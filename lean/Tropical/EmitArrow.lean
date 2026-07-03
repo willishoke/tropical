@@ -1173,18 +1173,23 @@ def twoPiE : Expr := lit 6283185307179586 15
 def halfPiE : Expr := lit 15707963267948966 16
 def cosSig (x : Expr) : Expr := sinSig (add x halfPiE)
 
-/-- One mode of a modal bank: `amp · d^deg · e^{−σ·d} · cos(2π·f·d + φ)`, the real
-    part of `A · d^deg · e^{μd}`. `deg = 0` is a simple pole; `deg = k > 0` is a
-    REPEATED pole of order k+1 — the `τ·e^{μτ}` resonance term you get by driving
-    a resonator exactly at its pole (the swell "on the verge of blowing up"): the
-    `d^deg` factor makes it rise before the exponential wins. `f, σ, amp, φ` are
-    `Sig` literals so the residue calculus can bake computed coefficients in. -/
+/-- One mode in RECTANGULAR form: `d^deg · e^{−σd} · (c_re·cos(ωd) − c_im·sin(ωd))
+    = Re(A · d^deg · e^{μd})` with pole `μ = −σ + iω` and complex amp `A = c_re +
+    i·c_im`. Rectangular (not magnitude/phase) so the residue calculus can emit the
+    coefficients as pure `+−×÷` expressions — no `sqrt`/`atan2` — which is what lets
+    every field be a LIVE param slot, not a baked literal. Authored modes set
+    `ω = 2π·f`, `c_re = amp`, `c_im = 0`. -/
 structure ModalMode where
-  freq  : Expr
-  sigma : Expr
-  amp   : Expr
-  phase : Expr := lit 0
+  sigma : Expr           -- σ = −Re μ  (decay)
+  omega : Expr           -- ω = Im μ   (rad/s)
+  cre   : Expr           -- Re A
+  cim   : Expr := lit 0   -- Im A
   deg   : Nat := 0
+
+/-- Authored mode from (freq Hz, decay σ, real amp): `ω = 2π·f`, `c_re = amp`,
+    `c_im = 0`. Any of `fHz`/`sigma`/`amp` may be a live `paramRef`. -/
+def ModalMode.hz (fHz sigma amp : Expr) (deg : Nat := 0) : ModalMode :=
+  { sigma, omega := mul twoPiE fHz, cre := amp, deg }
 
 /-- `base^k` by repeated multiply (k is a mode's small polynomial order). -/
 def powE (base : Expr) : Nat → Expr
@@ -1193,21 +1198,57 @@ def powE (base : Expr) : Nat → Expr
   | n + 1 => mul (powE base n) base
 
 /-- A modal bank as a pure `Sig` over the (already-warped) clock: shift each pole
-    to its time-since-strike `d = clk/2³²/SR − anchor`, sum `amp·d^deg·e^{−σd}·
-    cos(ωd+φ)` over the modes, and GATE on `d > 0` (causal: silent before the
-    strike, a closed-form tail after — and, read through a reversing warp, the tail
-    plays backward). Every sample is `f(clk)`: no state, random-access. The whole
-    thing rides `arrUn … (.clk c)`, so warps reach it through the clock leaf. -/
+    to its time-since-strike `d = clk/2³²/SR − anchor`, sum `d^deg·e^{−σd}·
+    (c_re·cos ωd − c_im·sin ωd)` over the modes, and GATE on `d > 0` (causal: silent
+    before the strike, a closed-form tail after — and, read through a reversing
+    warp, the tail plays backward). Every sample is `f(clk)`: no state, random-
+    access. Rides `arrUn … (.clk c)`, so warps reach it through the clock leaf. -/
 def modalBankSig (modes : Array ModalMode) (clkInt : Expr) (anchorSamples : Expr) : Expr :=
   let dSec := div (sub (div (toFloatE clkInt) (lit 4294967296)) anchorSamples) .sampleRate
   let bank := modes.foldl
     (fun acc m =>
-      let osc := mul (expSig (neg (mul m.sigma dSec)))
-                     (cosSig (add (mul (mul twoPiE m.freq) dSec) m.phase))
-      let shaped := if m.deg == 0 then osc else mul (powE dSec m.deg) osc
-      add acc (mul m.amp shaped))
+      let wd := mul m.omega dSec
+      let osc := sub (mul m.cre (cosSig wd)) (mul m.cim (sinSig wd))
+      let env := expSig (neg (mul m.sigma dSec))
+      let env2 := if m.deg == 0 then env else mul (powE dSec m.deg) env
+      add acc (mul env2 osc))
     (lit 0)
   selectE (gt dSec (lit 0)) bank (lit 0)
+
+/-- Complex arithmetic over `Expr` (real, imag) — the residue calculus done
+    SYMBOLICALLY, so poles/coeffs can be live param slots. With literal operands
+    every op constant-folds to the baked value; with a `paramRef` operand it stays
+    a live expression the kernel re-evaluates when the slot moves. Only `+−×÷`. -/
+abbrev CplxE := Expr × Expr
+def caddE (a b : CplxE) : CplxE := (add a.1 b.1, add a.2 b.2)
+def csubE (a b : CplxE) : CplxE := (sub a.1 b.1, sub a.2 b.2)
+def cmulE (a b : CplxE) : CplxE := (sub (mul a.1 b.1) (mul a.2 b.2), add (mul a.1 b.2) (mul a.2 b.1))
+def cdivE (a b : CplxE) : CplxE :=
+  let d := add (mul b.1 b.1) (mul b.2 b.2)
+  (div (add (mul a.1 b.1) (mul a.2 b.2)) d, div (sub (mul a.2 b.1) (mul a.1 b.2)) d)
+def cnegE (a : CplxE) : CplxE := (neg a.1, neg a.2)
+
+/-- The pole `μ = −σ + iω` and complex amp `A = c_re + i·c_im` of a mode, as `CplxE`. -/
+def ModalMode.poleE (m : ModalMode) : CplxE := (neg m.sigma, m.omega)
+def ModalMode.ampE (m : ModalMode) : CplxE := (m.cre, m.cim)
+def modeOfE (pole amp : CplxE) (deg : Nat := 0) : ModalMode :=
+  { sigma := neg pole.1, omega := pole.2, cre := amp.1, cim := amp.2, deg }
+
+/-- The residue calculus, SYMBOLICALLY — `voice ⋙ reverb` with every pole/coeff an
+    `Expr`. Same law as the build-time `residueCompose`: forced mode at each voice
+    pole λ (amp `a·H(λ)`), ringing mode at each reverb pole ν (amp `−a·r/(λ−ν)`).
+    No degeneracy branch — a build-time `|λ−ν|<tol` test is impossible on live
+    poles; an exact coincidence is measure-zero for continuous knobs, and a NEAR
+    coincidence gives a large finite coupling (the resonance you want). Validated
+    against the Float `residueCompose` on literal poles (`symbolic-residue`). -/
+def residueComposeE (voice reverb : Array ModalMode) : Array ModalMode :=
+  voice.foldl (fun acc v =>
+    let lam := v.poleE
+    let a := v.ampE
+    let Hlam := reverb.foldl (fun s r => caddE s (cdivE r.ampE (csubE lam r.poleE))) ((lit 0, lit 0) : CplxE)
+    let acc := acc.push (modeOfE lam (cmulE a Hlam))
+    reverb.foldl (fun acc r =>
+      acc.push (modeOfE r.poleE (cnegE (cdivE (cmulE a r.ampE) (csubE lam r.poleE))))) acc) #[]
 
 -- ── The RESIDUE CALCULUS (build-time): voice ⋙ reverb as one modal bank ────────
 -- Composing a voice (poles λ, amps a) with a modal reverb (poles ν, residues r,
@@ -1248,7 +1289,9 @@ def litF (x : Float) : Expr :=
   let s := x * 1000000000000.0
   let m : Int := if s ≥ 0.0 then Int.ofNat (s + 0.5).toUInt64.toNat
                  else -(Int.ofNat (0.5 - s).toUInt64.toNat)
-  lit m 12
+  -- a zero-mantissa NumLit with a nonzero exponent serializes to invalid JSON
+  -- ("0.e-12"); a plain `0` avoids it.
+  if m == 0 then lit 0 else lit m 12
 
 /-- A composed mode: pole μ = −σ+iω, complex amp A, polynomial order `deg`
     (deg=1 is the `A·d·e^{μd}` double pole a coincident voice/reverb pole makes). -/
@@ -1280,13 +1323,13 @@ def residueCompose (voice reverb : Array (Cplx × Cplx)) : Array CMode :=
       else
         acc.push { pole := nr.1, amp := ((a.mul nr.2).div (lam.sub nr.1)).neg }) acc) #[]
 
-/-- A composed mode → `ModalMode`, realized `|A|·d^deg·e^{−σd}·cos(ωd + arg A) =
-    Re(A·d^deg·e^{μd})`. -/
+/-- A composed mode → `ModalMode` (rectangular): `μ = −σ+iω`, `A = c_re+i·c_im`.
+    No `sqrt`/`atan2` — straight `litF` of the pole and coefficient parts. -/
 def cmodeToModalMode (m : CMode) : ModalMode :=
-  { freq := litF (m.pole.im / 6.283185307179586)
-    sigma := litF (-m.pole.re)
-    amp := litF m.amp.abs
-    phase := litF m.amp.arg
+  { sigma := litF (-m.pole.re)
+    omega := litF m.pole.im
+    cre := litF m.amp.re
+    cim := litF m.amp.im
     deg := m.deg }
 
 /-- A mode's contribution to the convolution's k-th derivative at 0: a term
@@ -1694,6 +1737,14 @@ def buildModalBankDirect (name : String) (modes : Array ModalMode) (anchor : Exp
 def buildModalReverb (name : String) (voice reverb : Array (Cplx × Cplx))
     (anchor : Expr) (arena : Arena) : Arena × ProgramIdx :=
   buildModalBankArrow name ((residueCompose voice reverb).map cmodeToModalMode) anchor arena
+
+/-- `voice ⋙ reverb` with the residue done SYMBOLICALLY (`residueComposeE`): the
+    poles/coeffs stay `Expr`, so any of them may be a live slot. With literal
+    inputs it folds to exactly `buildModalReverb`; the `symbolic-residue` gate
+    checks that agreement. -/
+def buildModalReverbSym (name : String) (voice reverb : Array ModalMode)
+    (anchor : Expr) (arena : Arena) : Arena × ProgramIdx :=
+  buildModalBankArrow name (residueComposeE voice reverb) anchor arena
 
 /-- Emit the modal bank read through a clock warp φ, via the arrow `.warp` (so φ
     threads through the `.clk` leaf exactly as the master clock does) — for the

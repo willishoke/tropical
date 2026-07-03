@@ -1304,12 +1304,9 @@ private def runBootstrapExp (arena : Arena)
 private def runModalBank (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : IO Bool := do
   let modes : Array Tropical.EmitArrow.ModalMode := #[
-    { freq := Tropical.EmitArrow.lit 220, sigma := Tropical.EmitArrow.lit 30 1,
-      amp := Tropical.EmitArrow.lit 6 1 },
-    { freq := Tropical.EmitArrow.lit 330, sigma := Tropical.EmitArrow.lit 40 1,
-      amp := Tropical.EmitArrow.lit 4 1 },
-    { freq := Tropical.EmitArrow.lit 440, sigma := Tropical.EmitArrow.lit 55 1,
-      amp := Tropical.EmitArrow.lit 3 1 }]
+    Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 220) (Tropical.EmitArrow.lit 30 1) (Tropical.EmitArrow.lit 6 1),
+    Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 330) (Tropical.EmitArrow.lit 40 1) (Tropical.EmitArrow.lit 4 1),
+    Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 440) (Tropical.EmitArrow.lit 55 1) (Tropical.EmitArrow.lit 3 1)]
   let anchor := Tropical.EmitArrow.lit 200
   let arrowPlan := buildAndFinish (.ok (Tropical.EmitArrow.buildModalBankArrow "modal_arrow" modes anchor arena))
   let directPlan := buildAndFinish (.ok (Tropical.EmitArrow.buildModalBankDirect "modal_direct" modes anchor arena))
@@ -1346,8 +1343,8 @@ private def runModalBank (arena : Arena)
 private def runModalDegree (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : IO Bool := do
   let modes : Array Tropical.EmitArrow.ModalMode := #[
-    { freq := Tropical.EmitArrow.lit 0, sigma := Tropical.EmitArrow.lit 25,
-      amp := Tropical.EmitArrow.lit 1, deg := 1 }]
+    { sigma := Tropical.EmitArrow.lit 25, omega := Tropical.EmitArrow.lit 0,
+      cre := Tropical.EmitArrow.lit 1, deg := 1 }]
   let anchor := Tropical.EmitArrow.lit 200
   match buildAndFinish (.ok (Tropical.EmitArrow.buildModalBankArrow "modal_deg" modes anchor arena)) with
   | .ok p =>
@@ -1391,10 +1388,8 @@ private def runModalDegree (arena : Arena)
 private def runModalReverse (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : IO Bool := do
   let modes : Array Tropical.EmitArrow.ModalMode := #[
-    { freq := Tropical.EmitArrow.lit 220, sigma := Tropical.EmitArrow.lit 30 1,
-      amp := Tropical.EmitArrow.lit 6 1 },
-    { freq := Tropical.EmitArrow.lit 330, sigma := Tropical.EmitArrow.lit 40 1,
-      amp := Tropical.EmitArrow.lit 4 1 }]
+    Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 220) (Tropical.EmitArrow.lit 30 1) (Tropical.EmitArrow.lit 6 1),
+    Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 330) (Tropical.EmitArrow.lit 40 1) (Tropical.EmitArrow.lit 4 1)]
   let anchor := Tropical.EmitArrow.lit 200
   let twoC : Int := 2048 * 4294967296          -- reflect around sample C = 1024
   let revφ : Tropical.EmitArrow.Clock → Tropical.EmitArrow.Clock :=
@@ -1523,6 +1518,48 @@ private def runResidueDegenerate (arena : Arena)
     IO.println s!"  PASS  residue-degenerate  coincident pole → one τ·e double pole; jet still exact (err={err}) — no blow-up"; pure true
   else
     IO.println s!"  FAIL  residue-degenerate  nDeg1={nDeg1} (want 1) err={err} (want <1e-9)"; pure false
+
+/-- THE SYMBOLIC RESIDUE gate. The residue calculus emitted as `Expr` couplings
+    (`residueComposeE`, so poles/coeffs can be live slots) must, on LITERAL poles,
+    fold to the same bank as the validated Float `residueCompose`. Same voice ⋙
+    reverb built both ways renders equal (differing only by litF input-vs-output
+    rounding). This is what makes modal params live without changing the math. -/
+private def runResidueSymbolic (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let tp := 6.283185307179586
+  let voiceF : Array (Cplx × Cplx) := #[
+    (⟨-2.0, tp * 220.0⟩, ⟨1.0, 0.0⟩),
+    (⟨-2.5, tp * 330.0⟩, ⟨0.6, 0.0⟩)]
+  let reverbF : Array (Cplx × Cplx) := #[
+    (⟨-3.0, tp * 180.0⟩, ⟨0.7, 0.2⟩),
+    (⟨-4.0, tp * 260.0⟩, ⟨-0.5, 0.4⟩),
+    (⟨-5.0, tp * 350.0⟩, ⟨0.3, -0.6⟩),
+    (⟨-6.0, tp * 500.0⟩, ⟨0.4, 0.1⟩)]
+  let toMode := fun (pa : Cplx × Cplx) =>
+    ({ sigma := litF (-pa.1.re), omega := litF pa.1.im,
+       cre := litF pa.2.re, cim := litF pa.2.im } : ModalMode)
+  let anchor := lit 200
+  match buildAndFinish (.ok (buildModalReverb "rv_baked" voiceF reverbF anchor arena)),
+        buildAndFinish (.ok (buildModalReverbSym "rv_sym" (voiceF.map toMode) (reverbF.map toMode) anchor arena)) with
+  | .ok bp, .ok sp =>
+    match ← renderPlanSamples bp 4096, ← renderPlanSamples sp 4096 with
+    | .ok bs, .ok ss =>
+      let n := min bs.size ss.size
+      let mut maxAbs : Float := 0.0
+      let mut energy : Float := 0.0
+      for i in [0:n] do
+        let d := (bs[i]! - ss[i]!).abs
+        if d > maxAbs then maxAbs := d
+        energy := energy + bs[i]! * bs[i]!
+      let rel := maxAbs / (Float.sqrt (energy / n.toFloat) + 1e-300)
+      IO.println s!"        Expr-residue (literal poles) vs Float-baked residue, voice(2)⋙reverb(4):"
+      IO.println s!"        result   max|Δ|={maxAbs}  ·  rel to rms={rel}"
+      if rel < 1e-6 && energy > 1e-9 then
+        IO.println s!"  PASS  symbolic-residue  Expr couplings fold to the validated Float residue (rel {rel}) — live-capable, same math"; pure true
+      else
+        IO.println s!"  FAIL  symbolic-residue  rel={rel} energy={energy}"; pure false
+    | .error e, _ | _, .error e => IO.println s!"  FAIL  symbolic-residue  render: {firstLine e}"; pure false
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  symbolic-residue  build: {firstLine e}"; pure false
 
 end ResidueGates
 
@@ -1934,6 +1971,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runResidueDegenerate arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runResidueSymbolic arena resolved) then
       failed := failed + 1
     -- ── (h⁸) THE PATCHER LOWERING: downstream-only patch graph → arrow term →
     --   slide → emit. L1 (byte-identity vs FlangeSin from a graph) is in the
