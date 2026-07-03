@@ -1695,6 +1695,14 @@ def buildModalReverb (name : String) (voice reverb : Array (Cplx × Cplx))
     (anchor : Expr) (arena : Arena) : Arena × ProgramIdx :=
   buildModalBankArrow name ((residueCompose voice reverb).map cmodeToModalMode) anchor arena
 
+/-- Emit the modal bank read through a clock warp φ, via the arrow `.warp` (so φ
+    threads through the `.clk` leaf exactly as the master clock does) — for the
+    reverse-reverb gate: a reversing φ makes the closed-form tail play backward. -/
+def buildModalBankWarped (name : String) (modes : Array ModalMode) (anchor : Expr)
+    (φ : Clock → Clock) (arena : Arena) : Arena × ProgramIdx :=
+  let (out, _) := emitTerm (normalize (ArrowTerm.warp φ (modalBankTerm modes anchor clockLit))) {}
+  buildExprCarrier name out arena
+
 -- ─────────────────────────────────────────────────────────────
 -- M9 — the PATCHER LOWERING: a downstream-only patch graph → arrow term
 -- ─────────────────────────────────────────────────────────────

@@ -1382,6 +1382,45 @@ private def runModalDegree (arena : Arena)
     | .error e => IO.println s!"  FAIL  modal-degree  render: {firstLine e}"; pure false
   | .error e => IO.println s!"  FAIL  modal-degree  build: {firstLine e}"; pure false
 
+/-- THE REVERSE-REVERB gate (the moat). The modal bank read through a reversing
+    warp φ(c) = 2·C·2³² − c (reflect scene time around sample C=1024) must equal
+    the FORWARD bank time-mirrored: rev[i] ≡ fwd[2C−i], bit-for-bit. This is
+    zero-latency reverse reverb — a stateless closed form addressed at negative
+    velocity, impossible on a streaming delay line. The warp threads through the
+    modal `arrUn … (.clk c)` via the same `.warp` a master-clock scrub uses. -/
+private def runModalReverse (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let modes : Array Tropical.EmitArrow.ModalMode := #[
+    { freq := Tropical.EmitArrow.lit 220, sigma := Tropical.EmitArrow.lit 30 1,
+      amp := Tropical.EmitArrow.lit 6 1 },
+    { freq := Tropical.EmitArrow.lit 330, sigma := Tropical.EmitArrow.lit 40 1,
+      amp := Tropical.EmitArrow.lit 4 1 }]
+  let anchor := Tropical.EmitArrow.lit 200
+  let twoC : Int := 2048 * 4294967296          -- reflect around sample C = 1024
+  let revφ : Tropical.EmitArrow.Clock → Tropical.EmitArrow.Clock :=
+    fun c => Tropical.EmitArrow.sub (Tropical.EmitArrow.lit twoC) c
+  match buildAndFinish (.ok (Tropical.EmitArrow.buildModalBankArrow "modal_fwd" modes anchor arena)),
+        buildAndFinish (.ok (Tropical.EmitArrow.buildModalBankWarped "modal_rev" modes anchor revφ arena)) with
+  | .ok fp, .ok rp =>
+    match ← renderPlanSamples fp 2048, ← renderPlanSamples rp 2048 with
+    | .ok fwd, .ok rev =>
+      let n := min fwd.size rev.size
+      let mut bitDiff := 0
+      let mut differsFwd := 0        -- rev ≠ fwd somewhere (warp is non-trivial)
+      let mut revEnergy : Float := 0.0
+      for i in [1:n] do
+        if rev[i]! != fwd[2048 - i]! then bitDiff := bitDiff + 1
+        if rev[i]! != fwd[i]! then differsFwd := differsFwd + 1
+        revEnergy := revEnergy + rev[i]! * rev[i]!
+      IO.println s!"        modal bank forward vs reversed (φ reflects scene time around sample 1024):"
+      IO.println s!"        result   rev[i] vs fwd[2048−i]: bit-differing {bitDiff}/{n}  ·  rev≠fwd at {differsFwd} samples  ·  rev energy={revEnergy}"
+      if bitDiff == 0 && differsFwd > 0 && revEnergy > 1e-6 then
+        IO.println s!"  PASS  modal-reverse  reversed reading ≡ forward time-mirrored, bit-exact — zero-latency reverse reverb ({n} samples)"; pure true
+      else
+        IO.println s!"  FAIL  modal-reverse  bitDiff={bitDiff} differsFwd={differsFwd} revEnergy={revEnergy}"; pure false
+    | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-reverse  render: {firstLine e}"; pure false
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-reverse  build: {firstLine e}"; pure false
+
 section ResidueGates
 open Tropical.EmitArrow
 
@@ -1882,6 +1921,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runModalDegree arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalReverse arena resolved) then
       failed := failed + 1
     IO.println "residue calculus (voice ⋙ reverb composed at build time):"
     total := total + 1
