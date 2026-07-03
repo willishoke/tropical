@@ -120,6 +120,30 @@ private def deltaOf (secondsE : Expr) : Expr :=
 private def gPow (g : Expr) (k : Nat) : Expr :=
   (Array.range k).foldl (fun acc _ => mul acc g) (lit 1)
 
+/-- A struck resonator's modal bank: `npart` harmonics of `f0`, decay
+    `σ_k = decay·(1 + 0.4k)`, amplitude `1/k^1.1`. `f0` and `decay` may be live
+    `paramRef`s (the pole frequencies/decays sweep with the knobs), because the
+    downstream residue calculus is emitted symbolically. -/
+private def resonatorBank (f0 decay : Expr) (npart : Nat) : Array ModalMode :=
+  (Array.range npart).map fun j =>
+    let k := j + 1
+    ModalMode.hz (mul (lit (Int.ofNat k)) f0)
+                 (mul decay (litF (1.0 + 0.4 * k.toFloat)))
+                 (litF (1.0 / Float.pow k.toFloat 1.1))
+
+/-- A reverb room as a `ModalMode` bank (pole + residue-as-coeff): `nmode`
+    log-spaced modes over `[flo,fhi]` with damping `σ = 6.91/rt60` (live), unit
+    residues at golden-ratio phases so the tail isn't a pure comb. Freqs and count
+    are structural (baked); only the damping is a live knob. -/
+private def reverbRoom (rt60 : Expr) (nmode : Nat) (flo fhi : Float) : Array ModalMode :=
+  let sigma := div (lit 691 2) rt60           -- 6.91 / rt60
+  let denom : Float := if nmode ≤ 1 then 1.0 else (nmode - 1).toFloat
+  (Array.range nmode).map fun j =>
+    let fq := flo * Float.pow (fhi / flo) (j.toFloat / denom)
+    let ph := 6.283185307179586 * (0.6180339887 * j.toFloat)
+    { sigma, omega := mul twoPiE (litF fq),
+      cre := litF (Float.cos ph), cim := litF (Float.sin ph) }
+
 -- ── Node decode (named inlets: `in` is an object {port: [srcId,…]}) ──────────
 private def portSources (inObj : Json) (port : String) : Array String :=
   match (inObj.getObjVal? port).toOption.bind (·.getArr?.toOption) with
@@ -266,6 +290,17 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
        #[ { id := lfoId, node := .source (sineVoiceE (p "rate" (jExpr params "rate" (lit 3 1)))) clk } ])
   | "mix" => (.mix (portSources inObj "in"), #[])
   | "ring" => (.ring (portSources inObj "in"), #[])
+  -- MODAL-island nodes: they carry poles, compose by the residue calculus at
+  -- build time, and realize to a Sig at their boundary (a Sig consumer or the
+  -- tap) — realized against the live `clk` (master clock) so they scrub too.
+  | "resonator" =>
+    let f0 := p "freq" (jExpr params "freq" (lit 220))
+    let decay := p "decay" (jExpr params "decay" (lit 4))
+    (.modalSource (resonatorBank f0 decay 6) (lit 0) clk, #[])
+  | "reverb" =>
+    let rt60 := p "rt60" (jExpr params "rt60" (lit 2))
+    (.modalReverb sig (reverbRoom rt60 32 60.0 6000.0), #[])
+  | "modalmix" => (.modalMix (portSources inObj "in"), #[])
   | _ => (.mix (portSources inObj "in"), #[])
 
 private structure Raw where
@@ -299,10 +334,12 @@ private def knobNamesOf : String → Array String
   | "flange"  => #["depth"]
   | "sflange" => #["depth", "rate"]
   | "fm"      => #["carrier", "depth"]
-  | "delay"   => #["amount"]
-  | "reverse" => #[]
-  | "knob"    => #["value"]
-  | _         => #[]
+  | "delay"     => #["amount"]
+  | "reverse"   => #[]
+  | "resonator" => #["freq", "decay"]   -- live poles (symbolic residue keeps them live)
+  | "reverb"    => #["rt60"]            -- live room damping
+  | "knob"      => #["value"]
+  | _           => #[]
 
 /-- The live param table: every node's continuous knobs as `(<id>.<knob>, default)`
     in scan order (node order, then knob order). The position IS the `ParamIdx` the
@@ -397,7 +434,7 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
   let tapIds := if emitTaps then tapNodeIds (rawsOf j) else #[]
   let (tapSigs, b) : Array (String × Sig) × Builder :=
     tapIds.foldl (fun (acc : Array (String × Sig) × Builder) id =>
-      match lowerNode g id with
+      match lowerInput g id with
       | .ok t => let (s, b') := emitTerm (normalize t) acc.2; (acc.1.push (id, s), b')
       | .error _ => acc) (#[], b0)
   let registry ← buildRegistry arena resolved #["FixedSinOsc", "MorphOsc", "PluckedMorphOsc"]

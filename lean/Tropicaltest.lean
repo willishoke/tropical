@@ -1,5 +1,6 @@
 import Tropical.Ffi
 import Tropical.Engine
+import Tropical.Playground
 import Tropical.Plan
 import Tropical.Ir.EmitLlvm
 import Tropical.PlanDecode
@@ -1621,6 +1622,43 @@ private def runModalPatch (arena : Arena)
     | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-patch  render: {firstLine e}"; pure false
   | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-patch  build: {firstLine e}"; pure false
 
+/-- THE MODAL LIVE gate (the payoff). A JSON patch `resonator(freq) → reverb → out`
+    compiled through the real `compilePlanPure` — decode → lowerModal → symbolic
+    residue → realize → strata → session compile → a JIT-loadable kernel — and its
+    pole frequency/decay and the room rt60 resolve to LIVE module slots
+    (`param:<id>.<knob>`), settable via `setSlot` with no relower. That the residue
+    calculus is symbolic is exactly what keeps the poles live; `symbolic-residue`
+    proves the couplings are the right functions of those slots. (This harness
+    can't drive a session plan's DAC to audio — that's the Engine/bun path — so the
+    audible sweep is left to those; here we prove it compiles and is live.) -/
+private def runModalLive (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let src := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"rev\",\"kind\":\"reverb\",\"params\":{\"rt60\":2},\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"rev\"]}}]}"
+  match Lean.Json.parse src with
+  | .error e => IO.println s!"  FAIL  modal-live  json parse: {e}"; pure false
+  | .ok j =>
+  match Tropical.Playground.compilePlanPure arena resolved j with
+  | .error e => IO.println s!"  FAIL  modal-live  compile: {firstLine e}"; pure false
+  | .ok (plan, _) =>
+    match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
+    | .ok manifest, .ok ir =>
+      let rt ← Tropical.Ffi.Runtime.new 256
+      rt.loadIr ir manifest.compress
+      let fPresent := (← rt.slotIndex? "param:res.freq").isSome
+      let dPresent := (← rt.slotIndex? "param:res.decay").isSome
+      let rtPresent := (← rt.slotIndex? "param:rev.rt60").isSome
+      IO.println s!"        JSON resonator(freq,decay) → reverb(rt60) → out compiled via compilePlanPure:"
+      IO.println s!"        result   JIT-loadable · live slots: res.freq={fPresent} res.decay={dPresent} rev.rt60={rtPresent}"
+      if fPresent && dPresent && rtPresent then
+        IO.println s!"  PASS  modal-live  modal patch compiles end to end; its pole freq/decay + room rt60 are live slots (setSlot, no relower)"; pure true
+      else
+        IO.println s!"  FAIL  modal-live  a modal param is not a live slot: freq={fPresent} decay={dPresent} rt60={rtPresent}"; pure false
+    | .error e, _ => IO.println s!"  FAIL  modal-live  toWire: {firstLine e}"; pure false
+    | _, .error e => IO.println s!"  FAIL  modal-live  emitKernel: {firstLine e}"; pure false
+
 /-- Test 3: `osc ⋙ flange ⋙ flange` — the slide pushes the outer warps through
     the inner flanger's sum and fuses them, producing the oscillator read at the
     nine convolved offsets automatically (the proper multiplicity, derived). We
@@ -2035,6 +2073,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runModalPatch arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalLive arena resolved) then
       failed := failed + 1
     -- ── (h⁸) THE PATCHER LOWERING: downstream-only patch graph → arrow term →
     --   slide → emit. L1 (byte-identity vs FlangeSin from a graph) is in the
