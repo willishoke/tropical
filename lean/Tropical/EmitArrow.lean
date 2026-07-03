@@ -1173,29 +1173,39 @@ def twoPiE : Expr := lit 6283185307179586 15
 def halfPiE : Expr := lit 15707963267948966 16
 def cosSig (x : Expr) : Expr := sinSig (add x halfPiE)
 
-/-- One mode of a modal bank: `amp · e^{−σ·d} · cos(2π·f·d + φ)`, a decaying
-    complex exponential's real part. `f`, `σ`, `amp`, `φ` are `Sig` literals so
-    the residue calculus (a future pass) can bake computed coefficients in; here
-    they are authored. This is the pole `μ = −σ + i2πf` realised over a time `d`. -/
+/-- One mode of a modal bank: `amp · d^deg · e^{−σ·d} · cos(2π·f·d + φ)`, the real
+    part of `A · d^deg · e^{μd}`. `deg = 0` is a simple pole; `deg = k > 0` is a
+    REPEATED pole of order k+1 — the `τ·e^{μτ}` resonance term you get by driving
+    a resonator exactly at its pole (the swell "on the verge of blowing up"): the
+    `d^deg` factor makes it rise before the exponential wins. `f, σ, amp, φ` are
+    `Sig` literals so the residue calculus can bake computed coefficients in. -/
 structure ModalMode where
   freq  : Expr
   sigma : Expr
   amp   : Expr
   phase : Expr := lit 0
+  deg   : Nat := 0
+
+/-- `base^k` by repeated multiply (k is a mode's small polynomial order). -/
+def powE (base : Expr) : Nat → Expr
+  | 0 => lit 1
+  | 1 => base
+  | n + 1 => mul (powE base n) base
 
 /-- A modal bank as a pure `Sig` over the (already-warped) clock: shift each pole
-    to its time-since-strike `d = clk/2³²/SR − anchor`, sum `amp·e^{−σd}·cos(ωd+φ)`
-    over the modes, and GATE on `d > 0` (causal: silent before the strike, a
-    closed-form decaying tail after — and, read through a reversing warp, the tail
+    to its time-since-strike `d = clk/2³²/SR − anchor`, sum `amp·d^deg·e^{−σd}·
+    cos(ωd+φ)` over the modes, and GATE on `d > 0` (causal: silent before the
+    strike, a closed-form tail after — and, read through a reversing warp, the tail
     plays backward). Every sample is `f(clk)`: no state, random-access. The whole
     thing rides `arrUn … (.clk c)`, so warps reach it through the clock leaf. -/
 def modalBankSig (modes : Array ModalMode) (clkInt : Expr) (anchorSamples : Expr) : Expr :=
   let dSec := div (sub (div (toFloatE clkInt) (lit 4294967296)) anchorSamples) .sampleRate
   let bank := modes.foldl
     (fun acc m =>
-      add acc (mul m.amp
-        (mul (expSig (neg (mul m.sigma dSec)))
-             (cosSig (add (mul (mul twoPiE m.freq) dSec) m.phase)))))
+      let osc := mul (expSig (neg (mul m.sigma dSec)))
+                     (cosSig (add (mul (mul twoPiE m.freq) dSec) m.phase))
+      let shaped := if m.deg == 0 then osc else mul (powE dSec m.deg) osc
+      add acc (mul m.amp shaped))
     (lit 0)
   selectE (gt dSec (lit 0)) bank (lit 0)
 
@@ -1240,43 +1250,67 @@ def litF (x : Float) : Expr :=
                  else -(Int.ofNat (0.5 - s).toUInt64.toNat)
   lit m 12
 
+/-- A composed mode: pole μ = −σ+iω, complex amp A, polynomial order `deg`
+    (deg=1 is the `A·d·e^{μd}` double pole a coincident voice/reverb pole makes). -/
+structure CMode where
+  pole : Cplx
+  amp  : Cplx
+  deg  : Nat := 0
+
 /-- The residue calculus: `voice ⋙ reverb` mode by mode. Each voice pole λ (amp a)
-    contributes a FORCED mode at λ with amp `a·H(λ)`, `H(λ)=Σ_q r_q/(λ−ν_q)` (the
-    transfer function through the input's own spectrum), and, per reverb pole ν_q,
-    a RINGING mode at ν_q with amp `−a·r_q/(λ−ν_q)`. Exactly the convolution of the
-    two exponential sums. Non-degenerate (λ≠ν_q; an exact coincidence would need a
-    τ·e^{μτ} double pole, not representable in `ModalMode` — deferred). The
-    couplings sum to zero (`Σ A = 0`), so the composed tail starts continuously —
-    no onset click, for free. -/
-def residueCompose (voice reverb : Array (Cplx × Cplx)) : Array (Cplx × Cplx) :=
+    contributes a FORCED mode at λ with amp `a·H(λ)`, `H(λ)=Σ_q r_q/(λ−ν_q)` (over
+    NON-coincident poles), and per reverb pole ν_q a RINGING mode at ν_q with amp
+    `−a·r_q/(λ−ν_q)`. When λ = ν_q (sympathetic resonance — a voice partial sitting
+    exactly on a room mode) that pole is DEGENERATE: instead of a 1/0 it yields a
+    `τ·e^{μd}` DOUBLE POLE (deg 1, amp `a·r_q`) — the resonance blow-up, from the
+    algebra. Exactly the convolution of the two exponential sums; the deg-0
+    couplings still sum to zero (continuous onset). -/
+def residueCompose (voice reverb : Array (Cplx × Cplx)) : Array CMode :=
+  let tol := 1e-6
   voice.foldl (fun acc pa =>
     let lam := pa.1
     let a := pa.2
-    let Hlam := reverb.foldl (fun s nr => s.add (nr.2.div (lam.sub nr.1))) (Cplx.ofReal 0.0)
-    let acc := acc.push (lam, a.mul Hlam)
+    let Hlam := reverb.foldl (fun s nr =>
+      if (lam.sub nr.1).normSq < tol then s
+      else s.add (nr.2.div (lam.sub nr.1))) (Cplx.ofReal 0.0)
+    let acc := acc.push { pole := lam, amp := a.mul Hlam }
     reverb.foldl (fun acc nr =>
-      acc.push (nr.1, ((a.mul nr.2).div (lam.sub nr.1)).neg)) acc) #[]
+      if (lam.sub nr.1).normSq < tol then
+        acc.push { pole := nr.1, amp := a.mul nr.2, deg := 1 }
+      else
+        acc.push { pole := nr.1, amp := ((a.mul nr.2).div (lam.sub nr.1)).neg }) acc) #[]
 
-/-- A build-time complex mode (pole μ=−σ+iω, complex amp A) → `ModalMode`, whose
-    realization `|A|·e^{−σd}·cos(ωd + arg A) = Re(A·e^{μd})`. -/
-def cmodeToModalMode (m : Cplx × Cplx) : ModalMode :=
-  { freq := litF (m.1.im / 6.283185307179586)
-    sigma := litF (-m.1.re)
-    amp := litF m.2.abs
-    phase := litF m.2.arg }
+/-- A composed mode → `ModalMode`, realized `|A|·d^deg·e^{−σd}·cos(ωd + arg A) =
+    Re(A·d^deg·e^{μd})`. -/
+def cmodeToModalMode (m : CMode) : ModalMode :=
+  { freq := litF (m.pole.im / 6.283185307179586)
+    sigma := litF (-m.pole.re)
+    amp := litF m.amp.abs
+    phase := litF m.amp.arg
+    deg := m.deg }
+
+/-- A mode's contribution to the convolution's k-th derivative at 0: a term
+    `A·d^p·e^{μd}` has `y⁽ᵏ⁾(0) = A·(k!/(k−p)!)·μ^{k−p}` (0 for k<p) — the deg-0
+    `A·μᵏ` and the deg-1 `A·k·μ^{k−1}` in one formula. -/
+def cmodeMoment (m : CMode) (k : Nat) : Cplx :=
+  if k < m.deg then ⟨0.0, 0.0⟩
+  else
+    let ff := (List.range m.deg).foldl (fun acc j => acc * (k - j).toFloat) 1.0
+    (m.amp.mul (m.pole.powNat (k - m.deg))).mul (Cplx.ofReal ff)
 
 /-- EXACT validator for `residueCompose`: the output modes must reproduce the
-    convolution's Taylor jet at t=0. Moment `Σᵢ Aᵢ μᵢᵏ` must equal the convolution's
-    k-th derivative `y⁽ᵏ⁾(0) = Σ_atoms a·Σ_{j<k} (Σ_q r_q ν_qʲ)·λ^{k−1−j}` (and
-    `y(0)=0`), for k=0..K. Returns the max RELATIVE error (normalized by the
-    cancellation-free magnitude Σ|Aᵢ||μᵢ|ᵏ). Pure complex ±×÷ — no transcendentals,
-    no rendering. A wrong sign/denominator/missing-ringing-term breaks a moment. -/
+    convolution's Taylor jet at t=0. `Σᵢ cmodeMoment(mᵢ, k)` (degree-aware, so a
+    τ·e double pole counts as `A·k·μ^{k−1}`) must equal the convolution's k-th
+    derivative `y⁽ᵏ⁾(0) = Σ_atoms a·Σ_{j<k} (Σ_q r_q ν_qʲ)·λ^{k−1−j}` (and `y(0)=0`),
+    for k=0..K. Max RELATIVE error (normalized by the cancellation-free magnitude).
+    Pure complex ±×÷. A wrong sign/denominator/missing-ringing/degeneracy breaks
+    a moment. -/
 def residueMomentError (voice reverb : Array (Cplx × Cplx)) (K : Nat) : Float :=
   let modes := residueCompose voice reverb
   let hMoment (j : Nat) : Cplx :=
     reverb.foldl (fun s nr => s.add (nr.2.mul (nr.1.powNat j))) ⟨0.0, 0.0⟩
   let momMode (k : Nat) : Cplx :=
-    modes.foldl (fun s m => s.add (m.2.mul (m.1.powNat k))) ⟨0.0, 0.0⟩
+    modes.foldl (fun s m => s.add (cmodeMoment m k)) ⟨0.0, 0.0⟩
   let convJet (k : Nat) : Cplx :=
     if k == 0 then ⟨0.0, 0.0⟩ else
     voice.foldl (fun s pa =>
@@ -1284,7 +1318,7 @@ def residueMomentError (voice reverb : Array (Cplx × Cplx)) (K : Nat) : Float :
         t.add ((hMoment j).mul (pa.1.powNat (k - 1 - j)))) ⟨0.0, 0.0⟩
       s.add (pa.2.mul jet)) ⟨0.0, 0.0⟩
   let normScale (k : Nat) : Float :=
-    modes.foldl (fun s m => s + m.2.abs * (m.1.powNat k).abs) 0.0
+    modes.foldl (fun s m => s + (cmodeMoment m k).abs) 0.0
   (List.range (K + 1)).foldl (fun mx k =>
     let e := ((momMode k).sub (convJet k)).abs / (normScale k + 1e-300)
     if e > mx then e else mx) 0.0

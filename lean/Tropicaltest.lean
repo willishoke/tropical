@@ -1338,6 +1338,50 @@ private def runModalBank (arena : Arena)
     | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-bank  render: {firstLine e}"; pure false
   | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-bank  build: {firstLine e}"; pure false
 
+/-- THE MODAL DEGREE gate. A degree-1 mode `amp·d·e^{−σd}` (a repeated pole — the
+    resonance "swell") rendered by the engine must match `sinkGain·d·e^{−σd}` to
+    minimax tolerance (an absolute oracle, validating the new `d^deg` factor), and
+    must RISE to a peak at d≈1/σ before decaying — the τ·e signature a simple pole
+    (monotone decay) cannot produce. -/
+private def runModalDegree (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let modes : Array Tropical.EmitArrow.ModalMode := #[
+    { freq := Tropical.EmitArrow.lit 0, sigma := Tropical.EmitArrow.lit 25,
+      amp := Tropical.EmitArrow.lit 1, deg := 1 }]
+  let anchor := Tropical.EmitArrow.lit 200
+  match buildAndFinish (.ok (Tropical.EmitArrow.buildModalBankArrow "modal_deg" modes anchor arena)) with
+  | .ok p =>
+    match ← renderPlanSamples p 8192 with
+    | .ok s =>
+      let sinkGain : Float := 0.05
+      let n := min s.size 8192
+      let mut preMax : Float := 0.0
+      for i in [0:201] do
+        let a := s[i]!.abs
+        if a > preMax then preMax := a
+      let mut maxRel : Float := 0.0
+      let mut peakVal : Float := 0.0
+      let mut peakI : Nat := 0
+      for i in [201:n] do
+        let d := (i.toFloat - 200.0) / 44100.0
+        let ref := sinkGain * d * Float.exp (-25.0 * d)
+        if ref.abs > 1e-5 then
+          let rel := (s[i]! - ref).abs / ref.abs
+          if rel > maxRel then maxRel := rel
+        let a := s[i]!.abs
+        if a > peakVal then
+          peakVal := a
+          peakI := i
+      let peakD := (peakI.toFloat - 200.0) / 44100.0
+      IO.println s!"        deg-1 τ·e mode (σ=25, f=0) vs sinkGain·d·e^(−25d):"
+      IO.println s!"        result   preMax={preMax} · max rel err={maxRel} · peak @ sample {peakI} (d={peakD}s, expect 1/σ=0.04)"
+      if preMax == 0.0 && maxRel < 1e-4 && peakI > 1500 && peakI < 2400 then
+        IO.println s!"  PASS  modal-degree  τ·e swell ≡ d·e^(−σd) to {maxRel}; rises to peak at d≈1/σ then decays"; pure true
+      else
+        IO.println s!"  FAIL  modal-degree  preMax={preMax} maxRel={maxRel} peakI={peakI}"; pure false
+    | .error e => IO.println s!"  FAIL  modal-degree  render: {firstLine e}"; pure false
+  | .error e => IO.println s!"  FAIL  modal-degree  build: {firstLine e}"; pure false
+
 section ResidueGates
 open Tropical.EmitArrow
 
@@ -1360,8 +1404,8 @@ private def runResidueMoments (arena : Arena)
     (⟨-6.0, tp * 500.0⟩, ⟨0.4, 0.1⟩)]
   let modes := residueCompose voice reverb
   let err := residueMomentError voice reverb 6
-  let sumA := modes.foldl (fun s m => s.add m.2) (⟨0.0, 0.0⟩ : Cplx)
-  let sumAbsA := modes.foldl (fun s m => s + m.2.abs) 0.0
+  let sumA := modes.foldl (fun s m => s.add m.amp) (⟨0.0, 0.0⟩ : Cplx)
+  let sumAbsA := modes.foldl (fun s m => s + m.amp.abs) 0.0
   let onset := sumA.abs / (sumAbsA + 1e-300)
   IO.println s!"        voice(2 poles) ⋙ reverb(4 poles) → {modes.size} residue modes; jet-match k=0..6:"
   IO.println s!"        result   max relative moment error = {err}  ·  onset ΣA/Σ|A| = {onset}"
@@ -1415,6 +1459,31 @@ private def runModalReverb (arena : Arena)
         IO.println s!"  FAIL  modal-reverb  preMax={preMax} peak={peak} firstPost={firstPost} eMid={eMid} eLate={eLate}"; pure false
     | .error e => IO.println s!"  FAIL  modal-reverb  render: {firstLine e}"; pure false
   | .error e => IO.println s!"  FAIL  modal-reverb  build: {firstLine e}"; pure false
+
+/-- THE DEGENERATE RESIDUE gate. A voice pole placed EXACTLY on a reverb pole
+    (sympathetic resonance) must compose to a `τ·e^{μd}` DOUBLE POLE, not blow up.
+    residueCompose must emit exactly one deg-1 mode, and — crucially — the
+    degree-aware moments must STILL reproduce the convolution jet (the double pole
+    contributes `A·k·μ^{k−1}`), so the exact-coincidence limit is handled, not
+    dodged. -/
+private def runResidueDegenerate (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let tp := 6.283185307179586
+  let voice : Array (Cplx × Cplx) := #[
+    (⟨-3.0, tp * 260.0⟩, ⟨1.0, 0.0⟩)]        -- λ sits exactly on reverb pole #2
+  let reverb : Array (Cplx × Cplx) := #[
+    (⟨-3.0, tp * 180.0⟩, ⟨0.7, 0.2⟩),
+    (⟨-3.0, tp * 260.0⟩, ⟨-0.5, 0.4⟩),        -- ν = λ (coincident)
+    (⟨-5.0, tp * 350.0⟩, ⟨0.3, -0.6⟩)]
+  let modes := residueCompose voice reverb
+  let nDeg1 := modes.foldl (fun c m => if m.deg == 1 then c + 1 else c) 0
+  let err := residueMomentError voice reverb 6
+  IO.println s!"        voice pole = reverb pole #2 (sympathetic): {modes.size} modes, {nDeg1} of degree 1:"
+  IO.println s!"        result   deg-1 modes = {nDeg1}  ·  degree-aware moment error k=0..6 = {err}"
+  if nDeg1 == 1 && err < 1e-9 then
+    IO.println s!"  PASS  residue-degenerate  coincident pole → one τ·e double pole; jet still exact (err={err}) — no blow-up"; pure true
+  else
+    IO.println s!"  FAIL  residue-degenerate  nDeg1={nDeg1} (want 1) err={err} (want <1e-9)"; pure false
 
 end ResidueGates
 
@@ -1811,12 +1880,18 @@ def main (args : List String) : IO UInt32 := do
     total := total + 1
     if !(← runModalBank arena resolved) then
       failed := failed + 1
+    total := total + 1
+    if !(← runModalDegree arena resolved) then
+      failed := failed + 1
     IO.println "residue calculus (voice ⋙ reverb composed at build time):"
     total := total + 1
     if !(← runResidueMoments arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runModalReverb arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runResidueDegenerate arena resolved) then
       failed := failed + 1
     -- ── (h⁸) THE PATCHER LOWERING: downstream-only patch graph → arrow term →
     --   slide → emit. L1 (byte-identity vs FlangeSin from a graph) is in the
