@@ -1199,6 +1199,96 @@ def modalBankSig (modes : Array ModalMode) (clkInt : Expr) (anchorSamples : Expr
     (lit 0)
   selectE (gt dSec (lit 0)) bank (lit 0)
 
+-- ── The RESIDUE CALCULUS (build-time): voice ⋙ reverb as one modal bank ────────
+-- Composing a voice (poles λ, amps a) with a modal reverb (poles ν, residues r,
+-- impulse response Σ r e^{νt}) IS a convolution — and the convolution of a sum of
+-- exponentials with a sum of exponentials is again a sum of exponentials, its
+-- coefficients pure residues. So `voice ⋙ reverb` is a BUILD-TIME complex
+-- computation that produces a ModalMode array; no runtime convolution, no state.
+
+/-- Build-time complex arithmetic for the residue calculus. Local and minimal
+    (no Mathlib): poles `μ = −σ + iω`, mode amplitudes `A`. -/
+structure Cplx where
+  re : Float
+  im : Float
+deriving Inhabited
+
+namespace Cplx
+def ofReal (x : Float) : Cplx := ⟨x, 0.0⟩
+def add (a b : Cplx) : Cplx := ⟨a.re + b.re, a.im + b.im⟩
+def sub (a b : Cplx) : Cplx := ⟨a.re - b.re, a.im - b.im⟩
+def mul (a b : Cplx) : Cplx := ⟨a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re⟩
+def neg (a : Cplx) : Cplx := ⟨-a.re, -a.im⟩
+def normSq (a : Cplx) : Float := a.re * a.re + a.im * a.im
+def div (a b : Cplx) : Cplx :=
+  let d := b.normSq
+  ⟨(a.re * b.re + a.im * b.im) / d, (a.im * b.re - a.re * b.im) / d⟩
+def abs (a : Cplx) : Float := Float.sqrt a.normSq
+def arg (a : Cplx) : Float := Float.atan2 a.im a.re
+def powNat (a : Cplx) : Nat → Cplx
+  | 0 => ⟨1.0, 0.0⟩
+  | n + 1 => (powNat a n).mul a
+end Cplx
+
+/-- Encode a build-time `Float` as a decimal `lit` (12 places, round-to-nearest) —
+    the bridge that lets residue-computed complex coefficients become a bank's
+    literal params. Magnitude must fit `·10¹²` in `UInt64` (fine for audio
+    σ/f/amp/phase). -/
+def litF (x : Float) : Expr :=
+  let s := x * 1000000000000.0
+  let m : Int := if s ≥ 0.0 then Int.ofNat (s + 0.5).toUInt64.toNat
+                 else -(Int.ofNat (0.5 - s).toUInt64.toNat)
+  lit m 12
+
+/-- The residue calculus: `voice ⋙ reverb` mode by mode. Each voice pole λ (amp a)
+    contributes a FORCED mode at λ with amp `a·H(λ)`, `H(λ)=Σ_q r_q/(λ−ν_q)` (the
+    transfer function through the input's own spectrum), and, per reverb pole ν_q,
+    a RINGING mode at ν_q with amp `−a·r_q/(λ−ν_q)`. Exactly the convolution of the
+    two exponential sums. Non-degenerate (λ≠ν_q; an exact coincidence would need a
+    τ·e^{μτ} double pole, not representable in `ModalMode` — deferred). The
+    couplings sum to zero (`Σ A = 0`), so the composed tail starts continuously —
+    no onset click, for free. -/
+def residueCompose (voice reverb : Array (Cplx × Cplx)) : Array (Cplx × Cplx) :=
+  voice.foldl (fun acc pa =>
+    let lam := pa.1
+    let a := pa.2
+    let Hlam := reverb.foldl (fun s nr => s.add (nr.2.div (lam.sub nr.1))) (Cplx.ofReal 0.0)
+    let acc := acc.push (lam, a.mul Hlam)
+    reverb.foldl (fun acc nr =>
+      acc.push (nr.1, ((a.mul nr.2).div (lam.sub nr.1)).neg)) acc) #[]
+
+/-- A build-time complex mode (pole μ=−σ+iω, complex amp A) → `ModalMode`, whose
+    realization `|A|·e^{−σd}·cos(ωd + arg A) = Re(A·e^{μd})`. -/
+def cmodeToModalMode (m : Cplx × Cplx) : ModalMode :=
+  { freq := litF (m.1.im / 6.283185307179586)
+    sigma := litF (-m.1.re)
+    amp := litF m.2.abs
+    phase := litF m.2.arg }
+
+/-- EXACT validator for `residueCompose`: the output modes must reproduce the
+    convolution's Taylor jet at t=0. Moment `Σᵢ Aᵢ μᵢᵏ` must equal the convolution's
+    k-th derivative `y⁽ᵏ⁾(0) = Σ_atoms a·Σ_{j<k} (Σ_q r_q ν_qʲ)·λ^{k−1−j}` (and
+    `y(0)=0`), for k=0..K. Returns the max RELATIVE error (normalized by the
+    cancellation-free magnitude Σ|Aᵢ||μᵢ|ᵏ). Pure complex ±×÷ — no transcendentals,
+    no rendering. A wrong sign/denominator/missing-ringing-term breaks a moment. -/
+def residueMomentError (voice reverb : Array (Cplx × Cplx)) (K : Nat) : Float :=
+  let modes := residueCompose voice reverb
+  let hMoment (j : Nat) : Cplx :=
+    reverb.foldl (fun s nr => s.add (nr.2.mul (nr.1.powNat j))) ⟨0.0, 0.0⟩
+  let momMode (k : Nat) : Cplx :=
+    modes.foldl (fun s m => s.add (m.2.mul (m.1.powNat k))) ⟨0.0, 0.0⟩
+  let convJet (k : Nat) : Cplx :=
+    if k == 0 then ⟨0.0, 0.0⟩ else
+    voice.foldl (fun s pa =>
+      let jet := (List.range k).foldl (fun t j =>
+        t.add ((hMoment j).mul (pa.1.powNat (k - 1 - j)))) ⟨0.0, 0.0⟩
+      s.add (pa.2.mul jet)) ⟨0.0, 0.0⟩
+  let normScale (k : Nat) : Float :=
+    modes.foldl (fun s m => s + m.2.abs * (m.1.powNat k).abs) 0.0
+  (List.range (K + 1)).foldl (fun mx k =>
+    let e := ((momMode k).sub (convJet k)).abs / (normScale k + 1e-300)
+    if e > mx then e else mx) 0.0
+
 /-- LHS `warp(neg) ⋙ fixed-point flanger` — `neg` is the OUTER warp, so tap clock
     = `neg(tapφ(clk))`: `past = neg(clk−δ) = −clk+δ`, `ahead = neg(clk+δ) = −clk−δ`
     — the ±δ taps land SWAPPED vs the RHS. Same `fixedFlangerSum` tree; the
@@ -1554,6 +1644,13 @@ def buildModalBankArrow (name : String) (modes : Array ModalMode) (anchor : Expr
 def buildModalBankDirect (name : String) (modes : Array ModalMode) (anchor : Expr)
     (arena : Arena) : Arena × ProgramIdx :=
   buildExprCarrier name (modalBankSig modes clockLit anchor) arena
+
+/-- `voice ⋙ reverb` end to end: run the residue calculus at build time, turn the
+    composed complex modes into a `ModalMode` bank, and emit it — the connection is
+    an exact symbolic computation, not a hand-tuned coupling table. -/
+def buildModalReverb (name : String) (voice reverb : Array (Cplx × Cplx))
+    (anchor : Expr) (arena : Arena) : Arena × ProgramIdx :=
+  buildModalBankArrow name ((residueCompose voice reverb).map cmodeToModalMode) anchor arena
 
 -- ─────────────────────────────────────────────────────────────
 -- M9 — the PATCHER LOWERING: a downstream-only patch graph → arrow term

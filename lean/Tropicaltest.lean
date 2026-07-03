@@ -1307,6 +1307,86 @@ private def runModalBank (arena : Arena)
     | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-bank  render: {firstLine e}"; pure false
   | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-bank  build: {firstLine e}"; pure false
 
+section ResidueGates
+open Tropical.EmitArrow
+
+/-- THE RESIDUE CALCULUS gate (exact, build-time). `voice ⋙ reverb` composed by
+    `residueCompose` must reproduce the convolution's Taylor jet at t=0: moment
+    `Σ Aᵢμᵢᵏ` equals `y⁽ᵏ⁾(0)` for k=0..6, and the 0th moment `Σ A = 0` (a wrong
+    sign, denominator, or a missing ringing term breaks one). `Σ A = 0` also means
+    the composed tail starts continuously — the reverb has no onset click for free.
+    Pure complex ±×÷; the emit path is checked separately by `modal-reverb`. -/
+private def runResidueMoments (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let tp := 6.283185307179586
+  let voice : Array (Cplx × Cplx) := #[
+    (⟨-2.0, tp * 220.0⟩, ⟨1.0, 0.0⟩),
+    (⟨-2.5, tp * 330.0⟩, ⟨0.6, 0.0⟩)]
+  let reverb : Array (Cplx × Cplx) := #[
+    (⟨-3.0, tp * 180.0⟩, ⟨0.7, 0.2⟩),
+    (⟨-4.0, tp * 260.0⟩, ⟨-0.5, 0.4⟩),
+    (⟨-5.0, tp * 350.0⟩, ⟨0.3, -0.6⟩),
+    (⟨-6.0, tp * 500.0⟩, ⟨0.4, 0.1⟩)]
+  let modes := residueCompose voice reverb
+  let err := residueMomentError voice reverb 6
+  let sumA := modes.foldl (fun s m => s.add m.2) (⟨0.0, 0.0⟩ : Cplx)
+  let sumAbsA := modes.foldl (fun s m => s + m.2.abs) 0.0
+  let onset := sumA.abs / (sumAbsA + 1e-300)
+  IO.println s!"        voice(2 poles) ⋙ reverb(4 poles) → {modes.size} residue modes; jet-match k=0..6:"
+  IO.println s!"        result   max relative moment error = {err}  ·  onset ΣA/Σ|A| = {onset}"
+  if err < 1e-9 && onset < 1e-9 then
+    IO.println s!"  PASS  residue-moments  composed modes reproduce the convolution jet to k=6 (err={err}); ΣA=0 ⇒ click-free onset"; pure true
+  else
+    IO.println s!"  FAIL  residue-moments  err={err} (want <1e-9) onset={onset} (want <1e-9)"; pure false
+
+/-- THE RESIDUE REVERB gate (emit). `buildModalReverb` runs the residue calculus
+    and emits the composed bank; it must render a real, causal, DECAYING signal
+    that starts CONTINUOUSLY at the strike — the `Σ A = 0` property means the first
+    post-strike sample is ≈0 and grows (no onset click), unlike an authored bank
+    whose partials all start at full amplitude. -/
+private def runModalReverb (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let tp := 6.283185307179586
+  let voice : Array (Cplx × Cplx) := #[
+    (⟨-2.0, tp * 220.0⟩, ⟨1.0, 0.0⟩),
+    (⟨-2.5, tp * 330.0⟩, ⟨0.6, 0.0⟩)]
+  let reverb : Array (Cplx × Cplx) := #[
+    (⟨-3.0, tp * 180.0⟩, ⟨0.7, 0.2⟩),
+    (⟨-4.0, tp * 260.0⟩, ⟨-0.5, 0.4⟩),
+    (⟨-5.0, tp * 350.0⟩, ⟨0.3, -0.6⟩),
+    (⟨-6.0, tp * 500.0⟩, ⟨0.4, 0.1⟩)]
+  let anchor := lit 200
+  -- render ~370 ms: the composed tail ramps up (click-free onset) over the first
+  -- tens of ms, then decays over its RT — so compare energy AFTER the onset peak.
+  match buildAndFinish (.ok (buildModalReverb "modal_reverb" voice reverb anchor arena)) with
+  | .ok p =>
+    match ← renderPlanSamples p 16384 with
+    | .ok s =>
+      let n := min s.size 16384
+      let mut preMax : Float := 0.0
+      for i in [0:201] do
+        let a := s[i]!.abs
+        if a > preMax then preMax := a
+      let firstPost := s[201]!.abs
+      let mut peak : Float := 0.0
+      for i in [201:n] do
+        let a := s[i]!.abs
+        if a > peak then peak := a
+      let mut eMid : Float := 0.0
+      let mut eLate : Float := 0.0
+      for i in [2048:6144] do eMid := eMid + s[i]! * s[i]!
+      for i in [12288:16384] do eLate := eLate + s[i]! * s[i]!
+      IO.println s!"        buildModalReverb rendered (voice ⋙ reverb, struck @ sample 200):"
+      IO.println s!"        result   pre-strike |max|={preMax} · first-post |s|={firstPost} · peak={peak} · E[mid]={eMid} E[late]={eLate}"
+      if preMax == 0.0 && peak > 1e-4 && firstPost < 0.02 * peak && eLate < eMid then
+        IO.println s!"  PASS  modal-reverb  residue-composed bank renders: causal, click-free onset (|first|≪peak), decaying tail ({n} samples)"; pure true
+      else
+        IO.println s!"  FAIL  modal-reverb  preMax={preMax} peak={peak} firstPost={firstPost} eMid={eMid} eLate={eLate}"; pure false
+    | .error e => IO.println s!"  FAIL  modal-reverb  render: {firstLine e}"; pure false
+  | .error e => IO.println s!"  FAIL  modal-reverb  build: {firstLine e}"; pure false
+
+end ResidueGates
+
 /-- Test 3: `osc ⋙ flange ⋙ flange` — the slide pushes the outer warps through
     the inner flanger's sum and fuses them, producing the oscillator read at the
     nine convolved offsets automatically (the proper multiplicity, derived). We
@@ -1696,6 +1776,13 @@ def main (args : List String) : IO UInt32 := do
     IO.println "modal island (decaying-resonator bank as a term over the clock):"
     total := total + 1
     if !(← runModalBank arena resolved) then
+      failed := failed + 1
+    IO.println "residue calculus (voice ⋙ reverb composed at build time):"
+    total := total + 1
+    if !(← runResidueMoments arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalReverb arena resolved) then
       failed := failed + 1
     -- ── (h⁸) THE PATCHER LOWERING: downstream-only patch graph → arrow term →
     --   slide → emit. L1 (byte-identity vs FlangeSin from a graph) is in the
