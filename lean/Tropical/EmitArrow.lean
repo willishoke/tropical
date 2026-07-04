@@ -11,7 +11,7 @@ new arrow — the "warp" combinators (`warpBank`, `Warp`-as-clock-expression) ar
 the clock axis of that realization and keep their names.
 
 The post-strata IR is **scalar by definition** (strata's job is to lower arrays,
-sums and generics away), so `EmitArrow` stays scalar: `Sig := Expr`. It needs no
+sums and generics away), so `EmitArrow` stays scalar: `Sig := Sig`. It needs no
 richer types — the richness lives in the typed elaborator upstream.
 
 Slice 1 built the `FlangeSin` flanger from a tiny arrow-combinator API and
@@ -69,33 +69,114 @@ open Lean (JsonNumber)
 open Tropical.Ir
 
 -- ─────────────────────────────────────────────────────────────
--- M1 — builder substrate: smart constructors over the resolved `Expr`
+-- M1 — builder substrate: smart constructors over a local authoring tree
 -- ─────────────────────────────────────────────────────────────
 
-/-- A float signal expression (the wires of the float-only arrow layer). -/
-abbrev Sig := Expr
+/-- EmitArrow's authoring-tree expression: the scalar subset the combinators
+    build, kept as a small tree (like the parser's `ParsedExpr`) and lowered
+    into the resolved-IR arena (`lowerSig`) when a `Program` is assembled. The
+    resolved IR itself is id-only (`ExprId`); this is a build-time frontend. -/
+inductive Sig where
+  | num (n : JsonNumber)
+  | binary (tag : BinaryOpTag) (lhs rhs : Sig)
+  | unary (tag : UnaryOpTag) (arg : Sig)
+  | clamp (value lo hi : Sig)
+  | select (cond then_ else_ : Sig)
+  | inputRef (idx : InputIdx)
+  | paramRef (idx : ParamIdx)
+  | nestedOut (instance_ : InstanceIdx) (output : OutputIdx)
+  | sampleRate
+  | sampleIndex
+deriving Repr, Inhabited
+
 /-- A clock-as-value expression (Q32.32 fixed-point sample coordinate). -/
-abbrev Clock := Expr
+abbrev Clock := Sig
+
+/-- Lower an authoring `Sig` into the resolved arena, interning bottom-up. -/
+partial def lowerSig : Sig → EArenaM ExprId
+  | .num n          => eintern (.num n)
+  | .binary t a b   => do eintern (.binary t (← lowerSig a) (← lowerSig b))
+  | .unary t a      => do eintern (.unary t (← lowerSig a))
+  | .clamp a b c    => do eintern (.clamp (← lowerSig a) (← lowerSig b) (← lowerSig c))
+  | .select a b c   => do eintern (.select (← lowerSig a) (← lowerSig b) (← lowerSig c))
+  | .inputRef i     => eintern (.inputRef i)
+  | .paramRef i     => eintern (.paramRef i)
+  | .nestedOut i o  => eintern (.nestedOut i o)
+  | .sampleRate     => eintern .sampleRate
+  | .sampleIndex    => eintern .sampleIndex
+
+/-- Lower an optional authoring default. -/
+def lowerSigOpt : Option Sig → EArenaM (Option ExprId)
+  | none => pure none
+  | some s => some <$> lowerSig s
+
+-- ─────────────────────────────────────────────────────────────
+-- Authoring-side decls (tree-valued) + the one lowering boundary
+-- ─────────────────────────────────────────────────────────────
+
+/-- An instance input at the authoring layer (tree `Sig` value). -/
+structure AInput where
+  port : InputIdx
+  value : Sig
+deriving Inhabited
+
+/-- An instance decl at the authoring layer. -/
+structure AInst where
+  name : String
+  programName : String
+  typeArgs : Array InstanceTypeArg := #[]
+  inputs : Array AInput := #[]
+deriving Inhabited
+
+/-- An input-port decl at the authoring layer (tree `Sig` default). -/
+structure AInputDecl where
+  name : String
+  type? : Option PortType := none
+  defaultSig : Option Sig := none
+deriving Inhabited
+
+/-- THE lowering boundary: assemble an authoring carrier into a resolved
+    `Program`, interning every tree `Sig` into `arena.exprs`, and push it into
+    the arena. All of EmitArrow's `Sig`-into-`Program` conversion funnels here. -/
+def assemble (arena : Arena) (name : String) (inputs : Array AInputDecl)
+    (outputs : Array OutputDecl) (decls : Array AInst)
+    (assigns : Array (OutputTarget × Sig))
+    (registry : Array (String × ProgramIdx)) (binderCount : Nat := 0)
+    (extraDecls : Array BodyDecl := #[]) :
+    Arena × ProgramIdx :=
+  let build : EArenaM Program := do
+    let inputsR ← inputs.mapM fun d => do
+      pure ({ name := d.name, type? := d.type?, default? := ← lowerSigOpt d.defaultSig } : InputDecl)
+    let declsR ← decls.mapM fun a => do
+      let ins ← a.inputs.mapM fun i => do
+        pure ({ port := i.port, value := ← lowerSig i.value } : InstanceInput)
+      pure (BodyDecl.inst a.name a.programName a.typeArgs ins)
+    let assignsR ← assigns.mapM fun (t, s) => do
+      pure ({ target := t, expr := ← lowerSig s } : OutputAssign)
+    pure { name, inputs := inputsR, outputs, decls := declsR ++ extraDecls,
+           assigns := assignsR, binderCount, registry }
+  let (prog, exprs) := build.run arena.exprs
+  ({ arena with programs := arena.programs.push prog, exprs }, ⟨arena.programs.size⟩)
 
 /-- Decimal literal `mantissa · 10^(-exponent)`. The exponent defaults to 0
     (an integer). This mirrors the `JsonNumber` the JSON parser produces, so
     the emitted bytes match: `lit 5 1 = 0.5`, `lit 25 2 = 0.25`, `lit 7 4 =
     0.0007`, `lit 4294967296 = 2³²`. -/
-def lit (mantissa : Int) (exponent : Nat := 0) : Expr := .num ⟨mantissa, exponent⟩
+def lit (mantissa : Int) (exponent : Nat := 0) : Sig := .num ⟨mantissa, exponent⟩
 
 /-- `arr`-level pointwise multiply. -/
-def mul (a b : Expr) : Expr := .binary .mul a b
+def mul (a b : Sig) : Sig := .binary .mul a b
 /-- `arr`-level pointwise add. -/
-def add (a b : Expr) : Expr := .binary .add a b
+def add (a b : Sig) : Sig := .binary .add a b
 /-- `arr`-level pointwise subtract. -/
-def sub (a b : Expr) : Expr := .binary .sub a b
+def sub (a b : Sig) : Sig := .binary .sub a b
 /-- `arr`-level truncate-to-int (the Q32.32 offset is an integer sample count). -/
-def toIntE (a : Expr) : Expr := .unary .toInt a
+def toIntE (a : Sig) : Sig := .unary .toInt a
 /-- Negate — the negate EFFECT (`.unary .neg`, emitted `sub i64 0, c`). The SAME
     operation whether applied to a signal value or to the clock; applied to the
     clock it IS `reverse`. There is one algebra of operations on expressions; the
     clock is one of those expressions. -/
-def neg (a : Expr) : Expr := .unary .neg a
+def neg (a : Sig) : Sig := .unary .neg a
 
 /-! More of the universal scalar op set — plain `.binary`/`.unary`/`.clamp`
     wrappers, staying scalar (the post-strata IR is scalar by definition). These
@@ -105,28 +186,28 @@ def neg (a : Expr) : Expr := .unary .neg a
     elaborator inserts for `unipolar`/`freq` ports. -/
 
 /-- `arr`-level pointwise divide. -/
-def div (a b : Expr) : Expr := .binary .div a b
+def div (a b : Sig) : Sig := .binary .div a b
 /-- Bitwise AND on the integer (fixed-point) clock/value (`& (2³²−1)` masks). -/
-def bitAnd (a b : Expr) : Expr := .binary .bitAnd a b
+def bitAnd (a b : Sig) : Sig := .binary .bitAnd a b
 /-- Logical/arithmetic right shift (`clk >> 32` etc.; the mask makes the choice
     irrelevant where it follows a `& (2³²−1)`). -/
-def rshift (a b : Expr) : Expr := .binary .rshift a b
+def rshift (a b : Sig) : Sig := .binary .rshift a b
 /-- Left shift (`sampleIndex << 32` — the root clock). -/
-def lshift (a b : Expr) : Expr := .binary .lshift a b
+def lshift (a b : Sig) : Sig := .binary .lshift a b
 /-- `gt` comparison (the bounded-default `select(hz > 0, …)`). -/
-def gt (a b : Expr) : Expr := .binary .gt a b
+def gt (a b : Sig) : Sig := .binary .gt a b
 /-- Round to nearest integer-as-float (`Sin`'s half-cycle count `n`). -/
-def roundE (a : Expr) : Expr := .unary .round a
+def roundE (a : Sig) : Sig := .unary .round a
 /-- Reinterpret int → float (`toFloat(acc & mask)` at the phasor boundary). -/
-def toFloatE (a : Expr) : Expr := .unary .toFloat a
+def toFloatE (a : Sig) : Sig := .unary .toFloat a
 /-- Clamp into `[lo, hi]` — the elaborator's lowering of a bounded port type
     (`unipolar` ⇒ `clamp _ 0 1`). -/
-def clampE (value lo hi : Expr) : Expr := .clamp value lo hi
+def clampE (value lo hi : Sig) : Sig := .clamp value lo hi
 /-- Select (`cond ? then : else`) — the bounded-default `select(hz > 0, hz, 0)`. -/
-def selectE (cond then_ else_ : Expr) : Expr := .select cond then_ else_
+def selectE (cond then_ else_ : Sig) : Sig := .select cond then_ else_
 /-- `ldexp(m, n) = m·2ⁿ` — the exact float-exponent bump `stdlib/Exp` uses for the
     integer part of range reduction. `n` is an integer-valued float (`round …`). -/
-def ldexpE (m n : Expr) : Expr := .binary .ldexp m n
+def ldexpE (m n : Sig) : Sig := .binary .ldexp m n
 
 /-! The warp-bank program signature, as port references. The signature is the
     same shape for every voice — only the input NAMES/defaults differ (which is
@@ -165,7 +246,7 @@ def offsetIn : Sig := .inputRef ⟨2⟩
     input 2), so warping by it is a lawful arrow. Shared across voices: both
     targets carry the identical offset expression (only its input *name* —
     `depth` vs `delta` — differs, and names aren't referenced here). -/
-def deltaSamples : Expr := toIntE (mul (mul offsetIn .sampleRate) (lit 4294967296))
+def deltaSamples : Sig := toIntE (mul (mul offsetIn .sampleRate) (lit 4294967296))
 
 -- ─────────────────────────────────────────────────────────────
 -- The `Voice` primitive — `Clock ⇝ Sig`, generic over the stdlib closed-form
@@ -183,7 +264,7 @@ def deltaSamples : Expr := toIntE (mul (mul offsetIn .sampleRate) (lit 429496729
     * `output` — which voice output carries the signal (both voices: index 0). -/
 structure Voice where
   programName : String
-  wire : Clock → Array InstanceInput
+  wire : Clock → Array AInput
   output : OutputIdx := ⟨0⟩
   /-- The phase-anchor hook (the slide in the phase domain). When set to
       `(phasePort, corr)`, the SLIDE (`emitTermC`) adds `corr shift` to this voice's
@@ -209,7 +290,7 @@ def modalVoice : Voice :=
     `InstanceIdx` of a declared voice is its position here, which is what the
     summed output reads back. -/
 structure Builder where
-  decls : Array BodyDecl := #[]
+  decls : Array AInst := #[]
 deriving Inhabited
 
 /-- `osc` — emit one `Voice` instance named `name`, wired from the warped clock
@@ -217,7 +298,7 @@ deriving Inhabited
     the program name, the input wiring, and the output index all come from `v`. -/
 def Builder.osc (b : Builder) (v : Voice) (name : String) (clkE : Clock) :
     Sig × Builder :=
-  let inst : BodyDecl := .inst name v.programName #[] (v.wire clkE)
+  let inst : AInst := { name, programName := v.programName, inputs := v.wire clkE }
   let i := b.decls.size
   (.nestedOut ⟨i⟩ v.output, { b with decls := b.decls.push inst })
 
@@ -293,7 +374,7 @@ def exl (m : Nat) : Mor := fun xs b => (xs.extract 0 m, b)
 def exr (m : Nat) : Mor := fun xs b => (xs.extract m xs.size, b)
 
 /-- Lift a pure wire-bundle function into a morphism (`arr`, RESTRICTED): no
-    instances, just structural/arithmetic rewiring of scalar `Expr`s. This is
+    instances, just structural/arithmetic rewiring of scalar `Sig`s. This is
     the `arr` of a cartesian (not closed) arrow — a fixed structural map, never
     an arbitrary host closure. -/
 def arrMor (f : Array Sig → Array Sig) : Mor := fun xs b => (f xs, b)
@@ -308,10 +389,10 @@ def arrMor (f : Array Sig → Array Sig) : Mor := fun xs b => (f xs, b)
     the cutover keeps. -/
 def instMor (name programName : String) (portOrder : Array InputIdx)
     (numOut : Nat) : Mor := fun args b =>
-  let inputs : Array InstanceInput :=
+  let inputs : Array AInput :=
     (portOrder.zip args).map (fun (p, v) => ⟨p, v⟩)
   let i := b.decls.size
-  let inst : BodyDecl := .inst name programName #[] inputs
+  let inst : AInst := { name, programName, inputs }
   let outs : Array Sig := (Array.range numOut).map (fun o => .nestedOut ⟨i⟩ ⟨o⟩)
   (outs, { b with decls := b.decls.push inst })
 
@@ -360,19 +441,19 @@ def flangerTaps : Array Tap := #[
 -- ─────────────────────────────────────────────────────────────
 
 /-- `clk : int`, default `clock() = sampleIndex << 32`. Shared by every voice. -/
-def clkInputDecl : InputDecl :=
+def clkInputDecl : AInputDecl :=
   { name := "clk", type? := some (.scalar .int),
-    default? := some (.binary .lshift .sampleIndex (lit 32)) }
+    defaultSig := some (.binary .lshift .sampleIndex (lit 32)) }
 
 /-- A pitch input (`freq`/`f0` : float), default `select(hz > 0, hz, 0)` — the
     elaborated form of the source's `select(220>0, 220, 0)` / `…110…`. -/
-def pitchInputDecl (name : String) (hz : Int) : InputDecl :=
+def pitchInputDecl (name : String) (hz : Int) : AInputDecl :=
   { name, type? := some (.scalar .float),
-    default? := some (.select (.binary .gt (lit hz) (lit 0)) (lit hz) (lit 0)) }
+    defaultSig := some (.select (.binary .gt (lit hz) (lit 0)) (lit hz) (lit 0)) }
 
 /-- An offset input (`depth`/`delta` : float), default `0.0007`. -/
-def offsetInputDecl (name : String) : InputDecl :=
-  { name, type? := some (.scalar .float), default? := some (lit 7 4) }
+def offsetInputDecl (name : String) : AInputDecl :=
+  { name, type? := some (.scalar .float), defaultSig := some (lit 7 4) }
 
 /-- A full warp-bank program: the program name, the voice it is generic over,
     its three input declarations (`clk`, pitch, offset), and the taps. Two
@@ -381,7 +462,7 @@ def offsetInputDecl (name : String) : InputDecl :=
 structure WarpBankProgram where
   name : String
   voice : Voice
-  inputs : Array InputDecl
+  inputs : Array AInputDecl
   taps : Array Tap
 
 /-- Build a `WarpBankProgram`'s `Program` into `arena`, returning its
@@ -403,16 +484,9 @@ def buildWarpBank (spec : WarpBankProgram) (arena : Arena)
   for (k, v) in vProg.registry do
     if !registry.any (·.1 == k) then registry := registry.push (k, v)
   let (b, outExpr) := warpBank spec.voice spec.taps
-  let prog : Program := {
-    name := spec.name
-    inputs := spec.inputs
-    outputs := #[{ name := "out", type? := some (.scalar .float) }]
-    decls := b.decls
-    assigns := #[{ target := .port ⟨0⟩, expr := outExpr }]
-    binderCount := 0
-    registry }
-  let idx : ProgramIdx := ⟨arena.programs.size⟩
-  pure ({ arena with programs := arena.programs.push prog }, idx)
+  pure (assemble arena spec.name spec.inputs
+    #[{ name := "out", type? := some (.scalar .float) }]
+    b.decls #[(.port ⟨0⟩, outExpr)] registry)
 
 -- ─────────────────────────────────────────────────────────────
 -- The two instantiations — one combinator, two voices, two programs
@@ -457,7 +531,7 @@ def buildReversibleComb (arena : Arena) (resolved : Array (String × ProgramIdx)
 
     Two things make this byte-identical to `diffcli emit-stdlib FixedSinOsc`:
 
-    * The post-strata form is a single inlined `Expr` tree (instances inlined,
+    * The post-strata form is a single inlined `Sig` tree (instances inlined,
       the `Sin` `fold` unrolled, the `let`s flattened). EmitArrow's Lean-level
       value reuse (`phase`, `x`, `n`, `r`, `r2` bound once and shared) yields the
       STRUCTURALLY-identical tree — the shared subterms appear duplicated exactly
@@ -501,22 +575,15 @@ def buildFixedSinOsc (arena : Arena) (_resolved : Array (String × ProgramIdx)) 
              (mul (add (lit (-2505210838544172) 23)
                (mul (lit 0) r2)) r2)) r2)) r2)) r2)) r2)
   let sine := mul sign (mul r poly)
-  let prog : Program := {
-    name := "FixedSinOsc"
-    inputs := #[
-      { name := "freq", type? := some (.scalar .float),
-        default? := some (selectE (gt (lit 440) (lit 0)) (lit 440) (lit 0)) },
-      { name := "clk", type? := some (.scalar .int),
-        default? := some (lshift .sampleIndex (lit 32)) },
-      { name := "phase", type? := some (.scalar .float),
-        default? := some (clampE (lit 0) (lit 0) (lit 1)) } ]
-    outputs := #[{ name := "sine", type? := some (.scalar .float) }]
-    decls := #[]
-    assigns := #[{ target := .port ⟨0⟩, expr := sine }]
-    binderCount := 0
-    registry := #[] }
-  let idx : ProgramIdx := ⟨arena.programs.size⟩
-  .ok ({ arena with programs := arena.programs.push prog }, idx)
+  .ok (assemble arena "FixedSinOsc"
+    #[ { name := "freq", type? := some (.scalar .float),
+         defaultSig := some (selectE (gt (lit 440) (lit 0)) (lit 440) (lit 0)) },
+       { name := "clk", type? := some (.scalar .int),
+         defaultSig := some (lshift .sampleIndex (lit 32)) },
+       { name := "phase", type? := some (.scalar .float),
+         defaultSig := some (clampE (lit 0) (lit 0) (lit 1)) } ]
+    #[{ name := "sine", type? := some (.scalar .float) }]
+    #[] #[(.port ⟨0⟩, sine)] #[])
 
 -- ─────────────────────────────────────────────────────────────
 -- C1 — a real MULTI-PORT program from the cartesian combinators: `MorphOsc`
@@ -599,45 +666,31 @@ def buildMorphOsc (arena : Arena) (resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) := do
   let registry ← buildRegistry arena resolved #["ClockPhasor", "Sin"]
   let (outs, b) := morphOscMor #[.inputRef ⟨0⟩, .inputRef ⟨1⟩, .inputRef ⟨2⟩, .inputRef ⟨3⟩] {}
-  let prog : Program := {
-    name := "MorphOsc"
-    inputs := #[
-      { name := "freq", type? := some (.scalar .float),
-        default? := some (selectE (gt (lit 220) (lit 0)) (lit 220) (lit 0)) },
-      { name := "morph", type? := some (.scalar .float),
-        default? := some (clampE (lit 0) (lit 0) (lit 1)) },
-      clkInputDecl,
-      { name := "phase", type? := some (.scalar .float),
-        default? := some (clampE (lit 0) (lit 0) (lit 1)) } ]
-    outputs := #[{ name := "out", type? := some (.scalar .float) }]
-    decls := b.decls
-    assigns := #[{ target := .port ⟨0⟩, expr := outs[0]! }]
-    binderCount := 0
-    registry }
-  let idx : ProgramIdx := ⟨arena.programs.size⟩
-  .ok ({ arena with programs := arena.programs.push prog }, idx)
+  .ok (assemble arena "MorphOsc"
+    #[ { name := "freq", type? := some (.scalar .float),
+         defaultSig := some (selectE (gt (lit 220) (lit 0)) (lit 220) (lit 0)) },
+       { name := "morph", type? := some (.scalar .float),
+         defaultSig := some (clampE (lit 0) (lit 0) (lit 1)) },
+       clkInputDecl,
+       { name := "phase", type? := some (.scalar .float),
+         defaultSig := some (clampE (lit 0) (lit 0) (lit 1)) } ]
+    #[{ name := "out", type? := some (.scalar .float) }]
+    b.decls #[(.port ⟨0⟩, outs[0]!)] registry)
 
 /-- An input-free `MorphOsc` carrier (literal `freqHz`, literal `morph`,
     closed-form `clk = sampleIndex << 32`) for the standard-rep differential —
     same combinator pipeline as `buildMorphOsc`, but renderable directly as a
     session root (no input ports to bind), like the warp-law carriers. -/
-def buildMorphOscLit (name : String) (freqHz : Int) (morph : Expr)
+def buildMorphOscLit (name : String) (freqHz : Int) (morph : Sig)
     (arena : Arena) (resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) := do
   let registry ← buildRegistry arena resolved #["ClockPhasor", "Sin"]
   -- `clk = sampleIndex << 32` inline (the `clkInputDecl` default; `clockLit` is
   -- defined below in the warp-law section, so spell it out here).
   let (outs, b) := morphOscMor #[lit freqHz, morph, .binary .lshift .sampleIndex (lit 32), lit 0] {}
-  let prog : Program := {
-    name
-    inputs := #[]
-    outputs := #[{ name := "out", type? := some (.scalar .float) }]
-    decls := b.decls
-    assigns := #[{ target := .port ⟨0⟩, expr := outs[0]! }]
-    binderCount := 0
-    registry }
-  let idx : ProgramIdx := ⟨arena.programs.size⟩
-  .ok ({ arena with programs := arena.programs.push prog }, idx)
+  .ok (assemble arena name #[]
+    #[{ name := "out", type? := some (.scalar .float) }]
+    b.decls #[(.port ⟨0⟩, outs[0]!)] registry)
 
 -- ─────────────────────────────────────────────────────────────
 -- M4 (slice 3) — the warp ARROW LAWS as audio goldens
@@ -665,13 +718,13 @@ def clockLit : Clock := .binary .lshift .sampleIndex (lit 32)
 /-- A δ literal: `toInt(seconds · sampleRate · 2³²)` with `seconds` a concrete
     decimal (`mantissa · 10^(-exponent)`), no input ref — a closed-form Q32.32
     integer sample count, identical across the two sides of every law. -/
-def deltaLit (mantissa : Int) (exponent : Nat) : Expr :=
+def deltaLit (mantissa : Int) (exponent : Nat) : Sig :=
   toIntE (mul (mul (lit mantissa exponent) .sampleRate) (lit 4294967296))
 
 /-- δ₁ = 0.0007 s, as Q32.32 samples. -/
-def delta1 : Expr := deltaLit 7 4
+def delta1 : Sig := deltaLit 7 4
 /-- δ₂ = 0.0011 s, as Q32.32 samples. -/
-def delta2 : Expr := deltaLit 11 4
+def delta2 : Sig := deltaLit 11 4
 
 /-- The `FixedSinOsc` voice with a LITERAL pitch (220 Hz) in place of the
     `pitchIn` input ref — so the warp-law carrier is fully closed-form (no input
@@ -698,16 +751,8 @@ def buildClockCarrier (name : String) (clkE : Clock) (arena : Arena)
   for (k, vi) in vProg.registry do
     if !registry.any (·.1 == k) then registry := registry.push (k, vi)
   let (sig, b) := ({} : Builder).osc v "voice" clkE
-  let prog : Program := {
-    name
-    inputs := #[]
-    outputs := #[{ name := "out", type? := some (.scalar .float) }]
-    decls := b.decls
-    assigns := #[{ target := .port ⟨0⟩, expr := sig }]
-    binderCount := 0
-    registry }
-  let idx : ProgramIdx := ⟨arena.programs.size⟩
-  pure ({ arena with programs := arena.programs.push prog }, idx)
+  pure (assemble arena name #[] #[{ name := "out", type? := some (.scalar .float) }]
+    b.decls #[(.port ⟨0⟩, sig)] registry)
 
 /-- Literal-pitch `FixedSinOsc` at 12 kHz — a tone high enough that a small
     lowpass FIR visibly attenuates (for the convolution stress test). -/
@@ -739,16 +784,8 @@ def buildTapCarrier (name : String) (v : Voice) (taps : Array Tap)
   let out := match summands[0]? with
     | none => lit 0
     | some s0 => (summands.extract 1 summands.size).foldl add s0
-  let prog : Program := {
-    name
-    inputs := #[]
-    outputs := #[{ name := "out", type? := some (.scalar .float) }]
-    decls := b.decls
-    assigns := #[{ target := .port ⟨0⟩, expr := out }]
-    binderCount := 0
-    registry }
-  let idx : ProgramIdx := ⟨arena.programs.size⟩
-  pure ({ arena with programs := arena.programs.push prog }, idx)
+  pure (assemble arena name #[] #[{ name := "out", type? := some (.scalar .float) }]
+    b.decls #[(.port ⟨0⟩, out)] registry)
 
 /-- Literal-pitch `FixedSinOsc` at an arbitrary `hz` (pitch at port 0, clock at
     port 1) — closed form, no input refs. -/
@@ -777,16 +814,8 @@ def buildFmCarrier (name : String) (carHz modHz depthSamples : Int)
   let warpedClk : Clock :=
     sub clockLit (toIntE (mul (mul (lit depthSamples) modSig) (lit 4294967296)))
   let (carSig, b) := b0.osc (litPitchVoice carHz) "car" warpedClk
-  let prog : Program := {
-    name
-    inputs := #[]
-    outputs := #[{ name := "out", type? := some (.scalar .float) }]
-    decls := b.decls
-    assigns := #[{ target := .port ⟨0⟩, expr := carSig }]
-    binderCount := 0
-    registry }
-  let idx : ProgramIdx := ⟨arena.programs.size⟩
-  pure ({ arena with programs := arena.programs.push prog }, idx)
+  pure (assemble arena name #[] #[{ name := "out", type? := some (.scalar .float) }]
+    b.decls #[(.port ⟨0⟩, carSig)] registry)
 
 /-- Two-level phase modulation (operator FM, DX-style): a `mod2Hz` oscillator
     (reading the ambient clock) warps the `modHz` modulator's clock; that
@@ -812,16 +841,8 @@ def buildPmPmCarrier (name : String) (carHz modHz mod2Hz depth1 depth2 : Int)
   let carClk : Clock :=
     sub clockLit (toIntE (mul (mul (lit depth1) modSig) (lit 4294967296)))
   let (carSig, b) := b1.osc (litPitchVoice carHz) "car" carClk
-  let prog : Program := {
-    name
-    inputs := #[]
-    outputs := #[{ name := "out", type? := some (.scalar .float) }]
-    decls := b.decls
-    assigns := #[{ target := .port ⟨0⟩, expr := carSig }]
-    binderCount := 0
-    registry }
-  let idx : ProgramIdx := ⟨arena.programs.size⟩
-  pure ({ arena with programs := arena.programs.push prog }, idx)
+  pure (assemble arena name #[] #[{ name := "out", type? := some (.scalar .float) }]
+    b.decls #[(.port ⟨0⟩, carSig)] registry)
 
 -- Law 1 — INVERSE / CANCELLATION:  warp(back δ) ⋙ warp(fwd δ) = id
 -- Both `(clk+δ)−δ` and `(clk−δ)+δ` cancel to `clk` in exact int64; we build
@@ -880,7 +901,7 @@ def flangerSum (dry past ahead : Sig) : Sig :=
 /-- One INDEPENDENT flanger over voice `v` at base clock `baseClk`, offset `d`:
     three fresh osc instances (`dry`/`past`/`ahead`, suffixed `tag`), weighted-
     summed. The dry tap is its own instance — the duplicated source. -/
-def Builder.flanger (b : Builder) (v : Voice) (baseClk : Clock) (d : Expr)
+def Builder.flanger (b : Builder) (v : Voice) (baseClk : Clock) (d : Sig)
     (tag : String) : Builder × Sig :=
   let (dry,   b) := b.osc v ("dry" ++ tag)   baseClk
   let (past,  b) := b.osc v ("past" ++ tag)  (sub baseClk d)
@@ -890,7 +911,7 @@ def Builder.flanger (b : Builder) (v : Voice) (baseClk : Clock) (d : Expr)
 /-- One flanger over voice `v` at `baseClk`, offset `d`, sharing a pre-built dry
     signal `dry` (the fanned source). Only the two delayed taps are fresh — the
     `&&&` diagonal on the shared source. Same `flangerSum` tree as `Builder.flanger`. -/
-def Builder.flangerSharedDry (b : Builder) (v : Voice) (baseClk : Clock) (d : Expr)
+def Builder.flangerSharedDry (b : Builder) (v : Voice) (baseClk : Clock) (d : Sig)
     (dry : Sig) (tag : String) : Builder × Sig :=
   let (past,  b) := b.osc v ("past" ++ tag)  (sub baseClk d)
   let (ahead, b) := b.osc v ("ahead" ++ tag) (add baseClk d)
@@ -899,7 +920,7 @@ def Builder.flangerSharedDry (b : Builder) (v : Voice) (baseClk : Clock) (d : Ex
 /-- Push an input-free voice program (`decls` + one `out = expr` assign) into
     `arena`, merging the `litPitchSinOscVoice` registry like `buildClockCarrier`.
     Shared by every input-free EmitArrow carrier (clock carrier + diagonals). -/
-def buildVoiceProgram (name : String) (decls : Array BodyDecl) (out : Sig)
+def buildVoiceProgram (name : String) (decls : Array AInst) (out : Sig)
     (arena : Arena) (resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) := do
   let v := litPitchSinOscVoice
@@ -910,16 +931,8 @@ def buildVoiceProgram (name : String) (decls : Array BodyDecl) (out : Sig)
   let mut registry : Array (String × ProgramIdx) := #[(vProg.name, vIdx)]
   for (k, vi) in vProg.registry do
     if !registry.any (·.1 == k) then registry := registry.push (k, vi)
-  let prog : Program := {
-    name
-    inputs := #[]
-    outputs := #[{ name := "out", type? := some (.scalar .float) }]
-    decls
-    assigns := #[{ target := .port ⟨0⟩, expr := out }]
-    binderCount := 0
-    registry }
-  let idx : ProgramIdx := ⟨arena.programs.size⟩
-  pure ({ arena with programs := arena.programs.push prog }, idx)
+  pure (assemble arena name #[] #[{ name := "out", type? := some (.scalar .float) }]
+    decls #[(.port ⟨0⟩, out)] registry)
 
 /-- SHARED diagonal: one dry source fanned into two flangers (δ₁, δ₂). 5 osc
     instances; the dry `nestedOut` feeds both flanger sums. -/
@@ -1038,7 +1051,7 @@ def buildFlangerThenReverse (arena : Arena) (resolved : Array (String × Program
     The "fixed-point value" is the existing `int` carrier reinterpreted as a
     Q-fractional saw, mixed with the existing INTEGER IR ops. No type-system /
     `ScalarKind` change, no fixed-point `Sin`, no touching the engine's float
-    carrier or the frozen float goldens — just integer `Expr` over the same
+    carrier or the frozen float goldens — just integer `Sig` over the same
     Q32.32 clock the warps already speak, with a single `toFloat` scale at the
     DAC boundary.
 
@@ -1053,7 +1066,7 @@ def buildFlangerThenReverse (arena : Arena) (resolved : Array (String × Program
 /-- `⌊freq·2³²/SR⌋` as a LITERAL int (freq = 220 Hz, SR = 44100):
     `⌊220·4294967296/44100⌋ = 21426140`. Precomputed so the source needs no
     float division — it is integer end to end. -/
-def fixedFreqInc : Expr := lit 21426140
+def fixedFreqInc : Sig := lit 21426140
 
 /-- A fixed-point Q0.32 saw phasor as a PURE INTEGER function of the clock —
     ClockPhasor's split-multiply (`acc = inc·thi + (inc·tlo)>>32`, masked to
@@ -1092,16 +1105,8 @@ def fixedOut (mix : Sig) : Sig :=
     no registry — the fixed-point carrier is pure integer arithmetic on
     `sampleIndex`, referencing no stdlib program). Returns its `ProgramIdx`. -/
 def buildExprCarrier (name : String) (out : Sig) (arena : Arena) : Arena × ProgramIdx :=
-  let prog : Program := {
-    name
-    inputs := #[]
-    outputs := #[{ name := "out", type? := some (.scalar .float) }]
-    decls := #[]
-    assigns := #[{ target := .port ⟨0⟩, expr := out }]
-    binderCount := 0
-    registry := #[] }
-  let idx : ProgramIdx := ⟨arena.programs.size⟩
-  ({ arena with programs := arena.programs.push prog }, idx)
+  assemble arena name #[] #[{ name := "out", type? := some (.scalar .float) }]
+    #[] #[(.port ⟨0⟩, out)] #[]
 
 /-- A single fixed-point source carrier `out = fixedOut(fixedPhase(clkE))` — the
     fixed-point analog of `buildClockCarrier`, for the single-source warp laws
@@ -1112,7 +1117,7 @@ def buildFixedSourceCarrier (name : String) (clkE : Clock) (arena : Arena) :
     Arena × ProgramIdx :=
   buildExprCarrier name (fixedOut (fixedPhase clkE)) arena
 
--- ── The BOOTSTRAP (part 1): the phasor + sine as pure Expr, over {+, ×, frac} ──
+-- ── The BOOTSTRAP (part 1): the phasor + sine as pure Sig, over {+, ×, frac} ──
 -- The generators (phasor, sine) were the last thing the arrow layer borrowed from
 -- `.trop`. These pointwise pieces need no ArrowTerm; the term wrapper that lifts
 -- them onto the clock leaf lives below `emitTerm`. Gated bit-exact vs `.trop`
@@ -1122,7 +1127,7 @@ def buildFixedSourceCarrier (name : String) (clkE : Clock) (arena : Arena) :
     integer split-multiply `acc = inc·thi + (inc·tlo)>>32 + off`, masked to
     `[0,2³²)`, then `/2³²` to a unipolar float. `inc = ⌊freq·2³²/SR⌋`,
     `off = ⌊offset·2³²⌋`. Structurally `stdlib/ClockPhasor.md`, as a `Sig`. -/
-def phasorPhaseSig (freqE offsetE clkSig : Expr) : Expr :=
+def phasorPhaseSig (freqE offsetE clkSig : Sig) : Sig :=
   let inc := toIntE (div (mul freqE (lit 4294967296)) .sampleRate)
   let off := toIntE (mul offsetE (lit 4294967296))
   let thi := rshift clkSig (lit 32)
@@ -1135,7 +1140,7 @@ def phasorPhaseSig (freqE offsetE clkSig : Expr) : Expr :=
     every transcendental is a polynomial, so it needs only `+`/`×` (and `round`
     for the range reduction). The `c0` term drops the fold's leading `0·r²` (a
     bit-exact no-op). -/
-def sinSig (x : Expr) : Expr :=
+def sinSig (x : Sig) : Sig :=
   let n := roundE (mul x (lit 3183098861837907 16))
   let r := sub x (mul n (lit 3141592653589793 15))
   let sign := sub (lit 1) (mul (lit 2) (bitAnd n (lit 1)))
@@ -1154,7 +1159,7 @@ def sinSig (x : Expr) : Expr :=
     6-term minimax `p`, then the exact `ldexp(exp_r, n)`. Pointwise `Sig → Sig`,
     only `{+, ×, round, clamp, ldexp}` — the decaying-envelope primitive the
     modal island needs, the exp twin of `sinSig`. -/
-def expSig (x : Expr) : Expr :=
+def expSig (x : Sig) : Sig :=
   let clamped := clampE x (lit (-87)) (lit 88)
   let n := roundE (mul clamped (lit 14426950408889634 16))
   let r := sub (sub clamped (mul n (lit 693145751953125 15)))
@@ -1169,9 +1174,9 @@ def expSig (x : Expr) : Expr :=
   ldexpE exp_r n
 
 /-- 2π and π/2 as `Sig` literals; `cos x = sin(x + π/2)` reuses the gated `sinSig`. -/
-def twoPiE : Expr := lit 6283185307179586 15
-def halfPiE : Expr := lit 15707963267948966 16
-def cosSig (x : Expr) : Expr := sinSig (add x halfPiE)
+def twoPiE : Sig := lit 6283185307179586 15
+def halfPiE : Sig := lit 15707963267948966 16
+def cosSig (x : Sig) : Sig := sinSig (add x halfPiE)
 
 /-- One mode in RECTANGULAR form: `d^deg · e^{−σd} · (c_re·cos(ωd) − c_im·sin(ωd))
     = Re(A · d^deg · e^{μd})` with pole `μ = −σ + iω` and complex amp `A = c_re +
@@ -1180,19 +1185,19 @@ def cosSig (x : Expr) : Expr := sinSig (add x halfPiE)
     every field be a LIVE param slot, not a baked literal. Authored modes set
     `ω = 2π·f`, `c_re = amp`, `c_im = 0`. -/
 structure ModalMode where
-  sigma : Expr           -- σ = −Re μ  (decay)
-  omega : Expr           -- ω = Im μ   (rad/s)
-  cre   : Expr           -- Re A
-  cim   : Expr := lit 0   -- Im A
+  sigma : Sig           -- σ = −Re μ  (decay)
+  omega : Sig           -- ω = Im μ   (rad/s)
+  cre   : Sig           -- Re A
+  cim   : Sig := lit 0   -- Im A
   deg   : Nat := 0
 
 /-- Authored mode from (freq Hz, decay σ, real amp): `ω = 2π·f`, `c_re = amp`,
     `c_im = 0`. Any of `fHz`/`sigma`/`amp` may be a live `paramRef`. -/
-def ModalMode.hz (fHz sigma amp : Expr) (deg : Nat := 0) : ModalMode :=
+def ModalMode.hz (fHz sigma amp : Sig) (deg : Nat := 0) : ModalMode :=
   { sigma, omega := mul twoPiE fHz, cre := amp, deg }
 
 /-- `base^k` by repeated multiply (k is a mode's small polynomial order). -/
-def powE (base : Expr) : Nat → Expr
+def powE (base : Sig) : Nat → Sig
   | 0 => lit 1
   | 1 => base
   | n + 1 => mul (powE base n) base
@@ -1203,7 +1208,7 @@ def powE (base : Expr) : Nat → Expr
     before the strike, a closed-form tail after — and, read through a reversing
     warp, the tail plays backward). Every sample is `f(clk)`: no state, random-
     access. Rides `arrUn … (.clk c)`, so warps reach it through the clock leaf. -/
-def modalBankSig (modes : Array ModalMode) (clkInt : Expr) (anchorSamples : Expr) : Expr :=
+def modalBankSig (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Sig) : Sig :=
   let dSec := div (sub (div (toFloatE clkInt) (lit 4294967296)) anchorSamples) .sampleRate
   let bank := modes.foldl
     (fun acc m =>
@@ -1215,11 +1220,11 @@ def modalBankSig (modes : Array ModalMode) (clkInt : Expr) (anchorSamples : Expr
     (lit 0)
   selectE (gt dSec (lit 0)) bank (lit 0)
 
-/-- Complex arithmetic over `Expr` (real, imag) — the residue calculus done
+/-- Complex arithmetic over `Sig` (real, imag) — the residue calculus done
     SYMBOLICALLY, so poles/coeffs can be live param slots. With literal operands
     every op constant-folds to the baked value; with a `paramRef` operand it stays
     a live expression the kernel re-evaluates when the slot moves. Only `+−×÷`. -/
-abbrev CplxE := Expr × Expr
+abbrev CplxE := Sig × Sig
 def caddE (a b : CplxE) : CplxE := (add a.1 b.1, add a.2 b.2)
 def csubE (a b : CplxE) : CplxE := (sub a.1 b.1, sub a.2 b.2)
 def cmulE (a b : CplxE) : CplxE := (sub (mul a.1 b.1) (mul a.2 b.2), add (mul a.1 b.2) (mul a.2 b.1))
@@ -1235,7 +1240,7 @@ def modeOfE (pole amp : CplxE) (deg : Nat := 0) : ModalMode :=
   { sigma := neg pole.1, omega := pole.2, cre := amp.1, cim := amp.2, deg }
 
 /-- The residue calculus, SYMBOLICALLY — `voice ⋙ reverb` with every pole/coeff an
-    `Expr`. Same law as the build-time `residueCompose`: forced mode at each voice
+    `Sig`. Same law as the build-time `residueCompose`: forced mode at each voice
     pole λ (amp `a·H(λ)`), ringing mode at each reverb pole ν (amp `−a·r/(λ−ν)`).
     No degeneracy branch — a build-time `|λ−ν|<tol` test is impossible on live
     poles; an exact coincidence is measure-zero for continuous knobs, and a NEAR
@@ -1285,7 +1290,7 @@ end Cplx
     the bridge that lets residue-computed complex coefficients become a bank's
     literal params. Magnitude must fit `·10¹²` in `UInt64` (fine for audio
     σ/f/amp/phase). -/
-def litF (x : Float) : Expr :=
+def litF (x : Float) : Sig :=
   let s := x * 1000000000000.0
   let m : Int := if s ≥ 0.0 then Int.ofNat (s + 0.5).toUInt64.toNat
                  else -(Int.ofNat (0.5 - s).toUInt64.toNat)
@@ -1529,7 +1534,7 @@ partial def emitTermC (cmod : Clock → Builder → Clock × Builder) :
     let (sy, b) := emitTermC cmod y b
     (mul sx sy, b)
   -- the clock leaf: apply the ambient clock transform and hand the warped clock
-  -- back AS the signal (Clock and Sig are both `Expr`). This is the one leaf warp
+  -- back AS the signal (Clock and Sig are both `Sig`). This is the one leaf warp
   -- acts on; a phasor over it inherits reverse/scrub/future-tap.
   | .clk c, b => cmod c b
   | .sum ts, b =>
@@ -1562,11 +1567,11 @@ def flangeEffect (s : ArrowTerm) : ArrowTerm :=
 /-- A SWEPT delay offset: `δ(τ) = toInt(seconds · m(τ) · sampleRate · 2³²)` — the
     static flanger's δ, but the depth is scaled by a modulator signal `m ∈ [−1,1]`,
     so the comb delay sweeps (through zero, as `m` crosses 0). -/
-def sweptDelta (secondsE : Expr) (m : Sig) : Expr :=
+def sweptDelta (secondsE : Sig) (m : Sig) : Sig :=
   toIntE (mul (mul (mul secondsE m) .sampleRate) (lit 4294967296))
 
-def sflangeBack (secondsE : Expr) : Clock → Sig → Clock := fun c m => sub c (sweptDelta secondsE m)
-def sflangeFwd (secondsE : Expr) : Clock → Sig → Clock := fun c m => add c (sweptDelta secondsE m)
+def sflangeBack (secondsE : Sig) : Clock → Sig → Clock := fun c m => sub c (sweptDelta secondsE m)
+def sflangeFwd (secondsE : Sig) : Clock → Sig → Clock := fun c m => add c (sweptDelta secondsE m)
 
 /-- A SWEPT (through-zero) flanger as a DOWNSTREAM effect: like `flangeEffect`, but
     the ±δ taps are SIGNAL-modulated (`swarp`) by `mod` — a modulator term (an LFO,
@@ -1590,16 +1595,10 @@ def buildFlangerViaSlide (arena : Arena) (resolved : Array (String × ProgramIdx
   let registry ← buildRegistry arena resolved #["FixedSinOsc"]
   let term := normalize (flangeEffect (.gen fixedSinOscVoice "osc" clkIn))
   let (out, b) := emitTerm term {}
-  let prog : Program := {
-    name := "FlangeSin"
-    inputs := #[clkInputDecl, pitchInputDecl "freq" 220, offsetInputDecl "depth"]
-    outputs := #[{ name := "out", type? := some (.scalar .float) }]
-    decls := b.decls
-    assigns := #[{ target := .port ⟨0⟩, expr := out }]
-    binderCount := 0
-    registry }
-  let idx : ProgramIdx := ⟨arena.programs.size⟩
-  .ok ({ arena with programs := arena.programs.push prog }, idx)
+  .ok (assemble arena "FlangeSin"
+    #[clkInputDecl, pitchInputDecl "freq" 220, offsetInputDecl "depth"]
+    #[{ name := "out", type? := some (.scalar .float) }]
+    b.decls #[(.port ⟨0⟩, out)] registry)
 
 /-! The slide tests below use closed-form (literal-pitch, no input ports)
     carriers so they render directly as session roots, like the warp-law gates. -/
@@ -1683,7 +1682,7 @@ def buildSlideProdUpstream (arena : Arena) (resolved : Array (String × ProgramI
 /-- A `FixedSinOsc` built ENTIRELY as a term over the clock leaf: `Sin(2π·phasor)`,
     no `gen`, no `.trop` instance — pure `{clk, +, ×, round}`. Warps reach it
     through the `clk` leaf, so it reverses/scrubs like any generator. -/
-def fixedSinOscTerm (freqE offsetE : Expr) (c : Clock) : ArrowTerm :=
+def fixedSinOscTerm (freqE offsetE : Sig) (c : Clock) : ArrowTerm :=
   ArrowTerm.arrUn
     (fun clkSig => sinSig (mul (lit 6283185307179586 15) (phasorPhaseSig freqE offsetE clkSig)))
     (ArrowTerm.clk c)
@@ -1715,7 +1714,7 @@ def buildExpProbe (name : String) (arena : Arena) : Arena × ProgramIdx :=
 /-- A modal bank struck at `anchor` (samples) as a term over the clock leaf: no
     `gen`, no `.trop` instance — `{clk, +, ×, round, clamp, ldexp}` all the way
     down, and warp-reachable like any generator. -/
-def modalBankTerm (modes : Array ModalMode) (anchor : Expr) (c : Clock) : ArrowTerm :=
+def modalBankTerm (modes : Array ModalMode) (anchor : Sig) (c : Clock) : ArrowTerm :=
   ArrowTerm.arrUn (fun clkSig => modalBankSig modes clkSig anchor) (ArrowTerm.clk c)
 
 -- ── The DIRECTION operator: forward↔reverse crossfade ─────────────────────────
@@ -1736,8 +1735,8 @@ def modalBankTerm (modes : Array ModalMode) (anchor : Expr) (c : Clock) : ArrowT
     bit-for-bit to the forward bank (`modalBankSig`); `dir=1` is its exact time-mirror
     (reverse reverb). `dampScale?` bends the decay clock (sway) on both sides. Pure
     `f(clk)`: no state. -/
-def modalBankSigDir (modes : Array ModalMode) (clkInt : Expr) (anchorSamples : Expr)
-    (dir : Expr) (dampScale? : Option Expr := none) : Expr :=
+def modalBankSigDir (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Sig)
+    (dir : Sig) (dampScale? : Option Sig := none) : Sig :=
   let dSec := div (sub (div (toFloatE clkInt) (lit 4294967296)) anchorSamples) .sampleRate
   modes.foldl
     (fun acc m =>
@@ -1762,8 +1761,8 @@ def modalBankSigDir (modes : Array ModalMode) (clkInt : Expr) (anchorSamples : E
 
 /-- `modalBankTerm` with a DIRECTION crossfade. Rides the `.clk` leaf like
     `modalBankTerm`, so master warps still reach it. -/
-def modalBankTermDir (modes : Array ModalMode) (anchor : Expr) (c : Clock)
-    (dir : Expr) (damp? : Option (Expr × Expr) := none) : ArrowTerm :=
+def modalBankTermDir (modes : Array ModalMode) (anchor : Sig) (c : Clock)
+    (dir : Sig) (damp? : Option (Sig × Sig) := none) : ArrowTerm :=
   ArrowTerm.arrUn
     (fun clkSig =>
       -- the sway LFO is a pure function of the SAME clock leaf the bank rides, so a
@@ -1778,19 +1777,19 @@ def modalBankTermDir (modes : Array ModalMode) (anchor : Expr) (c : Clock)
     (0 = forward tail, 1 = reverse/pre-verb) plus optional decay sway `(depth,
     rateHz)`. Attached to a `modalReverb` node, carried to `lowerInput`. -/
 structure ModalDir where
-  dir : Expr := lit 0
-  damp : Option (Expr × Expr) := none
+  dir : Sig := lit 0
+  damp : Option (Sig × Sig) := none
 
 /-- Emit the modal bank through the ARROW path (`arrUn`/`clk`, then `emitTerm`) —
     the term side of the `modal-bank` gate. -/
-def buildModalBankArrow (name : String) (modes : Array ModalMode) (anchor : Expr)
+def buildModalBankArrow (name : String) (modes : Array ModalMode) (anchor : Sig)
     (arena : Arena) : Arena × ProgramIdx :=
   let (out, _) := emitTerm (normalize (modalBankTerm modes anchor clockLit)) {}
   buildExprCarrier name out arena
 
 /-- Emit the SAME bank straight-line (`modalBankSig` on the bare clock, no arrow
     term) — the standard-rep side of the `modal-bank` gate. -/
-def buildModalBankDirect (name : String) (modes : Array ModalMode) (anchor : Expr)
+def buildModalBankDirect (name : String) (modes : Array ModalMode) (anchor : Sig)
     (arena : Arena) : Arena × ProgramIdx :=
   buildExprCarrier name (modalBankSig modes clockLit anchor) arena
 
@@ -1798,21 +1797,21 @@ def buildModalBankDirect (name : String) (modes : Array ModalMode) (anchor : Exp
     composed complex modes into a `ModalMode` bank, and emit it — the connection is
     an exact symbolic computation, not a hand-tuned coupling table. -/
 def buildModalReverb (name : String) (voice reverb : Array (Cplx × Cplx))
-    (anchor : Expr) (arena : Arena) : Arena × ProgramIdx :=
+    (anchor : Sig) (arena : Arena) : Arena × ProgramIdx :=
   buildModalBankArrow name ((residueCompose voice reverb).map cmodeToModalMode) anchor arena
 
 /-- `voice ⋙ reverb` with the residue done SYMBOLICALLY (`residueComposeE`): the
-    poles/coeffs stay `Expr`, so any of them may be a live slot. With literal
+    poles/coeffs stay `Sig`, so any of them may be a live slot. With literal
     inputs it folds to exactly `buildModalReverb`; the `symbolic-residue` gate
     checks that agreement. -/
 def buildModalReverbSym (name : String) (voice reverb : Array ModalMode)
-    (anchor : Expr) (arena : Arena) : Arena × ProgramIdx :=
+    (anchor : Sig) (arena : Arena) : Arena × ProgramIdx :=
   buildModalBankArrow name (residueComposeE voice reverb) anchor arena
 
 /-- Emit the modal bank read through a clock warp φ, via the arrow `.warp` (so φ
     threads through the `.clk` leaf exactly as the master clock does) — for the
     reverse-reverb gate: a reversing φ makes the closed-form tail play backward. -/
-def buildModalBankWarped (name : String) (modes : Array ModalMode) (anchor : Expr)
+def buildModalBankWarped (name : String) (modes : Array ModalMode) (anchor : Sig)
     (φ : Clock → Clock) (arena : Arena) : Arena × ProgramIdx :=
   let (out, _) := emitTerm (normalize (ArrowTerm.warp φ (modalBankTerm modes anchor clockLit))) {}
   buildExprCarrier name out arena
@@ -1820,9 +1819,9 @@ def buildModalBankWarped (name : String) (modes : Array ModalMode) (anchor : Exp
 /-- Emit a bank read through a DIRECTION (rotation + per-mode gate + optional
     residue window) — the `modal-direction` gate's device-under-test, mirroring
     what `lowerInput` emits for a reverb carrying a `ModalDir`. -/
-def buildModalBankDir (name : String) (modes : Array ModalMode) (anchor : Expr)
-    (dir : Expr) (arena : Arena)
-    (damp? : Option (Expr × Expr) := none) : Arena × ProgramIdx :=
+def buildModalBankDir (name : String) (modes : Array ModalMode) (anchor : Sig)
+    (dir : Sig) (arena : Arena)
+    (damp? : Option (Sig × Sig) := none) : Arena × ProgramIdx :=
   let (out, _) := emitTerm (normalize (modalBankTermDir modes anchor clockLit dir damp?)) {}
   buildExprCarrier name out arena
 
@@ -1845,7 +1844,7 @@ def modalAddrWarp : Clock → Sig → Clock :=
     (identity — agrees with the un-addressed bank, correct scaling); with
     `offsetSec > 0` the causal gate relocates to `τ = offsetSec·SR` (the signal
     drives the strike). -/
-def buildModalAddrRamp (name : String) (modes : Array ModalMode) (anchor : Expr)
+def buildModalAddrRamp (name : String) (modes : Array ModalMode) (anchor : Sig)
     (offsetSec : Float) (arena : Arena) : Arena × ProgramIdx :=
   let addrRamp : ArrowTerm := ArrowTerm.arrUn
     (fun clk => sub (div (toFloatE (rshift clk (lit 32))) .sampleRate) (litF offsetSec))
@@ -1889,11 +1888,11 @@ inductive Node where
   | mix (inputs : Array String)
   /-- A MODULATED carrier: `input`'s signal modulates this carrier's clock
       (FM/PM). The signal-into-clock edge — patch `mod.out → carrier.fm`. -/
-  | fm (input : String) (carrier : Voice) (baseClk : Clock) (depthE : Expr)
+  | fm (input : String) (carrier : Voice) (baseClk : Clock) (depthE : Sig)
   /-- A SWEPT flanger: `input` is the signal flanged, `modInput` the modulator that
       sweeps the ±δ taps (an LFO, or any patched signal). `depthSec` is the sweep
       depth in seconds. The signal-warp distributes onto `input`'s generators. -/
-  | sflange (input modInput : String) (depthSec : Expr)
+  | sflange (input modInput : String) (depthSec : Sig)
   /-- A KNOB: a program that is nothing but a param with one output. `idx` is the
       `ParamIdx` of the root's param slot; it lowers to a τ-constant `paramRef`
       leaf, so wiring it into a modulator/pitch position binds that parameter to a
@@ -1925,7 +1924,7 @@ inductive Node where
       inlet (a clock driven by a signal is a warp), distinct from the spectral
       (modal) inlets `modalReverb`/`modalMix` consume. It propagates through
       composition to the realization boundary. -/
-  | modalSource (modes : Array ModalMode) (anchor : Expr) (clk : Clock)
+  | modalSource (modes : Array ModalMode) (anchor : Sig) (clk : Clock)
       (addr : Option String)
   | modalReverb (input : String) (room : Array ModalMode) (dir : Option ModalDir)
   | modalMix (inputs : Array String)
@@ -1943,7 +1942,7 @@ structure PatchGraph where
     Q32.32 clock by `depth · m` samples — `clk − toInt(depth · m · 2³²)`. `depth`
     is an EXPRESSION (a literal, or a live `paramRef` slot), so the depth knob can
     be a live param. Closed form in τ (`m` is a closed-form signal) either way. -/
-def fmWarp (depthE : Expr) : Clock → Sig → Clock :=
+def fmWarp (depthE : Sig) : Clock → Sig → Clock :=
   fun base m => sub base (toIntE (mul (mul depthE m) (lit 4294967296)))
 
 /-- Is `id` a modal-island node? Its output wire carries poles, not a `Sig`. A
@@ -1963,7 +1962,7 @@ def nodeIsModal (g : PatchGraph) (id : String) : Bool :=
     its inputs. Never touches `Sig` — a modal node's inputs are modal by
     construction, so it only recurses into `lowerModal`. -/
 partial def lowerModal (g : PatchGraph) (id : String) :
-    Except String (Array ModalMode × Expr × Clock × Option String × Option ModalDir) := do
+    Except String (Array ModalMode × Sig × Clock × Option String × Option ModalDir) := do
   -- An unconnected modal inlet points at `__silence__`; a modal node with no modal
   -- source is a legal, incomplete patch — it compiles to an EMPTY bank (silence),
   -- not an error. (The graceful-silence contract, same as `mix []`.)
@@ -1990,7 +1989,7 @@ partial def lowerModal (g : PatchGraph) (id : String) :
     -- head carries the shared anchor/clock/address/direction for the union (a mix
     -- of differently-addressed sources takes the head's, like its clock).
     | (ms0, a0, clk0, addr0, dir0) :: rest =>
-      .ok (rest.foldl (fun acc (p : Array ModalMode × Expr × Clock × Option String × Option ModalDir) =>
+      .ok (rest.foldl (fun acc (p : Array ModalMode × Sig × Clock × Option String × Option ModalDir) =>
         acc ++ p.1) ms0, a0, clk0, addr0, dir0)
   | _ => .error s!"a modal inlet (reverb/modal-mix) needs a modal SOURCE — resonator or modal-mix — but '{id}' is a signal node; a Sig has no poles to compose"
 
@@ -2092,16 +2091,10 @@ def buildFlangeFromGraph (arena : Arena) (resolved : Array (String × ProgramIdx
   let registry ← buildRegistry arena resolved #["FixedSinOsc"]
   let term ← lowerGraph flangeGraph
   let (out, b) := emitTerm (normalize term) {}
-  let prog : Program := {
-    name := "FlangeSin"
-    inputs := #[clkInputDecl, pitchInputDecl "freq" 220, offsetInputDecl "depth"]
-    outputs := #[{ name := "out", type? := some (.scalar .float) }]
-    decls := b.decls
-    assigns := #[{ target := .port ⟨0⟩, expr := out }]
-    binderCount := 0
-    registry }
-  let idx : ProgramIdx := ⟨arena.programs.size⟩
-  .ok ({ arena with programs := arena.programs.push prog }, idx)
+  .ok (assemble arena "FlangeSin"
+    #[clkInputDecl, pitchInputDecl "freq" 220, offsetInputDecl "depth"]
+    #[{ name := "out", type? := some (.scalar .float) }]
+    b.decls #[(.port ⟨0⟩, out)] registry)
 
 /-- Lower the GRAPH `osc → flange → flange` (closed form) — must byte-equal the
     hand-built `buildSlideDoubleFlanger` (L2): the lowering of a chain composes

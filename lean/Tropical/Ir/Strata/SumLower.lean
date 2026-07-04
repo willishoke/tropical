@@ -168,7 +168,7 @@ def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
   let newDecls ← prog.decls.mapM fun decl => do
     match decl with
     | .inst name typeKey tArgs inputs =>
-      pure (EBodyDecl.inst name typeKey tArgs
+      pure (BodyDecl.inst name typeKey tArgs
         (← inputs.mapM fun i => do pure ({ port := i.port, value := ← rewriteExprE ctx i.value } : EInstanceInput)))
     | .param .. | .prog .. => pure decl
   let newAssigns ← prog.assigns.mapM fun a => do

@@ -109,12 +109,12 @@ def runCoreE (rootIdx : ProgramIdx) (typeArgs : Array ArgEntry) : PassM ProgramI
   let outputs := prog.outputs.map fun o => { o with type? := o.type?.map portType }
   let decls ← prog.decls.mapM fun d => do
     match d with
-    | .param name value? => pure (EBodyDecl.param name value?)
+    | .param name value? => pure (BodyDecl.param name value?)
     | .inst name typeKey tArgs inputs =>
-      pure (EBodyDecl.inst name typeKey tArgs
+      pure (BodyDecl.inst name typeKey tArgs
         (← inputs.mapM fun i => do
           pure ({ port := i.port, value := ← rw i.value } : EInstanceInput)))
-    | .prog name p => pure (EBodyDecl.prog name p)
+    | .prog name p => pure (BodyDecl.prog name p)
   let assigns ← prog.assigns.mapM fun a => do
     pure ({ target := a.target, expr := ← rw a.expr } : EOutputAssign)
   pushEProgram { prog with typeParams := #[], inputs, outputs, decls, assigns }

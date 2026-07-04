@@ -77,7 +77,7 @@ def portTypeStr (arena : Arena) : PortType → String
   | .array element shape =>
     s!"{elemName arena element}[{String.intercalate "," (shape.map dimStr).toList}]"
 
-private def wireOpName : Expr → String
+private def wireOpName : ENode → String
   | .binary tag .. => tag.wire
   | .unary tag _ => tag.wire
   | .clamp .. => "clamp" | .select .. => "select"
@@ -93,46 +93,35 @@ private def wireOpName : Expr → String
   | .tag .. => "tag" | .match_ .. => "match"
   | .num _ => "num" | .bool _ => "bool" | .arr _ => "arr"
 
-/-- Port of `literalDefault`: lower a resolved input default to the raw
-    wire-format ExprNode (literal-class forms only). -/
-partial def literalDefault (portName : String) : Expr → Except String Json
-  | .num n => .ok (Json.num n)
-  | .bool b => .ok (Json.bool b)
-  | .arr items => do
-    .ok (Json.arr (← items.mapM (literalDefault portName)))
-  | .binary tag a b => opArgs tag.wire #[a, b]
-  | .unary tag a => opArgs tag.wire #[a]
-  | .clamp a b c => opArgs "clamp" #[a, b, c]
-  | .select a b c => opArgs "select" #[a, b, c]
-  | .index a b => opArgs "index" #[a, b]
-  | .arraySet a b c => opArgs "arraySet" #[a, b, c]
-  | .sampleRate => .ok (Json.mkObj [("op", Json.str "sampleRate")])
-  | .sampleIndex => .ok (Json.mkObj [("op", Json.str "sampleIndex")])
-  | .zeros count => do
-    .ok (Json.mkObj [("op", Json.str "zeros"),
-      ("count", ← literalDefault portName count)])
-  | e =>
-    .error (s!"Compiled: input '{portName}' default has op '{wireOpName e}' that's not a literal-class form; "
-      ++ "defaults shouldn't reference decls or run combinators")
+/-- Port of `literalDefault`: lower a resolved input default (an `ExprId` into
+    the arena's DAG) to the raw wire-format ExprNode (literal-class forms only). -/
+partial def literalDefault (ea : ExprArena) (portName : String) (id : ExprId) :
+    Except String Json :=
+  match ea.deref id with
+  | none => .error s!"Compiled: input '{portName}' default references a dangling ExprId {id.idx}"
+  | some node => match node with
+    | .num n => .ok (Json.num n)
+    | .bool b => .ok (Json.bool b)
+    | .arr items => do
+      .ok (Json.arr (← items.mapM (literalDefault ea portName)))
+    | .binary tag a b => opArgs tag.wire #[a, b]
+    | .unary tag a => opArgs tag.wire #[a]
+    | .clamp a b c => opArgs "clamp" #[a, b, c]
+    | .select a b c => opArgs "select" #[a, b, c]
+    | .index a b => opArgs "index" #[a, b]
+    | .arraySet a b c => opArgs "arraySet" #[a, b, c]
+    | .sampleRate => .ok (Json.mkObj [("op", Json.str "sampleRate")])
+    | .sampleIndex => .ok (Json.mkObj [("op", Json.str "sampleIndex")])
+    | .zeros count => do
+      .ok (Json.mkObj [("op", Json.str "zeros"),
+        ("count", ← literalDefault ea portName count)])
+    | e =>
+      .error (s!"Compiled: input '{portName}' default has op '{wireOpName e}' that's not a literal-class form; "
+        ++ "defaults shouldn't reference decls or run combinators")
 where
-  opArgs (op : String) (args : Array Expr) : Except String Json := do
+  opArgs (op : String) (args : Array ExprId) : Except String Json := do
     .ok (Json.mkObj [("op", Json.str op),
-      ("args", Json.arr (← args.mapM (literalDefault portName)))])
-
-/-- A register's display type: the declared scalar/alias, overridden
-    to `float[N]` for array-init regs (`ensureSlots`' shape lift). -/
-private def regPortType (init : Expr) (type? : Option ScalarOrAlias) :
-    Option PortType :=
-  let declared : Option PortType := match type? with
-    | none => none
-    | some (.scalar k) => some (.scalar k)
-    | some (.alias td) => some (.alias td)
-  let arrayOf : Nat → PortType := fun n =>
-    .array (.scalar .float) #[.lit (JsonNumber.fromNat n)]
-  match init with
-  | .arr items => some (arrayOf items.size)
-  | .zeros (.num n) => some (arrayOf n.toFloat.toUInt64.toNat)
-  | _ => declared
+      ("args", Json.arr (← args.mapM (literalDefault ea portName)))])
 
 /-- The service's `concreteEntry`, off the typed store. -/
 def concreteEntry (arena : Arena) (entryName : String) (idx : ProgramIdx) :
@@ -145,7 +134,7 @@ def concreteEntry (arena : Arena) (entryName : String) (idx : ProgramIdx) :
       | some pt => (Json.str (portTypeStr arena pt), portTypeObj arena pt)
       | none => (jsonNull, jsonNull)
     let dflt ← match d.default? with
-      | some e => literalDefault d.name e
+      | some e => literalDefault arena.exprs d.name e
       | none => pure jsonNull
     .ok <| Json.mkObj [("name", Json.str d.name), ("type", t),
       ("type_obj", tObj), ("default", dflt)]

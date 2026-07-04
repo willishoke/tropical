@@ -28,18 +28,13 @@ namespace Tropical.Ir.Strata
 
 open Tropical.Ir
 
-/-- Instance-type lookup against an `EProgram`'s registry. -/
-def _root_.Tropical.Ir.EProgram.registryGet? (p : EProgram) (key : String) :
-    Option ProgramIdx :=
-  (p.registry.find? (·.1 == key)).map (·.2)
+/-- The id-form pipeline state IS the `Arena` now: identity pools, an id-valued
+    program pool, and the shared expression DAG (`exprs`) all in one. `base` is
+    the arena itself (kept as an accessor so the pass helpers read unchanged). -/
+abbrev EArena := Arena
 
-/-- The id-form pipeline state: identity pools (`base`), an id-valued program
-    pool, and the shared expression DAG. -/
-structure EArena where
-  base : Arena
-  programs : Array EProgram := #[]
-  exprs : ExprArena := {}
-deriving Inhabited
+/-- `EArena.base` — the identity pools live directly on the arena. -/
+def _root_.Tropical.Ir.Arena.base (a : Arena) : Arena := a
 
 /-- The shared pass monad. -/
 abbrev PassM := StateT EArena (Except Error)
@@ -100,78 +95,22 @@ def getInstanceTypeE (enclosing : EProgram) (instName typeKey : String) :
       s!"(keys: {keys}). This is a registry-build bug; check buildProgramRegistry call sites."⟩
 
 -- ─────────────────────────────────────────────────────────────
--- Entry: tree Arena → id-form EArena
+-- Entry/exit — both identities now
+--
+-- `Arena` IS the id-form (`Program` is id-valued, `Arena.exprs` is the shared
+-- DAG), so the old tree↔id bridges collapse: `ofArena` is the identity, and
+-- there is no tree to `materialize` back to — the strata passes push their
+-- rewritten programs into the same arena, so the post-strata root is already a
+-- valid `(Arena, ProgramIdx)`.
 -- ─────────────────────────────────────────────────────────────
 
-/-- Convert an input `Arena` into id form: intern every program's expressions
-    into one shared DAG, parallel to the tree pool (same `ProgramIdx`es, so
-    registry / `prog`-decl references stay valid). -/
-def EArena.ofArena (a : Arena) : EArena :=
-  let (programs, exprs) := (a.programs.mapM toEProgram).run {}
-  { base := a, programs, exprs }
+/-- Identity: an input `Arena` is already the id-form pipeline state. -/
+def EArena.ofArena (a : Arena) : EArena := a
 
--- ─────────────────────────────────────────────────────────────
--- Exit: id-form EProgram → tree Program (Phase A only; thrown away in B)
--- ─────────────────────────────────────────────────────────────
-
-/-- Convert one `EProgram` to a tree `Program`, derefing every id through the
-    DAG and applying the registry / `prog`-decl index remap. -/
-private def eprogramToProgram (ex : ExprArena) (ep : EProgram)
-    (newReg : Array (String × ProgramIdx))
-    (progRemap : ProgramIdx → ProgramIdx) : Program :=
-  { name := ep.name
-    typeParams := ep.typeParams
-    inputs := ep.inputs.map fun d =>
-      { name := d.name, type? := d.type?, default? := d.default?.map ex.toExpr }
-    outputs := ep.outputs
-    typeDefs := ep.typeDefs
-    decls := ep.decls.map fun d => match d with
-      | .param n v => .param n v
-      | .prog n pi => .prog n (progRemap pi)
-      | .inst n k ta ins =>
-        .inst n k ta (ins.map fun i => { port := i.port, value := ex.toExpr i.value })
-    assigns := ep.assigns.map fun a => { target := a.target, expr := ex.toExpr a.expr }
-    binderCount := ep.binderCount
-    registry := newReg }
-
-/-- Recursively materialize the reachable `EProgram` subgraph rooted at `eIdx`
-    into `acc` (a fresh tree `Arena` carrying the identity pools), children
-    before parents so the acyclic pool invariant (refs point at lower indices)
-    holds. `memo` maps an id-pool index to its tree-pool index. -/
-private partial def materializeInto (ea : EArena) (eIdx : ProgramIdx)
-    (acc : Arena) (memo : Std.HashMap Nat ProgramIdx) :
-    Except Error (Arena × ProgramIdx × Std.HashMap Nat ProgramIdx) := do
-  match memo.get? eIdx.idx with
-  | some tIdx => pure (acc, tIdx, memo)
-  | none =>
-    let some ep := ea.programs[eIdx.idx]?
-      | throw ⟨s!"materialize: program pool index {eIdx.idx} out of range (internal)"⟩
-    -- Every child program reference: registry values + prog-decl targets.
-    let progChildren : Array ProgramIdx := ep.decls.filterMap fun d =>
-      match d with | .prog _ pi => some pi | _ => none
-    let childIdxs : Array ProgramIdx := ep.registry.map (·.2) ++ progChildren
-    let mut acc := acc
-    let mut memo := memo
-    for c in childIdxs do
-      let (acc', _, memo') ← materializeInto ea c acc memo
-      acc := acc'; memo := memo'
-    let remap : ProgramIdx → ProgramIdx := fun pi =>
-      (memo.get? pi.idx).getD pi
-    let newReg := ep.registry.map fun (k, pi) => (k, remap pi)
-    let treeProg := eprogramToProgram ea.exprs ep newReg remap
-    let tIdx : ProgramIdx := ⟨acc.programs.size⟩
-    acc := { acc with programs := acc.programs.push treeProg }
-    memo := memo.insert eIdx.idx tIdx
-    pure (acc, tIdx, memo)
-
-/-- Materialize the post-strata root back to a tree `(Arena, ProgramIdx)`,
-    appending the reachable subgraph onto the original program pool (like the
-    tree passes, which push and never remove) so callers that still index
-    unreachable originals keep working. -/
+/-- Identity: the post-strata root is already an `(Arena, ProgramIdx)`. -/
 def EArena.materialize (ea : EArena) (root : ProgramIdx) :
-    Except Error (Arena × ProgramIdx) := do
-  let (acc, tRoot, _) ← materializeInto ea root ea.base {}
-  pure (acc, tRoot)
+    Except Error (Arena × ProgramIdx) :=
+  pure (ea, root)
 
 -- ─────────────────────────────────────────────────────────────
 -- Exit (Phase B): id-form EArena → (CoreArena × CoreProgram)
@@ -277,13 +216,20 @@ private partial def convProgram (ea : EArena) (eIdx : ProgramIdx) : ConvM CorePr
   return .mk ep.name inputs outputs decls assigns registry
 
 /-- The Phase B strata-exit reify: post-strata `EArena` → `(CoreArena ×
-    CoreProgram)`, sharing preserved. (The elaborated-tree downcast — for
-    session roots that never ran the passes — is `checkResolvedArena` in
-    `CoreArena.lean`, reachable-only so it doesn't intern the whole pool.) -/
+    CoreProgram)`, sharing preserved, reachable-only from `root`. -/
 def EArena.toResolved (ea : EArena) (root : ProgramIdx) :
     Except Error (CoreArena × CoreProgram) := do
   let (core, (ca, _)) ← (convProgram ea root).run ({}, {})
   return (ca, core)
+
+/-- Downcast an elaborated `Arena` (a session root / per-program compile
+    boundary that never ran the strata passes, but IS the id-form) to
+    `(CoreArena × CoreProgram)`. A thin `Except String` wrapper over
+    `toResolved` for the compile call sites; reachable-only, so it validates
+    only the evaluator-reachable graph and never touches the whole pool. -/
+def _root_.Tropical.Ir.checkResolvedArena (a : Arena) (root : ProgramIdx) :
+    Except String (Tropical.Ir.CoreArena × Tropical.Ir.Core.CoreProgram) :=
+  (EArena.toResolved a root).mapError (·.message)
 
 -- ─────────────────────────────────────────────────────────────
 -- mapExprId — id-form structural walker (mirrors Recursion.mapExpr)

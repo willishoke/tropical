@@ -50,7 +50,7 @@ private def assertAcyclic (arena : Arena) (root : ProgramIdx) :
     Except Error Unit := do
   let some prog := arena.program? root
     | throw ⟨s!"strataPipeline: program pool index {root.idx} out of range"⟩
-  let sccs := findInstanceCycles prog
+  let sccs := findInstanceCycles arena.exprs prog
   unless sccs.isEmpty do
     let names := "; ".intercalate (sccs.toList.map fun scc => " → ".intercalate scc.toList)
     throw ⟨s!"strataPipeline: input contains an unbroken inter-instance cycle: {names}"⟩

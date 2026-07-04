@@ -242,13 +242,14 @@ def liftIfNeeded (env : Env) : EngineM Unit := do
     let st ← env.state.get
     let counter := (st.nameCounters.get? "__wire").getD 0 + 1
     let synthName := s!"__wire_{counter}"
-    let (prog, sortedRefs) ← match Tropical.Ir.WireProgram.lift w.expr synthName with
+    let (prog, sortedRefs, exprs) ← match Tropical.Ir.WireProgram.lift w.expr synthName st.arena.exprs with
       | .error msg => internalError msg
       | .ok r => pure r
     -- The raw lifted program joins the store: templateByName mirrors
     -- TS `session.programs.set(name, lifted)` — the RAW form, which
-    -- is what a later registration's relink byName would see.
-    let arenaRaw := { st.arena with programs := st.arena.programs.push prog }
+    -- is what a later registration's relink byName would see. The lifted
+    -- body's ids intern into the store's shared expression DAG.
+    let arenaRaw := { st.arena with programs := st.arena.programs.push prog, exprs }
     let rawIdx : Tropical.Ir.ProgramIdx := ⟨st.arena.programs.size⟩
     let rawJson ← match Tropical.Ir.Codec.encodeResolved arenaRaw rawIdx with
       | .error e => internalError e
@@ -327,64 +328,69 @@ private partial def collectWireParams (expr : Json) : Array String :=
 
 /-- Resolution context for a session wire expression. -/
 private structure WireCtx where
-  /-- `(instanceName, outputName)` → `nestedOut ⟨instIdx⟩ ⟨outputIdx⟩`. -/
-  instOut : String → String → Except String Tropical.Ir.Expr
+  /-- `(instanceName, outputName)` → the `nestedOut` leaf node. -/
+  instOut : String → String → Except String Tropical.Ir.ENode
   /-- param/trigger name → `ParamIdx` (alphabetical position). -/
   paramIdx : String → Option Nat
 
-/-- Resolve a raw session wire expression directly to a resolved `Ir.Expr`,
-    mirroring the elaborator's `resolveExpr` over a session-root scope. Same op
-    set as `wireExprToParsed`; no parsed intermediate. -/
+private abbrev WireM := StateT Tropical.Ir.ExprArena (Except String)
+
+private def internWE (n : Tropical.Ir.ENode) : WireM Tropical.Ir.ExprId :=
+  fun a => .ok ((Tropical.Ir.eintern n).run a)
+
+/-- Resolve a raw session wire expression directly to a resolved arena `ExprId`,
+    mirroring the elaborator's `resolveExpr` over a session-root scope, interning
+    into the shared DAG. Same op set as `wireExprToParsed`; no parsed intermediate. -/
 private partial def wireExprToResolved (ctx : WireCtx) (expr : Json) :
-    Except String Tropical.Ir.Expr :=
+    WireM Tropical.Ir.ExprId :=
   match expr with
-  | .num n => .ok (.num n)
-  | .bool b => .ok (.bool b)
-  | .arr items => do pure (.arr (← items.mapM (wireExprToResolved ctx)))
+  | .num n => internWE (.num n)
+  | .bool b => internWE (.bool b)
+  | .arr items => do internWE (.arr (← items.mapM (wireExprToResolved ctx)))
   | .obj _ => do
     let some op := opOf? expr
-      | .error s!"session wire node missing op: {expr.compress}"
+      | throwThe String s!"session wire node missing op: {expr.compress}"
     let rawArgs := match getField? expr "args" with | some (.arr a) => a | _ => #[]
     let args ← rawArgs.mapM (wireExprToResolved ctx)
     if op == "ref" then
-      ctx.instOut ((getStrField? expr "instance").getD "") ((getStrField? expr "output").getD "")
+      internWE (← ctx.instOut ((getStrField? expr "instance").getD "") ((getStrField? expr "output").getD ""))
     else if op == "param" || op == "trigger" then
       let name := (getStrField? expr "name").getD ""
       match ctx.paramIdx name with
-      | some i => .ok (.paramRef ⟨i⟩)
-      | none => .error s!"session wire: param '{name}' not in root param table"
+      | some i => internWE (.paramRef ⟨i⟩)
+      | none => throwThe String s!"session wire: param '{name}' not in root param table"
     else if op == "array" then
       match getField? expr "items" with
-      | some (.arr items) => do pure (.arr (← items.mapM (wireExprToResolved ctx)))
-      | _ => .error "session wire: 'array' missing items"
-    else if op == "sampleRate" then .ok .sampleRate
-    else if op == "sampleIndex" then .ok .sampleIndex
+      | some (.arr items) => do internWE (.arr (← items.mapM (wireExprToResolved ctx)))
+      | _ => throwThe String "session wire: 'array' missing items"
+    else if op == "sampleRate" then internWE .sampleRate
+    else if op == "sampleIndex" then internWE .sampleIndex
     else if op == "clock" || op == "sampleClock" || op == "sample_clock" then
-      .ok (.binary .lshift .sampleIndex (.num ⟨32, 0⟩))
+      internWE (.binary .lshift (← internWE .sampleIndex) (← internWE (.num ⟨32, 0⟩)))
     else if op == "clamp" then
-      if args.size == 3 then .ok (.clamp args[0]! args[1]! args[2]!)
-      else .error s!"session wire: clamp expects 3 args, got {args.size}"
+      if args.size == 3 then internWE (.clamp args[0]! args[1]! args[2]!)
+      else throwThe String s!"session wire: clamp expects 3 args, got {args.size}"
     else if op == "select" then
-      if args.size == 3 then .ok (.select args[0]! args[1]! args[2]!)
-      else .error s!"session wire: select expects 3 args, got {args.size}"
+      if args.size == 3 then internWE (.select args[0]! args[1]! args[2]!)
+      else throwThe String s!"session wire: select expects 3 args, got {args.size}"
     else if op == "arraySet" || op == "array_set" then
-      if args.size == 3 then .ok (.arraySet args[0]! args[1]! args[2]!)
-      else .error s!"session wire: arraySet expects 3 args, got {args.size}"
+      if args.size == 3 then internWE (.arraySet args[0]! args[1]! args[2]!)
+      else throwThe String s!"session wire: arraySet expects 3 args, got {args.size}"
     else if op == "index" then
-      if args.size == 2 then .ok (.index args[0]! args[1]!)
-      else .error s!"session wire: index expects 2 args, got {args.size}"
+      if args.size == 2 then internWE (.index args[0]! args[1]!)
+      else throwThe String s!"session wire: index expects 2 args, got {args.size}"
     else if op == "zeros" then
-      if args.size == 1 then .ok (.zeros args[0]!)
-      else .error s!"session wire: zeros expects 1 arg, got {args.size}"
+      if args.size == 1 then internWE (.zeros args[0]!)
+      else throwThe String s!"session wire: zeros expects 1 arg, got {args.size}"
     else if let some tag := Tropical.Ir.BinaryOpTag.ofWire? op then
-      if args.size == 2 then .ok (.binary tag args[0]! args[1]!)
-      else .error s!"session wire: binary '{op}' expects 2 args, got {args.size}"
+      if args.size == 2 then internWE (.binary tag args[0]! args[1]!)
+      else throwThe String s!"session wire: binary '{op}' expects 2 args, got {args.size}"
     else if let some tag := Tropical.Ir.UnaryOpTag.ofWire? op then
-      if args.size == 1 then .ok (.unary tag args[0]!)
-      else .error s!"session wire: unary '{op}' expects 1 arg, got {args.size}"
+      if args.size == 1 then internWE (.unary tag args[0]!)
+      else throwThe String s!"session wire: unary '{op}' expects 1 arg, got {args.size}"
     else
-      .error s!"session wire: unsupported op '{op}'"
-  | _ => .error s!"session wire: invalid value {expr.compress}"
+      throwThe String s!"session wire: unsupported op '{op}'"
+  | _ => throwThe String s!"session wire: invalid value {expr.compress}"
 
 /-- Build the resolved session root `Program` directly from the graph (instances
     already carry resolved type snapshots via `resolverTbl`), deleting the
@@ -422,9 +428,11 @@ private def sessionToResolvedRoot (arena : Tropical.Ir.Arena)
           | some tgt =>
             match tgt.outputs.findIdx? (·.name == on) with
             | none => .error s!"session wire ref: '{rn}' ({tgt.name}) has no output '{on}'"
-            | some o => .ok (Tropical.Ir.Expr.nestedOut ⟨idx⟩ ⟨o⟩)
+            | some o => .ok (Tropical.Ir.ENode.nestedOut ⟨idx⟩ ⟨o⟩)
   let ctx : WireCtx := { instOut, paramIdx := fun nm => sortedParams.findIdx? (· == nm) }
-  -- instance decls (topo order), then param decls (alphabetical).
+  -- instance decls (topo order), then param decls (alphabetical). Wire
+  -- expressions intern into the shared DAG (seeded from the arena's exprs).
+  let mut exprs := arena.exprs
   let mut decls : Array Tropical.Ir.BodyDecl := #[]
   for name in order do
     let some info := (lowerInstances.find? (·.1 == name)).map (·.2)
@@ -439,7 +447,8 @@ private def sessionToResolvedRoot (arena : Tropical.Ir.Arena)
     for w in wires do
       let some pos := tgt.inputs.findIdx? (·.name == w.portName)
         | .error s!"sessionToResolvedRoot: '{name}' ({tgt.name}) has no input '{w.portName}'"
-      let value ← wireExprToResolved ctx w.expr
+      let (value, exprs') ← (wireExprToResolved ctx w.expr).run exprs
+      exprs := exprs'
       inputs := inputs.push { port := ⟨pos⟩, value }
     decls := decls.push (.inst name tgt.name #[] inputs)
   for pname in sortedParams do
@@ -461,7 +470,7 @@ private def sessionToResolvedRoot (arena : Tropical.Ir.Arena)
       if !registry.any (·.1 == k) then registry := registry.push (k, v)
   let prog : Tropical.Ir.Program := { name := "__session__", decls, registry }
   let idx : Tropical.Ir.ProgramIdx := ⟨arena.programs.size⟩
-  .ok ({ arena with programs := arena.programs.push prog }, idx)
+  .ok ({ arena with programs := arena.programs.push prog, exprs }, idx)
 
 /-- The session lowering + compile (Phase 3 lowering, Phase 4 stage 4a
     elaboration): lift if needed, then run the Lean lowering — slot

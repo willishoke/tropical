@@ -237,76 +237,11 @@ structure Binder where
   idx : BinderIdx
 deriving Repr, Inhabited, BEq
 
-mutual
-
-/-- Port of `ResolvedExpr` / `ResolvedExprOp`. -/
-inductive Expr where
-  | num (n : JsonNumber)
-  | bool (b : Bool)
-  | arr (items : Array Expr)
-  | binary (tag : BinaryOpTag) (lhs rhs : Expr)
-  | unary (tag : UnaryOpTag) (arg : Expr)
-  | clamp (value lo hi : Expr)
-  | select (cond then_ else_ : Expr)
-  | arraySet (arr idx value : Expr)
-  | index (arr idx : Expr)
-  | zeros (count : Expr)
-  | inputRef (idx : InputIdx)
-  | paramRef (idx : ParamIdx)
-  | typeParamRef (idx : TypeParamIdx)
-  | bindingRef (idx : BinderIdx)
-  | nestedOut (instance_ : InstanceIdx) (output : OutputIdx)
-  | sampleRate
-  | sampleIndex
-  | fold (over init : Expr) (acc elem : Binder) (body : Expr)
-  | scan (over init : Expr) (acc elem : Binder) (body : Expr)
-  | generate (count : Expr) (iter : Binder) (body : Expr)
-  | iterate (count init : Expr) (iter : Binder) (body : Expr)
-  | chain (count init : Expr) (iter : Binder) (body : Expr)
-  | map2 (over : Expr) (elem : Binder) (body : Expr)
-  | zipWith (a b : Expr) (x y : Binder) (body : Expr)
-  | letIn (binders : Array LetBinder) (body : Expr)
-  /-- Variant constructor: sum pool idx + variant position; payload
-      entries pair a field position (into the variant's payload) with
-      the value bound to it. -/
-  | tag (def_ : TypeDefIdx) (variant : Nat) (payload : Array TagPayload)
-  | match_ (def_ : TypeDefIdx) (scrutinee : Expr) (arms : Array MatchArm)
-deriving Repr, Inhabited
-
-inductive LetBinder where
-  | mk (binder : Binder) (value : Expr)
-deriving Repr, Inhabited
-
-inductive TagPayload where
-  | mk (field : Nat) (value : Expr)
-deriving Repr, Inhabited
-
-inductive MatchArm where
-  | mk (variant : Nat) (binders : Array Binder) (body : Expr)
-deriving Repr, Inhabited
-
-end
-
-def LetBinder.binder : LetBinder → Binder
-  | .mk b _ => b
-
-def LetBinder.value : LetBinder → Expr
-  | .mk _ v => v
-
-def TagPayload.field : TagPayload → Nat
-  | .mk f _ => f
-
-def TagPayload.value : TagPayload → Expr
-  | .mk _ v => v
-
-def MatchArm.variant : MatchArm → Nat
-  | .mk v _ _ => v
-
-def MatchArm.binders : MatchArm → Array Binder
-  | .mk _ b _ => b
-
-def MatchArm.body : MatchArm → Expr
-  | .mk _ _ b => b
+-- The tree `Expr` (and its `LetBinder`/`TagPayload`/`MatchArm` binders) is gone:
+-- the resolved expression IS the hash-consed `ENode`/`ExprArena` DAG below, and
+-- `Program`'s leaves are `ExprId`s. Authoring frontends (the surface parser's
+-- `ParsedExpr`, `EmitArrow`'s combinator tree) build their own shapes and lower
+-- into the arena.
 
 -- ─────────────────────────────────────────────────────────────
 -- ExprArena — the hash-consed (DAG) form of the resolved expression
@@ -442,7 +377,7 @@ def ExprArena.deref (a : ExprArena) (id : ExprId) : Option ENode :=
 structure InputDecl where
   name : String
   type? : Option PortType := none
-  default? : Option Expr := none
+  default? : Option ExprId := none
 deriving Repr, Inhabited
 
 structure OutputDecl where
@@ -457,7 +392,7 @@ deriving Repr, Inhabited
 
 structure InstanceInput where
   port : InputIdx
-  value : Expr
+  value : ExprId
 deriving Repr, Inhabited
 
 inductive BodyDecl where
@@ -477,7 +412,7 @@ deriving BEq, Repr, Inhabited
 
 structure OutputAssign where
   target : OutputTarget
-  expr : Expr
+  expr : ExprId
 deriving Repr, Inhabited
 
 /-- One program pool entry. `registry` is the `programRegistry` as an

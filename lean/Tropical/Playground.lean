@@ -34,9 +34,9 @@ private def jNum? (obj : Json) (key : String) : Option JsonNumber :=
   | .ok j => j.getNum?.toOption
   | .error _ => none
 
-/-- A numeric param as a scalar `Expr` (`Expr.num`), carrying the JSON decimal
+/-- A numeric param as a scalar `Sig` (`Sig.num`), carrying the JSON decimal
     straight through (mantissa · 10^-exponent). -/
-private def jExpr (obj : Json) (key : String) (dflt : Expr) : Expr :=
+private def jExpr (obj : Json) (key : String) (dflt : Sig) : Sig :=
   match jNum? obj key with
   | some n => lit n.mantissa n.exponent
   | none => dflt
@@ -59,16 +59,16 @@ private def jStr (obj : Json) (key : String) (dflt : String) : String :=
     the shift, referenced to the compile-time `freqInit` so the effect's delay is
     preserved as a fixed phase. Added to a warped copy's phase port by `emitTermC`,
     it keeps that copy phase-continuous across a live freq change. -/
-private def phaseCorr (pitchE freqInit : Expr) : Clock → Sig :=
+private def phaseCorr (pitchE freqInit : Sig) : Clock → Sig :=
   fun shift => div (mul (sub pitchE freqInit) (toFloatE shift)) (mul (lit 4294967296) .sampleRate)
 
 /-- The anchor payload: `(phaseSlot, freqInit)`. Present when the voice's freq is a
     live phase-anchored slot; the voice then wires the phase port and installs the
     `phaseAnchor` so every warped copy self-corrects. -/
-abbrev Anchor := Expr × Expr
+abbrev Anchor := Sig × Sig
 
 /-- `FixedSinOsc`: freq (port 0), clk (port 1), phase (port 2). -/
-private def sineVoiceE (pitchE : Expr) (anchor : Option Anchor := none) : Voice :=
+private def sineVoiceE (pitchE : Sig) (anchor : Option Anchor := none) : Voice :=
   match anchor with
   | some (phaseE, freqInit) =>
     { programName := "FixedSinOsc",
@@ -80,7 +80,7 @@ private def sineVoiceE (pitchE : Expr) (anchor : Option Anchor := none) : Voice 
 
 /-- `MorphOsc`: freq (port 0), morph (port 1), clk (port 2), phase (port 3).
     `morph = 0` is saw, `morph = 1` is sine. -/
-private def morphVoiceE (pitchE morphE : Expr) (anchor : Option Anchor := none) : Voice :=
+private def morphVoiceE (pitchE morphE : Sig) (anchor : Option Anchor := none) : Voice :=
   match anchor with
   | some (phaseE, freqInit) =>
     { programName := "MorphOsc",
@@ -92,14 +92,14 @@ private def morphVoiceE (pitchE morphE : Expr) (anchor : Option Anchor := none) 
 
 /-- The `source` node is always a `MorphOsc` (morph = 0 is saw, morph = 1 is sine),
     so the morph knob is always meaningful. -/
-private def voiceOf (pitchE morphE : Expr) (anchor : Option Anchor) : Voice :=
+private def voiceOf (pitchE morphE : Sig) (anchor : Option Anchor) : Voice :=
   morphVoiceE pitchE morphE anchor
 
 /-- `PluckedMorphOsc`: freq (0), morph (1), clk (2), event_rate (3), phase (4).
     A `MorphOsc` with the closed-form pluck envelope baked in — dynamic content
     that reverses with the master clock, so any downstream warp (a comb tap) reads
     a delayed PLUCKED copy (an audible echo/pre-echo), not a silent bulk delay. -/
-private def pluckedVoiceE (pitchE morphE eventRateE : Expr) (anchor : Option Anchor := none) : Voice :=
+private def pluckedVoiceE (pitchE morphE eventRateE : Sig) (anchor : Option Anchor := none) : Voice :=
   match anchor with
   | some (phaseE, freqInit) =>
     { programName := "PluckedMorphOsc",
@@ -112,19 +112,19 @@ private def pluckedVoiceE (pitchE morphE eventRateE : Expr) (anchor : Option Anc
 /-- `δ = toInt(seconds · sampleRate · 2³²)` — a Q32.32 sample offset (the stdlib
     flanger's own delay form), but with the `seconds` taken from the knob. Signed:
     a negative `seconds` reads the past, a positive one the future. -/
-private def deltaOf (secondsE : Expr) : Expr :=
+private def deltaOf (secondsE : Sig) : Sig :=
   toIntE (mul (mul secondsE .sampleRate) (lit 4294967296))
 
 /-- `gᵏ` as a product of `k` live-`g` reads (`g` may be a `paramRef`), so the comb's
     decay is a live knob with no relower. `k = 0 ⇒ 1`. -/
-private def gPow (g : Expr) (k : Nat) : Expr :=
+private def gPow (g : Sig) (k : Nat) : Sig :=
   (Array.range k).foldl (fun acc _ => mul acc g) (lit 1)
 
 /-- A struck resonator's modal bank: `npart` harmonics of `f0`, decay
     `σ_k = decay·(1 + 0.4k)`, amplitude `1/k^1.1`. `f0` and `decay` may be live
     `paramRef`s (the pole frequencies/decays sweep with the knobs), because the
     downstream residue calculus is emitted symbolically. -/
-private def resonatorBank (f0 decay : Expr) (npart : Nat) : Array ModalMode :=
+private def resonatorBank (f0 decay : Sig) (npart : Nat) : Array ModalMode :=
   (Array.range npart).map fun j =>
     let k := j + 1
     ModalMode.hz (mul (lit (Int.ofNat k)) f0)
@@ -135,7 +135,7 @@ private def resonatorBank (f0 decay : Expr) (npart : Nat) : Array ModalMode :=
     log-spaced modes over `[flo,fhi]` with damping `σ = 6.91/rt60` (live), unit
     residues at golden-ratio phases so the tail isn't a pure comb. Freqs and count
     are structural (baked); only the damping is a live knob. -/
-private def reverbRoom (rt60 : Expr) (nmode : Nat) (flo fhi : Float) : Array ModalMode :=
+private def reverbRoom (rt60 : Sig) (nmode : Nat) (flo fhi : Float) : Array ModalMode :=
   let sigma := div (lit 691 2) rt60           -- 6.91 / rt60
   let denom : Float := if nmode ≤ 1 then 1.0 else (nmode - 1).toFloat
   (Array.range nmode).map fun j =>
@@ -154,7 +154,7 @@ private def portSources (inObj : Json) (port : String) : Array String :=
     (used only if the param table somehow lacks the entry — the collector always
     allocates one). Every continuous knob is a live slot, so its value is READ from
     the slot at runtime, never baked — turning it drives `set_param`, no relower. -/
-private def pref (pidx : String → Option Nat) (name : String) (dflt : Expr) : Expr :=
+private def pref (pidx : String → Option Nat) (name : String) (dflt : Sig) : Sig :=
   match pidx name with
   | some i => .paramRef ⟨i⟩
   | none => dflt
@@ -184,7 +184,7 @@ private def isAnchored (kind kname : String) : Bool :=
     rate, matching the engine's `set_param_glide`). The value eases from `v0` to
     `v1` starting at tick `t0`; the control plane re-anchors the slots on each turn.
     Stateless — the ramp is a pure function of the ambient clock, not an accumulator. -/
-private def glideExpr (pidx : String → Option Nat) (base : String) (dflt : Expr) : Expr :=
+private def glideExpr (pidx : String → Option Nat) (base : String) (dflt : Sig) : Sig :=
   let v0 := pref pidx s!"{base}#v0" dflt
   let v1 := pref pidx s!"{base}#v1" dflt
   let t0 := pref pidx s!"{base}#t0" (lit 0)
@@ -226,7 +226,7 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
   let sig := (portSources inObj "in")[0]?.getD "__silence__"
   -- this node's own knob `kname` as a live value: a closed-form glide if glided,
   -- else a raw slot read; falling back to the baked literal if unallocated.
-  let p := fun (kname : String) (dflt : Expr) =>
+  let p := fun (kname : String) (dflt : Sig) =>
     if isGlided kind kname then glideExpr pidx s!"{id}.{kname}" dflt
     else pref pidx s!"{id}.{kname}" dflt
   let clk := masterClock pidx
@@ -245,7 +245,7 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     -- the anchor: (phase slot, compile-time freq). Present only when the source's
     -- own freq is a live slot; the compile-time freq is the reference the warped
     -- copies' phase correction is measured from.
-    let anchor := (pidx s!"{id}.freq#phase").map fun i => ((.paramRef ⟨i⟩ : Expr), jExpr params "freq" (lit 220))
+    let anchor := (pidx s!"{id}.freq#phase").map fun i => ((.paramRef ⟨i⟩ : Sig), jExpr params "freq" (lit 220))
     (.source (voiceOf pitchE (p "morph" (jExpr params "morph" (lit 0))) anchor) clk, #[])
   | "pluck" =>
     -- a plucked MorphOsc source: pitch (anchored), morph (glided), and event_rate
@@ -253,7 +253,7 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     let pitchE := match (portSources inObj "freq")[0]? with
       | some w => pref pidx s!"{w}.value" (jExpr params "freq" (lit 110))
       | none => p "freq" (jExpr params "freq" (lit 110))
-    let anchor := (pidx s!"{id}.freq#phase").map fun i => ((.paramRef ⟨i⟩ : Expr), jExpr params "freq" (lit 110))
+    let anchor := (pidx s!"{id}.freq#phase").map fun i => ((.paramRef ⟨i⟩ : Sig), jExpr params "freq" (lit 110))
     (.source (pluckedVoiceE pitchE (p "morph" (jExpr params "morph" (lit 0)))
        (p "event_rate" (jExpr params "event_rate" (lit 2))) anchor) clk, #[])
   | "comb" =>
@@ -263,7 +263,7 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     let d := deltaOf (p "delay" (jExpr params "delay" (lit 12 3)))   -- 0.012 s, future
     let g := p "decay" (jExpr params "decay" (lit 7 1))              -- 0.7
     let K := 6
-    let tail : Array (Expr × (Clock → Clock)) := (Array.range K).map fun j =>
+    let tail : Array (Sig × (Clock → Clock)) := (Array.range K).map fun j =>
       let k := j + 1
       (gPow g k, fun c => add c (mul (lit (Int.ofNat k)) d))
     (.comb sig (#[(lit 1, fun c => c)] ++ tail), #[])
@@ -276,7 +276,7 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
   | "reverse" => (.warpFx sig (fun c => neg c), #[])
   | "fm" =>
     -- `carrier` is a frequency → phase-anchored (own #phase slot); `depth` glides.
-    let carAnchor := (pidx s!"{id}.carrier#phase").map fun i => ((.paramRef ⟨i⟩ : Expr), jExpr params "carrier" (lit 330))
+    let carAnchor := (pidx s!"{id}.carrier#phase").map fun i => ((.paramRef ⟨i⟩ : Sig), jExpr params "carrier" (lit 330))
     (.fm sig (sineVoiceE (p "carrier" (jExpr params "carrier" (lit 330))) carAnchor)
       clk (p "depth" (jExpr params "depth" (lit 8))), #[])
   | "sflange" =>
@@ -466,18 +466,14 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
   -- Output port 0 is the audible mix; ports 1.. are the taps (`tap:<id>`).
   let tapOutputs := tapSigs.map fun (id, _) =>
     ({ name := s!"tap:{id}", type? := some (.scalar .float) } : OutputDecl)
-  let tapAssigns := tapSigs.mapIdx fun i (_, s) =>
-    ({ target := .port ⟨i + 1⟩, expr := s } : OutputAssign)
-  let prog : Program := {
-    name := "__patch__"
-    inputs := #[]
-    outputs := #[{ name := "out", type? := some (.scalar .float) }] ++ tapOutputs
-    decls := b.decls ++ paramDecls
-    assigns := #[{ target := .port ⟨0⟩, expr := out }] ++ tapAssigns
-    binderCount := 0
-    registry }
-  let idx : ProgramIdx := ⟨arena.programs.size⟩
-  let arena1 : Arena := { arena with programs := arena.programs.push prog }
+  let tapAssigns : Array (Tropical.Ir.OutputTarget × Sig) :=
+    tapSigs.mapIdx fun i (_, s) => (.port ⟨i + 1⟩, s)
+  -- Assemble through EmitArrow's lowering boundary (interns every `Sig` into the
+  -- arena's DAG); the live param decls append after the instance decls.
+  let (arena1, idx) := Tropical.EmitArrow.assemble arena "__patch__" #[]
+    (#[{ name := "out", type? := some (.scalar .float) }] ++ tapOutputs)
+    b.decls (#[(.port ⟨0⟩, out)] ++ tapAssigns) registry
+    (extraDecls := paramDecls)
   let (coreArena, core) ← (Tropical.Ir.Strata.runResolved { upto := 5 } arena1 idx).mapError (·.message)
   let input : Tropical.Compile.SessionInput := {
     instances := #[(Tropical.Compile.rootInstancePath, core)]
