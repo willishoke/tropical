@@ -1471,6 +1471,16 @@ inductive ArrowTerm where
       This is what lets the stdlib's generators be TERMS over `{clk, +, ×, frac}`
       instead of opaque `.trop` instances — the bootstrap's ground floor. -/
   | clk (c : Clock)
+  /-- THROUGH-ZERO PHASE MODULATION — the data-into-PHASE edge (the dual of
+      `swarp`'s data-into-clock FM). A single carrier `v` whose phase port
+      receives `depth · modSig` added on top of its anchor correction, where
+      `modSig` is the SIGNAL of `mod` (another sub-term, a closed form in τ).
+      Unlike FM it does NOT bend the carrier's clock, so there is no pitch droop
+      — the sidebands sit symmetrically about a fixed carrier. `mod` is emitted
+      through the SAME enclosing clock transform, so a downstream warp reclocks
+      the modulator too (the PM-of-PM / delay-continuity rule, as for `swarp`). -/
+  | pmGen (v : Voice) (name : String) (baseClk : Clock) (depth : Sig)
+      (mod : ArrowTerm)
 
 instance : Inhabited ArrowTerm := ⟨.sum #[]⟩
 
@@ -1491,6 +1501,7 @@ partial def normalize : ArrowTerm → ArrowTerm
   | .konst s => .konst s
   | .prod x y => .prod (normalize x) (normalize y)
   | .clk c => .clk c
+  | .pmGen v name baseClk depth mod => .pmGen v name baseClk depth (normalize mod)
 
 /-- Emit a (normalized) arrow term to its output signal. Each `gen` sources a
     voice instance in left-to-right order (matching `warpBank`'s instance order);
@@ -1537,6 +1548,21 @@ partial def emitTermC (cmod : Clock → Builder → Clock × Builder) :
   -- back AS the signal (Clock and Sig are both `Sig`). This is the one leaf warp
   -- acts on; a phasor over it inherits reverse/scrub/future-tap.
   | .clk c, b => cmod c b
+  -- through-zero PM: emit the modulator's signal (reclocked through the same
+  -- ambient transform), then source THIS carrier with `depth·modSig` added to its
+  -- phase port — on top of the anchor's clock-shift correction. The carrier's
+  -- clock is NOT bent, so the carrier pitch stays put (no FM droop).
+  | .pmGen v name baseClk depth mod, b =>
+    let (mSig, b) := emitTermC cmod mod b
+    let (clk', b) := cmod baseClk b
+    let pmOff := mul depth mSig
+    let v := match v.phaseAnchor with
+      | some (port, corr) =>
+        let c := add (corr (sub baseClk clk')) pmOff
+        { v with wire := fun cc => (v.wire cc).map fun ii =>
+            if ii.port.idx == port.idx then { ii with value := add ii.value c } else ii }
+      | none => v
+    b.osc v s!"{name}{b.decls.size}" clk'
   | .sum ts, b =>
     match ts[0]? with
     | none => (lit 0, b)
@@ -1889,6 +1915,11 @@ inductive Node where
   /-- A MODULATED carrier: `input`'s signal modulates this carrier's clock
       (FM/PM). The signal-into-clock edge — patch `mod.out → carrier.fm`. -/
   | fm (input : String) (carrier : Voice) (baseClk : Clock) (depthE : Sig)
+  /-- A PHASE-modulated carrier (through-zero PM): `input`'s signal, scaled by
+      `depthE` (the modulation index, in cycles), adds to this carrier's phase
+      port — NOT its clock. The direct `osc → osc` patch. Sidebands without pitch
+      droop (the carrier clock is untouched). -/
+  | pm (input : String) (carrier : Voice) (baseClk : Clock) (depthE : Sig)
   /-- A SWEPT flanger: `input` is the signal flanged, `modInput` the modulator that
       sweeps the ±δ taps (an LFO, or any patched signal). `depthSec` is the sweep
       depth in seconds. The signal-warp distributes onto `input`'s generators. -/
@@ -2009,6 +2040,8 @@ partial def lowerNode (g : PatchGraph) (id : String) : Except String ArrowTerm :
   | .mix inputs => return .sum (← inputs.mapM (lowerInput g))
   | .fm inId carrier base depth =>
     return .swarp (fmWarp depth) (← lowerInput g inId) (.gen carrier id base)
+  | .pm inId carrier base depth =>
+    return .pmGen carrier id base depth (← lowerInput g inId)
   | .sflange inId modId depthSec =>
     return sweptFlangeEffect (sflangeBack depthSec) (sflangeFwd depthSec)
       (← lowerInput g modId) (← lowerInput g inId)
