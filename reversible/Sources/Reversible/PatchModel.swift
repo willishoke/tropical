@@ -1,0 +1,290 @@
+import SwiftUI
+
+struct PatchNode: Identifiable {
+    let id: String
+    let kind: NodeKind
+    var position: CGPoint
+    var values: [String: Double]
+    /// inlet port → ordered source node ids
+    var inputs: [String: [String]]
+
+    var allInputs: [String] { inputs.values.flatMap { $0 } }
+}
+
+/// The patch graph + engine session, one object. TOPOLOGY RELOWERS, SCALARS
+/// ARE LIVE: every continuous knob is a live `param:<id>.<knob>` module slot —
+/// turning it drives `set_param` on the running kernel, no recompile. Only
+/// structural edits (add/remove/rewire) change the graph topology and trigger
+/// a relower + hot-swap.
+@MainActor
+final class PatchModel: ObservableObject {
+    @Published var nodes: [String: PatchNode] = [:]
+    @Published var order: [String] = []   // stable z/render order
+    @Published var status = "booting engine…"
+    @Published var statusIsError = false
+    @Published var audioOn = false
+    @Published var velocity: Double = 1
+
+    let engine: Engine
+    private var counter = 0
+    private var pushTask: Task<Void, Never>?
+    private var pushInFlight = false
+    private var pushAgain = false
+
+    init() {
+        // Bounce engine events onto the main actor; Engine is created with a
+        // plain sendable callback so the actor never touches UI state itself.
+        var forward: (@Sendable (EngineEvent) -> Void)!
+        let box = EventBox()
+        forward = { event in Task { @MainActor in box.handler?(event) } }
+        engine = Engine(events: forward)
+        box.handler = { [weak self] event in self?.handle(event) }
+
+        do { try startEngine() } catch {
+            setStatus("engine: \(error.localizedDescription)", isError: true)
+        }
+        addNode(.out, at: CGPoint(x: 1180, y: 360))
+        addNode(.source, at: CGPoint(x: 120, y: 200))
+        setStatus("engine up · patch something", isError: false)
+    }
+
+    private func startEngine() throws {
+        let e = engine
+        Task { try await e.start() }
+    }
+
+    private func handle(_ event: EngineEvent) {
+        switch event {
+        case .up:
+            setStatus("engine up", isError: false)
+            Task { await syncAudioState() }
+        case .exit(let code):
+            setStatus("engine exited (code \(code))", isError: true)
+        case .stderr(let text):
+            // Diagnostic only — the Electron app console.warn'd these.
+            FileHandle.standardError.write(Data("[engine] \(text)".utf8))
+        }
+    }
+
+    func setStatus(_ text: String, isError: Bool) {
+        status = text
+        statusIsError = isError
+    }
+
+    // ── Node lifecycle ───────────────────────────────────────────────────
+    @discardableResult
+    func addNode(_ kind: NodeKind, at point: CGPoint? = nil) -> PatchNode? {
+        let spec = kind.spec
+        if spec.fixed && nodes.values.contains(where: { $0.kind == kind }) { return nil }
+        counter += 1
+        let id = "\(kind.rawValue)\(counter)"
+        let pos = point ?? CGPoint(
+            x: 80 + Double(counter % 6) * 34,
+            y: 90 + Double(counter % 6) * 30)
+        var values: [String: Double] = [:]
+        for k in spec.knobs { values[k.name] = k.def }
+        var inputs: [String: [String]] = [:]
+        for p in spec.inlets { inputs[p] = [] }
+        let n = PatchNode(id: id, kind: kind, position: pos, values: values, inputs: inputs)
+        nodes[id] = n
+        order.append(id)
+        return n
+    }
+
+    func deleteNode(_ id: String) {
+        guard let n = nodes[id], !n.kind.spec.fixed else { return }
+        nodes.removeValue(forKey: id)
+        order.removeAll { $0 == id }
+        for var m in nodes.values {
+            for p in m.inputs.keys { m.inputs[p]?.removeAll { $0 == id } }
+            nodes[m.id] = m
+        }
+        schedulePush()
+    }
+
+    // ── Connection discipline ────────────────────────────────────────────
+    /// reachability for the cycle check (across all inlets)
+    private func reaches(_ a: String, _ target: String, _ seen: inout Set<String>) -> Bool {
+        if a == target { return true }
+        if seen.contains(a) { return false }
+        seen.insert(a)
+        guard let na = nodes[a] else { return false }
+        return na.allInputs.contains { reaches($0, target, &seen) }
+    }
+
+    func canConnect(from fromId: String, to toId: String, port: String) -> Bool {
+        guard fromId != toId,
+              let from = nodes[fromId], let to = nodes[toId],
+              to.kind.spec.inlets.contains(port),
+              !(to.inputs[port] ?? []).contains(fromId)
+        else { return false }
+        let fromIsKnob = from.kind == .knob
+        // A knob is a control value: it may only drive a control inlet (freq/mod).
+        if fromIsKnob && !NodeKind.controlInlets.contains(port) { return false }
+        // `freq` is control-only — audio-rate into the pitch port is not FM.
+        if !fromIsKnob && port == "freq" { return false }
+        // A modal inlet (Reverb/Modal∪) carries poles: only a modal node may
+        // drive it. (A modal outlet INTO a Sig inlet is fine — it realizes at
+        // the seam.)
+        if to.kind.wantsModal(inlet: port) && !from.kind.spec.modal { return false }
+        var seen = Set<String>()
+        if reaches(fromId, toId, &seen) { return false }   // would form a cycle
+        return true
+    }
+
+    func connect(from fromId: String, to toId: String, port: String) {
+        guard canConnect(from: fromId, to: toId, port: port), var to = nodes[toId] else { return }
+        if !to.kind.spec.summing { to.inputs[port] = [] }   // single inlet: replace
+        to.inputs[port, default: []].append(fromId)
+        nodes[toId] = to
+        schedulePush()
+    }
+
+    func deleteEdge(to toId: String, port: String, from fromId: String) {
+        guard var to = nodes[toId] else { return }
+        to.inputs[port]?.removeAll { $0 == fromId }
+        nodes[toId] = to
+        schedulePush()
+    }
+
+    // ── Serialization → load_patch_graph ─────────────────────────────────
+    func serialize() -> JSONValue {
+        var out: [JSONValue] = []
+        for id in order {
+            guard let n = nodes[id] else { continue }
+            let spec = n.kind.spec
+            var params: [String: JSONValue] = [:]
+            for k in spec.knobs { params[k.name] = .number(n.values[k.name] ?? k.def) }
+            var inputs: [String: JSONValue] = [:]
+            for p in spec.inlets { inputs[p] = .array((n.inputs[p] ?? []).map(JSONValue.string)) }
+            out.append(.object([
+                "id": .string(n.id),
+                "kind": .string(n.kind.rawValue),
+                "params": .object(params),
+                "sel": .object([:]),
+                "in": .object(inputs),
+            ]))
+        }
+        let outNode = nodes.values.first { $0.kind == .out }
+        return .object([
+            "nodes": .array(out),
+            "out": outNode.map { .string($0.id) } ?? .null,
+        ])
+    }
+
+    // ── Relower push (debounced, single-in-flight) ────────────────────────
+    func schedulePush(after delay: Duration = .zero) {
+        pushTask?.cancel()
+        pushTask = Task { [weak self] in
+            if delay > .zero { try? await Task.sleep(for: delay) }
+            guard !Task.isCancelled else { return }
+            await self?.pushGraph()
+        }
+    }
+
+    func pushGraph() async {
+        if pushInFlight { pushAgain = true; return }
+        pushInFlight = true
+        defer {
+            pushInFlight = false
+            if pushAgain { pushAgain = false; schedulePush() }
+        }
+        do {
+            // The compile+JIT is synchronous on the engine's single control
+            // thread, so a heavy node (e.g. a modal reverb: ~10⁵ IR lines →
+            // seconds of LLVM) blocks here with no other signal. Show it, so
+            // "compiling" is distinguishable from "hung" — the acute failure
+            // mode of the live-patch loop.
+            setStatus("compiling…", isError: false)
+            try await engine.call("load_patch_graph", serialize())
+            // A relower transfers slots by name, so a live scrub survives it —
+            // except a COLD first compile, which seeds master.velocity at its
+            // default (1). Re-apply a non-default scrub so the slider and the
+            // running clock agree (no-op if equal).
+            if velocity != 1 { params.send("set_param_velocity", "master.velocity", velocity) }
+            setStatus(audioOn ? "playing" : "compiled", isError: false)
+        } catch {
+            setStatus("compile: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    // ── Live param drive ──────────────────────────────────────────────────
+    lazy var params = ParamSender(model: self)
+
+    func sendKnob(_ node: PatchNode, _ knob: KnobSpec, _ value: Double) {
+        let name = "\(node.id).\(knob.name)"
+        switch knob.mode {
+        case .live: params.send("set_param", name, value)
+        case .glide: params.send("set_param_glide", name, value)
+        case .anchor: params.send("set_param_freq", name, value)
+        }
+    }
+
+    func setVelocity(_ v: Double) {
+        velocity = v
+        params.send("set_param_velocity", "master.velocity", v)
+    }
+
+    // ── Transport ─────────────────────────────────────────────────────────
+    func toggleAudio() async {
+        do {
+            if !audioOn {
+                try await engine.call("start_audio")
+                audioOn = true
+                setStatus("playing", isError: false)
+            } else {
+                try await engine.call("stop_audio")
+                audioOn = false
+                setStatus("stopped", isError: false)
+            }
+        } catch {
+            setStatus(error.localizedDescription, isError: true)
+        }
+    }
+
+    /// The engine (audio + DAC) is a separate process that OUTLIVES a window
+    /// reload — a fresh surface must not assume audio is off. Ask the engine
+    /// its real state and adopt it.
+    func syncAudioState() async {
+        guard let st = try? await engine.call("audio_status"),
+              st["is_running"]?.boolValue == true, !audioOn else { return }
+        audioOn = true
+    }
+}
+
+/// Breaks the init-order knot between the Engine's @Sendable event callback
+/// and the @MainActor model that wants to receive the events.
+private final class EventBox: @unchecked Sendable {
+    @MainActor var handler: ((EngineEvent) -> Void)?
+}
+
+/// Live param drive: set the `param:<name>` slot on the running kernel — no
+/// recompile. Rapid drags coalesce to the latest value per name; a cold-start
+/// miss (slot not compiled yet) falls back to a relower that bakes the value
+/// as the slot default, after which subsequent turns are live.
+@MainActor
+final class ParamSender {
+    private var pending: [String: (method: String, value: Double)] = [:]
+    private var busy: Set<String> = []
+    private weak var model: PatchModel?
+
+    init(model: PatchModel) { self.model = model }
+
+    func send(_ method: String, _ name: String, _ value: Double) {
+        pending[name] = (method, value)
+        guard !busy.contains(name) else { return }
+        busy.insert(name)
+        Task { [weak self] in
+            defer { self?.busy.remove(name) }
+            while let (m, v) = self?.pending.removeValue(forKey: name) {
+                guard let engine = self?.model?.engine else { return }
+                do {
+                    try await engine.call(m, .object(["name": .string(name), "value": .number(v)]))
+                } catch {
+                    self?.model?.schedulePush()
+                    return
+                }
+            }
+        }
+    }
+}
