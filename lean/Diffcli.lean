@@ -381,7 +381,7 @@ private def printStrata (opts : Tropical.Ir.Strata.Options)
     -- production seam asserts those per registered program). A check
     -- failure is a Lean-side invariant bug: harness error, loud.
     if opts.upto == 5 && opts.inlineNested then
-      if let .error e := Tropical.Ir.Core.check arena' root' then
+      if let .error e := Tropical.Ir.checkResolvedArena arena' root' then
         IO.eprintln e
         return 1
     printEncoded arena' root'
@@ -439,24 +439,19 @@ private def printEmit (typeArgs : Array (String × Lean.JsonNumber))
     (arena : Tropical.Ir.Arena) (root : Tropical.Ir.ProgramIdx) : IO UInt32 := do
   let opts : Tropical.Ir.Strata.Options :=
     { upto := Tropical.Ir.Strata.portedPasses, inlineNested := true, typeArgs }
-  match Tropical.Ir.Strata.run opts arena root with
+  match Tropical.Ir.Strata.runResolved opts arena root with
   | .error e =>
     IO.println (errorJson e.message).compress
     return 0
-  | .ok (arena', root') =>
-    match Tropical.Ir.Core.check arena' root' with
-    | .error e =>
-      IO.eprintln e
-      return 1
-    | .ok core =>
-      match Tropical.Ir.CompileResolved.compileResolved core with
-      | .error msg =>
-        IO.println (errorJson msg).compress
-        return 0
-      | .ok plan =>
-        match plan.toWire with
-        | .error e => IO.eprintln e; return 1
-        | .ok j => IO.println j.compress; return 0
+  | .ok (coreArena, core) =>
+    match Tropical.Ir.CompileResolved.compileResolved core coreArena with
+    | .error msg =>
+      IO.println (errorJson msg).compress
+      return 0
+    | .ok plan =>
+      match plan.toWire with
+      | .error e => IO.eprintln e; return 1
+      | .ok j => IO.println j.compress; return 0
 
 def emitStdlibVerb (args : List String) : IO UInt32 := do
   let some target := args.head?

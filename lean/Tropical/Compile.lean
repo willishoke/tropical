@@ -379,6 +379,7 @@ private def instParts : CoreBodyDecl → Option (String × String)
 /-- Partition a single kernel recursively. Returns the kernel tree plus
     the advanced allocation + accumulators. -/
 partial def partitionKernel (instancePath : String) (prog : CoreProgram)
+    (arena : Tropical.Ir.CoreArena)
     (wires : Array Tropical.Wire) (s : SessionAlloc) (acc : Accumulators)
     (inputSlotOverride : Array (Nat × Nat) := #[])
     (inputArraySlots : Array (Nat × ArraySlotInfo) := #[])
@@ -429,7 +430,7 @@ partial def partitionKernel (instancePath : String) (prog : CoreProgram)
     nestedInputSlots := nestedInputSlots.push (k, childInputMap)
     nestedInputArraySlots := nestedInputArraySlots.push (k, childInputArrayMap)
 
-    let (childFn, s', acc') ← partitionKernel childPath declType wires s acc
+    let (childFn, s', acc') ← partitionKernel childPath declType arena wires s acc
       childInputMap childInputArrayMap #[]
     s := s'
     acc := acc'
@@ -444,7 +445,7 @@ partial def partitionKernel (instancePath : String) (prog : CoreProgram)
     inputArraySlots
     nestedInputArraySlots
     nestedOutputArraySlots }
-  let plan ← compileResolved prog ctx
+  let plan ← compileResolved prog arena ctx
 
   -- ── 3. Remap into the unified slot/temp space. ──
   let regOffset := acc.nextRegRaw
@@ -501,6 +502,10 @@ structure SessionInput where
   alloc : Tropical.Lowering.Alloc
   /-- The elaborated session root, downcast to Core. -/
   root : CoreProgram
+  /-- The shared hash-consed expression DAG that every instance's (and the
+      root's) leaf `ExprId`s index into — one arena for root + registry
+      (Phase B). -/
+  arena : Tropical.Ir.CoreArena
   mode : Tropical.Plan.CompilationMode := .fused
 
 private def rootParamName : CoreBodyDecl → Option String
@@ -587,8 +592,8 @@ def compileSession (input : SessionInput) : Except String Tropical.Plan.FlatPlan
     if let some slot := s.paramSlots.get? rootParams[i]! then
       paramSlots := paramSlots.push (i, slot)
 
-  let (fn, s', acc) ← partitionKernel rootInstancePath input.root input.wiresPost s acc
-    #[] #[] paramSlots
+  let (fn, s', acc) ← partitionKernel rootInstancePath input.root input.arena
+    input.wiresPost s acc #[] #[] paramSlots
   s := s'
 
   let sinks ← emitSinks s input.graphOutputs

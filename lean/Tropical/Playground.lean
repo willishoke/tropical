@@ -478,8 +478,7 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
     registry }
   let idx : ProgramIdx := ⟨arena.programs.size⟩
   let arena1 : Arena := { arena with programs := arena.programs.push prog }
-  let (arena2, root') ← (Tropical.Ir.Strata.run { upto := 5 } arena1 idx).mapError (·.message)
-  let core ← Tropical.Ir.Core.check arena2 root'
+  let (coreArena, core) ← (Tropical.Ir.Strata.runResolved { upto := 5 } arena1 idx).mapError (·.message)
   let input : Tropical.Compile.SessionInput := {
     instances := #[(Tropical.Compile.rootInstancePath, core)]
     wiresPost := #[]
@@ -487,6 +486,7 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
     params := paramTable.map (fun (nm, v) => (nm, Json.num v))
     alloc := Tropical.Lowering.allocate (paramTable.map (·.1)) #[]
     root := core
+    arena := coreArena
     mode := .fused }
   let plan ← Tropical.Compile.compileSession input
   -- The final mix (`out`) plus one tap per user node, all routed to the synthetic

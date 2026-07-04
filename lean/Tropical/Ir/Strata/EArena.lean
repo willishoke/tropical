@@ -174,6 +174,118 @@ def EArena.materialize (ea : EArena) (root : ProgramIdx) :
   pure (acc, tRoot)
 
 -- ─────────────────────────────────────────────────────────────
+-- Exit (Phase B): id-form EArena → (CoreArena × CoreProgram)
+--
+-- Replaces `materialize` + `Core.check` in one pass: the strata DAG is
+-- threaded straight to emit as a `CoreArena` instead of flattened to a
+-- tree and re-interned three times (the modulated-clock blowup). Each
+-- reachable expression node is converted once and equal subtrees stay
+-- one node, so O(unique nodes), never O(expanded tree).
+--
+-- REACHABLE-only: `ea.exprs` is append-only and still holds the
+-- pre-lowering combinator nodes (`letIn`/`fold`/`tag`/…) that later
+-- passes rewrote away, so a whole-arena fold would falsely reject them
+-- as "survived <pass>". We convert only what the post-strata root (and
+-- its instance-referenced registry) actually references — exactly the
+-- evaluator-reachable graph the old `Core.check` walked.
+-- ─────────────────────────────────────────────────────────────
+
+open Tropical.Ir.Core (CoreProgram CoreInputDecl CoreOutputDecl CoreOutputAssign
+  CoreBodyDecl CoreInstanceInput)
+
+/-- Conversion state: the emit `CoreArena` under construction plus a memo
+    mapping an `ExprArena` id (`.idx`) to its interned `CoreArena` id. -/
+private abbrev ConvM := StateT (CoreArena × Std.HashMap Nat ExprId) (Except Error)
+
+/-- Convert one reachable `ExprArena` node (and its children) into the
+    `CoreArena`, memoized. Rejects any node a strata pass should have
+    removed — the id-form analogue of `Core.checkExpr`, but visited only
+    when actually referenced. -/
+private partial def convExprId (ea : ExprArena) (eid : ExprId) : ConvM ExprId := do
+  match (← get).2.get? eid.idx with
+  | some cid => return cid
+  | none =>
+    let some n := ea.deref eid
+      | throw ⟨s!"toResolved: dangling ExprId {eid.idx} (internal)"⟩
+    let cn : CNode ← match n with
+      | .num x          => pure (.num x)
+      | .bool b         => pure (.bool b)
+      | .arr items      => pure (.arr (← items.mapM (convExprId ea)))
+      | .binary t a b   => pure (.binary t (← convExprId ea a) (← convExprId ea b))
+      | .unary t a      => pure (.unary t (← convExprId ea a))
+      | .clamp a b c    => pure (.clamp (← convExprId ea a) (← convExprId ea b) (← convExprId ea c))
+      | .select a b c   => pure (.select (← convExprId ea a) (← convExprId ea b) (← convExprId ea c))
+      | .arraySet a b c => pure (.arraySet (← convExprId ea a) (← convExprId ea b) (← convExprId ea c))
+      | .index a b      => pure (.index (← convExprId ea a) (← convExprId ea b))
+      | .inputRef i     => pure (.inputRef i)
+      | .paramRef i     => pure (.paramRef i)
+      | .nestedOut i o  => pure (.nestedOut i o)
+      | .sampleRate     => pure .sampleRate
+      | .sampleIndex    => pure .sampleIndex
+      | .zeros _        => throw ⟨"toResolved: zeros survived arrayLower"⟩
+      | .typeParamRef _ => throw ⟨"toResolved: typeParamRef survived specialize"⟩
+      | .bindingRef _   => throw ⟨"toResolved: bindingRef survived arrayLower"⟩
+      | .letIn ..       => throw ⟨"toResolved: let survived arrayLower"⟩
+      | .fold ..        => throw ⟨"toResolved: fold survived arrayLower"⟩
+      | .scan ..        => throw ⟨"toResolved: scan survived arrayLower"⟩
+      | .generate ..    => throw ⟨"toResolved: generate survived arrayLower"⟩
+      | .iterate ..     => throw ⟨"toResolved: iterate survived arrayLower"⟩
+      | .chain ..       => throw ⟨"toResolved: chain survived arrayLower"⟩
+      | .map2 ..        => throw ⟨"toResolved: map2 survived arrayLower"⟩
+      | .zipWith ..     => throw ⟨"toResolved: zipWith survived arrayLower"⟩
+      | .tag ..         => throw ⟨"toResolved: tag survived sumLower"⟩
+      | .match_ ..      => throw ⟨"toResolved: match survived sumLower"⟩
+    let st ← get
+    let (cid, ca') := (intern cn).run st.1
+    set (ca', st.2.insert eid.idx cid)
+    return cid
+
+/-- Convert the reachable `EProgram` subgraph rooted at `eIdx` into a
+    `CoreProgram`, remapping every leaf id into the `CoreArena` and
+    following instance-referenced registry entries recursively (the
+    id-form `Core.check`). Port types resolve against the identity pools
+    (`base`). -/
+private partial def convProgram (ea : EArena) (eIdx : ProgramIdx) : ConvM CoreProgram := do
+  let some ep := ea.programs[eIdx.idx]?
+    | throw ⟨s!"toResolved: program pool index {eIdx.idx} out of range (internal)"⟩
+  unless ep.typeParams.isEmpty do
+    throw ⟨s!"core check ('{ep.name}'): {ep.typeParams.size} typeParam decl(s) (specialize) survived strata"⟩
+  let decls : Array CoreBodyDecl ← ep.decls.mapM fun d => do
+    match d with
+    | .param name value? => pure (.param name value?)
+    | .inst name typeKey tArgs inputs =>
+      let inputs' ← inputs.mapM fun i => do
+        pure ({ port := i.port, value := ← convExprId ea.exprs i.value } : CoreInstanceInput)
+      pure (.inst name typeKey tArgs inputs')
+    | .prog name _ => pure (.progDecl name)
+  let assigns : Array CoreOutputAssign ← ep.assigns.mapM fun a => do
+    pure { target := a.target, expr := ← convExprId ea.exprs a.expr }
+  let inputs : Array CoreInputDecl ← ep.inputs.mapM fun i => do
+    pure { name := i.name, type? := Core.resolveOptPortType ea.base i.type?,
+           default? := ← i.default?.mapM (convExprId ea.exprs) }
+  let outputs : Array CoreOutputDecl := ep.outputs.map fun o =>
+    { name := o.name, type? := Core.resolveOptPortType ea.base o.type? }
+  -- Registry: follow only instance-referenced entries (evaluator-reachable),
+  -- recursively — matching `Core.check`'s first-use dedup and tree duplication.
+  let mut registry : Array (String × CoreProgram) := #[]
+  for d in ep.decls do
+    if let .inst name typeKey _ _ := d then
+      unless registry.any (·.1 == typeKey) do
+        let some tIdx := ep.registryGet? typeKey
+          | throw ⟨s!"core check ('{ep.name}'): instance '{name}' typeKey '{typeKey}' missing from registry"⟩
+        registry := registry.push (typeKey, ← convProgram ea tIdx)
+  return .mk ep.name inputs outputs decls assigns registry
+
+/-- The Phase B strata-exit reify: post-strata `EArena` → `(CoreArena ×
+    CoreProgram)`, sharing preserved. (The elaborated-tree downcast — for
+    session roots that never ran the passes — is `checkResolvedArena` in
+    `CoreArena.lean`, reachable-only so it doesn't intern the whole pool.) -/
+def EArena.toResolved (ea : EArena) (root : ProgramIdx) :
+    Except Error (CoreArena × CoreProgram) := do
+  let (core, (ca, _)) ← (convProgram ea root).run ({}, {})
+  return (ca, core)
+
+-- ─────────────────────────────────────────────────────────────
 -- mapExprId — id-form structural walker (mirrors Recursion.mapExpr)
 -- ─────────────────────────────────────────────────────────────
 

@@ -203,7 +203,7 @@ def runStrataChecked (typeArgs : Array (String × Lean.JsonNumber))
       { upto := Tropical.Ir.Strata.portedPasses,
         inlineNested := sessionInlineNested, typeArgs } arena rootIdx).mapError (·.message)
   if sessionInlineNested then
-    if let .error e := Tropical.Ir.Core.check arena rootIdx then
+    if let .error e := Tropical.Ir.checkResolvedArena arena rootIdx then
       throw s!"post-strata Core check failed (port bug): {e}"
   pure (arena, rootIdx)
 
@@ -530,9 +530,9 @@ def syncCompile (env : Env) : EngineM Unit := do
         (some fun n => (tbl.find? (·.1 == n)).map (·.2)) with
     | .error e => internalError e.message
     | .ok r => pure r
-  let rootCore ← match Tropical.Ir.Core.check arena' rootIdx with
+  let (rootArena, rootCore) ← match Tropical.Ir.checkResolvedArena arena' rootIdx with
     | .error e => internalError s!"syncCompile: post-elaboration Core check failed (engine bug): {e}"
-    | .ok core => pure core
+    | .ok r => pure r
 
   -- Session instances in registry order, each materialized as the Core
   -- form the root's registry linked (first-instance-wins per stored
@@ -551,7 +551,8 @@ def syncCompile (env : Env) : EngineM Unit := do
       graphOutputs := st.graphOutputs
       params := st.params
       alloc
-      root := rootCore } with
+      root := rootCore
+      arena := rootArena } with
     | .error msg => internalError msg
     | .ok p => pure p
   -- Lean owns codegen: emit LLVM IR from the in-memory plan and hand it to
@@ -599,9 +600,9 @@ def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
       (some fun n => (tbl.find? (·.1 == n)).map (·.2)) with
     | .error e => internalError e.message
     | .ok r => pure r
-  let rootCore ← match Tropical.Ir.Core.check arena' rootIdx with
+  let (rootArena, rootCore) ← match Tropical.Ir.checkResolvedArena arena' rootIdx with
     | .error e => internalError s!"compileMirrorPlan: post-elaboration Core check failed (engine bug): {e}"
-    | .ok core => pure core
+    | .ok r => pure r
   let mut coreInstances : Array (String × Tropical.Ir.Core.CoreProgram) := #[]
   for (n, i) in st.instances do
     let some pname := storedProgName i
@@ -616,6 +617,7 @@ def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
       params := st.params
       alloc
       root := rootCore
+      arena := rootArena
       mode } with
     | .error msg => internalError msg
     | .ok p => pure p
@@ -655,9 +657,9 @@ def compileMirrorFlatPlanViaArrow (env : Env) (mode : Tropical.Plan.CompilationM
   let (arena', rootIdx) ← match sessionToResolvedRoot st.arena lowerInstances wiresPost tbl with
     | .error e => internalError e
     | .ok r => pure r
-  let rootCore ← match Tropical.Ir.Core.check arena' rootIdx with
+  let (rootArena, rootCore) ← match Tropical.Ir.checkResolvedArena arena' rootIdx with
     | .error e => internalError s!"compileMirrorPlanViaArrow: post-construction Core check failed: {e}"
-    | .ok core => pure core
+    | .ok r => pure r
   let mut coreInstances : Array (String × Tropical.Ir.Core.CoreProgram) := #[]
   for (n, i) in st.instances do
     let some pname := storedProgName i
@@ -672,6 +674,7 @@ def compileMirrorFlatPlanViaArrow (env : Env) (mode : Tropical.Plan.CompilationM
       params := st.params
       alloc
       root := rootCore
+      arena := rootArena
       mode } with
   | .error msg => internalError msg
   | .ok p => pure p

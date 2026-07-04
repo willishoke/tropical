@@ -479,8 +479,7 @@ private def compileArrowCarrier (arena : Arena) (resolved : Array (String × Pro
     (name : String) (clkE : Tropical.EmitArrow.Clock) :
     Except String Tropical.Plan.FlatPlan := do
   let (arena', idx) ← Tropical.EmitArrow.buildClockCarrier name clkE arena resolved
-  let (arena'', root') ← (Tropical.Ir.Strata.run { upto := 5 } arena' idx).mapError (·.message)
-  let core ← Tropical.Ir.Core.check arena'' root'
+  let (coreArena, core) ← (Tropical.Ir.Strata.runResolved { upto := 5 } arena' idx).mapError (·.message)
   -- The carrier is the synthetic session root, wired straight to the dac at its
   -- `out` port (`__root__.out`). No session wires, no params, no inputs.
   let input : Tropical.Compile.SessionInput := {
@@ -490,6 +489,7 @@ private def compileArrowCarrier (arena : Arena) (resolved : Array (String × Pro
     params := #[]
     alloc := {}
     root := core
+    arena := coreArena
     mode := .fused }
   Tropical.Compile.compileSession input
 
@@ -509,10 +509,9 @@ private def compileArrowCarrier (arena : Arena) (resolved : Array (String × Pro
     (all ported passes, inline) → Core.check → compileResolved → wire JSON. The
     canonical `tropical_plan_5`-per-instance bytes a program emits today. -/
 private def emitResolvedWire (arena : Arena) (idx : ProgramIdx) : Except String String := do
-  let (arena', root') ← (Tropical.Ir.Strata.run
+  let (coreArena, core) ← (Tropical.Ir.Strata.runResolved
       { upto := Tropical.Ir.Strata.portedPasses, inlineNested := true } arena idx).mapError (·.message)
-  let core ← Tropical.Ir.Core.check arena' root'
-  let plan ← Tropical.Ir.CompileResolved.compileResolved core
+  let plan ← Tropical.Ir.CompileResolved.compileResolved core coreArena
   let wire ← plan.toWire
   pure wire.compress
 
@@ -603,7 +602,7 @@ private def diagStrataCompile (arena : Arena) (idx : ProgramIdx) :
   let (arena'', root') ← (Tropical.Ir.Strata.run { upto := 5 } arena idx).mapError (·.message)
   let some prog := arena''.program? root'
     | .error "diagonal: post-strata root program index out of range"
-  let core ← Tropical.Ir.Core.check arena'' root'
+  let (coreArena, core) ← Tropical.Ir.checkResolvedArena arena'' root'
   let input : Tropical.Compile.SessionInput := {
     instances := #[(Tropical.Compile.rootInstancePath, core)]
     wiresPost := #[]
@@ -611,6 +610,7 @@ private def diagStrataCompile (arena : Arena) (idx : ProgramIdx) :
     params := #[]
     alloc := {}
     root := core
+    arena := coreArena
     mode := .fused }
   let plan ← Tropical.Compile.compileSession input
   pure (prog.binderCount, prog.decls.size, plan)
@@ -838,8 +838,7 @@ private def compileTapCarrier (arena : Arena) (resolved : Array (String × Progr
     Except String Tropical.Plan.FlatPlan := do
   let (arena', idx) ← Tropical.EmitArrow.buildTapCarrier name
     Tropical.EmitArrow.litPitch12kVoice taps arena resolved
-  let (arena'', root') ← (Tropical.Ir.Strata.run { upto := 5 } arena' idx).mapError (·.message)
-  let core ← Tropical.Ir.Core.check arena'' root'
+  let (coreArena, core) ← (Tropical.Ir.Strata.runResolved { upto := 5 } arena' idx).mapError (·.message)
   let input : Tropical.Compile.SessionInput := {
     instances := #[(Tropical.Compile.rootInstancePath, core)]
     wiresPost := #[]
@@ -847,6 +846,7 @@ private def compileTapCarrier (arena : Arena) (resolved : Array (String × Progr
     params := #[]
     alloc := {}
     root := core
+    arena := coreArena
     mode := .fused }
   Tropical.Compile.compileSession input
 
@@ -916,8 +916,7 @@ private def runConvolutionOracle (arena : Arena)
 
 private def finishCarrier (arena : Arena) (idx : ProgramIdx) :
     Except String Tropical.Plan.FlatPlan := do
-  let (arena'', root') ← (Tropical.Ir.Strata.run { upto := 5 } arena idx).mapError (·.message)
-  let core ← Tropical.Ir.Core.check arena'' root'
+  let (coreArena, core) ← (Tropical.Ir.Strata.runResolved { upto := 5 } arena idx).mapError (·.message)
   let input : Tropical.Compile.SessionInput := {
     instances := #[(Tropical.Compile.rootInstancePath, core)]
     wiresPost := #[]
@@ -925,6 +924,7 @@ private def finishCarrier (arena : Arena) (idx : ProgramIdx) :
     params := #[]
     alloc := {}
     root := core
+    arena := coreArena
     mode := .fused }
   Tropical.Compile.compileSession input
 

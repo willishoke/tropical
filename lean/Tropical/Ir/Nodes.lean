@@ -90,6 +90,15 @@ structure TypeParamPoolIdx where
   idx : Nat
 deriving BEq, Repr, Inhabited
 
+/-- Dense index into a hash-consed expression arena (`CoreArena` /
+    `ExprArena`). Defined here (not in `CoreArena`) so `Core`'s
+    post-strata leaves can be `ExprId`s without importing the arena
+    modules that in turn import `Core` (the circular dependency the
+    Phase B DAG-to-emit reshape would otherwise hit). -/
+structure ExprId where
+  idx : Nat
+deriving BEq, Hashable, Repr, Inhabited
+
 -- ─────────────────────────────────────────────────────────────
 -- Type defs (pool entries)
 -- ─────────────────────────────────────────────────────────────

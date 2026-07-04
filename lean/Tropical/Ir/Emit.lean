@@ -508,10 +508,13 @@ private def instInputs : CoreBodyDecl → Array CoreInstanceInput
   | .inst _ _ _ i => i
   | _ => #[]
 
-def emitProgram (outputExprs : Array CoreExpr)
+def emitProgram (outputExprs : Array ExprId)
     (outputPortScalarCounts : Array Nat)
     (nested : NestedContext) : EmitM FlatProgram := do
   let mut outputTargets : Array Nat := #[]
+  -- Port-default fallback (an unwired child port with no declared default):
+  -- one shared `0` id in the arena. Interned once; equal to any existing `.num 0`.
+  let zeroId ← internExpr (.num (0 : Nat))
 
   -- ── Fractal: per-child pre-input blocks ──
   let mut perChildPreInput : Array (Array NInstr) := #[]
@@ -531,13 +534,13 @@ def emitProgram (outputExprs : Array CoreExpr)
       let portDecl := ports[i]!
       let wireExpr := match lookup wiredByPort i with
         | some v => v
-        | none => portDecl.default?.getD (.num (0 : Nat))
+        | none => portDecl.default?.getD zeroId
       let scalarSlot := childScalarMap.bind (lookup · i)
       let arrayInfo := childArrayMap.bind (lookup · i)
       match scalarSlot with
       | some slot =>
         let portT := inputDeclScalarType portDecl.type?
-        let r ← compileNode (← internExpr wireExpr) (some portT)
+        let r ← compileNode wireExpr (some portT)
         let valOp ← match r with
           | .array op _ rt =>
             let dst ← allocReg
@@ -548,7 +551,7 @@ def emitProgram (outputExprs : Array CoreExpr)
       | none =>
         match arrayInfo with
         | some info =>
-          let r ← compileNode (← internExpr wireExpr) (some .float)
+          let r ← compileNode wireExpr (some .float)
           match r with
           | .scalar .. =>
             throw s!"emit_resolved: array-typed child input port at idx={i} of '{instName decl}' received scalar-shaped wire expression; expected array of size {info.size}"
@@ -570,7 +573,7 @@ def emitProgram (outputExprs : Array CoreExpr)
   for portI in [0:outputExprs.size] do
     let expr := outputExprs[portI]!
     let declaredCount := outputPortScalarCounts[portI]!
-    let r ← compileNode (← internExpr expr) (some .float)
+    let r ← compileNode expr (some .float)
     if declaredCount == 1 then
       let dst ← allocReg
       match r with
@@ -604,12 +607,13 @@ def emitProgram (outputExprs : Array CoreExpr)
     CF-only has no per-sample state, so there are no register backing
     slots to seed. -/
 def emitResolvedProgram
-    (outputExprs : Array CoreExpr)
+    (outputExprs : Array ExprId)
     (outputPortScalarCounts : Array Nat)
     (inputPortTypes : Array ScalarType)
     (slots : EmitSlots)
+    (arena : CoreArena)
     (nested : NestedContext) : Except String FlatProgram := do
-  let st : EmitSt := { slots, inputPortTypes }
+  let st : EmitSt := { slots, inputPortTypes, arena }
   let (prog, _) ← (emitProgram outputExprs outputPortScalarCounts nested).run st
   return prog
 
