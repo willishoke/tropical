@@ -235,10 +235,12 @@ final class PatchModel: ObservableObject {
                 try await engine.call("start_audio")
                 audioOn = true
                 setStatus("playing", isError: false)
+                startTelemetry()
             } else {
                 try await engine.call("stop_audio")
                 audioOn = false
                 setStatus("stopped", isError: false)
+                stopTelemetry()
             }
         } catch {
             setStatus(error.localizedDescription, isError: true)
@@ -247,11 +249,63 @@ final class PatchModel: ObservableObject {
 
     /// The engine (audio + DAC) is a separate process that OUTLIVES a window
     /// reload — a fresh surface must not assume audio is off. Ask the engine
-    /// its real state and adopt it.
+    /// its real state and adopt it, otherwise the transport shows "start"
+    /// while sound keeps playing with no way to stop it.
     func syncAudioState() async {
         guard let st = try? await engine.call("audio_status"),
               st["is_running"]?.boolValue == true, !audioOn else { return }
         audioOn = true
+        startTelemetry()
+    }
+
+    // ── Live audio-load telemetry ─────────────────────────────────────────
+    // Compile latency is one failure mode; RUNTIME cost is the other, and
+    // it's the one that's silent. A heavy kernel (a modal reverb: ~200 modes
+    // × transcendentals per sample) can blow the ~11.6 ms buffer deadline
+    // (512 frames @ 44.1k), and RtAudio responds to a missed deadline by
+    // emitting a zero buffer → "no sound" with a perfectly healthy compile.
+    // The DAC already counts it (`audio_status`); poll it so the meter reads
+    // "load 130% · ⚠ xruns" instead of leaving you guessing.
+    private static let bufferMs = (512.0 / 44100.0) * 1000   // ≈ 11.61 ms deadline
+    private var telemetryTask: Task<Void, Never>?
+    private var telemetryInFlight = false
+    private var underrunBase = 0
+
+    func stopTelemetry() {
+        telemetryTask?.cancel()
+        telemetryTask = nil
+    }
+
+    func startTelemetry() {
+        stopTelemetry()
+        telemetryTask = Task { [weak self] in
+            if let self {
+                let st = try? await self.engine.call("audio_status")
+                self.underrunBase = Int(st?["stats"]?["underrunCount"]?.doubleValue ?? 0)
+            }
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(750))
+                guard !Task.isCancelled else { return }
+                await self?.pollTelemetry()
+            }
+        }
+    }
+
+    private func pollTelemetry() async {
+        // Single-in-flight: the control thread is shared with compiles and
+        // knobs, so if a poll is stuck behind a long op we must NOT keep
+        // enqueuing more — that turns a slow compile into a pile-up.
+        if !audioOn || pushInFlight || telemetryInFlight || statusIsError { return }
+        telemetryInFlight = true
+        defer { telemetryInFlight = false }
+        guard let st = try? await engine.call("audio_status"),
+              let stats = st["stats"], stats != .null,
+              let maxMs = stats["maxCallbackMs"]?.doubleValue else { return }
+        let pct = Int((maxMs / Self.bufferMs * 100).rounded())
+        let xruns = max(0, Int(stats["underrunCount"]?.doubleValue ?? 0) - underrunBase)
+        let over = pct > 90 || xruns > 0
+        let xrunText = xruns > 0 ? " · ⚠ \(xruns) xrun\(xruns > 1 ? "s" : "") — dropout" : ""
+        setStatus("playing · load \(pct)%\(xrunText)", isError: over)
     }
 }
 
