@@ -1,35 +1,26 @@
 import Tropical.Ir.Nodes
 
 /-!
-# Core — the post-strata sub-IR as a type (Phase 5 stage 6)
+# Core — the post-strata program shape (Phase 5 stage 6)
 
 "The smallest sub-IR sufficient for any per-sample evaluator," made a
-type instead of prose. A `CoreExpr` is an `Expr` with the strata-dropped
-constructors gone by construction:
-
-  - no `typeParamRef`           (monomorphic — specialize)
-  - no `tag` / `match`          (sum-free — sumLower)
-  - no `fold`/`scan`/`generate`/`iterate`/`chain`/`map2`/`zipWith`/
-    `letIn`/`bindingRef`/`zeros` (combinator-free — arrayLower)
+type instead of prose. `CoreProgram` is the post-strata program: scalar,
+monomorphic, acyclic, combinator-free. Its **expression leaves are
+`ExprId`s** into a shared `CoreArena` (Phase B) — the tree twin `CoreExpr`
+is gone; there is one post-strata expression representation, the hash-consed
+DAG.
 
 Nesting is NOT dropped: the fractal session path keeps InstanceDecls
 as kernel boundaries (the flat path simply has none). Lifted
 ProgramDecls and never-instantiated registry entries are inert type
-bindings no evaluator reaches — they pass through as names, unchecked.
-`check` follows exactly the evaluator-reachable graph: body exprs,
-then recursively the program behind each instance's typeKey.
+bindings no evaluator reaches — they pass through as names.
 
-`check` is the executable downcast — the formalization of the
-post-strata invariant list, run as an assertion after the full Lean
-pipeline, and the spec any later typed-boundary refactor of the passes
-is checked against. Phase 6's emit/partition consume `CoreProgram`
-with total matches — no impossible-case panics.
-
-Harness scope note: on the differential `strata-file` nested path,
-instance targets are raw-elaborated (production strata-processes each
-instance type at registration), so the harness asserts `check` on the
-inline path only; the production seam asserts it per registered
-program.
+The executable downcasts that produce a `CoreProgram` — `EArena.toResolved`
+(strata exit) and `checkResolvedArena` (elaborated-tree boundary) — validate
+the post-strata invariant list (rejecting any strata-dropped constructor that
+survived) as they intern each leaf. They follow exactly the evaluator-reachable
+graph: body exprs, then recursively the program behind each instance's typeKey.
+The port-type resolvers below are shared by both.
 -/
 
 namespace Tropical.Ir.Core
@@ -70,23 +61,6 @@ inductive CorePortType where
       inference uses the base. -/
   | alias (base : ScalarKind)
   | array (element : CoreElem) (shape : Array CoreShapeDim)
-deriving Repr, Inhabited
-
-inductive CoreExpr where
-  | num (n : JsonNumber)
-  | bool (b : Bool)
-  | arr (items : Array CoreExpr)
-  | binary (tag : BinaryOpTag) (lhs rhs : CoreExpr)
-  | unary (tag : UnaryOpTag) (arg : CoreExpr)
-  | clamp (value lo hi : CoreExpr)
-  | select (cond then_ else_ : CoreExpr)
-  | arraySet (arr idx value : CoreExpr)
-  | index (arr idx : CoreExpr)
-  | inputRef (idx : InputIdx)
-  | paramRef (idx : ParamIdx)
-  | nestedOut (instance_ : InstanceIdx) (output : OutputIdx)
-  | sampleRate
-  | sampleIndex
 deriving Repr, Inhabited
 
 structure CoreInstanceInput where

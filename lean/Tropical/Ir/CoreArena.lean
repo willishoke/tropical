@@ -2,33 +2,37 @@ import Std.Data.HashMap
 import Tropical.Ir.Core
 
 /-!
-# CoreArena — hash-consed (DAG) form of the post-strata `CoreExpr`
+# CoreArena — hash-consed (DAG) form of the post-strata expression IR
 
-The native-DAG representation for issue #190 (the first boundary of the
-strangler migration). A `CNode` is a `CoreExpr` node whose children are
-`ExprId`s into an arena instead of inlined subtrees — so a node is **flat**
-(O(1) to hash and compare) and equal subtrees are one arena entry referenced by
-many ids. Interning at construction (`intern`) makes duplication impossible: the
-bloat a tree representation forces (the modulated clock copied into every
-oscillator partial) collapses to a single node.
+The native-DAG representation for issue #190. A `CNode` is a post-strata
+expression node whose children are `ExprId`s into an arena instead of inlined
+subtrees — so a node is **flat** (O(1) to hash and compare) and equal subtrees
+are one arena entry referenced by many ids. Interning at construction
+(`intern`) makes duplication impossible: the bloat a tree representation forces
+(the modulated clock copied into every oscillator partial) collapses to a
+single node.
+
+This is now the ONLY post-strata expression representation — the tree twin
+`CoreExpr` is gone (Phase B). Both the strata exit (`EArena.toResolved`) and the
+elaborated-tree downcast (`checkResolvedArena`, below) intern straight into a
+`CoreArena`; `Core`'s program leaves are `ExprId`s.
 
 Soundness: interning merges two nodes iff they have the same constructor and the
 same child ids. Every tropical op is pure and deterministic, so a merge never
 changes a computed value — the rendered audio is identical (the goldens hash the
 audio, not the plan, so register relabeling from a DAG walk is free).
 
-This boundary lives just before emit for now; later strangler steps move it
-earlier (before `Core.check`, before `inlineInstances`) until the elaborator
-constructs interned nodes directly and the tree `Expr` is gone.
+The remaining tree twin `Expr` (the elaborator's output, still consumed by the
+strata passes and `materialize`) is the next strangler target — deleting it
+means the elaborator constructs interned nodes directly.
 -/
 
 namespace Tropical.Ir
 
 open Lean (JsonNumber)
-open Tropical.Ir.Core (CoreExpr)
 
 /-- A post-strata expression node with children referenced by `ExprId`.
-    Mirrors `CoreExpr`'s 14 constructors; flat (no inlined subtrees). -/
+    The 14-constructor post-strata subset; flat (no inlined subtrees). -/
 inductive CNode where
   | num (n : JsonNumber)
   | bool (b : Bool)
@@ -88,24 +92,6 @@ def intern (n : CNode) : ArenaM ExprId := do
 /-- Dereference an id to its node. -/
 def CoreArena.deref (a : CoreArena) (id : ExprId) : Option CNode :=
   a.nodes[id.idx]?
-
-/-- Lower a tree `CoreExpr` into the arena, interning bottom-up. Each occurrence
-    is visited once (O(N_tree)); equal subtrees share one id (O(N_unique) nodes). -/
-partial def toArena : CoreExpr → ArenaM ExprId
-  | .num n          => intern (.num n)
-  | .bool b         => intern (.bool b)
-  | .arr items      => do intern (.arr (← items.mapM toArena))
-  | .binary t a b   => do intern (.binary t (← toArena a) (← toArena b))
-  | .unary t a      => do intern (.unary t (← toArena a))
-  | .clamp a b c    => do intern (.clamp (← toArena a) (← toArena b) (← toArena c))
-  | .select a b c   => do intern (.select (← toArena a) (← toArena b) (← toArena c))
-  | .arraySet a b c => do intern (.arraySet (← toArena a) (← toArena b) (← toArena c))
-  | .index a b      => do intern (.index (← toArena a) (← toArena b))
-  | .inputRef i     => intern (.inputRef i)
-  | .paramRef i     => intern (.paramRef i)
-  | .nestedOut i o  => intern (.nestedOut i o)
-  | .sampleRate     => intern .sampleRate
-  | .sampleIndex    => intern .sampleIndex
 
 -- ─────────────────────────────────────────────────────────────
 -- checkResolvedArena — the tree downcast (reachable-only), interning
@@ -200,24 +186,5 @@ def checkResolvedArena (arena : Arena) (rootIdx : ProgramIdx) :
   let (core, ca) ← (checkProgram arena rootIdx).run {}
   return (ca, core)
 
-/-- Rebuild a tree `CoreExpr` from an id (round-trip witness for tests). -/
-partial def CoreArena.toCore (a : CoreArena) (id : ExprId) : CoreExpr :=
-  match a.deref id with
-  | none => .num 0  -- unreachable for well-formed ids
-  | some n => match n with
-    | .num x          => .num x
-    | .bool b         => .bool b
-    | .arr items      => .arr (items.map a.toCore)
-    | .binary t l r   => .binary t (a.toCore l) (a.toCore r)
-    | .unary t x      => .unary t (a.toCore x)
-    | .clamp x y z    => .clamp (a.toCore x) (a.toCore y) (a.toCore z)
-    | .select x y z   => .select (a.toCore x) (a.toCore y) (a.toCore z)
-    | .arraySet x y z => .arraySet (a.toCore x) (a.toCore y) (a.toCore z)
-    | .index x y      => .index (a.toCore x) (a.toCore y)
-    | .inputRef i     => .inputRef i
-    | .paramRef i     => .paramRef i
-    | .nestedOut i o  => .nestedOut i o
-    | .sampleRate     => .sampleRate
-    | .sampleIndex    => .sampleIndex
 
 end Tropical.Ir

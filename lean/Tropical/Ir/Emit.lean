@@ -5,7 +5,7 @@ import Tropical.Ir.CoreArena
 import Tropical.Plan
 
 /-!
-# Emit — `CoreExpr → FlatProgram` (Phase 6 stage 6b)
+# Emit — `ExprId → FlatProgram` (Phase 6 stage 6b)
 
 Line-faithful port of `compiler/ir/emit_resolved.ts`'s `Emitter` over
 the Core sub-IR (total matches — the strata-dropped constructors are
@@ -192,12 +192,11 @@ deriving Inhabited
 
 abbrev EmitM := StateT EmitSt (Except String)
 
-/-- Intern a tree `CoreExpr` into the emit arena, returning its (shared) id. -/
-def internExpr (e : Tropical.Ir.Core.CoreExpr) : EmitM ExprId := do
-  let st ← get
-  let (id, arena) := (toArena e).run st.arena
-  set { st with arena := arena }
-  pure id
+/-- Intern a flat `CNode` into the emit arena, returning its (shared) id. The
+    post-strata leaves arrive pre-interned (Phase B); this covers only the
+    emit's own synthesized nodes (the port-default `0`). -/
+def internNode (n : CNode) : EmitM ExprId :=
+  modifyGet fun st => let (id, a) := (intern n).run st.arena; (id, { st with arena := a })
 
 /-- The TS operand `kind` strings (error-message rendering). -/
 private def operandKind : NOperand → String
@@ -514,7 +513,7 @@ def emitProgram (outputExprs : Array ExprId)
   let mut outputTargets : Array Nat := #[]
   -- Port-default fallback (an unwired child port with no declared default):
   -- one shared `0` id in the arena. Interned once; equal to any existing `.num 0`.
-  let zeroId ← internExpr (.num (0 : Nat))
+  let zeroId ← internNode (.num (0 : Nat))
 
   -- ── Fractal: per-child pre-input blocks ──
   let mut perChildPreInput : Array (Array NInstr) := #[]
