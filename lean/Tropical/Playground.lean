@@ -236,35 +236,28 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     | some i => (.knob i, #[])
     | none => (.mix #[], #[])   -- a knob missing from the table (unreachable): silence
   | "source" =>
-    -- The `freq` inlet accepts either a KNOB (sets pitch, reads its `<w>.value`
-    -- slot) or an AUDIO node (an oscillator → through-zero PM). We tell them apart
-    -- by whether the source has a `.value` param slot: only a knob does.
-    let freqSrc := (portSources inObj "freq")[0]?
-    let freqSrcIsKnob := match freqSrc with
-      | some w => (pidx s!"{w}.value").isSome
-      | none => false
-    let pitchE := match freqSrc with
-      | some w => if freqSrcIsKnob then pref pidx s!"{w}.value" (jExpr params "freq" (lit 220))
-                  else p "freq" (jExpr params "freq" (lit 220))
+    -- a Knob wired into `freq` shadows the baked freq slot: read the WIRED knob's
+    -- `<id>.value` slot instead.
+    let pitchE := match (portSources inObj "freq")[0]? with
+      | some w => pref pidx s!"{w}.value" (jExpr params "freq" (lit 220))
       | none => p "freq" (jExpr params "freq" (lit 220))
     let morphE := p "morph" (jExpr params "morph" (lit 0))
     -- the anchor: (phase slot, compile-time freq). Present only when the source's
     -- own freq is a live slot; the compile-time freq is the reference the warped
     -- copies' phase correction is measured from.
     let anchor := (pidx s!"{id}.freq#phase").map fun i => ((.paramRef ⟨i⟩ : Sig), jExpr params "freq" (lit 220))
-    match freqSrc with
-    | some w =>
-      if freqSrcIsKnob then
-        (.source (voiceOf pitchE morphE anchor) clk, #[])
-      else
-        -- osc → osc: through-zero PHASE modulation. The modulator `w`'s signal adds
-        -- `depth·mod` (cycles) to this carrier's phase port — no clock warp, so the
-        -- carrier pitch stays put. The carrier's phase port must be wired, so force
-        -- an anchor (reusing the live `#phase` slot if present, else a flat base).
-        let pmAnchor := anchor.getD ((lit 0 : Sig), jExpr params "freq" (lit 220))
-        -- A fixed musical PM index (0.3 cycles peak ≈ 1.9 rad). The GUI has no PM
-        -- depth knob yet; a fixed depth makes the patch AUDIBLE on connect.
-        (.pm w (voiceOf pitchE morphE (some pmAnchor)) clk (lit 3 1), #[])
+    -- dedicated `pm` inlet: an AUDIO node wired here through-zero phase-modulates
+    -- this carrier — `depth·mod` (cycles) added to the phase port, NOT the clock, so
+    -- the carrier pitch stays put. `freq` is untouched, so the carrier's own freq
+    -- knob (and a Knob wired into it) stay live under modulation.
+    match (portSources inObj "pm")[0]? with
+    | some modId =>
+      -- the phase port must be wired for PM to land, so force an anchor (reusing the
+      -- live `#phase` slot if present, else a flat base).
+      let pmAnchor := anchor.getD ((lit 0 : Sig), jExpr params "freq" (lit 220))
+      -- A fixed musical PM index (0.3 cycles peak ≈ 1.9 rad). The GUI has no PM
+      -- depth knob yet; a fixed depth makes the patch AUDIBLE on connect.
+      (.pm modId (voiceOf pitchE morphE (some pmAnchor)) clk (lit 3 1), #[])
     | none =>
       (.source (voiceOf pitchE morphE anchor) clk, #[])
   | "pluck" =>
