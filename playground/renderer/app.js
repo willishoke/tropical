@@ -12,7 +12,10 @@ const KINDS = {
     title: 'Osc', accent: '#6cc7ff', summing: false,
     inlets: ['freq'], outlets: ['out'], sels: [],
     knobs: [
-      { name: 'freq', min: 20, max: 2000, def: 220, log: true, unit: 'Hz', anchor: true },
+      // spans sub-Hz LFO → audio (log): dial it below ~1 Hz and it's a slow ramp
+      // you can patch into a Reson `addr` to scrub-trigger the resonance. A phasor
+      // is closed-form at any rate, so there's no low-frequency floor in the engine.
+      { name: 'freq', min: 0.02, max: 2000, def: 220, log: true, unit: 'Hz', anchor: true },
       { name: 'morph', min: 0, max: 1, def: 0, unit: '', glide: true },
     ],
   },
@@ -71,6 +74,57 @@ const KINDS = {
     title: 'Ring ⊗', accent: '#d0a0e0', summing: true,
     inlets: ['in'], outlets: ['out'], sels: [], knobs: [],
   },
+  // ── MODAL ISLAND ─────────────────────────────────────────────────────────
+  // The second arena: pole / exp-poly banks that compose by the residue calculus
+  // at BUILD time and realize to a Sig at their boundary. A modal OUTLET carries
+  // poles, not audio — it may feed a Sig inlet (realized at the seam by
+  // `lowerInput`) or another modal node; a modal INLET (Reverb/Modal∪) accepts
+  // ONLY a modal node (a Sig source there is ill-typed — see `wantsModal`).
+  resonator: {
+    // A struck resonator: 6 harmonics of `freq` decaying at rate `decay`. A modal
+    // SOURCE struck at τ=0 — it rings then decays, so scrub the master clock to
+    // re-strike. Poles stay LIVE (the residue is emitted symbolically). The `addr`
+    // inlet is TEMPORAL, not spectral: patch a CF signal (LFO/env/osc) and its
+    // value BECOMES the bank's time-address (seconds into the impulse response) —
+    // an ABSOLUTE warp, so the resonance TRIGGERS as the signal crosses zero and
+    // scrubs/pitches with its slope. Unlike a downstream sflange (a ±δ vibrato
+    // around the master clock), this relocates the strike to the signal. Unpatched
+    // ⇒ reads the master clock as before.
+    title: 'Reson', accent: '#4fd6c4', summing: false, modal: true,
+    inlets: ['addr'], outlets: ['out'], sels: [],
+    knobs: [
+      { name: 'freq', min: 20, max: 2000, def: 220, log: true, unit: 'Hz' },
+      { name: 'decay', min: 0.5, max: 50, def: 4, log: true, unit: '' },
+    ],
+  },
+  reverb: {
+    // A room bank (32 log-spaced modes, 60–6000 Hz) composed with its MODAL input
+    // by the residue calculus (voice ⋙ reverb). Modal in → modal out; only the
+    // room damping `rt60` is live. Feeds a Sig inlet (realized) or Modal∪.
+    title: 'Reverb', accent: '#3fb8b0', summing: false, modal: true,
+    inlets: ['in'], outlets: ['out'], sels: [],
+    // `dir` rotates the composed tail's poles in the s-plane (a live U(1) morph):
+    // 0 = forward decay, π = reverse (pre-verb), π/2 = decay↔frequency swap. Any
+    // continuous path forward→reverse crosses an undamped-ring axis; `window` nulls
+    // each mode AT its crossing (σ²/(σ²+w²)) — 0 = bare rotation (rings through the
+    // horizon), open = the click-free morph.
+    knobs: [
+      { name: 'rt60', min: 0.2, max: 12, def: 2, log: true, unit: 'sec' },
+      // dir crossfades the tail's direction: 0 = forward, 1 = reverse (pre-verb).
+      // Keeps σ/ω fixed so it stays audible across the range (heard on re-strike/scrub).
+      { name: 'dir', min: 0, max: 1, def: 0, unit: '' },
+      // decay SWAY: the room breathes — σ modulated on the envelope clock only, so
+      // the tail's decay time undulates while pitch holds. Continuous, stateless.
+      { name: 'sway', min: 0, max: 0.9, def: 0, unit: '' },
+      { name: 'rate', min: 0.05, max: 8, def: 0.3, log: true, unit: 'Hz' },
+    ],
+  },
+  modalmix: {
+    // Pole UNION (∪) of its modal inputs — the modal twin of Mix's sum. Many modal
+    // in → one modal out; no knobs (structural).
+    title: 'Modal ∪', accent: '#6fe0d0', summing: true, modal: true,
+    inlets: ['in'], outlets: ['out'], sels: [], knobs: [],
+  },
   out: {
     title: 'Out · dac', accent: '#ff8a8a', summing: true, fixed: true,
     inlets: ['in'], outlets: [], sels: [], knobs: [],
@@ -83,6 +137,15 @@ const KINDS = {
 // `voice`/`mode` selectors — change the graph topology and trigger a relower +
 // hot-swap. Control inlets accept a Knob node's output (a control value, not audio).
 const CONTROL_INLETS = new Set(['freq', 'mod'])
+
+// Inlets that carry POLES, not audio: a modal node's input (Reverb's `in`,
+// Modal∪'s `in`). They accept ONLY a modal-output node — the residue calculus
+// composes pole banks at build time (`lowerModal`), and a Sig source there would
+// throw at compile. A Sig inlet, by contrast, accepts either: a modal source
+// realizes to a Sig at the seam (`lowerInput`), but never the reverse.
+const MODAL_INLETS = new Set(['reverb:in', 'modalmix:in'])
+const wantsModal = (kind, port) => MODAL_INLETS.has(`${kind}:${port}`)
+const kindIsModal = (kind) => !!KINDS[kind].modal
 
 // ── State ──────────────────────────────────────────────────────────────────
 // node.in : { [inletPort]: [sourceNodeId, …] }
@@ -115,7 +178,16 @@ async function pushGraph() {
   if (pushInFlight) { pushAgain = true; return }
   pushInFlight = true
   try {
+    // The compile+JIT is synchronous on the engine's single control thread, so a
+    // heavy node (e.g. a modal reverb: ~10⁵ IR lines → seconds of LLVM) blocks
+    // here with no other signal. Show it, so "compiling" is distinguishable from
+    // "hung" — the acute failure mode of the live-patch loop.
+    setStatus('compiling…', false)
     await rpc('load_patch_graph', serialize())
+    // A relower transfers slots by name, so a live scrub survives it — except a
+    // COLD first compile, which seeds master.velocity at its default (1). Re-apply
+    // a non-default scrub so the slider and the running clock agree (no-op if equal).
+    if (velocity !== 1) sendParam('set_param_velocity', 'master.velocity', velocity)
     setStatus(audioOn ? 'playing' : 'compiled', false)
   } catch (e) {
     setStatus(`compile: ${e.message}`, true)
@@ -178,6 +250,7 @@ function fromNorm(t, k) {
 }
 function fmtVal(v, k) {
   if (k.unit === 's') return `${(v * 1000).toFixed(v < 0.001 ? 2 : 1)}ms`
+  if (k.unit === 'sec') return `${v.toFixed(2)}s`   // whole-second times (rt60)
   if (k.unit === 'Hz') return v >= 100 ? `${v.toFixed(0)}Hz` : `${v.toFixed(2)}Hz`
   return v.toFixed(2)
 }
@@ -224,6 +297,9 @@ function canConnect(fromId, toId, toPort) {
   if (fromIsKnob && !CONTROL_INLETS.has(toPort)) return false
   // `freq` is control-only — audio-rate into the pitch port is not FM.
   if (!fromIsKnob && toPort === 'freq') return false
+  // A modal inlet (Reverb/Modal∪) carries poles: only a modal node may drive it.
+  // (A modal outlet INTO a Sig inlet is fine — it realizes at the seam.)
+  if (wantsModal(to.kind, toPort) && !kindIsModal(from.kind)) return false
   if (reaches(fromId, toId)) return false   // would form a cycle
   return true
 }
@@ -418,14 +494,89 @@ audioBtn.onclick = async () => {
     if (!audioOn) {
       await rpc('start_audio', {})
       audioOn = true; audioBtn.textContent = '■ stop audio'; audioBtn.classList.add('on'); setStatus('playing', false)
+      startTelemetry()
     } else {
       await rpc('stop_audio', {})
       audioOn = false; audioBtn.textContent = '▶ start audio'; audioBtn.classList.remove('on'); setStatus('stopped', false)
+      stopTelemetry()
     }
   } catch (e) { setStatus(e.message, true) }
 }
 
 function setStatus(text, err) { statusEl.textContent = text; statusEl.classList.toggle('err', !!err) }
+
+// ── Live audio-load telemetry ────────────────────────────────────────────────
+// Compile latency is one failure mode; RUNTIME cost is the other, and it's the one
+// that's silent. A heavy kernel (a modal reverb: ~200 modes × transcendentals per
+// sample) can blow the ~11.6 ms buffer deadline (512 frames @ 44.1k), and RtAudio
+// responds to a missed deadline by emitting a zero buffer → "no sound" with a
+// perfectly healthy compile. The DAC already counts it (`audio_status`); poll it so
+// the meter reads "load 130% · ⚠ xruns" instead of leaving you guessing.
+const BUFFER_MS = (512 / 44100) * 1000        // ≈ 11.61 ms callback deadline
+let telemetryTimer = null
+let telemetryInFlight = false
+let underrunBase = 0
+async function pollTelemetry() {
+  // Single-in-flight: the control thread is shared with compiles and knobs, so if a
+  // poll is stuck behind a long op we must NOT keep enqueuing more — that turns a
+  // slow compile into a pile-up.
+  if (!audioOn || pushInFlight || telemetryInFlight || statusEl.classList.contains('err')) return
+  telemetryInFlight = true
+  let s
+  try { s = (await rpc('audio_status', {})).stats } catch { return } finally { telemetryInFlight = false }
+  if (!s) return
+  const pct = Math.round((s.maxCallbackMs / BUFFER_MS) * 100)
+  const xruns = Math.max(0, s.underrunCount - underrunBase)
+  const over = pct > 90 || xruns > 0
+  setStatus(`playing · load ${pct}%${xruns ? ` · ⚠ ${xruns} xrun${xruns > 1 ? 's' : ''} — dropout` : ''}`, over)
+}
+function stopTelemetry() { if (telemetryTimer) { clearInterval(telemetryTimer); telemetryTimer = null } }
+async function startTelemetry() {
+  stopTelemetry()
+  try { underrunBase = (await rpc('audio_status', {})).stats?.underrunCount ?? 0 } catch { underrunBase = 0 }
+  telemetryTimer = setInterval(pollTelemetry, 750)
+}
+
+// ── Master clock (global time-warp scrub) ─────────────────────────────────────
+// One control rides `master.velocity`, the base clock of EVERY generator, so a
+// scrub reverses / freezes / varispeeds the whole patch — voices, envelopes, and
+// the modal reverb tail — coherently. `set_param_velocity` re-bases the τ-origin
+// (`master.tau_base`) so the change is value-continuous (click-free). Closed-form:
+// nothing downstream holds history, so reverse is just f(τ) read at receding τ.
+// 1 = play · 0 = freeze · −1 = reverse · |v| > 1 = varispeed.
+let velocity = 1
+const velEl = document.getElementById('clk-vel')
+const velValEl = document.getElementById('clk-val')
+const clkBtns = {
+  rev: document.getElementById('clk-rev'),
+  freeze: document.getElementById('clk-freeze'),
+  play: document.getElementById('clk-play'),
+}
+function renderVelocity() {
+  velEl.value = String(velocity)
+  velValEl.textContent = `${velocity.toFixed(2)}×`
+  velValEl.classList.toggle('rev', velocity < 0)
+  velValEl.classList.toggle('frozen', velocity === 0)
+  clkBtns.rev.classList.toggle('on', velocity < 0)
+  clkBtns.freeze.classList.toggle('on', velocity === 0)
+  clkBtns.play.classList.toggle('on', velocity === 1)
+}
+// Coalesced like the knob senders; a pre-first-compile miss recompiles (which
+// allocates the slot) and the value re-applies from pushGraph's success path.
+function setVelocity(v) {
+  velocity = v
+  renderVelocity()
+  sendParam('set_param_velocity', 'master.velocity', v)
+}
+velEl.oninput = () => {
+  let v = parseFloat(velEl.value)
+  for (const d of [0, 1, -1, 2, -2]) if (Math.abs(v - d) < 0.06) v = d  // detents
+  setVelocity(v)
+}
+clkBtns.rev.onclick = () => setVelocity(velocity < 0 ? 1 : -1)   // toggle reverse
+clkBtns.freeze.onclick = () => setVelocity(velocity === 0 ? 1 : 0)
+clkBtns.play.onclick = () => setVelocity(1)
+renderVelocity()
 
 // ── Palette + boot ───────────────────────────────────────────────────────────
 function buildPalette() {
@@ -439,9 +590,24 @@ function buildPalette() {
   }
 }
 
+// The engine (audio + DAC) is a separate process that OUTLIVES a renderer reload —
+// so a fresh page must not assume audio is off. Ask the engine its real state and
+// adopt it, otherwise the transport shows "start" while sound keeps playing with no
+// way to stop it.
+async function syncAudioState() {
+  try {
+    const st = await rpc('audio_status', {})
+    if (st && st.is_running && !audioOn) {
+      audioOn = true
+      audioBtn.textContent = '■ stop audio'; audioBtn.classList.add('on')
+      startTelemetry()
+    }
+  } catch {}
+}
+
 window.tropical.onStatus((s) => {
   if (s.kind === 'exit') setStatus(s.text, true)
-  else if (s.kind === 'up') setStatus('engine up', false)
+  else if (s.kind === 'up') { setStatus('engine up', false); syncAudioState() }
   else if (s.kind === 'stderr') console.warn('[engine]', s.text)
 })
 
@@ -449,3 +615,4 @@ buildPalette()
 addNode('out', 1180, 360)
 addNode('source', 120, 200)
 setStatus('engine up · patch something', false)
+syncAudioState()

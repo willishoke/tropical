@@ -69,12 +69,19 @@ class Engine {
   call(method, params = {}) {
     const id = this.nextId++
     const line = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n'
+    // The compile+JIT is synchronous on the engine's one control thread, and a heavy
+    // kernel (a modal reverb) can take tens of seconds. A short timeout gives up while
+    // the engine is still grinding (the thread stays blocked, the late reply is
+    // dropped), so heavy compiles get a long leash while every other call still fails
+    // fast. NOTE: this is a diagnostic band-aid — the real fix is compiling off the
+    // control thread so this never blocks at all.
+    const timeoutMs = method === 'load_patch_graph' ? 180000 : 30000
     return new Promise((resolve, reject) => {
       this.pending.set(id, { resolve, reject })
       try { this.proc.stdin.write(line) } catch (e) { this.pending.delete(id); reject(e); return }
       setTimeout(() => {
         if (this.pending.has(id)) { this.pending.delete(id); reject(new Error(`timeout: ${method}`)) }
-      }, 30000)
+      }, timeoutMs)
     })
   }
 

@@ -54,6 +54,20 @@ body {
 .status { color: var(--muted); min-width: 220px; text-align: right; }
 .status.err { color: #f08a8a; }
 
+/* Master clock (global time-warp scrub) */
+.clock { display: flex; align-items: center; gap: 6px; padding: 3px 8px;
+  background: var(--panel-2); border: 1px solid var(--edge); border-radius: 6px; }
+.clock-label { color: var(--muted); font-size: 11px; letter-spacing: 0.03em; }
+.clk-btn { background: var(--panel); color: var(--text); border: 1px solid var(--edge);
+  border-radius: 5px; padding: 2px 7px; cursor: pointer; font: inherit; line-height: 1; }
+.clk-btn:hover { border-color: var(--jack-hot); }
+.clk-btn.on { background: #2c5a6e; border-color: #3f86a8; color: #eaf3f6; }
+#clk-vel { width: 120px; accent-color: #4fd6c4; cursor: ew-resize; }
+.clock-val { color: var(--text); font-size: 11px; min-width: 44px; text-align: right;
+  font-variant-numeric: tabular-nums; }
+.clock-val.rev { color: #4fd6c4; }        /* reversing — the moat gesture */
+.clock-val.frozen { color: var(--muted); }
+
 #canvas {
   position: relative;
   flex: 1 1 auto;
