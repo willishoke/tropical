@@ -12,15 +12,27 @@ struct ReversibleApp: App {
     }
 }
 
-/// Placeholder root until the canvas lands (commit 4). Kept buildable so
-/// every commit in the port runs.
 struct RootView: View {
+    @StateObject private var model = PatchModel()
+
     var body: some View {
-        ZStack {
-            Theme.bg.ignoresSafeArea()
-            Text("tropical")
-                .font(.system(size: 13, weight: .bold, design: .monospaced))
-                .foregroundStyle(Theme.muted)
+        VStack(spacing: 0) {
+            CanvasView()
+            footer
         }
+        .background(Theme.bg)
+        .environmentObject(model)
+    }
+
+    private var footer: some View {
+        Text("drag from an outlet (right) to an inlet (left) to patch downstream · drag a knob vertically to tweak · double-click a node to delete · the patch lowers through the arrow slide on every edit")
+            .font(Theme.monoSmall)
+            .foregroundStyle(Theme.muted)
+            .lineLimit(1)
+            .truncationMode(.tail)
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 5)
+            .background(Theme.panel)
+            .overlay(Rectangle().frame(height: 1).foregroundStyle(Theme.edge), alignment: .top)
     }
 }
