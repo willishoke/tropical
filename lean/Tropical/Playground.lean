@@ -296,10 +296,30 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
   | "resonator" =>
     let f0 := p "freq" (jExpr params "freq" (lit 220))
     let decay := p "decay" (jExpr params "decay" (lit 4))
-    (.modalSource (resonatorBank f0 decay 6) (lit 0) clk, #[])
+    -- optional `addr` inlet: a Sig node whose value BECOMES the bank's absolute
+    -- time-address (seconds into the impulse response). Unpatched ⇒ reads the
+    -- master clock as before; patched ⇒ the causal gate triggers on the address
+    -- signal's crossing and the ring scrubs/pitches with its slope (modalAddrWarp).
+    let addr? := (portSources inObj "addr")[0]?
+    (.modalSource (resonatorBank f0 decay 6) (lit 0) clk addr?, #[])
   | "reverb" =>
     let rt60 := p "rt60" (jExpr params "rt60" (lit 2))
-    (.modalReverb sig (reverbRoom rt60 32 60.0 6000.0), #[])
+    -- reading DIRECTION: θ (radians, live) rotates the composed tail's poles in the
+    -- s-plane — 0 = forward decay, π = reverse (pre-verb), interior = a continuous
+    -- U(1) morph (σ↔ω at π/2). `window` (live) nulls each mode at its horizon-
+    -- crossing (`σ²/(σ²+w²)`), offset off 0 so the kernel never divides 0/0: at the
+    -- knob's floor it is near-bare rotation, opened up it is the polite morph.
+    -- DIR crossfades the tail's time-direction: 0 = forward ring, 1 = reverse
+    -- (pre-verb into the strike), interior = both. Keeps σ/ω fixed, so it stays
+    -- audible across the whole range (no pole rotation).
+    let dirX := p "dir" (jExpr params "dir" (lit 0))
+    -- SWAY: the room's decay breathes — σ ↦ σ·(1 + sway·sin(2π·rate·t)) on the
+    -- envelope's clock only (pitch fixed). Continuous CF modulation of RT60 that
+    -- stays on-island (no ∫σ dτ, no state); scrubs/reverses with the master clock.
+    let sway := p "sway" (jExpr params "sway" (lit 0))
+    let swayRate := p "rate" (jExpr params "rate" (lit 3 1))   -- 0.3 Hz: a slow breath
+    let dir : ModalDir := { dir := dirX, damp := some (sway, swayRate) }
+    (.modalReverb sig (reverbRoom rt60 32 60.0 6000.0) (some dir), #[])
   | "modalmix" => (.modalMix (portSources inObj "in"), #[])
   | _ => (.mix (portSources inObj "in"), #[])
 
@@ -337,7 +357,7 @@ private def knobNamesOf : String → Array String
   | "delay"     => #["amount"]
   | "reverse"   => #[]
   | "resonator" => #["freq", "decay"]   -- live poles (symbolic residue keeps them live)
-  | "reverb"    => #["rt60"]            -- live room damping
+  | "reverb"    => #["rt60", "dir", "sway", "rate"]   -- damping + direction + decay sway
   | "knob"      => #["value"]
   | _           => #[]
 

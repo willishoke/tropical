@@ -1718,6 +1718,69 @@ def buildExpProbe (name : String) (arena : Arena) : Arena × ProgramIdx :=
 def modalBankTerm (modes : Array ModalMode) (anchor : Expr) (c : Clock) : ArrowTerm :=
   ArrowTerm.arrUn (fun clkSig => modalBankSig modes clkSig anchor) (ArrowTerm.clk c)
 
+-- ── The DIRECTION operator: forward↔reverse crossfade ─────────────────────────
+-- A bank's reading DIRECTION crossfades between the CAUSAL tail (energy at d>0, a
+-- forward ring) and the ANTI-CAUSAL tail (energy at d<0, a pre-verb blooming INTO
+-- the strike). Both keep the mode's own σ AND ω — only which side of the strike the
+-- energy sits on changes. (An earlier version ROTATED the pole `μ↦e^{iθ}μ`; elegant,
+-- but for audio modes `ω≫σ`, so any interior angle throws ω into the damping and the
+-- tail decays in microseconds — silent. The crossfade never touches the decay, so it
+-- stays audible across the whole knob. The rotation's cost was invisible because the
+-- gate checked "bounded", not "audible".)
+
+/-- A modal bank read with a forward↔reverse DIRECTION crossfade `dir ∈ [0,1]`.
+    Per mode: the CAUSAL ring `e^{−σd}` gated `d>0`, and the ANTI-CAUSAL ring
+    `e^{+σd} = e^{−σ|d|}` gated `d<0` reading the time-mirrored oscillator (`cos`
+    even, `sin` odd), blended `(1−dir)·forward + dir·reverse`. σ and ω are untouched,
+    so no setting can swing the frequency into the damping. `dir=0` reduces
+    bit-for-bit to the forward bank (`modalBankSig`); `dir=1` is its exact time-mirror
+    (reverse reverb). `dampScale?` bends the decay clock (sway) on both sides. Pure
+    `f(clk)`: no state. -/
+def modalBankSigDir (modes : Array ModalMode) (clkInt : Expr) (anchorSamples : Expr)
+    (dir : Expr) (dampScale? : Option Expr := none) : Expr :=
+  let dSec := div (sub (div (toFloatE clkInt) (lit 4294967296)) anchorSamples) .sampleRate
+  modes.foldl
+    (fun acc m =>
+      let wd := mul m.omega dSec
+      let oscF := sub (mul m.cre (cosSig wd)) (mul m.cim (sinSig wd))            -- osc(d)
+      -- osc(−d) evaluated at the NEGATED argument (not via cos-even/sin-odd), so
+      -- `dir=1` is the forward tail's exact time-mirror — the minimax sine isn't
+      -- bit-symmetric, so `cosSig(−wd)` must be spelled out to match `fwd[2C−i]`.
+      let wdN := neg wd
+      let oscR := sub (mul m.cre (cosSig wdN)) (mul m.cim (sinSig wdN))          -- osc(−d)
+      -- σ·d, optionally sway-bent (decay clock only, so pitch is untouched).
+      let sd := mul m.sigma dSec
+      let sd := match dampScale? with | none => sd | some s => mul sd s
+      let envF := expSig (neg sd)
+      let envF := if m.deg == 0 then envF else mul (powE dSec m.deg) envF
+      let envR := expSig sd
+      let envR := if m.deg == 0 then envR else mul (powE (neg dSec) m.deg) envR
+      let fwd := selectE (gt dSec (lit 0)) (mul envF oscF) (lit 0)
+      let rev := selectE (gt (neg dSec) (lit 0)) (mul envR oscR) (lit 0)
+      add acc (add (mul (sub (lit 1) dir) fwd) (mul dir rev)))
+    (lit 0)
+
+/-- `modalBankTerm` with a DIRECTION crossfade. Rides the `.clk` leaf like
+    `modalBankTerm`, so master warps still reach it. -/
+def modalBankTermDir (modes : Array ModalMode) (anchor : Expr) (c : Clock)
+    (dir : Expr) (damp? : Option (Expr × Expr) := none) : ArrowTerm :=
+  ArrowTerm.arrUn
+    (fun clkSig =>
+      -- the sway LFO is a pure function of the SAME clock leaf the bank rides, so a
+      -- master scrub reverses it coherently with the tail.
+      let dampScale? := damp?.map (fun (depth, rate) =>
+        let t := div (div (toFloatE clkSig) (lit 4294967296)) .sampleRate
+        add (lit 1) (mul depth (sinSig (mul (mul twoPiE rate) t))))
+      modalBankSigDir modes clkSig anchor dir dampScale?)
+    (ArrowTerm.clk c)
+
+/-- A bank's reading DIRECTION as data: the forward↔reverse crossfade `dir`
+    (0 = forward tail, 1 = reverse/pre-verb) plus optional decay sway `(depth,
+    rateHz)`. Attached to a `modalReverb` node, carried to `lowerInput`. -/
+structure ModalDir where
+  dir : Expr := lit 0
+  damp : Option (Expr × Expr) := none
+
 /-- Emit the modal bank through the ARROW path (`arrUn`/`clk`, then `emitTerm`) —
     the term side of the `modal-bank` gate. -/
 def buildModalBankArrow (name : String) (modes : Array ModalMode) (anchor : Expr)
@@ -1752,6 +1815,43 @@ def buildModalReverbSym (name : String) (voice reverb : Array ModalMode)
 def buildModalBankWarped (name : String) (modes : Array ModalMode) (anchor : Expr)
     (φ : Clock → Clock) (arena : Arena) : Arena × ProgramIdx :=
   let (out, _) := emitTerm (normalize (ArrowTerm.warp φ (modalBankTerm modes anchor clockLit))) {}
+  buildExprCarrier name out arena
+
+/-- Emit a bank read through a DIRECTION (rotation + per-mode gate + optional
+    residue window) — the `modal-direction` gate's device-under-test, mirroring
+    what `lowerInput` emits for a reverb carrying a `ModalDir`. -/
+def buildModalBankDir (name : String) (modes : Array ModalMode) (anchor : Expr)
+    (dir : Expr) (arena : Arena)
+    (damp? : Option (Expr × Expr) := none) : Arena × ProgramIdx :=
+  let (out, _) := emitTerm (normalize (modalBankTermDir modes anchor clockLit dir damp?)) {}
+  buildExprCarrier name out arena
+
+/-- An ABSOLUTE address warp: the modulator signal `s` (read as SECONDS) BECOMES
+    the clock, the base discarded — `c ↦ toInt(s·SR·2³²)`, so the modal bank's
+    `dSec = clk/2³²/SR − anchor` reduces to `s − anchor`. Unlike the RELATIVE
+    flange/fm warps (`c ± δ·m`, a bounded perturbation of the ambient clock), this
+    RELOCATES the causal gate to `s`'s crossing of the anchor: a patched CF signal
+    triggers and scrubs the resonance by its own zero-crossing, and its read rate
+    `ds/dτ` pitch-bends the ring. The master scrub still reaches it — `s` is itself
+    read through the enclosing clock transform (`emitTermC`'s `swarp` case). -/
+def modalAddrWarp : Clock → Sig → Clock :=
+  fun _ s => toIntE (mul s (mul .sampleRate (lit 4294967296)))
+
+/-- Emit the modal bank read through an ABSOLUTE SIGNAL address (`modalAddrWarp`) —
+    the `modal-addr` gate's device-under-test, mirroring what `lowerInput` emits
+    when a resonator's `addr` inlet is patched. The address is a ramp
+    `s(τ) = τ_samples/SR − offsetSec` in seconds; `modalAddrWarp` makes `s` the
+    bank's clock, so `dSec = s − anchor`. With `offsetSec = 0` the address IS time
+    (identity — agrees with the un-addressed bank, correct scaling); with
+    `offsetSec > 0` the causal gate relocates to `τ = offsetSec·SR` (the signal
+    drives the strike). -/
+def buildModalAddrRamp (name : String) (modes : Array ModalMode) (anchor : Expr)
+    (offsetSec : Float) (arena : Arena) : Arena × ProgramIdx :=
+  let addrRamp : ArrowTerm := ArrowTerm.arrUn
+    (fun clk => sub (div (toFloatE (rshift clk (lit 32))) .sampleRate) (litF offsetSec))
+    (ArrowTerm.clk clockLit)
+  let bank := modalBankTerm modes anchor clockLit
+  let (out, _) := emitTerm (normalize (.swarp modalAddrWarp addrRamp bank)) {}
   buildExprCarrier name out arena
 
 -- ─────────────────────────────────────────────────────────────
@@ -1819,9 +1919,15 @@ inductive Node where
       modal (a Sig can't be un-realized into poles) and REALIZE to a `Sig` at their
       boundary with the Sig mainland (a Sig consumer or the tap). `modalSource`
       carries the master clock it will realize against; `modalReverb` composes its
-      modal input with a room (`voice ⋙ reverb`); `modalMix` is the pole union. -/
+      modal input with a room (`voice ⋙ reverb`); `modalMix` is the pole union.
+      `modalSource.addr` is an OPTIONAL Sig node id: when present, that signal
+      becomes the bank's absolute time-address (`modalAddrWarp`) — the temporal
+      inlet (a clock driven by a signal is a warp), distinct from the spectral
+      (modal) inlets `modalReverb`/`modalMix` consume. It propagates through
+      composition to the realization boundary. -/
   | modalSource (modes : Array ModalMode) (anchor : Expr) (clk : Clock)
-  | modalReverb (input : String) (room : Array ModalMode)
+      (addr : Option String)
+  | modalReverb (input : String) (room : Array ModalMode) (dir : Option ModalDir)
   | modalMix (inputs : Array String)
 
 structure PatchNode where
@@ -1857,21 +1963,36 @@ def nodeIsModal (g : PatchGraph) (id : String) : Bool :=
     its inputs. Never touches `Sig` — a modal node's inputs are modal by
     construction, so it only recurses into `lowerModal`. -/
 partial def lowerModal (g : PatchGraph) (id : String) :
-    Except String (Array ModalMode × Expr × Clock) := do
+    Except String (Array ModalMode × Expr × Clock × Option String × Option ModalDir) := do
+  -- An unconnected modal inlet points at `__silence__`; a modal node with no modal
+  -- source is a legal, incomplete patch — it compiles to an EMPTY bank (silence),
+  -- not an error. (The graceful-silence contract, same as `mix []`.)
+  if id == "__silence__" then
+    return (#[], lit 0, clockLit, none, none)
   let some pn := g.nodes.find? (·.id == id)
     | .error s!"lowerModal: node '{id}' not found"
   match pn.node with
-  | .modalSource ms a clk => .ok (ms, a, clk)
-  | .modalReverb inId room => do
-    let (v, a, clk) ← lowerModal g inId
-    .ok (residueComposeE v room, a, clk)
+  | .modalSource ms a clk addr => .ok (ms, a, clk, addr, none)
+  | .modalReverb inId room dir => do
+    -- A reverb is a GENERIC EFFECT: a FIXED room bank that TRACKS the time-basis of
+    -- whatever feeds it. We take the source's anchor/clock/addr (its time-basis) but
+    -- discard its poles — the room rings its OWN modes, re-fired on the source's
+    -- `addr` schedule. This keeps the room source-independent and drops the cost from
+    -- `m·n` (pole fusion) to `n` (the room alone). (The old residue path fused the
+    -- source's spectrum into the tail — spectrally exact but bespoke + `mn`-expensive;
+    -- it's the opt-in colored path, not the default effect.)
+    let (_v, a, clk, addr, dirIn) ← lowerModal g inId
+    .ok (room, a, clk, addr, dir.orElse (fun _ => dirIn))
   | .modalMix inputs => do
     let parts ← inputs.mapM (lowerModal g)
     match parts.toList with
     | [] => .error s!"modalMix '{id}': no inputs"
-    | (ms0, a0, clk0) :: rest =>
-      .ok (rest.foldl (fun acc (p : Array ModalMode × Expr × Clock) => acc ++ p.1) ms0, a0, clk0)
-  | _ => .error s!"lowerModal: '{id}' is not a modal node"
+    -- head carries the shared anchor/clock/address/direction for the union (a mix
+    -- of differently-addressed sources takes the head's, like its clock).
+    | (ms0, a0, clk0, addr0, dir0) :: rest =>
+      .ok (rest.foldl (fun acc (p : Array ModalMode × Expr × Clock × Option String × Option ModalDir) =>
+        acc ++ p.1) ms0, a0, clk0, addr0, dir0)
+  | _ => .error s!"a modal inlet (reverb/modal-mix) needs a modal SOURCE — resonator or modal-mix — but '{id}' is a signal node; a Sig has no poles to compose"
 
 mutual
 /-- Lower one Sig node to its arrow term, recursing UP its input wires via
@@ -1910,8 +2031,20 @@ partial def lowerNode (g : PatchGraph) (id : String) : Except String ArrowTerm :
     reverse (a Sig node has no modal input, so lowerModal is never asked for one). -/
 partial def lowerInput (g : PatchGraph) (id : String) : Except String ArrowTerm := do
   if nodeIsModal g id then
-    let (ms, a, clk) ← lowerModal g id
-    .ok (modalBankTerm ms a clk)
+    let (ms, a, clk, addr?, dir?) ← lowerModal g id
+    -- realize the composed bank; a DIRECTION rotates the poles and reads them
+    -- through the per-mode `sign(σ·d)` gate (`modalBankTermDir`), else the plain
+    -- forward causal bank.
+    let bank := match dir? with
+      | none => modalBankTerm ms a clk
+      | some d => modalBankTermDir ms a clk d.dir d.damp
+    match addr? with
+    | none => .ok bank
+    -- a patched address signal BECOMES the bank's clock (absolute warp): the
+    -- signal is lowered as an ordinary Sig here at the seam, then `modalAddrWarp`
+    -- routes it into the bank's clock leaf. The master scrub still reaches the
+    -- bank through this modulator (it too rides the enclosing clock transform).
+    | some addrId => .ok (.swarp modalAddrWarp (← lowerInput g addrId) bank)
   else lowerNode g id
 end
 

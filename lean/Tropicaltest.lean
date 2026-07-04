@@ -1495,6 +1495,104 @@ private def runModalReverb (arena : Arena)
     | .error e => IO.println s!"  FAIL  modal-reverb  render: {firstLine e}"; pure false
   | .error e => IO.println s!"  FAIL  modal-reverb  build: {firstLine e}"; pure false
 
+/-- THE DIRECTION gate. `dir` crossfades the tail's time-direction and must, above
+    all, STAY AUDIBLE across its range (the pole-rotation version silently collapsed
+    the interior because ω≫σ threw the frequency into the damping). (A) `dir=0`
+    reduces bit-for-bit to the forward bank; (B) `dir=1` is that bank TIME-MIRRORED
+    (rev[i] ≡ fwd[2C−i]) — genuine reverse reverb, no warp; (C) `dir=0.5` stays finite
+    AND carries real energy (a substantial fraction of the forward bank's), i.e. it is
+    audible, not a collapsed transient — the property the rotation version lacked. -/
+private def runModalDirection (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let modes : Array ModalMode := #[
+    ModalMode.hz (lit 220) (lit 30 1) (lit 6 1),
+    ModalMode.hz (lit 330) (lit 40 1) (lit 4 1)]
+  let anchor := lit 1024                        -- mid of 2048 ⇒ 2C = 2048
+  let fwdB := buildModalBankArrow "dir_fwd" modes anchor arena
+  let idB  := buildModalBankDir "dir_id"  modes anchor (lit 0) arena        -- forward
+  let revB := buildModalBankDir "dir_rev" modes anchor (lit 1) arena        -- reverse
+  let midB := buildModalBankDir "dir_mid" modes anchor (litF 0.5) arena     -- crossfade
+  match buildAndFinish (.ok fwdB), buildAndFinish (.ok idB),
+        buildAndFinish (.ok revB), buildAndFinish (.ok midB) with
+  | .ok fp, .ok ip, .ok rp, .ok mp =>
+    match ← renderPlanSamples fp 2048, ← renderPlanSamples ip 2048,
+          ← renderPlanSamples rp 2048, ← renderPlanSamples mp 2048 with
+    | .ok fwd, .ok idv, .ok rev, .ok mid =>
+      let n := 2048
+      let mut idDiff := 0
+      let mut fwdE : Float := 0.0
+      for i in [0:n] do
+        if idv[i]! != fwd[i]! then idDiff := idDiff + 1
+        fwdE := fwdE + fwd[i]! * fwd[i]!
+      let mut revDiff := 0
+      let mut revDiffersFwd := 0
+      for i in [1:n] do
+        if rev[i]! != fwd[2048 - i]! then revDiff := revDiff + 1
+        if rev[i]! != fwd[i]! then revDiffersFwd := revDiffersFwd + 1
+      let mut midE : Float := 0.0
+      let mut midFinite := true
+      for i in [0:n] do
+        let a := mid[i]!.abs
+        if !a.isFinite then midFinite := false
+        midE := midE + a * a
+      IO.println s!"        direction crossfade (forward↔reverse, σ/ω fixed):"
+      IO.println s!"        (A) dir=0 vs fwd bitDiff={idDiff}  ·  (B) dir=1 mirror bitDiff={revDiff} (differs-fwd @{revDiffersFwd})"
+      IO.println s!"        (C) dir=0.5 finite={midFinite} · E={midE} vs forward E={fwdE} (AUDIBLE ⇒ E ≫ 0)"
+      let aOk := idDiff == 0
+      let bOk := revDiff == 0 && revDiffersFwd > 0
+      let cOk := midFinite && fwdE > 1e-6 && midE > 0.1 * fwdE
+      if aOk && bOk && cOk then
+        IO.println s!"  PASS  modal-direction  dir=0 forward (bit-exact) · dir=1 reverse (mirror bit-exact) · dir=0.5 AUDIBLE (E={midE}, {midE/fwdE} of fwd)"; pure true
+      else
+        IO.println s!"  FAIL  modal-direction  A={aOk} B={bOk} C={cOk} (idDiff={idDiff} revDiff={revDiff} midE={midE} fwdE={fwdE})"; pure false
+    | _, _, _, _ => IO.println s!"  FAIL  modal-direction  render error"; pure false
+  | _, _, _, _ => IO.println s!"  FAIL  modal-direction  build error"; pure false
+
+/-- THE SWAY gate. Decay sway modulates each mode's damping by `1 + depth·sin(2π·
+    rate·t)` on the ENVELOPE clock only. (S1) at depth 0 it is bit-for-bit the
+    un-swayed bank (the LFO term folds to ×1); (S2) at depth>0 the tail differs (its
+    decay breathes) yet stays causal (silent pre-strike) and bounded. Pitch is
+    untouched by construction (the oscillator reads the plain `dSec`); the LFO rides
+    the same clock leaf as the bank, so a master scrub reverses it coherently. -/
+private def runModalSway (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let modes : Array ModalMode := #[
+    ModalMode.hz (lit 220) (lit 30 1) (lit 6 1),
+    ModalMode.hz (lit 330) (lit 40 1) (lit 4 1)]
+  let anchor := lit 200
+  let noSway := buildModalBankDir "sway_no" modes anchor (lit 0) arena
+  let sway0  := buildModalBankDir "sway_0"  modes anchor (lit 0) arena (some (lit 0, lit 3 1))
+  let swayD  := buildModalBankDir "sway_d"  modes anchor (lit 0) arena (some (lit 5 1, lit 20 1))
+  match buildAndFinish (.ok noSway), buildAndFinish (.ok sway0), buildAndFinish (.ok swayD) with
+  | .ok np, .ok zp, .ok dp =>
+    match ← renderPlanSamples np 2048, ← renderPlanSamples zp 2048, ← renderPlanSamples dp 2048 with
+    | .ok nos, .ok zos, .ok dos =>
+      let n := 2048
+      let mut z0Diff := 0
+      for i in [0:n] do if zos[i]! != nos[i]! then z0Diff := z0Diff + 1
+      let mut modDiff := 0
+      let mut preMax : Float := 0.0
+      let mut dFinite := true
+      let mut dPeak : Float := 0.0
+      for i in [0:n] do
+        if dos[i]! != nos[i]! then modDiff := modDiff + 1
+        let a := dos[i]!.abs
+        if !a.isFinite then dFinite := false
+        if a > dPeak then dPeak := a
+      for i in [0:201] do
+        let a := dos[i]!.abs
+        if a > preMax then preMax := a
+      IO.println s!"        decay sway (σ·(1+depth·sin 2πrt) on the envelope clock only):"
+      IO.println s!"        (S1) depth 0 vs no-sway bitDiff={z0Diff}  ·  (S2) depth>0 differs @{modDiff}/{n}, pre-strike |max|={preMax}, peak={dPeak}, finite={dFinite}"
+      let s1 := z0Diff == 0
+      let s2 := modDiff > 100 && preMax == 0.0 && dFinite && dPeak > 1e-4 && dPeak < 1e3
+      if s1 && s2 then
+        IO.println s!"  PASS  modal-sway  depth 0 ≡ un-swayed (bit-exact) · depth>0 breathes the decay, causal & bounded"; pure true
+      else
+        IO.println s!"  FAIL  modal-sway  S1={s1} (bitDiff {z0Diff}) S2={s2} (modDiff {modDiff} preMax {preMax} peak {dPeak} finite {dFinite})"; pure false
+    | _, _, _ => IO.println s!"  FAIL  modal-sway  render error"; pure false
+  | _, _, _ => IO.println s!"  FAIL  modal-sway  build error"; pure false
+
 /-- THE DEGENERATE RESIDUE gate. A voice pole placed EXACTLY on a reverb pole
     (sympathetic resonance) must compose to a `τ·e^{μd}` DOUBLE POLE, not blow up.
     residueCompose must emit exactly one deg-1 mode, and — crucially — the
@@ -1584,8 +1682,8 @@ private def runModalPatch (arena : Arena)
   let twoC : Int := 2048 * 4294967296
   let mkGraph := fun (clk : Clock) => ({
     nodes := #[
-      { id := "res", node := .modalSource res anchor clk },
-      { id := "rev", node := .modalReverb "res" room }],
+      { id := "res", node := .modalSource res anchor clk none },
+      { id := "rev", node := .modalReverb "res" room none }],
     output := "rev" } : PatchGraph)
   let carrier := fun (name : String) (clk : Clock) => (do
     let term ← lowerGraph (mkGraph clk)
@@ -1658,6 +1756,61 @@ private def runModalLive (arena : Arena)
         IO.println s!"  FAIL  modal-live  a modal param is not a live slot: freq={fPresent} decay={dPresent} rt60={rtPresent}"; pure false
     | .error e, _ => IO.println s!"  FAIL  modal-live  toWire: {firstLine e}"; pure false
     | _, .error e => IO.println s!"  FAIL  modal-live  emitKernel: {firstLine e}"; pure false
+
+open Tropical.EmitArrow in
+/-- THE MODAL ADDRESS gate. A resonator's `addr` inlet: a patched CF signal BECOMES
+    the bank's absolute time-coordinate (`modalAddrWarp`), so the causal gate — the
+    strike — tracks the SIGNAL, not the master clock. Three things, end to end:
+    (1) SCALING — address = time (offset 0) reproduces the un-addressed bank (only a
+        float round-trip apart), proving `s`-seconds maps to exactly the right clock;
+    (2) TRIGGER — address = time − 0.01 s stays silent until sample 0.01·SR, then
+        rings, proving the signal RELOCATES the strike (scrub-to-trigger, not a
+        re-strike); (3) DECODE — a JSON `osc → res.addr, res → out` compiles through
+        the real `compilePlanPure` to codegen (the graph surface wires the address). -/
+private def runModalAddr (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let modes : Array ModalMode := #[
+    ModalMode.hz (lit 220) (lit 30 1) (lit 6 1),
+    ModalMode.hz (lit 440) (lit 45 1) (lit 3 1)]
+  let n := 2048
+  let onsetSec : Float := 0.01
+  let onset := (onsetSec * 44100.0).toUInt64.toNat
+  -- (3) decode: a real patched-signal address (an LFO osc) through the JSON surface.
+  let src := "{\"nodes\":[" ++
+    "{\"id\":\"lfo\",\"kind\":\"source\",\"params\":{\"freq\":40,\"morph\":0}}," ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4},\"in\":{\"addr\":[\"lfo\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"res\"]}}]}"
+  let decodeOk : Bool := match Lean.Json.parse src with
+    | .error _ => false
+    | .ok j => match Tropical.Playground.compilePlanPure arena resolved j with
+      | .error _ => false
+      | .ok (plan, _) => (Tropical.Ir.EmitLlvm.emitKernel plan).toOption.isSome
+  match buildAndFinish (.ok (buildModalBankArrow "ma_ref" modes (lit 0) arena)),
+        buildAndFinish (.ok (buildModalAddrRamp "ma_id" modes (lit 0) 0.0 arena)),
+        buildAndFinish (.ok (buildModalAddrRamp "ma_off" modes (lit 0) onsetSec arena)) with
+  | .ok refp, .ok idp, .ok offp =>
+    match ← renderPlanSamples refp n, ← renderPlanSamples idp n, ← renderPlanSamples offp n with
+    | .ok ref, .ok ida, .ok off =>
+      let mut maxErr : Float := 0.0
+      for i in [0:n] do
+        let e := (ida[i]! - ref[i]!).abs
+        if e > maxErr then maxErr := e
+      let mut preMax : Float := 0.0
+      for i in [0:onset] do
+        let a := off[i]!.abs
+        if a > preMax then preMax := a
+      let mut postPeak : Float := 0.0
+      for i in [onset+50:n] do
+        let a := off[i]!.abs
+        if a > postPeak then postPeak := a
+      IO.println s!"        addressed resonator (a patched CF signal AS the time coordinate):"
+      IO.println s!"        result   identity-addr max|Δ| vs un-addressed={maxErr} · offset-addr pre-onset|max|={preMax} post-onset peak={postPeak} · graph decode ok={decodeOk}"
+      if maxErr < 1e-4 && preMax == 0.0 && postPeak > 1e-6 && decodeOk then
+        IO.println s!"  PASS  modal-addr  a patched signal drives the bank's time: address=time ≡ un-addressed; offset relocates the strike; graph decode compiles"; pure true
+      else
+        IO.println s!"  FAIL  modal-addr  maxErr={maxErr} preMax={preMax} postPeak={postPeak} decodeOk={decodeOk}"; pure false
+    | .error e, _, _ | _, .error e, _ | _, _, .error e => IO.println s!"  FAIL  modal-addr  render: {firstLine e}"; pure false
+  | _, _, _ => IO.println s!"  FAIL  modal-addr  build"; pure false
 
 /-- Test 3: `osc ⋙ flange ⋙ flange` — the slide pushes the outer warps through
     the inner flanger's sum and fuses them, producing the oscillator read at the
@@ -2066,6 +2219,12 @@ def main (args : List String) : IO UInt32 := do
     if !(← runModalReverb arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← runModalDirection arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalSway arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← runResidueDegenerate arena resolved) then
       failed := failed + 1
     total := total + 1
@@ -2076,6 +2235,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runModalLive arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalAddr arena resolved) then
       failed := failed + 1
     -- ── (h⁸) THE PATCHER LOWERING: downstream-only patch graph → arrow term →
     --   slide → emit. L1 (byte-identity vs FlangeSin from a graph) is in the
