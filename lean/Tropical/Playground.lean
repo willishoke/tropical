@@ -374,6 +374,57 @@ private def knobNamesOf : String → Array String
   | "knob"      => #["value"]
   | _           => #[]
 
+-- ── Node-port schema (the connection-validation contract for the GUI) ─────────
+/-- The static node-port schema the playground GUI validates connections against.
+    For each node kind: its INLETS (name + the outlet colors it accepts, and
+    whether it fans in), its OUTLET color, and its continuous knobs. Colors:
+
+    * `signal`  — a per-sample stream (an oscillator/effect output);
+    * `modal`   — a pole bank (a resonator/reverb, composed by residue calculus);
+    * `control` — a knob (a live param slot).
+
+    A connection `outlet → inlet` is valid iff `outlet.color ∈ inlet.accepts`.
+    The asymmetry is real and enforced by the compiler: a `modal` outlet feeding a
+    `signal` inlet REALIZES at the seam (poles → stream), a `control` outlet is a
+    constant stream (so it also satisfies a `signal` inlet), but a `signal` into a
+    `modal` inlet is the one hard TYPE ERROR ("a Sig has no poles to compose").
+    There is no signal-port typing beyond this — every other mismatch was silently
+    dropped, which is what made osc→osc read as a dotted no-op.
+
+    Kept in sync with `buildNode` (the inlets it reads) and `knobNamesOf`. -/
+def nodeSchema : Json :=
+  let sig : Array String := #["signal", "modal", "control"]  -- a stream-consuming inlet
+  let modal : Array String := #["modal"]                     -- poles only
+  let ctrl : Array String := #["control"]                    -- a knob only
+  let inlet (name : String) (accepts : Array String) (multi : Bool := false) : Json :=
+    Json.mkObj [("name", Json.str name),
+      ("accepts", Json.arr (accepts.map Json.str)), ("multi", Json.bool multi)]
+  let node (kind : String) (inlets : Array Json) (outlet : Option String)
+      (knobs : Array String) : Json :=
+    Json.mkObj [("kind", Json.str kind), ("inlets", Json.arr inlets),
+      ("outlet", match outlet with | some c => Json.str c | none => Json.null),
+      ("knobs", Json.arr (knobs.map Json.str))]
+  Json.mkObj [
+    ("rule", Json.str
+      "outlet→inlet valid iff outlet.color ∈ inlet.accepts; modal→signal realizes, signal→modal is a type error"),
+    ("colors", Json.arr #[Json.str "signal", Json.str "modal", Json.str "control"]),
+    ("nodes", Json.arr #[
+      node "source"    #[inlet "freq" ctrl, inlet "pm" sig] (some "signal") #["freq", "morph"],
+      node "pluck"     #[inlet "freq" ctrl] (some "signal") #["freq", "morph", "event_rate"],
+      node "comb"      #[inlet "in" sig] (some "signal") #["delay", "decay"],
+      node "flange"    #[inlet "in" sig] (some "signal") #["depth"],
+      node "delay"     #[inlet "in" sig] (some "signal") #["amount"],
+      node "reverse"   #[inlet "in" sig] (some "signal") #[],
+      node "fm"        #[inlet "in" sig] (some "signal") #["carrier", "depth"],
+      node "sflange"   #[inlet "in" sig, inlet "mod" sig] (some "signal") #["depth", "rate"],
+      node "mix"       #[inlet "in" sig true] (some "signal") #[],
+      node "ring"      #[inlet "in" sig true] (some "signal") #[],
+      node "resonator" #[inlet "addr" sig] (some "modal") #["freq", "decay"],
+      node "reverb"    #[inlet "in" modal] (some "modal") #["rt60", "dir", "sway", "rate"],
+      node "modalmix"  #[inlet "in" modal true] (some "modal") #[],
+      node "knob"      #[] (some "control") #["value"],
+      node "out"       #[inlet "in" sig true] none #[] ])]
+
 /-- The live param table: every node's continuous knobs as `(<id>.<knob>, default)`
     in scan order (node order, then knob order). The position IS the `ParamIdx` the
     node's `paramRef`s carry; `compileSession` allocates each `param:<id>.<knob>`. A

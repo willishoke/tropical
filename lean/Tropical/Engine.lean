@@ -2139,6 +2139,9 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
 def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   wrap <| match name with
   | "load_patch_graph" => handleLoadPatchGraph env args
+  -- The static node-port schema (inlets + accepted colors + outlet color) the
+  -- GUI validates connections against. Session-independent, so it just echoes.
+  | "node_schema" => pure Tropical.Playground.nodeSchema
   | "define_program"  => handleDefineProgram env args
   | "add_instance"    => handleAddInstance env args
   | "remove_instance" => handleRemoveInstance env args
