@@ -2,6 +2,17 @@ import SwiftUI
 
 @main
 struct ReversibleApp: App {
+    // A bare SwiftPM executable is not an .app bundle, so macOS launches it
+    // as a background process — no Dock icon, window never activated. Claim
+    // regular-app status and take focus, or `swift run` shows nothing.
+    init() {
+        DispatchQueue.main.async {
+            NSApp.setActivationPolicy(.regular)
+            NSApp.activate(ignoringOtherApps: true)
+            NSApp.windows.first?.makeKeyAndOrderFront(nil)
+        }
+    }
+
     var body: some Scene {
         WindowGroup("tropical playground") {
             RootView()
