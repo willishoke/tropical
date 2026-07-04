@@ -1,18 +1,37 @@
 import SwiftUI
 
-/// Knob face: 38px dial, pointer sweeping −135°…+135° (styles.css .knob).
-/// Interaction (vertical drag → live param drive) lands in the next commit;
-/// this renders value + angle so the canvas is visually complete.
+/// Knob: 38px dial, pointer sweeping −135°…+135° (styles.css .knob).
+/// Every continuous knob is a live param slot `<id>.<knob>` — a vertical
+/// drag (180px = full sweep) drives the running kernel with no relower
+/// (only topology edits recompile). A glided knob eases via
+/// set_param_glide; freq-anchored knobs go phase-continuous via
+/// set_param_freq; the rest do a raw set_param write.
 struct KnobView: View {
     @EnvironmentObject var model: PatchModel
     let node: PatchNode
     let knob: KnobSpec
+    @State private var dragStartNorm: Double?
 
     private var value: Double { node.values[knob.name] ?? knob.def }
 
     var body: some View {
         VStack(spacing: 2) {
             dial
+                .contentShape(Circle())
+                .gesture(
+                    DragGesture(minimumDistance: 0)
+                        .onChanged { g in
+                            let t0 = dragStartNorm ?? knob.toNorm(value)
+                            dragStartNorm = t0
+                            let v = knob.fromNorm(t0 - g.translation.height / 180)
+                            model.nodes[node.id]?.values[knob.name] = v
+                            model.sendKnob(node, knob, v)
+                        }
+                        .onEnded { _ in
+                            dragStartNorm = nil
+                            model.sendKnob(node, knob, value)
+                        }
+                )
             Text(knob.name).font(Theme.monoTiny).foregroundStyle(Theme.muted)
             Text(knob.format(value)).font(Theme.monoTiny).foregroundStyle(Theme.text)
         }
