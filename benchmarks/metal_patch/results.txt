@@ -1,0 +1,19 @@
+c++ -O3 -std=c++20 -fobjc-arc -Wall -Wno-deprecated-declarations -framework Metal -framework Foundation modal_patch.mm -o modal_patch
+./modal_patch
+device: Apple M1 Pro   patch: ModalHeavy64 (64 partials, fmax 2980 Hz)   SR 44100
+
+FITNESS vs tropical f64 render  (1323008 samples, 30.000 s)
+  peak signal   0.01211
+  max abs err   2.706e-04
+  rms err       1.332e-05   (signal rms 8.562e-03)
+  SNR           56.2 dB   (~9.3 effective bits)
+  correlation   0.999999
+  SNR by window first 105.8 dB @ t=0   last 52.1 dB @ t=29.9s   (f32 phase drift)
+
+PERFORMANCE  (all us; sync=commit+wait, pipe_call=encode+commit, pipe_sust=block interval)
+B       sync_med pipe_call pipe_sust    cpu_f64  deadline   rt     spdup
+64        211.0u      3.4u     74.1u      15.0u   1451.2u   PASS   0.20x
+128       178.8u      3.4u     70.1u      31.3u   2902.5u   PASS   0.45x
+256       174.4u      3.4u     74.4u      67.8u   5805.0u   PASS   0.91x
+512       180.6u      3.7u     75.1u     148.0u  11610.0u   PASS   1.97x
+1024      190.5u      3.5u     78.7u     301.4u  23220.0u   PASS   3.83x
