@@ -1,4 +1,5 @@
 #include "c_api/tropical_socket.hpp"
+#include <vector>
 
 #include <nlohmann/json.hpp>
 
@@ -191,7 +192,7 @@ void SocketServer::handle_line(int fd, uint64_t id, const std::string & line)
     write_line(fd, resp.data(), resp.size());
     return;
   }
-  enqueue_control(id, line);
+  enqueue_control(id, line, method);
 }
 
 std::string SocketServer::handle_data(const std::string & line)
@@ -284,13 +285,49 @@ std::string SocketServer::handle_data(const std::string & line)
               {"error", {{"code", -32601}, {"message", "unknown data-plane method"}}}}.dump();
 }
 
-void SocketServer::enqueue_control(uint64_t client_id, std::string line)
+void SocketServer::send_superseded(const ControlMsg & msg)
 {
+  json id = nullptr;
+  try
+  {
+    json j = json::parse(msg.bytes);
+    if (j.contains("id")) id = j["id"];
+  }
+  catch (...) { /* malformed: reply with a null id */ }
+  const std::string resp = json{{"jsonrpc", "2.0"}, {"id", id},
+                                {"result", {{"superseded", true}}}}.dump();
+  send_response(msg.client_id, resp.data(), resp.size());
+}
+
+void SocketServer::enqueue_control(uint64_t client_id, std::string line, std::string method)
+{
+  std::vector<ControlMsg> superseded;
   {
     std::lock_guard<std::mutex> lk(ctrl_mtx_);
-    ctrl_q_.push(ControlMsg{client_id, std::move(line)});
+    // Compile coalescing: a `load_patch_graph` is a FULL-graph snapshot, so a new
+    // one supersedes any still-queued (not-yet-dispatched) one — while the user
+    // drags, we never waste a compile on an intermediate graph, we jump straight
+    // to the latest. Incremental control requests (wire/add_instance/…) are NOT
+    // full snapshots, so they are left in order. The one in-flight compile the
+    // Lean thread already pulled runs to completion (LLVM has no mid-compile
+    // interrupt); this drops only the BACKLOG. All of it lives here in the C++
+    // queue, so the Lean control loop stays single-threaded and serial.
+    if (method == "load_patch_graph")
+    {
+      std::deque<ControlMsg> kept;
+      for (auto & m : ctrl_q_)
+      {
+        if (m.method == "load_patch_graph") superseded.push_back(std::move(m));
+        else kept.push_back(std::move(m));
+      }
+      ctrl_q_ = std::move(kept);
+    }
+    ctrl_q_.push_back(ControlMsg{client_id, std::move(line), std::move(method)});
   }
   ctrl_cv_.notify_one();
+  // Resolve the dropped requests' promises (outside the queue lock — send_response
+  // takes clients_mtx_) so an async client that awaited them doesn't hang.
+  for (const auto & m : superseded) send_superseded(m);
 }
 
 bool SocketServer::next_control(uint64_t * out_client_id, char ** out_bytes, std::size_t * out_len)
@@ -300,7 +337,7 @@ bool SocketServer::next_control(uint64_t * out_client_id, char ** out_bytes, std
   if (ctrl_q_.empty()) return false;  // shutdown with nothing left to drain
 
   ControlMsg msg = std::move(ctrl_q_.front());
-  ctrl_q_.pop();
+  ctrl_q_.pop_front();
   lk.unlock();
 
   const std::size_t n = msg.bytes.size();
