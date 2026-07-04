@@ -15,40 +15,48 @@ f64 render, **not** bit-exactness), and measure the realtime win.
 1. ✅ **A real tropical patch runs on real Metal and sounds right.** f32 GPU vs tropical's
    f64 render: **105.8 dB SNR** over the first 0.1 s (17.6 effective bits, correlation
    1.000000) — far past CD quality (~96 dB). f32 is not the problem the scoping doc feared.
-2. ⚠️ **But naive f32 phase drifts with time.** Over 30 s the SNR falls from 105.8 dB (t=0)
-   to 52.1 dB (t=30 s); aggregate 56.2 dB. Root cause below — it's fixable and does **not**
-   need f64 on the GPU.
+2. ✅ **f32 is a sufficient substrate once phase is fixed-point — demonstrated, not argued.**
+   The error decomposes cleanly into *value* (f32, fine) and *time* (must be fixed-point):
+   naive f32 phase drifts 106→52 dB over 30 s, but a fixed-point-phase kernel holds a **flat
+   130 dB across the whole 30 s**, at ~zero perf cost. Time and value are different objects.
 3. ✅ **The GPU win is real on a real patch.** vs the CPU-f64 baseline of the same patch:
-   crossover ~B=256, then **1.97× at B=512, 3.83× at B=1024**, all realtime-feasible
+   crossover ~B=256, then **1.8× at B=512, 3.3× at B=1024**, all realtime-feasible
    (pipelined callback cost ~3.5 µs). Matches the synthetic `gpu_time_partition` crossover
-   (`K·B ≈ 10⁵`).
+   (`K·B ≈ 10⁵`). *(Caveat: the CPU baseline is scalar f64 `std::sin`, not tropical's
+   NEON-vectorized polynomial `sin` — a fair CPU baseline would narrow this; and the GPU is
+   still overhead-bound at these sizes. See below.)*
 
-## Fitness — f32 GPU vs tropical f64 render
+## Fitness — phase substrate comparison, f32 GPU vs tropical f64 render (30 s)
 
 ```
-window            SNR        notes
-first 0.1 s     105.8 dB     ~17.6 effective bits, corr 1.000000 — inaudible error
-last 0.1 s @30s  52.1 dB     phase-drifted
-30 s aggregate   56.2 dB     ~9.3 effective bits
+phase        SNR       max_abs    SNR@t=0    SNR@t=30s    corr
+naive f32   56.2 dB   2.71e-04   105.8 dB     52.1 dB    0.999999
+fixed      130.2 dB   3.08e-08   130.1 dB    130.2 dB    1.000000
 ```
 
-**Why it drifts.** The kernel evaluates the stateless closed form `sin(2π·freq·t)` with
-`t = (start+n)/SR` in f32. For a high partial (freq≈2980 Hz) at t=30 s, `freq·t ≈ 89400`,
-where an f32 ULP is ≈0.008 — i.e. ~0.008 cycle ≈ 3° of phase error before the sine is even
-taken. tropical stays exact only because it computes this in **f64** (ULP ≈1e-8 there). This
-is fundamental to *stateless* f32 phase, not a bug: you can't accumulate phase incrementally
-without reintroducing per-sample state, which the whole design forbids.
+**Why naive drifts.** The naive kernel evaluates `sin(2π·freq·t)` with `t=(start+n)/SR` in
+f32 — phase on the *line*. For a high partial (freq≈2980 Hz) at t=30 s, `freq·t ≈ 89400`,
+where an f32 ULP is ≈0.008 cycle ≈ 3° of phase error before the sine is taken. f32 precision
+is *relative*, so it degrades as the monotone coordinate grows.
 
-**The fix (keeps statelessness, stays on f32 GPU).** Split the phase by timescale: the
-control plane computes a per-block **base phase** per partial in f64 —
-`φ₀ᵢ = frac(freqᵢ · start / SR)`, once per block, off the audio-rate path — and the GPU
-kernel adds only the **within-block** fine phase in f32, `frac(φ₀ᵢ + freqᵢ · n / SR)` with
-`n < blockSize`. Because `n` is bounded (≤ a few thousand), `freqᵢ·n/SR` never grows large,
-so f32 keeps full precision indefinitely. This is a real design note for `EmitMsl` + the
-Metal host runtime: coarse phase in f64 on the host (cheap, once per block), fine phase in
-f32 on the GPU. It also matches how tropical's own `Sin` does range reduction — a faithful
-`EmitMsl` emitting the reduced-phase arithmetic (rather than a naive `sin(2πft)`) would
-already be closer to this.
+**The fix, implemented and measured — fixed-point phase.** Phase is the circle 𝕋 = ℝ/ℤ, a
+compact object; represent it as a 64-bit fixed-point fraction (ℤ/2⁶⁴ ↪ 𝕋, a subgroup
+inclusion — uniform resolution everywhere, and a group homomorphism, so the rotation action
+is exact). Per partial, quantize the increment once: `incr = round((freq/SR)·2⁶⁴)`. Then
+
+```
+φ(n) = (nabs · incr) mod 2⁶⁴      // u64 multiply + wrap — exact, uniform, STATELESS
+phf  = (φ >> 40) / 2²⁴  ∈ [0,1)   // drop to a bounded f32 only at the sine leaf
+```
+
+This is **not** a fixed-point accumulator (that would be state) — φ(n) is a pure function of
+the exact integer sample index, so it's exact random-access phase (scrub/jump/play all land
+identically) *and* stateless, preserving the ideology. The f32 only ever sees a bounded
+[0,1) argument, where it was already scoring 130 dB. Result: uniform 130 dB (~21.6 bits)
+across all t — the drift is gone. This is the empirical proof behind the fixed-point-time
+refactor: keep the monotone unbounded coordinate in uniform-precision integers, drop to f32
+only for the bounded value. (The 130 dB ceiling is the f32 *value* floor, not the time
+floor — exactly the point.)
 
 ## Performance — M1 Pro
 

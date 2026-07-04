@@ -2,18 +2,16 @@ c++ -O3 -std=c++20 -fobjc-arc -Wall -Wno-deprecated-declarations -framework Meta
 ./modal_patch
 device: Apple M1 Pro   patch: ModalHeavy64 (64 partials, fmax 2980 Hz)   SR 44100
 
-FITNESS vs tropical f64 render  (1323008 samples, 30.000 s)
-  peak signal   0.01211
-  max abs err   2.706e-04
-  rms err       1.332e-05   (signal rms 8.562e-03)
-  SNR           56.2 dB   (~9.3 effective bits)
-  correlation   0.999999
-  SNR by window first 105.8 dB @ t=0   last 52.1 dB @ t=29.9s   (f32 phase drift)
+FITNESS vs tropical f64 render  (1323008 samples, 30.0 s)   [phase substrate comparison]
+  phase           SNR    max_abs      SNR@t=0    SNR@t=end       corr
+  naive f32     56.2 dB   2.71e-04     105.8 dB      52.1 dB   0.999999
+  fixed       130.2 dB   3.08e-08     130.1 dB     130.2 dB   1.000000
+  (@t=end is t=29.9s; naive degrades with t, fixed holds — uniform-precision phase)
 
-PERFORMANCE  (all us; sync=commit+wait, pipe_call=encode+commit, pipe_sust=block interval)
+PERFORMANCE (fixed kernel; us; pipe_call=encode+commit, pipe_sust=block interval)
 B       sync_med pipe_call pipe_sust    cpu_f64  deadline   rt     spdup
-64        211.0u      3.4u     74.1u      15.0u   1451.2u   PASS   0.20x
-128       178.8u      3.4u     70.1u      31.3u   2902.5u   PASS   0.45x
-256       174.4u      3.4u     74.4u      67.8u   5805.0u   PASS   0.91x
-512       180.6u      3.7u     75.1u     148.0u  11610.0u   PASS   1.97x
-1024      190.5u      3.5u     78.7u     301.4u  23220.0u   PASS   3.83x
+64        226.5u      3.2u     81.7u      15.0u   1451.2u   PASS   0.18x
+128       191.9u      4.2u     64.1u      32.0u   2902.5u   PASS   0.50x
+256       187.5u      3.5u     71.2u      69.2u   5805.0u   PASS   0.97x
+512       205.3u      3.2u     83.8u     147.4u  11610.0u   PASS   1.76x
+1024      230.3u      3.3u     91.4u     302.3u  23220.0u   PASS   3.31x
