@@ -24,6 +24,9 @@ final class PatchModel: ObservableObject {
     @Published var statusIsError = false
     @Published var audioOn = false
     @Published var velocity: Double = 1
+    /// Live jack-dot centers in canvas space, mirrored from the canvas's
+    /// preference pass — the hit-test surface for wire drops.
+    var jackGeometry: [JackID: CGPoint] = [:]
 
     let engine: Engine
     private var counter = 0
