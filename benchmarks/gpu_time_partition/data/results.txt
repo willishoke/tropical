@@ -1,0 +1,26 @@
+device: Apple M1 Pro   maxThreads/tg: 1024   UMA: yes
+kernel: modal residue sum, K damped sines/sample   sampleRate: 48000 Hz
+metric: per-block round-trip (encode+commit+wait), 2000 iters after 64 warm
+
+K    B        gpu_med    gpu_p99    gpu_max    cpu_med   deadline   verdict
+16   64        201.3u     580.0u     828.7u       4.2u    1333.3u   PASS   
+16   128       155.7u     283.3u    1112.9u       9.0u    2666.7u   PASS   
+16   256       184.1u     697.2u    1510.5u      19.8u    5333.3u   PASS   
+16   512       178.7u     645.0u    1333.3u      37.8u   10666.7u   PASS   
+16   1024      186.2u     393.0u    1411.8u      84.5u   21333.3u   PASS   
+16   2048      190.3u     628.4u    1462.5u     161.2u   42666.7u   PASS   
+
+64   64        203.3u     592.0u    1518.2u      19.1u    1333.3u   PASS   
+64   128       216.5u     688.1u    1520.1u      42.8u    2666.7u   PASS   
+64   256       225.9u     601.6u    1413.8u      83.0u    5333.3u   PASS   
+64   512       225.9u     714.8u    1485.3u     157.8u   10666.7u   PASS   
+64   1024      231.5u     604.5u    1464.5u     307.6u   21333.3u   PASS   
+64   2048      226.0u     690.7u    1426.2u     590.6u   42666.7u   PASS   
+
+256  64        265.2u     703.3u    1513.8u      94.3u    1333.3u   PASS   
+256  128       278.5u     696.7u    1448.7u     158.5u    2666.7u   PASS   
+256  256       285.4u     801.0u    1480.4u     303.0u    5333.3u   PASS   
+256  512       287.5u     747.9u    1512.1u     573.3u   10666.7u   PASS   
+256  1024      329.3u     731.7u    1433.2u    1115.6u   21333.3u   PASS   
+256  2048      328.7u     745.4u    1496.5u    2188.5u   42666.7u   PASS   
+
