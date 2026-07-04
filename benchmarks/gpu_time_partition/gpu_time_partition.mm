@@ -7,14 +7,18 @@
 // one thread per time index, no cross-thread state, pure f(t, params).
 //
 // The only question that gates a realtime GPU backend on unified memory (UMA): does that
-// per-block dispatch complete inside the audio deadline (B / sampleRate)? We measure the
-// full round trip a realtime callback would pay — encode + commit + waitUntilCompleted —
-// and report median / p99 / max against the deadline, with a single-thread CPU baseline
-// for the crossover. Metal is reached at runtime (newLibraryWithSource); no .metal step.
+// per-block dispatch complete inside the audio deadline (B / sampleRate)? We measure three
+// submission strategies, because the naive one sets a misleading floor:
 //
-// verdict:  PASS   p99 < deadline           (robustly realtime, jitter included)
-//           p99>dl median < deadline ≤ p99  (fits typically; scheduling jitter overruns)
-//           FAIL   median ≥ deadline
+//   sync   commit + waitUntilCompleted            single-shot round trip, CPU sleeps
+//   spin   commit + busy-wait on cb.status        single-shot round trip, no sleep/wake
+//   pipe   ring of D buffers + async completion    critical-path cost (pipe_call) and
+//          handler signalling a semaphore          sustained throughput (pipe_sust)
+//
+//   pipe_call = encode+commit only (GPU overlaps; what an audio callback actually pays)
+//   pipe_sust = wall/ITERS with the pipeline full (GPU-bound sustained block interval)
+//
+// rt column: PASS if the sustained interval clears the deadline.
 
 #import <Foundation/Foundation.h>
 #import <Metal/Metal.h>
@@ -55,23 +59,11 @@ kernel void modal(device   float* out    [[buffer(0)]],
 }
 )METAL";
 
-// CPU baseline: identical modal sum, one thread, one block. -O3 auto-vectorizes across n.
-static float cpu_block(int B, int K, const float* fr, const float* de, const float* am,
-                       float t0, float dt, float* out) {
-  for (int n = 0; n < B; ++n) {
-    float t = t0 + (float)n * dt, acc = 0.0f;
-    for (int m = 0; m < K; ++m)
-      acc += am[m] * std::exp(-de[m] * t) * std::sin(6.2831853071795864f * fr[m] * t);
-    out[n] = acc;
-  }
-  return out[B - 1];  // defeat DCE
-}
-
 int main() {
   const double SR = 48000.0;
   const int blocks[] = {64, 128, 256, 512, 1024, 2048};
   const int Ks[] = {16, 64, 256};
-  const int WARM = 64, ITERS = 2000;
+  const int WARM = 64, ITERS = 2000, D = 3;  // D = pipeline depth
 
   @autoreleasepool {
     id<MTLDevice> dev = MTLCreateSystemDefaultDevice();
@@ -88,9 +80,10 @@ int main() {
     printf("device: %s   maxThreads/tg: %lu   UMA: %s\n", dev.name.UTF8String,
            (unsigned long)pso.maxTotalThreadsPerThreadgroup, dev.hasUnifiedMemory ? "yes" : "no");
     printf("kernel: modal residue sum, K damped sines/sample   sampleRate: %.0f Hz\n", SR);
-    printf("metric: per-block round-trip (encode+commit+wait), %d iters after %d warm\n\n", ITERS, WARM);
-    printf("%-4s %-5s %10s %10s %10s %10s %10s   %-7s\n", "K", "B", "gpu_med", "gpu_p99",
-           "gpu_max", "cpu_med", "deadline", "verdict");
+    printf("all times us. sync/spin = single-shot round trip; pipe_call = encode+commit "
+           "(GPU overlapped); pipe_sust = sustained block interval.\n\n");
+    printf("%-4s %-5s %9s %9s %9s %9s %9s %10s   %-4s\n", "K", "B", "sync_med", "spin_med",
+           "spin_p99", "pipe_call", "pipe_sust", "deadline", "rt");
 
     std::mt19937 rng(1);
     std::uniform_real_distribution<float> uf(0.5f, 1.0f);
@@ -103,52 +96,96 @@ int main() {
       id<MTLBuffer> aB = [dev newBufferWithBytes:am.data() length:K * sizeof(float) options:MTLResourceStorageModeShared];
 
       for (int B : blocks) {
-        id<MTLBuffer> oB = [dev newBufferWithLength:B * sizeof(float) options:MTLResourceStorageModeShared];
         float t0 = 0.f, dt = 1.f / (float)SR;
         uint Ku = (uint)K;
         NSUInteger tg = MIN((NSUInteger)pso.maxTotalThreadsPerThreadgroup, (NSUInteger)B);
 
-        auto dispatch = [&] {
-          @autoreleasepool {
-            id<MTLCommandBuffer> cb = [q commandBuffer];
-            id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
-            [e setComputePipelineState:pso];
-            [e setBuffer:oB offset:0 atIndex:0];
-            [e setBuffer:fB offset:0 atIndex:1];
-            [e setBuffer:dB offset:0 atIndex:2];
-            [e setBuffer:aB offset:0 atIndex:3];
-            [e setBytes:&Ku length:sizeof(Ku) atIndex:4];
-            [e setBytes:&t0 length:sizeof(t0) atIndex:5];
-            [e setBytes:&dt length:sizeof(dt) atIndex:6];
-            [e dispatchThreads:MTLSizeMake(B, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-            [e endEncoding];
-            [cb commit];
-            [cb waitUntilCompleted];
-          }
+        // Encode the (identical) modal dispatch writing into outBuf; return the committed-ready cb.
+        auto encode = [&](id<MTLBuffer> outBuf) -> id<MTLCommandBuffer> {
+          id<MTLCommandBuffer> cb = [q commandBuffer];
+          id<MTLComputeCommandEncoder> e = [cb computeCommandEncoder];
+          [e setComputePipelineState:pso];
+          [e setBuffer:outBuf offset:0 atIndex:0];
+          [e setBuffer:fB offset:0 atIndex:1];
+          [e setBuffer:dB offset:0 atIndex:2];
+          [e setBuffer:aB offset:0 atIndex:3];
+          [e setBytes:&Ku length:sizeof(Ku) atIndex:4];
+          [e setBytes:&t0 length:sizeof(t0) atIndex:5];
+          [e setBytes:&dt length:sizeof(dt) atIndex:6];
+          [e dispatchThreads:MTLSizeMake(B, 1, 1) threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
+          [e endEncoding];
+          return cb;
         };
 
-        for (int i = 0; i < WARM; ++i) dispatch();
-        std::vector<double> lat;
-        lat.reserve(ITERS);
-        for (int i = 0; i < ITERS; ++i) { auto s = clk::now(); dispatch(); lat.push_back(us_since(s, clk::now())); }
-        std::sort(lat.begin(), lat.end());
+        id<MTLBuffer> oB = [dev newBufferWithLength:B * sizeof(float) options:MTLResourceStorageModeShared];
 
-        std::vector<float> cout(B);
-        std::vector<double> clat;
-        clat.reserve(256);
-        for (int i = 0; i < 32; ++i) cpu_block(B, K, fr.data(), de.data(), am.data(), 0, dt, cout.data());
-        for (int i = 0; i < 256; ++i) {
-          auto s = clk::now();
-          volatile float sink = cpu_block(B, K, fr.data(), de.data(), am.data(), 0, dt, cout.data());
-          (void)sink;
-          clat.push_back(us_since(s, clk::now()));
+        // ---- sync: commit + waitUntilCompleted (CPU sleeps until done) ----
+        std::vector<double> sync_lat;
+        sync_lat.reserve(ITERS);
+        for (int i = 0; i < WARM + ITERS; ++i) {
+          @autoreleasepool {
+            auto s = clk::now();
+            id<MTLCommandBuffer> cb = encode(oB);
+            [cb commit];
+            [cb waitUntilCompleted];
+            if (i >= WARM) sync_lat.push_back(us_since(s, clk::now()));
+          }
         }
-        std::sort(clat.begin(), clat.end());
+        std::sort(sync_lat.begin(), sync_lat.end());
+
+        // ---- spin: commit + busy-wait on status (no sleep/wake) ----
+        std::vector<double> spin_lat;
+        spin_lat.reserve(ITERS);
+        for (int i = 0; i < WARM + ITERS; ++i) {
+          @autoreleasepool {
+            auto s = clk::now();
+            id<MTLCommandBuffer> cb = encode(oB);
+            [cb commit];
+            while (cb.status < MTLCommandBufferStatusCompleted) { /* spin */ }
+            if (i >= WARM) spin_lat.push_back(us_since(s, clk::now()));
+          }
+        }
+        std::sort(spin_lat.begin(), spin_lat.end());
+
+        // ---- pipe: ring of D buffers, async completion handler signals a semaphore ----
+        std::vector<id<MTLBuffer>> ring(D);
+        for (int k = 0; k < D; ++k)
+          ring[k] = [dev newBufferWithLength:B * sizeof(float) options:MTLResourceStorageModeShared];
+        dispatch_semaphore_t sem = dispatch_semaphore_create(D);
+        for (int i = 0; i < WARM; ++i) {
+          @autoreleasepool {
+            dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);
+            id<MTLCommandBuffer> cb = encode(ring[i % D]);
+            [cb addCompletedHandler:^(id<MTLCommandBuffer> _) { dispatch_semaphore_signal(sem); }];
+            [cb commit];
+          }
+        }
+        for (int k = 0; k < D; ++k) dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);  // quiesce
+        for (int k = 0; k < D; ++k) dispatch_semaphore_signal(sem);                       // reset to D
+
+        std::vector<double> call;
+        call.reserve(ITERS);
+        auto pipe_start = clk::now();
+        for (int i = 0; i < ITERS; ++i) {
+          @autoreleasepool {
+            dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);  // backpressure — not in call cost
+            auto s = clk::now();
+            id<MTLCommandBuffer> cb = encode(ring[i % D]);
+            [cb addCompletedHandler:^(id<MTLCommandBuffer> _) { dispatch_semaphore_signal(sem); }];
+            [cb commit];
+            call.push_back(us_since(s, clk::now()));  // encode+commit only; GPU work overlaps
+          }
+        }
+        double pipe_total = us_since(pipe_start, clk::now());
+        for (int k = 0; k < D; ++k) dispatch_semaphore_wait(sem, DISPATCH_TIME_FOREVER);    // drain in-flight
+        for (int k = 0; k < D; ++k) dispatch_semaphore_signal(sem);                         // restore to D before release
+        std::sort(call.begin(), call.end());
 
         double dl = 1e6 * (double)B / SR;
-        double gmed = pct(lat, 0.5), gp99 = pct(lat, 0.99), gmax = lat.back(), cmed = pct(clat, 0.5);
-        const char* verdict = (gp99 < dl) ? "PASS" : (gmed < dl ? "p99>dl" : "FAIL");
-        printf("%-4d %-5d %9.1fu %9.1fu %9.1fu %9.1fu %9.1fu   %-7s\n", K, B, gmed, gp99, gmax, cmed, dl, verdict);
+        double pipe_call = pct(call, 0.5), pipe_sust = pipe_total / ITERS;
+        const char* rt = (pipe_sust < dl) ? "PASS" : "FAIL";
+        printf("%-4d %-5d %8.1fu %8.1fu %8.1fu %8.1fu %8.1fu %9.1fu   %-4s\n", K, B,
+               pct(sync_lat, 0.5), pct(spin_lat, 0.5), pct(spin_lat, 0.99), pipe_call, pipe_sust, dl, rt);
       }
       printf("\n");
     }

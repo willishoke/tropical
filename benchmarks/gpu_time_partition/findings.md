@@ -78,11 +78,42 @@ K    B        gpu_med    gpu_p99    gpu_max    cpu_med   deadline   verdict
   decision, not a replacement: heavy closed-form patches that a CPU can't fill in time
   become realtime on the GPU; light ones stay on the CPU.
 
+## Reducing the submission floor
+
+The flat ~200 µs above is the *synchronous single-shot* path. Two ways off it, both
+measured (`data/results_modes.txt`):
+
+- **spin** — replace `waitUntilCompleted` with a busy-wait on `cb.status`. **Doesn't
+  help.** spin_med ≈ sync_med (often marginally worse), and the ~1–1.5 ms jitter tail
+  survives in both. The single-shot floor is GPU-side — kickoff + completion signalling —
+  not the CPU sleep/wake, so you can't spin under it. (This corrected the guess that spin
+  would be the big cut; it isn't.)
+- **pipe** — keep `D=3` blocks in flight with an async `addCompletedHandler` signalling a
+  semaphore, so the audio thread pays only encode+commit and hands off. **Decisive.**
+
+```
+K    B      sync_med  spin_med  pipe_call  pipe_sust   deadline
+16   256      165.7     198.0       3.6       76.5      5333.3
+64   1024     221.5     241.0       5.9       85.1     21333.3
+256  2048     279.4     331.2       5.6      107.2     42666.7
+```
+
+Pipelining collapses the critical-path cost from ~200 µs to **~4–6 µs** (a ~40–60×
+cut — that's what an audio callback actually pays) while the GPU sustains a block every
+**~80–108 µs**, far under every deadline including the tightest (B=64 / 1333 µs). Latency
+≠ throughput: one dispatch round-trips in ~200 µs, but with the pipeline full the GPU
+retires ~10–12k blocks/s. The effective floor essentially vanishes; the toll moves off
+the critical path and is absorbed by the block cadence. Caveat: the ~1–1.5 ms single-shot
+jitter tail still exists per dispatch, so depth must exceed the worst-case stall —
+trivially true at B≥128 (deadline ≫ stall), but B=64 needs lookahead ≥2 blocks, since a
+lone 1.5 ms stall exceeds one 1.33 ms deadline.
+
 ## Caveats / next
 
-- Single command buffer per block is the naive submission path; the flat floor is its
-  ceiling on improvement. Measure indirect command buffers + pipelined double-buffering.
-- `waitUntilCompleted` here also serializes with an idle GPU (no display contention). A
+- Indirect command buffers (pre-encode the identical command once) would shave the ~4 µs
+  encode cost further, but pipelining already put the critical path well below any deadline
+  — diminishing returns.
+- Every mode here serializes with an *idle* GPU (no display contention). A realtime audio
   realtime audio thread shares the GPU with the compositor; robustness under contention
   needs a reserved-GPU test (headless / Jetson) before any production claim.
 - This is a hand-written stand-in for the real kernel — it validates the *dispatch model*,

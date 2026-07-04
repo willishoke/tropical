@@ -1,0 +1,28 @@
+c++ -O3 -std=c++20 -fobjc-arc -Wall -Wno-deprecated-declarations -framework Metal -framework Foundation gpu_time_partition.mm -o bench
+./bench
+device: Apple M1 Pro   maxThreads/tg: 1024   UMA: yes
+kernel: modal residue sum, K damped sines/sample   sampleRate: 48000 Hz
+all times us. sync/spin = single-shot round trip; pipe_call = encode+commit (GPU overlapped); pipe_sust = sustained block interval.
+
+K    B      sync_med  spin_med  spin_p99 pipe_call pipe_sust   deadline   rt  
+16   64       204.5u    215.9u   1437.0u      3.4u     86.9u    1333.3u   PASS
+16   128      163.9u    195.3u   1461.3u      3.6u     77.7u    2666.7u   PASS
+16   256      165.7u    198.0u   1406.6u      3.6u     76.5u    5333.3u   PASS
+16   512      163.2u    199.6u   1424.1u      3.8u     80.5u   10666.7u   PASS
+16   1024     165.2u    206.5u   1564.3u      3.5u     79.1u   21333.3u   PASS
+16   2048     175.2u    207.1u   1375.2u      3.4u     84.3u   42666.7u   PASS
+
+64   64       199.7u    229.6u   1350.9u      3.4u     89.0u    1333.3u   PASS
+64   128      212.8u    228.6u   1219.5u      3.3u     84.3u    2666.7u   PASS
+64   256      180.9u    216.9u   1090.2u      3.8u     87.9u    5333.3u   PASS
+64   512      184.1u    223.4u   1336.9u      5.6u     89.7u   10666.7u   PASS
+64   1024     221.5u    241.0u   1535.0u      5.9u     85.1u   21333.3u   PASS
+64   2048     209.7u    224.3u   1355.5u      5.9u     78.0u   42666.7u   PASS
+
+256  64       250.7u    269.2u   1322.4u      4.8u     95.4u    1333.3u   PASS
+256  128      236.5u    284.1u   1088.5u      4.7u     95.4u    2666.7u   PASS
+256  256      236.8u    282.2u    963.4u      5.0u     89.1u    5333.3u   PASS
+256  512      251.0u    287.7u    971.8u      4.8u    103.0u   10666.7u   PASS
+256  1024     252.0u    336.8u   1101.0u      5.3u    108.0u   21333.3u   PASS
+256  2048     279.4u    331.2u   1019.1u      5.6u    107.2u   42666.7u   PASS
+
