@@ -1,3 +1,4 @@
+import Std.Data.HashMap
 import Lean.Data.Json
 import Tropical.Parse.Nodes
 
@@ -308,6 +309,133 @@ def MatchArm.body : MatchArm → Expr
   | .mk _ _ b => b
 
 -- ─────────────────────────────────────────────────────────────
+-- ExprArena — the hash-consed (DAG) form of the resolved expression
+--
+-- The native-DAG representation for the whole strata pipeline (issue #190). An
+-- `ENode` is flat — its children are `ExprId`s — so it is O(1) to hash and
+-- compare, and interning at construction makes two equal subtrees one node.
+-- This is THE resolved-expression representation: `Program`'s expression leaves
+-- are `ExprId`s into an `ExprArena`; there is no tree `Expr` twin.
+-- ─────────────────────────────────────────────────────────────
+
+/-- A let binder with an id-valued body. -/
+structure ELetBinder where
+  binder : Binder
+  value : ExprId
+deriving BEq, Repr, Inhabited
+
+/-- A tag payload with an id-valued field. -/
+structure ETagPayload where
+  field : Nat
+  value : ExprId
+deriving BEq, Repr, Inhabited
+
+/-- A match arm with an id-valued body. -/
+structure EMatchArm where
+  variant : Nat
+  binders : Array Binder
+  body : ExprId
+deriving BEq, Repr, Inhabited
+
+/-- A resolved expression node with children referenced by `ExprId`; flat (no
+    inlined subtrees). The full resolved op set — combinators (`fold`,
+    `generate`, …), `letIn`, `tag`/`match` and their binders — so the arena is
+    live from the elaborator through the strata passes to emit.
+
+    Binders carry their `BinderIdx`, so two otherwise-identical combinators with
+    *different* binder indices stay distinct (alpha-correct); within one program,
+    identical subtrees carry identical binder indices and so share. -/
+inductive ENode where
+  | num (n : JsonNumber)
+  | bool (b : Bool)
+  | arr (items : Array ExprId)
+  | binary (tag : BinaryOpTag) (lhs rhs : ExprId)
+  | unary (tag : UnaryOpTag) (arg : ExprId)
+  | clamp (value lo hi : ExprId)
+  | select (cond then_ else_ : ExprId)
+  | arraySet (arr idx value : ExprId)
+  | index (arr idx : ExprId)
+  | zeros (count : ExprId)
+  | inputRef (idx : InputIdx)
+  | paramRef (idx : ParamIdx)
+  | typeParamRef (idx : TypeParamIdx)
+  | bindingRef (idx : BinderIdx)
+  | nestedOut (instance_ : InstanceIdx) (output : OutputIdx)
+  | sampleRate
+  | sampleIndex
+  | fold (over init : ExprId) (acc elem : Binder) (body : ExprId)
+  | scan (over init : ExprId) (acc elem : Binder) (body : ExprId)
+  | generate (count : ExprId) (iter : Binder) (body : ExprId)
+  | iterate (count init : ExprId) (iter : Binder) (body : ExprId)
+  | chain (count init : ExprId) (iter : Binder) (body : ExprId)
+  | map2 (over : ExprId) (elem : Binder) (body : ExprId)
+  | zipWith (a b : ExprId) (x y : Binder) (body : ExprId)
+  | letIn (binders : Array ELetBinder) (body : ExprId)
+  | tag (def_ : TypeDefIdx) (variant : Nat) (payload : Array ETagPayload)
+  | match_ (def_ : TypeDefIdx) (scrutinee : ExprId) (arms : Array EMatchArm)
+deriving BEq, Repr, Inhabited
+
+/-- O(1) structural hash — children are ids (no subtree recursion). Op tags and
+    binders fold through hashable components (`.wire`, `.idx`, names). -/
+def enodeHash : ENode → UInt64
+  | .num n          => mixHash 1 (hash n)
+  | .bool b         => mixHash 2 (hash b)
+  | .arr items      => mixHash 3 (hash (items.map (·.idx)))
+  | .binary t a b   => mixHash (mixHash (mixHash 4 (hash t.wire)) (hash a.idx)) (hash b.idx)
+  | .unary t a      => mixHash (mixHash 5 (hash t.wire)) (hash a.idx)
+  | .clamp a b c    => mixHash (mixHash (mixHash 6 (hash a.idx)) (hash b.idx)) (hash c.idx)
+  | .select a b c   => mixHash (mixHash (mixHash 7 (hash a.idx)) (hash b.idx)) (hash c.idx)
+  | .arraySet a b c => mixHash (mixHash (mixHash 8 (hash a.idx)) (hash b.idx)) (hash c.idx)
+  | .index a b      => mixHash (mixHash 9 (hash a.idx)) (hash b.idx)
+  | .zeros c        => mixHash 10 (hash c.idx)
+  | .inputRef i     => mixHash 11 (hash i.idx)
+  | .paramRef i     => mixHash 12 (hash i.idx)
+  | .typeParamRef i => mixHash 13 (hash i.idx)
+  | .bindingRef i   => mixHash 14 (hash i.idx)
+  | .nestedOut i o  => mixHash (mixHash 15 (hash i.idx)) (hash o.idx)
+  | .sampleRate     => 16
+  | .sampleIndex    => 17
+  | .fold o i a e b => mixHash (mixHash (mixHash (mixHash (mixHash 18 (hash o.idx)) (hash i.idx)) (hash a.idx.idx)) (hash e.idx.idx)) (hash b.idx)
+  | .scan o i a e b => mixHash (mixHash (mixHash (mixHash (mixHash 19 (hash o.idx)) (hash i.idx)) (hash a.idx.idx)) (hash e.idx.idx)) (hash b.idx)
+  | .generate c i b => mixHash (mixHash (mixHash 20 (hash c.idx)) (hash i.idx.idx)) (hash b.idx)
+  | .iterate c i it b => mixHash (mixHash (mixHash (mixHash 21 (hash c.idx)) (hash i.idx)) (hash it.idx.idx)) (hash b.idx)
+  | .chain c i it b => mixHash (mixHash (mixHash (mixHash 22 (hash c.idx)) (hash i.idx)) (hash it.idx.idx)) (hash b.idx)
+  | .map2 o e b     => mixHash (mixHash (mixHash 23 (hash o.idx)) (hash e.idx.idx)) (hash b.idx)
+  | .zipWith a b x y bd => mixHash (mixHash (mixHash (mixHash (mixHash 24 (hash a.idx)) (hash b.idx)) (hash x.idx.idx)) (hash y.idx.idx)) (hash bd.idx)
+  | .letIn bs b     => mixHash (mixHash 25 (hash (bs.map (fun lb => (lb.binder.idx.idx, lb.value.idx))))) (hash b.idx)
+  | .tag d v p      => mixHash (mixHash (mixHash 26 (hash d.idx)) (hash v)) (hash (p.map (fun tp => (tp.field, tp.value.idx))))
+  | .match_ d s arms => mixHash (mixHash (mixHash 27 (hash d.idx)) (hash s.idx)) (hash (arms.map (fun a => (a.variant, a.body.idx))))
+
+instance : Hashable ENode := ⟨enodeHash⟩
+
+/-- Interned resolved-expression node store. Append-only; ids are assigned in
+    first-seen order; `dedup` collapses equal nodes. -/
+structure ExprArena where
+  nodes : Array ENode := #[]
+  dedup : Std.HashMap ENode ExprId := {}
+deriving Inhabited
+
+/-- `Repr` over the node array (the `dedup` map is a derived index). Lets
+    containers of `ExprArena` (`Arena`) keep their derived `Repr`. -/
+instance : Repr ExprArena where
+  reprPrec a _ := repr a.nodes
+
+abbrev EArenaM := StateM ExprArena
+
+/-- Intern a flat node, returning its (possibly shared) id. -/
+def eintern (n : ENode) : EArenaM ExprId := do
+  let a ← get
+  match a.dedup.get? n with
+  | some id => pure id
+  | none =>
+    let id : ExprId := ⟨a.nodes.size⟩
+    set { a with nodes := a.nodes.push n, dedup := a.dedup.insert n id }
+    pure id
+
+def ExprArena.deref (a : ExprArena) (id : ExprId) : Option ENode :=
+  a.nodes[id.idx]?
+
+-- ─────────────────────────────────────────────────────────────
 -- Decls + assigns + program
 -- ─────────────────────────────────────────────────────────────
 
@@ -394,6 +522,9 @@ structure Arena where
   typeParams : Array TypeParamDecl := #[]
   typeDefs : Array TypeDef := #[]
   programs : Array Program := #[]
+  /-- The shared hash-consed expression DAG every program's leaf `ExprId`s
+      index into. (Populated once `Program` is id-valued; `{}` until then.) -/
+  exprs : ExprArena := {}
 deriving Repr, Inhabited
 
 def Arena.program? (a : Arena) (i : ProgramIdx) : Option Program :=
