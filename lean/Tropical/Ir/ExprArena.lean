@@ -202,6 +202,51 @@ partial def ExprArena.toExpr (a : ExprArena) (id : ExprId) : Expr :=
     | .tag d v p      => .tag d v (p.map fun tp => .mk tp.field (a.toExpr tp.value))
     | .match_ d s arms => .match_ d (a.toExpr s) (arms.map fun arm => .mk arm.variant arm.binders (a.toExpr arm.body))
 
+/-- Convert the whole expression DAG into the emit's `CoreArena` (the post-strata
+    14-constructor subset), **preserving sharing**: each node is visited exactly once
+    and equal subtrees stay one node, so the modulated-clock duplication that a tree
+    reify (`toExpr`) would explode never forms. This is Phase B — the DAG threaded
+    straight to emit instead of flattened to a tree and re-interned three times.
+
+    Returns the `CoreArena` and a map `ExprArena id → CoreArena id`. Rejects any node
+    a strata pass should have removed (the DAG analogue of `Core.checkExpr`). Nodes
+    are interned in ascending id; the acyclic invariant (a child's id is lower than
+    its parent's) means every child is already mapped when its parent is reached, so
+    one linear pass suffices — O(unique nodes), never O(expanded tree). -/
+def ExprArena.toCoreArena (ea : ExprArena) : Except String (CoreArena × Array ExprId) :=
+  ea.nodes.foldlM (init := (({}, #[]) : CoreArena × Array ExprId)) fun (ca, map) n => do
+    let m := fun (id : ExprId) => map[id.idx]!    -- child already mapped (id.idx < current)
+    let cn : CNode ← match n with
+      | .num x          => .ok (.num x)
+      | .bool b         => .ok (.bool b)
+      | .arr items      => .ok (.arr (items.map m))
+      | .binary t l r   => .ok (.binary t (m l) (m r))
+      | .unary t a      => .ok (.unary t (m a))
+      | .clamp a b c    => .ok (.clamp (m a) (m b) (m c))
+      | .select a b c   => .ok (.select (m a) (m b) (m c))
+      | .arraySet a b c => .ok (.arraySet (m a) (m b) (m c))
+      | .index a b      => .ok (.index (m a) (m b))
+      | .inputRef i     => .ok (.inputRef i)
+      | .paramRef i     => .ok (.paramRef i)
+      | .nestedOut i o  => .ok (.nestedOut i o)
+      | .sampleRate     => .ok .sampleRate
+      | .sampleIndex    => .ok .sampleIndex
+      | .zeros _        => .error "toCoreArena: zeros survived arrayLower"
+      | .typeParamRef _ => .error "toCoreArena: typeParamRef survived specialize"
+      | .bindingRef _   => .error "toCoreArena: bindingRef survived arrayLower"
+      | .letIn ..       => .error "toCoreArena: let survived arrayLower"
+      | .fold ..        => .error "toCoreArena: fold survived arrayLower"
+      | .scan ..        => .error "toCoreArena: scan survived arrayLower"
+      | .generate ..    => .error "toCoreArena: generate survived arrayLower"
+      | .iterate ..     => .error "toCoreArena: iterate survived arrayLower"
+      | .chain ..       => .error "toCoreArena: chain survived arrayLower"
+      | .map2 ..        => .error "toCoreArena: map2 survived arrayLower"
+      | .zipWith ..     => .error "toCoreArena: zipWith survived arrayLower"
+      | .tag ..         => .error "toCoreArena: tag survived sumLower"
+      | .match_ ..      => .error "toCoreArena: match survived sumLower"
+    let (cid, ca') := (intern cn).run ca
+    .ok (ca', map.push cid)
+
 -- ─────────────────────────────────────────────────────────────
 -- EProgram — `Program` with id-valued expressions
 -- ─────────────────────────────────────────────────────────────
