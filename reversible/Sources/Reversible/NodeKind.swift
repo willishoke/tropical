@@ -41,6 +41,25 @@ struct NodeSpec {
     let knobs: [KnobSpec]
     var modal = false
     var fixed = false
+
+    /// Module footprint in grid units (VCV-style: every module has a defined
+    /// width and height on the grid). Derived from content: 54px per knob +
+    /// chrome for width; title + knob block + jacks for height.
+    var gridSize: (w: Int, h: Int) {
+        let w = max(4, Int(ceil((Double(knobs.count) * 54 + Double(max(0, knobs.count - 1)) * 8 + 18) / Grid.unit)))
+        let h = knobs.isEmpty ? 3 : 6
+        return (w, h)
+    }
+}
+
+enum Grid {
+    static let unit: Double = 22
+
+    static func snap(_ p: CGPoint) -> CGPoint {
+        CGPoint(
+            x: (p.x / unit).rounded() * unit,
+            y: (p.y / unit).rounded() * unit)
+    }
 }
 
 extension NodeKind {

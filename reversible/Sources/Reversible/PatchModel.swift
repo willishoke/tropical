@@ -81,9 +81,9 @@ final class PatchModel: ObservableObject {
         if spec.fixed && nodes.values.contains(where: { $0.kind == kind }) { return nil }
         counter += 1
         let id = "\(kind.rawValue)\(counter)"
-        let pos = point ?? CGPoint(
+        let pos = Grid.snap(point ?? CGPoint(
             x: 80 + Double(counter % 6) * 34,
-            y: 90 + Double(counter % 6) * 30)
+            y: 90 + Double(counter % 6) * 30))
         var values: [String: Double] = [:]
         for k in spec.knobs { values[k.name] = k.def }
         var inputs: [String: [String]] = [:]
