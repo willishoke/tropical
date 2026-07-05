@@ -18,6 +18,24 @@ struct PatchToolbar: ToolbarContent {
             .help("add a module to the patch")
         }
 
+        // Rank layout: one row per topological rank, sources at the top,
+        // dac at the bottom — the DAG's own order as geometry. `auto`
+        // re-runs it on every topology edit.
+        ToolbarItem {
+            ControlGroup {
+                Button {
+                    model.arrangeByRank()
+                } label: {
+                    Label("Arrange", systemImage: "square.stack.3d.down.right")
+                }
+                .help("lay out modules in rows by topological rank")
+                Toggle(isOn: $model.autoArrange) {
+                    Label("Auto", systemImage: "arrow.trianglehead.2.clockwise")
+                }
+                .help("re-arrange on every topology edit")
+            }
+        }
+
         ToolbarItem { ClockView() }
 
         ToolbarItem {

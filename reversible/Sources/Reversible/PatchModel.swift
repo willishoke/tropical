@@ -32,6 +32,11 @@ final class PatchModel: ObservableObject {
     @Published var statusIsError = false
     @Published var audioOn = false
     @Published var velocity: Double = 1
+    /// World → view offset for the infinite plane. Lives on the model so
+    /// arrange can bring the graph back into view.
+    @Published var pan: CGSize = .zero
+    /// When on, every topology edit re-runs the rank layout.
+    @Published var autoArrange = false
 
     /// Sources an inlet may legally take — the connection UI shows ONLY
     /// these (the type discipline enforced by omission: control inlets
@@ -39,6 +44,49 @@ final class PatchModel: ObservableObject {
     func legalSources(for nodeId: String, port: String) -> [PatchNode] {
         order.compactMap { nodes[$0] }
             .filter { canConnect(from: $0.id, to: nodeId, port: port) }
+    }
+
+    // ── Topological layout ────────────────────────────────────────────────
+    /// Rank = longest path from the sources (0 = no inputs). Total on a DAG;
+    /// the graph is acyclic by construction (canConnect rejects back-edges),
+    /// and the visit guard keeps a hypothetical bug from recursing forever.
+    func topologicalRanks() -> [String: Int] {
+        var memo: [String: Int] = [:]
+        func rank(_ id: String) -> Int {
+            if let r = memo[id] { return r }
+            memo[id] = 0
+            guard let n = nodes[id] else { return 0 }
+            let r = n.allInputs.map { rank($0) + 1 }.max() ?? 0
+            memo[id] = r
+            return r
+        }
+        for id in nodes.keys { _ = rank(id) }
+        return memo
+    }
+
+    /// One row per rank, sources at the top, dac at the bottom; within a row
+    /// modules keep their current left-to-right order (the mental map
+    /// survives the tidy). Positions land on the grid by construction.
+    func arrangeByRank() {
+        let ranks = topologicalRanks()
+        let rows = Dictionary(grouping: nodes.values) { ranks[$0.id] ?? 0 }
+        let margin = 2.0 * Grid.unit
+        let gap = 2.0 * Grid.unit
+        let rowPitch = 8.0 * Grid.unit   // tallest module (6u) + breathing room
+        withAnimation(.snappy(duration: 0.35)) {
+            for (r, members) in rows {
+                var x = margin
+                for n in members.sorted(by: { $0.position.x < $1.position.x }) {
+                    nodes[n.id]?.position = CGPoint(x: x, y: margin + Double(r) * rowPitch)
+                    x += Double(n.kind.spec.gridSize.w) * Grid.unit + gap
+                }
+            }
+            pan = .zero   // bring the arranged graph back into view
+        }
+    }
+
+    private func autoArrangeIfOn() {
+        if autoArrange { arrangeByRank() }
     }
 
     let engine: Engine
@@ -106,6 +154,7 @@ final class PatchModel: ObservableObject {
             hue: Double((counter * 137) % 360))
         nodes[id] = n
         order.append(id)
+        autoArrangeIfOn()
         return n
     }
 
@@ -117,6 +166,7 @@ final class PatchModel: ObservableObject {
             for p in m.inputs.keys { m.inputs[p]?.removeAll { $0 == id } }
             nodes[m.id] = m
         }
+        autoArrangeIfOn()
         schedulePush()
     }
 
@@ -155,6 +205,7 @@ final class PatchModel: ObservableObject {
         if !to.kind.spec.summing { to.inputs[port] = [] }   // single inlet: replace
         to.inputs[port, default: []].append(fromId)
         nodes[toId] = to
+        autoArrangeIfOn()
         schedulePush()
     }
 
@@ -162,6 +213,7 @@ final class PatchModel: ObservableObject {
         guard var to = nodes[toId] else { return }
         to.inputs[port]?.removeAll { $0 == fromId }
         nodes[toId] = to
+        autoArrangeIfOn()
         schedulePush()
     }
 

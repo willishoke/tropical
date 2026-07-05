@@ -10,28 +10,28 @@ import SwiftUI
 struct CanvasView: View {
     @EnvironmentObject var model: PatchModel
     // The plane is infinite in both axes: node positions are WORLD
-    // coordinates, `pan` maps world → view.
-    @State private var pan: CGSize = .zero
+    // coordinates, model.pan maps world → view (on the model so arrange
+    // can bring the graph back into view).
     @State private var panOrigin: CGSize?
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            DotGrid(pan: pan)
+            DotGrid(pan: model.pan)
                 .gesture(
                     DragGesture(minimumDistance: 1)
                         .onChanged { g in
-                            let o = panOrigin ?? pan
+                            let o = panOrigin ?? model.pan
                             panOrigin = o
-                            pan = CGSize(width: o.width + g.translation.width,
-                                         height: o.height + g.translation.height)
+                            model.pan = CGSize(width: o.width + g.translation.width,
+                                               height: o.height + g.translation.height)
                         }
                         .onEnded { _ in panOrigin = nil }
                 )
             ForEach(model.order, id: \.self) { id in
                 if let node = model.nodes[id] {
                     NodeView(node: node)
-                        .offset(x: node.position.x + pan.width,
-                                y: node.position.y + pan.height)
+                        .offset(x: node.position.x + model.pan.width,
+                                y: node.position.y + model.pan.height)
                 }
             }
         }
