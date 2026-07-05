@@ -1,38 +1,16 @@
 import SwiftUI
 
-// ── Jack geometry ───────────────────────────────────────────────────────────
-// Jack dots report their centers (in canvas space) up through a preference;
-// the wire layer reads the dictionary. The SwiftUI analog of app.js's
-// jackCenter() DOM query.
-struct JackID: Hashable {
-    let node: String
-    let dir: JackDir
-    let port: String
-}
-
-enum JackDir: Hashable { case input, output }
-
-struct JackCentersKey: PreferenceKey {
-    static var defaultValue: [JackID: CGPoint] = [:]
-    static func reduce(value: inout [JackID: CGPoint], nextValue: () -> [JackID: CGPoint]) {
-        value.merge(nextValue()) { _, new in new }
-    }
-}
-
-/// A wire drag in flight: from an outlet, tracking the pointer.
-struct PendingWire {
-    let fromNode: String
-    var cursor: CGPoint
-}
-
+// Connections render as COLOR IDENTITY, not cables. Every node has a stable
+// hue; an outlet wears its node's color, an inlet wears a chip per connected
+// source. Fan-out reads as the same color at many inlets; fan-in as many
+// chips on one inlet. Patching is selection, not drag: an inlet's menu lists
+// ONLY the type-legal sources (control inlets → knobs, modal inlets → modal
+// nodes, cycle-formers omitted) — the discipline enforced by what's offered,
+// never by rejection.
 struct CanvasView: View {
     @EnvironmentObject var model: PatchModel
-    @State private var jackCenters: [JackID: CGPoint] = [:]
-    @State private var pendingWire: PendingWire?
     // The plane is infinite in both axes: node positions are WORLD
-    // coordinates, `pan` maps world → view. Nodes render at world + pan, so
-    // jack centers (measured in the named space) already include the pan and
-    // wires/hit-tests need no second transform.
+    // coordinates, `pan` maps world → view.
     @State private var pan: CGSize = .zero
     @State private var panOrigin: CGSize?
 
@@ -49,10 +27,9 @@ struct CanvasView: View {
                         }
                         .onEnded { _ in panOrigin = nil }
                 )
-            WiresView(jackCenters: jackCenters, pendingWire: pendingWire)
             ForEach(model.order, id: \.self) { id in
                 if let node = model.nodes[id] {
-                    NodeView(node: node, pendingWire: $pendingWire)
+                    NodeView(node: node)
                         .offset(x: node.position.x + pan.width,
                                 y: node.position.y + pan.height)
                 }
@@ -60,11 +37,6 @@ struct CanvasView: View {
         }
         .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
         .clipped()
-        .coordinateSpace(name: "canvas")
-        .onPreferenceChange(JackCentersKey.self) {
-            jackCenters = $0
-            model.jackGeometry = $0
-        }
     }
 }
 
@@ -95,68 +67,10 @@ struct DotGrid: View {
     }
 }
 
-// ── Wires ───────────────────────────────────────────────────────────────────
-struct WiresView: View {
-    @EnvironmentObject var model: PatchModel
-    let jackCenters: [JackID: CGPoint]
-    let pendingWire: PendingWire?
-
-    private struct Edge: Identifiable {
-        let from: String
-        let to: String
-        let port: String
-        var id: String { "\(from)→\(to):\(port)" }
-    }
-
-    private var edges: [Edge] {
-        model.order.compactMap { model.nodes[$0] }.flatMap { n in
-            n.inputs.flatMap { port, srcs in
-                srcs.map { Edge(from: $0, to: n.id, port: port) }
-            }
-        }
-    }
-
-    var body: some View {
-        ZStack {
-            ForEach(edges) { e in
-                if let a = jackCenters[JackID(node: e.from, dir: .output, port: "out")],
-                   let b = jackCenters[JackID(node: e.to, dir: .input, port: e.port)] {
-                    let path = wirePath(a, b)
-                    path.stroke(Theme.wire, lineWidth: 2.5)
-                        .opacity(0.85)
-                        // Fat invisible stroke = the click target for delete.
-                        .contentShape(path.strokedPath(StrokeStyle(lineWidth: 12)))
-                        .onTapGesture {
-                            model.deleteEdge(to: e.to, port: e.port, from: e.from)
-                        }
-                }
-            }
-            if let p = pendingWire,
-               let a = jackCenters[JackID(node: p.fromNode, dir: .output, port: "out")] {
-                wirePath(a, p.cursor)
-                    .stroke(Theme.jackHot, style: StrokeStyle(lineWidth: 2.5, dash: [5, 4]))
-                    .allowsHitTesting(false)
-            }
-        }
-    }
-
-    private func wirePath(_ a: CGPoint, _ b: CGPoint) -> Path {
-        let dx = max(40, abs(b.x - a.x) * 0.5)
-        var p = Path()
-        p.move(to: a)
-        p.addCurve(
-            to: b,
-            control1: CGPoint(x: a.x + dx, y: a.y),
-            control2: CGPoint(x: b.x - dx, y: b.y))
-        return p
-    }
-}
-
 // ── Node ────────────────────────────────────────────────────────────────────
 struct NodeView: View {
     @EnvironmentObject var model: PatchModel
     let node: PatchNode
-    @Binding var pendingWire: PendingWire?
     @State private var dragOrigin: CGPoint?
 
     private var spec: NodeSpec { node.kind.spec }
@@ -164,40 +78,46 @@ struct NodeView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             titleBar
-            body_
+            knobRow
             Spacer(minLength: 0)
-            jacks
+            ports
         }
         // VCV-style: every module has a defined footprint in grid units.
         .frame(width: Double(spec.gridSize.w) * Grid.unit,
                height: Double(spec.gridSize.h) * Grid.unit,
                alignment: .topLeading)
-        .background(Theme.panel)
-        .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.edge))
-        .clipShape(RoundedRectangle(cornerRadius: 8))
+        .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
+        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.edge))
         .shadow(color: .black.opacity(0.35), radius: 9, y: 6)
-        .onTapGesture(count: 2) { model.deleteNode(node.id) }
     }
 
     private var titleBar: some View {
         HStack(spacing: 6) {
-            Circle().fill(spec.accent).frame(width: 9, height: 9)
+            Circle().fill(node.color).frame(width: 9, height: 9)
             Text(spec.title).font(Theme.mono.bold()).foregroundStyle(Theme.text)
             Spacer(minLength: 8)
             Text(node.id).font(Theme.monoSmall).foregroundStyle(Theme.muted)
+            if !spec.fixed {
+                Button {
+                    model.deleteNode(node.id)
+                } label: {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(Theme.muted)
+                }
+                .buttonStyle(.plain)
+                .help("remove module")
+            }
         }
         .padding(.horizontal, 9).padding(.vertical, 6)
-        .background(Theme.panel)
         .overlay(Rectangle().frame(height: 1).foregroundStyle(Theme.edge), alignment: .bottom)
         .contentShape(Rectangle())
         .gesture(
-            DragGesture(minimumDistance: 1, coordinateSpace: .named("canvas"))
+            DragGesture(minimumDistance: 1, coordinateSpace: .global)
                 .onChanged { g in
                     let origin = dragOrigin ?? node.position
                     dragOrigin = origin
-                    // Snap live (not on release): the module lands where it
-                    // reads, and wires re-route against the settled position.
-                    // World coords are unbounded — the plane is infinite.
+                    // Snap live: the module lands where it reads. World
+                    // coords are unbounded — the plane is infinite.
                     model.nodes[node.id]?.position = Grid.snap(CGPoint(
                         x: origin.x + g.translation.width,
                         y: origin.y + g.translation.height))
@@ -207,9 +127,9 @@ struct NodeView: View {
     }
 
     @ViewBuilder
-    private var body_: some View {
+    private var knobRow: some View {
         // A knob whose name matches a wired inlet is overridden by the patch
-        // cord (e.g. `freq` driven by a Knob node), so hide it.
+        // (e.g. `freq` driven by a Knob node), so hide it.
         let shown = spec.knobs.filter { (node.inputs[$0.name] ?? []).isEmpty }
         if !shown.isEmpty {
             HStack(alignment: .top, spacing: 8) {
@@ -221,91 +141,83 @@ struct NodeView: View {
         }
     }
 
-    private var jacks: some View {
+    private var ports: some View {
         HStack(alignment: .top) {
-            VStack(alignment: .leading, spacing: 7) {
+            VStack(alignment: .leading, spacing: 4) {
                 ForEach(spec.inlets, id: \.self) { port in
-                    JackView(node: node, port: port, dir: .input, pendingWire: $pendingWire)
+                    InletView(node: node, port: port)
                 }
             }
-            Spacer(minLength: 16)
-            VStack(alignment: .trailing, spacing: 7) {
+            Spacer(minLength: 12)
+            VStack(alignment: .trailing, spacing: 4) {
                 ForEach(spec.outlets, id: \.self) { port in
-                    JackView(node: node, port: port, dir: .output, pendingWire: $pendingWire)
+                    OutletView(node: node, port: port)
                 }
             }
         }
-        .padding(.horizontal, 4).padding(.bottom, 6)
+        .padding(.horizontal, 6).padding(.bottom, 6)
     }
 }
 
-// ── Jack ────────────────────────────────────────────────────────────────────
-struct JackView: View {
+// ── Ports ───────────────────────────────────────────────────────────────────
+/// An inlet: a menu of legal sources plus one color chip per connection.
+/// Tap a chip to disconnect. The menu is the whole patching gesture.
+struct InletView: View {
     @EnvironmentObject var model: PatchModel
     let node: PatchNode
     let port: String
-    let dir: JackDir
-    @Binding var pendingWire: PendingWire?
-    @State private var armed = false
+
+    private var sources: [String] { node.inputs[port] ?? [] }
 
     var body: some View {
-        HStack(spacing: 5) {
-            if dir == .input { dot; label } else { label; dot }
-        }
-    }
-
-    private var label: some View {
-        Text(port).font(Theme.monoSmall).foregroundStyle(Theme.muted)
-    }
-
-    private var dot: some View {
-        Circle()
-            .fill(armed ? Theme.jackHot : Theme.jack)
-            .overlay(Circle().stroke(Color(hex: 0x555F72)))
-            .frame(width: 12, height: 12)
-            .background(
-                GeometryReader { geo in
-                    Color.clear.preference(
-                        key: JackCentersKey.self,
-                        value: [
-                            JackID(node: node.id, dir: dir, port: port):
-                                CGPoint(
-                                    x: geo.frame(in: .named("canvas")).midX,
-                                    y: geo.frame(in: .named("canvas")).midY)
-                        ])
-                })
-            .gesture(dir == .output ? wireDrag : nil)
-    }
-
-    /// Drag from an outlet; drop on an inlet dot. The drop target is resolved
-    /// by hit-testing the reported jack centers (nearest inlet within reach) —
-    /// the SwiftUI analog of elementFromPoint.
-    private var wireDrag: some Gesture {
-        DragGesture(minimumDistance: 0, coordinateSpace: .named("canvas"))
-            .onChanged { g in
-                armed = true
-                pendingWire = PendingWire(fromNode: node.id, cursor: g.location)
-            }
-            .onEnded { g in
-                armed = false
-                defer { pendingWire = nil }
-                if let hit = model.nearestInlet(to: g.location) {
-                    model.connect(from: node.id, to: hit.node, port: hit.port)
+        HStack(spacing: 4) {
+            Menu {
+                let legal = model.legalSources(for: node.id, port: port)
+                if legal.isEmpty {
+                    Text("no legal sources")
+                } else {
+                    ForEach(legal) { src in
+                        Button("\(src.kind.spec.title) · \(src.id)") {
+                            model.connect(from: src.id, to: node.id, port: port)
+                        }
+                    }
                 }
+            } label: {
+                Image(systemName: "plus.circle")
+                    .font(.system(size: 11))
+                    .foregroundStyle(Theme.muted)
             }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .fixedSize()
+            .help("patch a source into \(port)")
+
+            ForEach(sources, id: \.self) { src in
+                Circle()
+                    .fill(model.nodes[src]?.color ?? Theme.jack)
+                    .frame(width: 10, height: 10)
+                    .onTapGesture { model.deleteEdge(to: node.id, port: port, from: src) }
+                    .help("\(src) → \(port) · click to disconnect")
+            }
+
+            Text(port).font(Theme.monoSmall).foregroundStyle(Theme.muted)
+        }
     }
 }
 
-extension PatchModel {
-    /// Inlet hit-testing against the live jack geometry (12px dot + slop).
-    /// Centers live on CanvasView state; mirrored here each preference pass.
-    func nearestInlet(to point: CGPoint) -> (node: String, port: String)? {
-        var best: (JackID, CGFloat)?
-        for (id, c) in jackGeometry where id.dir == .input {
-            let d = hypot(c.x - point.x, c.y - point.y)
-            if d <= 14, d < (best?.1 ?? .infinity) { best = (id, d) }
+/// An outlet wears its node's identity color — find this color on other
+/// modules' inlets to read the patch.
+struct OutletView: View {
+    let node: PatchNode
+    let port: String
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Text(port).font(Theme.monoSmall).foregroundStyle(Theme.muted)
+            Circle()
+                .fill(node.color)
+                .frame(width: 10, height: 10)
+                .help("\(node.id) — this color marks its destinations")
         }
-        guard let (id, _) = best else { return nil }
-        return (id.node, id.port)
     }
 }

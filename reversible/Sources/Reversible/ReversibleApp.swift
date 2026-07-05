@@ -28,16 +28,16 @@ struct RootView: View {
 
     var body: some View {
         VStack(spacing: 0) {
-            ToolbarView()
             CanvasView()
             footer
         }
         .background(Theme.bg)
+        .toolbar { PatchToolbar(model: model) }
         .environmentObject(model)
     }
 
     private var footer: some View {
-        Text("drag from an outlet (right) to an inlet (left) to patch downstream · drag a knob vertically to tweak · double-click a node to delete · the patch lowers through the arrow slide on every edit")
+        Text("＋ on an inlet patches a source (only legal ones are offered) · click a color chip to disconnect · an outlet's color marks its destinations · drag a knob vertically · the patch lowers through the arrow slide on every edit")
             .font(Theme.monoSmall)
             .foregroundStyle(Theme.muted)
             .lineLimit(1)

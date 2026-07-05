@@ -7,8 +7,16 @@ struct PatchNode: Identifiable {
     var values: [String: Double]
     /// inlet port → ordered source node ids
     var inputs: [String: [String]]
+    /// Identity hue (degrees). Connections render as COLOR, not cables: an
+    /// inlet wears the hues of its sources, so fan-out is the same color
+    /// appearing at many inlets. Golden-angle spacing keeps neighbors apart.
+    let hue: Double
 
     var allInputs: [String] { inputs.values.flatMap { $0 } }
+
+    var color: Color {
+        Color(hue: hue / 360, saturation: 0.62, brightness: 0.88)
+    }
 }
 
 /// The patch graph + engine session, one object. TOPOLOGY RELOWERS, SCALARS
@@ -24,9 +32,14 @@ final class PatchModel: ObservableObject {
     @Published var statusIsError = false
     @Published var audioOn = false
     @Published var velocity: Double = 1
-    /// Live jack-dot centers in canvas space, mirrored from the canvas's
-    /// preference pass — the hit-test surface for wire drops.
-    var jackGeometry: [JackID: CGPoint] = [:]
+
+    /// Sources an inlet may legally take — the connection UI shows ONLY
+    /// these (the type discipline enforced by omission: control inlets
+    /// list knobs, modal inlets list modal nodes, cycle-formers absent).
+    func legalSources(for nodeId: String, port: String) -> [PatchNode] {
+        order.compactMap { nodes[$0] }
+            .filter { canConnect(from: $0.id, to: nodeId, port: port) }
+    }
 
     let engine: Engine
     private var counter = 0
@@ -88,7 +101,9 @@ final class PatchModel: ObservableObject {
         for k in spec.knobs { values[k.name] = k.def }
         var inputs: [String: [String]] = [:]
         for p in spec.inlets { inputs[p] = [] }
-        let n = PatchNode(id: id, kind: kind, position: pos, values: values, inputs: inputs)
+        let n = PatchNode(
+            id: id, kind: kind, position: pos, values: values, inputs: inputs,
+            hue: Double((counter * 137) % 360))
         nodes[id] = n
         order.append(id)
         return n
