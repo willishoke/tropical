@@ -1,62 +1,44 @@
 import SwiftUI
 
-struct ToolbarView: View {
-    @EnvironmentObject var model: PatchModel
+/// Native window-toolbar content: add-module menu, master clock, transport,
+/// status. Custom chrome only where no native widget exists (the clock
+/// cluster); everything else is stock.
+struct PatchToolbar: ToolbarContent {
+    @ObservedObject var model: PatchModel
 
-    var body: some View {
-        HStack(spacing: 10) {
-            Text("tropical")
-                .font(Theme.mono.bold())
-                .foregroundStyle(Color(hex: 0xAEB8C8))
-            palette
-            Spacer()
-            ClockView()
-            transport
+    var body: some ToolbarContent {
+        ToolbarItem(placement: .navigation) {
+            Menu {
+                ForEach(NodeKind.allCases.filter { !$0.spec.fixed }, id: \.self) { kind in
+                    Button(kind.spec.title) { model.addNode(kind) }
+                }
+            } label: {
+                Label("Add Module", systemImage: "plus")
+            }
+            .help("add a module to the patch")
+        }
+
+        ToolbarItem { ClockView() }
+
+        ToolbarItem {
+            Button {
+                Task { await model.toggleAudio() }
+            } label: {
+                Label(model.audioOn ? "Stop" : "Start",
+                      systemImage: model.audioOn ? "stop.fill" : "play.fill")
+            }
+            .buttonStyle(.borderedProminent)
+            .tint(model.audioOn ? Theme.transportOn : Theme.transportOff)
+            .help(model.audioOn ? "stop audio" : "start audio")
+        }
+
+        ToolbarItem {
             Text(model.status)
-                .font(Theme.mono)
+                .font(Theme.monoSmall)
                 .foregroundStyle(model.statusIsError ? Theme.err : Theme.muted)
                 .lineLimit(1)
-                .frame(minWidth: 220, alignment: .trailing)
+                .frame(minWidth: 180, alignment: .trailing)
         }
-        .padding(.horizontal, 12).padding(.vertical, 8)
-        .background(Theme.panel)
-        .overlay(Rectangle().frame(height: 1).foregroundStyle(Theme.edge), alignment: .bottom)
-    }
-
-    private var palette: some View {
-        HStack(spacing: 6) {
-            ForEach(NodeKind.allCases.filter { !$0.spec.fixed }, id: \.self) { kind in
-                Button {
-                    model.addNode(kind)
-                } label: {
-                    HStack(spacing: 5) {
-                        Circle().fill(kind.spec.accent).frame(width: 8, height: 8)
-                        Text(kind.spec.title).font(Theme.mono)
-                    }
-                    .padding(.horizontal, 9).padding(.vertical, 5)
-                    .background(Theme.panel2)
-                    .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.edge))
-                    .clipShape(RoundedRectangle(cornerRadius: 6))
-                }
-                .buttonStyle(.plain)
-            }
-        }
-    }
-
-    private var transport: some View {
-        Button {
-            Task { await model.toggleAudio() }
-        } label: {
-            Text(model.audioOn ? "■ stop audio" : "▶ start audio")
-                .font(Theme.mono.bold())
-                .foregroundStyle(Color(hex: 0xEAF6EE))
-                .padding(.horizontal, 14).padding(.vertical, 6)
-                .background(model.audioOn ? Theme.transportOn : Theme.transportOff)
-                .overlay(RoundedRectangle(cornerRadius: 6)
-                    .stroke(model.audioOn ? Color(hex: 0xB25151) : Color(hex: 0x3C8A5E)))
-                .clipShape(RoundedRectangle(cornerRadius: 6))
-        }
-        .buttonStyle(.plain)
     }
 }
 
@@ -72,17 +54,15 @@ struct ClockView: View {
     @EnvironmentObject var model: PatchModel
 
     var body: some View {
-        HStack(spacing: 6) {
-            Text("clock").font(Theme.monoSmall).foregroundStyle(Theme.muted)
-            clockButton("⏴", on: model.velocity < 0, help: "reverse (−1×)") {
-                model.setVelocity(model.velocity < 0 ? 1 : -1)   // toggle reverse
+        HStack(spacing: 8) {
+            Picker("clock", selection: transportBinding) {
+                Image(systemName: "backward.fill").tag(Transport.reverse)
+                Image(systemName: "pause.fill").tag(Transport.freeze)
+                Image(systemName: "play.fill").tag(Transport.play)
             }
-            clockButton("⏸", on: model.velocity == 0, help: "freeze (0×)") {
-                model.setVelocity(model.velocity == 0 ? 1 : 0)
-            }
-            clockButton("⏵", on: model.velocity == 1, help: "play (1×)") {
-                model.setVelocity(1)
-            }
+            .pickerStyle(.segmented)
+            .labelsHidden()
+            .fixedSize()
             Slider(
                 value: Binding(
                     get: { model.velocity },
@@ -98,31 +78,36 @@ struct ClockView: View {
                 .monospacedDigit()
                 .frame(minWidth: 44, alignment: .trailing)
         }
-        .padding(.horizontal, 8).padding(.vertical, 3)
-        .background(Theme.panel2)
-        .overlay(RoundedRectangle(cornerRadius: 6).stroke(Theme.edge))
-        .clipShape(RoundedRectangle(cornerRadius: 6))
         .help("global time-warp — scrubs every voice, envelope, and reverb tail coherently (closed-form, no state)")
+    }
+
+    private enum Transport: Hashable { case reverse, freeze, play, free }
+
+    /// The segmented control reflects the three detents; a slider value off
+    /// any detent selects nothing (`.free`).
+    private var transportBinding: Binding<Transport> {
+        Binding(
+            get: {
+                switch model.velocity {
+                case -1: .reverse
+                case 0: .freeze
+                case 1: .play
+                default: .free
+                }
+            },
+            set: { t in
+                switch t {
+                case .reverse: model.setVelocity(-1)
+                case .freeze: model.setVelocity(0)
+                case .play: model.setVelocity(1)
+                case .free: break
+                }
+            })
     }
 
     /// Snap near the musically meaningful rates (mirrors app.js detents).
     private func detented(_ v: Double) -> Double {
         for d in [0.0, 1.0, -1.0, 2.0, -2.0] where abs(v - d) < 0.06 { return d }
         return v
-    }
-
-    private func clockButton(_ label: String, on: Bool, help: String, action: @escaping () -> Void) -> some View {
-        Button(action: action) {
-            Text(label)
-                .font(Theme.mono)
-                .foregroundStyle(on ? Color(hex: 0xEAF3F6) : Theme.text)
-                .padding(.horizontal, 7).padding(.vertical, 2)
-                .background(on ? Theme.clockOn : Theme.panel)
-                .overlay(RoundedRectangle(cornerRadius: 5)
-                    .stroke(on ? Color(hex: 0x3F86A8) : Theme.edge))
-                .clipShape(RoundedRectangle(cornerRadius: 5))
-        }
-        .buttonStyle(.plain)
-        .help(help)
     }
 }
