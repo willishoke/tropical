@@ -29,15 +29,32 @@ struct CanvasView: View {
     @EnvironmentObject var model: PatchModel
     @State private var jackCenters: [JackID: CGPoint] = [:]
     @State private var pendingWire: PendingWire?
+    // The plane is infinite in both axes: node positions are WORLD
+    // coordinates, `pan` maps world → view. Nodes render at world + pan, so
+    // jack centers (measured in the named space) already include the pan and
+    // wires/hit-tests need no second transform.
+    @State private var pan: CGSize = .zero
+    @State private var panOrigin: CGSize?
 
     var body: some View {
         ZStack(alignment: .topLeading) {
-            DotGrid()
+            DotGrid(pan: pan)
+                .gesture(
+                    DragGesture(minimumDistance: 1)
+                        .onChanged { g in
+                            let o = panOrigin ?? pan
+                            panOrigin = o
+                            pan = CGSize(width: o.width + g.translation.width,
+                                         height: o.height + g.translation.height)
+                        }
+                        .onEnded { _ in panOrigin = nil }
+                )
             WiresView(jackCenters: jackCenters, pendingWire: pendingWire)
             ForEach(model.order, id: \.self) { id in
                 if let node = model.nodes[id] {
                     NodeView(node: node, pendingWire: $pendingWire)
-                        .offset(x: node.position.x, y: node.position.y)
+                        .offset(x: node.position.x + pan.width,
+                                y: node.position.y + pan.height)
                 }
             }
         }
@@ -51,14 +68,19 @@ struct CanvasView: View {
     }
 }
 
-/// The 22px dot grid backdrop (styles.css #canvas background-image).
+/// The 22px dot grid backdrop, phase-shifted by the pan so the plane reads
+/// as infinite (dots scroll with the world).
 struct DotGrid: View {
+    let pan: CGSize
+
     var body: some View {
         Canvas { ctx, size in
-            let step: CGFloat = 22
-            var y: CGFloat = step / 2
+            let step = Grid.unit
+            let ox = pan.width.truncatingRemainder(dividingBy: step)
+            let oy = pan.height.truncatingRemainder(dividingBy: step)
+            var y = oy - step
             while y < size.height {
-                var x: CGFloat = step / 2
+                var x = ox - step
                 while x < size.width {
                     ctx.fill(
                         Path(ellipseIn: CGRect(x: x - 1, y: y - 1, width: 2, height: 2)),
@@ -69,6 +91,7 @@ struct DotGrid: View {
             }
         }
         .background(Theme.bg)
+        .contentShape(Rectangle())
     }
 }
 
@@ -142,14 +165,17 @@ struct NodeView: View {
         VStack(alignment: .leading, spacing: 0) {
             titleBar
             body_
+            Spacer(minLength: 0)
             jacks
         }
-        .frame(minWidth: 132, alignment: .leading)
+        // VCV-style: every module has a defined footprint in grid units.
+        .frame(width: Double(spec.gridSize.w) * Grid.unit,
+               height: Double(spec.gridSize.h) * Grid.unit,
+               alignment: .topLeading)
         .background(Theme.panel)
         .overlay(RoundedRectangle(cornerRadius: 8).stroke(Theme.edge))
         .clipShape(RoundedRectangle(cornerRadius: 8))
         .shadow(color: .black.opacity(0.35), radius: 9, y: 6)
-        .fixedSize()
         .onTapGesture(count: 2) { model.deleteNode(node.id) }
     }
 
@@ -169,9 +195,12 @@ struct NodeView: View {
                 .onChanged { g in
                     let origin = dragOrigin ?? node.position
                     dragOrigin = origin
-                    model.nodes[node.id]?.position = CGPoint(
-                        x: max(0, origin.x + g.translation.width),
-                        y: max(0, origin.y + g.translation.height))
+                    // Snap live (not on release): the module lands where it
+                    // reads, and wires re-route against the settled position.
+                    // World coords are unbounded — the plane is infinite.
+                    model.nodes[node.id]?.position = Grid.snap(CGPoint(
+                        x: origin.x + g.translation.width,
+                        y: origin.y + g.translation.height))
                 }
                 .onEnded { _ in dragOrigin = nil }
         )
