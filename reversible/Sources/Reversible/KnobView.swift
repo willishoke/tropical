@@ -48,10 +48,14 @@ struct KnobView: View {
                         center: UnitPoint(x: 0.5, y: 0.38),
                         startRadius: 0, endRadius: 27))
                 .overlay(Circle().stroke(Theme.edge))
+            // Pointer sits 5px in from the top edge; the ROTATED view is the
+            // full 38px square, so the pivot is the dial center (CSS
+            // transform-origin 50% 14px ≡ 5 + 14 = 19 = center).
             RoundedRectangle(cornerRadius: 2)
                 .fill(Theme.jackHot)
                 .frame(width: 2, height: 13)
                 .offset(y: 5)
+                .frame(width: 38, height: 38, alignment: .top)
                 .rotationEffect(.degrees(angle), anchor: .center)
         }
         .frame(width: 38, height: 38)
