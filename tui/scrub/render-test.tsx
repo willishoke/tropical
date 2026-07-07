@@ -10,18 +10,19 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms))
 const main = async () => {
   process.env.TUI_NO_AUDIO = '1'
   const { lastFrame, stdin, unmount } = render(<App />)
-  await sleep(1500) // let engine boot + patch load
+  await sleep(15000) // let engine cold-boot + elaborate stdlib + patch load (arrow path)
 
   let frame = lastFrame() ?? ''
   if (!frame.includes('reversible')) throw new Error('missing title:\n' + frame)
   if (!frame.includes('loaded (audio off)')) throw new Error('patch did not load:\n' + frame)
-  if (!frame.includes('Velocity')) throw new Error('params not rendered:\n' + frame)
+  if (!frame.includes('Voice pitch')) throw new Error('params not rendered:\n' + frame)
 
-  // velocity is row 0 — scrub it negative (reverse) and check transport label
+  // Voice pitch is row 0 — scrub it and confirm the value display changes.
+  const before = lastFrame() ?? ''
   for (let i = 0; i < 30; i++) stdin.write('\x1B[D') // left arrow ×30
   await sleep(300)
   frame = lastFrame() ?? ''
-  if (!frame.includes('REVERSE')) throw new Error('reverse transport not shown:\n' + frame)
+  if (frame === before) throw new Error('param did not respond to input:\n' + frame)
 
   // toggle reset
   stdin.write('r')

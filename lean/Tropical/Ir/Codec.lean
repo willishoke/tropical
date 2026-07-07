@@ -145,7 +145,13 @@ def encPortType (arena : Arena) : PortType → EncM Json
 def encBinder (b : Binder) : Json :=
   Json.mkObj [("name", Json.str b.name), ("idx", Lean.toJson b.idx.idx)]
 
-partial def encExpr (arena : Arena) : Expr → EncM Json
+/-- Encode a resolved expression to `tropical_resolved_1` JSON, derefing the
+    id-form through `arena.exprs`. Byte-identical output to the former tree
+    encoder — the arena is an implementation detail of how the graph is stored. -/
+partial def encExpr (arena : Arena) (id : ExprId) : EncM Json := do
+  let some node := arena.exprs.deref id
+    | encErr s!"encExpr: dangling ExprId {id.idx}"
+  match node with
   | .num n => pure (Json.num n)
   | .bool b => pure (Json.bool b)
   | .arr items => do
@@ -439,23 +445,32 @@ private def decodeTypeDef (i : Nat) (j : JsonV) (typeDefs : Array TypeDef)
 private def binder (ctx : String) (j : JsonV) : Except String Binder := do
   pure { name := ← reqStr ctx j "name", idx := ⟨← reqNat ctx j "idx"⟩ }
 
+/-- The decode monad interns each node into the shared expression DAG as it is
+    parsed, so a decoded `Program` is id-valued like the elaborator's output. -/
+private abbrev DecM := StateT ExprArena (Except String)
+
+private def internD (n : ENode) : DecM ExprId := fun a => .ok ((eintern n).run a)
+
+/-- Parse + intern a `tropical_resolved_1` expression, returning its arena id.
+    (Byte-round-trips with `encExpr` above.) The `req*`/`err`/`binder` helpers
+    return `Except String` and auto-lift into `DecM`. -/
 private partial def expr (ctx : String) (j : JsonV) (tdBase tdCount : Nat) :
-    Except String Expr := do
+    DecM ExprId := do
   match j with
-  | .num n => pure (.num n)
-  | .bool b => pure (.bool b)
+  | .num n => internD (.num n)
+  | .bool b => internD (.bool b)
   | .arr items => do
-    let mut out : Array Expr := #[]
+    let mut out : Array ExprId := #[]
     for h : i in [0:items.size] do
       out := out.push (← expr s!"{ctx}[{i}]" items[i] tdBase tdCount)
-    pure (.arr out)
+    internD (.arr out)
   | .obj _ =>
     let some op := j.opOf? | err ctx "expression object missing string 'op'"
     let args (n : Nat) : Except String (Array JsonV) := do
       let a ← reqArr ctx j "args"
       if a.size != n then err ctx s!"'{op}' expects {n} args, got {a.size}"
       else pure a
-    let sub (k : String) : Except String Expr := do
+    let sub (k : String) : DecM ExprId := do
       expr s!"{ctx}.{k}" (← reqField ctx j k) tdBase tdCount
     let defIdx : Except String TypeDefIdx := do
       let d ← reqNat ctx j "def"
@@ -463,90 +478,91 @@ private partial def expr (ctx : String) (j : JsonV) (tdBase tdCount : Nat) :
       else err ctx s!"typeDef pool index {d} is out of range"
     if let some tag := BinaryOpTag.ofWire? op then
       let a ← args 2
-      pure (.binary tag (← expr s!"{ctx}.args[0]" a[0]! tdBase tdCount)
-                        (← expr s!"{ctx}.args[1]" a[1]! tdBase tdCount))
+      internD (.binary tag (← expr s!"{ctx}.args[0]" a[0]! tdBase tdCount)
+                           (← expr s!"{ctx}.args[1]" a[1]! tdBase tdCount))
     else if let some tag := UnaryOpTag.ofWire? op then
       let a ← args 1
-      pure (.unary tag (← expr s!"{ctx}.args[0]" a[0]! tdBase tdCount))
+      internD (.unary tag (← expr s!"{ctx}.args[0]" a[0]! tdBase tdCount))
     else match op with
     | "clamp" => do
       let a ← args 3
-      pure (.clamp (← expr s!"{ctx}.args[0]" a[0]! tdBase tdCount)
-                   (← expr s!"{ctx}.args[1]" a[1]! tdBase tdCount)
-                   (← expr s!"{ctx}.args[2]" a[2]! tdBase tdCount))
-    | "select" => do
-      let a ← args 3
-      pure (.select (← expr s!"{ctx}.args[0]" a[0]! tdBase tdCount)
-                    (← expr s!"{ctx}.args[1]" a[1]! tdBase tdCount)
-                    (← expr s!"{ctx}.args[2]" a[2]! tdBase tdCount))
-    | "arraySet" => do
-      let a ← args 3
-      pure (.arraySet (← expr s!"{ctx}.args[0]" a[0]! tdBase tdCount)
+      internD (.clamp (← expr s!"{ctx}.args[0]" a[0]! tdBase tdCount)
                       (← expr s!"{ctx}.args[1]" a[1]! tdBase tdCount)
                       (← expr s!"{ctx}.args[2]" a[2]! tdBase tdCount))
+    | "select" => do
+      let a ← args 3
+      internD (.select (← expr s!"{ctx}.args[0]" a[0]! tdBase tdCount)
+                       (← expr s!"{ctx}.args[1]" a[1]! tdBase tdCount)
+                       (← expr s!"{ctx}.args[2]" a[2]! tdBase tdCount))
+    | "arraySet" => do
+      let a ← args 3
+      internD (.arraySet (← expr s!"{ctx}.args[0]" a[0]! tdBase tdCount)
+                         (← expr s!"{ctx}.args[1]" a[1]! tdBase tdCount)
+                         (← expr s!"{ctx}.args[2]" a[2]! tdBase tdCount))
     | "index" => do
       let a ← args 2
-      pure (.index (← expr s!"{ctx}.args[0]" a[0]! tdBase tdCount)
-                   (← expr s!"{ctx}.args[1]" a[1]! tdBase tdCount))
-    | "zeros" => pure (.zeros (← sub "count"))
-    | "inputRef" => pure (.inputRef ⟨← reqNat ctx j "idx"⟩)
-    | "paramRef" => pure (.paramRef ⟨← reqNat ctx j "idx"⟩)
-    | "typeParamRef" => pure (.typeParamRef ⟨← reqNat ctx j "idx"⟩)
-    | "bindingRef" => pure (.bindingRef ⟨← reqNat ctx j "idx"⟩)
+      internD (.index (← expr s!"{ctx}.args[0]" a[0]! tdBase tdCount)
+                      (← expr s!"{ctx}.args[1]" a[1]! tdBase tdCount))
+    | "zeros" => internD (.zeros (← sub "count"))
+    | "inputRef" => internD (.inputRef ⟨← reqNat ctx j "idx"⟩)
+    | "paramRef" => internD (.paramRef ⟨← reqNat ctx j "idx"⟩)
+    | "typeParamRef" => internD (.typeParamRef ⟨← reqNat ctx j "idx"⟩)
+    | "bindingRef" => internD (.bindingRef ⟨← reqNat ctx j "idx"⟩)
     | "nestedOut" =>
-      pure (.nestedOut ⟨← reqNat ctx j "instance"⟩ ⟨← reqNat ctx j "output"⟩)
-    | "sampleRate" => pure .sampleRate
-    | "sampleIndex" => pure .sampleIndex
+      internD (.nestedOut ⟨← reqNat ctx j "instance"⟩ ⟨← reqNat ctx j "output"⟩)
+    | "sampleRate" => internD .sampleRate
+    | "sampleIndex" => internD .sampleIndex
     | "fold" => do
-      pure (.fold (← sub "over") (← sub "init")
+      internD (.fold (← sub "over") (← sub "init")
         (← binder s!"{ctx}.acc" (← reqField ctx j "acc"))
         (← binder s!"{ctx}.elem" (← reqField ctx j "elem")) (← sub "body"))
     | "scan" => do
-      pure (.scan (← sub "over") (← sub "init")
+      internD (.scan (← sub "over") (← sub "init")
         (← binder s!"{ctx}.acc" (← reqField ctx j "acc"))
         (← binder s!"{ctx}.elem" (← reqField ctx j "elem")) (← sub "body"))
     | "generate" => do
-      pure (.generate (← sub "count")
+      internD (.generate (← sub "count")
         (← binder s!"{ctx}.iter" (← reqField ctx j "iter")) (← sub "body"))
     | "iterate" => do
-      pure (.iterate (← sub "count") (← sub "init")
+      internD (.iterate (← sub "count") (← sub "init")
         (← binder s!"{ctx}.iter" (← reqField ctx j "iter")) (← sub "body"))
     | "chain" => do
-      pure (.chain (← sub "count") (← sub "init")
+      internD (.chain (← sub "count") (← sub "init")
         (← binder s!"{ctx}.iter" (← reqField ctx j "iter")) (← sub "body"))
     | "map2" => do
-      pure (.map2 (← sub "over")
+      internD (.map2 (← sub "over")
         (← binder s!"{ctx}.elem" (← reqField ctx j "elem")) (← sub "body"))
     | "zipWith" => do
-      pure (.zipWith (← sub "a") (← sub "b")
+      internD (.zipWith (← sub "a") (← sub "b")
         (← binder s!"{ctx}.x" (← reqField ctx j "x"))
         (← binder s!"{ctx}.y" (← reqField ctx j "y")) (← sub "body"))
     | "let" => do
       let bs ← reqArr ctx j "binders"
-      let mut binders : Array LetBinder := #[]
+      let mut binders : Array ELetBinder := #[]
       for h : i in [0:bs.size] do
         let b := bs[i]
         let bctx := s!"{ctx}.binders[{i}]"
-        binders := binders.push <| .mk
-          (← binder s!"{bctx}.binder" (← reqField bctx b "binder"))
-          (← expr s!"{bctx}.value" (← reqField bctx b "value") tdBase tdCount)
-      pure (.letIn binders (← sub "in"))
+        binders := binders.push {
+          binder := ← binder s!"{bctx}.binder" (← reqField bctx b "binder"),
+          value := ← expr s!"{bctx}.value" (← reqField bctx b "value") tdBase tdCount }
+      internD (.letIn binders (← sub "in"))
     | "tag" => do
       let d ← defIdx
       let variant ← reqNat ctx j "variant"
       let ps ← reqArr ctx j "payload"
-      let mut payload : Array TagPayload := #[]
+      let mut payload : Array ETagPayload := #[]
       for h : i in [0:ps.size] do
         let p := ps[i]
         let pctx := s!"{ctx}.payload[{i}]"
-        payload := payload.push <| .mk (← reqNat pctx p "field")
-          (← expr s!"{pctx}.value" (← reqField pctx p "value") tdBase tdCount)
-      pure (.tag d variant payload)
+        payload := payload.push {
+          field := ← reqNat pctx p "field",
+          value := ← expr s!"{pctx}.value" (← reqField pctx p "value") tdBase tdCount }
+      internD (.tag d variant payload)
     | "match" => do
       let d ← defIdx
       let scrutinee ← sub "scrutinee"
       let as_ ← reqArr ctx j "arms"
-      let mut arms : Array MatchArm := #[]
+      let mut arms : Array EMatchArm := #[]
       for h : i in [0:as_.size] do
         let a := as_[i]
         let actx := s!"{ctx}.arms[{i}]"
@@ -554,9 +570,10 @@ private partial def expr (ctx : String) (j : JsonV) (tdBase tdCount : Nat) :
         let mut binders : Array Binder := #[]
         for h2 : k in [0:bs.size] do
           binders := binders.push (← binder s!"{actx}.binders[{k}]" bs[k])
-        arms := arms.push <| .mk (← reqNat actx a "variant") binders
-          (← expr s!"{actx}.body" (← reqField actx a "body") tdBase tdCount)
-      pure (.match_ d scrutinee arms)
+        arms := arms.push {
+          variant := ← reqNat actx a "variant", binders,
+          body := ← expr s!"{actx}.body" (← reqField actx a "body") tdBase tdCount }
+      internD (.match_ d scrutinee arms)
     | other => err ctx s!"unknown expression op '{other}'"
   | _ => err ctx "expected an expression value"
 
@@ -587,7 +604,7 @@ private def decodePortType (ctx : String) (j : JsonV) (typeDefs : Array TypeDef)
   | other => err ctx s!"unknown port-type kind '{other}'"
 
 private def decodeProgram (i : Nat) (j : JsonV) (typeDefs : Array TypeDef)
-    (tdBase tpBase tpCount pBase programsSoFar : Nat) : Except String Program := do
+    (tdBase tpBase tpCount pBase programsSoFar : Nat) : DecM Program := do
   let ctx := s!"programPool[{i}]"
   let tdCount := typeDefs.size - tdBase
   let name ← reqStr ctx j "name"
@@ -755,13 +772,16 @@ def decodeResolvedInto (arena : Arena) (j : JsonV) :
     let tds ← pool "typeDefPool"
     typeDefs := typeDefs.push (← Decode.decodeTypeDef i tds[i]! typeDefs tdBase)
 
-  -- 3. Programs — single forward pass.
+  -- 3. Programs — single forward pass, interning expressions into the shared
+  -- DAG (seeded from the existing arena's `exprs`).
   let mut programs : Array Program := arena.programs
+  let mut exprs : ExprArena := arena.exprs
   for i in [0:(← pool "programPool").size] do
     let ps ← pool "programPool"
-    programs := programs.push
-      (← Decode.decodeProgram i ps[i]! typeDefs tdBase tpBase tpCount
-           pBase (programs.size - pBase))
+    let (p, exprs') ← (Decode.decodeProgram i ps[i]! typeDefs tdBase tpBase tpCount
+           pBase (programs.size - pBase)).run exprs
+    programs := programs.push p
+    exprs := exprs'
 
   let root ← match j.getField? "root" with
     | some (.num n) =>
@@ -770,7 +790,7 @@ def decodeResolvedInto (arena : Arena) (j : JsonV) :
       else .error "decodeResolved: root: program pool index out of range"
     | _ => .error "decodeResolved: missing 'root'"
 
-  pure ({ typeParams, typeDefs, programs }, root)
+  pure ({ typeParams, typeDefs, programs, exprs }, root)
 
 /-- Decode `tropical_resolved_1` wire JSON into a fresh arena + root,
     keeping the wire pool order as the arena order. -/

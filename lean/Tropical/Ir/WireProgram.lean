@@ -106,27 +106,34 @@ partial def inferOutputPortType (expr : Json) : Option PortType :=
   | _ => none
 
 /-- Translation state: param decls (insertion-ordered, position =
-    `ParamIdx`). CF-only — the lifted body has no reg decls. -/
+    `ParamIdx`) plus the shared expression DAG the translated ids intern into.
+    CF-only — the lifted body has no reg decls. -/
 private structure Ctx where
   params : Array String := #[]
+  exprs : ExprArena := {}
+
+/-- Intern a node into the ctx's DAG, returning its id and the advanced ctx. -/
+private def internW (n : ENode) (ctx : Ctx) : ExprId × Ctx :=
+  let (id, ex) := (eintern n).run ctx.exprs
+  (id, { ctx with exprs := ex })
 
 private def wireKeyOf (inst port : String) : String := s!"{inst}:{port}"
 
-/-- Port of `translateExpr`: wire ExprNode Json → resolved `Expr`,
-    threading the param/reg accumulators. -/
+/-- Port of `translateExpr`: wire ExprNode Json → resolved id, interning into
+    the ctx's DAG and threading the param accumulator. -/
 private partial def translate (refToInput : Array (String × Nat))
-    (e : Json) (ctx : Ctx) : Except String (Expr × Ctx) := do
+    (e : Json) (ctx : Ctx) : Except String (ExprId × Ctx) := do
   match e with
-  | .num n => return (.num n, ctx)
-  | .bool b => return (.bool b, ctx)
+  | .num n => return internW (.num n) ctx
+  | .bool b => return internW (.bool b) ctx
   | .arr items =>
     let mut ctx := ctx
-    let mut out : Array Expr := #[]
+    let mut out : Array ExprId := #[]
     for item in items do
       let (t, ctx') ← translate refToInput item ctx
       out := out.push t
       ctx := ctx'
-    return (.arr out, ctx)
+    return internW (.arr out) ctx
   | .str _ | .null =>
     throw s!"liftWireToProgram: invalid expr value: {e.compress}"
   | .obj _ =>
@@ -136,11 +143,11 @@ private partial def translate (refToInput : Array (String × Nat))
       | some (.arr a) => a
       | _ => #[]
     -- N-ary helper: translate exactly `n` positional args.
-    let nArgs (n : Nat) (ctx : Ctx) : Except String (Array Expr × Ctx) := do
+    let nArgs (n : Nat) (ctx : Ctx) : Except String (Array ExprId × Ctx) := do
       unless args.size ≥ n do
         throw s!"liftWireToProgram: '{op}' requires {n} args, got {args.size}"
       let mut ctx := ctx
-      let mut out : Array Expr := #[]
+      let mut out : Array ExprId := #[]
       for i in [0:n] do
         let (t, ctx') ← translate refToInput args[i]! ctx
         out := out.push t
@@ -154,7 +161,7 @@ private partial def translate (refToInput : Array (String × Nat))
         | none => "undefined"
       let key := wireKeyOf inst outName
       match refToInput.find? (·.1 == key) with
-      | some (_, i) => return (.inputRef ⟨i⟩, ctx)
+      | some (_, i) => return internW (.inputRef ⟨i⟩) ctx
       | none =>
         throw <| s!"liftWireToProgram: ref {key} not in freeRefSet — " ++
           "pass the same set returned by freeRefs(expr)"
@@ -164,22 +171,22 @@ private partial def translate (refToInput : Array (String × Nat))
                  else { ctx with params := ctx.params.push name }
       let some pi := ctx.params.idxOf? name
         | throw "liftWireToProgram: param accumulator lost a name (internal)"
-      return (.paramRef ⟨pi⟩, ctx)
-    | "sampleRate" => return (.sampleRate, ctx)
-    | "sampleIndex" => return (.sampleIndex, ctx)
+      return internW (.paramRef ⟨pi⟩) ctx
+    | "sampleRate" => return internW .sampleRate ctx
+    | "sampleIndex" => return internW .sampleIndex ctx
     | "index" =>
       let (a, ctx) ← nArgs 2 ctx
-      return (.index a[0]! a[1]!, ctx)
+      return internW (.index a[0]! a[1]!) ctx
     | "array" =>
       let some (Json.arr items) := getField? e "items"
         | throw s!"liftWireToProgram: 'array' requires items[], got {e.compress}"
       let mut ctx := ctx
-      let mut out : Array Expr := #[]
+      let mut out : Array ExprId := #[]
       for item in items do
         let (t, ctx') ← translate refToInput item ctx
         out := out.push t
         ctx := ctx'
-      return (.arr out, ctx)
+      return internW (.arr out) ctx
     | "delay" =>
       -- CF-only: session-level `delay()` would synthesize a per-sample
       -- state register (the per-wire 1-sample latency). State has been
@@ -192,30 +199,30 @@ private partial def translate (refToInput : Array (String × Nat))
       match BinaryOpTag.ofWire? op with
       | some tag =>
         let (a, ctx) ← nArgs 2 ctx
-        return (.binary tag a[0]! a[1]!, ctx)
+        return internW (.binary tag a[0]! a[1]!) ctx
       | none =>
       match UnaryOpTag.ofWire? op with
       | some tag =>
         let (a, ctx) ← nArgs 1 ctx
-        return (.unary tag a[0]!, ctx)
+        return internW (.unary tag a[0]!) ctx
       | none =>
       match op with
       | "clamp" =>
         let (a, ctx) ← nArgs 3 ctx
-        return (.clamp a[0]! a[1]! a[2]!, ctx)
+        return internW (.clamp a[0]! a[1]! a[2]!) ctx
       | "select" =>
         let (a, ctx) ← nArgs 3 ctx
-        return (.select a[0]! a[1]! a[2]!, ctx)
+        return internW (.select a[0]! a[1]! a[2]!) ctx
       | "arraySet" =>
         let (a, ctx) ← nArgs 3 ctx
-        return (.arraySet a[0]! a[1]! a[2]!, ctx)
+        return internW (.arraySet a[0]! a[1]! a[2]!) ctx
       | _ => throw s!"liftWireToProgram: unhandled wire-form op '{op}'"
 
 /-- Port of `liftWireToProgram`: build the raw lifted `Program`.
     Returns the program AND the sorted free refs (the caller wires
     each `instance__port` input back to its source). -/
-def lift (expr : Json) (synthName : String) :
-    Except String (Program × Array (String × String)) := do
+def lift (expr : Json) (synthName : String) (exprs0 : ExprArena := {}) :
+    Except String (Program × Array (String × String) × ExprArena) := do
   let refs ← freeRefs expr
   -- Sort by canonical key — deterministic input order across calls.
   let sortedRefs := refs.qsort fun a b =>
@@ -227,7 +234,7 @@ def lift (expr : Json) (synthName : String) :
   let refToInput := sortedRefs.mapIdx fun i (inst, port) =>
     (wireKeyOf inst port, i)
   let outputDecl : OutputDecl := { name := "out", type? := inferOutputPortType expr }
-  let (translated, ctx) ← translate refToInput expr {}
+  let (translated, ctx) ← translate refToInput expr { exprs := exprs0 }
   let prog : Program := {
     name := synthName
     typeParams := #[]
@@ -238,6 +245,6 @@ def lift (expr : Json) (synthName : String) :
     assigns := #[{ target := .port ⟨0⟩, expr := translated }]
     binderCount := 0
     registry := #[] }
-  return (prog, sortedRefs)
+  return (prog, sortedRefs, ctx.exprs)
 
 end Tropical.Ir.WireProgram

@@ -62,11 +62,11 @@ private def inlineSubstProgramE (inner : EProgram)
     pure ({ i with default? := ← i.default?.mapM rw } : EInputDecl)
   let decls ← inner.decls.mapM fun d => do
     match d with
-    | .param name value? => pure (EBodyDecl.param name value?)
+    | .param name value? => pure (BodyDecl.param name value?)
     | .inst name typeKey tArgs ins =>
-      pure (EBodyDecl.inst name typeKey tArgs
+      pure (BodyDecl.inst name typeKey tArgs
         (← ins.mapM fun i => do pure ({ i with value := ← rw i.value } : EInstanceInput)))
-    | .prog name p => pure (EBodyDecl.prog name p)
+    | .prog name p => pure (BodyDecl.prog name p)
   let assigns ← inner.assigns.mapM fun a => do
     pure ({ a with expr := ← rw a.expr } : EOutputAssign)
   pure { inner with inputs := inputs, decls := decls, assigns := assigns, binderCount := inner.binderCount + binderOffset }

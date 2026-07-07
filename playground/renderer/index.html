@@ -11,6 +11,14 @@
     <span class="brand">tropical</span>
     <div class="palette" id="palette"></div>
     <div class="spacer"></div>
+    <div class="clock" id="clock" title="global time-warp — scrubs every voice, envelope, and reverb tail coherently (closed-form, no state)">
+      <span class="clock-label">clock</span>
+      <button id="clk-rev" class="clk-btn" title="reverse (−1×)">⏴</button>
+      <button id="clk-freeze" class="clk-btn" title="freeze (0×)">⏸</button>
+      <button id="clk-play" class="clk-btn" title="play (1×)">⏵</button>
+      <input id="clk-vel" type="range" min="-2" max="2" step="0.01" value="1" />
+      <span id="clk-val" class="clock-val">1.00×</span>
+    </div>
     <button id="btn-audio" class="transport">▶ start audio</button>
     <span id="status" class="status">booting engine…</span>
   </header>

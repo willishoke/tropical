@@ -1,35 +1,26 @@
 import Tropical.Ir.Nodes
 
 /-!
-# Core — the post-strata sub-IR as a type (Phase 5 stage 6)
+# Core — the post-strata program shape (Phase 5 stage 6)
 
 "The smallest sub-IR sufficient for any per-sample evaluator," made a
-type instead of prose. A `CoreExpr` is an `Expr` with the strata-dropped
-constructors gone by construction:
-
-  - no `typeParamRef`           (monomorphic — specialize)
-  - no `tag` / `match`          (sum-free — sumLower)
-  - no `fold`/`scan`/`generate`/`iterate`/`chain`/`map2`/`zipWith`/
-    `letIn`/`bindingRef`/`zeros` (combinator-free — arrayLower)
+type instead of prose. `CoreProgram` is the post-strata program: scalar,
+monomorphic, acyclic, combinator-free. Its **expression leaves are
+`ExprId`s** into a shared `CoreArena` (Phase B) — the tree twin `CoreExpr`
+is gone; there is one post-strata expression representation, the hash-consed
+DAG.
 
 Nesting is NOT dropped: the fractal session path keeps InstanceDecls
 as kernel boundaries (the flat path simply has none). Lifted
 ProgramDecls and never-instantiated registry entries are inert type
-bindings no evaluator reaches — they pass through as names, unchecked.
-`check` follows exactly the evaluator-reachable graph: body exprs,
-then recursively the program behind each instance's typeKey.
+bindings no evaluator reaches — they pass through as names.
 
-`check` is the executable downcast — the formalization of the
-post-strata invariant list, run as an assertion after the full Lean
-pipeline, and the spec any later typed-boundary refactor of the passes
-is checked against. Phase 6's emit/partition consume `CoreProgram`
-with total matches — no impossible-case panics.
-
-Harness scope note: on the differential `strata-file` nested path,
-instance targets are raw-elaborated (production strata-processes each
-instance type at registration), so the harness asserts `check` on the
-inline path only; the production seam asserts it per registered
-program.
+The executable downcasts that produce a `CoreProgram` — `EArena.toResolved`
+(strata exit) and `checkResolvedArena` (elaborated-tree boundary) — validate
+the post-strata invariant list (rejecting any strata-dropped constructor that
+survived) as they intern each leaf. They follow exactly the evaluator-reachable
+graph: body exprs, then recursively the program behind each instance's typeKey.
+The port-type resolvers below are shared by both.
 -/
 
 namespace Tropical.Ir.Core
@@ -72,26 +63,9 @@ inductive CorePortType where
   | array (element : CoreElem) (shape : Array CoreShapeDim)
 deriving Repr, Inhabited
 
-inductive CoreExpr where
-  | num (n : JsonNumber)
-  | bool (b : Bool)
-  | arr (items : Array CoreExpr)
-  | binary (tag : BinaryOpTag) (lhs rhs : CoreExpr)
-  | unary (tag : UnaryOpTag) (arg : CoreExpr)
-  | clamp (value lo hi : CoreExpr)
-  | select (cond then_ else_ : CoreExpr)
-  | arraySet (arr idx value : CoreExpr)
-  | index (arr idx : CoreExpr)
-  | inputRef (idx : InputIdx)
-  | paramRef (idx : ParamIdx)
-  | nestedOut (instance_ : InstanceIdx) (output : OutputIdx)
-  | sampleRate
-  | sampleIndex
-deriving Repr, Inhabited
-
 structure CoreInstanceInput where
   port : InputIdx
-  value : CoreExpr
+  value : ExprId
 deriving Repr, Inhabited
 
 inductive CoreBodyDecl where
@@ -108,7 +82,7 @@ deriving Repr, Inhabited
 structure CoreInputDecl where
   name : String
   type? : Option CorePortType := none
-  default? : Option CoreExpr := none
+  default? : Option ExprId := none
 deriving Repr, Inhabited
 
 structure CoreOutputDecl where
@@ -118,7 +92,7 @@ deriving Repr, Inhabited
 
 structure CoreOutputAssign where
   target : OutputTarget
-  expr : CoreExpr
+  expr : ExprId
 deriving Repr, Inhabited
 
 /-- A post-strata program, materialized as a tree. `registry` holds
@@ -164,62 +138,28 @@ def CoreProgram.instances (p : CoreProgram) : Array CoreBodyDecl :=
   p.decls.filter fun d => match d with | .inst .. => true | _ => false
 
 -- ─────────────────────────────────────────────────────────────
--- check — the executable downcast
+-- Port-type resolution (shared with the DAG downcast)
+--
+-- The expression downcast (`Expr`/`CoreExpr` → `ExprId`) moved to
+-- `EArena.toResolved` (Phase B: the strata DAG is threaded straight to
+-- emit instead of flattened to a tree and re-interned). These helpers —
+-- the pool-reference resolution for port types — stay here (they need
+-- only the identity pools, not the arena) and are public so the
+-- id-form downcast can reuse them.
 -- ─────────────────────────────────────────────────────────────
-
-private def fail {α} (prog : String) (what : String) : Except String α :=
-  .error s!"core check ('{prog}'): {what} survived strata"
-
-partial def checkExpr (progName : String) : Expr → Except String CoreExpr
-  | .num n => return .num n
-  | .bool b => return .bool b
-  | .arr items => return .arr (← items.mapM (checkExpr progName))
-  | .binary tag a b =>
-    return .binary tag (← checkExpr progName a) (← checkExpr progName b)
-  | .unary tag a => return .unary tag (← checkExpr progName a)
-  | .clamp a b c =>
-    return .clamp (← checkExpr progName a) (← checkExpr progName b) (← checkExpr progName c)
-  | .select a b c =>
-    return .select (← checkExpr progName a) (← checkExpr progName b) (← checkExpr progName c)
-  | .arraySet a b c =>
-    return .arraySet (← checkExpr progName a) (← checkExpr progName b) (← checkExpr progName c)
-  | .index a b => return .index (← checkExpr progName a) (← checkExpr progName b)
-  | .inputRef i => return .inputRef i
-  | .paramRef i => return .paramRef i
-  | .nestedOut i o => return .nestedOut i o
-  | .sampleRate => return .sampleRate
-  | .sampleIndex => return .sampleIndex
-  | .typeParamRef _ => fail progName "a typeParamRef (specialize)"
-  | .bindingRef _ => fail progName "a bindingRef (arrayLower)"
-  | .tag .. => fail progName "a tag (sumLower)"
-  | .match_ .. => fail progName "a match (sumLower)"
-  | .zeros _ => fail progName "a zeros (arrayLower)"
-  | .fold .. => fail progName "a fold (arrayLower)"
-  | .scan .. => fail progName "a scan (arrayLower)"
-  | .generate .. => fail progName "a generate (arrayLower)"
-  | .iterate .. => fail progName "an iterate (arrayLower)"
-  | .chain .. => fail progName "a chain (arrayLower)"
-  | .map2 .. => fail progName "a map2 (arrayLower)"
-  | .zipWith .. => fail progName "a zipWith (arrayLower)"
-  | .letIn .. => fail progName "a let (arrayLower)"
-
-private def checkOptExpr (progName : String) :
-    Option Expr → Except String (Option CoreExpr)
-  | some e => some <$> checkExpr progName e
-  | none => pure none
 
 /-- Resolve a pool-referencing element type to its self-contained Core
     form. Non-alias typeDefs in element position are unrepresentable in
     well-formed post-strata IR; collapse to float (the TS access path
     would read `undefined.base`-adjacent shapes as float downstream). -/
-private def resolveElem (arena : Arena) : ScalarOrAlias → CoreElem
+def resolveElem (arena : Arena) : ScalarOrAlias → CoreElem
   | .scalar k => .scalar k
   | .alias td =>
     match arena.typeDef? td with
     | some (.alias _ base) => .aliased base
     | _ => .aliased .float
 
-private def resolvePortType (arena : Arena) : PortType → CorePortType
+def resolvePortType (arena : Arena) : PortType → CorePortType
   | .scalar k => .scalar k
   | .alias td =>
     match arena.typeDef? td with
@@ -230,41 +170,9 @@ private def resolvePortType (arena : Arena) : PortType → CorePortType
       | .lit n => CoreShapeDim.lit n
       | .typeParam _ => CoreShapeDim.unresolved)
 
-private def resolveOptPortType (arena : Arena) :
+def resolveOptPortType (arena : Arena) :
     Option PortType → Option CorePortType
   | some t => some (resolvePortType arena t)
   | none => none
-
-partial def check (arena : Arena) (rootIdx : ProgramIdx) :
-    Except String CoreProgram := do
-  let some prog := arena.program? rootIdx
-    | .error s!"core check: program pool index {rootIdx.idx} out of range"
-  unless prog.typeParams.isEmpty do
-    fail prog.name s!"{prog.typeParams.size} typeParam decl(s) (specialize)"
-  let decls ← prog.decls.mapM fun d => do
-    match d with
-    | .param name value? => pure (CoreBodyDecl.param name value?)
-    | .inst name typeKey tArgs inputs =>
-      pure (CoreBodyDecl.inst name typeKey tArgs
-        (← inputs.mapM fun i => do
-          pure { port := i.port, value := ← checkExpr prog.name i.value : CoreInstanceInput }))
-    | .prog name _ => pure (CoreBodyDecl.progDecl name)
-  let assigns ← prog.assigns.mapM fun a => do
-    pure { target := a.target, expr := ← checkExpr prog.name a.expr : CoreOutputAssign }
-  let inputs ← prog.inputs.mapM fun i => do
-    pure { name := i.name, type? := resolveOptPortType arena i.type?,
-           default? := ← checkOptExpr prog.name i.default? : CoreInputDecl }
-  let outputs := prog.outputs.map fun o =>
-    { name := o.name, type? := resolveOptPortType arena o.type? : CoreOutputDecl }
-  -- Registry: follow only instance-referenced entries (the
-  -- evaluator-reachable graph), recursively.
-  let mut registry : Array (String × CoreProgram) := #[]
-  for d in prog.decls do
-    if let .inst name typeKey _ _ := d then
-      unless registry.any (·.1 == typeKey) do
-        let some tIdx := prog.registryGet? typeKey
-          | Except.error s!"core check ('{prog.name}'): instance '{name}' typeKey '{typeKey}' missing from registry"
-        registry := registry.push (typeKey, ← check arena tIdx)
-  return .mk prog.name inputs outputs decls assigns registry
 
 end Tropical.Ir.Core

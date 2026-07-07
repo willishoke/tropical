@@ -24,6 +24,15 @@ Attach to an already-running `--serve` engine instead (e.g. one already playing)
 TROPICAL_SOCK=/path/to.sock bun scope.tsx
 ```
 
+Attached, the scope taps whatever patch the other TUI has live. An arrow patch
+(the scrub's `load_patch_graph`) **publishes its own taps** — one per graph node,
+each routed to a `render_window`-readable root output slot — so the scope
+discovers them straight from `list_scope_taps` (no wiring). A session-model
+patch has no pre-published taps, so the scope falls back to discovering its
+instances and wiring each output to the reserved `scope` sink. Either way, `←/→`
+on the source control cycles the taps. `tui/launch-demo.sh` runs both panes
+against one engine.
+
 `q` / Esc quits. With no audio device it shows a static window at sample 0
 (`render_window` still works — only the master clock is frozen).
 

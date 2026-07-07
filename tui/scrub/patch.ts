@@ -1,106 +1,90 @@
-// Reversible τ-scrub + closed-form reverse reverb, anchored-phase voice,
-// CONTINUOUS pluck envelope (no discontinuity → no impulse-train scratch).
+// Reversible τ-scrub — reverse reverb via the arrow moat, on the modern
+// (arrowemit / `load_patch_graph`) path.
 //
-//   VelocityClock(velocity) → τ
-//        ├ AnchoredPhase(f0, τ)         → Φ   (pitch phase)
-//        └ AnchoredPhase(event_rate, τ) → Ψ   (event phase)
-//   tap k:  ModalVoice(Φ + f0·kD) · env(Ψ + event_rate·kD) · gᵏ ,  Σ → SoftClip → dac
+// The stateful stdlib this demo was born on (VelocityClock / AnchoredPhase /
+// Smooth) was retired by the cf-only fork; the live-param machinery moved into
+// the EmitArrow patch-graph (see lean/Tropical/Playground.lean). So this is now
+// a fixed patch-GRAPH driven live over the same three RPCs the playground uses:
 //
-// env(ψ) = 17.6·f·(1−f)⁶ with f=frac(ψ): a smooth skewed pulse — 0 at both ends
-// of the period (continuous across the wrap, so NO step → no aliasing comb),
-// asymmetric (fast rise, slow decay) so it still reverses audibly. No BLEP
-// needed because there's no discontinuity to band-limit.
+//   set_param          — a raw slot write (steps at block rate)
+//   set_param_glide    — a closed-form smoothstep ramp (click-free, stateless)
+//   set_param_freq     — a phase-anchored freq change (waveform stays continuous)
+//   set_param_velocity — the GLOBAL time-warp scrub (re-bases τ for continuity)
 //
-// All params are smoothed (audible glide) AND snap-settle, so between knob
-// moves f0/event_rate are exactly constant → AnchoredPhase is closed-form →
-// random access + exact reverse; during a move it glides (no squelch).
+// The graph (downstream-only, in the playground's node vocabulary):
+//
+//   plk ─► cmb ─► sfl ─► out
+//
+//   plk  PluckedMorphOsc — a MorphOsc with a closed-form pluck envelope baked in.
+//        THE dynamic content: forward it's a fast-attack/slow-decay pluck; reversed
+//        (Time warp < 0) a slow swell into a hard cut — the reversed-tape cue.
+//   cmb  one-sided resonant comb — the voice read at a decaying series of clock
+//        offsets k·delay. Because the voice is plucked, each tap is a delayed
+//        PLUCKED copy: an audible echo (delay < 0) or PRE-echo (delay > 0, reading
+//        the future — impossible on a stream). One-sided ⇒ time-asymmetric ⇒ the
+//        tail flips (echo ↔ pre-echo) when the master clock reverses.
+//   sfl  through-zero flange — motion over the whole tail.
+//
+// The global Time warp scrubs the master clock every generator reads, so one knob
+// runs the entire closed-form patch — voice, envelope, every comb tap — forward,
+// frozen, or backward, exactly. The slide (`normalize`) pushes each effect's warp
+// up onto the generators' clocks; nothing holds history.
+//
+// Every knob below is a live `param:<id>.<knob>` slot — turning it drives the
+// running kernel with NO recompile (the topology is fixed).
 
-const ref = (instance: string, output: string) => ({ op: 'ref', instance, output })
-const par = (name: string) => ({ op: 'param', name })
-const add = (a: any, b: any) => ({ op: 'add', args: [a, b] })
-const sub = (a: any, b: any) => ({ op: 'sub', args: [a, b] })
-const mul = (a: any, b: any) => ({ op: 'mul', args: [a, b] })
-const floor = (a: any) => ({ op: 'floor', args: [a] })
-const frac = (x: any) => sub(x, floor(x))
-
-const K = 10 // future reverb taps (k = 1..K); k = 0 is the dry event
+// A knob exposed on the TUI panel. `slot` is the engine param name
+// (`<nodeId>.<knob>`); `mode` picks which RPC drives it, matching how
+// Playground.lean allocates the slot (glided → ramp slots, anchored → #phase
+// slot, else a raw slot).
+export type ParamMode = 'live' | 'glide' | 'freq' | 'velocity'
 
 export type ParamSpec = {
-  name: string
+  slot: string
   label: string
   min: number
   max: number
   step: number
   value: number
   unit: string
-  group: 'transport' | 'voice' | 'reverb' | 'master'
+  mode: ParamMode
+  group: 'transport' | 'voice' | 'space' | 'motion'
 }
 
+// The panel. Values are in the graph's native units (Hz, seconds, unitless) —
+// exactly what the knob defaults below carry, so the seeded slots and these
+// agree name-for-name and unit-for-unit.
 export const PARAMS: ParamSpec[] = [
-  { name: 'velocity', label: 'Velocity', min: -2, max: 2, step: 0.05, value: 1, unit: '×', group: 'transport' },
-  { name: 'f0', label: 'Voice pitch', min: 40, max: 440, step: 1, value: 110, unit: 'Hz', group: 'voice' },
-  { name: 'event_rate', label: 'Event rate', min: 0.2, max: 6, step: 0.1, value: 1.0, unit: '/s', group: 'voice' },
-  { name: 'rev_time', label: 'Tap spacing', min: 5, max: 120, step: 1, value: 45, unit: 'ms', group: 'reverb' },
-  { name: 'rev_decay', label: 'Decay (g)', min: 0.3, max: 0.95, step: 0.01, value: 0.72, unit: '', group: 'reverb' },
-  { name: 'rev_amount', label: 'Reverb amt', min: 0, max: 1.2, step: 0.01, value: 0.7, unit: '', group: 'reverb' },
-  { name: 'master_gain', label: 'Drive', min: 0, max: 1.5, step: 0.01, value: 0.6, unit: '', group: 'master' },
+  { slot: 'master.velocity', label: 'Time warp', min: -2, max: 2, step: 0.05, value: 1, unit: '×', mode: 'velocity', group: 'transport' },
+  { slot: 'plk.freq',       label: 'Voice pitch', min: 40,     max: 440,  step: 1,      value: 110,   unit: 'Hz', mode: 'freq',  group: 'voice' },
+  { slot: 'plk.morph',      label: 'Morph',       min: 0,      max: 1,    step: 0.02,   value: 0.3,   unit: '',   mode: 'glide', group: 'voice' },
+  { slot: 'plk.event_rate', label: 'Pluck rate',  min: 0.5,    max: 8,    step: 0.1,    value: 2.5,   unit: '/s', mode: 'glide', group: 'voice' },
+  { slot: 'cmb.delay',      label: 'Tap (±=echo/pre)', min: -0.03, max: 0.03, step: 0.001, value: 0.012, unit: 's', mode: 'glide', group: 'space' },
+  { slot: 'cmb.decay',      label: 'Tail decay',  min: 0.2,    max: 0.9,  step: 0.01,   value: 0.7,   unit: '',   mode: 'glide', group: 'space' },
+  { slot: 'sfl.depth',      label: 'Flange depth', min: 0.0002, max: 0.02, step: 0.0002, value: 0.006, unit: 's', mode: 'glide', group: 'motion' },
+  { slot: 'sfl.rate',       label: 'Flange rate', min: 0.02,   max: 6,    step: 0.02,   value: 0.3,   unit: 'Hz', mode: 'live',  group: 'motion' },
 ]
 
-const GLIDE = 0.0007 // ~30 ms one-pole coefficient (clearly audible, then snaps)
+// A patch-graph node, shaped for `load_patch_graph` (see Playground.decodeGraph):
+// `{ id, kind, params, sel, in: { port: [srcId, …] } }`. Ports absent from `in`
+// default to empty (open) inlets.
+type GraphNode = {
+  id: string
+  kind: string
+  params: Record<string, number>
+  sel: Record<string, string>
+  in: Record<string, string[]>
+}
 
-export function buildProgram() {
-  const paramDecls = PARAMS.map((p) => ({ op: 'paramDecl', name: p.name, value: p.value }))
-  const smoothers = PARAMS.map((p) => ({
-    op: 'instanceDecl', name: `sm_${p.name}`, program: 'Smooth', inputs: { x: par(p.name), rate: GLIDE },
-  }))
-  const s = (name: string) => ref(`sm_${name}`, 'out') // smoothed param ref
-
-  const Phi = ref('pphase', 'phase')
-  const Psi = ref('ephase', 'phase')
-  const D = mul(s('rev_time'), 0.001)
-  const g = s('rev_decay')
-  const gPow = (k: number) => { let e: any = 1; for (let j = 0; j < k; j++) e = mul(g, e); return e }
-
-  const voicePhaseAt = (k: number) => (k === 0 ? Phi : add(Phi, mul(s('f0'), mul(k, D))))
-  const evtPhaseAt = (k: number) => (k === 0 ? Psi : add(Psi, mul(s('event_rate'), mul(k, D))))
-  // continuous skewed-pulse envelope: 17.6·f·(1−f)⁶, f = frac(event phase)
-  const envExpr = (k: number) => {
-    const f = frac(evtPhaseAt(k))
-    const u = sub(1, f)
-    const u2 = mul(u, u)
-    const u6 = mul(mul(u2, u2), u2)
-    return mul(17.6, mul(f, u6))
-  }
-
-  const dry = mul(ref('v0', 'out'), envExpr(0))
-  let revSum: any = null
-  for (let k = 1; k <= K; k++) {
-    const term = mul(gPow(k), mul(ref(`v${k}`, 'out'), envExpr(k)))
-    revSum = revSum === null ? term : add(revSum, term)
-  }
-  const total = add(dry, mul(s('rev_amount'), revSum))
-
-  // ModalVoice reused as phase reader: f0=1, tau = the phase
-  const voices = Array.from({ length: K + 1 }, (_, k) => ({
-    op: 'instanceDecl', name: `v${k}`, program: 'ModalVoice', inputs: { tau: voicePhaseAt(k), f0: 1 },
-  }))
-
-  const instances = [
-    { op: 'instanceDecl', name: 'clock', program: 'VelocityClock', inputs: { velocity: s('velocity') } },
-    { op: 'instanceDecl', name: 'pphase', program: 'AnchoredPhase', inputs: { rate: s('f0'), tau: ref('clock', 'tau') } },
-    { op: 'instanceDecl', name: 'ephase', program: 'AnchoredPhase', inputs: { rate: s('event_rate'), tau: ref('clock', 'tau') } },
-    ...smoothers,
-    ...voices,
-    { op: 'instanceDecl', name: 'master', program: 'SoftClip', inputs: { input: mul(total, s('master_gain')), drive: 1 } },
+// The fixed graph. Node kinds and knob names are 1:1 with Playground's `KINDS`.
+// `taps: true` asks the engine to materialize a `render_window`-readable tap per
+// node, so the scope TUI (`tui/scope`) can attach and inspect any point live.
+export function buildGraph() {
+  const nodes: GraphNode[] = [
+    { id: 'plk', kind: 'pluck',   params: { freq: 110, morph: 0.3, event_rate: 2.5 }, sel: {}, in: { freq: [] } },
+    { id: 'cmb', kind: 'comb',    params: { delay: 0.012, decay: 0.7 },   sel: {}, in: { in: ['plk'] } },
+    { id: 'sfl', kind: 'sflange', params: { depth: 0.006, rate: 0.3 },    sel: {}, in: { in: ['cmb'], mod: [] } },
+    { id: 'out', kind: 'out',     params: {},                             sel: {}, in: { in: ['sfl'] } },
   ]
-
-  return {
-    schema: 'tropical_program_2',
-    name: 'AnchoredReverseReverb',
-    body: {
-      op: 'block',
-      decls: [...paramDecls, ...instances],
-      assigns: [{ op: 'outputAssign', name: 'dac.out', expr: ref('master', 'out') }],
-    },
-  }
+  return { nodes, out: 'out', taps: true }
 }

@@ -29,8 +29,8 @@
 #include <condition_variable>
 #include <cstddef>
 #include <cstdint>
+#include <deque>
 #include <mutex>
-#include <queue>
 #include <string>
 #include <thread>
 #include <unordered_map>
@@ -43,6 +43,7 @@ struct ControlMsg
 {
   uint64_t    client_id;  // routes the response back to the originating fd
   std::string bytes;      // original request line (no trailing newline)
+  std::string method;     // parsed JSON-RPC method (for queue coalescing)
 };
 
 class SocketServer
@@ -77,7 +78,10 @@ private:
   void client_loop(int fd, uint64_t client_id);
   void handle_line(int fd, uint64_t client_id, const std::string & line);
   std::string handle_data(const std::string & line);  // returns a JSON-RPC response line
-  void enqueue_control(uint64_t client_id, std::string line);
+  void enqueue_control(uint64_t client_id, std::string line, std::string method);
+  // Resolve a coalesced-away control request's promise with a `superseded`
+  // result, so an async client that awaited it doesn't hang.
+  void send_superseded(const ControlMsg & msg);
   void close_client(uint64_t client_id);
   // Write a full line (caller supplies bytes without trailing newline); a
   // newline is appended. Serializes all writes to client fds under clients_mtx_.
@@ -99,7 +103,7 @@ private:
 
   std::mutex ctrl_mtx_;
   std::condition_variable ctrl_cv_;
-  std::queue<ControlMsg> ctrl_q_;
+  std::deque<ControlMsg> ctrl_q_;  // deque (not queue): coalescing scans + drops mid-queue
 
   static constexpr std::size_t kMaxLine = 4u * 1024u * 1024u;  // drop a runaway line
 };

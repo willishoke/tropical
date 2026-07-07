@@ -50,25 +50,19 @@ private def assertAcyclic (arena : Arena) (root : ProgramIdx) :
     Except Error Unit := do
   let some prog := arena.program? root
     | throw ⟨s!"strataPipeline: program pool index {root.idx} out of range"⟩
-  let sccs := findInstanceCycles prog
+  let sccs := findInstanceCycles arena.exprs prog
   unless sccs.isEmpty do
     let names := "; ".intercalate (sccs.toList.map fun scc => " → ".intercalate scc.toList)
     throw ⟨s!"strataPipeline: input contains an unbroken inter-instance cycle: {names}"⟩
 
-/-- Run passes `1..opts.upto`. Precondition (enforced by callers):
-    `opts.upto ≤ portedPasses`.
-
-    CF-only is now structural: `BodyDecl.reg` no longer exists in the IR, so
-    no program can declare per-sample state — the elaborator rejects surface
-    `reg`/`next` outright. There is no longer a runtime `assertNoReg` gate. -/
-def run (opts : Options) (arena : Arena) (root : ProgramIdx) :
-    Except Error (Arena × ProgramIdx) := do
-  if opts.upto < 1 then return (arena, root)
+/-- Run passes `1..opts.upto` over the shared expression DAG (the inlining
+    bloat never materializes), returning the post-strata `EArena` and root
+    index. The two exits — `run` (tree, for the codec/registration path) and
+    `runResolved` (the emit's `CoreArena`, Phase B) — share this driver. -/
+def runToEArena (opts : Options) (arena : Arena) (root : ProgramIdx) :
+    Except Error (EArena × ProgramIdx) := do
+  if opts.upto < 1 then return (EArena.ofArena arena, root)
   assertAcyclic arena root
-  -- Native-DAG (#190): convert to id form, run the passes over the shared
-  -- expression DAG (the inlining bloat never materializes), then materialize
-  -- the post-strata root back to a tree. (Phase B threads the DAG straight to
-  -- emit and drops this final materialization.)
   let ea := EArena.ofArena arena
   let passes : PassM ProgramIdx := do
     let root ← Specialize.runE root opts.typeArgs
@@ -81,6 +75,24 @@ def run (opts : Options) (arena : Arena) (root : ProgramIdx) :
     if opts.upto < 5 then return root
     IdentityElim.runE root
   let (postRoot, ea) ← passes.run ea
+  return (ea, postRoot)
+
+/-- The tree exit: materialize the post-strata root back to a tree `Program`
+    (Phase A). Kept for the registration/codec path, which round-trips the
+    strata'd instance type through `tropical_resolved_1`. -/
+def run (opts : Options) (arena : Arena) (root : ProgramIdx) :
+    Except Error (Arena × ProgramIdx) := do
+  if opts.upto < 1 then return (arena, root)
+  let (ea, postRoot) ← runToEArena opts arena root
   ea.materialize postRoot
+
+/-- The Phase B exit: reify the post-strata DAG straight into the emit's
+    `(CoreArena × CoreProgram)`, no intermediate tree. Replaces `run`
+    followed by `Core.check` on the compile-feeding paths (the modulated-clock
+    blowup lived in that flatten-and-recheck). -/
+def runResolved (opts : Options) (arena : Arena) (root : ProgramIdx) :
+    Except Error (Tropical.Ir.CoreArena × Tropical.Ir.Core.CoreProgram) := do
+  let (ea, postRoot) ← runToEArena opts arena root
+  ea.toResolved postRoot
 
 end Tropical.Ir.Strata

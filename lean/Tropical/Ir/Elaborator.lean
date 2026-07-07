@@ -148,7 +148,14 @@ private def mintBinder (name : String) : ElabM Binder := do
 private def pushBinder (s : Scope) (b : Binder) : Scope :=
   { s with binders := (b.name, b) :: s.binders }
 
-private def jnum0 : Expr := .num (JsonNumber.fromInt 0)
+/-- Intern a resolved-expression node into the arena's shared DAG, returning
+    its (possibly shared) id. The elaborator builds the id-form directly — there
+    is no tree `Expr`. -/
+private def internE (n : ENode) : ElabM ExprId := do
+  let st ← get
+  let (id, ex) := (eintern n).run st.arena.exprs
+  set { st with arena := { st.arena with exprs := ex } }
+  pure id
 
 -- ─────────────────────────────────────────────────────────────
 -- Builtin tables (elaborator.ts constants, verbatim)
@@ -251,8 +258,9 @@ private def resolvePortType (scope : Scope) : Tropical.Parse.PortTypeDecl → El
 -- Expressions
 -- ─────────────────────────────────────────────────────────────
 
-/-- Port of `lookupValueRef` — local scope only, fixed category order. -/
-private def lookupValueRef (s : Scope) (name : String) : Option Expr :=
+/-- Port of `lookupValueRef` — local scope only, fixed category order. Returns
+    the leaf `ENode` (the caller interns it). -/
+private def lookupValueRef (s : Scope) (name : String) : Option ENode :=
   match s.binders.find? (·.1 == name) with
   | some (_, b) => some (.bindingRef b.idx)
   | none =>
@@ -273,30 +281,30 @@ private def getSum (defIdx : TypeDefIdx) : ElabM (String × Array SumVariant) :=
 
 mutual
 
-partial def resolveExpr (scope : Scope) : ParsedExpr → ElabM Expr
-  | .num n => pure (.num n)
-  | .bool b => pure (.bool b)
+partial def resolveExpr (scope : Scope) : ParsedExpr → ElabM ExprId
+  | .num n => internE (.num n)
+  | .bool b => internE (.bool b)
   | .arr items => do
-    let mut out : Array Expr := #[]
+    let mut out : Array ExprId := #[]
     for e in items do
       out := out.push (← resolveExpr scope e)
-    pure (.arr out)
+    internE (.arr out)
   | .binary tag lhs rhs => do
-    pure (.binary (BinaryOpTag.ofParse tag) (← resolveExpr scope lhs) (← resolveExpr scope rhs))
+    internE (.binary (BinaryOpTag.ofParse tag) (← resolveExpr scope lhs) (← resolveExpr scope rhs))
   | .unary tag arg => do
-    pure (.unary (UnaryOpTag.ofParse tag) (← resolveExpr scope arg))
+    internE (.unary (UnaryOpTag.ofParse tag) (← resolveExpr scope arg))
   | .nameRef name =>
     match lookupValueRef scope name with
-    | some e => pure e
+    | some n => internE n
     | none => throwElab s!"unknown name '{name}'"
   | .binding name =>
     match scope.binders.find? (·.1 == name) with
-    | some (_, b) => pure (.bindingRef b.idx)
+    | some (_, b) => internE (.bindingRef b.idx)
     | none =>
       throwElab s!"binding '{name}' is not in scope (parser said it was bound — likely a parser bug)"
   | .nestedOut refName outputName => resolveNestedOut scope refName outputName
   | .index arr idx => do
-    pure (.index (← resolveExpr scope arr) (← resolveExpr scope idx))
+    internE (.index (← resolveExpr scope arr) (← resolveExpr scope idx))
   | .call callee args => resolveCall scope callee args
   | .tag variant payload => resolveTag scope variant payload
   | .match_ scrutinee arms => resolveMatch scope scrutinee arms
@@ -305,95 +313,95 @@ partial def resolveExpr (scope : Scope) : ParsedExpr → ElabM Expr
     let acc ← mintBinder accVar
     let elem ← mintBinder elemVar
     let bodyR ← resolveExpr (pushBinder (pushBinder scope acc) elem) body
-    pure (.fold (← resolveExpr scope over) (← resolveExpr scope init) acc elem bodyR)
+    internE (.fold (← resolveExpr scope over) (← resolveExpr scope init) acc elem bodyR)
   | .scan over init accVar elemVar body => do
     let acc ← mintBinder accVar
     let elem ← mintBinder elemVar
     let bodyR ← resolveExpr (pushBinder (pushBinder scope acc) elem) body
-    pure (.scan (← resolveExpr scope over) (← resolveExpr scope init) acc elem bodyR)
+    internE (.scan (← resolveExpr scope over) (← resolveExpr scope init) acc elem bodyR)
   | .generate count var body => do
     let iter ← mintBinder var
     let bodyR ← resolveExpr (pushBinder scope iter) body
-    pure (.generate (← resolveExpr scope count) iter bodyR)
+    internE (.generate (← resolveExpr scope count) iter bodyR)
   | .iterate count var init body => do
     let iter ← mintBinder var
     let bodyR ← resolveExpr (pushBinder scope iter) body
-    pure (.iterate (← resolveExpr scope count) (← resolveExpr scope init) iter bodyR)
+    internE (.iterate (← resolveExpr scope count) (← resolveExpr scope init) iter bodyR)
   | .chain count var init body => do
     let iter ← mintBinder var
     let bodyR ← resolveExpr (pushBinder scope iter) body
-    pure (.chain (← resolveExpr scope count) (← resolveExpr scope init) iter bodyR)
+    internE (.chain (← resolveExpr scope count) (← resolveExpr scope init) iter bodyR)
   | .map2 over elemVar body => do
     let elem ← mintBinder elemVar
     let bodyR ← resolveExpr (pushBinder scope elem) body
-    pure (.map2 (← resolveExpr scope over) elem bodyR)
+    internE (.map2 (← resolveExpr scope over) elem bodyR)
   | .zipWith a b xVar yVar body => do
     let x ← mintBinder xVar
     let y ← mintBinder yVar
     let bodyR ← resolveExpr (pushBinder (pushBinder scope x) y) body
-    pure (.zipWith (← resolveExpr scope a) (← resolveExpr scope b) x y bodyR)
+    internE (.zipWith (← resolveExpr scope a) (← resolveExpr scope b) x y bodyR)
 
-partial def resolveNestedOut (scope : Scope) (refName outputName : String) : ElabM Expr := do
+partial def resolveNestedOut (scope : Scope) (refName outputName : String) : ElabM ExprId := do
   let some (_, instIdx, typeKey) := scope.instances.find? (·.1 == refName)
     | throwElab s!"instance '{refName}' is not declared in this scope"
   let some targetIdx := (scope.registry.find? (·.1 == typeKey)).map (·.2)
     | throwElab s!"internal: instance '{refName}' typeKey '{typeKey}' not in scope registry"
   let target ← getProgram targetIdx
   match target.outputs.findIdx? (·.name == outputName) with
-  | some o => pure (.nestedOut ⟨instIdx⟩ ⟨o⟩)
+  | some o => internE (.nestedOut ⟨instIdx⟩ ⟨o⟩)
   | none =>
     let portList := String.intercalate ", " (target.outputs.map (·.name)).toList
     throwElab s!"instance '{refName}': program '{target.name}' has no output '{outputName}' (have: {portList})"
 
 partial def resolveCall (scope : Scope) (callee : ParsedExpr)
-    (args : Array ParsedExpr) : ElabM Expr := do
+    (args : Array ParsedExpr) : ElabM ExprId := do
   let .nameRef fname := callee
     | throwElab "unsupported call form: callee must be an identifier (no first-class function values yet)"
   if nullaryCalls.contains fname then
     if args.size != 0 then
       throwElab s!"'{fname}()' takes no arguments"
     if fname == "sample_rate" || fname == "sampleRate" then
-      pure .sampleRate
+      internE .sampleRate
     else if fname == "sample_index" || fname == "sampleIndex" then
-      pure .sampleIndex
+      internE .sampleIndex
     else
       -- clock(): the root fixed-point time coordinate θ = sampleIndex << 32,
       -- i.e. the current sample expressed in Q32.32 samples (zero fraction).
-      pure (.binary .lshift .sampleIndex (.num { mantissa := 32, exponent := 0 }))
+      internE (.binary .lshift (← internE .sampleIndex) (← internE (.num { mantissa := 32, exponent := 0 })))
   else if let some tag := unaryCall? fname then
     if args.size != 1 then
       throwElab s!"'{fname}' takes 1 argument; got {args.size}"
-    pure (.unary tag (← resolveExpr scope args[0]!))
+    internE (.unary tag (← resolveExpr scope args[0]!))
   else if let some tag := binaryCall? fname then
     if args.size != 2 then
       throwElab s!"'{fname}' takes 2 arguments; got {args.size}"
-    pure (.binary tag (← resolveExpr scope args[0]!) (← resolveExpr scope args[1]!))
+    internE (.binary tag (← resolveExpr scope args[0]!) (← resolveExpr scope args[1]!))
   else if fname == "zeros" then
     if args.size != 1 then
       throwElab s!"'zeros' takes 1 argument (count); got {args.size}"
-    pure (.zeros (← resolveExpr scope args[0]!))
+    internE (.zeros (← resolveExpr scope args[0]!))
   else if fname == "arraySet" || fname == "array_set" then
     if args.size != 3 then
       throwElab s!"'{fname}' takes 3 arguments (arr, idx, value); got {args.size}"
-    pure (.arraySet (← resolveExpr scope args[0]!) (← resolveExpr scope args[1]!)
-                    (← resolveExpr scope args[2]!))
+    internE (.arraySet (← resolveExpr scope args[0]!) (← resolveExpr scope args[1]!)
+                       (← resolveExpr scope args[2]!))
   else if fname == "clamp" then
     if args.size != 3 then
       throwElab s!"'clamp' takes 3 arguments (value, lo, hi); got {args.size}"
-    pure (.clamp (← resolveExpr scope args[0]!) (← resolveExpr scope args[1]!)
-                 (← resolveExpr scope args[2]!))
+    internE (.clamp (← resolveExpr scope args[0]!) (← resolveExpr scope args[1]!)
+                    (← resolveExpr scope args[2]!))
   else if fname == "select" then
     if args.size != 3 then
       throwElab s!"'select' takes 3 arguments (cond, then, else); got {args.size}"
-    pure (.select (← resolveExpr scope args[0]!) (← resolveExpr scope args[1]!)
-                  (← resolveExpr scope args[2]!))
+    internE (.select (← resolveExpr scope args[0]!) (← resolveExpr scope args[1]!)
+                     (← resolveExpr scope args[2]!))
   else
     throwElab <|
       s!"unknown function '{fname}'. The resolved IR has no escape hatch for unknown calls — " ++
       "add the builtin to the elaborator's registry, or use an instance declaration if it's a program type."
 
 partial def resolveTag (scope : Scope) (variantName : String)
-    (payload : Option (Array Tropical.Parse.TagPayloadEntry)) : ElabM Expr := do
+    (payload : Option (Array Tropical.Parse.TagPayloadEntry)) : ElabM ExprId := do
   let some (defIdx, varPos) := lookupVariantChain scope variantName
     | throwElab s!"tag construction: unknown variant '{variantName}'"
   let (_, variants) ← getSum defIdx
@@ -401,29 +409,29 @@ partial def resolveTag (scope : Scope) (variantName : String)
   -- `supplied`: Map semantics — set overwrites in place, insertion
   -- order observable through the extras error. Every payload value is
   -- resolved (side effects included) before field validation, like TS.
-  let mut supplied : Array (String × Expr) := #[]
+  let mut supplied : Array (String × ExprId) := #[]
   for entry in payload.getD #[] do
     let v ← resolveExpr scope entry.value
     match supplied.findIdx? (·.1 == entry.field) with
     | some i => supplied := supplied.set! i (entry.field, v)
     | none => supplied := supplied.push (entry.field, v)
-  let mut out : Array TagPayload := #[]
+  let mut out : Array ETagPayload := #[]
   let mut consumed : Array String := #[]
   for h : fi in [0:variant.payload.size] do
     let field := variant.payload[fi]
     match supplied.find? (·.1 == field.name) with
     | none => throwElab s!"tag '{variantName}': missing payload field '{field.name}'"
     | some (_, v) =>
-      out := out.push (.mk fi v)
+      out := out.push { field := fi, value := v }
       consumed := consumed.push field.name
   let extras := supplied.filter fun (n, _) => !consumed.contains n
   if !extras.isEmpty then
     let names := String.intercalate ", " (extras.map (·.1)).toList
     throwElab s!"tag '{variantName}': unknown payload field(s): {names}"
-  pure (.tag defIdx varPos out)
+  internE (.tag defIdx varPos out)
 
 partial def resolveMatch (scope : Scope) (scrutinee : ParsedExpr)
-    (arms : Array Tropical.Parse.MatchArm) : ElabM Expr := do
+    (arms : Array Tropical.Parse.MatchArm) : ElabM ExprId := do
   if arms.isEmpty then
     throwElab "match expression has no arms"
   let firstName := arms[0]!.variant
@@ -431,7 +439,7 @@ partial def resolveMatch (scope : Scope) (scrutinee : ParsedExpr)
     | throwElab s!"match: unknown variant '{firstName}' in first arm"
   let (sumName, variants) ← getSum defIdx
   let mut seen : Array Nat := #[]
-  let mut outArms : Array MatchArm := #[]
+  let mut outArms : Array EMatchArm := #[]
   for a in arms do
     let some varPos := variants.findIdx? (·.name == a.variant)
       | throwElab s!"match: variant '{a.variant}' is not a member of sum type '{sumName}'"
@@ -462,26 +470,26 @@ partial def resolveMatch (scope : Scope) (scrutinee : ParsedExpr)
       throwElab s!"match arm '{variant.name}': unknown pattern field(s): {names}"
     let armScope := binders.foldl pushBinder scope
     let body ← resolveExpr armScope a.body
-    outArms := outArms.push (.mk varPos binders body)
+    outArms := outArms.push { variant := varPos, binders, body }
   -- Exhaustiveness — before scrutinee resolution (TS object-literal
   -- field order: the return's `scrutinee: resolveExpr(...)` runs last).
   for h : vi in [0:variants.size] do
     if !seen.contains vi then
       throwElab s!"match on '{sumName}' is non-exhaustive: missing variant '{variants[vi].name}'"
-  pure (.match_ defIdx (← resolveExpr scope scrutinee) outArms)
+  internE (.match_ defIdx (← resolveExpr scope scrutinee) outArms)
 
 partial def resolveLet (scope : Scope) (bind : Array (String × ParsedExpr))
-    (body : ParsedExpr) : ElabM Expr := do
+    (body : ParsedExpr) : ElabM ExprId := do
   -- Sequential let* semantics: mint, resolve value WITHOUT the binder,
   -- then push it for subsequent entries and the body.
   let mut s := scope
-  let mut binders : Array LetBinder := #[]
+  let mut binders : Array ELetBinder := #[]
   for (name, valueExpr) in bind do
     let binder ← mintBinder name
     let value ← resolveExpr s valueExpr
-    binders := binders.push (.mk binder value)
+    binders := binders.push { binder, value }
     s := pushBinder s binder
-  pure (.letIn binders (← resolveExpr s body))
+  internE (.letIn binders (← resolveExpr s body))
 
 end
 
@@ -490,49 +498,38 @@ end
 -- ─────────────────────────────────────────────────────────────
 
 /-- Dep-edge collection (collectNestedOutInstances): exact traversal
-    order; first-add wins position (Set insertion parity). -/
-private partial def collectNestedOutDeps (numInstances : Nat) (acc : Array Nat) :
-    Expr → Array Nat
-  | .num _ | .bool _ => acc
-  | .arr items => items.foldl (collectNestedOutDeps numInstances) acc
-  | .nestedOut inst _ =>
-    if inst.idx < numInstances && !acc.contains inst.idx then acc.push inst.idx else acc
-  | .match_ _ scrutinee arms =>
-    arms.foldl (fun a arm => collectNestedOutDeps numInstances a arm.body)
-      (collectNestedOutDeps numInstances acc scrutinee)
-  | .fold over init _ _ body | .scan over init _ _ body =>
-    collectNestedOutDeps numInstances
-      (collectNestedOutDeps numInstances
-        (collectNestedOutDeps numInstances acc over) init) body
-  | .generate count _ body =>
-    collectNestedOutDeps numInstances (collectNestedOutDeps numInstances acc count) body
-  | .iterate count init _ body | .chain count init _ body =>
-    collectNestedOutDeps numInstances
-      (collectNestedOutDeps numInstances
-        (collectNestedOutDeps numInstances acc count) init) body
-  | .map2 over _ body =>
-    collectNestedOutDeps numInstances (collectNestedOutDeps numInstances acc over) body
-  | .zipWith a b _ _ body =>
-    collectNestedOutDeps numInstances
-      (collectNestedOutDeps numInstances
-        (collectNestedOutDeps numInstances acc a) b) body
-  | .letIn binders body =>
-    collectNestedOutDeps numInstances
-      (binders.foldl (fun a b => collectNestedOutDeps numInstances a b.value) acc) body
-  | .tag _ _ payload =>
-    payload.foldl (fun a p => collectNestedOutDeps numInstances a p.value) acc
-  | .zeros count => collectNestedOutDeps numInstances acc count
-  | .binary _ lhs rhs =>
-    collectNestedOutDeps numInstances (collectNestedOutDeps numInstances acc lhs) rhs
-  | .unary _ arg => collectNestedOutDeps numInstances acc arg
-  | .clamp a b c | .select a b c | .arraySet a b c =>
-    collectNestedOutDeps numInstances
-      (collectNestedOutDeps numInstances
-        (collectNestedOutDeps numInstances acc a) b) c
-  | .index a b =>
-    collectNestedOutDeps numInstances (collectNestedOutDeps numInstances acc a) b
-  | .inputRef _ | .paramRef _ | .typeParamRef _ | .bindingRef _
-  | .sampleRate | .sampleIndex => acc
+    order; first-add wins position (Set insertion parity). Walks the id-form
+    expression by derefing through the arena. -/
+private partial def collectNestedOutDeps (ea : ExprArena) (numInstances : Nat)
+    (acc : Array Nat) (id : ExprId) : Array Nat :=
+  let rec go (acc : Array Nat) (id : ExprId) : Array Nat :=
+    match ea.deref id with
+    | none => acc
+    | some node => match node with
+      | .num _ | .bool _ => acc
+      | .arr items => items.foldl go acc
+      | .nestedOut inst _ =>
+        if inst.idx < numInstances && !acc.contains inst.idx then acc.push inst.idx else acc
+      | .match_ _ scrutinee arms =>
+        arms.foldl (fun a arm => go a arm.body) (go acc scrutinee)
+      | .fold over init _ _ body | .scan over init _ _ body =>
+        go (go (go acc over) init) body
+      | .generate count _ body => go (go acc count) body
+      | .iterate count init _ body | .chain count init _ body =>
+        go (go (go acc count) init) body
+      | .map2 over _ body => go (go acc over) body
+      | .zipWith a b _ _ body => go (go (go acc a) b) body
+      | .letIn binders body =>
+        go (binders.foldl (fun a b => go a b.value) acc) body
+      | .tag _ _ payload => payload.foldl (fun a p => go a p.value) acc
+      | .zeros count => go acc count
+      | .binary _ lhs rhs => go (go acc lhs) rhs
+      | .unary _ arg => go acc arg
+      | .clamp a b c | .select a b c | .arraySet a b c => go (go (go acc a) b) c
+      | .index a b => go (go acc a) b
+      | .inputRef _ | .paramRef _ | .typeParamRef _ | .bindingRef _
+      | .sampleRate | .sampleIndex => acc
+  go acc id
 
 private structure TarjanSt where
   indexOf : Array (Option Nat)
@@ -575,7 +572,7 @@ private partial def strongConnect (deps : Array (Array Nat)) (v : Nat)
 
 /-- Port of `findInstanceCycles`: non-trivial SCCs of the inter-instance
     dep graph, as instance-name lists in SCC member order. -/
-def findInstanceCycles (prog : Program) : Array (Array String) := Id.run do
+def findInstanceCycles (ea : ExprArena) (prog : Program) : Array (Array String) := Id.run do
   let insts : Array (String × Array InstanceInput) := prog.decls.filterMap fun d =>
     match d with
     | .inst name _ _ inputs => some (name, inputs)
@@ -583,7 +580,7 @@ def findInstanceCycles (prog : Program) : Array (Array String) := Id.run do
   if insts.isEmpty then return #[]
   let n := insts.size
   let deps : Array (Array Nat) := insts.map fun (_, inputs) =>
-    inputs.foldl (fun acc w => collectNestedOutDeps n acc w.value) #[]
+    inputs.foldl (fun acc w => collectNestedOutDeps ea n acc w.value) #[]
   let mut st : TarjanSt := {
     indexOf := Array.replicate n none
     lowlink := Array.replicate n 0
@@ -599,7 +596,7 @@ def findInstanceCycles (prog : Program) : Array (Array String) := Id.run do
     `CycleViolation` message — byte-exact, including the suggested-fix
     snippet's straight quote + typographic apostrophe pairing. -/
 private def throwOnCycles (prog : Program) : ElabM Unit := do
-  let cycles := findInstanceCycles prog
+  let cycles := findInstanceCycles (← get).arena.exprs prog
   if cycles.isEmpty then return
   let diagnostics := cycles.map fun scc =>
     let target := scc[0]!

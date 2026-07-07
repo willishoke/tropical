@@ -61,12 +61,15 @@ private def outputPortScalarCount (decl : CoreOutputDecl) : Except String Nat :=
           ++ "type-param dimension; ensure specialize ran first")
     .ok total
 
-/-- Compile a post-strata `CoreProgram` to a `PerInstancePlan`. -/
-def compileResolved (prog : CoreProgram) (ctx : Context := {}) :
+/-- Compile a post-strata `CoreProgram` to a `PerInstancePlan`. The
+    `arena` is the shared hash-consed DAG the program's leaf `ExprId`s
+    index into (Phase B: one arena for the whole root + registry). -/
+def compileResolved (prog : CoreProgram) (arena : Tropical.Ir.CoreArena)
+    (ctx : Context := {}) :
     Except String Tropical.Plan.PerInstancePlan := do
   -- ── Output expressions: map output position → expr, in port order ──
   let outputExprs ← do
-    let mut exprs : Array CoreExpr := #[]
+    let mut exprs : Array Tropical.Ir.ExprId := #[]
     for i in [0:prog.outputs.size] do
       let out := prog.outputs[i]!
       let assign := prog.assigns.find? fun a =>
@@ -94,7 +97,7 @@ def compileResolved (prog : CoreProgram) (ctx : Context := {}) :
 
   let program ← Tropical.Ir.Emit.emitResolvedProgram
     outputExprs outputPortScalarCounts
-    inputPortTypes emitSlots
+    inputPortTypes emitSlots arena
     { instances := prog.instances, enclosing := prog }
 
   return {
