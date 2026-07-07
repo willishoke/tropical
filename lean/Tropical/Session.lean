@@ -2,6 +2,7 @@ import Std.Data.HashMap
 import Lean.Data.Json
 import Tropical.Expr
 import Tropical.Ir.Codec
+import Tropical.Plan
 
 /-!
 # Session state — the authoritative graph topology
@@ -115,6 +116,11 @@ structure SessionSt where
   /-- Param mirror: name → last-known value (raw Json to preserve lexical
       number forms). The service owns the live Param handles. -/
   params       : Array (String × Json) := #[]
+  /-- Host-contract dispatch table for the LOADED plan (name → discipline),
+      seeded from the plan's own `param_disciplines` at load — the unified
+      `set_param` dispatches from this, so no client ever chooses a verb.
+      Empty (a session-model patch, an old plan) ⇒ every write is raw. -/
+  paramDisciplines : Array Tropical.Plan.ParamDiscipline := #[]
   nameCounters : Std.HashMap String Nat := {}
   /-- The typed store (Phase 4 stage 4a): every adopted catalog entry's
       post-strata resolved IR, appended via `decodeResolvedInto`. The

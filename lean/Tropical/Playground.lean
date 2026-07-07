@@ -180,19 +180,28 @@ inductive PortDomain where
   | signal | modal | control
 deriving BEq, Repr
 
+/-- Display metadata for a knob — semantics, not decoration: without it every
+    frontend reinvents ranges and scales, badly, and drifts (three copies of
+    this table have already existed). Served verbatim by `get_vocabulary`. -/
+structure KnobMeta where
+  min : Float
+  max : Float
+  log : Bool := false
+  unit : String := ""
+deriving Repr
+
 /-- One port of a node kind. A port with `accepts ≠ #[]` is an inlet; a port
     with `knob = some (m, e)` carries a continuous param slot whose
     compile-time fallback is `lit m e` (the value `buildNode` bakes only if the
     collector somehow skipped the slot). A port may be BOTH (source `freq`: a
-    control inlet that, unwired, is a knob) — wiring it supersedes the slot.
-    Phase 1: constant fallbacks only; default TERMS (normalled subgraphs) land
-    in the next phase. -/
+    control inlet that, unwired, is a knob) — wiring it supersedes the slot. -/
 structure PortSpec where
   name : String
   accepts : Array PortDomain := #[]
   multi : Bool := false
   knob : Option (Int × Nat) := none
   discipline : Discipline := .raw
+  display : Option KnobMeta := none
   /-- The port whose NORMAL this knob parameterizes (an input of the default
       subgraph, not of the node): sflange's `rate` is an input of `mod`'s
       normalled LFO. Wiring the owner replaces the whole default — circuit,
@@ -210,52 +219,80 @@ private def ctrlIn : Array PortDomain := #[.control]
     define the `ParamIdx` scan order (`collectParams`), and the whole layout is
     what `get_vocabulary` will serve. -/
 def portSpecs : String → Array PortSpec
-  | "knob" => #[{ name := "value", knob := some (0, 0) }]
+  | "knob" => #[
+      { name := "value", knob := some (0, 0),
+        display := some { min := 0, max := 1000 } }]
   | "source" => #[
-      { name := "freq", accepts := ctrlIn, knob := some (220, 0), discipline := .anchor },
-      { name := "morph", knob := some (0, 0), discipline := .glide },
+      { name := "freq", accepts := ctrlIn, knob := some (220, 0), discipline := .anchor,
+        display := some { min := 0.02, max := 2000, log := true, unit := "Hz" } },
+      { name := "morph", knob := some (0, 0), discipline := .glide,
+        display := some { min := 0, max := 1 } },
       { name := "pm", accepts := sigIn }]
   | "pluck" => #[
-      { name := "freq", accepts := ctrlIn, knob := some (110, 0), discipline := .anchor },
-      { name := "morph", knob := some (0, 0), discipline := .glide },
-      { name := "event_rate", knob := some (2, 0), discipline := .glide }]
+      { name := "freq", accepts := ctrlIn, knob := some (110, 0), discipline := .anchor,
+        display := some { min := 20, max := 2000, log := true, unit := "Hz" } },
+      { name := "morph", knob := some (0, 0), discipline := .glide,
+        display := some { min := 0, max := 1 } },
+      { name := "event_rate", knob := some (2, 0), discipline := .glide,
+        display := some { min := 0.1, max := 20, log := true, unit := "Hz" } }]
   | "comb" => #[
       { name := "in", accepts := sigIn },
-      { name := "delay", knob := some (12, 3), discipline := .glide },
-      { name := "decay", knob := some (7, 1), discipline := .glide }]
+      { name := "delay", knob := some (12, 3), discipline := .glide,
+        display := some { min := 0.0005, max := 0.05, log := true, unit := "s" } },
+      { name := "decay", knob := some (7, 1), discipline := .glide,
+        display := some { min := 0, max := 0.95 } }]
   | "flange" => #[
       { name := "in", accepts := sigIn },
-      { name := "depth", knob := some (7, 4), discipline := .glide }]
+      { name := "depth", knob := some (7, 4), discipline := .glide,
+        display := some { min := 0.0001, max := 0.01, log := true, unit := "s" } }]
   | "sflange" => #[
       { name := "in", accepts := sigIn },
       { name := "mod", accepts := sigIn },
-      { name := "depth", knob := some (2, 3), discipline := .glide },
+      { name := "depth", knob := some (2, 3), discipline := .glide,
+        display := some { min := 0.0002, max := 0.02, log := true, unit := "s" } },
       -- `rate` parameterizes `mod`'s normal (the built-in LFO): patch `mod`
       -- and the LFO, this knob, and its slot all vanish together.
-      { name := "rate", knob := some (3, 1), ownerPort := some "mod" }]
+      { name := "rate", knob := some (3, 1), ownerPort := some "mod",
+        display := some { min := 0.02, max := 12, log := true, unit := "Hz" } }]
   | "fm" => #[
       { name := "in", accepts := sigIn },
-      { name := "carrier", knob := some (330, 0), discipline := .anchor },
-      { name := "depth", knob := some (8, 0), discipline := .glide }]
+      { name := "carrier", knob := some (330, 0), discipline := .anchor,
+        display := some { min := 20, max := 2000, log := true, unit := "Hz" } },
+      { name := "depth", knob := some (8, 0), discipline := .glide,
+        display := some { min := 1, max := 400, log := true } }]
   | "delay" => #[
       { name := "in", accepts := sigIn },
-      { name := "amount", knob := some (4, 3), discipline := .glide }]
+      { name := "amount", knob := some (4, 3), discipline := .glide,
+        display := some { min := 0.0001, max := 0.02, log := true, unit := "s" } }]
   | "reverse" => #[{ name := "in", accepts := sigIn }]
   | "mix" => #[{ name := "in", accepts := sigIn, multi := true }]
   | "ring" => #[{ name := "in", accepts := sigIn, multi := true }]
   | "resonator" => #[
       { name := "addr", accepts := sigIn },
-      { name := "freq", knob := some (220, 0) },
-      { name := "decay", knob := some (4, 0) }]
+      { name := "freq", knob := some (220, 0),
+        display := some { min := 20, max := 2000, log := true, unit := "Hz" } },
+      { name := "decay", knob := some (4, 0),
+        display := some { min := 0.5, max := 50, log := true } }]
   | "reverb" => #[
       { name := "in", accepts := modalIn },
-      { name := "rt60", knob := some (2, 0) },
-      { name := "dir", knob := some (0, 0) },
-      { name := "sway", knob := some (0, 0) },
-      { name := "rate", knob := some (3, 1) }]
+      { name := "rt60", knob := some (2, 0),
+        display := some { min := 0.2, max := 12, log := true, unit := "sec" } },
+      { name := "dir", knob := some (0, 0),
+        display := some { min := 0, max := 1 } },
+      { name := "sway", knob := some (0, 0),
+        display := some { min := 0, max := 0.9 } },
+      { name := "rate", knob := some (3, 1),
+        display := some { min := 0.05, max := 8, log := true, unit := "Hz" } }]
   | "modalmix" => #[{ name := "in", accepts := modalIn, multi := true }]
   | "out" => #[{ name := "in", accepts := sigIn, multi := true }]
   | _ => #[]
+
+/-- Each kind's outlet color (`none` = no outlet, the dac sink). -/
+def outletOf : String → Option PortDomain
+  | "knob" => some .control
+  | "resonator" | "reverb" | "modalmix" => some .modal
+  | "out" => none
+  | _ => some .signal
 
 /-- The kinds the table covers, in schema order (`out` last — it has no outlet). -/
 def vocabularyKinds : Array String := #[
@@ -463,56 +500,50 @@ private def rawsOf (j : Json) : Array Raw :=
 def knobNamesOf (kind : String) : Array String :=
   (portSpecs kind).filterMap fun p => if p.knob.isSome then some p.name else none
 
--- ── Node-port schema (the connection-validation contract for the GUI) ─────────
-/-- The static node-port schema the playground GUI validates connections against.
-    For each node kind: its INLETS (name + the outlet colors it accepts, and
-    whether it fans in), its OUTLET color, and its continuous knobs. Colors:
+-- ── get_vocabulary: the port-spec table, served ──────────────────────────────
+private def domStr : PortDomain → String
+  | .signal => "signal" | .modal => "modal" | .control => "control"
+private def discStr : Discipline → String
+  | .raw => "raw" | .glide => "glide" | .anchor => "anchor"
 
-    * `signal`  — a per-sample stream (an oscillator/effect output);
-    * `modal`   — a pole bank (a resonator/reverb, composed by residue calculus);
-    * `control` — a knob (a live param slot).
-
-    A connection `outlet → inlet` is valid iff `outlet.color ∈ inlet.accepts`.
-    The asymmetry is real and enforced by the compiler: a `modal` outlet feeding a
-    `signal` inlet REALIZES at the seam (poles → stream), a `control` outlet is a
-    constant stream (so it also satisfies a `signal` inlet), but a `signal` into a
-    `modal` inlet is the one hard TYPE ERROR ("a Sig has no poles to compose").
-    There is no signal-port typing beyond this — every other mismatch was silently
-    dropped, which is what made osc→osc read as a dotted no-op.
-
-    Kept in sync with `buildNode` (the inlets it reads) and `knobNamesOf`. -/
-def nodeSchema : Json :=
-  let sig : Array String := #["signal", "modal", "control"]  -- a stream-consuming inlet
-  let modal : Array String := #["modal"]                     -- poles only
-  let ctrl : Array String := #["control"]                    -- a knob only
-  let inlet (name : String) (accepts : Array String) (multi : Bool := false) : Json :=
-    Json.mkObj [("name", Json.str name),
-      ("accepts", Json.arr (accepts.map Json.str)), ("multi", Json.bool multi)]
-  let node (kind : String) (inlets : Array Json) (outlet : Option String)
-      (knobs : Array String) : Json :=
-    Json.mkObj [("kind", Json.str kind), ("inlets", Json.arr inlets),
-      ("outlet", match outlet with | some c => Json.str c | none => Json.null),
-      ("knobs", Json.arr (knobs.map Json.str))]
+/-- The vocabulary as JSON — the ONE description of the node kinds, GENERATED
+    from the port-spec table (the hand-maintained `nodeSchema` this replaces
+    was the third copy, and the class of bug this file exists to kill). Per
+    kind: outlet color and ports; per port: inlet facts (accepts/multi), knob
+    facts (default, write discipline, display metadata), and `owner` when the
+    knob parameterizes another port's normal. Clients RENDER this — nothing
+    the engine knows may be re-encoded client-side. The connection rule rides
+    along: `outlet→inlet` valid iff `outlet.color ∈ inlet.accepts`; a modal
+    outlet into a signal inlet REALIZES at the seam; a control outlet is a
+    constant stream; signal into a modal inlet is the one hard type error. -/
+def vocabularyJson : Json :=
+  let portJson := fun (p : PortSpec) => Json.mkObj <|
+    [("name", Json.str p.name)]
+    ++ (if p.accepts.isEmpty then [] else
+        [("accepts", Json.arr (p.accepts.map (Json.str ∘ domStr))),
+         ("multi", Json.bool p.multi)])
+    ++ (match p.knob with
+        | some (m, e) => [("default", Json.num ⟨m, e⟩),
+                          ("discipline", Json.str (discStr p.discipline))]
+        | none => [])
+    ++ (match p.display with
+        | some md => [("min", Lean.toJson md.min), ("max", Lean.toJson md.max),
+                      ("log", Json.bool md.log), ("unit", Json.str md.unit)]
+        | none => [])
+    ++ (match p.ownerPort with
+        | some o => [("owner", Json.str o)]
+        | none => [])
   Json.mkObj [
     ("rule", Json.str
       "outlet→inlet valid iff outlet.color ∈ inlet.accepts; modal→signal realizes, signal→modal is a type error"),
     ("colors", Json.arr #[Json.str "signal", Json.str "modal", Json.str "control"]),
-    ("nodes", Json.arr #[
-      node "source"    #[inlet "freq" ctrl, inlet "pm" sig] (some "signal") #["freq", "morph"],
-      node "pluck"     #[inlet "freq" ctrl] (some "signal") #["freq", "morph", "event_rate"],
-      node "comb"      #[inlet "in" sig] (some "signal") #["delay", "decay"],
-      node "flange"    #[inlet "in" sig] (some "signal") #["depth"],
-      node "delay"     #[inlet "in" sig] (some "signal") #["amount"],
-      node "reverse"   #[inlet "in" sig] (some "signal") #[],
-      node "fm"        #[inlet "in" sig] (some "signal") #["carrier", "depth"],
-      node "sflange"   #[inlet "in" sig, inlet "mod" sig] (some "signal") #["depth", "rate"],
-      node "mix"       #[inlet "in" sig true] (some "signal") #[],
-      node "ring"      #[inlet "in" sig true] (some "signal") #[],
-      node "resonator" #[inlet "addr" sig] (some "modal") #["freq", "decay"],
-      node "reverb"    #[inlet "in" modal] (some "modal") #["rt60", "dir", "sway", "rate"],
-      node "modalmix"  #[inlet "in" modal true] (some "modal") #[],
-      node "knob"      #[] (some "control") #["value"],
-      node "out"       #[inlet "in" sig true] none #[] ])]
+    ("kinds", Json.arr (vocabularyKinds.map fun k =>
+      Json.mkObj [
+        ("kind", Json.str k),
+        ("outlet", match outletOf k with
+          | some d => Json.str (domStr d)
+          | none => Json.null),
+        ("ports", Json.arr ((portSpecs k).map portJson))]))]
 
 /-- The live param table: every node's continuous knobs as `(<id>.<knob>, default)`
     in scan order (node order, then knob order). The position IS the `ParamIdx` the
@@ -578,6 +609,95 @@ def decodeGraph (j : Json) : Except String (PatchGraph × Array (String × JsonN
   pnodes := pnodes.push { id := "__out__", node := .mix outIns }
   pnodes := pnodes.push { id := "__silence__", node := .mix #[] }
   pure ({ nodes := pnodes, output := "__out__" }, params)
+
+-- ── Host-contract dispatch table (param_disciplines in the manifest) ────────
+/-- The per-param write-discipline table this graph's plan carries — the same
+    walk and skip rules as `collectParams`, projected to base names. A host
+    reads this from the manifest and dispatches param writes itself
+    (design/host-param-dispatch.md is the normative math); no client ever
+    chooses a write verb. -/
+private def paramDisciplinesOf (raws : Array Raw) :
+    Array Tropical.Plan.ParamDiscipline := Id.run do
+  let mut out : Array Tropical.Plan.ParamDiscipline := #[
+    { name := masterVelocityParam, discipline := "velocity",
+      companions := #[masterTauBaseParam] },
+    { name := masterTauBaseParam, discipline := "raw" }]
+  for r in raws do
+    if r.kind == "out" then continue
+    for spec in portSpecs r.kind do
+      if spec.knob.isNone then continue
+      let selfWired := !(portSources r.inObj spec.name).isEmpty
+      let ownerWired := match spec.ownerPort with
+        | some o => !(portSources r.inObj o).isEmpty
+        | none => false
+      if !selfWired && !ownerWired then
+        let base := s!"{r.id}.{spec.name}"
+        let d : Tropical.Plan.ParamDiscipline := match spec.discipline with
+          | .glide =>
+            -- 0.02 s: the engine's glide window
+            { name := base, discipline := "glide", glideDurSec := some ⟨2, 2⟩,
+              companions := #[s!"{base}#v0", s!"{base}#v1", s!"{base}#t0"] }
+          | .anchor =>
+            { name := base, discipline := "anchor", companions := #[s!"{base}#phase"] }
+          | .raw =>
+            { name := base, discipline := "raw" }
+        out := out.push d
+  return out
+
+-- ── The realized-state report (the load_patch_graph reply) ──────────────────
+/-- FACTS about what compiled — never warnings (legal-but-incomplete states
+    compile to silence by contract; the report is how a surface renders truth
+    instead of guessing policy). Per user node: `active` (reachable from the
+    `out` node, walking inlet edges backwards) or `excluded`. Per inlet:
+    `wired` (with sources) or `normalled` (running on its default). Per live
+    param: the collected value and write discipline, base names only — the
+    glide/anchor companion slots are the discipline's implementation detail,
+    not surface. Plus the taps. The silence-with-`{ok:true}` class dies here:
+    a patch that gracefully compiled to nothing now SAYS so, as facts. -/
+def realizedReport (args : Json) (taps : Array (String × String × String)) : Json := Id.run do
+  let raws := rawsOf args
+  let outId := match (args.getObjVal? "out").toOption with
+    | some (.str s) => s
+    | _ => ""
+  -- reachability fixed point (≤ |nodes| rounds; GUI graphs are small)
+  let mut reach : Array String := #[outId]
+  for _ in [0:raws.size] do
+    for r in raws do
+      if reach.contains r.id then
+        for spec in portSpecs r.kind do
+          for src in portSources r.inObj spec.name do
+            if !reach.contains src then reach := reach.push src
+  let nodesJ := raws.map fun r =>
+    Json.mkObj [("id", Json.str r.id), ("kind", Json.str r.kind),
+      ("status", Json.str (if reach.contains r.id then "active" else "excluded"))]
+  let inputsJ := raws.foldl (init := #[]) fun acc r =>
+    (portSpecs r.kind).foldl (init := acc) fun acc spec =>
+      if spec.accepts.isEmpty then acc else
+      let srcs := portSources r.inObj spec.name
+      acc.push (Json.mkObj (
+        [("node", Json.str r.id), ("port", Json.str spec.name)] ++
+        (if srcs.isEmpty then [("state", Json.str "normalled")]
+         else [("state", Json.str "wired"),
+               ("sources", Json.arr (srcs.map Json.str))])))
+  let kindOf : String → Option String := fun id => (raws.find? (·.id == id)).map (·.kind)
+  let paramsJ := (collectParams raws).filterMap fun (nm, v) =>
+    if nm.endsWith "#v1" || nm.endsWith "#t0" || nm.endsWith "#phase" then none
+    else if nm.endsWith "#v0" then
+      some (Json.mkObj [("name", Json.str (nm.dropRight 3)),
+        ("value", Json.num v), ("discipline", Json.str "glide")])
+    else
+      let disc :=
+        if nm == masterVelocityParam then "velocity"
+        else match nm.splitOn "." with
+          | [id, kname] => (kindOf id).map (fun k => discStr (disciplineOf k kname)) |>.getD "raw"
+          | _ => "raw"
+      some (Json.mkObj [("name", Json.str nm),
+        ("value", Json.num v), ("discipline", Json.str disc)])
+  let tapsJ := taps.map fun (name, inst, out) =>
+    Json.mkObj [("name", Json.str name), ("slot", Json.str s!"{inst}.{out}")]
+  return Json.mkObj [("ok", Json.bool true), ("nodes", Json.arr nodesJ),
+    ("inputs", Json.arr inputsJ), ("params", Json.arr paramsJ),
+    ("taps", Json.arr tapsJ)]
 
 -- ── Scope taps ──────────────────────────────────────────────────────────────
 /-- A scope tap: `(name, srcInstance, srcOutput)` — the exact `scopeTaps` triple
@@ -648,6 +768,10 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
     arena := coreArena
     mode := .fused }
   let plan ← Tropical.Compile.compileSession input
+  -- The host-contract dispatch table rides the manifest: any runtime host
+  -- (C++ today, Swift/Metal or wasm tomorrow) reads per-slot disciplines from
+  -- the plan itself and dispatches param writes locally.
+  let plan := { plan with paramDisciplines := paramDisciplinesOf (rawsOf j) }
   -- The final mix (`out`) plus one tap per user node, all routed to the synthetic
   -- root's output slots (`__root__.<port>`), ready for `render_window`.
   let root := Tropical.Compile.rootInstancePath

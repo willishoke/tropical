@@ -1916,56 +1916,183 @@ def unreadParamSlots (plan : Tropical.Plan.FlatPlan) : Array String := Id.run do
   return dead
 
 open Tropical.Playground in
-/-- THE TABLE-COHERENCE gate. The static `nodeSchema` JSON (served as
-    `node_schema`, slated to become a generated view) must agree with the
-    port-spec table — same kinds, same inlets (name/accepts/multi), same knobs
-    in the same order. While both exist, this gate is what makes them ONE
-    description; when the schema becomes generated, the gate becomes a
-    tautology and can retire with it. -/
-private def runVocabCoherence : IO Bool := do
-  let domStr : PortDomain → String
-    | .signal => "signal" | .modal => "modal" | .control => "control"
-  let strArr := fun (j : Lean.Json) => match j.getArr? with
-    | .ok a => a.filterMap (·.getStr?.toOption)
-    | .error _ => #[]
+/-- THE VOCABULARY-DRIVENNESS gate (successor to the table-coherence gate,
+    which retired with the static `nodeSchema` it was pinning). `get_vocabulary`
+    is only honest if the served table can DRIVE a client: for every kind,
+    generate a minimal patch FROM the vocabulary alone (wire each `in` inlet
+    from a domain-matching helper; leave optional normals intact), compile it
+    through the real `compilePlanPure`, and assert every knob the table
+    declares registers a live slot and nothing registered goes unread. A kind
+    added to the table is covered here with no test edit. -/
+private def runVocabDriven (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
   let mut ok := true
+  let mut covered := 0
   let mut issues : Array String := #[]
-  let nodes := match nodeSchema.getObjVal? "nodes" with
-    | .ok (.arr a) => a
-    | _ => #[]
-  -- every schema node must match the table's projection, and cover all kinds
-  let mut schemaKinds : Array String := #[]
-  for nj in nodes do
-    let kind := ((nj.getObjVal? "kind").toOption.bind (·.getStr?.toOption)).getD "?"
-    schemaKinds := schemaKinds.push kind
-    let specs := portSpecs kind
-    -- knobs: names in declaration order
-    let tblKnobs := knobNamesOf kind
-    let schKnobs := strArr ((nj.getObjVal? "knobs").toOption.getD (Lean.Json.arr #[]))
-    if tblKnobs != schKnobs then
-      ok := false; issues := issues.push s!"{kind}: knobs {schKnobs} ≠ table {tblKnobs}"
-    -- inlets: name + accepts + multi
-    let tblInlets := specs.filter (!·.accepts.isEmpty)
-    let schInlets := match (nj.getObjVal? "inlets").toOption.getD (Lean.Json.arr #[]) with
-      | .arr a => a
-      | _ => #[]
-    if tblInlets.size != schInlets.size then
-      ok := false; issues := issues.push s!"{kind}: {schInlets.size} schema inlets ≠ table {tblInlets.size}"
+  for kind in vocabularyKinds do
+    if kind == "out" then continue
+    let mut nodes : Array Lean.Json := #[]
+    let mut inFields : List (String × Lean.Json) := []
+    for p in portSpecs kind do
+      if !p.accepts.isEmpty && p.name == "in" then
+        if p.accepts == #[PortDomain.modal] then
+          nodes := nodes.push (Lean.Json.mkObj
+            [("id", .str "helper_m"), ("kind", .str "resonator"), ("params", Lean.Json.mkObj [])])
+          inFields := inFields ++ [("in", Lean.Json.arr #[.str "helper_m"])]
+        else
+          nodes := nodes.push (Lean.Json.mkObj
+            [("id", .str "helper_s"), ("kind", .str "source"), ("params", Lean.Json.mkObj [])])
+          inFields := inFields ++ [("in", Lean.Json.arr #[.str "helper_s"])]
+    nodes := nodes.push (Lean.Json.mkObj
+      [("id", .str "dut"), ("kind", .str kind), ("params", Lean.Json.mkObj []),
+       ("in", Lean.Json.mkObj inFields)])
+    -- a control-outlet kind (a bare Knob) drives nothing by itself — its
+    -- natural minimal patch consumes it through a source's control inlet, so
+    -- the patch has a generator (and the master-clock slots have a reader).
+    if outletOf kind == some .control then
+      nodes := nodes.push (Lean.Json.mkObj
+        [("id", .str "consumer"), ("kind", .str "source"), ("params", Lean.Json.mkObj []),
+         ("in", Lean.Json.mkObj [("freq", Lean.Json.arr #[.str "dut"])])])
+      nodes := nodes.push (Lean.Json.mkObj
+        [("id", .str "outn"), ("kind", .str "out"),
+         ("in", Lean.Json.mkObj [("in", Lean.Json.arr #[.str "consumer"])])])
     else
-      for (spec, ij) in tblInlets.zip schInlets do
-        let nm := ((ij.getObjVal? "name").toOption.bind (·.getStr?.toOption)).getD "?"
-        let acc := strArr ((ij.getObjVal? "accepts").toOption.getD (Lean.Json.arr #[]))
-        let multi := ((ij.getObjVal? "multi").toOption.bind (·.getBool?.toOption)).getD false
-        if nm != spec.name || acc != spec.accepts.map domStr || multi != spec.multi then
-          ok := false; issues := issues.push s!"{kind}.{nm}: schema inlet ≠ table ({acc}, multi={multi})"
-  if schemaKinds != vocabularyKinds then
-    ok := false; issues := issues.push s!"kind coverage: schema {schemaKinds} ≠ table {vocabularyKinds}"
-  IO.println s!"        {nodes.size} schema kinds vs the port-spec table (inlets, accepts, multi, knob order):"
-  IO.println s!"        result   {if issues.isEmpty then "coherent" else toString issues}"
+      nodes := nodes.push (Lean.Json.mkObj
+        [("id", .str "outn"), ("kind", .str "out"),
+         ("in", Lean.Json.mkObj [("in", Lean.Json.arr #[.str "dut"])])])
+    let patch := Lean.Json.mkObj [("nodes", Lean.Json.arr nodes), ("out", .str "outn")]
+    match Tropical.Playground.compilePlanPure arena resolved patch with
+    | .error e => ok := false; issues := issues.push s!"{kind}: compile: {firstLine e}"
+    | .ok (plan, _) =>
+      covered := covered + 1
+      -- every table knob must land as a slot: raw/anchor knobs under the bare
+      -- name, glided knobs as their #v0 anchor triple.
+      for p in portSpecs kind do
+        if p.knob.isSome then
+          let base := s!"param:dut.{p.name}"
+          if !(plan.slotNames.any (fun s => s == base || s == s!"{base}#v0")) then
+            ok := false; issues := issues.push s!"{kind}: {base} not registered"
+      let dead := unreadParamSlots plan
+      if !dead.isEmpty then
+        ok := false; issues := issues.push s!"{kind}: unread {dead}"
+  IO.println s!"        {covered} kinds, each compiled from a vocabulary-generated minimal patch:"
+  IO.println s!"        result   {if issues.isEmpty then "every declared knob registers and is read" else toString issues}"
   if ok then
-    IO.println "  PASS  vocab-coherence  static nodeSchema ≡ port-spec table — one description, two views"; pure true
+    IO.println "  PASS  vocab-driven  the served vocabulary drives a compiling patch per kind — declared knobs live, nothing unread"; pure true
   else
-    IO.println s!"  FAIL  vocab-coherence  drift between nodeSchema and portSpecs: {issues}"; pure false
+    IO.println s!"  FAIL  vocab-driven  {issues}"; pure false
+
+open Tropical.Playground in
+/-- THE REALIZED-STATE REPORT gate. The `load_patch_graph` reply must state
+    FACTS a surface can render — wired vs normalled inputs, live params with
+    disciplines, excluded nodes — and never a warning (house contract: legal-
+    but-incomplete compiles silently; the report tells, it does not scold).
+    This is the protocol-level net for the silence-with-`{ok:true}` class. -/
+private def runRealizedReport : IO Bool := do
+  let mkPatch := fun (withMod : Bool) (dangler : Bool) =>
+    let base := "{\"nodes\":[" ++
+      "{\"id\":\"osc\",\"kind\":\"source\",\"params\":{\"freq\":220}}," ++
+      (if withMod then "{\"id\":\"lfo\",\"kind\":\"source\",\"params\":{\"freq\":0.4}}," else "") ++
+      (if dangler then "{\"id\":\"orphan\",\"kind\":\"source\",\"params\":{\"freq\":99}}," else "") ++
+      "{\"id\":\"sfw\",\"kind\":\"sflange\",\"params\":{\"depth\":0.002,\"rate\":0.3},\"in\":{\"in\":[\"osc\"]" ++
+      (if withMod then ",\"mod\":[\"lfo\"]" else "") ++ "}}," ++
+      "{\"id\":\"outn\",\"kind\":\"out\",\"in\":{\"in\":[\"sfw\"]}}],\"out\":\"outn\"}"
+    base
+  let inputState := fun (rep : Lean.Json) (node port : String) =>
+    match rep.getObjVal? "inputs" with
+    | .ok (.arr a) => (a.find? fun ij =>
+        ((ij.getObjVal? "node").toOption.bind (·.getStr?.toOption)) == some node &&
+        ((ij.getObjVal? "port").toOption.bind (·.getStr?.toOption)) == some port).bind
+        fun ij => (ij.getObjVal? "state").toOption.bind (·.getStr?.toOption)
+    | _ => none
+  let paramNames := fun (rep : Lean.Json) =>
+    match rep.getObjVal? "params" with
+    | .ok (.arr a) => a.filterMap fun (pj : Lean.Json) =>
+        (pj.getObjVal? "name").toOption.bind (·.getStr?.toOption)
+    | _ => #[]
+  let nodeStatus := fun (rep : Lean.Json) (id : String) =>
+    match rep.getObjVal? "nodes" with
+    | .ok (.arr a) => (a.find? fun nj =>
+        ((nj.getObjVal? "id").toOption.bind (·.getStr?.toOption)) == some id).bind
+        fun nj => (nj.getObjVal? "status").toOption.bind (·.getStr?.toOption)
+    | _ => none
+  match Lean.Json.parse (mkPatch false false), Lean.Json.parse (mkPatch true false),
+        Lean.Json.parse (mkPatch false true) with
+  | .ok jUnwired, .ok jWired, .ok jDangler =>
+    let repU := realizedReport jUnwired #[]
+    let repW := realizedReport jWired #[]
+    let repD := realizedReport jDangler #[]
+    let unwiredOk := inputState repU "sfw" "mod" == some "normalled"
+      && (paramNames repU).contains "sfw.rate"
+    let wiredOk := inputState repW "sfw" "mod" == some "wired"
+      && !(paramNames repW).contains "sfw.rate"
+    let danglerOk := nodeStatus repD "orphan" == some "excluded"
+      && nodeStatus repD "osc" == some "active"
+    -- the no-warnings contract, checked on the wire form itself
+    let noWarnOk := ((repU.compress ++ repW.compress ++ repD.compress).toLower.splitOn "warn").length == 1
+    IO.println s!"        unwired: mod={inputState repU "sfw" "mod"} rate-param={((paramNames repU).contains "sfw.rate")} · wired: mod={inputState repW "sfw" "mod"} rate-param={((paramNames repW).contains "sfw.rate")} · orphan={nodeStatus repD "orphan"}"
+    if unwiredOk && wiredOk && danglerOk && noWarnOk then
+      IO.println "  PASS  realized-report  facts, not warnings: normalled/wired inputs, owned knobs absent when superseded, excluded nodes named"; pure true
+    else
+      IO.println s!"  FAIL  realized-report  unwired={unwiredOk} wired={wiredOk} dangler={danglerOk} noWarn={noWarnOk}"; pure false
+  | _, _, _ => IO.println "  FAIL  realized-report  patch json parse"; pure false
+
+open Tropical.Playground in
+/-- THE MANIFEST-DISCIPLINE gate. `param_disciplines` is host-contract data:
+    every entry must be consistent with the slots the same plan carries (glide
+    companions exist and the base slot doesn't; anchor/raw base slots exist;
+    the velocity entry names its tau_base companion), and a knob superseded by
+    a wired normal must be absent from the table exactly as it is from the
+    slots. A host dispatching from this table can then trust it blind. -/
+private def runManifestDisciplines (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let patch := fun (withMod : Bool) => "{\"nodes\":[" ++
+    "{\"id\":\"osc\",\"kind\":\"source\",\"params\":{\"freq\":220}}," ++
+    (if withMod then "{\"id\":\"lfo\",\"kind\":\"source\",\"params\":{\"freq\":0.4}}," else "") ++
+    "{\"id\":\"sfw\",\"kind\":\"sflange\",\"params\":{\"depth\":0.002,\"rate\":0.3},\"in\":{\"in\":[\"osc\"]" ++
+    (if withMod then ",\"mod\":[\"lfo\"]" else "") ++ "}}," ++
+    "{\"id\":\"outn\",\"kind\":\"out\",\"in\":{\"in\":[\"sfw\"]}}],\"out\":\"outn\"}"
+  let check := fun (label : String) (plan : Tropical.Plan.FlatPlan) => Id.run do
+    let mut issues : Array String := #[]
+    let names := plan.slotNames
+    for d in plan.paramDisciplines do
+      let base := s!"param:{d.name}"
+      for c in d.companions do
+        if !names.contains s!"param:{c}" then
+          issues := issues.push s!"{label}: {d.name} companion {c} has no slot"
+      match d.discipline with
+      | "glide" =>
+        if names.contains base then
+          issues := issues.push s!"{label}: glided {d.name} has a base slot (companions are the value)"
+        if d.glideDurSec.isNone then
+          issues := issues.push s!"{label}: glided {d.name} missing glide_dur_sec"
+      | "raw" | "anchor" | "velocity" =>
+        if !names.contains base then
+          issues := issues.push s!"{label}: {d.discipline} {d.name} has no base slot"
+      | other => issues := issues.push s!"{label}: unknown discipline {other}"
+    return issues
+  match Lean.Json.parse (patch false), Lean.Json.parse (patch true) with
+  | .ok ju, .ok jw =>
+    match Tropical.Playground.compilePlanPure arena resolved ju,
+          Tropical.Playground.compilePlanPure arena resolved jw with
+    | .ok (pu, _), .ok (pw, _) =>
+      let mut issues := check "unwired" pu ++ check "wired" pw
+      if !(pu.paramDisciplines.any (·.name == "sfw.rate")) then
+        issues := issues.push "unwired: sfw.rate missing from disciplines"
+      if pw.paramDisciplines.any (·.name == "sfw.rate") then
+        issues := issues.push "wired: superseded sfw.rate present in disciplines"
+      if !(pu.paramDisciplines.any fun d => d.name == "master.velocity"
+            && d.discipline == "velocity" && d.companions.contains "master.tau_base") then
+        issues := issues.push "master.velocity entry wrong"
+      IO.println s!"        {pu.paramDisciplines.size}+{pw.paramDisciplines.size} manifest entries checked against their plans' slots:"
+      IO.println s!"        result   {if issues.isEmpty then "consistent" else toString issues}"
+      if issues.isEmpty then
+        IO.println "  PASS  manifest-disciplines  param_disciplines ≡ the plan's slots — a host can dispatch from it blind"; pure true
+      else
+        IO.println s!"  FAIL  manifest-disciplines  {issues}"; pure false
+    | .error e, _ | _, .error e =>
+      IO.println s!"  FAIL  manifest-disciplines  compile: {firstLine e}"; pure false
+  | _, _ => IO.println "  FAIL  manifest-disciplines  json parse"; pure false
 
 /-- THE DEAD-SLOT LINT gate (the systemic net for the dead-knob class). Canonical
     patches covering every playground node kind compile through the real
@@ -2494,7 +2621,13 @@ def main (args : List String) : IO UInt32 := do
     if !(← runModalAddr arena resolved) then
       failed := failed + 1
     total := total + 1
-    if !(← runVocabCoherence) then
+    if !(← runRealizedReport) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runManifestDisciplines arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runVocabDriven arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runDeadSlotLint arena resolved) then

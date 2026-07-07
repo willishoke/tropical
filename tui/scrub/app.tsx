@@ -30,9 +30,9 @@ const GROUP_LABEL: Record<string, string> = {
 // the global master clock (re-basing τ for continuity), the rest step.
 const METHOD: Record<ParamMode, string> = {
   live: 'set_param',
-  glide: 'set_param_glide',
-  freq: 'set_param_freq',
-  velocity: 'set_param_velocity',
+  glide: 'set_param',
+  freq: 'set_param',
+  velocity: 'set_param',
 }
 
 // The forward / freeze / reverse readout for the global time-warp knob.
