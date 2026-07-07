@@ -1380,6 +1380,71 @@ private def runModalDegree (arena : Arena)
     | .error e => IO.println s!"  FAIL  modal-degree  render: {firstLine e}"; pure false
   | .error e => IO.println s!"  FAIL  modal-degree  build: {firstLine e}"; pure false
 
+/-- THE LONG-τ gate. Time-translation exactness at astronomical clock offsets:
+    the SAME bank struck K samples later, read K samples later, must be BYTE-
+    IDENTICAL to the bank at the origin (K = 2³⁰ samples ≈ 6.8 hours at 44.1k).
+    Both clocks are FRACTIONAL-sample — the production scrub form
+    `M(n) = toInt(velocity·2³²)·n` and a sub-sample offset — because that is
+    where the old float path actually rounded: at whole samples
+    `toFloat((2³⁰+s)·2³²)` has ~31 significant bits and was accidentally exact,
+    but a fractional clock plus the 2³⁰-sample shift needs >53 bits, so
+    `toFloat` rounds and the unreduced `ω·dSec` walks off the phase — precision
+    decayed with τ exactly when the clock was warped. On the integer relative
+    clock (`relClockQ` + `modePhaseW`) `clkRel` is the same i64 on both sides
+    at ANY low bits, so every downstream op sees identical bytes. Energy floors
+    keep silent agreement from passing. -/
+private def runLongTauModal (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let modes : Array Tropical.EmitArrow.ModalMode := #[
+    Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 220) (Tropical.EmitArrow.lit 30 1) (Tropical.EmitArrow.lit 6 1),
+    Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 330) (Tropical.EmitArrow.lit 40 1) (Tropical.EmitArrow.lit 4 1),
+    Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 440) (Tropical.EmitArrow.lit 55 1) (Tropical.EmitArrow.lit 3 1)]
+  let K : Int := 1073741824                    -- 2³⁰ samples
+  let Kq : Int := K * 4294967296               -- the same shift as a Q32.32 clock offset
+  let mkPair (tag : String) (clk : Tropical.EmitArrow.Clock) :
+      Except String Tropical.Plan.FlatPlan × Except String Tropical.Plan.FlatPlan :=
+    (buildAndFinish (.ok (Tropical.EmitArrow.buildExprCarrier s!"modal_lt_{tag}_base"
+        (Tropical.EmitArrow.modalBankSig modes clk (Tropical.EmitArrow.lit 200)) arena)),
+     buildAndFinish (.ok (Tropical.EmitArrow.buildExprCarrier s!"modal_lt_{tag}_far"
+        (Tropical.EmitArrow.modalBankSig modes
+          (Tropical.EmitArrow.add clk (Tropical.EmitArrow.litI Kq))
+          (Tropical.EmitArrow.lit (K + 200)) ) arena)))
+  let check (tag : String) (pair : Except String Tropical.Plan.FlatPlan × Except String Tropical.Plan.FlatPlan) :
+      IO (Option (Nat × Float)) := do
+    match pair with
+    | (.ok bp, .ok fp) =>
+      match ← renderPlanSamples bp 1024, ← renderPlanSamples fp 1024 with
+      | .ok base, .ok far =>
+        let n := min base.size far.size
+        let mut bitDiff := 0
+        for i in [0:n] do
+          if base[i]! != far[i]! then bitDiff := bitDiff + 1
+        let mut energy : Float := 0.0
+        for i in [200:n] do energy := energy + base[i]! * base[i]!
+        pure (some (bitDiff, energy))
+      | .error e, _ | _, .error e =>
+        IO.println s!"  FAIL  modal-longtau  render ({tag}): {firstLine e}"; pure none
+    | (.error e, _) | (_, .error e) =>
+      IO.println s!"  FAIL  modal-longtau  build ({tag}): {firstLine e}"; pure none
+  -- the master-clock scrub form: M(n) = toInt(velocity·2³²)·n at velocity 1.001
+  -- (toInt(1.001·2³²) = 4299262263) — every sample has populated low bits. The
+  -- literals ride `litI`: a bare `lit` would float-promote the clock arithmetic
+  -- and round the very bits this gate exists to protect.
+  let velClk := Tropical.EmitArrow.mul
+    (Tropical.EmitArrow.rshift Tropical.EmitArrow.clockLit (Tropical.EmitArrow.lit 32))
+    (Tropical.EmitArrow.litI 4299262263)
+  -- a bare sub-sample offset: one 2⁻³² unit off the whole-sample grid.
+  let subClk := Tropical.EmitArrow.add Tropical.EmitArrow.clockLit (Tropical.EmitArrow.litI 1)
+  match ← check "vel" (mkPair "vel" velClk), ← check "sub" (mkPair "sub" subClk) with
+  | some (d1, e1), some (d2, e2) =>
+    IO.println s!"        bank @ origin vs struck+read 2³⁰ samples later (≈6.8h), fractional clocks, 1024 samples:"
+    IO.println s!"        result   velocity-1.001 clock: bit-differing {d1}/1024 (E={e1})  ·  sub-sample offset: {d2}/1024 (E={e2})"
+    if d1 == 0 && d2 == 0 && e1 > 1e-6 && e2 > 1e-6 then
+      IO.println s!"  PASS  modal-longtau  time-translation byte-exact at τ+2³⁰ samples on fractional (scrub-form) clocks"; pure true
+    else
+      IO.println s!"  FAIL  modal-longtau  bitDiff vel={d1} sub={d2} (want 0) energy vel={e1} sub={e2} (>1e-6)"; pure false
+  | _, _ => pure false
+
 /-- THE REVERSE-REVERB gate (the moat). The modal bank read through a reversing
     warp φ(c) = 2·C·2³² − c (reflect scene time around sample C=1024) must equal
     the FORWARD bank time-mirrored: rev[i] ≡ fwd[2C−i], bit-for-bit. This is
@@ -2588,6 +2653,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runModalReverse arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runLongTauModal arena resolved) then
       failed := failed + 1
     IO.println "residue calculus (voice ⋙ reverb composed at build time):"
     total := total + 1

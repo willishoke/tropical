@@ -164,6 +164,15 @@ def assemble (arena : Arena) (name : String) (inputs : Array AInputDecl)
     0.0007`, `lit 4294967296 = 2³²`. -/
 def lit (mantissa : Int) (exponent : Nat := 0) : Sig := .num ⟨mantissa, exponent⟩
 
+/-- An INTEGER literal for clock arithmetic. A bare `lit` only narrows to int
+    inside an int-EXPECTED context (bitwise ops, `to_int`); in plain `add`/
+    `mul`/`sub` against the integer clock it stays float and PROMOTES the whole
+    op to float (`inferResultType`/`promoteTypes`) — the clock gets `sitofp`'d
+    and loses sub-sample bits once the value passes 2⁵³ (≈ 47 seconds of
+    absolute Q32.32 clock at 44.1k). Wrapping the literal in `toInt` pins the
+    op to exact i64. Use this for every literal that meets a clock. -/
+def litI (mantissa : Int) : Sig := .unary .toInt (.num ⟨mantissa, 0⟩)
+
 /-- `arr`-level pointwise multiply. -/
 def mul (a b : Sig) : Sig := .binary .mul a b
 /-- `arr`-level pointwise add. -/
@@ -1202,23 +1211,53 @@ def powE (base : Sig) : Nat → Sig
   | 1 => base
   | n + 1 => mul (powE base n) base
 
+/-- The RELATIVE clock `clkRel = clk − anchor·2³²` as an EXACT i64 subtract. The
+    old float path (`toFloat(clk)/2³² − anchor`) lost mantissa bits as the absolute
+    clock grew — the one unbounded-float-time site in the system. Subtracting on
+    the integer clock first keeps time-translation exact at any τ; everything
+    downstream (phase reduction, the bounded envelope coordinate, the causal gate)
+    sees only the bounded relative value. -/
+def relClockQ (clkInt anchorSamples : Sig) : Sig :=
+  sub clkInt (toIntE (mul anchorSamples (lit 4294967296)))
+
+/-- A mode's oscillator phase over the RELATIVE clock, integer-reduced (the
+    FixedPhasor pattern): the frequency lands ONCE as `incr = ⌊(ω/2π)·2³²/SR⌋`
+    (float math, so ω may be a live slot), then the exact split-multiply
+    `incr·hi + (incr·lo)>>32` reduces `incr·clkRel` on the circle ℤ/2³² — the
+    phase argument never leaves `[0, 2π)`, so its precision is τ-INDEPENDENT
+    (the old `ω·dSec` fed `sinSig` an unbounded argument whose mantissa starved
+    as τ grew). ω quantizes to the SR/2³² grid (~1e-5 Hz at 44.1k) — inaudible.
+    `rshift` is `ashr`, so `clkRel = (clkRel>>32)·2³² + (clkRel & (2³²−1))` holds
+    exactly on NEGATIVE relative clocks (pre-strike, mirrored reads). Returns the
+    phase in RADIANS `[0, 2π)` for the `sinSig`/`cosSig` polynomials. -/
+def modePhaseW (omega clkRel : Sig) : Sig :=
+  let incr := toIntE (div (mul (div omega twoPiE) (lit 4294967296)) .sampleRate)
+  let thi := rshift clkRel (lit 32)
+  let tlo := bitAnd clkRel (lit 4294967295)
+  let acc := add (mul incr thi) (rshift (mul incr tlo) (lit 32))
+  mul twoPiE (div (toFloatE (bitAnd acc (lit 4294967295))) (lit 4294967296))
+
 /-- A modal bank as a pure `Sig` over the (already-warped) clock: shift each pole
-    to its time-since-strike `d = clk/2³²/SR − anchor`, sum `d^deg·e^{−σd}·
-    (c_re·cos ωd − c_im·sin ωd)` over the modes, and GATE on `d > 0` (causal: silent
+    to its time-since-strike on the INTEGER clock (`relClockQ`, exact at any τ),
+    sum `d^deg·e^{−σd}·(c_re·cos φ − c_im·sin φ)` over the modes with each φ
+    integer-reduced (`modePhaseW`), and GATE on `clkRel > 0` (causal: silent
     before the strike, a closed-form tail after — and, read through a reversing
-    warp, the tail plays backward). Every sample is `f(clk)`: no state, random-
-    access. Rides `arrUn … (.clk c)`, so warps reach it through the clock leaf. -/
+    warp, the tail plays backward). The envelope coordinate `dSec` is float on
+    the BOUNDED relative clock (`expSig` clamps; decay makes far-field precision
+    irrelevant). Every sample is `f(clk)`: no state, random-access. Rides
+    `arrUn … (.clk c)`, so warps reach it through the clock leaf. -/
 def modalBankSig (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Sig) : Sig :=
-  let dSec := div (sub (div (toFloatE clkInt) (lit 4294967296)) anchorSamples) .sampleRate
+  let clkRel := relClockQ clkInt anchorSamples
+  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
   let bank := modes.foldl
     (fun acc m =>
-      let wd := mul m.omega dSec
+      let wd := modePhaseW m.omega clkRel
       let osc := sub (mul m.cre (cosSig wd)) (mul m.cim (sinSig wd))
       let env := expSig (neg (mul m.sigma dSec))
       let env2 := if m.deg == 0 then env else mul (powE dSec m.deg) env
       add acc (mul env2 osc))
     (lit 0)
-  selectE (gt dSec (lit 0)) bank (lit 0)
+  selectE (gt clkRel (lit 0)) bank (lit 0)
 
 /-- Complex arithmetic over `Sig` (real, imag) — the residue calculus done
     SYMBOLICALLY, so poles/coeffs can be live param slots. With literal operands
@@ -1789,15 +1828,18 @@ def modalBankTerm (modes : Array ModalMode) (anchor : Sig) (c : Clock) : ArrowTe
     `f(clk)`: no state. -/
 def modalBankSigDir (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Sig)
     (dir : Sig) (dampScale? : Option Sig := none) : Sig :=
-  let dSec := div (sub (div (toFloatE clkInt) (lit 4294967296)) anchorSamples) .sampleRate
+  let clkRel := relClockQ clkInt anchorSamples
+  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
   modes.foldl
     (fun acc m =>
-      let wd := mul m.omega dSec
+      let wd := modePhaseW m.omega clkRel
       let oscF := sub (mul m.cre (cosSig wd)) (mul m.cim (sinSig wd))            -- osc(d)
-      -- osc(−d) evaluated at the NEGATED argument (not via cos-even/sin-odd), so
-      -- `dir=1` is the forward tail's exact time-mirror — the minimax sine isn't
-      -- bit-symmetric, so `cosSig(−wd)` must be spelled out to match `fwd[2C−i]`.
-      let wdN := neg wd
+      -- osc(−d) as the phase of the NEGATED relative clock (not cos-even/sin-odd),
+      -- so `dir=1` is the forward tail's exact time-mirror — the minimax sine isn't
+      -- bit-symmetric, so the mirrored phase must be spelled out to match
+      -- `fwd[2C−i]`. `modePhaseW` is exact on the negated i64, so the rev side at
+      -- `clkRel = −X` evaluates at bit-equal phase to the fwd side at `+X`.
+      let wdN := modePhaseW m.omega (neg clkRel)
       let oscR := sub (mul m.cre (cosSig wdN)) (mul m.cim (sinSig wdN))          -- osc(−d)
       -- σ·d, optionally sway-bent (decay clock only, so pitch is untouched).
       let sd := mul m.sigma dSec
@@ -1806,8 +1848,8 @@ def modalBankSigDir (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Si
       let envF := if m.deg == 0 then envF else mul (powE dSec m.deg) envF
       let envR := expSig sd
       let envR := if m.deg == 0 then envR else mul (powE (neg dSec) m.deg) envR
-      let fwd := selectE (gt dSec (lit 0)) (mul envF oscF) (lit 0)
-      let rev := selectE (gt (neg dSec) (lit 0)) (mul envR oscR) (lit 0)
+      let fwd := selectE (gt clkRel (lit 0)) (mul envF oscF) (lit 0)
+      let rev := selectE (gt (lit 0) clkRel) (mul envR oscR) (lit 0)
       add acc (add (mul (sub (lit 1) dir) fwd) (mul dir rev)))
     (lit 0)
 
@@ -1818,10 +1860,10 @@ def modalBankTermDir (modes : Array ModalMode) (anchor : Sig) (c : Clock)
   ArrowTerm.arrUn
     (fun clkSig =>
       -- the sway LFO is a pure function of the SAME clock leaf the bank rides, so a
-      -- master scrub reverses it coherently with the tail.
+      -- master scrub reverses it coherently with the tail. Its phase is integer-
+      -- reduced (`phasorPhaseSig`), never `rate·t` on unbounded float seconds.
       let dampScale? := damp?.map (fun (depth, rate) =>
-        let t := div (div (toFloatE clkSig) (lit 4294967296)) .sampleRate
-        add (lit 1) (mul depth (sinSig (mul (mul twoPiE rate) t))))
+        add (lit 1) (mul depth (sinSig (mul twoPiE (phasorPhaseSig rate (lit 0) clkSig)))))
       modalBankSigDir modes clkSig anchor dir dampScale?)
     (ArrowTerm.clk c)
 
