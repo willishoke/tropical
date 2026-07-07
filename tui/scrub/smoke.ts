@@ -5,9 +5,9 @@ import { buildGraph, PARAMS, type ParamMode } from './patch'
 
 const METHOD: Record<ParamMode, string> = {
   live: 'set_param',
-  glide: 'set_param_glide',
-  freq: 'set_param_freq',
-  velocity: 'set_param_velocity',
+  glide: 'set_param',
+  freq: 'set_param',
+  velocity: 'set_param',
 }
 // The seeded-slot name a mode's drive addresses: a glided knob lives in its
 // `#v0` ramp slot; a raw/anchored knob in the bare slot (see Playground.collectParams).
@@ -28,7 +28,7 @@ const main = async () => {
   for (const p of PARAMS) {
     await c.call(METHOD[p.mode], { name: p.slot, value: p.value })
   }
-  console.log('drive OK — set_param / set_param_glide / set_param_freq all live')
+  console.log('drive OK — unified set_param dispatches raw/glide/anchor/velocity engine-side')
   c.kill()
 }
 main().catch((e) => { console.error('FAIL:', e.message); c.kill(); process.exit(1) })

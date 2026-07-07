@@ -2018,6 +2018,9 @@ def handleSetParamGlide (env : Env) (args : Json) : EngineM Json := do
   write "v0" curr
   write "v1" target
   write "t0" now
+  -- the mirror tracks the ramp's TARGET (its settled value), like every
+  -- other write path — a glide previously skipped this, so list_params lied.
+  env.state.modify (·.setParamValue name (toJson target))
   pure <| Json.mkObj [("name", Json.str name), ("value", toJson target)]
 
 /-- `set_param_freq`: a PHASE-ANCHORED frequency change. `freq = f·τ + φ_off` — so
@@ -2048,6 +2051,7 @@ def handleSetParamFreq (env : Env) (args : Json) : EngineM Json := do
     env.runtime.setSlot phaseIdx (raw - Float.floor raw)   -- frac → [0, 1)
     env.runtime.setSlot freqIdx target
   | none => env.runtime.setSlot freqIdx target
+  env.state.modify (·.setParamValue name (toJson target))
   pure <| Json.mkObj [("name", Json.str name), ("value", toJson target)]
 
 /-- `set_param_velocity`: the GLOBAL TIME-WARP scrub. The master clock is
@@ -2078,6 +2082,26 @@ def handleSetParamVelocity (env : Env) (args : Json) : EngineM Json := do
   env.runtime.setSlot velIdx target
   env.state.modify (·.setParamValue name (toJson target))
   pure <| Json.mkObj [("name", Json.str name), ("value", toJson target)]
+
+/-- ONE `set_param`, dispatched by the plan's own discipline table (the host
+    contract, design/host-param-dispatch.md): the caller never chooses a write
+    verb. Raw for table-less names (session-model patches, old plans) — with
+    the one engine-owned exception that the reserved master-clock velocity
+    param always re-bases, table or no table (the engine consulting its own
+    reserved name is not a client choosing semantics). The old
+    `set_param_glide/freq/velocity` methods remain as aliases into the same
+    internal handlers until the surfaces migrate (deleted in a later phase). -/
+def handleSetParamDispatch (env : Env) (args : Json) : EngineM Json := do
+  let name := (argStr? args "name").getD ""
+  let st ← env.state.get
+  let disc := match st.paramDisciplines.find? (·.name == name) with
+    | some d => d.discipline
+    | none => if name == Tropical.Playground.masterVelocityParam then "velocity" else "raw"
+  match disc with
+  | "glide" => handleSetParamGlide env args
+  | "anchor" => handleSetParamFreq env args
+  | "velocity" => handleSetParamVelocity env args
+  | _ => handleSetParam env args
 
 def handleListParams (env : Env) : EngineM Json := do
   let st ← env.state.get
@@ -2133,7 +2157,8 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
   -- this graph's inspection points via `list_scope_taps` with no session wiring.
   env.state.modify (fun st => { st with
     params := Tropical.Playground.knobParams args
-    scopeTaps := taps })
+    scopeTaps := taps
+    paramDisciplines := plan.paramDisciplines })
   -- The realized-state report: facts about what compiled (active/excluded
   -- nodes, wired/normalled inputs, live params with disciplines, taps) —
   -- never warnings. `ok` stays for callers that only ever looked at it.
@@ -2167,7 +2192,10 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   | "start_audio"     => handleStartAudio env args
   | "stop_audio"      => handleStopAudio env
   | "audio_status"    => handleAudioStatus env
-  | "set_param"       => handleSetParam env args
+  -- ONE set_param: discipline-dispatched from the loaded plan's table
+  -- (raw for table-less names). The three verbs below are migration
+  -- aliases into the same internals.
+  | "set_param"       => handleSetParamDispatch env args
   | "set_param_glide" => handleSetParamGlide env args
   | "set_param_freq"  => handleSetParamFreq env args
   | "set_param_velocity" => handleSetParamVelocity env args

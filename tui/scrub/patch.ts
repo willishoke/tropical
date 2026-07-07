@@ -6,10 +6,10 @@
 // the EmitArrow patch-graph (see lean/Tropical/Playground.lean). So this is now
 // a fixed patch-GRAPH driven live over the same three RPCs the playground uses:
 //
-//   set_param          — a raw slot write (steps at block rate)
-//   set_param_glide    — a closed-form smoothstep ramp (click-free, stateless)
-//   set_param_freq     — a phase-anchored freq change (waveform stays continuous)
-//   set_param_velocity — the GLOBAL time-warp scrub (re-bases τ for continuity)
+//   set_param — ONE verb; the engine dispatches per the loaded plan's
+//   param_disciplines table (raw slot write / closed-form glide /
+//   phase-anchored freq / master-clock velocity re-base) — the caller
+//   never chooses semantics (design/host-param-dispatch.md).
 //
 // The graph (downstream-only, in the playground's node vocabulary):
 //
