@@ -1916,56 +1916,71 @@ def unreadParamSlots (plan : Tropical.Plan.FlatPlan) : Array String := Id.run do
   return dead
 
 open Tropical.Playground in
-/-- THE TABLE-COHERENCE gate. The static `nodeSchema` JSON (served as
-    `node_schema`, slated to become a generated view) must agree with the
-    port-spec table — same kinds, same inlets (name/accepts/multi), same knobs
-    in the same order. While both exist, this gate is what makes them ONE
-    description; when the schema becomes generated, the gate becomes a
-    tautology and can retire with it. -/
-private def runVocabCoherence : IO Bool := do
-  let domStr : PortDomain → String
-    | .signal => "signal" | .modal => "modal" | .control => "control"
-  let strArr := fun (j : Lean.Json) => match j.getArr? with
-    | .ok a => a.filterMap (·.getStr?.toOption)
-    | .error _ => #[]
+/-- THE VOCABULARY-DRIVENNESS gate (successor to the table-coherence gate,
+    which retired with the static `nodeSchema` it was pinning). `get_vocabulary`
+    is only honest if the served table can DRIVE a client: for every kind,
+    generate a minimal patch FROM the vocabulary alone (wire each `in` inlet
+    from a domain-matching helper; leave optional normals intact), compile it
+    through the real `compilePlanPure`, and assert every knob the table
+    declares registers a live slot and nothing registered goes unread. A kind
+    added to the table is covered here with no test edit. -/
+private def runVocabDriven (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
   let mut ok := true
+  let mut covered := 0
   let mut issues : Array String := #[]
-  let nodes := match nodeSchema.getObjVal? "nodes" with
-    | .ok (.arr a) => a
-    | _ => #[]
-  -- every schema node must match the table's projection, and cover all kinds
-  let mut schemaKinds : Array String := #[]
-  for nj in nodes do
-    let kind := ((nj.getObjVal? "kind").toOption.bind (·.getStr?.toOption)).getD "?"
-    schemaKinds := schemaKinds.push kind
-    let specs := portSpecs kind
-    -- knobs: names in declaration order
-    let tblKnobs := knobNamesOf kind
-    let schKnobs := strArr ((nj.getObjVal? "knobs").toOption.getD (Lean.Json.arr #[]))
-    if tblKnobs != schKnobs then
-      ok := false; issues := issues.push s!"{kind}: knobs {schKnobs} ≠ table {tblKnobs}"
-    -- inlets: name + accepts + multi
-    let tblInlets := specs.filter (!·.accepts.isEmpty)
-    let schInlets := match (nj.getObjVal? "inlets").toOption.getD (Lean.Json.arr #[]) with
-      | .arr a => a
-      | _ => #[]
-    if tblInlets.size != schInlets.size then
-      ok := false; issues := issues.push s!"{kind}: {schInlets.size} schema inlets ≠ table {tblInlets.size}"
+  for kind in vocabularyKinds do
+    if kind == "out" then continue
+    let mut nodes : Array Lean.Json := #[]
+    let mut inFields : List (String × Lean.Json) := []
+    for p in portSpecs kind do
+      if !p.accepts.isEmpty && p.name == "in" then
+        if p.accepts == #[PortDomain.modal] then
+          nodes := nodes.push (Lean.Json.mkObj
+            [("id", .str "helper_m"), ("kind", .str "resonator"), ("params", Lean.Json.mkObj [])])
+          inFields := inFields ++ [("in", Lean.Json.arr #[.str "helper_m"])]
+        else
+          nodes := nodes.push (Lean.Json.mkObj
+            [("id", .str "helper_s"), ("kind", .str "source"), ("params", Lean.Json.mkObj [])])
+          inFields := inFields ++ [("in", Lean.Json.arr #[.str "helper_s"])]
+    nodes := nodes.push (Lean.Json.mkObj
+      [("id", .str "dut"), ("kind", .str kind), ("params", Lean.Json.mkObj []),
+       ("in", Lean.Json.mkObj inFields)])
+    -- a control-outlet kind (a bare Knob) drives nothing by itself — its
+    -- natural minimal patch consumes it through a source's control inlet, so
+    -- the patch has a generator (and the master-clock slots have a reader).
+    if outletOf kind == some .control then
+      nodes := nodes.push (Lean.Json.mkObj
+        [("id", .str "consumer"), ("kind", .str "source"), ("params", Lean.Json.mkObj []),
+         ("in", Lean.Json.mkObj [("freq", Lean.Json.arr #[.str "dut"])])])
+      nodes := nodes.push (Lean.Json.mkObj
+        [("id", .str "outn"), ("kind", .str "out"),
+         ("in", Lean.Json.mkObj [("in", Lean.Json.arr #[.str "consumer"])])])
     else
-      for (spec, ij) in tblInlets.zip schInlets do
-        let nm := ((ij.getObjVal? "name").toOption.bind (·.getStr?.toOption)).getD "?"
-        let acc := strArr ((ij.getObjVal? "accepts").toOption.getD (Lean.Json.arr #[]))
-        let multi := ((ij.getObjVal? "multi").toOption.bind (·.getBool?.toOption)).getD false
-        if nm != spec.name || acc != spec.accepts.map domStr || multi != spec.multi then
-          ok := false; issues := issues.push s!"{kind}.{nm}: schema inlet ≠ table ({acc}, multi={multi})"
-  if schemaKinds != vocabularyKinds then
-    ok := false; issues := issues.push s!"kind coverage: schema {schemaKinds} ≠ table {vocabularyKinds}"
-  IO.println s!"        {nodes.size} schema kinds vs the port-spec table (inlets, accepts, multi, knob order):"
-  IO.println s!"        result   {if issues.isEmpty then "coherent" else toString issues}"
+      nodes := nodes.push (Lean.Json.mkObj
+        [("id", .str "outn"), ("kind", .str "out"),
+         ("in", Lean.Json.mkObj [("in", Lean.Json.arr #[.str "dut"])])])
+    let patch := Lean.Json.mkObj [("nodes", Lean.Json.arr nodes), ("out", .str "outn")]
+    match Tropical.Playground.compilePlanPure arena resolved patch with
+    | .error e => ok := false; issues := issues.push s!"{kind}: compile: {firstLine e}"
+    | .ok (plan, _) =>
+      covered := covered + 1
+      -- every table knob must land as a slot: raw/anchor knobs under the bare
+      -- name, glided knobs as their #v0 anchor triple.
+      for p in portSpecs kind do
+        if p.knob.isSome then
+          let base := s!"param:dut.{p.name}"
+          if !(plan.slotNames.any (fun s => s == base || s == s!"{base}#v0")) then
+            ok := false; issues := issues.push s!"{kind}: {base} not registered"
+      let dead := unreadParamSlots plan
+      if !dead.isEmpty then
+        ok := false; issues := issues.push s!"{kind}: unread {dead}"
+  IO.println s!"        {covered} kinds, each compiled from a vocabulary-generated minimal patch:"
+  IO.println s!"        result   {if issues.isEmpty then "every declared knob registers and is read" else toString issues}"
   if ok then
-    IO.println "  PASS  vocab-coherence  static nodeSchema ≡ port-spec table — one description, two views"; pure true
+    IO.println "  PASS  vocab-driven  the served vocabulary drives a compiling patch per kind — declared knobs live, nothing unread"; pure true
   else
-    IO.println s!"  FAIL  vocab-coherence  drift between nodeSchema and portSpecs: {issues}"; pure false
+    IO.println s!"  FAIL  vocab-driven  {issues}"; pure false
 
 /-- THE DEAD-SLOT LINT gate (the systemic net for the dead-knob class). Canonical
     patches covering every playground node kind compile through the real
@@ -2494,7 +2509,7 @@ def main (args : List String) : IO UInt32 := do
     if !(← runModalAddr arena resolved) then
       failed := failed + 1
     total := total + 1
-    if !(← runVocabCoherence) then
+    if !(← runVocabDriven arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runDeadSlotLint arena resolved) then
