@@ -1794,13 +1794,16 @@ private def runResidueSymbolic (arena : Arena)
         let d := (bs[i]! - ss[i]!).abs
         if d > maxAbs then maxAbs := d
         energy := energy + bs[i]! * bs[i]!
-      let rel := maxAbs / (Float.sqrt (energy / n.toFloat) + 1e-300)
+      -- Two builds of the same 10-mode bank whose weights may differ by an ulp
+      -- pre-landing (litF round-trip), so each mode may jump one Q4.28 quantum
+      -- (design/fixed-carrier.md) × the 0.05 sink gain, 2× slack.
+      let bound := 10.0 * 3.7252903e-9 * 0.05 * 2.0
       IO.println s!"        Expr-residue (literal poles) vs Float-baked residue, voice(2)⋙reverb(4):"
-      IO.println s!"        result   max|Δ|={maxAbs}  ·  rel to rms={rel}"
-      if rel < 1e-6 && energy > 1e-9 then
-        IO.println s!"  PASS  symbolic-residue  Expr couplings fold to the validated Float residue (rel {rel}) — live-capable, same math"; pure true
+      IO.println s!"        result   max|Δ|={maxAbs * 1e9}e-9  ·  quantum bound={bound * 1e9}e-9"
+      if maxAbs < bound && energy > 1e-9 then
+        IO.println s!"  PASS  symbolic-residue  Expr couplings fold to the validated Float residue within the Q4.28 landing quantum (max|Δ| {maxAbs * 1e9}e-9) — live-capable, same math"; pure true
       else
-        IO.println s!"  FAIL  symbolic-residue  rel={rel} energy={energy}"; pure false
+        IO.println s!"  FAIL  symbolic-residue  max|Δ|={maxAbs * 1e9}e-9 (bound {bound * 1e9}e-9) energy={energy}"; pure false
     | .error e, _ | _, .error e => IO.println s!"  FAIL  symbolic-residue  render: {firstLine e}"; pure false
   | .error e, _ | _, .error e => IO.println s!"  FAIL  symbolic-residue  build: {firstLine e}"; pure false
 
@@ -1808,11 +1811,14 @@ private def runResidueSymbolic (arena : Arena)
     cross-weighted residues) must render pointwise-equal to the uncollected
     `residueComposeE` (m+m·n modes) — they are the same partial-fraction expansion
     with the per-pair ringing amps summed per reverb pole, so equality is algebraic
-    and the tolerance only absorbs FP reassociation. Also asserts the collection is
-    structural: m+n modes out, not m+m·n. This is what makes `voice ⋙ reverb`
-    affordable as the DEFAULT lowering — a factor m fewer transcendentals — which
-    is in turn what lets a reverb keep its source's spectrum (and live pitch knob)
-    instead of discarding them. -/
+    and the tolerance only absorbs the DOCUMENTED datapath quantization: each mode
+    lands its envelope×weight once in Q4.28 (design/fixed-carrier.md), so the two
+    structures truncate independently and may differ by up to (m+n + m+m·n)
+    quanta·sinkGain absolutely — the bound is quantum-tied, not relative. Also
+    asserts the collection is structural: m+n modes out, not m+m·n. This is what
+    makes `voice ⋙ reverb` affordable as the DEFAULT lowering — a factor m fewer
+    transcendentals — which is in turn what lets a reverb keep its source's
+    spectrum (and live pitch knob) instead of discarding them. -/
 private def runResidueCollected (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : IO Bool := do
   let tp := 6.283185307179586
@@ -1843,13 +1849,15 @@ private def runResidueCollected (arena : Arena)
         let d := (us[i]! - cs[i]!).abs
         if d > maxAbs then maxAbs := d
         energy := energy + us[i]! * us[i]!
-      let rel := maxAbs / (Float.sqrt (energy / n.toFloat) + 1e-300)
+      -- (nU + nC) independent Q4.28 weight landings × the 0.05 sink gain, with
+      -- 2× slack for the poly/final-shift ulps riding along.
+      let bound := (nU + nC).toFloat * 3.7252903e-9 * 0.05 * 2.0
       IO.println s!"        collected (m+n={nC}) vs uncollected (m+m·n={nU}), voice(3)⋙reverb(4):"
-      IO.println s!"        result   max|Δ|={maxAbs}  ·  rel to rms={rel}"
-      if rel < 1e-6 && energy > 1e-9 && nC == 7 && nU == 15 then
-        IO.println s!"  PASS  residue-collected  pole-union bank ≡ per-pair bank pointwise (rel {rel}); {nU}→{nC} modes — fusion affordable as the default"; pure true
+      IO.println s!"        result   max|Δ|={maxAbs * 1e9}e-9  ·  quantum bound={bound * 1e9}e-9"
+      if maxAbs < bound && energy > 1e-9 && nC == 7 && nU == 15 then
+        IO.println s!"  PASS  residue-collected  pole-union bank ≡ per-pair bank within the Q4.28 landing quantum (max|Δ| {maxAbs * 1e9}e-9 < {bound * 1e9}e-9); {nU}→{nC} modes — fusion affordable as the default"; pure true
       else
-        IO.println s!"  FAIL  residue-collected  rel={rel} energy={energy} nC={nC} (want 7) nU={nU} (want 15)"; pure false
+        IO.println s!"  FAIL  residue-collected  max|Δ|={maxAbs * 1e9}e-9 (bound {bound * 1e9}e-9) energy={energy} nC={nC} (want 7) nU={nU} (want 15)"; pure false
     | .error e, _ | _, .error e => IO.println s!"  FAIL  residue-collected  render: {firstLine e}"; pure false
   | .error e, _ | _, .error e => IO.println s!"  FAIL  residue-collected  build: {firstLine e}"; pure false
 
@@ -2613,6 +2621,24 @@ def main (args : List String) : IO UInt32 := do
           Tropical.EmitArrow.buildFlangeFromGraph) then
       failed := failed + 1
     IO.println "arrow laws (warp algebra ≡ byte-identical audio):"
+    -- ── PER-LAW CARRIER TABLE (load-bearing — see design/fixed-carrier.md) ──
+    -- Which value carrier each law rides is a CHOICE, not an accident: laws
+    -- whose two sides evaluate the same ops on bit-equal clocks are exact on
+    -- EITHER carrier (1-5 ride float to also witness the float path); law 6
+    -- deliberately rides FLOAT as the documented reassociation exhibit (the
+    -- ±δ tap swap moves bytes in float — denotational-only equality); law 7
+    -- is the SAME law on the FIXED carrier where integer-add associativity
+    -- makes it byte-exact; laws 8-10 mirror 1/4/5 on the fixed source.
+    --   1 inverse ················ float   (clock-exact on either)
+    --   2 additive ··············· float   (clock-exact on either)
+    --   3 diagonal/fan-out ······· float   (clock-exact on either)
+    --   4 reverse-involution ····· float   (clock-exact on either)
+    --   5 reverse-swaps-delay ···· float   (clock-exact on either)
+    --   6 reverse⋄flanger ········ FLOAT   (the reassociation exhibit: NOT byte)
+    --   7 reverse⋄flanger ········ FIXED   (byte-exact — the scope-A property)
+    --   8-10 single-source laws ·· FIXED   (byte-exact)
+    -- The modal island (modal-bank/-reverse/-direction/-longtau gates above)
+    -- rides the fixed datapath end to end as of scope-A B3.
     -- Law 1 — inverse/cancellation:  warp(back δ) ⋙ warp(fwd δ) = id
     total := total + 1
     if !(← runArrowLaw "inverse"

@@ -550,10 +550,68 @@ def buildReversibleComb (arena : Arena) (resolved : Array (String × ProgramIdx)
       parser produced (e.g. `6.283185307179586 = 6283185307179586·10⁻¹⁵`,
       `−2.505210838544172e-8 = −2505210838544172·10⁻²³`).
 
+
+
     Notes on the op set this exercises beyond the flanger: `div`, `bitAnd`,
     `rshift`, `lshift`, `round`, `toFloat`, and the `clamp` the elaborator emits
     for the `unipolar` bound (`ClockPhasor.offset` ⇒ `clamp _ 0 1`, and the
     `phase` output bound likewise). All plain scalar ops — no richer types. -/
+
+-- ── The FIXED-POINT SINE (scope A): the sample datapath in i64 ────────────────
+-- `stdlib/FixedSin.md`'s algorithm as a Sig builder, kept in LOCKSTEP with the
+-- .md (corpus-gated byte-identical). Cycles domain: the argument is the Q0.32
+-- phase (one turn = 2³²) straight off the integer phasor — range reduction is
+-- masking/shifts, exact and warp-transparent; there is no float π anywhere.
+-- Output is a Q2.30 sample. Every multiply of two Q2.30 values fits i64 and is
+-- 32×32→64-decomposable — what lets an f32-native backend (Metal) run this
+-- datapath byte-identically to the JIT.
+
+/-- `sin` over a MASKED Q0.32 cycles phase (`[0, 2³²)`), returning Q2.30.
+    Half-turn index `n = (P + 2³⁰) >> 31`; residual `r = P − n·2³¹` IS the
+    quarter-turn coordinate `s = r/2³⁰` in Q2.30; parity sign; degree-15
+    Taylor of `sin((π/2)s)` in `z = s²`, Horner all-positive-with-subtractions
+    (signs strictly alternate), so every `>> 30` rescale sees a non-negative
+    operand. The final `(r·acc₀) >> 30` is the one signed floor-shift
+    (≤1-ulp asymmetry at negative r, inside the ~1e-8 error budget). -/
+def fixedSinCycSig (phaseQ : Sig) : Sig :=
+  let n := rshift (add phaseQ (lit 1073741824)) (lit 31)
+  let r := sub phaseQ (lshift n (lit 31))
+  let sign := sub (litI 1) (mul (litI 2) (bitAnd n (lit 1)))
+  let z := rshift (mul r r) (lit 30)
+  let acc6 := sub (lit 61) (rshift z (lit 30))
+  let acc5 := sub (lit 3864) (rshift (mul acc6 z) (lit 30))
+  let acc4 := sub (lit 172272) (rshift (mul acc5 z) (lit 30))
+  let acc3 := sub (lit 5026995) (rshift (mul acc4 z) (lit 30))
+  let acc2 := sub (lit 85569306) (rshift (mul acc3 z) (lit 30))
+  let acc1 := sub (lit 693598668) (rshift (mul acc2 z) (lit 30))
+  let acc0 := sub (lit 1686629713) (rshift (mul acc1 z) (lit 30))
+  mul sign (rshift (mul r acc0) (lit 30))
+
+/-- `cos` as the exact quarter-turn shift of `fixedSinCycSig` — masked add,
+    no second table, no float. -/
+def fixedCosCycSig (phaseQ : Sig) : Sig :=
+  fixedSinCycSig (bitAnd (add phaseQ (lit 1073741824)) (lit 4294967295))
+
+/-- Scale a Q-fractional integer sample to float at the DAC boundary —
+    `toFloat(x)/2^fracBits`, the generalization of `fixedOut` (Q0.32) to any
+    Q format (the fixed sine is Q2.30 → `fixedOutQ 30`). Applied identically
+    on both sides of any law, so byte-identical ints render byte-identical
+    floats. -/
+def fixedOutQ (fracBits : Nat) (x : Sig) : Sig :=
+  div (toFloatE x) (lit (Int.pow 2 fracBits))
+
+/-- `stdlib/FixedSin.md` as a corpus-gate builder — the SAME ports, defaults,
+    and expression tree as the parsed .md, so `runEmitCorpusGate` can assert
+    the two emits byte-identical (the lockstep proof that the Sig builder and
+    the literate source describe one algorithm). -/
+def buildFixedSin (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let phase : Sig := .inputRef ⟨0⟩
+  .ok (assemble arena "FixedSin"
+    #[ { name := "phase", type? := some (.scalar .int),
+         defaultSig := some (lit 0) } ]
+    #[{ name := "out", type? := some (.scalar .int) }]
+    #[] #[(.port ⟨0⟩, fixedSinCycSig phase)] #[])
 def buildFixedSinOsc (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) :=
   let freqIn : Sig := .inputRef ⟨0⟩
@@ -1126,62 +1184,6 @@ def buildFixedSourceCarrier (name : String) (clkE : Clock) (arena : Arena) :
     Arena × ProgramIdx :=
   buildExprCarrier name (fixedOut (fixedPhase clkE)) arena
 
--- ── The FIXED-POINT SINE (scope A): the sample datapath in i64 ────────────────
--- `stdlib/FixedSin.md`'s algorithm as a Sig builder, kept in LOCKSTEP with the
--- .md (corpus-gated byte-identical). Cycles domain: the argument is the Q0.32
--- phase (one turn = 2³²) straight off the integer phasor — range reduction is
--- masking/shifts, exact and warp-transparent; there is no float π anywhere.
--- Output is a Q2.30 sample. Every multiply of two Q2.30 values fits i64 and is
--- 32×32→64-decomposable — what lets an f32-native backend (Metal) run this
--- datapath byte-identically to the JIT.
-
-/-- `sin` over a MASKED Q0.32 cycles phase (`[0, 2³²)`), returning Q2.30.
-    Half-turn index `n = (P + 2³⁰) >> 31`; residual `r = P − n·2³¹` IS the
-    quarter-turn coordinate `s = r/2³⁰` in Q2.30; parity sign; degree-15
-    Taylor of `sin((π/2)s)` in `z = s²`, Horner all-positive-with-subtractions
-    (signs strictly alternate), so every `>> 30` rescale sees a non-negative
-    operand. The final `(r·acc₀) >> 30` is the one signed floor-shift
-    (≤1-ulp asymmetry at negative r, inside the ~1e-8 error budget). -/
-def fixedSinCycSig (phaseQ : Sig) : Sig :=
-  let n := rshift (add phaseQ (lit 1073741824)) (lit 31)
-  let r := sub phaseQ (lshift n (lit 31))
-  let sign := sub (litI 1) (mul (litI 2) (bitAnd n (lit 1)))
-  let z := rshift (mul r r) (lit 30)
-  let acc6 := sub (lit 61) (rshift z (lit 30))
-  let acc5 := sub (lit 3864) (rshift (mul acc6 z) (lit 30))
-  let acc4 := sub (lit 172272) (rshift (mul acc5 z) (lit 30))
-  let acc3 := sub (lit 5026995) (rshift (mul acc4 z) (lit 30))
-  let acc2 := sub (lit 85569306) (rshift (mul acc3 z) (lit 30))
-  let acc1 := sub (lit 693598668) (rshift (mul acc2 z) (lit 30))
-  let acc0 := sub (lit 1686629713) (rshift (mul acc1 z) (lit 30))
-  mul sign (rshift (mul r acc0) (lit 30))
-
-/-- `cos` as the exact quarter-turn shift of `fixedSinCycSig` — masked add,
-    no second table, no float. -/
-def fixedCosCycSig (phaseQ : Sig) : Sig :=
-  fixedSinCycSig (bitAnd (add phaseQ (lit 1073741824)) (lit 4294967295))
-
-/-- Scale a Q-fractional integer sample to float at the DAC boundary —
-    `toFloat(x)/2^fracBits`, the generalization of `fixedOut` (Q0.32) to any
-    Q format (the fixed sine is Q2.30 → `fixedOutQ 30`). Applied identically
-    on both sides of any law, so byte-identical ints render byte-identical
-    floats. -/
-def fixedOutQ (fracBits : Nat) (x : Sig) : Sig :=
-  div (toFloatE x) (lit (Int.pow 2 fracBits))
-
-/-- `stdlib/FixedSin.md` as a corpus-gate builder — the SAME ports, defaults,
-    and expression tree as the parsed .md, so `runEmitCorpusGate` can assert
-    the two emits byte-identical (the lockstep proof that the Sig builder and
-    the literate source describe one algorithm). -/
-def buildFixedSin (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
-    Except String (Arena × ProgramIdx) :=
-  let phase : Sig := .inputRef ⟨0⟩
-  .ok (assemble arena "FixedSin"
-    #[ { name := "phase", type? := some (.scalar .int),
-         defaultSig := some (lit 0) } ]
-    #[{ name := "out", type? := some (.scalar .int) }]
-    #[] #[(.port ⟨0⟩, fixedSinCycSig phase)] #[])
-
 -- ── The BOOTSTRAP (part 1): the phasor + sine as pure Sig, over {+, ×, frac} ──
 -- The generators (phasor, sine) were the last thing the arrow layer borrowed from
 -- `.trop`. These pointwise pieces need no ArrowTerm; the term wrapper that lifts
@@ -1286,12 +1288,16 @@ def relClockQ (clkInt anchorSamples : Sig) : Sig :=
     `rshift` is `ashr`, so `clkRel = (clkRel>>32)·2³² + (clkRel & (2³²−1))` holds
     exactly on NEGATIVE relative clocks (pre-strike, mirrored reads). Returns the
     phase in RADIANS `[0, 2π)` for the `sinSig`/`cosSig` polynomials. -/
-def modePhaseW (omega clkRel : Sig) : Sig :=
+def modePhaseQ (omega clkRel : Sig) : Sig :=
   let incr := toIntE (div (mul (div omega twoPiE) (lit 4294967296)) .sampleRate)
   let thi := rshift clkRel (lit 32)
   let tlo := bitAnd clkRel (lit 4294967295)
-  let acc := add (mul incr thi) (rshift (mul incr tlo) (lit 32))
-  mul twoPiE (div (toFloatE (bitAnd acc (lit 4294967295))) (lit 4294967296))
+  bitAnd (add (mul incr thi) (rshift (mul incr tlo) (lit 32))) (lit 4294967295)
+
+/-- `modePhaseQ` scaled to RADIANS `[0, 2π)` — for float-polynomial consumers
+    (`sinSig`/`cosSig`). The fixed datapath consumes `modePhaseQ` directly. -/
+def modePhaseW (omega clkRel : Sig) : Sig :=
+  mul twoPiE (div (toFloatE (modePhaseQ omega clkRel)) (lit 4294967296))
 
 /-- A modal bank as a pure `Sig` over the (already-warped) clock: shift each pole
     to its time-since-strike on the INTEGER clock (`relClockQ`, exact at any τ),
@@ -1305,15 +1311,24 @@ def modePhaseW (omega clkRel : Sig) : Sig :=
 def modalBankSig (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Sig) : Sig :=
   let clkRel := relClockQ clkInt anchorSamples
   let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-  let bank := modes.foldl
+  -- Q datapath (scope A): per mode, the slow scalars (envelope × residue
+  -- weight) land ONCE as Q4.28 (headroom |w| < 32, quantum 3.7e-9 ≈ −168 dB —
+  -- a tail quieter than that truncates to true silence), the oscillator values
+  -- are exact Q2.30 off the integer phase, and the mode SUM is i64 — modular,
+  -- hence associative and commutative: reordering modes cannot move a bit,
+  -- which float summation never gave us. One float scale at the boundary.
+  let bankQ := modes.foldl
     (fun acc m =>
-      let wd := modePhaseW m.omega clkRel
-      let osc := sub (mul m.cre (cosSig wd)) (mul m.cim (sinSig wd))
+      let phQ := modePhaseQ m.omega clkRel
       let env := expSig (neg (mul m.sigma dSec))
       let env2 := if m.deg == 0 then env else mul (powE dSec m.deg) env
-      add acc (mul env2 osc))
-    (lit 0)
-  selectE (gt clkRel (lit 0)) bank (lit 0)
+      let wCre := toIntE (mul (mul env2 m.cre) (lit 268435456))
+      let wCim := toIntE (mul (mul env2 m.cim) (lit 268435456))
+      let oscQ := rshift (sub (mul wCre (fixedCosCycSig phQ))
+                              (mul wCim (fixedSinCycSig phQ))) (lit 28)
+      add acc oscQ)
+    (litI 0)
+  selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
 
 /-- Complex arithmetic over `Sig` (real, imag) — the residue calculus done
     SYMBOLICALLY, so poles/coeffs can be live param slots. With literal operands
@@ -1886,17 +1901,21 @@ def modalBankSigDir (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Si
     (dir : Sig) (dampScale? : Option Sig := none) : Sig :=
   let clkRel := relClockQ clkInt anchorSamples
   let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-  modes.foldl
-    (fun acc m =>
-      let wd := modePhaseW m.omega clkRel
-      let oscF := sub (mul m.cre (cosSig wd)) (mul m.cim (sinSig wd))            -- osc(d)
-      -- osc(−d) as the phase of the NEGATED relative clock (not cos-even/sin-odd),
-      -- so `dir=1` is the forward tail's exact time-mirror — the minimax sine isn't
-      -- bit-symmetric, so the mirrored phase must be spelled out to match
-      -- `fwd[2C−i]`. `modePhaseW` is exact on the negated i64, so the rev side at
-      -- `clkRel = −X` evaluates at bit-equal phase to the fwd side at `+X`.
-      let wdN := modePhaseW m.omega (neg clkRel)
-      let oscR := sub (mul m.cre (cosSig wdN)) (mul m.cim (sinSig wdN))          -- osc(−d)
+  -- Q datapath, same ledger as `modalBankSig` (Q4.28 weight landings, exact
+  -- Q2.30 oscillators, i64 mode sums). The causal gates and the dir crossfade
+  -- hoist OUT of the per-mode fold: the gate condition is per-bank (same
+  -- clkRel for every mode) and the blend distributes over the sum — done once
+  -- at the float boundary instead of per mode.
+  let (fwdQ, revQ) := modes.foldl
+    (fun (acc : Sig × Sig) m =>
+      let phQ := modePhaseQ m.omega clkRel
+      -- osc(−d) as the phase of the NEGATED relative clock (not cos-even/
+      -- sin-odd), so `dir=1` is the forward tail's exact time-mirror — the
+      -- fixed sine isn't bit-symmetric (one signed floor-shift), so the
+      -- mirrored phase must be spelled out to match `fwd[2C−i]`. `modePhaseQ`
+      -- is exact on the negated i64, so the rev side at `clkRel = −X`
+      -- evaluates at bit-equal phase to the fwd side at `+X`.
+      let phQN := modePhaseQ m.omega (neg clkRel)
       -- σ·d, optionally sway-bent (decay clock only, so pitch is untouched).
       let sd := mul m.sigma dSec
       let sd := match dampScale? with | none => sd | some s => mul sd s
@@ -1904,10 +1923,19 @@ def modalBankSigDir (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Si
       let envF := if m.deg == 0 then envF else mul (powE dSec m.deg) envF
       let envR := expSig sd
       let envR := if m.deg == 0 then envR else mul (powE (neg dSec) m.deg) envR
-      let fwd := selectE (gt clkRel (lit 0)) (mul envF oscF) (lit 0)
-      let rev := selectE (gt (lit 0) clkRel) (mul envR oscR) (lit 0)
-      add acc (add (mul (sub (lit 1) dir) fwd) (mul dir rev)))
-    (lit 0)
+      let wCreF := toIntE (mul (mul envF m.cre) (lit 268435456))
+      let wCimF := toIntE (mul (mul envF m.cim) (lit 268435456))
+      let wCreR := toIntE (mul (mul envR m.cre) (lit 268435456))
+      let wCimR := toIntE (mul (mul envR m.cim) (lit 268435456))
+      let fwdM := rshift (sub (mul wCreF (fixedCosCycSig phQ))
+                              (mul wCimF (fixedSinCycSig phQ))) (lit 28)
+      let revM := rshift (sub (mul wCreR (fixedCosCycSig phQN))
+                              (mul wCimR (fixedSinCycSig phQN))) (lit 28)
+      (add acc.1 fwdM, add acc.2 revM))
+    (litI 0, litI 0)
+  let fwd := selectE (gt clkRel (lit 0)) (fixedOutQ 30 fwdQ) (lit 0)
+  let rev := selectE (gt (lit 0) clkRel) (fixedOutQ 30 revQ) (lit 0)
+  add (mul (sub (lit 1) dir) fwd) (mul dir rev)
 
 /-- `modalBankTerm` with a DIRECTION crossfade. Rides the `.clk` leaf like
     `modalBankTerm`, so master warps still reach it. -/
