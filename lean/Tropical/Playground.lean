@@ -159,25 +159,112 @@ private def pref (pidx : String → Option Nat) (name : String) (dflt : Sig) : S
   | some i => .paramRef ⟨i⟩
   | none => dflt
 
-/-- Which (kind, knob) pairs are driven by a CLOSED-FORM GLIDE (3 slots + a ramp
-    expr) instead of a raw slot. PROTOTYPE: just the flanger's `depth`, so a turn
-    of it eases as a click-free smoothstep; every other knob stays a raw slot (the
-    A/B). -/
-private def isGlided (kind kname : String) : Bool :=
-  (kind == "source"  && kname == "morph")  ||
-  (kind == "pluck"   && (kname == "morph" || kname == "event_rate")) ||
-  (kind == "comb"    && (kname == "delay" || kname == "decay")) ||
-  (kind == "flange"  && kname == "depth")  ||
-  (kind == "sflange" && kname == "depth")  ||
-  (kind == "fm"      && kname == "depth")  ||
-  (kind == "delay"   && kname == "amount")
+-- ── The port-spec table: ONE description of the vocabulary ──────────────────
+-- Every recent vocabulary bug lived in a gap between two hand-maintained
+-- descriptions of one thing (buildNode vs collectParams vs nodeSchema — the
+-- sflange.rate dead knob was a NAME mismatch between an inlet and the param it
+-- supersedes). The table is the single source; the collector, the lowering,
+-- and the schema/vocabulary views are derived READERS of it and cannot drift.
 
-/-- Which (kind, knob) pairs are FREQUENCIES — phase-anchored (`#phase` offset slot
-    + `set_param_freq`) rather than glided, since gliding a frequency VALUE would
-    reintroduce the τ·f' chirp. A phasor-based oscillator's pitch input. -/
-private def isAnchored (kind kname : String) : Bool :=
-  (kind == "source" && kname == "freq") || (kind == "pluck" && kname == "freq")
-    || (kind == "fm" && kname == "carrier")
+/-- How a continuous port's live writes land — the host contract's dispatch
+    key. `raw` = plain slot write; `glide` = closed-form smoothstep re-anchor
+    (`#v0/#v1/#t0` companion slots); `anchor` = phase-anchored frequency
+    (`#phase` companion — gliding a frequency VALUE would reintroduce the
+    τ·f' chirp, so pitch keeps phase continuous instead). -/
+inductive Discipline where
+  | raw | glide | anchor
+deriving BEq, Repr
+
+/-- The connection-typing color a port carries or accepts. -/
+inductive PortDomain where
+  | signal | modal | control
+deriving BEq, Repr
+
+/-- One port of a node kind. A port with `accepts ≠ #[]` is an inlet; a port
+    with `knob = some (m, e)` carries a continuous param slot whose
+    compile-time fallback is `lit m e` (the value `buildNode` bakes only if the
+    collector somehow skipped the slot). A port may be BOTH (source `freq`: a
+    control inlet that, unwired, is a knob) — wiring it supersedes the slot.
+    Phase 1: constant fallbacks only; default TERMS (normalled subgraphs) land
+    in the next phase. -/
+structure PortSpec where
+  name : String
+  accepts : Array PortDomain := #[]
+  multi : Bool := false
+  knob : Option (Int × Nat) := none
+  discipline : Discipline := .raw
+deriving Repr
+
+private def sigIn : Array PortDomain := #[.signal, .modal, .control]
+private def modalIn : Array PortDomain := #[.modal]
+private def ctrlIn : Array PortDomain := #[.control]
+
+/-- THE table. Order matters twice: knob-bearing entries in declaration order
+    define the `ParamIdx` scan order (`collectParams`), and the whole layout is
+    what `get_vocabulary` will serve. -/
+def portSpecs : String → Array PortSpec
+  | "knob" => #[{ name := "value", knob := some (0, 0) }]
+  | "source" => #[
+      { name := "freq", accepts := ctrlIn, knob := some (220, 0), discipline := .anchor },
+      { name := "morph", knob := some (0, 0), discipline := .glide },
+      { name := "pm", accepts := sigIn }]
+  | "pluck" => #[
+      { name := "freq", accepts := ctrlIn, knob := some (110, 0), discipline := .anchor },
+      { name := "morph", knob := some (0, 0), discipline := .glide },
+      { name := "event_rate", knob := some (2, 0), discipline := .glide }]
+  | "comb" => #[
+      { name := "in", accepts := sigIn },
+      { name := "delay", knob := some (12, 3), discipline := .glide },
+      { name := "decay", knob := some (7, 1), discipline := .glide }]
+  | "flange" => #[
+      { name := "in", accepts := sigIn },
+      { name := "depth", knob := some (7, 4), discipline := .glide }]
+  | "sflange" => #[
+      { name := "in", accepts := sigIn },
+      { name := "mod", accepts := sigIn },
+      { name := "depth", knob := some (2, 3), discipline := .glide },
+      { name := "rate", knob := some (3, 1) }]
+  | "fm" => #[
+      { name := "in", accepts := sigIn },
+      { name := "carrier", knob := some (330, 0), discipline := .anchor },
+      { name := "depth", knob := some (8, 0), discipline := .glide }]
+  | "delay" => #[
+      { name := "in", accepts := sigIn },
+      { name := "amount", knob := some (4, 3), discipline := .glide }]
+  | "reverse" => #[{ name := "in", accepts := sigIn }]
+  | "mix" => #[{ name := "in", accepts := sigIn, multi := true }]
+  | "ring" => #[{ name := "in", accepts := sigIn, multi := true }]
+  | "resonator" => #[
+      { name := "addr", accepts := sigIn },
+      { name := "freq", knob := some (220, 0) },
+      { name := "decay", knob := some (4, 0) }]
+  | "reverb" => #[
+      { name := "in", accepts := modalIn },
+      { name := "rt60", knob := some (2, 0) },
+      { name := "dir", knob := some (0, 0) },
+      { name := "sway", knob := some (0, 0) },
+      { name := "rate", knob := some (3, 1) }]
+  | "modalmix" => #[{ name := "in", accepts := modalIn, multi := true }]
+  | "out" => #[{ name := "in", accepts := sigIn, multi := true }]
+  | _ => #[]
+
+/-- The kinds the table covers, in schema order (`out` last — it has no outlet). -/
+def vocabularyKinds : Array String := #[
+  "source", "pluck", "comb", "flange", "delay", "reverse", "fm", "sflange",
+  "mix", "ring", "resonator", "reverb", "modalmix", "knob", "out"]
+
+-- Derived views — the ONLY readers of glide/anchor/knob facts from here down.
+private def portOf (kind kname : String) : Option PortSpec :=
+  (portSpecs kind).find? (·.name == kname)
+private def disciplineOf (kind kname : String) : Discipline :=
+  ((portOf kind kname).map (·.discipline)).getD .raw
+private def isGlided (kind kname : String) : Bool := disciplineOf kind kname == .glide
+private def isAnchored (kind kname : String) : Bool := disciplineOf kind kname == .anchor
+/-- A knob's compile-time fallback from the table (`lit m e`). -/
+private def fallbackOf (kind kname : String) : Sig :=
+  match (portOf kind kname).bind (·.knob) with
+  | some (m, e) => lit m e
+  | none => lit 0
 
 /-- A closed-form smoothstep GLIDE of τ from three slots: `v0 + (v1−v0)·s²(3−2s)`,
     `s = clamp((τ − t0)/dur, 0, 1)`, `dur = 0.02·sampleRate` samples (20 ms at any
@@ -229,6 +316,9 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
   let p := fun (kname : String) (dflt : Sig) =>
     if isGlided kind kname then glideExpr pidx s!"{id}.{kname}" dflt
     else pref pidx s!"{id}.{kname}" dflt
+  -- a knob's request-or-table default: the JSON params value if given, else the
+  -- table's fallback — the one place buildNode learns a default from.
+  let dv := fun (kname : String) => jExpr params kname (fallbackOf kind kname)
   let clk := masterClock pidx
   match kind with
   | "knob" =>
@@ -239,13 +329,13 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     -- a Knob wired into `freq` shadows the baked freq slot: read the WIRED knob's
     -- `<id>.value` slot instead.
     let pitchE := match (portSources inObj "freq")[0]? with
-      | some w => pref pidx s!"{w}.value" (jExpr params "freq" (lit 220))
-      | none => p "freq" (jExpr params "freq" (lit 220))
-    let morphE := p "morph" (jExpr params "morph" (lit 0))
+      | some w => pref pidx s!"{w}.value" (dv "freq")
+      | none => p "freq" (dv "freq")
+    let morphE := p "morph" (dv "morph")
     -- the anchor: (phase slot, compile-time freq). Present only when the source's
     -- own freq is a live slot; the compile-time freq is the reference the warped
     -- copies' phase correction is measured from.
-    let anchor := (pidx s!"{id}.freq#phase").map fun i => ((.paramRef ⟨i⟩ : Sig), jExpr params "freq" (lit 220))
+    let anchor := (pidx s!"{id}.freq#phase").map fun i => ((.paramRef ⟨i⟩ : Sig), dv "freq")
     -- dedicated `pm` inlet: an AUDIO node wired here through-zero phase-modulates
     -- this carrier — `depth·mod` (cycles) added to the phase port, NOT the clock, so
     -- the carrier pitch stays put. `freq` is untouched, so the carrier's own freq
@@ -254,7 +344,7 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     | some modId =>
       -- the phase port must be wired for PM to land, so force an anchor (reusing the
       -- live `#phase` slot if present, else a flat base).
-      let pmAnchor := anchor.getD ((lit 0 : Sig), jExpr params "freq" (lit 220))
+      let pmAnchor := anchor.getD ((lit 0 : Sig), dv "freq")
       -- A fixed musical PM index (0.3 cycles peak ≈ 1.9 rad). The GUI has no PM
       -- depth knob yet; a fixed depth makes the patch AUDIBLE on connect.
       (.pm modId (voiceOf pitchE morphE (some pmAnchor)) clk (lit 3 1), #[])
@@ -264,51 +354,51 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     -- a plucked MorphOsc source: pitch (anchored), morph (glided), and event_rate
     -- (glided) drive the baked-in envelope. The dynamic content of the instrument.
     let pitchE := match (portSources inObj "freq")[0]? with
-      | some w => pref pidx s!"{w}.value" (jExpr params "freq" (lit 110))
-      | none => p "freq" (jExpr params "freq" (lit 110))
-    let anchor := (pidx s!"{id}.freq#phase").map fun i => ((.paramRef ⟨i⟩ : Sig), jExpr params "freq" (lit 110))
-    (.source (pluckedVoiceE pitchE (p "morph" (jExpr params "morph" (lit 0)))
-       (p "event_rate" (jExpr params "event_rate" (lit 2))) anchor) clk, #[])
+      | some w => pref pidx s!"{w}.value" (dv "freq")
+      | none => p "freq" (dv "freq")
+    let anchor := (pidx s!"{id}.freq#phase").map fun i => ((.paramRef ⟨i⟩ : Sig), dv "freq")
+    (.source (pluckedVoiceE pitchE (p "morph" (dv "morph"))
+       (p "event_rate" (dv "event_rate")) anchor) clk, #[])
   | "comb" =>
     -- a one-sided resonant comb: dry (k=0) + a decaying tap series at k·delay.
     -- `delay` is signed (future = pre-echo, the moat), and doubles as the resonant
     -- spacing (small ⇒ pitched comb, large ⇒ discrete echoes). `decay` = gᵏ.
-    let d := deltaOf (p "delay" (jExpr params "delay" (lit 12 3)))   -- 0.012 s, future
-    let g := p "decay" (jExpr params "decay" (lit 7 1))              -- 0.7
+    let d := deltaOf (p "delay" (dv "delay"))   -- 0.012 s, future
+    let g := p "decay" (dv "decay")             -- 0.7
     let K := 6
     let tail : Array (Sig × (Clock → Clock)) := (Array.range K).map fun j =>
       let k := j + 1
       (gPow g k, fun c => add c (mul (lit (Int.ofNat k)) d))
     (.comb sig (#[(lit 1, fun c => c)] ++ tail), #[])
   | "flange" =>
-    let d := deltaOf (p "depth" (jExpr params "depth" (lit 7 4)))
+    let d := deltaOf (p "depth" (dv "depth"))
     (.flange sig (fun c => sub c d) (fun c => add c d), #[])
   | "delay" =>
-    let d := deltaOf (p "amount" (jExpr params "amount" (lit 4 3)))
+    let d := deltaOf (p "amount" (dv "amount"))
     (.warpFx sig (fun c => sub c d), #[])
   | "reverse" => (.warpFx sig (fun c => neg c), #[])
   | "fm" =>
     -- `carrier` is a frequency → phase-anchored (own #phase slot); `depth` glides.
-    let carAnchor := (pidx s!"{id}.carrier#phase").map fun i => ((.paramRef ⟨i⟩ : Sig), jExpr params "carrier" (lit 330))
-    (.fm sig (sineVoiceE (p "carrier" (jExpr params "carrier" (lit 330))) carAnchor)
-      clk (p "depth" (jExpr params "depth" (lit 8))), #[])
+    let carAnchor := (pidx s!"{id}.carrier#phase").map fun i => ((.paramRef ⟨i⟩ : Sig), dv "carrier")
+    (.fm sig (sineVoiceE (p "carrier" (dv "carrier")) carAnchor)
+      clk (p "depth" (dv "depth")), #[])
   | "sflange" =>
-    let depthSec := p "depth" (jExpr params "depth" (lit 2 3))
+    let depthSec := p "depth" (dv "depth")
     match (portSources inObj "mod")[0]? with
     | some modId => (.sflange sig modId depthSec, #[])
     | none =>
       -- no modulator patched: synthesize a built-in LFO sine at the `rate` knob.
       let lfoId := s!"__lfo_{id}"
       (.sflange sig lfoId depthSec,
-       #[ { id := lfoId, node := .source (sineVoiceE (p "rate" (jExpr params "rate" (lit 3 1)))) clk } ])
+       #[ { id := lfoId, node := .source (sineVoiceE (p "rate" (dv "rate"))) clk } ])
   | "mix" => (.mix (portSources inObj "in"), #[])
   | "ring" => (.ring (portSources inObj "in"), #[])
   -- MODAL-island nodes: they carry poles, compose by the residue calculus at
   -- build time, and realize to a Sig at their boundary (a Sig consumer or the
   -- tap) — realized against the live `clk` (master clock) so they scrub too.
   | "resonator" =>
-    let f0 := p "freq" (jExpr params "freq" (lit 220))
-    let decay := p "decay" (jExpr params "decay" (lit 4))
+    let f0 := p "freq" (dv "freq")
+    let decay := p "decay" (dv "decay")
     -- optional `addr` inlet: a Sig node whose value BECOMES the bank's absolute
     -- time-address (seconds into the impulse response). Unpatched ⇒ reads the
     -- master clock as before; patched ⇒ the causal gate triggers on the address
@@ -316,7 +406,7 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     let addr? := (portSources inObj "addr")[0]?
     (.modalSource (resonatorBank f0 decay 6) (lit 0) clk addr?, #[])
   | "reverb" =>
-    let rt60 := p "rt60" (jExpr params "rt60" (lit 2))
+    let rt60 := p "rt60" (dv "rt60")
     -- reading DIRECTION: θ (radians, live) rotates the composed tail's poles in the
     -- s-plane — 0 = forward decay, π = reverse (pre-verb), interior = a continuous
     -- U(1) morph (σ↔ω at π/2). `window` (live) nulls each mode at its horizon-
@@ -325,12 +415,12 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     -- DIR crossfades the tail's time-direction: 0 = forward ring, 1 = reverse
     -- (pre-verb into the strike), interior = both. Keeps σ/ω fixed, so it stays
     -- audible across the whole range (no pole rotation).
-    let dirX := p "dir" (jExpr params "dir" (lit 0))
+    let dirX := p "dir" (dv "dir")
     -- SWAY: the room's decay breathes — σ ↦ σ·(1 + sway·sin(2π·rate·t)) on the
     -- envelope's clock only (pitch fixed). Continuous CF modulation of RT60 that
     -- stays on-island (no ∫σ dτ, no state); scrubs/reverses with the master clock.
-    let sway := p "sway" (jExpr params "sway" (lit 0))
-    let swayRate := p "rate" (jExpr params "rate" (lit 3 1))   -- 0.3 Hz: a slow breath
+    let sway := p "sway" (dv "sway")
+    let swayRate := p "rate" (dv "rate")   -- 0.3 Hz: a slow breath
     let dir : ModalDir := { dir := dirX, damp := some (sway, swayRate) }
     (.modalReverb sig (reverbRoom rt60 32 60.0 6000.0) (some dir), #[])
   | "modalmix" => (.modalMix (portSources inObj "in"), #[])
@@ -357,22 +447,12 @@ private def rawsOf (j : Json) : Array Raw :=
   | some arr => arr.filterMap decodeRaw
   | none => #[]
 
-/-- The continuous knobs each node kind carries — the ones that become live param
-    slots (`<nodeId>.<knob>`). Structural selectors (`voice`, warp `mode`) are NOT
-    here: changing one alters the graph topology, so it relowers. -/
-private def knobNamesOf : String → Array String
-  | "source"  => #["freq", "morph"]
-  | "pluck"   => #["freq", "morph", "event_rate"]
-  | "comb"    => #["delay", "decay"]
-  | "flange"  => #["depth"]
-  | "sflange" => #["depth", "rate"]
-  | "fm"      => #["carrier", "depth"]
-  | "delay"     => #["amount"]
-  | "reverse"   => #[]
-  | "resonator" => #["freq", "decay"]   -- live poles (symbolic residue keeps them live)
-  | "reverb"    => #["rt60", "dir", "sway", "rate"]   -- damping + direction + decay sway
-  | "knob"      => #["value"]
-  | _           => #[]
+/-- The continuous knobs each node kind carries, DERIVED from the port-spec
+    table (declaration order = `ParamIdx` scan order). Structural selectors
+    (`voice`, warp `mode`) are not ports: changing one alters topology, so it
+    relowers. -/
+def knobNamesOf (kind : String) : Array String :=
+  (portSpecs kind).filterMap fun p => if p.knob.isSome then some p.name else none
 
 -- ── Node-port schema (the connection-validation contract for the GUI) ─────────
 /-- The static node-port schema the playground GUI validates connections against.

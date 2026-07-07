@@ -1915,6 +1915,58 @@ def unreadParamSlots (plan : Tropical.Plan.FlatPlan) : Array String := Id.run do
       dead := dead.push name
   return dead
 
+open Tropical.Playground in
+/-- THE TABLE-COHERENCE gate. The static `nodeSchema` JSON (served as
+    `node_schema`, slated to become a generated view) must agree with the
+    port-spec table — same kinds, same inlets (name/accepts/multi), same knobs
+    in the same order. While both exist, this gate is what makes them ONE
+    description; when the schema becomes generated, the gate becomes a
+    tautology and can retire with it. -/
+private def runVocabCoherence : IO Bool := do
+  let domStr : PortDomain → String
+    | .signal => "signal" | .modal => "modal" | .control => "control"
+  let strArr := fun (j : Lean.Json) => match j.getArr? with
+    | .ok a => a.filterMap (·.getStr?.toOption)
+    | .error _ => #[]
+  let mut ok := true
+  let mut issues : Array String := #[]
+  let nodes := match nodeSchema.getObjVal? "nodes" with
+    | .ok (.arr a) => a
+    | _ => #[]
+  -- every schema node must match the table's projection, and cover all kinds
+  let mut schemaKinds : Array String := #[]
+  for nj in nodes do
+    let kind := ((nj.getObjVal? "kind").toOption.bind (·.getStr?.toOption)).getD "?"
+    schemaKinds := schemaKinds.push kind
+    let specs := portSpecs kind
+    -- knobs: names in declaration order
+    let tblKnobs := knobNamesOf kind
+    let schKnobs := strArr ((nj.getObjVal? "knobs").toOption.getD (Lean.Json.arr #[]))
+    if tblKnobs != schKnobs then
+      ok := false; issues := issues.push s!"{kind}: knobs {schKnobs} ≠ table {tblKnobs}"
+    -- inlets: name + accepts + multi
+    let tblInlets := specs.filter (!·.accepts.isEmpty)
+    let schInlets := match (nj.getObjVal? "inlets").toOption.getD (Lean.Json.arr #[]) with
+      | .arr a => a
+      | _ => #[]
+    if tblInlets.size != schInlets.size then
+      ok := false; issues := issues.push s!"{kind}: {schInlets.size} schema inlets ≠ table {tblInlets.size}"
+    else
+      for (spec, ij) in tblInlets.zip schInlets do
+        let nm := ((ij.getObjVal? "name").toOption.bind (·.getStr?.toOption)).getD "?"
+        let acc := strArr ((ij.getObjVal? "accepts").toOption.getD (Lean.Json.arr #[]))
+        let multi := ((ij.getObjVal? "multi").toOption.bind (·.getBool?.toOption)).getD false
+        if nm != spec.name || acc != spec.accepts.map domStr || multi != spec.multi then
+          ok := false; issues := issues.push s!"{kind}.{nm}: schema inlet ≠ table ({acc}, multi={multi})"
+  if schemaKinds != vocabularyKinds then
+    ok := false; issues := issues.push s!"kind coverage: schema {schemaKinds} ≠ table {vocabularyKinds}"
+  IO.println s!"        {nodes.size} schema kinds vs the port-spec table (inlets, accepts, multi, knob order):"
+  IO.println s!"        result   {if issues.isEmpty then "coherent" else toString issues}"
+  if ok then
+    IO.println "  PASS  vocab-coherence  static nodeSchema ≡ port-spec table — one description, two views"; pure true
+  else
+    IO.println s!"  FAIL  vocab-coherence  drift between nodeSchema and portSpecs: {issues}"; pure false
+
 /-- THE DEAD-SLOT LINT gate (the systemic net for the dead-knob class). Canonical
     patches covering every playground node kind compile through the real
     `compilePlanPure`, and every `param:*` slot each plan registers must be READ
@@ -1974,6 +2026,12 @@ private def runDeadSlotLint (arena : Arena)
       match Tropical.Playground.compilePlanPure arena resolved j with
       | .error e => IO.println s!"  FAIL  dead-slot-lint  {label}: compile: {firstLine e}"; ok := false
       | .ok (plan, _) =>
+        -- Byte-identity harness for refactor phases: TROPICAL_DUMP_PLANS=<dir>
+        -- writes each canonical plan's wire form for before/after comparison
+        -- (a refactor that promises plan identity proves it with `cmp`).
+        if let some dir := (← IO.getEnv "TROPICAL_DUMP_PLANS") then
+          if let .ok m := plan.toWire then
+            IO.FS.writeFile s!"{dir}/{label}.json" m.compress
         let nParams := (plan.slotNames.filter ("param:".isPrefixOf ·)).size
         -- zero registered params means the patch didn't decode as intended —
         -- vacuous passes are the graceful-exclusion failure mode.
@@ -2423,6 +2481,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runModalAddr arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runVocabCoherence) then
       failed := failed + 1
     total := total + 1
     if !(← runDeadSlotLint arena resolved) then
