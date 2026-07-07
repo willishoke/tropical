@@ -193,6 +193,13 @@ structure PortSpec where
   multi : Bool := false
   knob : Option (Int × Nat) := none
   discipline : Discipline := .raw
+  /-- The port whose NORMAL this knob parameterizes (an input of the default
+      subgraph, not of the node): sflange's `rate` is an input of `mod`'s
+      normalled LFO. Wiring the owner replaces the whole default — circuit,
+      knob, and slot vanish together, so a dead knob is unrepresentable (the
+      sflange.rate bug was this relationship encoded as a name coincidence
+      that didn't hold). -/
+  ownerPort : Option String := none
 deriving Repr
 
 private def sigIn : Array PortDomain := #[.signal, .modal, .control]
@@ -223,7 +230,9 @@ def portSpecs : String → Array PortSpec
       { name := "in", accepts := sigIn },
       { name := "mod", accepts := sigIn },
       { name := "depth", knob := some (2, 3), discipline := .glide },
-      { name := "rate", knob := some (3, 1) }]
+      -- `rate` parameterizes `mod`'s normal (the built-in LFO): patch `mod`
+      -- and the LFO, this knob, and its slot all vanish together.
+      { name := "rate", knob := some (3, 1), ownerPort := some "mod" }]
   | "fm" => #[
       { name := "in", accepts := sigIn },
       { name := "carrier", knob := some (330, 0), discipline := .anchor },
@@ -507,18 +516,28 @@ def nodeSchema : Json :=
 
 /-- The live param table: every node's continuous knobs as `(<id>.<knob>, default)`
     in scan order (node order, then knob order). The position IS the `ParamIdx` the
-    node's `paramRef`s carry; `compileSession` allocates each `param:<id>.<knob>`. A
-    knob shadowed by a wired control inlet of the same name (a Knob patched into
-    `freq`) is skipped — the cord's own slot drives it. The two reserved master-clock
-    slots lead the table: `velocity` (default 1 ⇒ forward at unity) and `tau_base`
-    (default 0), so every patch has a live global time-warp. -/
+    node's `paramRef`s carry; `compileSession` allocates each `param:<id>.<knob>`.
+    A knob's slot exists exactly while its default is in the compiled graph:
+    wiring the port itself (a Knob patched into `freq`) replaces the default, and
+    wiring its OWNER port (sflange `mod` over the normalled LFO that `rate`
+    parameterizes) removes the whole normal — either way the slot is not
+    registered, so a registered-but-unread knob is unrepresentable here. The two
+    reserved master-clock slots lead the table: `velocity` (default 1 ⇒ forward
+    at unity) and `tau_base` (default 0), so every patch has a live global
+    time-warp. -/
 private def collectParams (raws : Array Raw) : Array (String × JsonNumber) := Id.run do
   let mut out : Array (String × JsonNumber) :=
     #[(masterVelocityParam, ⟨1, 0⟩), (masterTauBaseParam, ⟨0, 0⟩)]
   for r in raws do
     if r.kind == "out" then continue
-    for kname in knobNamesOf r.kind do
-      if (portSources r.inObj kname).isEmpty then
+    for spec in portSpecs r.kind do
+      if spec.knob.isNone then continue
+      let kname := spec.name
+      let selfWired := !(portSources r.inObj kname).isEmpty
+      let ownerWired := match spec.ownerPort with
+        | some o => !(portSources r.inObj o).isEmpty
+        | none => false
+      if !selfWired && !ownerWired then
         let base := s!"{r.id}.{kname}"
         let dflt := (jNum? r.params kname).getD ⟨0, 0⟩
         if isGlided r.kind kname then

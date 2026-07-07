@@ -2009,13 +2009,19 @@ private def runDeadSlotLint (arena : Arena)
     "{\"id\":\"res2\",\"kind\":\"resonator\",\"params\":{\"freq\":330,\"decay\":3}}," ++
     "{\"id\":\"mm\",\"kind\":\"modalmix\",\"in\":{\"in\":[\"res1\",\"res2\"]}}," ++
     "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"mm\"]}}],\"out\":\"out\"}"
-  -- KNOWN HOLE, deliberately not in the canonical set: `sflange` with a `mod`
-  -- cord patched still registers `param:<id>.rate` (collectParams skips a knob
-  -- only when the inlet of the SAME name is wired; `mod` ≠ `rate`), and
-  -- `buildNode` reads `rate` only on the no-mod synthesized-LFO branch — a real
-  -- dead knob this lint detects (probe-verified). Reported, not allowlisted.
+  -- The once-KNOWN-HOLE, now in the canonical set: `sflange` with a `mod` cord
+  -- patched. `rate` parameterizes `mod`'s normalled LFO (ownerPort in the
+  -- port-spec table), so wiring `mod` removes the LFO, the knob, and the slot
+  -- together — the lint additionally asserts the slot's ABSENCE below, so the
+  -- old dead-knob encoding (registered-but-unread) can't quietly return.
+  let sflangeWired := "{\"nodes\":[" ++
+    "{\"id\":\"osc\",\"kind\":\"source\",\"params\":{\"freq\":220}}," ++
+    "{\"id\":\"lfo\",\"kind\":\"source\",\"params\":{\"freq\":0.4,\"morph\":1}}," ++
+    "{\"id\":\"sfw\",\"kind\":\"sflange\",\"params\":{\"depth\":0.002,\"rate\":0.3},\"in\":{\"in\":[\"osc\"],\"mod\":[\"lfo\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"sfw\"]}}],\"out\":\"out\"}"
   let patches : Array (String × String) := #[
-    ("signal-chain", signalChain), ("modal-chain", modalChain), ("modal-mix", modalMix)]
+    ("signal-chain", signalChain), ("modal-chain", modalChain), ("modal-mix", modalMix),
+    ("sflange-wired", sflangeWired)]
   let mut ok := true
   let mut checked := 0
   let mut deadAll : Array String := #[]
@@ -2041,6 +2047,11 @@ private def runDeadSlotLint (arena : Arena)
         let dead := (unreadParamSlots plan).filter (fun s => !allow.contains s!"{label}:{s}")
         if !dead.isEmpty then
           deadAll := deadAll ++ dead.map (s!"{label}: {·}")
+          ok := false
+        -- the sflange fix, asserted structurally: a knob owned by a wired
+        -- normal must not even REGISTER (absence, not just unreadness).
+        if label == "sflange-wired" && plan.slotNames.contains "param:sfw.rate" then
+          IO.println s!"  FAIL  dead-slot-lint  {label}: param:sfw.rate registered despite wired mod — the owned-knob rule regressed"
           ok := false
   IO.println s!"        {patches.size} canonical patches over the full node vocabulary, {checked} param:* slots:"
   IO.println s!"        result   unread param slots: {if deadAll.isEmpty then "none" else toString deadAll}"
