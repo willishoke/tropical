@@ -15,6 +15,7 @@ import { readFileSync, existsSync, writeFileSync } from 'fs'
 import { join, resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { WasmKernel, type KernelManifest } from '../../web/runtime/index'
+import { expectAudible } from './energy_floor'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const repoRoot = resolve(__dirname, '../..')
@@ -50,6 +51,7 @@ describe('web/dist shipped artifacts vs native JIT', () => {
   for (const e of entries) {
     test(`${e.slug}`, async () => {
       const nat = runNative(e.slug, N)
+      expectAudible(e.slug, nat)
 
       const wasmBytes = new Uint8Array(readFileSync(join(distDir, `${e.slug}.wasm`)))
       const manifest = JSON.parse(readFileSync(join(distDir, `${e.slug}.manifest.json`), 'utf-8')) as KernelManifest

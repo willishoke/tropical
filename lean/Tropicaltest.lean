@@ -1660,6 +1660,55 @@ private def runResidueSymbolic (arena : Arena)
     | .error e, _ | _, .error e => IO.println s!"  FAIL  symbolic-residue  render: {firstLine e}"; pure false
   | .error e, _ | _, .error e => IO.println s!"  FAIL  symbolic-residue  build: {firstLine e}"; pure false
 
+/-- THE COLLECTED RESIDUE gate. `residueComposeEC` (m+n modes: pole union with
+    cross-weighted residues) must render pointwise-equal to the uncollected
+    `residueComposeE` (m+m·n modes) — they are the same partial-fraction expansion
+    with the per-pair ringing amps summed per reverb pole, so equality is algebraic
+    and the tolerance only absorbs FP reassociation. Also asserts the collection is
+    structural: m+n modes out, not m+m·n. This is what makes `voice ⋙ reverb`
+    affordable as the DEFAULT lowering — a factor m fewer transcendentals — which
+    is in turn what lets a reverb keep its source's spectrum (and live pitch knob)
+    instead of discarding them. -/
+private def runResidueCollected (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let tp := 6.283185307179586
+  let toMode := fun (pa : Cplx × Cplx) =>
+    ({ sigma := litF (-pa.1.re), omega := litF pa.1.im,
+       cre := litF pa.2.re, cim := litF pa.2.im } : ModalMode)
+  let voice : Array ModalMode := #[
+    (⟨-2.0, tp * 220.0⟩, ⟨1.0, 0.0⟩),
+    (⟨-2.5, tp * 330.0⟩, ⟨0.6, 0.0⟩),
+    (⟨-3.5, tp * 440.0⟩, (⟨0.4, -0.2⟩ : Cplx))].map toMode
+  let reverb : Array ModalMode := #[
+    (⟨-3.0, tp * 180.0⟩, ⟨0.7, 0.2⟩),
+    (⟨-4.0, tp * 260.0⟩, ⟨-0.5, 0.4⟩),
+    (⟨-5.0, tp * 350.0⟩, ⟨0.3, -0.6⟩),
+    (⟨-6.0, tp * 500.0⟩, ⟨0.4, 0.1⟩)].map toMode
+  let nU := (residueComposeE voice reverb).size
+  let nC := (residueComposeEC voice reverb).size
+  let anchor := lit 200
+  match buildAndFinish (.ok (buildModalReverbSym "rv_unc" voice reverb anchor arena)),
+        buildAndFinish (.ok (buildModalReverbSymC "rv_col" voice reverb anchor arena)) with
+  | .ok up, .ok cp =>
+    match ← renderPlanSamples up 4096, ← renderPlanSamples cp 4096 with
+    | .ok us, .ok cs =>
+      let n := min us.size cs.size
+      let mut maxAbs : Float := 0.0
+      let mut energy : Float := 0.0
+      for i in [0:n] do
+        let d := (us[i]! - cs[i]!).abs
+        if d > maxAbs then maxAbs := d
+        energy := energy + us[i]! * us[i]!
+      let rel := maxAbs / (Float.sqrt (energy / n.toFloat) + 1e-300)
+      IO.println s!"        collected (m+n={nC}) vs uncollected (m+m·n={nU}), voice(3)⋙reverb(4):"
+      IO.println s!"        result   max|Δ|={maxAbs}  ·  rel to rms={rel}"
+      if rel < 1e-6 && energy > 1e-9 && nC == 7 && nU == 15 then
+        IO.println s!"  PASS  residue-collected  pole-union bank ≡ per-pair bank pointwise (rel {rel}); {nU}→{nC} modes — fusion affordable as the default"; pure true
+      else
+        IO.println s!"  FAIL  residue-collected  rel={rel} energy={energy} nC={nC} (want 7) nU={nU} (want 15)"; pure false
+    | .error e, _ | _, .error e => IO.println s!"  FAIL  residue-collected  render: {firstLine e}"; pure false
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  residue-collected  build: {firstLine e}"; pure false
+
 end ResidueGates
 
 open Tropical.EmitArrow in
@@ -1734,7 +1783,7 @@ private def runModalLive (arena : Arena)
   let src := "{\"nodes\":[" ++
     "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
     "{\"id\":\"rev\",\"kind\":\"reverb\",\"params\":{\"rt60\":2},\"in\":{\"in\":[\"res\"]}}," ++
-    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"rev\"]}}]}"
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"rev\"]}}],\"out\":\"out\"}"
   match Lean.Json.parse src with
   | .error e => IO.println s!"  FAIL  modal-live  json parse: {e}"; pure false
   | .ok j =>
@@ -1743,17 +1792,44 @@ private def runModalLive (arena : Arena)
   | .ok (plan, _) =>
     match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
     | .ok manifest, .ok ir =>
-      let rt ← Tropical.Ffi.Runtime.new 256
+      -- A slot that EXISTS but is never READ is a dead knob — exactly the
+      -- reverb-discards-the-voice regression (the pitch knob accepted writes into
+      -- a slot no instruction referenced). So presence is only half the gate: run
+      -- two identical runtimes a block, move `res.freq` on ONE, and require the
+      -- next blocks to diverge THROUGH the reverb. Identical second blocks =
+      -- dead knob = FAIL.
+      let rt ← Tropical.Ffi.Runtime.new 2048
       rt.loadIr ir manifest.compress
-      let fPresent := (← rt.slotIndex? "param:res.freq").isSome
+      let rt2 ← Tropical.Ffi.Runtime.new 2048
+      rt2.loadIr ir manifest.compress
+      let fIdx? ← rt.slotIndex? "param:res.freq"
       let dPresent := (← rt.slotIndex? "param:res.decay").isSome
       let rtPresent := (← rt.slotIndex? "param:rev.rt60").isSome
+      rt.process
+      rt2.process
+      let b1a := decodeF64LE (← rt.outputBytes)
+      let b1b := decodeF64LE (← rt2.outputBytes)
+      if let some fIdx := fIdx? then rt.setSlot fIdx 440.0
+      rt.process
+      rt2.process
+      let b2a := decodeF64LE (← rt.outputBytes)
+      let b2b := decodeF64LE (← rt2.outputBytes)
+      let mut sameB1 := true
+      for i in [0:min b1a.size b1b.size] do
+        if b1a[i]! != b1b[i]! then sameB1 := false
+      let mut dE : Float := 0.0
+      let mut e0 : Float := 0.0
+      for i in [0:min b2a.size b2b.size] do
+        let d := b2a[i]! - b2b[i]!
+        dE := dE + d * d
+        e0 := e0 + b2b[i]! * b2b[i]!
+      let knobRead := dE > 1e-12 && e0 > 1e-12
       IO.println s!"        JSON resonator(freq,decay) → reverb(rt60) → out compiled via compilePlanPure:"
-      IO.println s!"        result   JIT-loadable · live slots: res.freq={fPresent} res.decay={dPresent} rev.rt60={rtPresent}"
-      if fPresent && dPresent && rtPresent then
-        IO.println s!"  PASS  modal-live  modal patch compiles end to end; its pole freq/decay + room rt60 are live slots (setSlot, no relower)"; pure true
+      IO.println s!"        result   JIT-loadable · slots: freq={fIdx?.isSome} decay={dPresent} rt60={rtPresent} · pre-move blocks identical={sameB1} · post-move ΔE/E={dE / (e0 + 1e-300)}"
+      if fIdx?.isSome && dPresent && rtPresent && sameB1 && knobRead then
+        IO.println s!"  PASS  modal-live  modal params are live slots AND the kernel reads them: moving res.freq moves the signal THROUGH the reverb (setSlot, no relower)"; pure true
       else
-        IO.println s!"  FAIL  modal-live  a modal param is not a live slot: freq={fPresent} decay={dPresent} rt60={rtPresent}"; pure false
+        IO.println s!"  FAIL  modal-live  freq={fIdx?.isSome} decay={dPresent} rt60={rtPresent} sameB1={sameB1} knobRead={knobRead} (ΔE={dE}) — a present-but-unread slot is a dead knob"; pure false
     | .error e, _ => IO.println s!"  FAIL  modal-live  toWire: {firstLine e}"; pure false
     | _, .error e => IO.println s!"  FAIL  modal-live  emitKernel: {firstLine e}"; pure false
 
@@ -1779,7 +1855,7 @@ private def runModalAddr (arena : Arena)
   let src := "{\"nodes\":[" ++
     "{\"id\":\"lfo\",\"kind\":\"source\",\"params\":{\"freq\":40,\"morph\":0}}," ++
     "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4},\"in\":{\"addr\":[\"lfo\"]}}," ++
-    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"res\"]}}]}"
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"res\"]}}],\"out\":\"out\"}"
   let decodeOk : Bool := match Lean.Json.parse src with
     | .error _ => false
     | .ok j => match Tropical.Playground.compilePlanPure arena resolved j with
@@ -1811,6 +1887,178 @@ private def runModalAddr (arena : Arena)
         IO.println s!"  FAIL  modal-addr  maxErr={maxErr} preMax={preMax} postPeak={postPeak} decodeOk={decodeOk}"; pure false
     | .error e, _, _ | _, .error e, _ | _, _, .error e => IO.println s!"  FAIL  modal-addr  render: {firstLine e}"; pure false
   | _, _, _ => IO.println s!"  FAIL  modal-addr  build"; pure false
+
+-- ── THE DEAD-SLOT LINT ─────────────────────────────────────────────────────
+/-- Module-slot indices READ by an instance function: every `.slot` operand of
+    every instruction (preamble, body, pre-input), recursively through children.
+    A `WriteSlot` dst is a write, not a read — a slot only written is still dead. -/
+private partial def slotReadsOf (f : Tropical.Plan.InstanceFunction) : Array Nat :=
+  let ofInstrs := fun (instrs : Array Tropical.Plan.NInstr) =>
+    instrs.flatMap fun ins => ins.args.filterMap fun
+      | .slot i _ => some i
+      | _ => none
+  ofInstrs f.preambleInstructions ++ ofInstrs f.instructions
+    ++ ofInstrs f.preInputInstructions ++ f.children.flatMap slotReadsOf
+
+/-- `param:*` entries of `slotNames` referenced by NO instruction operand in the
+    plan. Sink `inputs` are slot reads too (they consume the `__root__.out`-style
+    output slots), but a param slot whose only consumer is a sink would itself be
+    a wiring bug, so the lint demands an instruction read for `param:*`. A hit is
+    a dead knob: `setSlot` succeeds, no instruction listens — the class the
+    reverb-discards-the-voice's-poles regression shipped in. -/
+def unreadParamSlots (plan : Tropical.Plan.FlatPlan) : Array String := Id.run do
+  let reads := plan.instanceFunctions.flatMap slotReadsOf
+  let mut dead : Array String := #[]
+  for i in [0:plan.slotNames.size] do
+    let name := plan.slotNames[i]!
+    if "param:".isPrefixOf name && !reads.contains i then
+      dead := dead.push name
+  return dead
+
+open Tropical.Playground in
+/-- THE TABLE-COHERENCE gate. The static `nodeSchema` JSON (served as
+    `node_schema`, slated to become a generated view) must agree with the
+    port-spec table — same kinds, same inlets (name/accepts/multi), same knobs
+    in the same order. While both exist, this gate is what makes them ONE
+    description; when the schema becomes generated, the gate becomes a
+    tautology and can retire with it. -/
+private def runVocabCoherence : IO Bool := do
+  let domStr : PortDomain → String
+    | .signal => "signal" | .modal => "modal" | .control => "control"
+  let strArr := fun (j : Lean.Json) => match j.getArr? with
+    | .ok a => a.filterMap (·.getStr?.toOption)
+    | .error _ => #[]
+  let mut ok := true
+  let mut issues : Array String := #[]
+  let nodes := match nodeSchema.getObjVal? "nodes" with
+    | .ok (.arr a) => a
+    | _ => #[]
+  -- every schema node must match the table's projection, and cover all kinds
+  let mut schemaKinds : Array String := #[]
+  for nj in nodes do
+    let kind := ((nj.getObjVal? "kind").toOption.bind (·.getStr?.toOption)).getD "?"
+    schemaKinds := schemaKinds.push kind
+    let specs := portSpecs kind
+    -- knobs: names in declaration order
+    let tblKnobs := knobNamesOf kind
+    let schKnobs := strArr ((nj.getObjVal? "knobs").toOption.getD (Lean.Json.arr #[]))
+    if tblKnobs != schKnobs then
+      ok := false; issues := issues.push s!"{kind}: knobs {schKnobs} ≠ table {tblKnobs}"
+    -- inlets: name + accepts + multi
+    let tblInlets := specs.filter (!·.accepts.isEmpty)
+    let schInlets := match (nj.getObjVal? "inlets").toOption.getD (Lean.Json.arr #[]) with
+      | .arr a => a
+      | _ => #[]
+    if tblInlets.size != schInlets.size then
+      ok := false; issues := issues.push s!"{kind}: {schInlets.size} schema inlets ≠ table {tblInlets.size}"
+    else
+      for (spec, ij) in tblInlets.zip schInlets do
+        let nm := ((ij.getObjVal? "name").toOption.bind (·.getStr?.toOption)).getD "?"
+        let acc := strArr ((ij.getObjVal? "accepts").toOption.getD (Lean.Json.arr #[]))
+        let multi := ((ij.getObjVal? "multi").toOption.bind (·.getBool?.toOption)).getD false
+        if nm != spec.name || acc != spec.accepts.map domStr || multi != spec.multi then
+          ok := false; issues := issues.push s!"{kind}.{nm}: schema inlet ≠ table ({acc}, multi={multi})"
+  if schemaKinds != vocabularyKinds then
+    ok := false; issues := issues.push s!"kind coverage: schema {schemaKinds} ≠ table {vocabularyKinds}"
+  IO.println s!"        {nodes.size} schema kinds vs the port-spec table (inlets, accepts, multi, knob order):"
+  IO.println s!"        result   {if issues.isEmpty then "coherent" else toString issues}"
+  if ok then
+    IO.println "  PASS  vocab-coherence  static nodeSchema ≡ port-spec table — one description, two views"; pure true
+  else
+    IO.println s!"  FAIL  vocab-coherence  drift between nodeSchema and portSpecs: {issues}"; pure false
+
+/-- THE DEAD-SLOT LINT gate (the systemic net for the dead-knob class). Canonical
+    patches covering every playground node kind compile through the real
+    `compilePlanPure`, and every `param:*` slot each plan registers must be READ
+    by some instruction operand. Presence-only checks pass a dead knob — the slot
+    exists, `setSlot` succeeds, nothing listens — which is exactly how the
+    reverb-drops-the-source's-poles regression stayed invisible; unreadness in the
+    PLAN is the property that catches the whole class, whatever node grows it next. -/
+private def runDeadSlotLint (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  -- Allowlist for slots proven legitimately unread, one justified entry at a
+  -- time (`<patch-label>:<slot>`); a blanket param exclusion would re-open the
+  -- hole the gate exists to close. Currently empty: every registered knob in
+  -- the canonical patches must be live.
+  let allow : Array String := #[]
+  -- Every buildNode kind: knob, source, pluck, comb, flange, sflange, fm,
+  -- delay, reverse, mix, ring, resonator, reverb, modalmix, out. The top-level
+  -- "out" field is mandatory — without it the patch gracefully compiles to
+  -- silence and EVERY knob goes dead (which this gate would report).
+  let signalChain := "{\"nodes\":[" ++
+    "{\"id\":\"k\",\"kind\":\"knob\",\"params\":{\"value\":110}}," ++
+    "{\"id\":\"osc\",\"kind\":\"source\",\"params\":{\"morph\":0.2},\"in\":{\"freq\":[\"k\"]}}," ++
+    "{\"id\":\"fl\",\"kind\":\"flange\",\"params\":{\"depth\":0.0007},\"in\":{\"in\":[\"osc\"]}}," ++
+    "{\"id\":\"sf\",\"kind\":\"sflange\",\"params\":{\"depth\":0.002,\"rate\":0.3},\"in\":{\"in\":[\"fl\"]}}," ++
+    "{\"id\":\"fmn\",\"kind\":\"fm\",\"params\":{\"carrier\":330,\"depth\":8},\"in\":{\"in\":[\"sf\"]}}," ++
+    "{\"id\":\"dl\",\"kind\":\"delay\",\"params\":{\"amount\":0.004},\"in\":{\"in\":[\"fmn\"]}}," ++
+    "{\"id\":\"rv\",\"kind\":\"reverse\",\"in\":{\"in\":[\"dl\"]}}," ++
+    "{\"id\":\"osc2\",\"kind\":\"source\",\"params\":{\"freq\":330}}," ++
+    "{\"id\":\"rg\",\"kind\":\"ring\",\"in\":{\"in\":[\"rv\",\"osc2\"]}}," ++
+    "{\"id\":\"pl\",\"kind\":\"pluck\",\"params\":{\"freq\":110}}," ++
+    "{\"id\":\"cb\",\"kind\":\"comb\",\"params\":{\"delay\":0.012,\"decay\":0.7},\"in\":{\"in\":[\"pl\"]}}," ++
+    "{\"id\":\"mx\",\"kind\":\"mix\",\"in\":{\"in\":[\"rg\",\"cb\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"mx\"]}}],\"out\":\"out\"}"
+  -- The regression's exact shape: the reverb must keep its source's poles live.
+  let modalChain := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"rvb\",\"kind\":\"reverb\",\"params\":{\"rt60\":2},\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"rvb\"]}}],\"out\":\"out\"}"
+  let modalMix := "{\"nodes\":[" ++
+    "{\"id\":\"res1\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"res2\",\"kind\":\"resonator\",\"params\":{\"freq\":330,\"decay\":3}}," ++
+    "{\"id\":\"mm\",\"kind\":\"modalmix\",\"in\":{\"in\":[\"res1\",\"res2\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"mm\"]}}],\"out\":\"out\"}"
+  -- The once-KNOWN-HOLE, now in the canonical set: `sflange` with a `mod` cord
+  -- patched. `rate` parameterizes `mod`'s normalled LFO (ownerPort in the
+  -- port-spec table), so wiring `mod` removes the LFO, the knob, and the slot
+  -- together — the lint additionally asserts the slot's ABSENCE below, so the
+  -- old dead-knob encoding (registered-but-unread) can't quietly return.
+  let sflangeWired := "{\"nodes\":[" ++
+    "{\"id\":\"osc\",\"kind\":\"source\",\"params\":{\"freq\":220}}," ++
+    "{\"id\":\"lfo\",\"kind\":\"source\",\"params\":{\"freq\":0.4,\"morph\":1}}," ++
+    "{\"id\":\"sfw\",\"kind\":\"sflange\",\"params\":{\"depth\":0.002,\"rate\":0.3},\"in\":{\"in\":[\"osc\"],\"mod\":[\"lfo\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"sfw\"]}}],\"out\":\"out\"}"
+  let patches : Array (String × String) := #[
+    ("signal-chain", signalChain), ("modal-chain", modalChain), ("modal-mix", modalMix),
+    ("sflange-wired", sflangeWired)]
+  let mut ok := true
+  let mut checked := 0
+  let mut deadAll : Array String := #[]
+  for (label, src) in patches do
+    match Lean.Json.parse src with
+    | .error e => IO.println s!"  FAIL  dead-slot-lint  {label}: json parse: {e}"; ok := false
+    | .ok j =>
+      match Tropical.Playground.compilePlanPure arena resolved j with
+      | .error e => IO.println s!"  FAIL  dead-slot-lint  {label}: compile: {firstLine e}"; ok := false
+      | .ok (plan, _) =>
+        -- Byte-identity harness for refactor phases: TROPICAL_DUMP_PLANS=<dir>
+        -- writes each canonical plan's wire form for before/after comparison
+        -- (a refactor that promises plan identity proves it with `cmp`).
+        if let some dir := (← IO.getEnv "TROPICAL_DUMP_PLANS") then
+          if let .ok m := plan.toWire then
+            IO.FS.writeFile s!"{dir}/{label}.json" m.compress
+        let nParams := (plan.slotNames.filter ("param:".isPrefixOf ·)).size
+        -- zero registered params means the patch didn't decode as intended —
+        -- vacuous passes are the graceful-exclusion failure mode.
+        if nParams == 0 then
+          IO.println s!"  FAIL  dead-slot-lint  {label}: no param:* slots registered — the patch decoded to nothing"; ok := false
+        checked := checked + nParams
+        let dead := (unreadParamSlots plan).filter (fun s => !allow.contains s!"{label}:{s}")
+        if !dead.isEmpty then
+          deadAll := deadAll ++ dead.map (s!"{label}: {·}")
+          ok := false
+        -- the sflange fix, asserted structurally: a knob owned by a wired
+        -- normal must not even REGISTER (absence, not just unreadness).
+        if label == "sflange-wired" && plan.slotNames.contains "param:sfw.rate" then
+          IO.println s!"  FAIL  dead-slot-lint  {label}: param:sfw.rate registered despite wired mod — the owned-knob rule regressed"
+          ok := false
+  IO.println s!"        {patches.size} canonical patches over the full node vocabulary, {checked} param:* slots:"
+  IO.println s!"        result   unread param slots: {if deadAll.isEmpty then "none" else toString deadAll}"
+  if ok then
+    IO.println "  PASS  dead-slot-lint  every registered param:* slot is read by an instruction — no dead knobs behind graceful exclusion"; pure true
+  else
+    IO.println s!"  FAIL  dead-slot-lint  dead knobs (setSlot lands, no instruction reads): {deadAll}"; pure false
 
 /-- Test 3: `osc ⋙ flange ⋙ flange` — the slide pushes the outer warps through
     the inner flanger's sum and fuses them, producing the oscillator read at the
@@ -1944,6 +2192,9 @@ private def runSessionViaArrowEquiv : IO Bool := do
     IO.println s!"  PASS  session-via-arrow  direct root ≡ elaborated root, plan-identical ({matched} patches{if skipped > 0 then s!"; {skipped} non-session skipped" else ""})"
   pure ok
 
+-- The gate ledger below is one long do-block; its elaboration depth tracks the
+-- gate count, and the default 512 is now too small.
+set_option maxRecDepth 1024 in
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   let mut failed := 0
@@ -2228,6 +2479,9 @@ def main (args : List String) : IO UInt32 := do
     if !(← runResidueDegenerate arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← runResidueCollected arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← runResidueSymbolic arena resolved) then
       failed := failed + 1
     total := total + 1
@@ -2238,6 +2492,12 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runModalAddr arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runVocabCoherence) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runDeadSlotLint arena resolved) then
       failed := failed + 1
     -- ── (h⁸) THE PATCHER LOWERING: downstream-only patch graph → arrow term →
     --   slide → emit. L1 (byte-identity vs FlangeSin from a graph) is in the
