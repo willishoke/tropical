@@ -17,6 +17,7 @@ import { writeFileSync, readFileSync } from 'fs'
 import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { WasmKernel, type KernelManifest } from '../../web/runtime/index'
+import { expectAudible } from './energy_floor'
 
 // Each case spawns three sequential heavy subprocesses — `diffcli compile`,
 // `render-bytes`, and `compile-wasm` (the last loads LLVM+lld in-process to
@@ -186,6 +187,7 @@ describe('wasm vs native JIT', () => {
     const wire = compileViaLean(prog)
     const N = 64
     const nat = runNative(wire, N)
+    expectAudible('FixedSinOsc 440 Hz', nat)
     const wasm = await runWasm(prog, wire, N)
     for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
@@ -195,6 +197,7 @@ describe('wasm vs native JIT', () => {
     const wire = compileViaLean(prog)
     const N = 128
     const nat = runNative(wire, N)
+    expectAudible('FixedSinOsc 880 Hz', nat)
     const wasm = await runWasm(prog, wire, N)
     for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
@@ -204,6 +207,7 @@ describe('wasm vs native JIT', () => {
     const wire = compileViaLean(prog)
     const N = 256
     const nat = runNative(wire, N)
+    expectAudible('FixedSinOsc → SoftClip(drive 4)', nat)
     const wasm = await runWasm(prog, wire, N)
     for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
@@ -242,6 +246,7 @@ describe('wasm vs native JIT', () => {
     const wire = compileViaLean(program)
     const N = 64
     const nat = runNative(wire, N)
+    expectAudible('array CF (generate/zipWith/fold)', nat)
     const wasm = await runWasm(program, wire, N)
     for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
@@ -251,6 +256,7 @@ describe('wasm vs native JIT', () => {
     const wire = compileViaLean(prog)
     const N = 256
     const nat = runNative(wire, N)
+    expectAudible('op-zoo', nat)
     const wasm = await runWasm(prog, wire, N)
     for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
