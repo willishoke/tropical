@@ -26,6 +26,18 @@ namespace tropical_plan5 { struct ParsedPlan5; }
 namespace tropical_runtime
 {
 
+// Host-contract param write discipline (design/host-param-dispatch.md),
+// carried by the plan manifest exactly like slot_names / slot_defaults.
+// Runtime copy of ParsedPlan5::ParamDiscipline so this header stays free
+// of the parser header.
+struct ParamDiscipline
+{
+  std::string              name;             // base param ("sf.depth"; slot "param:<name>")
+  std::string              discipline;       // raw | glide | anchor | velocity
+  double                   glide_dur_sec = 0.0;
+  std::vector<std::string> companions;       // #v0/#v1/#t0, #phase, tau_base sibling
+};
+
 struct KernelState
 {
   // ── Execution mode + kernel handles ──────────────────────────────────────
@@ -59,6 +71,22 @@ struct KernelState
   // control values set from outside persist across kernel rebuilds.
   std::vector<double>      slots;
   std::vector<std::string> slot_names;
+
+  // Host-contract dispatch table: which write discipline each base param
+  // carries. Lives here so a hot-swap replaces it together with the plan
+  // it describes (like slot_names); an empty table means every write is raw.
+  std::vector<ParamDiscipline> param_disciplines;
+
+  // Discipline lookup by base param name. Returns nullptr when the name is
+  // absent from the loaded plan's table (callers treat that as raw). The
+  // pointer is into this state — only valid while the state is held (e.g.
+  // under FlatRuntime::with_active_state_sync).
+  const ParamDiscipline * find_discipline(const std::string & name) const
+  {
+    for (const auto & d : param_disciplines)
+      if (d.name == name) return &d;
+    return nullptr;
+  }
 
   double sample_rate = 44100.0;
   uint64_t sample_index = 0;
@@ -271,6 +299,22 @@ public:
     for (uint32_t i = 0; i < state.slot_names.size(); ++i)
       if (state.slot_names[i] == name) { state.slots[i] = value; return true; }
     return false;
+  }
+
+  // Run `fn` against the active KernelState under build_mutex_ — the
+  // generalization of set_slot_by_name_sync for multi-slot writes. The
+  // discipline dispatches (glide/anchor/velocity re-anchorings) must
+  // resolve, read, and write several slots against ONE consistent plan;
+  // without the lock a concurrent hot-swap could flip the active state
+  // between resolve and write and land values at stale indices. Same
+  // contention profile as set_slot_by_name_sync: publish_state holds the
+  // lock only for the cheap transfer + flip, never the LLVM compile.
+  template <typename Fn>
+  auto with_active_state_sync(Fn && fn)
+  {
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
+    return fn(states_[state_idx]);
   }
 
   // ── Random-access render (scope / slave consumers) ─────────────────────────

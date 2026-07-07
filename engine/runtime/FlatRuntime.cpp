@@ -30,6 +30,14 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
     new_state.slots[i] = parsed.slot_defaults[i];
   }
 
+  // Host-contract dispatch table — swaps with the plan it describes, like
+  // slot_names. Field-copied because the runtime keeps its own struct (the
+  // header stays free of the parser header).
+  new_state.param_disciplines.reserve(parsed.param_disciplines.size());
+  for (const auto & d : parsed.param_disciplines)
+    new_state.param_disciplines.push_back(
+      { d.name, d.discipline, d.glide_dur_sec, d.companions });
+
   // CF-only: there are no per-sample state registers. The kernel's
   // `%registers` argument survives in the calling convention but is never
   // read or written, so the backing buffer is empty. The temp pool
