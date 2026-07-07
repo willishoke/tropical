@@ -933,20 +933,30 @@ private def buildAndFinish (built : Except String (Arena × ProgramIdx)) :
   let (a, i) ← built
   finishCarrier a i
 
-/-- tropical's `Sin`, transcribed exactly from stdlib/Sin.md: reduce by π
-    (n = round(x/π), r = x − n·π), parity sign, degree-11 Taylor Horner in r².
-    The SAME polynomial the engine evaluates — so the oracle is a straight-line
-    "standard representation," not a true-sine benchmark. -/
-private def sinH (x : Float) : Float :=
-  let nF := (x * 0.3183098861837907).round
-  let r := x - nF * 3.141592653589793
-  let oddF := nF - 2.0 * (nF / 2.0).floor          -- n & 1, as 0.0 / 1.0
-  let sign := 1.0 - 2.0 * oddF
-  let r2 := r * r
-  let poly := (((((-2.505210838544172e-8) * r2 + 0.0000027557319223985893) * r2
-      + (-0.0001984126984126984)) * r2 + 0.008333333333333333) * r2
-      + (-0.16666666666666666)) * r2 + 1.0
-  sign * (r * poly)
+/-- `stdlib/FixedSin.md` transcribed exactly in Lean Int arithmetic: the Q2.30
+    datapath sine at a MASKED Q0.32 cycles phase. `Int.fdiv` is floor division
+    = the engine's `ashr`; every Horner operand is non-negative by construction
+    (all-positive-with-subtractions), so floor = truncate there; the final
+    `(r·acc₀) >> 30` is the one signed floor-shift, matched exactly. -/
+private def fixedSinQ (p : Int) : Int :=
+  let n := Int.fdiv (p + 1073741824) 2147483648
+  let r := p - n * 2147483648
+  let sign := 1 - 2 * (Int.fmod n 2)
+  let z := Int.fdiv (r * r) 1073741824
+  let acc6 := 61 - Int.fdiv z 1073741824
+  let acc5 := 3864 - Int.fdiv (acc6 * z) 1073741824
+  let acc4 := 172272 - Int.fdiv (acc5 * z) 1073741824
+  let acc3 := 5026995 - Int.fdiv (acc4 * z) 1073741824
+  let acc2 := 85569306 - Int.fdiv (acc3 * z) 1073741824
+  let acc1 := 693598668 - Int.fdiv (acc2 * z) 1073741824
+  let acc0 := 1686629713 - Int.fdiv (acc1 * z) 1073741824
+  sign * Int.fdiv (r * acc0) 1073741824
+
+/-- The voice sine as the engine now computes it: re-land the float phase as
+    its exact Q0.32 integer (lossless — P < 2³² ≪ 2⁵³), run `fixedSinQ`, scale
+    Q2.30 → float. The standard-rep twin of `FixedSin(toInt(phase·2³²))/2³⁰`. -/
+private def voiceSin (phase : Float) : Float :=
+  Float.ofInt (fixedSinQ ((phase * 4294967296.0).toUInt64.toNat)) / 1073741824.0
 
 /-- `ClockPhasor.phase` at a Q32.32 clock value, transcribed exactly (integer
     math, offset = 0). inc = ⌊freqHz·2³²/SR⌋. Uses `fdiv`/`fmod` so it matches the
@@ -998,15 +1008,15 @@ private def runModulatedClock (arena : Arena)
       for t in [lo:n] do
         let clk : Int := Int.ofNat t * 4294967296
         -- calibration: engine's bare carrier vs the standard-rep carrier
-        let refBare := sinkGain * sinH (twoPi * phasorPhase clk 2000)
+        let refBare := sinkGain * voiceSin (phasorPhase clk 2000)
         if (bare[t]! - refBare).abs > e0 then e0 := (bare[t]! - refBare).abs
         if bare[t]!.toBits != refBare.toBits then calBitDiff := calBitDiff + 1
         if bare[t]!.abs > maxBare then maxBare := bare[t]!.abs
         -- the warp: mid-graph (unit-scale) modulator = Sin at the modulator phase;
         -- offset = toInt(depth·mod·2³²); φ = clk − offset (sub-sample, nonlinear)
-        let rawMod := sinH (twoPi * phasorPhase clk 200)
+        let rawMod := voiceSin (phasorPhase clk 200)
         let phi : Int := clk - truncToInt (depth * rawMod * two32)
-        let refFm := sinkGain * sinH (twoPi * phasorPhase phi 2000)
+        let refFm := sinkGain * voiceSin (phasorPhase phi 2000)
         if (got[t]! - refFm).abs > efm then efm := (got[t]! - refFm).abs
         if got[t]!.toBits != refFm.toBits then fmBitDiff := fmBitDiff + 1
         if (got[t]! - bare[t]!).abs > warpEffect then warpEffect := (got[t]! - bare[t]!).abs
@@ -1054,11 +1064,11 @@ private def runPmPm (arena : Arena)
       let mut nestEffect : Float := 0.0   -- |pm(pm) − single-level pm| (does level 2 matter)
       for t in [lo:n] do
         let clk : Int := Int.ofNat t * 4294967296
-        let mod2 := sinH (twoPi * phasorPhase clk 700)
+        let mod2 := voiceSin (phasorPhase clk 700)
         let modClk : Int := clk - truncToInt (d2 * mod2 * two32)
-        let mod := sinH (twoPi * phasorPhase modClk 200)
+        let mod := voiceSin (phasorPhase modClk 200)
         let carClk : Int := clk - truncToInt (d1 * mod * two32)
-        let ref := sinkGain * sinH (twoPi * phasorPhase carClk 2000)
+        let ref := sinkGain * voiceSin (phasorPhase carClk 2000)
         if (got[t]! - ref).abs > e0 then e0 := (got[t]! - ref).abs
         if got[t]!.toBits != ref.toBits then bitDiff := bitDiff + 1
         if got[t]!.abs > maxOut then maxOut := got[t]!.abs
@@ -1109,7 +1119,7 @@ private def runNegativeClock (arena : Arena)
       for t in [0:n] do
         let clk : Int := Int.ofNat t * 4294967296
         let phi : Int := clk - Int.ofNat delta * 4294967296   -- (t − 20)·2³²
-        let ref := sinkGain * sinH (twoPi * phasorPhase phi 2000)
+        let ref := sinkGain * voiceSin (phasorPhase phi 2000)
         if got[t]!.toBits != ref.toBits then bitDiff := bitDiff + 1
         if got[t]!.abs > maxOut then maxOut := got[t]!.abs
         if phi < 0 then
@@ -1149,7 +1159,7 @@ private def runMorphOscDifferential (arena : Arena)
   -- SAME integer phasor + Horner Sin (`(1−m)·(2·phase−1) + m·Sin(2π·phase)`).
   let refOut := fun (morphF : Float) (clk : Int) =>
     let phase := phasorPhase clk freqHz
-    sinkGain * ((1.0 - morphF) * (2.0 * phase - 1.0) + morphF * sinH (twoPi * phase))
+    sinkGain * ((1.0 - morphF) * (2.0 * phase - 1.0) + morphF * voiceSin phase)
   let render := fun (nm : String) (m : Tropical.EmitArrow.Sig) =>
     match buildAndFinish (Tropical.EmitArrow.buildMorphOscLit nm freqHz m arena resolved) with
     | .error e => (pure (.error e) : IO (Except String (Array Float)))

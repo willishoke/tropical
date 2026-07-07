@@ -612,6 +612,7 @@ def buildFixedSin (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
          defaultSig := some (lit 0) } ]
     #[{ name := "out", type? := some (.scalar .int) }]
     #[] #[(.port ⟨0⟩, fixedSinCycSig phase)] #[])
+
 def buildFixedSinOsc (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) :=
   let freqIn : Sig := .inputRef ⟨0⟩
@@ -625,23 +626,11 @@ def buildFixedSinOsc (arena : Arena) (_resolved : Array (String × ProgramIdx)) 
   let off := toIntE (mul (.inputRef ⟨2⟩) twoPow32)   -- offset = the `phase` input (port 2)
   let acc := add (add (mul inc thi) (rshift (mul inc tlo) (lit 32))) off
   let phase := clampE (div (toFloatE (bitAnd acc mask)) twoPow32) (lit 0) (lit 1)
-  -- Phase → [0, 2π).
-  let x := mul (lit 6283185307179586 15) phase
-  -- Sin: Payne–Hanek reduction + degree-11 Horner on r² (fold unrolled).
-  let n := roundE (mul x (lit 3183098861837907 16))
-  let oddN := bitAnd n (lit 1)
-  let sign := sub (lit 1) (mul (lit 2) oddN)
-  let r := sub x (mul n (lit 3141592653589793 15))
-  let r2 := mul r r
-  let poly :=
-    add (lit 1)
-     (mul (add (lit (-16666666666666666) 17)
-       (mul (add (lit 8333333333333333 18)
-         (mul (add (lit (-1984126984126984) 19)
-           (mul (add (lit 27557319223985893 22)
-             (mul (add (lit (-2505210838544172) 23)
-               (mul (lit 0) r2)) r2)) r2)) r2)) r2)) r2)
-  let sine := mul sign (mul r poly)
+  -- Re-land the phasor's Q0.32 integer EXACTLY (phase = P/2³² with P < 2³² ≪
+  -- 2⁵³, so the float round-trip is lossless), evaluate the Q2.30 datapath
+  -- sine, scale to float once at the voice boundary.
+  let pQ := toIntE (mul phase twoPow32)
+  let sine := div (toFloatE (fixedSinCycSig pQ)) (lit 1073741824)
   .ok (assemble arena "FixedSinOsc"
     #[ { name := "freq", type? := some (.scalar .float),
          defaultSig := some (selectE (gt (lit 440) (lit 0)) (lit 440) (lit 0)) },
@@ -701,11 +690,14 @@ def phasorMor : Mor := instMor "ph" "ClockPhasor" clockPhasorPorts 1
 def sawMor : Mor := arrMor (fun w => #[sub (mul (lit 2) w[0]!) (lit 1)])
 
 /-- The sine path `[phase] ⇝ [Sin(2π·phase).out]` — scale-by-2π (`arr`) ⋙ the
-    `Sin` bridge. The `⋙` here is the cross-program inline: `Sin`'s body is
-    fed `2π·phase` with no surviving instance boundary. -/
+    `FixedSin` bridge. The `⋙` here is the cross-program inline: the phase is
+    re-landed as its exact Q0.32 integer (lossless — P < 2³² ≪ 2⁵³), `FixedSin`'s
+    Q2.30 body is inlined with no surviving instance boundary, and the sample
+    scales to float once on the way out. -/
 def sinMor : Mor :=
-  seq (arrMor (fun w => #[mul (lit 6283185307179586 15) w[0]!]))
-      (instMor "sin" "Sin" #[⟨0⟩] 1)
+  seq (arrMor (fun w => #[toIntE (mul w[0]! (lit 4294967296))]))
+      (seq (instMor "sin" "FixedSin" #[⟨0⟩] 1)
+           (arrMor (fun w => #[div (toFloatE w[0]!) (lit 1073741824)])))
 
 /-- The crossfade product `[a, b, mix] ⇝ [(1−mix)·a + mix·b]` (pure `arr`) —
     `CrossFade`'s body, inlined. -/
@@ -731,7 +723,7 @@ def morphOscMor : Mor :=
     `clock` ⇒ `sampleIndex << 32`); the registry links `ClockPhasor` and `Sin`. -/
 def buildMorphOsc (arena : Arena) (resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) := do
-  let registry ← buildRegistry arena resolved #["ClockPhasor", "Sin"]
+  let registry ← buildRegistry arena resolved #["ClockPhasor", "FixedSin"]
   let (outs, b) := morphOscMor #[.inputRef ⟨0⟩, .inputRef ⟨1⟩, .inputRef ⟨2⟩, .inputRef ⟨3⟩] {}
   .ok (assemble arena "MorphOsc"
     #[ { name := "freq", type? := some (.scalar .float),
@@ -751,7 +743,7 @@ def buildMorphOsc (arena : Arena) (resolved : Array (String × ProgramIdx)) :
 def buildMorphOscLit (name : String) (freqHz : Int) (morph : Sig)
     (arena : Arena) (resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) := do
-  let registry ← buildRegistry arena resolved #["ClockPhasor", "Sin"]
+  let registry ← buildRegistry arena resolved #["ClockPhasor", "FixedSin"]
   -- `clk = sampleIndex << 32` inline (the `clkInputDecl` default; `clockLit` is
   -- defined below in the warp-law section, so spell it out here).
   let (outs, b) := morphOscMor #[lit freqHz, morph, .binary .lshift .sampleIndex (lit 32), lit 0] {}
@@ -1841,12 +1833,16 @@ def buildSlideProdUpstream (arena : Arena) (resolved : Array (String × ProgramI
 
 -- ── The BOOTSTRAP (part 2): FixedSinOsc as a TERM over the clock leaf ──────────
 
-/-- A `FixedSinOsc` built ENTIRELY as a term over the clock leaf: `Sin(2π·phasor)`,
-    no `gen`, no `.trop` instance — pure `{clk, +, ×, round}`. Warps reach it
+/-- A `FixedSinOsc` built ENTIRELY as a term over the clock leaf:
+    `FixedSin(toInt(phasor·2³²))/2³⁰` — the Q2.30 datapath sine at the exactly
+    re-landed Q0.32 phase — no `gen`, no `.trop` instance. Warps reach it
     through the `clk` leaf, so it reverses/scrubs like any generator. -/
 def fixedSinOscTerm (freqE offsetE : Sig) (c : Clock) : ArrowTerm :=
   ArrowTerm.arrUn
-    (fun clkSig => sinSig (mul (lit 6283185307179586 15) (phasorPhaseSig freqE offsetE clkSig)))
+    (fun clkSig =>
+      div (toFloatE (fixedSinCycSig
+            (toIntE (mul (phasorPhaseSig freqE offsetE clkSig) (lit 4294967296)))))
+          (lit 1073741824))
     (ArrowTerm.clk c)
 
 /-- Emit the bootstrapped `FixedSinOsc` (220 Hz, phase 0, `clk = sampleIndex<<32`)
