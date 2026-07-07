@@ -1255,6 +1255,32 @@ def residueComposeE (voice reverb : Array ModalMode) : Array ModalMode :=
     reverb.foldl (fun acc r =>
       acc.push (modeOfE r.poleE (cnegE (cdivE (cmulE a r.ampE) (csubE lam r.poleE))))) acc) #[]
 
+/-- `residueComposeE` COLLECTED to `m + n` modes. The uncollected form pushes one
+    ringing mode per (λ, ν) pair — `m·n` modes all sitting at the same `n` reverb
+    poles. Partial fractions over distinct simple poles needs only the pole UNION:
+    each voice pole λ keeps its forced mode (amp `a·H(λ)`, unchanged), and each
+    reverb pole ν keeps ONE ringing mode whose amp is the pair-amps summed over the
+    voice, `−r·Σ_k a_k/(λ_k−ν)`. Same signal (the `residue-collected` gate pins it
+    pointwise against the uncollected form), a factor `m` fewer transcendentals per
+    sample. Amps stay `CplxE` expressions, so live poles (a resonator's `freq`
+    slot) stay live through the composition — this is what keeps a voice's pitch
+    knob working THROUGH a reverb. Same no-degeneracy-branch stance as
+    `residueComposeE` (coincidence is measure-zero on live knobs; near-coincidence
+    is a large finite coupling — the sympathetic resonance you want). An empty
+    voice composes to the empty bank (silence), preserving the graceful-silence
+    contract for a reverb with nothing patched into it. -/
+def residueComposeEC (voice reverb : Array ModalMode) : Array ModalMode :=
+  if voice.isEmpty then #[] else
+  let forced := voice.map (fun v =>
+    let Hlam := reverb.foldl (fun s r => caddE s (cdivE r.ampE (csubE v.poleE r.poleE)))
+      ((lit 0, lit 0) : CplxE)
+    modeOfE v.poleE (cmulE v.ampE Hlam))
+  let ringing := reverb.map (fun r =>
+    let coupling := voice.foldl (fun s v => caddE s (cdivE v.ampE (csubE v.poleE r.poleE)))
+      ((lit 0, lit 0) : CplxE)
+    modeOfE r.poleE (cnegE (cmulE r.ampE coupling)))
+  forced ++ ringing
+
 -- ── The RESIDUE CALCULUS (build-time): voice ⋙ reverb as one modal bank ────────
 -- Composing a voice (poles λ, amps a) with a modal reverb (poles ν, residues r,
 -- impulse response Σ r e^{νt}) IS a convolution — and the convolution of a sum of
@@ -1834,6 +1860,13 @@ def buildModalReverbSym (name : String) (voice reverb : Array ModalMode)
     (anchor : Sig) (arena : Arena) : Arena × ProgramIdx :=
   buildModalBankArrow name (residueComposeE voice reverb) anchor arena
 
+/-- `voice ⋙ reverb` with the COLLECTED residue (`residueComposeEC`, `m+n` modes) —
+    the `residue-collected` gate's device-under-test, and the composition
+    `lowerModal` uses for a patched reverb. -/
+def buildModalReverbSymC (name : String) (voice reverb : Array ModalMode)
+    (anchor : Sig) (arena : Arena) : Arena × ProgramIdx :=
+  buildModalBankArrow name (residueComposeEC voice reverb) anchor arena
+
 /-- Emit the modal bank read through a clock warp φ, via the arrow `.warp` (so φ
     threads through the `.clk` leaf exactly as the master clock does) — for the
     reverse-reverb gate: a reversing φ makes the closed-form tail play backward. -/
@@ -2004,15 +2037,16 @@ partial def lowerModal (g : PatchGraph) (id : String) :
   match pn.node with
   | .modalSource ms a clk addr => .ok (ms, a, clk, addr, none)
   | .modalReverb inId room dir => do
-    -- A reverb is a GENERIC EFFECT: a FIXED room bank that TRACKS the time-basis of
-    -- whatever feeds it. We take the source's anchor/clock/addr (its time-basis) but
-    -- discard its poles — the room rings its OWN modes, re-fired on the source's
-    -- `addr` schedule. This keeps the room source-independent and drops the cost from
-    -- `m·n` (pole fusion) to `n` (the room alone). (The old residue path fused the
-    -- source's spectrum into the tail — spectrally exact but bespoke + `mn`-expensive;
-    -- it's the opt-in colored path, not the default effect.)
-    let (_v, a, clk, addr, dirIn) ← lowerModal g inId
-    .ok (room, a, clk, addr, dir.orElse (fun _ => dirIn))
+    -- A reverb FUSES its modal input with the room by the residue calculus, in the
+    -- COLLECTED form (`residueComposeEC`): `m + n` modes — the voice's poles colored
+    -- by the room (`a·H_room(λ)`) plus the room's poles colored by the voice
+    -- (`−r·Σ a/(λ−ν)`) — not the `m·n` the uncollected form cost (which is what
+    -- previously forced the discard-the-source "generic effect" compromise, killing
+    -- the source's spectrum AND its live knobs downstream of a reverb). Amps are
+    -- symbolic, so a resonator's `freq`/`decay` slots stay live through the room.
+    -- Time-basis (anchor/clock/addr) threads from the source as before.
+    let (v, a, clk, addr, dirIn) ← lowerModal g inId
+    .ok (residueComposeEC v room, a, clk, addr, dir.orElse (fun _ => dirIn))
   | .modalMix inputs => do
     let parts ← inputs.mapM (lowerModal g)
     match parts.toList with
