@@ -1888,6 +1888,109 @@ private def runModalAddr (arena : Arena)
     | .error e, _, _ | _, .error e, _ | _, _, .error e => IO.println s!"  FAIL  modal-addr  render: {firstLine e}"; pure false
   | _, _, _ => IO.println s!"  FAIL  modal-addr  build"; pure false
 
+-- ── THE DEAD-SLOT LINT ─────────────────────────────────────────────────────
+/-- Module-slot indices READ by an instance function: every `.slot` operand of
+    every instruction (preamble, body, pre-input), recursively through children.
+    A `WriteSlot` dst is a write, not a read — a slot only written is still dead. -/
+private partial def slotReadsOf (f : Tropical.Plan.InstanceFunction) : Array Nat :=
+  let ofInstrs := fun (instrs : Array Tropical.Plan.NInstr) =>
+    instrs.flatMap fun ins => ins.args.filterMap fun
+      | .slot i _ => some i
+      | _ => none
+  ofInstrs f.preambleInstructions ++ ofInstrs f.instructions
+    ++ ofInstrs f.preInputInstructions ++ f.children.flatMap slotReadsOf
+
+/-- `param:*` entries of `slotNames` referenced by NO instruction operand in the
+    plan. Sink `inputs` are slot reads too (they consume the `__root__.out`-style
+    output slots), but a param slot whose only consumer is a sink would itself be
+    a wiring bug, so the lint demands an instruction read for `param:*`. A hit is
+    a dead knob: `setSlot` succeeds, no instruction listens — the class the
+    reverb-discards-the-voice's-poles regression shipped in. -/
+def unreadParamSlots (plan : Tropical.Plan.FlatPlan) : Array String := Id.run do
+  let reads := plan.instanceFunctions.flatMap slotReadsOf
+  let mut dead : Array String := #[]
+  for i in [0:plan.slotNames.size] do
+    let name := plan.slotNames[i]!
+    if "param:".isPrefixOf name && !reads.contains i then
+      dead := dead.push name
+  return dead
+
+/-- THE DEAD-SLOT LINT gate (the systemic net for the dead-knob class). Canonical
+    patches covering every playground node kind compile through the real
+    `compilePlanPure`, and every `param:*` slot each plan registers must be READ
+    by some instruction operand. Presence-only checks pass a dead knob — the slot
+    exists, `setSlot` succeeds, nothing listens — which is exactly how the
+    reverb-drops-the-source's-poles regression stayed invisible; unreadness in the
+    PLAN is the property that catches the whole class, whatever node grows it next. -/
+private def runDeadSlotLint (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  -- Allowlist for slots proven legitimately unread, one justified entry at a
+  -- time (`<patch-label>:<slot>`); a blanket param exclusion would re-open the
+  -- hole the gate exists to close. Currently empty: every registered knob in
+  -- the canonical patches must be live.
+  let allow : Array String := #[]
+  -- Every buildNode kind: knob, source, pluck, comb, flange, sflange, fm,
+  -- delay, reverse, mix, ring, resonator, reverb, modalmix, out. The top-level
+  -- "out" field is mandatory — without it the patch gracefully compiles to
+  -- silence and EVERY knob goes dead (which this gate would report).
+  let signalChain := "{\"nodes\":[" ++
+    "{\"id\":\"k\",\"kind\":\"knob\",\"params\":{\"value\":110}}," ++
+    "{\"id\":\"osc\",\"kind\":\"source\",\"params\":{\"morph\":0.2},\"in\":{\"freq\":[\"k\"]}}," ++
+    "{\"id\":\"fl\",\"kind\":\"flange\",\"params\":{\"depth\":0.0007},\"in\":{\"in\":[\"osc\"]}}," ++
+    "{\"id\":\"sf\",\"kind\":\"sflange\",\"params\":{\"depth\":0.002,\"rate\":0.3},\"in\":{\"in\":[\"fl\"]}}," ++
+    "{\"id\":\"fmn\",\"kind\":\"fm\",\"params\":{\"carrier\":330,\"depth\":8},\"in\":{\"in\":[\"sf\"]}}," ++
+    "{\"id\":\"dl\",\"kind\":\"delay\",\"params\":{\"amount\":0.004},\"in\":{\"in\":[\"fmn\"]}}," ++
+    "{\"id\":\"rv\",\"kind\":\"reverse\",\"in\":{\"in\":[\"dl\"]}}," ++
+    "{\"id\":\"osc2\",\"kind\":\"source\",\"params\":{\"freq\":330}}," ++
+    "{\"id\":\"rg\",\"kind\":\"ring\",\"in\":{\"in\":[\"rv\",\"osc2\"]}}," ++
+    "{\"id\":\"pl\",\"kind\":\"pluck\",\"params\":{\"freq\":110}}," ++
+    "{\"id\":\"cb\",\"kind\":\"comb\",\"params\":{\"delay\":0.012,\"decay\":0.7},\"in\":{\"in\":[\"pl\"]}}," ++
+    "{\"id\":\"mx\",\"kind\":\"mix\",\"in\":{\"in\":[\"rg\",\"cb\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"mx\"]}}],\"out\":\"out\"}"
+  -- The regression's exact shape: the reverb must keep its source's poles live.
+  let modalChain := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"rvb\",\"kind\":\"reverb\",\"params\":{\"rt60\":2},\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"rvb\"]}}],\"out\":\"out\"}"
+  let modalMix := "{\"nodes\":[" ++
+    "{\"id\":\"res1\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"res2\",\"kind\":\"resonator\",\"params\":{\"freq\":330,\"decay\":3}}," ++
+    "{\"id\":\"mm\",\"kind\":\"modalmix\",\"in\":{\"in\":[\"res1\",\"res2\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"mm\"]}}],\"out\":\"out\"}"
+  -- KNOWN HOLE, deliberately not in the canonical set: `sflange` with a `mod`
+  -- cord patched still registers `param:<id>.rate` (collectParams skips a knob
+  -- only when the inlet of the SAME name is wired; `mod` ≠ `rate`), and
+  -- `buildNode` reads `rate` only on the no-mod synthesized-LFO branch — a real
+  -- dead knob this lint detects (probe-verified). Reported, not allowlisted.
+  let patches : Array (String × String) := #[
+    ("signal-chain", signalChain), ("modal-chain", modalChain), ("modal-mix", modalMix)]
+  let mut ok := true
+  let mut checked := 0
+  let mut deadAll : Array String := #[]
+  for (label, src) in patches do
+    match Lean.Json.parse src with
+    | .error e => IO.println s!"  FAIL  dead-slot-lint  {label}: json parse: {e}"; ok := false
+    | .ok j =>
+      match Tropical.Playground.compilePlanPure arena resolved j with
+      | .error e => IO.println s!"  FAIL  dead-slot-lint  {label}: compile: {firstLine e}"; ok := false
+      | .ok (plan, _) =>
+        let nParams := (plan.slotNames.filter ("param:".isPrefixOf ·)).size
+        -- zero registered params means the patch didn't decode as intended —
+        -- vacuous passes are the graceful-exclusion failure mode.
+        if nParams == 0 then
+          IO.println s!"  FAIL  dead-slot-lint  {label}: no param:* slots registered — the patch decoded to nothing"; ok := false
+        checked := checked + nParams
+        let dead := (unreadParamSlots plan).filter (fun s => !allow.contains s!"{label}:{s}")
+        if !dead.isEmpty then
+          deadAll := deadAll ++ dead.map (s!"{label}: {·}")
+          ok := false
+  IO.println s!"        {patches.size} canonical patches over the full node vocabulary, {checked} param:* slots:"
+  IO.println s!"        result   unread param slots: {if deadAll.isEmpty then "none" else toString deadAll}"
+  if ok then
+    IO.println "  PASS  dead-slot-lint  every registered param:* slot is read by an instruction — no dead knobs behind graceful exclusion"; pure true
+  else
+    IO.println s!"  FAIL  dead-slot-lint  dead knobs (setSlot lands, no instruction reads): {deadAll}"; pure false
+
 /-- Test 3: `osc ⋙ flange ⋙ flange` — the slide pushes the outer warps through
     the inner flanger's sum and fuses them, producing the oscillator read at the
     nine convolved offsets automatically (the proper multiplicity, derived). We
@@ -2020,6 +2123,9 @@ private def runSessionViaArrowEquiv : IO Bool := do
     IO.println s!"  PASS  session-via-arrow  direct root ≡ elaborated root, plan-identical ({matched} patches{if skipped > 0 then s!"; {skipped} non-session skipped" else ""})"
   pure ok
 
+-- The gate ledger below is one long do-block; its elaboration depth tracks the
+-- gate count, and the default 512 is now too small.
+set_option maxRecDepth 1024 in
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   let mut failed := 0
@@ -2317,6 +2423,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runModalAddr arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runDeadSlotLint arena resolved) then
       failed := failed + 1
     -- ── (h⁸) THE PATCHER LOWERING: downstream-only patch graph → arrow term →
     --   slide → emit. L1 (byte-identity vs FlangeSin from a graph) is in the
