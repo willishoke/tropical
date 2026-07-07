@@ -325,6 +325,30 @@ def CompilationMode.ofWire? : String → Option CompilationMode
 -- FlatPlan — the runnable plan
 -- ─────────────────────────────────────────────────────────────
 
+/-- Per-param write discipline — HOST-CONTRACT data. A runtime host (the C++
+    FlatRuntime, a Swift/Metal host, the wasm player) reads this from the
+    manifest and dispatches param writes itself, so no client ever chooses
+    semantics (see design/host-param-dispatch.md for the normative
+    re-anchoring math each discipline requires). `name` is the base param
+    (slot `param:<name>`); `companions` are the discipline's implementation
+    slots (`#v0/#v1/#t0` for glide, `#phase` for anchor, the `tau_base`
+    sibling for velocity). -/
+structure ParamDiscipline where
+  name : String
+  discipline : String
+  glideDurSec : Option JsonNumber := none
+  companions : Array String := #[]
+deriving Repr, Inhabited
+
+def ParamDiscipline.toWire (d : ParamDiscipline) : Json :=
+  let fields := #[("name", Json.str d.name), ("discipline", Json.str d.discipline)]
+  let fields := match d.glideDurSec with
+    | some n => fields.push ("glide_dur_sec", Json.num n)
+    | none => fields
+  let fields := if d.companions.isEmpty then fields
+    else fields.push ("companions", toJson d.companions)
+  Json.mkObj fields.toList
+
 structure FlatPlan where
   sampleRate : JsonNumber := (44100 : Nat)
   compilationMode : CompilationMode := .fused
@@ -340,6 +364,10 @@ structure FlatPlan where
   /-- Numbers in TS; delay-slot inits and param values land here
       verbatim (raw Json so lexical number forms survive). -/
   slotDefaults : Array Json
+  /-- Host-contract dispatch table (empty for plans with no live params;
+      omitted from the wire when empty, so old plans and old parsers are
+      both untouched). -/
+  paramDisciplines : Array ParamDiscipline := #[]
 deriving Inhabited
 
 /-- Mirrors `toWirePlan`'s omission rules. -/
@@ -357,6 +385,8 @@ def FlatPlan.toWire (p : FlatPlan) : Except String Json := do
       ("slot_names", toJson p.slotNames),
       ("slot_defaults", Json.arr p.slotDefaults),
       ("instance_functions", Json.arr (← p.instanceFunctions.mapM (·.toWire)))]
+  let fields := if p.paramDisciplines.isEmpty then fields
+    else fields.push ("param_disciplines", Json.arr (p.paramDisciplines.map (·.toWire)))
   let fields := if p.sinks.isEmpty then fields
     else fields.push ("sinks", Json.arr (p.sinks.map (·.toWire)))
   let fields := if isDefaultSources p.sources then fields

@@ -610,6 +610,40 @@ def decodeGraph (j : Json) : Except String (PatchGraph × Array (String × JsonN
   pnodes := pnodes.push { id := "__silence__", node := .mix #[] }
   pure ({ nodes := pnodes, output := "__out__" }, params)
 
+-- ── Host-contract dispatch table (param_disciplines in the manifest) ────────
+/-- The per-param write-discipline table this graph's plan carries — the same
+    walk and skip rules as `collectParams`, projected to base names. A host
+    reads this from the manifest and dispatches param writes itself
+    (design/host-param-dispatch.md is the normative math); no client ever
+    chooses a write verb. -/
+private def paramDisciplinesOf (raws : Array Raw) :
+    Array Tropical.Plan.ParamDiscipline := Id.run do
+  let mut out : Array Tropical.Plan.ParamDiscipline := #[
+    { name := masterVelocityParam, discipline := "velocity",
+      companions := #[masterTauBaseParam] },
+    { name := masterTauBaseParam, discipline := "raw" }]
+  for r in raws do
+    if r.kind == "out" then continue
+    for spec in portSpecs r.kind do
+      if spec.knob.isNone then continue
+      let selfWired := !(portSources r.inObj spec.name).isEmpty
+      let ownerWired := match spec.ownerPort with
+        | some o => !(portSources r.inObj o).isEmpty
+        | none => false
+      if !selfWired && !ownerWired then
+        let base := s!"{r.id}.{spec.name}"
+        let d : Tropical.Plan.ParamDiscipline := match spec.discipline with
+          | .glide =>
+            -- 0.02 s: the engine's glide window
+            { name := base, discipline := "glide", glideDurSec := some ⟨2, 2⟩,
+              companions := #[s!"{base}#v0", s!"{base}#v1", s!"{base}#t0"] }
+          | .anchor =>
+            { name := base, discipline := "anchor", companions := #[s!"{base}#phase"] }
+          | .raw =>
+            { name := base, discipline := "raw" }
+        out := out.push d
+  return out
+
 -- ── The realized-state report (the load_patch_graph reply) ──────────────────
 /-- FACTS about what compiled — never warnings (legal-but-incomplete states
     compile to silence by contract; the report is how a surface renders truth
@@ -734,6 +768,10 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
     arena := coreArena
     mode := .fused }
   let plan ← Tropical.Compile.compileSession input
+  -- The host-contract dispatch table rides the manifest: any runtime host
+  -- (C++ today, Swift/Metal or wasm tomorrow) reads per-slot disciplines from
+  -- the plan itself and dispatches param writes locally.
+  let plan := { plan with paramDisciplines := paramDisciplinesOf (rawsOf j) }
   -- The final mix (`out`) plus one tap per user node, all routed to the synthetic
   -- root's output slots (`__root__.<port>`), ready for `render_window`.
   let root := Tropical.Compile.rootInstancePath

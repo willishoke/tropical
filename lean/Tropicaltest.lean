@@ -2037,6 +2037,63 @@ private def runRealizedReport : IO Bool := do
       IO.println s!"  FAIL  realized-report  unwired={unwiredOk} wired={wiredOk} dangler={danglerOk} noWarn={noWarnOk}"; pure false
   | _, _, _ => IO.println "  FAIL  realized-report  patch json parse"; pure false
 
+open Tropical.Playground in
+/-- THE MANIFEST-DISCIPLINE gate. `param_disciplines` is host-contract data:
+    every entry must be consistent with the slots the same plan carries (glide
+    companions exist and the base slot doesn't; anchor/raw base slots exist;
+    the velocity entry names its tau_base companion), and a knob superseded by
+    a wired normal must be absent from the table exactly as it is from the
+    slots. A host dispatching from this table can then trust it blind. -/
+private def runManifestDisciplines (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let patch := fun (withMod : Bool) => "{\"nodes\":[" ++
+    "{\"id\":\"osc\",\"kind\":\"source\",\"params\":{\"freq\":220}}," ++
+    (if withMod then "{\"id\":\"lfo\",\"kind\":\"source\",\"params\":{\"freq\":0.4}}," else "") ++
+    "{\"id\":\"sfw\",\"kind\":\"sflange\",\"params\":{\"depth\":0.002,\"rate\":0.3},\"in\":{\"in\":[\"osc\"]" ++
+    (if withMod then ",\"mod\":[\"lfo\"]" else "") ++ "}}," ++
+    "{\"id\":\"outn\",\"kind\":\"out\",\"in\":{\"in\":[\"sfw\"]}}],\"out\":\"outn\"}"
+  let check := fun (label : String) (plan : Tropical.Plan.FlatPlan) => Id.run do
+    let mut issues : Array String := #[]
+    let names := plan.slotNames
+    for d in plan.paramDisciplines do
+      let base := s!"param:{d.name}"
+      for c in d.companions do
+        if !names.contains s!"param:{c}" then
+          issues := issues.push s!"{label}: {d.name} companion {c} has no slot"
+      match d.discipline with
+      | "glide" =>
+        if names.contains base then
+          issues := issues.push s!"{label}: glided {d.name} has a base slot (companions are the value)"
+        if d.glideDurSec.isNone then
+          issues := issues.push s!"{label}: glided {d.name} missing glide_dur_sec"
+      | "raw" | "anchor" | "velocity" =>
+        if !names.contains base then
+          issues := issues.push s!"{label}: {d.discipline} {d.name} has no base slot"
+      | other => issues := issues.push s!"{label}: unknown discipline {other}"
+    return issues
+  match Lean.Json.parse (patch false), Lean.Json.parse (patch true) with
+  | .ok ju, .ok jw =>
+    match Tropical.Playground.compilePlanPure arena resolved ju,
+          Tropical.Playground.compilePlanPure arena resolved jw with
+    | .ok (pu, _), .ok (pw, _) =>
+      let mut issues := check "unwired" pu ++ check "wired" pw
+      if !(pu.paramDisciplines.any (·.name == "sfw.rate")) then
+        issues := issues.push "unwired: sfw.rate missing from disciplines"
+      if pw.paramDisciplines.any (·.name == "sfw.rate") then
+        issues := issues.push "wired: superseded sfw.rate present in disciplines"
+      if !(pu.paramDisciplines.any fun d => d.name == "master.velocity"
+            && d.discipline == "velocity" && d.companions.contains "master.tau_base") then
+        issues := issues.push "master.velocity entry wrong"
+      IO.println s!"        {pu.paramDisciplines.size}+{pw.paramDisciplines.size} manifest entries checked against their plans' slots:"
+      IO.println s!"        result   {if issues.isEmpty then "consistent" else toString issues}"
+      if issues.isEmpty then
+        IO.println "  PASS  manifest-disciplines  param_disciplines ≡ the plan's slots — a host can dispatch from it blind"; pure true
+      else
+        IO.println s!"  FAIL  manifest-disciplines  {issues}"; pure false
+    | .error e, _ | _, .error e =>
+      IO.println s!"  FAIL  manifest-disciplines  compile: {firstLine e}"; pure false
+  | _, _ => IO.println "  FAIL  manifest-disciplines  json parse"; pure false
+
 /-- THE DEAD-SLOT LINT gate (the systemic net for the dead-knob class). Canonical
     patches covering every playground node kind compile through the real
     `compilePlanPure`, and every `param:*` slot each plan registers must be READ
@@ -2565,6 +2622,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runRealizedReport) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runManifestDisciplines arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runVocabDriven arena resolved) then

@@ -183,6 +183,19 @@ struct ParsedPlan5
   uint32_t                 slot_count = 0;
   std::vector<std::string> slot_names;
   std::vector<double>      slot_defaults;
+
+  // Host-contract param write dispatch (design/host-param-dispatch.md): the
+  // discipline is a fact about the compiled patch, carried by the plan, so a
+  // host dispatches writes itself and no client ever chooses a verb. Absent
+  // field ⇒ empty table ⇒ every write is raw (old plans unaffected).
+  struct ParamDiscipline
+  {
+    std::string              name;             // base param ("sf.depth"; slot "param:<name>")
+    std::string              discipline;       // raw | glide | anchor | velocity
+    double                   glide_dur_sec = 0.0;
+    std::vector<std::string> companions;       // #v0/#v1/#t0, #phase, tau_base sibling
+  };
+  std::vector<ParamDiscipline> param_disciplines;
 };
 
 // Parse the optional `compilation_mode` JSON string. Fails closed on
@@ -324,6 +337,20 @@ inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
   if (plan.contains("slot_defaults"))
     for (const auto & v : plan["slot_defaults"])
       result.slot_defaults.push_back(v.get<double>());
+
+  // ── Host-contract dispatch table (contains-guarded: absent ⇒ all-raw) ──
+  if (plan.contains("param_disciplines"))
+    for (const auto & d : plan["param_disciplines"])
+    {
+      ParsedPlan5::ParamDiscipline pd;
+      pd.name       = d.value("name", std::string{});
+      pd.discipline = d.value("discipline", std::string{"raw"});
+      pd.glide_dur_sec = d.value("glide_dur_sec", 0.0);
+      if (d.contains("companions"))
+        for (const auto & c : d["companions"])
+          pd.companions.push_back(c.get<std::string>());
+      result.param_disciplines.push_back(std::move(pd));
+    }
 
   return result;
 }
