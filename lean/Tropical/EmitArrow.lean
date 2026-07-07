@@ -1126,6 +1126,62 @@ def buildFixedSourceCarrier (name : String) (clkE : Clock) (arena : Arena) :
     Arena × ProgramIdx :=
   buildExprCarrier name (fixedOut (fixedPhase clkE)) arena
 
+-- ── The FIXED-POINT SINE (scope A): the sample datapath in i64 ────────────────
+-- `stdlib/FixedSin.md`'s algorithm as a Sig builder, kept in LOCKSTEP with the
+-- .md (corpus-gated byte-identical). Cycles domain: the argument is the Q0.32
+-- phase (one turn = 2³²) straight off the integer phasor — range reduction is
+-- masking/shifts, exact and warp-transparent; there is no float π anywhere.
+-- Output is a Q2.30 sample. Every multiply of two Q2.30 values fits i64 and is
+-- 32×32→64-decomposable — what lets an f32-native backend (Metal) run this
+-- datapath byte-identically to the JIT.
+
+/-- `sin` over a MASKED Q0.32 cycles phase (`[0, 2³²)`), returning Q2.30.
+    Half-turn index `n = (P + 2³⁰) >> 31`; residual `r = P − n·2³¹` IS the
+    quarter-turn coordinate `s = r/2³⁰` in Q2.30; parity sign; degree-15
+    Taylor of `sin((π/2)s)` in `z = s²`, Horner all-positive-with-subtractions
+    (signs strictly alternate), so every `>> 30` rescale sees a non-negative
+    operand. The final `(r·acc₀) >> 30` is the one signed floor-shift
+    (≤1-ulp asymmetry at negative r, inside the ~1e-8 error budget). -/
+def fixedSinCycSig (phaseQ : Sig) : Sig :=
+  let n := rshift (add phaseQ (lit 1073741824)) (lit 31)
+  let r := sub phaseQ (lshift n (lit 31))
+  let sign := sub (litI 1) (mul (litI 2) (bitAnd n (lit 1)))
+  let z := rshift (mul r r) (lit 30)
+  let acc6 := sub (lit 61) (rshift z (lit 30))
+  let acc5 := sub (lit 3864) (rshift (mul acc6 z) (lit 30))
+  let acc4 := sub (lit 172272) (rshift (mul acc5 z) (lit 30))
+  let acc3 := sub (lit 5026995) (rshift (mul acc4 z) (lit 30))
+  let acc2 := sub (lit 85569306) (rshift (mul acc3 z) (lit 30))
+  let acc1 := sub (lit 693598668) (rshift (mul acc2 z) (lit 30))
+  let acc0 := sub (lit 1686629713) (rshift (mul acc1 z) (lit 30))
+  mul sign (rshift (mul r acc0) (lit 30))
+
+/-- `cos` as the exact quarter-turn shift of `fixedSinCycSig` — masked add,
+    no second table, no float. -/
+def fixedCosCycSig (phaseQ : Sig) : Sig :=
+  fixedSinCycSig (bitAnd (add phaseQ (lit 1073741824)) (lit 4294967295))
+
+/-- Scale a Q-fractional integer sample to float at the DAC boundary —
+    `toFloat(x)/2^fracBits`, the generalization of `fixedOut` (Q0.32) to any
+    Q format (the fixed sine is Q2.30 → `fixedOutQ 30`). Applied identically
+    on both sides of any law, so byte-identical ints render byte-identical
+    floats. -/
+def fixedOutQ (fracBits : Nat) (x : Sig) : Sig :=
+  div (toFloatE x) (lit (Int.pow 2 fracBits))
+
+/-- `stdlib/FixedSin.md` as a corpus-gate builder — the SAME ports, defaults,
+    and expression tree as the parsed .md, so `runEmitCorpusGate` can assert
+    the two emits byte-identical (the lockstep proof that the Sig builder and
+    the literate source describe one algorithm). -/
+def buildFixedSin (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let phase : Sig := .inputRef ⟨0⟩
+  .ok (assemble arena "FixedSin"
+    #[ { name := "phase", type? := some (.scalar .int),
+         defaultSig := some (lit 0) } ]
+    #[{ name := "out", type? := some (.scalar .int) }]
+    #[] #[(.port ⟨0⟩, fixedSinCycSig phase)] #[])
+
 -- ── The BOOTSTRAP (part 1): the phasor + sine as pure Sig, over {+, ×, frac} ──
 -- The generators (phasor, sine) were the last thing the arrow layer borrowed from
 -- `.trop`. These pointwise pieces need no ArrowTerm; the term wrapper that lifts

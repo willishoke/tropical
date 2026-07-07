@@ -4,6 +4,7 @@
   "CrossFade",
   "Exp",
   "FixedPhasor",
+  "FixedSin",
   "HashNoise",
   "Log",
   "PluckEnv",

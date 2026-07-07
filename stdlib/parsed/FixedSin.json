@@ -1,0 +1,165 @@
+{"ports":
+ {"outputs": [{"type": {"op": "nameRef", "name": "int"}, "name": "out"}],
+  "inputs":
+  [{"type": {"op": "nameRef", "name": "int"}, "name": "phase", "default": 0}]},
+ "op": "program",
+ "name": "FixedSin",
+ "body":
+ {"op": "block",
+  "decls": [],
+  "assigns":
+  [{"op": "outputAssign",
+    "name": "out",
+    "expr":
+    {"op": "let",
+     "in":
+     {"op": "let",
+      "in":
+      {"op": "let",
+       "in":
+       {"op": "let",
+        "in":
+        {"op": "let",
+         "in":
+         {"op": "let",
+          "in":
+          {"op": "let",
+           "in":
+           {"op": "let",
+            "in":
+            {"op": "let",
+             "in":
+             {"op": "let",
+              "in":
+              {"op": "mul",
+               "args":
+               [{"op": "binding", "name": "sign"},
+                {"op": "rshift",
+                 "args":
+                 [{"op": "mul",
+                   "args":
+                   [{"op": "binding", "name": "r"},
+                    {"op": "binding", "name": "acc0"}]},
+                  30]}]},
+              "bind":
+              [{"value":
+                {"op": "sub",
+                 "args":
+                 [1686629713,
+                  {"op": "rshift",
+                   "args":
+                   [{"op": "mul",
+                     "args":
+                     [{"op": "binding", "name": "acc1"},
+                      {"op": "binding", "name": "z"}]},
+                    30]}]},
+                "name": "acc0"}]},
+             "bind":
+             [{"value":
+               {"op": "sub",
+                "args":
+                [693598668,
+                 {"op": "rshift",
+                  "args":
+                  [{"op": "mul",
+                    "args":
+                    [{"op": "binding", "name": "acc2"},
+                     {"op": "binding", "name": "z"}]},
+                   30]}]},
+               "name": "acc1"}]},
+            "bind":
+            [{"value":
+              {"op": "sub",
+               "args":
+               [85569306,
+                {"op": "rshift",
+                 "args":
+                 [{"op": "mul",
+                   "args":
+                   [{"op": "binding", "name": "acc3"},
+                    {"op": "binding", "name": "z"}]},
+                  30]}]},
+              "name": "acc2"}]},
+           "bind":
+           [{"value":
+             {"op": "sub",
+              "args":
+              [5026995,
+               {"op": "rshift",
+                "args":
+                [{"op": "mul",
+                  "args":
+                  [{"op": "binding", "name": "acc4"},
+                   {"op": "binding", "name": "z"}]},
+                 30]}]},
+             "name": "acc3"}]},
+          "bind":
+          [{"value":
+            {"op": "sub",
+             "args":
+             [172272,
+              {"op": "rshift",
+               "args":
+               [{"op": "mul",
+                 "args":
+                 [{"op": "binding", "name": "acc5"},
+                  {"op": "binding", "name": "z"}]},
+                30]}]},
+            "name": "acc4"}]},
+         "bind":
+         [{"value":
+           {"op": "sub",
+            "args":
+            [3864,
+             {"op": "rshift",
+              "args":
+              [{"op": "mul",
+                "args":
+                [{"op": "binding", "name": "acc6"},
+                 {"op": "binding", "name": "z"}]},
+               30]}]},
+           "name": "acc5"}]},
+        "bind":
+        [{"value":
+          {"op": "sub",
+           "args":
+           [61,
+            {"op": "rshift", "args": [{"op": "binding", "name": "z"}, 30]}]},
+          "name": "acc6"}]},
+       "bind":
+       [{"value":
+         {"op": "rshift",
+          "args":
+          [{"op": "mul",
+            "args":
+            [{"op": "binding", "name": "r"}, {"op": "binding", "name": "r"}]},
+           30]},
+         "name": "z"}]},
+      "bind":
+      [{"value":
+        {"op": "sub",
+         "args":
+         [{"op": "nameRef", "name": "phase"},
+          {"op": "lshift", "args": [{"op": "binding", "name": "n"}, 31]}]},
+        "name": "r"},
+       {"value":
+        {"op": "sub",
+         "args":
+         [{"op": "call",
+           "callee": {"op": "nameRef", "name": "toInt"},
+           "args": [1]},
+          {"op": "mul",
+           "args":
+           [{"op": "call",
+             "callee": {"op": "nameRef", "name": "toInt"},
+             "args": [2]},
+            {"op": "bitAnd", "args": [{"op": "binding", "name": "n"}, 1]}]}]},
+        "name": "sign"}]},
+     "bind":
+     [{"value":
+       {"op": "rshift",
+        "args":
+        [{"op": "add",
+          "args": [{"op": "nameRef", "name": "phase"}, 1073741824]},
+         31]},
+       "name": "n"}]}}]}}

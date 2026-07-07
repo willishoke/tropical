@@ -1293,6 +1293,85 @@ private def runBootstrapExp (arena : Arena)
     | .error e => IO.println s!"  FAIL  bootstrap-exp  render: {firstLine e}"; pure false
   | .error e => IO.println s!"  FAIL  bootstrap-exp  build: {firstLine e}"; pure false
 
+/-- THE FIXED-SINE ACCURACY gate. `fixedSinCycSig` (the Q2.30 integer-datapath
+    sine) over the integer phasor, rendered by the engine, vs the TRUE sine at
+    the exactly-known phase: the phasor model `P(i) = (21426140·i) mod 2³²` is
+    replicated in Lean Int arithmetic, so the oracle `sin(2π·P/2³²)` is
+    independent of every polynomial under test (a transcribed-coefficient typo
+    or a mis-shifted Horner step shows up directly). Budget: coefficient
+    rounding + 9 floor-shifts ≈ 1e-8 abs on the sin scale (−160 dB). -/
+private def runFixedSinAccuracy (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match buildAndFinish (.ok (Tropical.EmitArrow.buildExprCarrier "fixedsin_acc"
+      (Tropical.EmitArrow.fixedOutQ 30
+        (Tropical.EmitArrow.fixedSinCycSig
+          (Tropical.EmitArrow.fixedPhase Tropical.EmitArrow.clockLit))) arena)) with
+  | .ok p =>
+    match ← renderPlanSamples p 4096 with
+    | .ok s =>
+      let n := min s.size 4096
+      let sinkGain : Float := 0.05
+      let twoPi : Float := 6.283185307179586
+      let mut maxAbs : Float := 0.0
+      let mut worstI : Nat := 0
+      for i in [0:n] do
+        let pQ : Int := (21426140 * (Int.ofNat i)) % 4294967296
+        let ref := Float.sin (twoPi * (Float.ofInt pQ) / 4294967296.0)
+        let d := (s[i]! / sinkGain - ref).abs
+        if d > maxAbs then
+          maxAbs := d
+          worstI := i
+      IO.println s!"        fixedSin(Q0.32 phasor @220) vs true sin at the exact integer phase, 4096 samples:"
+      IO.println s!"        result   max abs error (sin scale) = {maxAbs * 1e9}e-9  (at sample {worstI})"
+      if maxAbs < 2e-8 then
+        IO.println s!"  PASS  fixedsin-accuracy  Q2.30 datapath sine ≡ true sine to {maxAbs * 1e9}e-9 (≈ −160 dB floor)"; pure true
+      else
+        IO.println s!"  FAIL  fixedsin-accuracy  max abs err {maxAbs * 1e9}e-9 (want <2e-8) at sample {worstI}"; pure false
+    | .error e => IO.println s!"  FAIL  fixedsin-accuracy  render: {firstLine e}"; pure false
+  | .error e => IO.println s!"  FAIL  fixedsin-accuracy  build: {firstLine e}"; pure false
+
+/-- THE FIXED-SINE LONG-τ gate. The fixed oscillator read 2³⁰+12345 samples
+    into the future must equal the origin oscillator phase-shifted by the
+    EXACTLY-computable Q0.32 offset `(inc·K) mod 2³²` — modular arithmetic on
+    the circle, byte-for-byte, at any τ. (The float carrier had no such
+    identity: its phase argument grew without bound.) K deliberately has low
+    bits set so nothing is accidentally exact. -/
+private def runFixedSinLongTau (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let K : Int := 1073741824 + 12345
+  let Kq : Int := K * 4294967296
+  let offset : Int := (21426140 * K) % 4294967296
+  let farOsc := Tropical.EmitArrow.fixedOutQ 30
+    (Tropical.EmitArrow.fixedSinCycSig
+      (Tropical.EmitArrow.fixedPhase
+        (Tropical.EmitArrow.add Tropical.EmitArrow.clockLit (Tropical.EmitArrow.litI Kq))))
+  let shiftedOsc := Tropical.EmitArrow.fixedOutQ 30
+    (Tropical.EmitArrow.fixedSinCycSig
+      (Tropical.EmitArrow.bitAnd
+        (Tropical.EmitArrow.add
+          (Tropical.EmitArrow.fixedPhase Tropical.EmitArrow.clockLit)
+          (Tropical.EmitArrow.litI offset))
+        (Tropical.EmitArrow.lit 4294967295)))
+  match buildAndFinish (.ok (Tropical.EmitArrow.buildExprCarrier "fixedsin_lt_far" farOsc arena)),
+        buildAndFinish (.ok (Tropical.EmitArrow.buildExprCarrier "fixedsin_lt_shift" shiftedOsc arena)) with
+  | .ok fp, .ok sp =>
+    match ← renderPlanSamples fp 2048, ← renderPlanSamples sp 2048 with
+    | .ok far, .ok shifted =>
+      let n := min far.size shifted.size
+      let mut bitDiff := 0
+      for i in [0:n] do
+        if far[i]! != shifted[i]! then bitDiff := bitDiff + 1
+      let mut energy : Float := 0.0
+      for i in [0:n] do energy := energy + far[i]! * far[i]!
+      IO.println s!"        fixed osc @ clk+(2³⁰+12345) samples vs origin osc phase-shifted (inc·K mod 2³²):"
+      IO.println s!"        result   bit-differing {bitDiff}/{n}  ·  energy={energy}"
+      if bitDiff == 0 && energy > 1e-6 then
+        IO.println s!"  PASS  fixedsin-longtau  modular phase identity byte-exact at τ+2³⁰ samples"; pure true
+      else
+        IO.println s!"  FAIL  fixedsin-longtau  bitDiff={bitDiff} (want 0) energy={energy} (>1e-6)"; pure false
+    | .error e, _ | _, .error e => IO.println s!"  FAIL  fixedsin-longtau  render: {firstLine e}"; pure false
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  fixedsin-longtau  build: {firstLine e}"; pure false
+
 /-- THE MODAL ISLAND gate. A decaying-resonator bank (`Σ amp·e^{−σd}·cos(ωd)`,
     gated causal at a strike time) built through the ARROW path (`arrUn`/`clk`,
     then `emitTerm`) must render bit-for-bit identical to the same bank built
@@ -2505,6 +2584,12 @@ def main (args : List String) : IO UInt32 := do
     if !(← runEmitCorpusGate "FixedSinOsc" "FixedSinOsc" arena resolved
           Tropical.EmitArrow.buildFixedSinOsc) then
       failed := failed + 1
+    -- The fixed-point DATAPATH sine (scope A): the Sig builder and the literate
+    -- .md describe one algorithm, byte-identical through the same emit recipe.
+    total := total + 1
+    if !(← runEmitCorpusGate "FixedSin" "FixedSin" arena resolved
+          Tropical.EmitArrow.buildFixedSin) then
+      failed := failed + 1
     -- products/MIMO: MorphOsc — a real multi-port body (ClockPhasor ⋙ (saw &&&
     -- Sin) ⋙ crossfade) built from the cartesian combinators, byte-identical.
     total := total + 1
@@ -2643,6 +2728,13 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runBootstrapExp arena resolved) then
+      failed := failed + 1
+    IO.println "fixed-point datapath sine (scope A — the sample values in i64):"
+    total := total + 1
+    if !(← runFixedSinAccuracy arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runFixedSinLongTau arena resolved) then
       failed := failed + 1
     IO.println "modal island (decaying-resonator bank as a term over the clock):"
     total := total + 1
