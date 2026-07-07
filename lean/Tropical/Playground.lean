@@ -610,6 +610,61 @@ def decodeGraph (j : Json) : Except String (PatchGraph × Array (String × JsonN
   pnodes := pnodes.push { id := "__silence__", node := .mix #[] }
   pure ({ nodes := pnodes, output := "__out__" }, params)
 
+-- ── The realized-state report (the load_patch_graph reply) ──────────────────
+/-- FACTS about what compiled — never warnings (legal-but-incomplete states
+    compile to silence by contract; the report is how a surface renders truth
+    instead of guessing policy). Per user node: `active` (reachable from the
+    `out` node, walking inlet edges backwards) or `excluded`. Per inlet:
+    `wired` (with sources) or `normalled` (running on its default). Per live
+    param: the collected value and write discipline, base names only — the
+    glide/anchor companion slots are the discipline's implementation detail,
+    not surface. Plus the taps. The silence-with-`{ok:true}` class dies here:
+    a patch that gracefully compiled to nothing now SAYS so, as facts. -/
+def realizedReport (args : Json) (taps : Array (String × String × String)) : Json := Id.run do
+  let raws := rawsOf args
+  let outId := match (args.getObjVal? "out").toOption with
+    | some (.str s) => s
+    | _ => ""
+  -- reachability fixed point (≤ |nodes| rounds; GUI graphs are small)
+  let mut reach : Array String := #[outId]
+  for _ in [0:raws.size] do
+    for r in raws do
+      if reach.contains r.id then
+        for spec in portSpecs r.kind do
+          for src in portSources r.inObj spec.name do
+            if !reach.contains src then reach := reach.push src
+  let nodesJ := raws.map fun r =>
+    Json.mkObj [("id", Json.str r.id), ("kind", Json.str r.kind),
+      ("status", Json.str (if reach.contains r.id then "active" else "excluded"))]
+  let inputsJ := raws.foldl (init := #[]) fun acc r =>
+    (portSpecs r.kind).foldl (init := acc) fun acc spec =>
+      if spec.accepts.isEmpty then acc else
+      let srcs := portSources r.inObj spec.name
+      acc.push (Json.mkObj (
+        [("node", Json.str r.id), ("port", Json.str spec.name)] ++
+        (if srcs.isEmpty then [("state", Json.str "normalled")]
+         else [("state", Json.str "wired"),
+               ("sources", Json.arr (srcs.map Json.str))])))
+  let kindOf : String → Option String := fun id => (raws.find? (·.id == id)).map (·.kind)
+  let paramsJ := (collectParams raws).filterMap fun (nm, v) =>
+    if nm.endsWith "#v1" || nm.endsWith "#t0" || nm.endsWith "#phase" then none
+    else if nm.endsWith "#v0" then
+      some (Json.mkObj [("name", Json.str (nm.dropRight 3)),
+        ("value", Json.num v), ("discipline", Json.str "glide")])
+    else
+      let disc :=
+        if nm == masterVelocityParam then "velocity"
+        else match nm.splitOn "." with
+          | [id, kname] => (kindOf id).map (fun k => discStr (disciplineOf k kname)) |>.getD "raw"
+          | _ => "raw"
+      some (Json.mkObj [("name", Json.str nm),
+        ("value", Json.num v), ("discipline", Json.str disc)])
+  let tapsJ := taps.map fun (name, inst, out) =>
+    Json.mkObj [("name", Json.str name), ("slot", Json.str s!"{inst}.{out}")]
+  return Json.mkObj [("ok", Json.bool true), ("nodes", Json.arr nodesJ),
+    ("inputs", Json.arr inputsJ), ("params", Json.arr paramsJ),
+    ("taps", Json.arr tapsJ)]
+
 -- ── Scope taps ──────────────────────────────────────────────────────────────
 /-- A scope tap: `(name, srcInstance, srcOutput)` — the exact `scopeTaps` triple
     the session model uses, so `list_scope_taps` (which builds the slot as

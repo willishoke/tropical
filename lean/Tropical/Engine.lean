@@ -2134,7 +2134,10 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
   env.state.modify (fun st => { st with
     params := Tropical.Playground.knobParams args
     scopeTaps := taps })
-  pure <| Json.mkObj [("ok", Json.bool true)]
+  -- The realized-state report: facts about what compiled (active/excluded
+  -- nodes, wired/normalled inputs, live params with disciplines, taps) —
+  -- never warnings. `ok` stays for callers that only ever looked at it.
+  pure <| Tropical.Playground.realizedReport args taps
 
 def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   wrap <| match name with

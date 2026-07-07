@@ -1982,6 +1982,61 @@ private def runVocabDriven (arena : Arena)
   else
     IO.println s!"  FAIL  vocab-driven  {issues}"; pure false
 
+open Tropical.Playground in
+/-- THE REALIZED-STATE REPORT gate. The `load_patch_graph` reply must state
+    FACTS a surface can render — wired vs normalled inputs, live params with
+    disciplines, excluded nodes — and never a warning (house contract: legal-
+    but-incomplete compiles silently; the report tells, it does not scold).
+    This is the protocol-level net for the silence-with-`{ok:true}` class. -/
+private def runRealizedReport : IO Bool := do
+  let mkPatch := fun (withMod : Bool) (dangler : Bool) =>
+    let base := "{\"nodes\":[" ++
+      "{\"id\":\"osc\",\"kind\":\"source\",\"params\":{\"freq\":220}}," ++
+      (if withMod then "{\"id\":\"lfo\",\"kind\":\"source\",\"params\":{\"freq\":0.4}}," else "") ++
+      (if dangler then "{\"id\":\"orphan\",\"kind\":\"source\",\"params\":{\"freq\":99}}," else "") ++
+      "{\"id\":\"sfw\",\"kind\":\"sflange\",\"params\":{\"depth\":0.002,\"rate\":0.3},\"in\":{\"in\":[\"osc\"]" ++
+      (if withMod then ",\"mod\":[\"lfo\"]" else "") ++ "}}," ++
+      "{\"id\":\"outn\",\"kind\":\"out\",\"in\":{\"in\":[\"sfw\"]}}],\"out\":\"outn\"}"
+    base
+  let inputState := fun (rep : Lean.Json) (node port : String) =>
+    match rep.getObjVal? "inputs" with
+    | .ok (.arr a) => (a.find? fun ij =>
+        ((ij.getObjVal? "node").toOption.bind (·.getStr?.toOption)) == some node &&
+        ((ij.getObjVal? "port").toOption.bind (·.getStr?.toOption)) == some port).bind
+        fun ij => (ij.getObjVal? "state").toOption.bind (·.getStr?.toOption)
+    | _ => none
+  let paramNames := fun (rep : Lean.Json) =>
+    match rep.getObjVal? "params" with
+    | .ok (.arr a) => a.filterMap fun (pj : Lean.Json) =>
+        (pj.getObjVal? "name").toOption.bind (·.getStr?.toOption)
+    | _ => #[]
+  let nodeStatus := fun (rep : Lean.Json) (id : String) =>
+    match rep.getObjVal? "nodes" with
+    | .ok (.arr a) => (a.find? fun nj =>
+        ((nj.getObjVal? "id").toOption.bind (·.getStr?.toOption)) == some id).bind
+        fun nj => (nj.getObjVal? "status").toOption.bind (·.getStr?.toOption)
+    | _ => none
+  match Lean.Json.parse (mkPatch false false), Lean.Json.parse (mkPatch true false),
+        Lean.Json.parse (mkPatch false true) with
+  | .ok jUnwired, .ok jWired, .ok jDangler =>
+    let repU := realizedReport jUnwired #[]
+    let repW := realizedReport jWired #[]
+    let repD := realizedReport jDangler #[]
+    let unwiredOk := inputState repU "sfw" "mod" == some "normalled"
+      && (paramNames repU).contains "sfw.rate"
+    let wiredOk := inputState repW "sfw" "mod" == some "wired"
+      && !(paramNames repW).contains "sfw.rate"
+    let danglerOk := nodeStatus repD "orphan" == some "excluded"
+      && nodeStatus repD "osc" == some "active"
+    -- the no-warnings contract, checked on the wire form itself
+    let noWarnOk := ((repU.compress ++ repW.compress ++ repD.compress).toLower.splitOn "warn").length == 1
+    IO.println s!"        unwired: mod={inputState repU "sfw" "mod"} rate-param={((paramNames repU).contains "sfw.rate")} · wired: mod={inputState repW "sfw" "mod"} rate-param={((paramNames repW).contains "sfw.rate")} · orphan={nodeStatus repD "orphan"}"
+    if unwiredOk && wiredOk && danglerOk && noWarnOk then
+      IO.println "  PASS  realized-report  facts, not warnings: normalled/wired inputs, owned knobs absent when superseded, excluded nodes named"; pure true
+    else
+      IO.println s!"  FAIL  realized-report  unwired={unwiredOk} wired={wiredOk} dangler={danglerOk} noWarn={noWarnOk}"; pure false
+  | _, _, _ => IO.println "  FAIL  realized-report  patch json parse"; pure false
+
 /-- THE DEAD-SLOT LINT gate (the systemic net for the dead-knob class). Canonical
     patches covering every playground node kind compile through the real
     `compilePlanPure`, and every `param:*` slot each plan registers must be READ
@@ -2507,6 +2562,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runModalAddr arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runRealizedReport) then
       failed := failed + 1
     total := total + 1
     if !(← runVocabDriven arena resolved) then
