@@ -187,11 +187,11 @@ are the closed-form instruments: modal resonance is a *damped sinusoid*
 
 | Type             | Ports | Composed of |
 |------------------|-------|-------------|
-| `ModalVoice`     | `(tau: float, f0: freq) → out: float` | sum of modes `gₖ·Sin(ωₖ·τ)` — a damped sinusoid where the decay weight `gₖ` rides the *mode index* `k` (a constant per mode), not τ, so it stays in-ring and reverses. Mild inharmonicity, cheap. |
-| `ReverseReverb`  | `(tau: float, f0: freq, spacing: float, decay: float, amount: float) → out: float` | geometric taps of `ModalVoice` at `τ+kD` (the *future*), so the reverb swells *into* a hit from before it. Decay is per-tap (spatial), so it reverses. |
-| `ReversibleComb` | `(tau: float, f0: freq, delta: float) → out: float` | symmetric offset reads `ModalVoice(τ±Δ)` — a centered comb that commutes with the involution τ ↦ −τ. |
-| `ReversibleProbe`| `(half: float, f0: freq, delta: float) → out: float` | the palindrome witness over `ReversibleComb`: `out[half+k] == out[half−k]`, bit-exact over a symmetric τ. The reversibility test reads this directly. |
-| `ScrubClock`     | `(tau_base: float, velocity: float) → tau: float` | the host-side transport made explicit: integrates a velocity knob into a render position `τ`, the coordinate the pure kernel is total over. |
+| `ModalVoice`     | `(clk: clock, f0: freq) → out: float` | sum of incommensurate sine partials off `ClockPhasor`s on the shared integer clock — a pure function of `clk`, so it reverses exactly when the clock does. Mild inharmonicity, cheap. |
+| `ReverseReverb`  | `(clk: clock, f0: freq, spacing: float, decay: float, amount: float) → out: float` | geometric taps of `ModalVoice` at `clk + toInt(k·D·SR·2³²)` (the *future*), so the reverb swells *into* a hit from before it. Decay is per-tap (spatial), so it reverses. |
+| `ReversibleComb` | `(clk: clock, f0: freq, delta: float) → out: float` | symmetric offset reads `ModalVoice(clk ± Δ·2³²·SR)` — a centered comb that commutes with the involution clk ↦ −clk. |
+| `ReversibleProbe`| `(half: float, f0: freq, delta: float) → out: float` | the palindrome witness over `ReversibleComb`: `out[half+k] == out[half−k]`, bit-exact over a symmetric integer clock. The reversibility test reads this directly. |
+| `ScrubClock`     | `(tau_base: float, velocity: float) → clk: clock` | the host-side transport made explicit: lands a velocity knob onto the Q32.32 integer render clock, the coordinate the pure kernel is total over. |
 
 ## Surface syntax
 

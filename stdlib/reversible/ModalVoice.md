@@ -1,11 +1,11 @@
 # ModalVoice
 
 A closed-form modal voice: a sum of undamped sinusoidal partials at
-incommensurate frequencies, evaluated as a pure function of the time
-coordinate `tau`. Because each partial is `sin(2π · f · tau)` and nothing
-here holds state, the whole voice is a pure function of `tau` — it can be
-evaluated at *any* `tau` (forward, backward, jumped) and it reverses exactly
-when `tau` reverses. This is the "torus cousin": the partials are the modes,
+incommensurate frequencies, evaluated as a pure function of the Q32.32
+integer clock. Because each partial is a `ClockPhasor → Sin` chain on the
+shared `clk` and nothing here holds state, the whole voice is a pure function
+of the clock — it can be evaluated at *any* clock value (forward, backward,
+jumped) and it reverses exactly when the clock reverses. This is the "torus cousin": the partials are the modes,
 their incommensurate ratios make the sum shimmer and never quite repeat.
 
 The partials are *undamped* on purpose. Damping (`e^(-α·tau)`) is the
@@ -35,13 +35,16 @@ flowchart LR
 
 Four `Sin` partials at `f0 · {1, 1+√2, 2+√5, ...}` — irrational ratios so no
 two partials are harmonically locked and the beat pattern never closes. Each
-partial reads `tau` directly: `Sin(x: 2π · f · tau)`. `Sin` performs its own
-range reduction, so large or negative `tau` is handled with full precision —
-which is exactly what makes scrubbing (and negative time) work.
+partial rides its own `ClockPhasor` on the shared integer clock: the phase is
+reduced on the circle ℤ/2³² *before* it ever becomes a float, so large or
+negative clocks carry full precision at any τ — which is exactly what makes
+scrubbing (and negative time) work. (`Sin` still range-reduces its float
+argument, but in this program it only ever sees the pre-reduced `2π·phase ∈
+[0, 2π)`.)
 
 The weights `0.4, 0.24, 0.16, 0.1` sum to `0.9 < 1`, keeping the voice below
 clipping. There is no register anywhere in this program: it is purely
-combinational in `tau`.
+combinational in the clock.
 
 ## Source
 

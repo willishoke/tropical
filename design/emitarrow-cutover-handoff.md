@@ -191,10 +191,22 @@ at a stateful effect (the ceded island) — the UX must say so there.
 - **Deleting strata safely.** Confirm nothing outside the per-program/session
   compile depends on `Strata.run` (e.g. `resolveProgramType`, `runStrataChecked`,
   the codec/`tropical_resolved_1` round-trip) before removing the passes.
-- **Carrier.** The cutover proceeds in **float**. The global fixed-point carrier
+- **Carrier.** ~~The cutover proceeds in **float**. The global fixed-point carrier
   swap (scope A: fixed-point `Sin`, both backends, DAC, re-freeze all goldens) is
   a separate, motivated-but-months-scale project; slice 6 proved its value at the
-  carrier-parametric level. Orthogonal to the cutover.
+  carrier-parametric level. Orthogonal to the cutover.~~ **EXECUTED 2026-07
+  (`fixed-carrier` branch)** — the "months-scale" estimate was stale: the clock
+  axis was already fully integer, so scope A reduced to (A) bounding the modal
+  island's one unbounded-float-time site on the integer relative clock, (B1) the
+  Q2.30 `FixedSin` datapath (`stdlib/FixedSin.md` ≡ `fixedSinCycSig`,
+  corpus-gated byte-identical), (B3) the modal bank in Q (Q4.28 landings,
+  associative i64 mode sums), (B2) the voices atop `FixedSin`. Both backends
+  inherit via the shared IR text; ZERO goldens re-frozen (the cf goldens pin
+  ModalVoice's float `Sin`, deliberately untouched; every fixed-path consumer is
+  differential-gated). Remaining float residue is deliberate and enumerated in
+  `design/fixed-carrier.md` (envelope `exp`, param landings, DAC scale). The
+  motivating consequence for Metal is recorded in
+  `design/metal-emitter-evaluation.md`.
 
 ## Code map
 
