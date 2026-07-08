@@ -1,0 +1,129 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>tropical</title>
+<style>
+  /* ── the register: early-Apple 1-bit paper, CRT wells for the scopes ── */
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  :root {
+    --paper: #f2f0e8;
+    --ink: #111111;
+    --phosphor: #3aff6e;
+    --phosphor-dim: #123a1c;
+    --crt: #060c07;
+  }
+  html, body { height: 100%; }
+  body {
+    background: var(--paper);
+    color: var(--ink);
+    font-family: "SF Mono", Menlo, monospace;
+    font-size: 13px;
+    overflow: hidden;
+    user-select: none;
+    cursor: default;
+  }
+
+  #frame { display: flex; flex-direction: column; height: 100%; padding: 10px; gap: 8px; }
+
+  /* header: chunky title + pinstripe fill, like a System 6 title bar */
+  #titlebar {
+    display: flex; align-items: center; gap: 12px;
+    border: 2px solid var(--ink);
+    padding: 4px 10px;
+    background: var(--paper);
+  }
+  #titlebar .stripes {
+    flex: 1; height: 12px;
+    background: repeating-linear-gradient(0deg, var(--ink) 0 1px, transparent 1px 3px);
+  }
+  #titlebar h1 { font-size: 15px; letter-spacing: 3px; font-weight: 800; }
+  #status { font-size: 11px; white-space: nowrap; }
+
+  #main { display: flex; flex: 1; gap: 8px; min-height: 0; }
+
+  /* left column: the circuit diagram */
+  #circuit {
+    width: 240px; flex: none;
+    border: 2px solid var(--ink);
+    background: var(--paper);
+    display: flex; flex-direction: column;
+  }
+  #circuit .paneltitle, .paneltitle {
+    border-bottom: 2px solid var(--ink);
+    padding: 2px 6px;
+    font-size: 10px; letter-spacing: 2px; font-weight: 700;
+  }
+  #diagram { flex: 1; width: 100%; }
+
+  #right { flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
+
+  /* four CRT wells across the top */
+  #scopes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; height: 220px; flex: none; }
+  .well { border: 2px solid var(--ink); display: flex; flex-direction: column; background: var(--paper); }
+  .well .paneltitle { display: flex; justify-content: space-between; }
+  .well canvas {
+    flex: 1; width: 100%;
+    background: var(--crt);
+    image-rendering: pixelated;
+  }
+
+  /* module rows */
+  #modules { flex: 1; border: 2px solid var(--ink); overflow-y: auto; background: var(--paper); }
+  .modrow { display: flex; border-bottom: 1px solid var(--ink); align-items: stretch; }
+  .modrow:last-child { border-bottom: none; }
+  .modname {
+    width: 110px; flex: none;
+    padding: 8px 8px;
+    font-weight: 800; font-size: 11px; letter-spacing: 1px;
+    border-right: 2px solid var(--ink);
+    display: flex; align-items: center;
+  }
+  .knobs { display: flex; flex-wrap: wrap; gap: 2px 14px; padding: 6px 10px; align-items: center; }
+  .knob { display: flex; align-items: baseline; gap: 6px; padding: 2px 4px; }
+  .knob .lbl { font-size: 11px; }
+  .knob .bar { font-size: 12px; letter-spacing: -1px; }
+  .knob .val { font-size: 11px; min-width: 68px; }
+  .knob.sel { background: var(--ink); color: var(--paper); }
+
+  #transport {
+    border: 2px solid var(--ink); flex: none;
+    display: flex; align-items: center; gap: 16px;
+    padding: 6px 12px; font-size: 12px;
+  }
+  #transport .glyph { font-size: 16px; font-weight: 800; min-width: 34px; }
+  #tau { margin-left: auto; font-size: 11px; }
+
+  #help {
+    flex: none; font-size: 10px; letter-spacing: 0.5px;
+    padding: 2px 4px; opacity: 0.75;
+  }
+</style>
+</head>
+<body>
+  <div id="frame">
+    <div id="titlebar">
+      <h1>TROPICAL</h1>
+      <div class="stripes"></div>
+      <div id="status">booting…</div>
+    </div>
+    <div id="main">
+      <div id="circuit">
+        <div class="paneltitle">CIRCUIT</div>
+        <canvas id="diagram"></canvas>
+      </div>
+      <div id="right">
+        <div id="scopes"></div>
+        <div id="modules"></div>
+        <div id="transport">
+          <span class="glyph" id="tglyph">▶▶</span>
+          <span id="ttext">FORWARD 1.00×</span>
+          <span id="tau">τ 0</span>
+        </div>
+        <div id="help">↑↓ knob · ←→ adjust (⇧ fine) · SPACE freeze/run · R reverse · scopes are random-access reads of the running kernel</div>
+      </div>
+    </div>
+  </div>
+  <script src="app.js"></script>
+</body>
+</html>
