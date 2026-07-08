@@ -933,20 +933,30 @@ private def buildAndFinish (built : Except String (Arena × ProgramIdx)) :
   let (a, i) ← built
   finishCarrier a i
 
-/-- tropical's `Sin`, transcribed exactly from stdlib/Sin.md: reduce by π
-    (n = round(x/π), r = x − n·π), parity sign, degree-11 Taylor Horner in r².
-    The SAME polynomial the engine evaluates — so the oracle is a straight-line
-    "standard representation," not a true-sine benchmark. -/
-private def sinH (x : Float) : Float :=
-  let nF := (x * 0.3183098861837907).round
-  let r := x - nF * 3.141592653589793
-  let oddF := nF - 2.0 * (nF / 2.0).floor          -- n & 1, as 0.0 / 1.0
-  let sign := 1.0 - 2.0 * oddF
-  let r2 := r * r
-  let poly := (((((-2.505210838544172e-8) * r2 + 0.0000027557319223985893) * r2
-      + (-0.0001984126984126984)) * r2 + 0.008333333333333333) * r2
-      + (-0.16666666666666666)) * r2 + 1.0
-  sign * (r * poly)
+/-- `stdlib/FixedSin.md` transcribed exactly in Lean Int arithmetic: the Q2.30
+    datapath sine at a MASKED Q0.32 cycles phase. `Int.fdiv` is floor division
+    = the engine's `ashr`; every Horner operand is non-negative by construction
+    (all-positive-with-subtractions), so floor = truncate there; the final
+    `(r·acc₀) >> 30` is the one signed floor-shift, matched exactly. -/
+private def fixedSinQ (p : Int) : Int :=
+  let n := Int.fdiv (p + 1073741824) 2147483648
+  let r := p - n * 2147483648
+  let sign := 1 - 2 * (Int.fmod n 2)
+  let z := Int.fdiv (r * r) 1073741824
+  let acc6 := 61 - Int.fdiv z 1073741824
+  let acc5 := 3864 - Int.fdiv (acc6 * z) 1073741824
+  let acc4 := 172272 - Int.fdiv (acc5 * z) 1073741824
+  let acc3 := 5026995 - Int.fdiv (acc4 * z) 1073741824
+  let acc2 := 85569306 - Int.fdiv (acc3 * z) 1073741824
+  let acc1 := 693598668 - Int.fdiv (acc2 * z) 1073741824
+  let acc0 := 1686629713 - Int.fdiv (acc1 * z) 1073741824
+  sign * Int.fdiv (r * acc0) 1073741824
+
+/-- The voice sine as the engine now computes it: re-land the float phase as
+    its exact Q0.32 integer (lossless — P < 2³² ≪ 2⁵³), run `fixedSinQ`, scale
+    Q2.30 → float. The standard-rep twin of `FixedSin(toInt(phase·2³²))/2³⁰`. -/
+private def voiceSin (phase : Float) : Float :=
+  Float.ofInt (fixedSinQ ((phase * 4294967296.0).toUInt64.toNat)) / 1073741824.0
 
 /-- `ClockPhasor.phase` at a Q32.32 clock value, transcribed exactly (integer
     math, offset = 0). inc = ⌊freqHz·2³²/SR⌋. Uses `fdiv`/`fmod` so it matches the
@@ -998,15 +1008,15 @@ private def runModulatedClock (arena : Arena)
       for t in [lo:n] do
         let clk : Int := Int.ofNat t * 4294967296
         -- calibration: engine's bare carrier vs the standard-rep carrier
-        let refBare := sinkGain * sinH (twoPi * phasorPhase clk 2000)
+        let refBare := sinkGain * voiceSin (phasorPhase clk 2000)
         if (bare[t]! - refBare).abs > e0 then e0 := (bare[t]! - refBare).abs
         if bare[t]!.toBits != refBare.toBits then calBitDiff := calBitDiff + 1
         if bare[t]!.abs > maxBare then maxBare := bare[t]!.abs
         -- the warp: mid-graph (unit-scale) modulator = Sin at the modulator phase;
         -- offset = toInt(depth·mod·2³²); φ = clk − offset (sub-sample, nonlinear)
-        let rawMod := sinH (twoPi * phasorPhase clk 200)
+        let rawMod := voiceSin (phasorPhase clk 200)
         let phi : Int := clk - truncToInt (depth * rawMod * two32)
-        let refFm := sinkGain * sinH (twoPi * phasorPhase phi 2000)
+        let refFm := sinkGain * voiceSin (phasorPhase phi 2000)
         if (got[t]! - refFm).abs > efm then efm := (got[t]! - refFm).abs
         if got[t]!.toBits != refFm.toBits then fmBitDiff := fmBitDiff + 1
         if (got[t]! - bare[t]!).abs > warpEffect then warpEffect := (got[t]! - bare[t]!).abs
@@ -1054,11 +1064,11 @@ private def runPmPm (arena : Arena)
       let mut nestEffect : Float := 0.0   -- |pm(pm) − single-level pm| (does level 2 matter)
       for t in [lo:n] do
         let clk : Int := Int.ofNat t * 4294967296
-        let mod2 := sinH (twoPi * phasorPhase clk 700)
+        let mod2 := voiceSin (phasorPhase clk 700)
         let modClk : Int := clk - truncToInt (d2 * mod2 * two32)
-        let mod := sinH (twoPi * phasorPhase modClk 200)
+        let mod := voiceSin (phasorPhase modClk 200)
         let carClk : Int := clk - truncToInt (d1 * mod * two32)
-        let ref := sinkGain * sinH (twoPi * phasorPhase carClk 2000)
+        let ref := sinkGain * voiceSin (phasorPhase carClk 2000)
         if (got[t]! - ref).abs > e0 then e0 := (got[t]! - ref).abs
         if got[t]!.toBits != ref.toBits then bitDiff := bitDiff + 1
         if got[t]!.abs > maxOut then maxOut := got[t]!.abs
@@ -1109,7 +1119,7 @@ private def runNegativeClock (arena : Arena)
       for t in [0:n] do
         let clk : Int := Int.ofNat t * 4294967296
         let phi : Int := clk - Int.ofNat delta * 4294967296   -- (t − 20)·2³²
-        let ref := sinkGain * sinH (twoPi * phasorPhase phi 2000)
+        let ref := sinkGain * voiceSin (phasorPhase phi 2000)
         if got[t]!.toBits != ref.toBits then bitDiff := bitDiff + 1
         if got[t]!.abs > maxOut then maxOut := got[t]!.abs
         if phi < 0 then
@@ -1149,7 +1159,7 @@ private def runMorphOscDifferential (arena : Arena)
   -- SAME integer phasor + Horner Sin (`(1−m)·(2·phase−1) + m·Sin(2π·phase)`).
   let refOut := fun (morphF : Float) (clk : Int) =>
     let phase := phasorPhase clk freqHz
-    sinkGain * ((1.0 - morphF) * (2.0 * phase - 1.0) + morphF * sinH (twoPi * phase))
+    sinkGain * ((1.0 - morphF) * (2.0 * phase - 1.0) + morphF * voiceSin phase)
   let render := fun (nm : String) (m : Tropical.EmitArrow.Sig) =>
     match buildAndFinish (Tropical.EmitArrow.buildMorphOscLit nm freqHz m arena resolved) with
     | .error e => (pure (.error e) : IO (Except String (Array Float)))
@@ -1293,6 +1303,85 @@ private def runBootstrapExp (arena : Arena)
     | .error e => IO.println s!"  FAIL  bootstrap-exp  render: {firstLine e}"; pure false
   | .error e => IO.println s!"  FAIL  bootstrap-exp  build: {firstLine e}"; pure false
 
+/-- THE FIXED-SINE ACCURACY gate. `fixedSinCycSig` (the Q2.30 integer-datapath
+    sine) over the integer phasor, rendered by the engine, vs the TRUE sine at
+    the exactly-known phase: the phasor model `P(i) = (21426140·i) mod 2³²` is
+    replicated in Lean Int arithmetic, so the oracle `sin(2π·P/2³²)` is
+    independent of every polynomial under test (a transcribed-coefficient typo
+    or a mis-shifted Horner step shows up directly). Budget: coefficient
+    rounding + 9 floor-shifts ≈ 1e-8 abs on the sin scale (−160 dB). -/
+private def runFixedSinAccuracy (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match buildAndFinish (.ok (Tropical.EmitArrow.buildExprCarrier "fixedsin_acc"
+      (Tropical.EmitArrow.fixedOutQ 30
+        (Tropical.EmitArrow.fixedSinCycSig
+          (Tropical.EmitArrow.fixedPhase Tropical.EmitArrow.clockLit))) arena)) with
+  | .ok p =>
+    match ← renderPlanSamples p 4096 with
+    | .ok s =>
+      let n := min s.size 4096
+      let sinkGain : Float := 0.05
+      let twoPi : Float := 6.283185307179586
+      let mut maxAbs : Float := 0.0
+      let mut worstI : Nat := 0
+      for i in [0:n] do
+        let pQ : Int := (21426140 * (Int.ofNat i)) % 4294967296
+        let ref := Float.sin (twoPi * (Float.ofInt pQ) / 4294967296.0)
+        let d := (s[i]! / sinkGain - ref).abs
+        if d > maxAbs then
+          maxAbs := d
+          worstI := i
+      IO.println s!"        fixedSin(Q0.32 phasor @220) vs true sin at the exact integer phase, 4096 samples:"
+      IO.println s!"        result   max abs error (sin scale) = {maxAbs * 1e9}e-9  (at sample {worstI})"
+      if maxAbs < 2e-8 then
+        IO.println s!"  PASS  fixedsin-accuracy  Q2.30 datapath sine ≡ true sine to {maxAbs * 1e9}e-9 (≈ −160 dB floor)"; pure true
+      else
+        IO.println s!"  FAIL  fixedsin-accuracy  max abs err {maxAbs * 1e9}e-9 (want <2e-8) at sample {worstI}"; pure false
+    | .error e => IO.println s!"  FAIL  fixedsin-accuracy  render: {firstLine e}"; pure false
+  | .error e => IO.println s!"  FAIL  fixedsin-accuracy  build: {firstLine e}"; pure false
+
+/-- THE FIXED-SINE LONG-τ gate. The fixed oscillator read 2³⁰+12345 samples
+    into the future must equal the origin oscillator phase-shifted by the
+    EXACTLY-computable Q0.32 offset `(inc·K) mod 2³²` — modular arithmetic on
+    the circle, byte-for-byte, at any τ. (The float carrier had no such
+    identity: its phase argument grew without bound.) K deliberately has low
+    bits set so nothing is accidentally exact. -/
+private def runFixedSinLongTau (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let K : Int := 1073741824 + 12345
+  let Kq : Int := K * 4294967296
+  let offset : Int := (21426140 * K) % 4294967296
+  let farOsc := Tropical.EmitArrow.fixedOutQ 30
+    (Tropical.EmitArrow.fixedSinCycSig
+      (Tropical.EmitArrow.fixedPhase
+        (Tropical.EmitArrow.add Tropical.EmitArrow.clockLit (Tropical.EmitArrow.litI Kq))))
+  let shiftedOsc := Tropical.EmitArrow.fixedOutQ 30
+    (Tropical.EmitArrow.fixedSinCycSig
+      (Tropical.EmitArrow.bitAnd
+        (Tropical.EmitArrow.add
+          (Tropical.EmitArrow.fixedPhase Tropical.EmitArrow.clockLit)
+          (Tropical.EmitArrow.litI offset))
+        (Tropical.EmitArrow.lit 4294967295)))
+  match buildAndFinish (.ok (Tropical.EmitArrow.buildExprCarrier "fixedsin_lt_far" farOsc arena)),
+        buildAndFinish (.ok (Tropical.EmitArrow.buildExprCarrier "fixedsin_lt_shift" shiftedOsc arena)) with
+  | .ok fp, .ok sp =>
+    match ← renderPlanSamples fp 2048, ← renderPlanSamples sp 2048 with
+    | .ok far, .ok shifted =>
+      let n := min far.size shifted.size
+      let mut bitDiff := 0
+      for i in [0:n] do
+        if far[i]! != shifted[i]! then bitDiff := bitDiff + 1
+      let mut energy : Float := 0.0
+      for i in [0:n] do energy := energy + far[i]! * far[i]!
+      IO.println s!"        fixed osc @ clk+(2³⁰+12345) samples vs origin osc phase-shifted (inc·K mod 2³²):"
+      IO.println s!"        result   bit-differing {bitDiff}/{n}  ·  energy={energy}"
+      if bitDiff == 0 && energy > 1e-6 then
+        IO.println s!"  PASS  fixedsin-longtau  modular phase identity byte-exact at τ+2³⁰ samples"; pure true
+      else
+        IO.println s!"  FAIL  fixedsin-longtau  bitDiff={bitDiff} (want 0) energy={energy} (>1e-6)"; pure false
+    | .error e, _ | _, .error e => IO.println s!"  FAIL  fixedsin-longtau  render: {firstLine e}"; pure false
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  fixedsin-longtau  build: {firstLine e}"; pure false
+
 /-- THE MODAL ISLAND gate. A decaying-resonator bank (`Σ amp·e^{−σd}·cos(ωd)`,
     gated causal at a strike time) built through the ARROW path (`arrUn`/`clk`,
     then `emitTerm`) must render bit-for-bit identical to the same bank built
@@ -1379,6 +1468,71 @@ private def runModalDegree (arena : Arena)
         IO.println s!"  FAIL  modal-degree  preMax={preMax} maxRel={maxRel} peakI={peakI}"; pure false
     | .error e => IO.println s!"  FAIL  modal-degree  render: {firstLine e}"; pure false
   | .error e => IO.println s!"  FAIL  modal-degree  build: {firstLine e}"; pure false
+
+/-- THE LONG-τ gate. Time-translation exactness at astronomical clock offsets:
+    the SAME bank struck K samples later, read K samples later, must be BYTE-
+    IDENTICAL to the bank at the origin (K = 2³⁰ samples ≈ 6.8 hours at 44.1k).
+    Both clocks are FRACTIONAL-sample — the production scrub form
+    `M(n) = toInt(velocity·2³²)·n` and a sub-sample offset — because that is
+    where the old float path actually rounded: at whole samples
+    `toFloat((2³⁰+s)·2³²)` has ~31 significant bits and was accidentally exact,
+    but a fractional clock plus the 2³⁰-sample shift needs >53 bits, so
+    `toFloat` rounds and the unreduced `ω·dSec` walks off the phase — precision
+    decayed with τ exactly when the clock was warped. On the integer relative
+    clock (`relClockQ` + `modePhaseW`) `clkRel` is the same i64 on both sides
+    at ANY low bits, so every downstream op sees identical bytes. Energy floors
+    keep silent agreement from passing. -/
+private def runLongTauModal (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let modes : Array Tropical.EmitArrow.ModalMode := #[
+    Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 220) (Tropical.EmitArrow.lit 30 1) (Tropical.EmitArrow.lit 6 1),
+    Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 330) (Tropical.EmitArrow.lit 40 1) (Tropical.EmitArrow.lit 4 1),
+    Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 440) (Tropical.EmitArrow.lit 55 1) (Tropical.EmitArrow.lit 3 1)]
+  let K : Int := 1073741824                    -- 2³⁰ samples
+  let Kq : Int := K * 4294967296               -- the same shift as a Q32.32 clock offset
+  let mkPair (tag : String) (clk : Tropical.EmitArrow.Clock) :
+      Except String Tropical.Plan.FlatPlan × Except String Tropical.Plan.FlatPlan :=
+    (buildAndFinish (.ok (Tropical.EmitArrow.buildExprCarrier s!"modal_lt_{tag}_base"
+        (Tropical.EmitArrow.modalBankSig modes clk (Tropical.EmitArrow.lit 200)) arena)),
+     buildAndFinish (.ok (Tropical.EmitArrow.buildExprCarrier s!"modal_lt_{tag}_far"
+        (Tropical.EmitArrow.modalBankSig modes
+          (Tropical.EmitArrow.add clk (Tropical.EmitArrow.litI Kq))
+          (Tropical.EmitArrow.lit (K + 200)) ) arena)))
+  let check (tag : String) (pair : Except String Tropical.Plan.FlatPlan × Except String Tropical.Plan.FlatPlan) :
+      IO (Option (Nat × Float)) := do
+    match pair with
+    | (.ok bp, .ok fp) =>
+      match ← renderPlanSamples bp 1024, ← renderPlanSamples fp 1024 with
+      | .ok base, .ok far =>
+        let n := min base.size far.size
+        let mut bitDiff := 0
+        for i in [0:n] do
+          if base[i]! != far[i]! then bitDiff := bitDiff + 1
+        let mut energy : Float := 0.0
+        for i in [200:n] do energy := energy + base[i]! * base[i]!
+        pure (some (bitDiff, energy))
+      | .error e, _ | _, .error e =>
+        IO.println s!"  FAIL  modal-longtau  render ({tag}): {firstLine e}"; pure none
+    | (.error e, _) | (_, .error e) =>
+      IO.println s!"  FAIL  modal-longtau  build ({tag}): {firstLine e}"; pure none
+  -- the master-clock scrub form: M(n) = toInt(velocity·2³²)·n at velocity 1.001
+  -- (toInt(1.001·2³²) = 4299262263) — every sample has populated low bits. The
+  -- literals ride `litI`: a bare `lit` would float-promote the clock arithmetic
+  -- and round the very bits this gate exists to protect.
+  let velClk := Tropical.EmitArrow.mul
+    (Tropical.EmitArrow.rshift Tropical.EmitArrow.clockLit (Tropical.EmitArrow.lit 32))
+    (Tropical.EmitArrow.litI 4299262263)
+  -- a bare sub-sample offset: one 2⁻³² unit off the whole-sample grid.
+  let subClk := Tropical.EmitArrow.add Tropical.EmitArrow.clockLit (Tropical.EmitArrow.litI 1)
+  match ← check "vel" (mkPair "vel" velClk), ← check "sub" (mkPair "sub" subClk) with
+  | some (d1, e1), some (d2, e2) =>
+    IO.println s!"        bank @ origin vs struck+read 2³⁰ samples later (≈6.8h), fractional clocks, 1024 samples:"
+    IO.println s!"        result   velocity-1.001 clock: bit-differing {d1}/1024 (E={e1})  ·  sub-sample offset: {d2}/1024 (E={e2})"
+    if d1 == 0 && d2 == 0 && e1 > 1e-6 && e2 > 1e-6 then
+      IO.println s!"  PASS  modal-longtau  time-translation byte-exact at τ+2³⁰ samples on fractional (scrub-form) clocks"; pure true
+    else
+      IO.println s!"  FAIL  modal-longtau  bitDiff vel={d1} sub={d2} (want 0) energy vel={e1} sub={e2} (>1e-6)"; pure false
+  | _, _ => pure false
 
 /-- THE REVERSE-REVERB gate (the moat). The modal bank read through a reversing
     warp φ(c) = 2·C·2³² − c (reflect scene time around sample C=1024) must equal
@@ -1650,13 +1804,16 @@ private def runResidueSymbolic (arena : Arena)
         let d := (bs[i]! - ss[i]!).abs
         if d > maxAbs then maxAbs := d
         energy := energy + bs[i]! * bs[i]!
-      let rel := maxAbs / (Float.sqrt (energy / n.toFloat) + 1e-300)
+      -- Two builds of the same 10-mode bank whose weights may differ by an ulp
+      -- pre-landing (litF round-trip), so each mode may jump one Q4.28 quantum
+      -- (design/fixed-carrier.md) × the 0.05 sink gain, 2× slack.
+      let bound := 10.0 * 3.7252903e-9 * 0.05 * 2.0
       IO.println s!"        Expr-residue (literal poles) vs Float-baked residue, voice(2)⋙reverb(4):"
-      IO.println s!"        result   max|Δ|={maxAbs}  ·  rel to rms={rel}"
-      if rel < 1e-6 && energy > 1e-9 then
-        IO.println s!"  PASS  symbolic-residue  Expr couplings fold to the validated Float residue (rel {rel}) — live-capable, same math"; pure true
+      IO.println s!"        result   max|Δ|={maxAbs * 1e9}e-9  ·  quantum bound={bound * 1e9}e-9"
+      if maxAbs < bound && energy > 1e-9 then
+        IO.println s!"  PASS  symbolic-residue  Expr couplings fold to the validated Float residue within the Q4.28 landing quantum (max|Δ| {maxAbs * 1e9}e-9) — live-capable, same math"; pure true
       else
-        IO.println s!"  FAIL  symbolic-residue  rel={rel} energy={energy}"; pure false
+        IO.println s!"  FAIL  symbolic-residue  max|Δ|={maxAbs * 1e9}e-9 (bound {bound * 1e9}e-9) energy={energy}"; pure false
     | .error e, _ | _, .error e => IO.println s!"  FAIL  symbolic-residue  render: {firstLine e}"; pure false
   | .error e, _ | _, .error e => IO.println s!"  FAIL  symbolic-residue  build: {firstLine e}"; pure false
 
@@ -1664,11 +1821,14 @@ private def runResidueSymbolic (arena : Arena)
     cross-weighted residues) must render pointwise-equal to the uncollected
     `residueComposeE` (m+m·n modes) — they are the same partial-fraction expansion
     with the per-pair ringing amps summed per reverb pole, so equality is algebraic
-    and the tolerance only absorbs FP reassociation. Also asserts the collection is
-    structural: m+n modes out, not m+m·n. This is what makes `voice ⋙ reverb`
-    affordable as the DEFAULT lowering — a factor m fewer transcendentals — which
-    is in turn what lets a reverb keep its source's spectrum (and live pitch knob)
-    instead of discarding them. -/
+    and the tolerance only absorbs the DOCUMENTED datapath quantization: each mode
+    lands its envelope×weight once in Q4.28 (design/fixed-carrier.md), so the two
+    structures truncate independently and may differ by up to (m+n + m+m·n)
+    quanta·sinkGain absolutely — the bound is quantum-tied, not relative. Also
+    asserts the collection is structural: m+n modes out, not m+m·n. This is what
+    makes `voice ⋙ reverb` affordable as the DEFAULT lowering — a factor m fewer
+    transcendentals — which is in turn what lets a reverb keep its source's
+    spectrum (and live pitch knob) instead of discarding them. -/
 private def runResidueCollected (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : IO Bool := do
   let tp := 6.283185307179586
@@ -1699,13 +1859,15 @@ private def runResidueCollected (arena : Arena)
         let d := (us[i]! - cs[i]!).abs
         if d > maxAbs then maxAbs := d
         energy := energy + us[i]! * us[i]!
-      let rel := maxAbs / (Float.sqrt (energy / n.toFloat) + 1e-300)
+      -- (nU + nC) independent Q4.28 weight landings × the 0.05 sink gain, with
+      -- 2× slack for the poly/final-shift ulps riding along.
+      let bound := (nU + nC).toFloat * 3.7252903e-9 * 0.05 * 2.0
       IO.println s!"        collected (m+n={nC}) vs uncollected (m+m·n={nU}), voice(3)⋙reverb(4):"
-      IO.println s!"        result   max|Δ|={maxAbs}  ·  rel to rms={rel}"
-      if rel < 1e-6 && energy > 1e-9 && nC == 7 && nU == 15 then
-        IO.println s!"  PASS  residue-collected  pole-union bank ≡ per-pair bank pointwise (rel {rel}); {nU}→{nC} modes — fusion affordable as the default"; pure true
+      IO.println s!"        result   max|Δ|={maxAbs * 1e9}e-9  ·  quantum bound={bound * 1e9}e-9"
+      if maxAbs < bound && energy > 1e-9 && nC == 7 && nU == 15 then
+        IO.println s!"  PASS  residue-collected  pole-union bank ≡ per-pair bank within the Q4.28 landing quantum (max|Δ| {maxAbs * 1e9}e-9 < {bound * 1e9}e-9); {nU}→{nC} modes — fusion affordable as the default"; pure true
       else
-        IO.println s!"  FAIL  residue-collected  rel={rel} energy={energy} nC={nC} (want 7) nU={nU} (want 15)"; pure false
+        IO.println s!"  FAIL  residue-collected  max|Δ|={maxAbs * 1e9}e-9 (bound {bound * 1e9}e-9) energy={energy} nC={nC} (want 7) nU={nU} (want 15)"; pure false
     | .error e, _ | _, .error e => IO.println s!"  FAIL  residue-collected  render: {firstLine e}"; pure false
   | .error e, _ | _, .error e => IO.println s!"  FAIL  residue-collected  build: {firstLine e}"; pure false
 
@@ -2440,6 +2602,12 @@ def main (args : List String) : IO UInt32 := do
     if !(← runEmitCorpusGate "FixedSinOsc" "FixedSinOsc" arena resolved
           Tropical.EmitArrow.buildFixedSinOsc) then
       failed := failed + 1
+    -- The fixed-point DATAPATH sine (scope A): the Sig builder and the literate
+    -- .md describe one algorithm, byte-identical through the same emit recipe.
+    total := total + 1
+    if !(← runEmitCorpusGate "FixedSin" "FixedSin" arena resolved
+          Tropical.EmitArrow.buildFixedSin) then
+      failed := failed + 1
     -- products/MIMO: MorphOsc — a real multi-port body (ClockPhasor ⋙ (saw &&&
     -- Sin) ⋙ crossfade) built from the cartesian combinators, byte-identical.
     total := total + 1
@@ -2463,6 +2631,24 @@ def main (args : List String) : IO UInt32 := do
           Tropical.EmitArrow.buildFlangeFromGraph) then
       failed := failed + 1
     IO.println "arrow laws (warp algebra ≡ byte-identical audio):"
+    -- ── PER-LAW CARRIER TABLE (load-bearing — see design/fixed-carrier.md) ──
+    -- Which value carrier each law rides is a CHOICE, not an accident: laws
+    -- whose two sides evaluate the same ops on bit-equal clocks are exact on
+    -- EITHER carrier (1-5 ride float to also witness the float path); law 6
+    -- deliberately rides FLOAT as the documented reassociation exhibit (the
+    -- ±δ tap swap moves bytes in float — denotational-only equality); law 7
+    -- is the SAME law on the FIXED carrier where integer-add associativity
+    -- makes it byte-exact; laws 8-10 mirror 1/4/5 on the fixed source.
+    --   1 inverse ················ float   (clock-exact on either)
+    --   2 additive ··············· float   (clock-exact on either)
+    --   3 diagonal/fan-out ······· float   (clock-exact on either)
+    --   4 reverse-involution ····· float   (clock-exact on either)
+    --   5 reverse-swaps-delay ···· float   (clock-exact on either)
+    --   6 reverse⋄flanger ········ FLOAT   (the reassociation exhibit: NOT byte)
+    --   7 reverse⋄flanger ········ FIXED   (byte-exact — the scope-A property)
+    --   8-10 single-source laws ·· FIXED   (byte-exact)
+    -- The modal island (modal-bank/-reverse/-direction/-longtau gates above)
+    -- rides the fixed datapath end to end as of scope-A B3.
     -- Law 1 — inverse/cancellation:  warp(back δ) ⋙ warp(fwd δ) = id
     total := total + 1
     if !(← runArrowLaw "inverse"
@@ -2579,6 +2765,13 @@ def main (args : List String) : IO UInt32 := do
     total := total + 1
     if !(← runBootstrapExp arena resolved) then
       failed := failed + 1
+    IO.println "fixed-point datapath sine (scope A — the sample values in i64):"
+    total := total + 1
+    if !(← runFixedSinAccuracy arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runFixedSinLongTau arena resolved) then
+      failed := failed + 1
     IO.println "modal island (decaying-resonator bank as a term over the clock):"
     total := total + 1
     if !(← runModalBank arena resolved) then
@@ -2588,6 +2781,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runModalReverse arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runLongTauModal arena resolved) then
       failed := failed + 1
     IO.println "residue calculus (voice ⋙ reverb composed at build time):"
     total := total + 1

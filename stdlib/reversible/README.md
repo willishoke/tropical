@@ -17,19 +17,19 @@ elaborate → strata → JIT/wasm). They are picked up by `make parse-all`
 
 | Program | Role |
 |---|---|
-| `VelocityClock` | The one stateful element — `tau` advances by a *signed* `velocity`. The live "finger on the tape": drive `param:velocity` negative to reverse, zero to freeze. |
-| `ModalVoice` | A closed-form modal voice — a sum of undamped, incommensurate sine partials, a pure function of `tau`. Conservative (undamped) so it reverses cleanly and stays bounded. |
-| `ReversibleComb` | A comb/flange built from *offset reads* of the source — `tau`, `tau − Δ`, and `tau + Δ` (the future tap). The closed-form analogue of a delay line; reads ahead because the source has a computable future. |
-| `ReversibleProbe` | The reversibility witness. Drives a palindromic `tau` from the sample counter (forward to `half`, then back) and feeds the comb. Its render is a **bit-exact palindrome** about sample `half`. |
+| `ScrubClock` | The host transport made explicit — the Q32.32 integer clock `clk` advances by a *signed* `velocity`. The live "finger on the tape": drive `param:velocity` negative to reverse, zero to freeze. |
+| `ModalVoice` | A closed-form modal voice — a sum of undamped, incommensurate sine partials, a pure function of the integer clock. Conservative (undamped) so it reverses cleanly and stays bounded. |
+| `ReversibleComb` | A comb/flange built from *offset reads* of the source — `clk`, `clk − Δ`, and `clk + Δ` (the future tap, offsets landed on the integer clock). The closed-form analogue of a delay line; reads ahead because the source has a computable future. |
+| `ReversibleProbe` | The reversibility witness. Drives a palindromic integer clock from the sample counter (forward to `half`, then back) and feeds the comb. Its render is a **bit-exact palindrome** about sample `half`. |
 
 ## The test
 
-`lake exe tropicaltest` renders `patches/reversible_probe.json` (a one-instance
+`tropicaltest` (the built binary — never `lake exe`, see the repo CLAUDE.md) renders `patches/reversible_probe.json` (a one-instance
 patch over `ReversibleProbe`) for `2·half` samples and asserts the output is a
 bit-exact palindrome about `half` — i.e. `out[half + k] == out[half − k]` for
-every `k`. Equal `tau` ⟹ equal output, sample for sample; a single mismatched
+every `k`. Equal clock ⟹ equal output, sample for sample; a single mismatched
 pair would mean a register leaked in and broke purity. The witness is exact
-(not within-epsilon) because the palindromic `tau` is a *coordinate* computed
+(not within-epsilon) because the palindromic clock is a *coordinate* computed
 by a symmetric formula, not an accumulated state.
 
 ## Build

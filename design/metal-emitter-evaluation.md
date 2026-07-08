@@ -15,6 +15,22 @@ bit-exact, so it can't join the existing correctness harness — it needs its ow
 tolerance-based correctness story. That is the load-bearing cost, and it should be decided
 deliberately, not discovered mid-port.
 
+> **Status update (scope A, `fixed-carrier` branch, 2026-07): the f64 obstacle has been
+> deliberately shrunk.** The sample datapath is now integer where it matters: the clock
+> and every phase are i64/ℤ-2³² (they always were on the stdlib path; the modal island
+> joined them), the sine is a Q2.30 integer polynomial (`stdlib/FixedSin.md` /
+> `fixedSinCycSig`), modal envelope×weight products land once per mode in Q4.28, and
+> mode/tap sums are modular i64 adds. Every multiply in that datapath is
+> 32×32→64-decomposable (MSL `mulhi`/`mullo`), so **byte-identical CPU/GPU is achievable
+> for the datapath**, and the bit-exact golden regime survives the port. The residual
+> float surface — the only part needing a tolerance gate — is enumerated and small:
+> the envelope `exp` (bounded argument by construction), the per-param landings
+> (`toInt(x·2³²)` / `toInt(x·2²⁸)`), and the one DAC scale (`toFloat/2³⁰`). The one
+> genuine-i64 (non-32×32) op is the sum accumulator: Apple-silicon MSL has 64-bit
+> integer add; a 32-bit pair-with-carry is the fallback. See `design/fixed-carrier.md`
+> for the Q-format ledger and gates. The section below is kept as written for the
+> pre-scope-A analysis it records.
+
 ## The current shape (what a Metal backend mirrors)
 
 - **One codegen, in Lean.** `lean/Tropical/Ir/EmitLlvm.lean` — `emitKernel : FlatPlan →

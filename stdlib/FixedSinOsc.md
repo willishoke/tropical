@@ -19,26 +19,32 @@ so modulate in the phase domain.
 flowchart LR
   freq([freq]) --> PH
   subgraph internals
-    PH["FixedPhasor (stateless)"] -- "phase ∈ [0,1)" --> MUL["× 2π"]
-    MUL -- "phase ∈ [0,2π)" --> SIN["Sin (pure poly)"]
+    PH["ClockPhasor (stateless)"] -- "phase ∈ [0,1)" --> REQ["× 2³² → toInt (exact Q0.32)"]
+    REQ -- "Q0.32 cycles" --> SIN["FixedSin (Q2.30 integer poly)"]
+    SIN -- "Q2.30" --> SC["toFloat / 2³⁰"]
   end
-  SIN --> sine([sine])
+  SC --> sine([sine])
 ```
 
 ## Internals
 
-**FixedPhasor.** A register-free phasor: `phase = ((⌊freq·2³²/SR⌋ ·
+**ClockPhasor.** A register-free phasor: `phase = ((⌊freq·2³²/SR⌋ ·
 sampleIndex) mod 2³²) / 2³²`, exact and drift-free on the circle ℤ/2³².
 No accumulator, so the phase at sample *n* depends only on *n*.
 
-**Phase scaling.** The [0, 1) phase is mapped to [0, 2π) by multiplying
-by `6.283185307179586` (the float closest to 2π), the full-cycle
-convention `Sin` expects.
+**Phase re-landing.** `toInt(phase · 2³²)` recovers the phasor's raw
+Q0.32 integer **exactly** (the phase is `P/2³²` with `P < 2³² ≪ 2⁵³`, so
+the float round-trip is lossless) — the Q0.32-in-cycles argument
+`FixedSin` expects. No radians, no float π.
 
-**Sin polynomial.** `Sin` does Payne–Hanek range reduction and a
-degree-11 Horner polynomial — pure combinational, no registers.
+**FixedSin polynomial.** The Q2.30 integer datapath sine
+(`stdlib/FixedSin.md`): range reduction by masking/shifts, degree-15
+Taylor Horner in i64. The sample value never exists in float until the
+single `toFloat(out)/2³⁰` scale at the voice's boundary — the property
+that lets an f32-native backend (Metal) evaluate this voice
+byte-identically to the JIT (design/fixed-carrier.md).
 
-Because neither stage holds a register, `FixedSinOsc` carries **zero**
+Because no stage holds a register, `FixedSinOsc` carries **zero**
 state. `FlatRuntime::render_window` can therefore evaluate it at any
 sample-index window exactly, concurrently with the audio thread — the
 basis of the scope / multi-rate-consumer path.
@@ -48,8 +54,8 @@ basis of the scope / multi-rate-consumer path.
 ```tropical
 program FixedSinOsc(freq: freq = 440, clk: clock = clock(), phase: unipolar = 0) -> (sine: float) {
   ph = ClockPhasor(clk: clk, freq: freq, offset: phase)
-  sin = Sin(x: 6.283185307179586 * ph.phase)
-  sine = sin.out
+  sin = FixedSin(phase: toInt(ph.phase * 4294967296))
+  sine = toFloat(sin.out) / 1073741824
 }
 ```
 

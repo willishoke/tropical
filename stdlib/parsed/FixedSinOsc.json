@@ -32,22 +32,31 @@
       "port": {"op": "nameRef", "name": "freq"}},
      {"value": {"op": "nameRef", "name": "phase"},
       "port": {"op": "nameRef", "name": "offset"}}]},
-   {"program": {"op": "nameRef", "name": "Sin"},
+   {"program": {"op": "nameRef", "name": "FixedSin"},
     "op": "instanceDecl",
     "name": "sin",
     "inputs":
     [{"value":
-      {"op": "mul",
+      {"op": "call",
+       "callee": {"op": "nameRef", "name": "toInt"},
        "args":
-       [6.283185307179586,
-        {"ref": {"op": "nameRef", "name": "ph"},
-         "output": {"op": "nameRef", "name": "phase"},
-         "op": "nestedOut"}]},
-      "port": {"op": "nameRef", "name": "x"}}]}],
+       [{"op": "mul",
+         "args":
+         [{"ref": {"op": "nameRef", "name": "ph"},
+           "output": {"op": "nameRef", "name": "phase"},
+           "op": "nestedOut"},
+          4294967296]}]},
+      "port": {"op": "nameRef", "name": "phase"}}]}],
   "assigns":
   [{"op": "outputAssign",
     "name": "sine",
     "expr":
-    {"ref": {"op": "nameRef", "name": "sin"},
-     "output": {"op": "nameRef", "name": "out"},
-     "op": "nestedOut"}}]}}
+    {"op": "div",
+     "args":
+     [{"op": "call",
+       "callee": {"op": "nameRef", "name": "toFloat"},
+       "args":
+       [{"ref": {"op": "nameRef", "name": "sin"},
+         "output": {"op": "nameRef", "name": "out"},
+         "op": "nestedOut"}]},
+      1073741824]}}]}}
