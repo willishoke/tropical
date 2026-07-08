@@ -1,6 +1,6 @@
 // tropical demo — the instrument. One fixed circuit, everything live:
 //
-//   o1, o2 ──mix──► ADDRESS ──► r1 r2 r3 r4 ──modalmix──► FILTER ──► out
+//   o1, o2 ──mix──► ADDRESS ──► r1 r2 r3 r4 ──modalmix──► REVERB ──► FILTER ──► out
 //   (the oscillator bank is the HAND: its summed waveform is the time-address
 //    that scrubs four modal rings; the rings compose through the filter's
 //    conjugate pole pair by the residue calculus — no state anywhere)
@@ -11,10 +11,12 @@
 const rpc = (m, p) => window.tropical.call(m, p)
 
 // ── the circuit ──────────────────────────────────────────────────────────────
-// NOTE: the modal REVERB stage is deliberately absent — composing 24 ring
-// modes through the 32-mode room currently blows the compile wall (see the
-// symbolic-composition scaling finding in playground/README.md); it returns
-// when host-side uniform hoisting lands. The filter's 2-pole compose is cheap.
+// The modal REVERB is back: the strata passes now walk the shared DAG with
+// memos (see the scaling finding in playground/README.md), so the 24 ring
+// modes compose through the 32-mode room in seconds. What remains is LLVM
+// compiling the one giant kernel (cache-cold ~a minute, cached ~10 s);
+// stage-0 uniform hoisting is the next cut. Reverb BEFORE the filter —
+// compose small-into-big last.
 const GRAPH = {
   nodes: [
     { id: 'o1', kind: 'source', params: { freq: 0.11, morph: 0 }, sel: {}, in: {} },
@@ -25,7 +27,8 @@ const GRAPH = {
     { id: 'r3', kind: 'resonator', params: { freq: 220, decay: 4 }, sel: {}, in: { addr: ['adr'] } },
     { id: 'r4', kind: 'resonator', params: { freq: 330, decay: 4 }, sel: {}, in: { addr: ['adr'] } },
     { id: 'mx', kind: 'modalmix', params: {}, sel: {}, in: { in: ['r1', 'r2', 'r3', 'r4'] } },
-    { id: 'flt', kind: 'filter', params: { cutoff: 800, resonance: 0.5 }, sel: {}, in: { in: ['mx'] } },
+    { id: 'rv', kind: 'reverb', params: { rt60: 2 }, sel: {}, in: { in: ['mx'] } },
+    { id: 'flt', kind: 'filter', params: { cutoff: 800, resonance: 0.5 }, sel: {}, in: { in: ['rv'] } },
     { id: 'out', kind: 'out', params: {}, sel: {}, in: { in: ['flt'] } },
   ],
   out: 'out',
@@ -55,6 +58,10 @@ const MODULES = [
     { slot: 'r4.freq', label: 'IV', min: 40, max: 2000, step: 0, log: true, value: 330, unit: 'Hz' },
     { slot: 'r1.decay', label: 'decay', min: 0.5, max: 50, step: 0, log: true, value: 4, unit: '',
       fan: ['r1.decay', 'r2.decay', 'r3.decay', 'r4.decay'] },
+  ]},
+  { name: 'REVERB', knobs: [
+    { slot: 'rv.rt60', label: 'size', min: 0.2, max: 12, step: 0, log: true, value: 2, unit: 's' },
+    { slot: 'rv.dir', label: 'dir', min: 0, max: 1, step: 0.02, value: 0, unit: '' },
   ]},
   { name: 'FILTER', knobs: [
     { slot: 'flt.cutoff', label: 'cutoff', min: 20, max: 8000, step: 0, log: true, value: 800, unit: 'Hz' },
@@ -223,7 +230,7 @@ async function boot() {
   renderPanel()
   drawDiagram()
   try {
-    status.textContent = 'compiling the circuit… (~20 s: one closed-form kernel, dual-loaded JIT + Metal)'
+    status.textContent = 'compiling the circuit… (one closed-form kernel incl. the 32-mode room — first run ~a minute, cached ~10 s)'
     await rpc('load_patch_graph', GRAPH)
     let audio = 'GPU · METAL'
     try { await rpc('start_audio', {}) } catch { audio = 'NO AUDIO DEVICE' }
@@ -306,11 +313,13 @@ function drawDiagram() {
     wire(x, ys - bh / 2 - u * 0.4, x, ys - bh / 2)
   }
   ctx.fillText('addr — the hand that plays the rings', cx, ys - bh / 2 - u * 1.2)
-  // modal mix → filter → reverb → out (the modal island, one column)
+  // modal mix → reverb → filter → out (the modal island, one column)
   const mx = box(cx, u * 15.5, w * 0.5, bh, 'MODAL Σ')
   for (const r of ring) { wire(r.x, r.y + bh / 2, r.x, mx.y - bh / 2 - u * 0.4); wire(r.x, mx.y - bh / 2 - u * 0.4, mx.x, mx.y - bh / 2) }
-  const flt = box(cx, u * 21, w * 0.5, bh, 'FILTER ~Q')
-  wire(mx.x, mx.y + bh / 2, flt.x, flt.y - bh / 2); arrow(flt.x, flt.y - bh / 2 - 2 * dpr)
+  const rv = box(cx, u * 19.3, w * 0.5, bh, 'REVERB ∿32')
+  wire(mx.x, mx.y + bh / 2, rv.x, rv.y - bh / 2); arrow(rv.x, rv.y - bh / 2 - 2 * dpr)
+  const flt = box(cx, u * 23.1, w * 0.5, bh, 'FILTER ~Q')
+  wire(rv.x, rv.y + bh / 2, flt.x, flt.y - bh / 2); arrow(flt.x, flt.y - bh / 2 - 2 * dpr)
   const out = box(cx, u * 27, w * 0.36, bh, 'OUT')
   wire(flt.x, flt.y + bh / 2, out.x, out.y - bh / 2); arrow(out.x, out.y - bh / 2 - 2 * dpr)
   ctx.textAlign = 'left'

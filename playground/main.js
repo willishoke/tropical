@@ -86,9 +86,12 @@ function call(method, params = {}) {
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject })
     sock ? sock.write(line) : outbox.push(line)
+    // load_patch_graph compiles the whole circuit into one kernel — the modal
+    // reverb's first (cache-cold) LLVM compile runs minutes-scale; be patient.
+    const ms = method === 'load_patch_graph' ? 300000 : 15000
     setTimeout(() => {
       if (pending.has(id)) { pending.delete(id); reject(new Error(`timeout: ${method}`)) }
-    }, 15000)
+    }, ms)
   })
 }
 

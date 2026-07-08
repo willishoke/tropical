@@ -42,9 +42,45 @@ private def sumDefE (d : TypeDefIdx) : PassM (String × Array SumVariant) := do
 
 private def nat0E (n : Nat) : PassM ExprId := einternP (.num ⟨Int.ofNat n, 0⟩)
 
+/-- Pass-wide memo of the has-sum predicate per source id (the arena is
+    append-only, so a node never changes under an id). Keeps the walks
+    DAG-shaped — without it they cost O(expanded tree), which is super-linear
+    on composed patches. -/
+private abbrev SumM := StateT (Std.HashMap Nat Bool) PassM
+
+private partial def exprHasSumE (id : ExprId) : SumM Bool := do
+  if let some r := (← get).get? id.idx then return r
+  let r ← match ← derefP id with
+    | .tag .. | .match_ .. => pure true
+    | .num _ | .bool _
+    | .inputRef _ | .paramRef _ | .typeParamRef _ | .bindingRef _
+    | .sampleRate | .sampleIndex | .nestedOut _ _ => pure false
+    | .arr items => items.anyM exprHasSumE
+    | .binary _ a b | .index a b => pure ((← exprHasSumE a) || (← exprHasSumE b))
+    | .unary _ a => exprHasSumE a
+    | .clamp a b c | .select a b c | .arraySet a b c =>
+      pure ((← exprHasSumE a) || (← exprHasSumE b) || (← exprHasSumE c))
+    | .zeros count => exprHasSumE count
+    | .fold over init _ _ body | .scan over init _ _ body =>
+      pure ((← exprHasSumE over) || (← exprHasSumE init) || (← exprHasSumE body))
+    | .iterate count init _ body | .chain count init _ body =>
+      pure ((← exprHasSumE count) || (← exprHasSumE init) || (← exprHasSumE body))
+    | .generate count _ body => pure ((← exprHasSumE count) || (← exprHasSumE body))
+    | .map2 over _ body => pure ((← exprHasSumE over) || (← exprHasSumE body))
+    | .zipWith a b _ _ body =>
+      pure ((← exprHasSumE a) || (← exprHasSumE b) || (← exprHasSumE body))
+    | .letIn binders body =>
+      pure ((← binders.anyM (fun b => exprHasSumE b.value)) || (← exprHasSumE body))
+  modify (·.insert id.idx r)
+  return r
+
 mutual
 
-private partial def rewriteExprE (ctx : CtxE) (id : ExprId) : PassM ExprId := do
+private partial def rewriteExprE (ctx : CtxE) (id : ExprId) : SumM ExprId := do
+  -- No tag/match anywhere below and no pending arm bindings: the rebuild
+  -- would re-intern to the same id — skip it.
+  if ctx.bindings.isEmpty then
+    unless ← exprHasSumE id do return id
   match ← derefP id with
   | .num _ | .bool _ => pure id
   | .arr items => einternP (.arr (← items.mapM (rewriteExprE ctx)))
@@ -90,14 +126,14 @@ private partial def rewriteExprE (ctx : CtxE) (id : ExprId) : PassM ExprId := do
     einternP (.letIn bs (← rewriteExprE ctx body))
 
 private partial def lowerMatchToSelectChainE (ctx : CtxE) (d : TypeDefIdx)
-    (scrutinee : ExprId) (arms : Array EMatchArm) : PassM ExprId := do
+    (scrutinee : ExprId) (arms : Array EMatchArm) : SumM ExprId := do
   let tagRead ← rewriteExprE ctx scrutinee
   let (typeName, variants) ← sumDefE d
-  let armFor (vi : Nat) (v : SumVariant) : PassM EMatchArm :=
+  let armFor (vi : Nat) (v : SumVariant) : SumM EMatchArm :=
     match arms.find? (·.variant == vi) with
     | some arm => pure arm
     | none => failP s!"sumLower: match on '{typeName}' missing arm for '{v.name}'"
-  let lowerArmBody (arm : EMatchArm) : PassM ExprId := do
+  let lowerArmBody (arm : EMatchArm) : SumM ExprId := do
     if arm.binders.isEmpty then
       rewriteExprE ctx arm.body
     else
@@ -117,7 +153,7 @@ private partial def lowerMatchToSelectChainE (ctx : CtxE) (d : TypeDefIdx)
 
 private partial def bindingsForArmE (ctx : CtxE) (scrutinee : ExprId)
     (matchDef : TypeDefIdx) (arm : EMatchArm) :
-    PassM (List (BinderIdx × ExprId)) := do
+    SumM (List (BinderIdx × ExprId)) := do
   let _ := ctx
   let _ := scrutinee
   if arm.binders.isEmpty then return []
@@ -129,30 +165,7 @@ private partial def bindingsForArmE (ctx : CtxE) (scrutinee : ExprId)
 
 end
 
-private partial def exprHasSumE (id : ExprId) : PassM Bool := do
-  match ← derefP id with
-  | .tag .. | .match_ .. => pure true
-  | .num _ | .bool _
-  | .inputRef _ | .paramRef _ | .typeParamRef _ | .bindingRef _
-  | .sampleRate | .sampleIndex | .nestedOut _ _ => pure false
-  | .arr items => items.anyM exprHasSumE
-  | .binary _ a b | .index a b => pure ((← exprHasSumE a) || (← exprHasSumE b))
-  | .unary _ a => exprHasSumE a
-  | .clamp a b c | .select a b c | .arraySet a b c =>
-    pure ((← exprHasSumE a) || (← exprHasSumE b) || (← exprHasSumE c))
-  | .zeros count => exprHasSumE count
-  | .fold over init _ _ body | .scan over init _ _ body =>
-    pure ((← exprHasSumE over) || (← exprHasSumE init) || (← exprHasSumE body))
-  | .iterate count init _ body | .chain count init _ body =>
-    pure ((← exprHasSumE count) || (← exprHasSumE init) || (← exprHasSumE body))
-  | .generate count _ body => pure ((← exprHasSumE count) || (← exprHasSumE body))
-  | .map2 over _ body => pure ((← exprHasSumE over) || (← exprHasSumE body))
-  | .zipWith a b _ _ body =>
-    pure ((← exprHasSumE a) || (← exprHasSumE b) || (← exprHasSumE body))
-  | .letIn binders body =>
-    pure ((← binders.anyM (fun b => exprHasSumE b.value)) || (← exprHasSumE body))
-
-private def progHasAnySumWorkE (prog : EProgram) : PassM Bool := do
+private def progHasAnySumWorkE (prog : EProgram) : SumM Bool := do
   for d in prog.decls do
     if let .inst _ _ _ inputs := d then
       if ← inputs.anyM (fun i => exprHasSumE i.value) then return true
@@ -160,7 +173,7 @@ private def progHasAnySumWorkE (prog : EProgram) : PassM Bool := do
     if ← exprHasSumE a.expr then return true
   return false
 
-def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
+private def runGoE (rootIdx : ProgramIdx) : SumM ProgramIdx := do
   let prog ← getEProgram rootIdx "sumLower"
   if !(← progHasAnySumWorkE prog) then
     return rootIdx
@@ -174,5 +187,9 @@ def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
   let newAssigns ← prog.assigns.mapM fun a => do
     pure ({ target := a.target, expr := ← rewriteExprE ctx a.expr } : EOutputAssign)
   pushEProgram { prog with decls := newDecls, assigns := newAssigns }
+
+/-- Run the pass with a fresh has-sum memo (one per pass application). -/
+def runE (rootIdx : ProgramIdx) : PassM ProgramIdx :=
+  (runGoE rootIdx).run' {}
 
 end Tropical.Ir.Strata.SumLower

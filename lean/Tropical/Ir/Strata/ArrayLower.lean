@@ -12,10 +12,14 @@ survives, every `bindingRef` is substituted away, and literal-count
 inline arrays survive as scalar ops over slot bundles.
 
 Substitution is BinderIdx-keyed (unique-per-program integers), so
-shadowing is structurally impossible. The TS per-iteration WeakMap
-memos are sharing-only (invisible to the structural codec) and are
-dropped; the unmemoized walk is O(output tree), the same bound as
-encoding.
+shadowing is structurally impossible. Phase B threads the DAG straight
+to emit with no tree encoding downstream, so the walk must be
+DAG-shaped: `LowerM` carries a pass-wide memo of the needs-lowering
+predicate (a subgraph with no combinator/bindingRef/zeros anywhere
+below is returned by id, unchanged — id-identical because `eintern`
+hash-conses) plus a rewrite memo for closed (empty-subst) roots.
+Without it the walk is O(expanded tree) — the residue-composition
+compile wall.
 
 Fractal: surviving InstanceDecls keep their typeKey; registry entries
 are lowered recursively PER ENTRY (no idx-level dedup — TS lowers each
@@ -44,9 +48,53 @@ private def loopCount (n : JsonNumber) : Nat :=
 
 private abbrev SubstMapE := List (BinderIdx × ExprId)
 
+/-- Pass-wide memos. `needs` caches the needs-lowering predicate per source id
+    (valid for the whole pass: the arena is append-only, so a node never
+    changes under an id). `rw` caches rewrites of closed roots — sound only
+    for empty substs, where the rewrite is a pure function of the subgraph. -/
+private structure LowerSt where
+  needs : Std.HashMap Nat Bool := {}
+  rw : Std.HashMap Nat ExprId := {}
+
+private abbrev LowerM := StateT LowerSt PassM
+
 private def nat0E (n : Nat) : PassM ExprId := einternP (.num ⟨Int.ofNat n, 0⟩)
 
-partial def lowerExprE (subst : SubstMapE) (id : ExprId) : PassM ExprId := do
+partial def exprNeedsLoweringE (id : ExprId) : LowerM Bool := do
+  if let some r := (← get).needs.get? id.idx then return r
+  let r ← match ← derefP id with
+    | .letIn .. | .fold .. | .scan .. | .generate ..
+    | .iterate .. | .chain .. | .map2 .. | .zipWith .. => pure true
+    | .bindingRef _ => pure true
+    | .zeros _ => pure true
+    | .num _ | .bool _
+    | .inputRef _ | .paramRef _ | .typeParamRef _
+    | .nestedOut _ _ | .sampleRate | .sampleIndex => pure false
+    | .arr items => items.anyM exprNeedsLoweringE
+    | .tag _ _ payload => payload.anyM (fun p => exprNeedsLoweringE p.value)
+    | .match_ _ scrutinee arms =>
+      pure ((← exprNeedsLoweringE scrutinee) || (← arms.anyM (fun a => exprNeedsLoweringE a.body)))
+    | .binary _ a b | .index a b => pure ((← exprNeedsLoweringE a) || (← exprNeedsLoweringE b))
+    | .unary _ a => exprNeedsLoweringE a
+    | .clamp a b c | .select a b c | .arraySet a b c =>
+      pure ((← exprNeedsLoweringE a) || (← exprNeedsLoweringE b) || (← exprNeedsLoweringE c))
+  modify fun s => { s with needs := s.needs.insert id.idx r }
+  return r
+
+mutual
+
+partial def lowerExprE (subst : SubstMapE) (id : ExprId) : LowerM ExprId := do
+  -- Nothing to lower anywhere below (in particular no bindingRef, so `subst`
+  -- is irrelevant): the rebuild would re-intern to the same id — skip it.
+  unless ← exprNeedsLoweringE id do return id
+  if subst.isEmpty then
+    if let some r := (← get).rw.get? id.idx then return r
+  let r ← lowerExprCoreE subst id
+  if subst.isEmpty then
+    modify fun s => { s with rw := s.rw.insert id.idx r }
+  return r
+
+private partial def lowerExprCoreE (subst : SubstMapE) (id : ExprId) : LowerM ExprId := do
   match ← derefP id with
   | .num _ | .bool _ => pure id
   | .arr items => einternP (.arr (← items.mapM (lowerExprE subst)))
@@ -139,27 +187,11 @@ partial def lowerExprE (subst : SubstMapE) (id : ExprId) : PassM ExprId := do
   | .arraySet a b c => einternP (.arraySet (← lowerExprE subst a) (← lowerExprE subst b) (← lowerExprE subst c))
   | .index a b => einternP (.index (← lowerExprE subst a) (← lowerExprE subst b))
 
-partial def exprNeedsLoweringE (id : ExprId) : PassM Bool := do
-  match ← derefP id with
-  | .letIn .. | .fold .. | .scan .. | .generate ..
-  | .iterate .. | .chain .. | .map2 .. | .zipWith .. => pure true
-  | .bindingRef _ => pure true
-  | .zeros _ => pure true
-  | .num _ | .bool _
-  | .inputRef _ | .paramRef _ | .typeParamRef _
-  | .nestedOut _ _ | .sampleRate | .sampleIndex => pure false
-  | .arr items => items.anyM exprNeedsLoweringE
-  | .tag _ _ payload => payload.anyM (fun p => exprNeedsLoweringE p.value)
-  | .match_ _ scrutinee arms =>
-    pure ((← exprNeedsLoweringE scrutinee) || (← arms.anyM (fun a => exprNeedsLoweringE a.body)))
-  | .binary _ a b | .index a b => pure ((← exprNeedsLoweringE a) || (← exprNeedsLoweringE b))
-  | .unary _ a => exprNeedsLoweringE a
-  | .clamp a b c | .select a b c | .arraySet a b c =>
-    pure ((← exprNeedsLoweringE a) || (← exprNeedsLoweringE b) || (← exprNeedsLoweringE c))
+end
 
 mutual
 
-private partial def progNeedsLoweringE (prog : EProgram) : PassM Bool := do
+private partial def progNeedsLoweringE (prog : EProgram) : LowerM Bool := do
   for i in prog.inputs do
     if let some d := i.default? then
       if ← exprNeedsLoweringE d then return true
@@ -169,7 +201,7 @@ private partial def progNeedsLoweringE (prog : EProgram) : PassM Bool := do
     if ← exprNeedsLoweringE a.expr then return true
   return false
 
-private partial def declNeedsLoweringE (enclosing : EProgram) : EBodyDecl → PassM Bool
+private partial def declNeedsLoweringE (enclosing : EProgram) : EBodyDecl → LowerM Bool
   | .param .. | .prog .. => pure false
   | .inst name typeKey _ inputs => do
     let (_, subType) ← getInstanceTypeE enclosing name typeKey
@@ -178,20 +210,20 @@ private partial def declNeedsLoweringE (enclosing : EProgram) : EBodyDecl → Pa
 
 end
 
-private def lowerDeclE (decl : EBodyDecl) : PassM EBodyDecl := do
+private def lowerDeclE (decl : EBodyDecl) : LowerM EBodyDecl := do
   match decl with
   | .param .. | .prog .. => pure decl
   | .inst name typeKey tArgs inputs =>
     pure (.inst name typeKey tArgs
       (← inputs.mapM fun i => do pure ({ port := i.port, value := ← lowerExprE [] i.value } : EInstanceInput)))
 
-partial def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
+private partial def runGoE (rootIdx : ProgramIdx) : LowerM ProgramIdx := do
   let prog ← getEProgram rootIdx "arrayLower"
   unless ← progNeedsLoweringE prog do
     return rootIdx
   let mut newRegistry : Array (String × ProgramIdx) := #[]
   for (key, subIdx) in prog.registry do
-    let subIdx' ← runE subIdx
+    let subIdx' ← runGoE subIdx
     newRegistry := newRegistry.push (key, subIdx')
   let newInputs ← prog.inputs.mapM fun i => do
     pure ({ name := i.name, type? := i.type?, default? := ← i.default?.mapM (lowerExprE []) } : EInputDecl)
@@ -200,5 +232,10 @@ partial def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
     pure ({ target := a.target, expr := ← lowerExprE [] a.expr } : EOutputAssign)
   pushEProgram { prog with
     inputs := newInputs, decls := newDecls, assigns := newAssigns, registry := newRegistry }
+
+/-- Run the pass with fresh memos (one per pass application; the registry
+    recursion in `runGoE` shares them). -/
+def runE (rootIdx : ProgramIdx) : PassM ProgramIdx :=
+  (runGoE rootIdx).run' {}
 
 end Tropical.Ir.Strata.ArrayLower

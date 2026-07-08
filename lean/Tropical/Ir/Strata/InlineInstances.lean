@@ -15,10 +15,11 @@ expressions, shift surviving Param/Binding refs by the lift offsets
 `nestedOut` against the recorded per-instance output expressions.
 
 The TS pass memoizes the nestedOut substitution walk on node identity
-to preserve DAG sharing. Expr sharing is invisible to the
-`tropical_resolved_1` codec (only the three arena pools carry
-identity), and the unmemoized walk is O(output tree) — the same bound
-as encoding — so the Lean port walks structurally.
+to preserve DAG sharing; the id-form walks here memoize the same way
+(`mapExprIdGo` under `MapM`). Phase B threads the DAG straight to emit
+with no tree encoding anywhere downstream, so an unmemoized walk would
+be the only place paying O(expanded tree) — super-linear on composed
+patches (the residue-composition compile wall).
 
 Substituted outer expressions pass through WITHOUT rewriting (TS
 returns them by reference; offsets must not touch outer-coordinate
@@ -56,8 +57,11 @@ private def inlineSubstHooksE (inputSubst : Array (Nat × ExprId))
 
 private def inlineSubstProgramE (inner : EProgram)
     (inputSubst : Array (Nat × ExprId))
-    (paramOffset binderOffset : Nat) : PassM EProgram := do
-  let rw := mapExprId (inlineSubstHooksE inputSubst paramOffset binderOffset)
+    (paramOffset binderOffset : Nat) : PassM EProgram :=
+  -- One memo across all of the clone's roots — the inner's inputs, decls, and
+  -- assigns share subgraphs, and the rewrite is root-independent.
+  StateT.run' (s := {}) do
+  let rw := mapExprIdGo (inlineSubstHooksE inputSubst paramOffset binderOffset)
   let inputs ← inner.inputs.mapM fun i => do
     pure ({ i with default? := ← i.default?.mapM rw } : EInputDecl)
   let decls ← inner.decls.mapM fun d => do
@@ -116,8 +120,8 @@ private def buildInputSubstE (instName : String) (declType flattened : EProgram)
 /-- `table[instanceIdx][outputIdx]` = recorded cloned output id. -/
 private abbrev NestedOutTableE := Array (Array ExprId)
 
-private partial def substExprNestedE (table : NestedOutTableE) (id : ExprId) : PassM ExprId :=
-  mapExprId {
+private partial def substExprNestedGoE (table : NestedOutTableE) (id : ExprId) : MapM ExprId :=
+  mapExprIdGo {
     node := fun e => match e with
       | .nestedOut inst out =>
         match table[inst.idx]? with
@@ -126,12 +130,15 @@ private partial def substExprNestedE (table : NestedOutTableE) (id : ExprId) : P
             "— instance not inlined?")
         | some perInstance =>
           match perInstance[out.idx]? with
-          | some v => do pure (some (← substExprNestedE table v))
+          | some v => do pure (some (← substExprNestedGoE table v))
           | none =>
             failP (s!"inlineInstances: nestedOut to instance idx={inst.idx} output idx={out.idx} " ++
               "has no resolved expression for that output")
       | _ => pure none
   } id
+
+private def substExprNestedE (table : NestedOutTableE) (id : ExprId) : PassM ExprId :=
+  (substExprNestedGoE table id).run' {}
 
 private def substDeclNestedE (d : EBodyDecl) : PassM EBodyDecl := do
   match d with

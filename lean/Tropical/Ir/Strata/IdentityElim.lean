@@ -49,14 +49,14 @@ private def detectIdentityE (enclosing : EProgram)
 
 /-- nestedOut(eliminated, o) → wired id (walked recursively so chains collapse);
     nestedOut(survivor) → remapped idx. -/
-private partial def substExprE (fates : Array InstFateE) (id : ExprId) : PassM ExprId :=
-  mapExprId {
+private partial def substExprGoE (fates : Array InstFateE) (id : ExprId) : MapM ExprId :=
+  mapExprIdGo {
     node := fun e => match e with
       | .nestedOut inst out =>
         match fates[inst.idx]? with
         | some (.eliminated outs) =>
           match outs[out.idx]? with
-          | some v => do pure (some (← substExprE fates v))
+          | some v => do pure (some (← substExprGoE fates v))
           | none => pure none
         | some (.survivor newIdx) =>
           if newIdx != inst.idx then do pure (some (← einternP (.nestedOut ⟨newIdx⟩ out)))
@@ -64,6 +64,9 @@ private partial def substExprE (fates : Array InstFateE) (id : ExprId) : PassM E
         | none => pure none
       | _ => pure none
   } id
+
+private def substExprE (fates : Array InstFateE) (id : ExprId) : PassM ExprId :=
+  (substExprGoE fates id).run' {}
 
 def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
   let prog ← getEProgram rootIdx "identityElim"
