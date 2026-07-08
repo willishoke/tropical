@@ -11,6 +11,7 @@ endif()
 option(TROPICAL_BUILD_PYTHON "Build ctypes-based Python package support (installs tropical/ package)" ON)
 option(TROPICAL_LLVM_STATIC "Link LLVM statically into libtropical for self-contained wheel distribution" OFF)
 option(TROPICAL_WASM_EMIT "Build the in-process IR→wasm emitter (links the LLVM WebAssembly backend + lld as a library). Needed by the build-time compile-wasm tool, not by the shipped audio runtime." OFF)
+option(TROPICAL_METAL "Build the Metal compute backend (Apple only): MSL kernels compiled at runtime, audio dispatched per-block on the GPU. The JIT stays dual-loaded for render_window/goldens." OFF)
 
 # nlohmann/json — header-only JSON library (for plan loading)
 set(JSON_BuildTests OFF CACHE INTERNAL "")
@@ -56,6 +57,29 @@ target_compile_definitions(tropical_core PRIVATE ${LLVM_DEFINITIONS})
 llvm_map_components_to_libnames(LLVM_ORC_JIT_LIBS
     Core OrcJIT ExecutionEngine native nativecodegen Support)
 target_link_libraries(tropical_core PRIVATE ${LLVM_ORC_JIT_LIBS})
+
+if(TROPICAL_METAL)
+    if(NOT APPLE)
+        message(FATAL_ERROR "TROPICAL_METAL requires macOS")
+    endif()
+    enable_language(OBJCXX)
+    set(CMAKE_OBJCXX_STANDARD 20)
+    target_sources(tropical_core PRIVATE engine/metal/MetalKernel.mm)
+    set_source_files_properties(engine/metal/MetalKernel.mm PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(tropical_core PRIVATE
+        "-framework Metal"
+        "-framework Foundation")
+    target_compile_definitions(tropical_core PRIVATE TROPICAL_METAL)
+    # msl_check — stdin → newLibraryWithSource compile checker (dev tool;
+    # the production compile path, no Xcode required).
+    add_executable(msl_check engine/metal/msl_check.mm)
+    set_source_files_properties(engine/metal/msl_check.mm PROPERTIES
+        COMPILE_OPTIONS "-fobjc-arc")
+    target_link_libraries(msl_check PRIVATE
+        "-framework Metal"
+        "-framework Foundation")
+endif()
 
 if(TROPICAL_WASM_EMIT)
     if(LLVM_PACKAGE_VERSION VERSION_LESS 21)
@@ -143,6 +167,13 @@ if(TROPICAL_BUILD_TESTS)
     target_compile_features(test_module_process PRIVATE cxx_std_20)
     target_link_libraries(test_module_process PRIVATE tropical_core)
     add_test(NAME module_process COMMAND test_module_process)
+    if(TROPICAL_METAL)
+        add_executable(test_metal_kernel engine/tests/test_metal_kernel.cpp)
+        target_include_directories(test_metal_kernel PRIVATE engine)
+        target_compile_features(test_metal_kernel PRIVATE cxx_std_20)
+        target_link_libraries(test_metal_kernel PRIVATE tropical_core)
+        add_test(NAME metal_kernel COMMAND test_metal_kernel)
+    endif()
 endif()
 
 # Install the public C header

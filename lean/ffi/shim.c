@@ -85,6 +85,24 @@ LEAN_EXPORT lean_obj_res shim_runtime_load_ir(b_lean_obj_arg rt, b_lean_obj_arg 
   return lean_io_result_mk_ok(lean_box(ok));
 }
 
+LEAN_EXPORT lean_obj_res shim_runtime_load_ir_msl(b_lean_obj_arg rt, b_lean_obj_arg ir,
+                                                  b_lean_obj_arg msl, b_lean_obj_arg manifest,
+                                                  lean_obj_arg world) {
+  (void)world;
+  const char *i = lean_string_cstr(ir);
+  const char *g = lean_string_cstr(msl);
+  const char *m = lean_string_cstr(manifest);
+  bool ok = tropical_runtime_load_ir_msl(unwrap(rt), i, strlen(i), g, strlen(g), m, strlen(m));
+  return lean_io_result_mk_ok(lean_box(ok));
+}
+
+LEAN_EXPORT lean_obj_res shim_runtime_set_sample_index(b_lean_obj_arg rt, uint64_t idx,
+                                                       lean_obj_arg world) {
+  (void)world;
+  tropical_runtime_set_sample_index(unwrap(rt), idx);
+  return lean_io_result_mk_ok(lean_box(0));
+}
+
 /* In-process IR→wasm (build-time tool). Empty ByteArray signals failure;
    Lean reads tropical_last_error. */
 LEAN_EXPORT lean_obj_res shim_compile_ir_to_wasm(b_lean_obj_arg ir, lean_obj_arg world) {
