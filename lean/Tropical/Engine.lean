@@ -12,6 +12,7 @@ import Tropical.Ir.Strata
 import Tropical.Ir.Core
 import Tropical.Ir.WireProgram
 import Tropical.Ir.EmitLlvm
+import Tropical.Ir.EmitMsl
 import Tropical.TypeArgs
 import Tropical.Compile
 import Tropical.Entries
@@ -45,6 +46,10 @@ structure Env where
       reads from it; param slots are driven on it. -/
   runtime : Ffi.Runtime
   dac     : IO.Ref (Option Ffi.Dac)
+  /-- `TROPICAL_BACKEND=metal` at boot: every session compile dual-loads
+      (LLVM IR → JIT + MSL → GPU pipeline) and audio dispatches on Metal.
+      The JIT keeps serving render_window/the scope either way. -/
+  metalBackend : Bool := false
 
 -- Reserved audio-output boundary leaf.
 private def dacName : String := "dac"
@@ -219,6 +224,21 @@ def buildKernelIr (plan : Tropical.Plan.FlatPlan) : EngineM (String × String) :
     | .error msg => internalError s!"EmitLlvm: {msg}"
     | .ok s => pure s
   pure (ir, planJson)
+
+/-- Emit the plan's kernel artifacts and load them into the runtime: LLVM
+    IR always; on the metal backend also the MSL kernel, dual-loaded (audio
+    on the GPU, render_window/the scope on the JIT). Any emit failure
+    errors BEFORE the load, so the previous kernel keeps playing — the
+    same recoverable contract as the IR path. -/
+def loadKernel (env : Env) (plan : Tropical.Plan.FlatPlan) : EngineM Unit := do
+  let (ir, planJson) ← buildKernelIr plan
+  if env.metalBackend then
+    let msl ← match Tropical.Ir.EmitMsl.emitKernel plan with
+      | .error msg => internalError s!"EmitMsl: {msg}"
+      | .ok s => pure s
+    env.runtime.loadIrMsl ir msl planJson
+  else
+    env.runtime.loadIr ir planJson
 
 -- ── Snapshot compile (`wire()` in TS) ────────────────────────────────────────
 
@@ -564,10 +584,9 @@ def syncCompile (env : Env) : EngineM Unit := do
       arena := rootArena } with
     | .error msg => internalError msg
     | .ok p => pure p
-  -- Lean owns codegen: emit LLVM IR from the in-memory plan and hand it to
-  -- the engine (planJson is the metadata manifest). No C++ plan compiler.
-  let (ir, planJson) ← buildKernelIr plan
-  env.runtime.loadIr ir planJson
+  -- Lean owns codegen: emit the kernel artifacts from the in-memory plan
+  -- and hand them to the engine (planJson is the metadata manifest).
+  loadKernel env plan
 
 /-- Harness-only (diffcli `compile`): rebuild the plan from the current
     mirror at an arbitrary compilation mode, WITHOUT loading it or
@@ -2147,8 +2166,7 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
   let (plan, taps) ← match ← Tropical.Playground.compilePlan args with
     | .error e => internalError e
     | .ok p => pure p
-  let (ir, planJson) ← buildKernelIr plan
-  env.runtime.loadIr ir planJson
+  loadKernel env plan
   -- Seed the session param mirror with the graph's knobs so `set_param` — which
   -- guards on the mirror, then drives the live `param:<name>` slot — reaches them
   -- without a relower. Replaces (not appends): the mirror tracks the current graph.
@@ -2223,7 +2241,8 @@ def boot : IO Env := do
   let state ← IO.mkRef ({} : SessionSt)
   let runtime ← Ffi.Runtime.new 512
   let dac ← IO.mkRef (none : Option Ffi.Dac)
-  let env : Env := { state, runtime, dac }
+  let metalBackend := (← IO.getEnv "TROPICAL_BACKEND") == some "metal"
+  let env : Env := { state, runtime, dac, metalBackend }
   let manifestText ← IO.FS.readFile "stdlib/parsed/manifest.json"
   let names ← match Json.parse manifestText with
     | .error e => throw <| IO.userError s!"stdlib/parsed/manifest.json: {e}"

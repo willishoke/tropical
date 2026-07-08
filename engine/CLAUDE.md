@@ -65,6 +65,28 @@ Execution container with two `KernelState` slots for lock-free hot-swap.
 
 **Fade control**: `begin_fade_in()` / `begin_fade_out()` set atomic counters decremented per sample.
 
+## Metal backend (`metal/`, TROPICAL_METAL builds)
+
+`MetalKernel` (ObjC++ behind a pure-C++ header) executes the fused kernel on
+the GPU: MSL emitted by Lean (`EmitMsl`), compiled at runtime
+(`newLibraryWithSource`, `MTLMathModeSafe`), one thread per sample,
+synchronous per-block dispatch. It rides inside `KernelState` — the existing
+double-buffered publish/flip is the hot-swap; `sample_index` carries over as
+usual. Loads are DUAL (`load_ir_msl`): the JIT always compiles too and keeps
+serving `render_window` (the scope) and the f64 reference; only `process()`
+dispatches to Metal. Slots stay f64 host-side, snapshotted to f32 at encode.
+
+Enable per session with `TROPICAL_BACKEND=metal` (read at engine boot).
+Correctness: `tests/web/metal_vs_jit.test.ts` (SNR vs the f64 JIT — f32
+output quantizes at ~-144 dB, so the gate is ~140 dB SNR flat in τ, not
+bytes) + `engine/tests/test_metal_kernel.cpp` (ctest).
+
+**Known v1 wart:** kernel-WRITTEN port slots are thread-private locals in the
+GPU kernel and never write back to the host slot array, so
+`tropical_runtime_get_slot` on such a slot returns the plan default in Metal
+mode (the CPU kernel would show the last sample's value). Host-written param
+slots are unaffected; the scope reads via `render_window` (JIT) and is exact.
+
 ## Audio output (`dac/TropicalDAC.hpp`)
 
 `TropicalDACImpl<AudioSource>` — templated RtAudio driver. FlatRuntime satisfies the `AudioSource` concept.
