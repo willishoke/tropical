@@ -3,6 +3,7 @@ import Tropical.Engine
 import Tropical.Playground
 import Tropical.Plan
 import Tropical.Ir.EmitLlvm
+import Tropical.Ir.EmitMsl
 import Tropical.PlanDecode
 import Tropical.Parse.Surface.Markdown
 import Tropical.Parse.Raise
@@ -194,6 +195,55 @@ private def runGolden (writeMode : Bool) (name patchPath goldenPath : String) : 
       let expected := firstLine (← IO.FS.readFile goldenPath)
       if got == expected then IO.println s!"  PASS  {name}  {got.take 16}"; pure true
       else IO.println s!"  FAIL  {name}  expected {expected.take 16} got {got.take 16}"; pure false
+
+/-- Compile a patch and emit its Metal kernel source (the EmitMsl path). -/
+private def emitMslOf (patchPath : String) : IO (Except String String) := do
+  match ← compilePatch patchPath .fused with
+  | .error e => pure (.error e)
+  | .ok planJson =>
+    match Lean.Json.parse planJson with
+    | .error e => pure (.error s!"parse: {e}")
+    | .ok j =>
+      match Tropical.Plan.FlatPlan.ofWire j with
+      | .error e => pure (.error s!"ofWire: {e}")
+      | .ok plan => pure (Tropical.Ir.EmitMsl.emitKernel plan)
+
+/-- MSL GOLDEN: the emitted Metal kernel text for a patch, frozen under
+    `tests/golden/msl/<name>.metal`. Text-frozen (like the IR philosophy:
+    emitter changes must be deliberate re-freezes, never drift), and it
+    carries the folded i64 landing constants — the byte-exactness claim
+    for the integer datapath on the GPU lives in this text. -/
+private def runMslGolden (writeMode : Bool) (name patchPath : String) : IO Bool := do
+  let goldenPath := s!"tests/golden/msl/{name}.metal"
+  match ← emitMslOf patchPath with
+  | .error e => IO.println s!"  FAIL  msl-golden/{name}  {firstLine e}"; pure false
+  | .ok msl =>
+    if writeMode then
+      IO.FS.writeFile goldenPath msl
+      IO.println s!"  WROTE msl-golden/{name}  ({msl.length}B)"; pure true
+    else
+      match ← (try (pure (some (← IO.FS.readFile goldenPath))) catch _ => pure none) with
+      | none => IO.println s!"  FAIL  msl-golden/{name}  missing {goldenPath} (run --write)"; pure false
+      | some expected =>
+        if msl == expected then
+          IO.println s!"  PASS  msl-golden/{name}  ({msl.length}B, text-frozen)"; pure true
+        else
+          IO.println s!"  FAIL  msl-golden/{name}  emitted MSL differs from frozen ({msl.length}B vs {expected.length}B)"; pure false
+
+/-- THE FOLD gate: EmitMsl's emit-time f64 constant folding must land the
+    LITERAL-frequency phase increment as the exact i64 the CPU computes —
+    `toInt(440·2³²/44100)` evaluated here in f64, asserted present in the
+    emitted text as a `long` literal. This is the byte-exact-phase claim
+    for literal patches on the f32 GPU (design/fixed-carrier.md). -/
+private def runMslFold : IO Bool := do
+  let expected : Int := Int.ofNat ((440.0 * 4294967296.0 / 44100.0).toUInt64.toNat)
+  match ← emitMslOf "web/patches/pure-sine-440.json" with
+  | .error e => IO.println s!"  FAIL  msl-fold  {firstLine e}"; pure false
+  | .ok msl =>
+    if (msl.splitOn s!"{expected}L").length > 1 then
+      IO.println s!"  PASS  msl-fold  literal landing folded in f64: increment {expected} present as i64 in the kernel"; pure true
+    else
+      IO.println s!"  FAIL  msl-fold  expected folded increment {expected}L not found in emitted MSL"; pure false
 
 /-- A golden whose expected hash is supplied inline (migration fixtures, whose
     hash lives inside a JSON record — read-only). -/
@@ -2568,6 +2618,17 @@ def main (args : List String) : IO UInt32 := do
     if ← System.FilePath.pathExists patchPath then
       total := total + 1
       if !(← runGolden writeMode name patchPath s!"tests/golden/cf/{name}.hash") then failed := failed + 1
+
+  -- ── (f′) MSL emitter goldens: the Metal backend's codegen, text-frozen ─────
+  IO.println "msl emitter (EmitMsl text-frozen + the f64 fold):"
+  for (name, patchPath) in [
+      ("pure-sine-440", "web/patches/pure-sine-440.json"),
+      ("tz-flanger", "web/patches/tz-flanger.json"),
+      ("reverse_reverb", "patches/reverse_reverb.json")] do
+    total := total + 1
+    if !(← runMslGolden writeMode name patchPath) then failed := failed + 1
+  total := total + 1
+  if !(← runMslFold) then failed := failed + 1
 
   -- ── (g) CF-only enforcement: cfOnly strata mode rejects per-sample state ───
   IO.println "cf-only enforcement (reg/next unrepresentable):"
