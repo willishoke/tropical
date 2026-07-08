@@ -88,6 +88,22 @@ def Runtime.loadIr (rt : Runtime) (irText : String) (manifestJson : String) : IO
   if !(← rt.loadIrRaw irText manifestJson) then
     throw <| IO.userError s!"runtime loadIr failed: {← lastError}"
 
+@[extern "shim_runtime_load_ir_msl"]
+opaque Runtime.loadIrMslRaw (rt : @& Runtime) (irText : @& String) (mslSource : @& String)
+    (manifestJson : @& String) : IO Bool
+
+/-- Dual load: LLVM IR → JIT (always) and MSL → the Metal compute pipeline
+    (audio path; requires libtropical built with `TROPICAL_METAL` when
+    `mslSource` is non-empty). Same hot-swap publish as `loadIr`. -/
+def Runtime.loadIrMsl (rt : Runtime) (irText mslSource manifestJson : String) : IO Unit := do
+  if !(← rt.loadIrMslRaw irText mslSource manifestJson) then
+    throw <| IO.userError s!"runtime loadIrMsl failed: {← lastError}"
+
+/-- Control-plane/test-only: reposition the active kernel's sample clock
+    (render verbs' `--start`). -/
+@[extern "shim_runtime_set_sample_index"]
+opaque Runtime.setSampleIndex (rt : @& Runtime) (idx : UInt64) : IO Unit
+
 /-- Lower textual LLVM IR (Lean's EmitLlvm output) to a complete wasm32 module,
     in-process via the engine's LLVM + lld. Build-time only — requires
     libtropical built with `TROPICAL_WASM_EMIT`. Empty result ⇒ throw. -/

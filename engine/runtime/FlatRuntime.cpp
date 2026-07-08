@@ -1,6 +1,10 @@
 #include "runtime/FlatRuntime.hpp"
 #include "runtime/NumericProgramParser.hpp"
 
+#ifdef TROPICAL_METAL
+#include "metal/MetalKernel.hpp"
+#endif
+
 #include <algorithm>
 #include <bit>
 #include <stdexcept>
@@ -110,6 +114,56 @@ bool FlatRuntime::load_ir(const std::string & ir_text, const std::string & manif
     throw std::runtime_error("FlatRuntime: IR JIT compilation failed: " + err);
   }
   new_state.kernel = *kernel_result;
+
+  return publish_state(std::move(new_state));
+}
+
+bool FlatRuntime::load_ir_msl(const std::string & ir_text,
+                              const std::string & msl_source,
+                              const std::string & manifest_json)
+{
+  using json = nlohmann::json;
+
+  const json manifest = json::parse(manifest_json);
+  const std::string schema = manifest.value("schema", std::string{});
+
+  tropical_plan5::ParsedPlan5 parsed;
+  if (schema == "tropical_plan_5")
+    parsed = tropical_plan5::parse_plan5(manifest);
+  else if (schema == "tropical_plan_4")
+    parsed = tropical_plan5::parse_plan4(manifest);
+  else
+    throw std::runtime_error("FlatRuntime: load_ir_msl unsupported manifest schema '" + schema + "'");
+
+  KernelState new_state = build_kernel_state(parsed);
+  new_state.mode = tropical_jit::CompilationMode::Fused;
+
+  // The JIT kernel loads ALWAYS — it keeps serving render_window (the
+  // scope) and the correctness reference even when audio runs on Metal.
+  auto kernel_result = tropical_jit::OrcJitEngine::instance().compile_ir_text(ir_text);
+  if (!kernel_result)
+  {
+    std::string err;
+    llvm::handleAllErrors(kernel_result.takeError(),
+      [&err](const llvm::ErrorInfoBase & e) { err = e.message(); });
+    throw std::runtime_error("FlatRuntime: IR JIT compilation failed: " + err);
+  }
+  new_state.kernel = *kernel_result;
+
+  if (!msl_source.empty())
+  {
+#ifdef TROPICAL_METAL
+    std::string err;
+    new_state.metal = tropical_metal::create(
+      msl_source, buffer_length_,
+      static_cast<uint32_t>(new_state.slots.size()), err);
+    if (!new_state.metal)
+      throw std::runtime_error("FlatRuntime: " + err);
+#else
+    throw std::runtime_error(
+      "FlatRuntime: MSL source supplied but the engine was built without TROPICAL_METAL");
+#endif
+  }
 
   return publish_state(std::move(new_state));
 }

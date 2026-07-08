@@ -7,6 +7,7 @@ import Tropical.Ir.Strata
 import Tropical.Ir.Core
 import Tropical.Ir.CompileResolved
 import Tropical.Ir.EmitLlvm
+import Tropical.Ir.EmitMsl
 import Tropical.PlanDecode
 import Tropical.Engine
 import Tropical.Parse.Surface.Markdown
@@ -72,10 +73,11 @@ def parseNatFlag (args : List String) (flag : String) (default : Nat) : Nat :=
 
 def renderBytes (args : List String) : IO UInt32 := do
   let some planPath := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
-    | IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]"
+    | IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N] [--start S]"
       return 1
   let frames := parseNatFlag args "--frames" 16
   let buffer := parseNatFlag args "--buffer" 256
+  let start := parseNatFlag args "--start" 0
   let planJson ← IO.FS.readFile planPath
   -- Lean owns codegen: parse the plan, emit IR, load via load_ir (planJson
   -- doubles as the metadata manifest). There is no C++ plan compiler.
@@ -89,6 +91,41 @@ def renderBytes (args : List String) : IO UInt32 := do
     | .error e => IO.eprintln s!"render-bytes: emitKernel: {e}"; return 1
   let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
   rt.loadIr ir planJson
+  if start != 0 then rt.setSampleIndex start.toUInt64
+  let stdout ← IO.getStdout
+  for _ in [0:frames] do
+    rt.process
+    stdout.write (← rt.outputBytes)
+  stdout.flush
+  return 0
+
+/-- `diffcli render-metal <plan.json>` — render through the METAL backend
+    (EmitMsl → load_ir_msl → GPU dispatch per block), same byte protocol as
+    `render-bytes`. The f64 JIT is dual-loaded but the output comes from the
+    f32 GPU kernel — this is the device-under-test side of `metal_vs_jit`.
+    Requires libtropical built with TROPICAL_METAL. Always sync dispatch. -/
+def renderMetal (args : List String) : IO UInt32 := do
+  let some planPath := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
+    | IO.eprintln "usage: diffcli render-metal <plan.json> [--frames N] [--buffer N] [--start S]"
+      return 1
+  let frames := parseNatFlag args "--frames" 16
+  let buffer := parseNatFlag args "--buffer" 256
+  let start := parseNatFlag args "--start" 0
+  let planJson ← IO.FS.readFile planPath
+  let plan ← match Lean.Json.parse planJson with
+    | .error e => IO.eprintln s!"render-metal: parse: {e}"; return 1
+    | .ok j => match Tropical.Plan.FlatPlan.ofWire j with
+      | .error e => IO.eprintln s!"render-metal: ofWire: {e}"; return 1
+      | .ok p => pure p
+  let ir ← match Tropical.Ir.EmitLlvm.emitKernel plan with
+    | .ok s => pure s
+    | .error e => IO.eprintln s!"render-metal: emitKernel: {e}"; return 1
+  let msl ← match Tropical.Ir.EmitMsl.emitKernel plan with
+    | .ok s => pure s
+    | .error e => IO.eprintln s!"render-metal: emitKernel (msl): {e}"; return 1
+  let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
+  rt.loadIrMsl ir msl planJson
+  if start != 0 then rt.setSampleIndex start.toUInt64
   let stdout ← IO.getStdout
   for _ in [0:frames] do
     rt.process
@@ -601,6 +638,20 @@ def emitIrVerb (args : List String) : IO UInt32 := do
     | .error e => IO.eprintln s!"emitKernel: {e}"; return 1
     | .ok ir => IO.println ir; return 0
 
+/-- `diffcli emit-msl <patch.json>` → the Lean-emitted Metal Shading
+    Language kernel on stdout (the Metal backend's codegen; sibling of
+    `emit-ir`). Sanity compile-check without any engine:
+    `diffcli emit-msl p.json | xcrun -sdk macosx metal -x metal -c -o /dev/null -`. -/
+def emitMslVerb (args : List String) : IO UInt32 := do
+  let some patch := args.find? (fun a => !a.startsWith "--")
+    | IO.eprintln "usage: diffcli emit-msl <patch.json>"; return 1
+  match ← compileToFlatPlan patch with
+  | .error e => IO.eprintln e; return 1
+  | .ok plan =>
+    match Tropical.Ir.EmitMsl.emitKernel plan with
+    | .error e => IO.eprintln s!"emitKernel (msl): {e}"; return 1
+    | .ok msl => IO.println msl; return 0
+
 /-- `diffcli compile-wasm <patch.json> --out <out.wasm>` → a complete wasm32
     module, emitted in-process (Lean IR → engine LLVM+lld, no subprocess). The
     plan_5 JSON from `diffcli compile` serves as the browser-side manifest. -/
@@ -623,7 +674,9 @@ def compileWasmVerb (args : List String) : IO UInt32 := do
 def main (args : List String) : IO UInt32 := do
   match args with
   | "render-bytes" :: rest => renderBytes rest
+  | "render-metal" :: rest => renderMetal rest
   | "emit-ir" :: rest => emitIrVerb rest
+  | "emit-msl" :: rest => emitMslVerb rest
   | "compile-wasm" :: rest => compileWasmVerb rest
   | "raise" :: rest => raiseVerb rest
   | "parsed-roundtrip" :: rest => parsedRoundtripVerb rest

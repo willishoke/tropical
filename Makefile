@@ -13,13 +13,15 @@ build:
 	cmake -S $(ROOT) -B $(BUILD_DIR) \
 		-DTROPICAL_BUILD_PYTHON=ON \
 		-DTROPICAL_WASM_EMIT=ON \
+		-DTROPICAL_METAL=ON \
 		-DLLVM_DIR=$(LLVM_DIR) \
 		$(EXTRA_CMAKE_ARGS)
 	cmake --build $(BUILD_DIR) -j$(JOBS)
 # TROPICAL_WASM_EMIT=ON links the WebAssembly backend + lld so `diffcli
 # compile-wasm` (the web build) works out of the box; requires `brew install
-# lld`. The CMake default is OFF, so a slim release build (no lld) is just
-# `cmake ... -DTROPICAL_WASM_EMIT=OFF` via EXTRA_CMAKE_ARGS.
+# lld`. TROPICAL_METAL=ON builds the GPU backend (macOS only; runtime MSL
+# compile, no Xcode needed). The CMake defaults are OFF, so a slim build is
+# `cmake ... -DTROPICAL_WASM_EMIT=OFF -DTROPICAL_METAL=OFF` via EXTRA_CMAKE_ARGS.
 
 repl: build
 	PYTHONPATH=$(BUILD_DIR) $(PYTHON)

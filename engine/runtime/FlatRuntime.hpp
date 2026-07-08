@@ -15,13 +15,19 @@
 #include <atomic>
 #include <bit>
 #include <cstdint>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+#ifdef TROPICAL_METAL
+#include "metal/MetalKernel.hpp"
+#endif
+
 namespace tropical_plan5 { struct ParsedPlan5; }
+namespace tropical_metal { struct MetalKernel; }
 
 namespace tropical_runtime
 {
@@ -40,6 +46,14 @@ struct ParamDiscipline
 
 struct KernelState
 {
+  // ── Metal execution backend (TROPICAL_METAL builds) ─────────────────────
+  // When set, process() dispatches this instead of the JIT fn-ptr — the
+  // kernel runs on the GPU, one thread per sample. Dual-loaded next to the
+  // JIT kernel (which keeps serving render_window / the scope), and swapped
+  // by the same publish/flip as everything else in this state. shared_ptr
+  // over an incomplete type: non-Metal builds never construct one.
+  std::shared_ptr<tropical_metal::MetalKernel> metal;
+
   // ── Execution mode + kernel handles ──────────────────────────────────────
   // Fused mode populates `kernel` (single NumericKernelFn). Microkernel
   // mode populates `microkernels` (preamble, N instance kernels,
@@ -119,6 +133,27 @@ public:
   bool load_ir(const std::string & ir_text, const std::string & manifest_json);
 
   /**
+   * Load a kernel DUAL: LLVM IR → JIT (always — render_window, the scope,
+   * and the goldens stay on the CPU kernel) and MSL → Metal pipeline (the
+   * audio path, when built with TROPICAL_METAL; throws otherwise when
+   * `msl_source` is non-empty). Same manifest contract as load_ir; the
+   * same publish/flip hot-swap covers both artifacts.
+   */
+  bool load_ir_msl(const std::string & ir_text, const std::string & msl_source,
+                   const std::string & manifest_json);
+
+  /**
+   * Control-plane/test-only: reposition the active kernel's sample clock
+   * (the `--start` of render verbs — long-τ gates render windows at
+   * arbitrary positions). Serialized against hot-swap.
+   */
+  void set_sample_index(uint64_t idx)
+  {
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    states_[active_state_.load(std::memory_order_acquire)].sample_index = idx;
+  }
+
+  /**
    * Process one buffer of audio. Called from the audio thread.
    * Fills outputBuffer with buffer_length_ samples.
    */
@@ -149,6 +184,21 @@ public:
 
     if (state.mode == tropical_jit::CompilationMode::Fused)
     {
+#ifdef TROPICAL_METAL
+      if (state.metal)
+      {
+        // GPU path: one thread per sample, synchronous per-block dispatch
+        // (v1). On a dispatch error, fall through to silence — the JIT
+        // kernel stays authoritative for render_window either way.
+        if (!tropical_metal::process_block(
+              *state.metal,
+              state.slots.data(), static_cast<uint32_t>(state.slots.size()),
+              state.sample_rate, state.sample_index,
+              outputBuffer.data(), buffer_length_))
+          std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);
+      }
+      else
+#endif
       // Single kernel call processes the entire buffer.
       state.kernel(
         nullptr,                       // no inputs (all embedded in expressions)

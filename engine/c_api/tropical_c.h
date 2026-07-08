@@ -85,6 +85,17 @@ void             tropical_runtime_free(tropical_runtime_t);
    the C++ plan compiler was retired in Phase 2. Always fused. */
 bool             tropical_runtime_load_ir(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* manifest_json, size_t manifest_len);
 
+/* Dual load: LLVM IR -> JIT (always; render_window + the correctness
+   reference stay on CPU) and MSL -> Metal compute pipeline (the audio path;
+   TROPICAL_METAL builds only -- fails with tropical_last_error otherwise
+   when msl is non-empty). Same manifest contract as load_ir; the same
+   double-buffered publish covers both artifacts (hot-swap preserved). */
+bool             tropical_runtime_load_ir_msl(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* manifest_json, size_t manifest_len);
+
+/* Control-plane/test-only: reposition the active kernel's sample clock
+   (render verbs' --start; long-tau gates render at arbitrary positions). */
+void             tropical_runtime_set_sample_index(tropical_runtime_t, uint64_t idx);
+
 /* ---------- Build-time IR→wasm (TROPICAL_WASM_EMIT builds only) ----------
    Lower Lean's LLVM IR to a complete wasm32 module, fully in-process (wasm32
    TargetMachine + lld-as-a-library — no subprocess). Returns a malloc'd buffer
