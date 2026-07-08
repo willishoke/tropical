@@ -2045,6 +2045,109 @@ private def runModalLive (arena : Arena)
     | .error e, _ => IO.println s!"  FAIL  modal-live  toWire: {firstLine e}"; pure false
     | _, .error e => IO.println s!"  FAIL  modal-live  emitKernel: {firstLine e}"; pure false
 
+/-- Build the resonator → filter → out patch graph as Json. -/
+private def filterPatchJson (fc : Int) (resM : Int) (resE : Nat) (srcF srcDecay : Int) : Lean.Json :=
+  let node := fun (id kind : String) (params : List (String × Lean.Json))
+                  (ins : List (String × Lean.Json)) =>
+    Lean.Json.mkObj <|
+      [("id", Lean.Json.str id), ("kind", Lean.Json.str kind),
+       ("params", Lean.Json.mkObj params)] ++
+      (if ins.isEmpty then [] else [("in", Lean.Json.mkObj ins)])
+  Lean.Json.mkObj [
+    ("nodes", Lean.Json.arr #[
+      node "res" "resonator" [("freq", Lean.Json.num (jn srcF)), ("decay", Lean.Json.num (jn srcDecay))] [],
+      node "flt" "filter" [("cutoff", Lean.Json.num (jn fc)), ("resonance", Lean.Json.num (jn resM resE))]
+        [("in", Lean.Json.arr #[Lean.Json.str "res"])],
+      node "out" "out" [] [("in", Lean.Json.arr #[Lean.Json.str "flt"])]]),
+    ("out", Lean.Json.str "out")]
+
+private def renderFilterPatch (arena : Arena) (resolved : Array (String × ProgramIdx))
+    (j : Lean.Json) (n : Nat) : IO (Except String (Array Float)) := do
+  match Tropical.Playground.compilePlanPure arena resolved j with
+  | .error e => pure (.error s!"compile: {firstLine e}")
+  | .ok (plan, _) =>
+    match ← renderPlanSamples plan n with
+    | .error e => pure (.error s!"render: {firstLine e}")
+    | .ok samples => pure (.ok samples)
+
+private def tailEnergy (xs : Array Float) (lo : Nat) : Float := Id.run do
+  let mut acc : Float := 0.0
+  for i in [lo:xs.size] do
+    acc := acc + xs[i]! * xs[i]!
+  pure acc
+
+/-- THE MODAL FILTER gate (the VCFQ). A `filter` node is a `modalReverb`
+    whose room is one EXACT conjugate pole pair (`filterPair`), so three
+    behaviors must hold, all through the ordinary graph surface:
+    (A) LOWPASS: the same struck resonator through cutoff=4000 vs cutoff=60
+        loses most of its energy (the composition's forced modes carry
+        `a·H(λ)`, and |H| is small far above fc).
+    (B) THE PING: with a fast-dying excitation and resonance at the top of
+        the knob (Q ≈ 44), the tail is the FILTER ringing at ω_d ≈ 2π·fc —
+        zero-crossing rate within 3% of fc. This is the Serge character the
+        node exists for: high resonance IS a struck resonator.
+    (C) LIVE: cutoff is a glided live knob — writing its glide endpoints
+        (#v0/#v1) diverges the output vs an untouched twin, THROUGH the
+        composition (no relower, no dead knob). -/
+private def runModalFilter (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  -- (A) lowpass attenuation
+  match ← renderFilterPatch arena resolved (filterPatchJson 4000 3 1 220 4) 4096,
+        ← renderFilterPatch arena resolved (filterPatchJson 60 3 1 220 4) 4096 with
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-filter  (A) {e}"; pure false
+  | .ok openS, .ok closedS =>
+    let eOpen := tailEnergy openS 200
+    let eClosed := tailEnergy closedS 200
+    -- (B) the ping: fast-dying strike at 1800 Hz, filter fc=500 res=1 (Q≈44);
+    -- by half the window the source is gone and the tail is the filter's ring.
+    match ← renderFilterPatch arena resolved (filterPatchJson 500 1 0 1800 60) 8192 with
+    | .error e => IO.println s!"  FAIL  modal-filter  (B) {e}"; pure false
+    | .ok ping =>
+      let mut crossings := 0
+      for i in [4097:8192] do
+        if (ping[i-1]! < 0.0 && ping[i]! >= 0.0) || (ping[i-1]! >= 0.0 && ping[i]! < 0.0) then
+          crossings := crossings + 1
+      let tailSec := (8192.0 - 4097.0) / 44100.0
+      let ringHz := crossings.toFloat / 2.0 / tailSec
+      let eTail := tailEnergy ping 4097
+      -- (C) live cutoff on one of two twin runtimes
+      match Tropical.Playground.compilePlanPure arena resolved (filterPatchJson 800 5 1 220 4) with
+      | .error e => IO.println s!"  FAIL  modal-filter  (C) compile: {firstLine e}"; pure false
+      | .ok (plan, _) =>
+      match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
+      | .ok manifest, .ok ir =>
+        let rt ← Tropical.Ffi.Runtime.new 2048
+        rt.loadIr ir manifest.compress
+        let rt2 ← Tropical.Ffi.Runtime.new 2048
+        rt2.loadIr ir manifest.compress
+        let v0? ← rt.slotIndex? "param:flt.cutoff#v0"
+        let v1? ← rt.slotIndex? "param:flt.cutoff#v1"
+        rt.process; rt2.process
+        if let some v0 := v0? then rt.setSlot v0 60.0
+        if let some v1 := v1? then rt.setSlot v1 60.0
+        rt.process; rt2.process
+        let a := decodeF64LE (← rt.outputBytes)
+        let b := decodeF64LE (← rt2.outputBytes)
+        let mut dE : Float := 0.0
+        let mut e0 : Float := 0.0
+        for i in [0:min a.size b.size] do
+          let d := a[i]! - b[i]!
+          dE := dE + d * d
+          e0 := e0 + b[i]! * b[i]!
+        let slotsPresent := v0?.isSome && v1?.isSome
+        let knobsLive := slotsPresent && dE > 1e-9 * e0 && e0 > 1e-9
+        IO.println s!"        filter = residue-composed conjugate pole pair (H exact); resonator → filter → out:"
+        IO.println s!"        (A) E[cutoff 4kHz]={eOpen} vs E[60Hz]={eClosed} (ratio {eOpen/(eClosed+1e-300)})"
+        IO.println s!"        (B) Q≈44 ping: tail rings at {ringHz} Hz (fc=500, want ±3%), E[tail]={eTail}"
+        IO.println s!"        (C) cutoff glide slots present={slotsPresent} · ΔE/E after move={dE/(e0+1e-300)}"
+        if eOpen > 20.0 * eClosed && eClosed > 0.0 &&
+           ringHz > 485.0 && ringHz < 515.0 && eTail > 1e-8 && knobsLive then
+          IO.println s!"  PASS  modal-filter  lowpass attenuates ({eOpen/(eClosed+1e-300)}x), Q≈44 pings at {ringHz} Hz, cutoff live through the composition"; pure true
+        else
+          IO.println s!"  FAIL  modal-filter  eOpen={eOpen} eClosed={eClosed} ringHz={ringHz} (want 485-515) eTail={eTail} live={knobsLive}"; pure false
+      | .error e, _ | _, .error e =>
+        IO.println s!"  FAIL  modal-filter  (C) emit: {firstLine e}"; pure false
+
 open Tropical.EmitArrow in
 /-- THE MODAL ADDRESS gate. A resonator's `addr` inlet: a patched CF signal BECOMES
     the bank's absolute time-coordinate (`modalAddrWarp`), so the causal gate — the
@@ -2873,6 +2976,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runModalLive arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalFilter arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runModalAddr arena resolved) then
