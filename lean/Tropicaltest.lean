@@ -2629,6 +2629,83 @@ private def runSessionViaArrowEquiv : IO Bool := do
     IO.println s!"  PASS  session-via-arrow  direct root ≡ elaborated root, plan-identical ({matched} patches{if skipped > 0 then s!"; {skipped} non-session skipped" else ""})"
   pure ok
 
+-- ── (h¹⁰) Stage differential: intern-time attribute vs the flow pass ──────────
+-- Phase 1 of the typed stage-0 refactor. The typed side (StageSig at
+-- `intern`, resolved along the partition recursion) must never classify an
+-- instruction LATER than the plan-level flow pass (`Stage0.classify`) — the
+-- flow pass is the trusted reference, and typed ⊑ flow means the attribute
+-- is at least as precise everywhere and wrong nowhere the flow pass can
+-- see. Strictly-earlier divergences are expected in exactly one category —
+-- fold-valued wire crossings the flow pass can't see through (its slot
+-- availability rule stops at the surviving writer) — and are reported, not
+-- failed; Phase 2's byte-identical-audio differential is the semantic gate
+-- on hoisting them.
+private def compilePatchStaged (path : String) :
+    IO (Except String (Tropical.Plan.FlatPlan
+      × Array (Array (Option Tropical.Ir.Stage)))) := do
+  let env ← Tropical.Engine.boot
+  let act : Tropical.EngineM _ := do
+    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str path)])
+    Tropical.Engine.compileMirrorStaged env .fused
+  match ← act.run with
+  | .ok (_, plan, blocks) => pure (.ok (plan, blocks))
+  | .error f => pure (.error f.toJson.compress)
+
+/-- The v1 array/param/input conservatism overlay: the flow pass pins
+    these to s1 at the *instruction* level, so the typed side must be
+    compared under the same placement rule. -/
+private def overlayS1 (i : Tropical.Plan.NInstr) : Bool :=
+  (match i.dst with
+    | .array _ => true | .sessionArray _ => true | _ => false)
+  || i.args.any fun a => match a with
+    | .arrayReg _ | .sessionArrayReg _ | .param _ _ | .input _ _ => true
+    | _ => false
+
+private def runStageDifferential : IO Bool := do
+  let entries ← (System.FilePath.mk "patches").readDir
+  let names := (entries.filterMap fun e =>
+    if e.fileName.endsWith ".json" then some e.fileName else none).qsort (· < ·)
+  let mut ok := true
+  let mut compared := 0
+  let mut skipped := 0
+  let mut unmapped := 0
+  let mut divergent := 0
+  for fn in names do
+    match ← compilePatchStaged s!"patches/{fn}" with
+    | .error _ => skipped := skipped + 1
+    | .ok (plan, typedBlocks) =>
+      let mut flowBlocks : Array (Array Tropical.Plan.NInstr) := #[]
+      for f in plan.instanceFunctions do
+        flowBlocks := flowBlocks ++ Tropical.Ir.Stage0.collectBlocks f
+      if typedBlocks.size != flowBlocks.size then
+        IO.println s!"  FAIL  stage-diff/{fn}  block count: typed {typedBlocks.size}, flow {flowBlocks.size}"
+        ok := false
+        continue
+      let (flowStages, _) := Tropical.Ir.Stage0.classify plan
+      let linear := flowBlocks.flatten
+      let typedLinear := typedBlocks.flatten
+      if typedLinear.size != linear.size || flowStages.size != linear.size then
+        IO.println s!"  FAIL  stage-diff/{fn}  length: typed {typedLinear.size}, instrs {linear.size}, flow {flowStages.size}"
+        ok := false
+        continue
+      for idx in [0:linear.size] do
+        match typedLinear[idx]! with
+        | none => unmapped := unmapped + 1
+        | some t0 =>
+          let t := if overlayS1 linear[idx]! then Tropical.Ir.Stage.s1 else t0
+          let f := flowStages[idx]!
+          if !(t.le f) then
+            IO.println s!"  FAIL  stage-diff/{fn}  instr {idx}: typed {repr t} > flow {repr f} ({linear[idx]!.tag})"
+            ok := false
+          else if t != f then
+            divergent := divergent + 1
+          compared := compared + 1
+  if ok then
+    IO.println (s!"  PASS  stage-diff  typed ⊑ flow over {compared} instructions "
+      ++ s!"({divergent} strictly earlier, {unmapped} unmapped"
+      ++ s!"{if skipped > 0 then s!"; {skipped} non-session skipped" else ""})")
+  pure ok
+
 -- The gate ledger below is one long do-block; its elaboration depth tracks the
 -- gate count, and the default 512 is now too small.
 set_option maxRecDepth 1024 in
@@ -2688,6 +2765,11 @@ def main (args : List String) : IO UInt32 := do
   IO.println "session via direct root (sessionToResolvedRoot ≡ sessionToParsed→elaborate):"
   total := total + 1
   if !(← runSessionViaArrowEquiv) then failed := failed + 1
+
+  -- ── (c″) Stage differential: intern-time attribute ⊑ the flow pass ─────────
+  IO.println "stage differential (typed StageSig vs Stage0 flow classification):"
+  total := total + 1
+  if !(← runStageDifferential) then failed := failed + 1
 
   -- ── (d) let-binding serialization order (ordered-array round-trip) ─────────
   IO.println "let serialization order:"

@@ -607,8 +607,8 @@ def syncCompile (env : Env) : EngineM Unit := do
     known limitation — so plan structure is mode-independent there
     too). Collapses into `syncCompile` at 6f when the sync payload
     retires. -/
-def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
-    EngineM Tropical.Plan.FlatPlan := do
+def buildSessionInput (env : Env) (mode : Tropical.Plan.CompilationMode) :
+    EngineM Tropical.Compile.SessionInput := do
   let st ← env.state.get
   let alloc := Tropical.Lowering.allocate (st.params.map (·.1)) st.instances
   let wiresPost := st.wires
@@ -647,18 +647,32 @@ def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
     let some core := rootCore.registryGet? pname
       | internalError s!"compileMirrorPlan: instance '{n}' program '{pname}' missing from root registry (engine bug)"
     coreInstances := coreInstances.push (n, core)
-  let plan ← match Tropical.Compile.compileSession {
-      instances := coreInstances
-      wiresPost
-      graphOutputs := st.graphOutputs
-      params := st.params
-      alloc
-      root := rootCore
-      arena := rootArena
-      mode } with
-    | .error msg => internalError msg
-    | .ok p => pure p
-  pure plan
+  pure {
+    instances := coreInstances
+    wiresPost
+    graphOutputs := st.graphOutputs
+    params := st.params
+    alloc
+    root := rootCore
+    arena := rootArena
+    mode }
+
+def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
+    EngineM Tropical.Plan.FlatPlan := do
+  let input ← buildSessionInput env mode
+  match Tropical.Compile.compileSession input with
+  | .error msg => internalError msg
+  | .ok p => pure p
+
+/-- The stage-differential entry: the session input, the compiled plan,
+    and the typed per-instruction stages in emit order. -/
+def compileMirrorStaged (env : Env) (mode : Tropical.Plan.CompilationMode) :
+    EngineM (Tropical.Compile.SessionInput × Tropical.Plan.FlatPlan
+      × Array (Array (Option Tropical.Ir.Stage))) := do
+  let input ← buildSessionInput env mode
+  match Tropical.Compile.compileSessionStaged input with
+  | .error msg => internalError msg
+  | .ok (p, blocks) => pure (input, p, blocks)
 
 def compileMirrorPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
     EngineM String := do

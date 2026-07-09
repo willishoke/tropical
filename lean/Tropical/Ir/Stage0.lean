@@ -1,4 +1,5 @@
 import Std.Data.HashMap
+import Tropical.Ir.CoreArena
 import Tropical.Plan
 
 /-!
@@ -88,8 +89,9 @@ deriving Inhabited
 
 /-- Instruction blocks of one instance function in emit order (mirrors
     `EmitLlvm.emitKernelBlock`): preamble, then per child its pre_input
-    block followed recursively by the child's own blocks, then the body. -/
-private partial def collectBlocks (f : InstanceFunction) : Array (Array NInstr) := Id.run do
+    block followed recursively by the child's own blocks, then the body.
+    Public: the stage differential linearizes plans the same way. -/
+partial def collectBlocks (f : InstanceFunction) : Array (Array NInstr) := Id.run do
   let mut out := #[f.preambleInstructions]
   for child in f.children do
     out := out.push child.preInputInstructions
@@ -117,16 +119,14 @@ private partial def rebuildFn (f : InstanceFunction) (blocks : Array (Array NIns
 -- Analysis — one forward pass in emit order
 -- ─────────────────────────────────────────────────────────────
 
-private inductive Stage where
-  | fold | s0 | s1
-deriving BEq, Inhabited
-
-private def Stage.join : Stage → Stage → Stage
-  | .s1, _ | _, .s1 => .s1
-  | .s0, _ | _, .s0 => .s0
-  | .fold, .fold => .fold
+-- `Stage` (fold < s0 < s1) and `Stage.join` are the shared binding-time
+-- type from `Tropical.Ir.CoreArena` — the same lattice the intern-time
+-- attribute uses, so this pass's flow-derived classification and the
+-- typed signature resolution are directly comparable.
 
 private structure Analysis where
+  /-- Per linear instruction index: the value's binding-time stage. -/
+  stages : Array Stage
   /-- Per linear instruction index: moves to the coefficient stream. -/
   hoisted : Array Bool
   /-- Fold-stage def sites the coefficient stream needs a duplicate of
@@ -272,7 +272,17 @@ private def analyze (plan : FlatPlan) (blocks : Array (Array NInstr)) : Analysis
       let some (t, ty) := defMeta[d]!
         | panic! "Stage0: boundary def is not a temp def"
       boundary := boundary.push (d, t, ty)
-  return { hoisted, needFold, boundary, rewrites }
+  return { stages, hoisted, needFold, boundary, rewrites }
+
+/-- The flow-derived classification, exposed for the stage differential:
+    per linear instruction (the `collectBlocks` emit-order walk), its
+    value stage and whether this pass hoists it. -/
+def classify (plan : FlatPlan) : Array Stage × Array Bool := Id.run do
+  let mut allBlocks : Array (Array NInstr) := #[]
+  for f in plan.instanceFunctions do
+    allBlocks := allBlocks ++ collectBlocks f
+  let a := analyze plan allBlocks
+  return (a.stages, a.hoisted)
 
 -- ─────────────────────────────────────────────────────────────
 -- Split

@@ -1,5 +1,6 @@
 import Lean.Data.Json
 import Tropical.Parse.Nodes
+import Tropical.Ir.CoreArena
 
 /-!
 # Plan layer — `tropical_plan_5` as a type (Phase 6 stage 6a)
@@ -182,6 +183,11 @@ structure PerInstancePlan where
   /-- Per-output-port temp indices (local; the session compiler shifts). -/
   outputTargets : Array Nat
   arraySlotNames : Array String
+  /-- Staging metadata, parallel to `instructions` / `perChildPreInput`:
+      the binding-time stage of the node each instruction was emitted
+      for (typed stage-0 refactor Phase 1). Never serialized. -/
+  instrStages : Array (Option Tropical.Ir.Stage) := #[]
+  perChildPreInputStages : Array (Array (Option Tropical.Ir.Stage)) := #[]
 deriving Repr, Inhabited
 
 /-- Wire encoding for the diff-emit gate (the TS side serializes the
