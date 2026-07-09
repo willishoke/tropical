@@ -2225,6 +2225,87 @@ private def runModalLive (arena : Arena)
     | .error e, _ => IO.println s!"  FAIL  modal-live  toWire: {firstLine e}"; pure false
     | _, .error e => IO.println s!"  FAIL  modal-live  emitKernel: {firstLine e}"; pure false
 
+/-- Count instructions matching `pred` across a plan's instance-function tree. -/
+private partial def countInstrsFn (pred : Tropical.Plan.NInstr → Bool) :
+    Tropical.Plan.InstanceFunction → Nat
+  | f => (f.instructions.filter pred).size
+         + f.children.foldl (fun acc c => acc + countInstrsFn pred c) 0
+
+private def countInstrs (pred : Tropical.Plan.NInstr → Bool) (p : Tropical.Plan.FlatPlan) : Nat :=
+  p.instanceFunctions.foldl (fun acc f => acc + countInstrsFn pred f) 0
+
+/-- Array-dst fills (`Pack`/`SetElement` — coefficient columns). `sessionArray`
+    I/O is excluded (still s1). -/
+private def planArrayFills (p : Tropical.Plan.FlatPlan) : Nat :=
+  countInstrs (fun i => match i.dst with | .array _ => true | _ => false) p
+
+/-- Reduce regions (banked mode loops). -/
+private def planReduces (p : Tropical.Plan.FlatPlan) : Nat :=
+  countInstrs (fun i => i.tag == "ReduceBegin") p
+
+/-- THE PER-ARRAY STAGING gate (banks-as-data blocker 3). `modal-live` proves the
+    banked lowering still renders correctly under live knobs; this proves the
+    PAYOFF structurally — with the banked lowering on, a live-param bank's
+    coefficient columns (`Pack` fills) move OUT of the audio kernel and INTO the
+    s0 coefficient kernel, and the audio kernel is left array-fill-free (its
+    in-loop `Index` reads the shared, coeff-filled storage). Adapts to the flag:
+    flag on ⇒ columns hoist; flag off ⇒ unrolled, no columns (no spurious hoist). -/
+private def runBanksStaging (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  -- A bare resonator → out: a UNIFORM (deg-0) forward bank with live freq/decay,
+  -- so with the flag on it banks (a reverb would compose to a possibly-ragged
+  -- bank via residueComposeEC's deg-1 coincident poles — not the payoff we gate).
+  let src := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"res\"]}}],\"out\":\"out\"}"
+  match Lean.Json.parse src with
+  | .error e => IO.println s!"  FAIL  banks-staging  json: {e}"; pure false
+  | .ok j =>
+  match Tropical.Playground.compilePlanPure arena resolved j with
+  | .error e => IO.println s!"  FAIL  banks-staging  compile: {firstLine e}"; pure false
+  | .ok (plan, _, stageBlocks) =>
+    match Tropical.Ir.Stage0.hoistTyped plan stageBlocks with
+    | .error e => IO.println s!"  FAIL  banks-staging  split: {firstLine e}"; pure false
+    | .ok split =>
+      let flagOn := Tropical.EmitArrow.banksTableEnabled
+      let coeffFills := match split.coeff? with | some c => planArrayFills c | none => 0
+      let audioFills := planArrayFills split.audio
+      let reduces := planReduces split.audio
+      -- Correctness: render the SAME banked plan via the TYPED split (live columns
+      -- hoisted to the coeff kernel, audio reads shared array_ptrs) and via the
+      -- FLOW split (arrays stay s1, everything in audio). Byte-identical ⇒
+      -- per-array staging preserves the render (the coeff kernel fills the shared
+      -- coefficient storage the audio kernel reads — run_coeff before buffer 0).
+      let typedBytes ← renderTypedBytes plan stageBlocks
+      match ← renderIrBytes plan with
+      | .error e => IO.println s!"  FAIL  banks-staging  flow render: {firstLine e}"; pure false
+      | .ok flowBytes =>
+        let n := min typedBytes.size flowBytes.size
+        let mut bitDiff := 0
+        for i in [0:n] do
+          if typedBytes[i]! != flowBytes[i]! then bitDiff := bitDiff + 1
+        let mut energy : Float := 0.0
+        for s in decodeF64LE typedBytes do energy := energy + s * s
+        IO.println s!"        resonator→out (live freq/decay), banks-table={flagOn}:"
+        IO.println s!"        result   reduce regions={reduces} · array fills coeff={coeffFills} audio={audioFills} · typed≡flow bitDiff={bitDiff}/{n} · E={energy}"
+        let renderOk := bitDiff == 0 && energy > 1e-6
+        if flagOn then
+          -- The bank loops and its LIVE columns (incr←freq, sigma←decay) hoist to
+          -- the s0 kernel. CONST columns (cre=1/k^1.1, cim=0) stay in audio as fold
+          -- Packs (one instruction each, LICM'd out of the sample loop). A Pack is
+          -- O(1) instructions regardless of K, so the audio kernel is flat in mode
+          -- count; per-array staging moves the LIVE coefficient mass off the audio
+          -- thread. Byte-identity to the flow split proves the shared-array crossing.
+          if reduces > 0 && coeffFills > 0 && renderOk then
+            IO.println s!"  PASS  banks-staging  bank looped ({reduces} region); {coeffFills} live column(s) → s0 kernel via shared array_ptrs; {audioFills} const baked; typed split ≡ flow byte-exact"; pure true
+          else
+            IO.println s!"  FAIL  banks-staging  flag on: reduces={reduces} coeff={coeffFills} renderOk={renderOk}"; pure false
+        else
+          if reduces == 0 && coeffFills == 0 && renderOk then
+            IO.println s!"  PASS  banks-staging  flag off: unrolled bank, no loop/columns, typed ≡ flow byte-exact"; pure true
+          else
+            IO.println s!"  FAIL  banks-staging  flag off: reduces={reduces} coeff={coeffFills} renderOk={renderOk}"; pure false
+
 /-- Build the resonator → filter → out patch graph as Json. -/
 private def filterPatchJson (fc : Int) (resM : Int) (resE : Nat) (srcF srcDecay : Int) : Lean.Json :=
   let node := fun (id kind : String) (params : List (String × Lean.Json))
@@ -3270,6 +3351,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runModalLive arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runBanksStaging arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runModalFilter arena resolved) then

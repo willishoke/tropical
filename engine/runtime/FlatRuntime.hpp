@@ -73,6 +73,21 @@ struct KernelState
   // buffers with a concurrently-running audio kernel is read-only-safe;
   // coefficient slot writes are the same tolerated one-buffer race class as
   // set_slot itself.
+  //
+  // BANKS-AS-DATA (per-array staging): the coefficient kernel also fills shared
+  // COEFFICIENT COLUMNS — `array_ptrs` slots whose fills classified s0 — that the
+  // audio kernel's in-loop `Index` reads (run_coeff and process() share the same
+  // `array_ptrs`; see below). This WIDENS the tolerated one-buffer race from
+  // atomic scalar slots to non-atomic array columns: a torn read during a live
+  // knob move can currently mix a column from generation N with another from N+1
+  // (Brady's cross-column tear). For a static render (goldens / split-equiv /
+  // scope) there is no concurrent writer, so it is exact. The planned consistency
+  // upgrade — before the banks-table lowering becomes the default — is to
+  // DOUBLE-BUFFER the coefficient columns (fill a back buffer, flip one index
+  // word; the kernel hot-swap pattern) so the audio thread always reads one whole
+  // generation, with the columns laid out as array-of-mode-records so any
+  // remaining tear yields WHOLE modes → a valid "fractional-generation" bank (the
+  // modal sum is independent per mode, so a generation blend is a valid bank).
   tropical_jit::NumericKernelFn      coeff_kernel = nullptr;
 
   // Flat buffers passed to kernel (matches NumericKernelFn signature)

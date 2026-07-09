@@ -357,11 +357,18 @@ private def rebuild (plan : FlatPlan) (allBlocks : Array (Array NInstr))
     slotCount := slotBase + a.boundary.size
     slotNames := slotNames
     slotDefaults := slotDefaults }
+  -- If any coefficient-column fill hoisted, the coeff kernel writes shared
+  -- `array_ptrs` storage (banks-as-data), so it needs the array metadata (same
+  -- slot indices as the audio plan — the storage is allocated once from the
+  -- audio plan and both kernels index it). Scalar-only splits keep zero arrays.
+  let coeffUsesArrays := coeffStream.any fun i =>
+    (match i.dst with | .array _ => true | _ => false)
+    || i.args.any fun a => match a with | .arrayReg _ => true | _ => false
   let coeff : FlatPlan := { audio with
     compilationMode := .fused
-    arraySlotNames := #[]
-    arraySlotCount := 0
-    arraySlotSizes := #[]
+    arraySlotNames := if coeffUsesArrays then plan.arraySlotNames else #[]
+    arraySlotCount := if coeffUsesArrays then plan.arraySlotCount else 0
+    arraySlotSizes := if coeffUsesArrays then plan.arraySlotSizes else #[]
     instanceFunctions := #[.mk "coefficient" "coefficient" #[] coeffStream #[]
       0 0 plan.registerCount #[]]
     sinks := #[]
@@ -381,15 +388,21 @@ def hoist (plan : FlatPlan) : Split := Id.run do
 -- Typed placement — the split driven by the intern-time attribute
 -- ─────────────────────────────────────────────────────────────
 
-/-- The v1 conservatism overlay at instruction level: arrays stay
-    per-sample, and the per-program FFI leaves (`param` handles, raw
-    `input` reads) have no control-time evaluator. -/
+/-- The instruction-level conservatism overlay. Kept per-sample regardless of
+    the value stage: the reduce region (the loop runs every sample), SESSION I/O
+    arrays (`sessionArray*` — genuinely per-sample device/wire buffers), the
+    per-program FFI leaves (`param` handles, raw `input` reads, no control-time
+    evaluator), and `loopIdx` (per-iteration). NOT pinned: plain `array`/
+    `arrayReg` — the coefficient columns (banks-as-data). Their stage defers to
+    the value attribute (join of the fills), so an array whose fills are all s0
+    hoists into the coefficient kernel and the audio kernel's in-loop `Index`
+    reads the shared, coefficient-filled storage (`run_coeff` and `process`
+    share `state.array_ptrs`). -/
 private def overlayS1 (i : NInstr) : Bool :=
   i.tag == "ReduceBegin" || i.tag == "ReduceEnd"
-  || (match i.dst with
-    | .array _ => true | .sessionArray _ => true | _ => false)
+  || (match i.dst with | .sessionArray _ => true | _ => false)
   || i.args.any fun a => match a with
-    | .arrayReg _ | .sessionArrayReg _ | .param _ _ | .input _ _ | .loopIdx => true
+    | .sessionArrayReg _ | .param _ _ | .input _ _ | .loopIdx => true
     | _ => false
 
 /-- Placement from the TYPED stages (per linear instruction, the
@@ -406,13 +419,19 @@ private def overlayS1 (i : NInstr) : Bool :=
     since defs precede uses). -/
 private def placementFromStages (blocks : Array (Array NInstr))
     (linStages : Array (Option Stage)) : Except String Analysis := do
-  -- Prepass: per-slot in-plan writers.
+  -- Prepass: per-slot and per-array-slot in-plan writers. An array slot whose
+  -- writers are all hoisted is a coefficient column filled in the coeff kernel
+  -- (banks-as-data); the shared `array_ptrs` storage is the boundary, so no
+  -- `coef:` slot crosses (unlike a scalar temp).
   let mut slotWriters : HashMap Nat (Array Nat) := {}
+  let mut arrayWriters : HashMap Nat (Array Nat) := {}
   let mut flat : Array NInstr := #[]
   for block in blocks do
     for instr in block do
       if let .moduleSlot m := instr.dst then
         slotWriters := slotWriters.insert m ((slotWriters.getD m #[]).push flat.size)
+      if let .array s := instr.dst then
+        arrayWriters := arrayWriters.insert s ((arrayWriters.getD s #[]).push flat.size)
       flat := flat.push instr
   if flat.size != linStages.size then
     throw s!"Stage0.placementFromStages: {flat.size} instructions but {linStages.size} stages"
@@ -457,6 +476,11 @@ private def placementFromStages (blocks : Array (Array NInstr))
       (match instr.dst with
         | .temp _ => true
         | .moduleSlot m => slotWriters.getD m #[] == #[idx]
+        -- A coefficient column: hoistable when THIS instruction is its sole
+        -- writer (a `Pack`, or the last of a fully-s0 `SetElement` group — the
+        -- group hoists together via the forward availability walk). The audio
+        -- kernel's `Index` reads the coeff-filled shared array; no `coef:` slot.
+        | .array s => arrayWriters.getD s #[] == #[idx]
         | _ => false)
     if hoist then
       dupSeeds := dupSeeds ++ seeds
