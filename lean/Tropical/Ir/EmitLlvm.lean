@@ -75,9 +75,17 @@ deriving Inhabited
 structure St where
   next : Nat := 0
   lines : Array String := #[]
-  /-- Global temp slot → the scalar type last written there (mirrors the
-      C++ `temp_types` table; read when a `reg` operand resolves). -/
-  tempTypes : Std.HashMap Nat ScalarType := {}
+  /-- Global temp slot → the SSA value last written there. Temps are pure
+      intra-call scratch in the fused kernel (sinks read module slots; the
+      runtime never reads `%temps` back), so instruction results stay SSA
+      values instead of round-tripping through the `%temps` array — the
+      same shape EmitMsl uses (typed locals). This is what keeps the
+      one-block kernel free of tens of thousands of escaping stores that
+      LLVM's machine scheduler and regalloc otherwise choke on. A `reg`
+      read with no prior write falls back to loading `%temps` (the
+      runtime zero-initializes it), preserving graceful-exclusion
+      semantics. -/
+  tempVals : Std.HashMap Nat TVal := {}
   sources : Array SourceKind := #[]
   /-- Label of the basic block currently being emitted into. Starts at
       `loop_body`; array ops (SetElement / elementwise) open new blocks,
@@ -119,7 +127,9 @@ def coerceF64 (v : TVal) : M String := do pure (← coerce v .float).ref
 -- Loads / stores (mirror the gep_temp / load_*_typed / slot helpers)
 -- ─────────────────────────────────────────────────────────────
 
-/-- Load `temps[slot]` (i64-backed) as the given type. -/
+/-- Load `temps[slot]` (i64-backed) as the given type — the fallback for a
+    `reg` read with no prior write this kernel (reads the runtime's
+    zero-initialized scratch, preserving graceful-exclusion semantics). -/
 def loadTempTyped (slot : Nat) (ty : ScalarType) : M TVal := do
   let g ← fresh; line s!"{g} = getelementptr inbounds i64, ptr %temps, i64 {slot}"
   let raw ← fresh; line s!"{raw} = load i64, ptr {g}, align 8"
@@ -128,16 +138,13 @@ def loadTempTyped (slot : Nat) (ty : ScalarType) : M TVal := do
   | .float => let b ← fresh; line s!"{b} = bitcast i64 {raw} to double"; pure ⟨b, .float⟩
   | .bool => let b ← fresh; line s!"{b} = trunc i64 {raw} to i1"; pure ⟨b, .bool⟩
 
-/-- Store a typed value into `temps[slot]` (i64-backed) and record its
-    type for later `reg` reads. -/
+/-- Record a temp write as an SSA value for later `reg` reads. Emits no
+    store: temps are intra-call scratch in the fused kernel, and every
+    block the emitter opens falls through, so an earlier def dominates
+    every later use. (The old store/load round-trip was bitcast-exact, so
+    handing back the same TVal is bit-identical.) -/
 def storeTempTyped (slot : Nat) (v : TVal) : M Unit := do
-  let asI64 ← match v.ty with
-    | .int => pure v.ref
-    | .float => let b ← fresh; line s!"{b} = bitcast double {v.ref} to i64"; pure b
-    | .bool => let b ← fresh; line s!"{b} = zext i1 {v.ref} to i64"; pure b
-  let g ← fresh; line s!"{g} = getelementptr inbounds i64, ptr %temps, i64 {slot}"
-  line s!"store i64 {asI64}, ptr {g}, align 8"
-  modify fun s => { s with tempTypes := s.tempTypes.insert slot v.ty }
+  modify fun s => { s with tempVals := s.tempVals.insert slot v }
 
 def loadSlotF64 (idx : Nat) : M String := do
   let g ← fresh; line s!"{g} = getelementptr inbounds double, ptr %slots, i64 {idx}"
@@ -184,8 +191,9 @@ def resolveOperand : NOperand → M TVal
     | .bool => pure ⟨if jnToInt v != 0 then "true" else "false", .bool⟩
     | .float => pure ⟨f64Lit v.toFloat, .float⟩
   | .reg slot _ => do
-    let ty := (← get).tempTypes.getD slot .float
-    loadTempTyped slot ty
+    match (← get).tempVals.get? slot with
+    | some v => pure v
+    | none => loadTempTyped slot .float
   | .source idx _ => do
     let srcs := (← get).sources
     match srcs[idx]? with

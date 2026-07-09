@@ -92,18 +92,59 @@ deriving Repr, Inhabited
 /-- A clock-as-value expression (Q32.32 fixed-point sample coordinate). -/
 abbrev Clock := Sig
 
-/-- Lower an authoring `Sig` into the resolved arena, interning bottom-up. -/
-partial def lowerSig : Sig → EArenaM ExprId
+/-- Reference (tree-walk) lowering of an authoring `Sig` into the resolved
+    arena, interning bottom-up. Runtime uses the memoized `lowerSigPtr`:
+    the combinators build `Sig` values that share subterms by Lean object
+    REFERENCE (e.g. residue composition embeds one voice's H(ν) sum into
+    every coupling amp), so the structural walk pays for the fully
+    expanded tree only for `eintern` to collapse it straight back into a
+    shared DAG — super-linear on composed patches. -/
+partial def lowerSigTree : Sig → EArenaM ExprId
   | .num n          => eintern (.num n)
-  | .binary t a b   => do eintern (.binary t (← lowerSig a) (← lowerSig b))
-  | .unary t a      => do eintern (.unary t (← lowerSig a))
-  | .clamp a b c    => do eintern (.clamp (← lowerSig a) (← lowerSig b) (← lowerSig c))
-  | .select a b c   => do eintern (.select (← lowerSig a) (← lowerSig b) (← lowerSig c))
+  | .binary t a b   => do eintern (.binary t (← lowerSigTree a) (← lowerSigTree b))
+  | .unary t a      => do eintern (.unary t (← lowerSigTree a))
+  | .clamp a b c    => do eintern (.clamp (← lowerSigTree a) (← lowerSigTree b) (← lowerSigTree c))
+  | .select a b c   => do eintern (.select (← lowerSigTree a) (← lowerSigTree b) (← lowerSigTree c))
   | .inputRef i     => eintern (.inputRef i)
   | .paramRef i     => eintern (.paramRef i)
   | .nestedOut i o  => eintern (.nestedOut i o)
   | .sampleRate     => eintern .sampleRate
   | .sampleIndex    => eintern .sampleIndex
+
+/-- Pointer-identity-memoized lowering: a hash map from object address to
+    interned id, threaded alongside the arena. Sound because `Sig` values
+    are immutable — a shared pointer IS the same subterm — and lowering a
+    subterm is deterministic (`eintern` returns equal ids for equal nodes),
+    so a pointer MISS merely re-lowers structurally to the same id. -/
+private unsafe def lowerSigPtrGo (s : Sig) :
+    StateM (ExprArena × Std.HashMap USize ExprId) ExprId := do
+  let key := ptrAddrUnsafe s
+  if let some r := (← get).2.get? key then return r
+  let intern1 (n : ENode) : StateM (ExprArena × Std.HashMap USize ExprId) ExprId :=
+    fun (a, m) => let (id, a') := (eintern n).run a; (id, (a', m))
+  let r ← match s with
+    | .num n          => intern1 (.num n)
+    | .binary t a b   => do intern1 (.binary t (← lowerSigPtrGo a) (← lowerSigPtrGo b))
+    | .unary t a      => do intern1 (.unary t (← lowerSigPtrGo a))
+    | .clamp a b c    => do intern1 (.clamp (← lowerSigPtrGo a) (← lowerSigPtrGo b) (← lowerSigPtrGo c))
+    | .select a b c   => do intern1 (.select (← lowerSigPtrGo a) (← lowerSigPtrGo b) (← lowerSigPtrGo c))
+    | .inputRef i     => intern1 (.inputRef i)
+    | .paramRef i     => intern1 (.paramRef i)
+    | .nestedOut i o  => intern1 (.nestedOut i o)
+    | .sampleRate     => intern1 .sampleRate
+    | .sampleIndex    => intern1 .sampleIndex
+  modify fun (a, m) => (a, m.insert key r)
+  return r
+
+private unsafe def lowerSigPtr (s : Sig) : EArenaM ExprId := fun arena =>
+  let (id, (arena', _)) := (lowerSigPtrGo s).run (arena, {})
+  (id, arena')
+
+/-- Lower an authoring `Sig` into the resolved arena, interning bottom-up.
+    Compiled implementation is the pointer-memoized walk (`lowerSigPtr`);
+    `lowerSigTree` is the structural reference it agrees with. -/
+@[implemented_by lowerSigPtr]
+def lowerSig (s : Sig) : EArenaM ExprId := lowerSigTree s
 
 /-- Lower an optional authoring default. -/
 def lowerSigOpt : Option Sig → EArenaM (Option ExprId)
