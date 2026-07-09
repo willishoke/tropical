@@ -1591,6 +1591,68 @@ private def runModalBank (arena : Arena)
     | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-bank  render: {firstLine e}"; pure false
   | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-bank  build: {firstLine e}"; pure false
 
+open Tropical.EmitArrow in
+/-- THE BANKS-AS-DATA gate (slice 3b). A decaying-resonator bank lowered through
+    the INDEXED REDUCTION (`modalBankSigTable` → `Sig.bankSum` → a `ReduceBegin`
+    region) must render BIT-FOR-BIT identical to the same bank unrolled
+    (`modalBankSigDirect`) — the i64-modular mode sum is associative, so the loop
+    and the fold agree to the bit. This exercises the whole new path end to end:
+    `Sig.arr`/`index`/`loopIdx`/`bankSum` through every strata pass, the
+    `ENode→CNode` downcast, and the emit-time reduce-region lowering. We also
+    assert the PAYOFF: banking shrinks the plan, and the per-mode MARGINAL
+    instruction cost drops (the DSP body no longer unrolls — only the coefficient
+    fills still scale, and those are destined for the s0 kernel next). -/
+private def runBanksAsData (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  -- A K-mode decaying bank, all deg-0 (the uniform datapath). Frequencies spread
+  -- so the bank is non-trivial; small amps so the i64 sum stays in headroom.
+  let mkModes (k : Nat) : Array ModalMode :=
+    (Array.range k).map fun i =>
+      ModalMode.hz (lit (Int.ofNat (220 + 40 * i))) (lit 30 1) (lit 2 1)
+  let anchor := lit 200
+  let modes := mkModes 12
+  let directPlan := buildAndFinish (.ok (buildModalBankDirect "bank_unrolled" modes anchor arena))
+  let tablePlan  := buildAndFinish (.ok (buildModalBankTable  "bank_looped"   modes anchor arena))
+  match directPlan, tablePlan with
+  | .ok dp, .ok tp =>
+    match ← renderPlanSamples dp 2048, ← renderPlanSamples tp 2048 with
+    | .ok dS, .ok tS =>
+      let n := min dS.size tS.size
+      let mut bitDiff := 0
+      for i in [0:n] do
+        if dS[i]! != tS[i]! then bitDiff := bitDiff + 1
+      let mut preMax : Float := 0.0
+      for i in [0:200] do
+        let a := tS[i]!.abs
+        if a > preMax then preMax := a
+      let mut eEarly : Float := 0.0
+      let mut eLate : Float := 0.0
+      for i in [200:600] do eEarly := eEarly + tS[i]! * tS[i]!
+      for i in [1648:2048] do eLate := eLate + tS[i]! * tS[i]!
+      -- Compile-scaling: the same bank at two mode counts, both lowerings.
+      let dSmall := buildAndFinish (.ok (buildModalBankDirect "d6"  (mkModes 6)  anchor arena))
+      let dBig   := buildAndFinish (.ok (buildModalBankDirect "d24" (mkModes 24) anchor arena))
+      let tSmall := buildAndFinish (.ok (buildModalBankTable  "t6"  (mkModes 6)  anchor arena))
+      let tBig   := buildAndFinish (.ok (buildModalBankTable  "t24" (mkModes 24) anchor arena))
+      match dSmall, dBig, tSmall, tBig with
+      | .ok ds, .ok db, .ok ts, .ok tb =>
+        let dMarginal := planInstrCount db - planInstrCount ds   -- unrolled per-mode marginal (×18)
+        let tMarginal := planInstrCount tb - planInstrCount ts   -- banked marginal (fills only)
+        let shrinks := decide (planInstrCount tp < planInstrCount dp)
+        IO.println s!"        bank = Σ amp·e^(−σd)·cos(2πf·d), 12 modes, struck @ 200 — unrolled vs looped:"
+        IO.println s!"        result   bit-differing {bitDiff}/{n}  ·  pre-strike |max|={preMax}  ·  E[early]={eEarly}  E[late]={eLate}"
+        IO.println s!"        payoff   plan-instrs 12-mode: unrolled={planInstrCount dp} looped={planInstrCount tp} (shrinks={shrinks})"
+        IO.println s!"        payoff   per-mode marginal (6→24 modes): unrolled +{dMarginal}  ·  banked +{tMarginal} (body no longer unrolls)"
+        if bitDiff == 0 && preMax == 0.0 && eEarly > 1e-6 && eLate < eEarly
+           && shrinks && tMarginal < dMarginal then
+          IO.println s!"  PASS  banks-as-data  looped ≡ unrolled bit-exact ({n} samples), causal, decaying; plan shrinks, marginal +{tMarginal}<+{dMarginal}"; pure true
+        else
+          IO.println s!"  FAIL  banks-as-data  bitDiff={bitDiff} preMax={preMax} shrinks={shrinks} tMarg={tMarginal} dMarg={dMarginal}"; pure false
+      | _, _, _, _ =>
+        IO.println s!"  FAIL  banks-as-data  scaling build failed"; pure false
+    | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-as-data  render: {firstLine e}"; pure false
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-as-data  build: {firstLine e}"; pure false
+
 /-- THE MODAL DEGREE gate. A degree-1 mode `amp·d·e^{−σd}` (a repeated pole — the
     resonance "swell") rendered by the engine must match `sinkGain·d·e^{−σd}` to
     minimax tolerance (an absolute oracle, validating the new `d^deg` factor), and
@@ -3168,6 +3230,9 @@ def main (args : List String) : IO UInt32 := do
     IO.println "modal island (decaying-resonator bank as a term over the clock):"
     total := total + 1
     if !(← runModalBank arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runBanksAsData arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runModalDegree arena resolved) then

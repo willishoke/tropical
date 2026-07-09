@@ -54,7 +54,8 @@ private partial def exprHasSumE (id : ExprId) : SumM Bool := do
     | .tag .. | .match_ .. => pure true
     | .num _ | .bool _
     | .inputRef _ | .paramRef _ | .typeParamRef _ | .bindingRef _
-    | .sampleRate | .sampleIndex | .nestedOut _ _ => pure false
+    | .sampleRate | .sampleIndex | .nestedOut _ _ | .loopIdx => pure false
+    | .bankSum _ ts b => pure ((← ts.anyM exprHasSumE) || (← exprHasSumE b))
     | .arr items => items.anyM exprHasSumE
     | .binary _ a b | .index a b => pure ((← exprHasSumE a) || (← exprHasSumE b))
     | .unary _ a => exprHasSumE a
@@ -98,7 +99,9 @@ private partial def rewriteExprE (ctx : CtxE) (id : ExprId) : SumM ExprId := do
       failP s!"sumLower: bare tag with payload (variant '{v.name}') in non-update context"
   | .match_ d scrutinee arms => lowerMatchToSelectChainE ctx d scrutinee arms
   | .inputRef _ | .paramRef _ | .typeParamRef _
-  | .sampleRate | .sampleIndex | .nestedOut _ _ => pure id
+  | .sampleRate | .sampleIndex | .nestedOut _ _ | .loopIdx => pure id
+  | .bankSum c ts b =>
+    einternP (.bankSum c (← ts.mapM (rewriteExprE ctx)) (← rewriteExprE ctx b))
   | .binary tag a b => einternP (.binary tag (← rewriteExprE ctx a) (← rewriteExprE ctx b))
   | .unary tag a => einternP (.unary tag (← rewriteExprE ctx a))
   | .clamp a b c => einternP (.clamp (← rewriteExprE ctx a) (← rewriteExprE ctx b) (← rewriteExprE ctx c))

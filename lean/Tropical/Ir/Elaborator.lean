@@ -527,8 +527,9 @@ private partial def collectNestedOutDeps (ea : ExprArena) (numInstances : Nat)
       | .unary _ arg => go acc arg
       | .clamp a b c | .select a b c | .arraySet a b c => go (go (go acc a) b) c
       | .index a b => go (go acc a) b
+      | .bankSum _ ts b => go (ts.foldl go acc) b
       | .inputRef _ | .paramRef _ | .typeParamRef _ | .bindingRef _
-      | .sampleRate | .sampleIndex => acc
+      | .sampleRate | .sampleIndex | .loopIdx => acc
   go acc id
 
 private structure TarjanSt where

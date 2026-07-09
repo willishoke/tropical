@@ -283,6 +283,7 @@ private def tryTerminal (e : CNode) (expected : Option ScalarType) :
       | none => pure (some (.const (0 : Nat) .float, .float))
   | .sampleRate => pure (some (Tropical.Plan.opRate, .float))
   | .sampleIndex => pure (some (Tropical.Plan.opTick, .int))
+  | .loopIdx => pure (some (Tropical.Plan.NOperand.loopIdx, .int))
   | .nestedOut inst out => do
     if let some perInstArr := lookup st.slots.nestedOutputArraySlots inst.idx then
       if (lookup perInstArr out.idx).isSome then
@@ -343,7 +344,8 @@ private partial def compileNodeUncached (e : CNode) (expected : Option ScalarTyp
   | .select a b c => compileTernary "Select" a b c expected
   | .arraySet a b c => compileSetElement a b c
   | .index a b => compileIndex a b
-  | .num _ | .bool _ | .paramRef _ | .sampleRate | .sampleIndex =>
+  | .bankSum count tables body => compileBankSum count tables body
+  | .num _ | .bool _ | .paramRef _ | .sampleRate | .sampleIndex | .loopIdx =>
     throw "emit_resolved: terminal node reached compileNodeUncached (port bug)"
 
 /-- Unbox a size-1 array to a scalar via Index[0]. -/
@@ -462,6 +464,35 @@ private partial def compileIndex (arrNode idxNode : ExprId) : EmitM CompileResul
     let idxOp := if idx.isArray then NOperand.const (0 : Nat) .int else idx.op
     emit (Tropical.Plan.instrIndex dst #[arrOp, idxOp] rt)
     pure (.scalar (.reg dst rt) rt)
+
+/-- Emit an indexed reduction (`CNode.bankSum`) as a `ReduceBegin`/body/`ReduceEnd`
+    region — the banks-as-data lowering (slice 3b). The mode sum is i64-modular
+    (associative), so the region renders bit-identical to the unrolled fold.
+
+    - The coefficient columns (`tables`) are materialized ONCE *before* the
+      region: compiling them here (not lazily inside the body) keeps their `Pack`
+      loop-invariant, and the CSE memo makes the body's `index` reuse the slot.
+    - The accumulator temp lives *outside* the region (seeded to 0 by
+      `ReduceBegin`); the body computes one mode's contribution and an explicit
+      `Add acc acc contrib` accumulates — the exact slice-3a contract.
+    - The CSE memo is snapshotted across the region: body-local temps do not
+      escape (the runtime zero-scratches post-region reads), so a later sequential
+      bank must not reuse them. Table entries (memoized before the snapshot) and
+      any subterm compiled outside the region survive. -/
+private partial def compileBankSum (count : Nat) (tables : Array ExprId) (body : ExprId) :
+    EmitM CompileResult := do
+  for t in tables do
+    let _ ← compileNode t
+  let acc ← allocReg
+  let memo0 := (← get).memo
+  emit (Tropical.Plan.instrReduceBegin acc (.const (0 : Nat) .int) count .int)
+  let contrib ← compileNode body (some .int)
+  if contrib.isArray then
+    throw "emit_resolved: bankSum body is array-valued; the mode contribution must be a scalar"
+  emit (Tropical.Plan.instrScalar "Add" acc #[.reg acc .int, contrib.op] .int)
+  emit (Tropical.Plan.instrReduceEnd acc .int)
+  modify fun s => { s with memo := memo0 }
+  pure (.scalar (.reg acc .int) .int)
 
 private partial def compileSetElement (arrNode idxNode valNode : ExprId) :
     EmitM CompileResult := do

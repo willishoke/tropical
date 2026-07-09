@@ -87,6 +87,13 @@ inductive Sig where
   | nestedOut (instance_ : InstanceIdx) (output : OutputIdx)
   | sampleRate
   | sampleIndex
+  -- Banks-as-data (slice 3b): the authoring tree can express an indexed
+  -- reduction over coefficient columns. `arr`/`index`/`loopIdx` lower to the
+  -- like-named IR nodes; `bankSum` to `ENode.bankSum` (a `ReduceBegin` region).
+  | arr (items : Array Sig)
+  | index (arr idx : Sig)
+  | loopIdx
+  | bankSum (count : Nat) (tables : Array Sig) (body : Sig)
 deriving Repr, Inhabited
 
 /-- A clock-as-value expression (Q32.32 fixed-point sample coordinate). -/
@@ -110,6 +117,10 @@ partial def lowerSigTree : Sig → EArenaM ExprId
   | .nestedOut i o  => eintern (.nestedOut i o)
   | .sampleRate     => eintern .sampleRate
   | .sampleIndex    => eintern .sampleIndex
+  | .arr items      => do eintern (.arr (← items.mapM lowerSigTree))
+  | .index a b      => do eintern (.index (← lowerSigTree a) (← lowerSigTree b))
+  | .loopIdx        => eintern .loopIdx
+  | .bankSum c ts b => do eintern (.bankSum c (← ts.mapM lowerSigTree) (← lowerSigTree b))
 
 /-- Pointer-identity-memoized lowering: a hash map from object address to
     interned id, threaded alongside the arena. Sound because `Sig` values
@@ -133,6 +144,10 @@ private unsafe def lowerSigPtrGo (s : Sig) :
     | .nestedOut i o  => intern1 (.nestedOut i o)
     | .sampleRate     => intern1 .sampleRate
     | .sampleIndex    => intern1 .sampleIndex
+    | .arr items      => do intern1 (.arr (← items.mapM lowerSigPtrGo))
+    | .index a b      => do intern1 (.index (← lowerSigPtrGo a) (← lowerSigPtrGo b))
+    | .loopIdx        => intern1 .loopIdx
+    | .bankSum c ts b => do intern1 (.bankSum c (← ts.mapM lowerSigPtrGo) (← lowerSigPtrGo b))
   modify fun (a, m) => (a, m.insert key r)
   return r
 
@@ -1332,6 +1347,17 @@ def modePhaseQ (omega clkRel : Sig) : Sig :=
 def modePhaseW (omega clkRel : Sig) : Sig :=
   mul twoPiE (div (toFloatE (modePhaseQ omega clkRel)) (lit 4294967296))
 
+/-- `modePhaseQ` with the quantized increment supplied DIRECTLY, skipping the
+    `incr = ⌊(ω/2π)·2³²/SR⌋` step. The banked path stores `incr`'s pre-`toInt`
+    float in a coefficient column and reads it per iteration; `toInt` in-loop then
+    recovers the SAME i64 (f64 storage round-trips the value exactly, < 2^53), so
+    `modePhaseQFromIncr (toIntE incrFloat) clkRel` is bit-identical to
+    `modePhaseQ ω clkRel`. -/
+def modePhaseQFromIncr (incr clkRel : Sig) : Sig :=
+  let thi := rshift clkRel (lit 32)
+  let tlo := bitAnd clkRel (lit 4294967295)
+  bitAnd (add (mul incr thi) (rshift (mul incr tlo) (lit 32))) (lit 4294967295)
+
 /-- A modal bank as a pure `Sig` over the (already-warped) clock: shift each pole
     to its time-since-strike on the INTEGER clock (`relClockQ`, exact at any τ),
     sum `d^deg·e^{−σd}·(c_re·cos φ − c_im·sin φ)` over the modes with each φ
@@ -1362,6 +1388,45 @@ def modalBankSig (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Sig) 
       add acc oscQ)
     (litI 0)
   selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
+
+/-- The BANKED lowering of a modal bank (banks-as-data slice 3b): the SAME value
+    as `modalBankSig`, but the mode sum is a `Sig.bankSum` indexed reduction over
+    four coefficient columns instead of an unrolled fold — so the emitted plan is
+    O(1) in mode count, not O(modes). Requires every mode `deg == 0` (the uniform
+    datapath, true for resonator/reverb/residue banks); ragged banks route to the
+    unrolled path. The columns hold the SAME per-mode subterms the unrolled path
+    bakes, and the mode sum is i64-modular (associative), so the render is
+    BIT-IDENTICAL — the goldens gate the move. Drop-in for `modalBankSig`: same
+    `(modes, clkInt, anchor)` signature, so it rides `modalBankTerm`'s `arrUn`
+    (warps reach it through the already-warped clock leaf) unchanged. -/
+def modalBankSigTable (modes : Array ModalMode) (clkInt anchorSamples : Sig) : Sig :=
+  let clkRel := relClockQ clkInt anchorSamples
+  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
+  -- Four coefficient columns, one entry per mode — the SAME s0 subterms the
+  -- unrolled path bakes per mode. `incr` lands as its pre-`toInt` float (< 2^53,
+  -- exact in f64); `toInt` happens in-loop.
+  let incrCol  := Sig.arr (modes.map fun m =>
+    div (mul (div m.omega twoPiE) (lit 4294967296)) .sampleRate)
+  let sigmaCol := Sig.arr (modes.map (·.sigma))
+  let creCol   := Sig.arr (modes.map (·.cre))
+  let cimCol   := Sig.arr (modes.map (·.cim))
+  -- The per-mode body over `loopIdx`, EXACTLY `modalBankSig`'s op sequence with
+  -- every per-mode scalar replaced by a column read (deg == 0, so `env2 = env`).
+  let k := Sig.loopIdx
+  let phQ  := modePhaseQFromIncr (toIntE (Sig.index incrCol k)) clkRel
+  let env  := expSig (neg (mul (Sig.index sigmaCol k) dSec))
+  let wCre := toIntE (mul (mul env (Sig.index creCol k)) (lit 268435456))
+  let wCim := toIntE (mul (mul env (Sig.index cimCol k)) (lit 268435456))
+  let oscQ := rshift (sub (mul wCre (fixedCosCycSig phQ))
+                          (mul wCim (fixedSinCycSig phQ))) (lit 28)
+  let bankQ := Sig.bankSum modes.size #[incrCol, sigmaCol, creCol, cimCol] oscQ
+  selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
+
+/-- True when a bank is eligible for the table lowering: every mode `deg == 0`
+    (the uniform datapath). Ragged banks (mixed degree) must route to the
+    unrolled `modalBankSig` (or, later, split into a banked deg-0 part ⊕ an
+    unrolled remainder). -/
+def bankIsUniform (modes : Array ModalMode) : Bool := modes.all (·.deg == 0)
 
 /-- Complex arithmetic over `Sig` (real, imag) — the residue calculus done
     SYMBOLICALLY, so poles/coeffs can be live param slots. With literal operands
@@ -1910,11 +1975,22 @@ def buildExpProbe (name : String) (arena : Arena) : Arena × ProgramIdx :=
 -- (voice ⋙ reverb) is a BUILD-TIME pass that fills the ModalMode array; the
 -- runtime substrate is just this bank. Gated by `modal-bank`.
 
+/-- Strangler flag for banks-as-data (slice 3b): when `TROPICAL_BANKS_TABLE` is
+    set, the forward modal bank lowers through the indexed reduction
+    (`modalBankSigTable`) instead of the unrolled fold — for uniform (all deg-0)
+    banks only. Default OFF: the committed goldens are the unrolled form, and
+    running them with the flag ON pins the move byte-for-byte. Read once at load,
+    so the pure lowering may branch on it. -/
+initialize banksTableEnabled : Bool ← do
+  return (← IO.getEnv "TROPICAL_BANKS_TABLE").isSome
+
 /-- A modal bank struck at `anchor` (samples) as a term over the clock leaf: no
     `gen`, no `.trop` instance — `{clk, +, ×, round, clamp, ldexp}` all the way
-    down, and warp-reachable like any generator. -/
+    down, and warp-reachable like any generator. Rides `arrUn … (.clk c)`, so
+    warps reach the (banked or unrolled) body through the clock leaf identically. -/
 def modalBankTerm (modes : Array ModalMode) (anchor : Sig) (c : Clock) : ArrowTerm :=
-  ArrowTerm.arrUn (fun clkSig => modalBankSig modes clkSig anchor) (ArrowTerm.clk c)
+  let lower := if banksTableEnabled && bankIsUniform modes then modalBankSigTable else modalBankSig
+  ArrowTerm.arrUn (fun clkSig => lower modes clkSig anchor) (ArrowTerm.clk c)
 
 -- ── The DIRECTION operator: forward↔reverse crossfade ─────────────────────────
 -- A bank's reading DIRECTION crossfades between the CAUSAL tail (energy at d>0, a
@@ -2007,6 +2083,13 @@ def buildModalBankArrow (name : String) (modes : Array ModalMode) (anchor : Sig)
 def buildModalBankDirect (name : String) (modes : Array ModalMode) (anchor : Sig)
     (arena : Arena) : Arena × ProgramIdx :=
   buildExprCarrier name (modalBankSig modes clockLit anchor) arena
+
+/-- The BANKED twin of `buildModalBankDirect` (`modalBankSigTable` on the bare
+    clock) — the device-under-test for the `banks-as-data` equivalence gate:
+    same modes, byte-identical render, but an O(1)-in-modes plan. -/
+def buildModalBankTable (name : String) (modes : Array ModalMode) (anchor : Sig)
+    (arena : Arena) : Arena × ProgramIdx :=
+  buildExprCarrier name (modalBankSigTable modes clockLit anchor) arena
 
 /-- `voice ⋙ reverb` end to end: run the residue calculus at build time, turn the
     composed complex modes into a `ModalMode` bank, and emit it — the connection is

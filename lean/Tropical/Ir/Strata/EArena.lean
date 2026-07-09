@@ -161,6 +161,8 @@ private partial def convExprId (ea : ExprArena) (eid : ExprId) : ConvM ExprId :=
       | .nestedOut i o  => pure (.nestedOut i o)
       | .sampleRate     => pure .sampleRate
       | .sampleIndex    => pure .sampleIndex
+      | .loopIdx        => pure .loopIdx
+      | .bankSum c ts b => pure (.bankSum c (← ts.mapM (convExprId ea)) (← convExprId ea b))
       | .zeros _        => throw ⟨"toResolved: zeros survived arrayLower"⟩
       | .typeParamRef _ => throw ⟨"toResolved: typeParamRef survived specialize"⟩
       | .bindingRef _   => throw ⟨"toResolved: bindingRef survived arrayLower"⟩
@@ -264,7 +266,9 @@ partial def mapExprIdGo (h : MapHooksId) (id : ExprId) : MapM ExprId := do
       match n with
       | .num _ | .bool _
       | .inputRef _ | .paramRef _ | .typeParamRef _ | .bindingRef _
-      | .nestedOut _ _ | .sampleRate | .sampleIndex => pure id
+      | .nestedOut _ _ | .sampleRate | .sampleIndex | .loopIdx => pure id
+      | .bankSum c ts b =>
+        einternP (.bankSum c (← ts.mapM (mapExprIdGo h)) (← mapExprIdGo h b))
       | .arr items => einternP (.arr (← items.mapM (mapExprIdGo h)))
       | .binary t a b => einternP (.binary t (← mapExprIdGo h a) (← mapExprIdGo h b))
       | .unary t a => einternP (.unary t (← mapExprIdGo h a))

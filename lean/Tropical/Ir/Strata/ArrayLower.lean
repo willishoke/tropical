@@ -69,7 +69,11 @@ partial def exprNeedsLoweringE (id : ExprId) : LowerM Bool := do
     | .zeros _ => pure true
     | .num _ | .bool _
     | .inputRef _ | .paramRef _ | .typeParamRef _
-    | .nestedOut _ _ | .sampleRate | .sampleIndex => pure false
+    | .nestedOut _ _ | .sampleRate | .sampleIndex | .loopIdx => pure false
+    -- A bankSum is NOT unrolled — it survives to post-strata as an indexed
+    -- reduction. Its tables/body are ordinary subgraphs, so descend only if one
+    -- genuinely contains a combinator/bindingRef/zeros to lower.
+    | .bankSum _ ts b => pure ((← ts.anyM exprNeedsLoweringE) || (← exprNeedsLoweringE b))
     | .arr items => items.anyM exprNeedsLoweringE
     | .tag _ _ payload => payload.anyM (fun p => exprNeedsLoweringE p.value)
     | .match_ _ scrutinee arms =>
@@ -172,7 +176,11 @@ private partial def lowerExprCoreE (subst : SubstMapE) (id : ExprId) : LowerM Ex
         failP s!"arrayLower: zeros count {n} is not a valid array length"
     | _ => einternP (.zeros countL)
   | .inputRef _ | .paramRef _ | .typeParamRef _
-  | .nestedOut _ _ | .sampleRate | .sampleIndex => pure id
+  | .nestedOut _ _ | .sampleRate | .sampleIndex | .loopIdx => pure id
+  | .bankSum c ts b =>
+    -- Preserve the region; lower its subgraphs (never unroll). `subst` threads
+    -- through in case the bank is nested in an enclosing combinator being unrolled.
+    einternP (.bankSum c (← ts.mapM (lowerExprE subst)) (← lowerExprE subst b))
   | .tag d v payload =>
     einternP (.tag d v
       (← payload.mapM fun p => do pure ({ field := p.field, value := ← lowerExprE subst p.value } : ETagPayload)))
