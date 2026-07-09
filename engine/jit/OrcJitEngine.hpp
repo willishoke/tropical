@@ -63,6 +63,12 @@ enum class OpTag : uint8_t
   // M6+: write a computed value to slots[dst]. `dst` is the slot index;
   // `args[0]` is the value to write (scalar). No temp slot consumed.
   WriteSlot,
+  // Indexed-reduction region delimiters (banks-as-data): dst = the
+  // accumulator temp; instructions between Begin and End run once per
+  // iteration (loop_count), with the `loop_idx` operand as the index.
+  // Metadata-only here — codegen is Lean's (EmitLlvm/EmitMsl).
+  ReduceBegin,
+  ReduceEnd,
 };
 
 enum class OperandKind : uint8_t

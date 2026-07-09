@@ -72,6 +72,18 @@ structure TVal where
   ty  : ScalarType
 deriving Inhabited
 
+/-- An open `ReduceBegin`/`ReduceEnd` region: the accumulator temp and
+    its alloca, the iteration-counter alloca, the loop labels, and the
+    `tempVals` snapshot to restore at close (body temps don't escape). -/
+structure ReduceCtx where
+  accTemp : Nat
+  accPtr : String
+  accTy : ScalarType
+  idxPtr : String
+  condLabel : String
+  endLabel : String
+  savedTempVals : Std.HashMap Nat TVal
+
 structure St where
   next : Nat := 0
   lines : Array String := #[]
@@ -92,6 +104,8 @@ structure St where
       so the loop back-edge + counter phi must reference the *final*
       block, not a hardcoded `loop_body`. -/
   curBlock : String := "loop_body"
+  /-- Innermost open reduction region (v1: nesting rejected). -/
+  reduce? : Option ReduceCtx := none
 
 abbrev M := EStateM String St
 
@@ -142,8 +156,15 @@ def loadTempTyped (slot : Nat) (ty : ScalarType) : M TVal := do
     store: temps are intra-call scratch in the fused kernel, and every
     block the emitter opens falls through, so an earlier def dominates
     every later use. (The old store/load round-trip was bitcast-exact, so
-    handing back the same TVal is bit-identical.) -/
+    handing back the same TVal is bit-identical.) Inside a reduction
+    region, a write to the accumulator temp stores through its alloca
+    instead — the running value crosses the loop back-edge in memory. -/
 def storeTempTyped (slot : Nat) (v : TVal) : M Unit := do
+  if let some rc := (← get).reduce? then
+    if slot == rc.accTemp then
+      let cv ← coerce v rc.accTy
+      line s!"store {llTy rc.accTy} {cv.ref}, ptr {rc.accPtr}, align 8"
+      return
   modify fun s => { s with tempVals := s.tempVals.insert slot v }
 
 def loadSlotF64 (idx : Nat) : M String := do
@@ -191,9 +212,22 @@ def resolveOperand : NOperand → M TVal
     | .bool => pure ⟨if jnToInt v != 0 then "true" else "false", .bool⟩
     | .float => pure ⟨f64Lit v.toFloat, .float⟩
   | .reg slot _ => do
+    -- Inside a reduction region, the accumulator temp reads the running
+    -- value from its alloca (an SSA value can't cross the back-edge).
+    if let some rc := (← get).reduce? then
+      if slot == rc.accTemp then
+        let v ← fresh
+        line s!"{v} = load {llTy rc.accTy}, ptr {rc.accPtr}, align 8"
+        return ⟨v, rc.accTy⟩
     match (← get).tempVals.get? slot with
     | some v => pure v
     | none => loadTempTyped slot .float
+  | .loopIdx => do
+    let some rc := (← get).reduce?
+      | fail "EmitLlvm: loop_idx operand outside a ReduceBegin/ReduceEnd region"
+    let v ← fresh
+    line s!"{v} = load i64, ptr {rc.idxPtr}, align 8"
+    pure ⟨v, .int⟩
   | .source idx _ => do
     let srcs := (← get).sources
     match srcs[idx]? with
@@ -465,6 +499,45 @@ private def emitElementwise (instr : NInstr) (dstSlot : Nat) : M Unit := do
 
 def emitInstr (instr : NInstr) : M Unit := do
   match instr.tag, instr.dst with
+  | "ReduceBegin", .temp accTemp =>
+    if (← get).reduce?.isSome then
+      fail "EmitLlvm: nested ReduceBegin regions are not supported (v1)"
+    let init ← match instr.args[0]? with
+      | some o => resolveOperand o
+      | none => fail "ReduceBegin missing init operand"
+    let initV ← coerce init instr.resultType
+    let accPtr ← fresh
+    line s!"{accPtr} = alloca {llTy instr.resultType}, align 8"
+    line s!"store {llTy instr.resultType} {initV.ref}, ptr {accPtr}, align 8"
+    let idxPtr ← fresh
+    line s!"{idxPtr} = alloca i64, align 8"
+    line s!"store i64 0, ptr {idxPtr}, align 8"
+    let n ← freshId
+    let condbb := s!"rd_cond_{n}"; let bodybb := s!"rd_body_{n}"; let endbb := s!"rd_end_{n}"
+    line s!"br label %{condbb}"
+    labelLine condbb
+    let k ← fresh; line s!"{k} = load i64, ptr {idxPtr}, align 8"
+    let c ← fresh; line s!"{c} = icmp ult i64 {k}, {instr.loopCount}"
+    line s!"br i1 {c}, label %{bodybb}, label %{endbb}"
+    labelLine bodybb
+    modify fun s => { s with reduce? := some {
+      accTemp, accPtr, accTy := instr.resultType, idxPtr,
+      condLabel := condbb, endLabel := endbb, savedTempVals := s.tempVals } }
+  | "ReduceEnd", .temp accTemp =>
+    let some rc := (← get).reduce?
+      | fail "EmitLlvm: ReduceEnd without an open ReduceBegin"
+    if rc.accTemp != accTemp then
+      fail "EmitLlvm: ReduceEnd accumulator does not match the open ReduceBegin"
+    let k ← fresh; line s!"{k} = load i64, ptr {rc.idxPtr}, align 8"
+    let k1 ← fresh; line s!"{k1} = add i64 {k}, 1"
+    line s!"store i64 {k1}, ptr {rc.idxPtr}, align 8"
+    line s!"br label %{rc.condLabel}"
+    labelLine rc.endLabel
+    -- Body temps don't escape; the accumulator's final value does.
+    let acc ← fresh
+    line s!"{acc} = load {llTy rc.accTy}, ptr {rc.accPtr}, align 8"
+    let newVals := rc.savedTempVals.insert accTemp ⟨acc, rc.accTy⟩
+    modify fun s => { s with reduce? := none, tempVals := newVals }
   | "WriteSlot", .moduleSlot idx =>
     let v ← match instr.args[0]? with | some o => resolveOperand o | none => fail "WriteSlot missing arg"
     storeSlotF64 idx (← coerceF64 v)

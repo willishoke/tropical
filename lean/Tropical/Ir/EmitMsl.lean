@@ -171,6 +171,19 @@ structure TVal where
   cv  : Option CVal := none
 deriving Inhabited
 
+/-- An open `ReduceBegin`/`ReduceEnd` region: the accumulator temp (a
+    mutable typed local declared before the loop), the loop-index
+    variable, and the temp-state snapshots to restore at close (body
+    locals are scoped to the loop braces in MSL, so their names must
+    not survive as "declared"). -/
+structure ReduceCtx where
+  accTemp : Nat
+  accTy : ScalarType
+  idxVar : String
+  savedTempTypes : Std.HashMap Nat ScalarType
+  savedConstTemps : Std.HashMap Nat CVal
+  savedDeclared : Std.HashSet String
+
 structure St where
   next : Nat := 0
   lines : Array String := #[]
@@ -199,6 +212,8 @@ structure St where
       so host writes to it are clobbered there too — folding cannot kill
       a live knob (param slots are host-written only, never folded). -/
   constSlots : Std.HashMap Nat CVal := {}
+  /-- Innermost open reduction region (v1: nesting rejected). -/
+  reduce? : Option ReduceCtx := none
 
 abbrev M := EStateM String St
 
@@ -257,8 +272,16 @@ def loadTempTyped (slot : Nat) (ty : ScalarType) : M TVal := do
 
 /-- Store a typed value into temp `slot`: declare-or-assign the typed
     local, record the type, kill any stale const. Constant stores don't
-    emit at all — they just record the fold. -/
+    emit at all — they just record the fold — EXCEPT the accumulator of
+    an open reduction region, which must always materialize (its value
+    varies across iterations even when one write folds). -/
 def storeTempTyped (slot : Nat) (v : TVal) : M Unit := do
+  if let some rc := (← get).reduce? then
+    if slot == rc.accTemp then
+      let cv ← coerce v rc.accTy
+      line s!"{tempVarName slot rc.accTy} = {cv.ref};"
+      modify fun s => { s with constTemps := s.constTemps.erase slot }
+      return
   match v.cv with
   | some c =>
     modify fun s => { s with
@@ -337,6 +360,10 @@ def resolveOperand : NOperand → M TVal
   | .param _ _ => fail "EmitMsl: 'param' operand is dead on the session path (use slots)"
   | .arrayReg _ => fail "EmitMsl: bare 'arrayReg' operand outside an array op"
   | .sessionArrayReg _ => fail "EmitMsl: 'sessionArrayReg' must be remapped before emit"
+  | .loopIdx => do
+    let some rc := (← get).reduce?
+      | fail "EmitMsl: loop_idx operand outside a ReduceBegin/ReduceEnd region"
+    pure ⟨rc.idxVar, .int, none⟩
 
 -- ─────────────────────────────────────────────────────────────
 -- The constant fold — f64/i64 evaluation mirroring emitOp
@@ -659,6 +686,48 @@ private def emitElementwise (sizes : Array Nat) (instr : NInstr) (dstSlot : Nat)
 
 def emitInstr (sizes : Array Nat) (instr : NInstr) : M Unit := do
   match instr.tag, instr.dst with
+  | "ReduceBegin", .temp accTemp =>
+    if (← get).reduce?.isSome then
+      fail "EmitMsl: nested ReduceBegin regions are not supported (v1)"
+    let init ← match instr.args[0]? with
+      | some o => resolveOperand o
+      | none => fail "ReduceBegin missing init operand"
+    let initV ← coerce init instr.resultType
+    -- The accumulator is a mutable typed local declared BEFORE the loop
+    -- (never const-folded — its value varies across iterations).
+    let accName := tempVarName accTemp instr.resultType
+    if (← get).declared.contains accName then
+      line s!"{accName} = {initV.ref};"
+    else
+      line s!"{mslTy instr.resultType} {accName} = {initV.ref};"
+    let n ← fresh
+    let idxVar := s!"rd{n}"
+    line s!"for (long {idxVar} = 0; {idxVar} < {instr.loopCount}L; ++{idxVar}) \{"
+    let st ← get
+    modify fun s => { s with
+      indent := s.indent + 1
+      declared := s.declared.insert accName
+      tempTypes := s.tempTypes.insert accTemp instr.resultType
+      constTemps := s.constTemps.erase accTemp
+      reduce? := some {
+        accTemp, accTy := instr.resultType, idxVar
+        savedTempTypes := st.tempTypes.insert accTemp instr.resultType
+        savedConstTemps := st.constTemps.erase accTemp
+        savedDeclared := st.declared.insert accName } }
+  | "ReduceEnd", .temp accTemp =>
+    let some rc := (← get).reduce?
+      | fail "EmitMsl: ReduceEnd without an open ReduceBegin"
+    if rc.accTemp != accTemp then
+      fail "EmitMsl: ReduceEnd accumulator does not match the open ReduceBegin"
+    modify fun s => { s with indent := s.indent - 1 }
+    line "}"
+    -- Body locals were scoped to the loop braces; only the accumulator
+    -- survives (its declaration precedes the loop).
+    modify fun s => { s with
+      reduce? := none
+      tempTypes := rc.savedTempTypes
+      constTemps := rc.savedConstTemps
+      declared := rc.savedDeclared }
   | "WriteSlot", .moduleSlot idx =>
     let v ← match instr.args[0]? with | some o => resolveOperand o | none => fail "WriteSlot missing arg"
     storeSlot idx v

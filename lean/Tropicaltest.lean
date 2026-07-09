@@ -167,6 +167,103 @@ def opCoveragePlan : FlatPlan :=
 
 end OpCoverage
 
+-- ── Synthetic reduce-region plan (banks-as-data slice 3a) ────────────────────
+-- The indexed-reduction primitive, gated by construction: the SAME
+-- computation — Σₖ toInt(table[k]·2²⁸)·(k+1), an i64 modular sum over a
+-- packed table, scaled back to float and mixed with τ so the output is
+-- audible and per-sample — built twice, as a ReduceBegin/ReduceEnd loop
+-- and fully unrolled. The i64 sum is associative, so the two must render
+-- BYTE-IDENTICAL bits; a frozen hash pins both against regression.
+section ReduceCoverage
+open Tropical.Plan
+
+-- (jn/cF/cI/rgF/rgI are the OpCoverage section's private helpers.)
+
+/-- The table: 4 floats packed into array slot 0. -/
+private def tableInstrs : Array NInstr :=
+  #[instrPack 0 #[cF 15 1, cF (-225) 2, cF 3, cF 5 1]]
+
+/-- One mode's contribution given the index operand `k` (temps `t`..): -/
+private def modeBody (t : Nat) (k : NOperand) : Array NInstr := #[
+  instrIndex t #[.arrayReg 0, k] .float,                        -- v = table[k]
+  instrScalar "Mul" (t+1) #[rgF t, cF 268435456] .float,        -- v·2²⁸
+  instrScalar "ToInt" (t+2) #[rgF (t+1)] .int,
+  instrScalar "Add" (t+3) #[k, cI 1] .int,                      -- k+1
+  instrScalar "Mul" (t+4) #[rgI (t+2), rgI (t+3)] .int]         -- w·(k+1)
+
+/-- Shared tail: scale the i64 accumulator (temp `acc`) to float, mix
+    with τ (so the render is per-sample), write the output slot. -/
+private def tailInstrs (acc t : Nat) : Array NInstr := #[
+  instrScalar "ToFloat" t #[rgI acc] .float,
+  instrScalar "Div" (t+1) #[rgF t, cF 268435456] .float,
+  instrScalar "ToFloat" (t+2) #[Tropical.Plan.opTick] .float,
+  instrScalar "Mod" (t+3) #[rgF (t+2), cF 64] .float,
+  instrScalar "Mul" (t+4) #[rgF (t+1), rgF (t+3)] .float,
+  instrWriteSlot 0 (rgF (t+4))]
+
+private def reducePlanOf (body : Array NInstr) (regCount : Nat) : FlatPlan :=
+  let inst := InstanceFunction.mk "root" "root" #[] body #[] 0 0 regCount #[]
+  { sampleRate := jn 44100, compilationMode := .fused,
+    arraySlotNames := #["table"], registerCount := regCount, arraySlotCount := 1,
+    arraySlotSizes := #[4], instanceFunctions := #[inst],
+    sinks := #[{ inputs := #[0], gain := jn 1, target := 0 }],
+    sources := defaultSources, slotCount := 1, slotNames := #["out"],
+    slotDefaults := #[Lean.Json.num (jn 0)] }
+
+/-- The loop form: acc = temp 1; body temps 2..6; tail temps 7.. -/
+private def reduceLoopPlan : FlatPlan :=
+  let body := tableInstrs
+    ++ #[instrReduceBegin 1 (cI 0) 4 .int]
+    ++ modeBody 2 .loopIdx
+    ++ #[instrScalar "Add" 1 #[rgI 1, rgI 6] .int,
+         instrReduceEnd 1 .int]
+    ++ tailInstrs 1 7
+  reducePlanOf body 12
+
+/-- The unrolled twin: same ops, literal indices, explicit adds. -/
+private def reduceUnrolledPlan : FlatPlan := Id.run do
+  let mut body := tableInstrs
+  let mut t := 2
+  let mut accs : Array Nat := #[]
+  for k in [0:4] do
+    body := body ++ modeBody t (cI (Int.ofNat k))
+    accs := accs.push (t+4)
+    t := t + 5
+  -- acc = ((0 + w0) + w1) + w2 + w3 — the loop's fold order.
+  body := body.push (instrScalar "Add" t #[cI 0, rgI accs[0]!] .int)
+  for i in [1:4] do
+    body := body.push (instrScalar "Add" (t+i) #[rgI (t+i-1), rgI accs[i]!] .int)
+  body := body ++ tailInstrs (t+3) (t+4)
+  reducePlanOf body (t+9)
+
+private def runReduceCoverage : IO Bool := do
+  match ← renderIrBytes reduceLoopPlan, ← renderIrBytes reduceUnrolledPlan with
+  | .ok looped, .ok unrolled =>
+    if looped != unrolled then
+      IO.println "  FAIL  reduce-coverage  loop and unrolled renders differ"
+      return false
+    let got ← sha256Hex looped
+    let expected := "7e5cea9663274157d79741c0c29cd36f3ce76bf6c4d3ae5bcd736050db68a0db"
+    if got != expected then
+      IO.println s!"  FAIL  reduce-coverage  expected {expected.take 16} got {got.take 16}"
+      return false
+    -- MSL smoke: the region must emit as a real for-loop (full SNR
+    -- gating arrives with the modal banked plans in slice 3b).
+    match Tropical.Ir.EmitMsl.emitKernel reduceLoopPlan with
+    | .error e =>
+      IO.println s!"  FAIL  reduce-coverage  EmitMsl: {firstLine e}"; pure false
+    | .ok msl =>
+      if (msl.splitOn "for (long rd").length >= 2 then
+        IO.println s!"  PASS  reduce-coverage  loop ≡ unrolled, hash {got.take 16}, MSL loop emitted"
+        pure true
+      else
+        IO.println "  FAIL  reduce-coverage  MSL kernel has no reduce loop"
+        pure false
+  | .error e, _ => IO.println s!"  FAIL  reduce-coverage  loop: {firstLine e}"; pure false
+  | _, .error e => IO.println s!"  FAIL  reduce-coverage  unrolled: {firstLine e}"; pure false
+
+end ReduceCoverage
+
 private def sortedNames (dir : String) (suffix : String) : IO (Array String) := do
   let entries ← (System.FilePath.mk dir).readDir
   let names := entries.filterMap fun e =>
@@ -2670,10 +2767,11 @@ private def runSessionViaArrowEquiv : IO Bool := do
     these to s1 at the *instruction* level, so the typed side must be
     compared under the same placement rule. -/
 private def overlayS1 (i : Tropical.Plan.NInstr) : Bool :=
-  (match i.dst with
+  i.tag == "ReduceBegin" || i.tag == "ReduceEnd"
+  || (match i.dst with
     | .array _ => true | .sessionArray _ => true | _ => false)
   || i.args.any fun a => match a with
-    | .arrayReg _ | .sessionArrayReg _ | .param _ _ | .input _ _ => true
+    | .arrayReg _ | .sessionArrayReg _ | .param _ _ | .input _ _ | .loopIdx => true
     | _ => false
 
 private def runStageDifferential : IO Bool := do
@@ -2804,6 +2902,11 @@ def main (args : List String) : IO UInt32 := do
     else
       IO.println s!"  FAIL  op-coverage  expected {expected.take 16} got {got.take 16}"
       failed := failed + 1
+
+  -- ── (c⁗) Reduce region: loop ≡ unrolled, frozen hash (banks slice 3a) ──────
+  IO.println "reduce coverage (ReduceBegin/End ≡ unrolled, EmitLlvm):"
+  total := total + 1
+  if !(← runReduceCoverage) then failed := failed + 1
 
   -- ── (c′) C4: session → resolved root directly ≡ the elaborate round-trip ───
   IO.println "session via direct root (sessionToResolvedRoot ≡ sessionToParsed→elaborate):"

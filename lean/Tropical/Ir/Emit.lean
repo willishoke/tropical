@@ -222,6 +222,7 @@ private def operandKind : NOperand → String
   | .arrayReg _ => "array_reg" | .sessionArrayReg _ => "session_array_reg"
   | .param .. => "param"
   | .source .. => "source" | .slot .. => "slot"
+  | .loopIdx => "loop_idx"
 
 private def allocReg : EmitM Nat :=
   modifyGet fun s => (s.nextReg, { s with nextReg := s.nextReg + 1 })

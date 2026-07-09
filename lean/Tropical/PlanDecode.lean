@@ -35,6 +35,7 @@ private def operandOfWire (j : Json) : Except String NOperand := do
   | "param" => pure (.param (← (← j.getObjVal? "ptr").getStr?) (← scalarOfWire j))
   | "source" => pure (.source (← (← j.getObjVal? "index").getNat?) (← scalarOfWire j))
   | "slot" => pure (.slot (← (← j.getObjVal? "index").getNat?) (← scalarOfWire j))
+  | "loop_idx" => pure .loopIdx
   | k => .error s!"PlanDecode: bad operand kind '{k}'"
 
 private def dstOfWire (j : Json) : Except String DstSlot := do

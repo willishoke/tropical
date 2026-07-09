@@ -316,6 +316,7 @@ private def remapOperand (instanceName : String) (regOffset arrayOffset : Nat) :
   | .reg slot t => .ok (.reg (slot + regOffset) t)
   | .arrayReg slot => .ok (.arrayReg (slot + arrayOffset))
   | .sessionArrayReg slot => .ok (.arrayReg slot)
+  | .loopIdx => .ok .loopIdx
   | .param _ _ =>
     .error (s!"compileSessionSlotted: legacy 'param' operand encountered "
       ++ s!"in '{instanceName}'. Session-level params should resolve "

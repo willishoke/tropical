@@ -71,6 +71,8 @@ inline tropical_jit::OpTag parse_op_tag(const std::string & s)
     {"ToFloat",     T::ToFloat},
     {"SmoothParam", T::SmoothParam},
     {"WriteSlot",   T::WriteSlot},
+    {"ReduceBegin", T::ReduceBegin},
+    {"ReduceEnd",   T::ReduceEnd},
   };
   const auto it = MAP.find(s);
   if (it == MAP.end())
@@ -111,6 +113,11 @@ inline tropical_jit::Operand parse_operand(const nlohmann::json & j)
   if (kind == "tick") return tropical_jit::Operand::make_source(0u, st);
   if (kind == "slot")
     return tropical_jit::Operand::make_slot(j.at("index").get<uint32_t>(), st);
+  // Reduce-region iteration index. The instruction stream is metadata
+  // only (codegen is Lean's) — parse it as an inert constant so the
+  // manifest read never fails closed on a banked plan.
+  if (kind == "loop_idx")
+    return tropical_jit::Operand::make_const(0.0, st);
   throw std::runtime_error("NumericProgramParser: unknown operand kind '" + kind + "'");
 }
 

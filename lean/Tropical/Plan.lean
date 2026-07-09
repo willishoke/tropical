@@ -66,6 +66,9 @@ inductive NOperand where
   | param (ptr : String) (scalarType : ScalarType)
   | source (index : Nat) (scalarType : ScalarType)
   | slot (index : Nat) (scalarType : ScalarType)
+  /-- The current iteration index (i64) inside a `ReduceBegin`/`ReduceEnd`
+      region. Meaningless outside one (emitters reject it there). -/
+  | loopIdx
 deriving Repr, Inhabited
 
 /-- Canonical source indices (sessions always emit `[tick, rate]`). -/
@@ -91,6 +94,8 @@ def NOperand.toWire : NOperand → Json
       ("scalar_type", scalarJson t)]
   | .slot i t => Json.mkObj [("kind", Json.str "slot"), ("index", toJson i),
       ("scalar_type", scalarJson t)]
+  | .loopIdx => Json.mkObj [("kind", Json.str "loop_idx"),
+      ("scalar_type", scalarJson .int)]
 
 /-- Discriminated writeback namespace. -/
 inductive DstSlot where
@@ -169,6 +174,22 @@ def instrWriteSlot (dst : Nat) (value : NOperand)
     (scalarType : ScalarType := .float) : NInstr :=
   { tag := "WriteSlot", dst := .moduleSlot dst, args := #[value],
     resultType := scalarType }
+
+/-- Open an indexed-reduction region: `dst` is the accumulator temp
+    (seeded from `init`), `loopCount` the trip count. The instructions
+    up to the matching `ReduceEnd` run once per iteration; within them
+    `.loopIdx` is the iteration index and reads/writes of the
+    accumulator temp see/update the running value. Loop-body temps do
+    not escape the region (post-region reads fall back to the
+    zero-initialized scratch, the emitters' usual graceful rule). -/
+def instrReduceBegin (accTemp : Nat) (init : NOperand) (loopCount : Nat)
+    (resultType : ScalarType) : NInstr :=
+  { tag := "ReduceBegin", dst := .temp accTemp, args := #[init],
+    loopCount, resultType }
+
+/-- Close the innermost reduction region opened on `accTemp`. -/
+def instrReduceEnd (accTemp : Nat) (resultType : ScalarType) : NInstr :=
+  { tag := "ReduceEnd", dst := .temp accTemp, args := #[], resultType }
 
 -- ─────────────────────────────────────────────────────────────
 -- PerInstancePlan — output of compileResolved

@@ -172,6 +172,7 @@ private def operandStage (sources : Array SourceKind)
   | .param _ _ => .s1         -- per-program FFI path: no re-run hook
   | .arrayReg _ => .s1        -- arrays are conservatively per-sample (v1)
   | .sessionArrayReg _ => .s1
+  | .loopIdx => .s1           -- per-iteration inside a reduce region
 
 private def analyze (plan : FlatPlan) (blocks : Array (Array NInstr)) : Analysis := Id.run do
   -- Prepass: in-plan write counts per module slot. A stage-0 slot write
@@ -205,7 +206,10 @@ private def analyze (plan : FlatPlan) (blocks : Array (Array NInstr)) : Analysis
         if let .reg t _ := arg then
           if let some d := tempDef.get? t then
             rds := rds.push d
-      let (hoist, vStage) := match instr.dst with
+      let (hoist, vStage) :=
+        -- Reduce delimiters are per-sample loop structure — never moved.
+        if instr.tag == "ReduceBegin" || instr.tag == "ReduceEnd" then (false, Stage.s1)
+        else match instr.dst with
         | .temp _ => (stage == .s0, stage)
         -- Strictly s0, like temps: a fold-valued slot write must STAY —
         -- EmitMsl's f64 emit-time folding propagates through in-kernel
@@ -381,10 +385,11 @@ def hoist (plan : FlatPlan) : Split := Id.run do
     per-sample, and the per-program FFI leaves (`param` handles, raw
     `input` reads) have no control-time evaluator. -/
 private def overlayS1 (i : NInstr) : Bool :=
-  (match i.dst with
+  i.tag == "ReduceBegin" || i.tag == "ReduceEnd"
+  || (match i.dst with
     | .array _ => true | .sessionArray _ => true | _ => false)
   || i.args.any fun a => match a with
-    | .arrayReg _ | .sessionArrayReg _ | .param _ _ | .input _ _ => true
+    | .arrayReg _ | .sessionArrayReg _ | .param _ _ | .input _ _ | .loopIdx => true
     | _ => false
 
 /-- Placement from the TYPED stages (per linear instruction, the
