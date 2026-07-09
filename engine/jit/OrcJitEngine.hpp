@@ -342,15 +342,30 @@ class OrcJitEngine
      *  collides in the JIT and identical IR is served from
      *  `ir_kernel_cache_` without a duplicate-symbol re-add, then
      *  add_module + lookup. The text must define exactly one function with
-     *  the fused `NumericKernelFn` signature. */
+     *  the fused `NumericKernelFn` signature.
+     *
+     *  `unoptimized` compiles the module at O0 regardless of the engine
+     *  opt level (a module flag steers the transform layer; the cache key
+     *  is salted so the two levels never collide). For kernels whose
+     *  codegen quality is irrelevant — the stage-0 coefficient kernel runs
+     *  once per control write, and O2's vectorizer/scheduler/regalloc on
+     *  its thousands-of-flops single block is exactly the compile wall the
+     *  split exists to remove. */
     llvm::Expected<NumericKernelFn> compile_ir_text(
-      const std::string & ir_text);
+      const std::string & ir_text, bool unoptimized = false);
 
   private:
     OrcJitEngine();
 
+    /** Lazily-built sibling LLJIT at CodeGenOptLevel::None (fast ISel,
+     *  linear scheduler, regalloc-fast) for `compile_ir_text(_, true)`.
+     *  nullptr + `unopt_init_error_` on init failure. */
+    llvm::orc::LLJIT * unoptimized_jit();
+
     std::unique_ptr<llvm::orc::LLJIT> jit_;
+    std::unique_ptr<llvm::orc::LLJIT> unopt_jit_;
     std::string init_error_;
+    std::string unopt_init_error_;
     mutable std::mutex jit_mutex_;
     /** IR-text kernels, keyed by md5(ir_text), so a reload of identical IR
      *  (e.g. a hot-swap back to a prior plan) returns the cached kernel

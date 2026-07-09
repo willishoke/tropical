@@ -87,10 +87,24 @@ bool FlatRuntime::publish_state(KernelState && new_state)
 
 bool FlatRuntime::load_ir(const std::string & ir_text, const std::string & manifest_json)
 {
+  return load_ir_staged(ir_text, {}, {}, manifest_json);
+}
+
+bool FlatRuntime::load_ir_msl(const std::string & ir_text,
+                              const std::string & msl_source,
+                              const std::string & manifest_json)
+{
+  return load_ir_staged(ir_text, msl_source, {}, manifest_json);
+}
+
+bool FlatRuntime::load_ir_staged(const std::string & ir_text,
+                                 const std::string & msl_source,
+                                 const std::string & coeff_ir,
+                                 const std::string & manifest_json)
+{
   using json = nlohmann::json;
 
   const json manifest = json::parse(manifest_json);
-
   const std::string schema = manifest.value("schema", std::string{});
 
   tropical_plan5::ParsedPlan5 parsed;
@@ -105,39 +119,6 @@ bool FlatRuntime::load_ir(const std::string & ir_text, const std::string & manif
   // The IR path is always fused — Lean emits a single fused kernel.
   new_state.mode = tropical_jit::CompilationMode::Fused;
 
-  auto kernel_result = tropical_jit::OrcJitEngine::instance().compile_ir_text(ir_text);
-  if (!kernel_result)
-  {
-    std::string err;
-    llvm::handleAllErrors(kernel_result.takeError(),
-      [&err](const llvm::ErrorInfoBase & e) { err = e.message(); });
-    throw std::runtime_error("FlatRuntime: IR JIT compilation failed: " + err);
-  }
-  new_state.kernel = *kernel_result;
-
-  return publish_state(std::move(new_state));
-}
-
-bool FlatRuntime::load_ir_msl(const std::string & ir_text,
-                              const std::string & msl_source,
-                              const std::string & manifest_json)
-{
-  using json = nlohmann::json;
-
-  const json manifest = json::parse(manifest_json);
-  const std::string schema = manifest.value("schema", std::string{});
-
-  tropical_plan5::ParsedPlan5 parsed;
-  if (schema == "tropical_plan_5")
-    parsed = tropical_plan5::parse_plan5(manifest);
-  else if (schema == "tropical_plan_4")
-    parsed = tropical_plan5::parse_plan4(manifest);
-  else
-    throw std::runtime_error("FlatRuntime: load_ir_msl unsupported manifest schema '" + schema + "'");
-
-  KernelState new_state = build_kernel_state(parsed);
-  new_state.mode = tropical_jit::CompilationMode::Fused;
-
   // The JIT kernel loads ALWAYS — it keeps serving render_window (the
   // scope) and the correctness reference even when audio runs on Metal.
   auto kernel_result = tropical_jit::OrcJitEngine::instance().compile_ir_text(ir_text);
@@ -149,6 +130,22 @@ bool FlatRuntime::load_ir_msl(const std::string & ir_text,
     throw std::runtime_error("FlatRuntime: IR JIT compilation failed: " + err);
   }
   new_state.kernel = *kernel_result;
+
+  if (!coeff_ir.empty())
+  {
+    // O0: the coefficient kernel runs once per control write — codegen
+    // quality is irrelevant, and O2 on its thousands-of-flops block is
+    // exactly the compile wall the stage-0 split removes.
+    auto coeff_result = tropical_jit::OrcJitEngine::instance().compile_ir_text(coeff_ir, true);
+    if (!coeff_result)
+    {
+      std::string err;
+      llvm::handleAllErrors(coeff_result.takeError(),
+        [&err](const llvm::ErrorInfoBase & e) { err = e.message(); });
+      throw std::runtime_error("FlatRuntime: coefficient IR JIT compilation failed: " + err);
+    }
+    new_state.coeff_kernel = *coeff_result;
+  }
 
   if (!msl_source.empty())
   {
@@ -164,6 +161,11 @@ bool FlatRuntime::load_ir_msl(const std::string & ir_text,
       "FlatRuntime: MSL source supplied but the engine was built without TROPICAL_METAL");
 #endif
   }
+
+  // Materialize coefficient slots before the state becomes visible to the
+  // audio thread or render_window — initial knob values exist, so a first
+  // buffer reading zero-initialized coefficient slots would be a bug.
+  run_coeff(new_state);
 
   return publish_state(std::move(new_state));
 }

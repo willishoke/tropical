@@ -13,6 +13,7 @@ import Tropical.Ir.Core
 import Tropical.Ir.WireProgram
 import Tropical.Ir.EmitLlvm
 import Tropical.Ir.EmitMsl
+import Tropical.StagedLoad
 import Tropical.TypeArgs
 import Tropical.Compile
 import Tropical.Entries
@@ -225,20 +226,28 @@ def buildKernelIr (plan : Tropical.Plan.FlatPlan) : EngineM (String × String) :
     | .ok s => pure s
   pure (ir, planJson)
 
-/-- Emit the plan's kernel artifacts and load them into the runtime: LLVM
-    IR always; on the metal backend also the MSL kernel, dual-loaded (audio
-    on the GPU, render_window/the scope on the JIT). Any emit failure
-    errors BEFORE the load, so the previous kernel keeps playing — the
-    same recoverable contract as the IR path. -/
+/-- Emit the plan's kernel artifacts and load them into the runtime: the
+    stage-0 split first (Stage0.hoist, gated by `TROPICAL_STAGE0`), then
+    LLVM IR for the audio kernel — and the coefficient kernel when
+    anything hoisted — always; on the metal backend also the MSL kernel,
+    dual-loaded (audio on the GPU, render_window/the scope on the JIT;
+    coefficients run on the CPU JIT in f64 and cross to the GPU as
+    host-written slots). Any emit failure errors BEFORE the load, so the
+    previous kernel keeps playing — the same recoverable contract as the
+    IR path. -/
 def loadKernel (env : Env) (plan : Tropical.Plan.FlatPlan) : EngineM Unit := do
-  let (ir, planJson) ← buildKernelIr plan
+  let split ← Tropical.StagedLoad.split plan
+  let (ir, planJson) ← buildKernelIr split.audio
+  let coeffIr ← match Tropical.StagedLoad.coeffIr split with
+    | .error msg => internalError s!"EmitLlvm (coeff): {msg}"
+    | .ok s => pure s
   if env.metalBackend then
-    let msl ← match Tropical.Ir.EmitMsl.emitKernel plan with
+    let msl ← match Tropical.Ir.EmitMsl.emitKernel split.audio with
       | .error msg => internalError s!"EmitMsl: {msg}"
       | .ok s => pure s
-    env.runtime.loadIrMsl ir msl planJson
+    env.runtime.loadIrStaged ir msl coeffIr planJson
   else
-    env.runtime.loadIr ir planJson
+    env.runtime.loadIrStaged ir "" coeffIr planJson
 
 -- ── Snapshot compile (`wire()` in TS) ────────────────────────────────────────
 

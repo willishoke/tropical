@@ -307,6 +307,60 @@ OrcJitEngine::OrcJitEngine()
     });
 }
 
+// The unoptimized sibling JIT: CodeGenOptLevel::None end to end — fast
+// instruction selection, the linear source-order scheduler, regalloc-fast —
+// and no IR pipeline beyond O0's. Compile cost is O(size) in the module,
+// which is the whole point: the stage-0 coefficient kernel is a
+// thousands-of-flops single block that runs once per control write, and
+// the default backend's scheduler/regalloc go superlinear on exactly that
+// shape (the compile wall the split exists to remove). Built lazily; shares
+// the disk object cache (module ids are salted so the tiers never collide).
+llvm::orc::LLJIT * OrcJitEngine::unoptimized_jit()
+{
+  if (unopt_jit_) return unopt_jit_.get();
+  if (!unopt_init_error_.empty()) return nullptr;
+
+  KernelObjectCache * cache_ptr = object_cache_.get();
+  auto jit_or_err = llvm::orc::LLJITBuilder()
+    .setCompileFunctionCreator(
+      [cache_ptr](llvm::orc::JITTargetMachineBuilder jtmb)
+        -> llvm::Expected<std::unique_ptr<llvm::orc::IRCompileLayer::IRCompiler>>
+      {
+        jtmb.setCodeGenOptLevel(llvm::CodeGenOptLevel::None);
+        return std::make_unique<llvm::orc::ConcurrentIRCompiler>(std::move(jtmb), cache_ptr);
+      })
+    .create();
+  if (!jit_or_err)
+  {
+    unopt_init_error_ = llvm::toString(jit_or_err.takeError());
+    return nullptr;
+  }
+  unopt_jit_ = std::move(*jit_or_err);
+  unopt_jit_->getIRTransformLayer().setTransform(
+    [](llvm::orc::ThreadSafeModule TSM,
+       const llvm::orc::MaterializationResponsibility &)
+        -> llvm::Expected<llvm::orc::ThreadSafeModule>
+    {
+      TSM.withModuleDo([](llvm::Module & M) {
+        llvm::PassBuilder PB;
+        llvm::LoopAnalysisManager LAM;
+        llvm::FunctionAnalysisManager FAM;
+        llvm::CGSCCAnalysisManager CGAM;
+        llvm::ModuleAnalysisManager MAM;
+        PB.registerModuleAnalyses(MAM);
+        PB.registerCGSCCAnalyses(CGAM);
+        PB.registerFunctionAnalyses(FAM);
+        PB.registerLoopAnalyses(LAM);
+        PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+        llvm::ModulePassManager MPM =
+          PB.buildO0DefaultPipeline(llvm::OptimizationLevel::O0);
+        MPM.run(M, MAM);
+      });
+      return std::move(TSM);
+    });
+  return unopt_jit_.get();
+}
+
 bool OrcJitEngine::available() const
 {
   return static_cast<bool>(jit_);
@@ -373,7 +427,7 @@ llvm::Expected<uint64_t> OrcJitEngine::lookup(const std::string & symbol_name)
 // Lean's EmitLlvm emits the IR.
 // ---------------------------------------------------------------------------
 llvm::Expected<NumericKernelFn> OrcJitEngine::compile_ir_text(
-  const std::string & ir_text)
+  const std::string & ir_text, bool unoptimized)
 {
   if (!jit_)
   {
@@ -384,9 +438,22 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_ir_text(
 
   std::lock_guard<std::mutex> lock(jit_mutex_);
 
-  const std::string key = md5_hex(ir_text);
+  // Salt the key by pipeline choice so identical text compiled at both
+  // levels (however unlikely) never serves the wrong object from either
+  // cache tier.
+  const std::string key = md5_hex(ir_text) + (unoptimized ? "_u" : "");
   if (auto it = ir_kernel_cache_.find(key); it != ir_kernel_cache_.end())
     return it->second;
+
+  llvm::orc::LLJIT * target = jit_.get();
+  if (unoptimized)
+  {
+    target = unoptimized_jit();
+    if (!target)
+      return llvm::make_error<llvm::StringError>(
+        "unoptimized JIT is not available: " + unopt_init_error_,
+        llvm::inconvertibleErrorCode());
+  }
 
   const std::string symbol = "tropical_k_" + key;
 
@@ -403,7 +470,7 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_ir_text(
       "compile_ir_text: failed to parse IR: " + err,
       llvm::inconvertibleErrorCode());
   }
-  module->setDataLayout(jit_->getDataLayout());
+  module->setDataLayout(target->getDataLayout());
 
   // Rename the single function definition to the content-addressed
   // symbol. Declarations (e.g. intrinsics) are left alone.
@@ -438,14 +505,20 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_ir_text(
       "compile_ir_text: parsed IR fails verification",
       llvm::inconvertibleErrorCode());
 
-  if (auto err = add_module(std::move(context), std::move(module)))
+  llvm::orc::ThreadSafeModule tsm(std::move(module), std::move(context));
+  if (auto err = target->addIRModule(std::move(tsm)))
     return std::move(err);
 
-  auto addr_or_err = lookup(symbol);
-  if (!addr_or_err)
-    return addr_or_err.takeError();
+  auto symbol_or_err = target->lookup(symbol);
+  if (!symbol_or_err)
+    return symbol_or_err.takeError();
+#if LLVM_VERSION_MAJOR >= 15
+  const uint64_t addr = symbol_or_err->getValue();
+#else
+  const uint64_t addr = symbol_or_err->getAddress();
+#endif
 
-  auto kernel = reinterpret_cast<NumericKernelFn>(*addr_or_err);
+  auto kernel = reinterpret_cast<NumericKernelFn>(addr);
   ir_kernel_cache_.emplace(key, kernel);
   return kernel;
 }

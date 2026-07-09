@@ -1,0 +1,73 @@
+import Tropical.Ffi
+import Tropical.Ir.Stage0
+import Tropical.Ir.EmitLlvm
+import Tropical.Ir.EmitMsl
+
+/-!
+# StagedLoad — the one place a `FlatPlan` becomes running kernels
+
+Every load path (the engine session compile, the golden/equiv runner,
+the diffcli render verbs) funnels through here so the stage-0 split is
+gated by the same suites that gate everything else: hoist (unless
+`TROPICAL_STAGE0=0`), emit the audio kernel — and the coefficient
+kernel when anything hoisted — through the same `EmitLlvm`, and load
+both over `Runtime.loadIrStaged`. The manifest is the *audio* plan's
+wire form: same schema, its slot table extended with the `coef:<n>`
+slots the two kernels share.
+-/
+
+namespace Tropical.StagedLoad
+
+open Tropical.Plan (FlatPlan)
+open Tropical.Ir.Stage0 (Split hoist)
+
+/-- Kill-switch for A/B and debugging: `TROPICAL_STAGE0=0` disables the
+    split (plans load exactly as before, one kernel). -/
+def enabled : IO Bool := do
+  pure ((← IO.getEnv "TROPICAL_STAGE0") != some "0")
+
+/-- The env-gated split. -/
+def split (plan : FlatPlan) : IO Split := do
+  if ← enabled then pure (hoist plan)
+  else pure { audio := plan, coeff? := none }
+
+/-- The coefficient kernel's IR — empty string when nothing hoisted
+    (the FFI treats empty as "no coefficient kernel"). -/
+def coeffIr (s : Split) : Except String String :=
+  match s.coeff? with
+  | none => .ok ""
+  | some c => Tropical.Ir.EmitLlvm.emitKernel c
+
+private def emitParts (s : Split) : Except String (String × String × String) := do
+  let manifestJson ← s.audio.toWire
+  let ir ← Tropical.Ir.EmitLlvm.emitKernel s.audio
+  let cir ← coeffIr s
+  return (ir, cir, manifestJson.compress)
+
+/-- Debug: `TROPICAL_STAGE0_DUMP=<dir>` writes the split artifacts. -/
+private def dumpParts (ir cir manifest : String) : IO Unit := do
+  if let some dir ← IO.getEnv "TROPICAL_STAGE0_DUMP" then
+    IO.FS.writeFile s!"{dir}/audio.ll" ir
+    IO.FS.writeFile s!"{dir}/coeff.ll" cir
+    IO.FS.writeFile s!"{dir}/manifest.json" manifest
+
+/-- Split + emit + load, JIT-only. -/
+def load (rt : Tropical.Ffi.Runtime) (plan : FlatPlan) : IO Unit := do
+  let s ← split plan
+  match emitParts s with
+  | .error e => throw <| IO.userError s!"StagedLoad: {e}"
+  | .ok (ir, cir, manifest) =>
+    dumpParts ir cir manifest
+    rt.loadIrStaged ir "" cir manifest
+
+/-- Split + emit + dual load (JIT + Metal): MSL is emitted from the
+    *audio* plan — coefficients are computed host-side in f64 by the JIT
+    coefficient kernel and cross to the GPU as host-written slots. -/
+def loadMsl (rt : Tropical.Ffi.Runtime) (plan : FlatPlan) : IO Unit := do
+  let s ← split plan
+  match emitParts s, Tropical.Ir.EmitMsl.emitKernel s.audio with
+  | .error e, _ => throw <| IO.userError s!"StagedLoad: {e}"
+  | _, .error e => throw <| IO.userError s!"StagedLoad (msl): {e}"
+  | .ok (ir, cir, manifest), .ok msl => rt.loadIrStaged ir msl cir manifest
+
+end Tropical.StagedLoad

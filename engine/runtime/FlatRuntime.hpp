@@ -18,6 +18,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -62,6 +63,17 @@ struct KernelState
   tropical_jit::CompilationMode      mode   = tropical_jit::CompilationMode::Fused;
   tropical_jit::NumericKernelFn      kernel = nullptr;
   tropical_jit::MicrokernelKernels   microkernels{};
+
+  // Stage-0 coefficient kernel (optional). A second single-function module
+  // holding the plan's τ-independent instructions; run once at load (before
+  // publish) and after every control-plane slot write, materializing
+  // coefficient values into `coef:<n>` module slots the audio kernel reads.
+  // Same NumericKernelFn signature, invoked with buffer_length = 1. Both
+  // kernels keep temps as SSA (never store `%temps`), so sharing the scratch
+  // buffers with a concurrently-running audio kernel is read-only-safe;
+  // coefficient slot writes are the same tolerated one-buffer race class as
+  // set_slot itself.
+  tropical_jit::NumericKernelFn      coeff_kernel = nullptr;
 
   // Flat buffers passed to kernel (matches NumericKernelFn signature)
   std::vector<int64_t> registers;
@@ -141,6 +153,18 @@ public:
    */
   bool load_ir_msl(const std::string & ir_text, const std::string & msl_source,
                    const std::string & manifest_json);
+
+  /**
+   * Load a kernel with an optional stage-0 coefficient kernel. `msl_source`
+   * may be empty (JIT-only); `coeff_ir` may be empty (no stage-0 split).
+   * When present, the coefficient kernel is compiled as its own module,
+   * run once against the new state before publish (initial knob values
+   * exist — a first buffer reading zero-initialized coefficient slots
+   * would be a plain bug, not graceful exclusion), and re-run after every
+   * control-plane slot write.
+   */
+  bool load_ir_staged(const std::string & ir_text, const std::string & msl_source,
+                      const std::string & coeff_ir, const std::string & manifest_json);
 
   /**
    * Control-plane/test-only: reposition the active kernel's sample clock
@@ -318,7 +342,11 @@ public:
   {
     const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
     KernelState & state = states_[state_idx];
-    if (idx < state.slots.size()) state.slots[idx] = value;
+    if (idx < state.slots.size())
+    {
+      state.slots[idx] = value;
+      run_coeff(state);
+    }
   }
 
   // Read a slot value. Useful for tests and introspection. Returns 0.0
@@ -347,7 +375,12 @@ public:
     const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
     KernelState & state = states_[state_idx];
     for (uint32_t i = 0; i < state.slot_names.size(); ++i)
-      if (state.slot_names[i] == name) { state.slots[i] = value; return true; }
+      if (state.slot_names[i] == name)
+      {
+        state.slots[i] = value;
+        run_coeff(state);
+        return true;
+      }
     return false;
   }
 
@@ -359,12 +392,26 @@ public:
   // between resolve and write and land values at stale indices. Same
   // contention profile as set_slot_by_name_sync: publish_state holds the
   // lock only for the cheap transfer + flip, never the LLVM compile.
+  // The coefficient re-run after `fn` covers any slot writes it made
+  // (discipline dispatches write several slots per param event); it is
+  // idempotent, so read-only callers pay one cheap one-sample kernel call.
   template <typename Fn>
   auto with_active_state_sync(Fn && fn)
   {
     std::lock_guard<std::mutex> lock(build_mutex_);
     const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
-    return fn(states_[state_idx]);
+    KernelState & state = states_[state_idx];
+    if constexpr (std::is_void_v<std::invoke_result_t<Fn &, KernelState &>>)
+    {
+      fn(state);
+      run_coeff(state);
+    }
+    else
+    {
+      auto result = fn(state);
+      run_coeff(state);
+      return result;
+    }
   }
 
   // ── Random-access render (scope / slave consumers) ─────────────────────────
@@ -461,6 +508,26 @@ private:
   // load_ir fills the kernel handle (via compile_ir_text) between them.
   KernelState build_kernel_state(const tropical_plan5::ParsedPlan5 & parsed);
   bool publish_state(KernelState && new_state);
+
+  // Evaluate the stage-0 coefficient kernel once (one "sample") against a
+  // state's slots. No-op when the plan carried no coefficient kernel.
+  static void run_coeff(KernelState & state)
+  {
+    if (!state.coeff_kernel) return;
+    double scratch_out = 0.0;
+    state.coeff_kernel(
+      nullptr,
+      state.registers.data(),
+      state.array_ptrs.data(),
+      state.array_sizes.data(),
+      state.temps.data(),
+      state.sample_rate,
+      0,                          // start_sample_index — tick-free by construction
+      state.param_ptrs.data(),
+      &scratch_out,
+      1,
+      state.slots.data());
+  }
 
   void wait_for_state_available(uint32_t state_index) const
   {

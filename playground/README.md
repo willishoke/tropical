@@ -76,10 +76,59 @@ patches halved in size. Cache-cold, same machine:
 The residue: cold is LLVM codegen on the real (post-CSE) arithmetic —
 one ~16k-flop block — and warm is the engine-side load (kernel-object
 cache + Apple's MSL compile). Both shrink with the panel's remaining
-cuts: (2) stage-0 uniform hoisting — a binding-time index on the
-expression type, τ-free subgraphs (the composed amps: ~90% of the
-surviving flops, essentially all 2.3k fdivs) erased into a one-sample
-coefficient kernel run at param writes, results landing in slots (also
-upgrades GPU amp accuracy from in-kernel f32 to host f64 constants);
+cuts: (2) stage-0 uniform hoisting (landed — round 3 below);
 (3) banks as tables — mode loops over array slots, making compile time
 O(1) in mode count.
+
+## Round 3: stage-0 uniform hoisting (2026-07-08)
+
+Landed as a plan-level binding-time split (`Tropical.Ir.Stage0`, applied
+by `StagedLoad` at every kernel load): a forward dataflow pass over the
+flat instruction stream in emit order marks each instruction `fold`
+(const/rate-only — stays put, both emitters fold it in f64), `s0`
+(τ-independent but param-slot-derived — hoisted), or `s1` (per-sample).
+The `s0` instructions — the composed modal amplitudes, ~90% of the
+demo's flops — move verbatim into a one-sample **coefficient kernel**
+(the same `tropical_plan_5`/`EmitLlvm` pipeline, a second module) that
+the engine runs once at load and after every slot write; boundary values
+cross to the audio kernel through fresh `coef:<n>` module slots.
+
+Two findings the gates forced, in the order they bit:
+
+- **The coefficient kernel must be compiled dumb end-to-end.** At the
+  JIT's default level, the split made cold compiles WORSE (25.6 s):
+  profiling showed the wall was never "the kernel is big" but "the
+  backend is superlinear" — the loop vectorizer's VPlan churn, then
+  SelectionDAG scheduling + greedy regalloc on one huge block. O0 IR
+  passes alone made it worse still (88 s — bigger input to the same
+  backend). The fix is a sibling LLJIT at `CodeGenOptLevel::None`
+  (fast ISel, linear scheduler, regalloc-fast): the coefficient kernel
+  runs once per knob write, its codegen quality is irrelevant.
+- **`fold` must stay behind, wholesale.** EmitMsl's emit-time f64
+  constant folding propagates through in-kernel slot write→read, so
+  hoisting const-only chains (or their slot writes) demoted exact f64
+  GPU literals to f32 host-slot crossings — pure-sine fell from >140 to
+  ~109 dB SNR. With `fold` untouched, const-only patches are identity
+  plans; only live-knob graphs split, and their GPU amps IMPROVE
+  (one f32 rounding of a host f64 value instead of thousands of f32
+  in-kernel flops).
+
+Measured cache-cold (JIT path), same machine — and note the scaling in
+mode count is now nearly flat, because everything that scales with
+modes lives in the coefficient kernel:
+
+| graph | round 2 | round 3 |
+|---|---|---|
+| 1 ring → reverb(32) | 5.8 s | 4.5 s |
+| 1 ring → reverb → filter | 3.8 s | 2.5 s |
+| 1 ring → filter → reverb | 5.2 s | 3.8 s |
+| 2 rings → reverb → filter | 6.8 s | 3.3 s |
+| 4 rings → reverb | 14.6 s | 2.6 s |
+| 4 rings → reverb → filter (the demo circuit) | 17.0 s cold / 5.3 s warm | **5.2 s cold / 3.1 s warm** |
+
+Gates: audio goldens 68/68 byte-identical cold-cache (hoisting moved no
+output bit), wasm≡JIT, metal_vs_jit 8/8 (~140 dB flat). modal_heavy64
+stays at 92.5 dB: its params bind as per-program FFI operands (stage-1
+by rule — that path has no re-run hook), so its amps never hoist; the
+predicted GPU-amp-accuracy win applies to the session/knob path the
+demo actually uses. `TROPICAL_STAGE0=0` disables the split for A/B.

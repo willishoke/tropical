@@ -11,11 +11,12 @@
 const rpc = (m, p) => window.tropical.call(m, p)
 
 // ── the circuit ──────────────────────────────────────────────────────────────
-// The modal REVERB is back: the strata passes now walk the shared DAG with
-// memos (see the scaling finding in playground/README.md), so the 24 ring
-// modes compose through the 32-mode room in seconds. What remains is LLVM
-// compiling the one giant kernel (cache-cold ~a minute, cached ~10 s);
-// stage-0 uniform hoisting is the next cut. Reverb BEFORE the filter —
+// The modal REVERB is back, and the compile wall is gone: the strata passes
+// walk the shared DAG with memos, and stage-0 hoisting moves the composed
+// amplitudes (~90% of the flops — everything that scales with mode count)
+// into a one-sample coefficient kernel compiled dumb and re-run at knob
+// writes (see playground/README.md). The whole circuit now loads
+// cache-cold in a few seconds. Reverb BEFORE the filter —
 // compose small-into-big last.
 const GRAPH = {
   nodes: [
@@ -230,7 +231,7 @@ async function boot() {
   renderPanel()
   drawDiagram()
   try {
-    status.textContent = 'compiling the circuit… (one closed-form kernel incl. the 32-mode room — first run ~a minute, cached ~10 s)'
+    status.textContent = 'compiling the circuit… (one closed-form kernel incl. the 32-mode room — a few seconds)'
     await rpc('load_patch_graph', GRAPH)
     let audio = 'GPU · METAL'
     try { await rpc('start_audio', {}) } catch { audio = 'NO AUDIO DEVICE' }

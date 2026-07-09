@@ -8,6 +8,7 @@ import Tropical.Ir.Core
 import Tropical.Ir.CompileResolved
 import Tropical.Ir.EmitLlvm
 import Tropical.Ir.EmitMsl
+import Tropical.StagedLoad
 import Tropical.PlanDecode
 import Tropical.Engine
 import Tropical.Parse.Surface.Markdown
@@ -79,18 +80,15 @@ def renderBytes (args : List String) : IO UInt32 := do
   let buffer := parseNatFlag args "--buffer" 256
   let start := parseNatFlag args "--start" 0
   let planJson ← IO.FS.readFile planPath
-  -- Lean owns codegen: parse the plan, emit IR, load via load_ir (planJson
-  -- doubles as the metadata manifest). There is no C++ plan compiler.
+  -- Lean owns codegen: parse the plan, stage-0 split + emit IR, load via
+  -- load_ir_staged. There is no C++ plan compiler.
   let plan ← match Lean.Json.parse planJson with
     | .error e => IO.eprintln s!"render-bytes: parse: {e}"; return 1
     | .ok j => match Tropical.Plan.FlatPlan.ofWire j with
       | .error e => IO.eprintln s!"render-bytes: ofWire: {e}"; return 1
       | .ok p => pure p
-  let ir ← match Tropical.Ir.EmitLlvm.emitKernel plan with
-    | .ok s => pure s
-    | .error e => IO.eprintln s!"render-bytes: emitKernel: {e}"; return 1
   let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
-  rt.loadIr ir planJson
+  Tropical.StagedLoad.load rt plan
   if start != 0 then rt.setSampleIndex start.toUInt64
   let stdout ← IO.getStdout
   for _ in [0:frames] do
@@ -117,14 +115,8 @@ def renderMetal (args : List String) : IO UInt32 := do
     | .ok j => match Tropical.Plan.FlatPlan.ofWire j with
       | .error e => IO.eprintln s!"render-metal: ofWire: {e}"; return 1
       | .ok p => pure p
-  let ir ← match Tropical.Ir.EmitLlvm.emitKernel plan with
-    | .ok s => pure s
-    | .error e => IO.eprintln s!"render-metal: emitKernel: {e}"; return 1
-  let msl ← match Tropical.Ir.EmitMsl.emitKernel plan with
-    | .ok s => pure s
-    | .error e => IO.eprintln s!"render-metal: emitKernel (msl): {e}"; return 1
   let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
-  rt.loadIrMsl ir msl planJson
+  Tropical.StagedLoad.loadMsl rt plan
   if start != 0 then rt.setSampleIndex start.toUInt64
   let stdout ← IO.getStdout
   for _ in [0:frames] do

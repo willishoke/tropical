@@ -1,5 +1,6 @@
 import Tropical.Ffi
 import Tropical.Engine
+import Tropical.StagedLoad
 import Tropical.Playground
 import Tropical.Plan
 import Tropical.Ir.EmitLlvm
@@ -33,20 +34,17 @@ private def FRAMES : Nat := 16
 private def BUFFER : Nat := 256
 
 /-- Render a plan JSON to its raw little-endian f64 PCM bytes (16×256 = 4096
-    samples). Lean owns codegen: parse the plan, emit IR (EmitLlvm), load via
-    load_ir. The goldens reproduce because EmitLlvm is byte-identical to the
-    retired C++ plan compiler (proven across the corpus in Phase 1b). -/
+    samples). Lean owns codegen: parse the plan, stage-0 split + emit IR
+    (StagedLoad → EmitLlvm), load via load_ir_staged. The goldens byte-gate
+    the split: hoisting must not move a single output bit. -/
 def renderPlanBytes (planJson : String) : IO ByteArray := do
   let plan ← match Lean.Json.parse planJson with
     | .error e => throw (IO.userError s!"renderPlanBytes: parse: {e}")
     | .ok j => match Tropical.Plan.FlatPlan.ofWire j with
       | .error e => throw (IO.userError s!"renderPlanBytes: ofWire: {e}")
       | .ok p => pure p
-  let ir ← match Tropical.Ir.EmitLlvm.emitKernel plan with
-    | .error e => throw (IO.userError s!"renderPlanBytes: emitKernel: {e}")
-    | .ok s => pure s
   let rt ← Tropical.Ffi.Runtime.new BUFFER.toUInt32
-  rt.loadIr ir planJson
+  Tropical.StagedLoad.load rt plan
   let mut acc := ByteArray.empty
   for _ in [0:FRAMES] do
     rt.process
@@ -89,19 +87,18 @@ def compilePatchArrow (path : String) (mode : Tropical.Plan.CompilationMode) :
   | .ok planJson => pure (.ok planJson)
   | .error f => pure (.error f.toJson.compress)
 
-/-- Render a FlatPlan via the Lean-emitted-IR path (EmitLlvm → load_ir). -/
+/-- Render a FlatPlan via the Lean-emitted-IR path (stage-0 split →
+    EmitLlvm → load_ir_staged). -/
 def renderIrBytes (plan : Tropical.Plan.FlatPlan) : IO (Except String ByteArray) := do
-  match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
-  | .ok manifest, .ok ir =>
+  try
     let rt ← Tropical.Ffi.Runtime.new BUFFER.toUInt32
-    rt.loadIr ir manifest.compress
+    Tropical.StagedLoad.load rt plan
     let mut acc := ByteArray.empty
     for _ in [0:FRAMES] do
       rt.process
       acc := acc ++ (← rt.outputBytes)
     pure (.ok acc)
-  | .error e, _ => pure (.error s!"toWire: {e}")
-  | _, .error e => pure (.error s!"emitKernel: {e}")
+  catch e => pure (.error e.toString)
 
 private def firstLine (s : String) : String := (s.splitOn "\n").headD ""
 
@@ -303,13 +300,11 @@ private def renderSamples (planJson : String) (n : Nat) : IO (Except String (Arr
   | .error e => pure (.error s!"parse: {e}")
   | .ok j => match Tropical.Plan.FlatPlan.ofWire j with
     | .error e => pure (.error s!"ofWire: {e}")
-    | .ok plan => match Tropical.Ir.EmitLlvm.emitKernel plan with
-      | .error e => pure (.error s!"emitKernel: {e}")
-      | .ok ir => do
-        let rt ← Tropical.Ffi.Runtime.new (UInt32.ofNat n)
-        rt.loadIr ir planJson
-        rt.process
-        pure (.ok (decodeF64LE (← rt.outputBytes)))
+    | .ok plan => do
+      let rt ← Tropical.Ffi.Runtime.new (UInt32.ofNat n)
+      Tropical.StagedLoad.load rt plan
+      rt.process
+      pure (.ok (decodeF64LE (← rt.outputBytes)))
 
 /-- Compile the reversible probe patch, render `2*half` samples, assert the
     output is a bit-exact palindrome about index `half` (and non-silent). -/
@@ -904,14 +899,12 @@ private def compileTapCarrier (arena : Arena) (resolved : Array (String × Progr
     fade), like `renderSamples` but from an in-hand plan. -/
 private def renderPlanSamples (plan : Tropical.Plan.FlatPlan) (n : Nat) :
     IO (Except String (Array Float)) := do
-  match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
-  | .ok manifest, .ok ir =>
+  try
     let rt ← Tropical.Ffi.Runtime.new (UInt32.ofNat n)
-    rt.loadIr ir manifest.compress
+    Tropical.StagedLoad.load rt plan
     rt.process
     pure (.ok (decodeF64LE (← rt.outputBytes)))
-  | .error e, _ => pure (.error s!"toWire: {e}")
-  | _, .error e => pure (.error s!"emitKernel: {e}")
+  catch e => pure (.error e.toString)
 
 /-- THE NON-FACADE GATE: tropical's clock-warped FIR ≡ an array-shift convolution
     of the independently-rendered bare oscillator. -/
@@ -2003,17 +1996,19 @@ private def runModalLive (arena : Arena)
   | .error e => IO.println s!"  FAIL  modal-live  compile: {firstLine e}"; pure false
   | .ok (plan, _) =>
     match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
-    | .ok manifest, .ok ir =>
+    | .ok _, .ok _ =>
       -- A slot that EXISTS but is never READ is a dead knob — exactly the
       -- reverb-discards-the-voice regression (the pitch knob accepted writes into
       -- a slot no instruction referenced). So presence is only half the gate: run
       -- two identical runtimes a block, move `res.freq` on ONE, and require the
       -- next blocks to diverge THROUGH the reverb. Identical second blocks =
-      -- dead knob = FAIL.
+      -- dead knob = FAIL. Under the stage-0 split this also gates the
+      -- coefficient re-run: the amps live in the coefficient kernel, so the
+      -- divergence only happens if set_slot re-runs it.
       let rt ← Tropical.Ffi.Runtime.new 2048
-      rt.loadIr ir manifest.compress
+      Tropical.StagedLoad.load rt plan
       let rt2 ← Tropical.Ffi.Runtime.new 2048
-      rt2.loadIr ir manifest.compress
+      Tropical.StagedLoad.load rt2 plan
       let fIdx? ← rt.slotIndex? "param:res.freq"
       let dPresent := (← rt.slotIndex? "param:res.decay").isSome
       let rtPresent := (← rt.slotIndex? "param:rev.rt60").isSome
@@ -2115,11 +2110,11 @@ private def runModalFilter (arena : Arena)
       | .error e => IO.println s!"  FAIL  modal-filter  (C) compile: {firstLine e}"; pure false
       | .ok (plan, _) =>
       match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
-      | .ok manifest, .ok ir =>
+      | .ok _, .ok _ =>
         let rt ← Tropical.Ffi.Runtime.new 2048
-        rt.loadIr ir manifest.compress
+        Tropical.StagedLoad.load rt plan
         let rt2 ← Tropical.Ffi.Runtime.new 2048
-        rt2.loadIr ir manifest.compress
+        Tropical.StagedLoad.load rt2 plan
         let v0? ← rt.slotIndex? "param:flt.cutoff#v0"
         let v1? ← rt.slotIndex? "param:flt.cutoff#v1"
         rt.process; rt2.process
