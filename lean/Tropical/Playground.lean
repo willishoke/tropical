@@ -767,7 +767,8 @@ private def tapNodeIds (raws : Array Raw) : Array String :=
     `render_window` can read it. Taps cost extra kernel compute (each re-emits its
     upstream cone), so they're for the inspection build, not a lean audio path. -/
 def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j : Json) :
-    Except String (Tropical.Plan.FlatPlan × Array Tap) := do
+    Except String (Tropical.Plan.FlatPlan × Array Tap
+      × Array (Array (Option Tropical.Ir.Stage))) := do
   let (g, paramTable) ← decodeGraph j
   let term ← lowerGraph g
   let (out, b0) := emitTerm (normalize term) {}
@@ -812,7 +813,7 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
     root := core
     arena := coreArena
     mode := .fused }
-  let plan ← Tropical.Compile.compileSession input
+  let (plan, stageBlocks) ← Tropical.Compile.compileSessionStaged input
   -- The host-contract dispatch table rides the manifest: any runtime host
   -- (C++ today, Swift/Metal or wasm tomorrow) reads per-slot disciplines from
   -- the plan itself and dispatches param writes locally.
@@ -822,7 +823,7 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
   let root := Tropical.Compile.rootInstancePath
   let taps : Array Tap := #[("out", root, "out")]
     ++ tapSigs.map (fun (id, _) => (id, root, s!"tap:{id}"))
-  pure (plan, taps)
+  pure (plan, taps, stageBlocks)
 
 -- ── Stdlib-into-arena (cached; mirrors Tropicaltest.arrowElabStdlib) ─────────
 def elabStdlib : IO (Except String (Arena × Array (String × ProgramIdx))) := do
@@ -869,8 +870,10 @@ def getStdlib : IO (Except String (Arena × Array (String × ProgramIdx))) := do
 def knobParams (j : Json) : Array (String × Json) :=
   (collectParams (rawsOf j)).map (fun (nm, v) => (nm, Json.num v))
 
-/-- Decode + lower + compile the GUI graph to a loadable `FlatPlan` + its taps. -/
-def compilePlan (j : Json) : IO (Except String (Tropical.Plan.FlatPlan × Array Tap)) := do
+/-- Decode + lower + compile the GUI graph to a loadable `FlatPlan` + its
+    taps + typed stage blocks (the split classification). -/
+def compilePlan (j : Json) : IO (Except String (Tropical.Plan.FlatPlan × Array Tap
+    × Array (Array (Option Tropical.Ir.Stage)))) := do
   match ← getStdlib with
   | .error e => pure (.error s!"stdlib elaboration: {e}")
   | .ok (arena, resolved) => pure (compilePlanPure arena resolved j)

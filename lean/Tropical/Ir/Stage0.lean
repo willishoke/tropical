@@ -288,13 +288,11 @@ def classify (plan : FlatPlan) : Array Stage × Array Bool := Id.run do
 -- Split
 -- ─────────────────────────────────────────────────────────────
 
-/-- Split a plan into its audio and coefficient stages. Identity
-    (`coeff? = none`, plan returned untouched) when nothing hoists. -/
-def hoist (plan : FlatPlan) : Split := Id.run do
-  let mut allBlocks : Array (Array NInstr) := #[]
-  for f in plan.instanceFunctions do
-    allBlocks := allBlocks ++ collectBlocks f
-  let a := analyze plan allBlocks
+/-- Shared split assembly: given a placement (`Analysis` — from the flow
+    `analyze` or the typed `placementFromStages`), rebuild the audio plan
+    and the coefficient plan. Identity when nothing hoists. -/
+private def rebuild (plan : FlatPlan) (allBlocks : Array (Array NInstr))
+    (a : Analysis) : Split := Id.run do
   if !(a.hoisted.any id) then
     return { audio := plan, coeff? := none }
 
@@ -365,5 +363,173 @@ def hoist (plan : FlatPlan) : Split := Id.run do
     sinks := #[]
     paramDisciplines := #[] }
   return { audio, coeff? := some coeff }
+
+/-- Split a plan into its audio and coefficient stages via the FLOW
+    classification (the plan-level reference pass — the only splitter
+    available where the arena is gone, i.e. plans parsed from JSON). -/
+def hoist (plan : FlatPlan) : Split := Id.run do
+  let mut allBlocks : Array (Array NInstr) := #[]
+  for f in plan.instanceFunctions do
+    allBlocks := allBlocks ++ collectBlocks f
+  return rebuild plan allBlocks (analyze plan allBlocks)
+
+-- ─────────────────────────────────────────────────────────────
+-- Typed placement — the split driven by the intern-time attribute
+-- ─────────────────────────────────────────────────────────────
+
+/-- The v1 conservatism overlay at instruction level: arrays stay
+    per-sample, and the per-program FFI leaves (`param` handles, raw
+    `input` reads) have no control-time evaluator. -/
+private def overlayS1 (i : NInstr) : Bool :=
+  (match i.dst with
+    | .array _ => true | .sessionArray _ => true | _ => false)
+  || i.args.any fun a => match a with
+    | .arrayReg _ | .sessionArrayReg _ | .param _ _ | .input _ _ => true
+    | _ => false
+
+/-- Placement from the TYPED stages (per linear instruction, the
+    partitioner's emit-order blocks). Unlike the flow pass — whose
+    availability facts are baked into its classification — the typed
+    stages are value facts only, so placement enforces availability
+    explicitly: an instruction hoists only if every temp def and every
+    sole-writer slot it reads is itself hoisted, fold-duplicable, or
+    external (never written in-plan). Fold-valued support — temp chains
+    AND sole-writer slot writes (the wire crossings the flow pass could
+    not see through) — is duplicated into the coefficient stream; a
+    dependency that is neither available nor duplicable simply keeps its
+    reader in the audio kernel (the cascade is the forward walk itself,
+    since defs precede uses). -/
+private def placementFromStages (blocks : Array (Array NInstr))
+    (linStages : Array (Option Stage)) : Except String Analysis := do
+  -- Prepass: per-slot in-plan writers.
+  let mut slotWriters : HashMap Nat (Array Nat) := {}
+  let mut flat : Array NInstr := #[]
+  for block in blocks do
+    for instr in block do
+      if let .moduleSlot m := instr.dst then
+        slotWriters := slotWriters.insert m ((slotWriters.getD m #[]).push flat.size)
+      flat := flat.push instr
+  if flat.size != linStages.size then
+    throw s!"Stage0.placementFromStages: {flat.size} instructions but {linStages.size} stages"
+
+  let stageAt (i : Nat) : Stage :=
+    match linStages[i]? with
+    | some (some s) => if overlayS1 flat[i]! then .s1 else s
+    | _ => .s1
+
+  let mut hoisted : Array Bool := #[]
+  let mut defMeta : Array (Option (Nat × ScalarType)) := #[]
+  let mut boundarySet : HashMap Nat Unit := {}
+  let mut rewrites : HashMap Nat (Array (Nat × Nat)) := {}
+  let mut tempDef : HashMap Nat Nat := {}
+  let mut dupSeeds : Array Nat := #[]
+  for idx in [0:flat.size] do
+    let instr := flat[idx]!
+    let stage := stageAt idx
+    -- Availability of every read, given the placement so far.
+    let mut avail := true
+    let mut seeds : Array Nat := #[]
+    if stage == .s0 then
+      for arg in instr.args do
+        match arg with
+        | .reg t _ =>
+          match tempDef.get? t with
+          | none => pure ()                       -- zero fallback: constant
+          | some d =>
+            if hoisted[d]! then pure ()
+            else if stageAt d == .fold then seeds := seeds.push d
+            else avail := false
+        | .slot i _ =>
+          match slotWriters.getD i #[] with
+          | #[] => pure ()                        -- external (param/default)
+          | #[w] =>
+            if w < idx && hoisted[w]! then pure ()
+            else if w < idx && stageAt w == .fold then seeds := seeds.push w
+            else avail := false
+          | _ => avail := false                   -- multi-writer: stay
+        | _ => pure ()
+    let hoist := stage == .s0 && avail &&
+      (match instr.dst with
+        | .temp _ => true
+        | .moduleSlot m => slotWriters.getD m #[] == #[idx]
+        | _ => false)
+    if hoist then
+      dupSeeds := dupSeeds ++ seeds
+    else
+      -- Reads of hoisted defs must come through coefficient slots.
+      let mut rw : Array (Nat × Nat) := #[]
+      for pos in [0:instr.args.size] do
+        if let .reg t _ := instr.args[pos]! then
+          if let some d := tempDef.get? t then
+            if hoisted[d]! then
+              rw := rw.push (pos, d)
+              boundarySet := boundarySet.insert d ()
+      if !rw.isEmpty then
+        rewrites := rewrites.insert idx rw
+    hoisted := hoisted.push hoist
+    match instr.dst with
+    | .temp t =>
+      defMeta := defMeta.push (some (t, instr.resultType))
+      tempDef := tempDef.insert t idx
+    | _ => defMeta := defMeta.push none
+
+  -- Duplication closure over fold support: temp defs and sole-writer
+  -- slot writes referenced (transitively) by hoisted instructions.
+  let mut needFold : HashMap Nat Unit := {}
+  let mut work := dupSeeds
+  -- Reaching defs must be recomputed per reference point for exactness;
+  -- for fold chains a simpler global map suffices because fold defs are
+  -- never shadowed by later defs of the same temp in-corpus. Guard it:
+  -- walk each duplicated instr's args through the same availability
+  -- rules and fail loudly on anything non-duplicable.
+  let lastDef : HashMap Nat Nat := Id.run do
+    let mut m : HashMap Nat Nat := {}
+    for i in [0:flat.size] do
+      if let .temp t := flat[i]!.dst then
+        if stageAt i == .fold then m := m.insert t i
+      pure ()
+    return m
+  while !work.isEmpty do
+    let d := work.back!
+    work := work.pop
+    if !(needFold.contains d) then
+      if stageAt d != .fold then
+        throw s!"Stage0.placementFromStages: duplicated instr {d} is not fold-stage (placement bug)"
+      needFold := needFold.insert d ()
+      for arg in flat[d]!.args do
+        match arg with
+        | .reg t _ =>
+          match lastDef.get? t with
+          | some dd => work := work.push dd
+          | none => pure ()                       -- zero fallback
+        | .slot i _ =>
+          match slotWriters.getD i #[] with
+          | #[] => pure ()
+          | #[w] =>
+            if !(hoisted[w]!) then
+              if stageAt w == .fold then work := work.push w
+              else throw s!"Stage0.placementFromStages: fold instr {d} reads slot {i} with non-fold surviving writer (placement bug)"
+          | _ => throw s!"Stage0.placementFromStages: fold instr {d} reads multi-writer slot {i} (placement bug)"
+        | _ => pure ()
+
+  -- Coefficient slot ordinals: ascending def index, deterministic.
+  let mut boundary : Array (Nat × Nat × ScalarType) := #[]
+  for d in [0:defMeta.size] do
+    if boundarySet.contains d then
+      match defMeta[d]! with
+      | some (t, ty) => boundary := boundary.push (d, t, ty)
+      | none => throw "Stage0.placementFromStages: boundary def is not a temp def"
+  let stages := (Array.range flat.size).map stageAt
+  return { stages, hoisted, needFold, boundary, rewrites }
+
+/-- Split a plan via the TYPED per-instruction stages (the partitioner's
+    emit-order blocks from `compileSessionStaged`). -/
+def hoistTyped (plan : FlatPlan)
+    (stageBlocks : Array (Array (Option Stage))) : Except String Split := do
+  let mut allBlocks : Array (Array NInstr) := #[]
+  for f in plan.instanceFunctions do
+    allBlocks := allBlocks ++ collectBlocks f
+  let a ← placementFromStages allBlocks (stageBlocks.flatten)
+  return rebuild plan allBlocks a
 
 end Tropical.Ir.Stage0

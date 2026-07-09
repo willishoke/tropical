@@ -26,9 +26,21 @@ open Tropical.Ir.Stage0 (Split hoist)
 def enabled : IO Bool := do
   pure ((← IO.getEnv "TROPICAL_STAGE0") != some "0")
 
-/-- The env-gated split. -/
+/-- The env-gated split (flow classification — the only splitter where
+    the arena is gone, i.e. plans parsed from JSON). -/
 def split (plan : FlatPlan) : IO Split := do
   if ← enabled then pure (hoist plan)
+  else pure { audio := plan, coeff? := none }
+
+/-- The env-gated TYPED split: classification from the intern-time
+    stage attribute (the partitioner's emit-order stage blocks), the
+    production path wherever the session compile is in hand. -/
+def splitTyped (plan : FlatPlan)
+    (stageBlocks : Array (Array (Option Tropical.Ir.Stage))) : IO Split := do
+  if ← enabled then
+    match Tropical.Ir.Stage0.hoistTyped plan stageBlocks with
+    | .ok s => pure s
+    | .error e => throw <| IO.userError s!"StagedLoad (typed split): {e}"
   else pure { audio := plan, coeff? := none }
 
 /-- The coefficient kernel's IR — empty string when nothing hoisted
@@ -69,5 +81,15 @@ def loadMsl (rt : Tropical.Ffi.Runtime) (plan : FlatPlan) : IO Unit := do
   | .error e, _ => throw <| IO.userError s!"StagedLoad: {e}"
   | _, .error e => throw <| IO.userError s!"StagedLoad (msl): {e}"
   | .ok (ir, cir, manifest), .ok msl => rt.loadIrStaged ir msl cir manifest
+
+/-- Typed split + emit + load, JIT-only. -/
+def loadTyped (rt : Tropical.Ffi.Runtime) (plan : FlatPlan)
+    (stageBlocks : Array (Array (Option Tropical.Ir.Stage))) : IO Unit := do
+  let s ← splitTyped plan stageBlocks
+  match emitParts s with
+  | .error e => throw <| IO.userError s!"StagedLoad: {e}"
+  | .ok (ir, cir, manifest) =>
+    dumpParts ir cir manifest
+    rt.loadIrStaged ir "" cir manifest
 
 end Tropical.StagedLoad

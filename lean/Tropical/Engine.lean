@@ -235,8 +235,12 @@ def buildKernelIr (plan : Tropical.Plan.FlatPlan) : EngineM (String × String) :
     host-written slots). Any emit failure errors BEFORE the load, so the
     previous kernel keeps playing — the same recoverable contract as the
     IR path. -/
-def loadKernel (env : Env) (plan : Tropical.Plan.FlatPlan) : EngineM Unit := do
-  let split ← Tropical.StagedLoad.split plan
+def loadKernel (env : Env) (plan : Tropical.Plan.FlatPlan)
+    (stages? : Option (Array (Array (Option Tropical.Ir.Stage))) := none) :
+    EngineM Unit := do
+  let split ← match stages? with
+    | some blocks => Tropical.StagedLoad.splitTyped plan blocks
+    | none => Tropical.StagedLoad.split plan
   let (ir, planJson) ← buildKernelIr split.audio
   let coeffIr ← match Tropical.StagedLoad.coeffIr split with
     | .error msg => internalError s!"EmitLlvm (coeff): {msg}"
@@ -583,7 +587,7 @@ def syncCompile (env : Env) : EngineM Unit := do
       | internalError s!"syncCompile: instance '{n}' program '{pname}' missing from root registry (engine bug)"
     coreInstances := coreInstances.push (n, core)
 
-  let plan ← match Tropical.Compile.compileSession {
+  let (plan, stageBlocks) ← match Tropical.Compile.compileSessionStaged {
       instances := coreInstances
       wiresPost
       graphOutputs := st.graphOutputs
@@ -594,8 +598,9 @@ def syncCompile (env : Env) : EngineM Unit := do
     | .error msg => internalError msg
     | .ok p => pure p
   -- Lean owns codegen: emit the kernel artifacts from the in-memory plan
-  -- and hand them to the engine (planJson is the metadata manifest).
-  loadKernel env plan
+  -- and hand them to the engine (planJson is the metadata manifest). The
+  -- split is TYPED here — the session compile is in hand.
+  loadKernel env plan (some stageBlocks)
 
 /-- Harness-only (diffcli `compile`): rebuild the plan from the current
     mirror at an arbitrary compilation mode, WITHOUT loading it or
@@ -2186,10 +2191,10 @@ def handleListScopeTaps (env : Env) : EngineM Json := do
     `compileSession → buildKernelIr → loadIr` tail. A compile failure errors
     BEFORE `loadIr`, so the previous kernel keeps playing. -/
 def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
-  let (plan, taps) ← match ← Tropical.Playground.compilePlan args with
+  let (plan, taps, stageBlocks) ← match ← Tropical.Playground.compilePlan args with
     | .error e => internalError e
     | .ok p => pure p
-  loadKernel env plan
+  loadKernel env plan (some stageBlocks)
   -- Seed the session param mirror with the graph's knobs so `set_param` — which
   -- guards on the mirror, then drives the live `param:<name>` slot — reaches them
   -- without a relower. Replaces (not appends): the mirror tracks the current graph.

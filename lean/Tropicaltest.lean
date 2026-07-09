@@ -173,11 +173,37 @@ private def sortedNames (dir : String) (suffix : String) : IO (Array String) := 
     if e.fileName.endsWith suffix then some (e.fileName.dropRight suffix.length) else none
   pure (names.qsort fun a b => decide (a < b))
 
-/-- Compile a patch (fused) and hash its rendered 16×256 output. -/
+/-- Compile a patch through the session mirror, returning the plan plus
+    the typed per-instruction stage blocks (the split classification). -/
+def compilePatchStaged (path : String) :
+    IO (Except String (Tropical.Plan.FlatPlan
+      × Array (Array (Option Tropical.Ir.Stage)))) := do
+  let env ← Tropical.Engine.boot
+  let act : Tropical.EngineM _ := do
+    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str path)])
+    Tropical.Engine.compileMirrorStaged env .fused
+  match ← act.run with
+  | .ok (_, plan, blocks) => pure (.ok (plan, blocks))
+  | .error f => pure (.error f.toJson.compress)
+
+/-- Render a FlatPlan via the TYPED split (stage attribute →
+    hoistTyped → EmitLlvm → load_ir_staged). -/
+def renderTypedBytes (plan : Tropical.Plan.FlatPlan)
+    (blocks : Array (Array (Option Tropical.Ir.Stage))) : IO ByteArray := do
+  let rt ← Tropical.Ffi.Runtime.new BUFFER.toUInt32
+  Tropical.StagedLoad.loadTyped rt plan blocks
+  let mut acc := ByteArray.empty
+  for _ in [0:FRAMES] do
+    rt.process
+    acc := acc ++ (← rt.outputBytes)
+  pure acc
+
+/-- Compile a patch (fused) and hash its rendered 16×256 output. The
+    render goes through the TYPED split — the goldens byte-gate it. -/
 private def hashOf (patchPath : String) : IO (Except String String) := do
-  match ← compilePatch patchPath .fused with
+  match ← compilePatchStaged patchPath with
   | .error e => pure (.error e)
-  | .ok planJson => pure (.ok (← sha256Hex (← renderPlanBytes planJson)))
+  | .ok (plan, blocks) => pure (.ok (← sha256Hex (← renderTypedBytes plan blocks)))
 
 /-- A file-backed patch golden: compare to `goldenPath`, or rewrite it under
     `--write` (the `validate_stdlib --write` re-baseline, now Lean-owned). -/
@@ -1994,7 +2020,7 @@ private def runModalLive (arena : Arena)
   | .ok j =>
   match Tropical.Playground.compilePlanPure arena resolved j with
   | .error e => IO.println s!"  FAIL  modal-live  compile: {firstLine e}"; pure false
-  | .ok (plan, _) =>
+  | .ok (plan, _, stageBlocks) =>
     match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
     | .ok _, .ok _ =>
       -- A slot that EXISTS but is never READ is a dead knob — exactly the
@@ -2006,9 +2032,9 @@ private def runModalLive (arena : Arena)
       -- coefficient re-run: the amps live in the coefficient kernel, so the
       -- divergence only happens if set_slot re-runs it.
       let rt ← Tropical.Ffi.Runtime.new 2048
-      Tropical.StagedLoad.load rt plan
+      Tropical.StagedLoad.loadTyped rt plan stageBlocks
       let rt2 ← Tropical.Ffi.Runtime.new 2048
-      Tropical.StagedLoad.load rt2 plan
+      Tropical.StagedLoad.loadTyped rt2 plan stageBlocks
       let fIdx? ← rt.slotIndex? "param:res.freq"
       let dPresent := (← rt.slotIndex? "param:res.decay").isSome
       let rtPresent := (← rt.slotIndex? "param:rev.rt60").isSome
@@ -2060,7 +2086,7 @@ private def renderFilterPatch (arena : Arena) (resolved : Array (String × Progr
     (j : Lean.Json) (n : Nat) : IO (Except String (Array Float)) := do
   match Tropical.Playground.compilePlanPure arena resolved j with
   | .error e => pure (.error s!"compile: {firstLine e}")
-  | .ok (plan, _) =>
+  | .ok (plan, _, _) =>
     match ← renderPlanSamples plan n with
     | .error e => pure (.error s!"render: {firstLine e}")
     | .ok samples => pure (.ok samples)
@@ -2108,13 +2134,13 @@ private def runModalFilter (arena : Arena)
       -- (C) live cutoff on one of two twin runtimes
       match Tropical.Playground.compilePlanPure arena resolved (filterPatchJson 800 5 1 220 4) with
       | .error e => IO.println s!"  FAIL  modal-filter  (C) compile: {firstLine e}"; pure false
-      | .ok (plan, _) =>
+      | .ok (plan, _, stageBlocks) =>
       match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
       | .ok _, .ok _ =>
         let rt ← Tropical.Ffi.Runtime.new 2048
-        Tropical.StagedLoad.load rt plan
+        Tropical.StagedLoad.loadTyped rt plan stageBlocks
         let rt2 ← Tropical.Ffi.Runtime.new 2048
-        Tropical.StagedLoad.load rt2 plan
+        Tropical.StagedLoad.loadTyped rt2 plan stageBlocks
         let v0? ← rt.slotIndex? "param:flt.cutoff#v0"
         let v1? ← rt.slotIndex? "param:flt.cutoff#v1"
         rt.process; rt2.process
@@ -2170,7 +2196,7 @@ private def runModalAddr (arena : Arena)
     | .error _ => false
     | .ok j => match Tropical.Playground.compilePlanPure arena resolved j with
       | .error _ => false
-      | .ok (plan, _) => (Tropical.Ir.EmitLlvm.emitKernel plan).toOption.isSome
+      | .ok (plan, _, _) => (Tropical.Ir.EmitLlvm.emitKernel plan).toOption.isSome
   match buildAndFinish (.ok (buildModalBankArrow "ma_ref" modes (lit 0) arena)),
         buildAndFinish (.ok (buildModalAddrRamp "ma_id" modes (lit 0) 0.0 arena)),
         buildAndFinish (.ok (buildModalAddrRamp "ma_off" modes (lit 0) onsetSec arena)) with
@@ -2273,7 +2299,7 @@ private def runVocabDriven (arena : Arena)
     let patch := Lean.Json.mkObj [("nodes", Lean.Json.arr nodes), ("out", .str "outn")]
     match Tropical.Playground.compilePlanPure arena resolved patch with
     | .error e => ok := false; issues := issues.push s!"{kind}: compile: {firstLine e}"
-    | .ok (plan, _) =>
+    | .ok (plan, _, _) =>
       covered := covered + 1
       -- every table knob must land as a slot: raw/anchor knobs under the bare
       -- name, glided knobs as their #v0 anchor triple.
@@ -2385,7 +2411,7 @@ private def runManifestDisciplines (arena : Arena)
   | .ok ju, .ok jw =>
     match Tropical.Playground.compilePlanPure arena resolved ju,
           Tropical.Playground.compilePlanPure arena resolved jw with
-    | .ok (pu, _), .ok (pw, _) =>
+    | .ok (pu, _, _), .ok (pw, _, _) =>
       let mut issues := check "unwired" pu ++ check "wired" pw
       if !(pu.paramDisciplines.any (·.name == "sfw.rate")) then
         issues := issues.push "unwired: sfw.rate missing from disciplines"
@@ -2468,7 +2494,7 @@ private def runDeadSlotLint (arena : Arena)
     | .ok j =>
       match Tropical.Playground.compilePlanPure arena resolved j with
       | .error e => IO.println s!"  FAIL  dead-slot-lint  {label}: compile: {firstLine e}"; ok := false
-      | .ok (plan, _) =>
+      | .ok (plan, _, _) =>
         -- Byte-identity harness for refactor phases: TROPICAL_DUMP_PLANS=<dir>
         -- writes each canonical plan's wire form for before/after comparison
         -- (a refactor that promises plan identity proves it with `cmp`).
@@ -2640,17 +2666,6 @@ private def runSessionViaArrowEquiv : IO Bool := do
 -- availability rule stops at the surviving writer) — and are reported, not
 -- failed; Phase 2's byte-identical-audio differential is the semantic gate
 -- on hoisting them.
-private def compilePatchStaged (path : String) :
-    IO (Except String (Tropical.Plan.FlatPlan
-      × Array (Array (Option Tropical.Ir.Stage)))) := do
-  let env ← Tropical.Engine.boot
-  let act : Tropical.EngineM _ := do
-    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str path)])
-    Tropical.Engine.compileMirrorStaged env .fused
-  match ← act.run with
-  | .ok (_, plan, blocks) => pure (.ok (plan, blocks))
-  | .error f => pure (.error f.toJson.compress)
-
 /-- The v1 array/param/input conservatism overlay: the flow pass pins
     these to s1 at the *instruction* level, so the typed side must be
     compared under the same placement rule. -/
@@ -2704,6 +2719,35 @@ private def runStageDifferential : IO Bool := do
     IO.println (s!"  PASS  stage-diff  typed ⊑ flow over {compared} instructions "
       ++ s!"({divergent} strictly earlier, {unmapped} unmapped"
       ++ s!"{if skipped > 0 then s!"; {skipped} non-session skipped" else ""})")
+  pure ok
+
+-- ── (h¹¹) Split equivalence: typed split ≡ flow split, in rendered bytes ──────
+-- Phase 2's semantic gate. The typed split hoists strictly more (the
+-- fold-crossing category), and every extra hoist must move NO output bit:
+-- render each corpus patch through both splits and require byte equality.
+private def runSplitEquiv : IO Bool := do
+  let entries ← (System.FilePath.mk "patches").readDir
+  let names := (entries.filterMap fun e =>
+    if e.fileName.endsWith ".json" then some e.fileName else none).qsort (· < ·)
+  let mut ok := true
+  let mut matched := 0
+  let mut skipped := 0
+  for fn in names do
+    match ← compilePatchStaged s!"patches/{fn}" with
+    | .error _ => skipped := skipped + 1
+    | .ok (plan, blocks) =>
+      let typed ← renderTypedBytes plan blocks
+      match ← renderIrBytes plan with
+      | .error e =>
+        IO.println s!"  FAIL  split-equiv/{fn}  flow render: {firstLine e}"; ok := false
+      | .ok flow =>
+        if typed == flow then matched := matched + 1
+        else
+          IO.println s!"  FAIL  split-equiv/{fn}  typed and flow renders differ"
+          ok := false
+  if ok then
+    IO.println (s!"  PASS  split-equiv  typed split ≡ flow split byte-for-byte "
+      ++ s!"({matched} patches{if skipped > 0 then s!"; {skipped} non-session skipped" else ""})")
   pure ok
 
 -- The gate ledger below is one long do-block; its elaboration depth tracks the
@@ -2770,6 +2814,11 @@ def main (args : List String) : IO UInt32 := do
   IO.println "stage differential (typed StageSig vs Stage0 flow classification):"
   total := total + 1
   if !(← runStageDifferential) then failed := failed + 1
+
+  -- ── (c‴) Split equivalence: typed split ≡ flow split, rendered bytes ───────
+  IO.println "split equivalence (typed hoist ≡ flow hoist, byte-for-byte):"
+  total := total + 1
+  if !(← runSplitEquiv) then failed := failed + 1
 
   -- ── (d) let-binding serialization order (ordered-array round-trip) ─────────
   IO.println "let serialization order:"
