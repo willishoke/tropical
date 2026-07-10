@@ -1591,6 +1591,18 @@ private def runModalBank (arena : Arena)
     | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-bank  render: {firstLine e}"; pure false
   | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-bank  build: {firstLine e}"; pure false
 
+/-- Warn-only cost ratchet (gates with rank): the FLATNESS assertions in the
+    banks gates are HARD — an asymptotic regression means banking is broken,
+    not slow, and that check never false-positives on an honest change. The
+    CONSTANTS are honest-change territory — a legitimate emit change may move
+    them — so drift prints a WARN line (never fails). Refreeze deliberately by
+    updating the constant at the call site. Warnings rot when nobody reads
+    them; this one is a single greppable token: `WARN`. -/
+private def warnBenchConst (gate what : String) (frozen got : Nat) : IO Unit :=
+  if got != frozen then
+    IO.println s!"  WARN  {gate}  {what}: {got} (frozen {frozen}) — cost constant drifted; refreeze deliberately"
+  else pure ()
+
 open Tropical.EmitArrow in
 /-- THE BANKS-AS-DATA gate (slice 3b). A decaying-resonator bank lowered through
     the INDEXED REDUCTION (`modalBankSigTable` → `Sig.bankSum` → a `ReduceBegin`
@@ -1643,6 +1655,8 @@ private def runBanksAsData (arena : Arena)
         IO.println s!"        result   bit-differing {bitDiff}/{n}  ·  pre-strike |max|={preMax}  ·  E[early]={eEarly}  E[late]={eLate}"
         IO.println s!"        payoff   plan-instrs 12-mode: unrolled={planInstrCount dp} looped={planInstrCount tp} (shrinks={shrinks})"
         IO.println s!"        payoff   per-mode marginal (6→24 modes): unrolled +{dMarginal}  ·  banked +{tMarginal} (body no longer unrolls)"
+        warnBenchConst "banks-as-data" "12-mode looped plan-instrs" 184 (planInstrCount tp)
+        warnBenchConst "banks-as-data" "banked per-mode marginal (6→24)" 72 tMarginal
         if bitDiff == 0 && preMax == 0.0 && eEarly > 1e-6 && eLate < eEarly
            && shrinks && tMarginal < dMarginal then
           IO.println s!"  PASS  banks-as-data  looped ≡ unrolled bit-exact ({n} samples), causal, decaying; plan shrinks, marginal +{tMarginal}<+{dMarginal}"; pure true
@@ -1726,6 +1740,8 @@ private def runBanksAsDataDir (arena : Arena)
     let shrinks := decide (tc < uc)
     IO.println s!"        payoff   plan-instrs 12-mode: unrolled={uc} looped={tc} (shrinks={shrinks})"
     IO.println s!"        payoff   per-mode marginal (6→24 modes): unrolled +{uMarginal}  ·  banked +{tMarginal}"
+    warnBenchConst "banks-as-data-dir" "12-mode looped plan-instrs" 317 tc
+    warnBenchConst "banks-as-data-dir" "banked per-mode marginal (6→24)" 72 tMarginal
     if ok && shrinks && tMarginal < uMarginal then
       IO.println s!"  PASS  banks-as-data-dir  looped ≡ unrolled bit-exact (mid/rev/sway), reverse audible; plan shrinks, marginal +{tMarginal}<+{uMarginal}"; pure true
     else
@@ -1766,6 +1782,7 @@ private def runBanksFloat (arena : Arena)
       let shrinks := decide (planInstrCount tp < planInstrCount up)
       IO.println s!"        float bank Σₖ ampₖ·t, {k} elements — unrolled vs looped (f64 accumulator):"
       IO.println s!"        result   bit-differing {bitDiff}/{n} · energy={energy} · plan-instrs unrolled={planInstrCount up} looped={planInstrCount tp}"
+      warnBenchConst "banks-float" "looped plan-instrs" 12 (planInstrCount tp)
       if bitDiff == 0 && energy > 1e-6 && shrinks then
         IO.println s!"  PASS  banks-float  looped ≡ unrolled bit-exact for a FLOAT fold (order preservation, no associativity); plan shrinks"; pure true
       else
@@ -1850,6 +1867,7 @@ private def runBanksFoldTrunk (_arena : Arena)
         IO.println s!"        result   bit-differing {bitDiff}/{n} vs hand-unrolled · nonzero={nonzero}"
         IO.println s!"        payoff   plan-instrs: fold(16)={planInstrCount fp} unrolled(16)={planInstrCount up} · fold(8)={planInstrCount f8} fold(64)={planInstrCount f64} (Δ={d})"
         if looping then
+          warnBenchConst "banks-fold-trunk" "fold plan-instrs (any K)" 8 (planInstrCount fp)
           if bitDiff == 0 && nonzero && shrinks && d ≤ 2 then
             IO.println s!"  PASS  banks-fold-trunk  surface fold banks: byte-equal to unroll, plan FLAT in K (Δ={d} ≤ 2, 8→64)"; pure true
           else
