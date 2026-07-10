@@ -466,15 +466,21 @@ private partial def compileIndex (arrNode idxNode : ExprId) : EmitM CompileResul
     pure (.scalar (.reg dst rt) rt)
 
 /-- Emit an indexed reduction (`CNode.bankSum`) as a `ReduceBegin`/body/`ReduceEnd`
-    region — the banks-as-data lowering (slice 3b). The mode sum is i64-modular
-    (associative), so the region renders bit-identical to the unrolled fold.
+    region — the banks-as-data lowering (slice 3b). The loop visits elements in
+    array order — the same order the unrolled fold nests its adds — so the region
+    renders bit-identical to the unroll for ANY scalar element type (order
+    preservation needs no associativity; the earlier i64-only restriction was the
+    scaffolding's, not the fold's).
 
     - The coefficient columns (`tables`) are materialized ONCE *before* the
       region: compiling them here (not lazily inside the body) keeps their `Pack`
       loop-invariant, and the CSE memo makes the body's `index` reuse the slot.
-    - The accumulator temp lives *outside* the region (seeded to 0 by
-      `ReduceBegin`); the body computes one mode's contribution and an explicit
-      `Add acc acc contrib` accumulates — the exact slice-3a contract.
+    - The accumulator's type FOLLOWS THE BODY (bool promotes to int): the body
+      compiles first with no imposed expectation, and the region opener is then
+      spliced in front of the body's instructions (instr + stage arrays insert in
+      lockstep). The accumulator temp lives *outside* the region (seeded to a
+      typed 0 by `ReduceBegin`); the body computes one element's contribution and
+      an explicit `Add acc acc contrib` accumulates — the exact slice-3a contract.
     - The CSE memo is snapshotted across the region: body-local temps do not
       escape (the runtime zero-scratches post-region reads), so a later sequential
       bank must not reuse them. Table entries (memoized before the snapshot) and
@@ -485,14 +491,19 @@ private partial def compileBankSum (count : Nat) (tables : Array ExprId) (body :
     let _ ← compileNode t
   let acc ← allocReg
   let memo0 := (← get).memo
-  emit (Tropical.Plan.instrReduceBegin acc (.const (0 : Nat) .int) count .int)
-  let contrib ← compileNode body (some .int)
+  let regionStart := (← get).instrs.size
+  let contrib ← compileNode body
   if contrib.isArray then
     throw "emit_resolved: bankSum body is array-valued; the mode contribution must be a scalar"
-  emit (Tropical.Plan.instrScalar "Add" acc #[.reg acc .int, contrib.op] .int)
-  emit (Tropical.Plan.instrReduceEnd acc .int)
+  let ty := if contrib.scalarType == .bool then .int else contrib.scalarType
+  modify fun s => { s with
+    instrs := s.instrs.insertIdx! regionStart
+      (Tropical.Plan.instrReduceBegin acc (.const (0 : Nat) ty) count ty)
+    instrStages := s.instrStages.insertIdx! regionStart s.curStage }
+  emit (Tropical.Plan.instrScalar "Add" acc #[.reg acc ty, contrib.op] ty)
+  emit (Tropical.Plan.instrReduceEnd acc ty)
   modify fun s => { s with memo := memo0 }
-  pure (.scalar (.reg acc .int) .int)
+  pure (.scalar (.reg acc ty) ty)
 
 private partial def compileSetElement (arrNode idxNode valNode : ExprId) :
     EmitM CompileResult := do

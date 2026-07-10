@@ -1733,6 +1733,46 @@ private def runBanksAsDataDir (arena : Arena)
   | _, _, _, _, _ =>
     IO.println s!"  FAIL  banks-as-data-dir  scaling build failed"; pure false
 
+open Tropical.EmitArrow in
+/-- THE FLOAT-BANK gate (typed accumulator). A FLOAT fold lowered through
+    `Sig.bankSum` must render bit-identical to the same fold unrolled. This is
+    the claim that banking needs NO algebraic precondition: the loop visits
+    elements in the order the unroll nests its adds, so order preservation —
+    not associativity — carries bit-exactness, floats included. (The i64
+    restriction in the original `compileBankSum` was scaffolding; the
+    accumulator now follows the body's type.) -/
+private def runBanksFloat (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let k := 16
+  -- t = τ seconds (the dSec recipe, anchor 0) — varies per sample so the sum
+  -- is a live float datapath, not a constant the optimizer could fold away.
+  let t := div (div (toFloatE clockLit) (lit 4294967296)) .sampleRate
+  let amps := (Array.range k).map fun i => litF (0.31 + 0.07 * i.toFloat)
+  let col := Sig.arr amps
+  let unrolled := amps.foldl (fun acc a => add acc (mul a t)) (lit 0)
+  let looped := Sig.bankSum k #[col] (mul (Sig.index col Sig.loopIdx) t)
+  let uPlan := buildAndFinish (.ok (buildExprCarrier "fbank_unrolled" unrolled arena))
+  let tPlan := buildAndFinish (.ok (buildExprCarrier "fbank_looped" looped arena))
+  match uPlan, tPlan with
+  | .ok up, .ok tp =>
+    match ← renderPlanSamples up 2048, ← renderPlanSamples tp 2048 with
+    | .ok uS, .ok tS =>
+      let n := min uS.size tS.size
+      let mut bitDiff := 0
+      for i in [0:n] do
+        if uS[i]! != tS[i]! then bitDiff := bitDiff + 1
+      let mut energy : Float := 0.0
+      for i in [0:n] do energy := energy + tS[i]! * tS[i]!
+      let shrinks := decide (planInstrCount tp < planInstrCount up)
+      IO.println s!"        float bank Σₖ ampₖ·t, {k} elements — unrolled vs looped (f64 accumulator):"
+      IO.println s!"        result   bit-differing {bitDiff}/{n} · energy={energy} · plan-instrs unrolled={planInstrCount up} looped={planInstrCount tp}"
+      if bitDiff == 0 && energy > 1e-6 && shrinks then
+        IO.println s!"  PASS  banks-float  looped ≡ unrolled bit-exact for a FLOAT fold (order preservation, no associativity); plan shrinks"; pure true
+      else
+        IO.println s!"  FAIL  banks-float  bitDiff={bitDiff} energy={energy} shrinks={shrinks}"; pure false
+    | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-float  render: {firstLine e}"; pure false
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-float  build: {firstLine e}"; pure false
+
 /-- THE MODAL DEGREE gate. A degree-1 mode `amp·d·e^{−σd}` (a repeated pole — the
     resonance "swell") rendered by the engine must match `sinkGain·d·e^{−σd}` to
     minimax tolerance (an absolute oracle, validating the new `d^deg` factor), and
@@ -3456,6 +3496,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runBanksAsDataDir arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runBanksFloat arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runModalDegree arena resolved) then
