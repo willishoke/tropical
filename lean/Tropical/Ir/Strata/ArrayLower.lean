@@ -68,7 +68,7 @@ private def childrenE : ENode → Array ExprId
   | .index a b => #[a, b]
   | .unary _ a => #[a]
   | .clamp a b c | .select a b c | .arraySet a b c => #[a, b, c]
-  | .bankSum _ ts b => ts.push b
+  | .bankSum _ ts b dc => (ts.push b) ++ dc.toArray
   | .tag _ _ payload => payload.map (·.value)
   | .match_ _ s arms => #[s] ++ arms.map (·.body)
 
@@ -118,7 +118,9 @@ partial def exprNeedsLoweringE (id : ExprId) : LowerM Bool := do
     -- A bankSum is NOT unrolled — it survives to post-strata as an indexed
     -- reduction. Its tables/body are ordinary subgraphs, so descend only if one
     -- genuinely contains a combinator/bindingRef/zeros to lower.
-    | .bankSum _ ts b => pure ((← ts.anyM exprNeedsLoweringE) || (← exprNeedsLoweringE b))
+    | .bankSum _ ts b dc =>
+      pure ((← ts.anyM exprNeedsLoweringE) || (← exprNeedsLoweringE b)
+        || (← dc.mapM exprNeedsLoweringE).getD false)
     | .arr items => items.anyM exprNeedsLoweringE
     | .tag _ _ payload => payload.anyM (fun p => exprNeedsLoweringE p.value)
     | .match_ _ scrutinee arms =>
@@ -225,10 +227,11 @@ private partial def lowerExprCoreE (subst : SubstMapE) (id : ExprId) : LowerM Ex
     | _ => einternP (.zeros countL)
   | .inputRef _ | .paramRef _ | .typeParamRef _
   | .nestedOut _ _ | .sampleRate | .sampleIndex | .loopIdx => pure id
-  | .bankSum c ts b =>
+  | .bankSum c ts b dc =>
     -- Preserve the region; lower its subgraphs (never unroll). `subst` threads
     -- through in case the bank is nested in an enclosing combinator being unrolled.
-    einternP (.bankSum c (← ts.mapM (lowerExprE subst)) (← lowerExprE subst b))
+    einternP (.bankSum c (← ts.mapM (lowerExprE subst)) (← lowerExprE subst b)
+      (← dc.mapM (lowerExprE subst)))
   | .tag d v payload =>
     einternP (.tag d v
       (← payload.mapM fun p => do pure ({ field := p.field, value := ← lowerExprE subst p.value } : ETagPayload)))

@@ -189,12 +189,15 @@ partial def encExpr (arena : Arena) (id : ExprId) : EncM Json := do
   | .sampleRate => pure <| Json.mkObj [("op", Json.str "sampleRate")]
   | .sampleIndex => pure <| Json.mkObj [("op", Json.str "sampleIndex")]
   | .loopIdx => pure <| Json.mkObj [("op", Json.str "loopIdx")]
-  | .bankSum count tables body => do
+  | .bankSum count tables body dynCount? => do
     let mut ts : Array Json := #[]
     for t in tables do
       ts := ts.push (← encExpr arena t)
-    pure <| Json.mkObj [("op", Json.str "bankSum"), ("count", Lean.toJson count),
+    -- `dyn_count` is optional on the wire (absent = static bank), so pre-existing
+    -- serialized programs decode unchanged.
+    pure <| Json.mkObj <| [("op", Json.str "bankSum"), ("count", Lean.toJson count),
                         ("tables", Json.arr ts), ("body", ← encExpr arena body)]
+                        ++ optField "dyn_count" (← dynCount?.mapM (encExpr arena))
   | .fold over init acc elem body => do
     pure <| Json.mkObj [("op", Json.str "fold"),
       ("over", ← encExpr arena over), ("init", ← encExpr arena init),
@@ -525,7 +528,11 @@ private partial def expr (ctx : String) (j : JsonV) (tdBase tdCount : Nat) :
       let mut tables : Array ExprId := #[]
       for h : i in [0:ts.size] do
         tables := tables.push (← expr s!"{ctx}.tables[{i}]" ts[i] tdBase tdCount)
-      internD (.bankSum (← reqNat ctx j "count") tables (← sub "body"))
+      -- optional runtime effective count (trip-count-as-data); absent = static.
+      let dc? ← match j.getField? "dyn_count" with
+        | some dj => some <$> expr s!"{ctx}.dyn_count" dj tdBase tdCount
+        | none => pure none
+      internD (.bankSum (← reqNat ctx j "count") tables (← sub "body") dc?)
     | "fold" => do
       internD (.fold (← sub "over") (← sub "init")
         (← binder s!"{ctx}.acc" (← reqField ctx j "acc"))

@@ -1766,7 +1766,7 @@ private def runBanksFloat (arena : Arena)
   let amps := (Array.range k).map fun i => litF (0.31 + 0.07 * i.toFloat)
   let col := Sig.arr amps
   let unrolled := amps.foldl (fun acc a => add acc (mul a t)) (lit 0)
-  let looped := Sig.bankSum k #[col] (mul (Sig.index col Sig.loopIdx) t)
+  let looped := Sig.bankSum k #[col] (mul (Sig.index col Sig.loopIdx) t) none
   let uPlan := buildAndFinish (.ok (buildExprCarrier "fbank_unrolled" unrolled arena))
   let tPlan := buildAndFinish (.ok (buildExprCarrier "fbank_looped" looped arena))
   match uPlan, tPlan with
@@ -2640,6 +2640,113 @@ private def runBanksBench (arena : Arena)
       -- Unrolled: no loop, no columns; the whole bank's arithmetic is in the
       -- audio kernel and grows with K. Not a failure — the documented contrast.
       IO.println s!"  PASS  banks-bench  flag off: unrolled bank, audio kernel GROWS with K ({a6}→{a512}, Δ={dAudio}) — the contrast the banked path removes"; pure true
+
+/-- THE TRIP-COUNT gate (trip-count-as-data v1: the room-size knob). A resonator
+    with the optional STATIC `partials_max` capacity carries a LIVE `partials`
+    slot whose in-kernel read is the bank's effective trip count, clamped to
+    capacity — mode count stops being topology. (a) at the default knob
+    (= capacity) it renders BIT-EXACT to the fully-static graph at the same
+    count; (b) knob at 4 ≡ static partials=4 (the clamped loop visits the same
+    mode prefix in unroll order — same ops, same bits; the dynamic plan's
+    capacity-sized columns beyond index 4 are never read); (c) knob above
+    capacity clamps (≡ the capacity render); (d) knob at 0 sums no modes —
+    silence from the bank, the patch's only source. A dynamic-count bank always
+    BANKS (a runtime count cannot unroll), so this holds in both flag states of
+    TROPICAL_BANKS_UNROLL. The static graph must NOT grow the slot (opt-in:
+    `partials_max` absent ⇒ no `param:res.partials`). -/
+private def runBanksCount (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let staticSrc := fun (k : Nat) => "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4,\"partials\":"
+      ++ toString k ++ "}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"res\"]}}],\"out\":\"out\"}"
+  let dynSrc := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4,\"partials\":16,\"partials_max\":16}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"res\"]}}],\"out\":\"out\"}"
+  let compile := fun (src : String) => do
+    let j ← Lean.Json.parse src
+    Tropical.Playground.compilePlanPure arena resolved j
+  -- Load a compiled graph, optionally preset a slot, render one 2048-sample
+  -- block (the modal-live pattern: a live slot driven through a render).
+  let render := fun (plan : Tropical.Plan.FlatPlan)
+      (blocks : Array (Array (Option Tropical.Ir.Stage)))
+      (preset? : Option Float) => do
+    let rt ← Tropical.Ffi.Runtime.new 2048
+    Tropical.StagedLoad.loadTyped rt plan blocks
+    let mut slotOk := true
+    if let some v := preset? then
+      match ← rt.slotIndex? "param:res.partials" with
+      | some idx => rt.setSlot idx v
+      | none => slotOk := false
+    rt.process
+    pure (slotOk, decodeF64LE (← rt.outputBytes))
+  let bitDiffOf := fun (a b : Array Float) => Id.run do
+    let mut d := 0
+    for i in [0:min a.size b.size] do
+      if a[i]! != b[i]! then d := d + 1
+    return d
+  let energyOf := fun (a : Array Float) => a.foldl (fun acc s => acc + s * s) 0.0
+  match compile (staticSrc 16), compile (staticSrc 4), compile dynSrc with
+  | .error e, _, _ => IO.println s!"  FAIL  banks-count  static-16 compile: {firstLine e}"; pure false
+  | _, .error e, _ => IO.println s!"  FAIL  banks-count  static-4 compile: {firstLine e}"; pure false
+  | _, _, .error e => IO.println s!"  FAIL  banks-count  dynamic compile: {firstLine e}"; pure false
+  | .ok (p16, _, b16), .ok (p4, _, b4), .ok (pd, _, bd) =>
+    -- opt-in: the static graph must NOT have grown a partials slot.
+    let rtS ← Tropical.Ffi.Runtime.new 2048
+    Tropical.StagedLoad.loadTyped rtS p16 b16
+    let staticHasSlot := (← rtS.slotIndex? "param:res.partials").isSome
+    let (_, s16) ← render p16 b16 none
+    let (_, s4)  ← render p4 b4 none
+    let (_, dDef)   ← render pd bd none          -- knob at its default (16)
+    let (ok4, d4)   ← render pd bd (some 4.0)    -- knob at 4
+    let (okC, dC)   ← render pd bd (some 100.0)  -- above capacity → clamps to 16
+    let (okZ, dZ)   ← render pd bd (some 0.0)    -- zero modes → silence
+    let slotLive := ok4 && okC && okZ
+    let e16 := energyOf s16
+    let dA := bitDiffOf dDef s16
+    let dB := bitDiffOf d4 s4
+    let dCn := bitDiffOf dC s16
+    let eZ := energyOf dZ
+    IO.println s!"        resonator partials_max=16 (LIVE partials slot) vs fully-static graphs:"
+    IO.println s!"        result   default(16)≡static16 bitDiff={dA}/{s16.size} · knob4≡static4 bitDiff={dB}/{s4.size} · knob100≡static16 bitDiff={dCn}/{s16.size}"
+    IO.println s!"        result   E[static16]={e16} · E[knob0]={eZ} · slot live={slotLive} · static graph has slot={staticHasSlot} (want false)"
+    if dA == 0 && dB == 0 && dCn == 0 && eZ ≤ 1e-24 && e16 > 1e-6 && slotLive && !staticHasSlot then
+      IO.println s!"  PASS  banks-count  live trip count ≡ static at 16/4, clamps at 100, silent at 0 — mode count is data, not topology"; pure true
+    else
+      IO.println s!"  FAIL  banks-count  dA={dA} dB={dB} dC={dCn} eZ={eZ} e16={e16} slotLive={slotLive} staticHasSlot={staticHasSlot}"; pure false
+
+/-- THE CACHE-INVARIANCE gate (the trip-count payoff). The kernel cache is keyed
+    by md5(ir_text) (`OrcJitEngine`), so a knob that changed the IR text would
+    force a full recompile. Two compiles of the SAME graph differing only in the
+    `partials` DEFAULT (4 vs 12, same `partials_max`) must emit IDENTICAL LLVM
+    IR — the count is a slot read; its default lives in plan metadata, never in
+    the kernel text. A `partials_max` change must CHANGE the text: capacity IS
+    topology (column sizes, the loop's static bound). Asserted on both the
+    unsplit kernel and the typed-split audio kernel (the artifact the staged
+    load actually caches). -/
+private def runBanksCountCache (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let src := fun (dflt cap : Nat) => "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4,\"partials\":"
+      ++ toString dflt ++ ",\"partials_max\":" ++ toString cap ++ "}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"res\"]}}],\"out\":\"out\"}"
+  let irOf : Nat → Nat → Except String (String × String) := fun dflt cap => do
+    let j ← (Lean.Json.parse (src dflt cap)).mapError (s!"json: {·}")
+    let (plan, _, blocks) ← Tropical.Playground.compilePlanPure arena resolved j
+    let split ← Tropical.Ir.Stage0.hoistTyped plan blocks
+    pure (← Tropical.Ir.EmitLlvm.emitKernel plan, ← Tropical.Ir.EmitLlvm.emitKernel split.audio)
+  match irOf 4 16, irOf 12 16, irOf 4 24 with
+  | .error e, _, _ | _, .error e, _ | _, _, .error e =>
+    IO.println s!"  FAIL  banks-count-cache  compile/emit: {firstLine e}"; pure false
+  | .ok (u4, a4), .ok (u12, a12), .ok (u24, a24) =>
+    let knobInvariant := u4 == u12 && a4 == a12
+    let capMoves := u4 != u24 && a4 != a24
+    IO.println s!"        same graph, partials default 4 vs 12 (cap 16) vs cap 24:"
+    IO.println s!"        result   knob-invariant IR: unsplit={u4 == u12} audio={a4 == a12} ({u4.length}B) · capacity moves IR: unsplit={u4 != u24} audio={a4 != a24}"
+    if knobInvariant && capMoves then
+      IO.println s!"  PASS  banks-count-cache  IR text is knob-invariant (md5 cache hit across counts); partials_max changes it (capacity is topology)"; pure true
+    else
+      IO.println s!"  FAIL  banks-count-cache  knobInvariant={knobInvariant} capMoves={capMoves}"; pure false
 
 /-- Build the resonator → filter → out patch graph as Json. -/
 private def filterPatchJson (fc : Int) (resM : Int) (resE : Nat) (srcF srcDecay : Int) : Lean.Json :=
@@ -3704,6 +3811,12 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runBanksBench arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runBanksCount arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runBanksCountCache arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runModalFilter arena resolved) then

@@ -318,8 +318,14 @@ inductive ENode where
       `tables` are the loop-invariant coefficient columns the body indexes at
       `loopIdx`; carried explicitly so emit materializes them ONCE before the
       region. `body` is the per-iteration contribution (references `loopIdx` and
-      `index table loopIdx`); the accumulation is emit's job, not the body's. -/
+      `index table loopIdx`); the accumulation is emit's job, not the body's.
+      `dynCount?` is the OPTIONAL runtime effective count (trip-count-as-data):
+      `count` stays the static CAPACITY (= tables' length, the topology); when
+      `dynCount?` is present the emitters clamp it to `[0, count]` at the loop
+      head and trip that many iterations — the room-size knob, no recompile.
+      `none` is today's static path, byte-identical output. -/
   | bankSum (count : Nat) (tables : Array ExprId) (body : ExprId)
+      (dynCount? : Option ExprId := none)
 deriving BEq, Repr, Inhabited
 
 /-- O(1) structural hash — children are ids (no subtree recursion). Op tags and
@@ -353,7 +359,7 @@ def enodeHash : ENode → UInt64
   | .tag d v p      => mixHash (mixHash (mixHash 26 (hash d.idx)) (hash v)) (hash (p.map (fun tp => (tp.field, tp.value.idx))))
   | .match_ d s arms => mixHash (mixHash (mixHash 27 (hash d.idx)) (hash s.idx)) (hash (arms.map (fun a => (a.variant, a.body.idx))))
   | .loopIdx        => 28
-  | .bankSum c ts b => mixHash (mixHash (mixHash 29 (hash c)) (hash (ts.map (·.idx)))) (hash b.idx)
+  | .bankSum c ts b dc => mixHash (mixHash (mixHash (mixHash 29 (hash c)) (hash (ts.map (·.idx)))) (hash b.idx)) (hash (dc.map (·.idx)))
 
 instance : Hashable ENode := ⟨enodeHash⟩
 

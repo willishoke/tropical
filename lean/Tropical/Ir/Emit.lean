@@ -344,7 +344,7 @@ private partial def compileNodeUncached (e : CNode) (expected : Option ScalarTyp
   | .select a b c => compileTernary "Select" a b c expected
   | .arraySet a b c => compileSetElement a b c
   | .index a b => compileIndex a b
-  | .bankSum count tables body => compileBankSum count tables body
+  | .bankSum count tables body dynCount? => compileBankSum count tables body dynCount?
   | .num _ | .bool _ | .paramRef _ | .sampleRate | .sampleIndex | .loopIdx =>
     throw "emit_resolved: terminal node reached compileNodeUncached (port bug)"
 
@@ -485,10 +485,19 @@ private partial def compileIndex (arrNode idxNode : ExprId) : EmitM CompileResul
       escape (the runtime zero-scratches post-region reads), so a later sequential
       bank must not reuse them. Table entries (memoized before the snapshot) and
       any subterm compiled outside the region survive. -/
-private partial def compileBankSum (count : Nat) (tables : Array ExprId) (body : ExprId) :
-    EmitM CompileResult := do
+private partial def compileBankSum (count : Nat) (tables : Array ExprId) (body : ExprId)
+    (dynCount? : Option ExprId := none) : EmitM CompileResult := do
   for t in tables do
     let _ ← compileNode t
+  -- The optional runtime effective count (trip-count-as-data) compiles BEFORE
+  -- the region, alongside the tables, so any instructions it needs are
+  -- loop-invariant. Its operand rides `ReduceBegin` as args[1]; `loopCount`
+  -- stays the static capacity and the emitters clamp at the loop head.
+  let countOp? ← dynCount?.mapM fun dc => do
+    let r ← compileNode dc (some .int)
+    if r.isArray then
+      throw "emit_resolved: bankSum dynamic count is array-valued; the effective trip count must be a scalar"
+    pure r.op
   let acc ← allocReg
   let memo0 := (← get).memo
   let regionStart := (← get).instrs.size
@@ -498,7 +507,7 @@ private partial def compileBankSum (count : Nat) (tables : Array ExprId) (body :
   let ty := if contrib.scalarType == .bool then .int else contrib.scalarType
   modify fun s => { s with
     instrs := s.instrs.insertIdx! regionStart
-      (Tropical.Plan.instrReduceBegin acc (.const (0 : Nat) ty) count ty)
+      (Tropical.Plan.instrReduceBegin acc (.const (0 : Nat) ty) count ty countOp?)
     instrStages := s.instrStages.insertIdx! regionStart s.curStage }
   emit (Tropical.Plan.instrScalar "Add" acc #[.reg acc ty, contrib.op] ty)
   emit (Tropical.Plan.instrReduceEnd acc ty)

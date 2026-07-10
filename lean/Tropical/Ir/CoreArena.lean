@@ -52,8 +52,12 @@ inductive CNode where
   | loopIdx
   /-- An indexed reduction `Σ_{k<count} body(k)`, i64-modular. `tables` are the
       loop-invariant coefficient columns the body indexes at `loopIdx`; emit
-      materializes them once before the `ReduceBegin`/`ReduceEnd` region. -/
+      materializes them once before the `ReduceBegin`/`ReduceEnd` region.
+      `count` is the static CAPACITY; `dynCount?` (trip-count-as-data) is an
+      optional runtime effective count, clamped to `[0, count]` at the loop
+      head by the emitters (`none` = today's static path). -/
   | bankSum (count : Nat) (tables : Array ExprId) (body : ExprId)
+      (dynCount? : Option ExprId := none)
 deriving BEq, Repr, Inhabited
 
 /-- O(1) structural hash — children are ids, so no subtree recursion. Op tags
@@ -74,7 +78,7 @@ def cnodeHash : CNode → UInt64
   | .sampleRate     => 13
   | .sampleIndex    => 14
   | .loopIdx        => 15
-  | .bankSum c ts b => mixHash (mixHash (mixHash 16 (hash c)) (hash (ts.map (·.idx)))) (hash b.idx)
+  | .bankSum c ts b dc => mixHash (mixHash (mixHash (mixHash 16 (hash c)) (hash (ts.map (·.idx)))) (hash b.idx)) (hash (dc.map (·.idx)))
 
 instance : Hashable CNode := ⟨cnodeHash⟩
 
@@ -179,8 +183,11 @@ def cnodeSig (sigs : Array StageSig) : CNode → StageSig
   | .clamp a b c | .select a b c | .arraySet a b c =>
     ((sigAt sigs a).join (sigAt sigs b)).join (sigAt sigs c)
   | .index a b => (sigAt sigs a).join (sigAt sigs b)
-  | .bankSum _ ts b =>
-    (ts.foldl (fun acc id => acc.join (sigAt sigs id)) ({ base := .fold } : StageSig)).join (sigAt sigs b)
+  | .bankSum _ ts b dc =>
+    let s := (ts.foldl (fun acc id => acc.join (sigAt sigs id)) ({ base := .fold } : StageSig)).join (sigAt sigs b)
+    match dc with
+    | some d => s.join (sigAt sigs d)
+    | none => s
 
 abbrev ArenaM := StateM CoreArena
 

@@ -494,7 +494,20 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     -- master clock as before; patched ⇒ the causal gate triggers on the address
     -- signal's crossing and the ring scrubs/pitches with its slope (modalAddrWarp).
     let addr? := (portSources inObj "addr")[0]?
-    (.modalSource (resonatorBank f0 decay npart) (lit 0) clk addr?, #[])
+    -- Trip-count-as-data (the room-size knob): the optional STATIC
+    -- `"partials_max"` param is the bank's CAPACITY. When present, the mode
+    -- list is built at capacity and `partials` becomes a LIVE param slot
+    -- (default = its graph value, or 6) whose in-kernel read is the bank's
+    -- dynamic trip count, clamped to capacity — turning it changes how many
+    -- modes sound with NO recompile (the IR text is knob-invariant). Absent ⇒
+    -- exactly the static path above: no new slot, no plan drift.
+    match jNum? params "partials_max" with
+    | none =>
+      (.modalSource (resonatorBank f0 decay npart) (lit 0) clk addr?, #[])
+    | some _ =>
+      let cap := (jInt params "partials_max" 6).toNat
+      let countE := pref pidx s!"{id}.partials" (lit (Int.ofNat npart))
+      (.modalSource (resonatorBank f0 decay cap) (lit 0) clk addr? (some countE), #[])
   | "reverb" =>
     let rt60 := p "rt60" (dv "rt60")
     -- reading DIRECTION: θ (radians, live) rotates the composed tail's poles in the
@@ -633,6 +646,12 @@ private def collectParams (raws : Array Raw) : Array (String × JsonNumber) := I
           -- continuous (click-free) instead of jumping by Δf·τ.
           if isAnchored r.kind kname then
             out := out.push (s!"{base}#phase", ⟨0, 0⟩)
+    -- Trip-count-as-data: a resonator carrying the optional STATIC
+    -- `partials_max` capacity gets a LIVE `partials` slot (the room-size
+    -- knob; default = graph `partials`, or 6). `partials_max` absent ⇒ no
+    -- slot — exactly the old fully-static behavior.
+    if r.kind == "resonator" && (jNum? r.params "partials_max").isSome then
+      out := out.push (s!"{r.id}.partials", (jNum? r.params "partials").getD ⟨6, 0⟩)
   return out
 
 /-- Decode the GUI graph, returning the patch plus the knob param table. The
@@ -691,6 +710,11 @@ private def paramDisciplinesOf (raws : Array Raw) :
           | .raw =>
             { name := base, discipline := "raw" }
         out := out.push d
+    -- Trip-count-as-data: the live `partials` slot (present only with the
+    -- STATIC `partials_max` capacity) is a plain raw write — same walk and
+    -- skip rules as `collectParams`.
+    if r.kind == "resonator" && (jNum? r.params "partials_max").isSome then
+      out := out.push { name := s!"{r.id}.partials", discipline := "raw" }
   return out
 
 -- ── The realized-state report (the load_patch_graph reply) ──────────────────

@@ -506,6 +506,21 @@ def emitInstr (instr : NInstr) : M Unit := do
       | some o => resolveOperand o
       | none => fail "ReduceBegin missing init operand"
     let initV ← coerce init instr.resultType
+    -- Trip-count-as-data: an optional args[1] is the RUNTIME effective count.
+    -- Resolve it HERE, before the loop blocks open (loop-invariant), coerce to
+    -- i64 (a slot read arrives f64 → fptosi), and clamp to [0, loopCount] via
+    -- icmp+select (the emitIndex bounds-check style). No args[1] emits the
+    -- static literal — byte-identical to the pre-dynamic form.
+    let bound ← match instr.args[1]? with
+      | none => pure (toString instr.loopCount)
+      | some o =>
+        let v ← resolveOperand o
+        let iv := (← coerce v .int).ref
+        let neg ← fresh; line s!"{neg} = icmp slt i64 {iv}, 0"
+        let lo ← fresh; line s!"{lo} = select i1 {neg}, i64 0, i64 {iv}"
+        let over ← fresh; line s!"{over} = icmp sgt i64 {lo}, {instr.loopCount}"
+        let cl ← fresh; line s!"{cl} = select i1 {over}, i64 {instr.loopCount}, i64 {lo}"
+        pure cl
     let accPtr ← fresh
     line s!"{accPtr} = alloca {llTy instr.resultType}, align 8"
     line s!"store {llTy instr.resultType} {initV.ref}, ptr {accPtr}, align 8"
@@ -517,7 +532,7 @@ def emitInstr (instr : NInstr) : M Unit := do
     line s!"br label %{condbb}"
     labelLine condbb
     let k ← fresh; line s!"{k} = load i64, ptr {idxPtr}, align 8"
-    let c ← fresh; line s!"{c} = icmp ult i64 {k}, {instr.loopCount}"
+    let c ← fresh; line s!"{c} = icmp ult i64 {k}, {bound}"
     line s!"br i1 {c}, label %{bodybb}, label %{endbb}"
     labelLine bodybb
     modify fun s => { s with reduce? := some {

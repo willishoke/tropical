@@ -181,10 +181,16 @@ def instrWriteSlot (dst : Nat) (value : NOperand)
     `.loopIdx` is the iteration index and reads/writes of the
     accumulator temp see/update the running value. Loop-body temps do
     not escape the region (post-region reads fall back to the
-    zero-initialized scratch, the emitters' usual graceful rule). -/
+    zero-initialized scratch, the emitters' usual graceful rule).
+
+    `count?` (trip-count-as-data): an optional RUNTIME effective count as a
+    second arg — `loopCount` stays the static capacity; the emitters resolve
+    `args[1]` once before the loop and trip `clamp(args[1], 0, loopCount)`
+    iterations. Absent = the static path, byte-identical emission. -/
 def instrReduceBegin (accTemp : Nat) (init : NOperand) (loopCount : Nat)
-    (resultType : ScalarType) : NInstr :=
-  { tag := "ReduceBegin", dst := .temp accTemp, args := #[init],
+    (resultType : ScalarType) (count? : Option NOperand := none) : NInstr :=
+  { tag := "ReduceBegin", dst := .temp accTemp,
+    args := match count? with | none => #[init] | some c => #[init, c],
     loopCount, resultType }
 
 /-- Close the innermost reduction region opened on `accTemp`. -/

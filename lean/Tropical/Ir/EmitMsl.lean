@@ -693,6 +693,17 @@ def emitInstr (sizes : Array Nat) (instr : NInstr) : M Unit := do
       | some o => resolveOperand o
       | none => fail "ReduceBegin missing init operand"
     let initV ← coerce init instr.resultType
+    -- Trip-count-as-data: an optional args[1] is the RUNTIME effective count —
+    -- a `long` local clamped to [0, loopCount] BEFORE the loop (loop-invariant;
+    -- `min`/`max` are metal:: via the preamble's using-directive). No args[1]
+    -- emits the static literal bound, byte-identical to the pre-dynamic form.
+    let bound ← match instr.args[1]? with
+      | none => pure s!"{instr.loopCount}L"
+      | some o =>
+        let v ← resolveOperand o
+        let iv ← coerce v .int
+        let b ← bindVal .int s!"min(max({iv.ref}, 0L), {instr.loopCount}L)"
+        pure b.ref
     -- The accumulator is a mutable typed local declared BEFORE the loop
     -- (never const-folded — its value varies across iterations).
     let accName := tempVarName accTemp instr.resultType
@@ -702,7 +713,7 @@ def emitInstr (sizes : Array Nat) (instr : NInstr) : M Unit := do
       line s!"{mslTy instr.resultType} {accName} = {initV.ref};"
     let n ← fresh
     let idxVar := s!"rd{n}"
-    line s!"for (long {idxVar} = 0; {idxVar} < {instr.loopCount}L; ++{idxVar}) \{"
+    line s!"for (long {idxVar} = 0; {idxVar} < {bound}; ++{idxVar}) \{"
     let st ← get
     modify fun s => { s with
       indent := s.indent + 1
