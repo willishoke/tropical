@@ -18,3 +18,6 @@ Computer-Modern serif, high data-ink ratio.
 - [Reverse reverb](reverse-reverb.md) — why the reverberant swell that
   arrives before a sound has always been an offline studio trick, and how
   a closed-form kernel plays it live at zero latency.
+- [Phase alignment by anchoring](phase-anchoring.md) — how an oscilloscope
+  makes a waveform stand still, and why the century-old trigger dissolves
+  into an exact subtraction once every signal is a function of time.
