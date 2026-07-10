@@ -12,6 +12,11 @@ Computer-Modern serif, high data-ink ratio.
 
 ## Index
 
+Reading order runs foundation-first; each effect leans on the atom below it.
+
+- [The sawtooth is a line](sawtooth-is-a-line.md) — the foundational atom:
+  the simplest closed-form signal is a linear function of time read modulo
+  one, and the classic waveforms are memoryless shapings of that one ramp.
 - [Through-zero flanging](through-zero-flanging.md) — why the canonical
   tape-studio effect cannot be done at zero latency on a sample stream,
   and why it is free for a closed-form kernel.
