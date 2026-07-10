@@ -246,7 +246,17 @@ def loadKernel (env : Env) (plan : Tropical.Plan.FlatPlan)
     | .error msg => internalError s!"EmitLlvm (coeff): {msg}"
     | .ok s => pure s
   if env.metalBackend then
-    let msl ← match Tropical.Ir.EmitMsl.emitKernel split.audio with
+    -- Hoisted coefficient columns (banks-as-data) don't cross to the
+    -- GPU yet — the MSL ABI has no array binding, so a column the
+    -- coeff kernel fills host-side would be an uninitialized local in
+    -- the GPU kernel. When the typed split hoisted any, emit the GPU
+    -- kernel from the UNSPLIT plan: the fills stay in-kernel and
+    -- recompute per sample (pure functions of slots — value-identical
+    -- to the coeff kernel's output, and the GPU has the headroom).
+    -- The JIT + render_window keep the typed split; run_coeff still
+    -- serves them. Retire when columns get a Metal crossing.
+    let mslPlan := if split.audio.coeffArraySlots.isEmpty then split.audio else plan
+    let msl ← match Tropical.Ir.EmitMsl.emitKernel mslPlan with
       | .error msg => internalError s!"EmitMsl: {msg}"
       | .ok s => pure s
     env.runtime.loadIrStaged ir msl coeffIr planJson

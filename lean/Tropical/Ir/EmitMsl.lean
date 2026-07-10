@@ -791,8 +791,18 @@ private def header : String :=
   "    const long current_idx = long(k.start_sample_index) + long(s);\n"
 
 /-- Emit the full MSL source for a FlatPlan's fused kernel. One thread
-    per sample; the host dispatches `buffer_length` threads. -/
+    per sample; the host dispatches `buffer_length` threads.
+
+    Refuses a plan that advertises hoisted coefficient columns
+    (`coeff_array_slots`): the MSL ABI has no array binding — every
+    array is a thread-private local — so a column the stage-0
+    coefficient kernel fills host-side would read UNINITIALIZED memory
+    here. Loud-before-load is the recoverable contract; callers emit
+    the GPU kernel from the UNSPLIT plan instead (fills stay
+    in-kernel) until columns get a Metal crossing. -/
 def emitKernel (plan : FlatPlan) : Except String String := do
+  unless plan.coeffArraySlots.isEmpty do
+    throw s!"EmitMsl: {plan.coeffArraySlots.size} hoisted coefficient column(s) have no GPU crossing (the MSL kernel has no array binding); emit from the unsplit plan"
   let sizes := plan.arraySlotSizes
   let body : M Unit := do
     -- thread-private array scratch (per-sample on CPU too).

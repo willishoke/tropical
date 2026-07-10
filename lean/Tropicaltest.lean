@@ -2536,6 +2536,52 @@ private def runBanksStaging (arena : Arena)
           else
             IO.println s!"  FAIL  banks-staging  flag off: reduces={reduces} coeff={coeffFills} renderOk={renderOk}"; pure false
 
+/-- The Metal column tripwire. The MSL ABI has no array binding — every
+    plan array is a thread-private local — so a typed-split audio plan
+    that advertises hoisted coefficient columns (`coeff_array_slots`)
+    would read UNINITIALIZED memory on the GPU while playing correctly
+    on the JIT. Silent wrongness; no render gate can see it (the
+    metal_vs_jit corpus has zero arrays). The guard is structural:
+    `EmitMsl.emitKernel` must REFUSE the split audio plan (loud before
+    load — the previous kernel keeps playing) and must accept the
+    UNSPLIT plan (fills in-kernel), which is what the session load
+    falls back to on the metal backend. Banked default ⇒ columns hoist
+    ⇒ refusal expected; under `TROPICAL_BANKS_UNROLL` nothing hoists ⇒
+    both emissions must succeed (no false positive). -/
+private def runMslColumnGuard (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let src := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"res\"]}}],\"out\":\"out\"}"
+  match Lean.Json.parse src with
+  | .error e => IO.println s!"  FAIL  msl-column-guard  json: {e}"; pure false
+  | .ok j =>
+  match Tropical.Playground.compilePlanPure arena resolved j with
+  | .error e => IO.println s!"  FAIL  msl-column-guard  compile: {firstLine e}"; pure false
+  | .ok (plan, _, stageBlocks) =>
+    match Tropical.Ir.Stage0.hoistTyped plan stageBlocks with
+    | .error e => IO.println s!"  FAIL  msl-column-guard  split: {firstLine e}"; pure false
+    | .ok split =>
+      let banked := Tropical.EmitArrow.banksTableEnabled
+      let cols := split.audio.coeffArraySlots.size
+      let splitMsl := Tropical.Ir.EmitMsl.emitKernel split.audio
+      let unsplitMsl := Tropical.Ir.EmitMsl.emitKernel plan
+      IO.println s!"        banked={banked} · hoisted columns={cols} · split-msl={if splitMsl.isOk then "ok" else "refused"} · unsplit-msl={if unsplitMsl.isOk then "ok" else "refused"}"
+      if banked then
+        match splitMsl, unsplitMsl with
+        | .error _, .ok _ =>
+          if cols > 0 then
+            IO.println s!"  PASS  msl-column-guard  {cols} hoisted column(s): split plan refused, unsplit plan emits (the metal fallback)"; pure true
+          else
+            IO.println s!"  FAIL  msl-column-guard  banked: refused with no columns advertised"; pure false
+        | _, _ =>
+          IO.println s!"  FAIL  msl-column-guard  banked: cols={cols} splitOk={splitMsl.isOk} unsplitOk={unsplitMsl.isOk} (want refuse/ok)"; pure false
+      else
+        if cols == 0 && splitMsl.isOk && unsplitMsl.isOk then
+          IO.println s!"  PASS  msl-column-guard  unrolled: no columns hoisted, both emissions clean (no false positive)"; pure true
+        else
+          IO.println s!"  FAIL  msl-column-guard  unrolled: cols={cols} splitOk={splitMsl.isOk} unsplitOk={unsplitMsl.isOk}"; pure false
+
 /-- THE COMPILE-FLATNESS BENCHMARK (banks-as-data payoff). Where `banks-staging`
     proves the payoff STRUCTURALLY at one mode count (columns hoist, audio is
     fill-free), this MEASURES it across scale: compile the SAME room at K=6 and
@@ -3652,6 +3698,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runBanksStaging arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runMslColumnGuard arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runBanksBench arena resolved) then

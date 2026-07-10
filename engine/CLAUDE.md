@@ -87,6 +87,16 @@ GPU kernel and never write back to the host slot array, so
 mode (the CPU kernel would show the last sample's value). Host-written param
 slots are unaffected; the scope reads via `render_window` (JIT) and is exact.
 
+**Known v1 gap:** hoisted coefficient COLUMNS (banks-as-data,
+`coeff_array_slots`) have no GPU crossing — the MSL ABI has no array binding.
+`EmitMsl` refuses such a plan outright, and the session load falls back to
+emitting the GPU kernel from the UNSPLIT plan (column fills recompute
+in-kernel per sample; correct, since they're pure functions of the slots that
+DO cross). The generation-buffered columns serve only the JIT/`render_window`
+side in Metal mode. The real crossing (a column buffer binding, uploaded from
+the generation `process()` captures) is scoped in
+`design/banking-leftovers-scope.local.md` (WS4).
+
 ## Audio output (`dac/TropicalDAC.hpp`)
 
 `TropicalDACImpl<AudioSource>` — templated RtAudio driver. FlatRuntime satisfies the `AudioSource` concept.
