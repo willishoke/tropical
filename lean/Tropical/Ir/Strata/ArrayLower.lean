@@ -42,6 +42,51 @@ private def loopCount (n : JsonNumber) : Nat :=
   let f := n.toFloat
   if f <= 0 then 0 else f.ceil.toUInt64.toNat
 
+/-- Loop-everything escape hatch (banks-as-data, the trunk move):
+    `TROPICAL_BANKS_UNROLL` reverts summing folds to the unrolled realization —
+    the same env var the modal-bank dispatch honors; one knob restores the
+    whole naive ladder for bisection. -/
+initialize banksLoopEnabled : Bool ← do
+  return (← IO.getEnv "TROPICAL_BANKS_UNROLL").isNone
+
+/-- The immediate children of a node — the generic walk the bank-eligibility
+    predicates use. -/
+private def childrenE : ENode → Array ExprId
+  | .num _ | .bool _ | .inputRef _ | .paramRef _ | .typeParamRef _
+  | .nestedOut _ _ | .sampleRate | .sampleIndex | .loopIdx | .bindingRef _ => #[]
+  | .arr items => items
+  | .zeros c => #[c]
+  | .letIn binders body => (binders.map (·.value)).push body
+  | .fold over init _ _ body => #[over, init, body]
+  | .scan over init _ _ body => #[over, init, body]
+  | .generate count _ body => #[count, body]
+  | .iterate count init _ body => #[count, init, body]
+  | .chain count init _ body => #[count, init, body]
+  | .map2 over _ body => #[over, body]
+  | .zipWith a b _ _ body => #[a, b, body]
+  | .binary _ a b => #[a, b]
+  | .index a b => #[a, b]
+  | .unary _ a => #[a]
+  | .clamp a b c | .select a b c | .arraySet a b c => #[a, b, c]
+  | .bankSum _ ts b => ts.push b
+  | .tag _ _ payload => payload.map (·.value)
+  | .match_ _ s arms => #[s] ++ arms.map (·.body)
+
+/-- Does any node satisfying `p` occur at or below `root`? Iterative DAG walk
+    with a visited set (subgraphs share; without it this is O(expanded tree)). -/
+private partial def anyNodeE (p : ENode → Bool) (root : ExprId) : PassM Bool := do
+  let mut stack : Array ExprId := #[root]
+  let mut seen : Std.HashSet Nat := {}
+  while !stack.isEmpty do
+    let id := stack.back!
+    stack := stack.pop
+    if seen.contains id.idx then continue
+    seen := seen.insert id.idx
+    let n ← derefP id
+    if p n then return true
+    stack := stack ++ childrenE n
+  return false
+
 -- ─────────────────────────────────────────────────────────────
 -- Id-form (#190 native-DAG) — mirrors the unroller on EArena
 -- ─────────────────────────────────────────────────────────────
@@ -115,10 +160,13 @@ private partial def lowerExprCoreE (subst : SubstMapE) (id : ExprId) : LowerM Ex
   | .fold over init acc elem body =>
     let .arr items ← derefP (← lowerExprE subst over)
       | failP "arrayLower: fold's 'over' did not lower to a static array"
-    let mut accV ← lowerExprE subst init
-    for item in items do
-      accV ← lowerExprE ((acc.idx, accV) :: (elem.idx, item) :: subst) body
-    pure accV
+    match ← tryBankFoldE subst items init acc elem body with
+    | some banked => pure banked
+    | none =>
+      let mut accV ← lowerExprE subst init
+      for item in items do
+        accV ← lowerExprE ((acc.idx, accV) :: (elem.idx, item) :: subst) body
+      pure accV
   | .scan over init acc elem body =>
     let .arr items ← derefP (← lowerExprE subst over)
       | failP "arrayLower: scan's 'over' did not lower to a static array"
@@ -194,6 +242,45 @@ private partial def lowerExprCoreE (subst : SubstMapE) (id : ExprId) : LowerM Ex
   | .select a b c => einternP (.select (← lowerExprE subst a) (← lowerExprE subst b) (← lowerExprE subst c))
   | .arraySet a b c => einternP (.arraySet (← lowerExprE subst a) (← lowerExprE subst b) (← lowerExprE subst c))
   | .index a b => einternP (.index (← lowerExprE subst a) (← lowerExprE subst b))
+
+/-- LOOP-EVERYTHING (banks-as-data, the trunk move): a SUMMING fold survives as
+    an indexed reduction (`bankSum`) instead of unrolling — the realization
+    below post-strata owns the loop; nothing per-effect, no size threshold.
+    Eligibility (anything else unrolls exactly as before):
+    - body ≡ `acc + rhs` with the accumulator free ONLY at that head. The loop
+      then visits elements in exactly the order the unroll nests its adds, so
+      the render is bit-identical for ANY element type (order preservation, not
+      associativity — the typed-accumulator emit carries floats). A Horner fold
+      (`acc·x + c`) is not a Σ and keeps unrolling, as it should.
+    - init ≡ literal 0 (the reduce seed `ReduceBegin` provides).
+    - scalar elements only (array/tag-valued columns wait for
+      columnize-over-shapes).
+    - no `bankSum` inside the lowered body — emit rejects NESTED regions (v1).
+      A banked fold as a column ELEMENT is fine: tables materialize before the
+      region, so its region closes sequentially.
+    The element binder substitutes to `index(col, loopIdx)` — the same
+    substitution machinery the unroll uses, pointed at a symbolic element. -/
+private partial def tryBankFoldE (subst : SubstMapE) (items : Array ExprId)
+    (init : ExprId) (acc elem : Binder) (body : ExprId) : LowerM (Option ExprId) := do
+  unless banksLoopEnabled do return none
+  if items.isEmpty then return none
+  match ← derefP (← lowerExprE subst init) with
+  | .num n => unless n.mantissa == 0 do return none
+  | _ => return none
+  let .binary .add accRef rhs ← derefP body | return none
+  let .bindingRef i ← derefP accRef | return none
+  unless i == acc.idx do return none
+  if ← anyNodeE (· == .bindingRef acc.idx) rhs then return none
+  for item in items do
+    match ← derefP item with
+    | .arr _ | .tag .. => return none
+    | _ => pure ()
+  let col ← einternP (.arr items)
+  let elemSym ← einternP (.index col (← einternP .loopIdx))
+  let rhs' ← lowerExprE ((elem.idx, elemSym) :: subst) rhs
+  if ← anyNodeE (fun n => match n with | .bankSum .. => true | _ => false) rhs' then
+    return none
+  some <$> einternP (.bankSum items.size #[col] rhs')
 
 end
 

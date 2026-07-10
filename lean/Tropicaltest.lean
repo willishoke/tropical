@@ -1773,6 +1773,98 @@ private def runBanksFloat (arena : Arena)
     | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-float  render: {firstLine e}"; pure false
   | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-float  build: {firstLine e}"; pure false
 
+/-- THE TRUNK-FOLD gate (loop-everything). A surface-language SUMMING fold —
+    through the FULL front door (raise → elaborate → strata → emit) — lowers to
+    an indexed reduction, renders byte-identical to its hand-unrolled add chain,
+    and the plan is FLAT in element count (the Pack carries the column; the loop
+    body is O(1)). Horner folds (`acc·x + c`) are shape-ineligible and keep
+    unrolling, so the transcendental stdlib is untouched — checked implicitly by
+    every other gate in this suite. -/
+private def runBanksFoldTrunk (_arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let jn (m : Nat) (e : Nat) : Lean.Json := Lean.Json.num ⟨Int.ofNat m, e⟩
+  let amp (i : Nat) : Lean.Json := jn (31 + 7 * i) 2          -- 0.31 + 0.07·i, exact decimals
+  let addJ (a b : Lean.Json) : Lean.Json :=
+    Lean.Json.mkObj [("op", Lean.Json.str "add"), ("args", Lean.Json.arr #[a, b])]
+  let mulHalf (a : Lean.Json) : Lean.Json :=
+    Lean.Json.mkObj [("op", Lean.Json.str "mul"), ("args", Lean.Json.arr #[a, jn 5 1])]
+  let binding (n : String) : Lean.Json :=
+    Lean.Json.mkObj [("op", Lean.Json.str "binding"), ("name", Lean.Json.str n)]
+  let mkPatch (k : Nat) (unrolled : Bool) : Lean.Json :=
+    let amps := (Array.range k).map amp
+    let expr :=
+      if unrolled then
+        -- ((0 + c₀·½) + c₁·½) + … — the fold's own unroll order
+        amps.foldl (fun acc a => addJ acc (mulHalf a)) (jn 0 0)
+      else
+        Lean.Json.mkObj [("op", Lean.Json.str "fold"), ("over", Lean.Json.arr amps),
+          ("init", jn 0 0), ("acc_var", Lean.Json.str "acc"), ("elem_var", Lean.Json.str "e"),
+          ("body", addJ (binding "acc") (mulHalf (binding "e")))]
+    let inner := Lean.Json.mkObj [
+      ("name", Lean.Json.str "FoldProbe"),
+      ("ports", Lean.Json.mkObj [("inputs", Lean.Json.arr #[]),
+        ("outputs", Lean.Json.arr #[Lean.Json.str "out"])]),
+      ("body", Lean.Json.mkObj [("op", Lean.Json.str "block"),
+        ("decls", Lean.Json.arr #[]),
+        ("assigns", Lean.Json.arr #[Lean.Json.mkObj [
+          ("op", Lean.Json.str "outputAssign"), ("name", Lean.Json.str "out"),
+          ("expr", expr)]])])]
+    Lean.Json.mkObj [
+      ("schema", Lean.Json.str "tropical_program_2"),
+      ("name", Lean.Json.str "fold_trunk_probe"),
+      ("body", Lean.Json.mkObj [("op", Lean.Json.str "block"),
+        ("decls", Lean.Json.arr #[
+          Lean.Json.mkObj [("op", Lean.Json.str "programDecl"),
+            ("name", Lean.Json.str "FoldProbe"), ("program", inner)],
+          Lean.Json.mkObj [("op", Lean.Json.str "instanceDecl"),
+            ("name", Lean.Json.str "p"), ("program", Lean.Json.str "FoldProbe"),
+            ("inputs", Lean.Json.mkObj [])]]),
+        ("assigns", Lean.Json.arr #[])]),
+      ("audio_outputs", Lean.Json.arr #[Lean.Json.mkObj [
+        ("instance", Lean.Json.str "p"), ("output", Lean.Json.str "out")]])]
+  let compileAt (k : Nat) (unrolled : Bool) (tag : String) :
+      IO (Except String Tropical.Plan.FlatPlan) := do
+    let tmp := s!"/tmp/tropicaltest-fold-{tag}.json"
+    IO.FS.writeFile tmp (mkPatch k unrolled).compress
+    match ← compilePatch tmp .fused with
+    | .error e => pure (.error e)
+    | .ok planJson =>
+      match Lean.Json.parse planJson with
+      | .error e => pure (.error s!"parse: {e}")
+      | .ok j => pure ((Tropical.Plan.FlatPlan.ofWire j).mapError (s!"ofWire: {·}"))
+  match ← compileAt 16 false "f16", ← compileAt 16 true "u16" with
+  | .ok fp, .ok up =>
+    match ← renderPlanSamples fp 2048, ← renderPlanSamples up 2048 with
+    | .ok fS, .ok uS =>
+      let n := min fS.size uS.size
+      let mut bitDiff := 0
+      for i in [0:n] do
+        if fS[i]! != uS[i]! then bitDiff := bitDiff + 1
+      let nonzero := fS.any (· != 0.0)
+      match ← compileAt 8 false "f8", ← compileAt 64 false "f64" with
+      | .ok f8, .ok f64 =>
+        let d := planInstrCount f64 - planInstrCount f8
+        let shrinks := decide (planInstrCount fp < planInstrCount up)
+        let looping := Tropical.Ir.Strata.ArrayLower.banksLoopEnabled
+        IO.println s!"        surface fold Σₖ ampₖ·½ through raise→elab→strata→emit, 16 elements (loop-everything={looping}):"
+        IO.println s!"        result   bit-differing {bitDiff}/{n} vs hand-unrolled · nonzero={nonzero}"
+        IO.println s!"        payoff   plan-instrs: fold(16)={planInstrCount fp} unrolled(16)={planInstrCount up} · fold(8)={planInstrCount f8} fold(64)={planInstrCount f64} (Δ={d})"
+        if looping then
+          if bitDiff == 0 && nonzero && shrinks && d ≤ 2 then
+            IO.println s!"  PASS  banks-fold-trunk  surface fold banks: byte-equal to unroll, plan FLAT in K (Δ={d} ≤ 2, 8→64)"; pure true
+          else
+            IO.println s!"  FAIL  banks-fold-trunk  bitDiff={bitDiff} nonzero={nonzero} shrinks={shrinks} Δ={d}"; pure false
+        else
+          -- escape hatch: the fold must genuinely revert to unrolling
+          if bitDiff == 0 && nonzero && !shrinks && d > 2 then
+            IO.println s!"  PASS  banks-fold-trunk  escape hatch reverts: fold unrolls (Δ={d} grows), byte-equal"; pure true
+          else
+            IO.println s!"  FAIL  banks-fold-trunk  (unroll mode) bitDiff={bitDiff} nonzero={nonzero} shrinks={shrinks} Δ={d}"; pure false
+      | .error e, _ | _, .error e =>
+        IO.println s!"  FAIL  banks-fold-trunk  scaling compile: {firstLine e}"; pure false
+    | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-fold-trunk  render: {firstLine e}"; pure false
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-fold-trunk  compile: {firstLine e}"; pure false
+
 /-- THE MODAL DEGREE gate. A degree-1 mode `amp·d·e^{−σd}` (a repeated pole — the
     resonance "swell") rendered by the engine must match `sinkGain·d·e^{−σd}` to
     minimax tolerance (an absolute oracle, validating the new `d^deg` factor), and
@@ -3499,6 +3591,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runBanksFloat arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runBanksFoldTrunk arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runModalDegree arena resolved) then
