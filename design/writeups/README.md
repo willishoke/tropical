@@ -15,3 +15,6 @@ Computer-Modern serif, high data-ink ratio.
 - [Through-zero flanging](through-zero-flanging.md) — why the canonical
   tape-studio effect cannot be done at zero latency on a sample stream,
   and why it is free for a closed-form kernel.
+- [Reverse reverb](reverse-reverb.md) — why the reverberant swell that
+  arrives before a sound has always been an offline studio trick, and how
+  a closed-form kernel plays it live at zero latency.
