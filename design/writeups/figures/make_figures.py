@@ -1,63 +1,16 @@
 #!/usr/bin/env python
-"""Regenerate the figures for the through-zero flanging writeup.
+"""Figures for the through-zero flanging writeup (through-zero-flanging.md).
 
-    python -m venv venv && venv/bin/pip install matplotlib numpy
     venv/bin/python design/writeups/figures/make_figures.py
 
-Aesthetic: narrow precise grayscale lines, Computer-Modern serif, high
-data-ink ratio. Emits vector SVG (text as embedded paths, so the files are
-self-contained and render identically without the CM fonts installed) next
-to this script.
+See _style.py for the shared house aesthetic.
 """
-import os
 import numpy as np
-import matplotlib as mpl
-mpl.use("Agg")
+from _style import apply_style, figdir_of, finish, tidy, boxed_legend, K, G, L, FILL
 import matplotlib.pyplot as plt
 
-# ---- Computer-Modern / LaTeX look without a TeX install -----------------
-mpl.rcParams.update({
-    "font.family": "serif",
-    "font.serif": ["cmr10", "CMU Serif", "DejaVu Serif"],
-    "mathtext.fontset": "cm",
-    "axes.unicode_minus": False,       # avoid missing-glyph warning w/ cmr10
-    "axes.formatter.use_mathtext": True,
-    "font.size": 10,
-    "axes.linewidth": 0.6,
-    "axes.titlesize": 11,
-    "axes.labelsize": 10,
-    "xtick.labelsize": 8.5,
-    "ytick.labelsize": 8.5,
-    "xtick.direction": "in",
-    "ytick.direction": "in",
-    "xtick.major.width": 0.6,
-    "ytick.major.width": 0.6,
-    "xtick.major.size": 3.0,
-    "ytick.major.size": 3.0,
-    "lines.linewidth": 0.9,
-    "figure.dpi": 110,
-    "svg.fonttype": "path",            # embed glyph outlines -> portable
-    "legend.frameon": False,
-    "legend.fontsize": 8.5,
-})
-
-K = "0.0"      # black
-G = "0.50"     # mid gray
-L = "0.72"     # light gray
-FILL = "0.90"  # shading
-
-FIGDIR = os.path.dirname(os.path.abspath(__file__))
-
-
-def finish(fig, name):
-    fig.savefig(os.path.join(FIGDIR, name + ".svg"), bbox_inches="tight",
-                pad_inches=0.04, transparent=True)
-    plt.close(fig)
-
-
-def tidy(ax):
-    ax.spines["top"].set_visible(False)
-    ax.spines["right"].set_visible(False)
+apply_style()
+FIGDIR = figdir_of(__file__)
 
 
 # =========================================================================
@@ -83,10 +36,9 @@ def fig_comb():
     ax.set_xlabel(r"frequency  $f$  (kHz)")
     ax.set_ylabel(r"$|H(f)|$")
     ax.set_yticks([0, 1, 2])
-    ax.legend(loc="upper right", handlelength=1.6, borderaxespad=0.4,
-              frameon=True, framealpha=1.0, edgecolor="0.8", fancybox=False)
+    boxed_legend(ax, loc="upper right", handlelength=1.6, borderaxespad=0.4)
     tidy(ax)
-    finish(fig, "comb")
+    finish(fig, "comb", FIGDIR)
 
 
 # =========================================================================
@@ -103,8 +55,7 @@ def fig_notch_fan():
 
     d_ord = 0.8 + 0.4 * np.cos(2 * np.pi * t)          # in [0.4, 1.2] ms
     for k in ks:
-        ax_c = K if k == 0 else G
-        a1.plot(t, (2 * k + 1) / (2 * d_ord), color=ax_c,
+        a1.plot(t, (2 * k + 1) / (2 * d_ord), color=K if k == 0 else G,
                 linewidth=0.9 if k == 0 else 0.7)
     a1.set_title(r"ordinary flanger", fontsize=10)
     a1.text(0.5, 7.4, r"$\Delta(t)>0$  always", ha="center", fontsize=8.5,
@@ -129,7 +80,7 @@ def fig_notch_fan():
         ax.set_xticks([0, 0.5, 1.0])
         tidy(ax)
     a1.set_ylabel(r"notch frequency (kHz)")
-    finish(fig, "notch-fan")
+    finish(fig, "notch-fan", FIGDIR)
 
 
 # =========================================================================
@@ -177,11 +128,10 @@ def fig_causality_wall():
         ax.set_xticks([0, 0.5, 1.0, 1.5])
         ax.set_yticks([-1, 0, 1, 2])
         tidy(ax)
-    a2.legend(loc="upper center", handlelength=1.8, borderaxespad=0.4,
-              labelspacing=0.3, ncol=2, columnspacing=1.4,
-              frameon=True, framealpha=1.0, edgecolor="0.8", fancybox=False)
+    boxed_legend(a2, loc="upper center", handlelength=1.8, borderaxespad=0.4,
+                 labelspacing=0.3, ncol=2, columnspacing=1.4)
     a1.set_ylabel(r"delay  $d$  (ms)")
-    finish(fig, "causality-wall")
+    finish(fig, "causality-wall", FIGDIR)
 
 
 if __name__ == "__main__":
