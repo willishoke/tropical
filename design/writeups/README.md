@@ -26,3 +26,7 @@ Reading order runs foundation-first; each effect leans on the atom below it.
 - [Phase alignment by anchoring](phase-anchoring.md) — how an oscilloscope
   makes a waveform stand still, and why the century-old trigger dissolves
   into an exact subtraction once every signal is a function of time.
+- [There is no control rate](no-control-rate.md) — why the audio-rate /
+  control-rate hierarchy is an artifact of buffers, and what is left once
+  you remove it: one signal, and consumers that each sample it at their
+  own rate.
