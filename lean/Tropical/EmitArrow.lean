@@ -1389,37 +1389,76 @@ def modalBankSig (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Sig) 
     (litI 0)
   selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
 
+/-- The SYMBOLIC mode: a bank body's per-mode scalars as column reads at the
+    loop index. A body written against `ModeSym` is the same lambda the unrolled
+    fold applies to a concrete `ModalMode` — only where the scalars COME FROM
+    changes (a column read at `loopIdx` instead of a baked subterm). `incr` is
+    the pre-`toInt` float increment `(ω/2π)·2³²/SR` (exact < 2^53); `toInt`
+    happens in the body (`modePhaseQFromIncr`). -/
+structure ModeSym where
+  incr  : Sig
+  sigma : Sig
+  cre   : Sig
+  cim   : Sig
+
+/-- A bank's coefficient columns: one `Sig.arr` per `ModalMode` field, one entry
+    per mode — the SAME s0 subterms the unrolled path bakes per mode, destined
+    for the stage-0 coefficient kernel. Built once per bank and shared by every
+    fold over it (a direction bank runs TWO folds over one set of columns; the
+    arena's hash-consing would dedupe rebuilt columns anyway, but sharing at the
+    source keeps the intent visible). -/
+structure BankCols where
+  count : Nat
+  incr  : Sig
+  sigma : Sig
+  cre   : Sig
+  cim   : Sig
+
+def bankCols (modes : Array ModalMode) : BankCols where
+  count := modes.size
+  incr  := Sig.arr (modes.map fun m =>
+    div (mul (div m.omega twoPiE) (lit 4294967296)) .sampleRate)
+  sigma := Sig.arr (modes.map (·.sigma))
+  cre   := Sig.arr (modes.map (·.cre))
+  cim   := Sig.arr (modes.map (·.cim))
+
+/-- THE generic banked fold: `Σₖ body(mode k)` as one indexed reduction
+    (`Sig.bankSum` → a `ReduceBegin` region — O(1) plan instructions in mode
+    count). The body is an ordinary function of the symbolic mode; this is the
+    only place a banked effect touches `loopIdx`/`bankSum`. Banking is a property
+    of the fold, not of the effect: every banked lowering is `bankFold` applied
+    to its own body, never a hand-built table twin. The loop visits modes in
+    array order — the same order the unrolled `foldl` nests its adds — so for
+    the i64 mode sum the render is BIT-IDENTICAL to the unroll. -/
+def bankFold (cols : BankCols) (body : ModeSym → Sig) : Sig :=
+  let k := Sig.loopIdx
+  Sig.bankSum cols.count #[cols.incr, cols.sigma, cols.cre, cols.cim]
+    (body { incr  := Sig.index cols.incr k
+          , sigma := Sig.index cols.sigma k
+          , cre   := Sig.index cols.cre k
+          , cim   := Sig.index cols.cim k })
+
 /-- The BANKED lowering of a modal bank (banks-as-data slice 3b): the SAME value
-    as `modalBankSig`, but the mode sum is a `Sig.bankSum` indexed reduction over
-    four coefficient columns instead of an unrolled fold — so the emitted plan is
+    as `modalBankSig`, but the mode sum is a `bankFold` indexed reduction over
+    the coefficient columns instead of an unrolled fold — so the emitted plan is
     O(1) in mode count, not O(modes). Requires every mode `deg == 0` (the uniform
     datapath, true for resonator/reverb/residue banks); ragged banks route to the
-    unrolled path. The columns hold the SAME per-mode subterms the unrolled path
-    bakes, and the mode sum is i64-modular (associative), so the render is
-    BIT-IDENTICAL — the goldens gate the move. Drop-in for `modalBankSig`: same
-    `(modes, clkInt, anchor)` signature, so it rides `modalBankTerm`'s `arrUn`
-    (warps reach it through the already-warped clock leaf) unchanged. -/
+    unrolled path. The body is EXACTLY `modalBankSig`'s op sequence over the
+    symbolic mode (deg == 0, so `env2 = env`), and the mode sum is i64-modular
+    (associative), so the render is BIT-IDENTICAL — the goldens gate the move.
+    Drop-in for `modalBankSig`: same `(modes, clkInt, anchor)` signature, so it
+    rides `modalBankTerm`'s `arrUn` (warps reach it through the already-warped
+    clock leaf) unchanged. -/
 def modalBankSigTable (modes : Array ModalMode) (clkInt anchorSamples : Sig) : Sig :=
   let clkRel := relClockQ clkInt anchorSamples
   let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-  -- Four coefficient columns, one entry per mode — the SAME s0 subterms the
-  -- unrolled path bakes per mode. `incr` lands as its pre-`toInt` float (< 2^53,
-  -- exact in f64); `toInt` happens in-loop.
-  let incrCol  := Sig.arr (modes.map fun m =>
-    div (mul (div m.omega twoPiE) (lit 4294967296)) .sampleRate)
-  let sigmaCol := Sig.arr (modes.map (·.sigma))
-  let creCol   := Sig.arr (modes.map (·.cre))
-  let cimCol   := Sig.arr (modes.map (·.cim))
-  -- The per-mode body over `loopIdx`, EXACTLY `modalBankSig`'s op sequence with
-  -- every per-mode scalar replaced by a column read (deg == 0, so `env2 = env`).
-  let k := Sig.loopIdx
-  let phQ  := modePhaseQFromIncr (toIntE (Sig.index incrCol k)) clkRel
-  let env  := expSig (neg (mul (Sig.index sigmaCol k) dSec))
-  let wCre := toIntE (mul (mul env (Sig.index creCol k)) (lit 268435456))
-  let wCim := toIntE (mul (mul env (Sig.index cimCol k)) (lit 268435456))
-  let oscQ := rshift (sub (mul wCre (fixedCosCycSig phQ))
-                          (mul wCim (fixedSinCycSig phQ))) (lit 28)
-  let bankQ := Sig.bankSum modes.size #[incrCol, sigmaCol, creCol, cimCol] oscQ
+  let bankQ := bankFold (bankCols modes) fun m =>
+    let phQ  := modePhaseQFromIncr (toIntE m.incr) clkRel
+    let env  := expSig (neg (mul m.sigma dSec))
+    let wCre := toIntE (mul (mul env m.cre) (lit 268435456))
+    let wCim := toIntE (mul (mul env m.cim) (lit 268435456))
+    rshift (sub (mul wCre (fixedCosCycSig phQ))
+                (mul wCim (fixedSinCycSig phQ))) (lit 28)
   selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
 
 /-- True when a bank is eligible for the table lowering: every mode `deg == 0`
@@ -2050,9 +2089,53 @@ def modalBankSigDir (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Si
   let rev := selectE (gt (lit 0) clkRel) (fixedOutQ 30 revQ) (lit 0)
   add (mul (sub (lit 1) dir) fwd) (mul dir rev)
 
-/-- `modalBankTerm` with a DIRECTION crossfade. Rides the `.clk` leaf like
-    `modalBankTerm`, so master warps still reach it. -/
-def modalBankTermDir (modes : Array ModalMode) (anchor : Sig) (c : Clock)
+/-- The BANKED direction bank: `modalBankSigDir`'s value with BOTH mode sums as
+    indexed reductions — the forward and reverse accumulators are two `bankFold`s
+    over the SAME coefficient columns (a pair-valued fold is two scalar folds;
+    each visits modes in array order, so each i64 sum agrees bit-for-bit with its
+    unrolled half). This is NOT a hand table twin: both bodies are
+    `modalBankSigDir`'s per-mode lambda split at the pair, written over the
+    symbolic mode. Requires `deg == 0` uniformity (the `bankIsUniform` guard at
+    dispatch), so the `powE` degree branches vanish, exactly as in
+    `modalBankSigTable`. Same signature as `modalBankSigDir` — the dispatch in
+    `modalBankTermDir` picks between them. -/
+def modalBankSigDirTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
+    (dir : Sig) (dampScale? : Option Sig := none) : Sig :=
+  let clkRel := relClockQ clkInt anchorSamples
+  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
+  let cols := bankCols modes
+  -- σ·d, optionally sway-bent (decay clock only, pitch untouched) — the same
+  -- subterm both sides read, per symbolic mode.
+  let sdOf := fun (m : ModeSym) =>
+    let sd := mul m.sigma dSec
+    match dampScale? with | none => sd | some s => mul sd s
+  let fwdQ := bankFold cols fun m =>
+    let phQ   := modePhaseQFromIncr (toIntE m.incr) clkRel
+    let envF  := expSig (neg (sdOf m))
+    let wCreF := toIntE (mul (mul envF m.cre) (lit 268435456))
+    let wCimF := toIntE (mul (mul envF m.cim) (lit 268435456))
+    rshift (sub (mul wCreF (fixedCosCycSig phQ))
+                (mul wCimF (fixedSinCycSig phQ))) (lit 28)
+  let revQ := bankFold cols fun m =>
+    -- the mirrored phase spelled out on the NEGATED clock, as in the unrolled
+    -- path (the fixed sine isn't bit-symmetric; see `modalBankSigDir`).
+    let phQN  := modePhaseQFromIncr (toIntE m.incr) (neg clkRel)
+    let envR  := expSig (sdOf m)
+    let wCreR := toIntE (mul (mul envR m.cre) (lit 268435456))
+    let wCimR := toIntE (mul (mul envR m.cim) (lit 268435456))
+    rshift (sub (mul wCreR (fixedCosCycSig phQN))
+                (mul wCimR (fixedSinCycSig phQN))) (lit 28)
+  let fwd := selectE (gt clkRel (lit 0)) (fixedOutQ 30 fwdQ) (lit 0)
+  let rev := selectE (gt (lit 0) clkRel) (fixedOutQ 30 revQ) (lit 0)
+  add (mul (sub (lit 1) dir) fwd) (mul dir rev)
+
+/-- The direction bank as a term over the clock leaf, with the LOWERING (unrolled
+    or banked) supplied explicitly — shared by `modalBankTermDir` (which picks by
+    flag) and the `banks-as-data-dir` equivalence gate (which builds both sides
+    regardless of the flag). -/
+def modalBankTermDirWith
+    (lower : Array ModalMode → Sig → Sig → Sig → Option Sig → Sig)
+    (modes : Array ModalMode) (anchor : Sig) (c : Clock)
     (dir : Sig) (damp? : Option (Sig × Sig) := none) : ArrowTerm :=
   ArrowTerm.arrUn
     (fun clkSig =>
@@ -2061,8 +2144,19 @@ def modalBankTermDir (modes : Array ModalMode) (anchor : Sig) (c : Clock)
       -- reduced (`phasorPhaseSig`), never `rate·t` on unbounded float seconds.
       let dampScale? := damp?.map (fun (depth, rate) =>
         add (lit 1) (mul depth (sinSig (mul twoPiE (phasorPhaseSig rate (lit 0) clkSig)))))
-      modalBankSigDir modes clkSig anchor dir dampScale?)
+      lower modes clkSig anchor dir dampScale?)
     (ArrowTerm.clk c)
+
+/-- `modalBankTerm` with a DIRECTION crossfade. Rides the `.clk` leaf like
+    `modalBankTerm`, so master warps still reach it. Dispatches to the banked
+    lowering for uniform banks under the strangler flag, like `modalBankTerm`. -/
+def modalBankTermDir (modes : Array ModalMode) (anchor : Sig) (c : Clock)
+    (dir : Sig) (damp? : Option (Sig × Sig) := none) : ArrowTerm :=
+  let lower : Array ModalMode → Sig → Sig → Sig → Option Sig → Sig :=
+    if banksTableEnabled && bankIsUniform modes
+    then fun ms clk a d s? => modalBankSigDirTable ms clk a d s?
+    else fun ms clk a d s? => modalBankSigDir ms clk a d s?
+  modalBankTermDirWith lower modes anchor c dir damp?
 
 /-- A bank's reading DIRECTION as data: the forward↔reverse crossfade `dir`
     (0 = forward tail, 1 = reverse/pre-verb) plus optional decay sway `(depth,
@@ -2128,6 +2222,17 @@ def buildModalBankDir (name : String) (modes : Array ModalMode) (anchor : Sig)
     (dir : Sig) (arena : Arena)
     (damp? : Option (Sig × Sig) := none) : Arena × ProgramIdx :=
   let (out, _) := emitTerm (normalize (modalBankTermDir modes anchor clockLit dir damp?)) {}
+  buildExprCarrier name out arena
+
+/-- `buildModalBankDir` with the LOWERING chosen explicitly (unrolled
+    `modalBankSigDir` vs banked `modalBankSigDirTable`) — the two sides of the
+    `banks-as-data-dir` equivalence gate, independent of the strangler flag. -/
+def buildModalBankDirWith
+    (lower : Array ModalMode → Sig → Sig → Sig → Option Sig → Sig)
+    (name : String) (modes : Array ModalMode) (anchor : Sig)
+    (dir : Sig) (arena : Arena)
+    (damp? : Option (Sig × Sig) := none) : Arena × ProgramIdx :=
+  let (out, _) := emitTerm (normalize (modalBankTermDirWith lower modes anchor clockLit dir damp?)) {}
   buildExprCarrier name out arena
 
 /-- An ABSOLUTE address warp: the modulator signal `s` (read as SECONDS) BECOMES

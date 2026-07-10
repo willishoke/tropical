@@ -1653,6 +1653,86 @@ private def runBanksAsData (arena : Arena)
     | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-as-data  render: {firstLine e}"; pure false
   | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-as-data  build: {firstLine e}"; pure false
 
+open Tropical.EmitArrow in
+/-- THE BANKS-AS-DATA DIRECTION gate. The direction bank lowered through TWO
+    indexed reductions over one set of coefficient columns
+    (`modalBankSigDirTable` — the forward and reverse accumulators as two
+    `bankFold`s) must render BIT-FOR-BIT identical to the unrolled pair-fold
+    (`modalBankSigDir`), across the crossfade (dir = 0.5), the pure reverse
+    (dir = 1 — the ANTI-CAUSAL region must actually carry energy, so the mirrored
+    phase `modePhaseQFromIncr(incr, −clkRel)` is genuinely exercised), and the
+    sway path (`dampScale?` threading the columns). Also asserts the payoff:
+    the banked plan shrinks, and both regions loop (per-mode marginal collapses).
+    This is the gate that retires the "hand-bank every effect" objection: no
+    direction table twin exists — both sides route through the SAME generic
+    `bankFold`, and this gate pins that the generic path carries a richer body
+    (two accumulators, mirrored phase, sway) without a transcription step. -/
+private def runBanksAsDataDir (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let mkModes (k : Nat) : Array ModalMode :=
+    (Array.range k).map fun i =>
+      ModalMode.hz (lit (Int.ofNat (220 + 40 * i))) (lit 30 1) (lit 2 1)
+  let anchor := lit 200
+  let modes := mkModes 12
+  let sway : Option (Sig × Sig) := some (lit 5 1, lit 20 1)
+  -- explicit lambdas: Lean eta-expands optParam references by inserting the
+  -- default, which would drop the `dampScale?` slot from the function type
+  let unrolled : Array ModalMode → Sig → Sig → Sig → Option Sig → Sig :=
+    fun ms clk a d s? => modalBankSigDir ms clk a d s?
+  let looped : Array ModalMode → Sig → Sig → Sig → Option Sig → Sig :=
+    fun ms clk a d s? => modalBankSigDirTable ms clk a d s?
+  -- Three configs: crossfade, pure reverse, crossfade+sway — each unrolled vs banked.
+  let cfgs : Array (String × Sig × Option (Sig × Sig)) :=
+    #[("mid", litF 0.5, none), ("rev", lit 1, none), ("sway", litF 0.5, sway)]
+  let mut ok := true
+  let mut planPair : Option (Nat × Nat) := none
+  for (tag, dir, damp?) in cfgs do
+    let uPlan := buildAndFinish (.ok (buildModalBankDirWith unrolled
+      s!"dir_{tag}_unrolled" modes anchor dir arena damp?))
+    let tPlan := buildAndFinish (.ok (buildModalBankDirWith looped
+      s!"dir_{tag}_looped" modes anchor dir arena damp?))
+    match uPlan, tPlan with
+    | .ok up, .ok tp =>
+      match ← renderPlanSamples up 2048, ← renderPlanSamples tp 2048 with
+      | .ok uS, .ok tS =>
+        let n := min uS.size tS.size
+        let mut bitDiff := 0
+        for i in [0:n] do
+          if uS[i]! != tS[i]! then bitDiff := bitDiff + 1
+        -- the reverse config must carry PRE-STRIKE energy (the anti-causal loop lives)
+        let mut preE : Float := 0.0
+        for i in [0:200] do preE := preE + tS[i]! * tS[i]!
+        let preOk := tag != "rev" || preE > 1e-6
+        if tag == "mid" then planPair := some (planInstrCount up, planInstrCount tp)
+        if bitDiff != 0 || !preOk then
+          IO.println s!"        dir[{tag}]  bitDiff={bitDiff}/{n} preE={preE} — MISMATCH"
+          ok := false
+        else
+          IO.println s!"        dir[{tag}]  bit-identical ({n} samples){if tag == "rev" then s!", pre-strike E={preE}" else ""}"
+      | .error e, _ | _, .error e =>
+        IO.println s!"  FAIL  banks-as-data-dir  render[{tag}]: {firstLine e}"; ok := false
+    | .error e, _ | _, .error e =>
+      IO.println s!"  FAIL  banks-as-data-dir  build[{tag}]: {firstLine e}"; ok := false
+  -- Payoff: banked direction plan shrinks at 12 modes; per-mode marginal collapses
+  -- (BOTH regions loop — the marginal is the column fills alone).
+  let uSmall := buildAndFinish (.ok (buildModalBankDirWith unrolled "du6"  (mkModes 6)  anchor (litF 0.5) arena))
+  let uBig   := buildAndFinish (.ok (buildModalBankDirWith unrolled "du24" (mkModes 24) anchor (litF 0.5) arena))
+  let tSmall := buildAndFinish (.ok (buildModalBankDirWith looped "dt6"  (mkModes 6)  anchor (litF 0.5) arena))
+  let tBig   := buildAndFinish (.ok (buildModalBankDirWith looped "dt24" (mkModes 24) anchor (litF 0.5) arena))
+  match planPair, uSmall, uBig, tSmall, tBig with
+  | some (uc, tc), .ok us, .ok ub, .ok ts, .ok tb =>
+    let uMarginal := planInstrCount ub - planInstrCount us
+    let tMarginal := planInstrCount tb - planInstrCount ts
+    let shrinks := decide (tc < uc)
+    IO.println s!"        payoff   plan-instrs 12-mode: unrolled={uc} looped={tc} (shrinks={shrinks})"
+    IO.println s!"        payoff   per-mode marginal (6→24 modes): unrolled +{uMarginal}  ·  banked +{tMarginal}"
+    if ok && shrinks && tMarginal < uMarginal then
+      IO.println s!"  PASS  banks-as-data-dir  looped ≡ unrolled bit-exact (mid/rev/sway), reverse audible; plan shrinks, marginal +{tMarginal}<+{uMarginal}"; pure true
+    else
+      IO.println s!"  FAIL  banks-as-data-dir  ok={ok} shrinks={shrinks} tMarg={tMarginal} uMarg={uMarginal}"; pure false
+  | _, _, _, _, _ =>
+    IO.println s!"  FAIL  banks-as-data-dir  scaling build failed"; pure false
+
 /-- THE MODAL DEGREE gate. A degree-1 mode `amp·d·e^{−σd}` (a repeated pole — the
     resonance "swell") rendered by the engine must match `sinkGain·d·e^{−σd}` to
     minimax tolerance (an absolute oracle, validating the new `d^deg` factor), and
@@ -3373,6 +3453,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runBanksAsData arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runBanksAsDataDir arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runModalDegree arena resolved) then
