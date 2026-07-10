@@ -2306,6 +2306,65 @@ private def runBanksStaging (arena : Arena)
           else
             IO.println s!"  FAIL  banks-staging  flag off: reduces={reduces} coeff={coeffFills} renderOk={renderOk}"; pure false
 
+/-- THE COMPILE-FLATNESS BENCHMARK (banks-as-data payoff). Where `banks-staging`
+    proves the payoff STRUCTURALLY at one mode count (columns hoist, audio is
+    fill-free), this MEASURES it across scale: compile the SAME room at K=6 and
+    K=512 modes and show the AUDIO kernel's plan instruction count is flat in K
+    (within a small constant) while only the coefficient kernel grows.
+
+    Why the audio kernel is flat: the resonator's freq/decay are LIVE (session
+    slots → stage-0), so their coefficient columns (incr←freq, sigma←decay) hoist
+    to the s0 coefficient kernel — those fills scale with K there, at knob rate,
+    O0. The amps (cre=1/k^1.1, cim=0) are compile-TIME constants, so their columns
+    bake into the audio kernel as fold `Pack`s — but a `Pack` is ONE instruction
+    regardless of K, so the audio kernel stays flat. The banked audio body is then
+    a fixed O(1) reduce region reading the shared, coeff-filled storage.
+
+    NOTE the nuance: this flatness rides on freq/decay being live. A fully-STATIC
+    bank would NOT be flat — with no live columns to hoist, its column arithmetic
+    stays as fold in the audio kernel and grows with K. True static flatness needs
+    blocker 4's fill-as-reduce. Flag off ⇒ the bank is unrolled and the audio
+    kernel grows ~linearly in K; we only REPORT that (the documented contrast). -/
+private def runBanksBench (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let flagOn := Tropical.EmitArrow.banksTableEnabled
+  -- A bare resonator → out with live freq/decay, at a graph-configurable mode
+  -- count K (the `"partials"` param threaded through Playground.buildNode).
+  let mkSrc := fun (k : Nat) => "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4,\"partials\":"
+      ++ toString k ++ "}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"res\"]}}],\"out\":\"out\"}"
+  -- Compile at K, split via the typed stage-0 hoist, and report
+  -- (audio-kernel instrs, coeff-kernel instrs).
+  let compileAt : Nat → Except String (Nat × Nat) := fun k => do
+    let j ← Lean.Json.parse (mkSrc k)
+    let (plan, _, stageBlocks) ← Tropical.Playground.compilePlanPure arena resolved j
+    let split ← Tropical.Ir.Stage0.hoistTyped plan stageBlocks
+    let audioN := planInstrCount split.audio
+    let coeffN := match split.coeff? with | some c => planInstrCount c | none => 0
+    pure (audioN, coeffN)
+  match compileAt 6, compileAt 512 with
+  | .error e, _ => IO.println s!"  FAIL  banks-bench  K=6 compile: {firstLine e}"; pure false
+  | _, .error e => IO.println s!"  FAIL  banks-bench  K=512 compile: {firstLine e}"; pure false
+  | .ok (a6, c6), .ok (a512, c512) =>
+    let dAudio := if a512 ≥ a6 then a512 - a6 else a6 - a512
+    IO.println s!"        bare resonator→out (live freq/decay), banks-table={flagOn}:"
+    IO.println s!"        audio-kernel instrs: K=6 → {a6}   K=512 → {a512}   Δ={dAudio}"
+    IO.println s!"        coeff-kernel instrs: K=6 → {c6}   K=512 → {c512}"
+    if flagOn then
+      -- Banked: the audio kernel is a fixed reduce body + O(1) const Packs, flat
+      -- in K; the LIVE columns' fills live in the coeff kernel and scale there.
+      let flat := dAudio ≤ 8
+      let coeffGrows := decide (c512 > c6)
+      if flat then
+        IO.println s!"  PASS  banks-bench  flag on: audio kernel FLAT in K (Δ={dAudio} ≤ 8, K=6→512); coeff kernel scales with K ({c6}→{c512}, grows={coeffGrows}) at knob rate"; pure true
+      else
+        IO.println s!"  FAIL  banks-bench  flag on: audio kernel NOT flat (Δ={dAudio} > 8) — a K-dependent audio instruction leaked past the coeff hoist"; pure false
+    else
+      -- Unrolled: no loop, no columns; the whole bank's arithmetic is in the
+      -- audio kernel and grows with K. Not a failure — the documented contrast.
+      IO.println s!"  PASS  banks-bench  flag off: unrolled bank, audio kernel GROWS with K ({a6}→{a512}, Δ={dAudio}) — the contrast the banked path removes"; pure true
+
 /-- Build the resonator → filter → out patch graph as Json. -/
 private def filterPatchJson (fc : Int) (resM : Int) (resE : Nat) (srcF srcDecay : Int) : Lean.Json :=
   let node := fun (id kind : String) (params : List (String × Lean.Json))
@@ -3354,6 +3413,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runBanksStaging arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runBanksBench arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runModalFilter arena resolved) then

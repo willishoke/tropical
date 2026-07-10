@@ -485,12 +485,16 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
   | "resonator" =>
     let f0 := p "freq" (dv "freq")
     let decay := p "decay" (dv "decay")
+    -- Mode count is graph-configurable via the optional `"partials"` param
+    -- (absent ⇒ 6, so existing graphs are unchanged). Only the bank's SIZE is
+    -- structural (baked); f0/decay stay live knobs regardless of count.
+    let npart := (jInt params "partials" 6).toNat
     -- optional `addr` inlet: a Sig node whose value BECOMES the bank's absolute
     -- time-address (seconds into the impulse response). Unpatched ⇒ reads the
     -- master clock as before; patched ⇒ the causal gate triggers on the address
     -- signal's crossing and the ring scrubs/pitches with its slope (modalAddrWarp).
     let addr? := (portSources inObj "addr")[0]?
-    (.modalSource (resonatorBank f0 decay 6) (lit 0) clk addr?, #[])
+    (.modalSource (resonatorBank f0 decay npart) (lit 0) clk addr?, #[])
   | "reverb" =>
     let rt60 := p "rt60" (dv "rt60")
     -- reading DIRECTION: θ (radians, live) rotates the composed tail's poles in the
