@@ -2014,14 +2014,18 @@ def buildExpProbe (name : String) (arena : Arena) : Arena × ProgramIdx :=
 -- (voice ⋙ reverb) is a BUILD-TIME pass that fills the ModalMode array; the
 -- runtime substrate is just this bank. Gated by `modal-bank`.
 
-/-- Strangler flag for banks-as-data (slice 3b): when `TROPICAL_BANKS_TABLE` is
-    set, the forward modal bank lowers through the indexed reduction
-    (`modalBankSigTable`) instead of the unrolled fold — for uniform (all deg-0)
-    banks only. Default OFF: the committed goldens are the unrolled form, and
-    running them with the flag ON pins the move byte-for-byte. Read once at load,
-    so the pure lowering may branch on it. -/
+/-- Banks-as-data is the DEFAULT lowering: uniform (all deg-0) modal banks lower
+    through the indexed reduction (`bankFold` — `modalBankSigTable` /
+    `modalBankSigDirTable`) instead of unrolling. The strangler ran its course:
+    the banked render is bit-identical to the unroll (order-preserving loop,
+    i64-modular sum — the `banks-as-data`/`banks-as-data-dir` gates pin it), the
+    goldens pass byte-for-byte either way, and the coefficient columns are
+    generation-buffered in FlatRuntime (no cross-column tear on live knob
+    moves). `TROPICAL_BANKS_UNROLL` is the escape hatch back to the unrolled
+    form (bisection ladder: the naive realization stays reachable). Read once at
+    load, so the pure lowering may branch on it. -/
 initialize banksTableEnabled : Bool ← do
-  return (← IO.getEnv "TROPICAL_BANKS_TABLE").isSome
+  return (← IO.getEnv "TROPICAL_BANKS_UNROLL").isNone
 
 /-- A modal bank struck at `anchor` (samples) as a term over the clock leaf: no
     `gen`, no `.trop` instance — `{clk, +, ×, round, clamp, ldexp}` all the way

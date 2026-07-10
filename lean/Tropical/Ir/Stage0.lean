@@ -352,19 +352,27 @@ private def rebuild (plan : FlatPlan) (allBlocks : Array (Array NInstr))
     fns := fns.push f'
     cursor := cursor'
 
+  -- The array slots the coeff stream FILLS (banks-as-data coefficient columns).
+  -- The audio plan advertises them so the runtime double-buffers exactly these:
+  -- the coeff kernel writes a back generation, one atomic flip publishes it, and
+  -- the audio kernel reads a whole consistent generation (no cross-column tear).
+  let coeffArraySlots : Array Nat := (coeffStream.filterMap fun i =>
+    match i.dst with | .array s => some s | _ => none).foldl
+      (fun acc s => if acc.contains s then acc else acc.push s) #[]
   let audio : FlatPlan := { plan with
     instanceFunctions := fns
     slotCount := slotBase + a.boundary.size
     slotNames := slotNames
-    slotDefaults := slotDefaults }
+    slotDefaults := slotDefaults
+    coeffArraySlots := coeffArraySlots }
   -- If any coefficient-column fill hoisted, the coeff kernel writes shared
   -- `array_ptrs` storage (banks-as-data), so it needs the array metadata (same
   -- slot indices as the audio plan — the storage is allocated once from the
   -- audio plan and both kernels index it). Scalar-only splits keep zero arrays.
-  let coeffUsesArrays := coeffStream.any fun i =>
-    (match i.dst with | .array _ => true | _ => false)
-    || i.args.any fun a => match a with | .arrayReg _ => true | _ => false
+  let coeffUsesArrays := !coeffArraySlots.isEmpty || coeffStream.any fun i =>
+    i.args.any fun a => match a with | .arrayReg _ => true | _ => false
   let coeff : FlatPlan := { audio with
+    coeffArraySlots := #[]
     compilationMode := .fused
     arraySlotNames := if coeffUsesArrays then plan.arraySlotNames else #[]
     arraySlotCount := if coeffUsesArrays then plan.arraySlotCount else 0

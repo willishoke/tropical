@@ -395,6 +395,12 @@ structure FlatPlan where
       omitted from the wire when empty, so old plans and old parsers are
       both untouched). -/
   paramDisciplines : Array ParamDiscipline := #[]
+  /-- Array slot indices FILLED by the stage-0 coefficient kernel (banks-as-data
+      coefficient columns). The runtime double-buffers exactly these — the coeff
+      kernel writes a back generation and flips one atomic word so the audio
+      kernel reads a whole, consistent generation of columns (no cross-column
+      tear on a live knob move). Empty ⇒ no double-buffering (omitted from wire). -/
+  coeffArraySlots : Array Nat := #[]
 deriving Inhabited
 
 /-- Mirrors `toWirePlan`'s omission rules. -/
@@ -414,6 +420,8 @@ def FlatPlan.toWire (p : FlatPlan) : Except String Json := do
       ("instance_functions", Json.arr (← p.instanceFunctions.mapM (·.toWire)))]
   let fields := if p.paramDisciplines.isEmpty then fields
     else fields.push ("param_disciplines", Json.arr (p.paramDisciplines.map (·.toWire)))
+  let fields := if p.coeffArraySlots.isEmpty then fields
+    else fields.push ("coeff_array_slots", toJson p.coeffArraySlots)
   let fields := if p.sinks.isEmpty then fields
     else fields.push ("sinks", Json.arr (p.sinks.map (·.toWire)))
   let fields := if isDefaultSources p.sources then fields

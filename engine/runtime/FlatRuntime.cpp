@@ -61,6 +61,26 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
     new_state.array_sizes[i] = new_state.array_storage[i].size();
   }
 
+  // BANKS-AS-DATA: generation-buffer the coefficient columns the plan
+  // advertises (see the KernelState comment for the protocol). Three
+  // generations per column, sized like the slot's base storage; the
+  // coefficient kernel's pointer view starts as a copy of the audio view
+  // (run_coeff repoints the column entries at its write generation per run).
+  for (uint32_t s : parsed.coeff_array_slots)
+    if (s < new_state.array_storage.size())
+      new_state.coeff_array_slots.push_back(s);
+  if (!new_state.coeff_array_slots.empty())
+  {
+    for (auto & gen : new_state.coeff_generations)
+    {
+      gen.resize(new_state.coeff_array_slots.size());
+      for (std::size_t j = 0; j < new_state.coeff_array_slots.size(); ++j)
+        gen[j].assign(
+          new_state.array_storage[new_state.coeff_array_slots[j]].size(), 0);
+    }
+    new_state.coeff_array_ptrs = new_state.array_ptrs;
+  }
+
   return new_state;
 }
 

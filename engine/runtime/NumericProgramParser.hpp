@@ -203,6 +203,12 @@ struct ParsedPlan5
     std::vector<std::string> companions;       // #v0/#v1/#t0, #phase, tau_base sibling
   };
   std::vector<ParamDiscipline> param_disciplines;
+
+  // Array slots filled by the stage-0 coefficient kernel (banks-as-data
+  // coefficient columns). The runtime double-buffers exactly these so the audio
+  // kernel reads a whole, consistent generation of columns across a live knob
+  // move. Absent ⇒ empty ⇒ no double-buffering (old plans unaffected).
+  std::vector<uint32_t> coeff_array_slots;
 };
 
 // Parse the optional `compilation_mode` JSON string. Fails closed on
@@ -358,6 +364,10 @@ inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
           pd.companions.push_back(c.get<std::string>());
       result.param_disciplines.push_back(std::move(pd));
     }
+
+  if (plan.contains("coeff_array_slots"))
+    for (const auto & s : plan["coeff_array_slots"])
+      result.coeff_array_slots.push_back(s.get<uint32_t>());
 
   return result;
 }

@@ -76,19 +76,33 @@ struct KernelState
   //
   // BANKS-AS-DATA (per-array staging): the coefficient kernel also fills shared
   // COEFFICIENT COLUMNS — `array_ptrs` slots whose fills classified s0 — that the
-  // audio kernel's in-loop `Index` reads (run_coeff and process() share the same
-  // `array_ptrs`; see below). This WIDENS the tolerated one-buffer race from
-  // atomic scalar slots to non-atomic array columns: a torn read during a live
-  // knob move can currently mix a column from generation N with another from N+1
-  // (Brady's cross-column tear). For a static render (goldens / split-equiv /
-  // scope) there is no concurrent writer, so it is exact. The planned consistency
-  // upgrade — before the banks-table lowering becomes the default — is to
-  // DOUBLE-BUFFER the coefficient columns (fill a back buffer, flip one index
-  // word; the kernel hot-swap pattern) so the audio thread always reads one whole
-  // generation, with the columns laid out as array-of-mode-records so any
-  // remaining tear yields WHOLE modes → a valid "fractional-generation" bank (the
-  // modal sum is independent per mode, so a generation blend is a valid bank).
+  // audio kernel's in-loop `Index` reads. Those slots (the plan advertises them
+  // as `coeff_array_slots`) are GENERATION-BUFFERED: three storage generations
+  // per column, one published-generation word. run_coeff fills a generation that
+  // is neither published nor captured by the in-flight audio buffer, then
+  // publishes it with one atomic store; process() captures the published
+  // generation ONCE per buffer (before raising audio_processing_, so a
+  // concurrent run_coeff can never pick the captured generation as its write
+  // target) and repoints `array_ptrs` for the whole buffer. The audio thread
+  // therefore always reads one whole, consistent generation of columns — no
+  // cross-column tear on a live knob move, no waiting on either thread. Three
+  // generations (not two) because a knob stream can run the coefficient kernel
+  // twice within one audio buffer: with two buffers the second run would have to
+  // rewrite the generation the in-flight buffer is still reading. Scalar
+  // coefficient slots stay in the tolerated one-buffer race class of set_slot.
   tropical_jit::NumericKernelFn      coeff_kernel = nullptr;
+
+  // The coefficient-column slots (indices into array_storage/array_ptrs), the
+  // three storage generations ([gen][j] backs slot coeff_array_slots[j]), the
+  // coefficient kernel's own pointer view (column entries repointed at the
+  // write generation per run; non-column entries alias array_storage), and the
+  // published-generation word (accessed via std::atomic_ref — kept a plain
+  // member so KernelState stays movable; every concurrent access site holds
+  // the publish/audio protocol described above).
+  std::vector<uint32_t> coeff_array_slots;
+  std::array<std::vector<std::vector<int64_t>>, 3> coeff_generations;
+  std::vector<int64_t *> coeff_array_ptrs;
+  uint32_t coeff_published_gen = 0;
 
   // Flat buffers passed to kernel (matches NumericKernelFn signature)
   std::vector<int64_t> registers;
@@ -200,10 +214,25 @@ public:
   {
 
     const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
+    KernelState & state = states_[state_idx];
+
+    // Capture ONE coefficient-column generation for the whole buffer (banks-as-
+    // data). Advertised BEFORE audio_processing_ goes true: a concurrent
+    // run_coeff that observes audio_processing_ == true (acquire) is then
+    // guaranteed to see this capture and will never pick it as a write target;
+    // one that observes false avoids the published generation, which is what
+    // this buffer read. Either way the columns this buffer indexes are one
+    // whole generation.
+    uint32_t coeff_gen = 0;
+    if (!state.coeff_array_slots.empty())
+    {
+      coeff_gen = std::atomic_ref(state.coeff_published_gen)
+                    .load(std::memory_order_acquire);
+      audio_coeff_gen_.store(coeff_gen, std::memory_order_relaxed);
+    }
+
     audio_state_index_.store(state_idx, std::memory_order_release);
     audio_processing_.store(true, std::memory_order_release);
-
-    KernelState & state = states_[state_idx];
 
     // No active kernel — emit silence (covers fused, microkernel, and
     // microkernel-deep modes; the "no kernel" predicate is mode-
@@ -220,6 +249,14 @@ public:
       audio_processing_.store(false, std::memory_order_release);
       return;
     }
+
+    // Point the audio view of every coefficient column at the captured
+    // generation — one repoint per buffer, so every in-loop Index this buffer
+    // executes reads the same generation.
+    if (!state.coeff_array_slots.empty())
+      for (std::size_t j = 0; j < state.coeff_array_slots.size(); ++j)
+        state.array_ptrs[state.coeff_array_slots[j]] =
+          state.coeff_generations[coeff_gen][j].data();
 
     if (state.mode == tropical_jit::CompilationMode::Fused)
     {
@@ -458,6 +495,18 @@ public:
     std::vector<int64_t>              temps     = active.temps;
     std::vector<double>               slots     = active.slots;
     std::vector<std::vector<int64_t>> arrays    = active.array_storage;
+    // Coefficient columns live in the generation store, not array_storage —
+    // copy the published generation in. (A run_coeff racing this copy via the
+    // lock-free set_slot can retarget mid-copy; that transient is the same
+    // control-plane class as a scope frame during a knob move, and strictly
+    // narrower than the pre-generation tear.)
+    if (!active.coeff_array_slots.empty())
+    {
+      const uint32_t gen = std::atomic_ref(active.coeff_published_gen)
+                             .load(std::memory_order_acquire);
+      for (std::size_t j = 0; j < active.coeff_array_slots.size(); ++j)
+        arrays[active.coeff_array_slots[j]] = active.coeff_generations[gen][j];
+    }
     std::vector<int64_t *>            array_ptrs(arrays.size());
     for (size_t a = 0; a < arrays.size(); ++a) array_ptrs[a] = arrays[a].data();
 
@@ -526,14 +575,36 @@ private:
 
   // Evaluate the stage-0 coefficient kernel once (one "sample") against a
   // state's slots. No-op when the plan carried no coefficient kernel.
-  static void run_coeff(KernelState & state)
+  // Coefficient columns are written into a FREE generation (neither published
+  // nor captured by the in-flight audio buffer — with three generations one
+  // always exists) via the coefficient kernel's own pointer view, then
+  // published with one atomic store. The audio thread picks the new
+  // generation up at its next buffer boundary; the control thread never
+  // waits. Non-member state (audio_coeff_gen_) is why this isn't static.
+  void run_coeff(KernelState & state)
   {
     if (!state.coeff_kernel) return;
+    int64_t ** arrays = state.array_ptrs.data();
+    uint32_t target = UINT32_MAX;
+    if (!state.coeff_array_slots.empty())
+    {
+      const uint32_t pub = std::atomic_ref(state.coeff_published_gen)
+                             .load(std::memory_order_acquire);
+      uint32_t in_use = pub;
+      if (audio_processing_.load(std::memory_order_acquire))
+        in_use = audio_coeff_gen_.load(std::memory_order_acquire);
+      target = 0;
+      while (target == pub || target == in_use) ++target;
+      for (std::size_t j = 0; j < state.coeff_array_slots.size(); ++j)
+        state.coeff_array_ptrs[state.coeff_array_slots[j]] =
+          state.coeff_generations[target][j].data();
+      arrays = state.coeff_array_ptrs.data();
+    }
     double scratch_out = 0.0;
     state.coeff_kernel(
       nullptr,
       state.registers.data(),
-      state.array_ptrs.data(),
+      arrays,
       state.array_sizes.data(),
       state.temps.data(),
       state.sample_rate,
@@ -542,6 +613,9 @@ private:
       &scratch_out,
       1,
       state.slots.data());
+    if (target != UINT32_MAX)
+      std::atomic_ref(state.coeff_published_gen)
+        .store(target, std::memory_order_release);
   }
 
   void wait_for_state_available(uint32_t state_index) const
@@ -558,6 +632,10 @@ private:
   std::atomic<uint32_t> active_state_{0};
   std::atomic<uint32_t> audio_state_index_{0};
   std::atomic<bool> audio_processing_{false};
+  // The coefficient-column generation captured by the in-flight audio buffer
+  // (valid while audio_processing_; stored before it goes true, so an
+  // acquire-load of audio_processing_ == true guarantees visibility).
+  std::atomic<uint32_t> audio_coeff_gen_{0};
   std::atomic<uint64_t> recompile_version_{0};
 
   mutable std::mutex build_mutex_;
