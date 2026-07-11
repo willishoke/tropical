@@ -416,75 +416,76 @@ def foldOp (tag : String) (resultType : ScalarType) (args : Array CVal) : Option
   -- int compare path coerces BOTH to int (mirrors argAs .int)
   let cmpInt (p : Int → Int → Bool) : Option CVal := do pure (.b (p (← aI 0) (← aI 1)))
   let cmpFlt (p : Float → Float → Bool) : Option CVal := do pure (.b (p (← aF 0) (← aF 1)))
-  match tag with
-  | "Add" =>
+  let some op := Tropical.Plan.PlanOp.ofString? tag | none
+  match op with
+  | .add =>
     if isInt then do let a ← aI 0; let b ← aI 1; pure (.i (wrap64 (a + b)))
     else do let a ← aF 0; let b ← aF 1; pure (.f (a + b))
-  | "Sub" =>
+  | .sub =>
     if isInt then do let a ← aI 0; let b ← aI 1; pure (.i (wrap64 (a - b)))
     else do let a ← aF 0; let b ← aF 1; pure (.f (a - b))
-  | "Mul" =>
+  | .mul =>
     if isInt then do let a ← aI 0; let b ← aI 1; pure (.i (wrap64 (a * b)))
     else do let a ← aF 0; let b ← aF 1; pure (.f (a * b))
-  | "Div" =>
+  | .div =>
     if isInt then do
       let a ← aI 0; let b ← aI 1
       pure (.i (if b == 0 then 0 else wrap64 (Int.tdiv a b)))
     else do
       let a ← aF 0; let b ← aF 1
       pure (.f (if b == 0.0 then 0.0 else a / b))
-  | "Mod" =>
+  | .mod =>
     if isInt then do
       let a ← aI 0; let b ← aI 1
       pure (.i (if b == 0 then 0 else wrap64 (Int.tmod a b)))
     else do
       let a ← aF 0; let b ← aF 1
       pure (.f (if b == 0.0 then 0.0 else a - (a / b).floor * b))
-  | "FloorDiv" =>
+  | .floorDiv =>
     if isInt then do
       let a ← aI 0; let b ← aI 1
       pure (.i (if b == 0 then 0 else wrap64 (Int.tdiv a b)))
     else do
       let a ← aF 0; let b ← aF 1
       pure (.f (if b == 0.0 then 0.0 else a / b).floor)
-  | "Less"      => if eitherInt then cmpInt (fun a b => decide (a < b)) else cmpFlt (fun a b => decide (a < b))
-  | "LessEq"    => if eitherInt then cmpInt (fun a b => decide (a ≤ b)) else cmpFlt (fun a b => decide (a ≤ b))
-  | "Greater"   => if eitherInt then cmpInt (fun a b => decide (a > b)) else cmpFlt (fun a b => decide (a > b))
-  | "GreaterEq" => if eitherInt then cmpInt (fun a b => decide (a ≥ b)) else cmpFlt (fun a b => decide (a ≥ b))
-  | "Equal"     => if eitherInt then cmpInt (fun a b => a == b) else cmpFlt (fun a b => a == b)
-  | "NotEqual"  => if eitherInt then cmpInt (fun a b => a != b) else cmpFlt (fun a b => a != b)
-  | "And" => do let a ← aB 0; let b ← aB 1; pure (.b (a && b))
-  | "Or"  => do let a ← aB 0; let b ← aB 1; pure (.b (a || b))
-  | "BitAnd" => do let a ← aI 0; let b ← aI 1; pure (.i (bit64 (· &&& ·) a b))
-  | "BitOr"  => do let a ← aI 0; let b ← aI 1; pure (.i (bit64 (· ||| ·) a b))
-  | "BitXor" => do let a ← aI 0; let b ← aI 1; pure (.i (bit64 (· ^^^ ·) a b))
-  | "LShift" => do
+  | .less      => if eitherInt then cmpInt (fun a b => decide (a < b)) else cmpFlt (fun a b => decide (a < b))
+  | .lessEq    => if eitherInt then cmpInt (fun a b => decide (a ≤ b)) else cmpFlt (fun a b => decide (a ≤ b))
+  | .greater   => if eitherInt then cmpInt (fun a b => decide (a > b)) else cmpFlt (fun a b => decide (a > b))
+  | .greaterEq => if eitherInt then cmpInt (fun a b => decide (a ≥ b)) else cmpFlt (fun a b => decide (a ≥ b))
+  | .equal     => if eitherInt then cmpInt (fun a b => a == b) else cmpFlt (fun a b => a == b)
+  | .notEqual  => if eitherInt then cmpInt (fun a b => a != b) else cmpFlt (fun a b => a != b)
+  | .and => do let a ← aB 0; let b ← aB 1; pure (.b (a && b))
+  | .or  => do let a ← aB 0; let b ← aB 1; pure (.b (a || b))
+  | .bitAnd => do let a ← aI 0; let b ← aI 1; pure (.i (bit64 (· &&& ·) a b))
+  | .bitOr  => do let a ← aI 0; let b ← aI 1; pure (.i (bit64 (· ||| ·) a b))
+  | .bitXor => do let a ← aI 0; let b ← aI 1; pure (.i (bit64 (· ^^^ ·) a b))
+  | .lshift => do
     let a ← aI 0; let sh ← aI 1
     if sh < 0 || sh > 63 then none else pure (.i (wrap64 (a <<< sh.toNat)))
-  | "RShift" => do
+  | .rshift => do
     let a ← aI 0; let sh ← aI 1
     if sh < 0 || sh > 63 then none else pure (.i (a >>> sh.toNat))  -- Int >>> is arithmetic (floor)
-  | "Neg" =>
+  | .neg =>
     if isInt then do let v ← aI 0; pure (.i (wrap64 (-v)))
     else do let v ← aF 0; pure (.f (-v))
-  | "Abs" =>
+  | .abs =>
     if isInt then do
       let v ← aI 0; pure (.i (if v < 0 then wrap64 (-v) else v))
     else do let v ← aF 0; pure (.f v.abs)
-  | "Sqrt"  => do let v ← aF 0; pure (.f v.sqrt)
-  | "Floor" => do let v ← aF 0; pure (.f v.floor)
-  | "Ceil"  => do let v ← aF 0; pure (.f v.ceil)
-  | "Round" => do let v ← aF 0; pure (.f v.round)   -- half-away, = llvm.round = metal::round
-  | "Not" => do
+  | .sqrt  => do let v ← aF 0; pure (.f v.sqrt)
+  | .floor => do let v ← aF 0; pure (.f v.floor)
+  | .ceil  => do let v ← aF 0; pure (.f v.ceil)
+  | .round => do let v ← aF 0; pure (.f v.round)   -- half-away, = llvm.round = metal::round
+  | .not => do
     match ← args[0]? with
     | .b v => pure (.b (!v))
     | .i n => pure (.b (n == 0))
     | .f x => pure (.b (x == 0.0))
-  | "BitNot" => do let v ← aI 0; pure (.i (bit64 (· ^^^ ·) v (-1)))
-  | "ToInt"   => do (← args[0]?).coerce? .int
-  | "ToBool"  => do (← args[0]?).coerce? .bool
-  | "ToFloat" => do (← args[0]?).coerce? .float
-  | "Clamp" =>
+  | .bitNot => do let v ← aI 0; pure (.i (bit64 (· ^^^ ·) v (-1)))
+  | .toInt   => do (← args[0]?).coerce? .int
+  | .toBool  => do (← args[0]?).coerce? .bool
+  | .toFloat => do (← args[0]?).coerce? .float
+  | .clamp =>
     if isInt then do
       let v ← aI 0; let lo ← aI 1; let hi ← aI 2
       let lc := if v > lo then v else lo
@@ -493,7 +494,7 @@ def foldOp (tag : String) (resultType : ScalarType) (args : Array CVal) : Option
       let v ← aF 0; let lo ← aF 1; let hi ← aF 2
       let lc := if v > lo then v else lo
       pure (.f (if lc < hi then lc else hi))
-  | "Select" => do
+  | .select => do
     let cond ← match ← args[0]? with
       | .b v => some v
       | .i n => some (n != 0)
@@ -532,18 +533,20 @@ def emitOpRuntime (tag : String) (resultType : ScalarType) (args : Array TVal) :
   let eitherInt : M Bool := do
     pure (((args[0]?).map (·.ty == .int)).getD false ||
           ((args[1]?).map (·.ty == .int)).getD false)
-  match tag with
-  | "Add" => if isInt then binI "+" (← aI 0) (← aI 1) else binF "+" (← aF 0) (← aF 1)
-  | "Sub" => if isInt then binI "-" (← aI 0) (← aI 1) else binF "-" (← aF 0) (← aF 1)
-  | "Mul" => if isInt then binI "*" (← aI 0) (← aI 1) else binF "*" (← aF 0) (← aF 1)
-  | "Div" =>
+  let some op := Tropical.Plan.PlanOp.ofString? tag
+    | fail s!"EmitMsl: unsupported op '{tag}'"
+  match op with
+  | .add => if isInt then binI "+" (← aI 0) (← aI 1) else binF "+" (← aF 0) (← aF 1)
+  | .sub => if isInt then binI "-" (← aI 0) (← aI 1) else binF "-" (← aF 0) (← aF 1)
+  | .mul => if isInt then binI "*" (← aI 0) (← aI 1) else binF "*" (← aF 0) (← aF 1)
+  | .div =>
     if isInt then
       let a ← aI 0; let b ← aI 1
       bindVal .int s!"({b} == 0L ? 0L : ({a} / {b}))"
     else
       let a ← aF 0; let b ← aF 1
       bindVal .float s!"({b} == 0.0f ? 0.0f : ({a} / {b}))"
-  | "Mod" =>
+  | .mod =>
     if isInt then
       let a ← aI 0; let b ← aI 1
       bindVal .int s!"({b} == 0L ? 0L : ({a} % {b}))"
@@ -552,7 +555,7 @@ def emitOpRuntime (tag : String) (resultType : ScalarType) (args : Array TVal) :
       let q ← binF "/" a b
       let fq ← callF "floor" q.ref
       bindVal .float s!"({b} == 0.0f ? 0.0f : ({a} - {fq.ref} * {b}))"
-  | "FloorDiv" =>
+  | .floorDiv =>
     if isInt then
       let a ← aI 0; let b ← aI 1
       bindVal .int s!"({b} == 0L ? 0L : ({a} / {b}))"
@@ -560,42 +563,42 @@ def emitOpRuntime (tag : String) (resultType : ScalarType) (args : Array TVal) :
       let a ← aF 0; let b ← aF 1
       let dv ← bindVal .float s!"({b} == 0.0f ? 0.0f : ({a} / {b}))"
       callF "floor" dv.ref
-  | "Less"      => if (← eitherInt) then cmpI "<"  (← aI 0) (← aI 1) else cmpF "<"  (← aF 0) (← aF 1)
-  | "LessEq"    => if (← eitherInt) then cmpI "<=" (← aI 0) (← aI 1) else cmpF "<=" (← aF 0) (← aF 1)
-  | "Greater"   => if (← eitherInt) then cmpI ">"  (← aI 0) (← aI 1) else cmpF ">"  (← aF 0) (← aF 1)
-  | "GreaterEq" => if (← eitherInt) then cmpI ">=" (← aI 0) (← aI 1) else cmpF ">=" (← aF 0) (← aF 1)
-  | "Equal"     => if (← eitherInt) then cmpI "==" (← aI 0) (← aI 1) else cmpF "==" (← aF 0) (← aF 1)
-  | "NotEqual"  => if (← eitherInt) then cmpI "!=" (← aI 0) (← aI 1) else cmpF "!=" (← aF 0) (← aF 1)
-  | "And" => bindVal .bool s!"({← aB 0} && {← aB 1})"
-  | "Or"  => bindVal .bool s!"({← aB 0} || {← aB 1})"
-  | "BitAnd" => binI "&" (← aI 0) (← aI 1)
-  | "BitOr"  => binI "|" (← aI 0) (← aI 1)
-  | "BitXor" => binI "^" (← aI 0) (← aI 1)
-  | "LShift" => binI "<<" (← aI 0) (← aI 1)
-  | "RShift" => binI ">>" (← aI 0) (← aI 1)   -- long >> long is arithmetic in MSL
-  | "Neg" =>
+  | .less      => if (← eitherInt) then cmpI "<"  (← aI 0) (← aI 1) else cmpF "<"  (← aF 0) (← aF 1)
+  | .lessEq    => if (← eitherInt) then cmpI "<=" (← aI 0) (← aI 1) else cmpF "<=" (← aF 0) (← aF 1)
+  | .greater   => if (← eitherInt) then cmpI ">"  (← aI 0) (← aI 1) else cmpF ">"  (← aF 0) (← aF 1)
+  | .greaterEq => if (← eitherInt) then cmpI ">=" (← aI 0) (← aI 1) else cmpF ">=" (← aF 0) (← aF 1)
+  | .equal     => if (← eitherInt) then cmpI "==" (← aI 0) (← aI 1) else cmpF "==" (← aF 0) (← aF 1)
+  | .notEqual  => if (← eitherInt) then cmpI "!=" (← aI 0) (← aI 1) else cmpF "!=" (← aF 0) (← aF 1)
+  | .and => bindVal .bool s!"({← aB 0} && {← aB 1})"
+  | .or  => bindVal .bool s!"({← aB 0} || {← aB 1})"
+  | .bitAnd => binI "&" (← aI 0) (← aI 1)
+  | .bitOr  => binI "|" (← aI 0) (← aI 1)
+  | .bitXor => binI "^" (← aI 0) (← aI 1)
+  | .lshift => binI "<<" (← aI 0) (← aI 1)
+  | .rshift => binI ">>" (← aI 0) (← aI 1)   -- long >> long is arithmetic in MSL
+  | .neg =>
     if isInt then bindVal .int s!"(0L - {← aI 0})"
     else bindVal .float s!"(-{← aF 0})"
-  | "Abs" =>
+  | .abs =>
     if isInt then
       let v ← aI 0
       bindVal .int s!"({v} < 0L ? (0L - {v}) : {v})"
     else callF "fabs" (← aF 0)
-  | "Sqrt"  => callF "sqrt"  (← aF 0)
-  | "Floor" => callF "floor" (← aF 0)
-  | "Ceil"  => callF "ceil"  (← aF 0)
-  | "Round" => callF "round" (← aF 0)   -- MSL round() is half-away, = llvm.round
-  | "Ldexp" =>
+  | .sqrt  => callF "sqrt"  (← aF 0)
+  | .floor => callF "floor" (← aF 0)
+  | .ceil  => callF "ceil"  (← aF 0)
+  | .round => callF "round" (← aF 0)   -- MSL round() is half-away, = llvm.round
+  | .ldexp =>
     -- native ldexp(float, int); the exponent arg truncates like fptosi.
     let x ← aF 0
     let n ← aF 1
     bindVal .float s!"ldexp({x}, int({n}))"
-  | "FloatExponent" =>
+  | .floatExponent =>
     -- raw exponent field, sign-extended shift like the f64 bit trick
     -- (bits >> 52 − 1023), transposed to f32 (bits >> 23 − 127).
     let x ← aF 0
     bindVal .float s!"float((as_type<int>({x}) >> 23) - 127)"
-  | "Not" =>
+  | .not =>
     match args[0]? with
     | none => fail "EmitMsl: Not missing operand"
     | some a =>
@@ -603,11 +606,11 @@ def emitOpRuntime (tag : String) (resultType : ScalarType) (args : Array TVal) :
       | .bool  => bindVal .bool s!"(!{a.ref})"
       | .int   => bindVal .bool s!"({a.ref} == 0L)"
       | .float => bindVal .bool s!"({a.ref} == 0.0f)"
-  | "BitNot" => bindVal .int s!"(~{← aI 0})"
-  | "ToInt"   => match args[0]? with | some a => coerce a .int   | none => fail "ToInt missing operand"
-  | "ToBool"  => match args[0]? with | some a => coerce a .bool  | none => fail "ToBool missing operand"
-  | "ToFloat" => match args[0]? with | some a => coerce a .float | none => fail "ToFloat missing operand"
-  | "Clamp" =>
+  | .bitNot => bindVal .int s!"(~{← aI 0})"
+  | .toInt   => match args[0]? with | some a => coerce a .int   | none => fail "ToInt missing operand"
+  | .toBool  => match args[0]? with | some a => coerce a .bool  | none => fail "ToBool missing operand"
+  | .toFloat => match args[0]? with | some a => coerce a .float | none => fail "ToFloat missing operand"
+  | .clamp =>
     if isInt then
       let v ← aI 0; let lo ← aI 1; let hi ← aI 2
       let lc ← bindVal .int s!"({v} > {lo} ? {v} : {lo})"
@@ -616,7 +619,7 @@ def emitOpRuntime (tag : String) (resultType : ScalarType) (args : Array TVal) :
       let v ← aF 0; let lo ← aF 1; let hi ← aF 2
       let lc ← bindVal .float s!"({v} > {lo} ? {v} : {lo})"
       bindVal .float s!"({lc.ref} < {hi} ? {lc.ref} : {hi})"
-  | "Select" =>
+  | .select =>
     let cond ← match args[0]? with
       | none => fail "Select missing cond"
       | some a =>
@@ -627,7 +630,6 @@ def emitOpRuntime (tag : String) (resultType : ScalarType) (args : Array TVal) :
     let t ← argAs args 1 resultType
     let f ← argAs args 2 resultType
     bindVal resultType s!"({cond} ? {t} : {f})"
-  | other => fail s!"EmitMsl: unsupported op '{other}'"
 
 /-- Fold when every arg is a compile-time constant; else emit. -/
 def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal := do
