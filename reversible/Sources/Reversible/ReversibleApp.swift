@@ -1,7 +1,27 @@
 import SwiftUI
 
+/// The app spawns the engine as a CHILD, but the kernel doesn't reap children
+/// with their parent: any exit that skips teardown leaves an orphaned engine
+/// holding the DAC — audio that nothing can stop. Funnel every exit path
+/// (Cmd-Q, last window closed, SIGTERM/SIGINT) through willTerminate, where
+/// the model has registered the engine's synchronous child-kill.
+final class AppDelegate: NSObject, NSApplicationDelegate {
+    static var onTerminate: (() -> Void)?
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { true }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        Self.onTerminate?()
+    }
+}
+
 @main
 struct ReversibleApp: App {
+    @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
+
+    // Signal sources must stay referenced or the handler dies with them.
+    private static var signalSources: [DispatchSourceSignal] = []
+
     // A bare SwiftPM executable is not an .app bundle, so macOS launches it
     // as a background process — no Dock icon, window never activated. Claim
     // regular-app status and take focus, or `swift run` shows nothing.
@@ -10,6 +30,17 @@ struct ReversibleApp: App {
             NSApp.setActivationPolicy(.regular)
             NSApp.activate(ignoringOtherApps: true)
             NSApp.windows.first?.makeKeyAndOrderFront(nil)
+        }
+        // A raw signal's default action exits without running willTerminate,
+        // orphaning the engine — reroute SIGTERM/SIGINT into the normal
+        // termination path (signal handlers can't touch AppKit; a dispatch
+        // source runs on the main queue and can).
+        for sig in [SIGTERM, SIGINT] {
+            signal(sig, SIG_IGN)
+            let src = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            src.setEventHandler { NSApp.terminate(nil) }
+            src.resume()
+            Self.signalSources.append(src)
         }
     }
 

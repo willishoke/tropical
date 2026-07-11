@@ -27,17 +27,27 @@ enum EngineError: Error, LocalizedError {
 }
 
 /// Owns the native `frontend` binary (the Lean compiler + session + runtime
-/// FFI) over its newline-delimited JSON-RPC surface (`--rpc`). Audio plays
+/// FFI) over its Unix-socket JSON-RPC surface (`--serve`). Audio plays
 /// out of the HOST's native device (RtAudio); the app is purely a control
 /// surface.
 ///
-/// Transport mirrors playground/main.js: one JSON object per line on stdin;
-/// replies arrive on stdout, matched by `id`. Control-plane replies wrap an
-/// inner {status,data} in result.content[0].text; data-plane replies
-/// (set_param) are a plain `result`. We unwrap both.
+/// Transport mirrors playground/main.js: one JSON object per line on the
+/// socket; replies are matched by `id`. The socket has a control/data plane
+/// SPLIT (tropical_socket.hpp): `set_param` / `render_window` /
+/// `playback_position` / `get_telemetry` are answered synchronously in C++
+/// and never queue behind the single Lean control thread — so knob writes
+/// and scope frames stay live through a long compile. Control-plane replies
+/// wrap an inner {status,data} in result.content[0].text; data-plane replies
+/// are a plain `result`. We unwrap both.
 actor Engine {
     private var process: Process?
-    private var stdin: FileHandle?
+    private var sock: FileHandle?
+    private var sockPath = ""
+    /// The child engine OUTLIVES the app unless someone reaps it — an orphaned
+    /// engine keeps the DAC (and whatever it was playing) alive forever. The
+    /// box holds the Process outside actor isolation so the app-termination
+    /// path (a synchronous, can't-await context) can always reach it.
+    private nonisolated let procBox = ProcessBox()
     private var buf = ""
     private var pending: [Int: CheckedContinuation<JSONValue, Error>] = [:]
     private var nextId = 1
@@ -56,7 +66,7 @@ actor Engine {
         self.events = events
     }
 
-    func start() throws {
+    func start() async throws {
         let bin = Engine.resolveBinary()
         // The engine expects to run from the repo root (stdlib paths etc.):
         // bin is <root>/lean/.lake/build/bin/frontend, so root is 5 up.
@@ -65,9 +75,13 @@ actor Engine {
             .deletingLastPathComponent()            // .lake/
             .deletingLastPathComponent()            // lean/
             .deletingLastPathComponent()            // root
+        // sockaddr_un caps the path at ~104 bytes, so the per-user temp dir
+        // (short on macOS) rather than the app scratch dir.
+        sockPath = FileManager.default.temporaryDirectory
+            .appendingPathComponent("reversible-\(ProcessInfo.processInfo.processIdentifier).sock").path
         let p = Process()
         p.executableURL = bin
-        p.arguments = ["--rpc"]
+        p.arguments = ["--serve", sockPath]
         p.currentDirectoryURL = root
         // The arrow patch-graph path does not route through syncCompile, but we
         // set the var anyway so any session-path compile in this process also
@@ -76,21 +90,20 @@ actor Engine {
         env["TROPICAL_ARROW"] = "1"
         p.environment = env
 
-        let inPipe = Pipe(), outPipe = Pipe(), errPipe = Pipe()
-        p.standardInput = inPipe
+        let outPipe = Pipe(), errPipe = Pipe()
+        p.standardInput = FileHandle.nullDevice   // serve mode never reads stdin
         p.standardOutput = outPipe
         p.standardError = errPipe
 
-        outPipe.fileHandleForReading.readabilityHandler = { [weak self] h in
-            let data = h.availableData
-            guard !data.isEmpty, let s = String(data: data, encoding: .utf8) else { return }
-            Task { await self?.consume(s) }
-        }
         let events = self.events
-        errPipe.fileHandleForReading.readabilityHandler = { h in
-            let data = h.availableData
-            guard !data.isEmpty, let s = String(data: data, encoding: .utf8) else { return }
-            events(.stderr(s))
+        // Serve mode replies on the socket; anything on stdout/stderr is
+        // diagnostic (e.g. "serving on <addr>").
+        for pipe in [outPipe, errPipe] {
+            pipe.fileHandleForReading.readabilityHandler = { h in
+                let data = h.availableData
+                guard !data.isEmpty, let s = String(data: data, encoding: .utf8) else { return }
+                events(.stderr(s))
+            }
         }
         p.terminationHandler = { [weak self] proc in
             events(.exit(proc.terminationStatus))
@@ -99,15 +112,74 @@ actor Engine {
 
         try p.run()
         process = p
-        stdin = inPipe.fileHandleForWriting
+        procBox.process = p
+        try await connectSocket()
         events(.up)
+    }
+
+    /// Synchronous child teardown for app exit (Cmd-Q, SIGTERM). Safe from
+    /// any thread; idempotent.
+    nonisolated func terminateChild() {
+        procBox.take()?.terminate()
+    }
+
+    /// The socket node appears once Engine.boot finishes and binds, so retry
+    /// until it accepts (or the process dies under us).
+    private func connectSocket() async throws {
+        let deadline = ContinuousClock.now.advanced(by: .seconds(20))
+        while ContinuousClock.now < deadline {
+            guard process?.isRunning == true else { throw EngineError.exited }
+            if let fd = Engine.connectOnce(path: sockPath) {
+                let h = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+                h.readabilityHandler = { [weak self] h in
+                    let data = h.availableData
+                    if data.isEmpty { h.readabilityHandler = nil; return }  // EOF
+                    guard let s = String(data: data, encoding: .utf8) else { return }
+                    Task { await self?.consume(s) }
+                }
+                sock = h
+                return
+            }
+            try await Task.sleep(for: .milliseconds(100))
+        }
+        throw EngineError.timeout(method: "connect \(sockPath)")
+    }
+
+    private static func connectOnce(path: String) -> Int32? {
+        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
+        guard fd >= 0 else { return nil }
+        var addr = sockaddr_un()
+        addr.sun_family = sa_family_t(AF_UNIX)
+        let bytes = Array(path.utf8CString)
+        guard bytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
+            close(fd)
+            return nil
+        }
+        withUnsafeMutableBytes(of: &addr.sun_path) { dst in
+            bytes.withUnsafeBytes { src in
+                dst.copyMemory(from: src)
+            }
+        }
+        let r = withUnsafePointer(to: &addr) {
+            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
+                Darwin.connect(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
+            }
+        }
+        guard r == 0 else {
+            close(fd)
+            return nil
+        }
+        return fd
     }
 
     func kill() {
         process?.terminationHandler = nil
         process?.terminate()
         process = nil
-        stdin = nil
+        procBox.take()
+        sock?.readabilityHandler = nil
+        sock = nil
+        unlink(sockPath)
     }
 
     private func failAllPending() {
@@ -115,7 +187,10 @@ actor Engine {
         pending.removeAll()
         for c in waiting { c.resume(throwing: EngineError.exited) }
         process = nil
-        stdin = nil
+        procBox.take()
+        sock?.readabilityHandler = nil
+        sock = nil
+        unlink(sockPath)
     }
 
     private func consume(_ chunk: String) {
@@ -156,7 +231,7 @@ actor Engine {
 
     @discardableResult
     func call(_ method: String, _ params: JSONValue = .object([:])) async throws -> JSONValue {
-        guard let stdin else { throw EngineError.notRunning }
+        guard let sock else { throw EngineError.notRunning }
         let id = nextId
         nextId += 1
         let req = JSONValue.object([
@@ -170,8 +245,10 @@ actor Engine {
         // a heavy kernel (a modal reverb) can take tens of seconds. A short
         // timeout gives up while the engine is still grinding (the thread stays
         // blocked, the late reply is dropped), so heavy compiles get a long leash
-        // while every other call still fails fast. NOTE: a diagnostic band-aid —
-        // the real fix is compiling off the control thread.
+        // while other CONTROL calls still fail fast. Data-plane methods
+        // (set_param/render_window/playback_position) answer in C++ and never
+        // wait on that thread. NOTE: a diagnostic band-aid — the real fix is
+        // compiling off the control thread.
         let timeout: Duration = method == "load_patch_graph" ? .seconds(180) : .seconds(30)
         let timer = Task { [weak self] in
             try await Task.sleep(for: timeout)
@@ -181,7 +258,7 @@ actor Engine {
 
         return try await withCheckedThrowingContinuation { cont in
             pending[id] = cont
-            do { try stdin.write(contentsOf: line) } catch {
+            do { try sock.write(contentsOf: line) } catch {
                 pending.removeValue(forKey: id)
                 cont.resume(throwing: error)
             }
@@ -191,5 +268,23 @@ actor Engine {
     private func timeOut(id: Int, method: String) {
         guard let cont = pending.removeValue(forKey: id) else { return }
         cont.resume(throwing: EngineError.timeout(method: method))
+    }
+}
+
+/// Cross-isolation handle to the child process for the synchronous
+/// termination path. `take()` swaps out under the lock so terminate is
+/// sent at most once.
+private final class ProcessBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var proc: Process?
+
+    var process: Process? {
+        get { lock.withLock { proc } }
+        set { lock.withLock { proc = newValue } }
+    }
+
+    @discardableResult
+    func take() -> Process? {
+        lock.withLock { let p = proc; proc = nil; return p }
     }
 }

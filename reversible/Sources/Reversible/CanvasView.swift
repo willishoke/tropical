@@ -78,9 +78,13 @@ struct NodeView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             titleBar
-            knobRow
-            Spacer(minLength: 0)
-            ports
+            if node.kind == .scope {
+                ScopeBody(node: node)
+            } else {
+                knobRow
+                Spacer(minLength: 0)
+                ports
+            }
         }
         // VCV-style: every module has a defined footprint in grid units.
         .frame(width: Double(spec.gridSize.w) * Grid.unit,
