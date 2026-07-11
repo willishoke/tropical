@@ -1,4 +1,5 @@
 import Tropical.Ir.Nodes
+import Tropical.Ir.BanksFlag
 import Tropical.Ir.Strata.Basic
 import Tropical.Ir.Strata.EArena
 
@@ -43,11 +44,10 @@ private def loopCount (n : JsonNumber) : Nat :=
   if f <= 0 then 0 else f.ceil.toUInt64.toNat
 
 /-- Loop-everything escape hatch (banks-as-data, the trunk move):
-    `TROPICAL_BANKS_UNROLL` reverts summing folds to the unrolled realization —
-    the same env var the modal-bank dispatch honors; one knob restores the
-    whole naive ladder for bisection. -/
-initialize banksLoopEnabled : Bool ← do
-  return (← IO.getEnv "TROPICAL_BANKS_UNROLL").isNone
+    `TROPICAL_BANKS_UNROLL` reverts summing folds to the unrolled realization.
+    Reads the ONE shared flag (`Ir.banksEnabled`) the modal-bank dispatch also
+    honors — one env read, one knob for the whole bisection ladder. -/
+def banksLoopEnabled : Bool := Tropical.Ir.banksEnabled
 
 /-- The immediate children of a node — the generic walk the bank-eligibility
     predicates use. -/

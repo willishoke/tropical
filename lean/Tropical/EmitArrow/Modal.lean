@@ -1,4 +1,5 @@
 import Tropical.EmitArrow.Numerics
+import Tropical.Ir.BanksFlag
 import Tropical.EmitArrow.Term
 
 /-!
@@ -288,9 +289,9 @@ def residueComposeEC (voice reverb : Array ModalMode) : Array ModalMode :=
     coefficient columns are generation-buffered in FlatRuntime (no cross-column
     tear on live knob moves). `TROPICAL_BANKS_UNROLL` is the escape hatch back
     to the unrolled form (bisection ladder: the naive realization stays
-    reachable). Read once at load, so the pure lowering may branch on it. -/
-initialize banksTableEnabled : Bool ← do
-  return (← IO.getEnv "TROPICAL_BANKS_UNROLL").isNone
+    reachable). Reads the ONE shared flag (`Ir.banksEnabled`), read once at
+    load, so the pure lowering may branch on it. -/
+def banksTableEnabled : Bool := Tropical.Ir.banksEnabled
 
 /-- A modal bank struck at `anchor` (samples) as a term over the clock leaf: no
     `gen`, no `.trop` instance — `{clk, +, ×, round, clamp, ldexp}` all the way
