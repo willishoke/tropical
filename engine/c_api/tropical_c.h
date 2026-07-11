@@ -92,6 +92,14 @@ bool             tropical_runtime_load_ir(tropical_runtime_t, const char* ir_tex
    double-buffered publish covers both artifacts (hot-swap preserved). */
 bool             tropical_runtime_load_ir_msl(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* manifest_json, size_t manifest_len);
 
+/* Staged load: like load_ir_msl (msl may be empty for JIT-only), plus an
+   optional stage-0 coefficient kernel (coeff_ir may be empty): a second
+   single-function LLVM module holding the plan's tau-independent
+   instructions, JIT-compiled as its own module, run once against the new
+   state before publish and re-run after every control-plane slot write.
+   Its outputs land in coef:<n> module slots the audio kernel reads. */
+bool             tropical_runtime_load_ir_staged(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* manifest_json, size_t manifest_len);
+
 /* Control-plane/test-only: reposition the active kernel's sample clock
    (render verbs' --start; long-tau gates render at arbitrary positions). */
 void             tropical_runtime_set_sample_index(tropical_runtime_t, uint64_t idx);

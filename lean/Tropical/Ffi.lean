@@ -99,6 +99,20 @@ def Runtime.loadIrMsl (rt : Runtime) (irText mslSource manifestJson : String) : 
   if !(← rt.loadIrMslRaw irText mslSource manifestJson) then
     throw <| IO.userError s!"runtime loadIrMsl failed: {← lastError}"
 
+@[extern "shim_runtime_load_ir_staged"]
+opaque Runtime.loadIrStagedRaw (rt : @& Runtime) (irText : @& String) (mslSource : @& String)
+    (coeffIr : @& String) (manifestJson : @& String) : IO Bool
+
+/-- Staged load: LLVM IR → JIT (always), MSL → Metal when non-empty, plus an
+    optional stage-0 coefficient kernel (`coeffIr`, empty = no split) —
+    a second single-function module the engine runs once before publish and
+    after every control-plane slot write, landing τ-independent values in
+    `coef:<n>` module slots the audio kernel reads. -/
+def Runtime.loadIrStaged (rt : Runtime) (irText mslSource coeffIr manifestJson : String) :
+    IO Unit := do
+  if !(← rt.loadIrStagedRaw irText mslSource coeffIr manifestJson) then
+    throw <| IO.userError s!"runtime loadIrStaged failed: {← lastError}"
+
 /-- Control-plane/test-only: reposition the active kernel's sample clock
     (render verbs' `--start`). -/
 @[extern "shim_runtime_set_sample_index"]

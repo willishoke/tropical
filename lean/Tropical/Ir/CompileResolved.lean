@@ -31,6 +31,9 @@ structure Context where
   inputArraySlots : Array (Nat × ArraySlotInfo) := #[]
   nestedInputArraySlots : Array (Nat × Array (Nat × ArraySlotInfo)) := #[]
   nestedOutputArraySlots : Array (Nat × Array (Nat × ArraySlotInfo)) := #[]
+  /-- Staging: the partitioner supplies input-wire stages and (having
+      recursed into children first) each child's per-output stages. -/
+  staging : Tropical.Ir.Emit.StagingInfo := {}
 deriving Inhabited
 
 /-- TS `inputPortTypes` derivation (compile_resolved.ts): scalar → it,
@@ -99,6 +102,7 @@ def compileResolved (prog : CoreProgram) (arena : Tropical.Ir.CoreArena)
     outputExprs outputPortScalarCounts
     inputPortTypes emitSlots arena
     { instances := prog.instances, enclosing := prog }
+    ctx.staging
 
   return {
     registerCount := program.registerCount
@@ -107,6 +111,8 @@ def compileResolved (prog : CoreProgram) (arena : Tropical.Ir.CoreArena)
     instructions := program.instructions
     perChildPreInput := program.perChildPreInput
     outputTargets := program.outputTargets
-    arraySlotNames := #[] }
+    arraySlotNames := #[]
+    instrStages := program.instrStages
+    perChildPreInputStages := program.perChildPreInputStages }
 
 end Tropical.Ir.CompileResolved

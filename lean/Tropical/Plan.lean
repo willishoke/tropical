@@ -1,5 +1,6 @@
 import Lean.Data.Json
 import Tropical.Parse.Nodes
+import Tropical.Ir.CoreArena
 
 /-!
 # Plan layer — `tropical_plan_5` as a type (Phase 6 stage 6a)
@@ -65,6 +66,13 @@ inductive NOperand where
   | param (ptr : String) (scalarType : ScalarType)
   | source (index : Nat) (scalarType : ScalarType)
   | slot (index : Nat) (scalarType : ScalarType)
+  /-- The iteration index (i64) of the enclosing `ReduceBegin`/`ReduceEnd`
+      region whose binder id is `id` (nested regions: the emitters resolve the
+      id against the stack of open regions, innermost first). Meaningless
+      outside a region with this id (emitters reject it there). `id = 0` is
+      the pre-nesting default and is OMITTED on the wire, so single-region
+      plans serialize byte-identically to the id-less form. -/
+  | loopIdx (id : Nat := 0)
 deriving Repr, Inhabited
 
 /-- Canonical source indices (sessions always emit `[tick, rate]`). -/
@@ -90,6 +98,10 @@ def NOperand.toWire : NOperand → Json
       ("scalar_type", scalarJson t)]
   | .slot i t => Json.mkObj [("kind", Json.str "slot"), ("index", toJson i),
       ("scalar_type", scalarJson t)]
+  | .loopIdx id => Json.mkObj <|
+      [("kind", Json.str "loop_idx")]
+      ++ (if id == 0 then [] else [("id", toJson id)])
+      ++ [("scalar_type", scalarJson .int)]
 
 /-- Discriminated writeback namespace. -/
 inductive DstSlot where
@@ -123,15 +135,22 @@ structure NInstr where
   loopCount : Nat := 1
   strides : Array Nat := #[]
   resultType : ScalarType
+  /-- `ReduceBegin` only: the binder id its body's `loopIdx id` operands refer
+      to (nested banks). Rides the wire as `loop_id`, OMITTED when 0 so
+      single-region plans stay byte-identical; decoding an absent field yields
+      0, and a plan with one open region resolves id-0 `loopIdx` against it. -/
+  loopId : Nat := 0
 deriving Repr, Inhabited
 
 def NInstr.toWire (i : NInstr) : Except String Json := do
-  return Json.mkObj [
+  return Json.mkObj <| [
     ("tag", Json.str i.tag),
     ("dst", toJson (← i.dst.wireIdx)),
     ("dst_kind", Json.str (← i.dst.wireKind)),
     ("args", Json.arr (i.args.map (·.toWire))),
-    ("loop_count", toJson i.loopCount),
+    ("loop_count", toJson i.loopCount)]
+    ++ (if i.loopId == 0 then [] else [("loop_id", toJson i.loopId)])
+    ++ [
     ("strides", toJson i.strides),
     ("result_type", scalarJson i.resultType)]
 
@@ -169,6 +188,33 @@ def instrWriteSlot (dst : Nat) (value : NOperand)
   { tag := "WriteSlot", dst := .moduleSlot dst, args := #[value],
     resultType := scalarType }
 
+/-- Open an indexed-reduction region: `dst` is the accumulator temp
+    (seeded from `init`), `loopCount` the trip count. The instructions
+    up to the matching `ReduceEnd` run once per iteration; within them
+    `.loopIdx` is the iteration index and reads/writes of the
+    accumulator temp see/update the running value. Loop-body temps do
+    not escape the region (post-region reads fall back to the
+    zero-initialized scratch, the emitters' usual graceful rule).
+
+    `count?` (trip-count-as-data): an optional RUNTIME effective count as a
+    second arg — `loopCount` stays the static capacity; the emitters resolve
+    `args[1]` once before the loop and trip `clamp(args[1], 0, loopCount)`
+    iterations. Absent = the static path, byte-identical emission.
+
+    `loopId` (nested banks): the region's binder id — body `loopIdx id`
+    operands resolve against it through the stack of open regions. 0 (the
+    default) is the single-region form and is omitted on the wire. -/
+def instrReduceBegin (accTemp : Nat) (init : NOperand) (loopCount : Nat)
+    (resultType : ScalarType) (count? : Option NOperand := none)
+    (loopId : Nat := 0) : NInstr :=
+  { tag := "ReduceBegin", dst := .temp accTemp,
+    args := match count? with | none => #[init] | some c => #[init, c],
+    loopCount, resultType, loopId }
+
+/-- Close the innermost reduction region opened on `accTemp`. -/
+def instrReduceEnd (accTemp : Nat) (resultType : ScalarType) : NInstr :=
+  { tag := "ReduceEnd", dst := .temp accTemp, args := #[], resultType }
+
 -- ─────────────────────────────────────────────────────────────
 -- PerInstancePlan — output of compileResolved
 -- ─────────────────────────────────────────────────────────────
@@ -182,6 +228,11 @@ structure PerInstancePlan where
   /-- Per-output-port temp indices (local; the session compiler shifts). -/
   outputTargets : Array Nat
   arraySlotNames : Array String
+  /-- Staging metadata, parallel to `instructions` / `perChildPreInput`:
+      the binding-time stage of the node each instruction was emitted
+      for (typed stage-0 refactor Phase 1). Never serialized. -/
+  instrStages : Array (Option Tropical.Ir.Stage) := #[]
+  perChildPreInputStages : Array (Array (Option Tropical.Ir.Stage)) := #[]
 deriving Repr, Inhabited
 
 /-- Wire encoding for the diff-emit gate (the TS side serializes the
@@ -368,6 +419,12 @@ structure FlatPlan where
       omitted from the wire when empty, so old plans and old parsers are
       both untouched). -/
   paramDisciplines : Array ParamDiscipline := #[]
+  /-- Array slot indices FILLED by the stage-0 coefficient kernel (banks-as-data
+      coefficient columns). The runtime double-buffers exactly these — the coeff
+      kernel writes a back generation and flips one atomic word so the audio
+      kernel reads a whole, consistent generation of columns (no cross-column
+      tear on a live knob move). Empty ⇒ no double-buffering (omitted from wire). -/
+  coeffArraySlots : Array Nat := #[]
 deriving Inhabited
 
 /-- Mirrors `toWirePlan`'s omission rules. -/
@@ -387,6 +444,8 @@ def FlatPlan.toWire (p : FlatPlan) : Except String Json := do
       ("instance_functions", Json.arr (← p.instanceFunctions.mapM (·.toWire)))]
   let fields := if p.paramDisciplines.isEmpty then fields
     else fields.push ("param_disciplines", Json.arr (p.paramDisciplines.map (·.toWire)))
+  let fields := if p.coeffArraySlots.isEmpty then fields
+    else fields.push ("coeff_array_slots", toJson p.coeffArraySlots)
   let fields := if p.sinks.isEmpty then fields
     else fields.push ("sinks", Json.arr (p.sinks.map (·.toWire)))
   let fields := if isDefaultSources p.sources then fields

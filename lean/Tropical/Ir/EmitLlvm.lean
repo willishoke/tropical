@@ -72,20 +72,57 @@ structure TVal where
   ty  : ScalarType
 deriving Inhabited
 
+/-- An open `ReduceBegin`/`ReduceEnd` region: the region's binder id (what a
+    `loopIdx id` operand resolves against), the accumulator temp and its
+    alloca, the iteration-counter alloca, the loop labels, and the `tempVals`
+    snapshot to restore at close (body temps don't escape). -/
+structure ReduceCtx where
+  id : Nat
+  accTemp : Nat
+  accPtr : String
+  accTy : ScalarType
+  idxPtr : String
+  condLabel : String
+  endLabel : String
+  savedTempVals : Std.HashMap Nat TVal
+deriving Inhabited
+
 structure St where
   next : Nat := 0
   lines : Array String := #[]
-  /-- Global temp slot → the scalar type last written there (mirrors the
-      C++ `temp_types` table; read when a `reg` operand resolves). -/
-  tempTypes : Std.HashMap Nat ScalarType := {}
+  /-- Global temp slot → the SSA value last written there. Temps are pure
+      intra-call scratch in the fused kernel (sinks read module slots; the
+      runtime never reads `%temps` back), so instruction results stay SSA
+      values instead of round-tripping through the `%temps` array — the
+      same shape EmitMsl uses (typed locals). This is what keeps the
+      one-block kernel free of tens of thousands of escaping stores that
+      LLVM's machine scheduler and regalloc otherwise choke on. A `reg`
+      read with no prior write falls back to loading `%temps` (the
+      runtime zero-initializes it), preserving graceful-exclusion
+      semantics. -/
+  tempVals : Std.HashMap Nat TVal := {}
   sources : Array SourceKind := #[]
   /-- Label of the basic block currently being emitted into. Starts at
       `loop_body`; array ops (SetElement / elementwise) open new blocks,
       so the loop back-edge + counter phi must reference the *final*
       block, not a hardcoded `loop_body`. -/
   curBlock : String := "loop_body"
+  /-- The stack of open reduction regions, outermost first (`ReduceBegin`
+      pushes, `ReduceEnd` pops). Nested banks: `loopIdx id` resolves by
+      searching this stack for its binder id; accumulator temp reads/writes
+      search it innermost-first, so an inner-region instruction touching an
+      OUTER accumulator finds the outer alloca. -/
+  reduces : Array ReduceCtx := #[]
 
 abbrev M := EStateM String St
+
+/-- The open region owning accumulator temp `slot`, innermost first. -/
+def findAccCtx (slot : Nat) : M (Option ReduceCtx) := do
+  let rs := (← get).reduces
+  for i in [0:rs.size] do
+    let rc := rs[rs.size - 1 - i]!
+    if rc.accTemp == slot then return some rc
+  return none
 
 def fresh : M String := do
   let s ← get
@@ -119,7 +156,9 @@ def coerceF64 (v : TVal) : M String := do pure (← coerce v .float).ref
 -- Loads / stores (mirror the gep_temp / load_*_typed / slot helpers)
 -- ─────────────────────────────────────────────────────────────
 
-/-- Load `temps[slot]` (i64-backed) as the given type. -/
+/-- Load `temps[slot]` (i64-backed) as the given type — the fallback for a
+    `reg` read with no prior write this kernel (reads the runtime's
+    zero-initialized scratch, preserving graceful-exclusion semantics). -/
 def loadTempTyped (slot : Nat) (ty : ScalarType) : M TVal := do
   let g ← fresh; line s!"{g} = getelementptr inbounds i64, ptr %temps, i64 {slot}"
   let raw ← fresh; line s!"{raw} = load i64, ptr {g}, align 8"
@@ -128,16 +167,19 @@ def loadTempTyped (slot : Nat) (ty : ScalarType) : M TVal := do
   | .float => let b ← fresh; line s!"{b} = bitcast i64 {raw} to double"; pure ⟨b, .float⟩
   | .bool => let b ← fresh; line s!"{b} = trunc i64 {raw} to i1"; pure ⟨b, .bool⟩
 
-/-- Store a typed value into `temps[slot]` (i64-backed) and record its
-    type for later `reg` reads. -/
+/-- Record a temp write as an SSA value for later `reg` reads. Emits no
+    store: temps are intra-call scratch in the fused kernel, and every
+    block the emitter opens falls through, so an earlier def dominates
+    every later use. (The old store/load round-trip was bitcast-exact, so
+    handing back the same TVal is bit-identical.) Inside a reduction
+    region, a write to the accumulator temp stores through its alloca
+    instead — the running value crosses the loop back-edge in memory. -/
 def storeTempTyped (slot : Nat) (v : TVal) : M Unit := do
-  let asI64 ← match v.ty with
-    | .int => pure v.ref
-    | .float => let b ← fresh; line s!"{b} = bitcast double {v.ref} to i64"; pure b
-    | .bool => let b ← fresh; line s!"{b} = zext i1 {v.ref} to i64"; pure b
-  let g ← fresh; line s!"{g} = getelementptr inbounds i64, ptr %temps, i64 {slot}"
-  line s!"store i64 {asI64}, ptr {g}, align 8"
-  modify fun s => { s with tempTypes := s.tempTypes.insert slot v.ty }
+  if let some rc ← findAccCtx slot then
+    let cv ← coerce v rc.accTy
+    line s!"store {llTy rc.accTy} {cv.ref}, ptr {rc.accPtr}, align 8"
+    return
+  modify fun s => { s with tempVals := s.tempVals.insert slot v }
 
 def loadSlotF64 (idx : Nat) : M String := do
   let g ← fresh; line s!"{g} = getelementptr inbounds double, ptr %slots, i64 {idx}"
@@ -184,8 +226,25 @@ def resolveOperand : NOperand → M TVal
     | .bool => pure ⟨if jnToInt v != 0 then "true" else "false", .bool⟩
     | .float => pure ⟨f64Lit v.toFloat, .float⟩
   | .reg slot _ => do
-    let ty := (← get).tempTypes.getD slot .float
-    loadTempTyped slot ty
+    -- Inside a reduction region, an accumulator temp reads the running
+    -- value from its alloca (an SSA value can't cross the back-edge).
+    -- Searched through the whole region stack: an inner-region read of
+    -- an OUTER accumulator must find the outer alloca.
+    if let some rc ← findAccCtx slot then
+      let v ← fresh
+      line s!"{v} = load {llTy rc.accTy}, ptr {rc.accPtr}, align 8"
+      return ⟨v, rc.accTy⟩
+    match (← get).tempVals.get? slot with
+    | some v => pure v
+    | none => loadTempTyped slot .float
+  | .loopIdx id => do
+    -- Resolve the binder id against the stack of open regions (unique along
+    -- a nesting chain, so first match is THE match).
+    let some rc := (← get).reduces.find? (fun rc => rc.id == id)
+      | fail s!"EmitLlvm: loop_idx id={id} matches no open ReduceBegin/ReduceEnd region"
+    let v ← fresh
+    line s!"{v} = load i64, ptr {rc.idxPtr}, align 8"
+    pure ⟨v, .int⟩
   | .source idx _ => do
     let srcs := (← get).sources
     match srcs[idx]? with
@@ -457,6 +516,63 @@ private def emitElementwise (instr : NInstr) (dstSlot : Nat) : M Unit := do
 
 def emitInstr (instr : NInstr) : M Unit := do
   match instr.tag, instr.dst with
+  | "ReduceBegin", .temp accTemp =>
+    -- Nested regions are supported; an ancestor with the SAME binder id is a
+    -- construction bug (ids must be unique along a nesting chain).
+    if (← get).reduces.any (fun rc => rc.id == instr.loopId) then
+      fail s!"EmitLlvm: nested ReduceBegin id={instr.loopId} collides with an open ancestor region"
+    let init ← match instr.args[0]? with
+      | some o => resolveOperand o
+      | none => fail "ReduceBegin missing init operand"
+    let initV ← coerce init instr.resultType
+    -- Trip-count-as-data: an optional args[1] is the RUNTIME effective count.
+    -- Resolve it HERE, before the loop blocks open (loop-invariant), coerce to
+    -- i64 (a slot read arrives f64 → fptosi), and clamp to [0, loopCount] via
+    -- icmp+select (the emitIndex bounds-check style). No args[1] emits the
+    -- static literal — byte-identical to the pre-dynamic form.
+    let bound ← match instr.args[1]? with
+      | none => pure (toString instr.loopCount)
+      | some o =>
+        let v ← resolveOperand o
+        let iv := (← coerce v .int).ref
+        let neg ← fresh; line s!"{neg} = icmp slt i64 {iv}, 0"
+        let lo ← fresh; line s!"{lo} = select i1 {neg}, i64 0, i64 {iv}"
+        let over ← fresh; line s!"{over} = icmp sgt i64 {lo}, {instr.loopCount}"
+        let cl ← fresh; line s!"{cl} = select i1 {over}, i64 {instr.loopCount}, i64 {lo}"
+        pure cl
+    let accPtr ← fresh
+    line s!"{accPtr} = alloca {llTy instr.resultType}, align 8"
+    line s!"store {llTy instr.resultType} {initV.ref}, ptr {accPtr}, align 8"
+    let idxPtr ← fresh
+    line s!"{idxPtr} = alloca i64, align 8"
+    line s!"store i64 0, ptr {idxPtr}, align 8"
+    let n ← freshId
+    let condbb := s!"rd_cond_{n}"; let bodybb := s!"rd_body_{n}"; let endbb := s!"rd_end_{n}"
+    line s!"br label %{condbb}"
+    labelLine condbb
+    let k ← fresh; line s!"{k} = load i64, ptr {idxPtr}, align 8"
+    let c ← fresh; line s!"{c} = icmp ult i64 {k}, {bound}"
+    line s!"br i1 {c}, label %{bodybb}, label %{endbb}"
+    labelLine bodybb
+    modify fun s => { s with reduces := s.reduces.push {
+      id := instr.loopId, accTemp, accPtr, accTy := instr.resultType, idxPtr,
+      condLabel := condbb, endLabel := endbb, savedTempVals := s.tempVals } }
+  | "ReduceEnd", .temp accTemp =>
+    let some rc := (← get).reduces.back?
+      | fail "EmitLlvm: ReduceEnd without an open ReduceBegin"
+    if rc.accTemp != accTemp then
+      fail "EmitLlvm: ReduceEnd accumulator does not match the innermost open ReduceBegin"
+    let k ← fresh; line s!"{k} = load i64, ptr {rc.idxPtr}, align 8"
+    let k1 ← fresh; line s!"{k1} = add i64 {k}, 1"
+    line s!"store i64 {k1}, ptr {rc.idxPtr}, align 8"
+    line s!"br label %{rc.condLabel}"
+    labelLine rc.endLabel
+    -- Body temps don't escape; the accumulator's final value does. Restore
+    -- is LIFO: each region carries its own entry snapshot.
+    let acc ← fresh
+    line s!"{acc} = load {llTy rc.accTy}, ptr {rc.accPtr}, align 8"
+    let newVals := rc.savedTempVals.insert accTemp ⟨acc, rc.accTy⟩
+    modify fun s => { s with reduces := s.reduces.pop, tempVals := newVals }
   | "WriteSlot", .moduleSlot idx =>
     let v ← match instr.args[0]? with | some o => resolveOperand o | none => fail "WriteSlot missing arg"
     storeSlotF64 idx (← coerceF64 v)

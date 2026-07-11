@@ -110,6 +110,29 @@ function gate(name: string, patch: string, samples: number, minDb: number, start
   expect(snr).toBeGreaterThan(minDb)
 }
 
+/** Render a playground PatchGraph through the TYPED session split
+ *  (`diffcli render-graph`): banked coefficient columns hoist to the
+ *  stage-0 coefficient kernel, and on `--metal` cross to the GPU via the
+ *  packed `coeff_columns` buffer(3) — the same path a live session runs
+ *  on TROPICAL_BACKEND=metal. Returns the samples plus the hoisted-column
+ *  count the verb reports on stderr, so the gate can assert the crossing
+ *  was actually exercised (a zero-column render would pass vacuously). */
+function renderGraph(graphPath: string, metal: boolean,
+                     samples: number): { out: Float64Array, columns: number } {
+  const buffer = 512
+  const frames = Math.ceil(samples / buffer)
+  const args = [diffcli, 'render-graph', graphPath,
+                '--frames', String(frames), '--buffer', String(buffer)]
+  if (metal) args.push('--metal')
+  const r = spawnSync(args, { cwd: repoRoot, env: cliEnv })
+  if (r.exitCode !== 0) throw new Error(`diffcli render-graph failed: ${r.stderr?.toString()}`)
+  const m = /hoisted columns=(\d+)/.exec(r.stderr?.toString() ?? '')
+  const b = r.stdout
+  const n = frames * buffer
+  return { out: new Float64Array(b.buffer.slice(b.byteOffset, b.byteOffset + n * 8)),
+           columns: m ? Number(m[1]) : 0 }
+}
+
 describe.skipIf(!METAL)('metal vs native JIT (SNR gates)', () => {
   test('pure-sine-440 — literal landing, f32 value floor', () => {
     gate('pure-sine-440', 'web/patches/pure-sine-440.json', 4096, 125)
@@ -137,6 +160,31 @@ describe.skipIf(!METAL)('metal vs native JIT (SNR gates)', () => {
 
   test('ring-mod — product of voices', () => {
     gate('ring-mod', 'web/patches/ring-mod.json', 4096, 125)
+  })
+
+  test('banked resonator — hoisted coefficient columns cross to the GPU (WS4)', () => {
+    // The banked default lowers the resonator's mode bank to `bankSum`,
+    // and the typed split hoists its LIVE coefficient columns (incr←freq,
+    // sigma←decay) to the stage-0 kernel — array data the GPU can only
+    // see through the coeff_columns buffer(3) crossing. The columns cross
+    // f64→f32, so this is slot-driven by construction (the documented
+    // exception class: phase error grows with the window). Measured
+    // ~113 dB at 4096 samples on M-series; gate at 100 as the boundary.
+    const graph = planFile('banked-resonator-graph', JSON.stringify({
+      nodes: [
+        { id: 'res', kind: 'resonator', params: { freq: 220, decay: 4 } },
+        { id: 'out', kind: 'out', in: { in: ['res'] } },
+      ],
+      out: 'out',
+    }))
+    const ref = renderGraph(graph, false, 4096)
+    expect(ref.columns).toBeGreaterThan(0)   // the split actually banked — no vacuous pass
+    expectAudible('banked resonator', ref.out)
+    const gpu = renderGraph(graph, true, 4096)
+    expect(gpu.columns).toBe(ref.columns)
+    const snr = snrDb(ref.out, gpu.out)
+    console.log(`    banked resonator: ${ref.columns} hoisted column(s), SNR ${snr.toFixed(1)} dB (floor 100)`)
+    expect(snr).toBeGreaterThan(100)
   })
 
   test('modal_heavy64 — the pre-scope-A unreduced-radian canary (short window only)', () => {

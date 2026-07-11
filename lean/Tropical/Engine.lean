@@ -13,6 +13,7 @@ import Tropical.Ir.Core
 import Tropical.Ir.WireProgram
 import Tropical.Ir.EmitLlvm
 import Tropical.Ir.EmitMsl
+import Tropical.StagedLoad
 import Tropical.TypeArgs
 import Tropical.Compile
 import Tropical.Entries
@@ -225,20 +226,41 @@ def buildKernelIr (plan : Tropical.Plan.FlatPlan) : EngineM (String × String) :
     | .ok s => pure s
   pure (ir, planJson)
 
-/-- Emit the plan's kernel artifacts and load them into the runtime: LLVM
-    IR always; on the metal backend also the MSL kernel, dual-loaded (audio
-    on the GPU, render_window/the scope on the JIT). Any emit failure
-    errors BEFORE the load, so the previous kernel keeps playing — the
-    same recoverable contract as the IR path. -/
-def loadKernel (env : Env) (plan : Tropical.Plan.FlatPlan) : EngineM Unit := do
-  let (ir, planJson) ← buildKernelIr plan
+/-- Emit the plan's kernel artifacts and load them into the runtime: the
+    stage-0 split first (Stage0.hoist, gated by `TROPICAL_STAGE0`), then
+    LLVM IR for the audio kernel — and the coefficient kernel when
+    anything hoisted — always; on the metal backend also the MSL kernel,
+    dual-loaded (audio on the GPU, render_window/the scope on the JIT;
+    coefficients run on the CPU JIT in f64 and cross to the GPU as
+    host-written slots, coefficient COLUMNS as the packed `coeff_columns`
+    buffer). Any emit failure errors BEFORE the load, so the
+    previous kernel keeps playing — the same recoverable contract as the
+    IR path. -/
+def loadKernel (env : Env) (plan : Tropical.Plan.FlatPlan)
+    (stages? : Option (Array (Array (Option Tropical.Ir.Stage))) := none) :
+    EngineM Unit := do
+  let split ← match stages? with
+    | some blocks => Tropical.StagedLoad.splitTyped plan blocks
+    | none => Tropical.StagedLoad.split plan
+  let (ir, planJson) ← buildKernelIr split.audio
+  let coeffIr ← match Tropical.StagedLoad.coeffIr split with
+    | .error msg => internalError s!"EmitLlvm (coeff): {msg}"
+    | .ok s => pure s
   if env.metalBackend then
-    let msl ← match Tropical.Ir.EmitMsl.emitKernel plan with
+    -- Hoisted coefficient columns (banks-as-data) cross to the GPU as
+    -- a packed `coeff_columns` device buffer (`buffer(3)`): EmitMsl
+    -- emits column reads for the slots the split advertises, the
+    -- stage-0 coefficient kernel fills the generation-buffered storage
+    -- host-side in f64, and process() uploads the captured generation
+    -- per dispatch (f64→f32, like slots). So the metal backend runs
+    -- the SAME typed split as the JIT — coefficient math at knob rate
+    -- on CPU, the audio loop on GPU reading real columns.
+    let msl ← match Tropical.Ir.EmitMsl.emitKernel split.audio with
       | .error msg => internalError s!"EmitMsl: {msg}"
       | .ok s => pure s
-    env.runtime.loadIrMsl ir msl planJson
+    env.runtime.loadIrStaged ir msl coeffIr planJson
   else
-    env.runtime.loadIr ir planJson
+    env.runtime.loadIrStaged ir "" coeffIr planJson
 
 -- ── Snapshot compile (`wire()` in TS) ────────────────────────────────────────
 
@@ -574,7 +596,7 @@ def syncCompile (env : Env) : EngineM Unit := do
       | internalError s!"syncCompile: instance '{n}' program '{pname}' missing from root registry (engine bug)"
     coreInstances := coreInstances.push (n, core)
 
-  let plan ← match Tropical.Compile.compileSession {
+  let (plan, stageBlocks) ← match Tropical.Compile.compileSessionStaged {
       instances := coreInstances
       wiresPost
       graphOutputs := st.graphOutputs
@@ -585,8 +607,9 @@ def syncCompile (env : Env) : EngineM Unit := do
     | .error msg => internalError msg
     | .ok p => pure p
   -- Lean owns codegen: emit the kernel artifacts from the in-memory plan
-  -- and hand them to the engine (planJson is the metadata manifest).
-  loadKernel env plan
+  -- and hand them to the engine (planJson is the metadata manifest). The
+  -- split is TYPED here — the session compile is in hand.
+  loadKernel env plan (some stageBlocks)
 
 /-- Harness-only (diffcli `compile`): rebuild the plan from the current
     mirror at an arbitrary compilation mode, WITHOUT loading it or
@@ -598,8 +621,8 @@ def syncCompile (env : Env) : EngineM Unit := do
     known limitation — so plan structure is mode-independent there
     too). Collapses into `syncCompile` at 6f when the sync payload
     retires. -/
-def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
-    EngineM Tropical.Plan.FlatPlan := do
+def buildSessionInput (env : Env) (mode : Tropical.Plan.CompilationMode) :
+    EngineM Tropical.Compile.SessionInput := do
   let st ← env.state.get
   let alloc := Tropical.Lowering.allocate (st.params.map (·.1)) st.instances
   let wiresPost := st.wires
@@ -638,18 +661,32 @@ def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
     let some core := rootCore.registryGet? pname
       | internalError s!"compileMirrorPlan: instance '{n}' program '{pname}' missing from root registry (engine bug)"
     coreInstances := coreInstances.push (n, core)
-  let plan ← match Tropical.Compile.compileSession {
-      instances := coreInstances
-      wiresPost
-      graphOutputs := st.graphOutputs
-      params := st.params
-      alloc
-      root := rootCore
-      arena := rootArena
-      mode } with
-    | .error msg => internalError msg
-    | .ok p => pure p
-  pure plan
+  pure {
+    instances := coreInstances
+    wiresPost
+    graphOutputs := st.graphOutputs
+    params := st.params
+    alloc
+    root := rootCore
+    arena := rootArena
+    mode }
+
+def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
+    EngineM Tropical.Plan.FlatPlan := do
+  let input ← buildSessionInput env mode
+  match Tropical.Compile.compileSession input with
+  | .error msg => internalError msg
+  | .ok p => pure p
+
+/-- The stage-differential entry: the session input, the compiled plan,
+    and the typed per-instruction stages in emit order. -/
+def compileMirrorStaged (env : Env) (mode : Tropical.Plan.CompilationMode) :
+    EngineM (Tropical.Compile.SessionInput × Tropical.Plan.FlatPlan
+      × Array (Array (Option Tropical.Ir.Stage))) := do
+  let input ← buildSessionInput env mode
+  match Tropical.Compile.compileSessionStaged input with
+  | .error msg => internalError msg
+  | .ok (p, blocks) => pure (input, p, blocks)
 
 def compileMirrorPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
     EngineM String := do
@@ -2163,10 +2200,10 @@ def handleListScopeTaps (env : Env) : EngineM Json := do
     `compileSession → buildKernelIr → loadIr` tail. A compile failure errors
     BEFORE `loadIr`, so the previous kernel keeps playing. -/
 def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
-  let (plan, taps) ← match ← Tropical.Playground.compilePlan args with
+  let (plan, taps, stageBlocks) ← match ← Tropical.Playground.compilePlan args with
     | .error e => internalError e
     | .ok p => pure p
-  loadKernel env plan
+  loadKernel env plan (some stageBlocks)
   -- Seed the session param mirror with the graph's knobs so `set_param` — which
   -- guards on the mirror, then drives the live `param:<name>` slot — reaches them
   -- without a relower. Replaces (not appends): the mirror tracks the current graph.

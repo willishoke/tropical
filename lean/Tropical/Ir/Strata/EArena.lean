@@ -161,6 +161,8 @@ private partial def convExprId (ea : ExprArena) (eid : ExprId) : ConvM ExprId :=
       | .nestedOut i o  => pure (.nestedOut i o)
       | .sampleRate     => pure .sampleRate
       | .sampleIndex    => pure .sampleIndex
+      | .loopIdx id     => pure (.loopIdx id)
+      | .bankSum c ts b dc ii => pure (.bankSum c (← ts.mapM (convExprId ea)) (← convExprId ea b) (← dc.mapM (convExprId ea)) ii)
       | .zeros _        => throw ⟨"toResolved: zeros survived arrayLower"⟩
       | .typeParamRef _ => throw ⟨"toResolved: typeParamRef survived specialize"⟩
       | .bindingRef _   => throw ⟨"toResolved: bindingRef survived arrayLower"⟩
@@ -235,58 +237,79 @@ def _root_.Tropical.Ir.checkResolvedArena (a : Arena) (root : ProgramIdx) :
 -- mapExprId — id-form structural walker (mirrors Recursion.mapExpr)
 -- ─────────────────────────────────────────────────────────────
 
+/-- Rewrite monad for one hook-set application: `PassM` plus a memo from
+    source `ExprId.idx` to rewritten id. The arena is a DAG (equal subtrees
+    share one node); the memo keeps the walk O(unique nodes) instead of
+    O(expanded tree). Sound because hooks are functions of the node alone —
+    there is no path context to invalidate a cached rewrite. -/
+abbrev MapM := StateT (Std.HashMap Nat ExprId) PassM
+
 /-- Hook set for `mapExprId`: `node n` may replace a node (returning its id,
     possibly freshly interned via `einternP`); `none` recurses structurally.
-    `binder` transforms binders at every binding site. -/
+    `binder` transforms binders at every binding site. Hooks run in `MapM` so
+    a hook that recurses (e.g. `nestedOut`-chain substitution) shares the
+    walk's memo. -/
 structure MapHooksId where
-  node : ENode → PassM (Option ExprId) := fun _ => pure none
+  node : ENode → MapM (Option ExprId) := fun _ => pure none
   binder : Binder → Binder := id
 
-/-- Structural map over an id-rooted expression, re-interning the result. Equal
-    subtrees collapse on intern, so the rewrite produces a DAG. -/
-partial def mapExprId (h : MapHooksId) (id : ExprId) : PassM ExprId := do
+/-- Structural map over an id-rooted expression, re-interning the result and
+    memoizing per source id. Equal subtrees collapse on intern, so the rewrite
+    produces a DAG — and the memo makes the walk itself DAG-shaped too. -/
+partial def mapExprIdGo (h : MapHooksId) (id : ExprId) : MapM ExprId := do
+  if let some r := (← get).get? id.idx then return r
   let n ← derefP id
-  match ← h.node n with
-  | some r => pure r
-  | none =>
-    match n with
-    | .num _ | .bool _
-    | .inputRef _ | .paramRef _ | .typeParamRef _ | .bindingRef _
-    | .nestedOut _ _ | .sampleRate | .sampleIndex => pure id
-    | .arr items => einternP (.arr (← items.mapM (mapExprId h)))
-    | .binary t a b => einternP (.binary t (← mapExprId h a) (← mapExprId h b))
-    | .unary t a => einternP (.unary t (← mapExprId h a))
-    | .clamp a b c => einternP (.clamp (← mapExprId h a) (← mapExprId h b) (← mapExprId h c))
-    | .select a b c => einternP (.select (← mapExprId h a) (← mapExprId h b) (← mapExprId h c))
-    | .arraySet a b c => einternP (.arraySet (← mapExprId h a) (← mapExprId h b) (← mapExprId h c))
-    | .index a b => einternP (.index (← mapExprId h a) (← mapExprId h b))
-    | .zeros c => einternP (.zeros (← mapExprId h c))
-    | .fold o i ac e b =>
-      einternP (.fold (← mapExprId h o) (← mapExprId h i) (h.binder ac) (h.binder e) (← mapExprId h b))
-    | .scan o i ac e b =>
-      einternP (.scan (← mapExprId h o) (← mapExprId h i) (h.binder ac) (h.binder e) (← mapExprId h b))
-    | .generate c it b =>
-      einternP (.generate (← mapExprId h c) (h.binder it) (← mapExprId h b))
-    | .iterate c i it b =>
-      einternP (.iterate (← mapExprId h c) (← mapExprId h i) (h.binder it) (← mapExprId h b))
-    | .chain c i it b =>
-      einternP (.chain (← mapExprId h c) (← mapExprId h i) (h.binder it) (← mapExprId h b))
-    | .map2 o e b =>
-      einternP (.map2 (← mapExprId h o) (h.binder e) (← mapExprId h b))
-    | .zipWith a b x y bd =>
-      einternP (.zipWith (← mapExprId h a) (← mapExprId h b) (h.binder x) (h.binder y) (← mapExprId h bd))
-    | .letIn bs b =>
-      let bs' ← bs.mapM fun lb => do
-        pure ({ binder := h.binder lb.binder, value := ← mapExprId h lb.value } : ELetBinder)
-      einternP (.letIn bs' (← mapExprId h b))
-    | .tag d v p =>
-      let p' ← p.mapM fun tp => do
-        pure ({ field := tp.field, value := ← mapExprId h tp.value } : ETagPayload)
-      einternP (.tag d v p')
-    | .match_ d s arms =>
-      let arms' ← arms.mapM fun arm => do
-        pure ({ variant := arm.variant, binders := arm.binders.map h.binder,
-                body := ← mapExprId h arm.body } : EMatchArm)
-      einternP (.match_ d (← mapExprId h s) arms')
+  let r ← do
+    match ← h.node n with
+    | some r => pure r
+    | none =>
+      match n with
+      | .num _ | .bool _
+      | .inputRef _ | .paramRef _ | .typeParamRef _ | .bindingRef _
+      | .nestedOut _ _ | .sampleRate | .sampleIndex | .loopIdx _ => pure id
+      | .bankSum c ts b dc ii =>
+        einternP (.bankSum c (← ts.mapM (mapExprIdGo h)) (← mapExprIdGo h b)
+          (← dc.mapM (mapExprIdGo h)) ii)
+      | .arr items => einternP (.arr (← items.mapM (mapExprIdGo h)))
+      | .binary t a b => einternP (.binary t (← mapExprIdGo h a) (← mapExprIdGo h b))
+      | .unary t a => einternP (.unary t (← mapExprIdGo h a))
+      | .clamp a b c => einternP (.clamp (← mapExprIdGo h a) (← mapExprIdGo h b) (← mapExprIdGo h c))
+      | .select a b c => einternP (.select (← mapExprIdGo h a) (← mapExprIdGo h b) (← mapExprIdGo h c))
+      | .arraySet a b c => einternP (.arraySet (← mapExprIdGo h a) (← mapExprIdGo h b) (← mapExprIdGo h c))
+      | .index a b => einternP (.index (← mapExprIdGo h a) (← mapExprIdGo h b))
+      | .zeros c => einternP (.zeros (← mapExprIdGo h c))
+      | .fold o i ac e b =>
+        einternP (.fold (← mapExprIdGo h o) (← mapExprIdGo h i) (h.binder ac) (h.binder e) (← mapExprIdGo h b))
+      | .scan o i ac e b =>
+        einternP (.scan (← mapExprIdGo h o) (← mapExprIdGo h i) (h.binder ac) (h.binder e) (← mapExprIdGo h b))
+      | .generate c it b =>
+        einternP (.generate (← mapExprIdGo h c) (h.binder it) (← mapExprIdGo h b))
+      | .iterate c i it b =>
+        einternP (.iterate (← mapExprIdGo h c) (← mapExprIdGo h i) (h.binder it) (← mapExprIdGo h b))
+      | .chain c i it b =>
+        einternP (.chain (← mapExprIdGo h c) (← mapExprIdGo h i) (h.binder it) (← mapExprIdGo h b))
+      | .map2 o e b =>
+        einternP (.map2 (← mapExprIdGo h o) (h.binder e) (← mapExprIdGo h b))
+      | .zipWith a b x y bd =>
+        einternP (.zipWith (← mapExprIdGo h a) (← mapExprIdGo h b) (h.binder x) (h.binder y) (← mapExprIdGo h bd))
+      | .letIn bs b =>
+        let bs' ← bs.mapM fun lb => do
+          pure ({ binder := h.binder lb.binder, value := ← mapExprIdGo h lb.value } : ELetBinder)
+        einternP (.letIn bs' (← mapExprIdGo h b))
+      | .tag d v p =>
+        let p' ← p.mapM fun tp => do
+          pure ({ field := tp.field, value := ← mapExprIdGo h tp.value } : ETagPayload)
+        einternP (.tag d v p')
+      | .match_ d s arms =>
+        let arms' ← arms.mapM fun arm => do
+          pure ({ variant := arm.variant, binders := arm.binders.map h.binder,
+                  body := ← mapExprIdGo h arm.body } : EMatchArm)
+        einternP (.match_ d (← mapExprIdGo h s) arms')
+  modify (·.insert id.idx r)
+  pure r
+
+/-- One hook-set application of `mapExprIdGo` with a fresh memo. -/
+def mapExprId (h : MapHooksId) (id : ExprId) : PassM ExprId :=
+  (mapExprIdGo h id).run' {}
 
 end Tropical.Ir.Strata

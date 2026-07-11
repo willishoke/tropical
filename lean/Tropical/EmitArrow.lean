@@ -87,23 +87,91 @@ inductive Sig where
   | nestedOut (instance_ : InstanceIdx) (output : OutputIdx)
   | sampleRate
   | sampleIndex
+  -- Banks-as-data (slice 3b): the authoring tree can express an indexed
+  -- reduction over coefficient columns. `arr`/`index`/`loopIdx` lower to the
+  -- like-named IR nodes; `bankSum` to `ENode.bankSum` (a `ReduceBegin` region).
+  -- `loopIdx` carries the UNIQUE BINDER ID of the `bankSum` it reads (nested
+  -- banks: unique along a nesting chain; Sig-level authoring uses `bankFold`,
+  -- whose banks never nest today — tables materialize before their region —
+  -- so `BankCols.idxId` defaults to 0).
+  | arr (items : Array Sig)
+  | index (arr idx : Sig)
+  | loopIdx (id : Nat)
+  -- `count` is the static CAPACITY; `dynCount?` (trip-count-as-data) is the
+  -- optional RUNTIME effective count, clamped to `[0, count]` at the loop head.
+  -- (No `:= none` default here: `Option Sig` is a NESTED occurrence of the
+  -- inductive, and the kernel rejects optParam defaults on nested fields.)
+  -- `idxId` names the binder the body's `loopIdx id` refers to.
+  | bankSum (count : Nat) (tables : Array Sig) (body : Sig)
+      (dynCount? : Option Sig) (idxId : Nat)
 deriving Repr, Inhabited
 
 /-- A clock-as-value expression (Q32.32 fixed-point sample coordinate). -/
 abbrev Clock := Sig
 
-/-- Lower an authoring `Sig` into the resolved arena, interning bottom-up. -/
-partial def lowerSig : Sig → EArenaM ExprId
+/-- Reference (tree-walk) lowering of an authoring `Sig` into the resolved
+    arena, interning bottom-up. Runtime uses the memoized `lowerSigPtr`:
+    the combinators build `Sig` values that share subterms by Lean object
+    REFERENCE (e.g. residue composition embeds one voice's H(ν) sum into
+    every coupling amp), so the structural walk pays for the fully
+    expanded tree only for `eintern` to collapse it straight back into a
+    shared DAG — super-linear on composed patches. -/
+partial def lowerSigTree : Sig → EArenaM ExprId
   | .num n          => eintern (.num n)
-  | .binary t a b   => do eintern (.binary t (← lowerSig a) (← lowerSig b))
-  | .unary t a      => do eintern (.unary t (← lowerSig a))
-  | .clamp a b c    => do eintern (.clamp (← lowerSig a) (← lowerSig b) (← lowerSig c))
-  | .select a b c   => do eintern (.select (← lowerSig a) (← lowerSig b) (← lowerSig c))
+  | .binary t a b   => do eintern (.binary t (← lowerSigTree a) (← lowerSigTree b))
+  | .unary t a      => do eintern (.unary t (← lowerSigTree a))
+  | .clamp a b c    => do eintern (.clamp (← lowerSigTree a) (← lowerSigTree b) (← lowerSigTree c))
+  | .select a b c   => do eintern (.select (← lowerSigTree a) (← lowerSigTree b) (← lowerSigTree c))
   | .inputRef i     => eintern (.inputRef i)
   | .paramRef i     => eintern (.paramRef i)
   | .nestedOut i o  => eintern (.nestedOut i o)
   | .sampleRate     => eintern .sampleRate
   | .sampleIndex    => eintern .sampleIndex
+  | .arr items      => do eintern (.arr (← items.mapM lowerSigTree))
+  | .index a b      => do eintern (.index (← lowerSigTree a) (← lowerSigTree b))
+  | .loopIdx id     => eintern (.loopIdx id)
+  | .bankSum c ts b dc ii => do
+    eintern (.bankSum c (← ts.mapM lowerSigTree) (← lowerSigTree b) (← dc.mapM lowerSigTree) ii)
+
+/-- Pointer-identity-memoized lowering: a hash map from object address to
+    interned id, threaded alongside the arena. Sound because `Sig` values
+    are immutable — a shared pointer IS the same subterm — and lowering a
+    subterm is deterministic (`eintern` returns equal ids for equal nodes),
+    so a pointer MISS merely re-lowers structurally to the same id. -/
+private unsafe def lowerSigPtrGo (s : Sig) :
+    StateM (ExprArena × Std.HashMap USize ExprId) ExprId := do
+  let key := ptrAddrUnsafe s
+  if let some r := (← get).2.get? key then return r
+  let intern1 (n : ENode) : StateM (ExprArena × Std.HashMap USize ExprId) ExprId :=
+    fun (a, m) => let (id, a') := (eintern n).run a; (id, (a', m))
+  let r ← match s with
+    | .num n          => intern1 (.num n)
+    | .binary t a b   => do intern1 (.binary t (← lowerSigPtrGo a) (← lowerSigPtrGo b))
+    | .unary t a      => do intern1 (.unary t (← lowerSigPtrGo a))
+    | .clamp a b c    => do intern1 (.clamp (← lowerSigPtrGo a) (← lowerSigPtrGo b) (← lowerSigPtrGo c))
+    | .select a b c   => do intern1 (.select (← lowerSigPtrGo a) (← lowerSigPtrGo b) (← lowerSigPtrGo c))
+    | .inputRef i     => intern1 (.inputRef i)
+    | .paramRef i     => intern1 (.paramRef i)
+    | .nestedOut i o  => intern1 (.nestedOut i o)
+    | .sampleRate     => intern1 .sampleRate
+    | .sampleIndex    => intern1 .sampleIndex
+    | .arr items      => do intern1 (.arr (← items.mapM lowerSigPtrGo))
+    | .index a b      => do intern1 (.index (← lowerSigPtrGo a) (← lowerSigPtrGo b))
+    | .loopIdx id     => intern1 (.loopIdx id)
+    | .bankSum c ts b dc ii => do
+      intern1 (.bankSum c (← ts.mapM lowerSigPtrGo) (← lowerSigPtrGo b) (← dc.mapM lowerSigPtrGo) ii)
+  modify fun (a, m) => (a, m.insert key r)
+  return r
+
+private unsafe def lowerSigPtr (s : Sig) : EArenaM ExprId := fun arena =>
+  let (id, (arena', _)) := (lowerSigPtrGo s).run (arena, {})
+  (id, arena')
+
+/-- Lower an authoring `Sig` into the resolved arena, interning bottom-up.
+    Compiled implementation is the pointer-memoized walk (`lowerSigPtr`);
+    `lowerSigTree` is the structural reference it agrees with. -/
+@[implemented_by lowerSigPtr]
+def lowerSig (s : Sig) : EArenaM ExprId := lowerSigTree s
 
 /-- Lower an optional authoring default. -/
 def lowerSigOpt : Option Sig → EArenaM (Option ExprId)
@@ -1291,6 +1359,17 @@ def modePhaseQ (omega clkRel : Sig) : Sig :=
 def modePhaseW (omega clkRel : Sig) : Sig :=
   mul twoPiE (div (toFloatE (modePhaseQ omega clkRel)) (lit 4294967296))
 
+/-- `modePhaseQ` with the quantized increment supplied DIRECTLY, skipping the
+    `incr = ⌊(ω/2π)·2³²/SR⌋` step. The banked path stores `incr`'s pre-`toInt`
+    float in a coefficient column and reads it per iteration; `toInt` in-loop then
+    recovers the SAME i64 (f64 storage round-trips the value exactly, < 2^53), so
+    `modePhaseQFromIncr (toIntE incrFloat) clkRel` is bit-identical to
+    `modePhaseQ ω clkRel`. -/
+def modePhaseQFromIncr (incr clkRel : Sig) : Sig :=
+  let thi := rshift clkRel (lit 32)
+  let tlo := bitAnd clkRel (lit 4294967295)
+  bitAnd (add (mul incr thi) (rshift (mul incr tlo) (lit 32))) (lit 4294967295)
+
 /-- A modal bank as a pure `Sig` over the (already-warped) clock: shift each pole
     to its time-since-strike on the INTEGER clock (`relClockQ`, exact at any τ),
     sum `d^deg·e^{−σd}·(c_re·cos φ − c_im·sin φ)` over the modes with each φ
@@ -1321,6 +1400,100 @@ def modalBankSig (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Sig) 
       add acc oscQ)
     (litI 0)
   selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
+
+/-- The SYMBOLIC mode: a bank body's per-mode scalars as column reads at the
+    loop index. A body written against `ModeSym` is the same lambda the unrolled
+    fold applies to a concrete `ModalMode` — only where the scalars COME FROM
+    changes (a column read at `loopIdx` instead of a baked subterm). `incr` is
+    the pre-`toInt` float increment `(ω/2π)·2³²/SR` (exact < 2^53); `toInt`
+    happens in the body (`modePhaseQFromIncr`). -/
+structure ModeSym where
+  incr  : Sig
+  sigma : Sig
+  cre   : Sig
+  cim   : Sig
+
+/-- A bank's coefficient columns: one `Sig.arr` per `ModalMode` field, one entry
+    per mode — the SAME s0 subterms the unrolled path bakes per mode, destined
+    for the stage-0 coefficient kernel. Built once per bank and shared by every
+    fold over it (a direction bank runs TWO folds over one set of columns; the
+    arena's hash-consing would dedupe rebuilt columns anyway, but sharing at the
+    source keeps the intent visible). -/
+structure BankCols where
+  count : Nat
+  /-- Optional LIVE effective count (trip-count-as-data): a `Sig` (typically a
+      param-slot read) the reduction trips instead of the static `count`, which
+      stays the CAPACITY (columns fill to capacity; the emitters clamp the live
+      value to `[0, count]` at the loop head). `none` = the static bank. -/
+  live? : Option Sig := none
+  /-- The bank's binder id (`Sig.bankSum.idxId` / `Sig.loopIdx.id`). Ids need
+      only be unique along a NESTING CHAIN, and `bankFold` banks never nest
+      (tables materialize before their region, so two banks over one set of
+      columns run sequentially) — 0 is correct for every Sig-level bank today.
+      If nesting ever arrives here, thread a chain-unique allocator; the
+      emitters fail loudly on an ancestor id collision. -/
+  idxId : Nat := 0
+  incr  : Sig
+  sigma : Sig
+  cre   : Sig
+  cim   : Sig
+
+def bankCols (modes : Array ModalMode) (live? : Option Sig := none) : BankCols where
+  count := modes.size
+  live? := live?
+  incr  := Sig.arr (modes.map fun m =>
+    div (mul (div m.omega twoPiE) (lit 4294967296)) .sampleRate)
+  sigma := Sig.arr (modes.map (·.sigma))
+  cre   := Sig.arr (modes.map (·.cre))
+  cim   := Sig.arr (modes.map (·.cim))
+
+/-- THE generic banked fold: `Σₖ body(mode k)` as one indexed reduction
+    (`Sig.bankSum` → a `ReduceBegin` region — O(1) plan instructions in mode
+    count). The body is an ordinary function of the symbolic mode; this is the
+    only place a banked effect touches `loopIdx`/`bankSum`. Banking is a property
+    of the fold, not of the effect: every banked lowering is `bankFold` applied
+    to its own body, never a hand-built table twin. The loop visits modes in
+    array order — the same order the unrolled `foldl` nests its adds — so for
+    the i64 mode sum the render is BIT-IDENTICAL to the unroll. -/
+def bankFold (cols : BankCols) (body : ModeSym → Sig) : Sig :=
+  let k := Sig.loopIdx cols.idxId
+  Sig.bankSum cols.count #[cols.incr, cols.sigma, cols.cre, cols.cim]
+    (body { incr  := Sig.index cols.incr k
+          , sigma := Sig.index cols.sigma k
+          , cre   := Sig.index cols.cre k
+          , cim   := Sig.index cols.cim k })
+    cols.live?
+    cols.idxId
+
+/-- The BANKED lowering of a modal bank (banks-as-data slice 3b): the SAME value
+    as `modalBankSig`, but the mode sum is a `bankFold` indexed reduction over
+    the coefficient columns instead of an unrolled fold — so the emitted plan is
+    O(1) in mode count, not O(modes). Requires every mode `deg == 0` (the uniform
+    datapath, true for resonator/reverb/residue banks); ragged banks route to the
+    unrolled path. The body is EXACTLY `modalBankSig`'s op sequence over the
+    symbolic mode (deg == 0, so `env2 = env`), and the mode sum is i64-modular
+    (associative), so the render is BIT-IDENTICAL — the goldens gate the move.
+    Drop-in for `modalBankSig`: same `(modes, clkInt, anchor)` signature, so it
+    rides `modalBankTerm`'s `arrUn` (warps reach it through the already-warped
+    clock leaf) unchanged. -/
+def modalBankSigTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
+    (live? : Option Sig := none) : Sig :=
+  let clkRel := relClockQ clkInt anchorSamples
+  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
+  let bankQ := bankFold (bankCols modes live?) fun m =>
+    let phQ  := modePhaseQFromIncr (toIntE m.incr) clkRel
+    let env  := expSig (neg (mul m.sigma dSec))
+    let wCre := toIntE (mul (mul env m.cre) (lit 268435456))
+    let wCim := toIntE (mul (mul env m.cim) (lit 268435456))
+    rshift (sub (mul wCre (fixedCosCycSig phQ))
+                (mul wCim (fixedSinCycSig phQ))) (lit 28)
+  selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
+
+/-- True when a bank is eligible for the table lowering: every mode `deg == 0`
+    (the uniform datapath). Ragged banks (mixed degree) must route to the
+    unrolled `modalBankSig` (or, later, split into a banked deg-0 part ⊕ an
+    unrolled remainder). -/
+def bankIsUniform (modes : Array ModalMode) : Bool := modes.all (·.deg == 0)
 
 /-- Complex arithmetic over `Sig` (real, imag) — the residue calculus done
     SYMBOLICALLY, so poles/coeffs can be live param slots. With literal operands
@@ -1869,11 +2042,36 @@ def buildExpProbe (name : String) (arena : Arena) : Arena × ProgramIdx :=
 -- (voice ⋙ reverb) is a BUILD-TIME pass that fills the ModalMode array; the
 -- runtime substrate is just this bank. Gated by `modal-bank`.
 
+/-- Banks-as-data is the DEFAULT lowering: uniform (all deg-0) modal banks lower
+    through the indexed reduction (`bankFold` — `modalBankSigTable` /
+    `modalBankSigDirTable`) instead of unrolling. The strangler ran its course:
+    the banked render is bit-identical to the unroll (order-preserving loop,
+    i64-modular sum — the `banks-as-data`/`banks-as-data-dir` gates pin it), the
+    goldens pass byte-for-byte either way, and the coefficient columns are
+    generation-buffered in FlatRuntime (no cross-column tear on live knob
+    moves). `TROPICAL_BANKS_UNROLL` is the escape hatch back to the unrolled
+    form (bisection ladder: the naive realization stays reachable). Read once at
+    load, so the pure lowering may branch on it. -/
+initialize banksTableEnabled : Bool ← do
+  return (← IO.getEnv "TROPICAL_BANKS_UNROLL").isNone
+
 /-- A modal bank struck at `anchor` (samples) as a term over the clock leaf: no
     `gen`, no `.trop` instance — `{clk, +, ×, round, clamp, ldexp}` all the way
-    down, and warp-reachable like any generator. -/
-def modalBankTerm (modes : Array ModalMode) (anchor : Sig) (c : Clock) : ArrowTerm :=
-  ArrowTerm.arrUn (fun clkSig => modalBankSig modes clkSig anchor) (ArrowTerm.clk c)
+    down, and warp-reachable like any generator. Rides `arrUn … (.clk c)`, so
+    warps reach the (banked or unrolled) body through the clock leaf identically. -/
+def modalBankTerm (modes : Array ModalMode) (anchor : Sig) (c : Clock)
+    (count? : Option Sig := none) : ArrowTerm :=
+  -- A dynamic-count bank ALWAYS banks: a runtime count cannot be unrolled, so
+  -- when `count?` is present the banked lowering fires regardless of
+  -- TROPICAL_BANKS_UNROLL — the escape hatch governs only STATIC banks. (A
+  -- non-uniform bank can't take the table lowering at all; it unrolls at
+  -- capacity and the live count is dropped — graceful, and unreachable from
+  -- the Playground, whose resonator banks are all deg-0.)
+  let banked := bankIsUniform modes && (count?.isSome || banksTableEnabled)
+  let lower := if banked
+    then fun ms clk a => modalBankSigTable ms clk a count?
+    else fun ms clk a => modalBankSig ms clk a
+  ArrowTerm.arrUn (fun clkSig => lower modes clkSig anchor) (ArrowTerm.clk c)
 
 -- ── The DIRECTION operator: forward↔reverse crossfade ─────────────────────────
 -- A bank's reading DIRECTION crossfades between the CAUSAL tail (energy at d>0, a
@@ -1933,9 +2131,53 @@ def modalBankSigDir (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Si
   let rev := selectE (gt (lit 0) clkRel) (fixedOutQ 30 revQ) (lit 0)
   add (mul (sub (lit 1) dir) fwd) (mul dir rev)
 
-/-- `modalBankTerm` with a DIRECTION crossfade. Rides the `.clk` leaf like
-    `modalBankTerm`, so master warps still reach it. -/
-def modalBankTermDir (modes : Array ModalMode) (anchor : Sig) (c : Clock)
+/-- The BANKED direction bank: `modalBankSigDir`'s value with BOTH mode sums as
+    indexed reductions — the forward and reverse accumulators are two `bankFold`s
+    over the SAME coefficient columns (a pair-valued fold is two scalar folds;
+    each visits modes in array order, so each i64 sum agrees bit-for-bit with its
+    unrolled half). This is NOT a hand table twin: both bodies are
+    `modalBankSigDir`'s per-mode lambda split at the pair, written over the
+    symbolic mode. Requires `deg == 0` uniformity (the `bankIsUniform` guard at
+    dispatch), so the `powE` degree branches vanish, exactly as in
+    `modalBankSigTable`. Same signature as `modalBankSigDir` — the dispatch in
+    `modalBankTermDir` picks between them. -/
+def modalBankSigDirTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
+    (dir : Sig) (dampScale? : Option Sig := none) (live? : Option Sig := none) : Sig :=
+  let clkRel := relClockQ clkInt anchorSamples
+  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
+  let cols := bankCols modes live?
+  -- σ·d, optionally sway-bent (decay clock only, pitch untouched) — the same
+  -- subterm both sides read, per symbolic mode.
+  let sdOf := fun (m : ModeSym) =>
+    let sd := mul m.sigma dSec
+    match dampScale? with | none => sd | some s => mul sd s
+  let fwdQ := bankFold cols fun m =>
+    let phQ   := modePhaseQFromIncr (toIntE m.incr) clkRel
+    let envF  := expSig (neg (sdOf m))
+    let wCreF := toIntE (mul (mul envF m.cre) (lit 268435456))
+    let wCimF := toIntE (mul (mul envF m.cim) (lit 268435456))
+    rshift (sub (mul wCreF (fixedCosCycSig phQ))
+                (mul wCimF (fixedSinCycSig phQ))) (lit 28)
+  let revQ := bankFold cols fun m =>
+    -- the mirrored phase spelled out on the NEGATED clock, as in the unrolled
+    -- path (the fixed sine isn't bit-symmetric; see `modalBankSigDir`).
+    let phQN  := modePhaseQFromIncr (toIntE m.incr) (neg clkRel)
+    let envR  := expSig (sdOf m)
+    let wCreR := toIntE (mul (mul envR m.cre) (lit 268435456))
+    let wCimR := toIntE (mul (mul envR m.cim) (lit 268435456))
+    rshift (sub (mul wCreR (fixedCosCycSig phQN))
+                (mul wCimR (fixedSinCycSig phQN))) (lit 28)
+  let fwd := selectE (gt clkRel (lit 0)) (fixedOutQ 30 fwdQ) (lit 0)
+  let rev := selectE (gt (lit 0) clkRel) (fixedOutQ 30 revQ) (lit 0)
+  add (mul (sub (lit 1) dir) fwd) (mul dir rev)
+
+/-- The direction bank as a term over the clock leaf, with the LOWERING (unrolled
+    or banked) supplied explicitly — shared by `modalBankTermDir` (which picks by
+    flag) and the `banks-as-data-dir` equivalence gate (which builds both sides
+    regardless of the flag). -/
+def modalBankTermDirWith
+    (lower : Array ModalMode → Sig → Sig → Sig → Option Sig → Sig)
+    (modes : Array ModalMode) (anchor : Sig) (c : Clock)
     (dir : Sig) (damp? : Option (Sig × Sig) := none) : ArrowTerm :=
   ArrowTerm.arrUn
     (fun clkSig =>
@@ -1944,8 +2186,23 @@ def modalBankTermDir (modes : Array ModalMode) (anchor : Sig) (c : Clock)
       -- reduced (`phasorPhaseSig`), never `rate·t` on unbounded float seconds.
       let dampScale? := damp?.map (fun (depth, rate) =>
         add (lit 1) (mul depth (sinSig (mul twoPiE (phasorPhaseSig rate (lit 0) clkSig)))))
-      modalBankSigDir modes clkSig anchor dir dampScale?)
+      lower modes clkSig anchor dir dampScale?)
     (ArrowTerm.clk c)
+
+/-- `modalBankTerm` with a DIRECTION crossfade. Rides the `.clk` leaf like
+    `modalBankTerm`, so master warps still reach it. Dispatches to the banked
+    lowering for uniform banks under the strangler flag, like `modalBankTerm`. -/
+def modalBankTermDir (modes : Array ModalMode) (anchor : Sig) (c : Clock)
+    (dir : Sig) (damp? : Option (Sig × Sig) := none)
+    (count? : Option Sig := none) : ArrowTerm :=
+  -- Same dispatch rule as `modalBankTerm`: a dynamic count ALWAYS banks (a
+  -- runtime count cannot be unrolled; TROPICAL_BANKS_UNROLL governs only
+  -- static banks); non-uniform banks unroll at capacity, dropping the count.
+  let lower : Array ModalMode → Sig → Sig → Sig → Option Sig → Sig :=
+    if bankIsUniform modes && (count?.isSome || banksTableEnabled)
+    then fun ms clk a d s? => modalBankSigDirTable ms clk a d s? count?
+    else fun ms clk a d s? => modalBankSigDir ms clk a d s?
+  modalBankTermDirWith lower modes anchor c dir damp?
 
 /-- A bank's reading DIRECTION as data: the forward↔reverse crossfade `dir`
     (0 = forward tail, 1 = reverse/pre-verb) plus optional decay sway `(depth,
@@ -1966,6 +2223,13 @@ def buildModalBankArrow (name : String) (modes : Array ModalMode) (anchor : Sig)
 def buildModalBankDirect (name : String) (modes : Array ModalMode) (anchor : Sig)
     (arena : Arena) : Arena × ProgramIdx :=
   buildExprCarrier name (modalBankSig modes clockLit anchor) arena
+
+/-- The BANKED twin of `buildModalBankDirect` (`modalBankSigTable` on the bare
+    clock) — the device-under-test for the `banks-as-data` equivalence gate:
+    same modes, byte-identical render, but an O(1)-in-modes plan. -/
+def buildModalBankTable (name : String) (modes : Array ModalMode) (anchor : Sig)
+    (arena : Arena) : Arena × ProgramIdx :=
+  buildExprCarrier name (modalBankSigTable modes clockLit anchor) arena
 
 /-- `voice ⋙ reverb` end to end: run the residue calculus at build time, turn the
     composed complex modes into a `ModalMode` bank, and emit it — the connection is
@@ -2004,6 +2268,17 @@ def buildModalBankDir (name : String) (modes : Array ModalMode) (anchor : Sig)
     (dir : Sig) (arena : Arena)
     (damp? : Option (Sig × Sig) := none) : Arena × ProgramIdx :=
   let (out, _) := emitTerm (normalize (modalBankTermDir modes anchor clockLit dir damp?)) {}
+  buildExprCarrier name out arena
+
+/-- `buildModalBankDir` with the LOWERING chosen explicitly (unrolled
+    `modalBankSigDir` vs banked `modalBankSigDirTable`) — the two sides of the
+    `banks-as-data-dir` equivalence gate, independent of the strangler flag. -/
+def buildModalBankDirWith
+    (lower : Array ModalMode → Sig → Sig → Sig → Option Sig → Sig)
+    (name : String) (modes : Array ModalMode) (anchor : Sig)
+    (dir : Sig) (arena : Arena)
+    (damp? : Option (Sig × Sig) := none) : Arena × ProgramIdx :=
+  let (out, _) := emitTerm (normalize (modalBankTermDirWith lower modes anchor clockLit dir damp?)) {}
   buildExprCarrier name out arena
 
 /-- An ABSOLUTE address warp: the modulator signal `s` (read as SECONDS) BECOMES
@@ -2110,8 +2385,13 @@ inductive Node where
       inlet (a clock driven by a signal is a warp), distinct from the spectral
       (modal) inlets `modalReverb`/`modalMix` consume. It propagates through
       composition to the realization boundary. -/
+  -- `modalSource.count` is the optional LIVE effective mode count
+  -- (trip-count-as-data): a `Sig` (a param-slot read) that becomes the bank's
+  -- dynamic trip count, clamped to `modes.size` (the capacity). Applies only
+  -- to a DIRECTLY realized bank — residue composition and pole union break
+  -- the mode-prefix alignment, so the count is dropped at those seams.
   | modalSource (modes : Array ModalMode) (anchor : Sig) (clk : Clock)
-      (addr : Option String)
+      (addr : Option String) (count : Option Sig := none)
   | modalReverb (input : String) (room : Array ModalMode) (dir : Option ModalDir)
   | modalMix (inputs : Array String)
 
@@ -2148,16 +2428,16 @@ def nodeIsModal (g : PatchGraph) (id : String) : Bool :=
     its inputs. Never touches `Sig` — a modal node's inputs are modal by
     construction, so it only recurses into `lowerModal`. -/
 partial def lowerModal (g : PatchGraph) (id : String) :
-    Except String (Array ModalMode × Sig × Clock × Option String × Option ModalDir) := do
+    Except String (Array ModalMode × Sig × Clock × Option String × Option ModalDir × Option Sig) := do
   -- An unconnected modal inlet points at `__silence__`; a modal node with no modal
   -- source is a legal, incomplete patch — it compiles to an EMPTY bank (silence),
   -- not an error. (The graceful-silence contract, same as `mix []`.)
   if id == "__silence__" then
-    return (#[], lit 0, clockLit, none, none)
+    return (#[], lit 0, clockLit, none, none, none)
   let some pn := g.nodes.find? (·.id == id)
     | .error s!"lowerModal: node '{id}' not found"
   match pn.node with
-  | .modalSource ms a clk addr => .ok (ms, a, clk, addr, none)
+  | .modalSource ms a clk addr count => .ok (ms, a, clk, addr, none, count)
   | .modalReverb inId room dir => do
     -- A reverb FUSES its modal input with the room by the residue calculus, in the
     -- COLLECTED form (`residueComposeEC`): `m + n` modes — the voice's poles colored
@@ -2167,17 +2447,23 @@ partial def lowerModal (g : PatchGraph) (id : String) :
     -- the source's spectrum AND its live knobs downstream of a reverb). Amps are
     -- symbolic, so a resonator's `freq`/`decay` slots stay live through the room.
     -- Time-basis (anchor/clock/addr) threads from the source as before.
-    let (v, a, clk, addr, dirIn) ← lowerModal g inId
-    .ok (residueComposeEC v room, a, clk, addr, dir.orElse (fun _ => dirIn))
+    let (v, a, clk, addr, dirIn, _count) ← lowerModal g inId
+    -- The live count does NOT survive composition: the composed bank's modes
+    -- (voice-colored + room-colored) are no longer a prefix of the source's,
+    -- so a partial trip has no meaning there. Realize at full capacity (the
+    -- knob is graceful-silent through a reverb — v1; no warning, legal state).
+    .ok (residueComposeEC v room, a, clk, addr, dir.orElse (fun _ => dirIn), none)
   | .modalMix inputs => do
     let parts ← inputs.mapM (lowerModal g)
     match parts.toList with
     | [] => .error s!"modalMix '{id}': no inputs"
     -- head carries the shared anchor/clock/address/direction for the union (a mix
-    -- of differently-addressed sources takes the head's, like its clock).
-    | (ms0, a0, clk0, addr0, dir0) :: rest =>
-      .ok (rest.foldl (fun acc (p : Array ModalMode × Sig × Clock × Option String × Option ModalDir) =>
-        acc ++ p.1) ms0, a0, clk0, addr0, dir0)
+    -- of differently-addressed sources takes the head's, like its clock). The
+    -- live count is dropped: the union concatenates mode arrays, so no single
+    -- prefix count applies (same v1 stance as the reverb seam).
+    | (ms0, a0, clk0, addr0, dir0, _count0) :: rest =>
+      .ok (rest.foldl (fun acc (p : Array ModalMode × Sig × Clock × Option String × Option ModalDir × Option Sig) =>
+        acc ++ p.1) ms0, a0, clk0, addr0, dir0, none)
   | _ => .error s!"a modal inlet (reverb/modal-mix) needs a modal SOURCE — resonator or modal-mix — but '{id}' is a signal node; a Sig has no poles to compose"
 
 mutual
@@ -2219,13 +2505,14 @@ partial def lowerNode (g : PatchGraph) (id : String) : Except String ArrowTerm :
     reverse (a Sig node has no modal input, so lowerModal is never asked for one). -/
 partial def lowerInput (g : PatchGraph) (id : String) : Except String ArrowTerm := do
   if nodeIsModal g id then
-    let (ms, a, clk, addr?, dir?) ← lowerModal g id
+    let (ms, a, clk, addr?, dir?, count?) ← lowerModal g id
     -- realize the composed bank; a DIRECTION rotates the poles and reads them
     -- through the per-mode `sign(σ·d)` gate (`modalBankTermDir`), else the plain
-    -- forward causal bank.
+    -- forward causal bank. `count?` (trip-count-as-data) is the bank's live
+    -- effective mode count when the source carries one.
     let bank := match dir? with
-      | none => modalBankTerm ms a clk
-      | some d => modalBankTermDir ms a clk d.dir d.damp
+      | none => modalBankTerm ms a clk count?
+      | some d => modalBankTermDir ms a clk d.dir d.damp count?
     match addr? with
     | none => .ok bank
     -- a patched address signal BECOMES the bank's clock (absolute warp): the

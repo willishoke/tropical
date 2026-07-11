@@ -144,6 +144,40 @@ private def reverbRoom (rt60 : Sig) (nmode : Nat) (flo fhi : Float) : Array Moda
     { sigma, omega := mul twoPiE (litF fq),
       cre := litF (Float.cos ph), cim := litF (Float.sin ph) }
 
+/-- A 2-pole resonant filter as its EXACT complex-conjugate pole pair — the
+    modal island's filter (the Serge-VCFQ move). "Filtering" a modal source is
+    composing its poles with the filter's by the residue calculus, so the
+    filter node is a `modalReverb` whose room is one conjugate pair:
+
+      H(s) = ω₀² / (s² + (ω₀/Q)s + ω₀²)      (lowpass, unity DC gain,
+                                               peak ≈ Q at fc — resonance ADDS
+                                               presence, it never thins the
+                                               passband)
+      ν = −α ± i·ω_d,  α = ω₀/(2Q),  ω_d = ω₀·√(1 − 1/(4Q²))
+      residues R = ∓ i·ω₀²/(2ω_d)
+
+    BOTH conjugates are stored (amps R, R̄), so the composition's `Σ amp/(λ−ν)`
+    IS the true rational H(λ) — exact, not a single-sided approximation — and
+    the two rendered modes sum to the real impulse response
+    `(ω₀²/ω_d)·e^{−αt}·sin(ω_d t)`. At high Q, α→0: the ringing modes barely
+    decay and a strike PINGS at fc — the composed pole pair literally is the
+    VCFQ's ring; sweep resonance up and the filter crosses into a struck
+    resonator, which is the whole aesthetic reason it lives on the modal
+    island. Everything is symbolic (`Sig`), so cutoff and resonance are live
+    knobs through the composition — no relower.
+
+    `res ∈ [0,1]` maps log to `Q = 0.55·80^res ∈ [0.55, 44]` (Q > ½ keeps ω_d
+    real; the top of the knob rings for seconds). -/
+private def filterPair (fc res : Sig) : Array ModalMode :=
+  let w0 := mul twoPiE fc
+  -- Q = 0.55·e^{res·ln 80}   (ln 80 = 4.382026634673881)
+  let q := mul (lit 55 2) (expSig (mul res (litF 4.382026634673881)))
+  let alpha := div w0 (mul (lit 2) q)
+  let wd := mul w0 (.unary .sqrt (sub (lit 1) (div (lit 1) (mul (lit 4) (mul q q)))))
+  let rim := div (mul w0 w0) (mul (lit 2) wd)          -- |Im R|
+  #[ { sigma := alpha, omega := wd,     cre := lit 0, cim := neg rim },
+     { sigma := alpha, omega := neg wd, cre := lit 0, cim := rim } ]
+
 -- ── Node decode (named inlets: `in` is an object {port: [srcId,…]}) ──────────
 private def portSources (inObj : Json) (port : String) : Array String :=
   match (inObj.getObjVal? port).toOption.bind (·.getArr?.toOption) with
@@ -283,6 +317,12 @@ def portSpecs : String → Array PortSpec
         display := some { min := 0, max := 0.9 } },
       { name := "rate", knob := some (3, 1),
         display := some { min := 0.05, max := 8, log := true, unit := "Hz" } }]
+  | "filter" => #[
+      { name := "in", accepts := modalIn },
+      { name := "cutoff", knob := some (800, 0), discipline := .glide,
+        display := some { min := 20, max := 8000, log := true, unit := "Hz" } },
+      { name := "resonance", knob := some (5, 1), discipline := .glide,
+        display := some { min := 0, max := 1 } }]
   | "modalmix" => #[{ name := "in", accepts := modalIn, multi := true }]
   | "out" => #[{ name := "in", accepts := sigIn, multi := true }]
   | _ => #[]
@@ -290,14 +330,14 @@ def portSpecs : String → Array PortSpec
 /-- Each kind's outlet color (`none` = no outlet, the dac sink). -/
 def outletOf : String → Option PortDomain
   | "knob" => some .control
-  | "resonator" | "reverb" | "modalmix" => some .modal
+  | "resonator" | "reverb" | "filter" | "modalmix" => some .modal
   | "out" => none
   | _ => some .signal
 
 /-- The kinds the table covers, in schema order (`out` last — it has no outlet). -/
 def vocabularyKinds : Array String := #[
   "source", "pluck", "comb", "flange", "delay", "reverse", "fm", "sflange",
-  "mix", "ring", "resonator", "reverb", "modalmix", "knob", "out"]
+  "mix", "ring", "resonator", "reverb", "filter", "modalmix", "knob", "out"]
 
 -- Derived views — the ONLY readers of glide/anchor/knob facts from here down.
 private def portOf (kind kname : String) : Option PortSpec :=
@@ -445,12 +485,29 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
   | "resonator" =>
     let f0 := p "freq" (dv "freq")
     let decay := p "decay" (dv "decay")
+    -- Mode count is graph-configurable via the optional `"partials"` param
+    -- (absent ⇒ 6, so existing graphs are unchanged). Only the bank's SIZE is
+    -- structural (baked); f0/decay stay live knobs regardless of count.
+    let npart := (jInt params "partials" 6).toNat
     -- optional `addr` inlet: a Sig node whose value BECOMES the bank's absolute
     -- time-address (seconds into the impulse response). Unpatched ⇒ reads the
     -- master clock as before; patched ⇒ the causal gate triggers on the address
     -- signal's crossing and the ring scrubs/pitches with its slope (modalAddrWarp).
     let addr? := (portSources inObj "addr")[0]?
-    (.modalSource (resonatorBank f0 decay 6) (lit 0) clk addr?, #[])
+    -- Trip-count-as-data (the room-size knob): the optional STATIC
+    -- `"partials_max"` param is the bank's CAPACITY. When present, the mode
+    -- list is built at capacity and `partials` becomes a LIVE param slot
+    -- (default = its graph value, or 6) whose in-kernel read is the bank's
+    -- dynamic trip count, clamped to capacity — turning it changes how many
+    -- modes sound with NO recompile (the IR text is knob-invariant). Absent ⇒
+    -- exactly the static path above: no new slot, no plan drift.
+    match jNum? params "partials_max" with
+    | none =>
+      (.modalSource (resonatorBank f0 decay npart) (lit 0) clk addr?, #[])
+    | some _ =>
+      let cap := (jInt params "partials_max" 6).toNat
+      let countE := pref pidx s!"{id}.partials" (lit (Int.ofNat npart))
+      (.modalSource (resonatorBank f0 decay cap) (lit 0) clk addr? (some countE), #[])
   | "reverb" =>
     let rt60 := p "rt60" (dv "rt60")
     -- reading DIRECTION: θ (radians, live) rotates the composed tail's poles in the
@@ -469,6 +526,11 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     let swayRate := p "rate" (dv "rate")   -- 0.3 Hz: a slow breath
     let dir : ModalDir := { dir := dirX, damp := some (sway, swayRate) }
     (.modalReverb sig (reverbRoom rt60 32 60.0 6000.0) (some dir), #[])
+  | "filter" =>
+    -- the filter IS a modalReverb with a computed 2-mode room: the residue
+    -- calculus does the "filtering" at build time, knobs stay live through it.
+    (.modalReverb sig
+      (filterPair (p "cutoff" (dv "cutoff")) (p "resonance" (dv "resonance"))) none, #[])
   | "modalmix" => (.modalMix (portSources inObj "in"), #[])
   | _ => (.mix (portSources inObj "in"), #[])
 
@@ -584,6 +646,12 @@ private def collectParams (raws : Array Raw) : Array (String × JsonNumber) := I
           -- continuous (click-free) instead of jumping by Δf·τ.
           if isAnchored r.kind kname then
             out := out.push (s!"{base}#phase", ⟨0, 0⟩)
+    -- Trip-count-as-data: a resonator carrying the optional STATIC
+    -- `partials_max` capacity gets a LIVE `partials` slot (the room-size
+    -- knob; default = graph `partials`, or 6). `partials_max` absent ⇒ no
+    -- slot — exactly the old fully-static behavior.
+    if r.kind == "resonator" && (jNum? r.params "partials_max").isSome then
+      out := out.push (s!"{r.id}.partials", (jNum? r.params "partials").getD ⟨6, 0⟩)
   return out
 
 /-- Decode the GUI graph, returning the patch plus the knob param table. The
@@ -642,6 +710,11 @@ private def paramDisciplinesOf (raws : Array Raw) :
           | .raw =>
             { name := base, discipline := "raw" }
         out := out.push d
+    -- Trip-count-as-data: the live `partials` slot (present only with the
+    -- STATIC `partials_max` capacity) is a plain raw write — same walk and
+    -- skip rules as `collectParams`.
+    if r.kind == "resonator" && (jNum? r.params "partials_max").isSome then
+      out := out.push { name := s!"{r.id}.partials", discipline := "raw" }
   return out
 
 -- ── The realized-state report (the load_patch_graph reply) ──────────────────
@@ -722,7 +795,8 @@ private def tapNodeIds (raws : Array Raw) : Array String :=
     `render_window` can read it. Taps cost extra kernel compute (each re-emits its
     upstream cone), so they're for the inspection build, not a lean audio path. -/
 def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j : Json) :
-    Except String (Tropical.Plan.FlatPlan × Array Tap) := do
+    Except String (Tropical.Plan.FlatPlan × Array Tap
+      × Array (Array (Option Tropical.Ir.Stage))) := do
   let (g, paramTable) ← decodeGraph j
   let term ← lowerGraph g
   let (out, b0) := emitTerm (normalize term) {}
@@ -767,7 +841,7 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
     root := core
     arena := coreArena
     mode := .fused }
-  let plan ← Tropical.Compile.compileSession input
+  let (plan, stageBlocks) ← Tropical.Compile.compileSessionStaged input
   -- The host-contract dispatch table rides the manifest: any runtime host
   -- (C++ today, Swift/Metal or wasm tomorrow) reads per-slot disciplines from
   -- the plan itself and dispatches param writes locally.
@@ -777,7 +851,7 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
   let root := Tropical.Compile.rootInstancePath
   let taps : Array Tap := #[("out", root, "out")]
     ++ tapSigs.map (fun (id, _) => (id, root, s!"tap:{id}"))
-  pure (plan, taps)
+  pure (plan, taps, stageBlocks)
 
 -- ── Stdlib-into-arena (cached; mirrors Tropicaltest.arrowElabStdlib) ─────────
 def elabStdlib : IO (Except String (Arena × Array (String × ProgramIdx))) := do
@@ -824,8 +898,10 @@ def getStdlib : IO (Except String (Arena × Array (String × ProgramIdx))) := do
 def knobParams (j : Json) : Array (String × Json) :=
   (collectParams (rawsOf j)).map (fun (nm, v) => (nm, Json.num v))
 
-/-- Decode + lower + compile the GUI graph to a loadable `FlatPlan` + its taps. -/
-def compilePlan (j : Json) : IO (Except String (Tropical.Plan.FlatPlan × Array Tap)) := do
+/-- Decode + lower + compile the GUI graph to a loadable `FlatPlan` + its
+    taps + typed stage blocks (the split classification). -/
+def compilePlan (j : Json) : IO (Except String (Tropical.Plan.FlatPlan × Array Tap
+    × Array (Array (Option Tropical.Ir.Stage)))) := do
   match ← getStdlib with
   | .error e => pure (.error s!"stdlib elaboration: {e}")
   | .ok (arena, resolved) => pure (compilePlanPure arena resolved j)

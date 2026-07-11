@@ -188,6 +188,21 @@ partial def encExpr (arena : Arena) (id : ExprId) : EncM Json := do
                         ("instance", Lean.toJson inst.idx), ("output", Lean.toJson out.idx)]
   | .sampleRate => pure <| Json.mkObj [("op", Json.str "sampleRate")]
   | .sampleIndex => pure <| Json.mkObj [("op", Json.str "sampleIndex")]
+  -- `id` omitted when 0 so pre-nesting programs serialize byte-identically.
+  | .loopIdx id =>
+    let idField : Option Json := if id == 0 then none else some (Lean.toJson id)
+    pure <| Json.mkObj <| [("op", Json.str "loopIdx")] ++ optField "id" idField
+  | .bankSum count tables body dynCount? idxId => do
+    let mut ts : Array Json := #[]
+    for t in tables do
+      ts := ts.push (← encExpr arena t)
+    -- `dyn_count`/`idx_id` are optional on the wire (absent = static bank /
+    -- binder id 0), so pre-existing serialized programs decode unchanged.
+    let idField : Option Json := if idxId == 0 then none else some (Lean.toJson idxId)
+    pure <| Json.mkObj <| [("op", Json.str "bankSum"), ("count", Lean.toJson count),
+                        ("tables", Json.arr ts), ("body", ← encExpr arena body)]
+                        ++ optField "dyn_count" (← dynCount?.mapM (encExpr arena))
+                        ++ optField "idx_id" idField
   | .fold over init acc elem body => do
     pure <| Json.mkObj [("op", Json.str "fold"),
       ("over", ← encExpr arena over), ("init", ← encExpr arena init),
@@ -512,6 +527,26 @@ private partial def expr (ctx : String) (j : JsonV) (tdBase tdCount : Nat) :
       internD (.nestedOut ⟨← reqNat ctx j "instance"⟩ ⟨← reqNat ctx j "output"⟩)
     | "sampleRate" => internD .sampleRate
     | "sampleIndex" => internD .sampleIndex
+    -- optional binder id (nested banks); absent = 0, the pre-nesting form.
+    | "loopIdx" => do
+      let id ← match j.getField? "id" with
+        | some _ => reqNat ctx j "id"
+        | none => pure 0
+      internD (.loopIdx id)
+    | "bankSum" => do
+      let ts ← reqArr ctx j "tables"
+      let mut tables : Array ExprId := #[]
+      for h : i in [0:ts.size] do
+        tables := tables.push (← expr s!"{ctx}.tables[{i}]" ts[i] tdBase tdCount)
+      -- optional runtime effective count (trip-count-as-data); absent = static.
+      let dc? ← match j.getField? "dyn_count" with
+        | some dj => some <$> expr s!"{ctx}.dyn_count" dj tdBase tdCount
+        | none => pure none
+      -- optional binder id (nested banks); absent = 0.
+      let idxId ← match j.getField? "idx_id" with
+        | some _ => reqNat ctx j "idx_id"
+        | none => pure 0
+      internD (.bankSum (← reqNat ctx j "count") tables (← sub "body") dc? idxId)
     | "fold" => do
       internD (.fold (← sub "over") (← sub "init")
         (← binder s!"{ctx}.acc" (← reqField ctx j "acc"))

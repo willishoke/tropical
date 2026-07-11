@@ -4,6 +4,9 @@
 //   buffer(0) device float*                  output_buffer
 //   buffer(1) constant float*                slots
 //   buffer(2) constant TropicalKernelConsts& k
+//   buffer(3) constant float*                coeff_columns   (ONLY when the
+//             plan advertises hoisted coefficient columns — column_count > 0;
+//             ordinary kernels keep the exact 3-binding signature)
 //   thread_position_in_grid                  = sample index
 //
 // with TropicalKernelConsts = { ulong start_sample_index; float sample_rate;
@@ -15,6 +18,7 @@
 #import <Foundation/Foundation.h>
 
 #include <algorithm>
+#include <cstring>
 #include <vector>
 
 namespace tropical_metal
@@ -57,16 +61,26 @@ struct MetalKernel
   id<MTLComputePipelineState> pso    = nil;
   id<MTLBuffer>               out    = nil;  // f32 × buffer_length, shared (sync path)
   id<MTLBuffer>               slots  = nil;  // f32 × slot_count, shared (sync path)
-  uint32_t capacity   = 0;
-  uint32_t slot_count = 0;
+  // Packed coefficient-column buffer (buffer(3), banks-as-data) — nil when
+  // the plan hoists no columns. Sized at load from the advertised slots'
+  // capacities; a hot-swap creates a fresh MetalKernel, so the size follows
+  // the plan across swaps like every other buffer here.
+  id<MTLBuffer>               columns = nil; // f32 × column_count, shared (sync path)
+  uint32_t capacity     = 0;
+  uint32_t slot_count   = 0;
+  uint32_t column_count = 0;
   // f64→f32 staging (audio-thread use; preallocated — no alloc in process).
   std::vector<float> slot_staging;
 
   // ── Pipelined mode (TROPICAL_METAL_PIPELINE=1) ─────────────────────────
   bool pipelined = false;
-  id<MTLBuffer>        ring_out[kPipelineDepth]   = { nil, nil, nil };
-  id<MTLBuffer>        ring_slots[kPipelineDepth] = { nil, nil, nil };
-  dispatch_semaphore_t ring_done[kPipelineDepth]  = { nullptr, nullptr, nullptr };
+  id<MTLBuffer>        ring_out[kPipelineDepth]     = { nil, nil, nil };
+  id<MTLBuffer>        ring_slots[kPipelineDepth]   = { nil, nil, nil };
+  // Per-ring-entry column buffers, like slots: an in-flight dispatch must
+  // never see a later upload, so columns get a buffer per ring entry, not
+  // a shared one.
+  id<MTLBuffer>        ring_columns[kPipelineDepth] = { nil, nil, nil };
+  dispatch_semaphore_t ring_done[kPipelineDepth]    = { nullptr, nullptr, nullptr };
   bool     primed       = false;
   uint32_t read_pos     = 0;
   uint64_t next_enqueue = 0;   // sample index of the next block to submit
@@ -79,6 +93,7 @@ struct MetalKernel
 // their initial value).
 static void enqueue_block(MetalKernel & k, uint32_t j,
                           const double * slots, uint32_t n_slots,
+                          const float * columns, uint32_t n_columns,
                           double sample_rate, uint64_t start, uint32_t len)
 {
   const uint32_t n = std::min<uint32_t>(n_slots, k.slot_count);
@@ -93,6 +108,20 @@ static void enqueue_block(MetalKernel & k, uint32_t j,
   [enc setBuffer:k.ring_slots[j] offset:0 atIndex:1];
   KernelConsts consts{ start, static_cast<float>(sample_rate), len };
   [enc setBytes:&consts length:sizeof(consts) atIndex:2];
+  if (k.column_count > 0)
+  {
+    // Coefficient columns, copied at ENQUEUE like the slot snapshot —
+    // pipelined columns inherit the documented D-block param lag, no new
+    // invalidation machinery. `columns` is the f32 image of the ONE
+    // generation this process() call captured (before audio_processing_
+    // went true), so this copy carries the whole-generation no-tear
+    // guarantee; the per-ring buffer keeps it from racing an in-flight
+    // dispatch.
+    const uint32_t nc = std::min<uint32_t>(n_columns, k.column_count);
+    if (columns && nc > 0)
+      std::memcpy(k.ring_columns[j].contents, columns, nc * sizeof(float));
+    [enc setBuffer:k.ring_columns[j] offset:0 atIndex:3];
+  }
   const NSUInteger tg =
     std::min<NSUInteger>(k.pso.maxTotalThreadsPerThreadgroup, len);
   [enc dispatchThreads:MTLSizeMake(len, 1, 1)
@@ -108,6 +137,7 @@ static void enqueue_block(MetalKernel & k, uint32_t j,
 MetalKernelPtr create(const std::string & msl_source,
                       uint32_t buffer_length,
                       uint32_t slot_count,
+                      uint32_t column_count,
                       std::string & err)
 {
   @autoreleasepool
@@ -147,15 +177,22 @@ MetalKernelPtr create(const std::string & msl_source,
     }
 
     auto k = std::make_shared<MetalKernel>();
-    k->pso        = pso;
-    k->capacity   = buffer_length;
-    k->slot_count = slot_count;
+    k->pso          = pso;
+    k->capacity     = buffer_length;
+    k->slot_count   = slot_count;
+    k->column_count = column_count;
     k->out = [dev newBufferWithLength:(NSUInteger)buffer_length * sizeof(float)
                               options:MTLResourceStorageModeShared];
     k->slots = [dev newBufferWithLength:(NSUInteger)std::max<uint32_t>(slot_count, 1) * sizeof(float)
                                 options:MTLResourceStorageModeShared];
     k->slot_staging.assign(slot_count, 0.0f);
     if (!k->out || !k->slots) { err = "MetalKernel: buffer allocation failed"; return nullptr; }
+    if (column_count > 0)
+    {
+      k->columns = [dev newBufferWithLength:(NSUInteger)column_count * sizeof(float)
+                                    options:MTLResourceStorageModeShared];
+      if (!k->columns) { err = "MetalKernel: column buffer allocation failed"; return nullptr; }
+    }
 
     const char * pipe = getenv("TROPICAL_METAL_PIPELINE");
     k->pipelined = pipe && pipe[0] == '1';
@@ -167,6 +204,13 @@ MetalKernelPtr create(const std::string & msl_source,
                                           options:MTLResourceStorageModeShared];
         k->ring_slots[j] = [dev newBufferWithLength:(NSUInteger)std::max<uint32_t>(slot_count, 1) * sizeof(float)
                                             options:MTLResourceStorageModeShared];
+        if (column_count > 0)
+        {
+          k->ring_columns[j] = [dev newBufferWithLength:(NSUInteger)column_count * sizeof(float)
+                                                options:MTLResourceStorageModeShared];
+          if (!k->ring_columns[j])
+          { err = "MetalKernel: ring column allocation failed"; return nullptr; }
+        }
         k->ring_done[j] = dispatch_semaphore_create(0);
         if (!k->ring_out[j] || !k->ring_slots[j])
         { err = "MetalKernel: ring allocation failed"; return nullptr; }
@@ -178,6 +222,7 @@ MetalKernelPtr create(const std::string & msl_source,
 
 bool process_block(MetalKernel & k,
                    const double * slots, uint32_t n_slots,
+                   const float * columns, uint32_t n_columns,
                    double sample_rate, uint64_t start_sample_index,
                    double * out_f64, uint32_t len)
 {
@@ -201,7 +246,8 @@ bool process_block(MetalKernel & k,
         k.read_pos = 0;
         for (uint32_t j = 0; j < kPipelineDepth; ++j)
         {
-          enqueue_block(k, j, slots, n_slots, sample_rate, k.next_enqueue, len);
+          enqueue_block(k, j, slots, n_slots, columns, n_columns,
+                        sample_rate, k.next_enqueue, len);
           k.next_enqueue += len;
         }
         k.primed = true;
@@ -211,7 +257,8 @@ bool process_block(MetalKernel & k,
       const float * src = static_cast<const float *>(k.ring_out[j].contents);
       for (uint32_t i = 0; i < len; ++i)
         out_f64[i] = static_cast<double>(src[i]);
-      enqueue_block(k, j, slots, n_slots, sample_rate, k.next_enqueue, len);
+      enqueue_block(k, j, slots, n_slots, columns, n_columns,
+                    sample_rate, k.next_enqueue, len);
       k.next_enqueue += len;
       k.read_pos = (j + 1) % kPipelineDepth;
       return true;
@@ -235,6 +282,19 @@ bool process_block(MetalKernel & k,
                          static_cast<float>(sample_rate),
                          len };
     [enc setBytes:&consts length:sizeof(consts) atIndex:2];
+    if (k.column_count > 0)
+    {
+      // Coefficient columns, copied at ENCODE next to the slot snapshot.
+      // `columns` is the f32 image of the ONE generation this process()
+      // call captured — captured BEFORE audio_processing_ went true, so
+      // the copy inherits the whole-generation guarantee: the GPU reads
+      // one consistent generation of columns, no cross-column tear on a
+      // live knob move.
+      const uint32_t nc = std::min<uint32_t>(n_columns, k.column_count);
+      if (columns && nc > 0)
+        std::memcpy(k.columns.contents, columns, nc * sizeof(float));
+      [enc setBuffer:k.columns offset:0 atIndex:3];
+    }
     const NSUInteger tg =
       std::min<NSUInteger>(k.pso.maxTotalThreadsPerThreadgroup, len);
     [enc dispatchThreads:MTLSizeMake(len, 1, 1)

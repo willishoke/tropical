@@ -2,6 +2,7 @@ import Std.Data.HashMap
 import Lean.Data.Json
 import Tropical.Ir.Core
 import Tropical.Ir.CoreArena
+import Tropical.Ir.Staging
 import Tropical.Plan
 
 /-!
@@ -188,9 +189,26 @@ structure EmitSt where
   -- one `ExprId`, so CSE keys on the id (O(1)) instead of recomputing a
   -- structural id per node (O(subtree)) — see issue #190.
   arena : CoreArena := {}
+  -- ── Staging (Phase 1 of the typed stage-0 refactor) ──
+  -- The binding context the current block resolves under (rebuilt by
+  -- `emitProgram` per pre-input block / body section), the stage of the
+  -- node currently being compiled, and the per-instruction stage record
+  -- (parallel to `instrs`: every `emit` pushes both).
+  stageCtx : Staging.StageCtx := {}
+  curStage : Option Stage := none
+  instrStages : Array (Option Stage) := #[]
 deriving Inhabited
 
 abbrev EmitM := StateT EmitSt (Except String)
+
+/-- Run `act` with `curStage` set (restored after) — instructions it
+    emits are attributed to that stage. -/
+def withStage {α} (s : Option Stage) (act : EmitM α) : EmitM α := do
+  let prev := (← get).curStage
+  modify fun st => { st with curStage := s }
+  let r ← act
+  modify fun st => { st with curStage := prev }
+  pure r
 
 /-- Intern a flat `CNode` into the emit arena, returning its (shared) id. The
     post-strata leaves arrive pre-interned (Phase B); this covers only the
@@ -204,6 +222,7 @@ private def operandKind : NOperand → String
   | .arrayReg _ => "array_reg" | .sessionArrayReg _ => "session_array_reg"
   | .param .. => "param"
   | .source .. => "source" | .slot .. => "slot"
+  | .loopIdx _ => "loop_idx"
 
 private def allocReg : EmitM Nat :=
   modifyGet fun s => (s.nextReg, { s with nextReg := s.nextReg + 1 })
@@ -213,7 +232,8 @@ private def allocArraySlot (size : Nat) : EmitM Nat :=
     { s with nextArraySlot := s.nextArraySlot + 1, arraySizes := s.arraySizes.push size })
 
 private def emit (i : NInstr) : EmitM Unit :=
-  modify fun s => { s with instrs := s.instrs.push i }
+  modify fun s => { s with instrs := s.instrs.push i,
+                           instrStages := s.instrStages.push s.curStage }
 
 private def expectedKey : Option ScalarType → String
   | none => ""
@@ -263,6 +283,7 @@ private def tryTerminal (e : CNode) (expected : Option ScalarType) :
       | none => pure (some (.const (0 : Nat) .float, .float))
   | .sampleRate => pure (some (Tropical.Plan.opRate, .float))
   | .sampleIndex => pure (some (Tropical.Plan.opTick, .int))
+  | .loopIdx id => pure (some (Tropical.Plan.NOperand.loopIdx id, .int))
   | .nestedOut inst out => do
     if let some perInstArr := lookup st.slots.nestedOutputArraySlots inst.idx then
       if (lookup perInstArr out.idx).isSome then
@@ -296,7 +317,9 @@ partial def compileNode (id : ExprId) (expected : Option ScalarType := none) :
   let key := s!"{id.idx}:{expectedKey expected}"
   if let some r := (← get).memo.get? key then
     return r
-  let r ← compileNodeUncached node expected
+  let st ← get
+  let r ← withStage (some (Staging.stageOf st.arena st.stageCtx id))
+    (compileNodeUncached node expected)
   modify fun s => { s with memo := s.memo.insert key r }
   return r
 
@@ -321,7 +344,8 @@ private partial def compileNodeUncached (e : CNode) (expected : Option ScalarTyp
   | .select a b c => compileTernary "Select" a b c expected
   | .arraySet a b c => compileSetElement a b c
   | .index a b => compileIndex a b
-  | .num _ | .bool _ | .paramRef _ | .sampleRate | .sampleIndex =>
+  | .bankSum count tables body dynCount? idxId => compileBankSum count tables body dynCount? idxId
+  | .num _ | .bool _ | .paramRef _ | .sampleRate | .sampleIndex | .loopIdx _ =>
     throw "emit_resolved: terminal node reached compileNodeUncached (port bug)"
 
 /-- Unbox a size-1 array to a scalar via Index[0]. -/
@@ -441,6 +465,63 @@ private partial def compileIndex (arrNode idxNode : ExprId) : EmitM CompileResul
     emit (Tropical.Plan.instrIndex dst #[arrOp, idxOp] rt)
     pure (.scalar (.reg dst rt) rt)
 
+/-- Emit an indexed reduction (`CNode.bankSum`) as a `ReduceBegin`/body/`ReduceEnd`
+    region — the banks-as-data lowering (slice 3b). The loop visits elements in
+    array order — the same order the unrolled fold nests its adds — so the region
+    renders bit-identical to the unroll for ANY scalar element type (order
+    preservation needs no associativity; the earlier i64-only restriction was the
+    scaffolding's, not the fold's).
+
+    - The coefficient columns (`tables`) are materialized ONCE *before* the
+      region: compiling them here (not lazily inside the body) keeps their `Pack`
+      loop-invariant, and the CSE memo makes the body's `index` reuse the slot.
+    - The accumulator's type FOLLOWS THE BODY (bool promotes to int): the body
+      compiles first with no imposed expectation, and the region opener is then
+      spliced in front of the body's instructions (instr + stage arrays insert in
+      lockstep). The accumulator temp lives *outside* the region (seeded to a
+      typed 0 by `ReduceBegin`); the body computes one element's contribution and
+      an explicit `Add acc acc contrib` accumulates — the exact slice-3a contract.
+    - The CSE memo is snapshotted across the region: body-local temps do not
+      escape (the runtime zero-scratches post-region reads), so a later sequential
+      bank must not reuse them. Table entries (memoized before the snapshot) and
+      any subterm compiled outside the region survive.
+    - NESTED banks: an inner `bankSum` in the body recurses through this same
+      function. The splice point is safe — `regionStart` is recorded before the
+      body compiles, and an inner region splices at a strictly later index, so
+      the outer's insertion point never moves — and the memo snapshot/restore
+      nests via the call frames (`memo0` is a local, not emitter state). `idxId`
+      is the region's binder id: it rides `ReduceBegin` as `loop_id`, and the
+      body's `loopIdx idxId` operands resolve against the emitters' stack of
+      open regions. -/
+private partial def compileBankSum (count : Nat) (tables : Array ExprId) (body : ExprId)
+    (dynCount? : Option ExprId := none) (idxId : Nat := 0) : EmitM CompileResult := do
+  for t in tables do
+    let _ ← compileNode t
+  -- The optional runtime effective count (trip-count-as-data) compiles BEFORE
+  -- the region, alongside the tables, so any instructions it needs are
+  -- loop-invariant. Its operand rides `ReduceBegin` as args[1]; `loopCount`
+  -- stays the static capacity and the emitters clamp at the loop head.
+  let countOp? ← dynCount?.mapM fun dc => do
+    let r ← compileNode dc (some .int)
+    if r.isArray then
+      throw "emit_resolved: bankSum dynamic count is array-valued; the effective trip count must be a scalar"
+    pure r.op
+  let acc ← allocReg
+  let memo0 := (← get).memo
+  let regionStart := (← get).instrs.size
+  let contrib ← compileNode body
+  if contrib.isArray then
+    throw "emit_resolved: bankSum body is array-valued; the mode contribution must be a scalar"
+  let ty := if contrib.scalarType == .bool then .int else contrib.scalarType
+  modify fun s => { s with
+    instrs := s.instrs.insertIdx! regionStart
+      (Tropical.Plan.instrReduceBegin acc (.const (0 : Nat) ty) count ty countOp? idxId)
+    instrStages := s.instrStages.insertIdx! regionStart s.curStage }
+  emit (Tropical.Plan.instrScalar "Add" acc #[.reg acc ty, contrib.op] ty)
+  emit (Tropical.Plan.instrReduceEnd acc ty)
+  modify fun s => { s with memo := memo0 }
+  pure (.scalar (.reg acc ty) ty)
+
 private partial def compileSetElement (arrNode idxNode valNode : ExprId) :
     EmitM CompileResult := do
   let arr ← compileNode arrNode
@@ -469,7 +550,10 @@ end
 -- Top-level emit driver
 -- ─────────────────────────────────────────────────────────────
 
-/-- Internal emit result (TS `FlatProgram`). -/
+/-- Internal emit result (TS `FlatProgram`). `instrStages` /
+    `perChildPreInputStages` are parallel to the instruction arrays: the
+    binding-time stage of the node each instruction was emitted for
+    (staging metadata — absent from every wire form). -/
 structure FlatProgram where
   registerCount : Nat
   arraySlotCount : Nat
@@ -477,7 +561,27 @@ structure FlatProgram where
   instructions : Array NInstr
   perChildPreInput : Array (Array NInstr)
   outputTargets : Array Nat
+  instrStages : Array (Option Stage) := #[]
+  perChildPreInputStages : Array (Array (Option Stage)) := #[]
 deriving Inhabited
+
+/-- Per-kernel staging input: the stage each input port's wire binds at
+    (in the parent's context) and each child's per-output stages, both
+    supplied by the partitioner (which recursed into children first).
+    Defaults resolve every parametric dep to `s1` — callers that don't
+    stage (the raw per-program paths) lose nothing. -/
+structure StagingInfo where
+  inputStages : Array Stage := #[]
+  childOutStages : Array (Array Stage) := #[]
+deriving Inhabited
+
+/-- The binding context for pre-input block `k` (only already-run
+    siblings `j < k` are resolvable) or, with `k = childCount`, for the
+    parent body (every child has run). -/
+def StagingInfo.ctxAt (info : StagingInfo) (k : Nat) : Staging.StageCtx :=
+  { inputStages := info.inputStages
+    childOut := (Array.range info.childOutStages.size).map fun j =>
+      if j < k then info.childOutStages[j]? else none }
 
 /-- Fractal context: the sub-instance decls of the program being
     emitted, plus the enclosing program (registry lookups for the
@@ -509,7 +613,8 @@ private def instInputs : CoreBodyDecl → Array CoreInstanceInput
 
 def emitProgram (outputExprs : Array ExprId)
     (outputPortScalarCounts : Array Nat)
-    (nested : NestedContext) : EmitM FlatProgram := do
+    (nested : NestedContext)
+    (staging : StagingInfo := {}) : EmitM FlatProgram := do
   let mut outputTargets : Array Nat := #[]
   -- Port-default fallback (an unwired child port with no declared default):
   -- one shared `0` id in the arena. Interned once; equal to any existing `.num 0`.
@@ -517,6 +622,7 @@ def emitProgram (outputExprs : Array ExprId)
 
   -- ── Fractal: per-child pre-input blocks ──
   let mut perChildPreInput : Array (Array NInstr) := #[]
+  let mut perChildPreInputStages : Array (Array (Option Stage)) := #[]
   let preChildBaseline := (← get).instrs.size
   let scalarSlotMaps := (← get).slots.nestedInputSlots
   let arraySlotMaps := (← get).slots.nestedInputArraySlots
@@ -528,6 +634,8 @@ def emitProgram (outputExprs : Array ExprId)
     let wiredByPort := (instInputs decl).map fun i => (i.port.idx, i.value)
     let some childType := nested.enclosing.registryGet? (instTypeKey decl)
       | throw s!"emit_resolved: instance '{instName decl}' typeKey '{instTypeKey decl}' missing from enclosing registry"
+    -- Pre-input block k resolves under "siblings j < k have run".
+    modify fun s => { s with stageCtx := staging.ctxAt k }
     let ports := childType.inputs
     for i in [0:ports.size] do
       let portDecl := ports[i]!
@@ -536,17 +644,19 @@ def emitProgram (outputExprs : Array ExprId)
         | none => portDecl.default?.getD zeroId
       let scalarSlot := childScalarMap.bind (lookup · i)
       let arrayInfo := childArrayMap.bind (lookup · i)
+      let wireStage := some (Staging.stageOf (← get).arena (← get).stageCtx wireExpr)
       match scalarSlot with
       | some slot =>
         let portT := inputDeclScalarType portDecl.type?
         let r ← compileNode wireExpr (some portT)
-        let valOp ← match r with
-          | .array op _ rt =>
-            let dst ← allocReg
-            emit (Tropical.Plan.instrIndex dst #[op, .const (0 : Nat) .int] rt)
-            pure (NOperand.reg dst rt)
-          | .scalar op _ => pure op
-        emit (Tropical.Plan.instrWriteSlot slot valOp portT)
+        withStage wireStage do
+          let valOp ← match r with
+            | .array op _ rt =>
+              let dst ← allocReg
+              emit (Tropical.Plan.instrIndex dst #[op, .const (0 : Nat) .int] rt)
+              pure (NOperand.reg dst rt)
+            | .scalar op _ => pure op
+          emit (Tropical.Plan.instrWriteSlot slot valOp portT)
       | none =>
         match arrayInfo with
         | some info =>
@@ -557,14 +667,20 @@ def emitProgram (outputExprs : Array ExprId)
           | .array op size _ =>
             if size != info.size then
               throw s!"emit_resolved: array-typed child input port at idx={i} of '{instName decl}' has size {info.size}, wire expression evaluates to array of size {size}"
-            emit (Tropical.Plan.instrSessionArray "Add" info.slot
-              #[op, .const (0 : Nat) .float] info.size #[1, 0] .float)
+            withStage wireStage do
+              emit (Tropical.Plan.instrSessionArray "Add" info.slot
+                #[op, .const (0 : Nat) .float] info.size #[1, 0] .float)
         | none => pure ()  -- no allocated parent-side slot — nothing to emit
     let st ← get
     perChildPreInput := perChildPreInput.push (st.instrs.extract childStart st.instrs.size)
+    perChildPreInputStages := perChildPreInputStages.push
+      (st.instrStages.extract childStart st.instrStages.size)
   -- Truncate the running list back to the pre-child boundary; the
   -- blocks live in perChildPreInput, the temps stay reserved.
-  modify fun s => { s with instrs := s.instrs.extract 0 preChildBaseline }
+  modify fun s => { s with instrs := s.instrs.extract 0 preChildBaseline,
+                           instrStages := s.instrStages.extract 0 preChildBaseline }
+  -- The body (and the outputs below) resolve with every child run.
+  modify fun s => { s with stageCtx := staging.ctxAt nested.instances.size }
 
   -- ── Output targets: one entry per scalar slot of every port ──
   if outputPortScalarCounts.size != outputExprs.size then
@@ -573,6 +689,8 @@ def emitProgram (outputExprs : Array ExprId)
     let expr := outputExprs[portI]!
     let declaredCount := outputPortScalarCounts[portI]!
     let r ← compileNode expr (some .float)
+    let outStage := some (Staging.stageOf (← get).arena (← get).stageCtx expr)
+    modify fun s => { s with curStage := outStage }
     if declaredCount == 1 then
       let dst ← allocReg
       match r with
@@ -592,6 +710,7 @@ def emitProgram (outputExprs : Array ExprId)
           let dst ← allocReg
           emit (Tropical.Plan.instrIndex dst #[op, .const elemI .int] rt)
           outputTargets := outputTargets.push dst
+    modify fun s => { s with curStage := none }
 
   let st ← get
   return {
@@ -600,7 +719,9 @@ def emitProgram (outputExprs : Array ExprId)
     arraySlotSizes := st.arraySizes
     instructions := st.instrs
     perChildPreInput
-    outputTargets }
+    outputTargets
+    instrStages := st.instrStages
+    perChildPreInputStages }
 
 /-- Public entry: construct the emitter state and run the driver.
     CF-only has no per-sample state, so there are no register backing
@@ -611,9 +732,10 @@ def emitResolvedProgram
     (inputPortTypes : Array ScalarType)
     (slots : EmitSlots)
     (arena : CoreArena)
-    (nested : NestedContext) : Except String FlatProgram := do
+    (nested : NestedContext)
+    (staging : StagingInfo := {}) : Except String FlatProgram := do
   let st : EmitSt := { slots, inputPortTypes, arena }
-  let (prog, _) ← (emitProgram outputExprs outputPortScalarCounts nested).run st
+  let (prog, _) ← (emitProgram outputExprs outputPortScalarCounts nested staging).run st
   return prog
 
 end Tropical.Ir.Emit

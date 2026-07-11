@@ -91,6 +91,7 @@ private def wireOpName : ENode → String
   | .iterate .. => "iterate" | .chain .. => "chain"
   | .map2 .. => "map2" | .zipWith .. => "zipWith" | .letIn .. => "let"
   | .tag .. => "tag" | .match_ .. => "match"
+  | .loopIdx _ => "loopIdx" | .bankSum .. => "bankSum"
   | .num _ => "num" | .bool _ => "bool" | .arr _ => "arr"
 
 /-- Port of `literalDefault`: lower a resolved input default (an `ExprId` into

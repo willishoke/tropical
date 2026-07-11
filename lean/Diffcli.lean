@@ -8,6 +8,7 @@ import Tropical.Ir.Core
 import Tropical.Ir.CompileResolved
 import Tropical.Ir.EmitLlvm
 import Tropical.Ir.EmitMsl
+import Tropical.StagedLoad
 import Tropical.PlanDecode
 import Tropical.Engine
 import Tropical.Parse.Surface.Markdown
@@ -79,18 +80,15 @@ def renderBytes (args : List String) : IO UInt32 := do
   let buffer := parseNatFlag args "--buffer" 256
   let start := parseNatFlag args "--start" 0
   let planJson ← IO.FS.readFile planPath
-  -- Lean owns codegen: parse the plan, emit IR, load via load_ir (planJson
-  -- doubles as the metadata manifest). There is no C++ plan compiler.
+  -- Lean owns codegen: parse the plan, stage-0 split + emit IR, load via
+  -- load_ir_staged. There is no C++ plan compiler.
   let plan ← match Lean.Json.parse planJson with
     | .error e => IO.eprintln s!"render-bytes: parse: {e}"; return 1
     | .ok j => match Tropical.Plan.FlatPlan.ofWire j with
       | .error e => IO.eprintln s!"render-bytes: ofWire: {e}"; return 1
       | .ok p => pure p
-  let ir ← match Tropical.Ir.EmitLlvm.emitKernel plan with
-    | .ok s => pure s
-    | .error e => IO.eprintln s!"render-bytes: emitKernel: {e}"; return 1
   let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
-  rt.loadIr ir planJson
+  Tropical.StagedLoad.load rt plan
   if start != 0 then rt.setSampleIndex start.toUInt64
   let stdout ← IO.getStdout
   for _ in [0:frames] do
@@ -117,14 +115,8 @@ def renderMetal (args : List String) : IO UInt32 := do
     | .ok j => match Tropical.Plan.FlatPlan.ofWire j with
       | .error e => IO.eprintln s!"render-metal: ofWire: {e}"; return 1
       | .ok p => pure p
-  let ir ← match Tropical.Ir.EmitLlvm.emitKernel plan with
-    | .ok s => pure s
-    | .error e => IO.eprintln s!"render-metal: emitKernel: {e}"; return 1
-  let msl ← match Tropical.Ir.EmitMsl.emitKernel plan with
-    | .ok s => pure s
-    | .error e => IO.eprintln s!"render-metal: emitKernel (msl): {e}"; return 1
   let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
-  rt.loadIrMsl ir msl planJson
+  Tropical.StagedLoad.loadMsl rt plan
   if start != 0 then rt.setSampleIndex start.toUInt64
   let stdout ← IO.getStdout
   for _ in [0:frames] do
@@ -132,6 +124,45 @@ def renderMetal (args : List String) : IO UInt32 := do
     stdout.write (← rt.outputBytes)
   stdout.flush
   return 0
+
+/-- `diffcli render-graph <graph.json> [--metal] [--frames N] [--buffer N]
+    [--start S]` — compile a playground PatchGraph (`{"nodes":[…],"out":…}`)
+    through the TYPED session path (`Playground.compilePlan` → typed
+    stage-0 split, so banked coefficient columns hoist to the coefficient
+    kernel) and render, JIT (default) or Metal (`--metal`). Same byte
+    protocol as `render-bytes`. This is the device side of the banked
+    `metal_vs_jit` gate: unlike `render-metal` (flow split — arrays pinned
+    per-sample, no columns), the typed split here exercises the
+    `coeff_columns` GPU crossing exactly as a live session on
+    `TROPICAL_BACKEND=metal` does. Prints `hoisted columns=N` on stderr so
+    the harness can assert the crossing is actually exercised. -/
+def renderGraph (args : List String) : IO UInt32 := do
+  let some graphPath := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
+    | IO.eprintln "usage: diffcli render-graph <graph.json> [--metal] [--frames N] [--buffer N] [--start S]"
+      return 1
+  let frames := parseNatFlag args "--frames" 16
+  let buffer := parseNatFlag args "--buffer" 256
+  let start := parseNatFlag args "--start" 0
+  let metal := args.contains "--metal"
+  let text ← IO.FS.readFile graphPath
+  let j ← match Lean.Json.parse text with
+    | .error e => IO.eprintln s!"render-graph: parse: {e}"; return 1
+    | .ok j => pure j
+  match ← Tropical.Playground.compilePlan j with
+  | .error e => IO.eprintln s!"render-graph: compile: {e}"; return 1
+  | .ok (plan, _, stageBlocks) =>
+    let split ← Tropical.StagedLoad.splitTyped plan stageBlocks
+    IO.eprintln s!"render-graph: hoisted columns={split.audio.coeffArraySlots.size}"
+    let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
+    if metal then Tropical.StagedLoad.loadMslTyped rt plan stageBlocks
+    else Tropical.StagedLoad.loadTyped rt plan stageBlocks
+    if start != 0 then rt.setSampleIndex start.toUInt64
+    let stdout ← IO.getStdout
+    for _ in [0:frames] do
+      rt.process
+      stdout.write (← rt.outputBytes)
+    stdout.flush
+    return 0
 
 private def errorJson (msg : String) : Lean.Json :=
   Lean.Json.mkObj [("error", Lean.Json.str msg)]
@@ -675,6 +706,7 @@ def main (args : List String) : IO UInt32 := do
   match args with
   | "render-bytes" :: rest => renderBytes rest
   | "render-metal" :: rest => renderMetal rest
+  | "render-graph" :: rest => renderGraph rest
   | "emit-ir" :: rest => emitIrVerb rest
   | "emit-msl" :: rest => emitMslVerb rest
   | "compile-wasm" :: rest => compileWasmVerb rest

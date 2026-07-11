@@ -129,12 +129,22 @@ ResolvedProgram (lean/Tropical/Ir/Nodes.lean)
   │   specialize       — drops type parameters       (Specialize.lean)
   │   sumLower         — drops sum types (variants → tag + scalar bundles)  (SumLower.lean)
   │   inlineInstances  — drops nesting (inner bodies lifted in place)  (InlineInstances.lean)
-  │   arrayLower       — drops shapes and combinators (fold/generate/let/etc. unroll)  (ArrayLower.lean)
+  │   arrayLower       — drops shapes and combinators (scan/generate/let/etc.
+  │                      unroll; a SUMMING fold survives as `bankSum`, the
+  │                      bounded indexed reduction — loop-everything;
+  │                      `TROPICAL_BANKS_UNROLL` reverts)  (ArrayLower.lean)
   │   identityElim     — categorical identity-law rewrite  (IdentityElim.lean)
   ▼
 ResolvedProgram (post-strata)
-  scalar-only · monomorphic · acyclic · non-nested · combinator-free.
-  the smallest sub-IR sufficient for any per-sample evaluator.
+  scalar-only · monomorphic · acyclic · non-nested · DECISION-FREE:
+  every combinator is retired except `bankSum`, the bounded reduction
+  that is itself the normal form for uniform indexed families (modal
+  banks, reverbs, partial banks — and any surface-language summing
+  fold). How to REALIZE it — loop vs unroll — is a backend's decision,
+  made below this seam; the trunk refuses it. Order preservation makes
+  every realization bit-identical, floats included (no associativity
+  precondition). The waist of the hourglass, not the end of the
+  pipeline: the smallest sub-IR sufficient for any per-sample evaluator.
 ```
 
 Sessions (the MCP/runtime view of a graph in flight) reuse the

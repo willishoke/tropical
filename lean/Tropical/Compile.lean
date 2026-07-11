@@ -316,6 +316,7 @@ private def remapOperand (instanceName : String) (regOffset arrayOffset : Nat) :
   | .reg slot t => .ok (.reg (slot + regOffset) t)
   | .arrayReg slot => .ok (.arrayReg (slot + arrayOffset))
   | .sessionArrayReg slot => .ok (.arrayReg slot)
+  | .loopIdx id => .ok (.loopIdx id)
   | .param _ _ =>
     .error (s!"compileSessionSlotted: legacy 'param' operand encountered "
       ++ s!"in '{instanceName}'. Session-level params should resolve "
@@ -327,13 +328,19 @@ private def remapInstr (instanceName : String) (regOffset arrayOffset : Nat)
     dst := shiftDst regOffset arrayOffset i.dst
     args := ← i.args.mapM (remapOperand instanceName regOffset arrayOffset) }
 
-/-- Output writebacks per declared port (the remap's `writeSlots`). -/
+/-- Output writebacks per declared port (the remap's `writeSlots`).
+    `portStages` (parallel to `outputPortNames`; empty = unstaged) tags
+    each emitted write with its port's binding-time stage. -/
 private def emitWriteSlots (s : SessionAlloc) (instanceName : String)
-    (outputPortNames : Array String) (outputTargets : Array Nat) (regOffset : Nat) :
-    Except String (Array NInstr) := do
+    (outputPortNames : Array String) (outputTargets : Array Nat) (regOffset : Nat)
+    (portStages : Array Tropical.Ir.Stage := #[]) :
+    Except String (Array NInstr × Array (Option Tropical.Ir.Stage)) := do
   let mut writeSlots : Array NInstr := #[]
+  let mut writeStages : Array (Option Tropical.Ir.Stage) := #[]
   let mut targetIdx := 0
-  for portName in outputPortNames do
+  for portI in [0:outputPortNames.size] do
+    let portName := outputPortNames[portI]!
+    let stage := portStages[portI]?
     let portKey := slotKey instanceName portName
     let some pmeta := s.outputPortMeta.get? portKey
       | throw (s!"compileSessionSlotted: instance '{instanceName}' port '{portName}' "
@@ -348,6 +355,7 @@ private def emitWriteSlots (s : SessionAlloc) (instanceName : String)
         let absTemp := localTemp + regOffset
         writeSlots := writeSlots.push (Tropical.Plan.instrSetElement arrSlot
           #[arrOp, .const elemI .int, .reg absTemp .float])
+        writeStages := writeStages.push stage
         targetIdx := targetIdx + 1
     | _, _ =>
       for scalarI in [0:pmeta.scalarSlotNames.size] do
@@ -361,12 +369,13 @@ private def emitWriteSlots (s : SessionAlloc) (instanceName : String)
         let absTemp := localTemp + regOffset
         writeSlots := writeSlots.push (Tropical.Plan.instrWriteSlot slotIdx
           (.reg absTemp scalarType) scalarType)
+        writeStages := writeStages.push stage
         targetIdx := targetIdx + 1
   if targetIdx != outputTargets.size then
     throw (s!"compileSessionSlotted: instance '{instanceName}' has {outputTargets.size} "
       ++ s!"output_targets but only {targetIdx} were consumed by slot expansion. "
       ++ "This indicates a port-shape / emit mismatch.")
-  return writeSlots
+  return (writeSlots, writeStages)
 
 -- ─────────────────────────────────────────────────────────────
 -- partitionKernel
@@ -376,20 +385,38 @@ private def instParts : CoreBodyDecl → Option (String × String)
   | .inst name typeKey _ _ => some (name, typeKey)
   | _ => none
 
-/-- Partition a single kernel recursively. Returns the kernel tree plus
-    the advanced allocation + accumulators. -/
+/-- The wire expression bound to a child input port, mirroring
+    `emitProgram`'s selection: explicit wire, else the port's declared
+    default, else `none` (the shared literal 0 — `fold`). -/
+private def childWireExpr (decl : CoreBodyDecl) (portIdx : Nat)
+    (portDecl : CoreInputDecl) : Option Tropical.Ir.ExprId :=
+  let wired := match decl with
+    | .inst _ _ _ inputs => (inputs.find? (·.port.idx == portIdx)).map (·.value)
+    | _ => none
+  wired <|> portDecl.default?
+
+/-- Partition a single kernel recursively. Returns the kernel tree, the
+    advanced allocation + accumulators, this kernel's instruction-stage
+    blocks in emit order (preamble; per child: pre-input, its blocks;
+    body — the exact linearization `EmitLlvm.emitKernelBlock` walks),
+    and its per-output binding-time stages. `inputStages` is the stage
+    each of this program's input ports binds at (from the parent). -/
 partial def partitionKernel (instancePath : String) (prog : CoreProgram)
     (arena : Tropical.Ir.CoreArena)
     (wires : Array Tropical.Wire) (s : SessionAlloc) (acc : Accumulators)
     (inputSlotOverride : Array (Nat × Nat) := #[])
     (inputArraySlots : Array (Nat × ArraySlotInfo) := #[])
-    (paramSlots : Array (Nat × Nat) := #[]) :
-    Except String (InstanceFunction × SessionAlloc × Accumulators) := do
+    (paramSlots : Array (Nat × Nat) := #[])
+    (inputStages : Array Tropical.Ir.Stage := #[]) :
+    Except String (InstanceFunction × SessionAlloc × Accumulators
+      × Array (Array (Option Tropical.Ir.Stage)) × Array Tropical.Ir.Stage) := do
   let mut s := s
   let mut acc := acc
 
   -- ── 1. Recurse into sub-InstanceDecls. ──
   let mut children : Array InstanceFunction := #[]
+  let mut childStageBlocks : Array (Array (Array (Option Tropical.Ir.Stage))) := #[]
+  let mut childOutStages : Array (Array Tropical.Ir.Stage) := #[]
   let mut nestedOutputSlots : Array (Nat × Array (Nat × Nat)) := #[]
   let mut nestedInputSlots : Array (Nat × Array (Nat × Nat)) := #[]
   let mut nestedOutputArraySlots : Array (Nat × Array (Nat × ArraySlotInfo)) := #[]
@@ -430,11 +457,28 @@ partial def partitionKernel (instancePath : String) (prog : CoreProgram)
     nestedInputSlots := nestedInputSlots.push (k, childInputMap)
     nestedInputArraySlots := nestedInputArraySlots.push (k, childInputArrayMap)
 
-    let (childFn, s', acc') ← partitionKernel childPath declType arena wires s acc
-      childInputMap childInputArrayMap #[]
+    -- Child input stages: each port's wire expression resolved under
+    -- THIS kernel's context at pre-input block k (siblings j < k have
+    -- run). Mirrors emitProgram's wire selection exactly.
+    let ctxK : Tropical.Ir.Staging.StageCtx :=
+      { inputStages
+        childOut := (Array.range instDecls.size).map fun j =>
+          if j < k then childOutStages[j]? else none }
+    let mut childInputStages : Array Tropical.Ir.Stage := #[]
+    for i in [0:declType.inputs.size] do
+      let stage := match childWireExpr instDecls[k]! i declType.inputs[i]! with
+        | some expr => Tropical.Ir.Staging.stageOf arena ctxK expr
+        | none => .fold   -- the shared literal-0 default
+      childInputStages := childInputStages.push stage
+
+    let (childFn, s', acc', childBlocks, childOuts) ←
+      partitionKernel childPath declType arena wires s acc
+        childInputMap childInputArrayMap #[] childInputStages
     s := s'
     acc := acc'
     children := children.push childFn
+    childStageBlocks := childStageBlocks.push childBlocks
+    childOutStages := childOutStages.push childOuts
 
   -- ── 2. Compile this kernel's body. ──
   let ctx : Context := {
@@ -444,18 +488,30 @@ partial def partitionKernel (instancePath : String) (prog : CoreProgram)
     inputSlotOverride
     inputArraySlots
     nestedInputArraySlots
-    nestedOutputArraySlots }
+    nestedOutputArraySlots
+    staging := { inputStages, childOutStages } }
   let plan ← compileResolved prog arena ctx
 
   -- ── 3. Remap into the unified slot/temp space. ──
   let regOffset := acc.nextRegRaw
   let arrayOffset := acc.nextArrayRaw
 
+  -- This kernel's per-output stages, under the full context (every
+  -- child has run by the time the body executes).
+  let fullCtx : Tropical.Ir.Staging.StageCtx :=
+    { inputStages, childOut := childOutStages.map some }
+  let outStages := (Array.range prog.outputs.size).map fun i =>
+    match prog.assigns.find? (fun a => match a.target with
+      | .port idx => idx.idx == i
+      | .dac => false) with
+    | some a => Tropical.Ir.Staging.stageOf arena fullCtx a.expr
+    | none => .s1
+
   let body ← plan.instructions.mapM (remapInstr instancePath regOffset arrayOffset)
   let perChildPreInput ← plan.perChildPreInput.mapM
     (·.mapM (remapInstr instancePath regOffset arrayOffset))
-  let writeSlots ← emitWriteSlots s instancePath (prog.outputs.map (·.name))
-    plan.outputTargets regOffset
+  let (writeSlots, writeStages) ← emitWriteSlots s instancePath (prog.outputs.map (·.name))
+    plan.outputTargets regOffset outStages
   let instanceInstructions := body ++ writeSlots
 
   -- Attach each per-child pre-input block to its child.
@@ -465,6 +521,15 @@ partial def partitionKernel (instancePath : String) (prog : CoreProgram)
       ++ s!"({children.size}). emit_resolved + compileResolved must produce "
       ++ "one block per nested InstanceDecl in body order.")
   children := children.mapIdx fun i c => c.withPreInput perChildPreInput[i]!
+
+  -- Stage blocks in emit order (the Stage0.collectBlocks linearization):
+  -- preamble (empty), per child its pre-input block then its own
+  -- blocks, then this body (+ output writebacks).
+  let mut stageBlocks : Array (Array (Option Tropical.Ir.Stage)) := #[#[]]
+  for k in [0:children.size] do
+    stageBlocks := stageBlocks.push (plan.perChildPreInputStages[k]?.getD #[])
+    stageBlocks := stageBlocks ++ (childStageBlocks[k]?.getD #[])
+  stageBlocks := stageBlocks.push (plan.instrStages ++ writeStages)
 
   let fn : InstanceFunction := .mk
     (s!"instance_" ++ (instancePath.replace "." "_"))
@@ -484,7 +549,7 @@ partial def partitionKernel (instancePath : String) (prog : CoreProgram)
     nextRegRaw := acc.nextRegRaw + plan.registerCount
     nextArrayRaw := acc.nextArrayRaw + plan.arraySlotCount }
 
-  return (fn, s, acc)
+  return (fn, s, acc, stageBlocks, outStages)
 
 -- ─────────────────────────────────────────────────────────────
 -- Session compile (compile_session_slotted.ts)
@@ -567,8 +632,11 @@ private partial def preallocInputs (s : SessionAlloc) (wires : Array Tropical.Wi
 /-- The session → `tropical_plan_5` lowering: two-phase slot
     pre-allocation, accumulator seeding from the session I/O array
     space, one `partitionKernel` over the synthetic root, sinks, and
-    slot metadata. -/
-def compileSession (input : SessionInput) : Except String Tropical.Plan.FlatPlan := do
+    slot metadata. The staged variant also returns the per-instruction
+    binding-time stages in emit order (the `Stage0.collectBlocks`
+    linearization) — the typed side of the stage differential. -/
+def compileSessionStaged (input : SessionInput) :
+    Except String (Tropical.Plan.FlatPlan × Array (Array (Option Tropical.Ir.Stage))) := do
   let mut s := SessionAlloc.ofAlloc input.alloc
 
   -- Two-phase pre-allocation: all outputs first (the input alias check
@@ -592,15 +660,15 @@ def compileSession (input : SessionInput) : Except String Tropical.Plan.FlatPlan
     if let some slot := s.paramSlots.get? rootParams[i]! then
       paramSlots := paramSlots.push (i, slot)
 
-  let (fn, s', acc) ← partitionKernel rootInstancePath input.root input.arena
-    input.wiresPost s acc #[] #[] paramSlots
+  let (fn, s', acc, stageBlocks, _) ← partitionKernel rootInstancePath input.root input.arena
+    input.wiresPost s acc #[] #[] paramSlots #[]
   s := s'
 
   let sinks ← emitSinks s input.graphOutputs
   let (slotCount, slotNames, slotDefaults) :=
     slotMetadata s input.params s.paramSlots
 
-  return {
+  return ({
     compilationMode := input.mode
     arraySlotNames := acc.arraySlotNames
     registerCount := acc.nextRegRaw
@@ -610,6 +678,9 @@ def compileSession (input : SessionInput) : Except String Tropical.Plan.FlatPlan
     sinks
     slotCount
     slotNames
-    slotDefaults }
+    slotDefaults }, stageBlocks)
+
+def compileSession (input : SessionInput) : Except String Tropical.Plan.FlatPlan :=
+  (compileSessionStaged input).map (·.1)
 
 end Tropical.Compile

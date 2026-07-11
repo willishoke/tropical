@@ -308,6 +308,33 @@ inductive ENode where
   | letIn (binders : Array ELetBinder) (body : ExprId)
   | tag (def_ : TypeDefIdx) (variant : Nat) (payload : Array ETagPayload)
   | match_ (def_ : TypeDefIdx) (scrutinee : ExprId) (arms : Array EMatchArm)
+  /-- The iteration index of the `bankSum` region whose `idxId` equals `id`
+      (the post-strata analogue of `Plan.NOperand.loopIdx`). Unlike the
+      combinators above, `bankSum`/`loopIdx` are NOT unrolled by arrayLower —
+      they survive to the post-strata IR as an indexed reduction (banks-as-data
+      slice 3b). `id` is a UNIQUE BINDER ID, not a de Bruijn index: it is
+      stable under nesting (wrapping an inner bank in an outer one changes
+      nothing about the inner's spelling — no shifting exists anywhere), and it
+      participates in the structural hash so two distinct indices are two
+      distinct DAG nodes. Ids need only be unique along a NESTING CHAIN
+      (ancestors): resolution is "search the stack of open regions for this
+      id", and the emitters fail on an unresolved id or an ancestor collision. -/
+  | loopIdx (id : Nat)
+  /-- An indexed reduction `Σ_{k<count} body(k)`, i64-modular so the sum is
+      associative (reordering modes moves no bit — the bit-exactness argument).
+      `tables` are the loop-invariant coefficient columns the body indexes at
+      `loopIdx`; carried explicitly so emit materializes them ONCE before the
+      region. `body` is the per-iteration contribution (references `loopIdx` and
+      `index table loopIdx`); the accumulation is emit's job, not the body's.
+      `dynCount?` is the OPTIONAL runtime effective count (trip-count-as-data):
+      `count` stays the static CAPACITY (= tables' length, the topology); when
+      `dynCount?` is present the emitters clamp it to `[0, count]` at the loop
+      head and trip that many iterations — the room-size knob, no recompile.
+      `none` is today's static path, byte-identical output.
+      `idxId` names the binder the body's `loopIdx id` refers to (nested banks:
+      the id must be unique along the region's nesting chain — see `loopIdx`). -/
+  | bankSum (count : Nat) (tables : Array ExprId) (body : ExprId)
+      (dynCount? : Option ExprId := none) (idxId : Nat := 0)
 deriving BEq, Repr, Inhabited
 
 /-- O(1) structural hash — children are ids (no subtree recursion). Op tags and
@@ -340,6 +367,8 @@ def enodeHash : ENode → UInt64
   | .letIn bs b     => mixHash (mixHash 25 (hash (bs.map (fun lb => (lb.binder.idx.idx, lb.value.idx))))) (hash b.idx)
   | .tag d v p      => mixHash (mixHash (mixHash 26 (hash d.idx)) (hash v)) (hash (p.map (fun tp => (tp.field, tp.value.idx))))
   | .match_ d s arms => mixHash (mixHash (mixHash 27 (hash d.idx)) (hash s.idx)) (hash (arms.map (fun a => (a.variant, a.body.idx))))
+  | .loopIdx id     => mixHash 28 (hash id)
+  | .bankSum c ts b dc ii => mixHash (mixHash (mixHash (mixHash (mixHash 29 (hash c)) (hash (ts.map (·.idx)))) (hash b.idx)) (hash (dc.map (·.idx)))) (hash ii)
 
 instance : Hashable ENode := ⟨enodeHash⟩
 
