@@ -40,8 +40,6 @@ private def sumDefE (d : TypeDefIdx) : PassM (String × Array SumVariant) := do
   | some (.sum name variants) => pure (name, variants)
   | _ => failP s!"sumLower: typeDef pool index {d.idx} is not a sum type (internal)"
 
-private def nat0E (n : Nat) : PassM ExprId := einternP (.num ⟨Int.ofNat n, 0⟩)
-
 /-- Pass-wide memo of the has-sum predicate per source id (the arena is
     append-only, so a node never changes under an id). Keeps the walks
     DAG-shaped — without it they cost O(expanded tree), which is super-linear

@@ -38,7 +38,9 @@ def unaryOp? : TokKind → Option UnaryOpTag
   | .minus => some .neg | .bang => some .not | .tilde => some .bitNot
   | _ => none
 
-private def isCapitalized (s : String) : Bool :=
+/-- True when `s` begins with an uppercase letter (a program-type name vs an
+    input/output identifier). -/
+def isCapitalized (s : String) : Bool :=
   match s.toList with
   | c :: _ => c.isUpper
   | [] => false

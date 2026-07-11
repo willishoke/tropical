@@ -47,6 +47,16 @@ def einternP (n : ENode) : PassM ExprId := do
   set { ea with exprs := ex }
   pure id
 
+/-- Intern a nat as an integer literal id (`.num ⟨n, 0⟩`) — the loop-index /
+    tag constant the array and sum lowerings emit. -/
+def nat0E (n : Nat) : PassM ExprId := einternP (.num ⟨Int.ofNat n, 0⟩)
+
+/-- The id wired to input port `i` — the last assignment wins (later `wire`
+    calls override earlier ones). `none` when the port is unwired. Shared by
+    the passes that substitute wired expressions at inline sites. -/
+def wiredForE (inputs : Array InstanceInput) (i : Nat) : Option ExprId :=
+  ((inputs.filter (·.port.idx == i)).back?).map (·.value)
+
 /-- Dereference an id to its node (dangling id is an internal bug). -/
 def derefP (id : ExprId) : PassM ENode := do
   match (← get).exprs.deref id with

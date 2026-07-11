@@ -99,9 +99,6 @@ private def recordOutputsE (instName : String) (declType cloned : Program) :
         s!"output_assign for output '{clonedOut.name}' (idx {i})")
   return out
 
-private def wiredForE (inputs : Array InstanceInput) (i : Nat) : Option ExprId :=
-  ((inputs.filter (·.port.idx == i)).back?).map (·.value)
-
 private def buildInputSubstE (instName : String) (declType flattened : Program)
     (inputs : Array InstanceInput) : PassM (Array (Nat × ExprId)) := do
   let mut subst : Array (Nat × ExprId) := #[]

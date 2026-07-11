@@ -23,11 +23,6 @@ inductive BodyItem where
   | assign (a : BodyAssign)
   | typeDef (t : TypeDef)
 
-private def isCapitalized (s : String) : Bool :=
-  match s.toList with
-  | c :: _ => c.isUpper
-  | [] => false
-
 -- ── Decls ────────────────────────────────────────────────────────────────────
 
 /-- `param name: smoothed [= default]` (default must be a number literal). -/

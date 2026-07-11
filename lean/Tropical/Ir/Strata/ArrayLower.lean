@@ -157,8 +157,6 @@ private structure LowerSt where
 
 private abbrev LowerM := StateT LowerSt PassM
 
-private def nat0E (n : Nat) : PassM ExprId := einternP (.num ⟨Int.ofNat n, 0⟩)
-
 partial def exprNeedsLoweringE (id : ExprId) : LowerM Bool := do
   if let some r := (← get).needs.get? id.idx then return r
   let r ← match ← derefP id with

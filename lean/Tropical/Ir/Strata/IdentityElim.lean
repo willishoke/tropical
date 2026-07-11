@@ -28,9 +28,6 @@ private inductive InstFateE where
   | survivor (newIdx : Nat)
 deriving Inhabited
 
-private def wiredForE (inputs : Array InstanceInput) (i : Nat) : Option ExprId :=
-  ((inputs.filter (·.port.idx == i)).back?).map (·.value)
-
 private def detectIdentityE (enclosing : Program)
     (instName typeKey : String) (inputs : Array InstanceInput) :
     PassM (Option (Array ExprId)) := do
