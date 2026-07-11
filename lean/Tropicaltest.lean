@@ -16,6 +16,7 @@ import Tropical.Compile
 import Tropical.EmitArrow
 import Tropical.Testing.ArrowFixtures
 import Tropical.Testing.EngineMirror
+import Tropical.Testing.PlanWire
 import Lean.Data.Json
 
 /-!

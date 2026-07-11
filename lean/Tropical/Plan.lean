@@ -154,7 +154,9 @@ def NInstr.toWire (i : NInstr) : Except String Json := do
     ("strides", toJson i.strides),
     ("result_type", scalarJson i.resultType)]
 
-private def instrsToWire (instrs : Array NInstr) : Except String Json := do
+/-- Wire-encode an instruction stream. Not `private`: the harness's
+    per-program plan encoding (`Testing/PlanWire`) shares it. -/
+def instrsToWire (instrs : Array NInstr) : Except String Json := do
   return Json.arr (← instrs.mapM (·.toWire))
 
 -- ─── Instruction constructors (ports of the TS typed constructors) ──────────
@@ -234,20 +236,6 @@ structure PerInstancePlan where
   instrStages : Array (Option Tropical.Ir.Stage) := #[]
   perChildPreInputStages : Array (Array (Option Tropical.Ir.Stage)) := #[]
 deriving Repr, Inhabited
-
-/-- Wire encoding for the diff-emit gate (the TS side serializes the
-    same shape from `emit_cmd.ts`; `PerInstancePlan` has no production
-    wire format — this exists so per-program emit is comparable before
-    the partitioner lands). -/
-def PerInstancePlan.toWire (p : PerInstancePlan) : Except String Json := do
-  return Json.mkObj [
-    ("register_count", toJson p.registerCount),
-    ("array_slot_count", toJson p.arraySlotCount),
-    ("array_slot_sizes", toJson p.arraySlotSizes),
-    ("instructions", ← instrsToWire p.instructions),
-    ("per_child_pre_input", Json.arr (← p.perChildPreInput.mapM instrsToWire)),
-    ("output_targets", toJson p.outputTargets),
-    ("array_slot_names", toJson p.arraySlotNames)]
 
 -- ─────────────────────────────────────────────────────────────
 -- InstanceFunction — a per-instance slice inside a FlatPlan
