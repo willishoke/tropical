@@ -452,11 +452,10 @@ def buildSessionInputVia (env : Env) (useArrow : Bool) (ctx : String)
     compile leaves the mutated graph in place and the previous kernel playing. -/
 def syncCompile (env : Env) : EngineM Unit := do
   liftIfNeeded env
-  -- EXPERIMENT (TROPICAL_ARROW, uncommitted): build the resolved session root
-  -- directly via the arrow path, deleting the parsed round-trip. With the var
-  -- unset the legacy elaborate path runs, so default behavior is untouched.
-  let useArrow := (← IO.getEnv "TROPICAL_ARROW").isSome
-  let input ← buildSessionInputVia env useArrow "syncCompile"
+  -- The arrow-root path (env.arrowRoot, read once at boot) builds the resolved
+  -- session root directly, deleting the parsed round-trip; unset, the legacy
+  -- elaborate path runs, so default behavior is untouched.
+  let input ← buildSessionInputVia env env.arrowRoot "syncCompile"
   let (plan, stageBlocks) ← match Tropical.Compile.compileSessionStaged input with
     | .error msg => internalError msg
     | .ok p => pure p

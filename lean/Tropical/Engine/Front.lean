@@ -108,7 +108,8 @@ def boot : IO Env := do
   let runtime ← Ffi.Runtime.new 512
   let dac ← IO.mkRef (none : Option Ffi.Dac)
   let metalBackend := (← IO.getEnv "TROPICAL_BACKEND") == some "metal"
-  let env : Env := { state, runtime, dac, metalBackend }
+  let arrowRoot := (← IO.getEnv "TROPICAL_ARROW").isSome
+  let env : Env := { state, runtime, dac, metalBackend, arrowRoot }
   let manifestText ← IO.FS.readFile "stdlib/parsed/manifest.json"
   let names ← match Json.parse manifestText with
     | .error e => throw <| IO.userError s!"stdlib/parsed/manifest.json: {e}"
