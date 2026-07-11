@@ -36,7 +36,7 @@ open Tropical.Ir
 -- so the modulated-clock duplication never materializes.
 -- ─────────────────────────────────────────────────────────────
 
-private def isParamDeclE : EBodyDecl → Bool
+private def isParamDeclE : BodyDecl → Bool
   | .param .. => true | _ => false
 
 /-- Clone hooks: `inputRef → wired id` (SHARED — the outer expression passes
@@ -55,28 +55,28 @@ private def inlineSubstHooksE (inputSubst : Array (Nat × ExprId))
   binder := fun b => { b with idx := ⟨b.idx.idx + binderOffset⟩ }
 }
 
-private def inlineSubstProgramE (inner : EProgram)
+private def inlineSubstProgramE (inner : Program)
     (inputSubst : Array (Nat × ExprId))
-    (paramOffset binderOffset : Nat) : PassM EProgram :=
+    (paramOffset binderOffset : Nat) : PassM Program :=
   -- One memo across all of the clone's roots — the inner's inputs, decls, and
   -- assigns share subgraphs, and the rewrite is root-independent.
   StateT.run' (s := {}) do
   let rw := mapExprIdGo (inlineSubstHooksE inputSubst paramOffset binderOffset)
   let inputs ← inner.inputs.mapM fun i => do
-    pure ({ i with default? := ← i.default?.mapM rw } : EInputDecl)
+    pure ({ i with default? := ← i.default?.mapM rw } : InputDecl)
   let decls ← inner.decls.mapM fun d => do
     match d with
     | .param name value? => pure (BodyDecl.param name value?)
     | .inst name typeKey tArgs ins =>
       pure (BodyDecl.inst name typeKey tArgs
-        (← ins.mapM fun i => do pure ({ i with value := ← rw i.value } : EInstanceInput)))
+        (← ins.mapM fun i => do pure ({ i with value := ← rw i.value } : InstanceInput)))
     | .prog name p => pure (BodyDecl.prog name p)
   let assigns ← inner.assigns.mapM fun a => do
-    pure ({ a with expr := ← rw a.expr } : EOutputAssign)
+    pure ({ a with expr := ← rw a.expr } : OutputAssign)
   pure { inner with inputs := inputs, decls := decls, assigns := assigns, binderCount := inner.binderCount + binderOffset }
 
-private def liftClonedBodyE (cloned : EProgram) : PassM (Array EBodyDecl) := do
-  let mut out : Array EBodyDecl := #[]
+private def liftClonedBodyE (cloned : Program) : PassM (Array BodyDecl) := do
+  let mut out : Array BodyDecl := #[]
   for d in cloned.decls do
     match d with
     | .param .. | .prog .. => out := out.push d
@@ -85,7 +85,7 @@ private def liftClonedBodyE (cloned : EProgram) : PassM (Array EBodyDecl) := do
         s!"instanceDecl '{dname}' — depth-first invariant violated")
   return out
 
-private def recordOutputsE (instName : String) (declType cloned : EProgram) :
+private def recordOutputsE (instName : String) (declType cloned : Program) :
     PassM (Array ExprId) := do
   let mut out : Array ExprId := #[]
   for i in [0:declType.outputs.size] do
@@ -99,11 +99,11 @@ private def recordOutputsE (instName : String) (declType cloned : EProgram) :
         s!"output_assign for output '{clonedOut.name}' (idx {i})")
   return out
 
-private def wiredForE (inputs : Array EInstanceInput) (i : Nat) : Option ExprId :=
+private def wiredForE (inputs : Array InstanceInput) (i : Nat) : Option ExprId :=
   ((inputs.filter (·.port.idx == i)).back?).map (·.value)
 
-private def buildInputSubstE (instName : String) (declType flattened : EProgram)
-    (inputs : Array EInstanceInput) : PassM (Array (Nat × ExprId)) := do
+private def buildInputSubstE (instName : String) (declType flattened : Program)
+    (inputs : Array InstanceInput) : PassM (Array (Nat × ExprId)) := do
   let mut subst : Array (Nat × ExprId) := #[]
   for i in [0:declType.inputs.size] do
     let some innerPort := flattened.inputs[i]?
@@ -140,7 +140,7 @@ private partial def substExprNestedGoE (table : NestedOutTableE) (id : ExprId) :
 private def substExprNestedE (table : NestedOutTableE) (id : ExprId) : PassM ExprId :=
   (substExprNestedGoE table id).run' {}
 
-private def substDeclNestedE (d : EBodyDecl) : PassM EBodyDecl := do
+private def substDeclNestedE (d : BodyDecl) : PassM BodyDecl := do
   match d with
   | .param .. | .prog .. => pure d
   | .inst name .. => failP s!"inlineInstances: substDecl on surviving InstanceDecl '{name}'"
@@ -150,11 +150,11 @@ mutual
 /-- Inline one instance: returns its lifted decls, recorded output ids, and the
     flattened inner's binderCount (the caller's running binder offset advances by
     it). The shared expr DAG threads through `PassM`. -/
-private partial def inlineOneE (enclosing : EProgram)
+private partial def inlineOneE (enclosing : Program)
     (instName typeKey : String) (typeArgs : Array InstanceTypeArg)
-    (inputs : Array EInstanceInput)
+    (inputs : Array InstanceInput)
     (paramOffset binderOffset : Nat) :
-    PassM (Array EBodyDecl × Array ExprId × Nat) := do
+    PassM (Array BodyDecl × Array ExprId × Nat) := do
   let (declTypeIdx, declType) ← getInstanceTypeE enclosing instName typeKey
   -- 1. Specialize (identity-keyed typeArgs; no-op for concrete inners).
   let specializedIdx ←
@@ -190,8 +190,8 @@ partial def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
     return rootIdx
 
   let outerParamCount := (prog.decls.filter isParamDeclE).size
-  let mut survivingDecls : Array EBodyDecl := #[]
-  let mut liftedDecls : Array EBodyDecl := #[]
+  let mut survivingDecls : Array BodyDecl := #[]
+  let mut liftedDecls : Array BodyDecl := #[]
   let mut nestedOutSubst : NestedOutTableE := #[]
   let mut liftedBinderCount := 0
   for decl in prog.decls do
@@ -210,7 +210,7 @@ partial def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
   -- sibling's output), so substDecl is the identity-plus-assertion here.
   let newDecls ← (survivingDecls ++ liftedDecls).mapM substDeclNestedE
   let newAssigns ← prog.assigns.mapM fun a => do
-    pure ({ a with expr := ← substExprNestedE nestedOutSubst a.expr } : EOutputAssign)
+    pure ({ a with expr := ← substExprNestedE nestedOutSubst a.expr } : OutputAssign)
 
   pushEProgram { prog with
     decls := newDecls

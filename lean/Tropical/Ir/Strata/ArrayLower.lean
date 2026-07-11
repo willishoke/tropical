@@ -406,7 +406,7 @@ end
 
 mutual
 
-private partial def progNeedsLoweringE (prog : EProgram) : LowerM Bool := do
+private partial def progNeedsLoweringE (prog : Program) : LowerM Bool := do
   for i in prog.inputs do
     if let some d := i.default? then
       if ← exprNeedsLoweringE d then return true
@@ -416,7 +416,7 @@ private partial def progNeedsLoweringE (prog : EProgram) : LowerM Bool := do
     if ← exprNeedsLoweringE a.expr then return true
   return false
 
-private partial def declNeedsLoweringE (enclosing : EProgram) : EBodyDecl → LowerM Bool
+private partial def declNeedsLoweringE (enclosing : Program) : BodyDecl → LowerM Bool
   | .param .. | .prog .. => pure false
   | .inst name typeKey _ inputs => do
     let (_, subType) ← getInstanceTypeE enclosing name typeKey
@@ -425,12 +425,12 @@ private partial def declNeedsLoweringE (enclosing : EProgram) : EBodyDecl → Lo
 
 end
 
-private def lowerDeclE (decl : EBodyDecl) : LowerM EBodyDecl := do
+private def lowerDeclE (decl : BodyDecl) : LowerM BodyDecl := do
   match decl with
   | .param .. | .prog .. => pure decl
   | .inst name typeKey tArgs inputs =>
     pure (.inst name typeKey tArgs
-      (← inputs.mapM fun i => do pure ({ port := i.port, value := ← lowerExprE [] i.value } : EInstanceInput)))
+      (← inputs.mapM fun i => do pure ({ port := i.port, value := ← lowerExprE [] i.value } : InstanceInput)))
 
 private partial def runGoE (rootIdx : ProgramIdx) : LowerM ProgramIdx := do
   let prog ← getEProgram rootIdx "arrayLower"
@@ -441,10 +441,10 @@ private partial def runGoE (rootIdx : ProgramIdx) : LowerM ProgramIdx := do
     let subIdx' ← runGoE subIdx
     newRegistry := newRegistry.push (key, subIdx')
   let newInputs ← prog.inputs.mapM fun i => do
-    pure ({ name := i.name, type? := i.type?, default? := ← i.default?.mapM (lowerExprE []) } : EInputDecl)
+    pure ({ name := i.name, type? := i.type?, default? := ← i.default?.mapM (lowerExprE []) } : InputDecl)
   let newDecls ← prog.decls.mapM lowerDeclE
   let newAssigns ← prog.assigns.mapM fun a => do
-    pure ({ target := a.target, expr := ← lowerExprE [] a.expr } : EOutputAssign)
+    pure ({ target := a.target, expr := ← lowerExprE [] a.expr } : OutputAssign)
   pushEProgram { prog with
     inputs := newInputs, decls := newDecls, assigns := newAssigns, registry := newRegistry }
 

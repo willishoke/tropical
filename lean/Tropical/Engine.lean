@@ -293,9 +293,8 @@ def liftIfNeeded (env : Env) : EngineM Unit := do
     -- body's ids intern into the store's shared expression DAG.
     let arenaRaw := { st.arena with programs := st.arena.programs.push prog, exprs }
     let rawIdx : Tropical.Ir.ProgramIdx := ⟨st.arena.programs.size⟩
-    let rawJson ← match Tropical.Ir.Codec.encodeResolved arenaRaw rawIdx with
-      | .error e => internalError e
-      | .ok j => pure j
+    -- (the raw form itself is never encoded — it has no consumer since the
+    -- service residue left; only the post-strata encode below is used)
     -- Strata, no relink (lifted bodies have no InstanceDecls — the
     -- registry is empty, exactly the TS lift's `programRegistry: new
     -- Map()`).
@@ -312,7 +311,6 @@ def liftIfNeeded (env : Env) : EngineM Unit := do
       { s with arena := arenaRaw,
                nameCounters := s.nameCounters.insert "__wire" counter,
                templateByName := s.templateByName.insert synthName rawIdx }
-    let _ := rawJson  -- the raw form's only consumer was the service residue
     let entry ← match Tropical.Entries.concreteEntry arenaPost synthName postIdx with
       | .error e => internalError e
       | .ok j => pure j
@@ -750,16 +748,6 @@ def compileMirrorPlanViaArrow (env : Env) (mode : Tropical.Plan.CompilationMode)
   match plan.toWire with
   | .error msg => internalError msg
   | .ok j => pure j.compress
-
--- ── Catalog adoption ─────────────────────────────────────────────────────────
-
-def adoptEntries (env : Env) (entries : Json) : EngineM Unit := do
-  match entries with
-  | .arr es =>
-    for e in es do
-      env.state.modify (·.addProgram (ProgMeta.fromEntry e))
-      let _ ← adoptResolved env e
-  | _ => pure ()
 
 -- ── Program registration (Phase 4 stage 4b; strata engine-side at 6b) ────────
 -- The engine runs the stage-2 raise, the elaboration, AND (Phase 5
@@ -1322,13 +1310,8 @@ def handleFanOut (env : Env) (args : Json) : EngineM Json := do
   let targets := argArr args "targets"
   let st ← env.state.get
 
-  let isPortRef := match rawSource with
-    | .obj _ => (getStrField? rawSource "instance").isSome
-                && (getField? rawSource "output").isSome
-                && (opOf? rawSource).isNone
-    | _ => false
-  -- TS checks `typeof rawSource.instance === 'string' && rawSource.output !== undefined`
-  -- regardless of an `op` field; a `ref` ExprNode matches the port-ref arm too.
+  -- The port-ref test matches TS: `instance` a string and `output` present,
+  -- regardless of an `op` field — a `ref` ExprNode matches the port-ref arm too.
   let isPortRefTS := match rawSource with
     | .obj _ => (getStrField? rawSource "instance").isSome && (getField? rawSource "output").isSome
     | _ => false
@@ -1343,7 +1326,6 @@ def handleFanOut (env : Env) (args : Json) : EngineM Json := do
             s!"{sName}.{outName}")
     else
       pure (rawSource, rawSource.compress)
-  let _ := isPortRef
 
   let mut linked : Array Json := #[]
   for dst in targets do
@@ -2197,8 +2179,8 @@ def handleListScopeTaps (env : Env) : EngineM Json := do
 /-- EXPERIMENT (`load_patch_graph`): compile a downstream-only patch graph (the
     playground GUI) through the EmitArrow arrow lowering — `lowerGraph → normalize
     (the slide) → emitTerm` — to a session root, then the production
-    `compileSession → buildKernelIr → loadIr` tail. A compile failure errors
-    BEFORE `loadIr`, so the previous kernel keeps playing. -/
+    `compileSession → buildKernelIr → loadIrStaged` tail. A compile failure
+    errors BEFORE the load, so the previous kernel keeps playing. -/
 def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
   let (plan, taps, stageBlocks) ← match ← Tropical.Playground.compilePlan args with
     | .error e => internalError e

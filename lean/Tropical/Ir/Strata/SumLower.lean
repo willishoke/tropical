@@ -171,7 +171,7 @@ private partial def bindingsForArmE (ctx : CtxE) (scrutinee : ExprId)
 
 end
 
-private def progHasAnySumWorkE (prog : EProgram) : SumM Bool := do
+private def progHasAnySumWorkE (prog : Program) : SumM Bool := do
   for d in prog.decls do
     if let .inst _ _ _ inputs := d then
       if ← inputs.anyM (fun i => exprHasSumE i.value) then return true
@@ -188,10 +188,10 @@ private def runGoE (rootIdx : ProgramIdx) : SumM ProgramIdx := do
     match decl with
     | .inst name typeKey tArgs inputs =>
       pure (BodyDecl.inst name typeKey tArgs
-        (← inputs.mapM fun i => do pure ({ port := i.port, value := ← rewriteExprE ctx i.value } : EInstanceInput)))
+        (← inputs.mapM fun i => do pure ({ port := i.port, value := ← rewriteExprE ctx i.value } : InstanceInput)))
     | .param .. | .prog .. => pure decl
   let newAssigns ← prog.assigns.mapM fun a => do
-    pure ({ target := a.target, expr := ← rewriteExprE ctx a.expr } : EOutputAssign)
+    pure ({ target := a.target, expr := ← rewriteExprE ctx a.expr } : OutputAssign)
   pushEProgram { prog with decls := newDecls, assigns := newAssigns }
 
 /-- Run the pass with a fresh has-sum memo (one per pass application). -/

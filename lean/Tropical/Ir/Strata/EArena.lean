@@ -1,5 +1,6 @@
 import Std.Data.HashMap
-import Tropical.Ir.ExprArena
+import Tropical.Ir.Nodes
+import Tropical.Ir.CoreArena
 import Tropical.Ir.Strata.Basic
 
 /-!
@@ -8,7 +9,7 @@ import Tropical.Ir.Strata.Basic
 The tree passes thread an `Arena` (program pool of tree `Program`s) and rebuild
 `Expr` trees; the bloat (the modulated clock duplicated into every oscillator
 partial) is born in `inlineInstances`' substitution. This is the id-form
-counterpart: an `EArena` carries a pool of `EProgram`s (id-valued) plus the
+counterpart: an `EArena` carries a pool of `Program`s (id-valued) plus the
 shared `ExprArena`, and every pass rewrites by interning into that one DAG. When
 `inlineInstances` substitutes a wired expression at many use sites it stores the
 same `ExprId` — the duplication never materializes.
@@ -52,14 +53,14 @@ def derefP (id : ExprId) : PassM ENode := do
   | some n => pure n
   | none => throw ⟨s!"EArena: dangling ExprId {id.idx} (internal)"⟩
 
-/-- An `EProgram` by pool index, with a contextual error on miss. -/
-def getEProgram (i : ProgramIdx) (ctx : String) : PassM EProgram := do
+/-- A `Program` by pool index, with a contextual error on miss. -/
+def getEProgram (i : ProgramIdx) (ctx : String) : PassM Program := do
   match (← get).programs[i.idx]? with
   | some p => pure p
   | none => throw ⟨s!"{ctx}: program pool index {i.idx} out of range"⟩
 
 /-- Append a rewritten program; returns its fresh pool index. -/
-def pushEProgram (p : EProgram) : PassM ProgramIdx := do
+def pushEProgram (p : Program) : PassM ProgramIdx := do
   let ea ← get
   set { ea with programs := ea.programs.push p }
   pure ⟨ea.programs.size⟩
@@ -79,10 +80,10 @@ def liftE {α} (e : Except Error α) : PassM α :=
 /-- Throw a strata `Error` in `PassM` (concrete return type for inference). -/
 def failP {α} (msg : String) : PassM α := throw ⟨msg⟩
 
-/-- Id-form `getInstanceType`: resolve an instance's target `EProgram` through
+/-- Id-form `getInstanceType`: resolve an instance's target `Program` through
     the enclosing program's registry. -/
-def getInstanceTypeE (enclosing : EProgram) (instName typeKey : String) :
-    PassM (ProgramIdx × EProgram) := do
+def getInstanceTypeE (enclosing : Program) (instName typeKey : String) :
+    PassM (ProgramIdx × Program) := do
   match enclosing.registryGet? typeKey with
   | some pIdx =>
     let p ← getEProgram pIdx
@@ -181,7 +182,7 @@ private partial def convExprId (ea : ExprArena) (eid : ExprId) : ConvM ExprId :=
     set (ca', st.2.insert eid.idx cid)
     return cid
 
-/-- Convert the reachable `EProgram` subgraph rooted at `eIdx` into a
+/-- Convert the reachable `Program` subgraph rooted at `eIdx` into a
     `CoreProgram`, remapping every leaf id into the `CoreArena` and
     following instance-referenced registry entries recursively (the
     id-form `Core.check`). Port types resolve against the identity pools

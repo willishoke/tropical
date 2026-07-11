@@ -28,11 +28,11 @@ private inductive InstFateE where
   | survivor (newIdx : Nat)
 deriving Inhabited
 
-private def wiredForE (inputs : Array EInstanceInput) (i : Nat) : Option ExprId :=
+private def wiredForE (inputs : Array InstanceInput) (i : Nat) : Option ExprId :=
   ((inputs.filter (·.port.idx == i)).back?).map (·.value)
 
-private def detectIdentityE (enclosing : EProgram)
-    (instName typeKey : String) (inputs : Array EInstanceInput) :
+private def detectIdentityE (enclosing : Program)
+    (instName typeKey : String) (inputs : Array InstanceInput) :
     PassM (Option (Array ExprId)) := do
   let (_, target) ← getInstanceTypeE enclosing instName typeKey
   if target.decls.size > 0 then return none
@@ -88,7 +88,7 @@ def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
         fates := fates.push (.survivor newPos)
         newPos := newPos + 1
 
-  let mut newDecls : Array EBodyDecl := #[]
+  let mut newDecls : Array BodyDecl := #[]
   let mut instPos := 0
   for d in prog.decls do
     match d with
@@ -99,12 +99,12 @@ def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
       | .eliminated _ => pure ()
       | .survivor _ =>
         let ins ← inputs.mapM fun i => do
-          pure ({ port := i.port, value := ← substExprE fates i.value } : EInstanceInput)
+          pure ({ port := i.port, value := ← substExprE fates i.value } : InstanceInput)
         newDecls := newDecls.push (.inst name typeKey tArgs ins)
     | .param .. | .prog .. =>
       newDecls := newDecls.push d
   let newAssigns ← prog.assigns.mapM fun a => do
-    pure ({ target := a.target, expr := ← substExprE fates a.expr } : EOutputAssign)
+    pure ({ target := a.target, expr := ← substExprE fates a.expr } : OutputAssign)
   pushEProgram { prog with decls := newDecls, assigns := newAssigns }
 
 end Tropical.Ir.Strata.IdentityElim
