@@ -3,7 +3,7 @@ import Tropical.Ir.Strata.Basic
 import Tropical.Ir.Strata.EArena
 
 /-!
-# identityElim — port of compiler/ir/identity_elim.ts (Phase 5 pass 5)
+# identityElim
 
 The categorical identity-law rewrite: an `InstanceDecl` whose program
 body is the identity morphism (no decls; every output assigned exactly

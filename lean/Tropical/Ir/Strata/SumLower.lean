@@ -3,7 +3,7 @@ import Tropical.Ir.Strata.Basic
 import Tropical.Ir.Strata.EArena
 
 /-!
-# sumLower — port of compiler/ir/sum_lower.ts (Phase 5 pass 2)
+# sumLower
 
 Lowers every `match`/`tag` expression to scalar select-chains and
 variant-index literals. CF-only removed sum-typed registers — the only

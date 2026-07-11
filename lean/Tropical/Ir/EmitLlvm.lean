@@ -3,7 +3,7 @@ import Lean.Data.Json
 import Tropical.Plan
 
 /-!
-# EmitLlvm — `FlatPlan → textual LLVM IR` (Phase 1b of the Lean-IR migration)
+# EmitLlvm — `FlatPlan → textual LLVM IR`
 
 A faithful port of `engine/jit/OrcJitEngine.cpp`'s fused-mode codegen
 (`compile_flat_program` + `EmitCtx`), emitting textual LLVM IR instead of

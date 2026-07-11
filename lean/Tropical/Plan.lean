@@ -3,7 +3,7 @@ import Tropical.Parse.Nodes
 import Tropical.Ir.CoreArena
 
 /-!
-# Plan layer — `tropical_plan_5` as a type (Phase 6 stage 6a)
+# Plan layer — `tropical_plan_5` as a type
 
 Port of `compiler/flat_plan.ts` plus the instruction/operand types from
 `compiler/ir/emit_resolved.ts`. Two layers, exactly as in TS:

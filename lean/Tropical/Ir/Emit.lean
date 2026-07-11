@@ -6,7 +6,7 @@ import Tropical.Ir.Staging
 import Tropical.Plan
 
 /-!
-# Emit — `ExprId → FlatProgram` (Phase 6 stage 6b)
+# Emit — `ExprId → FlatProgram`
 
 Line-faithful port of `compiler/ir/emit_resolved.ts`'s `Emitter` over
 the Core sub-IR (total matches — the strata-dropped constructors are

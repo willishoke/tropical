@@ -2,7 +2,7 @@ import Lean.Data.Json
 import Tropical.Session
 
 /-!
-# MCP resources + prompts (Phase 6 stage 6f)
+# MCP resources + prompts
 
 Port of `mcp/resources.ts`: the static resource/prompt texts (embedded
 verbatim — the format doc includes the rendered

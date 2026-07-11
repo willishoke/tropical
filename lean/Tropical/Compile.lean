@@ -3,7 +3,7 @@ import Tropical.Ir.CompileResolved
 import Tropical.Plan
 
 /-!
-# Session compile — partition + plan assembly (Phase 6 stage 6c)
+# Session compile — partition + plan assembly
 
 Port of `compiler/ir/partition_recursive.ts` and
 `compiler/ir/compile_session_slotted*.ts` over the Core sub-IR: the

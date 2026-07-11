@@ -5,7 +5,7 @@ import Tropical.Ir.Strata.SumLower
 import Tropical.Ir.Strata.EArena
 
 /-!
-# inlineInstances — port of compiler/ir/inline_instances.ts (Phase 5 pass 3)
+# inlineInstances
 
 Splice each `InstanceDecl` into its parent: specialize the inner
 (identity-keyed typeArgs), sumLower it, recursively inline its own

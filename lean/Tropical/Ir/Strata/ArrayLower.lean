@@ -4,7 +4,7 @@ import Tropical.Ir.Strata.Basic
 import Tropical.Ir.Strata.EArena
 
 /-!
-# arrayLower — port of compiler/ir/array_lower.ts (Phase 5 pass 4)
+# arrayLower
 
 Combinator unrolling and array-op lowering. After this pass no
 `let`/`fold`/`scan`/`generate`/`iterate`/`chain`/`map2`/`zipWith`

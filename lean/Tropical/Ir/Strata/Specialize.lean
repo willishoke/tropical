@@ -3,7 +3,7 @@ import Tropical.Ir.Strata.Basic
 import Tropical.Ir.Strata.EArena
 
 /-!
-# specialize — port of compiler/ir/specialize.ts (Phase 5 pass 1)
+# specialize
 
 Type-param substitution on the resolved IR. Produces a fresh `Program`
 per (template, type-args) pair, substituting:
