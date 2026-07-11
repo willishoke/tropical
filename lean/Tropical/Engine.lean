@@ -232,7 +232,8 @@ def buildKernelIr (plan : Tropical.Plan.FlatPlan) : EngineM (String × String) :
     anything hoisted — always; on the metal backend also the MSL kernel,
     dual-loaded (audio on the GPU, render_window/the scope on the JIT;
     coefficients run on the CPU JIT in f64 and cross to the GPU as
-    host-written slots). Any emit failure errors BEFORE the load, so the
+    host-written slots, coefficient COLUMNS as the packed `coeff_columns`
+    buffer). Any emit failure errors BEFORE the load, so the
     previous kernel keeps playing — the same recoverable contract as the
     IR path. -/
 def loadKernel (env : Env) (plan : Tropical.Plan.FlatPlan)
@@ -246,17 +247,15 @@ def loadKernel (env : Env) (plan : Tropical.Plan.FlatPlan)
     | .error msg => internalError s!"EmitLlvm (coeff): {msg}"
     | .ok s => pure s
   if env.metalBackend then
-    -- Hoisted coefficient columns (banks-as-data) don't cross to the
-    -- GPU yet — the MSL ABI has no array binding, so a column the
-    -- coeff kernel fills host-side would be an uninitialized local in
-    -- the GPU kernel. When the typed split hoisted any, emit the GPU
-    -- kernel from the UNSPLIT plan: the fills stay in-kernel and
-    -- recompute per sample (pure functions of slots — value-identical
-    -- to the coeff kernel's output, and the GPU has the headroom).
-    -- The JIT + render_window keep the typed split; run_coeff still
-    -- serves them. Retire when columns get a Metal crossing.
-    let mslPlan := if split.audio.coeffArraySlots.isEmpty then split.audio else plan
-    let msl ← match Tropical.Ir.EmitMsl.emitKernel mslPlan with
+    -- Hoisted coefficient columns (banks-as-data) cross to the GPU as
+    -- a packed `coeff_columns` device buffer (`buffer(3)`): EmitMsl
+    -- emits column reads for the slots the split advertises, the
+    -- stage-0 coefficient kernel fills the generation-buffered storage
+    -- host-side in f64, and process() uploads the captured generation
+    -- per dispatch (f64→f32, like slots). So the metal backend runs
+    -- the SAME typed split as the JIT — coefficient math at knob rate
+    -- on CPU, the audio loop on GPU reading real columns.
+    let msl ← match Tropical.Ir.EmitMsl.emitKernel split.audio with
       | .error msg => internalError s!"EmitMsl: {msg}"
       | .ok s => pure s
     env.runtime.loadIrStaged ir msl coeffIr planJson

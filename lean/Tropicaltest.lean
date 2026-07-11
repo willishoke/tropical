@@ -2854,18 +2854,19 @@ private def runBanksStaging (arena : Arena)
           else
             IO.println s!"  FAIL  banks-staging  flag off: reduces={reduces} coeffReduces={coeffReduces} coeff={coeffFills} renderOk={renderOk}"; pure false
 
-/-- The Metal column tripwire. The MSL ABI has no array binding — every
-    plan array is a thread-private local — so a typed-split audio plan
-    that advertises hoisted coefficient columns (`coeff_array_slots`)
-    would read UNINITIALIZED memory on the GPU while playing correctly
-    on the JIT. Silent wrongness; no render gate can see it (the
-    metal_vs_jit corpus has zero arrays). The guard is structural:
-    `EmitMsl.emitKernel` must REFUSE the split audio plan (loud before
-    load — the previous kernel keeps playing) and must accept the
-    UNSPLIT plan (fills in-kernel), which is what the session load
-    falls back to on the metal backend. Banked default ⇒ columns hoist
-    ⇒ refusal expected; under `TROPICAL_BANKS_UNROLL` nothing hoists ⇒
-    both emissions must succeed (no false positive). -/
+/-- The Metal column-crossing gate (WS4; supersedes the WS0 refusal
+    tripwire). Hoisted coefficient columns (`coeff_array_slots`) cross
+    to the GPU as ONE packed `constant float* coeff_columns
+    [[buffer(3)]]` device buffer, filled host-side by the stage-0
+    coefficient kernel and uploaded from the generation `process()`
+    captures. The gate is structural, on the emitted TEXT: the typed
+    split's audio plan must EMIT (no refusal) with the buffer(3)
+    declaration, each hoisted slot read via `coeff_columns[<offset> +
+    …]` at its compile-time packed offset, and NO thread-private
+    `float arr<s>[` local declared for it — while the columns-free
+    UNSPLIT plan keeps the exact 3-binding header (the msl-golden ABI,
+    byte-frozen). Under `TROPICAL_BANKS_UNROLL` nothing hoists: both
+    emissions clean, both on the plain header (no false positive). -/
 private def runMslColumnGuard (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : IO Bool := do
   let src := "{\"nodes\":[" ++
@@ -2881,24 +2882,47 @@ private def runMslColumnGuard (arena : Arena)
     | .error e => IO.println s!"  FAIL  msl-column-guard  split: {firstLine e}"; pure false
     | .ok split =>
       let banked := Tropical.EmitArrow.banksTableEnabled
-      let cols := split.audio.coeffArraySlots.size
-      let splitMsl := Tropical.Ir.EmitMsl.emitKernel split.audio
-      let unsplitMsl := Tropical.Ir.EmitMsl.emitKernel plan
-      IO.println s!"        banked={banked} · hoisted columns={cols} · split-msl={if splitMsl.isOk then "ok" else "refused"} · unsplit-msl={if unsplitMsl.isOk then "ok" else "refused"}"
-      if banked then
-        match splitMsl, unsplitMsl with
-        | .error _, .ok _ =>
-          if cols > 0 then
-            IO.println s!"  PASS  msl-column-guard  {cols} hoisted column(s): split plan refused, unsplit plan emits (the metal fallback)"; pure true
+      let cols := split.audio.coeffArraySlots
+      let has : String → String → Bool := fun hay needle =>
+        (hay.splitOn needle).length > 1
+      let plainHeader := "constant TropicalKernelConsts& k             [[buffer(2)]],\n    uint s [[thread_position_in_grid]])"
+      let columnsHeader := "constant float*                coeff_columns [[buffer(3)]],\n    uint s [[thread_position_in_grid]])"
+      match Tropical.Ir.EmitMsl.emitKernel split.audio,
+            Tropical.Ir.EmitMsl.emitKernel plan with
+      | .ok splitMsl, .ok unsplitMsl =>
+        -- The unsplit plan advertises no columns: exact 3-binding header,
+        -- no buffer(3) anywhere (the text-frozen ABI must not move).
+        let unsplitClean := has unsplitMsl plainHeader && !(has unsplitMsl "buffer(3)")
+        if banked then
+          -- Recompute the packed offsets the emitter promises (plan order,
+          -- capacity-summed) and check each hoisted slot: read at ITS
+          -- offset, no thread-private local.
+          let sizes := split.audio.arraySlotSizes
+          let binding := has splitMsl columnsHeader
+          let mut off := 0
+          let mut reads := true
+          let mut noLocals := true
+          for s in cols do
+            if !(has splitMsl s!"coeff_columns[{off} + ") then reads := false
+            if has splitMsl s!"float arr{s}[" then noLocals := false
+            off := off + max (sizes[s]?.getD 1) 1
+          IO.println (s!"        banked={banked} · hoisted columns={cols.size} ({off} floats packed) · "
+            ++ s!"buffer(3)={binding} · offset reads={reads} · locals suppressed={noLocals} · unsplit 3-binding={unsplitClean}")
+          if cols.size > 0 && binding && reads && noLocals && unsplitClean then
+            IO.println s!"  PASS  msl-column-guard  {cols.size} hoisted column(s) EMIT in column-binding mode: buffer(3) declared, reads at packed offsets, no arrN locals; columns-free plan keeps the frozen 3-binding header"; pure true
           else
-            IO.println s!"  FAIL  msl-column-guard  banked: refused with no columns advertised"; pure false
-        | _, _ =>
-          IO.println s!"  FAIL  msl-column-guard  banked: cols={cols} splitOk={splitMsl.isOk} unsplitOk={unsplitMsl.isOk} (want refuse/ok)"; pure false
-      else
-        if cols == 0 && splitMsl.isOk && unsplitMsl.isOk then
-          IO.println s!"  PASS  msl-column-guard  unrolled: no columns hoisted, both emissions clean (no false positive)"; pure true
+            IO.println s!"  FAIL  msl-column-guard  banked: cols={cols.size} binding={binding} reads={reads} noLocals={noLocals} unsplitClean={unsplitClean}"; pure false
         else
-          IO.println s!"  FAIL  msl-column-guard  unrolled: cols={cols} splitOk={splitMsl.isOk} unsplitOk={unsplitMsl.isOk}"; pure false
+          let splitClean := has splitMsl plainHeader && !(has splitMsl "buffer(3)")
+          IO.println s!"        banked={banked} · hoisted columns={cols.size} · split 3-binding={splitClean} · unsplit 3-binding={unsplitClean}"
+          if cols.isEmpty && splitClean && unsplitClean then
+            IO.println s!"  PASS  msl-column-guard  unrolled: no columns hoisted, both emissions on the plain 3-binding header (no false positive)"; pure true
+          else
+            IO.println s!"  FAIL  msl-column-guard  unrolled: cols={cols.size} splitClean={splitClean} unsplitClean={unsplitClean}"; pure false
+      | .error e, _ =>
+        IO.println s!"  FAIL  msl-column-guard  split plan refused (the WS0 stopgap is retired — columns must emit): {firstLine e}"; pure false
+      | _, .error e =>
+        IO.println s!"  FAIL  msl-column-guard  unsplit plan refused: {firstLine e}"; pure false
 
 /-- THE COMPILE-FLATNESS BENCHMARK (banks-as-data payoff). Where `banks-staging`
     proves the payoff STRUCTURALLY at one mode count (columns hoist, audio is

@@ -104,6 +104,18 @@ struct KernelState
   std::vector<int64_t *> coeff_array_ptrs;
   uint32_t coeff_published_gen = 0;
 
+  // Metal upload staging for the coefficient columns: the packed f32 image
+  // of the captured generation, rebuilt once per process() (audio thread,
+  // no allocation) and copied into the GPU column buffer per dispatch —
+  // at encode on the sync path, at enqueue on the pipelined path. Packed
+  // in `coeff_array_slots` order, each column at full capacity — the SAME
+  // layout EmitMsl bakes as compile-time offsets into the kernel text.
+  // Column storage is int64 bit-punned f64 (the JIT loads i64 + bitcast to
+  // double — see EmitLlvm.emitIndex), so the pack is bit_cast<double> then
+  // the same f64→f32 narrowing slots get. Sized at build; empty when the
+  // plan hoists no columns.
+  std::vector<float> metal_column_staging;
+
   // Flat buffers passed to kernel (matches NumericKernelFn signature)
   std::vector<int64_t> registers;
   std::vector<int64_t> temps;
@@ -263,12 +275,35 @@ public:
 #ifdef TROPICAL_METAL
       if (state.metal)
       {
+        // Pack the captured coefficient-column generation for the GPU.
+        // The generation was captured ONCE above, BEFORE audio_processing_
+        // went true — so this pack (and the per-dispatch copy it feeds)
+        // inherits the whole-generation guarantee: the GPU reads one
+        // consistent generation of columns, no cross-column tear on a
+        // live knob move. Value semantics match the JIT's array access
+        // exactly: the int64 storage is bit-punned f64 (load i64 +
+        // bitcast to double), then narrowed f64→f32 like the slot
+        // snapshot.
+        if (!state.coeff_array_slots.empty())
+        {
+          std::size_t off = 0;
+          for (std::size_t j = 0; j < state.coeff_array_slots.size(); ++j)
+          {
+            const auto & col = state.coeff_generations[coeff_gen][j];
+            for (std::size_t e = 0; e < col.size(); ++e)
+              state.metal_column_staging[off + e] =
+                static_cast<float>(std::bit_cast<double>(col[e]));
+            off += col.size();
+          }
+        }
         // GPU path: one thread per sample, synchronous per-block dispatch
         // (v1). On a dispatch error, fall through to silence — the JIT
         // kernel stays authoritative for render_window either way.
         if (!tropical_metal::process_block(
               *state.metal,
               state.slots.data(), static_cast<uint32_t>(state.slots.size()),
+              state.metal_column_staging.data(),
+              static_cast<uint32_t>(state.metal_column_staging.size()),
               state.sample_rate, state.sample_index,
               outputBuffer.data(), buffer_length_))
           std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);

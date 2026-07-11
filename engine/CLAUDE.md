@@ -87,15 +87,23 @@ GPU kernel and never write back to the host slot array, so
 mode (the CPU kernel would show the last sample's value). Host-written param
 slots are unaffected; the scope reads via `render_window` (JIT) and is exact.
 
-**Known v1 gap:** hoisted coefficient COLUMNS (banks-as-data,
-`coeff_array_slots`) have no GPU crossing — the MSL ABI has no array binding.
-`EmitMsl` refuses such a plan outright, and the session load falls back to
-emitting the GPU kernel from the UNSPLIT plan (column fills recompute
-in-kernel per sample; correct, since they're pure functions of the slots that
-DO cross). The generation-buffered columns serve only the JIT/`render_window`
-side in Metal mode. The real crossing (a column buffer binding, uploaded from
-the generation `process()` captures) is scoped in
-`design/banking-leftovers-scope.local.md` (WS4).
+**Coefficient columns (banks-as-data) cross via `buffer(3)`.** A plan that
+advertises hoisted columns (`coeff_array_slots`) emits its MSL kernel with a
+fourth binding — `constant float* coeff_columns [[buffer(3)]]`, ONE packed
+buffer whose per-slot offsets are compile-time literals in plan order —
+and reads those slots from it instead of declaring thread-private `arrN`
+locals it could never fill (columns-free plans keep the exact 3-binding
+ABI, byte-frozen by the msl-golden gates). Host side: `process()` packs the
+captured generation into f32 staging (`KernelState::metal_column_staging` —
+int64 storage bit-punned to f64 like the JIT's array loads, then narrowed
+f64→f32 like slots) and `process_block` copies it into the MTLBuffer at
+encode (sync) or enqueue (pipelined, per-ring-entry buffers — the
+documented D-block param lag, no tear: the pack reads the ONE generation
+captured before `audio_processing_` went true). So a banked session on
+`TROPICAL_BACKEND=metal` runs the same typed split as the JIT: coefficient
+math at knob rate on CPU, the audio loop on GPU reading real columns.
+Gated by `msl-column-guard` (tropicaltest), the banked-resonator SNR case
+in `metal_vs_jit`, and the column tests in `test_metal_kernel.cpp`.
 
 ## Audio output (`dac/TropicalDAC.hpp`)
 

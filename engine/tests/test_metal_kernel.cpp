@@ -13,6 +13,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <string>
 
@@ -160,6 +161,153 @@ static void test_metal_hotswap()
   printf("PASS  metal hot-swap carries the sample clock\n");
 }
 
+// ── Banked coefficient columns (WS4: the Metal column crossing) ────────────
+//
+// A staged manifest advertising ONE coefficient column (array slot 0,
+// capacity 4). The stage-0 coefficient kernel fills it host-side from
+// slots[0] — column[k] = slots[0] + k, f64 bit-punned into the i64 storage
+// exactly as EmitLlvm's Pack does — and the GPU kernel reads it from the
+// packed `coeff_columns` buffer(3) binding.
+
+static const char* STAGED_MANIFEST = R"({"schema":"tropical_plan_5",
+  "config":{"sampleRate":44100},"register_count":0,
+  "array_slot_count":1,"array_slot_sizes":[4],"array_slot_names":["col"],
+  "coeff_array_slots":[0],
+  "instance_functions":[],"sinks":[],"slot_count":2,"slot_defaults":[0.25, 0]})";
+
+// Stage-0 coefficient kernel (run by run_coeff with buffer_length = 1):
+// arrays[0][k] = slots[0] + k for k = 0..3, stored as bitcast i64 — the
+// same f64-punned view the JIT's Index loads.
+static const char* COEFF_FILL_IR =
+  "define void @kernel(ptr %inputs, ptr %registers, ptr %arrays, "
+  "ptr %array_sizes, ptr %temps, double %sampleRate, i64 %start_sample_index, "
+  "ptr %param_ptrs, ptr %output_buffer, i64 %buffer_length, ptr %slots) {\n"
+  "entry:\n"
+  "  %s0 = load double, ptr %slots, align 8\n"
+  "  %a0p = getelementptr inbounds ptr, ptr %arrays, i64 0\n"
+  "  %a0 = load ptr, ptr %a0p, align 8\n"
+  "  %v0 = fadd double %s0, 0.000000e+00\n"
+  "  %b0 = bitcast double %v0 to i64\n"
+  "  %e0 = getelementptr inbounds i64, ptr %a0, i64 0\n"
+  "  store i64 %b0, ptr %e0, align 8\n"
+  "  %v1 = fadd double %s0, 1.000000e+00\n"
+  "  %b1 = bitcast double %v1 to i64\n"
+  "  %e1 = getelementptr inbounds i64, ptr %a0, i64 1\n"
+  "  store i64 %b1, ptr %e1, align 8\n"
+  "  %v2 = fadd double %s0, 2.000000e+00\n"
+  "  %b2 = bitcast double %v2 to i64\n"
+  "  %e2 = getelementptr inbounds i64, ptr %a0, i64 2\n"
+  "  store i64 %b2, ptr %e2, align 8\n"
+  "  %v3 = fadd double %s0, 3.000000e+00\n"
+  "  %b3 = bitcast double %v3 to i64\n"
+  "  %e3 = getelementptr inbounds i64, ptr %a0, i64 3\n"
+  "  store i64 %b3, ptr %e3, align 8\n"
+  "  ret void\n}\n";
+
+// MSL ABI mirror of EmitMsl's COLUMN-BINDING header (buffer(3)).
+static std::string msl_kernel_columns(const std::string& body)
+{
+  return std::string(
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct TropicalKernelConsts {\n"
+    "    ulong start_sample_index;\n"
+    "    float sample_rate;\n"
+    "    uint  buffer_length;\n"
+    "};\n"
+    "kernel void tropical_kernel(\n"
+    "    device float*                  output_buffer [[buffer(0)]],\n"
+    "    constant float*                slots         [[buffer(1)]],\n"
+    "    constant TropicalKernelConsts& k             [[buffer(2)]],\n"
+    "    constant float*                coeff_columns [[buffer(3)]],\n"
+    "    uint s [[thread_position_in_grid]])\n"
+    "{\n"
+    "    if (s >= k.buffer_length) { return; }\n"
+    "    const long current_idx = long(k.start_sample_index) + long(s);\n")
+    + body + "\n}\n";
+}
+
+/** 5. Banked columns, LIVE (sync path): the coefficient kernel fills the
+ *     column host-side (run at load, then on every set_slot), process()
+ *     uploads the captured generation, and the GPU reads real values from
+ *     buffer(3). A slot write must land in the NEXT block's columns —
+ *     exactly the scalar live-slot contract of test 2, but through the
+ *     generation-buffered column crossing. */
+static void test_metal_columns_live()
+{
+  const unsigned int buf = 16;
+  tropical_runtime_t rt = tropical_runtime_new(buf);
+  ASSERT(rt != nullptr);
+
+  const std::string msl = msl_kernel_columns(
+    "    output_buffer[s] = coeff_columns[s % 4u];");
+  ASSERT(tropical_runtime_load_ir_staged(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
+                                         msl.c_str(), msl.size(),
+                                         COEFF_FILL_IR, strlen(COEFF_FILL_IR),
+                                         STAGED_MANIFEST, strlen(STAGED_MANIFEST)));
+  // Load ran the coefficient kernel against the slot default (0.25):
+  // column = [0.25, 1.25, 2.25, 3.25].
+  tropical_runtime_process(rt);
+  const double* out = tropical_runtime_output_buffer(rt);
+  ASSERT(out != nullptr);
+  for (unsigned int i = 0; i < buf; ++i)
+    ASSERT_NEAR(out[i], 0.25 + (double)(i % 4), 1e-7);
+  // Live knob: set_slot re-runs the coefficient kernel into a fresh
+  // generation; the next block captures + uploads it.
+  tropical_runtime_set_slot(rt, 0, 1.5);
+  tropical_runtime_process(rt);
+  for (unsigned int i = 0; i < buf; ++i)
+    ASSERT_NEAR(out[i], 1.5 + (double)(i % 4), 1e-7);
+  tropical_runtime_free(rt);
+  printf("PASS  metal coefficient columns reach the GPU + live knob refill\n");
+}
+
+/** 6. Banked columns, PIPELINED (TROPICAL_METAL_PIPELINE=1): columns ride
+ *     per-ring-entry buffers copied at enqueue, so a knob move lands with
+ *     the documented D(=3)-block lag — never mid-flight, never torn. */
+static void test_metal_columns_pipelined()
+{
+  setenv("TROPICAL_METAL_PIPELINE", "1", 1);
+  const unsigned int buf = 16;
+  tropical_runtime_t rt = tropical_runtime_new(buf);
+  if (rt == nullptr) { unsetenv("TROPICAL_METAL_PIPELINE"); ++g_fail; return; }
+
+  const std::string msl = msl_kernel_columns(
+    "    output_buffer[s] = coeff_columns[s % 4u];");
+  const bool loaded =
+    tropical_runtime_load_ir_staged(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
+                                    msl.c_str(), msl.size(),
+                                    COEFF_FILL_IR, strlen(COEFF_FILL_IR),
+                                    STAGED_MANIFEST, strlen(STAGED_MANIFEST));
+  unsetenv("TROPICAL_METAL_PIPELINE");   // create() read it at load
+  if (!loaded)
+  {
+    printf("FAIL\n    pipelined staged load failed: %s\n", tropical_last_error());
+    ++g_fail;
+    tropical_runtime_free(rt);
+    return;
+  }
+  const double* out = tropical_runtime_output_buffer(rt);
+  // Block 1 primes the ring (3 futures @ old columns) and reads the first.
+  tropical_runtime_process(rt);
+  for (unsigned int i = 0; i < buf; ++i)
+    ASSERT_NEAR(out[i], 0.25 + (double)(i % 4), 1e-7);
+  tropical_runtime_set_slot(rt, 0, 2.0);
+  // Blocks 2..4 drain futures enqueued BEFORE the write (the D-block lag);
+  // block 5 is the first enqueued after it.
+  for (int b = 0; b < 3; ++b)
+  {
+    tropical_runtime_process(rt);
+    for (unsigned int i = 0; i < buf; ++i)
+      ASSERT_NEAR(out[i], 0.25 + (double)(i % 4), 1e-7);
+  }
+  tropical_runtime_process(rt);
+  for (unsigned int i = 0; i < buf; ++i)
+    ASSERT_NEAR(out[i], 2.0 + (double)(i % 4), 1e-7);
+  tropical_runtime_free(rt);
+  printf("PASS  metal pipelined columns: per-ring upload, knob lands after the D-block lag\n");
+}
+
 /** 4. set_sample_index repositions the clock (the render --start hook). */
 static void test_metal_set_index()
 {
@@ -186,6 +334,8 @@ int main()
   test_metal_slots();
   test_metal_hotswap();
   test_metal_set_index();
+  test_metal_columns_live();
+  test_metal_columns_pipelined();
   if (g_fail == 0) printf("ALL METAL TESTS PASSED\n");
   return g_fail == 0 ? 0 : 1;
 }

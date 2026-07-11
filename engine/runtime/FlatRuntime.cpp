@@ -79,6 +79,14 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
           new_state.array_storage[new_state.coeff_array_slots[j]].size(), 0);
     }
     new_state.coeff_array_ptrs = new_state.array_ptrs;
+    // Metal upload staging: one f32 per column element, packed in
+    // coeff_array_slots order (EmitMsl's compile-time offset layout).
+    // Sized here so a hot-swap re-derives it with the plan; harmless
+    // (a few bytes) on JIT-only loads.
+    std::size_t column_floats = 0;
+    for (uint32_t s : new_state.coeff_array_slots)
+      column_floats += new_state.array_storage[s].size();
+    new_state.metal_column_staging.assign(column_floats, 0.0f);
   }
 
   return new_state;
@@ -173,7 +181,8 @@ bool FlatRuntime::load_ir_staged(const std::string & ir_text,
     std::string err;
     new_state.metal = tropical_metal::create(
       msl_source, buffer_length_,
-      static_cast<uint32_t>(new_state.slots.size()), err);
+      static_cast<uint32_t>(new_state.slots.size()),
+      static_cast<uint32_t>(new_state.metal_column_staging.size()), err);
     if (!new_state.metal)
       throw std::runtime_error("FlatRuntime: " + err);
 #else

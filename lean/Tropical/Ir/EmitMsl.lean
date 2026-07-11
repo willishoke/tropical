@@ -212,6 +212,16 @@ structure St where
       so host writes to it are clobbered there too — folding cannot kill
       a live knob (param slots are host-written only, never folded). -/
   constSlots : Std.HashMap Nat CVal := {}
+  /-- Hoisted coefficient columns (banks-as-data): array slot → element
+      offset into the packed `coeff_columns` device buffer (`buffer(3)`).
+      These slots are filled HOST-SIDE by the stage-0 coefficient kernel
+      (generation-buffered; `process()` uploads the captured generation
+      per dispatch, f64→f32 like slots), so the kernel reads them from
+      the binding instead of declaring thread-private locals it could
+      never fill. Offsets are compile-time constants — plan order of
+      `coeff_array_slots`, the SAME order the runtime packs the upload
+      staging. Empty for ordinary plans (the byte-frozen 3-binding ABI). -/
+  coeffOffsets : Std.HashMap Nat Nat := {}
   /-- Innermost open reduction region (v1: nesting rejected). -/
   reduce? : Option ReduceCtx := none
 
@@ -618,8 +628,24 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
 private def resolveF32 (o : NOperand) : M String := do
   coerceF32 (← resolveOperand o)
 
+/-- The read text for element `idx` of array `slot`: the thread-private
+    local for in-kernel arrays, the packed device buffer at a
+    compile-time offset for hoisted coefficient columns. -/
+private def arrayElem (slot : Nat) (idx : String) : M String := do
+  match (← get).coeffOffsets.get? slot with
+  | some off => pure s!"coeff_columns[{off} + {idx}]"
+  | none => pure s!"arr{slot}[{idx}]"
+
+/-- Hoisted columns are GPU-read-only (`constant` address space; the
+    stage-0 kernel fills them host-side). A plan that still writes one
+    in-kernel is a split bug — fail loudly, before the load. -/
+private def guardColumnWrite (slot : Nat) (what : String) : M Unit := do
+  if (← get).coeffOffsets.contains slot then
+    fail s!"EmitMsl: {what} writes hoisted coefficient column {slot} (columns are filled host-side by the stage-0 kernel and read-only on the GPU)"
+
 /-- `Pack` — fill the thread-private array with the resolved args. -/
 private def emitPack (dst : Nat) (args : Array NOperand) : M Unit := do
+  guardColumnWrite dst "Pack"
   for i in [0:args.size] do
     let v ← resolveF32 args[i]!
     line s!"arr{dst}[{i}] = {v};"
@@ -642,12 +668,14 @@ private def emitIndex (sizes : Array Nat) (dst : Nat) (args : Array NOperand) : 
   let rawIdx := (← coerce idxV .int).ref
   let inR ← bindVal .bool s!"({rawIdx} >= 0L && {rawIdx} < {size}L)"
   let safe ← bindVal .int s!"({inR.ref} ? {rawIdx} : 0L)"
-  let v ← bindVal .float s!"({inR.ref} ? arr{arrSlot}[{safe.ref}] : 0.0f)"
+  let elem ← arrayElem arrSlot safe.ref
+  let v ← bindVal .float s!"({inR.ref} ? {elem} : 0.0f)"
   storeTempTyped dst v
 
 /-- `SetElement` — bounds-checked in-place write. -/
 private def emitSetElement (sizes : Array Nat) (args : Array NOperand) : M Unit := do
   let arrSlot ← arrayRegSlot args[0]!
+  guardColumnWrite arrSlot "SetElement"
   let size ← arraySizeLit sizes arrSlot
   let idxV ← match args[1]? with | some o => resolveOperand o | none => fail "SetElement missing idx"
   let rawIdx := (← coerce idxV .int).ref
@@ -656,6 +684,7 @@ private def emitSetElement (sizes : Array Nat) (args : Array NOperand) : M Unit 
 
 /-- Elementwise array op: a real `for` loop over `loopCount` elements. -/
 private def emitElementwise (sizes : Array Nat) (instr : NInstr) (dstSlot : Nat) : M Unit := do
+  guardColumnWrite dstSlot "elementwise op"
   let nargs := instr.args.size
   -- Pre-resolve scalar operands outside the loop (mirrors EmitLlvm).
   let mut argArrs : Array (Option Nat) := #[]
@@ -675,7 +704,8 @@ private def emitElementwise (sizes : Array Nat) (instr : NInstr) (dstSlot : Nat)
   for i in [0:nargs] do
     match argArrs[i]! with
     | some slot =>
-      let v ← bindVal .float s!"arr{slot}[ew{n}]"
+      let elem ← arrayElem slot s!"ew{n}"
+      let v ← bindVal .float elem
       iterArgs := iterArgs.push v
     | none => iterArgs := iterArgs.push (argScalars[i]!).get!
   let res ← emitOpRuntime instr.tag instr.resultType iterArgs
@@ -801,29 +831,67 @@ private def header : String :=
   "    if (s >= k.buffer_length) { return; }\n" ++
   "    const long current_idx = long(k.start_sample_index) + long(s);\n"
 
+/-- The column-binding header: `header` plus `buffer(3)` — the packed
+    coefficient-column buffer, uploaded by the host from the generation
+    `process()` captures. Emitted ONLY when the plan advertises hoisted
+    columns; ordinary plans keep the exact 3-binding header above (the
+    msl-golden gates freeze that text). -/
+private def headerColumns : String :=
+  "#include <metal_stdlib>\n" ++
+  "using namespace metal;\n\n" ++
+  "struct TropicalKernelConsts {\n" ++
+  "    ulong start_sample_index;\n" ++
+  "    float sample_rate;\n" ++
+  "    uint  buffer_length;\n" ++
+  "};\n\n" ++
+  "kernel void tropical_kernel(\n" ++
+  "    device float*                  output_buffer [[buffer(0)]],\n" ++
+  "    constant float*                slots         [[buffer(1)]],\n" ++
+  "    constant TropicalKernelConsts& k             [[buffer(2)]],\n" ++
+  "    constant float*                coeff_columns [[buffer(3)]],\n" ++
+  "    uint s [[thread_position_in_grid]])\n" ++
+  "{\n" ++
+  "    if (s >= k.buffer_length) { return; }\n" ++
+  "    const long current_idx = long(k.start_sample_index) + long(s);\n"
+
 /-- Emit the full MSL source for a FlatPlan's fused kernel. One thread
     per sample; the host dispatches `buffer_length` threads.
 
-    Refuses a plan that advertises hoisted coefficient columns
-    (`coeff_array_slots`): the MSL ABI has no array binding — every
-    array is a thread-private local — so a column the stage-0
-    coefficient kernel fills host-side would read UNINITIALIZED memory
-    here. Loud-before-load is the recoverable contract; callers emit
-    the GPU kernel from the UNSPLIT plan instead (fills stay
-    in-kernel) until columns get a Metal crossing. -/
+    A plan that advertises hoisted coefficient columns
+    (`coeff_array_slots` — banks-as-data) emits in COLUMN-BINDING mode:
+    the kernel signature gains `constant float* coeff_columns
+    [[buffer(3)]]` (one packed buffer; per-slot offsets are compile-time
+    literals in plan order — the same order the runtime packs the upload
+    staging), reads of those slots index the binding, and no
+    thread-private `arrN` local is declared for them (the stage-0
+    coefficient kernel fills them host-side; an in-kernel local could
+    never be filled). All OTHER array slots keep thread-private locals
+    and in-kernel fills. Columns-free plans keep the exact 3-binding
+    header, byte-frozen by the msl-golden gates. -/
 def emitKernel (plan : FlatPlan) : Except String String := do
-  unless plan.coeffArraySlots.isEmpty do
-    throw s!"EmitMsl: {plan.coeffArraySlots.size} hoisted coefficient column(s) have no GPU crossing (the MSL kernel has no array binding); emit from the unsplit plan"
   let sizes := plan.arraySlotSizes
+  -- Packed offsets for the hoisted columns, in the plan's advertised
+  -- order — MUST match FlatRuntime's upload packing (it walks
+  -- coeff_array_slots in the same order).
+  let mut coeffOffsets : Std.HashMap Nat Nat := {}
+  let mut colOff := 0
+  for s in plan.coeffArraySlots do
+    let some sz := sizes[s]?
+      | throw s!"EmitMsl: coeff_array_slots entry {s} out of range (plan has {sizes.size} array slots)"
+    coeffOffsets := coeffOffsets.insert s colOff
+    colOff := colOff + max sz 1
   let body : M Unit := do
-    -- thread-private array scratch (per-sample on CPU too).
+    -- thread-private array scratch (per-sample on CPU too); hoisted
+    -- coefficient columns are read from the buffer(3) binding instead.
     for i in [0:plan.arraySlotCount] do
-      let sz := sizes[i]?.getD 1
-      line s!"float arr{i}[{max sz 1}];"
+      unless coeffOffsets.contains i do
+        let sz := sizes[i]?.getD 1
+        line s!"float arr{i}[{max sz 1}];"
     for inst in plan.instanceFunctions do
       emitKernelBlock sizes inst
     emitSinks plan.sinks
-  let init : St := { sources := plan.sources, sampleRate := plan.sampleRate.toFloat }
+  let init : St := { sources := plan.sources, sampleRate := plan.sampleRate.toFloat,
+                     coeffOffsets }
   match body.run init with
   | .error e _ => .error e
   | .ok _ st =>
@@ -831,6 +899,7 @@ def emitKernel (plan : FlatPlan) : Except String String := do
     -- `current_idx` may be unused after full folding; cast to void to
     -- keep -Wunused clean would misfire on use, so leave it — Metal's
     -- compiler doesn't warn on unused const locals by default.
-    .ok (header ++ bodyText ++ "\n}\n")
+    let hdr := if plan.coeffArraySlots.isEmpty then header else headerColumns
+    .ok (hdr ++ bodyText ++ "\n}\n")
 
 end Tropical.Ir.EmitMsl

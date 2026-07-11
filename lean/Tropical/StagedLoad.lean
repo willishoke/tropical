@@ -92,4 +92,20 @@ def loadTyped (rt : Tropical.Ffi.Runtime) (plan : FlatPlan)
     dumpParts ir cir manifest
     rt.loadIrStaged ir "" cir manifest
 
+/-- Typed split + emit + dual load (JIT + Metal). MSL is emitted from the
+    *audio* plan: scalar coefficients cross to the GPU as host-written
+    slots, and hoisted coefficient COLUMNS (banks-as-data) cross via the
+    packed `coeff_columns` buffer — the runtime uploads the captured
+    generation per dispatch, f64→f32. The same typed split a live
+    session runs on `TROPICAL_BACKEND=metal`. -/
+def loadMslTyped (rt : Tropical.Ffi.Runtime) (plan : FlatPlan)
+    (stageBlocks : Array (Array (Option Tropical.Ir.Stage))) : IO Unit := do
+  let s ← splitTyped plan stageBlocks
+  match emitParts s, Tropical.Ir.EmitMsl.emitKernel s.audio with
+  | .error e, _ => throw <| IO.userError s!"StagedLoad: {e}"
+  | _, .error e => throw <| IO.userError s!"StagedLoad (msl): {e}"
+  | .ok (ir, cir, manifest), .ok msl =>
+    dumpParts ir cir manifest
+    rt.loadIrStaged ir msl cir manifest
+
 end Tropical.StagedLoad
