@@ -35,7 +35,9 @@ private def operandOfWire (j : Json) : Except String NOperand := do
   | "param" => pure (.param (← (← j.getObjVal? "ptr").getStr?) (← scalarOfWire j))
   | "source" => pure (.source (← (← j.getObjVal? "index").getNat?) (← scalarOfWire j))
   | "slot" => pure (.slot (← (← j.getObjVal? "index").getNat?) (← scalarOfWire j))
-  | "loop_idx" => pure .loopIdx
+  -- Back-compat: an absent `id` decodes as 0 (the pre-nesting single-region
+  -- form; the emitters resolve id-0 against the one open region).
+  | "loop_idx" => pure (.loopIdx (((j.getObjVal? "id").bind (·.getNat?)).toOption.getD 0))
   | k => .error s!"PlanDecode: bad operand kind '{k}'"
 
 private def dstOfWire (j : Json) : Except String DstSlot := do
@@ -51,9 +53,11 @@ private def instrOfWire (j : Json) : Except String NInstr := do
   let dst ← dstOfWire j
   let args ← (optArr j "args").mapM operandOfWire
   let loopCount := ((j.getObjVal? "loop_count").bind (·.getNat?)).toOption.getD 1
+  -- Back-compat: absent `loop_id` decodes as 0 (single-region plans).
+  let loopId := ((j.getObjVal? "loop_id").bind (·.getNat?)).toOption.getD 0
   let strides := (optArr j "strides").map (fun x => (x.getNat?).toOption.getD 0)
   let resultType ← scalarOfWire j "result_type"
-  pure { tag, dst, args, loopCount, strides, resultType }
+  pure { tag, dst, args, loopCount, strides, resultType, loopId }
 
 private partial def instanceOfWire (j : Json) : Except String InstanceFunction := do
   let name ← (← j.getObjVal? "name").getStr?

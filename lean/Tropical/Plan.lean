@@ -66,9 +66,13 @@ inductive NOperand where
   | param (ptr : String) (scalarType : ScalarType)
   | source (index : Nat) (scalarType : ScalarType)
   | slot (index : Nat) (scalarType : ScalarType)
-  /-- The current iteration index (i64) inside a `ReduceBegin`/`ReduceEnd`
-      region. Meaningless outside one (emitters reject it there). -/
-  | loopIdx
+  /-- The iteration index (i64) of the enclosing `ReduceBegin`/`ReduceEnd`
+      region whose binder id is `id` (nested regions: the emitters resolve the
+      id against the stack of open regions, innermost first). Meaningless
+      outside a region with this id (emitters reject it there). `id = 0` is
+      the pre-nesting default and is OMITTED on the wire, so single-region
+      plans serialize byte-identically to the id-less form. -/
+  | loopIdx (id : Nat := 0)
 deriving Repr, Inhabited
 
 /-- Canonical source indices (sessions always emit `[tick, rate]`). -/
@@ -94,8 +98,10 @@ def NOperand.toWire : NOperand → Json
       ("scalar_type", scalarJson t)]
   | .slot i t => Json.mkObj [("kind", Json.str "slot"), ("index", toJson i),
       ("scalar_type", scalarJson t)]
-  | .loopIdx => Json.mkObj [("kind", Json.str "loop_idx"),
-      ("scalar_type", scalarJson .int)]
+  | .loopIdx id => Json.mkObj <|
+      [("kind", Json.str "loop_idx")]
+      ++ (if id == 0 then [] else [("id", toJson id)])
+      ++ [("scalar_type", scalarJson .int)]
 
 /-- Discriminated writeback namespace. -/
 inductive DstSlot where
@@ -129,15 +135,22 @@ structure NInstr where
   loopCount : Nat := 1
   strides : Array Nat := #[]
   resultType : ScalarType
+  /-- `ReduceBegin` only: the binder id its body's `loopIdx id` operands refer
+      to (nested banks). Rides the wire as `loop_id`, OMITTED when 0 so
+      single-region plans stay byte-identical; decoding an absent field yields
+      0, and a plan with one open region resolves id-0 `loopIdx` against it. -/
+  loopId : Nat := 0
 deriving Repr, Inhabited
 
 def NInstr.toWire (i : NInstr) : Except String Json := do
-  return Json.mkObj [
+  return Json.mkObj <| [
     ("tag", Json.str i.tag),
     ("dst", toJson (← i.dst.wireIdx)),
     ("dst_kind", Json.str (← i.dst.wireKind)),
     ("args", Json.arr (i.args.map (·.toWire))),
-    ("loop_count", toJson i.loopCount),
+    ("loop_count", toJson i.loopCount)]
+    ++ (if i.loopId == 0 then [] else [("loop_id", toJson i.loopId)])
+    ++ [
     ("strides", toJson i.strides),
     ("result_type", scalarJson i.resultType)]
 
@@ -186,12 +199,17 @@ def instrWriteSlot (dst : Nat) (value : NOperand)
     `count?` (trip-count-as-data): an optional RUNTIME effective count as a
     second arg — `loopCount` stays the static capacity; the emitters resolve
     `args[1]` once before the loop and trip `clamp(args[1], 0, loopCount)`
-    iterations. Absent = the static path, byte-identical emission. -/
+    iterations. Absent = the static path, byte-identical emission.
+
+    `loopId` (nested banks): the region's binder id — body `loopIdx id`
+    operands resolve against it through the stack of open regions. 0 (the
+    default) is the single-region form and is omitted on the wire. -/
 def instrReduceBegin (accTemp : Nat) (init : NOperand) (loopCount : Nat)
-    (resultType : ScalarType) (count? : Option NOperand := none) : NInstr :=
+    (resultType : ScalarType) (count? : Option NOperand := none)
+    (loopId : Nat := 0) : NInstr :=
   { tag := "ReduceBegin", dst := .temp accTemp,
     args := match count? with | none => #[init] | some c => #[init, c],
-    loopCount, resultType }
+    loopCount, resultType, loopId }
 
 /-- Close the innermost reduction region opened on `accTemp`. -/
 def instrReduceEnd (accTemp : Nat) (resultType : ScalarType) : NInstr :=

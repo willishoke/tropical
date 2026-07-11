@@ -90,15 +90,20 @@ inductive Sig where
   -- Banks-as-data (slice 3b): the authoring tree can express an indexed
   -- reduction over coefficient columns. `arr`/`index`/`loopIdx` lower to the
   -- like-named IR nodes; `bankSum` to `ENode.bankSum` (a `ReduceBegin` region).
+  -- `loopIdx` carries the UNIQUE BINDER ID of the `bankSum` it reads (nested
+  -- banks: unique along a nesting chain; Sig-level authoring uses `bankFold`,
+  -- whose banks never nest today — tables materialize before their region —
+  -- so `BankCols.idxId` defaults to 0).
   | arr (items : Array Sig)
   | index (arr idx : Sig)
-  | loopIdx
+  | loopIdx (id : Nat)
   -- `count` is the static CAPACITY; `dynCount?` (trip-count-as-data) is the
   -- optional RUNTIME effective count, clamped to `[0, count]` at the loop head.
   -- (No `:= none` default here: `Option Sig` is a NESTED occurrence of the
   -- inductive, and the kernel rejects optParam defaults on nested fields.)
+  -- `idxId` names the binder the body's `loopIdx id` refers to.
   | bankSum (count : Nat) (tables : Array Sig) (body : Sig)
-      (dynCount? : Option Sig)
+      (dynCount? : Option Sig) (idxId : Nat)
 deriving Repr, Inhabited
 
 /-- A clock-as-value expression (Q32.32 fixed-point sample coordinate). -/
@@ -124,9 +129,9 @@ partial def lowerSigTree : Sig → EArenaM ExprId
   | .sampleIndex    => eintern .sampleIndex
   | .arr items      => do eintern (.arr (← items.mapM lowerSigTree))
   | .index a b      => do eintern (.index (← lowerSigTree a) (← lowerSigTree b))
-  | .loopIdx        => eintern .loopIdx
-  | .bankSum c ts b dc => do
-    eintern (.bankSum c (← ts.mapM lowerSigTree) (← lowerSigTree b) (← dc.mapM lowerSigTree))
+  | .loopIdx id     => eintern (.loopIdx id)
+  | .bankSum c ts b dc ii => do
+    eintern (.bankSum c (← ts.mapM lowerSigTree) (← lowerSigTree b) (← dc.mapM lowerSigTree) ii)
 
 /-- Pointer-identity-memoized lowering: a hash map from object address to
     interned id, threaded alongside the arena. Sound because `Sig` values
@@ -152,9 +157,9 @@ private unsafe def lowerSigPtrGo (s : Sig) :
     | .sampleIndex    => intern1 .sampleIndex
     | .arr items      => do intern1 (.arr (← items.mapM lowerSigPtrGo))
     | .index a b      => do intern1 (.index (← lowerSigPtrGo a) (← lowerSigPtrGo b))
-    | .loopIdx        => intern1 .loopIdx
-    | .bankSum c ts b dc => do
-      intern1 (.bankSum c (← ts.mapM lowerSigPtrGo) (← lowerSigPtrGo b) (← dc.mapM lowerSigPtrGo))
+    | .loopIdx id     => intern1 (.loopIdx id)
+    | .bankSum c ts b dc ii => do
+      intern1 (.bankSum c (← ts.mapM lowerSigPtrGo) (← lowerSigPtrGo b) (← dc.mapM lowerSigPtrGo) ii)
   modify fun (a, m) => (a, m.insert key r)
   return r
 
@@ -1421,6 +1426,13 @@ structure BankCols where
       stays the CAPACITY (columns fill to capacity; the emitters clamp the live
       value to `[0, count]` at the loop head). `none` = the static bank. -/
   live? : Option Sig := none
+  /-- The bank's binder id (`Sig.bankSum.idxId` / `Sig.loopIdx.id`). Ids need
+      only be unique along a NESTING CHAIN, and `bankFold` banks never nest
+      (tables materialize before their region, so two banks over one set of
+      columns run sequentially) — 0 is correct for every Sig-level bank today.
+      If nesting ever arrives here, thread a chain-unique allocator; the
+      emitters fail loudly on an ancestor id collision. -/
+  idxId : Nat := 0
   incr  : Sig
   sigma : Sig
   cre   : Sig
@@ -1444,13 +1456,14 @@ def bankCols (modes : Array ModalMode) (live? : Option Sig := none) : BankCols w
     array order — the same order the unrolled `foldl` nests its adds — so for
     the i64 mode sum the render is BIT-IDENTICAL to the unroll. -/
 def bankFold (cols : BankCols) (body : ModeSym → Sig) : Sig :=
-  let k := Sig.loopIdx
+  let k := Sig.loopIdx cols.idxId
   Sig.bankSum cols.count #[cols.incr, cols.sigma, cols.cre, cols.cim]
     (body { incr  := Sig.index cols.incr k
           , sigma := Sig.index cols.sigma k
           , cre   := Sig.index cols.cre k
           , cim   := Sig.index cols.cim k })
     cols.live?
+    cols.idxId
 
 /-- The BANKED lowering of a modal bank (banks-as-data slice 3b): the SAME value
     as `modalBankSig`, but the mode sum is a `bankFold` indexed reduction over

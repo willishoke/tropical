@@ -222,7 +222,7 @@ private def operandKind : NOperand → String
   | .arrayReg _ => "array_reg" | .sessionArrayReg _ => "session_array_reg"
   | .param .. => "param"
   | .source .. => "source" | .slot .. => "slot"
-  | .loopIdx => "loop_idx"
+  | .loopIdx _ => "loop_idx"
 
 private def allocReg : EmitM Nat :=
   modifyGet fun s => (s.nextReg, { s with nextReg := s.nextReg + 1 })
@@ -283,7 +283,7 @@ private def tryTerminal (e : CNode) (expected : Option ScalarType) :
       | none => pure (some (.const (0 : Nat) .float, .float))
   | .sampleRate => pure (some (Tropical.Plan.opRate, .float))
   | .sampleIndex => pure (some (Tropical.Plan.opTick, .int))
-  | .loopIdx => pure (some (Tropical.Plan.NOperand.loopIdx, .int))
+  | .loopIdx id => pure (some (Tropical.Plan.NOperand.loopIdx id, .int))
   | .nestedOut inst out => do
     if let some perInstArr := lookup st.slots.nestedOutputArraySlots inst.idx then
       if (lookup perInstArr out.idx).isSome then
@@ -344,8 +344,8 @@ private partial def compileNodeUncached (e : CNode) (expected : Option ScalarTyp
   | .select a b c => compileTernary "Select" a b c expected
   | .arraySet a b c => compileSetElement a b c
   | .index a b => compileIndex a b
-  | .bankSum count tables body dynCount? => compileBankSum count tables body dynCount?
-  | .num _ | .bool _ | .paramRef _ | .sampleRate | .sampleIndex | .loopIdx =>
+  | .bankSum count tables body dynCount? idxId => compileBankSum count tables body dynCount? idxId
+  | .num _ | .bool _ | .paramRef _ | .sampleRate | .sampleIndex | .loopIdx _ =>
     throw "emit_resolved: terminal node reached compileNodeUncached (port bug)"
 
 /-- Unbox a size-1 array to a scalar via Index[0]. -/
@@ -484,9 +484,17 @@ private partial def compileIndex (arrNode idxNode : ExprId) : EmitM CompileResul
     - The CSE memo is snapshotted across the region: body-local temps do not
       escape (the runtime zero-scratches post-region reads), so a later sequential
       bank must not reuse them. Table entries (memoized before the snapshot) and
-      any subterm compiled outside the region survive. -/
+      any subterm compiled outside the region survive.
+    - NESTED banks: an inner `bankSum` in the body recurses through this same
+      function. The splice point is safe — `regionStart` is recorded before the
+      body compiles, and an inner region splices at a strictly later index, so
+      the outer's insertion point never moves — and the memo snapshot/restore
+      nests via the call frames (`memo0` is a local, not emitter state). `idxId`
+      is the region's binder id: it rides `ReduceBegin` as `loop_id`, and the
+      body's `loopIdx idxId` operands resolve against the emitters' stack of
+      open regions. -/
 private partial def compileBankSum (count : Nat) (tables : Array ExprId) (body : ExprId)
-    (dynCount? : Option ExprId := none) : EmitM CompileResult := do
+    (dynCount? : Option ExprId := none) (idxId : Nat := 0) : EmitM CompileResult := do
   for t in tables do
     let _ ← compileNode t
   -- The optional runtime effective count (trip-count-as-data) compiles BEFORE
@@ -507,7 +515,7 @@ private partial def compileBankSum (count : Nat) (tables : Array ExprId) (body :
   let ty := if contrib.scalarType == .bool then .int else contrib.scalarType
   modify fun s => { s with
     instrs := s.instrs.insertIdx! regionStart
-      (Tropical.Plan.instrReduceBegin acc (.const (0 : Nat) ty) count ty countOp?)
+      (Tropical.Plan.instrReduceBegin acc (.const (0 : Nat) ty) count ty countOp? idxId)
     instrStages := s.instrStages.insertIdx! regionStart s.curStage }
   emit (Tropical.Plan.instrScalar "Add" acc #[.reg acc ty, contrib.op] ty)
   emit (Tropical.Plan.instrReduceEnd acc ty)

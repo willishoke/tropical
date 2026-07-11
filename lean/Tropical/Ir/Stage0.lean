@@ -175,7 +175,7 @@ private def operandStage (sources : Array SourceKind)
   | .param _ _ => .s1         -- per-program FFI path: no re-run hook
   | .arrayReg _ => .s1        -- arrays are conservatively per-sample (v1)
   | .sessionArrayReg _ => .s1
-  | .loopIdx => .s1           -- per-iteration inside a reduce region
+  | .loopIdx _ => .s1         -- per-iteration inside a reduce region (any id)
 
 private def analyze (plan : FlatPlan) (blocks : Array (Array NInstr)) : Analysis := Id.run do
   -- Prepass: in-plan write counts per module slot. A stage-0 slot write
@@ -431,16 +431,19 @@ private def overlayPinnedS1 (i : NInstr) : Bool :=
 private def overlayS1 (i : NInstr) : Bool :=
   i.tag == "ReduceBegin" || i.tag == "ReduceEnd"
   || overlayPinnedS1 i
-  || i.args.any fun a => match a with | .loopIdx => true | _ => false
+  || i.args.any fun a => match a with | .loopIdx _ => true | _ => false
 
 /-- The matching `ReduceEnd` of the `ReduceBegin` at `b` in the linear
-    stream. NInstr streams cannot nest regions today (v1), so a plain
-    forward scan to the first delimiter is sound; a nested `ReduceBegin`
-    (or a missing `ReduceEnd`) yields `none` and the region stays put. -/
+    stream, DEPTH-COUNTING (regions nest): a nested `ReduceBegin` opens a
+    subregion whose own `ReduceEnd` must close before ours matches. A
+    missing `ReduceEnd` yields `none` and the region stays put. -/
 private def findRegionEnd (flat : Array NInstr) (b : Nat) : Option Nat := Id.run do
+  let mut depth : Nat := 0
   for i in [b+1:flat.size] do
-    if flat[i]!.tag == "ReduceBegin" then return none
-    if flat[i]!.tag == "ReduceEnd" then return some i
+    if flat[i]!.tag == "ReduceBegin" then depth := depth + 1
+    else if flat[i]!.tag == "ReduceEnd" then
+      if depth == 0 then return some i
+      depth := depth - 1
   return none
 
 /-- Placement from the TYPED stages (per linear instruction, the
@@ -554,7 +557,7 @@ private def placementFromStages (blocks : Array (Array NInstr))
           let ws := arrayWriters.getD s #[]
           if ws.isEmpty || !(ws.all fun w => w < b && hoisted[w]!) then
             return none
-        | .loopIdx => pure ()                      -- defined by the region
+        | .loopIdx _ => pure ()                    -- defined by the unit (any id: ours or a nested subregion's)
         | .const _ _ | .source _ _ => pure ()      -- value stage (rule 1) covers these
         | .input _ _ | .param _ _ | .sessionArrayReg _ => return none
       if let .temp t := instr.dst then regTemps := regTemps.insert t ()
@@ -568,16 +571,24 @@ private def placementFromStages (blocks : Array (Array NInstr))
   let mut dupSeeds : Array Nat := #[]
   -- The matching `ReduceEnd` index while inside a whole-region move.
   let mut regionEnd : Option Nat := none
+  -- Only OUTERMOST regions are whole-move candidates (nested v1 policy): a
+  -- nested subregion moves with its enclosing unit (it lies inside [b..e])
+  -- and is never considered separately. When an outermost region STAYS, its
+  -- matching end is recorded here so the begins nested inside it are skipped.
+  let mut noRegionUntil : Nat := 0
   for idx in [0:flat.size] do
     let instr := flat[idx]!
-    -- Whole-region decision at each `ReduceBegin`. Region membership is
-    -- derived from delimiter matching in the linear stream (streams
-    -- cannot nest regions today, v1 — the begin/end scan is sound).
-    if regionEnd.isNone && instr.tag == "ReduceBegin" then
+    -- Whole-region decision at each OUTERMOST `ReduceBegin`. Region
+    -- membership is derived from depth-counted delimiter matching in the
+    -- linear stream (`findRegionEnd`).
+    if regionEnd.isNone && idx ≥ noRegionUntil && instr.tag == "ReduceBegin" then
       if let some e := findRegionEnd flat idx then
-        if let some regionSeeds := tryRegion idx e hoisted tempDef then
+        match tryRegion idx e hoisted tempDef with
+        | some regionSeeds =>
           regionEnd := some e
           dupSeeds := dupSeeds ++ regionSeeds
+        | none =>
+          noRegionUntil := e + 1
     let inRegion := regionEnd.isSome
     let stage := stageAt idx
     -- Availability of every read, given the placement so far (skipped

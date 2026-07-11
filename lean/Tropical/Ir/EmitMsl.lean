@@ -171,18 +171,22 @@ structure TVal where
   cv  : Option CVal := none
 deriving Inhabited
 
-/-- An open `ReduceBegin`/`ReduceEnd` region: the accumulator temp (a
+/-- An open `ReduceBegin`/`ReduceEnd` region: the region's binder id (what a
+    `loopIdx id` operand resolves against), the accumulator temp (a
     mutable typed local declared before the loop), the loop-index
     variable, and the temp-state snapshots to restore at close (body
     locals are scoped to the loop braces in MSL, so their names must
-    not survive as "declared"). -/
+    not survive as "declared"). Nested regions: each context carries its
+    own snapshots, so restore is LIFO by construction. -/
 structure ReduceCtx where
+  id : Nat
   accTemp : Nat
   accTy : ScalarType
   idxVar : String
   savedTempTypes : Std.HashMap Nat ScalarType
   savedConstTemps : Std.HashMap Nat CVal
   savedDeclared : Std.HashSet String
+deriving Inhabited
 
 structure St where
   next : Nat := 0
@@ -222,10 +226,22 @@ structure St where
       `coeff_array_slots`, the SAME order the runtime packs the upload
       staging. Empty for ordinary plans (the byte-frozen 3-binding ABI). -/
   coeffOffsets : Std.HashMap Nat Nat := {}
-  /-- Innermost open reduction region (v1: nesting rejected). -/
-  reduce? : Option ReduceCtx := none
+  /-- The stack of open reduction regions, outermost first (`ReduceBegin`
+      pushes, `ReduceEnd` pops). Nested banks: `loopIdx id` resolves by
+      searching this stack for its binder id; accumulator writes search it
+      innermost-first, so an inner-region instruction adding into an OUTER
+      accumulator finds the outer local. -/
+  reduces : Array ReduceCtx := #[]
 
 abbrev M := EStateM String St
+
+/-- The open region owning accumulator temp `slot`, innermost first. -/
+def findAccCtx (slot : Nat) : M (Option ReduceCtx) := do
+  let rs := (← get).reduces
+  for i in [0:rs.size] do
+    let rc := rs[rs.size - 1 - i]!
+    if rc.accTemp == slot then return some rc
+  return none
 
 def fresh : M String := do
   let s ← get
@@ -286,12 +302,11 @@ def loadTempTyped (slot : Nat) (ty : ScalarType) : M TVal := do
     an open reduction region, which must always materialize (its value
     varies across iterations even when one write folds). -/
 def storeTempTyped (slot : Nat) (v : TVal) : M Unit := do
-  if let some rc := (← get).reduce? then
-    if slot == rc.accTemp then
-      let cv ← coerce v rc.accTy
-      line s!"{tempVarName slot rc.accTy} = {cv.ref};"
-      modify fun s => { s with constTemps := s.constTemps.erase slot }
-      return
+  if let some rc ← findAccCtx slot then
+    let cv ← coerce v rc.accTy
+    line s!"{tempVarName slot rc.accTy} = {cv.ref};"
+    modify fun s => { s with constTemps := s.constTemps.erase slot }
+    return
   match v.cv with
   | some c =>
     modify fun s => { s with
@@ -370,9 +385,11 @@ def resolveOperand : NOperand → M TVal
   | .param _ _ => fail "EmitMsl: 'param' operand is dead on the session path (use slots)"
   | .arrayReg _ => fail "EmitMsl: bare 'arrayReg' operand outside an array op"
   | .sessionArrayReg _ => fail "EmitMsl: 'sessionArrayReg' must be remapped before emit"
-  | .loopIdx => do
-    let some rc := (← get).reduce?
-      | fail "EmitMsl: loop_idx operand outside a ReduceBegin/ReduceEnd region"
+  | .loopIdx id => do
+    -- Resolve the binder id against the stack of open regions (unique along
+    -- a nesting chain, so first match is THE match).
+    let some rc := (← get).reduces.find? (fun rc => rc.id == id)
+      | fail s!"EmitMsl: loop_idx id={id} matches no open ReduceBegin/ReduceEnd region"
     pure ⟨rc.idxVar, .int, none⟩
 
 -- ─────────────────────────────────────────────────────────────
@@ -717,8 +734,10 @@ private def emitElementwise (sizes : Array Nat) (instr : NInstr) (dstSlot : Nat)
 def emitInstr (sizes : Array Nat) (instr : NInstr) : M Unit := do
   match instr.tag, instr.dst with
   | "ReduceBegin", .temp accTemp =>
-    if (← get).reduce?.isSome then
-      fail "EmitMsl: nested ReduceBegin regions are not supported (v1)"
+    -- Nested regions are supported; an ancestor with the SAME binder id is a
+    -- construction bug (ids must be unique along a nesting chain).
+    if (← get).reduces.any (fun rc => rc.id == instr.loopId) then
+      fail s!"EmitMsl: nested ReduceBegin id={instr.loopId} collides with an open ancestor region"
     let init ← match instr.args[0]? with
       | some o => resolveOperand o
       | none => fail "ReduceBegin missing init operand"
@@ -750,22 +769,23 @@ def emitInstr (sizes : Array Nat) (instr : NInstr) : M Unit := do
       declared := s.declared.insert accName
       tempTypes := s.tempTypes.insert accTemp instr.resultType
       constTemps := s.constTemps.erase accTemp
-      reduce? := some {
-        accTemp, accTy := instr.resultType, idxVar
+      reduces := s.reduces.push {
+        id := instr.loopId, accTemp, accTy := instr.resultType, idxVar
         savedTempTypes := st.tempTypes.insert accTemp instr.resultType
         savedConstTemps := st.constTemps.erase accTemp
         savedDeclared := st.declared.insert accName } }
   | "ReduceEnd", .temp accTemp =>
-    let some rc := (← get).reduce?
+    let some rc := (← get).reduces.back?
       | fail "EmitMsl: ReduceEnd without an open ReduceBegin"
     if rc.accTemp != accTemp then
-      fail "EmitMsl: ReduceEnd accumulator does not match the open ReduceBegin"
+      fail "EmitMsl: ReduceEnd accumulator does not match the innermost open ReduceBegin"
     modify fun s => { s with indent := s.indent - 1 }
     line "}"
     -- Body locals were scoped to the loop braces; only the accumulator
-    -- survives (its declaration precedes the loop).
+    -- survives (its declaration precedes the loop). Each region restores its
+    -- OWN entry snapshots — nested regions unwind LIFO by construction.
     modify fun s => { s with
-      reduce? := none
+      reduces := s.reduces.pop
       tempTypes := rc.savedTempTypes
       constTemps := rc.savedConstTemps
       declared := rc.savedDeclared }

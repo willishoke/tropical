@@ -53,7 +53,7 @@ initialize banksLoopEnabled : Bool ← do
     predicates use. -/
 private def childrenE : ENode → Array ExprId
   | .num _ | .bool _ | .inputRef _ | .paramRef _ | .typeParamRef _
-  | .nestedOut _ _ | .sampleRate | .sampleIndex | .loopIdx | .bindingRef _ => #[]
+  | .nestedOut _ _ | .sampleRate | .sampleIndex | .loopIdx _ | .bindingRef _ => #[]
   | .arr items => items
   | .zeros c => #[c]
   | .letIn binders body => (binders.map (·.value)).push body
@@ -68,7 +68,7 @@ private def childrenE : ENode → Array ExprId
   | .index a b => #[a, b]
   | .unary _ a => #[a]
   | .clamp a b c | .select a b c | .arraySet a b c => #[a, b, c]
-  | .bankSum _ ts b dc => (ts.push b) ++ dc.toArray
+  | .bankSum _ ts b dc _ => (ts.push b) ++ dc.toArray
   | .tag _ _ payload => payload.map (·.value)
   | .match_ _ s arms => #[s] ++ arms.map (·.body)
 
@@ -100,14 +100,17 @@ private partial def anyNodeE (p : ENode → Bool) (root : ExprId) : PassM Bool :
       or the element escaping whole, and the fold must unroll: a materialized
       array-of-arrays would silently zero-fill in emit's `compilePack`);
     - anything else (tags, ragged arities, nested tuples, mixed shapes) →
-      `none`, and the fold unrolls exactly as before. -/
-private def bankColumnsE (items : Array ExprId) :
+      `none`, and the fold unrolls exactly as before.
+    `idxId` is the binder id of the region being built (nested banks): the
+    projections read `loopIdx idxId`, so an inner bank constructed later inside
+    the body leaves them untouched. -/
+private def bankColumnsE (idxId : Nat) (items : Array ExprId) :
     PassM (Option (Array ExprId × ExprId × Option ENode)) := do
   let derefed ← items.mapM derefP
   let isScalarShape : ENode → Bool := fun n => match n with
     | .arr _ | .tag .. => false
     | _ => true
-  let loopIdxE ← einternP .loopIdx
+  let loopIdxE ← einternP (.loopIdx idxId)
   if derefed.all isScalarShape then
     let col ← einternP (.arr items)
     let elemSym ← einternP (.index col loopIdxE)
@@ -147,6 +150,10 @@ private abbrev SubstMapE := List (BinderIdx × ExprId)
 private structure LowerSt where
   needs : Std.HashMap Nat Bool := {}
   rw : Std.HashMap Nat ExprId := {}
+  /-- Binder ids of the banks whose bodies are CURRENTLY being lowered (the
+      open nesting chain, innermost first). A fold banking inside one of these
+      bodies will nest inside them, so its own id must avoid all of them. -/
+  openBankIds : List Nat := []
 
 private abbrev LowerM := StateT LowerSt PassM
 
@@ -161,11 +168,11 @@ partial def exprNeedsLoweringE (id : ExprId) : LowerM Bool := do
     | .zeros _ => pure true
     | .num _ | .bool _
     | .inputRef _ | .paramRef _ | .typeParamRef _
-    | .nestedOut _ _ | .sampleRate | .sampleIndex | .loopIdx => pure false
+    | .nestedOut _ _ | .sampleRate | .sampleIndex | .loopIdx _ => pure false
     -- A bankSum is NOT unrolled — it survives to post-strata as an indexed
     -- reduction. Its tables/body are ordinary subgraphs, so descend only if one
     -- genuinely contains a combinator/bindingRef/zeros to lower.
-    | .bankSum _ ts b dc =>
+    | .bankSum _ ts b dc _ =>
       pure ((← ts.anyM exprNeedsLoweringE) || (← exprNeedsLoweringE b)
         || (← dc.mapM exprNeedsLoweringE).getD false)
     | .arr items => items.anyM exprNeedsLoweringE
@@ -273,12 +280,12 @@ private partial def lowerExprCoreE (subst : SubstMapE) (id : ExprId) : LowerM Ex
         failP s!"arrayLower: zeros count {n} is not a valid array length"
     | _ => einternP (.zeros countL)
   | .inputRef _ | .paramRef _ | .typeParamRef _
-  | .nestedOut _ _ | .sampleRate | .sampleIndex | .loopIdx => pure id
-  | .bankSum c ts b dc =>
+  | .nestedOut _ _ | .sampleRate | .sampleIndex | .loopIdx _ => pure id
+  | .bankSum c ts b dc ii =>
     -- Preserve the region; lower its subgraphs (never unroll). `subst` threads
     -- through in case the bank is nested in an enclosing combinator being unrolled.
     einternP (.bankSum c (← ts.mapM (lowerExprE subst)) (← lowerExprE subst b)
-      (← dc.mapM (lowerExprE subst)))
+      (← dc.mapM (lowerExprE subst)) ii)
   | .tag d v payload =>
     einternP (.tag d v
       (← payload.mapM fun p => do pure ({ field := p.field, value := ← lowerExprE subst p.value } : ETagPayload)))
@@ -309,6 +316,35 @@ private partial def lowerExprCoreE (subst : SubstMapE) (id : ExprId) : LowerM Ex
         einternP (.index a' b')
     | _, _ => einternP (.index a' b')
 
+/-- Collect the binder ids of every `bankSum` reachable from `root`, following
+    `bindingRef`s through `subst` (the values a later lowering of `root` under
+    `subst` can pull in). Used to pick a fresh binder id for a new bank: a
+    pre-existing bank reachable this way can end up NESTED inside the new
+    region (e.g. a `letIn`-bound banked fold referenced by the body — the
+    Cauchy-with-shared-subsum shape), so the new id must avoid all of them.
+    Over-approximate is fine (an avoided id that never nests costs nothing);
+    banks reachable only through TABLES are included too, harmlessly — tables
+    materialize before their region, so they never join the nesting chain. -/
+private partial def collectBankIdsE (subst : SubstMapE) (root : ExprId) :
+    PassM (Std.HashSet Nat) := do
+  let mut stack : Array ExprId := #[root]
+  let mut seen : Std.HashSet Nat := {}
+  let mut out : Std.HashSet Nat := {}
+  while !stack.isEmpty do
+    let id := stack.back!
+    stack := stack.pop
+    if seen.contains id.idx then continue
+    seen := seen.insert id.idx
+    let n ← derefP id
+    match n with
+    | .bankSum _ _ _ _ ii => out := out.insert ii
+    | .bindingRef i =>
+      if let some (_, v) := subst.find? (·.1 == i) then
+        stack := stack.push v
+    | _ => pure ()
+    stack := stack ++ childrenE n
+  return out
+
 /-- LOOP-EVERYTHING (banks-as-data, the trunk move): a SUMMING fold survives as
     an indexed reduction (`bankSum`) instead of unrolling — the realization
     below post-strata owns the loop; nothing per-effect, no size threshold.
@@ -322,12 +358,21 @@ private partial def lowerExprCoreE (subst : SubstMapE) (id : ExprId) : LowerM Ex
     - element SHAPE decides the columns (`bankColumnsE`): scalar elements →
       one column; uniform-arity tuple elements → per-position columns
       (columnize-over-shapes); tags / ragged / nested / mixed → unroll.
-    - no `bankSum` inside the lowered body — emit rejects NESTED regions (v1).
-      A banked fold as a column ELEMENT is fine: tables materialize before the
-      region, so its region closes sequentially.
-    The element binder substitutes to `index(col, loopIdx)` (or the symbolic
-    tuple of such projections) — the same substitution machinery the unroll
-    uses, pointed at a symbolic element. -/
+    The element binder substitutes to `index(col, loopIdx idxId)` (or the
+    symbolic tuple of such projections) — the same substitution machinery the
+    unroll uses, pointed at a symbolic element.
+
+    NESTED banks (WS5): a summing fold inside the body banks TOO, as a nested
+    region with its own binder id. Lowering is inside-out — by the time this
+    fold's `rhs'` exists, any inner summing fold has already banked with an id
+    chosen while this fold's id was on `openBankIds` — so no rewriting of inner
+    bodies ever happens; ids are stable under nesting. Freshness needs only
+    chain-uniqueness: the id chosen here is the smallest Nat avoiding (a) every
+    enclosing bank currently being lowered (`openBankIds` — this fold nests
+    inside them) and (b) every bank already reachable from the body under
+    `subst` (`collectBankIdsE` — those can nest inside THIS fold). Plain
+    non-nested folds therefore still get id 0, keeping their wire form (and
+    hash-consing of identical folds) byte-identical to the pre-nesting world. -/
 private partial def tryBankFoldE (subst : SubstMapE) (items : Array ExprId)
     (init : ExprId) (acc elem : Binder) (body : ExprId) : LowerM (Option ExprId) := do
   unless banksLoopEnabled do return none
@@ -339,17 +384,23 @@ private partial def tryBankFoldE (subst : SubstMapE) (items : Array ExprId)
   let .bindingRef i ← derefP accRef | return none
   unless i == acc.idx do return none
   if ← anyNodeE (· == .bindingRef acc.idx) rhs then return none
-  let some (cols, elemSym, residual?) ← (bankColumnsE items : PassM _) | return none
+  -- Fresh binder id for this region: smallest Nat unused along the chain.
+  let used ← (collectBankIdsE subst rhs : PassM _)
+  let openIds := (← get).openBankIds
+  let mut idxId := 0
+  while used.contains idxId || openIds.contains idxId do
+    idxId := idxId + 1
+  let some (cols, elemSym, residual?) ← (bankColumnsE idxId items : PassM _) | return none
+  modify fun s => { s with openBankIds := idxId :: s.openBankIds }
   let rhs' ← lowerExprE ((elem.idx, elemSym) :: subst) rhs
+  modify fun s => { s with openBankIds := s.openBankIds.tail }
   -- The banked body must be SCALAR. If the symbolic tuple survived lowering
   -- (a non-literal index into the element, or the element escaping whole),
   -- bail to unroll — a materialized array-of-arrays would hit compilePack's
   -- silent zero-fill.
   if let some node := residual? then
     if ← anyNodeE (· == node) rhs' then return none
-  if ← anyNodeE (fun n => match n with | .bankSum .. => true | _ => false) rhs' then
-    return none
-  some <$> einternP (.bankSum items.size cols rhs')
+  some <$> einternP (.bankSum items.size cols rhs' none idxId)
 
 end
 

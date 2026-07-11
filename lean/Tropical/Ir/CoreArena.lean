@@ -48,16 +48,20 @@ inductive CNode where
   | nestedOut (instance_ : InstanceIdx) (output : OutputIdx)
   | sampleRate
   | sampleIndex
-  /-- Iteration index inside the enclosing `bankSum` region (→ `NOperand.loopIdx`). -/
-  | loopIdx
+  /-- Iteration index of the `bankSum` region whose `idxId` equals `id`
+      (→ `NOperand.loopIdx`). `id` is a UNIQUE BINDER ID (stable under nesting,
+      never shifted; unique along a nesting chain), and it participates in the
+      structural hash — two distinct indices are two distinct DAG nodes. -/
+  | loopIdx (id : Nat)
   /-- An indexed reduction `Σ_{k<count} body(k)`, i64-modular. `tables` are the
       loop-invariant coefficient columns the body indexes at `loopIdx`; emit
       materializes them once before the `ReduceBegin`/`ReduceEnd` region.
       `count` is the static CAPACITY; `dynCount?` (trip-count-as-data) is an
       optional runtime effective count, clamped to `[0, count]` at the loop
-      head by the emitters (`none` = today's static path). -/
+      head by the emitters (`none` = today's static path). `idxId` names the
+      binder the body's `loopIdx id` refers to (unique along a nesting chain). -/
   | bankSum (count : Nat) (tables : Array ExprId) (body : ExprId)
-      (dynCount? : Option ExprId := none)
+      (dynCount? : Option ExprId := none) (idxId : Nat := 0)
 deriving BEq, Repr, Inhabited
 
 /-- O(1) structural hash — children are ids, so no subtree recursion. Op tags
@@ -77,8 +81,8 @@ def cnodeHash : CNode → UInt64
   | .nestedOut i o  => mixHash (mixHash 12 (hash i.idx)) (hash o.idx)
   | .sampleRate     => 13
   | .sampleIndex    => 14
-  | .loopIdx        => 15
-  | .bankSum c ts b dc => mixHash (mixHash (mixHash (mixHash 16 (hash c)) (hash (ts.map (·.idx)))) (hash b.idx)) (hash (dc.map (·.idx)))
+  | .loopIdx id     => mixHash 15 (hash id)
+  | .bankSum c ts b dc ii => mixHash (mixHash (mixHash (mixHash (mixHash 16 (hash c)) (hash (ts.map (·.idx)))) (hash b.idx)) (hash (dc.map (·.idx)))) (hash ii)
 
 instance : Hashable CNode := ⟨cnodeHash⟩
 
@@ -174,7 +178,8 @@ private def sigAt (sigs : Array StageSig) (id : ExprId) : StageSig :=
 def cnodeSig (sigs : Array StageSig) : CNode → StageSig
   | .num _ | .bool _ | .sampleRate => { base := .fold }
   | .sampleIndex => { base := .s1 }
-  -- `loopIdx` is the join IDENTITY (`fold`), not `s1`: as a VALUE attribute,
+  -- `loopIdx` is the join IDENTITY (`fold`), not `s1`, REGARDLESS of its
+  -- binder id: as a VALUE attribute,
   -- the iteration index is defined by the enclosing reduce region, so it
   -- contributes no binding time of its own. This is what lets a `bankSum`
   -- whose tables/body/count are all s0 BE an s0 value (the whole loop runs
@@ -189,7 +194,7 @@ def cnodeSig (sigs : Array StageSig) : CNode → StageSig
   -- code therefore leaves the audio kernel only as a WHOLE delimiter-matched
   -- region (the separate `tryRegion` decision), never one instruction at a
   -- time.
-  | .loopIdx => { base := .fold }
+  | .loopIdx _ => { base := .fold }
   | .paramRef _ => { base := .s0 }
   | .inputRef i => { base := .fold, inputs := #[i.idx] }
   | .nestedOut i o => { base := .fold, nested := #[(i.idx, o.idx)] }
@@ -199,7 +204,7 @@ def cnodeSig (sigs : Array StageSig) : CNode → StageSig
   | .clamp a b c | .select a b c | .arraySet a b c =>
     ((sigAt sigs a).join (sigAt sigs b)).join (sigAt sigs c)
   | .index a b => (sigAt sigs a).join (sigAt sigs b)
-  | .bankSum _ ts b dc =>
+  | .bankSum _ ts b dc _ =>
     let s := (ts.foldl (fun acc id => acc.join (sigAt sigs id)) ({ base := .fold } : StageSig)).join (sigAt sigs b)
     match dc with
     | some d => s.join (sigAt sigs d)
