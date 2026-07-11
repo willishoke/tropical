@@ -13,6 +13,7 @@ import Tropical.PlanDecode
 import Tropical.Engine
 import Tropical.Parse.Surface.Markdown
 import Tropical.EmitArrow
+import Tropical.Testing.ArrowFixtures
 
 /-!
 The `diffcli` executable — differential-harness verbs that exercise the

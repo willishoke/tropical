@@ -14,6 +14,7 @@ import Tropical.Ir.Core
 import Tropical.Ir.CompileResolved
 import Tropical.Compile
 import Tropical.EmitArrow
+import Tropical.Testing.ArrowFixtures
 import Lean.Data.Json
 
 /-!
