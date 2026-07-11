@@ -14,6 +14,12 @@ Computer-Modern serif, high data-ink ratio.
 
 Reading order runs foundation-first; each effect leans on the atom below it.
 
+- [Oscillation without accumulation](oscillation-without-accumulation.md) —
+  the on-ramp: a pendulum looks like an object with state, but its state is
+  a *reading* of a closed-form function, and jumping, reversing, and
+  scrubbing fall out the moment you evaluate instead of step. Draws the
+  honest boundary — nonlinearity is fine, chaos and live feedback are the
+  ceded island.
 - [The sawtooth is a line](sawtooth-is-a-line.md) — the foundational atom:
   the simplest closed-form signal is a linear function of time read modulo
   one, and the classic waveforms are memoryless shapings of that one ramp.
