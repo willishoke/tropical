@@ -761,6 +761,16 @@ private partial def countFnInstrs (f : Tropical.Plan.InstanceFunction) : Nat :=
 private def planInstrCount (p : Tropical.Plan.FlatPlan) : Nat :=
   p.instanceFunctions.foldl (fun acc f => acc + countFnInstrs f) 0
 
+/-- Count instructions with a given tag across an InstanceFunction tree. -/
+private partial def countFnTagged (t : String) (f : Tropical.Plan.InstanceFunction) : Nat :=
+  (f.instructions.filter (·.tag == t)).size
+    + f.children.foldl (fun acc c => acc + countFnTagged t c) 0
+
+/-- Count instructions with a given tag across a FlatPlan (e.g. "ReduceBegin"
+    to count reduce regions, "Pack" to count materialized columns). -/
+private def planTagCount (t : String) (p : Tropical.Plan.FlatPlan) : Nat :=
+  p.instanceFunctions.foldl (fun acc f => acc + countFnTagged t f) 0
+
 /-- Strata-process an already-built carrier program, then compile it via the
     production session path. Returns (post-strata binderCount, post-strata
     declCount, FlatPlan) — the post-strata program is the CSE'd DAG, so its
@@ -1882,6 +1892,207 @@ private def runBanksFoldTrunk (_arena : Arena)
         IO.println s!"  FAIL  banks-fold-trunk  scaling compile: {firstLine e}"; pure false
     | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-fold-trunk  render: {firstLine e}"; pure false
   | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-fold-trunk  compile: {firstLine e}"; pure false
+
+/-- Wrap a single output expression in the minimal one-instance
+    `tropical_program_2` patch the fold gates probe with (`p.out = expr`).
+    `typeDefs` (optional) rides the inner program's ports — the tag-fold
+    bail case needs a payload-less sum in scope. -/
+private def foldProbePatchJson (expr : Lean.Json)
+    (typeDefs : Array Lean.Json := #[]) : Lean.Json :=
+  let ports :=
+    if typeDefs.isEmpty then
+      Lean.Json.mkObj [("inputs", Lean.Json.arr #[]),
+        ("outputs", Lean.Json.arr #[Lean.Json.str "out"])]
+    else
+      Lean.Json.mkObj [("inputs", Lean.Json.arr #[]),
+        ("outputs", Lean.Json.arr #[Lean.Json.str "out"]),
+        ("type_defs", Lean.Json.arr typeDefs)]
+  let inner := Lean.Json.mkObj [
+    ("name", Lean.Json.str "FoldProbe"),
+    ("ports", ports),
+    ("body", Lean.Json.mkObj [("op", Lean.Json.str "block"),
+      ("decls", Lean.Json.arr #[]),
+      ("assigns", Lean.Json.arr #[Lean.Json.mkObj [
+        ("op", Lean.Json.str "outputAssign"), ("name", Lean.Json.str "out"),
+        ("expr", expr)]])])]
+  Lean.Json.mkObj [
+    ("schema", Lean.Json.str "tropical_program_2"),
+    ("name", Lean.Json.str "fold_probe"),
+    ("body", Lean.Json.mkObj [("op", Lean.Json.str "block"),
+      ("decls", Lean.Json.arr #[
+        Lean.Json.mkObj [("op", Lean.Json.str "programDecl"),
+          ("name", Lean.Json.str "FoldProbe"), ("program", inner)],
+        Lean.Json.mkObj [("op", Lean.Json.str "instanceDecl"),
+          ("name", Lean.Json.str "p"), ("program", Lean.Json.str "FoldProbe"),
+          ("inputs", Lean.Json.mkObj [])]]),
+      ("assigns", Lean.Json.arr #[])]),
+    ("audio_outputs", Lean.Json.arr #[Lean.Json.mkObj [
+      ("instance", Lean.Json.str "p"), ("output", Lean.Json.str "out")]])]
+
+/-- Compile a fold-probe expression through the FULL front door
+    (raise → elaborate → strata → emit) and parse the resulting plan. -/
+private def compileFoldProbe (expr : Lean.Json) (tag : String)
+    (typeDefs : Array Lean.Json := #[]) : IO (Except String Tropical.Plan.FlatPlan) := do
+  let tmp := s!"/tmp/tropicaltest-columnize-{tag}.json"
+  IO.FS.writeFile tmp (foldProbePatchJson expr typeDefs).compress
+  match ← compilePatch tmp .fused with
+  | .error e => pure (.error e)
+  | .ok planJson =>
+    match Lean.Json.parse planJson with
+    | .error e => pure (.error s!"parse: {e}")
+    | .ok j => pure ((Tropical.Plan.FlatPlan.ofWire j).mapError (s!"ofWire: {·}"))
+
+-- Shared JSON expression builders for the columnize gates.
+private def cgJn (m : Nat) (e : Nat) : Lean.Json := Lean.Json.num ⟨Int.ofNat m, e⟩
+private def cgA (i : Nat) : Lean.Json := cgJn (31 + 7 * i) 2   -- aᵢ = 0.31 + 0.07·i
+private def cgB (i : Nat) : Lean.Json := cgJn (11 + 5 * i) 2   -- bᵢ = 0.11 + 0.05·i
+private def cgAdd (a b : Lean.Json) : Lean.Json :=
+  Lean.Json.mkObj [("op", Lean.Json.str "add"), ("args", Lean.Json.arr #[a, b])]
+private def cgMulHalf (a : Lean.Json) : Lean.Json :=
+  Lean.Json.mkObj [("op", Lean.Json.str "mul"), ("args", Lean.Json.arr #[a, cgJn 5 1])]
+private def cgIndex (a b : Lean.Json) : Lean.Json :=
+  Lean.Json.mkObj [("op", Lean.Json.str "index"), ("args", Lean.Json.arr #[a, b])]
+private def cgBinding (n : String) : Lean.Json :=
+  Lean.Json.mkObj [("op", Lean.Json.str "binding"), ("name", Lean.Json.str n)]
+/-- One tuple contribution: `a·½ + b`. -/
+private def cgTerm (a b : Lean.Json) : Lean.Json := cgAdd (cgMulHalf a) b
+private def cgFold (over : Lean.Json) (body : Lean.Json) : Lean.Json :=
+  Lean.Json.mkObj [("op", Lean.Json.str "fold"), ("over", over),
+    ("init", cgJn 0 0), ("acc_var", Lean.Json.str "acc"), ("elem_var", Lean.Json.str "e"),
+    ("body", body)]
+
+/-- THE COLUMNIZE gate (columnize-over-shapes). A surface-language summing fold
+    over TUPLE elements — Σ (aᵢ·½ + bᵢ) over [[a₀,b₀],…] through the FULL front
+    door — de-structures into per-position coefficient columns (the AoS→SoA iso
+    `Array (A×B) ≅ Array A × Array B`, done generically by `tryBankFoldE`) and
+    banks as ONE multi-table reduction: byte-equal to the hand-unrolled add
+    chain, exactly one `ReduceBegin` region with n=2 column `Pack`s, and the
+    plan FLAT in element count (HARD — a growth regression means banking is
+    broken). Under `TROPICAL_BANKS_UNROLL` the fold genuinely unrolls
+    (0 regions) and still matches bit-exact. -/
+private def runBanksColumnize (_arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let foldExpr (k : Nat) : Lean.Json :=
+    let pairs := (Array.range k).map fun i => Lean.Json.arr #[cgA i, cgB i]
+    cgFold (Lean.Json.arr pairs)
+      (cgAdd (cgBinding "acc")
+        (cgTerm (cgIndex (cgBinding "e") (cgJn 0 0)) (cgIndex (cgBinding "e") (cgJn 1 0))))
+  let unrollExpr (k : Nat) : Lean.Json :=
+    (Array.range k).foldl (fun acc i => cgAdd acc (cgTerm (cgA i) (cgB i))) (cgJn 0 0)
+  match ← compileFoldProbe (foldExpr 8) "f8", ← compileFoldProbe (unrollExpr 8) "u8" with
+  | .ok fp, .ok up =>
+    match ← renderPlanSamples fp 2048, ← renderPlanSamples up 2048 with
+    | .ok fS, .ok uS =>
+      let n := min fS.size uS.size
+      let mut bitDiff := 0
+      for i in [0:n] do
+        if fS[i]! != uS[i]! then bitDiff := bitDiff + 1
+      let nonzero := fS.any (· != 0.0)
+      match ← compileFoldProbe (foldExpr 64) "f64" with
+      | .ok f64 =>
+        let d := planInstrCount f64 - planInstrCount fp
+        let regions := planTagCount "ReduceBegin" fp
+        let packs := planTagCount "Pack" fp
+        let looping := Tropical.Ir.Strata.ArrayLower.banksLoopEnabled
+        IO.println s!"        surface fold Σₖ (aₖ·½ + bₖ) over [[a₀,b₀],…] (K=8), full front door (loop-everything={looping}):"
+        IO.println s!"        result   bit-differing {bitDiff}/{n} vs hand-unrolled · nonzero={nonzero} · regions={regions} · column-Packs={packs}"
+        IO.println s!"        payoff   plan-instrs: fold(8)={planInstrCount fp} unrolled(8)={planInstrCount up} fold(64)={planInstrCount f64} (Δ={d})"
+        if looping then
+          warnBenchConst "banks-columnize" "tuple-fold plan-instrs (any K)" 11 (planInstrCount fp)
+          if bitDiff == 0 && nonzero && regions == 1 && packs == 2 && d ≤ 2 then
+            IO.println s!"  PASS  banks-columnize  tuple fold banks as SoA: 1 region × 2 columns, byte-equal to unroll, plan FLAT in K (Δ={d} ≤ 2, 8→64)"; pure true
+          else
+            IO.println s!"  FAIL  banks-columnize  bitDiff={bitDiff} nonzero={nonzero} regions={regions} packs={packs} Δ={d}"; pure false
+        else
+          if bitDiff == 0 && nonzero && regions == 0 && d > 2 then
+            IO.println s!"  PASS  banks-columnize  escape hatch reverts: tuple fold unrolls (0 regions, Δ={d} grows), byte-equal"; pure true
+          else
+            IO.println s!"  FAIL  banks-columnize  (unroll mode) bitDiff={bitDiff} nonzero={nonzero} regions={regions} Δ={d}"; pure false
+      | .error e =>
+        IO.println s!"  FAIL  banks-columnize  scaling compile: {firstLine e}"; pure false
+    | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-columnize  render: {firstLine e}"; pure false
+  | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-columnize  compile: {firstLine e}"; pure false
+
+/-- THE COLUMNIZE BAIL-OUT gate. The shapes `tryBankFoldE` refuses must still
+    compile CORRECTLY via unrolling — never crash, never mis-bank:
+    - RAGGED arities (a 2-tuple next to a 3-tuple) → unroll, byte-equal to the
+      hand-written chain, 0 regions in BOTH flag states;
+    - a NON-LITERAL index into the tuple element (`e[sampleIndex mod 2]`) → the
+      symbolic tuple survives lowering, the residual guard bails, unroll — the
+      alternating output pins that the dynamic index is genuinely live;
+    - a fold over PAYLOAD-LESS TAGS: sum elements cannot reach ArrayLower as
+      tags at all — SumLower rewrites them to scalar variant literals first —
+      so the fold BANKS AS SCALARS (1 region when looping), today's behavior,
+      asserted here so the `.tag` claim stays pinned. -/
+private def runBanksColumnizeBail (_arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let looping := Tropical.Ir.Strata.ArrayLower.banksLoopEnabled
+  let check (name : String) (foldE unrollE : Lean.Json)
+      (typeDefs : Array Lean.Json) (wantRegions : Nat) : IO (Option String) := do
+    match ← compileFoldProbe foldE s!"bail-{name}-f" typeDefs,
+          ← compileFoldProbe unrollE s!"bail-{name}-u" typeDefs with
+    | .ok fp, .ok up =>
+      match ← renderPlanSamples fp 2048, ← renderPlanSamples up 2048 with
+      | .ok fS, .ok uS =>
+        let n := min fS.size uS.size
+        let mut bitDiff := 0
+        for i in [0:n] do
+          if fS[i]! != uS[i]! then bitDiff := bitDiff + 1
+        let nonzero := fS.any (· != 0.0)
+        let regions := planTagCount "ReduceBegin" fp
+        IO.println s!"        bail[{name}]  bit-differing {bitDiff}/{n} · nonzero={nonzero} · regions={regions} (want {wantRegions})"
+        if bitDiff == 0 && nonzero && regions == wantRegions then pure none
+        else pure (some s!"{name}: bitDiff={bitDiff} nonzero={nonzero} regions={regions} want={wantRegions}")
+      | .error e, _ | _, .error e => pure (some s!"{name} render: {firstLine e}")
+    | .error e, _ | _, .error e => pure (some s!"{name} compile: {firstLine e}")
+  -- (a) ragged arities: [[a₀,b₀],[a₁,b₁,0.99]] — mixed 2-/3-tuples never bank.
+  let raggedFold := cgFold
+    (Lean.Json.arr #[Lean.Json.arr #[cgA 0, cgB 0],
+                     Lean.Json.arr #[cgA 1, cgB 1, cgJn 99 2]])
+    (cgAdd (cgBinding "acc")
+      (cgTerm (cgIndex (cgBinding "e") (cgJn 0 0)) (cgIndex (cgBinding "e") (cgJn 1 0))))
+  let raggedUnroll :=
+    cgAdd (cgAdd (cgJn 0 0) (cgTerm (cgA 0) (cgB 0))) (cgTerm (cgA 1) (cgB 1))
+  -- (b) non-literal index: e[sampleIndex mod 2] — the projection cannot fold,
+  --     the symbolic tuple survives, the residual guard unrolls.
+  let sampIdx := Lean.Json.mkObj [("op", Lean.Json.str "sampleIndex")]
+  let dynIdx := Lean.Json.mkObj [("op", Lean.Json.str "mod"),
+    ("args", Lean.Json.arr #[sampIdx, cgJn 2 0])]
+  let dynFold := cgFold
+    (Lean.Json.arr #[Lean.Json.arr #[cgA 0, cgB 0], Lean.Json.arr #[cgA 1, cgB 1]])
+    (cgAdd (cgBinding "acc") (cgIndex (cgBinding "e") dynIdx))
+  let dynUnroll :=
+    cgAdd (cgAdd (cgJn 0 0) (cgIndex (Lean.Json.arr #[cgA 0, cgB 0]) dynIdx))
+      (cgIndex (Lean.Json.arr #[cgA 1, cgB 1]) dynIdx)
+  -- (c) payload-less tags: SumLower rewrites them to variant literals BEFORE
+  --     ArrayLower, so the fold banks as scalars — `.tag` never reaches the
+  --     shape check as an element.
+  let flagDefs : Array Lean.Json := #[Lean.Json.mkObj [
+    ("kind", Lean.Json.str "sum"), ("name", Lean.Json.str "Flag"),
+    ("variants", Lean.Json.arr #[
+      Lean.Json.mkObj [("name", Lean.Json.str "A"), ("payload", Lean.Json.arr #[])],
+      Lean.Json.mkObj [("name", Lean.Json.str "B"), ("payload", Lean.Json.arr #[])],
+      Lean.Json.mkObj [("name", Lean.Json.str "C"), ("payload", Lean.Json.arr #[])]])]]
+  let tagJ (v : String) : Lean.Json :=
+    Lean.Json.mkObj [("op", Lean.Json.str "tag"), ("variant", Lean.Json.str v)]
+  let tagFold := cgFold
+    (Lean.Json.arr #[tagJ "A", tagJ "C", tagJ "B"])
+    (cgAdd (cgBinding "acc") (cgMulHalf (cgBinding "e")))
+  let tagUnroll :=   -- variant indices 0, 2, 1 in fold order
+    cgAdd (cgAdd (cgAdd (cgJn 0 0) (cgMulHalf (cgJn 0 0)))
+      (cgMulHalf (cgJn 2 0))) (cgMulHalf (cgJn 1 0))
+  let mut fails : Array String := #[]
+  if let some f ← check "ragged" raggedFold raggedUnroll #[] 0 then fails := fails.push f
+  if let some f ← check "dyn-index" dynFold dynUnroll #[] 0 then fails := fails.push f
+  if let some f ← check "tags" tagFold tagUnroll flagDefs (if looping then 1 else 0) then
+    fails := fails.push f
+  if fails.isEmpty then
+    let tagWord := if looping then "banks as SCALARS (1 region)" else "unrolls with the flag off (0 regions)"
+    IO.println s!"  PASS  banks-columnize-bail  ragged + dynamic-index unroll byte-equal (0 regions); tag fold reaches ArrayLower as variant literals post-SumLower and {tagWord}"
+    pure true
+  else
+    IO.println s!"  FAIL  banks-columnize-bail  {String.intercalate " · " fails.toList}"
+    pure false
 
 /-- THE MODAL DEGREE gate. A degree-1 mode `amp·d·e^{−σd}` (a repeated pole — the
     resonance "swell") rendered by the engine must match `sinkGain·d·e^{−σd}` to
@@ -3765,6 +3976,12 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runBanksFoldTrunk arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runBanksColumnize arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runBanksColumnizeBail arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runModalDegree arena resolved) then

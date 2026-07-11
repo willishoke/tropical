@@ -87,6 +87,53 @@ private partial def anyNodeE (p : ENode → Bool) (root : ExprId) : PassM Bool :
     stack := stack ++ childrenE n
   return false
 
+/-- Column layout for a bankable fold, decided by the ELEMENT SHAPE:
+    - all scalar → one column, the element binder substitutes to
+      `index(col, loopIdx)` (today's path);
+    - all `.arr` of ONE arity n ≥ 1 with scalar sub-elements → n per-position
+      columns (columnize-over-shapes: the AoS→SoA iso
+      `Array (A×B) ≅ Array A × Array B`, done generically). The element binder
+      substitutes to a SYMBOLIC tuple `[index(col_0, loopIdx), …]` whose
+      literal projections the static-index fold resolves; `residual?` carries
+      that tuple node so the caller can verify it did not survive lowering
+      (`.index` is the only projection — a survivor means a non-literal index
+      or the element escaping whole, and the fold must unroll: a materialized
+      array-of-arrays would silently zero-fill in emit's `compilePack`);
+    - anything else (tags, ragged arities, nested tuples, mixed shapes) →
+      `none`, and the fold unrolls exactly as before. -/
+private def bankColumnsE (items : Array ExprId) :
+    PassM (Option (Array ExprId × ExprId × Option ENode)) := do
+  let derefed ← items.mapM derefP
+  let isScalarShape : ENode → Bool := fun n => match n with
+    | .arr _ | .tag .. => false
+    | _ => true
+  let loopIdxE ← einternP .loopIdx
+  if derefed.all isScalarShape then
+    let col ← einternP (.arr items)
+    let elemSym ← einternP (.index col loopIdxE)
+    return some (#[col], elemSym, none)
+  let .arr subs0 := derefed[0]! | return none
+  let n := subs0.size
+  if n == 0 then return none
+  let mut tuples : Array (Array ExprId) := #[]
+  for d in derefed do
+    let .arr subs := d | return none
+    if subs.size != n then return none
+    for s in subs do
+      match ← derefP s with
+      | .arr _ | .tag .. | .zeros _ => return none
+      | _ => pure ()
+    tuples := tuples.push subs
+  let mut cols : Array ExprId := #[]
+  let mut projs : Array ExprId := #[]
+  for j in [0:n] do
+    let col ← einternP (.arr (tuples.map (·[j]!)))
+    cols := cols.push col
+    projs := projs.push (← einternP (.index col loopIdxE))
+  let tupleNode : ENode := .arr projs
+  let elemSym ← einternP tupleNode
+  return some (cols, elemSym, some tupleNode)
+
 -- ─────────────────────────────────────────────────────────────
 -- Id-form (#190 native-DAG) — mirrors the unroller on EArena
 -- ─────────────────────────────────────────────────────────────
@@ -244,7 +291,23 @@ private partial def lowerExprCoreE (subst : SubstMapE) (id : ExprId) : LowerM Ex
   | .clamp a b c => einternP (.clamp (← lowerExprE subst a) (← lowerExprE subst b) (← lowerExprE subst c))
   | .select a b c => einternP (.select (← lowerExprE subst a) (← lowerExprE subst b) (← lowerExprE subst c))
   | .arraySet a b c => einternP (.arraySet (← lowerExprE subst a) (← lowerExprE subst b) (← lowerExprE subst c))
-  | .index a b => einternP (.index (← lowerExprE subst a) (← lowerExprE subst b))
+  | .index a b =>
+    let a' ← lowerExprE subst a
+    let b' ← lowerExprE subst b
+    -- Static-index fold: a literal, integral, in-bounds index into a literal
+    -- array IS the element. Columnize-over-shapes leans on this to resolve the
+    -- symbolic tuple's projections (`index(elem, j)` → `index(col_j, loopIdx)`);
+    -- out-of-bounds / non-integral indices keep today's runtime `Index`
+    -- semantics untouched. Fires only on nodes being rewritten anyway (the
+    -- needs-lowering fast path returns untouched subgraphs by id).
+    match ← derefP a', ← derefP b' with
+    | .arr items, .num n =>
+      let f := n.toFloat
+      if f == f.floor && f >= 0 && f.toUInt64.toNat < items.size then
+        pure items[f.toUInt64.toNat]!
+      else
+        einternP (.index a' b')
+    | _, _ => einternP (.index a' b')
 
 /-- LOOP-EVERYTHING (banks-as-data, the trunk move): a SUMMING fold survives as
     an indexed reduction (`bankSum`) instead of unrolling — the realization
@@ -256,13 +319,15 @@ private partial def lowerExprCoreE (subst : SubstMapE) (id : ExprId) : LowerM Ex
       associativity — the typed-accumulator emit carries floats). A Horner fold
       (`acc·x + c`) is not a Σ and keeps unrolling, as it should.
     - init ≡ literal 0 (the reduce seed `ReduceBegin` provides).
-    - scalar elements only (array/tag-valued columns wait for
-      columnize-over-shapes).
+    - element SHAPE decides the columns (`bankColumnsE`): scalar elements →
+      one column; uniform-arity tuple elements → per-position columns
+      (columnize-over-shapes); tags / ragged / nested / mixed → unroll.
     - no `bankSum` inside the lowered body — emit rejects NESTED regions (v1).
       A banked fold as a column ELEMENT is fine: tables materialize before the
       region, so its region closes sequentially.
-    The element binder substitutes to `index(col, loopIdx)` — the same
-    substitution machinery the unroll uses, pointed at a symbolic element. -/
+    The element binder substitutes to `index(col, loopIdx)` (or the symbolic
+    tuple of such projections) — the same substitution machinery the unroll
+    uses, pointed at a symbolic element. -/
 private partial def tryBankFoldE (subst : SubstMapE) (items : Array ExprId)
     (init : ExprId) (acc elem : Binder) (body : ExprId) : LowerM (Option ExprId) := do
   unless banksLoopEnabled do return none
@@ -274,16 +339,17 @@ private partial def tryBankFoldE (subst : SubstMapE) (items : Array ExprId)
   let .bindingRef i ← derefP accRef | return none
   unless i == acc.idx do return none
   if ← anyNodeE (· == .bindingRef acc.idx) rhs then return none
-  for item in items do
-    match ← derefP item with
-    | .arr _ | .tag .. => return none
-    | _ => pure ()
-  let col ← einternP (.arr items)
-  let elemSym ← einternP (.index col (← einternP .loopIdx))
+  let some (cols, elemSym, residual?) ← (bankColumnsE items : PassM _) | return none
   let rhs' ← lowerExprE ((elem.idx, elemSym) :: subst) rhs
+  -- The banked body must be SCALAR. If the symbolic tuple survived lowering
+  -- (a non-literal index into the element, or the element escaping whole),
+  -- bail to unroll — a materialized array-of-arrays would hit compilePack's
+  -- silent zero-fill.
+  if let some node := residual? then
+    if ← anyNodeE (· == node) rhs' then return none
   if ← anyNodeE (fun n => match n with | .bankSum .. => true | _ => false) rhs' then
     return none
-  some <$> einternP (.bankSum items.size #[col] rhs')
+  some <$> einternP (.bankSum items.size cols rhs')
 
 end
 
