@@ -128,6 +128,99 @@ def DstSlot.wireIdx : DstSlot → Except String Nat
   | .moduleSlot i => .ok i
   | .sessionArray _ => .error sessionArrayLeak
 
+/-- The scalar-op signature Σ: the arithmetic / logical / bitwise / cast
+    operations a plan instruction's `tag` names when it computes a scalar into a
+    temp or slot. Structural tags (`Pack`, `Index`, `ReduceBegin`, `WriteSlot`,
+    …) are NOT here — they route through their own emit paths, not `emitOp`.
+
+    This is the one object every backend interprets as a TOTAL algebra: the type
+    inference (`Emit.resultType`), the LLVM emitter, the MSL emitter, and the
+    MSL constant folder each match on it exhaustively, so extending the signature
+    forces every interpretation to define the new symbol (a partial `| _ => fail`
+    would not be an algebra). `name`/`ofString?` are the (de)serialization to the
+    plan wire tag; `ofString?` is the single point where an unknown scalar op is
+    rejected. -/
+inductive PlanOp where
+  | add | sub | mul | div | mod | floorDiv
+  | less | lessEq | greater | greaterEq | equal | notEqual
+  | and | or
+  | bitAnd | bitOr | bitXor | lshift | rshift | ldexp
+  | neg | abs | sqrt | floor | ceil | round
+  | not | bitNot | floatExponent | toInt | toBool | toFloat
+  | select | clamp
+deriving BEq, Repr, Inhabited
+
+/-- The plan wire tag for a scalar op (Capitalized; the `tropical_plan_5`
+    instruction `tag`). -/
+def PlanOp.name : PlanOp → String
+  | .add => "Add" | .sub => "Sub" | .mul => "Mul" | .div => "Div"
+  | .mod => "Mod" | .floorDiv => "FloorDiv"
+  | .less => "Less" | .lessEq => "LessEq" | .greater => "Greater"
+  | .greaterEq => "GreaterEq" | .equal => "Equal" | .notEqual => "NotEqual"
+  | .and => "And" | .or => "Or"
+  | .bitAnd => "BitAnd" | .bitOr => "BitOr" | .bitXor => "BitXor"
+  | .lshift => "LShift" | .rshift => "RShift" | .ldexp => "Ldexp"
+  | .neg => "Neg" | .abs => "Abs" | .sqrt => "Sqrt"
+  | .floor => "Floor" | .ceil => "Ceil" | .round => "Round"
+  | .not => "Not" | .bitNot => "BitNot" | .floatExponent => "FloatExponent"
+  | .toInt => "ToInt" | .toBool => "ToBool" | .toFloat => "ToFloat"
+  | .select => "Select" | .clamp => "Clamp"
+
+/-- Parse a plan wire tag into the scalar-op signature — the single validation
+    point for scalar ops (an unrecognized tag is not in Σ). -/
+def PlanOp.ofString? : String → Option PlanOp
+  | "Add" => some .add | "Sub" => some .sub | "Mul" => some .mul
+  | "Div" => some .div | "Mod" => some .mod | "FloorDiv" => some .floorDiv
+  | "Less" => some .less | "LessEq" => some .lessEq | "Greater" => some .greater
+  | "GreaterEq" => some .greaterEq | "Equal" => some .equal | "NotEqual" => some .notEqual
+  | "And" => some .and | "Or" => some .or
+  | "BitAnd" => some .bitAnd | "BitOr" => some .bitOr | "BitXor" => some .bitXor
+  | "LShift" => some .lshift | "RShift" => some .rshift | "Ldexp" => some .ldexp
+  | "Neg" => some .neg | "Abs" => some .abs | "Sqrt" => some .sqrt
+  | "Floor" => some .floor | "Ceil" => some .ceil | "Round" => some .round
+  | "Not" => some .not | "BitNot" => some .bitNot | "FloatExponent" => some .floatExponent
+  | "ToInt" => some .toInt | "ToBool" => some .toBool | "ToFloat" => some .toFloat
+  | "Select" => some .select | "Clamp" => some .clamp
+  | _ => none
+
+/-- Classification of the signature (properties of an op symbol, so a total
+    predicate with a default arm is fine — unlike the emit algebras, which must
+    be exhaustive). -/
+def PlanOp.isBitwise : PlanOp → Bool
+  | .bitAnd | .bitOr | .bitXor | .lshift | .rshift | .bitNot => true
+  | _ => false
+
+def PlanOp.isComparison : PlanOp → Bool
+  | .less | .lessEq | .greater | .greaterEq | .equal | .notEqual
+  | .not | .and | .or => true
+  | _ => false
+
+def PlanOp.isTranscendental : PlanOp → Bool
+  | .sqrt | .floor | .ceil | .round | .ldexp | .floatExponent => true
+  | _ => false
+
+def promoteTypes (a b : ScalarType) : ScalarType :=
+  if a == .float || b == .float then .float
+  else if a == .int || b == .int then .int
+  else .bool
+
+/-- The type-inference algebra over the signature: the result sort of an op from
+    its argument sorts. Casts fix the sort; bitwise → int, comparison → bool,
+    transcendental → float; `select`/`clamp` read the arm/value sort; the rest
+    promote across args (head as seed — `promoteTypes` is idempotent). -/
+def PlanOp.resultType : PlanOp → Array ScalarType → ScalarType
+  | .toInt,   _ => .int
+  | .toBool,  _ => .bool
+  | .toFloat, _ => .float
+  | op, argTypes =>
+    if op.isBitwise then .int
+    else if op.isComparison then .bool
+    else if op.isTranscendental then .float
+    else match op with
+      | .select => promoteTypes (argTypes[1]?.getD .float) (argTypes[2]?.getD .float)
+      | .clamp => argTypes[0]?.getD .float
+      | _ => if argTypes.isEmpty then .float else argTypes.foldl promoteTypes argTypes[0]!
+
 structure NInstr where
   tag : String
   dst : DstSlot
