@@ -9,6 +9,7 @@ import Tropical.Ir.CompileResolved
 import Tropical.Ir.EmitLlvm
 import Tropical.Ir.EmitMsl
 import Tropical.StagedLoad
+import Tropical.StdlibChain
 import Tropical.PlanDecode
 import Tropical.Engine
 import Tropical.Parse.Surface.Markdown
@@ -308,46 +309,27 @@ def parseAllVerb (_args : List String) : IO UInt32 := do
 
 -- ── elab-stdlib / elab-file (Phase 4 stage 3) ────────────────────────────────
 
-private def parsedDir : String := "stdlib/parsed"
+private def parsedDir : String := Tropical.StdlibChain.parsedDir
 
-/-- Read + strictly decode a serialized ParsedProgram. Decode failures
-    are harness errors (the TS side has no decoder to disagree with). -/
-private def readParsed (path : String) : IO (Except String Tropical.Parse.Program) := do
-  let text ← IO.FS.readFile path
-  pure <| do
-    let jv ← Tropical.Parse.JsonV.parse text |>.mapError (s!"JSON parse error: {·}")
-    Tropical.Parse.decodeProgram jv
+/-- Read + strictly decode a serialized ParsedProgram (the shared bridge
+    reader — verbs also point it at arbitrary paths). -/
+private def readParsed (path : String) : IO (Except String Tropical.Parse.Program) :=
+  Tropical.StdlibChain.readParsed path
 
-private def manifestNames : IO (Except String (Array String)) := do
-  let text ← IO.FS.readFile s!"{parsedDir}/manifest.json"
-  pure <| do
-    let jv ← Tropical.Parse.JsonV.parse text |>.mapError (s!"manifest parse error: {·}")
-    let some (Tropical.Parse.JsonV.arr items) := jv.getField? "programs"
-      | .error "manifest missing 'programs' array"
-    items.mapM fun
-      | .str s => .ok s
-      | _ => .error "manifest 'programs' entries must be strings"
+private def manifestNames : IO (Except String (Array String)) :=
+  Tropical.StdlibChain.manifestNames
 
-/-- The raw-elaborated stdlib chain (elaborate-only — no strata), in
-    manifest order, threading an external resolver over earlier results.
-    Mirrors `elabChain` in scripts/diff/elab_cmd.ts. -/
+/-- The raw-elaborated stdlib chain (elaborate-only — no strata) over an
+    explicit name prefix, keeping the structured `ElabError` the verbs
+    print as comparable JSON (the failing name is dropped — the caller
+    named the chain). -/
 private def elabChain (names : Array String) :
     IO (Except String (Except Tropical.Ir.ElabError
       (Tropical.Ir.Arena × Array (String × Tropical.Ir.ProgramIdx)))) := do
-  let mut arena : Tropical.Ir.Arena := {}
-  let mut resolved : Array (String × Tropical.Ir.ProgramIdx) := #[]
-  for name in names do
-    match ← readParsed s!"{parsedDir}/{name}.json" with
-    | .error e => return .error s!"{name}.json: {e}"
-    | .ok prog =>
-      let r := resolved
-      match Tropical.Ir.elaborateInto arena prog
-          (some fun n => (r.find? (·.1 == n)).map (·.2)) with
-      | .error e => return .ok (.error e)
-      | .ok (arena', idx) =>
-        arena := arena'
-        resolved := resolved.push (name, idx)
-  return .ok (.ok (arena, resolved))
+  match ← Tropical.StdlibChain.elabChain names with
+  | .error e => pure (.error e)
+  | .ok (.error (_, e)) => pure (.ok (.error e))
+  | .ok (.ok r) => pure (.ok (.ok r))
 
 private def printEncoded (arena : Tropical.Ir.Arena) (root : Tropical.Ir.ProgramIdx) :
     IO UInt32 := do

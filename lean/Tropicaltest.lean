@@ -612,37 +612,12 @@ private def runCfOnly (name md : String) (expectReject : Bool) : IO Bool := do
 
 open Tropical.Ir (Arena ProgramIdx)
 
-/-- Read + strictly decode a serialized ParsedProgram (mirrors Diffcli.readParsed). -/
-private def arrowReadParsed (path : String) : IO (Except String Tropical.Parse.Program) := do
-  let text ← IO.FS.readFile path
-  pure <| do
-    let jv ← Tropical.Parse.JsonV.parse text |>.mapError (s!"JSON parse error: {·}")
-    Tropical.Parse.decodeProgram jv
-
-/-- Elaborate the whole stdlib bridge chain in manifest order (mirrors
-    Diffcli.elabChain), so `FixedSinOsc` (and its transitive voice deps) are in
-    the arena for `buildClockCarrier` to link against. Done once and reused. -/
-private def arrowElabStdlib : IO (Except String (Arena × Array (String × ProgramIdx))) := do
-  let manifestText ← IO.FS.readFile "stdlib/parsed/manifest.json"
-  let names : Except String (Array String) := do
-    let jv ← Tropical.Parse.JsonV.parse manifestText |>.mapError (s!"manifest parse error: {·}")
-    let some (Tropical.Parse.JsonV.arr items) := jv.getField? "programs"
-      | .error "manifest missing 'programs' array"
-    items.mapM fun | .str s => .ok s | _ => .error "manifest 'programs' entries must be strings"
-  match names with
-  | .error e => pure (.error e)
-  | .ok names => do
-    let mut arena : Arena := {}
-    let mut resolved : Array (String × ProgramIdx) := #[]
-    for name in names do
-      match ← arrowReadParsed s!"stdlib/parsed/{name}.json" with
-      | .error e => return .error s!"{name}.json: {e}"
-      | .ok prog =>
-        let r := resolved
-        match Tropical.Ir.elaborateInto arena prog (some fun n => (r.find? (·.1 == n)).map (·.2)) with
-        | .error e => return .error s!"{name}: {e.message}"
-        | .ok (arena', idx) => arena := arena'; resolved := resolved.push (name, idx)
-    pure (.ok (arena, resolved))
+/-- Elaborate the whole stdlib bridge chain in manifest order (the shared
+    `StdlibChain` driver), so `FixedSinOsc` (and its transitive voice deps)
+    are in the arena for `buildClockCarrier` to link against. Done once and
+    reused. -/
+private def arrowElabStdlib : IO (Except String (Arena × Array (String × ProgramIdx))) :=
+  Tropical.StdlibChain.elabStdlib
 
 /-- Build one EmitArrow clock carrier (named `name`, clocked at `clkE`) into a
     runnable `FlatPlan` via the production session path. -/
