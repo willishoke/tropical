@@ -29,6 +29,7 @@ struct KnobSpec {
 enum NodeKind: String, CaseIterable, Codable {
     case source, knob, flange, sflange, fm, delay, reverse, mix, ring
     case resonator, reverb, modalmix
+    case scope
     case out
 }
 
@@ -41,11 +42,17 @@ struct NodeSpec {
     let knobs: [KnobSpec]
     var modal = false
     var fixed = false
+    /// A monitor lives only on the surface: it is never serialized into the
+    /// engine graph (its connections select scope taps), and its knobs are
+    /// local view state, not live param slots.
+    var monitor = false
+    var gridOverride: (w: Int, h: Int)? = nil
 
     /// Module footprint in grid units (VCV-style: every module has a defined
     /// width and height on the grid). Derived from content: 54px per knob +
     /// chrome for width; title + knob block + jacks for height.
     var gridSize: (w: Int, h: Int) {
+        if let o = gridOverride { return o }
         let w = max(4, Int(ceil((Double(knobs.count) * 54 + Double(max(0, knobs.count - 1)) * 8 + 18) / Grid.unit)))
         let h = knobs.isEmpty ? 3 : 6
         return (w, h)
@@ -203,6 +210,20 @@ extension NodeKind {
                 title: "Modal ∪", accent: Color(hex: 0x6FE0D0), summing: true,
                 inlets: ["in"], outlets: ["out"], knobs: [],
                 modal: true)
+        case .scope:
+            // A MONITOR, not a processor: never enters the engine graph.
+            // Each channel selects a node whose tap slot the poller reads via
+            // `render_window` — random-access closed-form evaluation on the
+            // C++ data plane, so tracing is free of the audio path and stays
+            // live through compiles. Patching a channel to a non-Out node
+            // asks the next relower for `taps: true` (each tap re-emits its
+            // upstream cone, so taps are paid for only while a scope looks).
+            // `window` is view state (the trace's time span), not a param.
+            return NodeSpec(
+                title: "Scope", accent: Color(hex: 0x7FE08C), summing: false,
+                inlets: ["ch1", "ch2", "ch3", "ch4"], outlets: [],
+                knobs: [KnobSpec(name: "window", min: 0.002, max: 0.35, def: 0.02, log: true, unit: "s")],
+                monitor: true, gridOverride: (w: 16, h: 12))
         case .out:
             return NodeSpec(
                 title: "Out · dac", accent: Color(hex: 0xFF8A8A), summing: true,

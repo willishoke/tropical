@@ -13,9 +13,13 @@ so reverse is just receding τ.
 swift run
 ```
 
-The app owns the Lean `frontend` binary over its newline-delimited
-JSON-RPC surface (`--rpc`) and plays audio out of the host's device
-(RtAudio) — the window is purely a control surface.
+The app owns the Lean `frontend` binary over its Unix-socket JSON-RPC
+surface (`--serve`, same newline-delimited framing as `--rpc`) and plays
+audio out of the host's device (RtAudio) — the window is purely a control
+surface. The socket carries a control/data plane split: `set_param`,
+`render_window`, and `playback_position` are answered synchronously in
+C++ and never queue behind the Lean control thread — that is what keeps
+knob writes and the Scope module's traces live through a long compile.
 
 Engine resolution order:
 1. `TROPICAL_ENGINE_BIN` env var (path to the `frontend` binary)

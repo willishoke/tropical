@@ -103,18 +103,24 @@ final class PatchModel: ObservableObject {
         forward = { event in Task { @MainActor in box.handler?(event) } }
         engine = Engine(events: forward)
         box.handler = { [weak self] event in self?.handle(event) }
+        // Every exit path must reap the child engine or it orphans with the
+        // DAC running (see AppDelegate).
+        AppDelegate.onTerminate = { [engine] in engine.terminateChild() }
 
-        do { try startEngine() } catch {
-            setStatus("engine: \(error.localizedDescription)", isError: true)
-        }
+        startEngine()
         addNode(.out, at: CGPoint(x: 1180, y: 360))
         addNode(.source, at: CGPoint(x: 120, y: 200))
         setStatus("engine up · patch something", isError: false)
+        startScopePolling()
     }
 
-    private func startEngine() throws {
+    private func startEngine() {
         let e = engine
-        Task { try await e.start() }
+        Task { [weak self] in
+            do { try await e.start() } catch {
+                self?.setStatus("engine: \(error.localizedDescription)", isError: true)
+            }
+        }
     }
 
     private func handle(_ event: EngineEvent) {
@@ -187,6 +193,10 @@ final class PatchModel: ObservableObject {
               !(to.inputs[port] ?? []).contains(fromId)
         else { return false }
         let fromIsKnob = from.kind == .knob
+        // A sink (Out, Scope) has no outlet, so it is never a source — except
+        // the final mix, which is always tappable (`__root__.out`), so Out may
+        // feed a Scope channel.
+        if from.kind.spec.outlets.isEmpty && !(to.kind == .scope && from.kind == .out) { return false }
         // A knob is a control value: it may only drive a control inlet (freq/mod).
         if fromIsKnob && !NodeKind.controlInlets.contains(port) { return false }
         // `freq` is control-only — audio-rate into the pitch port is not FM.
@@ -218,10 +228,19 @@ final class PatchModel: ObservableObject {
     }
 
     // ── Serialization → load_patch_graph ─────────────────────────────────
+    /// Taps cost kernel compute (each re-emits its upstream cone), so request
+    /// them only while a scope channel actually watches a node. Out is exempt:
+    /// the final-mix slot `__root__.out` exists in every compile.
+    var tapsWanted: Bool {
+        nodes.values.contains { n in
+            n.kind == .scope && n.allInputs.contains { nodes[$0]?.kind != .out }
+        }
+    }
+
     func serialize() -> JSONValue {
         var out: [JSONValue] = []
         for id in order {
-            guard let n = nodes[id] else { continue }
+            guard let n = nodes[id], !n.kind.spec.monitor else { continue }
             let spec = n.kind.spec
             var params: [String: JSONValue] = [:]
             for k in spec.knobs { params[k.name] = .number(n.values[k.name] ?? k.def) }
@@ -239,6 +258,7 @@ final class PatchModel: ObservableObject {
         return .object([
             "nodes": .array(out),
             "out": outNode.map { .string($0.id) } ?? .null,
+            "taps": .bool(tapsWanted),
         ])
     }
 
@@ -252,6 +272,8 @@ final class PatchModel: ObservableObject {
         }
     }
 
+    private var lastPushed: JSONValue?
+
     func pushGraph() async {
         if pushInFlight { pushAgain = true; return }
         pushInFlight = true
@@ -259,6 +281,10 @@ final class PatchModel: ObservableObject {
             pushInFlight = false
             if pushAgain { pushAgain = false; schedulePush() }
         }
+        // A monitor-only edit (e.g. scoping the Out mix) leaves the engine
+        // graph byte-identical — skip the recompile, not just debounce it.
+        let graph = serialize()
+        if graph == lastPushed { return }
         do {
             // The compile+JIT is synchronous on the engine's single control
             // thread, so a heavy node (e.g. a modal reverb: ~10⁵ IR lines →
@@ -266,14 +292,17 @@ final class PatchModel: ObservableObject {
             // "compiling" is distinguishable from "hung" — the acute failure
             // mode of the live-patch loop.
             setStatus("compiling…", isError: false)
-            try await engine.call("load_patch_graph", serialize())
+            try await engine.call("load_patch_graph", graph)
+            lastPushed = graph
             // A relower transfers slots by name, so a live scrub survives it —
             // except a COLD first compile, which seeds master.velocity at its
             // default (1). Re-apply a non-default scrub so the slider and the
             // running clock agree (no-op if equal).
             if velocity != 1 { params.send("set_param_velocity", "master.velocity", velocity) }
+            await refreshScopeTaps()
             setStatus(audioOn ? "playing" : "compiled", isError: false)
         } catch {
+            lastPushed = nil
             setStatus("compile: \(error.localizedDescription)", isError: true)
         }
     }
@@ -282,6 +311,8 @@ final class PatchModel: ObservableObject {
     lazy var params = ParamSender(model: self)
 
     func sendKnob(_ node: PatchNode, _ knob: KnobSpec, _ value: Double) {
+        // A monitor's knobs (Scope `window`) are view state, not param slots.
+        guard !node.kind.spec.monitor else { return }
         let name = "\(node.id).\(knob.name)"
         switch knob.mode {
         case .live: params.send("set_param", name, value)
@@ -356,6 +387,113 @@ final class PatchModel: ObservableObject {
                 await self?.pollTelemetry()
             }
         }
+    }
+
+    // ── Scope taps ────────────────────────────────────────────────────────
+    // A scope channel names a NODE; the engine names a SLOT. After each
+    // compile `list_scope_taps` rebinds node id → `__root__.tap:<id>` (a node
+    // that failed to lower simply has no tap and its trace goes dark). The
+    // final mix is the one slot that exists in every compile, so Out maps
+    // statically — no taps build required to watch the output.
+    private var scopeTapSlots: [String: String] = [:]
+
+    /// Latest triggered trace per scope channel, keyed "<scopeId>.<port>".
+    @Published var scopeTraces: [String: [Double]] = [:]
+
+    func scopeSlot(for sourceId: String) -> String? {
+        if nodes[sourceId]?.kind == .out { return "__root__.out" }
+        return scopeTapSlots[sourceId]
+    }
+
+    private func refreshScopeTaps() async {
+        guard tapsWanted else { scopeTapSlots = [:]; return }
+        guard let r = try? await engine.call("list_scope_taps"),
+              case .array(let taps)? = r["taps"] else { return }
+        var map: [String: String] = [:]
+        for t in taps {
+            guard let name = t["name"]?.stringValue,
+                  let slot = t["slot"]?.stringValue, name != "out" else { continue }
+            map[name] = slot
+        }
+        scopeTapSlots = map
+    }
+
+    // ── Scope poll loop ───────────────────────────────────────────────────
+    // `render_window` + `playback_position` are data-plane methods: answered
+    // synchronously in C++ off the audio thread, never queued behind the Lean
+    // control thread — so the trace stays live through a compile and works
+    // with the transport stopped (the kernel is closed-form; a frozen clock
+    // just yields a still waveform). One serial loop, so a slow frame can
+    // never pile up requests.
+    static let sampleRate = 44100.0
+    private var scopeTask: Task<Void, Never>?
+
+    private func startScopePolling() {
+        scopeTask = Task { [weak self] in
+            while !Task.isCancelled {
+                try? await Task.sleep(for: .milliseconds(33))
+                guard !Task.isCancelled else { return }
+                await self?.pollScopes()
+            }
+        }
+    }
+
+    private func pollScopes() async {
+        let scopes = order.compactMap { nodes[$0] }
+            .filter { $0.kind == .scope && !$0.allInputs.isEmpty }
+        guard !scopes.isEmpty else {
+            if !scopeTraces.isEmpty { scopeTraces = [:] }
+            return
+        }
+        guard let pos = try? await engine.call("playback_position"),
+              let position = pos["position"]?.doubleValue else { return }
+        var fresh: [String: [Double]] = [:]
+        for scope in scopes {
+            let window = scope.values["window"] ?? 0.02
+            let count = min(8192, max(128, Int(window * Self.sampleRate)))
+            // Fetch 2× the display span so the trigger can align a full
+            // window ending at the live head.
+            let fetch = min(16384, count * 2)
+            let start = max(0, Int(position) - fetch)
+            var slots: [String] = [], keys: [String] = []
+            for port in scope.kind.spec.inlets {
+                guard let src = scope.inputs[port]?.first,
+                      let slot = scopeSlot(for: src) else { continue }
+                slots.append(slot)
+                keys.append("\(scope.id).\(port)")
+            }
+            guard !slots.isEmpty,
+                  let r = try? await engine.call("render_window", .object([
+                      "start": .number(Double(start)),
+                      "count": .number(Double(fetch)),
+                      "slots": .array(slots.map(JSONValue.string)),
+                  ])),
+                  case .array(let chans)? = r["values"] else { continue }
+            for (i, key) in keys.enumerated() {
+                guard i < chans.count, case .array(let raw) = chans[i] else { continue }
+                let samples = raw.compactMap(\.doubleValue)
+                let t = Self.triggerIndex(samples, display: count)
+                fresh[key] = Array(samples[t..<min(t + count, samples.count)])
+            }
+        }
+        scopeTraces = fresh
+    }
+
+    /// Rising level-trigger with hysteresis (the playground scope's port of
+    /// tui/scope/trigger.ts): arm below −h, fire on the first climb past +h,
+    /// searching only far enough back that a full display window remains.
+    static func triggerIndex(_ s: [Double], display: Int) -> Int {
+        let searchEnd = s.count - display
+        guard searchEnd > 0 else { return 0 }
+        let peak = s.reduce(0) { max($0, abs($1)) }
+        let h = peak * 0.05
+        guard h > 0 else { return 0 }
+        var armed = false
+        for i in 0..<searchEnd {
+            if s[i] < -h { armed = true }
+            else if armed && s[i] >= h { return i }
+        }
+        return 0
     }
 
     private func pollTelemetry() async {
