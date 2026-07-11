@@ -12,7 +12,7 @@ See _style.py for the shared house aesthetic. Three beats:
                     closed form, elliptic), driven+damped (chaos, no f(t)).
 """
 import numpy as np
-from _style import apply_style, figdir_of, finish, tidy, K, G, L, FILL
+from _style import apply_style, figdir_of, finish, tidy, halo, K, G, L, FILL
 import matplotlib.pyplot as plt
 
 apply_style()
@@ -43,8 +43,8 @@ def fig_euler_spiral():
     # true orbit: the unit circle (theta = cos t, theta-dot = -sin t)
     a = np.linspace(0, 2 * np.pi, 400)
     ax.plot(np.cos(a), np.sin(a), color=L, linewidth=0.9)
-    ax.text(0.72, 0.72, "true orbit", color="0.45", fontsize=8.5,
-            ha="left", va="bottom", rotation=-45)
+    halo(ax.text(0.70, 0.70, "true orbit", color="0.42", fontsize=8.5,
+                 ha="left", va="bottom", rotation=-45))
 
     # forward Euler: x_{n+1} = x + dt v ; v_{n+1} = v - dt x  (energy grows)
     dt = 0.1
@@ -57,22 +57,21 @@ def fig_euler_spiral():
     xs, vs = np.array(xs), np.array(vs)
     ax.plot(xs, vs, color=K, linewidth=0.9)
     ax.plot(xs[:6], vs[:6], linestyle="none", marker="o", color=K, ms=2.6)
-    ax.annotate("forward Euler:\nenergy added each step",
-                xy=(xs[-1], vs[-1]), xytext=(-1.72, 1.28), fontsize=8.5,
-                color=K, ha="left", va="center",
-                arrowprops=dict(arrowstyle="->", color="0.3", linewidth=0.7,
-                                connectionstyle="arc3,rad=-0.2"))
+    # label by proximity in the open upper-left corner -- no slashing leader
+    halo(ax.text(-1.86, 1.44, "forward Euler:\nenergy added each step",
+                 fontsize=8.5, color=K, ha="left", va="center"))
 
     # a state = a point on the true orbit, reached by evaluation
     tstar = np.pi / 3
     px, pv = np.cos(tstar), -np.sin(tstar)
     ax.plot(px, pv, marker="o", color=K, ms=4.5)
-    ax.annotate(r"a state $(\theta,\dot\theta)$ at time $t$"
-                "\nread by evaluating,\nnot travelled to",
-                xy=(px, pv), xytext=(0.62, -1.42), fontsize=8.5, color=K,
-                ha="left", va="center",
-                arrowprops=dict(arrowstyle="->", color="0.3", linewidth=0.7,
-                                connectionstyle="arc3,rad=0.25"))
+    halo(ax.annotate(r"a state $(\theta,\dot\theta)$ at time $t$"
+                     "\nread by evaluating,\nnot travelled to",
+                     xy=(px, pv), xytext=(0.30, -1.55), fontsize=8.5, color=K,
+                     ha="left", va="center",
+                     arrowprops=dict(arrowstyle="->", color="0.4",
+                                     linewidth=0.7, shrinkB=5,
+                                     connectionstyle="arc3,rad=0.28")))
 
     ax.set_aspect("equal")
     ax.set_xlim(-1.95, 1.95)
@@ -98,14 +97,12 @@ def fig_read_anywhere():
     t = np.linspace(-3.4, 30, 3000)
     ax.plot(t, np.cos(t), color=K, linewidth=0.9)
 
-    # the stream's samples: computed in order, one after another
+    # the stream's samples: computed in order, one after another.  Label by
+    # proximity in the open band below the curve -- no leader across it.
     ts = np.arange(0.0, 12.01, 0.6)
     ax.plot(ts, np.cos(ts), linestyle="none", marker="o", color=L, ms=2.6)
-    ax.annotate("a stream computes these in order,\nleft to right",
-                xy=(ts[9], np.cos(ts[9])), xytext=(3.2, -1.72),
-                fontsize=8.5, color="0.45", ha="left", va="center",
-                arrowprops=dict(arrowstyle="->", color="0.6", linewidth=0.7,
-                                connectionstyle="arc3,rad=0.15"))
+    halo(ax.text(6.0, -1.58, "a stream computes these in order, left to right",
+                 ha="center", va="center", fontsize=8.5, color="0.42"))
 
     # three direct reads, reachable without stepping
     reads = [(-2.3, "backward"), (14.4, "fractional"), (27.0, "jumped")]
@@ -113,8 +110,8 @@ def fig_read_anywhere():
         v = np.cos(tau)
         ax.axvline(tau, color="0.6", linestyle=(0, (1, 2.2)), linewidth=0.6)
         ax.plot(tau, v, marker="o", color=K, ms=4.2)
-        ax.annotate(lab, xy=(tau, v), xytext=(tau, 1.5), ha="center",
-                    va="bottom", fontsize=8.5, color="0.25")
+        halo(ax.annotate(lab, xy=(tau, v), xytext=(tau, 1.55), ha="center",
+                         va="bottom", fontsize=8.5, color="0.25"))
 
     ax.set_xlim(-3.4, 30)
     ax.set_ylim(-1.9, 1.9)

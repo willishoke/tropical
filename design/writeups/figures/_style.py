@@ -11,6 +11,7 @@ import os
 import matplotlib as mpl
 mpl.use("Agg")
 import matplotlib.pyplot as plt  # noqa: E402  (after backend selection)
+import matplotlib.patheffects as pe  # noqa: E402
 
 # grayscale palette
 K = "0.0"      # black
@@ -67,3 +68,25 @@ def boxed_legend(ax, **kw):
     """A white-backed legend that reads cleanly over curves."""
     return ax.legend(frameon=True, framealpha=1.0, edgecolor="0.8",
                      fancybox=False, **kw)
+
+
+def halo(*artists, lw=2.6):
+    """Give text a thin white 'paper' halo so it reads over curves, axes, and
+    shaded regions without being moved. This is the highest-leverage
+    legibility fix in the series: it decouples whether a label is readable
+    from where it sits, so annotations no longer have to dodge every curve.
+    Deterministic (a plain stroke, no iterative solver), so byte-reproducible
+    output is preserved. Pass any Text / Annotation artists.
+
+        halo(ax.text(...))
+        halo(a1, a2, a3)                     # several at once
+        halo(ax.annotate(...), lw=3.0)       # wider halo over busy regions
+
+    Only the text is stroked; an Annotation's arrow is left untouched. Use on
+    inline labels and callouts, not on axis labels/ticks (already in the
+    margins). Halos assume a light page, which these black-ink-on-transparent
+    figures already require."""
+    effs = [pe.withStroke(linewidth=lw, foreground="white"), pe.Normal()]
+    for a in artists:
+        a.set_path_effects(effs)
+    return artists[0] if len(artists) == 1 else artists
