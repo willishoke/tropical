@@ -44,9 +44,9 @@ def powE (base : Sig) : Nat → Sig
   | 1 => base
   | n + 1 => mul (powE base n) base
 
-/-- The RELATIVE clock `clkRel = clk − anchor·2³²` as an EXACT i64 subtract. The
-    old float path (`toFloat(clk)/2³² − anchor`) lost mantissa bits as the absolute
-    clock grew — the one unbounded-float-time site in the system. Subtracting on
+/-- The RELATIVE clock `clkRel = clk − anchor·2³²` as an EXACT i64 subtract.
+    (A float-relative clock — `toFloat(clk)/2³² − anchor` — loses mantissa bits
+    as the absolute clock grows, drifting with τ.) Subtracting on
     the integer clock first keeps time-translation exact at any τ; everything
     downstream (phase reduction, the bounded envelope coordinate, the causal gate)
     sees only the bounded relative value. -/
@@ -58,8 +58,8 @@ def relClockQ (clkInt anchorSamples : Sig) : Sig :=
     (float math, so ω may be a live slot), then the exact split-multiply
     `incr·hi + (incr·lo)>>32` reduces `incr·clkRel` on the circle ℤ/2³² — the
     phase argument never leaves `[0, 2π)`, so its precision is τ-INDEPENDENT
-    (the old `ω·dSec` fed `sinSig` an unbounded argument whose mantissa starved
-    as τ grew). ω quantizes to the SR/2³² grid (~1e-5 Hz at 44.1k) — inaudible.
+    (a raw `ω·dSec` argument is unbounded — its mantissa starves as τ grows).
+    ω quantizes to the SR/2³² grid (~1e-5 Hz at 44.1k) — inaudible.
     `rshift` is `ashr`, so `clkRel = (clkRel>>32)·2³² + (clkRel & (2³²−1))` holds
     exactly on NEGATIVE relative clocks (pre-strike, mirrored reads). Returns the
     phase in RADIANS `[0, 2π)` for the `sinSig`/`cosSig` polynomials. -/
@@ -97,7 +97,7 @@ def modePhaseQFromIncr (incr clkRel : Sig) : Sig :=
 def modalBankSig (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Sig) : Sig :=
   let clkRel := relClockQ clkInt anchorSamples
   let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-  -- Q datapath (scope A): per mode, the slow scalars (envelope × residue
+  -- Q datapath: per mode, the slow scalars (envelope × residue
   -- weight) land ONCE as Q4.28 (headroom |w| < 32, quantum 3.7e-9 ≈ −168 dB —
   -- a tail quieter than that truncates to true silence), the oscillator values
   -- are exact Q2.30 off the integer phase, and the mode SUM is i64 — modular,
@@ -180,7 +180,7 @@ def bankFold (cols : BankCols) (body : ModeSym → Sig) : Sig :=
     cols.live?
     cols.idxId
 
-/-- The BANKED lowering of a modal bank (banks-as-data slice 3b): the SAME value
+/-- The BANKED lowering of a modal bank (banks-as-data): the SAME value
     as `modalBankSig`, but the mode sum is a `bankFold` indexed reduction over
     the coefficient columns instead of an unrolled fold — so the emitted plan is
     O(1) in mode count, not O(modes). Requires every mode `deg == 0` (the uniform
@@ -282,14 +282,13 @@ def residueComposeEC (voice reverb : Array ModalMode) : Array ModalMode :=
 
 /-- Banks-as-data is the DEFAULT lowering: uniform (all deg-0) modal banks lower
     through the indexed reduction (`bankFold` — `modalBankSigTable` /
-    `modalBankSigDirTable`) instead of unrolling. The strangler ran its course:
-    the banked render is bit-identical to the unroll (order-preserving loop,
-    i64-modular sum — the `banks-as-data`/`banks-as-data-dir` gates pin it), the
-    goldens pass byte-for-byte either way, and the coefficient columns are
-    generation-buffered in FlatRuntime (no cross-column tear on live knob
-    moves). `TROPICAL_BANKS_UNROLL` is the escape hatch back to the unrolled
-    form (bisection ladder: the naive realization stays reachable). Read once at
-    load, so the pure lowering may branch on it. -/
+    `modalBankSigDirTable`) instead of unrolling. Sound because the banked
+    render is bit-identical to the unroll (order-preserving loop, i64-modular
+    sum — the `banks-as-data`/`banks-as-data-dir` gates pin it) and the
+    coefficient columns are generation-buffered in FlatRuntime (no cross-column
+    tear on live knob moves). `TROPICAL_BANKS_UNROLL` is the escape hatch back
+    to the unrolled form (bisection ladder: the naive realization stays
+    reachable). Read once at load, so the pure lowering may branch on it. -/
 initialize banksTableEnabled : Bool ← do
   return (← IO.getEnv "TROPICAL_BANKS_UNROLL").isNone
 
@@ -429,7 +428,7 @@ def modalBankTermDirWith
 
 /-- `modalBankTerm` with a DIRECTION crossfade. Rides the `.clk` leaf like
     `modalBankTerm`, so master warps still reach it. Dispatches to the banked
-    lowering for uniform banks under the strangler flag, like `modalBankTerm`. -/
+    lowering for uniform banks under the banks flag, like `modalBankTerm`. -/
 def modalBankTermDir (modes : Array ModalMode) (anchor : Sig) (c : Clock)
     (dir : Sig) (damp? : Option (Sig × Sig) := none)
     (count? : Option Sig := none) : ArrowTerm :=

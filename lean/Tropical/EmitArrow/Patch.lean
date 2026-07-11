@@ -160,11 +160,11 @@ partial def lowerModal (g : PatchGraph) (id : String) :
     -- A reverb FUSES its modal input with the room by the residue calculus, in the
     -- COLLECTED form (`residueComposeEC`): `m + n` modes — the voice's poles colored
     -- by the room (`a·H_room(λ)`) plus the room's poles colored by the voice
-    -- (`−r·Σ a/(λ−ν)`) — not the `m·n` the uncollected form cost (which is what
-    -- previously forced the discard-the-source "generic effect" compromise, killing
-    -- the source's spectrum AND its live knobs downstream of a reverb). Amps are
-    -- symbolic, so a resonator's `freq`/`decay` slots stay live through the room.
-    -- Time-basis (anchor/clock/addr) threads from the source as before.
+    -- (`−r·Σ a/(λ−ν)`) — not the `m·n` of the uncollected pairing. The collected
+    -- cost is what lets the composition KEEP the source: its spectrum and its
+    -- live knobs survive downstream of a reverb (amps are symbolic, so a
+    -- resonator's `freq`/`decay` slots stay live through the room).
+    -- Time-basis (anchor/clock/addr) threads from the source.
     let (v, a, clk, addr, dirIn, _count) ← lowerModal g inId
     -- The live count does NOT survive composition: the composed bank's modes
     -- (voice-colored + room-colored) are no longer a prefix of the source's,

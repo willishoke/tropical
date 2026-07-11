@@ -17,7 +17,7 @@ namespace Tropical.EmitArrow
 open Tropical.Ir
 
 -- ─────────────────────────────────────────────────────────────
--- M2 — a "warp" is just a clock EXPRESSION (no separate algebra)
+-- A "warp" is just a clock EXPRESSION (no separate algebra)
 -- ─────────────────────────────────────────────────────────────
 
 /-! There is no `Warp` type. The clock is a first-class expression and a warp is
@@ -43,7 +43,7 @@ open Tropical.Ir
 /-- A **voice** is the primitive morphism `Clock ⇝ Sig`, made generic over the
     stdlib program that realizes it. `osc` does NOT hand-roll a phasor +
     polynomial — it references the elaborated voice body and lets strata inline
-    it (the M0 finding), which is what buys byte-identity.
+    it, which is what buys byte-identity with the hand-written programs.
 
     * `programName` — the stdlib program (`FixedSinOsc`, `ModalVoice`, …).
     * `wire` — how to fill the voice instance's inputs from the (warped) clock.
@@ -163,8 +163,8 @@ def arrMor (f : Array Sig → Array Sig) : Mor := fun xs b => (f xs, b)
     back as a bundle. The categorical content: a named multi-port instance IS a
     morphism between products; this bridge is the iso between its named (record)
     presentation and the positional (tuple) one. Emits a COARSE instance — `⋙`
-    and strata's `inlineInstances` flatten it; the combinator surface is what
-    the cutover keeps. -/
+    and strata's `inlineInstances` flatten it away; only the combinator surface
+    survives to the emitted bytes. -/
 def instMor (name programName : String) (portOrder : Array InputIdx)
     (numOut : Nat) : Mor := fun args b =>
   let inputs : Array AInput :=
@@ -179,7 +179,7 @@ def instMor (name programName : String) (portOrder : Array InputIdx)
 def clockLit : Clock := .binary .lshift .sampleIndex (lit 32)
 
 -- ─────────────────────────────────────────────────────────────
--- M8 — the SLIDE (WARP-PUSH): a REIFIED arrow term + the τ-push rewrite
+-- The SLIDE (WARP-PUSH): a REIFIED arrow term + the τ-push rewrite
 -- ─────────────────────────────────────────────────────────────
 
 /-! Everything above is the SMART-CONSTRUCTOR (deep-by-emission) layer: the
@@ -187,9 +187,9 @@ def clockLit : Clock := .binary .lshift .sampleIndex (lit 32)
     slide needs the opposite — a REIFIED arrow term it can pattern-match — because
     WARP-PUSH is a *rewrite*: it takes an effect presented DOWNSTREAM (`warp`
     applied to a signal) and pushes the warp UP through the stateless cone until
-    it lands as a generator's clock argument. Until now the warped clocks were
-    written by hand (`warpBank` builds the already-upstream form); this section
-    makes the COMPILER perform downstream→upstream.
+    it lands as a generator's clock argument. This is where the COMPILER performs
+    downstream→upstream: the user patches an effect after a signal, the emitted
+    kernel reads the generators at warped clocks.
 
     `ArrowTerm` is a tiny inspectable arrow AST. The only non-trivial node is
     `warp φ t` — `warp(φ) ⋙ t`, kept UNREDUCED. `normalize` (the slide) is three
@@ -201,11 +201,11 @@ def clockLit : Clock := .binary .lshift .sampleIndex (lit 32)
       * `warp φ ⋙ (a + b)    ⟶ (warp φ ⋙ a) + (warp φ ⋙ b)`, and through `scale`
                                                      (fork over the product, R3)
 
-    Crucially the warp/arr COMMUTATION (R1) is the first thing in this whole file
-    that the arrow LAWS make true and that plain `let`/composition does NOT give
-    you for free — this is where the EDSL stops being re-spelled `let` and starts
+    Crucially the warp/arr COMMUTATION (R1) is the one law here that the arrow
+    structure makes true and that plain `let`/composition does NOT give you for
+    free — this is where the EDSL stops being re-spelled `let` and starts
     earning its keep. The denotation is `⟦warp φ t⟧ = ⟦t⟧ ∘ φ`, so the slide is
-    just ∘-associativity, exactly the static-warp lawfulness already proven. -/
+    just ∘-associativity. -/
 
 /-- A reified, inspectable arrow term. `gen` is a voice instance whose clock arg
     is the warp target; `warp φ t` is `warp(φ) ⋙ t` kept unreduced; `scale`/`arrUn`
@@ -221,11 +221,11 @@ inductive ArrowTerm where
   /-- A SIGNAL-dependent warp — the data-into-clock edge, made first-class. Bends
       the clock of `t` by `mw baseClk modSig`, where `modSig` is the SIGNAL of
       `modulator` (another sub-term, a function of τ, so the warp stays a closed
-      form — the PM-of-PM lawfulness). This is the TOTAL generalization of the old
-      fused `fmGen`: it is a WRAPPER (like `warp`), so signal-warps compose with
-      plain warps and with each other — `swarp ∘ swarp`, `warp ∘ swarp`, all nest.
-      `fmGen carrier base mw mod` is just `swarp mw mod (gen carrier base)`. The
-      slide (in `emitTermC`) distributes it onto the generators `t` feeds. -/
+      form — the PM-of-PM lawfulness). A WRAPPER (like `warp`), so signal-warps
+      compose with plain warps and with each other — `swarp ∘ swarp`,
+      `warp ∘ swarp`, all nest; an FM voice is just
+      `swarp mw mod (gen carrier base)`. The slide (in `emitTermC`) distributes
+      it onto the generators `t` feeds. -/
   | swarp (mw : Clock → Sig → Clock) (modulator : ArrowTerm) (t : ArrowTerm)
   /-- A τ-CONSTANT leaf — a bare signal `s` that does not read the clock (a param
       slot read `paramRef`, or any literal). It has no generator, so the slide's

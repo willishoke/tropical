@@ -16,7 +16,7 @@ open Lean (JsonNumber)
 open Tropical.Ir
 
 -- ─────────────────────────────────────────────────────────────
--- M1 — builder substrate: smart constructors over a local authoring tree
+-- Builder substrate: smart constructors over a local authoring tree
 -- ─────────────────────────────────────────────────────────────
 
 /-- EmitArrow's authoring-tree expression: the scalar subset the combinators
@@ -34,7 +34,7 @@ inductive Sig where
   | nestedOut (instance_ : InstanceIdx) (output : OutputIdx)
   | sampleRate
   | sampleIndex
-  -- Banks-as-data (slice 3b): the authoring tree can express an indexed
+  -- Banks-as-data: the authoring tree can express an indexed
   -- reduction over coefficient columns. `arr`/`index`/`loopIdx` lower to the
   -- like-named IR nodes; `bankSum` to `ENode.bankSum` (a `ReduceBegin` region).
   -- `loopIdx` carries the UNIQUE BINDER ID of the `bankSum` it reads (nested

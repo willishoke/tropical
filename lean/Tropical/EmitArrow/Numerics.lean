@@ -15,7 +15,7 @@ namespace Tropical.EmitArrow
 
 open Tropical.Ir
 
--- ── The FIXED-POINT SINE (scope A): the sample datapath in i64 ────────────────
+-- ── The FIXED-POINT SINE: the sample datapath in i64 ─────────────────────────
 -- `stdlib/FixedSin.md`'s algorithm as a Sig builder, kept in LOCKSTEP with the
 -- .md (corpus-gated byte-identical). Cycles domain: the argument is the Q0.32
 -- phase (one turn = 2³²) straight off the integer phasor — range reduction is
