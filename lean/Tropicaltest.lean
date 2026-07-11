@@ -105,6 +105,42 @@ def renderIrBytes (plan : Tropical.Plan.FlatPlan) : IO (Except String ByteArray)
 
 private def firstLine (s : String) : String := (s.splitOn "\n").headD ""
 
+-- ── Gate combinators ─────────────────────────────────────────────────────────
+-- Every gate's verdict funnels through these two, so the protocol line the
+-- runner (and the label-diff check) depends on — `  PASS  <label>  <detail>` /
+-- `  FAIL  <label>  <detail>` — is typed in exactly one place.
+
+/-- Print the gate's PASS line and return `true`. -/
+private def passGate (label msg : String) : IO Bool := do
+  IO.println s!"  PASS  {label}  {msg}"
+  pure true
+
+/-- Print the gate's FAIL line and return `false`. -/
+private def failGate (label msg : String) : IO Bool := do
+  IO.println s!"  FAIL  {label}  {msg}"
+  pure false
+
+/-- Bit-differing sample count over the two arrays' common prefix
+    (IEEE `!=` — the pointwise-equality reading the byte-gates use). -/
+private def bitDiffCount (a b : Array Float) : Nat := Id.run do
+  let mut d := 0
+  for i in [0:min a.size b.size] do
+    if a[i]! != b[i]! then d := d + 1
+  return d
+
+/-- Σx² over the whole array. -/
+private def energyOf (xs : Array Float) : Float :=
+  xs.foldl (fun acc s => acc + s * s) 0.0
+
+/-- The hash-equivalence epilogue: sha256 both renders and PASS iff they
+    agree, with the gate's own verdict texts built from the hash(es). -/
+private def hashGate (label : String) (lhs rhs : ByteArray)
+    (passMsg : String → String) (failMsg : String → String → String) : IO Bool := do
+  let lhsHash ← sha256Hex lhs
+  let rhsHash ← sha256Hex rhs
+  if lhsHash == rhsHash then passGate label (passMsg lhsHash)
+  else failGate label (failMsg lhsHash rhsHash)
+
 -- ── Synthetic op-coverage plan ───────────────────────────────────────────────
 -- Exercises ops the patch corpus doesn't reach (GreaterEq, NotEqual, Or,
 -- BitOr, BitNot, FloorDiv, Sqrt, Floor, Ceil, Abs, ToInt/ToBool, Not), so a
@@ -254,16 +290,14 @@ private def runReduceCoverage : IO Bool := do
     -- gating arrives with the modal banked plans in slice 3b).
     match Tropical.Ir.EmitMsl.emitKernel reduceLoopPlan with
     | .error e =>
-      IO.println s!"  FAIL  reduce-coverage  EmitMsl: {firstLine e}"; pure false
+      failGate "reduce-coverage" s!"EmitMsl: {firstLine e}"
     | .ok msl =>
       if (msl.splitOn "for (long rd").length >= 2 then
-        IO.println s!"  PASS  reduce-coverage  loop ≡ unrolled, hash {got.take 16}, MSL loop emitted"
-        pure true
+        passGate "reduce-coverage" s!"loop ≡ unrolled, hash {got.take 16}, MSL loop emitted"
       else
-        IO.println "  FAIL  reduce-coverage  MSL kernel has no reduce loop"
-        pure false
-  | .error e, _ => IO.println s!"  FAIL  reduce-coverage  loop: {firstLine e}"; pure false
-  | _, .error e => IO.println s!"  FAIL  reduce-coverage  unrolled: {firstLine e}"; pure false
+        failGate "reduce-coverage" "MSL kernel has no reduce loop"
+  | .error e, _ => failGate "reduce-coverage" s!"loop: {firstLine e}"
+  | _, .error e => failGate "reduce-coverage" s!"unrolled: {firstLine e}"
 
 end ReduceCoverage
 
@@ -309,15 +343,15 @@ private def hashOf (patchPath : String) : IO (Except String String) := do
     `--write` (the `validate_stdlib --write` re-baseline, now Lean-owned). -/
 private def runGolden (writeMode : Bool) (name patchPath goldenPath : String) : IO Bool := do
   match ← hashOf patchPath with
-  | .error e => IO.println s!"  FAIL  {name}  compile: {firstLine e}"; pure false
+  | .error e => failGate s!"{name}" s!"compile: {firstLine e}"
   | .ok got =>
     if writeMode then
       IO.FS.writeFile goldenPath (got ++ "\n")
       IO.println s!"  WROTE {name}  {got.take 16}"; pure true
     else
       let expected := firstLine (← IO.FS.readFile goldenPath)
-      if got == expected then IO.println s!"  PASS  {name}  {got.take 16}"; pure true
-      else IO.println s!"  FAIL  {name}  expected {expected.take 16} got {got.take 16}"; pure false
+      if got == expected then passGate s!"{name}" s!"{got.take 16}"
+      else failGate s!"{name}" s!"expected {expected.take 16} got {got.take 16}"
 
 /-- Compile a patch and emit its Metal kernel source (the EmitMsl path). -/
 private def emitMslOf (patchPath : String) : IO (Except String String) := do
@@ -339,19 +373,19 @@ private def emitMslOf (patchPath : String) : IO (Except String String) := do
 private def runMslGolden (writeMode : Bool) (name patchPath : String) : IO Bool := do
   let goldenPath := s!"tests/golden/msl/{name}.metal"
   match ← emitMslOf patchPath with
-  | .error e => IO.println s!"  FAIL  msl-golden/{name}  {firstLine e}"; pure false
+  | .error e => failGate s!"msl-golden/{name}" s!"{firstLine e}"
   | .ok msl =>
     if writeMode then
       IO.FS.writeFile goldenPath msl
       IO.println s!"  WROTE msl-golden/{name}  ({msl.length}B)"; pure true
     else
       match ← (try (pure (some (← IO.FS.readFile goldenPath))) catch _ => pure none) with
-      | none => IO.println s!"  FAIL  msl-golden/{name}  missing {goldenPath} (run --write)"; pure false
+      | none => failGate s!"msl-golden/{name}" s!"missing {goldenPath} (run --write)"
       | some expected =>
         if msl == expected then
-          IO.println s!"  PASS  msl-golden/{name}  ({msl.length}B, text-frozen)"; pure true
+          passGate s!"msl-golden/{name}" s!"({msl.length}B, text-frozen)"
         else
-          IO.println s!"  FAIL  msl-golden/{name}  emitted MSL differs from frozen ({msl.length}B vs {expected.length}B)"; pure false
+          failGate s!"msl-golden/{name}" s!"emitted MSL differs from frozen ({msl.length}B vs {expected.length}B)"
 
 /-- THE FOLD gate: EmitMsl's emit-time f64 constant folding must land the
     LITERAL-frequency phase increment as the exact i64 the CPU computes —
@@ -361,21 +395,21 @@ private def runMslGolden (writeMode : Bool) (name patchPath : String) : IO Bool 
 private def runMslFold : IO Bool := do
   let expected : Int := Int.ofNat ((440.0 * 4294967296.0 / 44100.0).toUInt64.toNat)
   match ← emitMslOf "web/patches/pure-sine-440.json" with
-  | .error e => IO.println s!"  FAIL  msl-fold  {firstLine e}"; pure false
+  | .error e => failGate "msl-fold" s!"{firstLine e}"
   | .ok msl =>
     if (msl.splitOn s!"{expected}L").length > 1 then
-      IO.println s!"  PASS  msl-fold  literal landing folded in f64: increment {expected} present as i64 in the kernel"; pure true
+      passGate "msl-fold" s!"literal landing folded in f64: increment {expected} present as i64 in the kernel"
     else
-      IO.println s!"  FAIL  msl-fold  expected folded increment {expected}L not found in emitted MSL"; pure false
+      failGate "msl-fold" s!"expected folded increment {expected}L not found in emitted MSL"
 
 /-- A golden whose expected hash is supplied inline (migration fixtures, whose
     hash lives inside a JSON record — read-only). -/
 private def checkGoldenHash (name patchPath expected : String) : IO Bool := do
   match ← hashOf patchPath with
-  | .error e => IO.println s!"  FAIL  {name}  compile: {firstLine e}"; pure false
+  | .error e => failGate s!"{name}" s!"compile: {firstLine e}"
   | .ok got =>
-    if got == expected then IO.println s!"  PASS  {name}  {got.take 16}"; pure true
-    else IO.println s!"  FAIL  {name}  expected {expected.take 16} got {got.take 16}"; pure false
+    if got == expected then passGate s!"{name}" s!"{got.take 16}"
+    else failGate s!"{name}" s!"expected {expected.take 16} got {got.take 16}"
 
 /-- Regression for `let`-binding serialization order. `Sin`'s `let` is
     order-dependent (`poly` uses `r2`, `sign` uses `odd_n`) and its binding
@@ -387,17 +421,17 @@ private def checkGoldenHash (name patchPath expected : String) : IO Bool := do
 private def runLetRoundtrip : IO Bool := do
   let md ← IO.FS.readFile "stdlib/Sin.md"
   match Tropical.Parse.Surface.parseMarkdownProgram md with
-  | .error e => IO.println s!"  FAIL  let-roundtrip  parse: {firstLine e}"; pure false
+  | .error e => failGate "let-roundtrip" s!"parse: {firstLine e}"
   | .ok prog =>
     match Tropical.Parse.JsonV.parse prog.toJson.compress with
-    | .error e => IO.println s!"  FAIL  let-roundtrip  reparse: {firstLine e}"; pure false
+    | .error e => failGate "let-roundtrip" s!"reparse: {firstLine e}"
     | .ok jv =>
       match Tropical.Parse.decodeProgram jv with
-      | .error e => IO.println s!"  FAIL  let-roundtrip  decode: {firstLine e}"; pure false
+      | .error e => failGate "let-roundtrip" s!"decode: {firstLine e}"
       | .ok prog2 =>
         match Tropical.Ir.elaborateInto {} prog2 (some fun _ => none) with
-        | .error e => IO.println s!"  FAIL  let-roundtrip  elaborate: {firstLine e.message}"; pure false
-        | .ok _ => IO.println "  PASS  let-roundtrip  Sin survives encode→decode→elaborate"; pure true
+        | .error e => failGate "let-roundtrip" s!"elaborate: {firstLine e.message}"
+        | .ok _ => passGate "let-roundtrip" "Sin survives encode→decode→elaborate"
 
 -- ── Reversibility: a closed-form-in-τ patch fed a palindromic τ is a palindrome ─
 -- The architectural claim made testable. `ReversibleProbe` drives a symmetric
@@ -432,20 +466,23 @@ private def renderSamples (planJson : String) (n : Nat) : IO (Except String (Arr
       rt.process
       pure (.ok (decodeF64LE (← rt.outputBytes)))
 
-/-- Compile the reversible probe patch, render `2*half` samples, assert the
-    output is a bit-exact palindrome about index `half` (and non-silent). -/
-private def runReversibility : IO Bool := do
+/-- Compile a probe patch, render `2*half` samples, assert the output is a
+    bit-exact palindrome about index `half` (and non-silent). One witness,
+    two probes: `reversibility` (comb over modal voice) and `flanger`
+    (`ThroughZeroFlanger` — the LFO that sweeps `delta` is itself a function
+    of `tau`, so unfreezing the comb adds no state; a latched oscillator
+    would diverge between the forward and reverse halves). -/
+private def runPalindrome (label patchPath : String) : IO Bool := do
   let half : Nat := 2048
   let n : Nat := 2 * half
-  match ← compilePatch "patches/reversible_probe.json" .fused with
-  | .error e => IO.println s!"  FAIL  reversibility  compile: {firstLine e}"; pure false
+  match ← compilePatch patchPath .fused with
+  | .error e => failGate label s!"compile: {firstLine e}"
   | .ok planJson =>
     match ← renderSamples planJson n with
-    | .error e => IO.println s!"  FAIL  reversibility  render: {firstLine e}"; pure false
+    | .error e => failGate label s!"render: {firstLine e}"
     | .ok samples =>
       if samples.size < n then
-        IO.println s!"  FAIL  reversibility  got {samples.size} samples (want {n})"
-        pure false
+        failGate label s!"got {samples.size} samples (want {n})"
       else do
         let mut mism := 0
         let mut firstBad := 0
@@ -460,53 +497,17 @@ private def runReversibility : IO Bool := do
           energy := energy + v * v
           if v.abs > maxAbs then maxAbs := v.abs
         if mism != 0 then
-          IO.println s!"  FAIL  reversibility  {mism} mismatched pairs (first k={firstBad})"
-          pure false
+          failGate label s!"{mism} mismatched pairs (first k={firstBad})"
         else if energy <= 1e-6 then
-          IO.println s!"  FAIL  reversibility  signal is silent (energy {energy})"
-          pure false
+          failGate label s!"signal is silent (energy {energy})"
         else
-          IO.println s!"  PASS  reversibility  bit-exact palindrome over {half-1} pairs (peak |x|={maxAbs}, energy={energy})"
-          pure true
+          passGate label s!"bit-exact palindrome over {half-1} pairs (peak |x|={maxAbs}, energy={energy})"
 
-/-- Same palindrome witness pointed at `ThroughZeroFlanger`: the LFO that
-    sweeps `delta` is itself a function of `tau`, so unfreezing the comb adds
-    no state. A latched oscillator would diverge between the forward and
-    reverse halves; this stays bit-exact, sweep and all. -/
-private def runFlangerReversibility : IO Bool := do
-  let half : Nat := 2048
-  let n : Nat := 2 * half
-  match ← compilePatch "patches/flanger_probe.json" .fused with
-  | .error e => IO.println s!"  FAIL  flanger  compile: {firstLine e}"; pure false
-  | .ok planJson =>
-    match ← renderSamples planJson n with
-    | .error e => IO.println s!"  FAIL  flanger  render: {firstLine e}"; pure false
-    | .ok samples =>
-      if samples.size < n then
-        IO.println s!"  FAIL  flanger  got {samples.size} samples (want {n})"
-        pure false
-      else do
-        let mut mism := 0
-        let mut firstBad := 0
-        for k in [1:half] do
-          if (samples[half + k]!).toBits != (samples[half - k]!).toBits then
-            if mism == 0 then firstBad := k
-            mism := mism + 1
-        let mut energy := 0.0
-        let mut maxAbs := 0.0
-        for k in [0:n] do
-          let v := samples[k]!
-          energy := energy + v * v
-          if v.abs > maxAbs then maxAbs := v.abs
-        if mism != 0 then
-          IO.println s!"  FAIL  flanger  {mism} mismatched pairs (first k={firstBad})"
-          pure false
-        else if energy <= 1e-6 then
-          IO.println s!"  FAIL  flanger  signal is silent (energy {energy})"
-          pure false
-        else
-          IO.println s!"  PASS  flanger  bit-exact palindrome over {half-1} pairs (peak |x|={maxAbs}, energy={energy})"
-          pure true
+private def runReversibility : IO Bool :=
+  runPalindrome "reversibility" "patches/reversible_probe.json"
+
+private def runFlangerReversibility : IO Bool :=
+  runPalindrome "flanger" "patches/flanger_probe.json"
 
 /-- Fixed-point clock substrate witness: `ClockPhasor(clk: clock())` must be
     bit-for-bit identical to `FixedPhasor` (the root clock `θ = sampleIndex <<
@@ -516,14 +517,13 @@ private def runFlangerReversibility : IO Bool := do
 private def runClockPhasorEquiv : IO Bool := do
   let n : Nat := 4096
   match ← compilePatch "patches/clock_phasor_probe.json" .fused with
-  | .error e => IO.println s!"  FAIL  clock-phasor  compile: {firstLine e}"; pure false
+  | .error e => failGate "clock-phasor" s!"compile: {firstLine e}"
   | .ok planJson =>
     match ← renderSamples planJson n with
-    | .error e => IO.println s!"  FAIL  clock-phasor  render: {firstLine e}"; pure false
+    | .error e => failGate "clock-phasor" s!"render: {firstLine e}"
     | .ok samples =>
       if samples.size < n then
-        IO.println s!"  FAIL  clock-phasor  got {samples.size} samples (want {n})"
-        pure false
+        failGate "clock-phasor" s!"got {samples.size} samples (want {n})"
       else do
         let mut maxAbs := 0.0
         let mut firstBad := 0
@@ -535,11 +535,9 @@ private def runClockPhasorEquiv : IO Bool := do
             bad := bad + 1
           if v.abs > maxAbs then maxAbs := v.abs
         if bad != 0 then
-          IO.println s!"  FAIL  clock-phasor  {bad} nonzero samples (first k={firstBad}, max|Δ|={maxAbs})"
-          pure false
+          failGate "clock-phasor" s!"{bad} nonzero samples (first k={firstBad}, max|Δ|={maxAbs})"
         else
-          IO.println "  PASS  clock-phasor  ClockPhasor(clock()) ≡ FixedPhasor bit-for-bit"
-          pure true
+          passGate "clock-phasor" "ClockPhasor(clock()) ≡ FixedPhasor bit-for-bit"
 
 /-- Per-oscillator reverse witness: `FixedSinOsc(clk: -θ)` is the negated
     forward sine, so `forward + reverse` cancels. Reports the residual (≈ Sin
@@ -548,20 +546,18 @@ private def runClockPhasorEquiv : IO Bool := do
 private def runClockReverseProbe : IO Bool := do
   let n : Nat := 4096
   match ← compilePatch "patches/clock_reverse_probe.json" .fused with
-  | .error e => IO.println s!"  FAIL  clock-reverse  compile: {firstLine e}"; pure false
+  | .error e => failGate "clock-reverse" s!"compile: {firstLine e}"
   | .ok planJson =>
     match ← renderSamples planJson n with
-    | .error e => IO.println s!"  FAIL  clock-reverse  render: {firstLine e}"; pure false
+    | .error e => failGate "clock-reverse" s!"render: {firstLine e}"
     | .ok samples =>
       let mut maxAbs := 0.0
       for k in [0:samples.size] do
         if samples[k]!.abs > maxAbs then maxAbs := samples[k]!.abs
       if maxAbs < 1e-6 then
-        IO.println s!"  PASS  clock-reverse  forward+reverse cancels (max|Δ|={maxAbs})"
-        pure true
+        passGate "clock-reverse" s!"forward+reverse cancels (max|Δ|={maxAbs})"
       else
-        IO.println s!"  FAIL  clock-reverse  residual too large (max|Δ|={maxAbs})"
-        pure false
+        failGate "clock-reverse" s!"residual too large (max|Δ|={maxAbs})"
 
 -- ── CF-only enforcement: surface `reg`/`next` is unparseable ──────────────────
 -- The Phase-1 guarantee, now STRUCTURAL: `reg`/`next` were deleted from the
@@ -578,25 +574,25 @@ private def runCfOnly (name md : String) (expectReject : Bool) : IO Bool := do
   match Tropical.Parse.Surface.parseMarkdownProgram md with
   | .error e =>
     if expectReject then
-      IO.println s!"  PASS  cf-only/{name}  rejected per-sample state at parse"; pure true
+      passGate s!"cf-only/{name}" "rejected per-sample state at parse"
     else
-      IO.println s!"  FAIL  cf-only/{name}  parse: {firstLine e}"; pure false
+      failGate s!"cf-only/{name}" s!"parse: {firstLine e}"
   | .ok prog =>
     match Tropical.Ir.elaborateInto {} prog (some fun _ => none) with
     | .error e =>
       if expectReject then
-        IO.println s!"  PASS  cf-only/{name}  rejected per-sample state at elaboration"; pure true
+        passGate s!"cf-only/{name}" "rejected per-sample state at elaboration"
       else
-        IO.println s!"  FAIL  cf-only/{name}  unexpected reject: {firstLine e.message}"; pure false
+        failGate s!"cf-only/{name}" s!"unexpected reject: {firstLine e.message}"
     | .ok (arena, root) =>
       match Tropical.Ir.Strata.run { upto := 5 } arena root with
       | .error e =>
-        IO.println s!"  FAIL  cf-only/{name}  strata error: {firstLine e.message}"; pure false
+        failGate s!"cf-only/{name}" s!"strata error: {firstLine e.message}"
       | .ok _ =>
         if expectReject then
-          IO.println s!"  FAIL  cf-only/{name}  compiled but should be rejected"; pure false
+          failGate s!"cf-only/{name}" "compiled but should be rejected"
         else
-          IO.println s!"  PASS  cf-only/{name}  compiles (temps survive)"; pure true
+          passGate s!"cf-only/{name}" "compiles (temps survive)"
 
 -- ── (h) EmitArrow arrow laws: algebraically-equal warps ⇒ bit-identical audio ─
 -- Slice 3. The warp arrow laws are certified as AUDIO goldens: build the law's
@@ -619,25 +615,26 @@ open Tropical.Ir (Arena ProgramIdx)
 private def arrowElabStdlib : IO (Except String (Arena × Array (String × ProgramIdx))) :=
   Tropical.StdlibChain.elabStdlib
 
+/-- Finish a built carrier program into a runnable `FlatPlan` via the
+    production session path: full strata, then the carrier as the synthetic
+    session root wired straight to the dac at its `out` port
+    (`__root__.out`). No session wires, no params, no inputs. -/
+private def finishCarrier (arena : Arena) (idx : ProgramIdx) :
+    Except String Tropical.Plan.FlatPlan := do
+  let (coreArena, core) ← (Tropical.Ir.Strata.runResolved { upto := 5 } arena idx).mapError (·.message)
+  Tropical.Compile.compileSession (.forRoot core coreArena)
+
+private def buildAndFinish (built : Except String (Arena × ProgramIdx)) :
+    Except String Tropical.Plan.FlatPlan := do
+  let (a, i) ← built
+  finishCarrier a i
+
 /-- Build one EmitArrow clock carrier (named `name`, clocked at `clkE`) into a
     runnable `FlatPlan` via the production session path. -/
 private def compileArrowCarrier (arena : Arena) (resolved : Array (String × ProgramIdx))
     (name : String) (clkE : Tropical.EmitArrow.Clock) :
-    Except String Tropical.Plan.FlatPlan := do
-  let (arena', idx) ← Tropical.EmitArrow.buildClockCarrier name clkE arena resolved
-  let (coreArena, core) ← (Tropical.Ir.Strata.runResolved { upto := 5 } arena' idx).mapError (·.message)
-  -- The carrier is the synthetic session root, wired straight to the dac at its
-  -- `out` port (`__root__.out`). No session wires, no params, no inputs.
-  let input : Tropical.Compile.SessionInput := {
-    instances := #[(Tropical.Compile.rootInstancePath, core)]
-    wiresPost := #[]
-    graphOutputs := #[(Tropical.Compile.rootInstancePath, "out")]
-    params := #[]
-    alloc := {}
-    root := core
-    arena := coreArena
-    mode := .fused }
-  Tropical.Compile.compileSession input
+    Except String Tropical.Plan.FlatPlan :=
+  buildAndFinish (Tropical.EmitArrow.buildClockCarrier name clkE arena resolved)
 
 -- ── (h′) EmitArrow corpus gate: EmitArrow's emit ≡ strata's emit, per program ─
 -- The cutover (phase C1) reproduces the corpus one program at a time. This is
@@ -676,18 +673,16 @@ private def runEmitCorpusGate (label stdName : String)
     | IO.println s!"  FAIL  corpus-gate/{label}  stdlib '{stdName}' not in elaborated chain"
       pure false
   match builder arena resolved with
-  | .error e => IO.println s!"  FAIL  corpus-gate/{label}  build: {firstLine e}"; pure false
+  | .error e => failGate s!"corpus-gate/{label}" s!"build: {firstLine e}"
   | .ok (arena', idx) =>
     match emitResolvedWire arena' idx, emitResolvedWire arena stdIdx with
-    | .error e, _ => IO.println s!"  FAIL  corpus-gate/{label}  emit EmitArrow: {firstLine e}"; pure false
-    | _, .error e => IO.println s!"  FAIL  corpus-gate/{label}  emit stdlib {stdName}: {firstLine e}"; pure false
+    | .error e, _ => failGate s!"corpus-gate/{label}" s!"emit EmitArrow: {firstLine e}"
+    | _, .error e => failGate s!"corpus-gate/{label}" s!"emit stdlib {stdName}: {firstLine e}"
     | .ok got, .ok want =>
       if got == want then
-        IO.println s!"  PASS  corpus-gate/{label}  EmitArrow ≡ emit-stdlib {stdName} ({got.length}B)"
-        pure true
+        passGate s!"corpus-gate/{label}" s!"EmitArrow ≡ emit-stdlib {stdName} ({got.length}B)"
       else
-        IO.println s!"  FAIL  corpus-gate/{label}  EmitArrow ≠ emit-stdlib {stdName} (EmitArrow {got.length}B, stdlib {want.length}B)"
-        pure false
+        failGate s!"corpus-gate/{label}" s!"EmitArrow ≠ emit-stdlib {stdName} (EmitArrow {got.length}B, stdlib {want.length}B)"
 
 /-- Certify one warp law: build LHS and RHS carriers, render both, assert the
     rendered audio is byte-identical (SHA256). Also reports whether the emitted
@@ -698,27 +693,22 @@ private def runArrowLaw (name : String)
     (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Bool := do
   match compileArrowCarrier arena resolved s!"{name}_lhs" lhsClk,
         compileArrowCarrier arena resolved s!"{name}_rhs" rhsClk with
-  | .error e, _ => IO.println s!"  FAIL  arrow-law/{name}  build lhs: {firstLine e}"; pure false
-  | _, .error e => IO.println s!"  FAIL  arrow-law/{name}  build rhs: {firstLine e}"; pure false
+  | .error e, _ => failGate s!"arrow-law/{name}" s!"build lhs: {firstLine e}"
+  | _, .error e => failGate s!"arrow-law/{name}" s!"build rhs: {firstLine e}"
   | .ok lhsPlan, .ok rhsPlan =>
     match lhsPlan.toWire, rhsPlan.toWire with
     | .error e, _ | _, .error e =>
-      IO.println s!"  FAIL  arrow-law/{name}  toWire: {firstLine e}"; pure false
+      failGate s!"arrow-law/{name}" s!"toWire: {firstLine e}"
     | .ok lhsWire, .ok rhsWire =>
       let plansIdentical := lhsWire.compress == rhsWire.compress
       match ← renderIrBytes lhsPlan, ← renderIrBytes rhsPlan with
       | .error e, _ | _, .error e =>
-        IO.println s!"  FAIL  arrow-law/{name}  render: {firstLine e}"; pure false
+        failGate s!"arrow-law/{name}" s!"render: {firstLine e}"
       | .ok lhsBytes, .ok rhsBytes =>
-        let lhsHash ← sha256Hex lhsBytes
-        let rhsHash ← sha256Hex rhsBytes
         let planNote := if plansIdentical then "plans identical" else "plans differ (expected)"
-        if lhsHash == rhsHash then
-          IO.println s!"  PASS  arrow-law/{name}  audio ≡ {lhsHash.take 16} ({planNote})"
-          pure true
-        else
-          IO.println s!"  FAIL  arrow-law/{name}  audio differs: lhs {lhsHash.take 16} rhs {rhsHash.take 16} ({planNote})"
-          pure false
+        hashGate s!"arrow-law/{name}" lhsBytes rhsBytes
+          (fun h => s!"audio ≡ {h.take 16} ({planNote})")
+          (fun hl hr => s!"audio differs: lhs {hl.take 16} rhs {hr.take 16} ({planNote})")
 
 -- ── (h) slice 4 — the cartesian diagonal / fan-out law + its COST story ───────
 -- The diagonal `Δ = id &&& id`: one source fanned into two differently-warped
@@ -759,16 +749,7 @@ private def diagStrataCompile (arena : Arena) (idx : ProgramIdx) :
   let some prog := arena''.program? root'
     | .error "diagonal: post-strata root program index out of range"
   let (coreArena, core) ← Tropical.Ir.checkResolvedArena arena'' root'
-  let input : Tropical.Compile.SessionInput := {
-    instances := #[(Tropical.Compile.rootInstancePath, core)]
-    wiresPost := #[]
-    graphOutputs := #[(Tropical.Compile.rootInstancePath, "out")]
-    params := #[]
-    alloc := {}
-    root := core
-    arena := coreArena
-    mode := .fused }
-  let plan ← Tropical.Compile.compileSession input
+  let plan ← Tropical.Compile.compileSession (.forRoot core coreArena)
   pure (prog.binderCount, prog.decls.size, plan)
 
 /-- Certify the diagonal law: build SHARED (one fanned source) and INDEPENDENT
@@ -779,29 +760,27 @@ private def diagStrataCompile (arena : Arena) (idx : ProgramIdx) :
 private def runDiagonalLaw (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Bool := do
   match Tropical.EmitArrow.buildSharedDiagonal arena resolved,
         Tropical.EmitArrow.buildIndependentDiagonal arena resolved with
-  | .error e, _ => IO.println s!"  FAIL  arrow-law/diagonal  build shared: {firstLine e}"; pure false
-  | _, .error e => IO.println s!"  FAIL  arrow-law/diagonal  build independent: {firstLine e}"; pure false
+  | .error e, _ => failGate "arrow-law/diagonal" s!"build shared: {firstLine e}"
+  | _, .error e => failGate "arrow-law/diagonal" s!"build independent: {firstLine e}"
   | .ok (arenaS, idxS), .ok (arenaI, idxI) =>
     -- Pre-strata instance counts: the visible structural difference (5 vs 6).
     let preShared := (arenaS.program? idxS).map (·.decls.size) |>.getD 0
     let preIndep := (arenaI.program? idxI).map (·.decls.size) |>.getD 0
     match diagStrataCompile arenaS idxS, diagStrataCompile arenaI idxI with
-    | .error e, _ => IO.println s!"  FAIL  arrow-law/diagonal  compile shared: {firstLine e}"; pure false
-    | _, .error e => IO.println s!"  FAIL  arrow-law/diagonal  compile independent: {firstLine e}"; pure false
+    | .error e, _ => failGate "arrow-law/diagonal" s!"compile shared: {firstLine e}"
+    | _, .error e => failGate "arrow-law/diagonal" s!"compile independent: {firstLine e}"
     | .ok (bcS, dcS, planS), .ok (bcI, dcI, planI) =>
       let instrS := planInstrCount planS
       let instrI := planInstrCount planI
       match planS.toWire, planI.toWire with
       | .error e, _ | _, .error e =>
-        IO.println s!"  FAIL  arrow-law/diagonal  toWire: {firstLine e}"; pure false
+        failGate "arrow-law/diagonal" s!"toWire: {firstLine e}"
       | .ok wireS, .ok wireI =>
         let plansIdentical := wireS.compress == wireI.compress
         match ← renderIrBytes planS, ← renderIrBytes planI with
         | .error e, _ | _, .error e =>
-          IO.println s!"  FAIL  arrow-law/diagonal  render: {firstLine e}"; pure false
+          failGate "arrow-law/diagonal" s!"render: {firstLine e}"
         | .ok bytesS, .ok bytesI =>
-          let hashS ← sha256Hex bytesS
-          let hashI ← sha256Hex bytesI
           -- The plans being byte-identical IS the definitive collapse (the
           -- carrier program name never reaches the plan — the root instance is
           -- `__root__`). NB the post-strata binder DAGs DIFFER (independent
@@ -811,12 +790,9 @@ private def runDiagonalLaw (arena : Arena) (resolved : Array (String × ProgramI
           IO.println s!"        cost  shared:      pre-strata insts={preShared} post-strata binders={bcS} decls={dcS} plan-instrs={instrS} regs={planS.registerCount}"
           IO.println s!"        cost  independent: pre-strata insts={preIndep} post-strata binders={bcI} decls={dcI} plan-instrs={instrI} regs={planI.registerCount}"
           IO.println s!"        cost  plans byte-identical: {plansIdentical}  ·  CSE collapsed both to same {instrS}-instr/{planS.registerCount}-reg DAG: {plansIdentical && instrS == instrI}  (post-strata binders {bcS} vs {bcI} differ — dedup is at emit)"
-          if hashS == hashI then
-            IO.println s!"  PASS  arrow-law/diagonal  audio ≡ {hashS.take 16} (shared ≡ independent)"
-            pure true
-          else
-            IO.println s!"  FAIL  arrow-law/diagonal  audio differs: shared {hashS.take 16} independent {hashI.take 16}"
-            pure false
+          hashGate "arrow-law/diagonal" bytesS bytesI
+            (fun h => s!"audio ≡ {h.take 16} (shared ≡ independent)")
+            (fun hs hi => s!"audio differs: shared {hs.take 16} independent {hi.take 16}")
 
 -- ── (h) slice 5 — REVERSE (the moat) as warp(neg): involution, reverse-swaps- ──
 -- delay, and reverse-equivariance of the symmetric flanger. Laws 1-2 reuse
@@ -837,16 +813,16 @@ private def runReverseFlangerCommute
   let eps := 1e-6
   match Tropical.EmitArrow.buildReverseThenFlanger arena resolved,
         Tropical.EmitArrow.buildFlangerThenReverse arena resolved with
-  | .error e, _ => IO.println s!"  FAIL  arrow-law/reverse-flanger-commute  build lhs: {firstLine e}"; pure false
-  | _, .error e => IO.println s!"  FAIL  arrow-law/reverse-flanger-commute  build rhs: {firstLine e}"; pure false
+  | .error e, _ => failGate "arrow-law/reverse-flanger-commute" s!"build lhs: {firstLine e}"
+  | _, .error e => failGate "arrow-law/reverse-flanger-commute" s!"build rhs: {firstLine e}"
   | .ok (arenaL, idxL), .ok (arenaR, idxR) =>
     match diagStrataCompile arenaL idxL, diagStrataCompile arenaR idxR with
-    | .error e, _ => IO.println s!"  FAIL  arrow-law/reverse-flanger-commute  compile lhs: {firstLine e}"; pure false
-    | _, .error e => IO.println s!"  FAIL  arrow-law/reverse-flanger-commute  compile rhs: {firstLine e}"; pure false
+    | .error e, _ => failGate "arrow-law/reverse-flanger-commute" s!"compile lhs: {firstLine e}"
+    | _, .error e => failGate "arrow-law/reverse-flanger-commute" s!"compile rhs: {firstLine e}"
     | .ok (_, _, planL), .ok (_, _, planR) =>
       match ← renderIrBytes planL, ← renderIrBytes planR with
       | .error e, _ | _, .error e =>
-        IO.println s!"  FAIL  arrow-law/reverse-flanger-commute  render: {firstLine e}"; pure false
+        failGate "arrow-law/reverse-flanger-commute" s!"render: {firstLine e}"
       | .ok bytesL, .ok bytesR =>
         let hashL ← sha256Hex bytesL
         let hashR ← sha256Hex bytesR
@@ -867,14 +843,11 @@ private def runReverseFlangerCommute
         IO.println s!"        finding  byte-identical: {byteIdentical}  ·  bit-differing samples: {bitDiff}/{n}  ·  max|Δ|={maxAbs} (={maxAbs * 1e15}e-15, ε={eps})  ·  lhs energy={energy}"
         IO.println s!"        finding  ±δ taps swap slot ⇒ float value-sum reassociates ((A+B)+C vs (A+C)+B); exact on the (fixed-point) clock (laws 1-2), float-tolerance on the (float) value sum — byte-exact with a fixed-point value carrier"
         if energy <= 1e-6 then
-          IO.println s!"  FAIL  arrow-law/reverse-flanger-commute  signal silent (energy={energy})"
-          pure false
+          failGate "arrow-law/reverse-flanger-commute" s!"signal silent (energy={energy})"
         else if maxAbs < eps then
-          IO.println s!"  PASS  arrow-law/reverse-flanger-commute  denotational ≡ (max|Δ|={maxAbs} < ε; byte-identical={byteIdentical})"
-          pure true
+          passGate "arrow-law/reverse-flanger-commute" s!"denotational ≡ (max|Δ|={maxAbs} < ε; byte-identical={byteIdentical})"
         else
-          IO.println s!"  FAIL  arrow-law/reverse-flanger-commute  max|Δ|={maxAbs} ≥ ε={eps}"
-          pure false
+          failGate "arrow-law/reverse-flanger-commute" s!"max|Δ|={maxAbs} ≥ ε={eps}"
 
 -- ── (h) slice 6 — a FIXED-POINT VALUE carrier: slice-5's reassociation ────────
 -- failure becomes BYTE-IDENTICAL. The SAME warp combinators, but instantiated at
@@ -895,21 +868,16 @@ private def runFixedSourceLaw (name : String)
   let (arenaL, idxL) := Tropical.EmitArrow.buildFixedSourceCarrier s!"{name}_lhs" lhsClk arena
   let (arenaR, idxR) := Tropical.EmitArrow.buildFixedSourceCarrier s!"{name}_rhs" rhsClk arena
   match diagStrataCompile arenaL idxL, diagStrataCompile arenaR idxR with
-  | .error e, _ => IO.println s!"  FAIL  arrow-law/{name}  compile lhs: {firstLine e}"; pure false
-  | _, .error e => IO.println s!"  FAIL  arrow-law/{name}  compile rhs: {firstLine e}"; pure false
+  | .error e, _ => failGate s!"arrow-law/{name}" s!"compile lhs: {firstLine e}"
+  | _, .error e => failGate s!"arrow-law/{name}" s!"compile rhs: {firstLine e}"
   | .ok (_, _, planL), .ok (_, _, planR) =>
     match ← renderIrBytes planL, ← renderIrBytes planR with
     | .error e, _ | _, .error e =>
-      IO.println s!"  FAIL  arrow-law/{name}  render: {firstLine e}"; pure false
+      failGate s!"arrow-law/{name}" s!"render: {firstLine e}"
     | .ok bytesL, .ok bytesR =>
-      let hashL ← sha256Hex bytesL
-      let hashR ← sha256Hex bytesR
-      if hashL == hashR then
-        IO.println s!"  PASS  arrow-law/{name}  audio ≡ {hashL.take 16} (byte-identical)"
-        pure true
-      else
-        IO.println s!"  FAIL  arrow-law/{name}  audio differs: lhs {hashL.take 16} rhs {hashR.take 16}"
-        pure false
+      hashGate s!"arrow-law/{name}" bytesL bytesR
+        (fun h => s!"audio ≡ {h.take 16} (byte-identical)")
+        (fun hl hr => s!"audio differs: lhs {hl.take 16} rhs {hr.take 16}")
 
 /-- THE GATE: certify reverse-equivariance of the FIXED-POINT flanger
     `warp(neg) ⋙ flanger ≡ flanger ⋙ warp(neg)` — the exact law slice 5 found
@@ -922,12 +890,12 @@ private def runReverseFlangerCommuteFixedpoint (arena : Arena) : IO Bool := do
   let (arenaL, idxL) := Tropical.EmitArrow.buildReverseThenFixedFlanger arena
   let (arenaR, idxR) := Tropical.EmitArrow.buildFixedFlangerThenReverse arena
   match diagStrataCompile arenaL idxL, diagStrataCompile arenaR idxR with
-  | .error e, _ => IO.println s!"  FAIL  arrow-law/reverse-flanger-commute-fixedpoint  compile lhs: {firstLine e}"; pure false
-  | _, .error e => IO.println s!"  FAIL  arrow-law/reverse-flanger-commute-fixedpoint  compile rhs: {firstLine e}"; pure false
+  | .error e, _ => failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"compile lhs: {firstLine e}"
+  | _, .error e => failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"compile rhs: {firstLine e}"
   | .ok (_, _, planL), .ok (_, _, planR) =>
     match ← renderIrBytes planL, ← renderIrBytes planR with
     | .error e, _ | _, .error e =>
-      IO.println s!"  FAIL  arrow-law/reverse-flanger-commute-fixedpoint  render: {firstLine e}"; pure false
+      failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"render: {firstLine e}"
     | .ok bytesL, .ok bytesR =>
       let hashL ← sha256Hex bytesL
       let hashR ← sha256Hex bytesR
@@ -943,14 +911,11 @@ private def runReverseFlangerCommuteFixedpoint (arena : Arena) : IO Bool := do
       IO.println s!"        gate  byte-identical: {byteIdentical}  ·  bit-differing samples: {bitDiff}/{n} (slice-5 float was 1271/4096)  ·  lhs energy={energy}"
       IO.println s!"        gate  integer add is associative — ±δ tap slot swap leaves the Q0.32 mix bit-identical; one toFloat·/2³² scale at the boundary"
       if energy <= 1e-6 then
-        IO.println s!"  FAIL  arrow-law/reverse-flanger-commute-fixedpoint  signal silent (energy={energy})"
-        pure false
+        failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"signal silent (energy={energy})"
       else if byteIdentical then
-        IO.println s!"  PASS  arrow-law/reverse-flanger-commute-fixedpoint  audio ≡ {hashL.take 16} ({bitDiff}/{n} differing — byte-exact)"
-        pure true
+        passGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"audio ≡ {hashL.take 16} ({bitDiff}/{n} differing — byte-exact)"
       else
-        IO.println s!"  FAIL  arrow-law/reverse-flanger-commute-fixedpoint  audio differs ({bitDiff}/{n}): lhs {hashL.take 16} rhs {hashR.take 16}"
-        pure false
+        failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"audio differs ({bitDiff}/{n}): lhs {hashL.take 16} rhs {hashR.take 16}"
 
 -- ── (h″) The convolution stress test — the bubble, EXECUTED, with a NON-FACADE
 -- oracle. An FIR filter is fan-out + clock-warps + scale + sum (a convolution IS
@@ -991,20 +956,9 @@ private def bareTaps : Array Tropical.EmitArrow.Tap := #[
     `compileArrowCarrier`. -/
 private def compileTapCarrier (arena : Arena) (resolved : Array (String × ProgramIdx))
     (name : String) (taps : Array Tropical.EmitArrow.Tap) :
-    Except String Tropical.Plan.FlatPlan := do
-  let (arena', idx) ← Tropical.EmitArrow.buildTapCarrier name
-    Tropical.EmitArrow.litPitch12kVoice taps arena resolved
-  let (coreArena, core) ← (Tropical.Ir.Strata.runResolved { upto := 5 } arena' idx).mapError (·.message)
-  let input : Tropical.Compile.SessionInput := {
-    instances := #[(Tropical.Compile.rootInstancePath, core)]
-    wiresPost := #[]
-    graphOutputs := #[(Tropical.Compile.rootInstancePath, "out")]
-    params := #[]
-    alloc := {}
-    root := core
-    arena := coreArena
-    mode := .fused }
-  Tropical.Compile.compileSession input
+    Except String Tropical.Plan.FlatPlan :=
+  buildAndFinish (Tropical.EmitArrow.buildTapCarrier name
+    Tropical.EmitArrow.litPitch12kVoice taps arena resolved)
 
 /-- Render a `FlatPlan` to exactly `n` contiguous mono samples (buffer = n, no
     fade), like `renderSamples` but from an in-hand plan. -/
@@ -1026,12 +980,12 @@ private def runConvolutionOracle (arena : Arena)
   let maxDelay := kernel.size - 1
   match compileTapCarrier arena resolved "Fir3" firTaps,
         compileTapCarrier arena resolved "Bare" bareTaps with
-  | .error e, _ => IO.println s!"  FAIL  convolution-oracle  build fir: {firstLine e}"; pure false
-  | _, .error e => IO.println s!"  FAIL  convolution-oracle  build bare: {firstLine e}"; pure false
+  | .error e, _ => failGate "convolution-oracle" s!"build fir: {firstLine e}"
+  | _, .error e => failGate "convolution-oracle" s!"build bare: {firstLine e}"
   | .ok firPlan, .ok barePlan =>
     match ← renderPlanSamples firPlan n, ← renderPlanSamples barePlan n with
     | .error e, _ | _, .error e =>
-      IO.println s!"  FAIL  convolution-oracle  render: {firstLine e}"; pure false
+      failGate "convolution-oracle" s!"render: {firstLine e}"
     | .ok got, .ok x =>
       let mut maxAbs : Float := 0.0
       let mut filterEffect : Float := 0.0
@@ -1048,14 +1002,11 @@ private def runConvolutionOracle (arena : Arena)
         energy := energy + g * g
       let eps : Float := 1e-9
       if energy <= 1e-6 then
-        IO.println s!"  FAIL  convolution-oracle  signal silent (energy={energy})"
-        pure false
+        failGate "convolution-oracle" s!"signal silent (energy={energy})"
       else if maxAbs < eps then
-        IO.println s!"  PASS  convolution-oracle  clock-warp FIR ≡ array-shift conv  (max|Δ|={maxAbs}, filter-effect={filterEffect}, samples={n - maxDelay})"
-        pure true
+        passGate "convolution-oracle" s!"clock-warp FIR ≡ array-shift conv  (max|Δ|={maxAbs}, filter-effect={filterEffect}, samples={n - maxDelay})"
       else
-        IO.println s!"  FAIL  convolution-oracle  max|Δ|={maxAbs} (≥ {eps}); filter-effect={filterEffect}"
-        pure false
+        failGate "convolution-oracle" s!"max|Δ|={maxAbs} (≥ {eps}); filter-effect={filterEffect}"
 
 -- ── (h‴) The MODULATED-CLOCK stress test — a fractional, NONLINEAR warp, to see
 -- whether the bubble is a side-effect of affineness (it should not be). The warp
@@ -1067,25 +1018,6 @@ private def runConvolutionOracle (arena : Arena)
 -- TOLERANCE check, not bit-exact — but the tolerance is the bare osc's own
 -- poly/quantization floor, so the test isolates the WARP's contribution. A warp
 -- that secretly needed affineness would diverge by O(1), far above that floor.
-
-private def finishCarrier (arena : Arena) (idx : ProgramIdx) :
-    Except String Tropical.Plan.FlatPlan := do
-  let (coreArena, core) ← (Tropical.Ir.Strata.runResolved { upto := 5 } arena idx).mapError (·.message)
-  let input : Tropical.Compile.SessionInput := {
-    instances := #[(Tropical.Compile.rootInstancePath, core)]
-    wiresPost := #[]
-    graphOutputs := #[(Tropical.Compile.rootInstancePath, "out")]
-    params := #[]
-    alloc := {}
-    root := core
-    arena := coreArena
-    mode := .fused }
-  Tropical.Compile.compileSession input
-
-private def buildAndFinish (built : Except String (Arena × ProgramIdx)) :
-    Except String Tropical.Plan.FlatPlan := do
-  let (a, i) ← built
-  finishCarrier a i
 
 /-- `stdlib/FixedSin.md` transcribed exactly in Lean Int arithmetic: the Q2.30
     datapath sine at a MASKED Q0.32 cycles phase. `Int.fdiv` is floor division
@@ -1146,12 +1078,12 @@ private def runModulatedClock (arena : Arena)
   match buildAndFinish (Tropical.EmitArrow.buildTapCarrier "BareFc"
           (Tropical.EmitArrow.litPitchVoice 2000) bareTaps arena resolved),
         buildAndFinish (Tropical.EmitArrow.buildFmCarrier "FmOsc" 2000 200 3 arena resolved) with
-  | .error e, _ => IO.println s!"  FAIL  modulated-clock  build bare: {firstLine e}"; pure false
-  | _, .error e => IO.println s!"  FAIL  modulated-clock  build fm: {firstLine e}"; pure false
+  | .error e, _ => failGate "modulated-clock" s!"build bare: {firstLine e}"
+  | _, .error e => failGate "modulated-clock" s!"build fm: {firstLine e}"
   | .ok barePlan, .ok fmPlan =>
     match ← renderPlanSamples barePlan n, ← renderPlanSamples fmPlan n with
     | .error e, _ | _, .error e =>
-      IO.println s!"  FAIL  modulated-clock  render: {firstLine e}"; pure false
+      failGate "modulated-clock" s!"render: {firstLine e}"
     | .ok bare, .ok got =>
       let mut e0 : Float := 0.0           -- calibration: engine bare vs standard rep
       let mut efm : Float := 0.0          -- engine fm vs standard rep (the warp test)
@@ -1179,15 +1111,15 @@ private def runModulatedClock (arena : Arena)
       IO.println s!"        calibrate  engine bare vs standard rep:  max|Δ|={e0}  ·  bit-differing {calBitDiff}/{samples}"
       IO.println s!"        result     engine fm   vs standard rep:  max|Δ|={efm}  ·  bit-differing {fmBitDiff}/{samples}  ·  warp effect |fm−bare| max={warpEffect}"
       if maxBare < 1e-3 then
-        IO.println s!"  FAIL  modulated-clock  carrier silent (maxBare={maxBare})"; pure false
+        failGate "modulated-clock" s!"carrier silent (maxBare={maxBare})"
       else if e0 > 1e-6 then
-        IO.println s!"  FAIL  modulated-clock  calibration off (e0={e0}) — Sin/phasor transcription wrong, test invalid"; pure false
+        failGate "modulated-clock" s!"calibration off (e0={e0}) — Sin/phasor transcription wrong, test invalid"
       else if warpEffect < 0.2 * maxBare then
-        IO.println s!"  FAIL  modulated-clock  modulation negligible (warp {warpEffect} vs amp {maxBare})"; pure false
+        failGate "modulated-clock" s!"modulation negligible (warp {warpEffect} vs amp {maxBare})"
       else if efm < 10.0 * e0 + 1e-9 then
-        IO.println s!"  PASS  modulated-clock  fractional nonlinear warp ≡ standard rep (fm err {efm} ≈ floor {e0}; warp effect {warpEffect})"; pure true
+        passGate "modulated-clock" s!"fractional nonlinear warp ≡ standard rep (fm err {efm} ≈ floor {e0}; warp effect {warpEffect})"
       else
-        IO.println s!"  FAIL  modulated-clock  fm err {efm} ≫ floor {e0} — warp diverges from the standard rep"; pure false
+        failGate "modulated-clock" s!"fm err {efm} ≫ floor {e0} — warp diverges from the standard rep"
 
 /-- PM-of-PM: the modulator is ITSELF a warped oscillator (mod2 warps mod's
     clock, mod warps the carrier's clock). Bit-exact against a THREE-level nested
@@ -1205,12 +1137,12 @@ private def runPmPm (arena : Arena)
   let sinkGain : Float := 0.05
   match buildAndFinish (Tropical.EmitArrow.buildPmPmCarrier "PmPm" 2000 200 700 3 3 arena resolved),
         buildAndFinish (Tropical.EmitArrow.buildFmCarrier "Fm1" 2000 200 3 arena resolved) with
-  | .error e, _ => IO.println s!"  FAIL  pm-of-pm  build pmpm: {firstLine e}"; pure false
-  | _, .error e => IO.println s!"  FAIL  pm-of-pm  build fm1: {firstLine e}"; pure false
+  | .error e, _ => failGate "pm-of-pm" s!"build pmpm: {firstLine e}"
+  | _, .error e => failGate "pm-of-pm" s!"build fm1: {firstLine e}"
   | .ok pmpmPlan, .ok fmPlan =>
     match ← renderPlanSamples pmpmPlan n, ← renderPlanSamples fmPlan n with
     | .error e, _ | _, .error e =>
-      IO.println s!"  FAIL  pm-of-pm  render: {firstLine e}"; pure false
+      failGate "pm-of-pm" s!"render: {firstLine e}"
     | .ok got, .ok fm1 =>
       let mut e0 : Float := 0.0           -- engine pm(pm) vs nested standard rep
       let mut bitDiff : Nat := 0
@@ -1232,13 +1164,13 @@ private def runPmPm (arena : Arena)
       IO.println s!"        result   engine pm(pm) vs nested rep: max|Δ|={e0}  ·  bit-differing {bitDiff}/{samples}"
       IO.println s!"        nesting  |pm(pm) − single-level pm| max={nestEffect}  (level-2 must be non-trivial)"
       if maxOut < 1e-3 then
-        IO.println s!"  FAIL  pm-of-pm  carrier silent (maxOut={maxOut})"; pure false
+        failGate "pm-of-pm" s!"carrier silent (maxOut={maxOut})"
       else if nestEffect < 1e-3 then
-        IO.println s!"  FAIL  pm-of-pm  level-2 negligible (nesting effect {nestEffect}) — not stressing the nest"; pure false
+        failGate "pm-of-pm" s!"level-2 negligible (nesting effect {nestEffect}) — not stressing the nest"
       else if bitDiff == 0 then
-        IO.println s!"  PASS  pm-of-pm  nested warp ≡ nested standard rep bit-for-bit ({bitDiff}/{samples}; nesting effect {nestEffect})"; pure true
+        passGate "pm-of-pm" s!"nested warp ≡ nested standard rep bit-for-bit ({bitDiff}/{samples}; nesting effect {nestEffect})"
       else
-        IO.println s!"  FAIL  pm-of-pm  {bitDiff}/{samples} bit-differing (max|Δ|={e0}) — nested substitution diverges"; pure false
+        failGate "pm-of-pm" s!"{bitDiff}/{samples} bit-differing (max|Δ|={e0}) — nested substitution diverges"
 
 /-- The NEGATIVE-TIME boundary — the moat. A 20-sample delay warp pulls the clock
     negative for t < 20, so the carrier is evaluated BEFORE sample 0. Closed-form
@@ -1260,10 +1192,10 @@ private def runNegativeClock (arena : Arena)
       weight := Tropical.EmitArrow.lit 1 }
   match buildAndFinish (Tropical.EmitArrow.buildTapCarrier "DelayFc"
           (Tropical.EmitArrow.litPitchVoice 2000) #[delayTap] arena resolved) with
-  | .error e => IO.println s!"  FAIL  negative-clock  build: {firstLine e}"; pure false
+  | .error e => failGate "negative-clock" s!"build: {firstLine e}"
   | .ok plan =>
     match ← renderPlanSamples plan n with
-    | .error e => IO.println s!"  FAIL  negative-clock  render: {firstLine e}"; pure false
+    | .error e => failGate "negative-clock" s!"render: {firstLine e}"
     | .ok got =>
       let mut bitDiff : Nat := 0
       let mut maxOut : Float := 0.0
@@ -1284,15 +1216,15 @@ private def runNegativeClock (arena : Arena)
       IO.println s!"        result   engine vs random-access rep: bit-differing {bitDiff}/{n}  (neg-time samples {negCount}, differing {negBitDiff})"
       IO.println s!"        moat     |output| at negative time max={negMag}  (a streaming delay line would emit 0 here)"
       if maxOut < 1e-3 then
-        IO.println s!"  FAIL  negative-clock  silent (maxOut={maxOut})"; pure false
+        failGate "negative-clock" s!"silent (maxOut={maxOut})"
       else if negCount == 0 then
-        IO.println s!"  FAIL  negative-clock  delay didn't pull the clock negative ({negCount} neg samples)"; pure false
+        failGate "negative-clock" s!"delay didn't pull the clock negative ({negCount} neg samples)"
       else if negMag < 1e-3 then
-        IO.println s!"  FAIL  negative-clock  engine zero-pads at negative time (negMag={negMag}) — not random-access"; pure false
+        failGate "negative-clock" s!"engine zero-pads at negative time (negMag={negMag}) — not random-access"
       else if bitDiff == 0 then
-        IO.println s!"  PASS  negative-clock  random-access exact at negative time ({bitDiff}/{n}; {negCount} neg-time samples, |out|≤{negMag} where a stream emits 0)"; pure true
+        passGate "negative-clock" s!"random-access exact at negative time ({bitDiff}/{n}; {negCount} neg-time samples, |out|≤{negMag} where a stream emits 0)"
       else
-        IO.println s!"  FAIL  negative-clock  {bitDiff}/{n} bit-differing — negative-time phasor diverges"; pure false
+        failGate "negative-clock" s!"{bitDiff}/{n} bit-differing — negative-time phasor diverges"
 
 -- ── (h⁶) PRODUCTS / MIMO standard-rep differential (the DATA axis) ────────────
 -- `MorphOsc` built from the cartesian combinators (ClockPhasor ⋙ (saw &&& Sin)
@@ -1322,7 +1254,7 @@ private def runMorphOscDifferential (arena : Arena)
         ← render "MorphSin" (Tropical.EmitArrow.lit 1),
         ← render "MorphBlend" (Tropical.EmitArrow.lit 5 1) with
   | .error e, _, _ | _, .error e, _ | _, _, .error e =>
-    IO.println s!"  FAIL  morphosc-mimo  build/render: {firstLine e}"; pure false
+    failGate "morphosc-mimo" s!"build/render: {firstLine e}"
   | .ok saw, .ok sinv, .ok blend =>
     let mut sawDiff : Nat := 0
     let mut sinDiff : Nat := 0
@@ -1341,13 +1273,13 @@ private def runMorphOscDifferential (arena : Arena)
     IO.println s!"        result   engine MorphOsc vs std rep:  bit-differing  saw {sawDiff}/{samples} · sine {sinDiff}/{samples} · blend {blendDiff}/{samples}"
     IO.println s!"        mimo     diagonal feeds distinct consumers: max|saw−sine|={sawVsSin}"
     if maxBlend < 1e-3 then
-      IO.println s!"  FAIL  morphosc-mimo  carrier silent (maxBlend={maxBlend})"; pure false
+      failGate "morphosc-mimo" s!"carrier silent (maxBlend={maxBlend})"
     else if sawVsSin < 1e-2 then
-      IO.println s!"  FAIL  morphosc-mimo  saw ≈ sine (max|Δ|={sawVsSin}) — diagonal degenerate"; pure false
+      failGate "morphosc-mimo" s!"saw ≈ sine (max|Δ|={sawVsSin}) — diagonal degenerate"
     else if sawDiff == 0 && sinDiff == 0 && blendDiff == 0 then
-      IO.println s!"  PASS  morphosc-mimo  ClockPhasor ⋙ (saw &&& Sin) ⋙ crossfade ≡ standard rep, bit-exact (saw/sine/blend 0/{samples}; max|saw−sine|={sawVsSin})"; pure true
+      passGate "morphosc-mimo" s!"ClockPhasor ⋙ (saw &&& Sin) ⋙ crossfade ≡ standard rep, bit-exact (saw/sine/blend 0/{samples}; max|saw−sine|={sawVsSin})"
     else
-      IO.println s!"  FAIL  morphosc-mimo  bit-differing (saw {sawDiff} · sine {sinDiff} · blend {blendDiff}) — MIMO build diverges from the standard rep"; pure false
+      failGate "morphosc-mimo" s!"bit-differing (saw {sawDiff} · sine {sinDiff} · blend {blendDiff}) — MIMO build diverges from the standard rep"
 
 -- ── (h⁷) THE SLIDE (WARP-PUSH): downstream insert → upstream warp, by the compiler ─
 -- The reified arrow term + `normalize` push warps up to the generators. Three
@@ -1368,11 +1300,11 @@ private def runSlidePastArr (arena : Arena)
     match emitResolvedWire aD iD, emitResolvedWire aU iU with
     | .ok bytesD, .ok bytesU =>
       if bytesD == bytesU then
-        IO.println s!"  PASS  slide-past-arr  warp commuted past the shaper: slide(osc ⋙ shaper ⋙ flange) ≡ upstream ({bytesD.length}B)"; pure true
+        passGate "slide-past-arr" s!"warp commuted past the shaper: slide(osc ⋙ shaper ⋙ flange) ≡ upstream ({bytesD.length}B)"
       else
-        IO.println s!"  FAIL  slide-past-arr  slide(downstream) ≠ upstream (down {bytesD.length}B, up {bytesU.length}B) — R1 (commute past arr) wrong"; pure false
-    | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-past-arr  emit: {firstLine e}"; pure false
-  | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-past-arr  build: {firstLine e}"; pure false
+        failGate "slide-past-arr" s!"slide(downstream) ≠ upstream (down {bytesD.length}B, up {bytesU.length}B) — R1 (commute past arr) wrong"
+    | .error e, _ | _, .error e => failGate "slide-past-arr" s!"emit: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "slide-past-arr" s!"build: {firstLine e}"
 
 /-- Test 4: the product slide law. `slide(warp φ (x ⊗ y))` must byte-equal the
     hand-written upstream form (φ on each factor). Byte-equal ⇒ the warp
@@ -1388,11 +1320,11 @@ private def runSlideProd (arena : Arena)
     match emitResolvedWire aD iD, emitResolvedWire aU iU with
     | .ok bytesD, .ok bytesU =>
       if bytesD == bytesU then
-        IO.println s!"  PASS  slide-past-prod  warp distributed over ×: slide(warp(x ⊗ y)) ≡ (warp x) ⊗ (warp y) ({bytesD.length}B)"; pure true
+        passGate "slide-past-prod" s!"warp distributed over ×: slide(warp(x ⊗ y)) ≡ (warp x) ⊗ (warp y) ({bytesD.length}B)"
       else
-        IO.println s!"  FAIL  slide-past-prod  slide(downstream) ≠ upstream (down {bytesD.length}B, up {bytesU.length}B) — warp did NOT distribute over the product"; pure false
-    | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-past-prod  emit: {firstLine e}"; pure false
-  | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-past-prod  build: {firstLine e}"; pure false
+        failGate "slide-past-prod" s!"slide(downstream) ≠ upstream (down {bytesD.length}B, up {bytesU.length}B) — warp did NOT distribute over the product"
+    | .error e, _ | _, .error e => failGate "slide-past-prod" s!"emit: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "slide-past-prod" s!"build: {firstLine e}"
 
 /-- THE BOOTSTRAP gate. A `FixedSinOsc` built as a TERM over `{clk, +, ×, round}`
     (`fixedSinOscTerm` = `Sin(2π·phasor)`, no `gen`, no `.trop` instance) must
@@ -1420,11 +1352,11 @@ private def runBootstrapSin (arena : Arena)
       IO.println s!"        term = Sin(2π·phasor) over the clock leaf, no gen; ref = .trop FixedSinOsc @220:"
       IO.println s!"        result   term vs .trop:  bit-differing {bitDiff}/{n}  ·  max|Δ|={maxAbs}  ·  energy={energy}"
       if bitDiff == 0 && energy > 1e-6 then
-        IO.println s!"  PASS  bootstrap-sin  phasor+sine as terms ≡ .trop FixedSinOsc, bit-exact ({n} samples, energy={energy})"; pure true
+        passGate "bootstrap-sin" s!"phasor+sine as terms ≡ .trop FixedSinOsc, bit-exact ({n} samples, energy={energy})"
       else
-        IO.println s!"  FAIL  bootstrap-sin  bit-differing {bitDiff}/{n} (max|Δ|={maxAbs}) — the term diverges from the .trop generator"; pure false
-    | .error e, _ | _, .error e => IO.println s!"  FAIL  bootstrap-sin  render: {firstLine e}"; pure false
-  | .error e, _ | _, .error e => IO.println s!"  FAIL  bootstrap-sin  build: {firstLine e}"; pure false
+        failGate "bootstrap-sin" s!"bit-differing {bitDiff}/{n} (max|Δ|={maxAbs}) — the term diverges from the .trop generator"
+    | .error e, _ | _, .error e => failGate "bootstrap-sin" s!"render: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "bootstrap-sin" s!"build: {firstLine e}"
 
 /-- THE BOOTSTRAP-EXP gate. `expSig` (the modal envelope primitive, transcribed
     from stdlib/Exp) evaluated by the engine over a ramp `x∈[−10,10]` must match
@@ -1451,11 +1383,11 @@ private def runBootstrapExp (arena : Arena)
       IO.println s!"        expSig(x) vs libm exp, x∈[−10,10] across 2048 samples:"
       IO.println s!"        result   max relative error = {maxRel}  (at x={worstX})"
       if maxRel < 1e-5 then
-        IO.println s!"  PASS  bootstrap-exp  emitted polynomial exp ≡ true exp to {maxRel} (minimax) — transcription correct"; pure true
+        passGate "bootstrap-exp" s!"emitted polynomial exp ≡ true exp to {maxRel} (minimax) — transcription correct"
       else
-        IO.println s!"  FAIL  bootstrap-exp  max rel err {maxRel} (want <1e-5) at x={worstX}"; pure false
-    | .error e => IO.println s!"  FAIL  bootstrap-exp  render: {firstLine e}"; pure false
-  | .error e => IO.println s!"  FAIL  bootstrap-exp  build: {firstLine e}"; pure false
+        failGate "bootstrap-exp" s!"max rel err {maxRel} (want <1e-5) at x={worstX}"
+    | .error e => failGate "bootstrap-exp" s!"render: {firstLine e}"
+  | .error e => failGate "bootstrap-exp" s!"build: {firstLine e}"
 
 /-- THE FIXED-SINE ACCURACY gate. `fixedSinCycSig` (the Q2.30 integer-datapath
     sine) over the integer phasor, rendered by the engine, vs the TRUE sine at
@@ -1488,11 +1420,11 @@ private def runFixedSinAccuracy (arena : Arena)
       IO.println s!"        fixedSin(Q0.32 phasor @220) vs true sin at the exact integer phase, 4096 samples:"
       IO.println s!"        result   max abs error (sin scale) = {maxAbs * 1e9}e-9  (at sample {worstI})"
       if maxAbs < 2e-8 then
-        IO.println s!"  PASS  fixedsin-accuracy  Q2.30 datapath sine ≡ true sine to {maxAbs * 1e9}e-9 (≈ −160 dB floor)"; pure true
+        passGate "fixedsin-accuracy" s!"Q2.30 datapath sine ≡ true sine to {maxAbs * 1e9}e-9 (≈ −160 dB floor)"
       else
-        IO.println s!"  FAIL  fixedsin-accuracy  max abs err {maxAbs * 1e9}e-9 (want <2e-8) at sample {worstI}"; pure false
-    | .error e => IO.println s!"  FAIL  fixedsin-accuracy  render: {firstLine e}"; pure false
-  | .error e => IO.println s!"  FAIL  fixedsin-accuracy  build: {firstLine e}"; pure false
+        failGate "fixedsin-accuracy" s!"max abs err {maxAbs * 1e9}e-9 (want <2e-8) at sample {worstI}"
+    | .error e => failGate "fixedsin-accuracy" s!"render: {firstLine e}"
+  | .error e => failGate "fixedsin-accuracy" s!"build: {firstLine e}"
 
 /-- THE FIXED-SINE LONG-τ gate. The fixed oscillator read 2³⁰+12345 samples
     into the future must equal the origin oscillator phase-shifted by the
@@ -1522,19 +1454,17 @@ private def runFixedSinLongTau (arena : Arena)
     match ← renderPlanSamples fp 2048, ← renderPlanSamples sp 2048 with
     | .ok far, .ok shifted =>
       let n := min far.size shifted.size
-      let mut bitDiff := 0
-      for i in [0:n] do
-        if far[i]! != shifted[i]! then bitDiff := bitDiff + 1
+      let bitDiff := bitDiffCount far shifted
       let mut energy : Float := 0.0
       for i in [0:n] do energy := energy + far[i]! * far[i]!
       IO.println s!"        fixed osc @ clk+(2³⁰+12345) samples vs origin osc phase-shifted (inc·K mod 2³²):"
       IO.println s!"        result   bit-differing {bitDiff}/{n}  ·  energy={energy}"
       if bitDiff == 0 && energy > 1e-6 then
-        IO.println s!"  PASS  fixedsin-longtau  modular phase identity byte-exact at τ+2³⁰ samples"; pure true
+        passGate "fixedsin-longtau" "modular phase identity byte-exact at τ+2³⁰ samples"
       else
-        IO.println s!"  FAIL  fixedsin-longtau  bitDiff={bitDiff} (want 0) energy={energy} (>1e-6)"; pure false
-    | .error e, _ | _, .error e => IO.println s!"  FAIL  fixedsin-longtau  render: {firstLine e}"; pure false
-  | .error e, _ | _, .error e => IO.println s!"  FAIL  fixedsin-longtau  build: {firstLine e}"; pure false
+        failGate "fixedsin-longtau" s!"bitDiff={bitDiff} (want 0) energy={energy} (>1e-6)"
+    | .error e, _ | _, .error e => failGate "fixedsin-longtau" s!"render: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "fixedsin-longtau" s!"build: {firstLine e}"
 
 /-- THE MODAL ISLAND gate. A decaying-resonator bank (`Σ amp·e^{−σd}·cos(ωd)`,
     gated causal at a strike time) built through the ARROW path (`arrUn`/`clk`,
@@ -1559,9 +1489,7 @@ private def runModalBank (arena : Arena)
     match ← renderPlanSamples ap 2048, ← renderPlanSamples dp 2048 with
     | .ok aS, .ok dS =>
       let n := min aS.size dS.size
-      let mut bitDiff := 0
-      for i in [0:n] do
-        if aS[i]! != dS[i]! then bitDiff := bitDiff + 1
+      let bitDiff := bitDiffCount aS dS
       let mut preMax : Float := 0.0
       for i in [0:200] do
         let a := aS[i]!.abs
@@ -1573,11 +1501,11 @@ private def runModalBank (arena : Arena)
       IO.println s!"        bank = Σ amp·e^(−σd)·cos(2πf·d) @ 220/330/440, struck @ sample 200 (d=clk/2³²/SR−anchor):"
       IO.println s!"        result   arrow vs straight-line:  bit-differing {bitDiff}/{n}  ·  pre-strike |max|={preMax}  ·  E[early]={eEarly}  E[late]={eLate}"
       if bitDiff == 0 && preMax == 0.0 && eEarly > 1e-6 && eLate < eEarly then
-        IO.println s!"  PASS  modal-bank  gated decaying-sinusoid bank: arrow ≡ straight-line bit-exact, causal (silent pre-strike), decaying ({n} samples)"; pure true
+        passGate "modal-bank" s!"gated decaying-sinusoid bank: arrow ≡ straight-line bit-exact, causal (silent pre-strike), decaying ({n} samples)"
       else
-        IO.println s!"  FAIL  modal-bank  bitDiff={bitDiff} preMax={preMax} (want 0) eEarly={eEarly} (>1e-6) eLate={eLate} (<eEarly)"; pure false
-    | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-bank  render: {firstLine e}"; pure false
-  | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-bank  build: {firstLine e}"; pure false
+        failGate "modal-bank" s!"bitDiff={bitDiff} preMax={preMax} (want 0) eEarly={eEarly} (>1e-6) eLate={eLate} (<eEarly)"
+    | .error e, _ | _, .error e => failGate "modal-bank" s!"render: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "modal-bank" s!"build: {firstLine e}"
 
 /-- Warn-only cost ratchet (gates with rank): the FLATNESS assertions in the
     banks gates are HARD — an asymptotic regression means banking is broken,
@@ -1618,9 +1546,7 @@ private def runBanksAsData (arena : Arena)
     match ← renderPlanSamples dp 2048, ← renderPlanSamples tp 2048 with
     | .ok dS, .ok tS =>
       let n := min dS.size tS.size
-      let mut bitDiff := 0
-      for i in [0:n] do
-        if dS[i]! != tS[i]! then bitDiff := bitDiff + 1
+      let bitDiff := bitDiffCount dS tS
       let mut preMax : Float := 0.0
       for i in [0:200] do
         let a := tS[i]!.abs
@@ -1647,13 +1573,13 @@ private def runBanksAsData (arena : Arena)
         warnBenchConst "banks-as-data" "banked per-mode marginal (6→24)" 72 tMarginal
         if bitDiff == 0 && preMax == 0.0 && eEarly > 1e-6 && eLate < eEarly
            && shrinks && tMarginal < dMarginal then
-          IO.println s!"  PASS  banks-as-data  looped ≡ unrolled bit-exact ({n} samples), causal, decaying; plan shrinks, marginal +{tMarginal}<+{dMarginal}"; pure true
+          passGate "banks-as-data" s!"looped ≡ unrolled bit-exact ({n} samples), causal, decaying; plan shrinks, marginal +{tMarginal}<+{dMarginal}"
         else
-          IO.println s!"  FAIL  banks-as-data  bitDiff={bitDiff} preMax={preMax} shrinks={shrinks} tMarg={tMarginal} dMarg={dMarginal}"; pure false
+          failGate "banks-as-data" s!"bitDiff={bitDiff} preMax={preMax} shrinks={shrinks} tMarg={tMarginal} dMarg={dMarginal}"
       | _, _, _, _ =>
-        IO.println s!"  FAIL  banks-as-data  scaling build failed"; pure false
-    | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-as-data  render: {firstLine e}"; pure false
-  | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-as-data  build: {firstLine e}"; pure false
+        failGate "banks-as-data" "scaling build failed"
+    | .error e, _ | _, .error e => failGate "banks-as-data" s!"render: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "banks-as-data" s!"build: {firstLine e}"
 
 open Tropical.EmitArrow in
 /-- THE BANKS-AS-DATA DIRECTION gate. The direction bank lowered through TWO
@@ -1698,9 +1624,7 @@ private def runBanksAsDataDir (arena : Arena)
       match ← renderPlanSamples up 2048, ← renderPlanSamples tp 2048 with
       | .ok uS, .ok tS =>
         let n := min uS.size tS.size
-        let mut bitDiff := 0
-        for i in [0:n] do
-          if uS[i]! != tS[i]! then bitDiff := bitDiff + 1
+        let bitDiff := bitDiffCount uS tS
         -- the reverse config must carry PRE-STRIKE energy (the anti-causal loop lives)
         let mut preE : Float := 0.0
         for i in [0:200] do preE := preE + tS[i]! * tS[i]!
@@ -1731,11 +1655,11 @@ private def runBanksAsDataDir (arena : Arena)
     warnBenchConst "banks-as-data-dir" "12-mode looped plan-instrs" 317 tc
     warnBenchConst "banks-as-data-dir" "banked per-mode marginal (6→24)" 72 tMarginal
     if ok && shrinks && tMarginal < uMarginal then
-      IO.println s!"  PASS  banks-as-data-dir  looped ≡ unrolled bit-exact (mid/rev/sway), reverse audible; plan shrinks, marginal +{tMarginal}<+{uMarginal}"; pure true
+      passGate "banks-as-data-dir" s!"looped ≡ unrolled bit-exact (mid/rev/sway), reverse audible; plan shrinks, marginal +{tMarginal}<+{uMarginal}"
     else
-      IO.println s!"  FAIL  banks-as-data-dir  ok={ok} shrinks={shrinks} tMarg={tMarginal} uMarg={uMarginal}"; pure false
+      failGate "banks-as-data-dir" s!"ok={ok} shrinks={shrinks} tMarg={tMarginal} uMarg={uMarginal}"
   | _, _, _, _, _ =>
-    IO.println s!"  FAIL  banks-as-data-dir  scaling build failed"; pure false
+    failGate "banks-as-data-dir" "scaling build failed"
 
 open Tropical.EmitArrow in
 /-- THE FLOAT-BANK gate (typed accumulator). A FLOAT fold lowered through
@@ -1762,9 +1686,7 @@ private def runBanksFloat (arena : Arena)
     match ← renderPlanSamples up 2048, ← renderPlanSamples tp 2048 with
     | .ok uS, .ok tS =>
       let n := min uS.size tS.size
-      let mut bitDiff := 0
-      for i in [0:n] do
-        if uS[i]! != tS[i]! then bitDiff := bitDiff + 1
+      let bitDiff := bitDiffCount uS tS
       let mut energy : Float := 0.0
       for i in [0:n] do energy := energy + tS[i]! * tS[i]!
       let shrinks := decide (planInstrCount tp < planInstrCount up)
@@ -1772,11 +1694,11 @@ private def runBanksFloat (arena : Arena)
       IO.println s!"        result   bit-differing {bitDiff}/{n} · energy={energy} · plan-instrs unrolled={planInstrCount up} looped={planInstrCount tp}"
       warnBenchConst "banks-float" "looped plan-instrs" 12 (planInstrCount tp)
       if bitDiff == 0 && energy > 1e-6 && shrinks then
-        IO.println s!"  PASS  banks-float  looped ≡ unrolled bit-exact for a FLOAT fold (order preservation, no associativity); plan shrinks"; pure true
+        passGate "banks-float" "looped ≡ unrolled bit-exact for a FLOAT fold (order preservation, no associativity); plan shrinks"
       else
-        IO.println s!"  FAIL  banks-float  bitDiff={bitDiff} energy={energy} shrinks={shrinks}"; pure false
-    | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-float  render: {firstLine e}"; pure false
-  | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-float  build: {firstLine e}"; pure false
+        failGate "banks-float" s!"bitDiff={bitDiff} energy={energy} shrinks={shrinks}"
+    | .error e, _ | _, .error e => failGate "banks-float" s!"render: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "banks-float" s!"build: {firstLine e}"
 
 /-- THE TRUNK-FOLD gate (loop-everything). A surface-language SUMMING fold —
     through the FULL front door (raise → elaborate → strata → emit) — lowers to
@@ -1842,9 +1764,7 @@ private def runBanksFoldTrunk (_arena : Arena)
     match ← renderPlanSamples fp 2048, ← renderPlanSamples up 2048 with
     | .ok fS, .ok uS =>
       let n := min fS.size uS.size
-      let mut bitDiff := 0
-      for i in [0:n] do
-        if fS[i]! != uS[i]! then bitDiff := bitDiff + 1
+      let bitDiff := bitDiffCount fS uS
       let nonzero := fS.any (· != 0.0)
       match ← compileAt 8 false "f8", ← compileAt 64 false "f64" with
       | .ok f8, .ok f64 =>
@@ -1857,19 +1777,19 @@ private def runBanksFoldTrunk (_arena : Arena)
         if looping then
           warnBenchConst "banks-fold-trunk" "fold plan-instrs (any K)" 8 (planInstrCount fp)
           if bitDiff == 0 && nonzero && shrinks && d ≤ 2 then
-            IO.println s!"  PASS  banks-fold-trunk  surface fold banks: byte-equal to unroll, plan FLAT in K (Δ={d} ≤ 2, 8→64)"; pure true
+            passGate "banks-fold-trunk" s!"surface fold banks: byte-equal to unroll, plan FLAT in K (Δ={d} ≤ 2, 8→64)"
           else
-            IO.println s!"  FAIL  banks-fold-trunk  bitDiff={bitDiff} nonzero={nonzero} shrinks={shrinks} Δ={d}"; pure false
+            failGate "banks-fold-trunk" s!"bitDiff={bitDiff} nonzero={nonzero} shrinks={shrinks} Δ={d}"
         else
           -- escape hatch: the fold must genuinely revert to unrolling
           if bitDiff == 0 && nonzero && !shrinks && d > 2 then
-            IO.println s!"  PASS  banks-fold-trunk  escape hatch reverts: fold unrolls (Δ={d} grows), byte-equal"; pure true
+            passGate "banks-fold-trunk" s!"escape hatch reverts: fold unrolls (Δ={d} grows), byte-equal"
           else
-            IO.println s!"  FAIL  banks-fold-trunk  (unroll mode) bitDiff={bitDiff} nonzero={nonzero} shrinks={shrinks} Δ={d}"; pure false
+            failGate "banks-fold-trunk" s!"(unroll mode) bitDiff={bitDiff} nonzero={nonzero} shrinks={shrinks} Δ={d}"
       | .error e, _ | _, .error e =>
-        IO.println s!"  FAIL  banks-fold-trunk  scaling compile: {firstLine e}"; pure false
-    | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-fold-trunk  render: {firstLine e}"; pure false
-  | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-fold-trunk  compile: {firstLine e}"; pure false
+        failGate "banks-fold-trunk" s!"scaling compile: {firstLine e}"
+    | .error e, _ | _, .error e => failGate "banks-fold-trunk" s!"render: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "banks-fold-trunk" s!"compile: {firstLine e}"
 
 /-- Wrap a single output expression in the minimal one-instance
     `tropical_program_2` patch the fold gates probe with (`p.out = expr`).
@@ -1962,9 +1882,7 @@ private def runBanksColumnize (_arena : Arena)
     match ← renderPlanSamples fp 2048, ← renderPlanSamples up 2048 with
     | .ok fS, .ok uS =>
       let n := min fS.size uS.size
-      let mut bitDiff := 0
-      for i in [0:n] do
-        if fS[i]! != uS[i]! then bitDiff := bitDiff + 1
+      let bitDiff := bitDiffCount fS uS
       let nonzero := fS.any (· != 0.0)
       match ← compileFoldProbe (foldExpr 64) "f64" with
       | .ok f64 =>
@@ -1978,18 +1896,18 @@ private def runBanksColumnize (_arena : Arena)
         if looping then
           warnBenchConst "banks-columnize" "tuple-fold plan-instrs (any K)" 11 (planInstrCount fp)
           if bitDiff == 0 && nonzero && regions == 1 && packs == 2 && d ≤ 2 then
-            IO.println s!"  PASS  banks-columnize  tuple fold banks as SoA: 1 region × 2 columns, byte-equal to unroll, plan FLAT in K (Δ={d} ≤ 2, 8→64)"; pure true
+            passGate "banks-columnize" s!"tuple fold banks as SoA: 1 region × 2 columns, byte-equal to unroll, plan FLAT in K (Δ={d} ≤ 2, 8→64)"
           else
-            IO.println s!"  FAIL  banks-columnize  bitDiff={bitDiff} nonzero={nonzero} regions={regions} packs={packs} Δ={d}"; pure false
+            failGate "banks-columnize" s!"bitDiff={bitDiff} nonzero={nonzero} regions={regions} packs={packs} Δ={d}"
         else
           if bitDiff == 0 && nonzero && regions == 0 && d > 2 then
-            IO.println s!"  PASS  banks-columnize  escape hatch reverts: tuple fold unrolls (0 regions, Δ={d} grows), byte-equal"; pure true
+            passGate "banks-columnize" s!"escape hatch reverts: tuple fold unrolls (0 regions, Δ={d} grows), byte-equal"
           else
-            IO.println s!"  FAIL  banks-columnize  (unroll mode) bitDiff={bitDiff} nonzero={nonzero} regions={regions} Δ={d}"; pure false
+            failGate "banks-columnize" s!"(unroll mode) bitDiff={bitDiff} nonzero={nonzero} regions={regions} Δ={d}"
       | .error e =>
-        IO.println s!"  FAIL  banks-columnize  scaling compile: {firstLine e}"; pure false
-    | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-columnize  render: {firstLine e}"; pure false
-  | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-columnize  compile: {firstLine e}"; pure false
+        failGate "banks-columnize" s!"scaling compile: {firstLine e}"
+    | .error e, _ | _, .error e => failGate "banks-columnize" s!"render: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "banks-columnize" s!"compile: {firstLine e}"
 
 /-- THE COLUMNIZE BAIL-OUT gate. The shapes `tryBankFoldE` refuses must still
     compile CORRECTLY via unrolling — never crash, never mis-bank:
@@ -2013,9 +1931,7 @@ private def runBanksColumnizeBail (_arena : Arena)
       match ← renderPlanSamples fp 2048, ← renderPlanSamples up 2048 with
       | .ok fS, .ok uS =>
         let n := min fS.size uS.size
-        let mut bitDiff := 0
-        for i in [0:n] do
-          if fS[i]! != uS[i]! then bitDiff := bitDiff + 1
+        let bitDiff := bitDiffCount fS uS
         let nonzero := fS.any (· != 0.0)
         let regions := planTagCount "ReduceBegin" fp
         IO.println s!"        bail[{name}]  bit-differing {bitDiff}/{n} · nonzero={nonzero} · regions={regions} (want {wantRegions})"
@@ -2066,8 +1982,7 @@ private def runBanksColumnizeBail (_arena : Arena)
     fails := fails.push f
   if fails.isEmpty then
     let tagWord := if looping then "banks as SCALARS (1 region)" else "unrolls with the flag off (0 regions)"
-    IO.println s!"  PASS  banks-columnize-bail  ragged + dynamic-index unroll byte-equal (0 regions); tag fold reaches ArrayLower as variant literals post-SumLower and {tagWord}"
-    pure true
+    passGate "banks-columnize-bail" s!"ragged + dynamic-index unroll byte-equal (0 regions); tag fold reaches ArrayLower as variant literals post-SumLower and {tagWord}"
   else
     IO.println s!"  FAIL  banks-columnize-bail  {String.intercalate " · " fails.toList}"
     pure false
@@ -2124,9 +2039,7 @@ private def runBanksNested (_arena : Arena)
     match ← renderPlanSamples fp 2048, ← renderPlanSamples up 2048 with
     | .ok fS, .ok uS =>
       let n := min fS.size uS.size
-      let mut bitDiff := 0
-      for i in [0:n] do
-        if fS[i]! != uS[i]! then bitDiff := bitDiff + 1
+      let bitDiff := bitDiffCount fS uS
       let nonzero := fS.any (· != 0.0)
       match ← compileFoldProbe (foldExpr 16 16) "nested-f16" with
       | .ok f16 =>
@@ -2154,18 +2067,18 @@ private def runBanksNested (_arena : Arena)
               IO.println s!"        staged   compile failed: {firstLine e}"; pure false
           IO.println s!"        staged   typed-split render byte-equal to unroll: {stagedOk}"
           if bitDiff == 0 && nonzero && regions == 2 && nested && d ≤ 2 && stagedOk then
-            IO.println s!"  PASS  banks-nested  fold-of-folds banks as NESTED regions (RB RB RE RE), byte-equal to unroll (plain + typed split), plan FLAT in both counts (Δ={d} ≤ 2, (4,4)→(16,16))"; pure true
+            passGate "banks-nested" s!"fold-of-folds banks as NESTED regions (RB RB RE RE), byte-equal to unroll (plain + typed split), plan FLAT in both counts (Δ={d} ≤ 2, (4,4)→(16,16))"
           else
-            IO.println s!"  FAIL  banks-nested  bitDiff={bitDiff} nonzero={nonzero} regions={regions} nested={nested} Δ={d} stagedOk={stagedOk}"; pure false
+            failGate "banks-nested" s!"bitDiff={bitDiff} nonzero={nonzero} regions={regions} nested={nested} Δ={d} stagedOk={stagedOk}"
         else
           if bitDiff == 0 && nonzero && regions == 0 && d > 2 then
-            IO.println s!"  PASS  banks-nested  escape hatch reverts: the whole ladder unrolls (0 regions, Δ={d} grows), byte-equal"; pure true
+            passGate "banks-nested" s!"escape hatch reverts: the whole ladder unrolls (0 regions, Δ={d} grows), byte-equal"
           else
-            IO.println s!"  FAIL  banks-nested  (unroll mode) bitDiff={bitDiff} nonzero={nonzero} regions={regions} Δ={d}"; pure false
+            failGate "banks-nested" s!"(unroll mode) bitDiff={bitDiff} nonzero={nonzero} regions={regions} Δ={d}"
       | .error e =>
-        IO.println s!"  FAIL  banks-nested  scaling compile: {firstLine e}"; pure false
-    | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-nested  render: {firstLine e}"; pure false
-  | .error e, _ | _, .error e => IO.println s!"  FAIL  banks-nested  compile: {firstLine e}"; pure false
+        failGate "banks-nested" s!"scaling compile: {firstLine e}"
+    | .error e, _ | _, .error e => failGate "banks-nested" s!"render: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "banks-nested" s!"compile: {firstLine e}"
 
 /-- THE NESTED-BANKS MSL gate: EmitMsl on the nested plan emits two reduce
     `for` loops, the second opening strictly INSIDE the first (text-level
@@ -2186,10 +2099,10 @@ private def runBanksNestedMsl (_arena : Arena)
     cgFold (Lean.Json.arr ((Array.range 4).map cgA))
       (cgAdd (cgBinding "acc") (mulJ (cgBinding "e") (innerFold (cgBinding "e") 4)))
   match ← compileFoldProbe foldExpr "nested-msl" with
-  | .error e => IO.println s!"  FAIL  banks-nested-msl  compile: {firstLine e}"; pure false
+  | .error e => failGate "banks-nested-msl" s!"compile: {firstLine e}"
   | .ok fp =>
     match Tropical.Ir.EmitMsl.emitKernel fp with
-    | .error e => IO.println s!"  FAIL  banks-nested-msl  EmitMsl: {firstLine e}"; pure false
+    | .error e => failGate "banks-nested-msl" s!"EmitMsl: {firstLine e}"
     | .ok msl =>
       let looping := Tropical.Ir.Strata.ArrayLower.banksLoopEnabled
       -- Depth scan over the kernel text: a reduce-for line opens a loop, a
@@ -2205,14 +2118,14 @@ private def runBanksNestedMsl (_arena : Arena)
           depth := depth - 1
       if looping then
         if forDepths == #[0, 1] then
-          IO.println s!"  PASS  banks-nested-msl  two reduce for-loops, the inner strictly inside the outer (depths {forDepths})"; pure true
+          passGate "banks-nested-msl" s!"two reduce for-loops, the inner strictly inside the outer (depths {forDepths})"
         else
-          IO.println s!"  FAIL  banks-nested-msl  expected reduce-for depths #[0, 1], got {forDepths}"; pure false
+          failGate "banks-nested-msl" s!"expected reduce-for depths #[0, 1], got {forDepths}"
       else
         if forDepths.isEmpty then
-          IO.println s!"  PASS  banks-nested-msl  escape hatch: no reduce loop in the kernel"; pure true
+          passGate "banks-nested-msl" "escape hatch: no reduce loop in the kernel"
         else
-          IO.println s!"  FAIL  banks-nested-msl  (unroll mode) expected no reduce loops, got depths {forDepths}"; pure false
+          failGate "banks-nested-msl" s!"(unroll mode) expected no reduce loops, got depths {forDepths}"
 
 /-- THE MODAL DEGREE gate. A degree-1 mode `amp·d·e^{−σd}` (a repeated pole — the
     resonance "swell") rendered by the engine must match `sinkGain·d·e^{−σd}` to
@@ -2252,11 +2165,11 @@ private def runModalDegree (arena : Arena)
       IO.println s!"        deg-1 τ·e mode (σ=25, f=0) vs sinkGain·d·e^(−25d):"
       IO.println s!"        result   preMax={preMax} · max rel err={maxRel} · peak @ sample {peakI} (d={peakD}s, expect 1/σ=0.04)"
       if preMax == 0.0 && maxRel < 1e-4 && peakI > 1500 && peakI < 2400 then
-        IO.println s!"  PASS  modal-degree  τ·e swell ≡ d·e^(−σd) to {maxRel}; rises to peak at d≈1/σ then decays"; pure true
+        passGate "modal-degree" s!"τ·e swell ≡ d·e^(−σd) to {maxRel}; rises to peak at d≈1/σ then decays"
       else
-        IO.println s!"  FAIL  modal-degree  preMax={preMax} maxRel={maxRel} peakI={peakI}"; pure false
-    | .error e => IO.println s!"  FAIL  modal-degree  render: {firstLine e}"; pure false
-  | .error e => IO.println s!"  FAIL  modal-degree  build: {firstLine e}"; pure false
+        failGate "modal-degree" s!"preMax={preMax} maxRel={maxRel} peakI={peakI}"
+    | .error e => failGate "modal-degree" s!"render: {firstLine e}"
+  | .error e => failGate "modal-degree" s!"build: {firstLine e}"
 
 /-- THE LONG-τ gate. Time-translation exactness at astronomical clock offsets:
     the SAME bank struck K samples later, read K samples later, must be BYTE-
@@ -2294,9 +2207,7 @@ private def runLongTauModal (arena : Arena)
       match ← renderPlanSamples bp 1024, ← renderPlanSamples fp 1024 with
       | .ok base, .ok far =>
         let n := min base.size far.size
-        let mut bitDiff := 0
-        for i in [0:n] do
-          if base[i]! != far[i]! then bitDiff := bitDiff + 1
+        let bitDiff := bitDiffCount base far
         let mut energy : Float := 0.0
         for i in [200:n] do energy := energy + base[i]! * base[i]!
         pure (some (bitDiff, energy))
@@ -2318,9 +2229,9 @@ private def runLongTauModal (arena : Arena)
     IO.println s!"        bank @ origin vs struck+read 2³⁰ samples later (≈6.8h), fractional clocks, 1024 samples:"
     IO.println s!"        result   velocity-1.001 clock: bit-differing {d1}/1024 (E={e1})  ·  sub-sample offset: {d2}/1024 (E={e2})"
     if d1 == 0 && d2 == 0 && e1 > 1e-6 && e2 > 1e-6 then
-      IO.println s!"  PASS  modal-longtau  time-translation byte-exact at τ+2³⁰ samples on fractional (scrub-form) clocks"; pure true
+      passGate "modal-longtau" "time-translation byte-exact at τ+2³⁰ samples on fractional (scrub-form) clocks"
     else
-      IO.println s!"  FAIL  modal-longtau  bitDiff vel={d1} sub={d2} (want 0) energy vel={e1} sub={e2} (>1e-6)"; pure false
+      failGate "modal-longtau" s!"bitDiff vel={d1} sub={d2} (want 0) energy vel={e1} sub={e2} (>1e-6)"
   | _, _ => pure false
 
 /-- THE REVERSE-REVERB gate (the moat). The modal bank read through a reversing
@@ -2354,11 +2265,11 @@ private def runModalReverse (arena : Arena)
       IO.println s!"        modal bank forward vs reversed (φ reflects scene time around sample 1024):"
       IO.println s!"        result   rev[i] vs fwd[2048−i]: bit-differing {bitDiff}/{n}  ·  rev≠fwd at {differsFwd} samples  ·  rev energy={revEnergy}"
       if bitDiff == 0 && differsFwd > 0 && revEnergy > 1e-6 then
-        IO.println s!"  PASS  modal-reverse  reversed reading ≡ forward time-mirrored, bit-exact — zero-latency reverse reverb ({n} samples)"; pure true
+        passGate "modal-reverse" s!"reversed reading ≡ forward time-mirrored, bit-exact — zero-latency reverse reverb ({n} samples)"
       else
-        IO.println s!"  FAIL  modal-reverse  bitDiff={bitDiff} differsFwd={differsFwd} revEnergy={revEnergy}"; pure false
-    | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-reverse  render: {firstLine e}"; pure false
-  | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-reverse  build: {firstLine e}"; pure false
+        failGate "modal-reverse" s!"bitDiff={bitDiff} differsFwd={differsFwd} revEnergy={revEnergy}"
+    | .error e, _ | _, .error e => failGate "modal-reverse" s!"render: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "modal-reverse" s!"build: {firstLine e}"
 
 section ResidueGates
 open Tropical.EmitArrow
@@ -2388,9 +2299,9 @@ private def runResidueMoments (arena : Arena)
   IO.println s!"        voice(2 poles) ⋙ reverb(4 poles) → {modes.size} residue modes; jet-match k=0..6:"
   IO.println s!"        result   max relative moment error = {err}  ·  onset ΣA/Σ|A| = {onset}"
   if err < 1e-9 && onset < 1e-9 then
-    IO.println s!"  PASS  residue-moments  composed modes reproduce the convolution jet to k=6 (err={err}); ΣA=0 ⇒ click-free onset"; pure true
+    passGate "residue-moments" s!"composed modes reproduce the convolution jet to k=6 (err={err}); ΣA=0 ⇒ click-free onset"
   else
-    IO.println s!"  FAIL  residue-moments  err={err} (want <1e-9) onset={onset} (want <1e-9)"; pure false
+    failGate "residue-moments" s!"err={err} (want <1e-9) onset={onset} (want <1e-9)"
 
 /-- THE RESIDUE REVERB gate (emit). `buildModalReverb` runs the residue calculus
     and emits the composed bank; it must render a real, causal, DECAYING signal
@@ -2432,11 +2343,11 @@ private def runModalReverb (arena : Arena)
       IO.println s!"        buildModalReverb rendered (voice ⋙ reverb, struck @ sample 200):"
       IO.println s!"        result   pre-strike |max|={preMax} · first-post |s|={firstPost} · peak={peak} · E[mid]={eMid} E[late]={eLate}"
       if preMax == 0.0 && peak > 1e-4 && firstPost < 0.02 * peak && eLate < eMid then
-        IO.println s!"  PASS  modal-reverb  residue-composed bank renders: causal, click-free onset (|first|≪peak), decaying tail ({n} samples)"; pure true
+        passGate "modal-reverb" s!"residue-composed bank renders: causal, click-free onset (|first|≪peak), decaying tail ({n} samples)"
       else
-        IO.println s!"  FAIL  modal-reverb  preMax={preMax} peak={peak} firstPost={firstPost} eMid={eMid} eLate={eLate}"; pure false
-    | .error e => IO.println s!"  FAIL  modal-reverb  render: {firstLine e}"; pure false
-  | .error e => IO.println s!"  FAIL  modal-reverb  build: {firstLine e}"; pure false
+        failGate "modal-reverb" s!"preMax={preMax} peak={peak} firstPost={firstPost} eMid={eMid} eLate={eLate}"
+    | .error e => failGate "modal-reverb" s!"render: {firstLine e}"
+  | .error e => failGate "modal-reverb" s!"build: {firstLine e}"
 
 /-- THE DIRECTION gate. `dir` crossfades the tail's time-direction and must, above
     all, STAY AUDIBLE across its range (the pole-rotation version silently collapsed
@@ -2485,11 +2396,11 @@ private def runModalDirection (arena : Arena)
       let bOk := revDiff == 0 && revDiffersFwd > 0
       let cOk := midFinite && fwdE > 1e-6 && midE > 0.1 * fwdE
       if aOk && bOk && cOk then
-        IO.println s!"  PASS  modal-direction  dir=0 forward (bit-exact) · dir=1 reverse (mirror bit-exact) · dir=0.5 AUDIBLE (E={midE}, {midE/fwdE} of fwd)"; pure true
+        passGate "modal-direction" s!"dir=0 forward (bit-exact) · dir=1 reverse (mirror bit-exact) · dir=0.5 AUDIBLE (E={midE}, {midE/fwdE} of fwd)"
       else
-        IO.println s!"  FAIL  modal-direction  A={aOk} B={bOk} C={cOk} (idDiff={idDiff} revDiff={revDiff} midE={midE} fwdE={fwdE})"; pure false
-    | _, _, _, _ => IO.println s!"  FAIL  modal-direction  render error"; pure false
-  | _, _, _, _ => IO.println s!"  FAIL  modal-direction  build error"; pure false
+        failGate "modal-direction" s!"A={aOk} B={bOk} C={cOk} (idDiff={idDiff} revDiff={revDiff} midE={midE} fwdE={fwdE})"
+    | _, _, _, _ => failGate "modal-direction" "render error"
+  | _, _, _, _ => failGate "modal-direction" "build error"
 
 /-- THE SWAY gate. Decay sway modulates each mode's damping by `1 + depth·sin(2π·
     rate·t)` on the ENVELOPE clock only. (S1) at depth 0 it is bit-for-bit the
@@ -2530,11 +2441,11 @@ private def runModalSway (arena : Arena)
       let s1 := z0Diff == 0
       let s2 := modDiff > 100 && preMax == 0.0 && dFinite && dPeak > 1e-4 && dPeak < 1e3
       if s1 && s2 then
-        IO.println s!"  PASS  modal-sway  depth 0 ≡ un-swayed (bit-exact) · depth>0 breathes the decay, causal & bounded"; pure true
+        passGate "modal-sway" "depth 0 ≡ un-swayed (bit-exact) · depth>0 breathes the decay, causal & bounded"
       else
-        IO.println s!"  FAIL  modal-sway  S1={s1} (bitDiff {z0Diff}) S2={s2} (modDiff {modDiff} preMax {preMax} peak {dPeak} finite {dFinite})"; pure false
-    | _, _, _ => IO.println s!"  FAIL  modal-sway  render error"; pure false
-  | _, _, _ => IO.println s!"  FAIL  modal-sway  build error"; pure false
+        failGate "modal-sway" s!"S1={s1} (bitDiff {z0Diff}) S2={s2} (modDiff {modDiff} preMax {preMax} peak {dPeak} finite {dFinite})"
+    | _, _, _ => failGate "modal-sway" "render error"
+  | _, _, _ => failGate "modal-sway" "build error"
 
 /-- THE DEGENERATE RESIDUE gate. A voice pole placed EXACTLY on a reverb pole
     (sympathetic resonance) must compose to a `τ·e^{μd}` DOUBLE POLE, not blow up.
@@ -2557,9 +2468,9 @@ private def runResidueDegenerate (arena : Arena)
   IO.println s!"        voice pole = reverb pole #2 (sympathetic): {modes.size} modes, {nDeg1} of degree 1:"
   IO.println s!"        result   deg-1 modes = {nDeg1}  ·  degree-aware moment error k=0..6 = {err}"
   if nDeg1 == 1 && err < 1e-9 then
-    IO.println s!"  PASS  residue-degenerate  coincident pole → one τ·e double pole; jet still exact (err={err}) — no blow-up"; pure true
+    passGate "residue-degenerate" s!"coincident pole → one τ·e double pole; jet still exact (err={err}) — no blow-up"
   else
-    IO.println s!"  FAIL  residue-degenerate  nDeg1={nDeg1} (want 1) err={err} (want <1e-9)"; pure false
+    failGate "residue-degenerate" s!"nDeg1={nDeg1} (want 1) err={err} (want <1e-9)"
 
 /-- THE SYMBOLIC RESIDUE gate. The residue calculus emitted as `Expr` couplings
     (`residueComposeE`, so poles/coeffs can be live slots) must, on LITERAL poles,
@@ -2600,11 +2511,11 @@ private def runResidueSymbolic (arena : Arena)
       IO.println s!"        Expr-residue (literal poles) vs Float-baked residue, voice(2)⋙reverb(4):"
       IO.println s!"        result   max|Δ|={maxAbs * 1e9}e-9  ·  quantum bound={bound * 1e9}e-9"
       if maxAbs < bound && energy > 1e-9 then
-        IO.println s!"  PASS  symbolic-residue  Expr couplings fold to the validated Float residue within the Q4.28 landing quantum (max|Δ| {maxAbs * 1e9}e-9) — live-capable, same math"; pure true
+        passGate "symbolic-residue" s!"Expr couplings fold to the validated Float residue within the Q4.28 landing quantum (max|Δ| {maxAbs * 1e9}e-9) — live-capable, same math"
       else
-        IO.println s!"  FAIL  symbolic-residue  max|Δ|={maxAbs * 1e9}e-9 (bound {bound * 1e9}e-9) energy={energy}"; pure false
-    | .error e, _ | _, .error e => IO.println s!"  FAIL  symbolic-residue  render: {firstLine e}"; pure false
-  | .error e, _ | _, .error e => IO.println s!"  FAIL  symbolic-residue  build: {firstLine e}"; pure false
+        failGate "symbolic-residue" s!"max|Δ|={maxAbs * 1e9}e-9 (bound {bound * 1e9}e-9) energy={energy}"
+    | .error e, _ | _, .error e => failGate "symbolic-residue" s!"render: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "symbolic-residue" s!"build: {firstLine e}"
 
 /-- THE COLLECTED RESIDUE gate. `residueComposeEC` (m+n modes: pole union with
     cross-weighted residues) must render pointwise-equal to the uncollected
@@ -2654,11 +2565,11 @@ private def runResidueCollected (arena : Arena)
       IO.println s!"        collected (m+n={nC}) vs uncollected (m+m·n={nU}), voice(3)⋙reverb(4):"
       IO.println s!"        result   max|Δ|={maxAbs * 1e9}e-9  ·  quantum bound={bound * 1e9}e-9"
       if maxAbs < bound && energy > 1e-9 && nC == 7 && nU == 15 then
-        IO.println s!"  PASS  residue-collected  pole-union bank ≡ per-pair bank within the Q4.28 landing quantum (max|Δ| {maxAbs * 1e9}e-9 < {bound * 1e9}e-9); {nU}→{nC} modes — fusion affordable as the default"; pure true
+        passGate "residue-collected" s!"pole-union bank ≡ per-pair bank within the Q4.28 landing quantum (max|Δ| {maxAbs * 1e9}e-9 < {bound * 1e9}e-9); {nU}→{nC} modes — fusion affordable as the default"
       else
-        IO.println s!"  FAIL  residue-collected  max|Δ|={maxAbs * 1e9}e-9 (bound {bound * 1e9}e-9) energy={energy} nC={nC} (want 7) nU={nU} (want 15)"; pure false
-    | .error e, _ | _, .error e => IO.println s!"  FAIL  residue-collected  render: {firstLine e}"; pure false
-  | .error e, _ | _, .error e => IO.println s!"  FAIL  residue-collected  build: {firstLine e}"; pure false
+        failGate "residue-collected" s!"max|Δ|={maxAbs * 1e9}e-9 (bound {bound * 1e9}e-9) energy={energy} nC={nC} (want 7) nU={nU} (want 15)"
+    | .error e, _ | _, .error e => failGate "residue-collected" s!"render: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "residue-collected" s!"build: {firstLine e}"
 
 end ResidueGates
 
@@ -2714,11 +2625,11 @@ private def runModalPatch (arena : Arena)
       IO.println s!"        patch: resonator(3) → reverb(3) → out, lowered from a PatchGraph:"
       IO.println s!"        result   pre-strike |max|={preMax} · peak={peak} · E[early]={eEarly} E[late]={eLate} · rev≡fwd-mirror bitDiff {bitDiff}/{n}"
       if preMax == 0.0 && peak > 1e-6 && eLate < eEarly && bitDiff == 0 then
-        IO.println s!"  PASS  modal-patch  resonator→reverb→out compiles from a graph: causal, decaying, reverse-scrubs bit-exact"; pure true
+        passGate "modal-patch" "resonator→reverb→out compiles from a graph: causal, decaying, reverse-scrubs bit-exact"
       else
-        IO.println s!"  FAIL  modal-patch  preMax={preMax} peak={peak} eEarly={eEarly} eLate={eLate} bitDiff={bitDiff}"; pure false
-    | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-patch  render: {firstLine e}"; pure false
-  | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-patch  build: {firstLine e}"; pure false
+        failGate "modal-patch" s!"preMax={preMax} peak={peak} eEarly={eEarly} eLate={eLate} bitDiff={bitDiff}"
+    | .error e, _ | _, .error e => failGate "modal-patch" s!"render: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "modal-patch" s!"build: {firstLine e}"
 
 /-- THE MODAL LIVE gate (the payoff). A JSON patch `resonator(freq) → reverb → out`
     compiled through the real `compilePlanPure` — decode → lowerModal → symbolic
@@ -2736,10 +2647,10 @@ private def runModalLive (arena : Arena)
     "{\"id\":\"rev\",\"kind\":\"reverb\",\"params\":{\"rt60\":2},\"in\":{\"in\":[\"res\"]}}," ++
     "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"rev\"]}}],\"out\":\"out\"}"
   match Lean.Json.parse src with
-  | .error e => IO.println s!"  FAIL  modal-live  json parse: {e}"; pure false
+  | .error e => failGate "modal-live" s!"json parse: {e}"
   | .ok j =>
   match Tropical.Playground.compilePlanPure arena resolved j with
-  | .error e => IO.println s!"  FAIL  modal-live  compile: {firstLine e}"; pure false
+  | .error e => failGate "modal-live" s!"compile: {firstLine e}"
   | .ok (plan, _, stageBlocks) =>
     match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
     | .ok _, .ok _ =>
@@ -2780,11 +2691,11 @@ private def runModalLive (arena : Arena)
       IO.println s!"        JSON resonator(freq,decay) → reverb(rt60) → out compiled via compilePlanPure:"
       IO.println s!"        result   JIT-loadable · slots: freq={fIdx?.isSome} decay={dPresent} rt60={rtPresent} · pre-move blocks identical={sameB1} · post-move ΔE/E={dE / (e0 + 1e-300)}"
       if fIdx?.isSome && dPresent && rtPresent && sameB1 && knobRead then
-        IO.println s!"  PASS  modal-live  modal params are live slots AND the kernel reads them: moving res.freq moves the signal THROUGH the reverb (setSlot, no relower)"; pure true
+        passGate "modal-live" "modal params are live slots AND the kernel reads them: moving res.freq moves the signal THROUGH the reverb (setSlot, no relower)"
       else
-        IO.println s!"  FAIL  modal-live  freq={fIdx?.isSome} decay={dPresent} rt60={rtPresent} sameB1={sameB1} knobRead={knobRead} (ΔE={dE}) — a present-but-unread slot is a dead knob"; pure false
-    | .error e, _ => IO.println s!"  FAIL  modal-live  toWire: {firstLine e}"; pure false
-    | _, .error e => IO.println s!"  FAIL  modal-live  emitKernel: {firstLine e}"; pure false
+        failGate "modal-live" s!"freq={fIdx?.isSome} decay={dPresent} rt60={rtPresent} sameB1={sameB1} knobRead={knobRead} (ΔE={dE}) — a present-but-unread slot is a dead knob"
+    | .error e, _ => failGate "modal-live" s!"toWire: {firstLine e}"
+    | _, .error e => failGate "modal-live" s!"emitKernel: {firstLine e}"
 
 /-- Count instructions matching `pred` across a plan's instance-function tree. -/
 private partial def countInstrsFn (pred : Tropical.Plan.NInstr → Bool) :
@@ -2866,7 +2777,7 @@ private def runBanksRegionHoist : IO Bool := do
   let check := fun (label : String) (dyn : Bool) => do
     let plan := regionS0PlanOf dyn
     match Tropical.Ir.Stage0.hoistTyped plan regionS0Stages with
-    | .error e => IO.println s!"  FAIL  banks-region-hoist  {label} split: {firstLine e}"; pure false
+    | .error e => failGate "banks-region-hoist" s!"{label} split: {firstLine e}"
     | .ok split =>
       let audioReduces := planReduces split.audio
       let coeffReduces := match split.coeff? with | some c => planReduces c | none => 0
@@ -2875,7 +2786,7 @@ private def runBanksRegionHoist : IO Bool := do
       let cols := split.audio.coeffArraySlots
       let typed ← renderTypedBytes plan regionS0Stages
       match ← renderIrBytes plan with
-      | .error e => IO.println s!"  FAIL  banks-region-hoist  {label} flow render: {firstLine e}"; pure false
+      | .error e => failGate "banks-region-hoist" s!"{label} flow render: {firstLine e}"
       | .ok flow =>
         let n := min typed.size flow.size
         let mut bitDiff := 0
@@ -2897,8 +2808,7 @@ private def runBanksRegionHoist : IO Bool := do
       ++ "reads the sum via coef:0; typed ≡ flow byte-exact, static AND dynamic count")
     pure true
   else
-    IO.println s!"  FAIL  banks-region-hoist  static={okS} dynamic={okD}"
-    pure false
+    failGate "banks-region-hoist" s!"static={okS} dynamic={okD}"
 
 end RegionHoist
 
@@ -2918,13 +2828,13 @@ private def runBanksStaging (arena : Arena)
     "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
     "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"res\"]}}],\"out\":\"out\"}"
   match Lean.Json.parse src with
-  | .error e => IO.println s!"  FAIL  banks-staging  json: {e}"; pure false
+  | .error e => failGate "banks-staging" s!"json: {e}"
   | .ok j =>
   match Tropical.Playground.compilePlanPure arena resolved j with
-  | .error e => IO.println s!"  FAIL  banks-staging  compile: {firstLine e}"; pure false
+  | .error e => failGate "banks-staging" s!"compile: {firstLine e}"
   | .ok (plan, _, stageBlocks) =>
     match Tropical.Ir.Stage0.hoistTyped plan stageBlocks with
-    | .error e => IO.println s!"  FAIL  banks-staging  split: {firstLine e}"; pure false
+    | .error e => failGate "banks-staging" s!"split: {firstLine e}"
     | .ok split =>
       let flagOn := Tropical.EmitArrow.banksTableEnabled
       let coeffFills := match split.coeff? with | some c => planArrayFills c | none => 0
@@ -2942,7 +2852,7 @@ private def runBanksStaging (arena : Arena)
       -- coefficient storage the audio kernel reads — run_coeff before buffer 0).
       let typedBytes ← renderTypedBytes plan stageBlocks
       match ← renderIrBytes plan with
-      | .error e => IO.println s!"  FAIL  banks-staging  flow render: {firstLine e}"; pure false
+      | .error e => failGate "banks-staging" s!"flow render: {firstLine e}"
       | .ok flowBytes =>
         let n := min typedBytes.size flowBytes.size
         let mut bitDiff := 0
@@ -2965,14 +2875,14 @@ private def runBanksStaging (arena : Arena)
           -- region-free (the whole-region move must not fire on a clock-
           -- dependent bank).
           if reduces == 1 && coeffReduces == 0 && coeffFills > 0 && renderOk then
-            IO.println s!"  PASS  banks-staging  bank looped ({reduces} region, in audio; 0 in coeff — clock-dependent region stays); {coeffFills} live column(s) → s0 kernel via shared array_ptrs; {audioFills} const baked; typed split ≡ flow byte-exact"; pure true
+            passGate "banks-staging" s!"bank looped ({reduces} region, in audio; 0 in coeff — clock-dependent region stays); {coeffFills} live column(s) → s0 kernel via shared array_ptrs; {audioFills} const baked; typed split ≡ flow byte-exact"
           else
-            IO.println s!"  FAIL  banks-staging  flag on: reduces={reduces} coeffReduces={coeffReduces} coeff={coeffFills} renderOk={renderOk}"; pure false
+            failGate "banks-staging" s!"flag on: reduces={reduces} coeffReduces={coeffReduces} coeff={coeffFills} renderOk={renderOk}"
         else
           if reduces == 0 && coeffReduces == 0 && coeffFills == 0 && renderOk then
-            IO.println s!"  PASS  banks-staging  flag off: unrolled bank, no loop/columns, typed ≡ flow byte-exact"; pure true
+            passGate "banks-staging" "flag off: unrolled bank, no loop/columns, typed ≡ flow byte-exact"
           else
-            IO.println s!"  FAIL  banks-staging  flag off: reduces={reduces} coeffReduces={coeffReduces} coeff={coeffFills} renderOk={renderOk}"; pure false
+            failGate "banks-staging" s!"flag off: reduces={reduces} coeffReduces={coeffReduces} coeff={coeffFills} renderOk={renderOk}"
 
 /-- The Metal column-crossing gate (WS4; supersedes the WS0 refusal
     tripwire). Hoisted coefficient columns (`coeff_array_slots`) cross
@@ -2993,13 +2903,13 @@ private def runMslColumnGuard (arena : Arena)
     "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
     "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"res\"]}}],\"out\":\"out\"}"
   match Lean.Json.parse src with
-  | .error e => IO.println s!"  FAIL  msl-column-guard  json: {e}"; pure false
+  | .error e => failGate "msl-column-guard" s!"json: {e}"
   | .ok j =>
   match Tropical.Playground.compilePlanPure arena resolved j with
-  | .error e => IO.println s!"  FAIL  msl-column-guard  compile: {firstLine e}"; pure false
+  | .error e => failGate "msl-column-guard" s!"compile: {firstLine e}"
   | .ok (plan, _, stageBlocks) =>
     match Tropical.Ir.Stage0.hoistTyped plan stageBlocks with
-    | .error e => IO.println s!"  FAIL  msl-column-guard  split: {firstLine e}"; pure false
+    | .error e => failGate "msl-column-guard" s!"split: {firstLine e}"
     | .ok split =>
       let banked := Tropical.EmitArrow.banksTableEnabled
       let cols := split.audio.coeffArraySlots
@@ -3029,20 +2939,20 @@ private def runMslColumnGuard (arena : Arena)
           IO.println (s!"        banked={banked} · hoisted columns={cols.size} ({off} floats packed) · "
             ++ s!"buffer(3)={binding} · offset reads={reads} · locals suppressed={noLocals} · unsplit 3-binding={unsplitClean}")
           if cols.size > 0 && binding && reads && noLocals && unsplitClean then
-            IO.println s!"  PASS  msl-column-guard  {cols.size} hoisted column(s) EMIT in column-binding mode: buffer(3) declared, reads at packed offsets, no arrN locals; columns-free plan keeps the frozen 3-binding header"; pure true
+            passGate "msl-column-guard" s!"{cols.size} hoisted column(s) EMIT in column-binding mode: buffer(3) declared, reads at packed offsets, no arrN locals; columns-free plan keeps the frozen 3-binding header"
           else
-            IO.println s!"  FAIL  msl-column-guard  banked: cols={cols.size} binding={binding} reads={reads} noLocals={noLocals} unsplitClean={unsplitClean}"; pure false
+            failGate "msl-column-guard" s!"banked: cols={cols.size} binding={binding} reads={reads} noLocals={noLocals} unsplitClean={unsplitClean}"
         else
           let splitClean := has splitMsl plainHeader && !(has splitMsl "buffer(3)")
           IO.println s!"        banked={banked} · hoisted columns={cols.size} · split 3-binding={splitClean} · unsplit 3-binding={unsplitClean}"
           if cols.isEmpty && splitClean && unsplitClean then
-            IO.println s!"  PASS  msl-column-guard  unrolled: no columns hoisted, both emissions on the plain 3-binding header (no false positive)"; pure true
+            passGate "msl-column-guard" "unrolled: no columns hoisted, both emissions on the plain 3-binding header (no false positive)"
           else
-            IO.println s!"  FAIL  msl-column-guard  unrolled: cols={cols.size} splitClean={splitClean} unsplitClean={unsplitClean}"; pure false
+            failGate "msl-column-guard" s!"unrolled: cols={cols.size} splitClean={splitClean} unsplitClean={unsplitClean}"
       | .error e, _ =>
-        IO.println s!"  FAIL  msl-column-guard  split plan refused (the WS0 stopgap is retired — columns must emit): {firstLine e}"; pure false
+        failGate "msl-column-guard" s!"split plan refused (the WS0 stopgap is retired — columns must emit): {firstLine e}"
       | _, .error e =>
-        IO.println s!"  FAIL  msl-column-guard  unsplit plan refused: {firstLine e}"; pure false
+        failGate "msl-column-guard" s!"unsplit plan refused: {firstLine e}"
 
 /-- THE COMPILE-FLATNESS BENCHMARK (banks-as-data payoff). Where `banks-staging`
     proves the payoff STRUCTURALLY at one mode count (columns hoist, audio is
@@ -3082,8 +2992,8 @@ private def runBanksBench (arena : Arena)
     let coeffN := match split.coeff? with | some c => planInstrCount c | none => 0
     pure (audioN, coeffN)
   match compileAt 6, compileAt 512 with
-  | .error e, _ => IO.println s!"  FAIL  banks-bench  K=6 compile: {firstLine e}"; pure false
-  | _, .error e => IO.println s!"  FAIL  banks-bench  K=512 compile: {firstLine e}"; pure false
+  | .error e, _ => failGate "banks-bench" s!"K=6 compile: {firstLine e}"
+  | _, .error e => failGate "banks-bench" s!"K=512 compile: {firstLine e}"
   | .ok (a6, c6), .ok (a512, c512) =>
     let dAudio := if a512 ≥ a6 then a512 - a6 else a6 - a512
     IO.println s!"        bare resonator→out (live freq/decay), banks-table={flagOn}:"
@@ -3095,13 +3005,13 @@ private def runBanksBench (arena : Arena)
       let flat := dAudio ≤ 8
       let coeffGrows := decide (c512 > c6)
       if flat then
-        IO.println s!"  PASS  banks-bench  flag on: audio kernel FLAT in K (Δ={dAudio} ≤ 8, K=6→512); coeff kernel scales with K ({c6}→{c512}, grows={coeffGrows}) at knob rate"; pure true
+        passGate "banks-bench" s!"flag on: audio kernel FLAT in K (Δ={dAudio} ≤ 8, K=6→512); coeff kernel scales with K ({c6}→{c512}, grows={coeffGrows}) at knob rate"
       else
-        IO.println s!"  FAIL  banks-bench  flag on: audio kernel NOT flat (Δ={dAudio} > 8) — a K-dependent audio instruction leaked past the coeff hoist"; pure false
+        failGate "banks-bench" s!"flag on: audio kernel NOT flat (Δ={dAudio} > 8) — a K-dependent audio instruction leaked past the coeff hoist"
     else
       -- Unrolled: no loop, no columns; the whole bank's arithmetic is in the
       -- audio kernel and grows with K. Not a failure — the documented contrast.
-      IO.println s!"  PASS  banks-bench  flag off: unrolled bank, audio kernel GROWS with K ({a6}→{a512}, Δ={dAudio}) — the contrast the banked path removes"; pure true
+      passGate "banks-bench" s!"flag off: unrolled bank, audio kernel GROWS with K ({a6}→{a512}, Δ={dAudio}) — the contrast the banked path removes"
 
 /-- THE TRIP-COUNT gate (trip-count-as-data v1: the room-size knob). A resonator
     with the optional STATIC `partials_max` capacity carries a LIVE `partials`
@@ -3142,16 +3052,10 @@ private def runBanksCount (arena : Arena)
       | none => slotOk := false
     rt.process
     pure (slotOk, decodeF64LE (← rt.outputBytes))
-  let bitDiffOf := fun (a b : Array Float) => Id.run do
-    let mut d := 0
-    for i in [0:min a.size b.size] do
-      if a[i]! != b[i]! then d := d + 1
-    return d
-  let energyOf := fun (a : Array Float) => a.foldl (fun acc s => acc + s * s) 0.0
   match compile (staticSrc 16), compile (staticSrc 4), compile dynSrc with
-  | .error e, _, _ => IO.println s!"  FAIL  banks-count  static-16 compile: {firstLine e}"; pure false
-  | _, .error e, _ => IO.println s!"  FAIL  banks-count  static-4 compile: {firstLine e}"; pure false
-  | _, _, .error e => IO.println s!"  FAIL  banks-count  dynamic compile: {firstLine e}"; pure false
+  | .error e, _, _ => failGate "banks-count" s!"static-16 compile: {firstLine e}"
+  | _, .error e, _ => failGate "banks-count" s!"static-4 compile: {firstLine e}"
+  | _, _, .error e => failGate "banks-count" s!"dynamic compile: {firstLine e}"
   | .ok (p16, _, b16), .ok (p4, _, b4), .ok (pd, _, bd) =>
     -- opt-in: the static graph must NOT have grown a partials slot.
     let rtS ← Tropical.Ffi.Runtime.new 2048
@@ -3165,17 +3069,17 @@ private def runBanksCount (arena : Arena)
     let (okZ, dZ)   ← render pd bd (some 0.0)    -- zero modes → silence
     let slotLive := ok4 && okC && okZ
     let e16 := energyOf s16
-    let dA := bitDiffOf dDef s16
-    let dB := bitDiffOf d4 s4
-    let dCn := bitDiffOf dC s16
+    let dA := bitDiffCount dDef s16
+    let dB := bitDiffCount d4 s4
+    let dCn := bitDiffCount dC s16
     let eZ := energyOf dZ
     IO.println s!"        resonator partials_max=16 (LIVE partials slot) vs fully-static graphs:"
     IO.println s!"        result   default(16)≡static16 bitDiff={dA}/{s16.size} · knob4≡static4 bitDiff={dB}/{s4.size} · knob100≡static16 bitDiff={dCn}/{s16.size}"
     IO.println s!"        result   E[static16]={e16} · E[knob0]={eZ} · slot live={slotLive} · static graph has slot={staticHasSlot} (want false)"
     if dA == 0 && dB == 0 && dCn == 0 && eZ ≤ 1e-24 && e16 > 1e-6 && slotLive && !staticHasSlot then
-      IO.println s!"  PASS  banks-count  live trip count ≡ static at 16/4, clamps at 100, silent at 0 — mode count is data, not topology"; pure true
+      passGate "banks-count" "live trip count ≡ static at 16/4, clamps at 100, silent at 0 — mode count is data, not topology"
     else
-      IO.println s!"  FAIL  banks-count  dA={dA} dB={dB} dC={dCn} eZ={eZ} e16={e16} slotLive={slotLive} staticHasSlot={staticHasSlot}"; pure false
+      failGate "banks-count" s!"dA={dA} dB={dB} dC={dCn} eZ={eZ} e16={e16} slotLive={slotLive} staticHasSlot={staticHasSlot}"
 
 /-- THE CACHE-INVARIANCE gate (the trip-count payoff). The kernel cache is keyed
     by md5(ir_text) (`OrcJitEngine`), so a knob that changed the IR text would
@@ -3199,16 +3103,16 @@ private def runBanksCountCache (arena : Arena)
     pure (← Tropical.Ir.EmitLlvm.emitKernel plan, ← Tropical.Ir.EmitLlvm.emitKernel split.audio)
   match irOf 4 16, irOf 12 16, irOf 4 24 with
   | .error e, _, _ | _, .error e, _ | _, _, .error e =>
-    IO.println s!"  FAIL  banks-count-cache  compile/emit: {firstLine e}"; pure false
+    failGate "banks-count-cache" s!"compile/emit: {firstLine e}"
   | .ok (u4, a4), .ok (u12, a12), .ok (u24, a24) =>
     let knobInvariant := u4 == u12 && a4 == a12
     let capMoves := u4 != u24 && a4 != a24
     IO.println s!"        same graph, partials default 4 vs 12 (cap 16) vs cap 24:"
     IO.println s!"        result   knob-invariant IR: unsplit={u4 == u12} audio={a4 == a12} ({u4.length}B) · capacity moves IR: unsplit={u4 != u24} audio={a4 != a24}"
     if knobInvariant && capMoves then
-      IO.println s!"  PASS  banks-count-cache  IR text is knob-invariant (md5 cache hit across counts); partials_max changes it (capacity is topology)"; pure true
+      passGate "banks-count-cache" "IR text is knob-invariant (md5 cache hit across counts); partials_max changes it (capacity is topology)"
     else
-      IO.println s!"  FAIL  banks-count-cache  knobInvariant={knobInvariant} capMoves={capMoves}"; pure false
+      failGate "banks-count-cache" s!"knobInvariant={knobInvariant} capMoves={capMoves}"
 
 /-- Build the resonator → filter → out patch graph as Json. -/
 private def filterPatchJson (fc : Int) (resM : Int) (resE : Nat) (srcF srcDecay : Int) : Lean.Json :=
@@ -3259,14 +3163,14 @@ private def runModalFilter (arena : Arena)
   -- (A) lowpass attenuation
   match ← renderFilterPatch arena resolved (filterPatchJson 4000 3 1 220 4) 4096,
         ← renderFilterPatch arena resolved (filterPatchJson 60 3 1 220 4) 4096 with
-  | .error e, _ | _, .error e => IO.println s!"  FAIL  modal-filter  (A) {e}"; pure false
+  | .error e, _ | _, .error e => failGate "modal-filter" s!"(A) {e}"
   | .ok openS, .ok closedS =>
     let eOpen := tailEnergy openS 200
     let eClosed := tailEnergy closedS 200
     -- (B) the ping: fast-dying strike at 1800 Hz, filter fc=500 res=1 (Q≈44);
     -- by half the window the source is gone and the tail is the filter's ring.
     match ← renderFilterPatch arena resolved (filterPatchJson 500 1 0 1800 60) 8192 with
-    | .error e => IO.println s!"  FAIL  modal-filter  (B) {e}"; pure false
+    | .error e => failGate "modal-filter" s!"(B) {e}"
     | .ok ping =>
       let mut crossings := 0
       for i in [4097:8192] do
@@ -3277,7 +3181,7 @@ private def runModalFilter (arena : Arena)
       let eTail := tailEnergy ping 4097
       -- (C) live cutoff on one of two twin runtimes
       match Tropical.Playground.compilePlanPure arena resolved (filterPatchJson 800 5 1 220 4) with
-      | .error e => IO.println s!"  FAIL  modal-filter  (C) compile: {firstLine e}"; pure false
+      | .error e => failGate "modal-filter" s!"(C) compile: {firstLine e}"
       | .ok (plan, _, stageBlocks) =>
       match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
       | .ok _, .ok _ =>
@@ -3307,11 +3211,11 @@ private def runModalFilter (arena : Arena)
         IO.println s!"        (C) cutoff glide slots present={slotsPresent} · ΔE/E after move={dE/(e0+1e-300)}"
         if eOpen > 20.0 * eClosed && eClosed > 0.0 &&
            ringHz > 485.0 && ringHz < 515.0 && eTail > 1e-8 && knobsLive then
-          IO.println s!"  PASS  modal-filter  lowpass attenuates ({eOpen/(eClosed+1e-300)}x), Q≈44 pings at {ringHz} Hz, cutoff live through the composition"; pure true
+          passGate "modal-filter" s!"lowpass attenuates ({eOpen/(eClosed+1e-300)}x), Q≈44 pings at {ringHz} Hz, cutoff live through the composition"
         else
-          IO.println s!"  FAIL  modal-filter  eOpen={eOpen} eClosed={eClosed} ringHz={ringHz} (want 485-515) eTail={eTail} live={knobsLive}"; pure false
+          failGate "modal-filter" s!"eOpen={eOpen} eClosed={eClosed} ringHz={ringHz} (want 485-515) eTail={eTail} live={knobsLive}"
       | .error e, _ | _, .error e =>
-        IO.println s!"  FAIL  modal-filter  (C) emit: {firstLine e}"; pure false
+        failGate "modal-filter" s!"(C) emit: {firstLine e}"
 
 open Tropical.EmitArrow in
 /-- THE MODAL ADDRESS gate. A resonator's `addr` inlet: a patched CF signal BECOMES
@@ -3362,11 +3266,11 @@ private def runModalAddr (arena : Arena)
       IO.println s!"        addressed resonator (a patched CF signal AS the time coordinate):"
       IO.println s!"        result   identity-addr max|Δ| vs un-addressed={maxErr} · offset-addr pre-onset|max|={preMax} post-onset peak={postPeak} · graph decode ok={decodeOk}"
       if maxErr < 1e-4 && preMax == 0.0 && postPeak > 1e-6 && decodeOk then
-        IO.println s!"  PASS  modal-addr  a patched signal drives the bank's time: address=time ≡ un-addressed; offset relocates the strike; graph decode compiles"; pure true
+        passGate "modal-addr" "a patched signal drives the bank's time: address=time ≡ un-addressed; offset relocates the strike; graph decode compiles"
       else
-        IO.println s!"  FAIL  modal-addr  maxErr={maxErr} preMax={preMax} postPeak={postPeak} decodeOk={decodeOk}"; pure false
-    | .error e, _, _ | _, .error e, _ | _, _, .error e => IO.println s!"  FAIL  modal-addr  render: {firstLine e}"; pure false
-  | _, _, _ => IO.println s!"  FAIL  modal-addr  build"; pure false
+        failGate "modal-addr" s!"maxErr={maxErr} preMax={preMax} postPeak={postPeak} decodeOk={decodeOk}"
+    | .error e, _, _ | _, .error e, _ | _, _, .error e => failGate "modal-addr" s!"render: {firstLine e}"
+  | _, _, _ => failGate "modal-addr" "build"
 
 -- ── THE DEAD-SLOT LINT ─────────────────────────────────────────────────────
 /-- Module-slot indices READ by an instance function: every `.slot` operand of
@@ -3458,9 +3362,9 @@ private def runVocabDriven (arena : Arena)
   IO.println s!"        {covered} kinds, each compiled from a vocabulary-generated minimal patch:"
   IO.println s!"        result   {if issues.isEmpty then "every declared knob registers and is read" else toString issues}"
   if ok then
-    IO.println "  PASS  vocab-driven  the served vocabulary drives a compiling patch per kind — declared knobs live, nothing unread"; pure true
+    passGate "vocab-driven" "the served vocabulary drives a compiling patch per kind — declared knobs live, nothing unread"
   else
-    IO.println s!"  FAIL  vocab-driven  {issues}"; pure false
+    failGate "vocab-driven" s!"{issues}"
 
 open Tropical.Playground in
 /-- THE REALIZED-STATE REPORT gate. The `load_patch_graph` reply must state
@@ -3512,10 +3416,10 @@ private def runRealizedReport : IO Bool := do
     let noWarnOk := ((repU.compress ++ repW.compress ++ repD.compress).toLower.splitOn "warn").length == 1
     IO.println s!"        unwired: mod={inputState repU "sfw" "mod"} rate-param={((paramNames repU).contains "sfw.rate")} · wired: mod={inputState repW "sfw" "mod"} rate-param={((paramNames repW).contains "sfw.rate")} · orphan={nodeStatus repD "orphan"}"
     if unwiredOk && wiredOk && danglerOk && noWarnOk then
-      IO.println "  PASS  realized-report  facts, not warnings: normalled/wired inputs, owned knobs absent when superseded, excluded nodes named"; pure true
+      passGate "realized-report" "facts, not warnings: normalled/wired inputs, owned knobs absent when superseded, excluded nodes named"
     else
-      IO.println s!"  FAIL  realized-report  unwired={unwiredOk} wired={wiredOk} dangler={danglerOk} noWarn={noWarnOk}"; pure false
-  | _, _, _ => IO.println "  FAIL  realized-report  patch json parse"; pure false
+      failGate "realized-report" s!"unwired={unwiredOk} wired={wiredOk} dangler={danglerOk} noWarn={noWarnOk}"
+  | _, _, _ => failGate "realized-report" "patch json parse"
 
 open Tropical.Playground in
 /-- THE MANIFEST-DISCIPLINE gate. `param_disciplines` is host-contract data:
@@ -3567,12 +3471,12 @@ private def runManifestDisciplines (arena : Arena)
       IO.println s!"        {pu.paramDisciplines.size}+{pw.paramDisciplines.size} manifest entries checked against their plans' slots:"
       IO.println s!"        result   {if issues.isEmpty then "consistent" else toString issues}"
       if issues.isEmpty then
-        IO.println "  PASS  manifest-disciplines  param_disciplines ≡ the plan's slots — a host can dispatch from it blind"; pure true
+        passGate "manifest-disciplines" "param_disciplines ≡ the plan's slots — a host can dispatch from it blind"
       else
-        IO.println s!"  FAIL  manifest-disciplines  {issues}"; pure false
+        failGate "manifest-disciplines" s!"{issues}"
     | .error e, _ | _, .error e =>
-      IO.println s!"  FAIL  manifest-disciplines  compile: {firstLine e}"; pure false
-  | _, _ => IO.println "  FAIL  manifest-disciplines  json parse"; pure false
+      failGate "manifest-disciplines" s!"compile: {firstLine e}"
+  | _, _ => failGate "manifest-disciplines" "json parse"
 
 /-- THE DEAD-SLOT LINT gate (the systemic net for the dead-knob class). Canonical
     patches covering every playground node kind compile through the real
@@ -3663,9 +3567,9 @@ private def runDeadSlotLint (arena : Arena)
   IO.println s!"        {patches.size} canonical patches over the full node vocabulary, {checked} param:* slots:"
   IO.println s!"        result   unread param slots: {if deadAll.isEmpty then "none" else toString deadAll}"
   if ok then
-    IO.println "  PASS  dead-slot-lint  every registered param:* slot is read by an instruction — no dead knobs behind graceful exclusion"; pure true
+    passGate "dead-slot-lint" "every registered param:* slot is read by an instruction — no dead knobs behind graceful exclusion"
   else
-    IO.println s!"  FAIL  dead-slot-lint  dead knobs (setSlot lands, no instruction reads): {deadAll}"; pure false
+    failGate "dead-slot-lint" s!"dead knobs (setSlot lands, no instruction reads): {deadAll}"
 
 /-- Test 3: `osc ⋙ flange ⋙ flange` — the slide pushes the outer warps through
     the inner flanger's sum and fuses them, producing the oscillator read at the
@@ -3690,12 +3594,12 @@ private def runSlideCascade (arena : Arena)
           if (dbl[t]! - sgl[t]!).abs > diff then diff := (dbl[t]! - sgl[t]!).abs
         IO.println s!"        cascade osc ⋙ flange ⋙ flange: {ninstD} generator instances (single flange: {ninstS}); the slide convolved the kernels — 9 = 3⊛3 taps, no coincident-offset merge"
         if ninstD == 9 && ninstS == 3 && energy > 1e-6 && diff > 1e-4 then
-          IO.println s!"  PASS  slide-cascade  9-tap multiplicity derived by the slide (energy={energy}, |double−single|max={diff})"; pure true
+          passGate "slide-cascade" s!"9-tap multiplicity derived by the slide (energy={energy}, |double−single|max={diff})"
         else
-          IO.println s!"  FAIL  slide-cascade  ninstD={ninstD} (want 9) ninstS={ninstS} (want 3) energy={energy} diff={diff}"; pure false
-      | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-cascade  render: {firstLine e}"; pure false
-    | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-cascade  finish: {firstLine e}"; pure false
-  | .error e, _ | _, .error e => IO.println s!"  FAIL  slide-cascade  build: {firstLine e}"; pure false
+          failGate "slide-cascade" s!"ninstD={ninstD} (want 9) ninstS={ninstS} (want 3) energy={energy} diff={diff}"
+      | .error e, _ | _, .error e => failGate "slide-cascade" s!"render: {firstLine e}"
+    | .error e, _ | _, .error e => failGate "slide-cascade" s!"finish: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "slide-cascade" s!"build: {firstLine e}"
 
 -- ── (h⁸) THE PATCHER LOWERING: a downstream-only patch graph → arrow term ──────
 -- The MVP front end. A wire is the effect applied to the upstream term (⋙), a
@@ -3714,11 +3618,11 @@ private def runLoweringChain (arena : Arena)
     match emitResolvedWire aG iG, emitResolvedWire aH iH with
     | .ok bytesG, .ok bytesH =>
       if bytesG == bytesH then
-        IO.println s!"  PASS  lowering-chain  lower(osc→flange→flange) ≡ hand-built nested term ({bytesG.length}B)"; pure true
+        passGate "lowering-chain" s!"lower(osc→flange→flange) ≡ hand-built nested term ({bytesG.length}B)"
       else
-        IO.println s!"  FAIL  lowering-chain  graph {bytesG.length}B ≠ hand-term {bytesH.length}B"; pure false
-    | .error e, _ | _, .error e => IO.println s!"  FAIL  lowering-chain  emit: {firstLine e}"; pure false
-  | .error e, _ | _, .error e => IO.println s!"  FAIL  lowering-chain  build: {firstLine e}"; pure false
+        failGate "lowering-chain" s!"graph {bytesG.length}B ≠ hand-term {bytesH.length}B"
+    | .error e, _ | _, .error e => failGate "lowering-chain" s!"emit: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "lowering-chain" s!"build: {firstLine e}"
 
 /-- L3: a fan-out patch — `osc` fanned into two flangers, mixed (the diagonal +
     the product collapse through the lowering). Asserts six generator instances
@@ -3736,12 +3640,12 @@ private def runLoweringFanOut (arena : Arena)
         for t in [8:512] do energy := energy + got[t]! * got[t]!
         IO.println s!"        fan-out osc → (flange δ₁ &&& flange δ₂) → mix: {ninst} generator instances (the diagonal re-sources the osc per tap)"
         if ninst == 6 && energy > 1e-6 then
-          IO.println s!"  PASS  lowering-fanout  diagonal + mix through the lowering ({ninst} instances, energy={energy})"; pure true
+          passGate "lowering-fanout" s!"diagonal + mix through the lowering ({ninst} instances, energy={energy})"
         else
-          IO.println s!"  FAIL  lowering-fanout  ninst={ninst} (want 6) energy={energy}"; pure false
-      | .error e => IO.println s!"  FAIL  lowering-fanout  render: {firstLine e}"; pure false
-    | .error e => IO.println s!"  FAIL  lowering-fanout  finish: {firstLine e}"; pure false
-  | .error e => IO.println s!"  FAIL  lowering-fanout  build: {firstLine e}"; pure false
+          failGate "lowering-fanout" s!"ninst={ninst} (want 6) energy={energy}"
+      | .error e => failGate "lowering-fanout" s!"render: {firstLine e}"
+    | .error e => failGate "lowering-fanout" s!"finish: {firstLine e}"
+  | .error e => failGate "lowering-fanout" s!"build: {firstLine e}"
 
 /-- Modulated-effect node: a `.fm` node routes one node's signal into a carrier's
     clock (FM/PM). Gated byte-identical against the hand-built carriers the

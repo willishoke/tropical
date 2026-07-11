@@ -833,15 +833,9 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
     b.decls (#[(.port ⟨0⟩, out)] ++ tapAssigns) registry
     (extraDecls := paramDecls)
   let (coreArena, core) ← (Tropical.Ir.Strata.runResolved { upto := 5 } arena1 idx).mapError (·.message)
-  let input : Tropical.Compile.SessionInput := {
-    instances := #[(Tropical.Compile.rootInstancePath, core)]
-    wiresPost := #[]
-    graphOutputs := #[(Tropical.Compile.rootInstancePath, "out")]
-    params := paramTable.map (fun (nm, v) => (nm, Json.num v))
-    alloc := Tropical.Lowering.allocate (paramTable.map (·.1)) #[]
-    root := core
-    arena := coreArena
-    mode := .fused }
+  let input := Tropical.Compile.SessionInput.forRoot core coreArena
+    (params := paramTable.map (fun (nm, v) => (nm, Json.num v)))
+    (alloc := Tropical.Lowering.allocate (paramTable.map (·.1)) #[])
   let (plan, stageBlocks) ← Tropical.Compile.compileSessionStaged input
   -- The host-contract dispatch table rides the manifest: any runtime host
   -- (C++ today, Swift/Metal or wasm tomorrow) reads per-slot disciplines from
