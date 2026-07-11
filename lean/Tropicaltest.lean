@@ -2684,6 +2684,104 @@ private def planArrayFills (p : Tropical.Plan.FlatPlan) : Nat :=
 private def planReduces (p : Tropical.Plan.FlatPlan) : Nat :=
   countInstrs (fun i => i.tag == "ReduceBegin") p
 
+-- ── Region-aware Stage0 (WS3a): an all-s0 reduce region hoists AS A UNIT ─────
+section RegionHoist
+open Tropical.Plan
+
+/-- A reduce region whose WHOLE computation is coefficient-shaped: the table
+    Packs from live param slots (never written in-plan → s0-external), the body
+    indexes it at `loopIdx` and weights by (k+1) — no τ anywhere inside the
+    region. An s1 consumer mixes the accumulator with τ so the render is
+    per-sample. `dyn` adds the trip-count-as-data operand (`ReduceBegin`
+    args[1] ← the `param:n` slot, default 2 < capacity 4, so the dynamic
+    render differs from the static one — a real clamp path, not a no-op).
+    Temps: acc=1, body 2..5, tail 6..8. Built synthetically (FlatPlan + hand
+    stage blocks through `hoistTyped`, the reduce-coverage pattern): no
+    surface graph reaches an s0 region yet — the modal banks all read τ. -/
+private def regionS0PlanOf (dyn : Bool) : FlatPlan :=
+  let countOp? : Option NOperand := if dyn then some (.slot 3 .float) else none
+  let body : Array NInstr := #[
+    instrPack 0 #[.slot 1 .float, .slot 2 .float, .slot 1 .float, .slot 2 .float],
+    instrReduceBegin 1 (cF 0) 4 .float countOp?,
+    instrIndex 2 #[.arrayReg 0, .loopIdx] .float,               -- v = table[k]
+    instrScalar "Add" 3 #[.loopIdx, cI 1] .int,                 -- k+1
+    instrScalar "ToFloat" 4 #[rgI 3] .float,
+    instrScalar "Mul" 5 #[rgF 2, rgF 4] .float,                 -- v·(k+1)
+    instrScalar "Add" 1 #[rgF 1, rgF 5] .float,
+    instrReduceEnd 1 .float,
+    instrScalar "ToFloat" 6 #[Tropical.Plan.opTick] .float,     -- the s1 consumer
+    instrScalar "Mod" 7 #[rgF 6, cF 64] .float,
+    instrScalar "Mul" 8 #[rgF 1, rgF 7] .float,
+    instrWriteSlot 0 (rgF 8)]
+  let inst := InstanceFunction.mk "root" "root" #[] body #[] 0 0 9 #[]
+  { sampleRate := jn 44100, compilationMode := .fused,
+    arraySlotNames := #["table"], registerCount := 9, arraySlotCount := 1,
+    arraySlotSizes := #[4], instanceFunctions := #[inst],
+    sinks := #[{ inputs := #[0], gain := jn 1, target := 0 }],
+    sources := defaultSources, slotCount := 4,
+    slotNames := #["out", "param:a", "param:b", "param:n"],
+    slotDefaults := #[Lean.Json.num (jn 0), Lean.Json.num (jn 5 1),
+      Lean.Json.num (jn 25 2), Lean.Json.num (jn 2)] }
+
+/-- Hand stage blocks in the partitioner's shape (`collectBlocks`: preamble,
+    body): everything in and around the region is s0 (exactly what the
+    intern-time attribute derives with `loopIdx` stage-neutral), the τ tail s1. -/
+private def regionS0Stages : Array (Array (Option Tropical.Ir.Stage)) :=
+  let s0 : Option Tropical.Ir.Stage := some .s0
+  let s1 : Option Tropical.Ir.Stage := some .s1
+  #[#[], #[s0, s0, s0, s0, s0, s0, s0, s0, s1, s1, s1, s1]]
+
+/-- THE REGION-HOIST gate (region-aware Stage0, WS3a). A reduce region whose
+    body is entirely s0 (param-slot-derived, no clock/tick dependence) plus an
+    s1 consumer of its result: the typed split moves the WHOLE region
+    (delimiters + body, with its table Pack) into the coefficient stream — the
+    audio kernel contains ZERO regions and reads the sum via a `coef:` slot —
+    and the render is BYTE-EXACT against the flow split (which never hoists
+    regions: effectively the unsplit reference). Checked for the static region
+    AND the dynamic-count region (args[1] ← a param slot). This also verifies
+    the runtime claim end to end: the coefficient kernel containing a
+    `ReduceBegin` region is emitted through the same `EmitLlvm`, JIT-compiled,
+    and executed by `run_coeff` before buffer 0. -/
+private def runBanksRegionHoist : IO Bool := do
+  let check := fun (label : String) (dyn : Bool) => do
+    let plan := regionS0PlanOf dyn
+    match Tropical.Ir.Stage0.hoistTyped plan regionS0Stages with
+    | .error e => IO.println s!"  FAIL  banks-region-hoist  {label} split: {firstLine e}"; pure false
+    | .ok split =>
+      let audioReduces := planReduces split.audio
+      let coeffReduces := match split.coeff? with | some c => planReduces c | none => 0
+      let coeffFills := match split.coeff? with | some c => planArrayFills c | none => 0
+      let hasCoefSlot := split.audio.slotNames.any (· == "coef:0")
+      let cols := split.audio.coeffArraySlots
+      let typed ← renderTypedBytes plan regionS0Stages
+      match ← renderIrBytes plan with
+      | .error e => IO.println s!"  FAIL  banks-region-hoist  {label} flow render: {firstLine e}"; pure false
+      | .ok flow =>
+        let n := min typed.size flow.size
+        let mut bitDiff := 0
+        for i in [0:n] do
+          if typed[i]! != flow[i]! then bitDiff := bitDiff + 1
+        let mut energy : Float := 0.0
+        for s in decodeF64LE typed do energy := energy + s * s
+        IO.println (s!"        {label}: regions audio={audioReduces} coeff={coeffReduces} · "
+          ++ s!"coeff fills={coeffFills} · coef:0 slot={hasCoefSlot} · columns={cols} · "
+          ++ s!"typed≡flow bitDiff={bitDiff}/{n} · E={energy}")
+        pure (audioReduces == 0 && coeffReduces == 1 && coeffFills == 1
+          && hasCoefSlot && cols == #[0] && typed.size == flow.size
+          && bitDiff == 0 && energy > 1e-6)
+  let okS ← check "static count" false
+  let okD ← check "dynamic count (slot, 2 < capacity 4)" true
+  if okS && okD then
+    IO.println ("  PASS  banks-region-hoist  all-s0 region moves AS A UNIT "
+      ++ "(delimiters + body + table Pack) to the coeff kernel; audio is region-free, "
+      ++ "reads the sum via coef:0; typed ≡ flow byte-exact, static AND dynamic count")
+    pure true
+  else
+    IO.println s!"  FAIL  banks-region-hoist  static={okS} dynamic={okD}"
+    pure false
+
+end RegionHoist
+
 /-- THE PER-ARRAY STAGING gate (banks-as-data blocker 3). `modal-live` proves the
     banked lowering still renders correctly under live knobs; this proves the
     PAYOFF structurally — with the banked lowering on, a live-param bank's
@@ -2712,6 +2810,11 @@ private def runBanksStaging (arena : Arena)
       let coeffFills := match split.coeff? with | some c => planArrayFills c | none => 0
       let audioFills := planArrayFills split.audio
       let reduces := planReduces split.audio
+      -- banks-region-stay: the resonator's region is CLOCK-DEPENDENT (the
+      -- body reads τ), so the whole-region move (banks-region-hoist's
+      -- positive) must NOT fire here — the region stays in the audio
+      -- kernel, only its live columns hoist.
+      let coeffReduces := match split.coeff? with | some c => planReduces c | none => 0
       -- Correctness: render the SAME banked plan via the TYPED split (live columns
       -- hoisted to the coeff kernel, audio reads shared array_ptrs) and via the
       -- FLOW split (arrays stay s1, everything in audio). Byte-identical ⇒
@@ -2728,7 +2831,7 @@ private def runBanksStaging (arena : Arena)
         let mut energy : Float := 0.0
         for s in decodeF64LE typedBytes do energy := energy + s * s
         IO.println s!"        resonator→out (live freq/decay), banks-table={flagOn}:"
-        IO.println s!"        result   reduce regions={reduces} · array fills coeff={coeffFills} audio={audioFills} · typed≡flow bitDiff={bitDiff}/{n} · E={energy}"
+        IO.println s!"        result   reduce regions audio={reduces} coeff={coeffReduces} · array fills coeff={coeffFills} audio={audioFills} · typed≡flow bitDiff={bitDiff}/{n} · E={energy}"
         let renderOk := bitDiff == 0 && energy > 1e-6
         if flagOn then
           -- The bank loops and its LIVE columns (incr←freq, sigma←decay) hoist to
@@ -2737,15 +2840,19 @@ private def runBanksStaging (arena : Arena)
           -- O(1) instructions regardless of K, so the audio kernel is flat in mode
           -- count; per-array staging moves the LIVE coefficient mass off the audio
           -- thread. Byte-identity to the flow split proves the shared-array crossing.
-          if reduces > 0 && coeffFills > 0 && renderOk then
-            IO.println s!"  PASS  banks-staging  bank looped ({reduces} region); {coeffFills} live column(s) → s0 kernel via shared array_ptrs; {audioFills} const baked; typed split ≡ flow byte-exact"; pure true
+          -- banks-region-stay: exactly ONE region, in the AUDIO kernel — the
+          -- τ-reading body keeps the loop per-sample; the coeff kernel is
+          -- region-free (the whole-region move must not fire on a clock-
+          -- dependent bank).
+          if reduces == 1 && coeffReduces == 0 && coeffFills > 0 && renderOk then
+            IO.println s!"  PASS  banks-staging  bank looped ({reduces} region, in audio; 0 in coeff — clock-dependent region stays); {coeffFills} live column(s) → s0 kernel via shared array_ptrs; {audioFills} const baked; typed split ≡ flow byte-exact"; pure true
           else
-            IO.println s!"  FAIL  banks-staging  flag on: reduces={reduces} coeff={coeffFills} renderOk={renderOk}"; pure false
+            IO.println s!"  FAIL  banks-staging  flag on: reduces={reduces} coeffReduces={coeffReduces} coeff={coeffFills} renderOk={renderOk}"; pure false
         else
-          if reduces == 0 && coeffFills == 0 && renderOk then
+          if reduces == 0 && coeffReduces == 0 && coeffFills == 0 && renderOk then
             IO.println s!"  PASS  banks-staging  flag off: unrolled bank, no loop/columns, typed ≡ flow byte-exact"; pure true
           else
-            IO.println s!"  FAIL  banks-staging  flag off: reduces={reduces} coeff={coeffFills} renderOk={renderOk}"; pure false
+            IO.println s!"  FAIL  banks-staging  flag off: reduces={reduces} coeffReduces={coeffReduces} coeff={coeffFills} renderOk={renderOk}"; pure false
 
 /-- The Metal column tripwire. The MSL ABI has no array binding — every
     plan array is a thread-private local — so a typed-split audio plan
@@ -3703,6 +3810,11 @@ def main (args : List String) : IO UInt32 := do
   IO.println "reduce coverage (ReduceBegin/End ≡ unrolled, EmitLlvm):"
   total := total + 1
   if !(← runReduceCoverage) then failed := failed + 1
+
+  -- ── (c⁗′) Region-aware Stage0: an all-s0 region hoists as a unit (WS3a) ────
+  IO.println "banks region hoist (all-s0 reduce region → coefficient kernel):"
+  total := total + 1
+  if !(← runBanksRegionHoist) then failed := failed + 1
 
   -- ── (c′) C4: session → resolved root directly ≡ the elaborate round-trip ───
   IO.println "session via direct root (sessionToResolvedRoot ≡ sessionToParsed→elaborate):"

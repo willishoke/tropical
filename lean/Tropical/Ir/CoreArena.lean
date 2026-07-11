@@ -173,7 +173,23 @@ private def sigAt (sigs : Array StageSig) (id : ExprId) : StageSig :=
     attribute's. -/
 def cnodeSig (sigs : Array StageSig) : CNode → StageSig
   | .num _ | .bool _ | .sampleRate => { base := .fold }
-  | .sampleIndex | .loopIdx => { base := .s1 }
+  | .sampleIndex => { base := .s1 }
+  -- `loopIdx` is the join IDENTITY (`fold`), not `s1`: as a VALUE attribute,
+  -- the iteration index is defined by the enclosing reduce region, so it
+  -- contributes no binding time of its own. This is what lets a `bankSum`
+  -- whose tables/body/count are all s0 BE an s0 value (the whole loop runs
+  -- in the coefficient kernel at control-write time — region-aware Stage0);
+  -- pinning the leaf s1 would drag every region to the audio kernel forever.
+  -- SAFETY: the relaxation is sound only because per-instruction PLACEMENT
+  -- never trusts the attribute alone — `Stage0.overlayS1` pins every
+  -- `loopIdx`-reading instruction (and both delimiters) to s1 for INDIVIDUAL
+  -- moves, and `placementFromStages`' availability walk keeps everything
+  -- downstream of a pinned instruction in place (a loop-dependent temp's
+  -- reaching def is pinned, so its readers fail availability). Loop-dependent
+  -- code therefore leaves the audio kernel only as a WHOLE delimiter-matched
+  -- region (the separate `tryRegion` decision), never one instruction at a
+  -- time.
+  | .loopIdx => { base := .fold }
   | .paramRef _ => { base := .s0 }
   | .inputRef i => { base := .fold, inputs := #[i.idx] }
   | .nestedOut i o => { base := .fold, nested := #[(i.idx, o.idx)] }
