@@ -148,9 +148,6 @@ def liftIfNeeded (env : Env) : EngineM Unit := do
     let (arenaPost, postIdx) ← match runStrataChecked #[] arenaRaw rawIdx with
       | .error msg => internalError msg
       | .ok r => pure r
-    let postJson ← match Tropical.Ir.Codec.encodeResolved arenaPost postIdx with
-      | .error e => internalError e
-      | .ok j => pure j
     -- Persist the raw program + counter; the post-strata arena growth
     -- is transient — the store adopts the service entry's round trip,
     -- one copy, like the registration path.
@@ -360,20 +357,22 @@ def sessionToResolvedRoot (arena : Tropical.Ir.Arena)
   let idx : Tropical.Ir.ProgramIdx := ⟨arena.programs.size⟩
   .ok ({ arena with programs := arena.programs.push prog, exprs }, idx)
 
-/-- The session lowering + compile (Phase 3 lowering, Phase 4 stage 4a
-    elaboration): lift if needed, then run the Lean lowering — slot
-    allocation, delay extraction, acyclicity, serialization to a
-    ParsedProgram — elaborate the root over the typed store (LINKing
-    each instance's `resolvedIdx` snapshot through the resolver), ship
-    the encoded `tropical_resolved_1` root with the slot bookkeeping to
-    the service for decode + partition, and hot-swap the returned plan
-    into the Lean-owned runtime. -/
-def syncCompile (env : Env) : EngineM Unit := do
-  liftIfNeeded env
-  let st ← env.state.get
+/-- Build the `SessionInput` from the engine's current session mirror: allocate,
+    assert acyclic, rewrite each instance's `programName` to its stored program's
+    name, build the first-instance-wins name→idx resolver, construct the resolved
+    session root (directly via `sessionToResolvedRoot` when `useArrow`, else the
+    legacy `sessionToParsed → reparse → elaborate` round-trip), Core-check it, and
+    materialize the session instances against the root registry.
 
-  -- Lowering (pure over the mirror; the mirror itself stays canonical
-  -- pre-extraction).
+    THE one session-compile prologue, shared by `syncCompile` (production) and the
+    `compileMirror*` harness entry points. The `useArrow` flag is the only real
+    variation between the two root-construction paths; `ctx` labels the
+    engine-bug internal errors for the caller. `mode` reaches only the plan's
+    `compilation_mode` field. -/
+def buildSessionInputVia (env : Env) (useArrow : Bool) (ctx : String)
+    (mode : Tropical.Plan.CompilationMode := .fused) :
+    EngineM Tropical.Compile.SessionInput := do
+  let st ← env.state.get
   let alloc := Tropical.Lowering.allocate (st.params.map (·.1)) st.instances
   let wiresPost := st.wires
   Tropical.Lowering.assertSessionAcyclic st.instances wiresPost
@@ -401,19 +400,16 @@ def syncCompile (env : Env) : EngineM Unit := do
           resolverTbl := resolverTbl.push (p.name, idx)
   let tbl := resolverTbl
 
-  -- EXPERIMENT (TROPICAL_ARROW, uncommitted): build the resolved session
-  -- root directly via `sessionToResolvedRoot` — the session → arrow path,
-  -- deleting the "resolved → named → resolved" parsed round-trip. Plan is
-  -- byte-identical to the elaborate path (gated by `runSessionViaArrowEquiv`
-  -- in Tropicaltest). With the var unset the legacy elaborate path runs
-  -- unchanged, so default behavior is untouched.
-  let (arena', rootIdx) ← if (← IO.getEnv "TROPICAL_ARROW").isSome then
+  -- The one variation: build the resolved session root directly (arrow path,
+  -- no parsed round-trip) or via the legacy `sessionToParsed → reparse →
+  -- elaborate`. The two are plan-byte-identical (gated by
+  -- `runSessionViaArrowEquiv`); failure maps onto the recoverable envelope so
+  -- the previous kernel keeps playing.
+  let (arena', rootIdx) ← if useArrow then
     match sessionToResolvedRoot st.arena lowerInstances wiresPost tbl with
     | .error e => internalError e
     | .ok r => pure r
   else do
-    -- Legacy: session → parsed → reparse (Json → ordered JsonV, lossless)
-    -- → elaborate over the store arena. The appended root is transient.
     let parsed ← Tropical.Lowering.sessionToParsed lowerInstances wiresPost
     let typed ← match Tropical.Parse.JsonV.parse parsed.compress with
       | .error e => internalError s!"session root: ParsedProgram JSON re-parse failed: {e}"
@@ -421,14 +417,12 @@ def syncCompile (env : Env) : EngineM Unit := do
         match Tropical.Parse.decodeProgram jv with
         | .error e => internalError s!"session root: {e}"
         | .ok p => pure p
-    -- Failure maps onto the recoverable envelope (ElaborationError /
-    -- CycleViolation): the previous kernel keeps playing.
     match Tropical.Ir.elaborateInto st.arena typed
         (some fun n => (tbl.find? (·.1 == n)).map (·.2)) with
     | .error e => internalError e.message
     | .ok r => pure r
   let (rootArena, rootCore) ← match Tropical.Ir.checkResolvedArena arena' rootIdx with
-    | .error e => internalError s!"syncCompile: post-elaboration Core check failed (engine bug): {e}"
+    | .error e => internalError s!"{ctx}: post-construction Core check failed (engine bug): {e}"
     | .ok r => pure r
 
   -- Session instances in registry order, each materialized as the Core
@@ -437,19 +431,33 @@ def syncCompile (env : Env) : EngineM Unit := do
   let mut coreInstances : Array (String × Tropical.Ir.Core.CoreProgram) := #[]
   for (n, i) in st.instances do
     let some pname := storedProgName i
-      | internalError s!"syncCompile: instance '{n}' has no resolved snapshot (engine bug)"
+      | internalError s!"{ctx}: instance '{n}' has no resolved snapshot (engine bug)"
     let some core := rootCore.registryGet? pname
-      | internalError s!"syncCompile: instance '{n}' program '{pname}' missing from root registry (engine bug)"
+      | internalError s!"{ctx}: instance '{n}' program '{pname}' missing from root registry (engine bug)"
     coreInstances := coreInstances.push (n, core)
 
-  let (plan, stageBlocks) ← match Tropical.Compile.compileSessionStaged {
-      instances := coreInstances
-      wiresPost
-      graphOutputs := st.graphOutputs
-      params := st.params
-      alloc
-      root := rootCore
-      arena := rootArena } with
+  pure {
+    instances := coreInstances
+    wiresPost
+    graphOutputs := st.graphOutputs
+    params := st.params
+    alloc
+    root := rootCore
+    arena := rootArena
+    mode }
+
+/-- The session lowering + compile: lift free wires if needed, build the session
+    input from the mirror (the shared prologue), compile it to a plan with typed
+    stage blocks, and hot-swap the result into the Lean-owned runtime. A failed
+    compile leaves the mutated graph in place and the previous kernel playing. -/
+def syncCompile (env : Env) : EngineM Unit := do
+  liftIfNeeded env
+  -- EXPERIMENT (TROPICAL_ARROW, uncommitted): build the resolved session root
+  -- directly via the arrow path, deleting the parsed round-trip. With the var
+  -- unset the legacy elaborate path runs, so default behavior is untouched.
+  let useArrow := (← IO.getEnv "TROPICAL_ARROW").isSome
+  let input ← buildSessionInputVia env useArrow "syncCompile"
+  let (plan, stageBlocks) ← match Tropical.Compile.compileSessionStaged input with
     | .error msg => internalError msg
     | .ok p => pure p
   -- Lean owns codegen: emit the kernel artifacts from the in-memory plan
