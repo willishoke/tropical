@@ -53,6 +53,29 @@ private def jStr (obj : Json) (key : String) (dflt : String) : String :=
   | .ok (.str s) => s
   | _ => dflt
 
+/-- A numeric param as a build-time `Float` (the gong's structural strike
+    data — mode tables, drive, anchors — is baked, not slotted). -/
+private def jFloat (obj : Json) (key : String) (dflt : Float) : Float :=
+  ((jNum? obj key).map (·.toFloat)).getD dflt
+
+/-- A gong register's mode table: an array of `[freqHz, sigma, amp, phase]`
+    rows → `ModalMode`s (rectangular: `cre = a·cos φ`, `cim = a·sin φ`, so
+    the bank's `cre·cos ωd − cim·sin ωd` is `a·cos(ωd + φ)`). Amplitude-bloom
+    pairs arrive pre-expanded (two rows, `±a`, two σ). Malformed rows drop. -/
+private def jModes (obj : Json) (key : String) : Array ModalMode :=
+  match (obj.getObjVal? key).toOption.bind (·.getArr?.toOption) with
+  | none => #[]
+  | some arr => arr.filterMap fun mj =>
+    match mj.getArr?.toOption with
+    | some fs =>
+      if fs.size < 4 then none else
+      let num := fun (i : Nat) => ((fs[i]!.getNum?.toOption).map (·.toFloat)).getD 0.0
+      let a := num 2
+      let ph := num 3
+      some { sigma := litF (num 1), omega := litF (6.283185307179586 * num 0),
+             cre := litF (a * Float.cos ph), cim := litF (a * Float.sin ph) }
+    | none => none
+
 -- ── Voices (literal pitch, so the knob bakes into the emitted clock) ─────────
 /-- The phase-anchor correction — the slide, in the phase domain. A clock `shift`
     (Q32.32) of `shift/2³²` samples maps to a phase shift of
@@ -325,6 +348,12 @@ def portSpecs : String → Array PortSpec
       { name := "resonance", knob := some (5, 1), discipline := .glide,
         display := some { min := 0, max := 1 } }]
   | "modalmix" => #[{ name := "in", accepts := modalIn, multi := true }]
+  -- gong: a source with no inlets and no knobs — its strike data (`t`,
+  -- `beta`, `g`, `modes_full`, `modes_half`) is structural, carried in
+  -- `params`. shaper: one signal inlet; `drive`/`peak` are structural
+  -- (the poly fit is a build-time solve).
+  | "gong" => #[]
+  | "shaper" => #[{ name := "in", accepts := sigIn }]
   | "out" => #[{ name := "in", accepts := sigIn, multi := true }]
   | _ => #[]
 
@@ -338,7 +367,8 @@ def outletOf : String → Option PortDomain
 /-- The kinds the table covers, in schema order (`out` last — it has no outlet). -/
 def vocabularyKinds : Array String := #[
   "source", "pluck", "comb", "flange", "delay", "reverse", "fm", "sflange",
-  "mix", "ring", "resonator", "reverb", "filter", "modalmix", "knob", "out"]
+  "mix", "ring", "shaper", "gong", "resonator", "reverb", "filter",
+  "modalmix", "knob", "out"]
 
 -- Derived views — the ONLY readers of glide/anchor/knob facts from here down.
 private def portOf (kind kname : String) : Option PortSpec :=
@@ -533,6 +563,40 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     (.modalReverb sig
       (filterPair (p "cutoff" (dv "cutoff")) (p "resonance" (dv "resonance"))) none, #[])
   | "modalmix" => (.modalMix (portSources inObj "in"), #[])
+  | "gong" =>
+    -- One STRIKE of the struck nonlinear resonator: two anchored modal banks
+    -- (full-glide + stiff half-glide registers) behind per-strike pitch-bloom
+    -- warps, composed by `gongStrikeNodes` from existing node kinds. All data
+    -- is structural (a score's strikes are baked; the master clock still
+    -- scrubs/reverses them live): `t` (strike time, s), `beta` (pitch-bloom
+    -- depth, velocity already folded in), `g` (bloom settle rate), and the
+    -- two pre-expanded mode tables.
+    let t := jFloat params "t" 0.0
+    let beta := jFloat params "beta" 0.0
+    let gRate := jFloat params "g" 1.8
+    let anchor := mul (litF t) .sampleRate
+    -- a bare gong (no score data) strikes the built-in default bank at its
+    -- anchor — the kind's audible default, like the resonator's 6 partials.
+    let full := jModes params "modes_full"
+    let half := jModes params "modes_half"
+    let (full, half) :=
+      if full.isEmpty && half.isEmpty
+      then defaultGongModes (jFloat params "freq" 110.0)
+      else (full, half)
+    -- a data-less drop also gets an audible bloom (β = 0.05 ≈ a solid strike)
+    let beta := if beta == 0.0 && (params.getObjVal? "beta").toOption.isNone
+      then 0.05 else beta
+    gongStrikeNodes id clk anchor (litF beta) (litF gRate) full half
+  | "shaper" =>
+    -- The alias-free drive: an odd-poly (degree 5) fit of `tanh(drive·u)`,
+    -- fit at BUILD time (coefficients are a least-squares solve, so the
+    -- drive is structural — a knob change relowers, clicklessly). `peak` is
+    -- the fixed normalization reference (the vel-1.0 strike's peak), which
+    -- is what keeps velocity dynamics through the knee.
+    let k := jFloat params "drive" 2.6
+    let peak := jFloat params "peak" 1.0
+    let (c1, c3, c5) := polyFitTanhOdd k
+    (.shaper sig (polyShapeSig c1 c3 c5 peak), #[])
   | _ => (.mix (portSources inObj "in"), #[])
 
 private structure Raw where

@@ -3,6 +3,7 @@ import Tropical.EmitArrow.Term
 import Tropical.EmitArrow.Numerics
 import Tropical.EmitArrow.Modal
 import Tropical.EmitArrow.Patch
+import Tropical.EmitArrow.Gong
 
 /-!
 # EmitArrow — realization-by-emission of the post-strata (scalar) IR
@@ -31,6 +32,9 @@ The modules:
 * `Modal` — the pole island: modal banks, banked coefficient-column
   reductions, and the symbolic residue calculus.
 * `Patch` — the patcher lowering: downstream-only patch DAG → arrow term.
+* `Gong` — the struck nonlinear resonator: amplitude-bloom mode pairs,
+  the analytic pitch-bloom clock warp, and the alias-free polynomial
+  drive, all composed from existing node kinds.
 
 The byte-gate carriers that certify all of this against the hand-written
 stdlib programs live in `Tropical.Testing.ArrowFixtures`, outside the
