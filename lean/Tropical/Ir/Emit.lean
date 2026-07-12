@@ -6,7 +6,7 @@ import Tropical.Ir.Staging
 import Tropical.Plan
 
 /-!
-# Emit — `ExprId → FlatProgram` (Phase 6 stage 6b)
+# Emit — `ExprId → FlatProgram`
 
 Line-faithful port of `compiler/ir/emit_resolved.ts`'s `Emitter` over
 the Core sub-IR (total matches — the strata-dropped constructors are
@@ -78,59 +78,26 @@ def jsIsZeroOrOne (n : JsonNumber) : Bool :=
 -- Op-tag mappings (BINARY_TAG / UNARY_TAG / TERNARY_TAG values)
 -- ─────────────────────────────────────────────────────────────
 
-def binaryTag : BinaryOpTag → String
-  | .add => "Add" | .sub => "Sub" | .mul => "Mul" | .div => "Div" | .mod => "Mod"
-  | .floorDiv => "FloorDiv"
-  | .lt => "Less" | .lte => "LessEq" | .gt => "Greater" | .gte => "GreaterEq"
-  | .eq => "Equal" | .neq => "NotEqual"
-  | .bitAnd => "BitAnd" | .bitOr => "BitOr" | .bitXor => "BitXor"
-  | .lshift => "LShift" | .rshift => "RShift"
-  | .and => "And" | .or => "Or"
-  | .ldexp => "Ldexp"
+open Tropical.Plan (PlanOp promoteTypes)
 
-def unaryTag : UnaryOpTag → String
-  | .neg => "Neg" | .abs => "Abs" | .sqrt => "Sqrt"
-  | .floor => "Floor" | .ceil => "Ceil" | .round => "Round"
-  | .not => "Not" | .bitNot => "BitNot"
-  | .floatExponent => "FloatExponent"
-  | .toInt => "ToInt" | .toBool => "ToBool" | .toFloat => "ToFloat"
+/-- Lift the IR binary tag into the plan-op signature. -/
+def planOpOfBinary : BinaryOpTag → PlanOp
+  | .add => .add | .sub => .sub | .mul => .mul | .div => .div | .mod => .mod
+  | .floorDiv => .floorDiv
+  | .lt => .less | .lte => .lessEq | .gt => .greater | .gte => .greaterEq
+  | .eq => .equal | .neq => .notEqual
+  | .bitAnd => .bitAnd | .bitOr => .bitOr | .bitXor => .bitXor
+  | .lshift => .lshift | .rshift => .rshift
+  | .and => .and | .or => .or
+  | .ldexp => .ldexp
 
-def castResult? : String → Option ScalarType
-  | "ToInt" => some .int | "ToBool" => some .bool | "ToFloat" => some .float
-  | _ => none
-
-def isBitwiseTag (t : String) : Bool :=
-  t == "BitAnd" || t == "BitOr" || t == "BitXor" || t == "LShift" || t == "RShift"
-    || t == "BitNot"
-
-def isComparisonTag (t : String) : Bool :=
-  t == "Less" || t == "LessEq" || t == "Greater" || t == "GreaterEq"
-    || t == "Equal" || t == "NotEqual" || t == "Not" || t == "And" || t == "Or"
-
-def isTranscendentalTag (t : String) : Bool :=
-  t == "Sqrt" || t == "Floor" || t == "Ceil" || t == "Round" || t == "Ldexp"
-    || t == "FloatExponent"
-
-def promoteTypes (a b : ScalarType) : ScalarType :=
-  if a == .float || b == .float then .float
-  else if a == .int || b == .int then .int
-  else .bool
-
-def inferResultType (tag : String) (argTypes : Array ScalarType) : ScalarType :=
-  match castResult? tag with
-  | some t => t
-  | none =>
-    if isBitwiseTag tag then .int
-    else if isComparisonTag tag then .bool
-    else if isTranscendentalTag tag then .float
-    else if tag == "Select" then
-      promoteTypes (argTypes[1]?.getD .float) (argTypes[2]?.getD .float)
-    else if tag == "Clamp" then argTypes[0]?.getD .float
-    else if argTypes.isEmpty then .float
-    -- TS Array.reduce: head as seed, fold the tail. promoteTypes is
-    -- idempotent on equal args, so folding the whole array with the
-    -- head as seed is equivalent.
-    else argTypes.foldl promoteTypes argTypes[0]!
+/-- Lift the IR unary tag into the plan-op signature. -/
+def planOpOfUnary : UnaryOpTag → PlanOp
+  | .neg => .neg | .abs => .abs | .sqrt => .sqrt
+  | .floor => .floor | .ceil => .ceil | .round => .round
+  | .not => .not | .bitNot => .bitNot
+  | .floatExponent => .floatExponent
+  | .toInt => .toInt | .toBool => .toBool | .toFloat => .toFloat
 
 -- ─────────────────────────────────────────────────────────────
 -- Slot tables
@@ -338,10 +305,10 @@ private partial def compileNodeUncached (e : CNode) (expected : Option ScalarTyp
     | some info => pure (.array (.sessionArrayReg info.slot) info.size .float)
     | none =>
       throw "emit_resolved: nestedOut to non-array sub-instance output reached compileNodeUncached unexpectedly"
-  | .binary tag a b => compileBinary (binaryTag tag) a b expected
-  | .unary tag a => compileUnary (unaryTag tag) a expected
-  | .clamp a b c => compileTernary "Clamp" a b c expected
-  | .select a b c => compileTernary "Select" a b c expected
+  | .binary tag a b => compileBinary (planOpOfBinary tag) a b expected
+  | .unary tag a => compileUnary (planOpOfUnary tag) a expected
+  | .clamp a b c => compileTernary .clamp a b c expected
+  | .select a b c => compileTernary .select a b c expected
   | .arraySet a b c => compileSetElement a b c
   | .index a b => compileIndex a b
   | .bankSum count tables body dynCount? idxId => compileBankSum count tables body dynCount? idxId
@@ -367,16 +334,16 @@ private partial def compilePack (elements : Array ExprId) (expected : Option Sca
   emit (Tropical.Plan.instrPack slot args)
   pure (.array (.arrayReg slot) size .float)
 
-private partial def compileBinary (tag : String) (lhs rhs : ExprId)
+private partial def compileBinary (op : PlanOp) (lhs rhs : ExprId)
     (expected : Option ScalarType) : EmitM CompileResult := do
   let propagated := if expected == some .bool then none else expected
   let argExpected : Option ScalarType :=
-    if isBitwiseTag tag then some .int
-    else if isComparisonTag tag then none
+    if op.isBitwise then some .int
+    else if op.isComparison then none
     else propagated
   let l ← compileNode lhs argExpected
   let secondExpected : Option ScalarType :=
-    if isComparisonTag tag then
+    if op.isComparison then
       if l.isArray then some .float
       else if l.scalarType == .bool then none
       else some l.scalarType
@@ -384,11 +351,11 @@ private partial def compileBinary (tag : String) (lhs rhs : ExprId)
   let r ← compileNode rhs secondExpected
   let l ← unboxIfUnit l
   let r ← unboxIfUnit r
-  let rt := inferResultType tag #[l.scalarType, r.scalarType]
+  let rt := op.resultType #[l.scalarType, r.scalarType]
   match l, r with
   | .scalar lop _, .scalar rop _ =>
     let dst ← allocReg
-    emit (Tropical.Plan.instrScalar tag dst #[lop, rop] rt)
+    emit (Tropical.Plan.instrScalar op.name dst #[lop, rop] rt)
     pure (.scalar (.reg dst rt) rt)
   | _, _ =>
     let size := match l with
@@ -396,36 +363,36 @@ private partial def compileBinary (tag : String) (lhs rhs : ExprId)
       | _ => match r with | .array _ s _ => s | _ => 0
     let slot ← allocArraySlot size
     let strides := #[if l.isArray then 1 else 0, if r.isArray then 1 else 0]
-    emit (Tropical.Plan.instrArray tag slot #[l.op, r.op] size strides rt)
+    emit (Tropical.Plan.instrArray op.name slot #[l.op, r.op] size strides rt)
     pure (.array (.arrayReg slot) size rt)
 
-private partial def compileUnary (tag : String) (arg : ExprId)
+private partial def compileUnary (op : PlanOp) (arg : ExprId)
     (expected : Option ScalarType) : EmitM CompileResult := do
   let argExpected : Option ScalarType :=
-    if isTranscendentalTag tag then none
-    else if isComparisonTag tag then none
-    else if tag == "BitNot" then some .int
+    if op.isTranscendental then none
+    else if op.isComparison then none
+    else if op == .bitNot then some .int
     -- `ToInt` narrows its argument *from* float; it must not propagate an
     -- outer `int` expectation onto a float source (e.g. `toInt(f0 * 2.414…)`
     -- where the result is used in an int context). Leave the arg unconstrained.
-    else if tag == "ToInt" then none
+    else if op == .toInt then none
     else expected
   let a ← compileNode arg argExpected
   let a ← unboxIfUnit a
-  let rt := inferResultType tag #[a.scalarType]
+  let rt := op.resultType #[a.scalarType]
   match a with
-  | .scalar op _ =>
+  | .scalar aop _ =>
     let dst ← allocReg
-    emit (Tropical.Plan.instrScalar tag dst #[op] rt)
+    emit (Tropical.Plan.instrScalar op.name dst #[aop] rt)
     pure (.scalar (.reg dst rt) rt)
-  | .array op size _ =>
+  | .array aop size _ =>
     let slot ← allocArraySlot size
-    emit (Tropical.Plan.instrArray tag slot #[op] size #[1] rt)
+    emit (Tropical.Plan.instrArray op.name slot #[aop] size #[1] rt)
     pure (.array (.arrayReg slot) size rt)
 
-private partial def compileTernary (tag : String) (n1 n2 n3 : ExprId)
+private partial def compileTernary (op : PlanOp) (n1 n2 n3 : ExprId)
     (expected : Option ScalarType) : EmitM CompileResult := do
-  let condExpected : Option ScalarType := if tag == "Select" then some .bool else expected
+  let condExpected : Option ScalarType := if op == .select then some .bool else expected
   let armExpected := if expected == some .bool then none else expected
   let a ← compileNode n1 condExpected
   let b ← compileNode n2 armExpected
@@ -433,10 +400,10 @@ private partial def compileTernary (tag : String) (n1 n2 n3 : ExprId)
   let a ← unboxIfUnit a
   let b ← unboxIfUnit b
   let c ← unboxIfUnit c
-  let rt := inferResultType tag #[a.scalarType, b.scalarType, c.scalarType]
+  let rt := op.resultType #[a.scalarType, b.scalarType, c.scalarType]
   if !a.isArray && !b.isArray && !c.isArray then
     let dst ← allocReg
-    emit (Tropical.Plan.instrScalar tag dst #[a.op, b.op, c.op] rt)
+    emit (Tropical.Plan.instrScalar op.name dst #[a.op, b.op, c.op] rt)
     pure (.scalar (.reg dst rt) rt)
   else
     let size := match a with
@@ -447,7 +414,7 @@ private partial def compileTernary (tag : String) (n1 n2 n3 : ExprId)
     let slot ← allocArraySlot size
     let strides := #[if a.isArray then 1 else 0, if b.isArray then 1 else 0,
       if c.isArray then 1 else 0]
-    emit (Tropical.Plan.instrArray tag slot #[a.op, b.op, c.op] size strides rt)
+    emit (Tropical.Plan.instrArray op.name slot #[a.op, b.op, c.op] size strides rt)
     pure (.array (.arrayReg slot) size rt)
 
 private partial def compileIndex (arrNode idxNode : ExprId) : EmitM CompileResult := do

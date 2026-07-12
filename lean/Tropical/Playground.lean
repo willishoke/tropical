@@ -4,6 +4,7 @@ import Tropical.Ir.Core
 import Tropical.Compile
 import Tropical.Parse.Raise
 import Tropical.Ir.Elaborator
+import Tropical.StdlibChain
 import Lean.Data.Json
 
 /-!
@@ -832,15 +833,9 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
     b.decls (#[(.port ⟨0⟩, out)] ++ tapAssigns) registry
     (extraDecls := paramDecls)
   let (coreArena, core) ← (Tropical.Ir.Strata.runResolved { upto := 5 } arena1 idx).mapError (·.message)
-  let input : Tropical.Compile.SessionInput := {
-    instances := #[(Tropical.Compile.rootInstancePath, core)]
-    wiresPost := #[]
-    graphOutputs := #[(Tropical.Compile.rootInstancePath, "out")]
-    params := paramTable.map (fun (nm, v) => (nm, Json.num v))
-    alloc := Tropical.Lowering.allocate (paramTable.map (·.1)) #[]
-    root := core
-    arena := coreArena
-    mode := .fused }
+  let input := Tropical.Compile.SessionInput.forRoot core coreArena
+    (params := paramTable.map (fun (nm, v) => (nm, Json.num v)))
+    (alloc := Tropical.Lowering.allocate (paramTable.map (·.1)) #[])
   let (plan, stageBlocks) ← Tropical.Compile.compileSessionStaged input
   -- The host-contract dispatch table rides the manifest: any runtime host
   -- (C++ today, Swift/Metal or wasm tomorrow) reads per-slot disciplines from
@@ -853,32 +848,9 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
     ++ tapSigs.map (fun (id, _) => (id, root, s!"tap:{id}"))
   pure (plan, taps, stageBlocks)
 
--- ── Stdlib-into-arena (cached; mirrors Tropicaltest.arrowElabStdlib) ─────────
-def elabStdlib : IO (Except String (Arena × Array (String × ProgramIdx))) := do
-  let manifestText ← IO.FS.readFile "stdlib/parsed/manifest.json"
-  let names : Except String (Array String) := do
-    let jv ← Tropical.Parse.JsonV.parse manifestText |>.mapError (s!"manifest parse error: {·}")
-    let some (Tropical.Parse.JsonV.arr items) := jv.getField? "programs"
-      | .error "manifest missing 'programs' array"
-    items.mapM fun | .str s => .ok s | _ => .error "manifest 'programs' entries must be strings"
-  match names with
-  | .error e => pure (.error e)
-  | .ok names => do
-    let mut arena : Arena := {}
-    let mut resolved : Array (String × ProgramIdx) := #[]
-    for name in names do
-      let text ← IO.FS.readFile s!"stdlib/parsed/{name}.json"
-      match Tropical.Parse.JsonV.parse text with
-      | .error e => return .error s!"{name}.json: JSON parse error: {e}"
-      | .ok jv =>
-        match Tropical.Parse.decodeProgram jv with
-        | .error e => return .error s!"{name}.json: {e}"
-        | .ok prog =>
-          let r := resolved
-          match Tropical.Ir.elaborateInto arena prog (some fun n => (r.find? (·.1 == n)).map (·.2)) with
-          | .error e => return .error s!"{name}: {e.message}"
-          | .ok (arena', idx) => arena := arena'; resolved := resolved.push (name, idx)
-    pure (.ok (arena, resolved))
+-- ── Stdlib-into-arena (the shared chain; cached below via `getStdlib`) ───────
+def elabStdlib : IO (Except String (Arena × Array (String × ProgramIdx))) :=
+  Tropical.StdlibChain.elabStdlib
 
 initialize stdlibCache : IO.Ref (Option (Arena × Array (String × ProgramIdx))) ← IO.mkRef none
 

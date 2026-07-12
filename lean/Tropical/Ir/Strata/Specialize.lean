@@ -1,10 +1,9 @@
 import Tropical.Ir.Nodes
-import Tropical.Ir.Recursion
 import Tropical.Ir.Strata.Basic
 import Tropical.Ir.Strata.EArena
 
 /-!
-# specialize — port of compiler/ir/specialize.ts (Phase 5 pass 1)
+# specialize
 
 Type-param substitution on the resolved IR. Produces a fresh `Program`
 per (template, type-args) pair, substituting:
@@ -30,6 +29,11 @@ namespace Tropical.Ir.Strata.Specialize
 
 open Lean (JsonNumber)
 open Tropical.Ir
+
+/-- Port-type / shape-dim walker — substitute type-param shape dimensions. -/
+private def mapPortType (shapeDim : ShapeDim → ShapeDim) : PortType → PortType
+  | .array element shape => .array element (shape.map shapeDim)
+  | pt => pt
 
 /-- JS `Number.isInteger` over the parsed double. -/
 private def isIntegerValued (n : JsonNumber) : Bool :=
@@ -105,7 +109,7 @@ def runCoreE (rootIdx : ProgramIdx) (typeArgs : Array ArgEntry) : PassM ProgramI
   let portType := mapPortType shapeDim
   let inputs ← prog.inputs.mapM fun i => do
     pure ({ name := i.name, type? := i.type?.map portType,
-            default? := ← i.default?.mapM rw } : EInputDecl)
+            default? := ← i.default?.mapM rw } : InputDecl)
   let outputs := prog.outputs.map fun o => { o with type? := o.type?.map portType }
   let decls ← prog.decls.mapM fun d => do
     match d with
@@ -113,10 +117,10 @@ def runCoreE (rootIdx : ProgramIdx) (typeArgs : Array ArgEntry) : PassM ProgramI
     | .inst name typeKey tArgs inputs =>
       pure (BodyDecl.inst name typeKey tArgs
         (← inputs.mapM fun i => do
-          pure ({ port := i.port, value := ← rw i.value } : EInstanceInput)))
+          pure ({ port := i.port, value := ← rw i.value } : InstanceInput)))
     | .prog name p => pure (BodyDecl.prog name p)
   let assigns ← prog.assigns.mapM fun a => do
-    pure ({ target := a.target, expr := ← rw a.expr } : EOutputAssign)
+    pure ({ target := a.target, expr := ← rw a.expr } : OutputAssign)
   pushEProgram { prog with typeParams := #[], inputs, outputs, decls, assigns }
 
 /-- Id-form by-name adapter (the harness `argsByName` + specializeProgram). -/

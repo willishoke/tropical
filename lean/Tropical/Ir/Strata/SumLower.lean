@@ -3,7 +3,7 @@ import Tropical.Ir.Strata.Basic
 import Tropical.Ir.Strata.EArena
 
 /-!
-# sumLower — port of compiler/ir/sum_lower.ts (Phase 5 pass 2)
+# sumLower
 
 Lowers every `match`/`tag` expression to scalar select-chains and
 variant-index literals. CF-only removed sum-typed registers — the only
@@ -39,8 +39,6 @@ private def sumDefE (d : TypeDefIdx) : PassM (String × Array SumVariant) := do
   match ← typeDefP? d with
   | some (.sum name variants) => pure (name, variants)
   | _ => failP s!"sumLower: typeDef pool index {d.idx} is not a sum type (internal)"
-
-private def nat0E (n : Nat) : PassM ExprId := einternP (.num ⟨Int.ofNat n, 0⟩)
 
 /-- Pass-wide memo of the has-sum predicate per source id (the arena is
     append-only, so a node never changes under an id). Keeps the walks
@@ -171,7 +169,7 @@ private partial def bindingsForArmE (ctx : CtxE) (scrutinee : ExprId)
 
 end
 
-private def progHasAnySumWorkE (prog : EProgram) : SumM Bool := do
+private def progHasAnySumWorkE (prog : Program) : SumM Bool := do
   for d in prog.decls do
     if let .inst _ _ _ inputs := d then
       if ← inputs.anyM (fun i => exprHasSumE i.value) then return true
@@ -188,10 +186,10 @@ private def runGoE (rootIdx : ProgramIdx) : SumM ProgramIdx := do
     match decl with
     | .inst name typeKey tArgs inputs =>
       pure (BodyDecl.inst name typeKey tArgs
-        (← inputs.mapM fun i => do pure ({ port := i.port, value := ← rewriteExprE ctx i.value } : EInstanceInput)))
+        (← inputs.mapM fun i => do pure ({ port := i.port, value := ← rewriteExprE ctx i.value } : InstanceInput)))
     | .param .. | .prog .. => pure decl
   let newAssigns ← prog.assigns.mapM fun a => do
-    pure ({ target := a.target, expr := ← rewriteExprE ctx a.expr } : EOutputAssign)
+    pure ({ target := a.target, expr := ← rewriteExprE ctx a.expr } : OutputAssign)
   pushEProgram { prog with decls := newDecls, assigns := newAssigns }
 
 /-- Run the pass with a fresh has-sum memo (one per pass application). -/

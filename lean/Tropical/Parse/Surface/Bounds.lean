@@ -1,4 +1,5 @@
 import Tropical.Parse.Nodes
+import Tropical.Parse.BoundLower
 
 /-!
 # Bounds lowering (port of `compiler/parse/lower_bounds.ts`)
@@ -21,7 +22,8 @@ when parsed), so no tree recursion is needed here.
 namespace Tropical.Parse.Surface
 
 open Tropical.Parse
-  (ParsedExpr Program ProgramPorts ProgramPort ProgramPortSpec PortTypeDecl Block)
+  (ParsedExpr Program ProgramPorts ProgramPort ProgramPortSpec PortTypeDecl Block
+   wrapWithBound)
 open Lean (JsonNumber)
 
 /-- An explicit `in [lo, hi]` bound; each side `none` for the `null` sentinel. -/
@@ -47,12 +49,8 @@ def aliasBounds : Option PortTypeDecl → Option BoundPair
   | some (.scalar name) => builtinPortBounds name
   | _                   => none
 
-/-- Wrap an expression in the bounds-enforcing op chain (parser call shape). -/
-def wrapWithBound (expr : ParsedExpr) : BoundPair → ParsedExpr
-  | (some lo, some hi) => .call (.nameRef "clamp") #[expr, .num lo, .num hi]
-  | (some lo, none)    => .call (.nameRef "select") #[.binary .gt expr (.num lo), expr, .num lo]
-  | (none, some hi)    => .call (.nameRef "select") #[.binary .lt expr (.num hi), expr, .num hi]
-  | (none, none)       => expr
+-- `wrapWithBound` (the idempotent bounds → clamp/select fold, shared with the
+-- JSON raise path) comes from `Parse/BoundLower.lean`.
 
 private def lookupBound (arr : Array (String × BoundPair)) (nm : String) : Option BoundPair :=
   (arr.find? (·.1 == nm)).map (·.2)

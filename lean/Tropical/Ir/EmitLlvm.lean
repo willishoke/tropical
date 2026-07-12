@@ -3,7 +3,7 @@ import Lean.Data.Json
 import Tropical.Plan
 
 /-!
-# EmitLlvm — `FlatPlan → textual LLVM IR` (Phase 1b of the Lean-IR migration)
+# EmitLlvm — `FlatPlan → textual LLVM IR`
 
 A faithful port of `engine/jit/OrcJitEngine.cpp`'s fused-mode codegen
 (`compile_flat_program` + `EmitCtx`), emitting textual LLVM IR instead of
@@ -297,11 +297,13 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
   let eitherInt : M Bool := do
     pure (((args[0]?).map (·.ty == .int)).getD false ||
           ((args[1]?).map (·.ty == .int)).getD false)
-  match tag with
-  | "Add" => if isInt then binI "add" (← aI 0) (← aI 1) else binF "fadd" (← aF 0) (← aF 1)
-  | "Sub" => if isInt then binI "sub" (← aI 0) (← aI 1) else binF "fsub" (← aF 0) (← aF 1)
-  | "Mul" => if isInt then binI "mul" (← aI 0) (← aI 1) else binF "fmul" (← aF 0) (← aF 1)
-  | "Div" =>
+  let some op := Tropical.Plan.PlanOp.ofString? tag
+    | fail s!"EmitLlvm: unsupported op '{tag}'"
+  match op with
+  | .add => if isInt then binI "add" (← aI 0) (← aI 1) else binF "fadd" (← aF 0) (← aF 1)
+  | .sub => if isInt then binI "sub" (← aI 0) (← aI 1) else binF "fsub" (← aF 0) (← aF 1)
+  | .mul => if isInt then binI "mul" (← aI 0) (← aI 1) else binF "fmul" (← aF 0) (← aF 1)
+  | .div =>
     if isInt then
       let b ← aI 1; let q ← binI "sdiv" (← aI 0) b
       let z ← cmpI "eq" b "0"; let r ← fresh
@@ -310,7 +312,7 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
       let b ← aF 1; let q ← binF "fdiv" (← aF 0) b
       let z ← cmpF "oeq" b zeroF; let r ← fresh
       line s!"{r} = select i1 {z.ref}, double {zeroF}, double {q.ref}"; pure ⟨r, .float⟩
-  | "Mod" =>
+  | .mod =>
     if isInt then
       let b ← aI 1; let q ← binI "srem" (← aI 0) b
       let z ← cmpI "eq" b "0"; let r ← fresh
@@ -324,7 +326,7 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
       let m ← binF "fsub" a prod.ref
       let r ← fresh
       line s!"{r} = select i1 {z.ref}, double {zeroF}, double {m.ref}"; pure ⟨r, .float⟩
-  | "FloorDiv" =>
+  | .floorDiv =>
     if isInt then
       let b ← aI 1; let q ← binI "sdiv" (← aI 0) b
       let z ← cmpI "eq" b "0"; let r ← fresh
@@ -334,45 +336,45 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
       let z ← cmpF "oeq" b zeroF; let dv ← fresh
       line s!"{dv} = select i1 {z.ref}, double {zeroF}, double {q.ref}"
       callF "@llvm.floor.f64" dv
-  | "Less"      => if (← eitherInt) then cmpI "slt" (← aI 0) (← aI 1) else cmpF "olt" (← aF 0) (← aF 1)
-  | "LessEq"    => if (← eitherInt) then cmpI "sle" (← aI 0) (← aI 1) else cmpF "ole" (← aF 0) (← aF 1)
-  | "Greater"   => if (← eitherInt) then cmpI "sgt" (← aI 0) (← aI 1) else cmpF "ogt" (← aF 0) (← aF 1)
-  | "GreaterEq" => if (← eitherInt) then cmpI "sge" (← aI 0) (← aI 1) else cmpF "oge" (← aF 0) (← aF 1)
-  | "Equal"     => if (← eitherInt) then cmpI "eq"  (← aI 0) (← aI 1) else cmpF "oeq" (← aF 0) (← aF 1)
-  | "NotEqual"  => if (← eitherInt) then cmpI "ne"  (← aI 0) (← aI 1) else cmpF "une" (← aF 0) (← aF 1)
-  | "And" => let r ← fresh; line s!"{r} = and i1 {← aB 0}, {← aB 1}"; pure ⟨r, .bool⟩
-  | "Or"  => let r ← fresh; line s!"{r} = or i1 {← aB 0}, {← aB 1}"; pure ⟨r, .bool⟩
-  | "BitAnd" => binI "and" (← aI 0) (← aI 1)
-  | "BitOr"  => binI "or"  (← aI 0) (← aI 1)
-  | "BitXor" => binI "xor" (← aI 0) (← aI 1)
-  | "LShift" => binI "shl" (← aI 0) (← aI 1)
-  | "RShift" => binI "ashr" (← aI 0) (← aI 1)
-  | "Neg" =>
+  | .less      => if (← eitherInt) then cmpI "slt" (← aI 0) (← aI 1) else cmpF "olt" (← aF 0) (← aF 1)
+  | .lessEq    => if (← eitherInt) then cmpI "sle" (← aI 0) (← aI 1) else cmpF "ole" (← aF 0) (← aF 1)
+  | .greater   => if (← eitherInt) then cmpI "sgt" (← aI 0) (← aI 1) else cmpF "ogt" (← aF 0) (← aF 1)
+  | .greaterEq => if (← eitherInt) then cmpI "sge" (← aI 0) (← aI 1) else cmpF "oge" (← aF 0) (← aF 1)
+  | .equal     => if (← eitherInt) then cmpI "eq"  (← aI 0) (← aI 1) else cmpF "oeq" (← aF 0) (← aF 1)
+  | .notEqual  => if (← eitherInt) then cmpI "ne"  (← aI 0) (← aI 1) else cmpF "une" (← aF 0) (← aF 1)
+  | .and => let r ← fresh; line s!"{r} = and i1 {← aB 0}, {← aB 1}"; pure ⟨r, .bool⟩
+  | .or  => let r ← fresh; line s!"{r} = or i1 {← aB 0}, {← aB 1}"; pure ⟨r, .bool⟩
+  | .bitAnd => binI "and" (← aI 0) (← aI 1)
+  | .bitOr  => binI "or"  (← aI 0) (← aI 1)
+  | .bitXor => binI "xor" (← aI 0) (← aI 1)
+  | .lshift => binI "shl" (← aI 0) (← aI 1)
+  | .rshift => binI "ashr" (← aI 0) (← aI 1)
+  | .neg =>
     if isInt then binI "sub" "0" (← aI 0) else
     let r ← fresh; line s!"{r} = fneg double {← aF 0}"; pure ⟨r, .float⟩
-  | "Abs" =>
+  | .abs =>
     if isInt then
       let v ← aI 0; let neg ← binI "sub" "0" v
       let lt ← cmpI "slt" v "0"; let r ← fresh
       line s!"{r} = select i1 {lt.ref}, i64 {neg.ref}, i64 {v}"; pure ⟨r, .int⟩
     else callF "@llvm.fabs.f64" (← aF 0)
-  | "Sqrt"  => callF "@llvm.sqrt.f64"  (← aF 0)
-  | "Floor" => callF "@llvm.floor.f64" (← aF 0)
-  | "Ceil"  => callF "@llvm.ceil.f64"  (← aF 0)
-  | "Round" => callF "@llvm.round.f64" (← aF 0)
-  | "Ldexp" =>
+  | .sqrt  => callF "@llvm.sqrt.f64"  (← aF 0)
+  | .floor => callF "@llvm.floor.f64" (← aF 0)
+  | .ceil  => callF "@llvm.ceil.f64"  (← aF 0)
+  | .round => callF "@llvm.round.f64" (← aF 0)
+  | .ldexp =>
     let x ← aF 0
     let ni ← fresh; line s!"{ni} = fptosi double {← aF 1} to i64"
     let add ← fresh; line s!"{add} = add i64 {ni}, 1023"
     let bias ← fresh; line s!"{bias} = shl i64 {add}, 52"
     let scale ← fresh; line s!"{scale} = bitcast i64 {bias} to double"
     binF "fmul" x scale
-  | "FloatExponent" =>
+  | .floatExponent =>
     let bits ← fresh; line s!"{bits} = bitcast double {← aF 0} to i64"
     let sh ← fresh; line s!"{sh} = ashr i64 {bits}, 52"
     let e ← fresh; line s!"{e} = sub i64 {sh}, 1023"
     let r ← fresh; line s!"{r} = sitofp i64 {e} to double"; pure ⟨r, .float⟩
-  | "Not" =>
+  | .not =>
     match args[0]? with
     | none => fail "EmitLlvm: Not missing operand"
     | some a =>
@@ -380,11 +382,11 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
       | .bool  => let r ← fresh; line s!"{r} = xor i1 {a.ref}, true"; pure ⟨r, .bool⟩
       | .int   => let r ← fresh; line s!"{r} = icmp eq i64 {a.ref}, 0"; pure ⟨r, .bool⟩
       | .float => let r ← fresh; line s!"{r} = fcmp oeq double {a.ref}, {zeroF}"; pure ⟨r, .bool⟩
-  | "BitNot" => let r ← fresh; line s!"{r} = xor i64 {← aI 0}, -1"; pure ⟨r, .int⟩
-  | "ToInt"   => match args[0]? with | some a => coerce a .int   | none => fail "ToInt missing operand"
-  | "ToBool"  => match args[0]? with | some a => coerce a .bool  | none => fail "ToBool missing operand"
-  | "ToFloat" => match args[0]? with | some a => coerce a .float | none => fail "ToFloat missing operand"
-  | "Clamp" =>
+  | .bitNot => let r ← fresh; line s!"{r} = xor i64 {← aI 0}, -1"; pure ⟨r, .int⟩
+  | .toInt   => match args[0]? with | some a => coerce a .int   | none => fail "ToInt missing operand"
+  | .toBool  => match args[0]? with | some a => coerce a .bool  | none => fail "ToBool missing operand"
+  | .toFloat => match args[0]? with | some a => coerce a .float | none => fail "ToFloat missing operand"
+  | .clamp =>
     if isInt then
       let val ← aI 0; let lo ← aI 1; let hi ← aI 2
       let gt ← cmpI "sgt" val lo; let loc ← fresh
@@ -397,7 +399,7 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
       line s!"{loc} = select i1 {gt.ref}, double {val}, double {lo}"
       let lt ← cmpF "olt" loc hi; let r ← fresh
       line s!"{r} = select i1 {lt.ref}, double {loc}, double {hi}"; pure ⟨r, .float⟩
-  | "Select" =>
+  | .select =>
     let cond ← match args[0]? with
       | none => fail "Select missing cond"
       | some a =>
@@ -410,7 +412,6 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
     let r ← fresh
     line s!"{r} = select i1 {cond}, {llTy resultType} {t}, {llTy resultType} {f}"
     pure ⟨r, resultType⟩
-  | other => fail s!"EmitLlvm: unsupported op '{other}'"
 
 -- ─────────────────────────────────────────────────────────────
 -- Instruction emit (mirrors EmitCtx::emit_instr)

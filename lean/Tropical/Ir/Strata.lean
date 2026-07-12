@@ -8,7 +8,7 @@ import Tropical.Ir.Strata.IdentityElim
 import Tropical.Ir.Elaborator
 
 /-!
-# Strata pipeline — port of compiler/ir/strata.ts (Phase 5)
+# Strata pipeline
 
 The six-pass drop sequence over the resolved IR:
 

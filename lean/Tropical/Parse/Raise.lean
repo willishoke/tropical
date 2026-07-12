@@ -1,4 +1,5 @@
 import Tropical.Parse.Nodes
+import Tropical.Parse.BoundLower
 
 /-!
 # raise — legacy `tropical_program_2` JSON → typed ParsedProgram
@@ -726,50 +727,11 @@ private def aliasBounds : Option PortTypeDecl → Option Bounds
   | some (.scalar name) => builtinPortBounds name
   | _ => none
 
-private def exprIsNum (e : ParsedExpr) (i : Int) : Bool :=
-  match e with
-  | .num n => n.toFloat.toBits == (Float.ofInt i).toBits
-  | _ => false
-
-private def callArgsTo (e : ParsedExpr) (callee : String) : Option (Array ParsedExpr) :=
-  match e with
-  | .call (.nameRef n) args => if n == callee then some args else none
-  | _ => none
-
-/-- True if `e` already enforces `bounds` (idempotency guard). Checks
-    the parser-level call shapes; the elaborator-level direct-op shapes
-    the TS guard also accepts are unrepresentable in a ParsedProgram. -/
-private def alreadyWrapped (e : ParsedExpr) (bounds : Bounds) : Bool :=
-  let (lo, hi) := bounds
-  let clampMatch :=
-    match callArgsTo e "clamp" with
-    | some args =>
-      args.size == 3 &&
-      (match lo with | some l => exprIsNum args[1]! l | none => false) &&
-      (match hi with | some h => exprIsNum args[2]! h | none => false)
-    | none => false
-  let selectMatch :=
-    match callArgsTo e "select" with
-    | some args =>
-      args.size == 3 &&
-      (match args[0]!, lo, hi with
-       | .binary .gt _ rhs, some l, none => exprIsNum rhs l && exprIsNum args[2]! l
-       | .binary .lt _ rhs, none, some h => exprIsNum rhs h && exprIsNum args[2]! h
-       | _, _, _ => false)
-    | none => false
-  clampMatch || selectMatch
-
-private def wrapWithBound (e : ParsedExpr) (bounds : Bounds) : ParsedExpr :=
-  if alreadyWrapped e bounds then e
-  else
-    let lit (i : Int) : ParsedExpr := .num (JsonNumber.fromInt i)
-    match bounds with
-    | (some lo, some hi) => .call (.nameRef "clamp") #[e, lit lo, lit hi]
-    | (some lo, none) =>
-      .call (.nameRef "select") #[.binary .gt e (lit lo), e, lit lo]
-    | (none, some hi) =>
-      .call (.nameRef "select") #[.binary .lt e (lit hi), e, lit hi]
-    | (none, none) => e
+/-- Widen the integral alias bounds to the shared `JsonNumber` bound pair, so
+    the raise path folds them through the same idempotent `wrapWithBound` as
+    the surface parser (`Parse/BoundLower.lean`). -/
+private def boundPair : Bounds → Tropical.Parse.BoundPair
+  | (lo, hi) => (lo.map (JsonNumber.fromInt ·), hi.map (JsonNumber.fromInt ·))
 
 /-- Port of `lowerBoundsToClamps`: wrap bounded input defaults and
     bounded-output assigns in clamp/select chains. Pure (the TS version
@@ -789,7 +751,7 @@ partial def lowerBounds (p : Program) : Program :=
       | .spec s =>
         match aliasBounds s.type?, s.default? with
         | some b, some dflt =>
-          ProgramPort.spec { s with default? := some (wrapWithBound dflt b) }
+          ProgramPort.spec { s with default? := some (wrapWithBound dflt (boundPair b)) }
         | _, _ => ProgramPort.spec s
       | bare => bare
   -- Outputs: collect bounds by port name.
@@ -804,7 +766,7 @@ partial def lowerBounds (p : Program) : Program :=
       match a with
       | .output name e =>
         match outputBounds.find? (·.1 == name) with
-        | some (_, b) => .output name (wrapWithBound e b)
+        | some (_, b) => .output name (wrapWithBound e (boundPair b))
         | none => .output name e
   let ports' := ports.map fun pp => { pp with inputs := inputs' }
   .mk p.name p.typeParams ports' (.mk decls assigns) p.breaksCycles

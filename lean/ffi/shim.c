@@ -76,26 +76,6 @@ LEAN_EXPORT lean_obj_res shim_runtime_new(uint32_t buffer_length, lean_obj_arg w
   return lean_io_result_mk_ok(lean_alloc_external(runtime_class(), r));
 }
 
-LEAN_EXPORT lean_obj_res shim_runtime_load_ir(b_lean_obj_arg rt, b_lean_obj_arg ir,
-                                              b_lean_obj_arg manifest, lean_obj_arg world) {
-  (void)world;
-  const char *i = lean_string_cstr(ir);
-  const char *m = lean_string_cstr(manifest);
-  bool ok = tropical_runtime_load_ir(unwrap(rt), i, strlen(i), m, strlen(m));
-  return lean_io_result_mk_ok(lean_box(ok));
-}
-
-LEAN_EXPORT lean_obj_res shim_runtime_load_ir_msl(b_lean_obj_arg rt, b_lean_obj_arg ir,
-                                                  b_lean_obj_arg msl, b_lean_obj_arg manifest,
-                                                  lean_obj_arg world) {
-  (void)world;
-  const char *i = lean_string_cstr(ir);
-  const char *g = lean_string_cstr(msl);
-  const char *m = lean_string_cstr(manifest);
-  bool ok = tropical_runtime_load_ir_msl(unwrap(rt), i, strlen(i), g, strlen(g), m, strlen(m));
-  return lean_io_result_mk_ok(lean_box(ok));
-}
-
 LEAN_EXPORT lean_obj_res shim_runtime_load_ir_staged(b_lean_obj_arg rt, b_lean_obj_arg ir,
                                                      b_lean_obj_arg msl, b_lean_obj_arg coeff,
                                                      b_lean_obj_arg manifest, lean_obj_arg world) {

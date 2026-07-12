@@ -58,20 +58,4 @@ def relinkProgramRegistry (arena : Arena) (rootIdx : ProgramIdx)
   return ({ arena with programs := arena.programs.push { prog with registry := newReg } },
           ⟨arena.programs.size⟩)
 
-open Tropical.Ir in
-/-- Port of decl_tables.ts `getInstanceType` (shared by
-    inlineInstances and arrayLower). -/
-def getInstanceType (arena : Arena) (enclosing : Program)
-    (instName typeKey : String) : Except Error (ProgramIdx × Program) := do
-  match enclosing.registryGet? typeKey with
-  | some pIdx =>
-    let some p := arena.program? pIdx
-      | throw ⟨s!"getInstanceType: instance '{instName}' typeKey '{typeKey}' program pool index {pIdx.idx} out of range (internal)"⟩
-    return (pIdx, p)
-  | none =>
-    let keys := ", ".intercalate (enclosing.registry.toList.map (·.1))
-    throw ⟨s!"getInstanceType: instance '{instName}' typeKey '{typeKey}' " ++
-      s!"not found in enclosing program '{enclosing.name}' registry " ++
-      s!"(keys: {keys}). This is a registry-build bug; check buildProgramRegistry call sites."⟩
-
 end Tropical.Ir.Strata

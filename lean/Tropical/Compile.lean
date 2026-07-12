@@ -3,7 +3,7 @@ import Tropical.Ir.CompileResolved
 import Tropical.Plan
 
 /-!
-# Session compile — partition + plan assembly (Phase 6 stage 6c)
+# Session compile — partition + plan assembly
 
 Port of `compiler/ir/partition_recursive.ts` and
 `compiler/ir/compile_session_slotted*.ts` over the Core sub-IR: the
@@ -572,6 +572,19 @@ structure SessionInput where
       (Phase B). -/
   arena : Tropical.Ir.CoreArena
   mode : Tropical.Plan.CompilationMode := .fused
+
+/-- The synthetic-root session input: one instance — the root itself at
+    `rootInstancePath` — wired straight to the device at its `out` port,
+    no session wires. The shape every carrier/patch-graph lowering
+    compiles through `compileSession`; `params`/`alloc` carry a graph's
+    live knobs when it has any. -/
+def SessionInput.forRoot (root : CoreProgram) (arena : Tropical.Ir.CoreArena)
+    (params : Array (String × Json) := #[])
+    (alloc : Tropical.Lowering.Alloc := {}) : SessionInput :=
+  { instances := #[(rootInstancePath, root)]
+    wiresPost := #[]
+    graphOutputs := #[(rootInstancePath, "out")]
+    params, alloc, root, arena }
 
 private def rootParamName : CoreBodyDecl → Option String
   | .param name _ => some name

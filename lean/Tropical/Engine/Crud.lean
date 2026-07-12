@@ -1,0 +1,269 @@
+import Tropical.Engine.Registry
+
+/-!
+# Engine.Crud — instance/program lifecycle tool handlers
+
+The per-tool handlers for defining programs and creating, replicating,
+removing, listing, and describing instances. `resolveInstanceMeta` resolves a
+program name to its registered metadata (shared with the program-I/O path).
+-/
+
+namespace Tropical.Engine
+
+open Lean (Json toJson)
+open Tropical.Expr (getField? getStrField? opOf? validateExpr exprDependencies prettyExpr)
+open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
+
+-- ── Per-tool handlers ────────────────────────────────────────────────────────
+
+private def instanceSummary (st : SessionSt) (name : String) : Json :=
+  match st.findInstance? name with
+  | none => jsonNull
+  | some info => Json.mkObj [
+      ("name", Json.str name),
+      ("type_name", Json.str info.baseTypeName),
+      ("type_args", info.typeArgs.getD jsonNull),
+      ("inputs", toJson info.progMeta.inputNames),
+      ("outputs", toJson info.progMeta.outputNames)]
+
+/-- Resolve a program name (+ optional type args) to instance metadata
+    plus the typed-store snapshot for the resolved program, with the TS
+    failure shapes. Generic programs specialize through the service's
+    `resolve_type`, whose entry is adopted into the store; concrete
+    programs take the store's current mapping for the name.
+
+    `toolEnvelopes := false` selects the LOAD/MERGE ingest path's
+    failure shapes — `resolveProgramType`'s plain TS Errors
+    (`Unknown program type '…'. Known: …` etc.), which the service
+    relay surfaced as `internal_error` with the verbatim message. -/
+def resolveInstanceMeta (env : Env) (programName : String)
+    (typeArgs : Option Json) (programParam : String)
+    (toolEnvelopes : Bool := true) :
+    EngineM (Option Json × ProgMeta × Option Tropical.Ir.ProgramIdx) := do
+  let st ← env.state.get
+  match st.programs.get? programName with
+  | none =>
+    -- TS options: [...typeRegistry.keys(), ...programs.keys()] — concrete
+    -- names first, then every program name (concrete ones repeat).
+    let concrete := st.catalogOrder.filter fun n =>
+      match st.programs.get? n with | some m => !m.generic | none => false
+    if !toolEnvelopes then
+      let known := String.intercalate ", " (concrete ++ st.catalogOrder).toList
+      internalError s!"Unknown program type '{programName}'. Known: {if known.isEmpty then "(none)" else known}"
+    throwEnum .unknownProgram programParam (Json.str programName)
+      (concrete ++ st.catalogOrder)
+  | some pm =>
+    if pm.generic then
+      -- Phase 5 stage 6b: type-arg resolution + the specialization
+      -- (strata over the raw template, NO relink — TS
+      -- `specializeFromResolvedTemplate` never relinked) run
+      -- engine-side. Every failure — arg validation and strata alike —
+      -- maps to invalid_type_args with the raw message, exactly how
+      -- the engine mapped any service resolve_type failure before the
+      -- move.
+      let some templateIdx := st.templateByName.get? programName
+        | internalError s!"resolve_type: generic '{programName}' has no stored template (engine bug)"
+      let some template := st.arena.program? templateIdx
+        | internalError s!"resolve_type: template pool index {templateIdx.idx} out of range (engine bug)"
+      let declared ← template.typeParams.mapM fun i =>
+        match st.arena.typeParam? i with
+        | some tp => pure (tp.name, tp.default?)
+        | none => internalError s!"resolve_type: typeParam pool index out of range (engine bug)"
+      let resolvedArgs ←
+        match Tropical.TypeArgs.resolve typeArgs declared s!"instance of '{programName}'" with
+        | .error msg =>
+          if !toolEnvelopes then internalError msg
+          throwBare .invalidTypeArgs msg (param := some "type_args") (value := typeArgs)
+        | .ok r => pure r
+      let key := Tropical.TypeArgs.cacheKey programName resolvedArgs
+      let echo := Json.mkObj (resolvedArgs.toList.map fun (n, v) => (n, Json.num v))
+      match st.specializationCache.get? key with
+      | some (pmCached, idx?) => pure (some echo, pmCached, idx?)
+      | none =>
+        let (arena', specIdx) ←
+          match runStrataChecked resolvedArgs st.arena templateIdx with
+          | .error msg =>
+            if !toolEnvelopes then internalError msg
+            throwBare .invalidTypeArgs msg (param := some "type_args") (value := typeArgs)
+          | .ok r => pure r
+        -- arena' (the pre-round-trip specialization) is deliberately
+        -- NOT persisted: the store adopts the entry's codec round trip
+        -- below, exactly one arena copy — the same growth the
+        -- service-relay path had.
+        let entry ← match Tropical.Entries.concreteEntry arena' key specIdx with
+          | .error e => internalError e
+          | .ok j => pure j
+        let pmNew := ProgMeta.fromEntry entry
+        let idx? ← adoptResolved env entry
+        env.state.modify fun s =>
+          { s with specializationCache := s.specializationCache.insert key (pmNew, idx?) }
+        pure (some echo, pmNew, idx?)
+    else
+      match typeArgs with
+      | some ta =>
+        let keys := match ta with
+          | .obj m => String.intercalate ", " (m.toList.map Prod.fst)
+          | _ => ""
+        if keys.isEmpty then pure (none, pm, st.resolvedByName.get? programName)
+        else if !toolEnvelopes then
+          internalError s!"Program '{programName}' does not declare type_params; got type_args: {keys}"
+        else
+          throwBare .invalidTypeArgs
+            (s!"Program '{programName}' does not declare type_params; got type_args: {keys}")
+            (param := some "type_args") (value := some ta)
+      | none => pure (none, pm, st.resolvedByName.get? programName)
+
+def handleDefineProgram (env : Env) (args : Json) : EngineM Json := do
+  let def_ := (arg? args "def").getD jsonNull
+  -- Bridge to the ordered decoder by re-parsing the compressed form.
+  -- Lean Json objects are key-sorted, which is exactly what the relay
+  -- shipped to the TS service before this stage — observable raise
+  -- behavior is unchanged.
+  let jv ← match Tropical.Parse.JsonV.parse def_.compress with
+    | .error e => internalError s!"define_program: def JSON re-parse failed: {e}"
+    | .ok v => pure v
+  -- Stage-2 raise: normalizeProgramFile (schema-tag check + Zod-strip)
+  -- + raiseProgram. Failures map to internal_error with the verbatim
+  -- message — the envelope the TS path produced when its
+  -- normalizeProgramFile / loadProgramAsType threw.
+  let (prog, _top) ← match Tropical.Parse.Raise.raiseFile jv with
+    | .error msg => internalError msg
+    | .ok r => pure r
+  -- One service call per batch item, adoption between items: a later
+  -- item (the parent) thereby elaborates against the earlier item's
+  -- POST-STRATA form, matching TS (the sub's registration round-trips
+  -- through strata before the parent is processed).
+  let batch := registrationBatch prog.name prog
+  let mut rootEntry := jsonNull
+  for (name, p) in batch do
+    let (entry, _) ← registerOne env name p
+    rootEntry := entry
+  -- The TS handler's two result shapes.
+  if (prog.typeParams.getD #[]).isEmpty then
+    let names := fun (k : String) => Json.arr <|
+      (match getField? rootEntry k with
+       | some (.arr ps) => ps
+       | _ => #[]).filterMap fun pj => (getStrField? pj "name").map Json.str
+    pure <| Json.mkObj [
+      ("program_name", (getField? rootEntry "program_name").getD (Json.str prog.name)),
+      ("inputs", names "inputs"),
+      ("outputs", names "outputs")]
+  else
+    pure <| Json.mkObj [
+      ("program_name", Json.str prog.name),
+      ("inputs", toJson (portNames (prog.ports.bind (·.inputs)))),
+      ("outputs", toJson (portNames (prog.ports.bind (·.outputs)))),
+      ("type_params", Tropical.Parse.Encode.typeParams (prog.typeParams.getD #[]))]
+
+def handleAddInstance (env : Env) (args : Json) : EngineM Json := do
+  let programName := (argStr? args "program").getD ""
+  let instanceName := (argStr? args "instance_name").getD ""
+  if instanceName == dacName || instanceName == scopeName then
+    throwBare .invalidValue
+      s!"'{instanceName}' is a reserved instance name ({dacName} = audio output, {scopeName} = inspection taps). Choose a different name."
+      (param := some "instance_name") (value := some (Json.str instanceName))
+  let st ← env.state.get
+  if (st.findInstance? instanceName).isSome then
+    throwBare .instanceExists s!"Instance '{instanceName}' already exists."
+      (param := some "instance_name") (value := some (Json.str instanceName))
+  let (typeArgs, pm, resolvedIdx) ← resolveInstanceMeta env programName (arg? args "type_args") "program"
+  env.state.modify (·.addInstance instanceName
+    { baseTypeName := programName, typeArgs, progMeta := pm, resolvedIdx })
+  pure (instanceSummary (← env.state.get) instanceName)
+
+def handleReplicate (env : Env) (args : Json) : EngineM Json := do
+  let programName := (argStr? args "program").getD ""
+  let countJ := (arg? args "count").getD jsonNull
+  let count? : Option Nat := match countJ with
+    | .num n => if n.toFloat == n.toFloat.floor && n.toFloat ≥ 1 then some n.toFloat.toUInt64.toNat else none
+    | _ => none
+  let some count := count?
+    | throwRecord .invalidValue "count" countJ
+        [("count", { type := "int", required := true, min := some 1.0 })]
+        (some s!"count must be a positive integer, got {tsInterp countJ}")
+  let namePrefix := argStr? args "name_prefix"
+  let prefix' := namePrefix.getD programName.toLower
+  if prefix' == dacName || prefix' == scopeName then
+    throwBare .invalidValue
+      s!"'{prefix'}' is a reserved instance name ({dacName} = audio output, {scopeName} = inspection taps). Choose a different name_prefix."
+      (param := some "name_prefix") (value := some (Json.str prefix'))
+  let mut created : Array Json := #[]
+  for _ in [0:count] do
+    let st ← env.state.get
+    let (st', name) := st.nextName prefix'
+    env.state.set st'
+    if (st'.findInstance? name).isSome then
+      throwBare .instanceExists
+        s!"Instance '{name}' already exists — pick a different name_prefix"
+        (param := some "name_prefix") (value := namePrefix.map Json.str)
+    let (typeArgs, pm, resolvedIdx) ← resolveInstanceMeta env programName (arg? args "type_args") "program"
+    env.state.modify (·.addInstance name { baseTypeName := programName, typeArgs, progMeta := pm, resolvedIdx })
+    created := created.push (instanceSummary (← env.state.get) name)
+  pure <| Json.mkObj [("created", Json.arr created)]
+
+def handleRemoveInstance (env : Env) (args : Json) : EngineM Json := do
+  let instanceName := (argStr? args "instance_name").getD ""
+  let st ← env.state.get
+  let _ ← requireInstance st instanceName "instance_name"
+  env.state.modify fun st =>
+    let st := st.removeInstance instanceName
+    { st with
+      wires := st.wires.filter fun w =>
+        !(w.instName == instanceName || (exprDependencies w.expr).contains instanceName)
+      graphOutputs := st.graphOutputs.filter (·.1 != instanceName)
+      scopeTaps := st.scopeTaps.filter (·.2.1 != instanceName) }
+  syncCompile env
+  pure <| Json.mkObj [("removed", Json.str instanceName)]
+
+def handleListPrograms (env : Env) : EngineM Json := do
+  let st ← env.state.get
+  let portJson (withDefault : Bool) (p : PortInfo) : Json :=
+    Json.mkObj <|
+      [("name", Json.str p.name),
+       ("type", match p.typeStr with | some s => Json.str s | none => jsonNull)]
+      ++ (if withDefault then [("default", p.default.getD jsonNull)] else [])
+  let render (m : ProgMeta) : Json :=
+    Json.mkObj [
+      ("program_name", Json.str m.programName),
+      ("inputs", Json.arr (m.inputs.map (portJson true))),
+      ("outputs", Json.arr (m.outputs.map (portJson false))),
+      ("registers", Json.arr (m.registers.map (portJson false))),
+      ("type_params", if m.generic then m.typeParams.getD jsonNull else jsonNull)]
+  let metas := st.catalogOrder.filterMap st.programs.get?
+  let concrete := (metas.filter (!·.generic)).map render
+  let generic := (metas.filter (·.generic)).map render
+  pure <| Json.arr (concrete ++ generic)
+
+def handleListInstances (env : Env) : EngineM Json := do
+  let st ← env.state.get
+  pure <| Json.arr (st.instances.map fun (n, _) => instanceSummary st n)
+
+def handleGetInfo (env : Env) (args : Json) : EngineM Json := do
+  let instanceName := (argStr? args "instance_name").getD ""
+  let st ← env.state.get
+  let info ← requireInstance st instanceName "instance_name"
+  let lookupOutputs := fun n => (st.findInstance? n).map (·.progMeta.outputNames)
+  let inputs := info.progMeta.inputs.mapIdx fun i p =>
+    let wire := st.findWire? instanceName p.name
+    Json.mkObj [
+      ("name", Json.str p.name), ("index", toJson i),
+      ("type", p.typeObj.getD jsonNull),
+      ("expr", match wire with | some w => w.expr | none => jsonNull),
+      ("pretty", match wire with
+        | some w => Json.str (prettyExpr w.expr lookupOutputs)
+        | none => jsonNull)]
+  let outputs := info.progMeta.outputs.mapIdx fun i p =>
+    Json.mkObj [("name", Json.str p.name), ("index", toJson i),
+                ("type", p.typeObj.getD jsonNull)]
+  let registers := info.progMeta.registers.mapIdx fun i p =>
+    Json.mkObj [("name", Json.str p.name), ("index", toJson i),
+                ("type", p.typeObj.getD jsonNull)]
+  pure <| Json.mkObj [
+    ("name", Json.str instanceName),
+    ("program", Json.str info.baseTypeName),
+    ("type_args", info.typeArgs.getD jsonNull),
+    ("inputs", Json.arr inputs),
+    ("outputs", Json.arr outputs),
+    ("registers", Json.arr registers)]
+
+end Tropical.Engine

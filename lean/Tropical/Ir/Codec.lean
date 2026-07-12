@@ -2,7 +2,7 @@ import Tropical.Ir.Nodes
 import Tropical.Parse.OrderedJson
 
 /-!
-# Resolved⇄JSON codec — port of compiler/ir/resolved_codec.ts
+# Resolved⇄JSON codec
 
 Schema `tropical_resolved_1`: three identity pools (typeParams,
 typeDefs, programs) plus a root program index.

@@ -3,7 +3,7 @@ import Tropical.Expr
 import Tropical.Ir.Nodes
 
 /-!
-# Wire-program lift — port of compiler/ir/wire_program.ts (Phase 5 stage 6b)
+# Wire-program lift
 
 Lift a wire `ExprNode` (engine Json wire form) to a raw resolved
 `Program`: one `InputDecl` per free instance-output ref (sorted by

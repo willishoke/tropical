@@ -2,7 +2,7 @@ import Lean.Data.Json
 import Tropical.Expr
 
 /-!
-# Type-arg resolution — port of compiler/specialize.ts (Phase 5 stage 6b)
+# Type-arg resolution
 
 The boundary at which raw `type_args` (as supplied by MCP
 `add_instance`/`replicate`) are resolved against a generic template's

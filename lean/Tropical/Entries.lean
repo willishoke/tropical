@@ -3,7 +3,7 @@ import Tropical.Ir.Codec
 import Tropical.Ir.Emit
 
 /-!
-# Catalog entries — engine-side rendering (Phase 6 stage 6f)
+# Catalog entries — engine-side rendering
 
 Port of the compiler service's `concreteEntry` / `genericEntry`: the
 port-metadata shape `ProgMeta.fromEntry` consumes (and list_programs /

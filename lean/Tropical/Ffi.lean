@@ -39,13 +39,6 @@ opaque lastError : IO String
 @[extern "shim_runtime_new"]
 opaque Runtime.new (bufferLength : UInt32) : IO Runtime
 
-/-- Load a kernel from textual LLVM IR plus a metadata manifest (a
-    tropical_plan_5 JSON whose instruction graph is ignored — codegen
-    comes from the IR). Since Phase 2 this is the only load path: the C++
-    plan compiler is gone, and Lean owns codegen (`EmitLlvm`). -/
-@[extern "shim_runtime_load_ir"]
-opaque Runtime.loadIrRaw (rt : @& Runtime) (irText : @& String) (manifestJson : @& String) : IO Bool
-
 @[extern "shim_runtime_process"]
 opaque Runtime.process (rt : @& Runtime) : IO Unit
 
@@ -81,23 +74,6 @@ opaque Runtime.sampleRate (rt : @& Runtime) : IO Float
 def Runtime.slotIndex? (rt : Runtime) (name : String) : IO (Option UInt32) := do
   let idx ← rt.slotIndexRaw name
   pure <| if idx == 0xffffffff then none else some idx
-
-/-- Load a kernel from textual LLVM IR + a metadata manifest; raise the
-    engine's error string on failure. -/
-def Runtime.loadIr (rt : Runtime) (irText : String) (manifestJson : String) : IO Unit := do
-  if !(← rt.loadIrRaw irText manifestJson) then
-    throw <| IO.userError s!"runtime loadIr failed: {← lastError}"
-
-@[extern "shim_runtime_load_ir_msl"]
-opaque Runtime.loadIrMslRaw (rt : @& Runtime) (irText : @& String) (mslSource : @& String)
-    (manifestJson : @& String) : IO Bool
-
-/-- Dual load: LLVM IR → JIT (always) and MSL → the Metal compute pipeline
-    (audio path; requires libtropical built with `TROPICAL_METAL` when
-    `mslSource` is non-empty). Same hot-swap publish as `loadIr`. -/
-def Runtime.loadIrMsl (rt : Runtime) (irText mslSource manifestJson : String) : IO Unit := do
-  if !(← rt.loadIrMslRaw irText mslSource manifestJson) then
-    throw <| IO.userError s!"runtime loadIrMsl failed: {← lastError}"
 
 @[extern "shim_runtime_load_ir_staged"]
 opaque Runtime.loadIrStagedRaw (rt : @& Runtime) (irText : @& String) (mslSource : @& String)

@@ -1,7 +1,7 @@
 import Tropical.Ir.Nodes
 
 /-!
-# Core — the post-strata program shape (Phase 5 stage 6)
+# Core — the post-strata program shape
 
 "The smallest sub-IR sufficient for any per-sample evaluator," made a
 type instead of prose. `CoreProgram` is the post-strata program: scalar,

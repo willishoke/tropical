@@ -29,10 +29,13 @@ repl: build
 run: repl
 
 # Lean front-door. Builds the lean/ subtree (the production compiler + MCP
-# server, one binary), which pulls Turnstile via Lake.
+# server, one binary), which pulls Turnstile via Lake. Builds ALL THREE
+# executables, not just the default `frontend`: the gate runners are meant
+# to be invoked as built binaries (never `lake exe`), and a bare
+# `lake build` leaves stale tropicaltest/diffcli binaries in place.
 lean:
 	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake env leanc -c ffi/shim.c -o ffi/shim.o -I ../engine/c_api
-	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build
+	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build frontend diffcli tropicaltest
 
 # Launch the Lean MCP server. As of Phase 6 the whole stack is the one
 # binary (session, compiler, runtime FFI) — no bun subprocess.

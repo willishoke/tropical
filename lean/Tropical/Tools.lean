@@ -1,13 +1,12 @@
 import Turnstile
-import Tropical.Relay
 
 /-!
-# Tool argument types and the tool surface
+# Tool argument types
 
-Typed fronts for the 23 tropical tools; validated before forwarding.
-Simple fields are typed precisely; ExprNodes, "port name or index",
-port-ref arrays, and maps stay opaque `Json` (tropical leaves them
-untyped too).
+Typed fronts for the tropical tools, validated at the MCP boundary
+(`Frontend.tropicalEngineTools` dispatches them in-process). Simple fields
+are typed precisely; ExprNodes, "port name or index", port-ref arrays, and
+maps stay opaque `Json` (tropical leaves them untyped too).
 -/
 
 open Lean Turnstile
@@ -130,32 +129,3 @@ tool_args StartAudio where
   /-- DAC output channel count (default 2). First DAC creation only. -/
   channels : Option Nat where 1 ≤ channels
 deriving instance ToJson for StartAudio
-
-def tropicalTools (r : Relay) : List Tool := [
-  -- program management
-  fwd DefineProgram  r "define_program"  "Define and register a reusable DSP program type from a tropical_program_2 object.",
-  fwd AddInstance    r "add_instance"    "Create a named instance of a registered program type.",
-  fwd RemoveInstance r "remove_instance" "Remove a program instance from the session.",
-  fwd Replicate      r "replicate"       "Create N instances of a program type in one call (does not recompile; follow with wire).",
-  noArgTool          r "list_programs"   "List all registered program types with their input/output ports and defaults.",
-  noArgTool          r "list_instances"  "List all live program instances with their ports.",
-  fwd GetInfo        r "get_info"        "Detailed info about one instance: ports, wiring, registers.",
-  -- wiring
-  fwd Wire           r "wire"            "Set and/or remove input wiring in one recompile. Audio output is instance \"dac\", input \"out\"; the expr there must be a ref node.",
-  fwd WireChain      r "wire_chain"      "Wire N instances in series: output[i] → input[i+1]. One recompile.",
-  fwd WireZip        r "wire_zip"        "Wire two equal-length lists of ports pairwise. One recompile.",
-  fwd FanOut         r "fan_out"         "Wire one source (instance output or ExprNode) to many target inputs.",
-  fwd FanIn          r "fan_in"          "Sum N instance outputs (optional per-source gain) into one input.",
-  fwd ListWiring     r "list_wiring"     "List all wired inputs and the expression assigned to each.",
-  -- program I/O
-  fwd ExportProgram  r "export_program"  "Crystallize selected session instances into a reusable program type.",
-  fwd Load           r "load"            "Load a tropical_program_2 program (path or inline); stops audio and recreates the session.",
-  noArgTool          r "save"            "Serialize the current session to a tropical_program_2 object.",
-  fwd Merge          r "merge"           "Merge a program/patch into the current session without clearing it.",
-  -- control + audio
-  fwd SetParam       r "set_param"       "Set the value of a named Param (thread-safe, smoothed).",
-  noArgTool          r "list_params"     "List all registered Params with their current values.",
-  fwd StartAudio     r "start_audio"     "Start audio output.",
-  noArgTool          r "stop_audio"      "Stop audio output.",
-  noArgTool          r "audio_status"    "Return current audio status including callback statistics."
-]

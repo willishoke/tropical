@@ -1,7 +1,7 @@
 import Tropical.Ir.Emit
 
 /-!
-# compileResolved — per-program emit boundary (Phase 6 stage 6b)
+# compileResolved — per-program emit boundary
 
 Port of `compiler/ir/compile_resolved.ts` (and the trivial
 `compiler/ir/slots.ts`, whose decl-table projections are already
