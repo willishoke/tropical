@@ -344,4 +344,18 @@ def stdlibBuilders : Array (String × StdBuilder) := #[
   ("ReversibleComb", buildReversibleComb), ("ScrubClock", buildScrubClock),
   ("ThroughZeroFlanger", buildThroughZeroFlanger), ("SoftClip", buildSoftClip)]
 
+/-- Build the whole stdlib as one arena by folding `stdlibBuilders` from empty:
+    each builder appends its raw program, linking sub-programs by name against the
+    chain so far (deps precede dependents). Returns the arena + name→idx table.
+    The pure production replacement for the parsed-bridge `StdlibChain.elabStdlib`
+    — what the gates, the playground, and the diffcli verbs link against. -/
+def buildStdlibChain : Except String (Arena × Array (String × ProgramIdx)) := do
+  let mut arena : Arena := {}
+  let mut chain : Array (String × ProgramIdx) := #[]
+  for (name, build) in stdlibBuilders do
+    let (arena', idx) ← build arena chain
+    arena := arena'
+    chain := chain.push (name, idx)
+  pure (arena, chain)
+
 end Tropical.EmitArrow

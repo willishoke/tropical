@@ -150,6 +150,54 @@ def runStdlibGate (name : String)
   let ports ← runEntryEquivGate name name arena resolved builder
   pure (plan && ports)
 
+/-- One program's frozen artifact: the compressed `tropical_plan_5` wire plus its
+    concreteEntry port surface (inputs/outputs). The pair the goldens hash. -/
+def stdlibArtifact (arena : Arena) (idx : ProgramIdx) (name : String) : Except String String := do
+  let wire ← emitResolvedWire arena idx
+  let (a', i') ← (Tropical.Ir.Strata.run
+    { upto := Tropical.Ir.Strata.portedPasses, inlineNested := true } arena idx).mapError (·.message)
+  let entry ← Tropical.Entries.concreteEntry a' name i'
+  let ins := (entry.getObjVal? "inputs").toOption.getD Lean.Json.null
+  let outs := (entry.getObjVal? "outputs").toOption.getD Lean.Json.null
+  pure (wire ++ "\n--ports--\n" ++ (Lean.Json.mkObj [("inputs", ins), ("outputs", outs)]).compress)
+
+/-- Freeze / verify the per-program plan-wire + port surface as goldens — the
+    PERMANENT anchor once the parse bridge is gone. Folds the whole stdlib as a
+    builder chain, hashes each program's `stdlibArtifact`, and compares to (or
+    writes, under `--write`) `tests/golden/stdlib/<Name>.hash`. -/
+def runStdlibWireGoldens (writeMode : Bool) : IO Bool := do
+  match Tropical.EmitArrow.buildStdlibChain with
+  | .error e => failGate "stdlib-goldens" s!"build chain: {firstLine e}"
+  | .ok (arena, chain) => do
+    if writeMode then IO.FS.createDirAll "tests/golden/stdlib"
+    let mut ok := true
+    let mut n := 0
+    for (name, idx) in chain do
+      match stdlibArtifact arena idx name with
+      | .error e =>
+        IO.println s!"  FAIL  stdlib-goldens/{name}  emit: {firstLine e}"
+        ok := false
+      | .ok art =>
+        let hash ← sha256Hex art.toUTF8
+        let path := s!"tests/golden/stdlib/{name}.hash"
+        let hasGolden ← System.FilePath.pathExists path
+        if writeMode then
+          IO.FS.writeFile path (hash ++ "\n")
+          n := n + 1
+        else if !hasGolden then
+          IO.println s!"  FAIL  stdlib-goldens/{name}  no golden (run tropicaltest --write)"
+          ok := false
+        else
+          let stored := (← IO.FS.readFile path).trim
+          if stored == hash then
+            n := n + 1
+          else
+            IO.println s!"  FAIL  stdlib-goldens/{name}  {hash} ≠ golden {stored}"
+            ok := false
+    let suffix := if writeMode then " (WROTE)" else ""
+    if ok then passGate "stdlib-goldens" s!"{n} programs ≡ frozen wire+port goldens{suffix}"
+    else pure false
+
 /-- Certify one warp law: build LHS and RHS carriers, render both, assert the
     rendered audio is byte-identical (SHA256). Also reports whether the emitted
     plans are byte-identical (EXPECTED NO — the algebra is exact in the clock,

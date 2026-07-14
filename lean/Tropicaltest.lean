@@ -176,6 +176,12 @@ def main (args : List String) : IO UInt32 := do
     if !(← runEmitCorpusGate "FlangeFromGraph" "FlangeSin" arena resolved
           Tropical.EmitArrow.buildFlangeFromGraph) then
       failed := failed + 1
+    -- ── (h‴) Stdlib wire+port goldens: the PERMANENT anchor. Folds the builder
+    -- chain (no bridge) and freezes each program's plan-wire + port surface —
+    -- what guards the 15 builders once the parse bridge is deleted.
+    IO.println "stdlib wire+port goldens (builder chain ≡ frozen):"
+    total := total + 1
+    if !(← runStdlibWireGoldens writeMode) then failed := failed + 1
     IO.println "arrow laws (warp algebra ≡ byte-identical audio):"
     -- ── PER-LAW CARRIER TABLE (load-bearing — see design/fixed-carrier.md) ──
     -- Which value carrier each law rides is a CHOICE, not an accident: laws
