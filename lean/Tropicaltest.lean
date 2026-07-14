@@ -210,6 +210,30 @@ def main (args : List String) : IO UInt32 := do
     if !(← runEmitCorpusGate "FlangeFromGraph" "FlangeSin" arena resolved
           Tropical.EmitArrow.buildFlangeFromGraph) then
       failed := failed + 1
+    -- ── (h″) Entry-codec equivalence (Stage 1 de-risk): the builder's stored
+    -- catalog entry (resolved codec + port metadata) ≡ the bridge's, byte-wise.
+    -- This is what `registerResolved` will store and session compiles link.
+    IO.println "entry-codec equivalence (builder concreteEntry ≡ bridge, byte-identical):"
+    total := total + 1
+    if !(← runEntryEquivGate "FixedSinOsc" "FixedSinOsc" arena resolved
+          Tropical.EmitArrow.buildFixedSinOsc) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runEntryEquivGate "FixedSin" "FixedSin" arena resolved
+          Tropical.EmitArrow.buildFixedSin) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runEntryEquivGate "MorphOsc" "MorphOsc" arena resolved
+          Tropical.EmitArrow.buildMorphOsc) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runEntryEquivGate "FlangeSin" "FlangeSin" arena resolved
+          Tropical.EmitArrow.buildFlanger) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runEntryEquivGate "ReversibleComb" "ReversibleComb" arena resolved
+          Tropical.EmitArrow.buildReversibleComb) then
+      failed := failed + 1
     IO.println "arrow laws (warp algebra ≡ byte-identical audio):"
     -- ── PER-LAW CARRIER TABLE (load-bearing — see design/fixed-carrier.md) ──
     -- Which value carrier each law rides is a CHOICE, not an accident: laws

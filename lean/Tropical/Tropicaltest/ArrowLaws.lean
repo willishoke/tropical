@@ -1,4 +1,5 @@
 import Tropical.Tropicaltest.Reversibility
+import Tropical.Entries
 
 /-!
 # Tropical.Tropicaltest.ArrowLaws
@@ -98,6 +99,43 @@ def runEmitCorpusGate (label stdName : String)
         passGate s!"corpus-gate/{label}" s!"EmitArrow ≡ emit-stdlib {stdName} ({got.length}B)"
       else
         failGate s!"corpus-gate/{label}" s!"EmitArrow ≠ emit-stdlib {stdName} (EmitArrow {got.length}B, stdlib {want.length}B)"
+
+/-- Port-metadata equivalence (Stage 1 registry-equiv, per program): assert the
+    builder's post-strata catalog entry has byte-identical `inputs`/`outputs`
+    (port names, types, type_objs, and defaults — the ProgMeta that
+    list_programs / get_info / add_instance surface) to the bridge stdlib
+    program's. Both sides run the same strata (`Strata.run`, all ported passes,
+    inline) then `Entries.concreteEntry`; only the port surface is compared.
+    The resolved-body SEMANTICS are the corpus gate's job (plan-wire identity);
+    this pins the port surface, which the plan doesn't fully exercise (unwired
+    defaults). `binderCount` — a count of source `let`-binders, non-load-bearing
+    (nothing in Compile/Emit reads it) and legitimately 0 for a DAG-authored
+    builder — lives in the resolved codec, not the port surface, and is out of
+    scope by construction. -/
+def runEntryEquivGate (label stdName : String)
+    (arena : Arena) (resolved : Array (String × ProgramIdx))
+    (builder : Arena → Array (String × ProgramIdx) → Except String (Arena × ProgramIdx)) :
+    IO Bool := do
+  let portsOf (a : Arena) (i : ProgramIdx) : Except String String := do
+    let (a', i') ← (Tropical.Ir.Strata.run
+      { upto := Tropical.Ir.Strata.portedPasses, inlineNested := true } a i).mapError (·.message)
+    let e ← Tropical.Entries.concreteEntry a' stdName i'
+    let ins := (e.getObjVal? "inputs").toOption.getD Lean.Json.null
+    let outs := (e.getObjVal? "outputs").toOption.getD Lean.Json.null
+    pure (Lean.Json.mkObj [("inputs", ins), ("outputs", outs)]).compress
+  let some (_, stdIdx) := resolved.find? (·.1 == stdName)
+    | failGate s!"entry-equiv/{label}" s!"stdlib '{stdName}' not in elaborated chain"
+  match builder arena resolved with
+  | .error e => failGate s!"entry-equiv/{label}" s!"build: {firstLine e}"
+  | .ok (arena', idx) =>
+    match portsOf arena' idx, portsOf arena stdIdx with
+    | .error e, _ => failGate s!"entry-equiv/{label}" s!"builder ports: {firstLine e}"
+    | _, .error e => failGate s!"entry-equiv/{label}" s!"bridge ports: {firstLine e}"
+    | .ok got, .ok want =>
+      if got == want then
+        passGate s!"entry-equiv/{label}" s!"port metadata ≡ bridge {stdName} ({got.length}B)"
+      else
+        failGate s!"entry-equiv/{label}" s!"port metadata ≠ bridge (builder {got.length}B, bridge {want.length}B)"
 
 /-- Certify one warp law: build LHS and RHS carriers, render both, assert the
     rendered audio is byte-identical (SHA256). Also reports whether the emitted
