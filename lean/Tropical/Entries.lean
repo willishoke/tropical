@@ -155,25 +155,4 @@ def concreteEntry (arena : Arena) (entryName : String) (idx : ProgramIdx) :
     ("outputs", Json.arr outputs),
     ("registers", Json.arr registers)]
 
-/-- The service's `genericEntry` (raw templates; `resolved: null`). -/
-def genericEntry (arena : Arena) (entryName : String) (idx : ProgramIdx) : Json :=
-  let prog := (arena.program? idx).getD {name := entryName}
-  let typeParams := Json.mkObj <| prog.typeParams.toList.filterMap fun i =>
-    match arena.typeParam? i with
-    | some tp => some (tp.name, Json.mkObj <|
-        [("type", Json.str "int")]
-        ++ (match tp.default? with | some d => [("default", Json.num d)] | none => []))
-    | none => none
-  Json.mkObj [
-    ("program_name", Json.str entryName),
-    ("generic", Json.bool true),
-    ("resolved", jsonNull),
-    ("type_params", typeParams),
-    ("inputs", Json.arr (prog.inputs.map fun d => Json.mkObj
-      [("name", Json.str d.name), ("type", jsonNull), ("type_obj", jsonNull),
-       ("default", jsonNull)])),
-    ("outputs", Json.arr (prog.outputs.map fun d => Json.mkObj
-      [("name", Json.str d.name), ("type", jsonNull), ("type_obj", jsonNull)])),
-    ("registers", Json.arr #[])]
-
 end Tropical.Entries

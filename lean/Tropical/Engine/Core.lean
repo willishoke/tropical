@@ -14,7 +14,6 @@ import Tropical.Ir.WireProgram
 import Tropical.Ir.EmitLlvm
 import Tropical.Ir.EmitMsl
 import Tropical.StagedLoad
-import Tropical.TypeArgs
 import Tropical.Compile
 import Tropical.Entries
 import Tropical.Playground

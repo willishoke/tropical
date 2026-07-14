@@ -56,7 +56,6 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   -- disciplines, display metadata) — clients render it, never re-encode it.
   -- Session-independent, so it just echoes.
   | "get_vocabulary" => pure Tropical.Playground.vocabularyJson
-  | "define_program"  => handleDefineProgram env args
   | "add_instance"    => handleAddInstance env args
   | "remove_instance" => handleRemoveInstance env args
   | "replicate"       => handleReplicate env args

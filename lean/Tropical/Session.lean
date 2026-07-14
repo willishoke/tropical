@@ -140,12 +140,6 @@ structure SessionSt where
       from `resolvedByName`, which is keyed by *decoded* prog names and
       also collects specializations adopted via `resolve_type`. -/
   templateByName : Std.HashMap String Tropical.Ir.ProgramIdx := {}
-  /-- The engine-side mirror of TS `session.specializationCache`
-      (Phase 5 stage 6b): `Type<N=8>` cache key → the specialized
-      entry's port metadata + adopted store index. A hit skips the
-      strata run AND the service round trip — the service saw the key
-      on the first miss and keeps its own Compiled cached. -/
-  specializationCache : Std.HashMap String (ProgMeta × Option Tropical.Ir.ProgramIdx) := {}
 
 namespace SessionSt
 

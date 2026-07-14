@@ -313,8 +313,6 @@ describe('start_audio override validation (Phase A5)', () => {
   })
 })
 
-// NOTE: the 'generic stdlib types reachable' regression test was removed in the
-// CF-only migration — Delay/Sequencer were the only generic stdlib types and
-// both are retired, so there is no generic stdlib type to instantiate here. The
-// generic machinery (define_program type_params → type_args) is still live but
-// now has no stdlib example to exercise it. (doc-sweep tracked)
+// NOTE: generics and define_program are retired — new DSP types are authored as
+// Tropical.Stdlib arrow builders, not defined over the wire. There is no generic
+// machinery left to exercise here.

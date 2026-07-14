@@ -511,40 +511,6 @@ describe('unknown_program', () => {
   })
 })
 
-describe('generics (define_program with type_params)', () => {
-  // No stdlib generic survives the CF-only cut (Delay/Sequencer were retired),
-  // so exercise the generic machinery directly: define a generic inline, then
-  // resolve it with type_args and probe the invalid-type_args path.
-  const SCALE_BY = {
-    schema: 'tropical_program_2',
-    name: 'ScaleBy',
-    type_params: { K: { type: 'int' } },
-    ports: { inputs: ['x'], outputs: ['out'] },
-    body: { op: 'block', decls: [],
-      assigns: [{ op: 'outputAssign', name: 'out',
-        expr: { op: 'mul', args: [
-          { op: 'input', name: 'x' },
-          { op: 'typeParam', name: 'K' } ] } }],
-      value: null },
-  }
-  beforeAll(async () => { await client.callOk('define_program', { def: SCALE_BY }) })
-
-  test('add_instance with type_args resolves a generic', async () => {
-    const data = await client.callOk('add_instance', {
-      program: 'ScaleBy', instance_name: unique('s'), type_args: { K: 3 },
-    })
-    expect((data as { type_args?: Record<string, number> }).type_args?.K).toBe(3)
-  })
-
-  test('invalid_type_args: unexpected type-arg key', async () => {
-    const env = await client.callError('add_instance', {
-      program: 'ScaleBy', instance_name: unique('s'), type_args: { Bogus: 9 },
-    })
-    expect(env.code).toBe('invalid_type_args')
-    expect(env.param).toBe('type_args')
-  })
-})
-
 // ─── Tier 6: type_mismatch predicate ──────────────────────────────────────────
 
 describe('type_mismatch', () => {
