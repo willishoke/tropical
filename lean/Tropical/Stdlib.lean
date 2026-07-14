@@ -242,18 +242,106 @@ def buildThroughZeroFlanger (arena : Arena) (resolved : Array (String × Program
     #[clockInDecl "clk" clockSig, freqDecl "f0" 110, floatDecl "depth" (lit 7 4), freqDecl "rate" 3 1]
     #[floatOut] decls #[(.port ⟨0⟩, .nestedOut ⟨2⟩ ⟨0⟩)] registry)
 
--- ── The builder tables (dependency order = registration order) ───────────────
+-- ── The voices — promoted from `Testing/ArrowFixtures` ───────────────────────
 
-/-- The non-voice stdlib programs authored in this module. The 5 voices
-    (`FixedSin`, `FixedSinOsc`, `MorphOsc`, `FlangeSin`, `ReversibleComb`) are
-    woven in when they land here too; this list is the gate manifest and part of
-    the boot chain. (The reversibility probes and the FM/chord demo patches were
-    curated out — the moat's reversal is guarded by the `reverse_reverb` /
-    `scrub_reverb` cf goldens, not standalone probe programs.) -/
-def stdlibNewBuilders : Array (String × StdBuilder) := #[
-  ("Sin", buildSin), ("Tanh", buildTanh), ("ScrubClock", buildScrubClock),
-  ("VCA", buildVCA), ("ClockPhasor", buildClockPhasor), ("SoftClip", buildSoftClip),
-  ("ModalVoice", buildModalVoice), ("PluckedMorphOsc", buildPluckedMorphOsc),
-  ("ReverseReverb", buildReverseReverb), ("ThroughZeroFlanger", buildThroughZeroFlanger)]
+/-- `FixedSin` — the exact Q2.30 fixed-point sine over a Q0.32 cycles phase. -/
+def buildFixedSin (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  .ok (assemble arena "FixedSin"
+    #[{ name := "phase", type? := some (.scalar .int), defaultSig := some (lit 0) }]
+    #[{ name := "out", type? := some (.scalar .int) }]
+    #[] #[(.port ⟨0⟩, fixedSinCycSig (.inputRef ⟨0⟩))] #[])
+
+/-- `FixedSinOsc` — the foundational voice, built flat (no instances): the integer
+    split-multiply phasor composed with the Q2.30 sine, scaled to float once at
+    the boundary. -/
+def buildFixedSinOsc (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let freqIn : Sig := .inputRef ⟨0⟩
+  let clk : Sig := .inputRef ⟨1⟩
+  let twoPow32 := lit 4294967296
+  let mask := lit 4294967295
+  let inc := toIntE (div (mul freqIn twoPow32) .sampleRate)
+  let thi := rshift clk (lit 32)
+  let tlo := bitAnd clk mask
+  let off := toIntE (mul (.inputRef ⟨2⟩) twoPow32)
+  let acc := add (add (mul inc thi) (rshift (mul inc tlo) (lit 32))) off
+  let phase := clampE (div (toFloatE (bitAnd acc mask)) twoPow32) (lit 0) (lit 1)
+  let pQ := toIntE (mul phase twoPow32)
+  let sine := div (toFloatE (fixedSinCycSig pQ)) (lit 1073741824)
+  .ok (assemble arena "FixedSinOsc"
+    #[freqDecl "freq" 440, clockInDecl "clk" clockSig, unipolarDecl "phase"]
+    #[{ name := "sine", type? := some (.scalar .float) }]
+    #[] #[(.port ⟨0⟩, sine)] #[])
+
+/-- `MorphOsc` — `ClockPhasor ⋙ (saw &&& FixedSin) ⋙ crossfade`: the phasor's
+    phase drives a naive saw and a fixed-point sine, crossfaded by `morph`. -/
+def buildMorphOsc (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let registry ← buildRegistry arena resolved #["ClockPhasor", "FixedSin"]
+  let freq : Sig := .inputRef ⟨0⟩
+  let morph : Sig := .inputRef ⟨1⟩
+  let clk : Sig := .inputRef ⟨2⟩
+  let phase : Sig := .inputRef ⟨3⟩
+  let phaseOut : Sig := .nestedOut ⟨0⟩ ⟨0⟩
+  let decls : Array AInst := #[
+    { name := "ph", programName := "ClockPhasor", inputs := #[⟨⟨0⟩, clk⟩, ⟨⟨1⟩, freq⟩, ⟨⟨2⟩, phase⟩] },
+    { name := "sin", programName := "FixedSin",
+      inputs := #[⟨⟨0⟩, toIntE (mul phaseOut (lit 4294967296))⟩] }]
+  let saw := sub (mul (lit 2) phaseOut) (lit 1)
+  let sinOut := div (toFloatE (.nestedOut ⟨1⟩ ⟨0⟩)) (lit 1073741824)
+  let out := add (mul (sub (lit 1) morph) saw) (mul morph sinOut)
+  .ok (assemble arena "MorphOsc"
+    #[freqDecl "freq" 220, unipolarDecl "morph", clockInDecl "clk" clockSig, unipolarDecl "phase"]
+    #[floatOut] decls #[(.port ⟨0⟩, out)] registry)
+
+/-- The warp-bank of three taps (dry, `−δ`, `+δ`) over one voice, weighted
+    0.5/0.25/0.25 — the shared body of `FlangeSin` and `ReversibleComb`. `δ` =
+    `toInt(offset · sampleRate · 2³²)`, the offset input in Q32.32 samples. -/
+private def warpBank3 (arena : Arena) (name voiceName : String)
+    (registry : Array (String × ProgramIdx))
+    (clk offsetIn : Sig) (freqDeclHz : Int) (voiceInputs : Sig → Array AInput) :
+    Arena × ProgramIdx :=
+  let delta := toIntE (mul (mul offsetIn .sampleRate) (lit 4294967296))
+  let tap (nm : String) (clkE : Sig) : AInst :=
+    { name := nm, programName := voiceName, inputs := voiceInputs clkE }
+  let decls : Array AInst := #[tap "dry" clk, tap "past" (sub clk delta), tap "ahead" (add clk delta)]
+  let out := add (add (mul (lit 5 1) (.nestedOut ⟨0⟩ ⟨0⟩)) (mul (lit 25 2) (.nestedOut ⟨1⟩ ⟨0⟩)))
+                 (mul (lit 25 2) (.nestedOut ⟨2⟩ ⟨0⟩))
+  assemble arena name
+    #[clockInDecl "clk" clockSig, freqDecl (if voiceName == "ModalVoice" then "f0" else "freq") freqDeclHz,
+      floatDecl (if voiceName == "ModalVoice" then "delta" else "depth") (lit 7 4)]
+    #[floatOut] decls #[(.port ⟨0⟩, out)] registry
+
+/-- `FlangeSin` — the warp-bank flanger over the `FixedSinOsc` voice
+    (freq at port 0, clock at port 1). -/
+def buildFlanger (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let registry ← buildRegistry arena resolved #["FixedSinOsc"]
+  .ok (warpBank3 arena "FlangeSin" "FixedSinOsc" registry (.inputRef ⟨0⟩) (.inputRef ⟨2⟩) 220
+        (fun clkE => #[⟨⟨0⟩, .inputRef ⟨1⟩⟩, ⟨⟨1⟩, clkE⟩]))
+
+/-- `ReversibleComb` — the warp-bank comb over the `ModalVoice` voice (clock at
+    port 0, f0 at port 1). The ahead tap reads the future — reverses with zero
+    latency. -/
+def buildReversibleComb (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let registry ← buildRegistry arena resolved #["ModalVoice"]
+  .ok (warpBank3 arena "ReversibleComb" "ModalVoice" registry (.inputRef ⟨0⟩) (.inputRef ⟨2⟩) 110
+        (fun clkE => #[⟨⟨0⟩, clkE⟩, ⟨⟨1⟩, .inputRef ⟨1⟩⟩]))
+
+-- ── The builder chain (manifest order = registration order) ──────────────────
+
+/-- Every live stdlib program as an arrow builder, in manifest (registration)
+    order — deps before dependents, so `buildRegistry` resolves against the chain
+    built so far. THE boot chain and the gate manifest. -/
+def stdlibBuilders : Array (String × StdBuilder) := #[
+  ("ClockPhasor", buildClockPhasor), ("FixedSin", buildFixedSin),
+  ("FixedSinOsc", buildFixedSinOsc), ("MorphOsc", buildMorphOsc),
+  ("Sin", buildSin), ("Tanh", buildTanh), ("VCA", buildVCA),
+  ("FlangeSin", buildFlanger), ("ModalVoice", buildModalVoice),
+  ("PluckedMorphOsc", buildPluckedMorphOsc), ("ReverseReverb", buildReverseReverb),
+  ("ReversibleComb", buildReversibleComb), ("ScrubClock", buildScrubClock),
+  ("ThroughZeroFlanger", buildThroughZeroFlanger), ("SoftClip", buildSoftClip)]
 
 end Tropical.EmitArrow

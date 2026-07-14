@@ -14,6 +14,7 @@ import Tropical.PlanDecode
 import Tropical.Engine
 import Tropical.Parse.Surface.Markdown
 import Tropical.EmitArrow
+import Tropical.Stdlib
 import Tropical.Testing.ArrowFixtures
 import Tropical.Testing.EngineMirror
 import Tropical.Testing.PlanWire

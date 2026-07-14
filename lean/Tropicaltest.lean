@@ -154,83 +154,28 @@ def main (args : List String) : IO UInt32 := do
     IO.println s!"  FAIL  arrow-laws  elaborate stdlib: {firstLine e}"
     total := total + 13; failed := failed + 13
   | .ok (arena, resolved) =>
-    -- ── (h′) EmitArrow corpus gate: EmitArrow's emit ≡ strata's emit byte-wise ─
-    -- The cutover instrument (phase C1). FlangeSin/ReversibleComb generalize the
-    -- slices-1/2 byte-gate (formerly an external `diff` of two diffcli verbs);
-    -- FixedSinOsc builds the foundational voice DIRECTLY (phasor + Sin poly, no
-    -- sourced instance) and is byte-identical to `emit-stdlib FixedSinOsc`.
-    IO.println "emitarrow corpus gate (EmitArrow emit ≡ strata emit, byte-identical):"
-    total := total + 1
-    if !(← runEmitCorpusGate "FlangeSin" "FlangeSin" arena resolved
-          Tropical.EmitArrow.buildFlanger) then
-      failed := failed + 1
-    total := total + 1
-    if !(← runEmitCorpusGate "ReversibleComb" "ReversibleComb" arena resolved
-          Tropical.EmitArrow.buildReversibleComb) then
-      failed := failed + 1
-    total := total + 1
-    if !(← runEmitCorpusGate "FixedSinOsc" "FixedSinOsc" arena resolved
-          Tropical.EmitArrow.buildFixedSinOsc) then
-      failed := failed + 1
-    -- The fixed-point DATAPATH sine (scope A): the Sig builder and the literate
-    -- .md describe one algorithm, byte-identical through the same emit recipe.
-    total := total + 1
-    if !(← runEmitCorpusGate "FixedSin" "FixedSin" arena resolved
-          Tropical.EmitArrow.buildFixedSin) then
-      failed := failed + 1
-    -- products/MIMO: MorphOsc — a real multi-port body (ClockPhasor ⋙ (saw &&&
-    -- Sin) ⋙ crossfade) built from the cartesian combinators, byte-identical.
-    total := total + 1
-    if !(← runEmitCorpusGate "MorphOsc" "MorphOsc" arena resolved
-          Tropical.EmitArrow.buildMorphOsc) then
-      failed := failed + 1
-    -- THE SLIDE (WARP-PUSH), Test 1: build FlangeSin from the DOWNSTREAM-insert
-    -- form (osc ⋙ flange, warps unreduced), run the slide, emit — byte-identical
-    -- to stdlib FlangeSin. The compiler turns "flanger dropped downstream" into
-    -- "oscillator read at warped clocks." First compiler-driven downstream→upstream.
+    -- ── (h′) Stdlib builder gates: each of the 15 arrow builders ≡ its bridge
+    -- program, plan-wire (resolved-body semantics) AND port surface (names,
+    -- types, defaults). These builders ARE the stdlib the engine boots;
+    -- byte-identity to the (about-to-be-deleted) parse bridge anchors the
+    -- transition.
+    IO.println "stdlib builder gates (arrow builder ≡ bridge program, plan + ports):"
+    for (nm, bld) in Tropical.EmitArrow.stdlibBuilders do
+      total := total + 1
+      if !(← runStdlibGate nm arena resolved bld) then failed := failed + 1
+    -- ── (h″) The slide + patcher variants: FlangeSin built the OTHER two ways —
+    -- a downstream-insert run through the slide, and a patch graph lowered end to
+    -- end — must also reach the frozen artifact byte-for-byte (the arrow EDSL's
+    -- own machinery proof, not a stdlib program).
+    IO.println "emitarrow slide/patcher variants (≡ FlangeSin byte-identical):"
     total := total + 1
     if !(← runEmitCorpusGate "FlangeSinSlide" "FlangeSin" arena resolved
           Tropical.EmitArrow.buildFlangerViaSlide) then
       failed := failed + 1
-    -- THE PATCHER LOWERING, L1: lower the GRAPH `osc → flange` (instances + a
-    -- downstream wire), slide, emit — byte-identical to stdlib FlangeSin. The
-    -- user's patch graph, lowered end to end, reaches the exact hand-written
-    -- program. This is the MVP front end hitting the frozen artifact.
     total := total + 1
     if !(← runEmitCorpusGate "FlangeFromGraph" "FlangeSin" arena resolved
           Tropical.EmitArrow.buildFlangeFromGraph) then
       failed := failed + 1
-    -- ── (h″) Entry-codec equivalence (Stage 1 de-risk): the builder's stored
-    -- catalog entry (resolved codec + port metadata) ≡ the bridge's, byte-wise.
-    -- This is what `registerResolved` will store and session compiles link.
-    IO.println "entry-codec equivalence (builder concreteEntry ≡ bridge, byte-identical):"
-    total := total + 1
-    if !(← runEntryEquivGate "FixedSinOsc" "FixedSinOsc" arena resolved
-          Tropical.EmitArrow.buildFixedSinOsc) then
-      failed := failed + 1
-    total := total + 1
-    if !(← runEntryEquivGate "FixedSin" "FixedSin" arena resolved
-          Tropical.EmitArrow.buildFixedSin) then
-      failed := failed + 1
-    total := total + 1
-    if !(← runEntryEquivGate "MorphOsc" "MorphOsc" arena resolved
-          Tropical.EmitArrow.buildMorphOsc) then
-      failed := failed + 1
-    total := total + 1
-    if !(← runEntryEquivGate "FlangeSin" "FlangeSin" arena resolved
-          Tropical.EmitArrow.buildFlanger) then
-      failed := failed + 1
-    total := total + 1
-    if !(← runEntryEquivGate "ReversibleComb" "ReversibleComb" arena resolved
-          Tropical.EmitArrow.buildReversibleComb) then
-      failed := failed + 1
-    -- ── (h‴) Stdlib builder gates: each arrow builder ≡ its bridge program,
-    -- plan-wire (resolved-body semantics) AND port surface. These builders are
-    -- what replaces the .md/parsed-bridge stdlib at boot.
-    IO.println "stdlib builder gates (arrow builder ≡ bridge program, plan + ports):"
-    for (nm, bld) in Tropical.EmitArrow.stdlibNewBuilders do
-      total := total + 1
-      if !(← runStdlibGate nm arena resolved bld) then failed := failed + 1
     IO.println "arrow laws (warp algebra ≡ byte-identical audio):"
     -- ── PER-LAW CARRIER TABLE (load-bearing — see design/fixed-carrier.md) ──
     -- Which value carrier each law rides is a CHOICE, not an accident: laws
