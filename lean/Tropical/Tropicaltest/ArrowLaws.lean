@@ -137,6 +137,19 @@ def runEntryEquivGate (label stdName : String)
       else
         failGate s!"entry-equiv/{label}" s!"port metadata ≠ bridge (builder {got.length}B, bridge {want.length}B)"
 
+/-- Both Stdlib equivalence gates for one builder, against the bridge program of
+    the same name: the corpus gate (plan-wire — resolved-body semantics) AND the
+    entry-equiv gate (port surface — names/types/defaults). PASS iff both pass.
+    This is the per-program acceptance test every `Tropical.Stdlib` builder must
+    clear before it replaces its `.md`. -/
+def runStdlibGate (name : String)
+    (arena : Arena) (resolved : Array (String × ProgramIdx))
+    (builder : Arena → Array (String × ProgramIdx) → Except String (Arena × ProgramIdx)) :
+    IO Bool := do
+  let plan ← runEmitCorpusGate name name arena resolved builder
+  let ports ← runEntryEquivGate name name arena resolved builder
+  pure (plan && ports)
+
 /-- Certify one warp law: build LHS and RHS carriers, render both, assert the
     rendered audio is byte-identical (SHA256). Also reports whether the emitted
     plans are byte-identical (EXPECTED NO — the algebra is exact in the clock,

@@ -14,6 +14,7 @@ import Tropical.Ir.Core
 import Tropical.Ir.CompileResolved
 import Tropical.Compile
 import Tropical.EmitArrow
+import Tropical.Stdlib
 import Tropical.Testing.ArrowFixtures
 import Tropical.Testing.EngineMirror
 import Tropical.Testing.PlanWire
@@ -234,6 +235,13 @@ def main (args : List String) : IO UInt32 := do
     if !(← runEntryEquivGate "ReversibleComb" "ReversibleComb" arena resolved
           Tropical.EmitArrow.buildReversibleComb) then
       failed := failed + 1
+    -- ── (h‴) Stdlib builder gates: each arrow builder ≡ its bridge program,
+    -- plan-wire (resolved-body semantics) AND port surface. These builders are
+    -- what replaces the .md/parsed-bridge stdlib at boot.
+    IO.println "stdlib builder gates (arrow builder ≡ bridge program, plan + ports):"
+    for (nm, bld) in Tropical.EmitArrow.stdlibNewBuilders do
+      total := total + 1
+      if !(← runStdlibGate nm arena resolved bld) then failed := failed + 1
     IO.println "arrow laws (warp algebra ≡ byte-identical audio):"
     -- ── PER-LAW CARRIER TABLE (load-bearing — see design/fixed-carrier.md) ──
     -- Which value carrier each law rides is a CHOICE, not an accident: laws
