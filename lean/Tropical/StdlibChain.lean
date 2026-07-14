@@ -1,5 +1,6 @@
 import Tropical.Parse.Raise
 import Tropical.Ir.Elaborator
+import Tropical.Stdlib
 
 /-!
 # StdlibChain — the parsed-stdlib elaboration chain
@@ -64,16 +65,13 @@ def elabChain (names : Array String) :
         resolved := resolved.push (name, idx)
   return .ok (.ok (arena, resolved))
 
-/-- The whole manifest chain with elaboration failures flattened to a
-    message (`{name}: {message}`) — the shape the arena consumers take. -/
+/-- The whole stdlib chain the arena consumers (playground, arrow gates, diffcli)
+    link against — now the arrow-builder chain (`buildStdlibChain`), not the
+    parsed bridge. Pure, but kept in `IO` for its callers' signatures. The
+    bridge-reading `elabChain`/`manifestNames`/`readParsed` above survive only
+    for the diffcli `*-stdlib` verbs until those are retired. -/
 def elabStdlib :
-    IO (Except String (Tropical.Ir.Arena × Array (String × Tropical.Ir.ProgramIdx))) := do
-  match ← manifestNames with
-  | .error e => pure (.error e)
-  | .ok names =>
-    match ← elabChain names with
-    | .error e => pure (.error e)
-    | .ok (.error (name, e)) => pure (.error s!"{name}: {e.message}")
-    | .ok (.ok r) => pure (.ok r)
+    IO (Except String (Tropical.Ir.Arena × Array (String × Tropical.Ir.ProgramIdx))) :=
+  pure Tropical.EmitArrow.buildStdlibChain
 
 end Tropical.StdlibChain

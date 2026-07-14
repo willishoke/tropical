@@ -154,16 +154,7 @@ def main (args : List String) : IO UInt32 := do
     IO.println s!"  FAIL  arrow-laws  elaborate stdlib: {firstLine e}"
     total := total + 13; failed := failed + 13
   | .ok (arena, resolved) =>
-    -- ── (h′) Stdlib builder gates: each of the 15 arrow builders ≡ its bridge
-    -- program, plan-wire (resolved-body semantics) AND port surface (names,
-    -- types, defaults). These builders ARE the stdlib the engine boots;
-    -- byte-identity to the (about-to-be-deleted) parse bridge anchors the
-    -- transition.
-    IO.println "stdlib builder gates (arrow builder ≡ bridge program, plan + ports):"
-    for (nm, bld) in Tropical.EmitArrow.stdlibBuilders do
-      total := total + 1
-      if !(← runStdlibGate nm arena resolved bld) then failed := failed + 1
-    -- ── (h″) The slide + patcher variants: FlangeSin built the OTHER two ways —
+    -- ── (h′) The slide + patcher variants: FlangeSin built the OTHER two ways —
     -- a downstream-insert run through the slide, and a patch graph lowered end to
     -- end — must also reach the frozen artifact byte-for-byte (the arrow EDSL's
     -- own machinery proof, not a stdlib program).
