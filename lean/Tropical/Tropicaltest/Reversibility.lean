@@ -35,37 +35,3 @@ def renderSamples (planJson : String) (n : Nat) : IO (Except String (Array Float
       rt.process
       pure (.ok (decodeF64LE (← rt.outputBytes)))
 
--- ── CF-only enforcement: surface `reg`/`next` is unparseable ──────────────────
--- The Phase-1 guarantee, now STRUCTURAL: `reg`/`next` were deleted from the
--- surface grammar and the IR, so a program declaring them does not even parse
--- (the keywords are gone — `reg` lexes as a bare identifier and the statement
--- fails). A closed-form program (`Sin` — fold + temps, no reg) parses,
--- elaborates and strata-processes normally. The `Sin` case is the landmine pin
--- — emit-level SSA temps are not regs and must survive. Both are self-contained
--- (no instance deps), so they process standalone with a no-op external resolver.
-def cfOnlyRejectSrc : String :=
-  "```tropical\nprogram CfProbe(step: float = 1) -> (acc: float) {\n  reg s = 0\n  acc = s\n  next s = s + step\n}\n```"
-
-def runCfOnly (name md : String) (expectReject : Bool) : IO Bool := do
-  match Tropical.Parse.Surface.parseMarkdownProgram md with
-  | .error e =>
-    if expectReject then
-      passGate s!"cf-only/{name}" "rejected per-sample state at parse"
-    else
-      failGate s!"cf-only/{name}" s!"parse: {firstLine e}"
-  | .ok prog =>
-    match Tropical.Ir.elaborateInto {} prog (some fun _ => none) with
-    | .error e =>
-      if expectReject then
-        passGate s!"cf-only/{name}" "rejected per-sample state at elaboration"
-      else
-        failGate s!"cf-only/{name}" s!"unexpected reject: {firstLine e.message}"
-    | .ok (arena, root) =>
-      match Tropical.Ir.Strata.run { upto := 5 } arena root with
-      | .error e =>
-        failGate s!"cf-only/{name}" s!"strata error: {firstLine e.message}"
-      | .ok _ =>
-        if expectReject then
-          failGate s!"cf-only/{name}" "compiled but should be rejected"
-        else
-          passGate s!"cf-only/{name}" "compiles (temps survive)"

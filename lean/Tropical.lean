@@ -2,7 +2,6 @@ import Tropical.Json
 import Tropical.Tools
 import Tropical.Frontend
 import Tropical.Parse.Raise
-import Tropical.Parse.Surface.Markdown
 import Tropical.Ir.Nodes
 import Tropical.Ir.Codec
 import Tropical.Plan

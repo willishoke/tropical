@@ -278,24 +278,3 @@ def checkGoldenHash (name patchPath expected : String) : IO Bool := do
     if got == expected then passGate s!"{name}" s!"{got.take 16}"
     else failGate s!"{name}" s!"expected {expected.take 16} got {got.take 16}"
 
-/-- Regression for `let`-binding serialization order. `Sin`'s `let` is
-    order-dependent (`poly` uses `r2`, `sign` uses `odd_n`) and its binding
-    names do not sort in declaration order ("poly" < "r2"). Surface-parse →
-    encode (`toJson`) → re-parse → decode (`decodeProgram`) → elaborate must
-    succeed; if `let` bind were serialized as a key-reordering object, the
-    round-trip would scramble the bindings and elaboration would fail with
-    "unknown name". -/
-def runLetRoundtrip : IO Bool := do
-  let md ← IO.FS.readFile "stdlib/Sin.md"
-  match Tropical.Parse.Surface.parseMarkdownProgram md with
-  | .error e => failGate "let-roundtrip" s!"parse: {firstLine e}"
-  | .ok prog =>
-    match Tropical.Parse.JsonV.parse prog.toJson.compress with
-    | .error e => failGate "let-roundtrip" s!"reparse: {firstLine e}"
-    | .ok jv =>
-      match Tropical.Parse.decodeProgram jv with
-      | .error e => failGate "let-roundtrip" s!"decode: {firstLine e}"
-      | .ok prog2 =>
-        match Tropical.Ir.elaborateInto {} prog2 (some fun _ => none) with
-        | .error e => failGate "let-roundtrip" s!"elaborate: {firstLine e.message}"
-        | .ok _ => passGate "let-roundtrip" "Sin survives encode→decode→elaborate"

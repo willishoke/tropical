@@ -6,7 +6,6 @@ import Tropical.Plan
 import Tropical.Ir.EmitLlvm
 import Tropical.Ir.EmitMsl
 import Tropical.PlanDecode
-import Tropical.Parse.Surface.Markdown
 import Tropical.Parse.Raise
 import Tropical.Ir.Elaborator
 import Tropical.Ir.Strata
@@ -111,11 +110,6 @@ def main (args : List String) : IO UInt32 := do
   total := total + 1
   if !(← runSplitEquiv) then failed := failed + 1
 
-  -- ── (d) let-binding serialization order (ordered-array round-trip) ─────────
-  IO.println "let serialization order:"
-  total := total + 1
-  if !(← runLetRoundtrip) then failed := failed + 1
-
   -- ── (f) CF goldens (tests/golden/cf/*.hash) — the closed-form corpus ───────
   -- The corpus that must stay green through every phase of the CF-only
   -- migration (it is rendered via the same path as the legacy goldens but only
@@ -138,14 +132,6 @@ def main (args : List String) : IO UInt32 := do
     if !(← runMslGolden writeMode name patchPath) then failed := failed + 1
   total := total + 1
   if !(← runMslFold) then failed := failed + 1
-
-  -- ── (g) CF-only enforcement: cfOnly strata mode rejects per-sample state ───
-  IO.println "cf-only enforcement (reg/next unrepresentable):"
-  total := total + 1
-  if !(← runCfOnly "CfProbe" cfOnlyRejectSrc (expectReject := true)) then failed := failed + 1
-  total := total + 1
-  if !(← runCfOnly "Sin" (← IO.FS.readFile "stdlib/Sin.md") (expectReject := false)) then
-    failed := failed + 1
 
   -- ── (h) EmitArrow arrow laws (slice 3): warp algebra ≡ in rendered audio ────
   IO.println "arrow laws (warp algebra ≡ byte-identical audio):"

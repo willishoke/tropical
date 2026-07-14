@@ -6,7 +6,6 @@ import Tropical.Plan
 import Tropical.Ir.EmitLlvm
 import Tropical.Ir.EmitMsl
 import Tropical.PlanDecode
-import Tropical.Parse.Surface.Markdown
 import Tropical.Parse.Raise
 import Tropical.Ir.Elaborator
 import Tropical.Ir.Strata
