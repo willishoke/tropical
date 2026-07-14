@@ -29,8 +29,9 @@ is an audio device. None of that is load-bearing in the IR.
 
 This README is the high-level pitch. The full architecture lives
 in [`design/architecture.md`](design/architecture.md); the IR walks
-top-to-bottom from literate `.md` source through five structure-dropping
-passes to the slot-typed instruction stream the runtime executes.
+top-to-bottom from the arrow-combinator source (or an MCP patch graph)
+through the structure-dropping strata passes to the slot-typed
+instruction stream the runtime executes.
 
 ## What tropical actually is
 
@@ -87,27 +88,31 @@ rather than an ambitious one. The longer design conversation that
 arrived at this lives in
 [`design/archive/operadic_ir.md`](design/archive/operadic_ir.md).
 
-## Everything is legible
+## The stdlib is code, not a document
 
-The same discipline that makes the IR legible to the compiler makes
-the source legible to everyone else. There is no `.trop` file format:
-**a tropical program is a markdown document.** Every program in
-[`stdlib/`](stdlib/) is a literate document — prose explaining the
-DSP, a mermaid diagram of the signal flow, and exactly one
-```` ```tropical ```` code block holding the source. The compiler reads
-the code fence; humans and agents read the whole document; GitHub
-renders the diagrams inline.
+There is no surface language and no parallel metadata layer. The stdlib
+is [`Tropical.Stdlib`](lean/Tropical/Stdlib.lean): fifteen programs
+authored directly as arrow-combinator builders over the value algebra —
+a phasor is the integer split-multiply `phasorPhaseSig`, a flanger is
+three warped taps summed, a modal voice is four `ClockPhasor ⋙ Sin`
+partials weighted and added. The builder *is* the program; the port
+signature *is* the interface. Nothing is written twice, so nothing can
+fall out of sync. New instruments — the gong, the plucked string — land
+the same way: closed-form recipes composed from the existing
+combinators, needing no new IR nodes.
 
-There is deliberately no parallel metadata layer: the signature in the
-code block *is* the interface, and the prose *is* the documentation —
-nothing is written twice, so nothing can fall out of sync. What can be
-enforced structurally, is: the literate gate in the Lean
-golden runner (the built `tropicaltest` binary, off
-`lean/Tropical/Parse/Surface/Markdown.lean`) fails the build on a
-mismatched title, a missing diagram, or anything other than exactly
-one code block. An agent that wants to know what `SVF` exposes reads
-the same document a human does. See
-[`stdlib/OnePole.md`](stdlib/OnePole.md) for the canonical example.
+This replaced an earlier literate-`.md` surface language. What made that
+readable — one description, no duplication — the builders keep by being
+the source directly; what it cost (a whole parser and a committed parse
+bridge) is gone. New DSP types are authored as builders, not defined
+over the wire.
+
+What can be enforced structurally, is: every builder is byte-gated. Its
+compiled `tropical_plan_5` wire and its port surface (names, types,
+defaults) are frozen as goldens in
+[`tests/golden/stdlib/`](tests/golden/stdlib/), so a change to a builder
+— or to any strata or emit pass that moves a single byte — fails the
+build.
 
 ## Why you can trust the output
 
@@ -130,11 +135,12 @@ review. Every change runs the full surface:
   compile-time invariant. With no state primitive to break a cycle
   through, feedback is rejected with a port-detailed error rather than
   silently turned into a one-sample loop.
-- **A stdlib audit** that parses, elaborates, and lowers every
-  `stdlib/*.md` file on every change, asserting every post-strata
-  invariant — plus the literate gate, which fails the build if any
-  program document loses its title, diagram, or single-code-block
-  shape.
+- **Wire+port goldens** for the whole stdlib — the compiled
+  `tropical_plan_5` bytes and the port surface of all fifteen
+  [`Tropical.Stdlib`](lean/Tropical/Stdlib.lean) builders are frozen
+  ([`tests/golden/stdlib/`](tests/golden/stdlib/)). The stdlib is the
+  arrow-builder chain the engine boots; these goldens are what pin it,
+  now that there is no parse bridge to diff against.
 - **CI** runs all of it (the Lean build, the `tropicaltest` golden
   runner, the C++ tests, and the behavioral bun suites against the live
   Lean engine) on every PR, with LLVM pinned. Local development runs the

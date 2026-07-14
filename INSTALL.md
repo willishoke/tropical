@@ -58,16 +58,17 @@ The individual checks:
 
 ```bash
 cmake --build build -j4 && ctest --test-dir build         # C++ tests (JIT + C API, no audio device)
-./lean/.lake/build/bin/tropicaltest                       # audio goldens + native mode-equiv + stdlib audit
+./lean/.lake/build/bin/tropicaltest                       # audio + wire/port goldens + native mode-equiv
 TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test   # WASM≡JIT + MCP behavioral
 ```
 
-`tropicaltest` (`lake exe tropicaltest`) is the Lean golden runner: it
-parses, elaborates, and lowers every `stdlib/*.md`, asserts the
-post-strata invariants and the literate gate, checks the byte-for-byte
-audio goldens, and runs the native realization-variant equivalence
-(fused vs. per-instance microkernel; flat vs. nested) directly through
-the engine.
+`tropicaltest` is the Lean golden runner: it boots the `Tropical.Stdlib`
+builder programs (`lean/Tropical/Stdlib.lean` — 15 programs authored as
+arrow-combinator builders), checks the per-program wire+port goldens
+(`tests/golden/stdlib/*.hash`, one hash per program), checks the
+byte-for-byte audio goldens (`tests/golden/cf`, `tests/golden/msl`), and
+runs the native realization-variant equivalence (fused vs. per-instance
+microkernel; flat vs. nested) directly through the engine.
 
 The bun suites are the surviving cross-backend gate — `tests/web`
 (WASM emitter vs. JIT, off the same `tropical_plan_5`) and the MCP
@@ -75,10 +76,6 @@ protocol tests in `mcp/` — both run against the live Lean engine via
 `TROPICAL_ENGINE_CMD`. There is no koffi FFI: the bun process talks to
 the `frontend` binary over RPC, so `make build` and `make lean` must
 come first.
-
-`make parse-all` regenerates the committed `stdlib/parsed/*.json`
-bridge from `stdlib/*.md` via the Lean surface parser
-(`diffcli parse-all`).
 
 ### Web demo (optional)
 

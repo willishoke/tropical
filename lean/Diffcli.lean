@@ -36,35 +36,14 @@ normalizeProgramFile + raiseProgram and prints
 `{program, params?, audio_outputs?}` — or `{error}` with the TS error
 string — on stdout. The other side of scripts/diff/diff_raise.ts.
 
-    diffcli parsed-roundtrip <file.json>
-
-Reads serialized ParsedProgram JSON (the stdlib bridge corpus under
-stdlib/parsed/), decodes it into the typed AST, re-encodes, prints.
-A decode failure prints `{error}` — which the differ reports, since
-the TS side echoes the file verbatim. Gates codec fidelity.
-
-    diffcli elab-stdlib <Name>
-    diffcli elab-file <parsed.json>
-
-Phase 4 stage 3 (the elaborator gate, scripts/diff/diff_elab.ts).
-`elab-stdlib` elaborates the pre-parsed stdlib bridge in manifest order
-up to and including <Name> — threading an external resolver over the
-raw elaborated results, mirroring scripts/diff/elab_cmd.ts — and prints
-the canonical `tropical_resolved_1` encoding of <Name>. `elab-file`
-elaborates a self-contained ParsedProgram JSON against the full stdlib
-chain as resolver. An `ElaborationError` / `CycleViolation` prints
-`{error: <byte-exact TS message>}` and exits 0 (errors are comparable
-outputs); a ParsedProgram decode failure is a harness error (exit 1).
-
-    diffcli strata-stdlib <Name> [--upto=K] [--mode=inline|nested] [--type-args=J]
-    diffcli strata-file <parsed.json> [same flags]
-
-Phase 5 (the strata gate, scripts/diff/diff_strata.ts). Elaborates
-exactly like the elab verbs, then runs strata passes `1..K` and prints
-the canonical `tropical_resolved_1` encoding of the result — the
-hybrid prefix the TS suffix completes. `--upto` beyond
-`Strata.portedPasses` is a harness error (exit 1); strata errors print
-`{error: <byte-exact TS message>}` and exit 0.
+The compile/render verbs — `compile`, `compile-wasm`, `render-bytes`,
+`render-metal`, `render-graph`, `emit-ir`, `emit-msl` — boot the engine
+(the stdlib is the `Tropical.Stdlib` arrow builders) and print the plan,
+LLVM/MSL IR, or rendered bytes for a patch. The former surface/bridge
+verbs (parse-md, parse-all, elab-stdlib, elab-file, strata-stdlib,
+strata-file, emit-stdlib, emit-file, emitarrow-*, parsed-roundtrip,
+voice-desugar) were retired with the
+literate `.md` language and the parse bridge.
 -/
 
 def parseNatFlag (args : List String) (flag : String) (default : Nat) : Nat :=

@@ -17,7 +17,7 @@ Two modes:
 - `--rpc` — the ir_service-compatible newline JSON-RPC surface used by
   the bun test suites and the differential harness
 
-Run from the tropical repo root (so `stdlib/parsed/` resolves):
+Run from the tropical repo root (so relative patch/golden paths resolve):
   lean/.lake/build/bin/frontend [--rpc]
 -/
 
