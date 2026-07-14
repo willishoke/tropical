@@ -53,6 +53,29 @@ private def jStr (obj : Json) (key : String) (dflt : String) : String :=
   | .ok (.str s) => s
   | _ => dflt
 
+/-- A numeric param as a build-time `Float` (the gong's structural strike
+    data — mode tables, drive, anchors — is baked, not slotted). -/
+private def jFloat (obj : Json) (key : String) (dflt : Float) : Float :=
+  ((jNum? obj key).map (·.toFloat)).getD dflt
+
+/-- A gong register's mode table: an array of `[freqHz, sigma, amp, phase]`
+    rows → `ModalMode`s (rectangular: `cre = a·cos φ`, `cim = a·sin φ`, so
+    the bank's `cre·cos ωd − cim·sin ωd` is `a·cos(ωd + φ)`). Amplitude-bloom
+    pairs arrive pre-expanded (two rows, `±a`, two σ). Malformed rows drop. -/
+private def jModes (obj : Json) (key : String) : Array ModalMode :=
+  match (obj.getObjVal? key).toOption.bind (·.getArr?.toOption) with
+  | none => #[]
+  | some arr => arr.filterMap fun mj =>
+    match mj.getArr?.toOption with
+    | some fs =>
+      if fs.size < 4 then none else
+      let num := fun (i : Nat) => ((fs[i]!.getNum?.toOption).map (·.toFloat)).getD 0.0
+      let a := num 2
+      let ph := num 3
+      some { sigma := litF (num 1), omega := litF (6.283185307179586 * num 0),
+             cre := litF (a * Float.cos ph), cim := litF (a * Float.sin ph) }
+    | none => none
+
 -- ── Voices (literal pitch, so the knob bakes into the emitted clock) ─────────
 /-- The phase-anchor correction — the slide, in the phase domain. A clock `shift`
     (Q32.32) of `shift/2³²` samples maps to a phase shift of
@@ -131,6 +154,36 @@ private def resonatorBank (f0 decay : Sig) (npart : Nat) : Array ModalMode :=
     ModalMode.hz (mul (lit (Int.ofNat k)) f0)
                  (mul decay (litF (1.0 + 0.4 * k.toFloat)))
                  (litF (1.0 / Float.pow k.toFloat 1.1))
+
+/-- The default plucked-string bank a bare `string` node strikes: the exact
+    Jaffe-Smith pole table of the Karplus-Strong loop `y = x + ρ·½(y[n-N] +
+    y[n-N-1])` at fundamental `f0`, closed form — the loop diagonalized, not
+    simulated. Mode `k` sits at `f_k = k·SR/(N+½)` (`N = round(SR/f0)`); the
+    loop's averaging filter has `|G| = cos(π f_k/SR)`, so one transit multiplies
+    partial `k` by `g_k = ρ·|G|` and its decay is `σ_k = −SR·ln(g_k)/(N+½)` —
+    highs die faster, which IS the plucked-string sound. Residues use a `1/k`
+    displacement rolloff at golden-angle phases (projecting a real burst onto
+    the modes is the DATA path's job — this is the audible default). SR is baked
+    at 44100 for the default timbre; the `string` kind's real content arrives as
+    `modes` data rows. Capped at 48 partials (higher ones decay in ms). -/
+def defaultStringModes (f0 rho : Float) : Array ModalMode := Id.run do
+  let sr := 44100.0
+  let span := (sr / f0).round + 0.5          -- N + ½  (loop transit, samples)
+  let pi := 3.141592653589793
+  let kmax := min 48 (Float.floor (span / 2.0)).toUInt64.toNat
+  let mut modes : Array ModalMode := #[]
+  for j in [0:kmax] do
+    let k := (j + 1).toFloat
+    let fk := k * sr / span
+    let g := rho * Float.cos (pi * fk / sr)   -- ρ·|G(ω_k)| per loop transit
+    if fk < sr * 0.5 && g > 0.0 then
+      let sigma := - sr * Float.log g / span                 -- decay, 1/s
+      let amp := 1.0 / k                                      -- displacement rolloff
+      let ph := 2.399963 * k                                 -- golden-angle phases
+      modes := modes.push
+        { sigma := litF sigma, omega := litF (2.0 * pi * fk),
+          cre := litF (amp * Float.cos ph), cim := litF (amp * Float.sin ph) }
+  return modes
 
 /-- A reverb room as a `ModalMode` bank (pole + residue-as-coeff): `nmode`
     log-spaced modes over `[flo,fhi]` with damping `σ = 6.91/rt60` (live), unit
@@ -325,20 +378,31 @@ def portSpecs : String → Array PortSpec
       { name := "resonance", knob := some (5, 1), discipline := .glide,
         display := some { min := 0, max := 1 } }]
   | "modalmix" => #[{ name := "in", accepts := modalIn, multi := true }]
+  -- gong: a source with no inlets and no knobs — its strike data (`t`,
+  -- `beta`, `g`, `modes_full`, `modes_half`) is structural, carried in
+  -- `params`. shaper: one signal inlet; `drive`/`peak` are structural
+  -- (the poly fit is a build-time solve).
+  | "gong" => #[]
+  -- string: a plucked/struck string as its diagonalized modal bank. Like gong,
+  -- its content (`freq`, `decay`, `t`, `modes`) is structural, carried in
+  -- `params`; the optional `addr` inlet drives the pluck's time-address.
+  | "string" => #[{ name := "addr", accepts := sigIn }]
+  | "shaper" => #[{ name := "in", accepts := sigIn }]
   | "out" => #[{ name := "in", accepts := sigIn, multi := true }]
   | _ => #[]
 
 /-- Each kind's outlet color (`none` = no outlet, the dac sink). -/
 def outletOf : String → Option PortDomain
   | "knob" => some .control
-  | "resonator" | "reverb" | "filter" | "modalmix" => some .modal
+  | "resonator" | "reverb" | "filter" | "modalmix" | "string" => some .modal
   | "out" => none
   | _ => some .signal
 
 /-- The kinds the table covers, in schema order (`out` last — it has no outlet). -/
 def vocabularyKinds : Array String := #[
   "source", "pluck", "comb", "flange", "delay", "reverse", "fm", "sflange",
-  "mix", "ring", "resonator", "reverb", "filter", "modalmix", "knob", "out"]
+  "mix", "ring", "shaper", "gong", "string", "resonator", "reverb", "filter",
+  "modalmix", "knob", "out"]
 
 -- Derived views — the ONLY readers of glide/anchor/knob facts from here down.
 private def portOf (kind kname : String) : Option PortSpec :=
@@ -533,6 +597,58 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     (.modalReverb sig
       (filterPair (p "cutoff" (dv "cutoff")) (p "resonance" (dv "resonance"))) none, #[])
   | "modalmix" => (.modalMix (portSources inObj "in"), #[])
+  | "gong" =>
+    -- One STRIKE of the struck nonlinear resonator: two anchored modal banks
+    -- (full-glide + stiff half-glide registers) behind per-strike pitch-bloom
+    -- warps, composed by `gongStrikeNodes` from existing node kinds. All data
+    -- is structural (a score's strikes are baked; the master clock still
+    -- scrubs/reverses them live): `t` (strike time, s), `beta` (pitch-bloom
+    -- depth, velocity already folded in), `g` (bloom settle rate), and the
+    -- two pre-expanded mode tables.
+    let t := jFloat params "t" 0.0
+    let beta := jFloat params "beta" 0.0
+    let gRate := jFloat params "g" 1.8
+    let anchor := mul (litF t) .sampleRate
+    -- a bare gong (no score data) strikes the built-in default bank at its
+    -- anchor — the kind's audible default, like the resonator's 6 partials.
+    let full := jModes params "modes_full"
+    let half := jModes params "modes_half"
+    let (full, half) :=
+      if full.isEmpty && half.isEmpty
+      then defaultGongModes (jFloat params "freq" 110.0)
+      else (full, half)
+    -- a data-less drop also gets an audible bloom (β = 0.05 ≈ a solid strike)
+    let beta := if beta == 0.0 && (params.getObjVal? "beta").toOption.isNone
+      then 0.05 else beta
+    gongStrikeNodes id clk anchor (litF beta) (litF gRate) full half
+  | "string" =>
+    -- A plucked string as its diagonalized modal bank — the Karplus-Strong loop
+    -- is an LTI system, so its delay-line recurrence and this closed-form pole
+    -- bank are the same object, two realizations. `modes` (data rows
+    -- [f, σ, amp, phase]: the exact loop poles + the burst's residues) is
+    -- structural, a baked strike like a gong's; a data-less drop strikes the
+    -- closed-form default bank at `freq`/`decay`. `t` places the pluck in a
+    -- score; the master clock still scrubs/reverses the tail. The pluck holds
+    -- NO state — the burst is a seed (a coordinate), not entropy that left — so
+    -- unlike a delay-line string this one reverses with zero latency.
+    let modes := jModes params "modes"
+    let modes := if modes.isEmpty
+      then defaultStringModes (jFloat params "freq" 196.0) (jFloat params "decay" 0.996)
+      else modes
+    let t := jFloat params "t" 0.0
+    let anchor := mul (litF t) .sampleRate
+    let addr? := (portSources inObj "addr")[0]?
+    (.modalSource modes anchor clk addr?, #[])
+  | "shaper" =>
+    -- The alias-free drive: an odd-poly (degree 5) fit of `tanh(drive·u)`,
+    -- fit at BUILD time (coefficients are a least-squares solve, so the
+    -- drive is structural — a knob change relowers, clicklessly). `peak` is
+    -- the fixed normalization reference (the vel-1.0 strike's peak), which
+    -- is what keeps velocity dynamics through the knee.
+    let k := jFloat params "drive" 2.6
+    let peak := jFloat params "peak" 1.0
+    let (c1, c3, c5) := polyFitTanhOdd k
+    (.shaper sig (polyShapeSig c1 c3 c5 peak), #[])
   | _ => (.mix (portSources inObj "in"), #[])
 
 private structure Raw where
