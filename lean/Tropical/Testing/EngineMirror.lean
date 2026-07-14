@@ -31,9 +31,8 @@ namespace Tropical.Engine
     retires. -/
 def buildSessionInput (env : Env) (mode : Tropical.Plan.CompilationMode) :
     EngineM Tropical.Compile.SessionInput :=
-  -- The legacy elaborate-path root (no arrow); the shared prologue lives in
-  -- `Engine.Compile.buildSessionInputVia`.
-  buildSessionInputVia env (useArrow := false) "compileMirrorPlan" mode
+  -- The shared prologue lives in `Engine.Compile.buildSessionInputVia`.
+  buildSessionInputVia env "compileMirrorPlan" mode
 
 def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
     EngineM Tropical.Plan.FlatPlan := do
@@ -55,25 +54,6 @@ def compileMirrorStaged (env : Env) (mode : Tropical.Plan.CompilationMode) :
 def compileMirrorPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
     EngineM String := do
   let plan ← compileMirrorFlatPlan env mode
-  match plan.toWire with
-  | .error msg => internalError msg
-  | .ok j => pure j.compress
-
-/-- The C4 path: identical to `compileMirrorFlatPlan` but builds the session root
-    via `sessionToResolvedRoot` (direct, no `sessionToParsed → reparse →
-    elaborate`). Gated `tropical_resolved_1`/plan-identical against
-    `compileMirrorFlatPlan` on the golden corpus before it becomes the default. -/
-def compileMirrorFlatPlanViaArrow (env : Env) (mode : Tropical.Plan.CompilationMode) :
-    EngineM Tropical.Plan.FlatPlan := do
-  -- The arrow-path root (direct, no parsed round-trip); same shared prologue.
-  let input ← buildSessionInputVia env (useArrow := true) "compileMirrorPlanViaArrow" mode
-  match Tropical.Compile.compileSession input with
-  | .error msg => internalError msg
-  | .ok p => pure p
-
-def compileMirrorPlanViaArrow (env : Env) (mode : Tropical.Plan.CompilationMode) :
-    EngineM String := do
-  let plan ← compileMirrorFlatPlanViaArrow env mode
   match plan.toWire with
   | .error msg => internalError msg
   | .ok j => pure j.compress

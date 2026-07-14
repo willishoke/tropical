@@ -46,12 +46,6 @@ structure Env where
       (LLVM IR → JIT + MSL → GPU pipeline) and audio dispatches on Metal.
       The JIT keeps serving render_window/the scope either way. -/
   metalBackend : Bool := false
-  /-- `TROPICAL_ARROW` at boot: build the resolved session root directly via
-      `sessionToResolvedRoot` (the arrow path) instead of the legacy
-      `sessionToParsed → reparse → elaborate` round-trip. Read once here rather
-      than per graph mutation; the two paths are plan-byte-identical (gated by
-      `runSessionViaArrowEquiv`). -/
-  arrowRoot : Bool := false
 
 -- Reserved audio-output boundary leaf.
 def dacName : String := "dac"

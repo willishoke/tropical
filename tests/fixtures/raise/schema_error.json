@@ -1,5 +1,0 @@
-{
-  "schema": "tropical_program_1",
-  "name": "WrongSchema",
-  "body": { "op": "block", "decls": [], "assigns": [] }
-}

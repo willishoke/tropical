@@ -100,11 +100,6 @@ def main (args : List String) : IO UInt32 := do
   total := total + 1
   if !(← runBanksRegionHoist) then failed := failed + 1
 
-  -- ── (c′) C4: session → resolved root directly ≡ the elaborate round-trip ───
-  IO.println "session via direct root (sessionToResolvedRoot ≡ sessionToParsed→elaborate):"
-  total := total + 1
-  if !(← runSessionViaArrowEquiv) then failed := failed + 1
-
   -- ── (c″) Stage differential: intern-time attribute ⊑ the flow pass ─────────
   IO.println "stage differential (typed StageSig vs Stage0 flow classification):"
   total := total + 1

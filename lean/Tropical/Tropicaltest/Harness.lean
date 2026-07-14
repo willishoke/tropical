@@ -71,19 +71,6 @@ def compilePatch (path : String) (mode : Tropical.Plan.CompilationMode) :
   | .ok planJson => pure (.ok planJson)
   | .error f => pure (.error f.toJson.compress)
 
-/-- Compile a patch via the C4 DIRECT session-root path (`sessionToResolvedRoot`,
-    no `sessionToParsed → elaborate`). For the round-trip-deletion equivalence
-    gate: this plan must equal `compilePatch`'s (the elaborate path). -/
-def compilePatchArrow (path : String) (mode : Tropical.Plan.CompilationMode) :
-    IO (Except String String) := do
-  let env ← Tropical.Engine.boot
-  let act : Tropical.EngineM String := do
-    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str path)])
-    Tropical.Engine.compileMirrorPlanViaArrow env mode
-  match ← act.run with
-  | .ok planJson => pure (.ok planJson)
-  | .error f => pure (.error f.toJson.compress)
-
 /-- Render a FlatPlan via the Lean-emitted-IR path (stage-0 split →
     EmitLlvm → load_ir_staged). -/
 def renderIrBytes (plan : Tropical.Plan.FlatPlan) : IO (Except String ByteArray) := do
