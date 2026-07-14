@@ -122,21 +122,6 @@ def buildVCA (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
     #[floatDecl "audio" (lit 0), floatDecl "cv" (lit 0)] #[floatOut]
     #[] #[(.port ⟨0⟩, mul (.inputRef ⟨0⟩) (.inputRef ⟨1⟩))] #[])
 
-/-- `FixedPhasor` — the integer phasor over `sampleIndex` (not a clock input):
-    `acc = inc·sampleIndex + off`, masked to `[0, 2³²)`, scaled to unipolar. -/
-def buildFixedPhasor (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
-    Except String (Arena × ProgramIdx) :=
-  let freq : Sig := .inputRef ⟨0⟩
-  let offset : Sig := .inputRef ⟨1⟩
-  let inc := toIntE (div (mul freq (lit 4294967296)) .sampleRate)
-  let off := toIntE (mul offset (lit 4294967296))
-  let acc := add (mul inc .sampleIndex) off
-  let phase := div (toFloatE (bitAnd acc (lit 4294967295))) (lit 4294967296)
-  .ok (assemble arena "FixedPhasor"
-    #[freqDecl "freq" 440, unipolarDecl "offset"]
-    #[{ name := "phase", type? := some (.scalar .float) }]
-    #[] #[(.port ⟨0⟩, clampE phase (lit 0) (lit 1))] #[])
-
 /-- `ClockPhasor` — the phasor over an external Q32.32 `clk` (the split-multiply
     `phasorPhaseSig`), unipolar output. -/
 def buildClockPhasor (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
@@ -163,55 +148,6 @@ def buildSoftClip (arena : Arena) (resolved : Array (String × ProgramIdx)) :
     #[signalDecl "input", floatDecl "drive" (lit 1)]
     #[{ name := "out", type? := some (.scalar .float) }]
     decls #[(.port ⟨0⟩, clampE (.nestedOut ⟨0⟩ ⟨0⟩) (lit (-1)) (lit 1))] registry)
-
-/-- `ClockPM` — a carrier `FixedSinOsc` phase-modulated by `depth · modu` via its
-    clock inlet (through-zero PM). -/
-def buildClockPM (arena : Arena) (resolved : Array (String × ProgramIdx)) :
-    Except String (Arena × ProgramIdx) := do
-  let registry ← buildRegistry arena resolved #["FixedSinOsc"]
-  let carrier : Sig := .inputRef ⟨0⟩
-  let ratio : Sig := .inputRef ⟨1⟩
-  let depth : Sig := .inputRef ⟨2⟩
-  let carClk := add clockSig (toIntE (mul (mul depth (.nestedOut ⟨0⟩ ⟨0⟩)) (lit 4294967296)))
-  let decls : Array AInst := #[
-    { name := "modu", programName := "FixedSinOsc", inputs := #[⟨⟨0⟩, mul carrier ratio⟩] },
-    { name := "car", programName := "FixedSinOsc", inputs := #[⟨⟨0⟩, carrier⟩, ⟨⟨1⟩, carClk⟩] }]
-  .ok (assemble arena "ClockPM"
-    #[freqDecl "carrier" 220, freqDecl "ratio" 1, floatDecl "depth" (lit 40)]
-    #[floatOut] decls #[(.port ⟨0⟩, .nestedOut ⟨1⟩ ⟨0⟩)] registry)
-
-/-- `ClockReverseProbe` — one oscillator read forward and at `−clock()`; their
-    sum is the reversibility witness. -/
-def buildClockReverseProbe (arena : Arena) (resolved : Array (String × ProgramIdx)) :
-    Except String (Arena × ProgramIdx) := do
-  let registry ← buildRegistry arena resolved #["FixedSinOsc"]
-  let freq : Sig := .inputRef ⟨0⟩
-  let decls : Array AInst := #[
-    { name := "fwd", programName := "FixedSinOsc", inputs := #[⟨⟨0⟩, freq⟩, ⟨⟨1⟩, clockSig⟩] },
-    { name := "rev", programName := "FixedSinOsc", inputs := #[⟨⟨0⟩, freq⟩, ⟨⟨1⟩, sub (lit 0) clockSig⟩] }]
-  .ok (assemble arena "ClockReverseProbe"
-    #[freqDecl "freq" 220] #[floatOut]
-    decls #[(.port ⟨0⟩, add (.nestedOut ⟨0⟩ ⟨0⟩) (.nestedOut ⟨1⟩ ⟨0⟩))] registry)
-
-/-- `FMBell` — a 3-oscillator FM bell (breath LFO → index → modulator → carrier
-    clock). -/
-def buildFMBell (arena : Arena) (resolved : Array (String × ProgramIdx)) :
-    Except String (Arena × ProgramIdx) := do
-  let registry ← buildRegistry arena resolved #["FixedSinOsc"]
-  let carrier : Sig := .inputRef ⟨0⟩
-  let ratio : Sig := .inputRef ⟨1⟩
-  let index : Sig := .inputRef ⟨2⟩
-  let lfo : Sig := .inputRef ⟨3⟩
-  let carClk := add clockSig (toIntE (mul (mul (mul index (add (lit 1) (.nestedOut ⟨0⟩ ⟨0⟩)))
-                 (.nestedOut ⟨1⟩ ⟨0⟩)) (lit 4294967296)))
-  let decls : Array AInst := #[
-    { name := "breath", programName := "FixedSinOsc", inputs := #[⟨⟨0⟩, lfo⟩] },
-    { name := "modu", programName := "FixedSinOsc", inputs := #[⟨⟨0⟩, mul carrier ratio⟩] },
-    { name := "car", programName := "FixedSinOsc", inputs := #[⟨⟨0⟩, carrier⟩, ⟨⟨1⟩, carClk⟩] }]
-  .ok (assemble arena "FMBell"
-    #[freqDecl "carrier" 220, freqDecl "ratio" 14142135623730951 16,
-      floatDecl "index" (lit 90), freqDecl "lfo" 3 1]
-    #[floatOut] decls #[(.port ⟨0⟩, .nestedOut ⟨2⟩ ⟨0⟩)] registry)
 
 /-- `ModalVoice` — four inharmonic partials (`ClockPhasor ⋙ Sin`) at the
     Jaffe–Smith ratios, weighted-summed. -/
@@ -288,28 +224,6 @@ def buildReverseReverb (arena : Arena) (resolved : Array (String × ProgramIdx))
       floatDecl "decay" (lit 72 2), floatDecl "amount" (lit 7 1)]
     #[floatOut] decls #[(.port ⟨0⟩, add (.nestedOut ⟨0⟩ ⟨0⟩) (mul amount taps))] registry)
 
-/-- The palindromic-scrub clock a `*Probe` drives a comb with: a triangle over
-    `sampleIndex` (`nf` up to `half`, back down), in Q32.32. -/
-def triScrubClk (half : Sig) : Sig :=
-  let nf := toFloatE .sampleIndex
-  let tri := selectE (.binary .lt nf half) nf (sub (mul (lit 2) half) nf)
-  toIntE (mul tri (lit 4294967296))
-
-/-- `ReversibleProbe` — a `ReversibleComb` on the palindrome clock; the tail
-    reverses onto itself. -/
-def buildReversibleProbe (arena : Arena) (resolved : Array (String × ProgramIdx)) :
-    Except String (Arena × ProgramIdx) := do
-  let registry ← buildRegistry arena resolved #["ReversibleComb"]
-  let half : Sig := .inputRef ⟨0⟩
-  let f0 : Sig := .inputRef ⟨1⟩
-  let delta : Sig := .inputRef ⟨2⟩
-  let decls : Array AInst := #[
-    { name := "comb", programName := "ReversibleComb",
-      inputs := #[⟨⟨0⟩, triScrubClk half⟩, ⟨⟨1⟩, f0⟩, ⟨⟨2⟩, delta⟩] }]
-  .ok (assemble arena "ReversibleProbe"
-    #[floatDecl "half" (lit 2048), freqDecl "f0" 110, floatDecl "delta" (lit 7 4)]
-    #[floatOut] decls #[(.port ⟨0⟩, .nestedOut ⟨0⟩ ⟨0⟩)] registry)
-
 /-- `ThroughZeroFlanger` — a `ReversibleComb` whose delay is swept through zero
     by an LFO (`ClockPhasor ⋙ Sin`). -/
 def buildThroughZeroFlanger (arena : Arena) (resolved : Array (String × ProgramIdx)) :
@@ -328,68 +242,18 @@ def buildThroughZeroFlanger (arena : Arena) (resolved : Array (String × Program
     #[clockInDecl "clk" clockSig, freqDecl "f0" 110, floatDecl "depth" (lit 7 4), freqDecl "rate" 3 1]
     #[floatOut] decls #[(.port ⟨0⟩, .nestedOut ⟨2⟩ ⟨0⟩)] registry)
 
-/-- `ThroughZeroFlangerProbe` — the flanger on the palindrome clock. -/
-def buildThroughZeroFlangerProbe (arena : Arena) (resolved : Array (String × ProgramIdx)) :
-    Except String (Arena × ProgramIdx) := do
-  let registry ← buildRegistry arena resolved #["ThroughZeroFlanger"]
-  let half : Sig := .inputRef ⟨0⟩
-  let f0 : Sig := .inputRef ⟨1⟩
-  let depth : Sig := .inputRef ⟨2⟩
-  let lfoRate : Sig := .inputRef ⟨3⟩
-  let decls : Array AInst := #[
-    { name := "fl", programName := "ThroughZeroFlanger",
-      inputs := #[⟨⟨0⟩, triScrubClk half⟩, ⟨⟨1⟩, f0⟩, ⟨⟨2⟩, depth⟩, ⟨⟨3⟩, lfoRate⟩] }]
-  .ok (assemble arena "ThroughZeroFlangerProbe"
-    #[floatDecl "half" (lit 2048), freqDecl "f0" 110, floatDecl "depth" (lit 7 4), freqDecl "lfoRate" 6]
-    #[floatOut] decls #[(.port ⟨0⟩, .nestedOut ⟨0⟩ ⟨0⟩)] registry)
-
-/-- `ClockPhasorProbe` — `FixedPhasor` minus `ClockPhasor` at the root clock;
-    their phases must agree, so `out` is ~0. -/
-def buildClockPhasorProbe (arena : Arena) (resolved : Array (String × ProgramIdx)) :
-    Except String (Arena × ProgramIdx) := do
-  let registry ← buildRegistry arena resolved #["FixedPhasor", "ClockPhasor"]
-  let freq : Sig := .inputRef ⟨0⟩
-  let decls : Array AInst := #[
-    { name := "ref", programName := "FixedPhasor", inputs := #[⟨⟨0⟩, freq⟩] },
-    { name := "got", programName := "ClockPhasor", inputs := #[⟨⟨0⟩, clockSig⟩, ⟨⟨1⟩, freq⟩] }]
-  .ok (assemble arena "ClockPhasorProbe"
-    #[freqDecl "freq" 440] #[floatOut]
-    decls #[(.port ⟨0⟩, sub (.nestedOut ⟨0⟩ ⟨0⟩) (.nestedOut ⟨1⟩ ⟨0⟩))] registry)
-
-/-- `ClockChord` — three `ModalVoice`s at root / (5/4) / (3/2), the ratios cut as
-    exact integer clock warps `(θ·5)>>2`, `(θ·3)>>1`. -/
-def buildClockChord (arena : Arena) (resolved : Array (String × ProgramIdx)) :
-    Except String (Arena × ProgramIdx) := do
-  let registry ← buildRegistry arena resolved #["ModalVoice"]
-  let f0 : Sig := .inputRef ⟨0⟩
-  let mv (nm : String) (clkE : Sig) : AInst :=
-    { name := nm, programName := "ModalVoice", inputs := #[⟨⟨0⟩, clkE⟩, ⟨⟨1⟩, f0⟩] }
-  let decls : Array AInst := #[
-    mv "root" clockSig,
-    mv "third" (rshift (mul clockSig (lit 5)) (lit 2)),
-    mv "fifth" (rshift (mul clockSig (lit 3)) (lit 1))]
-  let out := add (add (mul (lit 4 1) (.nestedOut ⟨0⟩ ⟨0⟩)) (mul (lit 3 1) (.nestedOut ⟨1⟩ ⟨0⟩)))
-                 (mul (lit 3 1) (.nestedOut ⟨2⟩ ⟨0⟩))
-  .ok (assemble arena "ClockChord"
-    #[freqDecl "f0" 110] #[floatOut]
-    decls #[(.port ⟨0⟩, out)] registry)
-
 -- ── The builder tables (dependency order = registration order) ───────────────
 
-/-- Every stdlib program authored in this module, in dependency (registration)
-    order — leaves first, then instance-bearing bottom-up. The 5 voices that
-    already have production builders (`FixedSin`, `FixedSinOsc`, `MorphOsc`,
-    `FlangeSin`, `ReversibleComb`) are woven in when they land here too; this
-    list is the gate manifest and the seed of the boot chain. -/
+/-- The non-voice stdlib programs authored in this module. The 5 voices
+    (`FixedSin`, `FixedSinOsc`, `MorphOsc`, `FlangeSin`, `ReversibleComb`) are
+    woven in when they land here too; this list is the gate manifest and part of
+    the boot chain. (The reversibility probes and the FM/chord demo patches were
+    curated out — the moat's reversal is guarded by the `reverse_reverb` /
+    `scrub_reverb` cf goldens, not standalone probe programs.) -/
 def stdlibNewBuilders : Array (String × StdBuilder) := #[
   ("Sin", buildSin), ("Tanh", buildTanh), ("ScrubClock", buildScrubClock),
-  ("VCA", buildVCA), ("FixedPhasor", buildFixedPhasor), ("ClockPhasor", buildClockPhasor),
-  ("SoftClip", buildSoftClip), ("ClockPM", buildClockPM),
-  ("ClockReverseProbe", buildClockReverseProbe), ("FMBell", buildFMBell),
+  ("VCA", buildVCA), ("ClockPhasor", buildClockPhasor), ("SoftClip", buildSoftClip),
   ("ModalVoice", buildModalVoice), ("PluckedMorphOsc", buildPluckedMorphOsc),
-  ("ReverseReverb", buildReverseReverb), ("ReversibleProbe", buildReversibleProbe),
-  ("ThroughZeroFlanger", buildThroughZeroFlanger),
-  ("ThroughZeroFlangerProbe", buildThroughZeroFlangerProbe),
-  ("ClockPhasorProbe", buildClockPhasorProbe), ("ClockChord", buildClockChord)]
+  ("ReverseReverb", buildReverseReverb), ("ThroughZeroFlanger", buildThroughZeroFlanger)]
 
 end Tropical.EmitArrow

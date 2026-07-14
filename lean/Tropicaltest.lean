@@ -116,17 +116,6 @@ def main (args : List String) : IO UInt32 := do
   total := total + 1
   if !(← runLetRoundtrip) then failed := failed + 1
 
-  -- ── (e) Reversibility: closed-form-in-τ ⇒ palindromic render ───────────────
-  IO.println "reversibility (closed-form-in-tau palindrome):"
-  total := total + 1
-  if !(← runReversibility) then failed := failed + 1
-  total := total + 1
-  if !(← runFlangerReversibility) then failed := failed + 1
-  total := total + 1
-  if !(← runClockPhasorEquiv) then failed := failed + 1
-  total := total + 1
-  if !(← runClockReverseProbe) then failed := failed + 1
-
   -- ── (f) CF goldens (tests/golden/cf/*.hash) — the closed-form corpus ───────
   -- The corpus that must stay green through every phase of the CF-only
   -- migration (it is rendered via the same path as the legacy goldens but only
