@@ -124,4 +124,27 @@ def registerOne (env : Env) (name : String) (p : Tropical.Parse.Program)
       (if isGeneric then rawIdx else idx?.getD rawIdx) }
   pure (entry, rawIdx)
 
+/-- Register an already-resolved (arrow-builder) program — the concrete tail of
+    `registerOne` with the elaboration skipped. `arena'`/`rawIdx` are a builder's
+    output (`assemble` appended the RAW program to `arena'` at `rawIdx`, linking
+    sub-programs by name against the chain built so far, exactly as boot
+    elaboration linked against the raw stdlib map). `strataConcrete` relinks that
+    raw registry to the post-strata canon (`templateByName`) and runs strata;
+    the store adopts the service round-trip, one copy. The boot chain
+    (`Tropical.EmitArrow.stdlibBuilders`) registers each program this way. -/
+def registerResolved (env : Env) (name : String)
+    (arena' : Tropical.Ir.Arena) (rawIdx : Tropical.Ir.ProgramIdx) :
+    EngineM (Json × Tropical.Ir.ProgramIdx) := do
+  let st ← env.state.get
+  let (arenaShip, shipIdx) ← strataConcrete st arena' rawIdx
+  env.state.modify fun s => { s with arena := arenaShip }
+  let entry ← match Tropical.Entries.concreteEntry arenaShip name shipIdx with
+    | .error e => internalError e
+    | .ok j => pure j
+  env.state.modify (·.addProgram (ProgMeta.fromEntry entry))
+  let idx? ← adoptResolved env entry
+  env.state.modify fun s => { s with
+    templateByName := s.templateByName.insert name (idx?.getD rawIdx) }
+  pure (entry, rawIdx)
+
 end Tropical.Engine
