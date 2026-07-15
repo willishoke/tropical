@@ -83,35 +83,6 @@ def runModulatedNode (arena : Arena)
   IO.println msg2
   pure (ok1 && ok2)
 
--- ── (h⁹) C4: session → resolved root DIRECTLY ≡ the elaborate round-trip ───────
--- Every patch compiles to a session; this gate compiles each BOTH ways — the
--- production `sessionToParsed → elaborate` path and the direct
--- `sessionToResolvedRoot` path — and asserts the plans are byte-identical, so
--- the round-trip deletion is provably faithful before it becomes the default.
-def runSessionViaArrowEquiv : IO Bool := do
-  let entries ← (System.FilePath.mk "patches").readDir
-  let names := (entries.filterMap fun e =>
-    if e.fileName.endsWith ".json" then some e.fileName else none).qsort (· < ·)
-  let mut ok := true
-  let mut matched := 0
-  let mut skipped := 0
-  for fn in names do
-    let path := s!"patches/{fn}"
-    match ← compilePatch path .fused with
-    | .error _ => skipped := skipped + 1   -- not session-compilable on the baseline either
-    | .ok elabPlan =>
-      match ← compilePatchArrow path .fused with
-      | .error e =>
-        IO.println s!"  FAIL  session-via-arrow/{fn}  direct compile: {firstLine e}"; ok := false
-      | .ok arrowPlan =>
-        if elabPlan == arrowPlan then matched := matched + 1
-        else
-          IO.println s!"  FAIL  session-via-arrow/{fn}  plan differs (elab {elabPlan.length}B, direct {arrowPlan.length}B)"
-          ok := false
-  if ok then
-    IO.println s!"  PASS  session-via-arrow  direct root ≡ elaborated root, plan-identical ({matched} patches{if skipped > 0 then s!"; {skipped} non-session skipped" else ""})"
-  pure ok
-
 -- ── (h¹⁰) Stage differential: intern-time attribute vs the flow pass ──────────
 -- Phase 1 of the typed stage-0 refactor. The typed side (StageSig at
 -- `intern`, resolved along the partition recursion) must never classify an

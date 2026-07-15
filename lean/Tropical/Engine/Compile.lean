@@ -180,14 +180,14 @@ def liftIfNeeded (env : Env) : EngineM Unit := do
 -- Session → resolved root DIRECTLY (no parsed round-trip)
 -- ─────────────────────────────────────────────────────────────
 
-/-! `sessionToParsed → reparse → elaborate` takes the already-resolved session
-    instances, serializes them into a NAMED `__session__` ParsedProgram, and
-    re-elaborates the names back to pointers — the "resolved → named → resolved"
-    round-trip. `sessionToResolvedRoot` deletes it: the session graph is already
-    post-elaborate-shaped (instances carry resolved type snapshots; wires are
-    graph edges), so it builds the resolved root `Program` DIRECTLY, reproducing
-    the elaborator's output byte-for-byte (gated `tropical_resolved_1`-identical
-    against the elaborate path on every golden). `elaborate` stays the reifier
+/-! The session graph is already post-elaborate-shaped — instances carry resolved
+    type snapshots and wires are graph edges — so `sessionToResolvedRoot` builds
+    the resolved root `Program` DIRECTLY, reproducing what the elaborator would
+    have produced byte-for-byte. This replaced the former `sessionToParsed →
+    reparse → elaborate` round-trip (serialize the instances into a NAMED
+    `__session__` ParsedProgram, re-elaborate the names back to pointers), against
+    which it was gated `tropical_resolved_1`-identical on every golden before that
+    path was deleted. `elaborate` stays the reifier
     for the morphism-definition (`.trop`) language; the patcher skips it by BEING
     a graph. The construction (verified against `Elaborator.lean`):
     instance decls in topo order then params alphabetical; each `InstanceInput`
@@ -360,16 +360,14 @@ def sessionToResolvedRoot (arena : Tropical.Ir.Arena)
 /-- Build the `SessionInput` from the engine's current session mirror: allocate,
     assert acyclic, rewrite each instance's `programName` to its stored program's
     name, build the first-instance-wins name→idx resolver, construct the resolved
-    session root (directly via `sessionToResolvedRoot` when `useArrow`, else the
-    legacy `sessionToParsed → reparse → elaborate` round-trip), Core-check it, and
+    session root directly via `sessionToResolvedRoot`, Core-check it, and
     materialize the session instances against the root registry.
 
     THE one session-compile prologue, shared by `syncCompile` (production) and the
-    `compileMirror*` harness entry points. The `useArrow` flag is the only real
-    variation between the two root-construction paths; `ctx` labels the
-    engine-bug internal errors for the caller. `mode` reaches only the plan's
-    `compilation_mode` field. -/
-def buildSessionInputVia (env : Env) (useArrow : Bool) (ctx : String)
+    `compileMirror*` harness entry points. `ctx` labels the engine-bug internal
+    errors for the caller. `mode` reaches only the plan's `compilation_mode`
+    field. -/
+def buildSessionInputVia (env : Env) (ctx : String)
     (mode : Tropical.Plan.CompilationMode := .fused) :
     EngineM Tropical.Compile.SessionInput := do
   let st ← env.state.get
@@ -400,26 +398,12 @@ def buildSessionInputVia (env : Env) (useArrow : Bool) (ctx : String)
           resolverTbl := resolverTbl.push (p.name, idx)
   let tbl := resolverTbl
 
-  -- The one variation: build the resolved session root directly (arrow path,
-  -- no parsed round-trip) or via the legacy `sessionToParsed → reparse →
-  -- elaborate`. The two are plan-byte-identical (gated by
-  -- `runSessionViaArrowEquiv`); failure maps onto the recoverable envelope so
-  -- the previous kernel keeps playing.
-  let (arena', rootIdx) ← if useArrow then
+  -- Build the resolved session root directly (no parsed round-trip): the session
+  -- graph is already post-elaborate-shaped. Failure maps onto the recoverable
+  -- envelope so the previous kernel keeps playing.
+  let (arena', rootIdx) ←
     match sessionToResolvedRoot st.arena lowerInstances wiresPost tbl with
     | .error e => internalError e
-    | .ok r => pure r
-  else do
-    let parsed ← Tropical.Lowering.sessionToParsed lowerInstances wiresPost
-    let typed ← match Tropical.Parse.JsonV.parse parsed.compress with
-      | .error e => internalError s!"session root: ParsedProgram JSON re-parse failed: {e}"
-      | .ok jv =>
-        match Tropical.Parse.decodeProgram jv with
-        | .error e => internalError s!"session root: {e}"
-        | .ok p => pure p
-    match Tropical.Ir.elaborateInto st.arena typed
-        (some fun n => (tbl.find? (·.1 == n)).map (·.2)) with
-    | .error e => internalError e.message
     | .ok r => pure r
   let (rootArena, rootCore) ← match Tropical.Ir.checkResolvedArena arena' rootIdx with
     | .error e => internalError s!"{ctx}: post-construction Core check failed (engine bug): {e}"
@@ -452,10 +436,8 @@ def buildSessionInputVia (env : Env) (useArrow : Bool) (ctx : String)
     compile leaves the mutated graph in place and the previous kernel playing. -/
 def syncCompile (env : Env) : EngineM Unit := do
   liftIfNeeded env
-  -- The arrow-root path (env.arrowRoot, read once at boot) builds the resolved
-  -- session root directly, deleting the parsed round-trip; unset, the legacy
-  -- elaborate path runs, so default behavior is untouched.
-  let input ← buildSessionInputVia env env.arrowRoot "syncCompile"
+  -- Build the resolved session root directly (the only session path).
+  let input ← buildSessionInputVia env "syncCompile"
   let (plan, stageBlocks) ← match Tropical.Compile.compileSessionStaged input with
     | .error msg => internalError msg
     | .ok p => pure p

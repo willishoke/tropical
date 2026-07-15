@@ -156,17 +156,10 @@ def reversibleCombSpec : WarpBankProgram :=
     inputs := #[clkInputDecl, pitchInputDecl "f0" 110, offsetInputDecl "delta"]
     taps := flangerTaps }
 
-/-- Build the EmitArrow `FlangeSin` (FixedSinOsc voice) — the slice-1 gate.
-    Byte-identical to `diffcli emit-file stdlib/parsed/FlangeSin.json`. -/
-def buildFlanger (arena : Arena) (resolved : Array (String × ProgramIdx)) :
-    Except String (Arena × ProgramIdx) :=
-  buildWarpBank flangeSinSpec arena resolved
-
-/-- Build the EmitArrow `ReversibleComb` (ModalVoice voice) — the slice-2 gate.
-    Byte-identical to `diffcli emit-file stdlib/parsed/ReversibleComb.json`. -/
-def buildReversibleComb (arena : Arena) (resolved : Array (String × ProgramIdx)) :
-    Except String (Arena × ProgramIdx) :=
-  buildWarpBank reversibleCombSpec arena resolved
+-- The canonical `FlangeSin` / `ReversibleComb` / `FixedSin` / `FixedSinOsc` /
+-- `MorphOsc` builders were promoted to `Tropical.Stdlib` (production). The
+-- `flangeSinSpec`/`reversibleCombSpec`/`warpBank`/`morphOscMor` machinery stays
+-- here for the slide/graph/law/carrier gates that still exercise it.
 
 -- ─────────────────────────────────────────────────────────────
 -- C1 — build the FOUNDATIONAL VOICE directly: `FixedSinOsc` from scratch
@@ -200,46 +193,7 @@ def buildReversibleComb (arena : Arena) (resolved : Array (String × ProgramIdx)
     for the `unipolar` bound (`ClockPhasor.offset` ⇒ `clamp _ 0 1`, and the
     `phase` output bound likewise). All plain scalar ops — no richer types. -/
 
-/-- `stdlib/FixedSin.md` as a corpus-gate builder — the SAME ports, defaults,
-    and expression tree as the parsed .md, so `runEmitCorpusGate` can assert
-    the two emits byte-identical (the lockstep proof that the Sig builder and
-    the literate source describe one algorithm). -/
-def buildFixedSin (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
-    Except String (Arena × ProgramIdx) :=
-  let phase : Sig := .inputRef ⟨0⟩
-  .ok (assemble arena "FixedSin"
-    #[ { name := "phase", type? := some (.scalar .int),
-         defaultSig := some (lit 0) } ]
-    #[{ name := "out", type? := some (.scalar .int) }]
-    #[] #[(.port ⟨0⟩, fixedSinCycSig phase)] #[])
-
-def buildFixedSinOsc (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
-    Except String (Arena × ProgramIdx) :=
-  let freqIn : Sig := .inputRef ⟨0⟩
-  let clk : Clock := .inputRef ⟨1⟩
-  let twoPow32 := lit 4294967296
-  let mask := lit 4294967295
-  -- FixedPhasor (= ClockPhasor at clk): the integer split-multiply, exact on ℤ/2³².
-  let inc := toIntE (div (mul freqIn twoPow32) .sampleRate)
-  let thi := rshift clk (lit 32)
-  let tlo := bitAnd clk mask
-  let off := toIntE (mul (.inputRef ⟨2⟩) twoPow32)   -- offset = the `phase` input (port 2)
-  let acc := add (add (mul inc thi) (rshift (mul inc tlo) (lit 32))) off
-  let phase := clampE (div (toFloatE (bitAnd acc mask)) twoPow32) (lit 0) (lit 1)
-  -- Re-land the phasor's Q0.32 integer EXACTLY (phase = P/2³² with P < 2³² ≪
-  -- 2⁵³, so the float round-trip is lossless), evaluate the Q2.30 datapath
-  -- sine, scale to float once at the voice boundary.
-  let pQ := toIntE (mul phase twoPow32)
-  let sine := div (toFloatE (fixedSinCycSig pQ)) (lit 1073741824)
-  .ok (assemble arena "FixedSinOsc"
-    #[ { name := "freq", type? := some (.scalar .float),
-         defaultSig := some (selectE (gt (lit 440) (lit 0)) (lit 440) (lit 0)) },
-       { name := "clk", type? := some (.scalar .int),
-         defaultSig := some (lshift .sampleIndex (lit 32)) },
-       { name := "phase", type? := some (.scalar .float),
-         defaultSig := some (clampE (lit 0) (lit 0) (lit 1)) } ]
-    #[{ name := "sine", type? := some (.scalar .float) }]
-    #[] #[(.port ⟨0⟩, sine)] #[])
+-- `buildFixedSin` / `buildFixedSinOsc` promoted to `Tropical.Stdlib`.
 
 -- ─────────────────────────────────────────────────────────────
 -- C1 — a real MULTI-PORT program from the cartesian combinators: `MorphOsc`
@@ -299,25 +253,8 @@ def morphOscMor : Mor :=
       (seq (first 1 (fan sawMor sinMor))                  -- → [saw, sin, morph]
            crossfadeMor))                                  -- → [out]
 
-/-- Build the EmitArrow `MorphOsc` (real input ports) into `arena` — the
-    products/MIMO corpus gate. Byte-identical to `diffcli emit-stdlib MorphOsc`.
-    The input decls reproduce the elaborator's lowering of the source port types
-    (`freq` ⇒ `select(hz>0, hz, 0)`, `unipolar` ⇒ `clamp _ 0 1`,
-    `clock` ⇒ `sampleIndex << 32`); the registry links `ClockPhasor` and `Sin`. -/
-def buildMorphOsc (arena : Arena) (resolved : Array (String × ProgramIdx)) :
-    Except String (Arena × ProgramIdx) := do
-  let registry ← buildRegistry arena resolved #["ClockPhasor", "FixedSin"]
-  let (outs, b) := morphOscMor #[.inputRef ⟨0⟩, .inputRef ⟨1⟩, .inputRef ⟨2⟩, .inputRef ⟨3⟩] {}
-  .ok (assemble arena "MorphOsc"
-    #[ { name := "freq", type? := some (.scalar .float),
-         defaultSig := some (selectE (gt (lit 220) (lit 0)) (lit 220) (lit 0)) },
-       { name := "morph", type? := some (.scalar .float),
-         defaultSig := some (clampE (lit 0) (lit 0) (lit 1)) },
-       clkInputDecl,
-       { name := "phase", type? := some (.scalar .float),
-         defaultSig := some (clampE (lit 0) (lit 0) (lit 1)) } ]
-    #[{ name := "out", type? := some (.scalar .float) }]
-    b.decls #[(.port ⟨0⟩, outs[0]!)] registry)
+-- `buildMorphOsc` promoted to `Tropical.Stdlib` (the `morphOscMor` pipeline
+-- stays here — `buildMorphOscLit` still uses it).
 
 /-- An input-free `MorphOsc` carrier (literal `freqHz`, literal `morph`,
     closed-form `clk = sampleIndex << 32`) for the standard-rep differential —

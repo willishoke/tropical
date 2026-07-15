@@ -100,28 +100,40 @@ def registerOne (env : Env) (name : String) (p : Tropical.Parse.Program)
   let (arena', rawIdx) ← match Tropical.Ir.elaborateInto st.arena p (some res) with
     | .error e => internalError e.message
     | .ok r => pure r
-  -- Phase 5 stage 6b: concrete programs ship POST-STRATA resolved.
-  let isGeneric := !(p.typeParams.getD #[]).isEmpty
-  let (arenaShip, shipIdx) ←
-    if isGeneric then pure (arena', rawIdx)
-    else strataConcrete st arena' rawIdx
+  -- Concrete only (generics retired): strata the elaborated program and adopt
+  -- its post-strata entry — the same tail as `registerResolved`.
+  let (arenaShip, shipIdx) ← strataConcrete st arena' rawIdx
   env.state.modify fun st => { st with arena := arenaShip }
-  let entry ← if isGeneric then
-      pure (Tropical.Entries.genericEntry arenaShip name shipIdx)
-    else
-      match Tropical.Entries.concreteEntry arenaShip name shipIdx with
-      | .error e => internalError e
-      | .ok j => pure j
+  let entry ← match Tropical.Entries.concreteEntry arenaShip name shipIdx with
+    | .error e => internalError e
+    | .ok j => pure j
   env.state.modify (·.addProgram (ProgMeta.fromEntry entry))
   let idx? ← adoptResolved env entry
-  -- templateByName mirrors what TS `session.programs.set(name, ...)`
-  -- stored: the decided-by-this-item form, NOT whatever entryFor
-  -- echoed (a generic redefining a concrete name gets a STALE concrete
-  -- entry from the service's typeRegistry — TS still stores the new
-  -- generic template in session.programs).
   env.state.modify fun st => { st with
-    templateByName := st.templateByName.insert name
-      (if isGeneric then rawIdx else idx?.getD rawIdx) }
+    templateByName := st.templateByName.insert name (idx?.getD rawIdx) }
+  pure (entry, rawIdx)
+
+/-- Register an already-resolved (arrow-builder) program — the concrete tail of
+    `registerOne` with the elaboration skipped. `arena'`/`rawIdx` are a builder's
+    output (`assemble` appended the RAW program to `arena'` at `rawIdx`, linking
+    sub-programs by name against the chain built so far, exactly as boot
+    elaboration linked against the raw stdlib map). `strataConcrete` relinks that
+    raw registry to the post-strata canon (`templateByName`) and runs strata;
+    the store adopts the service round-trip, one copy. The boot chain
+    (`Tropical.EmitArrow.stdlibBuilders`) registers each program this way. -/
+def registerResolved (env : Env) (name : String)
+    (arena' : Tropical.Ir.Arena) (rawIdx : Tropical.Ir.ProgramIdx) :
+    EngineM (Json × Tropical.Ir.ProgramIdx) := do
+  let st ← env.state.get
+  let (arenaShip, shipIdx) ← strataConcrete st arena' rawIdx
+  env.state.modify fun s => { s with arena := arenaShip }
+  let entry ← match Tropical.Entries.concreteEntry arenaShip name shipIdx with
+    | .error e => internalError e
+    | .ok j => pure j
+  env.state.modify (·.addProgram (ProgMeta.fromEntry entry))
+  let idx? ← adoptResolved env entry
+  env.state.modify fun s => { s with
+    templateByName := s.templateByName.insert name (idx?.getD rawIdx) }
   pure (entry, rawIdx)
 
 end Tropical.Engine

@@ -11,11 +11,6 @@ maps stay opaque `Json` (tropical leaves them untyped too).
 
 open Lean Turnstile
 
-tool_args DefineProgram where
-  /-- A tropical_program_2 object defining the program. -/
-  «def» : Json
-deriving instance ToJson for DefineProgram
-
 tool_args AddInstance where
   /-- Registered program/type name (builtin or user-defined). -/
   program : String

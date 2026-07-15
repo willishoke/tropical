@@ -42,7 +42,7 @@ feedback.
 ## tropical_program_2
 
 The body is a `block` of `decls` (param_decl, instance_decl, program_decl) and
-`assigns` (output_assign). Ports and type_params sit alongside the body.
+`assigns` (output_assign). Ports sit alongside the body.
 **Audio output is an `output_assign` in the body with name `"dac.out"`** — wire
 the signal you want heard to it. Session metadata — `params`, `config` — is
 top-level.
@@ -132,7 +132,7 @@ top-level.
 }
 
 Key fields: schema, name, ports (inputs/outputs/type_defs), body (block),
-type_params, sample_rate, and top-level session metadata (params, config). Send
+sample_rate, and top-level session metadata (params, config). Send
 a signal to the speakers with a body `output_assign` named `"dac.out"`.
 (File-root `audio_outputs` is deprecated — don't use it.)
 

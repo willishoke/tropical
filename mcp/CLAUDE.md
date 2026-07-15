@@ -63,7 +63,10 @@ SessionState
 
 The strata pipeline (`assertAcyclic → specialize → sumLower →
 inlineInstances → arrayLower → identityElim`) runs per-instance at
-instance-type resolution. tropical is closed-form-only: every kernel is
+instance-type resolution. (`specialize` — the old generic-monomorphization
+pass — is inert now: no program declares type parameters, so it
+substitutes nothing and drops nothing. It stays in the chain as an
+identity pass.) tropical is closed-form-only: every kernel is
 a pure `f(τ, params)` with no per-sample state, so there is nothing to
 break a cycle around. `assertSessionAcyclic` is therefore a plain "no
 cycles at all" rule — inter-instance cycles are rejected outright, and
@@ -81,12 +84,14 @@ error envelope (see below) and the previous kernel keeps playing.
 
 The engine owns one `SessionState`. The fields tools read and mutate:
 
-- `typeRegistry` — registered concrete types (`define_program`,
-  stdlib loading); the metadata-wrapper form.
-- `programs` — unified registry of every registered program, both
-  concrete (post-strata, `typeParams=[]`) and generic templates (raw,
-  `typeParams.length > 0`).
-- `specializationCache` — keyed by `Type<N=8>`-style cache keys.
+- `typeRegistry` — registered concrete types; the metadata-wrapper
+  form. Populated by the `Tropical.Stdlib` boot (the 15 arrow-builder
+  programs) and by any concrete definitions carried inline in a loaded
+  `tropical_program_2` file.
+- `programs` — the registry of every registered program. Concrete
+  only (post-strata, `typeParams = []`): there are no generic
+  templates. New DSP types are authored as `Tropical.Stdlib` arrow
+  builders in Lean, not registered over the wire.
 - `instanceRegistry` — live instances.
 - `inputExprNodes` — wiring (`"inst:input" → ExprNode`).
 - `graphOutputs` — what wires to dac.
@@ -102,18 +107,23 @@ not a real instance.
 
 ### Program management
 
-- `define_program` — register a reusable type from a `tropical_program_2`
-  object. Generic programs (declaring `type_params`) become templates
-  that monomorphize at instance time.
-- `add_instance` — instantiate a registered type by name. `type_args`
-  for generics (e.g. `{N: 8}`). Validates uniqueness.
+New DSP types are **not** defined over the wire. They are authored as
+`Tropical.Stdlib` arrow-combinator builders in Lean and booted directly
+by the engine (15 at present) — no parse bridge, no literate `.md`
+surface language. The former `define_program` tool and its entire
+generics apparatus (`type_params` / `type_args`, monomorphization, the
+specialization cache) are gone; every registered program is concrete.
+
+- `add_instance` — instantiate a registered type by name. Validates
+  uniqueness. Since no program declares `type_params`, passing
+  `type_args` is always rejected with `invalid_type_args`.
 - `remove_instance` — delete an instance, cascade-clean wiring that
   references it.
 - `replicate` — create N instances in one call (does not trigger
   recompile by itself; pair with `wire`).
-- `list_programs` — concrete types + generic templates with ports,
-  defaults, and `type_params`.
-- `list_instances` — live instances with their `type_args`.
+- `list_programs` — the registered concrete types with their ports and
+  input defaults.
+- `list_instances` — live instances with their base type and ports.
 - `get_info` — detailed port / wiring info for one instance.
 
 ### Wiring
@@ -143,9 +153,14 @@ stateful sister runtime, "supertropical"; see `design/cf-only.md`.)
   reusable `ProgramType`. Current wiring becomes input defaults.
   Optionally removes the exported instances.
 - `load` — `tropical_program_2` JSON (path or inline). Stops audio,
-  recreates the session.
+  recreates the session from the file's instances + wiring over
+  already-registered programs. A self-contained file may also carry
+  inline **concrete** program definitions — they register through the
+  same JSON front door `export_program` uses; inline *generic*
+  definitions are rejected.
 - `save` — session → `tropical_program_2` JSON.
-- `merge` — additive: instances + wiring without clearing the session.
+- `merge` — additive: instances + wiring of already-registered programs
+  without clearing the session.
 
 ### Control parameters
 

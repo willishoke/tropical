@@ -133,19 +133,13 @@ structure SessionSt where
   /-- The registration-path mirror of TS `session.programs` (Phase 4
       stage 4b): for every *registered* program name, the arena index of
       the form the TS map holds — post-strata for concrete programs
-      (adopted from the service entry), the engine's own raw elaborated
-      template for generics. `define_program` elaboration resolves
-      cross-program references through this map, exactly like the TS
-      elaborator's `externalResolver` over `session.programs`. Distinct
+      (adopted from the entry). Cross-program references — the JSON front
+      door (`load`/`merge`/`export_program`) and the builder chain at boot
+      — resolve through this map via the elaborator's external resolver.
+      Distinct
       from `resolvedByName`, which is keyed by *decoded* prog names and
       also collects specializations adopted via `resolve_type`. -/
   templateByName : Std.HashMap String Tropical.Ir.ProgramIdx := {}
-  /-- The engine-side mirror of TS `session.specializationCache`
-      (Phase 5 stage 6b): `Type<N=8>` cache key → the specialized
-      entry's port metadata + adopted store index. A hit skips the
-      strata run AND the service round trip — the service saw the key
-      on the first miss and keeps its own Compiled cached. -/
-  specializationCache : Std.HashMap String (ProgMeta × Option Tropical.Ir.ProgramIdx) := {}
 
 namespace SessionSt
 

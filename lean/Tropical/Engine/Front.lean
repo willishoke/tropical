@@ -1,4 +1,5 @@
 import Tropical.Engine.Audio
+import Tropical.Stdlib
 
 /-!
 # Engine.Front — the tool dispatcher and boot
@@ -55,7 +56,6 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   -- disciplines, display metadata) — clients render it, never re-encode it.
   -- Session-independent, so it just echoes.
   | "get_vocabulary" => pure Tropical.Playground.vocabularyJson
-  | "define_program"  => handleDefineProgram env args
   | "add_instance"    => handleAddInstance env args
   | "remove_instance" => handleRemoveInstance env args
   | "replicate"       => handleReplicate env args
@@ -89,49 +89,36 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
 
 -- ── Boot ─────────────────────────────────────────────────────────────────────
 
-/-- Spawn the compiler service, boot the stdlib from the pre-parsed
-    bridge, build the Env.
+/-- Boot the stdlib and build the Env.
 
-    The service no longer loads the stdlib (Phase 4 stage 4b): the
-    engine reads `stdlib/parsed/manifest.json` (the registration order
-    `loadStdlib` produced) and each `stdlib/parsed/<Name>.json` from
-    the repo root, and registers each through the SAME
-    elaborate→register→adopt flow `define_program` uses. Mirroring
-    `loadStdlibFromResolved`: stdlib elaboration resolves siblings
-    through the RAW elaborated map (TS `localResolved`), and the
-    service relinks concrete registrations to the post-strata canon
-    before strata (its `processedByName` step) — so the registered
-    catalog is byte-faithful to the old TS `loadStdlib`. Any failure
-    here is fatal: the engine cannot compile without its store. -/
+    The stdlib is the arrow-builder chain (`Tropical.EmitArrow.stdlibBuilders`),
+    the 15 live programs authored directly as `Sig`/`assemble` builders — no
+    `.md` source, no parsed bridge, no elaboration. Each builder appends its raw
+    program to the arena, linking sub-programs by name against the chain built so
+    far (deps precede dependents in manifest order); `registerResolved` relinks
+    that raw registry to the post-strata canon and adopts the catalog entry. Any
+    failure here is fatal: the engine cannot compile without its store. -/
 def boot : IO Env := do
   let state ← IO.mkRef ({} : SessionSt)
   let runtime ← Ffi.Runtime.new 512
   let dac ← IO.mkRef (none : Option Ffi.Dac)
   let metalBackend := (← IO.getEnv "TROPICAL_BACKEND") == some "metal"
-  let arrowRoot := (← IO.getEnv "TROPICAL_ARROW").isSome
-  let env : Env := { state, runtime, dac, metalBackend, arrowRoot }
-  let manifestText ← IO.FS.readFile "stdlib/parsed/manifest.json"
-  let names ← match Json.parse manifestText with
-    | .error e => throw <| IO.userError s!"stdlib/parsed/manifest.json: {e}"
-    | .ok j =>
-      match j.getObjVal? "programs" with
-      | .ok (.arr ns) => pure <| ns.filterMap fun n =>
-          match n with | .str s => some s | _ => none
-      | _ => throw <| IO.userError "stdlib/parsed/manifest.json: missing programs[]"
+  let env : Env := { state, runtime, dac, metalBackend }
+  -- The stdlib is the arrow-builder chain (`Tropical.EmitArrow.stdlibBuilders`),
+  -- no longer the parsed-.md bridge. Each builder appends its RAW program to the
+  -- arena, linking sub-programs by name against the chain built so far;
+  -- `registerResolved` relinks that raw registry to the post-strata canon and
+  -- adopts the catalog entry. Manifest order == the chain order, so the catalog
+  -- (and `list_programs`) ordering is preserved.
   let registerAll : EngineM Unit := do
-    let mut raw : Std.HashMap String Tropical.Ir.ProgramIdx := {}
-    for name in names do
-      let path := s!"stdlib/parsed/{name}.json"
-      let text ← IO.FS.readFile path
-      let prog ← match Tropical.Parse.JsonV.parse text with
-        | .error e => internalError s!"{path}: JSON parse failed: {e}"
-        | .ok jv =>
-          match Tropical.Parse.decodeProgram jv with
-          | .error e => internalError s!"{path}: {e}"
-          | .ok p => pure p
-      let rawMap := raw
-      let (_, rawIdx) ← registerOne env name prog (some fun n => rawMap.get? n)
-      raw := raw.insert name rawIdx
+    let mut chain : Array (String × Tropical.Ir.ProgramIdx) := #[]
+    for (name, build) in Tropical.EmitArrow.stdlibBuilders do
+      let st ← env.state.get
+      let (arena', rawIdx) ← match build st.arena chain with
+        | .error e => internalError s!"stdlib builder '{name}': {e}"
+        | .ok r => pure r
+      let _ ← registerResolved env name arena' rawIdx
+      chain := chain.push (name, rawIdx)
   match ← registerAll.run with
   | .ok () => pure ()
   | .error f => throw <| IO.userError s!"stdlib boot failed: {f.toJson.compress}"

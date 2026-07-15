@@ -6,7 +6,6 @@ import Tropical.Plan
 import Tropical.Ir.EmitLlvm
 import Tropical.Ir.EmitMsl
 import Tropical.PlanDecode
-import Tropical.Parse.Surface.Markdown
 import Tropical.Parse.Raise
 import Tropical.Ir.Elaborator
 import Tropical.Ir.Strata
@@ -14,6 +13,7 @@ import Tropical.Ir.Core
 import Tropical.Ir.CompileResolved
 import Tropical.Compile
 import Tropical.EmitArrow
+import Tropical.Stdlib
 import Tropical.Testing.ArrowFixtures
 import Tropical.Testing.EngineMirror
 import Tropical.Testing.PlanWire
@@ -100,11 +100,6 @@ def main (args : List String) : IO UInt32 := do
   total := total + 1
   if !(← runBanksRegionHoist) then failed := failed + 1
 
-  -- ── (c′) C4: session → resolved root directly ≡ the elaborate round-trip ───
-  IO.println "session via direct root (sessionToResolvedRoot ≡ sessionToParsed→elaborate):"
-  total := total + 1
-  if !(← runSessionViaArrowEquiv) then failed := failed + 1
-
   -- ── (c″) Stage differential: intern-time attribute ⊑ the flow pass ─────────
   IO.println "stage differential (typed StageSig vs Stage0 flow classification):"
   total := total + 1
@@ -114,22 +109,6 @@ def main (args : List String) : IO UInt32 := do
   IO.println "split equivalence (typed hoist ≡ flow hoist, byte-for-byte):"
   total := total + 1
   if !(← runSplitEquiv) then failed := failed + 1
-
-  -- ── (d) let-binding serialization order (ordered-array round-trip) ─────────
-  IO.println "let serialization order:"
-  total := total + 1
-  if !(← runLetRoundtrip) then failed := failed + 1
-
-  -- ── (e) Reversibility: closed-form-in-τ ⇒ palindromic render ───────────────
-  IO.println "reversibility (closed-form-in-tau palindrome):"
-  total := total + 1
-  if !(← runReversibility) then failed := failed + 1
-  total := total + 1
-  if !(← runFlangerReversibility) then failed := failed + 1
-  total := total + 1
-  if !(← runClockPhasorEquiv) then failed := failed + 1
-  total := total + 1
-  if !(← runClockReverseProbe) then failed := failed + 1
 
   -- ── (f) CF goldens (tests/golden/cf/*.hash) — the closed-form corpus ───────
   -- The corpus that must stay green through every phase of the CF-only
@@ -154,14 +133,6 @@ def main (args : List String) : IO UInt32 := do
   total := total + 1
   if !(← runMslFold) then failed := failed + 1
 
-  -- ── (g) CF-only enforcement: cfOnly strata mode rejects per-sample state ───
-  IO.println "cf-only enforcement (reg/next unrepresentable):"
-  total := total + 1
-  if !(← runCfOnly "CfProbe" cfOnlyRejectSrc (expectReject := true)) then failed := failed + 1
-  total := total + 1
-  if !(← runCfOnly "Sin" (← IO.FS.readFile "stdlib/Sin.md") (expectReject := false)) then
-    failed := failed + 1
-
   -- ── (h) EmitArrow arrow laws (slice 3): warp algebra ≡ in rendered audio ────
   IO.println "arrow laws (warp algebra ≡ byte-identical audio):"
   match ← arrowElabStdlib with
@@ -169,52 +140,25 @@ def main (args : List String) : IO UInt32 := do
     IO.println s!"  FAIL  arrow-laws  elaborate stdlib: {firstLine e}"
     total := total + 13; failed := failed + 13
   | .ok (arena, resolved) =>
-    -- ── (h′) EmitArrow corpus gate: EmitArrow's emit ≡ strata's emit byte-wise ─
-    -- The cutover instrument (phase C1). FlangeSin/ReversibleComb generalize the
-    -- slices-1/2 byte-gate (formerly an external `diff` of two diffcli verbs);
-    -- FixedSinOsc builds the foundational voice DIRECTLY (phasor + Sin poly, no
-    -- sourced instance) and is byte-identical to `emit-stdlib FixedSinOsc`.
-    IO.println "emitarrow corpus gate (EmitArrow emit ≡ strata emit, byte-identical):"
-    total := total + 1
-    if !(← runEmitCorpusGate "FlangeSin" "FlangeSin" arena resolved
-          Tropical.EmitArrow.buildFlanger) then
-      failed := failed + 1
-    total := total + 1
-    if !(← runEmitCorpusGate "ReversibleComb" "ReversibleComb" arena resolved
-          Tropical.EmitArrow.buildReversibleComb) then
-      failed := failed + 1
-    total := total + 1
-    if !(← runEmitCorpusGate "FixedSinOsc" "FixedSinOsc" arena resolved
-          Tropical.EmitArrow.buildFixedSinOsc) then
-      failed := failed + 1
-    -- The fixed-point DATAPATH sine (scope A): the Sig builder and the literate
-    -- .md describe one algorithm, byte-identical through the same emit recipe.
-    total := total + 1
-    if !(← runEmitCorpusGate "FixedSin" "FixedSin" arena resolved
-          Tropical.EmitArrow.buildFixedSin) then
-      failed := failed + 1
-    -- products/MIMO: MorphOsc — a real multi-port body (ClockPhasor ⋙ (saw &&&
-    -- Sin) ⋙ crossfade) built from the cartesian combinators, byte-identical.
-    total := total + 1
-    if !(← runEmitCorpusGate "MorphOsc" "MorphOsc" arena resolved
-          Tropical.EmitArrow.buildMorphOsc) then
-      failed := failed + 1
-    -- THE SLIDE (WARP-PUSH), Test 1: build FlangeSin from the DOWNSTREAM-insert
-    -- form (osc ⋙ flange, warps unreduced), run the slide, emit — byte-identical
-    -- to stdlib FlangeSin. The compiler turns "flanger dropped downstream" into
-    -- "oscillator read at warped clocks." First compiler-driven downstream→upstream.
+    -- ── (h′) The slide + patcher variants: FlangeSin built the OTHER two ways —
+    -- a downstream-insert run through the slide, and a patch graph lowered end to
+    -- end — must also reach the frozen artifact byte-for-byte (the arrow EDSL's
+    -- own machinery proof, not a stdlib program).
+    IO.println "emitarrow slide/patcher variants (≡ FlangeSin byte-identical):"
     total := total + 1
     if !(← runEmitCorpusGate "FlangeSinSlide" "FlangeSin" arena resolved
           Tropical.EmitArrow.buildFlangerViaSlide) then
       failed := failed + 1
-    -- THE PATCHER LOWERING, L1: lower the GRAPH `osc → flange` (instances + a
-    -- downstream wire), slide, emit — byte-identical to stdlib FlangeSin. The
-    -- user's patch graph, lowered end to end, reaches the exact hand-written
-    -- program. This is the MVP front end hitting the frozen artifact.
     total := total + 1
     if !(← runEmitCorpusGate "FlangeFromGraph" "FlangeSin" arena resolved
           Tropical.EmitArrow.buildFlangeFromGraph) then
       failed := failed + 1
+    -- ── (h‴) Stdlib wire+port goldens: the PERMANENT anchor. Folds the builder
+    -- chain (no bridge) and freezes each program's plan-wire + port surface —
+    -- what guards the 15 builders once the parse bridge is deleted.
+    IO.println "stdlib wire+port goldens (builder chain ≡ frozen):"
+    total := total + 1
+    if !(← runStdlibWireGoldens writeMode) then failed := failed + 1
     IO.println "arrow laws (warp algebra ≡ byte-identical audio):"
     -- ── PER-LAW CARRIER TABLE (load-bearing — see design/fixed-carrier.md) ──
     -- Which value carrier each law rides is a CHOICE, not an accident: laws

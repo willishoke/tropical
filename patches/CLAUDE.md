@@ -29,8 +29,8 @@ under `web/patches/` and is precompiled via `bun web/build_patches.ts`.
 
 - **body.decls** — ordered list of `reg_decl`, `delay_decl`,
   `instance_decl`, `program_decl`. `instance_decl.program` must match
-  a registered type (PascalCase: `Sin`, `Clock`, `LadderFilter`,
-  `VCA`, …). For generic types pass `type_args: { N: 8 }` etc.
+  a registered type (PascalCase: `Sin`, `ModalVoice`, `FixedSinOsc`,
+  `VCA`, …). Generics are retired — there are no `type_args`.
 - **body.assigns** — `output_assign` (a wire to a named output port)
   and `next_update` (a register/delay update). Empty at the top level
   of an audio-only patch.
@@ -73,12 +73,14 @@ Available scalar ops: `add`, `sub`, `mul`, `div`, `mod`, `floor_div`,
 `lshift`, `rshift`, `bit_not`, `not`, `clamp`, `select`, `index`,
 `array_set`, `to_int`, `to_bool`, `to_float`, `round`, `floor`,
 `ceil`. Transcendentals (`sin`, `cos`, `tanh`, `exp`, `log`, `pow`)
-are stdlib programs (`stdlib/*.md`); instantiate one and reference
-its output via `ref`.
+are `Tropical.Stdlib` builder programs (`lean/Tropical/Stdlib.lean`,
+booted directly by the engine); instantiate one and reference its
+output via `ref`.
 
 ### Common program types and their I/O
 
-See `stdlib/README.md` for the full catalogue. The most-used handful:
+See `Tropical.Stdlib` (`lean/Tropical/Stdlib.lean`) for the full
+catalogue of builder programs. The most-used handful:
 
 | Type           | Inputs                                        | Outputs                  |
 |----------------|-----------------------------------------------|--------------------------|
@@ -90,5 +92,3 @@ See `stdlib/README.md` for the full catalogue. The most-used handful:
 | `OnePole`      | `input`, `g`                                  | `out`                    |
 | `LadderFilter` | `input`, `cutoff`, `resonance`, `drive`       | `lp`, `bp`, `hp`, `notch`|
 | `SoftClip`     | `input`, `drive`                              | `out`                    |
-| `Delay<N>`     | `x`                                           | `y`                      |
-| `Sequencer<N>` | `clock`, `values: float[N]`                   | `value`                  |

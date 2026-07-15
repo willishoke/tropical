@@ -414,9 +414,13 @@ private def ingestProgram (env : Env) (node : Tropical.Parse.JsonV)
       if st.params.any (·.1 == name) then
         internalError s!"merge collision: param '{name}' already exists."
 
-  -- Inline program definitions, each through the engine registration
-  -- batch (nested programDecls depth-first, exactly loadProgramAsType's
-  -- recursion).
+  -- A loaded tropical_program_2 file may carry inline program definitions of
+  -- concrete (non-generic) types — a self-contained patch. These register
+  -- through the JSON front door (raise → elaborate → strata), the same path
+  -- `export_program` uses. The agent-facing `define_program` TOOL is gone; this
+  -- file-level ingest survives (the banks/fold test corpus defines FoldProbe
+  -- this way, and it is the only route left for a fold-bearing program, which no
+  -- Stdlib builder is).
   for d in jvBodyEntries node "decls" do
     if jvOp? d == some "programDecl" then
       let some subName := jvStr? d "name"
@@ -525,8 +529,7 @@ def handleLoad (env : Env) (args : Json) : EngineM Json := do
   let (node, top) ← match Tropical.Parse.Raise.normalizeProgramFile jv with
     | .error msg => internalError msg
     | .ok r => pure r
-  -- Clear the session (typeRegistry / programs / specializationCache
-  -- survive — they hold the stdlib + session-defined types).
+  -- Clear the session (the registered programs survive — they hold the stdlib).
   env.state.modify fun st =>
     { st with instances := #[], wires := #[], graphOutputs := #[],
               params := #[], nameCounters := {} }

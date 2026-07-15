@@ -1,4 +1,5 @@
 import Tropical.Tropicaltest.Reversibility
+import Tropical.Entries
 
 /-!
 # Tropical.Tropicaltest.ArrowLaws
@@ -98,6 +99,104 @@ def runEmitCorpusGate (label stdName : String)
         passGate s!"corpus-gate/{label}" s!"EmitArrow ≡ emit-stdlib {stdName} ({got.length}B)"
       else
         failGate s!"corpus-gate/{label}" s!"EmitArrow ≠ emit-stdlib {stdName} (EmitArrow {got.length}B, stdlib {want.length}B)"
+
+/-- Port-metadata equivalence (Stage 1 registry-equiv, per program): assert the
+    builder's post-strata catalog entry has byte-identical `inputs`/`outputs`
+    (port names, types, type_objs, and defaults — the ProgMeta that
+    list_programs / get_info / add_instance surface) to the bridge stdlib
+    program's. Both sides run the same strata (`Strata.run`, all ported passes,
+    inline) then `Entries.concreteEntry`; only the port surface is compared.
+    The resolved-body SEMANTICS are the corpus gate's job (plan-wire identity);
+    this pins the port surface, which the plan doesn't fully exercise (unwired
+    defaults). `binderCount` — a count of source `let`-binders, non-load-bearing
+    (nothing in Compile/Emit reads it) and legitimately 0 for a DAG-authored
+    builder — lives in the resolved codec, not the port surface, and is out of
+    scope by construction. -/
+def runEntryEquivGate (label stdName : String)
+    (arena : Arena) (resolved : Array (String × ProgramIdx))
+    (builder : Arena → Array (String × ProgramIdx) → Except String (Arena × ProgramIdx)) :
+    IO Bool := do
+  let portsOf (a : Arena) (i : ProgramIdx) : Except String String := do
+    let (a', i') ← (Tropical.Ir.Strata.run
+      { upto := Tropical.Ir.Strata.portedPasses, inlineNested := true } a i).mapError (·.message)
+    let e ← Tropical.Entries.concreteEntry a' stdName i'
+    let ins := (e.getObjVal? "inputs").toOption.getD Lean.Json.null
+    let outs := (e.getObjVal? "outputs").toOption.getD Lean.Json.null
+    pure (Lean.Json.mkObj [("inputs", ins), ("outputs", outs)]).compress
+  let some (_, stdIdx) := resolved.find? (·.1 == stdName)
+    | failGate s!"entry-equiv/{label}" s!"stdlib '{stdName}' not in elaborated chain"
+  match builder arena resolved with
+  | .error e => failGate s!"entry-equiv/{label}" s!"build: {firstLine e}"
+  | .ok (arena', idx) =>
+    match portsOf arena' idx, portsOf arena stdIdx with
+    | .error e, _ => failGate s!"entry-equiv/{label}" s!"builder ports: {firstLine e}"
+    | _, .error e => failGate s!"entry-equiv/{label}" s!"bridge ports: {firstLine e}"
+    | .ok got, .ok want =>
+      if got == want then
+        passGate s!"entry-equiv/{label}" s!"port metadata ≡ bridge {stdName} ({got.length}B)"
+      else
+        failGate s!"entry-equiv/{label}" s!"port metadata ≠ bridge (builder {got.length}B, bridge {want.length}B)"
+
+/-- Both Stdlib equivalence gates for one builder, against the bridge program of
+    the same name: the corpus gate (plan-wire — resolved-body semantics) AND the
+    entry-equiv gate (port surface — names/types/defaults). PASS iff both pass.
+    This is the per-program acceptance test every `Tropical.Stdlib` builder must
+    clear before it replaces its `.md`. -/
+def runStdlibGate (name : String)
+    (arena : Arena) (resolved : Array (String × ProgramIdx))
+    (builder : Arena → Array (String × ProgramIdx) → Except String (Arena × ProgramIdx)) :
+    IO Bool := do
+  let plan ← runEmitCorpusGate name name arena resolved builder
+  let ports ← runEntryEquivGate name name arena resolved builder
+  pure (plan && ports)
+
+/-- One program's frozen artifact: the compressed `tropical_plan_5` wire plus its
+    concreteEntry port surface (inputs/outputs). The pair the goldens hash. -/
+def stdlibArtifact (arena : Arena) (idx : ProgramIdx) (name : String) : Except String String := do
+  let wire ← emitResolvedWire arena idx
+  let (a', i') ← (Tropical.Ir.Strata.run
+    { upto := Tropical.Ir.Strata.portedPasses, inlineNested := true } arena idx).mapError (·.message)
+  let entry ← Tropical.Entries.concreteEntry a' name i'
+  let ins := (entry.getObjVal? "inputs").toOption.getD Lean.Json.null
+  let outs := (entry.getObjVal? "outputs").toOption.getD Lean.Json.null
+  pure (wire ++ "\n--ports--\n" ++ (Lean.Json.mkObj [("inputs", ins), ("outputs", outs)]).compress)
+
+/-- Freeze / verify the per-program plan-wire + port surface as goldens — the
+    PERMANENT anchor once the parse bridge is gone. Folds the whole stdlib as a
+    builder chain, hashes each program's `stdlibArtifact`, and compares to (or
+    writes, under `--write`) `tests/golden/stdlib/<Name>.hash`. -/
+def runStdlibWireGoldens (writeMode : Bool) : IO Bool := do
+  match Tropical.EmitArrow.buildStdlibChain with
+  | .error e => failGate "stdlib-goldens" s!"build chain: {firstLine e}"
+  | .ok (arena, chain) => do
+    if writeMode then IO.FS.createDirAll "tests/golden/stdlib"
+    let mut ok := true
+    let mut n := 0
+    for (name, idx) in chain do
+      match stdlibArtifact arena idx name with
+      | .error e =>
+        IO.println s!"  FAIL  stdlib-goldens/{name}  emit: {firstLine e}"
+        ok := false
+      | .ok art =>
+        let hash ← sha256Hex art.toUTF8
+        let path := s!"tests/golden/stdlib/{name}.hash"
+        let hasGolden ← System.FilePath.pathExists path
+        if writeMode then
+          IO.FS.writeFile path (hash ++ "\n")
+          n := n + 1
+        else if !hasGolden then
+          IO.println s!"  FAIL  stdlib-goldens/{name}  no golden (run tropicaltest --write)"
+          ok := false
+        else
+          let stored := (← IO.FS.readFile path).trim
+          if stored == hash then
+            n := n + 1
+          else
+            IO.println s!"  FAIL  stdlib-goldens/{name}  {hash} ≠ golden {stored}"
+            ok := false
+    let suffix := if writeMode then " (WROTE)" else ""
+    if ok then passGate "stdlib-goldens" s!"{n} programs ≡ frozen wire+port goldens{suffix}"
+    else pure false
 
 /-- Certify one warp law: build LHS and RHS carriers, render both, assert the
     rendered audio is byte-identical (SHA256). Also reports whether the emitted

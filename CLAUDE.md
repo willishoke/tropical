@@ -16,7 +16,6 @@ make build          # C++ core, outputs build/libtropical.dylib
 make lean           # Lean frontend + diffcli (the production compiler + MCP server)
 make mcp-lean       # build C++ + Lean front door, then launch the MCP server
 make validate       # build + lean + tropicaltest + web build + bun test + ctest
-make parse-all      # regenerate stdlib/parsed/*.json from stdlib/*.md (Lean surface parser)
 make clean          # remove build directories
 ```
 
@@ -93,20 +92,16 @@ the next pass doesn't have to reason about. Reading the pipeline from
 top to bottom:
 
 ```
-literate .md source / tropical_program_2 JSON / MCP mutations
+arrow-combinator builders (Tropical.Stdlib / EmitArrow)  ·  MCP patch graphs  ·  tropical_program_2 JSON (load / export)
   │
-  │  parse  — drops layout, comments, sugar (`in [lo, hi]` → clamp/select)
+  │  There is no surface language: the literate .md parser was retired.
+  │  The stdlib and new instruments are authored as arrow builders that
+  │  `assemble` DIRECTLY into the resolved-IR DAG (EmitArrow.Sig → Nodes).
+  │  The JSON front door survives for load/merge/export: `raise`
+  │  (lean/Tropical/Parse/Raise.lean) → ParsedProgram → `elaborate`.
   ▼
-ParsedProgram (lean/Tropical/Parse/Nodes.lean)
-  refs are NameRefNode placeholders; the parser does no scope analysis.
-  surface syntax is a two-stage combinator-lexer + token-array parser
-  under lean/Tropical/Parse/Surface/ (Lexer, Cursor, Expr, Statements,
-  Declarations, Bounds, Markdown).
-  │
-  │  raise  (legacy JSON ingest, lean/Tropical/Parse/Raise.lean) —
-  │         pass-through into the same parsed shape
-  ▼
-ParsedProgram
+ParsedProgram (lean/Tropical/Parse/Nodes.lean)   — JSON-ingest path only
+  refs are NameRefNode placeholders; raise does no scope analysis.
   │
   │  elaborate (lean/Tropical/Ir/Elaborator.lean) — drops names, enforces
   │              the acyclic-source invariant
@@ -119,14 +114,15 @@ ResolvedProgram (lean/Tropical/Ir/Nodes.lean)
   resolved program (they're rejected upstream by the elaborator
   or the session materializer). There is no state primitive: kernels
   are closed-form `f(τ, params)`. (`reg`/`next`/`delay` are gone —
-  the parser has no production for them; recursive feedback is the
-  ceded island, deferred to a future stateful sister runtime.)
+  there is no IR node for them and no way to author one; recursive
+  feedback is the ceded island, deferred to a future stateful sister runtime.)
   │
   │  strata pipeline (lean/Tropical/Ir/Strata.lean,
   │                   passes under lean/Tropical/Ir/Strata/):
   │  ────────────────────────────────────────
   │   assertAcyclic    — confirms the caller honored the contract
-  │   specialize       — drops type parameters       (Specialize.lean)
+  │   specialize       — INERT: generics retired, so it substitutes nothing;
+  │                      stays as an identity pass  (Specialize.lean)
   │   sumLower         — drops sum types (variants → tag + scalar bundles)  (SumLower.lean)
   │   inlineInstances  — drops nesting (inner bodies lifted in place)  (InlineInstances.lean)
   │   arrayLower       — drops shapes and combinators (scan/generate/let/etc.
@@ -139,8 +135,8 @@ ResolvedProgram (post-strata)
   scalar-only · monomorphic · acyclic · non-nested · DECISION-FREE:
   every combinator is retired except `bankSum`, the bounded reduction
   that is itself the normal form for uniform indexed families (modal
-  banks, reverbs, partial banks — and any surface-language summing
-  fold). How to REALIZE it — loop vs unroll — is a backend's decision,
+  banks, reverbs, partial banks — and any summing fold in a loaded
+  program). How to REALIZE it — loop vs unroll — is a backend's decision,
   made below this seam; the trunk refuses it. Order preservation makes
   every realization bit-identical, floats included (no associativity
   precondition). The waist of the hourglass, not the end of the
@@ -149,11 +145,10 @@ ResolvedProgram (post-strata)
 
 Sessions (the MCP/runtime view of a graph in flight) reuse the
 per-program pipeline at the instance level — each instance type is
-elaborated and strata-processed once at load (`resolveProgramType`) —
-and, by default, serialize the whole session **back into a
-`ParsedProgram` and run it through the SAME `elaborate` front door** the
-surface path uses, producing one synthetic root `ResolvedProgram`
-lowered through the same fractal path:
+strata-processed once at load — and build the whole session
+**directly into one synthetic root `ResolvedProgram`**
+(`sessionToResolvedRoot`, no ParsedProgram round-trip), lowered
+through the same fractal path:
 
 ```
 SessionState  (instances + wiring + dac.out + params)
@@ -162,10 +157,10 @@ SessionState  (instances + wiring + dac.out + params)
   │     each instance is already a post-strata ResolvedProgram;
   │     liftWiresToInstances normalizes the wiring;
   │     then the slotted root-program lowering:
-  │       buildSessionRoot: sessionToParsedProgram → elaborate
-  │         (instances → InstanceDecls; the instances'
-  │          already-resolved types are supplied via the elaborator's
-  │          external-program-resolver hook — LINK, not re-elaboration)
+  │       sessionToResolvedRoot: the session graph is already
+  │         post-elaborate-shaped, so the resolved root `Program` is
+  │         built DIRECTLY — instances → InstanceDecls linking each
+  │         instance's already-resolved type snapshot, wires → Ir.Expr
   │       → partitionKernel → tropical_plan_5
   ▼
 tropical_plan_5  (instance_functions[] + sinks[] + sources[])
@@ -196,7 +191,7 @@ post-strata ResolvedProgram (per-program path)  /  SessionState (session path)
         ├─→ compileSession (engine-side: lean/Tropical/{Engine,Compile,Lowering,Wiring}.lean)
         │      liftWiresToInstances →
         │      session-acyclicity check → slotted root-program lowering:
-        │      (sessionToParsedProgram → elaborate → partitionKernel);
+        │      (sessionToResolvedRoot → partitionKernel, no parsed round-trip);
         │      instance_functions = [root] with the session instances as
         │      nested children.
         │      ──── C API boundary (engine/c_api/tropical_c.h, lean/Tropical/Ffi.lean) ────
@@ -269,7 +264,7 @@ Two distinct JSON schemas; do not confuse them.
 
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
-| `tropical_program_2` | `lean/Tropical/Parse/Raise.lean` (JSON ingest) and the surface parser under `lean/Tropical/Parse/Surface/` | The high-detail input shape: a program with typed ports, a body block of decls/assigns, optionally generic in `type_params`. Authored by humans (in literate `.md`) or by agents (over MCP). |
+| `tropical_program_2` | `lean/Tropical/Parse/Raise.lean` (JSON ingest) | The high-detail input shape: a program with typed ports, a body block of decls/assigns. The JSON front door for `load`/`merge`/`export_program` — a loaded file may carry inline concrete program definitions. (No `type_params`: generics are retired. The stdlib is authored as `Tropical.Stdlib` arrow builders, not this schema.) |
 | `tropical_plan_5`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: a root instruction stream (instances nested as `children`) plus `sinks[]` (device-bound outputs: sum input slots × gain → channel) and `sources[]` (runtime-bound inputs: canonical `[tick, rate]`; the dual of sinks). The engine consumes it as the codegen manifest; the web build derives a `.wasm` + a trimmed `KernelManifest` from it. The engine still accepts the older `tropical_plan_4` (single-kernel form, top-level `output_targets` temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 with the canonical sources at parse time. |
 
 Going from the first to the second without losing meaning is exactly
@@ -283,13 +278,14 @@ whole stack — compiler + session + runtime FFI + MCP server, one binary.
 ```
 lean/                 Lean 4: the production compiler + MCP server (one binary)
   Main.lean           the MCP front door → the `frontend` binary
-  Diffcli.lean        the `diffcli` CLI (compile / parse-all)
+  Diffcli.lean        the `diffcli` CLI (compile / compile-wasm / render / emit-ir / emit-msl / raise)
   Tropicaltest.lean   golden + native realization-variant equivalence runner
   ffi/                C shim to libtropical (shim.c, built by `make lean`)
   Tropical/
-    Parse/            parse: Nodes, Raise (JSON ingest), OrderedJson
-      Surface/        two-stage combinator-lexer + token-array surface parser
-                        (Lexer, Cursor, Expr, Statements, Declarations, Bounds, Markdown)
+    Parse/            JSON ingest: Nodes (ParsedProgram), Raise (tropical_program_2),
+                        BoundLower, OrderedJson  (the literate .md surface parser is retired)
+    Stdlib.lean       the stdlib as 15 arrow-combinator builders — the boot chain
+    EmitArrow/        the arrow authoring substrate (Sig, Term, Numerics, Patch, Modal, Gong)
     Ir/               elaborate → strata → emit
       Elaborator.lean   names → decl pointers; CycleViolation on cyclic source
       Strata.lean + Strata/{Specialize,SumLower,InlineInstances,ArrayLower,IdentityElim}
@@ -309,11 +305,10 @@ web/                  WASM/browser backend (precompiled-patch player)
   patches/            curated source patches; build_patches.ts → .wasm + manifest via `diffcli compile-wasm`
   dist/patches/       precompiled <slug>.wasm + <slug>.manifest.json
 patches/              Example patches (tropical_program_2 JSON)
-stdlib/               literate .md programs (see stdlib/README.md); stdlib/parsed/ is the committed parse bridge
 tests/                Cross-cutting test surface
   web/                WASM≡JIT + precompiled-plan equivalence (run vs. the Lean engine)
-  fixtures/           Shared fixtures (flat_plan JSONs, surface/elab/raise/mcp cases)
-  golden/             Audio golden hashes / migration goldens
+  fixtures/           Shared fixtures (flat_plan JSONs)
+  golden/             Audio golden hashes + the per-program stdlib wire+port goldens (golden/stdlib/)
 design/               Architecture and design notes (architecture.md is authoritative)
 ```
 

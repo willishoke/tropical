@@ -17,7 +17,7 @@ Two modes:
 - `--rpc` — the ir_service-compatible newline JSON-RPC surface used by
   the bun test suites and the differential harness
 
-Run from the tropical repo root (so `stdlib/parsed/` resolves):
+Run from the tropical repo root (so relative patch/golden paths resolve):
   lean/.lake/build/bin/frontend [--rpc]
 -/
 
@@ -44,7 +44,6 @@ private def inProcNoArg (env : Engine.Env) (name desc : String) : Tool :=
 
 def tropicalEngineTools (env : Engine.Env) : List Tool := [
   -- program management
-  inProcTool DefineProgram  env "define_program"  "Define and register a reusable DSP program type from a tropical_program_2 object.",
   inProcTool AddInstance    env "add_instance"    "Create a named instance of a registered program type.",
   inProcTool RemoveInstance env "remove_instance" "Remove a program instance from the session.",
   inProcTool Replicate      env "replicate"       "Create N instances of a program type in one call (does not recompile; follow with wire).",

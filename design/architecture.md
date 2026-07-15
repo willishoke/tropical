@@ -8,9 +8,9 @@ between it and its predecessor.
 The compiler does the same kind of work as a typical
 programming-language compiler — successive passes that simplify the
 program — and is designed around one rule: a pass never carries
-forward structure the next pass would rather not see. Surface
-syntax, names, type parameters, sum types, instance nesting, array
-shapes, combinators all get retired at the right moment. By the end
+forward structure the next pass would rather not see. JSON layout and
+sugar, names, sum types, instance nesting, array shapes, and
+combinators all get retired at the right moment. By the end
 of the chain, the IR is `tropical_plan_5`: a root instruction stream
 (instances nested as `children`) over typed scalar slots plus output sinks
 per-sample. Two backends interpret that low-detail IR — the JIT and
@@ -72,20 +72,22 @@ acyclic-DAG shape, not as a description of current cycle handling.
 ## Pipeline at a glance
 
 ```
-literate .md source / tropical_program_2 / MCP edits
+tropical_program_2 JSON (load / merge / export) / MCP edits
     │
-    │   parse              drops layout, sugar, bounds annotations
+    │   raise              drops JSON layout, sugar, bounds annotations
     ▼
 ParsedProgram
     │
     │   elaborate          drops names (every NameRef → decl object);
     │                      enforces acyclic-source invariant
     ▼
-ResolvedProgram                              ◀── DAG-shaped graph IR
-    │
+ResolvedProgram ◀── DAG-shaped graph IR ◀── arrow-combinator builders
+    │                                        (Tropical.Stdlib / EmitArrow):
+    │                                        authored straight as resolved IR,
+    │                                        skipping raise + elaborate
     │   strata pipeline:
     │     assertAcyclic    confirms caller honored the contract
-    │     specialize       drops type parameters
+    │     specialize       (inert — no generics survive to specialize)
     │     sumLower         drops sum types
     │     inlineInstances  drops nesting
     │     arrayLower       drops shapes and combinators
@@ -129,54 +131,73 @@ structure dropped between them.
 
 ---
 
-## 1. Surface and parse
+## 1. Front doors and parse
 
-**Input:** literate `.md` source text or `tropical_program_2` JSON.
-**Output:** `ParsedProgram` (`lean/Tropical/Parse/Nodes.lean`).
-**Drops:** layout, comments, surface sugar.
+**Input:** `tropical_program_2` JSON, or an arrow-combinator builder.
+**Output:** `ResolvedProgram` (`lean/Tropical/Ir/Nodes.lean`), reached
+either through the parse → elaborate front door or authored directly.
+**Drops (JSON front door):** JSON layout, sugar, bounds annotations.
 
-### 1.1 The two front-ends
+### 1.1 The two front doors
 
-Literate `.md` source is the human-authored surface form used by the
-stdlib and by hand-written patches. The surface parser
-(`lean/Tropical/Parse/Surface/*`) produces a `ParsedProgram` in layers:
+There is no longer a surface language. The literate-`.md` surface form
+and its parser (the whole `lean/Tropical/Parse/Surface/*` tree —
+Lexer, Cursor, Expr, Statements, Declarations, Bounds, Markdown) have
+been deleted, along with the `stdlib/*.md` programs and the committed
+`stdlib/parsed/` parse bridge. Two front doors remain:
 
-- `Surface/Lexer.lean` (+ `Surface/Cursor.lean`) — token stream
-- `Surface/Expr.lean` — infix precedence, unary, calls,
-  let/combinator lambdas (binders introduced on the fly via
-  `BinderDecl`)
-- `Surface/Statements.lean` — block bodies (decls + assigns)
-- `Surface/Declarations.lean` — program signatures, port specs,
-  type-param declarations, nested programs
-- `Surface/Markdown.lean` — the literate-`.md` envelope around them
+- **Arrow-combinator builders** (`lean/Tropical/Stdlib.lean` over the
+  `EmitArrow` value algebra in `lean/Tropical/EmitArrow*`). A program
+  is authored directly as a `Sig`/`AInst` tree and `assemble`d into a
+  resolved program in an arena — no parse, no elaborate. This is how
+  the standard library is written now: 15 builders (`ClockPhasor`,
+  `FixedSin`, `FixedSinOsc`, `MorphOsc`, `Sin`, `Tanh`, `VCA`,
+  `FlangeSin`, `ModalVoice`, `PluckedMorphOsc`, `ReverseReverb`,
+  `ReversibleComb`, `ScrubClock`, `ThroughZeroFlanger`, `SoftClip`) in
+  `stdlibBuilders`. The engine boots them by folding that chain through
+  `registerResolved` (`lean/Tropical/Engine/Registry.lean`) — deps
+  before dependents, each linked by name against the chain built so far
+  — with no bridge read at boot. New DSP types are added here, as
+  builders; they are not defined over the wire.
 
-The legacy/MCP entry is JSON. `lean/Tropical/Parse/Raise.lean` walks a
-`tropical_program_2` JSON object and emits the same `ParsedProgram`
-shape. Both front-ends converge on the same input to the elaborator.
+- **`tropical_program_2` JSON via `Raise`**
+  (`lean/Tropical/Parse/Raise.lean`). The `load`/`merge`/`save`/
+  `export_program` path: `Raise` walks a JSON object and emits a
+  `ParsedProgram` (`lean/Tropical/Parse/Nodes.lean`), which the
+  elaborator then resolves. A loaded file may carry inline **concrete**
+  (non-generic) program definitions — a self-contained patch — and
+  those register through this same raise → elaborate → strata path. That
+  is the only remaining route for a fold-bearing program (no `Stdlib`
+  builder emits one): the banks/`FoldProbe` test corpus is loaded this
+  way.
+
+Both front doors converge on the same post-strata `ResolvedProgram`;
+the builder path simply enters below parse+elaborate, at the raw
+resolved IR, and joins the JSON path at the strata pipeline.
 
 ### 1.2 Parse-time desugaring: bounds
 
-`lean/Tropical/Parse/Surface/Bounds.lean` runs immediately after parse,
-before anything else sees the program. It rewrites:
-
-- `signal[-1, 1]`, `unipolar[0, 1]`, `bipolar[-1, 1]`, `phase[0, 1]`,
-  `freq[0, ∞)` — named bound aliases — to explicit `clamp` or
-  `select` ops
-- explicit `in [lo, hi]` annotations on input defaults — same
-  treatment
-
-Bounds are a *parse-time* concept. They never reach the elaborator
-or the strata pipeline as a distinct construct.
+`lean/Tropical/Parse/BoundLower.lean` runs inside the JSON front door,
+folding notation into IR before the elaborator sees it. It rewrites the
+built-in port-type alias bounds — `signal`/`bipolar` → `[-1, 1]`,
+`unipolar`/`phase` → `[0, 1]`, `freq` → `[0, ∞)` — into explicit
+`clamp` or `select` ops on input defaults and matching output assigns
+(the transform is idempotent, so a default already written as its own
+`clamp` is not double-wrapped). Bounds are a *parse-time* concept: they
+never reach the elaborator or the strata pipeline as a distinct
+construct. (The arrow builders reproduce the same lowering by hand in
+their port-declaration helpers — `freq` ⇒ `select(hz > 0, hz, 0)`,
+`signal` ⇒ `clamp(d, -1, 1)`, and so on.)
 
 ### 1.3 What this pass deliberately doesn't do
 
-`Raise.lean` and the surface parser perform **zero scope analysis**.
-Every reference (`input("freq")`, `sin1.out`, `param("cutoff")`) emits a
-`NameRefNode` placeholder. The parser doesn't know which declarations are
-in scope, doesn't validate that the name exists, doesn't disambiguate
-between (say) an instance output and a parameter read. Name resolution
-lives in exactly one pass: the elaborator. This is the cleanest
-separation we've found between syntactic and semantic concerns.
+`Raise.lean` performs **zero scope analysis**. Every reference
+(`input("freq")`, `sin1.out`, `param("cutoff")`) emits a `NameRefNode`
+placeholder. It doesn't know which declarations are in scope, doesn't
+validate that the name exists, doesn't disambiguate between (say) an
+instance output and a parameter read. Name resolution lives in exactly
+one pass: the elaborator. This is the cleanest separation we've found
+between syntactic and semantic concerns.
 
 ---
 
@@ -185,8 +206,9 @@ separation we've found between syntactic and semantic concerns.
 **Input:** `ParsedProgram`.
 **Output:** `ResolvedProgram` (`lean/Tropical/Ir/Nodes.lean`).
 **Drops:** names. Enforces the **acyclic-source** invariant.
-**Keeps:** every other piece of surface structure (type params, sum
-types, nesting, combinators, shapes).
+**Keeps:** every other piece of input structure — sum types, nesting,
+combinators, shapes (and type params too, though with generics gone no
+live program carries any).
 
 `lean/Tropical/Ir/Elaborator.lean` is the unique site of name
 resolution. A single top-down pass over the parsed program: each
@@ -202,8 +224,10 @@ Refs (`InputRef`, `ParamRef`, `TypeParamRef`, `BindingRef`,
 `idx` into a typed decl table — positional identity, not a string lookup
 (the Lean image of the TS elaborator's `===` pointer identity). There is
 no state-register decl: tropical is closed-form-only, so there is no
-surface `reg`/`next` and no `delay` sugar to elaborate — the parser has
-no production for them and rejects them outright (see `design/cf-only.md`).
+`reg`/`next`/`delay` to elaborate. This is now structural rather than a
+rule — there is no surface grammar left to write one in, and `Raise`
+has no JSON op for them either. CF-only is a property of the shape of
+the inputs, not a check (see `design/cf-only.md`).
 
 The elaborator also runs **strict cycle detection** at the source
 level. Inter-instance cycles throw `CycleViolation` here, with a
@@ -248,27 +272,24 @@ Throws `AcyclicityViolation` if any non-trivial SCC survives into strata
 input. In the standard path this never fires; the elaborator and the
 session compiler have already rejected any cyclic graph.
 
-### 3.2 specialize — drops type parameters
+### 3.2 specialize — drops type parameters (now inert)
 
-`lean/Tropical/Ir/Strata/Specialize.lean`. Takes a generic program and
-a map keyed on `TypeParamDecl`; produces a fresh program with the
-integers substituted in.
+`lean/Tropical/Ir/Strata/Specialize.lean`. **This pass is now inert.**
+Generics have been removed — there is no way to author a generic
+program (no `define_program`, no surface language) and no
+specialization machinery around it (`Tropical.TypeArgs`, the
+`specializationCache`, and the generic catalog entry are all deleted).
+Nothing supplies type arguments, so `specialize` runs over programs
+with no `typeParams` and returns them unchanged. The pass is kept in
+the pipeline as a structural placeholder, not because it fires.
 
-Substitution sites:
-- `ShapeDim`s that are `TypeParamDecl`s become integers
-- expression-position `TypeParamRef` nodes become numeric literals
-  (with `ConstNode` wrapping when type information is needed)
-- the root program's `typeParams` list is dropped
-
-Each `(template, args)` pair produces a structurally fresh program;
-a generic `Voice<N=8>` and `Voice<N=44100>` give distinct programs with
-inline-array shapes `[8]` and `[44100]`. Sum/struct/alias type defs are
-shared across the clone (preserves variant identity for match arms,
-which `sum_lower` requires).
-
-The session-emit cache (`session.specializationCache`) memoizes on
-`(template, args)` keys. The pass itself doesn't consult the cache —
-that's the loader's job.
+The mechanism it retains, if a generic ever reappeared: take a template
+and a map keyed on `TypeParamDecl`, produce a fresh program with the
+integers substituted in — `ShapeDim`s that are `TypeParamDecl`s become
+integers, expression-position `TypeParamRef` nodes become numeric
+literals, and the root's `typeParams` list is dropped. Sum/struct/alias
+type defs are shared across the clone (preserving variant identity for
+match arms, which `sumLower` requires).
 
 ### 3.3 sumLower — drops sum types
 
@@ -285,10 +306,10 @@ Constraint:
 After this pass: no `tag` op, no `match` op, no sum-typed value.
 Decl identity is preserved end-to-end; replacements are by identity.
 
-Sum types survive in the surface language (and in struct/alias type
-defs) but, with no per-sample state, they appear only as transient
-expression-level values that this pass folds into select-chains — there
-is no longer a sum-typed *register* to decompose.
+Sum types survive in the `tropical_program_2` schema (and in
+struct/alias type defs) but, with no per-sample state, they appear only
+as transient expression-level values that this pass folds into
+select-chains — there is no longer a sum-typed *register* to decompose.
 
 ### 3.4 inlineInstances — drops nesting
 
@@ -426,7 +447,7 @@ session compiler:
 Then the slotted session compiler runs the root-program lowering:
 `buildSessionRoot` serializes the whole session back to a `ParsedProgram`
 and runs it through the SAME `elaborate` front
-door the surface path uses, yielding one synthetic root `ResolvedProgram`:
+door the JSON `load` path uses, yielding one synthetic root `ResolvedProgram`:
 instances become `InstanceDecl`s (their already-resolved types supplied
 via the elaborator's `ExternalProgramResolver` hook — LINK, not
 re-elaboration). That root is lowered through the *same* `partitionKernel`
@@ -587,12 +608,15 @@ TropicalDAC::audio_callback            ← engine/dac/TropicalDAC.hpp
      500 ms backoff + fade-in. switch_device() is explicit live-switch.
 ```
 
-**No transcendentals in the JIT.** `sin`, `cos`, `tanh`, `exp`,
-`log`, `pow` are stdlib programs (polynomial approximations
-using arithmetic + `Ldexp` + `FloatExponent` — single-instruction
-IEEE-754 bit ops for 2^n range reduction). They inline at strata
-time. The kernel contains no libm calls and is deterministic across
-platforms. Swap `stdlib/Sin.md` to change the approximation.
+**No transcendentals in the JIT.** `sin`, `cos`, `tanh`, `exp` are
+polynomial-approximation `Sig` datapaths in
+`lean/Tropical/EmitArrow/Numerics.lean` (arithmetic + `round`/`clamp` +
+`ldexp` — the last a single-instruction IEEE-754 bit op for 2^n range
+reduction), exposed as the `Sin`/`Tanh` stdlib builders and reused
+inline inside the oscillator/modal builders. They lower to arithmetic
+at strata time, so the kernel contains no libm calls and is
+deterministic across platforms. Edit the `Sin` builder (or the shared
+`sinSig`/`expSig` in `Numerics.lean`) to change the approximation.
 
 **Adding an op.** Codegen is Lean's `EmitLlvm` (textual LLVM IR); the
 native ORC JIT and the browser's wasm32 module both consume that *same*
@@ -663,24 +687,30 @@ proves *agreement*, not correctness — and it was retired with the port
 
 ---
 
-## 6. ProgramType and Compiled
+## 6. Program metadata and registration
 
-A thin wrapper over a post-strata `ResolvedProgram` (the
-`Compiled`/`ProgMeta` shape in `lean/Tropical/Session.lean`). The
-wrapper is metadata; the IR is the value. Helpers (`inputNames`,
-`outputNames`, …) read off the resolved IR; slot-derived fields are
-computed via `buildSlotMaps`. (There is no `registerNames` helper —
-the IR is stateless, so there are no state registers to name.)
+A registered program is metadata (`ProgMeta`, `lean/Tropical/Session.lean`)
+paired with post-strata resolved IR in the session's growing `Arena`;
+the metadata is a view, the IR is the value. `ProgMeta` carries the
+program name and its input/output port surface (names, types,
+defaults); helpers (`inputNames`, `outputNames`, …) read straight off
+it, and slot-derived fields are computed via `buildSlotMaps`. (There is
+no `registerNames` helper — the IR is stateless, so there are no state
+registers to name.) A live `InstanceInfo` holds a `baseTypeName`, its
+`ProgMeta`, and a `resolvedIdx` snapshot into the store, so the compile
+root resolver links against the instance's captured index, never a late
+name lookup.
 
-A session `Instance` holds a `Compiled` plus an instance name,
-`baseTypeName`, and optional `typeArgs`.
-
-`resolveProgramType` (`lean/Tropical/Session.lean`, with the
-specialize path in `lean/Tropical/TypeArgs.lean`) runs the full strata
-pipeline + wrap, then renames so the specialization cache key
-(`Type<N=8>`) shows up as the program's name in serialized output. The
-engine caches the result per `Type<N=8>` key so a hit skips re-running
-the pipeline.
+Registration runs each program through the strata pipeline once and
+adopts the result into the store (`strataConcrete` + `concreteEntry` in
+`lean/Tropical/Engine/Registry.lean`). The arena only ever grows and
+indices stay valid for the session's life, so there is no per-type
+specialization cache to consult — the two register paths are the stdlib
+boot chain (`registerResolved` over `stdlibBuilders`) and the JSON
+front door (`load`/`merge` adopting a concrete program). The
+`generic`/`typeArgs`/`typeParams` fields on `ProgMeta`/`InstanceInfo`
+are vestigial schema slots: with generics gone, no live program ever
+sets them.
 
 ---
 
@@ -690,7 +720,7 @@ Two distinct JSON schemas; do not confuse them.
 
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
-| `tropical_program_2` | `lean/Tropical/Parse/Raise.lean` (and save/export reconstruction) | The high-detail input shape: a program with typed ports, a body block of decls/assigns, optionally generic in `type_params`. Authored by humans (in literate `.md`) or by agents (over MCP). |
+| `tropical_program_2` | `lean/Tropical/Parse/Raise.lean` (JSON ingest, and save/export reconstruction) | The high-detail input shape: a program with typed ports and a body block of decls/assigns. Consumed by `load`/`merge` and produced by `save`/`export_program`; authored by agents over MCP or hand-written as a self-contained patch (e.g. the banks/`FoldProbe` test corpus). The `type_params` field still exists in the schema but is inert — nothing produces a generic program. |
 | `tropical_plan_5`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: a root instruction stream (`instance_functions[]`, instances nested as `children`) plus `sinks[]` (device-bound outputs) and `sources[]` (runtime-bound inputs — canonical `[tick, rate]`). The engine consumes it as the codegen manifest (the kernel itself comes from Lean's IR); the web build derives a `.wasm` + a trimmed `KernelManifest` from it. The engine still accepts the older `tropical_plan_4` (single-kernel, top-level temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 with the canonical sources at parse time. |
 
 Schema validation is the Lean type layer: the typed parsed/plan ASTs
@@ -848,13 +878,17 @@ validates each tool call against a typed schema and handles it in
 process. There is no relay and no subprocess — the same binary that
 serves MCP owns the long-lived `SessionState` (`lean/Tropical/
 Engine.lean` + `Session.lean`), compiles plans, and drives the runtime
-over FFI. One server, the full MCP surface — 22 tools plus resources
-(program catalog, program-format doc, `lean/Tropical/Resources.lean`)
-and the build-patch prompt. (The earlier `@modelcontextprotocol/sdk`
-stdio server and, after it, the Turnstile-front-door-over-TS-relay
-arrangement were both retired during the Lean port. The `feedback`
-tool — which used to wrap a back-edge in a unit delay — is gone with
-the rest of the per-sample-state machinery; cycles are now rejected.)
+over FFI. One server, the full MCP tool surface plus resources (program
+catalog, program-format doc, `lean/Tropical/Resources.lean`) and the
+build-patch prompt. (The earlier `@modelcontextprotocol/sdk` stdio
+server and, after it, the Turnstile-front-door-over-TS-relay arrangement
+were both retired during the Lean port. The `define_program` tool is
+gone too: with generics removed and the surface language deleted, new
+DSP types are authored as `Tropical.Stdlib` arrow builders, not defined
+over the wire — the JSON front door registers only concrete programs, via
+`load`/`merge`. The `feedback` tool — which used to wrap a back-edge in a
+unit delay — is gone with the rest of the per-sample-state machinery;
+cycles are now rejected.)
 
 Every tool that mutates the signal graph ultimately runs `syncCompile`
 (`lean/Tropical/Engine.lean`), which builds and loads its own plan:
@@ -970,9 +1004,17 @@ shape mismatches inside compatible broadcast rules insert
   mode-equiv), the web demo-plan precompile, the surviving bun suites
   (WASM≡JIT in `tests/web` + the MCP behavioral tests, both against
   `frontend --rpc` via `TROPICAL_ENGINE_CMD`), and `ctest`
-- `make parse-all` — regenerate the committed `stdlib/parsed/` bridge
-  from `stdlib/*.md` via the Lean surface parser (`diffcli parse-all`)
 - `make clean` — remove build directories
+
+(There is no `make parse-all` anymore: the literate-`.md` stdlib and its
+committed `stdlib/parsed/` bridge are deleted. The stdlib is the
+`Tropical.Stdlib` arrow-builder chain, boot-folded straight into the
+engine — no bridge to regenerate. The surviving `diffcli` verbs are
+`render-bytes`, `render-metal`, `render-graph`, `emit-ir`, `emit-msl`,
+`compile-wasm`, `raise`, and `compile`; the old surface/bridge verbs
+— `parse-md`, `parse-all`, `voice-desugar`, `parsed-roundtrip`,
+`elab-stdlib`/`elab-file`, `strata-stdlib`/`strata-file`,
+`emit-stdlib`/`emit-file`, `emitarrow-*` — are gone.)
 
 (There are no `make diff-*` targets anymore — the differential harness
 was migration scaffolding and was removed with the TS oracle. See
@@ -1023,9 +1065,21 @@ elaborator, emit, and partition passes are tested in the Lean modules
 themselves. The cross-cutting runner is `tropicaltest`
 (`lean/Tropicaltest.lean`): it renders the corpus through the real
 `libtropical` JIT (over `Tropical.Ffi`), hashes 16×256 samples, and
-gates on two things — the **frozen audio goldens** (`tests/golden/*.hash`,
-the correctness floor; `tropicaltest --write` re-baselines) and the
-**native mode-equivalence** check (fused vs. microkernel at 1e-12).
+gates on:
+
+- the **frozen audio goldens** — the closed-form corpus
+  (`tests/golden/cf/*.hash`), the Metal/MSL goldens (`tests/golden/msl/*`),
+  and the migration fixtures (`tests/golden/migration/`). This is the
+  correctness floor; `tropicaltest --write` re-baselines.
+- the **per-program stdlib wire+port goldens**
+  (`tests/golden/stdlib/*.hash`, one per live builder — 15 today). This
+  is the new permanent anchor that replaces the deleted parse bridge:
+  `runStdlibWireGoldens` folds `buildStdlibChain` and, for each builder,
+  hashes its compiled `tropical_plan_5` wire (`emitResolvedWire` —
+  resolved-body semantics) concatenated with its `concreteEntry` port
+  surface (inputs/outputs — names, types, defaults). It pins that the
+  arrow builders compile to exactly the intended plan and ports.
+- the **native mode-equivalence** check (fused vs. microkernel at 1e-12).
 
 ### 14.3 Surviving bun suites (`bun test`, against the Lean engine)
 
@@ -1040,10 +1094,13 @@ Run with `TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc"`:
 
 There is no longer any `compiler/**/*.test.ts` or `tests/equiv/*` — the
 TS compiler and its differential equiv suites were deleted with the
-port. The stdlib round-trip / lower-and-check audit that used to be
-`scripts/validate_stdlib.ts` is now part of `tropicaltest` and the
-Lean parse∘print fixpoint tests; `make parse-all` regenerates the
-`stdlib/parsed/` bridge it leans on.
+port. The stdlib lower-and-check audit that used to be
+`scripts/validate_stdlib.ts` — and, after it, the surface parser's
+parse∘print fixpoint checks — is now the per-program wire+port goldens
+inside `tropicaltest` (§14.2). There is nothing to regenerate: the
+stdlib is the `Tropical.Stdlib` builder chain, folded straight into the
+engine at boot, so there is no `stdlib/parsed/` bridge and no
+`make parse-all`.
 
 ---
 
@@ -1123,12 +1180,14 @@ All array shapes are known at compile time. That's what makes
 `arrayLower` — full unroll of combinators and array ops — total. No
 dynamic allocation on the audio thread.
 
-### Transcendentals as programs
+### Transcendentals as arrow builders
 
-`sin`, `cos`, `tanh`, `exp`, `log`, `pow` are stdlib programs using
-arithmetic + `Ldexp` + `FloatExponent`. They inline at strata time.
-No libm dependency in the kernel; deterministic across platforms;
-swap a file to change the math. See `stdlib/README.md`.
+`sin`, `cos`, `tanh`, `exp` are polynomial-approximation `Sig`
+datapaths in `lean/Tropical/EmitArrow/Numerics.lean`, built from
+arithmetic + `round`/`clamp` + `ldexp`. They lower to arithmetic at
+strata time. No libm dependency in the kernel; deterministic across
+platforms; edit the builder (or the shared `sinSig`/`expSig`) to change
+the math.
 
 ### Thread-safe control parameters
 

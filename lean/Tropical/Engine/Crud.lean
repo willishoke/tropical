@@ -53,107 +53,26 @@ def resolveInstanceMeta (env : Env) (programName : String)
     throwEnum .unknownProgram programParam (Json.str programName)
       (concrete ++ st.catalogOrder)
   | some pm =>
-    if pm.generic then
-      -- Phase 5 stage 6b: type-arg resolution + the specialization
-      -- (strata over the raw template, NO relink — TS
-      -- `specializeFromResolvedTemplate` never relinked) run
-      -- engine-side. Every failure — arg validation and strata alike —
-      -- maps to invalid_type_args with the raw message, exactly how
-      -- the engine mapped any service resolve_type failure before the
-      -- move.
-      let some templateIdx := st.templateByName.get? programName
-        | internalError s!"resolve_type: generic '{programName}' has no stored template (engine bug)"
-      let some template := st.arena.program? templateIdx
-        | internalError s!"resolve_type: template pool index {templateIdx.idx} out of range (engine bug)"
-      let declared ← template.typeParams.mapM fun i =>
-        match st.arena.typeParam? i with
-        | some tp => pure (tp.name, tp.default?)
-        | none => internalError s!"resolve_type: typeParam pool index out of range (engine bug)"
-      let resolvedArgs ←
-        match Tropical.TypeArgs.resolve typeArgs declared s!"instance of '{programName}'" with
-        | .error msg =>
-          if !toolEnvelopes then internalError msg
-          throwBare .invalidTypeArgs msg (param := some "type_args") (value := typeArgs)
-        | .ok r => pure r
-      let key := Tropical.TypeArgs.cacheKey programName resolvedArgs
-      let echo := Json.mkObj (resolvedArgs.toList.map fun (n, v) => (n, Json.num v))
-      match st.specializationCache.get? key with
-      | some (pmCached, idx?) => pure (some echo, pmCached, idx?)
-      | none =>
-        let (arena', specIdx) ←
-          match runStrataChecked resolvedArgs st.arena templateIdx with
-          | .error msg =>
-            if !toolEnvelopes then internalError msg
-            throwBare .invalidTypeArgs msg (param := some "type_args") (value := typeArgs)
-          | .ok r => pure r
-        -- arena' (the pre-round-trip specialization) is deliberately
-        -- NOT persisted: the store adopts the entry's codec round trip
-        -- below, exactly one arena copy — the same growth the
-        -- service-relay path had.
-        let entry ← match Tropical.Entries.concreteEntry arena' key specIdx with
-          | .error e => internalError e
-          | .ok j => pure j
-        let pmNew := ProgMeta.fromEntry entry
-        let idx? ← adoptResolved env entry
-        env.state.modify fun s =>
-          { s with specializationCache := s.specializationCache.insert key (pmNew, idx?) }
-        pure (some echo, pmNew, idx?)
-    else
-      match typeArgs with
-      | some ta =>
-        let keys := match ta with
-          | .obj m => String.intercalate ", " (m.toList.map Prod.fst)
-          | _ => ""
-        if keys.isEmpty then pure (none, pm, st.resolvedByName.get? programName)
-        else if !toolEnvelopes then
-          internalError s!"Program '{programName}' does not declare type_params; got type_args: {keys}"
-        else
-          throwBare .invalidTypeArgs
-            (s!"Program '{programName}' does not declare type_params; got type_args: {keys}")
-            (param := some "type_args") (value := some ta)
-      | none => pure (none, pm, st.resolvedByName.get? programName)
+    -- No generics: no program declares `type_params`, so `type_args` is always
+    -- rejected. Return the concrete metadata + its resolved snapshot.
+    match typeArgs with
+    | some ta =>
+      let keys := match ta with
+        | .obj m => String.intercalate ", " (m.toList.map Prod.fst)
+        | _ => ""
+      if keys.isEmpty then pure (none, pm, st.resolvedByName.get? programName)
+      else if !toolEnvelopes then
+        internalError s!"Program '{programName}' does not declare type_params; got type_args: {keys}"
+      else
+        throwBare .invalidTypeArgs
+          (s!"Program '{programName}' does not declare type_params; got type_args: {keys}")
+          (param := some "type_args") (value := some ta)
+    | none => pure (none, pm, st.resolvedByName.get? programName)
 
-def handleDefineProgram (env : Env) (args : Json) : EngineM Json := do
-  let def_ := (arg? args "def").getD jsonNull
-  -- Bridge to the ordered decoder by re-parsing the compressed form.
-  -- Lean Json objects are key-sorted, which is exactly what the relay
-  -- shipped to the TS service before this stage — observable raise
-  -- behavior is unchanged.
-  let jv ← match Tropical.Parse.JsonV.parse def_.compress with
-    | .error e => internalError s!"define_program: def JSON re-parse failed: {e}"
-    | .ok v => pure v
-  -- Stage-2 raise: normalizeProgramFile (schema-tag check + Zod-strip)
-  -- + raiseProgram. Failures map to internal_error with the verbatim
-  -- message — the envelope the TS path produced when its
-  -- normalizeProgramFile / loadProgramAsType threw.
-  let (prog, _top) ← match Tropical.Parse.Raise.raiseFile jv with
-    | .error msg => internalError msg
-    | .ok r => pure r
-  -- One service call per batch item, adoption between items: a later
-  -- item (the parent) thereby elaborates against the earlier item's
-  -- POST-STRATA form, matching TS (the sub's registration round-trips
-  -- through strata before the parent is processed).
-  let batch := registrationBatch prog.name prog
-  let mut rootEntry := jsonNull
-  for (name, p) in batch do
-    let (entry, _) ← registerOne env name p
-    rootEntry := entry
-  -- The TS handler's two result shapes.
-  if (prog.typeParams.getD #[]).isEmpty then
-    let names := fun (k : String) => Json.arr <|
-      (match getField? rootEntry k with
-       | some (.arr ps) => ps
-       | _ => #[]).filterMap fun pj => (getStrField? pj "name").map Json.str
-    pure <| Json.mkObj [
-      ("program_name", (getField? rootEntry "program_name").getD (Json.str prog.name)),
-      ("inputs", names "inputs"),
-      ("outputs", names "outputs")]
-  else
-    pure <| Json.mkObj [
-      ("program_name", Json.str prog.name),
-      ("inputs", toJson (portNames (prog.ports.bind (·.inputs)))),
-      ("outputs", toJson (portNames (prog.ports.bind (·.outputs)))),
-      ("type_params", Tropical.Parse.Encode.typeParams (prog.typeParams.getD #[]))]
+-- `define_program` is retired: new DSP types are authored as `Tropical.Stdlib`
+-- arrow builders, not defined over the wire. `load`/`merge` still ingest
+-- instances + wiring of already-registered programs (`ProgramIO`); the JSON
+-- program body is no longer a front door.
 
 def handleAddInstance (env : Env) (args : Json) : EngineM Json := do
   let programName := (argStr? args "program").getD ""

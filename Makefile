@@ -1,4 +1,4 @@
-.PHONY: build repl run lean mcp-lean clean validate parse-all test-lean-engine
+.PHONY: build repl run lean mcp-lean clean validate test-lean-engine
 
 ROOT := $(shell pwd)
 BUILD_DIR := $(ROOT)/build
@@ -58,12 +58,6 @@ validate: build lean
 	bun web/build_patches.ts
 	TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test
 	ctest --test-dir $(BUILD_DIR) --output-on-failure
-
-# Regenerate the committed stdlib/parsed bridge from stdlib/*.md (the Lean
-# surface parser). Replaces the former scripts/build_parsed_stdlib.ts.
-parse-all: lean
-	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build diffcli
-	./lean/.lake/build/bin/diffcli parse-all
 
 # Behavioral MCP protocol suites against the live Lean engine.
 test-lean-engine: build lean
