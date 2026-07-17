@@ -99,7 +99,7 @@ def runBootstrapExp (arena : Arena)
     match ← renderPlanSamples p 2048 with
     | .ok s =>
       let n := min s.size 2048
-      let sinkGain : Float := 0.05   -- defaultSinkGain: the carrier's output sink
+      let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat   -- the carrier's output sink
       let mut maxRel : Float := 0.0
       let mut worstX : Float := 0.0
       for i in [0:n] do
@@ -135,7 +135,7 @@ def runFixedSinAccuracy (arena : Arena)
     match ← renderPlanSamples p 4096 with
     | .ok s =>
       let n := min s.size 4096
-      let sinkGain : Float := 0.05
+      let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
       let twoPi : Float := 6.283185307179586
       let mut maxAbs : Float := 0.0
       let mut worstI : Nat := 0

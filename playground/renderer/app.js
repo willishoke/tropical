@@ -71,6 +71,12 @@ const MODULES = [
   { name: 'TRANSPORT', knobs: [
     { slot: 'master.velocity', label: 'time warp', min: -2, max: 2, step: 0.05, value: 1, unit: '×' },
   ]},
+  // Master VCA. The backend sink is a pure summer now — amplitude is ours. The
+  // default (3.7) is the compiled `master.gain` slot default, so UI and engine
+  // agree at load; nudging writes `set_param master.gain` live.
+  { name: 'MASTER', knobs: [
+    { slot: 'master.gain', label: 'volume', min: 0, max: 8, step: 0.1, value: 3.7, unit: '×' },
+  ]},
 ]
 const KNOBS = MODULES.flatMap((m) => m.knobs)
 

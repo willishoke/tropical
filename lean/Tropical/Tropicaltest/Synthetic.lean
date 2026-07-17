@@ -278,3 +278,54 @@ def checkGoldenHash (name patchPath expected : String) : IO Bool := do
     if got == expected then passGate s!"{name}" s!"{got.take 16}"
     else failGate s!"{name}" s!"expected {expected.take 16} got {got.take 16}"
 
+/-- A migration audio golden (`tests/golden/migration/<fixture>.json`): render
+    the fixture's `flat_plan` `input` and hash the output. Under `--write`,
+    rewrite the JSON with the fresh hash and a 32-sample peek; else compare the
+    stored hash. Only `hash` is load-bearing — `first_samples` is a human peek.
+    Regenerable like every other golden, so a deliberate level change (e.g. the
+    unity-sink re-freeze) re-baselines here too instead of needing a hand-edit. -/
+def runMigrationGolden (writeMode : Bool) (fixture : String) : IO Bool := do
+  let goldenPath := s!"tests/golden/migration/{fixture}.json"
+  let fixText ← IO.FS.readFile s!"tests/fixtures/flat_plan/{fixture}.json"
+  let input? : Option Lean.Json := do
+    let f ← (Lean.Json.parse fixText).toOption
+    (f.getObjVal? "input").toOption
+  match input? with
+  | none => IO.println s!"  SKIP  {fixture}  (missing input)"; pure true
+  | some input =>
+    let tmpPatch := "/tmp/tropicaltest-fixture.json"
+    IO.FS.writeFile tmpPatch input.compress
+    match ← compilePatchStaged tmpPatch with
+    | .error e => failGate s!"{fixture}" s!"compile: {firstLine e}"
+    | .ok (plan, blocks) =>
+      let bytes ← renderTypedBytes plan blocks
+      let got ← sha256Hex bytes
+      if writeMode then
+        -- first 32 f64 samples (little-endian) — a documentary peek, not checked
+        let nPeek := min 32 (bytes.size / 8)
+        let mut peek : Array String := #[]
+        for i in [0:nPeek] do
+          let mut u : UInt64 := 0
+          for j in [0:8] do
+            u := u * 256 + (bytes.get! (i * 8 + (7 - j))).toUInt64
+          peek := peek.push (Float.ofBits u).toString
+        let samples := String.intercalate ",\n    " peek.toList
+        let text := "{\n"
+          ++ s!"  \"fixture\": \"{fixture}.json\",\n"
+          ++ s!"  \"sample_count\": {bytes.size / 8},\n"
+          ++ s!"  \"hash\": \"{got}\",\n"
+          ++ s!"  \"first_samples\": [\n    {samples}\n  ]\n"
+          ++ "}\n"
+        IO.FS.writeFile goldenPath text
+        IO.println s!"  WROTE {fixture}  {got.take 16}"; pure true
+      else
+        let goldenText ← IO.FS.readFile goldenPath
+        let expected? : Option String := do
+          let g ← (Lean.Json.parse goldenText).toOption
+          (← (g.getObjVal? "hash").toOption).getStr?.toOption
+        match expected? with
+        | none => failGate s!"{fixture}" "golden missing hash field"
+        | some expected =>
+          if got == expected then passGate s!"{fixture}" s!"{got.take 16}"
+          else failGate s!"{fixture}" s!"expected {expected.take 16} got {got.take 16}"
+

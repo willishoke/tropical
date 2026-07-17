@@ -1738,5 +1738,5 @@ kernel void tropical_kernel(
     float tf854 = t899;
     float slf0 = tf854;
     const float t900 = (as_type<float>(0x00000000u) + slf0);
-    output_buffer[s] = t900 * as_type<float>(0x3d4ccccdu);
+    output_buffer[s] = t900 * as_type<float>(0x3f800000u);
 }
