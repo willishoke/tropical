@@ -205,6 +205,36 @@ def modalBankSigTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
                 (mul wCim (fixedSinCycSig phQ))) (lit 28)
   selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
 
+/-- The ANALYTIC bank: the `(Re, Im)` pair of `Σ A·e^{iφ}·env` over ONE column
+    set — the substrate for a phase TWIST (heterodyne) and for the
+    divided-difference paired body, both of which need `Im` as well as the `Re`
+    every existing lowering emits. Two `bankFold`s over one `BankCols` (the
+    direction bank's pattern, `modalBankSigDirTable` — two sequential regions,
+    `idxId` reuse is safe because they do not nest). The `re` fold is EXACTLY
+    `modalBankSigTable`'s body (`wCre·cos − wCim·sin`); the `im` fold is
+    `wCre·sin + wCim·cos`. Both gated `clkRel > 0` (causal). Identity the
+    `modal-pair` gate leans on: `Im(A·e^{iφ}) = Re(−iA·e^{iφ})`, so the `im`
+    component equals the `re` bank of the amp-rotated modes `(cre,cim)↦(cim,−cre)`
+    — a bit-identical oracle, no new numerics. deg-0 (uniform) only. -/
+def modalBankSigPairTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
+    (live? : Option Sig := none) : Sig × Sig :=
+  let clkRel := relClockQ clkInt anchorSamples
+  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
+  let cols := bankCols modes live?
+  let body (imag : Bool) : ModeSym → Sig := fun m =>
+    let phQ  := modePhaseQFromIncr (toIntE m.incr) clkRel
+    let env  := expSig (neg (mul m.sigma dSec))
+    let wCre := toIntE (mul (mul env m.cre) (lit 268435456))
+    let wCim := toIntE (mul (mul env m.cim) (lit 268435456))
+    if imag then
+      rshift (add (mul wCre (fixedSinCycSig phQ))
+                  (mul wCim (fixedCosCycSig phQ))) (lit 28)
+    else
+      rshift (sub (mul wCre (fixedCosCycSig phQ))
+                  (mul wCim (fixedSinCycSig phQ))) (lit 28)
+  let gate := fun q => selectE (gt clkRel (lit 0)) (fixedOutQ 30 q) (lit 0)
+  (gate (bankFold cols (body false)), gate (bankFold cols (body true)))
+
 /-- True when a bank is eligible for the table lowering: every mode `deg == 0`
     (the uniform datapath). Ragged banks (mixed degree) must route to the
     unrolled `modalBankSig` (or, later, split into a banked deg-0 part ⊕ an
@@ -271,6 +301,21 @@ def residueComposeEC (voice reverb : Array ModalMode) : Array ModalMode :=
       ((lit 0, lit 0) : CplxE)
     modeOfE r.poleE (cnegE (cmulE r.ampE coupling)))
   forced ++ ringing
+
+/-- `∫`: the antiderivative of a modal bank, exactly, as a build-time pole move.
+    `∫ Σₖ Aₖ e^{μₖ d} dd = Σₖ (Aₖ/μₖ) e^{μₖ d} + C`, and choosing `C = −Σₖ Aₖ/μₖ`
+    fixes the integral to 0 at the strike (`d=0`) — a DC atom (`μ=0`, so `e^{0·d}=1`)
+    carrying that constant. So each mode's amp divides by its pole (`cdivE`) and one
+    `μ=0` mode is appended. Pure `CplxE`, so poles/amps stay live. Stays deg-0
+    (bankable). Requires deg-0, NONZERO poles — the modulator case: an LFO is a σ=0
+    undamped mode with pole `iω≠0`, and integrating its bank IS the residue transform
+    `a ↦ a/μ` behind "FM is PM of the integrated bank" (`demos/modal_vco.py` D3). A DC
+    input mode (`μ=0`) would integrate to a `d·e^{0}` deg-1 ramp — out of scope for
+    v1, and division by its zero pole is the caller's contract to avoid. -/
+def integrateBank (modes : Array ModalMode) : Array ModalMode :=
+  let integ := modes.map (fun m => modeOfE m.poleE (cdivE m.ampE m.poleE))
+  let sumAmp := integ.foldl (fun s m => caddE s m.ampE) ((lit 0, lit 0) : CplxE)
+  integ.push (modeOfE (lit 0, lit 0) (cnegE sumAmp))
 
 -- ── The MODAL ISLAND (v1): a decaying-resonator bank as a term over the clock ──
 -- The pole/modal island's emit path. A bank is a gated sum of decaying sinusoids

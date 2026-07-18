@@ -594,6 +594,124 @@ def runResidueCollected (arena : Arena)
     | .error e, _ | _, .error e => failGate "residue-collected" s!"render: {firstLine e}"
   | .error e, _ | _, .error e => failGate "residue-collected" s!"build: {firstLine e}"
 
+/-- THE INTEGRATE gate. `integrateBank` — the antiderivative as a build-time pole
+    move (`a ↦ a/μ` + a `μ=0` DC atom fixing `∫|₀=0`) — validated three ways.
+    (A) the FLOAT oracle is EXACT by the jet: each integrated mode satisfies
+    `μ·(a/μ)=a` (its derivative recovers the source, 1e-12) and `Σ aₒᵤₜ=0` (the DC
+    atom zeroes the onset), with `n → n+1` modes. (B) the SYMBOLIC `integrateBank`
+    on the same literal bank folds to that oracle, rendering equal within the Q4.28
+    landing quantum — live-capable, same math. (C) the rendered integral matches the
+    cumulative TRAPEZOID of the source render (`demos/modal_vco.py` D3): a physically
+    independent numerical integral over the whole tail, truncation-bounded at SR. -/
+def runModalIntegrate (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let tp := 6.283185307179586
+  -- one undamped (σ=0, an LFO atom) + one damped mode, so the DC atom carries a
+  -- nonzero real constant (the onset-zero property is genuinely exercised).
+  let srcF : Array (Cplx × Cplx) := #[
+    (⟨0.0,  tp * 5.0⟩, ⟨1.0, 0.0⟩),
+    (⟨-2.0, tp * 7.0⟩, ⟨0.6, 0.0⟩)]
+  let toMode := fun (pa : Cplx × Cplx) =>
+    ({ sigma := litF (-pa.1.re), omega := litF pa.1.im,
+       cre := litF pa.2.re, cim := litF pa.2.im } : ModalMode)
+  -- (A) Float oracle: a ↦ a/μ, plus DC atom −Σ a/μ. Independent of the Sig algebra.
+  let integC : Array (Cplx × Cplx) := srcF.map (fun pa => (pa.1, pa.2.div pa.1))
+  let sumA := integC.foldl (fun s pa => s.add pa.2) (⟨0.0, 0.0⟩ : Cplx)
+  let oracleF : Array (Cplx × Cplx) := integC.push (⟨0.0, 0.0⟩, sumA.neg)
+  let mut jetErr : Float := 0.0
+  for i in [0:srcF.size] do
+    let recovered := (oracleF[i]!.1).mul (oracleF[i]!.2)         -- μ · (a/μ)
+    let e := (recovered.add (srcF[i]!.2).neg).abs
+    if e > jetErr then jetErr := e
+  let onsetA := (oracleF.foldl (fun s pa => s.add pa.2) (⟨0.0, 0.0⟩ : Cplx)).abs
+  let lastP := oracleF[oracleF.size - 1]!.1
+  let structOk := oracleF.size == srcF.size + 1 && lastP.re == 0.0 && lastP.im == 0.0
+  let anchor := lit 0                                            -- strike at sample 0
+  match buildAndFinish (.ok (buildModalBankArrow "int_src" (srcF.map toMode) anchor arena)),
+        buildAndFinish (.ok (buildModalBankArrow "int_sym" (integrateBank (srcF.map toMode)) anchor arena)),
+        buildAndFinish (.ok (buildModalBankArrow "int_ora" (oracleF.map toMode) anchor arena)) with
+  | .ok srcP, .ok symP, .ok oraP =>
+    match ← renderPlanSamples srcP 4096, ← renderPlanSamples symP 4096,
+          ← renderPlanSamples oraP 4096 with
+    | .ok sS, .ok iS, .ok oS =>
+      let n := min (min sS.size iS.size) oS.size
+      -- (B) symbolic ≡ Float-baked within the Q4.28 landing quantum
+      let mut symDiff : Float := 0.0
+      let mut iEnergy : Float := 0.0
+      for k in [0:n] do
+        let d := (iS[k]! - oS[k]!).abs
+        if d > symDiff then symDiff := d
+        iEnergy := iEnergy + iS[k]! * iS[k]!
+      let bound := oracleF.size.toFloat * 3.7252903e-9 * 0.05 * 4.0
+      -- (C) rendered integral ≡ cumulative trapezoid of the source render (D3).
+      -- The 0.05 sink gain scales source and integral alike, and the trapezoid is
+      -- linear, so it cancels — no gain correction needed.
+      let h := 1.0 / 44100.0
+      let mut acc : Float := 0.0
+      let mut prev : Float := sS[0]!
+      let mut trapErr : Float := 0.0
+      let mut trapNrm : Float := 0.0
+      for k in [1:n] do
+        acc := acc + (sS[k]! + prev) * 0.5 * h
+        prev := sS[k]!
+        let e := iS[k]! - acc
+        trapErr := trapErr + e * e
+        trapNrm := trapNrm + iS[k]! * iS[k]!
+      let trapRel := Float.sqrt (trapErr / (trapNrm + 1e-300))
+      IO.println s!"        ∫ modal bank (a↦a/μ + DC atom), {srcF.size}→{oracleF.size} modes:"
+      IO.println s!"        oracle   jet max|μ·a_int − a|={jetErr} · onset |Σa_out|={onsetA} · struct={structOk}"
+      IO.println s!"        result   symbolic≡Float max|Δ|={symDiff * 1e9}e-9 (bound {bound * 1e9}e-9) · trapezoid rel-L2={trapRel}"
+      if jetErr < 1e-12 && onsetA < 1e-12 && structOk && symDiff < bound
+          && iEnergy > 1e-9 && trapRel < 1e-3 then
+        passGate "modal-integrate" s!"antiderivative exact by the jet (μ·a_int=a, Σa=0), symbolic folds to Float within Q4.28, render ≡ cumulative trapezoid (rel {trapRel})"
+      else
+        failGate "modal-integrate" s!"jetErr={jetErr} onset={onsetA} struct={structOk} symDiff={symDiff*1e9}e-9 bound={bound*1e9}e-9 energy={iEnergy} trapRel={trapRel}"
+    | .error e, _, _ | _, .error e, _ | _, _, .error e => failGate "modal-integrate" s!"render: {firstLine e}"
+  | .error e, _, _ | _, .error e, _ | _, _, .error e => failGate "modal-integrate" s!"build: {firstLine e}"
+
+/-- THE ANALYTIC PAIR gate. `modalBankSigPairTable` emits `(Re, Im)` of one bank
+    over one column set — the substrate for heterodyne (`Re·cosθ − Im·sinθ`) and
+    the divided-difference paired body. Two bit-identical oracles, no new numerics
+    trusted: (Re) the pair's real part ≡ the existing `modalBankSigTable` (same op
+    sequence); (Im) the pair's imaginary part ≡ the REAL bank of the amp-rotated
+    modes `A ↦ −iA` (`(cre,cim) ↦ (cim,−cre)`), since `Im(A·e^{iφ}) =
+    Re(−iA·e^{iφ})`. Both sides are the already-gated table path on relabelled
+    coefficients, so equality is structural (bit-for-bit), not tolerance-bounded. -/
+def runModalPair (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let tp := 6.283185307179586
+  let toMode := fun (pa : Cplx × Cplx) =>
+    ({ sigma := litF (-pa.1.re), omega := litF pa.1.im,
+       cre := litF pa.2.re, cim := litF pa.2.im } : ModalMode)
+  let modes : Array ModalMode := #[
+    (⟨-2.0, tp * 220.0⟩, (⟨0.6, 0.2⟩ : Cplx)),
+    (⟨-3.0, tp * 337.0⟩, ⟨0.4, -0.3⟩),
+    (⟨-4.0, tp * 511.0⟩, ⟨0.3, 0.1⟩)].map toMode
+  let rot := modes.map (fun m => { m with cre := m.cim, cim := neg m.cre })
+  let anchor := lit 200
+  let ((reA, reP), (imA, imP)) := buildModalBankPair "pair_re" "pair_im" modes anchor arena
+  match buildAndFinish (.ok (reA, reP)), buildAndFinish (.ok (imA, imP)),
+        buildAndFinish (.ok (buildModalBankTable "pair_ref_re" modes anchor arena)),
+        buildAndFinish (.ok (buildModalBankTable "pair_ref_im" rot anchor arena)) with
+  | .ok rePlan, .ok imPlan, .ok refRe, .ok refIm =>
+    match ← renderPlanSamples rePlan 4096, ← renderPlanSamples imPlan 4096,
+          ← renderPlanSamples refRe 4096, ← renderPlanSamples refIm 4096 with
+    | .ok reS, .ok imS, .ok rReS, .ok rImS =>
+      let reDiff := bitDiffCount reS rReS
+      let imDiff := bitDiffCount imS rImS
+      let reE := reS.foldl (fun s x => s + x * x) 0.0
+      let imE := imS.foldl (fun s x => s + x * x) 0.0
+      IO.println s!"        analytic (Re,Im) bank, 3 modes: pair vs table oracles:"
+      IO.println s!"        result   Re bit-diff {reDiff}/4096 (vs table) · Im bit-diff {imDiff}/4096 (vs A↦−iA table) · E[Re]={reE} E[Im]={imE}"
+      if reDiff == 0 && imDiff == 0 && reE > 1e-9 && imE > 1e-9 then
+        passGate "modal-pair" s!"analytic pair: Re ≡ table, Im ≡ (A↦−iA) table, both bit-identical — the twist/DD substrate"
+      else
+        failGate "modal-pair" s!"reDiff={reDiff} imDiff={imDiff} reE={reE} imE={imE}"
+    | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
+      failGate "modal-pair" s!"render: {firstLine e}"
+  | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
+    failGate "modal-pair" s!"build: {firstLine e}"
+
 end ResidueGates
 
 open Tropical.EmitArrow in

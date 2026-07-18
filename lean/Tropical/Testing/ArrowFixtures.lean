@@ -969,6 +969,15 @@ def buildModalBankTable (name : String) (modes : Array ModalMode) (anchor : Sig)
     (arena : Arena) : Arena × ProgramIdx :=
   buildExprCarrier name (modalBankSigTable modes clockLit anchor) arena
 
+/-- Build the analytic `(Re, Im)` pair (`modalBankSigPairTable`) as TWO carriers
+    over the bare clock — the `modal-pair` gate's device-under-test. Each
+    component is its own single-`bankSum` program, so `Re` ≡ `buildModalBankTable`
+    and `Im` ≡ `buildModalBankTable` of the amp-rotated modes, bit-identically. -/
+def buildModalBankPair (nameRe nameIm : String) (modes : Array ModalMode)
+    (anchor : Sig) (arena : Arena) : (Arena × ProgramIdx) × (Arena × ProgramIdx) :=
+  let (reSig, imSig) := modalBankSigPairTable modes clockLit anchor
+  (buildExprCarrier nameRe reSig arena, buildExprCarrier nameIm imSig arena)
+
 /-- `voice ⋙ reverb` end to end: run the residue calculus at build time, turn the
     composed complex modes into a `ModalMode` bank, and emit it — the connection is
     an exact symbolic computation, not a hand-tuned coupling table. -/
