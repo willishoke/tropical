@@ -1,2 +1,3 @@
 *.wav
 *.f64
+__pycache__/
