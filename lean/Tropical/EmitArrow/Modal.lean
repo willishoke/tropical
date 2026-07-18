@@ -368,6 +368,125 @@ def reclockAffine (a b : Sig) (modes : Array ModalMode) : Array ModalMode :=
     let a' := cmulE m.ampE eMub
     { sigma := mul m.sigma a, omega := mul m.omega a, cre := a'.1, cim := a'.2, deg := m.deg }
 
+-- ── The DIVIDED-DIFFERENCE paired-mode family (WS-B2) ─────────────────────────
+-- Near-degenerate composition without the `1/Δ` cancellation: each (λ, ν) coupling
+-- is ONE fused paired atom `Re(c·e^{νd}·d·cexpm1((λ−ν)d))`, `c = a·r` bounded. The
+-- τ·e resonance at λ=ν is the smooth series limit of `cexpm1`, no branch. Its own
+-- uniform family (all one shape). Fixed-point realization validated in
+-- `demos/divdiff_qdatapath.py` (qA: never form `e^{λd}−e^{νd}`; compute
+-- `(e^z−1)/z` with the `−1` exact and `|z|≥thr`).
+
+/-- A fused divided-difference paired mode: two poles `λ, ν` (`CplxE`, pole form
+    `(−σ, ω)`) and a BOUNDED coeff `c = a·r` (no `1/Δ`). -/
+structure PairedMode where
+  lam : Sig × Sig
+  nu  : Sig × Sig
+  c   : Sig × Sig
+
+/-- `voice ⋙ reverb` as fused paired modes — one per (λ, ν), `c = a·r` via `cmulE`
+    only (NO `cdivE`, so no `1/Δ` is ever formed at build time; the division is
+    deferred to the render's stable `cexpm1`). Inherently `m·n` (collecting would
+    reintroduce the `1/Δ` that `residueComposeEC` suffers) — the stability trade for
+    the factor-m saving. The near-degenerate form: a live pole sweeping through a
+    room pole stays finite and reproduces the resonance (`demos/modal_divdiff.py`). -/
+def residueComposeDD (voice reverb : Array ModalMode) : Array PairedMode :=
+  voice.flatMap fun v => reverb.map fun r =>
+    { lam := v.poleE, nu := r.poleE, c := cmulE v.ampE r.ampE }
+
+/-- Multiply a `CplxE` by a real `Sig`. -/
+def scaleRealE (s : Sig) (z : CplxE) : CplxE := (mul s z.1, mul s z.2)
+
+/-- `(e^z − 1)/z` for a complex `z` as the Horner series `Σ_{k≥0} zᵏ/(k+1)!`, N=6
+    terms — the STABLE branch for small `|z|`, where the `−1` in the direct form
+    catastrophically cancels. Coeffs `1/(k+1)!`. Limit 1 at z=0 (the τ·e resonance).
+    Validated: series↔direct discontinuity at the threshold is 2.5e-12. -/
+def cexpm1SeriesE (z : CplxE) : CplxE :=
+  let step := fun (ck : Float) (acc : CplxE) => caddE (litF ck, lit 0) (cmulE z acc)
+  step 1.0 (step (1.0/2.0) (step (1.0/6.0) (step (1.0/24.0)
+    (step (1.0/120.0) (step (1.0/720.0) (litF (1.0/5040.0), lit 0))))))
+
+/-- The paired bank's coefficient columns — 7 (vs the single-pole `BankCols`'s 4):
+    the ν rotator increment, the SIGNED difference (`ω_λ−ω_ν`) rotator increment,
+    `σ_ν`, `σ_λ−σ_ν`, `ω_λ−ω_ν`, and the complex coeff. `poleE = (−σ, ω)`, so
+    `σ_ν = −ν.1`, `σ_λ−σ_ν = ν.1−λ.1`, `ω_d = λ.2−ν.2`. -/
+structure PairedBankCols where
+  count : Nat
+  live? : Option Sig := none
+  idxId : Nat := 0
+  incrNu   : Sig
+  incrDiff : Sig
+  sigmaNu  : Sig
+  ds       : Sig
+  wd       : Sig
+  cre      : Sig
+  cim      : Sig
+
+structure PairedModeSym where
+  incrNu   : Sig
+  incrDiff : Sig
+  sigmaNu  : Sig
+  ds       : Sig
+  wd       : Sig
+  cre      : Sig
+  cim      : Sig
+
+def pairedBankCols (modes : Array PairedMode) (live? : Option Sig := none) : PairedBankCols where
+  count := modes.size
+  live? := live?
+  incrNu   := Sig.arr (modes.map fun m => div (mul (div m.nu.2 twoPiE) (lit 4294967296)) .sampleRate)
+  incrDiff := Sig.arr (modes.map fun m =>
+    div (mul (div (sub m.lam.2 m.nu.2) twoPiE) (lit 4294967296)) .sampleRate)
+  sigmaNu  := Sig.arr (modes.map fun m => neg m.nu.1)
+  ds       := Sig.arr (modes.map fun m => sub m.nu.1 m.lam.1)
+  wd       := Sig.arr (modes.map fun m => sub m.lam.2 m.nu.2)
+  cre      := Sig.arr (modes.map fun m => m.c.1)
+  cim      := Sig.arr (modes.map fun m => m.c.2)
+
+def bankFoldPaired (cols : PairedBankCols) (body : PairedModeSym → Sig) : Sig :=
+  let k := Sig.loopIdx cols.idxId
+  Sig.bankSum cols.count
+    #[cols.incrNu, cols.incrDiff, cols.sigmaNu, cols.ds, cols.wd, cols.cre, cols.cim]
+    (body { incrNu := Sig.index cols.incrNu k, incrDiff := Sig.index cols.incrDiff k
+          , sigmaNu := Sig.index cols.sigmaNu k, ds := Sig.index cols.ds k
+          , wd := Sig.index cols.wd k, cre := Sig.index cols.cre k, cim := Sig.index cols.cim k })
+    cols.live? cols.idxId
+
+/-- The divided-difference paired-mode bank body (qA). Per mode: the ν rotator (exact
+    integer phase) plus a SECOND integer-phase rotator at the signed difference
+    frequency `ω_λ−ω_ν` for `e^z`; `cexpm1(z)` by a per-sample `selectE` between the
+    direct `(e^z−1)/z` (`|z|²≥thr²=0.01`, guarded so the unused branch never divides
+    by ~0) and the Horner series (small `|z|`); the complex weight
+    `Wc = c·(e^{νd}·d·cexpm1)` lands in Q4.28 and combines with the ν oscillator in
+    i64 — `modalBankSigTable`'s skeleton exactly, one float boundary scale. `envDf`
+    and `e^z` stay float (never landed); `z`'s imaginary part uses raw `ω_d·dSec`
+    (the divisor needs only relative precision; the rotator phase is integer-reduced,
+    consistent because `e^z` is periodic). -/
+def modalBankSigTableDD (modes : Array PairedMode) (clkInt anchorSamples : Sig)
+    (live? : Option Sig := none) : Sig :=
+  let clkRel := relClockQ clkInt anchorSamples
+  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
+  let bankQ := bankFoldPaired (pairedBankCols modes live?) fun m =>
+    let phQnu := modePhaseQFromIncr (toIntE m.incrNu) clkRel
+    let phQdf := modePhaseQFromIncr (toIntE m.incrDiff) clkRel
+    let cosDf := div (toFloatE (fixedCosCycSig phQdf)) (lit 1073741824)   -- Q2.30 → float
+    let sinDf := div (toFloatE (fixedSinCycSig phQdf)) (lit 1073741824)
+    let envNu := expSig (neg (mul m.sigmaNu dSec))
+    let envDf := expSig (neg (mul m.ds dSec))
+    let ez : CplxE := (mul envDf cosDf, mul envDf sinDf)                  -- e^z (float)
+    let z : CplxE := (neg (mul m.ds dSec), mul m.wd dSec)                 -- z = (λ−ν)d
+    let zsq := add (mul z.1 z.1) (mul z.2 z.2)
+    let big := gt zsq (litF 0.01)                                        -- |z|² ≥ thr² (thr=0.1)
+    let zsafe : CplxE := (selectE big z.1 (lit 1), selectE big z.2 (lit 0))
+    let direct := cdivE (csubE ez (lit 1, lit 0)) zsafe                  -- (e^z−1)/z
+    let series := cexpm1SeriesE z
+    let cx : CplxE := (selectE big direct.1 series.1, selectE big direct.2 series.2)
+    let wc := cmulE (m.cre, m.cim) (scaleRealE (mul envNu dSec) cx)      -- c·(e^{νd}·d·cexpm1)
+    let wCre := toIntE (mul wc.1 (lit 268435456))
+    let wCim := toIntE (mul wc.2 (lit 268435456))
+    rshift (sub (mul wCre (fixedCosCycSig phQnu)) (mul wCim (fixedSinCycSig phQnu))) (lit 28)
+  selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
+
+
 -- ── The MODAL ISLAND (v1): a decaying-resonator bank as a term over the clock ──
 -- The pole/modal island's emit path. A bank is a gated sum of decaying sinusoids
 -- (`modalBankSig`) — the real part of Σ amp·e^{μd}. It needs NO new ArrowTerm

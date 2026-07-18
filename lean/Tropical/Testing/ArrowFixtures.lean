@@ -1026,6 +1026,13 @@ def buildModalReverbSymC (name : String) (voice reverb : Array ModalMode)
     (anchor : Sig) (arena : Arena) : Arena × ProgramIdx :=
   buildModalBankArrow name (residueComposeEC voice reverb) anchor arena
 
+/-- `voice ⋙ reverb` as the FUSED DIVIDED-DIFFERENCE paired-mode bank
+    (`residueComposeDD` → `modalBankSigTableDD`) — the stable near-degenerate
+    composition (`residue-divdiff` gate's device-under-test). -/
+def buildModalReverbDD (name : String) (voice reverb : Array ModalMode)
+    (anchor : Sig) (arena : Arena) : Arena × ProgramIdx :=
+  buildExprCarrier name (modalBankSigTableDD (residueComposeDD voice reverb) clockLit anchor) arena
+
 /-- Emit the modal bank read through a clock warp φ, via the arrow `.warp` (so φ
     threads through the `.clk` leaf exactly as the master clock does) — for the
     reverse-reverb gate: a reversing φ makes the closed-form tail play backward. -/

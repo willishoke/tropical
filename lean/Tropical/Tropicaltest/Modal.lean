@@ -939,6 +939,82 @@ def runModalReclock (arena : Arena)
     | .error e, _, _ | _, .error e, _ | _, _, .error e => failGate "modal-reclock" s!"render: {firstLine e}"
   | .error e, _, _ | _, .error e, _ | _, _, .error e => failGate "modal-reclock" s!"build: {firstLine e}"
 
+/-- THE DIVIDED-DIFFERENCE gate (WS-B2). `residueComposeDD` → `modalBankSigTableDD`
+    composes voice ⋙ reverb as fused paired modes with NO `1/Δ`, stable through pole
+    coincidence. Three arms: (1) AWAY from coincidence the DD bank renders the same
+    composition as the collected `residueComposeEC` form, agreeing within the SR/2³²
+    frequency-grid floor every `modePhaseQ` bank shares (the DD path reconstructs
+    each `ω_λ` as `ω_ν + (ω_λ−ω_ν)`, two integer-phase rotators). (2) at EXACT
+    coincidence (λ=ν) a single paired mode reproduces the deg-1 `τ·e^{νd}` resonance
+    — bit-close to a hand-built deg-1 bank at the SAME frequency (no branch, no
+    blowup; the `cexpm1` series limit). (3) the coeff `c = a·r` is bounded
+    (`|c| < 8`, Q4.28-safe) where the collected ringing amp `|a·r/Δ|` overflows for
+    small `Δ` — the fixed-point disqualifier the paired form removes. -/
+def runResidueDivDiff (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let tp := 6.283185307179586
+  let fabs := fun (x : Float) => if x < 0.0 then -x else x
+  let toMode := fun (pa : Cplx × Cplx) =>
+    ({ sigma := litF (-pa.1.re), omega := litF pa.1.im,
+       cre := litF pa.2.re, cim := litF pa.2.im } : ModalMode)
+  let voiceF : Array (Cplx × Cplx) := #[
+    (⟨-2.0, tp * 220.0⟩, ⟨1.0, 0.0⟩), (⟨-2.5, tp * 330.0⟩, ⟨0.6, 0.0⟩)]
+  let reverbF : Array (Cplx × Cplx) := #[
+    (⟨-3.0, tp * 180.0⟩, ⟨0.7, 0.2⟩), (⟨-4.0, tp * 260.0⟩, ⟨-0.5, 0.4⟩),
+    (⟨-5.0, tp * 350.0⟩, ⟨0.3, -0.6⟩), (⟨-6.0, tp * 500.0⟩, ⟨0.4, 0.1⟩)]
+  let voice := voiceF.map toMode
+  let reverb := reverbF.map toMode
+  let anchor := lit 200
+  let nDD := (residueComposeDD voice reverb).size
+  -- arm 3 (algebraic): |c|=|a·r| bounded; collected |a·r/Δ| overflows at Δ=0.03
+  let mut cMax : Float := 0.0
+  for pa in voiceF do
+    for pr in reverbF do
+      let m := (Cplx.mul pa.2 pr.2).abs
+      if m > cMax then cMax := m
+  let overflowsAt003 := cMax / 0.03
+  -- arm 2 (coincidence): one paired mode λ=ν ≡ a deg-1 τ·e bank at ω=2π·220
+  let cpole : Cplx := ⟨-2.0, tp * 220.0⟩
+  let vC := #[(cpole, (⟨1.0, 0.0⟩ : Cplx))].map toMode
+  let rC := #[(cpole, (⟨0.5, 0.2⟩ : Cplx))].map toMode
+  let ar := Cplx.mul ⟨1.0, 0.0⟩ ⟨0.5, 0.2⟩
+  let deg1 : Array ModalMode := #[
+    { sigma := litF 2.0, omega := litF (tp * 220.0), cre := litF ar.re, cim := litF ar.im, deg := 1 }]
+  match buildAndFinish (.ok (buildModalReverbDD "dd_far" voice reverb anchor arena)),
+        buildAndFinish (.ok (buildModalReverbSymC "col_far" voice reverb anchor arena)),
+        buildAndFinish (.ok (buildModalReverbDD "dd_coin" vC rC anchor arena)),
+        buildAndFinish (.ok (buildModalBankArrow "deg1_ref" deg1 anchor arena)) with
+  | .ok ddF, .ok colF, .ok ddC, .ok refC =>
+    match ← renderPlanSamples ddF 4096, ← renderPlanSamples colF 4096,
+          ← renderPlanSamples ddC 4096, ← renderPlanSamples refC 4096 with
+    | .ok dfs, .ok cfs, .ok dcs, .ok rcs =>
+      let mut n1 : Float := 0.0
+      let mut d1 : Float := 0.0
+      for k in [0:min dfs.size cfs.size] do
+        n1 := n1 + (dfs[k]! - cfs[k]!) * (dfs[k]! - cfs[k]!)
+        d1 := d1 + cfs[k]! * cfs[k]!
+      let rel1 := Float.sqrt (n1 / (d1 + 1e-300))
+      let mut m2 : Float := 0.0
+      let mut e2 : Float := 0.0
+      for k in [0:min dcs.size rcs.size] do
+        let d := fabs (dcs[k]! - rcs[k]!)
+        if d > m2 then m2 := d
+        e2 := e2 + dcs[k]! * dcs[k]!
+      let bound2 := 3.0 * 3.7252903e-9 * 0.05 * 8.0
+      IO.println s!"        divided-difference composition (voice(2)⋙reverb(4), DD {nDD} paired modes):"
+      IO.println s!"        arm1     DD≡collected (well-sep) rel-L2={rel1} (freq-grid floor)"
+      IO.println s!"        arm2     DD@coincidence≡deg-1 τ·e max|Δ|={m2 * 1e9}e-9 (bound {bound2 * 1e9}e-9, tight)"
+      IO.println s!"        arm3     |c|max={cMax} (<8, Q4.28-safe) · collected |a·r/Δ|@Δ=0.03={overflowsAt003} (>8 overflows)"
+      if nDD == voice.size * reverb.size && rel1 < 2e-3 && m2 < bound2 && e2 > 1e-9
+          && cMax < 8.0 && overflowsAt003 > 8.0 then
+        passGate "residue-divdiff" s!"fused paired modes: away-from-coincidence ≡ collected (rel {rel1}); coincidence ≡ τ·e (Δ {m2*1e9}e-9); |c|={cMax}<8 vs collected 1/Δ overflow — stable, no 1/Δ"
+      else
+        failGate "residue-divdiff" s!"nDD={nDD} rel1={rel1} m2={m2*1e9}e-9 (bound {bound2*1e9}) e2={e2} cMax={cMax} ovf={overflowsAt003}"
+    | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
+      failGate "residue-divdiff" s!"render: {firstLine e}"
+  | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
+    failGate "residue-divdiff" s!"build: {firstLine e}"
+
 end ResidueGates
 
 open Tropical.EmitArrow in
