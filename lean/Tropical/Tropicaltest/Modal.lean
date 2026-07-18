@@ -1065,6 +1065,40 @@ def runModalLive (arena : Arena)
     | .error e, _ => failGate "modal-live" s!"toWire: {firstLine e}"
     | _, .error e => failGate "modal-live" s!"emitKernel: {firstLine e}"
 
+/-- THE PATCH-TYPING gate (WS-G): the connection rule is ENFORCED at decode, not
+    just documented. A `signal→modal` edge (a `source` wired into a `reverb`'s modal
+    inlet) is REJECTED by `compilePlanPure` with a "connection type error" — the
+    decode-time `checkEdgeTypes`, not the downstream `lowerModal` fallthrough; the
+    dual, a valid modal edge (`resonator → reverb`), still compiles. The whole
+    existing corpus (vocab-driven, dead-slot-lint, modal-*) staying green is the
+    no-false-rejection half of the gate. -/
+def runPatchTyping (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let hasSub := fun (s sub : String) => (s.splitOn sub).length != 1
+  let bad := "{\"nodes\":[" ++
+    "{\"id\":\"osc\",\"kind\":\"source\",\"params\":{\"freq\":220}}," ++
+    "{\"id\":\"rev\",\"kind\":\"reverb\",\"params\":{\"rt60\":2},\"in\":{\"in\":[\"osc\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"rev\"]}}],\"out\":\"out\"}"
+  let good := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"rev\",\"kind\":\"reverb\",\"params\":{\"rt60\":2},\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"rev\"]}}],\"out\":\"out\"}"
+  match Lean.Json.parse bad, Lean.Json.parse good with
+  | .ok jb, .ok jg =>
+    let badMsg := match Tropical.Playground.compilePlanPure arena resolved jb with
+      | .error e => firstLine e
+      | .ok _ => "(compiled — should have been rejected)"
+    let badRejected := hasSub badMsg "connection type error"
+    let goodOk := match Tropical.Playground.compilePlanPure arena resolved jg with
+      | .ok _ => true | .error _ => false
+    IO.println s!"        connection typing enforced at decode:"
+    IO.println s!"        result   signal→modal rejected={badRejected} · modal→signal compiles={goodOk}"
+    IO.println s!"        message  {badMsg}"
+    if badRejected && goodOk then
+      passGate "patch-typing" "signal→modal is a decode-time type error; a valid modal edge compiles — the served accepts-rule is enforced, not just documented"
+    else
+      failGate "patch-typing" s!"badRejected={badRejected} goodOk={goodOk} badMsg={badMsg}"
+  | _, _ => failGate "patch-typing" "json parse"
+
 /-- Count instructions matching `pred` across a plan's instance-function tree. -/
 private partial def countInstrsFn (pred : Tropical.Plan.NInstr → Bool) :
     Tropical.Plan.InstanceFunction → Nat

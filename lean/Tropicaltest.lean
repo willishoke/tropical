@@ -385,6 +385,9 @@ def main (args : List String) : IO UInt32 := do
     if !(← runModalLive arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← runPatchTyping arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← runBanksStaging arena resolved) then
       failed := failed + 1
     total := total + 1

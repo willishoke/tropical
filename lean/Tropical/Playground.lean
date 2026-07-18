@@ -677,6 +677,33 @@ private def domStr : PortDomain → String
 private def discStr : Discipline → String
   | .raw => "raw" | .glide => "glide" | .anchor => "anchor"
 
+/-- The connection-typing rule, ENFORCED at decode. The `portSpecs`/`outletOf`
+    tables already STATE it (and `vocabularyJson` serves it); this makes a bad edge
+    a pre-lowering type error with a clear message instead of a lowering-time
+    surprise (or, for modal inlets, the `lowerModal` fallthrough string). For every
+    wired inlet, the source's outlet color must be in the inlet's `accepts`:
+    `modal→signal` realizes, `control→signal` is a constant stream, but `signal→modal`
+    (a Sig has no poles to compose) is a type error — as is feeding an outletless
+    sink (`out`) as a source. A derived reader of the single-source table, so it
+    cannot drift from the served rule. Silence-on-legal-states is preserved: an
+    unwired inlet is not an edge, so it is never flagged. -/
+private def checkEdgeTypes (raws : Array Raw) : Except String Unit := do
+  for r in raws do
+    for p in portSpecs r.kind do
+      unless p.accepts.isEmpty do
+        for srcId in portSources r.inObj p.name do
+          match raws.find? (·.id == srcId) with
+          | none => pure ()                         -- dangling id: not a type error
+          | some src =>
+            match outletOf src.kind with
+            | none =>
+              throw s!"connection type error: '{src.id}' ({src.kind}) has no outlet but is wired into '{r.id}' ({r.kind}) inlet '{p.name}'"
+            | some col =>
+              unless p.accepts.contains col do
+                let accepted := String.intercalate "/" (p.accepts.toList.map domStr)
+                throw s!"connection type error: '{src.id}' ({src.kind}, {domStr col} outlet) → '{r.id}' ({r.kind}) inlet '{p.name}' which accepts {accepted} — outlet.color ∉ inlet.accepts (modal→signal realizes; signal→modal is a type error)"
+  pure ()
+
 /-- The vocabulary as JSON — the ONE description of the node kinds, GENERATED
     from the port-spec table (the hand-maintained `nodeSchema` this replaces
     was the third copy, and the class of bug this file exists to kill). Per
@@ -906,6 +933,7 @@ private def tapNodeIds (raws : Array Raw) : Array String :=
 def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j : Json) :
     Except String (Tropical.Plan.FlatPlan × Array Tap
       × Array (Array (Option Tropical.Ir.Stage))) := do
+  checkEdgeTypes (rawsOf j)                          -- reject ill-typed edges pre-lowering
   let (g, paramTable) ← decodeGraph j
   let term ← lowerGraph g
   let (out, b0) := emitTerm (normalize term) {}
