@@ -388,6 +388,9 @@ def main (args : List String) : IO UInt32 := do
     if !(← runPatchTyping arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← runGongStrike arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← runBanksStaging arena resolved) then
       failed := failed + 1
     total := total + 1

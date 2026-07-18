@@ -1099,6 +1099,45 @@ def runPatchTyping (arena : Arena) (resolved : Array (String × ProgramIdx)) : I
       failGate "patch-typing" s!"badRejected={badRejected} goodOk={goodOk} badMsg={badMsg}"
   | _, _ => failGate "patch-typing" "json parse"
 
+/-- THE GONG STRIKE gate (G7): a `gong` node compiled through the real
+    `compilePlanPure` (decode → `gongStrikeNodes` → two anchored modal banks under
+    per-register pitch-bloom warps → session compile → JIT-loadable kernel) renders a
+    causal, ringing strike. Struck at t=5ms: silent before the strike (the causal
+    gate), then a struck-resonator tail that decays over the render. Prints the bloom
+    metrics (peak index, early/late energy) for the record. -/
+def runGongStrike (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let src := "{\"nodes\":[" ++
+    "{\"id\":\"g\",\"kind\":\"gong\",\"params\":{\"t\":0.005,\"beta\":0.06,\"g\":1.8,\"freq\":110}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"g\"]}}],\"out\":\"out\"}"
+  match Lean.Json.parse src with
+  | .error e => failGate "gong-strike" s!"json: {e}"
+  | .ok j =>
+  match Tropical.Playground.compilePlanPure arena resolved j with
+  | .error e => failGate "gong-strike" s!"compile: {firstLine e}"
+  | .ok (plan, _, stageBlocks) =>
+    let rt ← Tropical.Ffi.Runtime.new 16384
+    Tropical.StagedLoad.loadTyped rt plan stageBlocks
+    rt.process
+    let s := decodeF64LE (← rt.outputBytes)
+    let abs := fun (x : Float) => if x < 0.0 then -x else x
+    let mut preMax : Float := 0.0
+    for i in [0:200] do
+      if abs s[i]! > preMax then preMax := abs s[i]!
+    let mut peak : Float := 0.0
+    let mut peakI : Nat := 0
+    for i in [240:s.size] do
+      if abs s[i]! > peak then peak := abs s[i]!; peakI := i
+    let mut eEarly : Float := 0.0
+    let mut eLate : Float := 0.0
+    for i in [240:4240] do if i < s.size then eEarly := eEarly + s[i]! * s[i]!
+    for i in [12000:16000] do if i < s.size then eLate := eLate + s[i]! * s[i]!
+    IO.println s!"        gong strike (t=5ms, β=0.06) via compilePlanPure → JIT:"
+    IO.println s!"        result   pre-strike|max|={preMax} · peak={peak}@{peakI} · E[early]={eEarly} E[late]={eLate}"
+    if preMax == 0.0 && peak > 1e-3 && eEarly > 1e-9 && eLate < eEarly then
+      passGate "gong-strike" s!"gong compiles + renders: causal (silent pre-strike), rings and decays (peak {peak}@{peakI}, E early {eEarly} > late {eLate}) — the struck resonator end to end"
+    else
+      failGate "gong-strike" s!"preMax={preMax} peak={peak} eEarly={eEarly} eLate={eLate}"
+
 /-- Count instructions matching `pred` across a plan's instance-function tree. -/
 private partial def countInstrsFn (pred : Tropical.Plan.NInstr → Bool) :
     Tropical.Plan.InstanceFunction → Nat
