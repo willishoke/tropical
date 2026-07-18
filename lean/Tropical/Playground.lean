@@ -17,8 +17,12 @@ via `compileSession` — the production loadable tail. The slide (`normalize`) p
 each effect's warps up onto the generators' clocks, so a `flange`/`fm` dropped
 downstream of an oscillator genuinely re-clocks that oscillator.
 
-Knobs are baked literals (EmitArrow emits no `paramRef`), so a knob change re-sends
-the whole graph and hot-swaps — clickless, since there is no per-sample state.
+Continuous knobs are LIVE `param:<id>.<knob>` module slots — a knob change drives
+`set_param` on the running kernel with no recompile (the modal path emits `paramRef`
+via `pref`; the earlier "all knobs baked" design is retired). Only STRUCTURAL edits —
+topology, mode-bank size, and baked strike data (gong/string mode tables, anchors) —
+re-send the whole graph and hot-swap. Clickless either way, since there is no
+per-sample state to carry.
 
 Uncommitted: this file makes `EmitArrow` reachable from the live `frontend`.
 -/
@@ -54,7 +58,7 @@ private def jStr (obj : Json) (key : String) (dflt : String) : String :=
   | _ => dflt
 
 /-- A numeric param as a build-time `Float` (the gong's structural strike
-    data — mode tables, drive, anchors — is baked, not slotted). -/
+    data — mode tables, anchors — is baked, not slotted). -/
 private def jFloat (obj : Json) (key : String) (dflt : Float) : Float :=
   ((jNum? obj key).map (·.toFloat)).getD dflt
 
@@ -380,14 +384,12 @@ def portSpecs : String → Array PortSpec
   | "modalmix" => #[{ name := "in", accepts := modalIn, multi := true }]
   -- gong: a source with no inlets and no knobs — its strike data (`t`,
   -- `beta`, `g`, `modes_full`, `modes_half`) is structural, carried in
-  -- `params`. shaper: one signal inlet; `drive`/`peak` are structural
-  -- (the poly fit is a build-time solve).
+  -- `params`.
   | "gong" => #[]
   -- string: a plucked/struck string as its diagonalized modal bank. Like gong,
   -- its content (`freq`, `decay`, `t`, `modes`) is structural, carried in
   -- `params`; the optional `addr` inlet drives the pluck's time-address.
   | "string" => #[{ name := "addr", accepts := sigIn }]
-  | "shaper" => #[{ name := "in", accepts := sigIn }]
   | "out" => #[{ name := "in", accepts := sigIn, multi := true }]
   | _ => #[]
 
@@ -401,7 +403,7 @@ def outletOf : String → Option PortDomain
 /-- The kinds the table covers, in schema order (`out` last — it has no outlet). -/
 def vocabularyKinds : Array String := #[
   "source", "pluck", "comb", "flange", "delay", "reverse", "fm", "sflange",
-  "mix", "ring", "shaper", "gong", "string", "resonator", "reverb", "filter",
+  "mix", "ring", "gong", "string", "resonator", "reverb", "filter",
   "modalmix", "knob", "out"]
 
 -- Derived views — the ONLY readers of glide/anchor/knob facts from here down.
@@ -639,16 +641,6 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     let anchor := mul (litF t) .sampleRate
     let addr? := (portSources inObj "addr")[0]?
     (.modalSource modes anchor clk addr?, #[])
-  | "shaper" =>
-    -- The alias-free drive: an odd-poly (degree 5) fit of `tanh(drive·u)`,
-    -- fit at BUILD time (coefficients are a least-squares solve, so the
-    -- drive is structural — a knob change relowers, clicklessly). `peak` is
-    -- the fixed normalization reference (the vel-1.0 strike's peak), which
-    -- is what keeps velocity dynamics through the knee.
-    let k := jFloat params "drive" 2.6
-    let peak := jFloat params "peak" 1.0
-    let (c1, c3, c5) := polyFitTanhOdd k
-    (.shaper sig (polyShapeSig c1 c3 c5 peak), #[])
   | _ => (.mix (portSources inObj "in"), #[])
 
 private structure Raw where
