@@ -165,7 +165,7 @@ def runModalDegree (arena : Arena)
   | .ok p =>
     match ← renderPlanSamples p 8192 with
     | .ok s =>
-      let sinkGain : Float := 0.05
+      let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
       let n := min s.size 8192
       let mut preMax : Float := 0.0
       for i in [0:201] do
@@ -529,8 +529,8 @@ def runResidueSymbolic (arena : Arena)
         energy := energy + bs[i]! * bs[i]!
       -- Two builds of the same 10-mode bank whose weights may differ by an ulp
       -- pre-landing (litF round-trip), so each mode may jump one Q4.28 quantum
-      -- (design/fixed-carrier.md) × the 0.05 sink gain, 2× slack.
-      let bound := 10.0 * 3.7252903e-9 * 0.05 * 2.0
+      -- (design/fixed-carrier.md) × the sink gain, 2× slack.
+      let bound := 10.0 * 3.7252903e-9 * Tropical.Plan.defaultSinkGain.toFloat * 2.0
       IO.println s!"        Expr-residue (literal poles) vs Float-baked residue, voice(2)⋙reverb(4):"
       IO.println s!"        result   max|Δ|={maxAbs * 1e9}e-9  ·  quantum bound={bound * 1e9}e-9"
       if maxAbs < bound && energy > 1e-9 then
@@ -582,9 +582,9 @@ def runResidueCollected (arena : Arena)
         let d := (us[i]! - cs[i]!).abs
         if d > maxAbs then maxAbs := d
         energy := energy + us[i]! * us[i]!
-      -- (nU + nC) independent Q4.28 weight landings × the 0.05 sink gain, with
+      -- (nU + nC) independent Q4.28 weight landings × the sink gain, with
       -- 2× slack for the poly/final-shift ulps riding along.
-      let bound := (nU + nC).toFloat * 3.7252903e-9 * 0.05 * 2.0
+      let bound := (nU + nC).toFloat * 3.7252903e-9 * Tropical.Plan.defaultSinkGain.toFloat * 2.0
       IO.println s!"        collected (m+n={nC}) vs uncollected (m+m·n={nU}), voice(3)⋙reverb(4):"
       IO.println s!"        result   max|Δ|={maxAbs * 1e9}e-9  ·  quantum bound={bound * 1e9}e-9"
       if maxAbs < bound && energy > 1e-9 && nC == 7 && nU == 15 then

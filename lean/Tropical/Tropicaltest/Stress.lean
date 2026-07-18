@@ -167,7 +167,7 @@ def runModulatedClock (arena : Arena)
   let depth : Float := 3.0
   let twoPi : Float := 6.283185307179586
   let two32 : Float := 4294967296.0
-  let sinkGain : Float := 0.05   -- defaultSinkGain (Plan.lean): scales OUTPUTS, not the mid-graph warp
+  let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat   -- scales OUTPUTS, not the mid-graph warp
   match buildAndFinish (Tropical.EmitArrow.buildTapCarrier "BareFc"
           (Tropical.EmitArrow.litPitchVoice 2000) bareTaps arena resolved),
         buildAndFinish (Tropical.EmitArrow.buildFmCarrier "FmOsc" 2000 200 3 arena resolved) with
@@ -227,7 +227,7 @@ def runPmPm (arena : Arena)
   let d2 : Float := 3.0
   let twoPi : Float := 6.283185307179586
   let two32 : Float := 4294967296.0
-  let sinkGain : Float := 0.05
+  let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
   match buildAndFinish (Tropical.EmitArrow.buildPmPmCarrier "PmPm" 2000 200 700 3 3 arena resolved),
         buildAndFinish (Tropical.EmitArrow.buildFmCarrier "Fm1" 2000 200 3 arena resolved) with
   | .error e, _ => failGate "pm-of-pm" s!"build pmpm: {firstLine e}"
@@ -277,7 +277,7 @@ def runNegativeClock (arena : Arena)
   let n : Nat := 1024
   let delta : Nat := 20
   let twoPi : Float := 6.283185307179586
-  let sinkGain : Float := 0.05
+  let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
   let delayTap : Tropical.EmitArrow.Tap :=
     { name := "d"
       warp := fun c => Tropical.EmitArrow.sub c
@@ -333,7 +333,7 @@ def runMorphOscDifferential (arena : Arena)
   let lo : Nat := 4
   let freqHz : Int := 2000
   let twoPi : Float := 6.283185307179586
-  let sinkGain : Float := 0.05
+  let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
   -- the standard rep: the SAME crossfade arithmetic the engine emits, on the
   -- SAME integer phasor + Horner Sin (`(1−m)·(2·phase−1) + m·Sin(2π·phase)`).
   let refOut := fun (morphF : Float) (clk : Int) =>
