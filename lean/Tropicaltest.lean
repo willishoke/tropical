@@ -361,6 +361,9 @@ def main (args : List String) : IO UInt32 := do
     if !(← runResidueDivDiff arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← runResidueBanked arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← runModalIntegrate arena resolved) then
       failed := failed + 1
     total := total + 1

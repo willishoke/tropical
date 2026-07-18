@@ -1033,6 +1033,13 @@ def buildModalReverbDD (name : String) (voice reverb : Array ModalMode)
     (anchor : Sig) (arena : Arena) : Arena × ProgramIdx :=
   buildExprCarrier name (modalBankSigTableDD (residueComposeDD voice reverb) clockLit anchor) arena
 
+/-- `voice ⋙ reverb` with the collected residue's Cauchy inner sums BANKED
+    (`residueComposeBanked` → `modalBankSigTable`) — same composition as
+    `buildModalReverbSymC`, O(m+n) coeff-fill code (`residue-banked` gate). -/
+def buildModalReverbBanked (name : String) (voice reverb : Array ModalMode)
+    (anchor : Sig) (arena : Arena) : Arena × ProgramIdx :=
+  buildModalBankArrow name (residueComposeBanked voice reverb) anchor arena
+
 /-- Emit the modal bank read through a clock warp φ, via the arrow `.warp` (so φ
     threads through the `.clk` leaf exactly as the master clock does) — for the
     reverse-reverb gate: a reversing φ makes the closed-form tail play backward. -/

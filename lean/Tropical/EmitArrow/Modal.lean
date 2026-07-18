@@ -302,6 +302,54 @@ def residueComposeEC (voice reverb : Array ModalMode) : Array ModalMode :=
     modeOfE r.poleE (cnegE (cmulE r.ampE coupling)))
   forced ++ ringing
 
+/-- `residueComposeEC` with the Cauchy inner sums BANKED (WS-F). Each output mode's
+    amp (`Hlam`/`coupling`) becomes a scalar `Sig.bankSum` over the SOURCE columns
+    rather than a meta-unrolled fold — same value (per-term identical to `cdivE`,
+    left-assoc = the fold's order, so BIT-IDENTICAL to `residueComposeEC`), but the
+    coefficient-kernel FILL is O(m+n) reduce regions instead of O(m·n) unrolled ops
+    when the poles are live: each inner sum is an all-s0 region that hoists to the
+    coeff kernel (`Stage0.tryRegion` — scalar accumulator), and the column writes
+    hoist as ordinary array fills. A compile-flatness win, orthogonal to
+    `residueComposeDD`'s stability (the `1/Δ` still appears — this is the COLLECTED
+    form). Inner binder id 1 (the audio bank is 0; the fills are sequential, emitted
+    before the audio region). -/
+def residueComposeBanked (voice reverb : Array ModalMode) : Array ModalMode :=
+  if voice.isEmpty then #[] else
+  let idH : Nat := 1
+  -- Σₖ (rRe+i·rIm)/((pRe−nRe[k]) + i(pIm−nIm[k])), real or imag part, as a scalar
+  -- bankSum; per term = `cdivE` (r·conj(d)/|d|²), left-associative.
+  let cauchy := fun (pRe pIm nRe nIm rRe rIm : Sig) (count : Nat) (imag : Bool) =>
+    Sig.bankSum count #[nRe, nIm, rRe, rIm]
+      (let k := Sig.loopIdx idH
+       let dRe := sub pRe (Sig.index nRe k)
+       let dIm := sub pIm (Sig.index nIm k)
+       let den := add (mul dRe dRe) (mul dIm dIm)
+       let rkRe := Sig.index rRe k
+       let rkIm := Sig.index rIm k
+       if imag then div (sub (mul rkIm dRe) (mul rkRe dIm)) den
+       else div (add (mul rkRe dRe) (mul rkIm dIm)) den)
+      none idH
+  let revNuRe := Sig.arr (reverb.map (·.poleE.1))
+  let revNuIm := Sig.arr (reverb.map (·.poleE.2))
+  let revRRe := Sig.arr (reverb.map (·.ampE.1))
+  let revRIm := Sig.arr (reverb.map (·.ampE.2))
+  let voNuRe := Sig.arr (voice.map (·.poleE.1))
+  let voNuIm := Sig.arr (voice.map (·.poleE.2))
+  let voARe := Sig.arr (voice.map (·.ampE.1))
+  let voAIm := Sig.arr (voice.map (·.ampE.2))
+  -- forced (over reverb): Hlam = Σᵣ r/(λ−ν), amp = a·Hlam
+  let forced := voice.map (fun v =>
+    let hRe := cauchy v.poleE.1 v.poleE.2 revNuRe revNuIm revRRe revRIm reverb.size false
+    let hIm := cauchy v.poleE.1 v.poleE.2 revNuRe revNuIm revRRe revRIm reverb.size true
+    modeOfE v.poleE (cmulE v.ampE (hRe, hIm)))
+  -- ringing (over voice): with pole=ν the bankSum gives Σᵥ a/(ν−λ) = −coupling, so
+  -- the EC amp `−r·coupling` becomes `r·(bankSum)` — no `cnegE`.
+  let ringing := reverb.map (fun r =>
+    let cRe := cauchy r.poleE.1 r.poleE.2 voNuRe voNuIm voARe voAIm voice.size false
+    let cIm := cauchy r.poleE.1 r.poleE.2 voNuRe voNuIm voARe voAIm voice.size true
+    modeOfE r.poleE (cmulE r.ampE (cRe, cIm)))
+  forced ++ ringing
+
 /-- `∫`: the antiderivative of a modal bank, exactly, as a build-time pole move.
     `∫ Σₖ Aₖ e^{μₖ d} dd = Σₖ (Aₖ/μₖ) e^{μₖ d} + C`, and choosing `C = −Σₖ Aₖ/μₖ`
     fixes the integral to 0 at the strike (`d=0`) — a DC atom (`μ=0`, so `e^{0·d}=1`)

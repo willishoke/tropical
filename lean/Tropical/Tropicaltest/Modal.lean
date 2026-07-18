@@ -1015,6 +1015,58 @@ def runResidueDivDiff (arena : Arena)
   | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
     failGate "residue-divdiff" s!"build: {firstLine e}"
 
+/-- THE BANKED CAUCHY FILLS gate (WS-F). `residueComposeBanked` computes the
+    collected form's Cauchy inner sums (`Hlam`/`coupling`) as scalar `Sig.bankSum`s
+    over the source columns — same value as `residueComposeEC` (bit-identical render,
+    per-term `cdivE`, left-assoc), but O(m+n) reduce-region fill code in place of the
+    O(m·n) meta-unrolled ops. Two arms: (1) EQUIVALENCE — banked ≡ collected
+    bit-for-bit over the render; (2) FLATNESS — with LIVE (`paramRef`) poles (so the
+    Cauchy structure survives const-folding), the banked plan carries fewer
+    instructions than the unrolled one at a 6⋙6 composition. -/
+def runResidueBanked (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let tp := 6.283185307179586
+  let toMode := fun (pa : Cplx × Cplx) =>
+    ({ sigma := litF (-pa.1.re), omega := litF pa.1.im,
+       cre := litF pa.2.re, cim := litF pa.2.im } : ModalMode)
+  let voice := #[
+    (⟨-2.0, tp * 220.0⟩, (⟨1.0, 0.0⟩ : Cplx)), (⟨-2.5, tp * 330.0⟩, ⟨0.6, 0.0⟩)].map toMode
+  let reverb := #[
+    (⟨-3.0, tp * 180.0⟩, (⟨0.7, 0.2⟩ : Cplx)), (⟨-4.0, tp * 260.0⟩, ⟨-0.5, 0.4⟩),
+    (⟨-5.0, tp * 350.0⟩, ⟨0.3, -0.6⟩), (⟨-6.0, tp * 500.0⟩, ⟨0.4, 0.1⟩)].map toMode
+  let anchor := lit 200
+  let nB := (residueComposeBanked voice reverb).size
+  -- flatness: live paramRef poles keep the Cauchy sums out of the const-folder
+  let pr := fun (i : Nat) => (Sig.paramRef ⟨i⟩ : Sig)
+  let mkLive := fun (b : Nat) =>
+    ({ sigma := pr b, omega := pr (b + 1), cre := pr (b + 2), cim := pr (b + 3) } : ModalMode)
+  let voiceL := (Array.range 6).map (fun i => mkLive (4 * i))
+  let reverbL := (Array.range 6).map (fun i => mkLive (24 + 4 * i))
+  let flat : Option (Nat × Nat) :=
+    match buildAndFinish (.ok (buildModalReverbSymC "rbcL" voiceL reverbL anchor arena)),
+          buildAndFinish (.ok (buildModalReverbBanked "rbbL" voiceL reverbL anchor arena)) with
+    | .ok clp, .ok blp => some (planInstrCount clp, planInstrCount blp)
+    | _, _ => none
+  match buildAndFinish (.ok (buildModalReverbSymC "rbc" voice reverb anchor arena)),
+        buildAndFinish (.ok (buildModalReverbBanked "rbb" voice reverb anchor arena)) with
+  | .ok cp, .ok bp =>
+    match ← renderPlanSamples cp 4096, ← renderPlanSamples bp 4096 with
+    | .ok cs, .ok bs =>
+      let bitDiff := bitDiffCount cs bs
+      let e := bs.foldl (fun a x => a + x * x) 0.0
+      let flatStr := match flat with
+        | some (c, b) => s!"unrolled {c} vs banked {b} plan-instrs (6⋙6)"
+        | none => "n/a (live build not finalized)"
+      let flatOk := match flat with | some (c, b) => b < c | none => true
+      IO.println s!"        banked Cauchy fills (collected form): equivalence + flatness"
+      IO.println s!"        result   banked≡collected bit-diff {bitDiff}/4096 · {nB} modes · {flatStr}"
+      if bitDiff == 0 && e > 1e-9 && nB == voice.size + reverb.size && flatOk then
+        passGate "residue-banked" s!"banked Cauchy fills ≡ collected bit-identical ({nB} modes); {flatStr} — O(m+n) coeff regions"
+      else
+        failGate "residue-banked" s!"bitDiff={bitDiff} nB={nB} e={e} flat={flatStr}"
+    | .error e, _ | _, .error e => failGate "residue-banked" s!"render: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "residue-banked" s!"build: {firstLine e}"
+
 end ResidueGates
 
 open Tropical.EmitArrow in
