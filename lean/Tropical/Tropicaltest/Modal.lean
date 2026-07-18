@@ -1138,6 +1138,52 @@ def runGongStrike (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO
     else
       failGate "gong-strike" s!"preMax={preMax} peak={peak} eEarly={eEarly} eLate={eLate}"
 
+/-- THE GONG LIVE gate (G4). The gong's pitch-bloom depth `beta` is now a live slot
+    (`param:<id>.beta`) — the score's baked value its initial, but adjustable with no
+    relower. Presence is only half the gate: a slot no instruction READS is a dead
+    knob. So run two identical gong runtimes a block, move `g.beta` on one, and
+    require the next block to DIVERGE — the bloom warp genuinely reads the slot. -/
+def runGongLive (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let src := "{\"nodes\":[" ++
+    "{\"id\":\"g\",\"kind\":\"gong\",\"params\":{\"t\":0.0,\"beta\":0.06,\"g\":1.8,\"freq\":110}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"g\"]}}],\"out\":\"out\"}"
+  match Lean.Json.parse src with
+  | .error e => failGate "gong-live" s!"json: {e}"
+  | .ok j =>
+  match Tropical.Playground.compilePlanPure arena resolved j with
+  | .error e => failGate "gong-live" s!"compile: {firstLine e}"
+  | .ok (plan, _, stageBlocks) =>
+    let rt ← Tropical.Ffi.Runtime.new 2048
+    Tropical.StagedLoad.loadTyped rt plan stageBlocks
+    let rt2 ← Tropical.Ffi.Runtime.new 2048
+    Tropical.StagedLoad.loadTyped rt2 plan stageBlocks
+    let bIdx? ← rt.slotIndex? "param:g.beta"
+    rt.process
+    rt2.process                                   -- block 1: the strike + early bloom
+    let b1a := decodeF64LE (← rt.outputBytes)
+    let b1b := decodeF64LE (← rt2.outputBytes)
+    if let some bIdx := bIdx? then rt.setSlot bIdx 0.4
+    rt.process
+    rt2.process                                   -- block 2: one ring now blooms deeper
+    let b2a := decodeF64LE (← rt.outputBytes)
+    let b2b := decodeF64LE (← rt2.outputBytes)
+    let mut sameB1 := true
+    for i in [0:min b1a.size b1b.size] do
+      if b1a[i]! != b1b[i]! then sameB1 := false
+    let mut dE : Float := 0.0
+    let mut e0 : Float := 0.0
+    for i in [0:min b2a.size b2b.size] do
+      let d := b2a[i]! - b2b[i]!
+      dE := dE + d * d
+      e0 := e0 + b2b[i]! * b2b[i]!
+    let read := dE > 1e-12 && e0 > 1e-12
+    IO.println s!"        gong β as a live slot (param:g.beta):"
+    IO.println s!"        result   slot present={bIdx?.isSome} · pre-move blocks identical={sameB1} · post-move ΔE/E={dE / (e0 + 1e-300)}"
+    if bIdx?.isSome && sameB1 && read then
+      passGate "gong-live" "gong β is a live slot AND the bloom warp reads it: moving g.beta diverges the ring (setSlot, no relower)"
+    else
+      failGate "gong-live" s!"present={bIdx?.isSome} sameB1={sameB1} read={read} (ΔE={dE})"
+
 /-- Count instructions matching `pred` across a plan's instance-function tree. -/
 private partial def countInstrsFn (pred : Tropical.Plan.NInstr → Bool) :
     Tropical.Plan.InstanceFunction → Nat

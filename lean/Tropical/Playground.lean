@@ -382,10 +382,11 @@ def portSpecs : String → Array PortSpec
       { name := "resonance", knob := some (5, 1), discipline := .glide,
         display := some { min := 0, max := 1 } }]
   | "modalmix" => #[{ name := "in", accepts := modalIn, multi := true }]
-  -- gong: a source with no inlets and no knobs — its strike data (`t`,
-  -- `beta`, `g`, `modes_full`, `modes_half`) is structural, carried in
-  -- `params`.
-  | "gong" => #[]
+  -- gong: a struck resonator whose strike data (`t`, `g`, `modes_full`,
+  -- `modes_half`) is structural (carried in `params`), EXCEPT the pitch-bloom
+  -- depth `beta` — promoted to a LIVE slot, so the bloom deepens/relaxes under a
+  -- knob with no relower, the score's baked value its initial.
+  | "gong" => #[{ name := "beta", knob := some (5, 2), display := some { min := 0, max := 0.5 } }]
   -- string: a plucked/struck string as its diagonalized modal bank. Like gong,
   -- its content (`freq`, `decay`, `t`, `modes`) is structural, carried in
   -- `params`; the optional `addr` inlet drives the pluck's time-address.
@@ -608,7 +609,6 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     -- depth, velocity already folded in), `g` (bloom settle rate), and the
     -- two pre-expanded mode tables.
     let t := jFloat params "t" 0.0
-    let beta := jFloat params "beta" 0.0
     let gRate := jFloat params "g" 1.8
     let anchor := mul (litF t) .sampleRate
     -- a bare gong (no score data) strikes the built-in default bank at its
@@ -619,10 +619,10 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
       if full.isEmpty && half.isEmpty
       then defaultGongModes (jFloat params "freq" 110.0)
       else (full, half)
-    -- a data-less drop also gets an audible bloom (β = 0.05 ≈ a solid strike)
-    let beta := if beta == 0.0 && (params.getObjVal? "beta").toOption.isNone
-      then 0.05 else beta
-    gongStrikeNodes id clk anchor (litF beta) (litF gRate) full half
+    -- β (pitch-bloom depth) is a LIVE slot: the score's baked value initializes it,
+    -- and it deepens/relaxes under the knob with no relower (table fallback 0.05 ≈
+    -- a solid strike, for a data-less drop).
+    gongStrikeNodes id clk anchor (p "beta" (dv "beta")) (litF gRate) full half
   | "string" =>
     -- A plucked string as its diagonalized modal bank — the Karplus-Strong loop
     -- is an LTI system, so its delay-line recurrence and this closed-form pole
