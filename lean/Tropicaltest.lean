@@ -367,6 +367,9 @@ def main (args : List String) : IO UInt32 := do
     if !(← runModalBessel arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← runModalHeterodyne arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← runResidueSymbolic arena resolved) then
       failed := failed + 1
     total := total + 1

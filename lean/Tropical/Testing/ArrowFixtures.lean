@@ -978,6 +978,19 @@ def buildModalBankPair (nameRe nameIm : String) (modes : Array ModalMode)
   let (reSig, imSig) := modalBankSigPairTable modes clockLit anchor
   (buildExprCarrier nameRe reSig arena, buildExprCarrier nameIm imSig arena)
 
+/-- Heterodyne FM as a twist at the realization seam: `Re·cosθ − Im·sinθ` over the
+    analytic `(Re, Im)` pair, with the static-index modulation phase
+    `θ(d) = b·sin(ω_m d)`. ONE complex rotation per sample, independent of bank
+    size — the cheap realization of the same FM that `besselFuse` bakes into
+    `carrier × (2N+1)` sideband modes. The `modal-heterodyne` gate cross-checks the
+    two against each other (D6). ω_m in rad/s, b the index. -/
+def buildHeterodyne (name : String) (modes : Array ModalMode) (wm b : Float)
+    (anchor : Sig) (arena : Arena) : Arena × ProgramIdx :=
+  let (re, im) := modalBankSigPairTable modes clockLit anchor
+  let dSec := div (div (toFloatE (relClockQ clockLit anchor)) (lit 4294967296)) .sampleRate
+  let theta := mul (litF b) (sinSig (mul (litF wm) dSec))
+  buildExprCarrier name (sub (mul re (cosSig theta)) (mul im (sinSig theta))) arena
+
 /-- `voice ⋙ reverb` end to end: run the residue calculus at build time, turn the
     composed complex modes into a `ModalMode` bank, and emit it — the connection is
     an exact symbolic computation, not a hand-tuned coupling table. -/

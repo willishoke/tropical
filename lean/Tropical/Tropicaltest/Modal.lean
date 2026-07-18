@@ -774,6 +774,44 @@ def runModalBessel (arena : Arena)
   | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
     failGate "modal-bessel" s!"build: {firstLine e}"
 
+/-- THE HETERODYNE gate (D6). Heterodyne FM as a twist at the realization seam —
+    `Re·cosθ − Im·sinθ` over the analytic pair, `θ = b·sin(ω_m d)` — is ONE
+    rotation per sample, independent of bank size. It must render equal to
+    `besselFuse`'s EXPLICIT sideband bank (`carrier × (2N+1)` modes at `μ+i·n·ω_m`,
+    amp `A·Jₙ(b)`): the same FM two ways, so the cheap twist really is a modal
+    object with poles. Tolerance absorbs the float-θ vs baked-sideband datapath
+    difference (`sinSig`/`cosSig` poly vs Q4.28 amps); the claim is agreement, and
+    the twist's advantage is the trip count — the carrier's modes, not `×(2N+1)`. -/
+def runModalHeterodyne (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let b := 3.0
+  let wm := 2.0 * 3.141592653589793 * 308.0
+  let carrier : Array ModalMode := #[
+    ModalMode.hz (lit 220) (lit 20 1) (lit 1),
+    ModalMode.hz (lit 330) (lit 30 1) (lit 5 1)]
+  let anchor := lit 200
+  match buildAndFinish (.ok (buildHeterodyne "het" carrier wm b anchor arena)),
+        buildAndFinish (.ok (buildModalBankArrow "hetFuse" (besselFuse carrier wm b 19) anchor arena)) with
+  | .ok hetP, .ok fuseP =>
+    match ← renderPlanSamples hetP 4096, ← renderPlanSamples fuseP 4096 with
+    | .ok hS, .ok fS =>
+      let n := min hS.size fS.size
+      let mut num : Float := 0.0
+      let mut den : Float := 0.0
+      for k in [0:n] do
+        num := num + (hS[k]! - fS[k]!) * (hS[k]! - fS[k]!)
+        den := den + fS[k]! * fS[k]!
+      let rel := Float.sqrt (num / (den + 1e-300))
+      let hEnergy := hS.foldl (fun a x => a + x * x) 0.0
+      IO.println s!"        heterodyne twist vs besselFuse bank (b={b}, 2-mode carrier):"
+      IO.println s!"        result   rel-L2 het≡fused-bank={rel} · plan-instrs het={planInstrCount hetP} fuse(19)={planInstrCount fuseP} · E[het]={hEnergy}"
+      if rel < 1e-3 && hEnergy > 1e-9 then
+        passGate "modal-heterodyne" s!"heterodyne twist (Re·cosθ−Im·sinθ) ≡ the fused Bessel bank (rel {rel}) — O(1)-in-sidebands FM, still a modal object (D6)"
+      else
+        failGate "modal-heterodyne" s!"rel={rel} hEnergy={hEnergy}"
+    | .error e, _ | _, .error e => failGate "modal-heterodyne" s!"render: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "modal-heterodyne" s!"build: {firstLine e}"
+
 end ResidueGates
 
 open Tropical.EmitArrow in
