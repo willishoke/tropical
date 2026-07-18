@@ -885,6 +885,60 @@ def runModalVco (arena : Arena)
     | .error e => failGate "modal-vco" s!"render: {firstLine e}"
   | .error e => failGate "modal-vco" s!"build: {firstLine e}"
 
+/-- THE AFFINE RECLOCK gate. `reclockAffine a b` is the pole-space image of the
+    affine clock warp `d↦a·d+b`, so the reclocked bank at sample `i` equals the
+    ORIGINAL bank at the warped sample `a·i + b·SR`: `reclock[i] ≡ orig[a·i + b·SR]`
+    (both anchored at 0) — a direct subsample/shift comparison, no `.warp` path.
+    Two arms so each isolates one axis: (A) `a=1, b·SR=10` — poles UNCHANGED, so the
+    only change is the amp rotation `A↦A·e^{μb}` (envelope `e^{−σb}` × phase
+    `e^{iωb}`); the integer phase is untouched, so this is drift-free and TIGHT.
+    (B) `a=2, b=0` — the pole scale `μ↦2μ`; the bank now uses integer phase on `2ω`,
+    which quantizes to the SR/2³² frequency grid INDEPENDENTLY of `2×(ω's grid)`, a
+    phase drift `≤ N·2⁻³²·2π` rad accumulating over the window (inaudible ~1e-5 Hz),
+    so this arm's bound is soft and window-scaled, not bit-exact. -/
+def runModalReclock (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let tp := 6.283185307179586
+  let fabs := fun (x : Float) => if x < 0.0 then -x else x
+  let toMode := fun (pa : Cplx × Cplx) =>
+    ({ sigma := litF (-pa.1.re), omega := litF pa.1.im,
+       cre := litF pa.2.re, cim := litF pa.2.im } : ModalMode)
+  let modes : Array ModalMode := #[
+    (⟨-2.0, tp * 220.0⟩, (⟨0.6, 0.2⟩ : Cplx)),
+    (⟨-3.0, tp * 337.0⟩, ⟨0.4, -0.3⟩)].map toMode
+  let anchor := lit 0
+  let dS : Nat := 10
+  let recA := reclockAffine (litF 1.0) (litF (dS.toFloat / 44100.0)) modes   -- delay
+  let recB := reclockAffine (litF 2.0) (litF 0.0) modes                       -- scale
+  match buildAndFinish (.ok (buildModalBankArrow "rc_o" modes anchor arena)),
+        buildAndFinish (.ok (buildModalBankArrow "rc_a" recA anchor arena)),
+        buildAndFinish (.ok (buildModalBankArrow "rc_b" recB anchor arena)) with
+  | .ok op, .ok ap, .ok bp =>
+    match ← renderPlanSamples op 8192, ← renderPlanSamples ap 4096,
+          ← renderPlanSamples bp 4096 with
+    | .ok os, .ok as_, .ok bs =>
+      let mut maxA : Float := 0.0                       -- arm A: amp rotation, tight
+      for i in [1:4000] do
+        if i + dS < os.size then
+          let d := fabs (as_[i]! - os[i + dS]!)
+          if d > maxA then maxA := d
+      let mut maxB : Float := 0.0                       -- arm B: pole scale, soft
+      for i in [1:4000] do
+        if 2 * i < os.size then
+          let d := fabs (bs[i]! - os[2 * i]!)
+          if d > maxB then maxB := d
+      let boundA := 2.0 * 3.7252903e-9 * 0.05 * 100.0                    -- Q + poly ulp
+      let boundB := 4000.0 * 2.3283064e-10 * tp * 1.13 * 0.05 * 2.0      -- freq-grid drift
+      let eB := bs.foldl (fun a x => a + x * x) 0.0
+      IO.println s!"        affine reclock: (A) delay a=1,b·SR=10  (B) scale a=2:"
+      IO.println s!"        result   armA max|Δ|={maxA * 1e9}e-9 (bound {boundA * 1e9}e-9, tight) · armB max|Δ|={maxB * 1e9}e-9 (bound {boundB * 1e9}e-9, freq-grid)"
+      if maxA < boundA && maxB < boundB && eB > 1e-9 then
+        passGate "modal-reclock" s!"amp rotation A↦A·e^(μb) exact (armA {maxA*1e9}e-9); pole scale ω↦2ω within the SR/2³² frequency grid (armB {maxB*1e9}e-9)"
+      else
+        failGate "modal-reclock" s!"maxA={maxA*1e9}e-9 (bound {boundA*1e9}) maxB={maxB*1e9}e-9 (bound {boundB*1e9}) eB={eB}"
+    | .error e, _, _ | _, .error e, _ | _, _, .error e => failGate "modal-reclock" s!"render: {firstLine e}"
+  | .error e, _, _ | _, .error e, _ | _, _, .error e => failGate "modal-reclock" s!"build: {firstLine e}"
+
 end ResidueGates
 
 open Tropical.EmitArrow in

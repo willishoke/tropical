@@ -354,6 +354,20 @@ def besselFuse (modes : Array ModalMode) (wm b : Float) (N : Nat) : Array ModalM
         , deg := m.deg }
   return out
 
+/-- Affine pole reclock: the pole-space image of the affine clock warp `d ↦ a·d+b`.
+    `e^{μ(a d + b)} = e^{μb}·e^{(μa)d}`, so the pole scales `μ ↦ μa` (`σ↦σa, ω↦ωa`)
+    and the amp rotates `A ↦ A·e^{μb} = A·e^{−σb}(cos ωb + i sin ωb)`. Pure `CplxE`
+    over `expSig`/`sinSig`/`cosSig`, so `a`,`b` may be live. AFFINE ONLY: a nonlinear
+    warp does not preserve poles (the varispeed case is deferred, per
+    `design/modal-island.local.md`); `b` in seconds, `a` dimensionless. deg-0 (the
+    `(a d+b)^k` binomial for `deg>0` is out of scope for v1). -/
+def reclockAffine (a b : Sig) (modes : Array ModalMode) : Array ModalMode :=
+  modes.map fun m =>
+    let envB := expSig (neg (mul m.sigma b))
+    let eMub : CplxE := (mul envB (cosSig (mul m.omega b)), mul envB (sinSig (mul m.omega b)))
+    let a' := cmulE m.ampE eMub
+    { sigma := mul m.sigma a, omega := mul m.omega a, cre := a'.1, cim := a'.2, deg := m.deg }
+
 -- ── The MODAL ISLAND (v1): a decaying-resonator bank as a term over the clock ──
 -- The pole/modal island's emit path. A bank is a gated sum of decaying sinusoids
 -- (`modalBankSig`) — the real part of Σ amp·e^{μd}. It needs NO new ArrowTerm
