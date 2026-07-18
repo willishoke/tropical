@@ -991,6 +991,19 @@ def buildHeterodyne (name : String) (modes : Array ModalMode) (wm b : Float)
   let theta := mul (litF b) (sinSig (mul (litF wm) dSec))
   buildExprCarrier name (sub (mul re (cosSig theta)) (mul im (sinSig theta))) arena
 
+/-- The integrated-pole reading (LFO→pole): a carrier whose frequency is modulated
+    by an LFO, rendered as the EXACT time-varying resonator — the phase advances by
+    the INTEGRAL of the modulated frequency, `θ = (ω₀·p)·Re(∫LFO)`, i.e. a
+    heterodyne twist (`buildHeterodyne`) with θ taken from the INTEGRATED modulator
+    bank (`integrateBank`) rather than a static `b·sin`. This is the exact solution
+    of `ẋ = μ(t)x`, NOT the snapshot reading (pole read at τ, applied over the whole
+    elapsed d), which is a different, wrong function (`demos/modal_vco.py` D1). -/
+def buildIntegratedPoleReading (name : String) (carrier lfo : Array ModalMode)
+    (om0Depth : Float) (anchor : Sig) (arena : Arena) : Arena × ProgramIdx :=
+  let (re, im) := modalBankSigPairTable carrier clockLit anchor
+  let theta := mul (litF om0Depth) (modalBankSig (integrateBank lfo) clockLit anchor)
+  buildExprCarrier name (sub (mul re (cosSig theta)) (mul im (sinSig theta))) arena
+
 /-- `voice ⋙ reverb` end to end: run the residue calculus at build time, turn the
     composed complex modes into a `ModalMode` bank, and emit it — the connection is
     an exact symbolic computation, not a hand-tuned coupling table. -/

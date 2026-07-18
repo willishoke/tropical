@@ -812,6 +812,79 @@ def runModalHeterodyne (arena : Arena)
     | .error e, _ | _, .error e => failGate "modal-heterodyne" s!"render: {firstLine e}"
   | .error e, _ | _, .error e => failGate "modal-heterodyne" s!"build: {firstLine e}"
 
+/-- RK4 of the modulated-resonator ODE `ẋ = μ(t)·x`, `μ(t) = −σ + iω₀(1 + p·cos ω_m t)`,
+    from `x(0)=1` to `T` in `n` steps — the independent oracle for `modal-vco`. -/
+private def rk4Osc (sigma om0 p wm T : Float) (n : Nat) : Cplx := Id.run do
+  let h := T / n.toFloat
+  let mu := fun (t : Float) => (⟨-sigma, om0 * (1.0 + p * Float.cos (wm * t))⟩ : Cplx)
+  let mut x : Cplx := ⟨1.0, 0.0⟩
+  let mut t : Float := 0.0
+  for _ in [0:n] do
+    let k1 := (mu t).mul x
+    let k2 := (mu (t + h * 0.5)).mul (x.add (k1.mul ⟨h * 0.5, 0.0⟩))
+    let k3 := (mu (t + h * 0.5)).mul (x.add (k2.mul ⟨h * 0.5, 0.0⟩))
+    let k4 := (mu (t + h)).mul (x.add (k3.mul ⟨h, 0.0⟩))
+    let s := (k1.add (k2.mul ⟨2.0, 0.0⟩)).add ((k3.mul ⟨2.0, 0.0⟩).add k4)
+    x := x.add (s.mul ⟨h / 6.0, 0.0⟩)
+    t := t + h
+  return x
+
+/-- THE LFO→POLE gate (integrated reading, D1/D2). Wiring an LFO to a resonator's
+    pole forces a READING of a time-varying pole. The INTEGRATED reading (phase
+    advances by `∫` of the modulated frequency, `θ = ω₀p·Re(∫LFO)` — `integrateBank`
+    into a heterodyne twist) IS the exact solution of `ẋ = μ(t)x`: it converges to
+    an independent RK4 integration at the O(h⁴) RK4 rate (error ratio ≈16 per
+    halving). The SNAPSHOT reading (pole read at τ, applied over the whole elapsed
+    d) is a different, well-defined function that does NOT solve the ODE — its error
+    PLATEAUS (the house discriminator). Plus: the integrated realization builds and
+    renders causally in the engine. -/
+def runModalVco (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let tp := 6.283185307179586
+  let sigma := 0.35
+  let f0 := 5.0
+  let p := 0.08
+  let fm := 0.8
+  let om0 := tp * f0
+  let wm := tp * fm
+  let T := 2.0
+  let env := Float.exp (-sigma * T)
+  -- integrated reading closed form: phase = ω₀(T + p·sin(ω_m T)/ω_m)
+  let phiInt := om0 * (T + p * Float.sin (wm * T) / wm)
+  let xInt : Cplx := ⟨env * Float.cos phiInt, env * Float.sin phiInt⟩
+  -- snapshot reading: pole read at T, applied over the whole elapsed T
+  let omSnap := om0 * (1.0 + p * Float.cos (wm * T))
+  let xSnap : Cplx := ⟨env * Float.cos (omSnap * T), env * Float.sin (omSnap * T)⟩
+  let relTo := fun (a b : Cplx) => (a.add b.neg).abs / (b.abs + 1e-300)
+  let e500 := relTo xInt (rk4Osc sigma om0 p wm T 500)
+  let e1000 := relTo xInt (rk4Osc sigma om0 p wm T 1000)
+  let e2000 := relTo xInt (rk4Osc sigma om0 p wm T 2000)
+  let r1 := e500 / (e1000 + 1e-300)
+  let r2 := e1000 / (e2000 + 1e-300)
+  let snapErr := relTo xSnap (rk4Osc sigma om0 p wm T 4000)
+  -- render sanity: the integrated realization builds + renders causal + nonzero
+  let carrier : Array ModalMode := #[ModalMode.hz (litF f0) (litF sigma) (lit 1)]
+  let lfo : Array ModalMode := #[ModalMode.hz (litF fm) (lit 0) (lit 1)]
+  let anchor := lit 200
+  match buildAndFinish (.ok (buildIntegratedPoleReading "vco" carrier lfo (om0 * p) anchor arena)) with
+  | .ok vp =>
+    match ← renderPlanSamples vp 4096 with
+    | .ok s =>
+      let mut preMax : Float := 0.0
+      for i in [0:201] do
+        if s[i]!.abs > preMax then preMax := s[i]!.abs
+      let energy := s.foldl (fun a x => a + x * x) 0.0
+      IO.println s!"        LFO→pole integrated reading vs RK4 of ẋ=μ(t)x (f0={f0}, p={p}, fm={fm}):"
+      IO.println s!"        oracle   integrated vs RK4 rel err: n=500 {e500} 1000 {e1000} 2000 {e2000} (ratios {r1}, {r2}; ~16=h⁴)"
+      IO.println s!"        result   snapshot vs ODE={snapErr} (plateaus) · render pre-strike|max|={preMax} E={energy}"
+      if 10.0 < r1 && r1 < 24.0 && 10.0 < r2 && r2 < 24.0 && snapErr > 1e-2
+          && preMax == 0.0 && energy > 1e-9 then
+        passGate "modal-vco" s!"the integrated reading IS the modulated resonator (RK4 h⁴: ratios {r1}, {r2}); the snapshot reading plateaus ({snapErr}); realization renders causal (D1/D2)"
+      else
+        failGate "modal-vco" s!"r1={r1} r2={r2} snapErr={snapErr} preMax={preMax} energy={energy}"
+    | .error e => failGate "modal-vco" s!"render: {firstLine e}"
+  | .error e => failGate "modal-vco" s!"build: {firstLine e}"
+
 end ResidueGates
 
 open Tropical.EmitArrow in
