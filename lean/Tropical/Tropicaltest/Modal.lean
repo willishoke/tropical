@@ -712,6 +712,68 @@ def runModalPair (arena : Arena)
   | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
     failGate "modal-pair" s!"build: {firstLine e}"
 
+/-- THE BESSEL FUSE gate (static-index FM → sideband bank, Jacobi–Anger). Three
+    independent checks: (i) `besselJ` satisfies the recurrence
+    `Jₙ₋₁(b)+Jₙ₊₁(b) = (2n/b)Jₙ(b)` (~1e-10); (ii) Parseval `Σₙ Jₙ(b)² = 1` — FM
+    conserves energy, the signature that the sideband weights ARE the FM
+    decomposition (~1e-6); (iii) the FUSED bank converges SUPEREXPONENTIALLY in the
+    sideband count — `‖fuse(N) − fuse(N_ref)‖` drops ≫10× per few sidebands as `N`
+    passes `⌈b⌉` (the tail `|n|>b` decays faster than any geometric), rendered
+    through the real engine path (self-convergence: both sides share the exact
+    lowering, so no straight-line phase drift). Correct weights, energy, truncation. -/
+def runModalBessel (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let fabs := fun (x : Float) => if x < 0.0 then -x else x
+  let b := 3.0
+  let wm := 2.0 * 3.141592653589793 * 308.0                 -- ω_m = 2π·308 rad/s
+  -- (i) recurrence Jₙ₋₁+Jₙ₊₁ = (2n/b)Jₙ
+  let mut recErr : Float := 0.0
+  for nn in [1:6] do
+    let nf := nn.toFloat
+    let e := fabs ((besselJ (nf - 1.0) b + besselJ (nf + 1.0) b) - (2.0 * nf / b) * besselJ nf b)
+    if e > recErr then recErr := e
+  -- (ii) Parseval Σ Jₙ² = 1
+  let mut energy : Float := 0.0
+  for i in [0:41] do
+    let jn := besselJ (i.toFloat - 20.0) b
+    energy := energy + jn * jn
+  let parseval := fabs (energy - 1.0)
+  -- (iii) superexponential render convergence (self-reference to N=19 ≈ exact)
+  let carrier : Array ModalMode := #[ModalMode.hz (lit 220) (lit 20 1) (lit 1)]
+  let anchor := lit 200
+  let fuse := fun (nm : String) (N : Nat) =>
+    buildModalBankArrow nm (besselFuse carrier wm b N) anchor arena
+  match buildAndFinish (.ok (fuse "fz5" 5)), buildAndFinish (.ok (fuse "fz8" 8)),
+        buildAndFinish (.ok (fuse "fz11" 11)), buildAndFinish (.ok (fuse "fzR" 19)) with
+  | .ok p5, .ok p8, .ok p11, .ok pR =>
+    match ← renderPlanSamples p5 4096, ← renderPlanSamples p8 4096,
+          ← renderPlanSamples p11 4096, ← renderPlanSamples pR 4096 with
+    | .ok s5, .ok s8, .ok s11, .ok sR =>
+      let relTo := fun (s : Array Float) => Id.run do
+        let n := min s.size sR.size
+        let mut num : Float := 0.0
+        let mut den : Float := 0.0
+        for k in [0:n] do
+          num := num + (s[k]! - sR[k]!) * (s[k]! - sR[k]!)
+          den := den + sR[k]! * sR[k]!
+        return Float.sqrt (num / (den + 1e-300))
+      let e5 := relTo s5
+      let e8 := relTo s8
+      let e11 := relTo s11
+      let rE := sR.foldl (fun a x => a + x * x) 0.0
+      IO.println s!"        static-index FM (b={b}, ω_m=2π·308) fused to a Bessel bank:"
+      IO.println s!"        oracle   recurrence err={recErr} · Parseval |ΣJ²−1|={parseval}"
+      IO.println s!"        result   ‖fuse(N)−fuse(19)‖/‖·‖: N=5 {e5} → N=8 {e8} → N=11 {e11}"
+      if recErr < 1e-10 && parseval < 1e-6 && e5 > 8.0 * e8 && e8 > 8.0 * e11
+          && e11 < 1e-3 && rE > 1e-9 then
+        passGate "modal-bessel" s!"Jₙ correct (recurrence {recErr}, Parseval {parseval}); FM'd bank truncates superexponentially (N=5→8→11: {e5}→{e8}→{e11})"
+      else
+        failGate "modal-bessel" s!"recErr={recErr} parseval={parseval} e5={e5} e8={e8} e11={e11} rE={rE}"
+    | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
+      failGate "modal-bessel" s!"render: {firstLine e}"
+  | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
+    failGate "modal-bessel" s!"build: {firstLine e}"
+
 end ResidueGates
 
 open Tropical.EmitArrow in

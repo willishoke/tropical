@@ -317,6 +317,43 @@ def integrateBank (modes : Array ModalMode) : Array ModalMode :=
   let sumAmp := integ.foldl (fun s m => caddE s m.ampE) ((lit 0, lit 0) : CplxE)
   integ.push (modeOfE (lit 0, lit 0) (cnegE sumAmp))
 
+/-- `Jₙ(b)` (Bessel, first kind) by trapezoid on the periodic integrand
+    `cos(nθ − b·sin θ)` over `[0,π]` — spectral accuracy on the smooth periodic
+    integrand. Build-time `Float`; the FM sideband weights of `besselFuse`. The
+    index `nf` is the sideband number as a `Float` (so callers avoid `Int→Float`). -/
+def besselJ (nf b : Float) (quad : Nat := 256) : Float := Id.run do
+  let pi := 3.141592653589793
+  let h := pi / quad.toFloat
+  let mut acc : Float := 0.0
+  for i in [0:quad + 1] do
+    let th := h * i.toFloat
+    let w := if i == 0 || i == quad then 0.5 else 1.0     -- trapezoid endpoints
+    acc := acc + w * Float.cos (nf * th - b * Float.sin th)
+  return acc * h / pi
+
+/-- Static-index FM as a build-time pole move (Jacobi–Anger). Modulating a bank by
+    `sin(ω_m d)` at index `b` sprouts, from each mode `(μ, A)`, a comb of sidebands
+    at pole `μ + i·n·ω_m` with amp `A·Jₙ(b)`, `n ∈ [−N, N]` — so an FM'd voice is
+    STILL a modal bank (it keeps poles, so it can feed the residue calculus). `ω_m`
+    (rad/s) and `b` are baked in v1 (a change relowers); the carrier's poles/amps
+    stay live (each sideband adds a baked offset to `ω` and scales `A` by the real
+    `Jₙ(b)`). `N` is the sideband capacity — the tail `|n| > b` decays
+    superexponentially, so `N ≈ ⌈b⌉ + few` is exact to machine precision
+    (`demos/modal_fm.py` D4). deg-0. -/
+def besselFuse (modes : Array ModalMode) (wm b : Float) (N : Nat) : Array ModalMode := Id.run do
+  let mut out : Array ModalMode := #[]
+  for m in modes do
+    for i in [0:2 * N + 1] do
+      let nf := i.toFloat - N.toFloat
+      let jn := besselJ nf b
+      out := out.push
+        { sigma := m.sigma
+        , omega := add m.omega (litF (nf * wm))
+        , cre := mul m.cre (litF jn)
+        , cim := mul m.cim (litF jn)
+        , deg := m.deg }
+  return out
+
 -- ── The MODAL ISLAND (v1): a decaying-resonator bank as a term over the clock ──
 -- The pole/modal island's emit path. A bank is a gated sum of decaying sinusoids
 -- (`modalBankSig`) — the real part of Σ amp·e^{μd}. It needs NO new ArrowTerm
