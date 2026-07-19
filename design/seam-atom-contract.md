@@ -57,8 +57,10 @@ Everything load-bearing is in that sentence, so read it slowly.
   passes; one that drifts above it fails.
 
 - **Admission region** — an *executable predicate* over pole configurations
-  and warp parameters, not a comment. `|a| < ½` excluded, depth > 300 excluded,
-  near-coincident poles routed elsewhere: these are outputs of a predicate the
+  and warp parameters, not a comment. Depth > 300 excluded, near-coincident
+  poles routed to their own branch (the `|a| < ½` exclusion of the v1 crossing
+  became WS-A4's coincident divided difference — an exclusion retired INTO the
+  predicate's served region): these are outputs of a predicate the
   harness can probe, not inputs from a human squint. An atom and the harness
   consult the *same* predicate, so "where does this atom promise anything" has
   one answer, in code.
@@ -100,7 +102,7 @@ apparatus is kept, not frozen.
 |---|---|---|---|
 | `residueComposeEC` | `id` | collected `ModalMode` bank · `modalBankSigTable` | separated poles (`|Δ|` above the coincidence floor — near-coincidence is `DD`'s region) |
 | `residueComposeDD` | `id` | `PairedMode` bank · `modalBankSigTableDD` | total (the `cexpm1` limit is the τ·e resonance, no branch) |
-| `bloomCompose` | `s + B(1−e^{−gs})` | `BloomPair` bank · `bloomComposedSig` | baked poles; `|a| ≥ ½`; envelope depth ≤ 300 |
+| `bloomCompose` | `s + B(1−e^{−gs})` | `BloomPair` bank · `bloomComposedSig` | baked poles; envelope depth ≤ 300 — TOTAL over `|a|` (WS-A4: coincidence via the divided-difference branch; ½ is a scheme crossover) |
 
 `bloomCompose` at `B→0` collapses to `residueComposeDD` (the Γ-bridge is the
 κ-extension of the divided difference), so the three are one family with a

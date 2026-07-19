@@ -798,9 +798,10 @@ deriving Inhabited
 def bloomPairPlan? (mu nu : CplxB) (B g : Float) : Option BloomPairPlan := Id.run do
   let aC : CplxB := (nu.sub mu).scale (1.0 / g)
   -- WS-A4 (atom four): the `|a| < ½` coincidence hole is CLAIMED admitted and
-  -- served by the coincident divided difference below. It ALWAYS crosses (never
-  -- series-only: |a+1| ≈ 1 < |κ| for any audio partial), so the CF branch is live
-  -- and its coincidence-stable envelopes carry the resonance.
+  -- served by the coincident divided difference below. It is forced onto the
+  -- crossing shape (never series-only) so the coincidence-stable CF constants are
+  -- always baked; when `|κ| < |a+1|` (a subtle bloom — see `bloomPhiKappaOverG`)
+  -- `dSwitch < 0` and the per-sample path starts on the series-DD lane at d = 0.
   let coincident := aC.abs < 0.5
   let kappa := mu.scale B
   let aP1 := aC.add ⟨1, 0⟩
@@ -816,10 +817,12 @@ def bloomPairPlan? (mu nu : CplxB) (B g : Float) : Option BloomPairPlan := Id.ru
     if kRaw + 8 > 300 then return none
     return some { mu, nu, aC, kappa, serOnly := false, coincident, nDepth := nRaw + 8, kDepth := kRaw + 8 }
 
-/-- The bloom atom's admission predicate at the pair level: `|a| ≥ ½` and both
-    envelope depths within the 300 cap — exactly the region `bloomCompose`
-    keeps a pair (`bloomPairPlan?` is `some`). Executable data the sweep probes
-    at its edges, not an annotation. -/
+/-- The bloom atom's admission predicate at the pair level: both envelope depths
+    within the 300 cap — exactly the region `bloomCompose` keeps a pair
+    (`bloomPairPlan?` is `some`). TOTAL over the `|a|` axis since WS-A4: the
+    `|a| < ½` coincidence is served by the divided-difference branch, and the ½
+    boundary is a scheme crossover, not an exclusion edge. Executable data the
+    sweep probes at its edges, not an annotation. -/
 def bloomAdmitsPair (mu nu : CplxB) (B g : Float) : Bool := (bloomPairPlan? mu nu B g).isSome
 
 /-- `bloomedVoice ⋙ reverb` as Γ-bridge pairs — the residue composition ACROSS a
@@ -828,13 +831,15 @@ def bloomAdmitsPair (mu nu : CplxB) (B g : Float) : Bool := (bloomPairPlan? mu n
     fold to a constant (`none` if a live pole reaches this — the caller keeps
     live-pole banks on `residueComposeE`'s unbloomed path); amps stay live.
     Admission drops (graceful exclusion, the documented v1 scope) route through
-    `bloomPairPlan?`: pairs with `|a| < ½` (the pole ON the settled partial — the
-    τ·e resonance; its `cexpm1`-style fusion is the follow-up, exactly as WS-B2
-    hardened `residueComposeEC`'s coincidence) and pairs whose envelope depth
-    exceeds 300 (cockpit-measured shipped max ≈ 140; the cap is headroom, not a
-    tuning). `B = 0` (or κ→0) degenerates every pair to series-only with `M ≡ 1`
-    — the WS-B2 divided-difference atom, which the `modal-bloom-gamma` gate
-    pins. -/
+    `bloomPairPlan?` and are now depth-only: pairs whose envelope depth exceeds
+    300 (cockpit-measured shipped max ≈ 250 incl. the coincident CF side; the cap
+    is headroom, not a tuning). Pairs with `|a| < ½` (the pole ON the settled
+    partial — the τ·e resonance) are SERVED since WS-A4 by the coincident
+    divided-difference branch (CF unchanged for large z; `Φ(a,z)` series-DD + the
+    `cexpm1` secular below `dSwitch`), exactly as WS-B2 hardened
+    `residueComposeEC`'s coincidence. `B = 0` (or κ→0) degenerates every pair to
+    series-only with `M ≡ 1` — the WS-B2 divided-difference atom, which the
+    `modal-bloom-gamma` gate pins. -/
 def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
     Option (Array BloomPair) := Id.run do
   let mut out : Array BloomPair := #[]
