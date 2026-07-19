@@ -723,7 +723,9 @@ deriving Inhabited
 
 def bloomPairPlan? (mu nu : CplxB) (B g : Float) : Option BloomPairPlan := Id.run do
   let aC : CplxB := (nu.sub mu).scale (1.0 / g)
-  if aC.abs < 0.5 then return none
+  -- WS-A4 (atom four): the `|a| < ½` coincidence hole is now CLAIMED admitted.
+  -- (Red-witness step: the shared predicate says "accurate here"; the coincident
+  -- realizer follows. The old `if aC.abs < 0.5 then return none` graceful drop is gone.)
   let kappa := mu.scale B
   let aP1 := aC.add ⟨1, 0⟩
   let serOnly := aP1.abs ≥ kappa.abs

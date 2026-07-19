@@ -109,8 +109,9 @@ private def qOm (om : Float) : Float :=
     gives the h→h/2 self-distance that certifies the oracle itself. NOT the
     Poisson pole ladder (float64-dead above the fundamental). -/
 private def oracleSeam (voice reverb : Array SeamMode) (phi : Float → Float)
-    (admits : SeamMode → SeamMode → Bool) (hdiv : Nat) : Array Float := Id.run do
-  let mut y : Array Float := Array.replicate nProbe 0.0
+    (admits : SeamMode → SeamMode → Bool) (hdiv : Nat) (nLen : Nat := nProbe) :
+    Array Float := Id.run do
+  let mut y : Array Float := Array.replicate nLen 0.0
   for v in voice do
     let mu : CplxB := ⟨-v.sigma, qOm v.omega⟩
     let a  : CplxB := ⟨v.are, v.aim⟩
@@ -122,7 +123,7 @@ private def oracleSeam (voice reverb : Array SeamMode) (phi : Float → Float)
       let h := 1.0 / (srF * hdiv.toFloat)
       let fint := fun (s : Float) => CplxB.exp ((mu.scale (phi s)).sub (nu.scale s))
       let mut jAcc : CplxB := ⟨0, 0⟩
-      for i in [anchorNat + 1 : nProbe] do
+      for i in [anchorNat + 1 : nLen] do
         let dBase := (i - 1 - anchorNat).toFloat / srF
         -- composite Simpson over [dBase, dBase + 1/SR]: weights 1,4,2,…,4,1
         let mut seg : CplxB := ⟨0, 0⟩
@@ -238,10 +239,15 @@ private def ddAtom : SeamAtom :=
 private def bloomBg : Float × Float := (0.05 / 1.8, 1.8)
 private def bloomWarp : Float → Float := fun s => s + bloomBg.1 * (1.0 - Float.exp (-bloomBg.2 * s))
 
-/-- `bloomCompose` — the Γ-bridge atom (`bloomed voice ⋙ reverb`). ACTIVE
-    exclusion: `bloomAdmitsPair` (`|a| ≥ ½`, envelope depths ≤ 300) drops pairs
-    outside the region, and the oracle sums the admitted ones only. Baked-pole
-    v1 (the sweep pole set is all literal). -/
+/-- `bloomCompose` — the Γ-bridge atom (`bloomed voice ⋙ reverb`), NOW TOTAL over
+    the crossing after atom four (WS-A4): the `|a| < ½` coincidence hole (a room
+    pole tuned to a settled partial — the τ·e resonance) is admitted and accurate,
+    the coincident divided difference bridging the CF branch (large `z`) to the
+    series-DD branch (small `z`). ACTIVE exclusion still drops depth > 300 pairs and
+    live poles. Baked-pole v1 (the sweep pole set is all literal). NOTE: the 0.09 s
+    interior/boundary window only exercises the CF branch (which is accidentally
+    stable at coincidence); the series-DD resonance lives in the tail, witnessed by
+    the long-render `coincidence deep-tail` check in `runSeamSweep`. -/
 private def bloomAtom : SeamAtom :=
   let B := bloomBg.1
   let g := bloomBg.2
@@ -254,15 +260,27 @@ private def bloomAtom : SeamAtom :=
     admitsPair := fun v r => bloomAdmitsPair v.pole r.pole B g
     activeExclusion := true
     snr := 3e-4
-    interior := (Array.range 3).map (fun c =>
-      -- gong-ish partials × room poles; wide freq gaps ⇒ |a| ≫ ½
-      (#[haltonMode (c*10+1) 300 1100, haltonMode (c*10+2) 1400 3200],
-       #[haltonMode (c*10+3) 150 400, haltonMode (c*10+4) 500 900]))
+    interior := #[
+      -- gong-ish partials × room poles; wide freq gaps ⇒ |a| ≫ ½ (the crossing).
+      (#[haltonMode 1 300 1100, haltonMode 2 1400 3200], #[haltonMode 3 150 400, haltonMode 4 500 900]),
+      (#[haltonMode 11 300 1100, haltonMode 12 1400 3200], #[haltonMode 13 150 400, haltonMode 14 500 900]),
+      (#[haltonMode 21 300 1100, haltonMode 22 1400 3200], #[haltonMode 23 150 400, haltonMode 24 500 900]),
+      -- coincidence configs (WS-A4): room poles ON the partials (ω matched; a σ/tiny-ω
+      -- offset sets |a| < ½), so each carries near-coincident τ·e pairs. The oracle
+      -- sums all admitted pairs; the far cross pairs are ordinary crossings.
+      (#[mkMode 520 0.4 0.9, mkMode 880 0.5 0.6],
+       #[{ sigma := 0.7, omega := tp * 520, are := 0.5 }, { sigma := 0.9, omega := tp * 880 + 0.4, are := 0.4 }]),
+      (#[mkMode 300 0.35 0.8, mkMode 1050 0.6 0.5],
+       #[{ sigma := 0.55, omega := tp * 300 + 0.2, are := 0.5 }, { sigma := 0.9, omega := tp * 1050, are := 0.4 }]) ]
     boundary :=
-      -- |a| straddling ½ via a freq offset (|ν−μ| ≈ g·|a|, g=1.8): 0.95 ⇒
-      -- |a|≈0.53 admitted, 0.80 ⇒ |a|≈0.44 excluded; plus a high-freq deep pair.
-      #[ (mkMode 1000 0.5 0.8, { sigma := 0.5, omega := tp * 1000 + 0.95, are := 0.4 })
-       , (mkMode 1000 0.5 0.8, { sigma := 0.5, omega := tp * 1000 + 0.80, are := 0.4 })
+      -- the ½ boundary is now a scheme CROSSOVER, not a cliff: probes straddle it and
+      -- all assert accuracy (|a|≈0.53 shipped-side, |a|≈0.44 coincidence-side), plus
+      -- a=0 EXACT (ω,σ matched) and a small spiral around it (the removable singularity).
+      #[ (mkMode 1000 0.5 0.8, { sigma := 0.5, omega := tp * 1000 + 0.95, are := 0.4 })   -- |a|≈0.53
+       , (mkMode 1000 0.5 0.8, { sigma := 0.5, omega := tp * 1000 + 0.80, are := 0.4 })   -- |a|≈0.44
+       , (mkMode 700 0.5 0.8, { sigma := 0.5, omega := tp * 700, are := 0.4 })            -- a = 0 EXACT
+       , (mkMode 700 0.5 0.8, { sigma := 0.62, omega := tp * 700, are := 0.4 })           -- |a|≈0.067 (real spiral)
+       , (mkMode 700 0.5 0.8, { sigma := 0.5, omega := tp * 700 + 0.5, are := 0.4 })      -- |a|≈0.278 (imag spiral)
        , (mkMode 2600 0.9 0.5, mkMode 300 0.8 0.4) ] }
 
 private def allAtoms : Array SeamAtom := #[ecAtom, ddAtom, bloomAtom]
@@ -270,11 +288,11 @@ private def allAtoms : Array SeamAtom := #[ecAtom, ddAtom, bloomAtom]
 -- ── The gate ──────────────────────────────────────────────────────────────────
 
 /-- Render one config's atom Sig to samples. -/
-private def renderConfig (arena : Arena) (name : String) (sig : Sig) :
-    IO (Except String (Array Float)) := do
+private def renderConfig (arena : Arena) (name : String) (sig : Sig)
+    (nLen : Nat := nProbe) : IO (Except String (Array Float)) := do
   match buildAndFinish (.ok (buildExprCarrier name sig arena)) with
   | .error e => pure (.error e)
-  | .ok plan => renderPlanSamples plan nProbe
+  | .ok plan => renderPlanSamples plan nLen
 
 /-- THE SEAM SWEEP: for each registered `SeamAtom`, re-check its law over its
     admission region (Halton interior configs) and at its edges (boundary
@@ -366,7 +384,32 @@ def runSeamSweep (arena : Arena)
       IO.println s!"        law-assoc VIOLATION: (v∘r₁)∘r₂ ≢ v∘(r₁∘r₂) rel {e}"; ok := false
     else IO.println s!"        law-assoc: (v∘r₁)∘r₂ ≡ v∘(r₁∘r₂) rel {e} — room-fold reassociation holds"
   | _, _ => IO.println "        law-assoc BUILD/RENDER failed"; ok := false
-  if ok then passGate "seam-sweep" "every registered atom holds its law over its admission region; composition laws (EC-commute, assoc) pinned"
+  -- ── coincidence deep-tail (WS-A4, atom four): the τ·e resonance rings PAST the
+  -- CF/series-DD switch (z ≈ 1 at d = ln|κ|/g ≈ 1.64 s for the fundamental), which
+  -- the 0.09 s interior/boundary window CANNOT reach — there the CF branch is
+  -- accidentally stable even for the OLD atom, so a short-window witness is green
+  -- on a coincidence the deep tail gets wrong (the point-witness disease this whole
+  -- apparatus exists to cure). Render an a = 0 EXACT pair (room pole ON the settled
+  -- partial, ν = μ — the removable 0/0) over ~2.2 s and re-check the law where the
+  -- resonance actually lives. Without the coincident branch the series lane selects
+  -- the singular Γ★/1(ν−μ) constants and the tail goes non-finite.
+  let (B, g) := bloomBg
+  let admD := fun (x y : SeamMode) => bloomAdmitsPair x.pole y.pole B g
+  let nDeep : Nat := 98304                       -- ≈ 2.23 s at 44.1 k
+  let deepLo : Nat := 74000                      -- ≈ 1.67 s > dSwitch: the series-DD region
+  let vDeep : Array SeamMode := #[mkMode 110 0.2 1.0]                       -- lightly damped, rings long
+  let rDeep : Array SeamMode := #[{ sigma := 0.2, omega := tp * 110, are := 0.5 }]  -- ν = μ EXACTLY ⇒ a = 0
+  match ← renderConfig arena "seam_bloom_coinc_deep" (bloomAtom.realize vDeep rDeep) nDeep with
+  | .error e => IO.println s!"        bloomGamma deep-tail BUILD/RENDER: {firstLine e}"; ok := false
+  | .ok dut =>
+    let refD := oracleSeam vDeep rDeep bloomWarp admD 8 nDeep
+    let eDeep := relL2Win dut refD deepLo nDeep
+    let eFull := relL2Win dut refD lo nDeep
+    IO.println s!"        bloomGamma coincidence deep-tail (a = 0 EXACT, κ≈19, ~2.2 s): series-DD region rel {eDeep}, full rel {eFull}"
+    if !(allFinite dut) || eDeep ≥ 3e-3 || eFull ≥ 3e-4 then
+      IO.println s!"        bloomGamma DEEP-TAIL VIOLATION: series-DD rel {eDeep} (full {eFull}) — the τ·e resonance region is off the law (or non-finite)"
+      ok := false
+  if ok then passGate "seam-sweep" "every registered atom holds its law over its admission region (incl. the τ·e coincidence deep-tail); composition laws (EC-commute, assoc) pinned"
   else failGate "seam-sweep" "a registered seam atom drifted off its stated law — see the per-config lines above"
 
 -- ── Deliverable A: gong⋙reverb(⋙reverb) audible from the patch surface ────────
