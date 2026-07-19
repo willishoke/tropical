@@ -969,6 +969,12 @@ def buildModalBankTable (name : String) (modes : Array ModalMode) (anchor : Sig)
     (arena : Arena) : Arena × ProgramIdx :=
   buildExprCarrier name (modalBankSigTable modes clockLit anchor) arena
 
+/-- Emit a bloom-composed Γ-bridge pair bank (`bloomComposedSig`) over the bare
+    clock — the `modal-bloom-gamma` gate's device-under-test. -/
+def buildBloomComposed (name : String) (pairs : Array BloomPair) (anchor : Sig)
+    (arena : Arena) : Arena × ProgramIdx :=
+  buildExprCarrier name (bloomComposedSig pairs clockLit anchor) arena
+
 /-- Build the analytic `(Re, Im)` pair (`modalBankSigPairTable`) as TWO carriers
     over the bare clock — the `modal-pair` gate's device-under-test. Each
     component is its own single-`bankSum` program, so `Re` ≡ `buildModalBankTable`

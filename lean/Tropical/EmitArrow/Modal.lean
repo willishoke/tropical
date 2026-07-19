@@ -535,6 +535,287 @@ def modalBankSigTableDD (modes : Array PairedMode) (clkInt anchorSamples : Sig)
   selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
 
 
+-- ── The bloom⋙reverb Γ-BRIDGE atom (WS-B3) ────────────────────────────────────
+-- A pitch-bloomed mode feeding a reverb pole. The bloomed mode is the voice mode
+-- on the bloom-warped clock, `Re(A·e^{μφ(d)})`, `φ(d) = d + B(1−e^{−gd})`;
+-- composing with a reverb pole ν is the convolution `∫₀^d e^{ν(d−s)}e^{μφ(s)}ds`.
+-- The Poisson-lattice expansion of `e^{−κe^{−gd}}` (κ = μB) is representation-
+-- DEAD: its coefficients `(−κ)ⁿ/n!` are Taylor coefficients (unique — no
+-- re-expansion escapes) cancelling from magnitude ~e^{|κ|}, and the shipped gong
+-- runs |κ| = |μ|·B ≈ 19–178. Decay-spaced sidebands at one frequency are nearly
+-- parallel atoms (Prony ill-conditioning); contrast `besselFuse`, whose
+-- frequency-spaced sidebands Parseval bounds forever. The composition instead
+-- has a closed form one RING EXTENSION up — the incomplete gamma `γ(a, κe^{−gd})`,
+-- `a = (ν−μ)/g` — and after cancelling every power/log prefactor against the
+-- carriers it is a branch-cut-free TWO-CARRIER atom (cockpit
+-- `demos/modal_bloom_gamma.py`, ALL PASS: 3.7e-13 worst vs the independent
+-- time-domain oracle, ≥11.8 digits over the (|a|,|κ|) box):
+--
+--   y(d) = Re[ c · ( K1·e^{νd} + K2(z(d))·e^{μφ(d)} ) ],   z(d) = κe^{−gd}
+--   series side (|a+1| ≥ |z|):  K1 = C,       K2 = −M(1,a+1,z)/(ν−μ)
+--   CF side     (|z| > |a+1|):  K1 = C − Γ★,  K2 = (Γ(a,z)·eᶻ·z^{−a})/g
+--
+-- C is the κ-side constant by the same rule at z = κ; the branches are bridged
+-- EXACTLY by the d-constant Γ★ = Γ(a)·κ^{−a}·e^{κ}/g — the Γ(a) term the two
+-- forms share (identity: `z^{−a}e^{z}e^{μφ(d)} = κ^{−a}e^{κ}e^{νd}`); its
+-- e^{±π|Im a|/2} blowups cancel in the EXPONENT, so it is computed as
+-- `exp(lgamma(a) − a·log κ + κ)/g` and is moderate. `z(d)` decays, so a CF pair
+-- re-enters the series side at the baked `d_switch = ln(|κ|/|a+1|)/g` — a
+-- per-sample `selectE`, the `cexpm1` discipline one floor up. κ→0 collapses to
+-- the WS-B2 divided-difference atom: this is its κ-extension.
+
+/-- Build-time complex `Float` — the `besselJ` tier: production BAKE-time
+    numerics for the Γ-bridge constants, never per-sample. Local and minimal
+    (no Mathlib). -/
+structure CplxB where
+  re : Float
+  im : Float
+deriving Inhabited, Repr
+
+namespace CplxB
+def add (a b : CplxB) : CplxB := ⟨a.re + b.re, a.im + b.im⟩
+def sub (a b : CplxB) : CplxB := ⟨a.re - b.re, a.im - b.im⟩
+def mul (a b : CplxB) : CplxB := ⟨a.re * b.re - a.im * b.im, a.re * b.im + a.im * b.re⟩
+def neg (a : CplxB) : CplxB := ⟨-a.re, -a.im⟩
+def scale (s : Float) (a : CplxB) : CplxB := ⟨s * a.re, s * a.im⟩
+def normSq (a : CplxB) : Float := a.re * a.re + a.im * a.im
+def abs (a : CplxB) : Float := Float.sqrt a.normSq
+def div (a b : CplxB) : CplxB :=
+  let d := b.normSq
+  ⟨(a.re * b.re + a.im * b.im) / d, (a.im * b.re - a.re * b.im) / d⟩
+def exp (z : CplxB) : CplxB :=
+  let e := Float.exp z.re
+  ⟨e * Float.cos z.im, e * Float.sin z.im⟩
+def log (z : CplxB) : CplxB := ⟨0.5 * Float.log z.normSq, Float.atan2 z.im z.re⟩
+end CplxB
+
+/-- A build-time complex constant as a `CplxE` literal pair. -/
+def cplxLitE (x : CplxB) : CplxE := (litF x.re, litF x.im)
+
+/-- Complex log-gamma: Lanczos (g=7, n=9) on `Re z ≥ ½`, reflection below with
+    `log sin(πz)` taken on the DOMINANT exponential (`s + log(1−e^{−2s})`, so
+    large |Im z| never overflows). Build-time only (the Γ★ bridge). Gated at
+    1.8e-15 against mpmath over the shipped a-range (cockpit D_bg5). -/
+def lgammaB (z : CplxB) : CplxB :=
+  let core : CplxB → CplxB := fun z =>
+    let lanczos : Array Float := #[0.99999999999980993, 676.5203681218851,
+      -1259.1392167224028, 771.32342877765313, -176.61502916214059,
+      12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6,
+      1.5056327351493116e-7]
+    let zz := z.sub ⟨1, 0⟩
+    let x := (Array.range 8).foldl
+      (fun acc i => acc.add (CplxB.div ⟨lanczos[i+1]!, 0⟩ (zz.add ⟨(i+1).toFloat, 0⟩)))
+      ⟨lanczos[0]!, 0⟩
+    let t := zz.add ⟨7.5, 0⟩
+    (((zz.add ⟨0.5, 0⟩).mul (CplxB.log t)).sub t).add
+      ((CplxB.log x).add ⟨0.5 * Float.log (2.0 * 3.141592653589793), 0⟩)
+  if z.re < 0.5 then
+    let pi := 3.141592653589793
+    -- s = ∓iπz picked so e^{s} is the dominant half of sin πz
+    let s : CplxB := if z.im < 0 then ⟨-pi * z.im, pi * z.re⟩ else ⟨pi * z.im, -pi * z.re⟩
+    let log2i : CplxB := if z.im < 0 then ⟨Float.log 2.0, pi / 2.0⟩
+                         else ⟨Float.log 2.0, -pi / 2.0⟩
+    let logsin := (s.add (CplxB.log (CplxB.sub ⟨1, 0⟩ (CplxB.exp (s.scale (-2.0)))))).sub log2i
+    (CplxB.sub ⟨Float.log pi, 0⟩ logsin).sub (core (CplxB.sub ⟨1, 0⟩ z))
+  else core z
+
+/-- `M(1, a+1, z) = 1 + z/(a+1)(1 + z/(a+2)(…))` by forward recurrence —
+    `(value, terms)`. Build-time (the κ-side constant + per-pair depth sizing);
+    the per-sample twin is the fixed-depth Horner in `bloomComposedSig`. Stable
+    for `|a+1| ≳ |z|` (imaginary-dominated a: terms bounded by `(|z|/|a|)ⁿ`). -/
+def bloomM1 (a z : CplxB) (tol : Float := 1e-17) (cap : Nat := 4000) : CplxB × Nat := Id.run do
+  let mut s : CplxB := ⟨1, 0⟩
+  let mut t : CplxB := ⟨1, 0⟩
+  for n in [1:cap] do
+    t := (t.mul z).div (a.add ⟨n.toFloat, 0⟩)
+    s := s.add t
+    if t.abs ≤ tol * (max s.abs 1.0) then return (s, n)
+  return (s, cap)
+
+/-- `CF(z) = Γ(a,z)·eᶻ·z^{−a}` by modified Lentz on the standard continued
+    fraction `1/(z+1−a− 1(1−a)/(z+3−a− 2(2−a)/(…)))` — `(value, depth)`.
+    Build-time (the κ-side constant + per-pair depth sizing); the per-sample
+    twin is the fixed-depth bottom-up fraction in `bloomComposedSig`. Stable
+    for `|z| ≳ |a|` (the sweep-crossing region). -/
+def bloomCF (a z : CplxB) (tol : Float := 1e-15) (cap : Nat := 4000) : CplxB × Nat := Id.run do
+  let tiny := 1e-300
+  let mut b : CplxB := (z.add ⟨1, 0⟩).sub a
+  let mut c : CplxB := ⟨1.0 / tiny, 0⟩
+  let mut d : CplxB := if b.normSq == 0.0 then ⟨tiny, 0⟩ else CplxB.div ⟨1, 0⟩ b
+  let mut h : CplxB := d
+  for i in [1:cap] do
+    let an : CplxB := (⟨i.toFloat, 0⟩ : CplxB).mul (a.sub ⟨i.toFloat, 0⟩)  -- −i(i−a)
+    b := b.add ⟨2, 0⟩
+    d := (an.mul d).add b
+    if d.abs < tiny then d := ⟨tiny, 0⟩
+    c := b.add (an.div c)
+    if c.abs < tiny then c := ⟨tiny, 0⟩
+    d := CplxB.div ⟨1, 0⟩ d
+    let delta := d.mul c
+    h := h.mul delta
+    if (delta.sub ⟨1, 0⟩).abs ≤ tol then return (h, i)
+  return (h, cap)
+
+/-- `Γ★ = Γ(a)·κ^{−a}·e^{κ}/g` — the d-constant bridge between the two envelope
+    branches, computed in the EXPONENT (`exp(lgamma(a) − a·log κ + κ)/g`) where
+    the `e^{±π|Im a|/2}` blowups of `Γ(a)` and `κ^{−a}` cancel, so the value is
+    moderate. Build-time only. -/
+def bloomGammaStar (a kappa : CplxB) (g : Float) : CplxB :=
+  (CplxB.exp (((lgammaB a).sub (a.mul (CplxB.log kappa))).add kappa)).scale (1.0 / g)
+
+/-- Fold an authored-constant `Sig` back to its `Float` (the baked-pole read in
+    `bloomCompose`). Partial: `none` on any live/unsupported node — a live pole
+    is outside the v1 baked-pole contract, not an error to paper over. -/
+private partial def sigConstF? : Sig → Option Float
+  | .num n            => some n.toFloat
+  | .unary .neg a     => (sigConstF? a).map (fun x => -x)
+  | .unary .toFloat a => sigConstF? a
+  | .binary .add a b  => do pure ((← sigConstF? a) + (← sigConstF? b))
+  | .binary .sub a b  => do pure ((← sigConstF? a) - (← sigConstF? b))
+  | .binary .mul a b  => do pure ((← sigConstF? a) * (← sigConstF? b))
+  | .binary .div a b  => do
+      let x ← sigConstF? a; let y ← sigConstF? b
+      pure (if y == 0.0 then 0.0 else x / y)
+  | _                 => none
+
+/-- One composed (voice μ, reverb ν) pair of the Γ-bridge atom. Everything but
+    the amp is BAKED (`besselFuse`'s v1 contract: B, g and both pole sets baked —
+    a change relowers; the amp `c = a_voice·r_reverb` stays a live `CplxE` and
+    enters linearly). `cfN.isEmpty` ⟺ series-only (the CF branch is not emitted
+    at all); otherwise `dSwitch > 0` and the per-sample select bridges at it. -/
+structure BloomPair where
+  muSigma  : Float
+  muOmega  : Float
+  nuSigma  : Float
+  nuOmega  : Float
+  bloomB   : Float
+  gRate    : Float
+  c        : CplxE
+  kappa    : CplxB
+  k1Ser    : CplxB          -- C  (the κ-side constant)
+  k1Cf     : CplxB          -- C − Γ★  (= −CF(κ)/g)
+  fSer     : CplxB          -- −1/(ν−μ)  (the series envelope's factor)
+  dSwitch  : Float          -- 0 ⇒ series-only
+  invA     : Array CplxB    -- 1/(a+k), k = 1..N (series Horner reciprocals)
+  cfB      : Array CplxB    -- (2j+1)−a, j = 0..K (CF b-constants; z is added per sample)
+  cfN      : Array CplxB    -- (j+1)((j+1)−a), j = 0..K−1 (CF numerators)
+deriving Inhabited
+
+/-- `bloomedVoice ⋙ reverb` as Γ-bridge pairs — the residue composition ACROSS a
+    pitch-bloom warp (`B = β·scale/g` seconds of total clock advance, `g` the
+    settle rate). Baked-pole contract (v1, `besselFuse` parity): every pole must
+    fold to a constant (`none` if a live pole reaches this — the caller keeps
+    live-pole banks on `residueComposeE`'s unbloomed path); amps stay live.
+    Admission drops (graceful exclusion, the documented v1 scope): pairs with
+    `|a| < ½` (the pole ON the settled partial — the τ·e resonance; its
+    `cexpm1`-style fusion is the follow-up, exactly as WS-B2 hardened
+    `residueComposeEC`'s coincidence) and pairs whose envelope depth exceeds 300
+    (cockpit-measured shipped max ≈ 140; the cap is headroom, not a tuning).
+    `B = 0` (or κ→0) degenerates every pair to series-only with `M ≡ 1` — the
+    WS-B2 divided-difference atom, which the `modal-bloom-gamma` gate pins. -/
+def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
+    Option (Array BloomPair) := Id.run do
+  let mut out : Array BloomPair := #[]
+  for v in voice do
+    let some vSig := sigConstF? v.sigma | return none
+    let some vOm  := sigConstF? v.omega | return none
+    for r in reverb do
+      let some rSig := sigConstF? r.sigma | return none
+      let some rOm  := sigConstF? r.omega | return none
+      let mu : CplxB := ⟨-vSig, vOm⟩
+      let nu : CplxB := ⟨-rSig, rOm⟩
+      let aC : CplxB := (nu.sub mu).scale (1.0 / g)
+      if aC.abs < 0.5 then continue
+      let kappa := mu.scale B
+      let aP1 := aC.add ⟨1, 0⟩
+      let serOnly := aP1.abs ≥ kappa.abs
+      -- the worst z either per-sample branch evaluates: the branch boundary
+      let zBnd := if serOnly then kappa else kappa.scale (aP1.abs / kappa.abs)
+      let (_, nRaw) := bloomM1 aC zBnd
+      if nRaw + 8 > 300 then continue
+      let invNuMu := CplxB.div ⟨1, 0⟩ (nu.sub mu)
+      let invA := (Array.range (nRaw + 8)).map (fun k =>
+        CplxB.div ⟨1, 0⟩ (aC.add ⟨(k + 1).toFloat, 0⟩))
+      let c := cmulE v.ampE r.ampE
+      if serOnly then
+        let (mK, _) := bloomM1 aC kappa
+        out := out.push {
+          muSigma := vSig, muOmega := vOm, nuSigma := rSig, nuOmega := rOm
+          bloomB := B, gRate := g, c, kappa
+          k1Ser := mK.mul invNuMu, k1Cf := ⟨0, 0⟩, fSer := invNuMu.neg
+          dSwitch := 0.0, invA, cfB := #[], cfN := #[] }
+      else
+        let (_, kRaw) := bloomCF aC zBnd
+        if kRaw + 8 > 300 then continue
+        let kDepth := kRaw + 8
+        let gs := bloomGammaStar aC kappa g
+        let (cfK, _) := bloomCF aC kappa
+        let cVal := gs.sub (cfK.scale (1.0 / g))
+        let cfB := (Array.range (kDepth + 1)).map (fun j =>
+          (⟨(2 * j + 1).toFloat - aC.re, -aC.im⟩ : CplxB))
+        let cfN := (Array.range kDepth).map (fun j =>
+          let jf := (j + 1).toFloat
+          (⟨jf, 0⟩ : CplxB).mul ((⟨jf, 0⟩ : CplxB).sub aC))
+        out := out.push {
+          muSigma := vSig, muOmega := vOm, nuSigma := rSig, nuOmega := rOm
+          bloomB := B, gRate := g, c, kappa
+          k1Ser := cVal, k1Cf := (cfK.scale (1.0 / g)).neg, fSer := invNuMu.neg
+          dSwitch := Float.log (kappa.abs / aP1.abs) / g, invA, cfB, cfN }
+  return some out
+
+/-- The bloom-composed pair bank as a pure `Sig` over the clock: per pair, TWO
+    Q-rotator carriers — the reverb ring `e^{νd}` on the straight relative clock
+    and the bloomed voice mode `e^{μφ(d)}` on the OFFSET clock (the same Q32.32
+    offset add as `gongBloomWarp`; never a float round-trip of the absolute
+    coordinate) — each weighted by its per-sample envelope (float, slowly
+    varying — the DD's `envDf` stance): the fixed-depth series Horner, and for
+    crossing pairs the fixed-depth bottom-up continued fraction with the
+    branches bridged by the baked Γ★ constants and selected at `dSwitch`
+    (`selectE`; the unselected lane may go non-finite off its region — the
+    select picks the cockpit-validated branch, the DD's guarded-`cexpm1`
+    stance). Weights land Q4.28, carriers are exact Q2.30, the pair sum is i64
+    (the `modalBankSigTableDD` skeleton). Unrolled per pair — envelope depths
+    are per-pair ragged, the non-uniform route. Causal gate on `clkRel > 0`. -/
+def bloomComposedSig (pairs : Array BloomPair) (clkInt anchorSamples : Sig) : Sig :=
+  let clkRel := relClockQ clkInt anchorSamples
+  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
+  let dPos := clampE dSec (lit 0) (lit 1000000)
+  let one : CplxE := (lit 1, lit 0)
+  let bankQ := pairs.foldl (fun acc p =>
+    let eg := expSig (neg (mul (litF p.gRate) dPos))
+    let z : CplxE := (mul (litF p.kappa.re) eg, mul (litF p.kappa.im) eg)
+    let off := mul (litF p.bloomB) (sub (lit 1) eg)
+    let clkW := add clkRel (toIntE (mul (mul off .sampleRate) (lit 4294967296)))
+    let phNu := modePhaseQ (litF p.nuOmega) clkRel
+    let phMu := modePhaseQ (litF p.muOmega) clkW
+    let envNu := expSig (neg (mul (litF p.nuSigma) dPos))
+    let envMu := expSig (neg (mul (litF p.muSigma) (add dPos off)))
+    let mser := p.invA.foldr
+      (fun ik h => caddE one (cmulE (cmulE z (cplxLitE ik)) h)) one
+    let k2ser := cmulE mser (cplxLitE p.fSer)
+    let (k1, k2) : CplxE × CplxE :=
+      if p.cfN.isEmpty then (cplxLitE p.k1Ser, k2ser)
+      else Id.run do
+        let kk := p.cfN.size
+        let mut h : CplxE := caddE z (cplxLitE p.cfB[kk]!)
+        for jr in [0:kk] do
+          let j := kk - 1 - jr
+          h := csubE (caddE z (cplxLitE p.cfB[j]!)) (cdivE (cplxLitE p.cfN[j]!) h)
+        let cf := cdivE one h
+        let k2cf : CplxE := (div cf.1 (litF p.gRate), div cf.2 (litF p.gRate))
+        let onSer := gt dPos (litF p.dSwitch)
+        return ((selectE onSer (litF p.k1Ser.re) (litF p.k1Cf.re),
+                 selectE onSer (litF p.k1Ser.im) (litF p.k1Cf.im)),
+                (selectE onSer k2ser.1 k2cf.1, selectE onSer k2ser.2 k2cf.2))
+    let w1 := cmulE p.c k1
+    let w2 := cmulE p.c k2
+    let land := fun (env : Sig) (w : CplxE) (ph : Sig) =>
+      rshift (sub (mul (toIntE (mul (mul env w.1) (lit 268435456))) (fixedCosCycSig ph))
+                  (mul (toIntE (mul (mul env w.2) (lit 268435456))) (fixedSinCycSig ph))) (lit 28)
+    add acc (add (land envNu w1 phNu) (land envMu w2 phMu)))
+    (litI 0)
+  selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
+
 -- ── The MODAL ISLAND (v1): a decaying-resonator bank as a term over the clock ──
 -- The pole/modal island's emit path. A bank is a gated sum of decaying sinusoids
 -- (`modalBankSig`) — the real part of Σ amp·e^{μd}. It needs NO new ArrowTerm

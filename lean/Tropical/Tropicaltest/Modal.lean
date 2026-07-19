@@ -1208,6 +1208,140 @@ def runResidueBanked (arena : Arena)
     | .error e, _ | _, .error e => failGate "residue-banked" s!"build: {firstLine e}"
   | .error e, _ | _, .error e => failGate "residue-banked" s!"live flatness build: {firstLine e}"
 
+/-- THE BLOOM Γ-BRIDGE gate (WS-B3). `bloomCompose` → `bloomComposedSig` — the
+    residue composition ACROSS a pitch-bloom warp as the two-carrier
+    incomplete-gamma atom (series/CF envelopes bridged by the baked Γ★; cockpit
+    `demos/modal_bloom_gamma.py`). The pair set includes the stationary-phase
+    crossing — a 1023 Hz partial sweeping THROUGH a 1040 Hz reverb pole
+    (|κ|≈178, |a|≈59) — the case the Poisson lattice can never render. Checks:
+    (o)  build-time lgamma satisfies `exp(lgamma(a+1) − lgamma(a)) = a` on the
+         pairs' actual `a` values (branch-insensitive form, ~1e-11);
+    (1)  agreement with an independent trapezoid prefix-quadrature of the
+         DEFINING convolution (rotator-grid ω, since the datapath deliberately
+         quantizes frequency to SR/2³²; h→h/2 self-distance printed as the
+         reference's own convergence evidence): rel-L2 < 2e-4 — ~14× the
+         observed 1.4e-5 float-envelope-vs-fixed-datapath floor at this 0.74 s
+         render (the heterodyne gate's ~2e-6 floor at 8× the τ; drift-type
+         error scales with τ). A wrong atom sits at 1e-2–1e0;
+    (2)  the κ→0 collapse: `B = 1e-12` renders ≡ `residueComposeEC`'s bank —
+         the WS-B2 divided-difference limit (uncollected vs collected datapaths,
+         so quantization-floor tolerance, not bit equality);
+    (3)  seam continuity: the crossing pair's per-sample branch switch at
+         `d_switch` introduces no step (adjacent-sample deltas in a ±16 window
+         at the switch bounded by 2× the neighborhood's);
+    (4)  causality: exact zero before the anchor. -/
+def runModalBloomGamma (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let sr := 44100.0
+  let tp := 6.283185307179586
+  let g := 1.8
+  let B := 0.05 / g                    -- β = 0.05, scale 1: the shipped full register
+  let vData : Array (Float × Float × Float) := #[(1023.0, 1.13, 1.0), (353.1, 0.56, 0.6)]
+  let rData : Array (Float × Float × Float) := #[(1040.0, 1.0, 0.4), (700.0, 1.5, 0.3)]
+  let mk := fun ((f, s, a) : Float × Float × Float) =>
+    ({ sigma := litF s, omega := litF (tp * f), cre := litF a } : ModalMode)
+  let voice := vData.map mk
+  let reverb := rData.map mk
+  let anchorN : Nat := 200
+  let anchor := lit 200
+  let n : Nat := 32768
+  let fabs := fun (x : Float) => if x < 0.0 then -x else x
+  match bloomCompose voice reverb B g, bloomCompose voice reverb 1e-12 g with
+  | none, _ | _, none =>
+    failGate "modal-bloom-gamma" "bloomCompose: a live pole reached the baked-pole contract"
+  | some pairs, some pairs0 =>
+    -- (o) the lgamma recurrence on the actual a values
+    let mut lgErr : Float := 0.0
+    for p in pairs do
+      let aC : CplxB := ⟨(p.nuSigma - p.muSigma) / g * (-1.0), (p.nuOmega - p.muOmega) / g⟩
+      let ratio := (CplxB.exp ((lgammaB (aC.add ⟨1, 0⟩)).sub (lgammaB aC))).div aC
+      lgErr := max lgErr ((ratio.sub ⟨1, 0⟩).abs)
+    match buildAndFinish (.ok (buildBloomComposed "bloomg" pairs anchor arena)),
+          buildAndFinish (.ok (buildBloomComposed "bloomg0" pairs0 anchor arena)),
+          buildAndFinish (.ok (buildModalBankTable "bloomg0r"
+            (residueComposeEC voice reverb) anchor arena)) with
+    | .ok plan, .ok plan0, .ok plan0r =>
+      match ← renderPlanSamples plan n, ← renderPlanSamples plan0 4096,
+            ← renderPlanSamples plan0r 4096 with
+      | .ok dut, .ok dut0, .ok ref0 =>
+        -- independent reference: trapezoid prefix-quadrature of
+        -- y_p(d) = e^{νd}·∫₀^d e^{μφ(s) − νs} ds per admitted pair, summed with
+        -- the real weights a·r — the defining integral, no gamma anywhere.
+        let phi := fun (d : Float) => d + B * (1.0 - Float.exp (-g * d))
+        let sinkGain : Float := 0.05   -- defaultSinkGain (Plan.lean): the carrier's output sink
+        -- the rotator's documented frequency quantization (`modePhaseQ`:
+        -- `incr = ⌊(ω/2π)·2³²/SR⌋`, the SR/2³² grid) — modeled in the reference
+        -- so the trapezoid refines toward the RENDERED carriers, not toward
+        -- frequencies the datapath deliberately does not carry
+        let qOm := fun (om : Float) =>
+          Float.floor (om / tp * 4294967296.0 / sr) * (tp * sr / 4294967296.0)
+        let refRender := fun (hdiv : Nat) => Id.run do
+          let mut y : Array Float := Array.replicate n 0.0
+          for (fv, sv, av) in vData do
+            let mu : CplxB := ⟨-sv, qOm (tp * fv)⟩
+            for (fr, srr, ar) in rData do
+              let nuC : CplxB := ⟨-srr, qOm (tp * fr)⟩
+              if ((nuC.sub mu).scale (1.0 / g)).abs < 0.5 then continue
+              let cAmp := av * ar * sinkGain
+              let h := 1.0 / (sr * hdiv.toFloat)
+              let fint := fun (s : Float) => CplxB.exp ((mu.scale (phi s)).sub (nuC.scale s))
+              let mut J : CplxB := ⟨0, 0⟩
+              let mut fPrev := fint 0.0
+              for i in [anchorN + 1 : n] do
+                let dBase := (i - 1 - anchorN).toFloat / sr
+                for k in [0:hdiv] do
+                  let fNext := fint (dBase + (k + 1).toFloat * h)
+                  J := J.add ((fPrev.add fNext).scale (h * 0.5))
+                  fPrev := fNext
+                let d := (i - anchorN).toFloat / sr
+                let yc := (CplxB.exp (nuC.scale d)).mul J
+                y := y.set! i (y[i]! + cAmp * yc.re)
+          return y
+        let ref1 := refRender 1
+        let ref2 := refRender 2
+        let relL2 := fun (xa xb : Array Float) (lo hi : Nat) => Id.run do
+          let mut nm := 0.0
+          let mut dn := 0.0
+          for i in [lo:hi] do
+            let dd := xa[i]! - xb[i]!
+            nm := nm + dd * dd
+            dn := dn + xb[i]! * xb[i]!
+          return Float.sqrt (nm / (dn + 1e-300))
+        let e2 := relL2 dut ref2 (anchorN + 1) n
+        let eT := relL2 ref1 ref2 (anchorN + 1) n
+        let e0 := relL2 dut0 ref0 (anchorN + 1) 4096
+        -- (3) seam continuity around the crossing pair's switch sample
+        let crossing := pairs.filter (fun p => p.dSwitch > 0.0)
+        let seamOk := Id.run do
+          if crossing.isEmpty then return false
+          let iSw := anchorN + (crossing[0]!.dSwitch * sr).toUInt64.toNat
+          if iSw + 1000 ≥ n then return false
+          let maxStep := fun (lo hi : Nat) => Id.run do
+            let mut m := 0.0
+            for i in [lo:hi] do
+              m := max m (fabs (dut[i]! - dut[i-1]!))
+            return m
+          let w := maxStep (iSw - 16) (iSw + 16)
+          let nb := max (maxStep (iSw - 1000) (iSw - 16)) (maxStep (iSw + 16) (iSw + 1000))
+          return w ≤ 2.0 * nb + 1e-9
+        -- (4) causality
+        let preMax := (Array.range anchorN).foldl (fun m i => max m (fabs dut[i]!)) 0.0
+        let energy := dut.foldl (fun a x => a + x * x) 0.0
+        let depths := String.intercalate ", " (pairs.toList.map (fun p =>
+          s!"{p.invA.size}/{p.cfN.size}"))
+        IO.println s!"        bloom⋙reverb Γ-bridge atom ({pairs.size} pairs incl. the in-band crossing; β·|μ|/g up to ~178):"
+        IO.println s!"        oracle   lgamma-recurrence {lgErr} · trapezoid h→h/2 self-distance {eT}"
+        IO.println s!"        result   ‖dut−ref(h/2)‖ {e2} · κ→0 vs residueComposeEC {e0} · depths ser/cf {depths}"
+        if lgErr < 1e-11 && e2 < 2e-4 && e0 < 1e-4
+            && seamOk && preMax == 0.0 && energy > 1e-9 && crossing.size == 1 then
+          passGate "modal-bloom-gamma" s!"the bloomed voice feeds the reverb in closed form — Γ-bridge atom at the datapath floor (rel {e2}; ref self-distance {eT}), κ→0 = the DD atom ({e0}), seam step-free"
+        else
+          failGate "modal-bloom-gamma" s!"lgErr={lgErr} e2={e2} eT={eT} e0={e0} seamOk={seamOk} preMax={preMax} energy={energy} crossing={crossing.size}"
+      | .error e, _, _ | _, .error e, _ | _, _, .error e =>
+        failGate "modal-bloom-gamma" s!"render: {firstLine e}"
+    | .error e, _, _ | _, .error e, _ | _, _, .error e =>
+      failGate "modal-bloom-gamma" s!"build: {firstLine e}"
+
 end ResidueGates
 
 open Tropical.EmitArrow in

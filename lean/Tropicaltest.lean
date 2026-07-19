@@ -364,6 +364,9 @@ def main (args : List String) : IO UInt32 := do
     if !(← runResidueBanked arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← runModalBloomGamma arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← runModalIntegrate arena resolved) then
       failed := failed + 1
     total := total + 1
