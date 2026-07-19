@@ -430,6 +430,12 @@ def main (args : List String) : IO UInt32 := do
     if !(← runVocabDriven arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← runModalClassAgreement) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runMalformedRejection arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← runDeadSlotLint arena resolved) then
       failed := failed + 1
     -- ── (h⁸) THE PATCHER LOWERING: downstream-only patch graph → arrow term →

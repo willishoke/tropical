@@ -693,7 +693,13 @@ private def checkEdgeTypes (raws : Array Raw) : Except String Unit := do
       unless p.accepts.isEmpty do
         for srcId in portSources r.inObj p.name do
           match raws.find? (·.id == srcId) with
-          | none => pure ()                         -- dangling id: not a type error
+          | none =>
+            -- A wire that NAMES no node is a broken document (a typo'd source),
+            -- not a legal-incomplete state: surface it here rather than let it die
+            -- downstream as `lower: node '…' not found` (or vanish silently if the
+            -- edge is unreferenced). An inlet with NO wire is not an edge and is
+            -- never reached, so silence-on-legal-states is untouched.
+            throw s!"connection error: '{r.id}' ({r.kind}) inlet '{p.name}' is wired from '{srcId}', which is not a node in the patch — a wire must name an existing node"
           | some src =>
             match outletOf src.kind with
             | none =>
@@ -703,6 +709,81 @@ private def checkEdgeTypes (raws : Array Raw) : Except String Unit := do
                 let accepted := String.intercalate "/" (p.accepts.toList.map domStr)
                 throw s!"connection type error: '{src.id}' ({src.kind}, {domStr col} outlet) → '{r.id}' ({r.kind}) inlet '{p.name}' which accepts {accepted} — outlet.color ∉ inlet.accepts (modal→signal realizes; signal→modal is a type error)"
   pure ()
+
+/-- The inlet edges out of `id`: every source id wired into one of `id`'s inlets
+    (`accepts ≠ #[]`). These are exactly the wires `lowerNode`/`lowerInput`/
+    `lowerModal` recurse UP, so a cycle among them is what would overflow the
+    (visited-set-free) lowering. An id naming no node contributes no edges — a
+    dangling source is a leaf here; its malformedness is `checkEdgeTypes`'s job. -/
+private def inletSources (raws : Array Raw) (id : String) : Array String :=
+  match raws.find? (·.id == id) with
+  | none => #[]
+  | some r => (portSpecs r.kind).foldl (init := #[]) fun acc p =>
+      if p.accepts.isEmpty then acc else acc ++ portSources r.inObj p.name
+
+/-- DFS for a back-edge to a node on the current path. `path` is the ancestor
+    chain (most-recent first); `done` is the set of fully-explored ids (a node
+    reached again off a different branch, with no cycle, is not re-walked, so this
+    is linear in the graph). `id ∈ path` is a source-level cycle → reject, naming
+    the loop. -/
+private partial def acyclicVisit (raws : Array Raw) (path : List String)
+    (done : List String) (id : String) : Except String (List String) := do
+  if path.contains id then
+    -- the loop: the path from the first occurrence of `id` back to `id`.
+    let loop := (path.reverse.dropWhile (· != id)) ++ [id]
+    throw s!"connection cycle: {" → ".intercalate loop} — patch graphs must be acyclic (you may only patch forward; there is no delay to break a loop through)"
+  else if done.contains id then
+    return done
+  else
+    let done' ← (inletSources raws id).foldlM
+      (fun d s => acyclicVisit raws (id :: path) d s) done
+    return id :: done'
+
+/-- Reject a cyclic patch BEFORE the unbounded `lowerModal`/`lowerNode`/`lowerInput`
+    recursion runs. A color-legal cycle — a `reverb` whose modal outlet feeds its
+    own modal inlet, a `mix` fed by itself — passes `checkEdgeTypes` but would
+    recurse forever and stack-overflow the process (the live MCP server). A DFS
+    over the same inlet edges the lowering follows turns it into a clear error.
+    The stated contract is "cycles rejected outright"; this brings the playground
+    decode path in line with the elaborator's `CycleViolation` and the session
+    acyclicity check. -/
+private def checkAcyclic (raws : Array Raw) : Except String Unit := do
+  let mut done : List String := []
+  for r in raws do
+    done ← acyclicVisit raws [] done r.id
+  pure ()
+
+/-- The top-level `"out"` id must name an existing node — or be absent/empty,
+    which is a legal-incomplete state (nothing routed to the dac yet) that
+    compiles to silence. A NON-empty id naming no node is a typo'd output target:
+    a broken document, which otherwise renders the WHOLE patch as silence with no
+    error (`decodeGraph`'s `outIns = #[]`). Surface it as an error instead. -/
+private def checkOutTarget (j : Json) (raws : Array Raw) : Except String Unit :=
+  match (j.getObjVal? "out").toOption with
+  | some (.str outId) =>
+    if outId == "" || raws.any (·.id == outId) then pure ()
+    else throw s!"output target error: the top-level \"out\" names node '{outId}', which is not in the patch — route the dac from an existing node (or omit \"out\" for a silent patch)"
+  | _ => pure ()
+
+/-- Finding-2 agreement: the connection-typing rule is decided at TWO sites.
+    `checkEdgeTypes` colors an outlet through `outletOf`; the lowering decides
+    modal-ness through `nodeIsModal` on the CONSTRUCTED node. Nothing forces them
+    to agree, so a future kind whose `buildNode` returns a modal node but which
+    lacks a modal `outletOf` case would be silently signal-colored — the checker
+    would then reject modal wiring the lowering accepts (or vice-versa). This
+    builds each vocabulary kind's DEFAULT node and reports the kinds where
+    `nodeIsModal` disagrees with `outletOf … == some .modal`; `tropicaltest`
+    asserts the result empty. (`out` has no outlet and is never built — skipped.) -/
+def modalClassificationDrift : Array String := Id.run do
+  let mut drift : Array String := #[]
+  for kind in vocabularyKinds do
+    if kind == "out" then continue
+    let (node, _) := buildNode (fun _ => none) "n" kind
+      (Json.mkObj []) (Json.mkObj []) (Json.mkObj [])
+    let g : PatchGraph := { nodes := #[{ id := "n", node }], output := "n" }
+    if nodeIsModal g "n" != (outletOf kind == some .modal) then
+      drift := drift.push kind
+  return drift
 
 /-- The vocabulary as JSON — the ONE description of the node kinds, GENERATED
     from the port-spec table (the hand-maintained `nodeSchema` this replaces
@@ -933,7 +1014,10 @@ private def tapNodeIds (raws : Array Raw) : Array String :=
 def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j : Json) :
     Except String (Tropical.Plan.FlatPlan × Array Tap
       × Array (Array (Option Tropical.Ir.Stage))) := do
-  checkEdgeTypes (rawsOf j)                          -- reject ill-typed edges pre-lowering
+  let raws := rawsOf j
+  checkEdgeTypes raws                                -- reject ill-typed / dangling edges pre-lowering
+  checkAcyclic raws                                  -- reject cycles BEFORE the unbounded lowering recursion
+  checkOutTarget j raws                              -- reject an "out" id that names no node
   let (g, paramTable) ← decodeGraph j
   let term ← lowerGraph g
   let (out, b0) := emitTerm (normalize term) {}
