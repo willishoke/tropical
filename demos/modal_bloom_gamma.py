@@ -52,10 +52,18 @@ Differentials (house style: independent oracle, a PLATEAU or a RATE):
   D_bg5  exactness gates: y(0) = 0 to roundoff; late-time pure-ring amplitude
          vs closed form; term counts / CF depths (the cost table).
 
-v1 exclusion (documented, gated): |a| < a_min — the pole ON the settled partial
-(τ·e deg-1 resonance; E1's 1/(ν−μ) reappears, CF's small-z log region) — the
-same precondition residueComposeEC carried before WS-B2 hardened it; the
-cexpm1-style fusion of THIS atom's resonance is the follow-up, not v1.
+The |a| < a_min hole is CLOSED by atom four (WS-A4, the coincidence divided
+difference — see d_bg6). Finding: the CF branch has NO coincidence pathology at
+all (Γ(a,z) → E1(z) finitely as a→0; the Γ(a) pole cancels between CF(z) and
+CF(κ) by the Γ★ identity), so for large z it needs nothing new — the old
+exclusion was E1's 1/(ν−μ) blowup + the Γ★ bridge, both singular at a=0, not a
+math failure. For small z (the deep tail, where CF degrades into the log region)
+the a-divided-difference of the E1 numerator takes over:
+    y = (c/g) Φ(a,κ) e^{νd} − (c/g) Φ(a,z) e^{μφ} + c e^κ (e^{νd}−e^{μd})/(ν−μ)
+with Φ(a,x) = Σ dₙxⁿ = (M_a(x)−eˣ)/a, dₙ=(n dₙ₋₁−fₙ₋₁)/(n(a+n)) EXACT (finite at
+a=0, dₙ→−Hₙ/n!); the κ-side constant Φ(a,κ) via the pole-FREE lgamma(a+1) bridge;
+the τ·e secular a residueComposeDD-shaped paired atom (cexpm1). Bit-clean over the
+whole (a,κ) box incl. a=0 exact and lightly-damped long tails.
 """
 import numpy as np
 
@@ -197,6 +205,64 @@ def compose_switch(mu, nu, kappa, B, d):
     if abs(a + 1) >= RHO * abs(z):
         return C * np.exp(nu * d) - M1_series(a, z)[0] * np.exp(mu * warp(d, B)) / (nu - mu)
     return (C - gs) * np.exp(nu * d) + cf_env(a, z)[0] * np.exp(mu * warp(d, B)) / G
+
+# ------------------------------------------------------ atom four (coincidence)
+# |a| < a_min: the room pole ON the settled partial (ν → μ). At a = 0 the E1
+# numerator vanishes IDENTICALLY (0/0 — removable), so the value is the
+# a-divided-difference of the numerator. Same two-region split as the crossing:
+# CF (large z, already coincidence-stable) bridged at d_switch to the series
+# divided difference Φ(a,z) (small z) + the τ·e secular. NO Γ★ (it is the singular
+# piece); the κ-side const Φ(a,κ) uses the pole-free lgamma(a+1) bridge.
+CF_K = 260   # fixed CF depth (kernel-faithful; > worst coincidence depth ~250)
+
+def cf_fixed(a, z, K):
+    """CF(z) = Γ(a,z)eᶻz^{−a}, FIXED depth K (bottom-up — the kernel's per-sample form)."""
+    h = z + (2 * K + 1) - a
+    for j in range(K - 1, -1, -1):
+        h = (z + (2 * j + 1) - a) - (j + 1) * ((j + 1) - a) / h
+    return 1.0 / h
+
+def d_coeffs(a, N):
+    """dₙ = (n dₙ₋₁ − fₙ₋₁)/(n(a+n)), d₀=0, fₙ=1/n! — Φ(a,x) = Σ_{n≥1} dₙxⁿ.
+    Exact recurrence (no 1/a): finite at a=0, dₙ → −Hₙ/n!."""
+    d = np.zeros(N + 1, dtype=complex); f = 1.0 + 0j
+    for n in range(1, N + 1):
+        d[n] = (n * d[n - 1] - f) / (n * (a + n)); f = f / n
+    return d
+
+def phi_horner(z, dn):
+    """Φ(a,z) = z·Σ dₙ z^{n−1} (Horner over the baked dₙ) — the small-z divided diff."""
+    h = 0j
+    for n in range(len(dn) - 1, 0, -1):
+        h = dn[n] + z * h
+    return z * h
+
+def cexpm1_k(w):
+    """(eʷ−1)/w, stable near 0 (7-term series, matches cexpm1SeriesE)."""
+    if abs(w) < 0.1:
+        c = 1.0 / 5040.0
+        for ck in [1/720, 1/120, 1/24, 1/6, 1/2, 1.0]:
+            c = ck + w * c
+        return c
+    return (np.exp(w) - 1.0) / w
+
+def phi_kappa(a, kappa, K):
+    """Φ(a,κ) = e^κ cexpm1(w)(w/a) − CF(κ), w = lgamma(a+1) − a log κ — the pole-free
+    bridge (never Σ dₙκⁿ, float-dead at shipped |κ|). w/a → −γ at a→0 (guarded)."""
+    wa = (lgamma_c(a + 1) / a - np.log(kappa)) if abs(a) > 1e-300 else (-0.5772156649015329 - np.log(kappa))
+    return np.exp(kappa) * cexpm1_k(a * wa) * wa - cf_fixed(a, kappa, K)
+
+def compose_coincident(mu, nu, kappa, B, d, N=45, K=CF_K, dn=None, Phik=None):
+    """The coincident atom (Design B), kernel-faithful. Switch at z = |a+1|."""
+    a = (nu - mu) / G
+    z = kappa * np.exp(-G * d)
+    if dn is None: dn = d_coeffs(a, N)
+    if Phik is None: Phik = phi_kappa(a, kappa, K)
+    dsw = np.log(abs(kappa) / abs(a + 1.0)) / G
+    if d < dsw:                                  # CF branch (large z)
+        return (cf_fixed(a, z, K) * np.exp(mu * warp(d, B)) - cf_fixed(a, kappa, K) * np.exp(nu * d)) / G
+    secular = np.exp(kappa) * np.exp(mu * d) * d * cexpm1_k((nu - mu) * d)  # e^κ(e^{νd}−e^{μd})/(ν−μ)
+    return Phik * np.exp(nu * d) / G - phi_horner(z, dn) * np.exp(mu * warp(d, B)) / G + secular
 
 # ------------------------------------------------------------------ oracle
 GL_X, GL_W = np.polynomial.legendre.leggauss(32)
@@ -396,6 +462,65 @@ def d_bg5():
     print(f"       {'PASS' if ok else 'FAIL'}\n")
     return ok
 
+# ------------------------------------------------------------------ D_bg6
+def d_bg6():
+    """The coincidence divided difference (atom four, WS-A4) vs the time-domain
+    oracle: an a-sweep through 0 (incl. a=0 EXACT), the |a|=½ crossover (no cliff),
+    and lightly-damped LONG tails (where CF-only would be silently wrong and the
+    series-DD branch carries the τ·e resonance). Kernel-faithful (fixed depths)."""
+    print("D_bg6  coincident divided difference vs oracle (a-sweep, crossover, deep tails)")
+    ok = True
+
+    def worst(mu, nu, kappa, B, dgrid, N=45):
+        a = (nu - mu) / G
+        dn = d_coeffs(a, N); Phik = phi_kappa(a, kappa, CF_K)
+        pk = 0.0; errs = []
+        for d in dgrid:
+            yo = oracle_quad(mu, nu, kappa, B, d, dps=25)
+            if yo is None:
+                continue
+            yc = compose_coincident(mu, nu, kappa, B, d, N, CF_K, dn, Phik)
+            errs.append(abs(yc - yo)); pk = max(pk, abs(yo))
+        return (max(errs) / max(pk, 1e-30)) if errs else float('nan')
+
+    # a-sweep through 0 at a mid partial (f=600, |κ|≈105) incl. a = 0 exact
+    print("       a-sweep through 0 (f=600):  |a|   worst-rel")
+    for da in [0.0, 0.001, 0.01, 0.05, 0.1, 0.25, 0.45, 0.49]:
+        mu = mode(600.0, 0.5); B = BETA / G; kappa = mu * B
+        nu = mu + G * (0.03 * da + 1j * da)
+        w = worst(mu, nu, kappa, B, DGRID)
+        good = w < 5e-11
+        ok = ok and good
+        print(f"                                   {abs((nu-mu)/G):5.3f}  {w:.2e}" + ("" if good else "  <-- FAIL"))
+
+    # |a| = 1/2 crossover: coincident (below) vs shipped switch (above) — continuity
+    print("       |a|=½ crossover (f=600):  |a| (branch)   coinc-rel   switch-rel")
+    for da in [0.45, 0.49, 0.499, 0.501, 0.51, 0.55]:
+        mu = mode(600.0, 0.5); B = BETA / G; kappa = mu * B
+        nu = mu + G * (0.03 + 1j * da); a = (nu - mu) / G
+        wc = worst(mu, nu, kappa, B, DGRID[:6])
+        pk = 0.0; es = []
+        for d in DGRID[:6]:
+            yo = oracle_quad(mu, nu, kappa, B, d, dps=25)
+            if yo is None: continue
+            es.append(abs(compose_switch(mu, nu, kappa, B, d) - yo)); pk = max(pk, abs(yo))
+        ws = max(es) / max(pk, 1e-30)
+        tag = "coinc" if abs(a) < 0.5 else "shipd"
+        print(f"                                 {abs(a):5.3f} ({tag})    {wc:.2e}   {ws:.2e}")
+
+    # lightly-damped LONG tails — the Design-A killers (CF-only was 6–10% wrong)
+    print("       deep tails (σ_μ=0.2, to 6–8 s):  f   |a|   worst-rel")
+    for (f, sm, sn, dmax) in [(110, 0.2, 0.8, 8.0), (220, 0.2, 0.6, 8.0),
+                              (600, 0.3, 0.8, 6.0), (110, 0.2, 0.2, 8.0)]:
+        mu = mode(f, sm); B = BETA / G; kappa = mu * B; nu = mode(f, sn) + G * (1j * 0.1)
+        dg = np.linspace(1e-4, dmax, 60)
+        w = worst(mu, nu, kappa, B, dg)
+        good = w < 1e-9
+        ok = ok and good
+        print(f"                                        {f:4}  {abs((nu-mu)/G):5.3f}  {w:.2e}" + ("" if good else "  <-- FAIL"))
+    print(f"       {'PASS' if ok else 'FAIL'}\n")
+    return ok
+
 # ------------------------------------------------------------------ main
 if __name__ == "__main__":
     if not HAVE_MP:
@@ -407,6 +532,7 @@ if __name__ == "__main__":
     if HAVE_MP:
         results["D_bg1"] = d_bg1()
         results["D_bg4"] = d_bg4()
+        results["D_bg6"] = d_bg6()
     results["D_bg5"] = d_bg5()
     bad = [k for k, v in results.items() if not v]
     print("ALL PASS" if not bad else f"FAILING: {', '.join(bad)}")

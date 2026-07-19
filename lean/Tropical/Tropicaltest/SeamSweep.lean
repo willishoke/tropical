@@ -406,7 +406,7 @@ def runSeamSweep (arena : Arena)
     let eDeep := relL2Win dut refD deepLo nDeep
     let eFull := relL2Win dut refD lo nDeep
     IO.println s!"        bloomGamma coincidence deep-tail (a = 0 EXACT, κ≈19, ~2.2 s): series-DD region rel {eDeep}, full rel {eFull}"
-    if !(allFinite dut) || eDeep ≥ 3e-3 || eFull ≥ 3e-4 then
+    if !(allFinite dut) || eDeep ≥ 1e-3 || eFull ≥ 1e-4 then
       IO.println s!"        bloomGamma DEEP-TAIL VIOLATION: series-DD rel {eDeep} (full {eFull}) — the τ·e resonance region is off the law (or non-finite)"
       ok := false
   if ok then passGate "seam-sweep" "every registered atom holds its law over its admission region (incl. the τ·e coincidence deep-tail); composition laws (EC-commute, assoc) pinned"
