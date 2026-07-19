@@ -1,4 +1,4 @@
-import Tropical.Tropicaltest.Modal
+import Tropical.Tropicaltest.SeamSweep
 
 /-!
 # Tropical.Tropicaltest.BanksStaging

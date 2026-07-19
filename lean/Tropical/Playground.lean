@@ -623,6 +623,23 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     -- and it deepens/relaxes under the knob with no relower (table fallback 0.05 ≈
     -- a solid strike, for a data-less drop).
     gongStrikeNodes id clk anchor (p "beta" (dv "beta")) (litF gRate) full half
+  | "bloomgong" =>
+    -- A pitch-bloomed gong register that stays MODAL to the boundary — so it can
+    -- cross a reverb (or a reverb CHAIN) by the residue calculus at the tap
+    -- (`bloomCompose`) instead of realizing at the warp. The reassociated
+    -- lowering folds the room chain first and crosses the bloom ONCE. Baked-pole-
+    -- bloom contract (besselFuse parity): β, g, scale baked (a change relowers);
+    -- amps stay live. Wired to `out` it plays the bare bloom-warped register;
+    -- wired to a BAKED-pole reverb it crosses. A live-pole (rt60) reverb
+    -- gracefully drops to the bare bloom (the recorded baked-pole-bloom v1 limit).
+    let t := jFloat params "t" 0.0
+    let beta := jFloat params "beta" 0.05
+    let gRate := jFloat params "g" 1.8
+    let scale := jFloat params "scale" 1.0
+    let modes := jModes params "modes"
+    let modes := if modes.isEmpty then (defaultGongModes (jFloat params "freq" 110.0)).1 else modes
+    let anchor := mul (litF t) .sampleRate
+    (.modalSource modes anchor clk none none (some (beta * scale / gRate, gRate)), #[])
   | "string" =>
     -- A plucked string as its diagonalized modal bank — the Karplus-Strong loop
     -- is an LTI system, so its delay-line recurrence and this closed-form pole

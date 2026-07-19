@@ -388,6 +388,15 @@ def main (args : List String) : IO UInt32 := do
     if !(← runResidueSymbolic arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← Tropical.Tropicaltest.SeamSweep.runSeamSweep arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← Tropical.Tropicaltest.SeamSweep.runGammaCoeff arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← Tropical.Tropicaltest.SeamSweep.runGongReverb arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← runModalPatch arena resolved) then
       failed := failed + 1
     total := total + 1

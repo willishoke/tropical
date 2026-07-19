@@ -701,18 +701,62 @@ structure BloomPair where
   cfN      : Array CplxB    -- (j+1)((j+1)−a), j = 0..K−1 (CF numerators)
 deriving Inhabited
 
+/-- The per-pair BAKING PLAN and admission decision for one composed (μ, ν)
+    pair — the executable form of the bloom atom's admission region (the sprint's
+    epistemics fix: the boundary is an apparatus output, not a comment). `none`
+    ⟺ the pair is OUTSIDE admission (`|a| < ½`, or an envelope depth over the 300
+    cap); `some` carries the branch choice and the two depths `bloomCompose`
+    needs to size its coefficient arrays. `bloomCompose` and the seam-sweep
+    harness consult THIS predicate, so "where does the atom promise anything" has
+    one answer, in code. -/
+structure BloomPairPlan where
+  mu      : CplxB
+  nu      : CplxB
+  aC      : CplxB
+  kappa   : CplxB
+  serOnly : Bool
+  /-- `invA` length / series depth (`nRaw + 8`). -/
+  nDepth  : Nat
+  /-- CF depth (`kRaw + 8`); 0 when `serOnly`. -/
+  kDepth  : Nat
+deriving Inhabited
+
+def bloomPairPlan? (mu nu : CplxB) (B g : Float) : Option BloomPairPlan := Id.run do
+  let aC : CplxB := (nu.sub mu).scale (1.0 / g)
+  if aC.abs < 0.5 then return none
+  let kappa := mu.scale B
+  let aP1 := aC.add ⟨1, 0⟩
+  let serOnly := aP1.abs ≥ kappa.abs
+  -- the worst z either per-sample branch evaluates: the branch boundary
+  let zBnd := if serOnly then kappa else kappa.scale (aP1.abs / kappa.abs)
+  let (_, nRaw) := bloomM1 aC zBnd
+  if nRaw + 8 > 300 then return none
+  if serOnly then
+    return some { mu, nu, aC, kappa, serOnly := true, nDepth := nRaw + 8, kDepth := 0 }
+  else
+    let (_, kRaw) := bloomCF aC zBnd
+    if kRaw + 8 > 300 then return none
+    return some { mu, nu, aC, kappa, serOnly := false, nDepth := nRaw + 8, kDepth := kRaw + 8 }
+
+/-- The bloom atom's admission predicate at the pair level: `|a| ≥ ½` and both
+    envelope depths within the 300 cap — exactly the region `bloomCompose`
+    keeps a pair (`bloomPairPlan?` is `some`). Executable data the sweep probes
+    at its edges, not an annotation. -/
+def bloomAdmitsPair (mu nu : CplxB) (B g : Float) : Bool := (bloomPairPlan? mu nu B g).isSome
+
 /-- `bloomedVoice ⋙ reverb` as Γ-bridge pairs — the residue composition ACROSS a
     pitch-bloom warp (`B = β·scale/g` seconds of total clock advance, `g` the
     settle rate). Baked-pole contract (v1, `besselFuse` parity): every pole must
     fold to a constant (`none` if a live pole reaches this — the caller keeps
     live-pole banks on `residueComposeE`'s unbloomed path); amps stay live.
-    Admission drops (graceful exclusion, the documented v1 scope): pairs with
-    `|a| < ½` (the pole ON the settled partial — the τ·e resonance; its
-    `cexpm1`-style fusion is the follow-up, exactly as WS-B2 hardened
-    `residueComposeEC`'s coincidence) and pairs whose envelope depth exceeds 300
-    (cockpit-measured shipped max ≈ 140; the cap is headroom, not a tuning).
-    `B = 0` (or κ→0) degenerates every pair to series-only with `M ≡ 1` — the
-    WS-B2 divided-difference atom, which the `modal-bloom-gamma` gate pins. -/
+    Admission drops (graceful exclusion, the documented v1 scope) route through
+    `bloomPairPlan?`: pairs with `|a| < ½` (the pole ON the settled partial — the
+    τ·e resonance; its `cexpm1`-style fusion is the follow-up, exactly as WS-B2
+    hardened `residueComposeEC`'s coincidence) and pairs whose envelope depth
+    exceeds 300 (cockpit-measured shipped max ≈ 140; the cap is headroom, not a
+    tuning). `B = 0` (or κ→0) degenerates every pair to series-only with `M ≡ 1`
+    — the WS-B2 divided-difference atom, which the `modal-bloom-gamma` gate
+    pins. -/
 def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
     Option (Array BloomPair) := Id.run do
   let mut out : Array BloomPair := #[]
@@ -724,20 +768,16 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
       let some rOm  := sigConstF? r.omega | return none
       let mu : CplxB := ⟨-vSig, vOm⟩
       let nu : CplxB := ⟨-rSig, rOm⟩
-      let aC : CplxB := (nu.sub mu).scale (1.0 / g)
-      if aC.abs < 0.5 then continue
-      let kappa := mu.scale B
-      let aP1 := aC.add ⟨1, 0⟩
-      let serOnly := aP1.abs ≥ kappa.abs
-      -- the worst z either per-sample branch evaluates: the branch boundary
-      let zBnd := if serOnly then kappa else kappa.scale (aP1.abs / kappa.abs)
-      let (_, nRaw) := bloomM1 aC zBnd
-      if nRaw + 8 > 300 then continue
+      -- the shared admission predicate: `none` ⇒ this pair is out of scope
+      -- (graceful exclusion), and it carries the two depths for the arrays.
+      let some plan := bloomPairPlan? mu nu B g | continue
+      let aC := plan.aC
+      let kappa := plan.kappa
       let invNuMu := CplxB.div ⟨1, 0⟩ (nu.sub mu)
-      let invA := (Array.range (nRaw + 8)).map (fun k =>
+      let invA := (Array.range plan.nDepth).map (fun k =>
         CplxB.div ⟨1, 0⟩ (aC.add ⟨(k + 1).toFloat, 0⟩))
       let c := cmulE v.ampE r.ampE
-      if serOnly then
+      if plan.serOnly then
         let (mK, _) := bloomM1 aC kappa
         out := out.push {
           muSigma := vSig, muOmega := vOm, nuSigma := rSig, nuOmega := rOm
@@ -745,9 +785,8 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
           k1Ser := mK.mul invNuMu, k1Cf := ⟨0, 0⟩, fSer := invNuMu.neg
           dSwitch := 0.0, invA, cfB := #[], cfN := #[] }
       else
-        let (_, kRaw) := bloomCF aC zBnd
-        if kRaw + 8 > 300 then continue
-        let kDepth := kRaw + 8
+        let kDepth := plan.kDepth
+        let aP1 := aC.add ⟨1, 0⟩
         let gs := bloomGammaStar aC kappa g
         let (cfK, _) := bloomCF aC kappa
         let cVal := gs.sub (cfK.scale (1.0 / g))
@@ -815,6 +854,28 @@ def bloomComposedSig (pairs : Array BloomPair) (clkInt anchorSamples : Sig) : Si
     add acc (add (land envNu w1 phNu) (land envMu w2 phMu)))
     (litI 0)
   selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
+
+/-- The bloom-composed pair bank as a TERM over the clock leaf — the realization
+    of a bloomed source crossed against a (folded) room. Rides `arrUn … (.clk c)`
+    like `modalBankTerm`, so master warps reach the two carriers through the
+    already-warped clock. -/
+def bloomComposedTerm (pairs : Array BloomPair) (anchor : Sig) (c : Clock) : ArrowTerm :=
+  ArrowTerm.arrUn (fun clkSig => bloomComposedSig pairs clkSig anchor) (ArrowTerm.clk c)
+
+/-- The pitch-bloom clock warp for a BARE bloomed source (no room to cross): the
+    offset `B·(1−e^{−g·d⁺})` added to the untouched integer clock — `B` already
+    folds the register scale (`B = β·scale/g`). The scale-1 sibling of
+    `gongBloomWarp` (which lives one layer up, in `Gong.lean`), defined here so
+    `Patch.lowerInput` can realize a bloomed source's bare fallback without a
+    circular import. `W(0)=0`, monotone, so the bank's own causal gate is
+    untouched. -/
+def bloomWarpClock (anchorSamples : Sig) (B g : Float) : Clock → Clock :=
+  fun clk =>
+    let clkRel := relClockQ clk anchorSamples
+    let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
+    let dPos := clampE dSec (lit 0) (lit 1000000)
+    let bloom := mul (litF B) (sub (lit 1) (expSig (neg (mul (litF g) dPos))))
+    add clk (toIntE (mul (mul bloom .sampleRate) (lit 4294967296)))
 
 -- ── The MODAL ISLAND (v1): a decaying-resonator bank as a term over the clock ──
 -- The pole/modal island's emit path. A bank is a gated sum of decaying sinusoids
