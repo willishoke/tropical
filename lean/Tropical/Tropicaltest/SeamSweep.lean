@@ -409,7 +409,33 @@ def runSeamSweep (arena : Arena)
     if !(allFinite dut) || eDeep ≥ 1e-3 || eFull ≥ 1e-4 then
       IO.println s!"        bloomGamma DEEP-TAIL VIOLATION: series-DD rel {eDeep} (full {eFull}) — the τ·e resonance region is off the law (or non-finite)"
       ok := false
-  if ok then passGate "seam-sweep" "every registered atom holds its law over its admission region (incl. the τ·e coincidence deep-tail); composition laws (EC-commute, assoc) pinned"
+  -- ── coincidence SMALL-κ (WS-A4): a SUBTLE bloom (tiny B ⇒ |κ| ≪ |a+1|) makes
+  -- dSwitch < 0, so the pair is ALWAYS on the series-DD branch and reads Φ(a,κ)
+  -- directly from d = 0 — the region where the lgamma(a+1) bridge catastrophically
+  -- cancels (both κ^{−Re a} terms → the tiny Φ(a,κ)≈−κ/(a+1)) and the direct Σdₙκⁿ
+  -- sum must take over. A short window suffices (no long tail needed). Its own warp.
+  -- Re(a) > 0 (voice MORE damped than the room, σ_μ > σ_ν) is what makes the bridge's
+  -- κ^{−Re a} terms blow up and cancel — a pure-imaginary a would not expose it — and
+  -- a LOW partial keeps κ tiny (κ ≈ |μ|·B ≈ 3.5e-4) so the garbage is unmistakable.
+  let bSmall : Float := 1.67e-6
+  let warpSmall : Float → Float := fun s => s + bSmall * (1.0 - Float.exp (-g * s))
+  let admS := fun (x y : SeamMode) => bloomAdmitsPair x.pole y.pole bSmall g
+  let vSmall : Array SeamMode := #[mkMode 55 0.8 1.0]                                       -- σ_μ = 0.8, κ ≈ 5.8e-4
+  let rSmall : Array SeamMode := #[{ sigma := 0.5, omega := tp * 55 + 0.74, are := 0.5 }]  -- Re(a)≈0.17, |a|≈0.44
+  let realizeSmall :=
+    match bloomCompose (vSmall.map (·.toModal)) (rSmall.map (·.toModal)) bSmall g with
+    | some pairs => bloomComposedSig pairs clockLit anchorSig
+    | none => litI 0
+  match ← renderConfig arena "seam_bloom_coinc_smallk" realizeSmall with
+  | .error e => IO.println s!"        bloomGamma small-κ BUILD/RENDER: {firstLine e}"; ok := false
+  | .ok dut =>
+    let refS := oracleSeam vSmall rSmall warpSmall admS 8
+    let eS := relL2Win dut refS lo hi
+    IO.println s!"        bloomGamma small-κ coincidence (subtle bloom, |κ|≈6e-4, always series-DD): rel {eS}"
+    if !(allFinite dut) || eS ≥ 3e-4 then
+      IO.println s!"        bloomGamma SMALL-κ VIOLATION: rel {eS} — Φ(a,κ) bridge cancellation not caught by the direct-sum fallback"
+      ok := false
+  if ok then passGate "seam-sweep" "every registered atom holds its law over its admission region (incl. the τ·e coincidence deep-tail AND small-κ direct-sum region); composition laws (EC-commute, assoc) pinned"
   else failGate "seam-sweep" "a registered seam atom drifted off its stated law — see the per-config lines above"
 
 -- ── Deliverable A: gong⋙reverb(⋙reverb) audible from the patch surface ────────

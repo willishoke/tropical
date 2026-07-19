@@ -704,19 +704,28 @@ def bloomDCoef (aC : CplxB) (n : Nat) : Array CplxB := Id.run do
     fprev := fprev.scale (1.0 / kf)   -- fₖ = fₖ₋₁/k
   return out
 
-/-- `Φ(a,κ)/g` — the d-CONSTANT of the coincident branch's `e^{νd}` carrier, via the
-    pole-FREE `lgamma(a+1)` bridge (never the `Σ dₙκⁿ` sum, float-dead at shipped
-    `|κ|`): `Φ(a,κ) = e^κ·cexpm1(w)·(w/a) − CF(κ)`, `w = lgamma(a+1) − a·log κ`
-    (identity `M_a(κ) = Γ(a+1)κ^{−a}e^κ − a·CF(κ)`). `w/a = lgamma(a+1)/a − log κ`;
-    at `a → 0` the ratio → `−γ` (digamma at 1), guarded. `cfK = CF(κ)` reuses the
-    crossing branch's `bloomCF`. Build-time only. -/
-def bloomPhiKappaOverG (aC kappa cfK : CplxB) (g : Float) : CplxB :=
-  let euler : Float := 0.5772156649015329
-  let laOverA : CplxB :=
-    if aC.normSq < 1e-12 then ⟨-euler, 0⟩ else (lgammaB (aC.add ⟨1, 0⟩)).div aC
-  let waOverA := laOverA.sub (CplxB.log kappa)
-  let w := aC.mul waOverA
-  ((((CplxB.exp kappa).mul (cexpm1B w)).mul waOverA).sub cfK).scale (1.0 / g)
+/-- `Φ(a,κ)/g` — the d-CONSTANT of the coincident branch's `e^{νd}` carrier. TWO
+    regimes, the same duality as the per-sample branches (the `Σ dₙκⁿ` sum and the
+    closed form are float-representable on opposite sides):
+    - `|κ| ≥ |a+1|` (shipped partials, |κ| up to ~178): the pole-FREE `lgamma(a+1)`
+      bridge `Φ(a,κ) = e^κ·cexpm1(w)·(w/a) − CF(κ)`, `w = lgamma(a+1) − a·log κ`
+      (identity `M_a(κ) = Γ(a+1)κ^{−a}e^κ − a·CF(κ)`; `w/a = lgamma(a+1)/a − log κ`,
+      → `−γ` at `a → 0`, guarded). The `Σ dₙκⁿ` sum is D_bg3-dead here.
+    - `|κ| < |a+1|` (subtle bloom / low partials): the bridge's two `κ^{−Re a}` terms
+      CATASTROPHICALLY CANCEL to the tiny `Φ(a,κ) ≈ −κ/(a+1)` (relerr cliffs past
+      100% by |κ|~0.01), so use the DIRECT sum `Σ dₙκⁿ` — machine-accurate here and
+      float-SAFE (|κ| bounded), and `dCoef` is sized at `|a+1| ≥ |κ|`, enough terms.
+    `cfK = CF(κ)` reuses the crossing branch's `bloomCF`. Build-time only. -/
+def bloomPhiKappaOverG (aC kappa cfK : CplxB) (dCoef : Array CplxB) (g : Float) : CplxB :=
+  if kappa.abs < (aC.add ⟨1, 0⟩).abs then
+    (kappa.mul (dCoef.foldr (fun dk acc => dk.add (kappa.mul acc)) ⟨0, 0⟩)).scale (1.0 / g)
+  else
+    let euler : Float := 0.5772156649015329
+    let laOverA : CplxB :=
+      if aC.normSq < 1e-12 then ⟨-euler, 0⟩ else (lgammaB (aC.add ⟨1, 0⟩)).div aC
+    let waOverA := laOverA.sub (CplxB.log kappa)
+    let w := aC.mul waOverA
+    ((((CplxB.exp kappa).mul (cexpm1B w)).mul waOverA).sub cfK).scale (1.0 / g)
 
 /-- Fold an authored-constant `Sig` back to its `Float` (the baked-pole read in
     `bloomCompose`). Partial: `none` on any live/unsupported node — a live pole
@@ -869,14 +878,15 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
           -- stable; below `dSwitch` it bridges to the series-DD branch (`dCoef`,
           -- `k1SerDD`) plus the τ·e secular `c·e^κ·(e^{νd}−e^{μd})/(ν−μ)`. The E1
           -- series lane (`k1Ser`/`fSer`, singular at a=0) is UNUSED here.
+          let dCoef := bloomDCoef aC plan.nDepth
           out := out.push {
             muSigma := vSig, muOmega := vOm, nuSigma := rSig, nuOmega := rOm
             bloomB := B, gRate := g, c, kappa
             k1Ser := ⟨0, 0⟩, k1Cf, fSer := ⟨0, 0⟩
             dSwitch, invA, cfB, cfN
             coincident := true
-            dCoef := bloomDCoef aC plan.nDepth
-            k1SerDD := bloomPhiKappaOverG aC kappa cfK g
+            dCoef
+            k1SerDD := bloomPhiKappaOverG aC kappa cfK dCoef g
             eKappa := CplxB.exp kappa }
         else
           let gs := bloomGammaStar aC kappa g

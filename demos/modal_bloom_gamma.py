@@ -246,9 +246,15 @@ def cexpm1_k(w):
         return c
     return (np.exp(w) - 1.0) / w
 
-def phi_kappa(a, kappa, K):
-    """Φ(a,κ) = e^κ cexpm1(w)(w/a) − CF(κ), w = lgamma(a+1) − a log κ — the pole-free
-    bridge (never Σ dₙκⁿ, float-dead at shipped |κ|). w/a → −γ at a→0 (guarded)."""
+def phi_kappa(a, kappa, K, dn):
+    """Φ(a,κ), TWO regimes (same duality as the per-sample branches):
+      |κ| ≥ |a+1|: e^κ cexpm1(w)(w/a) − CF(κ), w = lgamma(a+1) − a log κ — the
+        pole-free bridge (Σ dₙκⁿ is D_bg3-dead here). w/a → −γ at a→0 (guarded).
+      |κ| < |a+1|: the bridge's two κ^{−Re a} terms CATASTROPHICALLY CANCEL to the
+        tiny Φ(a,κ) (relerr past 100% by |κ|~0.01 — a subtle bloom / low partial),
+        so the direct sum Σ dₙκⁿ (machine-accurate, float-safe here) takes over."""
+    if abs(kappa) < abs(a + 1.0):
+        return phi_horner(kappa, dn)
     wa = (lgamma_c(a + 1) / a - np.log(kappa)) if abs(a) > 1e-300 else (-0.5772156649015329 - np.log(kappa))
     return np.exp(kappa) * cexpm1_k(a * wa) * wa - cf_fixed(a, kappa, K)
 
@@ -257,7 +263,7 @@ def compose_coincident(mu, nu, kappa, B, d, N=45, K=CF_K, dn=None, Phik=None):
     a = (nu - mu) / G
     z = kappa * np.exp(-G * d)
     if dn is None: dn = d_coeffs(a, N)
-    if Phik is None: Phik = phi_kappa(a, kappa, K)
+    if Phik is None: Phik = phi_kappa(a, kappa, K, dn)
     dsw = np.log(abs(kappa) / abs(a + 1.0)) / G
     if d < dsw:                                  # CF branch (large z)
         return (cf_fixed(a, z, K) * np.exp(mu * warp(d, B)) - cf_fixed(a, kappa, K) * np.exp(nu * d)) / G
@@ -473,7 +479,7 @@ def d_bg6():
 
     def worst(mu, nu, kappa, B, dgrid, N=45):
         a = (nu - mu) / G
-        dn = d_coeffs(a, N); Phik = phi_kappa(a, kappa, CF_K)
+        dn = d_coeffs(a, N); Phik = phi_kappa(a, kappa, CF_K, dn)
         pk = 0.0; errs = []
         for d in dgrid:
             yo = oracle_quad(mu, nu, kappa, B, d, dps=25)
@@ -518,6 +524,18 @@ def d_bg6():
         good = w < 1e-9
         ok = ok and good
         print(f"                                        {f:4}  {abs((nu-mu)/G):5.3f}  {w:.2e}" + ("" if good else "  <-- FAIL"))
+
+    # SMALL-κ (subtle bloom / low partials, Re(a)>0): the lgamma bridge cancels; the
+    # direct Σdₙκⁿ sum must take over. dSwitch<0 ⇒ always series-DD from d=0.
+    print("       small-κ (subtle bloom, Re(a)>0):  f   β   |κ|   worst-rel")
+    for (f, beta) in [(55, 3e-6), (110, 5e-6), (300, 5e-6)]:
+        mu = mode(f, 0.8); B = beta / G; kappa = mu * B
+        nu = complex(-0.5, 2 * np.pi * f + 0.74)          # Re(a)≈0.17, |a|≈0.44
+        dg = np.linspace(1e-4, 2.0, 60)
+        w = worst(mu, nu, kappa, B, dg)
+        good = w < 1e-9
+        ok = ok and good
+        print(f"                                         {f:4} {beta:.0e} {abs(kappa):.1e}  {w:.2e}" + ("" if good else "  <-- FAIL"))
     print(f"       {'PASS' if ok else 'FAIL'}\n")
     return ok
 
