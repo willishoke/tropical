@@ -594,12 +594,42 @@ def runResidueCollected (arena : Arena)
     | .error e, _ | _, .error e => failGate "residue-collected" s!"render: {firstLine e}"
   | .error e, _ | _, .error e => failGate "residue-collected" s!"build: {firstLine e}"
 
+/-- Evaluate a CONSTANT authoring `Sig` (the litF/±×÷/neg subtree the residue
+    algebra emits) back to its `Float`, so a gate can read a production
+    constructor's REAL emitted coefficients (hardening 0a-4c). Partial: `none` on
+    any non-constant/unsupported node. Div mirrors the kernel's zero-guard. Used
+    only in tests — never on a compile path. -/
+private partial def evalConstSig : Tropical.EmitArrow.Sig → Option Float
+  | .num n            => some n.toFloat
+  | .unary .neg a     => (evalConstSig a).map (fun x => -x)
+  | .unary .toFloat a => evalConstSig a
+  | .binary .add a b  => do pure ((← evalConstSig a) + (← evalConstSig b))
+  | .binary .sub a b  => do pure ((← evalConstSig a) - (← evalConstSig b))
+  | .binary .mul a b  => do pure ((← evalConstSig a) * (← evalConstSig b))
+  | .binary .div a b  => do
+      let x ← evalConstSig a; let y ← evalConstSig b
+      pure (if y == 0.0 then 0.0 else x / y)
+  | _                 => none
+
+/-- Read a `ModalMode`'s emitted (constant) fields back as `(pole μ = −σ+iω,
+    amp A = c_re+i·c_im)` — the inverse of `cmodeToModalMode`, for checking a
+    residue constructor's real output numerically. -/
+private def modeConst (m : Tropical.EmitArrow.ModalMode) : Option (Cplx × Cplx) := do
+  let σ ← evalConstSig m.sigma
+  let ω ← evalConstSig m.omega
+  let cr ← evalConstSig m.cre
+  let ci ← evalConstSig m.cim
+  pure (⟨-σ, ω⟩, ⟨cr, ci⟩)
+
 /-- THE INTEGRATE gate. `integrateBank` — the antiderivative as a build-time pole
     move (`a ↦ a/μ` + a `μ=0` DC atom fixing `∫|₀=0`) — validated three ways.
-    (A) the FLOAT oracle is EXACT by the jet: each integrated mode satisfies
-    `μ·(a/μ)=a` (its derivative recovers the source, 1e-12) and `Σ aₒᵤₜ=0` (the DC
-    atom zeroes the onset), with `n → n+1` modes. (B) the SYMBOLIC `integrateBank`
-    on the same literal bank folds to that oracle, rendering equal within the Q4.28
+    (A) the jet law is checked against `integrateBank`'s REAL emitted output (read
+    back with `evalConstSig`): each integrated mode satisfies `μ·A_int=A_src` (~1e-12)
+    and `Σ A_int=0` (the DC atom zeroes the onset), with `n → n+1` modes. Since μ is
+    read back from the SAME emitted mode as `A_int`, this arm certifies the `cdivE`
+    amp arithmetic and is invariant to a coupled pole-shift — the pole PLACEMENT is
+    pinned by (B)/(C), which reference the source pole independently. (B) the SYMBOLIC `integrateBank`
+    on the same literal bank folds to a Float oracle, rendering equal within the Q4.28
     landing quantum — live-capable, same math. (C) the rendered integral matches the
     cumulative TRAPEZOID of the source render (`demos/modal_vco.py` D3): a physically
     independent numerical integral over the whole tail, truncation-bounded at SR. -/
@@ -614,18 +644,38 @@ def runModalIntegrate (arena : Arena)
   let toMode := fun (pa : Cplx × Cplx) =>
     ({ sigma := litF (-pa.1.re), omega := litF pa.1.im,
        cre := litF pa.2.re, cim := litF pa.2.im } : ModalMode)
-  -- (A) Float oracle: a ↦ a/μ, plus DC atom −Σ a/μ. Independent of the Sig algebra.
+  -- (A) Float oracle bank: a ↦ a/μ, plus the DC atom −Σ a/μ. A re-derivation used
+  -- ONLY as the RENDER reference for arm (B) (`int_ora`, below).
   let integC : Array (Cplx × Cplx) := srcF.map (fun pa => (pa.1, pa.2.div pa.1))
   let sumA := integC.foldl (fun s pa => s.add pa.2) (⟨0.0, 0.0⟩ : Cplx)
   let oracleF : Array (Cplx × Cplx) := integC.push (⟨0.0, 0.0⟩, sumA.neg)
+  -- (A′, hardening 0a-4c) the JET LAW checked against `integrateBank`'s REAL
+  -- output — the production `Sig` bank read back with `evalConstSig`, NOT a
+  -- re-derivation of its `a↦a/μ` formula. (The OLD arms built a local oracle with
+  -- the SAME formula and checked `μ·(a/μ)=a` on THAT — a tautology that stayed
+  -- green no matter what `integrateBank` did.) Now `μ·A_int` must recover the
+  -- INDEPENDENT source amp `A_src`, and `Σ A_int=0` (the DC atom), read from the
+  -- actually-emitted modes. Caveat: μ is read from the SAME mode as `A_int`, so this
+  -- arm is invariant to a coupled pole-shift — it certifies the `cdivE` amp half;
+  -- arm (B)'s `int_ora` (built from the source pole) and arm (C)'s source-render
+  -- trapezoid pin the pole PLACEMENT.
+  let integOut := integrateBank (srcF.map toMode)
+  let integCplx := integOut.filterMap modeConst          -- (pole μ, amp A_int) per mode
   let mut jetErr : Float := 0.0
   for i in [0:srcF.size] do
-    let recovered := (oracleF[i]!.1).mul (oracleF[i]!.2)         -- μ · (a/μ)
-    let e := (recovered.add (srcF[i]!.2).neg).abs
-    if e > jetErr then jetErr := e
-  let onsetA := (oracleF.foldl (fun s pa => s.add pa.2) (⟨0.0, 0.0⟩ : Cplx)).abs
-  let lastP := oracleF[oracleF.size - 1]!.1
-  let structOk := oracleF.size == srcF.size + 1 && lastP.re == 0.0 && lastP.im == 0.0
+    match integCplx[i]? with
+    | some (μ, aInt) =>
+      let recovered := μ.mul aInt                          -- μ · A_int  (must = A_src)
+      let e := (recovered.add (srcF[i]!.2).neg).abs
+      if e > jetErr then jetErr := e
+    | none => jetErr := 1.0e9                              -- an unreadable mode ⇒ fail
+  let onsetA := (integCplx.foldl (fun s pa => s.add pa.2) (⟨0.0, 0.0⟩ : Cplx)).abs
+  let structOk :=
+    integOut.size == srcF.size + 1
+      && integCplx.size == integOut.size                   -- every emitted mode read back
+      && (match integCplx[integCplx.size - 1]? with
+          | some (μ, _) => μ.re == 0.0 && μ.im == 0.0      -- the DC atom sits at pole 0
+          | none => false)
   let anchor := lit 0                                            -- strike at sample 0
   match buildAndFinish (.ok (buildModalBankArrow "int_src" (srcF.map toMode) anchor arena)),
         buildAndFinish (.ok (buildModalBankArrow "int_sym" (integrateBank (srcF.map toMode)) anchor arena)),
@@ -805,7 +855,9 @@ def runModalHeterodyne (arena : Arena)
       let hEnergy := hS.foldl (fun a x => a + x * x) 0.0
       IO.println s!"        heterodyne twist vs besselFuse bank (b={b}, 2-mode carrier):"
       IO.println s!"        result   rel-L2 het≡fused-bank={rel} · plan-instrs het={planInstrCount hetP} fuse(19)={planInstrCount fuseP} · E[het]={hEnergy}"
-      if rel < 1e-3 && hEnergy > 1e-9 then
+      -- (hardening 0a-4) tightened from 1e-3 to 2e-5 (~10× the observed ~2e-6
+      -- float-θ-vs-baked-sideband floor); the old 1e-3 was ~500× above the floor.
+      if rel < 2e-5 && hEnergy > 1e-9 then
         passGate "modal-heterodyne" s!"heterodyne twist (Re·cosθ−Im·sinθ) ≡ the fused Bessel bank (rel {rel}) — O(1)-in-sidebands FM, still a modal object (D6)"
       else
         failGate "modal-heterodyne" s!"rel={rel} hEnergy={hEnergy}"
@@ -862,28 +914,60 @@ def runModalVco (arena : Arena)
   let r1 := e500 / (e1000 + 1e-300)
   let r2 := e1000 / (e2000 + 1e-300)
   let snapErr := relTo xSnap (rk4Osc sigma om0 p wm T 4000)
-  -- render sanity: the integrated realization builds + renders causal + nonzero
+  -- the integrated realization + a RAW-BANK variant (hardening 0a-1): the same
+  -- carrier, but θ from the un-integrated LFO bank instead of `integrateBank lfo`
+  -- — a LOCAL fixture copy (production `buildIntegratedPoleReading` untouched). Its
+  -- θ = ω₀p·cos(ω_m d), NOT ω₀p·sin(ω_m d)/ω_m, so it must DIVERGE from the oracle:
+  -- the proof that the render-vs-oracle check below has teeth.
   let carrier : Array ModalMode := #[ModalMode.hz (litF f0) (litF sigma) (lit 1)]
   let lfo : Array ModalMode := #[ModalMode.hz (litF fm) (lit 0) (lit 1)]
   let anchor := lit 200
-  match buildAndFinish (.ok (buildIntegratedPoleReading "vco" carrier lfo (om0 * p) anchor arena)) with
-  | .ok vp =>
-    match ← renderPlanSamples vp 4096 with
-    | .ok s =>
+  let rawVariant : Arena × ProgramIdx :=
+    let (re, im) := modalBankSigPairTable carrier clockLit anchor
+    let thetaRaw := mul (litF (om0 * p)) (modalBankSig lfo clockLit anchor)
+    buildExprCarrier "vco_raw" (sub (mul re (cosSig thetaRaw)) (mul im (sinSig thetaRaw))) arena
+  match buildAndFinish (.ok (buildIntegratedPoleReading "vco" carrier lfo (om0 * p) anchor arena)),
+        buildAndFinish (.ok rawVariant) with
+  | .ok vp, .ok rawP =>
+    match ← renderPlanSamples vp 4096, ← renderPlanSamples rawP 4096 with
+    | .ok s, .ok sRaw =>
       let mut preMax : Float := 0.0
       for i in [0:201] do
         if s[i]!.abs > preMax then preMax := s[i]!.abs
       let energy := s.foldl (fun a x => a + x * x) 0.0
+      -- (NEW, hardening 0a-1) the RENDERED integrated reading vs the closed-form
+      -- oracle `sinkGain·env(d)·cos(φ_int(d))` at MATCHED sample offsets — the
+      -- render is samples at SR anchored @200, so d = (i−200)/SR; the oracle is
+      -- Re(x_int(d)), env=e^{−σd}, φ_int=ω₀(d + p·sin(ω_m d)/ω_m). This exercises
+      -- `buildIntegratedPoleReading`'s ACTUAL render (was only smoke-checked). The
+      -- raw variant is measured against the SAME oracle and must blow past `bound`.
+      let n := min (min s.size sRaw.size) 4096
+      let sinkGain : Float := 0.05
+      let oracleAt := fun (i : Nat) =>
+        let d := (i.toFloat - 200.0) / 44100.0
+        let phi := om0 * (d + p * Float.sin (wm * d) / wm)
+        sinkGain * Float.exp (-sigma * d) * Float.cos phi
+      let mut renderErr : Float := 0.0
+      let mut rawErr : Float := 0.0
+      for i in [201:n] do
+        let o := oracleAt i
+        let e := (s[i]! - o).abs
+        if e > renderErr then renderErr := e
+        let er := (sRaw[i]! - o).abs
+        if er > rawErr then rawErr := er
+      let renderBound : Float := 1.5e-6    -- ~10× the observed ~1.46e-7 Q4.28/freq-grid floor
       IO.println s!"        LFO→pole integrated reading vs RK4 of ẋ=μ(t)x (f0={f0}, p={p}, fm={fm}):"
       IO.println s!"        oracle   integrated vs RK4 rel err: n=500 {e500} 1000 {e1000} 2000 {e2000} (ratios {r1}, {r2}; ~16=h⁴)"
       IO.println s!"        result   snapshot vs ODE={snapErr} (plateaus) · render pre-strike|max|={preMax} E={energy}"
+      IO.println s!"        render   ≡ env·cos(φ_int) max|Δ|={renderErr*1e9}e-9 (bound {renderBound*1e9}e-9) · raw-LFO variant max|Δ|={rawErr} (must exceed)"
       if 10.0 < r1 && r1 < 24.0 && 10.0 < r2 && r2 < 24.0 && snapErr > 1e-2
-          && preMax == 0.0 && energy > 1e-9 then
-        passGate "modal-vco" s!"the integrated reading IS the modulated resonator (RK4 h⁴: ratios {r1}, {r2}); the snapshot reading plateaus ({snapErr}); realization renders causal (D1/D2)"
+          && preMax == 0.0 && energy > 1e-9
+          && renderErr < renderBound && rawErr > renderBound then
+        passGate "modal-vco" s!"the integrated reading IS the modulated resonator (RK4 h⁴: ratios {r1}, {r2}); its RENDER ≡ env·cos(φ_int) (max|Δ| {renderErr}); the raw-LFO variant diverges (max|Δ| {rawErr}); snapshot plateaus ({snapErr}) (D1/D2)"
       else
-        failGate "modal-vco" s!"r1={r1} r2={r2} snapErr={snapErr} preMax={preMax} energy={energy}"
-    | .error e => failGate "modal-vco" s!"render: {firstLine e}"
-  | .error e => failGate "modal-vco" s!"build: {firstLine e}"
+        failGate "modal-vco" s!"r1={r1} r2={r2} snapErr={snapErr} preMax={preMax} energy={energy} renderErr={renderErr} (bound {renderBound}) rawErr={rawErr}"
+    | .error e, _ | _, .error e => failGate "modal-vco" s!"render: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "modal-vco" s!"build: {firstLine e}"
 
 /-- THE AFFINE RECLOCK gate. `reclockAffine a b` is the pole-space image of the
     affine clock warp `d↦a·d+b`, so the reclocked bank at sample `i` equals the
@@ -946,8 +1030,9 @@ def runModalReclock (arena : Arena)
     frequency-grid floor every `modePhaseQ` bank shares (the DD path reconstructs
     each `ω_λ` as `ω_ν + (ω_λ−ω_ν)`, two integer-phase rotators). (2) at EXACT
     coincidence (λ=ν) a single paired mode reproduces the deg-1 `τ·e^{νd}` resonance
-    — bit-close to a hand-built deg-1 bank at the SAME frequency (no branch, no
-    blowup; the `cexpm1` series limit). (3) the coeff `c = a·r` is bounded
+    — matching a hand-built deg-1 bank at the SAME frequency within the Q4.28
+    landing quantum (a `max|Δ| < bound` TOLERANCE, not `bitDiffCount == 0`
+    bit-identity; no branch, no blowup — the `cexpm1` series limit). (3) the coeff `c = a·r` is bounded
     (`|c| < 8`, Q4.28-safe) where the collected ringing amp `|a·r/Δ|` overflows for
     small `Δ` — the fixed-point disqualifier the paired form removes. -/
 def runResidueDivDiff (arena : Arena)
@@ -1001,15 +1086,65 @@ def runResidueDivDiff (arena : Arena)
         if d > m2 then m2 := d
         e2 := e2 + dcs[k]! * dcs[k]!
       let bound2 := 3.0 * 3.7252903e-9 * 0.05 * 8.0
+      -- arm 4 (near-coincidence SERIES sweep, hardening 0a-2): the small-|z| Horner
+      -- branch `cexpm1SeriesE` (selected when |z|²<0.01, i.e. |z|<0.1) is
+      -- load-bearing only when |λ−ν| is small enough that z=(λ−ν)d stays <0.1
+      -- across the window — arms 1-3 never enter it (well-separated ⇒ direct;
+      -- exact coincidence ⇒ z=0). Sweep the separation (DIRECTION = e^{i·0.7},
+      -- matching demos/divdiff_qdatapath.py's TARGETS) and check each DD render
+      -- against a DIRECT-double closed-form oracle Re(c·d·e^{νd}·(e^z−1)/z) — a
+      -- reference INDEPENDENT of the series coefficients, so a flipped LOW-ORDER
+      -- coeff shows (k≤2 solidly, k=3 marginal). The k≥4 terms sit below the
+      -- render's own floor at |z|≤0.088 and pass undetected — they cannot be made
+      -- observable without leaving the |z|<0.1 series branch, so the sweep certifies
+      -- render accuracy over the branch, not every coefficient. The collected form
+      -- can't be the oracle here: its |a·r/Δ| overflows Q4.28 at small Δ (arm 3). At
+      -- tgt=1.0 z reaches ~0.088 (<0.1 ⇒ still the series branch), where the
+      -- low-order z²/z³ coefficients bite.
+      let cexp := fun (w : Cplx) =>
+        let m := Float.exp w.re
+        (⟨m * Float.cos w.im, m * Float.sin w.im⟩ : Cplx)
+      let dirC : Cplx := ⟨Float.cos 0.7, Float.sin 0.7⟩
+      let nuC : Cplx := ⟨-2.0, tp * 220.0⟩            -- the shared reverb pole ν
+      let rC2 : Cplx := ⟨0.7, 0.2⟩                    -- reverb residue r
+      let aC : Cplx := ⟨1.0, 0.0⟩                     -- voice amp a
+      let cC := Cplx.mul aC rC2                        -- c = a·r (bounded)
+      let targets : Array Float := #[1.0, 3e-1, 1e-1, 3e-2, 1e-2, 1e-3, 1e-4, 1e-6]
+      let mut sweepMax : Float := 0.0
+      let mut sweepOk := true
+      let mut sweepWorstTgt : Float := 0.0
+      for ti in [0:targets.size] do
+        let tgt := targets[ti]!
+        let lamC : Cplx := nuC.add (dirC.mul ⟨tgt, 0.0⟩)   -- λ = ν + tgt·e^{i·0.7}
+        let vS := #[(lamC, aC)].map toMode
+        let rS := #[(nuC, rC2)].map toMode
+        match buildAndFinish (.ok (buildModalReverbDD s!"dd_sw{ti}" vS rS anchor arena)) with
+        | .error _ => sweepOk := false
+        | .ok ddP =>
+          match ← renderPlanSamples ddP 4096 with
+          | .error _ => sweepOk := false
+          | .ok ds =>
+            for i in [201:min ds.size 4096] do
+              let d := (i.toFloat - 200.0) / 44100.0
+              let z := (Cplx.sub lamC nuC).mul ⟨d, 0.0⟩              -- (λ−ν)·d
+              let cxm1 := (Cplx.sub (cexp z) ⟨1.0, 0.0⟩).div z        -- (e^z−1)/z direct
+              let enu := cexp (nuC.mul ⟨d, 0.0⟩)                      -- e^{νd}
+              let contrib := ((cC.mul ⟨d, 0.0⟩).mul enu).mul cxm1     -- c·d·e^{νd}·cexpm1
+              let e := fabs (ds[i]! - 0.05 * contrib.re)
+              if e > sweepMax then sweepMax := e; sweepWorstTgt := tgt
+      let sweepBound : Float := 1.5e-7                -- ~13× the observed ~1.1e-8 Q/freq-grid floor
       IO.println s!"        divided-difference composition (voice(2)⋙reverb(4), DD {nDD} paired modes):"
       IO.println s!"        arm1     DD≡collected (well-sep) rel-L2={rel1} (freq-grid floor)"
       IO.println s!"        arm2     DD@coincidence≡deg-1 τ·e max|Δ|={m2 * 1e9}e-9 (bound {bound2 * 1e9}e-9, tight)"
       IO.println s!"        arm3     |c|max={cMax} (<8, Q4.28-safe) · collected |a·r/Δ|@Δ=0.03={overflowsAt003} (>8 overflows)"
-      if nDD == voice.size * reverb.size && rel1 < 2e-3 && m2 < bound2 && e2 > 1e-9
-          && cMax < 8.0 && overflowsAt003 > 8.0 then
-        passGate "residue-divdiff" s!"fused paired modes: away-from-coincidence ≡ collected (rel {rel1}); coincidence ≡ τ·e (Δ {m2*1e9}e-9); |c|={cMax}<8 vs collected 1/Δ overflow — stable, no 1/Δ"
+      IO.println s!"        arm4     series-branch sweep max|Δ|={sweepMax*1e9}e-9 (bound {sweepBound*1e9}e-9) @tgt={sweepWorstTgt} · builds ok={sweepOk}"
+      -- (hardening 0a-4) arm 1 tightened from 2e-3 to 2e-5 (~10× the observed
+      -- ~2e-6 SR/2³² frequency-grid floor); the old 2e-3 was ~1000× above it.
+      if nDD == voice.size * reverb.size && rel1 < 2e-5 && m2 < bound2 && e2 > 1e-9
+          && cMax < 8.0 && overflowsAt003 > 8.0 && sweepOk && sweepMax < sweepBound then
+        passGate "residue-divdiff" s!"fused paired modes: away-from-coincidence ≡ collected (rel {rel1}); coincidence ≡ τ·e within the Q4.28 quantum (max|Δ| {m2*1e9}e-9, a tolerance — not bit-identity); near-coincidence series sweep ≡ direct-double oracle (max|Δ| {sweepMax}); |c|={cMax}<8 vs collected 1/Δ overflow — stable, no 1/Δ"
       else
-        failGate "residue-divdiff" s!"nDD={nDD} rel1={rel1} m2={m2*1e9}e-9 (bound {bound2*1e9}) e2={e2} cMax={cMax} ovf={overflowsAt003}"
+        failGate "residue-divdiff" s!"nDD={nDD} rel1={rel1} m2={m2*1e9}e-9 (bound {bound2*1e9}) e2={e2} cMax={cMax} ovf={overflowsAt003} sweepMax={sweepMax} (bound {sweepBound}) sweepOk={sweepOk}"
     | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
       failGate "residue-divdiff" s!"render: {firstLine e}"
   | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
@@ -1042,30 +1177,36 @@ def runResidueBanked (arena : Arena)
     ({ sigma := pr b, omega := pr (b + 1), cre := pr (b + 2), cim := pr (b + 3) } : ModalMode)
   let voiceL := (Array.range 6).map (fun i => mkLive (4 * i))
   let reverbL := (Array.range 6).map (fun i => mkLive (24 + 4 * i))
-  let flat : Option (Nat × Nat) :=
-    match buildAndFinish (.ok (buildModalReverbSymC "rbcL" voiceL reverbL anchor arena)),
-          buildAndFinish (.ok (buildModalReverbBanked "rbbL" voiceL reverbL anchor arena)) with
-    | .ok clp, .ok blp => some (planInstrCount clp, planInstrCount blp)
-    | _, _ => none
-  match buildAndFinish (.ok (buildModalReverbSymC "rbc" voice reverb anchor arena)),
-        buildAndFinish (.ok (buildModalReverbBanked "rbb" voice reverb anchor arena)) with
-  | .ok cp, .ok bp =>
-    match ← renderPlanSamples cp 4096, ← renderPlanSamples bp 4096 with
-    | .ok cs, .ok bs =>
-      let bitDiff := bitDiffCount cs bs
-      let e := bs.foldl (fun a x => a + x * x) 0.0
-      let flatStr := match flat with
-        | some (c, b) => s!"unrolled {c} vs banked {b} plan-instrs (6⋙6)"
-        | none => "n/a (live build not finalized)"
-      let flatOk := match flat with | some (c, b) => b < c | none => true
-      IO.println s!"        banked Cauchy fills (collected form): equivalence + flatness"
-      IO.println s!"        result   banked≡collected bit-diff {bitDiff}/4096 · {nB} modes · {flatStr}"
-      if bitDiff == 0 && e > 1e-9 && nB == voice.size + reverb.size && flatOk then
-        passGate "residue-banked" s!"banked Cauchy fills ≡ collected bit-identical ({nB} modes); {flatStr} — O(m+n) coeff regions"
-      else
-        failGate "residue-banked" s!"bitDiff={bitDiff} nB={nB} e={e} flat={flatStr}"
-    | .error e, _ | _, .error e => failGate "residue-banked" s!"render: {firstLine e}"
-  | .error e, _ | _, .error e => failGate "residue-banked" s!"build: {firstLine e}"
+  -- FLATNESS (hardening 0a-3): the live-pole (paramRef) builds keep the Cauchy
+  -- inner sums out of the const-folder, so the O(m+n) vs O(m·n) plan-instr gap
+  -- is observable. A build `.error` here is a REAL failure — route it to
+  -- `failGate` exactly like every other arm. (The old code matched `| _ => none`
+  -- and then `flatOk := match … | none => true`, so a live-build FAILURE printed
+  -- "n/a" inside a PASSING gate — a build failure mapped to a green result.) A
+  -- genuine success still checks `b < c`.
+  match buildAndFinish (.ok (buildModalReverbSymC "rbcL" voiceL reverbL anchor arena)),
+        buildAndFinish (.ok (buildModalReverbBanked "rbbL" voiceL reverbL anchor arena)) with
+  | .ok clp, .ok blp =>
+    let cN := planInstrCount clp
+    let bN := planInstrCount blp
+    let flatStr := s!"unrolled {cN} vs banked {bN} plan-instrs (6⋙6)"
+    let flatOk := decide (bN < cN)
+    match buildAndFinish (.ok (buildModalReverbSymC "rbc" voice reverb anchor arena)),
+          buildAndFinish (.ok (buildModalReverbBanked "rbb" voice reverb anchor arena)) with
+    | .ok cp, .ok bp =>
+      match ← renderPlanSamples cp 4096, ← renderPlanSamples bp 4096 with
+      | .ok cs, .ok bs =>
+        let bitDiff := bitDiffCount cs bs
+        let e := bs.foldl (fun a x => a + x * x) 0.0
+        IO.println s!"        banked Cauchy fills (collected form): equivalence + flatness"
+        IO.println s!"        result   banked≡collected bit-diff {bitDiff}/4096 · {nB} modes · {flatStr}"
+        if bitDiff == 0 && e > 1e-9 && nB == voice.size + reverb.size && flatOk then
+          passGate "residue-banked" s!"banked Cauchy fills ≡ collected bit-identical ({nB} modes); {flatStr} — O(m+n) coeff regions"
+        else
+          failGate "residue-banked" s!"bitDiff={bitDiff} nB={nB} e={e} flatOk={flatOk} flat={flatStr}"
+      | .error e, _ | _, .error e => failGate "residue-banked" s!"render: {firstLine e}"
+    | .error e, _ | _, .error e => failGate "residue-banked" s!"build: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "residue-banked" s!"live flatness build: {firstLine e}"
 
 end ResidueGates
 
