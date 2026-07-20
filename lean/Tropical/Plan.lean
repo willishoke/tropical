@@ -414,8 +414,12 @@ structure SinkSpec where
   target : Nat
 deriving Repr, Inhabited
 
-/-- Default sink gain — 1/20, the v1 headroom scale as data. -/
-def defaultSinkGain : JsonNumber := ⟨5, 2⟩  -- 5 × 10⁻² = 0.05
+/-- Default sink gain — UNITY. The device sink is a pure summer: it mixes its
+    input slots and hands the total to the channel untouched. Amplitude is a
+    frontend concern (the playground carries a live `master.gain` VCA in its
+    graph; other frontends own their own level), so the backend invents no
+    headroom scale of its own. (Was 1/20 — the v1 headroom hack, now gone.) -/
+def defaultSinkGain : JsonNumber := ⟨1, 0⟩  -- 1 × 10⁰ = 1.0
 
 def SinkSpec.toWire (s : SinkSpec) : Json :=
   Json.mkObj [("inputs", toJson s.inputs), ("gain", Json.num s.gain),

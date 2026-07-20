@@ -54,22 +54,8 @@ def main (args : List String) : IO UInt32 := do
   -- ── (b) Migration audio goldens (tests/golden/migration/*.json) ────────────
   IO.println "migration goldens:"
   for fixture in ← sortedNames "tests/golden/migration" ".json" do
-    let goldenText ← IO.FS.readFile s!"tests/golden/migration/{fixture}.json"
-    let expected? : Option String := do
-      let g ← (Lean.Json.parse goldenText).toOption
-      let h ← (g.getObjVal? "hash").toOption
-      h.getStr?.toOption
-    let fixText ← IO.FS.readFile s!"tests/fixtures/flat_plan/{fixture}.json"
-    let input? : Option Lean.Json := do
-      let f ← (Lean.Json.parse fixText).toOption
-      (f.getObjVal? "input").toOption
-    match expected?, input? with
-    | some expected, some input =>
-      total := total + 1
-      let tmpPatch := "/tmp/tropicaltest-fixture.json"
-      IO.FS.writeFile tmpPatch input.compress
-      if !(← checkGoldenHash fixture tmpPatch expected) then failed := failed + 1
-    | _, _ => IO.println s!"  SKIP  {fixture}  (missing hash/input)"
+    total := total + 1
+    if !(← runMigrationGolden writeMode fixture) then failed := failed + 1
 
   -- ── (c) Synthetic op-coverage: EmitLlvm over the rare ops, frozen hash ─────
   -- The patch corpus exercises 24 of 29 ops; this funnels the rest

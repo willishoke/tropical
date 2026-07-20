@@ -443,6 +443,20 @@ private def glideExpr (pidx : String → Option Nat) (base : String) (dflt : Sig
 def masterVelocityParam : String := "master.velocity"
 def masterTauBaseParam  : String := "master.tau_base"
 
+/-- The reserved master-VOLUME slot. Since the device sink is now a pure summer
+    (`defaultSinkGain = 1`, the backend applies no headroom scale of its own),
+    amplitude lives in the graph: `decodeGraph` scales the output mix-bus by a
+    `knob` reading this slot — a master VCA the frontend owns. Default `3.7`
+    lands the reference patch near −20 dBFS RMS (≈ a comfortable listening level
+    next to other apps, with headroom before clipping); a live `set_param
+    master.gain` moves it. It is a plain τ-constant, so it never disturbs the
+    scrub/warp timebase. -/
+def masterGainParam : String := "master.gain"
+
+/-- Default master volume: 3.7 (= 37 × 10⁻¹). Calibrated so the reference
+    playground patch renders at ≈ −20 dBFS RMS / −2.5 dBFS peak. -/
+def masterGainDefault : JsonNumber := ⟨37, 1⟩
+
 /-- Every generator's base clock, so global time is a property of the whole patch
     (not per-oscillator): `M(n) = toInt(tau_base·SR·2³²) + toInt(velocity·2³²)·n`.
     At the defaults `velocity = 1, tau_base = 0` this is exactly `sampleIndex<<32`
@@ -848,13 +862,14 @@ def vocabularyJson : Json :=
     wiring the port itself (a Knob patched into `freq`) replaces the default, and
     wiring its OWNER port (sflange `mod` over the normalled LFO that `rate`
     parameterizes) removes the whole normal — either way the slot is not
-    registered, so a registered-but-unread knob is unrepresentable here. The two
-    reserved master-clock slots lead the table: `velocity` (default 1 ⇒ forward
-    at unity) and `tau_base` (default 0), so every patch has a live global
-    time-warp. -/
+    registered, so a registered-but-unread knob is unrepresentable here. The
+    reserved master slots lead the table: `velocity` (default 1 ⇒ forward at
+    unity) and `tau_base` (default 0) — the global time-warp — plus `gain`
+    (default 3.7), the master VCA `decodeGraph` folds onto the output. -/
 private def collectParams (raws : Array Raw) : Array (String × JsonNumber) := Id.run do
   let mut out : Array (String × JsonNumber) :=
-    #[(masterVelocityParam, ⟨1, 0⟩), (masterTauBaseParam, ⟨0, 0⟩)]
+    #[(masterVelocityParam, ⟨1, 0⟩), (masterTauBaseParam, ⟨0, 0⟩),
+      (masterGainParam, masterGainDefault)]
   for r in raws do
     if r.kind == "out" then continue
     for spec in portSpecs r.kind do
@@ -908,7 +923,15 @@ def decodeGraph (j : Json) : Except String (PatchGraph × Array (String × JsonN
   let outIns := match raws.find? (·.id == outId) with
     | some r => if r.kind == "out" then portSources r.inObj "in" else #[r.id]
     | none => #[]
-  pnodes := pnodes.push { id := "__out__", node := .mix outIns }
+  -- The device sink is a pure summer now, so amplitude is authored here: the
+  -- dac mix-bus is scaled by a master VCA — `ring [mixbus, master]`, where
+  -- `master` is a knob reading the reserved `master.gain` slot (a τ-constant,
+  -- so it rides no clock and never perturbs the scrub timebase). An empty patch
+  -- still lowers to silence: `__mixbus__` is an empty sum, `× gain` is still 0.
+  let masterIdx := (pidx masterGainParam).getD 0
+  pnodes := pnodes.push { id := "__mixbus__", node := .mix outIns }
+  pnodes := pnodes.push { id := "__master__", node := .knob masterIdx }
+  pnodes := pnodes.push { id := "__out__", node := .ring #["__mixbus__", "__master__"] }
   pnodes := pnodes.push { id := "__silence__", node := .mix #[] }
   pure ({ nodes := pnodes, output := "__out__" }, params)
 
@@ -923,7 +946,8 @@ private def paramDisciplinesOf (raws : Array Raw) :
   let mut out : Array Tropical.Plan.ParamDiscipline := #[
     { name := masterVelocityParam, discipline := "velocity",
       companions := #[masterTauBaseParam] },
-    { name := masterTauBaseParam, discipline := "raw" }]
+    { name := masterTauBaseParam, discipline := "raw" },
+    { name := masterGainParam, discipline := "raw" }]
   for r in raws do
     if r.kind == "out" then continue
     for spec in portSpecs r.kind do

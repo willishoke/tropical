@@ -34,10 +34,22 @@ function startEngine() {
   })
   engine.stderr.on('data', (d) => process.stderr.write(`[engine] ${d}`))
   engine.on('exit', (code) => {
+    engine = null
     for (const { reject } of pending.values()) reject(new Error('engine exited'))
     pending.clear()
     if (!app.isQuitting) console.error(`engine exited (${code})`)
   })
+}
+
+// Kill the engine child. SIGTERM (the engine reaps it cleanly), with a SIGKILL
+// fallback in case it's wedged mid-compile. Idempotent: `engine` is nulled on
+// exit, so repeated calls are no-ops.
+function stopEngine() {
+  const child = engine
+  if (!child) return
+  try { child.kill('SIGTERM') } catch {}
+  const t = setTimeout(() => { try { child.kill('SIGKILL') } catch {} }, 2000)
+  child.on('exit', () => clearTimeout(t))
 }
 
 function tryConnect(attempt = 0) {
@@ -110,8 +122,23 @@ app.whenReady().then(() => {
   win.loadFile(join(__dirname, 'renderer/index.html'))
 })
 
-app.on('window-all-closed', () => {
+// Engine teardown lives in `before-quit`, NOT `window-all-closed`: the latter
+// is documented as *not emitted* when the app quits via Cmd+Q or app.quit(), so
+// cleanup hung there leaks the engine on the normal macOS quit path (it gets
+// reparented to launchd and orphaned). before-quit fires on every quit path.
+app.on('before-quit', () => {
   app.isQuitting = true
-  try { engine?.kill() } catch {}
+  stopEngine()
+})
+
+// Closing the window quits the app (single-window instrument); this in turn
+// fires before-quit, which does the actual engine kill.
+app.on('window-all-closed', () => {
   app.quit()
 })
+
+// If the main process itself is signalled (e.g. killed from a terminal), Electron
+// won't run before-quit — reap the child ourselves so it never outlives us.
+for (const sig of ['SIGINT', 'SIGTERM', 'SIGHUP']) {
+  process.on(sig, () => { stopEngine(); app.quit() })
+}
