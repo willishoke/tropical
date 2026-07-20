@@ -92,8 +92,8 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
   return new_state;
 }
 
-// By-name hot-swap state transfer + atomic double-buffer flip. Assumes
-// new_state already carries a populated kernel handle.
+// Atomic double-buffer flip (CF-only: no by-name state transfer — see below).
+// Assumes new_state already carries a populated kernel handle.
 bool FlatRuntime::publish_state(KernelState && new_state)
 {
   std::lock_guard<std::mutex> lock(build_mutex_);

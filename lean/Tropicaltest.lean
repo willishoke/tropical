@@ -344,13 +344,58 @@ def main (args : List String) : IO UInt32 := do
     if !(← runResidueCollected arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← runResidueDivDiff arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runResidueBanked arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalBloomGamma arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalIntegrate arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalPair arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalBessel arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalHeterodyne arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalVco arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalReclock arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← runResidueSymbolic arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← Tropical.Tropicaltest.SeamSweep.runSeamSweep arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← Tropical.Tropicaltest.SeamSweep.runGammaCoeff arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← Tropical.Tropicaltest.SeamSweep.runGongReverb arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runModalPatch arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runModalLive arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runPatchTyping arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runGongStrike arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runGongLive arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runBanksStaging arena resolved) then
@@ -381,6 +426,12 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runVocabDriven arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalClassAgreement) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runMalformedRejection arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runDeadSlotLint arena resolved) then

@@ -108,8 +108,14 @@ inductive Node where
   -- dynamic trip count, clamped to `modes.size` (the capacity). Applies only
   -- to a DIRECTLY realized bank — residue composition and pole union break
   -- the mode-prefix alignment, so the count is dropped at those seams.
+  -- `modalSource.bloom` is the optional PITCH-BLOOM `(B, g)` (baked Floats,
+  -- `B = β·scale/g`): a bloomed struck resonator (a gong register). It keeps
+  -- the source MODAL until the realization boundary — a downstream reverb folds
+  -- into the room chain and the bloom is crossed ONCE at the tap (bloomCompose),
+  -- rather than realizing at the warp up front. `none` = an ordinary bank.
   | modalSource (modes : Array ModalMode) (anchor : Sig) (clk : Clock)
       (addr : Option String) (count : Option Sig := none)
+      (bloom : Option (Float × Float) := none)
   | modalReverb (input : String) (room : Array ModalMode) (dir : Option ModalDir)
   | modalMix (inputs : Array String)
 
@@ -140,48 +146,72 @@ def nodeIsModal (g : PatchGraph) (id : String) : Bool :=
     | .modalMix .. => true
     | _ => false
 
-/-- Lower a modal-island subgraph to its pole bank + strike anchor + the master
+/-- The lowered modal value: a PLAIN composed bank (realized directly at the
+    boundary) or a BLOOMED source kept modal — its voice modes and the FOLDED
+    room chain held SEPARATE, so the pitch bloom is crossed ONCE (`bloomCompose`)
+    at realization, AFTER the rooms fold. The rooms fold by `residueComposeEC`
+    reinterpreted as filter∘filter (the two-hats reading: a bank is both a struck
+    source `Σaᵢe^{λᵢd}` and a transfer function `Σaᵢ/(s−λᵢ)`, same data), so
+    gong⋙reverb⋙reverb crosses each nonlinearity exactly once. This is the
+    reassociated lowering order: right-fold the modal tail, cross the bloom
+    last — attaching the crossing per-inlet would force the bloom at the first
+    room and hand the second a bare `Sig`. -/
+inductive ModalBank where
+  | plain (modes : Array ModalMode)
+  | bloomed (voice room : Array ModalMode) (bloomB gRate : Float)
+
+/-- Lower a modal-island subgraph to its `ModalBank` + strike anchor + the master
     clock it realizes against. Pure pole algebra at BUILD time: a reverb is the
-    residue calculus (`residueComposeE`, pole union), a mix is the pole union of
-    its inputs. Never touches `Sig` — a modal node's inputs are modal by
-    construction, so it only recurses into `lowerModal`. -/
+    residue calculus (`residueComposeEC`) on a plain source, or a room-chain FOLD
+    on a bloomed one; a mix is the pole union. Never touches `Sig` — a modal
+    node's inputs are modal by construction, so it only recurses into
+    `lowerModal`. -/
 partial def lowerModal (g : PatchGraph) (id : String) :
-    Except String (Array ModalMode × Sig × Clock × Option String × Option ModalDir × Option Sig) := do
+    Except String (ModalBank × Sig × Clock × Option String × Option ModalDir × Option Sig) := do
   -- An unconnected modal inlet points at `__silence__`; a modal node with no modal
   -- source is a legal, incomplete patch — it compiles to an EMPTY bank (silence),
   -- not an error. (The graceful-silence contract, same as `mix []`.)
   if id == "__silence__" then
-    return (#[], lit 0, clockLit, none, none, none)
+    return (.plain #[], lit 0, clockLit, none, none, none)
   let some pn := g.nodes.find? (·.id == id)
     | .error s!"lowerModal: node '{id}' not found"
   match pn.node with
-  | .modalSource ms a clk addr count => .ok (ms, a, clk, addr, none, count)
+  | .modalSource ms a clk addr count bloom? =>
+    match bloom? with
+    | none => .ok (.plain ms, a, clk, addr, none, count)
+    -- a bloomed source starts modal with an EMPTY room; reverbs fold in downstream
+    | some (B, gr) => .ok (.bloomed ms #[] B gr, a, clk, addr, none, count)
   | .modalReverb inId room dir => do
-    -- A reverb FUSES its modal input with the room by the residue calculus, in the
-    -- COLLECTED form (`residueComposeEC`): `m + n` modes — the voice's poles colored
-    -- by the room (`a·H_room(λ)`) plus the room's poles colored by the voice
-    -- (`−r·Σ a/(λ−ν)`) — not the `m·n` of the uncollected pairing. The collected
-    -- cost is what lets the composition KEEP the source: its spectrum and its
-    -- live knobs survive downstream of a reverb (amps are symbolic, so a
-    -- resonator's `freq`/`decay` slots stay live through the room).
-    -- Time-basis (anchor/clock/addr) threads from the source.
-    let (v, a, clk, addr, dirIn, _count) ← lowerModal g inId
-    -- The live count does NOT survive composition: the composed bank's modes
-    -- (voice-colored + room-colored) are no longer a prefix of the source's,
-    -- so a partial trip has no meaning there. Realize at full capacity (the
-    -- knob is graceful-silent through a reverb — v1; no warning, legal state).
-    .ok (residueComposeEC v room, a, clk, addr, dir.orElse (fun _ => dirIn), none)
+    let (bank, a, clk, addr, dirIn, _count) ← lowerModal g inId
+    -- The live count does NOT survive composition (the composed modes are no
+    -- longer a prefix of the source's) — realize at full capacity (graceful-
+    -- silent through a reverb; v1, no warning, legal state).
+    match bank with
+    | .plain v =>
+      -- source ⋙ filter: the COLLECTED residue calculus (`m + n` modes) — the
+      -- voice colored by the room (`a·H_room(λ)`) plus the room colored by the
+      -- voice. Amps stay symbolic, so live source knobs survive the room.
+      .ok (.plain (residueComposeEC v room), a, clk, addr, dir.orElse (fun _ => dirIn), none)
+    | .bloomed voice acc B gr =>
+      -- filter ∘ filter: FOLD this room into the accumulated room chain (voice
+      -- stays separate, bloom uncrossed). An empty accumulator is the fold
+      -- identity (the first reverb in a chain).
+      let folded := if acc.isEmpty then room else residueComposeEC acc room
+      .ok (.bloomed voice folded B gr, a, clk, addr, dir.orElse (fun _ => dirIn), none)
   | .modalMix inputs => do
     let parts ← inputs.mapM (lowerModal g)
     match parts.toList with
     | [] => .error s!"modalMix '{id}': no inputs"
-    -- head carries the shared anchor/clock/address/direction for the union (a mix
-    -- of differently-addressed sources takes the head's, like its clock). The
-    -- live count is dropped: the union concatenates mode arrays, so no single
-    -- prefix count applies (same v1 stance as the reverb seam).
-    | (ms0, a0, clk0, addr0, dir0, _count0) :: rest =>
-      .ok (rest.foldl (fun acc (p : Array ModalMode × Sig × Clock × Option String × Option ModalDir × Option Sig) =>
-        acc ++ p.1) ms0, a0, clk0, addr0, dir0, none)
+    -- head carries the shared anchor/clock/address/direction for the union.
+    | (bank0, a0, clk0, addr0, dir0, _count0) :: rest =>
+      -- pole union is defined on PLAIN banks; a bloomed source carries a warp
+      -- the union can't merge (v1) — reverb it before mixing.
+      let modesOf : ModalBank → Except String (Array ModalMode) := fun b => match b with
+        | .plain ms => .ok ms
+        | .bloomed .. => .error s!"modalMix '{id}': a bloomed source has a pitch-bloom warp pole-union can't merge (v1) — cross it through a reverb before mixing"
+      let ms0 ← modesOf bank0
+      let union ← rest.foldlM (fun acc p => do let m ← modesOf p.1; pure (acc ++ m)) ms0
+      .ok (.plain union, a0, clk0, addr0, dir0, none)
   | _ => .error s!"a modal inlet (reverb/modal-mix) needs a modal SOURCE — resonator or modal-mix — but '{id}' is a signal node; a Sig has no poles to compose"
 
 mutual
@@ -223,21 +253,33 @@ partial def lowerNode (g : PatchGraph) (id : String) : Except String ArrowTerm :
     reverse (a Sig node has no modal input, so lowerModal is never asked for one). -/
 partial def lowerInput (g : PatchGraph) (id : String) : Except String ArrowTerm := do
   if nodeIsModal g id then
-    let (ms, a, clk, addr?, dir?, count?) ← lowerModal g id
-    -- realize the composed bank; a DIRECTION rotates the poles and reads them
-    -- through the per-mode `sign(σ·d)` gate (`modalBankTermDir`), else the plain
-    -- forward causal bank. `count?` (trip-count-as-data) is the bank's live
-    -- effective mode count when the source carries one.
-    let bank := match dir? with
-      | none => modalBankTerm ms a clk count?
-      | some d => modalBankTermDir ms a clk d.dir d.damp count?
+    let (bank, a, clk, addr?, dir?, count?) ← lowerModal g id
+    -- realize the lowered bank at THIS edge (the one-directional Modal→Sig seam).
+    let term ← match bank with
+      | .plain ms =>
+        -- a DIRECTION rotates the poles and reads them through the per-mode
+        -- `sign(σ·d)` gate (`modalBankTermDir`), else the plain forward causal
+        -- bank. `count?` (trip-count-as-data) is the bank's live mode count.
+        .ok (match dir? with
+          | none => modalBankTerm ms a clk count?
+          | some d => modalBankTermDir ms a clk d.dir d.damp count?)
+      | .bloomed voice room B gr =>
+        -- the bare bloomed source: the bloom-warped bank (identical to a gong
+        -- register's `warpFx`-around-`modalSource`). Also the graceful fallback
+        -- when the crossing produces nothing (a live pole hit the baked-pole
+        -- contract, or every pair fell outside admission) — legal, no warning.
+        let bare := ArrowTerm.warp (bloomWarpClock a B gr) (modalBankTerm voice a clk count?)
+        if room.isEmpty then .ok bare
+        else match bloomCompose voice room B gr with
+          | some pairs => if pairs.isEmpty then .ok bare else .ok (bloomComposedTerm pairs a clk)
+          | none => .ok bare
     match addr? with
-    | none => .ok bank
+    | none => .ok term
     -- a patched address signal BECOMES the bank's clock (absolute warp): the
     -- signal is lowered as an ordinary Sig here at the seam, then `modalAddrWarp`
     -- routes it into the bank's clock leaf. The master scrub still reaches the
     -- bank through this modulator (it too rides the enclosing clock transform).
-    | some addrId => .ok (.swarp modalAddrWarp (← lowerInput g addrId) bank)
+    | some addrId => .ok (.swarp modalAddrWarp (← lowerInput g addrId) term)
   else lowerNode g id
 end
 

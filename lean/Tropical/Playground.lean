@@ -17,8 +17,12 @@ via `compileSession` — the production loadable tail. The slide (`normalize`) p
 each effect's warps up onto the generators' clocks, so a `flange`/`fm` dropped
 downstream of an oscillator genuinely re-clocks that oscillator.
 
-Knobs are baked literals (EmitArrow emits no `paramRef`), so a knob change re-sends
-the whole graph and hot-swaps — clickless, since there is no per-sample state.
+Continuous knobs are LIVE `param:<id>.<knob>` module slots — a knob change drives
+`set_param` on the running kernel with no recompile (the modal path emits `paramRef`
+via `pref`; the earlier "all knobs baked" design is retired). Only STRUCTURAL edits —
+topology, mode-bank size, and baked strike data (gong/string mode tables, anchors) —
+re-send the whole graph and hot-swap. Clickless either way, since there is no
+per-sample state to carry.
 
 Uncommitted: this file makes `EmitArrow` reachable from the live `frontend`.
 -/
@@ -54,7 +58,7 @@ private def jStr (obj : Json) (key : String) (dflt : String) : String :=
   | _ => dflt
 
 /-- A numeric param as a build-time `Float` (the gong's structural strike
-    data — mode tables, drive, anchors — is baked, not slotted). -/
+    data — mode tables, anchors — is baked, not slotted). -/
 private def jFloat (obj : Json) (key : String) (dflt : Float) : Float :=
   ((jNum? obj key).map (·.toFloat)).getD dflt
 
@@ -378,16 +382,15 @@ def portSpecs : String → Array PortSpec
       { name := "resonance", knob := some (5, 1), discipline := .glide,
         display := some { min := 0, max := 1 } }]
   | "modalmix" => #[{ name := "in", accepts := modalIn, multi := true }]
-  -- gong: a source with no inlets and no knobs — its strike data (`t`,
-  -- `beta`, `g`, `modes_full`, `modes_half`) is structural, carried in
-  -- `params`. shaper: one signal inlet; `drive`/`peak` are structural
-  -- (the poly fit is a build-time solve).
-  | "gong" => #[]
+  -- gong: a struck resonator whose strike data (`t`, `g`, `modes_full`,
+  -- `modes_half`) is structural (carried in `params`), EXCEPT the pitch-bloom
+  -- depth `beta` — promoted to a LIVE slot, so the bloom deepens/relaxes under a
+  -- knob with no relower, the score's baked value its initial.
+  | "gong" => #[{ name := "beta", knob := some (5, 2), display := some { min := 0, max := 0.5 } }]
   -- string: a plucked/struck string as its diagonalized modal bank. Like gong,
   -- its content (`freq`, `decay`, `t`, `modes`) is structural, carried in
   -- `params`; the optional `addr` inlet drives the pluck's time-address.
   | "string" => #[{ name := "addr", accepts := sigIn }]
-  | "shaper" => #[{ name := "in", accepts := sigIn }]
   | "out" => #[{ name := "in", accepts := sigIn, multi := true }]
   | _ => #[]
 
@@ -401,7 +404,7 @@ def outletOf : String → Option PortDomain
 /-- The kinds the table covers, in schema order (`out` last — it has no outlet). -/
 def vocabularyKinds : Array String := #[
   "source", "pluck", "comb", "flange", "delay", "reverse", "fm", "sflange",
-  "mix", "ring", "shaper", "gong", "string", "resonator", "reverb", "filter",
+  "mix", "ring", "gong", "string", "resonator", "reverb", "filter",
   "modalmix", "knob", "out"]
 
 -- Derived views — the ONLY readers of glide/anchor/knob facts from here down.
@@ -620,7 +623,6 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     -- depth, velocity already folded in), `g` (bloom settle rate), and the
     -- two pre-expanded mode tables.
     let t := jFloat params "t" 0.0
-    let beta := jFloat params "beta" 0.0
     let gRate := jFloat params "g" 1.8
     let anchor := mul (litF t) .sampleRate
     -- a bare gong (no score data) strikes the built-in default bank at its
@@ -631,10 +633,27 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
       if full.isEmpty && half.isEmpty
       then defaultGongModes (jFloat params "freq" 110.0)
       else (full, half)
-    -- a data-less drop also gets an audible bloom (β = 0.05 ≈ a solid strike)
-    let beta := if beta == 0.0 && (params.getObjVal? "beta").toOption.isNone
-      then 0.05 else beta
-    gongStrikeNodes id clk anchor (litF beta) (litF gRate) full half
+    -- β (pitch-bloom depth) is a LIVE slot: the score's baked value initializes it,
+    -- and it deepens/relaxes under the knob with no relower (table fallback 0.05 ≈
+    -- a solid strike, for a data-less drop).
+    gongStrikeNodes id clk anchor (p "beta" (dv "beta")) (litF gRate) full half
+  | "bloomgong" =>
+    -- A pitch-bloomed gong register that stays MODAL to the boundary — so it can
+    -- cross a reverb (or a reverb CHAIN) by the residue calculus at the tap
+    -- (`bloomCompose`) instead of realizing at the warp. The reassociated
+    -- lowering folds the room chain first and crosses the bloom ONCE. Baked-pole-
+    -- bloom contract (besselFuse parity): β, g, scale baked (a change relowers);
+    -- amps stay live. Wired to `out` it plays the bare bloom-warped register;
+    -- wired to a BAKED-pole reverb it crosses. A live-pole (rt60) reverb
+    -- gracefully drops to the bare bloom (the recorded baked-pole-bloom v1 limit).
+    let t := jFloat params "t" 0.0
+    let beta := jFloat params "beta" 0.05
+    let gRate := jFloat params "g" 1.8
+    let scale := jFloat params "scale" 1.0
+    let modes := jModes params "modes"
+    let modes := if modes.isEmpty then (defaultGongModes (jFloat params "freq" 110.0)).1 else modes
+    let anchor := mul (litF t) .sampleRate
+    (.modalSource modes anchor clk none none (some (beta * scale / gRate, gRate)), #[])
   | "string" =>
     -- A plucked string as its diagonalized modal bank — the Karplus-Strong loop
     -- is an LTI system, so its delay-line recurrence and this closed-form pole
@@ -653,16 +672,6 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     let anchor := mul (litF t) .sampleRate
     let addr? := (portSources inObj "addr")[0]?
     (.modalSource modes anchor clk addr?, #[])
-  | "shaper" =>
-    -- The alias-free drive: an odd-poly (degree 5) fit of `tanh(drive·u)`,
-    -- fit at BUILD time (coefficients are a least-squares solve, so the
-    -- drive is structural — a knob change relowers, clicklessly). `peak` is
-    -- the fixed normalization reference (the vel-1.0 strike's peak), which
-    -- is what keeps velocity dynamics through the knee.
-    let k := jFloat params "drive" 2.6
-    let peak := jFloat params "peak" 1.0
-    let (c1, c3, c5) := polyFitTanhOdd k
-    (.shaper sig (polyShapeSig c1 c3 c5 peak), #[])
   | _ => (.mix (portSources inObj "in"), #[])
 
 private structure Raw where
@@ -698,6 +707,114 @@ private def domStr : PortDomain → String
   | .signal => "signal" | .modal => "modal" | .control => "control"
 private def discStr : Discipline → String
   | .raw => "raw" | .glide => "glide" | .anchor => "anchor"
+
+/-- The connection-typing rule, ENFORCED at decode. The `portSpecs`/`outletOf`
+    tables already STATE it (and `vocabularyJson` serves it); this makes a bad edge
+    a pre-lowering type error with a clear message instead of a lowering-time
+    surprise (or, for modal inlets, the `lowerModal` fallthrough string). For every
+    wired inlet, the source's outlet color must be in the inlet's `accepts`:
+    `modal→signal` realizes, `control→signal` is a constant stream, but `signal→modal`
+    (a Sig has no poles to compose) is a type error — as is feeding an outletless
+    sink (`out`) as a source. A derived reader of the single-source table, so it
+    cannot drift from the served rule. Silence-on-legal-states is preserved: an
+    unwired inlet is not an edge, so it is never flagged. -/
+private def checkEdgeTypes (raws : Array Raw) : Except String Unit := do
+  for r in raws do
+    for p in portSpecs r.kind do
+      unless p.accepts.isEmpty do
+        for srcId in portSources r.inObj p.name do
+          match raws.find? (·.id == srcId) with
+          | none =>
+            -- A wire that NAMES no node is a broken document (a typo'd source),
+            -- not a legal-incomplete state: surface it here rather than let it die
+            -- downstream as `lower: node '…' not found` (or vanish silently if the
+            -- edge is unreferenced). An inlet with NO wire is not an edge and is
+            -- never reached, so silence-on-legal-states is untouched.
+            throw s!"connection error: '{r.id}' ({r.kind}) inlet '{p.name}' is wired from '{srcId}', which is not a node in the patch — a wire must name an existing node"
+          | some src =>
+            match outletOf src.kind with
+            | none =>
+              throw s!"connection type error: '{src.id}' ({src.kind}) has no outlet but is wired into '{r.id}' ({r.kind}) inlet '{p.name}'"
+            | some col =>
+              unless p.accepts.contains col do
+                let accepted := String.intercalate "/" (p.accepts.toList.map domStr)
+                throw s!"connection type error: '{src.id}' ({src.kind}, {domStr col} outlet) → '{r.id}' ({r.kind}) inlet '{p.name}' which accepts {accepted} — outlet.color ∉ inlet.accepts (modal→signal realizes; signal→modal is a type error)"
+  pure ()
+
+/-- The inlet edges out of `id`: every source id wired into one of `id`'s inlets
+    (`accepts ≠ #[]`). These are exactly the wires `lowerNode`/`lowerInput`/
+    `lowerModal` recurse UP, so a cycle among them is what would overflow the
+    (visited-set-free) lowering. An id naming no node contributes no edges — a
+    dangling source is a leaf here; its malformedness is `checkEdgeTypes`'s job. -/
+private def inletSources (raws : Array Raw) (id : String) : Array String :=
+  match raws.find? (·.id == id) with
+  | none => #[]
+  | some r => (portSpecs r.kind).foldl (init := #[]) fun acc p =>
+      if p.accepts.isEmpty then acc else acc ++ portSources r.inObj p.name
+
+/-- DFS for a back-edge to a node on the current path. `path` is the ancestor
+    chain (most-recent first); `done` is the set of fully-explored ids (a node
+    reached again off a different branch, with no cycle, is not re-walked, so this
+    is linear in the graph). `id ∈ path` is a source-level cycle → reject, naming
+    the loop. -/
+private partial def acyclicVisit (raws : Array Raw) (path : List String)
+    (done : List String) (id : String) : Except String (List String) := do
+  if path.contains id then
+    -- the loop: the path from the first occurrence of `id` back to `id`.
+    let loop := (path.reverse.dropWhile (· != id)) ++ [id]
+    throw s!"connection cycle: {" → ".intercalate loop} — patch graphs must be acyclic (you may only patch forward; there is no delay to break a loop through)"
+  else if done.contains id then
+    return done
+  else
+    let done' ← (inletSources raws id).foldlM
+      (fun d s => acyclicVisit raws (id :: path) d s) done
+    return id :: done'
+
+/-- Reject a cyclic patch BEFORE the unbounded `lowerModal`/`lowerNode`/`lowerInput`
+    recursion runs. A color-legal cycle — a `reverb` whose modal outlet feeds its
+    own modal inlet, a `mix` fed by itself — passes `checkEdgeTypes` but would
+    recurse forever and stack-overflow the process (the live MCP server). A DFS
+    over the same inlet edges the lowering follows turns it into a clear error.
+    The stated contract is "cycles rejected outright"; this brings the playground
+    decode path in line with the elaborator's `CycleViolation` and the session
+    acyclicity check. -/
+private def checkAcyclic (raws : Array Raw) : Except String Unit := do
+  let mut done : List String := []
+  for r in raws do
+    done ← acyclicVisit raws [] done r.id
+  pure ()
+
+/-- The top-level `"out"` id must name an existing node — or be absent/empty,
+    which is a legal-incomplete state (nothing routed to the dac yet) that
+    compiles to silence. A NON-empty id naming no node is a typo'd output target:
+    a broken document, which otherwise renders the WHOLE patch as silence with no
+    error (`decodeGraph`'s `outIns = #[]`). Surface it as an error instead. -/
+private def checkOutTarget (j : Json) (raws : Array Raw) : Except String Unit :=
+  match (j.getObjVal? "out").toOption with
+  | some (.str outId) =>
+    if outId == "" || raws.any (·.id == outId) then pure ()
+    else throw s!"output target error: the top-level \"out\" names node '{outId}', which is not in the patch — route the dac from an existing node (or omit \"out\" for a silent patch)"
+  | _ => pure ()
+
+/-- Finding-2 agreement: the connection-typing rule is decided at TWO sites.
+    `checkEdgeTypes` colors an outlet through `outletOf`; the lowering decides
+    modal-ness through `nodeIsModal` on the CONSTRUCTED node. Nothing forces them
+    to agree, so a future kind whose `buildNode` returns a modal node but which
+    lacks a modal `outletOf` case would be silently signal-colored — the checker
+    would then reject modal wiring the lowering accepts (or vice-versa). This
+    builds each vocabulary kind's DEFAULT node and reports the kinds where
+    `nodeIsModal` disagrees with `outletOf … == some .modal`; `tropicaltest`
+    asserts the result empty. (`out` has no outlet and is never built — skipped.) -/
+def modalClassificationDrift : Array String := Id.run do
+  let mut drift : Array String := #[]
+  for kind in vocabularyKinds do
+    if kind == "out" then continue
+    let (node, _) := buildNode (fun _ => none) "n" kind
+      (Json.mkObj []) (Json.mkObj []) (Json.mkObj [])
+    let g : PatchGraph := { nodes := #[{ id := "n", node }], output := "n" }
+    if nodeIsModal g "n" != (outletOf kind == some .modal) then
+      drift := drift.push kind
+  return drift
 
 /-- The vocabulary as JSON — the ONE description of the node kinds, GENERATED
     from the port-spec table (the hand-maintained `nodeSchema` this replaces
@@ -938,6 +1055,10 @@ private def tapNodeIds (raws : Array Raw) : Array String :=
 def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j : Json) :
     Except String (Tropical.Plan.FlatPlan × Array Tap
       × Array (Array (Option Tropical.Ir.Stage))) := do
+  let raws := rawsOf j
+  checkEdgeTypes raws                                -- reject ill-typed / dangling edges pre-lowering
+  checkAcyclic raws                                  -- reject cycles BEFORE the unbounded lowering recursion
+  checkOutTarget j raws                              -- reject an "out" id that names no node
   let (g, paramTable) ← decodeGraph j
   let term ← lowerGraph g
   let (out, b0) := emitTerm (normalize term) {}

@@ -104,6 +104,88 @@ def runVocabDriven (arena : Arena)
   else
     failGate "vocab-driven" s!"{issues}"
 
+/-- THE MODAL-CLASSIFICATION AGREEMENT gate (Finding 2). The connection-typing
+    rule is decided at TWO independent sites: `checkEdgeTypes` colors an outlet
+    through `outletOf`, the lowering decides modal-ness through `nodeIsModal` on
+    the constructed node. Nothing proves they agree, so a new modal kind missing
+    an `outletOf` case would be silently signal-colored (the checker rejecting
+    wiring the lowering accepts, or the reverse). This asserts, for every
+    vocabulary kind, that `nodeIsModal(default node) ⟺ outletOf(kind) == some
+    .modal` — one meaning for "modal", pinned by a test. -/
+def runModalClassAgreement : IO Bool := do
+  let drift := Tropical.Playground.modalClassificationDrift
+  IO.println s!"        {Tropical.Playground.vocabularyKinds.size} kinds: nodeIsModal(node) ⟺ outletOf == modal"
+  IO.println s!"        result   {if drift.isEmpty then "every kind's outlet color agrees with its constructed node" else s!"DRIFT {drift}"}"
+  if drift.isEmpty then
+    passGate "modal-class-agreement" "outletOf (the edge checker's color) and nodeIsModal (the lowering's) agree on modal-ness for every kind — the typing rule has one meaning, not two coincidentally-equal ones"
+  else
+    failGate "modal-class-agreement" s!"kinds where outletOf and nodeIsModal disagree: {drift}"
+
+/-- THE MALFORMED-DOCUMENT REJECTION gate (Findings 1 & 3). A malformed patch is a
+    BROKEN document — distinct from a legal-incomplete one (an unwired inlet →
+    silence, no error). Three malformations must each return a clear `Except.error`
+    and, critically for the live MCP server, must NOT crash the process:
+      · a color-LEGAL CYCLE — a reverb whose modal outlet feeds its own modal
+        inlet, a mix fed by itself — passes `checkEdgeTypes` (the colors match) yet
+        would stack-overflow the visited-set-free `lowerModal`/`lowerNode`
+        recursion; `checkAcyclic` now rejects it first;
+      · a WIRE naming no node (a typo'd source) — previously died downstream as
+        `lower: node '…' not found`, or vanished silently if unreferenced;
+      · a top-level `"out"` naming no node — previously rendered the WHOLE patch as
+        silence with no error.
+    The boundary stays crisp: a valid modal patch still compiles. -/
+def runMalformedRejection (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let hasSub := fun (s sub : String) => (s.splitOn sub).length != 1
+  let compileErr := fun (src : String) =>
+    match Lean.Json.parse src with
+    | .error e => s!"json parse: {e}"
+    | .ok j => match Tropical.Playground.compilePlanPure arena resolved j with
+      | .error e => firstLine e
+      | .ok _ => "(compiled — should have been rejected)"
+  -- color-legal reverb self-edge: modal outlet → modal inlet, but a cycle.
+  let cycleReverb := "{\"nodes\":[" ++
+    "{\"id\":\"rev\",\"kind\":\"reverb\",\"params\":{\"rt60\":2},\"in\":{\"in\":[\"rev\"]}}]," ++
+    "\"out\":\"rev\"}"
+  -- color-legal mix self-loop: signal outlet → signal inlet, but a cycle.
+  let cycleMix := "{\"nodes\":[" ++
+    "{\"id\":\"m\",\"kind\":\"mix\",\"in\":{\"in\":[\"m\"]}}],\"out\":\"m\"}"
+  -- a wire naming no node.
+  let danglingWire := "{\"nodes\":[" ++
+    "{\"id\":\"osc\",\"kind\":\"source\",\"params\":{\"freq\":220}}," ++
+    "{\"id\":\"mx\",\"kind\":\"mix\",\"in\":{\"in\":[\"osc\",\"ghost\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"mx\"]}}],\"out\":\"out\"}"
+  -- a top-level out naming no node (every wire otherwise valid).
+  let danglingOut := "{\"nodes\":[" ++
+    "{\"id\":\"osc\",\"kind\":\"source\",\"params\":{\"freq\":220}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"osc\"]}}],\"out\":\"typo\"}"
+  -- the crisp boundary: a valid modal patch still compiles.
+  let valid := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"rev\",\"kind\":\"reverb\",\"params\":{\"rt60\":2},\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"rev\"]}}],\"out\":\"out\"}"
+  let mRev := compileErr cycleReverb
+  let mMix := compileErr cycleMix
+  let mWire := compileErr danglingWire
+  let mOut := compileErr danglingOut
+  let mValid := match Lean.Json.parse valid with
+    | .ok j => (Tropical.Playground.compilePlanPure arena resolved j).toOption.isSome
+    | .error _ => false
+  let revOk := hasSub mRev "connection cycle"
+  let mixOk := hasSub mMix "connection cycle"
+  let wireOk := hasSub mWire "not a node in the patch"
+  let outOk := hasSub mOut "output target error"
+  IO.println s!"        malformed patches rejected (no crash); legal-incomplete unaffected:"
+  IO.println s!"        cycle(reverb self)   {mRev}"
+  IO.println s!"        cycle(mix self)      {mMix}"
+  IO.println s!"        dangling wire        {mWire}"
+  IO.println s!"        dangling out         {mOut}"
+  IO.println s!"        valid modal patch compiles={mValid}"
+  if revOk && mixOk && wireOk && outOk && mValid then
+    passGate "malformed-rejection" "a color-legal cycle, a dangling wire, and a dangling out each return a clear error (no stack-overflow); a valid patch still compiles"
+  else
+    failGate "malformed-rejection" s!"revOk={revOk} mixOk={mixOk} wireOk={wireOk} outOk={outOk} valid={mValid}"
+
 open Tropical.Playground in
 /-- THE REALIZED-STATE REPORT gate. The `load_patch_graph` reply must state
     FACTS a surface can render — wired vs normalled inputs, live params with

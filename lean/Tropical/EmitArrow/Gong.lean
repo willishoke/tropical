@@ -1,9 +1,9 @@
 import Tropical.EmitArrow.Patch
 
 /-!
-# EmitArrow.Gong — the struck nonlinear resonator
+# EmitArrow.Gong — the struck resonator
 
-A gong strike is three closed-form ideas stacked on the modal island, none
+A gong strike is two closed-form ideas stacked on the modal island, neither
 of them new machinery:
 
 * **amplitude bloom** — a register whose energy RISES after the strike is a
@@ -15,14 +15,13 @@ of them new machinery:
   the clock warp `d ↦ d + β(1−e^{−gd})/g`. Applied as a per-strike `warp`
   around the bank term, so the slide lands it on the bank's clock leaf and
   a master scrub reverses the glide coherently with the tail.
-* **warmth without aliasing** — an odd POLYNOMIAL fit of the tanh drive
-  curve. A degree-p polynomial multiplies bandwidth by exactly p, so with
-  the mode bank capped at `f_max` and `p·f_max < rate/2` the shaper's
-  output is bandlimited BY CONSTRUCTION — there is no component to fold.
-  (tanh's order-7+ products fold back in-band and, under the pitch bloom,
-  glide the wrong way — low energy, high salience.)
 
-Velocity enters at build time (bank amps, bloom depth β, drive) — the
+(The former third idea — an odd-polynomial "alias-free drive" — is retired:
+a static memoryless waveshaper is not warmth, and the `shaper` vocabulary
+kind that exposed it is gone with it. The gong is linear per strike; its
+nonlinearity is velocity coupling at build time.)
+
+Velocity enters at build time (bank amps, bloom depth β) — the
 score's strikes are baked; the live upgrade is amps/β as `paramRef`s.
 -/
 
@@ -51,47 +50,6 @@ def gongBloomWarp (anchorSamples beta g : Sig) (scale : Float) : Clock → Clock
     let bloom := mul (mul beta (litF scale))
       (div (sub (lit 1) (expSig (neg (mul g dPos)))) g)
     add clk (toIntE (mul (mul bloom .sampleRate) (lit 4294967296)))
-
--- ── The alias-free drive: odd-polynomial fit of the tanh curve ────────────
-
-/-- Least-squares odd-polynomial (degree 5) fit of `tanh(k·u)/tanh(k)` on
-    `u ∈ [−1, 1]` — the same curve the tanh drive shapes, truncated to the
-    orders a bandlimited input keeps under Nyquist. Build-time Float math:
-    normal equations over the `{u, u³, u⁵}` basis on a 4001-point grid,
-    solved by Cramer. Returns `(c₁, c₃, c₅)`. -/
-def polyFitTanhOdd (k : Float) : Float × Float × Float := Id.run do
-  let n : Nat := 4001
-  let tk := Float.tanh k
-  -- normal equations G·c = b over the odd basis powers (1, 3, 5)
-  let mut gm : Array Float := Array.replicate 9 0.0
-  let mut bv : Array Float := Array.replicate 3 0.0
-  for i in [0:n] do
-    let u := -1.0 + 2.0 * i.toFloat / (n - 1).toFloat
-    let t := Float.tanh (k * u) / tk
-    let p : Array Float := #[u, u * u * u, u * u * u * u * u]
-    for r in [0:3] do
-      bv := bv.set! r (bv[r]! + p[r]! * t)
-      for c in [0:3] do
-        gm := gm.set! (r * 3 + c) (gm[r * 3 + c]! + p[r]! * p[c]!)
-  let det := fun (m : Array Float) =>
-      m[0]! * (m[4]! * m[8]! - m[5]! * m[7]!)
-    - m[1]! * (m[3]! * m[8]! - m[5]! * m[6]!)
-    + m[2]! * (m[3]! * m[7]! - m[4]! * m[6]!)
-  let d := det gm
-  let col := fun (j : Nat) => det (Array.range 9 |>.map fun i =>
-    if i % 3 == j then bv[i / 3]! else gm[i]!)
-  (col 0 / d, col 1 / d, col 2 / d)
-
-/-- The shaper body: `peak · P(s/peak)` with `P(u) = c₁u + c₃u³ + c₅u⁵`
-    (Horner in `u²`). `peak` is a FIXED reference (the vel-1.0 strike's
-    measured peak), not a per-render normalization — that's what keeps
-    velocity dynamics: a soft strike stays in the polynomial's linear
-    region instead of being renormalized into the knee. -/
-def polyShapeSig (c1 c3 c5 peak : Float) (s : Sig) : Sig :=
-  let u := mul s (litF (1.0 / peak))
-  let u2 := mul u u
-  mul (litF peak)
-    (mul u (add (litF c1) (mul u2 (add (litF c3) (mul u2 (litF c5))))))
 
 -- ── The default strike (a bare gong node, no score data) ──────────────────
 

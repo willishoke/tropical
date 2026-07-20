@@ -969,6 +969,47 @@ def buildModalBankTable (name : String) (modes : Array ModalMode) (anchor : Sig)
     (arena : Arena) : Arena × ProgramIdx :=
   buildExprCarrier name (modalBankSigTable modes clockLit anchor) arena
 
+/-- Emit a bloom-composed Γ-bridge pair bank (`bloomComposedSig`) over the bare
+    clock — the `modal-bloom-gamma` gate's device-under-test. -/
+def buildBloomComposed (name : String) (pairs : Array BloomPair) (anchor : Sig)
+    (arena : Arena) : Arena × ProgramIdx :=
+  buildExprCarrier name (bloomComposedSig pairs clockLit anchor) arena
+
+/-- Build the analytic `(Re, Im)` pair (`modalBankSigPairTable`) as TWO carriers
+    over the bare clock — the `modal-pair` gate's device-under-test. Each
+    component is its own single-`bankSum` program, so `Re` ≡ `buildModalBankTable`
+    and `Im` ≡ `buildModalBankTable` of the amp-rotated modes, bit-identically. -/
+def buildModalBankPair (nameRe nameIm : String) (modes : Array ModalMode)
+    (anchor : Sig) (arena : Arena) : (Arena × ProgramIdx) × (Arena × ProgramIdx) :=
+  let (reSig, imSig) := modalBankSigPairTable modes clockLit anchor
+  (buildExprCarrier nameRe reSig arena, buildExprCarrier nameIm imSig arena)
+
+/-- Heterodyne FM as a twist at the realization seam: `Re·cosθ − Im·sinθ` over the
+    analytic `(Re, Im)` pair, with the static-index modulation phase
+    `θ(d) = b·sin(ω_m d)`. ONE complex rotation per sample, independent of bank
+    size — the cheap realization of the same FM that `besselFuse` bakes into
+    `carrier × (2N+1)` sideband modes. The `modal-heterodyne` gate cross-checks the
+    two against each other (D6). ω_m in rad/s, b the index. -/
+def buildHeterodyne (name : String) (modes : Array ModalMode) (wm b : Float)
+    (anchor : Sig) (arena : Arena) : Arena × ProgramIdx :=
+  let (re, im) := modalBankSigPairTable modes clockLit anchor
+  let dSec := div (div (toFloatE (relClockQ clockLit anchor)) (lit 4294967296)) .sampleRate
+  let theta := mul (litF b) (sinSig (mul (litF wm) dSec))
+  buildExprCarrier name (sub (mul re (cosSig theta)) (mul im (sinSig theta))) arena
+
+/-- The integrated-pole reading (LFO→pole): a carrier whose frequency is modulated
+    by an LFO, rendered as the EXACT time-varying resonator — the phase advances by
+    the INTEGRAL of the modulated frequency, `θ = (ω₀·p)·Re(∫LFO)`, i.e. a
+    heterodyne twist (`buildHeterodyne`) with θ taken from the INTEGRATED modulator
+    bank (`integrateBank`) rather than a static `b·sin`. This is the exact solution
+    of `ẋ = μ(t)x`, NOT the snapshot reading (pole read at τ, applied over the whole
+    elapsed d), which is a different, wrong function (`demos/modal_vco.py` D1). -/
+def buildIntegratedPoleReading (name : String) (carrier lfo : Array ModalMode)
+    (om0Depth : Float) (anchor : Sig) (arena : Arena) : Arena × ProgramIdx :=
+  let (re, im) := modalBankSigPairTable carrier clockLit anchor
+  let theta := mul (litF om0Depth) (modalBankSig (integrateBank lfo) clockLit anchor)
+  buildExprCarrier name (sub (mul re (cosSig theta)) (mul im (sinSig theta))) arena
+
 /-- `voice ⋙ reverb` end to end: run the residue calculus at build time, turn the
     composed complex modes into a `ModalMode` bank, and emit it — the connection is
     an exact symbolic computation, not a hand-tuned coupling table. -/
@@ -990,6 +1031,20 @@ def buildModalReverbSym (name : String) (voice reverb : Array ModalMode)
 def buildModalReverbSymC (name : String) (voice reverb : Array ModalMode)
     (anchor : Sig) (arena : Arena) : Arena × ProgramIdx :=
   buildModalBankArrow name (residueComposeEC voice reverb) anchor arena
+
+/-- `voice ⋙ reverb` as the FUSED DIVIDED-DIFFERENCE paired-mode bank
+    (`residueComposeDD` → `modalBankSigTableDD`) — the stable near-degenerate
+    composition (`residue-divdiff` gate's device-under-test). -/
+def buildModalReverbDD (name : String) (voice reverb : Array ModalMode)
+    (anchor : Sig) (arena : Arena) : Arena × ProgramIdx :=
+  buildExprCarrier name (modalBankSigTableDD (residueComposeDD voice reverb) clockLit anchor) arena
+
+/-- `voice ⋙ reverb` with the collected residue's Cauchy inner sums BANKED
+    (`residueComposeBanked` → `modalBankSigTable`) — same composition as
+    `buildModalReverbSymC`, O(m+n) coeff-fill code (`residue-banked` gate). -/
+def buildModalReverbBanked (name : String) (voice reverb : Array ModalMode)
+    (anchor : Sig) (arena : Arena) : Arena × ProgramIdx :=
+  buildModalBankArrow name (residueComposeBanked voice reverb) anchor arena
 
 /-- Emit the modal bank read through a clock warp φ, via the arrow `.warp` (so φ
     threads through the `.clk` leaf exactly as the master clock does) — for the
