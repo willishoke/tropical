@@ -42,7 +42,7 @@ private def anchorSig : Sig := lit 200
 private def nProbe : Nat := 4096
 /-- The carrier output sink gain (`defaultSinkGain`, Plan.lean) — raw-math
     references must scale by it (house precedent: Slide/Stress). -/
-private def sinkGain : Float := 0.05
+private def sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
 
 -- ── Low-discrepancy sampling (Halton — deterministic, reproducible) ───────────
 

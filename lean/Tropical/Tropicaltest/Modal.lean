@@ -692,9 +692,9 @@ def runModalIntegrate (arena : Arena)
         let d := (iS[k]! - oS[k]!).abs
         if d > symDiff then symDiff := d
         iEnergy := iEnergy + iS[k]! * iS[k]!
-      let bound := oracleF.size.toFloat * 3.7252903e-9 * 0.05 * 4.0
+      let bound := oracleF.size.toFloat * 3.7252903e-9 * Tropical.Plan.defaultSinkGain.toFloat * 4.0
       -- (C) rendered integral ≡ cumulative trapezoid of the source render (D3).
-      -- The 0.05 sink gain scales source and integral alike, and the trapezoid is
+      -- The sink gain scales source and integral alike, and the trapezoid is
       -- linear, so it cancels — no gain correction needed.
       let h := 1.0 / 44100.0
       let mut acc : Float := 0.0
@@ -942,7 +942,7 @@ def runModalVco (arena : Arena)
       -- `buildIntegratedPoleReading`'s ACTUAL render (was only smoke-checked). The
       -- raw variant is measured against the SAME oracle and must blow past `bound`.
       let n := min (min s.size sRaw.size) 4096
-      let sinkGain : Float := 0.05
+      let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
       let oracleAt := fun (i : Nat) =>
         let d := (i.toFloat - 200.0) / 44100.0
         let phi := om0 * (d + p * Float.sin (wm * d) / wm)
@@ -955,7 +955,7 @@ def runModalVco (arena : Arena)
         if e > renderErr then renderErr := e
         let er := (sRaw[i]! - o).abs
         if er > rawErr then rawErr := er
-      let renderBound : Float := 1.5e-6    -- ~10× the observed ~1.46e-7 Q4.28/freq-grid floor
+      let renderBound : Float := 3.0e-5 * Tropical.Plan.defaultSinkGain.toFloat    -- ~10× the observed ~1.46e-7 Q4.28/freq-grid floor (raw) × the sink gain
       IO.println s!"        LFO→pole integrated reading vs RK4 of ẋ=μ(t)x (f0={f0}, p={p}, fm={fm}):"
       IO.println s!"        oracle   integrated vs RK4 rel err: n=500 {e500} 1000 {e1000} 2000 {e2000} (ratios {r1}, {r2}; ~16=h⁴)"
       IO.println s!"        result   snapshot vs ODE={snapErr} (plateaus) · render pre-strike|max|={preMax} E={energy}"
@@ -1011,8 +1011,8 @@ def runModalReclock (arena : Arena)
         if 2 * i < os.size then
           let d := fabs (bs[i]! - os[2 * i]!)
           if d > maxB then maxB := d
-      let boundA := 2.0 * 3.7252903e-9 * 0.05 * 100.0                    -- Q + poly ulp
-      let boundB := 4000.0 * 2.3283064e-10 * tp * 1.13 * 0.05 * 2.0      -- freq-grid drift
+      let boundA := 2.0 * 3.7252903e-9 * Tropical.Plan.defaultSinkGain.toFloat * 100.0                    -- Q + poly ulp
+      let boundB := 4000.0 * 2.3283064e-10 * tp * 1.13 * Tropical.Plan.defaultSinkGain.toFloat * 2.0      -- freq-grid drift
       let eB := bs.foldl (fun a x => a + x * x) 0.0
       IO.println s!"        affine reclock: (A) delay a=1,b·SR=10  (B) scale a=2:"
       IO.println s!"        result   armA max|Δ|={maxA * 1e9}e-9 (bound {boundA * 1e9}e-9, tight) · armB max|Δ|={maxB * 1e9}e-9 (bound {boundB * 1e9}e-9, freq-grid)"
@@ -1085,7 +1085,7 @@ def runResidueDivDiff (arena : Arena)
         let d := fabs (dcs[k]! - rcs[k]!)
         if d > m2 then m2 := d
         e2 := e2 + dcs[k]! * dcs[k]!
-      let bound2 := 3.0 * 3.7252903e-9 * 0.05 * 8.0
+      let bound2 := 3.0 * 3.7252903e-9 * Tropical.Plan.defaultSinkGain.toFloat * 8.0
       -- arm 4 (near-coincidence SERIES sweep, hardening 0a-2): the small-|z| Horner
       -- branch `cexpm1SeriesE` (selected when |z|²<0.01, i.e. |z|<0.1) is
       -- load-bearing only when |λ−ν| is small enough that z=(λ−ν)d stays <0.1
@@ -1130,9 +1130,9 @@ def runResidueDivDiff (arena : Arena)
               let cxm1 := (Cplx.sub (cexp z) ⟨1.0, 0.0⟩).div z        -- (e^z−1)/z direct
               let enu := cexp (nuC.mul ⟨d, 0.0⟩)                      -- e^{νd}
               let contrib := ((cC.mul ⟨d, 0.0⟩).mul enu).mul cxm1     -- c·d·e^{νd}·cexpm1
-              let e := fabs (ds[i]! - 0.05 * contrib.re)
+              let e := fabs (ds[i]! - Tropical.Plan.defaultSinkGain.toFloat * contrib.re)
               if e > sweepMax then sweepMax := e; sweepWorstTgt := tgt
-      let sweepBound : Float := 1.5e-7                -- ~13× the observed ~1.1e-8 Q/freq-grid floor
+      let sweepBound : Float := 3.0e-6 * Tropical.Plan.defaultSinkGain.toFloat                -- ~13× the observed Q/freq-grid floor (raw) × the sink gain
       IO.println s!"        divided-difference composition (voice(2)⋙reverb(4), DD {nDD} paired modes):"
       IO.println s!"        arm1     DD≡collected (well-sep) rel-L2={rel1} (freq-grid floor)"
       IO.println s!"        arm2     DD@coincidence≡deg-1 τ·e max|Δ|={m2 * 1e9}e-9 (bound {bound2 * 1e9}e-9, tight)"
@@ -1268,7 +1268,7 @@ def runModalBloomGamma (arena : Arena)
         -- y_p(d) = e^{νd}·∫₀^d e^{μφ(s) − νs} ds per admitted pair, summed with
         -- the real weights a·r — the defining integral, no gamma anywhere.
         let phi := fun (d : Float) => d + B * (1.0 - Float.exp (-g * d))
-        let sinkGain : Float := 0.05   -- defaultSinkGain (Plan.lean): the carrier's output sink
+        let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat   -- defaultSinkGain (Plan.lean): the carrier's output sink
         -- the rotator's documented frequency quantization (`modePhaseQ`:
         -- `incr = ⌊(ω/2π)·2³²/SR⌋`, the SR/2³² grid) — modeled in the reference
         -- so the trapezoid refines toward the RENDERED carriers, not toward
