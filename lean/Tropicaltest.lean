@@ -383,6 +383,12 @@ def main (args : List String) : IO UInt32 := do
     if !(← Tropical.Tropicaltest.SeamSweep.runGongReverb arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← Tropical.Tropicaltest.SeamSweep.runSeamCoverage arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← Tropical.Tropicaltest.SeamSweep.runSeamLaneClean arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← runModalPatch arena resolved) then
       failed := failed + 1
     total := total + 1
