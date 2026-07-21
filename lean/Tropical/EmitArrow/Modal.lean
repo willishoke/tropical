@@ -64,17 +64,30 @@ private partial def sigConstF? : Sig → Option Float
 
 -- ── Option E: the per-bank Q-landing exponent (the modal-datapath rail fix) ────
 -- Every modal weight lands as Q4.28 (×2²⁸) and multiplies an exact Q2.30 rotator
--- in i64, so `|w|·env·2²⁸·2³⁰ = |w|·env·2⁵⁸` wraps against i64's 2⁶³ once
--- `|w|·env > 2⁵ = 32` — reachable from the shipped vocabulary (a resonant lowpass
--- has `|A| ≈ Q = 0.55·80^res`, so the rail is a cap on filter Q at 32; the top
--- ~8% of the resonance knob wraps). The cure: land the weight at `2^(28−k)` and
--- shift back by `28−k`, with `k` chosen PER BANK from the coefficient-time
--- amplitude so the product cannot wrap. The rendered VALUE is k-INVARIANT — the
--- `>>(28−k)` undoes the `·2^(28−k)` exactly and `(28−k)+30−(28−k)=30` leaves the
--- accumulator at Q2.30, so `fixedOutQ 30` is unchanged; only the quantization LSB
--- moves. At `k=0` the emitted ops are `·2²⁸` / `>>28` verbatim — byte-identical.
--- The i64 accumulator (`Σ oscQₘ`, each already `>>(28−k)` to Q2.30) never binds:
--- it needs `Σₘ|Aₘ| < 2³³`, orders looser than the per-mode `32·2^k`.
+-- in i64, so `w·env·2²⁸·2³⁰ = w·env·2⁵⁸` wraps against i64's 2⁶³ once the LANDED
+-- magnitude `sup_d |env₂·A| > 2⁵ = 32` — reachable from the shipped vocabulary (a
+-- resonant lowpass has `|A| ≈ Q = 0.55·80^res`, so the rail is a cap on filter Q
+-- at 32; the top ~8% of the resonance knob wraps). The cure: land the weight at
+-- `2^(28−k)` and shift back by `28−k`, with `k` chosen PER BANK from the
+-- coefficient-time bound `maxAbs = maxₘ sup_d |env₂ₘ·Aₘ|`. For a deg-0 mode
+-- `env₂ = e^{−σd} ≤ 1`, so the bound is the amplitude `|creₘ|+|cimₘ|`; a deg-`p`
+-- mode's `env₂ = d^p·e^{−σd}` peaks at `(p/(σe))^p` (`bankLandExp` folds that
+-- factor in — so the fix is sound for deg > 0 too, not only the deg-0 plain
+-- vocabulary). The rendered VALUE is k-INVARIANT — the `>>(28−k)` undoes the
+-- `·2^(28−k)` exactly and `(28−k)+30−(28−k)=30` leaves the accumulator at Q2.30,
+-- so `fixedOutQ 30` is unchanged; only the quantization LSB moves. At `k=0` the
+-- emitted ops are `·2²⁸` / `>>28` verbatim — byte-identical.
+--
+-- TWO caveats, both at the +198 dB extreme (maxAbs ≥ 2³³), practically inert but
+-- stated for honesty. (1) THE k=28 CEILING: `k` clamps at 28 (a negative shift is
+-- UB), so the per-mode guarantee holds only for `maxAbs < 2³³ = 32·2²⁸`; above it
+-- `k` saturates and the product wraps. (2) THE ORTHOGONAL ACCUMULATOR RAIL: the
+-- i64 sum `Σ oscQₘ` (each `>>(28−k)` to Q2.30) needs `Σₘ|Aₘ| < 2³³` — orders
+-- looser than the per-mode `32·2^k` for any realistic bank, but NOT never: a
+-- collected weight reaching 2³³ (a live pole swept within ~6e-11 rad/s of exact
+-- coincidence, or absurd authored amps) binds it, and option E does not address
+-- this rail. Both extremes are past any musical level; the device clamp (C = 256)
+-- bounds their blast radius at the DAC.
 
 /-- `⌊log₂|x|⌋` for a finite nonzero `x` — the IEEE-754 unbiased exponent, the
     exact Lean-Float mirror of the `floatExponent` op the DYNAMIC path emits (so a
@@ -83,12 +96,15 @@ private def floatExpZ (x : Float) : Int :=
   (((x.abs.toBits >>> 52) &&& 0x7ff).toNat : Int) - 1023
 
 /-- `k = clamp(0, 28, ⌊log₂ maxAbs⌋ − 4)` as a `Nat` (the static path). Solves
-    `maxAbs < 32·2^k`, so `maxAbs < 32 ⇒ k = 0` (bit-identical). Non-finite or
-    `≤ 0` ⇒ `k = 0` — a silent (all-zero-amp) or degenerate bank lands verbatim,
-    and the residue calculus on finite baked poles cannot produce a non-finite amp. -/
+    `maxAbs < 32·2^k` for `maxAbs < 2³³` (the k=28 ceiling: above it `k` saturates
+    and the guarantee lapses — a +198 dB weight, practically inert). `maxAbs < 32
+    ⇒ k = 0` (bit-identical). Non-finite (`+∞` from a non-decaying deg>0 mode) ⇒
+    `k = 28` (max headroom); `≤ 0` ⇒ `k = 0` (a silent all-zero bank lands verbatim). -/
 private def landK (maxAbs : Float) : Nat :=
-  if maxAbs ≤ 0.0 || !maxAbs.isFinite then 0
+  if maxAbs ≤ 0.0 then 0            -- silent/all-zero bank: land verbatim (k=0)
   else
+    -- ∞/NaN reach here (¬(x ≤ 0)); floatExpZ reads their exponent field 2047 ⇒
+    -- 1024 ⇒ clamp 28 (max headroom, matching the dynamic floatExponent path).
     let e := floatExpZ maxAbs - 4
     if e ≤ 0 then 0 else if e ≥ 28 then 28 else e.toNat
 
@@ -114,28 +130,56 @@ def LandExp.shift : LandExp → Sig
   | .static k  => lit (28 - k)
   | .dynamic k => sub (lit 28) k
 
-/-- The per-bank landing exponent from a bank's mode amplitudes. The guarded
-    magnitude is `maxAbs = maxₘ(|creₘ|+|cimₘ|)`, the L1 amp norm — invariant under
-    the `modal-pair` 90° swap `(cre,cim)↦(cim,−cre)` (it just swaps the two terms),
-    so the paired Re/Im banks and the amp-rotated oracle land at one `k`. The
-    DYNAMIC `maxSig` folds the SAME per-mode amp subterms the columns are built
-    from (never a `Sig.index` column read — `Stage0` pins `arrayReg`/`loopIdx`
-    `.s1`, which would park the O(count) chain in the AUDIO kernel); its leaves are
-    `num`/`paramRef`, so it stages to fold/s0 and rides the coefficient kernel.
-    `floatExponent` is `⌊log₂⌋` and fails toward HEADROOM: `floatExponent 0 =
-    −1023 ⇒ k=0` (silent bank), `floatExponent NaN = 1024 ⇒ k=28` (max headroom),
-    never k=0-toward-the-wrap. Both paths clamp `k∈[0,28]`. -/
+/-- The envelope-peak factor `sup_{d≥0} d^p·e^{−σd} = (p/(σe))^p` for a mode of
+    degree `p` (the polynomial-order lift): `1` for `p=0` (`e^{−σd} ≤ 1`), else the
+    interior peak at `d = p/σ`. A non-decaying polynomial mode (`σ ≤ 0`, `p > 0`)
+    has no finite sup — `+∞`, which lands `k=28` (max headroom; it cannot be made
+    safe, and no residue calculus produces one). -/
+private def envPeakF (deg : Nat) (sigma : Float) : Float :=
+  if deg == 0 then 1.0
+  else if sigma ≤ 0.0 then (1.0 / 0.0)
+  else Float.pow (deg.toFloat / (sigma * 2.718281828459045)) deg.toFloat
+
+/-- The `Sig` mirror of `envPeakF` for the DYNAMIC max fold: `(p/(σe))^p·(|cre|+
+    |cim|)`. Reduces to exactly `|cre|+|cim|` at `deg=0`, so a deg-0 bank's `maxSig`
+    is unchanged (byte-identical dynamic path). -/
+private def modeWeightBoundSig (m : ModalMode) : Sig :=
+  let amp := add (.unary .abs m.cre) (.unary .abs m.cim)
+  if m.deg == 0 then amp
+  else mul (powE (div (litF m.deg.toFloat) (mul m.sigma (litF 2.718281828459045))) m.deg) amp
+
+/-- The per-bank landing exponent from a bank's mode weights. The guarded
+    magnitude is `maxAbs = maxₘ sup_d |env₂ₘ·Aₘ| = maxₘ (p/(σe))^p·(|creₘ|+|cimₘ|)`,
+    the deg-lifted L1 amp norm — invariant under the `modal-pair` 90° swap
+    `(cre,cim)↦(cim,−cre)` (it just swaps the two amp terms; the env factor is
+    amp-free), so the paired Re/Im banks and the amp-rotated oracle land at one
+    `k`. The DYNAMIC `maxSig` folds the SAME per-mode subterms the columns are
+    built from (never a `Sig.index` column read — `Stage0` pins `arrayReg`/
+    `loopIdx` `.s1`, which would park the O(count) chain in the AUDIO kernel); its
+    leaves are `num`/`paramRef`, so it stages to fold/s0 and rides the coefficient
+    kernel. `floatExponent` is `⌊log₂⌋` and fails toward HEADROOM: `floatExponent 0
+    = −1023 ⇒ k=0` (silent bank), `floatExponent NaN/∞ = 1024 ⇒ k=28` (max
+    headroom), never k=0-toward-the-wrap. Both paths clamp `k∈[0,28]`. -/
 def bankLandExp (modes : Array ModalMode) : LandExp := Id.run do
   let mut mx : Float := 0.0
   let mut allConst := true
   for m in modes do
-    match sigConstF? m.cre, sigConstF? m.cim with
-    | some cr, some ci => let v := cr.abs + ci.abs; if v > mx then mx := v
-    | _, _ => allConst := false
+    -- deg-0 (the whole plain vocabulary) never queries σ, so a live-σ deg-0 bank
+    -- still takes the static path when its amps const-fold.
+    if m.deg == 0 then
+      match sigConstF? m.cre, sigConstF? m.cim with
+      | some cr, some ci => let v := cr.abs + ci.abs; if v > mx then mx := v
+      | _, _ => allConst := false
+    else
+      match sigConstF? m.cre, sigConstF? m.cim, sigConstF? m.sigma with
+      | some cr, some ci, some sg =>
+        let v := (cr.abs + ci.abs) * envPeakF m.deg sg
+        if v > mx then mx := v
+      | _, _, _ => allConst := false
   if allConst then
     return .static (landK mx)
   let maxSig := modes.foldl (fun acc m =>
-    let a := add (.unary .abs m.cre) (.unary .abs m.cim)
+    let a := modeWeightBoundSig m
     selectE (gt acc a) acc a) (lit 0)
   return .dynamic (clampE (sub (.unary .floatExponent maxSig) (lit 4)) (lit 0) (lit 28))
 

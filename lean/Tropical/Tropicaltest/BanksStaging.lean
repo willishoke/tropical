@@ -658,11 +658,18 @@ def runModalRailIdentity (arena : Arena)
     ModalMode.hz (lit (Int.ofNat (220 + 40 * i))) (lit 30 1) amp
   let small := mkModes (lit 2 1)      -- amp 0.2 ⇒ maxAbs 0.2 < 32 ⇒ k = 0
   let large := mkModes (lit 100)      -- amp 100  ⇒ maxAbs 100    ⇒ k = 2
+  -- a deg-1 bank with small σ: |A|=10 < 32 (amp-only would give k=0), but env₂ =
+  -- d·e^{−σd} peaks at (1/(σe)) ≈ 3.68, so the LANDED sup ≈ 36.8 > 32 ⇒ the
+  -- envelope-aware bound bumps k to 1. Proves the deg>0 lift is not amp-only.
+  let degBank := (Array.range 3).map fun i =>
+    ({ sigma := litF 0.1, omega := mul twoPiE (lit (Int.ofNat (300 + 40 * i))),
+       cre := litF 10.0, cim := lit 0, deg := 1 } : ModalMode)
   let hasSub := fun (s sub : String) => (s.splitOn sub).length != 1
   let land2p28 := "0x41b0000000000000"   -- 2²⁸, the verbatim Q4.28 landing (lowercase hex)
   let land2p26 := "0x4190000000000000"   -- 2²⁶, the k=2 landing
   let kSmall := match bankLandExp small with | .static k => some k | .dynamic _ => none
   let kLarge := match bankLandExp large with | .static k => some k | .dynamic _ => none
+  let kDeg   := match bankLandExp degBank with | .static k => some k | .dynamic _ => none
   match buildAndFinish (.ok (buildModalBankTable "id_small" small (lit 200) arena)),
         buildAndFinish (.ok (buildModalBankTable "id_large" large (lit 200) arena)) with
   | .ok pSmall, .ok pLarge =>
@@ -670,12 +677,13 @@ def runModalRailIdentity (arena : Arena)
     | .ok irSmall, .ok irLarge =>
       let smallVerbatim := hasSub irSmall land2p28    -- k=0 keeps 2²⁸
       let largeRescaled := hasSub irLarge land2p26 && !(hasSub irLarge land2p28)  -- k=2 ⇒ 2²⁶, no 2²⁸
-      IO.println s!"        static banks: small amp 0.2 ⇒ k={kSmall} (want 0), large amp 100 ⇒ k={kLarge} (want 2):"
-      IO.println s!"        small IR keeps 2²⁸ landing={smallVerbatim} · large IR rescales to 2²⁶ & drops 2²⁸={largeRescaled}"
-      if kSmall == some 0 && kLarge == some 2 && smallVerbatim && largeRescaled then
-        passGate "modal-rail-identity" "k=0 emits the Q4.28 landing VERBATIM (byte-identical plan, reused kernel-cache); a loud static bank rescales to 2²⁶ (option E fires) — the 'nothing moves at k=0' claim is now pinned both ways"
+      let degLifts := kDeg == some 1    -- env₂-aware bound bumps a small-|A| deg-1 bank
+      IO.println s!"        static banks: small amp 0.2 ⇒ k={kSmall} (want 0), large amp 100 ⇒ k={kLarge} (want 2), deg-1 σ=0.1 amp=10 ⇒ k={kDeg} (want 1, env-lifted):"
+      IO.println s!"        small IR keeps 2²⁸ landing={smallVerbatim} · large IR rescales to 2²⁶ & drops 2²⁸={largeRescaled} · deg-1 env₂ lift={degLifts}"
+      if kSmall == some 0 && kLarge == some 2 && degLifts && smallVerbatim && largeRescaled then
+        passGate "modal-rail-identity" "k=0 emits the Q4.28 landing VERBATIM (byte-identical, reused kernel-cache); a loud static bank rescales to 2²⁶ (option E fires); a small-|A| deg-1 bank still lifts k via its env₂ peak (deg>0 is not amp-only) — pinned every way"
       else
-        failGate "modal-rail-identity" s!"kSmall={kSmall} (want 0) kLarge={kLarge} (want 2) smallVerbatim={smallVerbatim} largeRescaled={largeRescaled}"
+        failGate "modal-rail-identity" s!"kSmall={kSmall} (want 0) kLarge={kLarge} (want 2) kDeg={kDeg} (want 1) smallVerbatim={smallVerbatim} largeRescaled={largeRescaled}"
     | .error e, _ | _, .error e => failGate "modal-rail-identity" s!"emit: {firstLine e}"
   | .error e, _ | _, .error e => failGate "modal-rail-identity" s!"build: {firstLine e}"
 
