@@ -244,8 +244,12 @@ private def peakAbsLE (b : ByteArray) : Float × Bool := Id.run do
     sample finite, where `C` is the device-boundary bound
     (`kDeviceOutputBound`, engine/dac/TropicalDAC.hpp).
 
-    It is trivially green today (the corpus peaks at 1.807 against C = 4), and
+    It is trivially green today (the corpus peaks at 1.807 against C = 256), and
     that is the point: it exists to catch the NEXT rail before a speaker does.
+    Note what the headroom number does NOT mean: C is set by the modal
+    vocabulary's legitimate reach (≈ Q·master_gain ≈ 163 at the top of the
+    resonance knob), not by this corpus, so a large ratio here is a statement
+    about the corpus being quiet, not about the margin being safe.
     It matters MORE than it would have under the rejected design. The clamp
     deliberately does not live in the emitted kernel — the kernel's output is
     the value of `f(τ)`, read as a number by `render-bytes`, the goldens, the
@@ -261,7 +265,7 @@ private def peakAbsLE (b : ByteArray) : Float × Bool := Id.run do
     a general readout and legitimately exceed C. Bounding *them* is what the
     rejected design got wrong. -/
 def runDeviceBound : IO Bool := do
-  let bound : Float := 4.0   -- must equal kDeviceOutputBound (TropicalDAC.hpp)
+  let bound : Float := 256.0   -- must equal kDeviceOutputBound (TropicalDAC.hpp)
   let corpus := [
     "patches/reverse_reverb.json", "patches/scrub_reverb.json",
     "web/patches/pure-sine-440.json", "web/patches/ring-mod.json",

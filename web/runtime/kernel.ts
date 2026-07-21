@@ -17,7 +17,7 @@ const FADE_SAMPLES = 2048
  *  feed) and never in `render` (the equivalence surface). Must equal
  *  `kDeviceOutputBound` in engine/dac/TropicalDAC.hpp, which carries the
  *  rationale and the measurement. */
-const DEVICE_OUTPUT_BOUND = 4.0
+const DEVICE_OUTPUT_BOUND = 256.0
 
 // @llvm.round = round half away from zero — the one math op with no wasm
 // instruction (f64.nearest is ties-to-even), so the kernel imports it. Must

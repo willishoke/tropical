@@ -163,16 +163,24 @@ static void test_ir_index_ramp()
  * properties, both load-bearing:
  *
  *   BOUNDEDNESS — nothing leaves the device boundary outside [−C, C], for any
- *   input at all, including the rail-incident magnitudes (63.3) and non-finite
- *   values. This is the property the gate exists for.
+ *   input at all, including gross excursions and non-finite values. This is the
+ *   property the gate exists for.
  *
  *   BIT-TRANSPARENCY — every non-NaN value already inside [−C, C] passes
  *   through UNCHANGED, bit for bit: ±0.0 keep their signs, denormals survive,
  *   and the endpoints themselves are fixed points. This is what makes the
  *   clamp invisible to every existing golden.
  *
+ * The transparency list deliberately includes 163.5 (the modal vocabulary's
+ * legitimate peak at the top of the resonance knob, ≈ Q·master_gain) and 233.7
+ * (the measured i64 modal-datapath rail incident). BOTH pass through untouched
+ * at C = 256, and the second one is an asserted non-property, not an oversight:
+ * the clamp does not and cannot discriminate that rail, because the burst and
+ * the music are the same order of magnitude. See kDeviceOutputBound. The rail
+ * is fixed at its source; this gate bounds the unbounded.
+ *
  * MUTATION: delete the clamp from TropicalDAC::fill_buffer (or widen
- * kDeviceOutputBound past 63.3) and the boundedness assertions below fail.
+ * kDeviceOutputBound past 1e9) and the boundedness assertions below fail.
  */
 static void test_device_bound_clamp()
 {
@@ -181,6 +189,8 @@ static void test_device_bound_clamp()
   // Bit-transparency below C — compare BITS, not values, so signed zero counts.
   const double transparent[] = {
     0.0, -0.0, 1.0, -1.0, 1.807261 /* the corpus peak */, -1.807261,
+    163.5 /* the modal vocabulary at res = 1: legitimate, must survive */,
+    233.7 /* the rail incident: below C, passes through — see the docstring */,
     C, -C, 4.9406564584124654e-324 /* min denormal */, -2.2250738585072014e-308,
   };
   for (double v : transparent)
@@ -192,9 +202,10 @@ static void test_device_bound_clamp()
     ASSERT(vb == gb);
   }
 
-  // Boundedness above C — including the measured rail-incident peak.
-  const double over[] = { 4.0000001, 5.0, 63.3, 64.0, 1e9,
-                          std::numeric_limits<double>::infinity() };
+  // Boundedness above C.
+  const double over[] = { 256.0000001, 257.0, 1e3, 1e9, 6.8719476736e10 /* 2^36,
+                          the hard-wrap magnitude an unrecoverable i64 rail
+                          produces */, std::numeric_limits<double>::infinity() };
   for (double v : over)
   {
     ASSERT(clamp_to_device_bound(v) == C);
@@ -209,11 +220,12 @@ static void test_device_bound_clamp()
   ASSERT(!std::isnan(got_nan));
   ASSERT(got_nan == -C);
 
-  // The bound itself: a power of two, above the measured corpus peak, and far
-  // below the rail incident it exists to catch.
-  ASSERT(C == 4.0);
-  ASSERT(C > 1.807261);
-  ASSERT(C < 63.3);
+  // The bound itself: a power of two, above the vocabulary's legitimate reach
+  // (Q = 0.55·80^res peaks at 44, times the 3.7 master gain ≈ 163), and far
+  // below a hard i64 wrap.
+  ASSERT(C == 256.0);
+  ASSERT(C > 163.5);
+  ASSERT(C < 6.8719476736e10);
 }
 
 int main()

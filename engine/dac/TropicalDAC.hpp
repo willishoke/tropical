@@ -35,13 +35,34 @@ static constexpr int kPrimeCycles = 4;
  * mirrors this exactly: `render()` (the equivalence surface) is untouched and
  * `process()` (the worklet feed) clamps — see `web/runtime/kernel.ts`.
  *
- * MEASURED at landing (2026-07-20): peak |sample| over the whole patch corpus —
+ * WHAT SETS C. Not the patch corpus. Peak |sample| over
  * `patches/{reverse_reverb,scrub_reverb}` and `web/patches/{pure-sine-440,
- * ring-mod,tz-flanger}`, 16384 samples each — is 1.807, so C = 4 is the
- * smallest power of two comfortably above it, at 2.2× headroom. For scale: the
- * i64 modal-datapath rail incident (design/modal-datapath-rail.local.md)
- * produced peaks of 63.3, 16× past this bound. The clamp is what protects the
- * interval between "this rail is fixed" and "the next rail is discovered."
+ * ring-mod,tz-flanger}` is only 1.807 (measured 2026-07-20, 16384 samples
+ * each), and C = 4 shipped on that basis — but that corpus contains no modal
+ * playground patches, and the modal vocabulary legitimately reaches far higher.
+ * A resonant lowpass has Q gain at resonance: `filterPair` maps
+ * `res ↦ Q = 0.55·80^res`, the composed modal coefficient is `|A| ≈ Q`, and the
+ * rendered peak is `≈ Q · master_gain`. At the top of the resonance knob
+ * (res = 1, Q = 44, master gain 3.7) that is ≈ 163 — spike-free, correct, and
+ * exactly the physics of a driven high-Q resonator. C = 4 would have hard-clipped
+ * the top of a shipped knob by 20×. C = 256 is the smallest power of two above
+ * the vocabulary's legitimate reach.
+ *
+ * C IS A HAZARD BOUND, NOT A LEVEL CONTROL. This follows `defaultSinkGain`'s
+ * own committed position — amplitude is a frontend concern; the backend invents
+ * no headroom scale of its own. C exists to stop the unbounded (∞, NaN, a 1e9
+ * excursion from a datapath defect), not to voice the instrument.
+ *
+ * AND IT CANNOT DISCRIMINATE THE MODAL RAIL — stated plainly because the
+ * temptation to believe otherwise is the whole hazard. The i64 modal-datapath
+ * incident (design/modal-datapath-rail.local.md) renders peaks of ≈ 234 on the
+ * production path, which is BELOW this C and therefore passes the clamp
+ * untouched. That is not a hole to close by lowering C: the incident's peak and
+ * the vocabulary's legitimate peak are the same order (234 vs 163, a factor of
+ * 1.4), because both are `≈ Q · gain` — no value of C admits the instrument and
+ * rejects the burst. The rail is fixed at its source (per-bank landing exponent);
+ * the clamp is defense in depth against the NEXT defect, whose magnitude is
+ * unknown and may be unbounded. Do not re-tune C to chase a known rail.
  *
  * NaN maps to −C: the first comparison is false on NaN, so the low arm takes
  * −C, which then passes the high arm. Ordered-compare + select rather than
@@ -49,7 +70,7 @@ static constexpr int kPrimeCycles = 4;
  * and leave signed zero unspecified. Exact for every non-NaN value in [−C, C],
  * including −0.0 and denormals.
  */
-static constexpr double kDeviceOutputBound = 4.0;
+static constexpr double kDeviceOutputBound = 256.0;
 
 static inline double clamp_to_device_bound(double x)
 {
