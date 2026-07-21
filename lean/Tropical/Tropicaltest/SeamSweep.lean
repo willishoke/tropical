@@ -193,14 +193,32 @@ private def idWarp : Float → Float := fun s => s
 
 /-- `residueComposeEC` — the collected residue bank (`voice ⋙ reverb`, m+n
     modes), realized through the default banked lowering. Total composition; the
-    admission predicate marks where the collected `1/Δ` amp stays inside the
-    Q4.28 headroom (`|a·r/Δ| < 8` ⟺ `|Δ|·8 > |a·r|`) — below it is
-    `residueComposeDD`'s region, not EC's promise (passive exclusion). -/
+    admission predicate marks where EC's `1/Δ` residue stays ACCURATE — below it
+    is `residueComposeDD`'s region, not EC's promise (passive exclusion).
+
+    RE-DERIVED (option E, the modal-datapath rail fix). This predicate ONCE
+    conflated two boundaries under one `|a·r/Δ| < 8` threshold: the i64 Q4.28
+    WRAP (a collected weight past 32 — `modalBankSigTable`'s landing) and the
+    near-coincidence ACCURACY floor (EC's `1/Δ` forms two huge opposite-sign
+    residues whose landed cancellation loses precision). Option E's per-bank
+    exponent (`bankLandExp`) removed the wrap for ALL |A|, so this predicate no
+    longer guards it — that boundary is now covered on the PRODUCTION path by the
+    `modal-rail`/`modal-rail-dir` witnesses (the real gesture, stronger than a
+    sweep probe). What remains is the accuracy boundary, and that is genuinely
+    PER-PAIR-LOCAL — accuracy degrades when ONE voice pole nears ONE room pole
+    (`λ_j → ν` ⇒ residue `a_j·r/(λ_j−ν) → ∞`, its cancellation error growing with
+    the landed magnitude even at zero wrap), unlike the wrap which was collective.
+    So the rail doc's collected-sum unsoundness applied to the WRAP (now fixed);
+    the per-pair form is SOUND for the accuracy purpose it now serves alone. The
+    `8` stays as the empirical EC-accurate edge (where DD takes over), no longer
+    a Q4.28-headroom number. -/
 private def ecAtom : SeamAtom :=
   { name := "residueEC"
     phi := idWarp
     realize := fun v r => modalBankSigTable (residueComposeEC (v.map (·.toModal)) (r.map (·.toModal))) clockLit anchorSig
     admitsPair := fun v r =>
+      -- EC's accuracy edge: the per-pair 1/Δ residue below DD's coincidence region
+      -- (`|a·r/Δ| < 8`). NOT a wrap bound — option E removed that (see the header).
       let dpole := (v.pole.sub r.pole).abs
       let amp := (v.amp.mul r.amp).abs
       dpole * 8.0 > amp
