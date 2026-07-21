@@ -409,6 +409,24 @@ def runBanksCountCache (arena : Arena)
     else
       failGate "banks-count-cache" s!"knobInvariant={knobInvariant} capMoves={capMoves}"
 
+/-- Build the resonator → reverb → out patch graph as Json (the dir-landing path:
+    a `reverb` node attaches a `ModalDir` unconditionally, so it routes through
+    `modalBankSigDirTable`). `rt60` is a `.raw` slot, so the value sets its default. -/
+private def reverbPatchJson (srcF srcDecay : Int) (rtM : Int) (rtE : Nat) : Lean.Json :=
+  let node := fun (id kind : String) (params : List (String × Lean.Json))
+                  (ins : List (String × Lean.Json)) =>
+    Lean.Json.mkObj <|
+      [("id", Lean.Json.str id), ("kind", Lean.Json.str kind),
+       ("params", Lean.Json.mkObj params)] ++
+      (if ins.isEmpty then [] else [("in", Lean.Json.mkObj ins)])
+  Lean.Json.mkObj [
+    ("nodes", Lean.Json.arr #[
+      node "res" "resonator" [("freq", Lean.Json.num (jn srcF)), ("decay", Lean.Json.num (jn srcDecay))] [],
+      node "rev" "reverb" [("rt60", Lean.Json.num (jn rtM rtE))]
+        [("in", Lean.Json.arr #[Lean.Json.str "res"])],
+      node "out" "out" [] [("in", Lean.Json.arr #[Lean.Json.str "rev"])]]),
+    ("out", Lean.Json.str "out")]
+
 /-- Build the resonator → filter → out patch graph as Json. -/
 private def filterPatchJson (fc : Int) (resM : Int) (resE : Nat) (srcF srcDecay : Int) : Lean.Json :=
   let node := fun (id kind : String) (params : List (String × Lean.Json))
@@ -568,6 +586,98 @@ def runModalRail (arena : Arena)
       passGate "modal-rail" s!"the top of the resonance knob renders SMOOTH through the fix (res 0.91 & 0.95 both spike-free; control peak {pkG} proves the discriminator sees loud≠broken) — the i64 landing rail is gone on the production path"
     else
       failGate "modal-rail" s!"spikes green={spG} red={spR} (want 0/0), finite {finiteG}/{finiteR}, control peak {pkG} (want >50) — the datapath wraps or the render is trivial"
+
+/-- THE MODAL DIR-RAIL WITNESS (option E, the reverb/dir-path red witness). The
+    `modalBankSigDirTable` landing had ZERO rail coverage, yet every `reverb` node
+    in the vocabulary routes through it (`reverb` attaches a `ModalDir`
+    unconditionally, unlike `filter`), so the same i64 wrap lived there unwitnessed.
+    At the default dir knob (0) the dir table reduces to its forward accumulator,
+    whose per-mode Q4.28 landing is the SAME overflow site as the plain table.
+
+    The gesture: `resonator(60,4) ⋙ reverb(rt60) ⋙ out`. The reverb room mode 0
+    sits at EXACTLY 60 Hz and resonator partial 1 at 1·60 Hz, so the poles coincide
+    in frequency and |Δ| collapses to |Δσ|; sweeping rt60 through the punctured
+    neighbourhood of the coincidence (σ_room = 6.91/rt60 crossing σ_res = decay·1.4
+    = 5.6 at rt60 ≈ 1.234) drives the collected |A| past the rail.
+
+    MEASURED on the production dir path (the derivation lab, fix forced off):
+    the red set is ERRATIC — the wrap needs differing per-mode wrap counts, so it
+    is necessary-not-sufficient and fires only at some rt60 in the neighbourhood
+    (rt60 1.230/1.236/1.238 → peak ≈237 with 15/3/21 spikes; the exact-coincidence
+    1.232/1.234 stay benign — the point itself yields a deg-1 mode on the unrolled
+    path, and benign wrap-parity pockets sit between). So the red arm is a
+    MEASURED rt60 (1.238, the strongest), never a derived threshold.
+
+    - GREEN CONTROL rt60 = 2.0 — peak ≈0.30, spikes 0 (far from coincidence).
+    - RED ARM rt60 = 1.238 — pre-fix peak 237 / 21 spikes; post-fix peak ≈0.28 / 0
+      spikes. Near coincidence the CORRECT reverb output is quiet (the ±c/Δ
+      residues cancel in the sum), so unlike the filter witness a peak bound is a
+      safe secondary catch here (the wrap's 237 is the anomaly, not the music).
+
+    MUTATION-VERIFIED: revert the dir landing to `lit 268435456`/`lit 28` and the
+    rt60-1.238 arm returns to 21 spikes / peak 237 → RED. -/
+def runModalRailDir (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match ← renderFilterPatch arena resolved (reverbPatchJson 60 4 2 0) 4096,
+        ← renderFilterPatch arena resolved (reverbPatchJson 60 4 1238 3) 4096 with
+  | .error e, _ | _, .error e => failGate "modal-rail-dir" s!"render: {e}"
+  | .ok green, .ok red =>
+    let (pkG, spG) := spikeStats green
+    let (pkR, spR) := spikeStats red
+    let finiteG := green.all (·.isFinite)
+    let finiteR := red.all (·.isFinite)
+    IO.println s!"        resonator(60,4) ⋙ reverb(rt60) ⋙ out, production dir path (60 Hz pole coincidence):"
+    IO.println s!"        rt60 2.0 (green control)  : peak={pkG} spikes={spG} finite={finiteG}"
+    IO.println s!"        rt60 1.238 (red arm)      : peak={pkR} spikes={spR} finite={finiteR}"
+    if spG == 0 && spR == 0 && finiteG && finiteR && pkG > 0.05 && pkR < 10.0 then
+      passGate "modal-rail-dir" s!"the reverb dir landing survives the 60 Hz pole coincidence (rt60 1.238 spike-free, peak {pkR} — the pre-fix ±237 wrap is gone; control rt60 2.0 renders) — the i64 rail is fixed on the dir path too"
+    else
+      failGate "modal-rail-dir" s!"spikes green={spG} red={spR} (want 0/0), finite {finiteG}/{finiteR}, control peak {pkG} (>0.05), red peak {pkR} (want <10 — the wrap is ≈237)"
+
+open Tropical.EmitArrow in
+/-- THE OPTION-E STRUCTURAL-IDENTITY gate — the anchor that makes "when max|A| < 32,
+    k = 0 and NOTHING moves" TESTABLE (no frozen plan/IR hash exists on the
+    EmitArrow modal-island path, so nothing else would catch a k=0 drift). Two
+    ALL-LITERAL-amp banks, so `bankLandExp` takes the STATIC path and `k` is a
+    compile-time `Nat` decided here — no dynamic machinery, no live slots:
+
+    - SMALL amps (L1 max 0.2 < 32) ⇒ `k = 0` ⇒ the landing is `·2²⁸` / `>>28`
+      VERBATIM: the emitted IR carries the pre-fix double `0x41B0000000000000`
+      (= 2²⁸) at the weight multiply — byte-identical structure, so the JIT reuses
+      the pre-fix kernel-cache object (the cache keys on md5 of the IR text).
+    - LARGE amps (L1 max 100) ⇒ `k = ⌊log₂ 100⌋ − 4 = 2` ⇒ the landing rescales to
+      `·2²⁶` (`0x4190000000000000`) and the 2²⁸ constant is ABSENT: option E fires
+      statically, exactly as the dynamic path does at knob rate.
+
+    Pins both directions at once. MUTATION-VERIFIED: force `bankLandExp` to
+    `.static 0` and the large bank keeps the 2²⁸ landing (option E stops firing) →
+    the `k=2`/`2²⁶` assertions go RED. -/
+def runModalRailIdentity (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let mkModes := fun (amp : Sig) => (Array.range 6).map fun i =>
+    ModalMode.hz (lit (Int.ofNat (220 + 40 * i))) (lit 30 1) amp
+  let small := mkModes (lit 2 1)      -- amp 0.2 ⇒ maxAbs 0.2 < 32 ⇒ k = 0
+  let large := mkModes (lit 100)      -- amp 100  ⇒ maxAbs 100    ⇒ k = 2
+  let hasSub := fun (s sub : String) => (s.splitOn sub).length != 1
+  let land2p28 := "0x41b0000000000000"   -- 2²⁸, the verbatim Q4.28 landing (lowercase hex)
+  let land2p26 := "0x4190000000000000"   -- 2²⁶, the k=2 landing
+  let kSmall := match bankLandExp small with | .static k => some k | .dynamic _ => none
+  let kLarge := match bankLandExp large with | .static k => some k | .dynamic _ => none
+  match buildAndFinish (.ok (buildModalBankTable "id_small" small (lit 200) arena)),
+        buildAndFinish (.ok (buildModalBankTable "id_large" large (lit 200) arena)) with
+  | .ok pSmall, .ok pLarge =>
+    match Tropical.Ir.EmitLlvm.emitKernel pSmall, Tropical.Ir.EmitLlvm.emitKernel pLarge with
+    | .ok irSmall, .ok irLarge =>
+      let smallVerbatim := hasSub irSmall land2p28    -- k=0 keeps 2²⁸
+      let largeRescaled := hasSub irLarge land2p26 && !(hasSub irLarge land2p28)  -- k=2 ⇒ 2²⁶, no 2²⁸
+      IO.println s!"        static banks: small amp 0.2 ⇒ k={kSmall} (want 0), large amp 100 ⇒ k={kLarge} (want 2):"
+      IO.println s!"        small IR keeps 2²⁸ landing={smallVerbatim} · large IR rescales to 2²⁶ & drops 2²⁸={largeRescaled}"
+      if kSmall == some 0 && kLarge == some 2 && smallVerbatim && largeRescaled then
+        passGate "modal-rail-identity" "k=0 emits the Q4.28 landing VERBATIM (byte-identical plan, reused kernel-cache); a loud static bank rescales to 2²⁶ (option E fires) — the 'nothing moves at k=0' claim is now pinned both ways"
+      else
+        failGate "modal-rail-identity" s!"kSmall={kSmall} (want 0) kLarge={kLarge} (want 2) smallVerbatim={smallVerbatim} largeRescaled={largeRescaled}"
+    | .error e, _ | _, .error e => failGate "modal-rail-identity" s!"emit: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "modal-rail-identity" s!"build: {firstLine e}"
 
 open Tropical.EmitArrow in
 /-- THE MODAL ADDRESS gate. A resonator's `addr` inlet: a patched CF signal BECOMES

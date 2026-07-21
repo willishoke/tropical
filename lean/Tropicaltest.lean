@@ -433,6 +433,12 @@ def main (args : List String) : IO UInt32 := do
     if !(← runModalRail arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← runModalRailDir arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalRailIdentity arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← runModalAddr arena resolved) then
       failed := failed + 1
     total := total + 1
