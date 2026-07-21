@@ -727,6 +727,55 @@ def bloomPhiKappaOverG (aC kappa cfK : CplxB) (dCoef : Array CplxB) (g : Float) 
     let w := aC.mul waOverA
     ((((CplxB.exp kappa).mul (cexpm1B w)).mul waOverA).sub cfK).scale (1.0 / g)
 
+-- ── The ROOM-CHAIN FOLD divided difference (WS-DDF) ───────────────────────────
+-- A bloomed voice crossing a reverb CHAIN reassociates as (fold room1|>room2, then
+-- cross the bloom once). The fold's collected residues carry a 1/Δ over the ROOM
+-- poles (Δ = ν1−ν2); near-coincident rooms (two rooms sharing a mode region) drive
+-- the residue `c/Δ` out of Q4.28 range as a VALUE (|c/Δ| > 8). MEASURED QUALIFIER
+-- (the `ddfold` gate, arm A): at the BLOOMED site that does not yet break the
+-- render — the bloom's per-sample K factor (≈ M(κ)/(gα) ≈ 1e-3 for rooms far from
+-- the voice) divides the huge residue back down before anything lands, so the
+-- collected fold stays finite to Δ ~ 1e-5 rad/s. The premise holds unqualified only
+-- at the BARE-residue site (`modal_divdiff`'s D_dd2, where the residue lands with
+-- no K factor in front of it). The fix below is the correct, modestly-tighter
+-- form — and the transfer datum — not an urgent repair. The fix: the chain is
+-- the DIVIDED DIFFERENCE of the bloom cross over the two room poles,
+--   chain(d) = c·[Y0(μ,ν1;d) − Y0(μ,ν2;d)]/(ν1−ν2),
+-- and since ν1≈ν2 ⟹ a1≈a2 it decomposes (cockpit `demos/modal_ddfold.py`, D_df2/3):
+--   chain/c = e^{ν2 d}·[K1(a1)·d·cexpm1(Δd) + DDa(K1)/g] + DDa(K2)(z)/g·e^{μφ(d)}
+-- reusing atom four's KIND of machinery one axis over — cexpm1 on the ν2 carrier,
+-- an a-divided-difference on the Γ-bridge constants (SERIES side only: the rooms are
+-- separated from the voice, |a|≫0, so `|a+1| ≥ |z|` throughout; no CF branch, no Γ★).
+
+/-- The general-a a-divided-difference coefficients `Qₙ` (WS-DDF): `DDa(M(1,a+1,·))
+    = Σ_{n≥1} Qₙ xⁿ`, the divided difference over two nearby a-values `a1, a2`
+    (`aⱼ = (νⱼ−μ)/g` for a near-coincident ROOM pair). The stable recurrence never
+    forms `M(a1)−M(a2)`:
+      `Qₙ = Qₙ₋₁/(a2+n) − Pₙ₋₁/((a1+n)(a2+n))`, `Q₀ = 0`, `Pₙ = Pₙ₋₁/(a1+n)`, `P₀ = 1`.
+    → `−Pₙ·Hₙ` (the a-derivative) at `a1 = a2`. The WS-DDF sibling of `bloomDCoef`
+    (the a≈0, differ-against-`eˣ` instance); this is the general-a form for the
+    room-chain FOLD's divided difference. Cockpit `demos/modal_ddfold.py` (D_df3,
+    float64 vs mpmath ~8e-14). -/
+def bloomFoldQCoef (a1 a2 : CplxB) (n : Nat) : Array CplxB := Id.run do
+  let mut out : Array CplxB := #[]
+  let mut pPrev : CplxB := ⟨1, 0⟩   -- P₀
+  let mut qPrev : CplxB := ⟨0, 0⟩   -- Q₀
+  for k in [1:n+1] do
+    let kf := k.toFloat
+    let a1k := a1.add ⟨kf, 0⟩
+    let a2k := a2.add ⟨kf, 0⟩
+    let qk := (qPrev.div a2k).sub (pPrev.div (a1k.mul a2k))
+    out := out.push qk
+    pPrev := pPrev.div a1k
+    qPrev := qk
+  return out
+
+/-- `DDa(M(1,a+1,x)) = Σ_{n≥1} Qₙ xⁿ = x·Horner(Q)` over the baked `Qₙ`
+    (`bloomFoldQCoef`) — build-time at `x = κ` (the `ddK1` constant), per-sample at
+    `x = z(d)` in the realizer. -/
+def bloomFoldDDaM (qcoef : Array CplxB) (x : CplxB) : CplxB :=
+  x.mul (qcoef.foldr (fun q h => q.add (x.mul h)) ⟨0, 0⟩)
+
 /-- Fold an authored-constant `Sig` back to its `Float` (the baked-pole read in
     `bloomCompose`). Partial: `none` on any live/unsupported node — a live pole
     is outside the v1 baked-pole contract, not an error to paper over. -/
@@ -1115,6 +1164,155 @@ def bloomComposedSig (pairs : Array BloomPair) (clkInt anchorSamples : Sig) : Si
     already-warped clock. -/
 def bloomComposedTerm (pairs : Array BloomPair) (anchor : Sig) (c : Clock) : ArrowTerm :=
   ArrowTerm.arrUn (fun clkSig => bloomComposedSig pairs clkSig anchor) (ArrowTerm.clk c)
+
+/-- One composed (voice μ, near-coincident room PAIR (ν1, ν2)) of the WS-DDF fold
+    atom — the divided difference of the bloom cross over the two room poles. All
+    baked but the amp `c = a_voice·r1·r2` (`a_voice` live). Series side only (the
+    rooms are separated from the voice, so `|a1+1| ≥ |κ|`; no CF branch, no Γ★). -/
+structure BloomFoldPair where
+  muSigma  : Float
+  muOmega  : Float
+  nu1Sigma : Float
+  nu1Omega : Float
+  nu2Sigma : Float
+  nu2Omega : Float
+  bloomB   : Float
+  gRate    : Float
+  c        : CplxE          -- a_voice · r1 · r2  (live amp)
+  kappa    : CplxB
+  k1a1     : CplxB          -- K1(a1) = M(1,a1+1,κ)/(g·a1)   (the ν2-carrier's baked coeff)
+  ddK1g    : CplxB          -- DDa(K1)/g = DDa(M/a;κ)/g²      (the ν2-carrier's const term)
+  invA1a2  : CplxB          -- 1/(a1·a2)   (per-sample DDa(K2) assembly)
+  invA2    : CplxB          -- 1/a2
+  invA     : Array CplxB    -- 1/(a1+k), k = 1..N   (M(a1;z) Horner, per-sample)
+  qCoef    : Array CplxB    -- Qₙ, n = 1..N         (DDa(M;z) Horner, per-sample)
+deriving Inhabited
+
+/-- `bloomedVoice ⋙ (room1 ⋙ room2)` for a NEAR-COINCIDENT room pair — the WS-DDF
+    fold atom. The chain is the divided difference of the bloom cross over the two
+    room poles; each voice mode μ crosses the pair (ν1, ν2) into a `BloomFoldPair`
+    carrying the `cexpm1`-carrier + a-DD constants (build-time; the a-DD is the
+    general-a `bloomFoldQCoef` sibling of atom four's `bloomDCoef`). `r1`, `r2` are
+    single baked room modes (the two filters folding); the voice bank's amps stay
+    live. `none` if a live pole reaches the baked-pole contract; a voice mode too
+    close to the rooms (`|a| < ½` or CF side `|a+1| < |κ|`) or over the 300 depth cap
+    is skipped (graceful — that mode is out of the series-side v1 scope). -/
+def bloomFoldCompose (voice : Array ModalMode) (r1 r2 : ModalMode) (B g : Float) :
+    Option (Array BloomFoldPair) := Id.run do
+  let some r1Sig := sigConstF? r1.sigma | return none
+  let some r1Om  := sigConstF? r1.omega | return none
+  let some r1Cre := sigConstF? r1.cre   | return none
+  let some r1Cim := sigConstF? r1.cim   | return none
+  let some r2Sig := sigConstF? r2.sigma | return none
+  let some r2Om  := sigConstF? r2.omega | return none
+  let some r2Cre := sigConstF? r2.cre   | return none
+  let some r2Cim := sigConstF? r2.cim   | return none
+  let nu1 : CplxB := ⟨-r1Sig, r1Om⟩
+  let nu2 : CplxB := ⟨-r2Sig, r2Om⟩
+  let r1r2 := (⟨r1Cre, r1Cim⟩ : CplxB).mul ⟨r2Cre, r2Cim⟩
+  let mut out : Array BloomFoldPair := #[]
+  for v in voice do
+    let some vSig := sigConstF? v.sigma | return none
+    let some vOm  := sigConstF? v.omega | return none
+    let mu : CplxB := ⟨-vSig, vOm⟩
+    let a1 := (nu1.sub mu).scale (1.0 / g)
+    let a2 := (nu2.sub mu).scale (1.0 / g)
+    let kappa := mu.scale B
+    let aP1 := a1.add ⟨1, 0⟩
+    -- series-side admission: rooms separated from the voice (no CF branch, no Γ★).
+    if a1.abs < 0.5 || a2.abs < 0.5 || aP1.abs < kappa.abs then continue
+    let (_, nRaw) := bloomM1 a1 kappa
+    let nDepth := nRaw + 8    -- M(a1;z) depth; the a-DD's Hₙ factor is a small (~log) tail
+    if nDepth > 300 then continue
+    let qCoef := bloomFoldQCoef a1 a2 nDepth
+    let invA := (Array.range nDepth).map (fun k => CplxB.div ⟨1, 0⟩ (a1.add ⟨(k + 1).toFloat, 0⟩))
+    let (mK1, _) := bloomM1 a1 kappa                     -- M(a1;κ)
+    let ddMκ := bloomFoldDDaM qCoef kappa                -- DDa(M;κ) = Σ κⁿ Qₙ
+    let invA1a2 := CplxB.div ⟨1, 0⟩ (a1.mul a2)
+    let invA2 := CplxB.div ⟨1, 0⟩ a2
+    -- DDa(M/a;κ) = −M(a1;κ)/(a1 a2) + DDa(M;κ)/a2 ; k1a1 = M(a1;κ)/(g a1)
+    let ddMaκ := (mK1.mul invA1a2).neg.add (ddMκ.mul invA2)
+    out := out.push {
+      muSigma := vSig, muOmega := vOm
+      nu1Sigma := r1Sig, nu1Omega := r1Om, nu2Sigma := r2Sig, nu2Omega := r2Om
+      bloomB := B, gRate := g
+      c := cmulE v.ampE (cplxLitE r1r2)
+      kappa
+      k1a1 := mK1.div (a1.scale g)
+      ddK1g := ddMaκ.scale (1.0 / (g * g))
+      invA1a2, invA2, invA, qCoef }
+  return some out
+
+/-- The WS-DDF fold-atom bank as a pure `Sig` over the clock: per pair, TWO carriers
+    (the ν2 ring `e^{ν2 d}` on the straight clock, the bloomed voice `e^{μφ(d)}` on
+    the offset clock — as `bloomComposedSig`), weighted by the divided-difference
+    form. The ν2-carrier weight is `K1(a1)·d·cexpm1(Δd) + ddK1/g` (the `cexpm1`
+    secular over Δ = ν1−ν2, the `modalBankSigTableDD` shape); the voice-carrier
+    weight is `DDa(K2)(z)/g = −DDa(M/a;z)/g²` per sample — `M(a1;z)` via the `invA`
+    Horner, `DDa(M;z) = Σ zⁿ Qₙ` via the `qCoef` Horner. Weights land Q4.28,
+    carriers exact Q2.30. Causal gate on `clkRel > 0`.
+
+    RANGE (the WS-AA range lens' standing obligation, adopted 2026-07-20 —
+    `design/seam-hardening-remainder-handoff.local.md` §2). **Rail**: the landing is
+    `|w|·env·2²⁸` against a Q2.30 rotator in i64, so `|w|·env·2⁵⁸ < 2⁶³` ⇒ **per
+    lane `|w|·env < 32`** — the shared modal-datapath rail
+    (`design/modal-datapath-rail.local.md`; note `|w| > 32` is *necessary, not
+    sufficient*: failure additionally needs differing per-mode wrap counts).
+    **Reachable max**: NOT bounded by this atom's admission, which is a
+    pole-DISTANCE test (`|a| ≥ ½`, `|a+1| ≥ |κ|`) — exactly the class the rail doc
+    §(3) declares unsound. `ddK1g` carries the Kummer a-poles at `a₁ = −2, −3, …`,
+    which admission does not exclude; an admitted config with `|a₁+3| = 0.002` lands
+    ≈ 2.8e3, ~87× past the rail (in two equal-and-opposite lanes that cancel to
+    ~1e-3 in the sum — a pure RANGE defect, not a math defect). Not reachable from
+    any surface today: `bloomFoldCompose` has no caller outside the `ddfold` gate,
+    and no Playground room bakes its poles into this shape. Routed to the option-E
+    landing (remainder-handoff §1) per the role-split rule — no red witness lands
+    before the fix. This predicate is `classifyBloomPair`'s shipped one transcribed
+    a site over, so the exposure is INHERITED, not introduced; the atom-specific
+    delta is that the divided difference is ~70× more exposed than its `k1a1`
+    sibling at the same pole distance. -/
+def bloomFoldComposedSig (pairs : Array BloomFoldPair) (clkInt anchorSamples : Sig) : Sig :=
+  let clkRel := relClockQ clkInt anchorSamples
+  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
+  let dPos := clampE dSec (lit 0) (lit 1000000)
+  let one : CplxE := (lit 1, lit 0)
+  let land := fun (env : Sig) (w : CplxE) (ph : Sig) =>
+    rshift (sub (mul (toIntE (mul (mul env w.1) (lit 268435456))) (fixedCosCycSig ph))
+                (mul (toIntE (mul (mul env w.2) (lit 268435456))) (fixedSinCycSig ph))) (lit 28)
+  let bankQ := pairs.foldl (fun acc p =>
+    let eg := expSig (neg (mul (litF p.gRate) dPos))
+    let z : CplxE := (mul (litF p.kappa.re) eg, mul (litF p.kappa.im) eg)
+    let off := mul (litF p.bloomB) (sub (lit 1) eg)
+    let clkW := add clkRel (toIntE (mul (mul off .sampleRate) (lit 4294967296)))
+    let phNu2 := modePhaseQ (litF p.nu2Omega) clkRel
+    let phMu := modePhaseQ (litF p.muOmega) clkW
+    let envNu2 := expSig (neg (mul (litF p.nu2Sigma) dPos))
+    let envMu := expSig (neg (mul (litF p.muSigma) (add dPos off)))
+    -- ν2-carrier weight: K1(a1)·d·cexpm1(Δd) + ddK1/g. Δ = ν1−ν2 (pole difference).
+    let w : CplxE := (mul (litF (p.nu2Sigma - p.nu1Sigma)) dPos,     -- Δ.re·d = (σ2−σ1)d
+                      mul (litF (p.nu1Omega - p.nu2Omega)) dPos)      -- Δ.im·d = (ω1−ω2)d
+    let wsq := add (mul w.1 w.1) (mul w.2 w.2)
+    let big := gt wsq (litF 0.01)
+    let wsafe : CplxE := (selectE big w.1 (lit 1), selectE big w.2 (lit 0))
+    let ewr := expSig w.1
+    let ew : CplxE := (mul ewr (cosSig w.2), mul ewr (sinSig w.2))
+    let direct := cdivE (csubE ew one) wsafe
+    let series := cexpm1SeriesE w
+    let cxΔ : CplxE := (selectE big direct.1 series.1, selectE big direct.2 series.2)   -- cexpm1(Δd)
+    let wNu := cmulE p.c (caddE (cmulE (cplxLitE p.k1a1) (scaleRealE dPos cxΔ)) (cplxLitE p.ddK1g))
+    -- voice-carrier weight: DDa(K2)(z)/g = −DDa(M/a;z)/g², M(a1;z) & DDa(M;z) Horners.
+    let mser := p.invA.foldr (fun ik h => caddE one (cmulE (cmulE z (cplxLitE ik)) h)) one   -- M(a1;z)
+    let ddMz := cmulE z (p.qCoef.foldr (fun q h => caddE (cplxLitE q) (cmulE z h)) (lit 0, lit 0))
+    let ddMaz := caddE (cnegE (cmulE mser (cplxLitE p.invA1a2))) (cmulE ddMz (cplxLitE p.invA2))
+    let wMu := cmulE p.c (scaleRealE (litF (-1.0 / (p.gRate * p.gRate))) ddMaz)
+    add acc (add (land envNu2 wNu phNu2) (land envMu wMu phMu)))
+    (litI 0)
+  selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
+
+/-- The WS-DDF fold-atom bank as a TERM over the clock leaf (rides `arrUn … (.clk c)`
+    like `bloomComposedTerm`, so master warps reach the carriers). -/
+def bloomFoldComposedTerm (pairs : Array BloomFoldPair) (anchor : Sig) (c : Clock) : ArrowTerm :=
+  ArrowTerm.arrUn (fun clkSig => bloomFoldComposedSig pairs clkSig anchor) (ArrowTerm.clk c)
 
 /-- The pitch-bloom clock warp for a BARE bloomed source (no room to cross): the
     offset `B·(1−e^{−g·d⁺})` added to the untouched integer clock — `B` already

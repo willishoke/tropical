@@ -855,4 +855,141 @@ def runSeamLaneClean (arena : Arena)
       failGate "seam-laneclean" s!"the CF-drop changed {bd} samples — the lane was NOT dead (or the render is non-finite)"
   | _, _ => failGate "seam-laneclean" "build/render failed for the lane-clean witness"
 
+-- ── WS-DDF: the near-coincident room-chain fold ───────────────────────────────
+
+/-- The STABLE oracle for the bloomed room-CHAIN: `c·∫₀^d [(e^{ν1(d−s)}−e^{ν2(d−s)})/Δ]
+    ·e^{μφ(s)} ds` per voice mode, summed, Re, sink-gained. The deg-1 folded kernel
+    (`room1 ⋙ room2` impulse response) quadratured directly — the `(·−·)/Δ` is
+    float64-accurate for the witness's MODERATE Δ (no huge residue). Composite
+    Simpson, ω on the rotator grid, matching the DUT carrier. -/
+private def oracleFoldChain (voice : Array SeamMode) (nu1p nu2p r1r2 : CplxB)
+    (B g : Float) (hdiv : Nat) (nLen : Nat := nProbe) : Array Float := Id.run do
+  let mut y : Array Float := Array.replicate nLen 0.0
+  -- match the DUT's convention: the ν2 carrier is on the rotator grid (`modePhaseQ`),
+  -- but the divided difference uses the RAW Δ (`cexpm1` divisor + slow oscillation),
+  -- so the effective ν1 = qOm(ω2) + (ω1−ω2)_raw. Quantizing ω1, ω2 SEPARATELY would
+  -- inject a ~res/Δ error into the 1/Δ-sensitive divided difference.
+  let om2 := qOm nu2p.im
+  let nu2 : CplxB := ⟨nu2p.re, om2⟩
+  let nu1 : CplxB := ⟨nu1p.re, om2 + (nu1p.im - nu2p.im)⟩
+  let dlt := nu1.sub nu2
+  for v in voice do
+    let mu : CplxB := ⟨-v.sigma, qOm v.omega⟩
+    let a  : CplxB := ⟨v.are, v.aim⟩
+    let c := (a.mul r1r2).scale sinkGain
+    let h := 1.0 / (srF * hdiv.toFloat)
+    let fint := fun (nu : CplxB) (s : Float) =>
+      CplxB.exp ((mu.scale (s + B * (1.0 - Float.exp (-g * s)))).sub (nu.scale s))
+    let mut j1 : CplxB := ⟨0, 0⟩
+    let mut j2 : CplxB := ⟨0, 0⟩
+    for i in [anchorNat + 1 : nLen] do
+      let dBase := (i - 1 - anchorNat).toFloat / srF
+      let mut s1 : CplxB := ⟨0, 0⟩
+      let mut s2 : CplxB := ⟨0, 0⟩
+      for k in [0:hdiv + 1] do
+        let w := if k == 0 || k == hdiv then 1.0 else if k % 2 == 1 then 4.0 else 2.0
+        let s := dBase + k.toFloat * h
+        s1 := s1.add ((fint nu1 s).scale w)
+        s2 := s2.add ((fint nu2 s).scale w)
+      j1 := j1.add (s1.scale (h / 3.0))
+      j2 := j2.add (s2.scale (h / 3.0))
+      let d := (i - anchorNat).toFloat / srF
+      let yc := (((CplxB.exp (nu1.scale d)).mul j1).sub ((CplxB.exp (nu2.scale d)).mul j2)).div dlt
+      y := y.set! i (y[i]! + (c.mul yc).re)
+  return y
+
+/-- Arm B's accuracy floor — MEASURED, not derived (set from the observed value at
+    landing, rounded up). Arm B carries the same Q4.28 absolute landing floor as arm
+    A against a signal of the same order (`K₁·2/|Δ| ≈ 5e-5` vs arm A's `K₁·d ≈
+    7e-5`), so the two floors sit in the same decade — but "same decade" is an
+    expectation, and the number below is an observation: arm B renders at **3.22e-3**
+    (2026-07-20), and the fail line is set at 5e-3 — ~1.5× margin, tight enough that
+    every structural mutation of the Δ-secular moves it by O(1) and trips it. -/
+private def ddfoldSeparatedFloor : Float := 5e-3
+
+/-- THE WS-DDF FOLD GATE, in TWO ARMS over one atom.
+
+    **Arm A — near-coincident** (Δ = 0.005 rad/s): the regime the atom is named
+    for. The collected fold (`residueComposeEC`) bakes a residue `c/Δ` that is out
+    of Q4.28 range as a *value* (`|c/Δ| ≈ 60 > 8`, printed below); the DD fold
+    removes it entirely. This arm asserts only that the DD form holds its law and
+    never loses to the collected form — it does **not** assert that the collected
+    form is broken. See the FINDING in the body, which measures that it is not, at
+    reachable Δ.
+
+    **Arm B — separated** (Δ = 30 rad/s, and `σ₁ ≠ σ₂` so `Δ.re ≠ 0`): the arm
+    that makes the divided-difference *structure* observable. Arm A alone cannot
+    see it: over the render window `|Δ|·d ≤ 4.4e-4`, so `cexpm1(Δd)` departs from
+    the constant `1` by only ~2e-4 while arm A's own error floor is ~2.1e-3 of
+    Q4.28 landing noise — flipping the Δ sign convention moves arm A by 3.3e-4 and
+    deleting the whole `cexpm1` select moves it by 1.7e-4, both invisible. Arm A
+    catches term *deletions*; it cannot catch the secular the atom exists to carry.
+    Arm B reaches `|Δ|·d ≈ 2.65`, so it selects the `big`/direct lane (dead in arm
+    A, which never leaves the series branch) and drives `expSig w.1` off zero for
+    the first time in any witness. MUTATION-VERIFIED on arm B: flip the Δ sign
+    convention (`Modal.lean` `w`), replace `cxΔ` by `1`, or force the series arm
+    (`big := gt wsq (litF 1e9)`) → each turns arm B RED by O(1); the last leaves
+    arm A green, which is what proves arm B is the coverage and not incidental.
+
+    Same divided-difference cure as atom four, at the fold site (WS-DDF; cockpit
+    `demos/modal_ddfold.py`; audit `design/seam-hardening-remainder-handoff` §0). -/
+def runFoldChain (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let lo := anchorNat + 1
+  let hi := nProbe
+  let (B, g) := bloomBg
+  let voice : Array SeamMode := #[mkMode 110 0.2 1.0, mkMode 353 0.56 0.6]
+  let r1 : SeamMode := mkMode 300 1.0 0.6
+  -- Arm A: the near-coincident pair (Δ = i·0.005 exactly — σ shared, so Δ.re = 0).
+  let r2 : SeamMode := { sigma := 1.0, omega := tp * 300 + 0.005, are := 0.5 }
+  -- Arm B: separated in BOTH components — Δ = (−0.7) + i·(−30), so |Δ|·d reaches
+  -- ≈ 2.65 at the window edge and the direct `cexpm1` lane is genuinely selected.
+  let r2s : SeamMode := { sigma := 1.7, omega := tp * 300 + 30.0, are := 0.5 }
+  let vM := voice.map (·.toModal)
+  let r1M := r1.toModal
+  -- One arm: the DD-fold DUT for a room pair against that pair's own stable
+  -- oracle. `oracleSelf` is the Simpson self-distance (hdiv 4 vs 8) — a QUADRATURE
+  -- convergence check, not a bound on the oracle's `1/Δ` cancellation error.
+  let runArm : String → SeamMode → IO (Option (Float × Float × Bool)) := fun tag r2m => do
+    let r1r2 := r1.amp.mul r2m.amp
+    let dut := match bloomFoldCompose vM r1M r2m.toModal B g with
+      | some pairs => bloomFoldComposedSig pairs clockLit anchorSig
+      | none => litI 0
+    let ref  := oracleFoldChain voice r1.pole r2m.pole r1r2 B g 8
+    let ref4 := oracleFoldChain voice r1.pole r2m.pole r1r2 B g 4
+    match ← renderConfig arena s!"seam_ddfold_{tag}" dut with
+    | .ok d => pure (some (relL2Win d ref lo hi, relL2Win ref4 ref lo hi, allFinite d))
+    | .error _ => pure none
+  let r1r2 := r1.amp.mul r2.amp
+  let coll := match bloomCompose vM (residueComposeEC #[r1M] #[r2.toModal]) B g with
+    | some pairs => bloomComposedSig pairs clockLit anchorSig
+    | none => litI 0
+  let refA := oracleFoldChain voice r1.pole r2.pole r1r2 B g 8
+  let resMag := (r1r2.div (r1.pole.sub r2.pole)).abs
+  match ← runArm "a" r2, ← runArm "b" r2s, ← renderConfig arena "seam_ddfold_coll" coll with
+  | some (eD, selfA, finA), some (eS, selfB, finB), .ok dC =>
+    let eC := relL2Win dC refA lo hi
+    IO.println s!"WS-DDF room-chain fold, two arms (collected residue |c/Δ|≈{resMag}):"
+    IO.println s!"        A near-coincident (Δ=0.005): DD rel {eD} · collected rel {eC} (oracle self {selfA})"
+    IO.println s!"        B separated (Δ=30, Δ.re≠0, direct cexpm1 lane): DD rel {eS} (oracle self {selfB})"
+    -- The atom's LAW: the DD fold ≡ the stable oracle within the divided-difference
+    -- floor (≈2e-3 — the chain signal is ≈ ∂Y0/∂ν, far weaker than the O(1) bloom
+    -- cross, so Q4.28's absolute floor costs more relative precision, the chain's
+    -- looser model). And it is at least as good as the collected fold. FINDING
+    -- (WS-DDF): the collected bloomed chain does NOT catastrophically break at
+    -- reachable Δ — the bloom's per-sample K factor (≈ M(κ)/(gα) ≈ 1e-3, rooms far
+    -- from the voice) scales the huge residue c/Δ DOWN before landing, so the Q4.28
+    -- overflow (modal_divdiff's D_dd2, where the residue lands directly) does not
+    -- reach the bloom cross until Δ < ~1e-5 rad/s (~1.6e-6 Hz). The DD fold is the
+    -- correct, modestly-tighter alternative; the a-DD machinery TRANSFERS (the datum).
+    if !finA || eD ≥ 3e-3 then
+      failGate "ddfold" s!"arm A (near-coincident) is off the law (rel {eD}, oracle self {selfA})"
+    else if eD > eC * 1.5 + 3e-4 then
+      failGate "ddfold" s!"arm A's DD fold ({eD}) is WORSE than the collected ({eC}) — the stable form should never lose"
+    else if !finB || eS ≥ ddfoldSeparatedFloor then
+      failGate "ddfold" s!"arm B (separated Δ, the direct cexpm1 lane) is off the law (rel {eS} ≥ {ddfoldSeparatedFloor}, oracle self {selfB}) — the Δ-secular's sign/branch is wrong"
+    else
+      passGate "ddfold" s!"the room-chain fold holds its law in both arms (A near-coincident DD {eD} ≤ collected {eC}; B separated DD {eS} on the direct cexpm1 lane); the a-DD machinery transferred to the fold site (WS-DDF datum). Finding: the bloom's K factor keeps the collected fold from breaking at reachable Δ — the wound is narrower than assumed"
+  | _, _, _ => failGate "ddfold" "build/render failed for the WS-DDF fold witness"
+
 end Tropical.Tropicaltest.SeamSweep
