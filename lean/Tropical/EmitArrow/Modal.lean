@@ -45,6 +45,100 @@ def powE (base : Sig) : Nat → Sig
   | 1 => base
   | n + 1 => mul (powE base n) base
 
+/-- Fold an authored-constant `Sig` back to its `Float` (the baked-pole read in
+    `bloomCompose`, and the static-`k` amplitude read in `bankLandExp`). Partial:
+    `none` on any live/unsupported node — a live pole is outside the v1 baked-pole
+    contract, not an error to paper over. (Hoisted above the landing sites so
+    `bankLandExp` can consult it.) -/
+private partial def sigConstF? : Sig → Option Float
+  | .num n            => some n.toFloat
+  | .unary .neg a     => (sigConstF? a).map (fun x => -x)
+  | .unary .toFloat a => sigConstF? a
+  | .binary .add a b  => do pure ((← sigConstF? a) + (← sigConstF? b))
+  | .binary .sub a b  => do pure ((← sigConstF? a) - (← sigConstF? b))
+  | .binary .mul a b  => do pure ((← sigConstF? a) * (← sigConstF? b))
+  | .binary .div a b  => do
+      let x ← sigConstF? a; let y ← sigConstF? b
+      pure (if y == 0.0 then 0.0 else x / y)
+  | _                 => none
+
+-- ── Option E: the per-bank Q-landing exponent (the modal-datapath rail fix) ────
+-- Every modal weight lands as Q4.28 (×2²⁸) and multiplies an exact Q2.30 rotator
+-- in i64, so `|w|·env·2²⁸·2³⁰ = |w|·env·2⁵⁸` wraps against i64's 2⁶³ once
+-- `|w|·env > 2⁵ = 32` — reachable from the shipped vocabulary (a resonant lowpass
+-- has `|A| ≈ Q = 0.55·80^res`, so the rail is a cap on filter Q at 32; the top
+-- ~8% of the resonance knob wraps). The cure: land the weight at `2^(28−k)` and
+-- shift back by `28−k`, with `k` chosen PER BANK from the coefficient-time
+-- amplitude so the product cannot wrap. The rendered VALUE is k-INVARIANT — the
+-- `>>(28−k)` undoes the `·2^(28−k)` exactly and `(28−k)+30−(28−k)=30` leaves the
+-- accumulator at Q2.30, so `fixedOutQ 30` is unchanged; only the quantization LSB
+-- moves. At `k=0` the emitted ops are `·2²⁸` / `>>28` verbatim — byte-identical.
+-- The i64 accumulator (`Σ oscQₘ`, each already `>>(28−k)` to Q2.30) never binds:
+-- it needs `Σₘ|Aₘ| < 2³³`, orders looser than the per-mode `32·2^k`.
+
+/-- `⌊log₂|x|⌋` for a finite nonzero `x` — the IEEE-754 unbiased exponent, the
+    exact Lean-Float mirror of the `floatExponent` op the DYNAMIC path emits (so a
+    bank that happens to be all-const and one that is live agree on `k`). -/
+private def floatExpZ (x : Float) : Int :=
+  (((x.abs.toBits >>> 52) &&& 0x7ff).toNat : Int) - 1023
+
+/-- `k = clamp(0, 28, ⌊log₂ maxAbs⌋ − 4)` as a `Nat` (the static path). Solves
+    `maxAbs < 32·2^k`, so `maxAbs < 32 ⇒ k = 0` (bit-identical). Non-finite or
+    `≤ 0` ⇒ `k = 0` — a silent (all-zero-amp) or degenerate bank lands verbatim,
+    and the residue calculus on finite baked poles cannot produce a non-finite amp. -/
+private def landK (maxAbs : Float) : Nat :=
+  if maxAbs ≤ 0.0 || !maxAbs.isFinite then 0
+  else
+    let e := floatExpZ maxAbs - 4
+    if e ≤ 0 then 0 else if e ≥ 28 then 28 else e.toNat
+
+/-- The per-bank Q-landing exponent `k`. STATIC when every amp answers
+    `sigConstF?` (⇒ `k` a compile-time `Nat`; `k=0` emits the landing literals
+    verbatim, a byte-identical plan and a reused kernel-cache object). DYNAMIC
+    otherwise (⇒ `k` an s0 `Sig`, hoisted to the coefficient kernel and crossing
+    to the audio kernel as a `coef:` slot). -/
+inductive LandExp where
+  | static (k : Nat)
+  | dynamic (kSig : Sig)
+
+/-- `2^(28−k)` — the Q-landing scale multiplied before `toInt`. `lit 268435456`
+    verbatim at `static 0`; `ldexp(1, 28−k)` (an exact power of two) when live. -/
+def LandExp.scale : LandExp → Sig
+  | .static k  => lit (Int.pow 2 (28 - k))
+  | .dynamic k => ldexpE (lit 1) (sub (lit 28) k)
+
+/-- `28−k` — the per-mode right shift (the operand of `rshift`). `lit 28` verbatim
+    at `static 0`. Always in `[0,28]` by construction, so the emitted `ashr`/`>>`
+    is never the out-of-range poison/UB LLVM and MSL leave undefined. -/
+def LandExp.shift : LandExp → Sig
+  | .static k  => lit (28 - k)
+  | .dynamic k => sub (lit 28) k
+
+/-- The per-bank landing exponent from a bank's mode amplitudes. The guarded
+    magnitude is `maxAbs = maxₘ(|creₘ|+|cimₘ|)`, the L1 amp norm — invariant under
+    the `modal-pair` 90° swap `(cre,cim)↦(cim,−cre)` (it just swaps the two terms),
+    so the paired Re/Im banks and the amp-rotated oracle land at one `k`. The
+    DYNAMIC `maxSig` folds the SAME per-mode amp subterms the columns are built
+    from (never a `Sig.index` column read — `Stage0` pins `arrayReg`/`loopIdx`
+    `.s1`, which would park the O(count) chain in the AUDIO kernel); its leaves are
+    `num`/`paramRef`, so it stages to fold/s0 and rides the coefficient kernel.
+    `floatExponent` is `⌊log₂⌋` and fails toward HEADROOM: `floatExponent 0 =
+    −1023 ⇒ k=0` (silent bank), `floatExponent NaN = 1024 ⇒ k=28` (max headroom),
+    never k=0-toward-the-wrap. Both paths clamp `k∈[0,28]`. -/
+def bankLandExp (modes : Array ModalMode) : LandExp := Id.run do
+  let mut mx : Float := 0.0
+  let mut allConst := true
+  for m in modes do
+    match sigConstF? m.cre, sigConstF? m.cim with
+    | some cr, some ci => let v := cr.abs + ci.abs; if v > mx then mx := v
+    | _, _ => allConst := false
+  if allConst then
+    return .static (landK mx)
+  let maxSig := modes.foldl (fun acc m =>
+    let a := add (.unary .abs m.cre) (.unary .abs m.cim)
+    selectE (gt acc a) acc a) (lit 0)
+  return .dynamic (clampE (sub (.unary .floatExponent maxSig) (lit 4)) (lit 0) (lit 28))
+
 /-- The RELATIVE clock `clkRel = clk − anchor·2³²` as an EXACT i64 subtract.
     (A float-relative clock — `toFloat(clk)/2³² − anchor` — loses mantissa bits
     as the absolute clock grows, drifting with τ.) Subtracting on
@@ -98,21 +192,23 @@ def modePhaseQFromIncr (incr clkRel : Sig) : Sig :=
 def modalBankSig (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Sig) : Sig :=
   let clkRel := relClockQ clkInt anchorSamples
   let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-  -- Q datapath: per mode, the slow scalars (envelope × residue
-  -- weight) land ONCE as Q4.28 (headroom |w| < 32, quantum 3.7e-9 ≈ −168 dB —
-  -- a tail quieter than that truncates to true silence), the oscillator values
-  -- are exact Q2.30 off the integer phase, and the mode SUM is i64 — modular,
-  -- hence associative and commutative: reordering modes cannot move a bit,
-  -- which float summation never gave us. One float scale at the boundary.
+  -- Q datapath: per mode, the slow scalars (envelope × residue weight) land ONCE
+  -- as Q(4+k).(28−k) (`le`, option E — `k=0`/Q4.28 unless the bank's collected
+  -- `|A|` crosses the i64 rail of 32; quantum 3.7e-9·2^k ≈ −168 dB at k=0 — a
+  -- tail quieter than that truncates to true silence), the oscillator values are
+  -- exact Q2.30 off the integer phase, and the mode SUM is i64 — modular, hence
+  -- associative and commutative: reordering modes cannot move a bit, which float
+  -- summation never gave us. One float scale at the boundary.
+  let le := bankLandExp modes
   let bankQ := modes.foldl
     (fun acc m =>
       let phQ := modePhaseQ m.omega clkRel
       let env := expSig (neg (mul m.sigma dSec))
       let env2 := if m.deg == 0 then env else mul (powE dSec m.deg) env
-      let wCre := toIntE (mul (mul env2 m.cre) (lit 268435456))
-      let wCim := toIntE (mul (mul env2 m.cim) (lit 268435456))
+      let wCre := toIntE (mul (mul env2 m.cre) le.scale)
+      let wCim := toIntE (mul (mul env2 m.cim) le.scale)
       let oscQ := rshift (sub (mul wCre (fixedCosCycSig phQ))
-                              (mul wCim (fixedSinCycSig phQ))) (lit 28)
+                              (mul wCim (fixedSinCycSig phQ))) le.shift
       add acc oscQ)
     (litI 0)
   selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
@@ -196,13 +292,14 @@ def modalBankSigTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
     (live? : Option Sig := none) : Sig :=
   let clkRel := relClockQ clkInt anchorSamples
   let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
+  let le := bankLandExp modes                                    -- option E: per-bank Q exponent
   let bankQ := bankFold (bankCols modes live?) fun m =>
     let phQ  := modePhaseQFromIncr (toIntE m.incr) clkRel
     let env  := expSig (neg (mul m.sigma dSec))
-    let wCre := toIntE (mul (mul env m.cre) (lit 268435456))
-    let wCim := toIntE (mul (mul env m.cim) (lit 268435456))
+    let wCre := toIntE (mul (mul env m.cre) le.scale)
+    let wCim := toIntE (mul (mul env m.cim) le.scale)
     rshift (sub (mul wCre (fixedCosCycSig phQ))
-                (mul wCim (fixedSinCycSig phQ))) (lit 28)
+                (mul wCim (fixedSinCycSig phQ))) le.shift
   selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
 
 /-- The ANALYTIC bank: the `(Re, Im)` pair of `Σ A·e^{iφ}·env` over ONE column
@@ -221,17 +318,18 @@ def modalBankSigPairTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
   let clkRel := relClockQ clkInt anchorSamples
   let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
   let cols := bankCols modes live?
+  let le := bankLandExp modes                                    -- option E: shared by Re and Im
   let body (imag : Bool) : ModeSym → Sig := fun m =>
     let phQ  := modePhaseQFromIncr (toIntE m.incr) clkRel
     let env  := expSig (neg (mul m.sigma dSec))
-    let wCre := toIntE (mul (mul env m.cre) (lit 268435456))
-    let wCim := toIntE (mul (mul env m.cim) (lit 268435456))
+    let wCre := toIntE (mul (mul env m.cre) le.scale)
+    let wCim := toIntE (mul (mul env m.cim) le.scale)
     if imag then
       rshift (add (mul wCre (fixedSinCycSig phQ))
-                  (mul wCim (fixedCosCycSig phQ))) (lit 28)
+                  (mul wCim (fixedCosCycSig phQ))) le.shift
     else
       rshift (sub (mul wCre (fixedCosCycSig phQ))
-                  (mul wCim (fixedSinCycSig phQ))) (lit 28)
+                  (mul wCim (fixedSinCycSig phQ))) le.shift
   let gate := fun q => selectE (gt clkRel (lit 0)) (fixedOutQ 30 q) (lit 0)
   (gate (bankFold cols (body false)), gate (bankFold cols (body true)))
 
@@ -505,7 +603,18 @@ def bankFoldPaired (cols : PairedBankCols) (body : PairedModeSym → Sig) : Sig 
     direct `(e^z−1)/z` (`|z|²≥thr²=0.01`, guarded so the unused branch never divides
     by ~0) and the Horner series (small `|z|`); the complex weight
     `Wc = c·(e^{νd}·d·cexpm1)` lands in Q4.28 and combines with the ν oscillator in
-    i64 — `modalBankSigTable`'s skeleton exactly, one float boundary scale. `envDf`
+    i64 — `modalBankSigTable`'s skeleton exactly, one float boundary scale.
+
+    RANGE (WS-AA range lens). **Rail**: the same i64 landing as the plain sites —
+    `|Wc|·2²⁸·2³⁰ < 2⁶³` ⇒ **per mode `|Wc| < 32`**. This is a FACTOR site: `Wc`
+    carries the per-sample `d·cexpm1(Δd)` secular, which is UNBOUNDED by a
+    coefficient-time `max|A|` (it needs the bake-time sup `min(2/|Δ|, 1/(e·σ_min))`),
+    so the plain `bankLandExp` does NOT reach it. **Reachable max**: not bounded by
+    admission (a pole-DISTANCE test). **DEFERRED, not fixed** (remainder-handoff §1):
+    this is a fixture-only site — no Playground surface routes through
+    `modalBankSigTableDD` (the DD dispatch is never wired into `lowerModal`), so it
+    lands nothing in production. Option E covers it when the DD wiring lands, with
+    its own measured sup and witness, per the role-split rule. `envDf`
     and `e^z` stay float (never landed); `z`'s imaginary part uses raw `ω_d·dSec`
     (the divisor needs only relative precision; the rotator phase is integer-reduced,
     consistent because `e^z` is periodic). -/
@@ -776,21 +885,6 @@ def bloomFoldQCoef (a1 a2 : CplxB) (n : Nat) : Array CplxB := Id.run do
 def bloomFoldDDaM (qcoef : Array CplxB) (x : CplxB) : CplxB :=
   x.mul (qcoef.foldr (fun q h => q.add (x.mul h)) ⟨0, 0⟩)
 
-/-- Fold an authored-constant `Sig` back to its `Float` (the baked-pole read in
-    `bloomCompose`). Partial: `none` on any live/unsupported node — a live pole
-    is outside the v1 baked-pole contract, not an error to paper over. -/
-private partial def sigConstF? : Sig → Option Float
-  | .num n            => some n.toFloat
-  | .unary .neg a     => (sigConstF? a).map (fun x => -x)
-  | .unary .toFloat a => sigConstF? a
-  | .binary .add a b  => do pure ((← sigConstF? a) + (← sigConstF? b))
-  | .binary .sub a b  => do pure ((← sigConstF? a) - (← sigConstF? b))
-  | .binary .mul a b  => do pure ((← sigConstF? a) * (← sigConstF? b))
-  | .binary .div a b  => do
-      let x ← sigConstF? a; let y ← sigConstF? b
-      pure (if y == 0.0 then 0.0 else x / y)
-  | _                 => none
-
 /-- One composed (voice μ, reverb ν) pair of the Γ-bridge atom. Everything but
     the amp is BAKED (`besselFuse`'s v1 contract: B, g and both pole sets baked —
     a change relowers; the amp `c = a_voice·r_reverb` stays a live `CplxE` and
@@ -1052,7 +1146,29 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
     select picks the cockpit-validated branch, the DD's guarded-`cexpm1`
     stance). Weights land Q4.28, carriers are exact Q2.30, the pair sum is i64
     (the `modalBankSigTableDD` skeleton). Unrolled per pair — envelope depths
-    are per-pair ragged, the non-uniform route. Causal gate on `clkRel > 0`. -/
+    are per-pair ragged, the non-uniform route. Causal gate on `clkRel > 0`.
+
+    RANGE (WS-AA range lens). **Rail**: `|env·w| < 32` PER CARRIER, PER pair (2
+    `land` calls for non-coincident pairs, 3 with the τ·e secular). A FACTOR site:
+    each `w` carries the region-selected series-M / continued-fraction / Γ★ / τ·e
+    factor, so the sup must be taken over d≥0 on the SELECTED lane only (a naive
+    both-lane sup over-estimates by ~1e10 — the unselected series-M reaches ~5e10
+    at z=κ where the selected CF weight is ~0.2). **Reachable max at every config
+    that fires today: ≪ 32** (measured: SeamSweep gong-reverb 0.005; WS-A4
+    coincident 0.27–0.92; a baked filterPair(Q44) stress config 2.48), so this
+    site is **unprotected but not broken**, and option E at k=0 is a byte-identical
+    no-op for it. **Two reasons it is NOT landed in this pass, DEFERRED to the
+    factor-site follow-on**: (a) it is GUI-DARK — `bloomCompose` requires every
+    pole to `sigConstF?`, but the Playground makes rt60/cutoff/resonance LIVE
+    slots, so the live surface never emits this (only the SeamSweep gate and
+    authored/loaded literal-pole programs do); (b) there is a reachable-by-baked-
+    poles degenerate case option E CANNOT absorb — filtering a gong ON one of its
+    own partials with a heavily-damped pole (`Re(a) ≲ −1`, `a` near a negative
+    integer) makes the series-M lane ~5e12, past the k≤28 ceiling of 32·2²⁸≈8.6e9,
+    AND the Γ★ bridge is itself semantically invalid there (the two lane-totals
+    disagree by ~1e8). Its correct remedy is a new `classifyBloomPair` admission
+    guard rejecting `Re(a) ≲ −1` to `excludedDepth`, which the factor-site landing
+    adds ALONGSIDE the per-pair exponent — not a landing-scale fix. -/
 def bloomComposedSig (pairs : Array BloomPair) (clkInt anchorSamples : Sig) : Sig :=
   let clkRel := relClockQ clkInt anchorSamples
   let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
@@ -1390,11 +1506,16 @@ def modalBankSigDir (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Si
     (dir : Sig) (dampScale? : Option Sig := none) : Sig :=
   let clkRel := relClockQ clkInt anchorSamples
   let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-  -- Q datapath, same ledger as `modalBankSig` (Q4.28 weight landings, exact
-  -- Q2.30 oscillators, i64 mode sums). The causal gates and the dir crossfade
-  -- hoist OUT of the per-mode fold: the gate condition is per-bank (same
-  -- clkRel for every mode) and the blend distributes over the sum — done once
-  -- at the float boundary instead of per mode.
+  -- Q datapath, same ledger as `modalBankSig` (Q(4+k).(28−k) weight landings via
+  -- option E's `le`, exact Q2.30 oscillators, i64 mode sums). The causal gates
+  -- and the dir crossfade hoist OUT of the per-mode fold. `le` is derived from
+  -- the AMP columns only (`bankLandExp` never reads env): the reverse arm's
+  -- `envR = e^{+σd}` is > 1 for d > 0, but that landing is DISCARDED by the
+  -- reverse `selectE` (active only for clkRel < 0, where envR ≤ 1) — its
+  -- non-taken poison must not force k upward, and the audible reverse tail is the
+  -- forward tail's time-mirror, equally |A|-bounded. So the same `le` serves both
+  -- arms and `dir=0` stays bit-identical to `modalBankSig`.
+  let le := bankLandExp modes
   let (fwdQ, revQ) := modes.foldl
     (fun (acc : Sig × Sig) m =>
       let phQ := modePhaseQ m.omega clkRel
@@ -1412,14 +1533,14 @@ def modalBankSigDir (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Si
       let envF := if m.deg == 0 then envF else mul (powE dSec m.deg) envF
       let envR := expSig sd
       let envR := if m.deg == 0 then envR else mul (powE (neg dSec) m.deg) envR
-      let wCreF := toIntE (mul (mul envF m.cre) (lit 268435456))
-      let wCimF := toIntE (mul (mul envF m.cim) (lit 268435456))
-      let wCreR := toIntE (mul (mul envR m.cre) (lit 268435456))
-      let wCimR := toIntE (mul (mul envR m.cim) (lit 268435456))
+      let wCreF := toIntE (mul (mul envF m.cre) le.scale)
+      let wCimF := toIntE (mul (mul envF m.cim) le.scale)
+      let wCreR := toIntE (mul (mul envR m.cre) le.scale)
+      let wCimR := toIntE (mul (mul envR m.cim) le.scale)
       let fwdM := rshift (sub (mul wCreF (fixedCosCycSig phQ))
-                              (mul wCimF (fixedSinCycSig phQ))) (lit 28)
+                              (mul wCimF (fixedSinCycSig phQ))) le.shift
       let revM := rshift (sub (mul wCreR (fixedCosCycSig phQN))
-                              (mul wCimR (fixedSinCycSig phQN))) (lit 28)
+                              (mul wCimR (fixedSinCycSig phQN))) le.shift
       (add acc.1 fwdM, add acc.2 revM))
     (litI 0, litI 0)
   let fwd := selectE (gt clkRel (lit 0)) (fixedOutQ 30 fwdQ) (lit 0)
@@ -1441,6 +1562,7 @@ def modalBankSigDirTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
   let clkRel := relClockQ clkInt anchorSamples
   let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
   let cols := bankCols modes live?
+  let le := bankLandExp modes                 -- option E: amp-only, shared fwd/rev (see modalBankSigDir)
   -- σ·d, optionally sway-bent (decay clock only, pitch untouched) — the same
   -- subterm both sides read, per symbolic mode.
   let sdOf := fun (m : ModeSym) =>
@@ -1449,19 +1571,19 @@ def modalBankSigDirTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
   let fwdQ := bankFold cols fun m =>
     let phQ   := modePhaseQFromIncr (toIntE m.incr) clkRel
     let envF  := expSig (neg (sdOf m))
-    let wCreF := toIntE (mul (mul envF m.cre) (lit 268435456))
-    let wCimF := toIntE (mul (mul envF m.cim) (lit 268435456))
+    let wCreF := toIntE (mul (mul envF m.cre) le.scale)
+    let wCimF := toIntE (mul (mul envF m.cim) le.scale)
     rshift (sub (mul wCreF (fixedCosCycSig phQ))
-                (mul wCimF (fixedSinCycSig phQ))) (lit 28)
+                (mul wCimF (fixedSinCycSig phQ))) le.shift
   let revQ := bankFold cols fun m =>
     -- the mirrored phase spelled out on the NEGATED clock, as in the unrolled
     -- path (the fixed sine isn't bit-symmetric; see `modalBankSigDir`).
     let phQN  := modePhaseQFromIncr (toIntE m.incr) (neg clkRel)
     let envR  := expSig (sdOf m)
-    let wCreR := toIntE (mul (mul envR m.cre) (lit 268435456))
-    let wCimR := toIntE (mul (mul envR m.cim) (lit 268435456))
+    let wCreR := toIntE (mul (mul envR m.cre) le.scale)
+    let wCimR := toIntE (mul (mul envR m.cim) le.scale)
     rshift (sub (mul wCreR (fixedCosCycSig phQN))
-                (mul wCimR (fixedSinCycSig phQN))) (lit 28)
+                (mul wCimR (fixedSinCycSig phQN))) le.shift
   let fwd := selectE (gt clkRel (lit 0)) (fixedOutQ 30 fwdQ) (lit 0)
   let rev := selectE (gt (lit 0) clkRel) (fixedOutQ 30 revQ) (lit 0)
   add (mul (sub (lit 1) dir) fwd) (mul dir rev)

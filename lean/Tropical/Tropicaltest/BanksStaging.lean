@@ -512,6 +512,63 @@ def runModalFilter (arena : Arena)
       | .error e, _ | _, .error e =>
         failGate "modal-filter" s!"(C) emit: {firstLine e}"
 
+/-- Oracle-free spike count: samples deviating from the mean of their neighbours by
+    more than 25% of peak. The rail probe's discriminator (design/prod-rail-probe):
+    a modal signal is a sum of decaying sinusoids ≤ 4.8 kHz on a 44.1 kHz grid, so
+    it is smooth by construction, while the i64 wrap's signature is ISOLATED
+    single-sample glitches. Reads 0 for every benign config INCLUDING loud ones
+    (peak 91), and jumps to hundreds exactly at the rail. Returns (peak, spikes). -/
+private def spikeStats (s : Array Float) : Float × Nat := Id.run do
+  let mut peak : Float := 0.0
+  for x in s do
+    if x.isFinite && x.abs > peak then peak := x.abs
+  let mut spikes : Nat := 0
+  if s.size ≥ 3 then
+    for i in [1:s.size-1] do
+      let d := (s[i]! - 0.5 * (s[i-1]! + s[i+1]!)).abs
+      if d > 0.25 * peak && peak > 1e-9 then spikes := spikes + 1
+  pure (peak, spikes)
+
+/-- THE MODAL RAIL WITNESS (option E, the production-path red witness). The exact
+    gesture the rail incident named: `resonator(800,4) ⋙ filter(cutoff 800, res) ⋙
+    out`, compiled through `compilePlanPure` on the PRODUCTION path (master clock,
+    anchor 0, master gain 3.7), the SAME path the shipped GUI drives. The filter's
+    amplitudes are LIVE param slots (`resonance` is a `pref` slot), so this
+    exercises option E's DYNAMIC (kernel-time) per-bank exponent — the case the
+    static path cannot reach, and the one the rail actually lives on.
+
+    Two arms on ONE knob, both MEASURED (design/prod-rail-probe.local.lean.txt):
+    - GREEN CONTROL res 0.91 — peak ≈ 91, spikes 0. Loud-but-correct: it proves
+      the discriminator distinguishes *loud* from *broken* and is not trivially
+      satisfied by silence (a peak floor guards that).
+    - RED ARM res 0.95 — pre-fix peak 234 with 211 spikes (the i64 wrap: `|A| ≈ Q =
+      0.55·80^0.95 ≈ 35` collected past the rail of 32 wraps to a ±64 full-scale
+      burst); post-fix `k = ⌊log₂ 35⌋−4 = 1` lands at Q3.27 and the ring renders
+      SMOOTH — peak ≈ 130 (the true driven-resonator output, legitimately louder
+      than the control) and spikes 0.
+
+    Discriminator is spikes, NOT peak: the correct high-Q output is LOUDER than the
+    control, so an amplitude bound would false-fail it. MUTATION-VERIFIED: revert
+    any plain-site landing to `lit 268435456`/`lit 28` and the res-0.95 arm returns
+    to hundreds of spikes → RED. -/
+def runModalRail (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match ← renderFilterPatch arena resolved (filterPatchJson 800 91 2 800 4) 4096,
+        ← renderFilterPatch arena resolved (filterPatchJson 800 95 2 800 4) 4096 with
+  | .error e, _ | _, .error e => failGate "modal-rail" s!"render: {e}"
+  | .ok green, .ok red =>
+    let (pkG, spG) := spikeStats green
+    let (pkR, spR) := spikeStats red
+    let finiteG := green.all (·.isFinite)
+    let finiteR := red.all (·.isFinite)
+    IO.println s!"        resonator(800,4) ⋙ filter(800, res) ⋙ out, production path (live amps ⇒ dynamic k):"
+    IO.println s!"        res 0.91 (green control): peak={pkG} spikes={spG} finite={finiteG}"
+    IO.println s!"        res 0.95 (red arm)      : peak={pkR} spikes={spR} finite={finiteR}"
+    if spG == 0 && spR == 0 && finiteG && finiteR && pkG > 50.0 then
+      passGate "modal-rail" s!"the top of the resonance knob renders SMOOTH through the fix (res 0.91 & 0.95 both spike-free; control peak {pkG} proves the discriminator sees loud≠broken) — the i64 landing rail is gone on the production path"
+    else
+      failGate "modal-rail" s!"spikes green={spG} red={spR} (want 0/0), finite {finiteG}/{finiteR}, control peak {pkG} (want >50) — the datapath wraps or the render is trivial"
+
 open Tropical.EmitArrow in
 /-- THE MODAL ADDRESS gate. A resonator's `addr` inlet: a patched CF signal BECOMES
     the bank's absolute time-coordinate (`modalAddrWarp`), so the causal gate — the
