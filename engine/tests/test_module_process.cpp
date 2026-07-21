@@ -11,11 +11,13 @@
  */
 
 #include "c_api/tropical_c.h"
+#include "dac/TropicalDAC.hpp"   // kDeviceOutputBound / clamp_to_device_bound
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <limits>
 #include <string>
 
 static int g_pass = 0;
@@ -151,12 +153,76 @@ static void test_ir_index_ramp()
   tropical_runtime_free(rt);
 }
 
+// ─────────────────────────────────────────────────────────────
+// The device-boundary clamp (the safety-class gate)
+// ─────────────────────────────────────────────────────────────
+
+/**
+ * `clamp_to_device_bound` is the last thing between a computed value and a
+ * speaker (TropicalDAC's callback applies it per sample, after the fade). Two
+ * properties, both load-bearing:
+ *
+ *   BOUNDEDNESS — nothing leaves the device boundary outside [−C, C], for any
+ *   input at all, including the rail-incident magnitudes (63.3) and non-finite
+ *   values. This is the property the gate exists for.
+ *
+ *   BIT-TRANSPARENCY — every non-NaN value already inside [−C, C] passes
+ *   through UNCHANGED, bit for bit: ±0.0 keep their signs, denormals survive,
+ *   and the endpoints themselves are fixed points. This is what makes the
+ *   clamp invisible to every existing golden.
+ *
+ * MUTATION: delete the clamp from TropicalDAC::fill_buffer (or widen
+ * kDeviceOutputBound past 63.3) and the boundedness assertions below fail.
+ */
+static void test_device_bound_clamp()
+{
+  const double C = kDeviceOutputBound;
+
+  // Bit-transparency below C — compare BITS, not values, so signed zero counts.
+  const double transparent[] = {
+    0.0, -0.0, 1.0, -1.0, 1.807261 /* the corpus peak */, -1.807261,
+    C, -C, 4.9406564584124654e-324 /* min denormal */, -2.2250738585072014e-308,
+  };
+  for (double v : transparent)
+  {
+    const double got = clamp_to_device_bound(v);
+    uint64_t vb, gb;
+    std::memcpy(&vb, &v, 8);
+    std::memcpy(&gb, &got, 8);
+    ASSERT(vb == gb);
+  }
+
+  // Boundedness above C — including the measured rail-incident peak.
+  const double over[] = { 4.0000001, 5.0, 63.3, 64.0, 1e9,
+                          std::numeric_limits<double>::infinity() };
+  for (double v : over)
+  {
+    ASSERT(clamp_to_device_bound(v) == C);
+    ASSERT(clamp_to_device_bound(-v) == -C);
+  }
+
+  // NaN is silenced to −C (ordered compare fails, so the low arm takes −C).
+  // Crucially it does NOT pass through: a NaN reaching a DAC is a click at
+  // best. This is the one input the clamp deliberately does not preserve.
+  const double got_nan =
+      clamp_to_device_bound(std::numeric_limits<double>::quiet_NaN());
+  ASSERT(!std::isnan(got_nan));
+  ASSERT(got_nan == -C);
+
+  // The bound itself: a power of two, above the measured corpus peak, and far
+  // below the rail incident it exists to catch.
+  ASSERT(C == 4.0);
+  ASSERT(C > 1.807261);
+  ASSERT(C < 63.3);
+}
+
 int main()
 {
   printf("test_module_process (load_ir engine)\n");
 
   run_test("constant kernel via load_ir",   test_ir_constant);
   run_test("closed-form index ramp",        test_ir_index_ramp);
+  run_test("device-boundary clamp",         test_device_bound_clamp);
 
   printf("\n  %d passed, %d failed\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;

@@ -10,6 +10,53 @@
 
 static constexpr int kPrimeCycles = 4;
 
+/**
+ * C — the device-boundary output bound. The last thing between a computed
+ * value and a speaker: `out = clamp(sample, ±C)`.
+ *
+ * This is the first SAFETY-class gate in the project. Every other gate proves
+ * agreement (wasm ≡ JIT), preservation (goldens), or law-conformance (the seam
+ * atoms); none of them bounds MAGNITUDE, and two backends can bit-agree on a
+ * speaker-destroying burst. Stateless hard min/max is the whole mechanism —
+ * closed-form, bit-transparent below C, no state, no smoothing. NOT a limiter
+ * and NOT a softclip: the purity story is swap continuity, and a hard clamp
+ * downstream of the kernel does not touch it.
+ *
+ * WHY HERE AND NOT IN THE KERNEL. The emitted kernel's output buffer is not
+ * the device boundary — it is the value of `f(τ)`, and the whole system reads
+ * it as a number: `diffcli render-bytes`, the frozen goldens, the wasm≡JIT
+ * differential, and the numeric coverage gates all consume it. `bootstrap-exp`
+ * legitimately renders exp(x) out to e^10 ≈ 22026 through the sink to check the
+ * emitted polynomial against libm. Clamping in `emitSinks` would make the
+ * compiler lie about the value of the closed-form function, and would bake an
+ * audio-specific magnitude assumption into an evaluator that is meant to stay
+ * nature-agnostic (video, control-rate). The DAC callback is where a value
+ * becomes sound, so it is where a sound-safety bound belongs. `WasmKernel`
+ * mirrors this exactly: `render()` (the equivalence surface) is untouched and
+ * `process()` (the worklet feed) clamps — see `web/runtime/kernel.ts`.
+ *
+ * MEASURED at landing (2026-07-20): peak |sample| over the whole patch corpus —
+ * `patches/{reverse_reverb,scrub_reverb}` and `web/patches/{pure-sine-440,
+ * ring-mod,tz-flanger}`, 16384 samples each — is 1.807, so C = 4 is the
+ * smallest power of two comfortably above it, at 2.2× headroom. For scale: the
+ * i64 modal-datapath rail incident (design/modal-datapath-rail.local.md)
+ * produced peaks of 63.3, 16× past this bound. The clamp is what protects the
+ * interval between "this rail is fixed" and "the next rail is discovered."
+ *
+ * NaN maps to −C: the first comparison is false on NaN, so the low arm takes
+ * −C, which then passes the high arm. Ordered-compare + select rather than
+ * std::fmin/fmax, whose IEEE minNum semantics return the *other* operand on NaN
+ * and leave signed zero unspecified. Exact for every non-NaN value in [−C, C],
+ * including −0.0 and denormals.
+ */
+static constexpr double kDeviceOutputBound = 4.0;
+
+static inline double clamp_to_device_bound(double x)
+{
+  const double lo = x > -kDeviceOutputBound ? x : -kDeviceOutputBound;
+  return lo < kDeviceOutputBound ? lo : kDeviceOutputBound;
+}
+
 static inline void update_max(std::atomic<uint64_t>& cur, uint64_t val)
 {
   uint64_t prev = cur.load(std::memory_order_relaxed);
@@ -230,7 +277,11 @@ struct TropicalDACImpl
 
     for (unsigned int i = 0; i < n_buffer_frames; ++i)
     {
-      const double sample = i < buf.size() ? buf[i] : 0.0;
+      // The device-boundary clamp — the last thing before the speaker, applied
+      // AFTER the runtime's fade envelope (which is in [0,1] and so can never
+      // defeat it). See kDeviceOutputBound.
+      const double sample =
+          clamp_to_device_bound(i < buf.size() ? buf[i] : 0.0);
       for (unsigned int c = 0; c < self->channels; ++c)
         *out++ = sample;
     }

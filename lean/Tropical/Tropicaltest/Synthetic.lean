@@ -220,6 +220,70 @@ def runGolden (writeMode : Bool) (name patchPath goldenPath : String) : IO Bool 
       if got == expected then passGate s!"{name}" s!"{got.take 16}"
       else failGate s!"{name}" s!"expected {expected.take 16} got {got.take 16}"
 
+-- ── The device-boundary early-warning gate (the safety class) ────────────────
+
+/-- Peak |sample| of a little-endian f64 render, and whether every sample is
+    finite. Folds the bytes in place — no intermediate `Array Float`. -/
+private def peakAbsLE (b : ByteArray) : Float × Bool := Id.run do
+  let n := b.size / 8
+  let mut peak : Float := 0.0
+  let mut finite := true
+  for i in [0:n] do
+    let mut u : UInt64 := 0
+    for j in [0:8] do
+      u := u * 256 + (b.get! (i * 8 + (7 - j))).toUInt64
+    let x := (Float.ofBits u).abs
+    if !x.isFinite then finite := false
+    else if x > peak then peak := x
+  pure (peak, finite)
+
+/-- THE STANDING BOUNDED-OUTPUT ASSERTION — the early-warning half of the
+    safety-class gate landed 2026-07-20.
+
+    Every audio patch in the corpus renders with `max |out| ≤ C` and every
+    sample finite, where `C` is the device-boundary bound
+    (`kDeviceOutputBound`, engine/dac/TropicalDAC.hpp).
+
+    It is trivially green today (the corpus peaks at 1.807 against C = 4), and
+    that is the point: it exists to catch the NEXT rail before a speaker does.
+    It matters MORE than it would have under the rejected design. The clamp
+    deliberately does not live in the emitted kernel — the kernel's output is
+    the value of `f(τ)`, read as a number by `render-bytes`, the goldens, the
+    wasm≡JIT differential and the numeric coverage gates, and bounding it there
+    would make the compiler lie (`bootstrap-exp` legitimately renders exp(10) ≈
+    22026 through the sink). So nothing upstream of the DAC is bounded by
+    construction, and THIS gate is what notices. Had it existed before the i64
+    modal-datapath rail incident (peaks of 63.3,
+    `design/modal-datapath-rail.local.md`) it would have caught it in CI.
+
+    Deliberately scoped to AUDIO patches — the synthetic numeric fixtures
+    (`op-coverage`, `reduce-coverage`, `bootstrap-exp`) use the output buffer as
+    a general readout and legitimately exceed C. Bounding *them* is what the
+    rejected design got wrong. -/
+def runDeviceBound : IO Bool := do
+  let bound : Float := 4.0   -- must equal kDeviceOutputBound (TropicalDAC.hpp)
+  let corpus := [
+    "patches/reverse_reverb.json", "patches/scrub_reverb.json",
+    "web/patches/pure-sine-440.json", "web/patches/ring-mod.json",
+    "web/patches/tz-flanger.json"]
+  let mut worst : Float := 0.0
+  let mut worstName := ""
+  let mut bad : Array String := #[]
+  for path in corpus do
+    if ← System.FilePath.pathExists path then
+      match ← compilePatchStaged path with
+      | .error e => bad := bad.push s!"{path}: compile {firstLine e}"
+      | .ok (plan, blocks) =>
+        let (peak, finite) := peakAbsLE (← renderTypedBytes plan blocks)
+        if !finite then bad := bad.push s!"{path}: NON-FINITE sample"
+        else if peak > bound then bad := bad.push s!"{path}: peak {peak} > C={bound}"
+        if peak > worst then worst := peak; worstName := path
+  IO.println s!"        device bound C = {bound}; worst corpus peak {worst} ({worstName})"
+  if bad.isEmpty then
+    passGate "device-bound" s!"every audio patch renders bounded and finite (worst {worst} ≤ C = {bound}, {(bound / worst)}× headroom) — the early warning for the next rail"
+  else
+    failGate "device-bound" s!"unbounded render(s): {String.intercalate "; " bad.toList}"
+
 /-- Compile a patch and emit its Metal kernel source (the EmitMsl path). -/
 private def emitMslOf (patchPath : String) : IO (Except String String) := do
   match ← compilePatch patchPath .fused with

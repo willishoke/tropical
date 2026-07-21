@@ -108,6 +108,11 @@ def main (args : List String) : IO UInt32 := do
       total := total + 1
       if !(← runGolden writeMode name patchPath s!"tests/golden/cf/{name}.hash") then failed := failed + 1
 
+  -- ── (e′) The device-boundary bound: every audio patch renders bounded ──────
+  IO.println "device boundary (the safety class):"
+  total := total + 1
+  if !(← runDeviceBound) then failed := failed + 1
+
   -- ── (f′) MSL emitter goldens: the Metal backend's codegen, text-frozen ─────
   IO.println "msl emitter (EmitMsl text-frozen + the f64 fold):"
   for (name, patchPath) in [
