@@ -1200,19 +1200,34 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
     at z=κ where the selected CF weight is ~0.2). **Reachable max at every config
     that fires today: ≪ 32** (measured: SeamSweep gong-reverb 0.005; WS-A4
     coincident 0.27–0.92; a baked filterPair(Q44) stress config 2.48), so this
-    site is **unprotected but not broken**, and option E at k=0 is a byte-identical
-    no-op for it. **Two reasons it is NOT landed in this pass, DEFERRED to the
-    factor-site follow-on**: (a) it is GUI-DARK — `bloomCompose` requires every
-    pole to `sigConstF?`, but the Playground makes rt60/cutoff/resonance LIVE
-    slots, so the live surface never emits this (only the SeamSweep gate and
-    authored/loaded literal-pole programs do); (b) there is a reachable-by-baked-
-    poles degenerate case option E CANNOT absorb — filtering a gong ON one of its
-    own partials with a heavily-damped pole (`Re(a) ≲ −1`, `a` near a negative
-    integer) makes the series-M lane ~5e12, past the k≤28 ceiling of 32·2²⁸≈8.6e9,
-    AND the Γ★ bridge is itself semantically invalid there (the two lane-totals
-    disagree by ~1e8). Its correct remedy is a new `classifyBloomPair` admission
-    guard rejecting `Re(a) ≲ −1` to `excludedDepth`, which the factor-site landing
-    adds ALONGSIDE the per-pair exponent — not a landing-scale fix. -/
+    site is **unprotected but not broken** at every config reachable today, and
+    option E at k=0 is a byte-identical no-op for it. **Two reasons it is NOT landed
+    in this pass, DEFERRED to the factor-site follow-on**: (a) it is UNREACHABLE from
+    the surface — `bloomgong` (its only surface producer) is a WITHHELD kind, rejected
+    by `Playground.checkServedKinds`; and even were it served, `bloomCompose` requires
+    every pole to `sigConstF?` while the Playground makes rt60/cutoff/resonance LIVE,
+    so only the SeamSweep gate and authored/loaded literal-pole programs emit it;
+    (b) there is a reachable-by-baked-poles case option E CANNOT absorb — filtering a
+    gong ON one of its own partials (room pole tuned to a voice partial: `Im a ≈ 0`)
+    with `a` near a negative integer `−n` (`Re a ≈ −(σ_ν−σ_μ)/g`, so a resonance
+    sweep walks `Re a` down the lattice −1,−2,…) AND large `|z|=|κ|`: there the
+    fixed-depth float64 series-M Horner catastrophically cancels (the `1/(a+k+1)`
+    factor at `k≈n−1` is near-singular — MEASURED rel error ~1e8, e.g. `|M_float|`
+    ≈ 3.7e11 vs true ≈ 971 at `a=−0.98, |κ|=76.8`), so the LANDED weight can reach
+    ~5e12–1e19, past the k≤28 ceiling of 32·2²⁸≈8.6e9. This is a CONDITIONING
+    failure of the series REALIZATION, **not** a defect in the Γ★ bridge, which is
+    EXACT there — the two lane-totals agree to 74+ digits at high precision (the
+    identity `−M(z)/(ga) − CF(z)/g = −Γ(a)z^{−a}eᶻ/g`, verified
+    `demos/bridge_verify.py`); the earlier "semantically invalid / lanes disagree by
+    ~1e8" reading conflated the float64 Horner's own cancellation error with a lane
+    disagreement. The near-integer configs are NOT incidentally depth-excluded
+    (`zBnd ≈ |a+1|` is small, so `classifyBloomPair` admits them as `crossing`). Its
+    correct remedy is a new `classifyBloomPair` admission guard rejecting a DISC
+    around each negative integer (`|a+n| ≲ ε`), NOT the half-plane `Re a ≲ −1` (which
+    excludes ~91% of the benign shipped register — measured), to a NEW `SeamRegion`
+    (not `excludedDepth`, which the coverage gate's totality assertion relies on),
+    landed ALONGSIDE the per-pair exponent — a correctness fix, not a landing-scale
+    one. -/
 def bloomComposedSig (pairs : Array BloomPair) (clkInt anchorSamples : Sig) : Sig :=
   let clkRel := relClockQ clkInt anchorSamples
   let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate

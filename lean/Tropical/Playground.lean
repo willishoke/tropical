@@ -401,11 +401,39 @@ def outletOf : String → Option PortDomain
   | "out" => none
   | _ => some .signal
 
-/-- The kinds the table covers, in schema order (`out` last — it has no outlet). -/
+/-- The kinds the table covers, in schema order (`out` last — it has no outlet).
+    The SERVED surface vocabulary: `checkServedKinds` admits exactly these; a
+    client renders them from `vocabularyJson`. -/
 def vocabularyKinds : Array String := #[
   "source", "pluck", "comb", "flange", "delay", "reverse", "fm", "sflange",
   "mix", "ring", "gong", "string", "resonator", "reverb", "filter",
   "modalmix", "knob", "out"]
+
+/-- Every kind `buildNode` actually constructs (its match arms — the AUTHORITATIVE
+    list, read straight off the arms below). The classification-drift gate and
+    `checkServedKinds` both derive from THIS, so `buildNode` cannot grow a kind the
+    vocabulary/withholding machinery has not accounted for: the drift gate asserts
+    `buildNodeKinds ⊆ vocabularyKinds ∪ withheldKinds` (every built kind is served
+    or explicitly withheld) and that no served kind drifts. (`out` is a dac sink,
+    not a `buildNode` arm — it is in `vocabularyKinds`, not here.) -/
+def buildNodeKinds : Array String := #[
+  "knob", "source", "pluck", "comb", "flange", "sflange", "fm", "delay",
+  "reverse", "mix", "ring", "resonator", "reverb", "filter", "modalmix",
+  "gong", "bloomgong", "string"]
+
+/-- Kinds `buildNode` builds but which are WITHHELD from the served surface. Their
+    modal factor-site landing (`bloomComposedSig`) still lands `lit 268435456`
+    unconditionally — no per-region sup, no admission guard for the conditioning
+    hazard when `a` is near a negative integer (the fixed-depth float64 series-M
+    Horner catastrophically cancels; see that def's RANGE block). `checkServedKinds`
+    rejects a withheld kind with an honest message rather than letting it die
+    downstream as a MISLEADING `signal→modal` type error: `outletOf` falls through
+    to `signal` for it, which DRIFTS from its modal constructed node — the exact
+    drift the `modal-class-agreement` gate now sees because it drives off
+    `buildNodeKinds`. Un-withholding one is NOT a one-line `outletOf` edit: it
+    re-admits the unguarded factor site, so it waits on the per-region-sup landing
+    (`design/seam-hardening-optionE-handoff.local.md`, the factor-site follow-on). -/
+def withheldKinds : Array String := #["bloomgong"]
 
 -- Derived views — the ONLY readers of glide/anchor/knob facts from here down.
 private def portOf (kind kname : String) : Option PortSpec :=
@@ -721,6 +749,13 @@ private def discStr : Discipline → String
 private def checkEdgeTypes (raws : Array Raw) : Except String Unit := do
   for r in raws do
     for p in portSpecs r.kind do
+      -- A knob-only port (`accepts = #[]`, `knob` set — `rt60`, `decay`, `cutoff`,
+      -- …) is a SET value, never a wired inlet. A wire into it slips past the
+      -- color loop below (empty accepts) yet makes `collectParams`' `selfWired`
+      -- SUPPRESS the slot — a silently dead knob. Reject a non-empty wire here
+      -- (an empty `in[knob]` entry is a harmless surface convention, kept legal).
+      if p.accepts.isEmpty && p.knob.isSome && !(portSources r.inObj p.name).isEmpty then
+        throw s!"connection error: '{r.id}' ({r.kind}) has a wire into '{p.name}', which is a knob (a set value), not an inlet — set it via its param slot (or wire its owner port), do not wire the knob itself"
       unless p.accepts.isEmpty do
         for srcId in portSources r.inObj p.name do
           match raws.find? (·.id == srcId) with
@@ -796,18 +831,40 @@ private def checkOutTarget (j : Json) (raws : Array Raw) : Except String Unit :=
     else throw s!"output target error: the top-level \"out\" names node '{outId}', which is not in the patch — route the dac from an existing node (or omit \"out\" for a silent patch)"
   | _ => pure ()
 
+/-- Reject a node the served surface does not cover, at the surface boundary —
+    BEFORE `checkEdgeTypes`, so the honest message wins over the misleading
+    `signal→modal` type error a WITHHELD modal kind (whose `outletOf` falls through
+    to `signal`) would otherwise die as downstream. A withheld kind (`withheldKinds`
+    — built by `buildNode` but not yet surface-ready) and a genuinely UNKNOWN kind
+    (a typo, which `buildNode`'s `_ => .mix` fallthrough would otherwise turn into
+    silent silence) each get their own message. Distinct from a legal-incomplete
+    state (an unwired inlet → silence, no error): an unknown/withheld kind is a
+    broken/unavailable document. A valid patch is untouched — every `vocabularyKinds`
+    entry (incl. `out`) passes. -/
+private def checkServedKinds (raws : Array Raw) : Except String Unit := do
+  for r in raws do
+    if withheldKinds.contains r.kind then
+      throw s!"unserved kind: '{r.id}' has kind '{r.kind}', which the engine builds but WITHHOLDS from the surface vocabulary (its modal factor-site landing has no admission guard yet) — not available as a patch node"
+    unless vocabularyKinds.contains r.kind do
+      throw s!"unknown kind: '{r.id}' has kind '{r.kind}', which is not a served node kind — see get_vocabulary for the {vocabularyKinds.size} kinds the surface builds"
+  pure ()
+
 /-- Finding-2 agreement: the connection-typing rule is decided at TWO sites.
     `checkEdgeTypes` colors an outlet through `outletOf`; the lowering decides
     modal-ness through `nodeIsModal` on the CONSTRUCTED node. Nothing forces them
     to agree, so a future kind whose `buildNode` returns a modal node but which
     lacks a modal `outletOf` case would be silently signal-colored — the checker
     would then reject modal wiring the lowering accepts (or vice-versa). This
-    builds each vocabulary kind's DEFAULT node and reports the kinds where
-    `nodeIsModal` disagrees with `outletOf … == some .modal`; `tropicaltest`
-    asserts the result empty. (`out` has no outlet and is never built — skipped.) -/
+    builds every kind `buildNode` constructs (`buildNodeKinds`, NOT just the
+    served `vocabularyKinds` — so a served-but-unlisted kind like a withheld
+    `bloomgong` is SEEN, not invisible) and reports the kinds where `nodeIsModal`
+    disagrees with `outletOf … == some .modal`. The gate then asserts no SERVED
+    kind drifts; a withheld kind may drift (that drift is why it is withheld —
+    `checkServedKinds` rejects it pre-lowering, so it can never mis-type an edge).
+    (`out` is a dac sink, never built — not in `buildNodeKinds`.) -/
 def modalClassificationDrift : Array String := Id.run do
   let mut drift : Array String := #[]
-  for kind in vocabularyKinds do
+  for kind in buildNodeKinds do
     if kind == "out" then continue
     let (node, _) := buildNode (fun _ => none) "n" kind
       (Json.mkObj []) (Json.mkObj []) (Json.mkObj [])
@@ -1056,7 +1113,8 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
     Except String (Tropical.Plan.FlatPlan × Array Tap
       × Array (Array (Option Tropical.Ir.Stage))) := do
   let raws := rawsOf j
-  checkEdgeTypes raws                                -- reject ill-typed / dangling edges pre-lowering
+  checkServedKinds raws                              -- reject withheld/unknown kinds FIRST (honest msg over the misleading type error)
+  checkEdgeTypes raws                                -- reject ill-typed / dangling / wire-into-knob edges pre-lowering
   checkAcyclic raws                                  -- reject cycles BEFORE the unbounded lowering recursion
   checkOutTarget j raws                              -- reject an "out" id that names no node
   let (g, paramTable) ← decodeGraph j

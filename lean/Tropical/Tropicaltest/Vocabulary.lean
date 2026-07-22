@@ -109,17 +109,35 @@ def runVocabDriven (arena : Arena)
     through `outletOf`, the lowering decides modal-ness through `nodeIsModal` on
     the constructed node. Nothing proves they agree, so a new modal kind missing
     an `outletOf` case would be silently signal-colored (the checker rejecting
-    wiring the lowering accepts, or the reverse). This asserts, for every
-    vocabulary kind, that `nodeIsModal(default node) ⟺ outletOf(kind) == some
-    .modal` — one meaning for "modal", pinned by a test. -/
+    wiring the lowering accepts, or the reverse). Driven off `buildNodeKinds` (every
+    kind `buildNode` constructs, not just the served table), so a served-but-unlisted
+    kind is SEEN. Asserts two properties: (1) no SERVED kind drifts —
+    `nodeIsModal(default node) ⟺ outletOf(kind) == some .modal` — one meaning for
+    "modal"; a WITHHELD kind may drift (that drift is precisely why it is withheld,
+    and `checkServedKinds` rejects it pre-lowering, so it cannot mis-type an edge);
+    (2) the three kind lists are mutually consistent — every served (non-`out`) and
+    withheld kind is BUILT, and every built kind is served-or-withheld — so
+    `buildNode` cannot grow a kind the vocabulary/withholding machinery misses. -/
 def runModalClassAgreement : IO Bool := do
-  let drift := Tropical.Playground.modalClassificationDrift
-  IO.println s!"        {Tropical.Playground.vocabularyKinds.size} kinds: nodeIsModal(node) ⟺ outletOf == modal"
-  IO.println s!"        result   {if drift.isEmpty then "every kind's outlet color agrees with its constructed node" else s!"DRIFT {drift}"}"
-  if drift.isEmpty then
-    passGate "modal-class-agreement" "outletOf (the edge checker's color) and nodeIsModal (the lowering's) agree on modal-ness for every kind — the typing rule has one meaning, not two coincidentally-equal ones"
+  let vocab    := Tropical.Playground.vocabularyKinds
+  let built    := Tropical.Playground.buildNodeKinds
+  let withheld := Tropical.Playground.withheldKinds
+  let drift    := Tropical.Playground.modalClassificationDrift          -- over `built`
+  let servedDrift   := drift.filter (fun k => !withheld.contains k)
+  let withheldDrift := drift.filter (fun k => withheld.contains k)
+  -- list-consistency: served/withheld ⊆ built, built ⊆ served ∪ withheld
+  let servedNotBuilt   := (vocab.filter (· != "out")).filter (fun k => !built.contains k)
+  let withheldNotBuilt := withheld.filter (fun k => !built.contains k)
+  let builtUnaccounted := built.filter (fun k => !vocab.contains k && !withheld.contains k)
+  let setIssues := servedNotBuilt.map (s!"served-not-built {·}")
+    ++ withheldNotBuilt.map (s!"withheld-not-built {·}")
+    ++ builtUnaccounted.map (s!"built-unaccounted {·}")
+  IO.println s!"        {built.size} built kinds: nodeIsModal(node) ⟺ outletOf == modal (served drift asserted empty)"
+  IO.println s!"        served drift {servedDrift} · withheld drift (contained, rejected pre-lowering) {withheldDrift} · list-consistency {if setIssues.isEmpty then "ok" else toString setIssues}"
+  if servedDrift.isEmpty && setIssues.isEmpty then
+    passGate "modal-class-agreement" s!"outletOf and nodeIsModal agree for every SERVED kind, and buildNodeKinds ⊆ served∪withheld (the {withheldDrift.size} withheld kind(s) may drift — rejected pre-lowering, so the drift cannot mis-type an edge)"
   else
-    failGate "modal-class-agreement" s!"kinds where outletOf and nodeIsModal disagree: {drift}"
+    failGate "modal-class-agreement" s!"servedDrift {servedDrift} · setIssues {setIssues}"
 
 /-- THE MALFORMED-DOCUMENT REJECTION gate (Findings 1 & 3). A malformed patch is a
     BROKEN document — distinct from a legal-incomplete one (an unwired inlet →
@@ -159,6 +177,23 @@ def runMalformedRejection (arena : Arena)
   let danglingOut := "{\"nodes\":[" ++
     "{\"id\":\"osc\",\"kind\":\"source\",\"params\":{\"freq\":220}}," ++
     "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"osc\"]}}],\"out\":\"typo\"}"
+  -- a WITHHELD kind (built by buildNode, not surface-served): its `bloomgong`→out
+  -- edge is color-legal by luck (modal→signal realizes), so `checkServedKinds`
+  -- must reject it FIRST, honestly — not let it reach the unguarded factor site.
+  let withheldKind := "{\"nodes\":[" ++
+    "{\"id\":\"bg\",\"kind\":\"bloomgong\",\"params\":{\"freq\":110}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"bg\"]}}],\"out\":\"out\"}"
+  -- an UNKNOWN kind (a typo): otherwise silent silence under buildNode's fallthrough.
+  let unknownKind := "{\"nodes\":[" ++
+    "{\"id\":\"x\",\"kind\":\"reverbb\",\"params\":{\"rt60\":2}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"x\"]}}],\"out\":\"out\"}"
+  -- a non-empty WIRE INTO A KNOB (`rt60` is a set value, not an inlet): slips past
+  -- the color loop (empty accepts) yet suppresses the slot — a silently dead knob.
+  let knobWire := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"k\",\"kind\":\"knob\",\"params\":{\"value\":3}}," ++
+    "{\"id\":\"rev\",\"kind\":\"reverb\",\"in\":{\"in\":[\"res\"],\"rt60\":[\"k\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"rev\"]}}],\"out\":\"out\"}"
   -- the crisp boundary: a valid modal patch still compiles.
   let valid := "{\"nodes\":[" ++
     "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
@@ -168,6 +203,9 @@ def runMalformedRejection (arena : Arena)
   let mMix := compileErr cycleMix
   let mWire := compileErr danglingWire
   let mOut := compileErr danglingOut
+  let mWithheld := compileErr withheldKind
+  let mUnknown := compileErr unknownKind
+  let mKnob := compileErr knobWire
   let mValid := match Lean.Json.parse valid with
     | .ok j => (Tropical.Playground.compilePlanPure arena resolved j).toOption.isSome
     | .error _ => false
@@ -175,16 +213,22 @@ def runMalformedRejection (arena : Arena)
   let mixOk := hasSub mMix "connection cycle"
   let wireOk := hasSub mWire "not a node in the patch"
   let outOk := hasSub mOut "output target error"
+  let withheldOk := hasSub mWithheld "unserved kind"
+  let unknownOk := hasSub mUnknown "unknown kind"
+  let knobOk := hasSub mKnob "is a knob"
   IO.println s!"        malformed patches rejected (no crash); legal-incomplete unaffected:"
   IO.println s!"        cycle(reverb self)   {mRev}"
   IO.println s!"        cycle(mix self)      {mMix}"
   IO.println s!"        dangling wire        {mWire}"
   IO.println s!"        dangling out         {mOut}"
+  IO.println s!"        withheld kind        {mWithheld}"
+  IO.println s!"        unknown kind         {mUnknown}"
+  IO.println s!"        wire into a knob     {mKnob}"
   IO.println s!"        valid modal patch compiles={mValid}"
-  if revOk && mixOk && wireOk && outOk && mValid then
-    passGate "malformed-rejection" "a color-legal cycle, a dangling wire, and a dangling out each return a clear error (no stack-overflow); a valid patch still compiles"
+  if revOk && mixOk && wireOk && outOk && withheldOk && unknownOk && knobOk && mValid then
+    passGate "malformed-rejection" "a color-legal cycle, a dangling wire/out, a WITHHELD kind (bloomgong), an UNKNOWN kind, and a wire-into-a-knob each return a clear error (no stack-overflow); a valid patch still compiles"
   else
-    failGate "malformed-rejection" s!"revOk={revOk} mixOk={mixOk} wireOk={wireOk} outOk={outOk} valid={mValid}"
+    failGate "malformed-rejection" s!"revOk={revOk} mixOk={mixOk} wireOk={wireOk} outOk={outOk} withheldOk={withheldOk} unknownOk={unknownOk} knobOk={knobOk} valid={mValid}"
 
 open Tropical.Playground in
 /-- THE REALIZED-STATE REPORT gate. The `load_patch_graph` reply must state
