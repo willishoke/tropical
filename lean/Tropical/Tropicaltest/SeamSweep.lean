@@ -599,6 +599,92 @@ def runGongReverb (arena : Arena)
   | .ok pS, .ok pC, .ok dS, .ok dC => gongVerdict voice room1 room2 pS pC dS dC
   | _, _, _, _ => failGate "gong-reverb" "build/render failed for a gong⋙reverb graph"
 
+-- ── WS-LP Phase 1: the live-pole crossing witness ─────────────────────────────
+
+/-- THE LIVE-POLE CROSSING GATE (WS-LP Phase 1). A bloomed source crosses a
+    reverb whose σ is a LIVE rt60 pole — the pole a Sig the folder can NOT
+    constant-fold (the surface shape: `6.91/rt60` with rt60 a slot read; here the
+    un-foldable stand-in is the same expression over a clamped literal, so the
+    carrier path can render it without a param table). Asserts:
+    (1) `bloomCompose` LIFTS the pairs instead of dropping to the bare bloom
+        (all voice×room pairs present, and their constants are genuinely live —
+        `sigConstF?` fails on them — and genuinely s0 — `sigIsS0` holds, the
+        Stage0-hoist precondition);
+    (2) the rendered live crossing ≈ the BAKED crossing at the same rt60 value
+        (the lift computes the same constants, by kernel arithmetic instead of
+        build-time arithmetic — identical up to last-bit float noise);
+    (3) the live crossing ≈ `oracleSeam` under the bloom warp (the law, not just
+        self-consistency), causal and finite;
+    (4) a pair that is NOT serOnly over the whole rt60 range (a room mode ON a
+        voice partial) drops gracefully PER PAIR — the rest of the bank lifts. -/
+def runBloomLivePole (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let (B, g) := bloomBg
+  let rt60Val : Float := 2.0
+  let (rtLo, rtHi) : Float × Float := (0.2, 12.0)     -- the reverb knob's declared span
+  let sigLive : Float := 6.91 / rt60Val
+  let voice : Array SeamMode := #[mkMode 220 1.0 1.0, mkMode 610 1.3 0.6, mkMode 1050 1.6 0.4]
+  let room  : Array SeamMode := #[mkMode 200 sigLive 1.0, mkMode 380 sigLive 0.8]
+  let vM := voice.map (·.toModal)
+  -- the live room: σ = 6.91/rt60 with rt60 NOT a foldable literal (clamp is
+  -- outside `sigConstF?`'s vocabulary, exactly like a `paramRef` slot read),
+  -- range declared as the knob span mapped through σ = 6.91/rt60
+  let rt60E : Sig := clampE (litF rt60Val) (litF rtLo) (litF rtHi)
+  let liveRoom := fun (rm : Array SeamMode) => rm.map (fun m =>
+    { m.toModal with sigma := div (lit 691 2) rt60E
+                     sigmaRange := some (6.91 / rtHi, 6.91 / rtLo) })
+  let rMLive  := liveRoom room
+  let rMBaked := room.map (·.toModal)
+  -- (1) the lift engages: all 6 pairs, live and s0
+  let some pairsLive := bloomCompose vM rMLive B g
+    | failGate "bloom-live-pole" "bloomCompose returned none for the live-rt60 room (dropped to bare bloom)"
+  -- NOT `k1Ser`: the lifted Horner shares subterms by REFERENCE, so its DAG is
+  -- small but its TREE is exponential in depth — a structural walk (`sigConstF?`
+  -- / `sigIsS0`, unmemoized) would never return. Its leaves are exactly the
+  -- constituents checked here (`nuSigma`, `fSer`, `invA`, `dSwitch` — plus
+  -- literals), so shallow checks carry the same s0/liveness claim.
+  let liveConsts := pairsLive.foldl (fun acc p =>
+    acc ++ #[p.fSer.1, p.fSer.2, p.nuSigma, p.dSwitch] ++
+    p.invA.foldl (fun a ik => a ++ #[ik.1, ik.2]) #[]) #[]
+  let genuinelyLive := pairsLive.all (fun p => (sigConstF? p.nuSigma).isNone)
+  let allS0 := liveConsts.all sigIsS0
+  -- (4) graceful per-pair drop: a room mode ON the 220 Hz partial is not
+  -- serOnly anywhere on the interval (|a+1| dips below |κ| at Re a = −1)
+  let nearRoom := liveRoom #[mkMode 220.5 sigLive 0.5]
+  let dropCount := match bloomCompose vM nearRoom B g with
+    | some ps => ps.size
+    | none => 1000
+  -- (2)+(3) render the live crossing, the baked crossing, and the oracle
+  let clk : Clock := clockLit
+  let mkGraph := fun (rm : Array ModalMode) =>
+    ({ nodes := #[ { id := "src", node := .modalSource vM anchorSig clk none none (some (B, g)) }
+                 , { id := "rev", node := .modalReverb "src" rm none } ]
+       output := "rev" } : PatchGraph)
+  let rLive ← renderGraph arena "wslp_live" (mkGraph rMLive)
+  let rBaked ← renderGraph arena "wslp_baked" (mkGraph rMBaked)
+  match rLive, rBaked with
+  | .ok pL, .ok pB =>
+    let lo := anchorNat + 1
+    let hi := nProbe
+    let adm := fun (v r : SeamMode) => bloomAdmitsPair v.pole r.pole B g
+    let eBaked := relL2Win pL pB lo hi
+    let eOracle := relL2Win pL (oracleSeam voice room bloomWarp adm 8) lo hi
+    let preE := energyWin pL 0 lo
+    let e := energyWin pL lo hi
+    IO.println s!"bloom live-pole crossing (WS-LP Phase 1: serOnly, live rt60):"
+    IO.println s!"        lift     pairs {pairsLive.size}/6 · live consts (unfoldable) {genuinelyLive} · s0 {allS0} · near-partial pair drops to {dropCount}/3"
+    IO.println s!"        render   live ≡ baked crossing {eBaked * 1e9}e-9 · live ≡ oracle {eOracle} · pre-E {preE} · E {e}"
+    -- live ≡ baked is a CONSISTENCY check, not the law (the oracle is): the
+    -- baked `mK` comes from build-time forward summation (`bloomM1`), the lifted
+    -- one from the emitted Horner (`bloomM1E`) — a real reassociation of a
+    -- ~200-term series, so the honest bar is ~1e-6, not bit-identity.
+    if pairsLive.size == 6 && genuinelyLive && allS0 && dropCount == 2
+        && eBaked < 1e-6 && eOracle < 3e-4 && preE < 1e-18 && e > 1e-9 && allFinite pL then
+      passGate "bloom-live-pole" s!"a live-rt60 reverb CROSSES the bloom (no bare-bloom drop): 6/6 pairs lifted s0, live ≡ baked {eBaked * 1e9}e-9, ≡ oracle {eOracle}, non-serOnly pair drops per-pair"
+    else
+      failGate "bloom-live-pole" s!"pairs={pairsLive.size} live={genuinelyLive} s0={allS0} drop={dropCount} eBaked={eBaked * 1e9}e-9 eOracle={eOracle} preE={preE} E={e} finite={allFinite pL}"
+  | .error e, _ | _, .error e => failGate "bloom-live-pole" s!"build/render: {e}"
+
 -- ── The Γ-bridge coefficient comparator (per-identity, series-shaped) ──────────
 -- Truncated power-series (Taylor-in-d) arithmetic over `CplxB`, depth N. The
 -- witness compares the ALGEBRA (every coefficient) rather than points of it: the
@@ -828,17 +914,23 @@ def runSeamCoverage (_arena : Arena)
     per-sample `selectE` always discards the CF lane, and the coincident branch
     never reads `invA` — the render must be byte-identical regardless. -/
 private def withCfLane (p : BloomPair) : BloomPair := Id.run do
-  let mu : CplxB := ⟨-p.muSigma, p.muOmega⟩
-  let nu : CplxB := ⟨-p.nuSigma, p.nuOmega⟩
+  -- the pair is BAKED (built from literal poles), so its `Sig` fields fold back
+  -- to Floats via `sigConstF?` (the WS-LP CplxE lift keeps baked pairs literal)
+  let cf := fun (s : Tropical.EmitArrow.Sig) => (Tropical.EmitArrow.sigConstF? s).getD 0.0
+  let mu : CplxB := ⟨-(cf p.muSigma), cf p.muOmega⟩
+  let nu : CplxB := ⟨-(cf p.nuSigma), cf p.nuOmega⟩
   let aC := (nu.sub mu).scale (1.0 / p.gRate)
   let plan := classifyBloomPair mu nu p.bloomB p.gRate
-  let (cfK, _) := bloomCF aC p.kappa
+  let kappaB : CplxB := ⟨cf p.kappa.1, cf p.kappa.2⟩
+  let (cfK, _) := bloomCF aC kappaB
   let cfB := (Array.range (plan.kDepth + 1)).map (fun j => (⟨(2 * j + 1).toFloat - aC.re, -aC.im⟩ : CplxB))
   let cfN := (Array.range plan.kDepth).map (fun j =>
     let jf := (j + 1).toFloat
     (⟨jf, 0⟩ : CplxB).mul ((⟨jf, 0⟩ : CplxB).sub aC))
   let invA := (Array.range plan.nDepth).map (fun k => CplxB.div ⟨1, 0⟩ (aC.add ⟨(k + 1).toFloat, 0⟩))
-  return { p with k1Cf := (cfK.scale (1.0 / p.gRate)).neg, cfB, cfN, invA }
+  return { p with k1Cf := cplxLitE ((cfK.scale (1.0 / p.gRate)).neg),
+                  cfB := cfB.map cplxLitE, cfN := cfN.map cplxLitE,
+                  invA := invA.map cplxLitE }
 
 /-- THE LANE-CLEAN GATE (WS-CL). The region-indexed `coincidentSubtle` emit (the
     whole CF lane DROPPED) is BYTE-IDENTICAL to the pre-refactor emit (which always

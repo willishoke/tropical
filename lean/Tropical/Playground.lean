@@ -192,15 +192,20 @@ def defaultStringModes (f0 rho : Float) : Array ModalMode := Id.run do
 /-- A reverb room as a `ModalMode` bank (pole + residue-as-coeff): `nmode`
     log-spaced modes over `[flo,fhi]` with damping `σ = 6.91/rt60` (live), unit
     residues at golden-ratio phases so the tail isn't a pure comb. Freqs and count
-    are structural (baked); only the damping is a live knob. -/
-private def reverbRoom (rt60 : Sig) (nmode : Nat) (flo fhi : Float) : Array ModalMode :=
+    are structural (baked); only the damping is a live knob. `rtRange` (the rt60
+    knob's declared span) maps through σ = 6.91/rt60 to each mode's `sigmaRange` —
+    what lets a bloomed source CROSS this room with the rt60 still live (WS-LP:
+    `bloomCompose` classifies the live pole over that interval). -/
+private def reverbRoom (rt60 : Sig) (rtRange : Option (Float × Float))
+    (nmode : Nat) (flo fhi : Float) : Array ModalMode :=
   let sigma := div (lit 691 2) rt60           -- 6.91 / rt60
+  let sigmaRange := rtRange.map (fun (lo, hi) => (6.91 / hi, 6.91 / lo))
   let denom : Float := if nmode ≤ 1 then 1.0 else (nmode - 1).toFloat
   (Array.range nmode).map fun j =>
     let fq := flo * Float.pow (fhi / flo) (j.toFloat / denom)
     let ph := 6.283185307179586 * (0.6180339887 * j.toFloat)
     { sigma, omega := mul twoPiE (litF fq),
-      cre := litF (Float.cos ph), cim := litF (Float.sin ph) }
+      cre := litF (Float.cos ph), cim := litF (Float.sin ph), sigmaRange }
 
 /-- A 2-pole resonant filter as its EXACT complex-conjugate pole pair — the
     modal island's filter (the Serge-VCFQ move). "Filtering" a modal source is
@@ -454,6 +459,12 @@ private def fallbackOf (kind kname : String) : Sig :=
   match (portOf kind kname).bind (·.knob) with
   | some (m, e) => lit m e
   | none => lit 0
+/-- A knob's display span from the table — the interval a live value is DECLARED
+    to range over (WS-LP feeds it to the live-pole region classifier; the lifted
+    kernel clamps the live read to it, so the declaration is enforced, not
+    advisory). -/
+private def displayRangeOf (kind kname : String) : Option (Float × Float) :=
+  ((portOf kind kname).bind (·.display)).map (fun d => (d.min, d.max))
 
 /-- A closed-form smoothstep GLIDE of τ from three slots: `v0 + (v1−v0)·s²(3−2s)`,
     `s = clamp((τ − t0)/dur, 0, 1)`, `dur = 0.02·sampleRate` samples (20 ms at any
@@ -642,7 +653,7 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     let sway := p "sway" (dv "sway")
     let swayRate := p "rate" (dv "rate")   -- 0.3 Hz: a slow breath
     let dir : ModalDir := { dir := dirX, damp := some (sway, swayRate) }
-    (.modalReverb sig (reverbRoom rt60 32 60.0 6000.0) (some dir), #[])
+    (.modalReverb sig (reverbRoom rt60 (displayRangeOf "reverb" "rt60") 32 60.0 6000.0) (some dir), #[])
   | "filter" =>
     -- the filter IS a modalReverb with a computed 2-mode room: the residue
     -- calculus does the "filtering" at build time, knobs stay live through it.
@@ -686,8 +697,9 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     -- lowering folds the room chain first and crosses the bloom ONCE. Baked-pole-
     -- bloom contract (besselFuse parity): β, g, scale baked (a change relowers);
     -- amps stay live. Wired to `out` it plays the bare bloom-warped register;
-    -- wired to a BAKED-pole reverb it crosses. A live-pole (rt60) reverb
-    -- gracefully drops to the bare bloom (the recorded baked-pole-bloom v1 limit).
+    -- wired to a reverb it crosses — including a LIVE-rt60 reverb since WS-LP
+    -- (serOnly pairs lift to s0 CplxE of the live pole; region-crossing pairs
+    -- drop gracefully per pair until the Phase 3 region-union emit).
     let t := jFloat params "t" 0.0
     let beta := jFloat params "beta" 0.05
     let gRate := jFloat params "g" 1.8

@@ -283,8 +283,11 @@ partial def lowerInput (g : PatchGraph) (id : String) : Except String ArrowTerm 
       | .bloomed voice room B gr =>
         -- the bare bloomed source: the bloom-warped bank (identical to a gong
         -- register's `warpFx`-around-`modalSource`). Also the graceful fallback
-        -- when the crossing produces nothing (a live pole hit the baked-pole
-        -- contract, or every pair fell outside admission) — legal, no warning.
+        -- when the crossing produces nothing (a live pole outside WS-LP's lift —
+        -- live voice/ω, live σ without a declared range, a glided σ — or every
+        -- pair fell outside admission) — legal, no warning. A live-rt60 room
+        -- with `sigmaRange` DOES cross (WS-LP): its serOnly pairs lift to s0
+        -- expressions of the live pole.
         let bare := ArrowTerm.warp (bloomWarpClock a B gr) (modalBankTerm voice a clk count?)
         if room.isEmpty then .ok bare
         else match bloomCompose voice room B gr with

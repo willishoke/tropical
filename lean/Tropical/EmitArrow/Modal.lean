@@ -33,6 +33,13 @@ structure ModalMode where
   cre   : Sig           -- Re A
   cim   : Sig := lit 0   -- Im A
   deg   : Nat := 0
+  /-- WS-LP: the closed interval a LIVE `sigma` ranges over (the knob's span,
+      supplied by the authoring site — e.g. the rt60 knob's display range mapped
+      through σ = 6.91/rt60). The region classifier's input when `sigma` doesn't
+      fold to a constant; the lifted kernel clamps the live σ to this interval,
+      so the classification is sound by construction. `none` + live σ ⇒ the
+      baked-pole fallback (bare bloom). -/
+  sigmaRange : Option (Float × Float) := none
 
 /-- Authored mode from (freq Hz, decay σ, real amp): `ω = 2π·f`, `c_re = amp`,
     `c_im = 0`. Any of `fHz`/`sigma`/`amp` may be a live `paramRef`. -/
@@ -47,10 +54,11 @@ def powE (base : Sig) : Nat → Sig
 
 /-- Fold an authored-constant `Sig` back to its `Float` (the baked-pole read in
     `bloomCompose`, and the static-`k` amplitude read in `bankLandExp`). Partial:
-    `none` on any live/unsupported node — a live pole is outside the v1 baked-pole
+    `none` on any live/unsupported node — a live pole is outside the baked-pole
     contract, not an error to paper over. (Hoisted above the landing sites so
-    `bankLandExp` can consult it.) -/
-private partial def sigConstF? : Sig → Option Float
+    `bankLandExp` can consult it; public so the test witnesses can read baked
+    `BloomPair` fields back as Floats.) -/
+partial def sigConstF? : Sig → Option Float
   | .num n            => some n.toFloat
   | .unary .neg a     => (sigConstF? a).map (fun x => -x)
   | .unary .toFloat a => sigConstF? a
@@ -798,6 +806,34 @@ end CplxB
 /-- A build-time complex constant as a `CplxE` literal pair. -/
 def cplxLitE (x : CplxB) : CplxE := (litF x.re, litF x.im)
 
+/-- The `CplxE` unit — the Kummer Horner's seed and the CF's numerator. -/
+def cOneE : CplxE := (lit 1, lit 0)
+
+/-- The fixed-depth Kummer `M(1, a+1, z)` Horner over the emitted reciprocals
+    `invA[k] = 1/(a+k+1)` — THE series lane's expression, shared verbatim by the
+    per-sample lane in `bloomComposedSig` (z live) and the live-pole lift's
+    `mK = M(1,a+1,κ)` constant in `bloomCompose` (z = κ, a coefficient — s0), so
+    the constant is computed by the SAME arithmetic the lane renders with. -/
+def bloomM1E (invA : Array CplxE) (z : CplxE) : CplxE :=
+  invA.foldr (fun ik h => caddE cOneE (cmulE (cmulE z ik) h)) cOneE
+
+/-- Is this `Sig` a pure s0 value — a function of knob slots and constants only
+    (no `τ`/tick, no input, no bank machinery)? The live-pole lift's admission
+    check: the lifted pair constants are correct (and Stage0-hoistable) only if
+    the pole read is knob-invariant per sample. A GLIDED pole (`.sampleIndex`
+    inside `glideExpr`) fails here — `settle` it first (the recorded WS-LP
+    discipline; reverb rt60 is raw ⇒ s0, filter cutoff/resonance are glided).
+    UNMEMOIZED structural walk (like `sigConstF?`): call it only on SHALLOW
+    authored expressions (a pole read), never on combinator-built values whose
+    subterms share by reference — their TREE is exponential in the DAG depth
+    (a Horner like `bloomM1E`'s output would never return). -/
+partial def sigIsS0 : Sig → Bool
+  | .num _ | .paramRef _ | .sampleRate => true
+  | .unary _ a => sigIsS0 a
+  | .binary _ a b => sigIsS0 a && sigIsS0 b
+  | .clamp a b c | .select a b c => sigIsS0 a && sigIsS0 b && sigIsS0 c
+  | _ => false
+
 /-- Complex log-gamma: Lanczos (g=7, n=9) on `Re z ≥ ½`, reflection below with
     `log sin(πz)` taken on the DOMINANT exponential (`s + log(1−e^{−2s})`, so
     large |Im z| never overflows). Build-time only (the Γ★ bridge). Gated at
@@ -1037,35 +1073,43 @@ def bloomFoldQCoef (a1 a2 : CplxB) (n : Nat) : Array CplxB := Id.run do
 def bloomFoldDDaM (qcoef : Array CplxB) (x : CplxB) : CplxB :=
   x.mul (qcoef.foldr (fun q h => q.add (x.mul h)) ⟨0, 0⟩)
 
-/-- One composed (voice μ, reverb ν) pair of the Γ-bridge atom. Everything but
-    the amp is BAKED (`besselFuse`'s v1 contract: B, g and both pole sets baked —
-    a change relowers; the amp `c = a_voice·r_reverb` stays a live `CplxE` and
-    enters linearly). `cfN.isEmpty` ⟺ series-only (the CF branch is not emitted
-    at all); otherwise `dSwitch > 0` and the per-sample select bridges at it. -/
+/-- One composed (voice μ, reverb ν) pair of the Γ-bridge atom. Every per-pair
+    constant is a `CplxE`/`Sig` (WS-LP): the BAKED path (`besselFuse` parity — B,
+    g, both pole sets fold to Floats; a change relowers) fills them with
+    `cplxLitE`/`litF`, byte-identical to the old `CplxB` fields; the LIVE-σ path
+    (a live-rt60 reverb pole) fills them with s0 expressions of the pole's knob
+    slot, so Stage0 hoists them to the coefficient kernel and turning rt60 never
+    relowers. B and g stay structural Floats (the bloom's shape, not a pole).
+    The amp `c = a_voice·r_reverb` is live as always and enters linearly.
+    `cfN.isEmpty` ⟺ series-only (the CF branch is not emitted at all);
+    otherwise `dSwitch > 0` and the per-sample select bridges at it. -/
 structure BloomPair where
-  muSigma  : Float
-  muOmega  : Float
-  nuSigma  : Float
-  nuOmega  : Float
+  muSigma  : Sig
+  muOmega  : Sig
+  nuSigma  : Sig
+  nuOmega  : Sig
   bloomB   : Float
   gRate    : Float
   c        : CplxE
-  kappa    : CplxB
-  k1Ser    : CplxB          -- C  (the κ-side constant)
-  k1Cf     : CplxB          -- C − Γ★  (= −CF(κ)/g)
-  fSer     : CplxB          -- −1/(ν−μ)  (the series envelope's factor)
-  dSwitch  : Float          -- 0 ⇒ series-only
-  invA     : Array CplxB    -- 1/(a+k), k = 1..N (series Horner reciprocals)
-  cfB      : Array CplxB    -- (2j+1)−a, j = 0..K (CF b-constants; z is added per sample)
-  cfN      : Array CplxB    -- (j+1)((j+1)−a), j = 0..K−1 (CF numerators)
+  kappa    : CplxE
+  k1Ser    : CplxE          -- C  (the κ-side constant)
+  k1Cf     : CplxE          -- C − Γ★  (= −CF(κ)/g)
+  fSer     : CplxE          -- −1/(ν−μ)  (the series envelope's factor)
+  dSwitch  : Sig            -- 0 ⇒ series-only
+  invA     : Array CplxE    -- 1/(a+k), k = 1..N (series Horner reciprocals)
+  cfB      : Array CplxE    -- (2j+1)−a, j = 0..K (CF b-constants; z is added per sample)
+  cfN      : Array CplxE    -- (j+1)((j+1)−a), j = 0..K−1 (CF numerators)
   -- coincidence (`|a| < ½`, WS-A4). `coincident = false` ⇒ the fields below are
   -- unused and the crossing/series-only per-sample body runs. When true: the CF
   -- branch (large z, `k1Cf`/`cfB`/`cfN`) bridges to the series-DD branch (small z)
   -- across `dSwitch`, and the τ·e secular rides a straight-μ carrier.
   coincident : Bool := false
-  dCoef      : Array CplxB := #[]     -- dₙ, n = 1..N (the a-divided-difference Horner coeffs)
-  k1SerDD    : CplxB := ⟨0, 0⟩        -- Φ(a,κ)/g (series-DD e^{νd} const, via the lgamma(a+1) bridge)
-  eKappa     : CplxB := ⟨0, 0⟩        -- e^κ (the secular coeff c·e^κ)
+  dCoef      : Array CplxE := #[]     -- dₙ, n = 1..N (the a-divided-difference Horner coeffs)
+  k1SerDD    : CplxE := (lit 0, lit 0)  -- Φ(a,κ)/g (series-DD e^{νd} const, via the lgamma(a+1) bridge)
+  eKappa     : CplxE := (lit 0, lit 0)  -- e^κ (the secular coeff c·e^κ)
+  -- (μ−ν as the τ·e secular's z-coefficients: (Re, −Im) — a FIELD so the baked
+  -- path emits the same single literals as before the CplxE lift.)
+  secCoef    : CplxE := (lit 0, lit 0)
 deriving Inhabited
 
 /-- The bloom crossing's region for one composed (μ, ν) pair — a TOTAL partition
@@ -1174,11 +1218,48 @@ def bloomAdmitsPair (mu nu : CplxB) (B g : Float) : Bool :=
   | .excludedDepth => false
   | _ => true
 
+/-- WS-LP Phase 1: classify a live-σ pair over its whole σ interval — `some
+    nDepth` iff the pair is `serOnly` at EVERY σ ∈ `[sigLo, sigHi]`, else `none`
+    (the pair drops gracefully; region-crossing pairs are Phase 3's union emit).
+    Only `Re a = (σ_μ − σ_ν)/g` moves with σ_ν (`Im a` and `κ = μ·B` are
+    σ_ν-independent), so the two region conditions reduce to interval minima of
+    `|a + c|` along a horizontal segment — attained at `Re a = −c` clamped to the
+    segment. The depth is sized at the interval's worst case: `bloomM1`'s
+    convergence slows as `|a+1|` falls toward `|κ|`, so sample both endpoints
+    and the closest approach to `−1`; same `+8` guard and `≤ 300` cap as the
+    baked classifier. -/
+def classifyBloomPairLiveSer (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
+    (B g : Float) : Option Nat := Id.run do
+  let kappa := mu.scale B
+  let imA := (nuOmega - mu.im) / g
+  -- Re a = (−σ_ν − Re μ)/g, decreasing in σ_ν
+  let reLo := (-sigHi - mu.re) / g
+  let reHi := (-sigLo - mu.re) / g
+  let minAbsAt := fun (c : Float) =>
+    let t := max reLo (min reHi (-c))
+    Float.sqrt ((t + c) * (t + c) + imA * imA)
+  -- ¬coincident throughout (min |a| ≥ ½) ∧ serOnly throughout (min |a+1| ≥ |κ|)
+  if minAbsAt 0.0 < 0.5 then return none
+  if minAbsAt 1.0 < kappa.abs then return none
+  let depthAt := fun (re : Float) => (bloomM1 ⟨re, imA⟩ kappa).2
+  let tStar := max reLo (min reHi (-1.0))
+  let nRaw := max (depthAt reLo) (max (depthAt reHi) (depthAt tStar))
+  if nRaw + 8 > 300 then return none
+  return some (nRaw + 8)
+
 /-- `bloomedVoice ⋙ reverb` as Γ-bridge pairs — the residue composition ACROSS a
     pitch-bloom warp (`B = β·scale/g` seconds of total clock advance, `g` the
-    settle rate). Baked-pole contract (v1, `besselFuse` parity): every pole must
-    fold to a constant (`none` if a live pole reaches this — the caller keeps
-    live-pole banks on `residueComposeE`'s unbloomed path); amps stay live.
+    settle rate). Pole contract (WS-LP Phase 1): VOICE poles and reverb ω must
+    fold to constants (`none` if not — the caller keeps such banks on
+    `residueComposeE`'s unbloomed path); a reverb σ may be LIVE (the rt60 knob)
+    when it is s0 (`sigIsS0` — raw slot reads, not glides) and carries a
+    `sigmaRange` from the authoring site: the pair's constants are then built as
+    s0 `CplxE` expressions of the live pole (Stage0 hoists them; rt60 turns with
+    no relower), the live σ clamped to the classified interval so the region
+    choice is sound by construction. A live pair must be `serOnly` over the
+    WHOLE interval (`classifyBloomPairLiveSer`) — a pair that crosses a region
+    boundary across the rt60 range drops gracefully (per pair, `continue`; the
+    Phase 3 region-union emit removes this limit). Amps stay live as always.
     Admission drops (graceful exclusion, the documented v1 scope) are the
     `classifyBloomPair` `excludedDepth` region and are now depth-only: pairs whose
     envelope depth exceeds 300 (cockpit-measured shipped max ≈ 250 incl. the
@@ -1200,90 +1281,131 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
     let some vSig := sigConstF? v.sigma | return none
     let some vOm  := sigConstF? v.omega | return none
     for r in reverb do
-      let some rSig := sigConstF? r.sigma | return none
       let some rOm  := sigConstF? r.omega | return none
       let mu : CplxB := ⟨-vSig, vOm⟩
-      let nu : CplxB := ⟨-rSig, rOm⟩
-      -- the shared classifier (WS-CL): `excludedDepth` ⇒ this pair is out of scope
-      -- (a COUNTED graceful drop — the coverage gate tallies it, not a silent
-      -- `continue`); every other region emits EXACTLY its own lanes (region-indexed
-      -- — the coincident regions no longer bake the dead E1/CF lanes). `bloomCompose`
-      -- and the seam-sweep harness consult THIS classifier, one answer in code.
-      let plan := classifyBloomPair mu nu B g
-      let aC := plan.aC
-      let kappa := plan.kappa
-      let aP1 := aC.add ⟨1, 0⟩
       let c := cmulE v.ampE r.ampE
-      match plan.region with
-      | .excludedDepth => continue
-      | .serOnly =>
-        let invNuMu := CplxB.div ⟨1, 0⟩ (nu.sub mu)
-        let invA := (Array.range plan.nDepth).map (fun k =>
-          CplxB.div ⟨1, 0⟩ (aC.add ⟨(k + 1).toFloat, 0⟩))
-        let (mK, _) := bloomM1 aC kappa
-        out := out.push {
-          muSigma := vSig, muOmega := vOm, nuSigma := rSig, nuOmega := rOm
-          bloomB := B, gRate := g, c, kappa
-          k1Ser := mK.mul invNuMu, k1Cf := ⟨0, 0⟩, fSer := invNuMu.neg
-          dSwitch := 0.0, invA, cfB := #[], cfN := #[] }
-      | .crossing =>
-        let invNuMu := CplxB.div ⟨1, 0⟩ (nu.sub mu)
-        let invA := (Array.range plan.nDepth).map (fun k =>
-          CplxB.div ⟨1, 0⟩ (aC.add ⟨(k + 1).toFloat, 0⟩))
-        let (cfK, _) := bloomCF aC kappa
-        let cfB := (Array.range (plan.kDepth + 1)).map (fun j =>
-          (⟨(2 * j + 1).toFloat - aC.re, -aC.im⟩ : CplxB))
-        let cfN := (Array.range plan.kDepth).map (fun j =>
-          let jf := (j + 1).toFloat
-          (⟨jf, 0⟩ : CplxB).mul ((⟨jf, 0⟩ : CplxB).sub aC))
-        let dSwitch := Float.log (kappa.abs / aP1.abs) / g
-        let k1Cf := (cfK.scale (1.0 / g)).neg      -- −CF(κ)/g (CF-side e^{νd} const)
-        let gs := bloomGammaStar aC kappa g
-        out := out.push {
-          muSigma := vSig, muOmega := vOm, nuSigma := rSig, nuOmega := rOm
-          bloomB := B, gRate := g, c, kappa
-          k1Ser := gs.sub (cfK.scale (1.0 / g)), k1Cf, fSer := invNuMu.neg
-          dSwitch, invA, cfB, cfN }
-      | .coincidentCrossing =>
-        -- WS-A4: the CF branch (large z, `k1Cf`/`cfB`/`cfN`), coincidence-stable,
-        -- bridges below `dSwitch` to the series-DD branch (`dCoef`/`k1SerDD`) plus
-        -- the τ·e secular `c·e^κ·(e^{νd}−e^{μd})/(ν−μ)`. The E1 series lane
-        -- (`invA`/`k1Ser`/`fSer`, singular at a=0) is NOT emitted (region-indexed).
-        let (cfK, _) := bloomCF aC kappa
-        let cfB := (Array.range (plan.kDepth + 1)).map (fun j =>
-          (⟨(2 * j + 1).toFloat - aC.re, -aC.im⟩ : CplxB))
-        let cfN := (Array.range plan.kDepth).map (fun j =>
-          let jf := (j + 1).toFloat
-          (⟨jf, 0⟩ : CplxB).mul ((⟨jf, 0⟩ : CplxB).sub aC))
-        let dSwitch := Float.log (kappa.abs / aP1.abs) / g
-        let k1Cf := (cfK.scale (1.0 / g)).neg      -- −CF(κ)/g (CF-side e^{νd} const)
-        let dCoef := bloomDCoef aC plan.nDepth
-        out := out.push {
-          muSigma := vSig, muOmega := vOm, nuSigma := rSig, nuOmega := rOm
-          bloomB := B, gRate := g, c, kappa
-          k1Ser := ⟨0, 0⟩, k1Cf, fSer := ⟨0, 0⟩
-          dSwitch, invA := #[], cfB, cfN
-          coincident := true
-          dCoef
-          k1SerDD := bloomPhiKappaOverG aC kappa cfK dCoef g
-          eKappa := CplxB.exp kappa }
-      | .coincidentSubtle =>
-        -- WS-A4 subtle bloom (`dSwitch < 0`): the per-sample path is series-DD from
-        -- d = 0, so the CF lane is DEAD (the `selectE` is const-true — LLVM `select`
-        -- ignores the unselected operand). Region-indexed: emit series-DD + the τ·e
-        -- secular ONLY — no CF lane (`k1Cf`/`cfB`/`cfN`, kept empty ⇒ `bloomComposedSig`
-        -- routes to the subtle sub-branch), no `invA`. `bloomPhiKappaOverG`'s subtle
-        -- branch reads only `dCoef`/κ (`cfK` unread), so a dummy `cfK` is bit-identical.
-        let dCoef := bloomDCoef aC plan.nDepth
-        out := out.push {
-          muSigma := vSig, muOmega := vOm, nuSigma := rSig, nuOmega := rOm
-          bloomB := B, gRate := g, c, kappa
-          k1Ser := ⟨0, 0⟩, k1Cf := ⟨0, 0⟩, fSer := ⟨0, 0⟩
-          dSwitch := Float.log (kappa.abs / aP1.abs) / g, invA := #[], cfB := #[], cfN := #[]
-          coincident := true
-          dCoef
-          k1SerDD := bloomPhiKappaOverG aC kappa ⟨0, 0⟩ dCoef g
-          eKappa := CplxB.exp kappa }
+      match sigConstF? r.sigma with
+      | none =>
+        -- WS-LP Phase 1: a LIVE reverb σ (the rt60 pole). Admissible only when
+        -- the pole read is s0 (a raw slot, not a glide — `settle` a glided pole
+        -- first) and the authoring site declared its interval; otherwise the
+        -- pre-WS-LP baked-pole fallback (`none` ⇒ the caller's bare bloom).
+        let some (sLo, sHi) := r.sigmaRange | return none
+        if !(sigIsS0 r.sigma) then return none
+        match classifyBloomPairLiveSer mu rOm sLo sHi B g with
+        | none => continue   -- not serOnly over the whole interval: graceful per-pair drop (Phase 3 widens)
+        | some nDepth =>
+          -- the lift: every baked constant re-expressed as an s0 `CplxE` of the
+          -- live pole. The clamp ENFORCES the classified interval in-kernel, so
+          -- an out-of-range slot write saturates the crossing's σ instead of
+          -- walking off the classified region. κ = μ·B is σ_ν-independent (baked).
+          let sigC := clampE r.sigma (litF sLo) (litF sHi)
+          let nuE : CplxE := (neg sigC, litF rOm)
+          let dNuMu := csubE nuE (cplxLitE mu)
+          let aE := scaleRealE (litF (1.0 / g)) dNuMu
+          let invNuMuE := cdivE cOneE dNuMu
+          let invA := (Array.range nDepth).map (fun k =>
+            cdivE cOneE (caddE aE (litF (k + 1).toFloat, lit 0)))
+          let kE := cplxLitE (mu.scale B)
+          out := out.push {
+            muSigma := litF vSig, muOmega := litF vOm
+            nuSigma := sigC, nuOmega := litF rOm
+            bloomB := B, gRate := g, c, kappa := kE
+            k1Ser := cmulE (bloomM1E invA kE) invNuMuE
+            k1Cf := (lit 0, lit 0), fSer := cnegE invNuMuE
+            dSwitch := lit 0, invA, cfB := #[], cfN := #[] }
+      | some rSig =>
+        let nu : CplxB := ⟨-rSig, rOm⟩
+        -- the shared classifier (WS-CL): `excludedDepth` ⇒ this pair is out of scope
+        -- (a COUNTED graceful drop — the coverage gate tallies it, not a silent
+        -- `continue`); every other region emits EXACTLY its own lanes (region-indexed
+        -- — the coincident regions no longer bake the dead E1/CF lanes). `bloomCompose`
+        -- and the seam-sweep harness consult THIS classifier, one answer in code.
+        let plan := classifyBloomPair mu nu B g
+        let aC := plan.aC
+        let kappa := plan.kappa
+        let aP1 := aC.add ⟨1, 0⟩
+        match plan.region with
+        | .excludedDepth => continue
+        | .serOnly =>
+          let invNuMu := CplxB.div ⟨1, 0⟩ (nu.sub mu)
+          let invA := (Array.range plan.nDepth).map (fun k =>
+            CplxB.div ⟨1, 0⟩ (aC.add ⟨(k + 1).toFloat, 0⟩))
+          let (mK, _) := bloomM1 aC kappa
+          out := out.push {
+            muSigma := litF vSig, muOmega := litF vOm
+            nuSigma := litF rSig, nuOmega := litF rOm
+            bloomB := B, gRate := g, c, kappa := cplxLitE kappa
+            k1Ser := cplxLitE (mK.mul invNuMu), k1Cf := (lit 0, lit 0)
+            fSer := cplxLitE invNuMu.neg
+            dSwitch := lit 0, invA := invA.map cplxLitE, cfB := #[], cfN := #[] }
+        | .crossing =>
+          let invNuMu := CplxB.div ⟨1, 0⟩ (nu.sub mu)
+          let invA := (Array.range plan.nDepth).map (fun k =>
+            CplxB.div ⟨1, 0⟩ (aC.add ⟨(k + 1).toFloat, 0⟩))
+          let (cfK, _) := bloomCF aC kappa
+          let cfB := (Array.range (plan.kDepth + 1)).map (fun j =>
+            (⟨(2 * j + 1).toFloat - aC.re, -aC.im⟩ : CplxB))
+          let cfN := (Array.range plan.kDepth).map (fun j =>
+            let jf := (j + 1).toFloat
+            (⟨jf, 0⟩ : CplxB).mul ((⟨jf, 0⟩ : CplxB).sub aC))
+          let dSwitch := Float.log (kappa.abs / aP1.abs) / g
+          let k1Cf := (cfK.scale (1.0 / g)).neg      -- −CF(κ)/g (CF-side e^{νd} const)
+          let gs := bloomGammaStar aC kappa g
+          out := out.push {
+            muSigma := litF vSig, muOmega := litF vOm
+            nuSigma := litF rSig, nuOmega := litF rOm
+            bloomB := B, gRate := g, c, kappa := cplxLitE kappa
+            k1Ser := cplxLitE (gs.sub (cfK.scale (1.0 / g))), k1Cf := cplxLitE k1Cf
+            fSer := cplxLitE invNuMu.neg
+            dSwitch := litF dSwitch, invA := invA.map cplxLitE
+            cfB := cfB.map cplxLitE, cfN := cfN.map cplxLitE }
+        | .coincidentCrossing =>
+          -- WS-A4: the CF branch (large z, `k1Cf`/`cfB`/`cfN`), coincidence-stable,
+          -- bridges below `dSwitch` to the series-DD branch (`dCoef`/`k1SerDD`) plus
+          -- the τ·e secular `c·e^κ·(e^{νd}−e^{μd})/(ν−μ)`. The E1 series lane
+          -- (`invA`/`k1Ser`/`fSer`, singular at a=0) is NOT emitted (region-indexed).
+          let (cfK, _) := bloomCF aC kappa
+          let cfB := (Array.range (plan.kDepth + 1)).map (fun j =>
+            (⟨(2 * j + 1).toFloat - aC.re, -aC.im⟩ : CplxB))
+          let cfN := (Array.range plan.kDepth).map (fun j =>
+            let jf := (j + 1).toFloat
+            (⟨jf, 0⟩ : CplxB).mul ((⟨jf, 0⟩ : CplxB).sub aC))
+          let dSwitch := Float.log (kappa.abs / aP1.abs) / g
+          let k1Cf := (cfK.scale (1.0 / g)).neg      -- −CF(κ)/g (CF-side e^{νd} const)
+          let dCoef := bloomDCoef aC plan.nDepth
+          out := out.push {
+            muSigma := litF vSig, muOmega := litF vOm
+            nuSigma := litF rSig, nuOmega := litF rOm
+            bloomB := B, gRate := g, c, kappa := cplxLitE kappa
+            k1Ser := (lit 0, lit 0), k1Cf := cplxLitE k1Cf, fSer := (lit 0, lit 0)
+            dSwitch := litF dSwitch, invA := #[]
+            cfB := cfB.map cplxLitE, cfN := cfN.map cplxLitE
+            coincident := true
+            dCoef := (dCoef.map cplxLitE)
+            k1SerDD := cplxLitE (bloomPhiKappaOverG aC kappa cfK dCoef g)
+            eKappa := cplxLitE (CplxB.exp kappa)
+            secCoef := (litF (vSig - rSig), litF (rOm - vOm)) }
+        | .coincidentSubtle =>
+          -- WS-A4 subtle bloom (`dSwitch < 0`): the per-sample path is series-DD from
+          -- d = 0, so the CF lane is DEAD (the `selectE` is const-true — LLVM `select`
+          -- ignores the unselected operand). Region-indexed: emit series-DD + the τ·e
+          -- secular ONLY — no CF lane (`k1Cf`/`cfB`/`cfN`, kept empty ⇒ `bloomComposedSig`
+          -- routes to the subtle sub-branch), no `invA`. `bloomPhiKappaOverG`'s subtle
+          -- branch reads only `dCoef`/κ (`cfK` unread), so a dummy `cfK` is bit-identical.
+          let dCoef := bloomDCoef aC plan.nDepth
+          out := out.push {
+            muSigma := litF vSig, muOmega := litF vOm
+            nuSigma := litF rSig, nuOmega := litF rOm
+            bloomB := B, gRate := g, c, kappa := cplxLitE kappa
+            k1Ser := (lit 0, lit 0), k1Cf := (lit 0, lit 0), fSer := (lit 0, lit 0)
+            dSwitch := litF (Float.log (kappa.abs / aP1.abs) / g)
+            invA := #[], cfB := #[], cfN := #[]
+            coincident := true
+            dCoef := (dCoef.map cplxLitE)
+            k1SerDD := cplxLitE (bloomPhiKappaOverG aC kappa ⟨0, 0⟩ dCoef g)
+            eKappa := cplxLitE (CplxB.exp kappa)
+            secCoef := (litF (vSig - rSig), litF (rOm - vOm)) }
   return some out
 
 /-- The bloom-composed pair bank as a pure `Sig` over the clock: per pair, TWO
@@ -1312,9 +1434,9 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
     option E at k=0 is a byte-identical no-op for it. **Two reasons it is NOT landed
     in this pass, DEFERRED to the factor-site follow-on**: (a) it is UNREACHABLE from
     the surface — `bloomgong` (its only surface producer) is a WITHHELD kind, rejected
-    by `Playground.checkServedKinds`; and even were it served, `bloomCompose` requires
-    every pole to `sigConstF?` while the Playground makes rt60/cutoff/resonance LIVE,
-    so only the SeamSweep gate and authored/loaded literal-pole programs emit it;
+    by `Playground.checkServedKinds` (WS-LP made the live-rt60 CROSSING compile, but
+    the surface stays sealed until this factor site carries the per-pair `k`), so
+    only the tropicaltest gates and authored/loaded literal-pole programs emit it;
     (b) there is a reachable-by-baked-poles case option E CANNOT absorb — filtering a
     gong ON one of its own partials (room pole tuned to a voice partial: `Im a ≈ 0`)
     with `a` near a negative integer `−n` (`Re a ≈ −(σ_ν−σ_μ)/g`, so a resonance
@@ -1348,20 +1470,20 @@ def bloomComposedSig (pairs : Array BloomPair) (clkInt anchorSamples : Sig) : Si
   -- depth), shared by the crossing and coincident branches (both large-z sides).
   let cfEnv := fun (p : BloomPair) (z : CplxE) => Id.run do
     let kk := p.cfN.size
-    let mut h : CplxE := caddE z (cplxLitE p.cfB[kk]!)
+    let mut h : CplxE := caddE z p.cfB[kk]!
     for jr in [0:kk] do
       let j := kk - 1 - jr
-      h := csubE (caddE z (cplxLitE p.cfB[j]!)) (cdivE (cplxLitE p.cfN[j]!) h)
+      h := csubE (caddE z p.cfB[j]!) (cdivE p.cfN[j]! h)
     return cdivE one h
   let bankQ := pairs.foldl (fun acc p =>
     let eg := expSig (neg (mul (litF p.gRate) dPos))
-    let z : CplxE := (mul (litF p.kappa.re) eg, mul (litF p.kappa.im) eg)
+    let z : CplxE := (mul p.kappa.1 eg, mul p.kappa.2 eg)
     let off := mul (litF p.bloomB) (sub (lit 1) eg)
     let clkW := add clkRel (toIntE (mul (mul off .sampleRate) (lit 4294967296)))
-    let phNu := modePhaseQ (litF p.nuOmega) clkRel
-    let phMu := modePhaseQ (litF p.muOmega) clkW
-    let envNu := expSig (neg (mul (litF p.nuSigma) dPos))
-    let envMu := expSig (neg (mul (litF p.muSigma) (add dPos off)))
+    let phNu := modePhaseQ p.nuOmega clkRel
+    let phMu := modePhaseQ p.muOmega clkW
+    let envNu := expSig (neg (mul p.nuSigma dPos))
+    let envMu := expSig (neg (mul p.muSigma (add dPos off)))
     if p.coincident then
       if p.cfN.isEmpty then
         -- WS-A4 / WS-CL: the subtle-bloom coincident pair (`dSwitch < 0`). The
@@ -1370,14 +1492,14 @@ def bloomComposedSig (pairs : Array BloomPair) (clkInt anchorSamples : Sig) : Si
         -- panic). Series-DD + the τ·e secular, ALWAYS on. Bit-identical to the old
         -- coincident branch with the const-true `onSer` (the `selectE`s all picked
         -- the series-DD/secular arm; the LLVM `select` ignored the CF operand).
-        let phiZ := cmulE z (p.dCoef.foldr (fun dk h => caddE (cplxLitE dk) (cmulE z h)) (lit 0, lit 0))
+        let phiZ := cmulE z (p.dCoef.foldr (fun dk h => caddE dk (cmulE z h)) (lit 0, lit 0))
         let k2ser : CplxE := (div (neg phiZ.1) (litF p.gRate), div (neg phiZ.2) (litF p.gRate))
-        let w1 := cmulE p.c ((litF p.k1SerDD.re, litF p.k1SerDD.im) : CplxE)
+        let w1 := cmulE p.c p.k1SerDD
         let w2 := cmulE p.c k2ser
-        let phMuS := modePhaseQ (litF p.muOmega) clkRel
-        let envMuS := expSig (neg (mul (litF p.muSigma) dPos))
-        let zsec : CplxE := (mul (litF (p.muSigma - p.nuSigma)) dPos,     -- (ν−μ)d
-                             mul (litF (p.nuOmega - p.muOmega)) dPos)
+        let phMuS := modePhaseQ p.muOmega clkRel
+        let envMuS := expSig (neg (mul p.muSigma dPos))
+        let zsec : CplxE := (mul p.secCoef.1 dPos,     -- (ν−μ)d
+                             mul p.secCoef.2 dPos)
         let zsq := add (mul zsec.1 zsec.1) (mul zsec.2 zsec.2)
         let big := gt zsq (litF 0.01)
         let zsafe : CplxE := (selectE big zsec.1 (lit 1), selectE big zsec.2 (lit 0))
@@ -1386,30 +1508,30 @@ def bloomComposedSig (pairs : Array BloomPair) (clkInt anchorSamples : Sig) : Si
         let direct := cdivE (csubE ez one) zsafe
         let series := cexpm1SeriesE zsec
         let cxsec : CplxE := (selectE big direct.1 series.1, selectE big direct.2 series.2)
-        let cek := cmulE p.c (cplxLitE p.eKappa)
+        let cek := cmulE p.c p.eKappa
         let wsec := cmulE cek (scaleRealE dPos cxsec)                   -- c·e^κ·d·cexpm1
         add acc (add (add (land envNu w1 phNu) (land envMu w2 phMu)) (land envMuS wsec phMuS))
       else
         -- WS-A4: the τ·e coincidence pair (`coincidentCrossing`). CF branch (large z,
         -- `onSer` false) bridges at `dSwitch` to the series-DD branch (small z) + the
         -- secular.
-        let onSer := gt dPos (litF p.dSwitch)
+        let onSer := gt dPos p.dSwitch
         let cf := cfEnv p z
         let k2cf : CplxE := (div cf.1 (litF p.gRate), div cf.2 (litF p.gRate))   -- CF(z)/g
         -- series-DD: Φ(a,z) = z·Σ dₙ z^{n−1} (Horner over `dCoef`); k2 = −Φ(a,z)/g.
-        let phiZ := cmulE z (p.dCoef.foldr (fun dk h => caddE (cplxLitE dk) (cmulE z h)) (lit 0, lit 0))
+        let phiZ := cmulE z (p.dCoef.foldr (fun dk h => caddE dk (cmulE z h)) (lit 0, lit 0))
         let k2ser : CplxE := (div (neg phiZ.1) (litF p.gRate), div (neg phiZ.2) (litF p.gRate))
-        let k1 : CplxE := (selectE onSer (litF p.k1SerDD.re) (litF p.k1Cf.re),
-                           selectE onSer (litF p.k1SerDD.im) (litF p.k1Cf.im))
+        let k1 : CplxE := (selectE onSer p.k1SerDD.1 p.k1Cf.1,
+                           selectE onSer p.k1SerDD.2 p.k1Cf.2)
         let k2 : CplxE := (selectE onSer k2ser.1 k2cf.1, selectE onSer k2ser.2 k2cf.2)
         let w1 := cmulE p.c k1
         let w2 := cmulE p.c k2
         -- the τ·e secular `c·e^κ·e^{μd}·d·cexpm1((ν−μ)d)` on the STRAIGHT μ carrier
         -- (= `c·e^κ·(e^{νd}−e^{μd})/(ν−μ)`), gated OFF on the CF side.
-        let phMuS := modePhaseQ (litF p.muOmega) clkRel
-        let envMuS := expSig (neg (mul (litF p.muSigma) dPos))
-        let zsec : CplxE := (mul (litF (p.muSigma - p.nuSigma)) dPos,     -- (ν−μ)d
-                             mul (litF (p.nuOmega - p.muOmega)) dPos)
+        let phMuS := modePhaseQ p.muOmega clkRel
+        let envMuS := expSig (neg (mul p.muSigma dPos))
+        let zsec : CplxE := (mul p.secCoef.1 dPos,     -- (ν−μ)d
+                             mul p.secCoef.2 dPos)
         let zsq := add (mul zsec.1 zsec.1) (mul zsec.2 zsec.2)
         let big := gt zsq (litF 0.01)
         let zsafe : CplxE := (selectE big zsec.1 (lit 1), selectE big zsec.2 (lit 0))
@@ -1418,22 +1540,21 @@ def bloomComposedSig (pairs : Array BloomPair) (clkInt anchorSamples : Sig) : Si
         let direct := cdivE (csubE ez one) zsafe
         let series := cexpm1SeriesE zsec
         let cxsec : CplxE := (selectE big direct.1 series.1, selectE big direct.2 series.2)
-        let cek := cmulE p.c (cplxLitE p.eKappa)
+        let cek := cmulE p.c p.eKappa
         let wsecFull := cmulE cek (scaleRealE dPos cxsec)                -- c·e^κ·d·cexpm1
         let wsec : CplxE := (selectE onSer wsecFull.1 (lit 0), selectE onSer wsecFull.2 (lit 0))
         add acc (add (add (land envNu w1 phNu) (land envMu w2 phMu)) (land envMuS wsec phMuS))
     else
-      let mser := p.invA.foldr
-        (fun ik h => caddE one (cmulE (cmulE z (cplxLitE ik)) h)) one
-      let k2ser := cmulE mser (cplxLitE p.fSer)
+      let mser := bloomM1E p.invA z
+      let k2ser := cmulE mser p.fSer
       let (k1, k2) : CplxE × CplxE :=
-        if p.cfN.isEmpty then (cplxLitE p.k1Ser, k2ser)
+        if p.cfN.isEmpty then (p.k1Ser, k2ser)
         else
           let cf := cfEnv p z
           let k2cf : CplxE := (div cf.1 (litF p.gRate), div cf.2 (litF p.gRate))
-          let onSer := gt dPos (litF p.dSwitch)
-          ((selectE onSer (litF p.k1Ser.re) (litF p.k1Cf.re),
-            selectE onSer (litF p.k1Ser.im) (litF p.k1Cf.im)),
+          let onSer := gt dPos p.dSwitch
+          ((selectE onSer p.k1Ser.1 p.k1Cf.1,
+            selectE onSer p.k1Ser.2 p.k1Cf.2),
            (selectE onSer k2ser.1 k2cf.1, selectE onSer k2ser.2 k2cf.2))
       let w1 := cmulE p.c k1
       let w2 := cmulE p.c k2

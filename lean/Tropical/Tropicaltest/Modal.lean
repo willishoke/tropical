@@ -1250,10 +1250,12 @@ def runModalBloomGamma (arena : Arena)
   | none, _ | _, none =>
     failGate "modal-bloom-gamma" "bloomCompose: a live pole reached the baked-pole contract"
   | some pairs, some pairs0 =>
-    -- (o) the lgamma recurrence on the actual a values
+    -- (o) the lgamma recurrence on the actual a values (the pairs are BAKED, so
+    -- the `Sig` fields fold back to their Floats via `sigConstF?`)
+    let cf := fun (s : Tropical.EmitArrow.Sig) => (Tropical.EmitArrow.sigConstF? s).getD 0.0
     let mut lgErr : Float := 0.0
     for p in pairs do
-      let aC : CplxB := ⟨(p.nuSigma - p.muSigma) / g * (-1.0), (p.nuOmega - p.muOmega) / g⟩
+      let aC : CplxB := ⟨(cf p.nuSigma - cf p.muSigma) / g * (-1.0), (cf p.nuOmega - cf p.muOmega) / g⟩
       let ratio := (CplxB.exp ((lgammaB (aC.add ⟨1, 0⟩)).sub (lgammaB aC))).div aC
       lgErr := max lgErr ((ratio.sub ⟨1, 0⟩).abs)
     match buildAndFinish (.ok (buildBloomComposed "bloomg" pairs anchor arena)),
@@ -1311,10 +1313,10 @@ def runModalBloomGamma (arena : Arena)
         let eT := relL2 ref1 ref2 (anchorN + 1) n
         let e0 := relL2 dut0 ref0 (anchorN + 1) 4096
         -- (3) seam continuity around the crossing pair's switch sample
-        let crossing := pairs.filter (fun p => p.dSwitch > 0.0)
+        let crossing := pairs.filter (fun p => cf p.dSwitch > 0.0)
         let seamOk := Id.run do
           if crossing.isEmpty then return false
-          let iSw := anchorN + (crossing[0]!.dSwitch * sr).toUInt64.toNat
+          let iSw := anchorN + (cf crossing[0]!.dSwitch * sr).toUInt64.toNat
           if iSw + 1000 ≥ n then return false
           let maxStep := fun (lo hi : Nat) => Id.run do
             let mut m := 0.0
