@@ -1699,3 +1699,43 @@ def runGaugeAdapter (arena : Arena)
     passGate "gauge-adapter" s!"the self-measured excitation gauge: g=0 no-op, g=1 unity-peak (÷‖H‖), g=½ √Q trim — render ≡ norm^(-g) to {worst} rel, ‖H‖ grows {norms}"
   else
     failGate "gauge-adapter" s!"ok={ok} grows={grows} worst={worst}"
+
+open Tropical.EmitArrow in
+/-- THE OPTION-E k-INVARIANCE gate. Option E's whole correctness rests on the landed
+    value being INVARIANT under the per-bank exponent `k` (the `·2^(28−k)` land and the
+    `>>(28−k)` shift cancel; only the quantization LSB moves). Every equivalence gate
+    only ever exercised `k = 0` (all shipped configs land there), so the k≠0 branch's
+    value-preservation was inferred, never witnessed. This pins it directly: a single
+    cosine mode at a SWEEP of amplitudes that crosses the `k` boundaries (|A|=32→k1,
+    64→k2, 128→k3), rendered through the real datapath — the peak must stay LINEAR in
+    the amplitude (peak/amp constant), i.e. NO jump as `k` steps. Consequence (why the
+    handoff's earlier "glided-bank floatExponent is a Metal risk" note is retracted): a
+    backend that computes a different `k` (f32 maxAbs vs f64 near a power-of-2 boundary)
+    lands the SAME value to within one quantization LSB — not a 2× divergence, and
+    wasm≡jit (both f64 ⇒ same k) is bit-identical regardless. -/
+def runKInvariance (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let amps := #[10.0, 30.0, 40.0, 60.0, 70.0, 130.0]   -- k = 0,0,1,1,2,3 (crosses 32/64/128)
+  let peakOf := fun (amp : Float) => do
+    let modes := #[ModalMode.hz (litF 300.0) (litF 5.0) (litF amp)]
+    match buildAndFinish (.ok (buildExprCarrier "kinv" (modalBankSig modes clockLit (lit 200)) arena)) with
+    | .ok p => match ← renderPlanSamples p 2048 with
+      | .ok s => do
+          let mut mx := 0.0
+          for i in [201:s.size] do mx := max mx s[i]!.abs
+          pure (some mx)
+      | .error e => IO.println s!"        kinv render: {firstLine e}"; pure none
+    | .error e => IO.println s!"        kinv build: {firstLine e}"; pure none
+  let mut ratios : Array Float := #[]
+  for amp in amps do
+    let some pk ← peakOf amp | return (← failGate "k-invariance" s!"render amp={amp}")
+    ratios := ratios.push (pk / amp)
+  -- peak/amp must be one constant across the sweep — no jump at a k boundary
+  let mean := ratios.foldl (· + ·) 0.0 / ratios.size.toFloat
+  let worst := ratios.foldl (fun w r => max w ((r - mean).abs / mean)) 0.0
+  IO.println s!"        single cosine mode, |A| sweep {amps} (k = 0,0,1,1,2,3):"
+  IO.println s!"        result   peak/amp {ratios} · worst deviation from constant {worst}"
+  if worst < 1e-5 then
+    passGate "k-invariance" s!"the landed value is k-invariant: peak/amp constant to {worst} across the k=0→3 boundaries (32/64/128) — the ·2^(28−k)/>>(28−k) cancel, a k-flip moves only the quantization LSB"
+  else
+    failGate "k-invariance" s!"peak/amp NOT constant (worst {worst}) — a k boundary jumped the value; option E's k-invariance is broken"

@@ -373,6 +373,9 @@ def main (args : List String) : IO UInt32 := do
     if !(← runGaugeAdapter arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← runKInvariance arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← runModalBessel arena resolved) then
       failed := failed + 1
     total := total + 1
