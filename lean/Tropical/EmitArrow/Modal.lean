@@ -1264,18 +1264,28 @@ def classifyBloomPairLive (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
     let nRaw := samples.foldl (fun m re => max m (bloomM1 ⟨re, imA⟩ kappa).2) 0
     if nRaw + 8 > 300 then return none
     return some (.serOnly, nRaw + 8, 0)
-  if max (absAt reLo 1.0) (absAt reHi 1.0) < kappa.abs then
-    -- crossing throughout: |a+1| never reaches |κ| (max at an endpoint)
-    let mut nRaw := 0
-    let mut kRaw := 0
-    for re in samples do
-      let aC : CplxB := ⟨re, imA⟩
-      let zBnd := kappa.scale ((aC.add ⟨1, 0⟩).abs / kappa.abs)
-      nRaw := max nRaw (bloomM1 aC zBnd).2
-      kRaw := max kRaw (bloomCF aC zBnd).2
-    if nRaw + 8 > 300 || kRaw + 8 > 300 then return none
-    return some (.crossing, nRaw + 8, kRaw + 8)
-  return none
+  -- |a+1| dips below |κ| somewhere: crossing-throughout OR straddling (phase 3a
+  -- — the union COLLAPSES onto the crossing lanes: on a serOnly-side config
+  -- `dSwitch < 0`, the per-sample select sits on the series lane from d = 0,
+  -- and the bridge identity makes its `Γ★ − CF(κ)/g` constant EQUAL serOnly's
+  -- `mK/(ν−μ)`; f64-accurate over the whole interval because a straddling pair
+  -- has `|Im a| < |κ|` by construction, which keeps the CF at z = κ inside its
+  -- convergence territory — probed at ≤ 7.5e-13 vs mpmath incl. the |Im a| ≈
+  -- |κ| edge (`demos/wslp_union_probe.py`; the DEEP-serOnly regime |Im a| ≫
+  -- |κ| fails at rel ~50 there, which is why serOnly-throughout keeps its own
+  -- arm). Only the depth sizing differs: a straddling pair's series lane runs
+  -- from d = 0 on its serOnly side (|z| up to |κ|), so size at z = κ;
+  -- crossing-throughout keeps the branch-boundary `zBnd` (phase 2, unchanged).
+  let straddles := max (absAt reLo 1.0) (absAt reHi 1.0) ≥ kappa.abs
+  let mut nRaw := 0
+  let mut kRaw := 0
+  for re in samples do
+    let aC : CplxB := ⟨re, imA⟩
+    let zBnd := kappa.scale ((aC.add ⟨1, 0⟩).abs / kappa.abs)
+    nRaw := max nRaw (bloomM1 aC (if straddles then kappa else zBnd)).2
+    kRaw := max kRaw (bloomCF aC zBnd).2
+  if nRaw + 8 > 300 || kRaw + 8 > 300 then return none
+  return some (.crossing, nRaw + 8, kRaw + 8)
 
 /-- `bloomedVoice ⋙ reverb` as Γ-bridge pairs — the residue composition ACROSS a
     pitch-bloom warp (`B = β·scale/g` seconds of total clock advance, `g` the

@@ -629,10 +629,10 @@ def runBloomLivePole (arena : Arena)
   -- the live room: σ = 6.91/rt60 with rt60 NOT a foldable literal (clamp is
   -- outside `sigConstF?`'s vocabulary, exactly like a `paramRef` slot read),
   -- range declared as the knob span mapped through σ = 6.91/rt60
-  let rt60E : Sig := clampE (litF rt60Val) (litF rtLo) (litF rtHi)
-  let liveRoom := fun (rm : Array SeamMode) => rm.map (fun m =>
-    { m.toModal with sigma := div (lit 691 2) rt60E
+  let liveRoomAt := fun (rv : Float) (rm : Array SeamMode) => rm.map (fun m =>
+    { m.toModal with sigma := div (lit 691 2) (clampE (litF rv) (litF rtLo) (litF rtHi))
                      sigmaRange := some (6.91 / rtHi, 6.91 / rtLo) })
+  let liveRoom := liveRoomAt rt60Val
   let rMLive  := liveRoom room
   let rMBaked := room.map (·.toModal)
   -- (1) the lift engages: all 6 pairs, live and s0
@@ -648,16 +648,50 @@ def runBloomLivePole (arena : Arena)
     p.invA.foldl (fun a ik => a ++ #[ik.1, ik.2]) #[]) #[]
   let genuinelyLive := pairsLive.all (fun p => (sigConstF? p.nuSigma).isNone)
   let allS0 := liveConsts.all sigIsS0
-  -- (4) graceful per-pair drop: a room mode 10.5 Hz off the 220 Hz partial
-  -- CHANGES region across the rt60 interval (|a+1| straddles |κ| = 38.4:
-  -- max ≈ 40.7 at the σ-high endpoint ⇒ serOnly there, min ≈ 36.7 at
-  -- Re a = −1 ⇒ crossing there) — the phase 3 union-emit case, dropped per
-  -- pair today. (The 220.5 Hz ON-partial pair phase 1 used here is now
-  -- crossing-throughout and LIFTS — the drop set shrank with phase 2.)
-  let nearRoom := liveRoom #[mkMode 230.5 sigLive 0.5]
+  -- (4) graceful per-pair drop: a room mode 0.05 Hz off the 220 Hz partial is
+  -- COINCIDENT-dipping (|Im a| ≈ 0.17 < ½, and the rt60 range walks Re a
+  -- through the disc) — the one remaining per-pair drop after phase 3a (the
+  -- τ·e lanes stay baked-only). The drop set shrank twice: phase 1's
+  -- on-partial probe (220.5 Hz) lifted with phase 2's crossing arm, and
+  -- phase 2's region-CHANGING probe (230.5 Hz) lifted with phase 3a's
+  -- union collapse — it is now witness (6) below.
+  let nearRoom := liveRoom #[mkMode 220.05 sigLive 0.5]
   let dropCount := match bloomCompose vM nearRoom B g with
     | some ps => ps.size
     | none => 1000
+  -- (6) phase 3a — the STRADDLING pair (region-changing over the interval):
+  -- room 230.5 Hz vs voice 220 (|a+1| straddles |κ| = 38.4: serOnly at low
+  -- rt60, crossing at high). Served by the crossing lanes alone (the union
+  -- collapse, probed in demos/wslp_union_probe.py). Witnessed on BOTH sides:
+  -- at rt60 = 2 the live dSwitch ≈ 0.026 s (seam in-window, both lanes); at
+  -- rt60 = 0.25 the pair sits on its serOnly side (dSwitch < 0, series from
+  -- d = 0) and the BAKED pair takes the serOnly ARM — so live ≡ baked there
+  -- is the bridge identity `Γ★ − CF(κ)/g = mK/(ν−μ)` IN THE EMITTED KERNEL.
+  let renderPairs := fun (name : String) (ps : Array BloomPair) =>
+    renderConfig arena name (bloomComposedSig ps clockLit anchorSig)
+  let straddleCheck : Float → String → IO (Option (Float × Float)) := fun rv tag => do
+    let sv := 6.91 / rv
+    let vS : Array SeamMode := #[mkMode 220 1.0 1.0]
+    let rS : Array SeamMode := #[mkMode 230.5 sv 0.5]
+    let some psL := bloomCompose (vS.map (·.toModal)) (liveRoomAt rv rS) B g | return none
+    let some psB := bloomCompose (vS.map (·.toModal)) (rS.map (·.toModal)) B g | return none
+    if psL.size != 1 || psL.any (fun p => p.cfN.isEmpty) then return none
+    match ← renderPairs s!"wslp_str_{tag}_l" psL, ← renderPairs s!"wslp_str_{tag}_b" psB with
+    | .ok l, .ok b =>
+      let admS := fun (v r : SeamMode) => bloomAdmitsPair v.pole r.pole B g
+      let eB := relL2Win l b (anchorNat + 1) nProbe
+      let eO := relL2Win l (oracleSeam vS rS bloomWarp admS 8) (anchorNat + 1) nProbe
+      if !(allFinite l) then return none
+      return some (eB, eO)
+    | _, _ => return none
+  let some (eBS2, eOS2) ← straddleCheck 2.0 "r2"
+    | failGate "bloom-live-pole" "straddle witness (rt60=2, crossing side) failed to lift/render"
+  let some (eBS0, eOS0) ← straddleCheck 0.25 "r025"
+    | failGate "bloom-live-pole" "straddle witness (rt60=0.25, serOnly side) failed to lift/render"
+  -- the full bank with the straddling room mode now lifts ALL THREE pairs
+  let straddleBankFull := match bloomCompose vM (liveRoom #[mkMode 230.5 sigLive 0.5]) B g with
+    | some ps => ps.size == 3
+    | none => false
   -- (5) WS-LP phase 2 — the CROSSING region, live: a room mode close enough to
   -- the 1023 Hz voice partial that `|a+1| < |κ|` over the WHOLE rt60 range
   -- (crossing-throughout: both lanes emitted, `dSwitch` live). The window is
@@ -695,20 +729,22 @@ def runBloomLivePole (arena : Arena)
     let e := energyWin pL lo hi
     let eBakedX := relL2Win pLX pBX lo nX
     let eOracleX := relL2Win pLX (oracleSeam voiceX roomX bloomWarp adm 8 nX) lo nX
-    IO.println s!"bloom live-pole crossing (WS-LP: serOnly + crossing regions, live rt60):"
-    IO.println s!"        lift     pairs {pairsLive.size}/6 · live consts (unfoldable) {genuinelyLive} · s0 {allS0} · near-partial pair drops to {dropCount}/3"
+    IO.println s!"bloom live-pole crossing (WS-LP: serOnly + crossing + straddling, live rt60):"
+    IO.println s!"        lift     pairs {pairsLive.size}/6 · live consts (unfoldable) {genuinelyLive} · s0 {allS0} · coincident-dip pair drops to {dropCount}/3"
     IO.println s!"        serOnly  live ≡ baked crossing {eBaked * 1e9}e-9 · live ≡ oracle {eOracle} · pre-E {preE} · E {e}"
     IO.println s!"        crossing lifted (1 pair, CF lane) {crossingLifted} · live ≡ baked {eBakedX * 1e9}e-9 · live ≡ oracle {eOracleX} (window {nX}, seam inside)"
+    IO.println s!"        straddle rt60=2 (seam in-window) ≡ baked {eBS2 * 1e9}e-9, ≡ oracle {eOS2} · rt60=0.25 (serOnly side) ≡ baked-SER-ARM {eBS0 * 1e9}e-9 (the bridge identity in-kernel), ≡ oracle {eOS0} · full bank 3/3 {straddleBankFull}"
     -- live ≡ baked is a CONSISTENCY check, not the law (the oracle is): the
     -- baked constants come from build-time forward summation (`bloomM1`) and
     -- `lgammaB`, the lifted ones from the emitted Horner/fraction/`lgammaE` —
     -- real reassociations, so the honest bar is ~1e-6, not bit-identity.
     if pairsLive.size == 6 && genuinelyLive && allS0 && dropCount == 2
         && eBaked < 1e-6 && eOracle < 3e-4 && preE < 1e-18 && e > 1e-9 && allFinite pL
-        && crossingLifted && eBakedX < 1e-6 && eOracleX < 3e-4 && allFinite pLX then
-      passGate "bloom-live-pole" s!"a live-rt60 reverb CROSSES the bloom in BOTH lifted regions: serOnly 6/6 (≡ baked {eBaked * 1e9}e-9, ≡ oracle {eOracle}); crossing incl. live dSwitch seam (≡ baked {eBakedX * 1e9}e-9, ≡ oracle {eOracleX}); non-liftable pair drops per-pair"
+        && crossingLifted && eBakedX < 1e-6 && eOracleX < 3e-4 && allFinite pLX
+        && eBS2 < 1e-6 && eOS2 < 3e-4 && eBS0 < 1e-6 && eOS0 < 3e-4 && straddleBankFull then
+      passGate "bloom-live-pole" s!"a live-rt60 reverb CROSSES the bloom in every non-coincident region: serOnly 6/6 (≡ oracle {eOracle}); crossing incl. live dSwitch seam (≡ oracle {eOracleX}); STRADDLING pair served by the union collapse on both sides (crossing side ≡ oracle {eOS2}; serOnly side ≡ baked ser arm {eBS0 * 1e9}e-9 — the bridge identity in-kernel); only the coincident dip drops per-pair"
     else
-      failGate "bloom-live-pole" s!"pairs={pairsLive.size} live={genuinelyLive} s0={allS0} drop={dropCount} eBaked={eBaked * 1e9}e-9 eOracle={eOracle} preE={preE} E={e} finite={allFinite pL} xLift={crossingLifted} eBakedX={eBakedX * 1e9}e-9 eOracleX={eOracleX} finiteX={allFinite pLX}"
+      failGate "bloom-live-pole" s!"pairs={pairsLive.size} live={genuinelyLive} s0={allS0} drop={dropCount} eBaked={eBaked * 1e9}e-9 eOracle={eOracle} preE={preE} E={e} finite={allFinite pL} xLift={crossingLifted} eBakedX={eBakedX * 1e9}e-9 eOracleX={eOracleX} finiteX={allFinite pLX} eBS2={eBS2 * 1e9}e-9 eOS2={eOS2} eBS0={eBS0 * 1e9}e-9 eOS0={eOS0} bank3={straddleBankFull}"
   | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
     failGate "bloom-live-pole" s!"build/render: {e}"
 
