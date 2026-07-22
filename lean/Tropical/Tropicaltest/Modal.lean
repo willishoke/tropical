@@ -1604,3 +1604,76 @@ def planArrayFills (p : Tropical.Plan.FlatPlan) : Nat :=
 /-- Reduce regions (banked mode loops). -/
 def planReduces (p : Tropical.Plan.FlatPlan) : Nat :=
   countInstrs (fun i => i.tag == "ReduceBegin") p
+
+open Tropical.EmitArrow in
+/-- THE EXCITATION-GAUGE gate (§5). `normalizePeak g` rescales a bank's residues by
+    the self-measured `1/‖H‖^g` (`‖H‖` = the p=8 norm of the bank's own transfer
+    function over its pole frequencies). Because the scale is ONE real shared across
+    the bank, the render is EXACTLY `scale · (bare render)` — so
+    `peak(normalizePeak g) / peak(bare) = ‖H‖^{−g}` (linearity; option E keeps the
+    value identical across the `k` the rescale moves). An INDEPENDENT Float oracle
+    recomputes `‖H‖₈` from the raw pole/residue Floats — independent of the emitted
+    `logSig`/`expSig`, so a mis-scaled adapter shows as ratio ≠ oracle. Asserts, over
+    a 2-resonance bank with the damping σ swept (lower σ ⇒ higher Q ⇒ higher ‖H‖):
+    (1) g=0 is a no-op (ratio 1 — strike-invariance / unity-DC); (2) g=1 applies
+    1/‖H‖ (ratio = ‖H‖⁻¹), and since ‖H‖ GROWS across the sweep, the normalized
+    FREQUENCY peak ‖H‖·scale = 1 is level-invariant (unity-peak); (3) g=½ the √Q
+    trim (ratio = ‖H‖^{−½}). -/
+def runGaugeAdapter (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let f1 := 300.0; let f2 := 520.0; let a1 := 1.0; let a2 := 0.7
+  let tp := 6.283185307179586
+  let ws := #[tp * f1, tp * f2]; let amps := #[a1, a2]
+  let sigmas := #[40.0, 10.0, 3.0]                    -- the damping sweep (Q ↑ as σ ↓)
+  -- INDEPENDENT oracle: ‖H‖₈ over the two pole freqs, H(iω) = Σⱼ aⱼ/(σ + i(ω−ωⱼ)).
+  let normOf := fun (sig : Float) => Id.run do
+    let mut S := 0.0
+    for wk in ws do
+      let mut hr := 0.0; let mut hi := 0.0
+      for j in [0:2] do
+        let dr := sig; let di := wk - ws[j]!
+        let dn := dr * dr + di * di
+        hr := hr + amps[j]! * dr / dn
+        hi := hi - amps[j]! * di / dn
+      let h2 := hr * hr + hi * hi
+      S := S + h2 * h2 * h2 * h2
+    return Float.exp (Float.log S / 8.0)              -- S^{1/8}
+  let mkModes := fun (sig : Float) => #[
+    ModalMode.hz (litF f1) (litF sig) (litF a1),
+    ModalMode.hz (litF f2) (litF sig) (litF a2)]
+  let peakOf := fun (modes : Array ModalMode) => do
+    match buildAndFinish (.ok (buildExprCarrier "gauge_probe"
+        (modalBankSig modes clockLit (lit 200)) arena)) with
+    | .ok p => match ← renderPlanSamples p 2048 with
+      | .ok s => do
+          let mut mx := 0.0
+          for i in [201:s.size] do mx := max mx s[i]!.abs
+          pure (some mx)
+      | .error e => IO.println s!"        gauge render: {firstLine e}"; pure none
+    | .error e => IO.println s!"        gauge build: {firstLine e}"; pure none
+  let mut ok := true
+  let mut worst := 0.0
+  let mut norms : Array Float := #[]
+  for sig in sigmas do
+    let nrm := normOf sig
+    norms := norms.push nrm
+    let some pBare ← peakOf (mkModes sig) | return (← failGate "gauge-adapter" "bare render")
+    for g in #[(0.0, "0"), (0.5, "½"), (1.0, "1")] do
+      let some pG ← peakOf (normalizePeak (litF g.1) (mkModes sig))
+        | return (← failGate "gauge-adapter" s!"g={g.2} render")
+      let ratio := pG / pBare
+      let oracle := Float.exp (Float.log nrm * (-g.1))   -- ‖H‖^{−g}
+      let rel := (ratio - oracle).abs / (max oracle 1e-9)
+      if rel > worst then worst := rel
+      if rel > 5e-3 then
+        IO.println s!"        GAUGE MISMATCH σ={sig} g={g.2}: render ratio {ratio} vs oracle norm^(-g) {oracle} (rel {rel})"
+        ok := false
+  -- level-invariance: ‖H‖ must GROW across the sweep (else the adapter faces no
+  -- level change and unity-peak is vacuous); the g=1 case above then re-levels it.
+  let grows := norms.size == 3 && norms[0]! < norms[1]! && norms[1]! < norms[2]!
+  IO.println s!"        normalizePeak: render ratio ≡ norm^(-g) over σ∈{sigmas}, g∈0/½/1:"
+  IO.println s!"        result   worst rel {worst} · ‖H‖ {norms} (grows across the sweep: {grows})"
+  if ok && grows then
+    passGate "gauge-adapter" s!"the self-measured excitation gauge: g=0 no-op, g=1 unity-peak (÷‖H‖), g=½ √Q trim — render ≡ norm^(-g) to {worst} rel, ‖H‖ grows {norms}"
+  else
+    failGate "gauge-adapter" s!"ok={ok} grows={grows} worst={worst}"

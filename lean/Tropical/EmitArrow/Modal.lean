@@ -444,6 +444,40 @@ def residueComposeEC (voice reverb : Array ModalMode) : Array ModalMode :=
     modeOfE r.poleE (cnegE (cmulE r.ampE coupling)))
   forced ++ ringing
 
+/-- The excitation-gauge adapter (§5): rescale every residue by the self-measured
+    `1/‖H‖^g`, with `g` a LIVE scalar. `‖H‖` is the p=8 norm of the bank's OWN
+    transfer function `H(iω) = Σᵢ Aᵢ/(iω − μᵢ)` sampled at its own pole frequencies
+    (each resonance peaks near its pole, so `max_k|H(iωₖ)|` tracks `‖H‖∞`, and the
+    smooth 8-norm — a summing fold, no `max` kink under a live sweep — approximates
+    it). `g = 0` is the IDENTITY (`‖H‖⁰ = 1`, unity-DC — the committed strike gauge:
+    strikes ping at a Q-independent level, `res` is ring time); `g = ½` the √Q trim;
+    `g = 1` unity-peak (`H/‖H‖` has unit peak, so a tuned tone is level-invariant
+    across a resonance sweep, pings fading as 1/Q). Self-measuring: the norm reads
+    pole/residue data ALONE (nothing about `filterPair`/`res`), so it applies
+    unchanged to any modal bank or composed segment — Modal ⇝ Modal. Coefficient-
+    time: the norm folds the mode `Sig`s DIRECTLY (never a `Sig.index`/clock read),
+    an s0 expression that hoists to the coefficient kernel and crosses to Metal as a
+    coef slot — `logSig`'s `floatExponent` never runs per sample (option E's
+    discipline). The scale is ONE real shared across the bank, so the render is
+    EXACTLY `scale · (bare render)` (linear in residues) — hence `g = 0` is a VALUE
+    no-op and any `g` is a pure re-level with no relower (a mid-ring sweep re-levels
+    the ongoing tail, closed-form, no click). An empty bank stays empty. -/
+def normalizePeak (g : Sig) (modes : Array ModalMode) : Array ModalMode :=
+  if modes.isEmpty then #[] else
+  -- H(iωₖ) = Σᵢ Aᵢ/(σᵢ + i(ωₖ − ωᵢ))   (iωₖ − μᵢ, with μᵢ = −σᵢ + iωᵢ)
+  let hAt := fun (wk : Sig) => modes.foldl (fun acc m =>
+      caddE acc (cdivE m.ampE ((m.sigma, sub wk m.omega) : CplxE))) ((lit 0, lit 0) : CplxE)
+  -- S = Σₖ |H(iωₖ)|⁸ = Σₖ (|H|²)⁴  (p = 8; even power ⇒ no sqrt)
+  let S := modes.foldl (fun acc m =>
+      let h := hAt m.omega
+      let h2 := add (mul h.1 h.1) (mul h.2 h.2)
+      add acc (mul (mul h2 h2) (mul h2 h2))) (lit 0)
+  -- ‖H‖⁻ᵍ = S^{−g/8} = exp(−(g/8)·ln S); floor S > 0 so a silent bank (S→0)
+  -- scales 0·anything = 0 with no log(0).
+  let scale := expSig (mul (mul (neg g) (lit 125 3))
+                           (logSig (clampE S (litF 1e-30) (litF 1e300))))
+  modes.map (fun m => { m with cre := mul m.cre scale, cim := mul m.cim scale })
+
 /-- `residueComposeEC` with the Cauchy inner sums BANKED (WS-F). Each output mode's
     amp (`Hlam`/`coupling`) becomes a scalar `Sig.bankSum` over the SOURCE columns
     rather than a meta-unrolled fold — same value (per-term identical to `cdivE`,
