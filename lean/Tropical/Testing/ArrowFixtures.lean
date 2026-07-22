@@ -949,6 +949,15 @@ def buildExpProbe (name : String) (arena : Arena) : Arena × ProgramIdx :=
   let x := sub (mul sIdxF (lit 9765625 9)) (lit 10)
   buildExprCarrier name (expSig x) arena
 
+/-- `logSig(x)` over a positive ramp `x ∈ [0.02, 200]` (`x = 0.02 + i·0.0977`,
+    ~4 decades across 2048 samples, exercising both range-reduction branches and
+    ~13 exponent octaves). The reference side of the `bootstrap-log` gate:
+    rendered `logSig(x)` vs libm `log(x)`. -/
+def buildLogProbe (name : String) (arena : Arena) : Arena × ProgramIdx :=
+  let sIdxF := toFloatE (rshift clockLit (lit 32))
+  let x := add (lit 2 2) (mul sIdxF (lit 9765625 8))
+  buildExprCarrier name (logSig x) arena
+
 /-- Emit the modal bank through the ARROW path (`arrUn`/`clk`, then `emitTerm`) —
     the term side of the `modal-bank` gate. -/
 def buildModalBankArrow (name : String) (modes : Array ModalMode) (anchor : Sig)

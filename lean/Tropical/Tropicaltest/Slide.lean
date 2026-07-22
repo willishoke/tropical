@@ -118,6 +118,40 @@ def runBootstrapExp (arena : Arena)
     | .error e => failGate "bootstrap-exp" s!"render: {firstLine e}"
   | .error e => failGate "bootstrap-exp" s!"build: {firstLine e}"
 
+/-- THE BOOTSTRAP-LOG gate. `logSig` (the excitation-gauge norm's inverse-of-`exp`)
+    evaluated by the engine over a positive ramp `x∈[0.02,200]` must match libm
+    `log` to its minimax tolerance. An independent oracle (true log, not a second
+    copy of the atanh series), so a transcribed-coefficient typo or a mis-branched
+    range reduction shows up as error ≫ 1e-6. Absolute error on the log scale (the
+    accuracy that maps to relative error in `norm^{−g} = exp(−g·log)`), so the
+    x→1 (log→0) region is not a false relative-error blowup. `logSig`'s
+    `bootstrap-exp`. -/
+def runBootstrapLog (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match buildAndFinish (.ok (Tropical.EmitArrow.buildLogProbe "log_probe" arena)) with
+  | .ok p =>
+    match ← renderPlanSamples p 2048 with
+    | .ok s =>
+      let n := min s.size 2048
+      let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
+      let mut maxAbs : Float := 0.0
+      let mut worstX : Float := 0.0
+      for i in [0:n] do
+        let x := 0.02 + i.toFloat * 0.09765625
+        let ref := sinkGain * Float.log x
+        let err := (s[i]! - ref).abs / sinkGain
+        if err > maxAbs then
+          maxAbs := err
+          worstX := x
+      IO.println s!"        logSig(x) vs libm log, x∈[0.02,200] across 2048 samples:"
+      IO.println s!"        result   max absolute error = {maxAbs}  (at x={worstX})"
+      if maxAbs < 1e-6 then
+        passGate "bootstrap-log" s!"emitted atanh-series log ≡ true log to {maxAbs} abs (minimax) — transcription + range reduction correct"
+      else
+        failGate "bootstrap-log" s!"max abs err {maxAbs} (want <1e-6) at x={worstX}"
+    | .error e => failGate "bootstrap-log" s!"render: {firstLine e}"
+  | .error e => failGate "bootstrap-log" s!"build: {firstLine e}"
+
 /-- THE FIXED-SINE ACCURACY gate. `fixedSinCycSig` (the Q2.30 integer-datapath
     sine) over the integer phasor, rendered by the engine, vs the TRUE sine at
     the exactly-known phase: the phasor model `P(i) = (21426140·i) mod 2³²` is

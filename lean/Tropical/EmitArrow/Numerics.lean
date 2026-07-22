@@ -6,9 +6,11 @@ import Tropical.EmitArrow.Sig
 The numeric datapaths every generator/envelope is built from, as pure `Sig`
 functions: the exact Q2.30 fixed-point sine/cosine over a Q0.32 cycles phase,
 the integer split-multiply phasor (`phasorPhaseSig`), and the float
-polynomial transcendentals (`sinSig`, `cosSig`, `expSig`). Every
-transcendental is a polynomial — the op set never grows past
-`{+, ×, round, clamp, ldexp}`.
+polynomial transcendentals (`sinSig`, `cosSig`, `expSig`). `sin`/`cos`/`exp`
+are pure polynomials — that op set never grows past `{+, ×, round, clamp,
+ldexp}`. `logSig` (the gauge norm's inverse of `exp`) adds exactly two: the
+`floatExponent` exponent-extract (option E's op) and one `div` (the `atanh`
+argument) — coefficient-time only in its modal uses, so no per-sample cost.
 -/
 
 namespace Tropical.EmitArrow
@@ -113,6 +115,35 @@ def expSig (x : Sig) : Sig :=
     add (lit 13981999507 13) (mul (lit 198756915 12) r)) r)) r)) r)) r)
   let exp_r := add (lit 1) (mul r (add (lit 1) (mul r p)))
   ldexpE exp_r n
+
+/-- `ln x` for `x > 0` — `expSig`'s mirror, the second float transcendental the
+    modal island needs (the self-measuring excitation gauge's `‖H‖^{−g}` wants a
+    live `log`; `norm^{−g} = exp(−g·ln norm)`). Range-reduce by the IEEE exponent
+    to the mantissa `m ∈ [√½, √2)` (`e = ⌊log₂ x⌋`, `m = x·2^{−e}`, halved when
+    `m > √2` so the series stays centred), then `ln m = 2·atanh s`, `s = (m−1)/(m+1)`
+    — a 5-term series (`|s| ≤ 0.172`, so the `s¹⁰` tail is < 1e-8). `ln x = e·ln2
+    + ln m`. Two ops past the `{+,×,round,clamp,ldexp}` sine/exp set — `floatExponent`
+    (the exponent extract) and `div` (the `atanh` argument); both already in the Sig
+    vocabulary (`floatExponent` is option E's dynamic-`k` op). COEFFICIENT-TIME only
+    in its modal uses (the gauge norm folds pole/residue slots, an s0 expression), so
+    `floatExponent`'s f32-vs-f64 Metal split never runs per sample — the same
+    discipline that keeps option E's dynamic `k` Metal-safe. Domain `x > 0` (like
+    `Float.log`); the gauge floors its norm above 0 before calling. -/
+def logSig (x : Sig) : Sig :=
+  let e0 := Sig.unary .floatExponent x              -- ⌊log₂ x⌋ (float)
+  let m0 := ldexpE x (neg e0)                       -- x·2^{−e0} ∈ [1, 2)
+  let big := gt m0 (lit 14142135623730951 16)       -- m0 > √2 ⇒ halve, bump the exponent
+  let m := selectE big (mul m0 (lit 5 1)) m0        -- m ∈ [√½, √2)
+  let e := selectE big (add e0 (lit 1)) e0
+  let s := div (sub m (lit 1)) (add m (lit 1))      -- |s| ≤ 0.172
+  let s2 := mul s s
+  let p :=                                          -- atanh(s)/s = 1 + s²/3 + s⁴/5 + s⁶/7 + s⁸/9
+    add (lit 1) (mul s2 (
+    add (lit 3333333333333333 16) (mul s2 (
+    add (lit 2 1) (mul s2 (
+    add (lit 14285714285714285 17) (mul s2 (
+        lit 1111111111111111 16))))))))
+  add (mul e (lit 6931471805599453 16)) (mul (mul (lit 2) s) p)
 
 /-- 2π and π/2 as `Sig` literals; `cos x = sin(x + π/2)` reuses the gated `sinSig`. -/
 def twoPiE : Sig := lit 6283185307179586 15

@@ -285,6 +285,9 @@ def main (args : List String) : IO UInt32 := do
     total := total + 1
     if !(← runBootstrapExp arena resolved) then
       failed := failed + 1
+    total := total + 1
+    if !(← runBootstrapLog arena resolved) then
+      failed := failed + 1
     IO.println "fixed-point datapath sine (scope A — the sample values in i64):"
     total := total + 1
     if !(← runFixedSinAccuracy arena resolved) then
