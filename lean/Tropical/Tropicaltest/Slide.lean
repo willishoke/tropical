@@ -152,6 +152,52 @@ def runBootstrapLog (arena : Arena)
     | .error e => failGate "bootstrap-log" s!"render: {firstLine e}"
   | .error e => failGate "bootstrap-log" s!"build: {firstLine e}"
 
+open Tropical.EmitArrow in
+/-- THE SETTLE gate. `settle e` returns the s0 value `e` converges to (the glide's
+    saturating ramp → its ceiling), or `none` when a clock read survives (a genuine
+    modulation). Asserts, on a synthetic glide `2 → 10` built in `glideExpr`'s exact
+    shape: (1) the glide READS the clock (s1) and renders as a ramp (first ≈ 2, last
+    ≈ 10); (2) `settle glide = some g'` with `readsSampleIndex g' = false` — s0 BY
+    CONSTRUCTION, the enforceable contract — and `g'` renders as the CONSTANT target
+    10 (`= v1`, the value behind the ramp); (3) `settle (oscillator)` = `none` (a
+    surviving clock read → decline); (4) `settle (const) = some const`. This is what
+    lets the gauge norm be Metal-safe by construction, not by precondition. -/
+def runSettle (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  -- a synthetic glide v0=2 → v1=10, glideExpr's shape (smoothstep of a clamped ramp)
+  let dur := mul (lit 2 2) .sampleRate
+  let s := clampE (div (sub (toFloatE .sampleIndex) (lit 0)) dur) (lit 0) (lit 1)
+  let ss := mul (mul s s) (sub (lit 3) (mul (lit 2) s))
+  let glide := add (lit 2) (mul (sub (lit 10) (lit 2)) ss)
+  let osc := sinSig (toFloatE .sampleIndex)           -- a surviving clock read
+  let konst := lit 7
+  let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
+  let renderConst := fun (name : String) (e : Sig) => do
+    match buildAndFinish (.ok (buildExprCarrier name e arena)) with
+    | .ok p => match ← renderPlanSamples p 8192 with
+      | .ok v => pure (some v)
+      | .error e => IO.println s!"        settle render: {firstLine e}"; pure none
+    | .error e => IO.println s!"        settle build: {firstLine e}"; pure none
+  let glideS1 := readsSampleIndex glide
+  let some g' := settle glide | return (← failGate "settle" "settle glide = none")
+  let g'S0 := !readsSampleIndex g'
+  let oscNone := (settle osc).isNone
+  let konstSome := match settle konst with | some k => !readsSampleIndex k | none => false
+  let some rGlide ← renderConst "settle_ramp" glide | return (← failGate "settle" "ramp render")
+  let some rSettled ← renderConst "settle_dst" g' | return (← failGate "settle" "settled render")
+  -- the glide rises 2 → 10 over 20 ms (≈882 samples at 44.1k), so 8192 samples reach v1
+  let rampLo := rGlide[10]! / sinkGain
+  let rampHi := rGlide[8000]! / sinkGain
+  let dstFlat := (rSettled[10]! - rSettled[8000]!).abs / sinkGain      -- constant?
+  let dstVal := rSettled[4000]! / sinkGain
+  let rampsUp := rampLo < 3.0 && rampHi > 9.5                          -- ramp 2 → 10
+  let settledTo10 := (dstVal - 10.0).abs < 1e-3 && dstFlat < 1e-3      -- flat at v1=10
+  IO.println s!"        settle: glide reads clock={glideS1} (ramp {rampLo}→{rampHi}); settled reads clock={!g'S0} val={dstVal} (flat Δ={dstFlat}); osc→none={oscNone}; const→some={konstSome}"
+  if glideS1 && g'S0 && rampsUp && settledTo10 && oscNone && konstSome then
+    passGate "settle" "settle: glide (s1 ramp 2→10) ↦ its s0 ceiling 10 (=v1), clock read GONE by construction; a surviving clock read (osc) declines; a const passes through"
+  else
+    failGate "settle" s!"glideS1={glideS1} g'S0={g'S0} rampsUp={rampsUp} settledTo10={settledTo10} oscNone={oscNone} konstSome={konstSome}"
+
 /-- THE FIXED-SINE ACCURACY gate. `fixedSinCycSig` (the Q2.30 integer-datapath
     sine) over the integer phasor, rendered by the engine, vs the TRUE sine at
     the exactly-known phase: the phasor model `P(i) = (21426140·i) mod 2³²` is

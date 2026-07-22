@@ -233,6 +233,55 @@ def selectE (cond then_ else_ : Sig) : Sig := .select cond then_ else_
     integer part of range reduction. `n` is an integer-valued float (`round …`). -/
 def ldexpE (m n : Sig) : Sig := .binary .ldexp m n
 
+/-- Does this expression read the sample clock (`.sampleIndex`)? That read is the
+    authoring layer's source of per-sample (s1) τ-dependence — a value with none is
+    a function of settled parameters alone (s0). -/
+partial def readsSampleIndex : Sig → Bool
+  | .sampleIndex        => true
+  | .binary _ a b       => readsSampleIndex a || readsSampleIndex b
+  | .unary _ a          => readsSampleIndex a
+  | .clamp v lo hi      => readsSampleIndex v || readsSampleIndex lo || readsSampleIndex hi
+  | .select c t e       => readsSampleIndex c || readsSampleIndex t || readsSampleIndex e
+  | .index a b          => readsSampleIndex a || readsSampleIndex b
+  | .arr items          => items.any readsSampleIndex
+  | .bankSum _ ts b _ _  => ts.any readsSampleIndex || readsSampleIndex b
+  | _                   => false
+
+private def isZeroLit : Sig → Bool | .num n => n.mantissa == 0 | _ => false
+private def isOneLit  : Sig → Bool | .num n => n.mantissa == 1 && n.exponent == 0 | _ => false
+
+/-- Collapse every SATURATING glide ramp to its terminal value — a `clampE(r, 0, 1)`
+    whose ramp `r` reads the clock (`glideExpr`'s smoothstep parameter, the only
+    converging τ-dependent construct authored today) reaches `1` as the clock runs,
+    so it settles to its ceiling. Every other subterm settles pointwise. This is the
+    mechanical half of `settle`; use `settle` for the totality contract. -/
+partial def settleRamps : Sig → Sig
+  | .clamp v lo hi =>
+    if isZeroLit lo && isOneLit hi && readsSampleIndex v then lit 1
+    else .clamp (settleRamps v) (settleRamps lo) (settleRamps hi)
+  | .binary t a b       => .binary t (settleRamps a) (settleRamps b)
+  | .unary t a          => .unary t (settleRamps a)
+  | .select c t e       => .select (settleRamps c) (settleRamps t) (settleRamps e)
+  | .index a b          => .index (settleRamps a) (settleRamps b)
+  | .arr items          => .arr (items.map settleRamps)
+  | .bankSum c ts b dc ii => .bankSum c (ts.map settleRamps) (settleRamps b) dc ii
+  | s                   => s
+
+/-- `settle e` — the τ-independent (s0) value `e` converges to as the clock runs,
+    when that value exists; `none` otherwise. The one converging τ-dependent
+    construct today is `glideExpr`'s saturating ramp, which `settleRamps` collapses
+    to its ceiling; a `.sampleIndex` that SURVIVES that collapse is a genuine
+    modulation (an LFO on a pole never settles — it has no fixed point), so `settle`
+    returns `none` and the caller must DECLINE rather than measure a value the signal
+    never sits at. The guarantee that makes this a contract, not a hope: a `some`
+    result reads no clock — **s0 by construction**. So a coefficient built through
+    `settle` (a self-measuring gauge norm) cannot emit a per-sample op, and the
+    f32≠f64 `floatExponent` split across backends is unREACHABLE, not merely
+    documented against. -/
+def settle (s : Sig) : Option Sig :=
+  let s' := settleRamps s
+  if readsSampleIndex s' then none else some s'
+
 /-- Mirror the elaborator's `registerInstanceDecl` over a sequence of
     instantiated program names: each adds `(name, idx)` then merges that
     program's own registry (skipping keys already present), in declaration
