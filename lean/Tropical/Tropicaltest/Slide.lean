@@ -118,6 +118,114 @@ def runBootstrapExp (arena : Arena)
     | .error e => failGate "bootstrap-exp" s!"render: {firstLine e}"
   | .error e => failGate "bootstrap-exp" s!"build: {firstLine e}"
 
+/-- THE BOOTSTRAP-LOG gate. `logSig` (the excitation-gauge norm's inverse-of-`exp`)
+    evaluated by the engine over a positive ramp `x∈[0.02,200]` must match libm
+    `log` to its minimax tolerance. An independent oracle (true log, not a second
+    copy of the atanh series), so a transcribed-coefficient typo or a mis-branched
+    range reduction shows up as error ≫ 1e-6. Absolute error on the log scale (the
+    accuracy that maps to relative error in `norm^{−g} = exp(−g·log)`), so the
+    x→1 (log→0) region is not a false relative-error blowup. `logSig`'s
+    `bootstrap-exp`. -/
+def runBootstrapLog (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match buildAndFinish (.ok (Tropical.EmitArrow.buildLogProbe "log_probe" arena)) with
+  | .ok p =>
+    match ← renderPlanSamples p 2048 with
+    | .ok s =>
+      let n := min s.size 2048
+      let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
+      let mut maxAbs : Float := 0.0
+      let mut worstX : Float := 0.0
+      for i in [0:n] do
+        let x := 0.02 + i.toFloat * 0.09765625
+        let ref := sinkGain * Float.log x
+        let err := (s[i]! - ref).abs / sinkGain
+        if err > maxAbs then
+          maxAbs := err
+          worstX := x
+      IO.println s!"        logSig(x) vs libm log, x∈[0.02,200] across 2048 samples:"
+      IO.println s!"        result   max absolute error = {maxAbs}  (at x={worstX})"
+      if maxAbs < 1e-6 then
+        passGate "bootstrap-log" s!"emitted atanh-series log ≡ true log to {maxAbs} abs (minimax) — transcription + range reduction correct"
+      else
+        failGate "bootstrap-log" s!"max abs err {maxAbs} (want <1e-6) at x={worstX}"
+    | .error e => failGate "bootstrap-log" s!"render: {firstLine e}"
+  | .error e => failGate "bootstrap-log" s!"build: {firstLine e}"
+
+/-- THE BOOTSTRAP-ATAN2 gate. `atan2E` (the one new op WS-LP's live Γ★ bridge needs
+    past `logSig` — for complex `log`/`lgamma`) traces a circle: `atan2E(sin θ, cos θ)`
+    over `θ ∈ [−3.1, 3.096]` must recover `θ` across all four quadrants. Independent
+    oracle (the known angle), so a bad octant fold or quadrant `select` shows as error
+    ≫ 1e-5. Absolute error on the angle scale. `logSig`'s `bootstrap-exp`, for atan2. -/
+def runBootstrapAtan2 (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match buildAndFinish (.ok (Tropical.EmitArrow.buildAtan2Probe "atan2_probe" arena)) with
+  | .ok p =>
+    match ← renderPlanSamples p 2048 with
+    | .ok s =>
+      let n := min s.size 2048
+      let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
+      let mut maxAbs : Float := 0.0
+      let mut worstT : Float := 0.0
+      for i in [0:n] do
+        let theta := -3.1 + i.toFloat * 0.00302734375
+        let err := (s[i]! / sinkGain - theta).abs
+        if err > maxAbs then maxAbs := err; worstT := theta
+      IO.println s!"        atan2E(sin θ, cos θ) vs θ, θ∈[−3.1,3.096] across 2048 samples (all quadrants):"
+      IO.println s!"        result   max absolute error = {maxAbs}  (at θ={worstT})"
+      if maxAbs < 1e-5 then
+        passGate "bootstrap-atan2" s!"emitted octant-reduced atan2 ≡ the true angle to {maxAbs} (incl. sin/cos error) — quadrants + fold correct"
+      else
+        failGate "bootstrap-atan2" s!"max abs err {maxAbs} (want <1e-5) at θ={worstT}"
+    | .error e => failGate "bootstrap-atan2" s!"render: {firstLine e}"
+  | .error e => failGate "bootstrap-atan2" s!"build: {firstLine e}"
+
+open Tropical.EmitArrow in
+/-- THE SETTLE gate. `settle e` returns the s0 value `e` converges to (the glide's
+    saturating ramp → its ceiling), or `none` when a clock read survives (a genuine
+    modulation). Asserts, on a synthetic glide `2 → 10` built in `glideExpr`'s exact
+    shape: (1) the glide READS the clock (s1) and renders as a ramp (first ≈ 2, last
+    ≈ 10); (2) `settle glide = some g'` with `readsSampleIndex g' = false` — s0 BY
+    CONSTRUCTION, the enforceable contract — and `g'` renders as the CONSTANT target
+    10 (`= v1`, the value behind the ramp); (3) `settle (oscillator)` = `none` (a
+    surviving clock read → decline); (4) `settle (const) = some const`. This is what
+    lets the gauge norm be Metal-safe by construction, not by precondition. -/
+def runSettle (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  -- a synthetic glide v0=2 → v1=10, glideExpr's shape (smoothstep of a clamped ramp)
+  let dur := mul (lit 2 2) .sampleRate
+  let s := clampE (div (sub (toFloatE .sampleIndex) (lit 0)) dur) (lit 0) (lit 1)
+  let ss := mul (mul s s) (sub (lit 3) (mul (lit 2) s))
+  let glide := add (lit 2) (mul (sub (lit 10) (lit 2)) ss)
+  let osc := sinSig (toFloatE .sampleIndex)           -- a surviving clock read
+  let konst := lit 7
+  let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
+  let renderConst := fun (name : String) (e : Sig) => do
+    match buildAndFinish (.ok (buildExprCarrier name e arena)) with
+    | .ok p => match ← renderPlanSamples p 8192 with
+      | .ok v => pure (some v)
+      | .error e => IO.println s!"        settle render: {firstLine e}"; pure none
+    | .error e => IO.println s!"        settle build: {firstLine e}"; pure none
+  let glideS1 := readsSampleIndex glide
+  let some g' := settle glide | return (← failGate "settle" "settle glide = none")
+  let g'S0 := !readsSampleIndex g'
+  let oscNone := (settle osc).isNone
+  let konstSome := match settle konst with | some k => !readsSampleIndex k | none => false
+  let some rGlide ← renderConst "settle_ramp" glide | return (← failGate "settle" "ramp render")
+  let some rSettled ← renderConst "settle_dst" g' | return (← failGate "settle" "settled render")
+  -- the glide rises 2 → 10 over 20 ms (≈882 samples at 44.1k), so 8192 samples reach v1
+  let rampLo := rGlide[10]! / sinkGain
+  let rampHi := rGlide[8000]! / sinkGain
+  let dstFlat := (rSettled[10]! - rSettled[8000]!).abs / sinkGain      -- constant?
+  let dstVal := rSettled[4000]! / sinkGain
+  let rampsUp := rampLo < 3.0 && rampHi > 9.5                          -- ramp 2 → 10
+  let settledTo10 := (dstVal - 10.0).abs < 1e-3 && dstFlat < 1e-3      -- flat at v1=10
+  IO.println s!"        settle: glide reads clock={glideS1} (ramp {rampLo}→{rampHi}); settled reads clock={!g'S0} val={dstVal} (flat Δ={dstFlat}); osc→none={oscNone}; const→some={konstSome}"
+  if glideS1 && g'S0 && rampsUp && settledTo10 && oscNone && konstSome then
+    passGate "settle" "settle: glide (s1 ramp 2→10) ↦ its s0 ceiling 10 (=v1), clock read GONE by construction; a surviving clock read (osc) declines; a const passes through"
+  else
+    failGate "settle" s!"glideS1={glideS1} g'S0={g'S0} rampsUp={rampsUp} settledTo10={settledTo10} oscNone={oscNone} konstSome={konstSome}"
+
 /-- THE FIXED-SINE ACCURACY gate. `fixedSinCycSig` (the Q2.30 integer-datapath
     sine) over the integer phasor, rendered by the engine, vs the TRUE sine at
     the exactly-known phase: the phasor model `P(i) = (21426140·i) mod 2³²` is

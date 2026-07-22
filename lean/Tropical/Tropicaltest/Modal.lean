@@ -1250,10 +1250,12 @@ def runModalBloomGamma (arena : Arena)
   | none, _ | _, none =>
     failGate "modal-bloom-gamma" "bloomCompose: a live pole reached the baked-pole contract"
   | some pairs, some pairs0 =>
-    -- (o) the lgamma recurrence on the actual a values
+    -- (o) the lgamma recurrence on the actual a values (the pairs are BAKED, so
+    -- the `Sig` fields fold back to their Floats via `sigConstF?`)
+    let cf := fun (s : Tropical.EmitArrow.Sig) => (Tropical.EmitArrow.sigConstF? s).getD 0.0
     let mut lgErr : Float := 0.0
     for p in pairs do
-      let aC : CplxB := ⟨(p.nuSigma - p.muSigma) / g * (-1.0), (p.nuOmega - p.muOmega) / g⟩
+      let aC : CplxB := ⟨(cf p.nuSigma - cf p.muSigma) / g * (-1.0), (cf p.nuOmega - cf p.muOmega) / g⟩
       let ratio := (CplxB.exp ((lgammaB (aC.add ⟨1, 0⟩)).sub (lgammaB aC))).div aC
       lgErr := max lgErr ((ratio.sub ⟨1, 0⟩).abs)
     match buildAndFinish (.ok (buildBloomComposed "bloomg" pairs anchor arena)),
@@ -1311,10 +1313,10 @@ def runModalBloomGamma (arena : Arena)
         let eT := relL2 ref1 ref2 (anchorN + 1) n
         let e0 := relL2 dut0 ref0 (anchorN + 1) 4096
         -- (3) seam continuity around the crossing pair's switch sample
-        let crossing := pairs.filter (fun p => p.dSwitch > 0.0)
+        let crossing := pairs.filter (fun p => cf p.dSwitch > 0.0)
         let seamOk := Id.run do
           if crossing.isEmpty then return false
-          let iSw := anchorN + (crossing[0]!.dSwitch * sr).toUInt64.toNat
+          let iSw := anchorN + (cf crossing[0]!.dSwitch * sr).toUInt64.toNat
           if iSw + 1000 ≥ n then return false
           let maxStep := fun (lo hi : Nat) => Id.run do
             let mut m := 0.0
@@ -1604,3 +1606,176 @@ def planArrayFills (p : Tropical.Plan.FlatPlan) : Nat :=
 /-- Reduce regions (banked mode loops). -/
 def planReduces (p : Tropical.Plan.FlatPlan) : Nat :=
   countInstrs (fun i => i.tag == "ReduceBegin") p
+
+/-- `FloatExponent` ops (the one op whose f32/f64 result differs at 0/subnormal) in a
+    plan's instruction tree — the gauge-stage gate reads this per kernel. -/
+def planFloatExponents (p : Tropical.Plan.FlatPlan) : Nat :=
+  countInstrs (fun i => i.tag == "FloatExponent") p
+
+open Tropical.EmitArrow in
+/-- THE EXCITATION-GAUGE gate (§5). `normalizePeak g` rescales a bank's residues by
+    the self-measured `1/‖H‖^g` (`‖H‖` = the p=8 norm of the bank's own transfer
+    function over its pole frequencies). Because the scale is ONE real shared across
+    the bank, the render is EXACTLY `scale · (bare render)` — so
+    `peak(normalizePeak g) / peak(bare) = ‖H‖^{−g}` (linearity; option E keeps the
+    value identical across the `k` the rescale moves). An INDEPENDENT Float oracle
+    recomputes `‖H‖₈` from the raw pole/residue Floats — independent of the emitted
+    `logSig`/`expSig`, so a mis-scaled adapter shows as ratio ≠ oracle. Asserts, over
+    a 2-resonance bank with the damping σ swept (lower σ ⇒ higher Q ⇒ higher ‖H‖):
+    (1) g=0 is a no-op (ratio 1 — strike-invariance / unity-DC); (2) g=1 applies
+    1/‖H‖ (ratio = ‖H‖⁻¹), and since ‖H‖ GROWS across the sweep, the normalized
+    FREQUENCY peak ‖H‖·scale = 1 is level-invariant (unity-peak); (3) g=½ the √Q
+    trim (ratio = ‖H‖^{−½}). -/
+def runGaugeAdapter (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let f1 := 300.0; let f2 := 520.0; let a1 := 1.0; let a2 := 0.7
+  let tp := 6.283185307179586
+  let ws := #[tp * f1, tp * f2]; let amps := #[a1, a2]
+  -- the damping sweep (Q ↑ as σ ↓); the small-σ tail drives ‖H‖ to ~33 ⇒ S ~ 1e12,
+  -- PAST the pre-fix clamp ceiling (litF 1e300 saturated to ≈1.8e7), so this gate
+  -- catches a collapsed-clamp regression: with the old ceiling, high-Q leveling failed.
+  let sigmas := #[40.0, 10.0, 3.0, 0.5, 0.1, 0.03]
+  -- INDEPENDENT oracle: ‖H‖₈ over the two pole freqs, H(iω) = Σⱼ aⱼ/(σ + i(ω−ωⱼ)).
+  let normOf := fun (sig : Float) => Id.run do
+    let mut S := 0.0
+    for wk in ws do
+      let mut hr := 0.0; let mut hi := 0.0
+      for j in [0:2] do
+        let dr := sig; let di := wk - ws[j]!
+        let dn := dr * dr + di * di
+        hr := hr + amps[j]! * dr / dn
+        hi := hi - amps[j]! * di / dn
+      let h2 := hr * hr + hi * hi
+      S := S + h2 * h2 * h2 * h2
+    return Float.exp (Float.log S / 8.0)              -- S^{1/8}
+  let mkModes := fun (sig : Float) => #[
+    ModalMode.hz (litF f1) (litF sig) (litF a1),
+    ModalMode.hz (litF f2) (litF sig) (litF a2)]
+  let peakOf := fun (modes : Array ModalMode) => do
+    match buildAndFinish (.ok (buildExprCarrier "gauge_probe"
+        (modalBankSig modes clockLit (lit 200)) arena)) with
+    | .ok p => match ← renderPlanSamples p 2048 with
+      | .ok s => do
+          let mut mx := 0.0
+          for i in [201:s.size] do mx := max mx s[i]!.abs
+          pure (some mx)
+      | .error e => IO.println s!"        gauge render: {firstLine e}"; pure none
+    | .error e => IO.println s!"        gauge build: {firstLine e}"; pure none
+  let mut ok := true
+  let mut worst := 0.0
+  let mut norms : Array Float := #[]
+  for sig in sigmas do
+    let nrm := normOf sig
+    norms := norms.push nrm
+    let some pBare ← peakOf (mkModes sig) | return (← failGate "gauge-adapter" "bare render")
+    for g in #[(0.0, "0"), (0.5, "½"), (1.0, "1")] do
+      let some pG ← peakOf (normalizePeak (litF g.1) (mkModes sig))
+        | return (← failGate "gauge-adapter" s!"g={g.2} render")
+      let ratio := pG / pBare
+      let oracle := Float.exp (Float.log nrm * (-g.1))   -- ‖H‖^{−g}
+      let rel := (ratio - oracle).abs / (max oracle 1e-9)
+      if rel > worst then worst := rel
+      if rel > 5e-3 then
+        IO.println s!"        GAUGE MISMATCH σ={sig} g={g.2}: render ratio {ratio} vs oracle norm^(-g) {oracle} (rel {rel})"
+        ok := false
+  -- level-invariance: ‖H‖ must GROW monotonically across the sweep (a non-vacuity
+  -- guard — the exact invariance is the ratio ≡ ‖H‖^{−g} assertion above, which
+  -- proves normalizePeak divides by precisely the self-measured norm); the g=1 case
+  -- then re-levels a norm that spans ~0.025 → ~33 (three decades incl. the ceiling).
+  let grows := norms.size == sigmas.size &&
+    (Array.range (norms.size - 1)).all (fun i => norms[i]! < norms[i+1]!)
+  -- the floor path (S→0): an all-zero-residue bank has S = 0, clamped to 1e-30 (not
+  -- to `litF 1e-30`'s collapsed 0, which would send logSig(0) ≈ −712 → scale ≈ e⁸⁸);
+  -- the render must stay silent (0·anything = 0), never amplified numerical dust.
+  let silentBank := #[ModalMode.hz (litF f1) (litF 3.0) (lit 0),
+                       ModalMode.hz (litF f2) (litF 3.0) (lit 0)]
+  let some pSilent ← peakOf (normalizePeak (litF 1.0) silentBank)
+    | return (← failGate "gauge-adapter" "silent render")
+  let silentOk := pSilent < 1e-9
+  if !silentOk then
+    IO.println s!"        GAUGE: silent bank amplified to {pSilent} at g=1 — the S→0 floor is broken"
+    ok := false
+  IO.println s!"        normalizePeak: render ratio ≡ norm^(-g) over σ∈{sigmas}, g∈0/½/1:"
+  IO.println s!"        result   worst rel {worst} · ‖H‖ {norms} (grows across the sweep: {grows})"
+  if ok && grows then
+    passGate "gauge-adapter" s!"the self-measured excitation gauge: g=0 no-op, g=1 unity-peak (÷‖H‖), g=½ √Q trim — render ≡ norm^(-g) to {worst} rel, ‖H‖ grows {norms}"
+  else
+    failGate "gauge-adapter" s!"ok={ok} grows={grows} worst={worst}"
+
+open Tropical.EmitArrow in
+/-- THE EMITTED-LGAMMA gate (WS-LP foundation). `lgammaE` — the emitted complex
+    log-gamma (via `atan2E`/`logSig`), the live twin of build-time `lgammaB` — must
+    match `lgammaB` over a `Re z ∈ [−5, 5]` sweep (crossing the reflection boundary
+    Re = ½) at both `Im z` signs (`+1`, `−2.5`, exercising the dominant-half select).
+    Independent oracle: the build-time Lanczos itself, rendered vs computed. Relative
+    error (lgamma grows near the negative reals). This is the primitive under WS-LP's
+    live Γ★ bridge; without it the crossing stays baked-pole. -/
+def runLgammaEmit (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
+  let step := 10.0 / 2048.0
+  let reRamp := sub (mul (toFloatE (rshift clockLit (lit 32))) (litF step)) (lit 5)
+  let mut worst : Float := 0.0
+  let mut worstAt : String := ""
+  let mut ok := true
+  for imVal in #[1.0, -2.5] do
+    let lg := lgammaE (reRamp, litF imVal)
+    match buildAndFinish (.ok (buildExprCarrier "lg_re" lg.1 arena)),
+          buildAndFinish (.ok (buildExprCarrier "lg_im" lg.2 arena)) with
+    | .ok pRe, .ok pIm =>
+      match ← renderPlanSamples pRe 2048, ← renderPlanSamples pIm 2048 with
+      | .ok sRe, .ok sIm =>
+        for i in [0:min sRe.size sIm.size] do
+          let re := -5.0 + i.toFloat * step
+          let ref := lgammaB ⟨re, imVal⟩
+          let scale := max (ref.re.abs + ref.im.abs) 1.0
+          let e := (max (sRe[i]! / sinkGain - ref.re).abs (sIm[i]! / sinkGain - ref.im).abs) / scale
+          if e > worst then worst := e; worstAt := s!"z=({re},{imVal})"
+      | .error e, _ | _, .error e => IO.println s!"        lgammaE render: {firstLine e}"; ok := false
+    | .error e, _ | _, .error e => IO.println s!"        lgammaE build: {firstLine e}"; ok := false
+  IO.println s!"        emitted lgammaE vs build-time lgammaB, Re∈[−5,5] (crosses ½), Im = 1 and −2.5:"
+  IO.println s!"        result   worst relative error {worst}  (at {worstAt})"
+  if ok && worst < 1e-4 then
+    passGate "lgamma-emit" s!"emitted complex lgamma ≡ build-time Lanczos to {worst} rel across the reflection boundary and both Im signs — WS-LP's live Γ★ bridge is sound"
+  else
+    failGate "lgamma-emit" s!"ok={ok} worst={worst} at {worstAt}"
+
+open Tropical.EmitArrow in
+/-- THE OPTION-E k-INVARIANCE gate. Option E's whole correctness rests on the landed
+    value being INVARIANT under the per-bank exponent `k` (the `·2^(28−k)` land and the
+    `>>(28−k)` shift cancel; only the quantization LSB moves). Every equivalence gate
+    only ever exercised `k = 0` (all shipped configs land there), so the k≠0 branch's
+    value-preservation was inferred, never witnessed. This pins it directly: a single
+    cosine mode at a SWEEP of amplitudes that crosses the `k` boundaries (|A|=32→k1,
+    64→k2, 128→k3), rendered through the real datapath — the peak must stay LINEAR in
+    the amplitude (peak/amp constant), i.e. NO jump as `k` steps. Consequence (why the
+    handoff's earlier "glided-bank floatExponent is a Metal risk" note is retracted): a
+    backend that computes a different `k` (f32 maxAbs vs f64 near a power-of-2 boundary)
+    lands the SAME value to within one quantization LSB — not a 2× divergence, and
+    wasm≡jit (both f64 ⇒ same k) is bit-identical regardless. -/
+def runKInvariance (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let amps := #[10.0, 30.0, 40.0, 60.0, 70.0, 130.0]   -- k = 0,0,1,1,2,3 (crosses 32/64/128)
+  let peakOf := fun (amp : Float) => do
+    let modes := #[ModalMode.hz (litF 300.0) (litF 5.0) (litF amp)]
+    match buildAndFinish (.ok (buildExprCarrier "kinv" (modalBankSig modes clockLit (lit 200)) arena)) with
+    | .ok p => match ← renderPlanSamples p 2048 with
+      | .ok s => do
+          let mut mx := 0.0
+          for i in [201:s.size] do mx := max mx s[i]!.abs
+          pure (some mx)
+      | .error e => IO.println s!"        kinv render: {firstLine e}"; pure none
+    | .error e => IO.println s!"        kinv build: {firstLine e}"; pure none
+  let mut ratios : Array Float := #[]
+  for amp in amps do
+    let some pk ← peakOf amp | return (← failGate "k-invariance" s!"render amp={amp}")
+    ratios := ratios.push (pk / amp)
+  -- peak/amp must be one constant across the sweep — no jump at a k boundary
+  let mean := ratios.foldl (· + ·) 0.0 / ratios.size.toFloat
+  let worst := ratios.foldl (fun w r => max w ((r - mean).abs / mean)) 0.0
+  IO.println s!"        single cosine mode, |A| sweep {amps} (k = 0,0,1,1,2,3):"
+  IO.println s!"        result   peak/amp {ratios} · worst deviation from constant {worst}"
+  if worst < 1e-5 then
+    passGate "k-invariance" s!"the landed value is k-invariant: peak/amp constant to {worst} across the k=0→3 boundaries (32/64/128) — the ·2^(28−k)/>>(28−k) cancel, a k-flip moves only the quantization LSB"
+  else
+    failGate "k-invariance" s!"peak/amp NOT constant (worst {worst}) — a k boundary jumped the value; option E's k-invariance is broken"

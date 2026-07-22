@@ -108,6 +108,11 @@ def main (args : List String) : IO UInt32 := do
       total := total + 1
       if !(← runGolden writeMode name patchPath s!"tests/golden/cf/{name}.hash") then failed := failed + 1
 
+  -- ── (e′) The device-boundary bound: every audio patch renders bounded ──────
+  IO.println "device boundary (the safety class):"
+  total := total + 1
+  if !(← runDeviceBound) then failed := failed + 1
+
   -- ── (f′) MSL emitter goldens: the Metal backend's codegen, text-frozen ─────
   IO.println "msl emitter (EmitMsl text-frozen + the f64 fold):"
   for (name, patchPath) in [
@@ -280,6 +285,15 @@ def main (args : List String) : IO UInt32 := do
     total := total + 1
     if !(← runBootstrapExp arena resolved) then
       failed := failed + 1
+    total := total + 1
+    if !(← runBootstrapLog arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runBootstrapAtan2 arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runSettle arena resolved) then
+      failed := failed + 1
     IO.println "fixed-point datapath sine (scope A — the sample values in i64):"
     total := total + 1
     if !(← runFixedSinAccuracy arena resolved) then
@@ -359,6 +373,15 @@ def main (args : List String) : IO UInt32 := do
     if !(← runModalPair arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← runGaugeAdapter arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runKInvariance arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runLgammaEmit arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← runModalBessel arena resolved) then
       failed := failed + 1
     total := total + 1
@@ -383,6 +406,18 @@ def main (args : List String) : IO UInt32 := do
     if !(← Tropical.Tropicaltest.SeamSweep.runGongReverb arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← Tropical.Tropicaltest.SeamSweep.runBloomLivePole arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← Tropical.Tropicaltest.SeamSweep.runSeamCoverage arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← Tropical.Tropicaltest.SeamSweep.runSeamLaneClean arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← Tropical.Tropicaltest.SeamSweep.runFoldChain arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← runModalPatch arena resolved) then
       failed := failed + 1
     total := total + 1
@@ -401,6 +436,9 @@ def main (args : List String) : IO UInt32 := do
     if !(← runBanksStaging arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← runGaugeStage arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← runMslColumnGuard arena resolved) then
       failed := failed + 1
     total := total + 1
@@ -414,6 +452,15 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runModalFilter arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalRail arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalRailDir arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalRailIdentity arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runModalAddr arena resolved) then

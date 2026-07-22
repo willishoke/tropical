@@ -192,15 +192,20 @@ def defaultStringModes (f0 rho : Float) : Array ModalMode := Id.run do
 /-- A reverb room as a `ModalMode` bank (pole + residue-as-coeff): `nmode`
     log-spaced modes over `[flo,fhi]` with damping `σ = 6.91/rt60` (live), unit
     residues at golden-ratio phases so the tail isn't a pure comb. Freqs and count
-    are structural (baked); only the damping is a live knob. -/
-private def reverbRoom (rt60 : Sig) (nmode : Nat) (flo fhi : Float) : Array ModalMode :=
+    are structural (baked); only the damping is a live knob. `rtRange` (the rt60
+    knob's declared span) maps through σ = 6.91/rt60 to each mode's `sigmaRange` —
+    what lets a bloomed source CROSS this room with the rt60 still live (WS-LP:
+    `bloomCompose` classifies the live pole over that interval). -/
+private def reverbRoom (rt60 : Sig) (rtRange : Option (Float × Float))
+    (nmode : Nat) (flo fhi : Float) : Array ModalMode :=
   let sigma := div (lit 691 2) rt60           -- 6.91 / rt60
+  let sigmaRange := rtRange.map (fun (lo, hi) => (6.91 / hi, 6.91 / lo))
   let denom : Float := if nmode ≤ 1 then 1.0 else (nmode - 1).toFloat
   (Array.range nmode).map fun j =>
     let fq := flo * Float.pow (fhi / flo) (j.toFloat / denom)
     let ph := 6.283185307179586 * (0.6180339887 * j.toFloat)
     { sigma, omega := mul twoPiE (litF fq),
-      cre := litF (Float.cos ph), cim := litF (Float.sin ph) }
+      cre := litF (Float.cos ph), cim := litF (Float.sin ph), sigmaRange }
 
 /-- A 2-pole resonant filter as its EXACT complex-conjugate pole pair — the
     modal island's filter (the Serge-VCFQ move). "Filtering" a modal source is
@@ -382,6 +387,13 @@ def portSpecs : String → Array PortSpec
       { name := "resonance", knob := some (5, 1), discipline := .glide,
         display := some { min := 0, max := 1 } }]
   | "modalmix" => #[{ name := "in", accepts := modalIn, multi := true }]
+  -- gauge: the §5 excitation-gauge adapter — re-levels its modal input's peak by the
+  -- self-measured ‖H‖^{−g}. `g` is the gauge: 0 = unity-DC (strike, the identity),
+  -- ½ = √Q trim, 1 = unity-peak (tuned-tone level-invariant). Glided (smooth sweep).
+  | "gauge" => #[
+      { name := "in", accepts := modalIn },
+      { name := "g", knob := some (0, 0), discipline := .glide,
+        display := some { min := 0, max := 1 } }]
   -- gong: a struck resonator whose strike data (`t`, `g`, `modes_full`,
   -- `modes_half`) is structural (carried in `params`), EXCEPT the pitch-bloom
   -- depth `beta` — promoted to a LIVE slot, so the bloom deepens/relaxes under a
@@ -397,15 +409,43 @@ def portSpecs : String → Array PortSpec
 /-- Each kind's outlet color (`none` = no outlet, the dac sink). -/
 def outletOf : String → Option PortDomain
   | "knob" => some .control
-  | "resonator" | "reverb" | "filter" | "modalmix" | "string" => some .modal
+  | "resonator" | "reverb" | "filter" | "modalmix" | "string" | "gauge" => some .modal
   | "out" => none
   | _ => some .signal
 
-/-- The kinds the table covers, in schema order (`out` last — it has no outlet). -/
+/-- The kinds the table covers, in schema order (`out` last — it has no outlet).
+    The SERVED surface vocabulary: `checkServedKinds` admits exactly these; a
+    client renders them from `vocabularyJson`. -/
 def vocabularyKinds : Array String := #[
   "source", "pluck", "comb", "flange", "delay", "reverse", "fm", "sflange",
   "mix", "ring", "gong", "string", "resonator", "reverb", "filter",
-  "modalmix", "knob", "out"]
+  "modalmix", "gauge", "knob", "out"]
+
+/-- Every kind `buildNode` actually constructs (its match arms — the AUTHORITATIVE
+    list, read straight off the arms below). The classification-drift gate and
+    `checkServedKinds` both derive from THIS, so `buildNode` cannot grow a kind the
+    vocabulary/withholding machinery has not accounted for: the drift gate asserts
+    `buildNodeKinds ⊆ vocabularyKinds ∪ withheldKinds` (every built kind is served
+    or explicitly withheld) and that no served kind drifts. (`out` is a dac sink,
+    not a `buildNode` arm — it is in `vocabularyKinds`, not here.) -/
+def buildNodeKinds : Array String := #[
+  "knob", "source", "pluck", "comb", "flange", "sflange", "fm", "delay",
+  "reverse", "mix", "ring", "resonator", "reverb", "filter", "modalmix",
+  "gauge", "gong", "bloomgong", "string"]
+
+/-- Kinds `buildNode` builds but which are WITHHELD from the served surface. Their
+    modal factor-site landing (`bloomComposedSig`) still lands `lit 268435456`
+    unconditionally — no per-region sup, no admission guard for the conditioning
+    hazard when `a` is near a negative integer (the fixed-depth float64 series-M
+    Horner catastrophically cancels; see that def's RANGE block). `checkServedKinds`
+    rejects a withheld kind with an honest message rather than letting it die
+    downstream as a MISLEADING `signal→modal` type error: `outletOf` falls through
+    to `signal` for it, which DRIFTS from its modal constructed node — the exact
+    drift the `modal-class-agreement` gate now sees because it drives off
+    `buildNodeKinds`. Un-withholding one is NOT a one-line `outletOf` edit: it
+    re-admits the unguarded factor site, so it waits on the per-region-sup landing
+    (`design/seam-hardening-optionE-handoff.local.md`, the factor-site follow-on). -/
+def withheldKinds : Array String := #["bloomgong"]
 
 -- Derived views — the ONLY readers of glide/anchor/knob facts from here down.
 private def portOf (kind kname : String) : Option PortSpec :=
@@ -419,6 +459,12 @@ private def fallbackOf (kind kname : String) : Sig :=
   match (portOf kind kname).bind (·.knob) with
   | some (m, e) => lit m e
   | none => lit 0
+/-- A knob's display span from the table — the interval a live value is DECLARED
+    to range over (WS-LP feeds it to the live-pole region classifier; the lifted
+    kernel clamps the live read to it, so the declaration is enforced, not
+    advisory). -/
+private def displayRangeOf (kind kname : String) : Option (Float × Float) :=
+  ((portOf kind kname).bind (·.display)).map (fun d => (d.min, d.max))
 
 /-- A closed-form smoothstep GLIDE of τ from three slots: `v0 + (v1−v0)·s²(3−2s)`,
     `s = clamp((τ − t0)/dur, 0, 1)`, `dur = 0.02·sampleRate` samples (20 ms at any
@@ -607,13 +653,20 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     let sway := p "sway" (dv "sway")
     let swayRate := p "rate" (dv "rate")   -- 0.3 Hz: a slow breath
     let dir : ModalDir := { dir := dirX, damp := some (sway, swayRate) }
-    (.modalReverb sig (reverbRoom rt60 32 60.0 6000.0) (some dir), #[])
+    (.modalReverb sig (reverbRoom rt60 (displayRangeOf "reverb" "rt60") 32 60.0 6000.0) (some dir), #[])
   | "filter" =>
     -- the filter IS a modalReverb with a computed 2-mode room: the residue
     -- calculus does the "filtering" at build time, knobs stay live through it.
     (.modalReverb sig
       (filterPair (p "cutoff" (dv "cutoff")) (p "resonance" (dv "resonance"))) none, #[])
   | "modalmix" => (.modalMix (portSources inObj "in"), #[])
+  | "gauge" =>
+    -- §5 excitation gauge: re-level the modal input's peak. g=0 identity (unity-DC,
+    -- the strike gauge), g=1 unity-peak. A pure Modal ⇝ Modal effect (`normalizePeak`);
+    -- the norm is self-measured on the SETTLED poles, so a glided filter input is
+    -- Metal-safe and an un-settleable input declines to identity.
+    let inId := (portSources inObj "in")[0]?.getD "__silence__"
+    (.modalGauge inId (p "g" (dv "g")), #[])
   | "gong" =>
     -- One STRIKE of the struck nonlinear resonator: two anchored modal banks
     -- (full-glide + stiff half-glide registers) behind per-strike pitch-bloom
@@ -644,8 +697,9 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     -- lowering folds the room chain first and crosses the bloom ONCE. Baked-pole-
     -- bloom contract (besselFuse parity): β, g, scale baked (a change relowers);
     -- amps stay live. Wired to `out` it plays the bare bloom-warped register;
-    -- wired to a BAKED-pole reverb it crosses. A live-pole (rt60) reverb
-    -- gracefully drops to the bare bloom (the recorded baked-pole-bloom v1 limit).
+    -- wired to a reverb it crosses — including a LIVE-rt60 reverb since WS-LP
+    -- (serOnly pairs lift to s0 CplxE of the live pole; region-crossing pairs
+    -- drop gracefully per pair until the Phase 3 region-union emit).
     let t := jFloat params "t" 0.0
     let beta := jFloat params "beta" 0.05
     let gRate := jFloat params "g" 1.8
@@ -721,6 +775,13 @@ private def discStr : Discipline → String
 private def checkEdgeTypes (raws : Array Raw) : Except String Unit := do
   for r in raws do
     for p in portSpecs r.kind do
+      -- A knob-only port (`accepts = #[]`, `knob` set — `rt60`, `decay`, `cutoff`,
+      -- …) is a SET value, never a wired inlet. A wire into it slips past the
+      -- color loop below (empty accepts) yet makes `collectParams`' `selfWired`
+      -- SUPPRESS the slot — a silently dead knob. Reject a non-empty wire here
+      -- (an empty `in[knob]` entry is a harmless surface convention, kept legal).
+      if p.accepts.isEmpty && p.knob.isSome && !(portSources r.inObj p.name).isEmpty then
+        throw s!"connection error: '{r.id}' ({r.kind}) has a wire into '{p.name}', which is a knob (a set value), not an inlet — set it via its param slot (or wire its owner port), do not wire the knob itself"
       unless p.accepts.isEmpty do
         for srcId in portSources r.inObj p.name do
           match raws.find? (·.id == srcId) with
@@ -796,18 +857,40 @@ private def checkOutTarget (j : Json) (raws : Array Raw) : Except String Unit :=
     else throw s!"output target error: the top-level \"out\" names node '{outId}', which is not in the patch — route the dac from an existing node (or omit \"out\" for a silent patch)"
   | _ => pure ()
 
+/-- Reject a node the served surface does not cover, at the surface boundary —
+    BEFORE `checkEdgeTypes`, so the honest message wins over the misleading
+    `signal→modal` type error a WITHHELD modal kind (whose `outletOf` falls through
+    to `signal`) would otherwise die as downstream. A withheld kind (`withheldKinds`
+    — built by `buildNode` but not yet surface-ready) and a genuinely UNKNOWN kind
+    (a typo, which `buildNode`'s `_ => .mix` fallthrough would otherwise turn into
+    silent silence) each get their own message. Distinct from a legal-incomplete
+    state (an unwired inlet → silence, no error): an unknown/withheld kind is a
+    broken/unavailable document. A valid patch is untouched — every `vocabularyKinds`
+    entry (incl. `out`) passes. -/
+private def checkServedKinds (raws : Array Raw) : Except String Unit := do
+  for r in raws do
+    if withheldKinds.contains r.kind then
+      throw s!"unserved kind: '{r.id}' has kind '{r.kind}', which the engine builds but WITHHOLDS from the surface vocabulary (its modal factor-site landing has no admission guard yet) — not available as a patch node"
+    unless vocabularyKinds.contains r.kind do
+      throw s!"unknown kind: '{r.id}' has kind '{r.kind}', which is not a served node kind — see get_vocabulary for the {vocabularyKinds.size} kinds the surface builds"
+  pure ()
+
 /-- Finding-2 agreement: the connection-typing rule is decided at TWO sites.
     `checkEdgeTypes` colors an outlet through `outletOf`; the lowering decides
     modal-ness through `nodeIsModal` on the CONSTRUCTED node. Nothing forces them
     to agree, so a future kind whose `buildNode` returns a modal node but which
     lacks a modal `outletOf` case would be silently signal-colored — the checker
     would then reject modal wiring the lowering accepts (or vice-versa). This
-    builds each vocabulary kind's DEFAULT node and reports the kinds where
-    `nodeIsModal` disagrees with `outletOf … == some .modal`; `tropicaltest`
-    asserts the result empty. (`out` has no outlet and is never built — skipped.) -/
+    builds every kind `buildNode` constructs (`buildNodeKinds`, NOT just the
+    served `vocabularyKinds` — so a served-but-unlisted kind like a withheld
+    `bloomgong` is SEEN, not invisible) and reports the kinds where `nodeIsModal`
+    disagrees with `outletOf … == some .modal`. The gate then asserts no SERVED
+    kind drifts; a withheld kind may drift (that drift is why it is withheld —
+    `checkServedKinds` rejects it pre-lowering, so it can never mis-type an edge).
+    (`out` is a dac sink, never built — not in `buildNodeKinds`.) -/
 def modalClassificationDrift : Array String := Id.run do
   let mut drift : Array String := #[]
-  for kind in vocabularyKinds do
+  for kind in buildNodeKinds do
     if kind == "out" then continue
     let (node, _) := buildNode (fun _ => none) "n" kind
       (Json.mkObj []) (Json.mkObj []) (Json.mkObj [])
@@ -1056,7 +1139,8 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
     Except String (Tropical.Plan.FlatPlan × Array Tap
       × Array (Array (Option Tropical.Ir.Stage))) := do
   let raws := rawsOf j
-  checkEdgeTypes raws                                -- reject ill-typed / dangling edges pre-lowering
+  checkServedKinds raws                              -- reject withheld/unknown kinds FIRST (honest msg over the misleading type error)
+  checkEdgeTypes raws                                -- reject ill-typed / dangling / wire-into-knob edges pre-lowering
   checkAcyclic raws                                  -- reject cycles BEFORE the unbounded lowering recursion
   checkOutTarget j raws                              -- reject an "out" id that names no node
   let (g, paramTable) ← decodeGraph j

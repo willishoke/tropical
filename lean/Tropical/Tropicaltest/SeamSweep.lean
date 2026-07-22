@@ -193,14 +193,32 @@ private def idWarp : Float → Float := fun s => s
 
 /-- `residueComposeEC` — the collected residue bank (`voice ⋙ reverb`, m+n
     modes), realized through the default banked lowering. Total composition; the
-    admission predicate marks where the collected `1/Δ` amp stays inside the
-    Q4.28 headroom (`|a·r/Δ| < 8` ⟺ `|Δ|·8 > |a·r|`) — below it is
-    `residueComposeDD`'s region, not EC's promise (passive exclusion). -/
+    admission predicate marks where EC's `1/Δ` residue stays ACCURATE — below it
+    is `residueComposeDD`'s region, not EC's promise (passive exclusion).
+
+    RE-DERIVED (option E, the modal-datapath rail fix). This predicate ONCE
+    conflated two boundaries under one `|a·r/Δ| < 8` threshold: the i64 Q4.28
+    WRAP (a collected weight past 32 — `modalBankSigTable`'s landing) and the
+    near-coincidence ACCURACY floor (EC's `1/Δ` forms two huge opposite-sign
+    residues whose landed cancellation loses precision). Option E's per-bank
+    exponent (`bankLandExp`) removed the wrap for ALL |A|, so this predicate no
+    longer guards it — that boundary is now covered on the PRODUCTION path by the
+    `modal-rail`/`modal-rail-dir` witnesses (the real gesture, stronger than a
+    sweep probe). What remains is the accuracy boundary, and that is genuinely
+    PER-PAIR-LOCAL — accuracy degrades when ONE voice pole nears ONE room pole
+    (`λ_j → ν` ⇒ residue `a_j·r/(λ_j−ν) → ∞`, its cancellation error growing with
+    the landed magnitude even at zero wrap), unlike the wrap which was collective.
+    So the rail doc's collected-sum unsoundness applied to the WRAP (now fixed);
+    the per-pair form is SOUND for the accuracy purpose it now serves alone. The
+    `8` stays as the empirical EC-accurate edge (where DD takes over), no longer
+    a Q4.28-headroom number. -/
 private def ecAtom : SeamAtom :=
   { name := "residueEC"
     phi := idWarp
     realize := fun v r => modalBankSigTable (residueComposeEC (v.map (·.toModal)) (r.map (·.toModal))) clockLit anchorSig
     admitsPair := fun v r =>
+      -- EC's accuracy edge: the per-pair 1/Δ residue below DD's coincidence region
+      -- (`|a·r/Δ| < 8`). NOT a wrap bound — option E removed that (see the header).
       let dpole := (v.pole.sub r.pole).abs
       let amp := (v.amp.mul r.amp).abs
       dpole * 8.0 > amp
@@ -247,7 +265,10 @@ private def bloomWarp : Float → Float := fun s => s + bloomBg.1 * (1.0 - Float
     live poles. Baked-pole v1 (the sweep pole set is all literal). NOTE: the 0.09 s
     interior/boundary window only exercises the CF branch (which is accidentally
     stable at coincidence); the series-DD resonance lives in the tail, witnessed by
-    the long-render `coincidence deep-tail` check in `runSeamSweep`. -/
+    the long-render checks in `runSeamSweep` — the `coincidence deep-tail` (a = 0
+    EXACT, the `euler` limit branch) AND the `a≠0 coincidentCrossing tail` (the
+    general `lgamma(a+1)/a` bridge, WS-AA audit) — plus the `small-κ` subtle-bloom
+    direct-sum branch. -/
 private def bloomAtom : SeamAtom :=
   let B := bloomBg.1
   let g := bloomBg.2
@@ -435,7 +456,28 @@ def runSeamSweep (arena : Arena)
     if !(allFinite dut) || eS ≥ 3e-4 then
       IO.println s!"        bloomGamma SMALL-κ VIOLATION: rel {eS} — Φ(a,κ) bridge cancellation not caught by the direct-sum fallback"
       ok := false
-  if ok then passGate "seam-sweep" "every registered atom holds its law over its admission region (incl. the τ·e coincidence deep-tail AND small-κ direct-sum region); composition laws (EC-commute, assoc) pinned"
+  -- ── coincidence a≠0 series-DD tail (WS-AA audit): the a=0 deep-tail above hits
+  -- bloomPhiKappaOverG's `euler` special case (aC.normSq < 1e-12, the removable-
+  -- singularity limit); the GENERAL lgamma(a+1)/a divided-difference bridge — baked
+  -- into k1SerDD for EVERY a≠0 coincidentCrossing pair (a room pole tuned NEAR but
+  -- not ON a settled partial, the generic coincidence, a=0 being measure-zero) — was
+  -- witnessed by no oracle. Render an a≠0 coincidentCrossing pair (0<|a|<½, |κ|≥|a+1|)
+  -- PAST its dSwitch (≈1.69 s) and re-check the series-DD tail where k1SerDD (via the
+  -- lgamma bridge) is the selected e^{νd} constant.
+  let vAC : Array SeamMode := #[mkMode 110 0.2 1.0]                                  -- μ, σ small ⇒ rings long
+  let rAC : Array SeamMode := #[{ sigma := 0.35, omega := tp * 110, are := 0.5 }]   -- ν≈μ ⇒ a≈−0.083 (real, ≠0)
+  let acLo : Nat := 76000                                                            -- ≈1.72 s > dSwitch≈1.69 s
+  match ← renderConfig arena "seam_bloom_coinc_aneq0" (bloomAtom.realize vAC rAC) nDeep with
+  | .error e => IO.println s!"        bloomGamma a≠0 tail BUILD/RENDER: {firstLine e}"; ok := false
+  | .ok dut =>
+    let refAC := oracleSeam vAC rAC bloomWarp admD 8 nDeep
+    let eAC := relL2Win dut refAC acLo nDeep
+    let eFullAC := relL2Win dut refAC lo nDeep
+    IO.println s!"        bloomGamma a≠0 coincidentCrossing tail (|a|≈0.083, |κ|≈19, general lgamma(a+1)/a bridge, ~2.2 s): series-DD region rel {eAC}, full rel {eFullAC}"
+    if !(allFinite dut) || eAC ≥ 1e-3 || eFullAC ≥ 1e-4 then
+      IO.println s!"        bloomGamma a≠0 TAIL VIOLATION: series-DD rel {eAC} (full {eFullAC}) — the general lgamma-bridge k1SerDD is off the law"
+      ok := false
+  if ok then passGate "seam-sweep" "every registered atom holds its law over its admission region (incl. the τ·e coincidence deep-tail, small-κ direct-sum, AND the a≠0 general lgamma-bridge tail); composition laws (EC-commute, assoc) pinned"
   else failGate "seam-sweep" "a registered seam atom drifted off its stated law — see the per-config lines above"
 
 -- ── Deliverable A: gong⋙reverb(⋙reverb) audible from the patch surface ────────
@@ -557,6 +599,92 @@ def runGongReverb (arena : Arena)
   | .ok pS, .ok pC, .ok dS, .ok dC => gongVerdict voice room1 room2 pS pC dS dC
   | _, _, _, _ => failGate "gong-reverb" "build/render failed for a gong⋙reverb graph"
 
+-- ── WS-LP Phase 1: the live-pole crossing witness ─────────────────────────────
+
+/-- THE LIVE-POLE CROSSING GATE (WS-LP Phase 1). A bloomed source crosses a
+    reverb whose σ is a LIVE rt60 pole — the pole a Sig the folder can NOT
+    constant-fold (the surface shape: `6.91/rt60` with rt60 a slot read; here the
+    un-foldable stand-in is the same expression over a clamped literal, so the
+    carrier path can render it without a param table). Asserts:
+    (1) `bloomCompose` LIFTS the pairs instead of dropping to the bare bloom
+        (all voice×room pairs present, and their constants are genuinely live —
+        `sigConstF?` fails on them — and genuinely s0 — `sigIsS0` holds, the
+        Stage0-hoist precondition);
+    (2) the rendered live crossing ≈ the BAKED crossing at the same rt60 value
+        (the lift computes the same constants, by kernel arithmetic instead of
+        build-time arithmetic — identical up to last-bit float noise);
+    (3) the live crossing ≈ `oracleSeam` under the bloom warp (the law, not just
+        self-consistency), causal and finite;
+    (4) a pair that is NOT serOnly over the whole rt60 range (a room mode ON a
+        voice partial) drops gracefully PER PAIR — the rest of the bank lifts. -/
+def runBloomLivePole (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let (B, g) := bloomBg
+  let rt60Val : Float := 2.0
+  let (rtLo, rtHi) : Float × Float := (0.2, 12.0)     -- the reverb knob's declared span
+  let sigLive : Float := 6.91 / rt60Val
+  let voice : Array SeamMode := #[mkMode 220 1.0 1.0, mkMode 610 1.3 0.6, mkMode 1050 1.6 0.4]
+  let room  : Array SeamMode := #[mkMode 200 sigLive 1.0, mkMode 380 sigLive 0.8]
+  let vM := voice.map (·.toModal)
+  -- the live room: σ = 6.91/rt60 with rt60 NOT a foldable literal (clamp is
+  -- outside `sigConstF?`'s vocabulary, exactly like a `paramRef` slot read),
+  -- range declared as the knob span mapped through σ = 6.91/rt60
+  let rt60E : Sig := clampE (litF rt60Val) (litF rtLo) (litF rtHi)
+  let liveRoom := fun (rm : Array SeamMode) => rm.map (fun m =>
+    { m.toModal with sigma := div (lit 691 2) rt60E
+                     sigmaRange := some (6.91 / rtHi, 6.91 / rtLo) })
+  let rMLive  := liveRoom room
+  let rMBaked := room.map (·.toModal)
+  -- (1) the lift engages: all 6 pairs, live and s0
+  let some pairsLive := bloomCompose vM rMLive B g
+    | failGate "bloom-live-pole" "bloomCompose returned none for the live-rt60 room (dropped to bare bloom)"
+  -- NOT `k1Ser`: the lifted Horner shares subterms by REFERENCE, so its DAG is
+  -- small but its TREE is exponential in depth — a structural walk (`sigConstF?`
+  -- / `sigIsS0`, unmemoized) would never return. Its leaves are exactly the
+  -- constituents checked here (`nuSigma`, `fSer`, `invA`, `dSwitch` — plus
+  -- literals), so shallow checks carry the same s0/liveness claim.
+  let liveConsts := pairsLive.foldl (fun acc p =>
+    acc ++ #[p.fSer.1, p.fSer.2, p.nuSigma, p.dSwitch] ++
+    p.invA.foldl (fun a ik => a ++ #[ik.1, ik.2]) #[]) #[]
+  let genuinelyLive := pairsLive.all (fun p => (sigConstF? p.nuSigma).isNone)
+  let allS0 := liveConsts.all sigIsS0
+  -- (4) graceful per-pair drop: a room mode ON the 220 Hz partial is not
+  -- serOnly anywhere on the interval (|a+1| dips below |κ| at Re a = −1)
+  let nearRoom := liveRoom #[mkMode 220.5 sigLive 0.5]
+  let dropCount := match bloomCompose vM nearRoom B g with
+    | some ps => ps.size
+    | none => 1000
+  -- (2)+(3) render the live crossing, the baked crossing, and the oracle
+  let clk : Clock := clockLit
+  let mkGraph := fun (rm : Array ModalMode) =>
+    ({ nodes := #[ { id := "src", node := .modalSource vM anchorSig clk none none (some (B, g)) }
+                 , { id := "rev", node := .modalReverb "src" rm none } ]
+       output := "rev" } : PatchGraph)
+  let rLive ← renderGraph arena "wslp_live" (mkGraph rMLive)
+  let rBaked ← renderGraph arena "wslp_baked" (mkGraph rMBaked)
+  match rLive, rBaked with
+  | .ok pL, .ok pB =>
+    let lo := anchorNat + 1
+    let hi := nProbe
+    let adm := fun (v r : SeamMode) => bloomAdmitsPair v.pole r.pole B g
+    let eBaked := relL2Win pL pB lo hi
+    let eOracle := relL2Win pL (oracleSeam voice room bloomWarp adm 8) lo hi
+    let preE := energyWin pL 0 lo
+    let e := energyWin pL lo hi
+    IO.println s!"bloom live-pole crossing (WS-LP Phase 1: serOnly, live rt60):"
+    IO.println s!"        lift     pairs {pairsLive.size}/6 · live consts (unfoldable) {genuinelyLive} · s0 {allS0} · near-partial pair drops to {dropCount}/3"
+    IO.println s!"        render   live ≡ baked crossing {eBaked * 1e9}e-9 · live ≡ oracle {eOracle} · pre-E {preE} · E {e}"
+    -- live ≡ baked is a CONSISTENCY check, not the law (the oracle is): the
+    -- baked `mK` comes from build-time forward summation (`bloomM1`), the lifted
+    -- one from the emitted Horner (`bloomM1E`) — a real reassociation of a
+    -- ~200-term series, so the honest bar is ~1e-6, not bit-identity.
+    if pairsLive.size == 6 && genuinelyLive && allS0 && dropCount == 2
+        && eBaked < 1e-6 && eOracle < 3e-4 && preE < 1e-18 && e > 1e-9 && allFinite pL then
+      passGate "bloom-live-pole" s!"a live-rt60 reverb CROSSES the bloom (no bare-bloom drop): 6/6 pairs lifted s0, live ≡ baked {eBaked * 1e9}e-9, ≡ oracle {eOracle}, non-serOnly pair drops per-pair"
+    else
+      failGate "bloom-live-pole" s!"pairs={pairsLive.size} live={genuinelyLive} s0={allS0} drop={dropCount} eBaked={eBaked * 1e9}e-9 eOracle={eOracle} preE={preE} E={e} finite={allFinite pL}"
+  | .error e, _ | _, .error e => failGate "bloom-live-pole" s!"build/render: {e}"
+
 -- ── The Γ-bridge coefficient comparator (per-identity, series-shaped) ──────────
 -- Truncated power-series (Taylor-in-d) arithmetic over `CplxB`, depth N. The
 -- witness compares the ALGEBRA (every coefficient) rather than points of it: the
@@ -648,5 +776,330 @@ def runGammaCoeff (_arena : Arena)
     passGate "gamma-coeff" s!"E1 series ≡ the composition integral coefficient-for-coefficient to d^{n} (max |Δ| {worst}) — the resummation algebra, not points"
   else
     failGate "gamma-coeff" s!"E1/integral coefficient mismatch: max |Δ| {worst} at |κ|={kappa.abs}"
+
+-- ── WS-CL: the region-coverage gate (totality as a number) ────────────────────
+-- The types prove COVERAGE (the `SeamRegion` match is exhaustive — a config with
+-- no handler won't compile); this gate turns "is the partition total over the
+-- shipped register" into a reported number, and the depth cap into MEASURED
+-- headroom (a sampled max over the Halton batch + the max-|κ| corner scan —
+-- empirical, never a typed bound; only the exhaustive match is type-proven).
+-- Per-region ACCURACY stays the seam-sweep's job (the contract's division of
+-- labor: types for coverage, the sweep + SNR for the law). Depth-cap drops are
+-- counted and printed — never a silent cap.
+
+/-- Per-region tally + worst envelope depth over a Halton batch. -/
+private structure RegionTally where
+  serOnly  : Nat := 0
+  crossing : Nat := 0
+  coincX   : Nat := 0        -- coincidentCrossing
+  coincS   : Nat := 0        -- coincidentSubtle
+  excl     : Nat := 0        -- excludedDepth
+  maxN     : Nat := 0        -- worst series depth (admitted samples; excluded carry 0)
+  maxK     : Nat := 0        -- worst CF depth
+  total    : Nat := 0
+
+/-- Classify a Halton batch of legal (voice pole, room pole) pairs and tally the
+    region histogram. Voice poles over the shipped full-register box (σ ∈ [0.2,
+    3.3], f ∈ [110, 1023] Hz — the register `bloomgong` DEFAULTS to; `freq` is an
+    unclamped knob, so higher user registers push |κ| up and legitimately reach
+    `excludedDepth` — the coverage below is scoped to the shipped register); room
+    poles either uniform over the reverb box (σ ∈ [0.58, 34.5], f ∈ [60, 6000] Hz)
+    or, when `near`, placed within `|ν−μ| < 0.9` of the voice pole (a shrinking
+    Halton offset) so `|a| < ½` and the coincident regions are actually exercised —
+    uniform sampling almost never lands on coincidence. -/
+private def tallyBatch (count : Nat) (B g : Float) (near : Bool) : RegionTally := Id.run do
+  let mut t : RegionTally := {}
+  for i in [1:count + 1] do
+    let sV := 0.2 + 3.1 * haltonF 3 i
+    let fV := 110.0 + 913.0 * haltonF 2 i
+    let mu : CplxB := ⟨-sV, tp * fV⟩
+    let nu : CplxB :=
+      if near then
+        ⟨-(sV + (haltonF 5 i - 0.5) * 0.8), tp * fV + (haltonF 7 i - 0.5) * 1.6⟩
+      else
+        ⟨-(0.58 + 33.97 * haltonF 5 i), tp * (60.0 + 5940.0 * haltonF 7 i)⟩
+    let plan := classifyBloomPair mu nu B g
+    t := { t with total := t.total + 1, maxN := max t.maxN plan.nDepth, maxK := max t.maxK plan.kDepth }
+    match plan.region with
+    | .serOnly            => t := { t with serOnly  := t.serOnly  + 1 }
+    | .crossing           => t := { t with crossing := t.crossing + 1 }
+    | .coincidentCrossing => t := { t with coincX   := t.coincX   + 1 }
+    | .coincidentSubtle   => t := { t with coincS   := t.coincS   + 1 }
+    | .excludedDepth      => t := { t with excl     := t.excl     + 1 }
+  return t
+
+/-- The worst envelope depth over the max-|κ| corner (the top of the register,
+    where `|zBnd| = |κ|` is largest and `bloomM1`/`bloomCF` converge slowest): voice
+    pinned at f = 1023 Hz (σ swept), room swept over the reverb box. The Halton
+    interior only approximates this corner, so a random sample UNDERSHOOTS the true
+    worst depth (measured ≈204 vs a boundary config's ≈226); this deterministic
+    corner scan is folded into the reported max so the headroom is a trustworthy
+    sup, not an undershoot. Still empirical (depth is a convergence count, not
+    analytic) — the reason the gate says MEASURED, never "provable". -/
+private def cornerMaxDepth (B g : Float) : Nat := Id.run do
+  let mut d : Nat := 0
+  for i in [1:800] do
+    let sV := 0.2 + 3.1 * haltonF 3 i
+    let mu : CplxB := ⟨-sV, tp * 1023.0⟩                                    -- the top partial ⇒ max |κ|
+    let nu : CplxB := ⟨-(0.58 + 33.97 * haltonF 5 i), tp * (60.0 + 5940.0 * haltonF 7 i)⟩
+    let plan := classifyBloomPair mu nu B g
+    d := max d (max plan.nDepth plan.kDepth)
+  return d
+
+/-- THE REGION-COVERAGE GATE (WS-CL). Halton-classify the shipped bloom register
+    and report totality as a number: the region histogram, the admitted fraction,
+    and the worst envelope depth vs the 300 cap. Asserts (1) the SHIPPED surface
+    (β = 0.05, the default register) is depth-total — zero drops, worst SAMPLED
+    depth (Halton interior + the max-|κ| corner scan) < 300, so the cap is MEASURED
+    headroom (empirical, not proven — a config in a sampling gap could differ, but
+    would still become a counted `excludedDepth`, never a silent error); (2) all
+    FOUR served regions are reachable — serOnly, crossing, coincidentCrossing,
+    coincidentSubtle (the partition claims no region nothing lands in); (3)
+    `excludedDepth` IS reachable off-surface (β = 0.5, knob max) and is COUNTED, not
+    silently dropped. Accuracy per region is the seam-sweep's job (types for
+    coverage, the sweep for the law). -/
+def runSeamCoverage (_arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let g := bloomBg.2
+  let Bship := bloomBg.1                         -- shipped bloom advance (β = 0.05)
+  let Bover := 0.5 / 1.8                         -- knob-max β = 0.5, scale 1
+  let bSmall : Float := 1.67e-6                  -- a subtle bloom (matches the small-κ witness)
+  let uni    := tallyBatch 1000 Bship g false    -- shipped, uniform room → serOnly + crossing
+  let near   := tallyBatch 1000 Bship g true     -- shipped, near-coincident → coincidentCrossing
+  let subtle := tallyBatch 1000 bSmall g true    -- subtle bloom, near-coincident → coincidentSubtle
+  let over   := tallyBatch 1000 Bover g false    -- knob-max β → the depth cap bites
+  let corner    := cornerMaxDepth Bship g        -- the max-|κ| worst-corner scan
+  let shipTotal := uni.total + near.total
+  let shipExcl  := uni.excl + near.excl
+  let admitFrac := (shipTotal - shipExcl).toFloat / shipTotal.toFloat
+  let maxDepth  := max (max (max uni.maxN uni.maxK) (max near.maxN near.maxK)) corner
+  IO.println "seam region coverage (classify the shipped register — totality as a number):"
+  IO.println s!"        shipped register (β=0.05): serOnly {uni.serOnly + near.serOnly}, crossing {uni.crossing + near.crossing}, coincidentCrossing {near.coincX}, excludedDepth {shipExcl} / {shipTotal}"
+  IO.println s!"        admitted fraction {admitFrac} · worst SAMPLED depth {maxDepth} of cap 300 (measured headroom {300 - maxDepth}; Halton interior + max-|κ| corner scan {corner})"
+  IO.println s!"        subtle-bloom box (B={bSmall}): coincidentSubtle {subtle.coincS} / {subtle.total} reachable"
+  IO.println s!"        knob-max box (β=0.5): excludedDepth {over.excl} / {over.total} — COUNTED, a graceful drop, not a silent cap"
+  let mut ok := true
+  -- (1) the shipped register is depth-total: the ≤300 cap is measured headroom
+  --     (sampled max incl. the worst corner; empirical, never a typed bound)
+  if shipExcl != 0 || maxDepth ≥ 300 then
+    IO.println s!"        COVERAGE VIOLATION: the shipped register hit the depth cap (excl {shipExcl}, maxDepth {maxDepth}) — the ≤300 bound is not headroom for the shipped surface"
+    ok := false
+  -- (2) all FOUR served regions the box reaches are actually reached (crossing too —
+  --     it has its own bloomGammaStar emit lane, so a dead crossing must fail here)
+  if uni.serOnly == 0 || uni.crossing + near.crossing == 0 || near.coincX == 0 || subtle.coincS == 0 then
+    IO.println s!"        COVERAGE VIOLATION: a served region is unreachable (serOnly {uni.serOnly}, crossing {uni.crossing + near.crossing}, coincidentCrossing {near.coincX}, coincidentSubtle {subtle.coincS}) — the partition claims a region nothing lands in"
+    ok := false
+  -- (3) excludedDepth is reachable off-surface AND counted (the drop is named).
+  --     Graceful SILENCE for an excluded pair is structural, not rendered here: the
+  --     `| .excludedDepth => continue` (Modal.lean) drops the pair from the bank
+  --     entirely, so a mixed bank is byte-identical to the bank without it — nothing
+  --     to render. This gate proves the region is reachable and counted, not silent.
+  if over.excl == 0 then
+    IO.println s!"        COVERAGE VIOLATION: knob-max β did not exceed the depth cap — excludedDepth is never exercised, so 'counted not silent' is untested"
+    ok := false
+  if ok then
+    passGate "seam-coverage" s!"the shipped register classifies TOTALLY: admitted fraction {admitFrac} (0 depth drops, worst SAMPLED depth {maxDepth} < 300 — measured headroom, Halton + corner scan), all four served regions reachable, excludedDepth counted off-surface ({over.excl}/{over.total})"
+  else
+    failGate "seam-coverage" "the region partition is not total over the shipped register — see the lines above"
+
+-- ── WS-CL: the lane-tidying bit-clean witness ─────────────────────────────────
+
+/-- Re-bake BOTH dropped lanes onto a `coincidentSubtle` `BloomPair` — reconstructs
+    the FULL pre-refactor coincident emit (the `cfB`/`cfN`/`k1Cf` CF lane AND the
+    nonempty `invA` E1 lane, both baked at the coincident `nDepth`/`kDepth`) so the
+    bit-clean witness compares the region-indexed emit against a faithful old pair,
+    not one that happens to share the new pair's empty lanes (no circularity: the
+    witness independently tests that BOTH dropped lanes are dead). The re-baked CF
+    values are the crossing arm's; the pair is subtle (`dSwitch < 0`) so the
+    per-sample `selectE` always discards the CF lane, and the coincident branch
+    never reads `invA` — the render must be byte-identical regardless. -/
+private def withCfLane (p : BloomPair) : BloomPair := Id.run do
+  -- the pair is BAKED (built from literal poles), so its `Sig` fields fold back
+  -- to Floats via `sigConstF?` (the WS-LP CplxE lift keeps baked pairs literal)
+  let cf := fun (s : Tropical.EmitArrow.Sig) => (Tropical.EmitArrow.sigConstF? s).getD 0.0
+  let mu : CplxB := ⟨-(cf p.muSigma), cf p.muOmega⟩
+  let nu : CplxB := ⟨-(cf p.nuSigma), cf p.nuOmega⟩
+  let aC := (nu.sub mu).scale (1.0 / p.gRate)
+  let plan := classifyBloomPair mu nu p.bloomB p.gRate
+  let kappaB : CplxB := ⟨cf p.kappa.1, cf p.kappa.2⟩
+  let (cfK, _) := bloomCF aC kappaB
+  let cfB := (Array.range (plan.kDepth + 1)).map (fun j => (⟨(2 * j + 1).toFloat - aC.re, -aC.im⟩ : CplxB))
+  let cfN := (Array.range plan.kDepth).map (fun j =>
+    let jf := (j + 1).toFloat
+    (⟨jf, 0⟩ : CplxB).mul ((⟨jf, 0⟩ : CplxB).sub aC))
+  let invA := (Array.range plan.nDepth).map (fun k => CplxB.div ⟨1, 0⟩ (aC.add ⟨(k + 1).toFloat, 0⟩))
+  return { p with k1Cf := cplxLitE ((cfK.scale (1.0 / p.gRate)).neg),
+                  cfB := cfB.map cplxLitE, cfN := cfN.map cplxLitE,
+                  invA := invA.map cplxLitE }
+
+/-- THE LANE-CLEAN GATE (WS-CL). The region-indexed `coincidentSubtle` emit (the
+    whole CF lane DROPPED) is BYTE-IDENTICAL to the pre-refactor emit (which always
+    baked the CF lane and let the const-true `selectE` discard it). Builds the same
+    subtle pair BOTH ways — the new empty-CF pair and the same pair with the CF lane
+    re-baked (`withCfLane`) — renders both, and asserts `bitDiffCount = 0`. The
+    lane-tidying's proof: the plan shrank, the samples did not move (the dropped
+    lane was truly dead, LLVM `select` ignoring the unselected operand). -/
+def runSeamLaneClean (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let g := bloomBg.2
+  let bSmall : Float := 1.67e-6
+  -- a subtle-bloom coincident pair (dSwitch < 0): |κ| ≪ |a+1|, |a| < ½
+  let v : Array SeamMode := #[mkMode 55 0.8 1.0]
+  let r : Array SeamMode := #[{ sigma := 0.5, omega := tp * 55 + 0.74, are := 0.5 }]
+  let vM := v.map (·.toModal)
+  let rM := r.map (·.toModal)
+  let newSig := match bloomCompose vM rM bSmall g with
+    | some pairs => bloomComposedSig pairs clockLit anchorSig
+    | none => litI 0
+  let oldSig := match bloomCompose vM rM bSmall g with
+    | some pairs => bloomComposedSig (pairs.map withCfLane) clockLit anchorSig
+    | none => litI 0
+  match ← renderConfig arena "seam_laneclean_new" newSig,
+        ← renderConfig arena "seam_laneclean_old" oldSig with
+  | .ok dNew, .ok dOld =>
+    let bd := bitDiffCount dNew dOld
+    IO.println s!"seam lane-clean (WS-CL): coincidentSubtle CF-drop bitDiff {bd} (region-indexed emit vs pre-refactor baked-CF emit)"
+    if bd == 0 && allFinite dNew then
+      passGate "seam-laneclean" "the region-indexed coincidentSubtle emit is BYTE-IDENTICAL to the pre-refactor always-bake-CF emit — the dropped CF lane was truly dead (const-true selectE)"
+    else
+      failGate "seam-laneclean" s!"the CF-drop changed {bd} samples — the lane was NOT dead (or the render is non-finite)"
+  | _, _ => failGate "seam-laneclean" "build/render failed for the lane-clean witness"
+
+-- ── WS-DDF: the near-coincident room-chain fold ───────────────────────────────
+
+/-- The STABLE oracle for the bloomed room-CHAIN: `c·∫₀^d [(e^{ν1(d−s)}−e^{ν2(d−s)})/Δ]
+    ·e^{μφ(s)} ds` per voice mode, summed, Re, sink-gained. The deg-1 folded kernel
+    (`room1 ⋙ room2` impulse response) quadratured directly — the `(·−·)/Δ` is
+    float64-accurate for the witness's MODERATE Δ (no huge residue). Composite
+    Simpson, ω on the rotator grid, matching the DUT carrier. -/
+private def oracleFoldChain (voice : Array SeamMode) (nu1p nu2p r1r2 : CplxB)
+    (B g : Float) (hdiv : Nat) (nLen : Nat := nProbe) : Array Float := Id.run do
+  let mut y : Array Float := Array.replicate nLen 0.0
+  -- match the DUT's convention: the ν2 carrier is on the rotator grid (`modePhaseQ`),
+  -- but the divided difference uses the RAW Δ (`cexpm1` divisor + slow oscillation),
+  -- so the effective ν1 = qOm(ω2) + (ω1−ω2)_raw. Quantizing ω1, ω2 SEPARATELY would
+  -- inject a ~res/Δ error into the 1/Δ-sensitive divided difference.
+  let om2 := qOm nu2p.im
+  let nu2 : CplxB := ⟨nu2p.re, om2⟩
+  let nu1 : CplxB := ⟨nu1p.re, om2 + (nu1p.im - nu2p.im)⟩
+  let dlt := nu1.sub nu2
+  for v in voice do
+    let mu : CplxB := ⟨-v.sigma, qOm v.omega⟩
+    let a  : CplxB := ⟨v.are, v.aim⟩
+    let c := (a.mul r1r2).scale sinkGain
+    let h := 1.0 / (srF * hdiv.toFloat)
+    let fint := fun (nu : CplxB) (s : Float) =>
+      CplxB.exp ((mu.scale (s + B * (1.0 - Float.exp (-g * s)))).sub (nu.scale s))
+    let mut j1 : CplxB := ⟨0, 0⟩
+    let mut j2 : CplxB := ⟨0, 0⟩
+    for i in [anchorNat + 1 : nLen] do
+      let dBase := (i - 1 - anchorNat).toFloat / srF
+      let mut s1 : CplxB := ⟨0, 0⟩
+      let mut s2 : CplxB := ⟨0, 0⟩
+      for k in [0:hdiv + 1] do
+        let w := if k == 0 || k == hdiv then 1.0 else if k % 2 == 1 then 4.0 else 2.0
+        let s := dBase + k.toFloat * h
+        s1 := s1.add ((fint nu1 s).scale w)
+        s2 := s2.add ((fint nu2 s).scale w)
+      j1 := j1.add (s1.scale (h / 3.0))
+      j2 := j2.add (s2.scale (h / 3.0))
+      let d := (i - anchorNat).toFloat / srF
+      let yc := (((CplxB.exp (nu1.scale d)).mul j1).sub ((CplxB.exp (nu2.scale d)).mul j2)).div dlt
+      y := y.set! i (y[i]! + (c.mul yc).re)
+  return y
+
+/-- Arm B's accuracy floor — MEASURED, not derived (set from the observed value at
+    landing, rounded up). Arm B carries the same Q4.28 absolute landing floor as arm
+    A against a signal of the same order (`K₁·2/|Δ| ≈ 5e-5` vs arm A's `K₁·d ≈
+    7e-5`), so the two floors sit in the same decade — but "same decade" is an
+    expectation, and the number below is an observation: arm B renders at **3.22e-3**
+    (2026-07-20), and the fail line is set at 5e-3 — ~1.5× margin, tight enough that
+    every structural mutation of the Δ-secular moves it by O(1) and trips it. -/
+private def ddfoldSeparatedFloor : Float := 5e-3
+
+/-- THE WS-DDF FOLD GATE, in TWO ARMS over one atom.
+
+    **Arm A — near-coincident** (Δ = 0.005 rad/s): the regime the atom is named
+    for. The collected fold (`residueComposeEC`) bakes a residue `c/Δ` that is out
+    of Q4.28 range as a *value* (`|c/Δ| ≈ 60 > 8`, printed below); the DD fold
+    removes it entirely. This arm asserts only that the DD form holds its law and
+    never loses to the collected form — it does **not** assert that the collected
+    form is broken. See the FINDING in the body, which measures that it is not, at
+    reachable Δ.
+
+    **Arm B — separated** (Δ = 30 rad/s, and `σ₁ ≠ σ₂` so `Δ.re ≠ 0`): the arm
+    that makes the divided-difference *structure* observable. Arm A alone cannot
+    see it: over the render window `|Δ|·d ≤ 4.4e-4`, so `cexpm1(Δd)` departs from
+    the constant `1` by only ~2e-4 while arm A's own error floor is ~2.1e-3 of
+    Q4.28 landing noise — flipping the Δ sign convention moves arm A by 3.3e-4 and
+    deleting the whole `cexpm1` select moves it by 1.7e-4, both invisible. Arm A
+    catches term *deletions*; it cannot catch the secular the atom exists to carry.
+    Arm B reaches `|Δ|·d ≈ 2.65`, so it selects the `big`/direct lane (dead in arm
+    A, which never leaves the series branch) and drives `expSig w.1` off zero for
+    the first time in any witness. MUTATION-VERIFIED on arm B: flip the Δ sign
+    convention (`Modal.lean` `w`), replace `cxΔ` by `1`, or force the series arm
+    (`big := gt wsq (litF 1e9)`) → each turns arm B RED by O(1); the last leaves
+    arm A green, which is what proves arm B is the coverage and not incidental.
+
+    Same divided-difference cure as atom four, at the fold site (WS-DDF; cockpit
+    `demos/modal_ddfold.py`; audit `design/seam-hardening-remainder-handoff` §0). -/
+def runFoldChain (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let lo := anchorNat + 1
+  let hi := nProbe
+  let (B, g) := bloomBg
+  let voice : Array SeamMode := #[mkMode 110 0.2 1.0, mkMode 353 0.56 0.6]
+  let r1 : SeamMode := mkMode 300 1.0 0.6
+  -- Arm A: the near-coincident pair (Δ = i·0.005 exactly — σ shared, so Δ.re = 0).
+  let r2 : SeamMode := { sigma := 1.0, omega := tp * 300 + 0.005, are := 0.5 }
+  -- Arm B: separated in BOTH components — Δ = (−0.7) + i·(−30), so |Δ|·d reaches
+  -- ≈ 2.65 at the window edge and the direct `cexpm1` lane is genuinely selected.
+  let r2s : SeamMode := { sigma := 1.7, omega := tp * 300 + 30.0, are := 0.5 }
+  let vM := voice.map (·.toModal)
+  let r1M := r1.toModal
+  -- One arm: the DD-fold DUT for a room pair against that pair's own stable
+  -- oracle. `oracleSelf` is the Simpson self-distance (hdiv 4 vs 8) — a QUADRATURE
+  -- convergence check, not a bound on the oracle's `1/Δ` cancellation error.
+  let runArm : String → SeamMode → IO (Option (Float × Float × Bool)) := fun tag r2m => do
+    let r1r2 := r1.amp.mul r2m.amp
+    let dut := match bloomFoldCompose vM r1M r2m.toModal B g with
+      | some pairs => bloomFoldComposedSig pairs clockLit anchorSig
+      | none => litI 0
+    let ref  := oracleFoldChain voice r1.pole r2m.pole r1r2 B g 8
+    let ref4 := oracleFoldChain voice r1.pole r2m.pole r1r2 B g 4
+    match ← renderConfig arena s!"seam_ddfold_{tag}" dut with
+    | .ok d => pure (some (relL2Win d ref lo hi, relL2Win ref4 ref lo hi, allFinite d))
+    | .error _ => pure none
+  let r1r2 := r1.amp.mul r2.amp
+  let coll := match bloomCompose vM (residueComposeEC #[r1M] #[r2.toModal]) B g with
+    | some pairs => bloomComposedSig pairs clockLit anchorSig
+    | none => litI 0
+  let refA := oracleFoldChain voice r1.pole r2.pole r1r2 B g 8
+  let resMag := (r1r2.div (r1.pole.sub r2.pole)).abs
+  match ← runArm "a" r2, ← runArm "b" r2s, ← renderConfig arena "seam_ddfold_coll" coll with
+  | some (eD, selfA, finA), some (eS, selfB, finB), .ok dC =>
+    let eC := relL2Win dC refA lo hi
+    IO.println s!"WS-DDF room-chain fold, two arms (collected residue |c/Δ|≈{resMag}):"
+    IO.println s!"        A near-coincident (Δ=0.005): DD rel {eD} · collected rel {eC} (oracle self {selfA})"
+    IO.println s!"        B separated (Δ=30, Δ.re≠0, direct cexpm1 lane): DD rel {eS} (oracle self {selfB})"
+    -- The atom's LAW: the DD fold ≡ the stable oracle within the divided-difference
+    -- floor (≈2e-3 — the chain signal is ≈ ∂Y0/∂ν, far weaker than the O(1) bloom
+    -- cross, so Q4.28's absolute floor costs more relative precision, the chain's
+    -- looser model). And it is at least as good as the collected fold. FINDING
+    -- (WS-DDF): the collected bloomed chain does NOT catastrophically break at
+    -- reachable Δ — the bloom's per-sample K factor (≈ M(κ)/(gα) ≈ 1e-3, rooms far
+    -- from the voice) scales the huge residue c/Δ DOWN before landing, so the Q4.28
+    -- overflow (modal_divdiff's D_dd2, where the residue lands directly) does not
+    -- reach the bloom cross until Δ < ~1e-5 rad/s (~1.6e-6 Hz). The DD fold is the
+    -- correct, modestly-tighter alternative; the a-DD machinery TRANSFERS (the datum).
+    if !finA || eD ≥ 3e-3 then
+      failGate "ddfold" s!"arm A (near-coincident) is off the law (rel {eD}, oracle self {selfA})"
+    else if eD > eC * 1.5 + 3e-4 then
+      failGate "ddfold" s!"arm A's DD fold ({eD}) is WORSE than the collected ({eC}) — the stable form should never lose"
+    else if !finB || eS ≥ ddfoldSeparatedFloor then
+      failGate "ddfold" s!"arm B (separated Δ, the direct cexpm1 lane) is off the law (rel {eS} ≥ {ddfoldSeparatedFloor}, oracle self {selfB}) — the Δ-secular's sign/branch is wrong"
+    else
+      passGate "ddfold" s!"the room-chain fold holds its law in both arms (A near-coincident DD {eD} ≤ collected {eC}; B separated DD {eS} on the direct cexpm1 lane); the a-DD machinery transferred to the fold site (WS-DDF datum). Finding: the bloom's K factor keeps the collected fold from breaking at reachable Δ — the wound is narrower than assumed"
+  | _, _, _ => failGate "ddfold" "build/render failed for the WS-DDF fold witness"
 
 end Tropical.Tropicaltest.SeamSweep

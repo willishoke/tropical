@@ -13,6 +13,12 @@ import { computeLayout, type KernelLayout } from './layout.js'
 const WASM_PAGE = 65536
 const FADE_SAMPLES = 2048
 
+/** `C` — the device-boundary output bound, applied in `process` (the worklet
+ *  feed) and never in `render` (the equivalence surface). Must equal
+ *  `kDeviceOutputBound` in engine/dac/TropicalDAC.hpp, which carries the
+ *  rationale and the measurement. */
+const DEVICE_OUTPUT_BOUND = 256.0
+
 // @llvm.round = round half away from zero — the one math op with no wasm
 // instruction (f64.nearest is ties-to-even), so the kernel imports it. Must
 // match the native kernel's rounding bit-for-bit.
@@ -115,7 +121,19 @@ export class WasmKernel {
     return new Float64Array(this.memory.buffer, L.output, n)
   }
 
-  /** Render `n` samples into `out` (f32 audio) with the anti-click fade. */
+  /** Render `n` samples into `out` (f32 audio) with the anti-click fade and the
+   *  device-boundary clamp.
+   *
+   *  The clamp lives HERE and not in `render` on purpose: `render` returns the
+   *  kernel's own f64 output — the value of `f(τ)` — and that is the surface the
+   *  WASM≡JIT equivalence gate compares against `diffcli render-bytes`. Bounding
+   *  it there would make the artifact lie about the function it encodes. This
+   *  method is the worklet feed: the point where a value becomes sound, and so
+   *  the point where a sound-safety bound belongs. Exact mirror of the native
+   *  side, where `FlatRuntime.outputBuffer` is honest and `TropicalDAC`'s
+   *  callback clamps — see `kDeviceOutputBound` in engine/dac/TropicalDAC.hpp
+   *  for `C`, its measurement, and the NaN/±0 argument for spelling it as
+   *  ordered-compare + select rather than Math.min/Math.max. */
   process(out: Float32Array, n: number): void {
     const f64 = this.render(n)
     for (let i = 0; i < n; i++) {
@@ -127,7 +145,8 @@ export class WasmKernel {
         const t = this.fadeOutRem / FADE_SAMPLES
         v *= t * t * (3 - 2 * t); this.fadeOutRem--
       }
-      out[i] = v
+      const lo = v > -DEVICE_OUTPUT_BOUND ? v : -DEVICE_OUTPUT_BOUND
+      out[i] = lo < DEVICE_OUTPUT_BOUND ? lo : DEVICE_OUTPUT_BOUND
     }
   }
 }

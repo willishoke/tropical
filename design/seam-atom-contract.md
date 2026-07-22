@@ -63,7 +63,20 @@ Everything load-bearing is in that sentence, so read it slowly.
   predicate's served region): these are outputs of a predicate the
   harness can probe, not inputs from a human squint. An atom and the harness
   consult the *same* predicate, so "where does this atom promise anything" has
-  one answer, in code.
+  one answer, in code. WS-CL sharpened the predicate into a **total classifier**:
+  `classifyBloomPair : (μ,ν,B,g) → SeamRegion`, where `SeamRegion` is a closed
+  partition (`serOnly | crossing | coincidentCrossing | coincidentSubtle |
+  excludedDepth`) and the atom's per-pair emit is an *exhaustive match* over it —
+  a region with no handler will not compile, so **types prove coverage** while the
+  sweep and the SNR threshold prove **accuracy** (that division of labor is the
+  design, not a compromise: an SNR is empirical and can never be typed). The
+  depth-cap drop is the named `excludedDepth` region, not a silent `continue`, and
+  the coverage gate (`runSeamCoverage`) Halton-classifies the legal config box to
+  report the admitted fraction as a number — turning "is the partition total over
+  the shipped surface" into `1.0` with the ≤300 cap shown as MEASURED headroom (a
+  sampled max over the Halton batch + a max-|κ| corner scan — empirical, not a typed
+  bound; only the exhaustive `SeamRegion` match is type-proven, per the same
+  division of labor above — an envelope depth, like an SNR, can never be typed).
 
 ## The four fields
 
@@ -102,7 +115,7 @@ apparatus is kept, not frozen.
 |---|---|---|---|
 | `residueComposeEC` | `id` | collected `ModalMode` bank · `modalBankSigTable` | separated poles (`|Δ|` above the coincidence floor — near-coincidence is `DD`'s region) |
 | `residueComposeDD` | `id` | `PairedMode` bank · `modalBankSigTableDD` | total (the `cexpm1` limit is the τ·e resonance, no branch) |
-| `bloomCompose` | `s + B(1−e^{−gs})` | `BloomPair` bank · `bloomComposedSig` | baked poles; envelope depth ≤ 300 — TOTAL over `|a|` (WS-A4: coincidence via the divided-difference branch; ½ is a scheme crossover) |
+| `bloomCompose` | `s + B(1−e^{−gs})` | `BloomPair` bank · `bloomComposedSig` | baked poles; `classifyBloomPair → SeamRegion` (WS-CL), exhaustive per-pair dispatch. TOTAL over `|a|` (WS-A4: coincidence via the divided-difference branch; ½ is a scheme crossover); `excludedDepth` (>300) is the only drop, counted by the coverage gate. Emit is region-indexed — coincident pairs carry no E1 lane, `coincidentSubtle` no CF lane (bit-clean, gated) |
 
 `bloomCompose` at `B→0` collapses to `residueComposeDD` (the Γ-bridge is the
 κ-extension of the divided difference), so the three are one family with a

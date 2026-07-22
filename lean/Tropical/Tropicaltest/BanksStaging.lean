@@ -409,6 +409,24 @@ def runBanksCountCache (arena : Arena)
     else
       failGate "banks-count-cache" s!"knobInvariant={knobInvariant} capMoves={capMoves}"
 
+/-- Build the resonator → reverb → out patch graph as Json (the dir-landing path:
+    a `reverb` node attaches a `ModalDir` unconditionally, so it routes through
+    `modalBankSigDirTable`). `rt60` is a `.raw` slot, so the value sets its default. -/
+private def reverbPatchJson (srcF srcDecay : Int) (rtM : Int) (rtE : Nat) : Lean.Json :=
+  let node := fun (id kind : String) (params : List (String × Lean.Json))
+                  (ins : List (String × Lean.Json)) =>
+    Lean.Json.mkObj <|
+      [("id", Lean.Json.str id), ("kind", Lean.Json.str kind),
+       ("params", Lean.Json.mkObj params)] ++
+      (if ins.isEmpty then [] else [("in", Lean.Json.mkObj ins)])
+  Lean.Json.mkObj [
+    ("nodes", Lean.Json.arr #[
+      node "res" "resonator" [("freq", Lean.Json.num (jn srcF)), ("decay", Lean.Json.num (jn srcDecay))] [],
+      node "rev" "reverb" [("rt60", Lean.Json.num (jn rtM rtE))]
+        [("in", Lean.Json.arr #[Lean.Json.str "res"])],
+      node "out" "out" [] [("in", Lean.Json.arr #[Lean.Json.str "rev"])]]),
+    ("out", Lean.Json.str "out")]
+
 /-- Build the resonator → filter → out patch graph as Json. -/
 private def filterPatchJson (fc : Int) (resM : Int) (resE : Nat) (srcF srcDecay : Int) : Lean.Json :=
   let node := fun (id kind : String) (params : List (String × Lean.Json))
@@ -512,6 +530,163 @@ def runModalFilter (arena : Arena)
       | .error e, _ | _, .error e =>
         failGate "modal-filter" s!"(C) emit: {firstLine e}"
 
+/-- Oracle-free spike count: samples deviating from the mean of their neighbours by
+    more than 25% of peak. The rail probe's discriminator (design/prod-rail-probe):
+    a modal signal is a sum of decaying sinusoids ≤ 4.8 kHz on a 44.1 kHz grid, so
+    it is smooth by construction, while the i64 wrap's signature is ISOLATED
+    single-sample glitches. Reads 0 for every benign config INCLUDING loud ones
+    (peak 91), and jumps to hundreds exactly at the rail. Returns (peak, spikes). -/
+private def spikeStats (s : Array Float) : Float × Nat := Id.run do
+  let mut peak : Float := 0.0
+  for x in s do
+    if x.isFinite && x.abs > peak then peak := x.abs
+  let mut spikes : Nat := 0
+  if s.size ≥ 3 then
+    for i in [1:s.size-1] do
+      let d := (s[i]! - 0.5 * (s[i-1]! + s[i+1]!)).abs
+      if d > 0.25 * peak && peak > 1e-9 then spikes := spikes + 1
+  pure (peak, spikes)
+
+/-- THE MODAL RAIL WITNESS (option E, the production-path red witness). The exact
+    gesture the rail incident named: `resonator(800,4) ⋙ filter(cutoff 800, res) ⋙
+    out`, compiled through `compilePlanPure` on the PRODUCTION path (master clock,
+    anchor 0, master gain 3.7), the SAME path the shipped GUI drives. The filter's
+    amplitudes are LIVE param slots (`resonance` is a `pref` slot), so this
+    exercises option E's DYNAMIC (kernel-time) per-bank exponent — the case the
+    static path cannot reach, and the one the rail actually lives on.
+
+    Two arms on ONE knob, both MEASURED (design/prod-rail-probe.local.lean.txt):
+    - GREEN CONTROL res 0.91 — peak ≈ 91, spikes 0. Loud-but-correct: it proves
+      the discriminator distinguishes *loud* from *broken* and is not trivially
+      satisfied by silence (a peak floor guards that).
+    - RED ARM res 0.95 — pre-fix peak 234 with 211 spikes (the i64 wrap: `|A| ≈ Q =
+      0.55·80^0.95 ≈ 35` collected past the rail of 32 wraps to a ±64 full-scale
+      burst); post-fix `k = ⌊log₂ 35⌋−4 = 1` lands at Q3.27 and the ring renders
+      SMOOTH — peak ≈ 130 (the true driven-resonator output, legitimately louder
+      than the control) and spikes 0.
+
+    Discriminator is spikes, NOT peak: the correct high-Q output is LOUDER than the
+    control, so an amplitude bound would false-fail it. MUTATION-VERIFIED: revert
+    any plain-site landing to `lit 268435456`/`lit 28` and the res-0.95 arm returns
+    to hundreds of spikes → RED. -/
+def runModalRail (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match ← renderFilterPatch arena resolved (filterPatchJson 800 91 2 800 4) 4096,
+        ← renderFilterPatch arena resolved (filterPatchJson 800 95 2 800 4) 4096 with
+  | .error e, _ | _, .error e => failGate "modal-rail" s!"render: {e}"
+  | .ok green, .ok red =>
+    let (pkG, spG) := spikeStats green
+    let (pkR, spR) := spikeStats red
+    let finiteG := green.all (·.isFinite)
+    let finiteR := red.all (·.isFinite)
+    IO.println s!"        resonator(800,4) ⋙ filter(800, res) ⋙ out, production path (live amps ⇒ dynamic k):"
+    IO.println s!"        res 0.91 (green control): peak={pkG} spikes={spG} finite={finiteG}"
+    IO.println s!"        res 0.95 (red arm)      : peak={pkR} spikes={spR} finite={finiteR}"
+    if spG == 0 && spR == 0 && finiteG && finiteR && pkG > 50.0 then
+      passGate "modal-rail" s!"the top of the resonance knob renders SMOOTH through the fix (res 0.91 & 0.95 both spike-free; control peak {pkG} proves the discriminator sees loud≠broken) — the i64 landing rail is gone on the production path"
+    else
+      failGate "modal-rail" s!"spikes green={spG} red={spR} (want 0/0), finite {finiteG}/{finiteR}, control peak {pkG} (want >50) — the datapath wraps or the render is trivial"
+
+/-- THE MODAL DIR-RAIL WITNESS (option E, the reverb/dir-path red witness). The
+    `modalBankSigDirTable` landing had ZERO rail coverage, yet every `reverb` node
+    in the vocabulary routes through it (`reverb` attaches a `ModalDir`
+    unconditionally, unlike `filter`), so the same i64 wrap lived there unwitnessed.
+    At the default dir knob (0) the dir table reduces to its forward accumulator,
+    whose per-mode Q4.28 landing is the SAME overflow site as the plain table.
+
+    The gesture: `resonator(60,4) ⋙ reverb(rt60) ⋙ out`. The reverb room mode 0
+    sits at EXACTLY 60 Hz and resonator partial 1 at 1·60 Hz, so the poles coincide
+    in frequency and |Δ| collapses to |Δσ|; sweeping rt60 through the punctured
+    neighbourhood of the coincidence (σ_room = 6.91/rt60 crossing σ_res = decay·1.4
+    = 5.6 at rt60 ≈ 1.234) drives the collected |A| past the rail.
+
+    MEASURED on the production dir path (the derivation lab, fix forced off):
+    the red set is ERRATIC — the wrap needs differing per-mode wrap counts, so it
+    is necessary-not-sufficient and fires only at some rt60 in the neighbourhood
+    (rt60 1.230/1.236/1.238 → peak ≈237 with 15/3/21 spikes; the exact-coincidence
+    1.232/1.234 stay benign — the point itself yields a deg-1 mode on the unrolled
+    path, and benign wrap-parity pockets sit between). So the red arm is a
+    MEASURED rt60 (1.238, the strongest), never a derived threshold.
+
+    - GREEN CONTROL rt60 = 2.0 — peak ≈0.30, spikes 0 (far from coincidence).
+    - RED ARM rt60 = 1.238 — pre-fix peak 237 / 21 spikes; post-fix peak ≈0.28 / 0
+      spikes. Near coincidence the CORRECT reverb output is quiet (the ±c/Δ
+      residues cancel in the sum), so unlike the filter witness a peak bound is a
+      safe secondary catch here (the wrap's 237 is the anomaly, not the music).
+
+    MUTATION-VERIFIED: revert the dir landing to `lit 268435456`/`lit 28` and the
+    rt60-1.238 arm returns to 21 spikes / peak 237 → RED. -/
+def runModalRailDir (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match ← renderFilterPatch arena resolved (reverbPatchJson 60 4 2 0) 4096,
+        ← renderFilterPatch arena resolved (reverbPatchJson 60 4 1238 3) 4096 with
+  | .error e, _ | _, .error e => failGate "modal-rail-dir" s!"render: {e}"
+  | .ok green, .ok red =>
+    let (pkG, spG) := spikeStats green
+    let (pkR, spR) := spikeStats red
+    let finiteG := green.all (·.isFinite)
+    let finiteR := red.all (·.isFinite)
+    IO.println s!"        resonator(60,4) ⋙ reverb(rt60) ⋙ out, production dir path (60 Hz pole coincidence):"
+    IO.println s!"        rt60 2.0 (green control)  : peak={pkG} spikes={spG} finite={finiteG}"
+    IO.println s!"        rt60 1.238 (red arm)      : peak={pkR} spikes={spR} finite={finiteR}"
+    if spG == 0 && spR == 0 && finiteG && finiteR && pkG > 0.05 && pkR < 10.0 then
+      passGate "modal-rail-dir" s!"the reverb dir landing survives the 60 Hz pole coincidence (rt60 1.238 spike-free, peak {pkR} — the pre-fix ±237 wrap is gone; control rt60 2.0 renders) — the i64 rail is fixed on the dir path too"
+    else
+      failGate "modal-rail-dir" s!"spikes green={spG} red={spR} (want 0/0), finite {finiteG}/{finiteR}, control peak {pkG} (>0.05), red peak {pkR} (want <10 — the wrap is ≈237)"
+
+open Tropical.EmitArrow in
+/-- THE OPTION-E STRUCTURAL-IDENTITY gate — the anchor that makes "when max|A| < 32,
+    k = 0 and NOTHING moves" TESTABLE (no frozen plan/IR hash exists on the
+    EmitArrow modal-island path, so nothing else would catch a k=0 drift). Two
+    ALL-LITERAL-amp banks, so `bankLandExp` takes the STATIC path and `k` is a
+    compile-time `Nat` decided here — no dynamic machinery, no live slots:
+
+    - SMALL amps (L1 max 0.2 < 32) ⇒ `k = 0` ⇒ the landing is `·2²⁸` / `>>28`
+      VERBATIM: the emitted IR carries the pre-fix double `0x41B0000000000000`
+      (= 2²⁸) at the weight multiply — byte-identical structure, so the JIT reuses
+      the pre-fix kernel-cache object (the cache keys on md5 of the IR text).
+    - LARGE amps (L1 max 100) ⇒ `k = ⌊log₂ 100⌋ − 4 = 2` ⇒ the landing rescales to
+      `·2²⁶` (`0x4190000000000000`) and the 2²⁸ constant is ABSENT: option E fires
+      statically, exactly as the dynamic path does at knob rate.
+
+    Pins both directions at once. MUTATION-VERIFIED: force `bankLandExp` to
+    `.static 0` and the large bank keeps the 2²⁸ landing (option E stops firing) →
+    the `k=2`/`2²⁶` assertions go RED. -/
+def runModalRailIdentity (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let mkModes := fun (amp : Sig) => (Array.range 6).map fun i =>
+    ModalMode.hz (lit (Int.ofNat (220 + 40 * i))) (lit 30 1) amp
+  let small := mkModes (lit 2 1)      -- amp 0.2 ⇒ maxAbs 0.2 < 32 ⇒ k = 0
+  let large := mkModes (lit 100)      -- amp 100  ⇒ maxAbs 100    ⇒ k = 2
+  -- a deg-1 bank with small σ: |A|=10 < 32 (amp-only would give k=0), but env₂ =
+  -- d·e^{−σd} peaks at (1/(σe)) ≈ 3.68, so the LANDED sup ≈ 36.8 > 32 ⇒ the
+  -- envelope-aware bound bumps k to 1. Proves the deg>0 lift is not amp-only.
+  let degBank := (Array.range 3).map fun i =>
+    ({ sigma := litF 0.1, omega := mul twoPiE (lit (Int.ofNat (300 + 40 * i))),
+       cre := litF 10.0, cim := lit 0, deg := 1 } : ModalMode)
+  let hasSub := fun (s sub : String) => (s.splitOn sub).length != 1
+  let land2p28 := "0x41b0000000000000"   -- 2²⁸, the verbatim Q4.28 landing (lowercase hex)
+  let land2p26 := "0x4190000000000000"   -- 2²⁶, the k=2 landing
+  let kSmall := match bankLandExp small with | .static k => some k | .dynamic _ => none
+  let kLarge := match bankLandExp large with | .static k => some k | .dynamic _ => none
+  let kDeg   := match bankLandExp degBank with | .static k => some k | .dynamic _ => none
+  match buildAndFinish (.ok (buildModalBankTable "id_small" small (lit 200) arena)),
+        buildAndFinish (.ok (buildModalBankTable "id_large" large (lit 200) arena)) with
+  | .ok pSmall, .ok pLarge =>
+    match Tropical.Ir.EmitLlvm.emitKernel pSmall, Tropical.Ir.EmitLlvm.emitKernel pLarge with
+    | .ok irSmall, .ok irLarge =>
+      let smallVerbatim := hasSub irSmall land2p28    -- k=0 keeps 2²⁸
+      let largeRescaled := hasSub irLarge land2p26 && !(hasSub irLarge land2p28)  -- k=2 ⇒ 2²⁶, no 2²⁸
+      let degLifts := kDeg == some 1    -- env₂-aware bound bumps a small-|A| deg-1 bank
+      IO.println s!"        static banks: small amp 0.2 ⇒ k={kSmall} (want 0), large amp 100 ⇒ k={kLarge} (want 2), deg-1 σ=0.1 amp=10 ⇒ k={kDeg} (want 1, env-lifted):"
+      IO.println s!"        small IR keeps 2²⁸ landing={smallVerbatim} · large IR rescales to 2²⁶ & drops 2²⁸={largeRescaled} · deg-1 env₂ lift={degLifts}"
+      if kSmall == some 0 && kLarge == some 2 && degLifts && smallVerbatim && largeRescaled then
+        passGate "modal-rail-identity" "k=0 emits the Q4.28 landing VERBATIM (byte-identical, reused kernel-cache); a loud static bank rescales to 2²⁶ (option E fires); a small-|A| deg-1 bank still lifts k via its env₂ peak (deg>0 is not amp-only) — pinned every way"
+      else
+        failGate "modal-rail-identity" s!"kSmall={kSmall} (want 0) kLarge={kLarge} (want 2) kDeg={kDeg} (want 1) smallVerbatim={smallVerbatim} largeRescaled={largeRescaled}"
+    | .error e, _ | _, .error e => failGate "modal-rail-identity" s!"emit: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "modal-rail-identity" s!"build: {firstLine e}"
+
 open Tropical.EmitArrow in
 /-- THE MODAL ADDRESS gate. A resonator's `addr` inlet: a patched CF signal BECOMES
     the bank's absolute time-coordinate (`modalAddrWarp`), so the causal gate — the
@@ -566,3 +741,46 @@ def runModalAddr (arena : Arena)
         failGate "modal-addr" s!"maxErr={maxErr} preMax={preMax} postPeak={postPeak} decodeOk={decodeOk}"
     | .error e, _, _ | _, .error e, _ | _, _, .error e => failGate "modal-addr" s!"render: {firstLine e}"
   | _, _, _ => failGate "modal-addr" "build"
+
+/-- THE GAUGE-STAGE gate (§5, Hamilton's "make the s0 contract mechanical"). The
+    gauge's self-measured norm uses `logSig` → `floatExponent`; `settle` measures it
+    on the SETTLED poles, so that op is s0 (the coefficient kernel), NOT per-sample.
+    Proven by DELTA against `resonator ⋙ filter(glided cutoff/res) ⋙ out` without the
+    gauge: the filter's own option-E landing already emits `FloatExponent` in the
+    audio kernel (a glided-amp bank), so the invariant is not "zero in audio" but
+    "the GAUGE adds zero": with `settle`, inserting the gauge leaves the audio
+    kernel's `FloatExponent` count UNCHANGED and moves its norm's `FloatExponent`
+    into the s0 coeff kernel. Remove `settle` from `gaugeScale` (the norm folds the
+    live glided poles) and the gauge's `FloatExponent` lands per-sample → the audio
+    delta jumps → red. Contract enforced by the compiler's own stage split, not a
+    docstring. -/
+def runGaugeStage (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let mk := fun (withGauge : Bool) =>
+    "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"flt\",\"kind\":\"filter\",\"params\":{\"cutoff\":800,\"resonance\":0.5},\"in\":{\"in\":[\"res\"]}}," ++
+    (if withGauge then "{\"id\":\"gau\",\"kind\":\"gauge\",\"params\":{\"g\":1},\"in\":{\"in\":[\"flt\"]}}," else "") ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"" ++ (if withGauge then "gau" else "flt") ++ "\"]}}],\"out\":\"out\"}"
+  let feOf : Bool → IO (Option (Nat × Nat)) := fun withGauge => do
+    match Lean.Json.parse (mk withGauge) with
+    | .error e => IO.println s!"        gauge-stage json: {e}"; pure none
+    | .ok j => match Tropical.Playground.compilePlanPure arena resolved j with
+      | .error e => IO.println s!"        gauge-stage compile: {firstLine e}"; pure none
+      | .ok (plan, _, sb) => match Tropical.Ir.Stage0.hoistTyped plan sb with
+        | .error e => IO.println s!"        gauge-stage split: {firstLine e}"; pure none
+        | .ok split =>
+          let a := planFloatExponents split.audio
+          let c := match split.coeff? with | some k => planFloatExponents k | none => 0
+          pure (some (a, c))
+  let some (aBare, cBare) ← feOf false | return (← failGate "gauge-stage" "bare compile")
+  let some (aGauge, cGauge) ← feOf true | return (← failGate "gauge-stage" "gauge compile")
+  IO.println s!"        resonator ⋙ filter(glided) ⋙ [gauge] ⋙ out — FloatExponent (audio, coeff):"
+  IO.println s!"        result   without gauge ({aBare}, {cBare}) · with gauge ({aGauge}, {cGauge})"
+  -- the gauge adds ZERO per-sample FloatExponent (its norm is s0), and DOES add its
+  -- norm's FloatExponent to the coeff kernel (so the gauge is genuinely present).
+  if aGauge == aBare && cGauge > cBare then
+    passGate "gauge-stage" s!"settle keeps the gauge norm s0: the gauge adds 0 FloatExponent to the audio kernel (stays {aBare}) and {cGauge - cBare} to the s0 coeff kernel — Metal-safe by construction"
+  else
+    failGate "gauge-stage" s!"audio {aBare}→{aGauge} (want equal), coeff {cBare}→{cGauge} (want grow) — the gauge norm leaked into the per-sample kernel"
+
