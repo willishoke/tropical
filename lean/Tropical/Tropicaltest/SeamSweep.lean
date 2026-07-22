@@ -648,13 +648,33 @@ def runBloomLivePole (arena : Arena)
     p.invA.foldl (fun a ik => a ++ #[ik.1, ik.2]) #[]) #[]
   let genuinelyLive := pairsLive.all (fun p => (sigConstF? p.nuSigma).isNone)
   let allS0 := liveConsts.all sigIsS0
-  -- (4) graceful per-pair drop: a room mode ON the 220 Hz partial is not
-  -- serOnly anywhere on the interval (|a+1| dips below |κ| at Re a = −1)
-  let nearRoom := liveRoom #[mkMode 220.5 sigLive 0.5]
+  -- (4) graceful per-pair drop: a room mode 10.5 Hz off the 220 Hz partial
+  -- CHANGES region across the rt60 interval (|a+1| straddles |κ| = 38.4:
+  -- max ≈ 40.7 at the σ-high endpoint ⇒ serOnly there, min ≈ 36.7 at
+  -- Re a = −1 ⇒ crossing there) — the phase 3 union-emit case, dropped per
+  -- pair today. (The 220.5 Hz ON-partial pair phase 1 used here is now
+  -- crossing-throughout and LIFTS — the drop set shrank with phase 2.)
+  let nearRoom := liveRoom #[mkMode 230.5 sigLive 0.5]
   let dropCount := match bloomCompose vM nearRoom B g with
     | some ps => ps.size
     | none => 1000
-  -- (2)+(3) render the live crossing, the baked crossing, and the oracle
+  -- (5) WS-LP phase 2 — the CROSSING region, live: a room mode close enough to
+  -- the 1023 Hz voice partial that `|a+1| < |κ|` over the WHOLE rt60 range
+  -- (crossing-throughout: both lanes emitted, `dSwitch` live). The window is
+  -- 2·nProbe so the live `dSwitch` (≈ 0.096 s at rt60 = 2 ⇒ sample ≈ 4443)
+  -- falls INSIDE it — the render exercises the CF lane, the seam, AND the
+  -- Γ★-bridged series lane.
+  let nX := 2 * nProbe
+  let voiceX : Array SeamMode := #[mkMode 1023 1.13 1.0]
+  let roomX  : Array SeamMode := #[mkMode 1066 sigLive 0.6]
+  let vMX := voiceX.map (·.toModal)
+  let some pairsX := bloomCompose vMX (liveRoom roomX) B g
+    | failGate "bloom-live-pole" "bloomCompose returned none for the live crossing-region room"
+  let crossingLifted := pairsX.size == 1 && pairsX.all (fun p => !p.cfN.isEmpty)
+  let bakedX := match bloomCompose vMX (roomX.map (·.toModal)) B g with
+    | some ps => bloomComposedSig ps clockLit anchorSig
+    | none => litI 0
+  -- (2)+(3) render live vs baked vs oracle (phase 1 graph route + phase 2 direct)
   let clk : Clock := clockLit
   let mkGraph := fun (rm : Array ModalMode) =>
     ({ nodes := #[ { id := "src", node := .modalSource vM anchorSig clk none none (some (B, g)) }
@@ -662,8 +682,10 @@ def runBloomLivePole (arena : Arena)
        output := "rev" } : PatchGraph)
   let rLive ← renderGraph arena "wslp_live" (mkGraph rMLive)
   let rBaked ← renderGraph arena "wslp_baked" (mkGraph rMBaked)
-  match rLive, rBaked with
-  | .ok pL, .ok pB =>
+  let rLiveX ← renderConfig arena "wslp_xlive" (bloomComposedSig pairsX clockLit anchorSig) nX
+  let rBakedX ← renderConfig arena "wslp_xbaked" bakedX nX
+  match rLive, rBaked, rLiveX, rBakedX with
+  | .ok pL, .ok pB, .ok pLX, .ok pBX =>
     let lo := anchorNat + 1
     let hi := nProbe
     let adm := fun (v r : SeamMode) => bloomAdmitsPair v.pole r.pole B g
@@ -671,19 +693,24 @@ def runBloomLivePole (arena : Arena)
     let eOracle := relL2Win pL (oracleSeam voice room bloomWarp adm 8) lo hi
     let preE := energyWin pL 0 lo
     let e := energyWin pL lo hi
-    IO.println s!"bloom live-pole crossing (WS-LP Phase 1: serOnly, live rt60):"
+    let eBakedX := relL2Win pLX pBX lo nX
+    let eOracleX := relL2Win pLX (oracleSeam voiceX roomX bloomWarp adm 8 nX) lo nX
+    IO.println s!"bloom live-pole crossing (WS-LP: serOnly + crossing regions, live rt60):"
     IO.println s!"        lift     pairs {pairsLive.size}/6 · live consts (unfoldable) {genuinelyLive} · s0 {allS0} · near-partial pair drops to {dropCount}/3"
-    IO.println s!"        render   live ≡ baked crossing {eBaked * 1e9}e-9 · live ≡ oracle {eOracle} · pre-E {preE} · E {e}"
+    IO.println s!"        serOnly  live ≡ baked crossing {eBaked * 1e9}e-9 · live ≡ oracle {eOracle} · pre-E {preE} · E {e}"
+    IO.println s!"        crossing lifted (1 pair, CF lane) {crossingLifted} · live ≡ baked {eBakedX * 1e9}e-9 · live ≡ oracle {eOracleX} (window {nX}, seam inside)"
     -- live ≡ baked is a CONSISTENCY check, not the law (the oracle is): the
-    -- baked `mK` comes from build-time forward summation (`bloomM1`), the lifted
-    -- one from the emitted Horner (`bloomM1E`) — a real reassociation of a
-    -- ~200-term series, so the honest bar is ~1e-6, not bit-identity.
+    -- baked constants come from build-time forward summation (`bloomM1`) and
+    -- `lgammaB`, the lifted ones from the emitted Horner/fraction/`lgammaE` —
+    -- real reassociations, so the honest bar is ~1e-6, not bit-identity.
     if pairsLive.size == 6 && genuinelyLive && allS0 && dropCount == 2
-        && eBaked < 1e-6 && eOracle < 3e-4 && preE < 1e-18 && e > 1e-9 && allFinite pL then
-      passGate "bloom-live-pole" s!"a live-rt60 reverb CROSSES the bloom (no bare-bloom drop): 6/6 pairs lifted s0, live ≡ baked {eBaked * 1e9}e-9, ≡ oracle {eOracle}, non-serOnly pair drops per-pair"
+        && eBaked < 1e-6 && eOracle < 3e-4 && preE < 1e-18 && e > 1e-9 && allFinite pL
+        && crossingLifted && eBakedX < 1e-6 && eOracleX < 3e-4 && allFinite pLX then
+      passGate "bloom-live-pole" s!"a live-rt60 reverb CROSSES the bloom in BOTH lifted regions: serOnly 6/6 (≡ baked {eBaked * 1e9}e-9, ≡ oracle {eOracle}); crossing incl. live dSwitch seam (≡ baked {eBakedX * 1e9}e-9, ≡ oracle {eOracleX}); non-liftable pair drops per-pair"
     else
-      failGate "bloom-live-pole" s!"pairs={pairsLive.size} live={genuinelyLive} s0={allS0} drop={dropCount} eBaked={eBaked * 1e9}e-9 eOracle={eOracle} preE={preE} E={e} finite={allFinite pL}"
-  | .error e, _ | _, .error e => failGate "bloom-live-pole" s!"build/render: {e}"
+      failGate "bloom-live-pole" s!"pairs={pairsLive.size} live={genuinelyLive} s0={allS0} drop={dropCount} eBaked={eBaked * 1e9}e-9 eOracle={eOracle} preE={preE} E={e} finite={allFinite pL} xLift={crossingLifted} eBakedX={eBakedX * 1e9}e-9 eOracleX={eOracleX} finiteX={allFinite pLX}"
+  | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
+    failGate "bloom-live-pole" s!"build/render: {e}"
 
 -- ── The Γ-bridge coefficient comparator (per-identity, series-shaped) ──────────
 -- Truncated power-series (Taylor-in-d) arithmetic over `CplxB`, depth N. The

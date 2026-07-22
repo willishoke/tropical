@@ -817,6 +817,21 @@ def cOneE : CplxE := (lit 1, lit 0)
 def bloomM1E (invA : Array CplxE) (z : CplxE) : CplxE :=
   invA.foldr (fun ik h => caddE cOneE (cmulE (cmulE z ik) h)) cOneE
 
+/-- The fixed-depth bottom-up continued fraction `CF(z) = Γ(a,z)eᶻz^{−a}` over
+    the emitted constants `cfB` (b-terms, `z` added per level) and `cfN`
+    (numerators) — THE CF lane's expression, shared verbatim by the per-sample
+    lane in `bloomComposedSig` (z live) and the live-pole lift's `CF(κ)`
+    constant in `bloomCompose` (z = κ, s0), so the constant is computed by the
+    SAME arithmetic the lane renders with (WS-LP phase 2, `bloomM1E`'s twin).
+    Requires `cfB.size = cfN.size + 1`. -/
+def bloomCFE (cfB cfN : Array CplxE) (z : CplxE) : CplxE := Id.run do
+  let kk := cfN.size
+  let mut h : CplxE := caddE z cfB[kk]!
+  for jr in [0:kk] do
+    let j := kk - 1 - jr
+    h := csubE (caddE z cfB[j]!) (cdivE cfN[j]! h)
+  return cdivE cOneE h
+
 /-- Is this `Sig` a pure s0 value — a function of knob slots and constants only
     (no `τ`/tick, no input, no bank machinery)? The live-pole lift's admission
     check: the lifted pair constants are correct (and Stage0-hoistable) only if
@@ -1218,34 +1233,49 @@ def bloomAdmitsPair (mu nu : CplxB) (B g : Float) : Bool :=
   | .excludedDepth => false
   | _ => true
 
-/-- WS-LP Phase 1: classify a live-σ pair over its whole σ interval — `some
-    nDepth` iff the pair is `serOnly` at EVERY σ ∈ `[sigLo, sigHi]`, else `none`
-    (the pair drops gracefully; region-crossing pairs are Phase 3's union emit).
-    Only `Re a = (σ_μ − σ_ν)/g` moves with σ_ν (`Im a` and `κ = μ·B` are
-    σ_ν-independent), so the two region conditions reduce to interval minima of
-    `|a + c|` along a horizontal segment — attained at `Re a = −c` clamped to the
-    segment. The depth is sized at the interval's worst case: `bloomM1`'s
-    convergence slows as `|a+1|` falls toward `|κ|`, so sample both endpoints
-    and the closest approach to `−1`; same `+8` guard and `≤ 300` cap as the
-    baked classifier. -/
-def classifyBloomPairLiveSer (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
-    (B g : Float) : Option Nat := Id.run do
+/-- WS-LP: classify a live-σ pair over its whole σ interval — `some (region,
+    nDepth, kDepth)` iff the pair sits in ONE non-coincident region at EVERY
+    σ ∈ `[sigLo, sigHi]` (`serOnly` throughout, phase 1, or `crossing`
+    throughout, phase 2), else `none` (the pair drops gracefully; a pair that
+    CHANGES region across the interval is phase 3's union emit, and the
+    coincident regions are with it). Only `Re a = (σ_μ − σ_ν)/g` moves with σ_ν
+    (`Im a` and `κ = μ·B` are σ_ν-independent), so the region conditions reduce
+    to interval extrema of `|a + c|` along a horizontal segment — the min at
+    `Re a = −c` clamped to the segment, the max at an endpoint (convexity).
+    Depths are sized at the interval's worst case (both endpoints + the closest
+    approach to `−1`, where `|a+1|` bottoms out), with the baked classifier's
+    `zBnd` per region (κ itself for serOnly; the branch-boundary `|z| = |a+1|`
+    for crossing), same `+8` guard and `≤ 300` cap. -/
+def classifyBloomPairLive (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
+    (B g : Float) : Option (SeamRegion × Nat × Nat) := Id.run do
   let kappa := mu.scale B
   let imA := (nuOmega - mu.im) / g
   -- Re a = (−σ_ν − Re μ)/g, decreasing in σ_ν
   let reLo := (-sigHi - mu.re) / g
   let reHi := (-sigLo - mu.re) / g
+  let absAt := fun (re c : Float) => Float.sqrt ((re + c) * (re + c) + imA * imA)
   let minAbsAt := fun (c : Float) =>
-    let t := max reLo (min reHi (-c))
-    Float.sqrt ((t + c) * (t + c) + imA * imA)
-  -- ¬coincident throughout (min |a| ≥ ½) ∧ serOnly throughout (min |a+1| ≥ |κ|)
+    absAt (max reLo (min reHi (-c))) c
+  -- ¬coincident throughout: min |a| ≥ ½ (the τ·e coincidence stays baked-only)
   if minAbsAt 0.0 < 0.5 then return none
-  if minAbsAt 1.0 < kappa.abs then return none
-  let depthAt := fun (re : Float) => (bloomM1 ⟨re, imA⟩ kappa).2
-  let tStar := max reLo (min reHi (-1.0))
-  let nRaw := max (depthAt reLo) (max (depthAt reHi) (depthAt tStar))
-  if nRaw + 8 > 300 then return none
-  return some (nRaw + 8)
+  let samples := #[reLo, reHi, max reLo (min reHi (-1.0))]
+  if minAbsAt 1.0 ≥ kappa.abs then
+    -- serOnly throughout: |a+1| never falls below |κ|
+    let nRaw := samples.foldl (fun m re => max m (bloomM1 ⟨re, imA⟩ kappa).2) 0
+    if nRaw + 8 > 300 then return none
+    return some (.serOnly, nRaw + 8, 0)
+  if max (absAt reLo 1.0) (absAt reHi 1.0) < kappa.abs then
+    -- crossing throughout: |a+1| never reaches |κ| (max at an endpoint)
+    let mut nRaw := 0
+    let mut kRaw := 0
+    for re in samples do
+      let aC : CplxB := ⟨re, imA⟩
+      let zBnd := kappa.scale ((aC.add ⟨1, 0⟩).abs / kappa.abs)
+      nRaw := max nRaw (bloomM1 aC zBnd).2
+      kRaw := max kRaw (bloomCF aC zBnd).2
+    if nRaw + 8 > 300 || kRaw + 8 > 300 then return none
+    return some (.crossing, nRaw + 8, kRaw + 8)
+  return none
 
 /-- `bloomedVoice ⋙ reverb` as Γ-bridge pairs — the residue composition ACROSS a
     pitch-bloom warp (`B = β·scale/g` seconds of total clock advance, `g` the
@@ -1292,9 +1322,9 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
         -- pre-WS-LP baked-pole fallback (`none` ⇒ the caller's bare bloom).
         let some (sLo, sHi) := r.sigmaRange | return none
         if !(sigIsS0 r.sigma) then return none
-        match classifyBloomPairLiveSer mu rOm sLo sHi B g with
-        | none => continue   -- not serOnly over the whole interval: graceful per-pair drop (Phase 3 widens)
-        | some nDepth =>
+        match classifyBloomPairLive mu rOm sLo sHi B g with
+        | none => continue   -- coincident / region-changing over the interval: graceful per-pair drop (Phase 3 widens)
+        | some (region, nDepth, kDepth) =>
           -- the lift: every baked constant re-expressed as an s0 `CplxE` of the
           -- live pole. The clamp ENFORCES the classified interval in-kernel, so
           -- an out-of-range slot write saturates the crossing's σ instead of
@@ -1306,14 +1336,42 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
           let invNuMuE := cdivE cOneE dNuMu
           let invA := (Array.range nDepth).map (fun k =>
             cdivE cOneE (caddE aE (litF (k + 1).toFloat, lit 0)))
-          let kE := cplxLitE (mu.scale B)
-          out := out.push {
-            muSigma := litF vSig, muOmega := litF vOm
-            nuSigma := sigC, nuOmega := litF rOm
-            bloomB := B, gRate := g, c, kappa := kE
-            k1Ser := cmulE (bloomM1E invA kE) invNuMuE
-            k1Cf := (lit 0, lit 0), fSer := cnegE invNuMuE
-            dSwitch := lit 0, invA, cfB := #[], cfN := #[] }
+          let kappaB := mu.scale B
+          let kE := cplxLitE kappaB
+          match region with
+          | .serOnly =>
+            out := out.push {
+              muSigma := litF vSig, muOmega := litF vOm
+              nuSigma := sigC, nuOmega := litF rOm
+              bloomB := B, gRate := g, c, kappa := kE
+              k1Ser := cmulE (bloomM1E invA kE) invNuMuE
+              k1Cf := (lit 0, lit 0), fSer := cnegE invNuMuE
+              dSwitch := lit 0, invA, cfB := #[], cfN := #[] }
+          | .crossing =>
+            -- WS-LP phase 2: the CF lane's constants as s0 `CplxE` of the live
+            -- pole — `cfB`/`cfN` linear in `a`, `CF(κ)` by the SAME emitted
+            -- fraction the lane renders with (`bloomCFE` at z = κ), the bridge
+            -- constant by the emitted `Γ★` (`bloomGammaStarE`, phase 0), and
+            -- `dSwitch = (ln|κ| − ½·ln|a+1|²)/g` via `logSig` (the `clogE`
+            -- modulus form — no sqrt in the vocabulary needed).
+            let cfB := (Array.range (kDepth + 1)).map (fun j =>
+              ((sub (litF (2 * j + 1).toFloat) aE.1, neg aE.2) : CplxE))
+            let cfN := (Array.range kDepth).map (fun j =>
+              let jf := cplxLitE ⟨(j + 1).toFloat, 0⟩
+              cmulE jf (csubE jf aE))
+            let cfK := bloomCFE cfB cfN kE
+            let cfOverG : CplxE := (div cfK.1 (litF g), div cfK.2 (litF g))
+            let aP1 := caddE aE cOneE
+            let dSwitch := div (sub (litF (Float.log kappaB.abs))
+              (mul (lit 5 1) (logSig (add (mul aP1.1 aP1.1) (mul aP1.2 aP1.2))))) (litF g)
+            out := out.push {
+              muSigma := litF vSig, muOmega := litF vOm
+              nuSigma := sigC, nuOmega := litF rOm
+              bloomB := B, gRate := g, c, kappa := kE
+              k1Ser := csubE (bloomGammaStarE aE kE (litF g)) cfOverG
+              k1Cf := cnegE cfOverG, fSer := cnegE invNuMuE
+              dSwitch, invA, cfB, cfN }
+          | _ => continue   -- unreachable: the live classifier only emits serOnly/crossing
       | some rSig =>
         let nu : CplxB := ⟨-rSig, rOm⟩
         -- the shared classifier (WS-CL): `excludedDepth` ⇒ this pair is out of scope
@@ -1466,15 +1524,10 @@ def bloomComposedSig (pairs : Array BloomPair) (clkInt anchorSamples : Sig) : Si
   let land := fun (env : Sig) (w : CplxE) (ph : Sig) =>
     rshift (sub (mul (toIntE (mul (mul env w.1) (lit 268435456))) (fixedCosCycSig ph))
                 (mul (toIntE (mul (mul env w.2) (lit 268435456))) (fixedSinCycSig ph))) (lit 28)
-  -- the per-sample continued fraction `CF(z) = Γ(a,z)eᶻz^{−a}` (bottom-up, fixed
-  -- depth), shared by the crossing and coincident branches (both large-z sides).
-  let cfEnv := fun (p : BloomPair) (z : CplxE) => Id.run do
-    let kk := p.cfN.size
-    let mut h : CplxE := caddE z p.cfB[kk]!
-    for jr in [0:kk] do
-      let j := kk - 1 - jr
-      h := csubE (caddE z p.cfB[j]!) (cdivE p.cfN[j]! h)
-    return cdivE one h
+  -- the per-sample continued fraction `CF(z) = Γ(a,z)eᶻz^{−a}` (`bloomCFE`,
+  -- shared with the live-pole lift's CF(κ) constant), used by the crossing and
+  -- coincident branches (both large-z sides).
+  let cfEnv := fun (p : BloomPair) (z : CplxE) => bloomCFE p.cfB p.cfN z
   let bankQ := pairs.foldl (fun acc p =>
     let eg := expSig (neg (mul (litF p.gRate) dPos))
     let z : CplxE := (mul p.kappa.1 eg, mul p.kappa.2 eg)
