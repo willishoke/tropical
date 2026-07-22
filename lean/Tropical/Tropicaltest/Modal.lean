@@ -1624,7 +1624,10 @@ def runGaugeAdapter (arena : Arena)
   let f1 := 300.0; let f2 := 520.0; let a1 := 1.0; let a2 := 0.7
   let tp := 6.283185307179586
   let ws := #[tp * f1, tp * f2]; let amps := #[a1, a2]
-  let sigmas := #[40.0, 10.0, 3.0]                    -- the damping sweep (Q ↑ as σ ↓)
+  -- the damping sweep (Q ↑ as σ ↓); the small-σ tail drives ‖H‖ to ~33 ⇒ S ~ 1e12,
+  -- PAST the pre-fix clamp ceiling (litF 1e300 saturated to ≈1.8e7), so this gate
+  -- catches a collapsed-clamp regression: with the old ceiling, high-Q leveling failed.
+  let sigmas := #[40.0, 10.0, 3.0, 0.5, 0.1, 0.03]
   -- INDEPENDENT oracle: ‖H‖₈ over the two pole freqs, H(iω) = Σⱼ aⱼ/(σ + i(ω−ωⱼ)).
   let normOf := fun (sig : Float) => Id.run do
     let mut S := 0.0
@@ -1668,9 +1671,23 @@ def runGaugeAdapter (arena : Arena)
       if rel > 5e-3 then
         IO.println s!"        GAUGE MISMATCH σ={sig} g={g.2}: render ratio {ratio} vs oracle norm^(-g) {oracle} (rel {rel})"
         ok := false
-  -- level-invariance: ‖H‖ must GROW across the sweep (else the adapter faces no
-  -- level change and unity-peak is vacuous); the g=1 case above then re-levels it.
-  let grows := norms.size == 3 && norms[0]! < norms[1]! && norms[1]! < norms[2]!
+  -- level-invariance: ‖H‖ must GROW monotonically across the sweep (a non-vacuity
+  -- guard — the exact invariance is the ratio ≡ ‖H‖^{−g} assertion above, which
+  -- proves normalizePeak divides by precisely the self-measured norm); the g=1 case
+  -- then re-levels a norm that spans ~0.025 → ~33 (three decades incl. the ceiling).
+  let grows := norms.size == sigmas.size &&
+    (Array.range (norms.size - 1)).all (fun i => norms[i]! < norms[i+1]!)
+  -- the floor path (S→0): an all-zero-residue bank has S = 0, clamped to 1e-30 (not
+  -- to `litF 1e-30`'s collapsed 0, which would send logSig(0) ≈ −712 → scale ≈ e⁸⁸);
+  -- the render must stay silent (0·anything = 0), never amplified numerical dust.
+  let silentBank := #[ModalMode.hz (litF f1) (litF 3.0) (lit 0),
+                       ModalMode.hz (litF f2) (litF 3.0) (lit 0)]
+  let some pSilent ← peakOf (normalizePeak (litF 1.0) silentBank)
+    | return (← failGate "gauge-adapter" "silent render")
+  let silentOk := pSilent < 1e-9
+  if !silentOk then
+    IO.println s!"        GAUGE: silent bank amplified to {pSilent} at g=1 — the S→0 floor is broken"
+    ok := false
   IO.println s!"        normalizePeak: render ratio ≡ norm^(-g) over σ∈{sigmas}, g∈0/½/1:"
   IO.println s!"        result   worst rel {worst} · ‖H‖ {norms} (grows across the sweep: {grows})"
   if ok && grows then

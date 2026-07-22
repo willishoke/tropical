@@ -454,14 +454,25 @@ def residueComposeEC (voice reverb : Array ModalMode) : Array ModalMode :=
     `g = 1` unity-peak (`H/‖H‖` has unit peak, so a tuned tone is level-invariant
     across a resonance sweep, pings fading as 1/Q). Self-measuring: the norm reads
     pole/residue data ALONE (nothing about `filterPair`/`res`), so it applies
-    unchanged to any modal bank or composed segment — Modal ⇝ Modal. Coefficient-
-    time: the norm folds the mode `Sig`s DIRECTLY (never a `Sig.index`/clock read),
-    an s0 expression that hoists to the coefficient kernel and crosses to Metal as a
-    coef slot — `logSig`'s `floatExponent` never runs per sample (option E's
-    discipline). The scale is ONE real shared across the bank, so the render is
-    EXACTLY `scale · (bare render)` (linear in residues) — hence `g = 0` is a VALUE
-    no-op and any `g` is a pure re-level with no relower (a mid-ring sweep re-levels
-    the ongoing tail, closed-form, no click). An empty bank stays empty. -/
+    unchanged to any modal bank or composed segment — Modal ⇝ Modal. The scale is ONE
+    real shared across the bank, so the render is EXACTLY `scale · (bare render)`
+    (linear in residues) — hence `g = 0` is a VALUE no-op and any `g` is a pure
+    re-level with no relower (a mid-ring sweep re-levels the ongoing tail, closed-
+    form, no click). An empty bank stays empty.
+
+    **Two preconditions the caller (the future `gauge` node) MUST honour** — the norm
+    is by-ear approximate, but these two are correctness, not taste:
+    - **s0 poles.** The norm folds the mode `Sig`s; if the poles are s0 (const or a
+      settled knob) the whole scale is an s0 coefficient, hoisted once and crossed to
+      Metal as a coef slot — `logSig`'s `floatExponent` (f32≠f64 across backends) then
+      never runs per sample. But a GLIDED knob is `.s1` (`glideExpr` reads
+      `.sampleIndex`), so `normalizePeak (filterPair glidedCutoff …)` would emit a
+      per-sample `floatExponent` and DIVERGE on Metal. The gauge node must build the
+      norm from SETTLED (`#v1`) values, not the glided expression.
+    - **deg 0.** `H` here is the deg-0 form `Aᵢ/(iω−μᵢ)`; a deg-`p` mode's true
+      response is `Aᵢ·p!/(iω−μᵢ)^{p+1}`, so this under-weights higher-deg peaks. Exact
+      for the shipped `filterPair`/`reverbRoom`/`resonatorBank` (all deg-0); a mixed-
+      deg bank is mis-levelled. -/
 def normalizePeak (g : Sig) (modes : Array ModalMode) : Array ModalMode :=
   if modes.isEmpty then #[] else
   -- H(iωₖ) = Σᵢ Aᵢ/(σᵢ + i(ωₖ − ωᵢ))   (iωₖ − μᵢ, with μᵢ = −σᵢ + iωᵢ)
@@ -472,10 +483,13 @@ def normalizePeak (g : Sig) (modes : Array ModalMode) : Array ModalMode :=
       let h := hAt m.omega
       let h2 := add (mul h.1 h.1) (mul h.2 h.2)
       add acc (mul (mul h2 h2) (mul h2 h2))) (lit 0)
-  -- ‖H‖⁻ᵍ = S^{−g/8} = exp(−(g/8)·ln S); floor S > 0 so a silent bank (S→0)
-  -- scales 0·anything = 0 with no log(0).
+  -- ‖H‖⁻ᵍ = S^{−g/8} = exp(−(g/8)·ln S). Floor S ∈ [1e−30, 1e30] (via `lit`, NOT
+  -- `litF` — `litF 1e−30` rounds to 0 and `litF 1e300` saturates to ≈1.8e7, which
+  -- would defeat the log(0) floor AND clamp every ‖H‖ ≳ 8): the floor guards a
+  -- silent bank (S→0 ⇒ logSig 0), the ceiling a non-finite one (S=∞ ⇒ logSig ∞ = NaN),
+  -- and 1e30 stays well under f32-max so Metal never overflows the clamp.
   let scale := expSig (mul (mul (neg g) (lit 125 3))
-                           (logSig (clampE S (litF 1e-30) (litF 1e300))))
+                           (logSig (clampE S (lit 1 30) (lit (10^30)))))
   modes.map (fun m => { m with cre := mul m.cre scale, cim := mul m.cim scale })
 
 /-- `residueComposeEC` with the Cauchy inner sums BANKED (WS-F). Each output mode's
