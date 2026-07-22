@@ -1605,6 +1605,11 @@ def planArrayFills (p : Tropical.Plan.FlatPlan) : Nat :=
 def planReduces (p : Tropical.Plan.FlatPlan) : Nat :=
   countInstrs (fun i => i.tag == "ReduceBegin") p
 
+/-- `FloatExponent` ops (the one op whose f32/f64 result differs at 0/subnormal) in a
+    plan's instruction tree — the gauge-stage gate reads this per kernel. -/
+def planFloatExponents (p : Tropical.Plan.FlatPlan) : Nat :=
+  countInstrs (fun i => i.tag == "FloatExponent") p
+
 open Tropical.EmitArrow in
 /-- THE EXCITATION-GAUGE gate (§5). `normalizePeak g` rescales a bank's residues by
     the self-measured `1/‖H‖^g` (`‖H‖` = the p=8 norm of the bank's own transfer

@@ -460,37 +460,42 @@ def residueComposeEC (voice reverb : Array ModalMode) : Array ModalMode :=
     re-level with no relower (a mid-ring sweep re-levels the ongoing tail, closed-
     form, no click). An empty bank stays empty.
 
-    **Two preconditions the caller (the future `gauge` node) MUST honour** — the norm
-    is by-ear approximate, but these two are correctness, not taste:
-    - **s0 poles.** The norm folds the mode `Sig`s; if the poles are s0 (const or a
-      settled knob) the whole scale is an s0 coefficient, hoisted once and crossed to
-      Metal as a coef slot — `logSig`'s `floatExponent` (f32≠f64 across backends) then
-      never runs per sample. But a GLIDED knob is `.s1` (`glideExpr` reads
-      `.sampleIndex`), so `normalizePeak (filterPair glidedCutoff …)` would emit a
-      per-sample `floatExponent` and DIVERGE on Metal. The gauge node must build the
-      norm from SETTLED (`#v1`) values, not the glided expression.
-    - **deg 0.** `H` here is the deg-0 form `Aᵢ/(iω−μᵢ)`; a deg-`p` mode's true
-      response is `Aᵢ·p!/(iω−μᵢ)^{p+1}`, so this under-weights higher-deg peaks. Exact
-      for the shipped `filterPair`/`reverbRoom`/`resonatorBank` (all deg-0); a mixed-
-      deg bank is mis-levelled. -/
-def normalizePeak (g : Sig) (modes : Array ModalMode) : Array ModalMode :=
-  if modes.isEmpty then #[] else
+    **s0 BY CONSTRUCTION** (`gaugeScale`): the norm is measured on the SETTLED poles
+    (`settle` collapses a glide to its `#v1` target), so `logSig`'s `floatExponent`
+    (f32≠f64 across backends) is coefficient-time and never runs per sample — the
+    Metal divergence is unreachable, not documented against. A pole that won't settle
+    (a genuine per-sample modulation, an LFO on a cutoff) makes `gaugeScale` `none`,
+    and the bank DECLINES (identity) rather than emit an s1 norm. **One remaining note
+    (taste-adjacent but a correctness caveat): deg 0.** `H` is the deg-0 form
+    `Aᵢ/(iω−μᵢ)`; a deg-`p` mode's `Aᵢ·p!/(iω−μᵢ)^{p+1}` is under-weighted (exact for
+    the shipped `filterPair`/`reverbRoom`/`resonatorBank`, all deg-0). -/
+def gaugeScale (g : Sig) (modes : Array ModalMode) : Option Sig := do
+  -- SETTLE every pole first — the whole scale then reads no clock (s0), so the
+  -- `floatExponent` inside `logSig` is coefficient-time. `none` if any won't settle.
+  let sm ← modes.mapM fun m => do
+    let sg ← settle m.sigma; let om ← settle m.omega
+    let cr ← settle m.cre;   let ci ← settle m.cim
+    pure ({ m with sigma := sg, omega := om, cre := cr, cim := ci } : ModalMode)
   -- H(iωₖ) = Σᵢ Aᵢ/(σᵢ + i(ωₖ − ωᵢ))   (iωₖ − μᵢ, with μᵢ = −σᵢ + iωᵢ)
-  let hAt := fun (wk : Sig) => modes.foldl (fun acc m =>
+  let hAt := fun (wk : Sig) => sm.foldl (fun acc m =>
       caddE acc (cdivE m.ampE ((m.sigma, sub wk m.omega) : CplxE))) ((lit 0, lit 0) : CplxE)
   -- S = Σₖ |H(iωₖ)|⁸ = Σₖ (|H|²)⁴  (p = 8; even power ⇒ no sqrt)
-  let S := modes.foldl (fun acc m =>
+  let S := sm.foldl (fun acc m =>
       let h := hAt m.omega
       let h2 := add (mul h.1 h.1) (mul h.2 h.2)
       add acc (mul (mul h2 h2) (mul h2 h2))) (lit 0)
   -- ‖H‖⁻ᵍ = S^{−g/8} = exp(−(g/8)·ln S). Floor S ∈ [1e−30, 1e30] (via `lit`, NOT
-  -- `litF` — `litF 1e−30` rounds to 0 and `litF 1e300` saturates to ≈1.8e7, which
-  -- would defeat the log(0) floor AND clamp every ‖H‖ ≳ 8): the floor guards a
-  -- silent bank (S→0 ⇒ logSig 0), the ceiling a non-finite one (S=∞ ⇒ logSig ∞ = NaN),
-  -- and 1e30 stays well under f32-max so Metal never overflows the clamp.
-  let scale := expSig (mul (mul (neg g) (lit 125 3))
-                           (logSig (clampE S (lit 1 30) (lit (10^30)))))
-  modes.map (fun m => { m with cre := mul m.cre scale, cim := mul m.cim scale })
+  -- `litF` — `litF 1e−30` rounds to 0, `litF 1e300` saturates to ≈1.8e7): the floor
+  -- guards a silent bank (S→0 ⇒ logSig 0), the ceiling a non-finite one (S=∞ ⇒
+  -- logSig ∞ = NaN), and 1e30 stays under f32-max so Metal never overflows the clamp.
+  pure (expSig (mul (mul (neg g) (lit 125 3))
+                    (logSig (clampE S (lit 1 30) (lit (10^30))))))
+
+def normalizePeak (g : Sig) (modes : Array ModalMode) : Array ModalMode :=
+  if modes.isEmpty then #[] else
+  match gaugeScale g modes with
+  | some scale => modes.map fun m => { m with cre := mul m.cre scale, cim := mul m.cim scale }
+  | none => modes   -- un-settleable poles: decline to identity, never an s1 norm
 
 /-- `residueComposeEC` with the Cauchy inner sums BANKED (WS-F). Each output mode's
     amp (`Hlam`/`coupling`) becomes a scalar `Sig.bankSum` over the SOURCE columns

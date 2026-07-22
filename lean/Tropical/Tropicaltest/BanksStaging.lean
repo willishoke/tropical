@@ -741,3 +741,46 @@ def runModalAddr (arena : Arena)
         failGate "modal-addr" s!"maxErr={maxErr} preMax={preMax} postPeak={postPeak} decodeOk={decodeOk}"
     | .error e, _, _ | _, .error e, _ | _, _, .error e => failGate "modal-addr" s!"render: {firstLine e}"
   | _, _, _ => failGate "modal-addr" "build"
+
+/-- THE GAUGE-STAGE gate (§5, Hamilton's "make the s0 contract mechanical"). The
+    gauge's self-measured norm uses `logSig` → `floatExponent`; `settle` measures it
+    on the SETTLED poles, so that op is s0 (the coefficient kernel), NOT per-sample.
+    Proven by DELTA against `resonator ⋙ filter(glided cutoff/res) ⋙ out` without the
+    gauge: the filter's own option-E landing already emits `FloatExponent` in the
+    audio kernel (a glided-amp bank), so the invariant is not "zero in audio" but
+    "the GAUGE adds zero": with `settle`, inserting the gauge leaves the audio
+    kernel's `FloatExponent` count UNCHANGED and moves its norm's `FloatExponent`
+    into the s0 coeff kernel. Remove `settle` from `gaugeScale` (the norm folds the
+    live glided poles) and the gauge's `FloatExponent` lands per-sample → the audio
+    delta jumps → red. Contract enforced by the compiler's own stage split, not a
+    docstring. -/
+def runGaugeStage (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let mk := fun (withGauge : Bool) =>
+    "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"flt\",\"kind\":\"filter\",\"params\":{\"cutoff\":800,\"resonance\":0.5},\"in\":{\"in\":[\"res\"]}}," ++
+    (if withGauge then "{\"id\":\"gau\",\"kind\":\"gauge\",\"params\":{\"g\":1},\"in\":{\"in\":[\"flt\"]}}," else "") ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"" ++ (if withGauge then "gau" else "flt") ++ "\"]}}],\"out\":\"out\"}"
+  let feOf : Bool → IO (Option (Nat × Nat)) := fun withGauge => do
+    match Lean.Json.parse (mk withGauge) with
+    | .error e => IO.println s!"        gauge-stage json: {e}"; pure none
+    | .ok j => match Tropical.Playground.compilePlanPure arena resolved j with
+      | .error e => IO.println s!"        gauge-stage compile: {firstLine e}"; pure none
+      | .ok (plan, _, sb) => match Tropical.Ir.Stage0.hoistTyped plan sb with
+        | .error e => IO.println s!"        gauge-stage split: {firstLine e}"; pure none
+        | .ok split =>
+          let a := planFloatExponents split.audio
+          let c := match split.coeff? with | some k => planFloatExponents k | none => 0
+          pure (some (a, c))
+  let some (aBare, cBare) ← feOf false | return (← failGate "gauge-stage" "bare compile")
+  let some (aGauge, cGauge) ← feOf true | return (← failGate "gauge-stage" "gauge compile")
+  IO.println s!"        resonator ⋙ filter(glided) ⋙ [gauge] ⋙ out — FloatExponent (audio, coeff):"
+  IO.println s!"        result   without gauge ({aBare}, {cBare}) · with gauge ({aGauge}, {cGauge})"
+  -- the gauge adds ZERO per-sample FloatExponent (its norm is s0), and DOES add its
+  -- norm's FloatExponent to the coeff kernel (so the gauge is genuinely present).
+  if aGauge == aBare && cGauge > cBare then
+    passGate "gauge-stage" s!"settle keeps the gauge norm s0: the gauge adds 0 FloatExponent to the audio kernel (stays {aBare}) and {cGauge - cBare} to the s0 coeff kernel — Metal-safe by construction"
+  else
+    failGate "gauge-stage" s!"audio {aBare}→{aGauge} (want equal), coeff {cBare}→{cGauge} (want grow) — the gauge norm leaked into the per-sample kernel"
+

@@ -382,6 +382,13 @@ def portSpecs : String → Array PortSpec
       { name := "resonance", knob := some (5, 1), discipline := .glide,
         display := some { min := 0, max := 1 } }]
   | "modalmix" => #[{ name := "in", accepts := modalIn, multi := true }]
+  -- gauge: the §5 excitation-gauge adapter — re-levels its modal input's peak by the
+  -- self-measured ‖H‖^{−g}. `g` is the gauge: 0 = unity-DC (strike, the identity),
+  -- ½ = √Q trim, 1 = unity-peak (tuned-tone level-invariant). Glided (smooth sweep).
+  | "gauge" => #[
+      { name := "in", accepts := modalIn },
+      { name := "g", knob := some (0, 0), discipline := .glide,
+        display := some { min := 0, max := 1 } }]
   -- gong: a struck resonator whose strike data (`t`, `g`, `modes_full`,
   -- `modes_half`) is structural (carried in `params`), EXCEPT the pitch-bloom
   -- depth `beta` — promoted to a LIVE slot, so the bloom deepens/relaxes under a
@@ -397,7 +404,7 @@ def portSpecs : String → Array PortSpec
 /-- Each kind's outlet color (`none` = no outlet, the dac sink). -/
 def outletOf : String → Option PortDomain
   | "knob" => some .control
-  | "resonator" | "reverb" | "filter" | "modalmix" | "string" => some .modal
+  | "resonator" | "reverb" | "filter" | "modalmix" | "string" | "gauge" => some .modal
   | "out" => none
   | _ => some .signal
 
@@ -407,7 +414,7 @@ def outletOf : String → Option PortDomain
 def vocabularyKinds : Array String := #[
   "source", "pluck", "comb", "flange", "delay", "reverse", "fm", "sflange",
   "mix", "ring", "gong", "string", "resonator", "reverb", "filter",
-  "modalmix", "knob", "out"]
+  "modalmix", "gauge", "knob", "out"]
 
 /-- Every kind `buildNode` actually constructs (its match arms — the AUTHORITATIVE
     list, read straight off the arms below). The classification-drift gate and
@@ -419,7 +426,7 @@ def vocabularyKinds : Array String := #[
 def buildNodeKinds : Array String := #[
   "knob", "source", "pluck", "comb", "flange", "sflange", "fm", "delay",
   "reverse", "mix", "ring", "resonator", "reverb", "filter", "modalmix",
-  "gong", "bloomgong", "string"]
+  "gauge", "gong", "bloomgong", "string"]
 
 /-- Kinds `buildNode` builds but which are WITHHELD from the served surface. Their
     modal factor-site landing (`bloomComposedSig`) still lands `lit 268435456`
@@ -642,6 +649,13 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     (.modalReverb sig
       (filterPair (p "cutoff" (dv "cutoff")) (p "resonance" (dv "resonance"))) none, #[])
   | "modalmix" => (.modalMix (portSources inObj "in"), #[])
+  | "gauge" =>
+    -- §5 excitation gauge: re-level the modal input's peak. g=0 identity (unity-DC,
+    -- the strike gauge), g=1 unity-peak. A pure Modal ⇝ Modal effect (`normalizePeak`);
+    -- the norm is self-measured on the SETTLED poles, so a glided filter input is
+    -- Metal-safe and an un-settleable input declines to identity.
+    let inId := (portSources inObj "in")[0]?.getD "__silence__"
+    (.modalGauge inId (p "g" (dv "g")), #[])
   | "gong" =>
     -- One STRIKE of the struck nonlinear resonator: two anchored modal banks
     -- (full-glide + stiff half-glide registers) behind per-strike pitch-bloom

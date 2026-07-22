@@ -424,6 +424,9 @@ def main (args : List String) : IO UInt32 := do
     if !(← runBanksStaging arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← runGaugeStage arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← runMslColumnGuard arena resolved) then
       failed := failed + 1
     total := total + 1

@@ -118,6 +118,11 @@ inductive Node where
       (bloom : Option (Float × Float) := none)
   | modalReverb (input : String) (room : Array ModalMode) (dir : Option ModalDir)
   | modalMix (inputs : Array String)
+  -- `modalGauge` is the excitation-gauge adapter (§5): it re-levels its modal input's
+  -- residues by the self-measured `‖H‖^{−g}` (`normalizePeak`), a pure Modal ⇝ Modal
+  -- effect. `g` is a live slot. The norm is measured on the SETTLED poles, so an
+  -- un-settleable (per-sample-modulated) input DECLINES to identity, never an s1 norm.
+  | modalGauge (input : String) (g : Sig)
 
 structure PatchNode where
   id : String
@@ -144,6 +149,7 @@ def nodeIsModal (g : PatchGraph) (id : String) : Bool :=
     | .modalSource .. => true
     | .modalReverb .. => true
     | .modalMix .. => true
+    | .modalGauge .. => true
     | _ => false
 
 /-- The lowered modal value: a PLAIN composed bank (realized directly at the
@@ -198,6 +204,17 @@ partial def lowerModal (g : PatchGraph) (id : String) :
       -- identity (the first reverb in a chain).
       let folded := if acc.isEmpty then room else residueComposeEC acc room
       .ok (.bloomed voice folded B gr, a, clk, addr, dir.orElse (fun _ => dirIn), none)
+  | .modalGauge inId gExpr => do
+    let (bank, a, clk, addr, dirIn, count) ← lowerModal g inId
+    -- re-level in place: `normalizePeak` scales residues by the SETTLED norm (s0),
+    -- preserving the pole set — so `count` (the live mode count) survives, unlike a
+    -- reverb's composition. An un-settleable input declines to identity inside
+    -- `normalizePeak`. A bloomed source gauges its VOICE modes; the folded room and
+    -- the uncrossed bloom are untouched.
+    match bank with
+    | .plain v => .ok (.plain (normalizePeak gExpr v), a, clk, addr, dirIn, count)
+    | .bloomed voice acc B gr =>
+      .ok (.bloomed (normalizePeak gExpr voice) acc B gr, a, clk, addr, dirIn, count)
   | .modalMix inputs => do
     let parts ← inputs.mapM (lowerModal g)
     match parts.toList with
