@@ -289,6 +289,9 @@ def main (args : List String) : IO UInt32 := do
     if !(← runBootstrapLog arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← runBootstrapAtan2 arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← runSettle arena resolved) then
       failed := failed + 1
     IO.println "fixed-point datapath sine (scope A — the sample values in i64):"
@@ -374,6 +377,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runKInvariance arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runLgammaEmit arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runModalBessel arena resolved) then

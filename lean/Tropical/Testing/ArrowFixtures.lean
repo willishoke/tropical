@@ -958,6 +958,14 @@ def buildLogProbe (name : String) (arena : Arena) : Arena × ProgramIdx :=
   let x := add (lit 2 2) (mul sIdxF (lit 9765625 8))
   buildExprCarrier name (logSig x) arena
 
+/-- `atan2E(sin θ, cos θ)` over a ramp `θ ∈ [−3.1, 3.096]` (all four quadrants across
+    2048 samples, inside `(−π, π)` so no wrap) — must recover `θ`. The reference side
+    of the `bootstrap-atan2` gate: rendered `atan2E` vs the known angle. -/
+def buildAtan2Probe (name : String) (arena : Arena) : Arena × ProgramIdx :=
+  let sIdxF := toFloatE (rshift clockLit (lit 32))
+  let theta := sub (mul sIdxF (lit 302734375 11)) (lit 31 1)
+  buildExprCarrier name (atan2E (sinSig theta) (cosSig theta)) arena
+
 /-- Emit the modal bank through the ARROW path (`arrUn`/`clk`, then `emitTerm`) —
     the term side of the `modal-bank` gate. -/
 def buildModalBankArrow (name : String) (modes : Array ModalMode) (anchor : Sig)

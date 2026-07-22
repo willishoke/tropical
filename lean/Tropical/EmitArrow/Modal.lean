@@ -825,6 +825,61 @@ def lgammaB (z : CplxB) : CplxB :=
     (CplxB.sub ⟨Float.log pi, 0⟩ logsin).sub (core (CplxB.sub ⟨1, 0⟩ z))
   else core z
 
+-- ── The EMITTED complex transcendentals (WS-LP: the live Γ★ bridge) ────────────
+-- The bloom crossing's bake-time constants are lifted from build-time `CplxB` to
+-- emitted `CplxE` (Sig × Sig) so a LIVE pole survives the crossing. The one new
+-- op under this is `atan2E` (Numerics); everything else is mechanical CplxE.
+
+/-- Complex log at Sig level: `⟨½·log|z|², atan2(Im, Re)⟩` — `logSig` supplies the
+    modulus half, `atan2E` the phase. The live twin of `CplxB.log`. -/
+def clogE (z : CplxE) : CplxE :=
+  (mul (lit 5 1) (logSig (add (mul z.1 z.1) (mul z.2 z.2))), atan2E z.2 z.1)
+
+/-- Complex exp at Sig level: `e^{Re}·⟨cos Im, sin Im⟩`. The live twin of `CplxB.exp`. -/
+def cexpE (z : CplxE) : CplxE :=
+  let e := expSig z.1
+  (mul e (cosSig z.2), mul e (sinSig z.2))
+
+/-- Complex log-gamma at Sig level — the EMITTED twin of `lgammaB`. Same Lanczos
+    (g=7, n=9) core, same reflection for `Re z < ½` on the dominant half of
+    `log sin πz`; the build-time `if z.re<½` / `if z.im<0` branches become `selectE`s
+    (the unselected core lane may go non-finite off its region — the select discards
+    it, the bloom's established discipline). Both `clogE`/`cexpE` reachable. -/
+def lgammaE (z : CplxE) : CplxE :=
+  let lanczos : Array Float := #[0.99999999999980993, 676.5203681218851,
+    -1259.1392167224028, 771.32342877765313, -176.61502916214059,
+    12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6,
+    1.5056327351493116e-7]
+  let core : CplxE → CplxE := fun z =>
+    let zz := csubE z (lit 1, lit 0)
+    let x := (Array.range 8).foldl
+      (fun acc i => caddE acc (cdivE ((litF lanczos[i+1]!, lit 0) : CplxE)
+        (caddE zz ((litF (i+1).toFloat, lit 0) : CplxE))))
+      ((litF lanczos[0]!, lit 0) : CplxE)
+    let t := caddE zz ((litF 7.5, lit 0) : CplxE)
+    caddE (csubE (cmulE (caddE zz ((lit 5 1, lit 0) : CplxE)) (clogE t)) t)
+          (caddE (clogE x) ((litF (0.5 * Float.log (2.0 * 3.141592653589793)), lit 0) : CplxE))
+  let pi := lit 3141592653589793 15
+  let imNeg := gt (lit 0) z.2                                    -- Im z < 0
+  let s : CplxE := (selectE imNeg (neg (mul pi z.2)) (mul pi z.2),
+                    selectE imNeg (mul pi z.1) (neg (mul pi z.1)))
+  let log2i : CplxE := ((litF (Float.log 2.0) : Sig),
+                        selectE imNeg (lit 15707963267948966 16) (neg (lit 15707963267948966 16)))
+  let logsin := csubE (caddE s (clogE (csubE ((lit 1, lit 0) : CplxE)
+                  (cexpE (scaleRealE (lit (-2)) s))))) log2i
+  let reflected := csubE (csubE ((litF (Float.log 3.141592653589793), lit 0) : CplxE) logsin)
+                         (core (csubE ((lit 1, lit 0) : CplxE) z))
+  let base := core z
+  let useRefl := gt (lit 5 1) z.1                                -- Re z < ½
+  (selectE useRefl reflected.1 base.1, selectE useRefl reflected.2 base.2)
+
+/-- Γ★ = `exp(lgamma(a) − a·log κ + κ)/g` at Sig level — the live twin of
+    `bloomGammaStar`, the bloom crossing's d-constant bridge between the two envelope
+    branches (its `e^{±π|Im a|/2}` blowups cancel in the exponent). -/
+def bloomGammaStarE (a kappa : CplxE) (g : Sig) : CplxE :=
+  scaleRealE (div (lit 1) g)
+    (cexpE (caddE (csubE (lgammaE a) (cmulE a (clogE kappa))) kappa))
+
 /-- `M(1, a+1, z) = 1 + z/(a+1)(1 + z/(a+2)(…))` by forward recurrence —
     `(value, terms)`. Build-time (the κ-side constant + per-pair depth sizing);
     the per-sample twin is the fixed-depth Horner in `bloomComposedSig`. Stable

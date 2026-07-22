@@ -152,6 +152,34 @@ def runBootstrapLog (arena : Arena)
     | .error e => failGate "bootstrap-log" s!"render: {firstLine e}"
   | .error e => failGate "bootstrap-log" s!"build: {firstLine e}"
 
+/-- THE BOOTSTRAP-ATAN2 gate. `atan2E` (the one new op WS-LP's live Γ★ bridge needs
+    past `logSig` — for complex `log`/`lgamma`) traces a circle: `atan2E(sin θ, cos θ)`
+    over `θ ∈ [−3.1, 3.096]` must recover `θ` across all four quadrants. Independent
+    oracle (the known angle), so a bad octant fold or quadrant `select` shows as error
+    ≫ 1e-5. Absolute error on the angle scale. `logSig`'s `bootstrap-exp`, for atan2. -/
+def runBootstrapAtan2 (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match buildAndFinish (.ok (Tropical.EmitArrow.buildAtan2Probe "atan2_probe" arena)) with
+  | .ok p =>
+    match ← renderPlanSamples p 2048 with
+    | .ok s =>
+      let n := min s.size 2048
+      let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
+      let mut maxAbs : Float := 0.0
+      let mut worstT : Float := 0.0
+      for i in [0:n] do
+        let theta := -3.1 + i.toFloat * 0.00302734375
+        let err := (s[i]! / sinkGain - theta).abs
+        if err > maxAbs then maxAbs := err; worstT := theta
+      IO.println s!"        atan2E(sin θ, cos θ) vs θ, θ∈[−3.1,3.096] across 2048 samples (all quadrants):"
+      IO.println s!"        result   max absolute error = {maxAbs}  (at θ={worstT})"
+      if maxAbs < 1e-5 then
+        passGate "bootstrap-atan2" s!"emitted octant-reduced atan2 ≡ the true angle to {maxAbs} (incl. sin/cos error) — quadrants + fold correct"
+      else
+        failGate "bootstrap-atan2" s!"max abs err {maxAbs} (want <1e-5) at θ={worstT}"
+    | .error e => failGate "bootstrap-atan2" s!"render: {firstLine e}"
+  | .error e => failGate "bootstrap-atan2" s!"build: {firstLine e}"
+
 open Tropical.EmitArrow in
 /-- THE SETTLE gate. `settle e` returns the s0 value `e` converges to (the glide's
     saturating ramp → its ceiling), or `none` when a clock read survives (a genuine

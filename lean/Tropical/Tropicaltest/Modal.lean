@@ -1701,6 +1701,44 @@ def runGaugeAdapter (arena : Arena)
     failGate "gauge-adapter" s!"ok={ok} grows={grows} worst={worst}"
 
 open Tropical.EmitArrow in
+/-- THE EMITTED-LGAMMA gate (WS-LP foundation). `lgammaE` — the emitted complex
+    log-gamma (via `atan2E`/`logSig`), the live twin of build-time `lgammaB` — must
+    match `lgammaB` over a `Re z ∈ [−5, 5]` sweep (crossing the reflection boundary
+    Re = ½) at both `Im z` signs (`+1`, `−2.5`, exercising the dominant-half select).
+    Independent oracle: the build-time Lanczos itself, rendered vs computed. Relative
+    error (lgamma grows near the negative reals). This is the primitive under WS-LP's
+    live Γ★ bridge; without it the crossing stays baked-pole. -/
+def runLgammaEmit (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
+  let step := 10.0 / 2048.0
+  let reRamp := sub (mul (toFloatE (rshift clockLit (lit 32))) (litF step)) (lit 5)
+  let mut worst : Float := 0.0
+  let mut worstAt : String := ""
+  let mut ok := true
+  for imVal in #[1.0, -2.5] do
+    let lg := lgammaE (reRamp, litF imVal)
+    match buildAndFinish (.ok (buildExprCarrier "lg_re" lg.1 arena)),
+          buildAndFinish (.ok (buildExprCarrier "lg_im" lg.2 arena)) with
+    | .ok pRe, .ok pIm =>
+      match ← renderPlanSamples pRe 2048, ← renderPlanSamples pIm 2048 with
+      | .ok sRe, .ok sIm =>
+        for i in [0:min sRe.size sIm.size] do
+          let re := -5.0 + i.toFloat * step
+          let ref := lgammaB ⟨re, imVal⟩
+          let scale := max (ref.re.abs + ref.im.abs) 1.0
+          let e := (max (sRe[i]! / sinkGain - ref.re).abs (sIm[i]! / sinkGain - ref.im).abs) / scale
+          if e > worst then worst := e; worstAt := s!"z=({re},{imVal})"
+      | .error e, _ | _, .error e => IO.println s!"        lgammaE render: {firstLine e}"; ok := false
+    | .error e, _ | _, .error e => IO.println s!"        lgammaE build: {firstLine e}"; ok := false
+  IO.println s!"        emitted lgammaE vs build-time lgammaB, Re∈[−5,5] (crosses ½), Im = 1 and −2.5:"
+  IO.println s!"        result   worst relative error {worst}  (at {worstAt})"
+  if ok && worst < 1e-4 then
+    passGate "lgamma-emit" s!"emitted complex lgamma ≡ build-time Lanczos to {worst} rel across the reflection boundary and both Im signs — WS-LP's live Γ★ bridge is sound"
+  else
+    failGate "lgamma-emit" s!"ok={ok} worst={worst} at {worstAt}"
+
+open Tropical.EmitArrow in
 /-- THE OPTION-E k-INVARIANCE gate. Option E's whole correctness rests on the landed
     value being INVARIANT under the per-bank exponent `k` (the `·2^(28−k)` land and the
     `>>(28−k)` shift cancel; only the quantization LSB moves). Every equivalence gate
