@@ -330,6 +330,9 @@ def main (args : List String) : IO UInt32 := do
     if !(← runBanksColumnizeBail arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← runStrikeComb arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← runModalDegree arena resolved) then
       failed := failed + 1
     total := total + 1

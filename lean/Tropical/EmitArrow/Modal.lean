@@ -232,6 +232,40 @@ def modePhaseQFromIncr (incr clkRel : Sig) : Sig :=
   let tlo := bitAnd clkRel (lit 4294967295)
   bitAnd (add (mul incr thi) (rshift (mul incr tlo) (lit 32))) (lit 4294967295)
 
+/-- The PERIODIC relative clock — `(τ − anchor) mod P` on the tick grid, exact
+    and drift-free: the strike-train quotient computed the way every oscillator
+    computes phase (the FixedPhasor reduction). The period lands ONCE as
+    `incr = round(2³²/(P·SR))` (round, not truncate — a 1-ulp error in the
+    float period must not cliff the increment), the split-multiply reduces
+    `incr·clkRel` on ℤ/2³², and the masked phase re-expands to ticks. P
+    quantizes to the 2³² grid exactly as ω does (the strike lattice shares the
+    oscillators' grid story; a P whose sample count divides 2³² is EXACT — the
+    gate's tight configs). The result lives in `[0, P·SR·2³²)` for ALL τ —
+    before the anchor too (ashr/mask reduce negative clkRel correctly), so a
+    bank reading this clock is an ETERNAL periodic train: the anchor is a
+    phase reference, not a start (universe semantics — scrub anywhere, the
+    train was always playing). Feed a bank as
+    `modalBankSig ms (relClockQuot …) (lit 0)`: the body's own `relClockQ`
+    subtracts nothing and every downstream read (dSec, phase, the causal
+    gate) sees the quotient. Period in SECONDS (the physics unit, like σ/ω);
+    the tick conversion reads the runtime sample rate. Requires P ≥ one
+    sample (incr ≤ 2³² — the same headroom bound as an audio-rate ω). -/
+def relClockQuot (clkInt anchorSamples : Sig) (pSec : Float) : Sig :=
+  -- The range is (0, P] — one tick pre-subtracted before the reduction and
+  -- re-added after — NOT [0, P): at the exact strike sample the quotient must
+  -- read d = P (the stack as of one period ago, tails-without-fresh), because
+  -- the fresh strike is the one the causal gate excludes at its own instant
+  -- (`clkRel > 0`, matching an anchored bank sample-for-sample). A [0, P)
+  -- read would zero the WHOLE tail stack for that one sample per bar — the
+  -- gate misfiring on the eternal train's oldest coordinate. Off the strike
+  -- samples the tick shift is a uniform ~2e-14 s lag — sub-quantization.
+  let clkRel := sub (relClockQ clkInt anchorSamples) (litI 1)
+  let incr := toIntE (roundE (div (lit 4294967296) (mul (litF pSec) .sampleRate)))
+  let thi := rshift clkRel (lit 32)
+  let tlo := bitAnd clkRel (lit 4294967295)
+  let phase := bitAnd (add (mul incr thi) (rshift (mul incr tlo) (lit 32))) (lit 4294967295)
+  add (toIntE (mul (toFloatE phase) (mul (litF pSec) .sampleRate))) (litI 1)
+
 /-- A modal bank as a pure `Sig` over the (already-warped) clock: shift each pole
     to its time-since-strike on the INTEGER clock (`relClockQ`, exact at any τ),
     sum `d^deg·e^{−σd}·(c_re·cos φ − c_im·sin φ)` over the modes with each φ
@@ -2052,6 +2086,81 @@ def modalBankTermPartitioned (plain : Array ModalMode) (paired : Array PairedMod
   ArrowTerm.arrUn
     (fun clkSig => add (lowerP plain clkSig anchor)
                        (modalBankSigTableDD paired clkSig anchor))
+    (ArrowTerm.clk c)
+
+-- ── The strike train: quotient clock × comb factor (the CF sequencer, tier 0) ──
+-- A periodically re-struck bank is NOT an event list: the infinite past of a
+-- period-P strike train sums, per pole, to the geometric factor 1/(1 − e^{λP})
+-- (a feedback-comb transfer function evaluated at the pole), read on the
+-- quotient clock d = (τ − anchor) mod P. The ramp-into-resonator patch is the
+-- J = 0 truncation of this (hard retrigger, the tail cut at the wrap — an
+-- artifact click); the comb factor is the J = ∞ completion: across the wrap
+-- the value steps by EXACTLY one fresh strike's onset
+-- (e^{λP}/(1−e^{λP}) + 1 = 1/(1−e^{λP})) — the physical transient — while
+-- every previous cycle rings through. Pattern (weights + intra-bar offsets)
+-- is authoring-level: each strike is the same combed bank at a shifted
+-- quotient anchor. Coefficients, not topology; offsets are free within the
+-- bar (microtiming is a phase factor, not a grid).
+
+/-- The comb factor `1/(1 − e^{λP})` for one mode, as s0 `CplxE`. σ may be
+    LIVE (the factor becomes an s0 expression of the slot — Stage0 hoists it,
+    the same lift discipline as every modal constant); ω must const-fold
+    (`none` otherwise — no served surface has a live modal ω). A baked σ
+    folds the factor to literals so `bankLandExp` sizes the landing for it —
+    which matters at the NEAR-SINGULARITY: a mode ringing at a harmonic of
+    the strike rate with small σP (ωP ≈ 2πk) builds resonantly under periodic
+    driving, the factor is large, and it lands in the amps where the landing
+    exponent sees it. (A live-σ factor leaves the amps unfoldable and the
+    landing falls back exactly as gauge output does.) -/
+def combFactorE (m : ModalMode) (pSec : Float) : Option CplxE := do
+  let wv ← sigConstF? m.omega
+  let eS := match sigConstF? m.sigma with
+    | some sv => litF (Float.exp (-(sv * pSec)))
+    | none => expSig (neg (mul m.sigma (litF pSec)))
+  let eLamP : CplxE := (mul eS (litF (Float.cos (wv * pSec))),
+                        mul eS (litF (Float.sin (wv * pSec))))
+  pure (cdivE (lit 1, lit 0) (csubE (lit 1, lit 0) eLamP))
+
+/-- Scale a bank's residues by the period-P comb factor (the strike train's
+    steady state). A mode whose ω does not fold keeps its bare amp — the
+    retrigger-without-overlap reading, stated (unreachable from served
+    surfaces, where modal ω always folds). -/
+def combScale (pSec : Float) (modes : Array ModalMode) : Array ModalMode :=
+  modes.map fun m =>
+    match combFactorE m pSec with
+    | some f => let a := cmulE m.ampE f; { m with cre := a.1, cim := a.2 }
+    | none => m
+
+/-- The strike train as a `Sig`: the combed bank read on the quotient clock,
+    summed over the bar's strikes `(offset seconds, weight)` — each strike is
+    the SAME combed bank at a shifted periodic anchor, so an N-strike bar
+    costs N bank reads. Banked/unrolled dispatch mirrors `modalBankTerm`;
+    the strike regions are sequential siblings, so the `idxId 0` reuse is
+    safe (the `modalBankSigPairTable` precedent). An empty strike list is
+    silence (the graceful-silence contract). -/
+def strikeTrainSig (modes : Array ModalMode) (clkInt anchorSamples : Sig)
+    (pSec : Float) (strikes : Array (Float × Float) := #[(0.0, 1.0)])
+    (count? : Option Sig := none) : Sig :=
+  let banked := bankIsUniform modes && (count?.isSome || banksTableEnabled)
+  let lower := if banked
+    then fun ms clk a => modalBankSigTable ms clk a count?
+    else fun ms clk a => modalBankSig ms clk a
+  let combed := combScale pSec modes
+  strikes.foldl (init := lit 0) fun acc (off, w) =>
+    let ms := combed.map fun m =>
+      { m with cre := mul (litF w) m.cre, cim := mul (litF w) m.cim }
+    let anchorK := add anchorSamples (mul (litF off) .sampleRate)
+    add acc (lower ms (relClockQuot clkInt anchorK pSec) (lit 0))
+
+/-- The strike train as a term: one `arrUn` at the clock leaf, so a warped
+    master clock warps the WHOLE train — tempo rubato reaches the strikes and
+    the tails through the same coordinate (swing later composes UPSTREAM of
+    the quotient, never inside it). -/
+def strikeTrainTerm (modes : Array ModalMode) (anchor : Sig) (c : Clock)
+    (pSec : Float) (strikes : Array (Float × Float) := #[(0.0, 1.0)])
+    (count? : Option Sig := none) : ArrowTerm :=
+  ArrowTerm.arrUn
+    (fun clkSig => strikeTrainSig modes clkSig anchor pSec strikes count?)
     (ArrowTerm.clk c)
 
 -- ── The DIRECTION operator: forward↔reverse crossfade ─────────────────────────

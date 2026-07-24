@@ -823,3 +823,80 @@ def runBanksColumnizeBail (_arena : Arena)
   else
     IO.println s!"  FAIL  banks-columnize-bail  {String.intercalate " · " fails.toList}"
     pure false
+
+-- ── The strike-comb gate (CF sequencer tier 0) ─────────────────────────────────
+
+private def relL2Comb (xa xb : Array Float) (lo hi : Nat) : Float := Id.run do
+  let mut nm := 0.0
+  let mut dn := 0.0
+  for i in [lo:hi] do
+    let d := xa[i]! - xb[i]!
+    nm := nm + d * d
+    dn := dn + xb[i]! * xb[i]!
+  return Float.sqrt (nm / (dn + 1e-300))
+
+open Tropical.EmitArrow in
+/-- THE STRIKE-COMB gate (the CF sequencer, tier 0). A periodically re-struck
+    bank rendered as ONE combed quotient read must equal the brute-force sum of
+    individually anchored strikes — the defining identity `Σ_j w·bank(τ − t_j)
+    = combFactor·bank((τ − anchor) mod P)`. Pinned:
+    (1) COMB ≡ BRUTE FORCE at an EXACT period (4096 samples ⇒ incr = 2²⁰, the
+        strike lattice on the sample grid, no quantization slack), with enough
+        pre-window strikes that the brute force's truncated past sits below
+        the compare floor. The bar carries TWO weighted strikes (offset 1536
+        samples, weight 0.6) — the pattern numerator (microtiming + accent)
+        rides the same identity.
+    (2) THE ETERNAL TRAIN — energy BEFORE the anchor: the quotient train was
+        always playing (anchor is a phase reference, not a start; universe
+        semantics — scrub anywhere).
+    (3) OVERLAP IS REAL — a brute force truncated to the in-window strikes
+        (no pre-history) must MISS by orders more than the full one: the comb
+        factor genuinely carries the previous bars' tails through the wrap
+        (the ramp-into-resonator patch is the truncation this completes). -/
+def runStrikeComb (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let sr := 44100.0
+  let pSamp := 4096.0
+  let pSec := pSamp / sr
+  let off2Samp := 1536.0
+  let mkBank (w : Float) : Array ModalMode :=
+    #[ ModalMode.hz (litF 223.0) (litF 15.0) (litF (0.5 * w)),
+       ModalMode.hz (litF 391.0) (litF 17.0) (litF (0.35 * w)),
+       ModalMode.hz (litF 667.0) (litF 19.0) (litF (0.3 * w)) ]
+  let nWin : Nat := 16384
+  let anchorF := 200.0
+  let comb := strikeTrainSig (mkBank 1.0) clockLit (lit 200) pSec
+    #[(0.0, 1.0), (off2Samp / sr, 0.6)]
+  -- brute force: anchored instances over strikes j ∈ [−16, 3] (pre-history to
+  -- the landing floor: e^{−15·0.0929·16} ≈ 2e-10) at both bar offsets
+  let bruteOver := fun (nPre : Nat) => Id.run do
+    let mut s : Sig := lit 0
+    for k in [0 : nPre + 4] do
+      let jF : Float := k.toFloat - nPre.toFloat
+      let base := anchorF + jF * pSamp
+      s := add s (modalBankSigTable (mkBank 1.0) clockLit (litF base))
+      s := add s (modalBankSigTable (mkBank 0.6) clockLit (litF (base + off2Samp)))
+    return s
+  match buildAndFinish (.ok (buildExprCarrier "strike_comb" comb arena)),
+        buildAndFinish (.ok (buildExprCarrier "strike_brute" (bruteOver 16) arena)),
+        buildAndFinish (.ok (buildExprCarrier "strike_trunc" (bruteOver 0) arena)) with
+  | .ok cp, .ok bp, .ok tp =>
+    match ← renderPlanSamples cp nWin, ← renderPlanSamples bp nWin,
+          ← renderPlanSamples tp nWin with
+    | .ok cS, .ok bS, .ok tS =>
+      let eFull := relL2Comb cS bS 0 nWin
+      let eTrunc := relL2Comb cS tS 0 nWin
+      let mut preE := 0.0
+      for i in [0:200] do preE := preE + cS[i]! * cS[i]!
+      let finite := cS.all (·.isFinite)
+      IO.println s!"strike comb (P = 4096 smp exact, 2-strike bar, 3-mode bank):"
+      IO.println s!"        comb ≡ brute(j≥−16) rel {eFull} · truncated brute(j≥0) misses by {eTrunc} · pre-anchor E {preE} · finite {finite}"
+      if finite && eFull < 1e-4 && eTrunc > 100.0 * eFull && eTrunc > 1e-3
+         && preE > 1e-9 then
+        passGate "strike-comb" s!"one combed quotient read ≡ 40 anchored strikes ({eFull}); the train is eternal (pre-anchor E {preE}); overlap genuinely carried (truncated brute off by {eTrunc})"
+      else
+        failGate "strike-comb" s!"eFull={eFull} eTrunc={eTrunc} preE={preE} finite={finite}"
+    | .error e, _, _ | _, .error e, _ | _, _, .error e =>
+      failGate "strike-comb" s!"render: {firstLine e}"
+  | .error e, _, _ | _, .error e, _ | _, _, .error e =>
+    failGate "strike-comb" s!"build: {firstLine e}"
