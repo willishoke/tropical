@@ -644,6 +644,197 @@ def residueComposeDD (voice reverb : Array ModalMode) : Array PairedMode :=
   voice.flatMap fun v => reverb.map fun r =>
     { lam := v.poleE, nu := r.poleE, c := cmulE v.ampE r.ampE }
 
+-- ── The EC/DD PARTITIONED compose (fork 3′ erasure, Phase 1) ──────────────────
+-- The compiler owns the EC-vs-DD choice PER COUPLING: a (λ, ν) pair routes to
+-- the fused paired atom when the collected `±c/Δ` representation would degrade,
+-- and stays collected otherwise. Everything decides at compile time on
+-- const-folded poles/amps; anything unmeasurable (live pole, live amp) stays
+-- collected in v1 — Phase 2 classifies live poles over their declared interval.
+
+/-- θ_acc — the accuracy lens (rad/s), frozen from `demos/ecdd_partition.py`
+    (2026-07-23). The measured mechanism is the FREQUENCY GRID, not float64
+    cancellation: rotator increments quantize ω at `2π·SR/2³² ≈ 6.5e-5 rad/s`,
+    so the collected form renders a grid-quantized Δ — below one quantum the two
+    increments coincide and the `±c/Δ` residues cancel to exact silence, and the
+    mis-rendered beat keeps it decades over the gate floor up to ~0.05 rad/s.
+    The paired body's series branch carries RAW Δ and holds ~2.4e-6 throughout.
+    Frozen at the advantage crossing 4.6e-2 × 10 (generous toward DD — DD is
+    accurate everywhere, so θ is a COST boundary, not a correctness boundary).
+
+    RATE PROVENANCE (the constant is a function of the datapath, not physics):
+    frozen AT SR = 44100 with the 2³² rotator — the grid quantum `2π·SR/2³²`
+    is LINEAR in SR and the advantage crossing tracks it, so the 44.1k–96k
+    family moves the crossing by ≤ ~2.2×, well inside the ×10 margin. If the
+    rotator width or the served rate family ever changes, re-freeze off the
+    cockpit's D_p1c sweep (`demos/ecdd_partition.py`) rather than trusting
+    the margin. -/
+def ecddThetaAcc : Float := 0.4642
+
+/-- The range lens: route when the collected ringing weight `|a·r|/|Δ|` exceeds
+    the Q4.28 magnitude ceiling 8 with a 2× margin. Amp-dependent — `|Δ|` alone
+    is not the criterion (cockpit D_p2: binding for `|a·r| ≳ 1.9`).
+
+    SERVICE REGION (the cap interplay, stated — it is NOT the whole lens): the
+    paired range cap admits only `|c|·min(2/|Δ|, 1/(e·σ_min)) < 8`, and the
+    `2/|Δ|` arm of that min is EXACTLY the complement of this lens
+    (`|c|·2/|Δ| < 8 ⟺ |c|/|Δ| < 4`). So a rail-fired coupling can only route
+    through the DAMPING arm: `|Δ| < 2e·σ_min` (the damping bound is the binding
+    sup) and `|c| < 8e·σ_min` (it clears). Well-damped heavy couplings route;
+    a lightly-damped heavy coupling is `CouplingRoute.refused` — a STATED
+    exclusion, never a silent fallback. -/
+def ecddRailCeil : Float := 4.0
+
+/-- The paired atom's own build-time range cap: per pair, `|Wc| ≤ |c|·sup_d
+    |e^{νd}·d·cexpm1(Δd)| ≤ |c|·min(2/|Δ|, 1/(e·σ_min))` (the sup the
+    remainder-handoff deferred until the DD wiring landed — this is that
+    landing). A coupling whose bound exceeds the cap is NOT routed — it stays
+    collected at the status-quo floor (wrong near coincidence), and the refusal
+    is FIRST-CLASS (`CouplingRoute.refused`): the merged seam atom's admission
+    excludes it rather than certifying the collected floor there. The scale arm
+    is the recorded route out if a real patch ever lands in the refusal region.
+    Cap 8 = the plain Q4.28 ceiling, 4× under the DD site's i64 rail of 32. -/
+def ecddPairCap : Float := 8.0
+
+/-- The σ INTERVAL a mode's damping ranges over: a const σ is its own point
+    interval; a LIVE σ with a declared `sigmaRange` classifies over the knob
+    span (WS-LP's build-time-over-the-declared-interval discipline); a live σ
+    without a range is unclassifiable (`none` ⇒ the coupling stays collected). -/
+def sigmaInterval? (m : ModalMode) : Option (Float × Float) :=
+  match sigConstF? m.sigma with
+  | some s => some (s, s)
+  | none => m.sigmaRange
+
+/-- A mode's pole with a LIVE σ CLAMPED to its declared interval (coefficient-
+    time, the WS-LP kernel-clamp precedent) — what makes the paired route's
+    build-time range cap sound by construction even if the host drives the knob
+    out of its declared span. A const σ passes through untouched. Production
+    unit modes arrive PRE-clamped (`clampSigmas` at graph ingestion), making
+    this a value-identical second wrap there; it stays as defense in depth for
+    direct callers (fixtures, the seam sweep) that own their own discipline. -/
+def clampedPoleE (m : ModalMode) : CplxE :=
+  match sigConstF? m.sigma, m.sigmaRange with
+  | none, some (lo, hi) => (neg (clampE m.sigma (litF lo) (litF hi)), m.omega)
+  | _, _ => m.poleE
+
+/-- Clamp every LIVE σ with a declared interval to that interval, in-kernel —
+    the UNIFORM-BANK extension of `clampedPoleE`, applied to unit modes at
+    graph ingestion (`lowerModal`'s source/reverb arms). Two things it buys:
+    (1) CONSISTENCY under knob overdrive — the collected modes and the paired
+    atoms of one bank saturate TOGETHER when the host drives a knob out of its
+    declared span, instead of the paired lanes clamping while the collected
+    lanes follow the raw knob (an internally inconsistent bank); (2) COLD
+    soundness — `couplingHot` decides cold at min |Δ| over the DECLARED
+    interval, so an unclamped out-of-span drive could dip a cold coupling's
+    |Δ| under θ_acc while it stays collected; the clamp makes the declared
+    interval the enforced one. `sigmaRange` is kept on the mode (the
+    classifiers still read it); the wrap is value-identity for any in-span
+    drive, so in-range behavior is bit-identical. Const σ passes untouched
+    (the cold byte-identity discipline). -/
+def clampSigmas (ms : Array ModalMode) : Array ModalMode :=
+  ms.map fun m =>
+    match sigConstF? m.sigma, m.sigmaRange with
+    | none, some (lo, hi) => { m with sigma := clampE m.sigma (litF lo) (litF hi) }
+    | _, _ => m
+
+/-- Where a (v, r) coupling lands — the routing verdict with the paired range
+    cap made a FIRST-CLASS outcome rather than a silent fallback, so the seam
+    apparatus can state the refusal region as admission instead of certifying
+    the collected floor over it. -/
+inductive CouplingRoute where
+  /-- Neither lens fires (or the coupling is unmeasurable at build time): the
+      collected `±c/Δ` representation is accurate — stays in the Cauchy sums. -/
+  | cold
+  /-- A lens fires and the paired range cap clears: one fused `PairedMode`. -/
+  | paired
+  /-- A lens fires but the pair's landed sup exceeds `ecddPairCap`: stays
+      collected at the status-quo floor (wrong near coincidence) — a STATED
+      exclusion, out of the merged atom's certified region. Reachable only at
+      extreme Q (`σ_min < |c|/(8e)` with a fired lens — rt60 of minutes at
+      unit amps); the scale arm is the recorded route out. -/
+  | refused
+deriving DecidableEq
+
+/-- The per-coupling routing verdict — compile-time only. σ may be LIVE with a
+    declared range (Phase 2): the lenses evaluate at min |Δ| over the interval —
+    a coupling whose interval DIPS under θ takes DD throughout the knob span, so
+    no runtime select ever exists (D2; the WS-LP phase-3a pattern). ω and amps
+    must const-fold, both modes deg-0; anything else is `cold`. A lens fires
+    (accuracy | range) ⇒ `paired` if the paired range cap clears at the
+    interval's worst point, else `refused`. -/
+def classifyCoupling (v r : ModalMode) : CouplingRoute :=
+  if !(v.deg == 0 && r.deg == 0) then .cold else
+  Id.run do
+    let some (svLo, svHi) := sigmaInterval? v | return .cold
+    let some (srLo, srHi) := sigmaInterval? r | return .cold
+    let some wv := sigConstF? v.omega | return .cold
+    let some wr := sigConstF? r.omega | return .cold
+    let some ar := sigConstF? v.cre | return .cold
+    let some ai := sigConstF? v.cim | return .cold
+    let some rr := sigConstF? r.cre | return .cold
+    let some ri := sigConstF? r.cim | return .cold
+    -- min |Δ| over the σ interval(s): the span distance (0 when they overlap —
+    -- the dipper), ω exact. Const σ degenerates to the point distance.
+    let sepLo := if svLo < srLo then srLo else svLo
+    let sepHi := if svHi < srHi then srHi else svHi
+    let dSig := if sepLo > sepHi then sepLo - sepHi else 0.0
+    let dAbs := Float.sqrt (dSig * dSig + (wv - wr) * (wv - wr))
+    let cAbs := Float.sqrt (ar * ar + ai * ai) * Float.sqrt (rr * rr + ri * ri)
+    if !(dAbs < ecddThetaAcc || (dAbs > 0.0 && cAbs / dAbs > ecddRailCeil)) then
+      return .cold
+    -- the paired range cap: sup of the divided-difference kernel over the
+    -- WHOLE interval — σ_min at the spans' low edge, |Δ| at its minimum
+    -- (sound: the paired pole clamps to the interval, `clampedPoleE`).
+    -- `min(sup₁, sup₂) < cap ⟺ either bound clears` — no infinity sentinels.
+    let smin := if svLo < srLo then svLo else srLo
+    let capOk := (dAbs > 0.0 && cAbs * (2.0 / dAbs) < ecddPairCap)
+              || (smin > 0.0 && cAbs * (1.0 / (Float.exp 1.0 * smin)) < ecddPairCap)
+    return if capOk then .paired else .refused
+
+/-- `true` ⇒ the (v, r) coupling leaves the collected sums and becomes one
+    `PairedMode` (`classifyCoupling = .paired`). -/
+def couplingHot (v r : ModalMode) : Bool :=
+  classifyCoupling v r == .paired
+
+/-- `true` ⇒ a lens fired but the paired range cap refused the coupling: it
+    renders collected at the status-quo floor. The merged seam atom's admission
+    predicate is the negation of this — the refusal is stated, not certified. -/
+def couplingRefused (v r : ModalMode) : Bool :=
+  classifyCoupling v r == .refused
+
+/-- The PARTITIONED compose — the one `residueCompose` seam. Cold couplings take
+    `residueComposeEC`'s collected shapes; hot couplings (per `couplingHot`)
+    leave the Cauchy sums (BOTH halves — the forced amp's `r/(λ−ν)` term and the
+    ringing amp's `a/(λ−ν)` term migrate together; the split is EXACT residue
+    algebra, not an approximation) and land as fused `PairedMode` atoms.
+    When NOTHING is hot the result is `residueComposeEC` VERBATIM (the same
+    call), so the cold path is byte-identical to the pre-partition compiler —
+    the erasure gate's discipline. -/
+def residueComposePartitioned (voice reverb : Array ModalMode) :
+    Array ModalMode × Array PairedMode := Id.run do
+  if voice.isEmpty then return (#[], #[])
+  let hotM := voice.map fun v => reverb.map fun r => couplingHot v r
+  if hotM.all (·.all (!·)) then return (residueComposeEC voice reverb, #[])
+  let isHot := fun (i q : Nat) => (hotM[i]!)[q]!
+  let forced := voice.mapIdx fun i v =>
+    let Hlam := reverb.zipIdx.foldl (init := ((lit 0, lit 0) : CplxE)) fun s (r, q) =>
+      if isHot i q then s
+      else caddE s (cdivE r.ampE (csubE v.poleE r.poleE))
+    modeOfE v.poleE (cmulE v.ampE Hlam)
+  let ringing := reverb.mapIdx fun q r =>
+    let coupling := voice.zipIdx.foldl (init := ((lit 0, lit 0) : CplxE)) fun s (v, i) =>
+      if isHot i q then s
+      else caddE s (cdivE v.ampE (csubE v.poleE r.poleE))
+    modeOfE r.poleE (cnegE (cmulE r.ampE coupling))
+  let mut paired : Array PairedMode := #[]
+  for (v, i) in voice.zipIdx do
+    for (r, q) in reverb.zipIdx do
+      if isHot i q then
+        -- live-σ poles enter the paired atom CLAMPED to their declared
+        -- interval, keeping the routing's range cap sound (Phase 2)
+        paired := paired.push
+          { lam := clampedPoleE v, nu := clampedPoleE r, c := cmulE v.ampE r.ampE }
+  return (forced ++ ringing, paired)
+
 /-- Multiply a `CplxE` by a real `Sig`. -/
 def scaleRealE (s : Sig) (z : CplxE) : CplxE := (mul s z.1, mul s z.2)
 
@@ -714,12 +905,13 @@ def bankFoldPaired (cols : PairedBankCols) (body : PairedModeSym → Sig) : Sig 
     `|Wc|·2²⁸·2³⁰ < 2⁶³` ⇒ **per mode `|Wc| < 32`**. This is a FACTOR site: `Wc`
     carries the per-sample `d·cexpm1(Δd)` secular, which is UNBOUNDED by a
     coefficient-time `max|A|` (it needs the bake-time sup `min(2/|Δ|, 1/(e·σ_min))`),
-    so the plain `bankLandExp` does NOT reach it. **Reachable max**: not bounded by
-    admission (a pole-DISTANCE test). **DEFERRED, not fixed** (remainder-handoff §1):
-    this is a fixture-only site — no Playground surface routes through
-    `modalBankSigTableDD` (the DD dispatch is never wired into `lowerModal`), so it
-    lands nothing in production. Option E covers it when the DD wiring lands, with
-    its own measured sup and witness, per the role-split rule. `envDf`
+    so the plain `bankLandExp` does NOT reach it. **Reachable max**: bounded at the
+    ROUTING site, not here — the EC/DD partition (`couplingHot`) admits a coupling
+    to this body only when the build-time sup `|c|·min(2/|Δ|, 1/(e·σ_min)) <
+    ecddPairCap = 8` clears (4× under this rail; a coupling over the cap stays
+    collected — reject, per the remainder-handoff's deferred item, now landed).
+    Direct callers outside the partition (fixtures, the seam sweep) own their own
+    amp discipline. `envDf`
     and `e^z` stay float (never landed); `z`'s imaginary part uses raw `ω_d·dSec`
     (the divisor needs only relative precision; the rotator phase is integer-reduced,
     consistent because `e^z` is periodic). -/
@@ -816,6 +1008,21 @@ def cOneE : CplxE := (lit 1, lit 0)
     the constant is computed by the SAME arithmetic the lane renders with. -/
 def bloomM1E (invA : Array CplxE) (z : CplxE) : CplxE :=
   invA.foldr (fun ik h => caddE cOneE (cmulE (cmulE z ik) h)) cOneE
+
+/-- The fixed-depth bottom-up continued fraction `CF(z) = Γ(a,z)eᶻz^{−a}` over
+    the emitted constants `cfB` (b-terms, `z` added per level) and `cfN`
+    (numerators) — THE CF lane's expression, shared verbatim by the per-sample
+    lane in `bloomComposedSig` (z live) and the live-pole lift's `CF(κ)`
+    constant in `bloomCompose` (z = κ, s0), so the constant is computed by the
+    SAME arithmetic the lane renders with (WS-LP phase 2, `bloomM1E`'s twin).
+    Requires `cfB.size = cfN.size + 1`. -/
+def bloomCFE (cfB cfN : Array CplxE) (z : CplxE) : CplxE := Id.run do
+  let kk := cfN.size
+  let mut h : CplxE := caddE z cfB[kk]!
+  for jr in [0:kk] do
+    let j := kk - 1 - jr
+    h := csubE (caddE z cfB[j]!) (cdivE cfN[j]! h)
+  return cdivE cOneE h
 
 /-- Is this `Sig` a pure s0 value — a function of knob slots and constants only
     (no `τ`/tick, no input, no bank machinery)? The live-pole lift's admission
@@ -1218,34 +1425,68 @@ def bloomAdmitsPair (mu nu : CplxB) (B g : Float) : Bool :=
   | .excludedDepth => false
   | _ => true
 
-/-- WS-LP Phase 1: classify a live-σ pair over its whole σ interval — `some
-    nDepth` iff the pair is `serOnly` at EVERY σ ∈ `[sigLo, sigHi]`, else `none`
-    (the pair drops gracefully; region-crossing pairs are Phase 3's union emit).
-    Only `Re a = (σ_μ − σ_ν)/g` moves with σ_ν (`Im a` and `κ = μ·B` are
-    σ_ν-independent), so the two region conditions reduce to interval minima of
-    `|a + c|` along a horizontal segment — attained at `Re a = −c` clamped to the
-    segment. The depth is sized at the interval's worst case: `bloomM1`'s
-    convergence slows as `|a+1|` falls toward `|κ|`, so sample both endpoints
-    and the closest approach to `−1`; same `+8` guard and `≤ 300` cap as the
-    baked classifier. -/
-def classifyBloomPairLiveSer (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
-    (B g : Float) : Option Nat := Id.run do
+/-- The two regions the LIVE classifier can emit — a two-constructor sum, so
+    `bloomCompose`'s match is exhaustive BY TYPE rather than by an
+    "unreachable" comment (the coincident regions and the depth exclusion are
+    not representable here: they return `none` and stay baked-only). The
+    baked classifier keeps the full five-region `SeamRegion`. -/
+inductive LiveRegion where
+  | serOnly
+  | crossing
+
+/-- WS-LP: classify a live-σ pair over its whole σ interval — `some (region,
+    nDepth, kDepth)` iff the pair sits in ONE non-coincident region at EVERY
+    σ ∈ `[sigLo, sigHi]` (`serOnly` throughout, phase 1, or `crossing`
+    throughout, phase 2), else `none` (the pair drops gracefully; a pair that
+    CHANGES region across the interval is phase 3's union emit, and the
+    coincident regions are with it). Only `Re a = (σ_μ − σ_ν)/g` moves with σ_ν
+    (`Im a` and `κ = μ·B` are σ_ν-independent), so the region conditions reduce
+    to interval extrema of `|a + c|` along a horizontal segment — the min at
+    `Re a = −c` clamped to the segment, the max at an endpoint (convexity).
+    Depths are sized at the interval's worst case (both endpoints + the closest
+    approach to `−1`, where `|a+1|` bottoms out), with the baked classifier's
+    `zBnd` per region (κ itself for serOnly; the branch-boundary `|z| = |a+1|`
+    for crossing), same `+8` guard and `≤ 300` cap. -/
+def classifyBloomPairLive (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
+    (B g : Float) : Option (LiveRegion × Nat × Nat) := Id.run do
   let kappa := mu.scale B
   let imA := (nuOmega - mu.im) / g
   -- Re a = (−σ_ν − Re μ)/g, decreasing in σ_ν
   let reLo := (-sigHi - mu.re) / g
   let reHi := (-sigLo - mu.re) / g
+  let absAt := fun (re c : Float) => Float.sqrt ((re + c) * (re + c) + imA * imA)
   let minAbsAt := fun (c : Float) =>
-    let t := max reLo (min reHi (-c))
-    Float.sqrt ((t + c) * (t + c) + imA * imA)
-  -- ¬coincident throughout (min |a| ≥ ½) ∧ serOnly throughout (min |a+1| ≥ |κ|)
+    absAt (max reLo (min reHi (-c))) c
+  -- ¬coincident throughout: min |a| ≥ ½ (the τ·e coincidence stays baked-only)
   if minAbsAt 0.0 < 0.5 then return none
-  if minAbsAt 1.0 < kappa.abs then return none
-  let depthAt := fun (re : Float) => (bloomM1 ⟨re, imA⟩ kappa).2
-  let tStar := max reLo (min reHi (-1.0))
-  let nRaw := max (depthAt reLo) (max (depthAt reHi) (depthAt tStar))
-  if nRaw + 8 > 300 then return none
-  return some (nRaw + 8)
+  let samples := #[reLo, reHi, max reLo (min reHi (-1.0))]
+  if minAbsAt 1.0 ≥ kappa.abs then
+    -- serOnly throughout: |a+1| never falls below |κ|
+    let nRaw := samples.foldl (fun m re => max m (bloomM1 ⟨re, imA⟩ kappa).2) 0
+    if nRaw + 8 > 300 then return none
+    return some (.serOnly, nRaw + 8, 0)
+  -- |a+1| dips below |κ| somewhere: crossing-throughout OR straddling (phase 3a
+  -- — the union COLLAPSES onto the crossing lanes: on a serOnly-side config
+  -- `dSwitch < 0`, the per-sample select sits on the series lane from d = 0,
+  -- and the bridge identity makes its `Γ★ − CF(κ)/g` constant EQUAL serOnly's
+  -- `mK/(ν−μ)`; f64-accurate over the whole interval because a straddling pair
+  -- has `|Im a| < |κ|` by construction, which keeps the CF at z = κ inside its
+  -- convergence territory — probed at ≤ 7.5e-13 vs mpmath incl. the |Im a| ≈
+  -- |κ| edge (`demos/wslp_union_probe.py`; the DEEP-serOnly regime |Im a| ≫
+  -- |κ| fails at rel ~50 there, which is why serOnly-throughout keeps its own
+  -- arm). Only the depth sizing differs: a straddling pair's series lane runs
+  -- from d = 0 on its serOnly side (|z| up to |κ|), so size at z = κ;
+  -- crossing-throughout keeps the branch-boundary `zBnd` (phase 2, unchanged).
+  let straddles := max (absAt reLo 1.0) (absAt reHi 1.0) ≥ kappa.abs
+  let mut nRaw := 0
+  let mut kRaw := 0
+  for re in samples do
+    let aC : CplxB := ⟨re, imA⟩
+    let zBnd := kappa.scale ((aC.add ⟨1, 0⟩).abs / kappa.abs)
+    nRaw := max nRaw (bloomM1 aC (if straddles then kappa else zBnd)).2
+    kRaw := max kRaw (bloomCF aC zBnd).2
+  if nRaw + 8 > 300 || kRaw + 8 > 300 then return none
+  return some (.crossing, nRaw + 8, kRaw + 8)
 
 /-- `bloomedVoice ⋙ reverb` as Γ-bridge pairs — the residue composition ACROSS a
     pitch-bloom warp (`B = β·scale/g` seconds of total clock advance, `g` the
@@ -1292,9 +1533,9 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
         -- pre-WS-LP baked-pole fallback (`none` ⇒ the caller's bare bloom).
         let some (sLo, sHi) := r.sigmaRange | return none
         if !(sigIsS0 r.sigma) then return none
-        match classifyBloomPairLiveSer mu rOm sLo sHi B g with
-        | none => continue   -- not serOnly over the whole interval: graceful per-pair drop (Phase 3 widens)
-        | some nDepth =>
+        match classifyBloomPairLive mu rOm sLo sHi B g with
+        | none => continue   -- coincident / region-changing over the interval: graceful per-pair drop (Phase 3 widens)
+        | some (region, nDepth, kDepth) =>
           -- the lift: every baked constant re-expressed as an s0 `CplxE` of the
           -- live pole. The clamp ENFORCES the classified interval in-kernel, so
           -- an out-of-range slot write saturates the crossing's σ instead of
@@ -1306,14 +1547,41 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
           let invNuMuE := cdivE cOneE dNuMu
           let invA := (Array.range nDepth).map (fun k =>
             cdivE cOneE (caddE aE (litF (k + 1).toFloat, lit 0)))
-          let kE := cplxLitE (mu.scale B)
-          out := out.push {
-            muSigma := litF vSig, muOmega := litF vOm
-            nuSigma := sigC, nuOmega := litF rOm
-            bloomB := B, gRate := g, c, kappa := kE
-            k1Ser := cmulE (bloomM1E invA kE) invNuMuE
-            k1Cf := (lit 0, lit 0), fSer := cnegE invNuMuE
-            dSwitch := lit 0, invA, cfB := #[], cfN := #[] }
+          let kappaB := mu.scale B
+          let kE := cplxLitE kappaB
+          match region with
+          | .serOnly =>
+            out := out.push {
+              muSigma := litF vSig, muOmega := litF vOm
+              nuSigma := sigC, nuOmega := litF rOm
+              bloomB := B, gRate := g, c, kappa := kE
+              k1Ser := cmulE (bloomM1E invA kE) invNuMuE
+              k1Cf := (lit 0, lit 0), fSer := cnegE invNuMuE
+              dSwitch := lit 0, invA, cfB := #[], cfN := #[] }
+          | .crossing =>
+            -- WS-LP phase 2: the CF lane's constants as s0 `CplxE` of the live
+            -- pole — `cfB`/`cfN` linear in `a`, `CF(κ)` by the SAME emitted
+            -- fraction the lane renders with (`bloomCFE` at z = κ), the bridge
+            -- constant by the emitted `Γ★` (`bloomGammaStarE`, phase 0), and
+            -- `dSwitch = (ln|κ| − ½·ln|a+1|²)/g` via `logSig` (the `clogE`
+            -- modulus form — no sqrt in the vocabulary needed).
+            let cfB := (Array.range (kDepth + 1)).map (fun j =>
+              ((sub (litF (2 * j + 1).toFloat) aE.1, neg aE.2) : CplxE))
+            let cfN := (Array.range kDepth).map (fun j =>
+              let jf := cplxLitE ⟨(j + 1).toFloat, 0⟩
+              cmulE jf (csubE jf aE))
+            let cfK := bloomCFE cfB cfN kE
+            let cfOverG : CplxE := (div cfK.1 (litF g), div cfK.2 (litF g))
+            let aP1 := caddE aE cOneE
+            let dSwitch := div (sub (litF (Float.log kappaB.abs))
+              (mul (lit 5 1) (logSig (add (mul aP1.1 aP1.1) (mul aP1.2 aP1.2))))) (litF g)
+            out := out.push {
+              muSigma := litF vSig, muOmega := litF vOm
+              nuSigma := sigC, nuOmega := litF rOm
+              bloomB := B, gRate := g, c, kappa := kE
+              k1Ser := csubE (bloomGammaStarE aE kE (litF g)) cfOverG
+              k1Cf := cnegE cfOverG, fSer := cnegE invNuMuE
+              dSwitch, invA, cfB, cfN }
       | some rSig =>
         let nu : CplxB := ⟨-rSig, rOm⟩
         -- the shared classifier (WS-CL): `excludedDepth` ⇒ this pair is out of scope
@@ -1466,15 +1734,10 @@ def bloomComposedSig (pairs : Array BloomPair) (clkInt anchorSamples : Sig) : Si
   let land := fun (env : Sig) (w : CplxE) (ph : Sig) =>
     rshift (sub (mul (toIntE (mul (mul env w.1) (lit 268435456))) (fixedCosCycSig ph))
                 (mul (toIntE (mul (mul env w.2) (lit 268435456))) (fixedSinCycSig ph))) (lit 28)
-  -- the per-sample continued fraction `CF(z) = Γ(a,z)eᶻz^{−a}` (bottom-up, fixed
-  -- depth), shared by the crossing and coincident branches (both large-z sides).
-  let cfEnv := fun (p : BloomPair) (z : CplxE) => Id.run do
-    let kk := p.cfN.size
-    let mut h : CplxE := caddE z p.cfB[kk]!
-    for jr in [0:kk] do
-      let j := kk - 1 - jr
-      h := csubE (caddE z p.cfB[j]!) (cdivE p.cfN[j]! h)
-    return cdivE one h
+  -- the per-sample continued fraction `CF(z) = Γ(a,z)eᶻz^{−a}` (`bloomCFE`,
+  -- shared with the live-pole lift's CF(κ) constant), used by the crossing and
+  -- coincident branches (both large-z sides).
+  let cfEnv := fun (p : BloomPair) (z : CplxE) => bloomCFE p.cfB p.cfN z
   let bankQ := pairs.foldl (fun acc p =>
     let eg := expSig (neg (mul (litF p.gRate) dPos))
     let z : CplxE := (mul p.kappa.1 eg, mul p.kappa.2 eg)
@@ -1771,6 +2034,25 @@ def modalBankTerm (modes : Array ModalMode) (anchor : Sig) (c : Clock)
     then fun ms clk a => modalBankSigTable ms clk a count?
     else fun ms clk a => modalBankSig ms clk a
   ArrowTerm.arrUn (fun clkSig => lower modes clkSig anchor) (ArrowTerm.clk c)
+
+/-- The PARTITIONED bank: the collected component through `modalBankTerm`'s
+    exact lowering plus the paired component (`modalBankSigTableDD`) summed at
+    the SAME clock leaf — one `arrUn`, so warps/scrub reach both bodies through
+    the shared clock identically. `paired = #[]` falls through to
+    `modalBankTerm` VERBATIM (the byte-identity discipline: a cold partition
+    emits today's term). The two bank regions are sequential siblings, so the
+    `idxId 0` reuse is safe (the `modalBankSigPairTable` precedent). -/
+def modalBankTermPartitioned (plain : Array ModalMode) (paired : Array PairedMode)
+    (anchor : Sig) (c : Clock) (count? : Option Sig := none) : ArrowTerm :=
+  if paired.isEmpty then modalBankTerm plain anchor c count? else
+  let banked := bankIsUniform plain && (count?.isSome || banksTableEnabled)
+  let lowerP := if banked
+    then fun ms clk a => modalBankSigTable ms clk a count?
+    else fun ms clk a => modalBankSig ms clk a
+  ArrowTerm.arrUn
+    (fun clkSig => add (lowerP plain clkSig anchor)
+                       (modalBankSigTableDD paired clkSig anchor))
+    (ArrowTerm.clk c)
 
 -- ── The DIRECTION operator: forward↔reverse crossfade ─────────────────────────
 -- A bank's reading DIRECTION crossfades between the CAUSAL tail (energy at d>0, a

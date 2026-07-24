@@ -191,67 +191,87 @@ private def SeamAtom.oracleAdmits (atom : SeamAtom) : SeamMode → SeamMode → 
 
 private def idWarp : Float → Float := fun s => s
 
-/-- `residueComposeEC` — the collected residue bank (`voice ⋙ reverb`, m+n
-    modes), realized through the default banked lowering. Total composition; the
-    admission predicate marks where EC's `1/Δ` residue stays ACCURATE — below it
-    is `residueComposeDD`'s region, not EC's promise (passive exclusion).
+/-- `residueCompose` — THE one compose seam (fork 3′ erasure). The EC and DD
+    atoms MERGED: the realization is the PARTITIONED compose
+    (`residueComposePartitioned` — cold couplings collected, hot couplings
+    routed to the paired DD body by `couplingHot`, decided at build time), and
+    the admission region is the UNION of the two half-regions the predecessors
+    certified MINUS the stated cap refusal (`couplingRefused`: a lens fired but
+    the paired range cap rejected the coupling back to the collected floor —
+    reachable only at extreme Q, and excluded here rather than certified). The
+    epistemic win this sprint exists for: the apparatus stops certifying two
+    half-regions with a folklore boundary and certifies one whole, with its one
+    true edge stated as admission; the old EC exclusion interior (`|a·r/Δ| ≥ 8`)
+    is now ordinary served territory with hard probes inside it.
 
-    RE-DERIVED (option E, the modal-datapath rail fix). This predicate ONCE
-    conflated two boundaries under one `|a·r/Δ| < 8` threshold: the i64 Q4.28
-    WRAP (a collected weight past 32 — `modalBankSigTable`'s landing) and the
-    near-coincidence ACCURACY floor (EC's `1/Δ` forms two huge opposite-sign
-    residues whose landed cancellation loses precision). Option E's per-bank
-    exponent (`bankLandExp`) removed the wrap for ALL |A|, so this predicate no
-    longer guards it — that boundary is now covered on the PRODUCTION path by the
-    `modal-rail`/`modal-rail-dir` witnesses (the real gesture, stronger than a
-    sweep probe). What remains is the accuracy boundary, and that is genuinely
-    PER-PAIR-LOCAL — accuracy degrades when ONE voice pole nears ONE room pole
-    (`λ_j → ν` ⇒ residue `a_j·r/(λ_j−ν) → ∞`, its cancellation error growing with
-    the landed magnitude even at zero wrap), unlike the wrap which was collective.
-    So the rail doc's collected-sum unsoundness applied to the WRAP (now fixed);
-    the per-pair form is SOUND for the accuracy purpose it now serves alone. The
-    `8` stays as the empirical EC-accurate edge (where DD takes over), no longer
-    a Q4.28-headroom number. -/
-private def ecAtom : SeamAtom :=
-  { name := "residueEC"
+    History (kept because the boundary's meaning has flipped twice): the old EC
+    atom's `|a·r/Δ| < 8` admission once guarded the i64 Q4.28 wrap, then —
+    after option E's per-bank exponent removed the wrap — the near-coincidence
+    accuracy floor. It is now the compiler's own ROUTING boundary
+    (`ecddRailCeil`, with margin), so the sweep no longer states it as
+    admission at all: both sides are served, each by its correct
+    representation, and the probes assert accuracy on both. -/
+private def composeAtom : SeamAtom :=
+  { name := "residueCompose"
     phi := idWarp
-    realize := fun v r => modalBankSigTable (residueComposeEC (v.map (·.toModal)) (r.map (·.toModal))) clockLit anchorSig
-    admitsPair := fun v r =>
-      -- EC's accuracy edge: the per-pair 1/Δ residue below DD's coincidence region
-      -- (`|a·r/Δ| < 8`). NOT a wrap bound — option E removed that (see the header).
-      let dpole := (v.pole.sub r.pole).abs
-      let amp := (v.amp.mul r.amp).abs
-      dpole * 8.0 > amp
+    realize := fun v r =>
+      let (plain, paired) :=
+        residueComposePartitioned (v.map (·.toModal)) (r.map (·.toModal))
+      let base := modalBankSigTable plain clockLit anchorSig
+      if paired.isEmpty then base
+      else add base (modalBankSigTableDD paired clockLit anchorSig)
+    -- the UNION admission minus the STATED cap refusal. The old EC atom
+    -- admitted `|a·r/Δ| < 8` and passively excluded the rest; the old DD atom
+    -- was total; the merged seam serves everything it routes (per coupling,
+    -- `couplingHot`) and REFUSES a lens-fired coupling the paired range cap
+    -- rejects (`couplingRefused` — it renders collected at the status-quo
+    -- floor, wrong near coincidence, so certifying it would be false). Passive
+    -- exclusion: the refused pair still renders; it is out of contract here
+    -- and pinned structurally by the ecdd-partition gate.
+    admitsPair := fun v r => !couplingRefused v.toModal r.toModal
     activeExclusion := false
+    -- one snr: both routes' floors sit under 2e-4 at this window (the trap
+    -- note about region-dependent error models is satisfied by construction —
+    -- if a route's floor ever rises past the shared snr, the probes on that
+    -- side fail loudly rather than silently averaging).
     snr := 2e-4
-    interior := (Array.range 4).map (fun c =>
-      (#[haltonMode (c*10+1) 220 900, haltonMode (c*10+2) 220 900],
-       #[haltonMode (c*10+3) 1500 3300, haltonMode (c*10+4) 1500 3300]))
+    interior :=
+      -- the old EC interiors (separated pairs — all route collected) …
+      (Array.range 4).map (fun c =>
+        (#[haltonMode (c*10+1) 220 900, haltonMode (c*10+2) 220 900],
+         #[haltonMode (c*10+3) 1500 3300, haltonMode (c*10+4) 1500 3300]))
+      -- … plus the old DD interiors (near-coincident offsets — these straddle
+      -- θ_acc, so the sweep exercises BOTH sides of the routing boundary).
+      ++ (Array.range 4).map (fun c =>
+        let vo := #[haltonMode (c*10+1) 400 1200, haltonMode (c*10+2) 400 1200]
+        let off := 0.6 * haltonF 2 (c+1)
+        (vo, vo.map (fun m => { m with omega := m.omega + tp * off, sigma := m.sigma + 0.1 })))
     boundary :=
-      -- two poles near the coincidence floor: same freq, σ apart by ~0.6 (|Δ| ≈
-      -- 0.6, |a·r| ≈ 0.5 ⇒ admitted, |a·r/Δ| ≈ 0.8 < 8) — the accuracy edge.
+      -- the old EC accuracy edge (|Δ| ≈ 0.6 > θ_acc, |a·r/Δ| < 4 — still cold,
+      -- the collected route's regression probes) …
       #[ (mkMode 800 0.4 0.8, { sigma := 1.0, omega := tp * 800, are := 0.6 })
-       , (mkMode 500 0.5 0.7, { sigma := 1.1, omega := tp * 500, are := 0.7 }) ] }
-
-/-- `residueComposeDD` — the fused divided-difference paired bank (`m·n` paired
-    modes; the `cexpm1` limit is the τ·e resonance, no branch). TOTAL admission
-    (it exists precisely to be accurate through coincidence). -/
-private def ddAtom : SeamAtom :=
-  { name := "residueDD"
-    phi := idWarp
-    realize := fun v r => modalBankSigTableDD (residueComposeDD (v.map (·.toModal)) (r.map (·.toModal))) clockLit anchorSig
-    admitsPair := fun _ _ => true
-    activeExclusion := false
-    snr := 2e-4
-    interior := (Array.range 4).map (fun c =>
-      let vo := #[haltonMode (c*10+1) 400 1200, haltonMode (c*10+2) 400 1200]
-      -- reverb poles NEAR the voice poles (the DD regime): a shrinking offset
-      let off := 0.6 * haltonF 2 (c+1)
-      (vo, vo.map (fun m => { m with omega := m.omega + tp * off, sigma := m.sigma + 0.1 })))
-    boundary :=
-      -- exact coincidence (λ = ν): the τ·e resonance, must stay finite/accurate
-      #[ (mkMode 700 0.8 0.6, mkMode 700 0.8 0.5)
-       , (mkMode 1100 0.5 0.7, { sigma := 0.5, omega := tp * 1100 + 0.02, are := 0.4 }) ] }
+       , (mkMode 500 0.5 0.7, { sigma := 1.1, omega := tp * 500, are := 0.7 })
+      -- … the old DD coincidence probes (λ = ν exactly; the τ·e resonance) …
+       , (mkMode 700 0.8 0.6, mkMode 700 0.8 0.5)
+       , (mkMode 1100 0.5 0.7, { sigma := 0.5, omega := tp * 1100 + 0.02, are := 0.4 })
+      -- … and the WIDENING (gate iii): hard probes INSIDE the old EC exclusion
+      -- — configurations the apparatus previously certified for nobody.
+      -- Deep inside the old exclusion (|a·r/Δ| ≈ 14 ≫ 8; Δ = 0.05 < θ_acc, so
+      -- the ACCURACY lens routes it — the rail lens's own witness is below):
+       , (mkMode 800 0.6 0.9, { sigma := 0.6, omega := tp * 800 + 0.05, are := 0.8 })
+      -- the sub-grid detune (Δ = 1e-6 rad/s < the 6.5e-5 rotator quantum —
+      -- UNREPRESENTABLE collected; the served-full upgrade's sharpest point):
+       , (mkMode 500 0.8 0.7, { sigma := 0.8, omega := tp * 500 + 1e-6, are := 0.7 })
+      -- the RAIL lens's own service region (its only discriminating law probe:
+      -- Δ = 0.6 > θ_acc so the accuracy lens is OFF; |a·r|/Δ = 4/0.6 ≈ 6.7 > 4
+      -- fires the rail lens; σ = 1.5 makes the damping arm the binding sup and
+      -- clears the cap, |c|/(e·σ_min) ≈ 0.98 < 8 — routed, law asserted):
+       , (mkMode 800 1.5 2.0, { sigma := 1.5, omega := tp * 800 + 0.6, are := 2.0 })
+      -- the STATED refusal (sub-grid Δ fires the accuracy lens; σ = 0.02 is
+      -- extreme Q, |c|/(e·σ_min) ≈ 18 ≥ 8 — the cap refuses, `admitsPair` is
+      -- false, the harness skips it as out-of-contract; the ecdd-partition
+      -- gate pins the refusal structurally):
+       , (mkMode 400 0.02 1.0, { sigma := 0.02, omega := tp * 400 + 1e-6, are := 1.0 }) ] }
 
 /-- The pitch bloom warp (shipped gong: β=0.05, g=1.8, scale 1 ⇒ B = β/g). -/
 private def bloomBg : Float × Float := (0.05 / 1.8, 1.8)
@@ -304,7 +324,7 @@ private def bloomAtom : SeamAtom :=
        , (mkMode 700 0.5 0.8, { sigma := 0.5, omega := tp * 700 + 0.5, are := 0.4 })      -- |a|≈0.278 (imag spiral)
        , (mkMode 2600 0.9 0.5, mkMode 300 0.8 0.4) ] }
 
-private def allAtoms : Array SeamAtom := #[ecAtom, ddAtom, bloomAtom]
+private def allAtoms : Array SeamAtom := #[composeAtom, bloomAtom]
 
 -- ── The gate ──────────────────────────────────────────────────────────────────
 
@@ -629,10 +649,10 @@ def runBloomLivePole (arena : Arena)
   -- the live room: σ = 6.91/rt60 with rt60 NOT a foldable literal (clamp is
   -- outside `sigConstF?`'s vocabulary, exactly like a `paramRef` slot read),
   -- range declared as the knob span mapped through σ = 6.91/rt60
-  let rt60E : Sig := clampE (litF rt60Val) (litF rtLo) (litF rtHi)
-  let liveRoom := fun (rm : Array SeamMode) => rm.map (fun m =>
-    { m.toModal with sigma := div (lit 691 2) rt60E
+  let liveRoomAt := fun (rv : Float) (rm : Array SeamMode) => rm.map (fun m =>
+    { m.toModal with sigma := div (lit 691 2) (clampE (litF rv) (litF rtLo) (litF rtHi))
                      sigmaRange := some (6.91 / rtHi, 6.91 / rtLo) })
+  let liveRoom := liveRoomAt rt60Val
   let rMLive  := liveRoom room
   let rMBaked := room.map (·.toModal)
   -- (1) the lift engages: all 6 pairs, live and s0
@@ -648,13 +668,67 @@ def runBloomLivePole (arena : Arena)
     p.invA.foldl (fun a ik => a ++ #[ik.1, ik.2]) #[]) #[]
   let genuinelyLive := pairsLive.all (fun p => (sigConstF? p.nuSigma).isNone)
   let allS0 := liveConsts.all sigIsS0
-  -- (4) graceful per-pair drop: a room mode ON the 220 Hz partial is not
-  -- serOnly anywhere on the interval (|a+1| dips below |κ| at Re a = −1)
-  let nearRoom := liveRoom #[mkMode 220.5 sigLive 0.5]
+  -- (4) graceful per-pair drop: a room mode 0.05 Hz off the 220 Hz partial is
+  -- COINCIDENT-dipping (|Im a| ≈ 0.17 < ½, and the rt60 range walks Re a
+  -- through the disc) — the one remaining per-pair drop after phase 3a (the
+  -- τ·e lanes stay baked-only). The drop set shrank twice: phase 1's
+  -- on-partial probe (220.5 Hz) lifted with phase 2's crossing arm, and
+  -- phase 2's region-CHANGING probe (230.5 Hz) lifted with phase 3a's
+  -- union collapse — it is now witness (6) below.
+  let nearRoom := liveRoom #[mkMode 220.05 sigLive 0.5]
   let dropCount := match bloomCompose vM nearRoom B g with
     | some ps => ps.size
     | none => 1000
-  -- (2)+(3) render the live crossing, the baked crossing, and the oracle
+  -- (6) phase 3a — the STRADDLING pair (region-changing over the interval):
+  -- room 230.5 Hz vs voice 220 (|a+1| straddles |κ| = 38.4: serOnly at low
+  -- rt60, crossing at high). Served by the crossing lanes alone (the union
+  -- collapse, probed in demos/wslp_union_probe.py). Witnessed on BOTH sides:
+  -- at rt60 = 2 the live dSwitch ≈ 0.026 s (seam in-window, both lanes); at
+  -- rt60 = 0.25 the pair sits on its serOnly side (dSwitch < 0, series from
+  -- d = 0) and the BAKED pair takes the serOnly ARM — so live ≡ baked there
+  -- is the bridge identity `Γ★ − CF(κ)/g = mK/(ν−μ)` IN THE EMITTED KERNEL.
+  let renderPairs := fun (name : String) (ps : Array BloomPair) =>
+    renderConfig arena name (bloomComposedSig ps clockLit anchorSig)
+  let straddleCheck : Float → String → IO (Option (Float × Float)) := fun rv tag => do
+    let sv := 6.91 / rv
+    let vS : Array SeamMode := #[mkMode 220 1.0 1.0]
+    let rS : Array SeamMode := #[mkMode 230.5 sv 0.5]
+    let some psL := bloomCompose (vS.map (·.toModal)) (liveRoomAt rv rS) B g | return none
+    let some psB := bloomCompose (vS.map (·.toModal)) (rS.map (·.toModal)) B g | return none
+    if psL.size != 1 || psL.any (fun p => p.cfN.isEmpty) then return none
+    match ← renderPairs s!"wslp_str_{tag}_l" psL, ← renderPairs s!"wslp_str_{tag}_b" psB with
+    | .ok l, .ok b =>
+      let admS := fun (v r : SeamMode) => bloomAdmitsPair v.pole r.pole B g
+      let eB := relL2Win l b (anchorNat + 1) nProbe
+      let eO := relL2Win l (oracleSeam vS rS bloomWarp admS 8) (anchorNat + 1) nProbe
+      if !(allFinite l) then return none
+      return some (eB, eO)
+    | _, _ => return none
+  let some (eBS2, eOS2) ← straddleCheck 2.0 "r2"
+    | failGate "bloom-live-pole" "straddle witness (rt60=2, crossing side) failed to lift/render"
+  let some (eBS0, eOS0) ← straddleCheck 0.25 "r025"
+    | failGate "bloom-live-pole" "straddle witness (rt60=0.25, serOnly side) failed to lift/render"
+  -- the full bank with the straddling room mode now lifts ALL THREE pairs
+  let straddleBankFull := match bloomCompose vM (liveRoom #[mkMode 230.5 sigLive 0.5]) B g with
+    | some ps => ps.size == 3
+    | none => false
+  -- (5) WS-LP phase 2 — the CROSSING region, live: a room mode close enough to
+  -- the 1023 Hz voice partial that `|a+1| < |κ|` over the WHOLE rt60 range
+  -- (crossing-throughout: both lanes emitted, `dSwitch` live). The window is
+  -- 2·nProbe so the live `dSwitch` (≈ 0.096 s at rt60 = 2 ⇒ sample ≈ 4443)
+  -- falls INSIDE it — the render exercises the CF lane, the seam, AND the
+  -- Γ★-bridged series lane.
+  let nX := 2 * nProbe
+  let voiceX : Array SeamMode := #[mkMode 1023 1.13 1.0]
+  let roomX  : Array SeamMode := #[mkMode 1066 sigLive 0.6]
+  let vMX := voiceX.map (·.toModal)
+  let some pairsX := bloomCompose vMX (liveRoom roomX) B g
+    | failGate "bloom-live-pole" "bloomCompose returned none for the live crossing-region room"
+  let crossingLifted := pairsX.size == 1 && pairsX.all (fun p => !p.cfN.isEmpty)
+  let bakedX := match bloomCompose vMX (roomX.map (·.toModal)) B g with
+    | some ps => bloomComposedSig ps clockLit anchorSig
+    | none => litI 0
+  -- (2)+(3) render live vs baked vs oracle (phase 1 graph route + phase 2 direct)
   let clk : Clock := clockLit
   let mkGraph := fun (rm : Array ModalMode) =>
     ({ nodes := #[ { id := "src", node := .modalSource vM anchorSig clk none none (some (B, g)) }
@@ -662,8 +736,10 @@ def runBloomLivePole (arena : Arena)
        output := "rev" } : PatchGraph)
   let rLive ← renderGraph arena "wslp_live" (mkGraph rMLive)
   let rBaked ← renderGraph arena "wslp_baked" (mkGraph rMBaked)
-  match rLive, rBaked with
-  | .ok pL, .ok pB =>
+  let rLiveX ← renderConfig arena "wslp_xlive" (bloomComposedSig pairsX clockLit anchorSig) nX
+  let rBakedX ← renderConfig arena "wslp_xbaked" bakedX nX
+  match rLive, rBaked, rLiveX, rBakedX with
+  | .ok pL, .ok pB, .ok pLX, .ok pBX =>
     let lo := anchorNat + 1
     let hi := nProbe
     let adm := fun (v r : SeamMode) => bloomAdmitsPair v.pole r.pole B g
@@ -671,19 +747,26 @@ def runBloomLivePole (arena : Arena)
     let eOracle := relL2Win pL (oracleSeam voice room bloomWarp adm 8) lo hi
     let preE := energyWin pL 0 lo
     let e := energyWin pL lo hi
-    IO.println s!"bloom live-pole crossing (WS-LP Phase 1: serOnly, live rt60):"
-    IO.println s!"        lift     pairs {pairsLive.size}/6 · live consts (unfoldable) {genuinelyLive} · s0 {allS0} · near-partial pair drops to {dropCount}/3"
-    IO.println s!"        render   live ≡ baked crossing {eBaked * 1e9}e-9 · live ≡ oracle {eOracle} · pre-E {preE} · E {e}"
+    let eBakedX := relL2Win pLX pBX lo nX
+    let eOracleX := relL2Win pLX (oracleSeam voiceX roomX bloomWarp adm 8 nX) lo nX
+    IO.println s!"bloom live-pole crossing (WS-LP: serOnly + crossing + straddling, live rt60):"
+    IO.println s!"        lift     pairs {pairsLive.size}/6 · live consts (unfoldable) {genuinelyLive} · s0 {allS0} · coincident-dip pair drops to {dropCount}/3"
+    IO.println s!"        serOnly  live ≡ baked crossing {eBaked * 1e9}e-9 · live ≡ oracle {eOracle} · pre-E {preE} · E {e}"
+    IO.println s!"        crossing lifted (1 pair, CF lane) {crossingLifted} · live ≡ baked {eBakedX * 1e9}e-9 · live ≡ oracle {eOracleX} (window {nX}, seam inside)"
+    IO.println s!"        straddle rt60=2 (seam in-window) ≡ baked {eBS2 * 1e9}e-9, ≡ oracle {eOS2} · rt60=0.25 (serOnly side) ≡ baked-SER-ARM {eBS0 * 1e9}e-9 (the bridge identity in-kernel), ≡ oracle {eOS0} · full bank 3/3 {straddleBankFull}"
     -- live ≡ baked is a CONSISTENCY check, not the law (the oracle is): the
-    -- baked `mK` comes from build-time forward summation (`bloomM1`), the lifted
-    -- one from the emitted Horner (`bloomM1E`) — a real reassociation of a
-    -- ~200-term series, so the honest bar is ~1e-6, not bit-identity.
+    -- baked constants come from build-time forward summation (`bloomM1`) and
+    -- `lgammaB`, the lifted ones from the emitted Horner/fraction/`lgammaE` —
+    -- real reassociations, so the honest bar is ~1e-6, not bit-identity.
     if pairsLive.size == 6 && genuinelyLive && allS0 && dropCount == 2
-        && eBaked < 1e-6 && eOracle < 3e-4 && preE < 1e-18 && e > 1e-9 && allFinite pL then
-      passGate "bloom-live-pole" s!"a live-rt60 reverb CROSSES the bloom (no bare-bloom drop): 6/6 pairs lifted s0, live ≡ baked {eBaked * 1e9}e-9, ≡ oracle {eOracle}, non-serOnly pair drops per-pair"
+        && eBaked < 1e-6 && eOracle < 3e-4 && preE < 1e-18 && e > 1e-9 && allFinite pL
+        && crossingLifted && eBakedX < 1e-6 && eOracleX < 3e-4 && allFinite pLX
+        && eBS2 < 1e-6 && eOS2 < 3e-4 && eBS0 < 1e-6 && eOS0 < 3e-4 && straddleBankFull then
+      passGate "bloom-live-pole" s!"a live-rt60 reverb CROSSES the bloom in every non-coincident region: serOnly 6/6 (≡ oracle {eOracle}); crossing incl. live dSwitch seam (≡ oracle {eOracleX}); STRADDLING pair served by the union collapse on both sides (crossing side ≡ oracle {eOS2}; serOnly side ≡ baked ser arm {eBS0 * 1e9}e-9 — the bridge identity in-kernel); only the coincident dip drops per-pair"
     else
-      failGate "bloom-live-pole" s!"pairs={pairsLive.size} live={genuinelyLive} s0={allS0} drop={dropCount} eBaked={eBaked * 1e9}e-9 eOracle={eOracle} preE={preE} E={e} finite={allFinite pL}"
-  | .error e, _ | _, .error e => failGate "bloom-live-pole" s!"build/render: {e}"
+      failGate "bloom-live-pole" s!"pairs={pairsLive.size} live={genuinelyLive} s0={allS0} drop={dropCount} eBaked={eBaked * 1e9}e-9 eOracle={eOracle} preE={preE} E={e} finite={allFinite pL} xLift={crossingLifted} eBakedX={eBakedX * 1e9}e-9 eOracleX={eOracleX} finiteX={allFinite pLX} eBS2={eBS2 * 1e9}e-9 eOS2={eOS2} eBS0={eBS0 * 1e9}e-9 eOS0={eOS0} bank3={straddleBankFull}"
+  | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
+    failGate "bloom-live-pole" s!"build/render: {e}"
 
 -- ── The Γ-bridge coefficient comparator (per-identity, series-shaped) ──────────
 -- Truncated power-series (Taylor-in-d) arithmetic over `CplxB`, depth N. The
@@ -1101,5 +1184,323 @@ def runFoldChain (arena : Arena)
     else
       passGate "ddfold" s!"the room-chain fold holds its law in both arms (A near-coincident DD {eD} ≤ collected {eC}; B separated DD {eS} on the direct cexpm1 lane); the a-DD machinery transferred to the fold site (WS-DDF datum). Finding: the bloom's K factor keeps the collected fold from breaking at reachable Δ — the wound is narrower than assumed"
   | _, _, _ => failGate "ddfold" "build/render failed for the WS-DDF fold witness"
+
+-- ── The EC/DD erasure gate (fork 3′ Phase 1) ──────────────────────────────────
+
+/-- Render an arrow TERM through the production emit seam (`normalize` →
+    `emitTerm`) — the comparator side of the byte-identity checks and the
+    collected counter-renders. -/
+private def renderTerm (arena : Arena) (name : String) (t : ArrowTerm)
+    (nLen : Nat := nProbe) : IO (Except String (Array Float)) := do
+  let (out, _) := emitTerm (normalize t) {}
+  renderConfig arena name out nLen
+
+private def renderGraphN (arena : Arena) (name : String) (gr : PatchGraph)
+    (nLen : Nat) : IO (Except String (Array Float)) := do
+  match lowerGraph gr with
+  | .error e => pure (.error e)
+  | .ok term => renderTerm arena name term nLen
+
+/-- THE EC/DD ERASURE GATE (fork 3′ Phase 1). The compiler owns the EC-vs-DD
+    choice per coupling; this gate pins the three behaviors that make that an
+    ERASURE rather than a new mode:
+    (1) COLD BYTE-IDENTITY — a separated chain from the patch surface
+        (src⋙rev⋙rev, nothing hot) renders BIT-IDENTICAL to the direct
+        collected chain `EC(EC(v,r₁),r₂)`: the deferred fold + partition
+        emits yesterday's compiler verbatim when θ is false.
+    (2) THE MIGRATION WITNESS — a room mode tuned ONTO a voice partial
+        (sub-grid detune, the old documented hazard) routes to the paired
+        atom: the partitioned render holds the law vs `oracleSeam` while the
+        collected counter-render (yesterday's output) is off it by decades —
+        served-full where it was served-wrong. Checked at the single compose
+        AND through a chain (the coupling forms against the COMPOSED amps at
+        the final fold, `sort-hot-last`'s mechanics).
+    (3) ROUTING STRUCTURE — the partition routes exactly the expected
+        couplings (one paired atom per tuned pair; room-room coincidence in
+        a chain routes at the final fold), and a room-room-coincident chain
+        renders finite and causal. (Its QUANTITATIVE oracle needs a deg-1
+        capable reference — the folded room's τ·e limit — which `oracleSeam`
+        can't express; recorded as the v2/deg-1 oracle gap, not silently
+        skipped.) -/
+def runEcddPartition (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let lo := anchorNat + 1
+  let nWin : Nat := 32768        -- ~0.74 s: the τ·e resonance (peak ≈ 1/σ s) is in-window
+  let admAll := fun (_ _ : SeamMode) => true
+  let voice : Array SeamMode := #[mkMode 220 1.0 1.0, mkMode 610 1.3 0.6]
+  let room1 : Array SeamMode := #[mkMode 200 1.2 1.0, mkMode 380 1.6 0.8]
+  let vM := voice.map (·.toModal)
+  let r1M := room1.map (·.toModal)
+  -- (1) cold byte-identity through the production seam
+  let roomCold : Array SeamMode := #[mkMode 260 1.4 0.9, mkMode 460 1.8 0.7]
+  let rCM := roomCold.map (·.toModal)
+  let gCold : PatchGraph :=
+    { nodes := #[ { id := "src", node := .modalSource vM anchorSig clockLit none none none }
+                , { id := "rev1", node := .modalReverb "src" r1M none }
+                , { id := "rev2", node := .modalReverb "rev1" rCM none } ]
+      output := "rev2" }
+  let directCold := modalBankTerm (residueComposeEC (residueComposeEC vM r1M) rCM) anchorSig clockLit
+  -- (2) the tuned-unison mutation: ω on the partial, σ matched ⇒ |Δ| = 1e-6
+  -- rad/s (below the 6.5e-5 rotator quantum — the unrepresentable-collected
+  -- point), amps const ⇒ `couplingHot` fires on the θ_acc lens.
+  let roomHot : Array SeamMode := #[{ sigma := 1.0, omega := tp * 220 + 1e-6, are := 0.7 }]
+  let rHM := roomHot.map (·.toModal)
+  let gHot1 : PatchGraph :=
+    { nodes := #[ { id := "src", node := .modalSource vM anchorSig clockLit none none none }
+                , { id := "rev", node := .modalReverb "src" rHM none } ]
+      output := "rev" }
+  let gHotC : PatchGraph :=
+    { nodes := #[ { id := "src", node := .modalSource vM anchorSig clockLit none none none }
+                , { id := "rev1", node := .modalReverb "src" r1M none }
+                , { id := "rev2", node := .modalReverb "rev1" rHM none } ]
+      output := "rev2" }
+  -- (3) structural routing: the partition's shape, checked directly
+  let (plainS, pairedS) := residueComposePartitioned vM rHM
+  let (_plainC, pairedC) := foldRoomsPartitioned vM #[r1M, rHM]
+  let r2Coin : Array SeamMode := #[{ sigma := 1.2, omega := tp * 200 + 1e-6, are := 0.7 }]
+  let r2CM := r2Coin.map (·.toModal)
+  let (_plainR, pairedR) := foldRoomsPartitioned vM #[r1M, r2CM]
+  -- (3b) the routing boundary, lens-discriminated. The RAIL lens's service
+  -- region (Δ = 0.6 > θ_acc — the accuracy lens is OFF — with |a·r|/Δ ≈ 6.7 >
+  -- 4 and σ = 1.5 so the damping arm clears the cap) must route; the SAME Δ at
+  -- small amps (|a·r|/Δ ≈ 1.7 < 4) must stay cold — together they prove the
+  -- rail lens itself decided, not θ_acc. And the STATED refusal: a lens-fired
+  -- coupling at extreme Q (σ = 0.02: |c|/(e·σ_min) ≈ 18 ≥ cap 8) classifies
+  -- `refused` and the partition leaves it collected — the admission edge the
+  -- merged seam atom now states instead of certifying.
+  let railVm := (mkMode 800 1.5 2.0).toModal
+  let railRm := ({ sigma := 1.5, omega := tp * 800 + 0.6, are := 2.0 } : SeamMode).toModal
+  let railRmCold := ({ sigma := 1.5, omega := tp * 800 + 0.6, are := 0.5 } : SeamMode).toModal
+  let refVm := (mkMode 400 0.02 1.0).toModal
+  let refRm := ({ sigma := 0.02, omega := tp * 400 + 1e-6, are := 1.0 } : SeamMode).toModal
+  let railRouted := (residueComposePartitioned #[railVm] #[railRm]).2.size == 1
+  let railDiscr := (residueComposePartitioned #[railVm] #[railRmCold]).2.isEmpty
+  let refusedStated := couplingRefused refVm refRm
+                    && (residueComposePartitioned #[refVm] #[refRm]).2.isEmpty
+  let lensOk := railRouted && railDiscr && refusedStated
+  let structOk := pairedS.size == 1 && plainS.size == vM.size + rHM.size
+              && pairedC.size == 1 && pairedR.size == 1
+  let gCoinC : PatchGraph :=
+    { nodes := #[ { id := "src", node := .modalSource vM anchorSig clockLit none none none }
+                , { id := "rev1", node := .modalReverb "src" r1M none }
+                , { id := "rev2", node := .modalReverb "rev1" r2CM none } ]
+      output := "rev2" }
+  match ← renderGraph arena "ecdd_cold" gCold,
+        ← renderTerm arena "ecdd_cold_direct" directCold,
+        ← renderGraphN arena "ecdd_hot1" gHot1 nWin,
+        ← renderTerm arena "ecdd_hot1_coll" (modalBankTerm (residueComposeEC vM rHM) anchorSig clockLit) nWin,
+        ← renderGraphN arena "ecdd_hotC" gHotC nWin,
+        ← renderTerm arena "ecdd_hotC_coll" (modalBankTerm (residueComposeEC (residueComposeEC vM r1M) rHM) anchorSig clockLit) nWin,
+        ← renderGraphN arena "ecdd_coinC" gCoinC nWin with
+  | .ok cold, .ok coldD, .ok hot1, .ok hot1C, .ok hotC, .ok hotCC, .ok coinC =>
+    let bitCold := bitDiffCount cold coldD
+    let ref1 := oracleSeam voice roomHot idWarp admAll 8 nWin
+    let e1DD := relL2Win hot1 ref1 lo nWin
+    let e1Coll := relL2Win hot1C ref1 lo nWin
+    let refC := oracleSeam voice (foldRoomsFloat room1 roomHot) idWarp admAll 8 nWin
+    let eCDD := relL2Win hotC refC lo nWin
+    let eCColl := relL2Win hotCC refC lo nWin
+    let coinFinite := allFinite coinC
+    let coinPre := energyWin coinC 0 lo
+    let coinE := energyWin coinC lo nWin
+    IO.println s!"ecdd erasure (per-coupling partition, θ_acc={Tropical.EmitArrow.ecddThetaAcc} rad/s):"
+    IO.println s!"        cold chain bitDiff {bitCold} (deferred fold ≡ yesterday's collected chain)"
+    IO.println s!"        tuned unison (|Δ|=1e-6, sub-grid): partitioned {e1DD} vs collected {e1Coll} (oracle law)"
+    IO.println s!"        tuned unison through a chain:      partitioned {eCDD} vs collected {eCColl}"
+    IO.println s!"        routing structure ok={structOk} · lens-discriminated: rail routes {railRouted} / small-amp cold {railDiscr} / extreme-Q refusal stated {refusedStated} · room-room coincident chain finite={coinFinite} preE={coinPre} E={coinE}"
+    -- frozen 2026-07-23 off first-landing measurements (e1DD ≈ 5e-7, eCDD ≈
+    -- 6e-6, both collected counter-renders ≈ 1.0): the plain-path chain floor
+    -- is 1e-4 — deliverable 2's re-freeze, an order tighter than the bloomed
+    -- chain gate's 2e-3 (whose 6.7e-4 is floor-relative, not 1/Δ — diagnosed,
+    -- out of v1). The collected/partitioned ratio floor is 1e4×.
+    let pass := bitCold == 0 && structOk && lensOk
+             && e1DD < 5e-5 && e1Coll > 1000.0 * e1DD
+             && eCDD < 1e-4 && eCColl > 1000.0 * eCDD
+             && coinFinite && coinPre < 1e-18 && coinE > 1e-9
+    if pass then
+      passGate "ecdd-partition" s!"the EC/DD choice is the compiler's: cold chain byte-identical (bitDiff 0), tuned unison served through the paired route ({e1DD} vs collected {e1Coll}; chain {eCDD} vs {eCColl}), routing structural + lens-discriminated (rail routes, small-amp cold, extreme-Q refusal stated), coincident room chain graceful"
+    else
+      failGate "ecdd-partition" s!"bitCold={bitCold} structOk={structOk} railRouted={railRouted} railDiscr={railDiscr} refusedStated={refusedStated} e1DD={e1DD} e1Coll={e1Coll} eCDD={eCDD} eCColl={eCColl} coinFinite={coinFinite} coinPre={coinPre} coinE={coinE}"
+  | _, _, _, _, _, _, _ => failGate "ecdd-partition" "build/render failed for an erasure-gate config"
+
+/-- THE EC/DD LIVE-POLE GATE (fork 3′ Phase 2). Interval classification: a
+    live-rt60 room mode tuned ONTO a baked partial routes to the paired DD
+    body at BUILD time when min |Δ| over the declared σ span dips under θ_acc
+    — the dipper takes DD THROUGHOUT the knob range, so no runtime select
+    exists and "no click at θ" is a compile-time triviality (D2). Asserts:
+    (1) STRUCTURE — the tuned live coupling routes (paired size 1: ω matched,
+        σ span ∋ the partial's σ), an UNTUNED live room routes nothing
+        (ordinary reverbs stay byte-identical), and a live σ with NO declared
+        range stays collected (unclassifiable — graceful);
+    (2) THE LAW ACROSS THE KNOB — the live render matches `oracleSeam` at TWO
+        rt60 values (same classification, same DD lane, constants computed by
+        kernel arithmetic off the live slot instead of at build time) — the
+        "confirm, don't assume" check that the paired columns (`ds`, `sigmaNu`
+        as s0 expressions of the knob; the per-sample series/direct `cexpm1`
+        select) genuinely lift;
+    (3) LIVE + CHAIN (the coverage-matrix cell, decided HERE, not by
+        accident): the PLAIN arm serves it — a baked room folds first, the
+        live tuned room folds last and partitions against the composed
+        (const-foldable) amps. The WS-LP bloomed live arm's refusal of
+        composed rooms is untouched (`runBloomLivePole` pins it). -/
+def runEcddLive (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let lo := anchorNat + 1
+  let nWin : Nat := 32768
+  let admAll := fun (_ _ : SeamMode) => true
+  -- the partial sits at σ = 3.455 = 6.91/2.0 — INSIDE the σ span of an
+  -- rt60 ∈ [0.2, 12] room ([0.576, 34.55]) ⇒ with ω matched, min|Δ| = 0
+  let voice : Array SeamMode := #[mkMode 220 3.455 1.0, mkMode 610 1.3 0.6]
+  let vM := voice.map (·.toModal)
+  let room1 : Array SeamMode := #[mkMode 200 1.2 1.0, mkMode 380 1.6 0.8]
+  let r1M := room1.map (·.toModal)
+  let (rtLo, rtHi) : Float × Float := (0.2, 12.0)
+  let liveSigma := fun (rv : Float) =>
+    div (lit 691 2) (clampE (litF rv) (litF rtLo) (litF rtHi))
+  let liveRoomAt := fun (rv : Float) (fHz amp : Float) (range? : Option (Float × Float)) =>
+    #[({ sigma := liveSigma rv, omega := litF (tp * fHz),
+         cre := litF amp, cim := lit 0,
+         sigmaRange := range? } : ModalMode)]
+  let span := some (6.91 / rtHi, 6.91 / rtLo)
+  let graphOf := fun (rooms : Array (Array ModalMode)) =>
+    let mkRev := fun (i : Nat) (rm : Array ModalMode) =>
+      ({ id := s!"rev{i}", node := .modalReverb (if i == 0 then "src" else s!"rev{i-1}") rm none })
+    ({ nodes := #[⟨"src", .modalSource vM anchorSig clockLit none none none⟩]
+              ++ rooms.zipIdx.map (fun (rm, i) => mkRev i rm)
+       output := s!"rev{rooms.size - 1}" } : PatchGraph)
+  -- (1) structure: tuned+ranged routes; untuned stays cold; rangeless stays cold
+  let tunedAt := fun rv => liveRoomAt rv 220.0 0.7 span
+  let (_, pTuned) := residueComposePartitioned vM (tunedAt 2.0)
+  let (_, pUntuned) := residueComposePartitioned vM (liveRoomAt 2.0 500.0 0.7 span)
+  let (_, pNoRange) := residueComposePartitioned vM (liveRoomAt 2.0 220.0 0.7 none)
+  let (_, pChain) := foldRoomsPartitioned vM #[r1M, tunedAt 2.0]
+  let structOk := pTuned.size == 1 && pUntuned.isEmpty && pNoRange.isEmpty
+               && pChain.size == 1
+  -- (2) the law at two knob values (single compose), (3) through a chain
+  let oracleAt := fun (rv : Float) => oracleSeam voice
+    #[{ sigma := 6.91 / rv, omega := tp * 220, are := 0.7 }] idWarp admAll 8 nWin
+  let oracleChainAt := fun (rv : Float) => oracleSeam voice
+    (foldRoomsFloat room1 #[{ sigma := 6.91 / rv, omega := tp * 220, are := 0.7 }])
+    idWarp admAll 8 nWin
+  -- (4) OVERDRIVE — the uniform-bank clamp (`clampSigmas` at graph ingestion):
+  -- a σ expression driven OUT of the declared span (rt60 = 0.1 through a
+  -- wide value clamp, so the raw σ evaluates to 69.1; the DECLARED span is
+  -- still [0.576, 34.55]) saturates in-kernel to the declared edge. The whole
+  -- bank — collected modes and the paired atom alike — must behave as
+  -- rt60 = 0.2: out-of-span drives can neither desync the two lane families
+  -- nor walk a cold-classified coupling's |Δ| under θ_acc.
+  let oobRoom : Array ModalMode :=
+    #[{ sigma := div (lit 691 2) (clampE (litF 0.1) (litF 0.05) (litF 30.0)),
+        omega := litF (tp * 220), cre := litF 0.7, cim := lit 0,
+        sigmaRange := span }]
+  match ← renderGraphN arena "ecddlive_a" (graphOf #[tunedAt 2.0]) nWin,
+        ← renderGraphN arena "ecddlive_b" (graphOf #[tunedAt 4.0]) nWin,
+        ← renderGraphN arena "ecddlive_chain" (graphOf #[r1M, tunedAt 2.0]) nWin,
+        ← renderGraphN arena "ecddlive_oob" (graphOf #[oobRoom]) nWin with
+  | .ok dutA, .ok dutB, .ok dutC, .ok dutO =>
+    let eA := relL2Win dutA (oracleAt 2.0) lo nWin
+    let eB := relL2Win dutB (oracleAt 4.0) lo nWin
+    let eC := relL2Win dutC (oracleChainAt 2.0) lo nWin
+    let eO := relL2Win dutO (oracleAt 0.2) lo nWin
+    IO.println s!"ecdd live-pole (interval classification over the declared rt60 span):"
+    IO.println s!"        structure ok={structOk} (tuned routes, untuned/rangeless stay collected, chain routes at the final fold)"
+    IO.println s!"        law: rt60=2.0 rel {eA} · rt60=4.0 rel {eB} (one DD lane across the knob) · live+chain rel {eC}"
+    IO.println s!"        overdrive: rt60 driven to 0.1 (out of span) ≡ oracle at the declared edge 0.2 rel {eO} (the whole bank saturates together)"
+    -- frozen 2026-07-23 off first-landing measurements (eA/eB ≈ 5e-7, the
+    -- single-crossing floor; eC ≈ 1.7e-5): the live lane owes the same floors
+    -- as the baked lane — the lift changes WHERE constants are computed, not
+    -- their accuracy.
+    let pass := structOk && allFinite dutA && allFinite dutO
+             && eA < 5e-5 && eB < 5e-5 && eC < 1e-4 && eO < 5e-5
+    if pass then
+      passGate "ecdd-live" s!"a live-rt60 room tuned onto a partial classifies over its declared interval and takes the DD lane throughout ({eA} / {eB} at two knob values, no runtime select to click); live+chain served on the plain arm ({eC}); untuned/rangeless live rooms stay collected; an out-of-span drive saturates the WHOLE bank to the declared edge ({eO})"
+    else
+      failGate "ecdd-live" s!"structOk={structOk} eA={eA} eB={eB} eC={eC} eO={eO}"
+  | _, _, _, _ => failGate "ecdd-live" "build/render failed for a live-pole erasure config"
+
+/-- THE GAUGE-OVER-HOT-CHAIN GATE (the gauge × partition interaction, measured
+    rather than assumed). Gauge is a COLLECTED surface in v1: it forces the
+    room fold at the gauge node, so a tuned (sub-grid) coupling under a gauge
+    renders collected — the status-quo floor for that pair (grid silence),
+    stated in `lowerModal`. The open question was the NORM: `gaugeScale`
+    self-measures on the collected amps, which for a tuned unison are the huge
+    cancelling `±c/Δ` pair (~7e5 here) — does the measure survive, or does it
+    mis-scale the WHOLE bank? It survives, and not by luck: the norm reads the
+    bank's transfer function `H(iω)`, and `H` has NO `1/Δ` pole — the `±c/Δ`
+    partial fractions recombine into the bounded product form
+    `c/((iω−λ)(iω−ν))`, so the f64 build-time cancellation is benign (rel err
+    ~eps·|c/Δ|/|H| ≈ 1e-10 at this detune; an f32 coefficient path would owe
+    its own witness — recorded, not covered here). Asserts:
+    (1) THE SCALE LAW — the gauged render is `scale · (ungauged collected
+        render)` with `scale` recomputed from an INDEPENDENT f64 mirror of
+        `gaugeScale` on the float-EC amps (the render is linear in residues:
+        one shared s0 scale, so any norm damage would show here). Asserted at
+        a REPRESENTABLE detune (Δ = 1e-3 > the grid quantum; amps ±700) where
+        the datapath resolves the signal;
+    (2) NORM SANITY at the sub-grid worst case (|c/Δ| ≈ 7e5) — the mirrored
+        scale sits in a sane band: the "scaled to oblivion" failure mode is
+        excluded by measurement;
+    (3) THE LANDING POISON, recorded as data (this gate's own finding): at
+        sub-grid detune the scale-law comparison is dominated by QUANTIZATION,
+        not the norm — the cancelling `±c/Δ` amps size the per-bank landing
+        exponent (`bankLandExp` k off maxAbs ≈ 7e5 ⇒ LSB ≈ 2⁻¹³), which
+        quantizes the surviving cold modes (amps ~1e-4) to ~1 LSB. The
+        collected floor under a forced-collected surface is therefore not just
+        "the hot pair is silent": the pair's amps degrade the WHOLE bank's
+        landing resolution. Where the partition routes, this cannot happen
+        (paired amps are bounded, `ecddPairCap`) — one more reason the routed
+        path is the served one. Pinned loosely (finite + the poisoned
+        comparison stays O(1), i.e. the bank still renders the cold modes at
+        the right ORDER, no blowup). -/
+def runEcddGauge (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let lo := anchorNat + 1
+  let nWin : Nat := 32768
+  let voice : Array SeamMode := #[mkMode 220 1.0 1.0, mkMode 610 1.3 0.6]
+  let vM := voice.map (·.toModal)
+  -- the f64 norm mirror: float-EC amps → H at each pole ω → S = Σ|H|⁸ →
+  -- scale = S^{−g/8} (g = 1) — `gaugeScale`'s formula on a separate code
+  -- path (CplxB floats, not symbolic CplxE).
+  let scaleOf := fun (room : Array SeamMode) =>
+    let ecF := foldRoomsFloat voice room
+    let hAt := fun (wk : Float) => ecF.foldl (fun (acc : CplxB) m =>
+        acc.add ((⟨m.are, m.aim⟩ : CplxB).div (⟨m.sigma, wk - m.omega⟩ : CplxB))) ⟨0, 0⟩
+    let sNorm := ecF.foldl (fun s m =>
+        let h := hAt m.omega
+        let h2 := h.re * h.re + h.im * h.im
+        s + (h2 * h2) * (h2 * h2)) 0.0
+    Float.exp (-(1.0 / 8.0) * Float.log sNorm)
+  let gaugedGraph := fun (rm : Array ModalMode) =>
+    ({ nodes := #[ { id := "src", node := .modalSource vM anchorSig clockLit none none none }
+                 , { id := "rev", node := .modalReverb "src" rm none }
+                 , { id := "gg",  node := .modalGauge "rev" (litF 1.0) } ]
+       output := "gg" } : PatchGraph)
+  -- config A: the sub-grid worst case (norm sanity + the landing poison)
+  let roomSub : Array SeamMode := #[{ sigma := 1.0, omega := tp * 220 + 1e-6, are := 0.7 }]
+  -- config B: representable detune (the clean scale-law witness — amps ±700,
+  -- landing exponent k = 6, quantization decades under the signal)
+  let roomRep : Array SeamMode := #[{ sigma := 1.0, omega := tp * 220 + 1e-3, are := 0.7 }]
+  let rSubM := roomSub.map (·.toModal)
+  let rRepM := roomRep.map (·.toModal)
+  match ← renderGraphN arena "ecddg_gauged_sub" (gaugedGraph rSubM) nWin,
+        ← renderTerm arena "ecddg_bare_sub" (modalBankTerm (residueComposeEC vM rSubM) anchorSig clockLit) nWin,
+        ← renderGraphN arena "ecddg_gauged_rep" (gaugedGraph rRepM) nWin,
+        ← renderTerm arena "ecddg_bare_rep" (modalBankTerm (residueComposeEC vM rRepM) anchorSig clockLit) nWin with
+  | .ok dutGS, .ok dutBS, .ok dutGR, .ok dutBR =>
+    let scaleSub := scaleOf roomSub
+    let scaleRep := scaleOf roomRep
+    let eLawRep := relL2Win dutGR (dutBR.map (· * scaleRep)) lo nWin
+    let ePoison := relL2Win dutGS (dutBS.map (· * scaleSub)) lo nWin
+    let eGS := energyWin dutGS lo nWin
+    let saneSub := 0.1 < scaleSub && scaleSub < 10.0
+    IO.println s!"ecdd gauge-over-hot (the norm on cancelling ±c/Δ amps):"
+    IO.println s!"        scale law (Δ=1e-3, resolvable): gauged ≡ {scaleRep} × collected rel {eLawRep}"
+    IO.println s!"        sub-grid (|c/Δ|≈7e5): norm sane {saneSub} (scale {scaleSub}) · landing-poison comparison {ePoison} (quantization-dominated, recorded) · E {eGS}"
+    if allFinite dutGS && allFinite dutGR && eLawRep < 1e-4
+        && saneSub && ePoison < 2.0 && eGS > 1e-9 then
+      passGate "ecdd-gauge" s!"gauge over a tuned-unison chain: the H-norm survives the ±c/Δ amps (sub-grid scale {scaleSub}, mirrored independently — no oblivion; scale law holds where the datapath resolves, {eLawRep}); the recorded residual is the collected floor PLUS the landing poison (huge amps size the bank's k, LSB over the cold modes)"
+    else
+      failGate "ecdd-gauge" s!"eLawRep={eLawRep} scaleSub={scaleSub} scaleRep={scaleRep} ePoison={ePoison} finite={allFinite dutGS}/{allFinite dutGR} E={eGS}"
+  | _, _, _, _ => failGate "ecdd-gauge" "build/render failed for a gauge-over-hot config"
 
 end Tropical.Tropicaltest.SeamSweep
