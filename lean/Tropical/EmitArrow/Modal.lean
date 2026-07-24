@@ -664,16 +664,27 @@ def ecddThetaAcc : Float := 0.4642
 
 /-- The range lens: route when the collected ringing weight `|a·r|/|Δ|` exceeds
     the Q4.28 magnitude ceiling 8 with a 2× margin. Amp-dependent — `|Δ|` alone
-    is not the criterion (cockpit D_p2: binding for `|a·r| ≳ 1.9`). -/
+    is not the criterion (cockpit D_p2: binding for `|a·r| ≳ 1.9`).
+
+    SERVICE REGION (the cap interplay, stated — it is NOT the whole lens): the
+    paired range cap admits only `|c|·min(2/|Δ|, 1/(e·σ_min)) < 8`, and the
+    `2/|Δ|` arm of that min is EXACTLY the complement of this lens
+    (`|c|·2/|Δ| < 8 ⟺ |c|/|Δ| < 4`). So a rail-fired coupling can only route
+    through the DAMPING arm: `|Δ| < 2e·σ_min` (the damping bound is the binding
+    sup) and `|c| < 8e·σ_min` (it clears). Well-damped heavy couplings route;
+    a lightly-damped heavy coupling is `CouplingRoute.refused` — a STATED
+    exclusion, never a silent fallback. -/
 def ecddRailCeil : Float := 4.0
 
 /-- The paired atom's own build-time range cap: per pair, `|Wc| ≤ |c|·sup_d
     |e^{νd}·d·cexpm1(Δd)| ≤ |c|·min(2/|Δ|, 1/(e·σ_min))` (the sup the
     remainder-handoff deferred until the DD wiring landed — this is that
-    landing). A coupling whose bound exceeds the cap is NOT routed (stays
-    collected — reject, the status-quo floor; the scale arm can come later if a
-    real patch ever trips this). Cap 8 = the plain Q4.28 ceiling, 4× under the
-    DD site's i64 rail of 32. -/
+    landing). A coupling whose bound exceeds the cap is NOT routed — it stays
+    collected at the status-quo floor (wrong near coincidence), and the refusal
+    is FIRST-CLASS (`CouplingRoute.refused`): the merged seam atom's admission
+    excludes it rather than certifying the collected floor there. The scale arm
+    is the recorded route out if a real patch ever lands in the refusal region.
+    Cap 8 = the plain Q4.28 ceiling, 4× under the DD site's i64 rail of 32. -/
 def ecddPairCap : Float := 8.0
 
 /-- The σ INTERVAL a mode's damping ranges over: a const σ is its own point
@@ -694,41 +705,70 @@ def clampedPoleE (m : ModalMode) : CplxE :=
   | none, some (lo, hi) => (neg (clampE m.sigma (litF lo) (litF hi)), m.omega)
   | _, _ => m.poleE
 
-/-- The per-coupling routing predicate — compile-time only. `true` ⇒ the (v, r)
-    coupling leaves the collected sums and becomes one `PairedMode`. σ may be
-    LIVE with a declared range (Phase 2): the lenses evaluate at min |Δ| over
-    the interval — a coupling whose interval DIPS under θ takes DD throughout
-    the knob span, so no runtime select ever exists (D2; the WS-LP phase-3a
-    pattern). ω and amps must const-fold, both modes deg-0; anything else stays
-    collected. Fires on either lens (accuracy | range), gated by the paired
-    range cap at the interval's worst point. -/
-def couplingHot (v r : ModalMode) : Bool :=
-  v.deg == 0 && r.deg == 0 &&
-  (Id.run do
-    let some (svLo, svHi) := sigmaInterval? v | return false
-    let some (srLo, srHi) := sigmaInterval? r | return false
-    let some wv := sigConstF? v.omega | return false
-    let some wr := sigConstF? r.omega | return false
-    let some ar := sigConstF? v.cre | return false
-    let some ai := sigConstF? v.cim | return false
-    let some rr := sigConstF? r.cre | return false
-    let some ri := sigConstF? r.cim | return false
+/-- Where a (v, r) coupling lands — the routing verdict with the paired range
+    cap made a FIRST-CLASS outcome rather than a silent fallback, so the seam
+    apparatus can state the refusal region as admission instead of certifying
+    the collected floor over it. -/
+inductive CouplingRoute where
+  /-- Neither lens fires (or the coupling is unmeasurable at build time): the
+      collected `±c/Δ` representation is accurate — stays in the Cauchy sums. -/
+  | cold
+  /-- A lens fires and the paired range cap clears: one fused `PairedMode`. -/
+  | paired
+  /-- A lens fires but the pair's landed sup exceeds `ecddPairCap`: stays
+      collected at the status-quo floor (wrong near coincidence) — a STATED
+      exclusion, out of the merged atom's certified region. Reachable only at
+      extreme Q (`σ_min < |c|/(8e)` with a fired lens — rt60 of minutes at
+      unit amps); the scale arm is the recorded route out. -/
+  | refused
+deriving DecidableEq
+
+/-- The per-coupling routing verdict — compile-time only. σ may be LIVE with a
+    declared range (Phase 2): the lenses evaluate at min |Δ| over the interval —
+    a coupling whose interval DIPS under θ takes DD throughout the knob span, so
+    no runtime select ever exists (D2; the WS-LP phase-3a pattern). ω and amps
+    must const-fold, both modes deg-0; anything else is `cold`. A lens fires
+    (accuracy | range) ⇒ `paired` if the paired range cap clears at the
+    interval's worst point, else `refused`. -/
+def classifyCoupling (v r : ModalMode) : CouplingRoute :=
+  if !(v.deg == 0 && r.deg == 0) then .cold else
+  Id.run do
+    let some (svLo, svHi) := sigmaInterval? v | return .cold
+    let some (srLo, srHi) := sigmaInterval? r | return .cold
+    let some wv := sigConstF? v.omega | return .cold
+    let some wr := sigConstF? r.omega | return .cold
+    let some ar := sigConstF? v.cre | return .cold
+    let some ai := sigConstF? v.cim | return .cold
+    let some rr := sigConstF? r.cre | return .cold
+    let some ri := sigConstF? r.cim | return .cold
     -- min |Δ| over the σ interval(s): the span distance (0 when they overlap —
     -- the dipper), ω exact. Const σ degenerates to the point distance.
     let sepLo := if svLo < srLo then srLo else svLo
-    let sepHi := if svHi < srHi then svHi else srHi
+    let sepHi := if svHi < srHi then srHi else svHi
     let dSig := if sepLo > sepHi then sepLo - sepHi else 0.0
     let dAbs := Float.sqrt (dSig * dSig + (wv - wr) * (wv - wr))
     let cAbs := Float.sqrt (ar * ar + ai * ai) * Float.sqrt (rr * rr + ri * ri)
-    let hot := dAbs < ecddThetaAcc || (dAbs > 0.0 && cAbs / dAbs > ecddRailCeil)
+    if !(dAbs < ecddThetaAcc || (dAbs > 0.0 && cAbs / dAbs > ecddRailCeil)) then
+      return .cold
     -- the paired range cap: sup of the divided-difference kernel over the
     -- WHOLE interval — σ_min at the spans' low edge, |Δ| at its minimum
-    -- (sound: the paired pole clamps to the interval, `clampedPoleE`)
+    -- (sound: the paired pole clamps to the interval, `clampedPoleE`).
+    -- `min(sup₁, sup₂) < cap ⟺ either bound clears` — no infinity sentinels.
     let smin := if svLo < srLo then svLo else srLo
-    let sup1 := if dAbs > 0.0 then 2.0 / dAbs else 1e308
-    let sup2 := if smin > 0.0 then 1.0 / (2.718281828459045 * smin) else 1e308
-    let sup := if sup1 < sup2 then sup1 else sup2
-    return hot && cAbs * sup < ecddPairCap)
+    let capOk := (dAbs > 0.0 && cAbs * (2.0 / dAbs) < ecddPairCap)
+              || (smin > 0.0 && cAbs * (1.0 / (Float.exp 1.0 * smin)) < ecddPairCap)
+    return if capOk then .paired else .refused
+
+/-- `true` ⇒ the (v, r) coupling leaves the collected sums and becomes one
+    `PairedMode` (`classifyCoupling = .paired`). -/
+def couplingHot (v r : ModalMode) : Bool :=
+  classifyCoupling v r == .paired
+
+/-- `true` ⇒ a lens fired but the paired range cap refused the coupling: it
+    renders collected at the status-quo floor. The merged seam atom's admission
+    predicate is the negation of this — the refusal is stated, not certified. -/
+def couplingRefused (v r : ModalMode) : Bool :=
+  classifyCoupling v r == .refused
 
 /-- The PARTITIONED compose — the one `residueCompose` seam. Cold couplings take
     `residueComposeEC`'s collected shapes; hot couplings (per `couplingHot`)

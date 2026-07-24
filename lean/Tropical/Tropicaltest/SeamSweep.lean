@@ -196,10 +196,13 @@ private def idWarp : Float → Float := fun s => s
     (`residueComposePartitioned` — cold couplings collected, hot couplings
     routed to the paired DD body by `couplingHot`, decided at build time), and
     the admission region is the UNION of the two half-regions the predecessors
-    certified — i.e. TOTAL. The epistemic win this sprint exists for: the
-    apparatus stops certifying two half-regions with a folklore boundary and
-    certifies one whole; the old EC exclusion interior (`|a·r/Δ| ≥ 8`) is now
-    ordinary served territory with hard probes inside it.
+    certified MINUS the stated cap refusal (`couplingRefused`: a lens fired but
+    the paired range cap rejected the coupling back to the collected floor —
+    reachable only at extreme Q, and excluded here rather than certified). The
+    epistemic win this sprint exists for: the apparatus stops certifying two
+    half-regions with a folklore boundary and certifies one whole, with its one
+    true edge stated as admission; the old EC exclusion interior (`|a·r/Δ| ≥ 8`)
+    is now ordinary served territory with hard probes inside it.
 
     History (kept because the boundary's meaning has flipped twice): the old EC
     atom's `|a·r/Δ| < 8` admission once guarded the i64 Q4.28 wrap, then —
@@ -217,10 +220,15 @@ private def composeAtom : SeamAtom :=
       let base := modalBankSigTable plain clockLit anchorSig
       if paired.isEmpty then base
       else add base (modalBankSigTableDD paired clockLit anchorSig)
-    -- the UNION admission — TOTAL. The old EC atom admitted `|a·r/Δ| < 8` and
-    -- passively excluded the rest; the old DD atom was total; the merged seam
-    -- serves everything, routing per coupling (`couplingHot`).
-    admitsPair := fun _ _ => true
+    -- the UNION admission minus the STATED cap refusal. The old EC atom
+    -- admitted `|a·r/Δ| < 8` and passively excluded the rest; the old DD atom
+    -- was total; the merged seam serves everything it routes (per coupling,
+    -- `couplingHot`) and REFUSES a lens-fired coupling the paired range cap
+    -- rejects (`couplingRefused` — it renders collected at the status-quo
+    -- floor, wrong near coincidence, so certifying it would be false). Passive
+    -- exclusion: the refused pair still renders; it is out of contract here
+    -- and pinned structurally by the ecdd-partition gate.
+    admitsPair := fun v r => !couplingRefused v.toModal r.toModal
     activeExclusion := false
     -- one snr: both routes' floors sit under 2e-4 at this window (the trap
     -- note about region-dependent error models is satisfied by construction —
@@ -248,11 +256,22 @@ private def composeAtom : SeamAtom :=
        , (mkMode 1100 0.5 0.7, { sigma := 0.5, omega := tp * 1100 + 0.02, are := 0.4 })
       -- … and the WIDENING (gate iii): hard probes INSIDE the old EC exclusion
       -- — configurations the apparatus previously certified for nobody.
-      -- The rail-lens interior (|a·r/Δ| ≈ 14 ≫ 8, θ_acc < Δ? no — Δ = 0.05):
+      -- Deep inside the old exclusion (|a·r/Δ| ≈ 14 ≫ 8; Δ = 0.05 < θ_acc, so
+      -- the ACCURACY lens routes it — the rail lens's own witness is below):
        , (mkMode 800 0.6 0.9, { sigma := 0.6, omega := tp * 800 + 0.05, are := 0.8 })
       -- the sub-grid detune (Δ = 1e-6 rad/s < the 6.5e-5 rotator quantum —
       -- UNREPRESENTABLE collected; the served-full upgrade's sharpest point):
-       , (mkMode 500 0.8 0.7, { sigma := 0.8, omega := tp * 500 + 1e-6, are := 0.7 }) ] }
+       , (mkMode 500 0.8 0.7, { sigma := 0.8, omega := tp * 500 + 1e-6, are := 0.7 })
+      -- the RAIL lens's own service region (its only discriminating law probe:
+      -- Δ = 0.6 > θ_acc so the accuracy lens is OFF; |a·r|/Δ = 4/0.6 ≈ 6.7 > 4
+      -- fires the rail lens; σ = 1.5 makes the damping arm the binding sup and
+      -- clears the cap, |c|/(e·σ_min) ≈ 0.98 < 8 — routed, law asserted):
+       , (mkMode 800 1.5 2.0, { sigma := 1.5, omega := tp * 800 + 0.6, are := 2.0 })
+      -- the STATED refusal (sub-grid Δ fires the accuracy lens; σ = 0.02 is
+      -- extreme Q, |c|/(e·σ_min) ≈ 18 ≥ 8 — the cap refuses, `admitsPair` is
+      -- false, the harness skips it as out-of-contract; the ecdd-partition
+      -- gate pins the refusal structurally):
+       , (mkMode 400 0.02 1.0, { sigma := 0.02, omega := tp * 400 + 1e-6, are := 1.0 }) ] }
 
 /-- The pitch bloom warp (shipped gong: β=0.05, g=1.8, scale 1 ⇒ B = β/g). -/
 private def bloomBg : Float × Float := (0.05 / 1.8, 1.8)
@@ -1241,6 +1260,24 @@ def runEcddPartition (arena : Arena)
   let r2Coin : Array SeamMode := #[{ sigma := 1.2, omega := tp * 200 + 1e-6, are := 0.7 }]
   let r2CM := r2Coin.map (·.toModal)
   let (_plainR, pairedR) := foldRoomsPartitioned vM #[r1M, r2CM]
+  -- (3b) the routing boundary, lens-discriminated. The RAIL lens's service
+  -- region (Δ = 0.6 > θ_acc — the accuracy lens is OFF — with |a·r|/Δ ≈ 6.7 >
+  -- 4 and σ = 1.5 so the damping arm clears the cap) must route; the SAME Δ at
+  -- small amps (|a·r|/Δ ≈ 1.7 < 4) must stay cold — together they prove the
+  -- rail lens itself decided, not θ_acc. And the STATED refusal: a lens-fired
+  -- coupling at extreme Q (σ = 0.02: |c|/(e·σ_min) ≈ 18 ≥ cap 8) classifies
+  -- `refused` and the partition leaves it collected — the admission edge the
+  -- merged seam atom now states instead of certifying.
+  let railVm := (mkMode 800 1.5 2.0).toModal
+  let railRm := ({ sigma := 1.5, omega := tp * 800 + 0.6, are := 2.0 } : SeamMode).toModal
+  let railRmCold := ({ sigma := 1.5, omega := tp * 800 + 0.6, are := 0.5 } : SeamMode).toModal
+  let refVm := (mkMode 400 0.02 1.0).toModal
+  let refRm := ({ sigma := 0.02, omega := tp * 400 + 1e-6, are := 1.0 } : SeamMode).toModal
+  let railRouted := (residueComposePartitioned #[railVm] #[railRm]).2.size == 1
+  let railDiscr := (residueComposePartitioned #[railVm] #[railRmCold]).2.isEmpty
+  let refusedStated := couplingRefused refVm refRm
+                    && (residueComposePartitioned #[refVm] #[refRm]).2.isEmpty
+  let lensOk := railRouted && railDiscr && refusedStated
   let structOk := pairedS.size == 1 && plainS.size == vM.size + rHM.size
               && pairedC.size == 1 && pairedR.size == 1
   let gCoinC : PatchGraph :=
@@ -1270,20 +1307,20 @@ def runEcddPartition (arena : Arena)
     IO.println s!"        cold chain bitDiff {bitCold} (deferred fold ≡ yesterday's collected chain)"
     IO.println s!"        tuned unison (|Δ|=1e-6, sub-grid): partitioned {e1DD} vs collected {e1Coll} (oracle law)"
     IO.println s!"        tuned unison through a chain:      partitioned {eCDD} vs collected {eCColl}"
-    IO.println s!"        routing structure ok={structOk} · room-room coincident chain finite={coinFinite} preE={coinPre} E={coinE}"
+    IO.println s!"        routing structure ok={structOk} · lens-discriminated: rail routes {railRouted} / small-amp cold {railDiscr} / extreme-Q refusal stated {refusedStated} · room-room coincident chain finite={coinFinite} preE={coinPre} E={coinE}"
     -- frozen 2026-07-23 off first-landing measurements (e1DD ≈ 5e-7, eCDD ≈
     -- 6e-6, both collected counter-renders ≈ 1.0): the plain-path chain floor
     -- is 1e-4 — deliverable 2's re-freeze, an order tighter than the bloomed
     -- chain gate's 2e-3 (whose 6.7e-4 is floor-relative, not 1/Δ — diagnosed,
     -- out of v1). The collected/partitioned ratio floor is 1e4×.
-    let pass := bitCold == 0 && structOk
+    let pass := bitCold == 0 && structOk && lensOk
              && e1DD < 5e-5 && e1Coll > 1000.0 * e1DD
              && eCDD < 1e-4 && eCColl > 1000.0 * eCDD
              && coinFinite && coinPre < 1e-18 && coinE > 1e-9
     if pass then
-      passGate "ecdd-partition" s!"the EC/DD choice is the compiler's: cold chain byte-identical (bitDiff 0), tuned unison served through the paired route ({e1DD} vs collected {e1Coll}; chain {eCDD} vs {eCColl}), routing structural, coincident room chain graceful"
+      passGate "ecdd-partition" s!"the EC/DD choice is the compiler's: cold chain byte-identical (bitDiff 0), tuned unison served through the paired route ({e1DD} vs collected {e1Coll}; chain {eCDD} vs {eCColl}), routing structural + lens-discriminated (rail routes, small-amp cold, extreme-Q refusal stated), coincident room chain graceful"
     else
-      failGate "ecdd-partition" s!"bitCold={bitCold} structOk={structOk} e1DD={e1DD} e1Coll={e1Coll} eCDD={eCDD} eCColl={eCColl} coinFinite={coinFinite} coinPre={coinPre} coinE={coinE}"
+      failGate "ecdd-partition" s!"bitCold={bitCold} structOk={structOk} railRouted={railRouted} railDiscr={railDiscr} refusedStated={refusedStated} e1DD={e1DD} e1Coll={e1Coll} eCDD={eCDD} eCColl={eCColl} coinFinite={coinFinite} coinPre={coinPre} coinE={coinE}"
   | _, _, _, _, _, _, _ => failGate "ecdd-partition" "build/render failed for an erasure-gate config"
 
 /-- THE EC/DD LIVE-POLE GATE (fork 3′ Phase 2). Interval classification: a

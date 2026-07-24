@@ -8,9 +8,11 @@ divided-difference paired form (coincidence-stable, bounded c = a·r). This
 cockpit produces the partition predicate's constants AS DATA, the config
 census that sizes the cost, and the second-order-DD go/no-go for v2.
 
-The predicate under measurement (design decision D1 — dual, cost-only):
+The predicate under measurement (design decision D1 — dual, cost-only), gated
+by the paired range cap `|a·r|·min(2/|Δ|, 1/(e·σ_min)) < 8` (a lens-fired
+coupling the cap rejects is REFUSED — stays collected, a stated exclusion):
 
-    route (λ, ν) to DD  ⇔  |Δ| < θ_acc  ∨  |a·r| / |Δ| > W_rail
+    route (λ, ν) to DD  ⇔  (|Δ| < θ_acc  ∨  |a·r| / |Δ| > W_rail)  ∧  cap
 
 θ_acc is where the collected form's cancellation error (~eps/|Δ| relative)
 crosses the seam gate floor; W_rail is the Q4.28 landing ceiling on the
@@ -88,6 +90,7 @@ rng = np.random.default_rng(0x7501)
 # fold chain gate currently 6.7e-4 (the 1/Δ artifact this sprint tightens).
 GATE_FLOOR = 2e-6
 Q428_CEIL = 8.0          # plain-bank Q4.28 magnitude ceiling (modal_divdiff D_dd2)
+PAIR_CAP = 8.0           # the paired atom's build-time range cap (ecddPairCap)
 DD_PREMIUM = 2.2         # per-mode render cost of the paired atom vs a plain mode
 
 # ---------------------------------------------------------------- evaluators
@@ -479,18 +482,44 @@ print(f"\nDD coeff |c| = |a·r| max over sweep: {dd_c_max:.2f}  "
       f"(ceiling {Q428_CEIL}; bounded, no 1/Δ)")
 assert dd_c_max < Q428_CEIL
 
-# the dual predicate, as the compiler will state it
-def route_to_dd(delta_abs, c_abs,
-                theta_acc=THETA_ACC, rail=Q428_CEIL, rail_margin=2.0):
-    """D1: accuracy lens OR range lens (amp-dependent), both compile-time."""
-    return (delta_abs < theta_acc) or (c_abs / delta_abs > rail / rail_margin)
+# the routing verdict, as the compiler states it (classifyCoupling, Modal.lean):
+# lens (accuracy | range) then the paired range cap — the SAME function the
+# shipped predicate computes, so every witness below runs on shipped semantics.
+def classify_coupling(delta_abs, c_abs, sigma_min,
+                      theta_acc=THETA_ACC, rail=Q428_CEIL, rail_margin=2.0,
+                      cap=PAIR_CAP):
+    """'cold' | 'paired' | 'refused' — D1's dual lens gated by the paired
+    range cap |c|·min(2/|Δ|, 1/(e·σ_min)) < cap (min < cap ⟺ either bound
+    clears)."""
+    lens = (delta_abs < theta_acc) or (
+        delta_abs > 0.0 and c_abs / delta_abs > rail / rail_margin)
+    if not lens:
+        return "cold"
+    cap_ok = (delta_abs > 0.0 and c_abs * (2.0 / delta_abs) < cap) or \
+             (sigma_min > 0.0 and c_abs * (1.0 / (np.e * sigma_min)) < cap)
+    return "paired" if cap_ok else "refused"
 
-# the rail lens catches couplings the |Δ| lens alone would pass
-example = (1.0, 8.0)    # |Δ| well above θ_acc, but |c/Δ| = 8 > rail/margin
-assert example[0] > THETA_ACC and route_to_dd(*example), \
-    "the range lens must route what the accuracy lens alone misses"
-print(f"dual-lens witness: |Δ|={example[0]}, |c|={example[1]} -> DD "
-      f"(rail), though |Δ| > θ_acc — |Δ| alone is NOT the criterion")
+def route_to_dd(delta_abs, c_abs, sigma_min):
+    return classify_coupling(delta_abs, c_abs, sigma_min) == "paired"
+
+# THE CAP INTERPLAY (the review finding, stated as data): |c|·2/|Δ| < cap is
+# EXACTLY the complement of the rail lens (|c|/|Δ| > rail/margin = cap/4·2 ⇔
+# cap = 8, margin 2), so a rail-fired coupling routes ONLY through the damping
+# arm: |Δ| < 2e·σ_min and |c| < 8e·σ_min. Witnesses on both sides:
+# (a) the rail lens's SERVICE region — well-damped, heavy, Δ > θ_acc: routes.
+assert 0.6 > THETA_ACC and classify_coupling(0.6, 4.0, 1.5) == "paired", \
+    "the rail lens must route a well-damped heavy coupling the θ lens misses"
+# (b) the same coupling lightly damped — the damping arm can't clear: REFUSED
+#     (stays collected, a stated exclusion, never a certified one).
+assert classify_coupling(0.6, 4.0, 0.05) == "refused", \
+    "a lightly-damped rail-fired coupling must be refused by the cap"
+# (c) the complement identity: with sup = 2/|Δ| binding (σ_min large enough to
+#     matter removed), rail-fired ⇒ cap-rejected — the two conditions negate.
+assert classify_coupling(1.0, 8.0, 0.0) == "refused", \
+    "rail-fired with only the 2/|Δ| arm available must always be refused"
+print(f"rail service region: |Δ|=0.6, |c|=4, σ_min=1.5 -> paired (damping arm "
+      f"clears); σ_min=0.05 -> refused; the 2/|Δ| cap arm alone NEGATES the "
+      f"rail lens exactly (|c|·2/|Δ| < 8 ⟺ |c|/|Δ| < 4)")
 
 # ------------------------------------------------- D_p3: the census
 print()
@@ -511,35 +540,46 @@ def voice_poles(f0, n):
 
 def census(voice, room, amps):
     """Per-coupling routing over the full m·n grid; returns (n_couplings,
-    n_hot, poles that carry >1 hot coupling)."""
+    n_hot, n_refused, poles that carry >1 hot coupling). Cap-refused couplings
+    render collected (the stated exclusion) — counted so the refusal region's
+    real-world bite is on record, not assumed empty."""
     hot_pairs = []
+    n_refused = 0
     for i, lam in enumerate(voice):
         for q, nu in enumerate(room):
-            if route_to_dd(abs(lam - nu), abs(amps[i, q])):
+            verdict = classify_coupling(abs(lam - nu), abs(amps[i, q]),
+                                        min(-lam.real, -nu.real))
+            if verdict == "paired":
                 hot_pairs.append((i, q))
+            elif verdict == "refused":
+                n_refused += 1
     from collections import Counter
     v_deg = Counter(i for i, _ in hot_pairs)
     r_deg = Counter(q for _, q in hot_pairs)
     shared = [p for p, d in list(v_deg.items()) + list(r_deg.items()) if d > 1]
-    return len(voice) * len(room), len(hot_pairs), shared
+    return len(voice) * len(room), len(hot_pairs), n_refused, shared
 
 N_TRIALS = 400
-tot_hot, tot_coup, multi_hot_cfgs, any_hot_cfgs = 0, 0, 0, 0
+tot_hot, tot_coup, tot_refused = 0, 0, 0
+multi_hot_cfgs, any_hot_cfgs = 0, 0
 for _ in range(N_TRIALS):
     room = room_poles(24)
     f0 = rng.uniform(60.0, 1200.0)
     voice = voice_poles(f0, 12)
     amps = (rng.uniform(0.05, 1.0, (len(voice), len(room)))
             * np.exp(1j * rng.uniform(0, 2 * np.pi, (len(voice), len(room)))))
-    nc, nh, shared = census(voice, room, amps)
+    nc, nh, nr, shared = census(voice, room, amps)
     tot_coup += nc
     tot_hot += nh
+    tot_refused += nr
     any_hot_cfgs += (nh > 0)
     multi_hot_cfgs += (len(shared) > 0)
 
 print(f"random voice x log-spaced room, {N_TRIALS} trials:")
 print(f"  hot couplings: {tot_hot}/{tot_coup} "
       f"({100.0 * tot_hot / tot_coup:.3f}% of couplings)")
+print(f"  cap-REFUSED couplings (lens fired, collected floor): "
+      f"{tot_refused}/{tot_coup}")
 print(f"  configs with any hot coupling: {any_hot_cfgs}/{N_TRIALS}")
 print(f"  configs with a SHARED-pole multi-hot (triple coincidence, the "
       f"sort-hot-last gap): {multi_hot_cfgs}/{N_TRIALS}")
@@ -549,15 +589,16 @@ room = room_poles(24)
 voice = voice_poles(100.0, 12)
 voice[3] = room[10] + 1j * 1e-5            # tuned unison, the served case
 amps = np.full((12, 24), 0.5 + 0j)
-nc, nh, shared = census(voice, room, amps)
+nc, nh, nr, shared = census(voice, room, amps)
 cost = (nc - nh + DD_PREMIUM * nh) / nc
 print(f"\ntuned-unison config (a partial parked on a room mode): "
-      f"{nh}/{nc} hot, shared-pole poles: {len(shared)}, "
+      f"{nh}/{nc} hot ({nr} refused), shared-pole poles: {len(shared)}, "
       f"render cost x{cost:.3f} of all-collected")
+assert nh >= 1 and nr == 0, "the tuned unison must route, not be cap-refused"
 
 # a deliberate unison STACK: many rooms on one pole (the columnize watch-item)
 stack = np.repeat(room[10], 6) + 1j * rng.uniform(-1e-4, 1e-4, 6)
-nc, nh, shared = census(voice, stack, np.full((12, 6), 0.5 + 0j))
+nc, nh, nr, shared = census(voice, stack, np.full((12, 6), 0.5 + 0j))
 print(f"unison stack (6 rooms on one mode): {nh}/{nc} hot — the paired "
       f"family wants WS2 columnizing before it wants v2 if this is common")
 
@@ -567,7 +608,8 @@ for _ in range(N_TRIALS):
     r1, r2 = room_poles(16), room_poles(16)
     for nu1 in r1:
         for nu2 in r2:
-            if route_to_dd(abs(nu1 - nu2), 0.25):
+            if route_to_dd(abs(nu1 - nu2), 0.25,
+                           min(-nu1.real, -nu2.real)):
                 chain_hot += 1
 print(f"chain fold (room x room, {N_TRIALS} trials): "
       f"{chain_hot}/{N_TRIALS * 256} couplings hot "
@@ -664,7 +706,10 @@ print(f"  THETA_ACC  = {THETA_ACC:.3e} rad/s  (datapath ADVANTAGE crossing "
 print(f"  RAIL lens  = |c|/|Δ| > {Q428_CEIL}/2 (margin 2x) — amp-dependent; "
       f"comparable in scale to θ_acc (binding for |c| > ~{THETA_ACC * Q428_CEIL / 2:.1f}), "
       f"so BOTH lenses earn their keep: accuracy for moderate amps, range "
-      f"for heavy couplings. |Δ| alone is not the criterion (D1 confirmed).")
+      f"for heavy couplings. |Δ| alone is not the criterion (D1 confirmed). "
+      f"SERVICE region: the 2/|Δ| cap arm exactly negates this lens, so it "
+      f"routes only through the damping arm (|c| < 8e·σ_min) — well-damped "
+      f"heavy couplings; the rest are REFUSED (stated, collected floor).")
 print(f"  DD plateau = {dd_plateau:.3e} everywhere (θ is a COST boundary)")
 print(f"  census     = hot couplings are rare in log-spaced configs, "
       f"~all singletons; sort-hot-last covers everything short of "
