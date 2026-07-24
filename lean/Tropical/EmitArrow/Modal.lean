@@ -659,7 +659,15 @@ def residueComposeDD (voice reverb : Array ModalMode) : Array PairedMode :=
     mis-rendered beat keeps it decades over the gate floor up to ~0.05 rad/s.
     The paired body's series branch carries RAW Δ and holds ~2.4e-6 throughout.
     Frozen at the advantage crossing 4.6e-2 × 10 (generous toward DD — DD is
-    accurate everywhere, so θ is a COST boundary, not a correctness boundary). -/
+    accurate everywhere, so θ is a COST boundary, not a correctness boundary).
+
+    RATE PROVENANCE (the constant is a function of the datapath, not physics):
+    frozen AT SR = 44100 with the 2³² rotator — the grid quantum `2π·SR/2³²`
+    is LINEAR in SR and the advantage crossing tracks it, so the 44.1k–96k
+    family moves the crossing by ≤ ~2.2×, well inside the ×10 margin. If the
+    rotator width or the served rate family ever changes, re-freeze off the
+    cockpit's D_p1c sweep (`demos/ecdd_partition.py`) rather than trusting
+    the margin. -/
 def ecddThetaAcc : Float := 0.4642
 
 /-- The range lens: route when the collected ringing weight `|a·r|/|Δ|` exceeds
@@ -1417,6 +1425,15 @@ def bloomAdmitsPair (mu nu : CplxB) (B g : Float) : Bool :=
   | .excludedDepth => false
   | _ => true
 
+/-- The two regions the LIVE classifier can emit — a two-constructor sum, so
+    `bloomCompose`'s match is exhaustive BY TYPE rather than by an
+    "unreachable" comment (the coincident regions and the depth exclusion are
+    not representable here: they return `none` and stay baked-only). The
+    baked classifier keeps the full five-region `SeamRegion`. -/
+inductive LiveRegion where
+  | serOnly
+  | crossing
+
 /-- WS-LP: classify a live-σ pair over its whole σ interval — `some (region,
     nDepth, kDepth)` iff the pair sits in ONE non-coincident region at EVERY
     σ ∈ `[sigLo, sigHi]` (`serOnly` throughout, phase 1, or `crossing`
@@ -1431,7 +1448,7 @@ def bloomAdmitsPair (mu nu : CplxB) (B g : Float) : Bool :=
     `zBnd` per region (κ itself for serOnly; the branch-boundary `|z| = |a+1|`
     for crossing), same `+8` guard and `≤ 300` cap. -/
 def classifyBloomPairLive (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
-    (B g : Float) : Option (SeamRegion × Nat × Nat) := Id.run do
+    (B g : Float) : Option (LiveRegion × Nat × Nat) := Id.run do
   let kappa := mu.scale B
   let imA := (nuOmega - mu.im) / g
   -- Re a = (−σ_ν − Re μ)/g, decreasing in σ_ν
@@ -1565,7 +1582,6 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
               k1Ser := csubE (bloomGammaStarE aE kE (litF g)) cfOverG
               k1Cf := cnegE cfOverG, fSer := cnegE invNuMuE
               dSwitch, invA, cfB, cfN }
-          | _ => continue   -- unreachable: the live classifier only emits serOnly/crossing
       | some rSig =>
         let nu : CplxB := ⟨-rSig, rOm⟩
         -- the shared classifier (WS-CL): `excludedDepth` ⇒ this pair is out of scope
