@@ -1382,27 +1382,41 @@ def runEcddLive (arena : Arena)
   let oracleChainAt := fun (rv : Float) => oracleSeam voice
     (foldRoomsFloat room1 #[{ sigma := 6.91 / rv, omega := tp * 220, are := 0.7 }])
     idWarp admAll 8 nWin
+  -- (4) OVERDRIVE — the uniform-bank clamp (`clampSigmas` at graph ingestion):
+  -- a σ expression driven OUT of the declared span (rt60 = 0.1 through a
+  -- wide value clamp, so the raw σ evaluates to 69.1; the DECLARED span is
+  -- still [0.576, 34.55]) saturates in-kernel to the declared edge. The whole
+  -- bank — collected modes and the paired atom alike — must behave as
+  -- rt60 = 0.2: out-of-span drives can neither desync the two lane families
+  -- nor walk a cold-classified coupling's |Δ| under θ_acc.
+  let oobRoom : Array ModalMode :=
+    #[{ sigma := div (lit 691 2) (clampE (litF 0.1) (litF 0.05) (litF 30.0)),
+        omega := litF (tp * 220), cre := litF 0.7, cim := lit 0,
+        sigmaRange := span }]
   match ← renderGraphN arena "ecddlive_a" (graphOf #[tunedAt 2.0]) nWin,
         ← renderGraphN arena "ecddlive_b" (graphOf #[tunedAt 4.0]) nWin,
-        ← renderGraphN arena "ecddlive_chain" (graphOf #[r1M, tunedAt 2.0]) nWin with
-  | .ok dutA, .ok dutB, .ok dutC =>
+        ← renderGraphN arena "ecddlive_chain" (graphOf #[r1M, tunedAt 2.0]) nWin,
+        ← renderGraphN arena "ecddlive_oob" (graphOf #[oobRoom]) nWin with
+  | .ok dutA, .ok dutB, .ok dutC, .ok dutO =>
     let eA := relL2Win dutA (oracleAt 2.0) lo nWin
     let eB := relL2Win dutB (oracleAt 4.0) lo nWin
     let eC := relL2Win dutC (oracleChainAt 2.0) lo nWin
+    let eO := relL2Win dutO (oracleAt 0.2) lo nWin
     IO.println s!"ecdd live-pole (interval classification over the declared rt60 span):"
     IO.println s!"        structure ok={structOk} (tuned routes, untuned/rangeless stay collected, chain routes at the final fold)"
     IO.println s!"        law: rt60=2.0 rel {eA} · rt60=4.0 rel {eB} (one DD lane across the knob) · live+chain rel {eC}"
+    IO.println s!"        overdrive: rt60 driven to 0.1 (out of span) ≡ oracle at the declared edge 0.2 rel {eO} (the whole bank saturates together)"
     -- frozen 2026-07-23 off first-landing measurements (eA/eB ≈ 5e-7, the
     -- single-crossing floor; eC ≈ 1.7e-5): the live lane owes the same floors
     -- as the baked lane — the lift changes WHERE constants are computed, not
     -- their accuracy.
-    let pass := structOk && allFinite dutA
-             && eA < 5e-5 && eB < 5e-5 && eC < 1e-4
+    let pass := structOk && allFinite dutA && allFinite dutO
+             && eA < 5e-5 && eB < 5e-5 && eC < 1e-4 && eO < 5e-5
     if pass then
-      passGate "ecdd-live" s!"a live-rt60 room tuned onto a partial classifies over its declared interval and takes the DD lane throughout ({eA} / {eB} at two knob values, no runtime select to click); live+chain served on the plain arm ({eC}); untuned/rangeless live rooms stay collected"
+      passGate "ecdd-live" s!"a live-rt60 room tuned onto a partial classifies over its declared interval and takes the DD lane throughout ({eA} / {eB} at two knob values, no runtime select to click); live+chain served on the plain arm ({eC}); untuned/rangeless live rooms stay collected; an out-of-span drive saturates the WHOLE bank to the declared edge ({eO})"
     else
-      failGate "ecdd-live" s!"structOk={structOk} eA={eA} eB={eB} eC={eC}"
-  | _, _, _ => failGate "ecdd-live" "build/render failed for a live-pole erasure config"
+      failGate "ecdd-live" s!"structOk={structOk} eA={eA} eB={eB} eC={eC} eO={eO}"
+  | _, _, _, _ => failGate "ecdd-live" "build/render failed for a live-pole erasure config"
 
 /-- THE GAUGE-OVER-HOT-CHAIN GATE (the gauge × partition interaction, measured
     rather than assumed). Gauge is a COLLECTED surface in v1: it forces the

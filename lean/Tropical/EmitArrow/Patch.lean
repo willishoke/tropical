@@ -224,6 +224,11 @@ partial def lowerModal (g : PatchGraph) (id : String) :
     | .error s!"lowerModal: node '{id}' not found"
   match pn.node with
   | .modalSource ms a clk addr count bloom? =>
+    -- unit modes enter the island CLAMPED to their declared σ intervals
+    -- (`clampSigmas` — the uniform-bank clamp; every downstream fold,
+    -- partition, gauge, and mix inherits it, so the whole bank saturates
+    -- together under knob overdrive). In-span drives are value-identical.
+    let ms := clampSigmas ms
     match bloom? with
     | none => .ok (.plain ms #[], a, clk, addr, none, count)
     -- a bloomed source starts modal with an EMPTY room; reverbs fold in downstream
@@ -233,6 +238,9 @@ partial def lowerModal (g : PatchGraph) (id : String) :
     -- The live count does NOT survive composition (the composed modes are no
     -- longer a prefix of the source's) — realize at full capacity (graceful-
     -- silent through a reverb; v1, no warning, legal state).
+    -- Room unit modes enter clamped (the uniform-bank σ clamp — see
+    -- `.modalSource`); in-span drives are value-identical.
+    let room := clampSigmas room
     match bank with
     | .plain v rooms =>
       -- source ⋙ filter: ACCUMULATE the room; the fold (and the EC/DD

@@ -699,11 +699,34 @@ def sigmaInterval? (m : ModalMode) : Option (Float × Float) :=
 /-- A mode's pole with a LIVE σ CLAMPED to its declared interval (coefficient-
     time, the WS-LP kernel-clamp precedent) — what makes the paired route's
     build-time range cap sound by construction even if the host drives the knob
-    out of its declared span. A const σ passes through untouched. -/
+    out of its declared span. A const σ passes through untouched. Production
+    unit modes arrive PRE-clamped (`clampSigmas` at graph ingestion), making
+    this a value-identical second wrap there; it stays as defense in depth for
+    direct callers (fixtures, the seam sweep) that own their own discipline. -/
 def clampedPoleE (m : ModalMode) : CplxE :=
   match sigConstF? m.sigma, m.sigmaRange with
   | none, some (lo, hi) => (neg (clampE m.sigma (litF lo) (litF hi)), m.omega)
   | _, _ => m.poleE
+
+/-- Clamp every LIVE σ with a declared interval to that interval, in-kernel —
+    the UNIFORM-BANK extension of `clampedPoleE`, applied to unit modes at
+    graph ingestion (`lowerModal`'s source/reverb arms). Two things it buys:
+    (1) CONSISTENCY under knob overdrive — the collected modes and the paired
+    atoms of one bank saturate TOGETHER when the host drives a knob out of its
+    declared span, instead of the paired lanes clamping while the collected
+    lanes follow the raw knob (an internally inconsistent bank); (2) COLD
+    soundness — `couplingHot` decides cold at min |Δ| over the DECLARED
+    interval, so an unclamped out-of-span drive could dip a cold coupling's
+    |Δ| under θ_acc while it stays collected; the clamp makes the declared
+    interval the enforced one. `sigmaRange` is kept on the mode (the
+    classifiers still read it); the wrap is value-identity for any in-span
+    drive, so in-range behavior is bit-identical. Const σ passes untouched
+    (the cold byte-identity discipline). -/
+def clampSigmas (ms : Array ModalMode) : Array ModalMode :=
+  ms.map fun m =>
+    match sigConstF? m.sigma, m.sigmaRange with
+    | none, some (lo, hi) => { m with sigma := clampE m.sigma (litF lo) (litF hi) }
+    | _, _ => m
 
 /-- Where a (v, r) coupling lands — the routing verdict with the paired range
     cap made a FIRST-CLASS outcome rather than a silent fallback, so the seam
