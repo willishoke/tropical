@@ -676,27 +676,55 @@ def ecddRailCeil : Float := 4.0
     DD site's i64 rail of 32. -/
 def ecddPairCap : Float := 8.0
 
+/-- The σ INTERVAL a mode's damping ranges over: a const σ is its own point
+    interval; a LIVE σ with a declared `sigmaRange` classifies over the knob
+    span (WS-LP's build-time-over-the-declared-interval discipline); a live σ
+    without a range is unclassifiable (`none` ⇒ the coupling stays collected). -/
+def sigmaInterval? (m : ModalMode) : Option (Float × Float) :=
+  match sigConstF? m.sigma with
+  | some s => some (s, s)
+  | none => m.sigmaRange
+
+/-- A mode's pole with a LIVE σ CLAMPED to its declared interval (coefficient-
+    time, the WS-LP kernel-clamp precedent) — what makes the paired route's
+    build-time range cap sound by construction even if the host drives the knob
+    out of its declared span. A const σ passes through untouched. -/
+def clampedPoleE (m : ModalMode) : CplxE :=
+  match sigConstF? m.sigma, m.sigmaRange with
+  | none, some (lo, hi) => (neg (clampE m.sigma (litF lo) (litF hi)), m.omega)
+  | _, _ => m.poleE
+
 /-- The per-coupling routing predicate — compile-time only. `true` ⇒ the (v, r)
-    coupling leaves the collected sums and becomes one `PairedMode`. Requires
-    BOTH poles and BOTH amps to const-fold (a live anything stays collected in
-    v1) and both modes deg-0, then fires on either lens (accuracy | range),
-    gated by the paired range cap. -/
+    coupling leaves the collected sums and becomes one `PairedMode`. σ may be
+    LIVE with a declared range (Phase 2): the lenses evaluate at min |Δ| over
+    the interval — a coupling whose interval DIPS under θ takes DD throughout
+    the knob span, so no runtime select ever exists (D2; the WS-LP phase-3a
+    pattern). ω and amps must const-fold, both modes deg-0; anything else stays
+    collected. Fires on either lens (accuracy | range), gated by the paired
+    range cap at the interval's worst point. -/
 def couplingHot (v r : ModalMode) : Bool :=
   v.deg == 0 && r.deg == 0 &&
   (Id.run do
-    let some sv := sigConstF? v.sigma | return false
+    let some (svLo, svHi) := sigmaInterval? v | return false
+    let some (srLo, srHi) := sigmaInterval? r | return false
     let some wv := sigConstF? v.omega | return false
-    let some sr := sigConstF? r.sigma | return false
     let some wr := sigConstF? r.omega | return false
     let some ar := sigConstF? v.cre | return false
     let some ai := sigConstF? v.cim | return false
     let some rr := sigConstF? r.cre | return false
     let some ri := sigConstF? r.cim | return false
-    let dAbs := Float.sqrt ((sv - sr) * (sv - sr) + (wv - wr) * (wv - wr))
+    -- min |Δ| over the σ interval(s): the span distance (0 when they overlap —
+    -- the dipper), ω exact. Const σ degenerates to the point distance.
+    let sepLo := if svLo < srLo then srLo else svLo
+    let sepHi := if svHi < srHi then svHi else srHi
+    let dSig := if sepLo > sepHi then sepLo - sepHi else 0.0
+    let dAbs := Float.sqrt (dSig * dSig + (wv - wr) * (wv - wr))
     let cAbs := Float.sqrt (ar * ar + ai * ai) * Float.sqrt (rr * rr + ri * ri)
     let hot := dAbs < ecddThetaAcc || (dAbs > 0.0 && cAbs / dAbs > ecddRailCeil)
-    -- the paired range cap: sup of the divided-difference kernel, both bounds
-    let smin := if sv < sr then sv else sr
+    -- the paired range cap: sup of the divided-difference kernel over the
+    -- WHOLE interval — σ_min at the spans' low edge, |Δ| at its minimum
+    -- (sound: the paired pole clamps to the interval, `clampedPoleE`)
+    let smin := if svLo < srLo then svLo else srLo
     let sup1 := if dAbs > 0.0 then 2.0 / dAbs else 1e308
     let sup2 := if smin > 0.0 then 1.0 / (2.718281828459045 * smin) else 1e308
     let sup := if sup1 < sup2 then sup1 else sup2
@@ -730,7 +758,10 @@ def residueComposePartitioned (voice reverb : Array ModalMode) :
   for (v, i) in voice.zipIdx do
     for (r, q) in reverb.zipIdx do
       if isHot i q then
-        paired := paired.push { lam := v.poleE, nu := r.poleE, c := cmulE v.ampE r.ampE }
+        -- live-σ poles enter the paired atom CLAMPED to their declared
+        -- interval, keeping the routing's range cap sound (Phase 2)
+        paired := paired.push
+          { lam := clampedPoleE v, nu := clampedPoleE r, c := cmulE v.ampE r.ampE }
   return (forced ++ ringing, paired)
 
 /-- Multiply a `CplxE` by a real `Sig`. -/

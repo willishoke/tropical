@@ -1286,4 +1286,85 @@ def runEcddPartition (arena : Arena)
       failGate "ecdd-partition" s!"bitCold={bitCold} structOk={structOk} e1DD={e1DD} e1Coll={e1Coll} eCDD={eCDD} eCColl={eCColl} coinFinite={coinFinite} coinPre={coinPre} coinE={coinE}"
   | _, _, _, _, _, _, _ => failGate "ecdd-partition" "build/render failed for an erasure-gate config"
 
+/-- THE EC/DD LIVE-POLE GATE (fork 3′ Phase 2). Interval classification: a
+    live-rt60 room mode tuned ONTO a baked partial routes to the paired DD
+    body at BUILD time when min |Δ| over the declared σ span dips under θ_acc
+    — the dipper takes DD THROUGHOUT the knob range, so no runtime select
+    exists and "no click at θ" is a compile-time triviality (D2). Asserts:
+    (1) STRUCTURE — the tuned live coupling routes (paired size 1: ω matched,
+        σ span ∋ the partial's σ), an UNTUNED live room routes nothing
+        (ordinary reverbs stay byte-identical), and a live σ with NO declared
+        range stays collected (unclassifiable — graceful);
+    (2) THE LAW ACROSS THE KNOB — the live render matches `oracleSeam` at TWO
+        rt60 values (same classification, same DD lane, constants computed by
+        kernel arithmetic off the live slot instead of at build time) — the
+        "confirm, don't assume" check that the paired columns (`ds`, `sigmaNu`
+        as s0 expressions of the knob; the per-sample series/direct `cexpm1`
+        select) genuinely lift;
+    (3) LIVE + CHAIN (the coverage-matrix cell, decided HERE, not by
+        accident): the PLAIN arm serves it — a baked room folds first, the
+        live tuned room folds last and partitions against the composed
+        (const-foldable) amps. The WS-LP bloomed live arm's refusal of
+        composed rooms is untouched (`runBloomLivePole` pins it). -/
+def runEcddLive (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let lo := anchorNat + 1
+  let nWin : Nat := 32768
+  let admAll := fun (_ _ : SeamMode) => true
+  -- the partial sits at σ = 3.455 = 6.91/2.0 — INSIDE the σ span of an
+  -- rt60 ∈ [0.2, 12] room ([0.576, 34.55]) ⇒ with ω matched, min|Δ| = 0
+  let voice : Array SeamMode := #[mkMode 220 3.455 1.0, mkMode 610 1.3 0.6]
+  let vM := voice.map (·.toModal)
+  let room1 : Array SeamMode := #[mkMode 200 1.2 1.0, mkMode 380 1.6 0.8]
+  let r1M := room1.map (·.toModal)
+  let (rtLo, rtHi) : Float × Float := (0.2, 12.0)
+  let liveSigma := fun (rv : Float) =>
+    div (lit 691 2) (clampE (litF rv) (litF rtLo) (litF rtHi))
+  let liveRoomAt := fun (rv : Float) (fHz amp : Float) (range? : Option (Float × Float)) =>
+    #[({ sigma := liveSigma rv, omega := litF (tp * fHz),
+         cre := litF amp, cim := lit 0,
+         sigmaRange := range? } : ModalMode)]
+  let span := some (6.91 / rtHi, 6.91 / rtLo)
+  let graphOf := fun (rooms : Array (Array ModalMode)) =>
+    let mkRev := fun (i : Nat) (rm : Array ModalMode) =>
+      ({ id := s!"rev{i}", node := .modalReverb (if i == 0 then "src" else s!"rev{i-1}") rm none })
+    ({ nodes := #[⟨"src", .modalSource vM anchorSig clockLit none none none⟩]
+              ++ rooms.zipIdx.map (fun (rm, i) => mkRev i rm)
+       output := s!"rev{rooms.size - 1}" } : PatchGraph)
+  -- (1) structure: tuned+ranged routes; untuned stays cold; rangeless stays cold
+  let tunedAt := fun rv => liveRoomAt rv 220.0 0.7 span
+  let (_, pTuned) := residueComposePartitioned vM (tunedAt 2.0)
+  let (_, pUntuned) := residueComposePartitioned vM (liveRoomAt 2.0 500.0 0.7 span)
+  let (_, pNoRange) := residueComposePartitioned vM (liveRoomAt 2.0 220.0 0.7 none)
+  let (_, pChain) := foldRoomsPartitioned vM #[r1M, tunedAt 2.0]
+  let structOk := pTuned.size == 1 && pUntuned.isEmpty && pNoRange.isEmpty
+               && pChain.size == 1
+  -- (2) the law at two knob values (single compose), (3) through a chain
+  let oracleAt := fun (rv : Float) => oracleSeam voice
+    #[{ sigma := 6.91 / rv, omega := tp * 220, are := 0.7 }] idWarp admAll 8 nWin
+  let oracleChainAt := fun (rv : Float) => oracleSeam voice
+    (foldRoomsFloat room1 #[{ sigma := 6.91 / rv, omega := tp * 220, are := 0.7 }])
+    idWarp admAll 8 nWin
+  match ← renderGraphN arena "ecddlive_a" (graphOf #[tunedAt 2.0]) nWin,
+        ← renderGraphN arena "ecddlive_b" (graphOf #[tunedAt 4.0]) nWin,
+        ← renderGraphN arena "ecddlive_chain" (graphOf #[r1M, tunedAt 2.0]) nWin with
+  | .ok dutA, .ok dutB, .ok dutC =>
+    let eA := relL2Win dutA (oracleAt 2.0) lo nWin
+    let eB := relL2Win dutB (oracleAt 4.0) lo nWin
+    let eC := relL2Win dutC (oracleChainAt 2.0) lo nWin
+    IO.println s!"ecdd live-pole (interval classification over the declared rt60 span):"
+    IO.println s!"        structure ok={structOk} (tuned routes, untuned/rangeless stay collected, chain routes at the final fold)"
+    IO.println s!"        law: rt60=2.0 rel {eA} · rt60=4.0 rel {eB} (one DD lane across the knob) · live+chain rel {eC}"
+    -- frozen 2026-07-23 off first-landing measurements (eA/eB ≈ 5e-7, the
+    -- single-crossing floor; eC ≈ 1.7e-5): the live lane owes the same floors
+    -- as the baked lane — the lift changes WHERE constants are computed, not
+    -- their accuracy.
+    let pass := structOk && allFinite dutA
+             && eA < 5e-5 && eB < 5e-5 && eC < 1e-4
+    if pass then
+      passGate "ecdd-live" s!"a live-rt60 room tuned onto a partial classifies over its declared interval and takes the DD lane throughout ({eA} / {eB} at two knob values, no runtime select to click); live+chain served on the plain arm ({eC}); untuned/rangeless live rooms stay collected"
+    else
+      failGate "ecdd-live" s!"structOk={structOk} eA={eA} eB={eB} eC={eC}"
+  | _, _, _ => failGate "ecdd-live" "build/render failed for a live-pole erasure config"
+
 end Tropical.Tropicaltest.SeamSweep
