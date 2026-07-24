@@ -644,6 +644,95 @@ def residueComposeDD (voice reverb : Array ModalMode) : Array PairedMode :=
   voice.flatMap fun v => reverb.map fun r =>
     { lam := v.poleE, nu := r.poleE, c := cmulE v.ampE r.ampE }
 
+-- ── The EC/DD PARTITIONED compose (fork 3′ erasure, Phase 1) ──────────────────
+-- The compiler owns the EC-vs-DD choice PER COUPLING: a (λ, ν) pair routes to
+-- the fused paired atom when the collected `±c/Δ` representation would degrade,
+-- and stays collected otherwise. Everything decides at compile time on
+-- const-folded poles/amps; anything unmeasurable (live pole, live amp) stays
+-- collected in v1 — Phase 2 classifies live poles over their declared interval.
+
+/-- θ_acc — the accuracy lens (rad/s), frozen from `demos/ecdd_partition.py`
+    (2026-07-23). The measured mechanism is the FREQUENCY GRID, not float64
+    cancellation: rotator increments quantize ω at `2π·SR/2³² ≈ 6.5e-5 rad/s`,
+    so the collected form renders a grid-quantized Δ — below one quantum the two
+    increments coincide and the `±c/Δ` residues cancel to exact silence, and the
+    mis-rendered beat keeps it decades over the gate floor up to ~0.05 rad/s.
+    The paired body's series branch carries RAW Δ and holds ~2.4e-6 throughout.
+    Frozen at the advantage crossing 4.6e-2 × 10 (generous toward DD — DD is
+    accurate everywhere, so θ is a COST boundary, not a correctness boundary). -/
+def ecddThetaAcc : Float := 0.4642
+
+/-- The range lens: route when the collected ringing weight `|a·r|/|Δ|` exceeds
+    the Q4.28 magnitude ceiling 8 with a 2× margin. Amp-dependent — `|Δ|` alone
+    is not the criterion (cockpit D_p2: binding for `|a·r| ≳ 1.9`). -/
+def ecddRailCeil : Float := 4.0
+
+/-- The paired atom's own build-time range cap: per pair, `|Wc| ≤ |c|·sup_d
+    |e^{νd}·d·cexpm1(Δd)| ≤ |c|·min(2/|Δ|, 1/(e·σ_min))` (the sup the
+    remainder-handoff deferred until the DD wiring landed — this is that
+    landing). A coupling whose bound exceeds the cap is NOT routed (stays
+    collected — reject, the status-quo floor; the scale arm can come later if a
+    real patch ever trips this). Cap 8 = the plain Q4.28 ceiling, 4× under the
+    DD site's i64 rail of 32. -/
+def ecddPairCap : Float := 8.0
+
+/-- The per-coupling routing predicate — compile-time only. `true` ⇒ the (v, r)
+    coupling leaves the collected sums and becomes one `PairedMode`. Requires
+    BOTH poles and BOTH amps to const-fold (a live anything stays collected in
+    v1) and both modes deg-0, then fires on either lens (accuracy | range),
+    gated by the paired range cap. -/
+def couplingHot (v r : ModalMode) : Bool :=
+  v.deg == 0 && r.deg == 0 &&
+  (Id.run do
+    let some sv := sigConstF? v.sigma | return false
+    let some wv := sigConstF? v.omega | return false
+    let some sr := sigConstF? r.sigma | return false
+    let some wr := sigConstF? r.omega | return false
+    let some ar := sigConstF? v.cre | return false
+    let some ai := sigConstF? v.cim | return false
+    let some rr := sigConstF? r.cre | return false
+    let some ri := sigConstF? r.cim | return false
+    let dAbs := Float.sqrt ((sv - sr) * (sv - sr) + (wv - wr) * (wv - wr))
+    let cAbs := Float.sqrt (ar * ar + ai * ai) * Float.sqrt (rr * rr + ri * ri)
+    let hot := dAbs < ecddThetaAcc || (dAbs > 0.0 && cAbs / dAbs > ecddRailCeil)
+    -- the paired range cap: sup of the divided-difference kernel, both bounds
+    let smin := if sv < sr then sv else sr
+    let sup1 := if dAbs > 0.0 then 2.0 / dAbs else 1e308
+    let sup2 := if smin > 0.0 then 1.0 / (2.718281828459045 * smin) else 1e308
+    let sup := if sup1 < sup2 then sup1 else sup2
+    return hot && cAbs * sup < ecddPairCap)
+
+/-- The PARTITIONED compose — the one `residueCompose` seam. Cold couplings take
+    `residueComposeEC`'s collected shapes; hot couplings (per `couplingHot`)
+    leave the Cauchy sums (BOTH halves — the forced amp's `r/(λ−ν)` term and the
+    ringing amp's `a/(λ−ν)` term migrate together; the split is EXACT residue
+    algebra, not an approximation) and land as fused `PairedMode` atoms.
+    When NOTHING is hot the result is `residueComposeEC` VERBATIM (the same
+    call), so the cold path is byte-identical to the pre-partition compiler —
+    the erasure gate's discipline. -/
+def residueComposePartitioned (voice reverb : Array ModalMode) :
+    Array ModalMode × Array PairedMode := Id.run do
+  if voice.isEmpty then return (#[], #[])
+  let hotM := voice.map fun v => reverb.map fun r => couplingHot v r
+  if hotM.all (·.all (!·)) then return (residueComposeEC voice reverb, #[])
+  let isHot := fun (i q : Nat) => (hotM[i]!)[q]!
+  let forced := voice.mapIdx fun i v =>
+    let Hlam := reverb.zipIdx.foldl (init := ((lit 0, lit 0) : CplxE)) fun s (r, q) =>
+      if isHot i q then s
+      else caddE s (cdivE r.ampE (csubE v.poleE r.poleE))
+    modeOfE v.poleE (cmulE v.ampE Hlam)
+  let ringing := reverb.mapIdx fun q r =>
+    let coupling := voice.zipIdx.foldl (init := ((lit 0, lit 0) : CplxE)) fun s (v, i) =>
+      if isHot i q then s
+      else caddE s (cdivE v.ampE (csubE v.poleE r.poleE))
+    modeOfE r.poleE (cnegE (cmulE r.ampE coupling))
+  let mut paired : Array PairedMode := #[]
+  for (v, i) in voice.zipIdx do
+    for (r, q) in reverb.zipIdx do
+      if isHot i q then
+        paired := paired.push { lam := v.poleE, nu := r.poleE, c := cmulE v.ampE r.ampE }
+  return (forced ++ ringing, paired)
+
 /-- Multiply a `CplxE` by a real `Sig`. -/
 def scaleRealE (s : Sig) (z : CplxE) : CplxE := (mul s z.1, mul s z.2)
 
@@ -714,12 +803,13 @@ def bankFoldPaired (cols : PairedBankCols) (body : PairedModeSym → Sig) : Sig 
     `|Wc|·2²⁸·2³⁰ < 2⁶³` ⇒ **per mode `|Wc| < 32`**. This is a FACTOR site: `Wc`
     carries the per-sample `d·cexpm1(Δd)` secular, which is UNBOUNDED by a
     coefficient-time `max|A|` (it needs the bake-time sup `min(2/|Δ|, 1/(e·σ_min))`),
-    so the plain `bankLandExp` does NOT reach it. **Reachable max**: not bounded by
-    admission (a pole-DISTANCE test). **DEFERRED, not fixed** (remainder-handoff §1):
-    this is a fixture-only site — no Playground surface routes through
-    `modalBankSigTableDD` (the DD dispatch is never wired into `lowerModal`), so it
-    lands nothing in production. Option E covers it when the DD wiring lands, with
-    its own measured sup and witness, per the role-split rule. `envDf`
+    so the plain `bankLandExp` does NOT reach it. **Reachable max**: bounded at the
+    ROUTING site, not here — the EC/DD partition (`couplingHot`) admits a coupling
+    to this body only when the build-time sup `|c|·min(2/|Δ|, 1/(e·σ_min)) <
+    ecddPairCap = 8` clears (4× under this rail; a coupling over the cap stays
+    collected — reject, per the remainder-handoff's deferred item, now landed).
+    Direct callers outside the partition (fixtures, the seam sweep) own their own
+    amp discipline. `envDf`
     and `e^z` stay float (never landed); `z`'s imaginary part uses raw `ω_d·dSec`
     (the divisor needs only relative precision; the rotator phase is integer-reduced,
     consistent because `e^z` is periodic). -/
@@ -1834,6 +1924,25 @@ def modalBankTerm (modes : Array ModalMode) (anchor : Sig) (c : Clock)
     then fun ms clk a => modalBankSigTable ms clk a count?
     else fun ms clk a => modalBankSig ms clk a
   ArrowTerm.arrUn (fun clkSig => lower modes clkSig anchor) (ArrowTerm.clk c)
+
+/-- The PARTITIONED bank: the collected component through `modalBankTerm`'s
+    exact lowering plus the paired component (`modalBankSigTableDD`) summed at
+    the SAME clock leaf — one `arrUn`, so warps/scrub reach both bodies through
+    the shared clock identically. `paired = #[]` falls through to
+    `modalBankTerm` VERBATIM (the byte-identity discipline: a cold partition
+    emits today's term). The two bank regions are sequential siblings, so the
+    `idxId 0` reuse is safe (the `modalBankSigPairTable` precedent). -/
+def modalBankTermPartitioned (plain : Array ModalMode) (paired : Array PairedMode)
+    (anchor : Sig) (c : Clock) (count? : Option Sig := none) : ArrowTerm :=
+  if paired.isEmpty then modalBankTerm plain anchor c count? else
+  let banked := bankIsUniform plain && (count?.isSome || banksTableEnabled)
+  let lowerP := if banked
+    then fun ms clk a => modalBankSigTable ms clk a count?
+    else fun ms clk a => modalBankSig ms clk a
+  ArrowTerm.arrUn
+    (fun clkSig => add (lowerP plain clkSig anchor)
+                       (modalBankSigTableDD paired clkSig anchor))
+    (ArrowTerm.clk c)
 
 -- ── The DIRECTION operator: forward↔reverse crossfade ─────────────────────────
 -- A bank's reading DIRECTION crossfades between the CAUSAL tail (energy at d>0, a

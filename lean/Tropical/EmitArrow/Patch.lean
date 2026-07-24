@@ -152,19 +152,60 @@ def nodeIsModal (g : PatchGraph) (id : String) : Bool :=
     | .modalGauge .. => true
     | _ => false
 
-/-- The lowered modal value: a PLAIN composed bank (realized directly at the
-    boundary) or a BLOOMED source kept modal — its voice modes and the FOLDED
-    room chain held SEPARATE, so the pitch bloom is crossed ONCE (`bloomCompose`)
-    at realization, AFTER the rooms fold. The rooms fold by `residueComposeEC`
-    reinterpreted as filter∘filter (the two-hats reading: a bank is both a struck
-    source `Σaᵢe^{λᵢd}` and a transfer function `Σaᵢ/(s−λᵢ)`, same data), so
-    gong⋙reverb⋙reverb crosses each nonlinearity exactly once. This is the
-    reassociated lowering order: right-fold the modal tail, cross the bloom
-    last — attaching the crossing per-inlet would force the bloom at the first
-    room and hand the second a bare `Sig`. -/
+/-- The lowered modal value: a PLAIN source with its room chain DEFERRED
+    (accumulated, folded at realization — the EC/DD partition site) or a
+    BLOOMED source kept modal — its voice modes and the FOLDED room chain held
+    SEPARATE, so the pitch bloom is crossed ONCE (`bloomCompose`) at
+    realization, AFTER the rooms fold. Rooms fold by the residue calculus
+    reinterpreted as filter∘filter (the two-hats reading: a bank is both a
+    struck source `Σaᵢe^{λᵢd}` and a transfer function `Σaᵢ/(s−λᵢ)`, same
+    data), so gong⋙reverb⋙reverb crosses each nonlinearity exactly once.
+
+    Why the plain arm defers (fork 3′): rooms COMMUTE (filter∘filter, the
+    bit-exact registered EC-commute law), so the fold order is free — and the
+    partition wants hot rooms (couplings near coincidence, `couplingHot`) to
+    fold LAST, where their couplings become `PairedMode` atoms that never need
+    to re-compose. A cold chain folds in arrival order through
+    `residueComposeEC` — byte-identical to the eager fold this replaced. -/
 inductive ModalBank where
-  | plain (modes : Array ModalMode)
+  | plain (voice : Array ModalMode) (rooms : Array (Array ModalMode))
   | bloomed (voice room : Array ModalMode) (bloomB gRate : Float)
+
+/-- The COLLECTED chain fold, arrival order — today's exact expressions (the
+    byte-identity comparator, and the fallback for the surfaces that need a
+    plain `Array ModalMode`: gauge, mix, direction). -/
+def foldRoomsEC (voice : Array ModalMode) (rooms : Array (Array ModalMode)) :
+    Array ModalMode :=
+  rooms.foldl residueComposeEC voice
+
+/-- The PARTITIONED chain fold: cold rooms fold first in arrival order
+    (collected, verbatim), rooms carrying a hot coupling fold LAST, and only
+    the final fold partitions — so `PairedMode`s form once and never
+    re-compose. The hot-room test is a sort HEURISTIC on source-unit
+    poles/amps (the partition itself re-decides per coupling, on the composed
+    amps, inside `residueComposePartitioned`); a multi-hot residual (a hot
+    coupling forming before the final fold — a deliberate triple/multi-unison)
+    stays collected at the status-quo floor, served gracefully, not silently
+    wrong. When no room is hot this is `foldRoomsEC` VERBATIM. -/
+def foldRoomsPartitioned (voice : Array ModalMode)
+    (rooms : Array (Array ModalMode)) :
+    Array ModalMode × Array PairedMode :=
+  if rooms.isEmpty then (voice, #[]) else
+  let units := #[voice] ++ rooms
+  let roomHot := fun (j : Nat) (room : Array ModalMode) =>
+    room.any fun q => units.zipIdx.any fun (u, i) =>
+      i != j + 1 && u.any fun p => couplingHot p q || couplingHot q p
+  if (rooms.zipIdx.all fun (r, j) => !roomHot j r) then
+    (foldRoomsEC voice rooms, #[])
+  else
+    let cold := rooms.zipIdx.filterMap fun (r, j) =>
+      if roomHot j r then none else some r
+    let hot := rooms.zipIdx.filterMap fun (r, j) =>
+      if roomHot j r then some r else none
+    let ordered := cold ++ hot
+    let front := ordered.pop
+    let last := ordered.back!
+    residueComposePartitioned (foldRoomsEC voice front) last
 
 /-- Lower a modal-island subgraph to its `ModalBank` + strike anchor + the master
     clock it realizes against. Pure pole algebra at BUILD time: a reverb is the
@@ -178,13 +219,13 @@ partial def lowerModal (g : PatchGraph) (id : String) :
   -- source is a legal, incomplete patch — it compiles to an EMPTY bank (silence),
   -- not an error. (The graceful-silence contract, same as `mix []`.)
   if id == "__silence__" then
-    return (.plain #[], lit 0, clockLit, none, none, none)
+    return (.plain #[] #[], lit 0, clockLit, none, none, none)
   let some pn := g.nodes.find? (·.id == id)
     | .error s!"lowerModal: node '{id}' not found"
   match pn.node with
   | .modalSource ms a clk addr count bloom? =>
     match bloom? with
-    | none => .ok (.plain ms, a, clk, addr, none, count)
+    | none => .ok (.plain ms #[], a, clk, addr, none, count)
     -- a bloomed source starts modal with an EMPTY room; reverbs fold in downstream
     | some (B, gr) => .ok (.bloomed ms #[] B gr, a, clk, addr, none, count)
   | .modalReverb inId room dir => do
@@ -193,11 +234,12 @@ partial def lowerModal (g : PatchGraph) (id : String) :
     -- longer a prefix of the source's) — realize at full capacity (graceful-
     -- silent through a reverb; v1, no warning, legal state).
     match bank with
-    | .plain v =>
-      -- source ⋙ filter: the COLLECTED residue calculus (`m + n` modes) — the
-      -- voice colored by the room (`a·H_room(λ)`) plus the room colored by the
-      -- voice. Amps stay symbolic, so live source knobs survive the room.
-      .ok (.plain (residueComposeEC v room), a, clk, addr, dir.orElse (fun _ => dirIn), none)
+    | .plain v rooms =>
+      -- source ⋙ filter: ACCUMULATE the room; the fold (and the EC/DD
+      -- partition) happens once, at realization — where the whole chain is
+      -- visible and hot rooms can sort last. Amps stay symbolic, so live
+      -- source knobs survive the room.
+      .ok (.plain v (rooms.push room), a, clk, addr, dir.orElse (fun _ => dirIn), none)
     | .bloomed voice acc B gr =>
       -- filter ∘ filter: FOLD this room into the accumulated room chain (voice
       -- stays separate, bloom uncrossed). An empty accumulator is the fold
@@ -212,7 +254,12 @@ partial def lowerModal (g : PatchGraph) (id : String) :
     -- `normalizePeak`. A bloomed source gauges its VOICE modes; the folded room and
     -- the uncrossed bloom are untouched.
     match bank with
-    | .plain v => .ok (.plain (normalizePeak gExpr v), a, clk, addr, dirIn, count)
+    -- gauge is a COLLECTED surface in v1: it needs the composed bank to
+    -- self-measure, so it forces the fold here (today's exact expressions) —
+    -- and its output amps carry the norm's expSig, so downstream couplings
+    -- are unmeasurable and stay collected (status quo, documented).
+    | .plain v rooms =>
+      .ok (.plain (normalizePeak gExpr (foldRoomsEC v rooms)) #[], a, clk, addr, dirIn, count)
     | .bloomed voice acc B gr =>
       .ok (.bloomed (normalizePeak gExpr voice) acc B gr, a, clk, addr, dirIn, count)
   | .modalMix inputs => do
@@ -223,12 +270,16 @@ partial def lowerModal (g : PatchGraph) (id : String) :
     | (bank0, a0, clk0, addr0, dir0, _count0) :: rest =>
       -- pole union is defined on PLAIN banks; a bloomed source carries a warp
       -- the union can't merge (v1) — reverb it before mixing.
+      -- mix is a COLLECTED surface in v1: pole union needs plain mode arrays,
+      -- so a deferred chain folds here (today's exact expressions). A hot
+      -- coupling BELOW a mix stays collected (status quo, documented); one
+      -- formed by a reverb ABOVE the mix partitions normally.
       let modesOf : ModalBank → Except String (Array ModalMode) := fun b => match b with
-        | .plain ms => .ok ms
+        | .plain ms rooms => .ok (foldRoomsEC ms rooms)
         | .bloomed .. => .error s!"modalMix '{id}': a bloomed source has a pitch-bloom warp pole-union can't merge (v1) — cross it through a reverb before mixing"
       let ms0 ← modesOf bank0
       let union ← rest.foldlM (fun acc p => do let m ← modesOf p.1; pure (acc ++ m)) ms0
-      .ok (.plain union, a0, clk0, addr0, dir0, none)
+      .ok (.plain union #[], a0, clk0, addr0, dir0, none)
   | _ => .error s!"a modal inlet (reverb/modal-mix) needs a modal SOURCE — resonator or modal-mix — but '{id}' is a signal node; a Sig has no poles to compose"
 
 mutual
@@ -273,13 +324,20 @@ partial def lowerInput (g : PatchGraph) (id : String) : Except String ArrowTerm 
     let (bank, a, clk, addr?, dir?, count?) ← lowerModal g id
     -- realize the lowered bank at THIS edge (the one-directional Modal→Sig seam).
     let term ← match bank with
-      | .plain ms =>
+      | .plain ms rooms =>
         -- a DIRECTION rotates the poles and reads them through the per-mode
         -- `sign(σ·d)` gate (`modalBankTermDir`), else the plain forward causal
         -- bank. `count?` (trip-count-as-data) is the bank's live mode count.
+        -- The deferred room chain folds HERE, partitioned (`couplingHot` routes
+        -- near-coincident couplings to the paired DD body; a cold chain emits
+        -- today's collected term verbatim). Direction is a collected surface
+        -- in v1 (its pole-rotation machinery has no paired form) — a hot
+        -- coupling under a direction stays collected, status quo.
         .ok (match dir? with
-          | none => modalBankTerm ms a clk count?
-          | some d => modalBankTermDir ms a clk d.dir d.damp count?)
+          | none =>
+            let (plain, paired) := foldRoomsPartitioned ms rooms
+            modalBankTermPartitioned plain paired a clk count?
+          | some d => modalBankTermDir (foldRoomsEC ms rooms) a clk d.dir d.damp count?)
       | .bloomed voice room B gr =>
         -- the bare bloomed source: the bloom-warped bank (identical to a gong
         -- register's `warpFx`-around-`modalSource`). Also the graceful fallback
