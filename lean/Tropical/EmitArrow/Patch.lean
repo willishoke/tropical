@@ -181,12 +181,26 @@ def foldRoomsEC (voice : Array ModalMode) (rooms : Array (Array ModalMode)) :
 /-- The PARTITIONED chain fold: cold rooms fold first in arrival order
     (collected, verbatim), rooms carrying a hot coupling fold LAST, and only
     the final fold partitions — so `PairedMode`s form once and never
-    re-compose. The hot-room test is a sort HEURISTIC on source-unit
-    poles/amps (the partition itself re-decides per coupling, on the composed
-    amps, inside `residueComposePartitioned`); a multi-hot residual (a hot
-    coupling forming before the final fold — a deliberate triple/multi-unison)
-    stays collected at the status-quo floor, served gracefully, not silently
-    wrong. When no room is hot this is `foldRoomsEC` VERBATIM. -/
+    re-compose. When no room is hot this is `foldRoomsEC` VERBATIM.
+
+    THE DETECTION INVARIANT (stated precisely, not hedged): heat is decided
+    twice — the sort HEURISTIC here reads source-UNIT poles/amps; the
+    partition re-decides per coupling on the COMPOSED amps, but only at the
+    final fold. The two predicates cohere exactly this far:
+    · θ_acc (accuracy-lens) heat is a pole-distance test — amp-independent —
+      and composition never moves poles, so the sort CANNOT miss it; every
+      near-coincident coupling reaches the final fold and partitions.
+    · Rail-lens heat is amp-dependent, and composed ringing amps carry `1/Δ`
+      factors from earlier folds — so a coupling can be rail-cold on unit
+      amps yet rail-hot on composed amps. If it forms BEFORE the final fold
+      it folds collected, silently, at the status-quo floor. That is: **amp-
+      dependent heat is only detected at the final fold.** The exposure is
+      narrow today — the rail lens's routed service region is itself cap-
+      bounded to well-damped couplings (`ecddRailCeil` doc) — but it WIDENS
+      if the cap or lens is ever retuned; re-examine this invariant then.
+    A multi-hot residual (a hot coupling forming before the final fold — a
+    deliberate triple/multi-unison) likewise stays collected at the
+    status-quo floor, served gracefully, not silently wrong. -/
 def foldRoomsPartitioned (voice : Array ModalMode)
     (rooms : Array (Array ModalMode)) :
     Array ModalMode × Array PairedMode :=
