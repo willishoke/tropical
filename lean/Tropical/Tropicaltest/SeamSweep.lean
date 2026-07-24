@@ -1404,4 +1404,89 @@ def runEcddLive (arena : Arena)
       failGate "ecdd-live" s!"structOk={structOk} eA={eA} eB={eB} eC={eC}"
   | _, _, _ => failGate "ecdd-live" "build/render failed for a live-pole erasure config"
 
+/-- THE GAUGE-OVER-HOT-CHAIN GATE (the gauge × partition interaction, measured
+    rather than assumed). Gauge is a COLLECTED surface in v1: it forces the
+    room fold at the gauge node, so a tuned (sub-grid) coupling under a gauge
+    renders collected — the status-quo floor for that pair (grid silence),
+    stated in `lowerModal`. The open question was the NORM: `gaugeScale`
+    self-measures on the collected amps, which for a tuned unison are the huge
+    cancelling `±c/Δ` pair (~7e5 here) — does the measure survive, or does it
+    mis-scale the WHOLE bank? It survives, and not by luck: the norm reads the
+    bank's transfer function `H(iω)`, and `H` has NO `1/Δ` pole — the `±c/Δ`
+    partial fractions recombine into the bounded product form
+    `c/((iω−λ)(iω−ν))`, so the f64 build-time cancellation is benign (rel err
+    ~eps·|c/Δ|/|H| ≈ 1e-10 at this detune; an f32 coefficient path would owe
+    its own witness — recorded, not covered here). Asserts:
+    (1) THE SCALE LAW — the gauged render is `scale · (ungauged collected
+        render)` with `scale` recomputed from an INDEPENDENT f64 mirror of
+        `gaugeScale` on the float-EC amps (the render is linear in residues:
+        one shared s0 scale, so any norm damage would show here). Asserted at
+        a REPRESENTABLE detune (Δ = 1e-3 > the grid quantum; amps ±700) where
+        the datapath resolves the signal;
+    (2) NORM SANITY at the sub-grid worst case (|c/Δ| ≈ 7e5) — the mirrored
+        scale sits in a sane band: the "scaled to oblivion" failure mode is
+        excluded by measurement;
+    (3) THE LANDING POISON, recorded as data (this gate's own finding): at
+        sub-grid detune the scale-law comparison is dominated by QUANTIZATION,
+        not the norm — the cancelling `±c/Δ` amps size the per-bank landing
+        exponent (`bankLandExp` k off maxAbs ≈ 7e5 ⇒ LSB ≈ 2⁻¹³), which
+        quantizes the surviving cold modes (amps ~1e-4) to ~1 LSB. The
+        collected floor under a forced-collected surface is therefore not just
+        "the hot pair is silent": the pair's amps degrade the WHOLE bank's
+        landing resolution. Where the partition routes, this cannot happen
+        (paired amps are bounded, `ecddPairCap`) — one more reason the routed
+        path is the served one. Pinned loosely (finite + the poisoned
+        comparison stays O(1), i.e. the bank still renders the cold modes at
+        the right ORDER, no blowup). -/
+def runEcddGauge (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let lo := anchorNat + 1
+  let nWin : Nat := 32768
+  let voice : Array SeamMode := #[mkMode 220 1.0 1.0, mkMode 610 1.3 0.6]
+  let vM := voice.map (·.toModal)
+  -- the f64 norm mirror: float-EC amps → H at each pole ω → S = Σ|H|⁸ →
+  -- scale = S^{−g/8} (g = 1) — `gaugeScale`'s formula on a separate code
+  -- path (CplxB floats, not symbolic CplxE).
+  let scaleOf := fun (room : Array SeamMode) =>
+    let ecF := foldRoomsFloat voice room
+    let hAt := fun (wk : Float) => ecF.foldl (fun (acc : CplxB) m =>
+        acc.add ((⟨m.are, m.aim⟩ : CplxB).div (⟨m.sigma, wk - m.omega⟩ : CplxB))) ⟨0, 0⟩
+    let sNorm := ecF.foldl (fun s m =>
+        let h := hAt m.omega
+        let h2 := h.re * h.re + h.im * h.im
+        s + (h2 * h2) * (h2 * h2)) 0.0
+    Float.exp (-(1.0 / 8.0) * Float.log sNorm)
+  let gaugedGraph := fun (rm : Array ModalMode) =>
+    ({ nodes := #[ { id := "src", node := .modalSource vM anchorSig clockLit none none none }
+                 , { id := "rev", node := .modalReverb "src" rm none }
+                 , { id := "gg",  node := .modalGauge "rev" (litF 1.0) } ]
+       output := "gg" } : PatchGraph)
+  -- config A: the sub-grid worst case (norm sanity + the landing poison)
+  let roomSub : Array SeamMode := #[{ sigma := 1.0, omega := tp * 220 + 1e-6, are := 0.7 }]
+  -- config B: representable detune (the clean scale-law witness — amps ±700,
+  -- landing exponent k = 6, quantization decades under the signal)
+  let roomRep : Array SeamMode := #[{ sigma := 1.0, omega := tp * 220 + 1e-3, are := 0.7 }]
+  let rSubM := roomSub.map (·.toModal)
+  let rRepM := roomRep.map (·.toModal)
+  match ← renderGraphN arena "ecddg_gauged_sub" (gaugedGraph rSubM) nWin,
+        ← renderTerm arena "ecddg_bare_sub" (modalBankTerm (residueComposeEC vM rSubM) anchorSig clockLit) nWin,
+        ← renderGraphN arena "ecddg_gauged_rep" (gaugedGraph rRepM) nWin,
+        ← renderTerm arena "ecddg_bare_rep" (modalBankTerm (residueComposeEC vM rRepM) anchorSig clockLit) nWin with
+  | .ok dutGS, .ok dutBS, .ok dutGR, .ok dutBR =>
+    let scaleSub := scaleOf roomSub
+    let scaleRep := scaleOf roomRep
+    let eLawRep := relL2Win dutGR (dutBR.map (· * scaleRep)) lo nWin
+    let ePoison := relL2Win dutGS (dutBS.map (· * scaleSub)) lo nWin
+    let eGS := energyWin dutGS lo nWin
+    let saneSub := 0.1 < scaleSub && scaleSub < 10.0
+    IO.println s!"ecdd gauge-over-hot (the norm on cancelling ±c/Δ amps):"
+    IO.println s!"        scale law (Δ=1e-3, resolvable): gauged ≡ {scaleRep} × collected rel {eLawRep}"
+    IO.println s!"        sub-grid (|c/Δ|≈7e5): norm sane {saneSub} (scale {scaleSub}) · landing-poison comparison {ePoison} (quantization-dominated, recorded) · E {eGS}"
+    if allFinite dutGS && allFinite dutGR && eLawRep < 1e-4
+        && saneSub && ePoison < 2.0 && eGS > 1e-9 then
+      passGate "ecdd-gauge" s!"gauge over a tuned-unison chain: the H-norm survives the ±c/Δ amps (sub-grid scale {scaleSub}, mirrored independently — no oblivion; scale law holds where the datapath resolves, {eLawRep}); the recorded residual is the collected floor PLUS the landing poison (huge amps size the bank's k, LSB over the cold modes)"
+    else
+      failGate "ecdd-gauge" s!"eLawRep={eLawRep} scaleSub={scaleSub} scaleRep={scaleRep} ePoison={ePoison} finite={allFinite dutGS}/{allFinite dutGR} E={eGS}"
+  | _, _, _, _ => failGate "ecdd-gauge" "build/render failed for a gauge-over-hot config"
+
 end Tropical.Tropicaltest.SeamSweep

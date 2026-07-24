@@ -257,7 +257,18 @@ partial def lowerModal (g : PatchGraph) (id : String) :
     -- gauge is a COLLECTED surface in v1: it needs the composed bank to
     -- self-measure, so it forces the fold here (today's exact expressions) —
     -- and its output amps carry the norm's expSig, so downstream couplings
-    -- are unmeasurable and stay collected (status quo, documented).
+    -- are unmeasurable and stay collected (status quo, documented). The fold
+    -- is SAFE against hot chains even though the collected amps carry the
+    -- huge cancelling ±c/Δ pair: the norm reads the transfer function H,
+    -- which has NO 1/Δ pole (the partial fractions recombine into the
+    -- bounded product form), so the f64 cancellation is benign — measured,
+    -- not assumed (the ecdd-gauge gate mirrors the norm independently and
+    -- pins gauged ≡ scale × collected). The residual under a gauge is the
+    -- hot pair rendering at the collected floor — which at sub-grid detune
+    -- means the pair is silent AND its ±c/Δ amps size the bank's landing
+    -- exponent, quantizing the cold modes coarsely (the LANDING POISON, the
+    -- gate's own finding) — the stated status quo of every collected
+    -- surface, one more reason the routed path is the served one.
     | .plain v rooms =>
       .ok (.plain (normalizePeak gExpr (foldRoomsEC v rooms)) #[], a, clk, addr, dirIn, count)
     | .bloomed voice acc B gr =>
