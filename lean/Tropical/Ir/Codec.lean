@@ -4,28 +4,23 @@ import Tropical.Parse.OrderedJson
 /-!
 # Resolved⇄JSON codec
 
-Schema `tropical_resolved_1`: three identity pools (typeParams,
-typeDefs, programs) plus a root program index.
+Schema `tropical_resolved_1`: the program pool plus a root program
+index. (The typeParam/typeDef pools left with generics and the
+sum-type lowering — the wire carries only trunk structure.)
 
 **Decode** rebuilds an `Arena` keeping the wire pool order as the arena
-order, in a single forward pass — the encoder's topological guarantees
-(alias deps before dependents, programs in post-order DFS from the
-root) mean every reference points strictly earlier in its pool, and a
-forward reference is a decode error.
+order, in a single forward pass — the encoder's topological guarantee
+(programs in post-order DFS from the root) means every reference points
+strictly earlier in the pool, and a forward reference is a decode error.
 
-**Encode** performs the same canonical reordering the TS encoder does:
-pool ids are assigned on *first reference* during a deterministic
+**Encode** assigns pool ids on *first reference* during a deterministic
 traversal — for each program: registry entries (in insertion order,
-recursing into targets), then `typeParams`, `inputs`, `outputs`,
-`typeDefs`, `decls` (nested `programDecl` targets recurse here),
-`assigns`; the program itself is pushed *after* its referents
-(post-order). TypeDefs push their alias field dependencies before
-themselves. Encoding a TS-encoded wire after decode therefore
-reproduces the pool order exactly.
+recursing into targets), then `inputs`, `outputs`, `decls` (nested
+`programDecl` targets recurse here), `assigns`; the program itself is
+pushed *after* its referents (post-order).
 
 Optional fields are absent, never null. Numbers are `JsonNumber`
-(decimal text preserved); the differential comparators compare numbers
-by IEEE-754 bit pattern after re-parsing.
+(decimal text preserved).
 -/
 
 namespace Tropical.Ir.Codec
@@ -42,12 +37,8 @@ def schemaTag : String := "tropical_resolved_1"
 namespace Encode
 
 structure St where
-  typeParamPool : Array Json := #[]
-  typeDefPool : Array Json := #[]
   programPool : Array Json := #[]
   /-- arena index → assigned pool id (none = not yet pooled). -/
-  typeParamIds : Array (Option Nat)
-  typeDefIds : Array (Option Nat)
   programIds : Array (Option Nat)
 
 abbrev EncM := StateT St (Except String)
@@ -61,98 +52,16 @@ private def optField (key : String) : Option Json → List (String × Json)
 
 private def scalarJson (k : ScalarKind) : Json := Json.str k.wire
 
-def typeParamId (arena : Arena) (i : TypeParamPoolIdx) : EncM Nat := do
-  let st ← get
-  match st.typeParamIds[i.idx]? with
-  | none => encErr s!"typeParam pool index {i.idx} out of range"
-  | some (some id) => pure id
-  | some none =>
-    let some tp := arena.typeParam? i
-      | encErr s!"typeParam pool index {i.idx} out of range"
-    let entry := Json.mkObj <|
-      [("name", Json.str tp.name)]
-      ++ optField "default" (tp.default?.map Json.num)
-    let id := (← get).typeParamPool.size
-    modify fun st => { st with
-      typeParamPool := st.typeParamPool.push entry
-      typeParamIds := st.typeParamIds.set! i.idx (some id) }
-    pure id
-
-/- Deliberately `partial` (the mutual below): the recursion runs through
-   the TYPE-DEF pool via alias/field indices, and its termination fact is
-   that pool's acyclicity — same story as the program pool further down,
-   a separate invariant from the expression arena's child-descending ids. -/
-mutual
-
-/-- Pool a typeDef, encoding alias field deps strictly before pushing
-    self (the decoder's single-forward-pass contract). -/
-partial def typeDefId (arena : Arena) (i : TypeDefIdx) : EncM Nat := do
-  let st ← get
-  match st.typeDefIds[i.idx]? with
-  | none => encErr s!"typeDef pool index {i.idx} out of range"
-  | some (some id) => pure id
-  | some none =>
-    let some td := arena.typeDef? i
-      | encErr s!"typeDef pool index {i.idx} out of range"
-    let entry : Json ← match td with
-      | .alias name base =>
-        pure <| Json.mkObj [("kind", Json.str "alias"), ("name", Json.str name),
-                            ("base", scalarJson base)]
-      | .struct name fields => do
-        let mut fs : Array Json := #[]
-        for f in fields do
-          fs := fs.push (← encField arena f)
-        pure <| Json.mkObj [("kind", Json.str "struct"), ("name", Json.str name),
-                            ("fields", Json.arr fs)]
-      | .sum name variants => do
-        let mut vs : Array Json := #[]
-        for v in variants do
-          let mut fs : Array Json := #[]
-          for f in v.payload do
-            fs := fs.push (← encField arena f)
-          vs := vs.push <| Json.mkObj [("name", Json.str v.name), ("payload", Json.arr fs)]
-        pure <| Json.mkObj [("kind", Json.str "sum"), ("name", Json.str name),
-                            ("variants", Json.arr vs)]
-    let id := (← get).typeDefPool.size
-    modify fun st => { st with
-      typeDefPool := st.typeDefPool.push entry
-      typeDefIds := st.typeDefIds.set! i.idx (some id) }
-    pure id
-
-partial def encField (arena : Arena) (f : StructField) : EncM Json := do
-  pure <| Json.mkObj [("name", Json.str f.name), ("type", ← encScalarOrAlias arena f.type)]
-
-partial def encScalarOrAlias (arena : Arena) : ScalarOrAlias → EncM Json
-  | .scalar k => pure (scalarJson k)
-  | .alias td => do pure <| Json.mkObj [("alias", Lean.toJson (← typeDefId arena td))]
-
-end
-
-def encShapeDim (arena : Arena) : ShapeDim → EncM Json
-  | .lit n => pure (Json.num n)
-  | .typeParam tp => do
-    pure <| Json.mkObj [("typeParam", Lean.toJson (← typeParamId arena tp))]
-
-def encPortType (arena : Arena) : PortType → EncM Json
+def encPortType : PortType → Json
   | .scalar k =>
-    pure <| Json.mkObj [("kind", Json.str "scalar"), ("scalar", scalarJson k)]
-  | .alias td => do
-    pure <| Json.mkObj [("kind", Json.str "alias"), ("alias", Lean.toJson (← typeDefId arena td))]
-  | .array element shape => do
-    let mut dims : Array Json := #[]
-    for d in shape do
-      dims := dims.push (← encShapeDim arena d)
-    pure <| Json.mkObj [("kind", Json.str "array"),
-                        ("element", ← encScalarOrAlias arena element),
-                        ("shape", Json.arr dims)]
-
-def encBinder (b : Binder) : Json :=
-  Json.mkObj [("name", Json.str b.name), ("idx", Lean.toJson b.idx.idx)]
+    Json.mkObj [("kind", Json.str "scalar"), ("scalar", scalarJson k)]
+  | .array element shape =>
+    Json.mkObj [("kind", Json.str "array"), ("element", scalarJson element),
+                ("shape", Json.arr (shape.map Json.num))]
 
 /-- Encode a resolved expression to `tropical_resolved_1` JSON, derefing the
-    id-form through `arena.exprs`. Byte-identical output to the former tree
-    encoder — the arena is an implementation detail of how the graph is stored.
-    Total by descent on `id.idx` (`hw` is checked once by `encodeResolved`). -/
+    id-form through `arena.exprs`. Total by descent on `id.idx` (`hw` is
+    checked once by `encodeResolved`). -/
 def encExpr (arena : Arena) (hw : arena.exprs.wf = true) (id : ExprId) : EncM Json := do
   match _hd : arena.exprs.deref id with
   | none => encErr s!"encExpr: dangling ExprId {id.idx}"
@@ -179,12 +88,8 @@ def encExpr (arena : Arena) (hw : arena.exprs.wf = true) (id : ExprId) : EncM Js
   | some (.index a b) => do
     pure <| Json.mkObj [("op", Json.str "index"),
       ("args", Json.arr #[← encExpr arena hw a, ← encExpr arena hw b])]
-  | some (.zeros count) => do
-    pure <| Json.mkObj [("op", Json.str "zeros"), ("count", ← encExpr arena hw count)]
   | some (.inputRef i) => pure <| Json.mkObj [("op", Json.str "inputRef"), ("idx", Lean.toJson i.idx)]
   | some (.paramRef i) => pure <| Json.mkObj [("op", Json.str "paramRef"), ("idx", Lean.toJson i.idx)]
-  | some (.typeParamRef i) => pure <| Json.mkObj [("op", Json.str "typeParamRef"), ("idx", Lean.toJson i.idx)]
-  | some (.bindingRef i) => pure <| Json.mkObj [("op", Json.str "bindingRef"), ("idx", Lean.toJson i.idx)]
   | some (.nestedOut inst out) =>
     pure <| Json.mkObj [("op", Json.str "nestedOut"),
                         ("instance", Lean.toJson inst.idx), ("output", Lean.toJson out.idx)]
@@ -206,55 +111,6 @@ def encExpr (arena : Arena) (hw : arena.exprs.wf = true) (id : ExprId) : EncM Js
                         ("tables", Json.arr ts), ("body", ← encExpr arena hw body)]
                         ++ optField "dyn_count" dynField
                         ++ optField "idx_id" idField
-  | some (.fold over init acc elem body) => do
-    pure <| Json.mkObj [("op", Json.str "fold"),
-      ("over", ← encExpr arena hw over), ("init", ← encExpr arena hw init),
-      ("acc", encBinder acc), ("elem", encBinder elem), ("body", ← encExpr arena hw body)]
-  | some (.scan over init acc elem body) => do
-    pure <| Json.mkObj [("op", Json.str "scan"),
-      ("over", ← encExpr arena hw over), ("init", ← encExpr arena hw init),
-      ("acc", encBinder acc), ("elem", encBinder elem), ("body", ← encExpr arena hw body)]
-  | some (.generate count iter body) => do
-    pure <| Json.mkObj [("op", Json.str "generate"), ("count", ← encExpr arena hw count),
-      ("iter", encBinder iter), ("body", ← encExpr arena hw body)]
-  | some (.iterate count init iter body) => do
-    pure <| Json.mkObj [("op", Json.str "iterate"),
-      ("count", ← encExpr arena hw count), ("init", ← encExpr arena hw init),
-      ("iter", encBinder iter), ("body", ← encExpr arena hw body)]
-  | some (.chain count init iter body) => do
-    pure <| Json.mkObj [("op", Json.str "chain"),
-      ("count", ← encExpr arena hw count), ("init", ← encExpr arena hw init),
-      ("iter", encBinder iter), ("body", ← encExpr arena hw body)]
-  | some (.map2 over elem body) => do
-    pure <| Json.mkObj [("op", Json.str "map2"), ("over", ← encExpr arena hw over),
-      ("elem", encBinder elem), ("body", ← encExpr arena hw body)]
-  | some (.zipWith a b x y body) => do
-    pure <| Json.mkObj [("op", Json.str "zipWith"),
-      ("a", ← encExpr arena hw a), ("b", ← encExpr arena hw b),
-      ("x", encBinder x), ("y", encBinder y), ("body", ← encExpr arena hw body)]
-  | some (.letIn binders body) => do
-    let bs ← binders.attach.mapM fun ⟨b, _⟩ => do
-      pure <| Json.mkObj [("binder", encBinder b.binder),
-                          ("value", ← encExpr arena hw b.value)]
-    pure <| Json.mkObj [("op", Json.str "let"), ("binders", Json.arr bs),
-                        ("in", ← encExpr arena hw body)]
-  | some (.tag def_ variant payload) => do
-    let defId ← typeDefId arena def_
-    let ps ← payload.attach.mapM fun ⟨p, _⟩ => do
-      pure <| Json.mkObj [("field", Lean.toJson p.field),
-                          ("value", ← encExpr arena hw p.value)]
-    pure <| Json.mkObj [("op", Json.str "tag"), ("def", Lean.toJson defId),
-                        ("variant", Lean.toJson variant), ("payload", Json.arr ps)]
-  | some (.match_ def_ scrutinee arms) => do
-    let defId ← typeDefId arena def_
-    let scrut ← encExpr arena hw scrutinee
-    let as_ ← arms.attach.mapM fun ⟨arm, _⟩ => do
-      pure <| Json.mkObj [
-        ("variant", Lean.toJson arm.variant),
-        ("binders", Json.arr (arm.binders.map encBinder)),
-        ("body", ← encExpr arena hw arm.body)]
-    pure <| Json.mkObj [("op", Json.str "match"), ("def", Lean.toJson defId),
-                        ("scrutinee", scrut), ("arms", Json.arr as_)]
 termination_by id.idx
 decreasing_by
   all_goals
@@ -274,7 +130,7 @@ decreasing_by
 mutual
 
 /-- Pool a program: registry targets first (insertion order), then the
-    program's own fields in TS field order, then push self (post-order
+    program's own fields in field order, then push self (post-order
     DFS — referenced programs strictly before referencing programs). -/
 partial def programId (arena : Arena) (hw : arena.exprs.wf = true) (i : ProgramIdx) : EncM Nat := do
   let st ← get
@@ -292,19 +148,15 @@ partial def programId (arena : Arena) (hw : arena.exprs.wf = true) (i : ProgramI
     pure id
 
 partial def encProgram (arena : Arena) (hw : arena.exprs.wf = true) (p : Program) : EncM Json := do
-  -- Registry first — matches the TS encoder's statement order, which
-  -- determines pool-id assignment for everything reachable.
+  -- Registry first — pool-id assignment order for everything reachable.
   let mut registry : Array Json := #[]
   for (key, target) in p.registry do
     registry := registry.push <| Json.arr #[Json.str key, Lean.toJson (← programId arena hw target)]
-  let mut typeParams : Array Json := #[]
-  for tp in p.typeParams do
-    typeParams := typeParams.push (Lean.toJson (← typeParamId arena tp))
   let mut inputs : Array Json := #[]
   for d in p.inputs do
     let mut fields : List (String × Json) := [("name", Json.str d.name)]
     match d.type? with
-    | some t => fields := fields ++ [("type", ← encPortType arena t)]
+    | some t => fields := fields ++ [("type", encPortType t)]
     | none => pure ()
     match d.default? with
     | some e => fields := fields ++ [("default", ← encExpr arena hw e)]
@@ -314,12 +166,9 @@ partial def encProgram (arena : Arena) (hw : arena.exprs.wf = true) (p : Program
   for d in p.outputs do
     let mut fields : List (String × Json) := [("name", Json.str d.name)]
     match d.type? with
-    | some t => fields := fields ++ [("type", ← encPortType arena t)]
+    | some t => fields := fields ++ [("type", encPortType t)]
     | none => pure ()
     outputs := outputs.push (Json.mkObj fields)
-  let mut typeDefs : Array Json := #[]
-  for td in p.typeDefs do
-    typeDefs := typeDefs.push (Lean.toJson (← typeDefId arena td))
   let mut decls : Array Json := #[]
   for d in p.decls do
     decls := decls.push (← encBodyDecl arena hw d)
@@ -331,13 +180,10 @@ partial def encProgram (arena : Arena) (hw : arena.exprs.wf = true) (p : Program
     assigns := assigns.push <| Json.mkObj [("target", target), ("expr", ← encExpr arena hw a.expr)]
   pure <| Json.mkObj [
     ("name", Json.str p.name),
-    ("typeParams", Json.arr typeParams),
     ("inputs", Json.arr inputs),
     ("outputs", Json.arr outputs),
-    ("typeDefs", Json.arr typeDefs),
     ("decls", Json.arr decls),
     ("assigns", Json.arr assigns),
-    ("binderCount", Lean.toJson p.binderCount),
     ("registry", Json.arr registry)]
 
 partial def encBodyDecl (arena : Arena) (hw : arena.exprs.wf = true) : BodyDecl → EncM Json
@@ -345,18 +191,14 @@ partial def encBodyDecl (arena : Arena) (hw : arena.exprs.wf = true) : BodyDecl 
     pure <| Json.mkObj <|
       [("op", Json.str "paramDecl"), ("name", Json.str name)]
       ++ optField "value" (value?.map Json.num)
-  | .inst name typeKey typeArgs inputs => do
-    let mut tas : Array Json := #[]
-    for a in typeArgs do
-      tas := tas.push <| Json.mkObj [("param", Lean.toJson a.param.idx), ("value", Json.num a.value)]
+  | .inst name typeKey inputs => do
     let mut ins : Array Json := #[]
     for w in inputs do
       ins := ins.push <| Json.mkObj [("port", Lean.toJson w.port.idx),
                                      ("value", ← encExpr arena hw w.value)]
     pure <| Json.mkObj [
       ("op", Json.str "instanceDecl"), ("name", Json.str name),
-      ("typeKey", Json.str typeKey),
-      ("typeArgs", Json.arr tas), ("inputs", Json.arr ins)]
+      ("typeKey", Json.str typeKey), ("inputs", Json.arr ins)]
   | .prog name program => do
     pure <| Json.mkObj [("op", Json.str "programDecl"), ("name", Json.str name),
                         ("program", Lean.toJson (← programId arena hw program))]
@@ -366,20 +208,16 @@ end
 end Encode
 
 /-- Encode an arena + root into `tropical_resolved_1` wire JSON,
-    performing the TS encoder's canonical pool reordering. -/
+    performing the canonical pool reordering. -/
 def encodeResolved (arena : Arena) (root : ProgramIdx) : Except String Json := do
   -- One O(edges) sweep buys `encExpr`'s termination measure (every arena
   -- built through `eintern` is child-descending by construction).
   if hw : arena.exprs.wf then
     let init : Encode.St := {
-      typeParamIds := Array.replicate arena.typeParams.size none
-      typeDefIds := Array.replicate arena.typeDefs.size none
       programIds := Array.replicate arena.programs.size none }
     let (rootId, st) ← (Encode.programId arena hw root).run init
     pure <| Json.mkObj [
       ("schema", Json.str schemaTag),
-      ("typeParamPool", Json.arr st.typeParamPool),
-      ("typeDefPool", Json.arr st.typeDefPool),
       ("programPool", Json.arr st.programPool),
       ("root", Lean.toJson rootId)]
   else
@@ -428,58 +266,6 @@ private def scalarKind (ctx : String) (s : String) : Except String ScalarKind :=
   | some k => pure k
   | none => err ctx s!"unknown scalar kind '{s}'"
 
-/-- `ScalarKind | {alias: n}`. Wire pool indices are relative to the
-    decode batch; `tdBase` offsets them into the (possibly pre-seeded)
-    arena pool. The alias index must point strictly earlier in the wire
-    pool (forward-pass contract); range is validated against the count
-    decoded so far — entries below `tdBase` belong to earlier decodes
-    and are unreachable from this batch's (non-negative) wire indices. -/
-private def scalarOrAlias (ctx : String) (j : JsonV) (typeDefs : Array TypeDef)
-    (tdBase : Nat) : Except String ScalarOrAlias := do
-  match j with
-  | .str s => pure (.scalar (← scalarKind ctx s))
-  | .obj _ =>
-    let idx ← reqNat ctx j "alias"
-    match typeDefs[tdBase + idx]? with
-    | some (.alias ..) => pure (.alias ⟨tdBase + idx⟩)
-    | some td => err ctx s!"typeDef '{td.name}' is not an alias"
-    | none => err ctx s!"typeDef pool index {idx} is out of range (decoded so far: {typeDefs.size - tdBase})"
-  | _ => err ctx "expected a scalar kind or {alias} record"
-
-private def decodeTypeDef (i : Nat) (j : JsonV) (typeDefs : Array TypeDef)
-    (tdBase : Nat) : Except String TypeDef := do
-  let ctx := s!"typeDefPool[{i}]"
-  let kind ← reqStr ctx j "kind"
-  let name ← reqStr ctx j "name"
-  let field (fctx : String) (f : JsonV) : Except String StructField := do
-    pure { name := ← reqStr fctx f "name"
-           type := ← scalarOrAlias s!"{fctx}.type" (← reqField fctx f "type") typeDefs tdBase }
-  match kind with
-  | "alias" => pure (.alias name (← scalarKind s!"{ctx}.base" (← reqStr ctx j "base")))
-  | "struct" => do
-    let mut fields : Array StructField := #[]
-    for h : k in [0:(← reqArr ctx j "fields").size] do
-      let fs ← reqArr ctx j "fields"
-      fields := fields.push (← field s!"{ctx}.fields[{k}]" fs[k]!)
-    pure (.struct name fields)
-  | "sum" => do
-    let vs ← reqArr ctx j "variants"
-    let mut variants : Array SumVariant := #[]
-    for h : k in [0:vs.size] do
-      let v := vs[k]
-      let vctx := s!"{ctx}.variants[{k}]"
-      let vName ← reqStr vctx v "name"
-      let ps ← reqArr vctx v "payload"
-      let mut payload : Array StructField := #[]
-      for h2 : m in [0:ps.size] do
-        payload := payload.push (← field s!"{vctx}.payload[{m}]" ps[m])
-      variants := variants.push { name := vName, payload }
-    pure (.sum name variants)
-  | other => err ctx s!"unknown typeDef kind '{other}'"
-
-private def binder (ctx : String) (j : JsonV) : Except String Binder := do
-  pure { name := ← reqStr ctx j "name", idx := ⟨← reqNat ctx j "idx"⟩ }
-
 /-- The decode monad interns each node into the shared expression DAG as it is
     parsed, so a decoded `Program` is id-valued like the elaborator's output. -/
 private abbrev DecM := StateT ExprArena (Except String)
@@ -503,17 +289,16 @@ private def reqArrD (ctx : String) (j : JsonV) (k : String) :
   | _ => err ctx s!"field '{k}' must be an array"
 
 /-- Parse + intern a `tropical_resolved_1` expression, returning its arena id.
-    (Byte-round-trips with `encExpr` above.) The `req*`/`err`/`binder` helpers
-    return `Except String` and auto-lift into `DecM`. Total by descent on
+    (Byte-round-trips with `encExpr` above.) The `req*`/`err` helpers return
+    `Except String` and auto-lift into `DecM`. Total by descent on
     `sizeOf j`. -/
-private def expr (ctx : String) (j : JsonV) (tdBase tdCount : Nat) :
-    DecM ExprId := do
+private def expr (ctx : String) (j : JsonV) : DecM ExprId := do
   match _hj : j with
   | .num n => internD (.num n)
   | .bool b => internD (.bool b)
   | .arr items => do
     let out ← items.attach.zipIdx.mapM fun (⟨x, _⟩, i) =>
-      expr s!"{ctx}[{i}]" x tdBase tdCount
+      expr s!"{ctx}[{i}]" x
     internD (.arr out)
   | .obj _ =>
     let some op := j.opOf? | err ctx "expression object missing string 'op'"
@@ -538,44 +323,30 @@ private def expr (ctx : String) (j : JsonV) (tdBase tdCount : Nat) :
               ⟨a[1], Nat.lt_trans (Tropical.Parse.sizeOf_lt_of_getElem (by omega)) ha⟩,
               ⟨a[2], Nat.lt_trans (Tropical.Parse.sizeOf_lt_of_getElem (by omega)) ha⟩)
       else err ctx s!"'{op}' expects 3 args, got {a.size}"
-    let defIdx : Except String TypeDefIdx := do
-      let d ← reqNat ctx j "def"
-      if d < tdCount then pure ⟨tdBase + d⟩
-      else err ctx s!"typeDef pool index {d} is out of range"
     if let some tag := BinaryOpTag.ofWire? op then
       let (⟨a0, _⟩, ⟨a1, _⟩) ← args2
-      internD (.binary tag (← expr s!"{ctx}.args[0]" a0 tdBase tdCount)
-                           (← expr s!"{ctx}.args[1]" a1 tdBase tdCount))
+      internD (.binary tag (← expr s!"{ctx}.args[0]" a0) (← expr s!"{ctx}.args[1]" a1))
     else if let some tag := UnaryOpTag.ofWire? op then
       let ⟨a0, _⟩ ← args1
-      internD (.unary tag (← expr s!"{ctx}.args[0]" a0 tdBase tdCount))
+      internD (.unary tag (← expr s!"{ctx}.args[0]" a0))
     else match op with
     | "clamp" => do
       let (⟨a0, _⟩, ⟨a1, _⟩, ⟨a2, _⟩) ← args3
-      internD (.clamp (← expr s!"{ctx}.args[0]" a0 tdBase tdCount)
-                      (← expr s!"{ctx}.args[1]" a1 tdBase tdCount)
-                      (← expr s!"{ctx}.args[2]" a2 tdBase tdCount))
+      internD (.clamp (← expr s!"{ctx}.args[0]" a0) (← expr s!"{ctx}.args[1]" a1)
+                      (← expr s!"{ctx}.args[2]" a2))
     | "select" => do
       let (⟨a0, _⟩, ⟨a1, _⟩, ⟨a2, _⟩) ← args3
-      internD (.select (← expr s!"{ctx}.args[0]" a0 tdBase tdCount)
-                       (← expr s!"{ctx}.args[1]" a1 tdBase tdCount)
-                       (← expr s!"{ctx}.args[2]" a2 tdBase tdCount))
+      internD (.select (← expr s!"{ctx}.args[0]" a0) (← expr s!"{ctx}.args[1]" a1)
+                       (← expr s!"{ctx}.args[2]" a2))
     | "arraySet" => do
       let (⟨a0, _⟩, ⟨a1, _⟩, ⟨a2, _⟩) ← args3
-      internD (.arraySet (← expr s!"{ctx}.args[0]" a0 tdBase tdCount)
-                         (← expr s!"{ctx}.args[1]" a1 tdBase tdCount)
-                         (← expr s!"{ctx}.args[2]" a2 tdBase tdCount))
+      internD (.arraySet (← expr s!"{ctx}.args[0]" a0) (← expr s!"{ctx}.args[1]" a1)
+                         (← expr s!"{ctx}.args[2]" a2))
     | "index" => do
       let (⟨a0, _⟩, ⟨a1, _⟩) ← args2
-      internD (.index (← expr s!"{ctx}.args[0]" a0 tdBase tdCount)
-                      (← expr s!"{ctx}.args[1]" a1 tdBase tdCount))
-    | "zeros" => do
-      let ⟨countJ, _⟩ ← reqFieldD ctx j "count"
-      internD (.zeros (← expr s!"{ctx}.count" countJ tdBase tdCount))
+      internD (.index (← expr s!"{ctx}.args[0]" a0) (← expr s!"{ctx}.args[1]" a1))
     | "inputRef" => internD (.inputRef ⟨← reqNat ctx j "idx"⟩)
     | "paramRef" => internD (.paramRef ⟨← reqNat ctx j "idx"⟩)
-    | "typeParamRef" => internD (.typeParamRef ⟨← reqNat ctx j "idx"⟩)
-    | "bindingRef" => internD (.bindingRef ⟨← reqNat ctx j "idx"⟩)
     | "nestedOut" =>
       internD (.nestedOut ⟨← reqNat ctx j "instance"⟩ ⟨← reqNat ctx j "output"⟩)
     | "sampleRate" => internD .sampleRate
@@ -589,10 +360,10 @@ private def expr (ctx : String) (j : JsonV) (tdBase tdCount : Nat) :
     | "bankSum" => do
       let ⟨ts, _⟩ ← reqArrD ctx j "tables"
       let tables ← ts.attach.zipIdx.mapM fun (⟨t, _⟩, i) =>
-        expr s!"{ctx}.tables[{i}]" t tdBase tdCount
+        expr s!"{ctx}.tables[{i}]" t
       -- optional runtime effective count (trip-count-as-data); absent = static.
       let dc? ← match hdc : j.getField? "dyn_count" with
-        | some dj => some <$> expr s!"{ctx}.dyn_count" dj tdBase tdCount
+        | some dj => some <$> expr s!"{ctx}.dyn_count" dj
         | none => pure none
       -- optional binder id (nested banks); absent = 0.
       let idxId ← match j.getField? "idx_id" with
@@ -600,99 +371,7 @@ private def expr (ctx : String) (j : JsonV) (tdBase tdCount : Nat) :
         | none => pure 0
       let count ← reqNat ctx j "count"
       let ⟨bodyJ, _⟩ ← reqFieldD ctx j "body"
-      internD (.bankSum count tables (← expr s!"{ctx}.body" bodyJ tdBase tdCount) dc? idxId)
-    | "fold" => do
-      let ⟨overJ, _⟩ ← reqFieldD ctx j "over"
-      let over ← expr s!"{ctx}.over" overJ tdBase tdCount
-      let ⟨initJ, _⟩ ← reqFieldD ctx j "init"
-      let init ← expr s!"{ctx}.init" initJ tdBase tdCount
-      let acc ← binder s!"{ctx}.acc" (← reqField ctx j "acc")
-      let elem ← binder s!"{ctx}.elem" (← reqField ctx j "elem")
-      let ⟨bodyJ, _⟩ ← reqFieldD ctx j "body"
-      internD (.fold over init acc elem (← expr s!"{ctx}.body" bodyJ tdBase tdCount))
-    | "scan" => do
-      let ⟨overJ, _⟩ ← reqFieldD ctx j "over"
-      let over ← expr s!"{ctx}.over" overJ tdBase tdCount
-      let ⟨initJ, _⟩ ← reqFieldD ctx j "init"
-      let init ← expr s!"{ctx}.init" initJ tdBase tdCount
-      let acc ← binder s!"{ctx}.acc" (← reqField ctx j "acc")
-      let elem ← binder s!"{ctx}.elem" (← reqField ctx j "elem")
-      let ⟨bodyJ, _⟩ ← reqFieldD ctx j "body"
-      internD (.scan over init acc elem (← expr s!"{ctx}.body" bodyJ tdBase tdCount))
-    | "generate" => do
-      let ⟨countJ, _⟩ ← reqFieldD ctx j "count"
-      let count ← expr s!"{ctx}.count" countJ tdBase tdCount
-      let iter ← binder s!"{ctx}.iter" (← reqField ctx j "iter")
-      let ⟨bodyJ, _⟩ ← reqFieldD ctx j "body"
-      internD (.generate count iter (← expr s!"{ctx}.body" bodyJ tdBase tdCount))
-    | "iterate" => do
-      let ⟨countJ, _⟩ ← reqFieldD ctx j "count"
-      let count ← expr s!"{ctx}.count" countJ tdBase tdCount
-      let ⟨initJ, _⟩ ← reqFieldD ctx j "init"
-      let init ← expr s!"{ctx}.init" initJ tdBase tdCount
-      let iter ← binder s!"{ctx}.iter" (← reqField ctx j "iter")
-      let ⟨bodyJ, _⟩ ← reqFieldD ctx j "body"
-      internD (.iterate count init iter (← expr s!"{ctx}.body" bodyJ tdBase tdCount))
-    | "chain" => do
-      let ⟨countJ, _⟩ ← reqFieldD ctx j "count"
-      let count ← expr s!"{ctx}.count" countJ tdBase tdCount
-      let ⟨initJ, _⟩ ← reqFieldD ctx j "init"
-      let init ← expr s!"{ctx}.init" initJ tdBase tdCount
-      let iter ← binder s!"{ctx}.iter" (← reqField ctx j "iter")
-      let ⟨bodyJ, _⟩ ← reqFieldD ctx j "body"
-      internD (.chain count init iter (← expr s!"{ctx}.body" bodyJ tdBase tdCount))
-    | "map2" => do
-      let ⟨overJ, _⟩ ← reqFieldD ctx j "over"
-      let over ← expr s!"{ctx}.over" overJ tdBase tdCount
-      let elem ← binder s!"{ctx}.elem" (← reqField ctx j "elem")
-      let ⟨bodyJ, _⟩ ← reqFieldD ctx j "body"
-      internD (.map2 over elem (← expr s!"{ctx}.body" bodyJ tdBase tdCount))
-    | "zipWith" => do
-      let ⟨aJ, _⟩ ← reqFieldD ctx j "a"
-      let a ← expr s!"{ctx}.a" aJ tdBase tdCount
-      let ⟨bJ, _⟩ ← reqFieldD ctx j "b"
-      let b ← expr s!"{ctx}.b" bJ tdBase tdCount
-      let x ← binder s!"{ctx}.x" (← reqField ctx j "x")
-      let y ← binder s!"{ctx}.y" (← reqField ctx j "y")
-      let ⟨bodyJ, _⟩ ← reqFieldD ctx j "body"
-      internD (.zipWith a b x y (← expr s!"{ctx}.body" bodyJ tdBase tdCount))
-    | "let" => do
-      let ⟨bs, _⟩ ← reqArrD ctx j "binders"
-      let binders ← bs.attach.zipIdx.mapM fun (⟨b, _⟩, i) => do
-        let bctx := s!"{ctx}.binders[{i}]"
-        let bnd ← binder s!"{bctx}.binder" (← reqField bctx b "binder")
-        let ⟨valueJ, _⟩ ← reqFieldD bctx b "value"
-        pure ({ binder := bnd,
-                value := ← expr s!"{bctx}.value" valueJ tdBase tdCount } : ELetBinder)
-      let ⟨inJ, _⟩ ← reqFieldD ctx j "in"
-      internD (.letIn binders (← expr s!"{ctx}.in" inJ tdBase tdCount))
-    | "tag" => do
-      let d ← defIdx
-      let variant ← reqNat ctx j "variant"
-      let ⟨ps, _⟩ ← reqArrD ctx j "payload"
-      let payload ← ps.attach.zipIdx.mapM fun (⟨p, _⟩, i) => do
-        let pctx := s!"{ctx}.payload[{i}]"
-        let field ← reqNat pctx p "field"
-        let ⟨valueJ, _⟩ ← reqFieldD pctx p "value"
-        pure ({ field,
-                value := ← expr s!"{pctx}.value" valueJ tdBase tdCount } : ETagPayload)
-      internD (.tag d variant payload)
-    | "match" => do
-      let d ← defIdx
-      let ⟨scrJ, _⟩ ← reqFieldD ctx j "scrutinee"
-      let scrutinee ← expr s!"{ctx}.scrutinee" scrJ tdBase tdCount
-      let ⟨as_, _⟩ ← reqArrD ctx j "arms"
-      let arms ← as_.attach.zipIdx.mapM fun (⟨a, _⟩, i) => do
-        let actx := s!"{ctx}.arms[{i}]"
-        let abs ← reqArr actx a "binders"
-        let mut binders : Array Binder := #[]
-        for h2 : k in [0:abs.size] do
-          binders := binders.push (← binder s!"{actx}.binders[{k}]" abs[k])
-        let variant ← reqNat actx a "variant"
-        let ⟨bodyJ, _⟩ ← reqFieldD actx a "body"
-        pure ({ variant, binders,
-                body := ← expr s!"{actx}.body" bodyJ tdBase tdCount } : EMatchArm)
-      internD (.match_ d scrutinee arms)
+      internD (.bankSum count tables (← expr s!"{ctx}.body" bodyJ) dc? idxId)
     | other => err ctx s!"unknown expression op '{other}'"
   | _ => err ctx "expected an expression value"
 termination_by sizeOf j
@@ -702,55 +381,32 @@ decreasing_by
     | (simp_all <;> omega)
     | (have := Array.sizeOf_lt_of_mem ‹_ ∈ items›; simp_all <;> omega)
     | (have := Array.sizeOf_lt_of_mem ‹_ ∈ ts›; simp_all <;> omega)
-    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ bs›; simp_all <;> omega)
-    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ ps›; simp_all <;> omega)
-    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ as_›; simp_all <;> omega)
     | (have := Tropical.Parse.JsonV.sizeOf_lt_of_getField hdc; simp_all <;> omega)
 
-private def decodePortType (ctx : String) (j : JsonV) (typeDefs : Array TypeDef)
-    (tdBase tpBase tpCount : Nat) : Except String PortType := do
+private def decodePortType (ctx : String) (j : JsonV) : Except String PortType := do
   let kind ← reqStr ctx j "kind"
   match kind with
   | "scalar" => pure (.scalar (← scalarKind s!"{ctx}.scalar" (← reqStr ctx j "scalar")))
-  | "alias" => do
-    let idx ← reqNat ctx j "alias"
-    match typeDefs[tdBase + idx]? with
-    | some (.alias ..) => pure (.alias ⟨tdBase + idx⟩)
-    | some td => err ctx s!"typeDef '{td.name}' is not an alias"
-    | none => err ctx s!"typeDef pool index {idx} out of range"
   | "array" => do
-    let element ← scalarOrAlias s!"{ctx}.element" (← reqField ctx j "element") typeDefs tdBase
+    let element ← match ← reqField ctx j "element" with
+      | .str s => scalarKind s!"{ctx}.element" s
+      | _ => err s!"{ctx}.element" "expected a scalar kind"
     let dims ← reqArr ctx j "shape"
-    let mut shape : Array ShapeDim := #[]
+    let mut shape : Array JsonNumber := #[]
     for h : i in [0:dims.size] do
       match dims[i] with
-      | .num n => shape := shape.push (.lit n)
-      | d@(.obj _) =>
-        let tp ← reqNat s!"{ctx}.shape[{i}]" d "typeParam"
-        if tp < tpCount then shape := shape.push (.typeParam ⟨tpBase + tp⟩)
-        else err s!"{ctx}.shape[{i}]" s!"typeParam pool index {tp} out of range"
-      | _ => err s!"{ctx}.shape[{i}]" "expected a number or {typeParam} record"
+      | .num n => shape := shape.push n
+      | _ => err s!"{ctx}.shape[{i}]" "expected a number (type-param dims are retired)"
     pure (.array element shape)
   | other => err ctx s!"unknown port-type kind '{other}'"
 
-private def decodeProgram (i : Nat) (j : JsonV) (typeDefs : Array TypeDef)
-    (tdBase tpBase tpCount pBase programsSoFar : Nat) : DecM Program := do
+private def decodeProgram (i : Nat) (j : JsonV)
+    (pBase programsSoFar : Nat) : DecM Program := do
   let ctx := s!"programPool[{i}]"
-  let tdCount := typeDefs.size - tdBase
   let name ← reqStr ctx j "name"
   let progRef (rctx : String) (n : Nat) : Except String ProgramIdx :=
     if n < programsSoFar then pure ⟨pBase + n⟩
     else err rctx s!"program pool index {n} is out of range (decoded so far: {programsSoFar}); forward references violate the post-order pool contract"
-
-  let mut typeParams : Array TypeParamPoolIdx := #[]
-  for h : k in [0:(← reqArr ctx j "typeParams").size] do
-    let tps ← reqArr ctx j "typeParams"
-    match tps[k]! with
-    | .num n =>
-      let idx := n.mantissa.toNat
-      if n.exponent == 0 && idx < tpCount then typeParams := typeParams.push ⟨tpBase + idx⟩
-      else err s!"{ctx}.typeParams[{k}]" s!"typeParam pool index out of range"
-    | _ => err s!"{ctx}.typeParams[{k}]" "expected a pool index"
 
   let mut inputs : Array InputDecl := #[]
   for h : k in [0:(← reqArr ctx j "inputs").size] do
@@ -759,10 +415,10 @@ private def decodeProgram (i : Nat) (j : JsonV) (typeDefs : Array TypeDef)
     let dctx := s!"{ctx}.inputs[{k}]"
     let type? ← match d.getField? "type" with
       | none => pure none
-      | some t => pure (some (← decodePortType s!"{dctx}.type" t typeDefs tdBase tpBase tpCount))
+      | some t => pure (some (← decodePortType s!"{dctx}.type" t))
     let default? ← match d.getField? "default" with
       | none => pure none
-      | some e => pure (some (← expr s!"{dctx}.default" e tdBase tdCount))
+      | some e => pure (some (← expr s!"{dctx}.default" e))
     inputs := inputs.push { name := ← reqStr dctx d "name", type?, default? }
 
   let mut outputs : Array OutputDecl := #[]
@@ -772,18 +428,8 @@ private def decodeProgram (i : Nat) (j : JsonV) (typeDefs : Array TypeDef)
     let dctx := s!"{ctx}.outputs[{k}]"
     let type? ← match d.getField? "type" with
       | none => pure none
-      | some t => pure (some (← decodePortType s!"{dctx}.type" t typeDefs tdBase tpBase tpCount))
+      | some t => pure (some (← decodePortType s!"{dctx}.type" t))
     outputs := outputs.push { name := ← reqStr dctx d "name", type? }
-
-  let mut typeDefRefs : Array TypeDefIdx := #[]
-  for h : k in [0:(← reqArr ctx j "typeDefs").size] do
-    let tds ← reqArr ctx j "typeDefs"
-    match tds[k]! with
-    | .num n =>
-      let idx := n.mantissa.toNat
-      if n.exponent == 0 && idx < tdCount then typeDefRefs := typeDefRefs.push ⟨tdBase + idx⟩
-      else err s!"{ctx}.typeDefs[{k}]" "typeDef pool index out of range"
-    | _ => err s!"{ctx}.typeDefs[{k}]" "expected a pool index"
 
   let mut decls : Array BodyDecl := #[]
   for h : k in [0:(← reqArr ctx j "decls").size] do
@@ -797,15 +443,6 @@ private def decodeProgram (i : Nat) (j : JsonV) (typeDefs : Array TypeDef)
       decls := decls.push (.param dname (← optNum dctx d "value"))
     | "instanceDecl" => do
       let typeKey ← reqStr dctx d "typeKey"
-      let tas ← reqArr dctx d "typeArgs"
-      let mut typeArgs : Array InstanceTypeArg := #[]
-      for h2 : m in [0:tas.size] do
-        let a := tas[m]
-        let actx := s!"{dctx}.typeArgs[{m}]"
-        let value ← match a.getField? "value" with
-          | some (.num n) => pure n
-          | _ => err actx "field 'value' must be a number"
-        typeArgs := typeArgs.push { param := ⟨← reqNat actx a "param"⟩, value }
       let ins ← reqArr dctx d "inputs"
       let mut instInputs : Array InstanceInput := #[]
       for h2 : m in [0:ins.size] do
@@ -813,8 +450,8 @@ private def decodeProgram (i : Nat) (j : JsonV) (typeDefs : Array TypeDef)
         let wctx := s!"{dctx}.inputs[{m}]"
         instInputs := instInputs.push {
           port := ⟨← reqNat wctx w "port"⟩
-          value := ← expr s!"{wctx}.value" (← reqField wctx w "value") tdBase tdCount }
-      decls := decls.push (.inst dname typeKey typeArgs instInputs)
+          value := ← expr s!"{wctx}.value" (← reqField wctx w "value") }
+      decls := decls.push (.inst dname typeKey instInputs)
     | "programDecl" =>
       decls := decls.push (.prog dname (← progRef s!"{dctx}.program" (← reqNat dctx d "program")))
     | other => err dctx s!"unknown body-decl op '{other}'"
@@ -832,7 +469,7 @@ private def decodeProgram (i : Nat) (j : JsonV) (typeDefs : Array TypeDef)
         if t.getStr? "kind" == some "dac" then pure OutputTarget.dac
         else err actx "unknown target kind"
       | _ => err actx "missing or malformed 'target'"
-    assigns := assigns.push { target, expr := ← expr s!"{actx}.expr" (← reqField actx a "expr") tdBase tdCount }
+    assigns := assigns.push { target, expr := ← expr s!"{actx}.expr" (← reqField actx a "expr") }
 
   let mut registry : Array (String × ProgramIdx) := #[]
   for h : k in [0:(← reqArr ctx j "registry").size] do
@@ -852,16 +489,15 @@ private def decodeProgram (i : Nat) (j : JsonV) (typeDefs : Array TypeDef)
         registry := registry.push (key, ← progRef s!"{ctx}.registry[{k}]" idx)
     | _ => err s!"{ctx}.registry[{k}]" "expected a [key, poolIdx] pair"
 
-  pure { name, typeParams, inputs, outputs, typeDefs := typeDefRefs,
-         decls, assigns, binderCount := ← reqNat ctx j "binderCount", registry }
+  pure { name, inputs, outputs, decls, assigns, registry }
 
 end Decode
 
 /-- Decode `tropical_resolved_1` wire JSON, **appending** into an
     existing arena. The wire's pool indices are batch-relative; the
     lower-index invariant makes the rebase a mechanical shift by the
-    base pool sizes. Each call appends a self-contained copy — wire
-    indices cannot reach entries below the bases, and nothing already
+    base pool size. Each call appends a self-contained copy — wire
+    indices cannot reach entries below the base, and nothing already
     in the arena is touched. -/
 def decodeResolvedInto (arena : Arena) (j : JsonV) :
     Except String (Arena × ProgramIdx) := do
@@ -876,39 +512,15 @@ def decodeResolvedInto (arena : Arena) (j : JsonV) :
     | some (.arr a) => pure a
     | _ => .error s!"decodeResolved: {k}: expected an array"
 
-  let tpBase := arena.typeParams.size
-  let tdBase := arena.typeDefs.size
-  let pBase  := arena.programs.size
+  let pBase := arena.programs.size
 
-  -- 1. Type params — leaves.
-  let mut typeParams : Array TypeParamDecl := arena.typeParams
-  for i in [0:(← pool "typeParamPool").size] do
-    let tps ← pool "typeParamPool"
-    let r := tps[i]!
-    let ctx := s!"typeParamPool[{i}]"
-    let name ← match r.getField? "name" with
-      | some (.str s) => pure s
-      | _ => .error s!"decodeResolved: {ctx}: missing string 'name'"
-    let default? ← match r.getField? "default" with
-      | none => pure none
-      | some (.num n) => pure (some n)
-      | some _ => .error s!"decodeResolved: {ctx}: 'default' must be a number"
-    typeParams := typeParams.push { name, default? }
-  let tpCount := typeParams.size - tpBase
-
-  -- 2. Type defs — single forward pass.
-  let mut typeDefs : Array TypeDef := arena.typeDefs
-  for i in [0:(← pool "typeDefPool").size] do
-    let tds ← pool "typeDefPool"
-    typeDefs := typeDefs.push (← Decode.decodeTypeDef i tds[i]! typeDefs tdBase)
-
-  -- 3. Programs — single forward pass, interning expressions into the shared
+  -- Programs — single forward pass, interning expressions into the shared
   -- DAG (seeded from the existing arena's `exprs`).
   let mut programs : Array Program := arena.programs
   let mut exprs : ExprArena := arena.exprs
   for i in [0:(← pool "programPool").size] do
     let ps ← pool "programPool"
-    let (p, exprs') ← (Decode.decodeProgram i ps[i]! typeDefs tdBase tpBase tpCount
+    let (p, exprs') ← (Decode.decodeProgram i ps[i]!
            pBase (programs.size - pBase)).run exprs
     programs := programs.push p
     exprs := exprs'
@@ -920,7 +532,7 @@ def decodeResolvedInto (arena : Arena) (j : JsonV) :
       else .error "decodeResolved: root: program pool index out of range"
     | _ => .error "decodeResolved: missing 'root'"
 
-  pure ({ typeParams, typeDefs, programs, exprs }, root)
+  pure ({ programs, exprs }, root)
 
 /-- Decode `tropical_resolved_1` wire JSON into a fresh arena + root,
     keeping the wire pool order as the arena order. -/

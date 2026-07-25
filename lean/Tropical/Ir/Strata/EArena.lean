@@ -75,12 +75,6 @@ def pushEProgram (p : Program) : PassM ProgramIdx := do
   set { ea with programs := ea.programs.push p }
   pure ⟨ea.programs.size⟩
 
-def typeParamP? (i : TypeParamPoolIdx) : PassM (Option TypeParamDecl) := do
-  pure ((← get).base.typeParam? i)
-
-def typeDefP? (i : TypeDefIdx) : PassM (Option TypeDef) := do
-  pure ((← get).base.typeDef? i)
-
 /-- Lift a pure `Except Error` (e.g. a shared validation helper) into `PassM`. -/
 def liftE {α} (e : Except Error α) : PassM α :=
   match e with
@@ -126,21 +120,15 @@ def EArena.materialize (ea : EArena) (root : ProgramIdx) :
 -- ─────────────────────────────────────────────────────────────
 -- Exit (Phase B): id-form EArena → (CoreArena × CoreProgram)
 --
--- Replaces `materialize` + `Core.check` in one pass: the strata DAG is
--- threaded straight to emit as a `CoreArena` instead of flattened to a
--- tree and re-interned three times (the modulated-clock blowup). Each
--- reachable expression node is converted once and equal subtrees stay
--- one node, so O(unique nodes), never O(expanded tree).
---
--- REACHABLE-only: `ea.exprs` is append-only, so it can hold nodes no
--- longer referenced by the lowered root (rewritten-away identities,
--- dead JSON-interned structure), and a whole-arena fold would falsely
--- reject them. We convert only what the root (and its
--- instance-referenced registry) actually references — exactly the
--- evaluator-reachable graph the old `Core.check` walked. A REACHABLE
--- retired constructor (a JSON-loaded `fold`/`tag`/…) is refused here:
--- this boundary is the front-door contract now that no pass lowers
--- combinators or sum types.
+-- Pure reachability GC: the strata DAG is threaded straight to emit as
+-- a `CoreArena`. Each reachable expression node is converted once and
+-- equal subtrees stay one node, so O(unique nodes), never O(expanded
+-- tree). REACHABLE-only: `ea.exprs` is append-only, so it can hold
+-- nodes no longer referenced by the lowered root (rewritten-away
+-- identities); we convert only what the root (and its
+-- instance-referenced registry) actually references. There is no
+-- refusal here any more — retired constructors are refused at the JSON
+-- front doors and are unspellable in `ENode`.
 -- ─────────────────────────────────────────────────────────────
 
 open Tropical.Ir.Core (CoreProgram CoreInputDecl CoreOutputDecl CoreOutputAssign
@@ -150,18 +138,9 @@ open Tropical.Ir.Core (CoreProgram CoreInputDecl CoreOutputDecl CoreOutputAssign
     mapping an `ExprArena` id (`.idx`) to its interned `CoreArena` id. -/
 private abbrev ConvM := StateT (CoreArena × Std.HashMap Nat ExprId) (Except Error)
 
-/-- The retired-constructor rejection: the front-door contract, stated at
-    the type boundary. Combinator/sum-type lowering left with the surface
-    language and generics that produced it (2026-07-25); a JSON program
-    that still spells one of these ops is refused here, not silently
-    miscompiled. Summing indexed families are authored as `bankSum`. -/
-private def retired (op : String) : Error :=
-  ⟨s!"toResolved: '{op}' is not a trunk construct — combinator/sum-type lowering was retired with its producers (the literate surface language and generics); a summing indexed family is authored as bankSum"⟩
-
 /-- Convert one reachable `ExprArena` node (and its children) into the
-    `CoreArena`, memoized. Rejects every retired constructor — the
-    id-form analogue of `Core.checkExpr`, but visited only when actually
-    referenced.
+    `CoreArena`, memoized. With `ENode` shrunk to the trunk set this is
+    a pure structure-preserving copy — the reachability GC.
 
     TOTAL, by descent on `eid.idx`: the source arena is a frozen
     parameter and `hw` says every edge points down
@@ -197,19 +176,6 @@ private def convExprId (ea : ExprArena) (hw : ea.wf = true) (eid : ExprId) :
           | none => pure none
           | some d => pure (some (← convExprId ea hw d))
         pure (.bankSum c ts' b' dc' ii)
-      | some (.zeros _)        => throw (retired "zeros")
-      | some (.typeParamRef _) => throw (retired "typeParamRef")
-      | some (.bindingRef _)   => throw (retired "bindingRef")
-      | some (.letIn ..)       => throw (retired "let")
-      | some (.fold ..)        => throw (retired "fold")
-      | some (.scan ..)        => throw (retired "scan")
-      | some (.generate ..)    => throw (retired "generate")
-      | some (.iterate ..)     => throw (retired "iterate")
-      | some (.chain ..)       => throw (retired "chain")
-      | some (.map2 ..)        => throw (retired "map2")
-      | some (.zipWith ..)     => throw (retired "zipWith")
-      | some (.tag ..)         => throw (retired "tag")
-      | some (.match_ ..)      => throw (retired "match")
     let st ← get
     let (cid, ca') := (intern cn).run st.1
     set (ca', st.2.insert eid.idx cid)
@@ -229,28 +195,26 @@ private partial def convProgram (ea : EArena) (hw : ea.exprs.wf = true)
     (eIdx : ProgramIdx) : ConvM CoreProgram := do
   let some ep := ea.programs[eIdx.idx]?
     | throw ⟨s!"toResolved: program pool index {eIdx.idx} out of range (internal)"⟩
-  unless ep.typeParams.isEmpty do
-    throw ⟨s!"core check ('{ep.name}'): {ep.typeParams.size} typeParam decl(s) — generics are retired; the trunk accepts only monomorphic programs"⟩
   let decls : Array CoreBodyDecl ← ep.decls.mapM fun d => do
     match d with
     | .param name value? => pure (.param name value?)
-    | .inst name typeKey tArgs inputs =>
+    | .inst name typeKey inputs =>
       let inputs' ← inputs.mapM fun i => do
         pure ({ port := i.port, value := ← convExprId ea.exprs hw i.value } : CoreInstanceInput)
-      pure (.inst name typeKey tArgs inputs')
+      pure (.inst name typeKey inputs')
     | .prog name _ => pure (.progDecl name)
   let assigns : Array CoreOutputAssign ← ep.assigns.mapM fun a => do
     pure { target := a.target, expr := ← convExprId ea.exprs hw a.expr }
   let inputs : Array CoreInputDecl ← ep.inputs.mapM fun i => do
-    pure { name := i.name, type? := Core.resolveOptPortType ea.base i.type?,
+    pure { name := i.name, type? := i.type?,
            default? := ← i.default?.mapM (convExprId ea.exprs hw) }
   let outputs : Array CoreOutputDecl := ep.outputs.map fun o =>
-    { name := o.name, type? := Core.resolveOptPortType ea.base o.type? }
+    { name := o.name, type? := o.type? }
   -- Registry: follow only instance-referenced entries (evaluator-reachable),
   -- recursively — matching `Core.check`'s first-use dedup and tree duplication.
   let mut registry : Array (String × CoreProgram) := #[]
   for d in ep.decls do
-    if let .inst name typeKey _ _ := d then
+    if let .inst name typeKey _ := d then
       unless registry.any (·.1 == typeKey) do
         let some tIdx := ep.registryGet? typeKey
           | throw ⟨s!"core check ('{ep.name}'): instance '{name}' typeKey '{typeKey}' missing from registry"⟩
@@ -292,12 +256,10 @@ abbrev MapM := StateT (Std.HashMap Nat ExprId) PassM
 
 /-- Hook set for `mapExprId`: `node n` may replace a node (returning its id,
     possibly freshly interned via `einternP`); `none` recurses structurally.
-    `binder` transforms binders at every binding site. Hooks run in `MapM` so
-    a hook that recurses (e.g. `nestedOut`-chain substitution) shares the
-    walk's memo. -/
+    Hooks run in `MapM` so a hook that recurses (e.g. `nestedOut`-chain
+    substitution) shares the walk's memo. -/
 structure MapHooksId where
   node : ENode → MapM (Option ExprId) := fun _ => pure none
-  binder : Binder → Binder := id
 
 /-- Structural map over an id-rooted expression, re-interning the result and
     memoizing per source id. Equal subtrees collapse on intern, so the rewrite
@@ -310,8 +272,7 @@ partial def mapExprIdGo (h : MapHooksId) (id : ExprId) : MapM ExprId := do
     | some r => pure r
     | none =>
       match n with
-      | .num _ | .bool _
-      | .inputRef _ | .paramRef _ | .typeParamRef _ | .bindingRef _
+      | .num _ | .bool _ | .inputRef _ | .paramRef _
       | .nestedOut _ _ | .sampleRate | .sampleIndex | .loopIdx _ => pure id
       | .bankSum c ts b dc ii =>
         einternP (.bankSum c (← ts.mapM (mapExprIdGo h)) (← mapExprIdGo h b)
@@ -323,34 +284,6 @@ partial def mapExprIdGo (h : MapHooksId) (id : ExprId) : MapM ExprId := do
       | .select a b c => einternP (.select (← mapExprIdGo h a) (← mapExprIdGo h b) (← mapExprIdGo h c))
       | .arraySet a b c => einternP (.arraySet (← mapExprIdGo h a) (← mapExprIdGo h b) (← mapExprIdGo h c))
       | .index a b => einternP (.index (← mapExprIdGo h a) (← mapExprIdGo h b))
-      | .zeros c => einternP (.zeros (← mapExprIdGo h c))
-      | .fold o i ac e b =>
-        einternP (.fold (← mapExprIdGo h o) (← mapExprIdGo h i) (h.binder ac) (h.binder e) (← mapExprIdGo h b))
-      | .scan o i ac e b =>
-        einternP (.scan (← mapExprIdGo h o) (← mapExprIdGo h i) (h.binder ac) (h.binder e) (← mapExprIdGo h b))
-      | .generate c it b =>
-        einternP (.generate (← mapExprIdGo h c) (h.binder it) (← mapExprIdGo h b))
-      | .iterate c i it b =>
-        einternP (.iterate (← mapExprIdGo h c) (← mapExprIdGo h i) (h.binder it) (← mapExprIdGo h b))
-      | .chain c i it b =>
-        einternP (.chain (← mapExprIdGo h c) (← mapExprIdGo h i) (h.binder it) (← mapExprIdGo h b))
-      | .map2 o e b =>
-        einternP (.map2 (← mapExprIdGo h o) (h.binder e) (← mapExprIdGo h b))
-      | .zipWith a b x y bd =>
-        einternP (.zipWith (← mapExprIdGo h a) (← mapExprIdGo h b) (h.binder x) (h.binder y) (← mapExprIdGo h bd))
-      | .letIn bs b =>
-        let bs' ← bs.mapM fun lb => do
-          pure ({ binder := h.binder lb.binder, value := ← mapExprIdGo h lb.value } : ELetBinder)
-        einternP (.letIn bs' (← mapExprIdGo h b))
-      | .tag d v p =>
-        let p' ← p.mapM fun tp => do
-          pure ({ field := tp.field, value := ← mapExprIdGo h tp.value } : ETagPayload)
-        einternP (.tag d v p')
-      | .match_ d s arms =>
-        let arms' ← arms.mapM fun arm => do
-          pure ({ variant := arm.variant, binders := arm.binders.map h.binder,
-                  body := ← mapExprIdGo h arm.body } : EMatchArm)
-        einternP (.match_ d (← mapExprIdGo h s) arms')
   modify (·.insert id.idx r)
   pure r
 

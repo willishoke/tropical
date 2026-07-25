@@ -90,12 +90,12 @@ where
 partial def inferOutputPortType (expr : Json) : Option PortType :=
   match expr with
   | .arr items =>
-    some (.array (.scalar .float) #[.lit ⟨items.size, 0⟩])
+    some (.array .float #[⟨items.size, 0⟩])
   | .obj _ =>
     let op := opOf? expr
     if (op == some "array" || op == some "arrayLiteral") then
       match getField? expr "items" with
-      | some (.arr items) => some (.array (.scalar .float) #[.lit ⟨items.size, 0⟩])
+      | some (.arr items) => some (.array .float #[⟨items.size, 0⟩])
       | _ => none
     else if op == some "delay" then
       match getField? expr "args" with
@@ -237,13 +237,10 @@ def lift (expr : Json) (synthName : String) (exprs0 : ExprArena := {}) :
   let (translated, ctx) ← translate refToInput expr { exprs := exprs0 }
   let prog : Program := {
     name := synthName
-    typeParams := #[]
     inputs := inputDecls
     outputs := #[outputDecl]
-    typeDefs := #[]
     decls := ctx.params.map (BodyDecl.param · none)
     assigns := #[{ target := .port ⟨0⟩, expr := translated }]
-    binderCount := 0
     registry := #[] }
   return (prog, sortedRefs, ctx.exprs)
 

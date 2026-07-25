@@ -70,7 +70,7 @@ def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
   let mut any := false
   for d in prog.decls do
     if !any then
-      if let .inst name typeKey _ inputs := d then
+      if let .inst name typeKey inputs := d then
         if (← detectIdentityE prog name typeKey inputs).isSome then
           any := true
   unless any do return rootIdx
@@ -78,7 +78,7 @@ def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
   let mut fates : Array InstFateE := #[]
   let mut newPos := 0
   for d in prog.decls do
-    if let .inst name typeKey _ inputs := d then
+    if let .inst name typeKey inputs := d then
       match ← detectIdentityE prog name typeKey inputs with
       | some outs => fates := fates.push (.eliminated outs)
       | none =>
@@ -89,7 +89,7 @@ def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
   let mut instPos := 0
   for d in prog.decls do
     match d with
-    | .inst name typeKey tArgs inputs =>
+    | .inst name typeKey inputs =>
       let fate := fates[instPos]!
       instPos := instPos + 1
       match fate with
@@ -97,7 +97,7 @@ def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
       | .survivor _ =>
         let ins ← inputs.mapM fun i => do
           pure ({ port := i.port, value := ← substExprE fates i.value } : InstanceInput)
-        newDecls := newDecls.push (.inst name typeKey tArgs ins)
+        newDecls := newDecls.push (.inst name typeKey ins)
     | .param .. | .prog .. =>
       newDecls := newDecls.push d
   let newAssigns ← prog.assigns.mapM fun a => do

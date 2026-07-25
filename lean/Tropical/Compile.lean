@@ -137,24 +137,19 @@ structure SlotExpansion where
   arraySize? : Option Nat := none
 deriving Inhabited
 
-/-- Port of `expandPortToSlots`: scalar → one slot of its kind; alias →
-    one opaque float slot; array → one array slot of size ∏shape. -/
+/-- Port of `expandPortToSlots`: scalar → one slot of its kind;
+    array → one array slot of size ∏shape (dims are literal — type-param
+    dims were retired with generics). -/
 def expandPortToSlots (baseName : String) (t? : Option CorePortType) :
     Except String SlotExpansion := do
   match t? with
   | none | some (.scalar _) =>
     let k := match t? with | some (.scalar k) => k | _ => .float
     return { names := #[baseName], types := #[k] }
-  | some (.alias _) =>
-    return { names := #[baseName], types := #[.float] }
   | some (.array _ shape) =>
     let mut total := 1
     for dim in shape do
-      match dim with
-      | .lit n => total := total * n.toFloat.toUInt64.toNat
-      | .unresolved =>
-        throw (s!"expandPortToSlots: array port '{baseName}' has unresolved "
-          ++ "type-param dimension; ensure specialize ran on the owning program")
+      total := total * dim.toFloat.toUInt64.toNat
     return { arraySize? := some total }
 
 private def slotKey (instPath portName : String) : String :=
@@ -382,7 +377,7 @@ private def emitWriteSlots (s : SessionAlloc) (instanceName : String)
 -- ─────────────────────────────────────────────────────────────
 
 private def instParts : CoreBodyDecl → Option (String × String)
-  | .inst name typeKey _ _ => some (name, typeKey)
+  | .inst name typeKey _ => some (name, typeKey)
   | _ => none
 
 /-- The wire expression bound to a child input port, mirroring
@@ -391,7 +386,7 @@ private def instParts : CoreBodyDecl → Option (String × String)
 private def childWireExpr (decl : CoreBodyDecl) (portIdx : Nat)
     (portDecl : CoreInputDecl) : Option Tropical.Ir.ExprId :=
   let wired := match decl with
-    | .inst _ _ _ inputs => (inputs.find? (·.port.idx == portIdx)).map (·.value)
+    | .inst _ _ inputs => (inputs.find? (·.port.idx == portIdx)).map (·.value)
     | _ => none
   wired <|> portDecl.default?
 

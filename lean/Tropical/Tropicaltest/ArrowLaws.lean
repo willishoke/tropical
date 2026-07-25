@@ -265,17 +265,15 @@ def planTagCount (t : String) (p : Tropical.Plan.FlatPlan) : Nat :=
   p.instanceFunctions.foldl (fun acc f => acc + countFnTagged t f) 0
 
 /-- Strata-process an already-built carrier program, then compile it via the
-    production session path. Returns (post-strata binderCount, post-strata
-    declCount, FlatPlan) — the post-strata program is the CSE'd DAG, so its
-    binderCount is the count of distinct shared subexpressions. -/
+    production session path. Returns (post-strata declCount, FlatPlan). -/
 private def diagStrataCompile (arena : Arena) (idx : ProgramIdx) :
-    Except String (Nat × Nat × Tropical.Plan.FlatPlan) := do
+    Except String (Nat × Tropical.Plan.FlatPlan) := do
   let (arena'', root') ← (Tropical.Ir.Strata.run {} arena idx).mapError (·.message)
   let some prog := arena''.program? root'
     | .error "diagonal: post-strata root program index out of range"
   let (coreArena, core) ← Tropical.Ir.checkResolvedArena arena'' root'
   let plan ← Tropical.Compile.compileSession (.forRoot core coreArena)
-  pure (prog.binderCount, prog.decls.size, plan)
+  pure (prog.decls.size, plan)
 
 /-- Certify the diagonal law: build SHARED (one fanned source) and INDEPENDENT
     (two sources) carriers, assert their rendered audio is byte-identical (the
@@ -294,7 +292,7 @@ def runDiagonalLaw (arena : Arena) (resolved : Array (String × ProgramIdx)) : I
     match diagStrataCompile arenaS idxS, diagStrataCompile arenaI idxI with
     | .error e, _ => failGate "arrow-law/diagonal" s!"compile shared: {firstLine e}"
     | _, .error e => failGate "arrow-law/diagonal" s!"compile independent: {firstLine e}"
-    | .ok (bcS, dcS, planS), .ok (bcI, dcI, planI) =>
+    | .ok (dcS, planS), .ok (dcI, planI) =>
       let instrS := planInstrCount planS
       let instrI := planInstrCount planI
       match planS.toWire, planI.toWire with
@@ -312,9 +310,9 @@ def runDiagonalLaw (arena : Arena) (resolved : Array (String × ProgramIdx)) : I
           -- carries the extra inlined osc(clk) body's binders); the duplicate
           -- source is deduped at EMIT (compileResolved value-numbering), not in
           -- the strata binder DAG — yet both reach the same minimal kernel.
-          IO.println s!"        cost  shared:      pre-strata insts={preShared} post-strata binders={bcS} decls={dcS} plan-instrs={instrS} regs={planS.registerCount}"
-          IO.println s!"        cost  independent: pre-strata insts={preIndep} post-strata binders={bcI} decls={dcI} plan-instrs={instrI} regs={planI.registerCount}"
-          IO.println s!"        cost  plans byte-identical: {plansIdentical}  ·  CSE collapsed both to same {instrS}-instr/{planS.registerCount}-reg DAG: {plansIdentical && instrS == instrI}  (post-strata binders {bcS} vs {bcI} differ — dedup is at emit)"
+          IO.println s!"        cost  shared:      pre-strata insts={preShared} post-strata decls={dcS} plan-instrs={instrS} regs={planS.registerCount}"
+          IO.println s!"        cost  independent: pre-strata insts={preIndep} post-strata decls={dcI} plan-instrs={instrI} regs={planI.registerCount}"
+          IO.println s!"        cost  plans byte-identical: {plansIdentical}  ·  CSE collapsed both to same {instrS}-instr/{planS.registerCount}-reg DAG: {plansIdentical && instrS == instrI}"
           hashGate "arrow-law/diagonal" bytesS bytesI
             (fun h => s!"audio ≡ {h.take 16} (shared ≡ independent)")
             (fun hs hi => s!"audio differs: shared {hs.take 16} independent {hi.take 16}")
@@ -344,7 +342,7 @@ def runReverseFlangerCommute
     match diagStrataCompile arenaL idxL, diagStrataCompile arenaR idxR with
     | .error e, _ => failGate "arrow-law/reverse-flanger-commute" s!"compile lhs: {firstLine e}"
     | _, .error e => failGate "arrow-law/reverse-flanger-commute" s!"compile rhs: {firstLine e}"
-    | .ok (_, _, planL), .ok (_, _, planR) =>
+    | .ok (_, planL), .ok (_, planR) =>
       match ← renderIrBytes planL, ← renderIrBytes planR with
       | .error e, _ | _, .error e =>
         failGate "arrow-law/reverse-flanger-commute" s!"render: {firstLine e}"
@@ -395,7 +393,7 @@ def runFixedSourceLaw (name : String)
   match diagStrataCompile arenaL idxL, diagStrataCompile arenaR idxR with
   | .error e, _ => failGate s!"arrow-law/{name}" s!"compile lhs: {firstLine e}"
   | _, .error e => failGate s!"arrow-law/{name}" s!"compile rhs: {firstLine e}"
-  | .ok (_, _, planL), .ok (_, _, planR) =>
+  | .ok (_, planL), .ok (_, planR) =>
     match ← renderIrBytes planL, ← renderIrBytes planR with
     | .error e, _ | _, .error e =>
       failGate s!"arrow-law/{name}" s!"render: {firstLine e}"
@@ -417,7 +415,7 @@ def runReverseFlangerCommuteFixedpoint (arena : Arena) : IO Bool := do
   match diagStrataCompile arenaL idxL, diagStrataCompile arenaR idxR with
   | .error e, _ => failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"compile lhs: {firstLine e}"
   | _, .error e => failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"compile rhs: {firstLine e}"
-  | .ok (_, _, planL), .ok (_, _, planR) =>
+  | .ok (_, planL), .ok (_, planR) =>
     match ← renderIrBytes planL, ← renderIrBytes planR with
     | .error e, _ | _, .error e =>
       failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"render: {firstLine e}"

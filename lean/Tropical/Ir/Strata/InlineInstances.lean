@@ -7,11 +7,9 @@ import Tropical.Ir.Strata.EArena
 
 Splice each `InstanceDecl` into its parent: recursively inline its own
 sub-instances (depth-first, bottom-up), substitute wired-in input
-expressions, shift surviving Param/Binding refs by the lift offsets
-(CF-only: there are no reg decls to lift or rename), then resolve every
+expressions, shift surviving Param refs by the lift offset (CF-only:
+there are no reg decls to lift or rename), then resolve every
 `nestedOut` against the recorded per-instance output expressions.
-(Inners are monomorphic and sum-free by contract — generics and the
-sum-type lowering are retired.)
 
 The TS pass memoizes the nestedOut substitution walk on node identity
 to preserve DAG sharing; the id-form walks here memoize the same way
@@ -40,39 +38,37 @@ private def isParamDeclE : BodyDecl → Bool
 
 /-- Clone hooks: `inputRef → wired id` (SHARED — the outer expression passes
     through untouched and is never re-walked, so the bloat never forms); every
-    surviving Param/Binding ref + binder idx shifts by the lift offsets. -/
+    surviving Param ref shifts by the lift offset. -/
 private def inlineSubstHooksE (inputSubst : Array (Nat × ExprId))
-    (paramOffset binderOffset : Nat) : MapHooksId := {
+    (paramOffset : Nat) : MapHooksId := {
   node := fun e => match e with
     | .inputRef i =>
       match inputSubst.find? (·.1 == i.idx) with
       | some (_, v) => pure (some v)
       | none => pure none
     | .paramRef i => do pure (some (← einternP (.paramRef ⟨i.idx + paramOffset⟩)))
-    | .bindingRef i => do pure (some (← einternP (.bindingRef ⟨i.idx + binderOffset⟩)))
     | _ => pure none
-  binder := fun b => { b with idx := ⟨b.idx.idx + binderOffset⟩ }
 }
 
 private def inlineSubstProgramE (inner : Program)
     (inputSubst : Array (Nat × ExprId))
-    (paramOffset binderOffset : Nat) : PassM Program :=
+    (paramOffset : Nat) : PassM Program :=
   -- One memo across all of the clone's roots — the inner's inputs, decls, and
   -- assigns share subgraphs, and the rewrite is root-independent.
   StateT.run' (s := {}) do
-  let rw := mapExprIdGo (inlineSubstHooksE inputSubst paramOffset binderOffset)
+  let rw := mapExprIdGo (inlineSubstHooksE inputSubst paramOffset)
   let inputs ← inner.inputs.mapM fun i => do
     pure ({ i with default? := ← i.default?.mapM rw } : InputDecl)
   let decls ← inner.decls.mapM fun d => do
     match d with
     | .param name value? => pure (BodyDecl.param name value?)
-    | .inst name typeKey tArgs ins =>
-      pure (BodyDecl.inst name typeKey tArgs
+    | .inst name typeKey ins =>
+      pure (BodyDecl.inst name typeKey
         (← ins.mapM fun i => do pure ({ i with value := ← rw i.value } : InstanceInput)))
     | .prog name p => pure (BodyDecl.prog name p)
   let assigns ← inner.assigns.mapM fun a => do
     pure ({ a with expr := ← rw a.expr } : OutputAssign)
-  pure { inner with inputs := inputs, decls := decls, assigns := assigns, binderCount := inner.binderCount + binderOffset }
+  pure { inner with inputs := inputs, decls := decls, assigns := assigns }
 
 private def liftClonedBodyE (cloned : Program) : PassM (Array BodyDecl) := do
   let mut out : Array BodyDecl := #[]
@@ -143,32 +139,26 @@ private def substDeclNestedE (d : BodyDecl) : PassM BodyDecl := do
 
 mutual
 
-/-- Inline one instance: returns its lifted decls, recorded output ids, and the
-    flattened inner's binderCount (the caller's running binder offset advances by
-    it). The shared expr DAG threads through `PassM`. -/
+/-- Inline one instance: returns its lifted decls and recorded output ids.
+    The shared expr DAG threads through `PassM`. -/
 private partial def inlineOneE (enclosing : Program)
-    (instName typeKey : String) (typeArgs : Array InstanceTypeArg)
+    (instName typeKey : String)
     (inputs : Array InstanceInput)
-    (paramOffset binderOffset : Nat) :
-    PassM (Array BodyDecl × Array ExprId × Nat) := do
+    (paramOffset : Nat) :
+    PassM (Array BodyDecl × Array ExprId) := do
   let (declTypeIdx, declType) ← getInstanceTypeE enclosing instName typeKey
-  -- 1. Generics are retired: a concrete instance carries no type args and
-  --    its target declares no type params. (The specialize/sumLower passes
-  --    that ran here were retired 2026-07-25 with their producers.)
-  unless declType.typeParams.isEmpty && typeArgs.isEmpty do
-    failP s!"inlineInstances: instance '{instName}' (target '{declType.name}') carries type args — generics are retired"
-  -- 2. Recursively inline sub-instances (depth-first, bottom-up).
+  -- 1. Recursively inline sub-instances (depth-first, bottom-up).
   let flatIdx ← runE declTypeIdx
   let flattened ← getEProgram flatIdx "inlineInstances"
-  -- 3. Input substitution map (wired > default > unsubstituted).
+  -- 2. Input substitution map (wired > default > unsubstituted).
   let inputSubst ← buildInputSubstE instName declType flattened inputs
-  -- 4. Clone with input substitution + idx shifting.
-  let cloned ← inlineSubstProgramE flattened inputSubst paramOffset binderOffset
-  -- 5. Lift body decls into the outer.
+  -- 3. Clone with input substitution + idx shifting.
+  let cloned ← inlineSubstProgramE flattened inputSubst paramOffset
+  -- 4. Lift body decls into the outer.
   let lifted ← liftClonedBodyE cloned
-  -- 6. Record output exprs for the nestedOut substitution.
+  -- 5. Record output exprs for the nestedOut substitution.
   let outputs ← recordOutputsE instName declType cloned
-  return (lifted, outputs, flattened.binderCount)
+  return (lifted, outputs)
 
 partial def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
   let prog ← getEProgram rootIdx "inlineInstances"
@@ -179,17 +169,13 @@ partial def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
   let mut survivingDecls : Array BodyDecl := #[]
   let mut liftedDecls : Array BodyDecl := #[]
   let mut nestedOutSubst : NestedOutTableE := #[]
-  let mut liftedBinderCount := 0
   for decl in prog.decls do
     match decl with
-    | .inst name typeKey typeArgs inputs =>
+    | .inst name typeKey inputs =>
       let paramOffset := outerParamCount + (liftedDecls.filter isParamDeclE).size
-      let binderOffset := prog.binderCount + liftedBinderCount
-      let (lifted, outputs, innerBinders) ←
-        inlineOneE prog name typeKey typeArgs inputs paramOffset binderOffset
+      let (lifted, outputs) ← inlineOneE prog name typeKey inputs paramOffset
       liftedDecls := liftedDecls ++ lifted
       nestedOutSubst := nestedOutSubst.push outputs
-      liftedBinderCount := liftedBinderCount + innerBinders
     | _ => survivingDecls := survivingDecls.push decl
 
   -- Surviving + lifted decls are param/prog only (CF-only: no regs to carry a
@@ -201,7 +187,6 @@ partial def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
   pushEProgram { prog with
     decls := newDecls
     assigns := newAssigns
-    binderCount := prog.binderCount + liftedBinderCount
     registry := #[] }
 
 end

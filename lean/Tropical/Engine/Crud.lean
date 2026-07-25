@@ -46,7 +46,7 @@ def resolveInstanceMeta (env : Env) (programName : String)
     -- TS options: [...typeRegistry.keys(), ...programs.keys()] — concrete
     -- names first, then every program name (concrete ones repeat).
     let concrete := st.catalogOrder.filter fun n =>
-      match st.programs.get? n with | some m => !m.generic | none => false
+      (st.programs.get? n).isSome
     if !toolEnvelopes then
       let known := String.intercalate ", " (concrete ++ st.catalogOrder).toList
       internalError s!"Unknown program type '{programName}'. Known: {if known.isEmpty then "(none)" else known}"
@@ -147,11 +147,9 @@ def handleListPrograms (env : Env) : EngineM Json := do
       ("inputs", Json.arr (m.inputs.map (portJson true))),
       ("outputs", Json.arr (m.outputs.map (portJson false))),
       ("registers", Json.arr (m.registers.map (portJson false))),
-      ("type_params", if m.generic then m.typeParams.getD jsonNull else jsonNull)]
+      ("type_params", jsonNull)]
   let metas := st.catalogOrder.filterMap st.programs.get?
-  let concrete := (metas.filter (!·.generic)).map render
-  let generic := (metas.filter (·.generic)).map render
-  pure <| Json.arr (concrete ++ generic)
+  pure <| Json.arr (metas.map render)
 
 def handleListInstances (env : Env) : EngineM Json := do
   let st ← env.state.get

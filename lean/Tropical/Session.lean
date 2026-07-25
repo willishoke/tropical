@@ -36,11 +36,9 @@ structure PortInfo where
   default : Option Json := none     -- raw ExprNode default (inputs only)
 deriving Inhabited
 
-/-- A registered program's metadata (concrete or generic template). -/
+/-- A registered program's metadata. -/
 structure ProgMeta where
   programName : String
-  generic     : Bool
-  typeParams  : Option Json := none   -- {name: {type:'int', default?}} for generics
   inputs      : Array PortInfo := #[]
   outputs     : Array PortInfo := #[]
   registers   : Array PortInfo := #[]
@@ -61,13 +59,7 @@ def ProgMeta.fromEntry (j : Json) : ProgMeta :=
     match Tropical.Expr.getField? j k with
     | some (.arr a) => a.map parsePort
     | _ => #[]
-  let typeParams := match Tropical.Expr.getField? j "type_params" with
-    | some .null | none => none
-    | some tp => some tp
   { programName := (Tropical.Expr.getStrField? j "program_name").getD ""
-    generic     := match Tropical.Expr.getField? j "generic" with
-                   | some (.bool b) => b | _ => false
-    typeParams
     inputs      := ports "inputs"
     outputs     := ports "outputs"
     registers   := ports "registers" }

@@ -29,39 +29,17 @@ open Lean (JsonNumber)
 open Tropical.Ir
 
 -- ─────────────────────────────────────────────────────────────
--- Resolved port types (Phase 6 enrichment)
+-- Port types
 --
 -- Emit/partition need port shapes (scalar counts, array sizes,
--- element kinds) and reg scalar types. The TS emit reads these off
--- the IR's PortType objects with arena-free field access (`alias.base`
--- etc.); the downcast resolves the pool references once so Core stays
--- a self-contained tree.
+-- element kinds). With user type defs and generics retired, the
+-- resolved `PortType` is already self-contained (builtin scalar kinds,
+-- literal dims) — Core uses it directly; there is no separate
+-- post-strata port-type universe.
 -- ─────────────────────────────────────────────────────────────
 
-/-- Array element: scalar kind, or an alias carrying its base. The two
-    survive distinctly because TS consumers disagree on the collapse —
-    `inputPortTypes` uses `element.base`, `expandPortToSlots` uses
-    `'float'` for alias elements. -/
-inductive CoreElem where
-  | scalar (k : ScalarKind)
-  | aliased (base : ScalarKind)
-deriving Repr, Inhabited
-
-/-- A shape dimension post-strata: a literal, or an unresolved type
-    param (specialize didn't run — emit reproduces the TS error). -/
-inductive CoreShapeDim where
-  | lit (n : JsonNumber)
-  | unresolved
-deriving Repr, Inhabited
-
-inductive CorePortType where
-  | scalar (k : ScalarKind)
-  /-- Alias port. `base` is the alias's underlying scalar; slot
-      expansion treats the port as one opaque float slot, type
-      inference uses the base. -/
-  | alias (base : ScalarKind)
-  | array (element : CoreElem) (shape : Array CoreShapeDim)
-deriving Repr, Inhabited
+/-- Post-strata port type = the resolved port type. -/
+abbrev CorePortType := PortType
 
 structure CoreInstanceInput where
   port : InputIdx
@@ -71,10 +49,8 @@ deriving Repr, Inhabited
 inductive CoreBodyDecl where
   | param (name : String) (value? : Option JsonNumber)
   /-- Fractal kernel boundary; `typeKey` resolves in the enclosing
-      `CoreProgram`'s registry. typeArgs survive as inert metadata on
-      the fractal path (targets are resolved pre-strata in production). -/
-  | inst (name : String) (typeKey : String)
-      (typeArgs : Array InstanceTypeArg) (inputs : Array CoreInstanceInput)
+      `CoreProgram`'s registry. -/
+  | inst (name : String) (typeKey : String) (inputs : Array CoreInstanceInput)
   /-- Inert lifted type binding; no evaluator reaches it. -/
   | progDecl (name : String)
 deriving Repr, Inhabited
@@ -136,43 +112,5 @@ def CoreProgram.params (p : CoreProgram) : Array CoreBodyDecl :=
 /-- Projected instance table (positions are `InstanceIdx`). -/
 def CoreProgram.instances (p : CoreProgram) : Array CoreBodyDecl :=
   p.decls.filter fun d => match d with | .inst .. => true | _ => false
-
--- ─────────────────────────────────────────────────────────────
--- Port-type resolution (shared with the DAG downcast)
---
--- The expression downcast (`Expr`/`CoreExpr` → `ExprId`) moved to
--- `EArena.toResolved` (Phase B: the strata DAG is threaded straight to
--- emit instead of flattened to a tree and re-interned). These helpers —
--- the pool-reference resolution for port types — stay here (they need
--- only the identity pools, not the arena) and are public so the
--- id-form downcast can reuse them.
--- ─────────────────────────────────────────────────────────────
-
-/-- Resolve a pool-referencing element type to its self-contained Core
-    form. Non-alias typeDefs in element position are unrepresentable in
-    well-formed post-strata IR; collapse to float (the TS access path
-    would read `undefined.base`-adjacent shapes as float downstream). -/
-def resolveElem (arena : Arena) : ScalarOrAlias → CoreElem
-  | .scalar k => .scalar k
-  | .alias td =>
-    match arena.typeDef? td with
-    | some (.alias _ base) => .aliased base
-    | _ => .aliased .float
-
-def resolvePortType (arena : Arena) : PortType → CorePortType
-  | .scalar k => .scalar k
-  | .alias td =>
-    match arena.typeDef? td with
-    | some (.alias _ base) => .alias base
-    | _ => .alias .float
-  | .array element shape =>
-    .array (resolveElem arena element) (shape.map fun
-      | .lit n => CoreShapeDim.lit n
-      | .typeParam _ => CoreShapeDim.unresolved)
-
-def resolveOptPortType (arena : Arena) :
-    Option PortType → Option CorePortType
-  | some t => some (resolvePortType arena t)
-  | none => none
 
 end Tropical.Ir.Core

@@ -192,8 +192,6 @@ def renderProgramCatalog (st : Tropical.SessionSt) : String := Id.run do
   for name in st.catalogOrder do
     match st.programs.get? name with
     | some pm =>
-      if pm.generic then
-        continue
       let inputParts := pm.inputs.map fun p =>
         match p.default with
         | some v => s!"{p.name}={v.compress}"

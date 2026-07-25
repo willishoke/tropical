@@ -44,9 +44,8 @@ private def sessionInlineNested : Bool := true
 
 /-- The direct lowering + the Core downcast (inline path), as a pure
     `Except` so call sites choose the envelope: registration failures
-    map to `internal_error`. The Core check is also where a JSON-loaded
-    program spelling a retired construct (`fold`/`tag`/…) is refused —
-    that is a front-door rejection, not an engine bug. -/
+    map to `internal_error`. (Retired constructs are refused at the JSON
+    front doors — by the time IR exists here it is trunk-only.) -/
 def runStrataChecked (arena : Tropical.Ir.Arena)
     (rootIdx : Tropical.Ir.ProgramIdx) :
     Except String (Tropical.Ir.Arena × Tropical.Ir.ProgramIdx) := do
@@ -261,9 +260,6 @@ private partial def wireExprToResolved (ctx : WireCtx) (expr : Json) :
     else if op == "index" then
       if args.size == 2 then internWE (.index args[0]! args[1]!)
       else throwThe String s!"session wire: index expects 2 args, got {args.size}"
-    else if op == "zeros" then
-      if args.size == 1 then internWE (.zeros args[0]!)
-      else throwThe String s!"session wire: zeros expects 1 arg, got {args.size}"
     else if let some tag := Tropical.Ir.BinaryOpTag.ofWire? op then
       if args.size == 2 then internWE (.binary tag args[0]! args[1]!)
       else throwThe String s!"session wire: binary '{op}' expects 2 args, got {args.size}"
@@ -333,7 +329,7 @@ def sessionToResolvedRoot (arena : Tropical.Ir.Arena)
       let (value, exprs') ← (wireExprToResolved ctx w.expr).run exprs
       exprs := exprs'
       inputs := inputs.push { port := ⟨pos⟩, value }
-    decls := decls.push (.inst name tgt.name #[] inputs)
+    decls := decls.push (.inst name tgt.name inputs)
   for pname in sortedParams do
     decls := decls.push (.param pname none)
   -- registry: per-instance (topo order) target name → idx, transitive merge.

@@ -627,7 +627,6 @@ def inputDeclScalarType (t? : Option CorePortType) : ScalarType :=
   match t? with
   | none => .float
   | some (.scalar k) => k
-  | some (.alias base) => base
   | some (.array ..) => .float
 
 private def instName : CoreBodyDecl → String
@@ -640,7 +639,7 @@ private def instTypeKey : CoreBodyDecl → String
   | _ => ""
 
 private def instInputs : CoreBodyDecl → Array CoreInstanceInput
-  | .inst _ _ _ i => i
+  | .inst _ _ i => i
   | _ => #[]
 
 def emitProgram (arena : CoreArena) (hw : arena.wf = true) (zeroId : ExprId)

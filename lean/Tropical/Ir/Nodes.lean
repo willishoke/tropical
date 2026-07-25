@@ -3,30 +3,26 @@ import Lean.Data.Json
 import Tropical.Parse.Nodes
 
 /-!
-# Resolved IR — pool-shaped port of compiler/ir/nodes.ts
+# Resolved IR — the trunk program shape
 
-The TS resolved IR uses object identity and back-pointers in four
-reference families (programs shared across registries, type defs
-shared across scope chains, type params shared across shape dims,
-`SumVariant.parent` cycles). Lean represents those natively as a
-top-level `Arena` of three identity pools — the same three pools the
-TS codec (`compiler/ir/resolved_codec.ts`, schema `tropical_resolved_1`)
-already serializes — and every cross-pool reference is a typed index
-newtype.
+A `Program` is a typed signal-flow graph: ports, params, instances,
+output assigns, with every expression leaf an `ExprId` into the shared
+hash-consed `ExprArena` DAG. The `Arena` is the identity pool — a
+program at index `i` references only programs below it, so the pool is
+acyclic by construction.
 
-Within a program, refs carry the positional de Bruijn levels of the TS
-IR: `RegIdx` / `InputIdx` / `OutputIdx` / `ParamIdx` / `InstanceIdx` /
-`TypeParamIdx` index the enclosing program's typed decl tables (which
-this port *computes* from `decls` — see `Program.regs` etc. — so the
-body↔table invariant holds by construction); `BinderIdx` is the
-unique-per-program ID minted by the elaborator.
+Within a program, refs are positional: `InputIdx` / `OutputIdx` /
+`ParamIdx` / `InstanceIdx` index the enclosing program's typed decl
+tables (computed from `decls`, so the body↔table invariant holds by
+construction).
 
-`Tag` / `Match` reference their sum type as (typeDef pool idx, variant
-position) and payload fields by position within the variant — exactly
-the wire encoding, so the codec is nearly an identity map.
+`ENode` is the trunk constructor set — the same vocabulary `Sig`
+authors and the backends consume. Retired constructs (combinators, sum
+types, binders, generics) have no representation here; the JSON front
+doors refuse their spellings at ingest.
 
 Numbers are `Lean.JsonNumber` (decimal text preserved) so encode output
-re-parses to the bit-identical double on the TS side, mirroring
+re-parses to the bit-identical double, mirroring
 `Tropical/Parse/Nodes.lean`.
 -/
 
@@ -63,31 +59,10 @@ structure InstanceIdx where
   idx : Nat
 deriving BEq, Repr, Inhabited
 
-/-- Position in `typeParams` (enclosing program; on
-    `InstanceDecl.typeArgs`, the target's). -/
-structure TypeParamIdx where
-  idx : Nat
-deriving BEq, Repr, Inhabited
-
-/-- Unique-per-program binder ID (NOT a table position). -/
-structure BinderIdx where
-  idx : Nat
-deriving BEq, Repr, Inhabited
-
 -- Pool indices (arena-level identity).
 
 /-- Index into `Arena.programs`. -/
 structure ProgramIdx where
-  idx : Nat
-deriving BEq, Repr, Inhabited
-
-/-- Index into `Arena.typeDefs`. -/
-structure TypeDefIdx where
-  idx : Nat
-deriving BEq, Repr, Inhabited
-
-/-- Index into `Arena.typeParams`. -/
-structure TypeParamPoolIdx where
   idx : Nat
 deriving BEq, Repr, Inhabited
 
@@ -101,65 +76,16 @@ structure ExprId where
 deriving BEq, Hashable, Repr, Inhabited
 
 -- ─────────────────────────────────────────────────────────────
--- Type defs (pool entries)
--- ─────────────────────────────────────────────────────────────
-
-/-- `ScalarKind | AliasTypeDef` positions in the TS IR. The alias arm
-    must reference an `alias` pool entry. -/
-inductive ScalarOrAlias where
-  | scalar (k : ScalarKind)
-  | alias (td : TypeDefIdx)
-deriving BEq, Repr, Inhabited
-
-structure StructField where
-  name : String
-  type : ScalarOrAlias
-deriving BEq, Repr, Inhabited
-
-structure SumVariant where
-  name : String
-  payload : Array StructField
-deriving BEq, Repr, Inhabited
-
-/-- A typeDef pool entry. The TS `SumVariant.parent` back-pointer is
-    implicit: a variant is identified by (pool idx of its sum, position). -/
-inductive TypeDef where
-  | alias (name : String) (base : ScalarKind)
-  | struct (name : String) (fields : Array StructField)
-  | sum (name : String) (variants : Array SumVariant)
-deriving BEq, Repr, Inhabited
-
-def TypeDef.name : TypeDef → String
-  | .alias n _ => n
-  | .struct n _ => n
-  | .sum n _ => n
-
-/-- The TS `op` discriminator string, used in error messages
-    (`resolveElement`'s "got ${td.op}"). -/
-def TypeDef.opName : TypeDef → String
-  | .alias _ _ => "aliasTypeDef"
-  | .struct _ _ => "structTypeDef"
-  | .sum _ _ => "sumTypeDef"
-
-/-- A typeParam pool entry. -/
-structure TypeParamDecl where
-  name : String
-  default? : Option JsonNumber := none
-deriving Repr, Inhabited
-
--- ─────────────────────────────────────────────────────────────
 -- Port types
+--
+-- Trunk-only: user type defs (alias/struct/sum) and type-param shape
+-- dims were retired with generics and the sum-type lowering — a port
+-- is a builtin scalar kind or an array of one with literal dims.
 -- ─────────────────────────────────────────────────────────────
-
-inductive ShapeDim where
-  | lit (n : JsonNumber)
-  | typeParam (tp : TypeParamPoolIdx)
-deriving Repr, Inhabited
 
 inductive PortType where
   | scalar (k : ScalarKind)
-  | alias (td : TypeDefIdx)
-  | array (element : ScalarOrAlias) (shape : Array ShapeDim)
+  | array (element : ScalarKind) (shape : Array JsonNumber)
 deriving Repr, Inhabited
 
 -- ─────────────────────────────────────────────────────────────
@@ -239,17 +165,11 @@ def UnaryOpTag.ofParse : Tropical.Parse.UnaryOpTag → UnaryOpTag
 -- Expressions
 -- ─────────────────────────────────────────────────────────────
 
-/-- An anonymous binder decl: identity label + unique-per-program idx. -/
-structure Binder where
-  name : String
-  idx : BinderIdx
-deriving Repr, Inhabited, BEq
-
--- The tree `Expr` (and its `LetBinder`/`TagPayload`/`MatchArm` binders) is gone:
--- the resolved expression IS the hash-consed `ENode`/`ExprArena` DAG below, and
--- `Program`'s leaves are `ExprId`s. Authoring frontends (the surface parser's
--- `ParsedExpr`, `EmitArrow`'s combinator tree) build their own shapes and lower
--- into the arena.
+-- The tree `Expr` (and its binder machinery) is gone: the resolved
+-- expression IS the hash-consed `ENode`/`ExprArena` DAG below, and
+-- `Program`'s leaves are `ExprId`s. Authoring frontends (the JSON codec's
+-- `ParsedExpr`, `EmitArrow`'s combinator tree) build their own shapes and
+-- lower into the arena.
 
 -- ─────────────────────────────────────────────────────────────
 -- ExprArena — the hash-consed (DAG) form of the resolved expression
@@ -261,33 +181,13 @@ deriving Repr, Inhabited, BEq
 -- are `ExprId`s into an `ExprArena`; there is no tree `Expr` twin.
 -- ─────────────────────────────────────────────────────────────
 
-/-- A let binder with an id-valued body. -/
-structure ELetBinder where
-  binder : Binder
-  value : ExprId
-deriving BEq, Repr, Inhabited
-
-/-- A tag payload with an id-valued field. -/
-structure ETagPayload where
-  field : Nat
-  value : ExprId
-deriving BEq, Repr, Inhabited
-
-/-- A match arm with an id-valued body. -/
-structure EMatchArm where
-  variant : Nat
-  binders : Array Binder
-  body : ExprId
-deriving BEq, Repr, Inhabited
-
 /-- A resolved expression node with children referenced by `ExprId`; flat (no
-    inlined subtrees). The full resolved op set — combinators (`fold`,
-    `generate`, …), `letIn`, `tag`/`match` and their binders — so the arena is
-    live from the elaborator through the lowering to emit.
-
-    Binders carry their `BinderIdx`, so two otherwise-identical combinators with
-    *different* binder indices stay distinct (alpha-correct); within one program,
-    identical subtrees carry identical binder indices and so share. -/
+    inlined subtrees). The trunk constructor set — the same vocabulary `Sig`
+    authors and emit consumes. The combinator/sum-type/binder tail (`fold`,
+    `scan`, `generate`, `iterate`, `chain`, `map2`, `zipWith`, `let`,
+    `tag`/`match`, `bindingRef`, `typeParamRef`, `zeros`) was retired with its
+    producers; those ops are refused at the JSON front doors, so they are
+    unspellable here by construction. -/
 inductive ENode where
   | num (n : JsonNumber)
   | bool (b : Bool)
@@ -298,29 +198,14 @@ inductive ENode where
   | select (cond then_ else_ : ExprId)
   | arraySet (arr idx value : ExprId)
   | index (arr idx : ExprId)
-  | zeros (count : ExprId)
   | inputRef (idx : InputIdx)
   | paramRef (idx : ParamIdx)
-  | typeParamRef (idx : TypeParamIdx)
-  | bindingRef (idx : BinderIdx)
   | nestedOut (instance_ : InstanceIdx) (output : OutputIdx)
   | sampleRate
   | sampleIndex
-  | fold (over init : ExprId) (acc elem : Binder) (body : ExprId)
-  | scan (over init : ExprId) (acc elem : Binder) (body : ExprId)
-  | generate (count : ExprId) (iter : Binder) (body : ExprId)
-  | iterate (count init : ExprId) (iter : Binder) (body : ExprId)
-  | chain (count init : ExprId) (iter : Binder) (body : ExprId)
-  | map2 (over : ExprId) (elem : Binder) (body : ExprId)
-  | zipWith (a b : ExprId) (x y : Binder) (body : ExprId)
-  | letIn (binders : Array ELetBinder) (body : ExprId)
-  | tag (def_ : TypeDefIdx) (variant : Nat) (payload : Array ETagPayload)
-  | match_ (def_ : TypeDefIdx) (scrutinee : ExprId) (arms : Array EMatchArm)
   /-- The iteration index of the `bankSum` region whose `idxId` equals `id`
-      (the post-strata analogue of `Plan.NOperand.loopIdx`). Unlike the
-      combinators above, `bankSum`/`loopIdx` are NOT unrolled by arrayLower —
-      they survive to the post-strata IR as an indexed reduction (banks-as-data
-      slice 3b). `id` is a UNIQUE BINDER ID, not a de Bruijn index: it is
+      (the post-strata analogue of `Plan.NOperand.loopIdx`).
+      `id` is a UNIQUE BINDER ID, not a de Bruijn index: it is
       stable under nesting (wrapping an inner bank in an outer one changes
       nothing about the inner's spelling — no shifting exists anywhere), and it
       participates in the structural hash so two distinct indices are two
@@ -357,24 +242,11 @@ def enodeHash : ENode → UInt64
   | .select a b c   => mixHash (mixHash (mixHash 7 (hash a.idx)) (hash b.idx)) (hash c.idx)
   | .arraySet a b c => mixHash (mixHash (mixHash 8 (hash a.idx)) (hash b.idx)) (hash c.idx)
   | .index a b      => mixHash (mixHash 9 (hash a.idx)) (hash b.idx)
-  | .zeros c        => mixHash 10 (hash c.idx)
   | .inputRef i     => mixHash 11 (hash i.idx)
   | .paramRef i     => mixHash 12 (hash i.idx)
-  | .typeParamRef i => mixHash 13 (hash i.idx)
-  | .bindingRef i   => mixHash 14 (hash i.idx)
   | .nestedOut i o  => mixHash (mixHash 15 (hash i.idx)) (hash o.idx)
   | .sampleRate     => 16
   | .sampleIndex    => 17
-  | .fold o i a e b => mixHash (mixHash (mixHash (mixHash (mixHash 18 (hash o.idx)) (hash i.idx)) (hash a.idx.idx)) (hash e.idx.idx)) (hash b.idx)
-  | .scan o i a e b => mixHash (mixHash (mixHash (mixHash (mixHash 19 (hash o.idx)) (hash i.idx)) (hash a.idx.idx)) (hash e.idx.idx)) (hash b.idx)
-  | .generate c i b => mixHash (mixHash (mixHash 20 (hash c.idx)) (hash i.idx.idx)) (hash b.idx)
-  | .iterate c i it b => mixHash (mixHash (mixHash (mixHash 21 (hash c.idx)) (hash i.idx)) (hash it.idx.idx)) (hash b.idx)
-  | .chain c i it b => mixHash (mixHash (mixHash (mixHash 22 (hash c.idx)) (hash i.idx)) (hash it.idx.idx)) (hash b.idx)
-  | .map2 o e b     => mixHash (mixHash (mixHash 23 (hash o.idx)) (hash e.idx.idx)) (hash b.idx)
-  | .zipWith a b x y bd => mixHash (mixHash (mixHash (mixHash (mixHash 24 (hash a.idx)) (hash b.idx)) (hash x.idx.idx)) (hash y.idx.idx)) (hash bd.idx)
-  | .letIn bs b     => mixHash (mixHash 25 (hash (bs.map (fun lb => (lb.binder.idx.idx, lb.value.idx))))) (hash b.idx)
-  | .tag d v p      => mixHash (mixHash (mixHash 26 (hash d.idx)) (hash v)) (hash (p.map (fun tp => (tp.field, tp.value.idx))))
-  | .match_ d s arms => mixHash (mixHash (mixHash 27 (hash d.idx)) (hash s.idx)) (hash (arms.map (fun a => (a.variant, a.body.idx))))
   | .loopIdx id     => mixHash 28 (hash id)
   | .bankSum c ts b dc ii => mixHash (mixHash (mixHash (mixHash (mixHash 29 (hash c)) (hash (ts.map (·.idx)))) (hash b.idx)) (hash (dc.map (·.idx)))) (hash ii)
 
@@ -407,12 +279,11 @@ def eintern (n : ENode) : EArenaM ExprId := do
 def ExprArena.deref (a : ExprArena) (id : ExprId) : Option ENode :=
   a.nodes[id.idx]?
 
-/-- The edge set of the DAG: every child id the node references,
-    including ids inside binder payloads (`letIn` values, `tag`
-    payloads, `match` arm bodies, `bankSum` tables/count). -/
+/-- The edge set of the DAG: every child id the node references
+    (including `bankSum` tables/body/dynCount). -/
 def ENode.children : ENode → Array ExprId
-  | .num _ | .bool _ | .inputRef _ | .paramRef _ | .typeParamRef _
-  | .bindingRef _ | .nestedOut _ _ | .sampleRate | .sampleIndex
+  | .num _ | .bool _ | .inputRef _ | .paramRef _
+  | .nestedOut _ _ | .sampleRate | .sampleIndex
   | .loopIdx _ => #[]
   | .arr items => items
   | .binary _ a b => #[a, b]
@@ -421,17 +292,6 @@ def ENode.children : ENode → Array ExprId
   | .select a b c => #[a, b, c]
   | .arraySet a b c => #[a, b, c]
   | .index a b => #[a, b]
-  | .zeros c => #[c]
-  | .fold o i _ _ b => #[o, i, b]
-  | .scan o i _ _ b => #[o, i, b]
-  | .generate c _ b => #[c, b]
-  | .iterate c i _ b => #[c, i, b]
-  | .chain c i _ b => #[c, i, b]
-  | .map2 o _ b => #[o, b]
-  | .zipWith a b _ _ body => #[a, b, body]
-  | .letIn bs b => (bs.map (·.value)).push b
-  | .tag _ _ p => p.map (·.value)
-  | .match_ _ s arms => #[s] ++ arms.map (·.body)
   | .bankSum _ ts b dc _ => (ts.push b) ++ dc.toArray
 
 /-- Child-descending well-formedness: every edge points to a strictly
@@ -473,11 +333,6 @@ structure OutputDecl where
   type? : Option PortType := none
 deriving Repr, Inhabited
 
-structure InstanceTypeArg where
-  param : TypeParamIdx
-  value : JsonNumber
-deriving Repr, Inhabited
-
 structure InstanceInput where
   port : InputIdx
   value : ExprId
@@ -485,8 +340,7 @@ deriving Repr, Inhabited
 
 inductive BodyDecl where
   | param (name : String) (value? : Option JsonNumber)
-  | inst (name : String) (typeKey : String)
-      (typeArgs : Array InstanceTypeArg) (inputs : Array InstanceInput)
+  | inst (name : String) (typeKey : String) (inputs : Array InstanceInput)
   | prog (name : String) (program : ProgramIdx)
 deriving Repr, Inhabited
 
@@ -504,19 +358,14 @@ structure OutputAssign where
 deriving Repr, Inhabited
 
 /-- One program pool entry. `registry` is the `programRegistry` as an
-    ordered association array — TS `Map` insertion order is observable
-    through the codec, so it is load-bearing here. `typeParams` entries
-    are pool indices (a nested program's shape dim may reference an
-    *enclosing* program's TypeParamDecl — exactly why the pool exists). -/
+    ordered association array — insertion order is observable through
+    the codec, so it is load-bearing here. -/
 structure Program where
   name : String
-  typeParams : Array TypeParamPoolIdx := #[]
   inputs : Array InputDecl := #[]
   outputs : Array OutputDecl := #[]
-  typeDefs : Array TypeDefIdx := #[]
   decls : Array BodyDecl := #[]
   assigns : Array OutputAssign := #[]
-  binderCount : Nat := 0
   registry : Array (String × ProgramIdx) := #[]
 deriving Repr, Inhabited
 
@@ -535,28 +384,21 @@ def Program.registryGet? (p : Program) (key : String) : Option ProgramIdx :=
 -- Arena — the three identity pools
 -- ─────────────────────────────────────────────────────────────
 
-/-- The identity pools of the resolved IR. References into a pool are
-    by index; sharing an index is the Lean image of TS pointer sharing.
-    Invariant (maintained by both the codec's forward-pass decode and
-    the elaborator's children-before-parents construction): a program
-    at index `i` references only programs at indices `< i`, so the
-    arena is acyclic by construction. -/
+/-- The identity pools of the resolved IR: the program pool plus the
+    shared expression DAG. References into the pool are by index;
+    sharing an index is pointer sharing. Invariant (maintained by both
+    the codec's forward-pass decode and the elaborator's
+    children-before-parents construction): a program at index `i`
+    references only programs at indices `< i`, so the arena is acyclic
+    by construction. -/
 structure Arena where
-  typeParams : Array TypeParamDecl := #[]
-  typeDefs : Array TypeDef := #[]
   programs : Array Program := #[]
   /-- The shared hash-consed expression DAG every program's leaf `ExprId`s
-      index into. (Populated once `Program` is id-valued; `{}` until then.) -/
+      index into. -/
   exprs : ExprArena := {}
 deriving Repr, Inhabited
 
 def Arena.program? (a : Arena) (i : ProgramIdx) : Option Program :=
   a.programs[i.idx]?
-
-def Arena.typeDef? (a : Arena) (i : TypeDefIdx) : Option TypeDef :=
-  a.typeDefs[i.idx]?
-
-def Arena.typeParam? (a : Arena) (i : TypeParamPoolIdx) : Option TypeParamDecl :=
-  a.typeParams[i.idx]?
 
 end Tropical.Ir

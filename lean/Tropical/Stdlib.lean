@@ -13,9 +13,8 @@ Two authoring styles, matching the two shapes the post-strata IR takes:
 
 * **Leaf** programs are flat `Sig` trees (no instances) — the closed-form
   scalar datapaths (`sinSig`, `phasorPhaseSig`, …) from `EmitArrow.Numerics`,
-  with Lean `let` sharing standing in for the source's `let` binders (a
-  DAG-authored program legitimately carries `binderCount = 0`; that field is
-  non-load-bearing — see the entry-codec de-risk).
+  with Lean `let` sharing standing in for source-level binders (the IR has
+  none — the host language is the binding layer).
 
 * **Instance-bearing** programs declare `AInst`s and let the lowering's
   `inlineInstances` flatten them, linking each sub-program by name through

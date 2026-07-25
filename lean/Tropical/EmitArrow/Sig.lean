@@ -139,7 +139,6 @@ deriving Inhabited
 structure AInst where
   name : String
   programName : String
-  typeArgs : Array InstanceTypeArg := #[]
   inputs : Array AInput := #[]
 deriving Inhabited
 
@@ -156,7 +155,7 @@ deriving Inhabited
 def assemble (arena : Arena) (name : String) (inputs : Array AInputDecl)
     (outputs : Array OutputDecl) (decls : Array AInst)
     (assigns : Array (OutputTarget × Sig))
-    (registry : Array (String × ProgramIdx)) (binderCount : Nat := 0)
+    (registry : Array (String × ProgramIdx))
     (extraDecls : Array BodyDecl := #[]) :
     Arena × ProgramIdx :=
   let build : EArenaM Program := do
@@ -165,11 +164,11 @@ def assemble (arena : Arena) (name : String) (inputs : Array AInputDecl)
     let declsR ← decls.mapM fun a => do
       let ins ← a.inputs.mapM fun i => do
         pure ({ port := i.port, value := ← lowerSig i.value } : InstanceInput)
-      pure (BodyDecl.inst a.name a.programName a.typeArgs ins)
+      pure (BodyDecl.inst a.name a.programName ins)
     let assignsR ← assigns.mapM fun (t, s) => do
       pure ({ target := t, expr := ← lowerSig s } : OutputAssign)
     pure { name, inputs := inputsR, outputs, decls := declsR ++ extraDecls,
-           assigns := assignsR, binderCount, registry }
+           assigns := assignsR, registry }
   let (prog, exprs) := build.run arena.exprs
   ({ arena with programs := arena.programs.push prog, exprs }, ⟨arena.programs.size⟩)
 

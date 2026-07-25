@@ -19,10 +19,14 @@ composes them:
    Error *text* is best-effort Zod mimicry; no recorded MCP script
    exercises a validation failure, so only the schema-tag message is
    contractual.
-3. **`raiseProgram`** (compiler/parse/raise.ts) — the op mappings,
-   desugarings (`{zeros: N}`, `{typeParam: n}`), and error strings,
-   ported exactly, followed by `lowerBoundsToClamps`
+3. **`raiseProgram`** (compiler/parse/raise.ts) — the op mappings and
+   error strings, followed by `lowerBoundsToClamps`
    (compiler/parse/lower_bounds.ts).
+
+This is the front door of the trunk grammar: retired constructs
+(combinators, sum types, binders, generics, state ops) are REFUSED
+here, at ingest, with the retirement message — the grammar you can
+spell is the language that compiles.
 
 Strictness divergences (all unreachable on inputs the TS path handles
 *successfully*): where TS casts a field and would silently emit
@@ -166,11 +170,6 @@ def portType (path : String) (v : JsonV) : Except String JsonV := do
         if n.toFloat < 0 then
           zerr (sub (sub path "shape") (toString i)) "Number must be greater than or equal to 0"
         outDims := outDims.push dims[i]
-      | dim@(.obj _) => do
-        if dim.getStr? "op" != some "typeParam" then
-          zerr (sub (sub path "shape") (toString i)) "Invalid input"
-        let name ← reqStr (sub (sub path "shape") (toString i)) dim "name"
-        outDims := outDims.push (.obj #[("op", .str "typeParam"), ("name", .str name)])
       | _ => zerr (sub (sub path "shape") (toString i)) "Invalid input"
     pure (.obj #[("kind", .str "array"), ("element", .str element),
                  ("shape", .arr outDims)])
@@ -199,45 +198,6 @@ def port (path : String) (v : JsonV) (allowDefault : Bool) : Except String JsonV
     pure (.obj fields)
   | _ => zerr path "Invalid input"
 
-def structFields (path : String) (v : JsonV) (key : String) : Except String JsonV := do
-  let some (JsonV.arr items) := v.getField? key
-    | zerr (sub path key) "Required"
-  let mut out : Array JsonV := #[]
-  for h : i in [0:items.size] do
-    let f := items[i]
-    let fPath := sub (sub path key) (toString i)
-    let name ← reqStr fPath f "name"
-    let st ← reqStr fPath f "scalar_type"
-    if st != "float" && st != "int" && st != "bool" then
-      zerr (sub fPath "scalar_type") "Invalid input"
-    out := out.push (.obj #[("name", .str name), ("scalar_type", .str st)])
-  pure (.arr out)
-
-def typeDef (path : String) (v : JsonV) : Except String JsonV := do
-  let .obj _ := v | zerr path "Invalid input"
-  match v.getStr? "kind" with
-  | some "struct" => do
-    let name ← reqStr path v "name"
-    let fields ← structFields path v "fields"
-    pure (.obj #[("kind", .str "struct"), ("name", .str name), ("fields", fields)])
-  | some "sum" => do
-    let name ← reqStr path v "name"
-    let some (JsonV.arr items) := v.getField? "variants"
-      | zerr (sub path "variants") "Required"
-    let mut variants : Array JsonV := #[]
-    for h : i in [0:items.size] do
-      let vt := items[i]
-      let vPath := sub (sub path "variants") (toString i)
-      let vName ← reqStr vPath vt "name"
-      let payload ← structFields vPath vt "payload"
-      variants := variants.push (.obj #[("name", .str vName), ("payload", payload)])
-    pure (.obj #[("kind", .str "sum"), ("name", .str name), ("variants", .arr variants)])
-  | some "alias" => do
-    let name ← reqStr path v "name"
-    let base ← reqStr path v "base"
-    pure (.obj #[("kind", .str "alias"), ("name", .str name), ("base", .str base)])
-  | _ => zerr path "Invalid input"
-
 def ports (path : String) (v : JsonV) : Except String JsonV := do
   let .obj _ := v | zerr path s!"Expected object, received {received v}"
   let mut fields : Array (String × JsonV) := #[]
@@ -257,36 +217,10 @@ def ports (path : String) (v : JsonV) : Except String JsonV := do
   match ← portArray "outputs" false with
   | some a => fields := fields.push ("outputs", a)
   | none => pure ()
-  match v.getField? "type_defs" with
-  | none => pure ()
-  | some (.arr items) => do
-    let mut out : Array JsonV := #[]
-    for h : i in [0:items.size] do
-      out := out.push (← typeDef (sub (sub path "type_defs") (toString i)) items[i])
-    fields := fields.push ("type_defs", .arr out)
-  | some other =>
-    zerr (sub path "type_defs") s!"Expected array, received {received other}"
+  if (v.getField? "type_defs").isSome then
+    zerr (sub path "type_defs")
+      "type_defs are retired — sum/struct/alias type defs left with the surface language and generics"
   pure (.obj fields)
-
-def typeParams (path : String) (v : JsonV) : Except String JsonV := do
-  let .obj entries := v | zerr path s!"Expected object, received {received v}"
-  let mut out : Array (String × JsonV) := #[]
-  for (name, spec) in entries do
-    let sPath := sub path name
-    let .obj _ := spec | zerr sPath s!"Expected object, received {received spec}"
-    if spec.getStr? "type" != some "int" then
-      zerr (sub sPath "type") "Invalid literal value, expected \"int\""
-    let mut fields : Array (String × JsonV) := #[("type", .str "int")]
-    match spec.getField? "default" with
-    | none => pure ()
-    | some (.num n) =>
-      if !isInt n then
-        zerr (sub sPath "default") "Expected integer, received float"
-      fields := fields.push ("default", .num n)
-    | some other =>
-      zerr (sub sPath "default") s!"Expected number, received {received other}"
-    out := out.push (name, .obj fields)
-  pure (.obj out)
 
 def block (path : String) (v : JsonV) : Except String JsonV := do
   let .obj _ := v | zerr path s!"Expected object, received {received v}"
@@ -382,9 +316,8 @@ def normalizeProgramFile (raw : JsonV) : Except String (JsonV × TopLevel) := do
     Schema.zerr "name" "String must contain at least 1 character(s)"
   let mut fields : Array (String × JsonV) :=
     #[("op", .str "program"), ("name", .str name)]
-  match raw.getField? "type_params" with
-  | none => pure ()
-  | some t => fields := fields.push ("type_params", ← Schema.typeParams "type_params" t)
+  if (raw.getField? "type_params").isSome then
+    Schema.zerr "type_params" "type_params are retired — generics left with the surface language"
   match raw.getField? "sample_rate" with
   | none => pure ()
   | some (.num n) =>
@@ -417,8 +350,12 @@ def normalizeProgramFile (raw : JsonV) : Except String (JsonV × TopLevel) := do
 
 /-- Legacy ops collapsing to `nameRef(<carried name>)`. -/
 private def refOpsName : List String :=
-  ["input", "reg", "typeParam", "param", "trigger",
-   "paramExpr", "triggerParamExpr"]
+  ["input", "param", "trigger", "paramExpr", "triggerParamExpr"]
+
+/-- The front-door refusal: a retired construct spelled in JSON dies at
+    ingest — nothing downstream can represent it, let alone lower it. -/
+private def retiredOp (op : String) : String :=
+  s!"'{op}' is not a trunk construct — combinator/sum-type lowering was retired with its producers (the literate surface language and generics); a summing indexed family is authored as bankSum"
 
 private def builtinNullaryOps : List String := ["sampleRate", "sampleIndex"]
 
@@ -479,10 +416,6 @@ def raiseExpr? : Option JsonV → Except String ParsedExpr
     -- ── Reference collapse ────────────────────────────────────
     if refOpsName.contains op then
       return .nameRef (← fieldStr node "name" s!"'{op}'")
-    if op == "delayRef" then
-      return .nameRef (← fieldStr node "id" "'delayRef'")
-    if op == "binding" then
-      return .binding (← fieldStr node "name" "'binding'")
 
     -- ── Builtin → call ───────────────────────────────────────
     if builtinNullaryOps.contains op then
@@ -511,83 +444,11 @@ def raiseExpr? : Option JsonV → Except String ParsedExpr
     | "index" => do
       let ⟨args, _⟩ ← raiseArgsD node op
       pure (.index (← raiseExpr? args[0]?) (← raiseExpr? args[1]?))
-    | "tag" => do
-      let variant ← fieldStr node "variant" "'tag'"
-      let payload ← match _hp : node.getField? "payload" with
-        | none => pure none
-        | some (.obj entries) => do
-          let out ← entries.attach.mapM fun ⟨(field, value), _⟩ => do
-            pure (TagPayloadEntry.mk field (← raiseExpr? (some value)))
-          pure (if out.isEmpty then none else some out)
-        | some other => rerr s!"'tag' payload must be an object, got {other.compress}"
-      pure (.tag variant payload)
-    | "match" => do
-      match _harms : node.getField? "arms" with
-      | some (.obj armEntries) => do
-        let arms ← armEntries.attach.mapM fun ⟨(variant, arm), _⟩ => do
-          -- Legacy arms carry bind name(s) only; payload field labels are
-          -- not in the schema, so raise emits `_unknown` placeholders.
-          let bindNames : Array String ← match arm.getField? "bind" with
-            | none => pure #[]
-            | some (.str s) => pure #[s]
-            | some (.arr bs) => do
-              let mut out : Array String := #[]
-              for b in bs do
-                match b with
-                | .str s => out := out.push s
-                | other => rerr s!"'match' arm bind must be a string, got {other.compress}"
-              pure out
-            | some other => rerr s!"'match' arm bind must be a string or array, got {other.compress}"
-          let body ← raiseExpr? (arm.getField? "body")
-          pure (MatchArm.mk variant (bindNames.map ("_unknown", ·)) body)
-        let scrutinee ← raiseExpr? (node.getField? "scrutinee")
-        pure (.match_ scrutinee arms)
-      | _ =>
-        rerr s!"'match' requires an arms object, got {JsonV.stringifyOpt (node.getField? "arms")}"
-    | "let" => do
-      match _hbe : node.getField? "bind" with
-      | some (.obj bindEntries) => do
-        let bind ← bindEntries.attach.mapM fun ⟨(k, v), _⟩ => do
-          pure (k, ← raiseExpr? (some v))
-        pure (.letIn bind (← raiseExpr? (node.getField? "in")))
-      | _ =>
-        rerr s!"'let' requires a bind object, got {JsonV.stringifyOpt (node.getField? "bind")}"
-    | "fold" => do
-      let over ← raiseExpr? (node.getField? "over")
-      let init ← raiseExpr? (node.getField? "init")
-      pure (.fold over init
-        (← fieldStr node "acc_var" "'fold'") (← fieldStr node "elem_var" "'fold'")
-        (← raiseExpr? (node.getField? "body")))
-    | "scan" => do
-      let over ← raiseExpr? (node.getField? "over")
-      let init ← raiseExpr? (node.getField? "init")
-      pure (.scan over init
-        (← fieldStr node "acc_var" "'scan'") (← fieldStr node "elem_var" "'scan'")
-        (← raiseExpr? (node.getField? "body")))
-    | "generate" => do
-      let count ← raiseExpr? (node.getField? "count")
-      pure (.generate count (← fieldStr node "var" "'generate'")
-        (← raiseExpr? (node.getField? "body")))
-    | "iterate" => do
-      let count ← raiseExpr? (node.getField? "count")
-      let init ← raiseExpr? (node.getField? "init")
-      pure (.iterate count (← fieldStr node "var" "'iterate'") init
-        (← raiseExpr? (node.getField? "body")))
-    | "chain" => do
-      let count ← raiseExpr? (node.getField? "count")
-      let init ← raiseExpr? (node.getField? "init")
-      pure (.chain count (← fieldStr node "var" "'chain'") init
-        (← raiseExpr? (node.getField? "body")))
-    | "map2" => do
-      let over ← raiseExpr? (node.getField? "over")
-      pure (.map2 over (← fieldStr node "elem_var" "'map2'")
-        (← raiseExpr? (node.getField? "body")))
-    | "zipWith" => do
-      let a ← raiseExpr? (node.getField? "a")
-      let b ← raiseExpr? (node.getField? "b")
-      pure (.zipWith a b
-        (← fieldStr node "x_var" "'zipWith'") (← fieldStr node "y_var" "'zipWith'")
-        (← raiseExpr? (node.getField? "body")))
+    | "let" | "fold" | "scan" | "generate" | "iterate" | "chain"
+    | "map2" | "zipWith" | "tag" | "match" | "binding" =>
+      rerr (retiredOp op)
+    | "reg" | "delayRef" | "delayValue" =>
+      rerr s!"'{op}' is retired — there is no state primitive; kernels are closed-form f(τ, params)"
     | other => rerr s!"unknown expression op '{other}'"
   | other => rerr s!"invalid expr value: {other.compress}"
 termination_by o => sizeOf o
@@ -595,15 +456,6 @@ decreasing_by
   all_goals first
     | (have := Array.sizeOf_lt_of_mem ‹_ ∈ items›; simp_all <;> omega)
     | (have := Array.sizeOf_lt_of_mem ‹_ ∈ args›; simp_all <;> omega)
-    | (have := JsonV.sizeOf_lt_of_getField ‹_ = some (JsonV.obj entries)›;
-       have := sizeOf_lt_of_mem_snd ‹_ ∈ entries›; simp_all <;> omega)
-    | (have := JsonV.sizeOf_lt_of_getField ‹_ = some (JsonV.obj bindEntries)›;
-       have := sizeOf_lt_of_mem_snd ‹_ ∈ bindEntries›; simp_all <;> omega)
-    | (refine Nat.lt_of_le_of_lt (JsonV.sizeOf_getField_le _ _) ?_;
-       have := JsonV.sizeOf_lt_of_getField ‹_ = some (JsonV.obj armEntries)›;
-       have := sizeOf_lt_of_mem_snd ‹_ ∈ armEntries›; simp_all <;> omega)
-    | (refine Nat.lt_of_le_of_lt (JsonV.sizeOf_getField_le _ _) ?_;
-       simp_all <;> omega)
     | (refine Nat.lt_of_le_of_lt (sizeOf_getElem?_le _ _) ?_;
        simp_all <;> omega)
 
@@ -615,12 +467,6 @@ def raiseExprOpt (e : Option JsonV) : Except String ParsedExpr := raiseExpr? e
 -- Ports + type defs
 -- ─────────────────────────────────────────────────────────────
 
-private def raiseShapeDim (d : JsonV) : Except String ShapeDim := do
-  match d with
-  | .num n => pure (.lit n)
-  | .obj _ => pure (.ref (← fieldStr d "name" "shape dim"))
-  | other => rerr s!"invalid shape dim: {other.compress}"
-
 private def raisePortType (pt : JsonV) : Except String PortTypeDecl := do
   match pt with
   | .str s => pure (.scalar s)
@@ -628,9 +474,11 @@ private def raisePortType (pt : JsonV) : Except String PortTypeDecl := do
     let element ← fieldStr pt "element" "array port type"
     let some (JsonV.arr dims) := pt.getField? "shape"
       | rerr s!"array port type requires a shape array, got {JsonV.stringifyOpt (pt.getField? "shape")}"
-    let mut shape : Array ShapeDim := #[]
+    let mut shape : Array JsonNumber := #[]
     for d in dims do
-      shape := shape.push (← raiseShapeDim d)
+      match d with
+      | .num n => shape := shape.push n
+      | other => rerr s!"invalid shape dim: {other.compress} (type-param dims are retired — shapes are literal)"
     pure (.array element shape)
   | other => rerr s!"invalid port type: {other.compress}"
 
@@ -648,40 +496,6 @@ private def raisePort (p : JsonV) : Except String ProgramPort := do
     pure (.spec { name, type?, default? })
   | other => rerr s!"invalid port: {other.compress}"
 
-private def raiseStructField (f : JsonV) (ctx : String) : Except String StructField := do
-  let name ← fieldStr f "name" ctx
-  let st ← fieldStr f "scalar_type" ctx
-  let some scalarType := ScalarKind.ofWire? st
-    | rerr s!"{ctx} has unknown scalar_type '{st}'"
-  pure { name, scalarType }
-
-private def raiseTypeDef (td : JsonV) : Except String TypeDef := do
-  let name ← fieldStr td "name" "type def"
-  match td.getStr? "kind" with
-  | some "alias" => do
-    pure (.alias name (← fieldStr td "base" "alias type def"))
-  | some "sum" => do
-    let some (JsonV.arr items) := td.getField? "variants"
-      | rerr s!"sum type def requires a variants array, got {JsonV.stringifyOpt (td.getField? "variants")}"
-    let mut variants : Array SumVariant := #[]
-    for v in items do
-      let vName ← fieldStr v "name" "sum variant"
-      let some (JsonV.arr payloadItems) := v.getField? "payload"
-        | rerr s!"sum variant requires a payload array, got {JsonV.stringifyOpt (v.getField? "payload")}"
-      let mut payload : Array StructField := #[]
-      for f in payloadItems do
-        payload := payload.push (← raiseStructField f "sum variant payload field")
-      variants := variants.push { name := vName, payload }
-    pure (.sum name variants)
-  | _ => do
-    -- TS falls through to the struct shape for any other kind.
-    let some (JsonV.arr items) := td.getField? "fields"
-      | rerr s!"struct type def requires a fields array, got {JsonV.stringifyOpt (td.getField? "fields")}"
-    let mut fields : Array StructField := #[]
-    for f in items do
-      fields := fields.push (← raiseStructField f "struct field")
-    pure (.struct name fields)
-
 private def raisePorts (ports : JsonV) : Except String ProgramPorts := do
   let portArray (k : String) : Except String (Option (Array ProgramPort)) := do
     match ports.getField? k with
@@ -694,33 +508,9 @@ private def raisePorts (ports : JsonV) : Except String ProgramPorts := do
     | some other => rerr s!"ports.{k} must be an array, got {other.compress}"
   let inputs ← portArray "inputs"
   let outputs ← portArray "outputs"
-  let typeDefs ← match ports.getField? "type_defs" with
-    | none => pure none
-    | some (.arr items) => do
-      let mut out : Array TypeDef := #[]
-      for td in items do
-        out := out.push (← raiseTypeDef td)
-      pure (some out)
-    | some other => rerr s!"ports.type_defs must be an array, got {other.compress}"
-  pure { inputs, outputs, typeDefs }
-
-private def raiseTypeParams (tps : JsonV) :
-    Except String (Array (String × TypeParamSpec)) := do
-  -- TS passes `legacy.type_params` through by reference; the typed AST
-  -- requires the (Zod-shaped) `{type:'int', default?}` form, which is
-  -- what the validated top level always supplies.
-  let .obj entries := tps
-    | rerr s!"type_params must be an object, got {tps.compress}"
-  let mut out : Array (String × TypeParamSpec) := #[]
-  for (name, spec) in entries do
-    if spec.getStr? "type" != some "int" then
-      rerr s!"type_params.{name} must have type 'int'"
-    let default? ← match spec.getField? "default" with
-      | none => pure none
-      | some (.num n) => pure (some n)
-      | some other => rerr s!"type_params.{name} default must be a number, got {other.compress}"
-    out := out.push (name, { default? })
-  pure out
+  if (ports.getField? "type_defs").isSome then
+    rerr "ports.type_defs are retired — sum/struct/alias type defs left with the surface language and generics"
+  pure { inputs, outputs }
 
 -- ─────────────────────────────────────────────────────────────
 -- Bounds lowering (port of compiler/parse/lower_bounds.ts)
@@ -752,7 +542,7 @@ private def boundPair : Bounds → Tropical.Parse.BoundPair
     mutates in place). Bounded inputs without defaults drop their
     bounds silently — there is nothing to wrap. -/
 def lowerBounds : Program → Program
-  | .mk pName pTypeParams ports (.mk pDecls pAssigns) pBreaksCycles =>
+  | .mk pName ports (.mk pDecls pAssigns) pBreaksCycles =>
     -- Nested programs first (mirrors the TS recursion).
     let decls := pDecls.attach.map fun ⟨d, _⟩ =>
       match _hd : d with
@@ -783,7 +573,7 @@ def lowerBounds : Program → Program
           | some (_, b) => .output name (wrapWithBound e (boundPair b))
           | none => .output name e
     let ports' := ports.map fun pp => { pp with inputs := inputs' }
-    .mk pName pTypeParams ports' (.mk decls assigns) pBreaksCycles
+    .mk pName ports' (.mk decls assigns) pBreaksCycles
 termination_by p => sizeOf p
 decreasing_by have := Array.sizeOf_lt_of_mem ‹_ ∈ pDecls›; simp_all <;> omega
 
@@ -821,16 +611,8 @@ def raiseBodyDecl (decl : JsonV) : Except String BodyDecl := do
   | "instanceDecl" => do
     let name ← fieldStr decl "name" "instanceDecl"
     let progName ← fieldStr decl "program" "instanceDecl"
-    let typeArgs ← match decl.getField? "type_args" with
-      | none => pure none
-      | some (.obj entries) => do
-        let mut out : Array (String × JsonNumber) := #[]
-        for (param, value) in entries do
-          match value with
-          | .num n => out := out.push (param, n)
-          | other => rerr s!"instanceDecl type_args.{param} must be a number, got {other.compress}"
-        pure (if out.isEmpty then none else some out)
-      | some other => rerr s!"instanceDecl type_args must be an object, got {other.compress}"
+    if (decl.getField? "type_args").isSome then
+      rerr s!"instanceDecl '{name}': type_args are retired — generics left with the surface language"
     let inputs ← match decl.getField? "inputs" with
       | none => pure none
       | some (.obj entries) => do
@@ -839,7 +621,7 @@ def raiseBodyDecl (decl : JsonV) : Except String BodyDecl := do
           out := out.push (port, ← raiseExpr value)
         pure (if out.isEmpty then none else some out)
       | some other => rerr s!"instanceDecl inputs must be an object, got {other.compress}"
-    pure (.inst name progName typeArgs inputs)
+    pure (.inst name progName inputs)
   | "programDecl" => do
     let name ← fieldStr decl "name" "programDecl"
     match _hi : decl.getField? "program" with
@@ -872,9 +654,6 @@ def raiseProgram (legacy : JsonV) : Except String Program := do
   | some other => rerr s!"body assigns must be an array, got {other.compress}"
 
   let name ← fieldStr legacy "name" "program"
-  let typeParams ← match legacy.getField? "type_params" with
-    | none => pure none
-    | some tps => pure (some (← raiseTypeParams tps))
   let ports ← match legacy.getField? "ports" with
     | none => pure none
     | some p => pure (some (← raisePorts p))
@@ -882,7 +661,7 @@ def raiseProgram (legacy : JsonV) : Except String Program := do
   let breaksCycles :=
     if legacy.getField? "breaks_cycles" == some (.bool true) then some true else none
 
-  pure <| lowerBounds (.mk name typeParams ports (.mk decls assigns) breaksCycles)
+  pure <| lowerBounds (.mk name ports (.mk decls assigns) breaksCycles)
 termination_by sizeOf legacy
 decreasing_by
   have := JsonV.sizeOf_lt_of_getField _hb

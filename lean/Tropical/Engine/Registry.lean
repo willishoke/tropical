@@ -34,9 +34,7 @@ def strataConcrete (st : SessionSt) (arena : Tropical.Ir.Arena)
     EngineM (Tropical.Ir.Arena × Tropical.Ir.ProgramIdx) := do
   let byName : String → Option Tropical.Ir.ProgramIdx := fun n =>
     (st.templateByName.get? n).filter fun idx =>
-      match arena.program? idx with
-      | some prog => prog.typeParams.isEmpty
-      | none => false
+      (arena.program? idx).isSome
   let (arena, rootIdx) ←
     match Tropical.Ir.Strata.relinkProgramRegistry arena rootIdx byName with
     | .error e => internalError e.message
@@ -47,7 +45,7 @@ def strataConcrete (st : SessionSt) (arena : Tropical.Ir.Arena)
 
 def renameProgram (p : Tropical.Parse.Program) (name : String) :
     Tropical.Parse.Program :=
-  .mk name p.typeParams p.ports p.body p.breaksCycles
+  .mk name p.ports p.body p.breaksCycles
 
 def portNames (ps : Option (Array Tropical.Parse.ProgramPort)) : Array String :=
   (ps.getD #[]).map fun
