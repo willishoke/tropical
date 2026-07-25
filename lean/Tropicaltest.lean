@@ -38,6 +38,14 @@ open Tropical
 open Tropical.Plan
 open Tropical.Ir (Arena ProgramIdx)
 
+/-- How many gates live inside the `arrowElabStdlib` block — the whole back half
+    of the suite, every one of which needs the elaborated stdlib to run at all.
+    The failure arm charges this many so a stdlib that does not elaborate is
+    reported as the total collapse it is; the `arrow-block-count` gate at the end
+    of `main` checks the number against what the block actually ran, so it is
+    verified rather than maintained. -/
+def arrowBlockGates : Nat := 96
+
 set_option maxRecDepth 1024 in
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
@@ -146,11 +154,22 @@ def main (args : List String) : IO UInt32 := do
 
   -- ── (h) EmitArrow arrow laws (slice 3): warp algebra ≡ in rendered audio ────
   IO.println "arrow laws (warp algebra ≡ byte-identical audio):"
+  let arrowTotal0 := total
+  let mut arrowRan := false
   match ← arrowElabStdlib with
   | .error e =>
     IO.println s!"  FAIL  arrow-laws  elaborate stdlib: {firstLine e}"
-    total := total + 13; failed := failed + 13
+    -- Everything below this point needs the elaborated stdlib, so NONE of it
+    -- runs. Charge every one of those gates as failed, or the summary line
+    -- under-reports a total collapse as a handful of failures. The constant is
+    -- not maintained by hand: `arrow-block-count` below compares it against the
+    -- number of gates the block ACTUALLY ran on the success path, so adding a
+    -- gate and forgetting this number is a red suite, not a silent drift.
+    -- (It said 13 from the day the block held 13 gates until 2026-07-24, by
+    -- which point the block held 96.)
+    total := total + arrowBlockGates; failed := failed + arrowBlockGates
   | .ok (arena, resolved) =>
+    arrowRan := true
     -- ── (h′) The slide + patcher variants: FlangeSin built the OTHER two ways —
     -- a downstream-insert run through the slide, and a patch graph lowered end to
     -- end — must also reach the frozen artifact byte-for-byte (the arrow EDSL's
@@ -533,6 +552,18 @@ def main (args : List String) : IO UInt32 := do
     total := total + 1
     if !(← runModulatedNode arena resolved) then
       failed := failed + 1
+
+  -- The arrow block's own gate count, checked rather than trusted: the number
+  -- the `.error` arm charges must be the number the `.ok` arm runs.
+  if arrowRan then
+    total := total + 1
+    if total - 1 - arrowTotal0 == arrowBlockGates then
+      let _ ← passGate "arrow-block-count"
+        s!"the arrow-laws block ran {arrowBlockGates} gates, which is exactly what its elaboration-failure arm charges — a stdlib that fails to elaborate is reported as a total collapse, not as 13 failures"
+    else
+      failed := failed + 1
+      let _ ← failGate "arrow-block-count"
+        s!"arrowBlockGates = {arrowBlockGates} but the block ran {total - 1 - arrowTotal0} — update the constant in Tropicaltest.lean"
 
   IO.println ""
   IO.println s!"{total - failed}/{total} passed"
