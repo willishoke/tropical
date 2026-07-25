@@ -457,6 +457,10 @@ def CompilationMode.ofWire? : String → Option CompilationMode
   | "microkernel-deep" => some .microkernelDeep
   | _ => none
 
+theorem CompilationMode.ofWire_wire (m : CompilationMode) :
+    CompilationMode.ofWire? m.wire = some m := by
+  cases m <;> rfl
+
 -- ─────────────────────────────────────────────────────────────
 -- FlatPlan — the runnable plan
 -- ─────────────────────────────────────────────────────────────

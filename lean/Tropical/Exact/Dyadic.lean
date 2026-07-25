@@ -39,15 +39,21 @@ def RoundDir.flip : RoundDir → RoundDir
   | .down => .up
   | .up   => .down
 
+/-- Flipping is an involution — the outward-rounding argument for interval
+    endpoints is exactly "negating swaps the direction, and swapping twice
+    is identity." -/
+theorem RoundDir.flip_flip (d : RoundDir) : d.flip.flip = d := by
+  cases d <;> rfl
+
 /-- Bit length of an `Int`'s magnitude: `0` for zero, else `⌊log₂|n|⌋ + 1`. -/
 def intBitLen (n : Int) : Nat :=
   if n == 0 then 0 else Nat.log2 n.natAbs + 1
 
 private def sqrtGo (n x : Nat) : Nat :=
   let y := (x + n / x) / 2
-  if h : y < x then sqrtGo n y else x
+  if _h : y < x then sqrtGo n y else x
 termination_by x
-decreasing_by exact h
+decreasing_by exact _h
 
 /-- Integer square root `⌊√n⌋` by Newton descent from an over-estimate
     (`2^(⌊log₂n⌋/2 + 1) ≥ √n` for every `n ≥ 2`); the iteration decreases

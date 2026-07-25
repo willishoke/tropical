@@ -194,6 +194,10 @@ def BinaryOpTag.ofWire? : String → Option BinaryOpTag
   | "floorDiv" => some .floorDiv | "ldexp" => some .ldexp
   | _ => none
 
+theorem BinaryOpTag.ofWire_wire (t : BinaryOpTag) :
+    BinaryOpTag.ofWire? t.wire = some t := by
+  cases t <;> rfl
+
 /-- Lift a parse-phase binary tag (the infix subset) into the resolved tag. -/
 def BinaryOpTag.ofParse : Tropical.Parse.BinaryOpTag → BinaryOpTag
   | .add => .add | .sub => .sub | .mul => .mul | .div => .div | .mod => .mod
@@ -223,6 +227,10 @@ def UnaryOpTag.ofWire? : String → Option UnaryOpTag
   | "floatExponent" => some .floatExponent | "toInt" => some .toInt
   | "toBool" => some .toBool | "toFloat" => some .toFloat
   | _ => none
+
+theorem UnaryOpTag.ofWire_wire (t : UnaryOpTag) :
+    UnaryOpTag.ofWire? t.wire = some t := by
+  cases t <;> rfl
 
 def UnaryOpTag.ofParse : Tropical.Parse.UnaryOpTag → UnaryOpTag
   | .neg => .neg | .not => .not | .bitNot => .bitNot

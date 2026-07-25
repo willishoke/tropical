@@ -82,6 +82,10 @@ def BinaryOpTag.ofWire? : String → Option BinaryOpTag
   | "lshift" => some .lshift | "rshift" => some .rshift
   | _ => none
 
+theorem BinaryOpTag.ofWire_wire (t : BinaryOpTag) :
+    BinaryOpTag.ofWire? t.wire = some t := by
+  cases t <;> rfl
+
 inductive UnaryOpTag where
   | neg | not | bitNot
 deriving BEq, Repr
@@ -92,6 +96,10 @@ def UnaryOpTag.wire : UnaryOpTag → String
 def UnaryOpTag.ofWire? : String → Option UnaryOpTag
   | "neg" => some .neg | "not" => some .not | "bitNot" => some .bitNot
   | _ => none
+
+theorem UnaryOpTag.ofWire_wire (t : UnaryOpTag) :
+    UnaryOpTag.ofWire? t.wire = some t := by
+  cases t <;> rfl
 
 -- ─────────────────────────────────────────────────────────────
 -- ParsedExpr — value-producing universe
