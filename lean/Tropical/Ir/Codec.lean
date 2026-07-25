@@ -78,6 +78,10 @@ def typeParamId (arena : Arena) (i : TypeParamPoolIdx) : EncM Nat := do
       typeParamIds := st.typeParamIds.set! i.idx (some id) }
     pure id
 
+/- Deliberately `partial` (the mutual below): the recursion runs through
+   the TYPE-DEF pool via alias/field indices, and its termination fact is
+   that pool's acyclicity — same story as the program pool further down,
+   a separate invariant from the expression arena's child-descending ids. -/
 mutual
 
 /-- Pool a typeDef, encoding alias field deps strictly before pushing
@@ -482,59 +486,92 @@ private abbrev DecM := StateT ExprArena (Except String)
 
 private def internD (n : ENode) : DecM ExprId := fun a => .ok ((eintern n).run a)
 
+/- Descending accessors: same behavior and error strings as `reqField` /
+   `reqArr`, but the result carries the `sizeOf` bound `expr`'s
+   termination measure descends through (the Parse-layer pattern). -/
+
+private def reqFieldD (ctx : String) (j : JsonV) (k : String) :
+    Except String {v : JsonV // sizeOf v < sizeOf j} :=
+  match hf : j.getField? k with
+  | some v => pure ⟨v, Tropical.Parse.JsonV.sizeOf_lt_of_getField hf⟩
+  | none => err ctx s!"missing field '{k}'"
+
+private def reqArrD (ctx : String) (j : JsonV) (k : String) :
+    Except String {items : Array JsonV // sizeOf items < sizeOf j} := do
+  match ← reqFieldD ctx j k with
+  | ⟨.arr items, h⟩ => pure ⟨items, by simp at h; omega⟩
+  | _ => err ctx s!"field '{k}' must be an array"
+
 /-- Parse + intern a `tropical_resolved_1` expression, returning its arena id.
     (Byte-round-trips with `encExpr` above.) The `req*`/`err`/`binder` helpers
-    return `Except String` and auto-lift into `DecM`. -/
-private partial def expr (ctx : String) (j : JsonV) (tdBase tdCount : Nat) :
+    return `Except String` and auto-lift into `DecM`. Total by descent on
+    `sizeOf j`. -/
+private def expr (ctx : String) (j : JsonV) (tdBase tdCount : Nat) :
     DecM ExprId := do
-  match j with
+  match _hj : j with
   | .num n => internD (.num n)
   | .bool b => internD (.bool b)
   | .arr items => do
-    let mut out : Array ExprId := #[]
-    for h : i in [0:items.size] do
-      out := out.push (← expr s!"{ctx}[{i}]" items[i] tdBase tdCount)
+    let out ← items.attach.zipIdx.mapM fun (⟨x, _⟩, i) =>
+      expr s!"{ctx}[{i}]" x tdBase tdCount
     internD (.arr out)
   | .obj _ =>
     let some op := j.opOf? | err ctx "expression object missing string 'op'"
-    let args (n : Nat) : Except String (Array JsonV) := do
-      let a ← reqArr ctx j "args"
-      if a.size != n then err ctx s!"'{op}' expects {n} args, got {a.size}"
-      else pure a
-    let sub (k : String) : DecM ExprId := do
-      expr s!"{ctx}.{k}" (← reqField ctx j k) tdBase tdCount
+    let args1 : Except String {v : JsonV // sizeOf v < sizeOf j} := do
+      let ⟨a, ha⟩ ← reqArrD ctx j "args"
+      if hn : a.size = 1 then
+        pure ⟨a[0], Nat.lt_trans (Tropical.Parse.sizeOf_lt_of_getElem (by omega)) ha⟩
+      else err ctx s!"'{op}' expects 1 args, got {a.size}"
+    let args2 : Except String
+        ({v : JsonV // sizeOf v < sizeOf j} × {v : JsonV // sizeOf v < sizeOf j}) := do
+      let ⟨a, ha⟩ ← reqArrD ctx j "args"
+      if hn : a.size = 2 then
+        pure (⟨a[0], Nat.lt_trans (Tropical.Parse.sizeOf_lt_of_getElem (by omega)) ha⟩,
+              ⟨a[1], Nat.lt_trans (Tropical.Parse.sizeOf_lt_of_getElem (by omega)) ha⟩)
+      else err ctx s!"'{op}' expects 2 args, got {a.size}"
+    let args3 : Except String
+        ({v : JsonV // sizeOf v < sizeOf j} × {v : JsonV // sizeOf v < sizeOf j}
+          × {v : JsonV // sizeOf v < sizeOf j}) := do
+      let ⟨a, ha⟩ ← reqArrD ctx j "args"
+      if hn : a.size = 3 then
+        pure (⟨a[0], Nat.lt_trans (Tropical.Parse.sizeOf_lt_of_getElem (by omega)) ha⟩,
+              ⟨a[1], Nat.lt_trans (Tropical.Parse.sizeOf_lt_of_getElem (by omega)) ha⟩,
+              ⟨a[2], Nat.lt_trans (Tropical.Parse.sizeOf_lt_of_getElem (by omega)) ha⟩)
+      else err ctx s!"'{op}' expects 3 args, got {a.size}"
     let defIdx : Except String TypeDefIdx := do
       let d ← reqNat ctx j "def"
       if d < tdCount then pure ⟨tdBase + d⟩
       else err ctx s!"typeDef pool index {d} is out of range"
     if let some tag := BinaryOpTag.ofWire? op then
-      let a ← args 2
-      internD (.binary tag (← expr s!"{ctx}.args[0]" a[0]! tdBase tdCount)
-                           (← expr s!"{ctx}.args[1]" a[1]! tdBase tdCount))
+      let (⟨a0, _⟩, ⟨a1, _⟩) ← args2
+      internD (.binary tag (← expr s!"{ctx}.args[0]" a0 tdBase tdCount)
+                           (← expr s!"{ctx}.args[1]" a1 tdBase tdCount))
     else if let some tag := UnaryOpTag.ofWire? op then
-      let a ← args 1
-      internD (.unary tag (← expr s!"{ctx}.args[0]" a[0]! tdBase tdCount))
+      let ⟨a0, _⟩ ← args1
+      internD (.unary tag (← expr s!"{ctx}.args[0]" a0 tdBase tdCount))
     else match op with
     | "clamp" => do
-      let a ← args 3
-      internD (.clamp (← expr s!"{ctx}.args[0]" a[0]! tdBase tdCount)
-                      (← expr s!"{ctx}.args[1]" a[1]! tdBase tdCount)
-                      (← expr s!"{ctx}.args[2]" a[2]! tdBase tdCount))
+      let (⟨a0, _⟩, ⟨a1, _⟩, ⟨a2, _⟩) ← args3
+      internD (.clamp (← expr s!"{ctx}.args[0]" a0 tdBase tdCount)
+                      (← expr s!"{ctx}.args[1]" a1 tdBase tdCount)
+                      (← expr s!"{ctx}.args[2]" a2 tdBase tdCount))
     | "select" => do
-      let a ← args 3
-      internD (.select (← expr s!"{ctx}.args[0]" a[0]! tdBase tdCount)
-                       (← expr s!"{ctx}.args[1]" a[1]! tdBase tdCount)
-                       (← expr s!"{ctx}.args[2]" a[2]! tdBase tdCount))
+      let (⟨a0, _⟩, ⟨a1, _⟩, ⟨a2, _⟩) ← args3
+      internD (.select (← expr s!"{ctx}.args[0]" a0 tdBase tdCount)
+                       (← expr s!"{ctx}.args[1]" a1 tdBase tdCount)
+                       (← expr s!"{ctx}.args[2]" a2 tdBase tdCount))
     | "arraySet" => do
-      let a ← args 3
-      internD (.arraySet (← expr s!"{ctx}.args[0]" a[0]! tdBase tdCount)
-                         (← expr s!"{ctx}.args[1]" a[1]! tdBase tdCount)
-                         (← expr s!"{ctx}.args[2]" a[2]! tdBase tdCount))
+      let (⟨a0, _⟩, ⟨a1, _⟩, ⟨a2, _⟩) ← args3
+      internD (.arraySet (← expr s!"{ctx}.args[0]" a0 tdBase tdCount)
+                         (← expr s!"{ctx}.args[1]" a1 tdBase tdCount)
+                         (← expr s!"{ctx}.args[2]" a2 tdBase tdCount))
     | "index" => do
-      let a ← args 2
-      internD (.index (← expr s!"{ctx}.args[0]" a[0]! tdBase tdCount)
-                      (← expr s!"{ctx}.args[1]" a[1]! tdBase tdCount))
-    | "zeros" => internD (.zeros (← sub "count"))
+      let (⟨a0, _⟩, ⟨a1, _⟩) ← args2
+      internD (.index (← expr s!"{ctx}.args[0]" a0 tdBase tdCount)
+                      (← expr s!"{ctx}.args[1]" a1 tdBase tdCount))
+    | "zeros" => do
+      let ⟨countJ, _⟩ ← reqFieldD ctx j "count"
+      internD (.zeros (← expr s!"{ctx}.count" countJ tdBase tdCount))
     | "inputRef" => internD (.inputRef ⟨← reqNat ctx j "idx"⟩)
     | "paramRef" => internD (.paramRef ⟨← reqNat ctx j "idx"⟩)
     | "typeParamRef" => internD (.typeParamRef ⟨← reqNat ctx j "idx"⟩)
@@ -550,83 +587,125 @@ private partial def expr (ctx : String) (j : JsonV) (tdBase tdCount : Nat) :
         | none => pure 0
       internD (.loopIdx id)
     | "bankSum" => do
-      let ts ← reqArr ctx j "tables"
-      let mut tables : Array ExprId := #[]
-      for h : i in [0:ts.size] do
-        tables := tables.push (← expr s!"{ctx}.tables[{i}]" ts[i] tdBase tdCount)
+      let ⟨ts, _⟩ ← reqArrD ctx j "tables"
+      let tables ← ts.attach.zipIdx.mapM fun (⟨t, _⟩, i) =>
+        expr s!"{ctx}.tables[{i}]" t tdBase tdCount
       -- optional runtime effective count (trip-count-as-data); absent = static.
-      let dc? ← match j.getField? "dyn_count" with
+      let dc? ← match hdc : j.getField? "dyn_count" with
         | some dj => some <$> expr s!"{ctx}.dyn_count" dj tdBase tdCount
         | none => pure none
       -- optional binder id (nested banks); absent = 0.
       let idxId ← match j.getField? "idx_id" with
         | some _ => reqNat ctx j "idx_id"
         | none => pure 0
-      internD (.bankSum (← reqNat ctx j "count") tables (← sub "body") dc? idxId)
+      let count ← reqNat ctx j "count"
+      let ⟨bodyJ, _⟩ ← reqFieldD ctx j "body"
+      internD (.bankSum count tables (← expr s!"{ctx}.body" bodyJ tdBase tdCount) dc? idxId)
     | "fold" => do
-      internD (.fold (← sub "over") (← sub "init")
-        (← binder s!"{ctx}.acc" (← reqField ctx j "acc"))
-        (← binder s!"{ctx}.elem" (← reqField ctx j "elem")) (← sub "body"))
+      let ⟨overJ, _⟩ ← reqFieldD ctx j "over"
+      let over ← expr s!"{ctx}.over" overJ tdBase tdCount
+      let ⟨initJ, _⟩ ← reqFieldD ctx j "init"
+      let init ← expr s!"{ctx}.init" initJ tdBase tdCount
+      let acc ← binder s!"{ctx}.acc" (← reqField ctx j "acc")
+      let elem ← binder s!"{ctx}.elem" (← reqField ctx j "elem")
+      let ⟨bodyJ, _⟩ ← reqFieldD ctx j "body"
+      internD (.fold over init acc elem (← expr s!"{ctx}.body" bodyJ tdBase tdCount))
     | "scan" => do
-      internD (.scan (← sub "over") (← sub "init")
-        (← binder s!"{ctx}.acc" (← reqField ctx j "acc"))
-        (← binder s!"{ctx}.elem" (← reqField ctx j "elem")) (← sub "body"))
+      let ⟨overJ, _⟩ ← reqFieldD ctx j "over"
+      let over ← expr s!"{ctx}.over" overJ tdBase tdCount
+      let ⟨initJ, _⟩ ← reqFieldD ctx j "init"
+      let init ← expr s!"{ctx}.init" initJ tdBase tdCount
+      let acc ← binder s!"{ctx}.acc" (← reqField ctx j "acc")
+      let elem ← binder s!"{ctx}.elem" (← reqField ctx j "elem")
+      let ⟨bodyJ, _⟩ ← reqFieldD ctx j "body"
+      internD (.scan over init acc elem (← expr s!"{ctx}.body" bodyJ tdBase tdCount))
     | "generate" => do
-      internD (.generate (← sub "count")
-        (← binder s!"{ctx}.iter" (← reqField ctx j "iter")) (← sub "body"))
+      let ⟨countJ, _⟩ ← reqFieldD ctx j "count"
+      let count ← expr s!"{ctx}.count" countJ tdBase tdCount
+      let iter ← binder s!"{ctx}.iter" (← reqField ctx j "iter")
+      let ⟨bodyJ, _⟩ ← reqFieldD ctx j "body"
+      internD (.generate count iter (← expr s!"{ctx}.body" bodyJ tdBase tdCount))
     | "iterate" => do
-      internD (.iterate (← sub "count") (← sub "init")
-        (← binder s!"{ctx}.iter" (← reqField ctx j "iter")) (← sub "body"))
+      let ⟨countJ, _⟩ ← reqFieldD ctx j "count"
+      let count ← expr s!"{ctx}.count" countJ tdBase tdCount
+      let ⟨initJ, _⟩ ← reqFieldD ctx j "init"
+      let init ← expr s!"{ctx}.init" initJ tdBase tdCount
+      let iter ← binder s!"{ctx}.iter" (← reqField ctx j "iter")
+      let ⟨bodyJ, _⟩ ← reqFieldD ctx j "body"
+      internD (.iterate count init iter (← expr s!"{ctx}.body" bodyJ tdBase tdCount))
     | "chain" => do
-      internD (.chain (← sub "count") (← sub "init")
-        (← binder s!"{ctx}.iter" (← reqField ctx j "iter")) (← sub "body"))
+      let ⟨countJ, _⟩ ← reqFieldD ctx j "count"
+      let count ← expr s!"{ctx}.count" countJ tdBase tdCount
+      let ⟨initJ, _⟩ ← reqFieldD ctx j "init"
+      let init ← expr s!"{ctx}.init" initJ tdBase tdCount
+      let iter ← binder s!"{ctx}.iter" (← reqField ctx j "iter")
+      let ⟨bodyJ, _⟩ ← reqFieldD ctx j "body"
+      internD (.chain count init iter (← expr s!"{ctx}.body" bodyJ tdBase tdCount))
     | "map2" => do
-      internD (.map2 (← sub "over")
-        (← binder s!"{ctx}.elem" (← reqField ctx j "elem")) (← sub "body"))
+      let ⟨overJ, _⟩ ← reqFieldD ctx j "over"
+      let over ← expr s!"{ctx}.over" overJ tdBase tdCount
+      let elem ← binder s!"{ctx}.elem" (← reqField ctx j "elem")
+      let ⟨bodyJ, _⟩ ← reqFieldD ctx j "body"
+      internD (.map2 over elem (← expr s!"{ctx}.body" bodyJ tdBase tdCount))
     | "zipWith" => do
-      internD (.zipWith (← sub "a") (← sub "b")
-        (← binder s!"{ctx}.x" (← reqField ctx j "x"))
-        (← binder s!"{ctx}.y" (← reqField ctx j "y")) (← sub "body"))
+      let ⟨aJ, _⟩ ← reqFieldD ctx j "a"
+      let a ← expr s!"{ctx}.a" aJ tdBase tdCount
+      let ⟨bJ, _⟩ ← reqFieldD ctx j "b"
+      let b ← expr s!"{ctx}.b" bJ tdBase tdCount
+      let x ← binder s!"{ctx}.x" (← reqField ctx j "x")
+      let y ← binder s!"{ctx}.y" (← reqField ctx j "y")
+      let ⟨bodyJ, _⟩ ← reqFieldD ctx j "body"
+      internD (.zipWith a b x y (← expr s!"{ctx}.body" bodyJ tdBase tdCount))
     | "let" => do
-      let bs ← reqArr ctx j "binders"
-      let mut binders : Array ELetBinder := #[]
-      for h : i in [0:bs.size] do
-        let b := bs[i]
+      let ⟨bs, _⟩ ← reqArrD ctx j "binders"
+      let binders ← bs.attach.zipIdx.mapM fun (⟨b, _⟩, i) => do
         let bctx := s!"{ctx}.binders[{i}]"
-        binders := binders.push {
-          binder := ← binder s!"{bctx}.binder" (← reqField bctx b "binder"),
-          value := ← expr s!"{bctx}.value" (← reqField bctx b "value") tdBase tdCount }
-      internD (.letIn binders (← sub "in"))
+        let bnd ← binder s!"{bctx}.binder" (← reqField bctx b "binder")
+        let ⟨valueJ, _⟩ ← reqFieldD bctx b "value"
+        pure ({ binder := bnd,
+                value := ← expr s!"{bctx}.value" valueJ tdBase tdCount } : ELetBinder)
+      let ⟨inJ, _⟩ ← reqFieldD ctx j "in"
+      internD (.letIn binders (← expr s!"{ctx}.in" inJ tdBase tdCount))
     | "tag" => do
       let d ← defIdx
       let variant ← reqNat ctx j "variant"
-      let ps ← reqArr ctx j "payload"
-      let mut payload : Array ETagPayload := #[]
-      for h : i in [0:ps.size] do
-        let p := ps[i]
+      let ⟨ps, _⟩ ← reqArrD ctx j "payload"
+      let payload ← ps.attach.zipIdx.mapM fun (⟨p, _⟩, i) => do
         let pctx := s!"{ctx}.payload[{i}]"
-        payload := payload.push {
-          field := ← reqNat pctx p "field",
-          value := ← expr s!"{pctx}.value" (← reqField pctx p "value") tdBase tdCount }
+        let field ← reqNat pctx p "field"
+        let ⟨valueJ, _⟩ ← reqFieldD pctx p "value"
+        pure ({ field,
+                value := ← expr s!"{pctx}.value" valueJ tdBase tdCount } : ETagPayload)
       internD (.tag d variant payload)
     | "match" => do
       let d ← defIdx
-      let scrutinee ← sub "scrutinee"
-      let as_ ← reqArr ctx j "arms"
-      let mut arms : Array EMatchArm := #[]
-      for h : i in [0:as_.size] do
-        let a := as_[i]
+      let ⟨scrJ, _⟩ ← reqFieldD ctx j "scrutinee"
+      let scrutinee ← expr s!"{ctx}.scrutinee" scrJ tdBase tdCount
+      let ⟨as_, _⟩ ← reqArrD ctx j "arms"
+      let arms ← as_.attach.zipIdx.mapM fun (⟨a, _⟩, i) => do
         let actx := s!"{ctx}.arms[{i}]"
-        let bs ← reqArr actx a "binders"
+        let abs ← reqArr actx a "binders"
         let mut binders : Array Binder := #[]
-        for h2 : k in [0:bs.size] do
-          binders := binders.push (← binder s!"{actx}.binders[{k}]" bs[k])
-        arms := arms.push {
-          variant := ← reqNat actx a "variant", binders,
-          body := ← expr s!"{actx}.body" (← reqField actx a "body") tdBase tdCount }
+        for h2 : k in [0:abs.size] do
+          binders := binders.push (← binder s!"{actx}.binders[{k}]" abs[k])
+        let variant ← reqNat actx a "variant"
+        let ⟨bodyJ, _⟩ ← reqFieldD actx a "body"
+        pure ({ variant, binders,
+                body := ← expr s!"{actx}.body" bodyJ tdBase tdCount } : EMatchArm)
       internD (.match_ d scrutinee arms)
     | other => err ctx s!"unknown expression op '{other}'"
   | _ => err ctx "expected an expression value"
+termination_by sizeOf j
+decreasing_by
+  all_goals first
+    | omega
+    | (simp_all <;> omega)
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ items›; simp_all <;> omega)
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ ts›; simp_all <;> omega)
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ bs›; simp_all <;> omega)
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ ps›; simp_all <;> omega)
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ as_›; simp_all <;> omega)
+    | (have := Tropical.Parse.JsonV.sizeOf_lt_of_getField hdc; simp_all <;> omega)
 
 private def decodePortType (ctx : String) (j : JsonV) (typeDefs : Array TypeDef)
     (tdBase tpBase tpCount : Nat) : Except String PortType := do
