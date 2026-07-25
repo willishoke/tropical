@@ -1,5 +1,17 @@
 import SwiftUI
 
+/// Async-signal-safe last resort. A fatal crash (SIGSEGV/SIGABRT/…) never
+/// reaches applicationWillTerminate, so reap the engine right here: `kill` is
+/// on the async-signal-safe list, unlike the Process API or any dispatch hop.
+/// Then restore the default disposition and re-raise so the crash still cores
+/// and reports normally.
+private func reapEngineOnCrash(_ sig: Int32) {
+    let pid = gEngineChildPID
+    if pid > 0 { kill(pid_t(pid), SIGKILL) }
+    signal(sig, SIG_DFL)
+    raise(sig)
+}
+
 /// The app spawns the engine as a CHILD, but the kernel doesn't reap children
 /// with their parent: any exit that skips teardown leaves an orphaned engine
 /// holding the DAC — audio that nothing can stop. Funnel every exit path
@@ -41,6 +53,11 @@ struct ReversibleApp: App {
             src.setEventHandler { NSApp.terminate(nil) }
             src.resume()
             Self.signalSources.append(src)
+        }
+        // Crashes are catchable (unlike an uncatchable SIGKILL of the app,
+        // which only the startup sweep covers); reap the engine before dying.
+        for sig in [SIGSEGV, SIGABRT, SIGILL, SIGFPE, SIGBUS] {
+            signal(sig, reapEngineOnCrash)
         }
     }
 

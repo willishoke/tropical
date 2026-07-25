@@ -1,5 +1,11 @@
 import Foundation
 
+/// PID of the live child engine, or 0. Read from an async-signal handler on a
+/// fatal crash (see reapEngineOnCrash), so it must be a `sig_atomic_t`, not a
+/// lock-guarded value — locking isn't async-signal-safe. Written only on
+/// spawn and reap.
+var gEngineChildPID: sig_atomic_t = 0
+
 /// Lifecycle/diagnostic events from the engine process — mirrors the
 /// Electron main-process `onStatus` channel.
 enum EngineEvent {
@@ -67,6 +73,9 @@ actor Engine {
     }
 
     func start() async throws {
+        // Reap any engine orphaned by a PREVIOUS instance that died before
+        // teardown (SIGKILL, crash) — the one gap the graceful path can't close.
+        Engine.sweepOrphans()
         let bin = Engine.resolveBinary()
         // The engine expects to run from the repo root (stdlib paths etc.):
         // bin is <root>/lean/.lake/build/bin/frontend, so root is 5 up.
@@ -113,6 +122,7 @@ actor Engine {
         try p.run()
         process = p
         procBox.process = p
+        gEngineChildPID = sig_atomic_t(p.processIdentifier)
         try await connectSocket()
         events(.up)
     }
@@ -120,7 +130,51 @@ actor Engine {
     /// Synchronous child teardown for app exit (Cmd-Q, SIGTERM). Safe from
     /// any thread; idempotent.
     nonisolated func terminateChild() {
+        gEngineChildPID = 0
         procBox.take()?.terminate()
+    }
+
+    /// Reap engines orphaned by a PREVIOUS reversible instance that died
+    /// without running teardown (the app was SIGKILLed, or crashed before the
+    /// crash handler fired). A socket name embeds the OWNER app's pid
+    /// (`reversible-<pid>.sock`), so an orphan is an engine whose owner is no
+    /// longer alive. We skip live siblings (owner still running) and can't
+    /// touch our own engine (not spawned yet at sweep time). Best-effort: any
+    /// parse/exec failure just leaves the sweep a no-op.
+    nonisolated static func sweepOrphans() {
+        let ps = Process()
+        ps.executableURL = URL(fileURLWithPath: "/bin/ps")
+        ps.arguments = ["-axo", "pid=,command="]
+        let pipe = Pipe()
+        ps.standardOutput = pipe
+        ps.standardError = FileHandle.nullDevice
+        guard (try? ps.run()) != nil else { return }
+        let data = pipe.fileHandleForReading.readDataToEndOfFile()
+        ps.waitUntilExit()
+        guard let out = String(data: data, encoding: .utf8) else { return }
+
+        let me = getpid()
+        for raw in out.split(separator: "\n") {
+            let line = String(raw).trimmingCharacters(in: .whitespaces)
+            guard line.range(of: "frontend --serve") != nil,
+                  let sockRange = line.range(
+                    of: #"/\S*reversible-[0-9]+\.sock"#, options: .regularExpression)
+            else { continue }
+            let sockPath = String(line[sockRange])
+            // Owner pid = the run of digits in `reversible-<pid>.sock`.
+            let owner = pid_t(sockPath
+                .drop(while: { !$0.isNumber })
+                .prefix(while: { $0.isNumber })) ?? -1
+            guard owner > 0, owner != me else { continue }
+            // owner reachable (alive, or alive-but-not-ours) → a live instance
+            // still owns this engine; leave it be.
+            if Darwin.kill(owner, 0) == 0 || errno == EPERM { continue }
+            // Engine's own pid is the first ps column.
+            guard let sp = line.firstIndex(of: " "),
+                  let childPID = pid_t(line[..<sp]) else { continue }
+            Darwin.kill(childPID, SIGKILL)
+            unlink(sockPath)
+        }
     }
 
     /// The socket node appears once Engine.boot finishes and binds, so retry
@@ -173,6 +227,7 @@ actor Engine {
     }
 
     func kill() {
+        gEngineChildPID = 0
         process?.terminationHandler = nil
         process?.terminate()
         process = nil
@@ -183,6 +238,7 @@ actor Engine {
     }
 
     private func failAllPending() {
+        gEngineChildPID = 0
         let waiting = pending.values
         pending.removeAll()
         for c in waiting { c.resume(throwing: EngineError.exited) }
