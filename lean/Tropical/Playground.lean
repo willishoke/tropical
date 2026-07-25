@@ -32,6 +32,7 @@ namespace Tropical.Playground
 open Lean (Json JsonNumber)
 open Tropical.Ir
 open Tropical.EmitArrow
+open Tropical.Exact (DyadicI)
 
 -- ── JSON field helpers (over `Lean.Json` objects) ───────────────────────────
 private def jNum? (obj : Json) (key : String) : Option JsonNumber :=
@@ -57,10 +58,79 @@ private def jStr (obj : Json) (key : String) (dflt : String) : String :=
   | .ok (.str s) => s
   | _ => dflt
 
-/-- A numeric param as a build-time `Float` (the gong's structural strike
-    data — mode tables, anchors — is baked, not slotted). -/
+/-- A numeric param as a build-time `Float`. RETAINED only for the readers that
+    hand a `Float` to a function whose signature this pass does not reach
+    (`defaultGongModes`, and `bloomgong`'s withheld `(Float × Float)` bloom
+    pair). Every other bake-time reader takes `jDec`/`jExactD` below: a `Float`
+    here throws the exact decimal away before a structural decision can read it,
+    and `JsonNumber.toFloat` inherits core's double rounding. -/
 private def jFloat (obj : Json) (key : String) (dflt : Float) : Float :=
   ((jNum? obj key).map (·.toFloat)).getD dflt
+
+/-- A numeric param as its exact DECIMAL `(mantissa, exponent)` — `m·10^{−e}`,
+    the shape `JsonNumber` already carries, with no `Float` in between. Read from
+    a PARSED number and defaulted with a plain `(Int × Nat)` tuple, never with a
+    `⟨m, e⟩ : JsonNumber` source literal: the linux-x86 miscompile that made every
+    carrier sink unity-gain on CI bites SOURCE literals only. -/
+private def jDec (obj : Json) (key : String) (dflt : Int × Nat) : Int × Nat :=
+  match jNum? obj key with
+  | some n => (n.mantissa, n.exponent)
+  | none => dflt
+
+/-- A decimal `(m, e)` as its certified enclosure `m·10^{−e}`. Decimals are not
+    dyadic, so this is where the authoring layer's exactness genuinely ends —
+    and the enclosure says so, to the working precision, instead of pretending. -/
+private def decD (d : Int × Nat) : DyadicI :=
+  DyadicI.ofJsonNumber ⟨d.1, d.2⟩
+
+/-- A numeric param as a certified enclosure. -/
+private def jExactD (obj : Json) (key : String) (dflt : Int × Nat) : DyadicI :=
+  decD (jDec obj key dflt)
+
+/-- The emit funnel on a CERTIFIED value: `litF` of the enclosure's midpoint —
+    the nearest `Float` to the exact value. `litF`'s 12-decimal quantization and
+    its own f64 multiply stay exactly where they are (the `litF` FORMAT is a
+    separate later decision with its own one-time golden migration); all that
+    changes is the PROVENANCE of the double it rounds — a correctly-rounded value
+    rather than a platform `libm`'s. Poison is `none`, never a fabricated `0`:
+    that is the `sigConstF?` pathology, one floor down. -/
+private def litOfD? (x : DyadicI) : Option Sig :=
+  if x.ok then some (litF x.toFloat) else none
+
+/-- `litOfD?` at a site where poison is unreachable BY CONSTRUCTION (every
+    argument is a `sin`/`cos` of a finite enclosure, or a `pow`/`log` of a
+    certifiably positive one) AND the bank's LENGTH is contractual — a
+    resonator's `partials_max` capacity, a reverb's `nmode` — so dropping a mode
+    is not an available answer. The `lit 0` arm is therefore dead code, and the
+    `exact-playground` gate asserts it STAYS dead over the whole served
+    vocabulary rather than trusting this sentence. -/
+private def litOfD (x : DyadicI) : Sig := (litOfD? x).getD (lit 0)
+
+/-- The AUTHORED `2π`, `π`, golden ratio and golden angle as exact DECIMALS —
+    the same numbers the incumbent `Float` literals spell, entering the carrier as
+    decimals rather than as the doubles nearest them. Deliberately NOT
+    `Tropical.Exact.{twoPiI, piI}`: swapping an authored rounding for the true
+    constant is a VALUE change, and this campaign moves the arithmetic. `twoPiD`
+    in particular must agree with the symbolic `twoPiE` (`lit 6283185307179586
+    e−15`, Numerics.lean) or one emitted plan would carry two spellings of 2π. -/
+private def twoPiD : DyadicI := decD (6283185307179586, 15)
+private def piD : DyadicI := decD (3141592653589793, 15)
+private def goldenRatioD : DyadicI := decD (6180339887, 10)
+private def goldenAngleD : DyadicI := decD (2399963, 6)
+
+/-- `ln 80`, certified once at module init (the `eulerI` precedent) — the
+    constant `filterPair`'s `Q = 0.55·80^res` mapping is written in terms of.
+    MEASURED: the exact value's nearest double IS the authored literal
+    `4.382026634673881` and its 12-place quantization is identical, so this is a
+    provenance change with no value change. -/
+private def ln80D : DyadicI := DyadicI.log (DyadicI.ofNat 80)
+
+/-- `ln 80` as the emitted literal `filterPair` consumes. Named so the
+    `exact-playground` probe can hand the gate THIS `Sig` rather than a second
+    spelling of it — `filterPair`'s own `q` is wrapped in an `expSig`, which does
+    not fold, so the constant has to be reachable on its own to be observable at
+    all. -/
+private def lnEightyLit : Sig := litOfD ln80D
 
 /-- A gong register's mode table: an array of `[freqHz, sigma, amp, phase]`
     rows → `ModalMode`s (rectangular: `cre = a·cos φ`, `cim = a·sin φ`, so
@@ -73,11 +143,20 @@ private def jModes (obj : Json) (key : String) : Array ModalMode :=
     match mj.getArr?.toOption with
     | some fs =>
       if fs.size < 4 then none else
-      let num := fun (i : Nat) => ((fs[i]!.getNum?.toOption).map (·.toFloat)).getD 0.0
-      let a := num 2
-      let ph := num 3
-      some { sigma := litF (num 1), omega := litF (6.283185307179586 * num 0),
-             cre := litF (a * Float.cos ph), cim := litF (a * Float.sin ph) }
+      -- each cell enters as the DECIMAL the score wrote, not as the double
+      -- nearest it: `JsonNumber.toFloat` double-rounds (the same conversion the
+      -- CI miscompile incident was about), and these rows are a gong's or a
+      -- string's whole timbre.
+      let numD := fun (i : Nat) =>
+        match fs[i]!.getNum?.toOption with
+        | some n => DyadicI.ofJsonNumber n
+        | none => DyadicI.zero
+      let a := numD 2
+      let ph := numD 3
+      some { sigma := litOfD (numD 1),
+             omega := litOfD (DyadicI.mul twoPiD (numD 0)),
+             cre := litOfD (DyadicI.mul a (DyadicI.cos ph)),
+             cim := litOfD (DyadicI.mul a (DyadicI.sin ph)) }
     | none => none
 
 -- ── Voices (literal pitch, so the knob bakes into the emitted clock) ─────────
@@ -155,9 +234,19 @@ private def gPow (g : Sig) (k : Nat) : Sig :=
 private def resonatorBank (f0 decay : Sig) (npart : Nat) : Array ModalMode :=
   (Array.range npart).map fun j =>
     let k := j + 1
+    let kD := DyadicI.ofNat k
+    -- σ factor `1 + 0.4k`: `0.4` is an AUTHORED DECIMAL, so it enters as a tight
+    -- enclosure instead of pretending to be the dyadic 0.4000000000000000222…
+    let sigFac := DyadicI.add DyadicI.one (DyadicI.mul (decD (4, 1)) kD)
+    -- amplitude `k^{−1.1}` — the one transcendental here, now `exp(−1.1·ln k)`
+    -- in the carrier. `k ≥ 1 > 0`, so `pow`'s positivity precondition is
+    -- certified and poison is unreachable (which is why `litOfD` is total here:
+    -- the array LENGTH is the bank's `partials_max` capacity contract, so a
+    -- dropped mode is not an available answer).
+    let ampD := DyadicI.div DyadicI.one (DyadicI.pow kD (decD (11, 1)))
     ModalMode.hz (mul (lit (Int.ofNat k)) f0)
-                 (mul decay (litF (1.0 + 0.4 * k.toFloat)))
-                 (litF (1.0 / Float.pow k.toFloat 1.1))
+                 (mul decay (litOfD sigFac))
+                 (litOfD ampD)
 
 /-- The default plucked-string bank a bare `string` node strikes: the exact
     Jaffe-Smith pole table of the Karplus-Strong loop `y = x + ρ·½(y[n-N] +
@@ -170,23 +259,69 @@ private def resonatorBank (f0 decay : Sig) (npart : Nat) : Array ModalMode :=
     the modes is the DATA path's job — this is the audible default). SR is baked
     at 44100 for the default timbre; the `string` kind's real content arrives as
     `modes` data rows. Capped at 48 partials (higher ones decay in ms). -/
-def defaultStringModes (f0 rho : Float) : Array ModalMode := Id.run do
-  let sr := 44100.0
-  let span := (sr / f0).round + 0.5          -- N + ½  (loop transit, samples)
-  let pi := 3.141592653589793
-  let kmax := min 48 (Float.floor (span / 2.0)).toUInt64.toNat
+def defaultStringModes (f0 rho : Int × Nat) : Array ModalMode := Id.run do
+  let srI : Int := 44100
+  let (m, e) := f0
+  -- `f0 ≤ 0` is not a string: an EMPTY bank — silence, the house's graceful
+  -- exclusion. (The incumbent `Float` path reached `44100/0 = ∞` here, whose
+  -- `.round + 0.5` is `∞`, whose `Float.floor … |>.toUInt64` SATURATES, so
+  -- `{"kind":"string","params":{"freq":0}}` emitted 48 undamped DC modes. Exact
+  -- arithmetic has no ∞ to saturate; the change is forced by the carrier, it is
+  -- the better answer, and `exact-playground` pins it so it is a decision rather
+  -- than a surprise.)
+  if m ≤ 0 then return #[]
+  -- THE FIRST CLIFF, decided rather than estimated. `N = round(SR/f0)` HALF AWAY
+  -- FROM ZERO in exact `Int` arithmetic on the decimal the JSON carried:
+  -- `f0 = m·10^{−e}` ⇒ `SR/f0 = SR·10^e/m`, a RATIONAL, and
+  -- `round(p/q) = ⌊(2p + q)/(2q)⌋` for `p, q > 0`. No `Float`, no enclosure and
+  -- no overlap arm — this cliff does not need a policy, it needs integers.
+  -- (MEASURED against the incumbent over 95 000 plausible decimal `f0`: two
+  -- disagreements, both `f0 = 2.24`, where `44100/2.24 = 19687.5` exactly but
+  -- the f64 quotient is `19687.499999999996`, so `Float.round` answered 19687
+  -- and the exact round answers 19688.)
+  let p : Int := srI * (10 : Int) ^ e
+  let q : Int := m
+  let N : Int := (2 * p + q) / (2 * q)   -- p, q > 0 ⇒ every division convention agrees
+  if N ≤ 0 then return #[]
+  -- span = N + ½, exactly: the dyadic `(2N+1)·2^{−1}`
+  let span : DyadicI := (DyadicI.ofInt (2 * N + 1)).shift (-1 : Int)
+  -- THE EMITTED PARTIAL COUNT. The incumbent's `Float.floor` was already inert —
+  -- `span/2 = N/2 + ¼` is exactly representable, so its floor is `N div 2` on
+  -- every platform — and here it is that integer fact and nothing else.
+  let kmax : Nat := min 48 (N / 2).toNat
+  let rhoD := decD rho
+  let srD := DyadicI.ofInt srI
+  let halfSR := srD.shift (-1 : Int)
   let mut modes : Array ModalMode := #[]
   for j in [0:kmax] do
-    let k := (j + 1).toFloat
-    let fk := k * sr / span
-    let g := rho * Float.cos (pi * fk / sr)   -- ρ·|G(ω_k)| per loop transit
-    if fk < sr * 0.5 && g > 0.0 then
-      let sigma := - sr * Float.log g / span                 -- decay, 1/s
-      let amp := 1.0 / k                                      -- displacement rolloff
-      let ph := 2.399963 * k                                 -- golden-angle phases
+    let k := DyadicI.ofNat (j + 1)
+    let fk := DyadicI.div (DyadicI.mul k srD) span            -- f_k = k·SR/span
+    -- ρ·|G(ω_k)| per loop transit. `π·f_k/SR = π·k/span` exactly, so the
+    -- reduction is taken algebraically instead of through two roundings.
+    let g := DyadicI.mul rhoD (DyadicI.cos (DyadicI.div (DyadicI.mul piD k) span))
+    -- THE SECOND CLIFF — the per-partial EMIT/SKIP fork, certified. Two
+    -- conjuncts, one policy: EMIT only on a certified verdict, DROP otherwise.
+    --  · `f_k < SR/2` is REDUNDANT — `k ≤ ⌊span/2⌋ = N div 2 < span/2` forces it
+    --    for every integer `k`. It is kept, as a certified check rather than a
+    --    float one, so a future change to `kmax` cannot silently re-open the
+    --    band edge (the `exact-playground` gate proves it never fires today).
+    --  · `g > 0` is the live half. `σ = −SR·ln g/span` is UNBOUNDED as `g → 0⁺`,
+    --    so an `overlap` verdict (the enclosure straddles zero) admits NO finite
+    --    decay: there is no conservative side to take, and an emitted σ would be
+    --    a fabricated number of exactly the class this campaign deletes.
+    -- The drop reproduces the incumbent on every reachable input: the only
+    -- reachable overlap is `ρ = 0`, where `g` is exactly `[0,0]` and the float
+    -- test `g > 0.0` is false too; a hypothetical straddling `g` is within
+    -- `2^{−128}` of zero — a partial losing `e^{−88}` per transit, inaudible
+    -- whichever way it goes. (`g < 0` needs `ρ < 0`.)
+    if DyadicI.certLt fk halfSR && DyadicI.certGt g DyadicI.zero then
+      let sigma := DyadicI.neg (DyadicI.div (DyadicI.mul srD (DyadicI.log g)) span)
+      let amp := DyadicI.inv k                        -- 1/k displacement rolloff
+      let ph := DyadicI.mul goldenAngleD k            -- golden-angle phases
       modes := modes.push
-        { sigma := litF sigma, omega := litF (2.0 * pi * fk),
-          cre := litF (amp * Float.cos ph), cim := litF (amp * Float.sin ph) }
+        { sigma := litOfD sigma, omega := litOfD (DyadicI.mul twoPiD fk),
+          cre := litOfD (DyadicI.mul amp (DyadicI.cos ph)),
+          cim := litOfD (DyadicI.mul amp (DyadicI.sin ph)) }
   return modes
 
 /-- A reverb room as a `ModalMode` bank (pole + residue-as-coeff): `nmode`
@@ -197,15 +332,32 @@ def defaultStringModes (f0 rho : Float) : Array ModalMode := Id.run do
     what lets a bloomed source CROSS this room with the rt60 still live (WS-LP:
     `bloomCompose` classifies the live pole over that interval). -/
 private def reverbRoom (rt60 : Sig) (rtRange : Option (Float × Float))
-    (nmode : Nat) (flo fhi : Float) : Array ModalMode :=
+    (nmode : Nat) (flo fhi : Int × Nat) : Array ModalMode :=
   let sigma := div (lit 691 2) rt60           -- 6.91 / rt60
-  let sigmaRange := rtRange.map (fun (lo, hi) => (6.91 / hi, 6.91 / lo))
-  let denom : Float := if nmode ≤ 1 then 1.0 else (nmode - 1).toFloat
+  -- `6.91` as the SAME exact decimal the EMITTED σ carries (`lit 691 e−2`), so
+  -- the declared range and the emitted value are two readings of ONE constant
+  -- rather than of a decimal and of the double nearest it — the
+  -- quantization-vs-classification hazard, at a site that genuinely decides
+  -- (`sigmaIntervalD?` feeds this range to the EC/DD router, and `clampSigmas`
+  -- emits its endpoints). The FIELD stays `Float` — its type is `ModalMode`'s —
+  -- so the exact quotient is projected to its nearest double here. MEASURED: at
+  -- the shipped rt60 span (0.2, 12) both endpoints are bit-identical.
+  let c691 : DyadicI := decD (691, 2)
+  let sigmaRange := rtRange.map fun (lo, hi) =>
+    ((DyadicI.div c691 (DyadicI.ofFloat hi)).toFloat,
+     (DyadicI.div c691 (DyadicI.ofFloat lo)).toFloat)
+  let floD := decD flo
+  let fhiD := decD fhi
+  let ratio := DyadicI.div fhiD floD          -- certifiably positive: `pow` is safe
+  let denom : DyadicI := DyadicI.ofNat (if nmode ≤ 1 then 1 else nmode - 1)
   (Array.range nmode).map fun j =>
-    let fq := flo * Float.pow (fhi / flo) (j.toFloat / denom)
-    let ph := 6.283185307179586 * (0.6180339887 * j.toFloat)
-    { sigma, omega := mul twoPiE (litF fq),
-      cre := litF (Float.cos ph), cim := litF (Float.sin ph), sigmaRange }
+    -- log-spacing `flo·(fhi/flo)^{j/(n−1)}` — `pow` in the carrier
+    -- (`exp(y·ln x)`), not the platform's. `ph` reaches ~120 rad at `j = 31`,
+    -- where a platform `cos` spends reduction bits and this one does not.
+    let fq := DyadicI.mul floD (DyadicI.pow ratio (DyadicI.div (DyadicI.ofNat j) denom))
+    let ph := DyadicI.mul twoPiD (DyadicI.mul goldenRatioD (DyadicI.ofNat j))
+    { sigma, omega := mul twoPiE (litOfD fq),
+      cre := litOfD (DyadicI.cos ph), cim := litOfD (DyadicI.sin ph), sigmaRange }
 
 /-- A 2-pole resonant filter as its EXACT complex-conjugate pole pair — the
     modal island's filter (the Serge-VCFQ move). "Filtering" a modal source is
@@ -233,8 +385,11 @@ private def reverbRoom (rt60 : Sig) (rtRange : Option (Float × Float))
     real; the top of the knob rings for seconds). -/
 private def filterPair (fc res : Sig) : Array ModalMode :=
   let w0 := mul twoPiE fc
-  -- Q = 0.55·e^{res·ln 80}   (ln 80 = 4.382026634673881)
-  let q := mul (lit 55 2) (expSig (mul res (litF 4.382026634673881)))
+  -- Q = 0.55·e^{res·ln 80}. `ln 80` is certified once at module init (`ln80D`)
+  -- rather than transcribed as a decimal literal; MEASURED byte-identical — the
+  -- exact value's nearest double IS `4.382026634673881` and its 12-place
+  -- quantization is unchanged. Provenance, not value.
+  let q := mul (lit 55 2) (expSig (mul res lnEightyLit))
   let alpha := div w0 (mul (lit 2) q)
   let wd := mul w0 (.unary .sqrt (sub (lit 1) (div (lit 1) (mul (lit 4) (mul q q)))))
   let rim := div (mul w0 w0) (mul (lit 2) wd)          -- |Im R|
@@ -653,7 +808,7 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     let sway := p "sway" (dv "sway")
     let swayRate := p "rate" (dv "rate")   -- 0.3 Hz: a slow breath
     let dir : ModalDir := { dir := dirX, damp := some (sway, swayRate) }
-    (.modalReverb sig (reverbRoom rt60 (displayRangeOf "reverb" "rt60") 32 60.0 6000.0) (some dir), #[])
+    (.modalReverb sig (reverbRoom rt60 (displayRangeOf "reverb" "rt60") 32 (60, 0) (6000, 0)) (some dir), #[])
   | "filter" =>
     -- the filter IS a modalReverb with a computed 2-mode room: the residue
     -- calculus does the "filtering" at build time, knobs stay live through it.
@@ -675,9 +830,10 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     -- scrubs/reverses them live): `t` (strike time, s), `beta` (pitch-bloom
     -- depth, velocity already folded in), `g` (bloom settle rate), and the
     -- two pre-expanded mode tables.
-    let t := jFloat params "t" 0.0
-    let gRate := jFloat params "g" 1.8
-    let anchor := mul (litF t) .sampleRate
+    -- the strike anchor and the bloom settle rate as EXACT decimals: the last
+    -- two `JsonNumber → Float → litF` round trips on the SERVED `gong` path.
+    let gRateD := jExactD params "g" (18, 1)
+    let anchor := mul (litOfD (jExactD params "t" (0, 0))) .sampleRate
     -- a bare gong (no score data) strikes the built-in default bank at its
     -- anchor — the kind's audible default, like the resonator's 6 partials.
     let full := jModes params "modes_full"
@@ -689,7 +845,7 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     -- β (pitch-bloom depth) is a LIVE slot: the score's baked value initializes it,
     -- and it deepens/relaxes under the knob with no relower (table fallback 0.05 ≈
     -- a solid strike, for a data-less drop).
-    gongStrikeNodes id clk anchor (p "beta" (dv "beta")) (litF gRate) full half
+    gongStrikeNodes id clk anchor (p "beta" (dv "beta")) (litOfD gRateD) full half
   | "bloomgong" =>
     -- A pitch-bloomed gong register that stays MODAL to the boundary — so it can
     -- cross a reverb (or a reverb CHAIN) by the residue calculus at the tap
@@ -700,13 +856,14 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     -- wired to a reverb it crosses — including a LIVE-rt60 reverb since WS-LP
     -- (serOnly pairs lift to s0 CplxE of the live pole; region-crossing pairs
     -- drop gracefully per pair until the Phase 3 region-union emit).
-    let t := jFloat params "t" 0.0
+    -- β, g and scale stay `Float` here: they feed `modalSource`'s
+    -- `(Float × Float)` bloom pair, whose type this pass does not reach.
     let beta := jFloat params "beta" 0.05
     let gRate := jFloat params "g" 1.8
     let scale := jFloat params "scale" 1.0
     let modes := jModes params "modes"
     let modes := if modes.isEmpty then (defaultGongModes (jFloat params "freq" 110.0)).1 else modes
-    let anchor := mul (litF t) .sampleRate
+    let anchor := mul (litOfD (jExactD params "t" (0, 0))) .sampleRate
     (.modalSource modes anchor clk none none (some (beta * scale / gRate, gRate)), #[])
   | "string" =>
     -- A plucked string as its diagonalized modal bank — the Karplus-Strong loop
@@ -720,10 +877,12 @@ private def buildNode (pidx : String → Option Nat) (id kind : String)
     -- unlike a delay-line string this one reverses with zero latency.
     let modes := jModes params "modes"
     let modes := if modes.isEmpty
-      then defaultStringModes (jFloat params "freq" 196.0) (jFloat params "decay" 0.996)
+      -- the exact decimals the score wrote, straight through: the loop-transit
+      -- count `N = round(SR/f0)` is decided from them, so a `Float` round trip
+      -- here would put a double rounding upstream of the emitted partial count.
+      then defaultStringModes (jDec params "freq" (196, 0)) (jDec params "decay" (996, 3))
       else modes
-    let t := jFloat params "t" 0.0
-    let anchor := mul (litF t) .sampleRate
+    let anchor := mul (litOfD (jExactD params "t" (0, 0))) .sampleRate
     let addr? := (portSources inObj "addr")[0]?
     (.modalSource modes anchor clk addr?, #[])
   | _ => (.mix (portSources inObj "in"), #[])
@@ -875,19 +1034,45 @@ private def checkServedKinds (raws : Array Raw) : Except String Unit := do
       throw s!"unknown kind: '{r.id}' has kind '{r.kind}', which is not a served node kind — see get_vocabulary for the {vocabularyKinds.size} kinds the surface builds"
   pure ()
 
-/-- Finding-2 agreement: the connection-typing rule is decided at TWO sites.
-    `checkEdgeTypes` colors an outlet through `outletOf`; the lowering decides
-    modal-ness through `nodeIsModal` on the CONSTRUCTED node. Nothing forces them
-    to agree, so a future kind whose `buildNode` returns a modal node but which
-    lacks a modal `outletOf` case would be silently signal-colored — the checker
-    would then reject modal wiring the lowering accepts (or vice-versa). This
-    builds every kind `buildNode` constructs (`buildNodeKinds`, NOT just the
-    served `vocabularyKinds` — so a served-but-unlisted kind like a withheld
-    `bloomgong` is SEEN, not invisible) and reports the kinds where `nodeIsModal`
-    disagrees with `outletOf … == some .modal`. The gate then asserts no SERVED
-    kind drifts; a withheld kind may drift (that drift is why it is withheld —
-    `checkServedKinds` rejects it pre-lowering, so it can never mis-type an edge).
-    (`out` is a dac sink, never built — not in `buildNodeKinds`.) -/
+/-- Gate probe for `exact-playground`, beside `modalClassificationDrift` because
+    it is the same pattern: a public reader of PRIVATE facts, so the gate never
+    has to force a builder public.
+
+    It returns what the SERVED BUILDERS ACTUALLY EMIT — `resonatorBank` and
+    `reverbRoom` are called, not transcribed. An earlier cut of this probe
+    recomputed their expressions inline and compared THAT against `libm`, which
+    tested the transcription and not the emitter; a builder could have been
+    edited out from under it and the differential would have stayed green.
+
+    The libm REFERENCE side deliberately lives one floor out, in the gate. Two
+    reasons, and the second is the load-bearing one: a differential's two sides
+    should not sit in the module under test, and `exact-corpse` reads the
+    GENERATED C of this module, where a reference call to `cos` is
+    indistinguishable from a production one. Keeping the reference out is what
+    lets the corpse gate cover `Playground.lean` with no exemption.
+
+    `f0 = 1, decay = 1` for the resonator and `rt60 = 1` for the room so the
+    live factors fold to identity and each mode's fields fold to exactly the
+    baked coefficient under test. -/
+def bakedResonatorProbe (npart : Nat) : Array ModalMode :=
+  resonatorBank (lit 1) (lit 1) npart
+
+/-- The shipped reverb room's 32 modes over 60…6000 Hz, as emitted. -/
+def bakedReverbProbe (nmode : Nat) : Array ModalMode :=
+  reverbRoom (lit 1) none nmode (60, 0) (6000, 0)
+
+/-- The `ln 80` literal `filterPair` emits — the one authored transcendental
+    constant in the file. This is the SAME `Sig` the builder consumes (one
+    definition, shared), not a second spelling of the formula; `filterPair`'s `q`
+    wraps it in an `expSig`, which `sigConstF?` does not fold, so the constant
+    must be reachable on its own to be observable at all. -/
+def bakedFilterLn80 : Sig := lnEightyLit
+
+/-- Fold an emitted field back to the double it carries (`none` if it did not
+    come out constant — which for these probes is itself a failure the gate
+    reports). -/
+def probeFold (s : Sig) : Option Float := sigConstF? s
+
 def modalClassificationDrift : Array String := Id.run do
   let mut drift : Array String := #[]
   for kind in buildNodeKinds do

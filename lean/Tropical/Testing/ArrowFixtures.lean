@@ -1206,4 +1206,185 @@ def buildPmPmFromGraph (carHz modHz mod2Hz depth1 depth2 : Int)
   let (out, b) := emitTerm (normalize term) {}
   buildVoiceProgram "GraphPmPm" b.decls out arena resolved
 
+-- ── The RETIRED float bake tier — now the oracle, not the compiler ───────────
+-- P3, the corpse removal. These are the `Float` originals of the bake-time
+-- numerics the exact carrier replaced. Not deleted, RELOCATED, and the
+-- distinction is the whole point of the move.
+--
+-- They are gone from the production import graph: no emitted constant, no
+-- emitted array size and no routing verdict reaches them any more. But the
+-- tropicaltest suites call the bake functions rather than reimplementing them,
+-- so deleting these outright would not have made a gate vacuous — it would have
+-- stopped several from compiling, and porting them onto `CplxDI` would have made
+-- the oracle the same carrier as the device under test, which IS vacuity.
+--
+-- Kept here, one floor outside the compiler, they become a genuinely independent
+-- reference: after the flip the DUT is exact arithmetic and the oracle is the
+-- platform's `libm`, which is a STRONGER differential than the campaign had
+-- before it started. The one-way door P3 closes is "the emitted program's shape
+-- depends on libm", not "no libm anywhere in the repo".
+--
+-- `CplxB` itself stays in `Modal.lean`: it is still the plain data type the
+-- depth-loop inputs and `BloomPairPlan` are written in. Only its three
+-- TRANSCENDENTAL methods came here with the functions that used them.
+
+namespace CplxB
+def abs (a : CplxB) : Float := Float.sqrt a.normSq
+def exp (z : CplxB) : CplxB :=
+  let e := Float.exp z.re
+  ⟨e * Float.cos z.im, e * Float.sin z.im⟩
+def log (z : CplxB) : CplxB := ⟨0.5 * Float.log z.normSq, Float.atan2 z.im z.re⟩
+end CplxB
+
+/-- Complex log-gamma: Lanczos (g=7, n=9) on `Re z ≥ ½`, reflection below with
+    `log sin(πz)` taken on the DOMINANT exponential (`s + log(1−e^{−2s})`, so
+    large |Im z| never overflows). Build-time only (the Γ★ bridge). Gated at
+    1.8e-15 against mpmath over the shipped a-range (cockpit D_bg5). -/
+def lgammaB (z : CplxB) : CplxB :=
+  let core : CplxB → CplxB := fun z =>
+    let lanczos : Array Float := #[0.99999999999980993, 676.5203681218851,
+      -1259.1392167224028, 771.32342877765313, -176.61502916214059,
+      12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6,
+      1.5056327351493116e-7]
+    let zz := z.sub ⟨1, 0⟩
+    let x := (Array.range 8).foldl
+      (fun acc i => acc.add (CplxB.div ⟨lanczos[i+1]!, 0⟩ (zz.add ⟨(i+1).toFloat, 0⟩)))
+      ⟨lanczos[0]!, 0⟩
+    let t := zz.add ⟨7.5, 0⟩
+    (((zz.add ⟨0.5, 0⟩).mul (CplxB.log t)).sub t).add
+      ((CplxB.log x).add ⟨0.5 * Float.log (2.0 * 3.141592653589793), 0⟩)
+  if z.re < 0.5 then
+    let pi := 3.141592653589793
+    -- s = ∓iπz picked so e^{s} is the dominant half of sin πz
+    let s : CplxB := if z.im < 0 then ⟨-pi * z.im, pi * z.re⟩ else ⟨pi * z.im, -pi * z.re⟩
+    let log2i : CplxB := if z.im < 0 then ⟨Float.log 2.0, pi / 2.0⟩
+                         else ⟨Float.log 2.0, -pi / 2.0⟩
+    let logsin := (s.add (CplxB.log (CplxB.sub ⟨1, 0⟩ (CplxB.exp (s.scale (-2.0)))))).sub log2i
+    (CplxB.sub ⟨Float.log pi, 0⟩ logsin).sub (core (CplxB.sub ⟨1, 0⟩ z))
+  else core z
+
+/-- `M(1, a+1, z) = 1 + z/(a+1)(1 + z/(a+2)(…))` by forward recurrence —
+    `(value, terms)`. Build-time (the κ-side constant + per-pair depth sizing);
+    the per-sample twin is the fixed-depth Horner in `bloomComposedSig`. Stable
+    for `|a+1| ≳ |z|` (imaginary-dominated a: terms bounded by `(|z|/|a|)ⁿ`). -/
+def bloomM1 (a z : CplxB) (tol : Float := 1e-17) (cap : Nat := 4000) : CplxB × Nat := Id.run do
+  let mut s : CplxB := ⟨1, 0⟩
+  let mut t : CplxB := ⟨1, 0⟩
+  for n in [1:cap] do
+    t := (t.mul z).div (a.add ⟨n.toFloat, 0⟩)
+    s := s.add t
+    if t.abs ≤ tol * (max s.abs 1.0) then return (s, n)
+  return (s, cap)
+
+/-- `CF(z) = Γ(a,z)·eᶻ·z^{−a}` by modified Lentz on the standard continued
+    fraction `1/(z+1−a− 1(1−a)/(z+3−a− 2(2−a)/(…)))` — `(value, depth)`.
+    Build-time (the κ-side constant + per-pair depth sizing); the per-sample
+    twin is the fixed-depth bottom-up fraction in `bloomComposedSig`. Stable
+    for `|z| ≳ |a|` (the sweep-crossing region). -/
+def bloomCF (a z : CplxB) (tol : Float := 1e-15) (cap : Nat := 4000) : CplxB × Nat := Id.run do
+  let tiny := 1e-300
+  let mut b : CplxB := (z.add ⟨1, 0⟩).sub a
+  let mut c : CplxB := ⟨1.0 / tiny, 0⟩
+  let mut d : CplxB := if b.normSq == 0.0 then ⟨tiny, 0⟩ else CplxB.div ⟨1, 0⟩ b
+  let mut h : CplxB := d
+  for i in [1:cap] do
+    let an : CplxB := (⟨i.toFloat, 0⟩ : CplxB).mul (a.sub ⟨i.toFloat, 0⟩)  -- −i(i−a)
+    b := b.add ⟨2, 0⟩
+    d := (an.mul d).add b
+    if d.abs < tiny then d := ⟨tiny, 0⟩
+    c := b.add (an.div c)
+    if c.abs < tiny then c := ⟨tiny, 0⟩
+    d := CplxB.div ⟨1, 0⟩ d
+    let delta := d.mul c
+    h := h.mul delta
+    if (delta.sub ⟨1, 0⟩).abs ≤ tol then return (h, i)
+  return (h, cap)
+
+/-- `Γ★ = Γ(a)·κ^{−a}·e^{κ}/g` — the d-constant bridge between the two envelope
+    branches, computed in the EXPONENT (`exp(lgamma(a) − a·log κ + κ)/g`) where
+    the `e^{±π|Im a|/2}` blowups of `Γ(a)` and `κ^{−a}` cancel, so the value is
+    moderate. Build-time only. -/
+def bloomGammaStar (a kappa : CplxB) (g : Float) : CplxB :=
+  (CplxB.exp (((lgammaB a).sub (a.mul (CplxB.log kappa))).add kappa)).scale (1.0 / g)
+
+/-- Build-time complex `(eᶻ−1)/z` (the divided difference of `exp` at 0, limit 1),
+    the stable branch for small `|z|` via the 7-term series `Σ zᵏ/(k+1)!`, direct
+    otherwise. The `CplxB` twin of `cexpm1SeriesE`. -/
+def cexpm1B (z : CplxB) : CplxB :=
+  if z.normSq < 0.01 then
+    let step := fun (ck : Float) (acc : CplxB) => (⟨ck, 0⟩ : CplxB).add (z.mul acc)
+    step 1.0 (step (1.0/2.0) (step (1.0/6.0) (step (1.0/24.0)
+      (step (1.0/120.0) (step (1.0/720.0) ⟨1.0/5040.0, 0⟩)))))
+  else (CplxB.exp z).sub ⟨1, 0⟩ |>.div z
+
+/-- The coincident series-DD coefficients `dₙ = (n·dₙ₋₁ − fₙ₋₁)/(n(a+n))`, `d₀ = 0`,
+    `fₙ = 1/n!` — the a-divided-difference of `M(1,a+1,·)` against `eˣ`
+    (`Φ(a,x) = Σ_{n≥1} dₙ xⁿ = (M_a(x)−eˣ)/a`). An EXACT rational recurrence: no
+    `1/a` is ever formed (the singularity is removed analytically), so it is finite
+    at `a = 0` (`dₙ → −Hₙ/n!`, `Hₙ` harmonic). The coincidence twin of `invA`;
+    per-sample Horner over `z(d)` on the small-`z` (deep-tail) branch. -/
+def bloomDCoef (aC : CplxB) (n : Nat) : Array CplxB := Id.run do
+  let mut out : Array CplxB := #[]
+  let mut dprev : CplxB := ⟨0, 0⟩   -- d₀
+  let mut fprev : CplxB := ⟨1, 0⟩   -- f₀ = 1/0!
+  for k in [1:n+1] do
+    let kf := k.toFloat
+    let dk := ((dprev.scale kf).sub fprev).div ((⟨kf, 0⟩ : CplxB).mul (aC.add ⟨kf, 0⟩))
+    out := out.push dk
+    dprev := dk
+    fprev := fprev.scale (1.0 / kf)   -- fₖ = fₖ₋₁/k
+  return out
+
+/-- `Φ(a,κ)/g` — the d-CONSTANT of the coincident branch's `e^{νd}` carrier. TWO
+    regimes, the same duality as the per-sample branches (the `Σ dₙκⁿ` sum and the
+    closed form are float-representable on opposite sides):
+    - `|κ| ≥ |a+1|` (shipped partials, |κ| up to ~178): the pole-FREE `lgamma(a+1)`
+      bridge `Φ(a,κ) = e^κ·cexpm1(w)·(w/a) − CF(κ)`, `w = lgamma(a+1) − a·log κ`
+      (identity `M_a(κ) = Γ(a+1)κ^{−a}e^κ − a·CF(κ)`; `w/a = lgamma(a+1)/a − log κ`,
+      → `−γ` at `a → 0`, guarded). The `Σ dₙκⁿ` sum is D_bg3-dead here.
+    - `|κ| < |a+1|` (subtle bloom / low partials): the bridge's two `κ^{−Re a}` terms
+      CATASTROPHICALLY CANCEL to the tiny `Φ(a,κ) ≈ −κ/(a+1)` (relerr cliffs past
+      100% by |κ|~0.01), so use the DIRECT sum `Σ dₙκⁿ` — machine-accurate here and
+      float-SAFE (|κ| bounded), and `dCoef` is sized at `|a+1| ≥ |κ|`, enough terms.
+    `cfK = CF(κ)` reuses the crossing branch's `bloomCF`. Build-time only. -/
+def bloomPhiKappaOverG (aC kappa cfK : CplxB) (dCoef : Array CplxB) (g : Float) : CplxB :=
+  if kappa.abs < (aC.add ⟨1, 0⟩).abs then
+    (kappa.mul (dCoef.foldr (fun dk acc => dk.add (kappa.mul acc)) ⟨0, 0⟩)).scale (1.0 / g)
+  else
+    let euler : Float := 0.5772156649015329
+    let laOverA : CplxB :=
+      if aC.normSq < 1e-12 then ⟨-euler, 0⟩ else (lgammaB (aC.add ⟨1, 0⟩)).div aC
+    let waOverA := laOverA.sub (CplxB.log kappa)
+    let w := aC.mul waOverA
+    ((((CplxB.exp kappa).mul (cexpm1B w)).mul waOverA).sub cfK).scale (1.0 / g)
+
+/-- The general-a a-divided-difference coefficients `Qₙ` (WS-DDF): `DDa(M(1,a+1,·))
+    = Σ_{n≥1} Qₙ xⁿ`, the divided difference over two nearby a-values `a1, a2`
+    (`aⱼ = (νⱼ−μ)/g` for a near-coincident ROOM pair). The stable recurrence never
+    forms `M(a1)−M(a2)`:
+      `Qₙ = Qₙ₋₁/(a2+n) − Pₙ₋₁/((a1+n)(a2+n))`, `Q₀ = 0`, `Pₙ = Pₙ₋₁/(a1+n)`, `P₀ = 1`.
+    → `−Pₙ·Hₙ` (the a-derivative) at `a1 = a2`. The WS-DDF sibling of `bloomDCoef`
+    (the a≈0, differ-against-`eˣ` instance); this is the general-a form for the
+    room-chain FOLD's divided difference. Cockpit `demos/modal_ddfold.py` (D_df3,
+    float64 vs mpmath ~8e-14). -/
+def bloomFoldQCoef (a1 a2 : CplxB) (n : Nat) : Array CplxB := Id.run do
+  let mut out : Array CplxB := #[]
+  let mut pPrev : CplxB := ⟨1, 0⟩   -- P₀
+  let mut qPrev : CplxB := ⟨0, 0⟩   -- Q₀
+  for k in [1:n+1] do
+    let kf := k.toFloat
+    let a1k := a1.add ⟨kf, 0⟩
+    let a2k := a2.add ⟨kf, 0⟩
+    let qk := (qPrev.div a2k).sub (pPrev.div (a1k.mul a2k))
+    out := out.push qk
+    pPrev := pPrev.div a1k
+    qPrev := qk
+  return out
+
+/-- `DDa(M(1,a+1,x)) = Σ_{n≥1} Qₙ xⁿ = x·Horner(Q)` over the baked `Qₙ`
+    (`bloomFoldQCoef`) — build-time at `x = κ` (the `ddK1` constant), per-sample at
+    `x = z(d)` in the realizer. -/
+def bloomFoldDDaM (qcoef : Array CplxB) (x : CplxB) : CplxB :=
+  x.mul (qcoef.foldr (fun q h => q.add (x.mul h)) ⟨0, 0⟩)
+
 end Tropical.EmitArrow
