@@ -37,6 +37,9 @@ final class PatchModel: ObservableObject {
     @Published var pan: CGSize = .zero
     /// When on, every topology edit re-runs the rank layout.
     @Published var autoArrange = false
+    /// The file this patch came from / saves to (nil = never saved). Drives
+    /// the window title and whether ⌘S needs to ask.
+    @Published var documentURL: URL?
 
     /// Sources an inlet may legally take — the connection UI shows ONLY
     /// these (the type discipline enforced by omission: control inlets
@@ -91,6 +94,18 @@ final class PatchModel: ObservableObject {
 
     let engine: Engine
     private var counter = 0
+
+    // Node ids are "<kind><n>" and must stay unique for the lifetime of a
+    // patch — a loaded file carries ids the counter has never issued, so the
+    // counter resumes past the highest one rather than restarting at 0.
+    func adoptCounter(from ids: some Sequence<String>) {
+        counter = ids.reduce(0) { hi, id in
+            max(hi, Int(id.drop(while: { !$0.isNumber })) ?? 0)
+        }
+    }
+
+    func resetCounter() { counter = 0 }
+
     private var pushTask: Task<Void, Never>?
     private var pushInFlight = false
     private var pushAgain = false
@@ -108,8 +123,7 @@ final class PatchModel: ObservableObject {
         AppDelegate.onTerminate = { [engine] in engine.terminateChild() }
 
         startEngine()
-        addNode(.out, at: CGPoint(x: 1180, y: 360))
-        addNode(.source, at: CGPoint(x: 120, y: 200))
+        seedBootPatch()
         setStatus("engine up · patch something", isError: false)
         startScopePolling()
     }
@@ -139,6 +153,12 @@ final class PatchModel: ObservableObject {
     func setStatus(_ text: String, isError: Bool) {
         status = text
         statusIsError = isError
+    }
+
+    /// The patch you start with, and the one `New Patch` returns to.
+    func seedBootPatch() {
+        addNode(.out, at: CGPoint(x: 1180, y: 360))
+        addNode(.source, at: CGPoint(x: 120, y: 200))
     }
 
     // ── Node lifecycle ───────────────────────────────────────────────────
