@@ -2,7 +2,7 @@
 
 The MCP stack. The production server is the **Lean `frontend` binary**
 (`lean/.lake/build/bin/frontend`) — it is the whole stack: session,
-registration, compiler (raise → elaborate → strata → emit →
+registration, compiler (raise → elaborate → lower → emit →
 partition), runtime FFI, save/export/load/merge, resources/prompts.
 There is no compiler-service subprocess and no TypeScript engine; the
 former `engine.ts` / `ir_service.ts` / `resources.ts` / `envelope.ts`
@@ -61,12 +61,13 @@ SessionState
   → runtime.loadPlan  (C API: NumericProgramParser → OrcJitEngine → FlatRuntime hot-swap)
 ```
 
-The strata pipeline (`assertAcyclic → specialize → sumLower →
-inlineInstances → arrayLower → identityElim`) runs per-instance at
-instance-type resolution. (`specialize` — the old generic-monomorphization
-pass — is inert now: no program declares type parameters, so it
-substitutes nothing and drops nothing. It stays in the chain as an
-identity pass.) tropical is closed-form-only: every kernel is
+The direct lowering (`assertAcyclic → inlineInstances → identityElim`
+→ the `toResolved` Core check) runs per-instance at instance-type
+resolution. (The old five-pass strata drop sequence was retired
+2026-07-25 — its producers, the literate surface language and
+generics, are gone; a loaded file spelling `fold`/`tag`/… is refused
+at the Core check with the retirement message.) tropical is
+closed-form-only: every kernel is
 a pure `f(τ, params)` with no per-sample state, so there is nothing to
 break a cycle around. `assertSessionAcyclic` is therefore a plain "no
 cycles at all" rule — inter-instance cycles are rejected outright, and
@@ -89,7 +90,7 @@ The engine owns one `SessionState`. The fields tools read and mutate:
   programs) and by any concrete definitions carried inline in a loaded
   `tropical_program_2` file.
 - `programs` — the registry of every registered program. Concrete
-  only (post-strata, `typeParams = []`): there are no generic
+  only (lowered, `typeParams = []`): there are no generic
   templates. New DSP types are authored as `Tropical.Stdlib` arrow
   builders in Lean, not registered over the wire.
 - `instanceRegistry` — live instances.
@@ -217,7 +218,7 @@ The four fail-shapes:
   types/required-ness/bounds.
 - predicate — domain check failed (e.g. range, ordering).
 
-`compile_failed` carries the strata or emit error verbatim in
+`compile_failed` carries the lowering or emit error verbatim in
 `message` and is `retryable: true` — the previous kernel keeps
 playing while the agent edits and retries.
 

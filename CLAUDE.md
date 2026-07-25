@@ -78,18 +78,18 @@ is the cartesian product, sequential composition is graph wiring,
 feedback is forbidden at the source-language layer (any cycle in source
 code throws `CycleViolation` at the elaborator — there is no `reg`/`delay`
 escape hatch; recursive filtering of live/external input is the ceded
-island, deferred to a future stateful sister runtime). The strata
-pipeline is what makes
-this concrete: each pass takes a graph, retires some structure that's
-already been consumed, and hands the next pass a smaller graph in the
-same category. Backends interpret the final, fully-reduced graph into
-different runtime targets.
+island, deferred to a future stateful sister runtime). The lowering is
+what makes this concrete — and it is DIRECT, not a pipeline: the
+authoring surface (`Sig`, fourteen constructors) is already the trunk
+IR, so there is nothing left to progressively retire. The historical
+five-pass strata drop sequence (specialize → sumLower →
+inlineInstances → arrayLower → identityElim) was retired 2026-07-25:
+four of the five passes had no live producer for the structure they
+existed to erase — the literate surface parser and generics that
+produced it are gone, and `Sig` cannot spell it (a type-level fact).
+Backends interpret the lowered graph into different runtime targets.
 
-In practical terms, every pass under `lean/Tropical/Parse/` and
-`lean/Tropical/Ir/` is structure-preserving — it produces an IR that's
-strictly poorer than its input, where the dropped structure is something
-the next pass doesn't have to reason about. Reading the pipeline from
-top to bottom:
+Reading the path from top to bottom:
 
 ```
 arrow-combinator builders (Tropical.Stdlib / EmitArrow)  ·  MCP patch graphs  ·  tropical_program_2 JSON (load / export)
@@ -117,35 +117,43 @@ ResolvedProgram (lean/Tropical/Ir/Nodes.lean)
   there is no IR node for them and no way to author one; recursive
   feedback is the ceded island, deferred to a future stateful sister runtime.)
   │
-  │  strata pipeline (lean/Tropical/Ir/Strata.lean,
-  │                   passes under lean/Tropical/Ir/Strata/):
+  │  the direct lowering (lean/Tropical/Ir/Strata.lean — two named
+  │  rewrites and a type boundary, not a pass pipeline):
   │  ────────────────────────────────────────
   │   assertAcyclic    — confirms the caller honored the contract
-  │   specialize       — INERT: generics retired, so it substitutes nothing;
-  │                      stays as an identity pass  (Specialize.lean)
-  │   sumLower         — drops sum types (variants → tag + scalar bundles)  (SumLower.lean)
-  │   inlineInstances  — drops nesting (inner bodies lifted in place)  (InlineInstances.lean)
-  │   arrayLower       — drops shapes and combinators (scan/generate/let/etc.
-  │                      unroll; a SUMMING fold survives as `bankSum`, the
-  │                      bounded indexed reduction — loop-everything;
-  │                      `TROPICAL_BANKS_UNROLL` reverts)  (ArrayLower.lean)
-  │   identityElim     — categorical identity-law rewrite  (IdentityElim.lean)
+  │   inlineInstances  — OPTIONAL (opts.inlineNested): inner bodies lifted
+  │                      in place; the fractal session path skips it and
+  │                      keeps instances as kernel boundaries  (InlineInstances.lean)
+  │   identityElim     — categorical identity-law peephole  (IdentityElim.lean)
+  │   toResolved       — the type boundary (Strata/EArena.lean): reify the
+  │                      reachable graph into the emit's CoreArena,
+  │                      REFUSING every retired constructor. A JSON file
+  │                      can still SPELL fold/scan/generate/tag/match/let
+  │                      (raise parses them); nothing lowers them any
+  │                      more, so they die here with the retirement
+  │                      message. Combinator programs are authored in
+  │                      Lean — the host language is the meta-level
+  │                      (Array.map builds coefficient tables at
+  │                      assemble time); only structure a backend wants
+  │                      AS DATA earns an IR node, the way `bankSum` did.
   ▼
-ResolvedProgram (post-strata)
-  scalar-only · monomorphic · acyclic · non-nested · DECISION-FREE:
-  every combinator is retired except `bankSum`, the bounded reduction
-  that is itself the normal form for uniform indexed families (modal
-  banks, reverbs, partial banks — and any summing fold in a loaded
-  program). How to REALIZE it — loop vs unroll — is a backend's decision,
-  made below this seam; the trunk refuses it. Order preservation makes
-  every realization bit-identical, floats included (no associativity
-  precondition). The waist of the hourglass, not the end of the
-  pipeline: the smallest sub-IR sufficient for any per-sample evaluator.
+ResolvedProgram (lowered)
+  scalar-only · monomorphic · acyclic · non-nested (inline path) ·
+  DECISION-FREE: no combinator exists except `bankSum`, the bounded
+  reduction that is itself the normal form for uniform indexed families
+  (modal banks, reverbs, partial banks). How to REALIZE it — loop vs
+  unroll — is a backend's decision, made below this seam; the trunk
+  refuses it. Order preservation makes every realization bit-identical,
+  floats included (no associativity precondition). The waist of the
+  hourglass: the smallest sub-IR sufficient for any per-sample
+  evaluator — and, because `Sig` is this same constructor set, the
+  authoring layer and the trunk are ONE vocabulary with the elaborate/
+  assemble seam between them.
 ```
 
 Sessions (the MCP/runtime view of a graph in flight) reuse the
 per-program pipeline at the instance level — each instance type is
-strata-processed once at load — and build the whole session
+lowered once at load — and build the whole session
 **directly into one synthetic root `ResolvedProgram`**
 (`sessionToResolvedRoot`, no ParsedProgram round-trip), lowered
 through the same fractal path:
@@ -154,7 +162,7 @@ through the same fractal path:
 SessionState  (instances + wiring + dac.out + params)
   │
   │  compileSession (engine-side: lean/Tropical/{Engine,Compile,Lowering,Wiring}.lean)
-  │     each instance is already a post-strata ResolvedProgram;
+  │     each instance is already a lowered ResolvedProgram;
   │     liftWiresToInstances normalizes the wiring;
   │     then the slotted root-program lowering:
   │       sessionToResolvedRoot: the session graph is already
@@ -177,16 +185,16 @@ mutations or hand-written JSON) is a compile error, not a one-sample
 feedback path. Recursive feedback on live/external input is the ceded
 island, deferred to a future stateful sister runtime.
 
-## What sits below post-strata
+## What sits below the waist
 
-Two *backends* consume the post-strata IR (as `tropical_plan_5`). They
+Two *backends* consume the lowered IR (as `tropical_plan_5`). They
 are not further compiler stages — they are interpretations of the same
 fully-reduced plan into different targets, and the surviving equivalence
 suite (wasm vs. JIT) plus the frozen audio goldens assert they
 agree pointwise.
 
 ```
-post-strata ResolvedProgram (per-program path)  /  SessionState (session path)
+lowered ResolvedProgram (per-program path)  /  SessionState (session path)
         │
         ├─→ compileSession (engine-side: lean/Tropical/{Engine,Compile,Lowering,Wiring}.lean)
         │      liftWiresToInstances →
@@ -254,7 +262,7 @@ backends and the JIT's own realization variants to those goldens:
   equivalence *within* the JIT (fused vs. per-instance microkernel,
   flat vs. nested), driven directly through the engine.
 
-Any disagreement is a strata or backend bug. The former
+Any disagreement is a lowering or backend bug. The former
 `make diff-*` differential harness (Lean-vs-TS) is gone along with the
 TS implementation; there are no longer differential gates.
 
@@ -268,7 +276,11 @@ Two distinct JSON schemas; do not confuse them.
 | `tropical_plan_5`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: a root instruction stream (instances nested as `children`) plus `sinks[]` (device-bound outputs: sum input slots × gain → channel) and `sources[]` (runtime-bound inputs: canonical `[tick, rate]`; the dual of sinks). The engine consumes it as the codegen manifest; the web build derives a `.wasm` + a trimmed `KernelManifest` from it. The engine still accepts the older `tropical_plan_4` (single-kernel form, top-level `output_targets` temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 with the canonical sources at parse time. |
 
 Going from the first to the second without losing meaning is exactly
-what the strata pipeline does.
+what the direct lowering does (elaborate → inline → identityElim →
+toResolved → partitionKernel). A `tropical_program_2` file that spells
+a retired construct (`fold`/`scan`/`generate`/`tag`/`match`/`let`)
+parses but refuses to compile at the `toResolved` boundary — nothing
+lowers combinators or sum types any more.
 
 ## Layout
 
@@ -286,9 +298,9 @@ lean/                 Lean 4: the production compiler + MCP server (one binary)
                         BoundLower, OrderedJson  (the literate .md surface parser is retired)
     Stdlib.lean       the stdlib as 15 arrow-combinator builders — the boot chain
     EmitArrow/        the arrow authoring substrate (Sig, Term, Numerics, Patch, Modal, Gong)
-    Ir/               elaborate → strata → emit
+    Ir/               elaborate → lower → emit
       Elaborator.lean   names → decl pointers; CycleViolation on cyclic source
-      Strata.lean + Strata/{Specialize,SumLower,InlineInstances,ArrayLower,IdentityElim}
+      Strata.lean (the direct lowering) + Strata/{Basic,EArena,InlineInstances,IdentityElim}
       Core, Nodes, Emit, CompileResolved, Codec, WireProgram, Recursion
     Engine, Session, Compile, Lowering, Wiring   engine-side session compile
     Plan.lean         tropical_plan_5 schema

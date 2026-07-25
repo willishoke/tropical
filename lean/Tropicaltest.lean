@@ -44,7 +44,7 @@ open Tropical.Ir (Arena ProgramIdx)
     reported as the total collapse it is; the `arrow-block-count` gate at the end
     of `main` checks the number against what the block actually ran, so it is
     verified rather than maintained. -/
-def arrowBlockGates : Nat := 96
+def arrowBlockGates : Nat := 94
 
 set_option maxRecDepth 1024 in
 def main (args : List String) : IO UInt32 := do
@@ -165,8 +165,11 @@ def main (args : List String) : IO UInt32 := do
     -- not maintained by hand: `arrow-block-count` below compares it against the
     -- number of gates the block ACTUALLY ran on the success path, so adding a
     -- gate and forgetting this number is a red suite, not a silent drift.
-    -- (It said 13 from the day the block held 13 gates until 2026-07-24, by
-    -- which point the block held 96.)
+    -- (It said 13 from the day the block held 13 gates until 2026-07-25, by
+    -- which point the block held 96. The check earned its keep immediately: the
+    -- very next merge — the strata retirement, which dropped three banks gates
+    -- and added one — moved the block to 94 and turned this red, which is
+    -- exactly the drift the hardcoded number had been hiding for however long.)
     total := total + arrowBlockGates; failed := failed + arrowBlockGates
   | .ok (arena, resolved) =>
     arrowRan := true
@@ -354,19 +357,13 @@ def main (args : List String) : IO UInt32 := do
     if !(← runBanksFloat arena resolved) then
       failed := failed + 1
     total := total + 1
-    if !(← runBanksFoldTrunk arena resolved) then
-      failed := failed + 1
-    total := total + 1
-    if !(← runBanksColumnize arena resolved) then
+    if !(← runRetiredFrontDoor arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runBanksNested arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runBanksNestedMsl arena resolved) then
-      failed := failed + 1
-    total := total + 1
-    if !(← runBanksColumnizeBail arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runStrikeComb arena resolved) then

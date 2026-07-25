@@ -25,109 +25,101 @@ private def reduceDelims (p : Tropical.Plan.FlatPlan) : Array String := Id.run d
           out := out.push i.tag
   return out
 
-/-- THE NESTED-BANKS gate (WS5): a fold-of-folds through the FULL front door
-    (raise → elaborate → strata → emit) — Σᵢ aᵢ·Σⱼ(bⱼ + aᵢ), the Cauchy shape:
-    the inner body reads the OUTER element, so the outer-index read
-    `index(col_a, loopIdx outer)` appears BOTH inside the inner region (in the
-    contribution) and outside it (the aᵢ· factor) as ONE hash-consed DAG node —
-    exactly what makes unique binder ids load-bearing (de Bruijn spellings
-    would fork it). Asserts: exactly 2 reduce regions, properly NESTED in the
-    stream (RB RB RE RE); byte-equal to the hand-unrolled reference over 2048
-    samples; plan FLAT in BOTH trip counts ((4,4) → (16,16), Δ ≤ 2 — HARD).
-    Under TROPICAL_BANKS_UNROLL the whole ladder reverts (0 regions) and still
-    matches byte-equal. -/
-def runBanksNested (_arena : Arena)
+open Tropical.EmitArrow in
+/-- The nested-banks probe: Σᵢ aᵢ·Σⱼ(bⱼ + aᵢ), the Cauchy shape, authored
+    DIRECTLY as nested `Sig.bankSum` regions (unique binder ids 0/1 along
+    the nesting chain — the JSON fold-of-folds spelling left with the fold
+    lowering). The inner body reads the OUTER element: `index(col_a,
+    loopIdx 0)` appears BOTH inside the inner region (in the contribution)
+    and outside it (the aᵢ· factor) as ONE hash-consed DAG node — exactly
+    what makes unique binder ids load-bearing (de Bruijn spellings would
+    fork it). -/
+private def nestedBankProbe (k1 k2 : Nat) : Sig :=
+  let aL (i : Nat) : Sig := lit (Int.ofNat (31 + 7 * i)) 2   -- aᵢ = 0.31 + 0.07·i
+  let bL (j : Nat) : Sig := lit (Int.ofNat (11 + 5 * j)) 2   -- bⱼ = 0.11 + 0.05·j
+  let colA := Sig.arr ((Array.range k1).map aL)
+  let colB := Sig.arr ((Array.range k2).map bL)
+  let aElem := Sig.index colA (Sig.loopIdx 0)
+  let bElem := Sig.index colB (Sig.loopIdx 1)
+  let inner := Sig.bankSum k2 #[colB] (add bElem aElem) none 1
+  Sig.bankSum k1 #[colA] (mul aElem inner) none 0
+
+open Tropical.EmitArrow in
+/-- The probe's hand-unrolled reference, in the reduce loop's own visit
+    order: ((0 + a₀·S₀) + a₁·S₁) + … with Sᵢ = ((0 + (b₀+aᵢ)) + (b₁+aᵢ)) + …. -/
+private def nestedBankUnrolled (k1 k2 : Nat) : Sig :=
+  let aL (i : Nat) : Sig := lit (Int.ofNat (31 + 7 * i)) 2
+  let bL (j : Nat) : Sig := lit (Int.ofNat (11 + 5 * j)) 2
+  (Array.range k1).foldl (fun acc i =>
+    let s := (Array.range k2).foldl (fun a j => add a (add (bL j) (aL i))) (lit 0)
+    add acc (mul (aL i) s)) (lit 0)
+
+open Tropical.EmitArrow in
+/-- THE NESTED-BANKS gate (WS5): the nested-`bankSum` probe must emit exactly
+    2 reduce regions, properly NESTED in the stream (RB RB RE RE); render
+    byte-equal to the hand-unrolled reference over 2048 samples; stay FLAT in
+    BOTH trip counts ((4,4) → (16,16), Δ ≤ 2 — HARD); and the TYPED Stage0
+    split (the production golden render path — depth-counted `findRegionEnd`,
+    outermost-only `tryRegion`) must traverse the nested delimiters and still
+    render byte-equal. (`TROPICAL_BANKS_UNROLL` does not apply: the flag
+    governs the modal BUILDER's lowering choice; a hand-authored `bankSum`
+    is always a region.) -/
+def runBanksNested (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
-  let mulJ (a b : Lean.Json) : Lean.Json :=
-    Lean.Json.mkObj [("op", Lean.Json.str "mul"), ("args", Lean.Json.arr #[a, b])]
-  -- inner: fold over [b₀..b_{k2-1}] of acc2 + (f + aElem) — aElem is the
-  -- OUTER element expression (binding "e" on the fold path; the literal aᵢ
-  -- on the unrolled reference path).
-  let innerFold (aElem : Lean.Json) (k2 : Nat) : Lean.Json :=
-    Lean.Json.mkObj [("op", Lean.Json.str "fold"),
-      ("over", Lean.Json.arr ((Array.range k2).map cgB)),
-      ("init", cgJn 0 0), ("acc_var", Lean.Json.str "acc2"), ("elem_var", Lean.Json.str "f"),
-      ("body", cgAdd (cgBinding "acc2") (cgAdd (cgBinding "f") aElem))]
-  let foldExpr (k1 k2 : Nat) : Lean.Json :=
-    cgFold (Lean.Json.arr ((Array.range k1).map cgA))
-      (cgAdd (cgBinding "acc") (mulJ (cgBinding "e") (innerFold (cgBinding "e") k2)))
-  -- The fold's own nesting order, hand-unrolled: ((0 + a₀·S₀) + a₁·S₁) + …
-  -- with Sᵢ = ((0 + (b₀+aᵢ)) + (b₁+aᵢ)) + …
-  let unrollExpr (k1 k2 : Nat) : Lean.Json :=
-    (Array.range k1).foldl (fun acc i =>
-      let s := (Array.range k2).foldl (fun a j => cgAdd a (cgAdd (cgB j) (cgA i))) (cgJn 0 0)
-      cgAdd acc (mulJ (cgA i) s)) (cgJn 0 0)
-  match ← compileFoldProbe (foldExpr 4 4) "nested-f4", ← compileFoldProbe (unrollExpr 4 4) "nested-u4" with
+  let fPlan := buildAndFinish (.ok (buildExprCarrier "nested_f4" (nestedBankProbe 4 4) arena))
+  let uPlan := buildAndFinish (.ok (buildExprCarrier "nested_u4" (nestedBankUnrolled 4 4) arena))
+  match fPlan, uPlan with
   | .ok fp, .ok up =>
     match ← renderPlanSamples fp 2048, ← renderPlanSamples up 2048 with
     | .ok fS, .ok uS =>
       let n := min fS.size uS.size
       let bitDiff := bitDiffCount fS uS
       let nonzero := fS.any (· != 0.0)
-      match ← compileFoldProbe (foldExpr 16 16) "nested-f16" with
+      match buildAndFinish (.ok (buildExprCarrier "nested_f16" (nestedBankProbe 16 16) arena)) with
       | .ok f16 =>
         let d := planInstrCount f16 - planInstrCount fp
         let regions := planTagCount "ReduceBegin" fp
         let delims := reduceDelims fp
         let nested := delims == #["ReduceBegin", "ReduceBegin", "ReduceEnd", "ReduceEnd"]
-        let looping := Tropical.Ir.Strata.ArrayLower.banksLoopEnabled
-        IO.println s!"        fold-of-folds Σᵢ aᵢ·Σⱼ(bⱼ+aᵢ) (K=4,4), inner body reads the OUTER element (loop-everything={looping}):"
+        IO.println s!"        bank-of-banks Σᵢ aᵢ·Σⱼ(bⱼ+aᵢ) (K=4,4), inner body reads the OUTER element:"
         IO.println s!"        result   bit-differing {bitDiff}/{n} vs hand-unrolled · nonzero={nonzero} · regions={regions} · delims={delims}"
-        IO.println s!"        payoff   plan-instrs: fold(4,4)={planInstrCount fp} unrolled(4,4)={planInstrCount up} fold(16,16)={planInstrCount f16} (Δ={d})"
-        if looping then
-          warnBenchConst "banks-nested" "nested-fold plan-instrs (any K)" 14 (planInstrCount fp)
-          -- The TYPED Stage0 split (the production golden render path) must
-          -- traverse the nested delimiters — depth-counted `findRegionEnd`,
-          -- outermost-only `tryRegion` — and still render byte-equal.
-          let stagedOk ← do
-            match ← compilePatchStaged "/tmp/tropicaltest-columnize-nested-f4.json",
-                  ← compilePatchStaged "/tmp/tropicaltest-columnize-nested-u4.json" with
-            | .ok (pf, bf), .ok (pu, bu) =>
-              let sf ← renderTypedBytes pf bf
-              let su ← renderTypedBytes pu bu
-              pure (sf == su)
-            | .error e, _ | _, .error e =>
-              IO.println s!"        staged   compile failed: {firstLine e}"; pure false
-          IO.println s!"        staged   typed-split render byte-equal to unroll: {stagedOk}"
-          if bitDiff == 0 && nonzero && regions == 2 && nested && d ≤ 2 && stagedOk then
-            passGate "banks-nested" s!"fold-of-folds banks as NESTED regions (RB RB RE RE), byte-equal to unroll (plain + typed split), plan FLAT in both counts (Δ={d} ≤ 2, (4,4)→(16,16))"
-          else
-            failGate "banks-nested" s!"bitDiff={bitDiff} nonzero={nonzero} regions={regions} nested={nested} Δ={d} stagedOk={stagedOk}"
+        IO.println s!"        payoff   plan-instrs: nested(4,4)={planInstrCount fp} unrolled(4,4)={planInstrCount up} nested(16,16)={planInstrCount f16} (Δ={d})"
+        warnBenchConst "banks-nested" "nested-bank plan-instrs (any K)" 14 (planInstrCount fp)
+        -- The TYPED Stage0 split must traverse the nested delimiters and
+        -- still render byte-equal.
+        let stagedOk ← do
+          match buildAndFinishStaged (.ok (buildExprCarrier "nested_f4s" (nestedBankProbe 4 4) arena)),
+                buildAndFinishStaged (.ok (buildExprCarrier "nested_u4s" (nestedBankUnrolled 4 4) arena)) with
+          | .ok (pf, bf), .ok (pu, bu) =>
+            let sf ← renderTypedBytes pf bf
+            let su ← renderTypedBytes pu bu
+            pure (sf == su)
+          | .error e, _ | _, .error e =>
+            IO.println s!"        staged   compile failed: {firstLine e}"; pure false
+        IO.println s!"        staged   typed-split render byte-equal to unroll: {stagedOk}"
+        if bitDiff == 0 && nonzero && regions == 2 && nested && d ≤ 2 && stagedOk then
+          passGate "banks-nested" s!"bank-of-banks emits NESTED regions (RB RB RE RE), byte-equal to unroll (plain + typed split), plan FLAT in both counts (Δ={d} ≤ 2, (4,4)→(16,16))"
         else
-          if bitDiff == 0 && nonzero && regions == 0 && d > 2 then
-            passGate "banks-nested" s!"escape hatch reverts: the whole ladder unrolls (0 regions, Δ={d} grows), byte-equal"
-          else
-            failGate "banks-nested" s!"(unroll mode) bitDiff={bitDiff} nonzero={nonzero} regions={regions} Δ={d}"
+          failGate "banks-nested" s!"bitDiff={bitDiff} nonzero={nonzero} regions={regions} nested={nested} Δ={d} stagedOk={stagedOk}"
       | .error e =>
-        failGate "banks-nested" s!"scaling compile: {firstLine e}"
+        failGate "banks-nested" s!"scaling build: {firstLine e}"
     | .error e, _ | _, .error e => failGate "banks-nested" s!"render: {firstLine e}"
-  | .error e, _ | _, .error e => failGate "banks-nested" s!"compile: {firstLine e}"
+  | .error e, _ | _, .error e => failGate "banks-nested" s!"build: {firstLine e}"
 
+open Tropical.EmitArrow in
 /-- THE NESTED-BANKS MSL gate: EmitMsl on the nested plan emits two reduce
     `for` loops, the second opening strictly INSIDE the first (text-level
     depth scan: reduce-for lines push, brace-only lines pop; the probe's body
     is scalar-only, so no other construct emits a bare closing brace before
-    the loops close). Under TROPICAL_BANKS_UNROLL the kernel has no reduce
-    loop at all. -/
-def runBanksNestedMsl (_arena : Arena)
+    the loops close). -/
+def runBanksNestedMsl (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
-  let mulJ (a b : Lean.Json) : Lean.Json :=
-    Lean.Json.mkObj [("op", Lean.Json.str "mul"), ("args", Lean.Json.arr #[a, b])]
-  let innerFold (aElem : Lean.Json) (k2 : Nat) : Lean.Json :=
-    Lean.Json.mkObj [("op", Lean.Json.str "fold"),
-      ("over", Lean.Json.arr ((Array.range k2).map cgB)),
-      ("init", cgJn 0 0), ("acc_var", Lean.Json.str "acc2"), ("elem_var", Lean.Json.str "f"),
-      ("body", cgAdd (cgBinding "acc2") (cgAdd (cgBinding "f") aElem))]
-  let foldExpr : Lean.Json :=
-    cgFold (Lean.Json.arr ((Array.range 4).map cgA))
-      (cgAdd (cgBinding "acc") (mulJ (cgBinding "e") (innerFold (cgBinding "e") 4)))
-  match ← compileFoldProbe foldExpr "nested-msl" with
-  | .error e => failGate "banks-nested-msl" s!"compile: {firstLine e}"
+  match buildAndFinish (.ok (buildExprCarrier "nested_msl" (nestedBankProbe 4 4) arena)) with
+  | .error e => failGate "banks-nested-msl" s!"build: {firstLine e}"
   | .ok fp =>
     match Tropical.Ir.EmitMsl.emitKernel fp with
     | .error e => failGate "banks-nested-msl" s!"EmitMsl: {firstLine e}"
     | .ok msl =>
-      let looping := Tropical.Ir.Strata.ArrayLower.banksLoopEnabled
       -- Depth scan over the kernel text: a reduce-for line opens a loop, a
       -- brace-only line closes one. Record the open depth at each reduce-for.
       let mut depth : Nat := 0
@@ -139,16 +131,10 @@ def runBanksNestedMsl (_arena : Arena)
           depth := depth + 1
         else if t == "}" && depth > 0 then
           depth := depth - 1
-      if looping then
-        if forDepths == #[0, 1] then
-          passGate "banks-nested-msl" s!"two reduce for-loops, the inner strictly inside the outer (depths {forDepths})"
-        else
-          failGate "banks-nested-msl" s!"expected reduce-for depths #[0, 1], got {forDepths}"
+      if forDepths == #[0, 1] then
+        passGate "banks-nested-msl" s!"two reduce for-loops, the inner strictly inside the outer (depths {forDepths})"
       else
-        if forDepths.isEmpty then
-          passGate "banks-nested-msl" "escape hatch: no reduce loop in the kernel"
-        else
-          failGate "banks-nested-msl" s!"(unroll mode) expected no reduce loops, got depths {forDepths}"
+        failGate "banks-nested-msl" s!"expected reduce-for depths #[0, 1], got {forDepths}"
 
 /-- THE MODAL DEGREE gate. A degree-1 mode `amp·d·e^{−σd}` (a repeated pole — the
     resonance "swell") rendered by the engine must match `sinkGain·d·e^{−σd}` to

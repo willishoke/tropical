@@ -32,18 +32,29 @@ def arrowElabStdlib : IO (Except String (Arena × Array (String × ProgramIdx)))
   Tropical.StdlibChain.elabStdlib
 
 /-- Finish a built carrier program into a runnable `FlatPlan` via the
-    production session path: full strata, then the carrier as the synthetic
+    production session path: the full lowering, then the carrier as the synthetic
     session root wired straight to the dac at its `out` port
     (`__root__.out`). No session wires, no params, no inputs. -/
 private def finishCarrier (arena : Arena) (idx : ProgramIdx) :
     Except String Tropical.Plan.FlatPlan := do
-  let (coreArena, core) ← (Tropical.Ir.Strata.runResolved { upto := 5 } arena idx).mapError (·.message)
+  let (coreArena, core) ← (Tropical.Ir.Strata.runResolved {} arena idx).mapError (·.message)
   Tropical.Compile.compileSession (.forRoot core coreArena)
 
 def buildAndFinish (built : Except String (Arena × ProgramIdx)) :
     Except String Tropical.Plan.FlatPlan := do
   let (a, i) ← built
   finishCarrier a i
+
+/-- `buildAndFinish`, keeping the typed per-instruction stage blocks (the
+    split classification) alongside the plan — the carrier analogue of
+    `compilePatchStaged`, for gates that render through the TYPED Stage0
+    split. -/
+def buildAndFinishStaged (built : Except String (Arena × ProgramIdx)) :
+    Except String (Tropical.Plan.FlatPlan
+      × Array (Array (Option Tropical.Ir.Stage))) := do
+  let (a, i) ← built
+  let (coreArena, core) ← (Tropical.Ir.Strata.runResolved {} a i).mapError (·.message)
+  Tropical.Compile.compileSessionStaged (.forRoot core coreArena)
 
 /-- Build one EmitArrow clock carrier (named `name`, clocked at `clkE`) into a
     runnable `FlatPlan` via the production session path. -/
@@ -52,7 +63,7 @@ def compileArrowCarrier (arena : Arena) (resolved : Array (String × ProgramIdx)
     Except String Tropical.Plan.FlatPlan :=
   buildAndFinish (Tropical.EmitArrow.buildClockCarrier name clkE arena resolved)
 
--- ── (h′) EmitArrow corpus gate: EmitArrow's emit ≡ strata's emit, per program ─
+-- ── (h′) EmitArrow corpus gate: EmitArrow's emit ≡ the trunk's emit, per program ─
 -- The cutover (phase C1) reproduces the corpus one program at a time. This is
 -- the reusable instrument: given a resolved program (built by an EmitArrow
 -- constructor) and a stdlib program NAME, emit BOTH through the production
@@ -60,16 +71,16 @@ def compileArrowCarrier (arena : Arena) (resolved : Array (String × ProgramIdx)
 -- and compare byte-for-byte. The stdlib side is exactly what `diffcli
 -- emit-stdlib <Name>` produces (the target strata produces TODAY); the
 -- EmitArrow side is what the cutover would emit instead. Byte-identity proves
--- EmitArrow covers strata's job for that program — the slices-1/2 byte-gate,
+-- EmitArrow covers the trunk's job for that program — the slices-1/2 byte-gate,
 -- generalized to any program, run as a tropicaltest assertion rather than an
 -- external `diff` of two diffcli verbs.
 
 /-- The production per-program emit recipe (the `diffcli emit-*` body): strata
-    (all ported passes, inline) → Core.check → compileResolved → wire JSON. The
+    (the direct lowering, inline) → Core.check → compileResolved → wire JSON. The
     canonical `tropical_plan_5`-per-instance bytes a program emits today. -/
 def emitResolvedWire (arena : Arena) (idx : ProgramIdx) : Except String String := do
   let (coreArena, core) ← (Tropical.Ir.Strata.runResolved
-      { upto := Tropical.Ir.Strata.portedPasses, inlineNested := true } arena idx).mapError (·.message)
+      { inlineNested := true } arena idx).mapError (·.message)
   let plan ← Tropical.Ir.CompileResolved.compileResolved core coreArena
   let wire ← plan.toWire
   pure wire.compress
@@ -104,8 +115,8 @@ def runEmitCorpusGate (label stdName : String)
     builder's post-strata catalog entry has byte-identical `inputs`/`outputs`
     (port names, types, type_objs, and defaults — the ProgMeta that
     list_programs / get_info / add_instance surface) to the bridge stdlib
-    program's. Both sides run the same strata (`Strata.run`, all ported passes,
-    inline) then `Entries.concreteEntry`; only the port surface is compared.
+    program's. Both sides run the same lowering (`Strata.run`, inline)
+    then `Entries.concreteEntry`; only the port surface is compared.
     The resolved-body SEMANTICS are the corpus gate's job (plan-wire identity);
     this pins the port surface, which the plan doesn't fully exercise (unwired
     defaults). `binderCount` — a count of source `let`-binders, non-load-bearing
@@ -118,7 +129,7 @@ def runEntryEquivGate (label stdName : String)
     IO Bool := do
   let portsOf (a : Arena) (i : ProgramIdx) : Except String String := do
     let (a', i') ← (Tropical.Ir.Strata.run
-      { upto := Tropical.Ir.Strata.portedPasses, inlineNested := true } a i).mapError (·.message)
+      { inlineNested := true } a i).mapError (·.message)
     let e ← Tropical.Entries.concreteEntry a' stdName i'
     let ins := (e.getObjVal? "inputs").toOption.getD Lean.Json.null
     let outs := (e.getObjVal? "outputs").toOption.getD Lean.Json.null
@@ -155,7 +166,7 @@ def runStdlibGate (name : String)
 def stdlibArtifact (arena : Arena) (idx : ProgramIdx) (name : String) : Except String String := do
   let wire ← emitResolvedWire arena idx
   let (a', i') ← (Tropical.Ir.Strata.run
-    { upto := Tropical.Ir.Strata.portedPasses, inlineNested := true } arena idx).mapError (·.message)
+    { inlineNested := true } arena idx).mapError (·.message)
   let entry ← Tropical.Entries.concreteEntry a' name i'
   let ins := (entry.getObjVal? "inputs").toOption.getD Lean.Json.null
   let outs := (entry.getObjVal? "outputs").toOption.getD Lean.Json.null
@@ -259,7 +270,7 @@ def planTagCount (t : String) (p : Tropical.Plan.FlatPlan) : Nat :=
     binderCount is the count of distinct shared subexpressions. -/
 private def diagStrataCompile (arena : Arena) (idx : ProgramIdx) :
     Except String (Nat × Nat × Tropical.Plan.FlatPlan) := do
-  let (arena'', root') ← (Tropical.Ir.Strata.run { upto := 5 } arena idx).mapError (·.message)
+  let (arena'', root') ← (Tropical.Ir.Strata.run {} arena idx).mapError (·.message)
   let some prog := arena''.program? root'
     | .error "diagonal: post-strata root program index out of range"
   let (coreArena, core) ← Tropical.Ir.checkResolvedArena arena'' root'

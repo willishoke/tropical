@@ -246,7 +246,7 @@ deriving Repr, Inhabited, BEq
 -- ─────────────────────────────────────────────────────────────
 -- ExprArena — the hash-consed (DAG) form of the resolved expression
 --
--- The native-DAG representation for the whole strata pipeline (issue #190). An
+-- The native-DAG representation for the whole lowering (issue #190). An
 -- `ENode` is flat — its children are `ExprId`s — so it is O(1) to hash and
 -- compare, and interning at construction makes two equal subtrees one node.
 -- This is THE resolved-expression representation: `Program`'s expression leaves
@@ -275,7 +275,7 @@ deriving BEq, Repr, Inhabited
 /-- A resolved expression node with children referenced by `ExprId`; flat (no
     inlined subtrees). The full resolved op set — combinators (`fold`,
     `generate`, …), `letIn`, `tag`/`match` and their binders — so the arena is
-    live from the elaborator through the strata passes to emit.
+    live from the elaborator through the lowering to emit.
 
     Binders carry their `BinderIdx`, so two otherwise-identical combinators with
     *different* binder indices stay distinct (alpha-correct); within one program,
