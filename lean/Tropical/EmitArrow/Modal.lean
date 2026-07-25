@@ -871,7 +871,13 @@ deriving DecidableEq
     no runtime select ever exists (D2; the WS-LP phase-3a pattern). ω and amps
     must const-fold, both modes deg-0; anything else is `cold`. A lens fires
     (accuracy | range) ⇒ `paired` if the paired range cap clears at the
-    interval's worst point, else `refused`. -/
+    interval's worst point, else `refused`.
+
+    BOTH AXES of the pole distance decide: `dAbs = √(dSig² + dw²)`, `dSig` the
+    σ-span distance and `dw` the exact ω difference. Two modes at the SAME
+    frequency but differently damped are SEPARATED, not coincident — which is
+    what the σ axis is for, and what it did not do until the `dSig` repair
+    (gate `ecdd-sigma-axis`). -/
 def classifyCoupling (v r : ModalMode) : CouplingRoute :=
   if !(v.deg == 0 && r.deg == 0) then .cold else
   Id.run do
@@ -883,19 +889,32 @@ def classifyCoupling (v r : ModalMode) : CouplingRoute :=
     let some ai := sigConstD? v.cim | return .cold
     let some rr := sigConstD? r.cre | return .cold
     let some ri := sigConstD? r.cim | return .cold
-    -- min |Δ| over the σ interval(s): the span distance (0 when they overlap —
-    -- the dipper), ω exact. Const σ degenerates to the point distance.
+    -- min |Δ| over the σ interval(s): the SPAN DISTANCE between `[svLo,svHi]`
+    -- and `[srLo,srHi]` — `max(0, max(svLo,srLo) − min(svHi,srHi))`, so zero
+    -- when the spans overlap (the dipper) and the gap when they are separated —
+    -- with ω exact. A const σ is its own point interval, so this degenerates to
+    -- `|σ_v − σ_r|`. The two axes separate because `dw` does not depend on σ:
+    -- minimizing `|Δ| = √((σ_r−σ_v)² + (ω_v−ω_r)²)` over the spans is exactly
+    -- minimizing the σ term, so `dAbs` below IS min |Δ|.
     --
-    -- NOTE (behaviour preserved verbatim across the carrier flip): `sepHi` takes
-    -- a MAX where the span distance wants a min, so `sepLo ≤ sepHi` always holds
-    -- and `dSig` is identically zero — the σ axis of the accuracy lens does not
-    -- currently participate, and `dAbs` reduces to `|ω_v − ω_r|`. That is a
-    -- pre-existing defect, not one this flip introduces, and it is left standing
-    -- HERE on purpose: a carrier cutover whose differential also contains a
-    -- semantic change cannot tell you which one moved a decision. It is repaired
-    -- in its own commit, with its own measurement.
+    -- THE THREE-ANSWER DISCIPLINE. `certGt` answers only on SEPARATED
+    -- enclosures; an overlap — spans touching to within the enclosure width, or
+    -- a σ whose `sigConstD?` fold poisoned — falls to `dSig := 0`, and that is
+    -- the CONSERVATIVE side. Every consumer of `dAbs` wants a LOWER bound on
+    -- min |Δ|: both lenses fire more readily as it shrinks, and the paired range
+    -- cap's sup `2·|c|/|Δ|` only grows. Under-measuring spends plan SIZE;
+    -- over-measuring spends ACCURACY, because DD is accurate everywhere while
+    -- the collected `±c/Δ` floor is the one that is wrong near coincidence, and
+    -- θ is a cost boundary (see `ecddThetaAcc`).
+    --
+    -- (Until 2026-07-24 `sepHi` took a `max` here, so `sepLo ≤ sepHi` held
+    -- unconditionally, `dSig` was identically zero, and `dAbs` collapsed to
+    -- `|ω_v − ω_r|` — any two modes sharing a frequency routed hot however
+    -- differently damped. Repaired in its own commit, out of the carrier flip,
+    -- so its differential has exactly one variable in it; gate
+    -- `ecdd-sigma-axis` now pins the axis in both directions.)
     let sepLo := DyadicI.max svLo srLo
-    let sepHi := DyadicI.max svHi srHi
+    let sepHi := DyadicI.min svHi srHi
     let dSig := if DyadicI.certGt sepLo sepHi then DyadicI.sub sepLo sepHi else DyadicI.zero
     let dw := DyadicI.sub wv wr
     let dAbs := DyadicI.sqrt (DyadicI.add (DyadicI.mul dSig dSig) (DyadicI.mul dw dw))

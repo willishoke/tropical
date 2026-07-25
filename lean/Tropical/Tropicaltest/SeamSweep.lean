@@ -1323,6 +1323,112 @@ def runEcddPartition (arena : Arena)
       failGate "ecdd-partition" s!"bitCold={bitCold} structOk={structOk} railRouted={railRouted} railDiscr={railDiscr} refusedStated={refusedStated} e1DD={e1DD} e1Coll={e1Coll} eCDD={eCDD} eCColl={eCColl} coinFinite={coinFinite} coinPre={coinPre} coinE={coinE}"
   | _, _, _, _, _, _, _ => failGate "ecdd-partition" "build/render failed for an erasure-gate config"
 
+-- ── The σ axis of the accuracy lens (the `dSig` repair) ──────────────────────
+
+/-- Per-route tally over a classified register — the repair's measurement. -/
+private structure RouteTally where
+  cold    : Nat := 0
+  paired  : Nat := 0
+  refused : Nat := 0
+
+/-- Classify `n` (voice, room) couplings and tally the three verdicts. Each arm
+    draws its ω offset from the ±0.8 rad/s band around the voice partial — the
+    ONLY band where either lens can fire (θ_acc = 0.4642 rad/s is 0.0739 Hz) —
+    so the histogram measures the ROUTER's decision rather than the trivial fact
+    that a log-spaced room sits far from every partial. -/
+private def tallyRoutes (n : Nat) (mk : Nat → ModalMode × ModalMode) : RouteTally := Id.run do
+  let mut t : RouteTally := {}
+  for i in [1:n + 1] do
+    let (v, r) := mk i
+    match classifyCoupling v r with
+    | .cold    => t := { t with cold    := t.cold + 1 }
+    | .paired  => t := { t with paired  := t.paired + 1 }
+    | .refused => t := { t with refused := t.refused + 1 }
+  return t
+
+/-- THE σ-AXIS GATE (the `dSig` repair). `classifyCoupling`'s accuracy lens is a
+    POLE-distance test — `|Δ| = √((σ_r−σ_v)² + (ω_v−ω_r)²)`, minimized over the
+    declared σ spans. Until the repair the σ term was identically zero (the span
+    distance took a `max` where it wanted a `min`), so `|Δ|` collapsed to
+    `|ω_v−ω_r|` and any two modes sharing a frequency routed to the paired body
+    however differently damped. This gate pins the axis as DECIDING, in both
+    directions, and prints the census the repair moved:
+
+    1. SEPARATED IN σ ALONE ⇒ cold — ω matched, `|σ_v−σ_r| = 0.6 > θ_acc`. The
+       collected `±c/Δ` form is well conditioned there (Δ is a real 0.6, and the
+       rotator-grid degeneracy θ_acc was frozen against is an ω-axis mechanism —
+       σ never reaches the rotator), so routing it hot only spent plan size.
+    2. NEAR IN σ ⇒ still paired, and the ω axis is UNMOVED (matched σ, dω = 0.05
+       ⇒ paired exactly as before). Two witnesses, because a gate that only
+       showed the new `cold` would also pass on a classifier that had gone cold
+       everywhere.
+    3. THE DIPPER SURVIVES — a live-rt60 room whose declared σ span CONTAINS the
+       partial's σ has span distance 0 and still routes throughout the knob span
+       (WS-LP's D2), while a partial damped far OUTSIDE that span separates from
+       it and stays collected: the σ axis decides on a live INTERVAL, not only on
+       baked points.
+    4. THE REFUSAL REGION SHRINKS — an extreme-Q partial (σ = 0.02) sharing a
+       frequency with an ordinary room mode was `refused` (a lens fired on the
+       collapsed |Δ|, and the paired cap could not clear at that Q), and a
+       refusal is OUTSIDE the merged seam atom's admission. With the σ axis live
+       it is an ordinary cold coupling — in contract, correctly represented. -/
+def runEcddSigmaAxis (_arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  -- a baked mode at (ω rad/s, σ, real amp); paired ω values are formed from the
+  -- SAME Float, so `dw` is the zero-width difference and `dAbs` is the σ term
+  let bake := fun (om sigma amp : Float) =>
+    ({ sigma := litF sigma, omega := litF om, cre := litF amp, cim := lit 0 } : ModalMode)
+  let pt := fun (fHz sigma amp : Float) => bake (tp * fHz) sigma amp
+  -- the shipped rt60 knob's span mapped through σ = 6.91/rt60 (`reverbRoom`)
+  let rtSpan : Float × Float := (6.91 / 12.0, 6.91 / 0.2)
+  -- the WS-LP live-σ stand-in: `6.91/rt60` over a clamped literal — `reverbRoom`'s
+  -- own shape, un-foldable by `sigConstD?`, carrying its declared span
+  let liveRoom := fun (om amp : Float) =>
+    ({ sigma := div (lit 691 2) (clampE (litF 2.0) (litF 0.2) (litF 12.0)),
+       omega := litF om, cre := litF amp, cim := lit 0,
+       sigmaRange := some rtSpan } : ModalMode)
+  let sepCold  := classifyCoupling (pt 800.0 0.4 0.8) (pt 800.0 1.0 0.6) == .cold
+  let nearHot  := classifyCoupling (pt 800.0 0.7 0.8) (pt 800.0 1.0 0.6) == .paired
+  let omegaHot := classifyCoupling (pt 800.0 0.6 0.9)
+                    (bake (tp * 800.0 + 0.05) 0.6 0.8) == .paired
+  let dipper   := classifyCoupling (pt 220.0 3.455 1.0)
+                    (liveRoom (tp * 220.0) 0.7) == .paired
+  let outSpan  := classifyCoupling (pt 220.0 0.05 1.0)
+                    (liveRoom (tp * 220.0) 0.7) == .cold
+  let exQ      := classifyCoupling (pt 400.0 0.02 1.0) (pt 400.0 1.0 1.0) == .cold
+  -- ARM A — the SHIPPED topology: baked partials over the gong register box
+  -- against a LIVE-rt60 room (σ declared over [0.576, 34.55])
+  let armA := fun (i : Nat) =>
+    let sV := 0.2 + 3.1 * haltonF 3 i
+    let fV := 110.0 + 913.0 * haltonF 2 i
+    let dOm := (haltonF 7 i - 0.5) * 1.6
+    ( bake (tp * fV) sV (0.4 + 0.6 * haltonF 5 i)
+    , liveRoom (tp * fV + dOm) (0.4 + 0.6 * haltonF 5 (i + 7919)) )
+  -- ARM B — the BAKED topology: a const-σ room (a `modes` data table, a fixture,
+  -- a folded room chain), where the σ axis actually carries information
+  let armB := fun (i : Nat) =>
+    let sV := 0.3 + 1.7 * haltonF 3 i
+    let fV := 400.0 + 800.0 * haltonF 2 i
+    let sR := 0.3 + 1.7 * haltonF 3 (i + 5003)
+    let dOm := (haltonF 7 i - 0.5) * 1.6
+    ( bake (tp * fV) sV (0.4 + 0.6 * haltonF 5 i)
+    , bake (tp * fV + dOm) sR (0.4 + 0.6 * haltonF 5 (i + 7919)) )
+  let a := tallyRoutes 1000 armA
+  let b := tallyRoutes 1000 armB
+  IO.println "ecdd σ-axis (the accuracy lens reads the whole pole distance):"
+  IO.println s!"        witnesses: σ-separated cold {sepCold} · σ-near paired {nearHot} · ω-near paired {omegaHot} · live dipper paired {dipper} · out-of-span cold {outSpan} · extreme-Q refusal retired {exQ}"
+  IO.println s!"        route census, 1000 couplings drawn in the ±0.8 rad/s lens band:"
+  IO.println s!"          live-rt60 room (shipped reverb topology): cold {a.cold} · paired {a.paired} · refused {a.refused}"
+  IO.println s!"          baked const-σ room (data rows, fixtures):  cold {b.cold} · paired {b.paired} · refused {b.refused}"
+  let ok := sepCold && nearHot && omegaHot && dipper && outSpan && exQ
+         && a.paired > 0 && b.paired > 0
+  if ok then
+    passGate "ecdd-sigma-axis"
+      s!"the lens reads BOTH axes: σ-only separation routes cold, σ-near still pairs, the ω axis is unmoved; live spans included (the dipper survives, an out-of-span partial separates, the extreme-Q refusal retires into ordinary cold) — census: live-room {a.paired}/1000 paired, baked-room {b.paired}/1000"
+  else
+    failGate "ecdd-sigma-axis"
+      s!"sepCold={sepCold} nearHot={nearHot} omegaHot={omegaHot} dipper={dipper} outSpan={outSpan} exQ={exQ} armA={a.cold}/{a.paired}/{a.refused} armB={b.cold}/{b.paired}/{b.refused}"
+
 /-- THE EC/DD LIVE-POLE GATE (fork 3′ Phase 2). Interval classification: a
     live-rt60 room mode tuned ONTO a baked partial routes to the paired DD
     body at BUILD time when min |Δ| over the declared σ span dips under θ_acc

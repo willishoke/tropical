@@ -429,6 +429,9 @@ def main (args : List String) : IO UInt32 := do
     if !(← Tropical.Tropicaltest.SeamSweep.runEcddPartition arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← Tropical.Tropicaltest.SeamSweep.runEcddSigmaAxis arena resolved) then
+      failed := failed + 1
+    total := total + 1
     if !(← Tropical.Tropicaltest.SeamSweep.runEcddLive arena resolved) then
       failed := failed + 1
     total := total + 1
