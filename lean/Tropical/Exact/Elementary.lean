@@ -157,28 +157,41 @@ private def cosSmall (r : DyadicI) : DyadicI :=
     let tw := abs term
     ⟨acc.lo - tw.hi, acc.hi + tw.hi, acc.ok⟩
 
-/-- Quadrant-reduced `(sin x, cos x)`: `x = k·(π/2) + r` with `|r| ≤ π/4`, the
-    quadrant `k mod 4` selecting which of `±sin r`, `±cos r` each answer is.
-    `k` comes from the midpoint — deterministic, and a neighbouring `k` only
-    widens `|r|` to `≤ 3π/4`, which the series still handles, so there is no
+/-- Quadrant reduction `x = k·(π/2) + r` with `|r| ≤ π/4`, shared by `sin` and
+    `cos`. `k` comes from the midpoint — deterministic, and a neighbouring `k`
+    only widens `|r|` to `≤ 3π/4`, which the series still handles, so there is no
     cliff at the boundary. Large arguments spend reduction bits: `π` is carried
     to `2^{−300}` and the working precision is 128, so `|x|` up to `2^160` still
     lands a full working mantissa. -/
-private def sinCosReduced (x : DyadicI) : DyadicI × DyadicI :=
-  if !x.ok then (poison, poison)
-  else
-    let k := roundToInt (div x piHalfI)
-    let r := sub x (mul (ofInt k) piHalfI)
-    let sr := sinSmall r
-    let cr := cosSmall r
-    match k % 4 with
-    | 0 => (sr, cr)
-    | 1 => (cr, neg sr)
-    | 2 => (neg sr, neg cr)
-    | _ => (neg cr, sr)
+private def reduceQuad (x : DyadicI) : Int × DyadicI :=
+  let k := roundToInt (div x piHalfI)
+  (k % 4, sub x (mul (ofInt k) piHalfI))
 
-def sin (x : DyadicI) : DyadicI := (sinCosReduced x).1
-def cos (x : DyadicI) : DyadicI := (sinCosReduced x).2
+/-- `sin x`. The quadrant selects WHICH of the two small-argument series to run,
+    and only that one is evaluated: these are the carrier's hottest kernels (a
+    256-panel Bessel quadrature is 257 of them, `defaultStringModes` three per
+    partial), and computing the sibling series to throw it away doubled every
+    one of those. -/
+def sin (x : DyadicI) : DyadicI :=
+  if !x.ok then poison
+  else
+    let (q, r) := reduceQuad x
+    match q with
+    | 0 => sinSmall r
+    | 1 => cosSmall r
+    | 2 => neg (sinSmall r)
+    | _ => neg (cosSmall r)
+
+/-- `cos x` — the same reduction, the other quadrant map. -/
+def cos (x : DyadicI) : DyadicI :=
+  if !x.ok then poison
+  else
+    let (q, r) := reduceQuad x
+    match q with
+    | 0 => cosSmall r
+    | 1 => neg (sinSmall r)
+    | 2 => neg (cosSmall r)
+    | _ => sinSmall r
 
 /-- `atan a` for `|a| ≤ 1`. Halves the argument three times by
     `atan a = 2·atan(a / (1 + √(1+a²)))` — after which `|a| ≤ 0.0985` and the
@@ -209,7 +222,7 @@ private def atanUnit (a : DyadicI) : DyadicI :=
 /-- `atan2 (y, x) ∈ [−π, π]` — the angle of `(x, y)`. First octant by
     `a = min(|x|,|y|)/max(|x|,|y|)`, then the swap and the quadrant placement.
 
-    Two things here are NOT overlap switches and are handled as such:
+    Three things here are NOT overlap switches and are handled as such:
 
     * **The origin.** `atan2 (0,0) = 0` is a CONVENTION, and an argument that is
       exactly the origin gets it (matching the float bake path and the emitted
@@ -217,47 +230,84 @@ private def atanUnit (a : DyadicI) : DyadicI :=
       it determines no angle at all, and answering `0` with zero width would be
       a false certification — the one failure mode this carrier exists to
       prevent. That case gets the whole range `[−π, π]`.
-    * **The quadrant.** `x < 0 ⇒ π − r` and `y < 0 ⇒ −r` are π-SIZED jumps. A
-      midpoint would pick one arm and be wrong about the other half of the
-      enclosure, so instead the result is the HULL over every sign combination
-      the enclosures still admit. An enclosure that stays on one side of an axis
-      — including one whose endpoint IS zero, which takes the `+0` convention
-      like IEEE — picks a single arm and loses no width; only a genuine straddle
-      widens.
+    * **The quadrant**, and it is TWO different questions, one per axis, because
+      only one of the axes carries the branch cut.
 
-    Only the `swap` is a real overlap switch: `atanUnit`'s halving maps every
-    real into `(−1, 1)`, so a wrong swap costs iterations, never correctness. -/
+      Across the **y axis** (`x = 0`, `y ≠ 0`) atan2 is CONTINUOUS: the two
+      placements `r₁` and `π − r₁` agree in the limit, and whenever `x`'s
+      enclosure can vanish, `r₁`'s enclosure already reaches `π/2` — so an
+      enclosure of `x` that merely TOUCHES zero picks one arm and loses nothing.
+
+      Across the **negative x axis** (`y = 0`, `x < 0`) it JUMPS by 2π: the
+      convention sends `y = +0` to `+π` and `y = −0` to `−π`. A `y` whose
+      enclosure touches zero from below therefore admits BOTH, and taking only
+      the negative arm — as an earlier cut of this function did, classifying by
+      `!hi.isPos` on both axes — EXCLUDES the true `+π`. Only a certifiably
+      negative `y` may take a single arm; `y ≥ 0` takes the `+0` convention
+      like IEEE.
+    * **The swap.** The denominator must be certifiably away from zero or `inv`
+      poisons, and a poisoned quotient here would destroy a perfectly
+      well-defined angle (`atan2 (1, [−1, 3])` excludes the origin entirely).
+      So the denominator is chosen by CERTIFIED SEPARATION first — the guard
+      above leaves at most one of `|x|`, `|y|` straddling zero, so a legal
+      choice always exists — and only among two legal choices does the midpoint
+      break the tie toward the larger one. That tie-break is the sole overlap
+      switch, and it is genuinely free: `atanUnit`'s three halvings bring ANY
+      finite quotient under `tan(π/16) < 0.2` before the series runs, so a
+      wrong-size quotient costs a little width, never the answer.
+
+    Where the series still cannot converge, the answer widens to the full range
+    rather than poisoning: a total function that sometimes says `[−π, π]` is
+    worth more here than a partial one. The final hull is intersected with
+    `[−π, π]`, which the true angle never leaves. -/
 def atan2 (y x : DyadicI) : DyadicI :=
   if !y.ok || !x.ok then poison
   else if x.lo.isZero && x.hi.isZero && y.lo.isZero && y.hi.isZero then zero
   else
+    let full : DyadicI := ⟨-piI.hi, piI.hi, true⟩
     let ax := abs x
     let ay := abs y
     if !certGt (max ax ay) zero then
       -- the origin is inside but the argument is not the origin: no angle is excluded
-      ⟨-piI.hi, piI.hi, true⟩
+      full
     else
-      let swap := Dyadic.blt (mid ax) (mid ay)
+      -- `swap = true` divides by `|y|`, `false` by `|x|`; a straddling divisor
+      -- overrides the midpoint preference
+      let swap :=
+        if straddlesZero ay then false
+        else if straddlesZero ax then true
+        else Dyadic.blt (mid ax) (mid ay)
       let num := if swap then ax else ay
       let den := if swap then ay else ax
       let r0 := atanUnit (div num den)
-      let r1 := if swap then sub piHalfI r0 else r0
-      let place := fun (xNeg yNeg : Bool) =>
-        let a := if xNeg then sub piI r1 else r1
-        if yNeg then neg a else a
-      -- one arm whenever the enclosure stays on one side of the axis (a zero
-      -- endpoint counts as the `+0` side, as IEEE does); both when it straddles
-      let arms := fun (v : DyadicI) =>
-        if !v.lo.isNeg then #[false]
-        else if !v.hi.isPos then #[true]
-        else #[true, false]
-      Id.run do
-        let mut acc : Option DyadicI := none
-        for xn in arms x do
-          for yn in arms y do
-            let a := place xn yn
-            acc := some (match acc with | none => a | some p => hull p a)
-        return acc.getD poison
+      if !r0.ok then full
+      else
+        let r1 := if swap then sub piHalfI r0 else r0
+        let place := fun (xNeg yNeg : Bool) =>
+          let a := if xNeg then sub piI r1 else r1
+          if yNeg then neg a else a
+        -- x: one arm on either side of zero, INCLUDING a zero endpoint (the
+        -- function is continuous there); y: one arm only when the sign is
+        -- certain, because the branch cut lies along `y = 0, x < 0`
+        let armsX := fun (v : DyadicI) =>
+          if !v.lo.isNeg then #[false]
+          else if !v.hi.isPos then #[true]
+          else #[true, false]
+        let armsY := fun (v : DyadicI) =>
+          if !v.lo.isNeg then #[false]
+          else if v.hi.isNeg then #[true]
+          else #[true, false]
+        Id.run do
+          let mut acc : Option DyadicI := none
+          for xn in armsX x do
+            for yn in armsY y do
+              let a := place xn yn
+              acc := some (match acc with | none => a | some p => hull p a)
+          let h := acc.getD full
+          -- the true angle is in `[−π, π]`, so trimming to it can only tighten
+          let lo := Dyadic.dmax h.lo (-piI.hi)
+          let hi := Dyadic.dmin h.hi piI.hi
+          return if h.ok && Dyadic.ble lo hi then ⟨lo, hi, true⟩ else h
 
 /-- `x^y` for a certifiably positive `x`, as `exp(y·ln x)`. -/
 def pow (x y : DyadicI) : DyadicI :=

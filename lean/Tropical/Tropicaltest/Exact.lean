@@ -5,7 +5,7 @@ import Tropical.EmitArrow.Modal
 /-!
 # Tropical.Tropicaltest.Exact — the exact-carrier gates (P0)
 
-Three standing gates over `Tropical.Exact`, the bake layer's `libm` exile:
+Four standing gates over `Tropical.Exact`, the bake layer's `libm` exile:
 
 * **`exact-constants`** — π and ln 2 are shipped as literal integer mantissas
   over `2³⁰⁰`. This gate RECOMPUTES both from scratch inside the carrier, at a
@@ -29,6 +29,13 @@ Three standing gates over `Tropical.Exact`, the bake layer's `libm` exile:
   gate also pins `litF`'s two known edges (flush-to-zero below `5e-13`,
   mantissa saturation above `1.8446744e7`) so that the day the emit boundary
   moves onto the exact quantizer, what changes is written down here.
+
+* **`exact-atan2`** — the one function here that is not a monotone series, and
+  the only one whose two open defects survived P0's own review. `atan2` is
+  checked as an INTERVAL EXTENSION: every point of a box must land inside that
+  box's answer (probing the AXES, not just the corners — both defects lived on
+  the boundary), and a box that excludes the origin must produce an answer
+  rather than poison.
 
 The gates are cheap (no render, no JIT) and run in the same `passGate` protocol
 as everything else.
@@ -213,6 +220,119 @@ def runExactElementary : IO Bool := do
   else
     failGate "exact-elementary"
       s!"worstUlp={sc.worstUlp} (at {sc.worstAt}) leastBits={sc.leastBits} (at {sc.loosestAt}) poisoned={sc.poisoned}"
+
+-- ── the interval extension: atan2 ─────────────────────────────────────────────
+
+/-- The sample points a containment check must probe for one box: the corners,
+    the centre, and wherever the box MEETS AN AXIS — which is where atan2's two
+    special structures live (the continuous crossing at `x = 0`, and the 2π-wide
+    branch cut along `y = 0, x < 0`). Both of the defects this gate exists for
+    were exactly there, and neither was reachable from corner samples alone. -/
+private def boxProbes (xlo xhi ylo yhi : Float) : Array (Float × Float) := Id.run do
+  let xs := #[xlo, xhi, 0.5 * (xlo + xhi)]
+             ++ (if xlo ≤ 0.0 && 0.0 ≤ xhi then #[0.0] else #[])
+  let ys := #[ylo, yhi, 0.5 * (ylo + yhi)]
+             ++ (if ylo ≤ 0.0 && 0.0 ≤ yhi then #[0.0] else #[])
+  let mut out : Array (Float × Float) := #[]
+  for a in xs do
+    for b in ys do
+      out := out.push (a, b)
+  return out
+
+/-- `atan2` as an INTERVAL EXTENSION, checked the only way an enclosure can be:
+    EVERY point of a box must land inside that box's answer, and a box that
+    excludes the origin must produce an answer at all.
+
+    The two properties are separable, and the two defects this gate was written
+    against are one of each:
+
+    * **Soundness.** `atan2 [−1,0] [−2,−1]` returned `[−3.1468, −2.1415]`, which
+      does not contain `atan2 0 (−1) = +π` — a point of its own box. The arm
+      classifier read a `hi` of exactly zero as strictly negative, so it took
+      only the `−0` side of the branch cut. A containment sweep that probes the
+      axes finds this; one that probes corners does not, because the violating
+      points are ON the boundary.
+    * **Totality.** `atan2 1 [−1,3]` poisoned, though every point of that box has
+      a perfectly good angle (the box excludes the origin entirely). The
+      midpoint chose a zero-straddling denominator and `inv` refused it.
+
+    Containment is checked carrier-against-carrier — the point evaluation must
+    sit inside the box evaluation — rather than against the platform `libm`, so
+    no ulp budget enters. The box answer is allowed `2^{−100}` of slack: the two
+    evaluations may take different reduction branches (a different swap, a
+    different quadrant `k`), and each is only obliged to enclose the truth, not
+    to nest in the other bit-for-bit. That slack is still ~2^26 times WIDER than
+    a point answer's own width, so it cannot hide anything at the π scale these
+    defects live at. The `leastBits` floor is what stops the whole gate from
+    being satisfied by a function that always answers `[−π, π]`. -/
+def runExactAtan2 : IO Bool := do
+  let n := 300
+  let slack : Int := -100
+  let mut boxes := 0
+  let mut probes := 0
+  let mut escaped := 0
+  let mut escapedAt := ""
+  let mut poisoned := 0
+  let mut poisonAt := ""
+  let mut ptPoison := 0
+  let mut leastBits : Float := 1.0e9
+  for i in [1:n+1] do
+    let u1 := halton 2 i
+    let u2 := halton 3 i
+    let u3 := halton 5 i
+    let u4 := halton 7 i
+    let cx := (u1 * 2.0 - 1.0) * 8.0
+    let cy0 := (u2 * 2.0 - 1.0) * 8.0
+    let cy := if cy0 == 0.0 then 1.0 else cy0
+    let rx := u3 * 4.0
+    let ry := u4 * 4.0
+    -- five constructions: a general box, the two axis-touching classes the open
+    -- defects lived in, a straddling denominator over a point numerator, and a
+    -- degenerate box (which is what the production bake path actually hands it)
+    let (xlo, xhi, ylo, yhi) :=
+      match i % 5 with
+      | 0 => (cx - rx, cx + rx, cy - ry, cy + ry)
+      | 1 => (-1.0 - rx, -0.5, -ry - 0.001, 0.0)      -- y.hi = 0 exactly, x < 0
+      | 2 => (-1.0 - rx, -0.5, 0.0, ry + 0.001)       -- y.lo = 0 exactly, x < 0
+      | 3 => (cx - rx - 1.0, cx + rx + 1.0, cy, cy)   -- x straddles, y a point
+      | _ => (cx, cx, cy, cy)                         -- degenerate
+    let xb : DyadicI := ⟨Dyadic.ofFloat xlo, Dyadic.ofFloat xhi, true⟩
+    let yb : DyadicI := ⟨Dyadic.ofFloat ylo, Dyadic.ofFloat yhi, true⟩
+    let res := DyadicI.atan2 yb xb
+    boxes := boxes + 1
+    let originIn := straddlesZero xb && straddlesZero yb
+    if !originIn && !res.ok then
+      poisoned := poisoned + 1
+      poisonAt := s!"y=[{ylo},{yhi}] x=[{xlo},{xhi}]"
+    if xlo == xhi && ylo == yhi then
+      leastBits := min leastBits (certifiedBits res)
+    let wide := res.widen slack
+    for (px, py) in boxProbes xlo xhi ylo yhi do
+      let pt := DyadicI.atan2 (ofFloat py) (ofFloat px)
+      probes := probes + 1
+      if !pt.ok then ptPoison := ptPoison + 1
+      else if !containedIn pt wide then
+        escaped := escaped + 1
+        escapedAt := s!"({px},{py}) ∉ atan2 [{ylo},{yhi}] [{xlo},{xhi}]"
+  -- the two ledger defects, as named regressions
+  let boxA : DyadicI := ⟨Dyadic.ofFloat (-2.0), Dyadic.ofFloat (-1.0), true⟩
+  let boxAy : DyadicI := ⟨Dyadic.ofFloat (-1.0), 0, true⟩
+  let dA := DyadicI.atan2 boxAy boxA
+  let dApt := DyadicI.atan2 zero (ofFloat (-1.0))          -- +π, a point of that box
+  let soundnessFixed := containedIn dApt (dA.widen slack)
+  let dB := DyadicI.atan2 (ofFloat 1.0)
+              ⟨Dyadic.ofFloat (-1.0), Dyadic.ofFloat 3.0, true⟩
+  let totalityFixed := dB.ok
+  IO.println s!"        {boxes} boxes × {probes} probes (corners, centre, axis crossings):"
+  IO.println s!"        escaped {escaped} · box-poison-off-origin {poisoned} · point-poison {ptPoison} · tightest point box certifies {leastBits} bits"
+  IO.println s!"        ledger regressions — atan2 [-1,0] [-2,-1] = {dA.render} ⊇ atan2 0 -1 = {dApt.render} : {soundnessFixed} · atan2 1 [-1,3] = {dB.render} : {totalityFixed}"
+  if escaped == 0 && poisoned == 0 && ptPoison == 0 && soundnessFixed
+      && totalityFixed && leastBits > 90.0 then
+    passGate "exact-atan2"
+      s!"atan2 is a sound interval extension over {probes} probes of {boxes} boxes (axes included, where both open defects lived) and TOTAL wherever the origin is excluded, while still certifying ≥{leastBits} bits on a point argument"
+  else
+    failGate "exact-atan2"
+      s!"escaped={escaped} (at {escapedAt}) boxPoison={poisoned} (at {poisonAt}) pointPoison={ptPoison} soundnessRegression={soundnessFixed} totalityRegression={totalityFixed} leastBits={leastBits}"
 
 -- ── the emit funnel ───────────────────────────────────────────────────────────
 
