@@ -152,10 +152,6 @@ structure EmitSt where
   arraySizes : Array Nat := #[]
   instrs : Array NInstr := #[]
   memo : Std.HashMap String CompileResult := {}
-  -- Hash-consed (DAG) form of the expressions emit walks. Equal subtrees are
-  -- one `ExprId`, so CSE keys on the id (O(1)) instead of recomputing a
-  -- structural id per node (O(subtree)) — see issue #190.
-  arena : CoreArena := {}
   -- ── Staging (Phase 1 of the typed stage-0 refactor) ──
   -- The binding context the current block resolves under (rebuilt by
   -- `emitProgram` per pre-input block / body section), the stage of the
@@ -176,12 +172,6 @@ def withStage {α} (s : Option Stage) (act : EmitM α) : EmitM α := do
   let r ← act
   modify fun st => { st with curStage := prev }
   pure r
-
-/-- Intern a flat `CNode` into the emit arena, returning its (shared) id. The
-    post-strata leaves arrive pre-interned (Phase B); this covers only the
-    emit's own synthesized nodes (the port-default `0`). -/
-def internNode (n : CNode) : EmitM ExprId :=
-  modifyGet fun st => let (id, a) := (intern n).run st.arena; (id, { st with arena := a })
 
 /-- The TS operand `kind` strings (error-message rendering). -/
 private def operandKind : NOperand → String
@@ -273,11 +263,26 @@ private def tryTerminal (e : CNode) (expected : Option ScalarType) :
 -- Compile
 -- ─────────────────────────────────────────────────────────────
 
+/-- Unbox a size-1 array to a scalar via Index[0]. -/
+private def unboxIfUnit (r : CompileResult) : EmitM CompileResult := do
+  match r with
+  | .array op 1 rt =>
+    let dst ← allocReg
+    emit (Tropical.Plan.instrIndex dst #[op, .const (0 : Nat) .int] rt)
+    pure (.scalar (.reg dst rt) rt)
+  | r => pure r
+
+/- The arena is a PARAMETER of the walk, not emitter state: nothing
+   below can intern, so the graph being compiled is frozen for the
+   whole traversal (the one synthesized node — the port-default `0` —
+   is interned by `emitResolvedProgram` before the state exists). This
+   is what makes `ExprId.idx` a usable termination measure here once
+   the arena's child-descending invariant is carried as data. -/
 mutual
 
-partial def compileNode (id : ExprId) (expected : Option ScalarType := none) :
-    EmitM CompileResult := do
-  let some node := (← get).arena.deref id
+partial def compileNode (arena : CoreArena) (id : ExprId)
+    (expected : Option ScalarType := none) : EmitM CompileResult := do
+  let some node := arena.deref id
     | throw s!"emit_resolved: dangling ExprId {id.idx}"
   if let some (op, t) ← tryTerminal node expected then
     return .scalar op t
@@ -285,15 +290,15 @@ partial def compileNode (id : ExprId) (expected : Option ScalarType := none) :
   if let some r := (← get).memo.get? key then
     return r
   let st ← get
-  let r ← withStage (some (Staging.stageOf st.arena st.stageCtx id))
-    (compileNodeUncached node expected)
+  let r ← withStage (some (Staging.stageOf arena st.stageCtx id))
+    (compileNodeUncached arena node expected)
   modify fun s => { s with memo := s.memo.insert key r }
   return r
 
-private partial def compileNodeUncached (e : CNode) (expected : Option ScalarType) :
-    EmitM CompileResult := do
+private partial def compileNodeUncached (arena : CoreArena) (e : CNode)
+    (expected : Option ScalarType) : EmitM CompileResult := do
   match e with
-  | .arr items => compilePack items expected
+  | .arr items => compilePack arena items expected
   | .inputRef i =>
     match lookup (← get).slots.inputArraySlots i.idx with
     | some info => pure (.array (.sessionArrayReg info.slot) info.size .float)
@@ -305,50 +310,42 @@ private partial def compileNodeUncached (e : CNode) (expected : Option ScalarTyp
     | some info => pure (.array (.sessionArrayReg info.slot) info.size .float)
     | none =>
       throw "emit_resolved: nestedOut to non-array sub-instance output reached compileNodeUncached unexpectedly"
-  | .binary tag a b => compileBinary (planOpOfBinary tag) a b expected
-  | .unary tag a => compileUnary (planOpOfUnary tag) a expected
-  | .clamp a b c => compileTernary .clamp a b c expected
-  | .select a b c => compileTernary .select a b c expected
-  | .arraySet a b c => compileSetElement a b c
-  | .index a b => compileIndex a b
-  | .bankSum count tables body dynCount? idxId => compileBankSum count tables body dynCount? idxId
+  | .binary tag a b => compileBinary arena (planOpOfBinary tag) a b expected
+  | .unary tag a => compileUnary arena (planOpOfUnary tag) a expected
+  | .clamp a b c => compileTernary arena .clamp a b c expected
+  | .select a b c => compileTernary arena .select a b c expected
+  | .arraySet a b c => compileSetElement arena a b c
+  | .index a b => compileIndex arena a b
+  | .bankSum count tables body dynCount? idxId =>
+    compileBankSum arena count tables body dynCount? idxId
   | .num _ | .bool _ | .paramRef _ | .sampleRate | .sampleIndex | .loopIdx _ =>
     throw "emit_resolved: terminal node reached compileNodeUncached (port bug)"
 
-/-- Unbox a size-1 array to a scalar via Index[0]. -/
-private partial def unboxIfUnit (r : CompileResult) : EmitM CompileResult := do
-  match r with
-  | .array op 1 rt =>
-    let dst ← allocReg
-    emit (Tropical.Plan.instrIndex dst #[op, .const (0 : Nat) .int] rt)
-    pure (.scalar (.reg dst rt) rt)
-  | r => pure r
-
-private partial def compilePack (elements : Array ExprId) (expected : Option ScalarType) :
-    EmitM CompileResult := do
+private partial def compilePack (arena : CoreArena) (elements : Array ExprId)
+    (expected : Option ScalarType) : EmitM CompileResult := do
   let size := elements.size
   let slot ← allocArraySlot size
   let args ← elements.mapM fun el => do
-    let r ← compileNode el expected
+    let r ← compileNode arena el expected
     pure (if r.isArray then NOperand.const (0 : Nat) .float else r.op)
   emit (Tropical.Plan.instrPack slot args)
   pure (.array (.arrayReg slot) size .float)
 
-private partial def compileBinary (op : PlanOp) (lhs rhs : ExprId)
+private partial def compileBinary (arena : CoreArena) (op : PlanOp) (lhs rhs : ExprId)
     (expected : Option ScalarType) : EmitM CompileResult := do
   let propagated := if expected == some .bool then none else expected
   let argExpected : Option ScalarType :=
     if op.isBitwise then some .int
     else if op.isComparison then none
     else propagated
-  let l ← compileNode lhs argExpected
+  let l ← compileNode arena lhs argExpected
   let secondExpected : Option ScalarType :=
     if op.isComparison then
       if l.isArray then some .float
       else if l.scalarType == .bool then none
       else some l.scalarType
     else argExpected
-  let r ← compileNode rhs secondExpected
+  let r ← compileNode arena rhs secondExpected
   let l ← unboxIfUnit l
   let r ← unboxIfUnit r
   let rt := op.resultType #[l.scalarType, r.scalarType]
@@ -366,7 +363,7 @@ private partial def compileBinary (op : PlanOp) (lhs rhs : ExprId)
     emit (Tropical.Plan.instrArray op.name slot #[l.op, r.op] size strides rt)
     pure (.array (.arrayReg slot) size rt)
 
-private partial def compileUnary (op : PlanOp) (arg : ExprId)
+private partial def compileUnary (arena : CoreArena) (op : PlanOp) (arg : ExprId)
     (expected : Option ScalarType) : EmitM CompileResult := do
   let argExpected : Option ScalarType :=
     if op.isTranscendental then none
@@ -377,7 +374,7 @@ private partial def compileUnary (op : PlanOp) (arg : ExprId)
     -- where the result is used in an int context). Leave the arg unconstrained.
     else if op == .toInt then none
     else expected
-  let a ← compileNode arg argExpected
+  let a ← compileNode arena arg argExpected
   let a ← unboxIfUnit a
   let rt := op.resultType #[a.scalarType]
   match a with
@@ -390,13 +387,13 @@ private partial def compileUnary (op : PlanOp) (arg : ExprId)
     emit (Tropical.Plan.instrArray op.name slot #[aop] size #[1] rt)
     pure (.array (.arrayReg slot) size rt)
 
-private partial def compileTernary (op : PlanOp) (n1 n2 n3 : ExprId)
+private partial def compileTernary (arena : CoreArena) (op : PlanOp) (n1 n2 n3 : ExprId)
     (expected : Option ScalarType) : EmitM CompileResult := do
   let condExpected : Option ScalarType := if op == .select then some .bool else expected
   let armExpected := if expected == some .bool then none else expected
-  let a ← compileNode n1 condExpected
-  let b ← compileNode n2 armExpected
-  let c ← compileNode n3 armExpected
+  let a ← compileNode arena n1 condExpected
+  let b ← compileNode arena n2 armExpected
+  let c ← compileNode arena n3 armExpected
   let a ← unboxIfUnit a
   let b ← unboxIfUnit b
   let c ← unboxIfUnit c
@@ -417,9 +414,9 @@ private partial def compileTernary (op : PlanOp) (n1 n2 n3 : ExprId)
     emit (Tropical.Plan.instrArray op.name slot #[a.op, b.op, c.op] size strides rt)
     pure (.array (.arrayReg slot) size rt)
 
-private partial def compileIndex (arrNode idxNode : ExprId) : EmitM CompileResult := do
-  let arr ← compileNode arrNode
-  let idx ← compileNode idxNode (some .int)
+private partial def compileIndex (arena : CoreArena) (arrNode idxNode : ExprId) : EmitM CompileResult := do
+  let arr ← compileNode arena arrNode
+  let idx ← compileNode arena idxNode (some .int)
   match arr with
   | .scalar .. =>
     throw ("emit_resolved: 'index' op has non-array operand. This usually means an "
@@ -460,23 +457,23 @@ private partial def compileIndex (arrNode idxNode : ExprId) : EmitM CompileResul
       is the region's binder id: it rides `ReduceBegin` as `loop_id`, and the
       body's `loopIdx idxId` operands resolve against the emitters' stack of
       open regions. -/
-private partial def compileBankSum (count : Nat) (tables : Array ExprId) (body : ExprId)
+private partial def compileBankSum (arena : CoreArena) (count : Nat) (tables : Array ExprId) (body : ExprId)
     (dynCount? : Option ExprId := none) (idxId : Nat := 0) : EmitM CompileResult := do
   for t in tables do
-    let _ ← compileNode t
+    let _ ← compileNode arena t
   -- The optional runtime effective count (trip-count-as-data) compiles BEFORE
   -- the region, alongside the tables, so any instructions it needs are
   -- loop-invariant. Its operand rides `ReduceBegin` as args[1]; `loopCount`
   -- stays the static capacity and the emitters clamp at the loop head.
   let countOp? ← dynCount?.mapM fun dc => do
-    let r ← compileNode dc (some .int)
+    let r ← compileNode arena dc (some .int)
     if r.isArray then
       throw "emit_resolved: bankSum dynamic count is array-valued; the effective trip count must be a scalar"
     pure r.op
   let acc ← allocReg
   let memo0 := (← get).memo
   let regionStart := (← get).instrs.size
-  let contrib ← compileNode body
+  let contrib ← compileNode arena body
   if contrib.isArray then
     throw "emit_resolved: bankSum body is array-valued; the mode contribution must be a scalar"
   let ty := if contrib.scalarType == .bool then .int else contrib.scalarType
@@ -489,11 +486,11 @@ private partial def compileBankSum (count : Nat) (tables : Array ExprId) (body :
   modify fun s => { s with memo := memo0 }
   pure (.scalar (.reg acc ty) ty)
 
-private partial def compileSetElement (arrNode idxNode valNode : ExprId) :
+private partial def compileSetElement (arena : CoreArena) (arrNode idxNode valNode : ExprId) :
     EmitM CompileResult := do
-  let arr ← compileNode arrNode
-  let idx ← compileNode idxNode
-  let val ← compileNode valNode
+  let arr ← compileNode arena arrNode
+  let idx ← compileNode arena idxNode
+  let val ← compileNode arena valNode
   match arr with
   | .scalar .. =>
     let size := 1
@@ -578,14 +575,12 @@ private def instInputs : CoreBodyDecl → Array CoreInstanceInput
   | .inst _ _ _ i => i
   | _ => #[]
 
-def emitProgram (outputExprs : Array ExprId)
+def emitProgram (arena : CoreArena) (zeroId : ExprId)
+    (outputExprs : Array ExprId)
     (outputPortScalarCounts : Array Nat)
     (nested : NestedContext)
     (staging : StagingInfo := {}) : EmitM FlatProgram := do
   let mut outputTargets : Array Nat := #[]
-  -- Port-default fallback (an unwired child port with no declared default):
-  -- one shared `0` id in the arena. Interned once; equal to any existing `.num 0`.
-  let zeroId ← internNode (.num (0 : Nat))
 
   -- ── Fractal: per-child pre-input blocks ──
   let mut perChildPreInput : Array (Array NInstr) := #[]
@@ -611,11 +606,11 @@ def emitProgram (outputExprs : Array ExprId)
         | none => portDecl.default?.getD zeroId
       let scalarSlot := childScalarMap.bind (lookup · i)
       let arrayInfo := childArrayMap.bind (lookup · i)
-      let wireStage := some (Staging.stageOf (← get).arena (← get).stageCtx wireExpr)
+      let wireStage := some (Staging.stageOf arena (← get).stageCtx wireExpr)
       match scalarSlot with
       | some slot =>
         let portT := inputDeclScalarType portDecl.type?
-        let r ← compileNode wireExpr (some portT)
+        let r ← compileNode arena wireExpr (some portT)
         withStage wireStage do
           let valOp ← match r with
             | .array op _ rt =>
@@ -627,7 +622,7 @@ def emitProgram (outputExprs : Array ExprId)
       | none =>
         match arrayInfo with
         | some info =>
-          let r ← compileNode wireExpr (some .float)
+          let r ← compileNode arena wireExpr (some .float)
           match r with
           | .scalar .. =>
             throw s!"emit_resolved: array-typed child input port at idx={i} of '{instName decl}' received scalar-shaped wire expression; expected array of size {info.size}"
@@ -655,8 +650,8 @@ def emitProgram (outputExprs : Array ExprId)
   for portI in [0:outputExprs.size] do
     let expr := outputExprs[portI]!
     let declaredCount := outputPortScalarCounts[portI]!
-    let r ← compileNode expr (some .float)
-    let outStage := some (Staging.stageOf (← get).arena (← get).stageCtx expr)
+    let r ← compileNode arena expr (some .float)
+    let outStage := some (Staging.stageOf arena (← get).stageCtx expr)
     modify fun s => { s with curStage := outStage }
     if declaredCount == 1 then
       let dst ← allocReg
@@ -701,8 +696,12 @@ def emitResolvedProgram
     (arena : CoreArena)
     (nested : NestedContext)
     (staging : StagingInfo := {}) : Except String FlatProgram := do
-  let st : EmitSt := { slots, inputPortTypes, arena }
-  let (prog, _) ← (emitProgram outputExprs outputPortScalarCounts nested staging).run st
+  -- Port-default fallback (an unwired child port with no declared default):
+  -- one shared `0` id, interned BEFORE the walk begins — the only node emit
+  -- ever synthesizes, so the arena the traversal sees is immutable.
+  let (zeroId, arena) := (intern (.num (0 : Nat))).run arena
+  let st : EmitSt := { slots, inputPortTypes }
+  let (prog, _) ← (emitProgram arena zeroId outputExprs outputPortScalarCounts nested staging).run st
   return prog
 
 end Tropical.Ir.Emit
