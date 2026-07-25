@@ -363,7 +363,7 @@ open Tropical.EmitArrow in
     (`modalBankSigDirect`) — the i64-modular mode sum is associative, so the loop
     and the fold agree to the bit. This exercises the whole new path end to end:
     `Sig.arr`/`index`/`loopIdx`/`bankSum` through the full lowering, the
-    `ENode→CNode` downcast, and the emit-time reduce-region lowering. We also
+    `ENode→ENode` downcast, and the emit-time reduce-region lowering. We also
     assert the PAYOFF: banking shrinks the plan, and the per-mode MARGINAL
     instruction cost drops (the DSP body no longer unrolls — only the coefficient
     fills still scale, and those are destined for the s0 kernel next). -/

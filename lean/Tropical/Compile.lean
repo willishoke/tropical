@@ -397,7 +397,7 @@ private def childWireExpr (decl : CoreBodyDecl) (portIdx : Nat)
     and its per-output binding-time stages. `inputStages` is the stage
     each of this program's input ports binds at (from the parent). -/
 partial def partitionKernel (instancePath : String) (prog : CoreProgram)
-    (arena : Tropical.Ir.CoreArena)
+    (arena : Tropical.Ir.ExprArena)
     (wires : Array Tropical.Wire) (s : SessionAlloc) (acc : Accumulators)
     (inputSlotOverride : Array (Nat × Nat) := #[])
     (inputArraySlots : Array (Nat × ArraySlotInfo) := #[])
@@ -565,7 +565,7 @@ structure SessionInput where
   /-- The shared hash-consed expression DAG that every instance's (and the
       root's) leaf `ExprId`s index into — one arena for root + registry
       (Phase B). -/
-  arena : Tropical.Ir.CoreArena
+  arena : Tropical.Ir.ExprArena
   mode : Tropical.Plan.CompilationMode := .fused
 
 /-- The synthetic-root session input: one instance — the root itself at
@@ -573,7 +573,7 @@ structure SessionInput where
     no session wires. The shape every carrier/patch-graph lowering
     compiles through `compileSession`; `params`/`alloc` carry a graph's
     live knobs when it has any. -/
-def SessionInput.forRoot (root : CoreProgram) (arena : Tropical.Ir.CoreArena)
+def SessionInput.forRoot (root : CoreProgram) (arena : Tropical.Ir.ExprArena)
     (params : Array (String × Json) := #[])
     (alloc : Tropical.Lowering.Alloc := {}) : SessionInput :=
   { instances := #[(rootInstancePath, root)]

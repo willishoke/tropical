@@ -66,11 +66,7 @@ structure ProgramIdx where
   idx : Nat
 deriving BEq, Repr, Inhabited
 
-/-- Dense index into a hash-consed expression arena (`CoreArena` /
-    `ExprArena`). Defined here (not in `CoreArena`) so `Core`'s
-    post-strata leaves can be `ExprId`s without importing the arena
-    modules that in turn import `Core` (the circular dependency the
-    Phase B DAG-to-emit reshape would otherwise hit). -/
+/-- Dense index into the hash-consed expression arena (`ExprArena`). -/
 structure ExprId where
   idx : Nat
 deriving BEq, Hashable, Repr, Inhabited
@@ -252,11 +248,128 @@ def enodeHash : ENode → UInt64
 
 instance : Hashable ENode := ⟨enodeHash⟩
 
+-- ─────────────────────────────────────────────────────────────
+-- Binding-time stage — computed at intern, "inference you do once"
+-- ─────────────────────────────────────────────────────────────
+
+/-- Binding time of a value, ordered `fold < s0 < s1`:
+
+    - `fold` — const/rate-only. Bound at elaboration; both emitters
+      constant-fold it in f64, so it must never be demoted to a slot
+      crossing (the Metal-precision rule the plan-level pass learned
+      at ~109 dB).
+    - `s0` — τ-independent but control-derived (params): bound at
+      control-write time; the stage-0 coefficient kernel's territory.
+    - `s1` — per-sample (τ below). -/
+inductive Stage where
+  | fold | s0 | s1
+deriving BEq, Repr, Inhabited
+
+def Stage.join : Stage → Stage → Stage
+  | .s1, _ | _, .s1 => .s1
+  | .s0, _ | _, .s0 => .s0
+  | .fold, .fold => .fold
+
+/-- `fold ≤ s0 ≤ s1` — "bound no later than". -/
+def Stage.le : Stage → Stage → Bool
+  | .fold, _ => true
+  | .s0, .fold => false
+  | .s0, _ => true
+  | .s1, s => s == .s1
+
+/-- The stage *signature* of a node: its intrinsic stage joined with
+    symbolic dependencies on the two parametric leaves — input ports
+    (bound per instance by the wiring) and nested-instance outputs
+    (bound by the child program's own signature). Resolution against a
+    binding context happens in `Staging`; the signature itself is a
+    birth attribute, computed once at `eintern` from the (already
+    interned) children — never re-derived by a later walk. -/
+structure StageSig where
+  base : Stage := .fold
+  /-- `InputIdx.idx` deps, strictly ascending. -/
+  inputs : Array Nat := #[]
+  /-- `(InstanceIdx.idx, OutputIdx.idx)` deps, strictly ascending. -/
+  nested : Array (Nat × Nat) := #[]
+deriving BEq, Repr, Inhabited
+
+/-- Merge two strictly-ascending dep arrays (dedup). -/
+private def mergeAsc {α : Type} [Ord α] [Inhabited α] (a b : Array α) : Array α := Id.run do
+  if a.isEmpty then return b
+  if b.isEmpty then return a
+  let mut out : Array α := #[]
+  let mut i := 0
+  let mut j := 0
+  while i < a.size && j < b.size do
+    match compare a[i]! b[j]! with
+    | .lt => out := out.push a[i]!; i := i + 1
+    | .gt => out := out.push b[j]!; j := j + 1
+    | .eq => out := out.push a[i]!; i := i + 1; j := j + 1
+  while i < a.size do out := out.push a[i]!; i := i + 1
+  while j < b.size do out := out.push b[j]!; j := j + 1
+  return out
+
+private instance : Ord (Nat × Nat) := ⟨fun a b =>
+  match compare a.1 b.1 with
+  | .eq => compare a.2 b.2
+  | o => o⟩
+
+def StageSig.join (a b : StageSig) : StageSig :=
+  { base := a.base.join b.base
+    inputs := mergeAsc a.inputs b.inputs
+    nested := mergeAsc a.nested b.nested }
+
+/-- A child's signature during intern (parents intern after children). -/
+private def sigAt (sigs : Array StageSig) (id : ExprId) : StageSig :=
+  sigs[id.idx]?.getD { base := .s1 }
+
+/-- The stage signature of a node given its children's (leaf rules +
+    join). `arr`/`arraySet`/`index` join like everything else — a stage
+    is a property of the VALUE; whether an array-valued node is
+    *hoistable* is the residualizer's placement decision, not the
+    attribute's. -/
+def enodeSig (sigs : Array StageSig) : ENode → StageSig
+  | .num _ | .bool _ | .sampleRate => { base := .fold }
+  | .sampleIndex => { base := .s1 }
+  -- `loopIdx` is the join IDENTITY (`fold`), not `s1`, REGARDLESS of its
+  -- binder id: as a VALUE attribute,
+  -- the iteration index is defined by the enclosing reduce region, so it
+  -- contributes no binding time of its own. This is what lets a `bankSum`
+  -- whose tables/body/count are all s0 BE an s0 value (the whole loop runs
+  -- in the coefficient kernel at control-write time — region-aware Stage0);
+  -- pinning the leaf s1 would drag every region to the audio kernel forever.
+  -- SAFETY: the relaxation is sound only because per-instruction PLACEMENT
+  -- never trusts the attribute alone — `Stage0.overlayS1` pins every
+  -- `loopIdx`-reading instruction (and both delimiters) to s1 for INDIVIDUAL
+  -- moves, and `placementFromStages`' availability walk keeps everything
+  -- downstream of a pinned instruction in place (a loop-dependent temp's
+  -- reaching def is pinned, so its readers fail availability). Loop-dependent
+  -- code therefore leaves the audio kernel only as a WHOLE delimiter-matched
+  -- region (the separate `tryRegion` decision), never one instruction at a
+  -- time.
+  | .loopIdx _ => { base := .fold }
+  | .paramRef _ => { base := .s0 }
+  | .inputRef i => { base := .fold, inputs := #[i.idx] }
+  | .nestedOut i o => { base := .fold, nested := #[(i.idx, o.idx)] }
+  | .arr items => items.foldl (fun acc id => acc.join (sigAt sigs id)) { base := .fold }
+  | .binary _ a b => (sigAt sigs a).join (sigAt sigs b)
+  | .unary _ a => sigAt sigs a
+  | .clamp a b c | .select a b c | .arraySet a b c =>
+    ((sigAt sigs a).join (sigAt sigs b)).join (sigAt sigs c)
+  | .index a b => (sigAt sigs a).join (sigAt sigs b)
+  | .bankSum _ ts b dc _ =>
+    let s := (ts.foldl (fun acc id => acc.join (sigAt sigs id)) ({ base := .fold } : StageSig)).join (sigAt sigs b)
+    match dc with
+    | some d => s.join (sigAt sigs d)
+    | none => s
+
 /-- Interned resolved-expression node store. Append-only; ids are assigned in
-    first-seen order; `dedup` collapses equal nodes. -/
+    first-seen order; `dedup` collapses equal nodes; `sigs[id]` is the node's
+    stage signature, computed at intern (children precede parents, so the
+    join is O(children)). -/
 structure ExprArena where
   nodes : Array ENode := #[]
   dedup : Std.HashMap ENode ExprId := {}
+  sigs : Array StageSig := #[]
 deriving Inhabited
 
 /-- `Repr` over the node array (the `dedup` map is a derived index). Lets
@@ -266,18 +379,23 @@ instance : Repr ExprArena where
 
 abbrev EArenaM := StateM ExprArena
 
-/-- Intern a flat node, returning its (possibly shared) id. -/
+/-- Intern a flat node, returning its (possibly shared) id. O(1)
+    (+O(children) for the stage signature on first intern). -/
 def eintern (n : ENode) : EArenaM ExprId := do
   let a ← get
   match a.dedup.get? n with
   | some id => pure id
   | none =>
     let id : ExprId := ⟨a.nodes.size⟩
-    set { a with nodes := a.nodes.push n, dedup := a.dedup.insert n id }
+    set { a with nodes := a.nodes.push n, dedup := a.dedup.insert n id,
+                 sigs := a.sigs.push (enodeSig a.sigs n) }
     pure id
 
 def ExprArena.deref (a : ExprArena) (id : ExprId) : Option ENode :=
   a.nodes[id.idx]?
+
+def ExprArena.sig? (a : ExprArena) (id : ExprId) : Option StageSig :=
+  a.sigs[id.idx]?
 
 /-- The edge set of the DAG: every child id the node references
     (including `bankSum` tables/body/dynCount). -/

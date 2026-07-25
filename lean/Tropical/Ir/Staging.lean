@@ -1,9 +1,9 @@
-import Tropical.Ir.CoreArena
+import Tropical.Ir.Core
 
 /-!
 # Staging — resolving stage signatures against a binding context
 
-A `StageSig` (computed once at `intern`, see `CoreArena`) is symbolic in
+A `StageSig` (computed once at `intern`, see `ExprArena`) is symbolic in
 the two parametric leaves: input ports and nested-instance outputs. This
 module resolves a signature to a concrete `Stage` given a `StageCtx` —
 the binding context one kernel is emitted under.
@@ -44,7 +44,7 @@ def resolve (ctx : StageCtx) (sig : StageSig) : Stage := Id.run do
   return s
 
 /-- The stage of an interned node under a context. Dangling id → `s1`. -/
-def stageOf (arena : CoreArena) (ctx : StageCtx) (id : ExprId) : Stage :=
+def stageOf (arena : ExprArena) (ctx : StageCtx) (id : ExprId) : Stage :=
   match arena.sig? id with
   | some sig => resolve ctx sig
   | none => .s1

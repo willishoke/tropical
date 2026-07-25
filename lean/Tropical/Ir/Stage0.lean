@@ -1,5 +1,5 @@
 import Std.Data.HashMap
-import Tropical.Ir.CoreArena
+import Tropical.Ir.Core
 import Tropical.Plan
 
 /-!
@@ -123,7 +123,7 @@ private partial def rebuildFn (f : InstanceFunction) (blocks : Array (Array NIns
 -- ─────────────────────────────────────────────────────────────
 
 -- `Stage` (fold < s0 < s1) and `Stage.join` are the shared binding-time
--- type from `Tropical.Ir.CoreArena` — the same lattice the intern-time
+-- type from `Tropical.Ir.ExprArena` — the same lattice the intern-time
 -- attribute uses, so this pass's flow-derived classification and the
 -- typed signature resolution are directly comparable.
 
@@ -419,7 +419,7 @@ private def overlayPinnedS1 (i : NInstr) : Bool :=
     delimiters and every `loopIdx` reader — one instruction of a loop can never
     move alone. A `loopIdx`-reading instruction varies per iteration even when
     its VALUE stage is s0 (the intern-time attribute treats `loopIdx` as
-    stage-neutral — see `cnodeSig`), so it pins s1 here, and everything
+    stage-neutral — see `enodeSig`), so it pins s1 here, and everything
     downstream of it stays behind via the availability walk. Loop code leaves
     the audio kernel only through the whole-region decision (`tryRegion` in
     `placementFromStages`). NOT pinned: plain `array`/`arrayReg` — the

@@ -23,7 +23,7 @@ rewrites and a type boundary:
   toResolved       — the type boundary (`EArena.toResolved`, called by the
                      `runResolved` exit and by `checkResolvedArena` on the
                      session paths): reify the reachable graph into the
-                     emit's `CoreArena`, REJECTING every retired
+                     emit's `ExprArena`, REJECTING every retired
                      constructor. This is the front-door contract — a
                      JSON-loaded `tropical_program_2` can still spell
                      `fold`/`tag`/… syntactically, and dies there with the
@@ -59,7 +59,7 @@ private def assertAcyclic (arena : Arena) (root : ProgramIdx) :
 /-- The direct lowering over the shared expression DAG (the inlining
     bloat never materializes), returning the `EArena` and root index.
     The two exits — `run` (tree, for the codec/registration path) and
-    `runResolved` (the emit's `CoreArena`) — share this body. -/
+    `runResolved` (the emit's `ExprArena`) — share this body. -/
 def runToEArena (opts : Options) (arena : Arena) (root : ProgramIdx) :
     Except Error (EArena × ProgramIdx) := do
   assertAcyclic arena root
@@ -79,11 +79,11 @@ def run (opts : Options) (arena : Arena) (root : ProgramIdx) :
   ea.materialize postRoot
 
 /-- The compile exit: reify the lowered DAG straight into the emit's
-    `(CoreArena × CoreProgram)`, no intermediate tree. This is where the
+    `(ExprArena × CoreProgram)`, no intermediate tree. This is where the
     retired-constructor rejection (`toResolved`) fires on the
     compile-feeding paths. -/
 def runResolved (opts : Options) (arena : Arena) (root : ProgramIdx) :
-    Except Error (Tropical.Ir.CoreArena × Tropical.Ir.Core.CoreProgram) := do
+    Except Error (Tropical.Ir.ExprArena × Tropical.Ir.Core.CoreProgram) := do
   let (ea, postRoot) ← runToEArena opts arena root
   ea.toResolved postRoot
 

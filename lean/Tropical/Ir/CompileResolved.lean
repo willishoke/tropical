@@ -61,7 +61,7 @@ private def outputPortScalarCount (decl : CoreOutputDecl) : Except String Nat :=
 /-- Compile a post-strata `CoreProgram` to a `PerInstancePlan`. The
     `arena` is the shared hash-consed DAG the program's leaf `ExprId`s
     index into (Phase B: one arena for the whole root + registry). -/
-def compileResolved (prog : CoreProgram) (arena : Tropical.Ir.CoreArena)
+def compileResolved (prog : CoreProgram) (arena : Tropical.Ir.ExprArena)
     (ctx : Context := {}) :
     Except String Tropical.Plan.PerInstancePlan := do
   -- ── Output expressions: map output position → expr, in port order ──

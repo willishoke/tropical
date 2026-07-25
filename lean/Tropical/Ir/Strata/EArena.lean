@@ -1,6 +1,6 @@
 import Std.Data.HashMap
 import Tropical.Ir.Nodes
-import Tropical.Ir.CoreArena
+import Tropical.Ir.Core
 import Tropical.Ir.Strata.Basic
 
 /-!
@@ -15,14 +15,7 @@ shared `ExprArena`, and every pass rewrites by interning into that one DAG. When
 same `ExprId` — the duplication never materializes.
 
 `PassM = StateT EArena (Except Error)` is the shared pass monad: `einternP`
-builds nodes, `derefP` reads them, `pushEProgram` appends a rewritten program,
-and `typeParam?/typeDef?` read the (unchanged) identity pools off `base`.
-
-Phase A keeps `Strata.run`'s signature: `ofArena` converts the input `Arena` in
-(interning every program's expressions once, pre-bloat), the id-passes run, and
-`materialize` converts the post-strata root back to a tree `Program`. The
-re-materialization is temporary — Phase B threads the DAG straight to emit — but
-it lets the id-passes land behind the bit-identical audio gate first.
+builds nodes, `derefP` reads them, `pushEProgram` appends a rewritten program.
 -/
 
 namespace Tropical.Ir.Strata
@@ -118,14 +111,15 @@ def EArena.materialize (ea : EArena) (root : ProgramIdx) :
   pure (ea, root)
 
 -- ─────────────────────────────────────────────────────────────
--- Exit (Phase B): id-form EArena → (CoreArena × CoreProgram)
+-- Exit: id-form EArena → (ExprArena × CoreProgram) — reachability GC
 --
--- Pure reachability GC: the strata DAG is threaded straight to emit as
--- a `CoreArena`. Each reachable expression node is converted once and
--- equal subtrees stay one node, so O(unique nodes), never O(expanded
--- tree). REACHABLE-only: `ea.exprs` is append-only, so it can hold
--- nodes no longer referenced by the lowered root (rewritten-away
--- identities); we convert only what the root (and its
+-- The strata DAG is threaded straight to emit as a fresh `ExprArena`
+-- (there is ONE arena vocabulary now — src and dst differ only in
+-- which ids are live). Each reachable expression node is copied once
+-- and equal subtrees stay one node, so O(unique nodes), never
+-- O(expanded tree). REACHABLE-only: `ea.exprs` is append-only, so it
+-- can hold nodes no longer referenced by the lowered root
+-- (rewritten-away identities); we copy only what the root (and its
 -- instance-referenced registry) actually references. There is no
 -- refusal here any more — retired constructors are refused at the JSON
 -- front doors and are unspellable in `ENode`.
@@ -134,13 +128,12 @@ def EArena.materialize (ea : EArena) (root : ProgramIdx) :
 open Tropical.Ir.Core (CoreProgram CoreInputDecl CoreOutputDecl CoreOutputAssign
   CoreBodyDecl CoreInstanceInput)
 
-/-- Conversion state: the emit `CoreArena` under construction plus a memo
-    mapping an `ExprArena` id (`.idx`) to its interned `CoreArena` id. -/
-private abbrev ConvM := StateT (CoreArena × Std.HashMap Nat ExprId) (Except Error)
+/-- GC state: the fresh dst `ExprArena` under construction plus a memo
+    mapping a src id (`.idx`) to its interned dst id. -/
+private abbrev ConvM := StateT (ExprArena × Std.HashMap Nat ExprId) (Except Error)
 
-/-- Convert one reachable `ExprArena` node (and its children) into the
-    `CoreArena`, memoized. With `ENode` shrunk to the trunk set this is
-    a pure structure-preserving copy — the reachability GC.
+/-- Copy one reachable src node (and its children) into the dst arena,
+    memoized — a pure structure-preserving copy; the reachability GC.
 
     TOTAL, by descent on `eid.idx`: the source arena is a frozen
     parameter and `hw` says every edge points down
@@ -151,7 +144,7 @@ private def convExprId (ea : ExprArena) (hw : ea.wf = true) (eid : ExprId) :
   match (← get).2.get? eid.idx with
   | some cid => return cid
   | none =>
-    let cn : CNode ← match _hd : ea.deref eid with
+    let cn : ENode ← match _hd : ea.deref eid with
       | none => throw ⟨s!"toResolved: dangling ExprId {eid.idx} (internal)"⟩
       | some (.num x)          => pure (.num x)
       | some (.bool b)         => pure (.bool b)
@@ -177,7 +170,7 @@ private def convExprId (ea : ExprArena) (hw : ea.wf = true) (eid : ExprId) :
           | some d => pure (some (← convExprId ea hw d))
         pure (.bankSum c ts' b' dc' ii)
     let st ← get
-    let (cid, ca') := (intern cn).run st.1
+    let (cid, ca') := (eintern cn).run st.1
     set (ca', st.2.insert eid.idx cid)
     return cid
 termination_by eid.idx
@@ -187,7 +180,7 @@ decreasing_by
     simp_all [ENode.children]
 
 /-- Convert the reachable `Program` subgraph rooted at `eIdx` into a
-    `CoreProgram`, remapping every leaf id into the `CoreArena` and
+    `CoreProgram`, remapping every leaf id into the `ExprArena` and
     following instance-referenced registry entries recursively (the
     id-form `Core.check`). Port types resolve against the identity pools
     (`base`). -/
@@ -221,10 +214,10 @@ private partial def convProgram (ea : EArena) (hw : ea.exprs.wf = true)
         registry := registry.push (typeKey, ← convProgram ea hw tIdx)
   return .mk ep.name inputs outputs decls assigns registry
 
-/-- The Phase B strata-exit reify: post-strata `EArena` → `(CoreArena ×
+/-- The Phase B strata-exit reify: post-strata `EArena` → `(ExprArena ×
     CoreProgram)`, sharing preserved, reachable-only from `root`. -/
 def EArena.toResolved (ea : EArena) (root : ProgramIdx) :
-    Except Error (CoreArena × CoreProgram) := do
+    Except Error (ExprArena × CoreProgram) := do
   -- One O(edges) sweep buys the conversion's termination measure: every
   -- arena built through `eintern` is child-descending by construction,
   -- so a failure here is an interning-order bug, not a user error.
@@ -236,11 +229,11 @@ def EArena.toResolved (ea : EArena) (root : ProgramIdx) :
 
 /-- Downcast an elaborated `Arena` (a session root / per-program compile
     boundary that never ran the lowering rewrites, but IS the id-form) to
-    `(CoreArena × CoreProgram)`. A thin `Except String` wrapper over
+    `(ExprArena × CoreProgram)`. A thin `Except String` wrapper over
     `toResolved` for the compile call sites; reachable-only, so it validates
     only the evaluator-reachable graph and never touches the whole pool. -/
 def _root_.Tropical.Ir.checkResolvedArena (a : Arena) (root : ProgramIdx) :
-    Except String (Tropical.Ir.CoreArena × Tropical.Ir.Core.CoreProgram) :=
+    Except String (Tropical.Ir.ExprArena × Tropical.Ir.Core.CoreProgram) :=
   (EArena.toResolved a root).mapError (·.message)
 
 -- ─────────────────────────────────────────────────────────────

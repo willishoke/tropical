@@ -1,6 +1,6 @@
 import Lean.Data.Json
 import Tropical.Parse.Nodes
-import Tropical.Ir.CoreArena
+import Tropical.Ir.Core
 
 /-!
 # Plan layer — `tropical_plan_5` as a type

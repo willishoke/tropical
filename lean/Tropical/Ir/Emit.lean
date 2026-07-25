@@ -1,7 +1,7 @@
 import Std.Data.HashMap
 import Lean.Data.Json
 import Tropical.Ir.Core
-import Tropical.Ir.CoreArena
+import Tropical.Ir.Core
 import Tropical.Ir.Staging
 import Tropical.Plan
 
@@ -14,7 +14,7 @@ unrepresentable here, where the TS emitter threw on them).
 
 ## CSE identity discipline
 
-Expressions are lowered into a hash-consed DAG (`CoreArena`) before they
+Expressions are lowered into a hash-consed DAG (`ExprArena`) before they
 are compiled: each node is interned to an `ExprId`, so equal subtrees are
 one node and CSE keys directly on `(ExprId, expectedKey)` — O(1) per node,
 no per-node structural-id recomputation (issue #190). Interning is sound for
@@ -213,7 +213,7 @@ private def resolveNumericLiteralType (n : JsonNumber) (expected : Option Scalar
     pure .bool
   | _ => pure .float
 
-private def tryTerminal (e : CNode) (expected : Option ScalarType) :
+private def tryTerminal (e : ENode) (expected : Option ScalarType) :
     EmitM (Option (NOperand × ScalarType)) := do
   let st ← get
   match e with
@@ -280,13 +280,13 @@ private def unboxIfUnit (r : CompileResult) : EmitM CompileResult := do
    TOTAL: `hw` (checked once by `emitResolvedProgram`) says every edge
    points down, so the walk descends on `idx`. The measure is
    lexicographic `(idx, phase)`: compileNode at phase 2 derefs and hands
-   its children bound (`CoreArena.forall_children_lt`) to the dispatch
+   its children bound (`ExprArena.forall_children_lt`) to the dispatch
    at phase 1, which splits it across the shape helpers at phase 0;
    their recursive calls re-enter compileNode at a strictly smaller
    idx. -/
 mutual
 
-def compileNode (arena : CoreArena) (hw : arena.wf = true) (id : ExprId)
+def compileNode (arena : ExprArena) (hw : arena.wf = true) (id : ExprId)
     (expected : Option ScalarType := none) : EmitM CompileResult := do
   match hd : arena.deref id with
   | none => throw s!"emit_resolved: dangling ExprId {id.idx}"
@@ -299,18 +299,18 @@ def compileNode (arena : CoreArena) (hw : arena.wf = true) (id : ExprId)
     let st ← get
     let r ← withStage (some (Staging.stageOf arena st.stageCtx id))
       (compileNodeUncached arena hw id.idx node
-        (CoreArena.forall_children_lt hw hd) expected)
+        (ExprArena.forall_children_lt hw hd) expected)
     modify fun s => { s with memo := s.memo.insert key r }
     return r
 termination_by (id.idx, 2)
 
-private def compileNodeUncached (arena : CoreArena) (hw : arena.wf = true)
-    (bound : Nat) (e : CNode) (hch : ∀ c ∈ e.children, c.idx < bound)
+private def compileNodeUncached (arena : ExprArena) (hw : arena.wf = true)
+    (bound : Nat) (e : ENode) (hch : ∀ c ∈ e.children, c.idx < bound)
     (expected : Option ScalarType) : EmitM CompileResult := do
   match e, hch with
   | .arr items, hch =>
     compilePack arena hw bound items
-      (fun c hc => hch c (by simpa [CNode.children] using hc)) expected
+      (fun c hc => hch c (by simpa [ENode.children] using hc)) expected
   | .inputRef i, _ =>
     match lookup (← get).slots.inputArraySlots i.idx with
     | some info => pure (.array (.sessionArrayReg info.slot) info.size .float)
@@ -324,40 +324,40 @@ private def compileNodeUncached (arena : CoreArena) (hw : arena.wf = true)
       throw "emit_resolved: nestedOut to non-array sub-instance output reached compileNodeUncached unexpectedly"
   | .binary tag a b, hch =>
     compileBinary arena hw bound (planOpOfBinary tag) a b
-      (hch a (by simp [CNode.children])) (hch b (by simp [CNode.children])) expected
+      (hch a (by simp [ENode.children])) (hch b (by simp [ENode.children])) expected
   | .unary tag a, hch =>
     compileUnary arena hw bound (planOpOfUnary tag) a
-      (hch a (by simp [CNode.children])) expected
+      (hch a (by simp [ENode.children])) expected
   | .clamp a b c, hch =>
     compileTernary arena hw bound .clamp a b c
-      (hch a (by simp [CNode.children])) (hch b (by simp [CNode.children]))
-      (hch c (by simp [CNode.children])) expected
+      (hch a (by simp [ENode.children])) (hch b (by simp [ENode.children]))
+      (hch c (by simp [ENode.children])) expected
   | .select a b c, hch =>
     compileTernary arena hw bound .select a b c
-      (hch a (by simp [CNode.children])) (hch b (by simp [CNode.children]))
-      (hch c (by simp [CNode.children])) expected
+      (hch a (by simp [ENode.children])) (hch b (by simp [ENode.children]))
+      (hch c (by simp [ENode.children])) expected
   | .arraySet a b c, hch =>
     compileSetElement arena hw bound a b c
-      (hch a (by simp [CNode.children])) (hch b (by simp [CNode.children]))
-      (hch c (by simp [CNode.children]))
+      (hch a (by simp [ENode.children])) (hch b (by simp [ENode.children]))
+      (hch c (by simp [ENode.children]))
   | .index a b, hch =>
     compileIndex arena hw bound a b
-      (hch a (by simp [CNode.children])) (hch b (by simp [CNode.children]))
+      (hch a (by simp [ENode.children])) (hch b (by simp [ENode.children]))
   | .bankSum count tables body dynCount? idxId, hch =>
     compileBankSum arena hw bound count tables body dynCount? idxId
       (fun t ht => hch t (by
-        simp only [CNode.children, Array.mem_append, Array.mem_push]
+        simp only [ENode.children, Array.mem_append, Array.mem_push]
         exact Or.inl (Or.inl ht)))
-      (hch body (by simp [CNode.children]))
+      (hch body (by simp [ENode.children]))
       (fun d hd => hch d (by
-        simp only [CNode.children, Array.mem_append, Array.mem_push]
+        simp only [ENode.children, Array.mem_append, Array.mem_push]
         exact Or.inr (by rw [Option.mem_def.mp hd]; simp)))
   | .num _, _ | .bool _, _ | .paramRef _, _ | .sampleRate, _ | .sampleIndex, _
   | .loopIdx _, _ =>
     throw "emit_resolved: terminal node reached compileNodeUncached (port bug)"
 termination_by (bound, 1)
 
-private def compilePack (arena : CoreArena) (hw : arena.wf = true) (bound : Nat)
+private def compilePack (arena : ExprArena) (hw : arena.wf = true) (bound : Nat)
     (elements : Array ExprId) (_hels : ∀ c ∈ elements, c.idx < bound)
     (expected : Option ScalarType) : EmitM CompileResult := do
   let size := elements.size
@@ -370,7 +370,7 @@ private def compilePack (arena : CoreArena) (hw : arena.wf = true) (bound : Nat)
 termination_by (bound, 0)
 decreasing_by have := _hels _ ‹_ ∈ elements›; apply Prod.Lex.left; omega
 
-private def compileBinary (arena : CoreArena) (hw : arena.wf = true) (bound : Nat)
+private def compileBinary (arena : ExprArena) (hw : arena.wf = true) (bound : Nat)
     (op : PlanOp) (lhs rhs : ExprId)
     (_hl : lhs.idx < bound) (_hr : rhs.idx < bound)
     (expected : Option ScalarType) : EmitM CompileResult := do
@@ -406,7 +406,7 @@ private def compileBinary (arena : CoreArena) (hw : arena.wf = true) (bound : Na
 termination_by (bound, 0)
 decreasing_by all_goals (apply Prod.Lex.left; omega)
 
-private def compileUnary (arena : CoreArena) (hw : arena.wf = true) (bound : Nat)
+private def compileUnary (arena : ExprArena) (hw : arena.wf = true) (bound : Nat)
     (op : PlanOp) (arg : ExprId) (_ha : arg.idx < bound)
     (expected : Option ScalarType) : EmitM CompileResult := do
   let argExpected : Option ScalarType :=
@@ -433,7 +433,7 @@ private def compileUnary (arena : CoreArena) (hw : arena.wf = true) (bound : Nat
 termination_by (bound, 0)
 decreasing_by apply Prod.Lex.left; omega
 
-private def compileTernary (arena : CoreArena) (hw : arena.wf = true) (bound : Nat)
+private def compileTernary (arena : ExprArena) (hw : arena.wf = true) (bound : Nat)
     (op : PlanOp) (n1 n2 n3 : ExprId)
     (_h1 : n1.idx < bound) (_h2 : n2.idx < bound) (_h3 : n3.idx < bound)
     (expected : Option ScalarType) : EmitM CompileResult := do
@@ -464,7 +464,7 @@ private def compileTernary (arena : CoreArena) (hw : arena.wf = true) (bound : N
 termination_by (bound, 0)
 decreasing_by all_goals (apply Prod.Lex.left; omega)
 
-private def compileIndex (arena : CoreArena) (hw : arena.wf = true) (bound : Nat)
+private def compileIndex (arena : ExprArena) (hw : arena.wf = true) (bound : Nat)
     (arrNode idxNode : ExprId)
     (_h1 : arrNode.idx < bound) (_h2 : idxNode.idx < bound) : EmitM CompileResult := do
   let arr ← compileNode arena hw arrNode
@@ -483,7 +483,7 @@ private def compileIndex (arena : CoreArena) (hw : arena.wf = true) (bound : Nat
 termination_by (bound, 0)
 decreasing_by all_goals (apply Prod.Lex.left; omega)
 
-/-- Emit an indexed reduction (`CNode.bankSum`) as a `ReduceBegin`/body/`ReduceEnd`
+/-- Emit an indexed reduction (`ENode.bankSum`) as a `ReduceBegin`/body/`ReduceEnd`
     region — the banks-as-data lowering (slice 3b). The loop visits elements in
     array order — the same order the unrolled fold nests its adds — so the region
     renders bit-identical to the unroll for ANY scalar element type (order
@@ -511,7 +511,7 @@ decreasing_by all_goals (apply Prod.Lex.left; omega)
       is the region's binder id: it rides `ReduceBegin` as `loop_id`, and the
       body's `loopIdx idxId` operands resolve against the emitters' stack of
       open regions. -/
-private def compileBankSum (arena : CoreArena) (hw : arena.wf = true) (bound : Nat)
+private def compileBankSum (arena : ExprArena) (hw : arena.wf = true) (bound : Nat)
     (count : Nat) (tables : Array ExprId) (body : ExprId)
     (dynCount? : Option ExprId) (idxId : Nat)
     (_hts : ∀ t ∈ tables, t.idx < bound) (_hb : body.idx < bound)
@@ -550,7 +550,7 @@ decreasing_by
     | (have := hdc _ rfl; apply Prod.Lex.left; omega)
     | (apply Prod.Lex.left; omega)
 
-private def compileSetElement (arena : CoreArena) (hw : arena.wf = true) (bound : Nat)
+private def compileSetElement (arena : ExprArena) (hw : arena.wf = true) (bound : Nat)
     (arrNode idxNode valNode : ExprId)
     (_h1 : arrNode.idx < bound) (_h2 : idxNode.idx < bound) (_h3 : valNode.idx < bound) :
     EmitM CompileResult := do
@@ -642,7 +642,7 @@ private def instInputs : CoreBodyDecl → Array CoreInstanceInput
   | .inst _ _ i => i
   | _ => #[]
 
-def emitProgram (arena : CoreArena) (hw : arena.wf = true) (zeroId : ExprId)
+def emitProgram (arena : ExprArena) (hw : arena.wf = true) (zeroId : ExprId)
     (outputExprs : Array ExprId)
     (outputPortScalarCounts : Array Nat)
     (nested : NestedContext)
@@ -760,13 +760,13 @@ def emitResolvedProgram
     (outputPortScalarCounts : Array Nat)
     (inputPortTypes : Array ScalarType)
     (slots : EmitSlots)
-    (arena : CoreArena)
+    (arena : ExprArena)
     (nested : NestedContext)
     (staging : StagingInfo := {}) : Except String FlatProgram := do
   -- Port-default fallback (an unwired child port with no declared default):
   -- one shared `0` id, interned BEFORE the walk begins — the only node emit
   -- ever synthesizes, so the arena the traversal sees is immutable.
-  let (zeroId, arena) := (intern (.num (0 : Nat))).run arena
+  let (zeroId, arena) := (eintern (.num (0 : Nat))).run arena
   -- One O(edges) sweep buys the walk's termination measure (every arena
   -- built through `intern` is child-descending by construction).
   if hw : arena.wf then

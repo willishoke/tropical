@@ -6,7 +6,7 @@ import Tropical.Ir.Nodes
 "The smallest sub-IR sufficient for any per-sample evaluator," made a
 type instead of prose. `CoreProgram` is the post-strata program: scalar,
 monomorphic, acyclic, combinator-free. Its **expression leaves are
-`ExprId`s** into a shared `CoreArena` (Phase B) — the tree twin `CoreExpr`
+`ExprId`s** into a shared `ExprArena` (Phase B) — the tree twin `CoreExpr`
 is gone; there is one post-strata expression representation, the hash-consed
 DAG.
 
