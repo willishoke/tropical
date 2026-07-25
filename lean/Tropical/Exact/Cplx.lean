@@ -20,6 +20,70 @@ both of its parts are.
 
 namespace Tropical.Exact
 
+-- ── The POINT carrier: reproducible arithmetic without an enclosure ──────────
+-- `DyadicI` answers "where is the value, certainly". Some bake-time questions
+-- do not want that answer. A SELF-CORRECTING RECURRENCE — modified Lentz for a
+-- continued fraction is the example — converges in floating point precisely
+-- because each step damps the previous step's error; interval arithmetic cannot
+-- see that damping (it tracks a worst case that the recurrence has already
+-- forgotten) and the enclosure widens about two bits per iteration until it is
+-- useless. Tracking it is the wrong instrument, not a precision shortfall.
+--
+-- What such a loop actually needs is REPRODUCIBILITY: the same iteration count
+-- on every platform. `Dyadic` with a fixed round-to-nearest at the working
+-- precision gives exactly that — the same algorithm, no `libm`, no
+-- fused-multiply-add, no reassociation, and 128 mantissa bits against a
+-- double's 53. That is the point carrier below.
+--
+-- The division is `Option`-valued for the same reason `DyadicI.inv` poisons: a
+-- reciprocal that does not exist is refused, never fabricated as zero.
+
+/-- Round a `Dyadic` to the working precision, to nearest — the point carrier's
+    one rounding, applied after every operation so mantissas stay bounded. -/
+private def rn (a : Dyadic) : Dyadic := Dyadic.roundNearestRel workingPrec a
+
+/-- A complex number in exact, reproducibly-rounded arithmetic — no enclosure.
+    The deterministic stand-in for `CplxB`, for recurrences whose convergence an
+    interval cannot follow. -/
+structure CplxD where
+  re : Dyadic
+  im : Dyadic
+
+namespace CplxD
+
+def zero : CplxD := ⟨0, 0⟩
+
+instance : Inhabited CplxD := ⟨zero⟩
+def one  : CplxD := ⟨1, 0⟩
+def ofNat (n : Nat) : CplxD := ⟨Dyadic.ofInt (n : Int), 0⟩
+def ofDyadic (d : Dyadic) : CplxD := ⟨d, 0⟩
+
+/-- A build-time `Float` pair enters EXACTLY. -/
+def ofFloats (re im : Float) : CplxD := ⟨Dyadic.ofFloat re, Dyadic.ofFloat im⟩
+
+def add (a b : CplxD) : CplxD := ⟨rn (a.re + b.re), rn (a.im + b.im)⟩
+def sub (a b : CplxD) : CplxD := ⟨rn (a.re - b.re), rn (a.im - b.im)⟩
+def neg (a : CplxD) : CplxD := ⟨-a.re, -a.im⟩
+
+def mul (a b : CplxD) : CplxD :=
+  ⟨rn (a.re * b.re - a.im * b.im), rn (a.re * b.im + a.im * b.re)⟩
+
+def normSq (a : CplxD) : Dyadic := rn (a.re * a.re + a.im * a.im)
+
+def abs (a : CplxD) : Dyadic :=
+  (Dyadic.sqrtRel? .down workingPrec (normSq a)).getD 0
+
+/-- `a / b`; `none` when `b` is exactly zero. -/
+def div (a b : CplxD) : Option CplxD := do
+  let d := normSq b
+  let re ← Dyadic.divRel? .down workingPrec (a.re * b.re + a.im * b.im) d
+  let im ← Dyadic.divRel? .down workingPrec (a.im * b.re - a.re * b.im) d
+  pure ⟨re, im⟩
+
+def toFloats (a : CplxD) : Float × Float := (a.re.toFloat, a.im.toFloat)
+
+end CplxD
+
 /-- A complex number as a pair of certified enclosures. The exact twin of the
     bake layer's `CplxB`. -/
 structure CplxDI where

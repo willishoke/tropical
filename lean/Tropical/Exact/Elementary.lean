@@ -70,6 +70,13 @@ def exp (x : DyadicI) : DyadicI :=
     let tw := abs t
     shift ⟨s.lo - tw.hi, s.hi + tw.hi, s.ok⟩ k
 
+/-- Euler's `e`, certified. A nullary `def`, so it is evaluated once at module
+    init and every use is a global read — the series does not re-run per call.
+    (The float bake path reaches the same constant two ways, `Float.exp 1.0` in
+    one place and the literal `2.718281828459045` in another; here there is one
+    of it, and it is the true `e` rather than a rounding of it.) -/
+def eulerI : DyadicI := exp one
+
 /-- `atanh s` for `|s| ≤ 0.2` — the kernel of `log`. `Σ s^{2j+1}/(2j+1)`.
 
     Unlike `sin`/`cos`/`atan` this series does NOT alternate: every term carries

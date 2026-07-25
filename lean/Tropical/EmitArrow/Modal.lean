@@ -1,6 +1,7 @@
 import Tropical.EmitArrow.Numerics
 import Tropical.Ir.BanksFlag
 import Tropical.EmitArrow.Term
+import Tropical.Exact.Gamma
 
 /-!
 # EmitArrow.Modal — the pole island: modal banks + the residue calculus
@@ -20,6 +21,7 @@ without touching σ or ω.
 namespace Tropical.EmitArrow
 
 open Tropical.Ir
+open Tropical.Exact (DyadicI CplxD CplxDI)
 
 /-- One mode in RECTANGULAR form: `d^deg · e^{−σd} · (c_re·cos(ωd) − c_im·sin(ωd))
     = Re(A · d^deg · e^{μd})` with pole `μ = −σ + iω` and complex amp `A = c_re +
@@ -70,6 +72,32 @@ partial def sigConstF? : Sig → Option Float
       pure (if y == 0.0 then 0.0 else x / y)
   | _                 => none
 
+/-- The EXACT twin of `sigConstF?`: fold an authored-constant `Sig` to a
+    certified enclosure instead of a `Float`. This is what every DECISION site
+    reads, because a decision made from a platform `libm`'s last bit can change
+    the emitted program's shape (see `Tropical.Exact`).
+
+    Two differences from the `Float` twin, both deliberate:
+
+    * A DECIMAL literal is not dyadic, so `0.1` enters as a tight enclosure
+      rather than pretending to be a point. That is where the authoring layer's
+      exactness genuinely ends, and the carrier says so.
+    * Division by zero POISONS instead of fabricating `0.0`. The `Float` twin's
+      `if y == 0.0 then 0.0` reads back a coincident-pole amplitude — whose
+      emitted value is `±inf` — as the number zero, and a classifier downstream
+      then certifies a coupling on it. Poison propagates to the caller, which
+      treats the mode as non-const (falling back to the live path) rather than
+      folding a value that does not exist. -/
+partial def sigConstD? : Sig → Option DyadicI
+  | .num n            => some (DyadicI.ofJsonNumber n)
+  | .unary .neg a     => (sigConstD? a).map DyadicI.neg
+  | .unary .toFloat a => sigConstD? a
+  | .binary .add a b  => do pure (DyadicI.add (← sigConstD? a) (← sigConstD? b))
+  | .binary .sub a b  => do pure (DyadicI.sub (← sigConstD? a) (← sigConstD? b))
+  | .binary .mul a b  => do pure (DyadicI.mul (← sigConstD? a) (← sigConstD? b))
+  | .binary .div a b  => do pure (DyadicI.div (← sigConstD? a) (← sigConstD? b))
+  | _                 => none
+
 -- ── Option E: the per-bank Q-landing exponent (the modal-datapath rail fix) ────
 -- Every modal weight lands as Q4.28 (×2²⁸) and multiplies an exact Q2.30 rotator
 -- in i64, so `w·env·2²⁸·2³⁰ = w·env·2⁵⁸` wraps against i64's 2⁶³ once the LANDED
@@ -97,23 +125,28 @@ partial def sigConstF? : Sig → Option Float
 -- this rail. Both extremes are past any musical level; the device clamp (C = 256)
 -- bounds their blast radius at the DAC.
 
-/-- `⌊log₂|x|⌋` for a finite nonzero `x` — the IEEE-754 unbiased exponent, the
-    exact Lean-Float mirror of the `floatExponent` op the DYNAMIC path emits (so a
-    bank that happens to be all-const and one that is live agree on `k`). -/
-private def floatExpZ (x : Float) : Int :=
-  (((x.abs.toBits >>> 52) &&& 0x7ff).toNat : Int) - 1023
+/-- `⌊log₂|x|⌋` for a certified-positive enclosure — the exact mirror of the
+    `floatExponent` op the DYNAMIC path emits (so a bank that happens to be
+    all-const and one that is live agree on `k`).
+
+    Read off the UPPER endpoint, which is the fail-safe direction: a larger
+    `maxAbs` yields a larger `k`, hence a SMALLER landing scale and more
+    headroom. The enclosure can only move `k` at all when the true magnitude
+    sits within the enclosure width of a power of two, and then it moves it the
+    safe way. -/
+private def landExpZ (x : DyadicI) : Int := (DyadicI.abs x).hi.magBits - 1
 
 /-- `k = clamp(0, 28, ⌊log₂ maxAbs⌋ − 4)` as a `Nat` (the static path). Solves
     `maxAbs < 32·2^k` for `maxAbs < 2³³` (the k=28 ceiling: above it `k` saturates
     and the guarantee lapses — a +198 dB weight, practically inert). `maxAbs < 32
-    ⇒ k = 0` (bit-identical). Non-finite (`+∞` from a non-decaying deg>0 mode) ⇒
-    `k = 28` (max headroom); `≤ 0` ⇒ `k = 0` (a silent all-zero bank lands verbatim). -/
-private def landK (maxAbs : Float) : Nat :=
-  if maxAbs ≤ 0.0 then 0            -- silent/all-zero bank: land verbatim (k=0)
+    ⇒ k = 0` (bit-identical). A magnitude not certifiably above zero (a silent
+    all-zero bank, or one whose enclosure cannot be separated from zero) lands
+    verbatim at `k = 0`; an UNBOUNDED sup is handled by the caller, which lands
+    `k = 28` (max headroom) without ever forming an infinity. -/
+private def landK (maxAbs : DyadicI) : Nat :=
+  if !DyadicI.certGt maxAbs DyadicI.zero then 0
   else
-    -- ∞/NaN reach here (¬(x ≤ 0)); floatExpZ reads their exponent field 2047 ⇒
-    -- 1024 ⇒ clamp 28 (max headroom, matching the dynamic floatExponent path).
-    let e := floatExpZ maxAbs - 4
+    let e := landExpZ maxAbs - 4
     if e ≤ 0 then 0 else if e ≥ 28 then 28 else e.toNat
 
 /-- The per-bank Q-landing exponent `k`. STATIC when every amp answers
@@ -140,13 +173,29 @@ def LandExp.shift : LandExp → Sig
 
 /-- The envelope-peak factor `sup_{d≥0} d^p·e^{−σd} = (p/(σe))^p` for a mode of
     degree `p` (the polynomial-order lift): `1` for `p=0` (`e^{−σd} ≤ 1`), else the
-    interior peak at `d = p/σ`. A non-decaying polynomial mode (`σ ≤ 0`, `p > 0`)
-    has no finite sup — `+∞`, which lands `k=28` (max headroom; it cannot be made
-    safe, and no residue calculus produces one). -/
-private def envPeakF (deg : Nat) (sigma : Float) : Float :=
-  if deg == 0 then 1.0
-  else if sigma ≤ 0.0 then (1.0 / 0.0)
-  else Float.pow (deg.toFloat / (sigma * 2.718281828459045)) deg.toFloat
+    interior peak at `d = p/σ`. `none` means NO FINITE SUP — a non-decaying
+    polynomial mode (`σ ≤ 0`, `p > 0`), or a `σ` whose enclosure cannot be
+    separated from zero. The caller lands `k = 28` there (max headroom; it cannot
+    be made safe, and no residue calculus produces one).
+
+    `none` in place of the old `+∞` is what removes a latent asymmetry: `+∞`
+    times a zero amplitude is `NaN`, and `NaN > mx` is `false`, so the static
+    fold silently SKIPPED such a mode and failed toward the wrap while the
+    dynamic mirror (`floatExponent NaN = 1024`) failed toward headroom — the two
+    paths disagreeing in opposite directions on the one case the rail exists
+    for. The carrier has no infinities to multiply, so the caller decides
+    explicitly: a silent mode contributes nothing at any envelope, and only a
+    LOUD mode with an unbounded envelope forces the ceiling.
+
+    The integer exponent is taken by exact repeated multiplication (`powNat`),
+    not `exp(p·log b)` — closed form where the closed form exists. -/
+private def envPeakD (deg : Nat) (sigma : DyadicI) : Option DyadicI :=
+  if deg == 0 then some DyadicI.one
+  else if !DyadicI.certGt sigma DyadicI.zero then none
+  else
+    let e := DyadicI.ofFloat 2.718281828459045
+    let peak := DyadicI.powNat (DyadicI.div (DyadicI.ofNat deg) (DyadicI.mul sigma e)) deg
+    if peak.ok then some peak else none
 
 /-- The `Sig` mirror of `envPeakF` for the DYNAMIC max fold: `(p/(σe))^p·(|cre|+
     |cim|)`. Reduces to exactly `|cre|+|cim|` at `deg=0`, so a deg-0 bank's `maxSig`
@@ -169,23 +218,32 @@ private def modeWeightBoundSig (m : ModalMode) : Sig :=
     = −1023 ⇒ k=0` (silent bank), `floatExponent NaN/∞ = 1024 ⇒ k=28` (max
     headroom), never k=0-toward-the-wrap. Both paths clamp `k∈[0,28]`. -/
 def bankLandExp (modes : Array ModalMode) : LandExp := Id.run do
-  let mut mx : Float := 0.0
+  let mut mx : DyadicI := DyadicI.zero
+  let mut unbounded := false
   let mut allConst := true
   for m in modes do
     -- deg-0 (the whole plain vocabulary) never queries σ, so a live-σ deg-0 bank
     -- still takes the static path when its amps const-fold.
     if m.deg == 0 then
-      match sigConstF? m.cre, sigConstF? m.cim with
-      | some cr, some ci => let v := cr.abs + ci.abs; if v > mx then mx := v
+      match sigConstD? m.cre, sigConstD? m.cim with
+      | some cr, some ci =>
+        let v := DyadicI.add (DyadicI.abs cr) (DyadicI.abs ci)
+        if v.ok then mx := DyadicI.max mx v else allConst := false
       | _, _ => allConst := false
     else
-      match sigConstF? m.cre, sigConstF? m.cim, sigConstF? m.sigma with
+      match sigConstD? m.cre, sigConstD? m.cim, sigConstD? m.sigma with
       | some cr, some ci, some sg =>
-        let v := (cr.abs + ci.abs) * envPeakF m.deg sg
-        if v > mx then mx := v
+        let amp := DyadicI.add (DyadicI.abs cr) (DyadicI.abs ci)
+        if !amp.ok then allConst := false
+        -- a SILENT mode contributes nothing at any envelope, so it must not
+        -- force the ceiling — this is where the old `0 · ∞ = NaN` skip lived
+        else if !DyadicI.certGt amp DyadicI.zero then pure ()
+        else match envPeakD m.deg sg with
+          | none => unbounded := true
+          | some peak => mx := DyadicI.max mx (DyadicI.mul amp peak)
       | _, _, _ => allConst := false
   if allConst then
-    return .static (landK mx)
+    return .static (if unbounded then 28 else landK mx)
   let maxSig := modes.foldl (fun acc m =>
     let a := modeWeightBoundSig m
     selectE (gt acc a) acc a) (lit 0)
@@ -729,6 +787,16 @@ def ecddRailCeil : Float := 4.0
     Cap 8 = the plain Q4.28 ceiling, 4× under the DD site's i64 rail of 32. -/
 def ecddPairCap : Float := 8.0
 
+/-! The same three lenses on the exact carrier — what the ROUTER actually
+    compares against, since its verdict picks which body a coupling is emitted
+    into. Each is the SAME double (a finite `Float` is a dyadic, so `ofFloat`
+    moves nothing); the `Float` definitions above stay as the published,
+    documented constants and as the seam sweep's reference. -/
+
+def ecddThetaAccD : DyadicI := DyadicI.ofFloat ecddThetaAcc
+def ecddRailCeilD : DyadicI := DyadicI.ofFloat ecddRailCeil
+def ecddPairCapD  : DyadicI := DyadicI.ofFloat ecddPairCap
+
 /-- The σ INTERVAL a mode's damping ranges over: a const σ is its own point
     interval; a LIVE σ with a declared `sigmaRange` classifies over the knob
     span (WS-LP's build-time-over-the-declared-interval discipline); a live σ
@@ -737,6 +805,15 @@ def sigmaInterval? (m : ModalMode) : Option (Float × Float) :=
   match sigConstF? m.sigma with
   | some s => some (s, s)
   | none => m.sigmaRange
+
+/-- The exact twin of `sigmaInterval?` — what the ROUTER reads, since its
+    verdict changes which body a coupling is emitted into. A declared
+    `sigmaRange` is a pair of authored `Float`s and enters the carrier exactly
+    (a finite double is a dyadic), so nothing about the declaration moves. -/
+def sigmaIntervalD? (m : ModalMode) : Option (DyadicI × DyadicI) :=
+  match sigConstD? m.sigma with
+  | some s => some (s, s)
+  | none => m.sigmaRange.map (fun (lo, hi) => (DyadicI.ofFloat lo, DyadicI.ofFloat hi))
 
 /-- A mode's pole with a LIVE σ CLAMPED to its declared interval (coefficient-
     time, the WS-LP kernel-clamp precedent) — what makes the paired route's
@@ -798,30 +875,46 @@ deriving DecidableEq
 def classifyCoupling (v r : ModalMode) : CouplingRoute :=
   if !(v.deg == 0 && r.deg == 0) then .cold else
   Id.run do
-    let some (svLo, svHi) := sigmaInterval? v | return .cold
-    let some (srLo, srHi) := sigmaInterval? r | return .cold
-    let some wv := sigConstF? v.omega | return .cold
-    let some wr := sigConstF? r.omega | return .cold
-    let some ar := sigConstF? v.cre | return .cold
-    let some ai := sigConstF? v.cim | return .cold
-    let some rr := sigConstF? r.cre | return .cold
-    let some ri := sigConstF? r.cim | return .cold
+    let some (svLo, svHi) := sigmaIntervalD? v | return .cold
+    let some (srLo, srHi) := sigmaIntervalD? r | return .cold
+    let some wv := sigConstD? v.omega | return .cold
+    let some wr := sigConstD? r.omega | return .cold
+    let some ar := sigConstD? v.cre | return .cold
+    let some ai := sigConstD? v.cim | return .cold
+    let some rr := sigConstD? r.cre | return .cold
+    let some ri := sigConstD? r.cim | return .cold
     -- min |Δ| over the σ interval(s): the span distance (0 when they overlap —
     -- the dipper), ω exact. Const σ degenerates to the point distance.
-    let sepLo := if svLo < srLo then srLo else svLo
-    let sepHi := if svHi < srHi then srHi else svHi
-    let dSig := if sepLo > sepHi then sepLo - sepHi else 0.0
-    let dAbs := Float.sqrt (dSig * dSig + (wv - wr) * (wv - wr))
-    let cAbs := Float.sqrt (ar * ar + ai * ai) * Float.sqrt (rr * rr + ri * ri)
-    if !(dAbs < ecddThetaAcc || (dAbs > 0.0 && cAbs / dAbs > ecddRailCeil)) then
+    --
+    -- NOTE (behaviour preserved verbatim across the carrier flip): `sepHi` takes
+    -- a MAX where the span distance wants a min, so `sepLo ≤ sepHi` always holds
+    -- and `dSig` is identically zero — the σ axis of the accuracy lens does not
+    -- currently participate, and `dAbs` reduces to `|ω_v − ω_r|`. That is a
+    -- pre-existing defect, not one this flip introduces, and it is left standing
+    -- HERE on purpose: a carrier cutover whose differential also contains a
+    -- semantic change cannot tell you which one moved a decision. It is repaired
+    -- in its own commit, with its own measurement.
+    let sepLo := DyadicI.max svLo srLo
+    let sepHi := DyadicI.max svHi srHi
+    let dSig := if DyadicI.certGt sepLo sepHi then DyadicI.sub sepLo sepHi else DyadicI.zero
+    let dw := DyadicI.sub wv wr
+    let dAbs := DyadicI.sqrt (DyadicI.add (DyadicI.mul dSig dSig) (DyadicI.mul dw dw))
+    let cAbs := DyadicI.mul (CplxDI.abs (CplxDI.mkI ar ai)) (CplxDI.abs (CplxDI.mkI rr ri))
+    let dPos := DyadicI.certGt dAbs DyadicI.zero
+    if !(DyadicI.certLt dAbs ecddThetaAccD
+         || (dPos && DyadicI.certGt (DyadicI.div cAbs dAbs) ecddRailCeilD)) then
       return .cold
     -- the paired range cap: sup of the divided-difference kernel over the
     -- WHOLE interval — σ_min at the spans' low edge, |Δ| at its minimum
     -- (sound: the paired pole clamps to the interval, `clampedPoleE`).
     -- `min(sup₁, sup₂) < cap ⟺ either bound clears` — no infinity sentinels.
-    let smin := if svLo < srLo then svLo else srLo
-    let capOk := (dAbs > 0.0 && cAbs * (2.0 / dAbs) < ecddPairCap)
-              || (smin > 0.0 && cAbs * (1.0 / (Float.exp 1.0 * smin)) < ecddPairCap)
+    let smin := DyadicI.min svLo srLo
+    let capOk :=
+      (dPos && DyadicI.certLt (DyadicI.mul cAbs (DyadicI.div (DyadicI.ofInt 2) dAbs))
+                              ecddPairCapD)
+      || (DyadicI.certGt smin DyadicI.zero
+          && DyadicI.certLt (DyadicI.div cAbs (DyadicI.mul Tropical.Exact.DyadicI.eulerI smin))
+                            ecddPairCapD)
     return if capOk then .paired else .refused
 
 /-- `true` ⇒ the (v, r) coupling leaves the collected sums and becomes one
@@ -1194,6 +1287,86 @@ def bloomCF (a z : CplxB) (tol : Float := 1e-15) (cap : Nat := 4000) : CplxB × 
     if (delta.sub ⟨1, 0⟩).abs ≤ tol then return (h, i)
   return (h, cap)
 
+-- ── The CERTIFIED DEPTHS: structure that cannot come from rounding ────────────
+-- `bloomM1`/`bloomCF` above are iterate-until-tolerance loops, and the count
+-- they return SIZES AN EMITTED ARRAY (`invA`, `cfB`/`cfN`) — so a one-ulp
+-- platform difference in the stopping test is not a different last bit, it is a
+-- different PROGRAM. That is the sharpest instance of the whole exact-bake
+-- campaign, and it is fixed independently of the values: the same recurrences
+-- run on the exact carrier, returning the count alone.
+--
+-- Both loops run on the POINT carrier (`CplxD`), not the enclosure. That is a
+-- deliberate choice about which instrument fits: these are SELF-CORRECTING
+-- recurrences — modified Lentz especially — that converge in floating point
+-- because each step damps the last step's error. An interval cannot see that
+-- damping; it tracks a worst case the recurrence has already forgotten, and the
+-- enclosure widens about two bits per iteration until it poisons (measured: gone
+-- by iteration ~100 at 128 bits, on a config the float loop settles at 108).
+-- Certification is not what a depth wants anyway — a rigorous depth would need a
+-- remainder bound on the TAIL, which the enclosure of the computed δ is not.
+--
+-- What the depth wants is REPRODUCIBILITY, and that is exactly what exact dyadic
+-- arithmetic at a fixed rounding delivers: the same algorithm, the same count on
+-- every platform, no libm, and 128 mantissa bits against a double's 53. The
+-- enclosure stays where it earns its keep — the region thresholds below, where a
+-- genuine separation question is being asked.
+--
+-- (`bloomM1`/`bloomCF` keep computing their VALUES in `CplxB` for now; the value
+-- flip is the next phase, and these depth functions collapse back into it as
+-- its second component.)
+
+/-- `bloomM1`'s term count, reproducibly. Same recurrence (`tₙ = tₙ₋₁·z/(a+n)`,
+    stop when `|tₙ| ≤ tol·max(|s|,1)`), exact arithmetic. -/
+def bloomM1DepthD (a z : CplxD) (tol : Dyadic) (cap : Nat := 4000) : Nat := Id.run do
+  let mut s : CplxD := CplxD.one
+  let mut t : CplxD := CplxD.one
+  for n in [1:cap] do
+    let some t' := CplxD.div (CplxD.mul t z) (CplxD.add a (CplxD.ofNat n)) | return cap
+    t := t'
+    s := CplxD.add s t
+    if Dyadic.ble (CplxD.abs t) (tol * Dyadic.dmax (CplxD.abs s) 1) then return n
+  return cap
+
+/-- `bloomCF`'s Lentz depth, reproducibly. Same modified-Lentz iteration
+    including its `tiny` renormalizations — those guard the FLOAT path against
+    underflow and exact arithmetic does not need them, but they are kept verbatim
+    because they participate in the count, and this function's contract is to
+    reproduce `bloomCF`'s depth deterministically, not to improve on it. -/
+def bloomCFDepthD (a z : CplxD) (tol : Dyadic) (cap : Nat := 4000) : Nat := Id.run do
+  let tiny : Dyadic := Dyadic.ofFloat 1.0e-300
+  let tinyC : CplxD := CplxD.ofDyadic tiny
+  let two : CplxD := CplxD.ofNat 2
+  let mut b : CplxD := CplxD.sub (CplxD.add z CplxD.one) a
+  let mut c : CplxD := CplxD.ofDyadic (Dyadic.ofFloat 1.0e300)
+  let mut d : CplxD := if (CplxD.normSq b).isZero then tinyC
+                       else (CplxD.div CplxD.one b).getD tinyC
+  for i in [1:cap] do
+    let ic := CplxD.ofNat i
+    let an : CplxD := CplxD.mul ic (CplxD.sub a ic)             -- −i(i−a)
+    b := CplxD.add b two
+    d := CplxD.add (CplxD.mul an d) b
+    if Dyadic.blt (CplxD.abs d) tiny then d := tinyC
+    c := CplxD.add b ((CplxD.div an c).getD tinyC)
+    if Dyadic.blt (CplxD.abs c) tiny then c := tinyC
+    let some dInv := CplxD.div CplxD.one d | return cap
+    d := dInv
+    let delta := CplxD.mul d c
+    if Dyadic.ble (CplxD.abs (CplxD.sub delta CplxD.one)) tol then return i
+  return cap
+
+/-- The two tolerances the depth loops stop at (the same doubles the `Float`
+    twins default to). -/
+def bloomM1TolD : Dyadic := Dyadic.ofFloat 1.0e-17
+def bloomCFTolD : Dyadic := Dyadic.ofFloat 1.0e-15
+
+/-- A build-time complex `Float` lifted into the exact ENCLOSURE — exactly (a
+    finite double is a dyadic). The bridge the region thresholds cross while the
+    values still live in `CplxB`. -/
+def CplxB.toExact (a : CplxB) : CplxDI := CplxDI.ofFloats a.re a.im
+
+/-- The same lift into the POINT carrier, for the depth loops. -/
+def CplxB.toPoint (a : CplxB) : CplxD := CplxD.ofFloats a.re a.im
+
 /-- `Γ★ = Γ(a)·κ^{−a}·e^{κ}/g` — the d-constant bridge between the two envelope
     branches, computed in the EXPONENT (`exp(lgamma(a) − a·log κ + κ)/g`) where
     the `e^{±π|Im a|/2}` blowups of `Γ(a)` and `κ^{−a}` cancel, so the value is
@@ -1418,34 +1591,51 @@ deriving Inhabited
     byte-for-byte from the old predicate — same `zBnd`, same `nRaw`/`kRaw` depth
     caps, same admission set — so the region label is the only new information; the
     two axes (coincidence `|a| < ½` and the CF boundary `|κ|` vs `|a+1|`) name the
-    branches the old flags already encoded. -/
+    branches the old flags already encoded.
+
+    EVERY comparison and both depths here are computed on the exact carrier: this
+    function decides which lanes a pair emits and how long its coefficient arrays
+    are, so its answer must be a function of the configuration alone. The region
+    axes (`|a|` against ½, `|a+1|` against `|κ|`) are OVERLAP SWITCHES — the two
+    schemes agree in an annulus around each threshold, so a pair whose enclosures
+    straddle may take either side without being wrong, and the side is picked
+    deterministically. The DEPTHS are not overlap switches, which is why they go
+    through `bloomM1DepthD`/`bloomCFDepthD`. -/
 def classifyBloomPair (mu nu : CplxB) (B g : Float) : BloomPairPlan := Id.run do
   let aC : CplxB := (nu.sub mu).scale (1.0 / g)
   -- WS-A4 (atom four): the `|a| < ½` coincidence is served by the coincident
   -- divided difference; `|κ| < |a+1|` (a subtle bloom — see `bloomPhiKappaOverG`)
   -- is `dSwitch < 0`, where the per-sample path starts on the series-DD lane at
   -- d = 0 and the CF lane is dead.
-  let coincident := aC.abs < 0.5
+  let aD := aC.toExact
+  let coincident := DyadicI.certLt (CplxDI.abs aD) (DyadicI.ofFloat 0.5)
   let kappa := mu.scale B
-  let aP1 := aC.add ⟨1, 0⟩
-  let serOnly := !coincident && aP1.abs ≥ kappa.abs
+  let absAP1 := CplxDI.abs (CplxDI.add aD CplxDI.one)
+  let absKappa := CplxDI.abs kappa.toExact
+  -- zBnd is a VALUE (where the series is sized), not a decision — it stays on
+  -- the float path until the value flip
+  let aP1Abs := (aC.add ⟨1, 0⟩).abs
+  let kappaAbs := kappa.abs
+  let serOnly := !coincident && !DyadicI.certLt absAP1 absKappa
   let excluded : BloomPairPlan :=
     { mu, nu, aC, kappa, region := .excludedDepth, nDepth := 0, kDepth := 0 }
   -- the worst z either per-sample branch evaluates: the branch boundary
-  let zBnd := if serOnly then kappa else kappa.scale (aP1.abs / kappa.abs)
-  let (_, nRaw) := bloomM1 aC zBnd
+  -- the worst z either per-sample branch evaluates: the branch boundary
+  let zBnd := if serOnly then kappa else kappa.scale (aP1Abs / kappaAbs)
+  let nRaw := bloomM1DepthD aC.toPoint zBnd.toPoint bloomM1TolD
   if nRaw + 8 > 300 then return excluded
   if serOnly then
     return { mu, nu, aC, kappa, region := .serOnly, nDepth := nRaw + 8, kDepth := 0 }
   else
-    let (_, kRaw) := bloomCF aC zBnd
+    let kRaw := bloomCFDepthD aC.toPoint zBnd.toPoint bloomCFTolD
     if kRaw + 8 > 300 then return excluded
     -- non-coincident here is always the CF-bridged crossing; coincident splits on
     -- the CF boundary (`dSwitch` sign = sign of `|κ| − |a+1|`): `|κ| ≥ |a+1|`
     -- reaches the CF (coincidentCrossing), else the CF lane is dead (subtle).
     let region : SeamRegion :=
       if !coincident then .crossing
-      else if kappa.abs ≥ aP1.abs then .coincidentCrossing else .coincidentSubtle
+      else if !DyadicI.certLt absKappa absAP1 then .coincidentCrossing
+      else .coincidentSubtle
     return { mu, nu, aC, kappa, region, nDepth := nRaw + 8, kDepth := kRaw + 8 }
 
 /-- The bloom atom's admission predicate at the pair level: both envelope depths
@@ -1488,15 +1678,27 @@ def classifyBloomPairLive (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
   -- Re a = (−σ_ν − Re μ)/g, decreasing in σ_ν
   let reLo := (-sigHi - mu.re) / g
   let reHi := (-sigLo - mu.re) / g
-  let absAt := fun (re c : Float) => Float.sqrt ((re + c) * (re + c) + imA * imA)
-  let minAbsAt := fun (c : Float) =>
-    absAt (max reLo (min reHi (-c))) c
+  -- the region conditions, on the exact carrier: this predicate decides whether
+  -- a live-σ pair is emitted at all and with which lanes, so it may not depend
+  -- on a platform's rounding. `absKappa`/`absAt`/`minAbsAt` are the same
+  -- expressions, evaluated as enclosures; each threshold is taken in the
+  -- direction that DROPS a pair it cannot certify (graceful exclusion is the
+  -- house rule for a legal-but-unservable config, never a warning).
+  let imAD := DyadicI.ofFloat imA
+  let reLoD := DyadicI.ofFloat reLo
+  let reHiD := DyadicI.ofFloat reHi
+  let absKappaD := CplxDI.abs kappa.toExact
+  let absAtD := fun (re : DyadicI) (c : DyadicI) =>
+    DyadicI.sqrt (DyadicI.add (DyadicI.square (DyadicI.add re c)) (DyadicI.square imAD))
+  let minAbsAtD := fun (c : DyadicI) =>
+    absAtD (DyadicI.max reLoD (DyadicI.min reHiD (DyadicI.neg c))) c
   -- ¬coincident throughout: min |a| ≥ ½ (the τ·e coincidence stays baked-only)
-  if minAbsAt 0.0 < 0.5 then return none
+  if !DyadicI.certGt (minAbsAtD DyadicI.zero) (DyadicI.ofFloat 0.5) then return none
   let samples := #[reLo, reHi, max reLo (min reHi (-1.0))]
-  if minAbsAt 1.0 ≥ kappa.abs then
+  if !DyadicI.certLt (minAbsAtD DyadicI.one) absKappaD then
     -- serOnly throughout: |a+1| never falls below |κ|
-    let nRaw := samples.foldl (fun m re => max m (bloomM1 ⟨re, imA⟩ kappa).2) 0
+    let nRaw := samples.foldl (fun m re =>
+      max m (bloomM1DepthD (CplxD.ofFloats re imA) kappa.toPoint bloomM1TolD)) 0
     if nRaw + 8 > 300 then return none
     return some (.serOnly, nRaw + 8, 0)
   -- |a+1| dips below |κ| somewhere: crossing-throughout OR straddling (phase 3a
@@ -1511,14 +1713,17 @@ def classifyBloomPairLive (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
   -- arm). Only the depth sizing differs: a straddling pair's series lane runs
   -- from d = 0 on its serOnly side (|z| up to |κ|), so size at z = κ;
   -- crossing-throughout keeps the branch-boundary `zBnd` (phase 2, unchanged).
-  let straddles := max (absAt reLo 1.0) (absAt reHi 1.0) ≥ kappa.abs
+  let straddles :=
+    !DyadicI.certLt (DyadicI.max (absAtD reLoD DyadicI.one) (absAtD reHiD DyadicI.one))
+                    absKappaD
   let mut nRaw := 0
   let mut kRaw := 0
   for re in samples do
     let aC : CplxB := ⟨re, imA⟩
     let zBnd := kappa.scale ((aC.add ⟨1, 0⟩).abs / kappa.abs)
-    nRaw := max nRaw (bloomM1 aC (if straddles then kappa else zBnd)).2
-    kRaw := max kRaw (bloomCF aC zBnd).2
+    nRaw := max nRaw (bloomM1DepthD aC.toPoint
+      (if straddles then kappa.toPoint else zBnd.toPoint) bloomM1TolD)
+    kRaw := max kRaw (bloomCFDepthD aC.toPoint zBnd.toPoint bloomCFTolD)
   if nRaw + 8 > 300 || kRaw + 8 > 300 then return none
   return some (.crossing, nRaw + 8, kRaw + 8)
 
