@@ -1,5 +1,6 @@
 import Lean.Data.Json
 import Tropical.Expr
+import Tropical.Parse.Nodes
 
 /-!
 # Port types and connection checking
@@ -21,26 +22,15 @@ namespace Tropical.Wiring
 open Lean (Json)
 open Tropical.Expr (getField? getStrField?)
 
-inductive ScalarKind where
-  | float | int | bool
-deriving BEq, Repr
-
-def ScalarKind.parse? : String → Option ScalarKind
-  | "float" => some .float
-  | "int"   => some .int
-  | "bool"  => some .bool
-  | _       => none
-
-def ScalarKind.wire : ScalarKind → String
-  | .float => "float"
-  | .int   => "int"
-  | .bool  => "bool"
+/-- The parse-layer enum is canonical (`Ir` and `Plan` alias it too);
+    the widening lattice below is what belongs to the wiring layer. -/
+abbrev ScalarKind := Tropical.Parse.ScalarKind
 
 /-- Widening lattice rank: bool → int → float. -/
-def ScalarKind.rank : ScalarKind → Nat
+def rank : ScalarKind → Nat
   | .bool => 0 | .int => 1 | .float => 2
 
-def widens (src dst : ScalarKind) : Bool := src.rank ≤ dst.rank
+def widens (src dst : ScalarKind) : Bool := rank src ≤ rank dst
 
 def narrowingHint : ScalarKind → String
   | .int   => "to_int()"
@@ -61,16 +51,16 @@ inductive PortType where
 def parsePortType? (j : Json) : Option PortType := do
   match getStrField? j "kind" with
   | some "scalar" =>
-    let k ← ScalarKind.parse? (← getStrField? j "scalar")
+    let k ← Parse.ScalarKind.ofWire? (← getStrField? j "scalar")
     return .scalar k
   | some "alias" =>
     let a ← getField? j "alias"
     return .alias ((getStrField? a "name").getD "?")
   | some "array" =>
     let elem : Elem ← match getField? j "element" with
-      | some (.str s) => pure { display := s, kind := ScalarKind.parse? s }
+      | some (.str s) => pure { display := s, kind := Parse.ScalarKind.ofWire? s }
       | some a => pure { display := (getStrField? a "name").getD "?",
-                         kind := (getStrField? a "base").bind ScalarKind.parse? }
+                         kind := (getStrField? a "base").bind Parse.ScalarKind.ofWire? }
       | none => none
     let shape ← match getField? j "shape" with
       | some (.arr dims) => dims.mapM fun d => match d with

@@ -196,6 +196,10 @@ def ScalarKind.ofWire? : String → Option ScalarKind
   | "float" => some .float | "int" => some .int | "bool" => some .bool
   | _ => none
 
+theorem ScalarKind.ofWire_wire (k : ScalarKind) :
+    ScalarKind.ofWire? k.wire = some k := by
+  cases k <;> rfl
+
 structure StructField where
   name : String
   scalarType : ScalarKind
