@@ -499,40 +499,76 @@ end
 
 /-- Dep-edge collection (collectNestedOutInstances): exact traversal
     order; first-add wins position (Set insertion parity). Walks the id-form
-    expression by derefing through the arena. -/
-private partial def collectNestedOutDeps (ea : ExprArena) (numInstances : Nat)
-    (acc : Array Nat) (id : ExprId) : Array Nat :=
-  let rec go (acc : Array Nat) (id : ExprId) : Array Nat :=
-    match ea.deref id with
-    | none => acc
-    | some node => match node with
-      | .num _ | .bool _ => acc
-      | .arr items => items.foldl go acc
-      | .nestedOut inst _ =>
-        if inst.idx < numInstances && !acc.contains inst.idx then acc.push inst.idx else acc
-      | .match_ _ scrutinee arms =>
-        arms.foldl (fun a arm => go a arm.body) (go acc scrutinee)
-      | .fold over init _ _ body | .scan over init _ _ body =>
-        go (go (go acc over) init) body
-      | .generate count _ body => go (go acc count) body
-      | .iterate count init _ body | .chain count init _ body =>
-        go (go (go acc count) init) body
-      | .map2 over _ body => go (go acc over) body
-      | .zipWith a b _ _ body => go (go (go acc a) b) body
-      | .letIn binders body =>
-        go (binders.foldl (fun a b => go a b.value) acc) body
-      | .tag _ _ payload => payload.foldl (fun a p => go a p.value) acc
-      | .zeros count => go acc count
-      | .binary _ lhs rhs => go (go acc lhs) rhs
-      | .unary _ arg => go acc arg
-      | .clamp a b c | .select a b c | .arraySet a b c => go (go (go acc a) b) c
-      | .index a b => go (go acc a) b
-      | .bankSum _ ts b dc _ =>
-        let acc := ts.foldl go acc
-        go (match dc with | some d => go acc d | none => acc) b
-      | .inputRef _ | .paramRef _ | .typeParamRef _ | .bindingRef _
-      | .sampleRate | .sampleIndex | .loopIdx _ => acc
-  go acc id
+    expression by derefing through the arena. Total by descent on `id.idx`
+    (`hw` is checked once by `findInstanceCycles`). -/
+private def collectNestedOutDeps (ea : ExprArena) (hw : ea.wf = true)
+    (numInstances : Nat) (acc : Array Nat) (id : ExprId) : Array Nat :=
+  match _hd : ea.deref id with
+  | none => acc
+  | some (.num _) | some (.bool _) => acc
+  | some (.arr items) =>
+    items.attach.foldl (fun a ⟨x, _⟩ => collectNestedOutDeps ea hw numInstances a x) acc
+  | some (.nestedOut inst _) =>
+    if inst.idx < numInstances && !acc.contains inst.idx then acc.push inst.idx else acc
+  | some (.match_ _ scrutinee arms) =>
+    arms.attach.foldl (fun a ⟨arm, _⟩ => collectNestedOutDeps ea hw numInstances a arm.body)
+      (collectNestedOutDeps ea hw numInstances acc scrutinee)
+  | some (.fold over init _ _ body) | some (.scan over init _ _ body) =>
+    collectNestedOutDeps ea hw numInstances
+      (collectNestedOutDeps ea hw numInstances
+        (collectNestedOutDeps ea hw numInstances acc over) init) body
+  | some (.generate count _ body) =>
+    collectNestedOutDeps ea hw numInstances
+      (collectNestedOutDeps ea hw numInstances acc count) body
+  | some (.iterate count init _ body) | some (.chain count init _ body) =>
+    collectNestedOutDeps ea hw numInstances
+      (collectNestedOutDeps ea hw numInstances
+        (collectNestedOutDeps ea hw numInstances acc count) init) body
+  | some (.map2 over _ body) =>
+    collectNestedOutDeps ea hw numInstances
+      (collectNestedOutDeps ea hw numInstances acc over) body
+  | some (.zipWith a b _ _ body) =>
+    collectNestedOutDeps ea hw numInstances
+      (collectNestedOutDeps ea hw numInstances
+        (collectNestedOutDeps ea hw numInstances acc a) b) body
+  | some (.letIn binders body) =>
+    collectNestedOutDeps ea hw numInstances
+      (binders.attach.foldl
+        (fun a ⟨b, _⟩ => collectNestedOutDeps ea hw numInstances a b.value) acc) body
+  | some (.tag _ _ payload) =>
+    payload.attach.foldl
+      (fun a ⟨p, _⟩ => collectNestedOutDeps ea hw numInstances a p.value) acc
+  | some (.zeros count) => collectNestedOutDeps ea hw numInstances acc count
+  | some (.binary _ lhs rhs) =>
+    collectNestedOutDeps ea hw numInstances
+      (collectNestedOutDeps ea hw numInstances acc lhs) rhs
+  | some (.unary _ arg) => collectNestedOutDeps ea hw numInstances acc arg
+  | some (.clamp a b c) | some (.select a b c) | some (.arraySet a b c) =>
+    collectNestedOutDeps ea hw numInstances
+      (collectNestedOutDeps ea hw numInstances
+        (collectNestedOutDeps ea hw numInstances acc a) b) c
+  | some (.index a b) =>
+    collectNestedOutDeps ea hw numInstances
+      (collectNestedOutDeps ea hw numInstances acc a) b
+  | some (.bankSum _ ts b dc _) =>
+    let acc := ts.attach.foldl
+      (fun a ⟨t, _⟩ => collectNestedOutDeps ea hw numInstances a t) acc
+    collectNestedOutDeps ea hw numInstances
+      (match _hdc : dc with
+        | some d => collectNestedOutDeps ea hw numInstances acc d
+        | none => acc) b
+  | some (.inputRef _) | some (.paramRef _) | some (.typeParamRef _)
+  | some (.bindingRef _) | some (.sampleRate) | some (.sampleIndex)
+  | some (.loopIdx _) => acc
+termination_by id.idx
+decreasing_by
+  all_goals
+    apply Tropical.Ir.ExprArena.forall_children_lt hw ‹_ = some _›
+    simp_all [ENode.children] <;>
+      first
+        | exact Or.inl ⟨_, by assumption, rfl⟩
+        | exact Or.inr ⟨_, by assumption, rfl⟩
+        | exact ⟨_, by assumption, rfl⟩
 
 private structure TarjanSt where
   indexOf : Array (Option Nat)
@@ -588,19 +624,25 @@ def findInstanceCycles (ea : ExprArena) (prog : Program) : Array (Array String) 
     | .inst name _ _ inputs => some (name, inputs)
     | _ => none
   if insts.isEmpty then return #[]
-  let n := insts.size
-  let deps : Array (Array Nat) := insts.map fun (_, inputs) =>
-    inputs.foldl (fun acc w => collectNestedOutDeps ea n acc w.value) #[]
-  let mut st : TarjanSt := {
-    indexOf := Array.replicate n none
-    lowlink := Array.replicate n 0
-    onStack := Array.replicate n false }
-  for v in [0:n] do
-    if st.indexOf[v]!.isNone then
-      st := strongConnect deps v st
-  let nontrivial := st.sccs.filter fun scc =>
-    scc.size > 1 || (scc.size == 1 && (deps[scc[0]!]!).contains scc[0]!)
-  return nontrivial.map (·.map fun i => insts[i]!.1)
+  -- One O(edges) sweep buys the dep walk's termination measure; every
+  -- arena built through `eintern` is child-descending by construction,
+  -- so the panic is an interning-order bug, never a user error.
+  if hw : ea.wf then
+    let n := insts.size
+    let deps : Array (Array Nat) := insts.map fun (_, inputs) =>
+      inputs.foldl (fun acc w => collectNestedOutDeps ea hw n acc w.value) #[]
+    let mut st : TarjanSt := {
+      indexOf := Array.replicate n none
+      lowlink := Array.replicate n 0
+      onStack := Array.replicate n false }
+    for v in [0:n] do
+      if st.indexOf[v]!.isNone then
+        st := strongConnect deps v st
+    let nontrivial := st.sccs.filter fun scc =>
+      scc.size > 1 || (scc.size == 1 && (deps[scc[0]!]!).contains scc[0]!)
+    return nontrivial.map (·.map fun i => insts[i]!.1)
+  else
+    panic! "findInstanceCycles: arena is not child-descending (internal interning-order bug)"
 
 /-- Port of `throwOnCycles` + `formatCycleDiagnostic` + the
     `CycleViolation` message — byte-exact, including the suggested-fix

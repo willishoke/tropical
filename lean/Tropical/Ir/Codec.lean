@@ -147,114 +147,119 @@ def encBinder (b : Binder) : Json :=
 
 /-- Encode a resolved expression to `tropical_resolved_1` JSON, derefing the
     id-form through `arena.exprs`. Byte-identical output to the former tree
-    encoder — the arena is an implementation detail of how the graph is stored. -/
-partial def encExpr (arena : Arena) (id : ExprId) : EncM Json := do
-  let some node := arena.exprs.deref id
-    | encErr s!"encExpr: dangling ExprId {id.idx}"
-  match node with
-  | .num n => pure (Json.num n)
-  | .bool b => pure (Json.bool b)
-  | .arr items => do
-    let mut out : Array Json := #[]
-    for e in items do
-      out := out.push (← encExpr arena e)
+    encoder — the arena is an implementation detail of how the graph is stored.
+    Total by descent on `id.idx` (`hw` is checked once by `encodeResolved`). -/
+def encExpr (arena : Arena) (hw : arena.exprs.wf = true) (id : ExprId) : EncM Json := do
+  match _hd : arena.exprs.deref id with
+  | none => encErr s!"encExpr: dangling ExprId {id.idx}"
+  | some (.num n) => pure (Json.num n)
+  | some (.bool b) => pure (Json.bool b)
+  | some (.arr items) => do
+    let out ← items.attach.mapM fun ⟨e, _⟩ => encExpr arena hw e
     pure (Json.arr out)
-  | .binary tag lhs rhs => do
+  | some (.binary tag lhs rhs) => do
     pure <| Json.mkObj [("op", Json.str tag.wire),
-                        ("args", Json.arr #[← encExpr arena lhs, ← encExpr arena rhs])]
-  | .unary tag arg => do
+                        ("args", Json.arr #[← encExpr arena hw lhs, ← encExpr arena hw rhs])]
+  | some (.unary tag arg) => do
     pure <| Json.mkObj [("op", Json.str tag.wire),
-                        ("args", Json.arr #[← encExpr arena arg])]
-  | .clamp a b c => do
+                        ("args", Json.arr #[← encExpr arena hw arg])]
+  | some (.clamp a b c) => do
     pure <| Json.mkObj [("op", Json.str "clamp"),
-      ("args", Json.arr #[← encExpr arena a, ← encExpr arena b, ← encExpr arena c])]
-  | .select a b c => do
+      ("args", Json.arr #[← encExpr arena hw a, ← encExpr arena hw b, ← encExpr arena hw c])]
+  | some (.select a b c) => do
     pure <| Json.mkObj [("op", Json.str "select"),
-      ("args", Json.arr #[← encExpr arena a, ← encExpr arena b, ← encExpr arena c])]
-  | .arraySet a b c => do
+      ("args", Json.arr #[← encExpr arena hw a, ← encExpr arena hw b, ← encExpr arena hw c])]
+  | some (.arraySet a b c) => do
     pure <| Json.mkObj [("op", Json.str "arraySet"),
-      ("args", Json.arr #[← encExpr arena a, ← encExpr arena b, ← encExpr arena c])]
-  | .index a b => do
+      ("args", Json.arr #[← encExpr arena hw a, ← encExpr arena hw b, ← encExpr arena hw c])]
+  | some (.index a b) => do
     pure <| Json.mkObj [("op", Json.str "index"),
-      ("args", Json.arr #[← encExpr arena a, ← encExpr arena b])]
-  | .zeros count => do
-    pure <| Json.mkObj [("op", Json.str "zeros"), ("count", ← encExpr arena count)]
-  | .inputRef i => pure <| Json.mkObj [("op", Json.str "inputRef"), ("idx", Lean.toJson i.idx)]
-  | .paramRef i => pure <| Json.mkObj [("op", Json.str "paramRef"), ("idx", Lean.toJson i.idx)]
-  | .typeParamRef i => pure <| Json.mkObj [("op", Json.str "typeParamRef"), ("idx", Lean.toJson i.idx)]
-  | .bindingRef i => pure <| Json.mkObj [("op", Json.str "bindingRef"), ("idx", Lean.toJson i.idx)]
-  | .nestedOut inst out =>
+      ("args", Json.arr #[← encExpr arena hw a, ← encExpr arena hw b])]
+  | some (.zeros count) => do
+    pure <| Json.mkObj [("op", Json.str "zeros"), ("count", ← encExpr arena hw count)]
+  | some (.inputRef i) => pure <| Json.mkObj [("op", Json.str "inputRef"), ("idx", Lean.toJson i.idx)]
+  | some (.paramRef i) => pure <| Json.mkObj [("op", Json.str "paramRef"), ("idx", Lean.toJson i.idx)]
+  | some (.typeParamRef i) => pure <| Json.mkObj [("op", Json.str "typeParamRef"), ("idx", Lean.toJson i.idx)]
+  | some (.bindingRef i) => pure <| Json.mkObj [("op", Json.str "bindingRef"), ("idx", Lean.toJson i.idx)]
+  | some (.nestedOut inst out) =>
     pure <| Json.mkObj [("op", Json.str "nestedOut"),
                         ("instance", Lean.toJson inst.idx), ("output", Lean.toJson out.idx)]
-  | .sampleRate => pure <| Json.mkObj [("op", Json.str "sampleRate")]
-  | .sampleIndex => pure <| Json.mkObj [("op", Json.str "sampleIndex")]
+  | some .sampleRate => pure <| Json.mkObj [("op", Json.str "sampleRate")]
+  | some .sampleIndex => pure <| Json.mkObj [("op", Json.str "sampleIndex")]
   -- `id` omitted when 0 so pre-nesting programs serialize byte-identically.
-  | .loopIdx id =>
+  | some (.loopIdx id) =>
     let idField : Option Json := if id == 0 then none else some (Lean.toJson id)
     pure <| Json.mkObj <| [("op", Json.str "loopIdx")] ++ optField "id" idField
-  | .bankSum count tables body dynCount? idxId => do
-    let mut ts : Array Json := #[]
-    for t in tables do
-      ts := ts.push (← encExpr arena t)
+  | some (.bankSum count tables body dynCount? idxId) => do
+    let ts ← tables.attach.mapM fun ⟨t, _⟩ => encExpr arena hw t
     -- `dyn_count`/`idx_id` are optional on the wire (absent = static bank /
     -- binder id 0), so pre-existing serialized programs decode unchanged.
+    let dynField : Option Json ← match _hdo : dynCount? with
+      | none => pure none
+      | some d => pure (some (← encExpr arena hw d))
     let idField : Option Json := if idxId == 0 then none else some (Lean.toJson idxId)
     pure <| Json.mkObj <| [("op", Json.str "bankSum"), ("count", Lean.toJson count),
-                        ("tables", Json.arr ts), ("body", ← encExpr arena body)]
-                        ++ optField "dyn_count" (← dynCount?.mapM (encExpr arena))
+                        ("tables", Json.arr ts), ("body", ← encExpr arena hw body)]
+                        ++ optField "dyn_count" dynField
                         ++ optField "idx_id" idField
-  | .fold over init acc elem body => do
+  | some (.fold over init acc elem body) => do
     pure <| Json.mkObj [("op", Json.str "fold"),
-      ("over", ← encExpr arena over), ("init", ← encExpr arena init),
-      ("acc", encBinder acc), ("elem", encBinder elem), ("body", ← encExpr arena body)]
-  | .scan over init acc elem body => do
+      ("over", ← encExpr arena hw over), ("init", ← encExpr arena hw init),
+      ("acc", encBinder acc), ("elem", encBinder elem), ("body", ← encExpr arena hw body)]
+  | some (.scan over init acc elem body) => do
     pure <| Json.mkObj [("op", Json.str "scan"),
-      ("over", ← encExpr arena over), ("init", ← encExpr arena init),
-      ("acc", encBinder acc), ("elem", encBinder elem), ("body", ← encExpr arena body)]
-  | .generate count iter body => do
-    pure <| Json.mkObj [("op", Json.str "generate"), ("count", ← encExpr arena count),
-      ("iter", encBinder iter), ("body", ← encExpr arena body)]
-  | .iterate count init iter body => do
+      ("over", ← encExpr arena hw over), ("init", ← encExpr arena hw init),
+      ("acc", encBinder acc), ("elem", encBinder elem), ("body", ← encExpr arena hw body)]
+  | some (.generate count iter body) => do
+    pure <| Json.mkObj [("op", Json.str "generate"), ("count", ← encExpr arena hw count),
+      ("iter", encBinder iter), ("body", ← encExpr arena hw body)]
+  | some (.iterate count init iter body) => do
     pure <| Json.mkObj [("op", Json.str "iterate"),
-      ("count", ← encExpr arena count), ("init", ← encExpr arena init),
-      ("iter", encBinder iter), ("body", ← encExpr arena body)]
-  | .chain count init iter body => do
+      ("count", ← encExpr arena hw count), ("init", ← encExpr arena hw init),
+      ("iter", encBinder iter), ("body", ← encExpr arena hw body)]
+  | some (.chain count init iter body) => do
     pure <| Json.mkObj [("op", Json.str "chain"),
-      ("count", ← encExpr arena count), ("init", ← encExpr arena init),
-      ("iter", encBinder iter), ("body", ← encExpr arena body)]
-  | .map2 over elem body => do
-    pure <| Json.mkObj [("op", Json.str "map2"), ("over", ← encExpr arena over),
-      ("elem", encBinder elem), ("body", ← encExpr arena body)]
-  | .zipWith a b x y body => do
+      ("count", ← encExpr arena hw count), ("init", ← encExpr arena hw init),
+      ("iter", encBinder iter), ("body", ← encExpr arena hw body)]
+  | some (.map2 over elem body) => do
+    pure <| Json.mkObj [("op", Json.str "map2"), ("over", ← encExpr arena hw over),
+      ("elem", encBinder elem), ("body", ← encExpr arena hw body)]
+  | some (.zipWith a b x y body) => do
     pure <| Json.mkObj [("op", Json.str "zipWith"),
-      ("a", ← encExpr arena a), ("b", ← encExpr arena b),
-      ("x", encBinder x), ("y", encBinder y), ("body", ← encExpr arena body)]
-  | .letIn binders body => do
-    let mut bs : Array Json := #[]
-    for b in binders do
-      bs := bs.push <| Json.mkObj [("binder", encBinder b.binder),
-                                   ("value", ← encExpr arena b.value)]
+      ("a", ← encExpr arena hw a), ("b", ← encExpr arena hw b),
+      ("x", encBinder x), ("y", encBinder y), ("body", ← encExpr arena hw body)]
+  | some (.letIn binders body) => do
+    let bs ← binders.attach.mapM fun ⟨b, _⟩ => do
+      pure <| Json.mkObj [("binder", encBinder b.binder),
+                          ("value", ← encExpr arena hw b.value)]
     pure <| Json.mkObj [("op", Json.str "let"), ("binders", Json.arr bs),
-                        ("in", ← encExpr arena body)]
-  | .tag def_ variant payload => do
+                        ("in", ← encExpr arena hw body)]
+  | some (.tag def_ variant payload) => do
     let defId ← typeDefId arena def_
-    let mut ps : Array Json := #[]
-    for p in payload do
-      ps := ps.push <| Json.mkObj [("field", Lean.toJson p.field),
-                                   ("value", ← encExpr arena p.value)]
+    let ps ← payload.attach.mapM fun ⟨p, _⟩ => do
+      pure <| Json.mkObj [("field", Lean.toJson p.field),
+                          ("value", ← encExpr arena hw p.value)]
     pure <| Json.mkObj [("op", Json.str "tag"), ("def", Lean.toJson defId),
                         ("variant", Lean.toJson variant), ("payload", Json.arr ps)]
-  | .match_ def_ scrutinee arms => do
+  | some (.match_ def_ scrutinee arms) => do
     let defId ← typeDefId arena def_
-    let scrut ← encExpr arena scrutinee
-    let mut as_ : Array Json := #[]
-    for arm in arms do
-      as_ := as_.push <| Json.mkObj [
+    let scrut ← encExpr arena hw scrutinee
+    let as_ ← arms.attach.mapM fun ⟨arm, _⟩ => do
+      pure <| Json.mkObj [
         ("variant", Lean.toJson arm.variant),
         ("binders", Json.arr (arm.binders.map encBinder)),
-        ("body", ← encExpr arena arm.body)]
+        ("body", ← encExpr arena hw arm.body)]
     pure <| Json.mkObj [("op", Json.str "match"), ("def", Lean.toJson defId),
                         ("scrutinee", scrut), ("arms", Json.arr as_)]
+termination_by id.idx
+decreasing_by
+  all_goals
+    apply Tropical.Ir.ExprArena.forall_children_lt hw ‹_ = some _›
+    simp_all [ENode.children] <;>
+      first
+        | exact Or.inl ⟨_, by assumption, rfl⟩
+        | exact Or.inr ⟨_, by assumption, rfl⟩
+        | exact ⟨_, by assumption, rfl⟩
 
 /- Deliberately `partial` (both defs below): the recursion runs through
    the PROGRAM pool via registry indices, and its termination fact is
@@ -267,7 +272,7 @@ mutual
 /-- Pool a program: registry targets first (insertion order), then the
     program's own fields in TS field order, then push self (post-order
     DFS — referenced programs strictly before referencing programs). -/
-partial def programId (arena : Arena) (i : ProgramIdx) : EncM Nat := do
+partial def programId (arena : Arena) (hw : arena.exprs.wf = true) (i : ProgramIdx) : EncM Nat := do
   let st ← get
   match st.programIds[i.idx]? with
   | none => encErr s!"program pool index {i.idx} out of range"
@@ -275,19 +280,19 @@ partial def programId (arena : Arena) (i : ProgramIdx) : EncM Nat := do
   | some none =>
     let some p := arena.program? i
       | encErr s!"program pool index {i.idx} out of range"
-    let encoded ← encProgram arena p
+    let encoded ← encProgram arena hw p
     let id := (← get).programPool.size
     modify fun st => { st with
       programPool := st.programPool.push encoded
       programIds := st.programIds.set! i.idx (some id) }
     pure id
 
-partial def encProgram (arena : Arena) (p : Program) : EncM Json := do
+partial def encProgram (arena : Arena) (hw : arena.exprs.wf = true) (p : Program) : EncM Json := do
   -- Registry first — matches the TS encoder's statement order, which
   -- determines pool-id assignment for everything reachable.
   let mut registry : Array Json := #[]
   for (key, target) in p.registry do
-    registry := registry.push <| Json.arr #[Json.str key, Lean.toJson (← programId arena target)]
+    registry := registry.push <| Json.arr #[Json.str key, Lean.toJson (← programId arena hw target)]
   let mut typeParams : Array Json := #[]
   for tp in p.typeParams do
     typeParams := typeParams.push (Lean.toJson (← typeParamId arena tp))
@@ -298,7 +303,7 @@ partial def encProgram (arena : Arena) (p : Program) : EncM Json := do
     | some t => fields := fields ++ [("type", ← encPortType arena t)]
     | none => pure ()
     match d.default? with
-    | some e => fields := fields ++ [("default", ← encExpr arena e)]
+    | some e => fields := fields ++ [("default", ← encExpr arena hw e)]
     | none => pure ()
     inputs := inputs.push (Json.mkObj fields)
   let mut outputs : Array Json := #[]
@@ -313,13 +318,13 @@ partial def encProgram (arena : Arena) (p : Program) : EncM Json := do
     typeDefs := typeDefs.push (Lean.toJson (← typeDefId arena td))
   let mut decls : Array Json := #[]
   for d in p.decls do
-    decls := decls.push (← encBodyDecl arena d)
+    decls := decls.push (← encBodyDecl arena hw d)
   let mut assigns : Array Json := #[]
   for a in p.assigns do
     let target : Json := match a.target with
       | .port i => Lean.toJson i.idx
       | .dac => Json.mkObj [("kind", Json.str "dac")]
-    assigns := assigns.push <| Json.mkObj [("target", target), ("expr", ← encExpr arena a.expr)]
+    assigns := assigns.push <| Json.mkObj [("target", target), ("expr", ← encExpr arena hw a.expr)]
   pure <| Json.mkObj [
     ("name", Json.str p.name),
     ("typeParams", Json.arr typeParams),
@@ -331,7 +336,7 @@ partial def encProgram (arena : Arena) (p : Program) : EncM Json := do
     ("binderCount", Lean.toJson p.binderCount),
     ("registry", Json.arr registry)]
 
-partial def encBodyDecl (arena : Arena) : BodyDecl → EncM Json
+partial def encBodyDecl (arena : Arena) (hw : arena.exprs.wf = true) : BodyDecl → EncM Json
   | .param name value? =>
     pure <| Json.mkObj <|
       [("op", Json.str "paramDecl"), ("name", Json.str name)]
@@ -343,14 +348,14 @@ partial def encBodyDecl (arena : Arena) : BodyDecl → EncM Json
     let mut ins : Array Json := #[]
     for w in inputs do
       ins := ins.push <| Json.mkObj [("port", Lean.toJson w.port.idx),
-                                     ("value", ← encExpr arena w.value)]
+                                     ("value", ← encExpr arena hw w.value)]
     pure <| Json.mkObj [
       ("op", Json.str "instanceDecl"), ("name", Json.str name),
       ("typeKey", Json.str typeKey),
       ("typeArgs", Json.arr tas), ("inputs", Json.arr ins)]
   | .prog name program => do
     pure <| Json.mkObj [("op", Json.str "programDecl"), ("name", Json.str name),
-                        ("program", Lean.toJson (← programId arena program))]
+                        ("program", Lean.toJson (← programId arena hw program))]
 
 end
 
@@ -359,17 +364,22 @@ end Encode
 /-- Encode an arena + root into `tropical_resolved_1` wire JSON,
     performing the TS encoder's canonical pool reordering. -/
 def encodeResolved (arena : Arena) (root : ProgramIdx) : Except String Json := do
-  let init : Encode.St := {
-    typeParamIds := Array.replicate arena.typeParams.size none
-    typeDefIds := Array.replicate arena.typeDefs.size none
-    programIds := Array.replicate arena.programs.size none }
-  let (rootId, st) ← (Encode.programId arena root).run init
-  pure <| Json.mkObj [
-    ("schema", Json.str schemaTag),
-    ("typeParamPool", Json.arr st.typeParamPool),
-    ("typeDefPool", Json.arr st.typeDefPool),
-    ("programPool", Json.arr st.programPool),
-    ("root", Lean.toJson rootId)]
+  -- One O(edges) sweep buys `encExpr`'s termination measure (every arena
+  -- built through `eintern` is child-descending by construction).
+  if hw : arena.exprs.wf then
+    let init : Encode.St := {
+      typeParamIds := Array.replicate arena.typeParams.size none
+      typeDefIds := Array.replicate arena.typeDefs.size none
+      programIds := Array.replicate arena.programs.size none }
+    let (rootId, st) ← (Encode.programId arena hw root).run init
+    pure <| Json.mkObj [
+      ("schema", Json.str schemaTag),
+      ("typeParamPool", Json.arr st.typeParamPool),
+      ("typeDefPool", Json.arr st.typeDefPool),
+      ("programPool", Json.arr st.programPool),
+      ("root", Lean.toJson rootId)]
+  else
+    throw "encodeResolved: arena is not child-descending (internal interning-order bug)"
 
 -- ─────────────────────────────────────────────────────────────
 -- Decode (wire pool order becomes the arena order)
