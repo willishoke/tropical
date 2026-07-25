@@ -30,6 +30,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 @main
 struct ReversibleApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var delegate
+    // The model lives at APP scope, not in RootView: the File menu commands
+    // are scene-level and need the same object the canvas is editing.
+    @StateObject private var model = PatchModel()
 
     // Signal sources must stay referenced or the handler dies with them.
     private static var signalSources: [DispatchSourceSignal] = []
@@ -63,16 +66,32 @@ struct ReversibleApp: App {
 
     var body: some Scene {
         WindowGroup("tropical playground") {
-            RootView()
+            RootView(model: model)
                 .frame(minWidth: 1100, minHeight: 700)
                 .preferredColorScheme(.dark)
         }
         .defaultSize(width: 1400, height: 900)
+        .commands {
+            // Stock File-menu verbs with their stock shortcuts — a patch is a
+            // document, so it should behave like one.
+            CommandGroup(replacing: .newItem) {
+                Button("New Patch") { Task { await model.newPatch() } }
+                    .keyboardShortcut("n")
+                Button("Open Patch…") { model.open() }
+                    .keyboardShortcut("o")
+            }
+            CommandGroup(replacing: .saveItem) {
+                Button("Save") { model.save() }
+                    .keyboardShortcut("s")
+                Button("Save As…") { model.saveAs() }
+                    .keyboardShortcut("s", modifiers: [.command, .shift])
+            }
+        }
     }
 }
 
 struct RootView: View {
-    @StateObject private var model = PatchModel()
+    @ObservedObject var model: PatchModel
 
     var body: some View {
         VStack(spacing: 0) {
@@ -82,6 +101,9 @@ struct RootView: View {
         .background(Theme.bg)
         .toolbar { PatchToolbar(model: model) }
         .environmentObject(model)
+        // Title tracks the open file, so the window says which patch this is.
+        .navigationTitle(model.documentURL?.deletingPathExtension().lastPathComponent
+                         ?? "untitled patch")
     }
 
     private var footer: some View {
