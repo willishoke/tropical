@@ -231,13 +231,62 @@ def widen (x : DyadicI) (k : Int) : DyadicI :=
 def hull (x y : DyadicI) : DyadicI :=
   bin x y fun _ => ⟨Dyadic.dmin x.lo y.lo, Dyadic.dmax x.hi y.hi, true⟩
 
+/-- The largest decimal exponent the reciprocal cache covers. `litF` — the one
+    lossy bake→emit funnel — always emits exponent 12; the authored maximum in
+    the tree is 23 (`Numerics.lean`'s minimax coefficients); the JSON front door
+    has never carried more than four decimal places. Forty is headroom, and past
+    it `ofJsonNumber` falls back to the division, so this is a CACHE and never a
+    domain restriction. -/
+def recip10Max : Nat := 40
+
+/-- `1/10^e` as an outward-rounded enclosure, for `e ≤ recip10Max`.
+
+    `10^e` is dyadic; its RECIPROCAL is not (for `e ≥ 1` it carries a factor
+    `5^{−e}`), so each entry is a genuine two-endpoint enclosure — precisely the
+    one `invAt workingPrec` produces, because that is literally how it is built.
+
+    That identity is the point, not a happy accident. `div` is DEFINED as
+    `mulAt prec x (invAt prec y)` (see `divAt` above), so
+    `mul (ofInt m) recip10Table[e]` and `div (ofInt m) (ofNat (10^e))` are the
+    same application of the same function to the same arguments — same
+    endpoints, same `ok`, at every mantissa and every exponent. The cache moves
+    WHEN the reciprocal is computed and nothing else. That matters because this
+    value feeds `landK`'s power-of-two read and every `certLt` in the EC/DD
+    router, where an enclosure one ulp wider — or NARROWER — is not a rounding
+    difference but a different emitted program. Narrower is not the safe
+    direction either: a tighter interval turns `overlap` into a verdict, and
+    `classifyBloomPairLive` DROPS the pairs it cannot certify. So the reflex
+    "compute the cached reciprocal at a higher precision, to make the extra
+    rounding unobservable" is exactly wrong here — the extra rounding is not
+    there to be hidden; there is no extra rounding.
+
+    Computed rather than written down as literal mantissas, for the same reason:
+    a literal table would silently disagree with the division path the day
+    `workingPrec` moves.
+
+    Lean compiles a nullary top-level `def` to a persistent global initialized
+    once per process — the treatment `piI` and `eulerI` already get — so this is
+    `recip10Max + 1` reciprocals at module init and zero after. -/
+def recip10Table : Array DyadicI :=
+  (Array.range (recip10Max + 1)).map fun e => inv (ofNat (10 ^ e))
+
 /-- A DECIMAL literal (`mantissa · 10^{−exponent}`, the shape `JsonNumber` and
     every authored `lit` carry) as a tight enclosure. Decimals are not dyadic,
     so this is where the authoring layer's exactness genuinely ends — and the
-    enclosure says so, to the working precision, instead of pretending. -/
+    enclosure says so, to the working precision, instead of pretending.
+
+    The reciprocal comes from `recip10Table`, so the hot path is one interval
+    MULTIPLY instead of a 128-bit interval DIVISION. This leaf is the bake
+    layer's inner loop — `bankLandExp` folds every mode's amps on every bank
+    realization and `classifyCoupling` folds eight fields per coupling pair — and
+    the returned enclosure is unchanged bit for bit (see `recip10Table`, and
+    `exact-recip10` which pins it). An exponent past the table's end still
+    divides. -/
 def ofJsonNumber (n : Lean.JsonNumber) : DyadicI :=
   if n.exponent == 0 then ofInt n.mantissa
-  else div (ofInt n.mantissa) (ofNat (10 ^ n.exponent))
+  else match recip10Table[n.exponent]? with
+    | some r => mul (ofInt n.mantissa) r
+    | none   => div (ofInt n.mantissa) (ofNat (10 ^ n.exponent))
 
 /-- Diagnostics: the midpoint as a float plus the enclosure width's binary
     exponent (how many bits are certified). -/

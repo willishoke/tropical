@@ -5,7 +5,7 @@ import Tropical.EmitArrow.Modal
 /-!
 # Tropical.Tropicaltest.Exact — the exact-carrier gates (P0)
 
-Four standing gates over `Tropical.Exact`, the bake layer's `libm` exile:
+Five standing gates over `Tropical.Exact`, the bake layer's `libm` exile:
 
 * **`exact-constants`** — π and ln 2 are shipped as literal integer mantissas
   over `2³⁰⁰`. This gate RECOMPUTES both from scratch inside the carrier, at a
@@ -36,6 +36,15 @@ Four standing gates over `Tropical.Exact`, the bake layer's `libm` exile:
   box's answer (probing the AXES, not just the corners — both defects lived on
   the boundary), and a box that excludes the origin must produce an answer
   rather than poison.
+
+* **`exact-recip10`** — the decimal reciprocal CACHE against the division it
+  replaces. `ofJsonNumber` stopped dividing per literal and started multiplying
+  by a precomputed `1/10^e`; because `div` is DEFINED as multiply-by-reciprocal
+  that is an identity, and this gate holds it to the bit rather than to a
+  tolerance. It compares against the LIVE `div` expression, not a frozen table,
+  so the day `divAt` stops being "multiply by the reciprocal" the gate says so.
+  It also PRINTS both timings; it does not gate on them, because a wall-clock
+  threshold in a test suite is a flake.
 
 The gates are cheap (no render, no JIT) and run in the same `passGate` protocol
 as everything else.
@@ -400,5 +409,86 @@ def runExactQuantize : IO Bool := do
     else
       failGate "exact-quantize"
         s!"lowMismatch={lowN - agreeLow - offLow} saturates={saturates} subResolution={subResolution} worstHigh={worstHigh}"
+
+-- ── the decimal reciprocal cache ──────────────────────────────────────────────
+
+/-- A synthetic all-literal deg-0 bank — the shape `bankLandExp` takes the
+    STATIC path on (`ModalMode.hz` makes `cre` a 12-place `litF` literal and
+    leaves `cim` at `lit 0`). Built outside the timer. -/
+private def benchBank (n : Nat) : Array Tropical.EmitArrow.ModalMode :=
+  (Array.range n).map fun i =>
+    Tropical.EmitArrow.ModalMode.hz
+      (Tropical.EmitArrow.litF (110.0 * (i + 1).toFloat))
+      (Tropical.EmitArrow.litF (2.0 + 0.01 * i.toFloat))
+      (Tropical.EmitArrow.litF (1.0 / (1.0 + i.toFloat)))
+
+/-- `recip10Table` is a CACHE, not a second algorithm — held to the BIT.
+
+    `DyadicI.div x y` is DEFINED as `mulAt workingPrec x (invAt workingPrec y)`,
+    so multiplying by a cached `inv (ofNat (10^e))` is the same application of
+    the same function to the same arguments; the table only decides WHEN the
+    reciprocal is computed. This gate pins that identity against the LIVE `div`
+    expression rather than a frozen table, so the day `divAt` becomes a genuine
+    directed division — a legitimate improvement — this goes red instead of
+    `ofJsonNumber` silently keeping the older, wider answer.
+
+    Bit equality is the right bar and a tolerance would be the wrong one. This
+    value feeds `landK`'s power-of-two read and every `certLt` in the EC/DD
+    router, where an enclosure one ulp wider OR NARROWER is not a rounding
+    difference but a different emitted program. Narrower is not the safe
+    direction: a tighter interval turns `overlap` into a verdict, and
+    `classifyBloomPairLive` DROPS what it cannot certify.
+
+    Exponents past the table's end are included so the division fallback is
+    exercised rather than assumed. The two timings are PRINTED, never gated — a
+    wall-clock threshold in a test suite is a flake. -/
+def runExactRecip10 : IO Bool := do
+  let mants : Array Int :=
+    #[0, 1, -1, 5, -5, 244140625, 999999999999, -999999999999,
+      2718281828459, -3141592653590, 1000000000000, 6283185307179586,
+      4611686018427387904, -4611686018427387904]
+  let eTop := DyadicI.recip10Max + 3
+  let mut checked := 0
+  let mut bad := ""
+  for e in [0:eTop] do
+    for m in mants do
+      let got  := DyadicI.ofJsonNumber ⟨m, e⟩
+      let want := if e == 0 then DyadicI.ofInt m
+                  else DyadicI.div (DyadicI.ofInt m) (DyadicI.ofNat (10 ^ e))
+      checked := checked + 1
+      if !(got.ok == want.ok && Dyadic.ble got.lo want.lo && Dyadic.ble want.lo got.lo
+            && Dyadic.ble got.hi want.hi && Dyadic.ble want.hi got.hi) then
+        if bad.isEmpty then
+          bad := s!"m={m} e={e}: cache {got.render} vs division {want.render}"
+  -- what the change was for. Both forms timed in the SAME run over the SAME
+  -- literals, so the comparison needs no second build and no stored number.
+  -- PRINTED, never gated: a wall-clock threshold in a test suite is a flake.
+  let t0 ← IO.monoMsNow
+  let mut sinkOld : Int := 0
+  for i in [1:20001] do
+    sinkOld := sinkOld +
+      (DyadicI.div (DyadicI.ofInt ((i : Int) * 271828182845))
+                   (DyadicI.ofNat (10 ^ 12))).hi.magBits
+  let t1 ← IO.monoMsNow
+  let mut sinkNew : Int := 0
+  for i in [1:20001] do
+    sinkNew := sinkNew + (DyadicI.ofJsonNumber ⟨(i : Int) * 271828182845, 12⟩).hi.magBits
+  let t2 ← IO.monoMsNow
+  -- eight DISTINCT banks, so the folds cannot collapse into one
+  let banks := (Array.range 8).map fun j => benchBank (512 + j)
+  let t3 ← IO.monoMsNow
+  let mut ksum := 0
+  for b in banks do
+    ksum := ksum + (match Tropical.EmitArrow.bankLandExp b with
+                    | .static k  => k
+                    | .dynamic _ => 0)
+  let t4 ← IO.monoMsNow
+  IO.println s!"        20000 12-place literals: division {t1 - t0} ms → cached reciprocal {t2 - t1} ms (sinks {sinkOld}/{sinkNew})"
+  IO.println s!"        bankLandExp × 8 over ~512-mode banks in {t4 - t3} ms (Σk {ksum})"
+  if bad.isEmpty then
+    passGate "exact-recip10"
+      s!"the 10^-e reciprocal cache reproduces the division form BIT FOR BIT over {checked} (mantissa, exponent) pairs spanning e ∈ [0, {eTop - 1}] — ofJsonNumber got faster without one enclosure getting wider or narrower, so no certLt/certGt verdict and no emitted program can have moved"
+  else
+    failGate "exact-recip10" bad
 
 end Tropical.Tropicaltest.ExactGates
