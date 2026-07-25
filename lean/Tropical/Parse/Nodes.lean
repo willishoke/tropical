@@ -315,17 +315,17 @@ private def optField (key : String) : Option Json → List (String × Json)
 
 mutual
 
-partial def expr : ParsedExpr → Json
+def expr : ParsedExpr → Json
   | .num n => Json.num n
   | .bool b => Json.bool b
-  | .arr items => Json.arr (items.map expr)
+  | .arr items => Json.arr (items.attach.map fun ⟨x, _⟩ => expr x)
   | .binary tag lhs rhs =>
     Json.mkObj [("op", jStr tag.wire), ("args", Json.arr #[expr lhs, expr rhs])]
   | .unary tag arg =>
     Json.mkObj [("op", jStr tag.wire), ("args", Json.arr #[expr arg])]
   | .call callee args =>
     Json.mkObj [("op", jStr "call"), ("callee", expr callee),
-                ("args", Json.arr (args.map expr))]
+                ("args", Json.arr (args.attach.map fun ⟨x, _⟩ => expr x))]
   | .nameRef name => jNameRef name
   | .binding name => Json.mkObj [("op", jStr "binding"), ("name", jStr name)]
   | .nestedOut ref output =>
@@ -339,7 +339,7 @@ partial def expr : ParsedExpr → Json
     -- re-encode (Lean `Json` is key-sorted), scrambling the binding order —
     -- the same reason match-arm binds use an array.
     Json.mkObj [("op", jStr "let"),
-                ("bind", Json.arr (bind.map fun (name, v) =>
+                ("bind", Json.arr (bind.attach.map fun ⟨(name, v), _⟩ =>
                   Json.mkObj [("name", jStr name), ("value", expr v)])),
                 ("in", expr body)]
   | .fold over init accVar elemVar body =>
@@ -368,23 +368,39 @@ partial def expr : ParsedExpr → Json
   | .tag variant payload =>
     Json.mkObj <|
       [("op", jStr "tag"), ("variant", jNameRef variant)]
-      ++ optField "payload" (payload.map fun entries =>
-           Json.arr (entries.map tagPayloadEntry))
+      ++ (match payload with
+          | none => []
+          | some entries =>
+            [("payload", Json.arr (entries.attach.map fun ⟨e, _⟩ =>
+              tagPayloadEntry e))])
   | .match_ scrutinee arms =>
     Json.mkObj [("op", jStr "match"), ("scrutinee", expr scrutinee),
-                ("arms", Json.arr (arms.map matchArm))]
+                ("arms", Json.arr (arms.attach.map fun ⟨a, _⟩ => matchArm a))]
+termination_by e => sizeOf e
+decreasing_by
+  all_goals first
+    | (simp; omega)
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ items›; simp; omega)
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ args›; simp; omega)
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ entries›; simp; omega)
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ arms›; simp; omega)
+    | (have := sizeOf_lt_of_mem_snd ‹_ ∈ bind›; simp; omega)
 
-partial def tagPayloadEntry : TagPayloadEntry → Json
+def tagPayloadEntry : TagPayloadEntry → Json
   | .mk field value =>
     Json.mkObj [("field", jNameRef field), ("value", expr value)]
+termination_by e => sizeOf e
+decreasing_by simp; omega
 
-partial def matchArm : MatchArm → Json
+def matchArm : MatchArm → Json
   | .mk variant binds body =>
     Json.mkObj [
       ("variant", jNameRef variant),
       ("binds", Json.arr (binds.map fun (field, bind) =>
         Json.mkObj [("field", jNameRef field), ("bind", jStr bind)])),
       ("body", expr body)]
+termination_by a => sizeOf a
+decreasing_by simp; omega
 
 end
 
@@ -438,7 +454,7 @@ def bodyAssign : BodyAssign → Json
 
 mutual
 
-partial def bodyDecl : BodyDecl → Json
+def bodyDecl : BodyDecl → Json
   | .param name value? =>
     Json.mkObj <|
       [("op", jStr "paramDecl"), ("name", jStr name)]
@@ -456,18 +472,26 @@ partial def bodyDecl : BodyDecl → Json
   | .prog name p =>
     Json.mkObj [("op", jStr "programDecl"), ("name", jStr name),
                 ("program", program p)]
+termination_by d => sizeOf d
+decreasing_by simp; omega
 
-partial def block (b : Block) : Json :=
-  Json.mkObj [("op", jStr "block"),
-              ("decls", Json.arr (b.decls.map bodyDecl)),
-              ("assigns", Json.arr (b.assigns.map bodyAssign))]
+def block : Block → Json
+  | .mk decls assigns =>
+    Json.mkObj [("op", jStr "block"),
+                ("decls", Json.arr (decls.attach.map fun ⟨d, _⟩ => bodyDecl d)),
+                ("assigns", Json.arr (assigns.map bodyAssign))]
+termination_by b => sizeOf b
+decreasing_by have := Array.sizeOf_lt_of_mem ‹_ ∈ decls›; simp; omega
 
-partial def program (p : Program) : Json :=
-  Json.mkObj <|
-    [("op", jStr "program"), ("name", jStr p.name), ("body", block p.body)]
-    ++ optField "type_params" (p.typeParams.map typeParams)
-    ++ optField "ports" (p.ports.map programPorts)
-    ++ optField "breaks_cycles" (p.breaksCycles.map Json.bool)
+def program : Program → Json
+  | .mk name tps ports body breaksCycles =>
+    Json.mkObj <|
+      [("op", jStr "program"), ("name", jStr name), ("body", block body)]
+      ++ optField "type_params" (tps.map typeParams)
+      ++ optField "ports" (ports.map programPorts)
+      ++ optField "breaks_cycles" (breaksCycles.map Json.bool)
+termination_by p => sizeOf p
+decreasing_by simp; omega
 
 end
 
@@ -523,6 +547,43 @@ private def reqArr (path : String) (j : JsonV) (k : String) :
   | .arr items => pure items
   | _ => err path s!"field '{k}' must be an array"
 
+/- The `…D` accessors are the descending forms: same behavior and error
+   strings as their plain twins, but the result carries the `sizeOf`
+   bound that lets the recursive decoders below discharge their
+   termination measure through a field access. -/
+
+private def reqFieldD (path : String) (j : JsonV) (k : String) :
+    Except String {v : JsonV // sizeOf v < sizeOf j} :=
+  match hf : j.getField? k with
+  | some v => pure ⟨v, JsonV.sizeOf_lt_of_getField hf⟩
+  | none => err path s!"missing field '{k}'"
+
+private def reqArrD (path : String) (j : JsonV) (k : String) :
+    Except String {items : Array JsonV // sizeOf items < sizeOf j} := do
+  match ← reqFieldD path j k with
+  | ⟨.arr items, h⟩ => pure ⟨items, by simp at h; omega⟩
+  | _ => err path s!"field '{k}' must be an array"
+
+/-- The exactly-two-element args array, elements bounded by `j`. -/
+private def req2ArgsD (path : String) (j : JsonV) (op : String) :
+    Except String
+      ({v : JsonV // sizeOf v < sizeOf j} × {v : JsonV // sizeOf v < sizeOf j}) := do
+  let ⟨args, hargs⟩ ← reqArrD path j "args"
+  if hn : args.size = 2 then
+    pure (⟨args[0], Nat.lt_trans (sizeOf_lt_of_getElem (by omega)) hargs⟩,
+          ⟨args[1], Nat.lt_trans (sizeOf_lt_of_getElem (by omega)) hargs⟩)
+  else
+    err path s!"'{op}' requires exactly 2 args, got {args.size}"
+
+/-- The exactly-one-element args array, element bounded by `j`. -/
+private def req1ArgD (path : String) (j : JsonV) (op : String) :
+    Except String {v : JsonV // sizeOf v < sizeOf j} := do
+  let ⟨args, hargs⟩ ← reqArrD path j "args"
+  if hn : args.size = 1 then
+    pure ⟨args[0], Nat.lt_trans (sizeOf_lt_of_getElem (by omega)) hargs⟩
+  else
+    err path s!"'{op}' requires exactly 1 arg, got {args.size}"
+
 /-- A `{op:'nameRef', name}` node. -/
 def nameRefNode (path : String) (j : JsonV) : Except String String := do
   let .obj _ := j | err path "expected a nameRef node"
@@ -533,14 +594,13 @@ def nameRefNode (path : String) (j : JsonV) : Except String String := do
 
 mutual
 
-partial def expr (path : String) (j : JsonV) : Except String ParsedExpr := do
-  match j with
+def expr (path : String) (j : JsonV) : Except String ParsedExpr := do
+  match _hj : j with
   | .num n => pure (.num n)
   | .bool b => pure (.bool b)
   | .arr items => do
-    let mut out : Array ParsedExpr := #[]
-    for h : i in [0:items.size] do
-      out := out.push (← expr s!"{path}[{i}]" items[i])
+    let out ← items.attach.zipIdx.mapM fun (⟨x, _⟩, i) =>
+      expr s!"{path}[{i}]" x
     pure (.arr out)
   | .str _ => err path "string is not a ParsedExpr"
   | .null => err path "null is not a ParsedExpr"
@@ -549,24 +609,20 @@ partial def expr (path : String) (j : JsonV) : Except String ParsedExpr := do
       | err path "expression object missing string 'op'"
     if let some tag := BinaryOpTag.ofWire? op then
       expectKeys path j ["op", "args"]
-      let args ← reqArr path j "args"
-      let #[l, r] := args
-        | err path s!"'{op}' requires exactly 2 args, got {args.size}"
+      let (⟨l, _⟩, ⟨r, _⟩) ← req2ArgsD path j op
       pure (.binary tag (← expr s!"{path}.args[0]" l) (← expr s!"{path}.args[1]" r))
     else if let some tag := UnaryOpTag.ofWire? op then
       expectKeys path j ["op", "args"]
-      let args ← reqArr path j "args"
-      let #[x] := args
-        | err path s!"'{op}' requires exactly 1 arg, got {args.size}"
+      let ⟨x, _⟩ ← req1ArgD path j op
       pure (.unary tag (← expr s!"{path}.args[0]" x))
     else match op with
     | "call" => do
       expectKeys path j ["op", "callee", "args"]
-      let callee ← expr s!"{path}.callee" (← reqField path j "callee")
-      let args ← reqArr path j "args"
-      let mut out : Array ParsedExpr := #[]
-      for h : i in [0:args.size] do
-        out := out.push (← expr s!"{path}.args[{i}]" args[i])
+      let ⟨calleeJson, _⟩ ← reqFieldD path j "callee"
+      let callee ← expr s!"{path}.callee" calleeJson
+      let ⟨args, _⟩ ← reqArrD path j "args"
+      let out ← args.attach.zipIdx.mapM fun (⟨a, _⟩, i) =>
+        expr s!"{path}.args[{i}]" a
       pure (.call callee out)
     | "nameRef" => do
       pure (.nameRef (← nameRefNode path j))
@@ -580,108 +636,135 @@ partial def expr (path : String) (j : JsonV) : Except String ParsedExpr := do
       pure (.nestedOut ref output)
     | "index" => do
       expectKeys path j ["op", "args"]
-      let args ← reqArr path j "args"
-      let #[a, i] := args
-        | err path s!"'index' requires exactly 2 args, got {args.size}"
+      let (⟨a, _⟩, ⟨i, _⟩) ← req2ArgsD path j "index"
       pure (.index (← expr s!"{path}.args[0]" a) (← expr s!"{path}.args[1]" i))
     | "let" => do
       expectKeys path j ["op", "bind", "in"]
-      let bindJson ← reqField path j "bind"
-      let mut bind : Array (String × ParsedExpr) := #[]
-      match bindJson with
-      | .arr items =>
-        -- Canonical ordered form: [{name, value}, …]. An array preserves
-        -- binding order through re-encode; an object does not (its keys are
-        -- reordered), and `let` bindings are order-dependent.
-        for h : i in [0:items.size] do
-          let b := items[i]
-          let bPath := s!"{path}.bind[{i}]"
-          expectKeys bPath b ["name", "value"]
-          let nm ← reqStr bPath b "name"
-          bind := bind.push (nm, ← expr s!"{bPath}.value" (← reqField bPath b "value"))
-      | .obj bindFields =>
-        -- Legacy object form (older committed bridge); decoded in textual order.
-        for (k, v) in bindFields do
-          bind := bind.push (k, ← expr s!"{path}.bind.{k}" v)
-      | _ => err path "'let' bind must be an array or object"
-      pure (.letIn bind (← expr s!"{path}.in" (← reqField path j "in")))
+      let ⟨bindJson, hbind⟩ ← reqFieldD path j "bind"
+      let bind : Array (String × ParsedExpr) ←
+        match bindJson, hbind with
+        | .arr items, _hb =>
+          -- Canonical ordered form: [{name, value}, …]. An array preserves
+          -- binding order through re-encode; an object does not (its keys are
+          -- reordered), and `let` bindings are order-dependent.
+          items.attach.zipIdx.mapM fun (⟨b, _⟩, i) => do
+            let bPath := s!"{path}.bind[{i}]"
+            expectKeys bPath b ["name", "value"]
+            let nm ← reqStr bPath b "name"
+            let ⟨v, _⟩ ← reqFieldD bPath b "value"
+            pure (nm, ← expr s!"{bPath}.value" v)
+        | .obj bindFields, _hb =>
+          -- Legacy object form (older committed bridge); decoded in textual order.
+          bindFields.attach.mapM fun ⟨(k, v), _⟩ => do
+            pure (k, ← expr s!"{path}.bind.{k}" v)
+        | _, _ => err path "'let' bind must be an array or object"
+      let ⟨inJson, _⟩ ← reqFieldD path j "in"
+      pure (.letIn bind (← expr s!"{path}.in" inJson))
     | "fold" => do
       expectKeys path j ["op", "over", "init", "acc_var", "elem_var", "body"]
-      pure (.fold
-        (← expr s!"{path}.over" (← reqField path j "over"))
-        (← expr s!"{path}.init" (← reqField path j "init"))
-        (← reqStr path j "acc_var") (← reqStr path j "elem_var")
-        (← expr s!"{path}.body" (← reqField path j "body")))
+      let ⟨overJson, _⟩ ← reqFieldD path j "over"
+      let over ← expr s!"{path}.over" overJson
+      let ⟨initJson, _⟩ ← reqFieldD path j "init"
+      let init ← expr s!"{path}.init" initJson
+      let accVar ← reqStr path j "acc_var"
+      let elemVar ← reqStr path j "elem_var"
+      let ⟨bodyJson, _⟩ ← reqFieldD path j "body"
+      pure (.fold over init accVar elemVar (← expr s!"{path}.body" bodyJson))
     | "scan" => do
       expectKeys path j ["op", "over", "init", "acc_var", "elem_var", "body"]
-      pure (.scan
-        (← expr s!"{path}.over" (← reqField path j "over"))
-        (← expr s!"{path}.init" (← reqField path j "init"))
-        (← reqStr path j "acc_var") (← reqStr path j "elem_var")
-        (← expr s!"{path}.body" (← reqField path j "body")))
+      let ⟨overJson, _⟩ ← reqFieldD path j "over"
+      let over ← expr s!"{path}.over" overJson
+      let ⟨initJson, _⟩ ← reqFieldD path j "init"
+      let init ← expr s!"{path}.init" initJson
+      let accVar ← reqStr path j "acc_var"
+      let elemVar ← reqStr path j "elem_var"
+      let ⟨bodyJson, _⟩ ← reqFieldD path j "body"
+      pure (.scan over init accVar elemVar (← expr s!"{path}.body" bodyJson))
     | "generate" => do
       expectKeys path j ["op", "count", "var", "body"]
-      pure (.generate
-        (← expr s!"{path}.count" (← reqField path j "count"))
-        (← reqStr path j "var")
-        (← expr s!"{path}.body" (← reqField path j "body")))
+      let ⟨countJson, _⟩ ← reqFieldD path j "count"
+      let count ← expr s!"{path}.count" countJson
+      let var ← reqStr path j "var"
+      let ⟨bodyJson, _⟩ ← reqFieldD path j "body"
+      pure (.generate count var (← expr s!"{path}.body" bodyJson))
     | "iterate" => do
       expectKeys path j ["op", "count", "var", "init", "body"]
-      pure (.iterate
-        (← expr s!"{path}.count" (← reqField path j "count"))
-        (← reqStr path j "var")
-        (← expr s!"{path}.init" (← reqField path j "init"))
-        (← expr s!"{path}.body" (← reqField path j "body")))
+      let ⟨countJson, _⟩ ← reqFieldD path j "count"
+      let count ← expr s!"{path}.count" countJson
+      let var ← reqStr path j "var"
+      let ⟨initJson, _⟩ ← reqFieldD path j "init"
+      let init ← expr s!"{path}.init" initJson
+      let ⟨bodyJson, _⟩ ← reqFieldD path j "body"
+      pure (.iterate count var init (← expr s!"{path}.body" bodyJson))
     | "chain" => do
       expectKeys path j ["op", "count", "var", "init", "body"]
-      pure (.chain
-        (← expr s!"{path}.count" (← reqField path j "count"))
-        (← reqStr path j "var")
-        (← expr s!"{path}.init" (← reqField path j "init"))
-        (← expr s!"{path}.body" (← reqField path j "body")))
+      let ⟨countJson, _⟩ ← reqFieldD path j "count"
+      let count ← expr s!"{path}.count" countJson
+      let var ← reqStr path j "var"
+      let ⟨initJson, _⟩ ← reqFieldD path j "init"
+      let init ← expr s!"{path}.init" initJson
+      let ⟨bodyJson, _⟩ ← reqFieldD path j "body"
+      pure (.chain count var init (← expr s!"{path}.body" bodyJson))
     | "map2" => do
       expectKeys path j ["op", "over", "elem_var", "body"]
-      pure (.map2
-        (← expr s!"{path}.over" (← reqField path j "over"))
-        (← reqStr path j "elem_var")
-        (← expr s!"{path}.body" (← reqField path j "body")))
+      let ⟨overJson, _⟩ ← reqFieldD path j "over"
+      let over ← expr s!"{path}.over" overJson
+      let elemVar ← reqStr path j "elem_var"
+      let ⟨bodyJson, _⟩ ← reqFieldD path j "body"
+      pure (.map2 over elemVar (← expr s!"{path}.body" bodyJson))
     | "zipWith" => do
       expectKeys path j ["op", "a", "b", "x_var", "y_var", "body"]
-      pure (.zipWith
-        (← expr s!"{path}.a" (← reqField path j "a"))
-        (← expr s!"{path}.b" (← reqField path j "b"))
-        (← reqStr path j "x_var") (← reqStr path j "y_var")
-        (← expr s!"{path}.body" (← reqField path j "body")))
+      let ⟨aJson, _⟩ ← reqFieldD path j "a"
+      let a ← expr s!"{path}.a" aJson
+      let ⟨bJson, _⟩ ← reqFieldD path j "b"
+      let b ← expr s!"{path}.b" bJson
+      let xVar ← reqStr path j "x_var"
+      let yVar ← reqStr path j "y_var"
+      let ⟨bodyJson, _⟩ ← reqFieldD path j "body"
+      pure (.zipWith a b xVar yVar (← expr s!"{path}.body" bodyJson))
     | "tag" => do
       expectKeys path j ["op", "variant", "payload"]
       let variant ← nameRefNode s!"{path}.variant" (← reqField path j "variant")
-      let payload ← match j.getField? "payload" with
+      let payload ← match _hp : j.getField? "payload" with
         | none => pure none
         | some (.arr entries) => do
-          let mut out : Array TagPayloadEntry := #[]
-          for h : i in [0:entries.size] do
-            out := out.push (← tagPayloadEntry s!"{path}.payload[{i}]" entries[i])
+          let out ← entries.attach.zipIdx.mapM fun (⟨e, _⟩, i) =>
+            tagPayloadEntry s!"{path}.payload[{i}]" e
           pure (some out)
         | some _ => err path "'tag' payload must be an array"
       pure (.tag variant payload)
     | "match" => do
       expectKeys path j ["op", "scrutinee", "arms"]
-      let scrutinee ← expr s!"{path}.scrutinee" (← reqField path j "scrutinee")
-      let armsJson ← reqArr path j "arms"
-      let mut arms : Array MatchArm := #[]
-      for h : i in [0:armsJson.size] do
-        arms := arms.push (← matchArm s!"{path}.arms[{i}]" armsJson[i])
+      let ⟨scrutineeJson, _⟩ ← reqFieldD path j "scrutinee"
+      let scrutinee ← expr s!"{path}.scrutinee" scrutineeJson
+      let ⟨armsJson, _⟩ ← reqArrD path j "arms"
+      let arms ← armsJson.attach.zipIdx.mapM fun (⟨a, _⟩, i) =>
+        matchArm s!"{path}.arms[{i}]" a
       pure (.match_ scrutinee arms)
     | other => err path s!"unknown expression op '{other}'"
+termination_by sizeOf j
+decreasing_by
+  all_goals first
+    | omega
+    | (simp_all <;> omega)
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ items›; simp_all <;> omega)
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ args›; simp_all <;> omega)
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ armsJson›; simp_all <;> omega)
+    | (have := sizeOf_lt_of_mem_snd ‹_ ∈ bindFields›; simp_all <;> omega)
+    | (have := JsonV.sizeOf_lt_of_getField ‹_ = some (JsonV.arr entries)›;
+       have := Array.sizeOf_lt_of_mem ‹_ ∈ entries›; simp_all <;> omega)
 
-partial def tagPayloadEntry (path : String) (j : JsonV) :
+def tagPayloadEntry (path : String) (j : JsonV) :
     Except String TagPayloadEntry := do
   expectKeys path j ["field", "value"]
   let field ← nameRefNode s!"{path}.field" (← reqField path j "field")
-  let value ← expr s!"{path}.value" (← reqField path j "value")
+  let ⟨valueJson, _⟩ ← reqFieldD path j "value"
+  let value ← expr s!"{path}.value" valueJson
   pure (.mk field value)
+termination_by sizeOf j
+decreasing_by omega
 
-partial def matchArm (path : String) (j : JsonV) : Except String MatchArm := do
+def matchArm (path : String) (j : JsonV) : Except String MatchArm := do
   expectKeys path j ["variant", "binds", "body"]
   let variant ← nameRefNode s!"{path}.variant" (← reqField path j "variant")
   let bindsJson ← reqArr path j "binds"
@@ -692,8 +775,11 @@ partial def matchArm (path : String) (j : JsonV) : Except String MatchArm := do
     expectKeys bPath b ["field", "bind"]
     let field ← nameRefNode s!"{bPath}.field" (← reqField bPath b "field")
     binds := binds.push (field, ← reqStr bPath b "bind")
-  let body ← expr s!"{path}.body" (← reqField path j "body")
+  let ⟨bodyJson, _⟩ ← reqFieldD path j "body"
+  let body ← expr s!"{path}.body" bodyJson
   pure (.mk variant binds body)
+termination_by sizeOf j
+decreasing_by omega
 
 end
 
@@ -822,8 +908,8 @@ def bodyAssign (path : String) (j : JsonV) : Except String BodyAssign := do
 
 mutual
 
-partial def bodyDecl (path : String) (j : JsonV) : Except String BodyDecl := do
-  let .obj _ := j | err path "body decl must be an object"
+def bodyDecl (path : String) (j : JsonV) : Except String BodyDecl := do
+  if !j.isObj then err path "body decl must be an object"
   match j.opOf? with
   | some "paramDecl" => do
     expectKeys path j ["op", "name", "value"]
@@ -863,28 +949,32 @@ partial def bodyDecl (path : String) (j : JsonV) : Except String BodyDecl := do
     pure (.inst name progName typeArgs inputs)
   | some "programDecl" => do
     expectKeys path j ["op", "name", "program"]
-    pure (.prog (← reqStr path j "name")
-      (← program s!"{path}.program" (← reqField path j "program")))
+    let name ← reqStr path j "name"
+    let ⟨progJson, _⟩ ← reqFieldD path j "program"
+    pure (.prog name (← program s!"{path}.program" progJson))
   | some other => err path s!"unknown body decl op '{other}'"
   | none => err path "body decl missing string 'op'"
+termination_by sizeOf j
+decreasing_by omega
 
-partial def block (path : String) (j : JsonV) : Except String Block := do
-  let .obj _ := j | err path "block must be an object"
+def block (path : String) (j : JsonV) : Except String Block := do
+  if !j.isObj then err path "block must be an object"
   if j.opOf? != some "block" then
     err path "block must have op 'block'"
   expectKeys path j ["op", "decls", "assigns"]
-  let declsJson ← reqArr path j "decls"
-  let mut decls : Array BodyDecl := #[]
-  for h : i in [0:declsJson.size] do
-    decls := decls.push (← bodyDecl s!"{path}.decls[{i}]" declsJson[i])
+  let ⟨declsJson, _⟩ ← reqArrD path j "decls"
+  let decls ← declsJson.attach.zipIdx.mapM fun (⟨d, _⟩, i) =>
+    bodyDecl s!"{path}.decls[{i}]" d
   let assignsJson ← reqArr path j "assigns"
   let mut assigns : Array BodyAssign := #[]
   for h : i in [0:assignsJson.size] do
     assigns := assigns.push (← bodyAssign s!"{path}.assigns[{i}]" assignsJson[i])
   pure (.mk decls assigns)
+termination_by sizeOf j
+decreasing_by have := Array.sizeOf_lt_of_mem ‹_ ∈ declsJson›; simp_all; omega
 
-partial def program (path : String) (j : JsonV) : Except String Program := do
-  let .obj _ := j | err path "program must be an object"
+def program (path : String) (j : JsonV) : Except String Program := do
+  if !j.isObj then err path "program must be an object"
   if j.opOf? != some "program" then
     err path "program must have op 'program'"
   expectKeys path j ["op", "name", "body", "type_params", "ports", "breaks_cycles"]
@@ -895,12 +985,15 @@ partial def program (path : String) (j : JsonV) : Except String Program := do
   let ports ← match j.getField? "ports" with
     | none => pure none
     | some p => pure (some (← programPorts s!"{path}.ports" p))
-  let body ← block s!"{path}.body" (← reqField path j "body")
+  let ⟨bodyJson, _⟩ ← reqFieldD path j "body"
+  let body ← block s!"{path}.body" bodyJson
   let breaksCycles ← match j.getField? "breaks_cycles" with
     | none => pure none
     | some (.bool b) => pure (some b)
     | some _ => err path "'breaks_cycles' must be a boolean"
   pure (.mk name tps ports body breaksCycles)
+termination_by sizeOf j
+decreasing_by omega
 
 end
 

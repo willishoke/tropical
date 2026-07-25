@@ -126,17 +126,19 @@ private def isInt (n : JsonNumber) : Bool :=
 
 /-- Shallow `ExprNodeSchema`: number | boolean | array (recursed) |
     object with a string `op` (children not recursed). -/
-partial def exprNode (path : String) (v : JsonV) : Except String Unit := do
+def exprNode (path : String) (v : JsonV) : Except String Unit := do
   match v with
   | .num _ | .bool _ => pure ()
   | .arr items =>
-    for h : i in [0:items.size] do
-      exprNode (sub path (toString i)) items[i]
+    items.attach.zipIdx.forM fun (⟨x, _⟩, i) =>
+      exprNode (sub path (toString i)) x
   | .obj _ =>
     match v.getStr? "op" with
     | some _ => pure ()
     | none => zerr path "Invalid input"
   | _ => zerr path "Invalid input"
+termination_by sizeOf v
+decreasing_by have := Array.sizeOf_lt_of_mem ‹_ ∈ items›; simp_all <;> omega
 
 /-- `PortTypeDeclSchema`: bare string (no brackets) or
     `{kind:'array', element, shape}`. Returns the stripped value. -/
@@ -442,160 +444,172 @@ private def fieldStr (node : JsonV) (k ctx : String) : Except String String :=
   | some (.str s) => pure s
   | _ => rerr s!"{ctx} requires string '{k}', got {JsonV.stringifyOpt (node.getField? k)}"
 
-mutual
+/-- Sized view of the `args` array: same behavior and error string as
+    the old `raiseArgs`, but the result carries the `sizeOf` bound that
+    `raiseExpr?`'s termination measure descends through. -/
+private def raiseArgsD (node : JsonV) (op : String) :
+    Except String {args : Array JsonV // sizeOf args < sizeOf node} :=
+  match h : node.getField? "args" with
+  | some (.arr a) =>
+    pure ⟨a, by have := JsonV.sizeOf_lt_of_getField h; simp at this; omega⟩
+  | _ => rerr s!"'{op}' requires an args array, got {JsonV.stringifyOpt (node.getField? "args")}"
 
-partial def raiseExpr (e : JsonV) : Except String ParsedExpr := do
-  match e with
+/-- The whole `raiseExpr` / `raiseOpNode` / `raiseArgAt` / `raiseExprOpt`
+    family as ONE recursive function over `Option JsonV`. `undefined`
+    (`none`) was always in the domain — TS feeds `args[i]` and missing
+    fields straight into raiseExpr, and rejects them with the exact
+    message below — and folding it in gives every recursive call a
+    strictly smaller `sizeOf`, with no lexicographic measure and no
+    mutual block. The public names below are thin views of this one. -/
+def raiseExpr? : Option JsonV → Except String ParsedExpr
+  | none => rerr "invalid expr value: undefined"
+  | some node => do
+  match _hn : node with
   | .num n => pure (.num n)
   | .bool b => pure (.bool b)
   | .arr items => do
-    let mut out : Array ParsedExpr := #[]
-    for item in items do
-      out := out.push (← raiseExpr item)
+    let out ← items.attach.mapM fun ⟨x, _⟩ => raiseExpr? (some x)
     pure (.arr out)
-  | .obj _ => raiseOpNode e
+  | .obj _ => do
+    let some op := node.opOf?
+      | match node.getField? "op" with
+        | none => rerr s!"expression object missing 'op' field: {node.compress}"
+        | some _ => rerr s!"expression object missing 'op' field: {node.compress}"
+
+    -- ── Reference collapse ────────────────────────────────────
+    if refOpsName.contains op then
+      return .nameRef (← fieldStr node "name" s!"'{op}'")
+    if op == "delayRef" then
+      return .nameRef (← fieldStr node "id" "'delayRef'")
+    if op == "binding" then
+      return .binding (← fieldStr node "name" "'binding'")
+
+    -- ── Builtin → call ───────────────────────────────────────
+    if builtinNullaryOps.contains op then
+      return .call (.nameRef op) #[]
+    if builtinCallOps.contains op then
+      let ⟨args, _⟩ ← raiseArgsD node op
+      let out ← args.attach.mapM fun ⟨a, _⟩ => raiseExpr? (some a)
+      return .call (.nameRef op) out
+
+    -- ── Pass-through binary / unary ──────────────────────────
+    if let some tag := BinaryOpTag.ofWire? op then
+      let ⟨args, _⟩ ← raiseArgsD node op
+      return .binary tag (← raiseExpr? args[0]?) (← raiseExpr? args[1]?)
+    if let some tag := UnaryOpTag.ofWire? op then
+      let ⟨args, _⟩ ← raiseArgsD node op
+      return .unary tag (← raiseExpr? args[0]?)
+
+    -- ── Structured / ADT ─────────────────────────────────────
+    match op with
+    | "nestedOut" => do
+      let ref ← fieldStr node "ref" "'nestedOut'"
+      let output := match node.getField? "output" with
+        | some v => v.jsString
+        | none => "undefined"
+      pure (.nestedOut ref output)
+    | "index" => do
+      let ⟨args, _⟩ ← raiseArgsD node op
+      pure (.index (← raiseExpr? args[0]?) (← raiseExpr? args[1]?))
+    | "tag" => do
+      let variant ← fieldStr node "variant" "'tag'"
+      let payload ← match _hp : node.getField? "payload" with
+        | none => pure none
+        | some (.obj entries) => do
+          let out ← entries.attach.mapM fun ⟨(field, value), _⟩ => do
+            pure (TagPayloadEntry.mk field (← raiseExpr? (some value)))
+          pure (if out.isEmpty then none else some out)
+        | some other => rerr s!"'tag' payload must be an object, got {other.compress}"
+      pure (.tag variant payload)
+    | "match" => do
+      match _harms : node.getField? "arms" with
+      | some (.obj armEntries) => do
+        let arms ← armEntries.attach.mapM fun ⟨(variant, arm), _⟩ => do
+          -- Legacy arms carry bind name(s) only; payload field labels are
+          -- not in the schema, so raise emits `_unknown` placeholders.
+          let bindNames : Array String ← match arm.getField? "bind" with
+            | none => pure #[]
+            | some (.str s) => pure #[s]
+            | some (.arr bs) => do
+              let mut out : Array String := #[]
+              for b in bs do
+                match b with
+                | .str s => out := out.push s
+                | other => rerr s!"'match' arm bind must be a string, got {other.compress}"
+              pure out
+            | some other => rerr s!"'match' arm bind must be a string or array, got {other.compress}"
+          let body ← raiseExpr? (arm.getField? "body")
+          pure (MatchArm.mk variant (bindNames.map ("_unknown", ·)) body)
+        let scrutinee ← raiseExpr? (node.getField? "scrutinee")
+        pure (.match_ scrutinee arms)
+      | _ =>
+        rerr s!"'match' requires an arms object, got {JsonV.stringifyOpt (node.getField? "arms")}"
+    | "let" => do
+      match _hbe : node.getField? "bind" with
+      | some (.obj bindEntries) => do
+        let bind ← bindEntries.attach.mapM fun ⟨(k, v), _⟩ => do
+          pure (k, ← raiseExpr? (some v))
+        pure (.letIn bind (← raiseExpr? (node.getField? "in")))
+      | _ =>
+        rerr s!"'let' requires a bind object, got {JsonV.stringifyOpt (node.getField? "bind")}"
+    | "fold" => do
+      let over ← raiseExpr? (node.getField? "over")
+      let init ← raiseExpr? (node.getField? "init")
+      pure (.fold over init
+        (← fieldStr node "acc_var" "'fold'") (← fieldStr node "elem_var" "'fold'")
+        (← raiseExpr? (node.getField? "body")))
+    | "scan" => do
+      let over ← raiseExpr? (node.getField? "over")
+      let init ← raiseExpr? (node.getField? "init")
+      pure (.scan over init
+        (← fieldStr node "acc_var" "'scan'") (← fieldStr node "elem_var" "'scan'")
+        (← raiseExpr? (node.getField? "body")))
+    | "generate" => do
+      let count ← raiseExpr? (node.getField? "count")
+      pure (.generate count (← fieldStr node "var" "'generate'")
+        (← raiseExpr? (node.getField? "body")))
+    | "iterate" => do
+      let count ← raiseExpr? (node.getField? "count")
+      let init ← raiseExpr? (node.getField? "init")
+      pure (.iterate count (← fieldStr node "var" "'iterate'") init
+        (← raiseExpr? (node.getField? "body")))
+    | "chain" => do
+      let count ← raiseExpr? (node.getField? "count")
+      let init ← raiseExpr? (node.getField? "init")
+      pure (.chain count (← fieldStr node "var" "'chain'") init
+        (← raiseExpr? (node.getField? "body")))
+    | "map2" => do
+      let over ← raiseExpr? (node.getField? "over")
+      pure (.map2 over (← fieldStr node "elem_var" "'map2'")
+        (← raiseExpr? (node.getField? "body")))
+    | "zipWith" => do
+      let a ← raiseExpr? (node.getField? "a")
+      let b ← raiseExpr? (node.getField? "b")
+      pure (.zipWith a b
+        (← fieldStr node "x_var" "'zipWith'") (← fieldStr node "y_var" "'zipWith'")
+        (← raiseExpr? (node.getField? "body")))
+    | other => rerr s!"unknown expression op '{other}'"
   | other => rerr s!"invalid expr value: {other.compress}"
+termination_by o => sizeOf o
+decreasing_by
+  all_goals first
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ items›; simp_all <;> omega)
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ args›; simp_all <;> omega)
+    | (have := JsonV.sizeOf_lt_of_getField ‹_ = some (JsonV.obj entries)›;
+       have := sizeOf_lt_of_mem_snd ‹_ ∈ entries›; simp_all <;> omega)
+    | (have := JsonV.sizeOf_lt_of_getField ‹_ = some (JsonV.obj bindEntries)›;
+       have := sizeOf_lt_of_mem_snd ‹_ ∈ bindEntries›; simp_all <;> omega)
+    | (refine Nat.lt_of_le_of_lt (JsonV.sizeOf_getField_le _ _) ?_;
+       have := JsonV.sizeOf_lt_of_getField ‹_ = some (JsonV.obj armEntries)›;
+       have := sizeOf_lt_of_mem_snd ‹_ ∈ armEntries›; simp_all <;> omega)
+    | (refine Nat.lt_of_le_of_lt (JsonV.sizeOf_getField_le _ _) ?_;
+       simp_all <;> omega)
+    | (refine Nat.lt_of_le_of_lt (sizeOf_getElem?_le _ _) ?_;
+       simp_all <;> omega)
 
-/-- TS indexes `args[i]` and feeds the result to `raiseExpr`; a missing
-    element is `undefined`, which raiseExpr rejects with this exact
-    message. -/
-partial def raiseArgAt (args : Array JsonV) (i : Nat) : Except String ParsedExpr :=
-  match args[i]? with
-  | some a => raiseExpr a
-  | none => rerr "invalid expr value: undefined"
+def raiseExpr (e : JsonV) : Except String ParsedExpr := raiseExpr? (some e)
 
-partial def raiseExprOpt (e : Option JsonV) : Except String ParsedExpr :=
-  match e with
-  | some v => raiseExpr v
-  | none => rerr "invalid expr value: undefined"
-
-partial def raiseArgs (node : JsonV) (op : String) : Except String (Array JsonV) :=
-  match node.getField? "args" with
-  | some (.arr a) => pure a
-  | _ => rerr s!"'{op}' requires an args array, got {JsonV.stringifyOpt (node.getField? "args")}"
-
-partial def raiseOpNode (node : JsonV) : Except String ParsedExpr := do
-  let some op := node.opOf?
-    | match node.getField? "op" with
-      | none => rerr s!"expression object missing 'op' field: {node.compress}"
-      | some _ => rerr s!"expression object missing 'op' field: {node.compress}"
-
-  -- ── Reference collapse ────────────────────────────────────
-  if refOpsName.contains op then
-    return .nameRef (← fieldStr node "name" s!"'{op}'")
-  if op == "delayRef" then
-    return .nameRef (← fieldStr node "id" "'delayRef'")
-  if op == "binding" then
-    return .binding (← fieldStr node "name" "'binding'")
-
-  -- ── Builtin → call ───────────────────────────────────────
-  if builtinNullaryOps.contains op then
-    return .call (.nameRef op) #[]
-  if builtinCallOps.contains op then
-    let args ← raiseArgs node op
-    let mut out : Array ParsedExpr := #[]
-    for a in args do
-      out := out.push (← raiseExpr a)
-    return .call (.nameRef op) out
-
-  -- ── Pass-through binary / unary ──────────────────────────
-  if let some tag := BinaryOpTag.ofWire? op then
-    let args ← raiseArgs node op
-    return .binary tag (← raiseArgAt args 0) (← raiseArgAt args 1)
-  if let some tag := UnaryOpTag.ofWire? op then
-    let args ← raiseArgs node op
-    return .unary tag (← raiseArgAt args 0)
-
-  -- ── Structured / ADT ─────────────────────────────────────
-  match op with
-  | "nestedOut" => do
-    let ref ← fieldStr node "ref" "'nestedOut'"
-    let output := match node.getField? "output" with
-      | some v => v.jsString
-      | none => "undefined"
-    pure (.nestedOut ref output)
-  | "index" => do
-    let args ← raiseArgs node op
-    pure (.index (← raiseArgAt args 0) (← raiseArgAt args 1))
-  | "tag" => do
-    let variant ← fieldStr node "variant" "'tag'"
-    let payload ← match node.getField? "payload" with
-      | none => pure none
-      | some (.obj entries) => do
-        let mut out : Array TagPayloadEntry := #[]
-        for (field, value) in entries do
-          out := out.push (.mk field (← raiseExpr value))
-        pure (if out.isEmpty then none else some out)
-      | some other => rerr s!"'tag' payload must be an object, got {other.compress}"
-    pure (.tag variant payload)
-  | "match" => do
-    let some (JsonV.obj armEntries) := node.getField? "arms"
-      | rerr s!"'match' requires an arms object, got {JsonV.stringifyOpt (node.getField? "arms")}"
-    let mut arms : Array MatchArm := #[]
-    for (variant, arm) in armEntries do
-      -- Legacy arms carry bind name(s) only; payload field labels are
-      -- not in the schema, so raise emits `_unknown` placeholders.
-      let bindNames : Array String ← match arm.getField? "bind" with
-        | none => pure #[]
-        | some (.str s) => pure #[s]
-        | some (.arr bs) => do
-          let mut out : Array String := #[]
-          for b in bs do
-            match b with
-            | .str s => out := out.push s
-            | other => rerr s!"'match' arm bind must be a string, got {other.compress}"
-          pure out
-        | some other => rerr s!"'match' arm bind must be a string or array, got {other.compress}"
-      let body ← raiseExprOpt (arm.getField? "body")
-      arms := arms.push (.mk variant (bindNames.map ("_unknown", ·)) body)
-    let scrutinee ← raiseExprOpt (node.getField? "scrutinee")
-    pure (.match_ scrutinee arms)
-  | "let" => do
-    let some (JsonV.obj bindEntries) := node.getField? "bind"
-      | rerr s!"'let' requires a bind object, got {JsonV.stringifyOpt (node.getField? "bind")}"
-    let mut bind : Array (String × ParsedExpr) := #[]
-    for (k, v) in bindEntries do
-      bind := bind.push (k, ← raiseExpr v)
-    pure (.letIn bind (← raiseExprOpt (node.getField? "in")))
-  | "fold" => do
-    let over ← raiseExprOpt (node.getField? "over")
-    let init ← raiseExprOpt (node.getField? "init")
-    pure (.fold over init
-      (← fieldStr node "acc_var" "'fold'") (← fieldStr node "elem_var" "'fold'")
-      (← raiseExprOpt (node.getField? "body")))
-  | "scan" => do
-    let over ← raiseExprOpt (node.getField? "over")
-    let init ← raiseExprOpt (node.getField? "init")
-    pure (.scan over init
-      (← fieldStr node "acc_var" "'scan'") (← fieldStr node "elem_var" "'scan'")
-      (← raiseExprOpt (node.getField? "body")))
-  | "generate" => do
-    let count ← raiseExprOpt (node.getField? "count")
-    pure (.generate count (← fieldStr node "var" "'generate'")
-      (← raiseExprOpt (node.getField? "body")))
-  | "iterate" => do
-    let count ← raiseExprOpt (node.getField? "count")
-    let init ← raiseExprOpt (node.getField? "init")
-    pure (.iterate count (← fieldStr node "var" "'iterate'") init
-      (← raiseExprOpt (node.getField? "body")))
-  | "chain" => do
-    let count ← raiseExprOpt (node.getField? "count")
-    let init ← raiseExprOpt (node.getField? "init")
-    pure (.chain count (← fieldStr node "var" "'chain'") init
-      (← raiseExprOpt (node.getField? "body")))
-  | "map2" => do
-    let over ← raiseExprOpt (node.getField? "over")
-    pure (.map2 over (← fieldStr node "elem_var" "'map2'")
-      (← raiseExprOpt (node.getField? "body")))
-  | "zipWith" => do
-    let a ← raiseExprOpt (node.getField? "a")
-    let b ← raiseExprOpt (node.getField? "b")
-    pure (.zipWith a b
-      (← fieldStr node "x_var" "'zipWith'") (← fieldStr node "y_var" "'zipWith'")
-      (← raiseExprOpt (node.getField? "body")))
-  | other => rerr s!"unknown expression op '{other}'"
-
-end
+def raiseExprOpt (e : Option JsonV) : Except String ParsedExpr := raiseExpr? e
 
 -- ─────────────────────────────────────────────────────────────
 -- Ports + type defs
@@ -737,39 +751,41 @@ private def boundPair : Bounds → Tropical.Parse.BoundPair
     bounded-output assigns in clamp/select chains. Pure (the TS version
     mutates in place). Bounded inputs without defaults drop their
     bounds silently — there is nothing to wrap. -/
-partial def lowerBounds (p : Program) : Program :=
-  let ports := p.ports
-  -- Nested programs first (mirrors the TS recursion).
-  let decls := p.body.decls.map fun d =>
-    match d with
-    | .prog n inner => .prog n (lowerBounds inner)
-    | other => other
-  -- Inputs: wrap defaults where the type alias carries bounds.
-  let inputs' := ports.bind (·.inputs) |>.map fun ins =>
-    ins.map fun port =>
-      match port with
-      | .spec s =>
-        match aliasBounds s.type?, s.default? with
-        | some b, some dflt =>
-          ProgramPort.spec { s with default? := some (wrapWithBound dflt (boundPair b)) }
-        | _, _ => ProgramPort.spec s
-      | bare => bare
-  -- Outputs: collect bounds by port name.
-  let outputBounds : Array (String × Bounds) :=
-    (ports.bind (·.outputs) |>.getD #[]).filterMap fun port =>
-      match port with
-      | .spec s => (aliasBounds s.type?).map (s.name, ·)
-      | .bare _ => none
-  let assigns :=
-    if outputBounds.isEmpty then p.body.assigns
-    else p.body.assigns.map fun a =>
-      match a with
-      | .output name e =>
-        match outputBounds.find? (·.1 == name) with
-        | some (_, b) => .output name (wrapWithBound e (boundPair b))
-        | none => .output name e
-  let ports' := ports.map fun pp => { pp with inputs := inputs' }
-  .mk p.name p.typeParams ports' (.mk decls assigns) p.breaksCycles
+def lowerBounds : Program → Program
+  | .mk pName pTypeParams ports (.mk pDecls pAssigns) pBreaksCycles =>
+    -- Nested programs first (mirrors the TS recursion).
+    let decls := pDecls.attach.map fun ⟨d, _⟩ =>
+      match _hd : d with
+      | .prog n inner => .prog n (lowerBounds inner)
+      | other => other
+    -- Inputs: wrap defaults where the type alias carries bounds.
+    let inputs' := ports.bind (·.inputs) |>.map fun ins =>
+      ins.map fun port =>
+        match port with
+        | .spec s =>
+          match aliasBounds s.type?, s.default? with
+          | some b, some dflt =>
+            ProgramPort.spec { s with default? := some (wrapWithBound dflt (boundPair b)) }
+          | _, _ => ProgramPort.spec s
+        | bare => bare
+    -- Outputs: collect bounds by port name.
+    let outputBounds : Array (String × Bounds) :=
+      (ports.bind (·.outputs) |>.getD #[]).filterMap fun port =>
+        match port with
+        | .spec s => (aliasBounds s.type?).map (s.name, ·)
+        | .bare _ => none
+    let assigns :=
+      if outputBounds.isEmpty then pAssigns
+      else pAssigns.map fun a =>
+        match a with
+        | .output name e =>
+          match outputBounds.find? (·.1 == name) with
+          | some (_, b) => .output name (wrapWithBound e (boundPair b))
+          | none => .output name e
+    let ports' := ports.map fun pp => { pp with inputs := inputs' }
+    .mk pName pTypeParams ports' (.mk decls assigns) pBreaksCycles
+termination_by p => sizeOf p
+decreasing_by have := Array.sizeOf_lt_of_mem ‹_ ∈ pDecls›; simp_all <;> omega
 
 -- ─────────────────────────────────────────────────────────────
 -- Body decls + assigns + program
@@ -781,11 +797,20 @@ private def opString (obj : JsonV) : String :=
   | some v => v.jsString
   | none => "undefined"
 
+def raiseBodyAssign (a : JsonV) : Except String BodyAssign := do
+  let .obj _ := a
+    | rerr s!"body assign must be an object, got {a.compress}"
+  match a.opOf?.getD (opString a) with
+  | "outputAssign" => do
+    let name ← fieldStr a "name" "outputAssign"
+    pure (.output name (← raiseExprOpt (a.getField? "expr")))
+  | other => rerr s!"unknown body assign op '{other}'"
+
 mutual
 
-partial def raiseBodyDecl (decl : JsonV) : Except String BodyDecl := do
-  let .obj _ := decl
-    | rerr s!"body decl must be an object, got {decl.compress}"
+def raiseBodyDecl (decl : JsonV) : Except String BodyDecl := do
+  if !decl.isObj then
+    rerr s!"body decl must be an object, got {decl.compress}"
   match decl.opOf?.getD (opString decl) with
   | "paramDecl" => do
     let name ← fieldStr decl "name" "paramDecl"
@@ -817,32 +842,27 @@ partial def raiseBodyDecl (decl : JsonV) : Except String BodyDecl := do
     pure (.inst name progName typeArgs inputs)
   | "programDecl" => do
     let name ← fieldStr decl "name" "programDecl"
-    let some inner := decl.getField? "program"
-      | rerr "programDecl missing program"
-    pure (.prog name (← raiseProgram inner))
+    match _hi : decl.getField? "program" with
+    | none => rerr "programDecl missing program"
+    | some inner => pure (.prog name (← raiseProgram inner))
   | other => rerr s!"unknown body decl op '{other}'"
-
-partial def raiseBodyAssign (a : JsonV) : Except String BodyAssign := do
-  let .obj _ := a
-    | rerr s!"body assign must be an object, got {a.compress}"
-  match a.opOf?.getD (opString a) with
-  | "outputAssign" => do
-    let name ← fieldStr a "name" "outputAssign"
-    pure (.output name (← raiseExprOpt (a.getField? "expr")))
-  | other => rerr s!"unknown body assign op '{other}'"
+termination_by sizeOf decl
+decreasing_by have := JsonV.sizeOf_lt_of_getField _hi; omega
 
 /-- Port of `raiseProgram`: raise body decls/assigns, lift ports and
     type params, then run the bounds lowering. Pure; errors carry the
     TS message strings. -/
-partial def raiseProgram (legacy : JsonV) : Except String Program := do
+def raiseProgram (legacy : JsonV) : Except String Program := do
+  let decls : Array BodyDecl ←
+    match _hb : legacy.getField? "body" with
+    | none => pure #[]
+    | some bodyV =>
+      match _hd : bodyV.getField? "decls" with
+      | none | some .null => pure #[]
+      | some (.arr items) =>
+        items.attach.mapM fun ⟨d, _⟩ => raiseBodyDecl d
+      | some other => rerr s!"body decls must be an array, got {other.compress}"
   let body := legacy.getField? "body"
-  let mut decls : Array BodyDecl := #[]
-  match body.bind (·.getField? "decls") with
-  | none | some .null => pure ()
-  | some (.arr items) =>
-    for d in items do
-      decls := decls.push (← raiseBodyDecl d)
-  | some other => rerr s!"body decls must be an array, got {other.compress}"
   let mut assigns : Array BodyAssign := #[]
   match body.bind (·.getField? "assigns") with
   | none | some .null => pure ()
@@ -863,6 +883,12 @@ partial def raiseProgram (legacy : JsonV) : Except String Program := do
     if legacy.getField? "breaks_cycles" == some (.bool true) then some true else none
 
   pure <| lowerBounds (.mk name typeParams ports (.mk decls assigns) breaksCycles)
+termination_by sizeOf legacy
+decreasing_by
+  have := JsonV.sizeOf_lt_of_getField _hb
+  have := JsonV.sizeOf_lt_of_getField _hd
+  have := Array.sizeOf_lt_of_mem ‹_ ∈ items›
+  simp_all <;> omega
 
 end
 

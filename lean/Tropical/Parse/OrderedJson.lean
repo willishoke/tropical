@@ -28,6 +28,33 @@ namespace Tropical.Parse
 
 open Lean (Json JsonNumber)
 
+/-- Termination workhorse for folds over `Array (α × β)` fields (ordered
+    objects, `let` binders, tag payloads): membership of the pair bounds
+    the second component. `Array.sizeOf_lt_of_mem` alone stops at the
+    pair; this adds the projection step. -/
+theorem sizeOf_lt_of_mem_snd {α β} [SizeOf α] [SizeOf β]
+    {a : α} {b : β} {ps : Array (α × β)} (h : (a, b) ∈ ps) :
+    sizeOf b < sizeOf ps := by
+  have := Array.sizeOf_lt_of_mem h
+  simp at this
+  omega
+
+/-- Indexing form of `Array.sizeOf_lt_of_mem`. -/
+theorem sizeOf_lt_of_getElem {α} [SizeOf α] {as : Array α} {i : Nat}
+    (h : i < as.size) : sizeOf as[i] < sizeOf as :=
+  Array.sizeOf_lt_of_mem (Array.getElem_mem h)
+
+/-- `Option`-level bound for recursion through `as[i]?` (a missing
+    element still decreases, because an array's size is at least 2). -/
+theorem sizeOf_getElem?_le {α} [SizeOf α] (as : Array α) (i : Nat) :
+    sizeOf as[i]? ≤ sizeOf as := by
+  match h : as[i]? with
+  | none => cases as; simp
+  | some a =>
+    have := Array.sizeOf_lt_of_mem (Array.mem_of_getElem? h)
+    simp
+    omega
+
 inductive JsonV where
   | null
   | bool (b : Bool)
@@ -44,6 +71,31 @@ namespace JsonV
 def getField? : JsonV → String → Option JsonV
   | .obj fields, k => (fields.find? (·.1 == k)).map (·.2)
   | _, _ => none
+
+/-- A field's value is smaller than the object it came from — the fact
+    that lets decoders recurse through `getField?` under a `sizeOf`
+    termination measure. -/
+theorem sizeOf_lt_of_getField {j v : JsonV} {k : String}
+    (h : j.getField? k = some v) : sizeOf v < sizeOf j := by
+  match j with
+  | .null | .bool _ | .num _ | .str _ | .arr _ => simp [getField?] at h
+  | .obj fields =>
+    simp only [getField?, Option.map_eq_some_iff] at h
+    obtain ⟨⟨a, b⟩, hf, rfl⟩ := h
+    have := sizeOf_lt_of_mem_snd (Array.mem_of_find?_eq_some hf)
+    simp
+    omega
+
+/-- `Option`-level bound for recursion through `getField?` itself (a
+    missing field still decreases against any `JsonV`). -/
+theorem sizeOf_getField_le (j : JsonV) (k : String) :
+    sizeOf (j.getField? k) ≤ sizeOf j := by
+  match h : j.getField? k with
+  | none => cases j <;> simp <;> omega
+  | some v =>
+    have := sizeOf_lt_of_getField h
+    simp
+    omega
 
 def getStr? (j : JsonV) (k : String) : Option String :=
   match j.getField? k with
@@ -63,29 +115,39 @@ def keys : JsonV → Array String
 
 -- ── Conversion to Lean.Json (for printing; key order is surrendered) ─────────
 
-partial def toJson : JsonV → Json
+def toJson : JsonV → Json
   | .null => Json.null
   | .bool b => Json.bool b
   | .num n => Json.num n
   | .str s => Json.str s
-  | .arr elems => Json.arr (elems.map toJson)
-  | .obj fields => Json.mkObj (fields.toList.map fun (k, v) => (k, toJson v))
+  | .arr elems => Json.arr (elems.attach.map fun ⟨x, _⟩ => toJson x)
+  | .obj fields =>
+    Json.mkObj (fields.attach.toList.map fun ⟨(k, v), _⟩ => (k, toJson v))
+termination_by j => sizeOf j
+decreasing_by
+  · have := Array.sizeOf_lt_of_mem ‹_ ∈ elems›; simp; omega
+  · have := sizeOf_lt_of_mem_snd ‹_ ∈ fields›; simp; omega
 
 -- ── JS-flavoured rendering (for error-message parity with TS) ────────────────
 
 /-- `JSON.stringify`-compatible compact rendering. Unlike
     `Json.compress`, object keys keep source order — which is what
     `JSON.stringify` does, and what the TS error strings embed. -/
-partial def compress : JsonV → String
+def compress : JsonV → String
   | .null => "null"
   | .bool b => toString b
   | .num n => toString n
   | .str s => (Json.str s).compress
   | .arr elems =>
-    "[" ++ String.intercalate "," (elems.map compress).toList ++ "]"
+    "[" ++ String.intercalate "," (elems.attach.map fun ⟨x, _⟩ => compress x).toList ++ "]"
   | .obj fields =>
     "{" ++ String.intercalate ","
-      (fields.map fun (k, v) => s!"{(Json.str k).compress}:{compress v}").toList ++ "}"
+      (fields.attach.map fun ⟨(k, v), _⟩ =>
+        s!"{(Json.str k).compress}:{compress v}").toList ++ "}"
+termination_by j => sizeOf j
+decreasing_by
+  · have := Array.sizeOf_lt_of_mem ‹_ ∈ elems›; simp; omega
+  · have := sizeOf_lt_of_mem_snd ‹_ ∈ fields›; simp; omega
 
 /-- JS `String(x)` for the value positions TS stringifies into names and
     error messages (`String(node.output)`, `String(obj.op)`). Array/object
@@ -117,6 +179,11 @@ open Lean.Json.Parser (lookahead)
 private def pNum : Parser JsonNumber := Lean.Json.Parser.num
 private def pStr : Parser String := Lean.Json.Parser.str
 
+/- Deliberately `partial`: these recurse on the parser STATE, not on a
+   JsonV — the discharging measure would be "remaining input shrinks",
+   a fact about `Std.Internal.Parsec` internals that core does not
+   expose. Every structural fold in this module is total; only the
+   three parser combinators below are exempt. -/
 mutual
 
 private partial def arrayCore (acc : Array JsonV) : Parser (Array JsonV) := do
