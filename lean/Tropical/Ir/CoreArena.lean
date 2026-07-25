@@ -231,6 +231,42 @@ def CoreArena.sig? (a : CoreArena) (id : ExprId) : Option StageSig :=
 def CoreArena.deref (a : CoreArena) (id : ExprId) : Option CNode :=
   a.nodes[id.idx]?
 
+/-- The edge set of the DAG (the Core-side mirror of `ENode.children`). -/
+def CNode.children : CNode → Array ExprId
+  | .num _ | .bool _ | .inputRef _ | .paramRef _ | .nestedOut _ _
+  | .sampleRate | .sampleIndex | .loopIdx _ => #[]
+  | .arr items => items
+  | .binary _ a b => #[a, b]
+  | .unary _ a => #[a]
+  | .clamp a b c => #[a, b, c]
+  | .select a b c => #[a, b, c]
+  | .arraySet a b c => #[a, b, c]
+  | .index a b => #[a, b]
+  | .bankSum _ ts b dc _ => (ts.push b) ++ dc.toArray
+
+/-- Child-descending well-formedness, mirror of `ExprArena.wf`: `intern`
+    assigns `⟨nodes.size⟩` to each fresh node, so every arena built
+    through it satisfies this by construction; checking it once makes
+    `ExprId.idx` a termination measure for walks over a frozen arena. -/
+def CoreArena.wf (a : CoreArena) : Bool :=
+  (Array.range a.nodes.size).all fun i =>
+    match a.nodes[i]? with
+    | some n => n.children.all (fun c => c.idx < i)
+    | none => true
+
+/-- The elimination form of `wf`: a dereferenced node's children are all
+    strictly below it — the decrease fact for `termination_by id.idx`. -/
+theorem CoreArena.forall_children_lt {a : CoreArena} (hw : a.wf = true)
+    {id : ExprId} {n : CNode} (hd : a.deref id = some n) :
+    ∀ c ∈ n.children, c.idx < id.idx := by
+  intro c hc
+  have hd' : a.nodes[id.idx]? = some n := hd
+  obtain ⟨hi, -⟩ := Array.getElem?_eq_some_iff.mp hd'
+  have hnode := Array.all_eq_true.mp hw id.idx (by simpa using hi)
+  rw [Array.getElem_range, hd'] at hnode
+  obtain ⟨i, hilt, rfl⟩ := Array.mem_iff_getElem.mp hc
+  exact of_decide_eq_true (Array.all_eq_true.mp hnode i hilt)
+
 -- The elaborated-arena → `(CoreArena × CoreProgram)` downcast is now just
 -- `EArena.toResolved` (the arena is already the id-form). `checkResolvedArena`
 -- (a thin `Except String` wrapper for the compile boundaries) lives in
