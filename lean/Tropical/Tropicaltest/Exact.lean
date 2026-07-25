@@ -666,6 +666,43 @@ def runExactValues : IO Bool := do
 
 -- ── the served bake surface ───────────────────────────────────────────────────
 
+/-- The authored 2π, as the DECIMAL `Playground` spells it (and `twoPiE` with
+    it), built from integers so no `JsonNumber` source literal is involved — the
+    linux-x86 miscompile bites those. -/
+private def twoPiDecimal : DyadicI :=
+  DyadicI.div (DyadicI.ofInt 6283185307179586) (DyadicI.ofNat (10 ^ 15))
+
+/-- The first partial's emitted ω for a given loop-transit count `N`:
+    `2π·f₁ = 2π·SR/(N + ½) = 2π·88200/(2N+1)`. Built from the definition of the
+    cliff rather than from the builder, so it discriminates instead of agreeing
+    with a transcription. -/
+private def stringOmega1 (n : Nat) : Float :=
+  (DyadicI.div (DyadicI.mul twoPiDecimal (DyadicI.ofNat 88200))
+               (DyadicI.ofNat (2 * n + 1))).toFloat
+
+/-- One site's differential outcome: literals compared, literals that moved, and
+    the worst relative distance. -/
+private structure SiteDiff where
+  n     : Nat := 0
+  moved : Nat := 0
+  worst : Float := 0.0
+deriving Inhabited
+
+/-- Score one emitted field against the libm expression it replaced. The
+    allowance is the magnitude-aware one `exact-values` uses: within ONE unit of
+    litF's 12th place, or within 1e-11 relatively (litF is only a faithful
+    12-place quantizer while |x| ≤ 9007.2, and a reverb's ω runs past that). -/
+private def SiteDiff.note (d : SiteDiff) (emitted : Option Float) (ref : Float) : SiteDiff :=
+  match emitted with
+  | none => { d with n := d.n + 1, moved := d.moved + 1, worst := 1.0e30 }
+  | some v =>
+    let delta := litFMantissa v - litFMantissa ref
+    let ad := if delta < 0 then -delta else delta
+    let rel := if ref == 0.0 then (if v == 0.0 then 0.0 else 1.0)
+               else Float.abs (v - ref) / Float.abs ref
+    let moved := !(ad ≤ 1 || rel ≤ 1.0e-11)
+    { n := d.n + 1, moved := d.moved + (if moved then 1 else 0), worst := max d.worst rel }
+
 /-- THE PLAYGROUND-BAKE gate. `Playground.lean` is the SERVED bake surface —
     `gong`, `string`, `resonator`, `reverb`, `filter` — and it carried eleven
     `libm` calls, two of them structural, while the whole bloom/Γ family the
@@ -673,145 +710,226 @@ def runExactValues : IO Bool := do
     three things a successor needs and nothing else can: the cliffs' verdicts,
     the value differential, and the totality of the emit funnel.
 
-    1. THE COUNT CLIFF. `defaultStringModes`' loop-transit count is now an exact
-       rational round, not a `Float.round` of an f64 quotient. Pinned at the
-       shipped default and at the one MEASURED disagreement (`f0 = 2.24`, where
-       `44100/2.24 = 19687.5` exactly and the double is `19687.4999…`), so the
-       quantization instance cannot drift back.
+    Every arm here observes what a BUILDER EMITS. An earlier cut of this gate had
+    three arms that could not fail: its differential recomputed the builders'
+    expressions inline and compared that against libm (testing the
+    transcription, not the emitter); its band-edge check was closed-form
+    arithmetic evaluated entirely inside the gate, with no dependency on
+    `Playground.lean` at all; and its tie-rounding probe read a mode COUNT that
+    `min 48` saturates, so the very cliff it documented was invisible to it.
+    Each is now taken through `Playground`'s own output.
+
+    1. THE COUNT CLIFF, observed where it is visible. `defaultStringModes`'
+       loop-transit count is an exact rational round, not a `Float.round` of an
+       f64 quotient. The one MEASURED disagreement is `f0 = 2.24`, where
+       `44100/2.24 = 19687.5` exactly and the double is `19687.4999…` — but at
+       that f0 the emitted COUNT is 48 either way, because `min 48` saturates
+       it. What the cliff actually moves is the whole pole table, so the probe
+       reads the first partial's emitted ω and checks it against BOTH candidate
+       transit counts: it must equal the N = 19688 value and differ from the
+       N = 19687 one.
     2. THE EMIT/SKIP CLIFF. The `g > 0` fork's policy — emit on a CERTIFIED
        positive verdict, drop otherwise — must reproduce the incumbent on every
        reachable input. `ρ = 0` is the only reachable overlap and it must drop
        everything; `ρ < 0` likewise; `f0 ≤ 0` is the one place the carrier FORCES
        a change (an `∞` saturating into 48 undamped DC modes becomes an empty
        bank), asserted so the change is a recorded decision and not a surprise.
-    3. REDUNDANCY. The `f_k < SR/2` conjunct is provably implied by
-       `k ≤ ⌊span/2⌋`. It is kept in the emitter as a defensive certified check;
-       this proves it never fires, so a future `kmax` change that DID re-open the
-       band edge turns this arm red rather than shipping partials above Nyquist.
-    4. THE DIFFERENTIAL + TOTALITY. `exactBakeDifferential` reports how far the
-       emitted literals moved, in units of `litF`'s 12th decimal place, and
-       asserts `litOfD`'s poison arm never fired. -/
+    3. THE BAND EDGE, on emitted output. `f_k < SR/2` is provably implied by
+       `k ≤ ⌊span/2⌋`, so the conjunct in the emitter never fires — but proving
+       that with arithmetic inside the gate proves nothing ABOUT the emitter.
+       This reads every ω `defaultStringModes` emits across the served f0 range
+       and requires it under `2π·SR/2`, so a future `kmax` change that re-opened
+       the band edge turns this red instead of shipping partials above Nyquist.
+    4. THE DIFFERENTIAL + TOTALITY, against the real builders. `resonatorBank`,
+       `reverbRoom` and `filterPair` are CALLED; the libm expressions they
+       replaced are evaluated here, one floor outside the module under test —
+       which is also what keeps `Playground.lean` free of platform trig, so
+       `exact-corpse` can read its generated C with no exemption. The moved
+       counts are frozen: a value that starts moving is a red gate, not a
+       printed number nobody reads. -/
 def runExactPlayground : IO Bool := do
   let count := fun (f0 rho : Int × Nat) => (Tropical.Playground.defaultStringModes f0 rho).size
-  -- (1) the count cliff
+  -- (1) the count cliff, read where it is observable
   let cDefault := count (196, 0) (996, 3)          -- N = 225, kmax = min 48 112
   let cHigh    := count (2000, 0) (996, 3)         -- N = 22,  kmax = 11
   let cLow     := count (20, 0) (996, 3)           -- N = 2205, kmax = 48
-  let cQuant   := count (224, 2) (996, 3)          -- f0 = 2.24: N = 19688, kmax = 48
+  let quantBank := Tropical.Playground.defaultStringModes (224, 2) (996, 3)
+  let quantOm := (quantBank.toList.head?).bind (fun m => Tropical.Playground.probeFold m.omega)
+  let wantTie := stringOmega1 19688      -- the exact half-away-from-zero answer
+  let notTie  := stringOmega1 19687      -- what the f64 quotient rounded to
+  let tieOk := match quantOm with
+    | some w => litFMantissa w == litFMantissa wantTie && litFMantissa w != litFMantissa notTie
+    | none => false
   -- (2) the fork policy
   let cZeroRho := count (196, 0) (0, 0)            -- g ≡ 0 ⇒ overlap ⇒ drop all
   let cNegRho  := count (196, 0) (-5, 1)           -- g < 0 certified ⇒ drop all
   let cZeroF0  := count (0, 0) (996, 3)            -- FORCED change: was 48 DC modes
-  -- (3) `f_k < SR/2` is implied by `k ≤ ⌊span/2⌋`, over every reachable N
+  -- (3) the band edge, on EMITTED ω across the served f0 range
+  let nyquist := (DyadicI.mul twoPiDecimal (DyadicI.ofNat 22050)).toFloat
   let mut bandViolations := 0
-  for nm1 in [0:400] do
-    let n := nm1 + 1
-    let kmax := Nat.min 48 (n / 2)
-    for j in [0:kmax] do
-      -- 2·k·SR < SR·span  ⟺  2k < span = n + ½  ⟺  4k < 2n + 1
-      if !(4 * (j + 1) < 2 * n + 1) then bandViolations := bandViolations + 1
-  -- (4) the value differential and the poison count
-  let (diff, poison) := Tropical.Playground.exactBakeDifferential
-  IO.println s!"        string count: f0=196 → {cDefault} (want 48) · f0=2000 → {cHigh} (want 11) · f0=20 → {cLow} (want 48) · f0=2.24 → {cQuant} (want 48, N=19688)"
+  let mut bandModes := 0
+  for i in [0:40] do
+    let f0 : Int := 20 + 60 * (i : Int)             -- 20 … 2360 Hz
+    for m in Tropical.Playground.defaultStringModes (f0, 0) (996, 3) do
+      bandModes := bandModes + 1
+      match Tropical.Playground.probeFold m.omega with
+      | some w => if !(w < nyquist) then bandViolations := bandViolations + 1
+      | none => bandViolations := bandViolations + 1
+  -- (4) the differential, against the builders themselves
+  let fold := Tropical.Playground.probeFold
+  let mut res : SiteDiff := {}
+  let mut i := 0
+  for m in Tropical.Playground.bakedResonatorProbe 512 do
+    let k := (i + 1).toFloat
+    i := i + 1
+    res := res.note (fold m.sigma) (1.0 + 0.4 * k)
+    res := res.note (fold m.cre) (1.0 / Float.pow k 1.1)
+  let mut rev : SiteDiff := {}
+  let twoPiF := 6.283185307179586
+  let mut j := 0
+  for m in Tropical.Playground.bakedReverbProbe 32 do
+    let jf := j.toFloat
+    j := j + 1
+    let fq := 60.0 * Float.pow (6000.0 / 60.0) (jf / 31.0)
+    let ph := twoPiF * (0.6180339887 * jf)
+    rev := rev.note (fold m.omega) (twoPiF * fq)
+    rev := rev.note (fold m.cre) (Float.cos ph)
+    rev := rev.note (fold m.cim) (Float.sin ph)
+  -- filterPair's one authored transcendental: the `ln 80` its Q mapping is
+  -- written in terms of, against the libm value it replaced
+  let mut flt : SiteDiff := {}
+  flt := flt.note (fold Tropical.Playground.bakedFilterLn80) (Float.log 80.0)
+  let mut poison := 0
+  for m in Tropical.Playground.bakedResonatorProbe 512 do
+    if (fold m.cre).isNone then poison := poison + 1
+  for m in Tropical.Playground.bakedReverbProbe 32 do
+    if (fold m.omega).isNone then poison := poison + 1
+  IO.println s!"        string count: f0=196 → {cDefault} (want 48) · f0=2000 → {cHigh} (want 11) · f0=20 → {cLow} (want 48)"
+  IO.println s!"        tie cliff   : f0=2.24 first ω {quantOm} — equals the N=19688 answer {wantTie}, differs from N=19687 {notTie} : {tieOk}"
   IO.println s!"        fork policy : ρ=0 → {cZeroRho} · ρ=−0.5 → {cNegRho} · f0=0 → {cZeroF0} (all want 0)"
-  IO.println s!"        band edge   : f_k < SR/2 violations over N∈[1,400) = {bandViolations} (want 0 — the conjunct is redundant)"
-  for (site, n, moved, mx) in diff do
-    IO.println s!"        differential: {site}  {moved}/{n} literals moved, max Δ = {mx} units of litF's 12th place"
+  IO.println s!"        band edge   : {bandViolations} of {bandModes} EMITTED ω at or above 2π·SR/2 (want 0 — the conjunct is redundant, proved on output)"
+  -- printed in units of 1e-18 because Lean's Float formatter shows anything
+  -- under ~1e-6 as "0.000000", which is exactly the range this differential
+  -- lives in — an unreadable number is not a measurement
+  IO.println s!"        differential: resonatorBank {res.moved}/{res.n} moved (worst rel {res.worst * 1.0e18}e-18) · reverbRoom {rev.moved}/{rev.n} ({rev.worst * 1.0e18}e-18) · filterPair {flt.moved}/{flt.n} ({flt.worst * 1.0e18}e-18)"
   IO.println s!"        poison      : {poison} (want 0 — litOfD's lit-0 arm is dead)"
-  let countsOk := cDefault == 48 && cHigh == 11 && cLow == 48 && cQuant == 48
+  let countsOk := cDefault == 48 && cHigh == 11 && cLow == 48
   let forkOk := cZeroRho == 0 && cNegRho == 0 && cZeroF0 == 0
-  if countsOk && forkOk && bandViolations == 0 && poison == 0 then
+  -- FROZEN ON THE EMITTED MANTISSA, not on the relative distance. The relative
+  -- figure is printed and deliberately not gated: at small emitted magnitudes it
+  -- is dominated by `litF`'s own 12-decimal grid rather than by the carrier —
+  -- the resonator's worst, 4.7e-10, is one half-unit of the 12th place on an amp
+  -- of 1.3e-3 (`k^{-1.1}` at k = 512), and would be there with a perfect
+  -- carrier. Bounding it would be bounding `litF`'s resolution, which
+  -- `exact-quantize` already owns. What this gate is for is whether the EMITTED
+  -- PROGRAM moved, and that is the mantissa.
+  let diffOk := res.moved == 0 && rev.moved == 0 && flt.moved == 0
+  if countsOk && tieOk && forkOk && bandViolations == 0 && bandModes > 500
+      && diffOk && poison == 0 then
     passGate "exact-playground"
-      "the served bake surface decides in exact arithmetic: the string's transit count is an Int round (no Float.round of an f64 quotient), the emit/skip fork emits only on a certified verdict and drops otherwise (reproducing g>0.0 on every reachable input), the band-edge conjunct is provably redundant, and no emitted coefficient came from poison"
+      s!"the served bake surface decides in exact arithmetic: the string's transit count is an Int round (pinned where the cliff is VISIBLE — the emitted pole table, not the mode count `min 48` saturates), the emit/skip fork emits only on a certified verdict, no emitted ω reaches Nyquist over {bandModes} partials, the three baked builders emit LITERALLY what the libm they replaced emitted ({res.n + rev.n + flt.n} coefficients, 0 moved), and none of it came from poison"
   else
     failGate "exact-playground"
-      s!"counts={countsOk} ({cDefault}/{cHigh}/{cLow}/{cQuant}) fork={forkOk} ({cZeroRho}/{cNegRho}/{cZeroF0}) bandViolations={bandViolations} poison={poison}"
+      s!"counts={countsOk} ({cDefault}/{cHigh}/{cLow}) tie={tieOk} fork={forkOk} ({cZeroRho}/{cNegRho}/{cZeroF0}) band={bandViolations}/{bandModes} diff={diffOk} (res {res.moved}/{res.n} rev {rev.moved}/{rev.n} flt {flt.moved}/{flt.n}) poison={poison}"
 
 -- ── the one-way door ──────────────────────────────────────────────────────────
 
+/-- Every `libm` entry point Lean's `Float` API exposes, by its C name. The list
+    is written against the GENERATED C rather than against Lean source, which is
+    the whole point of the change: a source-text scan can only ever recognise the
+    spellings its author thought of, and an earlier cut of this gate recognised
+    only the `Float.`-qualified ones. Dot notation (`x.exp` on a `Float`) walked
+    straight past it, and so did `Float.atan`, `asin`, `acos`, `asinh`, `acosh`,
+    `atanh` and `cbrt` — seven `@[extern]` calls, none of which contains any
+    banned substring (`Float.tan` is not a substring of `Float.atan`). By the
+    time Lean has emitted C there is one spelling left, and it is this one. -/
+private def libmSymbols : Array String :=
+  #["exp", "exp2", "expm1", "log", "log2", "log10", "log1p",
+    "sin", "cos", "tan", "asin", "acos", "atan", "atan2",
+    "sinh", "cosh", "tanh", "asinh", "acosh", "atanh",
+    "sqrt", "cbrt", "pow", "hypot", "fmod",
+    "floor", "ceil", "round", "trunc", "lgamma", "tgamma"]
+
+/-- Does `line` call `name` as a C function — the identifier immediately
+    followed by `(`, and not preceded by an identifier character, so
+    `lean_float_pow` and `my_exp(` do not match?
+
+    Written on `String.splitOn` rather than on a `List Char` walk: this runs over
+    every line of every production module's generated C, and the char-list form
+    cost the suite half a minute by itself. Each split piece ends exactly where
+    an occurrence begins, so the preceding character is that piece's last one. -/
+private def callsC (line name : String) : Bool := Id.run do
+  let parts := line.splitOn (name ++ "(")
+  if parts.length == 1 then return false
+  for p in parts.dropLast do
+    match p.back? with
+    | none => return true                    -- occurrence at the start of the line
+    | some c => if !(c.isAlphanum || c == '_') then return true
+  return false
+
 /-- THE CORPSE GATE (P3). The bake layer's `libm` exile, ENFORCED rather than
-    documented. Every earlier gate in this file says the exact carrier agrees
-    with the float path it replaced; this one says the float path is gone — that
-    no `Float` transcendental and no retired `Float`-tier definition survives in
-    the production bake graph, so a successor cannot reintroduce one by habit and
-    have every behavioral gate stay green (they would: a 1-ulp bake difference is
-    invisible to a threshold, which is the whole reason this campaign exists).
+    documented. Every other gate in this file says the exact carrier agrees with
+    the float path it replaced; this one says the float path is GONE from the
+    compiler — so a successor cannot reintroduce one by habit and have every
+    behavioural gate stay green (they would: a 1-ulp bake difference is invisible
+    to a threshold, which is the whole reason this campaign exists).
 
-    Two allowances, both explicit rather than fuzzy:
+    It reads the GENERATED C of each production bake module, not its Lean source.
+    That is a deliberate upgrade over the source scan it replaces, which was
+    exactly as good as its author's list of spellings and no better — dot
+    notation and seven of Lean's own `Float` externs walked past it. After
+    elaboration there is one spelling per call, so the check stops depending on
+    how the call was written.
 
-    * A line tagged `libm-oracle` is skipped. That tag appears only in
-      `exactBakeDifferential`, the Playground probe whose ENTIRE JOB is to
-      evaluate the incumbent `Float` expression beside the exact one. A
-      differential needs both sides.
-    * `structure CplxB` and its algebraic methods stay: `CplxB` is still the
-      plain data type `BloomPairPlan` and the depth-loop inputs are written in.
-      What left with P3 is its three TRANSCENDENTAL methods and every function
-      that used them — relocated to `Tropical.Testing.ArrowFixtures`, one floor
-      outside the compiler, where they are now the INDEPENDENT oracle (the DUT is
-      exact arithmetic; the reference is the platform's `libm`).
+    The source is still read for the RETIRED DEFINITIONS: `CplxB`'s three
+    transcendental methods and the nine functions that used them left for
+    `Tropical.Testing.ArrowFixtures`, one floor outside the compiler, where they
+    are now the INDEPENDENT oracle (the DUT is exact arithmetic; the reference is
+    the platform's `libm`). `structure CplxB` itself stays — it is the plain data
+    type `BloomPairPlan` and the depth-loop inputs are written in.
 
-    The file list is closed against a directory read, so a new module under
-    `EmitArrow/` cannot slip past by not being on it. -/
+    A missing `.c` is a FAILURE, never a silent pass: this gate reporting "zero
+    libm sites" because it read zero files would be the worst outcome available
+    to it. -/
 def runExactCorpse : IO Bool := do
   let dir := "lean/Tropical/EmitArrow"
-  let emitFiles ← (do
+  let emitMods ← (do
     let entries ← (System.FilePath.mk dir).readDir
     let names := entries.filterMap fun e =>
-      if e.fileName.endsWith ".lean" then some s!"{dir}/{e.fileName}" else none
+      if e.fileName.endsWith ".lean" then some (e.fileName.dropRight 5) else none
     pure (names.qsort fun a b => decide (a < b)))
-  let files := emitFiles.push "lean/Tropical/Playground.lean"
-  let banned := #["Float.exp", "Float.cos", "Float.sin", "Float.sqrt", "Float.log",
-                  "Float.atan2", "Float.pow", "Float.tan", "Float.floor",
-                  "Float.ceil", "Float.round"]
-  -- each name is spelled so it cannot prefix-match its own exact twin
-  -- (`bloomPhiKappaOverG` vs `bloomPhiKappaOverGD` is the one that bit)
+  let mods := (emitMods.map (fun m => ("EmitArrow/" ++ m, s!"{dir}/{m}.lean")))
+    |>.push ("Playground", "lean/Tropical/Playground.lean")
   let corpseNames := #["def lgammaB", "def bloomM1 ", "def bloomCF ", "def cexpm1B",
                        "def bloomGammaStar ", "def bloomPhiKappaOverG (",
                        "def bloomDCoef ", "def bloomFoldQCoef ", "def bloomFoldDDaM ",
-                       "def sigmaInterval?"]
+                       "def sigmaInterval?", "def abs (a : CplxB)",
+                       "def exp (z : CplxB)", "def log (z : CplxB)"]
   let mut hits : Array String := #[]
   let mut corpses : Array String := #[]
+  let mut missing : Array String := #[]
   let mut scanned := 0
-  for f in files do
-    let ls ← IO.FS.lines f
-    -- block-comment state, because the names of these functions are all over the
-    -- docstrings that explain why they are gone; a filter that only recognises
-    -- the line OPENING a doc comment reports its continuation lines as code
-    let mut inDoc := false
-    for h : i in [0:ls.size] do
-      let line := ls[i]
-      let opens := (line.splitOn "/-").length != 1
-      let closes := (line.splitOn "-/").length != 1
-      -- what remains of the line once its comments are taken out. A line that
-      -- OPENS and CLOSES a block comment still has code on both sides of it, so
-      -- it is stripped rather than skipped — skipping it would let
-      -- `def f := Float.exp x /- note -/` past the scanner, which is exactly the
-      -- shape a gate like this must not be foolable by.
-      let code :=
-        if inDoc then
-          if closes then (line.splitOn "-/").getLast!.splitOn "--" |>.head! else ""
-        else if opens && closes then
-          (line.splitOn "/-").head! ++ " " ++ ((line.splitOn "-/").getLast!.splitOn "--" |>.head!)
-        else if opens then (line.splitOn "/-").head!
-        else (line.splitOn "--")[0]!
-      if inDoc then
-        if closes then inDoc := false
-      else if opens && !closes then
-        inDoc := true
-      if (line.splitOn "libm-oracle").length != 1 then continue
-      if code.trim.isEmpty then continue
-      scanned := scanned + 1
-      for b in banned do
-        if (code.splitOn b).length != 1 then hits := hits.push s!"{f}:{i+1} {b}"
-    let src ← IO.FS.readFile f
+  for (modName, srcPath) in mods do
+    -- the compiler's own answer: what did this module actually call?
+    let cPath := s!"lean/.lake/build/ir/Tropical/{modName}.c"
+    if !(← System.FilePath.pathExists cPath) then
+      missing := missing.push cPath
+    else
+      for line in ← IO.FS.lines cPath do
+        scanned := scanned + 1
+        for sym in libmSymbols do
+          if callsC line sym then hits := hits.push s!"{modName}.c: {sym}()"
+    -- the source, for the retired definitions
+    let src ← IO.FS.readFile srcPath
     for name in corpseNames do
-      if (src.splitOn name).length != 1 then corpses := corpses.push s!"{f}: {name}"
-  IO.println s!"        scanned {files.size} production bake modules ({scanned} code lines outside doc comments)"
-  IO.println s!"        bake-time libm sites: {hits.size} · surviving Float-tier definitions: {corpses.size}"
-  if hits.isEmpty && corpses.isEmpty then
+      if (src.splitOn name).length != 1 then corpses := corpses.push s!"{srcPath}: {name}"
+  IO.println s!"        {mods.size} production bake modules, {scanned} lines of GENERATED C (the compiler's own answer, not the source's spelling)"
+  IO.println s!"        libm call sites: {hits.size} · retired Float-tier definitions still in production: {corpses.size} · unreadable modules: {missing.size}"
+  if hits.isEmpty && corpses.isEmpty && missing.isEmpty && scanned > 1000 then
     passGate "exact-corpse"
-      s!"no Float transcendental and no retired Float-tier bake definition survives in the production graph across {files.size} modules — the libm exile is enforced, not documented, and the oracle tier lives outside the compiler in Tropical.Testing"
+      s!"no libm call survives the production bake graph — checked in the EMITTED C across {mods.size} modules and {scanned} lines, so no spelling (dot notation, an unlisted Float extern, an operator) can hide one; and no retired Float-tier definition remains, the oracle tier having moved outside the compiler to Tropical.Testing"
   else
-    failGate "exact-corpse" s!"libm sites {hits} · corpses {corpses}"
+    failGate "exact-corpse"
+      s!"libm {hits} · corpses {corpses} · missing {missing} · scanned {scanned}"
 
 end Tropical.Tropicaltest.ExactGates

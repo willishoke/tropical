@@ -125,6 +125,13 @@ private def goldenAngleD : DyadicI := decD (2399963, 6)
     provenance change with no value change. -/
 private def ln80D : DyadicI := DyadicI.log (DyadicI.ofNat 80)
 
+/-- `ln 80` as the emitted literal `filterPair` consumes. Named so the
+    `exact-playground` probe can hand the gate THIS `Sig` rather than a second
+    spelling of it — `filterPair`'s own `q` is wrapped in an `expSig`, which does
+    not fold, so the constant has to be reachable on its own to be observable at
+    all. -/
+private def lnEightyLit : Sig := litOfD ln80D
+
 /-- A gong register's mode table: an array of `[freqHz, sigma, amp, phase]`
     rows → `ModalMode`s (rectangular: `cre = a·cos φ`, `cim = a·sin φ`, so
     the bank's `cre·cos ωd − cim·sin ωd` is `a·cos(ωd + φ)`). Amplitude-bloom
@@ -382,7 +389,7 @@ private def filterPair (fc res : Sig) : Array ModalMode :=
   -- rather than transcribed as a decimal literal; MEASURED byte-identical — the
   -- exact value's nearest double IS `4.382026634673881` and its 12-place
   -- quantization is unchanged. Provenance, not value.
-  let q := mul (lit 55 2) (expSig (mul res (litOfD ln80D)))
+  let q := mul (lit 55 2) (expSig (mul res lnEightyLit))
   let alpha := div w0 (mul (lit 2) q)
   let wd := mul w0 (.unary .sqrt (sub (lit 1) (div (lit 1) (mul (lit 4) (mul q q)))))
   let rim := div (mul w0 w0) (mul (lit 2) wd)          -- |Im R|
@@ -1029,69 +1036,43 @@ private def checkServedKinds (raws : Array Raw) : Except String Unit := do
 
 /-- Gate probe for `exact-playground`, beside `modalClassificationDrift` because
     it is the same pattern: a public reader of PRIVATE facts, so the gate never
-    has to force a builder public. Per site, the exact-vs-incumbent-`Float`
-    differential as `(site, literals compared, literals that moved, max |Δ| in
-    units of `litF`'s 12th decimal place)`, plus a poison count — `litOfD`'s
-    `lit 0` arm must never fire over the served vocabulary. -/
-def exactBakeDifferential : Array (String × Nat × Nat × Nat) × Nat := Id.run do
-  -- `litF`'s mantissa, normalized to the 12th place (it emits `lit m 12`, or a
-  -- bare `lit 0` at zero)
-  let mant : Sig → Int := fun s => match s with
-    | .num n => n.mantissa * (10 : Int) ^ (12 - Nat.min 12 n.exponent)
-    | _ => 0
-  let mut out : Array (String × Nat × Nat × Nat) := #[]
-  let mut poison := 0
-  let step := fun (exact : DyadicI) (float : Float) (n moved mx : Nat) =>
-    let p := if exact.ok then 0 else 1
-    let d := (mant (litOfD exact) - mant (litF float)).natAbs
-    (p, n + 1, if d == 0 then moved else moved + 1, Nat.max mx d)
-  -- resonatorBank: amp k^{−1.1} and the σ factor 1 + 0.4k, k = 1…512
-  let mut n := 0; let mut moved := 0; let mut mx := 0
-  for i in [0:512] do
-    let k := i + 1
-    let kD := DyadicI.ofNat k
-    let (p, n', m', x') := step (DyadicI.div DyadicI.one (DyadicI.pow kD (decD (11, 1))))
-      (1.0 / Float.pow k.toFloat 1.1) n moved mx   -- libm-oracle
-    poison := poison + p; n := n'; moved := m'; mx := x'
-    let (p, n', m', x') := step (DyadicI.add DyadicI.one (DyadicI.mul (decD (4, 1)) kD))
-      (1.0 + 0.4 * k.toFloat) n moved mx
-    poison := poison + p; n := n'; moved := m'; mx := x'
-  out := out.push ("resonatorBank", n, moved, mx)
-  -- reverbRoom: the shipped 32 modes over 60…6000 Hz
-  n := 0; moved := 0; mx := 0
-  let ratio := DyadicI.div (decD (6000, 0)) (decD (60, 0))
-  for j in [0:32] do
-    let jD := DyadicI.ofNat j
-    let (p, n', m', x') := step
-      (DyadicI.mul (decD (60, 0)) (DyadicI.pow ratio (DyadicI.div jD (DyadicI.ofNat 31))))
-      (60.0 * Float.pow (6000.0 / 60.0) (j.toFloat / 31.0)) n moved mx   -- libm-oracle
-    poison := poison + p; n := n'; moved := m'; mx := x'
-    let phD := DyadicI.mul twoPiD (DyadicI.mul goldenRatioD jD)
-    let phF := 6.283185307179586 * (0.6180339887 * j.toFloat)
-    let (p, n', m', x') := step (DyadicI.cos phD) (Float.cos phF) n moved mx   -- libm-oracle
-    poison := poison + p; n := n'; moved := m'; mx := x'
-    let (p, n', m', x') := step (DyadicI.sin phD) (Float.sin phF) n moved mx   -- libm-oracle
-    poison := poison + p; n := n'; moved := m'; mx := x'
-  out := out.push ("reverbRoom", n, moved, mx)
-  -- filterPair: the single ln 80 constant
-  let (p, n', m', x') := step ln80D 4.382026634673881 0 0 0
-  poison := poison + p
-  out := out.push ("filterPair", n', m', x')
-  return (out, poison)
+    has to force a builder public.
 
-/-- Finding-2 agreement: the connection-typing rule is decided at TWO sites.
-    `checkEdgeTypes` colors an outlet through `outletOf`; the lowering decides
-    modal-ness through `nodeIsModal` on the CONSTRUCTED node. Nothing forces them
-    to agree, so a future kind whose `buildNode` returns a modal node but which
-    lacks a modal `outletOf` case would be silently signal-colored — the checker
-    would then reject modal wiring the lowering accepts (or vice-versa). This
-    builds every kind `buildNode` constructs (`buildNodeKinds`, NOT just the
-    served `vocabularyKinds` — so a served-but-unlisted kind like a withheld
-    `bloomgong` is SEEN, not invisible) and reports the kinds where `nodeIsModal`
-    disagrees with `outletOf … == some .modal`. The gate then asserts no SERVED
-    kind drifts; a withheld kind may drift (that drift is why it is withheld —
-    `checkServedKinds` rejects it pre-lowering, so it can never mis-type an edge).
-    (`out` is a dac sink, never built — not in `buildNodeKinds`.) -/
+    It returns what the SERVED BUILDERS ACTUALLY EMIT — `resonatorBank` and
+    `reverbRoom` are called, not transcribed. An earlier cut of this probe
+    recomputed their expressions inline and compared THAT against `libm`, which
+    tested the transcription and not the emitter; a builder could have been
+    edited out from under it and the differential would have stayed green.
+
+    The libm REFERENCE side deliberately lives one floor out, in the gate. Two
+    reasons, and the second is the load-bearing one: a differential's two sides
+    should not sit in the module under test, and `exact-corpse` reads the
+    GENERATED C of this module, where a reference call to `cos` is
+    indistinguishable from a production one. Keeping the reference out is what
+    lets the corpse gate cover `Playground.lean` with no exemption.
+
+    `f0 = 1, decay = 1` for the resonator and `rt60 = 1` for the room so the
+    live factors fold to identity and each mode's fields fold to exactly the
+    baked coefficient under test. -/
+def bakedResonatorProbe (npart : Nat) : Array ModalMode :=
+  resonatorBank (lit 1) (lit 1) npart
+
+/-- The shipped reverb room's 32 modes over 60…6000 Hz, as emitted. -/
+def bakedReverbProbe (nmode : Nat) : Array ModalMode :=
+  reverbRoom (lit 1) none nmode (60, 0) (6000, 0)
+
+/-- The `ln 80` literal `filterPair` emits — the one authored transcendental
+    constant in the file. This is the SAME `Sig` the builder consumes (one
+    definition, shared), not a second spelling of the formula; `filterPair`'s `q`
+    wraps it in an `expSig`, which `sigConstF?` does not fold, so the constant
+    must be reachable on its own to be observable at all. -/
+def bakedFilterLn80 : Sig := lnEightyLit
+
+/-- Fold an emitted field back to the double it carries (`none` if it did not
+    come out constant — which for these probes is itself a failure the gate
+    reports). -/
+def probeFold (s : Sig) : Option Float := sigConstF? s
+
 def modalClassificationDrift : Array String := Id.run do
   let mut drift : Array String := #[]
   for kind in buildNodeKinds do

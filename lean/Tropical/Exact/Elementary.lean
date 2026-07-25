@@ -193,10 +193,36 @@ def cos (x : DyadicI) : DyadicI :=
     | 2 => neg (cosSmall r)
     | _ => sinSmall r
 
-/-- `atan a` for `|a| ≤ 1`. Halves the argument three times by
-    `atan a = 2·atan(a / (1 + √(1+a²)))` — after which `|a| ≤ 0.0985` and the
-    alternating Taylor series converges fast — then undoes the halvings. No π
-    constant enters, so the fold cannot drift. -/
+/-- Iteration cap for `atanUnit` alone, and it is a COST bound rather than a
+    domain one. After three halvings a convergent argument satisfies
+    `|z| ≤ tan(π/16) < 0.2`, so the alternating series needs `(2j+1)·log₂(1/0.2)
+    > workingPrec + 8`, i.e. about 30 terms — `seriesCap`'s 4096 is eight
+    decades of headroom nothing can use. A NON-convergent argument, on the other
+    hand, runs the cap out in full at 128 bits before returning `poison`, and
+    that is reachable: the halvings are decorrelated on a WIDE enclosure, so a
+    box like `[0, 1e6]` keeps `|z| ≥ 1`, the terms grow, the stopping test can
+    never fire, and one call costs ~45 ms. `atan2` routes such a box here since
+    its denominator is chosen by certified separation rather than by magnitude
+    (before that it poisoned instantly in `inv`, which was fast for the wrong
+    reason). 256 keeps every convergent case untouched — eight times the terms
+    any of them uses — and makes the divergent one sixteen times cheaper. -/
+private def atanCap : Nat := 256
+
+/-- `atan a`. Halves the argument three times by
+    `atan a = 2·atan(a / (1 + √(1+a²)))` — after which a convergent `|a|` is
+    under `tan(π/16) < 0.2` and the alternating Taylor series converges in ~30
+    terms — then undoes the halvings. No π constant enters, so the fold cannot
+    drift.
+
+    `|a| ≤ 1` is the cheap case, not a precondition: the halving map is
+    `tan(θ/2)` with `|θ| < π/2`, so it lands inside `(−1, 1)` after ONE step
+    whatever it started at. That matters because `atan2` no longer bounds the
+    quotient it passes — its denominator is picked for certified separation, not
+    for magnitude — so what the size tie-break buys is iterations, not validity.
+    A WIDE enclosure is the case the halvings cannot help: they shrink a
+    magnitude, not a width, so `|z| ≥ 1` can survive all three and the series
+    then diverges. That returns `poison` (which `atan2` widens to the full
+    range), and `atanCap` is what stops it costing 4096 iterations to say so. -/
 private def atanUnit (a : DyadicI) : DyadicI :=
   if !a.ok then poison
   else Id.run do
@@ -207,7 +233,7 @@ private def atanUnit (a : DyadicI) : DyadicI :=
     let mut term := z
     let mut acc := z
     let mut converged := false
-    for j in [1:seriesCap] do
+    for j in [1:atanCap] do
       term := mul term z2
       let t := div term (ofNat (2 * j + 1))
       acc := if j % 2 == 1 then sub acc t else add acc t
