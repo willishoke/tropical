@@ -4,7 +4,7 @@ import Tropical.Ir.CoreArena
 import Tropical.Ir.Strata.Basic
 
 /-!
-# EArena — the strata pipeline's id-form working state (#190 native-DAG)
+# EArena — the lowering's id-form working state (#190 native-DAG)
 
 The tree passes thread an `Arena` (program pool of tree `Program`s) and rebuild
 `Expr` trees; the bloat (the modulated clock duplicated into every oscillator
@@ -110,7 +110,7 @@ def getInstanceTypeE (enclosing : Program) (instName typeKey : String) :
 --
 -- `Arena` IS the id-form (`Program` is id-valued, `Arena.exprs` is the shared
 -- DAG), so the old tree↔id bridges collapse: `ofArena` is the identity, and
--- there is no tree to `materialize` back to — the strata passes push their
+-- there is no tree to `materialize` back to — the rewrites push their
 -- rewritten programs into the same arena, so the post-strata root is already a
 -- valid `(Arena, ProgramIdx)`.
 -- ─────────────────────────────────────────────────────────────
@@ -132,12 +132,15 @@ def EArena.materialize (ea : EArena) (root : ProgramIdx) :
 -- reachable expression node is converted once and equal subtrees stay
 -- one node, so O(unique nodes), never O(expanded tree).
 --
--- REACHABLE-only: `ea.exprs` is append-only and still holds the
--- pre-lowering combinator nodes (`letIn`/`fold`/`tag`/…) that later
--- passes rewrote away, so a whole-arena fold would falsely reject them
--- as "survived <pass>". We convert only what the post-strata root (and
--- its instance-referenced registry) actually references — exactly the
--- evaluator-reachable graph the old `Core.check` walked.
+-- REACHABLE-only: `ea.exprs` is append-only, so it can hold nodes no
+-- longer referenced by the lowered root (rewritten-away identities,
+-- dead JSON-interned structure), and a whole-arena fold would falsely
+-- reject them. We convert only what the root (and its
+-- instance-referenced registry) actually references — exactly the
+-- evaluator-reachable graph the old `Core.check` walked. A REACHABLE
+-- retired constructor (a JSON-loaded `fold`/`tag`/…) is refused here:
+-- this boundary is the front-door contract now that no pass lowers
+-- combinators or sum types.
 -- ─────────────────────────────────────────────────────────────
 
 open Tropical.Ir.Core (CoreProgram CoreInputDecl CoreOutputDecl CoreOutputAssign
@@ -147,10 +150,18 @@ open Tropical.Ir.Core (CoreProgram CoreInputDecl CoreOutputDecl CoreOutputAssign
     mapping an `ExprArena` id (`.idx`) to its interned `CoreArena` id. -/
 private abbrev ConvM := StateT (CoreArena × Std.HashMap Nat ExprId) (Except Error)
 
+/-- The retired-constructor rejection: the front-door contract, stated at
+    the type boundary. Combinator/sum-type lowering left with the surface
+    language and generics that produced it (2026-07-25); a JSON program
+    that still spells one of these ops is refused here, not silently
+    miscompiled. Summing indexed families are authored as `bankSum`. -/
+private def retired (op : String) : Error :=
+  ⟨s!"toResolved: '{op}' is not a trunk construct — combinator/sum-type lowering was retired with its producers (the literate surface language and generics); a summing indexed family is authored as bankSum"⟩
+
 /-- Convert one reachable `ExprArena` node (and its children) into the
-    `CoreArena`, memoized. Rejects any node a strata pass should have
-    removed — the id-form analogue of `Core.checkExpr`, but visited only
-    when actually referenced. -/
+    `CoreArena`, memoized. Rejects every retired constructor — the
+    id-form analogue of `Core.checkExpr`, but visited only when actually
+    referenced. -/
 private partial def convExprId (ea : ExprArena) (eid : ExprId) : ConvM ExprId := do
   match (← get).2.get? eid.idx with
   | some cid => return cid
@@ -174,19 +185,19 @@ private partial def convExprId (ea : ExprArena) (eid : ExprId) : ConvM ExprId :=
       | .sampleIndex    => pure .sampleIndex
       | .loopIdx id     => pure (.loopIdx id)
       | .bankSum c ts b dc ii => pure (.bankSum c (← ts.mapM (convExprId ea)) (← convExprId ea b) (← dc.mapM (convExprId ea)) ii)
-      | .zeros _        => throw ⟨"toResolved: zeros survived arrayLower"⟩
-      | .typeParamRef _ => throw ⟨"toResolved: typeParamRef survived specialize"⟩
-      | .bindingRef _   => throw ⟨"toResolved: bindingRef survived arrayLower"⟩
-      | .letIn ..       => throw ⟨"toResolved: let survived arrayLower"⟩
-      | .fold ..        => throw ⟨"toResolved: fold survived arrayLower"⟩
-      | .scan ..        => throw ⟨"toResolved: scan survived arrayLower"⟩
-      | .generate ..    => throw ⟨"toResolved: generate survived arrayLower"⟩
-      | .iterate ..     => throw ⟨"toResolved: iterate survived arrayLower"⟩
-      | .chain ..       => throw ⟨"toResolved: chain survived arrayLower"⟩
-      | .map2 ..        => throw ⟨"toResolved: map2 survived arrayLower"⟩
-      | .zipWith ..     => throw ⟨"toResolved: zipWith survived arrayLower"⟩
-      | .tag ..         => throw ⟨"toResolved: tag survived sumLower"⟩
-      | .match_ ..      => throw ⟨"toResolved: match survived sumLower"⟩
+      | .zeros _        => throw (retired "zeros")
+      | .typeParamRef _ => throw (retired "typeParamRef")
+      | .bindingRef _   => throw (retired "bindingRef")
+      | .letIn ..       => throw (retired "let")
+      | .fold ..        => throw (retired "fold")
+      | .scan ..        => throw (retired "scan")
+      | .generate ..    => throw (retired "generate")
+      | .iterate ..     => throw (retired "iterate")
+      | .chain ..       => throw (retired "chain")
+      | .map2 ..        => throw (retired "map2")
+      | .zipWith ..     => throw (retired "zipWith")
+      | .tag ..         => throw (retired "tag")
+      | .match_ ..      => throw (retired "match")
     let st ← get
     let (cid, ca') := (intern cn).run st.1
     set (ca', st.2.insert eid.idx cid)
@@ -201,7 +212,7 @@ private partial def convProgram (ea : EArena) (eIdx : ProgramIdx) : ConvM CorePr
   let some ep := ea.programs[eIdx.idx]?
     | throw ⟨s!"toResolved: program pool index {eIdx.idx} out of range (internal)"⟩
   unless ep.typeParams.isEmpty do
-    throw ⟨s!"core check ('{ep.name}'): {ep.typeParams.size} typeParam decl(s) (specialize) survived strata"⟩
+    throw ⟨s!"core check ('{ep.name}'): {ep.typeParams.size} typeParam decl(s) — generics are retired; the trunk accepts only monomorphic programs"⟩
   let decls : Array CoreBodyDecl ← ep.decls.mapM fun d => do
     match d with
     | .param name value? => pure (.param name value?)
@@ -236,7 +247,7 @@ def EArena.toResolved (ea : EArena) (root : ProgramIdx) :
   return (ca, core)
 
 /-- Downcast an elaborated `Arena` (a session root / per-program compile
-    boundary that never ran the strata passes, but IS the id-form) to
+    boundary that never ran the lowering rewrites, but IS the id-form) to
     `(CoreArena × CoreProgram)`. A thin `Except String` wrapper over
     `toResolved` for the compile call sites; reachable-only, so it validates
     only the evaluator-reachable graph and never touches the whole pool. -/

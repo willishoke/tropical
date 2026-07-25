@@ -212,10 +212,14 @@ describe('wasm vs native JIT', () => {
     for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
 
-  // CF-array equivalence: generate + zipWith + fold, seeded from sampleIndex so
-  // LLVM can't constant-fold the array ops away. Replaces the old array-register
-  // writeback test (its `reg arr` was removed in the CF-only migration).
-  test('array (generate / zipWith / fold, sampleIndex-seeded) — WASM matches JIT', async () => {
+  // The combinator lowering was retired 2026-07-25 with its producers (the
+  // literate surface language and generics): a tropical_program_2 file can
+  // still SPELL fold/generate/zipWith (raise parses them), but nothing
+  // lowers them any more — the front door refuses at the toResolved type
+  // boundary. This pins that refusal cross-process (the Lean-side twin is
+  // tropicaltest's retired-front-door gate). Summing indexed families are
+  // authored as Sig.bankSum in Lean, which this schema cannot spell.
+  test('array combinators (generate / zipWith / fold) — refused at the front door', () => {
     const program: ProgramFile = {
       schema: 'tropical_program_2',
       name: 'eq_arraycf',
@@ -243,12 +247,7 @@ describe('wasm vs native JIT', () => {
       ]},
       audio_outputs: [{ instance: 'inst', output: 'out' }],
     }
-    const wire = compileViaLean(program)
-    const N = 64
-    const nat = runNative(wire, N)
-    expectAudible('array CF (generate/zipWith/fold)', nat)
-    const wasm = await runWasm(program, wire, N)
-    for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
+    expect(() => compileViaLean(program)).toThrow(/not a trunk construct/)
   })
 
   test('op-zoo (bitwise / shifts / float↔int casts / mod / clamp / select) — WASM matches JIT', async () => {

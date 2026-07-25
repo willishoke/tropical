@@ -1,51 +1,52 @@
 import Tropical.Ir.Strata.Basic
 import Tropical.Ir.Strata.EArena
-import Tropical.Ir.Strata.Specialize
-import Tropical.Ir.Strata.SumLower
 import Tropical.Ir.Strata.InlineInstances
-import Tropical.Ir.Strata.ArrayLower
 import Tropical.Ir.Strata.IdentityElim
 import Tropical.Ir.Elaborator
 
 /-!
-# Strata pipeline
+# Strata — the direct lowering
 
-The six-pass drop sequence over the resolved IR:
+`Sig` — the one surviving authoring surface — already IS the trunk IR:
+its fourteen constructors are exactly the post-strata `ENode` subset
+(no combinators, no sum types, no generics; `bankSum` is the one
+bounded indexed reduction, kept as data). So there is no drop-pipeline
+here any more — the resolved DAG lowers DIRECTLY, through two named
+rewrites and a type boundary:
 
-  assertAcyclic → specialize → sumLower → inlineInstances
-                → arrayLower → identityElim
+  assertAcyclic    — the entry tripwire (cycle-breaking is upstream's job;
+                     any cycle here is a caller bug)
+  inlineInstances  — OPTIONAL (`opts.inlineNested`): inner instance bodies
+                     lifted in place. The fractal session path skips it and
+                     keeps instances as kernel boundaries.
+  identityElim     — the categorical identity-law peephole
+  toResolved       — the type boundary (`EArena.toResolved`, called by the
+                     `runResolved` exit and by `checkResolvedArena` on the
+                     session paths): reify the reachable graph into the
+                     emit's `CoreArena`, REJECTING every retired
+                     constructor. This is the front-door contract — a
+                     JSON-loaded `tropical_program_2` can still spell
+                     `fold`/`tag`/… syntactically, and dies there with the
+                     retirement message.
 
-Passes land one stage at a time behind the `diff-strata` hybrid gate
-(scripts/diff/diff_strata.ts): Lean runs passes `1..upto`, the result
-ships through the `tropical_resolved_1` codec, and the TS suffix
-completes the pipeline — only final post-strata output is compared, so
-a divergence at stage K localizes to pass K. `portedPasses` is the
-ratchet: the harness refuses an `upto` beyond it (a harness error, not
-a comparable `{error}` output).
-
-Pass numbering (K = passes completed):
-  1 specialize (incl. the entry acyclicity assertion)
-  2 sumLower
-  3 inlineInstances (skipped when `inlineNested := false` — the
-    fractal session path; InstanceDecls survive as kernel boundaries)
-  4 arrayLower
-  5 identityElim
-
-Passes are maps over `(Arena, ProgramIdx)` that may push fresh
-programs into the pool and abandon old ones — the codec encoder pools
-ids on first reference from the root, so unreachable entries are never
-emitted.
+The five-pass drop sequence (specialize → sumLower → inlineInstances →
+arrayLower → identityElim) was retired 2026-07-25: four of the five
+passes had no live producer for the structure they existed to retire —
+the literate surface parser and generics that produced it are gone, and
+`Sig` cannot spell it (a type-level fact: fourteen constructors, none of
+them a combinator). Measured before removal: across the full test
+corpus and every patch in the repo, the retired passes rewrote nothing
+outside their own unit-test fold probes. A future indexed-family
+construct that must survive to a backend as data should arrive the way
+`bankSum` did — as a `Sig` constructor with its own emit
+interpretation — not as a resurrected erasure pass.
 -/
 
 namespace Tropical.Ir.Strata
 
-/-- Number of passes ported so far. Bumped per Phase 5 stage; the
-    diffcli verbs reject `--upto` beyond this. -/
-def portedPasses : Nat := 5
-
-/-- Port of acyclic.ts `assertAcyclic` — the strataPipeline-entry
-    tripwire. Cycle-breaking is the realization layer's job upstream;
-    any cycle here is a caller bug. -/
+/-- Port of acyclic.ts `assertAcyclic` — the lowering-entry tripwire.
+    Cycle-breaking is the realization layer's job upstream; any cycle
+    here is a caller bug. -/
 private def assertAcyclic (arena : Arena) (root : ProgramIdx) :
     Except Error Unit := do
   let some prog := arena.program? root
@@ -55,41 +56,32 @@ private def assertAcyclic (arena : Arena) (root : ProgramIdx) :
     let names := "; ".intercalate (sccs.toList.map fun scc => " → ".intercalate scc.toList)
     throw ⟨s!"strataPipeline: input contains an unbroken inter-instance cycle: {names}"⟩
 
-/-- Run passes `1..opts.upto` over the shared expression DAG (the inlining
-    bloat never materializes), returning the post-strata `EArena` and root
-    index. The two exits — `run` (tree, for the codec/registration path) and
-    `runResolved` (the emit's `CoreArena`, Phase B) — share this driver. -/
+/-- The direct lowering over the shared expression DAG (the inlining
+    bloat never materializes), returning the `EArena` and root index.
+    The two exits — `run` (tree, for the codec/registration path) and
+    `runResolved` (the emit's `CoreArena`) — share this body. -/
 def runToEArena (opts : Options) (arena : Arena) (root : ProgramIdx) :
     Except Error (EArena × ProgramIdx) := do
-  if opts.upto < 1 then return (EArena.ofArena arena, root)
   assertAcyclic arena root
   let ea := EArena.ofArena arena
   let passes : PassM ProgramIdx := do
-    let root ← Specialize.runE root opts.typeArgs
-    if opts.upto < 2 then return root
-    let root ← SumLower.runE root
-    if opts.upto < 3 then return root
     let root ← if opts.inlineNested then InlineInstances.runE root else pure root
-    if opts.upto < 4 then return root
-    let root ← ArrayLower.runE root
-    if opts.upto < 5 then return root
     IdentityElim.runE root
   let (postRoot, ea) ← passes.run ea
   return (ea, postRoot)
 
-/-- The tree exit: materialize the post-strata root back to a tree `Program`
-    (Phase A). Kept for the registration/codec path, which round-trips the
-    strata'd instance type through `tropical_resolved_1`. -/
+/-- The tree exit: the lowered root as a tree `Program`. Kept for the
+    registration/codec path, which round-trips the lowered instance
+    type through `tropical_resolved_1`. -/
 def run (opts : Options) (arena : Arena) (root : ProgramIdx) :
     Except Error (Arena × ProgramIdx) := do
-  if opts.upto < 1 then return (arena, root)
   let (ea, postRoot) ← runToEArena opts arena root
   ea.materialize postRoot
 
-/-- The Phase B exit: reify the post-strata DAG straight into the emit's
-    `(CoreArena × CoreProgram)`, no intermediate tree. Replaces `run`
-    followed by `Core.check` on the compile-feeding paths (the modulated-clock
-    blowup lived in that flatten-and-recheck). -/
+/-- The compile exit: reify the lowered DAG straight into the emit's
+    `(CoreArena × CoreProgram)`, no intermediate tree. This is where the
+    retired-constructor rejection (`toResolved`) fires on the
+    compile-feeding paths. -/
 def runResolved (opts : Options) (arena : Arena) (root : ProgramIdx) :
     Except Error (Tropical.Ir.CoreArena × Tropical.Ir.Core.CoreProgram) := do
   let (ea, postRoot) ← runToEArena opts arena root

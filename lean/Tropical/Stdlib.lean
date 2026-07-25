@@ -17,7 +17,7 @@ Two authoring styles, matching the two shapes the post-strata IR takes:
   DAG-authored program legitimately carries `binderCount = 0`; that field is
   non-load-bearing — see the entry-codec de-risk).
 
-* **Instance-bearing** programs declare `AInst`s and let strata's
+* **Instance-bearing** programs declare `AInst`s and let the lowering's
   `inlineInstances` flatten them, linking each sub-program by name through
   `buildRegistry` over the chain built so far. Byte-identical to the `.md`
   program whose body declared the same instances in the same order.

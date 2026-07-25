@@ -9,7 +9,7 @@ Lift a wire `ExprNode` (engine Json wire form) to a raw resolved
 `Program`: one `InputDecl` per free instance-output ref (sorted by
 canonical `instance:port` key), one output `out`, and inline
 `ParamDecl`s for `param`/`trigger` refs. Shape-identical to a
-user-authored single-assign program; the strata pipeline accepts it
+user-authored single-assign program; the lowering accepts it
 unmodified.
 
 Pure and total over its inputs; every error string is the TS message

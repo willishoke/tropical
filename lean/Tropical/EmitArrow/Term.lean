@@ -163,7 +163,7 @@ def arrMor (f : Array Sig → Array Sig) : Mor := fun xs b => (f xs, b)
     back as a bundle. The categorical content: a named multi-port instance IS a
     morphism between products; this bridge is the iso between its named (record)
     presentation and the positional (tuple) one. Emits a COARSE instance — `⋙`
-    and strata's `inlineInstances` flatten it away; only the combinator surface
+    and the lowering's `inlineInstances` flatten it away; only the combinator surface
     survives to the emitted bytes. -/
 def instMor (name programName : String) (portOrder : Array InputIdx)
     (numOut : Nat) : Mor := fun args b =>

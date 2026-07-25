@@ -315,19 +315,13 @@ def main (args : List String) : IO UInt32 := do
     if !(← runBanksFloat arena resolved) then
       failed := failed + 1
     total := total + 1
-    if !(← runBanksFoldTrunk arena resolved) then
-      failed := failed + 1
-    total := total + 1
-    if !(← runBanksColumnize arena resolved) then
+    if !(← runRetiredFrontDoor arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runBanksNested arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runBanksNestedMsl arena resolved) then
-      failed := failed + 1
-    total := total + 1
-    if !(← runBanksColumnizeBail arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runModalDegree arena resolved) then

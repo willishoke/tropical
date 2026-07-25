@@ -42,22 +42,20 @@ def adoptResolved (env : Env) (entry : Json) : EngineM (Option Tropical.Ir.Progr
     which realization the registered catalog holds. -/
 private def sessionInlineNested : Bool := true
 
-/-- The strata pipeline + the post-strata Core downcast (inline path),
-    as a pure `Except` so call sites choose the envelope: registration
-    failures map to `internal_error` (TS strata throws were plain
-    Errors), specialization failures to `invalid_type_args` (the
-    engine mapped any service `resolve_type` failure that way before
-    the move). A Core-check failure is a port bug, surfaced loudly. -/
-def runStrataChecked (typeArgs : Array (String × Lean.JsonNumber))
-    (arena : Tropical.Ir.Arena) (rootIdx : Tropical.Ir.ProgramIdx) :
+/-- The direct lowering + the Core downcast (inline path), as a pure
+    `Except` so call sites choose the envelope: registration failures
+    map to `internal_error`. The Core check is also where a JSON-loaded
+    program spelling a retired construct (`fold`/`tag`/…) is refused —
+    that is a front-door rejection, not an engine bug. -/
+def runStrataChecked (arena : Tropical.Ir.Arena)
+    (rootIdx : Tropical.Ir.ProgramIdx) :
     Except String (Tropical.Ir.Arena × Tropical.Ir.ProgramIdx) := do
   let (arena, rootIdx) ←
     (Tropical.Ir.Strata.run
-      { upto := Tropical.Ir.Strata.portedPasses,
-        inlineNested := sessionInlineNested, typeArgs } arena rootIdx).mapError (·.message)
+      { inlineNested := sessionInlineNested } arena rootIdx).mapError (·.message)
   if sessionInlineNested then
     if let .error e := Tropical.Ir.checkResolvedArena arena rootIdx then
-      throw s!"post-strata Core check failed (port bug): {e}"
+      throw s!"core check failed: {e}"
   pure (arena, rootIdx)
 
 /-- Emit the (LLVM IR text, manifest JSON) for a compiled session plan
@@ -145,7 +143,7 @@ def liftIfNeeded (env : Env) : EngineM Unit := do
     -- Strata, no relink (lifted bodies have no InstanceDecls — the
     -- registry is empty, exactly the TS lift's `programRegistry: new
     -- Map()`).
-    let (arenaPost, postIdx) ← match runStrataChecked #[] arenaRaw rawIdx with
+    let (arenaPost, postIdx) ← match runStrataChecked arenaRaw rawIdx with
       | .error msg => internalError msg
       | .ok r => pure r
     -- Persist the raw program + counter; the post-strata arena growth

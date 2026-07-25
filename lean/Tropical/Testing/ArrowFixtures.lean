@@ -166,7 +166,7 @@ def reversibleCombSpec : WarpBankProgram :=
 -- ─────────────────────────────────────────────────────────────
 
 /-! The flanger family above *sources* `FixedSinOsc` as a `Voice` instance and
-    leans on strata's `inlineInstances` to flatten it. The cutover wants
+    leans on the lowering's `inlineInstances` to flatten it. The cutover wants
     EmitArrow to build the voice ITSELF — no instance boundary, the per-program
     path's one flat DAG. `buildFixedSinOsc` does exactly that: it reconstructs
     the post-strata (scalar, inlined) `FixedSinOsc` body — the `FixedPhasor`
