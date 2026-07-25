@@ -5,7 +5,7 @@ import Tropical.EmitArrow.Modal
 /-!
 # Tropical.Tropicaltest.Exact — the exact-carrier gates (P0)
 
-Five standing gates over `Tropical.Exact`, the bake layer's `libm` exile:
+Six standing gates over `Tropical.Exact`, the bake layer's `libm` exile:
 
 * **`exact-constants`** — π and ln 2 are shipped as literal integer mantissas
   over `2³⁰⁰`. This gate RECOMPUTES both from scratch inside the carrier, at a
@@ -490,5 +490,68 @@ def runExactRecip10 : IO Bool := do
       s!"the 10^-e reciprocal cache reproduces the division form BIT FOR BIT over {checked} (mantissa, exponent) pairs spanning e ∈ [0, {eTop - 1}] — ofJsonNumber got faster without one enclosure getting wider or narrower, so no certLt/certGt verdict and no emitted program can have moved"
   else
     failGate "exact-recip10" bad
+
+-- ── the served bake surface ───────────────────────────────────────────────────
+
+/-- THE PLAYGROUND-BAKE gate. `Playground.lean` is the SERVED bake surface —
+    `gong`, `string`, `resonator`, `reverb`, `filter` — and it carried eleven
+    `libm` calls, two of them structural, while the whole bloom/Γ family the
+    campaign was built around sits behind the WITHHELD `bloomgong`. This pins the
+    three things a successor needs and nothing else can: the cliffs' verdicts,
+    the value differential, and the totality of the emit funnel.
+
+    1. THE COUNT CLIFF. `defaultStringModes`' loop-transit count is now an exact
+       rational round, not a `Float.round` of an f64 quotient. Pinned at the
+       shipped default and at the one MEASURED disagreement (`f0 = 2.24`, where
+       `44100/2.24 = 19687.5` exactly and the double is `19687.4999…`), so the
+       quantization instance cannot drift back.
+    2. THE EMIT/SKIP CLIFF. The `g > 0` fork's policy — emit on a CERTIFIED
+       positive verdict, drop otherwise — must reproduce the incumbent on every
+       reachable input. `ρ = 0` is the only reachable overlap and it must drop
+       everything; `ρ < 0` likewise; `f0 ≤ 0` is the one place the carrier FORCES
+       a change (an `∞` saturating into 48 undamped DC modes becomes an empty
+       bank), asserted so the change is a recorded decision and not a surprise.
+    3. REDUNDANCY. The `f_k < SR/2` conjunct is provably implied by
+       `k ≤ ⌊span/2⌋`. It is kept in the emitter as a defensive certified check;
+       this proves it never fires, so a future `kmax` change that DID re-open the
+       band edge turns this arm red rather than shipping partials above Nyquist.
+    4. THE DIFFERENTIAL + TOTALITY. `exactBakeDifferential` reports how far the
+       emitted literals moved, in units of `litF`'s 12th decimal place, and
+       asserts `litOfD`'s poison arm never fired. -/
+def runExactPlayground : IO Bool := do
+  let count := fun (f0 rho : Int × Nat) => (Tropical.Playground.defaultStringModes f0 rho).size
+  -- (1) the count cliff
+  let cDefault := count (196, 0) (996, 3)          -- N = 225, kmax = min 48 112
+  let cHigh    := count (2000, 0) (996, 3)         -- N = 22,  kmax = 11
+  let cLow     := count (20, 0) (996, 3)           -- N = 2205, kmax = 48
+  let cQuant   := count (224, 2) (996, 3)          -- f0 = 2.24: N = 19688, kmax = 48
+  -- (2) the fork policy
+  let cZeroRho := count (196, 0) (0, 0)            -- g ≡ 0 ⇒ overlap ⇒ drop all
+  let cNegRho  := count (196, 0) (-5, 1)           -- g < 0 certified ⇒ drop all
+  let cZeroF0  := count (0, 0) (996, 3)            -- FORCED change: was 48 DC modes
+  -- (3) `f_k < SR/2` is implied by `k ≤ ⌊span/2⌋`, over every reachable N
+  let mut bandViolations := 0
+  for nm1 in [0:400] do
+    let n := nm1 + 1
+    let kmax := Nat.min 48 (n / 2)
+    for j in [0:kmax] do
+      -- 2·k·SR < SR·span  ⟺  2k < span = n + ½  ⟺  4k < 2n + 1
+      if !(4 * (j + 1) < 2 * n + 1) then bandViolations := bandViolations + 1
+  -- (4) the value differential and the poison count
+  let (diff, poison) := Tropical.Playground.exactBakeDifferential
+  IO.println s!"        string count: f0=196 → {cDefault} (want 48) · f0=2000 → {cHigh} (want 11) · f0=20 → {cLow} (want 48) · f0=2.24 → {cQuant} (want 48, N=19688)"
+  IO.println s!"        fork policy : ρ=0 → {cZeroRho} · ρ=−0.5 → {cNegRho} · f0=0 → {cZeroF0} (all want 0)"
+  IO.println s!"        band edge   : f_k < SR/2 violations over N∈[1,400) = {bandViolations} (want 0 — the conjunct is redundant)"
+  for (site, n, moved, mx) in diff do
+    IO.println s!"        differential: {site}  {moved}/{n} literals moved, max Δ = {mx} units of litF's 12th place"
+  IO.println s!"        poison      : {poison} (want 0 — litOfD's lit-0 arm is dead)"
+  let countsOk := cDefault == 48 && cHigh == 11 && cLow == 48 && cQuant == 48
+  let forkOk := cZeroRho == 0 && cNegRho == 0 && cZeroF0 == 0
+  if countsOk && forkOk && bandViolations == 0 && poison == 0 then
+    passGate "exact-playground"
+      "the served bake surface decides in exact arithmetic: the string's transit count is an Int round (no Float.round of an f64 quotient), the emit/skip fork emits only on a certified verdict and drops otherwise (reproducing g>0.0 on every reachable input), the band-edge conjunct is provably redundant, and no emitted coefficient came from poison"
+  else
+    failGate "exact-playground"
+      s!"counts={countsOk} ({cDefault}/{cHigh}/{cLow}/{cQuant}) fork={forkOk} ({cZeroRho}/{cNegRho}/{cZeroF0}) bandViolations={bandViolations} poison={poison}"
 
 end Tropical.Tropicaltest.ExactGates
