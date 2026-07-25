@@ -1,18 +1,17 @@
 import Tropical.Ir.Nodes
 import Tropical.Ir.Strata.Basic
-import Tropical.Ir.Strata.Specialize
-import Tropical.Ir.Strata.SumLower
 import Tropical.Ir.Strata.EArena
 
 /-!
 # inlineInstances
 
-Splice each `InstanceDecl` into its parent: specialize the inner
-(identity-keyed typeArgs), sumLower it, recursively inline its own
+Splice each `InstanceDecl` into its parent: recursively inline its own
 sub-instances (depth-first, bottom-up), substitute wired-in input
 expressions, shift surviving Param/Binding refs by the lift offsets
 (CF-only: there are no reg decls to lift or rename), then resolve every
 `nestedOut` against the recorded per-instance output expressions.
+(Inners are monomorphic and sum-free by contract — generics and the
+sum-type lowering are retired.)
 
 The TS pass memoizes the nestedOut substitution walk on node identity
 to preserve DAG sharing; the id-form walks here memoize the same way
@@ -153,23 +152,13 @@ private partial def inlineOneE (enclosing : Program)
     (paramOffset binderOffset : Nat) :
     PassM (Array BodyDecl × Array ExprId × Nat) := do
   let (declTypeIdx, declType) ← getInstanceTypeE enclosing instName typeKey
-  -- 1. Specialize (identity-keyed typeArgs; no-op for concrete inners).
-  let specializedIdx ←
-    if declType.typeParams.isEmpty && typeArgs.isEmpty then
-      pure declTypeIdx
-    else do
-      let args ← typeArgs.mapM fun a => do
-        let some pd := declType.typeParams[a.param.idx]?
-          | failP (s!"inlineInstances: instance '{instName}' typeArg idx={a.param.idx} out of range " ++
-              s!"(target '{declType.name}' has {declType.typeParams.size} typeParams)")
-        let some tp ← typeParamP? pd
-          | failP s!"inlineInstances: instance '{instName}': typeParam pool index {pd.idx} out of range (internal)"
-        pure { poolIdx? := some pd, name := tp.name, value := a.value : Specialize.ArgEntry }
-      Specialize.runCoreE declTypeIdx args
-  -- 2a. Lower sums before recursing/lifting.
-  let summedIdx ← SumLower.runE specializedIdx
-  -- 2b. Recursively inline sub-instances (depth-first, bottom-up).
-  let flatIdx ← runE summedIdx
+  -- 1. Generics are retired: a concrete instance carries no type args and
+  --    its target declares no type params. (The specialize/sumLower passes
+  --    that ran here were retired 2026-07-25 with their producers.)
+  unless declType.typeParams.isEmpty && typeArgs.isEmpty do
+    failP s!"inlineInstances: instance '{instName}' (target '{declType.name}') carries type args — generics are retired"
+  -- 2. Recursively inline sub-instances (depth-first, bottom-up).
+  let flatIdx ← runE declTypeIdx
   let flattened ← getEProgram flatIdx "inlineInstances"
   -- 3. Input substitution map (wired > default > unsubstituted).
   let inputSubst ← buildInputSubstE instName declType flattened inputs

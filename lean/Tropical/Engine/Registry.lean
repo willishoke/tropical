@@ -17,11 +17,11 @@ open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
 -- ── Program registration (raise → elaborate → strata → entry) ─────────────────
 -- The engine runs the stage-2 raise, the elaboration, AND (Phase 5
--- stage 6b) the strata pipeline itself; the service's
+-- stage 6b) the lowering itself; the service's
 -- `register_program` shrinks to typeDef registration + decode +
 -- `makeCompiled`, one call per batch item.
 
-/-- Run the strata pipeline on an elaborated concrete program — the
+/-- Run the lowering on an elaborated concrete program — the
     engine-side image of the service residue stage 6b retired:
     relink sub-program registry entries to the canonical post-strata
     registrations (`concreteByName` over TS `session.programs` =
@@ -41,7 +41,7 @@ def strataConcrete (st : SessionSt) (arena : Tropical.Ir.Arena)
     match Tropical.Ir.Strata.relinkProgramRegistry arena rootIdx byName with
     | .error e => internalError e.message
     | .ok r => pure r
-  match runStrataChecked #[] arena rootIdx with
+  match runStrataChecked arena rootIdx with
   | .error msg => internalError msg
   | .ok r => pure r
 
@@ -70,7 +70,7 @@ partial def registrationBatch (name : String) (p : Tropical.Parse.Program) :
   return out.push (name, renameProgram p name)
 
 /-- Register one program: elaborate it over the typed store, run the
-    strata pipeline on it (concrete programs only — generics ship the
+    lowering on it (concrete programs only — generics ship the
     raw template, which the service stores unstrata'd and never
     relinks), ship `{name, parsed, resolved}` to the service (typeDef
     registration + decode + `makeCompiled` + registry insert), and

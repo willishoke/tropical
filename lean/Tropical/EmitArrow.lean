@@ -14,7 +14,7 @@ directly in the post-strata, scalar shape and reuses the backend
 verb-first: it is a *realization by emission* of the existing scalar IR —
 the "warp" combinators are the clock axis of that realization.
 
-The post-strata IR is scalar by definition (strata's job is to lower arrays,
+The lowered IR is scalar by definition (arrays survive only as literals,
 sums and generics away), so EmitArrow stays scalar: the richness lives in
 the typed elaborator upstream. There is no `Warp` type and no separate clock
 algebra — the clock is a first-class expression and a warp is any operation

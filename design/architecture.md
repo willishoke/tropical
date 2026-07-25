@@ -85,15 +85,14 @@ ResolvedProgram ◀── DAG-shaped graph IR ◀── arrow-combinator builder
     │                                        (Tropical.Stdlib / EmitArrow):
     │                                        authored straight as resolved IR,
     │                                        skipping raise + elaborate
-    │   strata pipeline:
+    │   the direct lowering (not a pass pipeline — see §3):
     │     assertAcyclic    confirms caller honored the contract
-    │     specialize       (inert — no generics survive to specialize)
-    │     sumLower         drops sum types
-    │     inlineInstances  drops nesting
-    │     arrayLower       drops shapes and combinators
-    │     identityElim     categorical identity-law rewrite
+    │     inlineInstances  drops nesting (optional; session path skips it)
+    │     identityElim     categorical identity-law peephole
+    │     toResolved       type boundary — refuses retired constructs
+    │                      (fold/scan/generate/…/tag/match/let)
     ▼
-ResolvedProgram (post-strata)
+ResolvedProgram (lowered)
     │      scalar-only · monomorphic · acyclic · non-nested · combinator-free
     │
     │   ┌─→ compileSession → tropical_plan_5  (JIT path)
@@ -166,14 +165,14 @@ been deleted, along with the `stdlib/*.md` programs and the committed
   `ParsedProgram` (`lean/Tropical/Parse/Nodes.lean`), which the
   elaborator then resolves. A loaded file may carry inline **concrete**
   (non-generic) program definitions — a self-contained patch — and
-  those register through this same raise → elaborate → strata path. That
+  those register through this same raise → elaborate → lowering path. That
   is the only remaining route for a fold-bearing program (no `Stdlib`
   builder emits one): the banks/`FoldProbe` test corpus is loaded this
   way.
 
-Both front doors converge on the same post-strata `ResolvedProgram`;
+Both front doors converge on the same lowered `ResolvedProgram`;
 the builder path simply enters below parse+elaborate, at the raw
-resolved IR, and joins the JSON path at the strata pipeline.
+resolved IR, and joins the JSON path at the direct lowering.
 
 ### 1.2 Parse-time desugaring: bounds
 
@@ -184,7 +183,7 @@ built-in port-type alias bounds — `signal`/`bipolar` → `[-1, 1]`,
 `clamp` or `select` ops on input defaults and matching output assigns
 (the transform is idempotent, so a default already written as its own
 `clamp` is not double-wrapped). Bounds are a *parse-time* concept: they
-never reach the elaborator or the strata pipeline as a distinct
+never reach the elaborator or the lowering as a distinct
 construct. (The arrow builders reproduce the same lowering by hand in
 their port-declaration helpers — `freq` ⇒ `select(hz > 0, hz, 0)`,
 `signal` ⇒ `clamp(d, -1, 1)`, and so on.)
@@ -234,8 +233,8 @@ level. Inter-instance cycles throw `CycleViolation` here, with a
 port-detailed Tier-2 error message — there is no explicit-register
 escape hatch that would make a cycle legal; cycles are simply rejected.
 Acyclic-by-source is what makes everything downstream straight-
-line: the strata pipeline never needs to break cycles, and
-`assertAcyclic` at strata entry catches any caller that bypassed
+line: the lowering never needs to break cycles, and
+`assertAcyclic` at its entry catches any caller that bypassed
 the contract.
 
 After this pass, no string lookups, no scope walks, no shadowing
@@ -244,95 +243,63 @@ compiler operates on.
 
 ---
 
-## 3. Strata pipeline
+## 3. The direct lowering
 
-`lean/Tropical/Ir/Strata.lean` orchestrates six passes:
+`lean/Tropical/Ir/Strata.lean` is no longer a pass pipeline. The
+five-pass drop sequence (specialize → sumLower → inlineInstances →
+arrayLower → identityElim) was retired 2026-07-25: `Sig`, the one
+surviving authoring surface, is already the trunk IR — its fourteen
+constructors are exactly the lowered `ENode` subset, so four of the
+five passes had no live producer for the structure they existed to
+erase. Measured before removal: across the full test corpus and every
+patch in the repo, the retired passes rewrote nothing outside their
+own unit-test fold probes. What remains is a direct lowering — one
+entry check, two named rewrites, one type boundary:
 
 ```
-strataPipeline prog typeArgs options =
-  assertAcyclic prog
-  let specialized = specializeProgram prog typeArgs
-  let summed      = sumLower specialized
-  let inlined     = if options.inlineNested == false then summed
-                                                      else inlineInstances summed
-  let arrayed     = arrayLower inlined
-  identityElim arrayed
+runToEArena opts arena root =
+  assertAcyclic arena root
+  let inlined = if opts.inlineNested then inlineInstances root else root
+  identityElim inlined
+-- then one of the two exits:
+--   run          — materialize the tree (registration/codec path)
+--   runResolved  — toResolved into the emit's CoreArena (compile path)
 ```
 
-Each pass is a total function: returns a fresh `ResolvedProgram`, or —
-in the no-op fast path — the input unchanged. None of them mutate the
-input. **Acyclicity is the strataPipeline contract**; the callers
-guarantee it, `assertAcyclic` confirms it.
+Each rewrite is a total function: returns a fresh `ResolvedProgram`,
+or — in the no-op fast path — the input unchanged. **Acyclicity is the
+entry contract**; the callers guarantee it, `assertAcyclic` confirms it.
 
 ### 3.1 assertAcyclic — boundary check
 
-`lean/Tropical/Ir/Strata/Basic.lean`. Re-uses the SCC finder shared
-with the session-level acyclicity check (the shared cycle algorithm).
-Throws `AcyclicityViolation` if any non-trivial SCC survives into strata
-input. In the standard path this never fires; the elaborator and the
-session compiler have already rejected any cyclic graph.
+`lean/Tropical/Ir/Strata.lean`. Re-uses the SCC finder shared with the
+session-level acyclicity check (the shared cycle algorithm). Throws if
+any non-trivial SCC survives into the lowering input. In the standard
+path this never fires; the elaborator and the session compiler have
+already rejected any cyclic graph.
 
-### 3.2 specialize — drops type parameters (now inert)
-
-`lean/Tropical/Ir/Strata/Specialize.lean`. **This pass is now inert.**
-Generics have been removed — there is no way to author a generic
-program (no `define_program`, no surface language) and no
-specialization machinery around it (`Tropical.TypeArgs`, the
-`specializationCache`, and the generic catalog entry are all deleted).
-Nothing supplies type arguments, so `specialize` runs over programs
-with no `typeParams` and returns them unchanged. The pass is kept in
-the pipeline as a structural placeholder, not because it fires.
-
-The mechanism it retains, if a generic ever reappeared: take a template
-and a map keyed on `TypeParamDecl`, produce a fresh program with the
-integers substituted in — `ShapeDim`s that are `TypeParamDecl`s become
-integers, expression-position `TypeParamRef` nodes become numeric
-literals, and the root's `typeParams` list is dropped. Sum/struct/alias
-type defs are shared across the clone (preserving variant identity for
-match arms, which `sumLower` requires).
-
-### 3.3 sumLower — drops sum types
-
-`lean/Tropical/Ir/Strata/SumLower.lean`. Lowers `MatchExpr` to scalar
-select-chains and `TagExpr` to tag-literal writes, collapsing every
-sum-typed value to a discriminator-plus-fields scalar bundle.
-
-Constraint:
-- match-arm payload bindings have no slot source to bind from —
-  CF-only removed sum-typed registers (the only construct that could
-  supply payload slots), so a match arm that binds a payload is a
-  structural error.
-
-After this pass: no `tag` op, no `match` op, no sum-typed value.
-Decl identity is preserved end-to-end; replacements are by identity.
-
-Sum types survive in the `tropical_program_2` schema (and in
-struct/alias type defs) but, with no per-sample state, they appear only
-as transient expression-level values that this pass folds into
-select-chains — there is no longer a sum-typed *register* to decompose.
-
-### 3.4 inlineInstances — drops nesting
+### 3.2 inlineInstances — drops nesting (optional)
 
 `lean/Tropical/Ir/Strata/InlineInstances.lean`. Splices each
-`InstanceDecl` into its parent. After this pass:
+`InstanceDecl` into its parent. After this rewrite:
 
 - `body.decls` contains no `InstanceDecl`
 - no expression contains a `NestedOut` ref
 
-For each instance, depth-first bottom-up:
+Inners are monomorphic and sum-free by contract (generics and the
+sum-type lowering are retired; an instance carrying type args is an
+error). For each instance, depth-first bottom-up:
 
-1. Specialize the instance's type with `instanceDecl.typeArgs` (so
-   the inner already looks monomorphic by the time we touch it).
-2. Recursively inline sub-instances inside the (specialized) inner.
-3. Clone the inner with **input substitution**: every `InputRef`
+1. Recursively inline sub-instances inside the inner.
+2. Clone the inner with **input substitution**: every `InputRef`
    whose decl is in the inner's `ports.inputs` is replaced by the
    wired-in expression from `instanceDecl.inputs[port]`. Substituted
    expressions pass through by reference, preserving DAG sharing.
-4. Lift `ProgramDecl`s and `ParamDecl`s as-is (no rename:
+3. Lift `ProgramDecl`s and `ParamDecl`s as-is (no rename:
    `ParamDecl`s are session-scoped by name; `ProgramDecl`s are passive
    type bindings). There are no state registers to lift — the IR is
    stateless — so nothing is renamed or provenance-tagged.
-5. Record cloned `outputAssign` expressions in a substitution table
+4. Record cloned `outputAssign` expressions in a substitution table
    keyed by the *template's* `OutputDecl` (matched by position to
    the cloned program's outputs). Replace every `NestedOut {
    instance, output }` ref in the outer's surviving expressions.
@@ -353,60 +320,52 @@ tradeoff (the ~25% flat-path win comes from IR-level slot removal,
 not from anything LLVM could do — slots are observable hot-swap
 state).
 
-### 3.5 arrayLower — drops shapes and combinators
-
-`lean/Tropical/Ir/Strata/ArrayLower.lean`. Unrolls compile-time
-combinators and lowers array ops to scalar primitives via static shape
-information.
-
-After this pass:
-- no `let`, `fold`, `scan`, `generate`, `iterate`, `chain`, `map2`,
-  `zipWith` ops
-- no `bindingRef` (every `BinderDecl` introduced by a combinator or
-  let has been substituted away)
-- every `zeros{count}` with literal `count` becomes an inline array
-  `[0, 0, ..., 0]`
-
-Survivors (the post-arrayLower form admits these):
-- inline arrays as `ResolvedExpr[]` — element of `arrayPack`-style
-  values
-- `index(arr, i)` — left as-is (never constant-folded over inline
-  literals)
-- `arraySet(arr, i, v)` — left as-is; an immutable functional update
-  on an inline array (the array itself is a value, not a backing store)
-
-Substitution discipline: every `BindingRef.decl` is a pointer to a
-`BinderDecl`. Substitution is by `Map<BinderDecl, ResolvedExpr>`,
-which makes shadowing structurally impossible — shadowing would
-require two different `BinderDecl`s with the same name, and that's
-exactly what decl identity catches.
-
-Each combinator iteration uses a fresh `WeakMap` memo. A memo is
-valid only for one substitution map; reusing one across iterations
-would conflate different `acc`/`elem` values.
-
-### 3.6 identityElim — categorical identity-law rewrite
+### 3.3 identityElim — categorical identity-law rewrite
 
 `lean/Tropical/Ir/Strata/IdentityElim.lean`. Eliminates `InstanceDecl`s whose
 program body is the identity morphism (each output assigns the
 corresponding input untouched). In the per-program path
 `inlineInstances` already absorbs trivial sub-instances first, so
-this pass rarely fires today; it carries weight in the session-
+this rewrite rarely fires today; it carries weight in the session-
 level path where lifted wire-programs sometimes lower to a
-no-op kernel that the pass collapses cleanly.
+no-op kernel that it collapses cleanly.
 
-### 3.7 Post-strata invariants
+### 3.4 toResolved — the type boundary, and the front-door contract
 
-What you get from `strataPipeline`:
+`lean/Tropical/Ir/Strata/EArena.lean`. Reifies the reachable graph
+into the emit's `CoreArena` (`runResolved` exit, and
+`checkResolvedArena` on the session paths), refusing every retired
+constructor. This is where the compatibility decision lives: the
+`tropical_program_2` schema can still SPELL `fold`/`scan`/`generate`/
+`iterate`/`chain`/`map2`/`zipWith`/`let`/`tag`/`match` — `raise`
+parses them — but nothing lowers them any more, so a file carrying one
+refuses to compile with the retirement message naming the construct
+(pinned by the `retired-front-door` gate in `tropicaltest`).
+
+Combinator programs are authored in Lean instead: the host language is
+the meta-level (`Array.map` builds coefficient tables at assemble
+time), and only structure a backend wants **as data** earns an IR
+node — `bankSum`, the bounded indexed reduction, is the one that has
+(loop-everything; order preservation makes every realization
+bit-identical, floats included). A future indexed-family construct
+that must survive to a backend as data (a fill/generate whose consumer
+is not a sum, say) should arrive the same way: as a `Sig` constructor
+with its own emit interpretation, not as a resurrected erasure pass.
+
+### 3.5 Lowered-IR invariants
+
+What you get below the boundary:
 
 - **scalar-only** — no surviving array decls; arrays survive only as
-  inline literals in expressions
+  inline literals in expressions (plus `bankSum` coefficient columns)
 - **monomorphic** — no `TypeParamDecl`, no `TypeParamRef`
-- **acyclic** — confirmed at strata entry; production code paths
-  never produce cyclic IR
-- **non-nested** — no `InstanceDecl`, no `NestedOut`
+- **acyclic** — confirmed at entry; production code paths never
+  produce cyclic IR
+- **non-nested** — no `InstanceDecl`, no `NestedOut` (inline path;
+  the fractal session path keeps instances as kernel boundaries)
 - **combinator-free** — no `let`, `fold`, `scan`, `generate`,
-  `iterate`, `chain`, `map2`, `zipWith`
+  `iterate`, `chain`, `map2`, `zipWith`; `bankSum` is the one
+  surviving bounded reduction
 - **decl-identity-keyed** — refs hold decl objects, never strings
 
 That's the smallest sub-IR sufficient for any per-sample evaluator.
@@ -436,7 +395,8 @@ session compiler:
    anonymous-instance lift. Wires whose expressions contain array
    literals are extracted into anonymous `__wire_${i}` instances at
    session pre-compile time. The lifted programs go through the
-   full strata pipeline so combinators lower correctly.
+   full lowering (inline → identityElim → Core check), the same
+   recipe as any registered program.
 
 2. **`assertSessionAcyclic`** (`lean/Tropical/Lowering.lean`) —
    the session-acyclicity rule (Tarjan over the instance dep graph). It
@@ -509,10 +469,10 @@ different runtime.
 
 ---
 
-## 5. Backends over the post-strata IR
+## 5. Backends over the lowered IR
 
 The three sections below are not further compiler stages. They are
-parallel interpretations of the same post-strata `ResolvedProgram`
+parallel interpretations of the same lowered `ResolvedProgram`
 into different targets. Wiring expressions reference parameters by
 name (`{op:'param', name}`). The **session** path resolves each to a
 `param:name` **module slot** read — the control plane drives it via
@@ -544,7 +504,7 @@ writebacks, so there is no scheduler tier.
 
 **Structural CSE.** `Emit.lean` keys CSE on a bottom-up structural id
 (arena `ExprId`s replicating the TS identity semantics), not node
-identity. This catches duplicates that strata's clone-then-substitute
+identity. This catches duplicates that the lowering's clone-then-substitute
 introduces.
 
 **Operand kinds.** `NOperand` discriminates: `const`, `input`, `reg`,
@@ -614,7 +574,7 @@ polynomial-approximation `Sig` datapaths in
 `ldexp` — the last a single-instruction IEEE-754 bit op for 2^n range
 reduction), exposed as the `Sin`/`Tanh` stdlib builders and reused
 inline inside the oscillator/modal builders. They lower to arithmetic
-at strata time, so the kernel contains no libm calls and is
+at lowering time, so the kernel contains no libm calls and is
 deterministic across platforms. Edit the `Sin` builder (or the shared
 `sinSig`/`expSig` in `Numerics.lean`) to change the approximation.
 
@@ -622,7 +582,8 @@ deterministic across platforms. Edit the `Sin` builder (or the shared
 native ORC JIT and the browser's wasm32 module both consume that *same*
 IR. So a new op lands in Lean only:
 1. The wire-format op set (`lean/Tropical/Expr.lean`).
-2. The strata passes that traverse it.
+2. The lowering rewrites that traverse it (`InlineInstances`,
+   `IdentityElim`, the `toResolved` downcast).
 3. The IR emission case in `lean/Tropical/Ir/EmitLlvm.lean`.
 The engine receives IR text and JITs it; `diffcli compile-wasm` lowers
 the same IR to wasm32 in-process. No C++ change and no per-backend
@@ -678,7 +639,7 @@ developer's ear; the cross-checks anchor agreement around that floor:
 - **audio goldens** in `tropicaltest` — byte-for-byte against the
   frozen `tests/golden/*.hash` reference output.
 
-Any disagreement in a cross-check is a strata or backend bug, and the
+Any disagreement in a cross-check is a lowering or backend bug, and the
 runner localises which. Note what is *not* here: there is no
 differential against a second compiler implementation. The TS oracle
 that gated the Lean port was migration scaffolding — a differential
@@ -690,7 +651,7 @@ proves *agreement*, not correctness — and it was retired with the port
 ## 6. Program metadata and registration
 
 A registered program is metadata (`ProgMeta`, `lean/Tropical/Session.lean`)
-paired with post-strata resolved IR in the session's growing `Arena`;
+paired with lowered resolved IR in the session's growing `Arena`;
 the metadata is a view, the IR is the value. `ProgMeta` carries the
 program name and its input/output port surface (names, types,
 defaults); helpers (`inputNames`, `outputNames`, …) read straight off
@@ -701,7 +662,7 @@ registers to name.) A live `InstanceInfo` holds a `baseTypeName`, its
 root resolver links against the instance's captured index, never a late
 name lookup.
 
-Registration runs each program through the strata pipeline once and
+Registration runs each program through the lowering once and
 adopts the result into the store (`strataConcrete` + `concreteEntry` in
 `lean/Tropical/Engine/Registry.lean`). The arena only ever grows and
 indices stay valid for the session's life, so there is no per-type
@@ -730,7 +691,9 @@ order-preserving JSON codecs (`Tropical/Parse/OrderedJson.lean`,
 `KernelManifest` (`web/runtime/manifest.ts`), not a full plan mirror.
 
 Going from the first to the second without losing meaning is exactly
-what the strata pipeline does.
+what the direct lowering does; a file spelling a retired construct
+(`fold`/`tag`/…) parses but refuses to compile at the `toResolved`
+boundary.
 
 ### 7.1 tropical_program_2 sketch
 
@@ -1060,7 +1023,7 @@ transfer to test — the swap carries only the sample index.
 
 ### 14.2 Lean tests (the `tropicaltest` binary)
 
-The compiler/pipeline test surface is Lean-internal — the strata,
+The compiler/pipeline test surface is Lean-internal — the lowering,
 elaborator, emit, and partition passes are tested in the Lean modules
 themselves. The cross-cutting runner is `tropicaltest`
 (`lean/Tropicaltest.lean`): it renders the corpus through the real
@@ -1110,7 +1073,7 @@ engine at boot, so there is no `stdlib/parsed/` bridge and no
 
 Cycles in source code throw `CycleViolation` at elaborate-time; cycles
 in session wiring are rejected by `assertSessionAcyclic` (a plain "no
-cycles at all" rule). The compiler's strata pipeline asserts acyclic
+cycles at all" rule). The compiler's lowering asserts acyclic
 input at its boundary and refuses to lower cyclic IR. tropical is
 closed-form-only: there is no state primitive to break a cycle with, so
 nothing breaks one for you — feedback that needs genuine per-sample
@@ -1138,9 +1101,9 @@ clear where new passes belong, and makes sample-for-sample
 cross-backend agreement the right correctness criterion. The shape
 also matches
 the operadic reading sketched at the top of this document and in
-`design/archive/operadic_ir.md` — the strata pipeline is a
-composition of operad morphisms — but you can program against the
-pipeline without that vocabulary.
+`design/archive/operadic_ir.md` — the lowering is a composition of
+operad morphisms — but you can program against it without that
+vocabulary.
 
 ### Decl identity instead of strings
 
@@ -1185,7 +1148,7 @@ dynamic allocation on the audio thread.
 `sin`, `cos`, `tanh`, `exp` are polynomial-approximation `Sig`
 datapaths in `lean/Tropical/EmitArrow/Numerics.lean`, built from
 arithmetic + `round`/`clamp` + `ldexp`. They lower to arithmetic at
-strata time. No libm dependency in the kernel; deterministic across
+lowering time. No libm dependency in the kernel; deterministic across
 platforms; edit the builder (or the shared `sinSig`/`expSig`) to change
 the math.
 
