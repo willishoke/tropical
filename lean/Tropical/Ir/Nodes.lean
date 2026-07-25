@@ -407,6 +407,57 @@ def eintern (n : ENode) : EArenaM ExprId := do
 def ExprArena.deref (a : ExprArena) (id : ExprId) : Option ENode :=
   a.nodes[id.idx]?
 
+/-- The edge set of the DAG: every child id the node references,
+    including ids inside binder payloads (`letIn` values, `tag`
+    payloads, `match` arm bodies, `bankSum` tables/count). -/
+def ENode.children : ENode → Array ExprId
+  | .num _ | .bool _ | .inputRef _ | .paramRef _ | .typeParamRef _
+  | .bindingRef _ | .nestedOut _ _ | .sampleRate | .sampleIndex
+  | .loopIdx _ => #[]
+  | .arr items => items
+  | .binary _ a b => #[a, b]
+  | .unary _ a => #[a]
+  | .clamp a b c => #[a, b, c]
+  | .select a b c => #[a, b, c]
+  | .arraySet a b c => #[a, b, c]
+  | .index a b => #[a, b]
+  | .zeros c => #[c]
+  | .fold o i _ _ b => #[o, i, b]
+  | .scan o i _ _ b => #[o, i, b]
+  | .generate c _ b => #[c, b]
+  | .iterate c i _ b => #[c, i, b]
+  | .chain c i _ b => #[c, i, b]
+  | .map2 o _ b => #[o, b]
+  | .zipWith a b _ _ body => #[a, b, body]
+  | .letIn bs b => (bs.map (·.value)).push b
+  | .tag _ _ p => p.map (·.value)
+  | .match_ _ s arms => #[s] ++ arms.map (·.body)
+  | .bankSum _ ts b dc _ => (ts.push b) ++ dc.toArray
+
+/-- Child-descending well-formedness: every edge points to a strictly
+    smaller id. `eintern` assigns `⟨nodes.size⟩` to each fresh node, so
+    every arena built through it satisfies this by construction; the
+    check makes the fact available as data, and the conversion walks
+    terminate by descent on `idx` against it. -/
+def ExprArena.wf (a : ExprArena) : Bool :=
+  (Array.range a.nodes.size).all fun i =>
+    match a.nodes[i]? with
+    | some n => n.children.all (fun c => c.idx < i)
+    | none => true
+
+/-- The elimination form of `wf`: a dereferenced node's children are all
+    strictly below it — the decrease fact for `termination_by id.idx`. -/
+theorem ExprArena.forall_children_lt {a : ExprArena} (hw : a.wf = true)
+    {id : ExprId} {n : ENode} (hd : a.deref id = some n) :
+    ∀ c ∈ n.children, c.idx < id.idx := by
+  intro c hc
+  have hd' : a.nodes[id.idx]? = some n := hd
+  obtain ⟨hi, -⟩ := Array.getElem?_eq_some_iff.mp hd'
+  have hnode := Array.all_eq_true.mp hw id.idx (by simpa using hi)
+  rw [Array.getElem_range, hd'] at hnode
+  obtain ⟨i, hilt, rfl⟩ := Array.mem_iff_getElem.mp hc
+  exact of_decide_eq_true (Array.all_eq_true.mp hnode i hilt)
+
 -- ─────────────────────────────────────────────────────────────
 -- Decls + assigns + program
 -- ─────────────────────────────────────────────────────────────

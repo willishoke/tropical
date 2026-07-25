@@ -161,54 +161,72 @@ private def retired (op : String) : Error :=
 /-- Convert one reachable `ExprArena` node (and its children) into the
     `CoreArena`, memoized. Rejects every retired constructor — the
     id-form analogue of `Core.checkExpr`, but visited only when actually
-    referenced. -/
-private partial def convExprId (ea : ExprArena) (eid : ExprId) : ConvM ExprId := do
+    referenced.
+
+    TOTAL, by descent on `eid.idx`: the source arena is a frozen
+    parameter and `hw` says every edge points down
+    (`ExprArena.forall_children_lt`), so each recursive call is on a
+    strictly smaller id. The pilot of the arena-termination survey. -/
+private def convExprId (ea : ExprArena) (hw : ea.wf = true) (eid : ExprId) :
+    ConvM ExprId := do
   match (← get).2.get? eid.idx with
   | some cid => return cid
   | none =>
-    let some n := ea.deref eid
-      | throw ⟨s!"toResolved: dangling ExprId {eid.idx} (internal)"⟩
-    let cn : CNode ← match n with
-      | .num x          => pure (.num x)
-      | .bool b         => pure (.bool b)
-      | .arr items      => pure (.arr (← items.mapM (convExprId ea)))
-      | .binary t a b   => pure (.binary t (← convExprId ea a) (← convExprId ea b))
-      | .unary t a      => pure (.unary t (← convExprId ea a))
-      | .clamp a b c    => pure (.clamp (← convExprId ea a) (← convExprId ea b) (← convExprId ea c))
-      | .select a b c   => pure (.select (← convExprId ea a) (← convExprId ea b) (← convExprId ea c))
-      | .arraySet a b c => pure (.arraySet (← convExprId ea a) (← convExprId ea b) (← convExprId ea c))
-      | .index a b      => pure (.index (← convExprId ea a) (← convExprId ea b))
-      | .inputRef i     => pure (.inputRef i)
-      | .paramRef i     => pure (.paramRef i)
-      | .nestedOut i o  => pure (.nestedOut i o)
-      | .sampleRate     => pure .sampleRate
-      | .sampleIndex    => pure .sampleIndex
-      | .loopIdx id     => pure (.loopIdx id)
-      | .bankSum c ts b dc ii => pure (.bankSum c (← ts.mapM (convExprId ea)) (← convExprId ea b) (← dc.mapM (convExprId ea)) ii)
-      | .zeros _        => throw (retired "zeros")
-      | .typeParamRef _ => throw (retired "typeParamRef")
-      | .bindingRef _   => throw (retired "bindingRef")
-      | .letIn ..       => throw (retired "let")
-      | .fold ..        => throw (retired "fold")
-      | .scan ..        => throw (retired "scan")
-      | .generate ..    => throw (retired "generate")
-      | .iterate ..     => throw (retired "iterate")
-      | .chain ..       => throw (retired "chain")
-      | .map2 ..        => throw (retired "map2")
-      | .zipWith ..     => throw (retired "zipWith")
-      | .tag ..         => throw (retired "tag")
-      | .match_ ..      => throw (retired "match")
+    let cn : CNode ← match _hd : ea.deref eid with
+      | none => throw ⟨s!"toResolved: dangling ExprId {eid.idx} (internal)"⟩
+      | some (.num x)          => pure (.num x)
+      | some (.bool b)         => pure (.bool b)
+      | some (.arr items)      =>
+        pure (.arr (← items.attach.mapM fun ⟨c, _⟩ => convExprId ea hw c))
+      | some (.binary t a b)   => pure (.binary t (← convExprId ea hw a) (← convExprId ea hw b))
+      | some (.unary t a)      => pure (.unary t (← convExprId ea hw a))
+      | some (.clamp a b c)    => pure (.clamp (← convExprId ea hw a) (← convExprId ea hw b) (← convExprId ea hw c))
+      | some (.select a b c)   => pure (.select (← convExprId ea hw a) (← convExprId ea hw b) (← convExprId ea hw c))
+      | some (.arraySet a b c) => pure (.arraySet (← convExprId ea hw a) (← convExprId ea hw b) (← convExprId ea hw c))
+      | some (.index a b)      => pure (.index (← convExprId ea hw a) (← convExprId ea hw b))
+      | some (.inputRef i)     => pure (.inputRef i)
+      | some (.paramRef i)     => pure (.paramRef i)
+      | some (.nestedOut i o)  => pure (.nestedOut i o)
+      | some .sampleRate       => pure .sampleRate
+      | some .sampleIndex      => pure .sampleIndex
+      | some (.loopIdx id)     => pure (.loopIdx id)
+      | some (.bankSum c ts b dc ii) => do
+        let ts' ← ts.attach.mapM fun ⟨t, _⟩ => convExprId ea hw t
+        let b' ← convExprId ea hw b
+        let dc' ← match _hdc : dc with
+          | none => pure none
+          | some d => pure (some (← convExprId ea hw d))
+        pure (.bankSum c ts' b' dc' ii)
+      | some (.zeros _)        => throw (retired "zeros")
+      | some (.typeParamRef _) => throw (retired "typeParamRef")
+      | some (.bindingRef _)   => throw (retired "bindingRef")
+      | some (.letIn ..)       => throw (retired "let")
+      | some (.fold ..)        => throw (retired "fold")
+      | some (.scan ..)        => throw (retired "scan")
+      | some (.generate ..)    => throw (retired "generate")
+      | some (.iterate ..)     => throw (retired "iterate")
+      | some (.chain ..)       => throw (retired "chain")
+      | some (.map2 ..)        => throw (retired "map2")
+      | some (.zipWith ..)     => throw (retired "zipWith")
+      | some (.tag ..)         => throw (retired "tag")
+      | some (.match_ ..)      => throw (retired "match")
     let st ← get
     let (cid, ca') := (intern cn).run st.1
     set (ca', st.2.insert eid.idx cid)
     return cid
+termination_by eid.idx
+decreasing_by
+  all_goals
+    apply ExprArena.forall_children_lt hw ‹ExprArena.deref _ _ = some _›
+    simp_all [ENode.children]
 
 /-- Convert the reachable `Program` subgraph rooted at `eIdx` into a
     `CoreProgram`, remapping every leaf id into the `CoreArena` and
     following instance-referenced registry entries recursively (the
     id-form `Core.check`). Port types resolve against the identity pools
     (`base`). -/
-private partial def convProgram (ea : EArena) (eIdx : ProgramIdx) : ConvM CoreProgram := do
+private partial def convProgram (ea : EArena) (hw : ea.exprs.wf = true)
+    (eIdx : ProgramIdx) : ConvM CoreProgram := do
   let some ep := ea.programs[eIdx.idx]?
     | throw ⟨s!"toResolved: program pool index {eIdx.idx} out of range (internal)"⟩
   unless ep.typeParams.isEmpty do
@@ -218,14 +236,14 @@ private partial def convProgram (ea : EArena) (eIdx : ProgramIdx) : ConvM CorePr
     | .param name value? => pure (.param name value?)
     | .inst name typeKey tArgs inputs =>
       let inputs' ← inputs.mapM fun i => do
-        pure ({ port := i.port, value := ← convExprId ea.exprs i.value } : CoreInstanceInput)
+        pure ({ port := i.port, value := ← convExprId ea.exprs hw i.value } : CoreInstanceInput)
       pure (.inst name typeKey tArgs inputs')
     | .prog name _ => pure (.progDecl name)
   let assigns : Array CoreOutputAssign ← ep.assigns.mapM fun a => do
-    pure { target := a.target, expr := ← convExprId ea.exprs a.expr }
+    pure { target := a.target, expr := ← convExprId ea.exprs hw a.expr }
   let inputs : Array CoreInputDecl ← ep.inputs.mapM fun i => do
     pure { name := i.name, type? := Core.resolveOptPortType ea.base i.type?,
-           default? := ← i.default?.mapM (convExprId ea.exprs) }
+           default? := ← i.default?.mapM (convExprId ea.exprs hw) }
   let outputs : Array CoreOutputDecl := ep.outputs.map fun o =>
     { name := o.name, type? := Core.resolveOptPortType ea.base o.type? }
   -- Registry: follow only instance-referenced entries (evaluator-reachable),
@@ -236,15 +254,21 @@ private partial def convProgram (ea : EArena) (eIdx : ProgramIdx) : ConvM CorePr
       unless registry.any (·.1 == typeKey) do
         let some tIdx := ep.registryGet? typeKey
           | throw ⟨s!"core check ('{ep.name}'): instance '{name}' typeKey '{typeKey}' missing from registry"⟩
-        registry := registry.push (typeKey, ← convProgram ea tIdx)
+        registry := registry.push (typeKey, ← convProgram ea hw tIdx)
   return .mk ep.name inputs outputs decls assigns registry
 
 /-- The Phase B strata-exit reify: post-strata `EArena` → `(CoreArena ×
     CoreProgram)`, sharing preserved, reachable-only from `root`. -/
 def EArena.toResolved (ea : EArena) (root : ProgramIdx) :
     Except Error (CoreArena × CoreProgram) := do
-  let (core, (ca, _)) ← (convProgram ea root).run ({}, {})
-  return (ca, core)
+  -- One O(edges) sweep buys the conversion's termination measure: every
+  -- arena built through `eintern` is child-descending by construction,
+  -- so a failure here is an interning-order bug, not a user error.
+  if hw : ea.exprs.wf then
+    let (core, (ca, _)) ← (convProgram ea hw root).run ({}, {})
+    return (ca, core)
+  else
+    throw ⟨"toResolved: expression arena is not child-descending (internal interning-order bug)"⟩
 
 /-- Downcast an elaborated `Arena` (a session root / per-program compile
     boundary that never ran the lowering rewrites, but IS the id-form) to
