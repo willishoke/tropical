@@ -372,23 +372,18 @@ def findInstanceCycles (ea : ExprArena) (prog : Program) : Array (Array String) 
   else
     panic! "findInstanceCycles: arena is not child-descending (internal interning-order bug)"
 
-/-- Port of `throwOnCycles` + `formatCycleDiagnostic` + the
-    `CycleViolation` message — byte-exact, including the suggested-fix
-    snippet's straight quote + typographic apostrophe pairing. -/
+/-- The acyclic-source contract's error: name the cycle and say the
+    true thing — there is no state primitive to break it through. -/
 private def throwOnCycles (prog : Program) : ElabM Unit := do
   let cycles := findInstanceCycles (← get).arena.exprs prog
   if cycles.isEmpty then return
   let diagnostics := cycles.map fun scc =>
-    let target := scc[0]!
     let memberPath := String.intercalate " → " scc.toList
-    let suggestedFix :=
-      s!"Suggested fix: insert a 'delay' statement on one of '{target}'’s " ++
-      "output ports to break the cycle explicitly. " ++
-      s!"Example: 'delay {target}_out_delayed = {target}.<port> init 0' " ++
-      s!"and route cycle members from {target}_out_delayed instead."
-    s!"tropical: cycle in program '{prog.name}' without a user register\n" ++
+    s!"tropical: cycle in program '{prog.name}'\n" ++
     s!"  Instances in cycle: {memberPath}\n" ++
-    s!"  {suggestedFix}"
+    "  There is no state primitive to break a cycle through — kernels are " ++
+    "closed-form f(τ, params), so instance graphs must feed forward. " ++
+    "Restructure the graph; recursive feedback on live input is outside this language."
   throw (.cycle ("tropical: strict cycle policy violated:\n" ++
     String.intercalate "\n\n" diagnostics.toList))
 

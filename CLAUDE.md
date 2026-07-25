@@ -99,6 +99,10 @@ arrow-combinator builders (Tropical.Stdlib / EmitArrow)  ·  MCP patch graphs  �
   │  `assemble` DIRECTLY into the resolved-IR DAG (EmitArrow.Sig → Nodes).
   │  The JSON front door survives for load/merge/export: `raise`
   │  (lean/Tropical/Parse/Raise.lean) → ParsedProgram → `elaborate`.
+  │  raise is the refusal site: retired spellings (fold/scan/generate/
+  │  iterate/chain/map2/zipWith/let/tag/match/binding, reg/delayRef,
+  │  type_params/type_defs/type_args) die AT INGEST with the retirement
+  │  message — the grammar you can spell is the language that compiles.
   ▼
 ParsedProgram (lean/Tropical/Parse/Nodes.lean)   — JSON-ingest path only
   refs are NameRefNode placeholders; raise does no scope analysis.
@@ -125,15 +129,15 @@ ResolvedProgram (lean/Tropical/Ir/Nodes.lean)
   │                      in place; the fractal session path skips it and
   │                      keeps instances as kernel boundaries  (InlineInstances.lean)
   │   identityElim     — categorical identity-law peephole  (IdentityElim.lean)
-  │   toResolved       — the type boundary (Strata/EArena.lean): reify the
-  │                      reachable graph into the emit's CoreArena,
-  │                      REFUSING every retired constructor. A JSON file
-  │                      can still SPELL fold/scan/generate/tag/match/let
-  │                      (raise parses them); nothing lowers them any
-  │                      more, so they die here with the retirement
-  │                      message. Combinator programs are authored in
-  │                      Lean — the host language is the meta-level
-  │                      (Array.map builds coefficient tables at
+  │   toResolved       — the reachability GC (Strata/EArena.lean): copy the
+  │                      evaluator-reachable graph into a fresh arena of the
+  │                      SAME vocabulary (there is one expression type,
+  │                      `ENode`; the former CNode/CoreArena twin dissolved
+  │                      into it). No refusal remains here — retired
+  │                      constructors are refused at raise and are
+  │                      unspellable in the IR. Combinator programs are
+  │                      authored in Lean — the host language is the
+  │                      meta-level (Array.map builds coefficient tables at
   │                      assemble time); only structure a backend wants
   │                      AS DATA earns an IR node, the way `bankSum` did.
   ▼
@@ -272,15 +276,16 @@ Two distinct JSON schemas; do not confuse them.
 
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
-| `tropical_program_2` | `lean/Tropical/Parse/Raise.lean` (JSON ingest) | The high-detail input shape: a program with typed ports, a body block of decls/assigns. The JSON front door for `load`/`merge`/`export_program` — a loaded file may carry inline concrete program definitions. (No `type_params`: generics are retired. The stdlib is authored as `Tropical.Stdlib` arrow builders, not this schema.) |
+| `tropical_program_2` | `lean/Tropical/Parse/Raise.lean` (JSON ingest) | The high-detail input shape: a program with typed ports, a body block of decls/assigns. The JSON front door for `load`/`merge`/`export_program` — a loaded file may carry inline concrete program definitions. The grammar is TRUNK-ONLY: retired spellings (combinators, sum types, binders, generics, state ops) are refused at ingest with the retirement message. (The stdlib is authored as `Tropical.Stdlib` arrow builders, not this schema.) |
 | `tropical_plan_5`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: a root instruction stream (instances nested as `children`) plus `sinks[]` (device-bound outputs: sum input slots × gain → channel) and `sources[]` (runtime-bound inputs: canonical `[tick, rate]`; the dual of sinks). The engine consumes it as the codegen manifest; the web build derives a `.wasm` + a trimmed `KernelManifest` from it. The engine still accepts the older `tropical_plan_4` (single-kernel form, top-level `output_targets` temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 with the canonical sources at parse time. |
 
 Going from the first to the second without losing meaning is exactly
 what the direct lowering does (elaborate → inline → identityElim →
 toResolved → partitionKernel). A `tropical_program_2` file that spells
-a retired construct (`fold`/`scan`/`generate`/`tag`/`match`/`let`)
-parses but refuses to compile at the `toResolved` boundary — nothing
-lowers combinators or sum types any more.
+a retired construct (`fold`/`scan`/`generate`/`iterate`/`chain`/
+`map2`/`zipWith`/`tag`/`match`/`let`/`binding`, or any generics/
+type-defs field) does not parse: raise refuses it at ingest with the
+retirement message. Nothing past the codec can carry it.
 
 ## Layout
 
@@ -301,7 +306,7 @@ lean/                 Lean 4: the production compiler + MCP server (one binary)
     Ir/               elaborate → lower → emit
       Elaborator.lean   names → decl pointers; CycleViolation on cyclic source
       Strata.lean (the direct lowering) + Strata/{Basic,EArena,InlineInstances,IdentityElim}
-      Core, Nodes, Emit, CompileResolved, Codec, WireProgram, Recursion
+      Core, Nodes, Emit, CompileResolved, Codec, WireProgram
     Engine, Session, Compile, Lowering, Wiring   engine-side session compile
     Plan.lean         tropical_plan_5 schema
     Ffi.lean          FFI bridge to libtropical (Runtime, DAC, Param)
