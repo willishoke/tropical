@@ -1,0 +1,284 @@
+import Tropical.Tropicaltest.Harness
+import Tropical.Exact.Gamma
+import Tropical.EmitArrow.Modal
+
+/-!
+# Tropical.Tropicaltest.Exact — the exact-carrier gates (P0)
+
+Three standing gates over `Tropical.Exact`, the bake layer's `libm` exile:
+
+* **`exact-constants`** — π and ln 2 are shipped as literal integer mantissas
+  over `2³⁰⁰`. This gate RECOMPUTES both from scratch inside the carrier, at a
+  precision well above the literals' own, with rigorous remainder bounds
+  (Machin's `16·atan(1/5) − 4·atan(1/239)`; `2·atanh(1/3)`), and checks that the
+  recomputed enclosure sits INSIDE the literal one. A wrong digit is a red
+  gate, not a silent drift, and the recomputation cannot pass by sharing a bug
+  with the literal — the literals are data, the recomputation is code.
+
+* **`exact-elementary`** — the corpus differential against the `Float` path.
+  Every transcendental is evaluated at the shapes the bake layer actually
+  reaches (the exponent ranges of `bloomGammaStar`, the `|κ|` up to ~178, the
+  gong's fractional powers, the Lanczos a-range) and checked two ways: the
+  enclosure must be TIGHT (the carrier is not allowed to answer "somewhere in
+  this wide interval"), and its midpoint must agree with the platform `libm`
+  inside the ulp budget a double can carry. The second direction is the one
+  that would catch a carrier that is deterministic but wrong.
+
+* **`exact-quantize`** — `Dyadic.toDecimalMantissa` against `litF`, the emit
+  funnel. These must agree on every value in `litF`'s HONEST range, and the
+  gate also pins `litF`'s two known edges (flush-to-zero below `5e-13`,
+  mantissa saturation above `1.8446744e7`) so that the day the emit boundary
+  moves onto the exact quantizer, what changes is written down here.
+
+The gates are cheap (no render, no JIT) and run in the same `passGate` protocol
+as everything else.
+-/
+
+open Tropical.Exact
+open Tropical.Exact.DyadicI
+
+namespace Tropical.Tropicaltest.ExactGates
+
+/-- Precision the constants are RE-derived at: well above the 300 bits the
+    literals carry, so the check has room to be decisive. -/
+private def certPrec : Nat := 420
+
+/-- `atan(1/n)` for an integer `n ≥ 2`, as a certified enclosure at `certPrec`.
+    The alternating series `Σ (−1)ʲ/((2j+1)·n^{2j+1})` has strictly decreasing
+    terms, so the tail is bounded by the first omitted term — the interval is
+    widened by exactly that. -/
+private def atanInv (n : Nat) : DyadicI := Id.run do
+  let x := invAt certPrec (ofNat n)
+  let x2 := mulAt certPrec x x
+  let mut power := x                      -- x^{2j+1}
+  let mut acc := x
+  let mut lastTerm := x
+  for j in [1:2000] do
+    power := mulAt certPrec power x2
+    let t := divAt certPrec power (ofNat (2 * j + 1))
+    acc := if j % 2 == 1 then subAt certPrec acc t else addAt certPrec acc t
+    lastTerm := t
+    -- stop once the term is below 2^{-(certPrec+8)} — the tail is then under it
+    if certLt (abs t) (exact (Dyadic.ofIntWithPrec 1 ((certPrec + 8 : Nat) : Int))) then
+      break
+  let w := (abs lastTerm).hi
+  return ⟨acc.lo - w, acc.hi + w, acc.ok⟩
+
+/-- π by Machin: `16·atan(1/5) − 4·atan(1/239)`. -/
+private def piRecomputed : DyadicI :=
+  subAt certPrec (mulAt certPrec (ofNat 16) (atanInv 5))
+                 (mulAt certPrec (ofNat 4) (atanInv 239))
+
+/-- `ln 2 = 2·atanh(1/3) = 2·Σ 1/((2k+1)·3^{2k+1})` — all terms positive, and
+    the tail after term `k` is under `term·(1/9)/(1−1/9) < term/8`, so widening
+    UPWARD by the last term is generous. -/
+private def ln2Recomputed : DyadicI := Id.run do
+  let x := invAt certPrec (ofNat 3)
+  let x2 := mulAt certPrec x x
+  let mut power := x
+  let mut acc := x
+  let mut lastTerm := x
+  for k in [1:2000] do
+    power := mulAt certPrec power x2
+    let t := divAt certPrec power (ofNat (2 * k + 1))
+    acc := addAt certPrec acc t
+    lastTerm := t
+    if certLt (abs t) (exact (Dyadic.ofIntWithPrec 1 ((certPrec + 8 : Nat) : Int))) then
+      break
+  let w := (abs lastTerm).hi
+  return (⟨acc.lo, acc.hi + w, acc.ok⟩ : DyadicI).shift 1
+
+/-- Is `inner` contained in `outer`? -/
+private def containedIn (inner outer : DyadicI) : Bool :=
+  inner.ok && outer.ok && Dyadic.ble outer.lo inner.lo && Dyadic.ble inner.hi outer.hi
+
+/-- π and ln 2, re-derived from scratch and checked against the shipped
+    literals. -/
+def runExactConstants : IO Bool := do
+  let piR := piRecomputed
+  let ln2R := ln2Recomputed
+  let piOk := containedIn piR piI
+  let ln2Ok := containedIn ln2R ln2I
+  -- the recomputation must also be SHARPER than the literal, or the check is vacuous
+  let piSharp := Dyadic.blt piR.width piI.width
+  let ln2Sharp := Dyadic.blt ln2R.width ln2I.width
+  IO.println s!"        recomputed at {certPrec} bits: π {piR.render} · ln2 {ln2R.render}"
+  IO.println s!"        shipped literals (2^-{constPrec}): π {piI.render} · ln2 {ln2I.render}"
+  if piOk && ln2Ok && piSharp && ln2Sharp then
+    passGate "exact-constants"
+      s!"π (Machin) and ln2 (atanh ⅓) re-derived inside the carrier at {certPrec} bits land INSIDE the shipped 2^-{constPrec} literals — the constants are gate-covered data, not trusted digits"
+  else
+    failGate "exact-constants"
+      s!"piContained={piOk} ln2Contained={ln2Ok} piSharper={piSharp} ln2Sharper={ln2Sharp}"
+
+-- ── the corpus differential ───────────────────────────────────────────────────
+
+/-- ULP distance between a carrier midpoint and the platform `libm` value,
+    measured in units of the double's own precision (`2^-52`). -/
+private def ulpDist (m ref : Float) : Float :=
+  if !ref.isFinite || !m.isFinite then 1.0e30
+  else if ref == 0.0 then (if m == 0.0 then 0.0 else 1.0e30)
+  else
+    let d := (m - ref) / ref
+    (if d < 0.0 then -d else d) * 4503599627370496.0
+
+/-- How many bits of the value the enclosure actually certifies: `−log₂` of the
+    relative width, so BIGGER is tighter. `1e9` for an exact interval. -/
+private def certifiedBits (x : DyadicI) : Float :=
+  if !x.ok then -1.0e9
+  else if x.width.isZero then 1.0e9
+  else
+    let m := (abs x).lo
+    if m.isZero then Float.ofInt (-x.width.magBits)
+    else Float.ofInt (m.magBits - x.width.magBits)
+
+/-- Halton radical inverse — the deterministic low-discrepancy sampler the
+    seam sweep already uses (`Math.random` is banned and would break resume). -/
+private def halton (base i : Nat) : Float := Id.run do
+  let mut f : Float := 1.0
+  let mut r : Float := 0.0
+  let mut n : Nat := i
+  for _ in [0:32] do
+    if n > 0 then
+      f := f / base.toFloat
+      r := r + f * (n % base).toFloat
+      n := n / base
+  return r
+
+/-- One differential outcome: worst ulp distance from the `Float` path and the
+    LEAST number of bits any enclosure certified. -/
+private structure Score where
+  worstUlp  : Float := 0.0
+  leastBits : Float := 1.0e9
+  worstAt   : String := ""
+  loosestAt : String := ""
+  poisoned  : Nat := 0
+deriving Inhabited
+
+private def Score.note (s : Score) (name : String) (iv : DyadicI) (ref : Float) : Score :=
+  if !iv.ok then { s with poisoned := s.poisoned + 1 }
+  else
+    let u := ulpDist iv.toFloat ref
+    let b := certifiedBits iv
+    { worstUlp  := max s.worstUlp u,
+      leastBits := min s.leastBits b,
+      worstAt   := if u > s.worstUlp then name else s.worstAt,
+      loosestAt := if b < s.leastBits then name else s.loosestAt,
+      poisoned  := s.poisoned }
+
+/-- Every transcendental over the shapes the bake layer reaches, against the
+    `Float` path — the P0 corpus differential. -/
+def runExactElementary : IO Bool := do
+  let n := 240
+  let mut sc : Score := {}
+  for i in [1:n+1] do
+    let u1 := halton 2 i
+    let u2 := halton 3 i
+    let u3 := halton 5 i
+    -- exp over the shipped exponent span (κ reaches ~178; expSig clamps at ±87)
+    let xe := (u1 * 2.0 - 1.0) * 700.0
+    sc := sc.note s!"exp {xe}" (DyadicI.exp (ofFloat xe)) (Float.exp xe)
+    -- log over the gauge/bridge span
+    let xl := Float.exp ((u2 * 2.0 - 1.0) * 690.0)
+    sc := sc.note s!"log {xl}" (DyadicI.log (ofFloat xl)) (Float.log xl)
+    -- sin/cos over ω·d spans (ω up to 2π·20k, d up to seconds)
+    let xt := (u3 * 2.0 - 1.0) * 125000.0
+    sc := sc.note s!"sin {xt}" (DyadicI.sin (ofFloat xt)) (Float.sin xt)
+    sc := sc.note s!"cos {xt}" (DyadicI.cos (ofFloat xt)) (Float.cos xt)
+    -- atan2 over all four quadrants (the CplxB.log phase)
+    let ay := (u1 * 2.0 - 1.0) * 200.0
+    let ax := (u2 * 2.0 - 1.0) * 200.0
+    sc := sc.note s!"atan2 {ay} {ax}" (DyadicI.atan2 (ofFloat ay) (ofFloat ax)) (Float.atan2 ay ax)
+    -- pow: the envelope-peak factor (p/(σe))^p and the gong's r^0.7 / r^0.8
+    let pb := 0.05 + u3 * 40.0
+    let pe := 0.3 + u1 * 3.0
+    sc := sc.note s!"pow {pb} {pe}" (DyadicI.pow (ofFloat pb) (ofFloat pe)) (Float.pow pb pe)
+    -- complex log-gamma over the Γ★ bridge's a-range
+    let gr := (u2 * 2.0 - 1.0) * 40.0
+    let gi := (u3 * 2.0 - 1.0) * 150.0
+    let lgE := CplxDI.lgamma (CplxDI.ofFloats gr gi)
+    let lgF := Tropical.EmitArrow.lgammaB ⟨gr, gi⟩
+    sc := sc.note s!"lgamma.re {gr},{gi}" lgE.re lgF.re
+    sc := sc.note s!"lgamma.im {gr},{gi}" lgE.im lgF.im
+  IO.println s!"        {n} Halton configs × 9 kernels vs the Float path:"
+  IO.println s!"        worst |exact−float| {sc.worstUlp} ulp (at {sc.worstAt}) · tightest-case certified bits {sc.leastBits} (at {sc.loosestAt}) · poisoned {sc.poisoned}"
+  -- Two directions, two budgets. The ULP budget is the FLOAT path's error, not
+  -- the carrier's: a complex Lanczos chain accumulates hundreds of ulps in f64,
+  -- and the carrier is the accurate side of that comparison — a LARGE number
+  -- here is evidence about `lgammaB`, not about this module. The BITS budget is
+  -- the carrier's own: every enclosure must certify far more than a double's 53.
+  if sc.poisoned == 0 && sc.worstUlp < 65536.0 && sc.leastBits > 90.0 then
+    passGate "exact-elementary"
+      s!"exp/log/sin/cos/atan2/pow/lgamma track the float path to {sc.worstUlp} ulp over the shipped corpus while certifying ≥{sc.leastBits} bits (a double carries 53) — the bake layer's transcendentals are reproducible without libm"
+  else
+    failGate "exact-elementary"
+      s!"worstUlp={sc.worstUlp} (at {sc.worstAt}) leastBits={sc.leastBits} (at {sc.loosestAt}) poisoned={sc.poisoned}"
+
+-- ── the emit funnel ───────────────────────────────────────────────────────────
+
+/-- Read `litF`'s emitted decimal back as a 12-place mantissa. -/
+private def litFMantissa (x : Float) : Int :=
+  match Tropical.EmitArrow.litF x with
+  | .num jn => if jn.exponent == 12 then jn.mantissa else jn.mantissa * 1000000000000
+  | _ => 0
+
+/-- `Dyadic.toDecimalMantissa` against `litF` — the emit funnel, measured.
+
+    `litF` forms `x · 1e12` IN FLOATING POINT and then rounds, so it is only a
+    faithful 12-place quantizer while that product stays exactly representable:
+    `|x| ≤ 2⁵³/10¹² ≈ 9007.2`. This gate pins the crossover rather than asserting
+    a precision `litF` does not have, and states the far edge — above
+    `2⁶⁴/10¹² ≈ 1.8446744e7` the `UInt64` cast SATURATES and `litF` emits a
+    number unrelated to its input.
+
+    Below `5e-13` both quantizers answer `0`: that is correct rounding at twelve
+    places, not a defect — the resolution simply ends there.
+
+    The exact quantizer has none of this: it is `⌊|x|·10¹² + ½⌋` in `Int`
+    arithmetic, at any magnitude. The numbers below are what a future
+    `litF → litD` cutover would move, so that decision arrives with its cost
+    already measured. -/
+def runExactQuantize : IO Bool := do
+  let n := 400
+  let faithfulTop : Float := 9007.199254740992          -- 2⁵³/10¹²
+  let mut agreeLow := 0
+  let mut offLow := 0
+  let mut lowN := 0
+  let mut highN := 0
+  let mut worstHigh : Int := 0
+  let mut worstHighX : Float := 0.0
+  for i in [1:n+1] do
+    let u := halton 2 i
+    let s := halton 3 i
+    let mag := Float.exp (-27.0 + u * 43.0)             -- ~2e-12 … ~1e7
+    let x := if s < 0.5 then mag else -mag
+    let d := (Dyadic.ofFloat x).toDecimalMantissa 12 - litFMantissa x
+    let ad := if d < 0 then -d else d
+    if mag ≤ faithfulTop then
+      lowN := lowN + 1
+      if ad == 0 then agreeLow := agreeLow + 1
+      else if ad ≤ 1 then offLow := offLow + 1
+    else
+      highN := highN + 1
+      if ad > worstHigh then
+        worstHigh := ad
+        worstHighX := x
+  -- the far edge: the UInt64 cast saturates
+  let satX : Float := 1.0e8
+  let satM := litFMantissa satX
+  let exactSat := (Dyadic.ofFloat satX).toDecimalMantissa 12
+  let saturates := satM == 18446744073709551615 && exactSat == 100000000000000000000
+  -- the resolution floor: both answer 0, and they agree that they do
+  let subResolution := litFMantissa 1.0e-13 == 0 && (Dyadic.ofFloat 1.0e-13).toDecimalMantissa 12 == 0
+  IO.println s!"        litF is a faithful 12-place quantizer only while |x|·10¹² < 2⁵³ (|x| ≤ {faithfulTop}):"
+  IO.println s!"        below it  ({lowN} samples): identical {agreeLow} · off-by-one {offLow} · worse {lowN - agreeLow - offLow}"
+  IO.println s!"        above it  ({highN} samples): worst drift {worstHigh} units of the 12th place (at x={worstHighX})"
+  IO.println s!"        far edge — litF(1e8) = {satM} (UInt64 saturation) vs exact {exactSat}; sub-resolution 1e-13 → 0 both sides {subResolution}"
+  if lowN - agreeLow - offLow == 0 && saturates && subResolution && worstHigh > 1 then
+    passGate "exact-quantize"
+      s!"the exact decimal quantizer reproduces litF wherever litF is faithful ({agreeLow}/{lowN} identical, {offLow} off-by-one) and diverges only where litF's own f64 product has run out of bits (drift up to {worstHigh} units past |x|>{faithfulTop}, hard saturation past 1.8446744e7) — the litF→litD cutover's cost, measured"
+    else
+      failGate "exact-quantize"
+        s!"lowMismatch={lowN - agreeLow - offLow} saturates={saturates} subResolution={subResolution} worstHigh={worstHigh}"
+
+end Tropical.Tropicaltest.ExactGates

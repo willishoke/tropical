@@ -19,6 +19,7 @@ import Tropical.Testing.EngineMirror
 import Tropical.Testing.PlanWire
 import Lean.Data.Json
 import Tropical.Tropicaltest.Patcher
+import Tropical.Tropicaltest.Exact
 
 /-!
 # tropicaltest — the post-TS golden + native-equiv runner (Phase 8)
@@ -56,6 +57,20 @@ def main (args : List String) : IO UInt32 := do
   for fixture in ← sortedNames "tests/golden/migration" ".json" do
     total := total + 1
     if !(← runMigrationGolden writeMode fixture) then failed := failed + 1
+
+  -- ── (b′) The exact bake carrier: libm's exile, one floor above the kernel ──
+  -- The compiler's own constants and decisions must not come from a platform
+  -- `libm`: a bake-time comparison can change EMITTED STRUCTURE (array sizes,
+  -- lane counts, whether a pair is dropped), so a 1-ulp platform difference is
+  -- a different program, not a different last bit. These gates check the
+  -- carrier that removes that dependency — its constants re-derived from
+  -- scratch, its transcendentals against the float path, and its quantizer
+  -- against the emit funnel `litF`.
+  IO.println "exact bake carrier (dyadic/interval — the bake layer's libm exile):"
+  total := total + 3
+  if !(← Tropical.Tropicaltest.ExactGates.runExactConstants) then failed := failed + 1
+  if !(← Tropical.Tropicaltest.ExactGates.runExactElementary) then failed := failed + 1
+  if !(← Tropical.Tropicaltest.ExactGates.runExactQuantize) then failed := failed + 1
 
   -- ── (c) Synthetic op-coverage: EmitLlvm over the rare ops, frozen hash ─────
   -- The patch corpus exercises 24 of 29 ops; this funnels the rest
