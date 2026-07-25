@@ -544,7 +544,14 @@ private structure TarjanSt where
 
 /-- Tarjan's SCC, recursion + orders matching cycle_break.ts: nodes
     visited in instance order, successors in dep insertion order, SCC
-    members in stack-pop order (the SCC root is last). -/
+    members in stack-pop order (the SCC root is last).
+
+    Deliberately `partial`: the discharging measure is "unvisited nodes
+    strictly decrease" (each recursive call happens under a
+    `visited[w] = false` check that its own entry immediately flips),
+    a fact threaded through mutable state inside a `for` loop — carrying
+    it as data is the classic well-founded-Tarjan exercise and buys
+    nothing here. -/
 private partial def strongConnect (deps : Array (Array Nat)) (v : Nat)
     (st0 : TarjanSt) : TarjanSt := Id.run do
   let mut st := st0

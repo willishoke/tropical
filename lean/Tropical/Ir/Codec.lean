@@ -256,6 +256,12 @@ partial def encExpr (arena : Arena) (id : ExprId) : EncM Json := do
     pure <| Json.mkObj [("op", Json.str "match"), ("def", Lean.toJson defId),
                         ("scrutinee", scrut), ("arms", Json.arr as_)]
 
+/- Deliberately `partial` (both defs below): the recursion runs through
+   the PROGRAM pool via registry indices, and its termination fact is
+   the pool's acyclicity — no recursive program instantiation — which
+   is a second, separate invariant from the expression arena's
+   child-descending ids (`ExprArena.wf`). Until that invariant is
+   carried as data the way `wf` is, the measure is unstateable. -/
 mutual
 
 /-- Pool a program: registry targets first (insertion order), then the
