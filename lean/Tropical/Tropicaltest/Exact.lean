@@ -5,7 +5,7 @@ import Tropical.EmitArrow.Modal
 /-!
 # Tropical.Tropicaltest.Exact — the exact-carrier gates (P0)
 
-Six standing gates over `Tropical.Exact`, the bake layer's `libm` exile:
+Five standing gates over `Tropical.Exact`, the bake layer's `libm` exile:
 
 * **`exact-constants`** — π and ln 2 are shipped as literal integer mantissas
   over `2³⁰⁰`. This gate RECOMPUTES both from scratch inside the carrier, at a
@@ -491,6 +491,179 @@ def runExactRecip10 : IO Bool := do
   else
     failGate "exact-recip10" bad
 
+-- ── the P2 differential: the flipped values against the pre-flip float path ────
+
+open Tropical.EmitArrow in
+/-- Relative distance between a carrier value and its float twin, complex. -/
+private def relC (m : CplxDI) (ref : CplxB) : Float :=
+  let (mr, mi) := m.toFloats
+  let dr := mr - ref.re
+  let di := mi - ref.im
+  let num := Float.sqrt (dr * dr + di * di)
+  let den := Float.sqrt (ref.re * ref.re + ref.im * ref.im)
+  if !num.isFinite then 1.0e30 else if den < 1.0e-300 then num else num / den
+
+/-- The worst relative disagreement seen, and where. -/
+private structure Diff where
+  worst   : Float := 0.0
+  at?     : String := ""
+  litSame : Nat := 0
+  litOff1 : Nat := 0
+  litWorse: Nat := 0
+  worstLit: Int := 0
+  poisoned: Nat := 0
+deriving Inhabited
+
+open Tropical.EmitArrow in
+/-- Score one (exact, float) pair on BOTH axes. The literal axis is the one that
+    matters for the emitted program, and both sides go through `litF` so the
+    `x·10¹²` f64 product — which itself rounds, disagreeing on ~2e-4 of literals
+    even with a perfect carrier — stays INSIDE the funnel and cannot manufacture
+    false diffs. (`toDecimalMantissa` is NOT the analogue of `litF` and must not
+    appear here.)
+
+    The literal allowance is MAGNITUDE-AWARE, because `litF` is only a faithful
+    12-place quantizer while `|x| ≤ 2⁵³/10¹² ≈ 9007.2` (`exact-quantize` measures
+    exactly that): above it the emitted mantissa's own last digits are noise, and
+    a raw mantissa delta there says nothing about whether a value moved. So a
+    literal counts as agreeing when it is within ONE unit of the 12th place OR
+    within `1e-11` relatively. -/
+private def Diff.note (d : Diff) (name : String) (m : CplxDI) (ref : CplxB) : Diff :=
+  if !m.ok then { d with poisoned := d.poisoned + 1 }
+  else
+    let r := relC m ref
+    let (mr, mi) := m.toFloats
+    let step := fun (dd : Diff) (a b : Float) =>
+      let delta := litFMantissa a - litFMantissa b
+      let ad := if delta < 0 then -delta else delta
+      let rel := if b == 0.0 then (if a == 0.0 then 0.0 else 1.0)
+                 else Float.abs (a - b) / Float.abs b
+      if ad == 0 then { dd with litSame := dd.litSame + 1 }
+      else if ad ≤ 1 || rel ≤ 1.0e-11 then
+        { dd with litOff1 := dd.litOff1 + 1, worstLit := max dd.worstLit ad }
+      else { dd with litWorse := dd.litWorse + 1, worstLit := max dd.worstLit ad }
+    let d := step (step d mr ref.re) mi ref.im
+    if r > d.worst then { d with worst := r, at? := name } else d
+
+open Tropical.EmitArrow in
+/-- THE VALUES-FLIP DIFFERENTIAL (P2). Every bake-time value function whose float
+    twin still exists is evaluated BOTH ways over the shipped bloom register, and
+    the two are compared on two axes: the VALUE relatively, and the EMITTED
+    LITERAL exactly.
+
+    The 1e-9 value budget is the FLOAT path's own error, not the carrier's.
+    `exact-elementary` already measured the worst constituent at ~159 ulp
+    (3.5e-14 relative, at `lgamma.im`, with the carrier on the ACCURATE side of
+    that comparison); Γ★ and Φ apply `exp`/`log` to that, the Horners accumulate
+    up to `300·2⁻⁵²` more, and `Φ`'s large-|κ| arm subtracts two big numbers. The
+    budget is set to catch a broken branch or a wrong reduction, not to flag the
+    accuracy GAIN it exists to see — which is why the LITERAL histogram is the
+    second number to read: a literal disagrees only when the true value sits
+    within the float path's own error of a half-grid boundary.
+
+    `poisoned == 0` is a hard assertion. A poisoned constant makes `bloomCompose`
+    return `none` and the caller fall back to the bare bloom — silently, and
+    correctly, but the shipped register must never take that path. -/
+def runExactValues : IO Bool := do
+  let tStart ← IO.monoMsNow
+  let n := 120
+  let mut ser : Diff := {}      -- serOnly: M(1,a+1,κ), the E1 reciprocals
+  let mut cro : Diff := {}      -- crossing: Γ★, CF(κ)
+  let mut coi : Diff := {}      -- coincident: dCoef, Φ(a,κ)/g, cexpm1
+  let mut fol : Diff := {}      -- the fold: Q coefficients, DDa M
+  for i in [1:n+1] do
+    let u1 := halton 2 i
+    let u2 := halton 3 i
+    let u3 := halton 5 i
+    let u4 := halton 7 i
+    let g : Float := 4.0 + 20.0 * u4
+    let gD := ofFloat g
+    -- κ = μ·B over the shipped span (|κ| reaches ~178 in the register)
+    let kappa : CplxB := ⟨-(0.02 + 2.0 * u1), (u2 * 2.0 - 1.0) * 170.0⟩
+    let kD := CplxDI.ofFloats kappa.re kappa.im
+    let kAbs := kappa.abs
+    -- Each family is sampled INSIDE ITS OWN ADMITTED REGION, because that is the
+    -- only place the comparison means anything: outside it BOTH paths are
+    -- evaluating a divergent series, they disagree by O(1), and the differential
+    -- would be measuring the divergence rather than the carrier. `serOnly`
+    -- (and the fold) live where `|a+1| ≥ |κ|`; the crossing lives where
+    -- `|κ| ≥ |a+1|`; the coincidence lives at `|a| < ½`.
+    -- `a = (ν−μ)/g` is IMAGINARY-DOMINATED in production — `Re a = (σ_μ−σ_ν)/g`
+    -- is a damping difference over a settle rate, `Im a` a frequency difference
+    -- over the same — and that is precisely `bloomM1`'s documented stability
+    -- condition: with `|Im a| ≥ |z|`, every `|a+k|` stays above `|z|` and the
+    -- terms decay monotonically from the first. A sampler that let `Re a` run
+    -- large would walk `a+k` through its own minimum, the terms would grow by
+    -- twenty orders before decaying, and the differential would be measuring
+    -- the float path's catastrophic cancellation in a configuration no pole pair
+    -- can produce.
+    let aSer : CplxB :=
+      let im := (kAbs + 1.0 + 4.0 * u3) * (if u4 < 0.5 then 1.0 else -1.0)
+      ⟨(u3 * 2.0 - 1.0) * 3.0, im⟩
+    let aCro : CplxB := ⟨(u3 * 2.0 - 1.0) * 3.0, (u4 * 2.0 - 1.0) * 9.0⟩
+    let aNear : CplxB := ⟨(u1 * 2.0 - 1.0) * 0.3, (u2 * 2.0 - 1.0) * 0.3⟩
+    let aSerD := CplxDI.ofFloats aSer.re aSer.im
+    let aCroD := CplxDI.ofFloats aCro.re aCro.im
+    let aNearD := CplxDI.ofFloats aNear.re aNear.im
+    -- serOnly arm: the κ-side M constant at the count the point carrier returns
+    let nK := bloomM1DepthD aSer.toPoint kappa.toPoint bloomM1TolD
+    let (mKf, _) := bloomM1 aSer kappa
+    ser := ser.note s!"M1 a={aSer.re},{aSer.im} κ={kappa.re},{kappa.im}"
+                    (bloomM1D aSerD kD nK) mKf
+    -- crossing arm: Γ★ and the Lentz CF
+    cro := cro.note s!"Γ★ a={aCro.re},{aCro.im}"
+                    (bloomGammaStarD aCroD kD gD) (bloomGammaStar aCro kappa g)
+    let (cfKf, _) := bloomCF aCro kappa
+    let (cfKp, _) := bloomCFPointD aCro.toPoint kappa.toPoint bloomCFTolD
+    cro := cro.note s!"CF a={aCro.re},{aCro.im}" cfKp.asPointI cfKf
+    -- coincident arm: cexpm1 on both sides of its 0.01 split, dCoef, Φ
+    let wSmall : CplxB := ⟨0.02 * (u1 - 0.5), 0.02 * (u2 - 0.5)⟩
+    let wBig : CplxB := ⟨2.0 * (u1 - 0.5), 2.0 * (u2 - 0.5)⟩
+    coi := coi.note s!"cexpm1 small {wSmall.re}" (cexpm1D (CplxDI.ofFloats wSmall.re wSmall.im))
+                    (cexpm1B wSmall)
+    coi := coi.note s!"cexpm1 big {wBig.re}" (cexpm1D (CplxDI.ofFloats wBig.re wBig.im))
+                    (cexpm1B wBig)
+    let dcF := bloomDCoef aNear 24
+    let dcD := bloomDCoefD aNearD 24
+    for k in [0:24] do
+      coi := coi.note s!"dCoef[{k}] a={aNear.re},{aNear.im}" dcD[k]! dcF[k]!
+    coi := coi.note s!"Φ a={aNear.re},{aNear.im} κ={kappa.re},{kappa.im}"
+                    (bloomPhiKappaOverGD aNearD kD (CplxDI.ofFloats cfKf.re cfKf.im) dcD gD)
+                    (bloomPhiKappaOverG aNear kappa cfKf dcF g)
+    -- the fold arm (WS-DDF): two nearby a's, the stable Q recurrence, on the
+    -- same series-side admission as `bloomFoldCompose` (`|a+1| ≥ |κ|`)
+    let a2 : CplxB := ⟨aSer.re + 0.05, aSer.im - 0.03⟩
+    let a2D := CplxDI.ofFloats a2.re a2.im
+    let qF := bloomFoldQCoef aSer a2 24
+    let qD := bloomFoldQCoefD aSerD a2D 24
+    for k in [0:24] do
+      fol := fol.note s!"Q[{k}]" qD[k]! qF[k]!
+    fol := fol.note s!"DDaM" (bloomFoldDDaMD qD kD) (bloomFoldDDaM qF kappa)
+  let fams := #[("serOnly M(1,a+1,κ)", ser), ("crossing Γ★/CF", cro),
+                ("coincident dCoef/Φ/cexpm1", coi), ("fold Q/DDaM", fol)]
+  let mut worst : Float := 0.0
+  let mut poisoned := 0
+  let mut lits := 0
+  let mut litMoved := 0
+  IO.println s!"        {n} Halton configs over the shipped register (κ to |170|, both sides of |a|=½):"
+  for (label, d) in fams do
+    let tot := d.litSame + d.litOff1 + d.litWorse
+    IO.println s!"        {label}: worst rel {d.worst} (at {d.at?}) · literals {d.litSame}/{tot} identical, {d.litOff1} off-by-one, {d.litWorse} further (worst {d.worstLit}) · poisoned {d.poisoned}"
+    worst := max worst d.worst
+    poisoned := poisoned + d.poisoned
+    lits := lits + tot
+    litMoved := litMoved + d.litOff1 + d.litWorse
+  let movedFrac := litMoved.toFloat / (max lits 1).toFloat
+  let tEnd ← IO.monoMsNow
+  -- the bake layer's cost, running BOTH paths, printed and not gated
+  IO.println s!"        emitted literals that moved at all: {litMoved}/{lits} ({movedFrac}) · both paths in {tEnd - tStart} ms"
+  if poisoned == 0 && worst < 1.0e-9 && movedFrac < 1.0e-2 then
+    passGate "exact-values"
+      s!"the flipped bake-time values track the float path they replaced to {worst} relative over the shipped register, moving {litMoved} of {lits} emitted literals ({movedFrac}) — the values flip changed the arithmetic, not the program"
+  else
+    failGate "exact-values"
+      s!"worst={worst} poisoned={poisoned} litMoved={litMoved}/{lits} ({movedFrac})"
+
 -- ── the served bake surface ───────────────────────────────────────────────────
 
 /-- THE PLAYGROUND-BAKE gate. `Playground.lean` is the SERVED bake surface —
@@ -553,5 +726,92 @@ def runExactPlayground : IO Bool := do
   else
     failGate "exact-playground"
       s!"counts={countsOk} ({cDefault}/{cHigh}/{cLow}/{cQuant}) fork={forkOk} ({cZeroRho}/{cNegRho}/{cZeroF0}) bandViolations={bandViolations} poison={poison}"
+
+-- ── the one-way door ──────────────────────────────────────────────────────────
+
+/-- THE CORPSE GATE (P3). The bake layer's `libm` exile, ENFORCED rather than
+    documented. Every earlier gate in this file says the exact carrier agrees
+    with the float path it replaced; this one says the float path is gone — that
+    no `Float` transcendental and no retired `Float`-tier definition survives in
+    the production bake graph, so a successor cannot reintroduce one by habit and
+    have every behavioral gate stay green (they would: a 1-ulp bake difference is
+    invisible to a threshold, which is the whole reason this campaign exists).
+
+    Two allowances, both explicit rather than fuzzy:
+
+    * A line tagged `libm-oracle` is skipped. That tag appears only in
+      `exactBakeDifferential`, the Playground probe whose ENTIRE JOB is to
+      evaluate the incumbent `Float` expression beside the exact one. A
+      differential needs both sides.
+    * `structure CplxB` and its algebraic methods stay: `CplxB` is still the
+      plain data type `BloomPairPlan` and the depth-loop inputs are written in.
+      What left with P3 is its three TRANSCENDENTAL methods and every function
+      that used them — relocated to `Tropical.Testing.ArrowFixtures`, one floor
+      outside the compiler, where they are now the INDEPENDENT oracle (the DUT is
+      exact arithmetic; the reference is the platform's `libm`).
+
+    The file list is closed against a directory read, so a new module under
+    `EmitArrow/` cannot slip past by not being on it. -/
+def runExactCorpse : IO Bool := do
+  let dir := "lean/Tropical/EmitArrow"
+  let emitFiles ← (do
+    let entries ← (System.FilePath.mk dir).readDir
+    let names := entries.filterMap fun e =>
+      if e.fileName.endsWith ".lean" then some s!"{dir}/{e.fileName}" else none
+    pure (names.qsort fun a b => decide (a < b)))
+  let files := emitFiles.push "lean/Tropical/Playground.lean"
+  let banned := #["Float.exp", "Float.cos", "Float.sin", "Float.sqrt", "Float.log",
+                  "Float.atan2", "Float.pow", "Float.tan", "Float.floor",
+                  "Float.ceil", "Float.round"]
+  -- each name is spelled so it cannot prefix-match its own exact twin
+  -- (`bloomPhiKappaOverG` vs `bloomPhiKappaOverGD` is the one that bit)
+  let corpseNames := #["def lgammaB", "def bloomM1 ", "def bloomCF ", "def cexpm1B",
+                       "def bloomGammaStar ", "def bloomPhiKappaOverG (",
+                       "def bloomDCoef ", "def bloomFoldQCoef ", "def bloomFoldDDaM ",
+                       "def sigmaInterval?"]
+  let mut hits : Array String := #[]
+  let mut corpses : Array String := #[]
+  let mut scanned := 0
+  for f in files do
+    let ls ← IO.FS.lines f
+    -- block-comment state, because the names of these functions are all over the
+    -- docstrings that explain why they are gone; a filter that only recognises
+    -- the line OPENING a doc comment reports its continuation lines as code
+    let mut inDoc := false
+    for h : i in [0:ls.size] do
+      let line := ls[i]
+      let opens := (line.splitOn "/-").length != 1
+      let closes := (line.splitOn "-/").length != 1
+      -- what remains of the line once its comments are taken out. A line that
+      -- OPENS and CLOSES a block comment still has code on both sides of it, so
+      -- it is stripped rather than skipped — skipping it would let
+      -- `def f := Float.exp x /- note -/` past the scanner, which is exactly the
+      -- shape a gate like this must not be foolable by.
+      let code :=
+        if inDoc then
+          if closes then (line.splitOn "-/").getLast!.splitOn "--" |>.head! else ""
+        else if opens && closes then
+          (line.splitOn "/-").head! ++ " " ++ ((line.splitOn "-/").getLast!.splitOn "--" |>.head!)
+        else if opens then (line.splitOn "/-").head!
+        else (line.splitOn "--")[0]!
+      if inDoc then
+        if closes then inDoc := false
+      else if opens && !closes then
+        inDoc := true
+      if (line.splitOn "libm-oracle").length != 1 then continue
+      if code.trim.isEmpty then continue
+      scanned := scanned + 1
+      for b in banned do
+        if (code.splitOn b).length != 1 then hits := hits.push s!"{f}:{i+1} {b}"
+    let src ← IO.FS.readFile f
+    for name in corpseNames do
+      if (src.splitOn name).length != 1 then corpses := corpses.push s!"{f}: {name}"
+  IO.println s!"        scanned {files.size} production bake modules ({scanned} code lines outside doc comments)"
+  IO.println s!"        bake-time libm sites: {hits.size} · surviving Float-tier definitions: {corpses.size}"
+  if hits.isEmpty && corpses.isEmpty then
+    passGate "exact-corpse"
+      s!"no Float transcendental and no retired Float-tier bake definition survives in the production graph across {files.size} modules — the libm exile is enforced, not documented, and the oracle tier lives outside the compiler in Tropical.Testing"
+  else
+    failGate "exact-corpse" s!"libm sites {hits} · corpses {corpses}"
 
 end Tropical.Tropicaltest.ExactGates

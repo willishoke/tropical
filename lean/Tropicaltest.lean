@@ -67,11 +67,13 @@ def main (args : List String) : IO UInt32 := do
   -- scratch, its transcendentals against the float path, and its quantizer
   -- against the emit funnel `litF`.
   IO.println "exact bake carrier (dyadic/interval — the bake layer's libm exile):"
-  total := total + 6
+  total := total + 8
+  if !(← Tropical.Tropicaltest.ExactGates.runExactCorpse) then failed := failed + 1
   if !(← Tropical.Tropicaltest.ExactGates.runExactConstants) then failed := failed + 1
   if !(← Tropical.Tropicaltest.ExactGates.runExactElementary) then failed := failed + 1
   if !(← Tropical.Tropicaltest.ExactGates.runExactAtan2) then failed := failed + 1
   if !(← Tropical.Tropicaltest.ExactGates.runExactRecip10) then failed := failed + 1
+  if !(← Tropical.Tropicaltest.ExactGates.runExactValues) then failed := failed + 1
   if !(← Tropical.Tropicaltest.ExactGates.runExactPlayground) then failed := failed + 1
   if !(← Tropical.Tropicaltest.ExactGates.runExactQuantize) then failed := failed + 1
 

@@ -68,6 +68,9 @@ def neg (a : CplxD) : CplxD := ⟨-a.re, -a.im⟩
 def mul (a b : CplxD) : CplxD :=
   ⟨rn (a.re * b.re - a.im * b.im), rn (a.re * b.im + a.im * b.re)⟩
 
+/-- Multiply by a real. -/
+def scale (s : Dyadic) (a : CplxD) : CplxD := ⟨rn (s * a.re), rn (s * a.im)⟩
+
 def normSq (a : CplxD) : Dyadic := rn (a.re * a.re + a.im * a.im)
 
 def abs (a : CplxD) : Dyadic :=
@@ -158,8 +161,32 @@ def powNat (z : CplxDI) : Nat → CplxDI
 /-- The midpoint pair as `Float`s — what reaches `litF`. -/
 def toFloats (a : CplxDI) : Float × Float := (a.re.toFloat, a.im.toFloat)
 
+/-- The enclosure's midpoint as a POINT value — the deterministic representative
+    a reproducibility loop runs on (a depth count, a Lentz recurrence). The dual
+    of `CplxD.asPointI`: this one loses a certificate it had, that one asserts a
+    certificate it never had. -/
+def midPoint (a : CplxDI) : CplxD := ⟨DyadicI.mid a.re, DyadicI.mid a.im⟩
+
 def render (a : CplxDI) : String := s!"({a.re.render}) + ({a.im.render})i"
 
 end CplxDI
+
+namespace CplxD
+
+/-- Assert a point value as a zero-width enclosure. This is a LAUNDERING step
+    and it is named so it can be found: the result CLAIMS a certificate the
+    computation never earned. It exists for exactly one situation — a
+    self-correcting recurrence, whose value the enclosure cannot follow (see the
+    note above `CplxD`), feeding an expression whose other operands ARE
+    certified. The crossing arm's `Γ★ − CF(κ)/g` is that expression: `Γ★` is a
+    real enclosure, `CF(κ)` is a Lentz iterate that poisons an interval around
+    iteration 100, well short of the shipped CF depths.
+
+    A downstream reader must not take a zero width here for "perfectly
+    certified"; it means "no certificate at all". Every other lift into `CplxDI`
+    should come from `ofFloats`/`ofI`, which are honest. -/
+def asPointI (a : CplxD) : CplxDI := ⟨DyadicI.exact a.re, DyadicI.exact a.im⟩
+
+end CplxD
 
 end Tropical.Exact
