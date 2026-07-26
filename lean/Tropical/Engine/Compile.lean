@@ -207,14 +207,21 @@ private partial def collectWireParams (expr : Json) : Array String :=
       (args ++ items).foldl (fun acc e => acc ++ collectWireParams e) #[]
   | _ => #[]
 
-/-- Resolution context for a session wire expression. -/
-private structure WireCtx where
+/-- Resolution context for a session wire expression. Not `private`: the
+    export path (`ProgramIO.handleExportProgram`) drives the same conversion
+    with its own ref/name resolution (siblings → `nestedOut` by decl position,
+    exposed ports → `inputRef`, no params). -/
+structure WireCtx where
   /-- `(instanceName, outputName)` → the `nestedOut` leaf node. -/
   instOut : String → String → Except String Tropical.Ir.ENode
   /-- param/trigger name → `ParamIdx` (alphabetical position). -/
   paramIdx : String → Option Nat
+  /-- name → `InputIdx` — the fallback category after params, mirroring the
+      resolution order names always had (params, then inputs). The session
+      root has no input ports (`fun _ => none`); export's program body does. -/
+  inputIdx : String → Option Nat := fun _ => none
 
-private abbrev WireM := StateT Tropical.Ir.ExprArena (Except String)
+abbrev WireM := StateT Tropical.Ir.ExprArena (Except String)
 
 private def internWE (n : Tropical.Ir.ENode) : WireM Tropical.Ir.ExprId :=
   fun a => .ok ((Tropical.Ir.eintern n).run a)
@@ -222,7 +229,7 @@ private def internWE (n : Tropical.Ir.ENode) : WireM Tropical.Ir.ExprId :=
 /-- Resolve a raw session wire expression directly to a resolved arena `ExprId`,
     mirroring the elaborator's `resolveExpr` over a session-root scope, interning
     into the shared DAG. Same op set as `wireExprToParsed`; no parsed intermediate. -/
-private partial def wireExprToResolved (ctx : WireCtx) (expr : Json) :
+partial def wireExprToResolved (ctx : WireCtx) (expr : Json) :
     WireM Tropical.Ir.ExprId :=
   match expr with
   | .num n => internWE (.num n)
@@ -239,7 +246,10 @@ private partial def wireExprToResolved (ctx : WireCtx) (expr : Json) :
       let name := (getStrField? expr "name").getD ""
       match ctx.paramIdx name with
       | some i => internWE (.paramRef ⟨i⟩)
-      | none => throwThe String s!"session wire: param '{name}' not in root param table"
+      | none =>
+        match ctx.inputIdx name with
+        | some i => internWE (.inputRef ⟨i⟩)
+        | none => throwThe String s!"unknown name '{name}'"
     else if op == "array" then
       match getField? expr "items" with
       | some (.arr items) => do internWE (.arr (← items.mapM (wireExprToResolved ctx)))

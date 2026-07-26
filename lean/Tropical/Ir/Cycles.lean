@@ -103,6 +103,22 @@ private partial def strongConnect (deps : Array (Array Nat)) (v : Nat)
     st := { st with sccs := st.sccs.push scc }
   return st
 
+/-- The acyclic-source contract's message: name the cycle and say the true
+    thing — there is no state primitive to break it through. Shared by every
+    boundary that enforces the contract on a constructed `Program`
+    (`export_program`'s direct registration; formerly the elaborator's
+    `CycleViolation`). -/
+def cycleViolationMessage (progName : String) (cycles : Array (Array String)) : String :=
+  let diagnostics := cycles.map fun scc =>
+    let memberPath := String.intercalate " → " scc.toList
+    s!"tropical: cycle in program '{progName}'\n" ++
+    s!"  Instances in cycle: {memberPath}\n" ++
+    "  There is no state primitive to break a cycle through — kernels are " ++
+    "closed-form f(τ, params), so instance graphs must feed forward. " ++
+    "Restructure the graph; recursive feedback on live input is outside this language."
+  "tropical: strict cycle policy violated:\n" ++
+    String.intercalate "\n\n" diagnostics.toList
+
 /-- Port of `findInstanceCycles`: non-trivial SCCs of the inter-instance
     dep graph, as instance-name lists in SCC member order. -/
 def findInstanceCycles (ea : ExprArena) (prog : Program) : Array (Array String) := Id.run do

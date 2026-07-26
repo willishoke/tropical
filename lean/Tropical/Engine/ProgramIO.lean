@@ -279,20 +279,137 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
     ("body", Json.mkObj [("op", Json.str "block"), ("decls", Json.arr decls),
       ("assigns", Json.arr assigns)])]
 
-  -- Register the exported program through the engine batch (raise +
-  -- elaborate + strata + service registry residue + adoption) — the
-  -- loadProgramAsType image; raise/elaborate failures surface as
-  -- internal_error with the verbatim message.
-  let jv ← match Tropical.Parse.JsonV.parse node.compress with
-    | .error e => internalError s!"export_program: node JSON re-parse failed: {e}"
-    | .ok v => pure v
-  let parsed ← match Tropical.Parse.Raise.raiseProgram jv with
-    | .error msg => internalError msg
-    | .ok p => pure p
-  let mut rootEntry := jsonNull
-  for (n, p) in registrationBatch name (renameProgram parsed name) do
-    let (entry, _) ← registerOne env n p
-    rootEntry := entry
+  -- Register the exported program DIRECTLY: build the resolved `Program`
+  -- off the session mirror (the `sessionToResolvedRoot` recipe — export
+  -- differs in ports: exposed inputs and exported outputs instead of dac
+  -- sinks) and run the `registerResolved` tail (strata + entry + adopt).
+  -- The JSON node above is OUTPUT serialization only — there is no
+  -- reparse, no raise, no elaborator on this path.
+  let resolveType : String → Except String (Tropical.Ir.ProgramIdx × Tropical.Ir.Program) :=
+    fun instName => do
+      let some info := st.findInstance? instName
+        | .error s!"export: internal: '{instName}' missing from registry"
+      let some ti := st.templateByName.get? info.baseTypeName
+        | .error s!"export: instance '{instName}': program type '{info.baseTypeName}' is not registered"
+      let some tgt := st.arena.program? ti
+        | .error s!"export: instance '{instName}': program index for '{info.baseTypeName}' out of range"
+      pure (ti, tgt)
+  -- Sibling refs resolve to `nestedOut ⟨position in order⟩`; names (params
+  -- included — the resolution category order is params, then inputs, and the
+  -- exported body declares no params) resolve against the exposed inputs.
+  let bodyCtx : WireCtx := {
+    instOut := fun rn on => do
+      let some idx := order.idxOf? rn
+        | .error s!"instance '{rn}' is not declared in this scope"
+      let (_, tgt) ← resolveType rn
+      match tgt.outputs.findIdx? (·.name == on) with
+      | some o => pure (.nestedOut ⟨idx⟩ ⟨o⟩)
+      | none =>
+        let portList := String.intercalate ", " (tgt.outputs.map (·.name)).toList
+        .error s!"instance '{rn}': program '{tgt.name}' has no output '{on}' (have: {portList})"
+    paramIdx := fun _ => none
+    inputIdx := fun nm => exposed.findIdx? (·.1 == nm) }
+  -- An input default resolves before any instance is in scope, and sees only
+  -- the inputs declared before it (the incremental-scope rule).
+  let defaultCtx : Nat → WireCtx := fun visible => {
+    instOut := fun rn _ => .error s!"instance '{rn}' is not declared in this scope"
+    paramIdx := fun _ => none
+    inputIdx := fun nm => (exposed.extract 0 visible).findIdx? (·.1 == nm) }
+  -- The port surface: exposed inputs (type from the target's resolved decl —
+  -- scalar float is the unspelled default — plus the folded wiring default),
+  -- then the exported outputs.
+  let mut exprs := st.arena.exprs
+  let mut inputDecls : Array Tropical.Ir.InputDecl := #[]
+  for k in [0:exposed.size] do
+    let (inputName, instName, portName) := exposed[k]!
+    let (_, tgt) ← match resolveType instName with
+      | .error e => internalError e
+      | .ok r => pure r
+    let some pos := tgt.inputs.findIdx? (·.name == portName)
+      | internalError s!"export: internal: '{instName}' has no resolved input '{portName}'"
+    let type? : Option Tropical.Ir.PortType := match tgt.inputs[pos]!.type? with
+      | some (.scalar .float) | none => none
+      | some t => some t
+    let mut default? : Option Tropical.Ir.ExprId := none
+    if let some expr := findWire instName portName then
+      match (wireExprToResolved (defaultCtx k) expr).run exprs with
+      | .error e => internalError e
+      | .ok (eid, exprs') =>
+        exprs := exprs'
+        default? := some eid
+    inputDecls := inputDecls.push { name := inputName, type?, default? }
+  let mut outputDecls : Array Tropical.Ir.OutputDecl := #[]
+  let mut assignsR : Array Tropical.Ir.OutputAssign := #[]
+  for k in [0:outputPairs.size] do
+    let (outName, ref) := outputPairs[k]!
+    let instName := (getStrField? ref "instance").getD ""
+    let portName := (getStrField? ref "output").getD ""
+    let (_, tgt) ← match resolveType instName with
+      | .error e => internalError e
+      | .ok r => pure r
+    let some idx := order.idxOf? instName
+      | internalError s!"export: internal: output instance '{instName}' not in export order"
+    let some o := tgt.outputs.findIdx? (·.name == portName)
+      | internalError s!"export: internal: '{instName}' has no resolved output '{portName}'"
+    let type? : Option Tropical.Ir.PortType := match tgt.outputs[o]!.type? with
+      | some (.scalar .float) | none => none
+      | some t => some t
+    outputDecls := outputDecls.push { name := outName, type? }
+    let (eid, exprs') := (Tropical.Ir.eintern (.nestedOut ⟨idx⟩ ⟨o⟩)).run exprs
+    exprs := exprs'
+    assignsR := assignsR.push { target := .port ⟨k⟩, expr := eid }
+  -- Instance decls in export order: exposed ports become `inputRef`, sibling
+  -- refs become `nestedOut`, ports in declared input order.
+  let mut declsR : Array Tropical.Ir.BodyDecl := #[]
+  for instName in order do
+    let (_, tgt) ← match resolveType instName with
+      | .error e => internalError e
+      | .ok r => pure r
+    let some info := st.findInstance? instName
+      | internalError s!"export: internal: '{instName}' missing from registry"
+    let mut instInputs : Array Tropical.Ir.InstanceInput := #[]
+    for portName in info.progMeta.inputNames do
+      let key := s!"{instName}:{portName}"
+      let some pos := tgt.inputs.findIdx? (·.name == portName)
+        | internalError s!"export: internal: '{instName}' input '{portName}' is not a declared port of '{tgt.name}'"
+      match exposed.find? fun (_, i, p) => s!"{i}:{p}" == key with
+      | some (inputName, _, _) =>
+        let some ii := exposed.findIdx? (·.1 == inputName)
+          | internalError "export: internal: exposed input vanished"
+        let (eid, exprs') := (Tropical.Ir.eintern (.inputRef ⟨ii⟩)).run exprs
+        exprs := exprs'
+        instInputs := instInputs.push { port := ⟨pos⟩, value := eid }
+      | none =>
+        if let some expr := findWire instName portName then
+          match (wireExprToResolved bodyCtx expr).run exprs with
+          | .error e => internalError e
+          | .ok (eid, exprs') =>
+            exprs := exprs'
+            instInputs := instInputs.push { port := ⟨pos⟩, value := eid }
+    declsR := declsR.push (.inst instName tgt.name instInputs)
+  -- Registry: per-instance target (export order, last write wins per key)
+  -- plus the transitive merge — the shape the lowering's relink expects.
+  let mut registry : Array (String × Tropical.Ir.ProgramIdx) := #[]
+  for instName in order do
+    let (ti, tgt) ← match resolveType instName with
+      | .error e => internalError e
+      | .ok r => pure r
+    registry := match registry.findIdx? (·.1 == tgt.name) with
+      | some i => registry.set! i (tgt.name, ti)
+      | none => registry.push (tgt.name, ti)
+    for (kk, vv) in tgt.registry do
+      if !registry.any (·.1 == kk) then registry := registry.push (kk, vv)
+  let prog : Tropical.Ir.Program := {
+    name, inputs := inputDecls, outputs := outputDecls
+    decls := declsR, assigns := assignsR, registry }
+  -- The acyclic-source contract, enforced where the program is constructed
+  -- (the session mirror can hold a cyclic graph after a refused compile).
+  let cycles := Tropical.Ir.findInstanceCycles exprs prog
+  if !cycles.isEmpty then
+    internalError (Tropical.Ir.cycleViolationMessage name cycles)
+  let arena' := { st.arena with programs := st.arena.programs.push prog, exprs }
+  let rawIdx : Tropical.Ir.ProgramIdx := ⟨st.arena.programs.size⟩
+  let (rootEntry, _) ← registerResolved env name arena' rawIdx
   let entryNames := fun (k : String) => Json.arr <|
     (match getField? rootEntry k with
      | some (.arr ps) => ps
