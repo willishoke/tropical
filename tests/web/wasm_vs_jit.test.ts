@@ -172,14 +172,15 @@ describe('wasm vs native JIT', () => {
     for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
 
-  // The combinator lowering was retired 2026-07-25 with its producers (the
-  // literate surface language and generics): a tropical_program_2 file can
-  // still SPELL fold/generate/zipWith (raise parses them), but nothing
-  // lowers them any more — the front door refuses at the toResolved type
-  // boundary. This pins that refusal cross-process (the Lean-side twin is
-  // tropicaltest's retired-front-door gate). Summing indexed families are
-  // authored as Sig.bankSum in Lean, which this schema cannot spell.
-  test('array combinators (generate / zipWith / fold) — refused at the front door', () => {
+  // Program definitions over the wire are retired (elaborator retirement,
+  // phase 5): a tropical_program_2 file carrying a programDecl — whatever its
+  // body spells — is refused AT INGEST with the retirement message; the wire
+  // is a patch bay (instances + wiring + params of registered types). This
+  // pins that refusal cross-process. The raise-level combinator refusal
+  // ('fold' is not a trunk construct) is pinned in-process by tropicaltest's
+  // retired-front-door gate. Summing indexed families are authored as
+  // Sig.bankSum in Lean, which this schema cannot spell.
+  test('program definitions over the wire — refused at ingest', () => {
     const program: ProgramFile = {
       schema: 'tropical_program_2',
       name: 'eq_arraycf',
@@ -207,7 +208,7 @@ describe('wasm vs native JIT', () => {
       ]},
       audio_outputs: [{ instance: 'inst', output: 'out' }],
     }
-    expect(() => compileViaLean(program)).toThrow(/not a trunk construct/)
+    expect(() => compileViaLean(program)).toThrow(/program definitions over the wire are retired/)
   })
 
   test('op-zoo (bitwise / shifts / float↔int casts / mod / clamp / select) — WASM matches JIT', async () => {

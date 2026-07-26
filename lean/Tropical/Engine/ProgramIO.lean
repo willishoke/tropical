@@ -446,12 +446,13 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
 -- ── v2 ingest (load / merge) ─────────────────────────────────────────────────
 -- Port of `loadProgramAsSession` / `mergeProgramIntoSession` over the
 -- engine's mirror: the normalized v2 node (Zod-stripped, key order
--- preserved by JsonV) is walked directly; inline programDecls register
--- through the engine's own `registerOne` batches; instances resolve
--- through the engine specialization path with the load-path failure
--- shapes; wires store RAW (loadProgramAsSession sets inputExprNodes
--- directly — no auto-delay wrap). All failures are plain TS Errors on
--- the oracle → `internal_error` with the verbatim message.
+-- preserved by JsonV) is walked directly; instances resolve through the
+-- engine specialization path with the load-path failure shapes; wires
+-- store RAW (loadProgramAsSession sets inputExprNodes directly — no
+-- auto-delay wrap). The wire is a PATCH BAY: program definitions
+-- (programDecl) are refused at ingest — programs are authored in Lean
+-- (arrow builders). All failures are plain TS Errors on the oracle →
+-- `internal_error` with the verbatim message.
 
 open Tropical.Parse (JsonV) in
 private def jvBodyEntries (node : JsonV) (k : String) : Array JsonV :=
@@ -531,24 +532,17 @@ private def ingestProgram (env : Env) (node : Tropical.Parse.JsonV)
       if st.params.any (·.1 == name) then
         internalError s!"merge collision: param '{name}' already exists."
 
-  -- A loaded tropical_program_2 file may carry inline program definitions of
-  -- concrete (non-generic) types — a self-contained patch. These register
-  -- through the JSON front door (raise → elaborate → strata), the same path
-  -- `export_program` uses. The agent-facing `define_program` TOOL is gone; this
-  -- file-level ingest survives (the banks/fold test corpus defines FoldProbe
-  -- this way, and it is the only route left for a fold-bearing program, which no
-  -- Stdlib builder is).
+  -- Program definitions over the wire are RETIRED — the same
+  -- refusal-at-ingest pattern as raise's retiredOp. (The former ingest's
+  -- own justification — the FoldProbe fold corpus — self-cancelled: since
+  -- the raise refusal landed, a fold-bearing programDecl died at raise and
+  -- never reached the elaborator.)
   for d in jvBodyEntries node "decls" do
     if jvOp? d == some "programDecl" then
-      let some subName := jvStr? d "name"
-        | internalError s!"{context}: programDecl missing name"
-      let some subNode := d.getField? "program"
-        | internalError s!"{context}: programDecl '{subName}' missing program"
-      let parsed ← match Tropical.Parse.Raise.raiseProgram subNode with
-        | .error msg => internalError msg
-        | .ok p => pure p
-      for (n, p) in registrationBatch subName (renameProgram parsed subName) do
-        let _ ← registerOne env n p
+      let subName := (jvStr? d "name").getD "?"
+      internalError <|
+        s!"{context}: programDecl '{subName}': program definitions over the wire are retired — " ++
+        "programs are authored in Lean (arrow builders); load ingests instances + wiring + params of registered types."
 
   -- Params before instances (instances may reference them). Idempotent
   -- per name.
