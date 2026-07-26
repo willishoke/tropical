@@ -1,5 +1,5 @@
 import Std.Data.HashMap
-import Tropical.Ir.CoreArena
+import Tropical.Ir.Core
 import Tropical.Plan
 
 /-!
@@ -94,22 +94,24 @@ deriving Inhabited
     `EmitLlvm.emitKernelBlock`): preamble, then per child its pre_input
     block followed recursively by the child's own blocks, then the body.
     Public: the stage differential linearizes plans the same way. -/
-partial def collectBlocks (f : InstanceFunction) : Array (Array NInstr) := Id.run do
+def collectBlocks (f : InstanceFunction) : Array (Array NInstr) := Id.run do
   let mut out := #[f.preambleInstructions]
-  for child in f.children do
+  for h : child in f.children do
     out := out.push child.preInputInstructions
     out := out ++ collectBlocks child
   return out.push f.instructions
+termination_by sizeOf f
+decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children h
 
 /-- Reassemble an instance function from rewritten blocks, consuming them
     in the same order `collectBlocks` produced. Returns the rebuilt
     function and the next unconsumed block index. -/
-private partial def rebuildFn (f : InstanceFunction) (blocks : Array (Array NInstr))
+private def rebuildFn (f : InstanceFunction) (blocks : Array (Array NInstr))
     (start : Nat) : InstanceFunction × Nat := Id.run do
   let preamble := blocks[start]!
   let mut i := start + 1
   let mut children : Array InstanceFunction := #[]
-  for child in f.children do
+  for h : child in f.children do
     let preInput := blocks[i]!
     let (child', i') := rebuildFn child blocks (i + 1)
     children := children.push (child'.withPreInput preInput)
@@ -117,13 +119,15 @@ private partial def rebuildFn (f : InstanceFunction) (blocks : Array (Array NIns
   let body := blocks[i]!
   return (.mk f.name f.instanceName preamble body f.preInputInstructions
     f.registerOffset f.arraySlotOffset f.registerCount children, i + 1)
+termination_by sizeOf f
+decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children h
 
 -- ─────────────────────────────────────────────────────────────
 -- Analysis — one forward pass in emit order
 -- ─────────────────────────────────────────────────────────────
 
 -- `Stage` (fold < s0 < s1) and `Stage.join` are the shared binding-time
--- type from `Tropical.Ir.CoreArena` — the same lattice the intern-time
+-- type from `Tropical.Ir.ExprArena` — the same lattice the intern-time
 -- attribute uses, so this pass's flow-derived classification and the
 -- typed signature resolution are directly comparable.
 
@@ -419,7 +423,7 @@ private def overlayPinnedS1 (i : NInstr) : Bool :=
     delimiters and every `loopIdx` reader — one instruction of a loop can never
     move alone. A `loopIdx`-reading instruction varies per iteration even when
     its VALUE stage is s0 (the intern-time attribute treats `loopIdx` as
-    stage-neutral — see `cnodeSig`), so it pins s1 here, and everything
+    stage-neutral — see `enodeSig`), so it pins s1 here, and everything
     downstream of it stays behind via the availability walk. Loop code leaves
     the audio kernel only through the whole-region decision (`tryRegion` in
     `placementFromStages`). NOT pinned: plain `array`/`arrayReg` — the

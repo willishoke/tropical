@@ -49,33 +49,47 @@ under `web/patches/` and is precompiled via `bun web/build_patches.ts`.
 
 ### Expression format
 
-Input expressions are MCP wire-format `ExprNode`s — the same shape
-the materializer reads when translating session wiring into resolved
-IR. The closed op set is validated by `validateExpr` in
-`lean/Tropical/Expr.lean`.
+Input expressions are MCP wire-format `ExprNode`s — the same shape the
+session compile reads when translating wiring into resolved IR. The
+grammar is a closed inductive, `Tropical.WireExpr`
+(`lean/Tropical/WireExpr.lean`), and its JSON decoder is the single
+refusal site: what decodes is exactly what compiles. Anything else —
+state ops (`delay`, `reg`), retired combinators (`fold`, `scan`), the
+old array/functional ops (`map`, `matmul`, `reduce`, `zeros`, …) — is
+rejected at ingest.
 
 - **Literal number / boolean** — `440`, `0.5`, `true`
-- **Inline array** — `[110, 220, 330, 440]`
-- **Instance output reference** — `{"op": "ref", "instance": "Osc1", "output": "out"}`
+- **Inline array** — `[110, 220, 330, 440]` (or
+  `{"op": "array", "items": [...]}` / `{"op": "arrayLiteral", "values": [...]}`,
+  which decode to the same thing)
+- **Instance output reference** — `{"op": "ref", "instance": "Osc1", "output": "out"}`.
+  `output` is a port name or a positional index.
 - **Binary operation** — `{"op": "mul", "args": [<expr>, <expr>]}`
 - **Unary operation** — `{"op": "neg", "args": [<expr>]}`
 - **Ternary** — `{"op": "select", "args": [<cond>, <then>, <else>]}` /
   `{"op": "clamp", "args": [<v>, <lo>, <hi>]}`
-- **Sentinels** — `{"op": "sample_rate"}`, `{"op": "sample_index"}`
-- **Param** — `{"op": "param", "name": "cutoff"}`. The materializer
-  resolves the name to an FFI handle at compile time. Legacy
-  `{"op": "trigger", "name": "kick"}` refs are still accepted on the
-  wire and aliased to `{op:'param'}` at materialization.
+- **Sentinels** — `{"op": "sampleRate"}`, `{"op": "sampleIndex"}`,
+  `{"op": "clock"}`
+- **Param** — `{"op": "param", "name": "cutoff"}`. The session compile
+  resolves the name to a `param:<name>` module slot.
+  `{"op": "trigger", "name": "kick"}` is accepted and lowers to the same
+  slot; the legacy spellings `paramExpr` / `triggerParamExpr` decode to
+  `param` / `trigger`.
 
-Available scalar ops: `add`, `sub`, `mul`, `div`, `mod`, `floor_div`,
-`neg`, `abs`, `sqrt`, `ldexp`, `float_exponent`, `lt`, `lte`, `gt`,
-`gte`, `eq`, `neq`, `and`, `or`, `bit_and`, `bit_or`, `bit_xor`,
-`lshift`, `rshift`, `bit_not`, `not`, `clamp`, `select`, `index`,
-`array_set`, `to_int`, `to_bool`, `to_float`, `round`, `floor`,
-`ceil`. Transcendentals (`sin`, `cos`, `tanh`, `exp`, `log`, `pow`)
-are `Tropical.Stdlib` builder programs (`lean/Tropical/Stdlib.lean`,
-booted directly by the engine); instantiate one and reference its
-output via `ref`.
+Op names are **camelCase** on the wire, not snake_case. Available
+scalar ops: `add`, `sub`, `mul`, `div`, `mod`, `floorDiv`, `neg`,
+`abs`, `sqrt`, `ldexp`, `floatExponent`, `lt`, `lte`, `gt`, `gte`,
+`eq`, `neq`, `and`, `or`, `bitAnd`, `bitOr`, `bitXor`, `lshift`,
+`rshift`, `bitNot`, `not`, `clamp`, `select`, `index`, `arraySet`
+(`array_set` also decodes), `toInt`, `toBool`, `toFloat`, `round`,
+`floor`, `ceil`. Transcendentals (`sin`, `cos`, `tanh`, `exp`, `log`,
+`pow`) are `Tropical.Stdlib` builder programs
+(`lean/Tropical/Stdlib.lean`, booted directly by the engine);
+instantiate one and reference its output via `ref`.
+
+Arity is exact: binary ops require exactly 2 `args`, unary exactly 1,
+ternary exactly 3. A wrong count is refused at the tool boundary with
+`invalid_value`, not at the next compile.
 
 ### Common program types and their I/O
 

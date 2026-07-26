@@ -12,7 +12,7 @@ document through the `JsonV` ordered-JSON reader and folds it into the session.
 namespace Tropical.Engine
 
 open Lean (Json toJson)
-open Tropical.Expr (getField? getStrField? opOf? validateExpr exprDependencies prettyExpr)
+open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
 -- ── Program I/O (save / export) ──────────────────────────────────────────────
@@ -31,7 +31,7 @@ def handleSave (env : Env) : EngineM Json := do
     let mut inputs : Array (String × Json) := #[]
     for portName in info.progMeta.inputNames do
       if let some w := wiresPost.find? fun w => w.instName == name && w.portName == portName then
-        inputs := inputs.push (portName, w.expr)
+        inputs := inputs.push (portName, w.expr.toJson)
     decls := decls.push <| Json.mkObj <|
       [("op", Json.str "instanceDecl"), ("name", Json.str name),
        ("program", Json.str info.baseTypeName)]
@@ -53,40 +53,38 @@ def handleSave (env : Env) : EngineM Json := do
      ("body", body)])]
 
 /-- Port of `rewriteRefs`: session refs to internal instances become
-    `nestedOut`; recursion follows `args` only (the TS shape). -/
-private partial def rewriteRefs (reachable : Array String) (node : Json) : Json :=
-  match node with
-  | .arr items => .arr (items.map (rewriteRefs reachable))
-  | .obj fields =>
-    let isInternalRef :=
-      opOf? node == some "ref" &&
-      (match getStrField? node "instance" with
-       | some i => reachable.contains i
-       | none => false)
-    if isInternalRef then
-      Json.mkObj [("op", Json.str "nestedOut"),
-        ("ref", Json.str ((getStrField? node "instance").getD "")),
-        ("output", (getField? node "output").getD jsonNull)]
-    else
-      match getField? node "args" with
-      | some (.arr items) => Id.run do
-        let mut out : List (String × Json) := []
-        for (k, v) in fields.toArray do
-          if k == "args" then
-            out := out ++ [(k, Json.arr (items.map (rewriteRefs reachable)))]
-          else out := out ++ [(k, v)]
-        return Json.mkObj out
-      | _ => node
-  | _ => node
+    `nestedOut`. Typed and exhaustive — refs inside array literals are
+    rewritten too (the old Json walker followed `args` only and
+    silently skipped `items`). -/
+private def rewriteRefs (reachable : Array String) : WireExpr → WireExpr
+  | .ref inst output =>
+    if reachable.contains inst then .nestedOut inst output else .ref inst output
+  | .arr items => .arr (items.attach.map fun ⟨x, _⟩ => rewriteRefs reachable x)
+  | .binary tag l r => .binary tag (rewriteRefs reachable l) (rewriteRefs reachable r)
+  | .unary tag a => .unary tag (rewriteRefs reachable a)
+  | .clamp a b c =>
+    .clamp (rewriteRefs reachable a) (rewriteRefs reachable b) (rewriteRefs reachable c)
+  | .select a b c =>
+    .select (rewriteRefs reachable a) (rewriteRefs reachable b) (rewriteRefs reachable c)
+  | .arraySet a b c =>
+    .arraySet (rewriteRefs reachable a) (rewriteRefs reachable b) (rewriteRefs reachable c)
+  | .index a b => .index (rewriteRefs reachable a) (rewriteRefs reachable b)
+  | .broadcastTo a shape => .broadcastTo (rewriteRefs reachable a) shape
+  | e => e
+termination_by e => sizeOf e
+decreasing_by
+  all_goals first
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ items›; simp; omega)
+    | (simp; omega)
 
 /-- Port of `reachableInstances` (stack-pop walk; discovery order is the
     TS Set's insertion order). -/
-private def reachableFrom (rootExprs : Array Json) (wires : Array Wire)
+private def reachableFrom (rootExprs : Array WireExpr) (wires : Array Wire)
     (allInstances : Array String) : Array String := Id.run do
   let mut reachable : Array String := #[]
   let mut queue : Array String := #[]
   for expr in rootExprs do
-    for dep in exprDependencies expr do
+    for dep in expr.deps do
       if allInstances.contains dep && !reachable.contains dep then
         reachable := reachable.push dep
         queue := queue.push dep
@@ -95,7 +93,7 @@ private def reachableFrom (rootExprs : Array Json) (wires : Array Wire)
     queue := queue.pop
     for w in wires do
       if w.instName == name then
-        for dep in exprDependencies w.expr do
+        for dep in w.expr.deps do
           if allInstances.contains dep && !reachable.contains dep then
             reachable := reachable.push dep
             queue := queue.push dep
@@ -145,7 +143,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
   let allInstances := st.instanceNames
 
   -- Validate output mappings; build the root ref expressions.
-  let mut rootExprs : Array Json := #[]
+  let mut rootExprs : Array WireExpr := #[]
   for (outName, ref) in outputPairs do
     let instName := (getStrField? ref "instance").getD ""
     let some info := st.findInstance? instName
@@ -153,9 +151,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
     let portName := (getStrField? ref "output").getD ""
     if !info.progMeta.outputNames.contains portName then
       internalError s!"export: instance '{instName}' has no output '{portName}'. Available: {String.intercalate ", " info.progMeta.outputNames.toList}"
-    rootExprs := rootExprs.push <| Json.mkObj
-      [("op", Json.str "ref"), ("instance", Json.str instName),
-       ("output", Json.str portName)]
+    rootExprs := rootExprs.push (.ref instName (.name portName))
 
   -- Validate input mappings ("instance:port" targets).
   let inputPairs : Array (String × Json) := match arg? args "inputs" with
@@ -188,7 +184,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
   let mut reachable := reachableFrom rootExprs wiresPost allInstances
   for (_, instName, portName) in exposed do
     if let some currentExpr := findWire instName portName then
-      for dep in exprDependencies currentExpr do
+      for dep in currentExpr.deps do
         if allInstances.contains dep && !reachable.contains dep then
           let extra := reachableFrom #[currentExpr] wiresPost allInstances
           for e in extra do
@@ -198,7 +194,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
   for instName in reachable do
     for w in wiresPost do
       if w.instName == instName && !exposedKeys.contains w.key then
-        for dep in exprDependencies w.expr do
+        for dep in w.expr.deps do
           if !reachable.contains dep && allInstances.contains dep then
             internalError (s!"export: instance '{instName}' wiring '{w.key}' references '{dep}' which is outside the exported subgraph. "
               ++ s!"Either expose it as an input or include '{dep}' in the output dependency chain.")
@@ -219,7 +215,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
       | t?, d? => Json.mkObj <|
         [("name", Json.str inputName)]
         ++ (match t? with | some t => [("type", t)] | none => [])
-        ++ (match d? with | some d => [("default", d)] | none => [])
+        ++ (match d? with | some d => [("default", d.toJson)] | none => [])
   let mut outputEntries : Array Json := #[]
   for (outName, ref) in outputPairs do
     let instName := (getStrField? ref "instance").getD ""
@@ -258,7 +254,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
           Json.mkObj [("op", Json.str "input"), ("name", Json.str inputName)])
       | none =>
         if let some expr := findWire instName portName then
-          instInputs := instInputs.push (portName, rewriteRefs reachable expr)
+          instInputs := instInputs.push (portName, (rewriteRefs reachable expr).toJson)
     decls := decls.push <| Json.mkObj <|
       [("op", Json.str "instanceDecl"), ("name", Json.str instName),
        ("program", Json.str info.baseTypeName)]
@@ -279,20 +275,159 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
     ("body", Json.mkObj [("op", Json.str "block"), ("decls", Json.arr decls),
       ("assigns", Json.arr assigns)])]
 
-  -- Register the exported program through the engine batch (raise +
-  -- elaborate + strata + service registry residue + adoption) — the
-  -- loadProgramAsType image; raise/elaborate failures surface as
-  -- internal_error with the verbatim message.
-  let jv ← match Tropical.Parse.JsonV.parse node.compress with
-    | .error e => internalError s!"export_program: node JSON re-parse failed: {e}"
-    | .ok v => pure v
-  let parsed ← match Tropical.Parse.Raise.raiseProgram jv with
-    | .error msg => internalError msg
-    | .ok p => pure p
-  let mut rootEntry := jsonNull
-  for (n, p) in registrationBatch name (renameProgram parsed name) do
-    let (entry, _) ← registerOne env n p
-    rootEntry := entry
+  -- Register the exported program DIRECTLY: build the resolved `Program`
+  -- off the session mirror (the `sessionToResolvedRoot` recipe — export
+  -- differs in ports: exposed inputs and exported outputs instead of dac
+  -- sinks) and run the `registerResolved` tail (strata + entry + adopt).
+  -- The JSON node above is OUTPUT serialization only — there is no
+  -- reparse, no raise, no elaborator on this path.
+  -- NOTE: this resolves the instance's type by NAME, and `export_program` is
+  -- the one route that rebinds a name at runtime. An instance added before a
+  -- rebind keeps rendering its own snapshot (`resolvedIdx`) in the session, but
+  -- exports through the CURRENT binding of its name — so re-exporting a name
+  -- that already has live instances crystallizes a different body than the
+  -- session plays. That divergence is pre-existing and NOT fixed here:
+  -- resolving through `info.resolvedIdx` does not repair it, because the
+  -- emitted decl and the program registry are both keyed by name (verified —
+  -- the export still takes the rebound body). Fixing it properly means giving
+  -- distinct snapshots distinct registry keys, which is a design change, not a
+  -- patch. See the PR discussion.
+  let resolveType : String → Except String (Tropical.Ir.ProgramIdx × Tropical.Ir.Program) :=
+    fun instName => do
+      let some info := st.findInstance? instName
+        | .error s!"export: internal: '{instName}' missing from registry"
+      let some ti := st.templateByName.get? info.baseTypeName
+        | .error s!"export: instance '{instName}': program type '{info.baseTypeName}' is not registered"
+      let some tgt := st.arena.program? ti
+        | .error s!"export: instance '{instName}': program index for '{info.baseTypeName}' out of range"
+      pure (ti, tgt)
+  -- Sibling refs resolve to `nestedOut ⟨position in order⟩`; names (params
+  -- included — the resolution category order is params, then inputs, and the
+  -- exported body declares no params) resolve against the exposed inputs.
+  let bodyCtx : WireCtx := {
+    instOut := fun rn on => do
+      let some idx := order.idxOf? rn
+        | .error s!"instance '{rn}' is not declared in this scope"
+      let (_, tgt) ← resolveType rn
+      match tgt.outputs.findIdx? (·.name == on) with
+      | some o => pure (.nestedOut ⟨idx⟩ ⟨o⟩)
+      | none =>
+        let portList := String.intercalate ", " (tgt.outputs.map (·.name)).toList
+        .error s!"instance '{rn}': program '{tgt.name}' has no output '{on}' (have: {portList})"
+    paramIdx := fun _ => none
+    inputIdx := fun nm => exposed.findIdx? (·.1 == nm) }
+  -- An input default resolves before any instance is in scope, and sees only
+  -- the inputs declared before it (the incremental-scope rule).
+  let defaultCtx : Nat → WireCtx := fun visible => {
+    instOut := fun rn _ => .error s!"instance '{rn}' is not declared in this scope"
+    paramIdx := fun _ => none
+    inputIdx := fun nm => (exposed.extract 0 visible).findIdx? (·.1 == nm) }
+  -- The port surface: exposed inputs (type from the target's resolved decl —
+  -- scalar float is the unspelled default — plus the folded wiring default),
+  -- then the exported outputs.
+  let mut exprs := st.arena.exprs
+  let mut inputDecls : Array Tropical.Ir.InputDecl := #[]
+  for k in [0:exposed.size] do
+    let (inputName, instName, portName) := exposed[k]!
+    let (_, tgt) ← match resolveType instName with
+      | .error e => internalError e
+      | .ok r => pure r
+    let some pos := tgt.inputs.findIdx? (·.name == portName)
+      | internalError s!"export: internal: '{instName}' has no resolved input '{portName}'"
+    let type? : Option Tropical.Ir.PortType := match tgt.inputs[pos]!.type? with
+      | some (.scalar .float) | none => none
+      | some t => some t
+    let mut default? : Option Tropical.Ir.ExprId := none
+    if let some expr := findWire instName portName then
+      match (wireExprToResolved (defaultCtx k) expr).run exprs with
+      | .error e => internalError e
+      | .ok (eid, exprs') =>
+        exprs := exprs'
+        default? := some eid
+    inputDecls := inputDecls.push { name := inputName, type?, default? }
+  let mut outputDecls : Array Tropical.Ir.OutputDecl := #[]
+  let mut assignsR : Array Tropical.Ir.OutputAssign := #[]
+  for k in [0:outputPairs.size] do
+    let (outName, ref) := outputPairs[k]!
+    let instName := (getStrField? ref "instance").getD ""
+    let portName := (getStrField? ref "output").getD ""
+    let (_, tgt) ← match resolveType instName with
+      | .error e => internalError e
+      | .ok r => pure r
+    let some idx := order.idxOf? instName
+      | internalError s!"export: internal: output instance '{instName}' not in export order"
+    let some o := tgt.outputs.findIdx? (·.name == portName)
+      | internalError s!"export: internal: '{instName}' has no resolved output '{portName}'"
+    let type? : Option Tropical.Ir.PortType := match tgt.outputs[o]!.type? with
+      | some (.scalar .float) | none => none
+      | some t => some t
+    outputDecls := outputDecls.push { name := outName, type? }
+    let (eid, exprs') := (Tropical.Ir.eintern (.nestedOut ⟨idx⟩ ⟨o⟩)).run exprs
+    exprs := exprs'
+    assignsR := assignsR.push { target := .port ⟨k⟩, expr := eid }
+  -- Instance decls in export order: exposed ports become `inputRef`, sibling
+  -- refs become `nestedOut`, ports in declared input order.
+  let mut declsR : Array Tropical.Ir.BodyDecl := #[]
+  for instName in order do
+    let (_, tgt) ← match resolveType instName with
+      | .error e => internalError e
+      | .ok r => pure r
+    let some info := st.findInstance? instName
+      | internalError s!"export: internal: '{instName}' missing from registry"
+    let mut instInputs : Array Tropical.Ir.InstanceInput := #[]
+    for portName in info.progMeta.inputNames do
+      let key := s!"{instName}:{portName}"
+      -- Resolve the port POSITION only for ports that actually land in the
+      -- exported decl. `tgt` comes from a late name lookup, so an instance
+      -- whose type name was re-registered since it was added (export_program
+      -- onto a live name — iterating your own crystallized program) can carry
+      -- snapshot ports the current target no longer declares. Resolving those
+      -- eagerly aborted the whole export; the elaborator this replaced looped
+      -- the SERIALIZED inputs, and an unwired, unexposed port serializes to
+      -- nothing. A port that IS exposed or wired still errors here — it has to,
+      -- there is no position to bind it to.
+      let pos? := tgt.inputs.findIdx? (·.name == portName)
+      let unknownPort {α} : EngineM α :=
+        internalError s!"export: internal: '{instName}' input '{portName}' is not a declared port of '{tgt.name}'"
+      match exposed.find? fun (_, i, p) => s!"{i}:{p}" == key with
+      | some (inputName, _, _) =>
+        let some pos := pos? | unknownPort
+        let some ii := exposed.findIdx? (·.1 == inputName)
+          | internalError "export: internal: exposed input vanished"
+        let (eid, exprs') := (Tropical.Ir.eintern (.inputRef ⟨ii⟩)).run exprs
+        exprs := exprs'
+        instInputs := instInputs.push { port := ⟨pos⟩, value := eid }
+      | none =>
+        if let some expr := findWire instName portName then
+          let some pos := pos? | unknownPort
+          match (wireExprToResolved bodyCtx expr).run exprs with
+          | .error e => internalError e
+          | .ok (eid, exprs') =>
+            exprs := exprs'
+            instInputs := instInputs.push { port := ⟨pos⟩, value := eid }
+    declsR := declsR.push (.inst instName tgt.name instInputs)
+  -- Registry: per-instance target (export order, last write wins per key)
+  -- plus the transitive merge — the shape the lowering's relink expects.
+  let mut registry : Array (String × Tropical.Ir.ProgramIdx) := #[]
+  for instName in order do
+    let (ti, tgt) ← match resolveType instName with
+      | .error e => internalError e
+      | .ok r => pure r
+    registry := match registry.findIdx? (·.1 == tgt.name) with
+      | some i => registry.set! i (tgt.name, ti)
+      | none => registry.push (tgt.name, ti)
+    for (kk, vv) in tgt.registry do
+      if !registry.any (·.1 == kk) then registry := registry.push (kk, vv)
+  let prog : Tropical.Ir.Program := {
+    name, inputs := inputDecls, outputs := outputDecls
+    decls := declsR, assigns := assignsR, registry }
+  -- The acyclic-source contract, enforced where the program is constructed
+  -- (the session mirror can hold a cyclic graph after a refused compile).
+  if let some cyc := Tropical.Ir.findInstanceCycle? exprs prog then
+    internalError (Tropical.Ir.cycleViolationMessage name cyc)
+  let arena' := { st.arena with programs := st.arena.programs.push prog, exprs }
+  let rawIdx : Tropical.Ir.ProgramIdx := ⟨st.arena.programs.size⟩
+  let (rootEntry, _) ← registerResolved env name arena' rawIdx
   let entryNames := fun (k : String) => Json.arr <|
     (match getField? rootEntry k with
      | some (.arr ps) => ps
@@ -310,7 +445,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
         instances := st.instances.filter fun (n, _) => !exported.contains n
         wires := st.wires.filter fun w =>
           !(exported.contains w.instName
-            || (exprDependencies w.expr).any exported.contains)
+            || w.expr.deps.any exported.contains)
         graphOutputs := st.graphOutputs.filter fun (i, _) => !exported.contains i }
     let st ← env.state.get
     if !st.instances.isEmpty || !st.graphOutputs.isEmpty then
@@ -329,12 +464,13 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
 -- ── v2 ingest (load / merge) ─────────────────────────────────────────────────
 -- Port of `loadProgramAsSession` / `mergeProgramIntoSession` over the
 -- engine's mirror: the normalized v2 node (Zod-stripped, key order
--- preserved by JsonV) is walked directly; inline programDecls register
--- through the engine's own `registerOne` batches; instances resolve
--- through the engine specialization path with the load-path failure
--- shapes; wires store RAW (loadProgramAsSession sets inputExprNodes
--- directly — no auto-delay wrap). All failures are plain TS Errors on
--- the oracle → `internal_error` with the verbatim message.
+-- preserved by JsonV) is walked directly; instances resolve through the
+-- engine specialization path with the load-path failure shapes; wires
+-- store RAW (loadProgramAsSession sets inputExprNodes directly — no
+-- auto-delay wrap). The wire is a PATCH BAY: program definitions
+-- (programDecl) are refused at ingest — programs are authored in Lean
+-- (arrow builders). All failures are plain TS Errors on the oracle →
+-- `internal_error` with the verbatim message.
 
 open Tropical.Parse (JsonV) in
 private def jvBodyEntries (node : JsonV) (k : String) : Array JsonV :=
@@ -414,24 +550,17 @@ private def ingestProgram (env : Env) (node : Tropical.Parse.JsonV)
       if st.params.any (·.1 == name) then
         internalError s!"merge collision: param '{name}' already exists."
 
-  -- A loaded tropical_program_2 file may carry inline program definitions of
-  -- concrete (non-generic) types — a self-contained patch. These register
-  -- through the JSON front door (raise → elaborate → strata), the same path
-  -- `export_program` uses. The agent-facing `define_program` TOOL is gone; this
-  -- file-level ingest survives (the banks/fold test corpus defines FoldProbe
-  -- this way, and it is the only route left for a fold-bearing program, which no
-  -- Stdlib builder is).
+  -- Program definitions over the wire are RETIRED — the same
+  -- refusal-at-ingest pattern as raise's retiredOp. (The former ingest's
+  -- own justification — the FoldProbe fold corpus — self-cancelled: since
+  -- the raise refusal landed, a fold-bearing programDecl died at raise and
+  -- never reached the elaborator.)
   for d in jvBodyEntries node "decls" do
     if jvOp? d == some "programDecl" then
-      let some subName := jvStr? d "name"
-        | internalError s!"{context}: programDecl missing name"
-      let some subNode := d.getField? "program"
-        | internalError s!"{context}: programDecl '{subName}' missing program"
-      let parsed ← match Tropical.Parse.Raise.raiseProgram subNode with
-        | .error msg => internalError msg
-        | .ok p => pure p
-      for (n, p) in registrationBatch subName (renameProgram parsed subName) do
-        let _ ← registerOne env n p
+      let subName := (jvStr? d "name").getD "?"
+      internalError <|
+        s!"{context}: programDecl '{subName}': program definitions over the wire are retired — " ++
+        "programs are authored in Lean (arrow builders); load ingests instances + wiring + params of registered types."
 
   -- Params before instances (instances may reference them). Idempotent
   -- per name.
@@ -469,11 +598,20 @@ private def ingestProgram (env : Env) (node : Tropical.Parse.JsonV)
         let ob := orderOf q.1.1
         if oa == ob then Nat.blt p.2 q.2 else Nat.blt oa ob
       for ((input, exprV), _) in sorted do
-        let expr := exprV.toJson
-        match validateExpr expr s!"{instName}.{input}" with
+        -- Decode straight off the ordered JSON — the typed store's
+        -- ingest refusal site (no Lean.Json hop).
+        let path := s!"{instName}.{input}"
+        match WireExpr.ofJsonV exprV path with
         | .error msg => internalError msg
-        | .ok _ => pure ()
-        env.state.modify (·.setWireRaw instName input expr)
+        | .ok expr =>
+          -- Same "decodes ≠ compiles" gap the tool boundary closes: a file
+          -- may not carry a form only the engine builds, or the session it
+          -- loads into is dead on arrival. (The ingest keeps `internal_error`
+          -- — the failure is a property of the document, not of a named tool
+          -- argument.)
+          match expr.uncompilableOp? with
+          | some op => internalError (WireExpr.uncompilableMessage path op)
+          | none => env.state.modify (·.setWireRaw instName input expr)
 
   -- Input defaults — every instance in registry order (TS loops the
   -- whole registry, pre-existing instances included on merge).

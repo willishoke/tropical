@@ -1,6 +1,7 @@
 import Std.Data.HashMap
 import Lean.Data.Json
 import Tropical.Expr
+import Tropical.WireExpr
 import Tropical.Ir.Codec
 import Tropical.Plan
 
@@ -33,14 +34,12 @@ structure PortInfo where
   name    : String
   typeStr : Option String := none   -- display string ("float", "float[8]")
   typeObj : Option Json := none     -- structured PortType (get_info echo, wire checks)
-  default : Option Json := none     -- raw ExprNode default (inputs only)
+  default : Option WireExpr := none -- typed ExprNode default (inputs only)
 deriving Inhabited
 
-/-- A registered program's metadata (concrete or generic template). -/
+/-- A registered program's metadata. -/
 structure ProgMeta where
   programName : String
-  generic     : Bool
-  typeParams  : Option Json := none   -- {name: {type:'int', default?}} for generics
   inputs      : Array PortInfo := #[]
   outputs     : Array PortInfo := #[]
   registers   : Array PortInfo := #[]
@@ -54,20 +53,17 @@ private def parsePort (j : Json) : PortInfo :=
   { name    := (Tropical.Expr.getStrField? j "name").getD ""
     typeStr := match nonNull "type" with | some (.str s) => some s | _ => none
     typeObj := nonNull "type_obj"
-    default := nonNull "default" }
+    -- Entry defaults come from `literalDefault`, which only emits the
+    -- compilable literal-class forms — decode cannot fail on them; a
+    -- malformed default from a hand-written entry degrades to none.
+    default := (nonNull "default").bind fun j => (WireExpr.ofJson j).toOption }
 
 def ProgMeta.fromEntry (j : Json) : ProgMeta :=
   let ports (k : String) : Array PortInfo :=
     match Tropical.Expr.getField? j k with
     | some (.arr a) => a.map parsePort
     | _ => #[]
-  let typeParams := match Tropical.Expr.getField? j "type_params" with
-    | some .null | none => none
-    | some tp => some tp
   { programName := (Tropical.Expr.getStrField? j "program_name").getD ""
-    generic     := match Tropical.Expr.getField? j "generic" with
-                   | some (.bool b) => b | _ => false
-    typeParams
     inputs      := ports "inputs"
     outputs     := ports "outputs"
     registers   := ports "registers" }
@@ -89,13 +85,13 @@ structure InstanceInfo where
   resolvedIdx  : Option Tropical.Ir.ProgramIdx := none
 deriving Inhabited
 
-/-- A stored wire. Always the canonical authored form — MCP-set wires
-    carry the auto-delay wrap; load/merge-adopted wires are whatever the
-    state dump reconstructed. -/
+/-- A stored wire. The expression is TYPED — every ingest path decodes
+    through `WireExpr` (the refusal site), so the store cannot hold a
+    spelling the grammar lacks. -/
 structure Wire where
   instName : String
   portName : String
-  expr     : Json
+  expr     : WireExpr
 deriving Inhabited
 
 def Wire.key (w : Wire) : String := s!"{w.instName}:{w.portName}"
@@ -162,7 +158,7 @@ def removeInstance (st : SessionSt) (name : String) : SessionSt :=
   { st with instances := st.instances.filter (·.1 != name) }
 
 /-- TS-Map semantics: replacing an existing key keeps its position. -/
-def setWireRaw (st : SessionSt) (instName portName : String) (expr : Json) : SessionSt :=
+def setWireRaw (st : SessionSt) (instName portName : String) (expr : WireExpr) : SessionSt :=
   match st.wires.findIdx? (fun w => w.instName == instName && w.portName == portName) with
   | some i => { st with wires := st.wires.set! i { instName, portName, expr } }
   | none   => { st with wires := st.wires.push { instName, portName, expr } }

@@ -75,10 +75,11 @@ If you want a single sentence to hang the whole codebase off:
 That's not load-bearing vocabulary you have to use day-to-day, but it
 *is* the shape of the system: programs are graphs, parallel composition
 is the cartesian product, sequential composition is graph wiring,
-feedback is forbidden at the source-language layer (any cycle in source
-code throws `CycleViolation` at the elaborator — there is no `reg`/`delay`
-escape hatch; recursive filtering of live/external input is the ceded
-island, deferred to a future stateful sister runtime). The lowering is
+feedback is forbidden at the source-language layer (any cycle is a
+compile error at the boundary that constructs the graph — the session
+compile, export's direct construction (`Ir/Cycles.lean`) — there is no
+`reg`/`delay` escape hatch; recursive filtering of live/external input
+is the ceded island, deferred to a future stateful sister runtime). The lowering is
 what makes this concrete — and it is DIRECT, not a pipeline: the
 authoring surface (`Sig`, fourteen constructors) is already the trunk
 IR, so there is nothing left to progressively retire. The historical
@@ -94,25 +95,25 @@ Reading the path from top to bottom:
 ```
 arrow-combinator builders (Tropical.Stdlib / EmitArrow)  ·  MCP patch graphs  ·  tropical_program_2 JSON (load / export)
   │
-  │  There is no surface language: the literate .md parser was retired.
-  │  The stdlib and new instruments are authored as arrow builders that
-  │  `assemble` DIRECTLY into the resolved-IR DAG (EmitArrow.Sig → Nodes).
-  │  The JSON front door survives for load/merge/export: `raise`
-  │  (lean/Tropical/Parse/Raise.lean) → ParsedProgram → `elaborate`.
-  ▼
-ParsedProgram (lean/Tropical/Parse/Nodes.lean)   — JSON-ingest path only
-  refs are NameRefNode placeholders; raise does no scope analysis.
-  │
-  │  elaborate (lean/Tropical/Ir/Elaborator.lean) — drops names, enforces
-  │              the acyclic-source invariant
-  │              every NameRef is replaced by a direct decl-object pointer.
-  │              inter-instance cycles in source code throw
-  │              CycleViolation here (Tier-2 port-detailed error).
+  │  There is no surface language: the literate .md parser was retired,
+  │  and the ELABORATOR WITH IT (2026-07-26) — there is no ParsedProgram
+  │  and no name-resolution pass. The stdlib and new instruments are
+  │  authored as arrow builders that `assemble` DIRECTLY into the
+  │  resolved-IR DAG (EmitArrow.Sig → Nodes). The JSON front door is a
+  │  PATCH BAY: `normalizeProgramFile` (lean/Tropical/Parse/Raise.lean,
+  │  schema check + node/metadata split) → the session ingest
+  │  (Engine/ProgramIO.lean) walks the node directly — instances +
+  │  wiring + params of REGISTERED types. Ingest is the refusal site:
+  │  a programDecl (a program body over the wire) dies with the
+  │  retirement message; wire expressions are a TYPED inductive
+  │  (Tropical.WireExpr — the decoder is the refusal site; no
+  │  combinator/binder/state-op spellings exist) —
+  │  the grammar you can spell is the language that compiles.
   ▼
 ResolvedProgram (lean/Tropical/Ir/Nodes.lean)
   DAG-shaped graph IR — cycles are not representable in a valid
-  resolved program (they're rejected upstream by the elaborator
-  or the session materializer). There is no state primitive: kernels
+  resolved program (they're rejected at every constructing boundary
+  via Ir/Cycles.lean). There is no state primitive: kernels
   are closed-form `f(τ, params)`. (`reg`/`next`/`delay` are gone —
   there is no IR node for them and no way to author one; recursive
   feedback is the ceded island, deferred to a future stateful sister runtime.)
@@ -125,15 +126,15 @@ ResolvedProgram (lean/Tropical/Ir/Nodes.lean)
   │                      in place; the fractal session path skips it and
   │                      keeps instances as kernel boundaries  (InlineInstances.lean)
   │   identityElim     — categorical identity-law peephole  (IdentityElim.lean)
-  │   toResolved       — the type boundary (Strata/EArena.lean): reify the
-  │                      reachable graph into the emit's CoreArena,
-  │                      REFUSING every retired constructor. A JSON file
-  │                      can still SPELL fold/scan/generate/tag/match/let
-  │                      (raise parses them); nothing lowers them any
-  │                      more, so they die here with the retirement
-  │                      message. Combinator programs are authored in
-  │                      Lean — the host language is the meta-level
-  │                      (Array.map builds coefficient tables at
+  │   toResolved       — the reachability GC (Strata/EArena.lean): copy the
+  │                      evaluator-reachable graph into a fresh arena of the
+  │                      SAME vocabulary (there is one expression type,
+  │                      `ENode`; the former CNode/CoreArena twin dissolved
+  │                      into it). No refusal remains here — retired
+  │                      constructors are refused at raise and are
+  │                      unspellable in the IR. Combinator programs are
+  │                      authored in Lean — the host language is the
+  │                      meta-level (Array.map builds coefficient tables at
   │                      assemble time); only structure a backend wants
   │                      AS DATA earns an IR node, the way `bankSum` did.
   ▼
@@ -147,8 +148,8 @@ ResolvedProgram (lowered)
   floats included (no associativity precondition). The waist of the
   hourglass: the smallest sub-IR sufficient for any per-sample
   evaluator — and, because `Sig` is this same constructor set, the
-  authoring layer and the trunk are ONE vocabulary with the elaborate/
-  assemble seam between them.
+  authoring layer and the trunk are ONE vocabulary with the `assemble`
+  seam between them.
 ```
 
 Sessions (the MCP/runtime view of a graph in flight) reuse the
@@ -174,12 +175,12 @@ SessionState  (instances + wiring + dac.out + params)
 tropical_plan_5  (instance_functions[] + sinks[] + sources[])
 ```
 
-**The IR is acyclic by construction.** Source-level cycles are
-rejected at the elaborator — there is no register to break them
-through. Session-level cycles in MCP-built graphs are rejected too:
-the session-acyclicity check (`lean/Tropical/{Engine,Lowering}.lean`)
-is a plain "no cycles at all" rule, run as an invariant at
-compileSession's entry. Nothing breaks cycles for you — there are no
+**The IR is acyclic by construction.** There is no register to break a
+cycle through, so every boundary that constructs a graph rejects them
+(`Ir/Cycles.lean`): the session-acyclicity check
+(`lean/Tropical/{Engine,Lowering}.lean`) is a plain "no cycles at all"
+rule, run as an invariant at compileSession's entry, and
+`export_program`'s direct construction enforces the same contract. Nothing breaks cycles for you — there are no
 per-wire delays, so wires add no latency, and a back-edge (in MCP
 mutations or hand-written JSON) is a compile error, not a one-sample
 feedback path. Recursive feedback on live/external input is the ceded
@@ -272,15 +273,17 @@ Two distinct JSON schemas; do not confuse them.
 
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
-| `tropical_program_2` | `lean/Tropical/Parse/Raise.lean` (JSON ingest) | The high-detail input shape: a program with typed ports, a body block of decls/assigns. The JSON front door for `load`/`merge`/`export_program` — a loaded file may carry inline concrete program definitions. (No `type_params`: generics are retired. The stdlib is authored as `Tropical.Stdlib` arrow builders, not this schema.) |
+| `tropical_program_2` | `lean/Tropical/Parse/Raise.lean` (JSON ingest) | The PATCH-BAY shape: instances of registered types + wiring + params, a body block of instanceDecls/paramDecls/outputAssigns. The JSON front door for `load`/`merge` (and `save`/`export_program`'s output serialization). Program DEFINITIONS over the wire are retired — a programDecl is refused at ingest with the retirement message; wire expressions decode into the typed session grammar (`Tropical.WireExpr`), which cannot spell combinators/binders/state ops. (Programs are authored as `Tropical.Stdlib`/EmitArrow arrow builders, not this schema.) |
 | `tropical_plan_5`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: a root instruction stream (instances nested as `children`) plus `sinks[]` (device-bound outputs: sum input slots × gain → channel) and `sources[]` (runtime-bound inputs: canonical `[tick, rate]`; the dual of sinks). The engine consumes it as the codegen manifest; the web build derives a `.wasm` + a trimmed `KernelManifest` from it. The engine still accepts the older `tropical_plan_4` (single-kernel form, top-level `output_targets` temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 with the canonical sources at parse time. |
 
 Going from the first to the second without losing meaning is exactly
-what the direct lowering does (elaborate → inline → identityElim →
-toResolved → partitionKernel). A `tropical_program_2` file that spells
-a retired construct (`fold`/`scan`/`generate`/`tag`/`match`/`let`)
-parses but refuses to compile at the `toResolved` boundary — nothing
-lowers combinators or sum types any more.
+what the session compile does (ingest → sessionToResolvedRoot →
+inline → identityElim → toResolved → partitionKernel). A
+`tropical_program_2` file that carries a program body (`programDecl`)
+or spells a retired construct in a wire (`fold`/`scan`/…, generics,
+state ops) does not load: ingest refuses it with the retirement
+message, and the session wire grammar has no spelling for the rest.
+Nothing past the codec can carry it.
 
 ## Layout
 
@@ -290,18 +293,18 @@ whole stack — compiler + session + runtime FFI + MCP server, one binary.
 ```
 lean/                 Lean 4: the production compiler + MCP server (one binary)
   Main.lean           the MCP front door → the `frontend` binary
-  Diffcli.lean        the `diffcli` CLI (compile / compile-wasm / render / emit-ir / emit-msl / raise)
+  Diffcli.lean        the `diffcli` CLI (compile / compile-wasm / render / emit-ir / emit-msl)
   Tropicaltest.lean   golden + native realization-variant equivalence runner
   ffi/                C shim to libtropical (shim.c, built by `make lean`)
   Tropical/
-    Parse/            JSON ingest: Nodes (ParsedProgram), Raise (tropical_program_2),
-                        BoundLower, OrderedJson  (the literate .md surface parser is retired)
+    Parse/            JSON ingest: Raise (normalizeProgramFile — the patch-bay
+                        front door), Nodes (ScalarKind), OrderedJson (JsonV)
+                        (the surface parser AND the elaborator are retired)
     Stdlib.lean       the stdlib as 15 arrow-combinator builders — the boot chain
     EmitArrow/        the arrow authoring substrate (Sig, Term, Numerics, Patch, Modal, Gong)
-    Ir/               elaborate → lower → emit
-      Elaborator.lean   names → decl pointers; CycleViolation on cyclic source
+    Ir/               lower → emit (authoring assembles directly; no elaborate)
       Strata.lean (the direct lowering) + Strata/{Basic,EArena,InlineInstances,IdentityElim}
-      Core, Nodes, Emit, CompileResolved, Codec, WireProgram, Recursion
+      Core, Nodes, Cycles, Emit, CompileResolved, Codec, WireProgram
     Engine, Session, Compile, Lowering, Wiring   engine-side session compile
     Plan.lean         tropical_plan_5 schema
     Ffi.lean          FFI bridge to libtropical (Runtime, DAC, Param)

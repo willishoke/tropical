@@ -137,24 +137,19 @@ structure SlotExpansion where
   arraySize? : Option Nat := none
 deriving Inhabited
 
-/-- Port of `expandPortToSlots`: scalar → one slot of its kind; alias →
-    one opaque float slot; array → one array slot of size ∏shape. -/
+/-- Port of `expandPortToSlots`: scalar → one slot of its kind;
+    array → one array slot of size ∏shape (dims are literal — type-param
+    dims were retired with generics). -/
 def expandPortToSlots (baseName : String) (t? : Option CorePortType) :
     Except String SlotExpansion := do
   match t? with
   | none | some (.scalar _) =>
     let k := match t? with | some (.scalar k) => k | _ => .float
     return { names := #[baseName], types := #[k] }
-  | some (.alias _) =>
-    return { names := #[baseName], types := #[.float] }
   | some (.array _ shape) =>
     let mut total := 1
     for dim in shape do
-      match dim with
-      | .lit n => total := total * n.toFloat.toUInt64.toNat
-      | .unresolved =>
-        throw (s!"expandPortToSlots: array port '{baseName}' has unresolved "
-          ++ "type-param dimension; ensure specialize ran on the owning program")
+      total := total * dim.toFloat.toUInt64.toNat
     return { arraySize? := some total }
 
 private def slotKey (instPath portName : String) : String :=
@@ -189,28 +184,20 @@ def allocateOutputSlots (s : SessionAlloc) (instPath : String) (prog : CoreProgr
         slotCount := s.slotCount + exp.names.size }
   return s
 
-/-- The array-input alias quotient (`tryAliasInputArrayWire`). -/
+/-- The array-input alias quotient (`tryAliasInputArrayWire`). Only a
+    string-named ref aliases (numeric output indices never did — the
+    old reader used the string accessor). -/
 private def tryAliasInputArrayWire (s : SessionAlloc) (wires : Array Tropical.Wire)
     (instPath portName : String) : Option ArraySlotInfo := do
   let w ← wires.find? fun w => w.instName == instPath && w.portName == portName
   match w.expr with
-  | .obj _ =>
-    if opOf? w.expr == some "ref" then do
-      let srcInst ← getStrField? w.expr "instance"
-      let srcOut ← getStrField? w.expr "output"
-      let pmeta ← s.outputPortMeta.get? (slotKey srcInst srcOut)
-      let slot ← pmeta.arraySlot?
-      let size ← pmeta.arraySize?
-      pure { slot, size }
-    else if opOf? w.expr == some "sessionArraySlot" then do
-      let idx ← match getField? w.expr "index" with
-        | some (.num n) => some n.toFloat.toUInt64.toNat
-        | _ => none
-      let size ← match getField? w.expr "size" with
-        | some (.num n) => some n.toFloat.toUInt64.toNat
-        | _ => none
-      pure { slot := idx, size }
-    else none
+  | .ref srcInst (.name srcOut) => do
+    let pmeta ← s.outputPortMeta.get? (slotKey srcInst srcOut)
+    let slot ← pmeta.arraySlot?
+    let size ← pmeta.arraySize?
+    pure { slot, size }
+  | .sessionArraySlot idx (some size) =>
+    pure { slot := idx, size }
   | _ => none
 
 /-- Port of `allocateInputSlots`. Idempotent; the alias check binds a
@@ -382,7 +369,7 @@ private def emitWriteSlots (s : SessionAlloc) (instanceName : String)
 -- ─────────────────────────────────────────────────────────────
 
 private def instParts : CoreBodyDecl → Option (String × String)
-  | .inst name typeKey _ _ => some (name, typeKey)
+  | .inst name typeKey _ => some (name, typeKey)
   | _ => none
 
 /-- The wire expression bound to a child input port, mirroring
@@ -391,7 +378,7 @@ private def instParts : CoreBodyDecl → Option (String × String)
 private def childWireExpr (decl : CoreBodyDecl) (portIdx : Nat)
     (portDecl : CoreInputDecl) : Option Tropical.Ir.ExprId :=
   let wired := match decl with
-    | .inst _ _ _ inputs => (inputs.find? (·.port.idx == portIdx)).map (·.value)
+    | .inst _ _ inputs => (inputs.find? (·.port.idx == portIdx)).map (·.value)
     | _ => none
   wired <|> portDecl.default?
 
@@ -401,8 +388,8 @@ private def childWireExpr (decl : CoreBodyDecl) (portIdx : Nat)
     body — the exact linearization `EmitLlvm.emitKernelBlock` walks),
     and its per-output binding-time stages. `inputStages` is the stage
     each of this program's input ports binds at (from the parent). -/
-partial def partitionKernel (instancePath : String) (prog : CoreProgram)
-    (arena : Tropical.Ir.CoreArena)
+def partitionKernel (instancePath : String) (prog : CoreProgram)
+    (arena : Tropical.Ir.ExprArena)
     (wires : Array Tropical.Wire) (s : SessionAlloc) (acc : Accumulators)
     (inputSlotOverride : Array (Nat × Nat) := #[])
     (inputArraySlots : Array (Nat × ArraySlotInfo) := #[])
@@ -427,8 +414,17 @@ partial def partitionKernel (instancePath : String) (prog : CoreProgram)
     let some (childName, typeKey) := instParts instDecls[k]!
       | throw "partitionKernel: non-instance decl in instance table (port bug)"
     let childPath := joinInstancePath instancePath childName
-    let some declType := prog.registryGet? typeKey
-      | throw s!"partitionKernel: instance '{childPath}' typeKey '{typeKey}' missing from registry"
+    -- Subtype binder: the registry hit rides with its decrease fact so
+    -- the recursion below stays inside the for-loop (see the sizeOf
+    -- workhorse next to `registryGet?`).
+    let declTypeS : {q : CoreProgram // sizeOf q < sizeOf prog} ←
+      match hr : prog.registryGet? typeKey with
+      | some c =>
+        pure (⟨c, CoreProgram.sizeOf_lt_of_registryGet? hr⟩ :
+          {q : CoreProgram // sizeOf q < sizeOf prog})
+      | none =>
+        throw s!"partitionKernel: instance '{childPath}' typeKey '{typeKey}' missing from registry"
+    let declType := declTypeS.1
 
     s ← allocateOutputSlots s childPath declType
     s ← allocateInputSlots s wires childPath declType
@@ -472,7 +468,7 @@ partial def partitionKernel (instancePath : String) (prog : CoreProgram)
       childInputStages := childInputStages.push stage
 
     let (childFn, s', acc', childBlocks, childOuts) ←
-      partitionKernel childPath declType arena wires s acc
+      partitionKernel childPath declTypeS.1 arena wires s acc
         childInputMap childInputArrayMap #[] childInputStages
     s := s'
     acc := acc'
@@ -550,6 +546,8 @@ partial def partitionKernel (instancePath : String) (prog : CoreProgram)
     nextArrayRaw := acc.nextArrayRaw + plan.arraySlotCount }
 
   return (fn, s, acc, stageBlocks, outStages)
+termination_by sizeOf prog
+decreasing_by exact declTypeS.2
 
 -- ─────────────────────────────────────────────────────────────
 -- Session compile (compile_session_slotted.ts)
@@ -570,7 +568,7 @@ structure SessionInput where
   /-- The shared hash-consed expression DAG that every instance's (and the
       root's) leaf `ExprId`s index into — one arena for root + registry
       (Phase B). -/
-  arena : Tropical.Ir.CoreArena
+  arena : Tropical.Ir.ExprArena
   mode : Tropical.Plan.CompilationMode := .fused
 
 /-- The synthetic-root session input: one instance — the root itself at
@@ -578,7 +576,7 @@ structure SessionInput where
     no session wires. The shape every carrier/patch-graph lowering
     compiles through `compileSession`; `params`/`alloc` carry a graph's
     live knobs when it has any. -/
-def SessionInput.forRoot (root : CoreProgram) (arena : Tropical.Ir.CoreArena)
+def SessionInput.forRoot (root : CoreProgram) (arena : Tropical.Ir.ExprArena)
     (params : Array (String × Json) := #[])
     (alloc : Tropical.Lowering.Alloc := {}) : SessionInput :=
   { instances := #[(rootInstancePath, root)]
@@ -620,27 +618,35 @@ private def emitSinks (s : SessionAlloc) (graphOutputs : Array (String × String
   return #[{ inputs, gain := Tropical.Plan.defaultSinkGain, target := 0 }]
 
 /-- `preallocateOutputsRecursive`: parent before children, body order. -/
-private partial def preallocOutputs (s : SessionAlloc) (path : String)
+private def preallocOutputs (s : SessionAlloc) (path : String)
     (prog : CoreProgram) : Except String SessionAlloc := do
   let mut s ← allocateOutputSlots s path prog
   for d in prog.instances do
     if let some (childName, typeKey) := instParts d then
-      let some childType := prog.registryGet? typeKey
-        | throw s!"compileSession: instance '{path}.{childName}' typeKey '{typeKey}' missing from registry"
-      s ← preallocOutputs s (joinInstancePath path childName) childType
+      match hr : prog.registryGet? typeKey with
+      | none =>
+        throw s!"compileSession: instance '{path}.{childName}' typeKey '{typeKey}' missing from registry"
+      | some childType =>
+        s ← preallocOutputs s (joinInstancePath path childName) childType
   return s
+termination_by sizeOf prog
+decreasing_by exact CoreProgram.sizeOf_lt_of_registryGet? hr
 
 /-- `preallocateInputsRecursive`: runs AFTER all outputs so the alias
     check can see every producer's meta. -/
-private partial def preallocInputs (s : SessionAlloc) (wires : Array Tropical.Wire)
+private def preallocInputs (s : SessionAlloc) (wires : Array Tropical.Wire)
     (path : String) (prog : CoreProgram) : Except String SessionAlloc := do
   let mut s ← allocateInputSlots s wires path prog
   for d in prog.instances do
     if let some (childName, typeKey) := instParts d then
-      let some childType := prog.registryGet? typeKey
-        | throw s!"compileSession: instance '{path}.{childName}' typeKey '{typeKey}' missing from registry"
-      s ← preallocInputs s wires (joinInstancePath path childName) childType
+      match hr : prog.registryGet? typeKey with
+      | none =>
+        throw s!"compileSession: instance '{path}.{childName}' typeKey '{typeKey}' missing from registry"
+      | some childType =>
+        s ← preallocInputs s wires (joinInstancePath path childName) childType
   return s
+termination_by sizeOf prog
+decreasing_by exact CoreProgram.sizeOf_lt_of_registryGet? hr
 
 /-- The session → `tropical_plan_5` lowering: two-phase slot
     pre-allocation, accumulator seeding from the session I/O array

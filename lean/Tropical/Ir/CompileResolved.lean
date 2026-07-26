@@ -37,37 +37,31 @@ structure Context where
 deriving Inhabited
 
 /-- TS `inputPortTypes` derivation (compile_resolved.ts): scalar → it,
-    alias → base, array → element kind (alias element → its base). -/
+    array → its element kind. -/
 private def inputPortType (t? : Option CorePortType) : ScalarType :=
   match t? with
   | none => .float
   | some (.scalar k) => k
-  | some (.alias base) => base
-  | some (.array (.scalar k) _) => k
-  | some (.array (.aliased base) _) => base
+  | some (.array k _) => k
 
 private def shapeDimNat (n : JsonNumber) : Nat :=
   n.toFloat.toUInt64.toNat
 
-/-- TS `outputPortScalarCount`: scalar/alias → 1; array → product of
-    shape dims, throwing on unresolved type-param dims. -/
+/-- TS `outputPortScalarCount`: scalar → 1; array → product of shape
+    dims (literal — type-param dims were retired with generics). -/
 private def outputPortScalarCount (decl : CoreOutputDecl) : Except String Nat :=
   match decl.type? with
-  | none | some (.scalar _) | some (.alias _) => .ok 1
+  | none | some (.scalar _) => .ok 1
   | some (.array _ shape) => do
     let mut total := 1
     for dim in shape do
-      match dim with
-      | .lit n => total := total * shapeDimNat n
-      | .unresolved =>
-        .error (s!"compileResolved: output port '{decl.name}' has unresolved "
-          ++ "type-param dimension; ensure specialize ran first")
+      total := total * shapeDimNat dim
     .ok total
 
 /-- Compile a post-strata `CoreProgram` to a `PerInstancePlan`. The
     `arena` is the shared hash-consed DAG the program's leaf `ExprId`s
     index into (Phase B: one arena for the whole root + registry). -/
-def compileResolved (prog : CoreProgram) (arena : Tropical.Ir.CoreArena)
+def compileResolved (prog : CoreProgram) (arena : Tropical.Ir.ExprArena)
     (ctx : Context := {}) :
     Except String Tropical.Plan.PerInstancePlan := do
   -- ── Output expressions: map output position → expr, in port order ──

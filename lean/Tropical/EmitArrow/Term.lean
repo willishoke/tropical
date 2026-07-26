@@ -272,11 +272,11 @@ instance : Inhabited ArrowTerm := ⟨.sum #[]⟩
     them into generator clocks) is exactly what makes the algebra TOTAL: the slide
     is function composition of clock transforms, so `warp ∘ warp`, `warp ∘ swarp`,
     and `swarp ∘ swarp` all compose — there is no case it cannot reduce. -/
-partial def normalize : ArrowTerm → ArrowTerm
+def normalize : ArrowTerm → ArrowTerm
   | .gen v name clk => .gen v name clk
   | .scale w t => .scale w (normalize t)
   | .arrUn f t => .arrUn f (normalize t)
-  | .sum ts => .sum (ts.map normalize)
+  | .sum ts => .sum (ts.attach.map fun ⟨x, _⟩ => normalize x)
   | .warp φ t => .warp φ (normalize t)
   | .swarp mw mod t => .swarp mw (normalize mod) (normalize t)
   | .konst s => .konst s
@@ -289,7 +289,7 @@ partial def normalize : ArrowTerm → ArrowTerm
     `scale`/`arrUn` are the pointwise ops; `sum` is the left-assoc fold
     `((t₀ + t₁) + t₂)`. Instance names are uniquified by position (names are
     inlined away post-strata, so they never reach the emitted bytes). -/
-partial def emitTermC (cmod : Clock → Builder → Clock × Builder) :
+def emitTermC (cmod : Clock → Builder → Clock × Builder) :
     ArrowTerm → Builder → Sig × Builder
   | .gen v name clk, b =>
     let (clk', b) := cmod clk b
@@ -345,13 +345,21 @@ partial def emitTermC (cmod : Clock → Builder → Clock × Builder) :
       | none => v
     b.osc v s!"{name}{b.decls.size}" clk'
   | .sum ts, b =>
-    match ts[0]? with
+    -- emit every summand in order, then fold the left-assoc sum — the
+    -- same builder sequence and Sig tree as the old head/tail fold.
+    let (sigs, b) := ts.attach.foldl
+      (fun (acc : Array Sig × Builder) ti =>
+        let (s, b') := emitTermC cmod ti.1 acc.2
+        (acc.1.push s, b'))
+      ((#[] : Array Sig), b)
+    match sigs[0]? with
     | none => (lit 0, b)
-    | some t0 =>
-      let (s0, b) := emitTermC cmod t0 b
-      (ts.extract 1 ts.size).foldl
-        (fun (acc : Sig × Builder) ti => let (s, b) := emitTermC cmod ti acc.2; (add acc.1 s, b))
-        (s0, b)
+    | some s0 => ((sigs.extract 1 sigs.size).foldl add s0, b)
+termination_by t _ => sizeOf t
+decreasing_by
+  all_goals first
+    | decreasing_tactic
+    | (have := Array.sizeOf_lt_of_mem ti.2; simp_all; omega)
 
 /-- Emit a (normalized) term at the identity clock context — the public entry. -/
 def emitTerm (t : ArrowTerm) (b : Builder) : Sig × Builder :=

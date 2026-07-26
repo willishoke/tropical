@@ -208,7 +208,11 @@ describe('wire to dac.out — error envelopes', () => {
       set: [{ instance: 'dac', input: 'out', expr: 0.5 }],
     })
     expect(env.code).toBe('invalid_value')
-    expect(env.param).toBe('expr')
+    // `set[].expr`, not a bare `expr` — the same qualified form every sibling
+    // field of a set[] entry already used (`set[].instance`, `set[].input`,
+    // `set[].combine`, and the next test's `set[].input`).
+    expect(env.param).toBe('set[].expr')
+    expect(env.value).toBe(0.5)
   })
 
   test('wrong dac port name rejected', async () => {

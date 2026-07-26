@@ -35,14 +35,17 @@ def programFormatDoc : String := r#"# tropical program format
 
 Programs are the unified representation for all DSP in tropical. tropical is
 closed-form-only: a program is a pure function of a time coordinate, with
-declared ports and a body that declares params/instances/nested programs and
-assigns outputs. There is no per-sample state — no `reg`, no `delay`, no
-feedback.
+declared ports and a body that declares params/instances and assigns outputs.
+There is no per-sample state — no `reg`, no `delay`, no feedback.
 
 ## tropical_program_2
 
-The body is a `block` of `decls` (param_decl, instance_decl, program_decl) and
-`assigns` (output_assign). Ports sit alongside the body.
+The wire format is a PATCH BAY: instances of registered program types, wiring,
+and params. The body is a `block` of `decls` (param_decl, instance_decl) and
+`assigns` (output_assign). **Program definitions over the wire are retired** —
+programs are authored in Lean (arrow builders) and registered at boot (or
+crystallized from a session with `export_program`); a file carrying a
+`programDecl` is refused at ingest.
 **Audio output is an `output_assign` in the body with name `"dac.out"`** — wire
 the signal you want heard to it. Session metadata — `params`, `config` — is
 top-level.
@@ -54,47 +57,6 @@ top-level.
     "op": "block",
     "decls": [
       {
-        "op": "programDecl",
-        "name": "Gain",
-        "program": {
-          "op": "program",
-          "name": "Gain",
-          "ports": {
-            "inputs": [
-              "input",
-              "k"
-            ],
-            "outputs": [
-              "out"
-            ]
-          },
-          "body": {
-            "op": "block",
-            "decls": [],
-            "assigns": [
-              {
-                "op": "outputAssign",
-                "name": "out",
-                "expr": {
-                  "op": "mul",
-                  "args": [
-                    {
-                      "op": "input",
-                      "name": "input"
-                    },
-                    {
-                      "op": "input",
-                      "name": "k"
-                    }
-                  ]
-                }
-              }
-            ],
-            "value": null
-          }
-        }
-      },
-      {
         "op": "instanceDecl",
         "name": "osc",
         "program": "FixedSinOsc",
@@ -104,15 +66,15 @@ top-level.
       },
       {
         "op": "instanceDecl",
-        "name": "amp",
-        "program": "Gain",
+        "name": "shaper",
+        "program": "SoftClip",
         "inputs": {
           "input": {
             "op": "ref",
             "instance": "osc",
             "output": "sine"
           },
-          "k": 0.5
+          "drive": 4
         }
       }
     ],
@@ -122,7 +84,7 @@ top-level.
         "name": "dac.out",
         "expr": {
           "op": "ref",
-          "instance": "amp",
+          "instance": "shaper",
           "output": "out"
         }
       }
@@ -131,29 +93,27 @@ top-level.
   }
 }
 
-Key fields: schema, name, ports (inputs/outputs/type_defs), body (block),
-sample_rate, and top-level session metadata (params, config). Send
-a signal to the speakers with a body `output_assign` named `"dac.out"`.
-(File-root `audio_outputs` is deprecated — don't use it.)
+Key fields: schema, name, ports (inputs/outputs), body (block), sample_rate,
+and top-level session metadata (params, config). Send a signal to the speakers
+with a body `output_assign` named `"dac.out"`. (File-root `audio_outputs` is
+deprecated — don't use it.)
 
 Decl node shapes:
 - param_decl:    { op, name, value? }
-- instance_decl: { op, name, program, inputs?, type_args? }
-- program_decl:  { op, name, program: <program node> }
+- instance_decl: { op, name, program, inputs? }
 
 Assign node shapes:
 - output_assign: { op, name, expr }
 
 ## Expression node format (ExprNode)
 
-Used in instance input wiring and inline program process definitions.
+Used in instance input wiring.
 
 - **Literal**: `3.14` or `true`
 - **Reference**: `{ "op": "ref", "instance": "osc", "output": "out" }` — routes another instance's output to this input
-- **Input port**: `{ "op": "input", "name": "freq" }` — (inside program definitions only)
 - **Param**: `{ "op": "param", "name": "cutoff" }`
-- **Binary**: `{ "op": "mul", "args": [<expr>, <expr>] }` — add, sub, mul, div, floor_div, mod, pow; lt, lte, gt, gte, eq, neq; bit_and, bit_or, bit_xor, lshift, rshift
-- **Unary**: `{ "op": "neg", "args": [<expr>] }` — neg, abs, not, bit_not
+- **Binary**: `{ "op": "mul", "args": [<expr>, <expr>] }` — add, sub, mul, div, floorDiv, mod, ldexp; lt, lte, gt, gte, eq, neq; and, or; bitAnd, bitOr, bitXor, lshift, rshift
+- **Unary**: `{ "op": "neg", "args": [<expr>] }` — neg, abs, not, bitNot, sqrt, floor, ceil, round, floatExponent, toInt, toBool, toFloat
 - **Clamp / Select / Array / Index / Builtins**: see the program catalog and stdlib for worked examples.
 "#
 
@@ -192,11 +152,9 @@ def renderProgramCatalog (st : Tropical.SessionSt) : String := Id.run do
   for name in st.catalogOrder do
     match st.programs.get? name with
     | some pm =>
-      if pm.generic then
-        continue
       let inputParts := pm.inputs.map fun p =>
         match p.default with
-        | some v => s!"{p.name}={v.compress}"
+        | some v => s!"{p.name}={v.toJson.compress}"
         | none => p.name
       let inputsJoined := String.intercalate ", " inputParts.toList
       let outputsJoined := String.intercalate ", " pm.outputNames.toList

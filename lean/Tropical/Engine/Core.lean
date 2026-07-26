@@ -7,7 +7,6 @@ import Tropical.Session
 import Tropical.Lowering
 import Tropical.Parse.Nodes
 import Tropical.Parse.Raise
-import Tropical.Ir.Elaborator
 import Tropical.Ir.Strata
 import Tropical.Ir.Core
 import Tropical.Ir.WireProgram
@@ -32,7 +31,7 @@ because every downstream handler module consumes them.
 namespace Tropical.Engine
 
 open Lean (Json toJson)
-open Tropical.Expr (getField? getStrField? opOf? validateExpr exprDependencies prettyExpr)
+open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
 structure Env where
@@ -130,7 +129,7 @@ private def scalarTypeJson (k : String) : Json :=
     connection check) and the structured PortType Json (echoed verbatim
     as the `got` field of `type_mismatch` envelopes — TS passes the
     PortType object itself). -/
-private def srcTypeOf (st : SessionSt) (node : Json) : Option (PortType × Json) :=
+private def srcTypeOf (st : SessionSt) (node : WireExpr) : Option (PortType × Json) :=
   match node with
   | .num _  => some (.scalar .float, scalarTypeJson "float")
   | .bool _ => some (.scalar .bool, scalarTypeJson "bool")
@@ -138,30 +137,41 @@ private def srcTypeOf (st : SessionSt) (node : Json) : Option (PortType × Json)
     some (.array { display := "float", kind := some .float } #[items.size],
           Json.mkObj [("kind", Json.str "array"), ("element", Json.str "float"),
                       ("shape", Json.arr #[Lean.toJson items.size])])
-  | .obj _ =>
-    if opOf? node == some "ref" then do
-      let instName ← getStrField? node "instance"
-      let info ← st.findInstance? instName
-      let outIdx ← match getField? node "output" with
-        | some (.num n) => some n.toFloat.toUInt64.toNat
-        | some (.str s) => info.progMeta.outputNames.idxOf? s
-        | _ => none
-      let port ← info.progMeta.outputs[outIdx]?
-      let typeObj ← port.typeObj
-      let parsed ← parsePortType? typeObj
-      pure (parsed, typeObj)
-    else none
+  | .ref instName output => do
+    let info ← st.findInstance? instName
+    let outIdx ← match output with
+      | .index n => some n.toFloat.toUInt64.toNat
+      | .name s => info.progMeta.outputNames.idxOf? s
+    let port ← info.progMeta.outputs[outIdx]?
+    let typeObj ← port.typeObj
+    let parsed ← parsePortType? typeObj
+    pure (parsed, typeObj)
   | _ => none
 
-def adaptInputExpr (st : SessionSt) (node : Json) (dstTypeObj : Option Json)
-    (instanceName inputName : String) : EngineM Json := do
+/-- `raw?` is the caller's own JSON for `node`, when it had one, and `param`
+    names the argument it arrived in.
+
+    Both exist so the envelope describes what the AGENT sent. `value` must echo
+    the caller's spelling — decoding canonicalizes aliases (`{op:'array',items}`
+    and `{op:'arrayLiteral',values}` both become a bare array, `paramExpr`
+    becomes `param`) — and `param` must name a field the call actually has:
+    `set[].expr` on `wire`, `initial_expr` on `wire_chain`, `source` on
+    `fan_out`. A bare `"expr"` names an argument no tool takes, so an agent
+    doing param-directed repair cannot find it.
+
+    Wires the engine synthesizes (chain links, zip pairs, fan-in sums) have no
+    caller JSON; they pass `none` and echo the canonical form, which is the only
+    form that exists for them. -/
+def adaptInputExpr (st : SessionSt) (node : WireExpr) (dstTypeObj : Option Json)
+    (instanceName inputName : String) (raw? : Option Json := none)
+    (param : String := "expr") : EngineM WireExpr := do
   match srcTypeOf st node with
   | none => pure node
   | some (srcType, srcTypeJson) =>
     let dstType := dstTypeObj.bind parsePortType?
     let check := checkArrayConnection (some srcType) dstType node
     if !check.compatible then
-      throwPredicate .typeMismatch "expr" node "type_compatible"
+      throwPredicate .typeMismatch param (raw?.getD node.toJson) "type_compatible"
         dstTypeObj (some srcTypeJson)
         (some s!"Type mismatch on '{instanceName}'.{inputName}: {check.error.getD ""}")
     pure (check.broadcastExpr.getD node)

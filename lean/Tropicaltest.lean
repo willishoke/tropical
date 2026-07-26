@@ -7,7 +7,6 @@ import Tropical.Ir.EmitLlvm
 import Tropical.Ir.EmitMsl
 import Tropical.PlanDecode
 import Tropical.Parse.Raise
-import Tropical.Ir.Elaborator
 import Tropical.Ir.Strata
 import Tropical.Ir.Core
 import Tropical.Ir.CompileResolved
@@ -108,6 +107,18 @@ def main (args : List String) : IO UInt32 := do
   IO.println "reduce coverage (ReduceBegin/End ≡ unrolled, EmitLlvm):"
   total := total + 1
   if !(← runReduceCoverage) then failed := failed + 1
+
+  -- ── (c⁗ᵃ) The patch-bay refusal (elaborator retirement, phase 5) ───────────
+  -- Program definitions over the wire are retired: a programDecl-bearing
+  -- file dies at ingest with the retirement message.
+  IO.println "patch-bay refusal (programDecl over the wire → retirement message):"
+  total := total + 1
+  if !(← runPatchBayRefusal) then failed := failed + 1
+
+  -- ── (c⁗ᵇ) The CF-only cycle tripwire (session mirror spells a cycle) ───────
+  IO.println "cycle refusal (cyclic session wiring → CF-only message):"
+  total := total + 1
+  if !(← runCycleRefusal) then failed := failed + 1
 
   -- ── (c⁗′) Region-aware Stage0: an all-s0 region hoists as a unit (WS3a) ────
   IO.println "banks region hoist (all-s0 reduce region → coefficient kernel):"

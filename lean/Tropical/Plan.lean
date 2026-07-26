@@ -1,6 +1,6 @@
 import Lean.Data.Json
 import Tropical.Parse.Nodes
-import Tropical.Ir.CoreArena
+import Tropical.Ir.Core
 
 /-!
 # Plan layer — `tropical_plan_5` as a type
@@ -375,6 +375,16 @@ def registerCount : InstanceFunction → Nat
 def children : InstanceFunction → Array InstanceFunction
   | .mk _ _ _ _ _ _ _ _ c => c
 
+/-- A child is smaller than its parent — the termination workhorse for
+    every walker over the instance-function tree. -/
+theorem sizeOf_lt_of_mem_children {c f : InstanceFunction}
+    (h : c ∈ f.children) : sizeOf c < sizeOf f := by
+  cases f
+  have := Array.sizeOf_lt_of_mem h
+  simp [children] at this
+  simp
+  omega
+
 /-- Replace the pre-input block (the parent attaches each per-child
     block after compiling its own body). -/
 def withPreInput (f : InstanceFunction) (block : Array NInstr) : InstanceFunction :=
@@ -383,7 +393,7 @@ def withPreInput (f : InstanceFunction) (block : Array NInstr) : InstanceFunctio
 
 /-- Mirrors `toWireInstanceFn`: preamble/pre_input/children omitted
     when empty so legacy JSON consumers see the bytes they expect. -/
-partial def toWire (f : InstanceFunction) : Except String Json := do
+def toWire (f : InstanceFunction) : Except String Json := do
   let base := #[
     ("name", Json.str f.name),
     ("instance_name", Json.str f.instanceName),
@@ -397,9 +407,11 @@ partial def toWire (f : InstanceFunction) : Except String Json := do
     else do pure <| base.push ("pre_input_instructions", ← instrsToWire f.preInputInstructions)
   let base ← if f.children.isEmpty then pure base
     else do
-      let kids ← f.children.mapM toWire
+      let kids ← f.children.attach.mapM fun c => toWire c.1
       pure <| base.push ("children", Json.arr kids)
   return Json.mkObj base.toList
+termination_by sizeOf f
+decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children c.2
 
 end InstanceFunction
 
@@ -456,6 +468,10 @@ def CompilationMode.ofWire? : String → Option CompilationMode
   | "microkernel" => some .microkernel
   | "microkernel-deep" => some .microkernelDeep
   | _ => none
+
+theorem CompilationMode.ofWire_wire (m : CompilationMode) :
+    CompilationMode.ofWire? m.wire = some m := by
+  cases m <;> rfl
 
 -- ─────────────────────────────────────────────────────────────
 -- FlatPlan — the runnable plan

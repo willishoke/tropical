@@ -14,13 +14,16 @@ open Tropical.Ir (Arena ProgramIdx)
 /-- Module-slot indices READ by an instance function: every `.slot` operand of
     every instruction (preamble, body, pre-input), recursively through children.
     A `WriteSlot` dst is a write, not a read — a slot only written is still dead. -/
-private partial def slotReadsOf (f : Tropical.Plan.InstanceFunction) : Array Nat :=
+private def slotReadsOf (f : Tropical.Plan.InstanceFunction) : Array Nat :=
   let ofInstrs := fun (instrs : Array Tropical.Plan.NInstr) =>
     instrs.flatMap fun ins => ins.args.filterMap fun
       | .slot i _ => some i
       | _ => none
   ofInstrs f.preambleInstructions ++ ofInstrs f.instructions
-    ++ ofInstrs f.preInputInstructions ++ f.children.flatMap slotReadsOf
+    ++ ofInstrs f.preInputInstructions
+    ++ f.children.attach.flatMap fun c => slotReadsOf c.1
+termination_by sizeOf f
+decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children c.2
 
 /-- `param:*` entries of `slotNames` referenced by NO instruction operand in the
     plan. Sink `inputs` are slot reads too (they consume the `__root__.out`-style
@@ -144,9 +147,9 @@ def runModalClassAgreement : IO Bool := do
     silence, no error). Three malformations must each return a clear `Except.error`
     and, critically for the live MCP server, must NOT crash the process:
       · a color-LEGAL CYCLE — a reverb whose modal outlet feeds its own modal
-        inlet, a mix fed by itself — passes `checkEdgeTypes` (the colors match) yet
-        would stack-overflow the visited-set-free `lowerModal`/`lowerNode`
-        recursion; `checkAcyclic` now rejects it first;
+        inlet, a mix fed by itself — passes `checkEdgeTypes` (the colors match);
+        `lowerGraph`'s own topo-rank entry refuses it with the loop named (the
+        lowering is total now — no stack to overflow);
       · a WIRE naming no node (a typo'd source) — previously died downstream as
         `lower: node '…' not found`, or vanished silently if unreferenced;
       · a top-level `"out"` naming no node — previously rendered the WHOLE patch as

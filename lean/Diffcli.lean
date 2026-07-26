@@ -1,6 +1,4 @@
 import Tropical.Ffi
-import Tropical.Parse.Raise
-import Tropical.Ir.Elaborator
 import Tropical.Ir.Codec
 import Tropical.Ir.Strata
 import Tropical.Ir.Core
@@ -29,21 +27,15 @@ tests/golden/ when fed the same plans validate_stdlib.ts renders
 (frames=16, buffer=256) — the Phase 2 gate that the Lean FFI path is
 sample-for-sample the TS koffi path.
 
-    diffcli raise <file.json>
-
-Runs a `tropical_program_2` file through the Lean port of
-normalizeProgramFile + raiseProgram and prints
-`{program, params?, audio_outputs?}` — or `{error}` with the TS error
-string — on stdout. The other side of scripts/diff/diff_raise.ts.
-
 The compile/render verbs — `compile`, `compile-wasm`, `render-bytes`,
 `render-metal`, `render-graph`, `emit-ir`, `emit-msl` — boot the engine
 (the stdlib is the `Tropical.Stdlib` arrow builders) and print the plan,
 LLVM/MSL IR, or rendered bytes for a patch. The former surface/bridge
 verbs (parse-md, parse-all, elab-stdlib, elab-file, strata-stdlib,
 strata-file, emit-stdlib, emit-file, emitarrow-*, parsed-roundtrip,
-voice-desugar) were retired with the
-literate `.md` language and the parse bridge.
+voice-desugar, raise) were retired with the literate `.md` language,
+the parse bridge, and finally the elaborator (the `raise` verb printed
+the ParsedProgram, which no longer exists).
 -/
 
 def parseNatFlag (args : List String) (flag : String) (default : Nat) : Nat :=
@@ -145,24 +137,6 @@ def renderGraph (args : List String) : IO UInt32 := do
     stdout.flush
     return 0
 
-private def errorJson (msg : String) : Lean.Json :=
-  Lean.Json.mkObj [("error", Lean.Json.str msg)]
-
-def raiseVerb (args : List String) : IO UInt32 := do
-  let some path := args.head?
-    | IO.eprintln "usage: diffcli raise <file.json>"
-      return 1
-  let text ← IO.FS.readFile path
-  let out : Lean.Json :=
-    match Tropical.Parse.JsonV.parse text with
-    | .error e => errorJson s!"JSON parse error: {e}"
-    | .ok jv =>
-      match Tropical.Parse.Raise.raiseFile jv with
-      | .error msg => errorJson msg
-      | .ok (prog, top) => Tropical.Parse.Raise.raisedFileJson prog top
-  IO.println out.compress
-  return 0
-
 private def parseStrFlag (args : List String) (flag : String) : Option String :=
   args.findSome? fun a =>
     if a.startsWith (flag ++ "=") then some (a.drop (flag.length + 1)).toString else none
@@ -176,7 +150,7 @@ private def parseStrFlag (args : List String) (flag : String) : Option String :=
     diff_plan.ts / diff_audio.ts. -/
 def compileVerb (args : List String) : IO UInt32 := do
   let some patch := args.find? (fun a => !a.startsWith "--")
-    | IO.eprintln "usage: diffcli compile <patch.json> [--mode=fused|microkernel|microkernel-deep]"
+    | IO.eprintln "usage: diffcli compile <patch.json> [--mode=fused|microkernel|microkernel-deep] [--fixtures]"
       return 1
   let modeStr := (parseStrFlag args "--mode").getD "fused"
   let some mode := Tropical.Plan.CompilationMode.ofWire? modeStr
@@ -184,6 +158,7 @@ def compileVerb (args : List String) : IO UInt32 := do
       return 1
   let env ← Tropical.Engine.boot
   let act : Tropical.EngineM String := do
+    if args.contains "--fixtures" then Tropical.Engine.registerTestFixtures env
     let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str patch)])
     Tropical.Engine.compileMirrorPlan env mode
   match ← act.run with
@@ -195,11 +170,14 @@ def compileVerb (args : List String) : IO UInt32 := do
     return 1
 
 /-- Compile a patch to an in-memory FlatPlan (the shape both the plan path
-    and the IR path consume). -/
-private def compileToFlatPlan (patch : String) :
+    and the IR path consume). `fixtures` additionally registers the
+    test-fixture programs (`OpZoo`) so equivalence patches can instantiate
+    them by name. -/
+private def compileToFlatPlan (patch : String) (fixtures : Bool := false) :
     IO (Except String Tropical.Plan.FlatPlan) := do
   let env ← Tropical.Engine.boot
   let act : Tropical.EngineM Tropical.Plan.FlatPlan := do
+    if fixtures then Tropical.Engine.registerTestFixtures env
     let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str patch)])
     Tropical.Engine.compileMirrorFlatPlan env .fused
   match ← act.run with
@@ -236,10 +214,10 @@ def emitMslVerb (args : List String) : IO UInt32 := do
     plan_5 JSON from `diffcli compile` serves as the browser-side manifest. -/
 def compileWasmVerb (args : List String) : IO UInt32 := do
   let some patch := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
-    | IO.eprintln "usage: diffcli compile-wasm <patch.json> --out <out.wasm>"; return 1
+    | IO.eprintln "usage: diffcli compile-wasm <patch.json> --out <out.wasm> [--fixtures]"; return 1
   let some outPath := parseStrFlag args "--out"
     | IO.eprintln "compile-wasm: --out <path> required"; return 1
-  match ← compileToFlatPlan patch with
+  match ← compileToFlatPlan patch (fixtures := args.contains "--fixtures") with
   | .error e => IO.eprintln e; return 1
   | .ok plan =>
     match Tropical.Ir.EmitLlvm.emitKernel plan with
@@ -258,8 +236,7 @@ def main (args : List String) : IO UInt32 := do
   | "emit-ir" :: rest => emitIrVerb rest
   | "emit-msl" :: rest => emitMslVerb rest
   | "compile-wasm" :: rest => compileWasmVerb rest
-  | "raise" :: rest => raiseVerb rest
   | "compile" :: rest => compileVerb rest
   | _ =>
-    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]\n       diffcli render-metal <plan.json>\n       diffcli render-graph <graph.json>\n       diffcli emit-ir <patch.json>\n       diffcli emit-msl <patch.json>\n       diffcli compile <patch.json> [--mode=M]\n       diffcli compile-wasm <patch.json> --out <out.wasm>\n       diffcli raise <file.json>"
+    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]\n       diffcli render-metal <plan.json>\n       diffcli render-graph <graph.json>\n       diffcli emit-ir <patch.json>\n       diffcli emit-msl <patch.json>\n       diffcli compile <patch.json> [--mode=M]\n       diffcli compile-wasm <patch.json> --out <out.wasm>"
     return 1

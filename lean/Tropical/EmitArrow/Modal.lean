@@ -71,7 +71,7 @@ def powE (base : Sig) : Nat → Sig
     * Division by zero POISONS instead of computing something. A caller that
       checks `ok` treats the mode as non-const and falls back to the live path,
       rather than folding a value that does not exist. -/
-partial def sigConstD? : Sig → Option DyadicI
+def sigConstD? : Sig → Option DyadicI
   | .num n            => some (DyadicI.ofJsonNumber n)
   | .unary .neg a     => (sigConstD? a).map DyadicI.neg
   | .unary .toFloat a => sigConstD? a
@@ -94,7 +94,7 @@ partial def sigConstD? : Sig → Option DyadicI
     preserved deliberately rather than fixed inside a carrier commit. Every
     DECISION site is already off this function and on `sigConstD?`, where the
     poison is visible. -/
-partial def sigConstF? (s : Sig) : Option Float := (sigConstD? s).map DyadicI.toFloat
+def sigConstF? (s : Sig) : Option Float := (sigConstD? s).map DyadicI.toFloat
 
 -- ── Option E: the per-bank Q-landing exponent (the modal-datapath rail fix) ────
 -- Every modal weight lands as Q4.28 (×2²⁸) and multiplies an exact Q2.30 rotator
@@ -1210,7 +1210,7 @@ def bloomCFE (cfB cfN : Array CplxE) (z : CplxE) : CplxE := Id.run do
     authored expressions (a pole read), never on combinator-built values whose
     subterms share by reference — their TREE is exponential in the DAG depth
     (a Horner like `bloomM1E`'s output would never return). -/
-partial def sigIsS0 : Sig → Bool
+def sigIsS0 : Sig → Bool
   | .num _ | .paramRef _ | .sampleRate => true
   | .unary _ a => sigIsS0 a
   | .binary _ a b => sigIsS0 a && sigIsS0 b

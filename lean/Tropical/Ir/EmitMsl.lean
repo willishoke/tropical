@@ -660,12 +660,14 @@ def emitInstr (sizes : Array Nat) (instr : NInstr) : M Unit := do
 -- Fractal per-instance walk + sinks (mirror EmitLlvm)
 -- ─────────────────────────────────────────────────────────────
 
-partial def emitKernelBlock (sizes : Array Nat) (inst : InstanceFunction) : M Unit := do
+def emitKernelBlock (sizes : Array Nat) (inst : InstanceFunction) : M Unit := do
   for i in inst.preambleInstructions do emitInstr sizes i
-  for child in inst.children do
+  for h : child in inst.children do
     for i in child.preInputInstructions do emitInstr sizes i
     emitKernelBlock sizes child
   for i in inst.instructions do emitInstr sizes i
+termination_by sizeOf inst
+decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children h
 
 def emitSinks (sinks : Array SinkSpec) : M Unit := do
   for sink in sinks do

@@ -28,101 +28,72 @@ open Tropical.Ir
 
 private def jsonNull : Json := Json.null
 
-private def aliasJson (arena : Arena) (td : TypeDefIdx) : Json :=
-  match arena.typeDef? td with
-  | some (.alias name base) => Json.mkObj
-      [("op", Json.str "aliasTypeDef"), ("name", Json.str name),
-       ("base", Json.str base.wire)]
-  | _ => jsonNull
-
-private def elemJson (arena : Arena) : ScalarOrAlias → Json
-  | .scalar k => Json.str k.wire
-  | .alias td => aliasJson arena td
-
-private def elemName (arena : Arena) : ScalarOrAlias → String
-  | .scalar k => k.wire
-  | .alias td =>
-    match arena.typeDef? td with
-    | some t => t.name
-    | none => "?"
-
-private def dimJson (arena : Arena) : ShapeDim → Json
-  | .lit n => Json.num n
-  | .typeParam i =>
-    match arena.typeParam? i with
-    | some tp => Json.mkObj <|
-        [("op", Json.str "typeParamDecl"), ("name", Json.str tp.name)]
-        ++ (match tp.default? with | some d => [("default", Json.num d)] | none => [])
-    | none => jsonNull
-
-private def dimStr : ShapeDim → String
-  | .lit n => Tropical.Ir.Emit.jsNumString n
-  | .typeParam _ => "?"
-
 /-- The structured `type_obj` (the serialized IR `PortType`). -/
-def portTypeObj (arena : Arena) : PortType → Json
+def portTypeObj : PortType → Json
   | .scalar k => Json.mkObj [("kind", Json.str "scalar"), ("scalar", Json.str k.wire)]
-  | .alias td => Json.mkObj [("kind", Json.str "alias"), ("alias", aliasJson arena td)]
   | .array element shape => Json.mkObj
-      [("kind", Json.str "array"), ("element", elemJson arena element),
-       ("shape", Json.arr (shape.map (dimJson arena)))]
+      [("kind", Json.str "array"), ("element", Json.str element.wire),
+       ("shape", Json.arr (shape.map Json.num))]
 
 /-- `portTypeToString` (the display string). -/
-def portTypeStr (arena : Arena) : PortType → String
+def portTypeStr : PortType → String
   | .scalar k => k.wire
-  | .alias td =>
-    match arena.typeDef? td with
-    | some t => t.name
-    | none => "?"
   | .array element shape =>
-    s!"{elemName arena element}[{String.intercalate "," (shape.map dimStr).toList}]"
+    s!"{element.wire}[{String.intercalate "," (shape.map Tropical.Ir.Emit.jsNumString).toList}]"
 
 private def wireOpName : ENode → String
   | .binary tag .. => tag.wire
   | .unary tag _ => tag.wire
   | .clamp .. => "clamp" | .select .. => "select"
   | .arraySet .. => "arraySet" | .index .. => "index"
-  | .zeros _ => "zeros"
   | .inputRef _ => "inputRef" | .paramRef _ => "paramRef"
-  | .typeParamRef _ => "typeParamRef" | .bindingRef _ => "bindingRef"
   | .nestedOut .. => "nestedOut"
   | .sampleRate => "sampleRate" | .sampleIndex => "sampleIndex"
-  | .fold .. => "fold" | .scan .. => "scan" | .generate .. => "generate"
-  | .iterate .. => "iterate" | .chain .. => "chain"
-  | .map2 .. => "map2" | .zipWith .. => "zipWith" | .letIn .. => "let"
-  | .tag .. => "tag" | .match_ .. => "match"
   | .loopIdx _ => "loopIdx" | .bankSum .. => "bankSum"
   | .num _ => "num" | .bool _ => "bool" | .arr _ => "arr"
 
+private def mkOpNode (op : String) (args : Array Json) : Json :=
+  Json.mkObj [("op", Json.str op), ("args", Json.arr args)]
+
 /-- Port of `literalDefault`: lower a resolved input default (an `ExprId` into
-    the arena's DAG) to the raw wire-format ExprNode (literal-class forms only). -/
-partial def literalDefault (ea : ExprArena) (portName : String) (id : ExprId) :
-    Except String Json :=
-  match ea.deref id with
+    the arena's DAG) to the raw wire-format ExprNode (literal-class forms only).
+    Total by the frozen-arena wf: `hw` certifies children sit strictly below
+    their parent, so the walk descends `id.idx`. -/
+def literalDefault (ea : ExprArena) (hw : ea.wf = true) (portName : String)
+    (id : ExprId) : Except String Json :=
+  match hd : ea.deref id with
   | none => .error s!"Compiled: input '{portName}' default references a dangling ExprId {id.idx}"
   | some node => match node with
     | .num n => .ok (Json.num n)
     | .bool b => .ok (Json.bool b)
     | .arr items => do
-      .ok (Json.arr (← items.mapM (literalDefault ea portName)))
-    | .binary tag a b => opArgs tag.wire #[a, b]
-    | .unary tag a => opArgs tag.wire #[a]
-    | .clamp a b c => opArgs "clamp" #[a, b, c]
-    | .select a b c => opArgs "select" #[a, b, c]
-    | .index a b => opArgs "index" #[a, b]
-    | .arraySet a b c => opArgs "arraySet" #[a, b, c]
+      .ok (Json.arr (← items.attach.mapM fun ⟨x, _⟩ => literalDefault ea hw portName x))
+    | .binary tag a b => do
+      .ok (mkOpNode tag.wire #[← literalDefault ea hw portName a, ← literalDefault ea hw portName b])
+    | .unary tag a => do
+      .ok (mkOpNode tag.wire #[← literalDefault ea hw portName a])
+    | .clamp a b c => do
+      .ok (mkOpNode "clamp" #[← literalDefault ea hw portName a,
+        ← literalDefault ea hw portName b, ← literalDefault ea hw portName c])
+    | .select a b c => do
+      .ok (mkOpNode "select" #[← literalDefault ea hw portName a,
+        ← literalDefault ea hw portName b, ← literalDefault ea hw portName c])
+    | .index a b => do
+      .ok (mkOpNode "index" #[← literalDefault ea hw portName a,
+        ← literalDefault ea hw portName b])
+    | .arraySet a b c => do
+      .ok (mkOpNode "arraySet" #[← literalDefault ea hw portName a,
+        ← literalDefault ea hw portName b, ← literalDefault ea hw portName c])
     | .sampleRate => .ok (Json.mkObj [("op", Json.str "sampleRate")])
     | .sampleIndex => .ok (Json.mkObj [("op", Json.str "sampleIndex")])
-    | .zeros count => do
-      .ok (Json.mkObj [("op", Json.str "zeros"),
-        ("count", ← literalDefault ea portName count)])
     | e =>
       .error (s!"Compiled: input '{portName}' default has op '{wireOpName e}' that's not a literal-class form; "
         ++ "defaults shouldn't reference decls or run combinators")
-where
-  opArgs (op : String) (args : Array ExprId) : Except String Json := do
-    .ok (Json.mkObj [("op", Json.str op),
-      ("args", Json.arr (← args.mapM (literalDefault ea portName)))])
+termination_by id.idx
+decreasing_by
+  all_goals
+    apply Tropical.Ir.ExprArena.forall_children_lt hw ‹Tropical.Ir.ExprArena.deref _ _ = some _›
+    simp_all [Tropical.Ir.ENode.children]
 
 /-- The service's `concreteEntry`, off the typed store. -/
 def concreteEntry (arena : Arena) (entryName : String) (idx : ProgramIdx) :
@@ -132,16 +103,18 @@ def concreteEntry (arena : Arena) (entryName : String) (idx : ProgramIdx) :
   let resolved ← Codec.encodeResolved arena idx
   let inputs ← prog.inputs.mapM fun d => do
     let (t, tObj) := match d.type? with
-      | some pt => (Json.str (portTypeStr arena pt), portTypeObj arena pt)
+      | some pt => (Json.str (portTypeStr pt), portTypeObj pt)
       | none => (jsonNull, jsonNull)
     let dflt ← match d.default? with
-      | some e => literalDefault arena.exprs d.name e
+      | some e =>
+        if hw : arena.exprs.wf then literalDefault arena.exprs hw d.name e
+        else .error "entry render: expression arena failed its well-formedness sweep"
       | none => pure jsonNull
     .ok <| Json.mkObj [("name", Json.str d.name), ("type", t),
       ("type_obj", tObj), ("default", dflt)]
   let outputs := prog.outputs.map fun d =>
     let (t, tObj) := match d.type? with
-      | some pt => (Json.str (portTypeStr arena pt), portTypeObj arena pt)
+      | some pt => (Json.str (portTypeStr pt), portTypeObj pt)
       | none => (jsonNull, jsonNull)
     Json.mkObj [("name", Json.str d.name), ("type", t), ("type_obj", tObj)]
   -- CF-only: programs have no reg decls, so the registers list is empty.

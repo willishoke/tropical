@@ -363,7 +363,7 @@ open Tropical.EmitArrow in
     (`modalBankSigDirect`) — the i64-modular mode sum is associative, so the loop
     and the fold agree to the bit. This exercises the whole new path end to end:
     `Sig.arr`/`index`/`loopIdx`/`bankSum` through the full lowering, the
-    `ENode→CNode` downcast, and the emit-time reduce-region lowering. We also
+    `ENode→ENode` downcast, and the emit-time reduce-region lowering. We also
     assert the PAYOFF: banking shrinks the plan, and the per-mode MARGINAL
     instruction cost drops (the DSP body no longer unrolls — only the coefficient
     fills still scale, and those are destined for the s0 kernel next). -/
@@ -537,47 +537,22 @@ def runBanksFloat (arena : Arena)
     | .error e, _ | _, .error e => failGate "banks-float" s!"render: {firstLine e}"
   | .error e, _ | _, .error e => failGate "banks-float" s!"build: {firstLine e}"
 
-/-- Wrap a single output expression in the minimal one-instance
-    `tropical_program_2` patch the retired-front-door gate probes with
-    (`p.out = expr`). -/
+/-- Wrap a single wire expression in the minimal PATCH-BAY patch the
+    retired-front-door gate probes with: a registered stdlib instance whose
+    input carries `expr`. With program bodies gone from the wire, an instance
+    input is the ONLY place an expression can still enter as JSON. -/
 private def foldProbePatchJson (expr : Lean.Json) : Lean.Json :=
-  let ports :=
-    Lean.Json.mkObj [("inputs", Lean.Json.arr #[]),
-      ("outputs", Lean.Json.arr #[Lean.Json.str "out"])]
-  let inner := Lean.Json.mkObj [
-    ("name", Lean.Json.str "FoldProbe"),
-    ("ports", ports),
-    ("body", Lean.Json.mkObj [("op", Lean.Json.str "block"),
-      ("decls", Lean.Json.arr #[]),
-      ("assigns", Lean.Json.arr #[Lean.Json.mkObj [
-        ("op", Lean.Json.str "outputAssign"), ("name", Lean.Json.str "out"),
-        ("expr", expr)]])])]
   Lean.Json.mkObj [
     ("schema", Lean.Json.str "tropical_program_2"),
     ("name", Lean.Json.str "fold_probe"),
     ("body", Lean.Json.mkObj [("op", Lean.Json.str "block"),
       ("decls", Lean.Json.arr #[
-        Lean.Json.mkObj [("op", Lean.Json.str "programDecl"),
-          ("name", Lean.Json.str "FoldProbe"), ("program", inner)],
         Lean.Json.mkObj [("op", Lean.Json.str "instanceDecl"),
-          ("name", Lean.Json.str "p"), ("program", Lean.Json.str "FoldProbe"),
-          ("inputs", Lean.Json.mkObj [])]]),
+          ("name", Lean.Json.str "p"), ("program", Lean.Json.str "SoftClip"),
+          ("inputs", Lean.Json.mkObj [("input", expr)])]]),
       ("assigns", Lean.Json.arr #[])]),
     ("audio_outputs", Lean.Json.arr #[Lean.Json.mkObj [
       ("instance", Lean.Json.str "p"), ("output", Lean.Json.str "out")]])]
-
-/-- Compile a probe expression through the FULL front door
-    (raise → elaborate → lower → emit) and parse the resulting plan. -/
-def compileFoldProbe (expr : Lean.Json) (tag : String) :
-    IO (Except String Tropical.Plan.FlatPlan) := do
-  let tmp := s!"/tmp/tropicaltest-probe-{tag}.json"
-  IO.FS.writeFile tmp (foldProbePatchJson expr).compress
-  match ← compilePatch tmp .fused with
-  | .error e => pure (.error e)
-  | .ok planJson =>
-    match Lean.Json.parse planJson with
-    | .error e => pure (.error s!"parse: {e}")
-    | .ok j => pure ((Tropical.Plan.FlatPlan.ofWire j).mapError (s!"ofWire: {·}"))
 
 -- Shared JSON expression builders for the retired-front-door probe.
 def cgJn (m : Nat) (e : Nat) : Lean.Json := Lean.Json.num ⟨Int.ofNat m, e⟩
@@ -593,27 +568,29 @@ def cgFold (over : Lean.Json) (body : Lean.Json) : Lean.Json :=
     ("init", cgJn 0 0), ("acc_var", Lean.Json.str "acc"), ("elem_var", Lean.Json.str "e"),
     ("body", body)]
 
-/-- THE RETIRED-FRONT-DOOR gate. `tropical_program_2` can still SPELL the
-    retired combinators (`raise` parses them), but nothing lowers them any
-    more — the drop passes were retired 2026-07-25 with their producers.
-    The contract is a clean refusal at the type boundary (`toResolved`),
-    not a miscompile: a fold-bearing program must fail to compile with the
-    retirement message naming the construct. -/
+/-- THE RETIRED-FRONT-DOOR gate. With program bodies gone from the wire
+    (the patch-bay-refusal gate pins that), the only door left for a JSON
+    expression is an instance input wire — and the session wire grammar
+    (`validateExpr`) cannot spell the retired combinators: a fold-bearing
+    wire dies at ingest as an unknown op, not a miscompile. The grammar you
+    can spell is the language that compiles. -/
 def runRetiredFrontDoor (_arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let foldExpr := cgFold (Lean.Json.arr ((Array.range 4).map cgA))
     (cgAdd (cgBinding "acc") (cgMulHalf (cgBinding "e")))
-  match ← compileFoldProbe foldExpr "retired-fold" with
+  let tmp := "/tmp/tropicaltest-fold-wire-probe.json"
+  IO.FS.writeFile tmp (foldProbePatchJson foldExpr).compress
+  match ← compilePatch tmp .fused with
   | .ok _ =>
     failGate "retired-front-door"
-      "fold-bearing program COMPILED — nothing lowers folds; this must be a refusal"
+      "fold-bearing wire COMPILED — the session grammar must refuse retired spellings"
   | .error e =>
-    if (e.splitOn "'fold' is not a trunk construct").length > 1 then
+    if (e.splitOn "unknown op 'fold'").length > 1 then
       passGate "retired-front-door"
-        s!"fold-bearing JSON refused at the type boundary: {firstLine e}"
+        s!"fold-bearing wire refused at ingest: {firstLine e}"
     else
       failGate "retired-front-door"
-        s!"fold-bearing JSON failed with the WRONG error (want the retirement message): {firstLine e}"
+        s!"fold-bearing wire failed with the WRONG error (want the unknown-op refusal): {firstLine e}"
 
 -- ── The strike-comb gate (CF sequencer tier 0) ─────────────────────────────────
 

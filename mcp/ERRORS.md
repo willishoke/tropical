@@ -136,12 +136,24 @@ Codes are stable identifiers. Add new codes; never repurpose existing ones.
 | `length_mismatch` | `wire_zip` / similar: paired arrays differ in length | `predicate` | false |
 | `arity_error` | too few / many args (e.g. `wire_chain` < 2 instances) | `predicate` | false |
 | `missing_argument` | required tool arg absent | — | false |
-| `invalid_value` | value out of allowed range or wrong primitive type | `record` or `predicate` | false |
+| `invalid_value` | value out of allowed range or wrong primitive type; a wire expression the grammar refuses | `record` or `predicate` (absent for bare refusals) | false |
 | `compile_failed` | `applyFlatPlan` / JIT compilation error | — | false |
 | `audio_error` | DAC open / device error | — | varies |
 | `internal_error` | uncaught exception not classified above | — | false |
 
 `retryable: true` is reserved for transient failures. Validation errors are never retryable — the args need to change.
+
+**Wire expressions.** The wire grammar is a closed inductive
+(`Tropical.WireExpr`) whose JSON decoder is the single refusal site: a
+state op, a retired combinator, an unknown op, a wrong arity, or a
+malformed `ref` is refused at the TOOL boundary, before the session
+store is touched. Those are bad arguments, so they carry
+`invalid_value` with `param` (`set[].expr`, `initial_expr`, `source`)
+and the offending expression echoed in `value` — never
+`internal_error`, which stays reserved for unclassified throws. File
+ingest (`load` / `merge`) is the exception: a decode failure there is a
+property of the whole document, not of a named tool argument, so it
+keeps `internal_error` with the verbatim message.
 
 ## Suggestion computability
 

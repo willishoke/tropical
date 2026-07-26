@@ -63,7 +63,7 @@ abbrev Clock := Sig
     every coupling amp), so the structural walk pays for the fully
     expanded tree only for `eintern` to collapse it straight back into a
     shared DAG — super-linear on composed patches. -/
-partial def lowerSigTree : Sig → EArenaM ExprId
+def lowerSigTree : Sig → EArenaM ExprId
   | .num n          => eintern (.num n)
   | .binary t a b   => do eintern (.binary t (← lowerSigTree a) (← lowerSigTree b))
   | .unary t a      => do eintern (.unary t (← lowerSigTree a))
@@ -74,11 +74,17 @@ partial def lowerSigTree : Sig → EArenaM ExprId
   | .nestedOut i o  => eintern (.nestedOut i o)
   | .sampleRate     => eintern .sampleRate
   | .sampleIndex    => eintern .sampleIndex
-  | .arr items      => do eintern (.arr (← items.mapM lowerSigTree))
+  | .arr items      => do
+    eintern (.arr (← items.attach.mapM fun ⟨x, _⟩ => lowerSigTree x))
   | .index a b      => do eintern (.index (← lowerSigTree a) (← lowerSigTree b))
   | .loopIdx id     => eintern (.loopIdx id)
   | .bankSum c ts b dc ii => do
-    eintern (.bankSum c (← ts.mapM lowerSigTree) (← lowerSigTree b) (← dc.mapM lowerSigTree) ii)
+    let ts' ← ts.attach.mapM fun ⟨x, _⟩ => lowerSigTree x
+    let b' ← lowerSigTree b
+    let dc' ← match dc with
+      | none => pure none
+      | some d => do pure (some (← lowerSigTree d))
+    eintern (.bankSum c ts' b' dc' ii)
 
 /-- Pointer-identity-memoized lowering: a hash map from object address to
     interned id, threaded alongside the arena. Sound because `Sig` values
@@ -139,7 +145,6 @@ deriving Inhabited
 structure AInst where
   name : String
   programName : String
-  typeArgs : Array InstanceTypeArg := #[]
   inputs : Array AInput := #[]
 deriving Inhabited
 
@@ -156,7 +161,7 @@ deriving Inhabited
 def assemble (arena : Arena) (name : String) (inputs : Array AInputDecl)
     (outputs : Array OutputDecl) (decls : Array AInst)
     (assigns : Array (OutputTarget × Sig))
-    (registry : Array (String × ProgramIdx)) (binderCount : Nat := 0)
+    (registry : Array (String × ProgramIdx))
     (extraDecls : Array BodyDecl := #[]) :
     Arena × ProgramIdx :=
   let build : EArenaM Program := do
@@ -165,11 +170,11 @@ def assemble (arena : Arena) (name : String) (inputs : Array AInputDecl)
     let declsR ← decls.mapM fun a => do
       let ins ← a.inputs.mapM fun i => do
         pure ({ port := i.port, value := ← lowerSig i.value } : InstanceInput)
-      pure (BodyDecl.inst a.name a.programName a.typeArgs ins)
+      pure (BodyDecl.inst a.name a.programName ins)
     let assignsR ← assigns.mapM fun (t, s) => do
       pure ({ target := t, expr := ← lowerSig s } : OutputAssign)
     pure { name, inputs := inputsR, outputs, decls := declsR ++ extraDecls,
-           assigns := assignsR, binderCount, registry }
+           assigns := assignsR, registry }
   let (prog, exprs) := build.run arena.exprs
   ({ arena with programs := arena.programs.push prog, exprs }, ⟨arena.programs.size⟩)
 
@@ -236,15 +241,16 @@ def ldexpE (m n : Sig) : Sig := .binary .ldexp m n
 /-- Does this expression read the sample clock (`.sampleIndex`)? That read is the
     authoring layer's source of per-sample (s1) τ-dependence — a value with none is
     a function of settled parameters alone (s0). -/
-partial def readsSampleIndex : Sig → Bool
+def readsSampleIndex : Sig → Bool
   | .sampleIndex        => true
   | .binary _ a b       => readsSampleIndex a || readsSampleIndex b
   | .unary _ a          => readsSampleIndex a
   | .clamp v lo hi      => readsSampleIndex v || readsSampleIndex lo || readsSampleIndex hi
   | .select c t e       => readsSampleIndex c || readsSampleIndex t || readsSampleIndex e
   | .index a b          => readsSampleIndex a || readsSampleIndex b
-  | .arr items          => items.any readsSampleIndex
-  | .bankSum _ ts b _ _  => ts.any readsSampleIndex || readsSampleIndex b
+  | .arr items          => items.attach.any fun ⟨x, _⟩ => readsSampleIndex x
+  | .bankSum _ ts b _ _  =>
+    (ts.attach.any fun ⟨x, _⟩ => readsSampleIndex x) || readsSampleIndex b
   | _                   => false
 
 private def isZeroLit : Sig → Bool | .num n => n.mantissa == 0 | _ => false
@@ -255,7 +261,7 @@ private def isOneLit  : Sig → Bool | .num n => n.mantissa == 1 && n.exponent =
     converging τ-dependent construct authored today) reaches `1` as the clock runs,
     so it settles to its ceiling. Every other subterm settles pointwise. This is the
     mechanical half of `settle`; use `settle` for the totality contract. -/
-partial def settleRamps : Sig → Sig
+def settleRamps : Sig → Sig
   | .clamp v lo hi =>
     if isZeroLit lo && isOneLit hi && readsSampleIndex v then lit 1
     else .clamp (settleRamps v) (settleRamps lo) (settleRamps hi)
@@ -263,8 +269,9 @@ partial def settleRamps : Sig → Sig
   | .unary t a          => .unary t (settleRamps a)
   | .select c t e       => .select (settleRamps c) (settleRamps t) (settleRamps e)
   | .index a b          => .index (settleRamps a) (settleRamps b)
-  | .arr items          => .arr (items.map settleRamps)
-  | .bankSum c ts b dc ii => .bankSum c (ts.map settleRamps) (settleRamps b) dc ii
+  | .arr items          => .arr (items.attach.map fun ⟨x, _⟩ => settleRamps x)
+  | .bankSum c ts b dc ii =>
+    .bankSum c (ts.attach.map fun ⟨x, _⟩ => settleRamps x) (settleRamps b) dc ii
   | s                   => s
 
 /-- `settle e` — the τ-independent (s0) value `e` converges to as the clock runs,

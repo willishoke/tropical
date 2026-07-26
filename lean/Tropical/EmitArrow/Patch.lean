@@ -1,4 +1,5 @@
 import Tropical.EmitArrow.Modal
+import Tropical.Ir.Cycles
 
 /-!
 # EmitArrow.Patch — the patcher lowering: a downstream-only graph → arrow term
@@ -140,6 +141,18 @@ structure PatchGraph where
 def fmWarp (depthE : Sig) : Clock → Sig → Clock :=
   fun base m => sub base (toIntE (mul (mul depthE m) (lit 4294967296)))
 
+/-- Every input id a node's lowering recurses into — the wires of the
+    graph, `modalSource`'s optional address inlet included. These are the
+    edges `lowerAt` ranks (and refuses cycles over). -/
+def Node.inputIds : Node → Array String
+  | .source .. | .knob _ => #[]
+  | .flange i _ _ | .shaper i _ | .warpFx i _ | .comb i _ => #[i]
+  | .mix is | .ring is | .modalMix is => is
+  | .fm i .. | .pm i .. => #[i]
+  | .sflange i m _ => #[i, m]
+  | .modalSource _ _ _ addr _ _ => (addr.map (#[·])).getD #[]
+  | .modalReverb i _ _ | .modalGauge i _ => #[i]
+
 /-- Is `id` a modal-island node? Its output wire carries poles, not a `Sig`. A
     missing node reads as Sig (graceful — a half-built patch stays lowerable). -/
 def nodeIsModal (g : PatchGraph) (id : String) : Bool :=
@@ -221,21 +234,37 @@ def foldRoomsPartitioned (voice : Array ModalMode)
     let last := ordered.back!
     residueComposePartitioned (foldRoomsEC voice front) last
 
+/-- The empty modal value (`__silence__`, the graceful-silence contract). -/
+private def silentModal :
+    ModalBank × Sig × Clock × Option String × Option ModalDir × Option Sig :=
+  (.plain #[] #[], lit 0, clockLit, none, none, none)
+
+/-- The rank-certificate breach message. Dead by invariant — `lowerAt`
+    refuses cyclic graphs (with the full loop named) before any lowering
+    runs — but a direct caller handing in an unranked recursion still
+    gets the honest refusal, never an overflow. -/
+private def cycleGuardMsg (src dst : String) : String :=
+  s!"connection cycle: {src} → {dst} — patch graphs must be acyclic (you may only patch forward; there is no delay to break a loop through)"
+
 /-- Lower a modal-island subgraph to its `ModalBank` + strike anchor + the master
     clock it realizes against. Pure pole algebra at BUILD time: a reverb is the
     residue calculus (`residueComposeEC`) on a plain source, or a room-chain FOLD
     on a bloomed one; a mix is the pole union. Never touches `Sig` — a modal
     node's inputs are modal by construction, so it only recurses into
-    `lowerModal`. -/
-partial def lowerModal (g : PatchGraph) (id : String) :
+    `lowerModal`. Total: recursion descends the caller-supplied topological
+    rank (`rankOf`, built by `lowerAt`); `r` is this node's own rank. -/
+def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (r : Nat) :
     Except String (ModalBank × Sig × Clock × Option String × Option ModalDir × Option Sig) := do
   -- An unconnected modal inlet points at `__silence__`; a modal node with no modal
   -- source is a legal, incomplete patch — it compiles to an EMPTY bank (silence),
   -- not an error. (The graceful-silence contract, same as `mix []`.)
   if id == "__silence__" then
-    return (.plain #[] #[], lit 0, clockLit, none, none, none)
+    return silentModal
   let some pn := g.nodes.find? (·.id == id)
     | .error s!"lowerModal: node '{id}' not found"
+  -- The gated modal recursion (inlined at each site for the WF measure):
+  -- `__silence__` short-circuits, a dangling id keeps today's message, and
+  -- a rank breach is the dead-by-invariant refusal.
   match pn.node with
   | .modalSource ms a clk addr count bloom? =>
     -- unit modes enter the island CLAMPED to their declared σ intervals
@@ -248,7 +277,13 @@ partial def lowerModal (g : PatchGraph) (id : String) :
     -- a bloomed source starts modal with an EMPTY room; reverbs fold in downstream
     | some (B, gr) => .ok (.bloomed ms #[] B gr, a, clk, addr, none, count)
   | .modalReverb inId room dir => do
-    let (bank, a, clk, addr, dirIn, _count) ← lowerModal g inId
+    let (bank, a, clk, addr, dirIn, _count) ←
+      if inId == "__silence__" then pure silentModal
+      else match rankOf inId with
+        | none => throw s!"lowerModal: node '{inId}' not found"
+        | some ri =>
+          if h : ri < r then lowerModal g rankOf inId ri
+          else throw (cycleGuardMsg id inId)
     -- The live count does NOT survive composition (the composed modes are no
     -- longer a prefix of the source's) — realize at full capacity (graceful-
     -- silent through a reverb; v1, no warning, legal state).
@@ -269,7 +304,13 @@ partial def lowerModal (g : PatchGraph) (id : String) :
       let folded := if acc.isEmpty then room else residueComposeEC acc room
       .ok (.bloomed voice folded B gr, a, clk, addr, dir.orElse (fun _ => dirIn), none)
   | .modalGauge inId gExpr => do
-    let (bank, a, clk, addr, dirIn, count) ← lowerModal g inId
+    let (bank, a, clk, addr, dirIn, count) ←
+      if inId == "__silence__" then pure silentModal
+      else match rankOf inId with
+        | none => throw s!"lowerModal: node '{inId}' not found"
+        | some ri =>
+          if h : ri < r then lowerModal g rankOf inId ri
+          else throw (cycleGuardMsg id inId)
     -- re-level in place: `normalizePeak` scales residues by the SETTLED norm (s0),
     -- preserving the pole set — so `count` (the live mode count) survives, unlike a
     -- reverb's composition. An un-settleable input declines to identity inside
@@ -296,7 +337,13 @@ partial def lowerModal (g : PatchGraph) (id : String) :
     | .bloomed voice acc B gr =>
       .ok (.bloomed (normalizePeak gExpr voice) acc B gr, a, clk, addr, dirIn, count)
   | .modalMix inputs => do
-    let parts ← inputs.mapM (lowerModal g)
+    let parts ← inputs.mapM fun i =>
+      if i == "__silence__" then pure silentModal
+      else match rankOf i with
+        | none => throw s!"lowerModal: node '{i}' not found"
+        | some ri =>
+          if h : ri < r then lowerModal g rankOf i ri
+          else throw (cycleGuardMsg id i)
     match parts.toList with
     | [] => .error s!"modalMix '{id}': no inputs"
     -- head carries the shared anchor/clock/address/direction for the union.
@@ -314,47 +361,64 @@ partial def lowerModal (g : PatchGraph) (id : String) :
       let union ← rest.foldlM (fun acc p => do let m ← modesOf p.1; pure (acc ++ m)) ms0
       .ok (.plain union #[], a0, clk0, addr0, dir0, none)
   | _ => .error s!"a modal inlet (reverb/modal-mix) needs a modal SOURCE — resonator or modal-mix — but '{id}' is a signal node; a Sig has no poles to compose"
+termination_by r
+decreasing_by all_goals exact h
 
 mutual
+/-- The gated `Sig`-side recursion step: rank lookup, dangling refusal
+    (today's message), and the strict-decrease check that carries the
+    whole mutual block's termination. -/
+def lowerInputGated (g : PatchGraph) (rankOf : String → Option Nat)
+    (srcId i : String) (r : Nat) : Except String ArrowTerm := do
+  match rankOf i with
+  | none => throw s!"lower: node '{i}' not found"
+  | some ri =>
+    if h : ri < r then lowerInput g rankOf i ri
+    else throw (cycleGuardMsg srcId i)
+termination_by (r, 0)
 /-- Lower one Sig node to its arrow term, recursing UP its input wires via
     `lowerInput` (which realizes a modal input at its edge). A wire is `⋙`; fan-out
     is the shared upstream term; a mixer is the sum; `fm` routes its input's signal
     into the carrier's clock. Result is the UNREDUCED downstream term. -/
-partial def lowerNode (g : PatchGraph) (id : String) : Except String ArrowTerm := do
+def lowerNode (g : PatchGraph) (rankOf : String → Option Nat)
+    (id : String) (r : Nat) : Except String ArrowTerm := do
   let some pn := g.nodes.find? (·.id == id)
     | .error s!"lower: node '{id}' not found"
   match pn.node with
   | .source v clk => .ok (.gen v id clk)
-  | .flange inId back fwd => return flangeEffectWith back fwd (← lowerInput g inId)
-  | .shaper inId f => return .arrUn f (← lowerInput g inId)
-  | .warpFx inId φ => return .warp φ (← lowerInput g inId)
-  | .mix inputs => return .sum (← inputs.mapM (lowerInput g))
+  | .flange inId back fwd =>
+    return flangeEffectWith back fwd (← lowerInputGated g rankOf id inId r)
+  | .shaper inId f => return .arrUn f (← lowerInputGated g rankOf id inId r)
+  | .warpFx inId φ => return .warp φ (← lowerInputGated g rankOf id inId r)
+  | .mix inputs => return .sum (← inputs.mapM (lowerInputGated g rankOf id · r))
   | .fm inId carrier base depth =>
-    return .swarp (fmWarp depth) (← lowerInput g inId) (.gen carrier id base)
+    return .swarp (fmWarp depth) (← lowerInputGated g rankOf id inId r) (.gen carrier id base)
   | .pm inId carrier base depth =>
-    return .pmGen carrier id base depth (← lowerInput g inId)
+    return .pmGen carrier id base depth (← lowerInputGated g rankOf id inId r)
   | .sflange inId modId depthSec =>
     return sweptFlangeEffect (sflangeBack depthSec) (sflangeFwd depthSec)
-      (← lowerInput g modId) (← lowerInput g inId)
+      (← lowerInputGated g rankOf id modId r) (← lowerInputGated g rankOf id inId r)
   | .knob idx => .ok (.konst (.paramRef ⟨idx⟩))
   | .comb inId taps => do
-    let s ← lowerInput g inId
+    let s ← lowerInputGated g rankOf id inId r
     return .sum (taps.map fun (w, φ) => .scale w (.warp φ s))
   | .ring inputs => do
-    let terms ← inputs.mapM (lowerInput g)
+    let terms ← inputs.mapM (lowerInputGated g rankOf id · r)
     match terms.toList with
     | [] => return .konst (lit 0)
     | t :: ts => return ts.foldl (fun acc u => .prod acc u) t
   | _ =>
     .error s!"lower: modal node '{id}' reached Sig lowering — realize via lowerInput"
+termination_by (r, 1)
 
 /-- Lower an input wire: a modal node realizes its island (pole bank →
     `modalBankTerm` at the master clock) at this edge; a Sig node lowers normally.
     This is the one-directional seam — modal grafts into Sig here, never the
     reverse (a Sig node has no modal input, so lowerModal is never asked for one). -/
-partial def lowerInput (g : PatchGraph) (id : String) : Except String ArrowTerm := do
+def lowerInput (g : PatchGraph) (rankOf : String → Option Nat)
+    (id : String) (r : Nat) : Except String ArrowTerm := do
   if nodeIsModal g id then
-    let (bank, a, clk, addr?, dir?, count?) ← lowerModal g id
+    let (bank, a, clk, addr?, dir?, count?) ← lowerModal g rankOf id r
     -- realize the lowered bank at THIS edge (the one-directional Modal→Sig seam).
     let term ← match bank with
       | .plain ms rooms =>
@@ -390,13 +454,31 @@ partial def lowerInput (g : PatchGraph) (id : String) : Except String ArrowTerm 
     -- signal is lowered as an ordinary Sig here at the seam, then `modalAddrWarp`
     -- routes it into the bank's clock leaf. The master scrub still reaches the
     -- bank through this modulator (it too rides the enclosing clock transform).
-    | some addrId => .ok (.swarp modalAddrWarp (← lowerInput g addrId) term)
-  else lowerNode g id
+    | some addrId => .ok (.swarp modalAddrWarp (← lowerInputGated g rankOf id addrId r) term)
+  else lowerNode g rankOf id r
+termination_by (r, 2)
 end
+
+/-- Lower from an arbitrary node id — THE total entry. Interns the graph,
+    refuses cycles with the loop named (the topo sort IS the cycle check,
+    and it covers every caller — hand-built `PatchGraph`s included, which
+    used to bypass the playground's separate pre-pass), then lowers with
+    the Kahn rank as the termination measure. -/
+def lowerAt (g : PatchGraph) (rootId : String) : Except String ArrowTerm := do
+  let ids := g.nodes.map (·.id)
+  let deps : Array (Array Nat) := g.nodes.map fun pn =>
+    pn.node.inputIds.filterMap ids.idxOf?
+  let some ranks := Tropical.Ir.topoRanks? deps
+    | let names := match Tropical.Ir.findCycle deps with
+        | some cyc => cyc.map fun i => ((ids[i]?).getD "?")
+        | none => #[]
+      throw s!"connection cycle: {Tropical.Ir.renderLoop names} — patch graphs must be acyclic (you may only patch forward; there is no delay to break a loop through)"
+  let rankOf := fun (s : String) => (ids.idxOf? s).bind (ranks[·]?)
+  lowerInput g rankOf rootId ((rankOf rootId).getD g.nodes.size)
 
 /-- Lower a whole patch to its (downstream, unreduced) arrow term. The output may
     be a modal island (realized at the tap) or a Sig graph. Compose with
     `normalize` (the slide), then `emitTerm`. -/
-def lowerGraph (g : PatchGraph) : Except String ArrowTerm := lowerInput g g.output
+def lowerGraph (g : PatchGraph) : Except String ArrowTerm := lowerAt g g.output
 
 end Tropical.EmitArrow
