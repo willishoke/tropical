@@ -519,4 +519,55 @@ deriving Repr, Inhabited
 def Arena.program? (a : Arena) (i : ProgramIdx) : Option Program :=
   a.programs[i.idx]?
 
+-- ─────────────────────────────────────────────────────────────
+-- Program-pool well-formedness — the pool mirror of `ExprArena.wf`
+-- ─────────────────────────────────────────────────────────────
+
+/-- The program-pool edge set: every pool index a program references —
+    registry targets plus nested `programDecl` links. -/
+def Program.progChildren (p : Program) : Array ProgramIdx :=
+  p.registry.map (·.2) ++ (p.decls.filterMap fun d =>
+    match d with | .prog _ t => some t | _ => none)
+
+/-- Pool-level child-descending well-formedness: every program
+    references only programs strictly below its own index. Every
+    construction site satisfies it (the elaborator pushes children
+    before parents, the codec decodes in a forward pass, the lowering
+    appends via `pushEProgram`); checking it once makes
+    `ProgramIdx.idx` a termination measure for pool walks — the
+    lowering's instance recursion and the codec's pooling DFS. -/
+def progPoolWf (programs : Array Program) : Bool :=
+  (Array.range programs.size).all fun i =>
+    match programs[i]? with
+    | some p => p.progChildren.all (fun c => c.idx < i)
+    | none => true
+
+def Arena.progWf (a : Arena) : Bool := progPoolWf a.programs
+
+/-- The elimination form of `progPoolWf`: a program's pool children are
+    all strictly below it — the decrease fact for `termination_by i.idx`. -/
+theorem progPool_children_lt {programs : Array Program}
+    (hw : progPoolWf programs = true)
+    {i : Nat} {p : Program} (hp : programs[i]? = some p) :
+    ∀ c ∈ p.progChildren, c.idx < i := by
+  intro c hc
+  obtain ⟨hi, -⟩ := Array.getElem?_eq_some_iff.mp hp
+  have hnode := Array.all_eq_true.mp hw i (by simpa using hi)
+  rw [Array.getElem_range, hp] at hnode
+  obtain ⟨j, hjlt, rfl⟩ := Array.mem_iff_getElem.mp hc
+  exact of_decide_eq_true (Array.all_eq_true.mp hnode j hjlt)
+
+/-- Registry corollary: a `registryGet?` hit points strictly below the
+    program it was looked up in. -/
+theorem progPool_registry_lt {programs : Array Program}
+    (hw : progPoolWf programs = true)
+    {i : Nat} {p : Program} (hp : programs[i]? = some p)
+    {k : String} {t : ProgramIdx} (ht : p.registryGet? k = some t) :
+    t.idx < i := by
+  refine progPool_children_lt hw hp t ?_
+  simp only [Program.registryGet?] at ht
+  obtain ⟨e, he, hev⟩ := Option.map_eq_some_iff.mp ht
+  exact Array.mem_append.mpr (Or.inl (hev ▸
+    Array.mem_map.mpr ⟨e, Array.mem_of_find?_eq_some he, rfl⟩))
+
 end Tropical.Ir

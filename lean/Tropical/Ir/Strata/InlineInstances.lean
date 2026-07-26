@@ -152,83 +152,103 @@ private def substDeclNestedE (d : BodyDecl) : PassM BodyDecl := do
   | .param .. | .prog .. => pure d
   | .inst name .. => failP s!"inlineInstances: substDecl on surviving InstanceDecl '{name}'"
 
-/- Deliberately `partial` (the mutual below): the recursion runs through
-   the PROGRAM pool via registry indices (`runE declTypeIdx`), and its
-   termination fact is the pool's acyclicity — children pushed before
-   parents — a separate invariant from the expression arena's
-   child-descending ids. Same family as the codec's `programId`; a
-   pool-level `wf` (the frozen-prefix recipe one level up) would
-   discharge it. -/
-mutual
+/-- The recursive flatten + splice, TOTAL by descent on `rootIdx.idx`
+    over the frozen pool snapshot: the only recursion follows a
+    registry edge of a frozen-pool program, and `hwp` says those edges
+    point strictly down. Programs pushed by inner calls are read only
+    through `getEProgram` on their returned indices (never recursed
+    on), so the snapshot never goes stale for the recursion.
 
-/-- Inline one instance: returns its lifted decls and recorded output ids.
-    The shared expr DAG threads through `PassM`. -/
-private partial def inlineOneE (enclosing : Program)
-    (instName typeKey : String)
-    (inputs : Array InstanceInput)
-    (paramOffset : Nat) :
-    PassM (Array BodyDecl × Array ExprId) := do
-  let (declTypeIdx, declType) ← getInstanceTypeE enclosing instName typeKey
-  -- 1. Recursively inline sub-instances (depth-first, bottom-up).
-  let flatIdx ← runE declTypeIdx
-  let flattened ← getEProgram flatIdx "inlineInstances"
-  -- 2. Input substitution map (wired > default > unsubstituted).
-  let inputSubst ← buildInputSubstE instName declType flattened inputs
-  -- 3. Clone with input substitution + idx shifting.
-  let cloned ← inlineSubstProgramE flattened inputSubst paramOffset
-  -- 4. Lift body decls into the outer.
-  let lifted ← liftClonedBodyE cloned
-  -- 5. Record output exprs for the nestedOut substitution.
-  let outputs ← recordOutputsE instName declType cloned
-  return (lifted, outputs)
+    Phase 1 flattens every instance target (recursion, order-
+    independent); phase 2 splices sequentially with the running param
+    offsets (no recursion). Same pushes in the same order as the old
+    interleaved mutual — only expression-interning order shifts, which
+    the `toResolved` GC renumbers away. -/
+private def goE (pool : Array Program) (hwp : progPoolWf pool = true)
+    (rootIdx : ProgramIdx) : PassM ProgramIdx := do
+  match hp : pool[rootIdx.idx]? with
+  | none => failP s!"inlineInstances: program pool index {rootIdx.idx} out of range"
+  | some prog => do
+    unless prog.decls.any (fun d => match d with | .inst .. => true | _ => false) do
+      return rootIdx
 
-partial def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
-  let prog ← getEProgram rootIdx "inlineInstances"
-  unless prog.decls.any (fun d => match d with | .inst .. => true | _ => false) do
-    return rootIdx
+    -- ── Phase 1: recursively flatten every instance target. ──
+    let flats : Array (Option (Program × Program)) ← prog.decls.mapM fun d => do
+      match d with
+      | .inst name typeKey _ =>
+        match hr : prog.registryGet? typeKey with
+        | some declTypeIdx =>
+          match pool[declTypeIdx.idx]? with
+          | none =>
+            failP s!"inlineInstances: registry target {declTypeIdx.idx} out of range (internal)"
+          | some declType => do
+            let flatIdx ← goE pool hwp declTypeIdx
+            let flattened ← getEProgram flatIdx "inlineInstances"
+            pure (some (declType, flattened))
+        | none =>
+          let keys := ", ".intercalate (prog.registry.toList.map (·.1))
+          failP (s!"getInstanceType: instance '{name}' typeKey '{typeKey}' " ++
+            s!"not found in enclosing program '{prog.name}' registry " ++
+            s!"(keys: {keys}). This is a registry-build bug; check buildProgramRegistry call sites.")
+      | _ => pure none
 
-  let outerParamCount := (prog.decls.filter isParamDeclE).size
-  let mut survivingDecls : Array BodyDecl := #[]
-  let mut liftedDecls : Array BodyDecl := #[]
-  let mut nestedOutSubst : NestedOutTableE := #[]
-  for decl in prog.decls do
-    match decl with
-    | .inst name typeKey inputs =>
-      let paramOffset := outerParamCount + (liftedDecls.filter isParamDeclE).size
-      let (lifted, outputs) ← inlineOneE prog name typeKey inputs paramOffset
-      liftedDecls := liftedDecls ++ lifted
-      nestedOutSubst := nestedOutSubst.push outputs
-    | _ => survivingDecls := survivingDecls.push decl
+    -- ── Phase 2: splice sequentially with the running offsets. ──
+    let outerParamCount := (prog.decls.filter isParamDeclE).size
+    let mut survivingDecls : Array BodyDecl := #[]
+    let mut liftedDecls : Array BodyDecl := #[]
+    let mut nestedOutSubst : NestedOutTableE := #[]
+    for (decl, flat?) in prog.decls.zip flats do
+      match decl, flat? with
+      | .inst name _ inputs, some (declType, flattened) =>
+        let paramOffset := outerParamCount + (liftedDecls.filter isParamDeclE).size
+        let inputSubst ← buildInputSubstE name declType flattened inputs
+        let cloned ← inlineSubstProgramE flattened inputSubst paramOffset
+        let lifted ← liftClonedBodyE cloned
+        let outputs ← recordOutputsE name declType cloned
+        liftedDecls := liftedDecls ++ lifted
+        nestedOutSubst := nestedOutSubst.push outputs
+      | .inst name .., none =>
+        failP s!"inlineInstances: internal phase mismatch for instance '{name}'"
+      | d, _ => survivingDecls := survivingDecls.push d
 
-  -- ── Normalize the recorded-output table (bounded Jacobi passes). ──
-  -- Entries reference sibling instances through the outer wiring; the
-  -- sibling graph is acyclic (elaborator/session contract), so
-  -- `n` one-hop passes collapse every chain — the quotient walk that
-  -- used to be the hook's own recursion is now table construction. A
-  -- fixpoint pass rewrites to the same ids (dedup), so `==` early-exits.
-  for _ in [0:nestedOutSubst.size] do
-    let prev := nestedOutSubst
-    nestedOutSubst ← withFrozenSrc "inlineInstances" fun src hw =>
-      prev.mapM fun outs =>
-        (outs.mapM (mapExprIdGo src hw (nestedHopHooks prev))).run' {}
-    if nestedOutSubst == prev then break
-  let table := nestedOutSubst
-  _ ← withFrozenSrc "inlineInstances" fun src hw =>
-    table.mapM fun outs =>
-      (outs.mapM (mapExprIdGo src hw nestedVerifyHooks)).run' {}
+    -- ── Normalize the recorded-output table (bounded Jacobi passes). ──
+    -- Entries reference sibling instances through the outer wiring; the
+    -- sibling graph is acyclic (elaborator/session contract), so
+    -- `n` one-hop passes collapse every chain — the quotient walk that
+    -- used to be the hook's own recursion is now table construction. A
+    -- fixpoint pass rewrites to the same ids (dedup), so `==` early-exits.
+    for _ in [0:nestedOutSubst.size] do
+      let prev := nestedOutSubst
+      nestedOutSubst ← withFrozenSrc "inlineInstances" fun src hw =>
+        prev.mapM fun outs =>
+          (outs.mapM (mapExprIdGo src hw (nestedHopHooks prev))).run' {}
+      if nestedOutSubst == prev then break
+    let table := nestedOutSubst
+    _ ← withFrozenSrc "inlineInstances" fun src hw =>
+      table.mapM fun outs =>
+        (outs.mapM (mapExprIdGo src hw nestedVerifyHooks)).run' {}
 
-  -- Surviving + lifted decls are param/prog only (CF-only: no regs to carry a
-  -- sibling's output), so substDecl is the identity-plus-assertion here.
-  let newDecls ← (survivingDecls ++ liftedDecls).mapM substDeclNestedE
-  let newAssigns ← withFrozenSrc "inlineInstances" fun src hw =>
-    prog.assigns.mapM fun a => do
-      pure ({ a with expr := ← mapExprId src hw (nestedHopHooks table) a.expr } : OutputAssign)
+    -- Surviving + lifted decls are param/prog only (CF-only: no regs to carry a
+    -- sibling's output), so substDecl is the identity-plus-assertion here.
+    let newDecls ← (survivingDecls ++ liftedDecls).mapM substDeclNestedE
+    let newAssigns ← withFrozenSrc "inlineInstances" fun src hw =>
+      prog.assigns.mapM fun a => do
+        pure ({ a with expr := ← mapExprId src hw (nestedHopHooks table) a.expr } : OutputAssign)
 
-  pushEProgram { prog with
-    decls := newDecls
-    assigns := newAssigns
-    registry := #[] }
+    pushEProgram { prog with
+      decls := newDecls
+      assigns := newAssigns
+      registry := #[] }
+termination_by rootIdx.idx
+decreasing_by exact progPool_registry_lt hwp hp hr
 
-end
+/-- The pass entry: snapshot the program pool, check pool-wf once (an
+    O(edges) sweep that buys the whole recursion's termination measure
+    — every pool is child-descending by construction, so the failure
+    arm is a construction-order bug, never a user error), and descend. -/
+def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
+  let pool := (← get).programs
+  if hwp : progPoolWf pool then goE pool hwp rootIdx
+  else failP "inlineInstances: program pool is not child-descending (internal construction-order bug)"
 
 end Tropical.Ir.Strata.InlineInstances

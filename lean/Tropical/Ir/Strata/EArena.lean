@@ -182,48 +182,66 @@ decreasing_by
 /-- Convert the reachable `Program` subgraph rooted at `eIdx` into a
     `CoreProgram`, remapping every leaf id into the `ExprArena` and
     following instance-referenced registry entries recursively (the
-    id-form `Core.check`). Port types resolve against the identity pools
-    (`base`). -/
-private partial def convProgram (ea : EArena) (hw : ea.exprs.wf = true)
+    id-form `Core.check`).
+
+    TOTAL, by descent on `eIdx.idx`: `hwp` says every registry edge
+    points strictly below its program, so the follow is a frozen-pool
+    descent — the same recipe as the expression walks, one level up.
+    The key collection (first-use dedup, matching `Core.check`) runs
+    first as a plain loop, carrying each target's decrease fact as a
+    subtype so the recursive `mapM` discharges its measure directly. -/
+private def convProgram (ea : EArena) (hw : ea.exprs.wf = true)
+    (hwp : progPoolWf ea.programs = true)
     (eIdx : ProgramIdx) : ConvM CoreProgram := do
-  let some ep := ea.programs[eIdx.idx]?
-    | throw ⟨s!"toResolved: program pool index {eIdx.idx} out of range (internal)"⟩
-  let decls : Array CoreBodyDecl ← ep.decls.mapM fun d => do
-    match d with
-    | .param name value? => pure (.param name value?)
-    | .inst name typeKey inputs =>
-      let inputs' ← inputs.mapM fun i => do
-        pure ({ port := i.port, value := ← convExprId ea.exprs hw i.value } : CoreInstanceInput)
-      pure (.inst name typeKey inputs')
-    | .prog name _ => pure (.progDecl name)
-  let assigns : Array CoreOutputAssign ← ep.assigns.mapM fun a => do
-    pure { target := a.target, expr := ← convExprId ea.exprs hw a.expr }
-  let inputs : Array CoreInputDecl ← ep.inputs.mapM fun i => do
-    pure { name := i.name, type? := i.type?,
-           default? := ← i.default?.mapM (convExprId ea.exprs hw) }
-  let outputs : Array CoreOutputDecl := ep.outputs.map fun o =>
-    { name := o.name, type? := o.type? }
-  -- Registry: follow only instance-referenced entries (evaluator-reachable),
-  -- recursively — matching `Core.check`'s first-use dedup and tree duplication.
-  let mut registry : Array (String × CoreProgram) := #[]
-  for d in ep.decls do
-    if let .inst name typeKey _ := d then
-      unless registry.any (·.1 == typeKey) do
-        let some tIdx := ep.registryGet? typeKey
-          | throw ⟨s!"core check ('{ep.name}'): instance '{name}' typeKey '{typeKey}' missing from registry"⟩
-        registry := registry.push (typeKey, ← convProgram ea hw tIdx)
-  return .mk ep.name inputs outputs decls assigns registry
+  match hp : ea.programs[eIdx.idx]? with
+  | none => throw ⟨s!"toResolved: program pool index {eIdx.idx} out of range (internal)"⟩
+  | some ep => do
+    let decls : Array CoreBodyDecl ← ep.decls.mapM fun d => do
+      match d with
+      | .param name value? => pure (.param name value?)
+      | .inst name typeKey inputs =>
+        let inputs' ← inputs.mapM fun i => do
+          pure ({ port := i.port, value := ← convExprId ea.exprs hw i.value } : CoreInstanceInput)
+        pure (.inst name typeKey inputs')
+      | .prog name _ => pure (.progDecl name)
+    let assigns : Array CoreOutputAssign ← ep.assigns.mapM fun a => do
+      pure { target := a.target, expr := ← convExprId ea.exprs hw a.expr }
+    let inputs : Array CoreInputDecl ← ep.inputs.mapM fun i => do
+      pure { name := i.name, type? := i.type?,
+             default? := ← i.default?.mapM (convExprId ea.exprs hw) }
+    let outputs : Array CoreOutputDecl := ep.outputs.map fun o =>
+      { name := o.name, type? := o.type? }
+    -- Registry: follow only instance-referenced entries (evaluator-
+    -- reachable), first-use dedup order, each carrying its decrease fact.
+    let mut keys : Array (String × {t : ProgramIdx // t.idx < eIdx.idx}) := #[]
+    for d in ep.decls do
+      if let .inst name typeKey _ := d then
+        unless keys.any (·.1 == typeKey) do
+          match hr : ep.registryGet? typeKey with
+          | some tIdx =>
+            keys := keys.push (typeKey, ⟨tIdx, progPool_registry_lt hwp hp hr⟩)
+          | none =>
+            throw ⟨s!"core check ('{ep.name}'): instance '{name}' typeKey '{typeKey}' missing from registry"⟩
+    let registry ← keys.mapM fun kt => do
+      pure (kt.1, ← convProgram ea hw hwp kt.2.1)
+    return .mk ep.name inputs outputs decls assigns registry
+termination_by eIdx.idx
+decreasing_by exact kt.2.2
 
 /-- The Phase B strata-exit reify: post-strata `EArena` → `(ExprArena ×
     CoreProgram)`, sharing preserved, reachable-only from `root`. -/
 def EArena.toResolved (ea : EArena) (root : ProgramIdx) :
     Except Error (ExprArena × CoreProgram) := do
-  -- One O(edges) sweep buys the conversion's termination measure: every
-  -- arena built through `eintern` is child-descending by construction,
-  -- so a failure here is an interning-order bug, not a user error.
+  -- Two O(edges) sweeps buy the conversion's termination measures: the
+  -- expression arena's child-descending ids and the program pool's —
+  -- both hold by construction, so a failure here is a construction-
+  -- order bug, not a user error.
   if hw : ea.exprs.wf then
-    let (core, (ca, _)) ← (convProgram ea hw root).run ({}, {})
-    return (ca, core)
+    if hwp : progPoolWf ea.programs then
+      let (core, (ca, _)) ← (convProgram ea hw hwp root).run ({}, {})
+      return (ca, core)
+    else
+      throw ⟨"toResolved: program pool is not child-descending (internal construction-order bug)"⟩
   else
     throw ⟨"toResolved: expression arena is not child-descending (internal interning-order bug)"⟩
 
