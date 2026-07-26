@@ -55,8 +55,9 @@ private def inlineSubstProgramE (inner : Program)
     (paramOffset : Nat) : PassM Program :=
   -- One memo across all of the clone's roots — the inner's inputs, decls, and
   -- assigns share subgraphs, and the rewrite is root-independent.
+  withFrozenSrc "inlineInstances" fun src hw =>
   StateT.run' (s := {}) do
-  let rw := mapExprIdGo (inlineSubstHooksE inputSubst paramOffset)
+  let rw := mapExprIdGo src hw (inlineSubstHooksE inputSubst paramOffset)
   let inputs ← inner.inputs.mapM fun i => do
     pure ({ i with default? := ← i.default?.mapM rw } : InputDecl)
   let decls ← inner.decls.mapM fun d => do
@@ -112,31 +113,52 @@ private def buildInputSubstE (instName : String) (declType flattened : Program)
 /-- `table[instanceIdx][outputIdx]` = recorded cloned output id. -/
 private abbrev NestedOutTableE := Array (Array ExprId)
 
-private partial def substExprNestedGoE (table : NestedOutTableE) (id : ExprId) : MapM ExprId :=
-  mapExprIdGo {
-    node := fun e => match e with
-      | .nestedOut inst out =>
-        match table[inst.idx]? with
+/-- ONE hop through the recorded-output table: a `nestedOut` to an
+    inlined sibling becomes that sibling's recorded output id as
+    recorded (not re-walked; the fixpoint loop below supplies the
+    collapse). -/
+private def nestedHopHooks (table : NestedOutTableE) : MapHooksId := {
+  node := fun e => match e with
+    | .nestedOut inst out =>
+      match table[inst.idx]? with
+      | none =>
+        failP (s!"inlineInstances: nestedOut to instance idx={inst.idx} output idx={out.idx} " ++
+          "— instance not inlined?")
+      | some perInstance =>
+        match perInstance[out.idx]? with
+        | some v => pure (some v)
         | none =>
           failP (s!"inlineInstances: nestedOut to instance idx={inst.idx} output idx={out.idx} " ++
-            "— instance not inlined?")
-        | some perInstance =>
-          match perInstance[out.idx]? with
-          | some v => do pure (some (← substExprNestedGoE table v))
-          | none =>
-            failP (s!"inlineInstances: nestedOut to instance idx={inst.idx} output idx={out.idx} " ++
-              "has no resolved expression for that output")
-      | _ => pure none
-  } id
+            "has no resolved expression for that output")
+    | _ => pure none
+}
 
-private def substExprNestedE (table : NestedOutTableE) (id : ExprId) : PassM ExprId :=
-  (substExprNestedGoE table id).run' {}
+/-- Post-fixpoint verification: every instance was inlined, so a
+    `nestedOut` REMAINING in a final table value means the sibling
+    graph had a cycle the upstream contract should have rejected (a
+    bare forwarding cycle even converges to self-reference, so the
+    fixpoint alone is not the check) — an internal error, never an
+    unbounded recursion. -/
+private def nestedVerifyHooks : MapHooksId := {
+  node := fun e => match e with
+    | .nestedOut inst out =>
+      failP (s!"inlineInstances: nestedOut to instance idx={inst.idx} output idx={out.idx} " ++
+        "did not resolve — the instance graph must be acyclic (upstream contract)")
+    | _ => pure none
+}
 
 private def substDeclNestedE (d : BodyDecl) : PassM BodyDecl := do
   match d with
   | .param .. | .prog .. => pure d
   | .inst name .. => failP s!"inlineInstances: substDecl on surviving InstanceDecl '{name}'"
 
+/- Deliberately `partial` (the mutual below): the recursion runs through
+   the PROGRAM pool via registry indices (`runE declTypeIdx`), and its
+   termination fact is the pool's acyclicity — children pushed before
+   parents — a separate invariant from the expression arena's
+   child-descending ids. Same family as the codec's `programId`; a
+   pool-level `wf` (the frozen-prefix recipe one level up) would
+   discharge it. -/
 mutual
 
 /-- Inline one instance: returns its lifted decls and recorded output ids.
@@ -178,11 +200,29 @@ partial def runE (rootIdx : ProgramIdx) : PassM ProgramIdx := do
       nestedOutSubst := nestedOutSubst.push outputs
     | _ => survivingDecls := survivingDecls.push decl
 
+  -- ── Normalize the recorded-output table (bounded Jacobi passes). ──
+  -- Entries reference sibling instances through the outer wiring; the
+  -- sibling graph is acyclic (elaborator/session contract), so
+  -- `n` one-hop passes collapse every chain — the quotient walk that
+  -- used to be the hook's own recursion is now table construction. A
+  -- fixpoint pass rewrites to the same ids (dedup), so `==` early-exits.
+  for _ in [0:nestedOutSubst.size] do
+    let prev := nestedOutSubst
+    nestedOutSubst ← withFrozenSrc "inlineInstances" fun src hw =>
+      prev.mapM fun outs =>
+        (outs.mapM (mapExprIdGo src hw (nestedHopHooks prev))).run' {}
+    if nestedOutSubst == prev then break
+  let table := nestedOutSubst
+  _ ← withFrozenSrc "inlineInstances" fun src hw =>
+    table.mapM fun outs =>
+      (outs.mapM (mapExprIdGo src hw nestedVerifyHooks)).run' {}
+
   -- Surviving + lifted decls are param/prog only (CF-only: no regs to carry a
   -- sibling's output), so substDecl is the identity-plus-assertion here.
   let newDecls ← (survivingDecls ++ liftedDecls).mapM substDeclNestedE
-  let newAssigns ← prog.assigns.mapM fun a => do
-    pure ({ a with expr := ← substExprNestedE nestedOutSubst a.expr } : OutputAssign)
+  let newAssigns ← withFrozenSrc "inlineInstances" fun src hw =>
+    prog.assigns.mapM fun a => do
+      pure ({ a with expr := ← mapExprId src hw (nestedHopHooks table) a.expr } : OutputAssign)
 
   pushEProgram { prog with
     decls := newDecls

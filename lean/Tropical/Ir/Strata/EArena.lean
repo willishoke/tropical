@@ -249,39 +249,73 @@ abbrev MapM := StateT (Std.HashMap Nat ExprId) PassM
 
 /-- Hook set for `mapExprId`: `node n` may replace a node (returning its id,
     possibly freshly interned via `einternP`); `none` recurses structurally.
-    Hooks run in `MapM` so a hook that recurses (e.g. `nestedOut`-chain
-    substitution) shares the walk's memo. -/
+    Hooks are ONE-HOP: a replacement id is returned whole, never re-walked —
+    a hook that needs collapsed values consults a pre-normalized table
+    (see the pass-side fixpoint loops), it does not recurse through the
+    walk. That contract is what makes the walker total. -/
 structure MapHooksId where
   node : ENode → MapM (Option ExprId) := fun _ => pure none
 
+/-- Freeze the current expression arena as a walk group's read source.
+    The walks only ever deref pre-walk ids — rewrites intern (write) but
+    are never read back — so one snapshot plus one O(edges) `wf` check
+    buys `mapExprIdGo`'s termination measure for every walk in the
+    group. The failure arm is an interning-order bug, never a user
+    error (every arena built through `eintern` is child-descending by
+    construction). -/
+def withFrozenSrc {α} (ctx : String)
+    (k : (src : ExprArena) → src.wf = true → PassM α) : PassM α := do
+  let src := (← get).exprs
+  if hw : src.wf then k src hw
+  else failP s!"{ctx}: arena is not child-descending (internal interning-order bug)"
+
 /-- Structural map over an id-rooted expression, re-interning the result and
     memoizing per source id. Equal subtrees collapse on intern, so the rewrite
-    produces a DAG — and the memo makes the walk itself DAG-shaped too. -/
-partial def mapExprIdGo (h : MapHooksId) (id : ExprId) : MapM ExprId := do
+    produces a DAG — and the memo makes the walk itself DAG-shaped too.
+
+    TOTAL, by descent on `id.idx` over the frozen source `src`: every
+    deref reads the snapshot (the walk never reads what it interns), and
+    `hw` says the snapshot's edges point down. A hook may start a FRESH
+    walk (its own root, its own measure); it must not re-enter this one. -/
+def mapExprIdGo (src : ExprArena) (hw : src.wf = true) (h : MapHooksId)
+    (id : ExprId) : MapM ExprId := do
   if let some r := (← get).get? id.idx then return r
-  let n ← derefP id
   let r ← do
-    match ← h.node n with
-    | some r => pure r
-    | none =>
-      match n with
-      | .num _ | .bool _ | .inputRef _ | .paramRef _
-      | .nestedOut _ _ | .sampleRate | .sampleIndex | .loopIdx _ => pure id
-      | .bankSum c ts b dc ii =>
-        einternP (.bankSum c (← ts.mapM (mapExprIdGo h)) (← mapExprIdGo h b)
-          (← dc.mapM (mapExprIdGo h)) ii)
-      | .arr items => einternP (.arr (← items.mapM (mapExprIdGo h)))
-      | .binary t a b => einternP (.binary t (← mapExprIdGo h a) (← mapExprIdGo h b))
-      | .unary t a => einternP (.unary t (← mapExprIdGo h a))
-      | .clamp a b c => einternP (.clamp (← mapExprIdGo h a) (← mapExprIdGo h b) (← mapExprIdGo h c))
-      | .select a b c => einternP (.select (← mapExprIdGo h a) (← mapExprIdGo h b) (← mapExprIdGo h c))
-      | .arraySet a b c => einternP (.arraySet (← mapExprIdGo h a) (← mapExprIdGo h b) (← mapExprIdGo h c))
-      | .index a b => einternP (.index (← mapExprIdGo h a) (← mapExprIdGo h b))
+    match _hd : src.deref id with
+    | none => failP s!"mapExprId: dangling ExprId {id.idx} (internal)"
+    | some n =>
+      match ← h.node n with
+      | some r => pure r
+      | none =>
+        match _hn : n with
+        | .num _ | .bool _ | .inputRef _ | .paramRef _
+        | .nestedOut _ _ | .sampleRate | .sampleIndex | .loopIdx _ => pure id
+        | .bankSum c ts b dc ii =>
+          einternP (.bankSum c
+            (← ts.attach.mapM fun ⟨t, _⟩ => mapExprIdGo src hw h t)
+            (← mapExprIdGo src hw h b)
+            (← match _hdc : dc with
+                | none => pure none
+                | some d => some <$> mapExprIdGo src hw h d) ii)
+        | .arr items =>
+          einternP (.arr (← items.attach.mapM fun ⟨x, _⟩ => mapExprIdGo src hw h x))
+        | .binary t a b => einternP (.binary t (← mapExprIdGo src hw h a) (← mapExprIdGo src hw h b))
+        | .unary t a => einternP (.unary t (← mapExprIdGo src hw h a))
+        | .clamp a b c => einternP (.clamp (← mapExprIdGo src hw h a) (← mapExprIdGo src hw h b) (← mapExprIdGo src hw h c))
+        | .select a b c => einternP (.select (← mapExprIdGo src hw h a) (← mapExprIdGo src hw h b) (← mapExprIdGo src hw h c))
+        | .arraySet a b c => einternP (.arraySet (← mapExprIdGo src hw h a) (← mapExprIdGo src hw h b) (← mapExprIdGo src hw h c))
+        | .index a b => einternP (.index (← mapExprIdGo src hw h a) (← mapExprIdGo src hw h b))
   modify (·.insert id.idx r)
   pure r
+termination_by id.idx
+decreasing_by
+  all_goals
+    apply ExprArena.forall_children_lt hw ‹ExprArena.deref _ _ = some _›
+    simp_all [ENode.children]
 
 /-- One hook-set application of `mapExprIdGo` with a fresh memo. -/
-def mapExprId (h : MapHooksId) (id : ExprId) : PassM ExprId :=
-  (mapExprIdGo h id).run' {}
+def mapExprId (src : ExprArena) (hw : src.wf = true) (h : MapHooksId)
+    (id : ExprId) : PassM ExprId :=
+  (mapExprIdGo src hw h id).run' {}
 
 end Tropical.Ir.Strata
