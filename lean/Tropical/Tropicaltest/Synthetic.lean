@@ -214,6 +214,55 @@ def runPatchBayRefusal : IO Bool := do
 
 end PatchBayRefusal
 
+-- ── The CF-only cycle tripwire gate ──────────────────────────────────────────
+-- Wire cycles are unbuildable through the IR, but the session mirror can spell
+-- one in a patch file; the compile must refuse it at `assertSessionAcyclic`
+-- (the shared total detector, `Ir.findCycle`) with a nameable loop.
+section CycleRefusal
+
+private def instDecl (name : String) (inputs : Array (String × Lean.Json)) : Lean.Json :=
+  Lean.Json.mkObj [
+    ("op", Lean.Json.str "instanceDecl"), ("name", Lean.Json.str name),
+    ("program", Lean.Json.str "SoftClip"),
+    ("inputs", Lean.Json.mkObj inputs.toList)]
+
+private def refTo (inst : String) : Lean.Json :=
+  Lean.Json.mkObj [
+    ("op", Lean.Json.str "ref"), ("instance", Lean.Json.str inst),
+    ("output", Lean.Json.str "out")]
+
+private def cyclePatchJson (decls : Array Lean.Json) : Lean.Json :=
+  Lean.Json.mkObj [
+    ("schema", Lean.Json.str "tropical_program_2"),
+    ("name", Lean.Json.str "cycle_probe"),
+    ("body", Lean.Json.mkObj [("op", Lean.Json.str "block"),
+      ("decls", Lean.Json.arr decls), ("assigns", Lean.Json.arr #[])]),
+    ("audio_outputs", Lean.Json.arr #[Lean.Json.mkObj [
+      ("instance", Lean.Json.str "a"), ("output", Lean.Json.str "out")]])]
+
+private def expectCycleRefusal (label : String) (path : String)
+    (decls : Array Lean.Json) : IO Bool := do
+  IO.FS.writeFile path (cyclePatchJson decls).compress
+  match ← compilePatch path .fused with
+  | .ok _ =>
+    failGate s!"cycle-refusal/{label}" "cyclic session COMPILED — CF-only tripwire is dead"
+  | .error e =>
+    if (e.splitOn "CF-only — inter-instance cycles are not allowed").length > 1 then
+      passGate s!"cycle-refusal/{label}" (firstLine e)
+    else
+      failGate s!"cycle-refusal/{label}"
+        s!"cyclic session refused with the WRONG error (want the CF-only message): {firstLine e}"
+
+def runCycleRefusal : IO Bool := do
+  let selfLoop ← expectCycleRefusal "self" "/tmp/tropicaltest-cycle-self.json"
+    #[instDecl "a" #[("input", refTo "a")]]
+  let pair ← expectCycleRefusal "pair" "/tmp/tropicaltest-cycle-pair.json"
+    #[instDecl "a" #[("input", refTo "b")],
+      instDecl "b" #[("input", refTo "a")]]
+  pure (selfLoop && pair)
+
+end CycleRefusal
+
 def sortedNames (dir : String) (suffix : String) : IO (Array String) := do
   let entries ← (System.FilePath.mk dir).readDir
   let names := entries.filterMap fun e =>

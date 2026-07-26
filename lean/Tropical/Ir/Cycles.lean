@@ -3,12 +3,18 @@ import Tropical.Ir.Nodes
 /-!
 # Instance-graph cycle detection
 
-`findInstanceCycles`: the non-trivial SCCs of a program's
-inter-instance dependency graph (edges = `nestedOut` references inside
-instance input wiring), as instance-name lists in SCC member order.
-Shared by the elaborator's acyclic-source contract (`CycleViolation`)
-and the lowering's entry tripwire (`Strata.assertAcyclic`) — the IR is
-acyclic by construction, and both boundaries state it.
+`findCycle` / `findInstanceCycle?`: one cycle of the inter-instance
+dependency graph (edges = `nestedOut` references inside instance input
+wiring), if any exists. Cycles are always fatal here — the IR is
+acyclic by construction and every boundary states it — so the
+tripwires need *detection with a nameable loop*, not SCC computation:
+a Kahn peel leaves exactly the nodes involved in or fed by cycles, and
+a successor walk inside that remainder must close a loop within n+1
+steps. Every loop is bounded by the node count, so the whole check is
+total by construction (the Tarjan pair this replaced was the last
+`partial` graph algorithm). Shared by the lowering's entry tripwire
+(`Strata.assertAcyclic`), direct program registration (`ProgramIO`),
+and the session tripwire (`Lowering.assertSessionAcyclic`).
 -/
 
 namespace Tropical.Ir
@@ -57,76 +63,93 @@ decreasing_by
         | exact Or.inr ⟨_, by assumption, rfl⟩
         | exact ⟨_, by assumption, rfl⟩
 
-private structure TarjanSt where
-  indexOf : Array (Option Nat)
-  lowlink : Array Nat
-  onStack : Array Bool
-  stack : Array Nat := #[]
-  sccs : Array (Array Nat) := #[]
-  next : Nat := 0
+/-- One cycle of a finite digraph, if any. `deps[v]` lists v's
+    successors; out-of-range successors are ignored (they cannot sit on
+    a cycle). Returns the loop as node indices in successor order, open
+    (the caller closes it for rendering); a self-loop is `#[v]`.
 
-/-- Tarjan's SCC, recursion + orders matching cycle_break.ts: nodes
-    visited in instance order, successors in dep insertion order, SCC
-    members in stack-pop order (the SCC root is last).
+    Kahn peel: repeatedly remove nodes whose live successors are all
+    removed. Afterward every remaining node keeps at least one live
+    successor, so a successor walk from any remaining node must revisit
+    within n+1 steps — the revisited suffix is the cycle. Each node
+    enqueues at most once and the walk is bounded, so every loop is a
+    plain `for` over a range: total by construction, no measure to
+    prove. -/
+def findCycle (deps : Array (Array Nat)) : Option (Array Nat) := Id.run do
+  let n := deps.size
+  let live := fun (w : Nat) => w < n
+  -- liveSucc[v] = v's not-yet-peeled in-range successors, as a count.
+  let mut liveSucc : Array Nat := deps.map fun ss => (ss.filter live).size
+  -- Reverse adjacency: preds[w] = the nodes listing w as a successor.
+  let mut preds : Array (Array Nat) := Array.replicate n #[]
+  for v in [0:n] do
+    for w in deps[v]! do
+      if live w then preds := preds.set! w (preds[w]!.push v)
+  let mut peeled : Array Bool := Array.replicate n false
+  let mut queue : Array Nat := #[]
+  for v in [0:n] do
+    if liveSucc[v]! == 0 then queue := queue.push v
+  let mut qi := 0
+  for _ in [0:n] do
+    if qi < queue.size then
+      let w := queue[qi]!
+      qi := qi + 1
+      peeled := peeled.set! w true
+      for v in preds[w]! do
+        if !peeled[v]! then
+          let c := liveSucc[v]! - 1
+          liveSucc := liveSucc.set! v c
+          if c == 0 then queue := queue.push v
+  -- Remainder walk: follow the first live successor until a revisit.
+  match (Array.range n).find? (fun v => !peeled[v]!) with
+  | none => return none
+  | some s =>
+    let mut posOf : Array (Option Nat) := Array.replicate n none
+    let mut path : Array Nat := #[]
+    let mut cur := s
+    let mut result : Option (Array Nat) := none
+    for _ in [0:n+1] do
+      if result.isNone then
+        match posOf[cur]! with
+        | some p => result := some (path.extract p path.size)
+        | none =>
+          posOf := posOf.set! cur (some path.size)
+          path := path.push cur
+          match deps[cur]!.find? (fun w => live w && !peeled[w]!) with
+          | some w => cur := w
+          | none =>
+            -- Unreachable: the peel invariant guarantees a live
+            -- successor. Loud if the invariant ever breaks.
+            result := panic! "findCycle: remainder node has no live successor (peel invariant broken)"
+    return result
 
-    Deliberately `partial`: the discharging measure is "unvisited nodes
-    strictly decrease" (each recursive call happens under a
-    `visited[w] = false` check that its own entry immediately flips),
-    a fact threaded through mutable state inside a `for` loop — carrying
-    it as data is the classic well-founded-Tarjan exercise and buys
-    nothing here. -/
-private partial def strongConnect (deps : Array (Array Nat)) (v : Nat)
-    (st0 : TarjanSt) : TarjanSt := Id.run do
-  let mut st := st0
-  st := { st with
-    indexOf := st.indexOf.set! v (some st.next)
-    lowlink := st.lowlink.set! v st.next
-    next := st.next + 1
-    stack := st.stack.push v
-    onStack := st.onStack.set! v true }
-  for w in deps[v]! do
-    if st.indexOf[w]!.isNone then
-      st := strongConnect deps w st
-      st := { st with lowlink := st.lowlink.set! v (Nat.min st.lowlink[v]! st.lowlink[w]!) }
-    else if st.onStack[w]! then
-      st := { st with lowlink := st.lowlink.set! v (Nat.min st.lowlink[v]! (st.indexOf[w]!.getD 0)) }
-  if some st.lowlink[v]! == st.indexOf[v]! then
-    let mut scc : Array Nat := #[]
-    let mut go := true
-    while go do
-      match st.stack.back? with
-      | none => go := false
-      | some w =>
-        st := { st with stack := st.stack.pop, onStack := st.onStack.set! w false }
-        scc := scc.push w
-        if w == v then go := false
-    st := { st with sccs := st.sccs.push scc }
-  return st
+/-- Close an open loop for rendering: `[a, b] → "a → b → a"`. -/
+def renderLoop (cycle : Array String) : String :=
+  let loop := cycle ++ ((cycle[0]?).map (#[·])).getD #[]
+  String.intercalate " → " loop.toList
 
 /-- The acyclic-source contract's message: name the cycle and say the true
     thing — there is no state primitive to break it through. Shared by every
     boundary that enforces the contract on a constructed `Program`
     (`export_program`'s direct registration; formerly the elaborator's
     `CycleViolation`). -/
-def cycleViolationMessage (progName : String) (cycles : Array (Array String)) : String :=
-  let diagnostics := cycles.map fun scc =>
-    let memberPath := String.intercalate " → " scc.toList
+def cycleViolationMessage (progName : String) (cycle : Array String) : String :=
+  "tropical: strict cycle policy violated:\n" ++
     s!"tropical: cycle in program '{progName}'\n" ++
-    s!"  Instances in cycle: {memberPath}\n" ++
+    s!"  Instances in cycle: {renderLoop cycle}\n" ++
     "  There is no state primitive to break a cycle through — kernels are " ++
     "closed-form f(τ, params), so instance graphs must feed forward. " ++
     "Restructure the graph; recursive feedback on live input is outside this language."
-  "tropical: strict cycle policy violated:\n" ++
-    String.intercalate "\n\n" diagnostics.toList
 
-/-- Port of `findInstanceCycles`: non-trivial SCCs of the inter-instance
-    dep graph, as instance-name lists in SCC member order. -/
-def findInstanceCycles (ea : ExprArena) (prog : Program) : Array (Array String) := Id.run do
+/-- One cycle of the inter-instance dep graph, if any, as instance
+    names in signal-flow order (producer → consumer, open — callers
+    close the loop via `renderLoop`). -/
+def findInstanceCycle? (ea : ExprArena) (prog : Program) : Option (Array String) := Id.run do
   let insts : Array (String × Array InstanceInput) := prog.decls.filterMap fun d =>
     match d with
     | .inst name _ inputs => some (name, inputs)
     | _ => none
-  if insts.isEmpty then return #[]
+  if insts.isEmpty then return none
   -- One O(edges) sweep buys the dep walk's termination measure; every
   -- arena built through `eintern` is child-descending by construction,
   -- so the panic is an interning-order bug, never a user error.
@@ -134,18 +157,10 @@ def findInstanceCycles (ea : ExprArena) (prog : Program) : Array (Array String) 
     let n := insts.size
     let deps : Array (Array Nat) := insts.map fun (_, inputs) =>
       inputs.foldl (fun acc w => collectNestedOutDeps ea hw n acc w.value) #[]
-    let mut st : TarjanSt := {
-      indexOf := Array.replicate n none
-      lowlink := Array.replicate n 0
-      onStack := Array.replicate n false }
-    for v in [0:n] do
-      if st.indexOf[v]!.isNone then
-        st := strongConnect deps v st
-    let nontrivial := st.sccs.filter fun scc =>
-      scc.size > 1 || (scc.size == 1 && (deps[scc[0]!]!).contains scc[0]!)
-    return nontrivial.map (·.map fun i => insts[i]!.1)
+    -- `deps` edges point consumer → producer; reverse for flow order.
+    return (findCycle deps).map fun cyc => cyc.reverse.map fun i => insts[i]!.1
   else
-    panic! "findInstanceCycles: arena is not child-descending (internal interning-order bug)"
+    panic! "findInstanceCycle?: arena is not child-descending (internal interning-order bug)"
 
 
 end Tropical.Ir

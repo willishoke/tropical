@@ -3,6 +3,7 @@ import Tropical.Errors
 import Tropical.Expr
 import Tropical.Wiring
 import Tropical.Session
+import Tropical.Ir.Cycles
 
 /-!
 # Session lowering — Phase 3 of the Lean port
@@ -12,7 +13,8 @@ engine's mirror (pure — the durable mirror is never mutated here):
 
 - slot allocation (`allocateParamSlot` + `allocateOutputSlots` over the
   catalog port types, canonical order: params → instance outputs)
-- `assertSessionAcyclic` — Tarjan tripwire over the instance dep graph
+- `assertSessionAcyclic` — cycle tripwire over the instance dep graph,
+  via the shared total detector `Ir.findCycle`
   (CF-only: inter-instance cycles are rejected outright)
 - `computeInstanceTopoOrder` — Kahn with sorted ties
 
@@ -139,82 +141,21 @@ private def buildDeps (instances : Array (String × InstanceInfo)) (wires : Arra
       deps := deps.set! i (n, ps)
   return deps
 
-/-- Tarjan SCC (port of compiler/compiler.ts tarjanSCC; same visit and
-    neighbor order). -/
-private partial def tarjanSCC (deps : Array (String × Array String)) : Array (Array String) := Id.run do
-  let mut indices : Std.HashMap String Nat := {}
-  let mut lowlinks : Std.HashMap String Nat := {}
-  let mut onStack : Std.HashMap String Bool := {}
-  let mut stack : Array String := #[]
-  let mut sccs : Array (Array String) := #[]
-  let mut nextIdx := 0
-
-  let neighbors := fun (v : String) =>
-    ((deps.find? (·.1 == v)).map (·.2)).getD #[]
-
-  -- Explicit-stack DFS replicating the recursive algorithm.
-  let rec visit (v : String) (st : Std.HashMap String Nat × Std.HashMap String Nat ×
-      Std.HashMap String Bool × Array String × Array (Array String) × Nat) :
-      Std.HashMap String Nat × Std.HashMap String Nat ×
-      Std.HashMap String Bool × Array String × Array (Array String) × Nat := Id.run do
-    let (indices0, lowlinks0, onStack0, stack0, sccs0, idx0) := st
-    let mut indices := indices0.insert v idx0
-    let mut lowlinks := lowlinks0.insert v idx0
-    let mut onStack := onStack0.insert v true
-    let mut stack := stack0.push v
-    let mut sccs := sccs0
-    let mut idx := idx0 + 1
-    for w in neighbors v do
-      if !indices.contains w then
-        let (i', l', o', s', c', x') := visit w (indices, lowlinks, onStack, stack, sccs, idx)
-        indices := i'; lowlinks := l'; onStack := o'; stack := s'; sccs := c'; idx := x'
-        let lv := (lowlinks.get? v).getD 0
-        let lw := (lowlinks.get? w).getD 0
-        lowlinks := lowlinks.insert v (Nat.min lv lw)
-      else if (onStack.get? w).getD false then
-        let lv := (lowlinks.get? v).getD 0
-        let iw := (indices.get? w).getD 0
-        lowlinks := lowlinks.insert v (Nat.min lv iw)
-    if (lowlinks.get? v).getD 0 == (indices.get? v).getD 0 then
-      let mut scc : Array String := #[]
-      let mut go := true
-      while go do
-        match stack.back? with
-        | none => go := false
-        | some w =>
-          stack := stack.pop
-          onStack := onStack.insert w false
-          scc := scc.push w
-          if w == v then go := false
-      sccs := sccs.push scc
-    return (indices, lowlinks, onStack, stack, sccs, idx)
-
-  let mut st := (indices, lowlinks, onStack, stack, sccs, nextIdx)
-  for (v, _) in deps do
-    let (i, _, _, _, _, _) := st
-    if !i.contains v then
-      st := visit v st
-  let (_, _, _, _, out, _) := st
-  return out
-
-/-- CF-only inter-instance cycle tripwire. -/
+/-- CF-only inter-instance cycle tripwire (the shared total detector,
+    `Ir.findCycle`, over the wire dep graph). Producer names outside
+    the instance set (dangling refs) cannot sit on a cycle and are
+    dropped at interning. -/
 def assertSessionAcyclic (instances : Array (String × InstanceInfo))
     (wires : Array Wire) : EngineM Unit := do
   let deps := buildDeps instances wires (dropSelfEdges := false)
-  let sccs := tarjanSCC deps
-  let selfEdge := fun (n : String) =>
-    (((deps.find? (·.1 == n)).map (·.2)).getD #[]).contains n
-  let nontrivial := sccs.filter fun scc =>
-    scc.size > 1 || (scc.size == 1 && selfEdge scc[0]!)
-  if nontrivial.isEmpty then
-    pure ()
-  else
-    let lines := nontrivial.map fun c =>
-      s!"  - {String.intercalate " → " c.toList} → {c[0]!}"
-    let msg := String.intercalate "\n" <|
-      ["compileSession: CF-only — inter-instance cycles are not allowed:"]
-      ++ lines.toList
-    internalError msg
+  let depsIdx : Array (Array Nat) := deps.map fun (_, ps) =>
+    ps.filterMap fun p => deps.findIdx? (·.1 == p)
+  if let some cyc := Tropical.Ir.findCycle depsIdx then
+    -- `deps` edges point consumer → producer; reverse for flow order.
+    let names := cyc.reverse.map fun i => ((deps[i]?).map (·.1)).getD "?"
+    internalError <| String.intercalate "\n"
+      ["compileSession: CF-only — inter-instance cycles are not allowed:",
+       s!"  - {Tropical.Ir.renderLoop names}"]
 
 /-- Kahn with lexicographically sorted ready-queues (port of
     computeInstanceTopoOrder; incomplete orders append the remainder in

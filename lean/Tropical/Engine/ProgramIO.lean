@@ -404,9 +404,8 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
     decls := declsR, assigns := assignsR, registry }
   -- The acyclic-source contract, enforced where the program is constructed
   -- (the session mirror can hold a cyclic graph after a refused compile).
-  let cycles := Tropical.Ir.findInstanceCycles exprs prog
-  if !cycles.isEmpty then
-    internalError (Tropical.Ir.cycleViolationMessage name cycles)
+  if let some cyc := Tropical.Ir.findInstanceCycle? exprs prog then
+    internalError (Tropical.Ir.cycleViolationMessage name cyc)
   let arena' := { st.arena with programs := st.arena.programs.push prog, exprs }
   let rawIdx : Tropical.Ir.ProgramIdx := ⟨st.arena.programs.size⟩
   let (rootEntry, _) ← registerResolved env name arena' rawIdx

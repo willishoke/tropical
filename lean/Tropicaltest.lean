@@ -115,6 +115,11 @@ def main (args : List String) : IO UInt32 := do
   total := total + 1
   if !(← runPatchBayRefusal) then failed := failed + 1
 
+  -- ── (c⁗ᵇ) The CF-only cycle tripwire (session mirror spells a cycle) ───────
+  IO.println "cycle refusal (cyclic session wiring → CF-only message):"
+  total := total + 1
+  if !(← runCycleRefusal) then failed := failed + 1
+
   -- ── (c⁗′) Region-aware Stage0: an all-s0 region hoists as a unit (WS3a) ────
   IO.println "banks region hoist (all-s0 reduce region → coefficient kernel):"
   total := total + 1
