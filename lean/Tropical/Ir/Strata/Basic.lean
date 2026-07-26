@@ -1,4 +1,4 @@
-import Tropical.Ir.Nodes
+import Tropical.Ir.Cycles
 
 /-!
 # Strata shared types — Options + Error
