@@ -44,10 +44,12 @@ interface ProgramFile {
 const PROG_TMP = '/tmp/wvj-program.json'
 
 /** Compile a `ProgramFile` to a `tropical_plan_5` wire plan JSON string via
- *  the Lean `diffcli compile` front door (native oracle + manifest source). */
+ *  the Lean `diffcli compile` front door (native oracle + manifest source).
+ *  `--fixtures` registers the builder-authored test programs (`OpZoo`) on top
+ *  of the stdlib so patch-bay fixtures can instantiate them by name. */
 function compileViaLean(program: ProgramFile): string {
   writeFileSync(PROG_TMP, JSON.stringify(program))
-  const r = spawnSync([diffcli, 'compile', PROG_TMP, '--mode=fused'], { cwd: repoRoot, env: cliEnv })
+  const r = spawnSync([diffcli, 'compile', PROG_TMP, '--mode=fused', '--fixtures'], { cwd: repoRoot, env: cliEnv })
   if (r.exitCode !== 0) throw new Error(`diffcli compile failed (exit ${r.exitCode}): ${r.stderr?.toString()}`)
   return r.stdout.toString().trim()
 }
@@ -81,7 +83,7 @@ function runNative(wirePlan: string, samples: number): Float64Array {
 async function runWasm(program: ProgramFile, plan: string, samples: number): Promise<Float64Array> {
   writeFileSync(PROG_TMP, JSON.stringify(program))
   const out = '/tmp/wvj-program.wasm'
-  const r = spawnSync([diffcli, 'compile-wasm', PROG_TMP, `--out=${out}`], { cwd: repoRoot, env: cliEnv })
+  const r = spawnSync([diffcli, 'compile-wasm', PROG_TMP, `--out=${out}`, '--fixtures'], { cwd: repoRoot, env: cliEnv })
   if (r.exitCode !== 0) throw new Error(`diffcli compile-wasm failed (exit ${r.exitCode}): ${r.stderr?.toString()}`)
   const k = await WasmKernel.instantiate(new Uint8Array(readFileSync(out)), manifestFromPlan(plan), samples)
   return k.render(samples).slice()
@@ -122,56 +124,14 @@ function softClipChainProgram(drive: number): ProgramFile {
 // clamp/select, comparisons, and the rounding intrinsics. Confirms every op
 // lowers correctly on wasm32 (esp. fptosi → i64.trunc_sat, the one op with
 // target-divergent lowering), not just the arithmetic the audio patches hit.
+// The program body is authored in Lean (`EmitArrow.opZooSig`, registered by
+// `--fixtures`); this file drives it BY NAME — the schema cannot carry program
+// bodies over the wire.
 function opZooProgram(): ProgramFile {
-  const seed = () => ({ op: 'bitAnd', args: [{ op: 'toInt', args: [{ op: 'sampleIndex' }] }, 255] })
-  const expr = {
-    op: 'clamp',
-    args: [
-      { op: 'add', args: [
-        { op: 'to_float', args: [
-          { op: 'bitXor', args: [
-            { op: 'lshift', args: [seed(), 1] },
-            { op: 'bitAnd', args: [
-              { op: 'bitNot', args: [seed()] },
-              { op: 'rshift', args: [{ op: 'bitOr', args: [seed(), 1] }, 1] },
-            ] },
-          ] },
-        ] },
-        { op: 'add', args: [
-          { op: 'to_float', args: [
-            { op: 'mod', args: [{ op: 'floorDiv', args: [seed(), 3] }, 7] },
-          ] },
-          { op: 'add', args: [
-            { op: 'select', args: [
-              { op: 'and', args: [
-                { op: 'gt', args: [{ op: 'toFloat', args: [{ op: 'sampleIndex' }] }, 0] },
-                { op: 'or', args: [
-                  { op: 'lte', args: [{ op: 'sampleRate' }, 1000000] },
-                  { op: 'not', args: [{ op: 'eq', args: [{ op: 'toBool', args: [{ op: 'toFloat', args: [{ op: 'sampleIndex' }] }] }, 0] }] },
-                ] },
-              ] },
-              { op: 'sqrt', args: [{ op: 'abs', args: [{ op: 'neg', args: [{ op: 'sub', args: [{ op: 'ceil', args: [2.2] }, { op: 'floor', args: [3.7] }] }] }] }] },
-              { op: 'to_float', args: [{ op: 'toInt', args: [3.7] }] },
-            ] },
-            { op: 'mul', args: [
-              { op: 'round', args: [{ op: 'ldexp', args: [{ op: 'floatExponent', args: [0.1] }, 2] }] },
-              { op: 'div', args: [{ op: 'to_float', args: [{ op: 'gte', args: [{ op: 'lt', args: [1, 2] }, 0] }] }, 1000.0] },
-            ] },
-          ] },
-        ] },
-      ] },
-      -1.0, 1.0,
-    ],
-  }
   return {
     schema: 'tropical_program_2',
     name: 'eq_opzoo',
     body: { op: 'block', decls: [
-      { op: 'programDecl', name: 'OpZoo', program: {
-        op: 'program', name: 'OpZoo',
-        ports: { inputs: [], outputs: ['out'] },
-        body: { op: 'block', decls: [], assigns: [{ op: 'outputAssign', name: 'out', expr }] },
-      }},
       { op: 'instanceDecl', name: 'inst', program: 'OpZoo', inputs: {} },
     ]},
     audio_outputs: [{ instance: 'inst', output: 'out' }],

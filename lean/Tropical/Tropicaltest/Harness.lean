@@ -70,6 +70,20 @@ def compilePatch (path : String) (mode : Tropical.Plan.CompilationMode) :
   | .ok planJson => pure (.ok planJson)
   | .error f => pure (.error f.toJson.compress)
 
+/-- `compilePatch` with the test-fixture programs (`OpZoo`) registered on top
+    of the boot chain — the `diffcli … --fixtures` path, for patches that
+    instantiate a fixture by name. -/
+def compilePatchFixtures (path : String) (mode : Tropical.Plan.CompilationMode) :
+    IO (Except String String) := do
+  let env ← Tropical.Engine.boot
+  let act : Tropical.EngineM String := do
+    Tropical.Engine.registerTestFixtures env
+    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str path)])
+    Tropical.Engine.compileMirrorPlan env mode
+  match ← act.run with
+  | .ok planJson => pure (.ok planJson)
+  | .error f => pure (.error f.toJson.compress)
+
 /-- Render a FlatPlan via the Lean-emitted-IR path (stage-0 split →
     EmitLlvm → load_ir_staged). -/
 def renderIrBytes (plan : Tropical.Plan.FlatPlan) : IO (Except String ByteArray) := do

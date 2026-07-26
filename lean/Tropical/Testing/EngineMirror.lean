@@ -1,4 +1,5 @@
 import Tropical.Engine
+import Tropical.Testing.ArrowFixtures
 
 /-!
 # EngineMirror — harness-only session recompiles (test support, not production)
@@ -57,5 +58,15 @@ def compileMirrorPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
   match plan.toWire with
   | .error msg => internalError msg
   | .ok j => pure j.compress
+
+/-- Register the test-fixture programs on top of a booted engine — the exact
+    boot-chain tail (`registerResolved`: strata + entry + adopt), no
+    elaboration. Today the roster is `OpZoo`, the wasm≡JIT expression-coverage
+    program, which the equivalence suite instantiates BY NAME (`diffcli …
+    --fixtures`). Harness-only: nothing production calls this. -/
+def registerTestFixtures (env : Env) : EngineM Unit := do
+  let st ← env.state.get
+  let (arena', rawIdx) := Tropical.EmitArrow.buildOpZoo st.arena
+  let _ ← registerResolved env "OpZoo" arena' rawIdx
 
 end Tropical.Engine

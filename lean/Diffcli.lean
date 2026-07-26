@@ -176,7 +176,7 @@ private def parseStrFlag (args : List String) (flag : String) : Option String :=
     diff_plan.ts / diff_audio.ts. -/
 def compileVerb (args : List String) : IO UInt32 := do
   let some patch := args.find? (fun a => !a.startsWith "--")
-    | IO.eprintln "usage: diffcli compile <patch.json> [--mode=fused|microkernel|microkernel-deep]"
+    | IO.eprintln "usage: diffcli compile <patch.json> [--mode=fused|microkernel|microkernel-deep] [--fixtures]"
       return 1
   let modeStr := (parseStrFlag args "--mode").getD "fused"
   let some mode := Tropical.Plan.CompilationMode.ofWire? modeStr
@@ -184,6 +184,7 @@ def compileVerb (args : List String) : IO UInt32 := do
       return 1
   let env ← Tropical.Engine.boot
   let act : Tropical.EngineM String := do
+    if args.contains "--fixtures" then Tropical.Engine.registerTestFixtures env
     let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str patch)])
     Tropical.Engine.compileMirrorPlan env mode
   match ← act.run with
@@ -195,11 +196,14 @@ def compileVerb (args : List String) : IO UInt32 := do
     return 1
 
 /-- Compile a patch to an in-memory FlatPlan (the shape both the plan path
-    and the IR path consume). -/
-private def compileToFlatPlan (patch : String) :
+    and the IR path consume). `fixtures` additionally registers the
+    test-fixture programs (`OpZoo`) so equivalence patches can instantiate
+    them by name. -/
+private def compileToFlatPlan (patch : String) (fixtures : Bool := false) :
     IO (Except String Tropical.Plan.FlatPlan) := do
   let env ← Tropical.Engine.boot
   let act : Tropical.EngineM Tropical.Plan.FlatPlan := do
+    if fixtures then Tropical.Engine.registerTestFixtures env
     let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str patch)])
     Tropical.Engine.compileMirrorFlatPlan env .fused
   match ← act.run with
@@ -236,10 +240,10 @@ def emitMslVerb (args : List String) : IO UInt32 := do
     plan_5 JSON from `diffcli compile` serves as the browser-side manifest. -/
 def compileWasmVerb (args : List String) : IO UInt32 := do
   let some patch := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
-    | IO.eprintln "usage: diffcli compile-wasm <patch.json> --out <out.wasm>"; return 1
+    | IO.eprintln "usage: diffcli compile-wasm <patch.json> --out <out.wasm> [--fixtures]"; return 1
   let some outPath := parseStrFlag args "--out"
     | IO.eprintln "compile-wasm: --out <path> required"; return 1
-  match ← compileToFlatPlan patch with
+  match ← compileToFlatPlan patch (fixtures := args.contains "--fixtures") with
   | .error e => IO.eprintln e; return 1
   | .ok plan =>
     match Tropical.Ir.EmitLlvm.emitKernel plan with

@@ -1387,4 +1387,40 @@ def bloomFoldQCoef (a1 a2 : CplxB) (n : Nat) : Array CplxB := Id.run do
 def bloomFoldDDaM (qcoef : Array CplxB) (x : CplxB) : CplxB :=
   x.mul (qcoef.foldr (fun q h => q.add (x.mul h)) ⟨0, 0⟩)
 
+-- ── The op-zoo fixture (wasm≡JIT expression coverage, by name) ────────────────
+-- The former tests/web/wasm_vs_jit.test.ts inline `eq_opzoo` program_2 fixture,
+-- authored as a Sig — a single self-contained program exercising the rare ops
+-- at *runtime* (seeded from sampleIndex so LLVM can't constant-fold them away):
+-- the full bitwise/shift cluster, both float↔int conversions, mod/floorDiv,
+-- clamp/select, comparisons, and the rounding intrinsics. The wasm≡JIT gate
+-- drives it BY NAME (`diffcli … --fixtures` registers it); the JSON spelling
+-- is gone with the body-bearing front door.
+
+/-- The op-zoo expression, node-for-node the shape the JSON fixture raised to
+    (`seed = toInt(sampleIndex) & 255`, shared — hash-consing collapses the
+    repeats either way). -/
+def opZooSig : Sig :=
+  let seed := bitAnd (toIntE .sampleIndex) (lit 255)
+  let noise := toFloatE (.binary .bitXor
+    (lshift seed (lit 1))
+    (bitAnd (.unary .bitNot seed) (rshift (.binary .bitOr seed (lit 1)) (lit 1))))
+  let modTerm := toFloatE (.binary .mod (.binary .floorDiv seed (lit 3)) (lit 7))
+  let cond := .binary .and
+    (gt (toFloatE .sampleIndex) (lit 0))
+    (.binary .or (.binary .lte .sampleRate (lit 1000000))
+      (.unary .not (.binary .eq (.unary .toBool (toFloatE .sampleIndex)) (lit 0))))
+  let branch := selectE cond
+    (.unary .sqrt (.unary .abs (neg (sub (.unary .ceil (lit 22 1)) (.unary .floor (lit 37 1))))))
+    (toFloatE (toIntE (lit 37 1)))
+  let tail := mul (roundE (ldexpE (.unary .floatExponent (lit 1 1)) (lit 2)))
+    (div (toFloatE (.binary .gte (.binary .lt (lit 1) (lit 2)) (lit 0))) (lit 1000))
+  clampE (add noise (add modTerm (add branch tail))) (lit (-1)) (lit 1)
+
+/-- Push the op-zoo program (`OpZoo`, no inputs, one bare float `out`) into the
+    arena — instance-free and registry-free, like `buildExprCarrier`, but with
+    the output port UNTYPED to mirror what the elaborator produced for the JSON
+    fixture's bare `outputs: ['out']` (the cutover byte-gate pins this). -/
+def buildOpZoo (arena : Arena) : Arena × ProgramIdx :=
+  assemble arena "OpZoo" #[] #[{ name := "out" }] #[] #[(.port ⟨0⟩, opZooSig)] #[]
+
 end Tropical.EmitArrow

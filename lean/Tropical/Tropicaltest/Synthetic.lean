@@ -168,6 +168,87 @@ def runReduceCoverage : IO Bool := do
 
 end ReduceCoverage
 
+-- ── The op-zoo cutover byte-gate (elaborator retirement, phase 2) ────────────
+-- The wasm≡JIT `eq_opzoo` fixture moves from an inline programDecl body
+-- (raise → elaborate → strata) to a builder-registered program driven by name
+-- (`EmitArrow.buildOpZoo` via `registerTestFixtures`). The strangler contract:
+-- both registrations must produce the SAME session plan, byte for byte, BEFORE
+-- the JSON spelling dies. This gate is transitional — it dies with the
+-- programDecl ingest it compares against.
+section OpZooCutover
+
+private def oj (m : Int) (e : Nat := 0) : Lean.Json := Lean.Json.num ⟨m, e⟩
+private def oop (op : String) (args : Array Lean.Json) : Lean.Json :=
+  Lean.Json.mkObj [("op", Lean.Json.str op), ("args", Lean.Json.arr args)]
+private def onull (op : String) : Lean.Json := Lean.Json.mkObj [("op", Lean.Json.str op)]
+
+/-- The op-zoo expression as the TS fixture's JSON spelled it (post-
+    `JSON.stringify`: `2.2` → ⟨22,1⟩, `1000.0` → `1000`, `-1.0` → `-1`). -/
+private def opZooExprJson : Lean.Json :=
+  let seed := oop "bitAnd" #[oop "toInt" #[onull "sampleIndex"], oj 255]
+  let noise := oop "to_float" #[oop "bitXor" #[
+    oop "lshift" #[seed, oj 1],
+    oop "bitAnd" #[oop "bitNot" #[seed],
+      oop "rshift" #[oop "bitOr" #[seed, oj 1], oj 1]]]]
+  let modTerm := oop "to_float" #[oop "mod" #[oop "floorDiv" #[seed, oj 3], oj 7]]
+  let branch := oop "select" #[
+    oop "and" #[
+      oop "gt" #[oop "toFloat" #[onull "sampleIndex"], oj 0],
+      oop "or" #[
+        oop "lte" #[onull "sampleRate", oj 1000000],
+        oop "not" #[oop "eq" #[
+          oop "toBool" #[oop "toFloat" #[onull "sampleIndex"]], oj 0]]]],
+    oop "sqrt" #[oop "abs" #[oop "neg" #[oop "sub" #[
+      oop "ceil" #[oj 22 1], oop "floor" #[oj 37 1]]]]],
+    oop "to_float" #[oop "toInt" #[oj 37 1]]]
+  let tail := oop "mul" #[
+    oop "round" #[oop "ldexp" #[oop "floatExponent" #[oj 1 1], oj 2]],
+    oop "div" #[oop "to_float" #[oop "gte" #[oop "lt" #[oj 1, oj 2], oj 0]], oj 1000]]
+  oop "clamp" #[oop "add" #[noise, oop "add" #[modTerm, oop "add" #[branch, tail]]],
+    oj (-1), oj 1]
+
+/-- The eq_opzoo patch file, in both spellings: `withDecl` carries the inline
+    programDecl body (the retiring front door); without it the file is
+    patch-bay-only and `OpZoo` must already be registered (the fixture path). -/
+private def opZooPatchJson (withDecl : Bool) : Lean.Json :=
+  let progDecl := Lean.Json.mkObj [
+    ("op", Lean.Json.str "programDecl"), ("name", Lean.Json.str "OpZoo"),
+    ("program", Lean.Json.mkObj [
+      ("op", Lean.Json.str "program"), ("name", Lean.Json.str "OpZoo"),
+      ("ports", Lean.Json.mkObj [("inputs", Lean.Json.arr #[]),
+        ("outputs", Lean.Json.arr #[Lean.Json.str "out"])]),
+      ("body", Lean.Json.mkObj [("op", Lean.Json.str "block"),
+        ("decls", Lean.Json.arr #[]),
+        ("assigns", Lean.Json.arr #[Lean.Json.mkObj [
+          ("op", Lean.Json.str "outputAssign"), ("name", Lean.Json.str "out"),
+          ("expr", opZooExprJson)]])])])]
+  let instDecl := Lean.Json.mkObj [
+    ("op", Lean.Json.str "instanceDecl"), ("name", Lean.Json.str "inst"),
+    ("program", Lean.Json.str "OpZoo"), ("inputs", Lean.Json.mkObj [])]
+  Lean.Json.mkObj [
+    ("schema", Lean.Json.str "tropical_program_2"),
+    ("name", Lean.Json.str "eq_opzoo"),
+    ("body", Lean.Json.mkObj [("op", Lean.Json.str "block"),
+      ("decls", Lean.Json.arr (if withDecl then #[progDecl, instDecl] else #[instDecl]))]),
+    ("audio_outputs", Lean.Json.arr #[Lean.Json.mkObj [
+      ("instance", Lean.Json.str "inst"), ("output", Lean.Json.str "out")]])]
+
+def runOpZooCutover : IO Bool := do
+  let declPath := "/tmp/tropicaltest-opzoo-decl.json"
+  let namePath := "/tmp/tropicaltest-opzoo-byname.json"
+  IO.FS.writeFile declPath (opZooPatchJson true).compress
+  IO.FS.writeFile namePath (opZooPatchJson false).compress
+  match ← compilePatch declPath .fused, ← compilePatchFixtures namePath .fused with
+  | .ok viaDecl, .ok viaName =>
+    if viaDecl == viaName then
+      passGate "opzoo-cutover" s!"builder-registered OpZoo ≡ elaborated programDecl ({viaDecl.length}B plan)"
+    else
+      failGate "opzoo-cutover" s!"plans differ (programDecl {viaDecl.length}B, by-name {viaName.length}B)"
+  | .error e, _ => failGate "opzoo-cutover" s!"programDecl compile: {firstLine e}"
+  | _, .error e => failGate "opzoo-cutover" s!"by-name compile: {firstLine e}"
+
+end OpZooCutover
+
 def sortedNames (dir : String) (suffix : String) : IO (Array String) := do
   let entries ← (System.FilePath.mk dir).readDir
   let names := entries.filterMap fun e =>

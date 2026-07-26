@@ -109,6 +109,14 @@ def main (args : List String) : IO UInt32 := do
   total := total + 1
   if !(← runReduceCoverage) then failed := failed + 1
 
+  -- ── (c⁗ᵃ) Op-zoo cutover byte-gate (elaborator retirement, phase 2) ────────
+  -- Transitional: the builder-registered OpZoo must compile to the SAME plan
+  -- as the inline-programDecl spelling before the JSON spelling dies. Dies
+  -- with the programDecl ingest it compares against.
+  IO.println "op-zoo cutover (builder-registered ≡ elaborated programDecl, plan bytes):"
+  total := total + 1
+  if !(← runOpZooCutover) then failed := failed + 1
+
   -- ── (c⁗′) Region-aware Stage0: an all-s0 region hoists as a unit (WS3a) ────
   IO.println "banks region hoist (all-s0 reduce region → coefficient kernel):"
   total := total + 1
