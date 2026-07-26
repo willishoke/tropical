@@ -105,6 +105,22 @@ def CoreProgram.registry : CoreProgram → Array (String × CoreProgram)
 def CoreProgram.registryGet? (p : CoreProgram) (key : String) : Option CoreProgram :=
   (p.registry.find? (·.1 == key)).map (·.2)
 
+/-- A registry hit is a structural subterm of its parent — the
+    termination workhorse for walkers over the materialized tree
+    (`registry` holds child programs by value, so no pool certificate
+    is needed; contrast `progPool_registry_lt`). -/
+theorem CoreProgram.sizeOf_lt_of_registryGet? {p q : CoreProgram} {key : String}
+    (h : p.registryGet? key = some q) : sizeOf q < sizeOf p := by
+  cases p with
+  | mk n i o d a r =>
+    simp only [CoreProgram.registryGet?, CoreProgram.registry,
+      Option.map_eq_some_iff] at h
+    obtain ⟨kv, hf, rfl⟩ := h
+    have hkv := Array.sizeOf_lt_of_mem (Array.mem_of_find?_eq_some hf)
+    cases kv
+    simp_all
+    omega
+
 /-- Projected param table (positions are `ParamIdx`). -/
 def CoreProgram.params (p : CoreProgram) : Array CoreBodyDecl :=
   p.decls.filter fun d => match d with | .param .. => true | _ => false

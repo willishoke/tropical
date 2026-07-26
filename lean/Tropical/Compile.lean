@@ -396,7 +396,7 @@ private def childWireExpr (decl : CoreBodyDecl) (portIdx : Nat)
     body — the exact linearization `EmitLlvm.emitKernelBlock` walks),
     and its per-output binding-time stages. `inputStages` is the stage
     each of this program's input ports binds at (from the parent). -/
-partial def partitionKernel (instancePath : String) (prog : CoreProgram)
+def partitionKernel (instancePath : String) (prog : CoreProgram)
     (arena : Tropical.Ir.ExprArena)
     (wires : Array Tropical.Wire) (s : SessionAlloc) (acc : Accumulators)
     (inputSlotOverride : Array (Nat × Nat) := #[])
@@ -422,8 +422,17 @@ partial def partitionKernel (instancePath : String) (prog : CoreProgram)
     let some (childName, typeKey) := instParts instDecls[k]!
       | throw "partitionKernel: non-instance decl in instance table (port bug)"
     let childPath := joinInstancePath instancePath childName
-    let some declType := prog.registryGet? typeKey
-      | throw s!"partitionKernel: instance '{childPath}' typeKey '{typeKey}' missing from registry"
+    -- Subtype binder: the registry hit rides with its decrease fact so
+    -- the recursion below stays inside the for-loop (see the sizeOf
+    -- workhorse next to `registryGet?`).
+    let declTypeS : {q : CoreProgram // sizeOf q < sizeOf prog} ←
+      match hr : prog.registryGet? typeKey with
+      | some c =>
+        pure (⟨c, CoreProgram.sizeOf_lt_of_registryGet? hr⟩ :
+          {q : CoreProgram // sizeOf q < sizeOf prog})
+      | none =>
+        throw s!"partitionKernel: instance '{childPath}' typeKey '{typeKey}' missing from registry"
+    let declType := declTypeS.1
 
     s ← allocateOutputSlots s childPath declType
     s ← allocateInputSlots s wires childPath declType
@@ -467,7 +476,7 @@ partial def partitionKernel (instancePath : String) (prog : CoreProgram)
       childInputStages := childInputStages.push stage
 
     let (childFn, s', acc', childBlocks, childOuts) ←
-      partitionKernel childPath declType arena wires s acc
+      partitionKernel childPath declTypeS.1 arena wires s acc
         childInputMap childInputArrayMap #[] childInputStages
     s := s'
     acc := acc'
@@ -545,6 +554,8 @@ partial def partitionKernel (instancePath : String) (prog : CoreProgram)
     nextArrayRaw := acc.nextArrayRaw + plan.arraySlotCount }
 
   return (fn, s, acc, stageBlocks, outStages)
+termination_by sizeOf prog
+decreasing_by exact declTypeS.2
 
 -- ─────────────────────────────────────────────────────────────
 -- Session compile (compile_session_slotted.ts)
@@ -615,27 +626,35 @@ private def emitSinks (s : SessionAlloc) (graphOutputs : Array (String × String
   return #[{ inputs, gain := Tropical.Plan.defaultSinkGain, target := 0 }]
 
 /-- `preallocateOutputsRecursive`: parent before children, body order. -/
-private partial def preallocOutputs (s : SessionAlloc) (path : String)
+private def preallocOutputs (s : SessionAlloc) (path : String)
     (prog : CoreProgram) : Except String SessionAlloc := do
   let mut s ← allocateOutputSlots s path prog
   for d in prog.instances do
     if let some (childName, typeKey) := instParts d then
-      let some childType := prog.registryGet? typeKey
-        | throw s!"compileSession: instance '{path}.{childName}' typeKey '{typeKey}' missing from registry"
-      s ← preallocOutputs s (joinInstancePath path childName) childType
+      match hr : prog.registryGet? typeKey with
+      | none =>
+        throw s!"compileSession: instance '{path}.{childName}' typeKey '{typeKey}' missing from registry"
+      | some childType =>
+        s ← preallocOutputs s (joinInstancePath path childName) childType
   return s
+termination_by sizeOf prog
+decreasing_by exact CoreProgram.sizeOf_lt_of_registryGet? hr
 
 /-- `preallocateInputsRecursive`: runs AFTER all outputs so the alias
     check can see every producer's meta. -/
-private partial def preallocInputs (s : SessionAlloc) (wires : Array Tropical.Wire)
+private def preallocInputs (s : SessionAlloc) (wires : Array Tropical.Wire)
     (path : String) (prog : CoreProgram) : Except String SessionAlloc := do
   let mut s ← allocateInputSlots s wires path prog
   for d in prog.instances do
     if let some (childName, typeKey) := instParts d then
-      let some childType := prog.registryGet? typeKey
-        | throw s!"compileSession: instance '{path}.{childName}' typeKey '{typeKey}' missing from registry"
-      s ← preallocInputs s wires (joinInstancePath path childName) childType
+      match hr : prog.registryGet? typeKey with
+      | none =>
+        throw s!"compileSession: instance '{path}.{childName}' typeKey '{typeKey}' missing from registry"
+      | some childType =>
+        s ← preallocInputs s wires (joinInstancePath path childName) childType
   return s
+termination_by sizeOf prog
+decreasing_by exact CoreProgram.sizeOf_lt_of_registryGet? hr
 
 /-- The session → `tropical_plan_5` lowering: two-phase slot
     pre-allocation, accumulator seeding from the session I/O array
