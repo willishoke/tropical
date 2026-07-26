@@ -147,9 +147,9 @@ def runModalClassAgreement : IO Bool := do
     silence, no error). Three malformations must each return a clear `Except.error`
     and, critically for the live MCP server, must NOT crash the process:
       · a color-LEGAL CYCLE — a reverb whose modal outlet feeds its own modal
-        inlet, a mix fed by itself — passes `checkEdgeTypes` (the colors match) yet
-        would stack-overflow the visited-set-free `lowerModal`/`lowerNode`
-        recursion; `checkAcyclic` now rejects it first;
+        inlet, a mix fed by itself — passes `checkEdgeTypes` (the colors match);
+        `lowerGraph`'s own topo-rank entry refuses it with the loop named (the
+        lowering is total now — no stack to overflow);
       · a WIRE naming no node (a typo'd source) — previously died downstream as
         `lower: node '…' not found`, or vanished silently if unreferenced;
       · a top-level `"out"` naming no node — previously rendered the WHOLE patch as

@@ -959,49 +959,6 @@ private def checkEdgeTypes (raws : Array Raw) : Except String Unit := do
                 throw s!"connection type error: '{src.id}' ({src.kind}, {domStr col} outlet) → '{r.id}' ({r.kind}) inlet '{p.name}' which accepts {accepted} — outlet.color ∉ inlet.accepts (modal→signal realizes; signal→modal is a type error)"
   pure ()
 
-/-- The inlet edges out of `id`: every source id wired into one of `id`'s inlets
-    (`accepts ≠ #[]`). These are exactly the wires `lowerNode`/`lowerInput`/
-    `lowerModal` recurse UP, so a cycle among them is what would overflow the
-    (visited-set-free) lowering. An id naming no node contributes no edges — a
-    dangling source is a leaf here; its malformedness is `checkEdgeTypes`'s job. -/
-private def inletSources (raws : Array Raw) (id : String) : Array String :=
-  match raws.find? (·.id == id) with
-  | none => #[]
-  | some r => (portSpecs r.kind).foldl (init := #[]) fun acc p =>
-      if p.accepts.isEmpty then acc else acc ++ portSources r.inObj p.name
-
-/-- DFS for a back-edge to a node on the current path. `path` is the ancestor
-    chain (most-recent first); `done` is the set of fully-explored ids (a node
-    reached again off a different branch, with no cycle, is not re-walked, so this
-    is linear in the graph). `id ∈ path` is a source-level cycle → reject, naming
-    the loop. -/
-private partial def acyclicVisit (raws : Array Raw) (path : List String)
-    (done : List String) (id : String) : Except String (List String) := do
-  if path.contains id then
-    -- the loop: the path from the first occurrence of `id` back to `id`.
-    let loop := (path.reverse.dropWhile (· != id)) ++ [id]
-    throw s!"connection cycle: {" → ".intercalate loop} — patch graphs must be acyclic (you may only patch forward; there is no delay to break a loop through)"
-  else if done.contains id then
-    return done
-  else
-    let done' ← (inletSources raws id).foldlM
-      (fun d s => acyclicVisit raws (id :: path) d s) done
-    return id :: done'
-
-/-- Reject a cyclic patch BEFORE the unbounded `lowerModal`/`lowerNode`/`lowerInput`
-    recursion runs. A color-legal cycle — a `reverb` whose modal outlet feeds its
-    own modal inlet, a `mix` fed by itself — passes `checkEdgeTypes` but would
-    recurse forever and stack-overflow the process (the live MCP server). A DFS
-    over the same inlet edges the lowering follows turns it into a clear error.
-    The stated contract is "cycles rejected outright"; this brings the playground
-    decode path in line with the elaborator's `CycleViolation` and the session
-    acyclicity check. -/
-private def checkAcyclic (raws : Array Raw) : Except String Unit := do
-  let mut done : List String := []
-  for r in raws do
-    done ← acyclicVisit raws [] done r.id
-  pure ()
-
 /-- The top-level `"out"` id must name an existing node — or be absent/empty,
     which is a legal-incomplete state (nothing routed to the dac yet) that
     compiles to silence. A NON-empty id naming no node is a typo'd output target:
@@ -1324,8 +1281,9 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
   let raws := rawsOf j
   checkServedKinds raws                              -- reject withheld/unknown kinds FIRST (honest msg over the misleading type error)
   checkEdgeTypes raws                                -- reject ill-typed / dangling / wire-into-knob edges pre-lowering
-  checkAcyclic raws                                  -- reject cycles BEFORE the unbounded lowering recursion
   checkOutTarget j raws                              -- reject an "out" id that names no node
+  -- (cycles are refused by `lowerGraph` itself now — the topo sort that
+  -- funds the lowering's termination IS the cycle check, loop named)
   let (g, paramTable) ← decodeGraph j
   let term ← lowerGraph g
   let (out, b0) := emitTerm (normalize term) {}
@@ -1340,7 +1298,7 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
   let tapIds := if emitTaps then tapNodeIds (rawsOf j) else #[]
   let (tapSigs, b) : Array (String × Sig) × Builder :=
     tapIds.foldl (fun (acc : Array (String × Sig) × Builder) id =>
-      match lowerInput g id with
+      match lowerAt g id with
       | .ok t => let (s, b') := emitTerm (normalize t) acc.2; (acc.1.push (id, s), b')
       | .error _ => acc) (#[], b0)
   let registry ← buildRegistry arena resolved #["FixedSinOsc", "MorphOsc", "PluckedMorphOsc"]

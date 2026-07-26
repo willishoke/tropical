@@ -101,6 +101,8 @@ def findCycle (deps : Array (Array Nat)) : Option (Array Nat) := Id.run do
           liveSucc := liveSucc.set! v c
           if c == 0 then queue := queue.push v
   -- Remainder walk: follow the first live successor until a revisit.
+  -- (findCycle's peel and `topoRanks?` below share their structure; they
+  -- stay separate because one needs the peeled set, the other the order.)
   match (Array.range n).find? (fun v => !peeled[v]!) with
   | none => return none
   | some s =>
@@ -122,6 +124,36 @@ def findCycle (deps : Array (Array Nat)) : Option (Array Nat) := Id.run do
             -- successor. Loud if the invariant ever breaks.
             result := panic! "findCycle: remainder node has no live successor (peel invariant broken)"
     return result
+
+/-- Topological ranks over the same digraph shape as `findCycle`
+    (`deps[v]` = v's successors; out-of-range ignored): `rank[v]` is v's
+    peel position, so every live successor of `v` ranks strictly below
+    it — a ready-made termination measure for walkers that recurse along
+    `deps` edges. `none` iff the graph has a cycle. Total by the same
+    bounded-loop argument as `findCycle`. -/
+def topoRanks? (deps : Array (Array Nat)) : Option (Array Nat) := Id.run do
+  let n := deps.size
+  let live := fun (w : Nat) => w < n
+  let mut liveSucc : Array Nat := deps.map fun ss => (ss.filter live).size
+  let mut preds : Array (Array Nat) := Array.replicate n #[]
+  for v in [0:n] do
+    for w in deps[v]! do
+      if live w then preds := preds.set! w (preds[w]!.push v)
+  let mut rank : Array Nat := Array.replicate n 0
+  let mut queue : Array Nat := #[]
+  for v in [0:n] do
+    if liveSucc[v]! == 0 then queue := queue.push v
+  let mut qi := 0
+  for _ in [0:n] do
+    if qi < queue.size then
+      let w := queue[qi]!
+      rank := rank.set! w qi
+      qi := qi + 1
+      for v in preds[w]! do
+        let c := liveSucc[v]! - 1
+        liveSucc := liveSucc.set! v c
+        if c == 0 then queue := queue.push v
+  if qi == n then return some rank else return none
 
 /-- Close an open loop for rendering: `[a, b] → "a → b → a"`. -/
 def renderLoop (cycle : Array String) : String :=
