@@ -121,37 +121,51 @@ decreasing_by
         | exact Or.inr ⟨_, by assumption, rfl⟩
         | exact ⟨_, by assumption, rfl⟩
 
-/- Deliberately `partial` (both defs below): the recursion runs through
-   the PROGRAM pool via registry indices, and its termination fact is
-   the pool's acyclicity — no recursive program instantiation — which
-   is a second, separate invariant from the expression arena's
-   child-descending ids (`ExprArena.wf`). Until that invariant is
-   carried as data the way `wf` is, the measure is unstateable. -/
+/- TOTAL: the recursion runs through the PROGRAM pool via registry
+   indices and nested programDecl links; `hwp` (checked once by
+   `encodeResolved`) says every pool edge points strictly down, so the
+   DFS descends on the pool index. The measure is lexicographic
+   `(idx, phase)`: programId at phase 2 resolves its program and hands
+   the children bound (`progPool_children_lt`) to encProgram at phase 1,
+   whose registry follows and per-decl encodes (phase 0) re-enter
+   programId at a strictly smaller idx. -/
 mutual
 
 /-- Pool a program: registry targets first (insertion order), then the
     program's own fields in field order, then push self (post-order
     DFS — referenced programs strictly before referencing programs). -/
-partial def programId (arena : Arena) (hw : arena.exprs.wf = true) (i : ProgramIdx) : EncM Nat := do
+def programId (arena : Arena) (hw : arena.exprs.wf = true)
+    (hwp : progPoolWf arena.programs = true) (i : ProgramIdx) : EncM Nat := do
   let st ← get
   match st.programIds[i.idx]? with
   | none => encErr s!"program pool index {i.idx} out of range"
   | some (some id) => pure id
   | some none =>
-    let some p := arena.program? i
-      | encErr s!"program pool index {i.idx} out of range"
-    let encoded ← encProgram arena hw p
-    let id := (← get).programPool.size
-    modify fun st => { st with
-      programPool := st.programPool.push encoded
-      programIds := st.programIds.set! i.idx (some id) }
-    pure id
+    match hp : arena.programs[i.idx]? with
+    | none => encErr s!"program pool index {i.idx} out of range"
+    | some p => do
+      let encoded ← encProgram arena hw hwp i.idx p (progPool_children_lt hwp hp)
+      let id := (← get).programPool.size
+      modify fun st => { st with
+        programPool := st.programPool.push encoded
+        programIds := st.programIds.set! i.idx (some id) }
+      pure id
+termination_by (i.idx, 2)
 
-partial def encProgram (arena : Arena) (hw : arena.exprs.wf = true) (p : Program) : EncM Json := do
+def encProgram (arena : Arena) (hw : arena.exprs.wf = true)
+    (hwp : progPoolWf arena.programs = true) (bound : Nat) (p : Program)
+    (hch : ∀ c ∈ p.progChildren, c.idx < bound) : EncM Json := do
   -- Registry first — pool-id assignment order for everything reachable.
-  let mut registry : Array Json := #[]
-  for (key, target) in p.registry do
-    registry := registry.push <| Json.arr #[Json.str key, Lean.toJson (← programId arena hw target)]
+  -- Collect the targets with their decrease facts, then pool in order.
+  let mut regTargets : Array (String × {t : ProgramIdx // t.idx < bound}) := #[]
+  for kt in p.registry.attach do
+    regTargets := regTargets.push (kt.1.1,
+      ⟨kt.1.2, hch kt.1.2 (Array.mem_append.mpr (Or.inl
+        (Array.mem_map.mpr ⟨kt.1, kt.2, rfl⟩)))⟩)
+  let registry ← regTargets.mapM
+    fun (kt : String × {t : ProgramIdx // t.idx < bound}) => do
+      have hlt : kt.2.1.idx < bound := kt.2.2
+      pure <| Json.arr #[Json.str kt.1, Lean.toJson (← programId arena hw hwp kt.2.1)]
   let mut inputs : Array Json := #[]
   for d in p.inputs do
     let mut fields : List (String × Json) := [("name", Json.str d.name)]
@@ -169,9 +183,10 @@ partial def encProgram (arena : Arena) (hw : arena.exprs.wf = true) (p : Program
     | some t => fields := fields ++ [("type", encPortType t)]
     | none => pure ()
     outputs := outputs.push (Json.mkObj fields)
-  let mut decls : Array Json := #[]
-  for d in p.decls do
-    decls := decls.push (← encBodyDecl arena hw d)
+  let decls ← p.decls.attach.mapM fun dm =>
+    encBodyDecl arena hw hwp bound dm.1 fun name t hdt =>
+      hch t (Array.mem_append.mpr (Or.inr
+        (Array.mem_filterMap.mpr ⟨dm.1, dm.2, by simp [hdt]⟩)))
   let mut assigns : Array Json := #[]
   for a in p.assigns do
     let target : Json := match a.target with
@@ -185,8 +200,12 @@ partial def encProgram (arena : Arena) (hw : arena.exprs.wf = true) (p : Program
     ("decls", Json.arr decls),
     ("assigns", Json.arr assigns),
     ("registry", Json.arr registry)]
+termination_by (bound, 1)
 
-partial def encBodyDecl (arena : Arena) (hw : arena.exprs.wf = true) : BodyDecl → EncM Json
+def encBodyDecl (arena : Arena) (hw : arena.exprs.wf = true)
+    (hwp : progPoolWf arena.programs = true) (bound : Nat) (d : BodyDecl)
+    (hpd : ∀ name t, d = .prog name t → t.idx < bound) : EncM Json := do
+  match hn : d with
   | .param name value? =>
     pure <| Json.mkObj <|
       [("op", Json.str "paramDecl"), ("name", Json.str name)]
@@ -200,8 +219,10 @@ partial def encBodyDecl (arena : Arena) (hw : arena.exprs.wf = true) : BodyDecl 
       ("op", Json.str "instanceDecl"), ("name", Json.str name),
       ("typeKey", Json.str typeKey), ("inputs", Json.arr ins)]
   | .prog name program => do
+    have hlt : program.idx < bound := hpd name program rfl
     pure <| Json.mkObj [("op", Json.str "programDecl"), ("name", Json.str name),
-                        ("program", Lean.toJson (← programId arena hw program))]
+                        ("program", Lean.toJson (← programId arena hw hwp program))]
+termination_by (bound, 0)
 
 end
 
@@ -210,16 +231,20 @@ end Encode
 /-- Encode an arena + root into `tropical_resolved_1` wire JSON,
     performing the canonical pool reordering. -/
 def encodeResolved (arena : Arena) (root : ProgramIdx) : Except String Json := do
-  -- One O(edges) sweep buys `encExpr`'s termination measure (every arena
-  -- built through `eintern` is child-descending by construction).
+  -- Two O(edges) sweeps buy the termination measures: the expression
+  -- arena's child-descending ids (`encExpr`) and the program pool's
+  -- (`programId`'s DFS) — both hold by construction.
   if hw : arena.exprs.wf then
-    let init : Encode.St := {
-      programIds := Array.replicate arena.programs.size none }
-    let (rootId, st) ← (Encode.programId arena hw root).run init
-    pure <| Json.mkObj [
-      ("schema", Json.str schemaTag),
-      ("programPool", Json.arr st.programPool),
-      ("root", Lean.toJson rootId)]
+    if hwp : progPoolWf arena.programs then
+      let init : Encode.St := {
+        programIds := Array.replicate arena.programs.size none }
+      let (rootId, st) ← (Encode.programId arena hw hwp root).run init
+      pure <| Json.mkObj [
+        ("schema", Json.str schemaTag),
+        ("programPool", Json.arr st.programPool),
+        ("root", Lean.toJson rootId)]
+    else
+      throw "encodeResolved: program pool is not child-descending (internal construction-order bug)"
   else
     throw "encodeResolved: arena is not child-descending (internal interning-order bug)"
 
