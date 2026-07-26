@@ -11,7 +11,7 @@ plus param listing and the debug render tap.
 namespace Tropical.Engine
 
 open Lean (Json toJson)
-open Tropical.Expr (getField? getStrField? opOf? validateExpr exprDependencies prettyExpr)
+open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
 -- ── Audio / params (native — the engine owns the runtime and DAC) ───────────

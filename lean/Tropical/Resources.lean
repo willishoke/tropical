@@ -112,8 +112,8 @@ Used in instance input wiring.
 - **Literal**: `3.14` or `true`
 - **Reference**: `{ "op": "ref", "instance": "osc", "output": "out" }` — routes another instance's output to this input
 - **Param**: `{ "op": "param", "name": "cutoff" }`
-- **Binary**: `{ "op": "mul", "args": [<expr>, <expr>] }` — add, sub, mul, div, floor_div, mod, pow; lt, lte, gt, gte, eq, neq; bit_and, bit_or, bit_xor, lshift, rshift
-- **Unary**: `{ "op": "neg", "args": [<expr>] }` — neg, abs, not, bit_not
+- **Binary**: `{ "op": "mul", "args": [<expr>, <expr>] }` — add, sub, mul, div, floorDiv, mod, ldexp; lt, lte, gt, gte, eq, neq; and, or; bitAnd, bitOr, bitXor, lshift, rshift
+- **Unary**: `{ "op": "neg", "args": [<expr>] }` — neg, abs, not, bitNot, sqrt, floor, ceil, round, floatExponent, toInt, toBool, toFloat
 - **Clamp / Select / Array / Index / Builtins**: see the program catalog and stdlib for worked examples.
 "#
 
@@ -154,7 +154,7 @@ def renderProgramCatalog (st : Tropical.SessionSt) : String := Id.run do
     | some pm =>
       let inputParts := pm.inputs.map fun p =>
         match p.default with
-        | some v => s!"{p.name}={v.compress}"
+        | some v => s!"{p.name}={v.toJson.compress}"
         | none => p.name
       let inputsJoined := String.intercalate ", " inputParts.toList
       let outputsJoined := String.intercalate ", " pm.outputNames.toList

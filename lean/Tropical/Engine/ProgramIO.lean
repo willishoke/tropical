@@ -12,7 +12,7 @@ document through the `JsonV` ordered-JSON reader and folds it into the session.
 namespace Tropical.Engine
 
 open Lean (Json toJson)
-open Tropical.Expr (getField? getStrField? opOf? validateExpr exprDependencies prettyExpr)
+open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
 -- ── Program I/O (save / export) ──────────────────────────────────────────────
@@ -31,7 +31,7 @@ def handleSave (env : Env) : EngineM Json := do
     let mut inputs : Array (String × Json) := #[]
     for portName in info.progMeta.inputNames do
       if let some w := wiresPost.find? fun w => w.instName == name && w.portName == portName then
-        inputs := inputs.push (portName, w.expr)
+        inputs := inputs.push (portName, w.expr.toJson)
     decls := decls.push <| Json.mkObj <|
       [("op", Json.str "instanceDecl"), ("name", Json.str name),
        ("program", Json.str info.baseTypeName)]
@@ -53,40 +53,38 @@ def handleSave (env : Env) : EngineM Json := do
      ("body", body)])]
 
 /-- Port of `rewriteRefs`: session refs to internal instances become
-    `nestedOut`; recursion follows `args` only (the TS shape). -/
-private partial def rewriteRefs (reachable : Array String) (node : Json) : Json :=
-  match node with
-  | .arr items => .arr (items.map (rewriteRefs reachable))
-  | .obj fields =>
-    let isInternalRef :=
-      opOf? node == some "ref" &&
-      (match getStrField? node "instance" with
-       | some i => reachable.contains i
-       | none => false)
-    if isInternalRef then
-      Json.mkObj [("op", Json.str "nestedOut"),
-        ("ref", Json.str ((getStrField? node "instance").getD "")),
-        ("output", (getField? node "output").getD jsonNull)]
-    else
-      match getField? node "args" with
-      | some (.arr items) => Id.run do
-        let mut out : List (String × Json) := []
-        for (k, v) in fields.toArray do
-          if k == "args" then
-            out := out ++ [(k, Json.arr (items.map (rewriteRefs reachable)))]
-          else out := out ++ [(k, v)]
-        return Json.mkObj out
-      | _ => node
-  | _ => node
+    `nestedOut`. Typed and exhaustive — refs inside array literals are
+    rewritten too (the old Json walker followed `args` only and
+    silently skipped `items`). -/
+private def rewriteRefs (reachable : Array String) : WireExpr → WireExpr
+  | .ref inst output =>
+    if reachable.contains inst then .nestedOut inst output else .ref inst output
+  | .arr items => .arr (items.attach.map fun ⟨x, _⟩ => rewriteRefs reachable x)
+  | .binary tag l r => .binary tag (rewriteRefs reachable l) (rewriteRefs reachable r)
+  | .unary tag a => .unary tag (rewriteRefs reachable a)
+  | .clamp a b c =>
+    .clamp (rewriteRefs reachable a) (rewriteRefs reachable b) (rewriteRefs reachable c)
+  | .select a b c =>
+    .select (rewriteRefs reachable a) (rewriteRefs reachable b) (rewriteRefs reachable c)
+  | .arraySet a b c =>
+    .arraySet (rewriteRefs reachable a) (rewriteRefs reachable b) (rewriteRefs reachable c)
+  | .index a b => .index (rewriteRefs reachable a) (rewriteRefs reachable b)
+  | .broadcastTo a shape => .broadcastTo (rewriteRefs reachable a) shape
+  | e => e
+termination_by e => sizeOf e
+decreasing_by
+  all_goals first
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ items›; simp; omega)
+    | (simp; omega)
 
 /-- Port of `reachableInstances` (stack-pop walk; discovery order is the
     TS Set's insertion order). -/
-private def reachableFrom (rootExprs : Array Json) (wires : Array Wire)
+private def reachableFrom (rootExprs : Array WireExpr) (wires : Array Wire)
     (allInstances : Array String) : Array String := Id.run do
   let mut reachable : Array String := #[]
   let mut queue : Array String := #[]
   for expr in rootExprs do
-    for dep in exprDependencies expr do
+    for dep in expr.deps do
       if allInstances.contains dep && !reachable.contains dep then
         reachable := reachable.push dep
         queue := queue.push dep
@@ -95,7 +93,7 @@ private def reachableFrom (rootExprs : Array Json) (wires : Array Wire)
     queue := queue.pop
     for w in wires do
       if w.instName == name then
-        for dep in exprDependencies w.expr do
+        for dep in w.expr.deps do
           if allInstances.contains dep && !reachable.contains dep then
             reachable := reachable.push dep
             queue := queue.push dep
@@ -145,7 +143,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
   let allInstances := st.instanceNames
 
   -- Validate output mappings; build the root ref expressions.
-  let mut rootExprs : Array Json := #[]
+  let mut rootExprs : Array WireExpr := #[]
   for (outName, ref) in outputPairs do
     let instName := (getStrField? ref "instance").getD ""
     let some info := st.findInstance? instName
@@ -153,9 +151,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
     let portName := (getStrField? ref "output").getD ""
     if !info.progMeta.outputNames.contains portName then
       internalError s!"export: instance '{instName}' has no output '{portName}'. Available: {String.intercalate ", " info.progMeta.outputNames.toList}"
-    rootExprs := rootExprs.push <| Json.mkObj
-      [("op", Json.str "ref"), ("instance", Json.str instName),
-       ("output", Json.str portName)]
+    rootExprs := rootExprs.push (.ref instName (.name portName))
 
   -- Validate input mappings ("instance:port" targets).
   let inputPairs : Array (String × Json) := match arg? args "inputs" with
@@ -188,7 +184,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
   let mut reachable := reachableFrom rootExprs wiresPost allInstances
   for (_, instName, portName) in exposed do
     if let some currentExpr := findWire instName portName then
-      for dep in exprDependencies currentExpr do
+      for dep in currentExpr.deps do
         if allInstances.contains dep && !reachable.contains dep then
           let extra := reachableFrom #[currentExpr] wiresPost allInstances
           for e in extra do
@@ -198,7 +194,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
   for instName in reachable do
     for w in wiresPost do
       if w.instName == instName && !exposedKeys.contains w.key then
-        for dep in exprDependencies w.expr do
+        for dep in w.expr.deps do
           if !reachable.contains dep && allInstances.contains dep then
             internalError (s!"export: instance '{instName}' wiring '{w.key}' references '{dep}' which is outside the exported subgraph. "
               ++ s!"Either expose it as an input or include '{dep}' in the output dependency chain.")
@@ -219,7 +215,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
       | t?, d? => Json.mkObj <|
         [("name", Json.str inputName)]
         ++ (match t? with | some t => [("type", t)] | none => [])
-        ++ (match d? with | some d => [("default", d)] | none => [])
+        ++ (match d? with | some d => [("default", d.toJson)] | none => [])
   let mut outputEntries : Array Json := #[]
   for (outName, ref) in outputPairs do
     let instName := (getStrField? ref "instance").getD ""
@@ -258,7 +254,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
           Json.mkObj [("op", Json.str "input"), ("name", Json.str inputName)])
       | none =>
         if let some expr := findWire instName portName then
-          instInputs := instInputs.push (portName, rewriteRefs reachable expr)
+          instInputs := instInputs.push (portName, (rewriteRefs reachable expr).toJson)
     decls := decls.push <| Json.mkObj <|
       [("op", Json.str "instanceDecl"), ("name", Json.str instName),
        ("program", Json.str info.baseTypeName)]
@@ -426,7 +422,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
         instances := st.instances.filter fun (n, _) => !exported.contains n
         wires := st.wires.filter fun w =>
           !(exported.contains w.instName
-            || (exprDependencies w.expr).any exported.contains)
+            || w.expr.deps.any exported.contains)
         graphOutputs := st.graphOutputs.filter fun (i, _) => !exported.contains i }
     let st ← env.state.get
     if !st.instances.isEmpty || !st.graphOutputs.isEmpty then
@@ -579,11 +575,11 @@ private def ingestProgram (env : Env) (node : Tropical.Parse.JsonV)
         let ob := orderOf q.1.1
         if oa == ob then Nat.blt p.2 q.2 else Nat.blt oa ob
       for ((input, exprV), _) in sorted do
-        let expr := exprV.toJson
-        match validateExpr expr s!"{instName}.{input}" with
+        -- Decode straight off the ordered JSON — the typed store's
+        -- ingest refusal site (no Lean.Json hop).
+        match WireExpr.ofJsonV exprV s!"{instName}.{input}" with
         | .error msg => internalError msg
-        | .ok _ => pure ()
-        env.state.modify (·.setWireRaw instName input expr)
+        | .ok expr => env.state.modify (·.setWireRaw instName input expr)
 
   -- Input defaults — every instance in registry order (TS loops the
   -- whole registry, pre-existing instances included on merge).

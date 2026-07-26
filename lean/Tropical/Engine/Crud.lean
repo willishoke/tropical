@@ -11,7 +11,7 @@ program name to its registered metadata (shared with the program-I/O path).
 namespace Tropical.Engine
 
 open Lean (Json toJson)
-open Tropical.Expr (getField? getStrField? opOf? validateExpr exprDependencies prettyExpr)
+open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
 -- ── Per-tool handlers ────────────────────────────────────────────────────────
@@ -128,7 +128,7 @@ def handleRemoveInstance (env : Env) (args : Json) : EngineM Json := do
     let st := st.removeInstance instanceName
     { st with
       wires := st.wires.filter fun w =>
-        !(w.instName == instanceName || (exprDependencies w.expr).contains instanceName)
+        !(w.instName == instanceName || w.expr.deps.contains instanceName)
       graphOutputs := st.graphOutputs.filter (·.1 != instanceName)
       scopeTaps := st.scopeTaps.filter (·.2.1 != instanceName) }
   syncCompile env
@@ -140,7 +140,7 @@ def handleListPrograms (env : Env) : EngineM Json := do
     Json.mkObj <|
       [("name", Json.str p.name),
        ("type", match p.typeStr with | some s => Json.str s | none => jsonNull)]
-      ++ (if withDefault then [("default", p.default.getD jsonNull)] else [])
+      ++ (if withDefault then [("default", (p.default.map (·.toJson)).getD jsonNull)] else [])
   let render (m : ProgMeta) : Json :=
     Json.mkObj [
       ("program_name", Json.str m.programName),
@@ -165,9 +165,9 @@ def handleGetInfo (env : Env) (args : Json) : EngineM Json := do
     Json.mkObj [
       ("name", Json.str p.name), ("index", toJson i),
       ("type", p.typeObj.getD jsonNull),
-      ("expr", match wire with | some w => w.expr | none => jsonNull),
+      ("expr", match wire with | some w => w.expr.toJson | none => jsonNull),
       ("pretty", match wire with
-        | some w => Json.str (prettyExpr w.expr lookupOutputs)
+        | some w => Json.str (w.expr.pretty lookupOutputs)
         | none => jsonNull)]
   let outputs := info.progMeta.outputs.mapIdx fun i p =>
     Json.mkObj [("name", Json.str p.name), ("index", toJson i),

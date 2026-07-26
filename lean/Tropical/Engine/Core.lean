@@ -31,7 +31,7 @@ because every downstream handler module consumes them.
 namespace Tropical.Engine
 
 open Lean (Json toJson)
-open Tropical.Expr (getField? getStrField? opOf? validateExpr exprDependencies prettyExpr)
+open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
 structure Env where
@@ -129,7 +129,7 @@ private def scalarTypeJson (k : String) : Json :=
     connection check) and the structured PortType Json (echoed verbatim
     as the `got` field of `type_mismatch` envelopes — TS passes the
     PortType object itself). -/
-private def srcTypeOf (st : SessionSt) (node : Json) : Option (PortType × Json) :=
+private def srcTypeOf (st : SessionSt) (node : WireExpr) : Option (PortType × Json) :=
   match node with
   | .num _  => some (.scalar .float, scalarTypeJson "float")
   | .bool _ => some (.scalar .bool, scalarTypeJson "bool")
@@ -137,30 +137,26 @@ private def srcTypeOf (st : SessionSt) (node : Json) : Option (PortType × Json)
     some (.array { display := "float", kind := some .float } #[items.size],
           Json.mkObj [("kind", Json.str "array"), ("element", Json.str "float"),
                       ("shape", Json.arr #[Lean.toJson items.size])])
-  | .obj _ =>
-    if opOf? node == some "ref" then do
-      let instName ← getStrField? node "instance"
-      let info ← st.findInstance? instName
-      let outIdx ← match getField? node "output" with
-        | some (.num n) => some n.toFloat.toUInt64.toNat
-        | some (.str s) => info.progMeta.outputNames.idxOf? s
-        | _ => none
-      let port ← info.progMeta.outputs[outIdx]?
-      let typeObj ← port.typeObj
-      let parsed ← parsePortType? typeObj
-      pure (parsed, typeObj)
-    else none
+  | .ref instName output => do
+    let info ← st.findInstance? instName
+    let outIdx ← match output with
+      | .index n => some n.toFloat.toUInt64.toNat
+      | .name s => info.progMeta.outputNames.idxOf? s
+    let port ← info.progMeta.outputs[outIdx]?
+    let typeObj ← port.typeObj
+    let parsed ← parsePortType? typeObj
+    pure (parsed, typeObj)
   | _ => none
 
-def adaptInputExpr (st : SessionSt) (node : Json) (dstTypeObj : Option Json)
-    (instanceName inputName : String) : EngineM Json := do
+def adaptInputExpr (st : SessionSt) (node : WireExpr) (dstTypeObj : Option Json)
+    (instanceName inputName : String) : EngineM WireExpr := do
   match srcTypeOf st node with
   | none => pure node
   | some (srcType, srcTypeJson) =>
     let dstType := dstTypeObj.bind parsePortType?
     let check := checkArrayConnection (some srcType) dstType node
     if !check.compatible then
-      throwPredicate .typeMismatch "expr" node "type_compatible"
+      throwPredicate .typeMismatch "expr" node.toJson "type_compatible"
         dstTypeObj (some srcTypeJson)
         (some s!"Type mismatch on '{instanceName}'.{inputName}: {check.error.getD ""}")
     pure (check.broadcastExpr.getD node)

@@ -184,28 +184,20 @@ def allocateOutputSlots (s : SessionAlloc) (instPath : String) (prog : CoreProgr
         slotCount := s.slotCount + exp.names.size }
   return s
 
-/-- The array-input alias quotient (`tryAliasInputArrayWire`). -/
+/-- The array-input alias quotient (`tryAliasInputArrayWire`). Only a
+    string-named ref aliases (numeric output indices never did — the
+    old reader used the string accessor). -/
 private def tryAliasInputArrayWire (s : SessionAlloc) (wires : Array Tropical.Wire)
     (instPath portName : String) : Option ArraySlotInfo := do
   let w ← wires.find? fun w => w.instName == instPath && w.portName == portName
   match w.expr with
-  | .obj _ =>
-    if opOf? w.expr == some "ref" then do
-      let srcInst ← getStrField? w.expr "instance"
-      let srcOut ← getStrField? w.expr "output"
-      let pmeta ← s.outputPortMeta.get? (slotKey srcInst srcOut)
-      let slot ← pmeta.arraySlot?
-      let size ← pmeta.arraySize?
-      pure { slot, size }
-    else if opOf? w.expr == some "sessionArraySlot" then do
-      let idx ← match getField? w.expr "index" with
-        | some (.num n) => some n.toFloat.toUInt64.toNat
-        | _ => none
-      let size ← match getField? w.expr "size" with
-        | some (.num n) => some n.toFloat.toUInt64.toNat
-        | _ => none
-      pure { slot := idx, size }
-    else none
+  | .ref srcInst (.name srcOut) => do
+    let pmeta ← s.outputPortMeta.get? (slotKey srcInst srcOut)
+    let slot ← pmeta.arraySlot?
+    let size ← pmeta.arraySize?
+    pure { slot, size }
+  | .sessionArraySlot idx (some size) =>
+    pure { slot := idx, size }
   | _ => none
 
 /-- Port of `allocateInputSlots`. Idempotent; the alias check binds a

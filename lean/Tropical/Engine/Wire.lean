@@ -11,46 +11,42 @@ chain, zip, fan-out, fan-in, and list-wiring. Each mutation ends in a single
 namespace Tropical.Engine
 
 open Lean (Json toJson)
-open Tropical.Expr (getField? getStrField? opOf? validateExpr exprDependencies prettyExpr)
+open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
 -- ── wire (the unified mutation tool) ─────────────────────────────────────────
 
-private def resolveDacSource (st : SessionSt) (expr : Json) : EngineM (String × String) := do
-  let isRefObj := match expr with
-    | .obj _ => true
-    | _ => false
-  if !isRefObj then
-    throwBare .invalidValue
-      s!"dac.{dacOut} requires a ref-shaped expression (use refExpr or \{op:'ref',instance,output}). Got literal/array."
-      (param := some "expr") (value := some expr)
-  if opOf? expr != some "ref" then
-    throwBare .invalidValue
-      s!"dac.{dacOut} requires expr.op === 'ref'. Got op='{(opOf? expr).getD "undefined"}'."
-      (param := some "expr") (value := some expr)
-  let instJ := getField? expr "instance"
-  let some (Json.str instName) := instJ
-    | throwBare .invalidValue s!"dac.{dacOut}: ref.instance must be a string"
-        (param := some "instance") (value := instJ)
+private def resolveDacSource (st : SessionSt) (expr : WireExpr) : EngineM (String × String) := do
+  let (instName, output) ← match expr with
+    | .ref inst output => pure (inst, output)
+    | .num _ | .bool _ | .arr _ =>
+      throwBare .invalidValue
+        s!"dac.{dacOut} requires a ref-shaped expression (use refExpr or \{op:'ref',instance,output}). Got literal/array."
+        (param := some "expr") (value := some expr.toJson)
+    | other =>
+      throwBare .invalidValue
+        s!"dac.{dacOut} requires expr.op === 'ref'. Got op='{other.opName}'."
+        (param := some "expr") (value := some expr.toJson)
   let info ← requireInstance st instName "instance"
   let outNames := info.progMeta.outputNames
-  match getField? expr "output" with
-  | some (.num n) =>
+  match output with
+  | .index n =>
     let idx := n.toFloat.toUInt64.toNat
     if n.toFloat < 0 || idx ≥ outNames.size then
       throwEnum .unknownOutput "output" (Json.num n) outNames
     pure (instName, outNames[idx]!)
-  | some (.str s) =>
+  | .name s =>
     if !outNames.contains s then
       throwEnum .unknownOutput "output" (Json.str s) outNames
     pure (instName, s)
-  | other =>
-    throwBare .invalidValue s!"dac.{dacOut}: ref.output must be a number or string"
-      (param := some "output") (value := other)
 
-private def validateOrInternal (expr : Json) (path : String) : EngineM Unit :=
-  match validateExpr expr path with
-  | .ok () => pure ()
+/-- The tool-boundary decode: raw expression Json → `WireExpr`. The
+    decoder is the refusal site (state ops, retired ops, arity); its
+    failures ride the `internal_error` path the old `validateExpr`
+    used. -/
+private def decodeOrInternal (expr : Json) (path : String) : EngineM WireExpr :=
+  match WireExpr.ofJson expr path with
+  | .ok e => pure e
   | .error msg => internalError msg
 
 def handleWire (env : Env) (args : Json) : EngineM Json := do
@@ -90,9 +86,9 @@ def handleWire (env : Env) (args : Json) : EngineM Json := do
         throwBare .unknownOutput
           s!"dac has only one output port: '{dacOut}'. Got '{tsInterp sInput}'."
           (param := some "set[].input") (value := some sInput)
-      validateOrInternal sExpr s!"{dacName}.{dacOut}"
+      let decoded ← decodeOrInternal sExpr s!"{dacName}.{dacOut}"
       let st ← env.state.get
-      let (srcInst, srcOut) ← resolveDacSource st sExpr
+      let (srcInst, srcOut) ← resolveDacSource st decoded
       env.state.modify fun st =>
         { st with graphOutputs := st.graphOutputs.push (srcInst, srcOut) }
       dacWires := dacWires.push <| Json.mkObj
@@ -103,9 +99,9 @@ def handleWire (env : Env) (args : Json) : EngineM Json := do
         throwBare .invalidValue
           s!"scope tap requires a string input name ({scopeName}.<name>)."
           (param := some "set[].input") (value := some sInput)
-      validateOrInternal sExpr s!"{scopeName}.{tapName}"
+      let decoded ← decodeOrInternal sExpr s!"{scopeName}.{tapName}"
       let st ← env.state.get
-      let (srcInst, srcOut) ← resolveDacSource st sExpr
+      let (srcInst, srcOut) ← resolveDacSource st decoded
       env.state.modify fun st =>
         { st with scopeTaps := (st.scopeTaps.filter (·.1 != tapName)).push (tapName, srcInst, srcOut) }
       scopeWires := scopeWires.push <| Json.mkObj
@@ -115,17 +111,21 @@ def handleWire (env : Env) (args : Json) : EngineM Json := do
       let info ← requireInstance st sInst "set[].instance"
       let inputId ← resolveInputIdx info.progMeta sInput
       let resolvedName := (info.progMeta.inputNames[inputId]?).getD (toString inputId)
-      validateOrInternal sExpr s!"{sInst}.{resolvedName}"
-      let adapted ← adaptInputExpr st sExpr (inputTypeObj info.progMeta inputId) sInst resolvedName
+      let decoded ← decodeOrInternal sExpr s!"{sInst}.{resolvedName}"
+      let adapted ← adaptInputExpr st decoded (inputTypeObj info.progMeta inputId) sInst resolvedName
       let existing := st.findWire? sInst resolvedName
-      let toStore := match existing, argStr? s "combine" with
+      let toStore ← match existing, argStr? s "combine" with
         | some w, some combine =>
-          Json.mkObj [("op", Json.str combine),
-                      ("args", Json.arr #[w.expr, adapted])]
-        | _, _ => adapted
+          match Tropical.Ir.BinaryOpTag.ofWire? combine with
+          | some tag => pure (WireExpr.binary tag w.expr adapted)
+          | none =>
+            throwBare .invalidValue
+              s!"combine must be a binary wire op (add, mul, …), got '{combine}'"
+              (param := some "set[].combine") (value := some (Json.str combine))
+        | _, _ => pure adapted
       env.state.modify (·.setWireRaw sInst resolvedName toStore)
       results := results.push <| Json.mkObj
-        [("instance", Json.str sInst), ("input", Json.str resolvedName), ("expr", toStore)]
+        [("instance", Json.str sInst), ("input", Json.str resolvedName), ("expr", toStore.toJson)]
 
   syncCompile env
   pure <| Json.mkObj <|
@@ -159,7 +159,8 @@ def handleWireChain (env : Env) (args : Json) : EngineM Json := do
     let firstInst := insts[0]!
     let inputName ← resolveInputName firstInst.progMeta inputPort
     let idx := (firstInst.progMeta.inputNames.idxOf? inputName).getD 0
-    let expr ← adaptInputExpr st initial (inputTypeObj firstInst.progMeta idx) firstName inputName
+    let decoded ← decodeOrInternal initial s!"{firstName}.{inputName}"
+    let expr ← adaptInputExpr st decoded (inputTypeObj firstInst.progMeta idx) firstName inputName
     env.state.modify (·.setWireRaw firstName inputName expr)
 
   let mut linked : Array Json := #[]
@@ -170,8 +171,7 @@ def handleWireChain (env : Env) (args : Json) : EngineM Json := do
     let dstName := instanceNames[i+1]!
     let outName ← resolveOutputName srcInst.progMeta outputPort
     let inName ← resolveInputName dstInst.progMeta inputPort
-    let refExpr := Json.mkObj [("op", Json.str "ref"),
-      ("instance", Json.str srcName), ("output", Json.str outName)]
+    let refExpr : WireExpr := .ref srcName (.name outName)
     let idx := (dstInst.progMeta.inputNames.idxOf? inName).getD 0
     let st' ← env.state.get
     let expr ← adaptInputExpr st' refExpr (inputTypeObj dstInst.progMeta idx) dstName inName
@@ -200,8 +200,7 @@ def handleWireZip (env : Env) (args : Json) : EngineM Json := do
     let dstInst ← requireInstance st dstName "targets[].instance"
     let outName ← resolveOutputName srcInst.progMeta ((getField? src "output").getD jsonNull)
     let inName ← resolveInputName dstInst.progMeta ((getField? dst "input").getD jsonNull)
-    let refExpr := Json.mkObj [("op", Json.str "ref"),
-      ("instance", Json.str srcName), ("output", Json.str outName)]
+    let refExpr : WireExpr := .ref srcName (.name outName)
     let idx := (dstInst.progMeta.inputNames.idxOf? inName).getD 0
     let expr ← adaptInputExpr st refExpr (inputTypeObj dstInst.progMeta idx) dstName inName
     env.state.modify (·.setWireRaw dstName inName expr)
@@ -225,11 +224,9 @@ def handleFanOut (env : Env) (args : Json) : EngineM Json := do
       let sName := (getStrField? rawSource "instance").getD ""
       let srcInst ← requireInstance st sName "source.instance"
       let outName ← resolveOutputName srcInst.progMeta ((getField? rawSource "output").getD jsonNull)
-      pure (Json.mkObj [("op", Json.str "ref"),
-              ("instance", Json.str sName), ("output", Json.str outName)],
-            s!"{sName}.{outName}")
-    else
-      pure (rawSource, rawSource.compress)
+      pure ((WireExpr.ref sName (.name outName)), s!"{sName}.{outName}")
+    else do
+      pure (← decodeOrInternal rawSource "source", rawSource.compress)
 
   let mut linked : Array Json := #[]
   for dst in targets do
@@ -254,19 +251,18 @@ def handleFanIn (env : Env) (args : Json) : EngineM Json := do
   let targetName := (argStr? target "instance").getD ""
   let dstInst ← requireInstance st targetName "target.instance"
 
-  let mut terms : Array Json := #[]
+  let mut terms : Array WireExpr := #[]
   for src in sources do
     let srcName := (argStr? src "instance").getD ""
     let srcInst ← requireInstance st srcName "sources[].instance"
     let outName ← resolveOutputName srcInst.progMeta ((getField? src "output").getD jsonNull)
-    let ref := Json.mkObj [("op", Json.str "ref"),
-      ("instance", Json.str srcName), ("output", Json.str outName)]
+    let ref : WireExpr := .ref srcName (.name outName)
     terms := terms.push <| match getField? src "gain" with
-      | some g@(.num _) => Json.mkObj [("op", Json.str "mul"), ("args", Json.arr #[ref, g])]
+      | some (.num g) => .binary .mul ref (.num g)
       | _ => ref
 
   let sumExpr := terms[1:].foldl
-    (fun acc t => Json.mkObj [("op", Json.str "add"), ("args", Json.arr #[acc, t])])
+    (fun acc t => WireExpr.binary .add acc t)
     terms[0]!
 
   let inName ← resolveInputName dstInst.progMeta ((getField? target "input").getD jsonNull)
@@ -285,10 +281,10 @@ def handleListWiring (env : Env) (args : Json) : EngineM Json := do
     if let some f := filter then
       if w.instName != f then none else
       some (Json.mkObj [("instance", Json.str w.instName), ("input", Json.str w.portName),
-                        ("expr", Json.str (prettyExpr w.expr lookupOutputs))])
+                        ("expr", Json.str (w.expr.pretty lookupOutputs))])
     else
       some (Json.mkObj [("instance", Json.str w.instName), ("input", Json.str w.portName),
-                        ("expr", Json.str (prettyExpr w.expr lookupOutputs))])
+                        ("expr", Json.str (w.expr.pretty lookupOutputs))])
   pure (Json.arr results)
 
 end Tropical.Engine

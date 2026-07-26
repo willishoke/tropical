@@ -1,5 +1,6 @@
 import Lean.Data.Json
 import Tropical.Expr
+import Tropical.WireExpr
 import Tropical.Parse.Nodes
 
 /-!
@@ -98,19 +99,18 @@ def broadcastShapes (a b : Array Nat) : Option (Array Nat) := Id.run do
 
 structure ConnectionCheck where
   compatible    : Bool
-  broadcastExpr : Option Json := none
+  broadcastExpr : Option Tropical.WireExpr := none
   error         : Option String := none
   resultShape   : Option (Array Nat) := none
 
-private def broadcastTo (refExpr : Json) (shape : Array Nat) : Json :=
-  Json.mkObj [("op", Json.str "broadcastTo"), ("args", Json.arr #[refExpr]),
-              ("shape", Json.arr (shape.map fun n => Lean.toJson n))]
+private def broadcastTo (refExpr : Tropical.WireExpr) (shape : Array Nat) : Tropical.WireExpr :=
+  .broadcastTo refExpr shape
 
 private def floatT : PortType := .scalar .float
 
 /-- Port of compiler/array_wiring.ts `checkArrayConnection` — same
     decision tree, same error strings. -/
-def checkArrayConnection (srcIn dstIn : Option PortType) (refExpr : Json) : ConnectionCheck := Id.run do
+def checkArrayConnection (srcIn dstIn : Option PortType) (refExpr : Tropical.WireExpr) : ConnectionCheck := Id.run do
   let src := srcIn.getD floatT
   let dst := dstIn.getD floatT
 

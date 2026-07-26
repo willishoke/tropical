@@ -12,7 +12,7 @@ downstream-only patch graph through the EmitArrow lowering to a session root.
 namespace Tropical.Engine
 
 open Lean (Json toJson)
-open Tropical.Expr (getField? getStrField? opOf? validateExpr exprDependencies prettyExpr)
+open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
 -- ── Dispatcher ───────────────────────────────────────────────────────────────

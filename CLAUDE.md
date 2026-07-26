@@ -105,8 +105,9 @@ arrow-combinator builders (Tropical.Stdlib / EmitArrow)  ·  MCP patch graphs  �
   │  (Engine/ProgramIO.lean) walks the node directly — instances +
   │  wiring + params of REGISTERED types. Ingest is the refusal site:
   │  a programDecl (a program body over the wire) dies with the
-  │  retirement message; wire expressions live in the session grammar
-  │  (Tropical.Expr.validateExpr — no combinator/binder spellings) —
+  │  retirement message; wire expressions are a TYPED inductive
+  │  (Tropical.WireExpr — the decoder is the refusal site; no
+  │  combinator/binder/state-op spellings exist) —
   │  the grammar you can spell is the language that compiles.
   ▼
 ResolvedProgram (lean/Tropical/Ir/Nodes.lean)
@@ -272,7 +273,7 @@ Two distinct JSON schemas; do not confuse them.
 
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
-| `tropical_program_2` | `lean/Tropical/Parse/Raise.lean` (JSON ingest) | The PATCH-BAY shape: instances of registered types + wiring + params, a body block of instanceDecls/paramDecls/outputAssigns. The JSON front door for `load`/`merge` (and `save`/`export_program`'s output serialization). Program DEFINITIONS over the wire are retired — a programDecl is refused at ingest with the retirement message; wire expressions are the session grammar (`Tropical.Expr.validateExpr`), which cannot spell combinators/binders/state ops. (Programs are authored as `Tropical.Stdlib`/EmitArrow arrow builders, not this schema.) |
+| `tropical_program_2` | `lean/Tropical/Parse/Raise.lean` (JSON ingest) | The PATCH-BAY shape: instances of registered types + wiring + params, a body block of instanceDecls/paramDecls/outputAssigns. The JSON front door for `load`/`merge` (and `save`/`export_program`'s output serialization). Program DEFINITIONS over the wire are retired — a programDecl is refused at ingest with the retirement message; wire expressions decode into the typed session grammar (`Tropical.WireExpr`), which cannot spell combinators/binders/state ops. (Programs are authored as `Tropical.Stdlib`/EmitArrow arrow builders, not this schema.) |
 | `tropical_plan_5`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: a root instruction stream (instances nested as `children`) plus `sinks[]` (device-bound outputs: sum input slots × gain → channel) and `sources[]` (runtime-bound inputs: canonical `[tick, rate]`; the dual of sinks). The engine consumes it as the codegen manifest; the web build derives a `.wasm` + a trimmed `KernelManifest` from it. The engine still accepts the older `tropical_plan_4` (single-kernel form, top-level `output_targets` temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 with the canonical sources at parse time. |
 
 Going from the first to the second without losing meaning is exactly

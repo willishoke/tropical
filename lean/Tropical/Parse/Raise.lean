@@ -9,7 +9,7 @@ validation, and the program-node / top-level-metadata split. The wire
 is a PATCH BAY (instances + wiring + params of registered types): the
 ingest (`Engine/ProgramIO.lean`) walks the returned `JsonV` node
 directly, wire expressions are validated by the session grammar
-(`Tropical.Expr.validateExpr`), and program definitions over the wire
+(`Tropical.WireExpr`'s decoder), and program definitions over the wire
 are refused at ingest.
 
 The rest of raise — expression raising, port raising, the bounds

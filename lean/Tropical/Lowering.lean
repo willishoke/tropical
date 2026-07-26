@@ -19,8 +19,8 @@ engine's mirror (pure — the durable mirror is never mutated here):
 - `computeInstanceTopoOrder` — Kahn with sorted ties
 
 Wire *lifting* (array literals → anonymous `__wire_N` instances) stays
-in the compiler service — it needs strata. `needsWireLift` (the pure
-detection) lives here so the engine knows when to request it.
+in the compiler service — it needs strata. Lift detection is
+`WireExpr.needsLift` (typed, on the store's own wire type).
 -/
 
 namespace Tropical.Lowering
@@ -28,22 +28,6 @@ namespace Tropical.Lowering
 open Lean (Json toJson)
 open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? PortType ScalarKind)
-
--- ── Lift detection (compiler/ir/lift_wires.ts needsWireLift) ─────────────────
-
-partial def needsWireLift (expr : Json) : Bool :=
-  match expr with
-  | .arr _ => true   -- bare array literal
-  | .obj _ =>
-    let op := opOf? expr
-    if op == some "array" || op == some "arrayLiteral" then true
-    else
-      let inArr (k : String) : Bool :=
-        match getField? expr k with
-        | some (.arr items) => items.any needsWireLift
-        | _ => false
-      inArr "args" || inArr "items"
-  | _ => false
 
 -- ── Slot allocation (compiler/session.ts expandPortToSlots discipline) ──────
 
@@ -109,21 +93,6 @@ def allocate (params : Array String) (instances : Array (String × InstanceInfo)
 
 -- ── Dep graph, cycle tripwire, topo order ────────────────────────────────────
 
-private partial def collectInstanceRefs (expr : Json) (acc : Array String) : Array String :=
-  match expr with
-  | .arr items => items.foldl (fun a e => collectInstanceRefs e a) acc
-  | .obj m =>
-    if opOf? expr == some "ref" then
-      match getStrField? expr "instance" with
-      | some i => if acc.contains i then acc else acc.push i
-      | none => acc
-    else
-      m.toArray.foldl (fun a (kv : String × Json) =>
-        match kv.2 with
-        | .obj _ | .arr _ => collectInstanceRefs kv.2 a
-        | _ => a) acc
-  | _ => acc
-
 /-- consumer → producers, in instance order; producer sets keep
     discovery order (TS Set-insertion parity). -/
 private def buildDeps (instances : Array (String × InstanceInfo)) (wires : Array Wire)
@@ -135,7 +104,7 @@ private def buildDeps (instances : Array (String × InstanceInfo)) (wires : Arra
     | some i =>
       let (n, producers) := deps[i]!
       let mut ps := producers
-      for r in collectInstanceRefs w.expr #[] do
+      for r in w.expr.deps do
         if !ps.contains r && !(dropSelfEdges && r == n) then
           ps := ps.push r
       deps := deps.set! i (n, ps)
