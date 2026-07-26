@@ -3,20 +3,26 @@ import Lean.Data.Json
 /-!
 # Order-preserving JSON
 
-`Lean.Json` stores objects in a tree map sorted by key, which destroys
-the source key order. That is fine everywhere the differential harness
-compares values (the comparators are key-order-insensitive), but the
-TS `raise` adapter's semantics *observe* key order: `Object.entries`
-over `instanceDecl.inputs` / `type_args`, `tag.payload`, `match.arms`,
-and `let.bind` iterates keys in JSON-source insertion order, and raise
-turns several of those records into **arrays**, where order is
-load-bearing. A faithful Lean port therefore needs a JSON value type
-whose objects are ordered association arrays.
+`Lean.Json` stores objects in a `Std.TreeMap.Raw` sorted by key. `JsonV`
+keeps them as insertion-ordered association arrays instead, which today
+buys two things:
+
+- **Provable recursion.** An `Array (String × JsonV)` object admits the
+  `sizeOf` lemmas below (`sizeOf_lt_of_mem_snd`, `sizeOf_lt_of_getField`)
+  that the codec's total decode DFS hangs its termination on; core ships
+  no such lemmas for tree-map lookups. This is the load-bearing property.
+- **Key order**, the original motivation (the TS `raise` adapter observed
+  `Object.entries` order over several record shapes — all retired with
+  the surface language). Audited 2026-07-26: order is now semantically
+  inert except as the trailing tiebreak for unknown-port wires in the
+  ingest's declared-port sort (`Engine/ProgramIO`), wires the compiler
+  never reads. Two of the three parse entries feed this parser from
+  `Lean.Json.compress` output — already key-sorted — and nothing minds.
 
 `JsonV` is exactly `Lean.Json` with `obj : Array (String × JsonV)`.
-The parser is a line-for-line adaptation of `Lean.Json.Parser`
-(string/number parsing is reused from it verbatim, so numeric fidelity
-is identical to `Lean.Json.parse`).
+The parser is a total lexer + pushdown fold (see the Parser section);
+string/number literals are decoded by `Lean.Json.parse` on the lexed
+spans, so literal fidelity is identical to `Lean.Json.parse`.
 
 Known divergence from JS, documented rather than replicated: JS object
 iteration hoists integer-like keys ("0", "1", …) ahead of string keys
@@ -166,104 +172,213 @@ def stringifyOpt : Option JsonV → String
   | some j => j.compress
   | none => "undefined"
 
--- ── Parser (adapted from Lean.Json.Parser, objects kept ordered) ─────────────
+-- ── Parser: total lexer + pushdown fold, objects kept ordered ────────────────
 
 section Parser
 
-open Std.Internal.Parsec
-open Std.Internal.Parsec.String
-open Lean.Json.Parser (lookahead)
+/- Ingress without fuel: the text is consumed in ITS OWN order. A single
+   lexer scan whose position strictly advances (measure `utf8ByteSize −
+   byteIdx`, discharged by `Pos.Raw.byteIdx_lt_byteIdx_next`) produces
+   the token array; one fold over that array with an explicit stack of
+   suspended containers builds the tree. Recursion depth became a data
+   stack, so termination is structural over the input, and every error
+   branch names a real malformed input — there is no exhaustion case.
+   Leaf LITERALS (strings with their escapes, numbers) are decoded by
+   `Lean.Json.parse` on the lexed span, so literal semantics — numeric
+   fidelity included — are core's exactly. -/
 
-/-- Aliases dodging the collision with the `JsonV.num`/`JsonV.str`
-    constructors in scope. -/
-private def pNum : Parser JsonNumber := Lean.Json.Parser.num
-private def pStr : Parser String := Lean.Json.Parser.str
+private inductive Tok where
+  | lbrack | rbrack | lbrace | rbrace | comma | colon
+  | str (s : String) | num (n : JsonNumber) | bool (b : Bool) | null
 
-/- Deliberately `partial`: these recurse on the parser STATE, not on a
-   JsonV — the discharging measure would be "remaining input shrinks",
-   a fact about `Std.Internal.Parsec` internals that core does not
-   expose. Every structural fold in this module is total; only the
-   three parser combinators below are exempt. -/
-mutual
+private def Tok.describe : Tok → String
+  | .lbrack => "'['" | .rbrack => "']'" | .lbrace => "'{'" | .rbrace => "'}'"
+  | .comma => "','"  | .colon => "':'"
+  | .str _ => "a string" | .num _ => "a number"
+  | .bool b => toString b | .null => "null"
 
-private partial def arrayCore (acc : Array JsonV) : Parser (Array JsonV) := do
-  let hd ← anyCore
-  let acc' := acc.push hd
-  let c ← any
-  if c == ']' then
-    ws
-    return acc'
-  else if c == ',' then
-    ws
-    arrayCore acc'
-  else
-    fail "unexpected character in array"
-
-private partial def objectCore (acc : Array (String × JsonV)) :
-    Parser (Array (String × JsonV)) := do
-  lookahead (fun c => c == '"') "\""; skip
-  let k ← pStr; ws
-  lookahead (fun c => c == ':') ":"; skip; ws
-  let v ← anyCore
-  let c ← any
-  if c == '}' then
-    ws
-    return acc.push (k, v)
-  else if c == ',' then
-    ws
-    objectCore (acc.push (k, v))
-  else
-    fail "unexpected character in object"
-
-private partial def anyCore : Parser JsonV := do
-  let c ← peek!
-  if c == '[' then
-    skip; ws
-    let c ← peek!
-    if c == ']' then
-      skip; ws
-      return .arr #[]
+/-- Position just past the closing quote of a string literal, `p` sitting
+    just after the opening quote. A backslash skips the char after it —
+    enough to find the FIRST unescaped quote, which is also where core's
+    decoder stops (a `\uXXXX` tail is hex digits, never a bare `"`). -/
+private def strEnd (s : String) (p : String.Pos.Raw) :
+    Except String {q : String.Pos.Raw // p.byteIdx < q.byteIdx} :=
+  if hp : p.byteIdx < s.utf8ByteSize then
+    have h1 := String.Pos.Raw.byteIdx_lt_byteIdx_next s p
+    let c := String.Pos.Raw.get s p
+    if c == '"' then
+      .ok ⟨p.next s, h1⟩
+    else if c == '\\' then
+      have h2 := String.Pos.Raw.byteIdx_lt_byteIdx_next s (p.next s)
+      match strEnd s ((p.next s).next s) with
+      | .ok ⟨q, _hq⟩ => .ok ⟨q, by omega⟩
+      | .error e => .error e
     else
-      return .arr (← arrayCore #[])
-  else if c == '{' then
-    skip; ws
-    let c ← peek!
-    if c == '}' then
-      skip; ws
-      return .obj #[]
-    else
-      return .obj (← objectCore #[])
-  else if c == '"' then
-    skip
-    let s ← pStr
-    ws
-    return .str s
-  else if c == 'f' then
-    skipString "false"; ws
-    return .bool false
-  else if c == 't' then
-    skipString "true"; ws
-    return .bool true
-  else if c == 'n' then
-    skipString "null"; ws
-    return .null
-  else if c == '-' || ('0' <= c && c <= '9') then
-    let n ← pNum
-    ws
-    return .num n
+      match strEnd s (p.next s) with
+      | .ok ⟨q, _hq⟩ => .ok ⟨q, by omega⟩
+      | .error e => .error e
   else
-    fail "unexpected input"
+    .error s!"offset {p.byteIdx}: unterminated string"
+termination_by s.utf8ByteSize - p.byteIdx
+decreasing_by all_goals omega
 
-end
+private def isNumChar (c : Char) : Bool :=
+  c.isDigit || c == '-' || c == '+' || c == 'e' || c == 'E' || c == '.'
 
-private def anyWithEof : Parser JsonV := do
-  ws
-  let res ← anyCore
-  eof
-  return res
+/-- Position just past the maximal run of number-literal chars. On valid
+    JSON this is exactly the span core's number parser consumes: a legal
+    follower of a number is whitespace, `,`, `]`, or `}` — never in the
+    run set. -/
+private def numEnd (s : String) (p : String.Pos.Raw) :
+    {q : String.Pos.Raw // p.byteIdx ≤ q.byteIdx} :=
+  if hp : p.byteIdx < s.utf8ByteSize then
+    if isNumChar (String.Pos.Raw.get s p) then
+      have h1 := String.Pos.Raw.byteIdx_lt_byteIdx_next s p
+      let ⟨q, _hq⟩ := numEnd s (p.next s)
+      ⟨q, by omega⟩
+    else ⟨p, Nat.le_refl _⟩
+  else ⟨p, Nat.le_refl _⟩
+termination_by s.utf8ByteSize - p.byteIdx
+decreasing_by omega
 
-def parse (s : String) : Except String JsonV :=
-  Parser.run anyWithEof s
+/-- One scan, source order. Structural tokens push directly; string and
+    number spans are delimited here and their VALUES decoded by
+    `Lean.Json.parse` on the span (a span that fails to decode is a
+    malformed literal). Each token carries its byte offset for errors. -/
+private def lex (s : String) (p : String.Pos.Raw) (acc : Array (Tok × Nat)) :
+    Except String (Array (Tok × Nat)) :=
+  if _hp : p.byteIdx < s.utf8ByteSize then
+    have _h1 := String.Pos.Raw.byteIdx_lt_byteIdx_next s p
+    let c := String.Pos.Raw.get s p
+    if c == ' ' || c == '\t' || c == '\n' || c == '\r' then
+      lex s (p.next s) acc
+    else if c == '[' then lex s (p.next s) (acc.push (.lbrack, p.byteIdx))
+    else if c == ']' then lex s (p.next s) (acc.push (.rbrack, p.byteIdx))
+    else if c == '{' then lex s (p.next s) (acc.push (.lbrace, p.byteIdx))
+    else if c == '}' then lex s (p.next s) (acc.push (.rbrace, p.byteIdx))
+    else if c == ',' then lex s (p.next s) (acc.push (.comma, p.byteIdx))
+    else if c == ':' then lex s (p.next s) (acc.push (.colon, p.byteIdx))
+    else if c == '"' then
+      match strEnd s (p.next s) with
+      | .error e => .error e
+      | .ok ⟨q, _hq⟩ =>
+        match Lean.Json.parse (String.Pos.Raw.extract s p q) with
+        | .ok (Json.str v) => lex s q (acc.push (.str v, p.byteIdx))
+        | _ => .error s!"offset {p.byteIdx}: invalid string literal"
+    else if c == '-' || c.isDigit then
+      let ⟨q, _hq⟩ := numEnd s (p.next s)
+      match Lean.Json.parse (String.Pos.Raw.extract s p q) with
+      | .ok (Json.num n) => lex s q (acc.push (.num n, p.byteIdx))
+      | _ => .error s!"offset {p.byteIdx}: invalid number literal"
+    else if c == 't' then
+      if String.Pos.Raw.extract s p ⟨p.byteIdx + 4⟩ == "true" then
+        lex s ⟨p.byteIdx + 4⟩ (acc.push (.bool true, p.byteIdx))
+      else .error s!"offset {p.byteIdx}: unexpected input"
+    else if c == 'f' then
+      if String.Pos.Raw.extract s p ⟨p.byteIdx + 5⟩ == "false" then
+        lex s ⟨p.byteIdx + 5⟩ (acc.push (.bool false, p.byteIdx))
+      else .error s!"offset {p.byteIdx}: unexpected input"
+    else if c == 'n' then
+      if String.Pos.Raw.extract s p ⟨p.byteIdx + 4⟩ == "null" then
+        lex s ⟨p.byteIdx + 4⟩ (acc.push (.null, p.byteIdx))
+      else .error s!"offset {p.byteIdx}: unexpected input"
+    else
+      .error s!"offset {p.byteIdx}: unexpected character '{c}'"
+  else .ok acc
+termination_by s.utf8ByteSize - p.byteIdx
+decreasing_by all_goals omega
+
+/-- A suspended container: the parent awaiting the value under
+    construction. The continuation, defunctionalized. -/
+private inductive Ctx where
+  | arr (items : Array JsonV)
+  | obj (fields : Array (String × JsonV)) (key : String)
+
+/-- What the next token must be. Together with the `Ctx` stack this is a
+    zipper over the partial tree; a container's own frame is suspended
+    onto the stack only when a CHILD value begins, so no state ever
+    destructures a stack it might not have — every arm is live. -/
+private inductive Mode where
+  | rootVal                                                    -- expecting the root value
+  | rootDone (v : JsonV)                                       -- root complete
+  | arrFirst                                                   -- after `[`: value or `]`
+  | arrNext  (items : Array JsonV)                             -- after `,`: value
+  | arrAfter (items : Array JsonV)                             -- after element: `,` or `]`
+  | objFirst                                                   -- after `{`: key or `}`
+  | objKey   (fields : Array (String × JsonV))                 -- after `,`: key
+  | objColon (fields : Array (String × JsonV)) (key : String)  -- after key: `:`
+  | objVal   (fields : Array (String × JsonV)) (key : String)  -- after `:`: value
+  | objAfter (fields : Array (String × JsonV))                 -- after pair: `,` or `}`
+
+/-- Complete a value: hand it to the innermost suspended container, or
+    crown it the root. Pops at most one frame — closings never cascade. -/
+private def complete (v : JsonV) : List Ctx → List Ctx × Mode
+  | [] => ([], .rootDone v)
+  | .arr items :: rest => (rest, .arrAfter (items.push v))
+  | .obj fields key :: rest => (rest, .objAfter (fields.push (key, v)))
+
+private def scalar? : Tok → Option JsonV
+  | .str s => some (.str s)
+  | .num n => some (.num n)
+  | .bool b => some (.bool b)
+  | .null  => some .null
+  | _ => none
+
+/-- Dispatch a value-starting token; `stack` already holds the container
+    the value belongs to (or is empty at root). -/
+private def beginValue (stack : List Ctx) (tok : Tok) (off : Nat) :
+    Except String (List Ctx × Mode) :=
+  match scalar? tok with
+  | some v => .ok (complete v stack)
+  | none =>
+    match tok with
+    | .lbrack => .ok (stack, .arrFirst)
+    | .lbrace => .ok (stack, .objFirst)
+    | t => .error s!"offset {off}: expected a value, got {t.describe}"
+
+private def step (st : List Ctx × Mode) (tok : Tok) (off : Nat) :
+    Except String (List Ctx × Mode) :=
+  let (stack, mode) := st
+  match mode with
+  | .rootVal => beginValue stack tok off
+  | .arrFirst =>
+    match tok with
+    | .rbrack => .ok (complete (.arr #[]) stack)
+    | t => beginValue (.arr #[] :: stack) t off
+  | .arrNext items => beginValue (.arr items :: stack) tok off
+  | .arrAfter items =>
+    match tok with
+    | .comma  => .ok (stack, .arrNext items)
+    | .rbrack => .ok (complete (.arr items) stack)
+    | t => .error s!"offset {off}: expected ',' or ']' in array, got {t.describe}"
+  | .objFirst =>
+    match tok with
+    | .rbrace => .ok (complete (.obj #[]) stack)
+    | .str k  => .ok (stack, .objColon #[] k)
+    | t => .error s!"offset {off}: expected a key or '}' in object, got {t.describe}"
+  | .objKey fields =>
+    match tok with
+    | .str k => .ok (stack, .objColon fields k)
+    | t => .error s!"offset {off}: expected a key in object, got {t.describe}"
+  | .objColon fields key =>
+    match tok with
+    | .colon => .ok (stack, .objVal fields key)
+    | t => .error s!"offset {off}: expected ':' after key, got {t.describe}"
+  | .objVal fields key => beginValue (.obj fields key :: stack) tok off
+  | .objAfter fields =>
+    match tok with
+    | .comma  => .ok (stack, .objKey fields)
+    | .rbrace => .ok (complete (.obj fields) stack)
+    | t => .error s!"offset {off}: expected ',' or '}' in object, got {t.describe}"
+  | .rootDone _ => .error s!"offset {off}: expected end of input, got {tok.describe}"
+
+def parse (s : String) : Except String JsonV := do
+  let toks ← lex s ⟨0⟩ #[]
+  let (_, mode) ← toks.foldlM (fun st t => step st t.1 t.2)
+    (([] : List Ctx), Mode.rootVal)
+  match mode with
+  | .rootDone v => .ok v
+  | _ => .error s!"offset {s.utf8ByteSize}: unexpected end of input"
 
 end Parser
 
