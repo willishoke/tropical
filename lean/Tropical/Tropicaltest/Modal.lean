@@ -585,7 +585,7 @@ def runResidueCollected (arena : Arena)
     constructor's REAL emitted coefficients (hardening 0a-4c). Partial: `none` on
     any non-constant/unsupported node. Div mirrors the kernel's zero-guard. Used
     only in tests — never on a compile path. -/
-private partial def evalConstSig : Tropical.EmitArrow.Sig → Option Float
+private def evalConstSig : Tropical.EmitArrow.Sig → Option Float
   | .num n            => some n.toFloat
   | .unary .neg a     => (evalConstSig a).map (fun x => -x)
   | .unary .toFloat a => evalConstSig a
@@ -1576,10 +1576,12 @@ def runGongLive (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO B
       failGate "gong-live" s!"present={bIdx?.isSome} sameB1={sameB1} read={read} (ΔE={dE})"
 
 /-- Count instructions matching `pred` across a plan's instance-function tree. -/
-private partial def countInstrsFn (pred : Tropical.Plan.NInstr → Bool) :
+private def countInstrsFn (pred : Tropical.Plan.NInstr → Bool) :
     Tropical.Plan.InstanceFunction → Nat
   | f => (f.instructions.filter pred).size
-         + f.children.foldl (fun acc c => acc + countInstrsFn pred c) 0
+         + f.children.attach.foldl (fun acc c => acc + countInstrsFn pred c.1) 0
+termination_by f => sizeOf f
+decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children c.2
 
 private def countInstrs (pred : Tropical.Plan.NInstr → Bool) (p : Tropical.Plan.FlatPlan) : Nat :=
   p.instanceFunctions.foldl (fun acc f => acc + countInstrsFn pred f) 0

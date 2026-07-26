@@ -14,13 +14,16 @@ open Tropical.Ir (Arena ProgramIdx)
 /-- Module-slot indices READ by an instance function: every `.slot` operand of
     every instruction (preamble, body, pre-input), recursively through children.
     A `WriteSlot` dst is a write, not a read — a slot only written is still dead. -/
-private partial def slotReadsOf (f : Tropical.Plan.InstanceFunction) : Array Nat :=
+private def slotReadsOf (f : Tropical.Plan.InstanceFunction) : Array Nat :=
   let ofInstrs := fun (instrs : Array Tropical.Plan.NInstr) =>
     instrs.flatMap fun ins => ins.args.filterMap fun
       | .slot i _ => some i
       | _ => none
   ofInstrs f.preambleInstructions ++ ofInstrs f.instructions
-    ++ ofInstrs f.preInputInstructions ++ f.children.flatMap slotReadsOf
+    ++ ofInstrs f.preInputInstructions
+    ++ f.children.attach.flatMap fun c => slotReadsOf c.1
+termination_by sizeOf f
+decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children c.2
 
 /-- `param:*` entries of `slotNames` referenced by NO instruction operand in the
     plan. Sink `inputs` are slot reads too (they consume the `__root__.out`-style

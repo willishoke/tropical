@@ -52,32 +52,48 @@ private def wireOpName : ENode → String
   | .loopIdx _ => "loopIdx" | .bankSum .. => "bankSum"
   | .num _ => "num" | .bool _ => "bool" | .arr _ => "arr"
 
+private def mkOpNode (op : String) (args : Array Json) : Json :=
+  Json.mkObj [("op", Json.str op), ("args", Json.arr args)]
+
 /-- Port of `literalDefault`: lower a resolved input default (an `ExprId` into
-    the arena's DAG) to the raw wire-format ExprNode (literal-class forms only). -/
-partial def literalDefault (ea : ExprArena) (portName : String) (id : ExprId) :
-    Except String Json :=
-  match ea.deref id with
+    the arena's DAG) to the raw wire-format ExprNode (literal-class forms only).
+    Total by the frozen-arena wf: `hw` certifies children sit strictly below
+    their parent, so the walk descends `id.idx`. -/
+def literalDefault (ea : ExprArena) (hw : ea.wf = true) (portName : String)
+    (id : ExprId) : Except String Json :=
+  match hd : ea.deref id with
   | none => .error s!"Compiled: input '{portName}' default references a dangling ExprId {id.idx}"
   | some node => match node with
     | .num n => .ok (Json.num n)
     | .bool b => .ok (Json.bool b)
     | .arr items => do
-      .ok (Json.arr (← items.mapM (literalDefault ea portName)))
-    | .binary tag a b => opArgs tag.wire #[a, b]
-    | .unary tag a => opArgs tag.wire #[a]
-    | .clamp a b c => opArgs "clamp" #[a, b, c]
-    | .select a b c => opArgs "select" #[a, b, c]
-    | .index a b => opArgs "index" #[a, b]
-    | .arraySet a b c => opArgs "arraySet" #[a, b, c]
+      .ok (Json.arr (← items.attach.mapM fun ⟨x, _⟩ => literalDefault ea hw portName x))
+    | .binary tag a b => do
+      .ok (mkOpNode tag.wire #[← literalDefault ea hw portName a, ← literalDefault ea hw portName b])
+    | .unary tag a => do
+      .ok (mkOpNode tag.wire #[← literalDefault ea hw portName a])
+    | .clamp a b c => do
+      .ok (mkOpNode "clamp" #[← literalDefault ea hw portName a,
+        ← literalDefault ea hw portName b, ← literalDefault ea hw portName c])
+    | .select a b c => do
+      .ok (mkOpNode "select" #[← literalDefault ea hw portName a,
+        ← literalDefault ea hw portName b, ← literalDefault ea hw portName c])
+    | .index a b => do
+      .ok (mkOpNode "index" #[← literalDefault ea hw portName a,
+        ← literalDefault ea hw portName b])
+    | .arraySet a b c => do
+      .ok (mkOpNode "arraySet" #[← literalDefault ea hw portName a,
+        ← literalDefault ea hw portName b, ← literalDefault ea hw portName c])
     | .sampleRate => .ok (Json.mkObj [("op", Json.str "sampleRate")])
     | .sampleIndex => .ok (Json.mkObj [("op", Json.str "sampleIndex")])
     | e =>
       .error (s!"Compiled: input '{portName}' default has op '{wireOpName e}' that's not a literal-class form; "
         ++ "defaults shouldn't reference decls or run combinators")
-where
-  opArgs (op : String) (args : Array ExprId) : Except String Json := do
-    .ok (Json.mkObj [("op", Json.str op),
-      ("args", Json.arr (← args.mapM (literalDefault ea portName)))])
+termination_by id.idx
+decreasing_by
+  all_goals
+    apply Tropical.Ir.ExprArena.forall_children_lt hw ‹Tropical.Ir.ExprArena.deref _ _ = some _›
+    simp_all [Tropical.Ir.ENode.children]
 
 /-- The service's `concreteEntry`, off the typed store. -/
 def concreteEntry (arena : Arena) (entryName : String) (idx : ProgramIdx) :
@@ -90,7 +106,9 @@ def concreteEntry (arena : Arena) (entryName : String) (idx : ProgramIdx) :
       | some pt => (Json.str (portTypeStr pt), portTypeObj pt)
       | none => (jsonNull, jsonNull)
     let dflt ← match d.default? with
-      | some e => literalDefault arena.exprs d.name e
+      | some e =>
+        if hw : arena.exprs.wf then literalDefault arena.exprs hw d.name e
+        else .error "entry render: expression arena failed its well-formedness sweep"
       | none => pure jsonNull
     .ok <| Json.mkObj [("name", Json.str d.name), ("type", t),
       ("type_obj", tObj), ("default", dflt)]

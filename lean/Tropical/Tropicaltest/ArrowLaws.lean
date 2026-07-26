@@ -247,17 +247,22 @@ def runArrowLaw (name : String)
 -- so plan byte-identity is a pure structural test of the CSE collapse).
 
 /-- Count instructions across an InstanceFunction tree (body + nested children). -/
-private partial def countFnInstrs (f : Tropical.Plan.InstanceFunction) : Nat :=
-  f.instructions.size + f.children.foldl (fun acc c => acc + countFnInstrs c) 0
+private def countFnInstrs (f : Tropical.Plan.InstanceFunction) : Nat :=
+  f.instructions.size
+    + f.children.attach.foldl (fun acc c => acc + countFnInstrs c.1) 0
+termination_by sizeOf f
+decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children c.2
 
 /-- Total instruction count of a FlatPlan (all instance functions, recursive). -/
 def planInstrCount (p : Tropical.Plan.FlatPlan) : Nat :=
   p.instanceFunctions.foldl (fun acc f => acc + countFnInstrs f) 0
 
 /-- Count instructions with a given tag across an InstanceFunction tree. -/
-private partial def countFnTagged (t : String) (f : Tropical.Plan.InstanceFunction) : Nat :=
+private def countFnTagged (t : String) (f : Tropical.Plan.InstanceFunction) : Nat :=
   (f.instructions.filter (·.tag == t)).size
-    + f.children.foldl (fun acc c => acc + countFnTagged t c) 0
+    + f.children.attach.foldl (fun acc c => acc + countFnTagged t c.1) 0
+termination_by sizeOf f
+decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children c.2
 
 /-- Count instructions with a given tag across a FlatPlan (e.g. "ReduceBegin"
     to count reduce regions, "Pack" to count materialized columns). -/
