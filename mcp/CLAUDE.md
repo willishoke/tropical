@@ -154,13 +154,18 @@ stateful sister runtime, "supertropical"; see `design/cf-only.md`.)
 
 - `export_program` — crystallize selected session instances into a
   reusable `ProgramType`. Current wiring becomes input defaults.
-  Optionally removes the exported instances.
+  Optionally removes the exported instances. It builds the resolved IR
+  **directly** off the session mirror — there is no JSON round-trip.
+  This is the only route that registers a new program type at runtime.
 - `load` — `tropical_program_2` JSON (path or inline). Stops audio,
   recreates the session from the file's instances + wiring over
-  already-registered programs. A self-contained file may also carry
-  inline **concrete** program definitions — they register through the
-  same JSON front door `export_program` uses; inline *generic*
-  definitions are rejected.
+  already-registered programs. It is a PATCH BAY: instances, wiring,
+  and params of types that are **already registered**. A file carrying
+  an inline program definition (`programDecl`) is refused at ingest —
+  program definitions over the wire are retired. To get a new type,
+  either author it in Lean as an arrow builder (`Tropical.Stdlib` /
+  `EmitArrow`) or build it from instances and crystallize it with
+  `export_program`.
 - `save` — session → `tropical_program_2` JSON.
 - `merge` — additive: instances + wiring of already-registered programs
   without clearing the session.

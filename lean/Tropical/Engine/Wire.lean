@@ -16,17 +16,23 @@ open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
 -- ── wire (the unified mutation tool) ─────────────────────────────────────────
 
-private def resolveDacSource (st : SessionSt) (expr : WireExpr) : EngineM (String × String) := do
+/-- `raw` is the caller's own JSON: `value` must echo what the AGENT sent, and
+    the decoder canonicalizes aliases (`paramExpr` → `param`, `{op:'array',…}` →
+    a bare array, `sample_clock` → `clock`), so echoing `expr.toJson` would hand
+    back a spelling the caller never wrote. `label` is the port being wired, so
+    the message names the real target rather than always saying `dac.out`. -/
+private def resolveDacSource (st : SessionSt) (expr : WireExpr) (raw : Json)
+    (label : String) : EngineM (String × String) := do
   let (instName, output) ← match expr with
     | .ref inst output => pure (inst, output)
     | .num _ | .bool _ | .arr _ =>
       throwBare .invalidValue
-        s!"dac.{dacOut} requires a ref-shaped expression (use refExpr or \{op:'ref',instance,output}). Got literal/array."
-        (param := some "expr") (value := some expr.toJson)
+        s!"{label} requires a ref-shaped expression (use refExpr or \{op:'ref',instance,output}). Got literal/array."
+        (param := some "set[].expr") (value := some raw)
     | other =>
       throwBare .invalidValue
-        s!"dac.{dacOut} requires expr.op === 'ref'. Got op='{other.opName}'."
-        (param := some "expr") (value := some expr.toJson)
+        s!"{label} requires expr.op === 'ref'. Got op='{other.opName}'."
+        (param := some "set[].expr") (value := some raw)
   let info ← requireInstance st instName "instance"
   let outNames := info.progMeta.outputNames
   match output with
@@ -41,13 +47,35 @@ private def resolveDacSource (st : SessionSt) (expr : WireExpr) : EngineM (Strin
     pure (instName, s)
 
 /-- The tool-boundary decode: raw expression Json → `WireExpr`. The
-    decoder is the refusal site (state ops, retired ops, arity); its
-    failures ride the `internal_error` path the old `validateExpr`
-    used. -/
-private def decodeOrInternal (expr : Json) (path : String) : EngineM WireExpr :=
+    decoder is the refusal site (state ops, retired ops, arity).
+
+    A failure here is a bad ARGUMENT, not an engine fault, so it rides
+    `invalid_value` with the offending expression echoed in `value` —
+    `ERRORS.md` reserves `internal_error` for unclassified throws, and
+    an agent branching on the code must be able to tell "fix your call"
+    from "the engine broke". (The old `validateExpr` routed these to
+    `internal_error`; the one input where that accidentally differed —
+    a `ref` whose `output` is present but neither string nor number —
+    used to reach `resolveDacSource`'s classified arm, which `RefOut`
+    has since made unreachable by typing.)
+
+    The INGEST path (`load`/`merge`) keeps `internal_error`: there the
+    decode failure is a property of a whole file, not of a named tool
+    argument. -/
+private def decodeWire (expr : Json) (path : String) (param : String) :
+    EngineM WireExpr :=
   match WireExpr.ofJson expr path with
-  | .ok e => pure e
-  | .error msg => internalError msg
+  | .error msg =>
+    throwBare .invalidValue msg (param := some param) (value := some expr)
+  | .ok e =>
+    -- Decoding is necessary but not sufficient: five constructors exist for
+    -- the engine's own use and no lowering compiles them. Refuse here, or
+    -- they reach the store and detonate at the next compile.
+    match e.uncompilableOp? with
+    | some op =>
+      throwBare .invalidValue (WireExpr.uncompilableMessage path op)
+        (param := some param) (value := some expr)
+    | none => pure e
 
 def handleWire (env : Env) (args : Json) : EngineM Json := do
   let setOps := argArr args "set"
@@ -86,9 +114,9 @@ def handleWire (env : Env) (args : Json) : EngineM Json := do
         throwBare .unknownOutput
           s!"dac has only one output port: '{dacOut}'. Got '{tsInterp sInput}'."
           (param := some "set[].input") (value := some sInput)
-      let decoded ← decodeOrInternal sExpr s!"{dacName}.{dacOut}"
+      let decoded ← decodeWire sExpr s!"{dacName}.{dacOut}" "set[].expr"
       let st ← env.state.get
-      let (srcInst, srcOut) ← resolveDacSource st decoded
+      let (srcInst, srcOut) ← resolveDacSource st decoded sExpr s!"{dacName}.{dacOut}"
       env.state.modify fun st =>
         { st with graphOutputs := st.graphOutputs.push (srcInst, srcOut) }
       dacWires := dacWires.push <| Json.mkObj
@@ -99,9 +127,9 @@ def handleWire (env : Env) (args : Json) : EngineM Json := do
         throwBare .invalidValue
           s!"scope tap requires a string input name ({scopeName}.<name>)."
           (param := some "set[].input") (value := some sInput)
-      let decoded ← decodeOrInternal sExpr s!"{scopeName}.{tapName}"
+      let decoded ← decodeWire sExpr s!"{scopeName}.{tapName}" "set[].expr"
       let st ← env.state.get
-      let (srcInst, srcOut) ← resolveDacSource st decoded
+      let (srcInst, srcOut) ← resolveDacSource st decoded sExpr s!"{scopeName}.{tapName}"
       env.state.modify fun st =>
         { st with scopeTaps := (st.scopeTaps.filter (·.1 != tapName)).push (tapName, srcInst, srcOut) }
       scopeWires := scopeWires.push <| Json.mkObj
@@ -111,8 +139,9 @@ def handleWire (env : Env) (args : Json) : EngineM Json := do
       let info ← requireInstance st sInst "set[].instance"
       let inputId ← resolveInputIdx info.progMeta sInput
       let resolvedName := (info.progMeta.inputNames[inputId]?).getD (toString inputId)
-      let decoded ← decodeOrInternal sExpr s!"{sInst}.{resolvedName}"
-      let adapted ← adaptInputExpr st decoded (inputTypeObj info.progMeta inputId) sInst resolvedName
+      let decoded ← decodeWire sExpr s!"{sInst}.{resolvedName}" "set[].expr"
+      let adapted ← adaptInputExpr st decoded (inputTypeObj info.progMeta inputId)
+        sInst resolvedName (raw? := some sExpr) (param := "set[].expr")
       let existing := st.findWire? sInst resolvedName
       let toStore ← match existing, argStr? s "combine" with
         | some w, some combine =>
@@ -159,8 +188,9 @@ def handleWireChain (env : Env) (args : Json) : EngineM Json := do
     let firstInst := insts[0]!
     let inputName ← resolveInputName firstInst.progMeta inputPort
     let idx := (firstInst.progMeta.inputNames.idxOf? inputName).getD 0
-    let decoded ← decodeOrInternal initial s!"{firstName}.{inputName}"
-    let expr ← adaptInputExpr st decoded (inputTypeObj firstInst.progMeta idx) firstName inputName
+    let decoded ← decodeWire initial s!"{firstName}.{inputName}" "initial_expr"
+    let expr ← adaptInputExpr st decoded (inputTypeObj firstInst.progMeta idx)
+      firstName inputName (raw? := some initial) (param := "initial_expr")
     env.state.modify (·.setWireRaw firstName inputName expr)
 
   let mut linked : Array Json := #[]
@@ -175,6 +205,7 @@ def handleWireChain (env : Env) (args : Json) : EngineM Json := do
     let idx := (dstInst.progMeta.inputNames.idxOf? inName).getD 0
     let st' ← env.state.get
     let expr ← adaptInputExpr st' refExpr (inputTypeObj dstInst.progMeta idx) dstName inName
+      (param := "input")
     env.state.modify (·.setWireRaw dstName inName expr)
     linked := linked.push (Json.str s!"{srcName}.{outName} → {dstName}.{inName}")
 
@@ -203,6 +234,7 @@ def handleWireZip (env : Env) (args : Json) : EngineM Json := do
     let refExpr : WireExpr := .ref srcName (.name outName)
     let idx := (dstInst.progMeta.inputNames.idxOf? inName).getD 0
     let expr ← adaptInputExpr st refExpr (inputTypeObj dstInst.progMeta idx) dstName inName
+      (param := "targets[].input")
     env.state.modify (·.setWireRaw dstName inName expr)
     linked := linked.push (Json.str s!"{srcName}.{outName} → {dstName}.{inName}")
   syncCompile env
@@ -226,7 +258,7 @@ def handleFanOut (env : Env) (args : Json) : EngineM Json := do
       let outName ← resolveOutputName srcInst.progMeta ((getField? rawSource "output").getD jsonNull)
       pure ((WireExpr.ref sName (.name outName)), s!"{sName}.{outName}")
     else do
-      pure (← decodeOrInternal rawSource "source", rawSource.compress)
+      pure (← decodeWire rawSource "source" "source", rawSource.compress)
 
   let mut linked : Array Json := #[]
   for dst in targets do
@@ -236,6 +268,8 @@ def handleFanOut (env : Env) (args : Json) : EngineM Json := do
     let inName ← resolveInputName dstInst.progMeta ((getField? dst "input").getD jsonNull)
     let idx := (dstInst.progMeta.inputNames.idxOf? inName).getD 0
     let expr ← adaptInputExpr st' sourceExpr (inputTypeObj dstInst.progMeta idx) dstName inName
+      (raw? := if isPortRefTS then none else some rawSource)
+      (param := if isPortRefTS then "targets[].input" else "source")
     env.state.modify (·.setWireRaw dstName inName expr)
     linked := linked.push (Json.str s!"{sourceLabel} → {dstName}.{inName}")
   syncCompile env
@@ -268,6 +302,7 @@ def handleFanIn (env : Env) (args : Json) : EngineM Json := do
   let inName ← resolveInputName dstInst.progMeta ((getField? target "input").getD jsonNull)
   let idx := (dstInst.progMeta.inputNames.idxOf? inName).getD 0
   let expr ← adaptInputExpr st sumExpr (inputTypeObj dstInst.progMeta idx) targetName inName
+    (param := "target.input")
   env.state.modify (·.setWireRaw targetName inName expr)
   syncCompile env
   pure <| Json.mkObj [("mixed", toJson sources.size),

@@ -148,15 +148,30 @@ private def srcTypeOf (st : SessionSt) (node : WireExpr) : Option (PortType × J
     pure (parsed, typeObj)
   | _ => none
 
+/-- `raw?` is the caller's own JSON for `node`, when it had one, and `param`
+    names the argument it arrived in.
+
+    Both exist so the envelope describes what the AGENT sent. `value` must echo
+    the caller's spelling — decoding canonicalizes aliases (`{op:'array',items}`
+    and `{op:'arrayLiteral',values}` both become a bare array, `paramExpr`
+    becomes `param`) — and `param` must name a field the call actually has:
+    `set[].expr` on `wire`, `initial_expr` on `wire_chain`, `source` on
+    `fan_out`. A bare `"expr"` names an argument no tool takes, so an agent
+    doing param-directed repair cannot find it.
+
+    Wires the engine synthesizes (chain links, zip pairs, fan-in sums) have no
+    caller JSON; they pass `none` and echo the canonical form, which is the only
+    form that exists for them. -/
 def adaptInputExpr (st : SessionSt) (node : WireExpr) (dstTypeObj : Option Json)
-    (instanceName inputName : String) : EngineM WireExpr := do
+    (instanceName inputName : String) (raw? : Option Json := none)
+    (param : String := "expr") : EngineM WireExpr := do
   match srcTypeOf st node with
   | none => pure node
   | some (srcType, srcTypeJson) =>
     let dstType := dstTypeObj.bind parsePortType?
     let check := checkArrayConnection (some srcType) dstType node
     if !check.compatible then
-      throwPredicate .typeMismatch "expr" node.toJson "type_compatible"
+      throwPredicate .typeMismatch param (raw?.getD node.toJson) "type_compatible"
         dstTypeObj (some srcTypeJson)
         (some s!"Type mismatch on '{instanceName}'.{inputName}: {check.error.getD ""}")
     pure (check.broadcastExpr.getD node)

@@ -164,6 +164,49 @@ decreasing_by
 
 def deps (e : WireExpr) : Array String := depsInto #[] e
 
+/-- The first sub-expression no lowering can compile, if any.
+
+    Five constructors are in the grammar because something OTHER than an
+    agent builds them — `broadcastTo` from the wiring adapter, `input` /
+    `nestedOut` from `export_program`'s serializer, `sessionSlot` /
+    `sessionArraySlot` from legacy state-dump reads — and BOTH lowerings
+    (`Engine.wireExprToResolved`, `Ir.WireProgram.translate`) refuse all
+    five. So "it decodes" was never the same as "it compiles", and a wire
+    carrying one used to reach the session store and detonate at the next
+    `syncCompile` — poisoning the session for every later mutation and
+    getting persisted by `save` into a file that can never load.
+
+    Every boundary that ADMITS a wire checks this, which is what makes the
+    decoder's promise true: the grammar you can spell is the language that
+    compiles. -/
+def uncompilableOp? : WireExpr → Option String
+  | .broadcastTo .. => some "broadcastTo"
+  | .input _ => some "input"
+  | .nestedOut .. => some "nestedOut"
+  | .sessionSlot _ => some "sessionSlot"
+  | .sessionArraySlot .. => some "sessionArraySlot"
+  | .arr items => items.attach.findSome? fun ⟨x, _⟩ => uncompilableOp? x
+  | .binary _ l r => (uncompilableOp? l).orElse fun _ => uncompilableOp? r
+  | .unary _ a => uncompilableOp? a
+  | .clamp a b c | .select a b c | .arraySet a b c =>
+    ((uncompilableOp? a).orElse fun _ => uncompilableOp? b).orElse fun _ =>
+      uncompilableOp? c
+  | .index a b => (uncompilableOp? a).orElse fun _ => uncompilableOp? b
+  | _ => none
+termination_by e => sizeOf e
+decreasing_by
+  all_goals first
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ items›; simp; omega)
+    | (simp; omega)
+
+/-- The refusal message for `uncompilableOp?`, shared by every admitting
+    boundary so the wording does not drift. -/
+def uncompilableMessage (path op : String) : String :=
+  s!"{path}: '{op}' is not a wire a patch can carry — it is a form the engine " ++
+  "builds internally (wiring adapter / export serializer / legacy state dump) " ++
+  "and no lowering compiles. Wire an instance output, a param, or a closed-form " ++
+  "expression over them instead."
+
 /-- `param`/`trigger` names, first-encounter order (replaces
     `Engine.collectWireParams`). -/
 def paramNamesInto (acc : Array String) : WireExpr → Array String

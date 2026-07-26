@@ -483,6 +483,255 @@ describe('invalid_value', () => {
   })
 })
 
+// ─── The wire grammar as a refusal site ───────────────────────────────────────
+//
+// `Tropical.WireExpr`'s decoder is the ONE place a wire expression is admitted
+// or refused, and it runs at the tool boundary — before the session store is
+// touched, so a bad expression cannot poison a session and fail at the next
+// compile. A refusal here is a bad ARGUMENT, so it carries `invalid_value` with
+// `param`/`value`, not `internal_error` (which ERRORS.md reserves for
+// unclassified throws).
+
+describe('wire expression decode — refusal site', () => {
+  const inst = unique('sc')
+  beforeAll(async () => {
+    await client.callOk('add_instance', { program: 'SoftClip', instance_name: inst })
+  })
+
+  const decodeError = (expr: unknown) =>
+    client.callError('wire', { set: [{ instance: inst, input: 'input', expr }] })
+
+  test('retired combinator is refused by name', async () => {
+    const env = await decodeError({ op: 'fold', args: [] })
+    expect(env.code).toBe('invalid_value')
+    expect(env.param).toBe('set[].expr')
+    expect(env.message).toContain("unknown op 'fold'")
+  })
+
+  test('state op is refused with the closed-form-only message', async () => {
+    const env = await decodeError({ op: 'delay', args: [0] })
+    expect(env.code).toBe('invalid_value')
+    expect(env.message).toContain('closed-form-only')
+    expect(env.message).toContain('no per-sample state')
+  })
+
+  test('wrong arity is refused at the tool, not at the next compile', async () => {
+    const env = await decodeError({ op: 'mul', args: [1, 2, 3] })
+    expect(env.code).toBe('invalid_value')
+    expect(env.message).toContain("'mul' requires exactly 2 args, got 3")
+  })
+
+  test('a bare string is not an expression', async () => {
+    const env = await decodeError('hello')
+    expect(env.code).toBe('invalid_value')
+    expect(env.message).toContain('got string')
+  })
+
+  test('the offending expression is echoed verbatim in value', async () => {
+    const env = await decodeError({ op: 'matmul', args: [1, 2] })
+    expect(env.value).toEqual({ op: 'matmul', args: [1, 2] })
+  })
+
+  // Five constructors decode but no lowering compiles them: broadcastTo (the
+  // wiring adapter builds it), input / nestedOut (export's serializer),
+  // sessionSlot / sessionArraySlot (legacy state dumps). Admitting one used to
+  // write it to the store and detonate at the next syncCompile, permanently
+  // poisoning the session and persisting through `save` into an unloadable file.
+  for (const expr of [
+    { op: 'sessionSlot', index: 7 },
+    { op: 'sessionArraySlot', index: 2, size: 4 },
+    { op: 'input', name: 'zzz' },
+    { op: 'nestedOut', ref: 'x', output: 'out' },
+    { op: 'broadcastTo', args: [1], shape: [4] },
+  ]) {
+    test(`engine-internal form '${expr.op}' is refused, not stored`, async () => {
+      const env = await client.callError('wire', {
+        set: [{ instance: inst, input: 'input', expr }],
+      })
+      expect(env.code).toBe('invalid_value')
+      expect(env.param).toBe('set[].expr')
+      expect(env.message).toContain(`'${expr.op}' is not a wire a patch can carry`)
+
+      // The session must still be usable — the old failure mode made every
+      // later mutation return the same error until the session was reset.
+      const ok = await client.callOk('wire', {
+        set: [{ instance: inst, input: 'input', expr: 0.25 }],
+      })
+      expect(ok).toBeDefined()
+    })
+  }
+
+  test('an engine-internal form nested inside a legal expression is caught', async () => {
+    const env = await client.callError('wire', {
+      set: [{ instance: inst, input: 'input',
+              expr: { op: 'add', args: [1, { op: 'sessionSlot', index: 3 }] } }],
+    })
+    expect(env.code).toBe('invalid_value')
+    expect(env.message).toContain("'sessionSlot' is not a wire a patch can carry")
+  })
+
+  // handleWire commits each set[] entry as it goes, so a later refusal leaves
+  // the earlier ones applied (and skips syncCompile). This pins the refusal
+  // itself, not atomicity: the FAILING entry must not land.
+  test('the refused entry of a multi-entry set does not land', async () => {
+    await client.callError('wire', {
+      set: [
+        { instance: inst, input: 'drive', expr: 0.75 },
+        { instance: inst, input: 'input', expr: { op: 'scan', args: [] } },
+      ],
+    })
+    const wiring = (await client.callOk('list_wiring', { instance: inst })) as Array<{
+      instance: string; input: string; expr: string
+    }>
+    expect(wiring.find(w => w.input === 'drive')?.expr).toBe('0.75')
+    expect(wiring.find(w => w.input === 'input')?.expr).not.toContain('scan')
+  })
+
+  // Previously ungated surfaces: both of these bypassed validation entirely and
+  // failed later, from inside the compile.
+  test('wire_chain initial_expr is decoded', async () => {
+    const env = await client.callError('wire_chain', {
+      instances: [inst], output: 'out', input: 'input',
+      initial_expr: { op: 'fold', args: [] },
+    })
+    expect(env.code).toBe('invalid_value')
+    expect(env.param).toBe('initial_expr')
+    expect(env.message).toContain("unknown op 'fold'")
+  })
+
+  test('fan_out source is decoded', async () => {
+    const env = await client.callError('fan_out', {
+      source: { op: 'reg', name: 'x' },
+      targets: [{ instance: inst, input: 'input' }],
+    })
+    expect(env.code).toBe('invalid_value')
+    expect(env.param).toBe('source')
+    expect(env.message).toContain('closed-form-only')
+  })
+
+  // A `ref` whose `output` is present but neither a string nor an index is a
+  // fixable argument, not an engine fault.
+  test('non-scalar ref.output on a dac wire is classified', async () => {
+    const env = await client.callError('wire', {
+      set: [{ instance: 'dac', input: 'out', expr: { op: 'ref', instance: inst, output: true } }],
+    })
+    expect(env.code).toBe('invalid_value')
+    expect(env.param).toBe('set[].expr')
+    expect(env.message).toContain("'ref' output must be a string port name or index")
+  })
+})
+
+describe('wire expression decode — alias collapse', () => {
+  const inst = unique('sc')
+  beforeAll(async () => {
+    await client.callOk('add_instance', { program: 'SoftClip', instance_name: inst })
+  })
+
+  // paramExpr/triggerParamExpr are legacy spellings; they collapse at decode, so
+  // both lowering paths see the same node and `save` persists the canonical one.
+  test('paramExpr collapses to param', async () => {
+    const data = (await client.callOk('wire', {
+      set: [{ instance: inst, input: 'input', expr: { op: 'paramExpr', name: 'pitch' } }],
+    })) as { set: Array<{ expr: { op: string; name: string } }> }
+    expect(data.set[0].expr).toEqual({ op: 'param', name: 'pitch' })
+  })
+
+  // Self-contained rather than reading the previous test's state, so it can run
+  // under -t filtering.
+  test('the collapsed form is what list_wiring renders', async () => {
+    await client.callOk('wire', {
+      set: [{ instance: inst, input: 'input', expr: { op: 'paramExpr', name: 'pitch' } }],
+    })
+    const wiring = (await client.callOk('list_wiring', { instance: inst })) as Array<{
+      instance: string; input: string; expr: string
+    }>
+    expect(wiring.find(w => w.input === 'input')?.expr).toBe('param(pitch)')
+  })
+
+  test('save persists the collapsed form', async () => {
+    await client.callOk('wire', {
+      set: [{ instance: inst, input: 'input', expr: { op: 'paramExpr', name: 'pitch' } }],
+    })
+    const saved = (await client.callOk('save', {})) as {
+      program: { body: { decls: Array<{ name: string; inputs?: Record<string, unknown> }> } }
+    }
+    const decl = saved.program.body.decls.find(d => d.name === inst)
+    expect(decl?.inputs?.input).toEqual({ op: 'param', name: 'pitch' })
+  })
+
+  test('triggerParamExpr collapses to trigger', async () => {
+    const data = (await client.callOk('wire', {
+      set: [{ instance: inst, input: 'drive', expr: { op: 'triggerParamExpr', name: 'kick' } }],
+    })) as { set: Array<{ expr: { op: string; name: string } }> }
+    expect(data.set[0].expr).toEqual({ op: 'trigger', name: 'kick' })
+  })
+})
+
+describe('wire combine', () => {
+  const inst = unique('sc')
+  beforeAll(async () => {
+    await client.callOk('add_instance', { program: 'SoftClip', instance_name: inst })
+    await client.callOk('wire', { set: [{ instance: inst, input: 'input', expr: 1 }] })
+  })
+
+  test('a binary wire op combines with the existing wire, existing on the left', async () => {
+    const data = (await client.callOk('wire', {
+      set: [{ instance: inst, input: 'input', expr: 2, combine: 'add' }],
+    })) as { set: Array<{ expr: unknown }> }
+    expect(data.set[0].expr).toEqual({ op: 'add', args: [1, 2] })
+  })
+
+  // Storing an arbitrary string used to defer the failure to the next compile.
+  test('a ternary op is not a combine', async () => {
+    const env = await client.callError('wire', {
+      set: [{ instance: inst, input: 'input', expr: 2, combine: 'select' }],
+    })
+    expect(env.code).toBe('invalid_value')
+    expect(env.param).toBe('set[].combine')
+    expect(env.value).toBe('select')
+  })
+
+  test('an unknown op is not a combine', async () => {
+    const env = await client.callError('wire', {
+      set: [{ instance: inst, input: 'input', expr: 2, combine: 'frobnicate' }],
+    })
+    expect(env.code).toBe('invalid_value')
+    expect(env.message).toContain('must be a binary wire op')
+  })
+
+  // combine only fires when there is an existing wire to combine WITH; on a
+  // bare port it is ignored entirely, so the validation is never reached.
+  test('combine on an unwired port is ignored, not validated', async () => {
+    const data = await client.callOk('wire', {
+      set: [{ instance: inst, input: 'drive', expr: 3, combine: 'frobnicate' }],
+    })
+    expect(data).toBeDefined()
+  })
+})
+
+// The literal-source arm of fan_out (isPortRefTS = false) is the one this PR
+// newly routed through the decoder; nothing pinned it SUCCEEDING.
+describe('fan_out literal source', () => {
+  const t1 = unique('sc')
+  const t2 = unique('sc')
+  beforeAll(async () => {
+    await client.callOk('add_instance', { program: 'SoftClip', instance_name: t1 })
+    await client.callOk('add_instance', { program: 'SoftClip', instance_name: t2 })
+  })
+
+  test('an expression source fans out to every target', async () => {
+    const data = (await client.callOk('fan_out', {
+      source: { op: 'mul', args: [2, 3] },
+      targets: [{ instance: t1, input: 'input' }, { instance: t2, input: 'input' }],
+    })) as { linked: string[] }
+    expect(data.linked.length).toBe(2)
+    const wiring = (await client.callOk('list_wiring', { instance: t1 })) as Array<{
+      input: string; expr: string
+    }>
+    expect(wiring.find(w => w.input === 'input')?.expr).toBe('(2 * 3)')
+  })
+})
+
 describe('unknown_program', () => {
   test('add_instance with unregistered program', async () => {
     const env = await client.callError('add_instance', { program: 'NonExistent', instance_name: unique('x') })
@@ -542,6 +791,78 @@ describe('type_mismatch', () => {
     })
     expect(data).toBeDefined()
   })
+
+  // The op-form array spellings decode to the same node as a bare array, so they
+  // get the same connection check — but `value` must echo what the caller wrote,
+  // not the canonicalized form the decoder produced.
+  test('{op:array} → scalar input, echoed verbatim', async () => {
+    const expr = { op: 'array', items: [1, 2, 3] }
+    const env = await client.callError('wire', {
+      set: [{ instance: inst, input: 'input', expr }],
+    })
+    expect(env.code).toBe('type_mismatch')
+    expect(env.value).toEqual(expr)
+    if (env.valid?.kind === 'predicate') {
+      expect(env.valid.got).toEqual({ kind: 'array', element: 'float', shape: [3] })
+    }
+  })
+
+  test('{op:arrayLiteral} → scalar input, echoed verbatim', async () => {
+    const expr = { op: 'arrayLiteral', values: [1, 2] }
+    const env = await client.callError('wire', {
+      set: [{ instance: inst, input: 'input', expr }],
+    })
+    expect(env.code).toBe('type_mismatch')
+    expect(env.value).toEqual(expr)
+  })
+})
+
+// ─── export_program: an instance outlives a re-registration of its type ───────
+//
+// `export_program` is the only route that registers a program type at runtime,
+// and it can bind a name that already has live instances. Those instances keep
+// their own port snapshot, so the export must not resolve ports the *current*
+// target no longer declares — unless the port is actually being exported.
+//
+// This pins the ABSENCE OF A SPURIOUS ABORT, nothing more. A separate,
+// pre-existing bug lives in the same scenario: the exported decl binds the
+// instance by type NAME, so the crystallized program carries the REBOUND body
+// rather than the snapshot the session plays. That is not fixed here and this
+// test does not bless it — see the note at `resolveType` in ProgramIO.lean.
+
+describe('export_program over a re-registered type name', () => {
+  const osc = unique('osc')
+  const osc2 = unique('osc')
+  const voice = unique('Voice')
+  const v1 = unique('v')
+
+  test('a stale unwired port does not abort a later export', async () => {
+    await client.callOk('add_instance', { program: 'FixedSinOsc', instance_name: osc })
+    // Register `voice` with `freq` exposed, then instantiate it.
+    await client.callOk('export_program', {
+      name: voice,
+      outputs: { out: { instance: osc, output: 'sine' } },
+      inputs: { freq: `${osc}:freq` },
+    })
+    await client.callOk('add_instance', { program: voice, instance_name: v1 })
+
+    // Re-register the SAME name with a different exposed set. `v1`'s snapshot
+    // still says `freq`; the new target only declares `phase`.
+    await client.callOk('add_instance', { program: 'FixedSinOsc', instance_name: osc2 })
+    await client.callOk('export_program', {
+      name: voice,
+      outputs: { out: { instance: osc2, output: 'sine' } },
+      inputs: { phase: `${osc2}:phase` },
+    })
+
+    // `v1.freq` is neither wired nor exposed, so it never lands in the exported
+    // decl and must not be resolved.
+    const data = await client.callOk('export_program', {
+      name: unique('Outer'),
+      outputs: { o: { instance: v1, output: 'out' } },
+    })
+    expect(data).toBeDefined()
+  })
 })
 
 // ─── Tier 7: invalid_state ────────────────────────────────────────────────────
@@ -570,6 +891,34 @@ describe('internal_error fallback', () => {
     })
     expect(env.code).toBe('internal_error')
     expect(env.retryable).toBe(false)
+  })
+
+  // The documented split: a refused wire is invalid_value at a TOOL boundary
+  // (a named argument the agent can fix) and internal_error on INGEST (a
+  // property of the whole document). Without this pin, a future "classify
+  // everything" pass would erase the split silently.
+  const loadWith = (expr: unknown) => client.callError('load', {
+    program: {
+      schema: 'tropical_program_2', name: 'p',
+      body: {
+        op: 'block',
+        decls: [{ op: 'instanceDecl', name: 'sc', program: 'SoftClip', inputs: { input: expr } }],
+        assigns: [],
+      },
+    },
+  })
+
+  test('a wire the grammar refuses is internal_error on the ingest path', async () => {
+    const env = await loadWith({ op: 'fold', args: [] })
+    expect(env.code).toBe('internal_error')
+    expect(env.param).toBeUndefined()
+    expect(env.message).toContain("unknown op 'fold'")
+  })
+
+  test('an engine-internal form is refused on the ingest path too', async () => {
+    const env = await loadWith({ op: 'sessionSlot', index: 7 })
+    expect(env.code).toBe('internal_error')
+    expect(env.message).toContain("'sessionSlot' is not a wire a patch can carry")
   })
 })
 

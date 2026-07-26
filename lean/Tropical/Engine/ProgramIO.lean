@@ -281,6 +281,17 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
   -- sinks) and run the `registerResolved` tail (strata + entry + adopt).
   -- The JSON node above is OUTPUT serialization only — there is no
   -- reparse, no raise, no elaborator on this path.
+  -- NOTE: this resolves the instance's type by NAME, and `export_program` is
+  -- the one route that rebinds a name at runtime. An instance added before a
+  -- rebind keeps rendering its own snapshot (`resolvedIdx`) in the session, but
+  -- exports through the CURRENT binding of its name — so re-exporting a name
+  -- that already has live instances crystallizes a different body than the
+  -- session plays. That divergence is pre-existing and NOT fixed here:
+  -- resolving through `info.resolvedIdx` does not repair it, because the
+  -- emitted decl and the program registry are both keyed by name (verified —
+  -- the export still takes the rebound body). Fixing it properly means giving
+  -- distinct snapshots distinct registry keys, which is a design change, not a
+  -- patch. See the PR discussion.
   let resolveType : String → Except String (Tropical.Ir.ProgramIdx × Tropical.Ir.Program) :=
     fun instName => do
       let some info := st.findInstance? instName
@@ -366,10 +377,21 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
     let mut instInputs : Array Tropical.Ir.InstanceInput := #[]
     for portName in info.progMeta.inputNames do
       let key := s!"{instName}:{portName}"
-      let some pos := tgt.inputs.findIdx? (·.name == portName)
-        | internalError s!"export: internal: '{instName}' input '{portName}' is not a declared port of '{tgt.name}'"
+      -- Resolve the port POSITION only for ports that actually land in the
+      -- exported decl. `tgt` comes from a late name lookup, so an instance
+      -- whose type name was re-registered since it was added (export_program
+      -- onto a live name — iterating your own crystallized program) can carry
+      -- snapshot ports the current target no longer declares. Resolving those
+      -- eagerly aborted the whole export; the elaborator this replaced looped
+      -- the SERIALIZED inputs, and an unwired, unexposed port serializes to
+      -- nothing. A port that IS exposed or wired still errors here — it has to,
+      -- there is no position to bind it to.
+      let pos? := tgt.inputs.findIdx? (·.name == portName)
+      let unknownPort {α} : EngineM α :=
+        internalError s!"export: internal: '{instName}' input '{portName}' is not a declared port of '{tgt.name}'"
       match exposed.find? fun (_, i, p) => s!"{i}:{p}" == key with
       | some (inputName, _, _) =>
+        let some pos := pos? | unknownPort
         let some ii := exposed.findIdx? (·.1 == inputName)
           | internalError "export: internal: exposed input vanished"
         let (eid, exprs') := (Tropical.Ir.eintern (.inputRef ⟨ii⟩)).run exprs
@@ -377,6 +399,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
         instInputs := instInputs.push { port := ⟨pos⟩, value := eid }
       | none =>
         if let some expr := findWire instName portName then
+          let some pos := pos? | unknownPort
           match (wireExprToResolved bodyCtx expr).run exprs with
           | .error e => internalError e
           | .ok (eid, exprs') =>
@@ -577,9 +600,18 @@ private def ingestProgram (env : Env) (node : Tropical.Parse.JsonV)
       for ((input, exprV), _) in sorted do
         -- Decode straight off the ordered JSON — the typed store's
         -- ingest refusal site (no Lean.Json hop).
-        match WireExpr.ofJsonV exprV s!"{instName}.{input}" with
+        let path := s!"{instName}.{input}"
+        match WireExpr.ofJsonV exprV path with
         | .error msg => internalError msg
-        | .ok expr => env.state.modify (·.setWireRaw instName input expr)
+        | .ok expr =>
+          -- Same "decodes ≠ compiles" gap the tool boundary closes: a file
+          -- may not carry a form only the engine builds, or the session it
+          -- loads into is dead on arrival. (The ingest keeps `internal_error`
+          -- — the failure is a property of the document, not of a named tool
+          -- argument.)
+          match expr.uncompilableOp? with
+          | some op => internalError (WireExpr.uncompilableMessage path op)
+          | none => env.state.modify (·.setWireRaw instName input expr)
 
   -- Input defaults — every instance in registry order (TS loops the
   -- whole registry, pre-existing instances included on merge).
