@@ -7,7 +7,6 @@ import Tropical.Session
 import Tropical.Lowering
 import Tropical.Parse.Nodes
 import Tropical.Parse.Raise
-import Tropical.Ir.Elaborator
 import Tropical.Ir.Strata
 import Tropical.Ir.Core
 import Tropical.Ir.WireProgram

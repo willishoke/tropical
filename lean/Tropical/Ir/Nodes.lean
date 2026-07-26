@@ -120,15 +120,6 @@ theorem BinaryOpTag.ofWire_wire (t : BinaryOpTag) :
     BinaryOpTag.ofWire? t.wire = some t := by
   cases t <;> rfl
 
-/-- Lift a parse-phase binary tag (the infix subset) into the resolved tag. -/
-def BinaryOpTag.ofParse : Tropical.Parse.BinaryOpTag → BinaryOpTag
-  | .add => .add | .sub => .sub | .mul => .mul | .div => .div | .mod => .mod
-  | .lt => .lt | .lte => .lte | .gt => .gt | .gte => .gte
-  | .eq => .eq | .neq => .neq
-  | .and => .and | .or => .or
-  | .bitAnd => .bitAnd | .bitOr => .bitOr | .bitXor => .bitXor
-  | .lshift => .lshift | .rshift => .rshift
-
 inductive UnaryOpTag where
   | neg | not | bitNot
   | sqrt | abs | floor | ceil | round
@@ -153,9 +144,6 @@ def UnaryOpTag.ofWire? : String → Option UnaryOpTag
 theorem UnaryOpTag.ofWire_wire (t : UnaryOpTag) :
     UnaryOpTag.ofWire? t.wire = some t := by
   cases t <;> rfl
-
-def UnaryOpTag.ofParse : Tropical.Parse.UnaryOpTag → UnaryOpTag
-  | .neg => .neg | .not => .not | .bitNot => .bitNot
 
 -- ─────────────────────────────────────────────────────────────
 -- Expressions

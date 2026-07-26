@@ -2,8 +2,9 @@
 
 The MCP stack. The production server is the **Lean `frontend` binary**
 (`lean/.lake/build/bin/frontend`) — it is the whole stack: session,
-registration, compiler (raise → elaborate → lower → emit →
-partition), runtime FFI, save/export/load/merge, resources/prompts.
+registration, compiler (patch-bay ingest → direct root construction →
+lower → emit → partition; there is no raise-to-AST and no elaborator),
+runtime FFI, save/export/load/merge, resources/prompts.
 There is no compiler-service subprocess and no TypeScript engine; the
 former `engine.ts` / `ir_service.ts` / `resources.ts` / `envelope.ts`
 are deleted, and Lean implements them natively
@@ -54,8 +55,8 @@ SessionState
        → liftWiresToInstances  (anonymous-instance lift for array-literal wires)
        → assertSessionAcyclic  (no cycles at all — a hard rule, nothing
                                 breaks cycles for you)
-       → compileSessionSlotted (buildSessionRoot → elaborate one root
-                                ResolvedProgram → partitionKernel →
+       → compileSessionSlotted (sessionToResolvedRoot builds the root
+                                ResolvedProgram DIRECTLY → partitionKernel →
                                 instance_functions[] (root, nested) + sinks[])
        → tropical_plan_5 JSON
   → runtime.loadPlan  (C API: NumericProgramParser → OrcJitEngine → FlatRuntime hot-swap)
@@ -64,14 +65,15 @@ SessionState
 The direct lowering (`assertAcyclic → inlineInstances → identityElim`
 → the `toResolved` Core check) runs per-instance at instance-type
 resolution. (The old five-pass strata drop sequence was retired
-2026-07-25 — its producers, the literate surface language and
-generics, are gone; a loaded file spelling `fold`/`tag`/… is refused
-at the Core check with the retirement message.) tropical is
+2026-07-25, and the elaborator followed it 2026-07-26 — program bodies
+no longer cross the wire at all: a loaded file carrying a `programDecl`
+is refused at ingest with the retirement message, and the session wire
+grammar cannot spell `fold`/`tag`/….) tropical is
 closed-form-only: every kernel is
 a pure `f(τ, params)` with no per-sample state, so there is nothing to
 break a cycle around. `assertSessionAcyclic` is therefore a plain "no
-cycles at all" rule — inter-instance cycles are rejected outright, and
-source-level cycles throw `CycleViolation` at the elaborator. (A
+cycles at all" rule — inter-instance cycles are rejected outright, at
+every boundary that constructs a graph (`Ir/Cycles.lean`). (A
 recursive filter on live or broadband input has no closed form; that
 island is ceded on purpose to a future stateful sister runtime,
 "supertropical" — see `design/cf-only.md`.) The WASM backend consumes

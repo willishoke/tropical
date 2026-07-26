@@ -7,7 +7,6 @@ import Tropical.Ir.EmitLlvm
 import Tropical.Ir.EmitMsl
 import Tropical.PlanDecode
 import Tropical.Parse.Raise
-import Tropical.Ir.Elaborator
 import Tropical.Ir.Strata
 import Tropical.Ir.Core
 import Tropical.Ir.CompileResolved

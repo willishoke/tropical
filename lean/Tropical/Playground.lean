@@ -2,8 +2,6 @@ import Tropical.EmitArrow
 import Tropical.Ir.Strata
 import Tropical.Ir.Core
 import Tropical.Compile
-import Tropical.Parse.Raise
-import Tropical.Ir.Elaborator
 import Tropical.StdlibChain
 import Lean.Data.Json
 

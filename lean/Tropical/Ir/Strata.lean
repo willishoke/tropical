@@ -2,7 +2,7 @@ import Tropical.Ir.Strata.Basic
 import Tropical.Ir.Strata.EArena
 import Tropical.Ir.Strata.InlineInstances
 import Tropical.Ir.Strata.IdentityElim
-import Tropical.Ir.Elaborator
+import Tropical.Ir.Cycles
 
 /-!
 # Strata — the direct lowering
