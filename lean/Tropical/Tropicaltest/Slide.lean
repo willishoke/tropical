@@ -566,18 +566,13 @@ private def foldProbePatchJson (expr : Lean.Json) : Lean.Json :=
     ("audio_outputs", Lean.Json.arr #[Lean.Json.mkObj [
       ("instance", Lean.Json.str "p"), ("output", Lean.Json.str "out")]])]
 
-/-- Compile a probe expression through the FULL front door
-    (raise → elaborate → lower → emit) and parse the resulting plan. -/
-def compileFoldProbe (expr : Lean.Json) (tag : String) :
-    IO (Except String Tropical.Plan.FlatPlan) := do
-  let tmp := s!"/tmp/tropicaltest-probe-{tag}.json"
-  IO.FS.writeFile tmp (foldProbePatchJson expr).compress
-  match ← compilePatch tmp .fused with
-  | .error e => pure (.error e)
-  | .ok planJson =>
-    match Lean.Json.parse planJson with
-    | .error e => pure (.error s!"parse: {e}")
-    | .ok j => pure ((Tropical.Plan.FlatPlan.ofWire j).mapError (s!"ofWire: {·}"))
+/-- Run a probe file through the front door's refusal site — `raiseFile`
+    in-process (no engine, no temp file, no elaborator): the raise IS where a
+    retired spelling must die, and this drives it directly. -/
+def raiseFoldProbe (expr : Lean.Json) : Except String Unit := do
+  match Tropical.Parse.JsonV.parse (foldProbePatchJson expr).compress with
+  | .error e => throw s!"JSON parse: {e}"
+  | .ok jv => discard <| Tropical.Parse.Raise.raiseFile jv
 
 -- Shared JSON expression builders for the retired-front-door probe.
 def cgJn (m : Nat) (e : Nat) : Lean.Json := Lean.Json.num ⟨Int.ofNat m, e⟩
@@ -593,24 +588,23 @@ def cgFold (over : Lean.Json) (body : Lean.Json) : Lean.Json :=
     ("init", cgJn 0 0), ("acc_var", Lean.Json.str "acc"), ("elem_var", Lean.Json.str "e"),
     ("body", body)]
 
-/-- THE RETIRED-FRONT-DOOR gate. `tropical_program_2` can still SPELL the
-    retired combinators (`raise` parses them), but nothing lowers them any
-    more — the drop passes were retired 2026-07-25 with their producers.
-    The contract is a clean refusal at the type boundary (`toResolved`),
-    not a miscompile: a fold-bearing program must fail to compile with the
-    retirement message naming the construct. -/
+/-- THE RETIRED-FRONT-DOOR gate. `tropical_program_2` can no longer carry the
+    retired combinators past ingest: `raise` refuses them AT the front door
+    with the retirement message naming the construct — the grammar you can
+    spell is the language that compiles. Asserted in-process against
+    `raiseFile` directly (the refusal site), no engine load. -/
 def runRetiredFrontDoor (_arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let foldExpr := cgFold (Lean.Json.arr ((Array.range 4).map cgA))
     (cgAdd (cgBinding "acc") (cgMulHalf (cgBinding "e")))
-  match ← compileFoldProbe foldExpr "retired-fold" with
+  match raiseFoldProbe foldExpr with
   | .ok _ =>
     failGate "retired-front-door"
-      "fold-bearing program COMPILED — nothing lowers folds; this must be a refusal"
+      "fold-bearing program RAISED — the front door must refuse retired spellings"
   | .error e =>
     if (e.splitOn "'fold' is not a trunk construct").length > 1 then
       passGate "retired-front-door"
-        s!"fold-bearing JSON refused at the type boundary: {firstLine e}"
+        s!"fold-bearing JSON refused at ingest: {firstLine e}"
     else
       failGate "retired-front-door"
         s!"fold-bearing JSON failed with the WRONG error (want the retirement message): {firstLine e}"
