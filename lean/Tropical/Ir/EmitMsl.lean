@@ -3,6 +3,7 @@ import Std.Data.HashSet
 import Lean.Data.Json
 import Tropical.Plan
 import Tropical.Ir.ConstFold
+import Tropical.Ir.EmitCommon
 
 /-!
 # EmitMsl — `FlatPlan → Metal Shading Language source` (the Metal backend)
@@ -67,8 +68,9 @@ the f32 arithmetic is IEEE-ordered and the SNR gates are stable.
 
 namespace Tropical.Ir.EmitMsl
 
-open Lean (Json JsonNumber)
+open Lean (Json)
 open Tropical.Plan
+open Tropical.Ir.EmitCommon
 
 abbrev ScalarType := Tropical.Plan.ScalarType
 
@@ -91,13 +93,6 @@ def f32Lit (x : Float) : String :=
 def i64Lit (n : Int) : String :=
   if n == -9223372036854775808 then "(-9223372036854775807L - 1L)"
   else s!"{n}L"
-
-/-- Integer value of a JsonNumber const (mirrors EmitLlvm.jnToInt). -/
-def jnToInt (n : JsonNumber) : Int :=
-  let rec divPow (m : Int) : Nat → Int
-    | 0 => m
-    | k+1 => divPow (m / 10) k
-  divPow n.mantissa n.exponent
 
 def mslTy : ScalarType → String
   | .float => "float" | .int => "long" | .bool => "bool"
@@ -319,8 +314,8 @@ def storeSlot (idx : Nat) (v : TVal) : M Unit := do
 
 def resolveOperand : NOperand → M TVal
   | .const v t => match t with
-    | .int  => let n := jnToInt v; pure ⟨i64Lit n, .int, some (.i (wrap64 n))⟩
-    | .bool => let b := jnToInt v != 0
+    | .int  => let n := jsonNumberToInt v; pure ⟨i64Lit n, .int, some (.i (wrap64 n))⟩
+    | .bool => let b := jsonNumberToInt v != 0
                pure ⟨if b then "true" else "false", .bool, some (.b b)⟩
     | .float => let x := v.toFloat; pure ⟨f32Lit x, .float, some (.f x)⟩
   | .reg slot _ => do
@@ -377,8 +372,9 @@ def emitOpRuntime (tag : String) (resultType : ScalarType) (args : Array TVal) :
   let eitherInt : M Bool := do
     pure (((args[0]?).map (·.ty == .int)).getD false ||
           ((args[1]?).map (·.ty == .int)).getD false)
-  let some op := Tropical.Plan.PlanOp.ofString? tag
-    | fail s!"EmitMsl: unsupported op '{tag}'"
+  let op ← match validateScalarOp "EmitMsl" tag args.size with
+    | .ok op => pure op
+    | .error e => fail e
   match op with
   | .add => if isInt then binI "+" (← aI 0) (← aI 1) else binF "+" (← aF 0) (← aF 1)
   | .sub => if isInt then binI "-" (← aI 0) (← aI 1) else binF "-" (← aF 0) (← aF 1)
@@ -519,9 +515,10 @@ private def arraySizeLit (sizes : Array Nat) (slot : Nat) : M Nat := do
   | some n => pure n
   | none => fail s!"EmitMsl: array slot {slot} out of range"
 
-def arrayRegSlot : NOperand → M Nat
-  | .arrayReg s => pure s
-  | _ => fail "EmitMsl: expected an arrayReg operand"
+def arrayRegSlot (operand : NOperand) : M Nat :=
+  match expectArrayReg "EmitMsl" operand with
+  | .ok slot => pure slot
+  | .error e => fail e
 
 /-- `Index` — bounds-checked read (0.0 out of range), safe clamped access. -/
 private def emitIndex (sizes : Array Nat) (dst : Nat) (args : Array NOperand) : M Unit := do
