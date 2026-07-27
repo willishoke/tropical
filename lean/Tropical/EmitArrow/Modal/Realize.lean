@@ -295,5 +295,3 @@ def modalBankTermDir (modes : Array ModalMode) (anchor : Sig) (c : Clock)
 structure ModalDir where
   dir : Sig := lit 0
   damp : Option (Sig × Sig) := none
-
-

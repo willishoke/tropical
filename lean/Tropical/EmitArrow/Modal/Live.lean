@@ -677,4 +677,3 @@ def bloomWarpClock (anchorSamples : Sig) (B g : Float) : Clock → Clock :=
 
 
 end Tropical.EmitArrow
-

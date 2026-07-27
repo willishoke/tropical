@@ -112,5 +112,3 @@ def compilePlan (j : Json) : IO (Except String CompiledPatch) := do
   match ← getStdlib with
   | .error e => pure (.error s!"stdlib elaboration: {e}")
   | .ok (arena, resolved) => pure (compilePlanPure arena resolved j)
-
-

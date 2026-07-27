@@ -601,4 +601,3 @@ def bloomAdmitsPair (mu nu : CplxB) (B g : Float) : Bool :=
 
 
 end Tropical.EmitArrow
-

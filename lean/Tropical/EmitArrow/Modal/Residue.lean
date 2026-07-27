@@ -1109,4 +1109,3 @@ def modalBankSigTableDD (modes : Array PairedMode) (clkInt anchorSamples : Sig)
 
 
 end Tropical.EmitArrow
-
