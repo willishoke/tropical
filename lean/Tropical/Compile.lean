@@ -368,6 +368,13 @@ private def emitWriteSlots (s : SessionAlloc) (instanceName : String)
 -- partitionKernel
 -- ─────────────────────────────────────────────────────────────
 
+structure PartitionResult where
+  instanceFunction : InstanceFunction
+  allocation : SessionAlloc
+  accumulators : Accumulators
+  stageBlocks : Array (Array (Option Tropical.Ir.Stage))
+  outputStages : Array Tropical.Ir.Stage
+
 private def instParts : CoreBodyDecl → Option (String × String)
   | .inst name typeKey _ => some (name, typeKey)
   | _ => none
@@ -395,8 +402,7 @@ def partitionKernel (instancePath : String) (prog : CoreProgram)
     (inputArraySlots : Array (Nat × ArraySlotInfo) := #[])
     (paramSlots : Array (Nat × Nat) := #[])
     (inputStages : Array Tropical.Ir.Stage := #[]) :
-    Except String (InstanceFunction × SessionAlloc × Accumulators
-      × Array (Array (Option Tropical.Ir.Stage)) × Array Tropical.Ir.Stage) := do
+    Except String PartitionResult := do
   let mut s := s
   let mut acc := acc
 
@@ -467,14 +473,14 @@ def partitionKernel (instancePath : String) (prog : CoreProgram)
         | none => .fold   -- the shared literal-0 default
       childInputStages := childInputStages.push stage
 
-    let (childFn, s', acc', childBlocks, childOuts) ←
+    let child ←
       partitionKernel childPath declTypeS.1 arena wires s acc
         childInputMap childInputArrayMap #[] childInputStages
-    s := s'
-    acc := acc'
-    children := children.push childFn
-    childStageBlocks := childStageBlocks.push childBlocks
-    childOutStages := childOutStages.push childOuts
+    s := child.allocation
+    acc := child.accumulators
+    children := children.push child.instanceFunction
+    childStageBlocks := childStageBlocks.push child.stageBlocks
+    childOutStages := childOutStages.push child.outputStages
 
   -- ── 2. Compile this kernel's body. ──
   let ctx : Context := {
@@ -545,7 +551,12 @@ def partitionKernel (instancePath : String) (prog : CoreProgram)
     nextRegRaw := acc.nextRegRaw + plan.registerCount
     nextArrayRaw := acc.nextArrayRaw + plan.arraySlotCount }
 
-  return (fn, s, acc, stageBlocks, outStages)
+  return {
+    instanceFunction := fn
+    allocation := s
+    accumulators := acc
+    stageBlocks
+    outputStages := outStages }
 termination_by sizeOf prog
 decreasing_by exact declTypeS.2
 
@@ -679,9 +690,9 @@ def compileSessionStaged (input : SessionInput) :
     if let some slot := s.paramSlots.get? rootParams[i]! then
       paramSlots := paramSlots.push (i, slot)
 
-  let (fn, s', acc, stageBlocks, _) ← partitionKernel rootInstancePath input.root input.arena
+  let partition ← partitionKernel rootInstancePath input.root input.arena
     input.wiresPost s acc #[] #[] paramSlots #[]
-  s := s'
+  s := partition.allocation
 
   let sinks ← emitSinks s input.graphOutputs
   let (slotCount, slotNames, slotDefaults) :=
@@ -689,15 +700,15 @@ def compileSessionStaged (input : SessionInput) :
 
   return ({
     compilationMode := input.mode
-    arraySlotNames := acc.arraySlotNames
-    registerCount := acc.nextRegRaw
-    arraySlotCount := acc.nextArrayRaw
-    arraySlotSizes := acc.arraySlotSizes
-    instanceFunctions := #[fn]
+    arraySlotNames := partition.accumulators.arraySlotNames
+    registerCount := partition.accumulators.nextRegRaw
+    arraySlotCount := partition.accumulators.nextArrayRaw
+    arraySlotSizes := partition.accumulators.arraySlotSizes
+    instanceFunctions := #[partition.instanceFunction]
     sinks
     slotCount
     slotNames
-    slotDefaults }, stageBlocks)
+    slotDefaults }, partition.stageBlocks)
 
 def compileSession (input : SessionInput) : Except String Tropical.Plan.FlatPlan :=
   (compileSessionStaged input).map (·.1)
