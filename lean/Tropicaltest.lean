@@ -14,6 +14,7 @@ import Tropical.Compile
 import Tropical.EmitArrow
 import Tropical.Stdlib
 import Tropical.Testing.ArrowFixtures
+import Tropical.Testing.ClockLaws
 import Tropical.Testing.EngineMirror
 import Tropical.Testing.PlanWire
 import Lean.Data.Json

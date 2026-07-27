@@ -14,13 +14,17 @@ open Tropical.Plan
 -- Slice 3. The warp arrow laws are certified as AUDIO goldens: build the law's
 -- LHS and RHS as two EmitArrow carrier programs (a single FixedSinOsc clocked at
 -- two algebraically-equal clock expressions), render both, and assert the
--- rendered audio is byte-identical (SHA256). The laws hold byte-exactly because
--- warps are integer add/sub on the Q32.32 fixed-point clock — exact and
--- associative — so the two sides feed the oscillator a bit-identical int64 clock
--- and render bit-identical audio, EVEN THOUGH the emitted plans differ (no
--- algebraic tree normalization). The render bridge reuses the production session
--- path: buildClockCarrier (EmitArrow) → Strata.run → Core.check → compileSession
--- (the carrier as a one-instance root wired to the dac) → FlatPlan → renderIrBytes.
+-- rendered audio is byte-identical (SHA256). Since slice 3b the algebra half is
+-- a THEOREM, not prose: the fixture clock pairs denote equal integers for EVERY
+-- clock expression on the fixed rail (`Testing/ClockLaws.lean` instances of the
+-- universal laws in `EmitArrow/ClockAlgebra.lean`; trusted base = the one named
+-- hypothesis CLOCK_RAIL_IS_EXACT). These gates carry the remaining half — the
+-- BACKEND renders a given plan as frozen — so the two sides feed the oscillator
+-- a bit-identical int64 clock and render bit-identical audio, EVEN THOUGH the
+-- emitted plans differ (no algebraic tree normalization). The render bridge
+-- reuses the production session path: buildClockCarrier (EmitArrow) →
+-- Strata.run → Core.check → compileSession (the carrier as a one-instance root
+-- wired to the dac) → FlatPlan → renderIrBytes.
 
 open Tropical.Ir (Arena ProgramIdx)
 

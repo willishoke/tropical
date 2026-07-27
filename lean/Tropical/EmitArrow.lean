@@ -3,6 +3,7 @@ import Tropical.EmitArrow.Term
 import Tropical.EmitArrow.Numerics
 import Tropical.EmitArrow.Modal
 import Tropical.EmitArrow.BankOrder
+import Tropical.EmitArrow.ClockAlgebra
 import Tropical.EmitArrow.Patch
 import Tropical.EmitArrow.Gong
 
