@@ -142,10 +142,15 @@ ResolvedProgram (lowered)
   scalar-only · monomorphic · acyclic · non-nested (inline path) ·
   DECISION-FREE: no combinator exists except `bankSum`, the bounded
   reduction that is itself the normal form for uniform indexed families
-  (modal banks, reverbs, partial banks). How to REALIZE it — loop vs
-  unroll — is a backend's decision, made below this seam; the trunk
-  refuses it. Order preservation makes every realization bit-identical,
-  floats included (no associativity precondition). The waist of the
+  (modal banks, reverbs, partial banks). Whether a bank is REALIZED as a
+  `bankSum` region or unrolled is chosen at AUTHORING time, by the arrow
+  modal builder reading the one shared flag (`Ir/BanksFlag.lean`,
+  `TROPICAL_BANKS_UNROLL` — a debugging bisection, banked is the
+  default); backends realize whatever arrives. Order preservation makes
+  every realization bit-identical, floats included (no associativity
+  precondition) — a theorem since slice 3c (`EmitArrow/BankOrder.lean` +
+  `Ir/EmitBankLaws.lean`; trusted base = one named assumption,
+  `REDUCE_REGION_EXECUTES_IN_ARRAY_ORDER`). The waist of the
   hourglass: the smallest sub-IR sufficient for any per-sample
   evaluator — and, because `Sig` is this same constructor set, the
   authoring layer and the trunk are ONE vocabulary with the `assemble`

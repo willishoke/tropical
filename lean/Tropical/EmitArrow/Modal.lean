@@ -198,7 +198,7 @@ private def envPeakD (deg : Nat) (sigma : DyadicI) : Option DyadicI :=
 /-- The `Sig` mirror of `envPeakF` for the DYNAMIC max fold: `(p/(σe))^p·(|cre|+
     |cim|)`. Reduces to exactly `|cre|+|cim|` at `deg=0`, so a deg-0 bank's `maxSig`
     is unchanged (byte-identical dynamic path). -/
-private def modeWeightBoundSig (m : ModalMode) : Sig :=
+def modeWeightBoundSig (m : ModalMode) : Sig :=
   let amp := add (.unary .abs m.cre) (.unary .abs m.cim)
   if m.deg == 0 then amp
   else mul (powE (div (litF m.deg.toFloat) (mul m.sigma (litF 2.718281828459045))) m.deg) amp
