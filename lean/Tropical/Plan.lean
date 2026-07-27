@@ -183,6 +183,11 @@ def PlanOp.ofString? : String → Option PlanOp
   | "Select" => some .select | "Clamp" => some .clamp
   | _ => none
 
+/-- The scalar-op wire table is a left inverse of its encoder. -/
+theorem PlanOp.ofString_name (op : PlanOp) :
+    PlanOp.ofString? op.name = some op := by
+  cases op <;> rfl
+
 /-- Classification of the signature (properties of an op symbol, so a total
     predicate with a default arm is fine — unlike the emit algebras, which must
     be exhaustive). -/
