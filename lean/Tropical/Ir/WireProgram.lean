@@ -23,6 +23,18 @@ namespace Tropical.Ir.WireProgram
 open Lean (Json JsonNumber)
 open Tropical (WireExpr RefOut)
 
+/-- A free instance-output reference discovered in a wire expression. -/
+structure FreeRef where
+  instanceName : String
+  outputName : String
+
+/-- The raw program synthesized from a wire expression, together with the
+    information needed to attach it to the session graph. -/
+structure LiftResult where
+  program : Program
+  freeRefs : Array FreeRef
+  exprs : ExprArena
+
 /-- `String(output)` for the freeRefs error message (numeric outputs
     render bare, as JS does). -/
 private def refOutStr : RefOut → String
@@ -33,15 +45,17 @@ private def refOutStr : RefOut → String
     deduplicated by canonical key in first-encounter order. Wire-form
     refs must carry string port names — numeric output indices are
     post-elaboration. -/
-def freeRefs (expr : WireExpr) : Except String (Array (String × String)) :=
+def freeRefs (expr : WireExpr) : Except String (Array FreeRef) :=
   walk #[] expr
 where
-  walk (acc : Array (String × String)) (e : WireExpr) :
-      Except String (Array (String × String)) := do
+  walk (acc : Array FreeRef) (e : WireExpr) :
+      Except String (Array FreeRef) := do
     match e with
     | .ref inst (.name outName) =>
-      pure <| if acc.any (fun (i, o) => i == inst && o == outName)
-              then acc else acc.push (inst, outName)
+      pure <| if acc.any (fun ref =>
+        ref.instanceName == inst && ref.outputName == outName)
+        then acc
+        else acc.push { instanceName := inst, outputName := outName }
     | .ref inst (.index n) =>
       throw <| s!"freeRefs: ref({inst}, {n.toString}) — output must be a " ++
         "string port name in wire-form, got number"
@@ -148,17 +162,17 @@ decreasing_by
     Returns the program AND the sorted free refs (the caller wires
     each `instance__port` input back to its source). -/
 def lift (expr : WireExpr) (synthName : String) (exprs0 : ExprArena := {}) :
-    Except String (Program × Array (String × String) × ExprArena) := do
+    Except String LiftResult := do
   let refs ← freeRefs expr
   -- Sort by canonical key — deterministic input order across calls.
   let sortedRefs := refs.qsort fun a b =>
-    wireKeyOf a.1 a.2 < wireKeyOf b.1 b.2
-  let inputDecls : Array InputDecl := sortedRefs.map fun (inst, port) =>
+    wireKeyOf a.instanceName a.outputName < wireKeyOf b.instanceName b.outputName
+  let inputDecls : Array InputDecl := sortedRefs.map fun ref =>
     -- Double-underscore separator avoids collisions with user port
     -- names; dots in instance paths flatten to underscores.
-    { name := s!"{inst.replace "." "_"}__{port}" }
-  let refToInput := sortedRefs.mapIdx fun i (inst, port) =>
-    (wireKeyOf inst port, i)
+    { name := s!"{ref.instanceName.replace "." "_"}__{ref.outputName}" }
+  let refToInput := sortedRefs.mapIdx fun i ref =>
+    (wireKeyOf ref.instanceName ref.outputName, i)
   let outputDecl : OutputDecl := { name := "out", type? := inferOutputPortType expr }
   let (translated, ctx) ← translate refToInput expr { exprs := exprs0 }
   let prog : Program := {
@@ -168,6 +182,6 @@ def lift (expr : WireExpr) (synthName : String) (exprs0 : ExprArena := {}) :
     decls := ctx.params.map (BodyDecl.param · none)
     assigns := #[{ target := .port ⟨0⟩, expr := translated }]
     registry := #[] }
-  return (prog, sortedRefs, ctx.exprs)
+  return { program := prog, freeRefs := sortedRefs, exprs := ctx.exprs }
 
 end Tropical.Ir.WireProgram

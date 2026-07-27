@@ -128,14 +128,17 @@ def liftIfNeeded (env : Env) : EngineM Unit := do
     let st ← env.state.get
     let counter := (st.nameCounters.get? "__wire").getD 0 + 1
     let synthName := s!"__wire_{counter}"
-    let (prog, sortedRefs, exprs) ← match Tropical.Ir.WireProgram.lift w.expr synthName st.arena.exprs with
+    let lifted ← match Tropical.Ir.WireProgram.lift w.expr synthName st.arena.exprs with
       | .error msg => internalError msg
       | .ok r => pure r
     -- The raw lifted program joins the store: templateByName mirrors
     -- TS `session.programs.set(name, lifted)` — the RAW form, which
     -- is what a later registration's relink byName would see. The lifted
     -- body's ids intern into the store's shared expression DAG.
-    let arenaRaw := { st.arena with programs := st.arena.programs.push prog, exprs }
+    let arenaRaw := {
+      st.arena with
+      programs := st.arena.programs.push lifted.program
+      exprs := lifted.exprs }
     let rawIdx : Tropical.Ir.ProgramIdx := ⟨st.arena.programs.size⟩
     -- (the raw form itself is never encoded — it has no consumer since the
     -- service residue left; only the post-strata encode below is used)
@@ -166,9 +169,10 @@ def liftIfNeeded (env : Env) : EngineM Unit := do
     -- instance (raw refs, NO delay wrap — `liftOneWire` set
     -- inputExprNodes directly), then replace the original wire in
     -- place (TS-Map position semantics).
-    for (inst, port) in sortedRefs do
-      let inputName := s!"{inst.replace "." "_"}__{port}"
-      env.state.modify (·.setWireRaw synthName inputName (.ref inst (.name port)))
+    for ref in lifted.freeRefs do
+      let inputName := s!"{ref.instanceName.replace "." "_"}__{ref.outputName}"
+      env.state.modify (·.setWireRaw synthName inputName
+        (.ref ref.instanceName (.name ref.outputName)))
     env.state.modify (·.setWireRaw w.instName w.portName (.ref synthName (.name "out")))
 
 -- ─────────────────────────────────────────────────────────────
