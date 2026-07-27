@@ -5,3 +5,4 @@ import Tropical.Ir.Nodes
 import Tropical.Ir.Codec
 import Tropical.Plan
 import Tropical.Ir.Strata
+import Tropical.Ir.EmitBankLaws

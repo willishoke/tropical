@@ -181,14 +181,14 @@ private def operandKind : NOperand → String
   | .source .. => "source" | .slot .. => "slot"
   | .loopIdx _ => "loop_idx"
 
-private def allocReg : EmitM Nat :=
+def allocReg : EmitM Nat :=
   modifyGet fun s => (s.nextReg, { s with nextReg := s.nextReg + 1 })
 
 private def allocArraySlot (size : Nat) : EmitM Nat :=
   modifyGet fun s => (s.nextArraySlot,
     { s with nextArraySlot := s.nextArraySlot + 1, arraySizes := s.arraySizes.push size })
 
-private def emit (i : NInstr) : EmitM Unit :=
+def emit (i : NInstr) : EmitM Unit :=
   modify fun s => { s with instrs := s.instrs.push i,
                            instrStages := s.instrStages.push s.curStage }
 
@@ -486,9 +486,17 @@ decreasing_by all_goals (apply Prod.Lex.left; omega)
 /-- Emit an indexed reduction (`ENode.bankSum`) as a `ReduceBegin`/body/`ReduceEnd`
     region — the banks-as-data lowering (slice 3b). The loop visits elements in
     array order — the same order the unrolled fold nests its adds — so the region
-    renders bit-identical to the unroll for ANY scalar element type (order
-    preservation needs no associativity; the earlier i64-only restriction was the
-    scaffolding's, not the fold's).
+    renders bit-identical to the unroll for ANY scalar element type. Since
+    slice 3c this is a THEOREM, not prose: `compileBankSum_stream`
+    (`Ir/EmitBankLaws.lean`) proves this function emits exactly
+    `tables ++ [ReduceBegin] ++ body ++ [Add, ReduceEnd]`, the frontend half
+    (`EmitArrow/BankOrder.lean`, `unrollBanks_modalBankSigTable`) proves the
+    banked and unrolled builders are the same tree under the reference
+    realization, and the whole trusted base is the ONE named assumption
+    `REDUCE_REGION_EXECUTES_IN_ARRAY_ORDER` (`regionDenotation`'s docstring,
+    `Ir/EmitBankLaws.lean`) — checkable against the emitted LLVM/MSL by eye.
+    Order preservation needs no associativity; the earlier i64-only
+    restriction was the scaffolding's, not the fold's.
 
     - The coefficient columns (`tables`) are materialized ONCE *before* the
       region: compiling them here (not lazily inside the body) keeps their `Pack`
@@ -511,7 +519,7 @@ decreasing_by all_goals (apply Prod.Lex.left; omega)
       is the region's binder id: it rides `ReduceBegin` as `loop_id`, and the
       body's `loopIdx idxId` operands resolve against the emitters' stack of
       open regions. -/
-private def compileBankSum (arena : ExprArena) (hw : arena.wf = true) (bound : Nat)
+def compileBankSum (arena : ExprArena) (hw : arena.wf = true) (bound : Nat)
     (count : Nat) (tables : Array ExprId) (body : ExprId)
     (dynCount? : Option ExprId) (idxId : Nat)
     (_hts : ∀ t ∈ tables, t.idx < bound) (_hb : body.idx < bound)
