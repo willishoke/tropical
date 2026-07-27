@@ -102,6 +102,9 @@ structure ScopeTap where
   sourceOutput : String
 deriving Inhabited
 
+def ScopeTap.slot (tap : ScopeTap) : String :=
+  s!"{tap.sourceInstance}.{tap.sourceOutput}"
+
 structure SessionSt where
   /-- Program registration order — mirrors the service's `session.programs`
       map order (stdlib, then session definitions). -/

@@ -266,7 +266,7 @@ end CycleRefusal
 def sortedNames (dir : String) (suffix : String) : IO (Array String) := do
   let entries ← (System.FilePath.mk dir).readDir
   let names := entries.filterMap fun e =>
-    if e.fileName.endsWith suffix then some (e.fileName.dropRight suffix.length) else none
+    if e.fileName.endsWith suffix then some (e.fileName.dropEnd suffix.length).toString else none
   pure (names.qsort fun a b => decide (a < b))
 
 /-- Compile a patch through the session mirror, returning the plan plus

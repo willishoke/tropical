@@ -70,7 +70,7 @@ def run (env : Engine.Env) : IO Unit := do
   repeat
     let line ← stdin.getLine
     if line.isEmpty then break  -- EOF
-    let trimmed := line.trim
+    let trimmed := line.trimAscii.toString
     if trimmed.isEmpty then continue
     match Json.parse trimmed with
     | .error e => send (errorEnvelope Json.null s!"parse error: {e}")

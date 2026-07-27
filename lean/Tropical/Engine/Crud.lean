@@ -19,6 +19,13 @@ structure InstanceResolution where
   programMeta : ProgMeta
   resolvedIdx? : Option Tropical.Ir.ProgramIdx
 
+def InstanceResolution.toInstanceInfo
+    (resolved : InstanceResolution) (baseTypeName : String) : InstanceInfo := {
+  baseTypeName
+  typeArgs := resolved.typeArgs
+  progMeta := resolved.programMeta
+  resolvedIdx := resolved.resolvedIdx? }
+
 -- ── Per-tool handlers ────────────────────────────────────────────────────────
 
 private def instanceSummary (st : SessionSt) (name : String) : Json :=
@@ -98,10 +105,7 @@ def handleAddInstance (env : Env) (args : Json) : EngineM Json := do
       (param := some "instance_name") (value := some (Json.str instanceName))
   let resolved ← resolveInstanceMeta env programName (arg? args "type_args") "program"
   env.state.modify (·.addInstance instanceName
-    { baseTypeName := programName
-      typeArgs := resolved.typeArgs
-      progMeta := resolved.programMeta
-      resolvedIdx := resolved.resolvedIdx? })
+    (resolved.toInstanceInfo programName))
   pure (instanceSummary (← env.state.get) instanceName)
 
 def handleReplicate (env : Env) (args : Json) : EngineM Json := do
@@ -130,11 +134,7 @@ def handleReplicate (env : Env) (args : Json) : EngineM Json := do
         s!"Instance '{name}' already exists — pick a different name_prefix"
         (param := some "name_prefix") (value := namePrefix.map Json.str)
     let resolved ← resolveInstanceMeta env programName (arg? args "type_args") "program"
-    env.state.modify (·.addInstance name {
-      baseTypeName := programName
-      typeArgs := resolved.typeArgs
-      progMeta := resolved.programMeta
-      resolvedIdx := resolved.resolvedIdx? })
+    env.state.modify (·.addInstance name (resolved.toInstanceInfo programName))
     created := created.push (instanceSummary (← env.state.get) name)
   pure <| Json.mkObj [("created", Json.arr created)]
 

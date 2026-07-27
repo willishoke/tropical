@@ -21,6 +21,9 @@ private structure ExposedInput where
   portName : String
 deriving Inhabited
 
+private def ExposedInput.key (input : ExposedInput) : String :=
+  s!"{input.instanceName}:{input.portName}"
+
 -- ── Program I/O (save / export) ──────────────────────────────────────────────
 
 def handleSave (env : Env) : EngineM Json := do
@@ -181,7 +184,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
     if !info.progMeta.inputNames.contains portName then
       internalError s!"export: instance '{instName}' has no input '{portName}'. Available: {String.intercalate ", " info.progMeta.inputNames.toList}"
     exposed := exposed.push { name := inputName, instanceName := instName, portName }
-  let exposedKeys := exposed.map fun input => s!"{input.instanceName}:{input.portName}"
+  let exposedKeys := exposed.map (·.key)
   let findWire := fun (inst port : String) =>
     (wiresPost.find? fun w => w.instName == inst && w.portName == port).map (·.expr)
 
@@ -254,8 +257,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
     let mut instInputs : Array (String × Json) := #[]
     for portName in info.progMeta.inputNames do
       let key := s!"{instName}:{portName}"
-      match exposed.find? fun input =>
-          s!"{input.instanceName}:{input.portName}" == key with
+      match exposed.find? (·.key == key) with
       | some input =>
         instInputs := instInputs.push (portName,
           Json.mkObj [("op", Json.str "input"), ("name", Json.str input.name)])
@@ -396,8 +398,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
       let pos? := tgt.inputs.findIdx? (·.name == portName)
       let unknownPort {α} : EngineM α :=
         internalError s!"export: internal: '{instName}' input '{portName}' is not a declared port of '{tgt.name}'"
-      match exposed.find? fun input =>
-          s!"{input.instanceName}:{input.portName}" == key with
+      match exposed.find? (·.key == key) with
       | some input =>
         let some pos := pos? | unknownPort
         let some ii := exposed.findIdx? (·.name == input.name)
@@ -590,11 +591,7 @@ private def ingestProgram (env : Env) (node : Tropical.Parse.JsonV)
       | none => none
     let resolved ←
       resolveInstanceMeta env programName typeArgs "program" (toolEnvelopes := false)
-    env.state.modify (·.addInstance instName
-      { baseTypeName := programName
-        typeArgs := resolved.typeArgs
-        progMeta := resolved.programMeta
-        resolvedIdx := resolved.resolvedIdx? })
+    env.state.modify (·.addInstance instName (resolved.toInstanceInfo programName))
     -- Wires in declared input-port order (the canonical order; JS's
     -- stable sort leaves unknown ports trailing in JSON-key order,
     -- which JsonV preserves).

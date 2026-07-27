@@ -28,6 +28,9 @@ structure FreeRef where
   instanceName : String
   outputName : String
 
+def FreeRef.inputName (ref : FreeRef) : String :=
+  s!"{ref.instanceName.replace "." "_"}__{ref.outputName}"
+
 /-- The raw program synthesized from a wire expression, together with the
     information needed to attach it to the session graph. -/
 structure LiftResult where
@@ -167,10 +170,10 @@ def lift (expr : WireExpr) (synthName : String) (exprs0 : ExprArena := {}) :
   -- Sort by canonical key — deterministic input order across calls.
   let sortedRefs := refs.qsort fun a b =>
     wireKeyOf a.instanceName a.outputName < wireKeyOf b.instanceName b.outputName
+  -- Double-underscore separator avoids collisions with user port names; dots
+  -- in instance paths flatten to underscores.
   let inputDecls : Array InputDecl := sortedRefs.map fun ref =>
-    -- Double-underscore separator avoids collisions with user port
-    -- names; dots in instance paths flatten to underscores.
-    { name := s!"{ref.instanceName.replace "." "_"}__{ref.outputName}" }
+    { name := ref.inputName }
   let refToInput := sortedRefs.mapIdx fun i ref =>
     (wireKeyOf ref.instanceName ref.outputName, i)
   let outputDecl : OutputDecl := { name := "out", type? := inferOutputPortType expr }

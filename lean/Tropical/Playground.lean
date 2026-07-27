@@ -1237,7 +1237,7 @@ def realizedReport (args : Json) (taps : Array Tropical.ScopeTap) : Json := Id.r
   let paramsJ := (collectParams raws).filterMap fun (nm, v) =>
     if nm.endsWith "#v1" || nm.endsWith "#t0" || nm.endsWith "#phase" then none
     else if nm.endsWith "#v0" then
-      some (Json.mkObj [("name", Json.str (nm.dropRight 3)),
+      some (Json.mkObj [("name", Json.str (nm.dropEnd 3).toString),
         ("value", Json.num v), ("discipline", Json.str "glide")])
     else
       let disc :=
@@ -1249,7 +1249,7 @@ def realizedReport (args : Json) (taps : Array Tropical.ScopeTap) : Json := Id.r
         ("value", Json.num v), ("discipline", Json.str disc)])
   let tapsJ := taps.map fun tap =>
     Json.mkObj [("name", Json.str tap.name),
-      ("slot", Json.str s!"{tap.sourceInstance}.{tap.sourceOutput}")]
+      ("slot", Json.str tap.slot)]
   return Json.mkObj [("ok", Json.bool true), ("nodes", Json.arr nodesJ),
     ("inputs", Json.arr inputsJ), ("params", Json.arr paramsJ),
     ("taps", Json.arr tapsJ)]

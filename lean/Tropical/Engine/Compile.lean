@@ -170,8 +170,7 @@ def liftIfNeeded (env : Env) : EngineM Unit := do
     -- inputExprNodes directly), then replace the original wire in
     -- place (TS-Map position semantics).
     for ref in lifted.freeRefs do
-      let inputName := s!"{ref.instanceName.replace "." "_"}__{ref.outputName}"
-      env.state.modify (·.setWireRaw synthName inputName
+      env.state.modify (·.setWireRaw synthName ref.inputName
         (.ref ref.instanceName (.name ref.outputName)))
     env.state.modify (·.setWireRaw w.instName w.portName (.ref synthName (.name "out")))
 

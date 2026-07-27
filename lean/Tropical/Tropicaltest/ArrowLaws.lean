@@ -203,7 +203,7 @@ def runStdlibWireGoldens (writeMode : Bool) : IO Bool := do
           IO.println s!"  FAIL  stdlib-goldens/{name}  no golden (run tropicaltest --write)"
           ok := false
         else
-          let stored := (← IO.FS.readFile path).trim
+          let stored := (← IO.FS.readFile path).trimAscii.toString
           if stored == hash then
             n := n + 1
           else

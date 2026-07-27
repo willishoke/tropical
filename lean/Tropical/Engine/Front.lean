@@ -23,7 +23,7 @@ def handleListScopeTaps (env : Env) : EngineM Json := do
     Json.mkObj [("name", Json.str tap.name),
                 ("instance", Json.str tap.sourceInstance),
                 ("output", Json.str tap.sourceOutput),
-                ("slot", Json.str s!"{tap.sourceInstance}.{tap.sourceOutput}")]
+                ("slot", Json.str tap.slot)]
   pure <| Json.mkObj [("taps", Json.arr taps)]
 
 /-- EXPERIMENT (`load_patch_graph`): compile a downstream-only patch graph (the
