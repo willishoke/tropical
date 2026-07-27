@@ -1410,7 +1410,9 @@ def runModalLive (arena : Arena)
   | .ok j =>
   match Tropical.Playground.compilePlanPure arena resolved j with
   | .error e => failGate "modal-live" s!"compile: {firstLine e}"
-  | .ok (plan, _, stageBlocks) =>
+  | .ok compiled =>
+    let plan := compiled.plan
+    let stageBlocks := compiled.stageBlocks
     match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
     | .ok _, .ok _ =>
       -- A slot that EXISTS but is never READ is a dead knob — exactly the
@@ -1505,7 +1507,9 @@ def runGongStrike (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO
   | .ok j =>
   match Tropical.Playground.compilePlanPure arena resolved j with
   | .error e => failGate "gong-strike" s!"compile: {firstLine e}"
-  | .ok (plan, _, stageBlocks) =>
+  | .ok compiled =>
+    let plan := compiled.plan
+    let stageBlocks := compiled.stageBlocks
     let rt ← Tropical.Ffi.Runtime.new 16384
     Tropical.StagedLoad.loadTyped rt plan stageBlocks
     rt.process
@@ -1543,7 +1547,9 @@ def runGongLive (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO B
   | .ok j =>
   match Tropical.Playground.compilePlanPure arena resolved j with
   | .error e => failGate "gong-live" s!"compile: {firstLine e}"
-  | .ok (plan, _, stageBlocks) =>
+  | .ok compiled =>
+    let plan := compiled.plan
+    let stageBlocks := compiled.stageBlocks
     let rt ← Tropical.Ffi.Runtime.new 2048
     Tropical.StagedLoad.loadTyped rt plan stageBlocks
     let rt2 ← Tropical.Ffi.Runtime.new 2048

@@ -1208,7 +1208,7 @@ private def paramDisciplinesOf (raws : Array Raw) :
     glide/anchor companion slots are the discipline's implementation detail,
     not surface. Plus the taps. The silence-with-`{ok:true}` class dies here:
     a patch that gracefully compiled to nothing now SAYS so, as facts. -/
-def realizedReport (args : Json) (taps : Array (String × String × String)) : Json := Id.run do
+def realizedReport (args : Json) (taps : Array Tropical.ScopeTap) : Json := Id.run do
   let raws := rawsOf args
   let outId := match (args.getObjVal? "out").toOption with
     | some (.str s) => s
@@ -1247,18 +1247,22 @@ def realizedReport (args : Json) (taps : Array (String × String × String)) : J
           | _ => "raw"
       some (Json.mkObj [("name", Json.str nm),
         ("value", Json.num v), ("discipline", Json.str disc)])
-  let tapsJ := taps.map fun (name, inst, out) =>
-    Json.mkObj [("name", Json.str name), ("slot", Json.str s!"{inst}.{out}")]
+  let tapsJ := taps.map fun tap =>
+    Json.mkObj [("name", Json.str tap.name),
+      ("slot", Json.str s!"{tap.sourceInstance}.{tap.sourceOutput}")]
   return Json.mkObj [("ok", Json.bool true), ("nodes", Json.arr nodesJ),
     ("inputs", Json.arr inputsJ), ("params", Json.arr paramsJ),
     ("taps", Json.arr tapsJ)]
 
 -- ── Scope taps ──────────────────────────────────────────────────────────────
-/-- A scope tap: `(name, srcInstance, srcOutput)` — the exact `scopeTaps` triple
-    the session model uses, so `list_scope_taps` (which builds the slot as
-    `<inst>.<out>`) needs no change. For the arrow path the source instance is
-    always the synthetic root, and the output is a dedicated `tap:<id>` port. -/
-abbrev Tap := String × String × String
+/-- For the arrow path the source instance is always the synthetic root, and
+    the output is a dedicated `tap:<id>` port. -/
+abbrev Tap := Tropical.ScopeTap
+
+structure CompiledPatch where
+  plan : Tropical.Plan.FlatPlan
+  taps : Array Tap
+  stageBlocks : Array (Array (Option Tropical.Ir.Stage))
 
 /-- The user-facing nodes worth tapping: the raw GUI nodes, minus the reserved
     `out`/`__silence__` and any synthesized helper (`__lfo_*`) — i.e. every node
@@ -1276,8 +1280,7 @@ private def tapNodeIds (raws : Array Raw) : Array String :=
     `render_window` can read it. Taps cost extra kernel compute (each re-emits its
     upstream cone), so they're for the inspection build, not a lean audio path. -/
 def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j : Json) :
-    Except String (Tropical.Plan.FlatPlan × Array Tap
-      × Array (Array (Option Tropical.Ir.Stage))) := do
+    Except String CompiledPatch := do
   let raws := rawsOf j
   checkServedKinds raws                              -- reject withheld/unknown kinds FIRST (honest msg over the misleading type error)
   checkEdgeTypes raws                                -- reject ill-typed / dangling / wire-into-knob edges pre-lowering
@@ -1330,9 +1333,15 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
   -- The final mix (`out`) plus one tap per user node, all routed to the synthetic
   -- root's output slots (`__root__.<port>`), ready for `render_window`.
   let root := Tropical.Compile.rootInstancePath
-  let taps : Array Tap := #[("out", root, "out")]
-    ++ tapSigs.map (fun (id, _) => (id, root, s!"tap:{id}"))
-  pure (plan, taps, stageBlocks)
+  let taps : Array Tap := #[{
+      name := "out"
+      sourceInstance := root
+      sourceOutput := "out" }]
+    ++ tapSigs.map (fun (id, _) => {
+      name := id
+      sourceInstance := root
+      sourceOutput := s!"tap:{id}" })
+  pure { plan, taps, stageBlocks }
 
 -- ── Stdlib-into-arena (the shared chain; cached below via `getStdlib`) ───────
 def elabStdlib : IO (Except String (Arena × Array (String × ProgramIdx))) :=
@@ -1358,8 +1367,7 @@ def knobParams (j : Json) : Array (String × Json) :=
 
 /-- Decode + lower + compile the GUI graph to a loadable `FlatPlan` + its
     taps + typed stage blocks (the split classification). -/
-def compilePlan (j : Json) : IO (Except String (Tropical.Plan.FlatPlan × Array Tap
-    × Array (Array (Option Tropical.Ir.Stage)))) := do
+def compilePlan (j : Json) : IO (Except String CompiledPatch) := do
   match ← getStdlib with
   | .error e => pure (.error s!"stdlib elaboration: {e}")
   | .ok (arena, resolved) => pure (compilePlanPure arena resolved j)

@@ -127,7 +127,9 @@ def runBanksStaging (arena : Arena)
   | .ok j =>
   match Tropical.Playground.compilePlanPure arena resolved j with
   | .error e => failGate "banks-staging" s!"compile: {firstLine e}"
-  | .ok (plan, _, stageBlocks) =>
+  | .ok compiled =>
+    let plan := compiled.plan
+    let stageBlocks := compiled.stageBlocks
     match Tropical.Ir.Stage0.hoistTyped plan stageBlocks with
     | .error e => failGate "banks-staging" s!"split: {firstLine e}"
     | .ok split =>
@@ -202,7 +204,9 @@ def runMslColumnGuard (arena : Arena)
   | .ok j =>
   match Tropical.Playground.compilePlanPure arena resolved j with
   | .error e => failGate "msl-column-guard" s!"compile: {firstLine e}"
-  | .ok (plan, _, stageBlocks) =>
+  | .ok compiled =>
+    let plan := compiled.plan
+    let stageBlocks := compiled.stageBlocks
     match Tropical.Ir.Stage0.hoistTyped plan stageBlocks with
     | .error e => failGate "msl-column-guard" s!"split: {firstLine e}"
     | .ok split =>
@@ -281,8 +285,8 @@ def runBanksBench (arena : Arena)
   -- (audio-kernel instrs, coeff-kernel instrs).
   let compileAt : Nat → Except String (Nat × Nat) := fun k => do
     let j ← Lean.Json.parse (mkSrc k)
-    let (plan, _, stageBlocks) ← Tropical.Playground.compilePlanPure arena resolved j
-    let split ← Tropical.Ir.Stage0.hoistTyped plan stageBlocks
+    let compiled ← Tropical.Playground.compilePlanPure arena resolved j
+    let split ← Tropical.Ir.Stage0.hoistTyped compiled.plan compiled.stageBlocks
     let audioN := planInstrCount split.audio
     let coeffN := match split.coeff? with | some c => planInstrCount c | none => 0
     pure (audioN, coeffN)
@@ -351,17 +355,17 @@ def runBanksCount (arena : Arena)
   | .error e, _, _ => failGate "banks-count" s!"static-16 compile: {firstLine e}"
   | _, .error e, _ => failGate "banks-count" s!"static-4 compile: {firstLine e}"
   | _, _, .error e => failGate "banks-count" s!"dynamic compile: {firstLine e}"
-  | .ok (p16, _, b16), .ok (p4, _, b4), .ok (pd, _, bd) =>
+  | .ok c16, .ok c4, .ok cd =>
     -- opt-in: the static graph must NOT have grown a partials slot.
     let rtS ← Tropical.Ffi.Runtime.new 2048
-    Tropical.StagedLoad.loadTyped rtS p16 b16
+    Tropical.StagedLoad.loadTyped rtS c16.plan c16.stageBlocks
     let staticHasSlot := (← rtS.slotIndex? "param:res.partials").isSome
-    let (_, s16) ← render p16 b16 none
-    let (_, s4)  ← render p4 b4 none
-    let (_, dDef)   ← render pd bd none          -- knob at its default (16)
-    let (ok4, d4)   ← render pd bd (some 4.0)    -- knob at 4
-    let (okC, dC)   ← render pd bd (some 100.0)  -- above capacity → clamps to 16
-    let (okZ, dZ)   ← render pd bd (some 0.0)    -- zero modes → silence
+    let (_, s16) ← render c16.plan c16.stageBlocks none
+    let (_, s4)  ← render c4.plan c4.stageBlocks none
+    let (_, dDef)   ← render cd.plan cd.stageBlocks none          -- knob at its default (16)
+    let (ok4, d4)   ← render cd.plan cd.stageBlocks (some 4.0)    -- knob at 4
+    let (okC, dC)   ← render cd.plan cd.stageBlocks (some 100.0)  -- above capacity → clamps to 16
+    let (okZ, dZ)   ← render cd.plan cd.stageBlocks (some 0.0)    -- zero modes → silence
     let slotLive := ok4 && okC && okZ
     let e16 := energyOf s16
     let dA := bitDiffCount dDef s16
@@ -393,9 +397,10 @@ def runBanksCountCache (arena : Arena)
     "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"res\"]}}],\"out\":\"out\"}"
   let irOf : Nat → Nat → Except String (String × String) := fun dflt cap => do
     let j ← (Lean.Json.parse (src dflt cap)).mapError (s!"json: {·}")
-    let (plan, _, blocks) ← Tropical.Playground.compilePlanPure arena resolved j
-    let split ← Tropical.Ir.Stage0.hoistTyped plan blocks
-    pure (← Tropical.Ir.EmitLlvm.emitKernel plan, ← Tropical.Ir.EmitLlvm.emitKernel split.audio)
+    let compiled ← Tropical.Playground.compilePlanPure arena resolved j
+    let split ← Tropical.Ir.Stage0.hoistTyped compiled.plan compiled.stageBlocks
+    pure (← Tropical.Ir.EmitLlvm.emitKernel compiled.plan,
+      ← Tropical.Ir.EmitLlvm.emitKernel split.audio)
   match irOf 4 16, irOf 12 16, irOf 4 24 with
   | .error e, _, _ | _, .error e, _ | _, _, .error e =>
     failGate "banks-count-cache" s!"compile/emit: {firstLine e}"
@@ -447,8 +452,8 @@ private def renderFilterPatch (arena : Arena) (resolved : Array (String × Progr
     (j : Lean.Json) (n : Nat) : IO (Except String (Array Float)) := do
   match Tropical.Playground.compilePlanPure arena resolved j with
   | .error e => pure (.error s!"compile: {firstLine e}")
-  | .ok (plan, _, _) =>
-    match ← renderPlanSamples plan n with
+  | .ok compiled =>
+    match ← renderPlanSamples compiled.plan n with
     | .error e => pure (.error s!"render: {firstLine e}")
     | .ok samples => pure (.ok samples)
 
@@ -495,7 +500,9 @@ def runModalFilter (arena : Arena)
       -- (C) live cutoff on one of two twin runtimes
       match Tropical.Playground.compilePlanPure arena resolved (filterPatchJson 800 5 1 220 4) with
       | .error e => failGate "modal-filter" s!"(C) compile: {firstLine e}"
-      | .ok (plan, _, stageBlocks) =>
+      | .ok compiled =>
+      let plan := compiled.plan
+      let stageBlocks := compiled.stageBlocks
       match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
       | .ok _, .ok _ =>
         let rt ← Tropical.Ffi.Runtime.new 2048
@@ -714,7 +721,7 @@ def runModalAddr (arena : Arena)
     | .error _ => false
     | .ok j => match Tropical.Playground.compilePlanPure arena resolved j with
       | .error _ => false
-      | .ok (plan, _, _) => (Tropical.Ir.EmitLlvm.emitKernel plan).toOption.isSome
+      | .ok compiled => (Tropical.Ir.EmitLlvm.emitKernel compiled.plan).toOption.isSome
   match buildAndFinish (.ok (buildModalBankArrow "ma_ref" modes (lit 0) arena)),
         buildAndFinish (.ok (buildModalAddrRamp "ma_id" modes (lit 0) 0.0 arena)),
         buildAndFinish (.ok (buildModalAddrRamp "ma_off" modes (lit 0) onsetSec arena)) with
@@ -767,7 +774,7 @@ def runGaugeStage (arena : Arena)
     | .error e => IO.println s!"        gauge-stage json: {e}"; pure none
     | .ok j => match Tropical.Playground.compilePlanPure arena resolved j with
       | .error e => IO.println s!"        gauge-stage compile: {firstLine e}"; pure none
-      | .ok (plan, _, sb) => match Tropical.Ir.Stage0.hoistTyped plan sb with
+      | .ok compiled => match Tropical.Ir.Stage0.hoistTyped compiled.plan compiled.stageBlocks with
         | .error e => IO.println s!"        gauge-stage split: {firstLine e}"; pure none
         | .ok split =>
           let a := planFloatExponents split.audio
@@ -783,4 +790,3 @@ def runGaugeStage (arena : Arena)
     passGate "gauge-stage" s!"settle keeps the gauge norm s0: the gauge adds 0 FloatExponent to the audio kernel (stays {aBare}) and {cGauge - cBare} to the s0 coeff kernel — Metal-safe by construction"
   else
     failGate "gauge-stage" s!"audio {aBare}→{aGauge} (want equal), coeff {cBare}→{cGauge} (want grow) — the gauge norm leaked into the per-sample kernel"
-

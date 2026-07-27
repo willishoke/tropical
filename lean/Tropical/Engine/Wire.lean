@@ -131,7 +131,10 @@ def handleWire (env : Env) (args : Json) : EngineM Json := do
       let st ← env.state.get
       let (srcInst, srcOut) ← resolveDacSource st decoded sExpr s!"{scopeName}.{tapName}"
       env.state.modify fun st =>
-        { st with scopeTaps := (st.scopeTaps.filter (·.1 != tapName)).push (tapName, srcInst, srcOut) }
+        { st with scopeTaps := (st.scopeTaps.filter (·.name != tapName)).push {
+            name := tapName
+            sourceInstance := srcInst
+            sourceOutput := srcOut } }
       scopeWires := scopeWires.push <| Json.mkObj
         [("instance", Json.str sInst), ("input", sInput), ("expr", sExpr)]
     else

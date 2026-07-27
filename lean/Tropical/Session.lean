@@ -96,6 +96,12 @@ deriving Inhabited
 
 def Wire.key (w : Wire) : String := s!"{w.instName}:{w.portName}"
 
+structure ScopeTap where
+  name : String
+  sourceInstance : String
+  sourceOutput : String
+deriving Inhabited
+
 structure SessionSt where
   /-- Program registration order — mirrors the service's `session.programs`
       map order (stdlib, then session definitions). -/
@@ -104,11 +110,10 @@ structure SessionSt where
   instances    : Array (String × InstanceInfo) := #[]
   wires        : Array Wire := #[]
   graphOutputs : Array (String × String) := #[]   -- (instance, output)
-  /-- Scope taps: (tapName, srcInstance, srcOutput). Opt-in observation
-      points — like `graphOutputs` (dac) but routed to a render_window-
-      readable slot instead of the audio output. The keep-set the collapse
-      honors: params ∪ dac ∪ scope-taps stay materialized. -/
-  scopeTaps    : Array (String × String × String) := #[]
+  /-- Opt-in observation points — like `graphOutputs` (dac) but routed to a
+      render_window-readable slot instead of the audio output. The keep-set
+      the collapse honors: params ∪ dac ∪ scope-taps stay materialized. -/
+  scopeTaps    : Array ScopeTap := #[]
   /-- Param mirror: name → last-known value (raw Json to preserve lexical
       number forms). The service owns the live Param handles. -/
   params       : Array (String × Json) := #[]
