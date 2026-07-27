@@ -50,27 +50,35 @@ def coeffIr (s : Split) : Except String String :=
   | none => .ok ""
   | some c => Tropical.Ir.EmitLlvm.emitKernel c
 
-private def emitParts (s : Split) : Except String (String × String × String) := do
+private structure EmittedParts where
+  audioIr : String
+  coefficientIr : String
+  manifest : String
+
+private def emitParts (s : Split) : Except String EmittedParts := do
   let manifestJson ← s.audio.toWire
   let ir ← Tropical.Ir.EmitLlvm.emitKernel s.audio
   let cir ← coeffIr s
-  return (ir, cir, manifestJson.compress)
+  return {
+    audioIr := ir
+    coefficientIr := cir
+    manifest := manifestJson.compress }
 
 /-- Debug: `TROPICAL_STAGE0_DUMP=<dir>` writes the split artifacts. -/
-private def dumpParts (ir cir manifest : String) : IO Unit := do
+private def dumpParts (parts : EmittedParts) : IO Unit := do
   if let some dir ← IO.getEnv "TROPICAL_STAGE0_DUMP" then
-    IO.FS.writeFile s!"{dir}/audio.ll" ir
-    IO.FS.writeFile s!"{dir}/coeff.ll" cir
-    IO.FS.writeFile s!"{dir}/manifest.json" manifest
+    IO.FS.writeFile s!"{dir}/audio.ll" parts.audioIr
+    IO.FS.writeFile s!"{dir}/coeff.ll" parts.coefficientIr
+    IO.FS.writeFile s!"{dir}/manifest.json" parts.manifest
 
 /-- Split + emit + load, JIT-only. -/
 def load (rt : Tropical.Ffi.Runtime) (plan : FlatPlan) : IO Unit := do
   let s ← split plan
   match emitParts s with
   | .error e => throw <| IO.userError s!"StagedLoad: {e}"
-  | .ok (ir, cir, manifest) =>
-    dumpParts ir cir manifest
-    rt.loadIrStaged ir "" cir manifest
+  | .ok parts =>
+    dumpParts parts
+    rt.loadIrStaged parts.audioIr "" parts.coefficientIr parts.manifest
 
 /-- Split + emit + dual load (JIT + Metal): MSL is emitted from the
     *audio* plan — coefficients are computed host-side in f64 by the JIT
@@ -80,7 +88,8 @@ def loadMsl (rt : Tropical.Ffi.Runtime) (plan : FlatPlan) : IO Unit := do
   match emitParts s, Tropical.Ir.EmitMsl.emitKernel s.audio with
   | .error e, _ => throw <| IO.userError s!"StagedLoad: {e}"
   | _, .error e => throw <| IO.userError s!"StagedLoad (msl): {e}"
-  | .ok (ir, cir, manifest), .ok msl => rt.loadIrStaged ir msl cir manifest
+  | .ok parts, .ok msl =>
+    rt.loadIrStaged parts.audioIr msl parts.coefficientIr parts.manifest
 
 /-- Typed split + emit + load, JIT-only. -/
 def loadTyped (rt : Tropical.Ffi.Runtime) (plan : FlatPlan)
@@ -88,9 +97,9 @@ def loadTyped (rt : Tropical.Ffi.Runtime) (plan : FlatPlan)
   let s ← splitTyped plan stageBlocks
   match emitParts s with
   | .error e => throw <| IO.userError s!"StagedLoad: {e}"
-  | .ok (ir, cir, manifest) =>
-    dumpParts ir cir manifest
-    rt.loadIrStaged ir "" cir manifest
+  | .ok parts =>
+    dumpParts parts
+    rt.loadIrStaged parts.audioIr "" parts.coefficientIr parts.manifest
 
 /-- Typed split + emit + dual load (JIT + Metal). MSL is emitted from the
     *audio* plan: scalar coefficients cross to the GPU as host-written
@@ -104,8 +113,8 @@ def loadMslTyped (rt : Tropical.Ffi.Runtime) (plan : FlatPlan)
   match emitParts s, Tropical.Ir.EmitMsl.emitKernel s.audio with
   | .error e, _ => throw <| IO.userError s!"StagedLoad: {e}"
   | _, .error e => throw <| IO.userError s!"StagedLoad (msl): {e}"
-  | .ok (ir, cir, manifest), .ok msl =>
-    dumpParts ir cir manifest
-    rt.loadIrStaged ir msl cir manifest
+  | .ok parts, .ok msl =>
+    dumpParts parts
+    rt.loadIrStaged parts.audioIr msl parts.coefficientIr parts.manifest
 
 end Tropical.StagedLoad

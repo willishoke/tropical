@@ -15,6 +15,12 @@ open Lean (Json toJson)
 open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
+private structure ExposedInput where
+  name : String
+  instanceName : String
+  portName : String
+deriving Inhabited
+
 -- ── Program I/O (save / export) ──────────────────────────────────────────────
 
 def handleSave (env : Env) : EngineM Json := do
@@ -157,7 +163,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
   let inputPairs : Array (String × Json) := match arg? args "inputs" with
     | some (.obj m) => m.toArray
     | _ => #[]
-  let mut exposed : Array (String × String × String) := #[]  -- (inputName, inst, port)
+  let mut exposed : Array ExposedInput := #[]
   for (inputName, targetJ) in inputPairs do
     let parsed? : Option (String × String) := match targetJ with
       | .str target =>
@@ -174,16 +180,16 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
       | internalError s!"export: input '{inputName}' references unknown instance '{instName}'."
     if !info.progMeta.inputNames.contains portName then
       internalError s!"export: instance '{instName}' has no input '{portName}'. Available: {String.intercalate ", " info.progMeta.inputNames.toList}"
-    exposed := exposed.push (inputName, instName, portName)
-  let exposedKeys := exposed.map fun (_, i, p) => s!"{i}:{p}"
+    exposed := exposed.push { name := inputName, instanceName := instName, portName }
+  let exposedKeys := exposed.map fun input => s!"{input.instanceName}:{input.portName}"
   let findWire := fun (inst port : String) =>
     (wiresPost.find? fun w => w.instName == inst && w.portName == port).map (·.expr)
 
   -- Reverse reachability from the outputs, extended by exposed-input
   -- wiring defaults.
   let mut reachable := reachableFrom rootExprs wiresPost allInstances
-  for (_, instName, portName) in exposed do
-    if let some currentExpr := findWire instName portName then
+  for input in exposed do
+    if let some currentExpr := findWire input.instanceName input.portName then
       for dep in currentExpr.deps do
         if allInstances.contains dep && !reachable.contains dep then
           let extra := reachableFrom #[currentExpr] wiresPost allInstances
@@ -204,16 +210,16 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
     (st.findInstance? inst).bind fun info =>
       (if isInput then info.progMeta.inputs else info.progMeta.outputs).find? (·.name == port)
   let mut inputEntries : Array Json := #[]
-  for (inputName, instName, portName) in exposed do
-    let typeObj? := (portInfoOf instName portName true).bind (·.typeObj)
-    let default? := (findWire instName portName).map (rewriteRefs reachable)
+  for input in exposed do
+    let typeObj? := (portInfoOf input.instanceName input.portName true).bind (·.typeObj)
+    let default? := (findWire input.instanceName input.portName).map (rewriteRefs reachable)
     let typeDecl? ← if isDefaultPortType typeObj? then pure (none : Option Json)
       else some <$> portTypeToDecl (typeObj?.getD jsonNull)
     inputEntries := inputEntries.push <|
       match typeDecl?, default? with
-      | none, none => Json.str inputName
+      | none, none => Json.str input.name
       | t?, d? => Json.mkObj <|
-        [("name", Json.str inputName)]
+        [("name", Json.str input.name)]
         ++ (match t? with | some t => [("type", t)] | none => [])
         ++ (match d? with | some d => [("default", d.toJson)] | none => [])
   let mut outputEntries : Array Json := #[]
@@ -248,10 +254,11 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
     let mut instInputs : Array (String × Json) := #[]
     for portName in info.progMeta.inputNames do
       let key := s!"{instName}:{portName}"
-      match exposed.find? fun (_, i, p) => s!"{i}:{p}" == key with
-      | some (inputName, _, _) =>
+      match exposed.find? fun input =>
+          s!"{input.instanceName}:{input.portName}" == key with
+      | some input =>
         instInputs := instInputs.push (portName,
-          Json.mkObj [("op", Json.str "input"), ("name", Json.str inputName)])
+          Json.mkObj [("op", Json.str "input"), ("name", Json.str input.name)])
       | none =>
         if let some expr := findWire instName portName then
           instInputs := instInputs.push (portName, (rewriteRefs reachable expr).toJson)
@@ -315,36 +322,36 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
         let portList := String.intercalate ", " (tgt.outputs.map (·.name)).toList
         .error s!"instance '{rn}': program '{tgt.name}' has no output '{on}' (have: {portList})"
     paramIdx := fun _ => none
-    inputIdx := fun nm => exposed.findIdx? (·.1 == nm) }
+    inputIdx := fun nm => exposed.findIdx? (·.name == nm) }
   -- An input default resolves before any instance is in scope, and sees only
   -- the inputs declared before it (the incremental-scope rule).
   let defaultCtx : Nat → WireCtx := fun visible => {
     instOut := fun rn _ => .error s!"instance '{rn}' is not declared in this scope"
     paramIdx := fun _ => none
-    inputIdx := fun nm => (exposed.extract 0 visible).findIdx? (·.1 == nm) }
+    inputIdx := fun nm => (exposed.extract 0 visible).findIdx? (·.name == nm) }
   -- The port surface: exposed inputs (type from the target's resolved decl —
   -- scalar float is the unspelled default — plus the folded wiring default),
   -- then the exported outputs.
   let mut exprs := st.arena.exprs
   let mut inputDecls : Array Tropical.Ir.InputDecl := #[]
   for k in [0:exposed.size] do
-    let (inputName, instName, portName) := exposed[k]!
-    let (_, tgt) ← match resolveType instName with
+    let input := exposed[k]!
+    let (_, tgt) ← match resolveType input.instanceName with
       | .error e => internalError e
       | .ok r => pure r
-    let some pos := tgt.inputs.findIdx? (·.name == portName)
-      | internalError s!"export: internal: '{instName}' has no resolved input '{portName}'"
+    let some pos := tgt.inputs.findIdx? (·.name == input.portName)
+      | internalError s!"export: internal: '{input.instanceName}' has no resolved input '{input.portName}'"
     let type? : Option Tropical.Ir.PortType := match tgt.inputs[pos]!.type? with
       | some (.scalar .float) | none => none
       | some t => some t
     let mut default? : Option Tropical.Ir.ExprId := none
-    if let some expr := findWire instName portName then
+    if let some expr := findWire input.instanceName input.portName then
       match (wireExprToResolved (defaultCtx k) expr).run exprs with
       | .error e => internalError e
       | .ok (eid, exprs') =>
         exprs := exprs'
         default? := some eid
-    inputDecls := inputDecls.push { name := inputName, type?, default? }
+    inputDecls := inputDecls.push { name := input.name, type?, default? }
   let mut outputDecls : Array Tropical.Ir.OutputDecl := #[]
   let mut assignsR : Array Tropical.Ir.OutputAssign := #[]
   for k in [0:outputPairs.size] do
@@ -389,10 +396,11 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
       let pos? := tgt.inputs.findIdx? (·.name == portName)
       let unknownPort {α} : EngineM α :=
         internalError s!"export: internal: '{instName}' input '{portName}' is not a declared port of '{tgt.name}'"
-      match exposed.find? fun (_, i, p) => s!"{i}:{p}" == key with
-      | some (inputName, _, _) =>
+      match exposed.find? fun input =>
+          s!"{input.instanceName}:{input.portName}" == key with
+      | some input =>
         let some pos := pos? | unknownPort
-        let some ii := exposed.findIdx? (·.1 == inputName)
+        let some ii := exposed.findIdx? (·.name == input.name)
           | internalError "export: internal: exposed input vanished"
         let (eid, exprs') := (Tropical.Ir.eintern (.inputRef ⟨ii⟩)).run exprs
         exprs := exprs'
