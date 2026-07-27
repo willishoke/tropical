@@ -580,15 +580,18 @@ private def ingestProgram (env : Env) (node : Tropical.Parse.JsonV)
     let typeArgs : Option Json := match d.getField? "type_args" with
       | some ta => some ta.toJson
       | none => none
-    let (typeArgsEcho, pm, resolvedIdx) ←
+    let resolved ←
       resolveInstanceMeta env programName typeArgs "program" (toolEnvelopes := false)
     env.state.modify (·.addInstance instName
-      { baseTypeName := programName, typeArgs := typeArgsEcho, progMeta := pm, resolvedIdx })
+      { baseTypeName := programName
+        typeArgs := resolved.typeArgs
+        progMeta := resolved.programMeta
+        resolvedIdx := resolved.resolvedIdx? })
     -- Wires in declared input-port order (the canonical order; JS's
     -- stable sort leaves unknown ports trailing in JSON-key order,
     -- which JsonV preserves).
     if let some (.obj inputFields) := d.getField? "inputs" then
-      let declared := pm.inputNames
+      let declared := resolved.programMeta.inputNames
       let orderOf := fun (k : String) =>
         match declared.idxOf? k with
         | some i => i

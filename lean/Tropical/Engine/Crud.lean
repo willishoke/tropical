@@ -14,6 +14,11 @@ open Lean (Json toJson)
 open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
+structure InstanceResolution where
+  typeArgs : Option Json
+  programMeta : ProgMeta
+  resolvedIdx? : Option Tropical.Ir.ProgramIdx
+
 -- ── Per-tool handlers ────────────────────────────────────────────────────────
 
 private def instanceSummary (st : SessionSt) (name : String) : Json :=
@@ -39,7 +44,7 @@ private def instanceSummary (st : SessionSt) (name : String) : Json :=
 def resolveInstanceMeta (env : Env) (programName : String)
     (typeArgs : Option Json) (programParam : String)
     (toolEnvelopes : Bool := true) :
-    EngineM (Option Json × ProgMeta × Option Tropical.Ir.ProgramIdx) := do
+    EngineM InstanceResolution := do
   let st ← env.state.get
   match st.programs.get? programName with
   | none =>
@@ -60,14 +65,20 @@ def resolveInstanceMeta (env : Env) (programName : String)
       let keys := match ta with
         | .obj m => String.intercalate ", " (m.toList.map Prod.fst)
         | _ => ""
-      if keys.isEmpty then pure (none, pm, st.resolvedByName.get? programName)
+      if keys.isEmpty then pure {
+        typeArgs := none
+        programMeta := pm
+        resolvedIdx? := st.resolvedByName.get? programName }
       else if !toolEnvelopes then
         internalError s!"Program '{programName}' does not declare type_params; got type_args: {keys}"
       else
         throwBare .invalidTypeArgs
           (s!"Program '{programName}' does not declare type_params; got type_args: {keys}")
           (param := some "type_args") (value := some ta)
-    | none => pure (none, pm, st.resolvedByName.get? programName)
+    | none => pure {
+        typeArgs := none
+        programMeta := pm
+        resolvedIdx? := st.resolvedByName.get? programName }
 
 -- `define_program` is retired: new DSP types are authored as `Tropical.Stdlib`
 -- arrow builders, not defined over the wire. `load`/`merge` still ingest
@@ -85,9 +96,12 @@ def handleAddInstance (env : Env) (args : Json) : EngineM Json := do
   if (st.findInstance? instanceName).isSome then
     throwBare .instanceExists s!"Instance '{instanceName}' already exists."
       (param := some "instance_name") (value := some (Json.str instanceName))
-  let (typeArgs, pm, resolvedIdx) ← resolveInstanceMeta env programName (arg? args "type_args") "program"
+  let resolved ← resolveInstanceMeta env programName (arg? args "type_args") "program"
   env.state.modify (·.addInstance instanceName
-    { baseTypeName := programName, typeArgs, progMeta := pm, resolvedIdx })
+    { baseTypeName := programName
+      typeArgs := resolved.typeArgs
+      progMeta := resolved.programMeta
+      resolvedIdx := resolved.resolvedIdx? })
   pure (instanceSummary (← env.state.get) instanceName)
 
 def handleReplicate (env : Env) (args : Json) : EngineM Json := do
@@ -115,8 +129,12 @@ def handleReplicate (env : Env) (args : Json) : EngineM Json := do
       throwBare .instanceExists
         s!"Instance '{name}' already exists — pick a different name_prefix"
         (param := some "name_prefix") (value := namePrefix.map Json.str)
-    let (typeArgs, pm, resolvedIdx) ← resolveInstanceMeta env programName (arg? args "type_args") "program"
-    env.state.modify (·.addInstance name { baseTypeName := programName, typeArgs, progMeta := pm, resolvedIdx })
+    let resolved ← resolveInstanceMeta env programName (arg? args "type_args") "program"
+    env.state.modify (·.addInstance name {
+      baseTypeName := programName
+      typeArgs := resolved.typeArgs
+      progMeta := resolved.programMeta
+      resolvedIdx := resolved.resolvedIdx? })
     created := created.push (instanceSummary (← env.state.get) name)
   pure <| Json.mkObj [("created", Json.arr created)]
 
