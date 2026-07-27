@@ -1704,8 +1704,13 @@ inductive LiveRegion where
   | serOnly
   | crossing
 
-/-- WS-LP: classify a live-σ pair over its whole σ interval — `some (region,
-    nDepth, kDepth)` iff the pair sits in ONE non-coincident region at EVERY
+structure LiveBloomPairPlan where
+  region : LiveRegion
+  nDepth : Nat
+  kDepth : Nat
+
+/-- WS-LP: classify a live-σ pair over its whole σ interval — `some plan` iff
+    the pair sits in ONE non-coincident region at EVERY
     σ ∈ `[sigLo, sigHi]` (`serOnly` throughout, phase 1, or `crossing`
     throughout, phase 2), else `none` (the pair drops gracefully; a pair that
     CHANGES region across the interval is phase 3's union emit, and the
@@ -1718,7 +1723,7 @@ inductive LiveRegion where
     `zBnd` per region (κ itself for serOnly; the branch-boundary `|z| = |a+1|`
     for crossing), same `+8` guard and `≤ 300` cap. -/
 def classifyBloomPairLive (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
-    (B g : Float) : Option (LiveRegion × Nat × Nat) := Id.run do
+    (B g : Float) : Option LiveBloomPairPlan := Id.run do
   let kappa := mu.scale B
   let imA := (nuOmega - mu.im) / g
   -- Re a = (−σ_ν − Re μ)/g, decreasing in σ_ν
@@ -1746,7 +1751,7 @@ def classifyBloomPairLive (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
     let nRaw := samples.foldl (fun m re =>
       max m (bloomM1DepthD (CplxD.ofFloats re imA) kappa.toPoint bloomM1TolD)) 0
     if nRaw + 8 > 300 then return none
-    return some (.serOnly, nRaw + 8, 0)
+    return some { region := .serOnly, nDepth := nRaw + 8, kDepth := 0 }
   -- |a+1| dips below |κ| somewhere: crossing-throughout OR straddling (phase 3a
   -- — the union COLLAPSES onto the crossing lanes: on a serOnly-side config
   -- `dSwitch < 0`, the per-sample select sits on the series lane from d = 0,
@@ -1775,7 +1780,7 @@ def classifyBloomPairLive (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
     nRaw := max nRaw (bloomM1DepthD aP (if straddles then kP else zBnd) bloomM1TolD)
     kRaw := max kRaw (bloomCFDepthD aP zBnd bloomCFTolD)
   if nRaw + 8 > 300 || kRaw + 8 > 300 then return none
-  return some (.crossing, nRaw + 8, kRaw + 8)
+  return some { region := .crossing, nDepth := nRaw + 8, kDepth := kRaw + 8 }
 
 /-- `bloomedVoice ⋙ reverb` as Γ-bridge pairs — the residue composition ACROSS a
     pitch-bloom warp (`B = β·scale/g` seconds of total clock advance, `g` the
@@ -1824,7 +1829,7 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
         if !(sigIsS0 r.sigma) then return none
         match classifyBloomPairLive mu rOm sLo sHi B g with
         | none => continue   -- coincident / region-changing over the interval: graceful per-pair drop (Phase 3 widens)
-        | some (region, nDepth, kDepth) =>
+        | some plan =>
           -- the lift: every baked constant re-expressed as an s0 `CplxE` of the
           -- live pole. The clamp ENFORCES the classified interval in-kernel, so
           -- an out-of-range slot write saturates the crossing's σ instead of
@@ -1834,11 +1839,11 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
           let dNuMu := csubE nuE (cplxLitE mu)
           let aE := scaleRealE (litF (1.0 / g)) dNuMu
           let invNuMuE := cdivE cOneE dNuMu
-          let invA := (Array.range nDepth).map (fun k =>
+          let invA := (Array.range plan.nDepth).map (fun k =>
             cdivE cOneE (caddE aE (litF (k + 1).toFloat, lit 0)))
           let kappaB := mu.scale B
           let kE := cplxLitE kappaB
-          match region with
+          match plan.region with
           | .serOnly =>
             out := out.push {
               muSigma := litF vSig, muOmega := litF vOm
@@ -1854,9 +1859,9 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
             -- constant by the emitted `Γ★` (`bloomGammaStarE`, phase 0), and
             -- `dSwitch = (ln|κ| − ½·ln|a+1|²)/g` via `logSig` (the `clogE`
             -- modulus form — no sqrt in the vocabulary needed).
-            let cfB := (Array.range (kDepth + 1)).map (fun j =>
+            let cfB := (Array.range (plan.kDepth + 1)).map (fun j =>
               ((sub (litF (2 * j + 1).toFloat) aE.1, neg aE.2) : CplxE))
-            let cfN := (Array.range kDepth).map (fun j =>
+            let cfN := (Array.range plan.kDepth).map (fun j =>
               let jf := cplxLitE ⟨(j + 1).toFloat, 0⟩
               cmulE jf (csubE jf aE))
             let cfK := bloomCFE cfB cfN kE

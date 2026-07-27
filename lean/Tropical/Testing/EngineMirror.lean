@@ -42,15 +42,19 @@ def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
   | .error msg => internalError msg
   | .ok p => pure p
 
+structure StagedMirror where
+  sessionInput : Tropical.Compile.SessionInput
+  plan : Tropical.Plan.FlatPlan
+  stageBlocks : Array (Array (Option Tropical.Ir.Stage))
+
 /-- The stage-differential entry: the session input, the compiled plan,
     and the typed per-instruction stages in emit order. -/
 def compileMirrorStaged (env : Env) (mode : Tropical.Plan.CompilationMode) :
-    EngineM (Tropical.Compile.SessionInput × Tropical.Plan.FlatPlan
-      × Array (Array (Option Tropical.Ir.Stage))) := do
+    EngineM StagedMirror := do
   let input ← buildSessionInput env mode
   match Tropical.Compile.compileSessionStaged input with
   | .error msg => internalError msg
-  | .ok (p, blocks) => pure (input, p, blocks)
+  | .ok (plan, stageBlocks) => pure { sessionInput := input, plan, stageBlocks }
 
 def compileMirrorPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
     EngineM String := do

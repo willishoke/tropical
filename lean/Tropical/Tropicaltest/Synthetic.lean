@@ -279,7 +279,7 @@ def compilePatchStaged (path : String) :
     let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str path)])
     Tropical.Engine.compileMirrorStaged env .fused
   match ← act.run with
-  | .ok (_, plan, blocks) => pure (.ok (plan, blocks))
+  | .ok compiled => pure (.ok (compiled.plan, compiled.stageBlocks))
   | .error f => pure (.error f.toJson.compress)
 
 /-- Render a FlatPlan via the TYPED split (stage attribute →
@@ -491,4 +491,3 @@ def runMigrationGolden (writeMode : Bool) (fixture : String) : IO Bool := do
         | some expected =>
           if got == expected then passGate s!"{fixture}" s!"{got.take 16}"
           else failGate s!"{fixture}" s!"expected {expected.take 16} got {got.take 16}"
-
