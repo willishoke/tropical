@@ -123,12 +123,12 @@ def renderGraph (args : List String) : IO UInt32 := do
     | .ok j => pure j
   match ← Tropical.Playground.compilePlan j with
   | .error e => IO.eprintln s!"render-graph: compile: {e}"; return 1
-  | .ok (plan, _, stageBlocks) =>
-    let split ← Tropical.StagedLoad.splitTyped plan stageBlocks
+  | .ok compiled =>
+    let split ← Tropical.StagedLoad.splitTyped compiled.plan compiled.stageBlocks
     IO.eprintln s!"render-graph: hoisted columns={split.audio.coeffArraySlots.size}"
     let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
-    if metal then Tropical.StagedLoad.loadMslTyped rt plan stageBlocks
-    else Tropical.StagedLoad.loadTyped rt plan stageBlocks
+    if metal then Tropical.StagedLoad.loadMslTyped rt compiled.plan compiled.stageBlocks
+    else Tropical.StagedLoad.loadTyped rt compiled.plan compiled.stageBlocks
     if start != 0 then rt.setSampleIndex start.toUInt64
     let stdout ← IO.getStdout
     for _ in [0:frames] do

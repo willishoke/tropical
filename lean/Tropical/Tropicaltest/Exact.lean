@@ -896,7 +896,7 @@ def runExactCorpse : IO Bool := do
   let emitMods ← (do
     let entries ← (System.FilePath.mk dir).readDir
     let names := entries.filterMap fun e =>
-      if e.fileName.endsWith ".lean" then some (e.fileName.dropRight 5) else none
+      if e.fileName.endsWith ".lean" then some (e.fileName.dropEnd 5).toString else none
     pure (names.qsort fun a b => decide (a < b)))
   let mods := (emitMods.map (fun m => ("EmitArrow/" ++ m, s!"{dir}/{m}.lean")))
     |>.push ("Playground", "lean/Tropical/Playground.lean")

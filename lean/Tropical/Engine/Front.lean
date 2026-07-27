@@ -19,9 +19,11 @@ open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
 def handleListScopeTaps (env : Env) : EngineM Json := do
   let st ← env.state.get
-  let taps := st.scopeTaps.map fun (name, inst, out) =>
-    Json.mkObj [("name", Json.str name), ("instance", Json.str inst),
-                ("output", Json.str out), ("slot", Json.str s!"{inst}.{out}")]
+  let taps := st.scopeTaps.map fun tap =>
+    Json.mkObj [("name", Json.str tap.name),
+                ("instance", Json.str tap.sourceInstance),
+                ("output", Json.str tap.sourceOutput),
+                ("slot", Json.str tap.slot)]
   pure <| Json.mkObj [("taps", Json.arr taps)]
 
 /-- EXPERIMENT (`load_patch_graph`): compile a downstream-only patch graph (the
@@ -30,10 +32,10 @@ def handleListScopeTaps (env : Env) : EngineM Json := do
     `compileSession → buildKernelIr → loadIrStaged` tail. A compile failure
     errors BEFORE the load, so the previous kernel keeps playing. -/
 def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
-  let (plan, taps, stageBlocks) ← match ← Tropical.Playground.compilePlan args with
+  let compiled ← match ← Tropical.Playground.compilePlan args with
     | .error e => internalError e
     | .ok p => pure p
-  loadKernel env plan (some stageBlocks)
+  loadKernel env compiled.plan (some compiled.stageBlocks)
   -- Seed the session param mirror with the graph's knobs so `set_param` — which
   -- guards on the mirror, then drives the live `param:<name>` slot — reaches them
   -- without a relower. Replaces (not appends): the mirror tracks the current graph.
@@ -42,12 +44,12 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
   -- this graph's inspection points via `list_scope_taps` with no session wiring.
   env.state.modify (fun st => { st with
     params := Tropical.Playground.knobParams args
-    scopeTaps := taps
-    paramDisciplines := plan.paramDisciplines })
+    scopeTaps := compiled.taps
+    paramDisciplines := compiled.plan.paramDisciplines })
   -- The realized-state report: facts about what compiled (active/excluded
   -- nodes, wired/normalled inputs, live params with disciplines, taps) —
   -- never warnings. `ok` stays for callers that only ever looked at it.
-  pure <| Tropical.Playground.realizedReport args taps
+  pure <| Tropical.Playground.realizedReport args compiled.taps
 
 def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   wrap <| match name with

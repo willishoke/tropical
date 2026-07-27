@@ -1,6 +1,7 @@
 import Std.Data.HashMap
 import Lean.Data.Json
 import Tropical.Plan
+import Tropical.Ir.EmitCommon
 
 /-!
 # EmitLlvm — `FlatPlan → textual LLVM IR`
@@ -32,8 +33,9 @@ parser reproduces them exactly rather than risking decimal round-trip.
 
 namespace Tropical.Ir.EmitLlvm
 
-open Lean (Json JsonNumber)
+open Lean (Json)
 open Tropical.Plan
+open Tropical.Ir.EmitCommon
 
 abbrev ScalarType := Tropical.Plan.ScalarType
 
@@ -48,16 +50,6 @@ def hex16 (u : UInt64) : String :=
 
 /-- An f64 LLVM literal as raw IEEE-754 bits — exact, parser-safe. -/
 def f64Lit (x : Float) : String := hex16 x.toBits
-
-/-- Integer value of a JsonNumber const (truncates the decimal exponent,
-    matching the C++ parser's `static_cast<int64_t>(const_val)`). -/
-def jnToInt (n : JsonNumber) : Int :=
-  -- n = mantissa × 10^(-exponent); the const path only carries integers
-  -- for int/bool operands, so exponent is 0 in-corpus. Guard anyway.
-  let rec divPow (m : Int) : Nat → Int
-    | 0 => m
-    | k+1 => divPow (m / 10) k
-  divPow n.mantissa n.exponent
 
 def llTy : ScalarType → String
   | .float => "double" | .int => "i64" | .bool => "i1"
@@ -212,9 +204,10 @@ def labelLine (l : String) : M Unit :=
   modify fun s => { s with lines := s.lines.push (l ++ ":"), curBlock := l }
 
 /-- The arrayReg slot of an operand (for Index/SetElement/elementwise). -/
-def arrayRegSlot : NOperand → M Nat
-  | .arrayReg s => pure s
-  | _ => fail "EmitLlvm: expected an arrayReg operand"
+def arrayRegSlot (operand : NOperand) : M Nat :=
+  match expectArrayReg "EmitLlvm" operand with
+  | .ok slot => pure slot
+  | .error e => fail e
 
 -- ─────────────────────────────────────────────────────────────
 -- Operand resolution (mirrors EmitCtx::resolve_typed)
@@ -222,8 +215,8 @@ def arrayRegSlot : NOperand → M Nat
 
 def resolveOperand : NOperand → M TVal
   | .const v t => match t with
-    | .int  => pure ⟨toString (jnToInt v), .int⟩
-    | .bool => pure ⟨if jnToInt v != 0 then "true" else "false", .bool⟩
+    | .int  => pure ⟨toString (jsonNumberToInt v), .int⟩
+    | .bool => pure ⟨if jsonNumberToInt v != 0 then "true" else "false", .bool⟩
     | .float => pure ⟨f64Lit v.toFloat, .float⟩
   | .reg slot _ => do
     -- Inside a reduction region, an accumulator temp reads the running
@@ -297,8 +290,9 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
   let eitherInt : M Bool := do
     pure (((args[0]?).map (·.ty == .int)).getD false ||
           ((args[1]?).map (·.ty == .int)).getD false)
-  let some op := Tropical.Plan.PlanOp.ofString? tag
-    | fail s!"EmitLlvm: unsupported op '{tag}'"
+  let op ← match validateScalarOp "EmitLlvm" tag args.size with
+    | .ok op => pure op
+    | .error e => fail e
   match op with
   | .add => if isInt then binI "add" (← aI 0) (← aI 1) else binF "fadd" (← aF 0) (← aF 1)
   | .sub => if isInt then binI "sub" (← aI 0) (← aI 1) else binF "fsub" (← aF 0) (← aF 1)

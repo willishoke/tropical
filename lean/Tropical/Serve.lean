@@ -30,7 +30,7 @@ def run (addr : String) : IO Unit := do
     | none => break  -- socket shut down
     | some (clientId, line) =>
       let resp ←
-        match Json.parse line.trim with
+        match Json.parse line.trimAscii.toString with
         | .error e => pure (Rpc.errorEnvelope Json.null s!"parse error: {e}")
         | .ok req  => Rpc.handleRequest env req
       Ffi.Socket.sendResponse sock clientId resp.compress

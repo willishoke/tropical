@@ -266,7 +266,7 @@ end CycleRefusal
 def sortedNames (dir : String) (suffix : String) : IO (Array String) := do
   let entries ← (System.FilePath.mk dir).readDir
   let names := entries.filterMap fun e =>
-    if e.fileName.endsWith suffix then some (e.fileName.dropRight suffix.length) else none
+    if e.fileName.endsWith suffix then some (e.fileName.dropEnd suffix.length).toString else none
   pure (names.qsort fun a b => decide (a < b))
 
 /-- Compile a patch through the session mirror, returning the plan plus
@@ -279,7 +279,7 @@ def compilePatchStaged (path : String) :
     let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str path)])
     Tropical.Engine.compileMirrorStaged env .fused
   match ← act.run with
-  | .ok (_, plan, blocks) => pure (.ok (plan, blocks))
+  | .ok compiled => pure (.ok (compiled.plan, compiled.stageBlocks))
   | .error f => pure (.error f.toJson.compress)
 
 /-- Render a FlatPlan via the TYPED split (stage attribute →
@@ -491,4 +491,3 @@ def runMigrationGolden (writeMode : Bool) (fixture : String) : IO Bool := do
         | some expected =>
           if got == expected then passGate s!"{fixture}" s!"{got.take 16}"
           else failGate s!"{fixture}" s!"expected {expected.take 16} got {got.take 16}"
-

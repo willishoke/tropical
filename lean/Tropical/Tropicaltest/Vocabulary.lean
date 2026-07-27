@@ -88,7 +88,8 @@ def runVocabDriven (arena : Arena)
     let patch := Lean.Json.mkObj [("nodes", Lean.Json.arr nodes), ("out", .str "outn")]
     match Tropical.Playground.compilePlanPure arena resolved patch with
     | .error e => ok := false; issues := issues.push s!"{kind}: compile: {firstLine e}"
-    | .ok (plan, _, _) =>
+    | .ok compiled =>
+      let plan := compiled.plan
       covered := covered + 1
       -- every table knob must land as a slot: raw/anchor knobs under the bare
       -- name, glided knobs as their #v0 anchor triple.
@@ -326,7 +327,9 @@ def runManifestDisciplines (arena : Arena)
   | .ok ju, .ok jw =>
     match Tropical.Playground.compilePlanPure arena resolved ju,
           Tropical.Playground.compilePlanPure arena resolved jw with
-    | .ok (pu, _, _), .ok (pw, _, _) =>
+    | .ok compiledU, .ok compiledW =>
+      let pu := compiledU.plan
+      let pw := compiledW.plan
       let mut issues := check "unwired" pu ++ check "wired" pw
       if !(pu.paramDisciplines.any (·.name == "sfw.rate")) then
         issues := issues.push "unwired: sfw.rate missing from disciplines"
@@ -409,7 +412,8 @@ def runDeadSlotLint (arena : Arena)
     | .ok j =>
       match Tropical.Playground.compilePlanPure arena resolved j with
       | .error e => IO.println s!"  FAIL  dead-slot-lint  {label}: compile: {firstLine e}"; ok := false
-      | .ok (plan, _, _) =>
+      | .ok compiled =>
+        let plan := compiled.plan
         -- Byte-identity harness for refactor phases: TROPICAL_DUMP_PLANS=<dir>
         -- writes each canonical plan's wire form for before/after comparison
         -- (a refactor that promises plan identity proves it with `cmp`).
