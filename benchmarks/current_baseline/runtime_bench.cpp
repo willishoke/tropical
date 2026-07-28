@@ -441,6 +441,7 @@ int main(int argc, char ** argv)
     uint64_t reconnect_failure_count = 0;
     uint64_t ownership_failure_count = 0;
     uint64_t reference_ownership_failure_count = 0;
+    uint64_t metal_dispatch_failure_count = 0;
     uint64_t nonfinite_count = 0;
     double checksum = 0.0;
     double write_value = o.slot_value;
@@ -712,6 +713,8 @@ int main(int argc, char ** argv)
           tropical_runtime_ownership_failure_count(rt);
         reference_ownership_failure_count =
           tropical_runtime_ownership_failure_count(reference_rt);
+        metal_dispatch_failure_count =
+          tropical_runtime_metal_dispatch_failure_count(rt);
         if (tropical_dac_is_reconnecting(dac) || disconnect_count > 0
             || reconnect_success_count > 0 || reconnect_failure_count > 0)
         {
@@ -727,6 +730,13 @@ int main(int argc, char ** argv)
           dac_abort_reason = ownership_failure_count > 0
             ? "live_runtime_ownership_failure"
             : "reference_runtime_ownership_failure";
+          snapshot("measured_failure_abort");
+          break;
+        }
+        if (metal_dispatch_failure_count > 0)
+        {
+          dac_aborted = true;
+          dac_abort_reason = "metal_dispatch_failure";
           snapshot("measured_failure_abort");
           break;
         }
@@ -937,6 +947,8 @@ int main(int argc, char ** argv)
         tropical_runtime_ownership_failure_count(rt);
       reference_ownership_failure_count =
         tropical_runtime_ownership_failure_count(reference_rt);
+      metal_dispatch_failure_count =
+        tropical_runtime_metal_dispatch_failure_count(rt);
 
       callback_histogram.resize(
         tropical_dac_callback_histogram_bin_count(), 0);
@@ -1068,6 +1080,8 @@ int main(int argc, char ** argv)
     }
     ownership_failure_count =
       tropical_runtime_ownership_failure_count(rt);
+    metal_dispatch_failure_count =
+      tropical_runtime_metal_dispatch_failure_count(rt);
     const uint64_t final_rss = required_rss_bytes();
 
     auto print_optional = [](const std::optional<uint64_t> & value) {
@@ -1109,6 +1123,8 @@ int main(int argc, char ** argv)
               << ownership_failure_count
               << ",\"reference_ownership_failure_count\":"
               << reference_ownership_failure_count
+              << ",\"metal_dispatch_failure_count\":"
+              << metal_dispatch_failure_count
               << ",\"reload_artifacts_distinct\":"
               << (reload_artifacts_distinct ? "true" : "false")
               << ",\"overrun_count\":" << overrun_count

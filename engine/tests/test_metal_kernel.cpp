@@ -11,6 +11,7 @@
 
 #include "c_api/tropical_c.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -402,6 +403,89 @@ static void test_metal_pipeline_invalid_depth()
   printf("PASS  metal invalid pipeline depth refuses clearly\n");
 }
 
+/** 9. A deterministic completion failure must reject the whole block before
+ *     output copy, emit silence, increment sticky telemetry once, latch the
+ *     failed kernel silent until replacement, and never strand either the
+ *     synchronous or pipelined wait path. No DAC is opened. */
+static void test_metal_dispatch_failure_fail_closed()
+{
+  using Clock = std::chrono::steady_clock;
+  const unsigned int buf = 16;
+  const std::string msl = msl_kernel(
+    "    output_buffer[s] = slots[0];");
+
+  for (const unsigned int depth : {0u, 3u})
+  {
+    setenv("TROPICAL_METAL_TEST_FAIL_DISPATCH_AT", "2", 1);
+    if (depth > 0)
+      setenv("TROPICAL_METAL_PIPELINE_DEPTH", "3", 1);
+
+    tropical_runtime_t rt = tropical_runtime_new(buf);
+    if (!rt)
+    {
+      unsetenv("TROPICAL_METAL_TEST_FAIL_DISPATCH_AT");
+      unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
+      ++g_fail;
+      return;
+    }
+    const bool loaded =
+      tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
+                                   msl.c_str(), msl.size(),
+                                   MANIFEST, strlen(MANIFEST));
+    // create() captured both test controls; realtime dispatch never reads
+    // the environment.
+    unsetenv("TROPICAL_METAL_TEST_FAIL_DISPATCH_AT");
+    unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
+    ASSERT(loaded);
+    ASSERT(tropical_runtime_metal_pipeline_depth(rt) == depth);
+    ASSERT(tropical_runtime_metal_dispatch_failure_count(rt) == 0);
+
+    // Establish nonzero prior output so a failed command cannot pass by
+    // leaving stale samples in FlatRuntime's output buffer.
+    tropical_runtime_process(rt);
+    const double * out = tropical_runtime_output_buffer(rt);
+    for (unsigned int i = 0; i < buf; ++i)
+      ASSERT_NEAR(out[i], 0.25, 1e-7);
+
+    const auto failure_start = Clock::now();
+    tropical_runtime_process(rt);
+    const double failure_seconds =
+      std::chrono::duration<double>(Clock::now() - failure_start).count();
+    ASSERT(failure_seconds < 5.0);
+    for (unsigned int i = 0; i < buf; ++i)
+      ASSERT(out[i] == 0.0);
+    ASSERT(tropical_runtime_metal_dispatch_failure_count(rt) == 1);
+
+    // The failed kernel is latched: subsequent callbacks return silent without
+    // another wait/dispatch and do not count one underlying command twice.
+    const auto latched_start = Clock::now();
+    tropical_runtime_process(rt);
+    const double latched_seconds =
+      std::chrono::duration<double>(Clock::now() - latched_start).count();
+    ASSERT(latched_seconds < 1.0);
+    for (unsigned int i = 0; i < buf; ++i)
+      ASSERT(out[i] == 0.0);
+    ASSERT(tropical_runtime_metal_dispatch_failure_count(rt) == 1);
+
+    // A fresh MetalKernel clears the execution latch, while FlatRuntime's
+    // monotonic evidence survives the hot-swap.
+    if (depth > 0)
+      setenv("TROPICAL_METAL_PIPELINE_DEPTH", "3", 1);
+    const bool reloaded =
+      tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
+                                   msl.c_str(), msl.size(),
+                                   MANIFEST, strlen(MANIFEST));
+    unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
+    ASSERT(reloaded);
+    tropical_runtime_process(rt);
+    for (unsigned int i = 0; i < buf; ++i)
+      ASSERT_NEAR(out[i], 0.25, 1e-7);
+    ASSERT(tropical_runtime_metal_dispatch_failure_count(rt) == 1);
+    tropical_runtime_free(rt);
+  }
+  printf("PASS  metal failure latches silent until fresh kernel (sync and pipeline)\n");
+}
+
 /** 4. set_sample_index repositions the clock (the render --start hook). */
 static void test_metal_set_index()
 {
@@ -432,6 +516,7 @@ int main()
   test_metal_columns_pipelined();
   test_metal_pipeline_depth_sweep();
   test_metal_pipeline_invalid_depth();
+  test_metal_dispatch_failure_fail_closed();
   if (g_fail == 0) printf("ALL METAL TESTS PASSED\n");
   return g_fail == 0 ? 0 : 1;
 }

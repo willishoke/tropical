@@ -19,6 +19,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <vector>
@@ -60,6 +61,14 @@ id<MTLCommandQueue> shared_queue()
 // up to D blocks.
 static constexpr uint32_t kMaxPipelineDepth = 3;
 
+enum class RingDispatchState : uint8_t
+{
+  NeverSubmitted,
+  Pending,
+  Succeeded,
+  Failed,
+};
+
 struct MetalKernel
 {
   id<MTLComputePipelineState> pso    = nil;
@@ -85,9 +94,28 @@ struct MetalKernel
   // a shared one.
   id<MTLBuffer>        ring_columns[kMaxPipelineDepth] = { nil, nil, nil };
   dispatch_semaphore_t ring_done[kMaxPipelineDepth]    = { nullptr, nullptr, nullptr };
+  // Retaining the command buffer until its ring entry is consumed lets the
+  // audio thread classify the completed dispatch from Metal's authoritative
+  // status/error before it reads shared output. The completion handler only
+  // signals a preallocated semaphore, so teardown remains safe even when a
+  // superseded kernel still has futures in flight.
+  id<MTLCommandBuffer> ring_command[kMaxPipelineDepth] = { nil, nil, nil };
+  RingDispatchState ring_state[kMaxPipelineDepth] = {
+    RingDispatchState::NeverSubmitted,
+    RingDispatchState::NeverSubmitted,
+    RingDispatchState::NeverSubmitted,
+  };
   bool     primed       = false;
   uint32_t read_pos     = 0;
   uint64_t next_enqueue = 0;   // sample index of the next block to submit
+
+  // Deterministic no-DAC test seam, captured once at construction so the
+  // realtime path never reads the environment. 0 disables it; N classifies
+  // the Nth otherwise-successful completed command as failed.
+  uint64_t test_fail_dispatch_at = 0;
+  uint64_t completed_dispatches  = 0;
+  bool dispatch_failure_latched  = false;
+  bool dispatch_failure_unreported = false;
 };
 
 static bool configure_pipeline_depth(uint32_t & depth, std::string & err)
@@ -114,23 +142,95 @@ static bool configure_pipeline_depth(uint32_t & depth, std::string & err)
   return true;
 }
 
+static bool configure_test_failure(MetalKernel & k, std::string & err)
+{
+  const char * raw = getenv("TROPICAL_METAL_TEST_FAIL_DISPATCH_AT");
+  if (!raw || !*raw)
+    return true;
+
+  errno = 0;
+  char * end = nullptr;
+  const unsigned long long parsed = std::strtoull(raw, &end, 10);
+  if (errno != 0 || end == raw || *end != '\0' || parsed == 0)
+  {
+    err = "MetalKernel: TROPICAL_METAL_TEST_FAIL_DISPATCH_AT must be a positive integer";
+    return false;
+  }
+  k.test_fail_dispatch_at = static_cast<uint64_t>(parsed);
+  return true;
+}
+
+static bool completed_successfully(MetalKernel & k,
+                                   id<MTLCommandBuffer> command)
+{
+  if (!command)
+    return false;
+
+  ++k.completed_dispatches;
+  const bool injected =
+    k.test_fail_dispatch_at != 0
+    && k.completed_dispatches == k.test_fail_dispatch_at;
+  return !injected
+      && command.status == MTLCommandBufferStatusCompleted
+      && command.error == nil;
+}
+
+static void latch_dispatch_failure(MetalKernel & k)
+{
+  if (!k.dispatch_failure_latched)
+  {
+    k.dispatch_failure_latched = true;
+    k.dispatch_failure_unreported = true;
+  }
+}
+
+static bool fail_ring_submission(MetalKernel & k, uint32_t j)
+{
+  k.ring_command[j] = nil;
+  k.ring_state[j] = RingDispatchState::Failed;
+  if (k.ring_done[j])
+    dispatch_semaphore_signal(k.ring_done[j]);
+  return false;
+}
+
 // Submit block `start` into ring slot j (no wait). The completion handler
 // signals ring_done[j]; Metal retains the buffers until completion, and ARC
 // keeps the captured semaphore alive, so teardown mid-flight is safe (the
 // semaphores start at 0 and only ever get signaled — never destroyed below
 // their initial value).
-static void enqueue_block(MetalKernel & k, uint32_t j,
+static bool enqueue_block(MetalKernel & k, uint32_t j,
                           const double * slots, uint32_t n_slots,
                           const float * columns, uint32_t n_columns,
-                          double sample_rate, uint64_t start, uint32_t len)
+                          double sample_rate, uint64_t start, uint32_t len,
+                          bool commit_immediately)
 {
+  k.ring_state[j] = RingDispatchState::Pending;
+  k.ring_command[j] = nil;
+  if (!k.ring_done[j] || !k.pso || !k.ring_out[j] || !k.ring_slots[j]
+      || (k.column_count > 0 && !k.ring_columns[j]))
+  {
+    // create() rejects these conditions. Keeping this path terminal makes a
+    // future platform allocation anomaly fail closed instead of waiting on a
+    // semaphore that no command can signal.
+    return fail_ring_submission(k, j);
+  }
+
   const uint32_t n = std::min<uint32_t>(n_slots, k.slot_count);
   float * sdst = static_cast<float *>(k.ring_slots[j].contents);
+  if (!sdst)
+    return fail_ring_submission(k, j);
   for (uint32_t i = 0; i < n; ++i)
     sdst[i] = static_cast<float>(slots[i]);
 
-  id<MTLCommandBuffer> cb = [shared_queue() commandBuffer];
+  id<MTLCommandQueue> queue = shared_queue();
+  if (!queue)
+    return fail_ring_submission(k, j);
+  id<MTLCommandBuffer> cb = [queue commandBuffer];
+  if (!cb)
+    return fail_ring_submission(k, j);
   id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+  if (!enc)
+    return fail_ring_submission(k, j);
   [enc setComputePipelineState:k.pso];
   [enc setBuffer:k.ring_out[j] offset:0 atIndex:0];
   [enc setBuffer:k.ring_slots[j] offset:0 atIndex:1];
@@ -146,8 +246,14 @@ static void enqueue_block(MetalKernel & k, uint32_t j,
     // guarantee; the per-ring buffer keeps it from racing an in-flight
     // dispatch.
     const uint32_t nc = std::min<uint32_t>(n_columns, k.column_count);
+    void * cdst = k.ring_columns[j].contents;
+    if (!cdst)
+    {
+      [enc endEncoding];
+      return fail_ring_submission(k, j);
+    }
     if (columns && nc > 0)
-      std::memcpy(k.ring_columns[j].contents, columns, nc * sizeof(float));
+      std::memcpy(cdst, columns, nc * sizeof(float));
     [enc setBuffer:k.ring_columns[j] offset:0 atIndex:3];
   }
   const NSUInteger tg =
@@ -159,7 +265,28 @@ static void enqueue_block(MetalKernel & k, uint32_t j,
   [cb addCompletedHandler:^(id<MTLCommandBuffer>) {
     dispatch_semaphore_signal(done);
   }];
-  [cb commit];
+  // Retain the exact command whose completion signals this entry. The consumer
+  // reads status/error after the acquire wait and before touching ring_out.
+  k.ring_command[j] = cb;
+  if (commit_immediately)
+    [cb commit];
+  return true;
+}
+
+static bool wait_for_ring(MetalKernel & k, uint32_t j)
+{
+  if (!k.ring_done[j])
+  {
+    k.ring_state[j] = RingDispatchState::Failed;
+    return false;
+  }
+  dispatch_semaphore_wait(k.ring_done[j], DISPATCH_TIME_FOREVER);
+  if (k.ring_state[j] == RingDispatchState::Pending)
+    k.ring_state[j] = completed_successfully(k, k.ring_command[j])
+      ? RingDispatchState::Succeeded
+      : RingDispatchState::Failed;
+  k.ring_command[j] = nil;
+  return k.ring_state[j] == RingDispatchState::Succeeded;
 }
 
 MetalKernelPtr create(const std::string & msl_source,
@@ -224,6 +351,8 @@ MetalKernelPtr create(const std::string & msl_source,
 
     if (!configure_pipeline_depth(k->depth, err))
       return nullptr;
+    if (!configure_test_failure(*k, err))
+      return nullptr;
     if (k->depth > 0)
     {
       for (uint32_t j = 0; j < k->depth; ++j)
@@ -240,7 +369,7 @@ MetalKernelPtr create(const std::string & msl_source,
           { err = "MetalKernel: ring column allocation failed"; return nullptr; }
         }
         k->ring_done[j] = dispatch_semaphore_create(0);
-        if (!k->ring_out[j] || !k->ring_slots[j])
+        if (!k->ring_out[j] || !k->ring_slots[j] || !k->ring_done[j])
         { err = "MetalKernel: ring allocation failed"; return nullptr; }
       }
     }
@@ -255,6 +384,10 @@ bool process_block(MetalKernel & k,
                    double * out_f64, uint32_t len)
 {
   if (len == 0 || len > k.capacity) return false;
+  // A failed command invalidates this kernel's dispatch stream. Do not submit,
+  // wait, or expose any later ring contents until control publishes a fresh
+  // MetalKernel; FlatRuntime continues advancing time with silent blocks.
+  if (k.dispatch_failure_latched) return false;
 
   if (k.depth > 0)
   {
@@ -268,28 +401,55 @@ bool process_block(MetalKernel & k,
       const uint64_t expected =
         k.next_enqueue >= queued ? k.next_enqueue - queued
                                  : std::numeric_limits<uint64_t>::max();
+      bool discarded_failure = false;
       if (!k.primed || expected != start_sample_index)
       {
         if (k.primed)  // drain stale futures before re-priming
           for (uint32_t j = 0; j < k.depth; ++j)
-            dispatch_semaphore_wait(k.ring_done[j], DISPATCH_TIME_FOREVER);
+            discarded_failure = !wait_for_ring(k, j) || discarded_failure;
+        if (discarded_failure)
+        {
+          latch_dispatch_failure(k);
+          return false;
+        }
         k.next_enqueue = start_sample_index;
         k.read_pos = 0;
         for (uint32_t j = 0; j < k.depth; ++j)
         {
-          enqueue_block(k, j, slots, n_slots, columns, n_columns,
-                        sample_rate, k.next_enqueue, len);
+          if (!enqueue_block(k, j, slots, n_slots, columns, n_columns,
+                             sample_rate, k.next_enqueue, len, true))
+          {
+            latch_dispatch_failure(k);
+            return false;
+          }
           k.next_enqueue += len;
         }
         k.primed = true;
       }
       const uint32_t j = k.read_pos;
-      dispatch_semaphore_wait(k.ring_done[j], DISPATCH_TIME_FOREVER);
-      const float * src = static_cast<const float *>(k.ring_out[j].contents);
+      const bool current_success = wait_for_ring(k, j);
+      const float * src =
+        static_cast<const float *>(k.ring_out[j].contents);
+      if (!current_success || !src)
+      {
+        latch_dispatch_failure(k);
+        return false;
+      }
+      // Refill the consumed entry before accepting even the successful current
+      // output. A nil queue/buffer/encoder path therefore fails this callback
+      // closed and cannot expose a block from a now-invalid dispatch stream.
+      if (!enqueue_block(k, j, slots, n_slots, columns, n_columns,
+                         sample_rate, k.next_enqueue, len, false))
+      {
+        latch_dispatch_failure(k);
+        return false;
+      }
+      // The replacement command is fully encoded but cannot overwrite the
+      // shared ring output until commit. Copy the completed command first,
+      // then start the replacement.
       for (uint32_t i = 0; i < len; ++i)
         out_f64[i] = static_cast<double>(src[i]);
-      enqueue_block(k, j, slots, n_slots, columns, n_columns,
-                    sample_rate, k.next_enqueue, len);
+      [k.ring_command[j] commit];
       k.next_enqueue += len;
       k.read_pos = (j + 1) % k.depth;
       return true;
@@ -298,14 +458,42 @@ bool process_block(MetalKernel & k,
 
   @autoreleasepool
   {
+    if (!k.pso || !k.out || !k.slots
+        || (k.column_count > 0 && !k.columns))
+    {
+      latch_dispatch_failure(k);
+      return false;
+    }
+
     // Slot snapshot: f64 host truth → f32 shared buffer, once per block.
     const uint32_t n = std::min<uint32_t>(n_slots, k.slot_count);
     float * sdst = static_cast<float *>(k.slots.contents);
+    if (!sdst)
+    {
+      latch_dispatch_failure(k);
+      return false;
+    }
     for (uint32_t i = 0; i < n; ++i)
       sdst[i] = static_cast<float>(slots[i]);
 
-    id<MTLCommandBuffer> cb = [shared_queue() commandBuffer];
+    id<MTLCommandQueue> queue = shared_queue();
+    if (!queue)
+    {
+      latch_dispatch_failure(k);
+      return false;
+    }
+    id<MTLCommandBuffer> cb = [queue commandBuffer];
+    if (!cb)
+    {
+      latch_dispatch_failure(k);
+      return false;
+    }
     id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
+    if (!enc)
+    {
+      latch_dispatch_failure(k);
+      return false;
+    }
     [enc setComputePipelineState:k.pso];
     [enc setBuffer:k.out offset:0 atIndex:0];
     [enc setBuffer:k.slots offset:0 atIndex:1];
@@ -322,8 +510,15 @@ bool process_block(MetalKernel & k,
       // one consistent generation of columns, no cross-column tear on a
       // live knob move.
       const uint32_t nc = std::min<uint32_t>(n_columns, k.column_count);
+      void * cdst = k.columns.contents;
+      if (!cdst)
+      {
+        [enc endEncoding];
+        latch_dispatch_failure(k);
+        return false;
+      }
       if (columns && nc > 0)
-        std::memcpy(k.columns.contents, columns, nc * sizeof(float));
+        std::memcpy(cdst, columns, nc * sizeof(float));
       [enc setBuffer:k.columns offset:0 atIndex:3];
     }
     const NSUInteger tg =
@@ -333,13 +528,29 @@ bool process_block(MetalKernel & k,
     [enc endEncoding];
     [cb commit];
     [cb waitUntilCompleted];
-    if (cb.error != nil) return false;
+    if (!completed_successfully(k, cb))
+    {
+      latch_dispatch_failure(k);
+      return false;
+    }
 
     const float * src = static_cast<const float *>(k.out.contents);
+    if (!src)
+    {
+      latch_dispatch_failure(k);
+      return false;
+    }
     for (uint32_t i = 0; i < len; ++i)
       out_f64[i] = static_cast<double>(src[i]);
     return true;
   }
+}
+
+bool take_dispatch_failure(MetalKernel & k)
+{
+  const bool value = k.dispatch_failure_unreported;
+  k.dispatch_failure_unreported = false;
+  return value;
 }
 
 uint32_t pipeline_depth(const MetalKernel & k)

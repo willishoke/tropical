@@ -394,6 +394,13 @@ uint64_t tropical_runtime_ownership_failure_count(tropical_runtime_t r)
     ->ownership_failure_count();
 }
 
+uint64_t tropical_runtime_metal_dispatch_failure_count(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_dispatch_failure_count();
+}
+
 void tropical_runtime_begin_fade_in(tropical_runtime_t r)
 {
   if (r) static_cast<tropical_runtime::FlatRuntime*>(r)->begin_fade_in();

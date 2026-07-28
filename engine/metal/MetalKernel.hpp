@@ -44,12 +44,19 @@ MetalKernelPtr create(const std::string & msl_source,
 /// coefficient columns (`columns` — already narrowed to f32 by the caller
 /// from ONE whole captured generation), encode one thread per sample,
 /// commit, wait, widen the f32 output into `out_f64`. Returns false on a
-/// device/command-buffer error (caller emits silence).
+/// device/command-buffer error before copying output. A failure latches this
+/// kernel closed: later calls return false immediately until control publishes
+/// a fresh MetalKernel (caller emits silence throughout).
 bool process_block(MetalKernel & k,
                    const double * slots, uint32_t n_slots,
                    const float * columns, uint32_t n_columns,
                    double sample_rate, uint64_t start_sample_index,
                    double * out_f64, uint32_t len);
+
+/// Consume the one-shot report for a newly latched dispatch failure. Once
+/// latched, process_block remains false until this MetalKernel is replaced;
+/// consuming the report does not clear the latch.
+bool take_dispatch_failure(MetalKernel & k);
 
 /// Qualification diagnostic: zero for synchronous dispatch, otherwise the
 /// configured number of future blocks.  This is deliberately runtime-only;

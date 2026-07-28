@@ -43,6 +43,7 @@ def passing_result() -> dict:
         "reconnect_failure_count": 0,
         "ownership_failure_count": 0,
         "reference_ownership_failure_count": 0,
+        "metal_dispatch_failure_count": 0,
         "reload_artifacts_distinct": True,
         "dac_stats": {
             "callback_count": 100,
@@ -236,6 +237,13 @@ class AcceptanceGateTests(unittest.TestCase):
         gates, failures = self.evaluate(result)
         self.assertFalse(gates["zero_runtime_ownership_failures"])
         self.assertIn("zero_runtime_ownership_failures", failures)
+
+    def test_metal_dispatch_failure_blocks_qualification(self) -> None:
+        result = passing_result()
+        result["metal_dispatch_failure_count"] = 1
+        gates, failures = self.evaluate(result)
+        self.assertFalse(gates["zero_metal_dispatch_failures"])
+        self.assertIn("zero_metal_dispatch_failures", failures)
 
     def test_missing_production_discipline_blocks_qualification(self) -> None:
         result = passing_result()

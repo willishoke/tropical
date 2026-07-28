@@ -305,6 +305,8 @@ def evaluate_acceptance(result: dict[str, Any],
         "zero_runtime_ownership_failures":
             result.get("ownership_failure_count") == 0
             and result.get("reference_ownership_failure_count") == 0,
+        "zero_metal_dispatch_failures":
+            result.get("metal_dispatch_failure_count") == 0,
         "all_required_events_completed":
             all(event_completion.get(name, False) for name in (
                 "baseline", "writes", "writes_stopped", "clock_jump", "hot_swap",
@@ -491,6 +493,10 @@ def run_latency_matrix(stream, work: Path) -> None:
             if jit.get("ownership_failure_count") != 0:
                 raise RuntimeError(
                     f"JIT ownership failure at B={buffer} {discipline}")
+            if jit.get("metal_dispatch_failure_count") != 0:
+                raise RuntimeError(
+                    f"unexpected JIT Metal dispatch failure at B={buffer} "
+                    f"{discipline}")
             if jit["latency_blocks"] != 0:
                 raise RuntimeError(
                     f"JIT latency canary at B={buffer} {discipline} "
@@ -520,6 +526,10 @@ def run_latency_matrix(stream, work: Path) -> None:
                 if result.get("ownership_failure_count") != 0:
                     raise RuntimeError(
                         f"Metal ownership failure at B={buffer} D={depth} "
+                        f"{discipline}")
+                if result.get("metal_dispatch_failure_count") != 0:
+                    raise RuntimeError(
+                        f"Metal dispatch failure at B={buffer} D={depth} "
                         f"{discipline}")
                 if result["pipeline_depth"] != depth or observed != depth:
                     raise RuntimeError(

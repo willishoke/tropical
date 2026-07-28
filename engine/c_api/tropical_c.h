@@ -154,6 +154,11 @@ unsigned int     tropical_runtime_metal_pipeline_depth(tropical_runtime_t);
    ownership acquisition could not obtain a coherent snapshot. Qualification
    requires zero. */
 uint64_t         tropical_runtime_ownership_failure_count(tropical_runtime_t);
+/* Sticky monotonic count of underlying Metal dispatch failures. One failed
+   command latches its kernel silent but increments this counter only once;
+   replacement does not erase the evidence. Always 0 for JIT/non-Metal builds;
+   qualification requires zero. */
+uint64_t         tropical_runtime_metal_dispatch_failure_count(tropical_runtime_t);
 
 /* Fade control (for DAC) */
 void             tropical_runtime_begin_fade_in(tropical_runtime_t);

@@ -199,6 +199,10 @@ if(TROPICAL_BUILD_TESTS)
         target_compile_features(test_metal_kernel PRIVATE cxx_std_20)
         target_link_libraries(test_metal_kernel PRIVATE tropical_core)
         add_test(NAME current_metal_kernel COMMAND test_metal_kernel)
+        # Includes deterministic sync + pipelined command-failure injection.
+        # A stranded completion semaphore is a bounded test failure, not a
+        # wedged test runner.
+        set_tests_properties(current_metal_kernel PROPERTIES TIMEOUT 30)
     endif()
 endif()
 

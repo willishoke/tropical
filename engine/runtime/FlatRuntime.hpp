@@ -447,7 +447,12 @@ public:
               static_cast<uint32_t>(state.metal_column_staging.size()),
               state.sample_rate, start_sample_index,
               outputBuffer.data(), buffer_length_))
+        {
+          if (tropical_metal::take_dispatch_failure(*state.metal))
+            metal_dispatch_failure_count_.fetch_add(
+              1, std::memory_order_relaxed);
           std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);
+        }
       }
       else
 #endif
@@ -757,6 +762,15 @@ public:
     return ownership_failure_count_.load(std::memory_order_acquire);
   }
 
+  // Sticky count of underlying Metal dispatch failures. One failed command
+  // latches its kernel silent but increments this only once; a fresh kernel
+  // restores execution without erasing the evidence. Qualification requires
+  // zero.
+  uint64_t metal_dispatch_failure_count() const
+  {
+    return metal_dispatch_failure_count_.load(std::memory_order_acquire);
+  }
+
   // Test-only: install/remove the deterministic ownership pause seam.
   void set_ownership_test_seam(RuntimeOwnershipTestSeam * seam)
   {
@@ -883,6 +897,7 @@ private:
     control_generation_owners_{};
   std::atomic<uint64_t> recompile_version_{0};
   std::atomic<uint64_t> ownership_failure_count_{0};
+  std::atomic<uint64_t> metal_dispatch_failure_count_{0};
   std::atomic<RuntimeOwnershipTestSeam *> ownership_test_seam_{nullptr};
 
   // Buffer-boundary clock handoff. Only the audio thread touches plain

@@ -748,6 +748,7 @@ static void test_dac_histogram_contract()
   ASSERT(tropical_dac_disconnect_count(nullptr) == 0);
   ASSERT(tropical_dac_reconnect_success_count(nullptr) == 0);
   ASSERT(tropical_dac_reconnect_failure_count(nullptr) == 0);
+  ASSERT(tropical_runtime_metal_dispatch_failure_count(nullptr) == 0);
   ASSERT(tropical_runtime_ownership_failure_count(nullptr) == 0);
 }
 
