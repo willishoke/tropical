@@ -1,5 +1,48 @@
 # Metal backend — live findings (V2 phase 6)
 
+## 2026-07-28 blocked production-dispatch incident
+
+The independently approved 60-second B=512/D=3 actual-DAC smoke is retained as
+[`data/approved-short-smoke-b512-d3-60s-b351deb-m1pro-20260727.jsonl`](data/approved-short-smoke-b512-d3-60s-b351deb-m1pro-20260727.jsonl).
+It ran from commit `b351deb6b8d9218fce5744e354b72e53bc0c7728`
+and returned nonzero, so the planned B=128 and B=256 smokes were not started.
+The only manifest status entry is the requested output file itself, created
+before the manifest snapshot; the worktree was clean immediately before the
+run.
+
+The end reference fell to 88.116 dB with 1.351e-12 maximum error after start,
+post-2^40, and post-swap checkpoints of 144.010, 143.940, and 142.664 dB. The
+runtime correctly blocked on that row. All other invariants passed: zero
+underruns, overruns, non-finite samples, ownership failures, or device
+continuity events; 0.281 ms callback p99; 1.00018 callback coverage; exact
+B=512/D=3; distinct replacement artifacts; and valid, non-growing RSS.
+
+The incident is a reference-oracle timing defect, not evidence of Metal drift:
+
+- Production dispatch reads the live completed sample boundary independently
+  for raw, glide, anchor, and velocity. The old oracle sampled one `live_now`
+  before the batch, processed the reference, then reused that stale boundary
+  while the four production writes consumed up to 10.264 ms against an
+  11.610 ms callback period. Fifteen batches after the clean midpoint consumed
+  80.92 ms in total, allowing boundary crossings to accumulate in
+  time-dependent anchor/velocity companions.
+- The deterministic no-DAC discriminator uses the actual emitted heavy graph,
+  fresh replacement defaults, the exact 15-event post-2^40 schedule, and
+  synchronous Metal. True 1↔0.75 velocity toggles are bit-identical to JIT
+  (999 dB, zero error), as is the velocity=1 no-op control, even though the
+  final host `tau_base` is 6,233,064.849705 s and its f32 representation is
+  6,233,065. This rejects the competing Metal slot-precision hypothesis.
+- With one forced callback crossing inside the production batch, replay at
+  each dispatch's exact boundary remains bit-identical. Reusing the obsolete
+  batch-start boundary falls below the unchanged 100 dB gate. The checked-in
+  `run_velocity_oracle_discriminator.py` reproduces all three cases.
+
+The correction records `applied_sample_index` from each production dispatch
+and replays the separate JIT runtime through a qualification-only explicit-now
+entry point that shares the exact production math. Production dispatch timing
+and the >100 dB acceptance gate are unchanged. No fresh DAC smoke may start
+until this diagnosis and correction receive independent review.
+
 ## 2026-07-27 sprint qualification update
 
 The new qualification surface is implemented and has produced two distinct
