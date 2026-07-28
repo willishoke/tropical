@@ -394,8 +394,8 @@ def withPreInput (f : InstanceFunction) (block : Array NInstr) : InstanceFunctio
   match f with
   | .mk n i pre instrs _ ro ao rc ch => .mk n i pre instrs block ro ao rc ch
 
-/-- Mirrors `toWireInstanceFn`: preamble/pre_input/children omitted
-    when empty so legacy JSON consumers see the bytes they expect. -/
+/-- Mirrors `toWireInstanceFn`: canonical empty preamble/pre_input/children
+    fields are omitted for a compact Plan-5 wire form. -/
 def toWire (f : InstanceFunction) : Except String Json := do
   let base := #[
     ("name", Json.str f.name),

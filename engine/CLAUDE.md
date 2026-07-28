@@ -14,7 +14,7 @@ runtime/   FlatRuntime.*          metadata load, staged init, atomic publish
 jit/       OrcJitEngine.*         textual LLVM → ORC; LLVM → wasm32 support
 metal/     MetalKernel.*          MSL compilation and block dispatch
 dac/       TropicalDAC.hpp        RtAudio device boundary
-tests/                              current ABI and compatibility CTests
+tests/                              current ABI and schema-boundary CTests
 ```
 
 ## Kernel load path

@@ -100,11 +100,12 @@ The checked surface includes:
 - native realization checks;
 - wasm-vs-JIT sample agreement;
 - Metal-vs-JIT tolerance/SNR and runtime tests;
-- cycle, patch-bay, and production legacy-non-emission gates.
+- cycle, patch-bay, Plan-5 schema-rejection, and production non-emission gates.
 
 The exact statement, evidence, limitation, and owner of each load-bearing
 claim is recorded in [`design/trust-boundary.md`](design/trust-boundary.md).
-Legacy schema and state-shaped residue are classified separately in
+Retired schemas and state-shaped carriers are removed; their rejection
+boundary and residual historical references are recorded in
 [`design/compatibility-matrix.md`](design/compatibility-matrix.md).
 
 ## Build and test
@@ -124,7 +125,7 @@ repository map. See [`INSTALL.md`](INSTALL.md) for installation prerequisites.
 - [`design/trust-boundary.md`](design/trust-boundary.md) — theorem,
   implementation, and empirical obligations.
 - [`design/compatibility-matrix.md`](design/compatibility-matrix.md) —
-  production versus compatibility reachability.
+  current Plan-5 reachability and retired-surface rejection.
 - [`mcp/CLAUDE.md`](mcp/CLAUDE.md) — MCP tools and session behavior.
 - [`lean/Main.lean`](lean/Main.lean) — the Lean/Turnstile frontend.
 
