@@ -399,7 +399,8 @@ int main(int argc, char ** argv)
     std::vector<std::string> param_event_discipline;
     std::vector<std::string> param_event_name;
     std::vector<double> param_event_value;
-    std::vector<uint64_t> param_event_applied_sample_index;
+    std::vector<uint64_t> param_event_observed_sample_index;
+    std::vector<uint64_t> param_event_effective_sample_index;
     std::vector<uint64_t> callback_histogram;
     uint64_t callback_histogram_epoch = 0;
     uint64_t measured_stats_epoch = 0;
@@ -469,8 +470,10 @@ int main(int argc, char ** argv)
         param_event_discipline.push_back(result.discipline);
         param_event_name.push_back(event.name);
         param_event_value.push_back(write_value);
-        param_event_applied_sample_index.push_back(
-          result.applied_sample_index);
+        param_event_observed_sample_index.push_back(
+          result.observed_sample_index);
+        param_event_effective_sample_index.push_back(
+          result.effective_sample_index);
       }
       else
         for (uint32_t i = 0; i < o.write_count; ++i)
@@ -624,8 +627,9 @@ int main(int argc, char ** argv)
         const auto start = Clock::now();
         if (!o.param_events.empty())
         {
-          // Keep the isolated JIT oracle's published "now" aligned with the
-          // live runtime before invoking the exact shared host dispatch.
+          // Keep the isolated JIT oracle's completed-boundary telemetry
+          // aligned with live. Each event is then replayed explicitly at the
+          // live transaction's first audible effective index.
           const uint64_t live_now = static_cast<uint64_t>(
             tropical_runtime_current_sample_index(rt));
           tropical_runtime_set_sample_index(
@@ -643,7 +647,7 @@ int main(int argc, char ** argv)
               static_cast<tropical_runtime::FlatRuntime *>(reference_rt)
                 ->dispatch_param_sync_at_sample_index(
                   event.name, event_value,
-                  live_result.applied_sample_index);
+                  live_result.effective_sample_index);
             if (!live_result.ok || !reference_result.ok)
             {
               dac_abort_reason = !live_result.ok
@@ -661,8 +665,8 @@ int main(int argc, char ** argv)
                 + ":reference=" + reference_result.discipline;
               return false;
             }
-            if (reference_result.applied_sample_index
-                != live_result.applied_sample_index)
+            if (reference_result.effective_sample_index
+                != live_result.effective_sample_index)
             {
               dac_abort_reason =
                 "reference_param_dispatch_sample_index_mismatch:"
@@ -673,8 +677,10 @@ int main(int argc, char ** argv)
             param_event_discipline.push_back(live_result.discipline);
             param_event_name.push_back(event.name);
             param_event_value.push_back(event_value);
-            param_event_applied_sample_index.push_back(
-              live_result.applied_sample_index);
+            param_event_observed_sample_index.push_back(
+              live_result.observed_sample_index);
+            param_event_effective_sample_index.push_back(
+              live_result.effective_sample_index);
           }
           ++write_round;
         }
@@ -1171,8 +1177,10 @@ int main(int argc, char ** argv)
                 << ",\"discipline\":\"" << param_event_discipline[i]
                 << "\",\"name\":\"" << param_event_name[i]
                 << "\",\"value\":" << param_event_value[i]
-                << ",\"applied_sample_index\":"
-                << param_event_applied_sample_index[i] << '}';
+                << ",\"observed_sample_index\":"
+                << param_event_observed_sample_index[i]
+                << ",\"effective_sample_index\":"
+                << param_event_effective_sample_index[i] << '}';
     }
     std::cout << ']';
     std::cout << ",\"dac_stats\":{\"callback_count\":"

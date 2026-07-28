@@ -71,7 +71,10 @@ if(TROPICAL_METAL)
     target_link_libraries(tropical_core PRIVATE
         "-framework Metal"
         "-framework Foundation")
-    target_compile_definitions(tropical_core PRIVATE TROPICAL_METAL)
+    # FlatRuntime.hpp changes KernelState layout and inline process() behavior
+    # under this definition, so every consumer compiling that public header
+    # must see the same value.
+    target_compile_definitions(tropical_core PUBLIC TROPICAL_METAL)
     # msl_check — stdin → newLibraryWithSource compile checker (dev tool;
     # the production compile path, no Xcode required).
     add_executable(msl_check engine/metal/msl_check.mm)
@@ -195,7 +198,8 @@ if(TROPICAL_BUILD_TESTS)
     endif()
     if(TROPICAL_METAL)
         add_executable(test_metal_kernel engine/tests/test_metal_kernel.cpp)
-        target_include_directories(test_metal_kernel PRIVATE engine)
+        target_include_directories(test_metal_kernel PRIVATE engine ${LLVM_INCLUDE_DIRS})
+        target_compile_definitions(test_metal_kernel PRIVATE ${LLVM_DEFINITIONS})
         target_compile_features(test_metal_kernel PRIVATE cxx_std_20)
         target_link_libraries(test_metal_kernel PRIVATE tropical_core)
         add_test(NAME current_metal_kernel COMMAND test_metal_kernel)

@@ -10,15 +10,30 @@
  */
 
 #include "c_api/tropical_c.h"
+#include "runtime/FlatRuntime.hpp"
 
+#include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <string>
+#include <thread>
 
 static int g_fail = 0;
+
+static bool wait_for_true(
+  const std::atomic<bool> & value,
+  std::chrono::milliseconds timeout = std::chrono::milliseconds(2000))
+{
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (!value.load(std::memory_order_acquire)
+         && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  return value.load(std::memory_order_acquire);
+}
 
 #define ASSERT(cond)                                                          \
   do {                                                                        \
@@ -265,16 +280,20 @@ static void test_metal_columns_live()
   printf("PASS  metal coefficient columns reach the GPU + live knob refill\n");
 }
 
-/** 6. Banked columns, PIPELINED (TROPICAL_METAL_PIPELINE=1): columns ride
- *     per-ring-entry buffers copied at enqueue, so a knob move lands with
- *     the backwards-compatible D(=3)-block lag — never mid-flight, never
- *     torn. */
+/** 6. Banked columns, pipelined at explicit D=3: columns ride per-ring-entry
+ *     buffers copied at enqueue, so a knob move lands with the D-block lag —
+ *     never mid-flight, never torn. */
 static void test_metal_columns_pipelined()
 {
-  setenv("TROPICAL_METAL_PIPELINE", "1", 1);
+  setenv("TROPICAL_METAL_PIPELINE_DEPTH", "3", 1);
   const unsigned int buf = 16;
   tropical_runtime_t rt = tropical_runtime_new(buf);
-  if (rt == nullptr) { unsetenv("TROPICAL_METAL_PIPELINE"); ++g_fail; return; }
+  if (rt == nullptr)
+  {
+    unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
+    ++g_fail;
+    return;
+  }
 
   const std::string msl = msl_kernel_columns(
     "    output_buffer[s] = coeff_columns[s % 4u];");
@@ -283,7 +302,7 @@ static void test_metal_columns_pipelined()
                                     msl.c_str(), msl.size(),
                                     COEFF_FILL_IR, strlen(COEFF_FILL_IR),
                                     STAGED_MANIFEST, strlen(STAGED_MANIFEST));
-  unsetenv("TROPICAL_METAL_PIPELINE");   // create() read it at load
+  unsetenv("TROPICAL_METAL_PIPELINE_DEPTH"); // create() read it at load
   if (!loaded)
   {
     printf("FAIL\n    pipelined staged load failed: %s\n", tropical_last_error());
@@ -323,10 +342,6 @@ static void test_metal_pipeline_depth_sweep()
   for (unsigned int depth = 1; depth <= 3; ++depth)
   {
     const std::string raw = std::to_string(depth);
-    // The numeric seam is authoritative when both controls are present.
-    // This exercises precedence at D=1 while the other rows exercise the
-    // depth-only spelling.
-    if (depth == 1) setenv("TROPICAL_METAL_PIPELINE", "1", 1);
     setenv("TROPICAL_METAL_PIPELINE_DEPTH", raw.c_str(), 1);
     tropical_runtime_t rt = tropical_runtime_new(buf);
     if (rt == nullptr)
@@ -340,7 +355,6 @@ static void test_metal_pipeline_depth_sweep()
                                    msl.c_str(), msl.size(),
                                    MANIFEST, strlen(MANIFEST));
     unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
-    if (depth == 1) unsetenv("TROPICAL_METAL_PIPELINE");
     ASSERT(loaded);
     ASSERT(tropical_runtime_metal_pipeline_depth(rt) == depth);
 
@@ -382,7 +396,196 @@ static void test_metal_pipeline_depth_sweep()
   printf("PASS  metal pipeline depths 1/2/3: lag + clock/hot-swap re-prime\n");
 }
 
-/** 8. Invalid qualification configuration refuses at Metal construction
+/** 8. Exact control timing at every Metal depth. Fresh/reset/hot-swap
+ *     captures use E=C; steady captures use E=C+D*B. The deterministic seams
+ *     force both before- and after-capture publication for all disciplines. */
+static void test_metal_effective_dispatch_depth_sweep()
+{
+  constexpr unsigned int buf = 16;
+  constexpr double sr = 44100.0;
+  constexpr uint64_t jump = 1000000;
+  const std::string msl = msl_kernel("    output_buffer[s] = slots[0];");
+  const std::string manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":8,
+    "slot_names":["param:bank.freq","param:canary.morph#v0",
+      "param:canary.morph#v1","param:canary.morph#t0",
+      "param:canary.freq","param:canary.freq#phase",
+      "param:master.velocity","param:master.tau_base"],
+    "slot_defaults":[180.0,0.0,0.0,0.0,55.0,0.0,1.0,0.0],
+    "param_disciplines":[
+      {"name":"bank.freq","discipline":"raw","companions":[]},
+      {"name":"canary.morph","discipline":"glide",
+       "glide_dur_sec":0.02,
+       "companions":["canary.morph#v0","canary.morph#v1",
+         "canary.morph#t0"]},
+      {"name":"canary.freq","discipline":"anchor",
+       "companions":["canary.freq#phase"]},
+      {"name":"master.velocity","discipline":"velocity",
+       "companions":["master.tau_base"]}
+    ]})";
+  const std::array<std::string, 4> names = {
+    "bank.freq", "canary.morph", "canary.freq", "master.velocity"
+  };
+
+  for (uint32_t depth = 1; depth <= 3; ++depth)
+  {
+    const std::string raw_depth = std::to_string(depth);
+    setenv("TROPICAL_METAL_PIPELINE_DEPTH", raw_depth.c_str(), 1);
+    tropical_runtime::FlatRuntime rt(buf);
+    ASSERT(rt.load_ir_msl(JIT_CONST_IR, msl, manifest));
+    unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
+    const uint32_t observed_depth = rt.metal_pipeline_depth();
+    if (observed_depth != depth)
+      printf("    requested D=%u, observed D=%u\n", depth, observed_depth);
+    ASSERT(observed_depth == depth);
+
+    auto dispatch_all = [&](const std::array<double, 4> & values) {
+        std::array<tropical_runtime::ParamDispatchResult, 4> results;
+        for (std::size_t i = 0; i < names.size(); ++i)
+          results[i] = rt.dispatch_param_sync(names[i], values[i]);
+        return results;
+      };
+
+    // Fresh + forced before capture: all four transactions are audible at C.
+    tropical_runtime::RuntimeOwnershipTestSeam before;
+    before.pause_before_boundary_capture.store(true, std::memory_order_relaxed);
+    rt.set_ownership_test_seam(&before);
+    std::jthread first_audio([&] { rt.process(); });
+    ASSERT(wait_for_true(before.boundary_capture_pending));
+    const auto fresh =
+      dispatch_all({260.0, 0.5, 65.0, 0.75});
+    for (const auto & result : fresh)
+    {
+      ASSERT(result.ok);
+      ASSERT(result.observed_sample_index == 0);
+      ASSERT(result.effective_sample_index == 0);
+    }
+    before.release_boundary_capture.store(true, std::memory_order_release);
+    first_audio.join();
+    rt.set_ownership_test_seam(nullptr);
+    for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 260.0, 1e-5);
+
+    // Forced after capture: current output stays old; the next capture is
+    // C=2B and becomes audible at E=C+D*B.
+    const double old_v0 = rt.get_slot(1);
+    const double old_v1 = rt.get_slot(2);
+    const double old_t0 = rt.get_slot(3);
+    const double old_freq = rt.get_slot(4);
+    const double old_phase = rt.get_slot(5);
+    const double old_velocity = rt.get_slot(6);
+    const double old_tau = rt.get_slot(7);
+    tropical_runtime::RuntimeOwnershipTestSeam after;
+    after.pause_after_generation_ownership.store(
+      true, std::memory_order_relaxed);
+    rt.set_ownership_test_seam(&after);
+    std::jthread captured_audio([&] { rt.process(); });
+    ASSERT(wait_for_true(after.generation_owned));
+    const uint64_t steady_e =
+      static_cast<uint64_t>(2 + depth) * buf;
+    const auto steady =
+      dispatch_all({300.0, 0.0, 55.0, 1.0});
+    for (const auto & result : steady)
+    {
+      ASSERT(result.ok);
+      ASSERT(result.observed_sample_index == buf);
+      ASSERT(result.effective_sample_index == steady_e);
+    }
+    const double r =
+      (static_cast<double>(steady_e) - old_t0) / (0.02 * sr);
+    const double s = std::clamp(r, 0.0, 1.0);
+    ASSERT_NEAR(
+      rt.get_slot(1),
+      old_v0 + (old_v1 - old_v0) * (s * s * (3.0 - 2.0 * s)),
+      1e-12);
+    const double inc0 = std::floor(old_freq * 4294967296.0 / sr);
+    const double inc1 = std::floor(55.0 * 4294967296.0 / sr);
+    const auto frac = [](double x) { return x - std::floor(x); };
+    ASSERT_NEAR(
+      frac(old_phase + inc0 * steady_e / 4294967296.0),
+      frac(rt.get_slot(5) + inc1 * steady_e / 4294967296.0),
+      1e-12);
+    ASSERT_NEAR(
+      old_tau * sr + old_velocity * steady_e,
+      rt.get_slot(7) * sr + rt.get_slot(6) * steady_e,
+      1e-9);
+    after.release_generation.store(true, std::memory_order_release);
+    captured_audio.join();
+    rt.set_ownership_test_seam(nullptr);
+    for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 260.0, 1e-5);
+    for (uint32_t b = 0; b < depth; ++b)
+    {
+      rt.process();
+      for (double sample : rt.outputBuffer)
+        ASSERT_NEAR(sample, 260.0, 1e-5);
+    }
+    rt.process();
+    for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 300.0, 1e-5);
+
+    // A pending clock discontinuity makes the next capture a re-prime: E=C.
+    const uint64_t observed_before_jump = rt.current_sample_index();
+    rt.set_sample_index(jump);
+    const auto reset =
+      dispatch_all({220.0, 0.25, 60.0, 0.8});
+    for (const auto & result : reset)
+    {
+      ASSERT(result.ok);
+      ASSERT(result.observed_sample_index == observed_before_jump);
+      ASSERT(result.effective_sample_index == jump);
+    }
+    rt.process();
+    for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 220.0, 1e-5);
+
+    // Hot-swap installs an unprimed kernel at the carried next C. Force the
+    // control transactions to win immediately before that capture.
+    setenv("TROPICAL_METAL_PIPELINE_DEPTH", raw_depth.c_str(), 1);
+    ASSERT(rt.load_ir_msl(JIT_CONST_IR, msl, manifest));
+    unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
+    const uint64_t swap_c = rt.current_sample_index();
+    tropical_runtime::RuntimeOwnershipTestSeam swap_before;
+    swap_before.pause_before_boundary_capture.store(
+      true, std::memory_order_relaxed);
+    rt.set_ownership_test_seam(&swap_before);
+    std::jthread swap_audio([&] { rt.process(); });
+    ASSERT(wait_for_true(swap_before.boundary_capture_pending));
+    const auto swapped =
+      dispatch_all({240.0, 0.4, 62.0, 0.9});
+    for (const auto & result : swapped)
+    {
+      ASSERT(result.ok);
+      ASSERT(result.observed_sample_index == swap_c);
+      ASSERT(result.effective_sample_index == swap_c);
+    }
+    swap_before.release_boundary_capture.store(
+      true, std::memory_order_release);
+    swap_audio.join();
+    rt.set_ownership_test_seam(nullptr);
+    for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 240.0, 1e-5);
+    ASSERT(rt.ownership_failure_count() == 0);
+  }
+  printf("PASS  Metal D1/D2/D3 effective dispatch: steady + all re-primes\n");
+}
+
+/** 9. The retired broad pipeline alias must not silently re-enable D=3. */
+static void test_legacy_pipeline_alias_retired()
+{
+  setenv("TROPICAL_METAL_PIPELINE", "1", 1);
+  tropical_runtime_t rt = tropical_runtime_new(16);
+  ASSERT(rt != nullptr);
+  const std::string msl = msl_kernel("    output_buffer[s] = slots[0];");
+  const bool loaded =
+    tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
+                                 msl.c_str(), msl.size(),
+                                 MANIFEST, strlen(MANIFEST));
+  unsetenv("TROPICAL_METAL_PIPELINE");
+  ASSERT(loaded);
+  ASSERT(tropical_runtime_metal_pipeline_depth(rt) == 0);
+  tropical_runtime_free(rt);
+  printf("PASS  retired TROPICAL_METAL_PIPELINE alias remains inert\n");
+}
+
+/** 10. Invalid qualification configuration refuses at Metal construction
  *     with a stable, actionable diagnostic. */
 static void test_metal_pipeline_invalid_depth()
 {
@@ -515,6 +718,8 @@ int main()
   test_metal_columns_live();
   test_metal_columns_pipelined();
   test_metal_pipeline_depth_sweep();
+  test_metal_effective_dispatch_depth_sweep();
+  test_legacy_pipeline_alias_retired();
   test_metal_pipeline_invalid_depth();
   test_metal_dispatch_failure_fail_closed();
   if (g_fail == 0) printf("ALL METAL TESTS PASSED\n");

@@ -54,7 +54,11 @@ struct ParamDispatchResult
   bool        ok = false;
   std::string error;
   std::string discipline;
-  uint64_t    applied_sample_index = 0;
+  // Last completed callback boundary visible when the control transaction
+  // began. Diagnostic only: discipline math is stamped at the first output
+  // sample that can actually contain the published generation.
+  uint64_t    observed_sample_index = 0;
+  uint64_t    effective_sample_index = 0;
 };
 
 // Explicit ownership for storage that is mutated off the audio thread.
@@ -79,6 +83,12 @@ struct RuntimeOwnershipTestSeam
   std::atomic<bool> pause_after_generation_ownership{false};
   std::atomic<bool> generation_owned{false};
   std::atomic<bool> release_generation{false};
+  std::atomic<bool> pause_before_boundary_capture{false};
+  std::atomic<bool> boundary_capture_pending{false};
+  std::atomic<bool> release_boundary_capture{false};
+  std::atomic<bool> pause_after_dispatch_materialization{false};
+  std::atomic<bool> dispatch_materialized{false};
+  std::atomic<bool> release_dispatch{false};
 };
 
 struct KernelState
@@ -267,12 +277,47 @@ public:
    */
   void process()
   {
+    auto finish_silence = [&] {
+      std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);
+      audio_sample_index_ += buffer_length_;
+      published_sample_index_.store(
+        audio_sample_index_, std::memory_order_release);
+    };
+
+    if (RuntimeOwnershipTestSeam * seam =
+          ownership_test_seam_.load(std::memory_order_acquire);
+        seam
+        && seam->pause_before_boundary_capture.load(
+          std::memory_order_acquire))
+    {
+      seam->boundary_capture_pending.store(true, std::memory_order_release);
+      while (!seam->release_boundary_capture.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    }
+
+    // Wait-free boundary linearization. The returned even word contains the
+    // exact state/generation captured by this callback. The first add marks
+    // the word odd while audio updates the next-capture prediction; the
+    // second makes it even and advances the epoch. A control publication CAS
+    // therefore lands wholly before capture or loses and retries off-RT.
+    const uint64_t captured_boundary_word =
+      capture_boundary_word_.fetch_add(
+        kCapturePhaseBit_, std::memory_order_acquire);
+    const uint32_t captured_state_idx =
+      static_cast<uint32_t>(
+        (captured_boundary_word & kCaptureStateMask_) >> 2);
+    const uint32_t captured_control_gen =
+      static_cast<uint32_t>(
+        captured_boundary_word & kCaptureGenerationMask_);
+
     // Apply a control-plane clock reposition exactly at this buffer boundary.
     // The plain audio_* clock fields are owned solely by this thread.
     const uint64_t request_seq_before =
       sample_index_request_seq_.load(std::memory_order_acquire);
     if ((request_seq_before & 1U) == 0
-        && request_seq_before != audio_applied_sample_index_seq_)
+        && request_seq_before
+             != audio_applied_sample_index_seq_.load(
+                  std::memory_order_relaxed))
     {
       const uint64_t requested =
         requested_sample_index_.load(std::memory_order_acquire);
@@ -281,32 +326,28 @@ public:
       if (request_seq_before == request_seq_after)
       {
         audio_sample_index_ = requested;
-        audio_applied_sample_index_seq_ = request_seq_after;
+        audio_applied_sample_index_seq_.store(
+          request_seq_after, std::memory_order_relaxed);
       }
     }
     const uint64_t start_sample_index = audio_sample_index_;
 
-    auto finish_silence = [&] {
-      std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);
-      audio_sample_index_ += buffer_length_;
-      published_sample_index_.store(
-        audio_sample_index_, std::memory_order_release);
-    };
-
     // Own a state before reading any of its movable storage, then revalidate
     // the publication. A control writer may wait/yield; the audio thread makes
     // only a small fixed number of attempts and fails safely to silence.
-    uint32_t state_idx = 0;
+    uint32_t state_idx = captured_state_idx;
     bool state_owned = false;
     for (unsigned int attempt = 0; attempt < kAudioCaptureAttempts_; ++attempt)
     {
-      state_idx = active_state_.load(std::memory_order_acquire);
       StorageOwner expected = StorageOwner::Free;
       if (!state_owners_[state_idx].compare_exchange_strong(
             expected, StorageOwner::Audio,
             std::memory_order_acquire, std::memory_order_relaxed))
         continue;
-      if (active_state_.load(std::memory_order_acquire) == state_idx)
+      const uint64_t boundary_now =
+        capture_boundary_word_.load(std::memory_order_relaxed);
+      if ((boundary_now & kCaptureStateMask_)
+          == (captured_boundary_word & kCaptureStateMask_))
       {
         state_owned = true;
         break;
@@ -316,18 +357,17 @@ public:
     }
     if (!state_owned)
     {
+      next_capture_sample_index_.store(
+        start_sample_index + buffer_length_, std::memory_order_relaxed);
+      next_capture_effective_sample_index_.store(
+        start_sample_index + buffer_length_, std::memory_order_relaxed);
+      state_requires_reprime_[state_idx].store(
+        true, std::memory_order_relaxed);
+      capture_boundary_word_.fetch_add(
+        kCapturePhaseBit_, std::memory_order_release);
       ownership_failure_count_.fetch_add(1, std::memory_order_relaxed);
       finish_silence();
       return;
-    }
-
-    if (RuntimeOwnershipTestSeam * seam =
-          ownership_test_seam_.load(std::memory_order_acquire);
-        seam && seam->pause_after_state_ownership.load(std::memory_order_acquire))
-    {
-      seam->state_owned.store(true, std::memory_order_release);
-      while (!seam->release_state.load(std::memory_order_acquire))
-        std::this_thread::yield();
     }
 
     KernelState & state = states_[state_idx];
@@ -335,20 +375,22 @@ public:
     // Own the published slot/coefficient generation before copying or using
     // it. Revalidating after the CAS closes both the initial race and the ABA
     // reuse window: a writer cannot mutate an audio-owned generation.
-    uint32_t control_gen = 0;
+    uint32_t control_gen = captured_control_gen;
     bool generation_owned = false;
     for (unsigned int attempt = 0; attempt < kAudioCaptureAttempts_; ++attempt)
     {
-      control_gen = std::atomic_ref(state.control_published_gen)
-                      .load(std::memory_order_acquire);
       StorageOwner expected = StorageOwner::Free;
       if (!control_generation_owners_[state_idx][control_gen]
              .compare_exchange_strong(
                expected, StorageOwner::Audio,
                std::memory_order_acquire, std::memory_order_relaxed))
         continue;
-      if (std::atomic_ref(state.control_published_gen)
-            .load(std::memory_order_acquire) == control_gen)
+      const uint64_t boundary_now =
+        capture_boundary_word_.load(std::memory_order_relaxed);
+      if ((boundary_now
+           & (kCaptureStateMask_ | kCaptureGenerationMask_))
+          == (captured_boundary_word
+              & (kCaptureStateMask_ | kCaptureGenerationMask_)))
       {
         generation_owned = true;
         break;
@@ -358,11 +400,43 @@ public:
     }
     if (!generation_owned)
     {
+      next_capture_sample_index_.store(
+        start_sample_index + buffer_length_, std::memory_order_relaxed);
+      next_capture_effective_sample_index_.store(
+        start_sample_index + buffer_length_, std::memory_order_relaxed);
+      state_requires_reprime_[state_idx].store(
+        true, std::memory_order_relaxed);
+      capture_boundary_word_.fetch_add(
+        kCapturePhaseBit_, std::memory_order_release);
       ownership_failure_count_.fetch_add(1, std::memory_order_relaxed);
       state_owners_[state_idx].store(
         StorageOwner::Free, std::memory_order_release);
       finish_silence();
       return;
+    }
+
+    // The generation capture above is the boundary linearization point.
+    // After any successful callback (including a fresh/re-prime callback),
+    // the following capture is steady-state: JIT/sync Metal is audible at C;
+    // pipelined Metal is audible at C + D*B.
+    next_capture_sample_index_.store(
+      start_sample_index + buffer_length_, std::memory_order_relaxed);
+    next_capture_effective_sample_index_.store(
+      steady_state_effective_sample_index(
+        state, start_sample_index + buffer_length_),
+      std::memory_order_relaxed);
+    state_requires_reprime_[state_idx].store(
+      false, std::memory_order_relaxed);
+    capture_boundary_word_.fetch_add(
+      kCapturePhaseBit_, std::memory_order_release);
+
+    if (RuntimeOwnershipTestSeam * seam =
+          ownership_test_seam_.load(std::memory_order_acquire);
+        seam && seam->pause_after_state_ownership.load(std::memory_order_acquire))
+    {
+      seam->state_owned.store(true, std::memory_order_release);
+      while (!seam->release_state.load(std::memory_order_acquire))
+        std::this_thread::yield();
     }
 
     if (RuntimeOwnershipTestSeam * seam =
@@ -793,17 +867,48 @@ public:
   ParamDispatchResult dispatch_param_sync(const std::string & name, double value);
 
   // Qualification/test-only oracle entry point. It runs the exact production
-  // discipline math at a caller-supplied completed sample boundary, allowing
-  // a separate reference runtime to replay the boundary that production
-  // dispatch_param_sync actually observed. It is intentionally not in the C
-  // API or socket protocol as a way to control production time.
+  // discipline math at a caller-supplied first-audible sample index, allowing
+  // a separate reference runtime to replay production's effective boundary.
+  // It is intentionally not in the C API or socket protocol as a way to
+  // control production time.
   ParamDispatchResult dispatch_param_sync_at_sample_index(
     const std::string & name, double value, uint64_t sample_index);
 
 private:
+  struct ControlGenerationReservation
+  {
+    uint32_t target = 0;
+    bool owned = false;
+  };
+
   ParamDispatchResult dispatch_param_sync_locked(
     KernelState & state, uint32_t state_idx, const std::string & name,
     double value, uint64_t sample_index);
+
+  ControlGenerationReservation reserve_control_generation(
+    KernelState & state, uint32_t state_index);
+  void materialize_control_snapshot(
+    KernelState & state, uint32_t target);
+  void commit_control_snapshot(
+    KernelState & state, uint32_t state_index,
+    ControlGenerationReservation reservation);
+  void release_control_snapshot_reservation(
+    uint32_t state_index, ControlGenerationReservation reservation);
+
+  uint64_t steady_state_effective_sample_index(
+    const KernelState & state, uint64_t capture_sample_index) const
+  {
+#ifdef TROPICAL_METAL
+    if (state.metal)
+      return capture_sample_index
+           + static_cast<uint64_t>(
+               tropical_metal::pipeline_depth(*state.metal))
+             * buffer_length_;
+#else
+    (void)state;
+#endif
+    return capture_sample_index;
+  }
 
   // build_kernel_state maps a parsed plan's *metadata* (everything except
   // the kernel handle) into a fresh KernelState; publish_state carries the
@@ -819,74 +924,9 @@ private:
   void publish_control_snapshot(
     KernelState & state, uint32_t state_index = UINT32_MAX)
   {
-    const uint32_t pub = std::atomic_ref(state.control_published_gen)
-                           .load(std::memory_order_acquire);
-    uint32_t target = 0;
-    bool target_owned = false;
-    if (state_index == UINT32_MAX)
-    {
-      // A newly built local state is not visible and needs no atomic owner.
-      while (target == pub) ++target;
-    }
-    else
-    {
-      // Control writers are serialized by build_mutex_. They may wait/yield
-      // off the real-time thread until a non-published generation is free.
-      for (;;)
-      {
-        const uint32_t published =
-          std::atomic_ref(state.control_published_gen)
-            .load(std::memory_order_acquire);
-        for (target = 0; target < control_generation_owners_[state_index].size();
-             ++target)
-        {
-          if (target == published) continue;
-          StorageOwner expected = StorageOwner::Free;
-          if (control_generation_owners_[state_index][target]
-                .compare_exchange_strong(
-                  expected, StorageOwner::Writer,
-                  std::memory_order_acquire, std::memory_order_relaxed))
-          {
-            target_owned = true;
-            break;
-          }
-        }
-        if (target_owned) break;
-        std::this_thread::yield();
-      }
-    }
-
-    int64_t ** arrays = state.array_ptrs.data();
-    if (!state.coeff_array_slots.empty())
-    {
-      for (std::size_t j = 0; j < state.coeff_array_slots.size(); ++j)
-        state.coeff_array_ptrs[state.coeff_array_slots[j]] =
-          state.coeff_generations[target][j].data();
-      arrays = state.coeff_array_ptrs.data();
-    }
-    if (state.coeff_kernel)
-    {
-      double scratch_out = 0.0;
-      state.coeff_kernel(
-        nullptr,
-        state.coeff_registers.data(),
-        arrays,
-        state.array_sizes.data(),
-        state.coeff_temps.data(),
-        state.sample_rate,
-        0,                        // tick-free coefficient stage
-        state.param_ptrs.data(),
-        &scratch_out,
-        1,
-        state.slots.data());
-    }
-    std::copy(state.slots.begin(), state.slots.end(),
-              state.slot_generations[target].begin());
-    if (target_owned)
-      control_generation_owners_[state_index][target].store(
-        StorageOwner::Free, std::memory_order_release);
-    std::atomic_ref(state.control_published_gen)
-      .store(target, std::memory_order_release);
+    auto reservation = reserve_control_generation(state, state_index);
+    materialize_control_snapshot(state, reservation.target);
+    commit_control_snapshot(state, state_index, reservation);
   }
 
   unsigned int buffer_length_;
@@ -905,9 +945,27 @@ private:
   // value; audio never spins and simply defers an in-progress request.
   std::atomic<uint64_t> requested_sample_index_{0};
   std::atomic<uint64_t> sample_index_request_seq_{0};
-  uint64_t audio_applied_sample_index_seq_ = 0;
+  std::atomic<uint64_t> audio_applied_sample_index_seq_{0};
   uint64_t audio_sample_index_ = 0;
   std::atomic<uint64_t> published_sample_index_{0};
+
+  // Atomic audio-boundary word:
+  //   bits 0..1  published control generation (0..2)
+  //   bit  2     active state index
+  //   bit  3     audio capture phase (set while prediction is updated)
+  //   bits 4..63 boundary epoch
+  // The two phase-bit additions advance the epoch without carrying through
+  // the isolated state/generation bits. Even at the impossible B=1 extreme,
+  // 2^60 callbacks is about 829,000 years at 44.1 kHz, so wrap is outside
+  // any runtime lifetime.
+  static_assert(std::atomic<uint64_t>::is_always_lock_free);
+  static constexpr uint64_t kCaptureGenerationMask_ = 0x3;
+  static constexpr uint64_t kCaptureStateMask_ = 0x4;
+  static constexpr uint64_t kCapturePhaseBit_ = 0x8;
+  std::atomic<uint64_t> capture_boundary_word_{0};
+  std::atomic<uint64_t> next_capture_sample_index_{0};
+  std::atomic<uint64_t> next_capture_effective_sample_index_{0};
+  std::array<std::atomic<bool>, 2> state_requires_reprime_{{true, true}};
 
   mutable std::mutex build_mutex_;
 

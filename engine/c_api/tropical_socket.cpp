@@ -217,7 +217,8 @@ static std::string dispatch_set_param(tropical_runtime::FlatRuntime * rt,
               {"result", {
                 {"name", name},
                 {"value", value},
-                {"applied_sample_index", result.applied_sample_index},
+                {"observed_sample_index", result.observed_sample_index},
+                {"effective_sample_index", result.effective_sample_index},
               }}}.dump();
 }
 

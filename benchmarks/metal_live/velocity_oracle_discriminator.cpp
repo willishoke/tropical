@@ -140,8 +140,8 @@ Result run_scenario(
       const auto jit_dispatch =
         jit.dispatch_param_sync(names[i], values[i]);
       if (!metal_dispatch.ok || !jit_dispatch.ok
-          || metal_dispatch.applied_sample_index != now
-          || jit_dispatch.applied_sample_index != now)
+          || metal_dispatch.effective_sample_index != now
+          || jit_dispatch.effective_sample_index != now)
         throw std::runtime_error("event dispatch mismatch");
     }
   }
@@ -224,7 +224,7 @@ std::pair<Comparison, Comparison> run_delayed_oracle(
       const auto production =
         metal.dispatch_param_sync(names[i], values[i]);
       const auto replay = exact.dispatch_param_sync_at_sample_index(
-        names[i], values[i], production.applied_sample_index);
+        names[i], values[i], production.effective_sample_index);
       const auto legacy = stale.dispatch_param_sync_at_sample_index(
         names[i], values[i], batch_start);
       if (!production.ok || !replay.ok || !legacy.ok)

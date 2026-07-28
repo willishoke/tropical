@@ -41,7 +41,6 @@ BASE_CONTROLS: dict[str, str | None] = {
     "TROPICAL_KERNEL_CACHE_DISABLE": "0",
     "TROPICAL_BACKEND": None,
     "TROPICAL_BUFFER_LENGTH": None,
-    "TROPICAL_METAL_PIPELINE": "0",
     "TROPICAL_METAL_PIPELINE_DEPTH": None,
     "TROPICAL_STAGE0_DUMP": None,
 }
@@ -368,9 +367,14 @@ def evaluate_acceptance(result: dict[str, Any],
             bool(param_events)
             and all(
                 isinstance(event, dict)
-                and isinstance(event.get("applied_sample_index"), int)
-                and not isinstance(event.get("applied_sample_index"), bool)
-                and event["applied_sample_index"] >= 0
+                and isinstance(event.get("observed_sample_index"), int)
+                and not isinstance(
+                    event.get("observed_sample_index"), bool)
+                and event["observed_sample_index"] >= 0
+                and isinstance(event.get("effective_sample_index"), int)
+                and not isinstance(
+                    event.get("effective_sample_index"), bool)
+                and event["effective_sample_index"] >= 0
                 for event in param_events
             ),
         "rss_sampling_sufficient":
@@ -424,9 +428,8 @@ def manifest(mode: str) -> dict[str, Any]:
         "llvm": output(["/opt/homebrew/opt/llvm/bin/llvm-config", "--version"]),
         "build": "RelWithDebInfo; TROPICAL_METAL=ON; TROPICAL_WASM_EMIT=ON",
         "sample_rate": 44100,
-        "legacy_pipeline_default_depth": 3,
-        "depth_precedence":
-            "TROPICAL_METAL_PIPELINE_DEPTH overrides TROPICAL_METAL_PIPELINE=1",
+        "pipeline_depth_control":
+            "TROPICAL_METAL_PIPELINE_DEPTH=1..3; unset selects sync Metal",
         "cache":
             "TROPICAL_KERNEL_CACHE_ROOT points to a fresh harness-owned directory",
         "benchmark_controls": BASE_CONTROLS,

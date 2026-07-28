@@ -53,8 +53,8 @@ id<MTLCommandQueue> shared_queue()
 }
 } // namespace
 
-// Maximum qualification depth.  TROPICAL_METAL_PIPELINE=1 keeps its existing
-// D=3 behavior; TROPICAL_METAL_PIPELINE_DEPTH=1..3 is the opt-in sweep seam.
+// Maximum qualification depth. TROPICAL_METAL_PIPELINE_DEPTH=1..3 is the
+// explicit opt-in sweep seam.
 // Blocks are pre-rendered AHEAD of the playhead. Legal because kernels are
 // closed-form — block S+kB is a pure function of its sample index and the slot
 // snapshot at enqueue time. Audio-position latency is ZERO; param changes lag
@@ -85,7 +85,7 @@ struct MetalKernel
   // f64→f32 staging (audio-thread use; preallocated — no alloc in process).
   std::vector<float> slot_staging;
 
-  // ── Pipelined mode (TROPICAL_METAL_PIPELINE=1) ─────────────────────────
+  // ── Pipelined mode (TROPICAL_METAL_PIPELINE_DEPTH=1..3) ────────────────
   uint32_t depth = 0;
   id<MTLBuffer>        ring_out[kMaxPipelineDepth]     = { nil, nil, nil };
   id<MTLBuffer>        ring_slots[kMaxPipelineDepth]   = { nil, nil, nil };
@@ -121,10 +121,6 @@ struct MetalKernel
 static bool configure_pipeline_depth(uint32_t & depth, std::string & err)
 {
   depth = 0;
-  const char * pipe = getenv("TROPICAL_METAL_PIPELINE");
-  if (pipe && pipe[0] == '1' && pipe[1] == '\0')
-    depth = 3; // preserve the original opt-in behavior
-
   const char * raw = getenv("TROPICAL_METAL_PIPELINE_DEPTH");
   if (!raw || !*raw)
     return true;

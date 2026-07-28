@@ -87,10 +87,14 @@ def passing_result() -> dict:
         "final_rss_bytes": 100 << 20,
         "dac_snapshots": [],
         "param_events": [
-            {"discipline": "raw", "applied_sample_index": 100},
-            {"discipline": "glide", "applied_sample_index": 100},
-            {"discipline": "anchor", "applied_sample_index": 100},
-            {"discipline": "velocity", "applied_sample_index": 100},
+            {"discipline": "raw", "observed_sample_index": 100,
+             "effective_sample_index": 1636},
+            {"discipline": "glide", "observed_sample_index": 100,
+             "effective_sample_index": 1636},
+            {"discipline": "anchor", "observed_sample_index": 100,
+             "effective_sample_index": 1636},
+            {"discipline": "velocity", "observed_sample_index": 100,
+             "effective_sample_index": 1636},
         ],
     }
 
@@ -255,7 +259,7 @@ class AcceptanceGateTests(unittest.TestCase):
     def test_missing_param_dispatch_sample_index_blocks_qualification(
             self) -> None:
         result = passing_result()
-        del result["param_events"][2]["applied_sample_index"]
+        del result["param_events"][2]["effective_sample_index"]
         gates, failures = self.evaluate(result)
         self.assertFalse(gates["all_param_dispatch_indices_recorded"])
         self.assertIn("all_param_dispatch_indices_recorded", failures)

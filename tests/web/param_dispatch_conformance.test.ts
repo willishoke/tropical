@@ -326,11 +326,14 @@ describe('param dispatch conformance (C++ data-plane ≡ Lean reference)', () =>
         await a.call('set_param', { name: 'master.velocity', value: driveValues['master.velocity'] }),
         await a.call('set_param', { name: 'sfl.rate', value: driveValues['sfl.rate'] }),
       ]
-      // The data plane reports the exact completed boundary used by each
-      // production dispatch. No DAC runs in this differential, so all four
-      // must have applied at the frozen zero boundary.
+      // The data plane reports both the completed boundary it observed and
+      // the first audible sample used by the discipline math. No DAC runs in
+      // this differential, so both are frozen at zero.
       for (const result of productionDispatches)
-        expect(result.applied_sample_index).toBe(0)
+      {
+        expect(result.observed_sample_index).toBe(0)
+        expect(result.effective_sample_index).toBe(0)
+      }
 
       await b.call('set_param', { name: 'sfl.depth', value: driveValues['sfl.depth'] })
       await b.call('set_param', { name: 'src.freq', value: driveValues['src.freq'] })
