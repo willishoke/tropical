@@ -160,9 +160,9 @@ Plan-4 compatibility is a parser/runtime lift only and cannot expand the product
 - Owner: Compatibility
 - Evidence: inspection, executable gate
 - Formal symbol: none
-- Implementation: `engine/runtime/NumericProgramParser.hpp`, `lean/Tropical/Parse/Raise.lean`, `lean/Tropical/WireExpr.lean`
+- Implementation: `engine/runtime/NumericProgramParser.hpp`, `lean/Tropical/PlanDecode.lean`, `lean/Tropical/Parse/Raise.lean`, `lean/Tropical/WireExpr.lean`
 - Gates: `patch-bay-refusal`, `production-non-emission`, `compat_legacy_plan4_manifest`, `manual:plan-4 compatibility review`
-- Limitation: Hand-authored plan-4 test fixtures exercise runtime compatibility but are outside source-level semantics.
+- Limitation: Hand-authored plan-4 test fixtures exercise runtime compatibility but are outside source-level semantics. FlatPlan.ofWire does not itself validate the top-level schema tag; production emitters construct plan 5 and FlatRuntime validates native loads, so any new direct ofWire caller must preserve that precondition.
 
 ## FROZEN_AUDIO_GOLDENS_ANCHOR_CORRECTNESS
 

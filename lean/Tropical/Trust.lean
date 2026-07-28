@@ -204,12 +204,12 @@ def obligations : Array Obligation := #[
   { id := "LEGACY_PLAN_4_IS_NOT_SOURCE_SEMANTICS"
     statement := "Plan-4 compatibility is a parser/runtime lift only and cannot expand the production source language."
     evidence := #[.inspection, .executableGate]
-    implementationPaths := #["engine/runtime/NumericProgramParser.hpp", "lean/Tropical/Parse/Raise.lean", "lean/Tropical/WireExpr.lean"]
+    implementationPaths := #["engine/runtime/NumericProgramParser.hpp", "lean/Tropical/PlanDecode.lean", "lean/Tropical/Parse/Raise.lean", "lean/Tropical/WireExpr.lean"]
     gateNames := #["patch-bay-refusal", "production-non-emission",
       "compat_legacy_plan4_manifest", "manual:plan-4 compatibility review"]
     owner := "Compatibility"
     status := .scoped
-    limitation := "Hand-authored plan-4 test fixtures exercise runtime compatibility but are outside source-level semantics."
+    limitation := "Hand-authored plan-4 test fixtures exercise runtime compatibility but are outside source-level semantics. FlatPlan.ofWire does not itself validate the top-level schema tag; production emitters construct plan 5 and FlatRuntime validates native loads, so any new direct ofWire caller must preserve that precondition."
     priority := .medium },
   { id := "FROZEN_AUDIO_GOLDENS_ANCHOR_CORRECTNESS"
     statement := "Frozen audio hashes are the independent behavioral anchor after retirement of the TypeScript compiler."
