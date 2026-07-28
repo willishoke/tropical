@@ -60,8 +60,6 @@ function manifestFromPlan(planJson: string): KernelManifest {
   return {
     sampleRate:     p.config?.sampleRate ?? 44100,
     registerCount:  p.register_count ?? 0,
-    registerTypes:  p.register_types ?? [],
-    stateInit:      p.state_init ?? [],
     arraySlotSizes: p.array_slot_sizes ?? [],
     slotCount:      p.slot_count ?? (p.slot_defaults?.length ?? 0),
     slotDefaults:   p.slot_defaults ?? [],

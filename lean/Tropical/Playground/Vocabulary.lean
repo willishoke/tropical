@@ -621,7 +621,7 @@ def displayRangeOf (kind kname : String) : Option (Float × Float) :=
 
 /-- A closed-form smoothstep GLIDE of τ from three slots: `v0 + (v1−v0)·s²(3−2s)`,
     `s = clamp((τ − t0)/dur, 0, 1)`, `dur = 0.02·sampleRate` samples (20 ms at any
-    rate, matching the engine's `set_param_glide`). The value eases from `v0` to
+    rate, matching the engine's glide discipline for `set_param`). The value eases from `v0` to
     `v1` starting at tick `t0`; the control plane re-anchors the slots on each turn.
     Stateless — the ramp is a pure function of the ambient clock, not an accumulator. -/
 def glideExpr (pidx : String → Option Nat) (base : String) (dflt : Sig) : Sig :=

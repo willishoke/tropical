@@ -383,6 +383,14 @@ describe('unknown_param', () => {
     expect(env.value).toBe('does_not_exist')
     expect(env.valid?.kind).toBe('enum')
   })
+
+  test('retired parameter-method aliases are not RPC methods', async () => {
+    for (const method of ['set_param_glide', 'set_param_freq', 'set_param_velocity']) {
+      const env = await client.callError(method, { name: 'does_not_matter', value: 1.0 })
+      expect(env.code).toBe('internal_error')
+      expect(env.message).toContain(`Unknown tool: '${method}'`)
+    }
+  })
 })
 
 // unknown_device intentionally untested — start_audio would open real hardware.

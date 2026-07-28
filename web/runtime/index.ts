@@ -4,7 +4,7 @@
  * nothing of tropical_plan_5 or the compiler. Extract to its own package when
  * a second consumer appears (see design notes / CLAUDE.md).
  */
-export type { KernelManifest, RegisterType } from './manifest.js'
+export type { KernelManifest } from './manifest.js'
 export type { KernelLayout } from './layout.js'
 export { computeLayout } from './layout.js'
 export { WasmKernel } from './kernel.js'

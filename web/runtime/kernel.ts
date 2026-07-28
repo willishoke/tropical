@@ -77,22 +77,12 @@ export class WasmKernel {
     return k
   }
 
-  /** Initialize the compatibility register region (empty for production plan
-   *  5), array sizes, and slots from their defaults. */
+  /** Initialize array sizes and slots from their defaults. The scratch and
+   * register regions begin zeroed with WebAssembly memory. */
   private initState(): void {
     const dv = new DataView(this.memory.buffer)
     const f64 = new Float64Array(this.memory.buffer)
     const m = this.manifest
-    for (let i = 0; i < m.stateInit.length; i++) {
-      const v = m.stateInit[i]
-      if (Array.isArray(v)) continue
-      const t = m.registerTypes[i] ?? 'float'
-      const off = this.layout.registers + i * 8
-      if (typeof v === 'boolean') dv.setBigInt64(off, v ? 1n : 0n, true)
-      else if (t === 'int') dv.setBigInt64(off, BigInt(Math.trunc(v)), true)
-      else if (t === 'bool') dv.setBigInt64(off, v !== 0 ? 1n : 0n, true)
-      else dv.setFloat64(off, v as number, true)
-    }
     m.arraySlotSizes.forEach((sz, i) =>
       dv.setBigInt64(this.layout.arraySizes + i * 8, BigInt(sz), true))
     for (let i = 0; i < m.slotCount; i++)

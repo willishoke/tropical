@@ -8,8 +8,6 @@
  * tropical (the producer, via `diffcli compile-wasm`) and any consumer (this
  * demo today; an extracted `@tropical/runtime-wasm` package tomorrow).
  */
-export type RegisterType = 'float' | 'int' | 'bool'
-
 export type KernelManifest = {
   /** Kernel sample rate (Hz); the kernel reads it for time-based sources. */
   sampleRate: number
@@ -17,10 +15,6 @@ export type KernelManifest = {
    * also reserves an equally sized zeroed register region, unused by current
    * production kernels. */
   registerCount: number
-  /** Compatibility-only register metadata; production plan 5 emits `[]`. */
-  registerTypes: RegisterType[]
-  /** Compatibility-only register initializer; production plan 5 emits `[]`. */
-  stateInit: (number | boolean)[]
   /** Element count of each array-typed register slot. */
   arraySlotSizes: number[]
   /** Number of inter-module slots (instance output wires + param inputs). */

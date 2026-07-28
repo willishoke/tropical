@@ -79,12 +79,8 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   | "stop_audio"      => handleStopAudio env
   | "audio_status"    => handleAudioStatus env
   -- ONE set_param: discipline-dispatched from the loaded plan's table
-  -- (raw for table-less names). The three verbs below are migration
-  -- aliases into the same internals.
+  -- (raw for table-less names).
   | "set_param"       => handleSetParamDispatch env args
-  | "set_param_glide" => handleSetParamGlide env args
-  | "set_param_freq"  => handleSetParamFreq env args
-  | "set_param_velocity" => handleSetParamVelocity env args
   | "list_params"     => handleListParams env
   | "debug_render"    => handleDebugRender env args
   | _ => internalError s!"Unknown tool: '{name}'"

@@ -200,10 +200,9 @@ void SocketServer::handle_line(int fd, uint64_t id, const std::string & line)
 // param_disciplines table — the client never chooses a verb. Every branch is
 // a synchronous slot write off the audio thread, like the raw path; the whole
 // resolve-read-write runs under one lock so a concurrent hot-swap can never
-// land values at stale slot indices. The math mirrors the Lean reference
-// (Engine.lean handleSetParamGlide / handleSetParamFreq /
-// handleSetParamVelocity) exactly — including the quantized-increment floor
-// arithmetic — and the conformance differential
+// land values at stale slot indices. The math mirrors the Lean set_param
+// discipline implementations exactly — including the quantized-increment
+// floor arithmetic — and the conformance differential
 // (tests/web/param_dispatch_conformance.test.ts) gates the agreement.
 static std::string dispatch_set_param(tropical_runtime::FlatRuntime * rt,
                                       const json & id, const std::string & name,
