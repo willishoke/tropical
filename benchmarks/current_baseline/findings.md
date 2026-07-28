@@ -76,15 +76,21 @@ Structural topology editing is outside the product's primary live-performance
 loop. The measured 1.4–1.6 s warm and 5–6 s cold walls are therefore retained
 as an exact-product baseline, not promoted into a 500 ms release gate.
 
+The evaluated renderer loads one fixed graph at boot and exposes no topology
+editor or structural-selector editor. Every in-session control uses
+`set_param` without relowering. Staff accepts the measured one-time boot/load
+cost for this product.
+
 No tiered preview path or compile optimization is planned from this result.
 That decision does not weaken numerics, change the product graph, or reinterpret
 the measurements; it aligns architecture work with the active live-performance
 requirements.
 
 The rejected alternative is spending architecture on an inactive product
-requirement. If structural topology editing enters the primary live loop later,
-these exact measurements provide the baseline for setting a product-owned
-target and reconsidering tiering or compilation work.
+requirement. This no-optimization decision does not generalize to MCP/session
+composition, a future graph editor, or other products. Reopen it if structural
+editing becomes product-facing or boot latency becomes a product requirement;
+these exact measurements remain the baseline for setting that future target.
 
 ## Bank capacity and live count
 
