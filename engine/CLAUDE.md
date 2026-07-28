@@ -200,8 +200,8 @@ Gated by `msl-column-guard` (tropicaltest), the banked-resonator SNR case
 in `metal_vs_jit`, and the column tests in `test_metal_kernel.cpp`.
 
 Qualification controls only: `TROPICAL_METAL_PIPELINE_DEPTH=1..3` selects the
-future-block depth and overrides the legacy `TROPICAL_METAL_PIPELINE=1`
-(which remains D=3). Invalid explicit depths refuse at kernel construction.
+future-block depth. The retired `TROPICAL_METAL_PIPELINE` spelling is inert.
+Invalid explicit depths refuse at kernel construction.
 The read-only C diagnostic `tropical_runtime_metal_pipeline_depth` returns 0
 for sync/JIT/non-Metal builds. `TROPICAL_BUFFER_LENGTH=16..16384` selects the
 live engine block length before Runtime/DAC construction; absence preserves

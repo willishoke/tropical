@@ -22,10 +22,9 @@ short validation is not release qualification. The B=128 result blocks that
 configuration, not Metal universally. This records the product decision and
 does not authorize another DAC run.
 
-`TROPICAL_METAL_PIPELINE_DEPTH=1..3` is qualification-only. When both controls
-are present it overrides the legacy `TROPICAL_METAL_PIPELINE=1`; the legacy
-spelling retains D=3. Missing controls retain synchronous Metal. Invalid depth
-values refuse during Metal kernel construction.
+`TROPICAL_METAL_PIPELINE_DEPTH=1..3` is qualification-only. Missing controls
+retain synchronous Metal; the retired `TROPICAL_METAL_PIPELINE` spelling is
+inert. Invalid depth values refuse during Metal kernel construction.
 
 The latency fixture changes an output-visible raw slot impulsively. The
 `write_count` rows preserve the host disciplines' slot-write shapes:
@@ -51,8 +50,9 @@ It records:
   seconds after observed hot-swap progress;
 - process user+system CPU seconds and measured-wall fraction;
 - write and hot-swap walls;
-- the exact completed sample index read by every production parameter
-  dispatch, replayed by the isolated JIT oracle at that same index;
+- the last completed boundary observed by every production parameter
+  dispatch and the exact first audible sample index, with the isolated JIT
+  oracle replayed at the latter;
 - a separate offline per-block p50/p95/p99 supporting row.
 
 The audio callback performs no allocation, lock, or I/O for telemetry: it adds

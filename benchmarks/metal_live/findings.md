@@ -6,7 +6,7 @@ Independent review authorized one B=512/D=3 validation after the exact-index
 oracle correction, followed by one B=128/D=3 operating-envelope row. The
 B=512 row is retained as
 [`data/reviewed-oracle-fix-smoke-b512-d3-60s-3dc3be4-m1pro-20260728.jsonl`](data/reviewed-oracle-fix-smoke-b512-d3-60s-3dc3be4-m1pro-20260728.jsonl).
-It ran from commit `3dc3be45fed602ba8301e44c6f71e66ab339f1ce`;
+It ran from commit `3dc3be4cb2f1727a6243ede8f6707938548dc766`;
 its SHA-256 is
 `f36e87522f0c966b69bb1bb6271d6d49bd63bb2cc8a64d86147af5c941db8fb2`.
 That short validation passed all 24 gates, including four reference
@@ -81,11 +81,14 @@ The incident is a reference-oracle timing defect, not evidence of Metal drift:
   batch-start boundary falls below the unchanged 100 dB gate. The checked-in
   `run_velocity_oracle_discriminator.py` reproduces all three cases.
 
-The correction records `applied_sample_index` from each production dispatch
-and replays the separate JIT runtime through a qualification-only explicit-now
-entry point that shares the exact production math. Production dispatch timing
-and the >100 dB acceptance gate are unchanged. Independent review authorized
-only the short validation sequence recorded above.
+That historical correction recorded `applied_sample_index`, which at the time
+meant the completed callback boundary observed by each dispatch, and replayed
+the separate JIT runtime through a qualification-only explicit-now entry
+point. Current evidence replaces that ambiguous field with
+`observed_sample_index` and `effective_sample_index`; discipline math and
+oracle replay use the latter, the first output sample at which the generation
+is audible. Independent review authorized only the short validation sequence
+recorded above.
 
 ## 2026-07-27 sprint qualification update
 
@@ -100,9 +103,10 @@ evidence classes:
   (D3/B512). Multi-slot dispatch took 41–417 ns median across these short
   rows. This measures captured-snapshot transport, not the deliberately gradual
   audible onset of a glide.
-- CTest now proves the legacy D=3 spelling, explicit D=1/2/3 precedence,
-  default synchronous mode, invalid-depth refusal, exact D-block live-column
-  lag, clock-jump draining, and hot-swap re-prime on real Metal hardware.
+- That historical CTest run covered the then-supported D=3 alias and explicit
+  depth precedence. The alias is now retired; current tests require explicit
+  D=1/2/3, default synchronous mode, invalid-depth refusal, exact D-block
+  live-column lag, clock-jump draining, and hot-swap re-prime.
 
 The first 10-second default-device smoke recorded one RtAudio underrun despite
 0 callback budget overruns (859 callbacks, 0.147 ms average, 4.889 ms max).
@@ -165,10 +169,11 @@ unreduced-radian relic kept as a canary in `metal_vs_jit`).
    render is 2.1×/2.2×/3.2× the JIT at 128/256/512 partials; the crossover is
    below 128 partials (far below the K·B ≈ 10⁵ microbenchmark estimate,
    because the real per-sample graph is much fatter than a bare sine).
-2. **Pipelined dispatch decouples the audio thread from synthesis cost
-   entirely**: callback cost is a constant ~0.1 ms (max 0.73 ms measured,
-   including a mid-playback hot-swap) at every patch size, zero dropouts.
-   The 512-partial patch that the JIT cannot play (drops) is a non-event.
+2. **In these July 7 B=512 fixture rows**, pipelined dispatch decoupled the
+   audio thread from synthesis cost: callback cost was ~0.1 ms (max 0.73 ms,
+   including a mid-playback hot-swap) at every patch size, with zero recorded
+   dropouts. This is retained historical evidence, not a claim about later
+   B=128/D=3 qualification; that reviewed row failed as recorded above.
 3. **Dual-load is free**: hot-swap latency with MSL+JIT ≈ JIT alone
    (3.52 s vs 3.55 s at 512 partials — dominated by session compile + LLVM).
 4. **Correctness held throughout**: `metal_vs_jit` SNRs identical in sync and
@@ -204,19 +209,22 @@ before the GPU itself saturates at this block size.
 - **Sync Metal's jitter tail is real** (max 22.95 ms under normal desktop
   contention — the reserved-GPU caveat from `gpu_time_partition/findings.md`,
   reproduced live). Pipelining removes it from the critical path entirely.
-- Pipelined callback cost is patch-size-INDEPENDENT: the audio thread only
-  copies a completed buffer and enqueues the next future block.
+- In this fixed-B historical fixture, pipelined callback cost was insensitive
+  to patch size: the audio thread copied a completed buffer and enqueued the
+  next future block.
 
 ## The pipeline's trade (and why it's cheap here)
 
-`TROPICAL_METAL_PIPELINE=1` pre-renders D=3 FUTURE blocks — legal because
+The July 7 fixture used a D=3 future-block pipeline — legal because
 kernels are closed-form: block S+kB is a pure function of its sample index
 and the slot snapshot at enqueue time. So unlike a stream-DSP pipeline there
 is ZERO audio-position latency; the cost is **param-change latency of up to
 D blocks** (34.8 ms at B=512, 8.7 ms at B=128). Clock jumps
 (scrub/`set_sample_index`) re-prime the ring at the requested position;
-hot-swap primes at the carried `sample_index` (measured seamless, max
-0.73 ms callback through a swap).
+hot-swap primes at the carried `sample_index`. The 0.73 ms swap callback cited
+by that historical fixture is not a claim about every later buffer-size row;
+the reviewed B=128 operating-envelope failure above recorded a 5.422916 ms
+maximum and an underrun.
 
 ## Historical recommendation (superseded)
 
