@@ -6,7 +6,7 @@
 - **Supervisor:** Staff engineer
 - **Status:** Planned
 - **Master:** [Staff engineer sprint handoff](00-staff-engineer-master-handoff.md)
-- **Depends on:** Lane B supplies the final semantic theorem boundary; Lanes D
+- **Depends on:** Lane B supplies the final semantic capstone/boundary; Lanes D
   and E supply current performance/numeric evidence.
 - **Must not overlap:** This lane does not prove Lane B’s theorem and does not
   change backend semantics.

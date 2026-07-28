@@ -1,10 +1,12 @@
 # Current performance baseline findings
 
-**Status:** Schema-3 exact-product baseline complete. **S-06 staff decision:
+**Status:** Schema-3 exact fixed-renderer baseline complete. **S-06 staff decision:
 accept the measured baseline; no tiered preview or compile optimization now.**
 
 The qualifying raw dataset is
 [`full-m1pro-20260728-exact-product-schema3.jsonl`](data/full-m1pro-20260728-exact-product-schema3.jsonl).
+The retained filename predates the decision to scope the demo separately; it
+is evidence for the fixed playground renderer, not a flagship product claim.
 Its SHA-256 is
 `a5792b58edf026ae3d56133179e4618a5a3387a99d808adbad8609e5fa9aefb1`.
 It was recorded from clean commit
@@ -13,13 +15,13 @@ canonical Apple M1 Pro (10 CPU cores, 16 GPU cores, 16 GB), macOS 26.3,
 LLVM 22.1.7, RelWithDebInfo, 44.1 kHz, B=512.
 
 The earlier schema-2 row remains historical evidence for its benchmark-owned
-six-node approximation. It is rejected for flagship product and S-06
+six-node approximation. It is rejected for fixed-renderer and S-06
 decisions: it omitted the address path, source oscillators, current ring
 parameters/default partial semantics, reverb, filter, and taps.
 
-## Exact product fixture and byte evidence
+## Exact fixed-renderer fixture and byte evidence
 
-The schema-3 flagship is not copied into the matrix. The harness reads the
+The schema-3 renderer fixture is not copied into the matrix. The harness reads the
 strict-JSON `GRAPH` declaration directly from `playground/renderer/app.js`.
 The normalized graph SHA-256 is
 `ea6779becbc520ab83c3d71fb56335f367083b637cee6fd679a8109309660a81`.
@@ -39,7 +41,7 @@ the default six partials to an explicit seven.
 Every cold and warm repeat retains byte count and SHA-256 for manifest, audio
 LLVM IR, coefficient LLVM IR, and MSL. All six main generations and all six
 generations for each edit are byte-identical within their series. The main
-product artifacts are:
+fixture artifacts are:
 
 | artifact | bytes | SHA-256 |
 |---|---:|---|
@@ -51,42 +53,42 @@ product artifacts are:
 The graph produces 11,039 plan instructions, 95,446 registers, 601 slots,
 22 array slots, and 14 coefficient-array slots. These are substantially
 different from the rejected approximation and explain why its sub-500 ms
-claim was not product evidence.
+claim was not evidence for this renderer.
 
-## Flagship structural editing
+## Fixed-renderer structural editing
 
 Each entry is a complete `render-graph` generation/load/publication subprocess
 wall. Every cold and warm column has three raw samples. Cold repeats use fresh
 benchmark-owned caches; each warm repeat is a new process reusing only its
 paired cold cache.
 
-| exact-product operation | cold raw (ms) | cold median | cold range / median | warm raw (ms) | warm median | warm range / median |
+| fixed-renderer operation | cold raw (ms) | cold median | cold range / median | warm raw (ms) | warm median | warm range / median |
 |---|---|---:|---:|---|---:|---:|
 | full generation | 5288.650, 5253.585, 5278.919 | 5278.919 ms | 0.66% | 1397.467, 1397.915, 1392.085 | 1397.467 ms | 0.42% |
 | add addressed fifth ring | 6291.362, 6193.188, 6208.277 | 6208.277 ms | 1.58% | 1634.664, 1624.635, 1617.873 | 1624.635 ms | 1.03% |
 | make default partials 6 → 7 | 5446.444, 5429.437, 5444.909 | 5444.909 ms | 0.31% | 1421.681, 1424.694, 1427.792 | 1424.694 ms | 0.43% |
 
-The exact-product walls are accepted measurements: approximately 1.4–1.6 s
+The fixed-renderer walls are accepted measurements: approximately 1.4–1.6 s
 warm and 5–6 s cold across the full generation and two representative edits.
 Their low variance makes them suitable as a machine-local baseline.
 
 ## S-06 staff decision
 
-Structural topology editing is outside the product's primary live-performance
+Structural topology editing is outside this fixed renderer's live-performance
 loop. The measured 1.4–1.6 s warm and 5–6 s cold walls are therefore retained
-as an exact-product baseline, not promoted into a 500 ms release gate.
+as a fixed-renderer baseline, not promoted into a 500 ms release gate.
 
 The evaluated renderer loads one fixed graph at boot and exposes no topology
 editor or structural-selector editor. Every in-session control uses
 `set_param` without relowering. Staff accepts the measured one-time boot/load
-cost for this product.
+cost for this demo/reference fixture.
 
 No tiered preview path or compile optimization is planned from this result.
-That decision does not weaken numerics, change the product graph, or reinterpret
+That decision does not weaken numerics, change the fixture graph, or reinterpret
 the measurements; it aligns architecture work with the active live-performance
 requirements.
 
-The rejected alternative is spending architecture on an inactive product
+The rejected alternative is spending architecture on an inactive renderer
 requirement. This no-optimization decision does not generalize to MCP/session
 composition, a future graph editor, or other products. Reopen it if structural
 editing becomes product-facing or boot latency becomes a product requirement;
@@ -108,7 +110,7 @@ synchronous (D=0).
 | K=512 | 137 | 1113.322 / 850.243 ms | 2.0070 | 1.3862 |
 
 The synchronous Metal crossover on this machine remains between 128 and 256
-partials. The exact product itself is faster per block on warm JIT
+partials. The fixed renderer itself is faster per block on warm JIT
 (1.947 ms median) than synchronous Metal (2.948 ms median), so the bank
 crossover must not be generalized into automatic backend selection.
 
@@ -125,12 +127,12 @@ flat across live counts while execution tracks the live trip count:
 
 - The 512-sample deadline is 11.610 ms; its half-deadline is 5.805 ms.
   Across all 192 individual 100-block probes, the worst process p99 was
-  3.503 ms (exact-product cold Metal). No probe crossed the half-deadline.
+  3.503 ms (fixed-renderer cold Metal). No probe crossed the half-deadline.
 - The worst raw slot-write p99 was 1.547 ms (nested bank), below one block.
 - The row retains 19,200 raw process samples and 1,512 raw write samples.
   Every probe reports zero non-finite outputs, ownership failures, reference
   ownership failures, and overruns.
-- All 16 main generation series and both repeated flagship edit series report
+- All 16 main generation series and both repeated renderer edit series report
   byte-identical emitted artifacts, backed by the complete retained digest
   matrices rather than a boolean assertion alone.
 - The ordinary user kernel-cache inventory was identical before and after:
@@ -148,12 +150,12 @@ visible rather than being discarded:
 
 Each is one high first sample with a tight following pair and tight warm
 series. The cause is not isolated by current instrumentation, so neither row
-is used for S-06. The exact-product and edit series that do determine S-06
+is used for S-06. The fixed-renderer and edit series that do determine S-06
 remain below 1.6% range/median.
 
 ## Candidate regression budgets
 
-- Exact flagship topology→publication: retain the accepted approximately
+- Exact fixed-renderer topology→publication: retain the accepted approximately
   1.4–1.6 s warm and 5–6 s cold measurements as the machine-local comparison
   baseline. There is no 500 ms release gate for the existing full path.
 - 512-bank cold topology→publication: median ≤2 s.

@@ -11,6 +11,17 @@
 - **Must not overlap:** No backend, runtime, benchmark, or architecture-doc
   edits.
 
+## Outcome — fallback 1 landed
+
+The original denotational target below is retained as the lane's historical
+brief. The approved fallback supersedes it for this sprint:
+`Tropical.Semantics.lowerSigTree_lowersTo` is checked for every production
+`Sig` constructor against the production `lowerSigTree`. This is a relational
+lowering theorem, not denotational preservation and not LLVM, wasm, or Metal
+verification. The stronger theorem is a non-blocking follow-up requiring
+production `DedupSound` preservation and lawful `ENode` equality/hash
+behavior.
+
 ## Mission
 
 Land the first end-to-end semantic preservation theorem over a production

@@ -18,10 +18,11 @@ change proofs, docs, benchmarks, tests, and runtime qualification.
 The sprint closes on one clean, reproducible baseline:
 
 - current architecture described truthfully;
-- first preservation theorem checked;
+- approved relational lowering capstone checked;
 - trusted boundary queryable;
 - current performance measured;
-- Metal operating envelope qualified;
+- Metal operating envelope explicitly scoped, with final B512/D3 qualification
+  contingent on the required long soak;
 - legacy compatibility bounded;
 - all ordinary gates green on a clean checkout.
 
@@ -266,7 +267,8 @@ scope is cut to address it.
 3. All must-land deliverables are on the release-candidate commit.
 4. The release candidate passes clean-checkout validation.
 5. Linux CI is green.
-6. macOS Metal smoke is green and the manual qualification result is linked.
+6. macOS Metal smoke is green and the required B512/D3 30-minute actual-DAC
+   soak passes and is linked.
 7. There are no unexplained golden changes.
 8. The trust audit and production non-emission gate run in validation.
 9. The staff engineer signs the final decision log.

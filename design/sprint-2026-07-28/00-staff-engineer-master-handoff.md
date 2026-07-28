@@ -5,7 +5,30 @@
 - **Supervisor:** Staff engineer
 - **Sprint type:** Architecture consolidation and evidence
 - **Feature policy:** No new synthesis vocabulary or modal atoms
-- **Status:** Ready for kickoff
+- **Status:** Integration in progress; release candidate pending final
+  validation and B512/D3 long-soak evidence
+
+## Accelerated outcome amendment
+
+The calendar below is a sequencing guide, not elapsed-time evidence. Staff
+accelerated the lanes while preserving their review boundaries. The current
+close-state is:
+
+- architecture, trust, exact fixed-renderer performance, and the relational
+  semantics capstone are integrated;
+- `lowerSigTree_lowersTo` reinforces all production constructors but is not
+  denotational or backend verification; the stronger semantic theorem is a
+  non-blocking follow-up;
+- the fixed playground renderer is a separately scoped demo/reference fixture,
+  so its measured one-time load does not authorize tiering or compile-time
+  optimization;
+- Metal support is configuration-specific: B128/D3 is unsupported on the
+  canonical M1 Pro, B256 is untested, and B512/D3 is a candidate pending its
+  required final 30-minute actual-DAC soak;
+- the original Plan-4 quarantine decision has been superseded by an explicit
+  aggressive-retirement decision; `tropical_program_2` remains current; and
+- demo/product-surface work is out of this sprint and will be scoped
+  separately.
 
 ## Executive mandate
 
@@ -28,8 +51,8 @@ documentation agree on one current architecture.
 The desired close-state is:
 
 > One small closed-form calculus, one explicit semantic/trust boundary, three
-> qualified execution targets, one bounded legacy-compatibility story, and a
-> clean release baseline.
+> execution targets with an explicit hardware envelope, one current schema
+> boundary with legacy removed, and a clean release baseline.
 
 This is deliberately not the sprint that adds the next instrument, restores a
 surface language, introduces state, or generalizes to video/control rates.
@@ -40,15 +63,16 @@ All seven lanes must compose into these five outcomes:
 
 1. **Truth:** Current architecture docs describe the code at the release
    candidate, including the direct JSON patch-bay path and Metal.
-2. **Meaning:** A checked Lean theorem proves the first production lowering
-   boundary preserves denotation.
+2. **Meaning:** A checked all-constructor Lean theorem reinforces the first
+   production lowering boundary relationally; denotational preservation stays
+   explicit and non-blocking.
 3. **Trust:** Every remaining assumption, unsafe optimization, external
    dependency, and empirical correctness gate is recorded in one queryable
    ledger.
 4. **Evidence:** Current post-bank compile/edit performance and Metal’s
    reliability/control-latency envelope are measured reproducibly.
-5. **Boundary:** Legacy stateful plan/runtime support is classified and cannot
-   be confused with the current language.
+5. **Boundary:** Legacy stateful plan/runtime support is retired; current
+   schema names and omission defaults remain explicit.
 
 The staff engineer owns composition and scope, not every implementation.
 
@@ -345,11 +369,12 @@ Maintain this table in the sprint master PR or the final evidence index:
 | S-01 | Day 2 | Lane B theorem statement | — | link | staff |
 | S-02 | Day 2 | Trust evidence taxonomy | — | link | staff |
 | S-03 | Day 4 | Semantic full path or fallback | — | link | staff |
-| S-04 | Day 4 | Legacy compatibility classifications | — | link | staff |
+| S-04 | Day 4 | Legacy compatibility quarantine (superseded by S-09) | — | Lane F | staff |
 | S-05 | Day 8 | P1 scope cuts, if any | — | link | staff |
-| S-06 | Day 9 | Tiered preview recommendation | — | Lane D | staff |
-| S-07 | Day 9 | Qualified Metal defaults by latency budget | — | Lane E | staff |
+| S-06 | Day 9 | Fixed-renderer baseline accepted; no tiering/compile optimization | — | Lane D | staff |
+| S-07 | Day 9 | Configuration-specific Metal support envelope | — | Lane E | staff |
 | S-08 | Day 10 | Release candidate acceptance | — | Tier 3 | staff |
+| S-09 | accelerated | Retire Plan-4/runtime/API legacy compatibility immediately | — | Lane F | staff |
 
 Decisions must describe rejected alternatives. “Team agreed” is not enough to
 reconstruct why.
@@ -469,9 +494,9 @@ The sprint is done only when all are true:
 
 ### Compatibility
 
-- Legacy state/plan-4 surfaces are classified.
-- Current production paths are gated against state emission.
-- Test names and docs cannot be mistaken for source-language support.
+- Legacy state/Plan-4/runtime/API aliases are absent from current boundaries.
+- Current production paths reject retired schema/state fields.
+- `tropical_program_2` and current Plan-5 omission defaults remain supported.
 
 ### Release
 
@@ -506,10 +531,12 @@ focused bet:
 
 - extend the semantic spine through direct lowering or stage-0;
 - implement theorem-licensed backend bank-realization policy;
-- build tiered structural-edit preview if Lane D justifies it;
-- turn the playground into the flagship eigenmode instrument;
+- design a separate flagship instrument without treating the playground
+  renderer as its product surface;
 - narrow an analytic approximation obligation in the Exact layer;
 - begin a second concrete rate consumer before adding rate-indexed types.
 
-The staff engineer recommends one based on the final evidence. Do not choose it
-in advance and bend this sprint’s results toward it.
+The demo/product artifact is deliberately scoped in a separate pass, not
+selected by this evidence package. The staff engineer recommends any compiler,
+semantics, or runtime follow-up from the final evidence without bending this
+sprint’s results toward it.

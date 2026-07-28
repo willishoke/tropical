@@ -11,6 +11,19 @@
 - **Must not overlap:** Measure first. Do not implement tiered compilation,
   automatic backend selection, or broad optimizer changes in this sprint.
 
+## Outcome — fixed renderer measured, optimization retired
+
+The original flagship/tiering fork below is retained as the lane's historical
+brief. The measured graph is the exact fixed `playground/renderer` demo and
+reference fixture, not the separately scoped flagship product. Its
+approximately 1.4–1.6 s warm and 5–6 s cold generation/load walls missed the
+kickoff hypothesis, but no interactive topology editor or structural selector
+exists in this renderer; live controls use `set_param` without relowering.
+Staff therefore accepts the machine-local baseline and authorizes neither a
+tiered preview nor compile-time optimization for this fixed renderer. Reopen
+the question only for a product-facing structural editor or an explicit boot
+latency contract.
+
 ## Mission
 
 Replace pre-bank and anecdotal performance claims with a reproducible baseline
