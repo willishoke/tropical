@@ -71,6 +71,12 @@ private def dumpParts (parts : EmittedParts) : IO Unit := do
     IO.FS.writeFile s!"{dir}/coeff.ll" parts.coefficientIr
     IO.FS.writeFile s!"{dir}/manifest.json" parts.manifest
 
+/-- The Metal sibling of the opt-in stage dump. Normal output and wire schemas
+    are untouched when `TROPICAL_STAGE0_DUMP` is absent. -/
+private def dumpMsl (msl : String) : IO Unit := do
+  if let some dir ← IO.getEnv "TROPICAL_STAGE0_DUMP" then
+    IO.FS.writeFile s!"{dir}/audio.metal" msl
+
 /-- Split + emit + load, JIT-only. -/
 def load (rt : Tropical.Ffi.Runtime) (plan : FlatPlan) : IO Unit := do
   let s ← split plan
@@ -89,6 +95,8 @@ def loadMsl (rt : Tropical.Ffi.Runtime) (plan : FlatPlan) : IO Unit := do
   | .error e, _ => throw <| IO.userError s!"StagedLoad: {e}"
   | _, .error e => throw <| IO.userError s!"StagedLoad (msl): {e}"
   | .ok parts, .ok msl =>
+    dumpParts parts
+    dumpMsl msl
     rt.loadIrStaged parts.audioIr msl parts.coefficientIr parts.manifest
 
 /-- Typed split + emit + load, JIT-only. -/
@@ -115,6 +123,7 @@ def loadMslTyped (rt : Tropical.Ffi.Runtime) (plan : FlatPlan)
   | _, .error e => throw <| IO.userError s!"StagedLoad (msl): {e}"
   | .ok parts, .ok msl =>
     dumpParts parts
+    dumpMsl msl
     rt.loadIrStaged parts.audioIr msl parts.coefficientIr parts.manifest
 
 end Tropical.StagedLoad

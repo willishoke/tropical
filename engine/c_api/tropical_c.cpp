@@ -314,6 +314,12 @@ unsigned int tropical_runtime_get_buffer_length(tropical_runtime_t r)
   return static_cast<tropical_runtime::FlatRuntime*>(r)->getBufferLength();
 }
 
+unsigned int tropical_runtime_metal_pipeline_depth(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)->metal_pipeline_depth();
+}
+
 void tropical_runtime_begin_fade_in(tropical_runtime_t r)
 {
   if (r) static_cast<tropical_runtime::FlatRuntime*>(r)->begin_fade_in();

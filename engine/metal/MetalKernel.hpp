@@ -50,4 +50,9 @@ bool process_block(MetalKernel & k,
                    double sample_rate, uint64_t start_sample_index,
                    double * out_f64, uint32_t len);
 
+/// Qualification diagnostic: zero for synchronous dispatch, otherwise the
+/// configured number of future blocks.  This is deliberately runtime-only;
+/// it does not alter the plan or protocol schema.
+uint32_t pipeline_depth(const MetalKernel & k);
+
 } // namespace tropical_metal

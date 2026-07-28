@@ -116,6 +116,11 @@ Kernel ABI:
 Lean emission defines the semantics of those arguments. Do not resurrect C++
 instruction codegen.
 
+Benchmark/qualification runs may set `TROPICAL_KERNEL_CACHE_ROOT` to move the
+build-id subtree under a harness-owned directory, or
+`TROPICAL_KERNEL_CACHE_DISABLE=1` to disable disk cache reads/writes. Defaults
+are unchanged; harnesses must never clear the user's ordinary cache.
+
 ### WebAssembly build support
 
 With `TROPICAL_WASM_EMIT`, the engine lowers the same LLVM module to wasm32
@@ -137,6 +142,21 @@ The JIT always loads alongside Metal for scopes and reference rendering. Tests:
 
 See [`benchmarks/metal_live/findings.md`](../benchmarks/metal_live/findings.md)
 for current qualification measurements.
+
+Qualification controls only: `TROPICAL_METAL_PIPELINE_DEPTH=1..3` selects the
+future-block depth and overrides the legacy `TROPICAL_METAL_PIPELINE=1`
+(which remains D=3). Invalid explicit depths refuse at kernel construction.
+The read-only C diagnostic `tropical_runtime_metal_pipeline_depth` returns 0
+for sync/JIT/non-Metal builds. `TROPICAL_BUFFER_LENGTH=16..16384` selects the
+live engine block length before Runtime/DAC construction; absence preserves
+the 512 default.
+
+## Audio output (`dac/TropicalDAC.hpp`)
+
+`TropicalDACImpl<AudioSource>` is the RtAudio device driver. The callback
+copies mono output to every device channel and records callback timing,
+underruns, and overruns. A watcher handles device loss/default-device changes;
+explicit switches and reconnects use fade-in.
 
 ## C API boundary
 

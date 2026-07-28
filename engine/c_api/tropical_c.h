@@ -117,6 +117,10 @@ void             tropical_free_buffer(uint8_t* buf);
 void             tropical_runtime_process(tropical_runtime_t);
 const double*    tropical_runtime_output_buffer(tropical_runtime_t);
 unsigned int     tropical_runtime_get_buffer_length(tropical_runtime_t);
+/* Qualification diagnostic: 0 for JIT/synchronous Metal and on non-Metal
+   builds (the stable sentinel), otherwise the number of future Metal blocks
+   currently configured. */
+unsigned int     tropical_runtime_metal_pipeline_depth(tropical_runtime_t);
 
 /* Fade control (for DAC) */
 void             tropical_runtime_begin_fade_in(tropical_runtime_t);

@@ -185,6 +185,14 @@ if(TROPICAL_BUILD_TESTS)
     endif()
 endif()
 
+# Reproducible benchmark probe. It consumes emitted artifacts and reports raw
+# load/write/block samples; it is never installed as production surface.
+add_executable(tropical_runtime_bench
+    benchmarks/current_baseline/runtime_bench.cpp)
+target_include_directories(tropical_runtime_bench PRIVATE engine)
+target_compile_features(tropical_runtime_bench PRIVATE cxx_std_20)
+target_link_libraries(tropical_runtime_bench PRIVATE tropical_core)
+
 # Install the public C header
 install(FILES engine/c_api/tropical_c.h DESTINATION include)
 if(TROPICAL_BUILD_PYTHON)

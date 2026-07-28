@@ -394,6 +394,17 @@ public:
 
   unsigned int getBufferLength() const { return buffer_length_; }
 
+  uint32_t metal_pipeline_depth() const
+  {
+#ifdef TROPICAL_METAL
+    const uint32_t idx = active_state_.load(std::memory_order_acquire);
+    const auto & metal = states_[idx].metal;
+    return metal ? tropical_metal::pipeline_depth(*metal) : 0;
+#else
+    return 0;
+#endif
+  }
+
   void begin_fade_in(int samples = 2048)
   {
     fade_out_remaining_.store(-1, std::memory_order_relaxed);

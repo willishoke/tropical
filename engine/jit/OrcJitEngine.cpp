@@ -212,6 +212,13 @@ static std::string binary_build_id()
 
 static fs::path kernel_cache_dir()
 {
+  // Benchmark and qualification runs must never clear or perturb a
+  // developer's ordinary cache.  An explicit root keeps the normal build-id
+  // invalidation while moving the whole cache under a caller-owned directory.
+  if (const char * root = std::getenv("TROPICAL_KERNEL_CACHE_ROOT");
+      root && *root)
+    return fs::path(root) / binary_build_id();
+
   fs::path base;
   if (const char * xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
     base = fs::path(xdg);
@@ -220,6 +227,12 @@ static fs::path kernel_cache_dir()
   else
     base = fs::temp_directory_path();
   return base / "tropical" / "kernels" / binary_build_id();
+}
+
+static bool kernel_cache_disabled()
+{
+  const char * value = std::getenv("TROPICAL_KERNEL_CACHE_DISABLE");
+  return value && *value && std::string(value) != "0";
 }
 
 // Read TROPICAL_JIT_OPT_LEVEL env var. Accepts "O0"/"0", "O1"/"1",
@@ -254,7 +267,8 @@ OrcJitEngine::OrcJitEngine()
   llvm::InitializeNativeTarget();
   llvm::InitializeNativeTargetAsmPrinter();
 
-  object_cache_ = std::make_unique<KernelObjectCache>(kernel_cache_dir());
+  if (!kernel_cache_disabled())
+    object_cache_ = std::make_unique<KernelObjectCache>(kernel_cache_dir());
   KernelObjectCache * cache_ptr = object_cache_.get();
 
   opt_level_ = parse_opt_level();

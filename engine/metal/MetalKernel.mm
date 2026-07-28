@@ -18,7 +18,9 @@
 #import <Foundation/Foundation.h>
 
 #include <algorithm>
+#include <cerrno>
 #include <cstring>
+#include <limits>
 #include <vector>
 
 namespace tropical_metal
@@ -50,11 +52,13 @@ id<MTLCommandQueue> shared_queue()
 }
 } // namespace
 
-// Pipeline depth for TROPICAL_METAL_PIPELINE=1: blocks pre-rendered AHEAD
-// of the playhead. Legal because kernels are closed-form — block S+kB is a
-// pure function of its sample index and the slot snapshot at enqueue time.
-// Audio-position latency is ZERO; param changes lag up to D blocks.
-static constexpr uint32_t kPipelineDepth = 3;
+// Maximum qualification depth.  TROPICAL_METAL_PIPELINE=1 keeps its existing
+// D=3 behavior; TROPICAL_METAL_PIPELINE_DEPTH=1..3 is the opt-in sweep seam.
+// Blocks are pre-rendered AHEAD of the playhead. Legal because kernels are
+// closed-form — block S+kB is a pure function of its sample index and the slot
+// snapshot at enqueue time. Audio-position latency is ZERO; param changes lag
+// up to D blocks.
+static constexpr uint32_t kMaxPipelineDepth = 3;
 
 struct MetalKernel
 {
@@ -73,18 +77,42 @@ struct MetalKernel
   std::vector<float> slot_staging;
 
   // ── Pipelined mode (TROPICAL_METAL_PIPELINE=1) ─────────────────────────
-  bool pipelined = false;
-  id<MTLBuffer>        ring_out[kPipelineDepth]     = { nil, nil, nil };
-  id<MTLBuffer>        ring_slots[kPipelineDepth]   = { nil, nil, nil };
+  uint32_t depth = 0;
+  id<MTLBuffer>        ring_out[kMaxPipelineDepth]     = { nil, nil, nil };
+  id<MTLBuffer>        ring_slots[kMaxPipelineDepth]   = { nil, nil, nil };
   // Per-ring-entry column buffers, like slots: an in-flight dispatch must
   // never see a later upload, so columns get a buffer per ring entry, not
   // a shared one.
-  id<MTLBuffer>        ring_columns[kPipelineDepth] = { nil, nil, nil };
-  dispatch_semaphore_t ring_done[kPipelineDepth]    = { nullptr, nullptr, nullptr };
+  id<MTLBuffer>        ring_columns[kMaxPipelineDepth] = { nil, nil, nil };
+  dispatch_semaphore_t ring_done[kMaxPipelineDepth]    = { nullptr, nullptr, nullptr };
   bool     primed       = false;
   uint32_t read_pos     = 0;
   uint64_t next_enqueue = 0;   // sample index of the next block to submit
 };
+
+static bool configure_pipeline_depth(uint32_t & depth, std::string & err)
+{
+  depth = 0;
+  const char * pipe = getenv("TROPICAL_METAL_PIPELINE");
+  if (pipe && pipe[0] == '1' && pipe[1] == '\0')
+    depth = 3; // preserve the original opt-in behavior
+
+  const char * raw = getenv("TROPICAL_METAL_PIPELINE_DEPTH");
+  if (!raw || !*raw)
+    return true;
+
+  errno = 0;
+  char * end = nullptr;
+  const unsigned long parsed = std::strtoul(raw, &end, 10);
+  if (errno != 0 || end == raw || *end != '\0'
+      || parsed < 1 || parsed > kMaxPipelineDepth)
+  {
+    err = "MetalKernel: TROPICAL_METAL_PIPELINE_DEPTH must be an integer in [1,3]";
+    return false;
+  }
+  depth = static_cast<uint32_t>(parsed);
+  return true;
+}
 
 // Submit block `start` into ring slot j (no wait). The completion handler
 // signals ring_done[j]; Metal retains the buffers until completion, and ARC
@@ -194,11 +222,11 @@ MetalKernelPtr create(const std::string & msl_source,
       if (!k->columns) { err = "MetalKernel: column buffer allocation failed"; return nullptr; }
     }
 
-    const char * pipe = getenv("TROPICAL_METAL_PIPELINE");
-    k->pipelined = pipe && pipe[0] == '1';
-    if (k->pipelined)
+    if (!configure_pipeline_depth(k->depth, err))
+      return nullptr;
+    if (k->depth > 0)
     {
-      for (uint32_t j = 0; j < kPipelineDepth; ++j)
+      for (uint32_t j = 0; j < k->depth; ++j)
       {
         k->ring_out[j] = [dev newBufferWithLength:(NSUInteger)buffer_length * sizeof(float)
                                           options:MTLResourceStorageModeShared];
@@ -228,7 +256,7 @@ bool process_block(MetalKernel & k,
 {
   if (len == 0 || len > k.capacity) return false;
 
-  if (k.pipelined)
+  if (k.depth > 0)
   {
     @autoreleasepool
     {
@@ -236,15 +264,18 @@ bool process_block(MetalKernel & k,
       // by submitting D future blocks starting at the requested position.
       // Hot-swap stays seamless: the carried sample_index is where the ring
       // primes, and the first read waits only one dispatch (~sub-ms).
-      const uint64_t expected = k.next_enqueue - (uint64_t)kPipelineDepth * len;
+      const uint64_t queued = (uint64_t)k.depth * len;
+      const uint64_t expected =
+        k.next_enqueue >= queued ? k.next_enqueue - queued
+                                 : std::numeric_limits<uint64_t>::max();
       if (!k.primed || expected != start_sample_index)
       {
         if (k.primed)  // drain stale futures before re-priming
-          for (uint32_t j = 0; j < kPipelineDepth; ++j)
+          for (uint32_t j = 0; j < k.depth; ++j)
             dispatch_semaphore_wait(k.ring_done[j], DISPATCH_TIME_FOREVER);
         k.next_enqueue = start_sample_index;
         k.read_pos = 0;
-        for (uint32_t j = 0; j < kPipelineDepth; ++j)
+        for (uint32_t j = 0; j < k.depth; ++j)
         {
           enqueue_block(k, j, slots, n_slots, columns, n_columns,
                         sample_rate, k.next_enqueue, len);
@@ -260,7 +291,7 @@ bool process_block(MetalKernel & k,
       enqueue_block(k, j, slots, n_slots, columns, n_columns,
                     sample_rate, k.next_enqueue, len);
       k.next_enqueue += len;
-      k.read_pos = (j + 1) % kPipelineDepth;
+      k.read_pos = (j + 1) % k.depth;
       return true;
     }
   }
@@ -309,6 +340,11 @@ bool process_block(MetalKernel & k,
       out_f64[i] = static_cast<double>(src[i]);
     return true;
   }
+}
+
+uint32_t pipeline_depth(const MetalKernel & k)
+{
+  return k.depth;
 }
 
 } // namespace tropical_metal

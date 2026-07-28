@@ -1,5 +1,36 @@
 # Metal backend — live findings (V2 phase 6)
 
+## 2026-07-27 sprint qualification update
+
+The new qualification surface is implemented and has produced two distinct
+evidence classes:
+
+- The full short latency matrix passed on the canonical M1 Pro:
+  B=128/256/512 × D=1/2/3 × raw/glide/anchor/velocity. Every one of the 36
+  Metal rows first reflected the impulsive write after exactly D blocks; the
+  three JIT reference rows reflected it in block zero. Thus observed transport
+  latency exactly matched `D×B/44100`, from 2.90 ms (D1/B128) through 34.83 ms
+  (D3/B512). Multi-slot dispatch took 41–417 ns median across these short
+  rows. This measures captured-snapshot transport, not the deliberately gradual
+  audible onset of a glide.
+- CTest now proves the legacy D=3 spelling, explicit D=1/2/3 precedence,
+  default synchronous mode, invalid-depth refusal, exact D-block live-column
+  lag, clock-jump draining, and hot-swap re-prime on real Metal hardware.
+
+The first 10-second default-device smoke recorded one RtAudio underrun despite
+0 callback budget overruns (859 callbacks, 0.147 ms average, 4.889 ms max).
+That row is a real qualification failure and is retained. Following the staff
+stop-line protocol, the harness was split into cumulative snapshots and rerun:
+a 15-second diagnostic recorded zero underruns at startup/warm-up, clean
+post-reset baseline, after writes, after the clock jump, after hot-swap, and
+after stop. Its measured window had 1293 callbacks, 0.096 ms average, 2.723 ms
+max, and zero overruns. This permits a reset-bounded 30-minute measurement; it
+does not erase the original one-underrun row.
+
+The long-row status and raw-data links will be frozen here after the stable
+implementation commit. Until that row completes, Metal remains
+**qualification pending**, not release-qualified.
+
 **Date:** 2026-07-07
 **Host:** Apple M1 Pro, macOS 26.3, 44.1 kHz, B=512 (engine boot default)
 **Patches:** `modal_fixed{128,256,512}.json` — production-style fat additive

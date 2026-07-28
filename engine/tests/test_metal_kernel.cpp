@@ -97,6 +97,7 @@ static void test_metal_ramp()
   ASSERT(tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
                                       msl.c_str(), msl.size(),
                                       MANIFEST, strlen(MANIFEST)));
+  ASSERT(tropical_runtime_metal_pipeline_depth(rt) == 0);
   tropical_runtime_process(rt);
   const double* out = tropical_runtime_output_buffer(rt);
   ASSERT(out != nullptr);
@@ -264,7 +265,8 @@ static void test_metal_columns_live()
 
 /** 6. Banked columns, PIPELINED (TROPICAL_METAL_PIPELINE=1): columns ride
  *     per-ring-entry buffers copied at enqueue, so a knob move lands with
- *     the documented D(=3)-block lag — never mid-flight, never torn. */
+ *     the backwards-compatible D(=3)-block lag — never mid-flight, never
+ *     torn. */
 static void test_metal_columns_pipelined()
 {
   setenv("TROPICAL_METAL_PIPELINE", "1", 1);
@@ -287,6 +289,7 @@ static void test_metal_columns_pipelined()
     tropical_runtime_free(rt);
     return;
   }
+  ASSERT(tropical_runtime_metal_pipeline_depth(rt) == 3);
   const double* out = tropical_runtime_output_buffer(rt);
   // Block 1 primes the ring (3 futures @ old columns) and reads the first.
   tropical_runtime_process(rt);
@@ -306,6 +309,96 @@ static void test_metal_columns_pipelined()
     ASSERT_NEAR(out[i], 2.0 + (double)(i % 4), 1e-7);
   tropical_runtime_free(rt);
   printf("PASS  metal pipelined columns: per-ring upload, knob lands after the D-block lag\n");
+}
+
+/** 7. Qualification depth sweep. Every supported depth has the exact
+ *     D-block slot-snapshot lag, while a clock jump drains queued futures
+ *     and re-primes from the current slot snapshot immediately. */
+static void test_metal_pipeline_depth_sweep()
+{
+  const unsigned int buf = 16;
+  const std::string msl = msl_kernel("    output_buffer[s] = slots[0];");
+  for (unsigned int depth = 1; depth <= 3; ++depth)
+  {
+    const std::string raw = std::to_string(depth);
+    // The numeric seam is authoritative when both controls are present.
+    // This exercises precedence at D=1 while the other rows exercise the
+    // depth-only spelling.
+    if (depth == 1) setenv("TROPICAL_METAL_PIPELINE", "1", 1);
+    setenv("TROPICAL_METAL_PIPELINE_DEPTH", raw.c_str(), 1);
+    tropical_runtime_t rt = tropical_runtime_new(buf);
+    if (rt == nullptr)
+    {
+      unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
+      ++g_fail;
+      return;
+    }
+    const bool loaded =
+      tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
+                                   msl.c_str(), msl.size(),
+                                   MANIFEST, strlen(MANIFEST));
+    unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
+    if (depth == 1) unsetenv("TROPICAL_METAL_PIPELINE");
+    ASSERT(loaded);
+    ASSERT(tropical_runtime_metal_pipeline_depth(rt) == depth);
+
+    tropical_runtime_process(rt); // prime and consume the first old block
+    tropical_runtime_set_slot(rt, 0, 0.75);
+    for (unsigned int b = 0; b < depth; ++b)
+    {
+      tropical_runtime_process(rt);
+      const double * out = tropical_runtime_output_buffer(rt);
+      for (unsigned int i = 0; i < buf; ++i) ASSERT_NEAR(out[i], 0.25, 1e-7);
+    }
+    tropical_runtime_process(rt);
+    const double * out = tropical_runtime_output_buffer(rt);
+    for (unsigned int i = 0; i < buf; ++i) ASSERT_NEAR(out[i], 0.75, 1e-7);
+
+    // A discontinuous clock move must discard every queued old snapshot.
+    tropical_runtime_set_slot(rt, 0, 0.5);
+    tropical_runtime_set_sample_index(rt, 1000000);
+    tropical_runtime_process(rt);
+    out = tropical_runtime_output_buffer(rt);
+    for (unsigned int i = 0; i < buf; ++i) ASSERT_NEAR(out[i], 0.5, 1e-7);
+
+    // Hot-swap builds a fresh ring at the carried coordinate. No completed
+    // future from the old kernel may be emitted after publication.
+    setenv("TROPICAL_METAL_PIPELINE_DEPTH", raw.c_str(), 1);
+    const std::string replacement =
+      msl_kernel("    output_buffer[s] = slots[0] + 1.0f;");
+    const bool swapped =
+      tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
+                                   replacement.c_str(), replacement.size(),
+                                   MANIFEST, strlen(MANIFEST));
+    unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
+    ASSERT(swapped);
+    tropical_runtime_process(rt);
+    out = tropical_runtime_output_buffer(rt);
+    for (unsigned int i = 0; i < buf; ++i) ASSERT_NEAR(out[i], 1.25, 1e-7);
+    tropical_runtime_free(rt);
+  }
+  printf("PASS  metal pipeline depths 1/2/3: lag + clock/hot-swap re-prime\n");
+}
+
+/** 8. Invalid qualification configuration refuses at Metal construction
+ *     with a stable, actionable diagnostic. */
+static void test_metal_pipeline_invalid_depth()
+{
+  setenv("TROPICAL_METAL_PIPELINE_DEPTH", "4", 1);
+  tropical_runtime_t rt = tropical_runtime_new(16);
+  ASSERT(rt != nullptr);
+  const std::string msl = msl_kernel("    output_buffer[s] = slots[0];");
+  const bool loaded =
+    tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
+                                 msl.c_str(), msl.size(),
+                                 MANIFEST, strlen(MANIFEST));
+  unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
+  ASSERT(!loaded);
+  ASSERT(std::strstr(tropical_last_error(),
+                     "TROPICAL_METAL_PIPELINE_DEPTH must be an integer in [1,3]")
+         != nullptr);
+  tropical_runtime_free(rt);
+  printf("PASS  metal invalid pipeline depth refuses clearly\n");
 }
 
 /** 4. set_sample_index repositions the clock (the render --start hook). */
@@ -336,6 +429,8 @@ int main()
   test_metal_set_index();
   test_metal_columns_live();
   test_metal_columns_pipelined();
+  test_metal_pipeline_depth_sweep();
+  test_metal_pipeline_invalid_depth();
   if (g_fail == 0) printf("ALL METAL TESTS PASSED\n");
   return g_fail == 0 ? 0 : 1;
 }
