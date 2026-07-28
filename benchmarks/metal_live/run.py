@@ -28,6 +28,12 @@ LATENCY_PARAMS = {
     "anchor": ("probe.freq", 220.0, 440.0),
     "velocity": ("master.velocity", 1.0, 0.75),
 }
+
+
+class QualificationBlocked(RuntimeError):
+    """A fully recorded row failed acceptance; do not append a duplicate row."""
+
+
 BASE_CONTROLS: dict[str, str | None] = {
     "TROPICAL_STAGE0": "1",
     "TROPICAL_BANKS_UNROLL": None,
@@ -174,6 +180,13 @@ def analyze_rss(result: dict[str, Any], rate: int, buffer: int
     )
     return {
         "sample_count": len(values),
+        "all_samples_positive":
+            bool(values)
+            and all(
+                isinstance(value, int) and not isinstance(value, bool)
+                and value > 0
+                for value in values
+            ),
         "warmup_end_block": warmup_end,
         "warmup_contract":
             "two seconds after observed hot-swap progress",
@@ -196,13 +209,29 @@ def evaluate_acceptance(result: dict[str, Any],
                         buffer: int, rate: int, depth: int,
                         canary_amplitude_bound: float = 1e-12,
                         ) -> tuple[dict[str, bool], list[str]]:
-    expected_labels = {
+    expected_labels = [
         "start",
         "post_2p40_clock_jump",
         "midpoint_after_hot_swap",
         "end",
-    }
+    ]
     labels = result.get("reference_labels", [])
+    checkpoint_arrays = [
+        labels,
+        result.get("reference_blocks", []),
+        result.get("reference_start_indices", []),
+        result.get("reference_snr_db", []),
+        result.get("reference_max_error", []),
+        result.get("reference_signal_energy", []),
+        result.get("reference_checksum", []),
+    ]
+    checkpoint_arrays_aligned = (
+        labels == expected_labels
+        and all(
+            isinstance(values, list) and len(values) == len(expected_labels)
+            for values in checkpoint_arrays
+        )
+    )
     snr = result.get("reference_snr_db", [])
     energies = result.get("reference_signal_energy", [])
     callback = result.get("callback_summary_ns", {})
@@ -311,8 +340,8 @@ def evaluate_acceptance(result: dict[str, Any],
             and end_block >= last_write + depth + 1,
         "callback_progress_not_stalled":
             not event_completion.get("callback_progress_stalled", True),
-        "all_reference_checkpoints_present":
-            set(labels) == expected_labels and len(snr) == len(expected_labels),
+        "reference_checkpoint_arrays_aligned":
+            checkpoint_arrays_aligned,
         "all_reference_snr_above_100db":
             len(snr) == len(expected_labels)
             and all(
@@ -334,6 +363,11 @@ def evaluate_acceptance(result: dict[str, Any],
             applied_disciplines == {"raw", "glide", "anchor", "velocity"},
         "rss_sampling_sufficient":
             rss_analysis.get("sample_count", 0) >= 3,
+        "rss_samples_are_valid":
+            rss_analysis.get("all_samples_positive") is True
+            and isinstance(result.get("final_rss_bytes"), int)
+            and not isinstance(result.get("final_rss_bytes"), bool)
+            and result["final_rss_bytes"] > 0,
         "no_material_post_warmup_rss_growth":
             not rss_analysis["material_net_or_level_growth"],
     }
@@ -739,6 +773,9 @@ def run_soak(stream, work: Path, duration: float, buffer: int, depth: int) -> No
     }
     stream.write(json.dumps(row, separators=(",", ":")) + "\n")
     stream.flush()
+    if failure_reasons:
+        raise QualificationBlocked(
+            "Metal soak acceptance blocked: " + ", ".join(failure_reasons))
 
 
 def main() -> int:
@@ -774,6 +811,8 @@ def main() -> int:
                     active_mode = "soak"
                     run_soak(stream, work, options.duration_seconds,
                              options.buffer, options.depth)
+            except QualificationBlocked:
+                return 1
             except Exception as error:
                 write_failure_row(
                     stream,

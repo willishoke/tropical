@@ -6,7 +6,10 @@ from __future__ import annotations
 import importlib.util
 import io
 import json
+import sys
+import tempfile
 import unittest
+from unittest import mock
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
@@ -73,7 +76,15 @@ def passing_result() -> dict:
             "end",
         ],
         "reference_snr_db": [120.0, 120.0, 120.0, 120.0],
+        "reference_blocks": [11, 31, 51, 90],
+        "reference_start_indices": [0, 1 << 40, 1 << 40, 1 << 40],
+        "reference_max_error": [1e-15] * 4,
         "reference_signal_energy": [5.12e-14] * 4,
+        "reference_checksum": [1e-7] * 4,
+        "rss_blocks": [60, 70, 80],
+        "rss_bytes": [100 << 20, 100 << 20, 100 << 20],
+        "final_rss_bytes": 100 << 20,
+        "dac_snapshots": [],
         "param_events": [
             {"discipline": "raw"},
             {"discipline": "glide"},
@@ -87,7 +98,11 @@ class AcceptanceGateTests(unittest.TestCase):
     def evaluate(self, result: dict) -> tuple[dict[str, bool], list[str]]:
         return RUN.evaluate_acceptance(
             result,
-            {"sample_count": 3, "material_net_or_level_growth": False},
+            {
+                "sample_count": 3,
+                "all_samples_positive": True,
+                "material_net_or_level_growth": False,
+            },
             buffer=512,
             rate=44100,
             depth=3,
@@ -140,7 +155,11 @@ class AcceptanceGateTests(unittest.TestCase):
         result = passing_result()
         gates, failures = RUN.evaluate_acceptance(
             result,
-            {"sample_count": 2, "material_net_or_level_growth": False},
+            {
+                "sample_count": 2,
+                "all_samples_positive": True,
+                "material_net_or_level_growth": False,
+            },
             buffer=512,
             rate=44100,
             depth=3,
@@ -225,6 +244,22 @@ class AcceptanceGateTests(unittest.TestCase):
         self.assertFalse(gates["all_production_param_disciplines_exercised"])
         self.assertIn("all_production_param_disciplines_exercised", failures)
 
+    def test_zero_rss_samples_block_qualification(self) -> None:
+        result = passing_result()
+        result["rss_bytes"] = [0, 0, 0]
+        analysis = RUN.analyze_rss(result, rate=44100, buffer=512)
+        gates, failures = RUN.evaluate_acceptance(
+            result, analysis, buffer=512, rate=44100, depth=3)
+        self.assertFalse(gates["rss_samples_are_valid"])
+        self.assertIn("rss_samples_are_valid", failures)
+
+    def test_parallel_checkpoint_length_mismatch_blocks(self) -> None:
+        result = passing_result()
+        result["reference_labels"].append("start")
+        gates, failures = self.evaluate(result)
+        self.assertFalse(gates["reference_checkpoint_arrays_aligned"])
+        self.assertIn("reference_checkpoint_arrays_aligned", failures)
+
     def test_canary_masking_bank_blocks_qualification(self) -> None:
         result = passing_result()
         result["reference_signal_energy"][-1] = 512 * (1.01e-12 ** 2)
@@ -290,6 +325,81 @@ class AcceptanceGateTests(unittest.TestCase):
             result, analysis, buffer=512, rate=44100, depth=3)
         self.assertFalse(gates["no_material_post_warmup_rss_growth"])
         self.assertIn("no_material_post_warmup_rss_growth", failures)
+
+    def test_blocked_soak_row_is_written_then_raises(self) -> None:
+        result = passing_result()
+        artifacts = {
+            key: Path(f"/tmp/{key}")
+            for key in (
+                "ir", "coeff", "msl", "manifest",
+                "reload_ir", "reload_coeff", "reload_msl", "reload_manifest",
+            )
+        }
+        slots = {
+            "reference_slot": 0,
+            "param_events": [
+                ("raw", "raw", 0.0, 1.0),
+                ("glide", "glide", 0.0, 1.0),
+                ("anchor", "anchor", 0.0, 1.0),
+                ("velocity", "velocity", 0.0, 1.0),
+            ],
+            "canary_amplitude_bound": 1e-12,
+        }
+        rss_analysis = {
+            "sample_count": 3,
+            "all_samples_positive": True,
+            "material_net_or_level_growth": False,
+        }
+        stream = io.StringIO()
+        with (
+            mock.patch.object(
+                RUN, "prepare_heavy_graph", return_value=(artifacts, slots)),
+            mock.patch.object(RUN, "probe", side_effect=[{}, result]),
+            mock.patch.object(RUN, "analyze_rss", return_value=rss_analysis),
+            mock.patch.object(
+                RUN, "evaluate_acceptance",
+                return_value=({"forced_failure": False}, ["forced_failure"])),
+            self.assertRaises(RUN.QualificationBlocked),
+        ):
+            RUN.run_soak(stream, Path("/tmp"), 1800, 512, 3)
+        row = json.loads(stream.getvalue())
+        self.assertEqual(row["qualification_status"], "blocked")
+        self.assertEqual(row["failure_reasons"], ["forced_failure"])
+
+    def test_main_returns_nonzero_for_blocked_soak_without_duplicate_row(
+            self) -> None:
+        def blocked_soak(stream, *_args) -> None:
+            stream.write(json.dumps({
+                "schema": "tropical_metal_live_soak_2",
+                "qualification_status": "blocked",
+                "failure_reasons": ["forced_failure"],
+            }) + "\n")
+            stream.flush()
+            raise RUN.QualificationBlocked("forced_failure")
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "blocked.jsonl"
+            with (
+                mock.patch.object(
+                    sys, "argv",
+                    ["run.py", "--mode", "soak", "--skip-build",
+                     "--output", str(output)]),
+                mock.patch.object(RUN, "RUNTIME_BENCH", Path(__file__)),
+                mock.patch.object(RUN, "DIFFCLI", Path(__file__)),
+                mock.patch.object(
+                    RUN, "manifest",
+                    return_value={"schema": "tropical_metal_live_env_2"}),
+                mock.patch.object(RUN, "run_soak", side_effect=blocked_soak),
+            ):
+                self.assertEqual(RUN.main(), 1)
+            rows = [
+                json.loads(line)
+                for line in output.read_text().splitlines()
+                if line.strip()
+            ]
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[1]["qualification_status"], "blocked")
+        self.assertNotEqual(rows[1]["schema"], "tropical_metal_live_failure_2")
 
     def test_classified_failure_row_is_flushed_and_blocked(self) -> None:
         class RecordingStream(io.StringIO):

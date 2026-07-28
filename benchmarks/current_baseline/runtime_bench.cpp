@@ -287,6 +287,14 @@ uint64_t rss_bytes()
 #endif
 }
 
+uint64_t required_rss_bytes()
+{
+  const uint64_t value = rss_bytes();
+  if (value == 0)
+    throw std::runtime_error("RSS sampling failed");
+  return value;
+}
+
 uint64_t elapsed_ns(Clock::time_point start, Clock::time_point end)
 {
   return static_cast<uint64_t>(
@@ -846,7 +854,7 @@ int main(int argc, char ** argv)
         if (o.rss_every > 0 && block >= next_rss)
         {
           rss_block.push_back(block);
-          rss_value.push_back(rss_bytes());
+          rss_value.push_back(required_rss_bytes());
           next_rss = block + o.rss_every;
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -1028,7 +1036,7 @@ int main(int argc, char ** argv)
         if (o.rss_every > 0 && block % o.rss_every == 0)
         {
           rss_block.push_back(block);
-          rss_value.push_back(rss_bytes());
+          rss_value.push_back(required_rss_bytes());
         }
 
         ++block;
@@ -1045,7 +1053,7 @@ int main(int argc, char ** argv)
     }
     ownership_failure_count =
       tropical_runtime_ownership_failure_count(rt);
-    const uint64_t final_rss = rss_bytes();
+    const uint64_t final_rss = required_rss_bytes();
 
     auto print_optional = [](const std::optional<uint64_t> & value) {
       if (value) std::cout << *value; else std::cout << "null";
