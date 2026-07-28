@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import hashlib
 import json
 import os
 import platform
@@ -38,6 +39,18 @@ BASE_CONTROLS: dict[str, str | None] = {
     "TROPICAL_METAL_PIPELINE": "0",
     "TROPICAL_METAL_PIPELINE_DEPTH": None,
     "TROPICAL_STAGE0_DUMP": None,
+}
+PRODUCT_GRAPH_CONTRACT = "TROPICAL_EXACT_PRODUCT_GRAPH_1"
+PRODUCT_GRAPH_BEGIN = "// TROPICAL_EXACT_PRODUCT_GRAPH_BEGIN"
+PRODUCT_GRAPH_END = "// TROPICAL_EXACT_PRODUCT_GRAPH_END"
+PRODUCT_GRAPH_DECLARATION = "const GRAPH = "
+BASELINE_MATRIX_SCHEMA = "tropical_baseline_matrix_2"
+BASELINE_ROW_SCHEMA = "tropical_baseline_row_3"
+ARTIFACT_PATH_KEYS = {
+    "manifest": "manifest",
+    "audio_ir": "ir",
+    "coefficient_ir": "coeff",
+    "msl": "msl",
 }
 
 
@@ -124,10 +137,121 @@ def instruction_count(plan: Any) -> int:
     return count
 
 
+def sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
+
+
+def fixture_graph(fixture: dict[str, Any]) -> dict[str, Any]:
+    inline = fixture.get("graph")
+    if isinstance(inline, dict):
+        return copy.deepcopy(inline)
+
+    source = fixture.get("product_graph")
+    if not isinstance(source, dict):
+        raise RuntimeError(
+            f"graph fixture {fixture.get('name')} has no graph source")
+    if source.get("contract") != PRODUCT_GRAPH_CONTRACT:
+        raise RuntimeError(
+            f"unsupported product graph contract: {source.get('contract')}")
+    source_path = ROOT / str(source.get("path", ""))
+    text = source_path.read_text()
+    if text.count(PRODUCT_GRAPH_BEGIN) != 1 or text.count(PRODUCT_GRAPH_END) != 1:
+        raise RuntimeError(
+            f"{source_path} must contain one exact-product graph marker pair")
+    begin = text.index(PRODUCT_GRAPH_BEGIN) + len(PRODUCT_GRAPH_BEGIN)
+    end = text.index(PRODUCT_GRAPH_END, begin)
+    declaration = text[begin:end].strip()
+    if not declaration.startswith(PRODUCT_GRAPH_DECLARATION):
+        raise RuntimeError(
+            f"{source_path} exact-product region must declare const GRAPH")
+    encoded = declaration[len(PRODUCT_GRAPH_DECLARATION):].strip()
+    try:
+        graph = json.loads(encoded)
+    except json.JSONDecodeError as error:
+        raise RuntimeError(
+            f"{source_path} exact-product GRAPH must remain strict JSON: "
+            f"{error}") from error
+    if not isinstance(graph, dict):
+        raise RuntimeError(f"{source_path} exact-product GRAPH is not an object")
+    return graph
+
+
+def fixture_provenance(fixture: dict[str, Any]) -> dict[str, Any]:
+    graph = fixture_graph(fixture)
+    graph_bytes = json.dumps(
+        graph, sort_keys=True, separators=(",", ":")).encode()
+    source = fixture.get("product_graph")
+    if isinstance(source, dict):
+        source_path = ROOT / str(source["path"])
+        return {
+            "kind": "renderer_exact_product_graph",
+            "path": str(source["path"]),
+            "contract": source["contract"],
+            "source_file_sha256": sha256_bytes(source_path.read_bytes()),
+            "normalized_graph_sha256": sha256_bytes(graph_bytes),
+        }
+    return {
+        "kind": "inline_matrix_graph",
+        "path": str(MATRIX.relative_to(ROOT)),
+        "normalized_graph_sha256": sha256_bytes(graph_bytes),
+    }
+
+
+def structural_edit_provenance(
+        source_fixture: dict[str, Any],
+        edited_fixture: dict[str, Any]) -> dict[str, Any]:
+    source = fixture_provenance(source_fixture)
+    graph = fixture_graph(edited_fixture)
+    graph_bytes = json.dumps(
+        graph, sort_keys=True, separators=(",", ":")).encode()
+    return {
+        "kind": "derived_structural_edit",
+        "source_normalized_graph_sha256":
+            source["normalized_graph_sha256"],
+        "normalized_graph_sha256": sha256_bytes(graph_bytes),
+        "normalized_graph": graph,
+    }
+
+
+def source_provenance(
+        fixture: dict[str, Any], source: Path | None) -> dict[str, Any]:
+    if fixture["class"] == "graph":
+        return fixture_provenance(fixture)
+    assert source is not None
+    return {
+        "kind": "program_file",
+        "path": str(source.relative_to(ROOT)),
+        "source_file_sha256": sha256_bytes(source.read_bytes()),
+    }
+
+
+def load_matrix() -> list[dict[str, Any]]:
+    decoded = json.loads(MATRIX.read_text())
+    if decoded.get("schema") != BASELINE_MATRIX_SCHEMA:
+        raise RuntimeError(
+            f"baseline matrix must use {BASELINE_MATRIX_SCHEMA}")
+    fixtures = decoded.get("fixtures")
+    if not isinstance(fixtures, list) or not fixtures:
+        raise RuntimeError("baseline matrix fixtures must be a non-empty list")
+    names = [fixture.get("name") for fixture in fixtures]
+    if any(not isinstance(name, str) or not name for name in names):
+        raise RuntimeError("every baseline fixture needs a name")
+    if len(set(names)) != len(names):
+        raise RuntimeError("baseline fixture names must be unique")
+    flagship = [fixture for fixture in fixtures if fixture.get("flagship")]
+    if len(flagship) != 1:
+        raise RuntimeError("baseline matrix needs exactly one flagship")
+    if not isinstance(flagship[0].get("product_graph"), dict):
+        raise RuntimeError("flagship must consume the exact product graph")
+    fixture_graph(flagship[0])
+    return fixtures
+
+
 def graph_size(fixture: dict[str, Any], source: Path | None) -> tuple[int, int]:
     if fixture["class"] == "graph":
-        encoded = json.dumps(fixture["graph"], separators=(",", ":")).encode()
-        return len(fixture["graph"].get("nodes", [])), len(encoded)
+        graph = fixture_graph(fixture)
+        encoded = json.dumps(graph, separators=(",", ":")).encode()
+        return len(graph.get("nodes", [])), len(encoded)
     assert source is not None
     parsed = json.loads(source.read_text())
     decls = parsed.get("body", {}).get("decls", [])
@@ -219,6 +343,20 @@ def artifact_metrics(manifest_path: Path, ir_path: Path, coeff_path: Path,
     }
 
 
+def artifact_digests(paths: dict[str, Path]) -> dict[str, dict[str, Any]]:
+    result: dict[str, dict[str, Any]] = {}
+    for label, path_key in ARTIFACT_PATH_KEYS.items():
+        path = paths[path_key]
+        if not path.exists():
+            continue
+        value = path.read_bytes()
+        result[label] = {
+            "sha256": sha256_bytes(value),
+            "bytes": len(value),
+        }
+    return result
+
+
 def runtime_args(ir: Path, manifest: Path, coeff: Path, msl: Path | None,
                  blocks: int, slot: int | None) -> list[str]:
     args = [
@@ -285,7 +423,8 @@ def prepare_artifacts(fixture: dict[str, Any], directory: Path,
             timings["msl_frontend_emit_total_ns"] = msl_ns
     else:
         graph_path = directory / "graph.json"
-        graph_path.write_text(json.dumps(fixture["graph"], separators=(",", ":")))
+        graph_path.write_text(json.dumps(
+            fixture_graph(fixture), separators=(",", ":")))
         args = [
             str(DIFFCLI), "render-graph", str(graph_path),
             "--frames", "0", "--buffer", "512",
@@ -310,8 +449,10 @@ def generation_series(fixture: dict[str, Any], directory: Path,
                       ) -> tuple[dict[str, Path], dict[str, Any]]:
     cold_samples: list[dict[str, int | None]] = []
     warm_samples: list[dict[str, int | None]] = []
+    cold_digests: list[dict[str, Any]] = []
+    warm_digests: list[dict[str, Any]] = []
     representative: dict[str, Path] | None = None
-    reference_bytes: dict[str, bytes] | None = None
+    reference_digests: dict[str, dict[str, Any]] | None = None
     emitted_bytes_stable = True
 
     for repeat in range(repeats):
@@ -323,17 +464,22 @@ def generation_series(fixture: dict[str, Any], directory: Path,
             fixture, repeat_root / "warm", metal, cache_root)
         cold_samples.append(cold)
         warm_samples.append(warm)
+        cold_digest = artifact_digests(cold_paths)
+        warm_digest = artifact_digests(warm_paths)
+        cold_digests.append({
+            "repeat": repeat,
+            "artifacts": cold_digest,
+        })
+        warm_digests.append({
+            "repeat": repeat,
+            "artifacts": warm_digest,
+        })
         representative = warm_paths
 
-        for paths in (cold_paths, warm_paths):
-            current = {
-                key: path.read_bytes()
-                for key, path in paths.items()
-                if path.exists()
-            }
-            if reference_bytes is None:
-                reference_bytes = current
-            elif current != reference_bytes:
+        for current in (cold_digest, warm_digest):
+            if reference_digests is None:
+                reference_digests = current
+            elif current != reference_digests:
                 emitted_bytes_stable = False
 
     assert representative is not None
@@ -358,6 +504,15 @@ def generation_series(fixture: dict[str, Any], directory: Path,
         "warm": warm_samples,
         "summary_ns": summaries,
         "emitted_bytes_stable": emitted_bytes_stable,
+        "artifact_digests": {
+            "algorithm": "sha256",
+            "expected_artifacts": [
+                "manifest", "audio_ir", "coefficient_ir",
+                *(["msl"] if metal else []),
+            ],
+            "cold": cold_digests,
+            "warm": warm_digests,
+        },
         "cold_cache":
             "fresh benchmark-owned root for each repeat",
         "warm_cache":
@@ -365,31 +520,85 @@ def generation_series(fixture: dict[str, Any], directory: Path,
     }
 
 
+def validate_generation_evidence(
+        generation: dict[str, Any], repeats: int, metal: bool) -> None:
+    digests = generation.get("artifact_digests", {})
+    expected = {
+        "manifest", "audio_ir", "coefficient_ir",
+        *(["msl"] if metal else []),
+    }
+    if digests.get("algorithm") != "sha256":
+        raise RuntimeError("generation evidence must use SHA-256")
+    if set(digests.get("expected_artifacts", [])) != expected:
+        raise RuntimeError("generation evidence artifact set mismatch")
+
+    all_artifacts: list[dict[str, Any]] = []
+    for temperature in ("cold", "warm"):
+        samples = digests.get(temperature)
+        if not isinstance(samples, list) or len(samples) != repeats:
+            raise RuntimeError(
+                f"generation evidence needs {repeats} {temperature} samples")
+        for repeat, sample in enumerate(samples):
+            if sample.get("repeat") != repeat:
+                raise RuntimeError(
+                    f"{temperature} digest repeat indices are not contiguous")
+            artifacts = sample.get("artifacts")
+            if not isinstance(artifacts, dict) or set(artifacts) != expected:
+                raise RuntimeError(
+                    f"{temperature} repeat {repeat} artifact digest mismatch")
+            for value in artifacts.values():
+                digest = value.get("sha256")
+                byte_count = value.get("bytes")
+                if (
+                    not isinstance(digest, str) or len(digest) != 64
+                    or any(ch not in "0123456789abcdef" for ch in digest)
+                    or not isinstance(byte_count, int) or byte_count < 0
+                ):
+                    raise RuntimeError("malformed retained artifact digest")
+            all_artifacts.append(artifacts)
+
+    stable = all(
+        artifacts == all_artifacts[0] for artifacts in all_artifacts[1:])
+    if generation.get("emitted_bytes_stable") is not stable:
+        raise RuntimeError(
+            "emitted_bytes_stable disagrees with retained artifact digests")
+
+
 def flagship_edits(fixture: dict[str, Any]) -> dict[str, dict[str, Any]]:
     if not fixture.get("flagship"):
         return {}
 
     topology = copy.deepcopy(fixture)
+    topology.pop("product_graph", None)
+    topology["graph"] = fixture_graph(fixture)
     nodes = topology["graph"]["nodes"]
-    out_index = next(i for i, node in enumerate(nodes) if node["id"] == "out")
-    nodes.insert(out_index, {
+    mix_index = next(i for i, node in enumerate(nodes) if node["id"] == "mx")
+    nodes.insert(mix_index, {
         "id": "r5",
         "kind": "resonator",
-        "params": {"freq": 329.63, "decay": 4, "partials": 16},
+        "params": {"freq": 440, "decay": 4},
+        "sel": {},
+        "in": {"addr": ["adr"]},
     })
-    mix = next(node for node in nodes if node["id"] == "mix")
+    mix = next(node for node in nodes if node["id"] == "mx")
     mix["in"]["in"].append("r5")
-    topology["name"] = f"{fixture['name']}-topology-add-ring"
+    topology["name"] = f"{fixture['name']}-topology-add-addressed-ring"
 
-    selector = copy.deepcopy(fixture)
-    r1 = next(node for node in selector["graph"]["nodes"]
+    partials = copy.deepcopy(fixture)
+    partials.pop("product_graph", None)
+    partials["graph"] = fixture_graph(fixture)
+    r1 = next(node for node in partials["graph"]["nodes"]
               if node["id"] == "r1")
-    r1["params"]["partials"] = 17
-    selector["name"] = f"{fixture['name']}-structural-partials-16-to-17"
+    if "partials" in r1["params"]:
+        raise RuntimeError(
+            "exact-product r1 must exercise the renderer's default partials")
+    r1["params"]["partials"] = 7
+    partials["name"] = (
+        f"{fixture['name']}-structural-default-partials-6-to-7")
 
     return {
-        "topology_add_ring": topology,
-        "structural_capacity_selector": selector,
+        "topology_add_addressed_ring": topology,
+        "structural_default_partials_6_to_7": partials,
     }
 
 
@@ -418,7 +627,7 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="tropical-baseline-", dir=output.parent))
     environment = environment_manifest()
-    matrix = json.loads(MATRIX.read_text())["fixtures"]
+    matrix = load_matrix()
     fixtures = [item for item in matrix if options.suite == "full" or item.get("smoke")]
 
     try:
@@ -428,12 +637,20 @@ def main() -> int:
                 fixture_dir = work / "generation" / fixture["name"]
                 paths, generation = generation_series(
                     fixture, fixture_dir, options.metal, options.repeats)
+                validate_generation_evidence(
+                    generation, options.repeats, options.metal)
                 structural_edits: dict[str, Any] = {}
                 for edit_name, edited_fixture in flagship_edits(fixture).items():
                     _, edit_generation = generation_series(
                         edited_fixture, work / "edits" / edit_name,
                         options.metal, options.repeats)
-                    structural_edits[edit_name] = edit_generation
+                    validate_generation_evidence(
+                        edit_generation, options.repeats, options.metal)
+                    structural_edits[edit_name] = {
+                        "fixture_provenance": structural_edit_provenance(
+                            fixture, edited_fixture),
+                        **edit_generation,
+                    }
                 plan = json.loads(paths["manifest"].read_text())
                 slot_names = plan.get("slot_names", [])
                 param_slot = next(
@@ -484,9 +701,11 @@ def main() -> int:
                         runtime["metal_warm"].append(run_probe(metal_args, metal_cache))
 
                 row = {
-                    "schema": "tropical_baseline_row_2",
+                    "schema": BASELINE_ROW_SCHEMA,
                     "fixture": fixture["name"],
                     "fixture_class": fixture["class"],
+                    "fixture_provenance":
+                        source_provenance(fixture, source),
                     "source_nodes": nodes,
                     "source_bytes": source_bytes,
                     "arena_node_count": None,
@@ -512,8 +731,9 @@ def main() -> int:
                         "frontend plan/lower/emit walls are coarse subprocess totals",
                         "arena node count is not exposed without invasive compiler instrumentation",
                         "Metal load includes the mandatory dual JIT load",
-                        "structural selector row uses the baked modal partial capacity "
-                        "(16 to 17); decoded graph sel fields are currently inert",
+                        "the flagship structural-capacity edit makes the "
+                        "renderer-default six partials explicit as seven; "
+                        "decoded graph sel fields remain inert",
                     ],
                 }
                 stream.write(json.dumps(row, separators=(",", ":")) + "\n")

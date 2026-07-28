@@ -13,9 +13,18 @@ benchmarks/current_baseline/run.sh --suite full --metal --repeats 3
 ```
 
 The full matrix is checked in at `fixtures/matrix.json`. It covers the fixed
-sine, through-zero flanger, one ring, ring→reverb, four-ring flagship, gong,
-plucked string, fixed banks at 16/64/128/256/512, a 512-capacity dynamic bank
-at three live counts, and a composed nested-bank fixture.
+sine, through-zero flanger, one ring, ring→reverb, the exact four-ring product
+circuit, gong, plucked string, fixed banks at 16/64/128/256/512, a
+512-capacity dynamic bank at three live counts, and a composed nested-bank
+fixture.
+
+The flagship row does not carry a benchmark-owned approximation. It reads the
+strict-JSON `GRAPH` declaration between the exact-product markers in
+`playground/renderer/app.js`, the same object the renderer passes to
+`load_patch_graph`. The schema gate pins its oscillator address path, four
+address-driven rings, current parameters and default-six-partial semantics,
+modal mix, reverb, filter, output, and taps. Its two structural edits add one
+address-driven ring and make one ring's default six partials explicitly seven.
 
 `runtime_bench.cpp` consumes already-emitted LLVM/MSL/manifest artifacts. This
 keeps artifact generation, ORC/MSL load, raw slot writes, and block execution
@@ -25,10 +34,16 @@ in JSONL and adds minimum/median/p95/p99/max summaries.
 Each compile repeat now performs two complete generations: a cold generation
 with a fresh benchmark-owned cache and a warm generation in a new subprocess
 reusing that exact cache. Raw walls and minimum/median/variance summaries are
-recorded separately. The four-ring row also repeats one topology addition and
-one baked modal-capacity change (the current structural-selector surrogate).
-The graph decoder's `sel` object is currently inert, so the report says so
-rather than presenting a no-op selector mutation as evidence.
+recorded separately. Schema-3 rows retain the byte count and SHA-256 digest of
+every manifest, audio IR, coefficient IR, and MSL artifact for every cold and
+warm repeat, including both flagship edits. `emitted_bytes_stable` is checked
+against that retained digest matrix rather than standing alone.
+
+Run the focused schema/provenance gates with:
+
+```sh
+python3 benchmarks/current_baseline/test_run.py
+```
 
 ## Cache safety
 
