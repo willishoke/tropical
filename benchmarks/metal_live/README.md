@@ -24,8 +24,8 @@ latency from intentionally subjective glide onset. The harness fails if the
 first changed block differs from D.
 
 The soak compiles the real 512-partial bank. The bank stays reachable behind a
-live 1e-12 gain (−240 dB), and a continuous 55 Hz correctness canary runs at
-1e-8 amplitude (−160 dB). This is effectively silent at the default device but
+live 1e-8 gain (−160 dB), and a continuous 55 Hz correctness canary runs at
+1e-12 amplitude (−240 dB). This is effectively silent at the default device but
 keeps every reference comparison nonzero, including after the 2^40 clock jump.
 It records:
 
@@ -50,8 +50,9 @@ one relaxed histogram increment and services at most one preallocated capture
 buffer. Startup status is preserved but separated by an epoch applied at an
 actual callback boundary. A negotiated-frame mismatch refuses before stream
 start. Any post-reset underrun, callback overrun/stall, missing event/reference,
-reference checkpoint below 80 dB, callback p99 at or above 50% of the block
-deadline, or monotonic post-warmup RSS growth marks the row blocked. Ordinary
+reference checkpoint not strictly above 100 dB, callback p99 at or above 50%
+of the block deadline, or monotonic post-warmup RSS growth marks the row
+blocked. Ordinary
 end captures wait at least pipeline depth plus one callback after the preceding
 write; jump and hot-swap checkpoints are tied to their observed re-prime
 progress callbacks.
