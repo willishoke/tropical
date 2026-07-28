@@ -13,6 +13,7 @@
 #include "ControlParam.hpp"
 #include "jit/OrcJitEngine.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <bit>
@@ -20,6 +21,7 @@
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
@@ -47,6 +49,12 @@ struct ParamDiscipline
   std::vector<std::string> companions;       // #v0/#v1/#t0, #phase, tau_base sibling
 };
 
+struct ParamDispatchResult
+{
+  bool        ok = false;
+  std::string error;
+};
+
 struct KernelState
 {
   // ── Metal execution backend (TROPICAL_METAL builds) ─────────────────────
@@ -71,40 +79,36 @@ struct KernelState
   // publish) and after every control-plane slot write, materializing
   // coefficient values into `coef:<n>` module slots the audio kernel reads.
   // Same NumericKernelFn signature, invoked with buffer_length = 1. Both
-  // kernels keep temps as SSA (never store `%temps`), so sharing the scratch
-  // buffers with a concurrently-running audio kernel is read-only-safe;
-  // coefficient slot writes are the same tolerated one-buffer race class as
-  // set_slot itself.
+  // kernels keep temps as SSA (never store `%temps`). Control and audio use
+  // disjoint slot views, so coefficient materialization never races the
+  // in-flight audio kernel.
   //
   // BANKS-AS-DATA (per-array staging): the coefficient kernel also fills shared
   // COEFFICIENT COLUMNS — `array_ptrs` slots whose fills classified s0 — that the
   // audio kernel's in-loop `Index` reads. Those slots (the plan advertises them
-  // as `coeff_array_slots`) are GENERATION-BUFFERED: three storage generations
-  // per column, one published-generation word. run_coeff fills a generation that
-  // is neither published nor captured by the in-flight audio buffer, then
-  // publishes it with one atomic store; process() captures the published
-  // generation ONCE per buffer (before raising audio_processing_, so a
-  // concurrent run_coeff can never pick the captured generation as its write
-  // target) and repoints `array_ptrs` for the whole buffer. The audio thread
-  // therefore always reads one whole, consistent generation of columns — no
-  // cross-column tear on a live knob move, no waiting on either thread. Three
-  // generations (not two) because a knob stream can run the coefficient kernel
-  // twice within one audio buffer: with two buffers the second run would have to
-  // rewrite the generation the in-flight buffer is still reading. Scalar
-  // coefficient slots stay in the tolerated one-buffer race class of set_slot.
+  // as `coeff_array_slots`) are GENERATION-BUFFERED together with the entire
+  // scalar slot set. A control transaction materializes both into one free
+  // generation and release-publishes one generation word. process() captures
+  // that generation once per buffer, so ordinary slots, scalar coefficients,
+  // and every coefficient column are mutually coherent.
   tropical_jit::NumericKernelFn      coeff_kernel = nullptr;
 
   // The coefficient-column slots (indices into array_storage/array_ptrs), the
   // three storage generations ([gen][j] backs slot coeff_array_slots[j]), the
   // coefficient kernel's own pointer view (column entries repointed at the
-  // write generation per run; non-column entries alias array_storage), and the
-  // published-generation word (accessed via std::atomic_ref — kept a plain
-  // member so KernelState stays movable; every concurrent access site holds
-  // the publish/audio protocol described above).
+  // write generation per run; non-column entries alias array_storage).
+  // slot_generations are immutable once published until the control thread
+  // proves a generation is neither published nor captured by audio.
+  // audio_slots is private per-state scratch: audio copies the captured slot
+  // generation at the boundary, then kernels may write it freely.
+  // control_published_gen covers BOTH slot and column generations. atomic_ref
+  // is used at access sites so KernelState remains movable.
   std::vector<uint32_t> coeff_array_slots;
   std::array<std::vector<std::vector<int64_t>>, 3> coeff_generations;
   std::vector<int64_t *> coeff_array_ptrs;
-  uint32_t coeff_published_gen = 0;
+  std::array<std::vector<double>, 3> slot_generations;
+  std::vector<double> audio_slots;
+  uint32_t control_published_gen = 0;
 
   // Metal upload staging for the coefficient columns: the packed f32 image
   // of the captured generation, rebuilt once per process() (audio thread,
@@ -121,6 +125,11 @@ struct KernelState
   // Flat buffers passed to kernel (matches NumericKernelFn signature)
   std::vector<int64_t> registers;
   std::vector<int64_t> temps;
+  // Control-only scratch for the coefficient kernel. Even though emitted
+  // stage-0 code currently keeps temporaries in SSA, using disjoint backing
+  // buffers makes that codegen property unnecessary for thread safety.
+  std::vector<int64_t> coeff_registers;
+  std::vector<int64_t> coeff_temps;
   std::vector<std::vector<int64_t>> array_storage;
   std::vector<int64_t *> array_ptrs;
   std::vector<uint64_t> array_sizes;
@@ -158,7 +167,6 @@ struct KernelState
   }
 
   double sample_rate = 44100.0;
-  uint64_t sample_index = 0;
 };
 
 
@@ -217,7 +225,9 @@ public:
   void set_sample_index(uint64_t idx)
   {
     std::lock_guard<std::mutex> lock(build_mutex_);
-    states_[active_state_.load(std::memory_order_acquire)].sample_index = idx;
+    sample_index_request_seq_.fetch_add(1, std::memory_order_acq_rel);
+    requested_sample_index_.store(idx, std::memory_order_relaxed);
+    sample_index_request_seq_.fetch_add(1, std::memory_order_release);
   }
 
   /**
@@ -226,27 +236,55 @@ public:
    */
   void process()
   {
-
-    const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
+    // Advertise processing before selecting a state, then capture/advertise/
+    // verify the active index. A rapid second hot-swap must wait before it can
+    // reuse the state this callback has verified.
+    audio_processing_.store(true, std::memory_order_release);
+    uint32_t state_idx = 0;
+    do
+    {
+      state_idx = active_state_.load(std::memory_order_acquire);
+      audio_state_index_.store(state_idx, std::memory_order_release);
+    }
+    while (active_state_.load(std::memory_order_acquire) != state_idx);
     KernelState & state = states_[state_idx];
 
-    // Capture ONE coefficient-column generation for the whole buffer (banks-as-
-    // data). Advertised BEFORE audio_processing_ goes true: a concurrent
-    // run_coeff that observes audio_processing_ == true (acquire) is then
-    // guaranteed to see this capture and will never pick it as a write target;
-    // one that observes false avoids the published generation, which is what
-    // this buffer read. Either way the columns this buffer indexes are one
-    // whole generation.
-    uint32_t coeff_gen = 0;
-    if (!state.coeff_array_slots.empty())
+    // Apply a control-plane clock reposition exactly at this buffer boundary.
+    // The plain audio_* clock fields are owned solely by this thread.
+    const uint64_t request_seq_before =
+      sample_index_request_seq_.load(std::memory_order_acquire);
+    if ((request_seq_before & 1U) == 0
+        && request_seq_before != audio_applied_sample_index_seq_)
     {
-      coeff_gen = std::atomic_ref(state.coeff_published_gen)
-                    .load(std::memory_order_acquire);
-      audio_coeff_gen_.store(coeff_gen, std::memory_order_relaxed);
+      const uint64_t requested =
+        requested_sample_index_.load(std::memory_order_relaxed);
+      const uint64_t request_seq_after =
+        sample_index_request_seq_.load(std::memory_order_acquire);
+      if (request_seq_before == request_seq_after)
+      {
+        audio_sample_index_ = requested;
+        audio_applied_sample_index_seq_ = request_seq_after;
+      }
     }
+    const uint64_t start_sample_index = audio_sample_index_;
 
-    audio_state_index_.store(state_idx, std::memory_order_release);
-    audio_processing_.store(true, std::memory_order_release);
+    // Advertise state + processing first, then capture/advertise/verify one
+    // coherent control generation. A writer excludes both the current
+    // published generation and this advertised generation for this state.
+    // The verification loop closes the window where a writer publishes
+    // between our first load and advertisement.
+    uint32_t control_gen = 0;
+    do
+    {
+      control_gen = std::atomic_ref(state.control_published_gen)
+                      .load(std::memory_order_acquire);
+      audio_control_gen_.store(control_gen, std::memory_order_release);
+    }
+    while (std::atomic_ref(state.control_published_gen)
+             .load(std::memory_order_acquire) != control_gen);
+    std::copy(state.slot_generations[control_gen].begin(),
+              state.slot_generations[control_gen].end(),
+              state.audio_slots.begin());
 
     // No active kernel — emit silence (covers fused, microkernel, and
     // microkernel-deep modes; the "no kernel" predicate is mode-
@@ -260,6 +298,9 @@ public:
     if (!fused_ready && !mk_ready)
     {
       std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);
+      audio_sample_index_ += buffer_length_;
+      published_sample_index_.store(
+        audio_sample_index_, std::memory_order_release);
       audio_processing_.store(false, std::memory_order_release);
       return;
     }
@@ -270,7 +311,7 @@ public:
     if (!state.coeff_array_slots.empty())
       for (std::size_t j = 0; j < state.coeff_array_slots.size(); ++j)
         state.array_ptrs[state.coeff_array_slots[j]] =
-          state.coeff_generations[coeff_gen][j].data();
+          state.coeff_generations[control_gen][j].data();
 
     if (state.mode == tropical_jit::CompilationMode::Fused)
     {
@@ -278,9 +319,9 @@ public:
       if (state.metal)
       {
         // Pack the captured coefficient-column generation for the GPU.
-        // The generation was captured ONCE above, BEFORE audio_processing_
-        // went true — so this pack (and the per-dispatch copy it feeds)
-        // inherits the whole-generation guarantee: the GPU reads one
+        // The generation was captured and advertised once above, so this pack
+        // (and the per-dispatch copy it feeds) inherits the whole-generation
+        // guarantee: the GPU reads one
         // consistent generation of columns, no cross-column tear on a
         // live knob move. Value semantics match the JIT's array access
         // exactly: the int64 storage is bit-punned f64 (load i64 +
@@ -291,7 +332,7 @@ public:
           std::size_t off = 0;
           for (std::size_t j = 0; j < state.coeff_array_slots.size(); ++j)
           {
-            const auto & col = state.coeff_generations[coeff_gen][j];
+            const auto & col = state.coeff_generations[control_gen][j];
             for (std::size_t e = 0; e < col.size(); ++e)
               state.metal_column_staging[off + e] =
                 static_cast<float>(std::bit_cast<double>(col[e]));
@@ -303,10 +344,11 @@ public:
         // kernel stays authoritative for render_window either way.
         if (!tropical_metal::process_block(
               *state.metal,
-              state.slots.data(), static_cast<uint32_t>(state.slots.size()),
+              state.audio_slots.data(),
+              static_cast<uint32_t>(state.audio_slots.size()),
               state.metal_column_staging.data(),
               static_cast<uint32_t>(state.metal_column_staging.size()),
-              state.sample_rate, state.sample_index,
+              state.sample_rate, start_sample_index,
               outputBuffer.data(), buffer_length_))
           std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);
       }
@@ -320,11 +362,11 @@ public:
         state.array_sizes.data(),
         state.temps.data(),
         state.sample_rate,
-        state.sample_index,
+        start_sample_index,
         state.param_ptrs.data(),
         outputBuffer.data(),
         buffer_length_,
-        state.slots.data());          // M6: shared inter-module slot array
+        state.audio_slots.data());   // private whole-buffer slot snapshot
     }
     else
     {
@@ -340,9 +382,9 @@ public:
       int64_t *      temps       = state.temps.data();
       const double   sr          = state.sample_rate;
       const uint64_t * params    = state.param_ptrs.data();
-      double *       slots       = state.slots.data();
+      double *       slots       = state.audio_slots.data();
       double *       out         = outputBuffer.data();
-      const uint64_t start_idx   = state.sample_index;
+      const uint64_t start_idx   = start_sample_index;
       for (unsigned int i = 0; i < buffer_length_; ++i)
       {
         const uint64_t s = start_idx + i;
@@ -352,7 +394,7 @@ public:
       }
     }
 
-    state.sample_index += buffer_length_;
+    audio_sample_index_ += buffer_length_;
 
     // Apply fade envelope
     {
@@ -387,6 +429,9 @@ public:
       }
     }
 
+    // Publish the completed boundary only after all output processing for this
+    // buffer (including fade) is complete.
+    published_sample_index_.store(audio_sample_index_, std::memory_order_release);
     audio_processing_.store(false, std::memory_order_release);
   }
 
@@ -396,6 +441,7 @@ public:
 
   uint32_t metal_pipeline_depth() const
   {
+    std::lock_guard<std::mutex> lock(build_mutex_);
 #ifdef TROPICAL_METAL
     const uint32_t idx = active_state_.load(std::memory_order_acquire);
     const auto & metal = states_[idx].metal;
@@ -428,6 +474,7 @@ public:
   // by integer index thereafter.
   uint32_t slot_index(const std::string & name) const
   {
+    std::lock_guard<std::mutex> lock(build_mutex_);
     const uint32_t idx = active_state_.load(std::memory_order_acquire);
     const KernelState & state = states_[idx];
     for (uint32_t i = 0; i < state.slot_names.size(); ++i)
@@ -435,17 +482,17 @@ public:
     return UINT32_MAX;
   }
 
-  // Write a slot value. Safe to call from any thread; the audio thread
-  // reads slots via the kernel (M6+) and tolerates one-buffer races on
-  // double writes. Out-of-range indices are no-ops.
+  // Write a slot value from a control thread. All control writers serialize
+  // with hot-swap, then publish one coherent snapshot for the next buffer.
   void set_slot(uint32_t idx, double value)
   {
+    std::lock_guard<std::mutex> lock(build_mutex_);
     const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
     KernelState & state = states_[state_idx];
     if (idx < state.slots.size())
     {
       state.slots[idx] = value;
-      run_coeff(state);
+      publish_control_snapshot(state);
     }
   }
 
@@ -453,6 +500,7 @@ public:
   // if the index is out of range.
   double get_slot(uint32_t idx) const
   {
+    std::lock_guard<std::mutex> lock(build_mutex_);
     const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
     const KernelState & state = states_[state_idx];
     if (idx >= state.slots.size()) return 0.0;
@@ -461,9 +509,9 @@ public:
 
   // ── Control-plane data path (socket endpoint) ──────────────────────────────
   // Resolve a slot by name and write it atomically against the live kernel,
-  // serialized with hot-swap (publish_state) via build_mutex_. Unlike the
-  // lock-free set_slot, this is safe to call from a control thread running
-  // concurrently with load_ir: the lock excludes the inactive-state rebuild,
+  // serialized with hot-swap (publish_state) via build_mutex_. This is safe to
+  // call from a control thread running concurrently with load_ir: the lock
+  // excludes the inactive-state rebuild,
   // and resolving + writing under one lock means a recompile can never land a
   // value in a stale slot index. build_mutex_ is held by publish_state only
   // for the cheap state publication + flip (microseconds) — never the LLVM
@@ -478,7 +526,7 @@ public:
       if (state.slot_names[i] == name)
       {
         state.slots[i] = value;
-        run_coeff(state);
+        publish_control_snapshot(state);
         return true;
       }
     return false;
@@ -505,12 +553,12 @@ public:
     if constexpr (std::is_void_v<std::invoke_result_t<Fn &, KernelState &>>)
     {
       fn(state);
-      run_coeff(state);
+      publish_control_snapshot(state);
     }
     else
     {
       auto result = fn(state);
-      run_coeff(state);
+      publish_control_snapshot(state);
       return result;
     }
   }
@@ -544,14 +592,11 @@ public:
     std::vector<int64_t>              temps     = active.temps;
     std::vector<double>               slots     = active.slots;
     std::vector<std::vector<int64_t>> arrays    = active.array_storage;
-    // Coefficient columns live in the generation store, not array_storage —
-    // copy the published generation in. (A run_coeff racing this copy via the
-    // lock-free set_slot can retarget mid-copy; that transient is the same
-    // control-plane class as a scope frame during a knob move, and strictly
-    // narrower than the pre-generation tear.)
+    // Coefficient columns live in the same immutable published generation as
+    // the control slot snapshot.
     if (!active.coeff_array_slots.empty())
     {
-      const uint32_t gen = std::atomic_ref(active.coeff_published_gen)
+      const uint32_t gen = std::atomic_ref(active.control_published_gen)
                              .load(std::memory_order_acquire);
       for (std::size_t j = 0; j < active.coeff_array_slots.size(); ++j)
         arrays[active.coeff_array_slots[j]] = active.coeff_generations[gen][j];
@@ -590,6 +635,7 @@ public:
   // Slot count of the currently-active kernel (telemetry).
   uint32_t slot_count() const
   {
+    std::lock_guard<std::mutex> lock(build_mutex_);
     const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
     return static_cast<uint32_t>(states_[state_idx].slots.size());
   }
@@ -598,11 +644,10 @@ public:
   // audio thread has processed (advances one buffer per process() call, paced
   // by the device clock when the DAC is running). The master "now" a slave
   // consumer renders a window ending at; static when audio isn't running.
-  // Benign stale-by-a-buffer race on read.
+  // Published at each completed audio buffer boundary.
   uint64_t current_sample_index() const
   {
-    const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
-    return states_[state_idx].sample_index;
+    return published_sample_index_.load(std::memory_order_acquire);
   }
 
   // The active kernel's sample rate — the same value the kernel reads for
@@ -610,9 +655,15 @@ public:
   // phasor's `inc = floor(freq*2^32/SR)` when phase-anchoring a freq change.
   double sample_rate() const
   {
+    std::lock_guard<std::mutex> lock(build_mutex_);
     const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
     return states_[state_idx].sample_rate;
   }
+
+  // Exact production host-param dispatch, shared by the socket and
+  // qualification harness. Companion reads/writes publish atomically as one
+  // control generation at the next audio buffer.
+  ParamDispatchResult dispatch_param_sync(const std::string & name, double value);
 
 private:
   // build_kernel_state maps a parsed plan's *metadata* (everything except
@@ -622,49 +673,53 @@ private:
   KernelState build_kernel_state(const tropical_plan5::ParsedPlan5 & parsed);
   bool publish_state(KernelState && new_state);
 
-  // Evaluate the stage-0 coefficient kernel once (one "sample") against a
-  // state's slots. No-op when the plan carried no coefficient kernel.
-  // Coefficient columns are written into a FREE generation (neither published
-  // nor captured by the in-flight audio buffer — with three generations one
-  // always exists) via the coefficient kernel's own pointer view, then
-  // published with one atomic store. The audio thread picks the new
-  // generation up at its next buffer boundary; the control thread never
-  // waits. Non-member state (audio_coeff_gen_) is why this isn't static.
-  void run_coeff(KernelState & state)
+  // Materialize one complete control transaction into a FREE generation.
+  // Scalar coefficient slots, coefficient columns, and ordinary slots become
+  // visible together through one release-published generation word. Called
+  // under build_mutex_, except while constructing an unpublished local state.
+  void publish_control_snapshot(KernelState & state)
   {
-    if (!state.coeff_kernel) return;
+    const uint32_t pub = std::atomic_ref(state.control_published_gen)
+                           .load(std::memory_order_acquire);
+    uint32_t in_use = UINT32_MAX;
+    if (audio_processing_.load(std::memory_order_acquire))
+    {
+      const uint32_t audio_state =
+        audio_state_index_.load(std::memory_order_acquire);
+      if (&state == &states_[audio_state])
+        in_use = audio_control_gen_.load(std::memory_order_acquire);
+    }
+    uint32_t target = 0;
+    while (target == pub || target == in_use) ++target;
+
     int64_t ** arrays = state.array_ptrs.data();
-    uint32_t target = UINT32_MAX;
     if (!state.coeff_array_slots.empty())
     {
-      const uint32_t pub = std::atomic_ref(state.coeff_published_gen)
-                             .load(std::memory_order_acquire);
-      uint32_t in_use = pub;
-      if (audio_processing_.load(std::memory_order_acquire))
-        in_use = audio_coeff_gen_.load(std::memory_order_acquire);
-      target = 0;
-      while (target == pub || target == in_use) ++target;
       for (std::size_t j = 0; j < state.coeff_array_slots.size(); ++j)
         state.coeff_array_ptrs[state.coeff_array_slots[j]] =
           state.coeff_generations[target][j].data();
       arrays = state.coeff_array_ptrs.data();
     }
-    double scratch_out = 0.0;
-    state.coeff_kernel(
-      nullptr,
-      state.registers.data(),
-      arrays,
-      state.array_sizes.data(),
-      state.temps.data(),
-      state.sample_rate,
-      0,                          // start_sample_index — tick-free by construction
-      state.param_ptrs.data(),
-      &scratch_out,
-      1,
-      state.slots.data());
-    if (target != UINT32_MAX)
-      std::atomic_ref(state.coeff_published_gen)
-        .store(target, std::memory_order_release);
+    if (state.coeff_kernel)
+    {
+      double scratch_out = 0.0;
+      state.coeff_kernel(
+        nullptr,
+        state.coeff_registers.data(),
+        arrays,
+        state.array_sizes.data(),
+        state.coeff_temps.data(),
+        state.sample_rate,
+        0,                        // tick-free coefficient stage
+        state.param_ptrs.data(),
+        &scratch_out,
+        1,
+        state.slots.data());
+    }
+    std::copy(state.slots.begin(), state.slots.end(),
+              state.slot_generations[target].begin());
+    std::atomic_ref(state.control_published_gen)
+      .store(target, std::memory_order_release);
   }
 
   void wait_for_state_available(uint32_t state_index) const
@@ -681,11 +736,18 @@ private:
   std::atomic<uint32_t> active_state_{0};
   std::atomic<uint32_t> audio_state_index_{0};
   std::atomic<bool> audio_processing_{false};
-  // The coefficient-column generation captured by the in-flight audio buffer
-  // (valid while audio_processing_; stored before it goes true, so an
-  // acquire-load of audio_processing_ == true guarantees visibility).
-  std::atomic<uint32_t> audio_coeff_gen_{0};
+  // Unified control generation captured by the in-flight audio buffer.
+  std::atomic<uint32_t> audio_control_gen_{0};
   std::atomic<uint64_t> recompile_version_{0};
+
+  // Buffer-boundary clock handoff. Only the audio thread touches plain
+  // audio_* fields. Control publishes an odd/even seqlock around the atomic
+  // value; audio never spins and simply defers an in-progress request.
+  std::atomic<uint64_t> requested_sample_index_{0};
+  std::atomic<uint64_t> sample_index_request_seq_{0};
+  uint64_t audio_applied_sample_index_seq_ = 0;
+  uint64_t audio_sample_index_ = 0;
+  std::atomic<uint64_t> published_sample_index_{0};
 
   mutable std::mutex build_mutex_;
 

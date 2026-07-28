@@ -236,6 +236,21 @@ bool tropical_dac_is_reconnecting(tropical_dac_t d)
   return d && static_cast<RuntimeDAC*>(d)->is_reconnecting();
 }
 
+uint64_t tropical_dac_disconnect_count(tropical_dac_t d)
+{
+  return d ? static_cast<RuntimeDAC*>(d)->disconnect_count() : 0;
+}
+
+uint64_t tropical_dac_reconnect_success_count(tropical_dac_t d)
+{
+  return d ? static_cast<RuntimeDAC*>(d)->reconnect_success_count() : 0;
+}
+
+uint64_t tropical_dac_reconnect_failure_count(tropical_dac_t d)
+{
+  return d ? static_cast<RuntimeDAC*>(d)->reconnect_failure_count() : 0;
+}
+
 unsigned int tropical_dac_get_active_device(tropical_dac_t d)
 {
   return d ? static_cast<RuntimeDAC*>(d)->active_device() : 0;

@@ -209,118 +209,13 @@ static std::string dispatch_set_param(tropical_runtime::FlatRuntime * rt,
                                       const json & id, const std::string & name,
                                       double value)
 {
-  auto ok = [&] {
+  const auto result = rt->dispatch_param_sync(name, value);
+  if (!result.ok)
     return json{{"jsonrpc", "2.0"}, {"id", id},
-                {"result", {{"name", name}, {"value", value}}}}.dump();
-  };
-  auto err = [&](const std::string & msg) {
-    return json{{"jsonrpc", "2.0"}, {"id", id},
-                {"error", {{"code", -32603}, {"message", msg}}}}.dump();
-  };
-
-  return rt->with_active_state_sync(
-    [&](tropical_runtime::KernelState & st) -> std::string
-  {
-    auto slot_of = [&st](const std::string & slot_name) -> uint32_t {
-      for (uint32_t i = 0; i < st.slot_names.size(); ++i)
-        if (st.slot_names[i] == slot_name) return i;
-      return UINT32_MAX;
-    };
-    // Missing companions read as 0.0 and write as no-ops, matching the Lean
-    // reference's per-slot defaults.
-    auto read  = [&st](uint32_t i) { return i < st.slots.size() ? st.slots[i] : 0.0; };
-    auto write = [&st](uint32_t i, double v) { if (i < st.slots.size()) st.slots[i] = v; };
-
-    const tropical_runtime::ParamDiscipline * pd = st.find_discipline(name);
-    const std::string disc = pd ? pd->discipline : std::string{"raw"};
-
-    if (disc == "glide")
-    {
-      // Re-anchor the closed-form smoothstep ramp so it departs from the
-      // CURRENT value (no jump): evaluate f(now) from the companions, then
-      // v0 := current, v1 := target, t0 := now. The base slot does not exist
-      // for glided params — only the companions are written.
-      const uint32_t v0i = slot_of("param:" + name + "#v0");
-      const uint32_t v1i = slot_of("param:" + name + "#v1");
-      const uint32_t t0i = slot_of("param:" + name + "#t0");
-      if (v0i == UINT32_MAX)
-        return err("set_param: no glide slots for '" + name + "'");
-      const double now = static_cast<double>(st.sample_index);
-      // dur matches the kernel's ramp window; the table carries it (0.02 s
-      // for playground knobs), with the kernel's 20 ms as the fallback.
-      const double dur_sec = pd->glide_dur_sec > 0.0 ? pd->glide_dur_sec : 0.02;
-      const double dur = st.sample_rate * dur_sec;
-      const double v0 = read(v0i);
-      const double v1 = read(v1i);
-      const double t0 = read(t0i);
-      const double r = (now - t0) / dur;
-      const double s = r < 0.0 ? 0.0 : (r > 1.0 ? 1.0 : r);
-      write(v0i, v0 + (v1 - v0) * (s * s * (3.0 - 2.0 * s)));
-      write(v1i, value);
-      write(t0i, now);
-      return ok();
-    }
-
-    if (disc == "anchor")
-    {
-      // Phase-anchored frequency: bump #phase by the phase the change would
-      // have jumped (Δφ = (inc0 − inc1)·now / 2^32 cycles, inc the phasor's
-      // own quantized increment), wrap to [0, 1), then write the base slot.
-      const uint32_t fi = slot_of("param:" + name);
-      if (fi == UINT32_MAX)
-        return err("set_param: unknown param '" + name + "'");
-      const uint32_t pi = slot_of("param:" + name + "#phase");
-      if (pi == UINT32_MAX)
-      {
-        // No #phase companion in the loaded plan: degrade to raw.
-        write(fi, value);
-        return ok();
-      }
-      const double now  = static_cast<double>(st.sample_index);
-      const double sr   = st.sample_rate;
-      const double inc0 = std::floor(read(fi) * 4294967296.0 / sr);
-      const double inc1 = std::floor(value * 4294967296.0 / sr);
-      const double dcyc = ((inc0 - inc1) * now) / 4294967296.0;
-      const double ph   = read(pi) + dcyc;
-      write(pi, ph - std::floor(ph));   // frac → [0, 1)
-      write(fi, value);
-      return ok();
-    }
-
-    if (disc == "velocity")
-    {
-      // Master-clock re-base: tau_base += (v_current − target)·now/SR keeps
-      // M(n) value-continuous across the velocity change.
-      const uint32_t vi = slot_of("param:" + name);
-      if (vi == UINT32_MAX)
-        return err("set_param: unknown param '" + name + "'");
-      // The origin slot is the declared companion; the Lean reference
-      // derives the same name by substitution ("velocity" → "tau_base").
-      std::string tau;
-      if (!pd->companions.empty()) tau = pd->companions.front();
-      else
-      {
-        tau = name;
-        const std::size_t pos = tau.find("velocity");
-        if (pos != std::string::npos) tau.replace(pos, 8, "tau_base");
-      }
-      const uint32_t ti = slot_of("param:" + tau);
-      if (ti == UINT32_MAX)
-        return err("set_param: no origin slot '" + tau + "'");
-      const double now = static_cast<double>(st.sample_index);
-      write(ti, read(ti) + (read(vi) - value) * now / st.sample_rate);
-      write(vi, value);
-      return ok();
-    }
-
-    // raw (or a name absent from the table): plain base-slot write —
-    // today's behavior, and the whole contract for old plans.
-    const uint32_t bi = slot_of("param:" + name);
-    if (bi == UINT32_MAX)
-      return err("set_param: unknown param '" + name + "'");
-    write(bi, value);
-    return ok();
-  });
+                {"error", {{"code", -32603},
+                           {"message", result.error}}}}.dump();
+  return json{{"jsonrpc", "2.0"}, {"id", id},
+              {"result", {{"name", name}, {"value", value}}}}.dump();
 }
 
 std::string SocketServer::handle_data(const std::string & line)

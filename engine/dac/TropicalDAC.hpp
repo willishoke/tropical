@@ -125,9 +125,14 @@ struct TropicalDACImpl
   std::atomic<uint64_t> stats_epoch_{1};
   std::atomic<uint64_t> requested_stats_epoch_{1};
 
-  // One qualification capture slot. Storage is allocated at construction;
-  // the callback only copies into it and publishes a sequence number.
+  // One qualification capture slot. Storage is allocated at construction.
+  // The explicit state machine enforces exactly one requester and one reader:
+  // callback writes happen only in Requested, reader copies only in Reading,
+  // and another request cannot begin until the successful read returns Idle.
+  enum class CaptureState : uint8_t { Idle, Requested, Ready, Reading };
+  static_assert(std::atomic<CaptureState>::is_always_lock_free);
   std::vector<double> captured_output_;
+  std::atomic<CaptureState> capture_state_{CaptureState::Idle};
   std::atomic<uint64_t> capture_sequence_{0};
   std::atomic<uint64_t> capture_requested_{0};
   std::atomic<uint64_t> capture_ready_{0};
@@ -135,6 +140,9 @@ struct TropicalDACImpl
   std::atomic<unsigned int> negotiated_buffer_frames_{0};
 
   std::atomic<bool>     device_disconnected_{false};
+  std::atomic<uint64_t> disconnect_count_{0};
+  std::atomic<uint64_t> reconnect_success_count_{0};
+  std::atomic<uint64_t> reconnect_failure_count_{0};
   std::atomic<bool>     watcher_shutdown_{false};
   std::thread           watcher_thread_;
   unsigned int          active_device_id_{0};
@@ -145,7 +153,10 @@ struct TropicalDACImpl
   {
     audio.setErrorCallback([this](RtAudioErrorType type, const std::string&) {
       if (type == RTAUDIO_DEVICE_DISCONNECT)
+      {
+        disconnect_count_.fetch_add(1, std::memory_order_relaxed);
         device_disconnected_.store(true, std::memory_order_relaxed);
+      }
     });
   }
 
@@ -175,6 +186,12 @@ struct TropicalDACImpl
     requested_histogram_.store(0, std::memory_order_relaxed);
     stats_epoch_.store(1, std::memory_order_relaxed);
     requested_stats_epoch_.store(1, std::memory_order_relaxed);
+    capture_requested_.store(0, std::memory_order_relaxed);
+    capture_ready_.store(0, std::memory_order_relaxed);
+    capture_state_.store(CaptureState::Idle, std::memory_order_relaxed);
+    disconnect_count_.store(0, std::memory_order_relaxed);
+    reconnect_success_count_.store(0, std::memory_order_relaxed);
+    reconnect_failure_count_.store(0, std::memory_order_relaxed);
 
     open_stream();
     running = true;
@@ -197,6 +214,21 @@ struct TropicalDACImpl
   bool is_reconnecting() const
   {
     return device_disconnected_.load(std::memory_order_relaxed);
+  }
+
+  uint64_t disconnect_count() const
+  {
+    return disconnect_count_.load(std::memory_order_acquire);
+  }
+
+  uint64_t reconnect_success_count() const
+  {
+    return reconnect_success_count_.load(std::memory_order_acquire);
+  }
+
+  uint64_t reconnect_failure_count() const
+  {
+    return reconnect_failure_count_.load(std::memory_order_acquire);
   }
 
   struct Stats {
@@ -287,6 +319,11 @@ struct TropicalDACImpl
 
   uint64_t request_output_capture()
   {
+    CaptureState expected = CaptureState::Idle;
+    if (!capture_state_.compare_exchange_strong(
+          expected, CaptureState::Requested,
+          std::memory_order_acq_rel, std::memory_order_acquire))
+      return 0;
     const uint64_t sequence =
       capture_sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
     capture_requested_.store(sequence, std::memory_order_release);
@@ -294,14 +331,23 @@ struct TropicalDACImpl
   }
 
   bool read_output_capture(uint64_t sequence, uint64_t & start_index,
-                           double * out, std::size_t capacity) const
+                           double * out, std::size_t capacity)
   {
-    if (!out || capacity < captured_output_.size()
+    if (sequence == 0 || !out || capacity < captured_output_.size()
         || capture_ready_.load(std::memory_order_acquire) != sequence)
+      return false;
+    CaptureState expected = CaptureState::Ready;
+    if (!capture_state_.compare_exchange_strong(
+          expected, CaptureState::Reading,
+          std::memory_order_acq_rel, std::memory_order_acquire))
       return false;
     start_index = captured_start_index_.load(std::memory_order_relaxed);
     std::copy(captured_output_.begin(), captured_output_.end(), out);
-    return capture_ready_.load(std::memory_order_acquire) == sequence;
+    const bool valid =
+      capture_ready_.load(std::memory_order_acquire) == sequence;
+    capture_requested_.store(0, std::memory_order_relaxed);
+    capture_state_.store(CaptureState::Idle, std::memory_order_release);
+    return valid;
   }
 
   unsigned int negotiated_buffer_frames() const noexcept
@@ -418,25 +464,30 @@ struct TropicalDACImpl
     self->source->process();
     const auto& buf = self->source->outputBuffer;
 
-    const uint64_t capture =
-      self->capture_requested_.load(std::memory_order_acquire);
-    if (capture != 0
-        && capture != self->capture_ready_.load(std::memory_order_relaxed))
+    if (self->capture_state_.load(std::memory_order_acquire)
+        == CaptureState::Requested)
     {
-      const std::size_t n =
-        std::min<std::size_t>(buf.size(), self->captured_output_.size());
-      std::copy_n(buf.begin(), n, self->captured_output_.begin());
-      std::fill(self->captured_output_.begin() + n,
-                self->captured_output_.end(), 0.0);
-      if constexpr (requires { self->source->current_sample_index(); })
+      const uint64_t capture =
+        self->capture_requested_.load(std::memory_order_acquire);
+      if (capture != 0)
       {
-        const uint64_t next = self->source->current_sample_index();
-        self->captured_start_index_.store(
-          next >= self->captured_output_.size()
-            ? next - self->captured_output_.size() : 0,
-          std::memory_order_relaxed);
+        const std::size_t n =
+          std::min<std::size_t>(buf.size(), self->captured_output_.size());
+        std::copy_n(buf.begin(), n, self->captured_output_.begin());
+        std::fill(self->captured_output_.begin() + n,
+                  self->captured_output_.end(), 0.0);
+        if constexpr (requires { self->source->current_sample_index(); })
+        {
+          const uint64_t next = self->source->current_sample_index();
+          self->captured_start_index_.store(
+            next >= self->captured_output_.size()
+              ? next - self->captured_output_.size() : 0,
+            std::memory_order_relaxed);
+        }
+        self->capture_ready_.store(capture, std::memory_order_release);
+        self->capture_state_.store(
+          CaptureState::Ready, std::memory_order_release);
       }
-      self->capture_ready_.store(capture, std::memory_order_release);
     }
 
     auto* out = static_cast<double*>(output_buffer);
@@ -558,6 +609,8 @@ private:
 
       if (!disconnected && !default_changed)
         continue;
+      if (default_changed)
+        disconnect_count_.fetch_add(1, std::memory_order_relaxed);
 
       try
       {
@@ -579,9 +632,11 @@ private:
       {
         source->begin_fade_in();
         open_stream();
+        reconnect_success_count_.fetch_add(1, std::memory_order_relaxed);
       }
       catch (...)
       {
+        reconnect_failure_count_.fetch_add(1, std::memory_order_relaxed);
         device_disconnected_.store(true, std::memory_order_relaxed);
       }
     }

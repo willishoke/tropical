@@ -91,6 +91,21 @@ buffer, advances the coordinate, and applies the smoothstep fade. The active
 state is published with a release store after the inactive state is fully
 built.
 
+At a callback boundary, `process()`:
+
+1. applies any stable even-sequence clock request;
+2. advertises, captures, and verifies the active state and one coherent
+   slot/coefficient generation;
+3. copies published slots into preallocated audio scratch and calls the kernel;
+4. advances the runtime-global audio clock and applies the smoothstep fade;
+5. publishes the completed sample boundary and releases ownership.
+
+Control writes serialize under `build_mutex_`, run the coefficient stage in
+control-only scratch, and release-publish the complete slot/coefficient set as
+one generation. State and generation ownership atomics live outside movable
+kernel state, closing an ABA window during hot-swap. The audio path never
+locks or allocates; a bounded ownership failure emits silence and telemetry.
+
 `render_window` evaluates the fused JIT kernel at arbitrary coordinates for
 scope/slave consumers. Metal sessions remain dual-loaded so this path stays on
 the f64 JIT reference.
@@ -140,8 +155,44 @@ The JIT always loads alongside Metal for scopes and reference rendering. Tests:
 - `engine/tests/test_metal_kernel.cpp`;
 - MSL and coefficient-column gates in `tropicaltest`.
 
-See [`benchmarks/metal_live/findings.md`](../benchmarks/metal_live/findings.md)
-for current qualification measurements.
+`MetalKernel` (ObjC++ behind a pure-C++ header) executes the fused kernel on
+the GPU: MSL emitted by Lean (`EmitMsl`), compiled at runtime
+(`newLibraryWithSource`, `MTLMathModeSafe`), one thread per sample,
+synchronous per-block dispatch. It rides inside `KernelState` — the existing
+double-buffered publish/flip is the hot-swap; the runtime-global audio clock is
+independent of the swapped state. Loads are DUAL (`load_ir_msl`): the JIT always compiles too and keeps
+serving `render_window` (the scope) and the f64 reference; only `process()`
+dispatches to Metal. Slots stay f64 host-side, captured as a coherent
+generation at the buffer boundary, then snapshotted to f32 at encode.
+
+Enable per session with `TROPICAL_BACKEND=metal` (read at engine boot).
+Correctness: `tests/web/metal_vs_jit.test.ts` (SNR vs the f64 JIT — f32
+output quantizes at ~-144 dB, so the gate is ~140 dB SNR flat in τ, not
+bytes) + `engine/tests/test_metal_kernel.cpp` (ctest).
+
+**Known v1 wart:** kernel-WRITTEN port slots are thread-private locals in the
+GPU kernel and never write back to the host slot array, so
+`tropical_runtime_get_slot` on such a slot returns the plan default in Metal
+mode (the CPU kernel would show the last sample's value). Host-written param
+slots are unaffected; the scope reads via `render_window` (JIT) and is exact.
+
+**Coefficient columns (banks-as-data) cross via `buffer(3)`.** A plan that
+advertises hoisted columns (`coeff_array_slots`) emits its MSL kernel with a
+fourth binding — `constant float* coeff_columns [[buffer(3)]]`, ONE packed
+buffer whose per-slot offsets are compile-time literals in plan order —
+and reads those slots from it instead of declaring thread-private `arrN`
+locals it could never fill (columns-free plans keep the exact 3-binding
+ABI, byte-frozen by the msl-golden gates). Host side: `process()` packs the
+captured generation into f32 staging (`KernelState::metal_column_staging` —
+int64 storage bit-punned to f64 like the JIT's array loads, then narrowed
+f64→f32 like slots) and `process_block` copies it into the MTLBuffer at
+encode (sync) or enqueue (pipelined, per-ring-entry buffers — the
+documented D-block param lag, no tear: the pack reads the ONE generation
+captured before `audio_processing_` went true). So a banked session on
+`TROPICAL_BACKEND=metal` runs the same typed split as the JIT: coefficient
+math at knob rate on CPU, the audio loop on GPU reading real columns.
+Gated by `msl-column-guard` (tropicaltest), the banked-resonator SNR case
+in `metal_vs_jit`, and the column tests in `test_metal_kernel.cpp`.
 
 Qualification controls only: `TROPICAL_METAL_PIPELINE_DEPTH=1..3` selects the
 future-block depth and overrides the legacy `TROPICAL_METAL_PIPELINE=1`
@@ -150,6 +201,9 @@ The read-only C diagnostic `tropical_runtime_metal_pipeline_depth` returns 0
 for sync/JIT/non-Metal builds. `TROPICAL_BUFFER_LENGTH=16..16384` selects the
 live engine block length before Runtime/DAC construction; absence preserves
 the 512 default.
+
+See [`benchmarks/metal_live/findings.md`](../benchmarks/metal_live/findings.md)
+for current qualification measurements.
 
 ## Audio output (`dac/TropicalDAC.hpp`)
 

@@ -75,7 +75,10 @@ uint64_t tropical_dac_callback_histogram_overflow_floor_ns(void);
 size_t tropical_dac_copy_callback_histogram(
   tropical_dac_t, uint64_t* out, size_t capacity, uint64_t* epoch);
 /* Qualification output capture. One buffer is preallocated at construction;
-   request/read never changes the audio path except for one bounded copy. */
+   request/read never changes the audio path except for one bounded copy.
+   Exactly one request may be outstanding: request returns 0 unless the
+   capture state is idle, and only one reader can successfully consume a
+   ready sequence. A successful read returns the state to idle. */
 uint64_t tropical_dac_request_output_capture(tropical_dac_t);
 bool tropical_dac_read_output_capture(
   tropical_dac_t, uint64_t sequence, uint64_t* start_index,
@@ -84,6 +87,11 @@ bool tropical_dac_read_output_capture(
 unsigned int tropical_dac_get_buffer_frames(tropical_dac_t);
 /* True while a device-disconnect has been detected and reconnection is in progress */
 bool tropical_dac_is_reconnecting(tropical_dac_t);
+/* Sticky continuity counters since tropical_dac_start. Separate accessors keep
+   tropical_dac_stats_t ABI-frozen for older callers. */
+uint64_t tropical_dac_disconnect_count(tropical_dac_t);
+uint64_t tropical_dac_reconnect_success_count(tropical_dac_t);
+uint64_t tropical_dac_reconnect_failure_count(tropical_dac_t);
 
 /* Returns the device ID currently open for output (0 if not started) */
 unsigned int tropical_dac_get_active_device(tropical_dac_t);
@@ -121,7 +129,8 @@ bool             tropical_runtime_load_ir_msl(tropical_runtime_t, const char* ir
    Its outputs land in coef:<n> module slots the audio kernel reads. */
 bool             tropical_runtime_load_ir_staged(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* manifest_json, size_t manifest_len);
 
-/* Control-plane/test-only: reposition the active kernel's sample clock
+/* Control-plane/test-only: request a sample-clock reposition. The audio thread
+   applies the newest stable request at its next process-buffer boundary
    (render verbs' --start; long-tau gates render at arbitrary positions). */
 void             tropical_runtime_set_sample_index(tropical_runtime_t, uint64_t idx);
 

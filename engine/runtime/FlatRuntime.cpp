@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <stdexcept>
 
 namespace tropical_runtime
@@ -33,6 +34,9 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
   {
     new_state.slots[i] = parsed.slot_defaults[i];
   }
+  for (auto & generation : new_state.slot_generations)
+    generation = new_state.slots;
+  new_state.audio_slots = new_state.slots;
 
   // Host-contract dispatch table — swaps with the plan it describes, like
   // slot_names. Field-copied because the runtime keeps its own struct (the
@@ -48,6 +52,8 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
   // (`register_count`) is the SSA scratch the kernel actually uses.
   new_state.registers.clear();
   new_state.temps.assign(parsed.program.register_count, 0);
+  new_state.coeff_registers = new_state.registers;
+  new_state.coeff_temps.assign(parsed.program.register_count, 0);
 
   const auto & sizes = parsed.program.array_slot_sizes;
   new_state.array_storage.resize(sizes.size());
@@ -65,7 +71,7 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
   // advertises (see the KernelState comment for the protocol). Three
   // generations per column, sized like the slot's base storage; the
   // coefficient kernel's pointer view starts as a copy of the audio view
-  // (run_coeff repoints the column entries at its write generation per run).
+  // (publish_control_snapshot repoints column entries to its target generation).
   for (uint32_t s : parsed.coeff_array_slots)
     if (s < new_state.array_storage.size())
       new_state.coeff_array_slots.push_back(s);
@@ -101,11 +107,9 @@ bool FlatRuntime::publish_state(KernelState && new_state)
   const uint32_t inactive = 1U - active;
   wait_for_state_available(inactive);
 
-  const auto & old_state = states_[active];
-
-  new_state.sample_index = old_state.sample_index;
   // CF-only: no by-name state transfer on hot-swap. Registers/arrays/slots
-  // zero-init from the fresh kernel; only the sample index carries over.
+  // zero-init from the fresh kernel. The audio-owned clock is runtime-global,
+  // so a state flip cannot repeat, skip, or race its sample position.
 
   states_[inactive] = std::move(new_state);
   active_state_.store(inactive, std::memory_order_release);
@@ -194,9 +198,114 @@ bool FlatRuntime::load_ir_staged(const std::string & ir_text,
   // Materialize coefficient slots before the state becomes visible to the
   // audio thread or render_window — initial knob values exist, so a first
   // buffer reading zero-initialized coefficient slots would be a bug.
-  run_coeff(new_state);
+  publish_control_snapshot(new_state);
 
   return publish_state(std::move(new_state));
+}
+
+ParamDispatchResult FlatRuntime::dispatch_param_sync(
+  const std::string & name, double value)
+{
+  if (!std::isfinite(value))
+    return {false, "set_param: value must be finite"};
+
+  std::lock_guard<std::mutex> lock(build_mutex_);
+  const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
+  KernelState & state = states_[state_idx];
+
+  auto slot_of = [&state](const std::string & slot_name) -> uint32_t {
+    for (uint32_t i = 0; i < state.slot_names.size(); ++i)
+      if (state.slot_names[i] == slot_name) return i;
+    return UINT32_MAX;
+  };
+  auto read = [&state](uint32_t i) {
+    return i < state.slots.size() ? state.slots[i] : 0.0;
+  };
+  auto write = [&state](uint32_t i, double v) {
+    if (i < state.slots.size()) state.slots[i] = v;
+  };
+  auto fail = [](std::string error) {
+    return ParamDispatchResult{false, std::move(error)};
+  };
+  auto commit = [&]() {
+    publish_control_snapshot(state);
+    return ParamDispatchResult{true, {}};
+  };
+
+  const ParamDiscipline * pd = state.find_discipline(name);
+  const std::string discipline = pd ? pd->discipline : std::string{"raw"};
+  const double now = static_cast<double>(
+    published_sample_index_.load(std::memory_order_acquire));
+
+  if (discipline == "glide")
+  {
+    const uint32_t v0i = slot_of("param:" + name + "#v0");
+    const uint32_t v1i = slot_of("param:" + name + "#v1");
+    const uint32_t t0i = slot_of("param:" + name + "#t0");
+    if (v0i == UINT32_MAX)
+      return fail("set_param: no glide slots for '" + name + "'");
+    const double dur_sec = pd->glide_dur_sec > 0.0
+      ? pd->glide_dur_sec : 0.02;
+    const double dur = state.sample_rate * dur_sec;
+    const double v0 = read(v0i);
+    const double v1 = read(v1i);
+    const double t0 = read(t0i);
+    const double r = (now - t0) / dur;
+    const double s = r < 0.0 ? 0.0 : (r > 1.0 ? 1.0 : r);
+    write(v0i, v0 + (v1 - v0) * (s * s * (3.0 - 2.0 * s)));
+    write(v1i, value);
+    write(t0i, now);
+    return commit();
+  }
+
+  if (discipline == "anchor")
+  {
+    const uint32_t fi = slot_of("param:" + name);
+    if (fi == UINT32_MAX)
+      return fail("set_param: unknown param '" + name + "'");
+    const uint32_t pi = slot_of("param:" + name + "#phase");
+    if (pi == UINT32_MAX)
+    {
+      write(fi, value);
+      return commit();
+    }
+    const double inc0 =
+      std::floor(read(fi) * 4294967296.0 / state.sample_rate);
+    const double inc1 =
+      std::floor(value * 4294967296.0 / state.sample_rate);
+    const double dcyc = ((inc0 - inc1) * now) / 4294967296.0;
+    const double phase = read(pi) + dcyc;
+    write(pi, phase - std::floor(phase));
+    write(fi, value);
+    return commit();
+  }
+
+  if (discipline == "velocity")
+  {
+    const uint32_t vi = slot_of("param:" + name);
+    if (vi == UINT32_MAX)
+      return fail("set_param: unknown param '" + name + "'");
+    std::string tau;
+    if (!pd->companions.empty()) tau = pd->companions.front();
+    else
+    {
+      tau = name;
+      const std::size_t pos = tau.find("velocity");
+      if (pos != std::string::npos) tau.replace(pos, 8, "tau_base");
+    }
+    const uint32_t ti = slot_of("param:" + tau);
+    if (ti == UINT32_MAX)
+      return fail("set_param: no origin slot '" + tau + "'");
+    write(ti, read(ti) + (read(vi) - value) * now / state.sample_rate);
+    write(vi, value);
+    return commit();
+  }
+
+  const uint32_t bi = slot_of("param:" + name);
+  if (bi == UINT32_MAX)
+    return fail("set_param: unknown param '" + name + "'");
+  write(bi, value);
+  return commit();
 }
 
 } // namespace tropical_runtime

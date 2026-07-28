@@ -176,7 +176,8 @@ static const char* STAGED_MANIFEST = R"({"schema":"tropical_plan_5",
   "coeff_array_slots":[0],
   "instance_functions":[],"sinks":[],"slot_count":2,"slot_defaults":[0.25, 0]})";
 
-// Stage-0 coefficient kernel (run by run_coeff with buffer_length = 1):
+// Stage-0 coefficient kernel (run during control-snapshot publication with
+// buffer_length = 1):
 // arrays[0][k] = slots[0] + k for k = 0..3, stored as bitcast i64 — the
 // same f64-punned view the JIT's Index loads.
 static const char* COEFF_FILL_IR =
