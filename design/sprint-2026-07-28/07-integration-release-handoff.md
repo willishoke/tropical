@@ -2,9 +2,9 @@
 
 - **Sprint:** 2026-07-28 through 2026-08-10
 - **Lane:** G — integration, gates, and sprint release candidate
-- **DRI:** Assign an integration owner at kickoff
+- **DRI:** Staff integration
 - **Supervisor:** Staff engineer
-- **Status:** Planned
+- **Status:** Local candidate complete; external release blocked by Metal qualification and unrun Linux CI
 - **Master:** [Staff engineer sprint handoff](00-staff-engineer-master-handoff.md)
 - **Depends on:** All lanes.
 - **Must not overlap:** This lane coordinates shared build/test files and does
@@ -21,9 +21,9 @@ The sprint closes on one clean, reproducible baseline:
 - approved relational lowering capstone checked;
 - trusted boundary queryable;
 - current performance measured;
-- Metal operating envelope explicitly scoped, with final B512/D3 qualification
-  contingent on the required long soak;
-- legacy compatibility bounded;
+- Metal operating envelope explicitly scoped, with the final B512/D3
+  qualification failure retained;
+- legacy compatibility removed; retired schemas and carriers reject;
 - all ordinary gates green on a clean checkout.
 
 Integration is not a final-day merge event. This lane owns the daily evidence
@@ -234,8 +234,8 @@ Stretch work moves to follow-ups.
 
 Preferred order:
 
-1. Compatibility non-emission gate and labels.
-2. Semantic modules and theorem.
+1. Legacy retirement and Plan-5/current-boundary rejection gates.
+2. Semantic modules and relational capstone.
 3. Trust ledger and audit, updated with theorem links.
 4. Performance harness/instrumentation.
 5. Metal harness/runtime qualification changes.
@@ -272,6 +272,13 @@ scope is cut to address it.
 7. There are no unexplained golden changes.
 8. The trust audit and production non-emission gate run in validation.
 9. The staff engineer signs the final decision log.
+
+Closeout result: the clean macOS candidate passes the local validation
+components, but acceptance gates 5 and 6 remain unsatisfied. GitHub-hosted
+Linux CI was not run, and the single final B512/D3 actual-DAC attempt recorded
+a hard callback overrun at clock-jump re-prime. The failure is retained as P0
+evidence; it closes the measurement obligation but blocks external release
+qualification.
 
 ## Non-goals
 

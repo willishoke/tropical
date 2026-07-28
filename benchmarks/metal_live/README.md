@@ -16,11 +16,14 @@ benchmarks/metal_live/run.sh --mode soak \
 
 On the canonical M1 Pro, B=128/D=3 is a known unsupported configuration: its
 reviewed live row recorded a 5.422916 ms callback against the 2.902494 ms hard
-callback deadline, plus one underrun. B=256 remains untested. B=512/D=3 is the
-supported candidate, subject to the required final long soak; its passing
-short validation is not release qualification. The B=128 result blocks that
-configuration, not Metal universally. This records the product decision and
-does not authorize another DAC run.
+callback deadline, plus one underrun. B=256 remains untested. B=512/D=3 is
+also not release-qualified: its single final long-soak attempt aborted at the
+scheduled clock jump after 450.05 measured seconds when one 21.009750 ms
+callback exceeded the 11.609977 ms deadline. The row had zero measured-window
+underruns, ownership failures, Metal dispatch failures, or non-finite samples,
+but the deadline miss is release-blocking. These results scope two unsupported
+configurations on this machine; they do not establish a universal Metal
+failure. This document does not authorize another DAC run.
 
 `TROPICAL_METAL_PIPELINE_DEPTH=1..3` is qualification-only. Missing controls
 retain synchronous Metal; the retired `TROPICAL_METAL_PIPELINE` spelling is

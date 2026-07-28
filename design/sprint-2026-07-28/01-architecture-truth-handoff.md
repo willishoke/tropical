@@ -2,9 +2,9 @@
 
 - **Sprint:** 2026-07-28 through 2026-08-10
 - **Lane:** A — documentation and architectural truth
-- **DRI:** Assign at kickoff
+- **DRI:** Staff integration
 - **Supervisor:** Staff engineer
-- **Status:** Planned
+- **Status:** Complete — current architecture and invariant map landed
 - **Master:** [Staff engineer sprint handoff](00-staff-engineer-master-handoff.md)
 - **Depends on:** Performance lane supplies current measurements by Day 7;
   Trust lane supplies the final obligation names by Day 7.
@@ -67,8 +67,8 @@ The following terms are current and must be used consistently:
   - the same LLVM route compiled to WebAssembly for the browser player;
   - MSL plus `MetalKernel` for supported Apple live audio.
 - **State contract:** production Tropical kernels are pure
-  `f(τ, params)`. Legacy plan/runtime state support, if retained, is
-  compatibility substrate and must be labeled as such.
+  `f(τ, params)`. Legacy plan/runtime state support is retired; current
+  serialized boundaries reject the old schema and carriers.
 
 ## Owned files
 

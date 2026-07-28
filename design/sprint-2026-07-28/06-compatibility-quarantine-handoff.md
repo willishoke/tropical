@@ -9,12 +9,12 @@
 
 - **Sprint:** 2026-07-28 through 2026-08-10
 - **Lane:** F — legacy plan/runtime boundary
-- **DRI:** Assign at kickoff
+- **DRI:** Runtime/compiler retirement lane
 - **Supervisor:** Staff engineer
 - **Status:** Historical — completed/superseded
 - **Master:** [Staff engineer sprint handoff](00-staff-engineer-master-handoff.md)
 - **Depends on:** None. Lane A consumes the classification; Lane C records the
-  remaining compatibility obligation.
+  retired-boundary rejection evidence.
 - **Must not overlap:** No deletion of supported behavior without a staff
   decision; no Metal-specific runtime edits.
 

@@ -2,9 +2,9 @@
 
 - **Sprint:** 2026-07-28 through 2026-08-10
 - **Lane:** C — explicit trust and evidence accounting
-- **DRI:** Assign at kickoff
+- **DRI:** Trust-boundary lane
 - **Supervisor:** Staff engineer
-- **Status:** Planned
+- **Status:** Complete — typed ledger, generated report, and audit landed
 - **Master:** [Staff engineer sprint handoff](00-staff-engineer-master-handoff.md)
 - **Depends on:** Lane B supplies the final semantic capstone/boundary; Lanes D
   and E supply current performance/numeric evidence.
@@ -194,8 +194,8 @@ Freeze the schema after this review.
 
 - Link Lane B’s capstone theorem.
 - Link Lane D’s reproducibility report and thresholds.
-- Link Lane E’s Metal evidence and remaining manual soak obligation.
-- Link Lane F’s compatibility boundary.
+- Link Lane E’s Metal evidence and final qualification result.
+- Link Lane F’s retired-schema rejection boundary.
 
 ### Day 9: adversarial review
 

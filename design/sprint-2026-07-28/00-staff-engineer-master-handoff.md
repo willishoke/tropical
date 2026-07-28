@@ -5,8 +5,8 @@
 - **Supervisor:** Staff engineer
 - **Sprint type:** Architecture consolidation and evidence
 - **Feature policy:** No new synthesis vocabulary or modal atoms
-- **Status:** Integration in progress; release candidate pending final
-  validation and B512/D3 long-soak evidence
+- **Status:** Local code candidate validated; external release blocked by the
+  final B512/D3 qualification failure and unrun Linux CI
 
 ## Accelerated outcome amendment
 
@@ -22,9 +22,9 @@ close-state is:
 - the fixed playground renderer is a separately scoped demo/reference fixture,
   so its measured one-time load does not authorize tiering or compile-time
   optimization;
-- Metal support is configuration-specific: B128/D3 is unsupported on the
-  canonical M1 Pro, B256 is untested, and B512/D3 is a candidate pending its
-  required final 30-minute actual-DAC soak;
+- Metal support is configuration-specific: B128/D3 and B512/D3 failed
+  qualification on the canonical M1 Pro, B256 is untested, and no pipelined
+  live configuration is declared supported by this sprint;
 - the original Plan-4 quarantine decision has been superseded by an explicit
   aggressive-retirement decision; `tropical_program_2` remains current; and
 - demo/product-surface work is out of this sprint and will be scoped
@@ -81,12 +81,12 @@ The staff engineer owns composition and scope, not every implementation.
 | Lane | Handoff | Must-land result | Primary owner profile |
 |---|---|---|---|
 | A | [Architecture truth](01-architecture-truth-handoff.md) | Current source-to-sound architecture and invariant map | Compiler generalist / technical writer |
-| B | [Semantic spine](02-semantics-spine-handoff.md) | `lowerSigTree` denotation-preservation theorem or approved explicit fallback | Lean proof engineer |
+| B | [Semantic spine](02-semantics-spine-handoff.md) | Checked all-constructor relational capstone; denotational preservation is a nonblocking follow-up | Lean proof engineer |
 | C | [Trust boundary](03-trust-boundary-handoff.md) | Typed obligation ledger, report, and audit | Formal-methods/compiler engineer |
-| D | [Performance baseline](04-current-performance-baseline-handoff.md) | Reproducible post-bank compile/edit/runtime data and tiering decision | Compiler performance engineer |
-| E | [Metal qualification](05-metal-qualification-handoff.md) | Buffer/depth sweep, soak, parameter-latency measurements, stale-future tests | Apple GPU/runtime engineer |
-| F | [Compatibility quarantine](06-compatibility-quarantine-handoff.md) | Legacy matrix, non-emission gate, bounded retain/remove recommendation | Runtime/compiler engineer |
-| G | [Integration and release](07-integration-release-handoff.md) | Continuously green integration branch and clean release candidate | Build/release engineer |
+| D | [Performance baseline](04-current-performance-baseline-handoff.md) | Fixed-renderer baseline and no-optimization decision | Compiler performance engineer |
+| E | [Metal qualification](05-metal-qualification-handoff.md) | Scoped Metal envelope and retained B512/D3 qualification failure | Apple GPU/runtime engineer |
+| F | [Compatibility retirement](06-compatibility-quarantine-handoff.md) | Retired-surface matrix, immediate removal, and current-boundary rejection gates | Runtime/compiler engineer |
+| G | [Integration and release](07-integration-release-handoff.md) | Local clean candidate and explicit external blockers | Build/release engineer |
 
 Every lane document is a self-contained handoff. This master is authoritative
 only for cross-lane priorities, ownership, dependencies, and scope changes.
@@ -100,7 +100,7 @@ only for cross-lane priorities, ownership, dependencies, and scope changes.
 - Checked semantic theorem or the fallback explicitly selected by Day 4.
 - Trust ledger covering all current production `unsafe`/`implemented_by`
   sites and named backend assumptions.
-- Production non-emission gate for legacy state.
+- Plan-5/current-schema and retired-carrier rejection gates.
 - Reproducible current performance report.
 - Required Metal short smoke and either a passing 30-minute soak or a visible
   release-blocking qualification failure.
@@ -110,7 +110,7 @@ only for cross-lane priorities, ownership, dependencies, and scope changes.
 
 - Generated human trust report from the Lean ledger.
 - Empirical parameter-latency matrix for all four write disciplines.
-- CTest/test-tree compatibility labeling.
+- CTest/test-tree retired-surface rejection coverage.
 - Current bank-capacity and dynamic-count performance sweep.
 - Documentation status headers for historical design notes.
 
@@ -119,7 +119,7 @@ only for cross-lane priorities, ownership, dependencies, and scope changes.
 - Second Apple Silicon machine.
 - Desktop-contention comparison beyond one required probe.
 - Stronger semantic theorem than the committed first boundary.
-- Mechanical separation of compatibility test helpers.
+- Mechanical separation of retired-surface test helpers.
 - Stable structural performance proxy in CI beyond existing flatness gates.
 
 ## Non-negotiable invariants
@@ -161,7 +161,7 @@ The plan is sized for:
 People may own more than one lane if staffing is smaller, using only these safe
 combinations:
 
-- A + F: architecture truth plus compatibility classification;
+- A + F: architecture truth plus retired-surface classification;
 - C + B: trust ledger plus semantics, if there is still an independent Lean
   reviewer;
 - D + E: general measurements plus Metal qualification;
@@ -176,7 +176,7 @@ with release integration. Avoid assigning one person both E and F if both need
 - Lane B theorem: another Lean-capable engineer.
 - Lane E runtime changes: a C++/Metal reviewer who did not author them.
 - Lane A architecture: one engineer traces the document against source.
-- Lane F compatibility: one adversarial front-door reachability review.
+- Lane F retirement: one adversarial front-door reachability review.
 - Release candidate: staff engineer plus integration DRI.
 
 ## File ownership and collision map
@@ -188,7 +188,7 @@ with release integration. Avoid assigning one person both E and F if both need
 | `lean/Tropical/Trust.lean`, `design/trust-boundary.md` | C | G registers audit in shared runner |
 | `benchmarks/current_baseline/`, opt-in timing instrumentation | D | G owns shared CLI/build registration |
 | `engine/metal/*`, Metal tests and findings | E | Shared `FlatRuntime` edit requires F notification |
-| compatibility matrix, generic plan-4 parser/tests | F | Shared `FlatRuntime` edit requires E notification |
+| retired-surface matrix and Plan-5/schema rejection tests | F | Shared `FlatRuntime` edit requires E notification |
 | `Makefile`, CI, top-level runner/import/build files | G | Other lanes send minimal requested patch |
 
 The staff engineer resolves any unlisted shared file before work begins.
@@ -205,7 +205,7 @@ Day-1 green baseline
     │                            │     │
     ├── Lane E Metal ────────────┼─────┤
     │                            │     │
-    └── Lane F compatibility ────┤     │
+    └── Lane F retirement ───────┤     │
                                  ▼     ▼
                            Lane C trust ledger
                                  │
@@ -217,7 +217,7 @@ Day-1 green baseline
 ```
 
 Lane A begins immediately with an audit and draft; it does not freeze final
-performance, trust, or compatibility wording until Days 7–8.
+performance, trust, or retired-boundary wording until Days 7–8.
 
 Lane C begins with provisional obligations and replaces placeholders as Lanes
 B, D, E, and F finish.
@@ -270,7 +270,7 @@ Expected:
 - C ledger type and rendering skeleton;
 - D reproducible harness with cache isolation;
 - E block-length/pipeline test seam underway;
-- F first production non-emission assertion;
+- F first retired-carrier rejection assertion;
 - A authoritative architecture outline.
 
 G performs the first rolling integration and full validation.
@@ -299,7 +299,7 @@ Must be independently valuable and reviewable:
 - C populated trust ledger skeleton;
 - D harness plus first compile matrix;
 - E short Metal sweep and automated smoke;
-- F compatibility matrix and non-emission gate;
+- F retired-surface matrix and rejection gate;
 - G green integrated branch.
 
 No experimental proof or runtime work lands merely to show progress.
@@ -308,8 +308,9 @@ No experimental proof or runtime work lands merely to show progress.
 
 - B closes arena extension lemmas.
 - D completes compile/bank sweep.
-- E starts long soak and parameter-latency runs.
-- F applies staff-approved quarantine labels.
+- E starts long-soak and parameter-latency work.
+- F records the then-provisional quarantine classification, later superseded
+  by S-09.
 - C maps actual gates and unsafe sites.
 
 ### Day 7 — Wednesday, August 5: evidence joins
@@ -317,7 +318,7 @@ No experimental proof or runtime work lands merely to show progress.
 - B adds arrays/banks and targets the capstone.
 - D publishes preliminary findings.
 - E publishes raw soak/latency data.
-- F finalizes compatibility status.
+- F finalizes the retired-surface decision.
 - C replaces provisional entries with evidence links.
 - A consumes the first final facts.
 - G runs the second rolling full integration.
@@ -329,7 +330,7 @@ At noon:
 - no new stretch work;
 - no new benchmark dimension;
 - no theorem broadening;
-- no compatibility deletion newly proposed for this sprint;
+- no retirement change beyond the already approved S-09 scope;
 - no architectural prose about unlanded behavior.
 
 Staff reviews every P0/P1 row and moves unfinished P2 work to follow-ups.
@@ -340,9 +341,9 @@ Expected final lane results:
 
 - B theorem/fallback reviewed;
 - C trust report and audit;
-- D findings and tiering decision;
+- D findings and no-optimization decision;
 - E qualification findings and operating envelope;
-- F compatibility matrix/recommendation;
+- F retired-surface matrix and retirement evidence;
 - A final architecture truth pass.
 
 G merges in dependency order and produces the release-candidate commit.
@@ -358,7 +359,7 @@ The staff engineer:
 - confirms every P0 item;
 - accepts or rejects the release candidate;
 - assigns every remaining obligation;
-- publishes the evidence index and next-sprint recommendations.
+- publishes the evidence index and unauthorized follow-up candidates.
 
 ## Staff decision log
 
@@ -401,11 +402,12 @@ Every substantive PR answers:
 - Is equality bit-exact, tolerance-based, or structural?
 - Is a comparison deciding program shape?
 
-### Compatibility
+### Retired boundaries
 
 - Is this reachable from a current front door?
 - Does it preserve the CF-only refusal boundary?
-- Does it affect plan-4 or direct C API users?
+- Does it reintroduce a retired plan/API carrier or change the current
+  Plan-5/program-2 boundary?
 
 ### Operations
 
@@ -422,7 +424,7 @@ expansion. The staff engineer may trade work within the sprint only when:
 - a correctness defect is found;
 - the approved semantic fallback is invoked;
 - Metal qualification exposes a product-safety failure;
-- compatibility reachability contradicts the documented language.
+- retired-surface reachability contradicts the documented language.
 
 When scope changes:
 
@@ -441,7 +443,8 @@ Do not add:
 - video/control rate polymorphism;
 - full backend verification.
 
-Those are next-sprint candidates after this baseline exists.
+Those are unauthorized follow-ups after this baseline exists; this sprint
+makes no next-sprint commitment.
 
 ## Stop-the-line policy
 
@@ -468,7 +471,7 @@ The sprint is done only when all are true:
 
 - `design/architecture.md`, root docs, and subsystem docs describe the current
   direct pipeline and three execution targets.
-- Historical/compatibility material is labeled.
+- Historical compatibility material is labeled.
 - Live parameter writes and structural recompiles are not conflated.
 
 ### Formal
@@ -488,11 +491,11 @@ The sprint is done only when all are true:
 
 - Current post-bank measurements are reproducible.
 - The four-ring structural-edit numbers are current.
-- The tiered-preview decision is recorded.
+- The fixed-renderer no-optimization decision is recorded.
 - Metal soak/latency evidence and operating envelope are recorded, or a
   qualification failure blocks release visibly.
 
-### Compatibility
+### Retired boundaries
 
 - Legacy state/Plan-4/runtime/API aliases are absent from current boundaries.
 - Current production paths reject retired schema/state fields.
@@ -513,11 +516,11 @@ Lane G assembles, and the staff engineer accepts, one final index linking:
 1. baseline and release-candidate shas;
 2. Day-1 and Day-10 validation outputs;
 3. architecture mismatch resolution;
-4. semantic theorem and proof review;
+4. semantic relational capstone and proof review;
 5. trust report and audit result;
-6. performance raw data, findings, and tiering decision;
+6. performance raw data, findings, and no-optimization decision;
 7. Metal raw data, findings, and qualification decision;
-8. compatibility matrix and recommendation;
+8. retired-surface matrix and retirement/rejection evidence;
 9. all scope decisions;
 10. remaining obligations with owner and target date.
 
@@ -530,7 +533,7 @@ If this sprint closes cleanly, the evidence should make one of these the next
 focused bet:
 
 - extend the semantic spine through direct lowering or stage-0;
-- implement theorem-licensed backend bank-realization policy;
+- implement backend bank-realization policy only after the requisite theorem;
 - design a separate flagship instrument without treating the playground
   renderer as its product surface;
 - narrow an analytic approximation obligation in the Exact layer;

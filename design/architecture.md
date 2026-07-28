@@ -180,7 +180,7 @@ writes and structural recompiles are different operations and must be measured
 separately. Current dated measurements, cache conditions, machine details, and
 percentiles live in the [performance baseline](../benchmarks/current_baseline/findings.md).
 
-## Plan and compatibility boundary
+## Plan and retired-schema boundary
 
 [`Tropical.Plan`](../lean/Tropical/Plan.lean) is the typed
 `tropical_plan_5` producer contract. It carries:
@@ -259,5 +259,5 @@ tests/                       cross-backend and golden fixtures
 ```
 
 For contributor commands and platform requirements, see
-[`CLAUDE.md`](../CLAUDE.md). For legacy reachability and removal ownership, see
+[`CLAUDE.md`](../CLAUDE.md). For retired-surface rejection evidence, see
 the [compatibility matrix](compatibility-matrix.md).

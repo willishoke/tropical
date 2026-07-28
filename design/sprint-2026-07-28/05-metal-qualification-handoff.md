@@ -2,14 +2,25 @@
 
 - **Sprint:** 2026-07-28 through 2026-08-10
 - **Lane:** E — Apple GPU runtime qualification
-- **DRI:** Assign an Apple-runtime owner at kickoff
+- **DRI:** Apple-runtime lane
 - **Supervisor:** Staff engineer
-- **Status:** Planned
+- **Status:** Complete — scoped qualification failure recorded; no live configuration declared supported
 - **Master:** [Staff engineer sprint handoff](00-staff-engineer-master-handoff.md)
 - **Depends on:** Lane D owns general performance reporting; this lane owns
   Metal-specific reliability and latency evidence.
 - **Must not overlap:** No plan/IR redesign and no automatic backend-selection
   policy.
+
+## Outcome — configuration evidence complete, live release blocked
+
+The latency matrix and short validation landed, and the final long row ran
+exactly once. On the canonical M1 Pro, B128/D3 missed its 2.902494 ms
+deadline; B512/D3 later missed its 11.609977 ms deadline at the scheduled
+clock-jump re-prime after 450.050 measured seconds. B256 was not tested.
+Accordingly, this sprint declares no supported pipelined live-Metal
+configuration. The retained brief below is the qualification protocol; the
+raw rows and current decision are in
+[`benchmarks/metal_live/findings.md`](../../benchmarks/metal_live/findings.md).
 
 ## Mission
 

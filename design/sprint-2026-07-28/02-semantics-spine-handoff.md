@@ -2,9 +2,9 @@
 
 - **Sprint:** 2026-07-28 through 2026-08-10
 - **Lane:** B — Lean semantics and preservation proof
-- **DRI:** Assign a Lean proof owner at kickoff
+- **DRI:** Lean semantics lane
 - **Supervisor:** Staff engineer
-- **Status:** Planned
+- **Status:** Complete — approved fallback 1 checked and independently reviewed
 - **Master:** [Staff engineer sprint handoff](00-staff-engineer-master-handoff.md)
 - **Depends on:** None for implementation; Lane C consumes its theorem and
   assumption names.

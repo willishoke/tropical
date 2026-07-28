@@ -1,5 +1,46 @@
 # Metal backend — live findings (V2 phase 6)
 
+## 2026-07-28 final B=512/D=3 qualification failure
+
+The one authorized 30-minute B=512/D=3 actual-DAC soak is retained unchanged
+as
+[`data/final-soak-b512-d3-1800s-bd7c9bf-m1pro-20260728.jsonl`](data/final-soak-b512-d3-1800s-bd7c9bf-m1pro-20260728.jsonl).
+It ran from the clean code candidate
+`bd7c9bf56690e383bdd53e4ca64c73defab533f3`; the only manifest status entry
+is the output file created before the snapshot. Its SHA-256 is
+`ab03fbc7ad849799cb0a770c4858d552ccba5d6c505d13792ae8b532e9e8bfd0`.
+The failed artifact is the final qualification result; it was not retried.
+
+The harness aborted at the first scheduled clock jump after 450.050 seconds
+and 38,763 measured callbacks. One callback took 21.009750 ms against the
+11.609977 ms B=512 deadline, producing
+`post_reset_callback_overrun`. The immediately preceding snapshot had a
+0.336500 ms maximum. Across the measured window there were zero underruns,
+zero ownership failures, zero Metal dispatch failures, zero non-finite
+samples, 0.203 ms callback p99, 0.999972 callback coverage, and no material RSS
+growth. The start reference passed at 144.013 dB. The abort correctly occurred
+before clock-jump progress, hot-swap, and final-reference evidence, so those
+gates remain unsatisfied rather than being inferred.
+
+The timing places the failure on the discontinuity re-prime boundary. A
+pipelined clock jump drains stale futures, submits D replacement blocks from
+the requested coordinate, and synchronously waits for the first replacement
+inside the callback. The row proves that this path exposed the callback to a
+deadline-breaking tail on the canonical M1 Pro. It does not by itself
+distinguish deterministic re-prime work from Metal/system scheduling jitter
+within that synchronous wait. Earlier retained B512/D3 jump windows completed
+at 2.946 ms and 4.460 ms, so a fixed deterministic 21 ms path cost is not
+supported; a tail exposed by the synchronous re-prime is the leading
+explanation. The row does not authorize weakening the hard deadline to a
+perceptual-latency budget.
+
+The supported-envelope decision is therefore conservative: B=128/D=3 and
+B=512/D=3 are not release-qualified on the canonical M1 Pro, B=256 remains
+untested, and no pipelined Metal configuration is currently declared supported
+from this sprint evidence. Metal remains a valid backend for offline,
+synchronous, and explicitly experimental use; this result does not invalidate
+the backend's correctness evidence or the steady-state performance result.
+
 ## 2026-07-28 reviewed short validation and operating-envelope stop
 
 Independent review authorized one B=512/D=3 validation after the exact-index
@@ -36,13 +77,14 @@ later. Exact per-dispatch replay remained aligned: the later post-2^40
 checkpoint measured 144.135 dB with error below 1e-14. The abort occurred
 before hot-swap, so this row makes no post-swap RSS claim.
 
-The approved sequence stopped at the B=128 failure. B=256 and the long-duration
-rows were not run and remain untested. The staff product decision scopes the
+That approved short sequence stopped at the B=128 failure. B=256 remained
+untested; the later final B=512 row is recorded above. The staff product
+decision scopes the
 observed hard-deadline miss to B=128/D=3, which is a known unsupported
 configuration on the canonical M1 Pro; it does not block Metal universally.
-B=512/D=3 is the supported candidate based on its passing short validation,
-but remains pending the required final long soak before release qualification.
-B=256 has no support decision until it is tested.
+B=512/D=3 subsequently failed its final qualification row and is also
+unsupported for release on this machine. B=256 has no support decision until
+it is tested.
 
 ## 2026-07-28 blocked production-dispatch incident
 
@@ -151,9 +193,8 @@ Raw evidence is intentionally classified rather than blended:
   reviewed genuine B=128 operating-envelope failure.
 
 The genuine B=128 failure blocks the B=128/D=3 configuration on the canonical
-M1 Pro, not Metal universally. B=256 remains untested, while B=512/D=3 remains
-a supported candidate pending its required final long soak and is not yet
-release-qualified.
+M1 Pro, not Metal universally. B=256 remains untested. The later final
+B=512/D=3 row recorded above also failed qualification.
 
 **Date:** 2026-07-07
 **Host:** Apple M1 Pro, macOS 26.3, 44.1 kHz, B=512 (engine boot default)
@@ -236,14 +277,18 @@ The JIT remains the correctness reference, the scope path (`render_window`),
 and the portability fallback — dual-load makes that free.
 
 That recommendation is **not current release guidance**. The sprint evidence
-supports exact D-block transport and a corrected B=512/D=3 short smoke. The
-required final long B=512/D=3 soak is pending, B=256 is untested, and B=128/D=3
-is outside the supported envelope on the canonical M1 Pro.
+supports exact D-block transport and a corrected B=512/D=3 short smoke, but
+the final long row exposed a re-prime deadline miss. B=128/D=3 and B=512/D=3
+are outside the release-qualified envelope on the canonical M1 Pro; B=256 is
+untested.
 
 ## Pending
 
-- The required final 30-minute B=512/D=3 actual-DAC soak. No run is authorized
-  by this document.
+- Redesign or otherwise bound clock-jump/hot-swap re-prime work before another
+  B=512/D=3 qualification proposal. The failed final row does not authorize a
+  retry. Candidate follow-ups are stage-timing instrumentation and an
+  epoch-tagged ring primed off the audio thread; adding depth alone cannot
+  preserve a discontinuous coordinate because every queued future is stale.
 - A B=256 support decision; that configuration remains untested. B=128/D=3 is
   not a pending candidate on the canonical M1 Pro.
 - Process user+system CPU seconds and measured-wall fraction are recorded.
