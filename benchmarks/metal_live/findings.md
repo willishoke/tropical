@@ -31,13 +31,13 @@ The first long attempt was interrupted because review found the original
 harness could not prove live SNR, callback p95/p99, or actual event progress.
 It is explicitly a rejected diagnostic, not a qualification row. The final
 16-second real-DAC harness smoke passed every fail-closed gate with 1379
-measured callbacks, zero underruns/overruns, a 0.249 ms p99 upper bound at
-1 us resolution, 6.525 ms exact max, 5.61% process CPU/wall, and
-142.46–145.48 dB nonzero JIT-reference SNR at start, post-2^40,
+measured callbacks, zero underruns/overruns, a 0.237 ms p99 upper bound at
+1 us resolution, 5.531 ms exact max, 5.41% process CPU/wall, and
+144.14–145.19 dB nonzero JIT-reference SNR at start, post-2^40,
 midpoint-after-swap, and end. All required event booleans and callback indices
-were present, and the ordinary end capture was 38 callbacks after its preceding
+were present, and the ordinary end capture was 37 callbacks after its preceding
 write (D+1 required). Three RSS samples after the explicit two-second
-post-hot-swap settling boundary decreased by 49,152 bytes and passed the
+post-hot-swap settling boundary were flat and passed the
 non-monotonic-growth gate. This validates the harness only; it is not a
 long-run memory conclusion.
 
