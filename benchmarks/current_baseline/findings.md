@@ -1,8 +1,7 @@
 # Current performance baseline findings
 
-**Status:** Schema-3 exact-product baseline complete. Lane D recommends
-**S-06: tiering recommended** from the measured product circuit; the staff
-signature remains pending.
+**Status:** Schema-3 exact-product baseline complete. **S-06 staff decision:
+accept the measured baseline; no tiered preview or compile optimization now.**
 
 The qualifying raw dataset is
 [`full-m1pro-20260728-exact-product-schema3.jsonl`](data/full-m1pro-20260728-exact-product-schema3.jsonl).
@@ -67,28 +66,25 @@ paired cold cache.
 | add addressed fifth ring | 6291.362, 6193.188, 6208.277 | 6208.277 ms | 1.58% | 1634.664, 1624.635, 1617.873 | 1624.635 ms | 1.03% |
 | make default partials 6 → 7 | 5446.444, 5429.437, 5444.909 | 5444.909 ms | 0.31% | 1421.681, 1424.694, 1427.792 | 1424.694 ms | 0.43% |
 
-All three exact-product series miss both kickoff hypotheses. Relative to the
-500 ms warm target, the medians are 2.79×, 3.25×, and 2.85×. Relative to the
-2 s cold target, they are 2.64×, 3.10×, and 2.72×. The miss is large and the
-target distributions are low-variance, so it is not explained by measurement
-noise.
+The exact-product walls are accepted measurements: approximately 1.4–1.6 s
+warm and 5–6 s cold across the full generation and two representative edits.
+Their low variance makes them suitable as a machine-local baseline.
 
-## S-06 recommendation
+## S-06 staff decision
 
-**Lane D recommends a tiered structural-edit preview path next sprint.**
+Structural topology editing is outside the product's primary live-performance
+loop. The measured 1.4–1.6 s warm and 5–6 s cold walls are therefore retained
+as an exact-product baseline, not promoted into a 500 ms release gate.
 
-The measured target for that path is topology-to-preview publication at or
-below 500 ms warm and 2 s cold for the exact flagship graph. The normal
-compiler path must still converge to the same artifact semantics; this lane
-does not propose weakening numerics, changing the product graph, or
-implementing tiering in the current sprint.
+No tiered preview path or compile optimization is planned from this result.
+That decision does not weaken numerics, change the product graph, or reinterpret
+the measurements; it aligns architecture work with the active live-performance
+requirements.
 
-“No tiering needed” is rejected because both realistic structural edits and an
-unchanged full product generation miss the agreed targets by 2.6–3.3×.
-“More isolation needed” is rejected for S-06 because the relevant series have
-three cache-isolated cold/warm repeats, complete artifact digests, identical
-emitted bytes, and at most 1.58% range/median. The S-06 record remains pending
-until the staff engineer signs the recommendation.
+The rejected alternative is spending architecture on an inactive product
+requirement. If structural topology editing enters the primary live loop later,
+these exact measurements provide the baseline for setting a product-owned
+target and reconsidering tiering or compilation work.
 
 ## Bank capacity and live count
 
@@ -151,9 +147,9 @@ remain below 1.6% range/median.
 
 ## Candidate regression budgets
 
-- Exact flagship topology→publication: median ≤500 ms warm and ≤2 s cold.
-  Current measurements are known misses; use the thresholds as the tiered
-  preview target, not as a green regression gate on the existing full path.
+- Exact flagship topology→publication: retain the accepted approximately
+  1.4–1.6 s warm and 5–6 s cold measurements as the machine-local comparison
+  baseline. There is no 500 ms release gate for the existing full path.
 - 512-bank cold topology→publication: median ≤2 s.
 - Banked audio plan instruction growth from K=16 to K=512: zero.
 - JIT/Metal block p99: below 50% of the 11.61 ms B=512 deadline.
