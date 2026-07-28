@@ -35,7 +35,7 @@ run: repl
 # `lake build` leaves stale tropicaltest/diffcli binaries in place.
 lean:
 	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake env leanc -c ffi/shim.c -o ffi/shim.o -I ../engine/c_api
-	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build frontend diffcli tropicaltest
+	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build frontend diffcli tropicaltest trustreport
 
 # Launch the Lean MCP server. As of Phase 6 the whole stack is the one
 # binary (session, compiler, runtime FFI) — no bun subprocess.
@@ -53,7 +53,8 @@ clean:
 # libLLVM with Lean's (no AMDGPU target) and the lld wasm emitter then dies at
 # load (_LLVMInitializeAMDGPUAsmParser). See CLAUDE.md "Test".
 validate: build lean
-	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build diffcli tropicaltest
+	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build diffcli tropicaltest trustreport
+	$(PYTHON) tools/audit_trust_sites.py
 	./lean/.lake/build/bin/tropicaltest
 	bun web/build_patches.ts
 	TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test

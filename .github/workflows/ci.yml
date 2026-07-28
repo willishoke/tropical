@@ -59,7 +59,10 @@ jobs:
         run: |
           cd lean
           lake env leanc -c ffi/shim.c -o ffi/shim.o -I ../engine/c_api
-          lake build frontend diffcli tropicaltest
+          lake build frontend diffcli tropicaltest trustreport
+
+      - name: Audit typed trust sites against production Lean
+        run: python3 tools/audit_trust_sites.py
 
       - name: Golden + native-equiv runner
         run: ./lean/.lake/build/bin/tropicaltest

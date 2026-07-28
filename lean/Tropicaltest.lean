@@ -17,6 +17,7 @@ import Tropical.Testing.ArrowFixtures
 import Tropical.Testing.ClockLaws
 import Tropical.Testing.EngineMirror
 import Tropical.Testing.PlanWire
+import Tropical.Testing.Semantics
 import Lean.Data.Json
 import Tropical.Tropicaltest.Patcher
 import Tropical.Tropicaltest.Exact
@@ -51,6 +52,11 @@ def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   let mut failed := 0
   let mut total := 0
+
+  -- ── Trusted-boundary ledger + semantic fallback fixtures ──────────────────
+  IO.println "trusted boundary (typed ledger, report, production fixtures):"
+  total := total + 1
+  if !(← Tropical.Testing.Semantics.runTrustAudit) then failed := failed + 1
 
   -- ── (a) Patch audio goldens (tests/golden/*.hash) ──────────────────────────
   IO.println "patch goldens:"
