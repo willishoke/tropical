@@ -1,5 +1,40 @@
 # Metal backend — live findings (V2 phase 6)
 
+## 2026-07-28 reviewed short validation and operating-envelope stop
+
+Independent review authorized one B=512/D=3 validation after the exact-index
+oracle correction, followed by one B=128/D=3 operating-envelope row. The
+B=512 row is retained as
+[`data/reviewed-oracle-fix-smoke-b512-d3-60s-3dc3be4-m1pro-20260728.jsonl`](data/reviewed-oracle-fix-smoke-b512-d3-60s-3dc3be4-m1pro-20260728.jsonl).
+It ran from commit `3dc3be45fed602ba8301e44c6f71e66ab339f1ce`;
+its SHA-256 is
+`f36e87522f0c966b69bb1bb6271d6d49bd63bb2cc8a64d86147af5c941db8fb2`.
+That short validation passed all 24 gates, including four reference
+checkpoints at 142.543–144.013 dB.
+
+The subsequent B=128 row is retained unchanged as
+[`data/reviewed-oracle-fix-smoke-b128-d3-60s-a875b68-m1pro-20260728.jsonl`](data/reviewed-oracle-fix-smoke-b128-d3-60s-a875b68-m1pro-20260728.jsonl).
+It ran exactly once from commit
+`a875b6845c8ebbe9100ae8593b897cb3996b599d`; its SHA-256 is
+`5eba153a8637d3cc51f513d383c0912e107d10b580ba553fcff3b50363d40388`.
+The row blocked after 19.958 s of measured time with
+`post_reset_underrun`: one underrun and one callback overrun were recorded,
+and the 5.422916 ms exact callback maximum exceeded the 2.902494 ms B=128
+deadline. This is a genuine operating-envelope failure; the evidence does not
+establish a cause for the single tail event.
+
+The B=128 row also exercised the correction across a live multi-index batch.
+At event block 2754, raw and glide were applied at sample index 442368 while
+anchor and velocity were applied at 442496, one 128-sample callback boundary
+later. Exact per-dispatch replay remained aligned: the later post-2^40
+checkpoint measured 144.135 dB with error below 1e-14. The abort occurred
+before hot-swap, so this row makes no post-swap RSS claim.
+
+The approved sequence stopped at the B=128 failure. B=256 and the long-duration
+rows were not run and remain untested. The passing B=512 short validation does
+not override the B=128 failure or replace the missing rows: Metal release
+qualification remains **blocked/pending**.
+
 ## 2026-07-28 blocked production-dispatch incident
 
 The independently approved 60-second B=512/D=3 actual-DAC smoke is retained as
@@ -40,8 +75,8 @@ The incident is a reference-oracle timing defect, not evidence of Metal drift:
 The correction records `applied_sample_index` from each production dispatch
 and replays the separate JIT runtime through a qualification-only explicit-now
 entry point that shares the exact production math. Production dispatch timing
-and the >100 dB acceptance gate are unchanged. No fresh DAC smoke may start
-until this diagnosis and correction receive independent review.
+and the >100 dB acceptance gate are unchanged. Independent review authorized
+only the short validation sequence recorded above.
 
 ## 2026-07-27 sprint qualification update
 
@@ -96,11 +131,14 @@ Raw evidence is intentionally classified rather than blended:
 - `data/pre-hard-gates-diagnostic-b512-d3-m1pro-20260727.jsonl`: pre-threshold
   smoke retained as a diagnostic;
 - `data/corrected-harness-smoke-b512-d3-m1pro-20260727.jsonl`: final short
-  review smoke with explicit gate results.
+  review smoke with explicit gate results;
+- `data/reviewed-oracle-fix-smoke-b512-d3-60s-3dc3be4-m1pro-20260728.jsonl`:
+  reviewed passing short validation after the exact-index correction;
+- `data/reviewed-oracle-fix-smoke-b128-d3-60s-a875b68-m1pro-20260728.jsonl`:
+  reviewed genuine B=128 operating-envelope failure.
 
-Until corrected 30-minute B=512 and 10-minute B=128/B=256 rows complete from a
-reviewed clean commit, Metal remains **qualification pending**, not
-release-qualified.
+The genuine B=128 failure and untested B=256 and long-duration rows keep Metal
+release qualification **blocked/pending**, not release-qualified.
 
 **Date:** 2026-07-07
 **Host:** Apple M1 Pro, macOS 26.3, 44.1 kHz, B=512 (engine boot default)
