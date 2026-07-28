@@ -53,6 +53,7 @@ struct ParamDispatchResult
 {
   bool        ok = false;
   std::string error;
+  std::string discipline;
 };
 
 // Explicit ownership for storage that is mutated off the audio thread.

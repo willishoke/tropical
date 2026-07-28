@@ -215,6 +215,8 @@ endif()
 add_executable(tropical_runtime_bench
     benchmarks/current_baseline/runtime_bench.cpp)
 target_include_directories(tropical_runtime_bench PRIVATE engine)
+target_include_directories(tropical_runtime_bench PRIVATE ${LLVM_INCLUDE_DIRS})
+target_compile_definitions(tropical_runtime_bench PRIVATE ${LLVM_DEFINITIONS})
 target_compile_features(tropical_runtime_bench PRIVATE cxx_std_20)
 target_link_libraries(tropical_runtime_bench PRIVATE tropical_core)
 

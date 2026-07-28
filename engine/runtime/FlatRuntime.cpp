@@ -220,7 +220,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
   const std::string & name, double value)
 {
   if (!std::isfinite(value))
-    return {false, "set_param: value must be finite"};
+    return {false, "set_param: value must be finite", {}};
 
   std::lock_guard<std::mutex> lock(build_mutex_);
   const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
@@ -237,16 +237,17 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
   auto write = [&state](uint32_t i, double v) {
     if (i < state.slots.size()) state.slots[i] = v;
   };
-  auto fail = [](std::string error) {
-    return ParamDispatchResult{false, std::move(error)};
+  const ParamDiscipline * pd = state.find_discipline(name);
+  const std::string discipline = pd ? pd->discipline : std::string{"raw"};
+  auto fail = [&](std::string error) {
+    return ParamDispatchResult{
+      false, std::move(error), discipline
+    };
   };
   auto commit = [&]() {
     publish_control_snapshot(state, state_idx);
-    return ParamDispatchResult{true, {}};
+    return ParamDispatchResult{true, {}, discipline};
   };
-
-  const ParamDiscipline * pd = state.find_discipline(name);
-  const std::string discipline = pd ? pd->discipline : std::string{"raw"};
   const double now = static_cast<double>(
     published_sample_index_.load(std::memory_order_acquire));
 

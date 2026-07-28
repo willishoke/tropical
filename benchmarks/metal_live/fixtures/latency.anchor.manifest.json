@@ -1,0 +1,19 @@
+{
+  "schema": "tropical_plan_5",
+  "config": {"sampleRate": 44100},
+  "register_count": 0,
+  "array_slot_count": 0,
+  "array_slot_sizes": [],
+  "instance_functions": [],
+  "sinks": [],
+  "slot_count": 2,
+  "slot_defaults": [220, 0],
+  "slot_names": ["param:probe.freq", "param:probe.freq#phase"],
+  "param_disciplines": [
+    {
+      "name": "probe.freq",
+      "discipline": "anchor",
+      "companions": ["probe.freq#phase"]
+    }
+  ]
+}
