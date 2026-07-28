@@ -10,6 +10,7 @@ git grep -n -E 'ParsedProgram|Ir/Elaborator|CoreArena|ArrayLower|SumLower|Specia
 git grep -n -E -i 'two backends|sub-millisecond|state transfer'
 git grep -n -E 'reg_decl|delay_decl|next_update|state_init|register_targets'
 git grep -n -E -i 'compiler service|TS session|inputExprNodes|compileSessionSlotted|runtime\.loadPlan|by-name transfer'
+git grep -n -E 'paramExpr|triggerParamExpr|arrayLiteral|array_set|sampleClock|sample_clock|sessionSlot|sessionArraySlot|audio_outputs|breaks_cycles'
 ```
 
 The commands are intentionally broader than “must return zero.” A zero-result
@@ -22,6 +23,8 @@ must fit one of these reviewed buckets.
 - A rejection boundary or test naming a retired schema or field.
 - A refusal test whose purpose is to ensure a deleted source construct cannot
   cross the boundary.
+- A decoder or normalization rejection message naming a retired Program-2
+  alias or root carrier.
 - A safety/correctness counterexample saying that agreement between two
   backends is insufficient; this does not claim that Tropical has only two
   execution targets.
@@ -58,6 +61,10 @@ compile-scaling subsection as a historical measurement record.
   boundary test.
 - [`PlanDecode.lean`](../lean/Tropical/PlanDecode.lean) names retired fields
   only to reject them.
+- [`WireExpr.lean`](../lean/Tropical/WireExpr.lean),
+  [`Raise.lean`](../lean/Tropical/Parse/Raise.lean), and
+  [`mcp/errors.test.ts`](../mcp/errors.test.ts) name retired Program-2
+  spellings only at rejection boundaries and their tests.
 
 ## Audit outcome
 

@@ -37,11 +37,15 @@ const cliEnv = { ...process.env, PATH: `${process.env.HOME}/.elan/bin:${process.
 interface ProgramFile {
   schema: 'tropical_program_2'
   name: string
-  body: { op: 'block'; decls: unknown[] }
-  audio_outputs: { instance: string; output: string }[]
+  body: { op: 'block'; decls: unknown[]; assigns: unknown[] }
 }
 
 const PROG_TMP = '/tmp/wvj-program.json'
+const dacOut = (instance: string, output: string) => ({
+  op: 'outputAssign',
+  name: 'dac.out',
+  expr: { op: 'ref', instance, output },
+})
 
 /** Compile a `ProgramFile` to a `tropical_plan_5` wire plan JSON string via
  *  the Lean `diffcli compile` front door (native oracle + manifest source).
@@ -93,8 +97,7 @@ function sinOscProgram(freqHz: number): ProgramFile {
     name: 'eq_sinosc',
     body: { op: 'block', decls: [
       { op: 'instanceDecl', name: 'osc', program: 'FixedSinOsc', inputs: { freq: freqHz } },
-    ]},
-    audio_outputs: [{ instance: 'osc', output: 'sine' }],
+    ], assigns: [dacOut('osc', 'sine')] },
   }
 }
 
@@ -111,8 +114,7 @@ function softClipChainProgram(drive: number): ProgramFile {
         input: { op: 'ref', instance: 'osc', output: 'sine' },
         drive,
       }},
-    ]},
-    audio_outputs: [{ instance: 'sc', output: 'out' }],
+    ], assigns: [dacOut('sc', 'out')] },
   }
 }
 
@@ -131,8 +133,7 @@ function opZooProgram(): ProgramFile {
     name: 'eq_opzoo',
     body: { op: 'block', decls: [
       { op: 'instanceDecl', name: 'inst', program: 'OpZoo', inputs: {} },
-    ]},
-    audio_outputs: [{ instance: 'inst', output: 'out' }],
+    ], assigns: [dacOut('inst', 'out')] },
   }
 }
 
@@ -203,8 +204,7 @@ describe('wasm vs native JIT', () => {
             }}],
             value: null } } },
         { op: 'instanceDecl', name: 'inst', program: 'ArrayCF', inputs: {} }
-      ]},
-      audio_outputs: [{ instance: 'inst', output: 'out' }],
+      ], assigns: [dacOut('inst', 'out')] },
     }
     expect(() => compileViaLean(program)).toThrow(/program definitions over the wire are retired/)
   })

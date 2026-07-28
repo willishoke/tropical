@@ -6,7 +6,7 @@ import Tropical.Ir.Nodes
 
 Lift a wire expression to a raw resolved `Program`: one `InputDecl`
 per free instance-output ref (sorted by canonical `instance:port`
-key), one output `out`, and inline `ParamDecl`s for `param`/`trigger`
+key), one output `out`, and inline `ParamDecl`s for `param`
 refs. Shape-identical to a user-authored single-assign program; the
 lowering accepts it unmodified.
 
@@ -118,7 +118,7 @@ private def translate (refToInput : Array (String × Nat))
     | none =>
       throw <| s!"liftWireToProgram: ref {key} not in freeRefSet — " ++
         "pass the same set returned by freeRefs(expr)"
-  | .param name | .trigger name =>
+  | .param name =>
     let ctx := if ctx.params.contains name then ctx
                else { ctx with params := ctx.params.push name }
     let some pi := ctx.params.idxOf? name
@@ -152,8 +152,7 @@ private def translate (refToInput : Array (String × Nat))
     let (a, ctx) ← translate refToInput x ctx
     let (b, ctx) ← translate refToInput y ctx
     pure (internW (.index a b) ctx)
-  | .clock | .broadcastTo .. | .input _ | .nestedOut ..
-  | .sessionSlot _ | .sessionArraySlot .. =>
+  | .clock | .broadcastTo .. | .input _ | .nestedOut .. =>
     throw s!"liftWireToProgram: unhandled wire-form op '{e.opName}'"
 termination_by sizeOf e
 decreasing_by

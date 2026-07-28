@@ -41,14 +41,14 @@ There is no per-sample state — no `reg`, no `delay`, no feedback.
 ## tropical_program_2
 
 The wire format is a PATCH BAY: instances of registered program types, wiring,
-and params. The body is a `block` of `decls` (param_decl, instance_decl) and
-`assigns` (output_assign). **Program definitions over the wire are retired** —
+and params. The body is a `block` of `decls` (`paramDecl`, `instanceDecl`) and
+`assigns` (`outputAssign`). **Program definitions over the wire are retired** —
 programs are authored in Lean (arrow builders) and registered at boot (or
 crystallized from a session with `export_program`); a file carrying a
 `programDecl` is refused at ingest.
-**Audio output is an `output_assign` in the body with name `"dac.out"`** — wire
-the signal you want heard to it. Session metadata — `params`, `config` — is
-top-level.
+**Audio output is an `outputAssign` in the body with name `"dac.out"`** — wire
+the signal you want heard to it. Root `params`, `audio_outputs`, and
+`breaks_cycles` carriers are retired and refused.
 
 {
   "schema": "tropical_program_2",
@@ -93,17 +93,16 @@ top-level.
   }
 }
 
-Key fields: schema, name, ports (inputs/outputs), body (block), sample_rate,
-and top-level session metadata (params, config). Send a signal to the speakers
-with a body `output_assign` named `"dac.out"`. (File-root `audio_outputs` is
-deprecated — don't use it.)
+Key fields: schema, name, ports (inputs/outputs), body (block), and sample_rate.
+Declare parameters with body `paramDecl` nodes. Send a signal to the speakers
+with a body `outputAssign` named `"dac.out"`.
 
 Decl node shapes:
-- param_decl:    { op, name, value? }
-- instance_decl: { op, name, program, inputs? }
+- paramDecl:    { op, name, value? }
+- instanceDecl: { op, name, program, inputs? }
 
 Assign node shapes:
-- output_assign: { op, name, expr }
+- outputAssign: { op, name, expr }
 
 ## Expression node format (ExprNode)
 
@@ -114,7 +113,7 @@ Used in instance input wiring.
 - **Param**: `{ "op": "param", "name": "cutoff" }`
 - **Binary**: `{ "op": "mul", "args": [<expr>, <expr>] }` — add, sub, mul, div, floorDiv, mod, ldexp; lt, lte, gt, gte, eq, neq; and, or; bitAnd, bitOr, bitXor, lshift, rshift
 - **Unary**: `{ "op": "neg", "args": [<expr>] }` — neg, abs, not, bitNot, sqrt, floor, ceil, round, floatExponent, toInt, toBool, toFloat
-- **Clamp / Select / Array / Index / Builtins**: see the program catalog and stdlib for worked examples.
+- **Clamp / Select / bare arrays / Index / Builtins**: see the program catalog and stdlib for worked examples.
 "#
 
 def buildPatchPrompt : String := r#"# build-patch workflow
@@ -141,7 +140,7 @@ Use `wire` with a single set entry, or `set_param` for control parameters.
 
 - Use named ports (e.g. `"output": "out"`) rather than integer indices.
 - Wire everything in one program object where possible; minimize round trips.
-- Audio output goes through a body `output_assign` named `"dac.out"` (or the
+- Audio output goes through a body `outputAssign` named `"dac.out"` (or the
   `wire` tool with `instance: "dac", input: "out"`).
 "#
 

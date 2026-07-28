@@ -550,9 +550,10 @@ private def foldProbePatchJson (expr : Lean.Json) : Lean.Json :=
         Lean.Json.mkObj [("op", Lean.Json.str "instanceDecl"),
           ("name", Lean.Json.str "p"), ("program", Lean.Json.str "SoftClip"),
           ("inputs", Lean.Json.mkObj [("input", expr)])]]),
-      ("assigns", Lean.Json.arr #[])]),
-    ("audio_outputs", Lean.Json.arr #[Lean.Json.mkObj [
-      ("instance", Lean.Json.str "p"), ("output", Lean.Json.str "out")]])]
+      ("assigns", Lean.Json.arr #[Lean.Json.mkObj [
+        ("op", Lean.Json.str "outputAssign"), ("name", Lean.Json.str "dac.out"),
+        ("expr", Lean.Json.mkObj [("op", Lean.Json.str "ref"),
+          ("instance", Lean.Json.str "p"), ("output", Lean.Json.str "out")])]])])]
 
 -- Shared JSON expression builders for the retired-front-door probe.
 def cgJn (m : Nat) (e : Nat) : Lean.Json := Lean.Json.num ⟨Int.ofNat m, e⟩

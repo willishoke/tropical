@@ -7,15 +7,13 @@ import Tropical.Parse.OrderedJson
 The wire-expression grammar as a closed inductive, replacing raw
 `Lean.Json` in the session store. The constructor set is derived from
 the READERS — what the two lowerings (`Engine.wireExprToResolved`,
-`Ir.WireProgram.translate`) can compile, plus the forms other parts of
-the engine legitimately construct or tolerate:
+`Ir.WireProgram.translate`) can compile, plus current forms other parts
+of the engine construct:
 
 - `broadcastTo` — constructed by the wiring adapter (`adaptInputExpr`)
   on scalar→array connections; still refused at both lowerings.
 - `input` / `nestedOut` — export-file forms (`export_program` writes
-  them; loading such a file stores them); refused at both lowerings.
-- `sessionSlot` / `sessionArraySlot` — service-state-dump legacy reads
-  (the alias quotient consumes `sessionArraySlot`; both pretty-print).
+  them); refused at patch admission and both lowerings.
 
 The DECODER is the refusal site: state ops (`delay`, `reg`,
 `delayValue`, `delayRef`) die here with the closed-form-only message,
@@ -28,14 +26,9 @@ you can spell is the language that compiles — this module makes that
 sentence true at the wire layer, where it previously wasn't (the old
 `validateExpr` accepted ~20 ops no lowering could compile).
 
-Alias collapses at decode (round-trips canonicalize):
-- `{op:'array'|'arrayLiteral', items|values}` and bare JSON arrays →
-  `arr`.
-- `paramExpr` → `param`, `triggerParamExpr` → `trigger` (this also
-  makes them compile uniformly on both lowering paths; previously the
-  session path refused what the lift path accepted).
-- `sampleClock` / `sample_clock` / `clock` → `clock`.
-- `array_set` / `arraySet` → `arraySet`.
+The decoder accepts one spelling per operation. Arrays are bare JSON arrays;
+parameter reads are `param`; the time coordinate is `clock`; and array update
+is `arraySet`. Retired aliases fail as unknown operations.
 
 Decoding is total over `JsonV` (the array-backed twin with the
 `sizeOf` lemmas); the `Lean.Json` entry reparses through `JsonV`
@@ -65,7 +58,6 @@ inductive WireExpr where
   | arr (items : Array WireExpr)
   | ref (inst : String) (output : RefOut)
   | param (name : String)
-  | trigger (name : String)
   | binary (tag : BinaryOpTag) (l r : WireExpr)
   | unary (tag : UnaryOpTag) (a : WireExpr)
   | clamp (a b c : WireExpr)
@@ -78,8 +70,6 @@ inductive WireExpr where
   | broadcastTo (a : WireExpr) (shape : Array Nat)
   | input (name : String)
   | nestedOut (ref : String) (output : RefOut)
-  | sessionSlot (idx : Nat)
-  | sessionArraySlot (idx : Nat) (size : Option Nat)
 deriving BEq, Repr, Inhabited
 
 namespace WireExpr
@@ -88,14 +78,13 @@ namespace WireExpr
     parity at the lowerings' refusal arms). -/
 def opName : WireExpr → String
   | .num _ => "num" | .bool _ => "bool" | .arr _ => "array"
-  | .ref .. => "ref" | .param _ => "param" | .trigger _ => "trigger"
+  | .ref .. => "ref" | .param _ => "param"
   | .binary tag .. => tag.wire | .unary tag _ => tag.wire
   | .clamp .. => "clamp" | .select .. => "select"
   | .index .. => "index" | .arraySet .. => "arraySet"
   | .sampleRate => "sampleRate" | .sampleIndex => "sampleIndex"
   | .clock => "clock" | .broadcastTo .. => "broadcastTo"
   | .input _ => "input" | .nestedOut .. => "nestedOut"
-  | .sessionSlot _ => "sessionSlot" | .sessionArraySlot .. => "sessionArraySlot"
 
 -- ── Encoder (the canonical wire-format Json) ─────────────────────────────────
 
@@ -116,7 +105,6 @@ def toJson : WireExpr → Json
   | .ref inst output =>
     opNode "ref" [("instance", Json.str inst), ("output", refOutJson output)]
   | .param name => opNode "param" [("name", Json.str name)]
-  | .trigger name => opNode "trigger" [("name", Json.str name)]
   | .binary tag l r => opArgs tag.wire #[toJson l, toJson r]
   | .unary tag a => opArgs tag.wire #[toJson a]
   | .clamp a b c => opArgs "clamp" #[toJson a, toJson b, toJson c]
@@ -132,11 +120,6 @@ def toJson : WireExpr → Json
   | .input name => opNode "input" [("name", Json.str name)]
   | .nestedOut r output =>
     opNode "nestedOut" [("ref", Json.str r), ("output", refOutJson output)]
-  | .sessionSlot idx => opNode "sessionSlot" [("index", Lean.toJson idx)]
-  | .sessionArraySlot idx size =>
-    opNode "sessionArraySlot" <|
-      [("index", Lean.toJson idx)]
-      ++ (match size with | some s => [("size", Lean.toJson s)] | none => [])
 termination_by e => sizeOf e
 decreasing_by
   all_goals first
@@ -166,12 +149,11 @@ def deps (e : WireExpr) : Array String := depsInto #[] e
 
 /-- The first sub-expression no lowering can compile, if any.
 
-    Five constructors are in the grammar because something OTHER than an
-    agent builds them — `broadcastTo` from the wiring adapter, `input` /
-    `nestedOut` from `export_program`'s serializer, `sessionSlot` /
-    `sessionArraySlot` from legacy state-dump reads — and BOTH lowerings
+    Three constructors are in the grammar because current engine code builds
+    them — `broadcastTo` from the wiring adapter and `input` / `nestedOut`
+    from `export_program`'s serializer — and BOTH lowerings
     (`Engine.wireExprToResolved`, `Ir.WireProgram.translate`) refuse all
-    five. So "it decodes" was never the same as "it compiles", and a wire
+    three. So "it decodes" was never the same as "it compiles", and a wire
     carrying one used to reach the session store and detonate at the next
     `syncCompile` — poisoning the session for every later mutation and
     getting persisted by `save` into a file that can never load.
@@ -183,8 +165,6 @@ def uncompilableOp? : WireExpr → Option String
   | .broadcastTo .. => some "broadcastTo"
   | .input _ => some "input"
   | .nestedOut .. => some "nestedOut"
-  | .sessionSlot _ => some "sessionSlot"
-  | .sessionArraySlot .. => some "sessionArraySlot"
   | .arr items => items.attach.findSome? fun ⟨x, _⟩ => uncompilableOp? x
   | .binary _ l r => (uncompilableOp? l).orElse fun _ => uncompilableOp? r
   | .unary _ a => uncompilableOp? a
@@ -203,14 +183,14 @@ decreasing_by
     boundary so the wording does not drift. -/
 def uncompilableMessage (path op : String) : String :=
   s!"{path}: '{op}' is not a wire a patch can carry — it is a form the engine " ++
-  "builds internally (wiring adapter / export serializer / legacy state dump) " ++
+  "builds internally (wiring adapter / export serializer) " ++
   "and no lowering compiles. Wire an instance output, a param, or a closed-form " ++
   "expression over them instead."
 
-/-- `param`/`trigger` names, first-encounter order (replaces
+/-- `param` names, first-encounter order (replaces
     `Engine.collectWireParams`). -/
 def paramNamesInto (acc : Array String) : WireExpr → Array String
-  | .param name | .trigger name =>
+  | .param name =>
     if acc.contains name then acc else acc.push name
   | .arr items => items.attach.foldl (fun a ⟨x, _⟩ => paramNamesInto a x) acc
   | .binary _ l r => paramNamesInto (paramNamesInto acc l) r
@@ -231,10 +211,8 @@ decreasing_by
 def paramNames (e : WireExpr) : Array String := paramNamesInto #[] e
 
 /-- Does the wire need lifting into an anonymous instance? True exactly
-    when an array literal appears anywhere (replaces
-    `Lowering.needsWireLift`: bare arrays, `array`/`arrayLiteral` ops,
-    and recursion through `args`/`items` all collapse to "contains
-    `arr`"). -/
+    when a bare array literal appears anywhere (replaces
+    `Lowering.needsWireLift`). -/
 def needsLift : WireExpr → Bool
   | .arr _ => true
   | .binary _ l r => needsLift l || needsLift r
@@ -276,7 +254,6 @@ def pretty (lookupOutputs : String → Option (Array String)) : WireExpr → Str
       pretty lookupOutputs x).toList ++ "]"
   | .ref inst output => s!"{inst}.{refOutStr lookupOutputs inst output}"
   | .param name => s!"param({name})"
-  | .trigger name => s!"trigger({name})"
   | .binary tag l r =>
     let ls := pretty lookupOutputs l
     let rs := pretty lookupOutputs r
@@ -292,15 +269,13 @@ def pretty (lookupOutputs : String → Option (Array String)) : WireExpr → Str
     s!"select({pretty lookupOutputs a}, {pretty lookupOutputs b}, {pretty lookupOutputs c})"
   | .index a b => s!"{pretty lookupOutputs a}[{pretty lookupOutputs b}]"
   | .arraySet a b c =>
-    s!"array_set({pretty lookupOutputs a}, {pretty lookupOutputs b}, {pretty lookupOutputs c})"
+    s!"arraySet({pretty lookupOutputs a}, {pretty lookupOutputs b}, {pretty lookupOutputs c})"
   | .sampleRate => "sampleRate"
   | .sampleIndex => "sampleIndex"
   | .clock => "clock()"
   | .broadcastTo a _ => s!"broadcastTo({pretty lookupOutputs a})"
   | .input name => s!"input({name})"
   | .nestedOut r output => s!"{r}.{refOutStr lookupOutputs r output}"
-  | .sessionSlot idx => s!"delay(slot:{idx})"
-  | .sessionArraySlot idx _ => s!"delay(array_slot:{idx})"
 termination_by e => sizeOf e
 decreasing_by
   all_goals first
@@ -343,11 +318,6 @@ private def elemBound {items : Array JsonV} {j : JsonV}
     sizeOf items[i] < sizeOf j :=
   Nat.lt_trans (Tropical.Parse.sizeOf_lt_of_getElem hi) h
 
-private def reqNat (path : String) (j : JsonV) (k : String) : Except String Nat :=
-  match j.getField? k with
-  | some (.num n) => pure n.toFloat.toUInt64.toNat
-  | _ => throw s!"{path}: '{k}' must be a number"
-
 /-- Decode a wire expression off ordered JSON. Total by descent on
     `sizeOf j` (the codec-decoder pattern). Threads `path` for the
     error-position prefix the old `validateExpr` messages carried. -/
@@ -377,7 +347,7 @@ def ofJsonV (j : JsonV) (path : String := "expr") : Except String WireExpr := do
         pure (.unary tag (← ofJsonV (a[0]'(by omega)) s!"{path}.args[0]"))
       else throw s!"{path}: internal arity"
     else match op with
-    | "clamp" | "select" | "arraySet" | "array_set" =>
+    | "clamp" | "select" | "arraySet" =>
       let ⟨a, ha⟩ ← argsExact path j op 3
       if h3 : a.size = 3 then
         let x ← ofJsonV (a[0]'(by omega)) s!"{path}.args[0]"
@@ -407,21 +377,13 @@ def ofJsonV (j : JsonV) (path : String := "expr") : Except String WireExpr := do
       | some v => throw s!"{path}: 'ref' output must be a string port name or index, got {jsTypeof v}"
       | none =>
         throw s!"{path}: 'ref' requires 'output'. Use \{op: \"ref\", instance: \"{inst}\", output: \"port_name\"}"
-    | "param" | "paramExpr" | "trigger" | "triggerParamExpr" =>
+    | "param" =>
       let some name := j.getStr? "name"
         | throw s!"{path}: '{op}' requires 'name' (string)"
-      pure (if op == "param" || op == "paramExpr" then .param name else .trigger name)
-    | "array" | "arrayLiteral" =>
-      let itemsKey := if (j.getField? "items").isSome then "items" else "values"
-      match hf : j.getField? itemsKey with
-      | some (.arr items) =>
-        let out ← items.attach.zipIdx.mapM fun (⟨x, _⟩, i) =>
-          ofJsonV x s!"{path}.{itemsKey}[{i}]"
-        pure (.arr out)
-      | _ => throw s!"{path}: '{op}' requires items: ExprNode[]"
+      pure (.param name)
     | "sampleRate" => pure .sampleRate
     | "sampleIndex" => pure .sampleIndex
-    | "clock" | "sampleClock" | "sample_clock" => pure .clock
+    | "clock" => pure .clock
     | "broadcastTo" =>
       let ⟨a, ha⟩ ← argsExact path j op 1
       let shape ← match j.getField? "shape" with
@@ -443,14 +405,6 @@ def ofJsonV (j : JsonV) (path : String := "expr") : Except String WireExpr := do
       | some (.str s) => pure (.nestedOut r (.name s))
       | some (.num n) => pure (.nestedOut r (.index n))
       | _ => throw s!"{path}: 'nestedOut' requires 'output' (string or index)"
-    | "sessionSlot" => pure (.sessionSlot (← reqNat path j "index"))
-    | "sessionArraySlot" =>
-      let idx ← reqNat path j "index"
-      let size ← match j.getField? "size" with
-        | some (.num n) => pure (some n.toFloat.toUInt64.toNat)
-        | some _ => throw s!"{path}: 'sessionArraySlot' size must be a number"
-        | none => pure none
-      pure (.sessionArraySlot idx size)
     | _ =>
       if stateOps.contains op then
         throw <| s!"{path}: '{op}' is unsupported — tropical is closed-form-only " ++

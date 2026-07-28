@@ -63,17 +63,15 @@ private def resolveDacWire (st : SessionSt) (expr : Tropical.Parse.JsonV)
   | _ =>
     internalError s!"{context}: dac.out wire requires a ref-shaped expression (use \{op:'ref',instance,output}); got literal/array."
 
-/-- Walk a normalized v2 node + topLevel into the engine session
-    (additive; the caller cleared state for load). Mirrors the TS
-    ingest order: type_defs → inline programDecls → params → instances
-    (+ wires) → defaults → graph outputs. -/
+/-- Walk a normalized v2 node into the engine session (additive; the caller
+    cleared state for load). Canonical order is body parameter declarations,
+    instances (+ wires), defaults, then body graph outputs. -/
 private def ingestProgram (env : Env) (node : Tropical.Parse.JsonV)
-    (top : Tropical.Parse.Raise.TopLevel) (merge : Bool) : EngineM Unit := do
+    (merge : Bool) : EngineM Unit := do
   let context := if merge then "mergeProgramIntoSession" else "loadProgramAsSession"
 
-  -- Merged param specs: body paramDecls canonical, topLevel fallback
-  -- (dedup by name, body wins).
-  let bodyParams := (jvBodyEntries node "decls").filterMap fun d =>
+  -- Parameter declarations live in the canonical body declaration list.
+  let paramSpecs := (jvBodyEntries node "decls").filterMap fun d =>
     if jvOp? d == some "paramDecl" then do
       let name ← jvStr? d "name"
       let value : Json := match d.getField? "value" with
@@ -81,12 +79,6 @@ private def ingestProgram (env : Env) (node : Tropical.Parse.JsonV)
         | _ => Lean.toJson (0 : Nat)
       pure (name, value)
     else none
-  let mut paramSpecs := bodyParams
-  for p in top.params.getD #[] do
-    if !paramSpecs.any (·.1 == p.name) then
-      paramSpecs := paramSpecs.push (p.name,
-        match p.value with | some v => Json.num v | none => Lean.toJson (0 : Nat))
-
   -- Merge collision checks (fail fast, TS order: instances then params).
   if merge then
     let st ← env.state.get
@@ -171,8 +163,7 @@ private def ingestProgram (env : Env) (node : Tropical.Parse.JsonV)
         if (st.findWire? name port.name).isNone then
           env.state.modify (·.setWireRaw name port.name defaultExpr)
 
-  -- Graph outputs: body dac.out wires canonical, file-root
-  -- audio_outputs deprecated fallback (appended after).
+  -- Graph outputs are canonical body `dac.out` wires.
   let st ← env.state.get
   let mut outs : Array (String × String) := #[]
   for a in jvBodyEntries node "assigns" do
@@ -180,18 +171,6 @@ private def ingestProgram (env : Env) (node : Tropical.Parse.JsonV)
       let some expr := a.getField? "expr"
         | internalError s!"{context}: dac.out wire requires a ref-shaped expression (use \{op:'ref',instance,output}); got literal/array."
       outs := outs.push (← resolveDacWire st expr context)
-  for o in top.audioOutputs.getD #[] do
-    match o with
-    | .expr _ =>
-      internalError s!"{context}: file-root audio_outputs[].expr form not supported. Use \{instance, output} or migrate to body dac.out wires."
-    | .ref instName output =>
-      if (st.findInstance? instName).isNone then
-        internalError s!"{context}: audio_outputs references unknown instance '{instName}'."
-      let outName := match output with
-        | .str s => s
-        | .num n => toString n
-        | other => other.toJson.compress
-      outs := outs.push (instName, outName)
   env.state.modify fun st => { st with graphOutputs := st.graphOutputs ++ outs }
 
 def handleLoad (env : Env) (args : Json) : EngineM Json := do
@@ -212,14 +191,14 @@ def handleLoad (env : Env) (args : Json) : EngineM Json := do
   let jv ← match Tropical.Parse.JsonV.parse rawText with
     | .error e => internalError s!"JSON Parse error: {e}"
     | .ok v => pure v
-  let (node, top) ← match Tropical.Parse.Raise.normalizeProgramFile jv with
+  let node ← match Tropical.Parse.Raise.normalizeProgramFile jv with
     | .error msg => internalError msg
     | .ok r => pure r
   -- Clear the session (the registered programs survive — they hold the stdlib).
   env.state.modify fun st =>
     { st with instances := #[], wires := #[], graphOutputs := #[],
               params := #[], nameCounters := {} }
-  ingestProgram env node top (merge := false)
+  ingestProgram env node (merge := false)
   syncCompile env
   let t1 ← IO.monoMsNow
   let st ← env.state.get
@@ -239,10 +218,10 @@ def handleMerge (env : Env) (args : Json) : EngineM Json := do
   let jv ← match Tropical.Parse.JsonV.parse program.compress with
     | .error e => internalError s!"JSON Parse error: {e}"
     | .ok v => pure v
-  let (node, top) ← match Tropical.Parse.Raise.normalizeProgramFile jv with
+  let node ← match Tropical.Parse.Raise.normalizeProgramFile jv with
     | .error msg => internalError msg
     | .ok r => pure r
-  ingestProgram env node top (merge := true)
+  ingestProgram env node (merge := true)
   syncCompile env
   let st ← env.state.get
   pure <| Json.mkObj [

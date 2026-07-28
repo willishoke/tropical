@@ -16,11 +16,9 @@ open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
 -- ── wire (the unified mutation tool) ─────────────────────────────────────────
 
-/-- `raw` is the caller's own JSON: `value` must echo what the AGENT sent, and
-    the decoder canonicalizes aliases (`paramExpr` → `param`, `{op:'array',…}` →
-    a bare array, `sample_clock` → `clock`), so echoing `expr.toJson` would hand
-    back a spelling the caller never wrote. `label` is the port being wired, so
-    the message names the real target rather than always saying `dac.out`. -/
+/-- `raw` is the caller's own JSON: `value` must echo what the agent sent.
+    `label` is the port being wired, so the message names the real target
+    rather than always saying `dac.out`. -/
 private def resolveDacSource (st : SessionSt) (expr : WireExpr) (raw : Json)
     (label : String) : EngineM (String × String) := do
   let (instName, output) ← match expr with

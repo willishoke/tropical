@@ -15,10 +15,10 @@ under `web/patches/` and is precompiled via `bun web/build_patches.ts`.
   "body": {
     "op": "block",
     "decls": [
-      { "op": "instance_decl", "name": "Osc1", "program": "SinOsc", "inputs": { "freq": 440 } }
+      { "op": "instanceDecl", "name": "Osc1", "program": "SinOsc", "inputs": { "freq": 440 } }
     ],
     "assigns": [
-      { "op": "output_assign", "name": "dac.out",
+      { "op": "outputAssign", "name": "dac.out",
         "expr": { "op": "ref", "instance": "Osc1", "output": "sine" } }
     ]
   }
@@ -35,19 +35,17 @@ under `web/patches/` and is precompiled via `bun web/build_patches.ts`.
   patch-bay language.
 - **body.assigns** — `outputAssign` wires expressions to named output
   boundaries, including `dac.out`. There is no next/update assignment.
-- **audio_outputs** — list of `{ instance, output }` mixed into the
-  mono audio bus. **Legacy.** The Lean ingest
-  (`lean/Tropical/Parse/Raise.lean`) still accepts it as deprecated
-  top-level metadata, but the modern way is to wire into the reserved
-  `dac` instance via `output_assign{name: "dac.out"}` in
-  `body.assigns` (or via the MCP `wire` tool with
-  `instance: "dac", input: "out"`). Prefer `dac.out` for new patches.
-- **params** — *(optional, deprecated for new patches)* named control
-  parameters with initial values and smoothing time constants. New
-  patches register params via the MCP `set_param` tool instead.
+- **body.decls parameter declarations** — `paramDecl` entries declare
+  named control parameters. The MCP `set_param` tool changes values after
+  load.
 - **ports** — *(optional)* port metadata retained for serialization.
   Top-level patches don't need it; a loaded patch cannot use this field to
   define a new program type.
+
+The retired root fields `audio_outputs`, `params`, and `breaks_cycles` are
+rejected. Express audio routing with a body `outputAssign` to `dac.out`,
+parameters with body `paramDecl` entries, and graphs as closed-form acyclic
+wiring.
 
 ### Expression format
 
@@ -60,14 +58,11 @@ state ops (`delay`, `reg`), retired combinators (`fold`, `scan`), the
 old array/functional ops (`map`, `matmul`, `reduce`, `zeros`, …) — is
 rejected at ingest.
 
-Legacy plan/runtime compatibility sits below this boundary and does not
-enlarge the patch grammar. See
+The serialized plan boundary is independently strict. See
 [`design/compatibility-matrix.md`](../design/compatibility-matrix.md).
 
 - **Literal number / boolean** — `440`, `0.5`, `true`
-- **Inline array** — `[110, 220, 330, 440]` (or
-  `{"op": "array", "items": [...]}` / `{"op": "arrayLiteral", "values": [...]}`,
-  which decode to the same thing)
+- **Inline array** — `[110, 220, 330, 440]`
 - **Instance output reference** — `{"op": "ref", "instance": "Osc1", "output": "out"}`.
   `output` is a port name or a positional index.
 - **Binary operation** — `{"op": "mul", "args": [<expr>, <expr>]}`
@@ -78,18 +73,18 @@ enlarge the patch grammar. See
   `{"op": "clock"}`
 - **Param** — `{"op": "param", "name": "cutoff"}`. The session compile
   resolves the name to a `param:<name>` module slot.
-  `{"op": "trigger", "name": "kick"}` is accepted and lowers to the same
-  slot; the legacy spellings `paramExpr` / `triggerParamExpr` decode to
-  `param` / `trigger`.
 
 Op names are **camelCase** on the wire, not snake_case. Available
 scalar ops: `add`, `sub`, `mul`, `div`, `mod`, `floorDiv`, `neg`,
 `abs`, `sqrt`, `ldexp`, `floatExponent`, `lt`, `lte`, `gt`, `gte`,
 `eq`, `neq`, `and`, `or`, `bitAnd`, `bitOr`, `bitXor`, `lshift`,
-`rshift`, `bitNot`, `not`, `clamp`, `select`, `index`, `arraySet`
-(`array_set` also decodes), `toInt`, `toBool`, `toFloat`, `round`,
-`floor`, `ceil`. Transcendentals (`sin`, `cos`, `tanh`, `exp`, `log`,
-`pow`) are `Tropical.Stdlib` builder programs
+`rshift`, `bitNot`, `not`, `clamp`, `select`, `index`, `arraySet`,
+`toInt`, `toBool`, `toFloat`, `round`, `floor`, `ceil`.
+Alternate spellings—including `paramExpr`, `triggerParamExpr`, `trigger`,
+`array`/`arrayLiteral` object forms, `sampleClock`/`sample_clock`,
+`array_set`, and `sessionSlot`/`sessionArraySlot`—are retired and rejected.
+Transcendentals (`sin`, `cos`, `tanh`, `exp`, `log`, `pow`) are
+`Tropical.Stdlib` builder programs
 (`lean/Tropical/Stdlib.lean`, booted directly by the engine);
 instantiate one and reference its output via `ref`.
 

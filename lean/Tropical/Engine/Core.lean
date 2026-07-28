@@ -152,9 +152,7 @@ private def srcTypeOf (st : SessionSt) (node : WireExpr) : Option (PortType × J
     names the argument it arrived in.
 
     Both exist so the envelope describes what the AGENT sent. `value` must echo
-    the caller's spelling — decoding canonicalizes aliases (`{op:'array',items}`
-    and `{op:'arrayLiteral',values}` both become a bare array, `paramExpr`
-    becomes `param`) — and `param` must name a field the call actually has:
+    the caller's spelling, and `param` must name a field the call actually has:
     `set[].expr` on `wire`, `initial_expr` on `wire_chain`, `source` on
     `fan_out`. A bare `"expr"` names an argument no tool takes, so an agent
     doing param-directed repair cannot find it.

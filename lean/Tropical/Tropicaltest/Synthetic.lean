@@ -236,9 +236,10 @@ private def cyclePatchJson (decls : Array Lean.Json) : Lean.Json :=
     ("schema", Lean.Json.str "tropical_program_2"),
     ("name", Lean.Json.str "cycle_probe"),
     ("body", Lean.Json.mkObj [("op", Lean.Json.str "block"),
-      ("decls", Lean.Json.arr decls), ("assigns", Lean.Json.arr #[])]),
-    ("audio_outputs", Lean.Json.arr #[Lean.Json.mkObj [
-      ("instance", Lean.Json.str "a"), ("output", Lean.Json.str "out")]])]
+      ("decls", Lean.Json.arr decls),
+      ("assigns", Lean.Json.arr #[Lean.Json.mkObj [
+        ("op", Lean.Json.str "outputAssign"), ("name", Lean.Json.str "dac.out"),
+        ("expr", refTo "a")]])])]
 
 private def expectCycleRefusal (label : String) (path : String)
     (decls : Array Lean.Json) : IO Bool := do

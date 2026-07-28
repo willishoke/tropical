@@ -14,14 +14,18 @@
           }
         }
       ],
-      "assigns": [],
+      "assigns": [
+        {
+          "op": "outputAssign",
+          "name": "dac.out",
+          "expr": {
+            "op": "ref",
+            "instance": "osc",
+            "output": "out"
+          }
+        }
+      ],
       "value": null
-    },
-    "audio_outputs": [
-      {
-        "instance": "osc",
-        "output": "out"
-      }
-    ]
+    }
   }
 }

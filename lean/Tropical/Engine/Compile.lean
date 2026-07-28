@@ -195,7 +195,7 @@ def liftIfNeeded (env : Env) : EngineM Unit := do
 structure WireCtx where
   /-- `(instanceName, outputName)` → the `nestedOut` leaf node. -/
   instOut : String → String → Except String Tropical.Ir.ENode
-  /-- param/trigger name → `ParamIdx` (alphabetical position). -/
+  /-- param name → `ParamIdx` (alphabetical position). -/
   paramIdx : String → Option Nat
   /-- name → `InputIdx` — the fallback category after params, mirroring the
       resolution order names always had (params, then inputs). The session
@@ -224,7 +224,7 @@ def wireExprToResolved (ctx : WireCtx) (expr : Tropical.WireExpr) :
       | .name s => s
       | .index n => n.toString
     internWE (← ctx.instOut inst outName)
-  | .param name | .trigger name =>
+  | .param name =>
     match ctx.paramIdx name with
     | some i => internWE (.paramRef ⟨i⟩)
     | none =>
@@ -250,7 +250,7 @@ def wireExprToResolved (ctx : WireCtx) (expr : Tropical.WireExpr) :
     internWE (.binary tag (← wireExprToResolved ctx a) (← wireExprToResolved ctx b))
   | .unary tag a => do
     internWE (.unary tag (← wireExprToResolved ctx a))
-  | .broadcastTo .. | .input _ | .nestedOut .. | .sessionSlot _ | .sessionArraySlot .. =>
+  | .broadcastTo .. | .input _ | .nestedOut .. =>
     throwThe String s!"session wire: unsupported op '{expr.opName}'"
 termination_by sizeOf expr
 decreasing_by
@@ -273,7 +273,7 @@ def sessionToResolvedRoot (arena : Tropical.Ir.Arena)
   let mut instIdxOf : Array (String × Nat) := #[]
   for k in [0:order.size] do
     instIdxOf := instIdxOf.push (order[k]!, k)
-  -- params: every param/trigger referenced in any wire, alphabetical.
+  -- params: every param referenced in any wire, alphabetical.
   let mut pnames : Array String := #[]
   for w in wiresPost do
     for nm in w.expr.paramNames do

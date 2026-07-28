@@ -30,7 +30,7 @@ instance order), then ALL inputs (top-level + nested, depth-first)] —
 the exact two-phase `preallocateOutputsRecursive` /
 `preallocateInputsRecursive` order, including the array-input alias
 quotient (a single-`ref` array wire binds the consumer port to the
-producer's slot; a `sessionArraySlot` wire binds to the delay's slot).
+producer's slot).
 
 Errors are `Except String` with byte-exact TS messages; the engine
 maps them to `internal_error` (the envelope every TS compile-path
@@ -185,8 +185,7 @@ def allocateOutputSlots (s : SessionAlloc) (instPath : String) (prog : CoreProgr
   return s
 
 /-- The array-input alias quotient (`tryAliasInputArrayWire`). Only a
-    string-named ref aliases (numeric output indices never did — the
-    old reader used the string accessor). -/
+    string-named ref aliases (numeric output indices never did). -/
 private def tryAliasInputArrayWire (s : SessionAlloc) (wires : Array Tropical.Wire)
     (instPath portName : String) : Option ArraySlotInfo := do
   let w ← wires.find? fun w => w.instName == instPath && w.portName == portName
@@ -196,12 +195,10 @@ private def tryAliasInputArrayWire (s : SessionAlloc) (wires : Array Tropical.Wi
     let slot ← pmeta.arraySlot?
     let size ← pmeta.arraySize?
     pure { slot, size }
-  | .sessionArraySlot idx (some size) =>
-    pure { slot := idx, size }
   | _ => none
 
 /-- Port of `allocateInputSlots`. Idempotent; the alias check binds a
-    single-`ref` (or extracted array-delay) wire's consumer port to the
+    single-`ref` wire's consumer port to the
     producer slot instead of allocating + copying. -/
 def allocateInputSlots (s : SessionAlloc) (wires : Array Tropical.Wire)
     (instPath : String) (prog : CoreProgram) : Except String SessionAlloc := do
