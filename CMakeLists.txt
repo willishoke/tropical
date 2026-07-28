@@ -220,6 +220,20 @@ target_compile_definitions(tropical_runtime_bench PRIVATE ${LLVM_DEFINITIONS})
 target_compile_features(tropical_runtime_bench PRIVATE cxx_std_20)
 target_link_libraries(tropical_runtime_bench PRIVATE tropical_core)
 
+if(TROPICAL_METAL)
+    # Deterministic, no-DAC reproducer for the large-clock host-dispatch
+    # reference-oracle incident. The Python driver emits the real heavy graph
+    # before invoking this artifact consumer.
+    add_executable(metal_velocity_oracle_discriminator
+        benchmarks/metal_live/velocity_oracle_discriminator.cpp)
+    target_include_directories(metal_velocity_oracle_discriminator
+        PRIVATE engine ${LLVM_INCLUDE_DIRS})
+    target_compile_definitions(metal_velocity_oracle_discriminator
+        PRIVATE ${LLVM_DEFINITIONS})
+    target_compile_features(metal_velocity_oracle_discriminator PRIVATE cxx_std_20)
+    target_link_libraries(metal_velocity_oracle_discriminator PRIVATE tropical_core)
+endif()
+
 # Install the public C header
 install(FILES engine/c_api/tropical_c.h DESTINATION include)
 if(TROPICAL_BUILD_PYTHON)

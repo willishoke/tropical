@@ -12,6 +12,7 @@
 #include "c_api/tropical_c.h"
 #include "dac/TropicalDAC.hpp"   // kDeviceOutputBound / clamp_to_device_bound
 #include "runtime/FlatRuntime.hpp"
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <cstddef>
@@ -295,6 +296,116 @@ static void test_clock_request_barrier()
   ASSERT(applied_start == requested);
   ASSERT(continued_start == requested + buf);
   ASSERT(rt.ownership_failure_count() == 0);
+}
+
+// A reference oracle must replay each production dispatch at the completed
+// boundary that dispatch actually read. Freezing one batch-start boundary can
+// accumulate a visible phase/origin error when the callback advances between
+// the four discipline writes.
+static void test_param_dispatch_exact_sample_replay()
+{
+  constexpr unsigned int buf = 512;
+  constexpr uint64_t base = uint64_t{1} << 40;
+  tropical_runtime::FlatRuntime live(buf);
+  tropical_runtime::FlatRuntime replay(buf);
+  tropical_runtime::FlatRuntime stale_batch_oracle(buf);
+  const std::string ir = wrap_loop(
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double 0.000000e+00, ptr %op, align 8\n");
+  const std::string manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":8,
+    "slot_names":["param:bank.freq","param:canary.morph#v0",
+      "param:canary.morph#v1","param:canary.morph#t0",
+      "param:canary.freq","param:canary.freq#phase",
+      "param:master.velocity","param:master.tau_base"],
+    "slot_defaults":[180.0,0.0,0.0,0.0,55.0,0.0,1.0,0.0],
+    "param_disciplines":[
+      {"name":"bank.freq","discipline":"raw","companions":[]},
+      {"name":"canary.morph","discipline":"glide",
+       "glide_dur_sec":0.02,
+       "companions":["canary.morph#v0","canary.morph#v1",
+         "canary.morph#t0"]},
+      {"name":"canary.freq","discipline":"anchor",
+       "companions":["canary.freq#phase"]},
+      {"name":"master.velocity","discipline":"velocity",
+       "companions":["master.tau_base"]}
+    ]})";
+  ASSERT(live.load_ir(ir, manifest));
+  ASSERT(replay.load_ir(ir, manifest));
+  ASSERT(stale_batch_oracle.load_ir(ir, manifest));
+
+  const std::array<std::string, 4> names = {
+    "bank.freq", "canary.morph", "canary.freq", "master.velocity"
+  };
+  const std::array<std::string, 4> disciplines = {
+    "raw", "glide", "anchor", "velocity"
+  };
+  const std::array<double, 4> lows = {180.0, 0.0, 55.0, 1.0};
+  const std::array<double, 4> highs = {260.0, 0.5, 65.0, 0.75};
+
+  // High/low/high: the anchor crosses one callback after the batch snapshot
+  // on each high write. The stale oracle therefore accumulates exactly two
+  // buffers of 10 Hz phase-reanchoring error.
+  for (uint64_t round = 0; round < 3; ++round)
+  {
+    const uint64_t batch_start = base + (round * 86 + 1) * buf;
+    live.set_sample_index(batch_start - buf);
+    live.process();
+    const bool high = (round & 1U) == 0;
+    const auto & values = high ? highs : lows;
+
+    for (std::size_t i = 0; i < names.size(); ++i)
+    {
+      if (i == 2 && high)
+      {
+        live.set_sample_index(batch_start);
+        live.process();
+      }
+      const auto production =
+        live.dispatch_param_sync(names[i], values[i]);
+      ASSERT(production.ok);
+      ASSERT(production.discipline == disciplines[i]);
+      const uint64_t expected_index =
+        i >= 2 && high ? batch_start + buf : batch_start;
+      ASSERT(production.applied_sample_index == expected_index);
+
+      const auto exact = replay.dispatch_param_sync_at_sample_index(
+        names[i], values[i], production.applied_sample_index);
+      ASSERT(exact.ok);
+      ASSERT(exact.discipline == disciplines[i]);
+      ASSERT(exact.applied_sample_index
+             == production.applied_sample_index);
+
+      const auto stale =
+        stale_batch_oracle.dispatch_param_sync_at_sample_index(
+          names[i], values[i], batch_start);
+      ASSERT(stale.ok);
+      ASSERT(stale.applied_sample_index == batch_start);
+    }
+  }
+
+  for (uint32_t slot = 0; slot < 8; ++slot)
+    ASSERT_NEAR(live.get_slot(slot), replay.get_slot(slot), 0.0);
+
+  const uint32_t phase_slot = live.slot_index("param:canary.freq#phase");
+  ASSERT(phase_slot != UINT32_MAX);
+  const double live_phase = live.get_slot(phase_slot);
+  const double stale_phase = stale_batch_oracle.get_slot(phase_slot);
+  double phase_delta = std::fabs(live_phase - stale_phase);
+  phase_delta = std::min(phase_delta, 1.0 - phase_delta);
+  const double inc55 = std::floor(55.0 * 4294967296.0 / 44100.0);
+  const double inc65 = std::floor(65.0 * 4294967296.0 / 44100.0);
+  const double expected_phase_delta =
+    std::fabs((inc55 - inc65) * (2.0 * buf) / 4294967296.0);
+  ASSERT_NEAR(phase_delta, expected_phase_delta, 1e-15);
+
+  // This is the incident-scale output error for a 1e-12 canary: 1.333e-12,
+  // matching the blocked row's 1.351e-12 without implicating the 1e-8 bank.
+  const double predicted_max_error =
+    2e-12 * std::sin(3.14159265358979323846 * expected_phase_delta);
+  ASSERT_NEAR(predicted_max_error, 1.332958724784292e-12, 1e-18);
 }
 
 // A coefficient transaction writes slot[1] = 2*slot[0], while the audio
@@ -646,6 +757,8 @@ int main()
   run_test("closed-form index ramp",        test_ir_index_ramp);
   run_test("clock request boundary handoff", test_clock_boundary_handoff);
   run_test("clock odd-sequence barrier", test_clock_request_barrier);
+  run_test("param dispatch exact-sample replay",
+           test_param_dispatch_exact_sample_replay);
   run_test("coherent slot/coefficient generation", test_control_generation_coherence);
   run_test("hot-swap state handoff", test_hot_swap_state_handoff);
   run_test("owned generation survives two publications", test_generation_ownership_barrier);

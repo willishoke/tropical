@@ -240,10 +240,17 @@ describe('param dispatch conformance (C++ data-plane ≡ Lean reference)', () =>
       await expect(readSlots(a, ['param:sfl.depth'])).rejects.toThrow(/unknown slot/)
 
       // Drive the identical sequence.
-      await a.call('set_param', { name: 'sfl.depth', value: driveValues['sfl.depth'] })
-      await a.call('set_param', { name: 'src.freq', value: driveValues['src.freq'] })
-      await a.call('set_param', { name: 'master.velocity', value: driveValues['master.velocity'] })
-      await a.call('set_param', { name: 'sfl.rate', value: driveValues['sfl.rate'] })
+      const productionDispatches = [
+        await a.call('set_param', { name: 'sfl.depth', value: driveValues['sfl.depth'] }),
+        await a.call('set_param', { name: 'src.freq', value: driveValues['src.freq'] }),
+        await a.call('set_param', { name: 'master.velocity', value: driveValues['master.velocity'] }),
+        await a.call('set_param', { name: 'sfl.rate', value: driveValues['sfl.rate'] }),
+      ]
+      // The data plane reports the exact completed boundary used by each
+      // production dispatch. No DAC runs in this differential, so all four
+      // must have applied at the frozen zero boundary.
+      for (const result of productionDispatches)
+        expect(result.applied_sample_index).toBe(0)
 
       await b.call('set_param_glide', { name: 'sfl.depth', value: driveValues['sfl.depth'] })
       await b.call('set_param_freq', { name: 'src.freq', value: driveValues['src.freq'] })

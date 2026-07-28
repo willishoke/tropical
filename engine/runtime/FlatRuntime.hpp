@@ -54,6 +54,7 @@ struct ParamDispatchResult
   bool        ok = false;
   std::string error;
   std::string discipline;
+  uint64_t    applied_sample_index = 0;
 };
 
 // Explicit ownership for storage that is mutated off the audio thread.
@@ -780,7 +781,19 @@ public:
   // control generation at the next audio buffer.
   ParamDispatchResult dispatch_param_sync(const std::string & name, double value);
 
+  // Qualification/test-only oracle entry point. It runs the exact production
+  // discipline math at a caller-supplied completed sample boundary, allowing
+  // a separate reference runtime to replay the boundary that production
+  // dispatch_param_sync actually observed. It is intentionally not in the C
+  // API or socket protocol as a way to control production time.
+  ParamDispatchResult dispatch_param_sync_at_sample_index(
+    const std::string & name, double value, uint64_t sample_index);
+
 private:
+  ParamDispatchResult dispatch_param_sync_locked(
+    KernelState & state, uint32_t state_idx, const std::string & name,
+    double value, uint64_t sample_index);
+
   // build_kernel_state maps a parsed plan's *metadata* (everything except
   // the kernel handle) into a fresh KernelState; publish_state carries the
   // sample coordinate and performs the atomic double-buffer flip.

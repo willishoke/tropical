@@ -215,7 +215,11 @@ static std::string dispatch_set_param(tropical_runtime::FlatRuntime * rt,
                 {"error", {{"code", -32603},
                            {"message", result.error}}}}.dump();
   return json{{"jsonrpc", "2.0"}, {"id", id},
-              {"result", {{"name", name}, {"value", value}}}}.dump();
+              {"result", {
+                {"name", name},
+                {"value", value},
+                {"applied_sample_index", result.applied_sample_index},
+              }}}.dump();
 }
 
 std::string SocketServer::handle_data(const std::string & line)

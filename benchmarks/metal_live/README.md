@@ -41,6 +41,8 @@ It records:
   seconds after observed hot-swap progress;
 - process user+system CPU seconds and measured-wall fraction;
 - write and hot-swap walls;
+- the exact completed sample index read by every production parameter
+  dispatch, replayed by the isolated JIT oracle at that same index;
 - a separate offline per-block p50/p95/p99 supporting row.
 
 The audio callback performs no allocation, lock, or I/O for telemetry: it adds
@@ -58,6 +60,20 @@ cannot pass the memory gate.
 
 Before every subprocess, inherited `TROPICAL_*` variables are removed and the
 benchmark controls are explicitly set and recorded.
+
+The no-DAC large-clock oracle discriminator reproduces the real heavy graph,
+post-swap defaults, and final 15-event schedule from the blocked 60-second
+smoke:
+
+```sh
+python3 benchmarks/metal_live/run_velocity_oracle_discriminator.py
+```
+
+It requires true 1↔0.75 velocity toggles and the velocity-no-op control to
+remain above 140 dB on synchronous Metal versus JIT. It then forces a callback
+boundary between production dispatches: exact-index replay must remain above
+140 dB while the obsolete batch-start oracle must fail below 100 dB. This is a
+deterministic harness regression, not a DAC qualification row.
 
 The engine boot block length is independently selectable with
 `TROPICAL_BUFFER_LENGTH` (16..16384) before runtime/DAC construction. The

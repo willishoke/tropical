@@ -220,12 +220,39 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
   const std::string & name, double value)
 {
   if (!std::isfinite(value))
-    return {false, "set_param: value must be finite", {}};
+    return {
+      false, "set_param: value must be finite", {},
+      published_sample_index_.load(std::memory_order_acquire)
+    };
 
   std::lock_guard<std::mutex> lock(build_mutex_);
   const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
   KernelState & state = states_[state_idx];
+  const uint64_t sample_index =
+    published_sample_index_.load(std::memory_order_acquire);
+  return dispatch_param_sync_locked(
+    state, state_idx, name, value, sample_index);
+}
 
+ParamDispatchResult FlatRuntime::dispatch_param_sync_at_sample_index(
+  const std::string & name, double value, uint64_t sample_index)
+{
+  if (!std::isfinite(value))
+    return {
+      false, "set_param: value must be finite", {}, sample_index
+    };
+
+  std::lock_guard<std::mutex> lock(build_mutex_);
+  const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
+  KernelState & state = states_[state_idx];
+  return dispatch_param_sync_locked(
+    state, state_idx, name, value, sample_index);
+}
+
+ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
+  KernelState & state, uint32_t state_idx, const std::string & name,
+  double value, uint64_t sample_index)
+{
   auto slot_of = [&state](const std::string & slot_name) -> uint32_t {
     for (uint32_t i = 0; i < state.slot_names.size(); ++i)
       if (state.slot_names[i] == slot_name) return i;
@@ -241,15 +268,16 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
   const std::string discipline = pd ? pd->discipline : std::string{"raw"};
   auto fail = [&](std::string error) {
     return ParamDispatchResult{
-      false, std::move(error), discipline
+      false, std::move(error), discipline, sample_index
     };
   };
   auto commit = [&]() {
     publish_control_snapshot(state, state_idx);
-    return ParamDispatchResult{true, {}, discipline};
+    return ParamDispatchResult{
+      true, {}, discipline, sample_index
+    };
   };
-  const double now = static_cast<double>(
-    published_sample_index_.load(std::memory_order_acquire));
+  const double now = static_cast<double>(sample_index);
 
   if (discipline == "glide")
   {

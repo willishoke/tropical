@@ -234,6 +234,7 @@ def evaluate_acceptance(result: dict[str, Any],
     )
     snr = result.get("reference_snr_db", [])
     energies = result.get("reference_signal_energy", [])
+    param_events = result.get("param_events", [])
     callback = result.get("callback_summary_ns", {})
     p99 = callback.get("p99_upper_bound_ns")
     deadline_ns = buffer * 1e9 / rate
@@ -361,6 +362,15 @@ def evaluate_acceptance(result: dict[str, Any],
             and "midpoint_after_hot_swap" in labels,
         "all_production_param_disciplines_exercised":
             applied_disciplines == {"raw", "glide", "anchor", "velocity"},
+        "all_param_dispatch_indices_recorded":
+            bool(param_events)
+            and all(
+                isinstance(event, dict)
+                and isinstance(event.get("applied_sample_index"), int)
+                and not isinstance(event.get("applied_sample_index"), bool)
+                and event["applied_sample_index"] >= 0
+                for event in param_events
+            ),
         "rss_sampling_sufficient":
             rss_analysis.get("sample_count", 0) >= 3,
         "rss_samples_are_valid":
