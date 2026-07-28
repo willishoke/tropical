@@ -180,5 +180,39 @@ class ArtifactDigestTests(unittest.TestCase):
         self.assertEqual(digests["coefficient_ir"]["bytes"], 0)
 
 
+class CacheIsolationEvidenceTests(unittest.TestCase):
+    def test_snapshot_hashes_the_complete_inventory(self) -> None:
+        inventory = {
+            "build/a.o": {"bytes": 3, "sha256": "a" * 64},
+            "build/b.o": {"bytes": 5, "sha256": "b" * 64},
+        }
+        snapshot = RUN.cache_snapshot(True, inventory)
+        self.assertEqual(snapshot["files"], 2)
+        self.assertEqual(snapshot["bytes"], 8)
+        self.assertEqual(len(snapshot["tree_sha256"]), 64)
+        self.assertNotIn("mtime_ns", snapshot)
+
+    def test_cache_changes_retain_attributable_paths_and_hashes(self) -> None:
+        before = {
+            "same.o": {"bytes": 3, "sha256": "a" * 64},
+            "changed.o": {"bytes": 4, "sha256": "b" * 64},
+            "removed.o": {"bytes": 5, "sha256": "c" * 64},
+        }
+        after = {
+            "same.o": {"bytes": 3, "sha256": "a" * 64},
+            "changed.o": {"bytes": 7, "sha256": "d" * 64},
+            "added.o": {"bytes": 6, "sha256": "e" * 64},
+        }
+        changes = RUN.cache_changes(before, after)
+        self.assertEqual(
+            [entry["path"] for entry in changes["added"]], ["added.o"])
+        self.assertEqual(
+            [entry["path"] for entry in changes["removed"]], ["removed.o"])
+        self.assertEqual(
+            [entry["path"] for entry in changes["modified"]], ["changed.o"])
+        self.assertEqual(
+            changes["modified"][0]["after"]["sha256"], "d" * 64)
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -258,15 +258,57 @@ def graph_size(fixture: dict[str, Any], source: Path | None) -> tuple[int, int]:
     return len(decls), source.stat().st_size
 
 
-def cache_snapshot() -> dict[str, Any]:
+def cache_inventory() -> tuple[bool, dict[str, dict[str, Any]]]:
     ordinary = Path.home() / ".cache" / "tropical" / "kernels"
     if not ordinary.exists():
-        return {"exists": False, "files": 0, "mtime_ns": None}
-    files = [path for path in ordinary.rglob("*") if path.is_file()]
+        return False, {}
+    inventory: dict[str, dict[str, Any]] = {}
+    for path in sorted(ordinary.rglob("*")):
+        if not path.is_file():
+            continue
+        try:
+            value = path.read_bytes()
+        except FileNotFoundError:
+            continue
+        inventory[str(path.relative_to(ordinary))] = {
+            "bytes": len(value),
+            "sha256": sha256_bytes(value),
+        }
+    return True, inventory
+
+
+def cache_snapshot(
+        exists: bool,
+        inventory: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    encoded = json.dumps(
+        inventory, sort_keys=True, separators=(",", ":")).encode()
     return {
-        "exists": True,
-        "files": len(files),
-        "mtime_ns": ordinary.stat().st_mtime_ns,
+        "exists": exists,
+        "files": len(inventory),
+        "bytes": sum(entry["bytes"] for entry in inventory.values()),
+        "tree_sha256": sha256_bytes(encoded),
+    }
+
+
+def cache_changes(
+        before: dict[str, dict[str, Any]],
+        after: dict[str, dict[str, Any]]) -> dict[str, Any]:
+    before_paths = set(before)
+    after_paths = set(after)
+    return {
+        "added": [
+            {"path": path, **after[path]}
+            for path in sorted(after_paths - before_paths)
+        ],
+        "removed": [
+            {"path": path, **before[path]}
+            for path in sorted(before_paths - after_paths)
+        ],
+        "modified": [
+            {"path": path, "before": before[path], "after": after[path]}
+            for path in sorted(before_paths & after_paths)
+            if before[path] != after[path]
+        ],
     }
 
 
@@ -291,7 +333,8 @@ def safe_hardware_manifest() -> dict[str, Any]:
         return {"error": "system_profiler JSON unavailable"}
 
 
-def environment_manifest() -> dict[str, Any]:
+def environment_manifest(
+        ordinary_cache_before: dict[str, Any]) -> dict[str, Any]:
     toolchain = (ROOT / "lean" / "lean-toolchain").read_text().strip()
     return {
         "schema": "tropical_baseline_environment_1",
@@ -317,7 +360,7 @@ def environment_manifest() -> dict[str, Any]:
             "all inherited TROPICAL_* variables removed before explicit controls",
         "stage0": "enabled (explicit TROPICAL_STAGE0=1)",
         "banks_unroll": "banked (TROPICAL_BANKS_UNROLL explicitly absent)",
-        "ordinary_cache_before": cache_snapshot(),
+        "ordinary_cache_before": ordinary_cache_before,
     }
 
 
@@ -626,7 +669,9 @@ def main() -> int:
     output = options.output or HERE / "data" / f"{options.suite}-{timestamp}.jsonl"
     output.parent.mkdir(parents=True, exist_ok=True)
     work = Path(tempfile.mkdtemp(prefix="tropical-baseline-", dir=output.parent))
-    environment = environment_manifest()
+    ordinary_before_exists, ordinary_before = cache_inventory()
+    environment = environment_manifest(
+        cache_snapshot(ordinary_before_exists, ordinary_before))
     matrix = load_matrix()
     fixtures = [item for item in matrix if options.suite == "full" or item.get("smoke")]
 
@@ -740,12 +785,18 @@ def main() -> int:
                 stream.flush()
                 print(f"recorded {fixture['name']}", file=sys.stderr)
 
-            ordinary_after = cache_snapshot()
+            ordinary_after_exists, ordinary_after = cache_inventory()
+            unchanged = (
+                ordinary_before_exists == ordinary_after_exists
+                and ordinary_before == ordinary_after
+            )
             trailer = {
                 "schema": "tropical_baseline_trailer_1",
-                "ordinary_cache_after": ordinary_after,
-                "ordinary_cache_unchanged":
-                    ordinary_after == environment["ordinary_cache_before"],
+                "ordinary_cache_after":
+                    cache_snapshot(ordinary_after_exists, ordinary_after),
+                "ordinary_cache_unchanged": unchanged,
+                "ordinary_cache_changes":
+                    cache_changes(ordinary_before, ordinary_after),
             }
             stream.write(json.dumps(trailer, separators=(",", ":")) + "\n")
     finally:

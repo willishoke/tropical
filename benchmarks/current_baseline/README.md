@@ -64,7 +64,10 @@ sets and records stage-0 enabled, banked realization, JIT O2, synchronous Metal
 for baseline rows, and its cache root. A cold sample is a complete generation
 with a fresh root; the paired warm sample is a second complete generation
 reusing only that root. It snapshots the ordinary cache before and after and
-records whether it changed. It never deletes the ordinary cache.
+records a SHA-256 digest over every relative path and file digest. If another
+process changes the ordinary cache during the measurement, the trailer retains
+the added, removed, and modified paths so a contaminated run cannot masquerade
+as cache-safe evidence. The harness never deletes the ordinary cache.
 
 ## Metric boundaries
 
