@@ -11,20 +11,21 @@ import Tropical.Engine.Front
 # The tropical IR engine — tool semantics, in Lean
 
 The engine is the whole stack: the session, the native runtime (FFI),
-registration (raise + elaborate + strata + entry rendering), the compiler
-(Core downcast + partition + plan assembly), the v2 ingest (load/merge), and
-save/export. There is no compiler-service subprocess.
+direct resolved-program registration/lowering, plan partition/assembly, the
+v2 patch-bay ingest (load/merge), and save/export. There is no
+compiler-service subprocess.
 
-Every graph mutation ends in `syncCompile`: the mirror lowers, elaborates,
-downcasts, partitions, and the plan hot-swaps into the Lean-owned runtime.
-State mutations precede the compile — a failed compile leaves the mutated
-graph in place; the previous kernel keeps playing and the error is recoverable.
+Every structural graph mutation ends in `syncCompile`: the mirror becomes one
+resolved root directly, passes the Core check, partitions, and hot-swaps its
+plan into the Lean-owned runtime. Parameter writes use live slots and do not
+take this path. A failed structural compile leaves the mutated graph in place;
+the previous kernel keeps playing and the error is recoverable.
 
 The implementation is split by concern; this module re-exports the whole
 surface so `import Tropical.Engine` sees it unchanged:
 
 * `Engine.Core` — env, tool-arg access, lookup vocabulary
-* `Engine.Compile` — mirror → elaborate → partition → hot-swap
+* `Engine.Compile` — mirror → resolved root → partition → hot-swap
 * `Engine.Registry` — program registration
 * `Engine.Crud` — instance/program lifecycle handlers
 * `Engine.Wire` — the wiring tools

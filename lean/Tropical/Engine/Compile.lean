@@ -1,16 +1,15 @@
 import Tropical.Engine.Core
 
 /-!
-# Engine.Compile — the compile path: mirror, elaborate, partition, hot-swap
+# Engine.Compile — the compile path: mirror, resolved root, partition, hot-swap
 
 Every graph mutation ends here. `syncCompile` lowers the session mirror,
-elaborates it, downcasts to Core, partitions, assembles the plan, and hot-swaps
-it into the Lean-owned runtime; a failed compile leaves the mutated graph in
-place and the previous kernel playing. `sessionToResolvedRoot` is the direct
-session→resolved-root lowering (no parsed round-trip); `liftIfNeeded` lifts
-free wire expressions into synthetic programs; `buildKernelIr`/`loadKernel`
-bridge to the FFI. `adoptResolved` re-adopts a serialized resolved entry into
-the typed store.
+constructs one resolved root directly, checks its Core shape, partitions,
+assembles the plan, and hot-swaps it into the Lean-owned runtime; a failed
+compile leaves the mutated graph in place and the previous kernel playing.
+`liftIfNeeded` lifts free wire expressions into synthetic programs;
+`buildKernelIr`/`loadKernel` bridge to the FFI. `adoptResolved` re-adopts a
+serialized resolved entry into the typed store.
 -/
 
 namespace Tropical.Engine
@@ -178,16 +177,12 @@ def liftIfNeeded (env : Env) : EngineM Unit := do
 -- Session → resolved root DIRECTLY (no parsed round-trip)
 -- ─────────────────────────────────────────────────────────────
 
-/-! The session graph is already post-elaborate-shaped — instances carry resolved
+/-! The session graph already has resolved identity — instances carry resolved
     type snapshots and wires are graph edges — so `sessionToResolvedRoot` builds
-    the resolved root `Program` DIRECTLY, reproducing what the elaborator would
-    have produced byte-for-byte. This replaced the former `sessionToParsed →
-    reparse → elaborate` round-trip (serialize the instances into a NAMED
-    `__session__` ParsedProgram, re-elaborate the names back to pointers), against
-    which it was gated `tropical_resolved_1`-identical on every golden before that
-    path was deleted. `elaborate` stays the reifier
-    for the morphism-definition (`.trop`) language; the patcher skips it by BEING
-    a graph. The construction (verified against `Elaborator.lean`):
+    the resolved root `Program` DIRECTLY. This replaced the historical
+    parsed-program/reparse/elaborate round-trip and was gated
+    `tropical_resolved_1`-identical before that path was deleted. The current
+    construction is:
     instance decls in topo order then params alphabetical; each `InstanceInput`
     `port` = the target program's input position; wires resolved to `Ir.Expr`
     (`nestedOut ⟨topoIdx⟩ ⟨outputIdx⟩`, `paramRef ⟨alphaIdx⟩`, builtins —
@@ -363,7 +358,8 @@ def buildSessionInputVia (env : Env) (ctx : String)
   let wiresPost := st.wires
   Tropical.Lowering.assertSessionAcyclic st.instances wiresPost
 
-  -- TS parity (`sessionToParsedProgram` emits `inst.compiled.prog.name`):
+  -- Preserved historical parity: the retired parsed-session path emitted the
+  -- stored program name here.
   -- the root references each instance's program by the *stored*
   -- program's name — for specialized generics that is the base name
   -- (`Delay`), not the display key the catalog entry carries

@@ -1,13 +1,12 @@
 /**
  * test_module_process.cpp
  *
- * Exercises the surviving C++ engine — `tropical_runtime_load_ir`
- * (compile_ir_text → JIT → run) and hot-swap state transfer — with
- * hand-written LLVM IR. The C++ plan compiler was retired in Phase 2
- * (Lean's EmitLlvm owns codegen); arithmetic/op correctness now lives in
- * the Lean `tropicaltest` gates. These tests cover the engine half: that
- * textual IR matching the kernel ABI parses, JITs, runs, and that named
- * register state transfers across a load_ir hot-swap.
+ * Exercises the current C++ engine with hand-written LLVM IR:
+ * `tropical_runtime_load_ir` → compile_ir_text → JIT → run, plus the
+ * device-boundary clamp. Lean's EmitLlvm owns production codegen;
+ * arithmetic/op correctness lives in the Lean `tropicaltest` gates.
+ * These tests cover the engine half only. They do not assert plan
+ * instruction semantics or per-sample state.
  */
 
 #include "c_api/tropical_c.h"

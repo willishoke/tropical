@@ -15,8 +15,8 @@ as kernel boundaries (the flat path simply has none). Lifted
 ProgramDecls and never-instantiated registry entries are inert type
 bindings no evaluator reaches — they pass through as names.
 
-The executable downcasts that produce a `CoreProgram` — `EArena.toResolved`
-(strata exit) and `checkResolvedArena` (elaborated-tree boundary) — validate
+The executable checks that produce a `CoreProgram` — `EArena.toResolved`
+(strata exit) and `checkResolvedArena` (direct resolved-tree boundary) — validate
 the post-strata invariant list (rejecting any strata-dropped constructor that
 survived) as they intern each leaf. They follow exactly the evaluator-reachable
 graph: body exprs, then recursively the program behind each instance's typeKey.

@@ -4,10 +4,10 @@ Realtime audio synthesis. The whole patch — every oscillator, filter,
 envelope, and wire — compiles to a single per-sample kernel. There is no
 runtime interpreter and no module boundary in the audio callback. Every
 kernel is closed-form: a pure function `f(τ, params)` of a time
-coordinate, with no per-sample state. Every edit hot-swaps a fresh
-kernel; matching params/control slots transfer by name. Nothing clicks
-because there is no state to carry — oscillator phase is computed from
-the time coordinate, not latched.
+coordinate, with no per-sample state. Parameter edits write live slots;
+structural and topology edits hot-swap a fresh kernel at the current
+coordinate. Nothing clicks because there is no hidden DSP state to carry —
+oscillator phase is computed from the time coordinate, not latched.
 
 ## Build
 
@@ -193,82 +193,57 @@ island, deferred to a future stateful sister runtime.
 
 ## What sits below the waist
 
-Two *backends* consume the lowered IR (as `tropical_plan_5`). They
-are not further compiler stages — they are interpretations of the same
-fully-reduced plan into different targets, and the surviving equivalence
-suite (wasm vs. JIT) plus the frozen audio goldens assert they
-agree pointwise.
+Three execution targets consume the same typed `FlatPlan`; they are target
+interpretations, not more source-language stages.
 
 ```
-lowered ResolvedProgram (per-program path)  /  SessionState (session path)
-        │
-        ├─→ compileSession (engine-side: lean/Tropical/{Engine,Compile,Lowering,Wiring}.lean)
-        │      liftWiresToInstances →
-        │      session-acyclicity check → slotted root-program lowering:
-        │      (sessionToResolvedRoot → partitionKernel, no parsed round-trip);
-        │      instance_functions = [root] with the session instances as
-        │      nested children.
-        │      ──── C API boundary (engine/c_api/tropical_c.h, lean/Tropical/Ffi.lean) ────
-        │      NumericProgramParser → FlatProgram (multi-function)
-        │      OrcJitEngine → LLVM IR — one kernel function whose body is:
-        │          for each sample:
-        │            for each instance_function (recursively: preamble,
-        │              per-child {pre_input, child}, body)
-        │            for each sink: output[target] = gain · Σ slots[inputs]
-        │      FlatRuntime → buffer loop, double-buffered hot-swap
-        │      TropicalDAC (RtAudio) → audio output
-        │
-        └─→ compile-wasm (engine LLVM + lld, in-process: the *same* IR the
-               JIT runs, lowered to wasm32 — there is no second emitter).
-               Per patch the build ships <slug>.wasm + a trimmed
-               <slug>.manifest.json (web/patches/*.json + `diffcli
-               compile-wasm` → web/dist/patches/). The browser is a
-               precompiled-patch player: it fetches .wasm + manifest and
-               instantiates via the runtime package (web/runtime/) — no
-               recompile, no hot-swap, no SharedArrayBuffer. Smoothstep
-               fade, AudioWorkletProcessor → audio output.
+tropical_plan_5 / FlatPlan
+  ├─ EmitLlvm → textual LLVM → OrcJitEngine::compile_ir_text → FlatRuntime
+  ├─ EmitLlvm → the same LLVM → wasm32 TargetMachine + lld → browser player
+  └─ EmitMsl  → MSL → MetalKernel → supported Apple live audio
 ```
 
-**Fixed-topology compilation.** Tropical compiles a session graph to
-one monolithic kernel; the topology is fixed for the lifetime of the
-kernel. Topology changes (adding/removing instances, rewiring) trigger
-hot-swap to a freshly compiled kernel with params/control slots
-transferred by name (there is no per-sample state to carry across).
-There is no per-instance runtime gating — every instance runs every
-sample, and the JIT fuses across instances aggressively. This is the
-shape of synthesis the language is good at; dynamic-lifecycle
-semantics belong in a different language with a different runtime.
+The JIT uses f64 values plus i64 rails and is the native reference and scope
+path. WebAssembly shares the LLVM f64/i64 semantics. Metal uses an f32 value
+path plus the exact i64 clock rail; on Metal sessions the JIT remains
+dual-loaded for `render_window` and reference comparisons.
 
-Params. Wiring expressions reference parameters by name
-(`{op:'param', name}` / `{op:'trigger', name}`). The **session**
-compiler resolves each to a `param:name` **module slot** read — the
-control plane drives it via `setSlot`, and hot-swap transfers it by
-name like any other slot (both session lowerings do this; the root
-path threads it as `paramSlots` so the root kernel's `ParamRef` lowers
-to the slot). The standalone **per-program** path instead binds params
-to FFI handles — a native pointer (`tropical_param_t`) on the JIT, a
-SAB slot index (stringified to keep `tropical_plan_5` backend-agnostic)
-on the WASM path.
+`NumericProgramParser` is now a manifest reader. Lean owns code generation:
+the C++ runtime receives textual LLVM plus plan metadata, compiles the text, and
+publishes the resulting kernel. The parser's instruction graph does not
+generate native code.
+
+**Fixed-topology compilation.** Topology and structural selector changes
+rebuild the synthetic root, lower, emit, and hot-swap. Ordinary parameter
+changes write `param:<name>` slots without relowering. `FlatRuntime` carries
+only `sample_index` across publication; it does not transfer registers, arrays,
+or slots by name. Current parameter values come from the session/control layer
+and the fresh plan defaults.
+
+There is no per-instance runtime gating: every included instance runs every
+sample. Current timing data, split by parameter writes versus structural
+recompiles, lives in `benchmarks/current_baseline/findings.md`.
 
 ## Equivalence gates
 
 With the TS implementation gone there is no second implementation to
 diff against — a differential proves *agreement*, not correctness.
-Correctness is anchored by **frozen audio goldens** (and the
-developer's ear); the surviving cross-checks pin the two `tropical_plan_5`
-backends and the JIT's own realization variants to those goldens:
+Correctness is anchored by **frozen audio goldens**; the surviving
+cross-checks pin target refinements and the JIT's realization variants:
 
-- `tests/web/wasm_vs_jit.test.ts` — WASM and JIT agree sample-for-sample
-  (the two backends, both off `tropical_plan_5`), run against the live
-  Lean engine via `TROPICAL_ENGINE_CMD`.
+- `tests/web/wasm_vs_jit.test.ts` — WASM and JIT agree sample-for-sample,
+  run against the live Lean engine via `TROPICAL_ENGINE_CMD`.
 - `tests/web/web_plans_vs_jit.test.ts` — every precompiled plan in
   `web/dist/patches/` matches the JIT output.
+- `tests/web/metal_vs_jit.test.ts` — Metal meets the documented f32
+  tolerance/SNR boundary against the f64 JIT.
 - `tropicaltest` (`lean/Tropicaltest.lean`, run as the built binary) — byte-for-byte
   audio goldens (`tests/golden/`) plus the native realization-variant
   equivalence *within* the JIT (fused vs. per-instance microkernel,
   flat vs. nested), driven directly through the engine.
 
-Any disagreement is a lowering or backend bug. The former
+Any disagreement is a lowering or backend bug, but agreement alone does not
+prove source semantics; see `design/trust-boundary.md`. The former
 `make diff-*` differential harness (Lean-vs-TS) is gone along with the
 TS implementation; there are no longer differential gates.
 
@@ -279,7 +254,7 @@ Two distinct JSON schemas; do not confuse them.
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
 | `tropical_program_2` | `lean/Tropical/Parse/Raise.lean` (JSON ingest) | The PATCH-BAY shape: instances of registered types + wiring + params, a body block of instanceDecls/paramDecls/outputAssigns. The JSON front door for `load`/`merge` (and `save`/`export_program`'s output serialization). Program DEFINITIONS over the wire are retired — a programDecl is refused at ingest with the retirement message; wire expressions decode into the typed session grammar (`Tropical.WireExpr`), which cannot spell combinators/binders/state ops. (Programs are authored as `Tropical.Stdlib`/EmitArrow arrow builders, not this schema.) |
-| `tropical_plan_5`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: a root instruction stream (instances nested as `children`) plus `sinks[]` (device-bound outputs: sum input slots × gain → channel) and `sources[]` (runtime-bound inputs: canonical `[tick, rate]`; the dual of sinks). The engine consumes it as the codegen manifest; the web build derives a `.wasm` + a trimmed `KernelManifest` from it. The engine still accepts the older `tropical_plan_4` (single-kernel form, top-level `output_targets` temp-mix) for hand-crafted unit tests; it's lifted into a one-instance plan_5 with the canonical sources at parse time. |
+| `tropical_plan_5`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: nested instance blocks plus `sinks[]`, `sources[]`, typed slots, stage metadata, and optional bank regions. Lean emits LLVM/MSL from the typed plan; native and web hosts consume trimmed metadata manifests. The native C load APIs retain a bounded `tropical_plan_4` metadata lift for direct callers, but current Tropical never emits it and legacy state keys are ignored. See `design/compatibility-matrix.md`. |
 
 Going from the first to the second without losing meaning is exactly
 what the session compile does (ingest → sessionToResolvedRoot →

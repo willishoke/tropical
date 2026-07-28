@@ -1,3 +1,5 @@
+Status: Superseded by [the current architecture](architecture.md)
+
 # EmitArrow cutover — handoff (the strangler endgame)
 
 How to get from "EmitArrow is a verified front end **beside** the pipeline" to

@@ -124,7 +124,7 @@ struct KernelState
   std::vector<uint64_t> array_sizes;
   std::vector<uint64_t> param_ptrs;
 
-  // Array slot names for array state transfer on hot-swap
+  // Array slot names from the manifest (diagnostic/compatibility metadata).
   std::vector<std::string> array_names;
 
   // Output extraction
@@ -132,10 +132,10 @@ struct KernelState
 
   // ── Slot model state ─────────────────────────────────────────────────────
   // Inter-module slot array. Control-plane writes via
-  // tropical_runtime_set_slot; JIT codegen reads via 'slot' operands and
-  // writes via WriteSlot instructions (parent→child input wiring,
-  // MCP wire auto-delay, etc.). Slots survive hot-swap by name so
-  // control values set from outside persist across kernel rebuilds.
+  // tropical_runtime_set_slot; emitted kernels read/write these slots.
+  // A fresh load initializes them from its own manifest. FlatRuntime does not
+  // copy slot values between kernels; the session/control host supplies
+  // current parameter values.
   std::vector<double>      slots;
   std::vector<std::string> slot_names;
 
@@ -602,8 +602,8 @@ public:
 
 private:
   // build_kernel_state maps a parsed plan's *metadata* (everything except
-  // the kernel handle) into a fresh KernelState; publish_state runs the
-  // by-name hot-swap state transfer and the atomic double-buffer flip.
+  // the kernel handle) into a fresh KernelState; publish_state carries the
+  // sample coordinate and performs the atomic double-buffer flip.
   // load_ir fills the kernel handle (via compile_ir_text) between them.
   KernelState build_kernel_state(const tropical_plan5::ParsedPlan5 & parsed);
   bool publish_state(KernelState && new_state);

@@ -98,8 +98,9 @@ The engine owns one `SessionState`. The fields tools read and mutate:
 - `instanceRegistry` — live instances.
 - `inputExprNodes` — wiring (`"inst:input" → ExprNode`).
 - `graphOutputs` — what wires to dac.
-- `paramRegistry` — control parameters by name (the session compiler
-  turns names into FFI handles at compile time).
+- `paramRegistry` — current control values by name (the session compiler
+  materializes `param:<name>` module slots, which `set_param` writes without
+  relowering).
 - `runtime` — native `tropical_runtime_t`.
 - `dac` — created lazily on first `start_audio`.
 

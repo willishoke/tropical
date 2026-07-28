@@ -166,13 +166,22 @@ if(TROPICAL_BUILD_TESTS)
     target_include_directories(test_module_process PRIVATE engine)
     target_compile_features(test_module_process PRIVATE cxx_std_20)
     target_link_libraries(test_module_process PRIVATE tropical_core)
-    add_test(NAME module_process COMMAND test_module_process)
+    add_test(NAME current_module_process COMMAND test_module_process)
+
+    add_executable(test_compat_legacy_plan4
+        engine/tests/test_compat_legacy_plan4.cpp)
+    target_include_directories(test_compat_legacy_plan4 PRIVATE engine)
+    target_compile_features(test_compat_legacy_plan4 PRIVATE cxx_std_20)
+    target_link_libraries(test_compat_legacy_plan4 PRIVATE tropical_core)
+    add_test(NAME compat_legacy_plan4_manifest
+        COMMAND test_compat_legacy_plan4)
+
     if(TROPICAL_METAL)
         add_executable(test_metal_kernel engine/tests/test_metal_kernel.cpp)
         target_include_directories(test_metal_kernel PRIVATE engine)
         target_compile_features(test_metal_kernel PRIVATE cxx_std_20)
         target_link_libraries(test_metal_kernel PRIVATE tropical_core)
-        add_test(NAME metal_kernel COMMAND test_metal_kernel)
+        add_test(NAME current_metal_kernel COMMAND test_metal_kernel)
     endif()
 endif()
 
@@ -185,4 +194,3 @@ if(TROPICAL_BUILD_PYTHON)
 else()
     install(TARGETS tropical_core DESTINATION lib)
 endif()
-

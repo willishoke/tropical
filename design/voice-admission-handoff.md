@@ -1,3 +1,5 @@
+Status: Historical — not a description of current main
+
 # Voice-port admission — design fork (for architect review)
 
 **Status:** DECIDED 2026-06-28 in discussion (the fork below is recorded for

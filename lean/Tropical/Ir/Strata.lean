@@ -23,11 +23,10 @@ rewrites and a type boundary:
   toResolved       — the type boundary (`EArena.toResolved`, called by the
                      `runResolved` exit and by `checkResolvedArena` on the
                      session paths): reify the reachable graph into the
-                     emit's `ExprArena`, REJECTING every retired
-                     constructor. This is the front-door contract — a
-                     JSON-loaded `tropical_program_2` can still spell
-                     `fold`/`tag`/… syntactically, and dies there with the
-                     retirement message.
+                     emit's `ExprArena` and validate the resolved shape.
+                     Retired constructors have no representation here; JSON
+                     spellings are refused by ingest/`WireExpr` before an IR
+                     graph exists.
 
 The five-pass drop sequence (specialize → sumLower → inlineInstances →
 arrayLower → identityElim) was retired 2026-07-25: four of the five
@@ -77,9 +76,7 @@ def run (opts : Options) (arena : Arena) (root : ProgramIdx) :
   ea.materialize postRoot
 
 /-- The compile exit: reify the lowered DAG straight into the emit's
-    `(ExprArena × CoreProgram)`, no intermediate tree. This is where the
-    retired-constructor rejection (`toResolved`) fires on the
-    compile-feeding paths. -/
+    `(ExprArena × CoreProgram)`, no intermediate tree. -/
 def runResolved (opts : Options) (arena : Arena) (root : ProgramIdx) :
     Except Error (Tropical.Ir.ExprArena × Tropical.Ir.Core.CoreProgram) := do
   let (ea, postRoot) ← runToEArena opts arena root

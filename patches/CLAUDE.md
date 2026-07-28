@@ -27,13 +27,14 @@ under `web/patches/` and is precompiled via `bun web/build_patches.ts`.
 
 ### Fields
 
-- **body.decls** — ordered list of `reg_decl`, `delay_decl`,
-  `instance_decl`, `program_decl`. `instance_decl.program` must match
-  a registered type (PascalCase: `Sin`, `ModalVoice`, `FixedSinOsc`,
-  `VCA`, …). Generics are retired — there are no `type_args`.
-- **body.assigns** — `output_assign` (a wire to a named output port)
-  and `next_update` (a register/delay update). Empty at the top level
-  of an audio-only patch.
+- **body.decls** — ordered `instanceDecl` and parameter metadata over
+  already-registered program types. `instanceDecl.program` must match a
+  registered type (PascalCase: `Sin`, `ModalVoice`, `FixedSinOsc`, `VCA`, …).
+  Generics are retired — there are no `type_args`. A `programDecl` is rejected
+  at ingest; register and delay declarations are not part of the current
+  patch-bay language.
+- **body.assigns** — `outputAssign` wires expressions to named output
+  boundaries, including `dac.out`. There is no next/update assignment.
 - **audio_outputs** — list of `{ instance, output }` mixed into the
   mono audio bus. **Legacy.** The Lean ingest
   (`lean/Tropical/Parse/Raise.lean`) still accepts it as deprecated
@@ -44,8 +45,9 @@ under `web/patches/` and is precompiled via `bun web/build_patches.ts`.
 - **params** — *(optional, deprecated for new patches)* named control
   parameters with initial values and smoothing time constants. New
   patches register params via the MCP `set_param` tool instead.
-- **ports** — *(optional)* port declarations for reusable composite
-  programs. Top-level patches don't need them.
+- **ports** — *(optional)* port metadata retained for serialization.
+  Top-level patches don't need it; a loaded patch cannot use this field to
+  define a new program type.
 
 ### Expression format
 
@@ -57,6 +59,10 @@ refusal site: what decodes is exactly what compiles. Anything else —
 state ops (`delay`, `reg`), retired combinators (`fold`, `scan`), the
 old array/functional ops (`map`, `matmul`, `reduce`, `zeros`, …) — is
 rejected at ingest.
+
+Legacy plan/runtime compatibility sits below this boundary and does not
+enlarge the patch grammar. See
+[`design/compatibility-matrix.md`](../design/compatibility-matrix.md).
 
 - **Literal number / boolean** — `440`, `0.5`, `true`
 - **Inline array** — `[110, 220, 330, 440]` (or
