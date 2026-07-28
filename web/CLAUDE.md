@@ -19,9 +19,8 @@ Per patch, the build emits two artifacts the browser fetches:
   in-process — no `wasm-ld` on PATH, no toolchain).
 - `<slug>.manifest.json` — a `KernelManifest`: the trimmed subset of
   `tropical_plan_5` the runtime needs (sample rate, SSA scratch sizing,
-  array/slot sizing, and slot defaults). The retained `stateInit` and
-  `registerTypes` fields are always empty for production plan 5 and are
-  compatibility-only; see the
+  array/slot sizing, and slot defaults). Retired state/register metadata is
+  not part of this contract; see the
   [compatibility matrix](../design/compatibility-matrix.md).
 
 ## Layout
@@ -88,7 +87,7 @@ imported `WebAssembly.Memory` and places each region above the module's
 ```
 __heap_base
   inputs        f64[64]            — zeroed (demo patches have no external input)
-  registers     i64[registerCount] — zeroed compatibility ABI region (unused by current kernels)
+  registers     i64[registerCount] — zeroed kernel-ABI region (unused by current kernels)
   temps         i64[registerCount] — per-sample SSA scratch
   arrays        f64[arraySlotSizes...] — array-register backing stores
   array_sizes   i64[arraySlotCount]    — element count per array slot

@@ -19,8 +19,7 @@ must fit one of these reviewed buckets.
 ## Allowed current hits
 
 - A negated statement that explicitly says a former type/pass/path is gone.
-- A compatibility comment naming a field that is ignored or accepted only by
-  the plan-4 branch.
+- A rejection boundary or test naming a retired schema or field.
 - A refusal test whose purpose is to ensure a deleted source construct cannot
   cross the boundary.
 - A safety/correctness counterexample saying that agreement between two
@@ -49,19 +48,16 @@ is also explicitly historical; it measures a rejected/retired scheduler design.
 The current [`playground/README.md`](../playground/README.md) labels its older
 compile-scaling subsection as a historical measurement record.
 
-## Compatibility-only hits
+## Retired-boundary hits
 
 - [`NumericProgramParser.hpp`](../engine/runtime/NumericProgramParser.hpp)
-  names ignored state keys and the bounded plan-4 lift.
+  names retired fields only to reject them.
 - [`FlatRuntime.cpp`](../engine/runtime/FlatRuntime.cpp) explicitly states that
   publication performs no by-name state transfer.
-- [`engine/tests`](../engine/tests/) names `legacy_plan4` only in the dedicated
-  compatibility test/CTest.
-- [`web/runtime/manifest.ts`](../web/runtime/manifest.ts) retains the empty
-  `stateInit`/`registerTypes` carrier classified in the compatibility matrix.
-- The migration fixture
-  [`stdlib_sin.json`](../tests/fixtures/flat_plan/stdlib_sin.json) retains a
-  dead `expected_plan` snapshot that current golden code does not consume.
+- [`engine/tests`](../engine/tests/) names `tropical_plan_4` only in a negative
+  boundary test.
+- [`PlanDecode.lean`](../lean/Tropical/PlanDecode.lean) names retired fields
+  only to reject them.
 
 ## Audit outcome
 

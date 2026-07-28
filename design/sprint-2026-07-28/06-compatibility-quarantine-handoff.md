@@ -1,10 +1,17 @@
 # Legacy compatibility quarantine — sprint handoff
 
+> **Outcome (2026-07-28): completed and superseded by staff decision S-09.**
+> The audit found no production dependency on the Plan-4 lift. Staff selected
+> immediate removal with no deprecation window: serialized plan entry points
+> are Plan-5-only, retired carriers fail clearly, and specialized parameter
+> method aliases are gone. The material below is the original investigation
+> brief, preserved as design history; it does not describe current support.
+
 - **Sprint:** 2026-07-28 through 2026-08-10
 - **Lane:** F — legacy plan/runtime boundary
 - **DRI:** Assign at kickoff
 - **Supervisor:** Staff engineer
-- **Status:** Planned
+- **Status:** Historical — completed/superseded
 - **Master:** [Staff engineer sprint handoff](00-staff-engineer-master-handoff.md)
 - **Depends on:** None. Lane A consumes the classification; Lane C records the
   remaining compatibility obligation.

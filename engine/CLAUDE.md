@@ -48,8 +48,9 @@ Three C entry points share the same tail:
 - `tropical_runtime_load_ir_msl`;
 - `tropical_runtime_load_ir_staged`.
 
-See [`design/compatibility-matrix.md`](../design/compatibility-matrix.md) for
-the bounded plan-4 dispatch accepted by these direct APIs.
+All three require a `tropical_plan_5` manifest. Older or unknown schemas and
+retired state/output carriers fail at the load boundary; see
+[`design/compatibility-matrix.md`](../design/compatibility-matrix.md).
 
 ## State and publication contract
 
@@ -59,8 +60,8 @@ runtime:
 - `register_count` sizes the SSA temp pool; it is not persistent state;
 - the `%registers` kernel-ABI argument is retained but its backing buffer is
   empty;
-- plan-4 state keys such as `state_init`, `register_names`,
-  `register_types`, and `register_targets` are ignored;
+- retired state keys such as `state_init`, `register_names`,
+  `register_types`, and `register_targets` are rejected;
 - a fresh load initializes scratch, arrays, and slots from its own manifest;
 - `publish_state` carries only `sample_index`;
 - there is no by-name register, array, or slot migration.
@@ -244,8 +245,8 @@ remain the mathematical kernel output for goldens and backend comparisons.
 
 ## Tests
 
-See [`tests/CLAUDE.md`](tests/CLAUDE.md). CTest names deliberately distinguish
-current production/ABI tests from `compat_legacy_plan4` coverage.
+See [`tests/CLAUDE.md`](tests/CLAUDE.md). `current_module_process` includes the
+serialized-plan rejection boundary alongside current production/ABI checks.
 
 ```bash
 cmake --build build -j4
@@ -257,7 +258,6 @@ ctest --test-dir build --output-on-failure
 - Keep public C ABI changes explicit and separately reviewed.
 - No interpreter or C++ plan-codegen fallback belongs on the production path.
 - Audio-thread code must not allocate, lock, log, or throw.
-- Treat state-shaped C++ types as compatibility/dead residue unless the
-  compatibility matrix proves a current caller.
-- Update the compatibility matrix and its dedicated CTest when changing
-  plan-4 dispatch.
+- Do not add state-shaped compatibility carriers to the Plan-5 runtime.
+- Update the compatibility matrix and negative boundary gates when changing
+  serialized-plan dispatch.

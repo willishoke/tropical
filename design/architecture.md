@@ -196,12 +196,10 @@ Lean's type has no legacy state initialization, state-register types/names, or
 register update targets. The wire field `register_count` sizes the SSA temp
 pool; `NOperand.reg` is a temp read, not persistent state.
 
-The native C APIs accept `tropical_plan_4` only as a compatibility metadata
-manifest paired with caller-supplied LLVM IR. The lift in
-[`NumericProgramParser`](../engine/runtime/NumericProgramParser.hpp) retains
-sample-rate, scratch, array, slot, and legacy output-mix metadata. Legacy state
-keys are ignored, and the C++ runtime allocates no state-register backing
-store. This surface is below the production compiler boundary; see the
+The native C APIs and Lean `FlatPlan.ofWire` accept `tropical_plan_5` only.
+Older or unknown schema tags and retired state/output carriers fail clearly at
+the serialized-plan boundary; there is no compatibility lift. The C++ runtime
+allocates no persistent state-register backing store. See the
 [compatibility matrix](compatibility-matrix.md).
 
 ## Execution targets

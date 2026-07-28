@@ -151,18 +151,18 @@ Lean core arithmetic, LLVM/lld, Metal, RtAudio, and Turnstile are distinct exter
 - Gates: `patch-goldens`, `wasm-vs-jit`, `metal-ctest`, `mcp-protocol`
 - Limitation: Pinning and tests constrain versions; they do not verify the implementations of external compilers, frameworks, drivers, or hardware.
 
-## LEGACY_PLAN_4_IS_NOT_SOURCE_SEMANTICS
+## SERIALIZED_PLAN_SCHEMA_IS_PLAN_5_ONLY
 
-Plan-4 compatibility is a parser/runtime lift only and cannot expand the production source language.
+Serialized plan entry points accept tropical_plan_5 only and reject retired schema carriers instead of translating or ignoring them.
 
-- Status: scoped
+- Status: evidence-backed
 - Priority: medium
 - Owner: Compatibility
 - Evidence: inspection, executable gate
 - Formal symbol: none
-- Implementation: `engine/runtime/NumericProgramParser.hpp`, `lean/Tropical/PlanDecode.lean`, `lean/Tropical/Parse/Raise.lean`, `lean/Tropical/WireExpr.lean`
-- Gates: `patch-bay-refusal`, `production-non-emission`, `compat_legacy_plan4_manifest`, `manual:plan-4 compatibility review`
-- Limitation: Hand-authored plan-4 test fixtures exercise runtime compatibility but are outside source-level semantics. FlatPlan.ofWire does not itself validate the top-level schema tag; production emitters construct plan 5 and FlatRuntime validates native loads, so any new direct ofWire caller must preserve that precondition.
+- Implementation: `engine/runtime/FlatRuntime.cpp`, `engine/runtime/NumericProgramParser.hpp`, `lean/Tropical/PlanDecode.lean`
+- Gates: `production-non-emission`, `plan5-schema-rejection`, `current_module_process`, `manual:serialized-plan boundary review`
+- Limitation: Canonical plan 5 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, the tick/rate source pair, empty child/instruction arrays, and zero loop ids.
 
 ## FROZEN_AUDIO_GOLDENS_ANCHOR_CORRECTNESS
 

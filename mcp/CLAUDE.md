@@ -174,8 +174,9 @@ stateful sister runtime, "supertropical"; see `design/cf-only.md`.)
 - `set_param` — apply the loaded plan's declared `raw`, `glide`, `anchor`, or
   `velocity` host discipline, then update the corresponding runtime slots
   without relowering. Glide ramps and anchor/velocity rebasing are explicit
-  closed-form companion-slot writes, not hidden per-sample state. Legacy
-  discipline-specific tool names remain aliases into the same dispatcher.
+  closed-form companion-slot writes, not hidden per-sample state. This is the
+  only public parameter-write method; discipline-specific method aliases are
+  retired.
 - `list_params` — registered params and their current values.
 
 ### Audio control

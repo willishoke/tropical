@@ -53,8 +53,10 @@ The Day 1 audit starts with at least these entries:
    change that affects execution.
 10. **EXTERNAL_TOOLCHAIN** — Lean core dyadics, LLVM/lld, Metal, RtAudio, and
     Turnstile enter the trusted computing base in explicitly different ways.
-11. **LEGACY_PLAN_4_IS_NOT_SOURCE_SEMANTICS** — retained parser/runtime
-    compatibility cannot expand the production source language.
+11. **SERIALIZED_PLAN_SCHEMA_IS_PLAN_5_ONLY** — the original brief proposed a
+    scoped Plan-4 compatibility obligation; the staff retirement decision
+    superseded it with exact Plan-5 validation and explicit retired-carrier
+    rejection.
 
 The audit must add omissions discovered by searching code and docs.
 
