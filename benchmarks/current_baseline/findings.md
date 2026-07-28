@@ -1,7 +1,10 @@
 # Current performance baseline findings
 
-**Status:** Harness complete; full frozen row pending after the implementation
-commit. The figures below are genuine one-repeat smoke measurements from
+**Status:** Corrected harness complete; the prior full row is retained as
+runtime evidence but is not accepted for structural-edit decisions because it
+generated each topology only once. A new frozen full row is pending from the
+corrected implementation commit. The figures below are genuine one-repeat
+development measurements from
 2026-07-27 on the canonical Apple M1 Pro (10 CPU cores, 16 GPU cores, 16 GB),
 macOS 26.3, LLVM 22.1.7, RelWithDebInfo, 44.1 kHz, B=512.
 
@@ -16,7 +19,8 @@ macOS 26.3, LLVM 22.1.7, RelWithDebInfo, 44.1 kHz, B=512.
 | modal bank 512 | 137 | 347.27 ms | 77.86 ms | 2.0968 ms | 1093.11 ms |
 | dynamic bank, K=512/live=128 | 137 | 348.60 ms | 77.84 ms | 0.5914 ms | 1114.17 ms |
 
-These are smoke numbers, not the frozen product table. They already support
+These are superseded development numbers, not the frozen product table. They
+support
 two structural observations:
 
 1. The banked audio plan is flat in capacity at 137 instructions from K=16 to
@@ -28,12 +32,13 @@ two structural observations:
 
 ## Decision
 
-**Provisional recommendation: no tiered preview implementation yet.** The
-flagship smoke clears the interactive budget and the banked plan is
-structurally flat. Freeze the full repeated matrix before turning this into a
-signed staff decision; if its four-ring median exceeds 500 ms or variance
-exceeds 20%, change the decision to “more isolation needed,” not to an
-unmeasured optimization.
+**Decision pending corrected frozen evidence.** A three-repeat corrected smoke
+measured the four-ring full-generation wall at 386.10 ms cold and 358.88 ms
+warm medians. Its topology-add cold range was 25.2% of the median, above the
+handoff's 20% escalation line; the warm range was 3.5%. This is a noise signal,
+not permission to tune a threshold. Run the corrected full matrix from a clean
+commit and present the raw repeat distribution before a staff engineer signs
+“no tiering,” “tiering recommended,” or “more isolation needed.”
 
 ## Candidate regression budgets
 
@@ -50,7 +55,8 @@ unmeasured optimization.
   plan serialization.
 - ORC load is a single public wall, not separate LLVM emit and object-link
   timers.
-- Smoke data has one repeat and was recorded from a dirty implementation
-  worktree; it is retained as development evidence, not the frozen row.
+- The committed `tropical_baseline_row_1` data has valid repeated ORC/runtime
+  rows, but only one topology-generation sample. Schema 2 fixes that boundary
+  with repeated cold/warm full generations and explicit structural edits.
 - Metal qualification, including live DAC statistics, is reported separately
   in `../metal_live/findings.md`.

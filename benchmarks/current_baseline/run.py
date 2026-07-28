@@ -9,6 +9,7 @@ samples and labels inseparable frontend walls as coarse.
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import os
 import platform
@@ -27,6 +28,30 @@ HERE = Path(__file__).resolve().parent
 MATRIX = HERE / "fixtures" / "matrix.json"
 DIFFCLI = ROOT / "lean" / ".lake" / "build" / "bin" / "diffcli"
 RUNTIME_BENCH = ROOT / "build" / "tropical_runtime_bench"
+BASE_CONTROLS: dict[str, str | None] = {
+    "TROPICAL_STAGE0": "1",
+    "TROPICAL_BANKS_UNROLL": None,
+    "TROPICAL_JIT_OPT_LEVEL": "O2",
+    "TROPICAL_KERNEL_CACHE_DISABLE": "0",
+    "TROPICAL_BACKEND": None,
+    "TROPICAL_BUFFER_LENGTH": None,
+    "TROPICAL_METAL_PIPELINE": "0",
+    "TROPICAL_METAL_PIPELINE_DEPTH": None,
+    "TROPICAL_STAGE0_DUMP": None,
+}
+
+
+def benchmark_env(overrides: dict[str, str | None]) -> dict[str, str]:
+    env = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("TROPICAL_")
+    }
+    controls = BASE_CONTROLS | overrides
+    env.update({
+        key: value for key, value in controls.items()
+        if value is not None
+    })
+    return env
 
 
 def command(args: list[str], env: dict[str, str] | None = None) -> tuple[bytes, int]:
@@ -73,6 +98,16 @@ def summary(values: list[int]) -> dict[str, int | None]:
         "p99": percentile(values, 0.99),
         "max": max(values) if values else None,
     }
+
+
+def compile_summary(values: list[int]) -> dict[str, int | float | None]:
+    result: dict[str, int | float | None] = summary(values)
+    median = result["median"]
+    result["range_over_median"] = (
+        (max(values) - min(values)) / median
+        if values and isinstance(median, int) and median > 0 else None
+    )
+    return result
 
 
 def instruction_count(plan: Any) -> int:
@@ -153,8 +188,11 @@ def environment_manifest() -> dict[str, Any]:
         ]),
         "sample_rate": 44100,
         "block_length": 512,
-        "stage0": os.environ.get("TROPICAL_STAGE0", "default-on"),
-        "banks_unroll": os.environ.get("TROPICAL_BANKS_UNROLL", "default-banked"),
+        "benchmark_controls": BASE_CONTROLS,
+        "environment_policy":
+            "all inherited TROPICAL_* variables removed before explicit controls",
+        "stage0": "enabled (explicit TROPICAL_STAGE0=1)",
+        "banks_unroll": "banked (TROPICAL_BANKS_UNROLL explicitly absent)",
         "ordinary_cache_before": cache_snapshot(),
     }
 
@@ -203,8 +241,9 @@ def runtime_args(ir: Path, manifest: Path, coeff: Path, msl: Path | None,
 
 def run_probe(args: list[str], cache_root: Path,
               extra_env: dict[str, str] | None = None) -> dict[str, Any]:
-    env = os.environ.copy()
-    env["TROPICAL_KERNEL_CACHE_ROOT"] = str(cache_root)
+    env = benchmark_env({
+        "TROPICAL_KERNEL_CACHE_ROOT": str(cache_root),
+    })
     if extra_env:
         env.update(extra_env)
     stdout, wall_ns = command(args, env)
@@ -216,11 +255,13 @@ def run_probe(args: list[str], cache_root: Path,
 
 
 def prepare_artifacts(fixture: dict[str, Any], directory: Path,
-                      metal: bool) -> tuple[dict[str, Path], dict[str, int | None]]:
+                      metal: bool, cache_root: Path
+                      ) -> tuple[dict[str, Path], dict[str, int | None]]:
     directory.mkdir(parents=True, exist_ok=True)
-    env = os.environ.copy()
-    env["TROPICAL_STAGE0_DUMP"] = str(directory)
-    env["TROPICAL_KERNEL_CACHE_ROOT"] = str(directory / "prepare-cache")
+    env = benchmark_env({
+        "TROPICAL_STAGE0_DUMP": str(directory),
+        "TROPICAL_KERNEL_CACHE_ROOT": str(cache_root),
+    })
     timings: dict[str, int | None] = {
         "frontend_plan_total_ns": None,
         "artifact_prepare_total_ns": None,
@@ -264,6 +305,94 @@ def prepare_artifacts(fixture: dict[str, Any], directory: Path,
     return paths, timings
 
 
+def generation_series(fixture: dict[str, Any], directory: Path,
+                      metal: bool, repeats: int
+                      ) -> tuple[dict[str, Path], dict[str, Any]]:
+    cold_samples: list[dict[str, int | None]] = []
+    warm_samples: list[dict[str, int | None]] = []
+    representative: dict[str, Path] | None = None
+    reference_bytes: dict[str, bytes] | None = None
+    emitted_bytes_stable = True
+
+    for repeat in range(repeats):
+        repeat_root = directory / f"repeat-{repeat}"
+        cache_root = repeat_root / "cache"
+        cold_paths, cold = prepare_artifacts(
+            fixture, repeat_root / "cold", metal, cache_root)
+        warm_paths, warm = prepare_artifacts(
+            fixture, repeat_root / "warm", metal, cache_root)
+        cold_samples.append(cold)
+        warm_samples.append(warm)
+        representative = warm_paths
+
+        for paths in (cold_paths, warm_paths):
+            current = {
+                key: path.read_bytes()
+                for key, path in paths.items()
+                if path.exists()
+            }
+            if reference_bytes is None:
+                reference_bytes = current
+            elif current != reference_bytes:
+                emitted_bytes_stable = False
+
+    assert representative is not None
+    timing_keys = sorted({
+        key for sample in cold_samples + warm_samples for key in sample
+    })
+    summaries: dict[str, Any] = {}
+    for key in timing_keys:
+        summaries[key] = {
+            "cold": compile_summary([
+                int(sample[key]) for sample in cold_samples
+                if sample.get(key) is not None
+            ]),
+            "warm": compile_summary([
+                int(sample[key]) for sample in warm_samples
+                if sample.get(key) is not None
+            ]),
+        }
+    return representative, {
+        "repeat_count": repeats,
+        "cold": cold_samples,
+        "warm": warm_samples,
+        "summary_ns": summaries,
+        "emitted_bytes_stable": emitted_bytes_stable,
+        "cold_cache":
+            "fresh benchmark-owned root for each repeat",
+        "warm_cache":
+            "second full generation reusing the corresponding cold root",
+    }
+
+
+def flagship_edits(fixture: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    if not fixture.get("flagship"):
+        return {}
+
+    topology = copy.deepcopy(fixture)
+    nodes = topology["graph"]["nodes"]
+    out_index = next(i for i, node in enumerate(nodes) if node["id"] == "out")
+    nodes.insert(out_index, {
+        "id": "r5",
+        "kind": "resonator",
+        "params": {"freq": 329.63, "decay": 4, "partials": 16},
+    })
+    mix = next(node for node in nodes if node["id"] == "mix")
+    mix["in"]["in"].append("r5")
+    topology["name"] = f"{fixture['name']}-topology-add-ring"
+
+    selector = copy.deepcopy(fixture)
+    r1 = next(node for node in selector["graph"]["nodes"]
+              if node["id"] == "r1")
+    r1["params"]["partials"] = 17
+    selector["name"] = f"{fixture['name']}-structural-partials-16-to-17"
+
+    return {
+        "topology_add_ring": topology,
+        "structural_capacity_selector": selector,
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--suite", choices=("smoke", "full"), default="smoke")
@@ -274,6 +403,8 @@ def main() -> int:
     parser.add_argument("--metal", action="store_true")
     parser.add_argument("--wasm", action="store_true")
     options = parser.parse_args()
+    if options.repeats < 1:
+        raise RuntimeError("--repeats must be positive")
 
     if not options.skip_build:
         command(["cmake", "--build", str(ROOT / "build"), "-j4"])
@@ -294,8 +425,15 @@ def main() -> int:
         with output.open("w") as stream:
             stream.write(json.dumps(environment, separators=(",", ":")) + "\n")
             for fixture in fixtures:
-                fixture_dir = work / fixture["name"]
-                paths, timings = prepare_artifacts(fixture, fixture_dir, options.metal)
+                fixture_dir = work / "generation" / fixture["name"]
+                paths, generation = generation_series(
+                    fixture, fixture_dir, options.metal, options.repeats)
+                structural_edits: dict[str, Any] = {}
+                for edit_name, edited_fixture in flagship_edits(fixture).items():
+                    _, edit_generation = generation_series(
+                        edited_fixture, work / "edits" / edit_name,
+                        options.metal, options.repeats)
+                    structural_edits[edit_name] = edit_generation
                 plan = json.loads(paths["manifest"].read_text())
                 slot_names = plan.get("slot_names", [])
                 param_slot = next(
@@ -315,9 +453,12 @@ def main() -> int:
                     _, wasm_ns = command([
                         str(DIFFCLI), "compile-wasm", str(source),
                         f"--out={wasm}",
-                    ])
+                    ], benchmark_env({
+                        "TROPICAL_KERNEL_CACHE_ROOT":
+                            str(fixture_dir / "wasm-cache"),
+                    }))
                     metrics["wasm_bytes"] = wasm.stat().st_size
-                    timings["wasm_total_ns"] = wasm_ns
+                    generation["wasm_total_ns"] = wasm_ns
 
                 runtime: dict[str, list[dict[str, Any]]] = {
                     "jit_cold": [], "jit_warm": [],
@@ -343,7 +484,7 @@ def main() -> int:
                         runtime["metal_warm"].append(run_probe(metal_args, metal_cache))
 
                 row = {
-                    "schema": "tropical_baseline_row_1",
+                    "schema": "tropical_baseline_row_2",
                     "fixture": fixture["name"],
                     "fixture_class": fixture["class"],
                     "source_nodes": nodes,
@@ -354,17 +495,25 @@ def main() -> int:
                     "nested": fixture.get("nested", False),
                     "flagship": fixture.get("flagship", False),
                     "metrics": metrics,
-                    "timings": timings,
+                    "generation": generation,
+                    "structural_edits": structural_edits,
                     "runtime": runtime,
                     "cache_state": {
                         "root_env": "TROPICAL_KERNEL_CACHE_ROOT",
                         "cold": "fresh per-repeat benchmark-owned root",
                         "warm": "second process reusing that root",
                     },
+                    "benchmark_controls": {
+                        **BASE_CONTROLS,
+                        "TROPICAL_KERNEL_CACHE_ROOT":
+                            "<per-repeat harness-owned root>",
+                    },
                     "limitations": [
                         "frontend plan/lower/emit walls are coarse subprocess totals",
                         "arena node count is not exposed without invasive compiler instrumentation",
                         "Metal load includes the mandatory dual JIT load",
+                        "structural selector row uses the baked modal partial capacity "
+                        "(16 to 17); decoded graph sel fields are currently inert",
                     ],
                 }
                 stream.write(json.dumps(row, separators=(",", ":")) + "\n")

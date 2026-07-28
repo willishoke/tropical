@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import shutil
 import statistics
@@ -22,6 +23,30 @@ DIFFCLI = ROOT / "lean" / ".lake" / "build" / "bin" / "diffcli"
 LATENCY = HERE / "fixtures"
 MATRIX = ROOT / "benchmarks" / "current_baseline" / "fixtures" / "matrix.json"
 DISCIPLINES = {"raw": 1, "glide": 3, "anchor": 2, "velocity": 2}
+BASE_CONTROLS: dict[str, str | None] = {
+    "TROPICAL_STAGE0": "1",
+    "TROPICAL_BANKS_UNROLL": None,
+    "TROPICAL_JIT_OPT_LEVEL": "O2",
+    "TROPICAL_KERNEL_CACHE_DISABLE": "0",
+    "TROPICAL_BACKEND": None,
+    "TROPICAL_BUFFER_LENGTH": None,
+    "TROPICAL_METAL_PIPELINE": "0",
+    "TROPICAL_METAL_PIPELINE_DEPTH": None,
+    "TROPICAL_STAGE0_DUMP": None,
+}
+
+
+def benchmark_env(overrides: dict[str, str | None]) -> dict[str, str]:
+    env = {
+        key: value for key, value in os.environ.items()
+        if not key.startswith("TROPICAL_")
+    }
+    controls = BASE_CONTROLS | overrides
+    env.update({
+        key: value for key, value in controls.items()
+        if value is not None
+    })
+    return env
 
 
 def run(args: list[str], env: dict[str, str] | None = None) -> tuple[bytes, int]:
@@ -67,6 +92,160 @@ def summarize(values: list[int]) -> dict[str, int | None]:
     }
 
 
+def summarize_callback_histogram(result: dict[str, Any]) -> dict[str, Any]:
+    histogram = result.get("callback_histogram", {})
+    counts = histogram.get("counts", [])
+    width = histogram.get("bin_width_ns")
+    overflow_floor = histogram.get("overflow_floor_ns")
+    total = sum(counts)
+
+    def quantile_upper_bound(q: float) -> int | None:
+        if not counts or not width or total == 0:
+            return None
+        target = max(1, int(q * total + .999999) - 0)
+        seen = 0
+        for index, count in enumerate(counts):
+            seen += count
+            if seen >= target:
+                if index == len(counts) - 1:
+                    return overflow_floor
+                return (index + 1) * width
+        return None
+
+    return {
+        "count": total,
+        "p50_upper_bound_ns": quantile_upper_bound(.50),
+        "p95_upper_bound_ns": quantile_upper_bound(.95),
+        "p99_upper_bound_ns": quantile_upper_bound(.99),
+        "max_exact_ns": int(
+            result.get("dac_stats", {}).get("max_callback_ms", 0) * 1e6
+        ),
+        "resolution_ns": width,
+        "overflow_floor_ns": overflow_floor,
+        "overflow_count": counts[-1] if counts else None,
+    }
+
+
+def analyze_rss(result: dict[str, Any], rate: int, buffer: int
+                ) -> dict[str, Any]:
+    event_blocks = result.get("event_blocks", {})
+    hot_swap_progress = event_blocks.get("hot_swap_progress")
+    settle_blocks = max(1, int(2 * rate / buffer))
+    warmup_end = (
+        hot_swap_progress + settle_blocks
+        if isinstance(hot_swap_progress, int) else None
+    )
+    pairs = [
+        (block, value)
+        for block, value in zip(result.get("rss_blocks", []),
+                                result.get("rss_bytes", []), strict=True)
+        if warmup_end is None or block >= warmup_end
+    ]
+    values = [value for _, value in pairs]
+    deltas = [right - left for left, right in zip(values, values[1:])]
+    monotonic_growth = (
+        len(values) >= 3
+        and values[-1] > values[0]
+        and all(delta >= 0 for delta in deltas)
+    )
+    return {
+        "sample_count": len(values),
+        "warmup_end_block": warmup_end,
+        "warmup_contract":
+            "two seconds after observed hot-swap progress",
+        "first_block": pairs[0][0] if pairs else None,
+        "last_block": pairs[-1][0] if pairs else None,
+        "growth_bytes": values[-1] - values[0] if len(values) >= 2 else None,
+        "increase_intervals": sum(delta > 0 for delta in deltas),
+        "flat_intervals": sum(delta == 0 for delta in deltas),
+        "decrease_intervals": sum(delta < 0 for delta in deltas),
+        "monotonic_growth": monotonic_growth,
+    }
+
+
+def evaluate_acceptance(result: dict[str, Any],
+                        rss_analysis: dict[str, Any],
+                        buffer: int, rate: int, depth: int
+                        ) -> tuple[dict[str, bool], list[str]]:
+    expected_labels = {
+        "start",
+        "post_2p40_clock_jump",
+        "midpoint_after_hot_swap",
+        "end",
+    }
+    labels = result.get("reference_labels", [])
+    snr = result.get("reference_snr_db", [])
+    callback = result.get("callback_summary_ns", {})
+    p99 = callback.get("p99_upper_bound_ns")
+    deadline_ns = buffer * 1e9 / rate
+    event_completion = result.get("event_completion", {})
+    histogram_count = callback.get("count")
+    callback_count = result.get("dac_stats", {}).get("callback_count")
+    event_blocks = result.get("event_blocks", {})
+    start_block = event_blocks.get("start_reference")
+    post_jump_block = event_blocks.get("post_jump_reference")
+    midpoint_block = event_blocks.get("midpoint_reference")
+    end_block = event_blocks.get("end_reference")
+    end_preceding_write = event_blocks.get("end_preceding_write")
+
+    gates = {
+        "runtime_not_aborted": not result.get("dac_aborted", True),
+        "negotiated_frames_match":
+            result.get("negotiated_buffer_frames") == buffer,
+        "zero_underruns":
+            result.get("dac_stats", {}).get("underrun_count") == 0,
+        "zero_callback_overruns":
+            result.get("dac_stats", {}).get("overrun_count") == 0,
+        "callback_p99_below_half_deadline":
+            p99 is not None and p99 < deadline_ns / 2,
+        "histogram_covers_all_measured_callbacks":
+            histogram_count is not None and histogram_count == callback_count,
+        "all_required_events_completed":
+            all(event_completion.get(name, False) for name in (
+                "baseline", "writes", "clock_jump", "hot_swap",
+                "start_reference", "post_jump_reference",
+                "midpoint_reference", "end_reference",
+            )),
+        "reference_checkpoint_order_valid":
+            all(isinstance(value, int) for value in (
+                event_blocks.get("baseline"),
+                event_blocks.get("clock_jump_progress"),
+                event_blocks.get("hot_swap_progress"),
+                start_block, post_jump_block, midpoint_block, end_block,
+            ))
+            and start_block > event_blocks["baseline"]
+            and post_jump_block > event_blocks["clock_jump_progress"]
+            and midpoint_block > event_blocks["hot_swap_progress"]
+            and end_block > midpoint_block,
+        "end_reference_clear_of_future_write_queue":
+            isinstance(end_block, int)
+            and (
+                end_preceding_write is None
+                or (
+                    isinstance(end_preceding_write, int)
+                    and end_block >= end_preceding_write + depth + 1
+                )
+            ),
+        "callback_progress_not_stalled":
+            not event_completion.get("callback_progress_stalled", True),
+        "all_reference_checkpoints_present":
+            set(labels) == expected_labels and len(snr) == len(expected_labels),
+        "all_reference_snr_at_least_80db":
+            len(snr) == len(expected_labels)
+            and all(
+                isinstance(value, (int, float))
+                and math.isfinite(value)
+                and value >= 80.0
+                for value in snr
+            ),
+        "rss_sampling_sufficient":
+            rss_analysis.get("sample_count", 0) >= 3,
+        "no_monotonic_post_warmup_rss_growth":
+            not rss_analysis["monotonic_growth"],
+    }
+    return gates, [name for name, passed in gates.items() if not passed]
+
+
 def safe_hardware_manifest() -> dict[str, Any]:
     raw = output([
         "system_profiler", "-json", "SPHardwareDataType", "SPDisplaysDataType",
@@ -110,6 +289,9 @@ def manifest(mode: str) -> dict[str, Any]:
             "TROPICAL_METAL_PIPELINE_DEPTH overrides TROPICAL_METAL_PIPELINE=1",
         "cache":
             "TROPICAL_KERNEL_CACHE_ROOT points to a fresh harness-owned directory",
+        "benchmark_controls": BASE_CONTROLS,
+        "environment_policy":
+            "all inherited TROPICAL_* variables removed before explicit controls",
     }
 
 
@@ -119,6 +301,7 @@ def probe(args: list[str], env: dict[str, str]) -> dict[str, Any]:
     result["wall_ns"] = wall
     result["process_summary_ns"] = summarize(result["process_ns"])
     result["write_summary_ns"] = summarize(result["write_ns"])
+    result["callback_summary_ns"] = summarize_callback_histogram(result)
     return result
 
 
@@ -144,8 +327,10 @@ def latency_args(buffer: int, metal: bool, write_count: int) -> list[str]:
 def run_latency_matrix(stream, work: Path) -> None:
     rate = 44100
     for buffer in (128, 256, 512):
-        jit_env = os.environ.copy()
-        jit_env["TROPICAL_KERNEL_CACHE_ROOT"] = str(work / "cache" / f"jit-{buffer}")
+        jit_env = benchmark_env({
+            "TROPICAL_KERNEL_CACHE_ROOT":
+                str(work / "cache" / f"jit-{buffer}"),
+        })
         jit = probe(latency_args(buffer, False, 1), jit_env)
         if jit["latency_blocks"] != 0:
             raise RuntimeError(f"JIT latency canary at B={buffer} was not next-block")
@@ -163,11 +348,12 @@ def run_latency_matrix(stream, work: Path) -> None:
 
         for depth in (1, 2, 3):
             for discipline, write_count in DISCIPLINES.items():
-                env = os.environ.copy()
-                env["TROPICAL_METAL_PIPELINE_DEPTH"] = str(depth)
-                env["TROPICAL_KERNEL_CACHE_ROOT"] = str(
-                    work / "cache" / f"metal-{buffer}-{depth}-{discipline}"
-                )
+                env = benchmark_env({
+                    "TROPICAL_METAL_PIPELINE_DEPTH": str(depth),
+                    "TROPICAL_KERNEL_CACHE_ROOT": str(
+                        work / "cache" / f"metal-{buffer}-{depth}-{discipline}"
+                    ),
+                })
                 result = probe(latency_args(buffer, True, write_count), env)
                 observed = result["latency_blocks"]
                 if result["pipeline_depth"] != depth or observed != depth:
@@ -200,16 +386,33 @@ def prepare_heavy_graph(work: Path) -> tuple[dict[str, Path], dict[str, Any]]:
     heavy_muted = {
         "nodes": [
             fixture["graph"]["nodes"][0],
-            {"id": "mute", "kind": "knob", "params": {"value": 0}},
+            {"id": "mute", "kind": "knob", "params": {"value": 1e-12}},
             {"id": "muted", "kind": "ring", "in": {"in": ["bank", "mute"]}},
-            {"id": "out", "kind": "out", "in": {"in": ["muted"]}},
+            {
+                "id": "canary",
+                "kind": "source",
+                "params": {"freq": 55, "morph": 0},
+            },
+            {"id": "trim", "kind": "knob", "params": {"value": 1e-8}},
+            {
+                "id": "quiet_canary",
+                "kind": "ring",
+                "in": {"in": ["canary", "trim"]},
+            },
+            {
+                "id": "mix",
+                "kind": "mix",
+                "in": {"in": ["muted", "quiet_canary"]},
+            },
+            {"id": "out", "kind": "out", "in": {"in": ["mix"]}},
         ],
         "out": "out",
     }
     graph.write_text(json.dumps(heavy_muted, separators=(",", ":")))
-    env = os.environ.copy()
-    env["TROPICAL_STAGE0_DUMP"] = str(artifact)
-    env["TROPICAL_KERNEL_CACHE_ROOT"] = str(work / "prepare-cache")
+    env = benchmark_env({
+        "TROPICAL_STAGE0_DUMP": str(artifact),
+        "TROPICAL_KERNEL_CACHE_ROOT": str(work / "prepare-cache"),
+    })
     run([
         str(DIFFCLI), "render-graph", str(graph), "--metal",
         "--frames", "0", "--buffer", "512",
@@ -236,7 +439,7 @@ def run_soak(stream, work: Path, duration: float, buffer: int, depth: int) -> No
     artifacts, slots = prepare_heavy_graph(work)
     rate = 44100
     expected_blocks = max(1, int(duration * rate / buffer))
-    rss_every = max(1, int(5 * rate / buffer))
+    rss_every = max(1, int(2 * rate / buffer))
     common = [
         str(RUNTIME_BENCH),
         "--ir", str(artifacts["ir"]),
@@ -248,6 +451,7 @@ def run_soak(stream, work: Path, duration: float, buffer: int, depth: int) -> No
         "--realtime",
         "--warmup", "8",
         "--slot", str(slots["param_slot"]),
+        "--reference-slot", str(slots["reference_slot"]),
         "--slot-value", "0.75",
         "--write-every", str(max(1, int(rate / buffer))),
         "--rss-every", str(rss_every),
@@ -255,9 +459,10 @@ def run_soak(stream, work: Path, duration: float, buffer: int, depth: int) -> No
         "--jump-index", str(1 << 40),
         "--reload-at", str(expected_blocks // 2),
     ]
-    env = os.environ.copy()
-    env["TROPICAL_METAL_PIPELINE_DEPTH"] = str(depth)
-    env["TROPICAL_KERNEL_CACHE_ROOT"] = str(work / "soak-cache")
+    env = benchmark_env({
+        "TROPICAL_METAL_PIPELINE_DEPTH": str(depth),
+        "TROPICAL_KERNEL_CACHE_ROOT": str(work / "soak-cache"),
+    })
     offline_args = [
         str(RUNTIME_BENCH),
         "--ir", str(artifacts["ir"]),
@@ -274,8 +479,9 @@ def run_soak(stream, work: Path, duration: float, buffer: int, depth: int) -> No
     ]
     offline = probe(offline_args, env)
     result = probe(common + ["--dac"], env)
-    rss = result["rss_bytes"]
-    growth = rss[-1] - rss[1] if len(rss) > 2 else None
+    rss_analysis = analyze_rss(result, rate, buffer)
+    acceptance_gates, failure_reasons = evaluate_acceptance(
+        result, rss_analysis, buffer, rate, depth)
     measured_snapshots = [
         item for item in result["dac_snapshots"]
         if item["label"] not in {"startup_warmup_before_reset", "after_stop"}
@@ -291,14 +497,23 @@ def run_soak(stream, work: Path, duration: float, buffer: int, depth: int) -> No
         "pipeline_depth": depth,
         "hot_swap_block": expected_blocks // 2,
         "clock_jump_block": expected_blocks // 4,
-        "rss_post_warmup_growth_bytes": growth,
+        "rss_post_warmup": rss_analysis,
         "sink_contract":
-            "live param-backed multiply defaults to zero; bank workload remains live",
+            "live bank is retained behind a param-backed 1e-12 gain (-240 dB); "
+            "a continuous 55 Hz canary is fixed at 1e-8 amplitude (-160 dB), making "
+            "start/mid/end/large-coordinate SNR non-vacuous while effectively silent",
         "dac_stats": result["dac_stats"],
         "post_reset_underruns": post_reset_underruns,
+        "acceptance_gates": acceptance_gates,
+        "failure_reasons": failure_reasons,
+        "unavailable_measurements": [
+            "pipeline queue depth over time (configured depth only)",
+            "Metal resource/object counts",
+            "GPU execution and re-prime duration",
+            "live inter-callback/block interval distribution",
+        ],
         "qualification_status":
-            "blocked" if result["dac_aborted"] or post_reset_underruns
-            else "measured-window-pass",
+            "blocked" if failure_reasons else "measured-window-pass",
         "offline_support": offline,
         "raw": result,
     }

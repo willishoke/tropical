@@ -11,6 +11,7 @@
 
 #include "c_api/tropical_c.h"
 #include "dac/TropicalDAC.hpp"   // kDeviceOutputBound / clamp_to_device_bound
+#include <cstddef>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -21,6 +22,12 @@
 
 static int g_pass = 0;
 static int g_fail = 0;
+
+// Keep the existing public stats ABI frozen: new qualification telemetry uses
+// separate accessors, never appended fields that older callers did not
+// allocate.
+static_assert(sizeof(tropical_dac_stats_t) == 40);
+static_assert(offsetof(tropical_dac_stats_t, overrun_count) == 32);
 
 static void run_test(const char* name, std::function<void()> fn)
 {
@@ -227,6 +234,14 @@ static void test_device_bound_clamp()
   ASSERT(C < 6.8719476736e10);
 }
 
+static void test_dac_histogram_contract()
+{
+  ASSERT(tropical_dac_callback_histogram_bin_count() == 20001);
+  ASSERT(tropical_dac_callback_histogram_bin_width_ns() == 1000);
+  ASSERT(tropical_dac_callback_histogram_overflow_floor_ns() == 20000000);
+  ASSERT(tropical_dac_get_stats_epoch(nullptr) == 0);
+}
+
 int main()
 {
   printf("test_module_process (load_ir engine)\n");
@@ -234,6 +249,7 @@ int main()
   run_test("constant kernel via load_ir",   test_ir_constant);
   run_test("closed-form index ramp",        test_ir_index_ramp);
   run_test("device-boundary clamp",         test_device_bound_clamp);
+  run_test("fixed DAC histogram/ABI contract", test_dac_histogram_contract);
 
   printf("\n  %d passed, %d failed\n", g_pass, g_fail);
   return g_fail > 0 ? 1 : 0;

@@ -2,6 +2,7 @@
 
 #include "../lib/rtaudio/RtAudio.h"
 
+#include <array>
 #include <atomic>
 #include <chrono>
 #include <stdexcept>
@@ -9,6 +10,10 @@
 #include <vector>
 
 static constexpr int kPrimeCycles = 4;
+static constexpr uint64_t kCallbackHistogramBinNs = 1000;
+static constexpr std::size_t kCallbackHistogramRegularBins = 20000;
+static constexpr std::size_t kCallbackHistogramBins =
+  kCallbackHistogramRegularBins + 1; // final bin is >= 20 ms
 
 /**
  * C — the device-boundary output bound. The last thing between a computed
@@ -113,6 +118,21 @@ struct TropicalDACImpl
   std::atomic<uint64_t> max_callback_ns_{0};
   std::atomic<uint64_t> underrun_count_{0};
   std::atomic<uint64_t> overrun_count_{0};
+  std::array<std::array<std::atomic<uint64_t>, kCallbackHistogramBins>, 2>
+    callback_histogram_{};
+  std::atomic<unsigned int> active_histogram_{0};
+  std::atomic<unsigned int> requested_histogram_{0};
+  std::atomic<uint64_t> stats_epoch_{1};
+  std::atomic<uint64_t> requested_stats_epoch_{1};
+
+  // One qualification capture slot. Storage is allocated at construction;
+  // the callback only copies into it and publishes a sequence number.
+  std::vector<double> captured_output_;
+  std::atomic<uint64_t> capture_sequence_{0};
+  std::atomic<uint64_t> capture_requested_{0};
+  std::atomic<uint64_t> capture_ready_{0};
+  std::atomic<uint64_t> captured_start_index_{0};
+  std::atomic<unsigned int> negotiated_buffer_frames_{0};
 
   std::atomic<bool>     device_disconnected_{false};
   std::atomic<bool>     watcher_shutdown_{false};
@@ -120,7 +140,8 @@ struct TropicalDACImpl
   unsigned int          active_device_id_{0};
 
   TropicalDACImpl(AudioSource* s, unsigned int sr, unsigned int ch)
-    : source(s), sample_rate(sr), channels(ch)
+    : source(s), sample_rate(sr), channels(ch),
+      captured_output_(s->getBufferLength(), 0.0)
   {
     audio.setErrorCallback([this](RtAudioErrorType type, const std::string&) {
       if (type == RTAUDIO_DEVICE_DISCONNECT)
@@ -147,6 +168,13 @@ struct TropicalDACImpl
     max_callback_ns_.store(0, std::memory_order_relaxed);
     underrun_count_.store(0, std::memory_order_relaxed);
     overrun_count_.store(0, std::memory_order_relaxed);
+    for (auto & bank : callback_histogram_)
+      for (auto & bin : bank)
+        bin.store(0, std::memory_order_relaxed);
+    active_histogram_.store(0, std::memory_order_relaxed);
+    requested_histogram_.store(0, std::memory_order_relaxed);
+    stats_epoch_.store(1, std::memory_order_relaxed);
+    requested_stats_epoch_.store(1, std::memory_order_relaxed);
 
     open_stream();
     running = true;
@@ -193,13 +221,92 @@ struct TropicalDACImpl
     return s;
   }
 
+  uint64_t stats_epoch() const noexcept
+  {
+    return stats_epoch_.load(std::memory_order_acquire);
+  }
+
+  uint64_t reset_stats_epoch()
+  {
+    const unsigned int next_bank =
+      1U - active_histogram_.load(std::memory_order_acquire);
+    for (auto & bin : callback_histogram_[next_bank])
+      bin.store(0, std::memory_order_relaxed);
+
+    const uint64_t next_epoch =
+      requested_stats_epoch_.load(std::memory_order_relaxed) + 1;
+    requested_histogram_.store(next_bank, std::memory_order_relaxed);
+    requested_stats_epoch_.store(next_epoch, std::memory_order_release);
+
+    if (!running)
+    {
+      callback_count_.store(0, std::memory_order_relaxed);
+      total_callback_ns_.store(0, std::memory_order_relaxed);
+      max_callback_ns_.store(0, std::memory_order_relaxed);
+      underrun_count_.store(0, std::memory_order_relaxed);
+      overrun_count_.store(0, std::memory_order_relaxed);
+      active_histogram_.store(next_bank, std::memory_order_release);
+      stats_epoch_.store(next_epoch, std::memory_order_release);
+      return next_epoch;
+    }
+
+    // The callback applies the epoch at its next boundary. Waiting here makes
+    // the measured window exact without putting a lock on the audio thread.
+    const auto deadline =
+      std::chrono::steady_clock::now() + std::chrono::seconds(2);
+    while (stats_epoch_.load(std::memory_order_acquire) != next_epoch
+           && std::chrono::steady_clock::now() < deadline)
+      std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    return stats_epoch_.load(std::memory_order_acquire) == next_epoch
+      ? next_epoch : 0;
+  }
+
   void reset_stats()
   {
-    callback_count_.store(0, std::memory_order_relaxed);
-    total_callback_ns_.store(0, std::memory_order_relaxed);
-    max_callback_ns_.store(0, std::memory_order_relaxed);
-    underrun_count_.store(0, std::memory_order_relaxed);
-    overrun_count_.store(0, std::memory_order_relaxed);
+    (void)reset_stats_epoch();
+  }
+
+  std::size_t copy_callback_histogram(
+    uint64_t * out, std::size_t capacity, uint64_t & epoch) const
+  {
+    if (!out || capacity < kCallbackHistogramBins) return 0;
+    const uint64_t before = stats_epoch_.load(std::memory_order_acquire);
+    const uint64_t count_before =
+      callback_count_.load(std::memory_order_acquire);
+    const unsigned int bank =
+      active_histogram_.load(std::memory_order_acquire);
+    for (std::size_t i = 0; i < kCallbackHistogramBins; ++i)
+      out[i] = callback_histogram_[bank][i].load(std::memory_order_relaxed);
+    const uint64_t count_after =
+      callback_count_.load(std::memory_order_acquire);
+    const uint64_t after = stats_epoch_.load(std::memory_order_acquire);
+    if (before != after || count_before != count_after) return 0;
+    epoch = after;
+    return kCallbackHistogramBins;
+  }
+
+  uint64_t request_output_capture()
+  {
+    const uint64_t sequence =
+      capture_sequence_.fetch_add(1, std::memory_order_relaxed) + 1;
+    capture_requested_.store(sequence, std::memory_order_release);
+    return sequence;
+  }
+
+  bool read_output_capture(uint64_t sequence, uint64_t & start_index,
+                           double * out, std::size_t capacity) const
+  {
+    if (!out || capacity < captured_output_.size()
+        || capture_ready_.load(std::memory_order_acquire) != sequence)
+      return false;
+    start_index = captured_start_index_.load(std::memory_order_relaxed);
+    std::copy(captured_output_.begin(), captured_output_.end(), out);
+    return capture_ready_.load(std::memory_order_acquire) == sequence;
+  }
+
+  unsigned int negotiated_buffer_frames() const noexcept
+  {
+    return negotiated_buffer_frames_.load(std::memory_order_acquire);
   }
 
   // ── Master clock (multi-device A/V sync) ───────────────────────────────────
@@ -285,15 +392,53 @@ struct TropicalDACImpl
     RtAudioStreamStatus status,
     void*               user_data)
   {
-    const auto t0 = std::chrono::steady_clock::now();
-
     auto* self = static_cast<TropicalDACImpl*>(user_data);
+
+    const uint64_t requested_epoch =
+      self->requested_stats_epoch_.load(std::memory_order_acquire);
+    if (requested_epoch !=
+        self->stats_epoch_.load(std::memory_order_relaxed))
+    {
+      self->callback_count_.store(0, std::memory_order_relaxed);
+      self->total_callback_ns_.store(0, std::memory_order_relaxed);
+      self->max_callback_ns_.store(0, std::memory_order_relaxed);
+      self->underrun_count_.store(0, std::memory_order_relaxed);
+      self->overrun_count_.store(0, std::memory_order_relaxed);
+      self->active_histogram_.store(
+        self->requested_histogram_.load(std::memory_order_relaxed),
+        std::memory_order_release);
+      self->stats_epoch_.store(requested_epoch, std::memory_order_release);
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
 
     if (status)
       self->underrun_count_.fetch_add(1, std::memory_order_relaxed);
 
     self->source->process();
     const auto& buf = self->source->outputBuffer;
+
+    const uint64_t capture =
+      self->capture_requested_.load(std::memory_order_acquire);
+    if (capture != 0
+        && capture != self->capture_ready_.load(std::memory_order_relaxed))
+    {
+      const std::size_t n =
+        std::min<std::size_t>(buf.size(), self->captured_output_.size());
+      std::copy_n(buf.begin(), n, self->captured_output_.begin());
+      std::fill(self->captured_output_.begin() + n,
+                self->captured_output_.end(), 0.0);
+      if constexpr (requires { self->source->current_sample_index(); })
+      {
+        const uint64_t next = self->source->current_sample_index();
+        self->captured_start_index_.store(
+          next >= self->captured_output_.size()
+            ? next - self->captured_output_.size() : 0,
+          std::memory_order_relaxed);
+      }
+      self->capture_ready_.store(capture, std::memory_order_release);
+    }
+
     auto* out = static_cast<double*>(output_buffer);
 
     for (unsigned int i = 0; i < n_buffer_frames; ++i)
@@ -311,14 +456,24 @@ struct TropicalDACImpl
     const uint64_t elapsed_ns =
         std::chrono::duration_cast<std::chrono::nanoseconds>(t1 - t0).count();
 
-    self->callback_count_.fetch_add(1, std::memory_order_relaxed);
     self->total_callback_ns_.fetch_add(elapsed_ns, std::memory_order_relaxed);
     update_max(self->max_callback_ns_, elapsed_ns);
+    const std::size_t histogram_bin =
+      std::min<std::size_t>(
+        elapsed_ns / kCallbackHistogramBinNs,
+        kCallbackHistogramRegularBins);
+    const unsigned int histogram =
+      self->active_histogram_.load(std::memory_order_relaxed);
+    self->callback_histogram_[histogram][histogram_bin].fetch_add(
+      1, std::memory_order_relaxed);
 
     const uint64_t budget_ns =
         (static_cast<uint64_t>(n_buffer_frames) * 1000000000ULL) / self->sample_rate;
     if (elapsed_ns > budget_ns)
       self->overrun_count_.fetch_add(1, std::memory_order_relaxed);
+    // Publish callback completion last so readers that acquire the count can
+    // take a self-consistent histogram/counter snapshot.
+    self->callback_count_.fetch_add(1, std::memory_order_release);
 
     return 0;
   }
@@ -351,6 +506,15 @@ private:
       &TropicalDACImpl::fill_buffer,
       this);
 
+    negotiated_buffer_frames_.store(buffer_frames, std::memory_order_release);
+    if (buffer_frames != source->getBufferLength())
+    {
+      audio.closeStream();
+      throw std::runtime_error(
+        "RtAudio negotiated " + std::to_string(buffer_frames)
+        + " frames, but Tropical runtime requires "
+        + std::to_string(source->getBufferLength()));
+    }
     audio.startStream();
   }
 

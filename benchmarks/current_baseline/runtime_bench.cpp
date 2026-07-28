@@ -20,7 +20,9 @@
 
 #if defined(__APPLE__)
 #include <mach/mach.h>
+#include <sys/resource.h>
 #elif defined(__linux__)
+#include <sys/resource.h>
 #include <unistd.h>
 #endif
 
@@ -174,6 +176,21 @@ uint64_t elapsed_ns(Clock::time_point start, Clock::time_point end)
     std::chrono::duration_cast<std::chrono::nanoseconds>(end - start).count());
 }
 
+uint64_t process_cpu_ns()
+{
+#if defined(__APPLE__) || defined(__linux__)
+  rusage usage{};
+  if (getrusage(RUSAGE_SELF, &usage) != 0) return 0;
+  const auto timeval_ns = [](const timeval & value) {
+    return static_cast<uint64_t>(value.tv_sec) * 1000000000ULL
+      + static_cast<uint64_t>(value.tv_usec) * 1000ULL;
+  };
+  return timeval_ns(usage.ru_utime) + timeval_ns(usage.ru_stime);
+#else
+  return 0;
+#endif
+}
+
 bool load(tropical_runtime_t rt, const Options & o,
           const std::string & ir, const std::string & manifest,
           const std::string & coeff, const std::string & msl)
@@ -230,8 +247,38 @@ int main(int argc, char ** argv)
     std::vector<uint64_t> rss_block;
     std::vector<uint64_t> rss_value;
     std::vector<uint64_t> reference_block;
+    std::vector<std::string> reference_label;
+    std::vector<uint64_t> reference_start_index;
     std::vector<double> reference_snr_db;
     std::vector<double> reference_max_error;
+    std::vector<uint64_t> callback_histogram;
+    uint64_t callback_histogram_epoch = 0;
+    uint64_t measured_stats_epoch = 0;
+    unsigned int negotiated_buffer_frames = 0;
+    bool callback_progress_stalled = false;
+    bool baseline_completed = false;
+    bool writes_completed = false;
+    bool jump_completed = false;
+    bool reload_completed = false;
+    bool start_reference_completed = false;
+    bool post_jump_reference_completed = false;
+    bool midpoint_reference_completed = false;
+    bool end_reference_completed = false;
+    std::optional<uint64_t> baseline_block;
+    std::optional<uint64_t> first_write_block;
+    std::optional<uint64_t> last_write_block;
+    std::optional<uint64_t> jump_request_block;
+    std::optional<uint64_t> jump_progress_block;
+    std::optional<uint64_t> reload_request_block;
+    std::optional<uint64_t> reload_publication_block;
+    std::optional<uint64_t> reload_progress_block;
+    std::optional<uint64_t> start_reference_block;
+    std::optional<uint64_t> post_jump_reference_block;
+    std::optional<uint64_t> midpoint_reference_block;
+    std::optional<uint64_t> end_reference_block;
+    std::optional<uint64_t> post_jump_preceding_write_block;
+    std::optional<uint64_t> midpoint_preceding_write_block;
+    std::optional<uint64_t> end_preceding_write_block;
     std::optional<uint64_t> latency_blocks;
     std::optional<uint64_t> reload_ns;
     uint64_t overrun_count = 0;
@@ -250,15 +297,35 @@ int main(int argc, char ** argv)
     }
 
     const auto run_start = Clock::now();
+    uint64_t cpu_start_ns = process_cpu_ns();
+    uint64_t cpu_delta_ns = 0;
     uint64_t block = 0;
     uint64_t run_ns = 0;
     tropical_dac_stats_t dac_stats{};
     std::vector<std::string> dac_snapshot_labels;
     std::vector<tropical_dac_stats_t> dac_snapshots;
+    std::vector<uint64_t> dac_snapshot_epochs;
     bool dac_aborted = false;
     std::string dac_abort_reason;
+    std::string reference_failure_reason;
     if (o.dac)
     {
+      if (!o.reference_slot)
+        throw std::runtime_error(
+          "--dac qualification requires --reference-slot");
+
+      // A completely separate JIT runtime is the reference oracle. It is
+      // never processed by the DAC callback and is updated only by this
+      // control thread, avoiding races with the live Metal runtime.
+      tropical_runtime_t reference_rt = tropical_runtime_new(o.buffer);
+      if (!reference_rt) throw std::runtime_error(tropical_last_error());
+      if (!load(reference_rt, o, ir, manifest, coeff, {}))
+      {
+        const std::string error = tropical_last_error();
+        tropical_runtime_free(reference_rt);
+        throw std::runtime_error(error);
+      }
+
       tropical_dac_t dac =
         tropical_dac_new_runtime(rt, static_cast<unsigned int>(o.rate), 2);
       if (!dac) throw std::runtime_error(tropical_last_error());
@@ -276,6 +343,7 @@ int main(int argc, char ** argv)
         tropical_dac_get_stats(dac, &stats);
         dac_snapshot_labels.push_back(label);
         dac_snapshots.push_back(stats);
+        dac_snapshot_epochs.push_back(tropical_dac_get_stats_epoch(dac));
       };
 
       // Startup/device-prime status is useful evidence but is not part of the
@@ -283,22 +351,104 @@ int main(int argc, char ** argv)
       // two-second boundary before any qualification event is scheduled.
       std::this_thread::sleep_for(std::chrono::seconds(2));
       snapshot("startup_warmup_before_reset");
-      tropical_dac_reset_stats(dac);
+      negotiated_buffer_frames = tropical_dac_get_buffer_frames(dac);
+      if (negotiated_buffer_frames != o.buffer)
+      {
+        dac_aborted = true;
+        dac_abort_reason = "negotiated_buffer_length_mismatch";
+      }
+      measured_stats_epoch = tropical_dac_reset_stats_epoch(dac);
+      if (measured_stats_epoch == 0)
+      {
+        dac_aborted = true;
+        dac_abort_reason = "stats_epoch_reset_timeout";
+      }
       const auto measured_start = Clock::now();
+      cpu_start_ns = process_cpu_ns();
       const uint64_t baseline_blocks =
         std::max<uint64_t>(1, static_cast<uint64_t>(2.0 * o.rate / o.buffer));
+      const uint64_t expected_blocks =
+        std::max<uint64_t>(1, static_cast<uint64_t>(
+          o.duration_seconds * o.rate / o.buffer));
+      const uint64_t end_reference_target =
+        std::max<uint64_t>(1, expected_blocks * 9 / 10);
       uint64_t next_write = std::numeric_limits<uint64_t>::max();
       uint64_t next_rss = 0;
-      bool baseline_recorded = false;
-      bool writes_recorded = false;
-      bool jump_recorded = false;
+      uint64_t last_progress_block = 0;
+      auto last_progress_at = Clock::now();
+
+      auto capture_reference =
+        [&](const std::string & label, std::optional<uint64_t> & event_block)
+          -> bool {
+        const uint64_t sequence = tropical_dac_request_output_capture(dac);
+        if (sequence == 0) return false;
+        std::vector<double> actual(o.buffer, 0.0);
+        uint64_t start_index = 0;
+        const auto capture_deadline =
+          Clock::now() + std::chrono::seconds(2);
+        while (Clock::now() < capture_deadline
+               && !tropical_dac_read_output_capture(
+                 dac, sequence, &start_index, actual.data(), actual.size()))
+          std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        if (!tropical_dac_read_output_capture(
+              dac, sequence, &start_index, actual.data(), actual.size()))
+          return false;
+
+        std::vector<double> reference(o.buffer, 0.0);
+        const uint32_t slot_id = *o.reference_slot;
+        if (!tropical_runtime_render_window(
+              reference_rt, start_index, o.buffer,
+              &slot_id, 1, reference.data()))
+          return false;
+
+        double signal = 0.0;
+        double error = 0.0;
+        double max_error = 0.0;
+        for (uint32_t i = 0; i < o.buffer; ++i)
+        {
+          signal += reference[i] * reference[i];
+          const double delta = reference[i] - actual[i];
+          error += delta * delta;
+          max_error = std::max(max_error, std::fabs(delta));
+        }
+        tropical_dac_stats_t stats{};
+        tropical_dac_get_stats(dac, &stats);
+        event_block = stats.callback_count;
+        reference_label.push_back(label);
+        reference_block.push_back(stats.callback_count);
+        reference_start_index.push_back(start_index);
+        reference_snr_db.push_back(
+          error == 0.0 ? (signal > 0.0 ? 999.0 : 0.0)
+                       : (signal > 0.0
+                            ? 10.0 * std::log10(signal / error) : -999.0));
+        reference_max_error.push_back(max_error);
+        if (signal <= 0.0)
+          reference_failure_reason = label + "_reference_signal_zero";
+        else if (!std::isfinite(reference_snr_db.back()))
+          reference_failure_reason = label + "_reference_snr_nonfinite";
+        else if (reference_snr_db.back() < 80.0)
+          reference_failure_reason = label + "_reference_snr_below_80db";
+        return reference_failure_reason.empty();
+      };
+
       bool jumped = false;
+      bool jump_progress_seen = false;
       bool reloaded = false;
-      while (std::chrono::duration<double>(Clock::now() - measured_start).count()
+      bool reload_progress_seen = false;
+      while (!dac_aborted
+             && std::chrono::duration<double>(
+                  Clock::now() - measured_start).count()
                < o.duration_seconds)
       {
         tropical_dac_get_stats(dac, &dac_stats);
         block = dac_stats.callback_count;
+        if (tropical_dac_get_stats_epoch(dac) != measured_stats_epoch)
+        {
+          dac_aborted = true;
+          dac_abort_reason = "stats_epoch_changed";
+          snapshot("measured_failure_abort");
+          break;
+        }
         if (dac_stats.underrun_count > 0 || dac_stats.overrun_count > 0)
         {
           dac_aborted = true;
@@ -307,39 +457,135 @@ int main(int argc, char ** argv)
           snapshot("measured_failure_abort");
           break;
         }
-        if (!baseline_recorded && block >= baseline_blocks)
+        if (block != last_progress_block)
+        {
+          last_progress_block = block;
+          last_progress_at = Clock::now();
+        }
+        else if (Clock::now() - last_progress_at > std::chrono::seconds(2))
+        {
+          callback_progress_stalled = true;
+          dac_aborted = true;
+          dac_abort_reason = "callback_progress_stalled";
+          snapshot("measured_failure_abort");
+          break;
+        }
+
+        if (!baseline_completed && block >= baseline_blocks)
         {
           snapshot("clean_baseline_after_reset");
-          baseline_recorded = true;
+          baseline_completed = true;
+          baseline_block = block;
+          start_reference_completed =
+            capture_reference("start", start_reference_block);
+          if (!start_reference_completed)
+          {
+            dac_aborted = true;
+            dac_abort_reason = reference_failure_reason.empty()
+              ? "start_reference_capture_failed" : reference_failure_reason;
+            break;
+          }
           next_write = o.write_every > 0 ? block + o.write_every
                                          : std::numeric_limits<uint64_t>::max();
         }
-        if (baseline_recorded && o.write_every > 0 && block >= next_write)
+        if (baseline_completed && o.write_every > 0 && block >= next_write)
         {
           write_value =
             write_value == o.slot_value ? o.slot_value * 0.5 : o.slot_value;
           const auto start = Clock::now();
           for (uint32_t i = 0; i < o.write_count; ++i)
+          {
             tropical_runtime_set_slot(rt, *o.slot + i, write_value);
+            tropical_runtime_set_slot(
+              reference_rt, *o.slot + i, write_value);
+          }
           write_ns.push_back(elapsed_ns(start, Clock::now()));
+          if (!first_write_block) first_write_block = block;
+          last_write_block = block;
+          writes_completed = true;
           next_write += o.write_every;
         }
-        if (!jumped && o.jump_at && block >= *o.jump_at)
+        if (!jumped && baseline_completed && writes_completed
+            && last_write_block && block > *last_write_block
+            && o.jump_at && block >= *o.jump_at)
         {
-          snapshot("after_periodic_writes");
-          writes_recorded = true;
+          snapshot("before_clock_jump");
+          jump_request_block = block;
           tropical_runtime_set_sample_index(rt, o.jump_index);
+          tropical_runtime_set_sample_index(reference_rt, o.jump_index);
           jumped = true;
         }
-        if (!reloaded && o.reload_at && block >= *o.reload_at)
+        if (jumped && !jump_progress_seen && block > *jump_request_block)
         {
-          snapshot("after_clock_jump");
-          jump_recorded = true;
+          jump_progress_seen = true;
+          jump_completed = true;
+          jump_progress_block = block;
+          snapshot("after_clock_jump_progress");
+          post_jump_preceding_write_block = last_write_block;
+          post_jump_reference_completed =
+            capture_reference("post_2p40_clock_jump",
+                              post_jump_reference_block);
+          if (!post_jump_reference_completed)
+          {
+            dac_aborted = true;
+            dac_abort_reason = reference_failure_reason.empty()
+              ? "post_jump_reference_capture_failed"
+              : reference_failure_reason;
+            break;
+          }
+        }
+        if (!reloaded && jump_completed && last_write_block
+            && block > *last_write_block && o.reload_at
+            && block >= *o.reload_at)
+        {
+          snapshot("before_hot_swap");
+          reload_request_block = block;
           const auto start = Clock::now();
           if (!load(rt, o, ir, manifest, coeff, msl))
             throw std::runtime_error(tropical_last_error());
           reload_ns = elapsed_ns(start, Clock::now());
+          tropical_dac_stats_t published{};
+          tropical_dac_get_stats(dac, &published);
+          reload_publication_block = published.callback_count;
+          if (!load(reference_rt, o, ir, manifest, coeff, {}))
+            throw std::runtime_error(tropical_last_error());
           reloaded = true;
+        }
+        if (reloaded && !reload_progress_seen
+            && block > *reload_publication_block)
+        {
+          reload_progress_seen = true;
+          reload_completed = true;
+          reload_progress_block = block;
+          snapshot("after_hot_swap_progress");
+          midpoint_preceding_write_block = last_write_block;
+          midpoint_reference_completed =
+            capture_reference("midpoint_after_hot_swap",
+                              midpoint_reference_block);
+          if (!midpoint_reference_completed)
+          {
+            dac_aborted = true;
+            dac_abort_reason = reference_failure_reason.empty()
+              ? "midpoint_reference_capture_failed"
+              : reference_failure_reason;
+            break;
+          }
+        }
+        if (!end_reference_completed && reload_completed
+            && block >= end_reference_target
+            && (!last_write_block
+                || block >= *last_write_block + depth + 1))
+        {
+          end_preceding_write_block = last_write_block;
+          end_reference_completed =
+            capture_reference("end", end_reference_block);
+          if (!end_reference_completed)
+          {
+            dac_aborted = true;
+            dac_abort_reason = reference_failure_reason.empty()
+              ? "end_reference_capture_failed" : reference_failure_reason;
+            break;
+          }
         }
         if (o.rss_every > 0 && block >= next_rss)
         {
@@ -349,19 +595,62 @@ int main(int argc, char ** argv)
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
       }
-      if (!dac_aborted)
+
+      if (!dac_aborted
+          && !(baseline_completed && writes_completed && jump_completed
+               && reload_completed && start_reference_completed
+               && post_jump_reference_completed
+               && midpoint_reference_completed && end_reference_completed))
       {
-        if (!baseline_recorded) snapshot("clean_baseline_after_reset");
-        if (!writes_recorded) snapshot("after_periodic_writes");
-        if (!jump_recorded) snapshot("after_clock_jump");
-        snapshot("after_hot_swap");
+        dac_aborted = true;
+        dac_abort_reason = "required_event_missing";
+        snapshot("measured_failure_abort");
       }
       tropical_dac_get_stats(dac, &dac_stats);
+      block = dac_stats.callback_count;
       overrun_count = dac_stats.overrun_count;
+
+      callback_histogram.resize(
+        tropical_dac_callback_histogram_bin_count(), 0);
+      bool histogram_consistent = false;
+      for (unsigned int attempt = 0; attempt < 100; ++attempt)
+      {
+        if (tropical_dac_copy_callback_histogram(
+              dac, callback_histogram.data(), callback_histogram.size(),
+              &callback_histogram_epoch) == callback_histogram.size())
+        {
+          tropical_dac_stats_t candidate{};
+          tropical_dac_get_stats(dac, &candidate);
+          uint64_t histogram_count = 0;
+          for (const uint64_t count : callback_histogram)
+            histogram_count += count;
+          if (histogram_count == candidate.callback_count)
+          {
+            dac_stats = candidate;
+            block = candidate.callback_count;
+            overrun_count = candidate.overrun_count;
+            histogram_consistent = true;
+            break;
+          }
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+      }
+      if (!histogram_consistent
+          || callback_histogram_epoch != measured_stats_epoch)
+      {
+        dac_aborted = true;
+        if (dac_abort_reason.empty())
+          dac_abort_reason = "callback_histogram_snapshot_failed";
+      }
+
+      run_ns = elapsed_ns(measured_start, Clock::now());
+      const uint64_t cpu_end_ns = process_cpu_ns();
+      cpu_delta_ns =
+        cpu_end_ns >= cpu_start_ns ? cpu_end_ns - cpu_start_ns : 0;
       tropical_dac_stop(dac);
       snapshot("after_stop");
       tropical_dac_free(dac);
-      run_ns = elapsed_ns(measured_start, Clock::now());
+      tropical_runtime_free(reference_rt);
     }
     else
     {
@@ -447,9 +736,16 @@ int main(int argc, char ** argv)
         }
       }
       run_ns = elapsed_ns(run_start, Clock::now());
+      const uint64_t cpu_end_ns = process_cpu_ns();
+      cpu_delta_ns =
+        cpu_end_ns >= cpu_start_ns ? cpu_end_ns - cpu_start_ns : 0;
     }
     const uint64_t final_rss = rss_bytes();
     tropical_runtime_free(rt);
+
+    auto print_optional = [](const std::optional<uint64_t> & value) {
+      if (value) std::cout << *value; else std::cout << "null";
+    };
 
     std::cout << "{\"schema\":\"tropical_runtime_bench_1\""
               << ",\"buffer_length\":" << o.buffer
@@ -458,6 +754,13 @@ int main(int argc, char ** argv)
               << ",\"pipeline_depth\":" << depth
               << ",\"load_ns\":" << load_ns
               << ",\"run_ns\":" << run_ns
+              << ",\"process_cpu_ns\":" << cpu_delta_ns
+              << ",\"process_cpu_seconds\":"
+              << static_cast<double>(cpu_delta_ns) / 1e9
+              << ",\"process_cpu_fraction\":"
+              << (run_ns > 0
+                    ? static_cast<double>(cpu_delta_ns)
+                      / static_cast<double>(run_ns) : 0.0)
               << ",\"blocks\":" << block
               << ",\"dac_mode\":" << (o.dac ? "true" : "false")
               << ",\"dac_aborted\":" << (dac_aborted ? "true" : "false")
@@ -466,6 +769,9 @@ int main(int argc, char ** argv)
     else std::cout << '"' << dac_abort_reason << '"';
     std::cout
               << ",\"deadline_ns\":" << deadline_ns
+              << ",\"negotiated_buffer_frames\":"
+              << negotiated_buffer_frames
+              << ",\"measured_stats_epoch\":" << measured_stats_epoch
               << ",\"overrun_count\":" << overrun_count
               << ",\"nonfinite_count\":" << nonfinite_count
               << ",\"checksum\":" << checksum
@@ -485,6 +791,15 @@ int main(int argc, char ** argv)
     print_array(rss_value);
     std::cout << ",\"reference_blocks\":";
     print_array(reference_block);
+    std::cout << ",\"reference_labels\":[";
+    for (std::size_t i = 0; i < reference_label.size(); ++i)
+    {
+      if (i) std::cout << ',';
+      std::cout << '"' << reference_label[i] << '"';
+    }
+    std::cout << ']';
+    std::cout << ",\"reference_start_indices\":";
+    print_array(reference_start_index);
     std::cout << ",\"reference_snr_db\":";
     print_array(reference_snr_db);
     std::cout << ",\"reference_max_error\":";
@@ -495,6 +810,60 @@ int main(int argc, char ** argv)
               << ",\"max_callback_ms\":" << dac_stats.max_callback_ms
               << ",\"underrun_count\":" << dac_stats.underrun_count
               << ",\"overrun_count\":" << dac_stats.overrun_count << '}';
+    std::cout << ",\"callback_histogram\":{"
+              << "\"epoch\":" << callback_histogram_epoch
+              << ",\"bin_width_ns\":"
+              << tropical_dac_callback_histogram_bin_width_ns()
+              << ",\"overflow_floor_ns\":"
+              << tropical_dac_callback_histogram_overflow_floor_ns()
+              << ",\"counts\":";
+    print_array(callback_histogram);
+    std::cout << '}';
+    std::cout << ",\"event_completion\":{"
+              << "\"baseline\":" << (baseline_completed ? "true" : "false")
+              << ",\"writes\":" << (writes_completed ? "true" : "false")
+              << ",\"clock_jump\":" << (jump_completed ? "true" : "false")
+              << ",\"hot_swap\":" << (reload_completed ? "true" : "false")
+              << ",\"start_reference\":"
+              << (start_reference_completed ? "true" : "false")
+              << ",\"post_jump_reference\":"
+              << (post_jump_reference_completed ? "true" : "false")
+              << ",\"midpoint_reference\":"
+              << (midpoint_reference_completed ? "true" : "false")
+              << ",\"end_reference\":"
+              << (end_reference_completed ? "true" : "false")
+              << ",\"callback_progress_stalled\":"
+              << (callback_progress_stalled ? "true" : "false")
+              << '}';
+    std::cout << ",\"event_blocks\":{";
+    std::cout << "\"baseline\":"; print_optional(baseline_block);
+    std::cout << ",\"first_write\":"; print_optional(first_write_block);
+    std::cout << ",\"last_write\":"; print_optional(last_write_block);
+    std::cout << ",\"clock_jump_request\":";
+    print_optional(jump_request_block);
+    std::cout << ",\"clock_jump_progress\":";
+    print_optional(jump_progress_block);
+    std::cout << ",\"hot_swap_request\":";
+    print_optional(reload_request_block);
+    std::cout << ",\"hot_swap_publication\":";
+    print_optional(reload_publication_block);
+    std::cout << ",\"hot_swap_progress\":";
+    print_optional(reload_progress_block);
+    std::cout << ",\"start_reference\":";
+    print_optional(start_reference_block);
+    std::cout << ",\"post_jump_reference\":";
+    print_optional(post_jump_reference_block);
+    std::cout << ",\"midpoint_reference\":";
+    print_optional(midpoint_reference_block);
+    std::cout << ",\"end_reference\":";
+    print_optional(end_reference_block);
+    std::cout << ",\"post_jump_preceding_write\":";
+    print_optional(post_jump_preceding_write_block);
+    std::cout << ",\"midpoint_preceding_write\":";
+    print_optional(midpoint_preceding_write_block);
+    std::cout << ",\"end_preceding_write\":";
+    print_optional(end_preceding_write_block);
+    std::cout << '}';
     std::cout << ",\"dac_snapshots\":[";
     for (std::size_t i = 0; i < dac_snapshots.size(); ++i)
     {
@@ -502,6 +871,7 @@ int main(int argc, char ** argv)
       const auto & stats = dac_snapshots[i];
       std::cout << "{\"label\":\"" << dac_snapshot_labels[i]
                 << "\",\"callback_count\":" << stats.callback_count
+                << ",\"epoch\":" << dac_snapshot_epochs[i]
                 << ",\"avg_callback_ms\":" << stats.avg_callback_ms
                 << ",\"max_callback_ms\":" << stats.max_callback_ms
                 << ",\"underrun_count\":" << stats.underrun_count

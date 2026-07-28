@@ -27,9 +27,37 @@ after stop. Its measured window had 1293 callbacks, 0.096 ms average, 2.723 ms
 max, and zero overruns. This permits a reset-bounded 30-minute measurement; it
 does not erase the original one-underrun row.
 
-The long-row status and raw-data links will be frozen here after the stable
-implementation commit. Until that row completes, Metal remains
-**qualification pending**, not release-qualified.
+The first long attempt was interrupted because review found the original
+harness could not prove live SNR, callback p95/p99, or actual event progress.
+It is explicitly a rejected diagnostic, not a qualification row. The final
+16-second real-DAC harness smoke passed every fail-closed gate with 1379
+measured callbacks, zero underruns/overruns, a 0.249 ms p99 upper bound at
+1 us resolution, 6.525 ms exact max, 5.61% process CPU/wall, and
+142.46–145.48 dB nonzero JIT-reference SNR at start, post-2^40,
+midpoint-after-swap, and end. All required event booleans and callback indices
+were present, and the ordinary end capture was 38 callbacks after its preceding
+write (D+1 required). Three RSS samples after the explicit two-second
+post-hot-swap settling boundary decreased by 49,152 bytes and passed the
+non-monotonic-growth gate. This validates the harness only; it is not a
+long-run memory conclusion.
+
+Raw evidence is intentionally classified rather than blended:
+
+- `data/failed-underrun-smoke-b512-d3-m1pro-20260727.jsonl`: original genuine
+  one-underrun failure;
+- `data/reset-bounded-diagnostic-b512-d3-m1pro-20260727.jsonl`: clean snapshot
+  diagnostic after the startup/reset split;
+- `data/interrupted-pre-abort-fix-b512-d3-m1pro-20260727.jsonl` and
+  `data/interrupted-review-rejected-b512-d3-m1pro-20260727.jsonl`: manifest-only
+  interrupted attempts, never qualification rows;
+- `data/pre-hard-gates-diagnostic-b512-d3-m1pro-20260727.jsonl`: pre-threshold
+  smoke retained as a diagnostic;
+- `data/corrected-harness-smoke-b512-d3-m1pro-20260727.jsonl`: final short
+  review smoke with explicit gate results.
+
+Until corrected 30-minute B=512 and 10-minute B=128/B=256 rows complete from a
+reviewed clean commit, Metal remains **qualification pending**, not
+release-qualified.
 
 **Date:** 2026-07-07
 **Host:** Apple M1 Pro, macOS 26.3, 44.1 kHz, B=512 (engine boot default)
@@ -98,18 +126,30 @@ D blocks** (34.8 ms at B=512, 8.7 ms at B=128). Clock jumps
 hot-swap primes at the carried `sample_index` (measured seamless, max
 0.73 ms callback through a swap).
 
-## Recommendation
+## Historical recommendation (superseded)
 
-Default the live engine to `TROPICAL_BACKEND=metal` + pipeline on Apple
+The July 7 recommendation was to default the live engine to
+`TROPICAL_BACKEND=metal` + pipeline on Apple
 hardware; keep B=128–256 if the D-block param latency matters (8.7–17.4 ms —
 comparable to typical controller→audio latency), B=512 for maximum headroom.
 The JIT remains the correctness reference, the scope path (`render_window`),
 and the portability fallback — dual-load makes that free.
 
+That recommendation is **not current release guidance**. The sprint evidence
+supports exact D-block transport and a corrected short smoke, but the required
+long live rows are still pending.
+
 ## Pending
 
-- 30-min soak (leaks/@autoreleasepool discipline, SNR drift) — not yet run.
-- B-sweep of live sessions (engine buffer length is fixed at boot; needs a
-  boot flag before B=128/256 live rows can be measured).
-- Knob-latency measurement under pipeline (bounded by D·B by construction;
-  not yet measured empirically).
+- Corrected 30-minute B=512 and 10-minute B=128/B=256 actual-DAC rows.
+- Process user+system CPU seconds and measured-wall fraction are recorded.
+  Per-core attribution, pipeline queue-depth samples, and Metal
+  resource/object counts are not exposed by the current harness.
+- Callback p95/p99 are 1 us histogram upper bounds, not exact retained samples;
+  the exact max remains available. The fixed histogram has an explicit >=20 ms
+  overflow bin.
+- The control-latency matrix measures impulsive slot transport for all four
+  host write shapes; deliberately glided audible onset remains outside that
+  transport claim.
+- A second Apple generation and compositor-contention row remain optional,
+  untested hardware risks.

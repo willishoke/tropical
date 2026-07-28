@@ -154,9 +154,19 @@ the 512 default.
 ## Audio output (`dac/TropicalDAC.hpp`)
 
 `TropicalDACImpl<AudioSource>` is the RtAudio device driver. The callback
-copies mono output to every device channel and records callback timing,
-underruns, and overruns. A watcher handles device loss/default-device changes;
-explicit switches and reconnects use fade-in.
+copies mono output to every device channel and:
+
+- tracks timing stats
+  (avg/max callback ms, underrun/overrun counts), and increments a fixed
+  preallocated 1 us callback histogram. Qualification reset uses a
+  callback-boundary epoch; it never resets counters concurrently mid-callback.
+- Qualification output capture uses one construction-time buffer and a
+  request/ready sequence. The callback performs only a bounded copy; it does
+  not allocate, lock, or perform I/O.
+- RtAudio must negotiate the runtime's requested frame count exactly; a
+  mismatch closes the stream and refuses before playback.
+- A watcher polls for disconnect/default-device changes; recovery and explicit
+  device switches use fade-in.
 
 ## C API boundary
 

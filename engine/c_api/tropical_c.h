@@ -62,6 +62,26 @@ typedef struct {
 
 void tropical_dac_get_stats(tropical_dac_t, tropical_dac_stats_t* out);
 void tropical_dac_reset_stats(tropical_dac_t);
+/* Race-free measured-window reset. Returns the applied epoch, or 0 if no
+   callback boundary acknowledged the reset within two seconds. */
+uint64_t tropical_dac_reset_stats_epoch(tropical_dac_t);
+uint64_t tropical_dac_get_stats_epoch(tropical_dac_t);
+/* Fixed callback-duration histogram: 1 us bins [0,20 ms), plus one >=20 ms
+   overflow bin. The audio thread performs one relaxed atomic increment and
+   never allocates, locks, or performs I/O. Returns bins copied, or 0. */
+size_t tropical_dac_callback_histogram_bin_count(void);
+uint64_t tropical_dac_callback_histogram_bin_width_ns(void);
+uint64_t tropical_dac_callback_histogram_overflow_floor_ns(void);
+size_t tropical_dac_copy_callback_histogram(
+  tropical_dac_t, uint64_t* out, size_t capacity, uint64_t* epoch);
+/* Qualification output capture. One buffer is preallocated at construction;
+   request/read never changes the audio path except for one bounded copy. */
+uint64_t tropical_dac_request_output_capture(tropical_dac_t);
+bool tropical_dac_read_output_capture(
+  tropical_dac_t, uint64_t sequence, uint64_t* start_index,
+  double* out, size_t capacity);
+/* Actual frame count negotiated by RtAudio (0 before stream open). */
+unsigned int tropical_dac_get_buffer_frames(tropical_dac_t);
 /* True while a device-disconnect has been detected and reconnection is in progress */
 bool tropical_dac_is_reconnecting(tropical_dac_t);
 

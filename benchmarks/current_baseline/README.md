@@ -22,6 +22,14 @@ keeps artifact generation, ORC/MSL load, raw slot writes, and block execution
 as separate walls. The orchestrator retains every raw load/write/block sample
 in JSONL and adds minimum/median/p95/p99/max summaries.
 
+Each compile repeat now performs two complete generations: a cold generation
+with a fresh benchmark-owned cache and a warm generation in a new subprocess
+reusing that exact cache. Raw walls and minimum/median/variance summaries are
+recorded separately. The four-ring row also repeats one topology addition and
+one baked modal-capacity change (the current structural-selector surrogate).
+The graph decoder's `sel` object is currently inert, so the report says so
+rather than presenting a no-op selector mutation as evidence.
+
 ## Cache safety
 
 The production default remains:
@@ -36,10 +44,12 @@ Two opt-in benchmark controls are available:
   caller-owned root.
 - `TROPICAL_KERNEL_CACHE_DISABLE=1` disables disk reads and writes.
 
-The harness always uses a fresh temporary root beneath its run directory. A
-cold sample is a new process with a fresh root; the paired warm sample is a
-second process reusing only that root. It snapshots the ordinary cache before
-and after and records whether it changed. It never deletes the ordinary cache.
+The harness removes every inherited `TROPICAL_*` variable, then explicitly
+sets and records stage-0 enabled, banked realization, JIT O2, synchronous Metal
+for baseline rows, and its cache root. A cold sample is a complete generation
+with a fresh root; the paired warm sample is a second complete generation
+reusing only that root. It snapshots the ordinary cache before and after and
+records whether it changed. It never deletes the ordinary cache.
 
 ## Metric boundaries
 

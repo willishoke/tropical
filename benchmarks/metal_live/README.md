@@ -23,20 +23,41 @@ raw=1, glide=3, anchor=2, velocity=2. This isolates future-block transport
 latency from intentionally subjective glide onset. The harness fails if the
 first changed block differs from D.
 
-The soak compiles the real 512-partial bank. Its sink passes through a live
-parameter-backed zero multiplier: the modal workload remains reachable and
-runs, but the default-device output is silent. It records:
+The soak compiles the real 512-partial bank. The bank stays reachable behind a
+live 1e-12 gain (−240 dB), and a continuous 55 Hz correctness canary runs at
+1e-8 amplitude (−160 dB). This is effectively silent at the default device but
+keeps every reference comparison nonzero, including after the 2^40 clock jump.
+It records:
 
-- real `tropical_dac_*` callback count/average/max and RtAudio
-  underrun/overrun counts;
-- snapshots before reset, at a clean post-reset baseline, after periodic
-  writes, after a clock jump, after hot-swap, and after stop;
-- resident memory every five seconds;
+- real callback count/average/max plus p50/p95/p99 upper bounds from a
+  preallocated fixed histogram (1 us resolution, >=20 ms overflow bin);
+- a callback-boundary stats epoch, requested and negotiated RtAudio frames,
+  and RtAudio underrun/overrun counts;
+- progress-gated snapshots and actual callback indices for baseline, periodic
+  writes, clock jump, publication, and the first post-publication callback;
+- nonzero JIT-reference SNR/max error from a separate, control-thread-only JIT
+  runtime at start, post-2^40, midpoint-after-swap, and end;
+- resident memory every two seconds, with the growth window beginning two
+  seconds after observed hot-swap progress;
+- process user+system CPU seconds and measured-wall fraction;
 - write and hot-swap walls;
 - a separate offline per-block p50/p95/p99 supporting row.
 
-Startup status is preserved but separated from the measured window. Any
-post-reset underrun marks the row blocked; the test is never weakened.
+The audio callback performs no allocation, lock, or I/O for telemetry: it adds
+one relaxed histogram increment and services at most one preallocated capture
+buffer. Startup status is preserved but separated by an epoch applied at an
+actual callback boundary. A negotiated-frame mismatch refuses before stream
+start. Any post-reset underrun, callback overrun/stall, missing event/reference,
+reference checkpoint below 80 dB, callback p99 at or above 50% of the block
+deadline, or monotonic post-warmup RSS growth marks the row blocked. Ordinary
+end captures wait at least pipeline depth plus one callback after the preceding
+write; jump and hot-swap checkpoints are tied to their observed re-prime
+progress callbacks.
+At least three post-warmup RSS samples are required; an empty or short series
+cannot pass the memory gate.
+
+Before every subprocess, inherited `TROPICAL_*` variables are removed and the
+benchmark controls are explicitly set and recorded.
 
 The engine boot block length is independently selectable with
 `TROPICAL_BUFFER_LENGTH` (16..16384) before runtime/DAC construction. The
