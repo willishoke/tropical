@@ -55,6 +55,30 @@ struct ParamDispatchResult
   std::string error;
 };
 
+// Explicit ownership for storage that is mutated off the audio thread.
+// These atomics deliberately live outside KernelState: KernelState is movable
+// during hot-swap, while ownership must remain at a stable address.
+enum class StorageOwner : uint8_t { Free, Audio, Writer };
+static_assert(std::atomic<StorageOwner>::is_always_lock_free);
+
+// Deterministic concurrency-test seam. Production leaves this null. Tests may
+// pause a clock request while odd or the audio callback after it owns a state
+// or generation, forcing boundary/publication/reuse interleavings without
+// relying on scheduler timing.
+struct RuntimeOwnershipTestSeam
+{
+  std::atomic<bool> pause_after_clock_payload{false};
+  std::atomic<bool> clock_payload_stored{false};
+  std::atomic<bool> release_clock{false};
+  std::atomic<bool> pause_after_state_ownership{false};
+  std::atomic<bool> state_owned{false};
+  std::atomic<bool> release_state{false};
+  std::atomic<bool> writer_waiting_for_state{false};
+  std::atomic<bool> pause_after_generation_ownership{false};
+  std::atomic<bool> generation_owned{false};
+  std::atomic<bool> release_generation{false};
+};
+
 struct KernelState
 {
   // ── Metal execution backend (TROPICAL_METAL builds) ─────────────────────
@@ -226,7 +250,15 @@ public:
   {
     std::lock_guard<std::mutex> lock(build_mutex_);
     sample_index_request_seq_.fetch_add(1, std::memory_order_acq_rel);
-    requested_sample_index_.store(idx, std::memory_order_relaxed);
+    requested_sample_index_.store(idx, std::memory_order_release);
+    if (RuntimeOwnershipTestSeam * seam =
+          ownership_test_seam_.load(std::memory_order_acquire);
+        seam && seam->pause_after_clock_payload.load(std::memory_order_acquire))
+    {
+      seam->clock_payload_stored.store(true, std::memory_order_release);
+      while (!seam->release_clock.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    }
     sample_index_request_seq_.fetch_add(1, std::memory_order_release);
   }
 
@@ -236,19 +268,6 @@ public:
    */
   void process()
   {
-    // Advertise processing before selecting a state, then capture/advertise/
-    // verify the active index. A rapid second hot-swap must wait before it can
-    // reuse the state this callback has verified.
-    audio_processing_.store(true, std::memory_order_release);
-    uint32_t state_idx = 0;
-    do
-    {
-      state_idx = active_state_.load(std::memory_order_acquire);
-      audio_state_index_.store(state_idx, std::memory_order_release);
-    }
-    while (active_state_.load(std::memory_order_acquire) != state_idx);
-    KernelState & state = states_[state_idx];
-
     // Apply a control-plane clock reposition exactly at this buffer boundary.
     // The plain audio_* clock fields are owned solely by this thread.
     const uint64_t request_seq_before =
@@ -257,7 +276,7 @@ public:
         && request_seq_before != audio_applied_sample_index_seq_)
     {
       const uint64_t requested =
-        requested_sample_index_.load(std::memory_order_relaxed);
+        requested_sample_index_.load(std::memory_order_acquire);
       const uint64_t request_seq_after =
         sample_index_request_seq_.load(std::memory_order_acquire);
       if (request_seq_before == request_seq_after)
@@ -268,20 +287,96 @@ public:
     }
     const uint64_t start_sample_index = audio_sample_index_;
 
-    // Advertise state + processing first, then capture/advertise/verify one
-    // coherent control generation. A writer excludes both the current
-    // published generation and this advertised generation for this state.
-    // The verification loop closes the window where a writer publishes
-    // between our first load and advertisement.
+    auto finish_silence = [&] {
+      std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);
+      audio_sample_index_ += buffer_length_;
+      published_sample_index_.store(
+        audio_sample_index_, std::memory_order_release);
+    };
+
+    // Own a state before reading any of its movable storage, then revalidate
+    // the publication. A control writer may wait/yield; the audio thread makes
+    // only a small fixed number of attempts and fails safely to silence.
+    uint32_t state_idx = 0;
+    bool state_owned = false;
+    for (unsigned int attempt = 0; attempt < kAudioCaptureAttempts_; ++attempt)
+    {
+      state_idx = active_state_.load(std::memory_order_acquire);
+      StorageOwner expected = StorageOwner::Free;
+      if (!state_owners_[state_idx].compare_exchange_strong(
+            expected, StorageOwner::Audio,
+            std::memory_order_acquire, std::memory_order_relaxed))
+        continue;
+      if (active_state_.load(std::memory_order_acquire) == state_idx)
+      {
+        state_owned = true;
+        break;
+      }
+      state_owners_[state_idx].store(
+        StorageOwner::Free, std::memory_order_release);
+    }
+    if (!state_owned)
+    {
+      ownership_failure_count_.fetch_add(1, std::memory_order_relaxed);
+      finish_silence();
+      return;
+    }
+
+    if (RuntimeOwnershipTestSeam * seam =
+          ownership_test_seam_.load(std::memory_order_acquire);
+        seam && seam->pause_after_state_ownership.load(std::memory_order_acquire))
+    {
+      seam->state_owned.store(true, std::memory_order_release);
+      while (!seam->release_state.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    }
+
+    KernelState & state = states_[state_idx];
+
+    // Own the published slot/coefficient generation before copying or using
+    // it. Revalidating after the CAS closes both the initial race and the ABA
+    // reuse window: a writer cannot mutate an audio-owned generation.
     uint32_t control_gen = 0;
-    do
+    bool generation_owned = false;
+    for (unsigned int attempt = 0; attempt < kAudioCaptureAttempts_; ++attempt)
     {
       control_gen = std::atomic_ref(state.control_published_gen)
                       .load(std::memory_order_acquire);
-      audio_control_gen_.store(control_gen, std::memory_order_release);
+      StorageOwner expected = StorageOwner::Free;
+      if (!control_generation_owners_[state_idx][control_gen]
+             .compare_exchange_strong(
+               expected, StorageOwner::Audio,
+               std::memory_order_acquire, std::memory_order_relaxed))
+        continue;
+      if (std::atomic_ref(state.control_published_gen)
+            .load(std::memory_order_acquire) == control_gen)
+      {
+        generation_owned = true;
+        break;
+      }
+      control_generation_owners_[state_idx][control_gen].store(
+        StorageOwner::Free, std::memory_order_release);
     }
-    while (std::atomic_ref(state.control_published_gen)
-             .load(std::memory_order_acquire) != control_gen);
+    if (!generation_owned)
+    {
+      ownership_failure_count_.fetch_add(1, std::memory_order_relaxed);
+      state_owners_[state_idx].store(
+        StorageOwner::Free, std::memory_order_release);
+      finish_silence();
+      return;
+    }
+
+    if (RuntimeOwnershipTestSeam * seam =
+          ownership_test_seam_.load(std::memory_order_acquire);
+        seam
+        && seam->pause_after_generation_ownership.load(
+          std::memory_order_acquire))
+    {
+      seam->generation_owned.store(true, std::memory_order_release);
+      while (!seam->release_generation.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    }
+
     std::copy(state.slot_generations[control_gen].begin(),
               state.slot_generations[control_gen].end(),
               state.audio_slots.begin());
@@ -301,7 +396,10 @@ public:
       audio_sample_index_ += buffer_length_;
       published_sample_index_.store(
         audio_sample_index_, std::memory_order_release);
-      audio_processing_.store(false, std::memory_order_release);
+      control_generation_owners_[state_idx][control_gen].store(
+        StorageOwner::Free, std::memory_order_release);
+      state_owners_[state_idx].store(
+        StorageOwner::Free, std::memory_order_release);
       return;
     }
 
@@ -432,7 +530,10 @@ public:
     // Publish the completed boundary only after all output processing for this
     // buffer (including fade) is complete.
     published_sample_index_.store(audio_sample_index_, std::memory_order_release);
-    audio_processing_.store(false, std::memory_order_release);
+    control_generation_owners_[state_idx][control_gen].store(
+      StorageOwner::Free, std::memory_order_release);
+    state_owners_[state_idx].store(
+      StorageOwner::Free, std::memory_order_release);
   }
 
   std::vector<double> outputBuffer;
@@ -492,7 +593,7 @@ public:
     if (idx < state.slots.size())
     {
       state.slots[idx] = value;
-      publish_control_snapshot(state);
+      publish_control_snapshot(state, state_idx);
     }
   }
 
@@ -526,7 +627,7 @@ public:
       if (state.slot_names[i] == name)
       {
         state.slots[i] = value;
-        publish_control_snapshot(state);
+        publish_control_snapshot(state, state_idx);
         return true;
       }
     return false;
@@ -553,12 +654,12 @@ public:
     if constexpr (std::is_void_v<std::invoke_result_t<Fn &, KernelState &>>)
     {
       fn(state);
-      publish_control_snapshot(state);
+      publish_control_snapshot(state, state_idx);
     }
     else
     {
       auto result = fn(state);
-      publish_control_snapshot(state);
+      publish_control_snapshot(state, state_idx);
       return result;
     }
   }
@@ -650,6 +751,19 @@ public:
     return published_sample_index_.load(std::memory_order_acquire);
   }
 
+  // Number of callbacks that emitted silence because bounded ownership
+  // acquisition could not obtain a coherent state/generation.
+  uint64_t ownership_failure_count() const
+  {
+    return ownership_failure_count_.load(std::memory_order_acquire);
+  }
+
+  // Test-only: install/remove the deterministic ownership pause seam.
+  void set_ownership_test_seam(RuntimeOwnershipTestSeam * seam)
+  {
+    ownership_test_seam_.store(seam, std::memory_order_release);
+  }
+
   // The active kernel's sample rate — the same value the kernel reads for
   // `sampleRate()` (opRate). The control plane needs it to reproduce the
   // phasor's `inc = floor(freq*2^32/SR)` when phase-anchoring a freq change.
@@ -677,20 +791,45 @@ private:
   // Scalar coefficient slots, coefficient columns, and ordinary slots become
   // visible together through one release-published generation word. Called
   // under build_mutex_, except while constructing an unpublished local state.
-  void publish_control_snapshot(KernelState & state)
+  void publish_control_snapshot(
+    KernelState & state, uint32_t state_index = UINT32_MAX)
   {
     const uint32_t pub = std::atomic_ref(state.control_published_gen)
                            .load(std::memory_order_acquire);
-    uint32_t in_use = UINT32_MAX;
-    if (audio_processing_.load(std::memory_order_acquire))
-    {
-      const uint32_t audio_state =
-        audio_state_index_.load(std::memory_order_acquire);
-      if (&state == &states_[audio_state])
-        in_use = audio_control_gen_.load(std::memory_order_acquire);
-    }
     uint32_t target = 0;
-    while (target == pub || target == in_use) ++target;
+    bool target_owned = false;
+    if (state_index == UINT32_MAX)
+    {
+      // A newly built local state is not visible and needs no atomic owner.
+      while (target == pub) ++target;
+    }
+    else
+    {
+      // Control writers are serialized by build_mutex_. They may wait/yield
+      // off the real-time thread until a non-published generation is free.
+      for (;;)
+      {
+        const uint32_t published =
+          std::atomic_ref(state.control_published_gen)
+            .load(std::memory_order_acquire);
+        for (target = 0; target < control_generation_owners_[state_index].size();
+             ++target)
+        {
+          if (target == published) continue;
+          StorageOwner expected = StorageOwner::Free;
+          if (control_generation_owners_[state_index][target]
+                .compare_exchange_strong(
+                  expected, StorageOwner::Writer,
+                  std::memory_order_acquire, std::memory_order_relaxed))
+          {
+            target_owned = true;
+            break;
+          }
+        }
+        if (target_owned) break;
+        std::this_thread::yield();
+      }
+    }
 
     int64_t ** arrays = state.array_ptrs.data();
     if (!state.coeff_array_slots.empty())
@@ -718,27 +857,22 @@ private:
     }
     std::copy(state.slots.begin(), state.slots.end(),
               state.slot_generations[target].begin());
+    if (target_owned)
+      control_generation_owners_[state_index][target].store(
+        StorageOwner::Free, std::memory_order_release);
     std::atomic_ref(state.control_published_gen)
       .store(target, std::memory_order_release);
-  }
-
-  void wait_for_state_available(uint32_t state_index) const
-  {
-    while (audio_processing_.load(std::memory_order_acquire) &&
-           audio_state_index_.load(std::memory_order_acquire) == state_index)
-    {
-      std::this_thread::yield();
-    }
   }
 
   unsigned int buffer_length_;
   std::array<KernelState, 2> states_;
   std::atomic<uint32_t> active_state_{0};
-  std::atomic<uint32_t> audio_state_index_{0};
-  std::atomic<bool> audio_processing_{false};
-  // Unified control generation captured by the in-flight audio buffer.
-  std::atomic<uint32_t> audio_control_gen_{0};
+  std::array<std::atomic<StorageOwner>, 2> state_owners_{};
+  std::array<std::array<std::atomic<StorageOwner>, 3>, 2>
+    control_generation_owners_{};
   std::atomic<uint64_t> recompile_version_{0};
+  std::atomic<uint64_t> ownership_failure_count_{0};
+  std::atomic<RuntimeOwnershipTestSeam *> ownership_test_seam_{nullptr};
 
   // Buffer-boundary clock handoff. Only the audio thread touches plain
   // audio_* fields. Control publishes an odd/even seqlock around the atomic
@@ -751,6 +885,7 @@ private:
 
   mutable std::mutex build_mutex_;
 
+  static constexpr unsigned int kAudioCaptureAttempts_ = 4;
   static constexpr int kFadeSamples_ = 2048;
   std::atomic<int> fade_in_remaining_{0};
   std::atomic<int> fade_out_remaining_{-1};

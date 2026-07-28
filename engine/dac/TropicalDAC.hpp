@@ -140,6 +140,7 @@ struct TropicalDACImpl
   std::atomic<unsigned int> negotiated_buffer_frames_{0};
 
   std::atomic<bool>     device_disconnected_{false};
+  std::atomic<bool>     rtaudio_disconnect_latched_{false};
   std::atomic<uint64_t> disconnect_count_{0};
   std::atomic<uint64_t> reconnect_success_count_{0};
   std::atomic<uint64_t> reconnect_failure_count_{0};
@@ -154,8 +155,12 @@ struct TropicalDACImpl
     audio.setErrorCallback([this](RtAudioErrorType type, const std::string&) {
       if (type == RTAUDIO_DEVICE_DISCONNECT)
       {
-        disconnect_count_.fetch_add(1, std::memory_order_relaxed);
-        device_disconnected_.store(true, std::memory_order_relaxed);
+        // Count a physical RtAudio disconnect edge exactly once. Watcher
+        // retries and default-route changes have separate reconnect counters.
+        if (!rtaudio_disconnect_latched_.exchange(
+              true, std::memory_order_acq_rel))
+          disconnect_count_.fetch_add(1, std::memory_order_relaxed);
+        device_disconnected_.store(true, std::memory_order_release);
       }
     });
   }
@@ -192,6 +197,7 @@ struct TropicalDACImpl
     disconnect_count_.store(0, std::memory_order_relaxed);
     reconnect_success_count_.store(0, std::memory_order_relaxed);
     reconnect_failure_count_.store(0, std::memory_order_relaxed);
+    rtaudio_disconnect_latched_.store(false, std::memory_order_relaxed);
 
     open_stream();
     running = true;
@@ -423,7 +429,9 @@ struct TropicalDACImpl
       ok = false;
     }
 
-    device_disconnected_.store(false, std::memory_order_relaxed);
+    device_disconnected_.store(!ok, std::memory_order_relaxed);
+    if (ok)
+      rtaudio_disconnect_latched_.store(false, std::memory_order_release);
     watcher_shutdown_.store(false, std::memory_order_relaxed);
     watcher_thread_ = std::thread(&TropicalDACImpl::watcher_loop, this);
 
@@ -609,8 +617,6 @@ private:
 
       if (!disconnected && !default_changed)
         continue;
-      if (default_changed)
-        disconnect_count_.fetch_add(1, std::memory_order_relaxed);
 
       try
       {
@@ -632,6 +638,7 @@ private:
       {
         source->begin_fade_in();
         open_stream();
+        rtaudio_disconnect_latched_.store(false, std::memory_order_release);
         reconnect_success_count_.fetch_add(1, std::memory_order_relaxed);
       }
       catch (...)

@@ -87,8 +87,10 @@ bool tropical_dac_read_output_capture(
 unsigned int tropical_dac_get_buffer_frames(tropical_dac_t);
 /* True while a device-disconnect has been detected and reconnection is in progress */
 bool tropical_dac_is_reconnecting(tropical_dac_t);
-/* Sticky continuity counters since tropical_dac_start. Separate accessors keep
-   tropical_dac_stats_t ABI-frozen for older callers. */
+/* Sticky continuity counters since tropical_dac_start. disconnect_count is
+   edge-counted from RtAudio device-disconnect events only; default-route
+   reopens and retries are reflected by the reconnect counters. Separate
+   accessors keep tropical_dac_stats_t ABI-frozen for older callers. */
 uint64_t tropical_dac_disconnect_count(tropical_dac_t);
 uint64_t tropical_dac_reconnect_success_count(tropical_dac_t);
 uint64_t tropical_dac_reconnect_failure_count(tropical_dac_t);
@@ -150,6 +152,10 @@ unsigned int     tropical_runtime_get_buffer_length(tropical_runtime_t);
    builds (the stable sentinel), otherwise the number of future Metal blocks
    currently configured. */
 unsigned int     tropical_runtime_metal_pipeline_depth(tropical_runtime_t);
+/* Sticky count of callbacks silenced because bounded state/generation
+   ownership acquisition could not obtain a coherent snapshot. Qualification
+   requires zero. */
+uint64_t         tropical_runtime_ownership_failure_count(tropical_runtime_t);
 
 /* Fade control (for DAC) */
 void             tropical_runtime_begin_fade_in(tropical_runtime_t);

@@ -12,6 +12,7 @@ option(TROPICAL_BUILD_PYTHON "Build ctypes-based Python package support (install
 option(TROPICAL_LLVM_STATIC "Link LLVM statically into libtropical for self-contained wheel distribution" OFF)
 option(TROPICAL_WASM_EMIT "Build the in-process IR→wasm emitter (links the LLVM WebAssembly backend + lld as a library). Needed by the build-time compile-wasm tool, not by the shipped audio runtime." OFF)
 option(TROPICAL_METAL "Build the Metal compute backend (Apple only): MSL kernels compiled at runtime, audio dispatched per-block on the GPU. The JIT stays dual-loaded for render_window/goldens." OFF)
+option(TROPICAL_TSAN "Instrument the runtime process tests with ThreadSanitizer." OFF)
 
 # nlohmann/json — header-only JSON library (for plan loading)
 set(JSON_BuildTests OFF CACHE INTERNAL "")
@@ -156,6 +157,21 @@ target_link_libraries(tropical_core PRIVATE rtaudio nlohmann_json::nlohmann_json
 target_include_directories(tropical_core PRIVATE engine)
 set_target_properties(tropical_core PROPERTIES OUTPUT_NAME "tropical")
 
+if(TROPICAL_TSAN)
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-fsanitize=thread")
+    set(CMAKE_REQUIRED_LINK_OPTIONS "-fsanitize=thread")
+    check_cxx_source_compiles("int main() { return 0; }" TROPICAL_HAS_TSAN)
+    unset(CMAKE_REQUIRED_FLAGS)
+    unset(CMAKE_REQUIRED_LINK_OPTIONS)
+    if(NOT TROPICAL_HAS_TSAN)
+        message(FATAL_ERROR "TROPICAL_TSAN requested, but this compiler does not support -fsanitize=thread")
+    endif()
+    target_compile_options(rtaudio PRIVATE -fsanitize=thread)
+    target_compile_options(tropical_core PRIVATE -fsanitize=thread)
+    target_link_options(tropical_core PRIVATE -fsanitize=thread)
+endif()
+
 # ---- Tests -------------------------------------------------------------------
 
 option(TROPICAL_BUILD_TESTS "Build C++ process tests (no audio device required)" ON)
@@ -163,7 +179,8 @@ option(TROPICAL_BUILD_TESTS "Build C++ process tests (no audio device required)"
 if(TROPICAL_BUILD_TESTS)
     enable_testing()
     add_executable(test_module_process engine/tests/test_module_process.cpp)
-    target_include_directories(test_module_process PRIVATE engine)
+    target_include_directories(test_module_process PRIVATE engine ${LLVM_INCLUDE_DIRS})
+    target_compile_definitions(test_module_process PRIVATE ${LLVM_DEFINITIONS})
     target_compile_features(test_module_process PRIVATE cxx_std_20)
     target_link_libraries(test_module_process PRIVATE tropical_core)
     add_test(NAME current_module_process COMMAND test_module_process)
@@ -176,6 +193,14 @@ if(TROPICAL_BUILD_TESTS)
     add_test(NAME compat_legacy_plan4_manifest
         COMMAND test_compat_legacy_plan4)
 
+    if(TROPICAL_TSAN)
+        target_compile_options(test_module_process PRIVATE -fsanitize=thread)
+        target_link_options(test_module_process PRIVATE -fsanitize=thread)
+        add_custom_target(check_runtime_tsan
+            COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R module_process
+            DEPENDS test_module_process
+            USES_TERMINAL)
+    endif()
     if(TROPICAL_METAL)
         add_executable(test_metal_kernel engine/tests/test_metal_kernel.cpp)
         target_include_directories(test_metal_kernel PRIVATE engine)

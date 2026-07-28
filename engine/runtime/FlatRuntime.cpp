@@ -105,13 +105,26 @@ bool FlatRuntime::publish_state(KernelState && new_state)
   std::lock_guard<std::mutex> lock(build_mutex_);
   const uint32_t active   = active_state_.load(std::memory_order_acquire);
   const uint32_t inactive = 1U - active;
-  wait_for_state_available(inactive);
+  for (;;)
+  {
+    StorageOwner expected = StorageOwner::Free;
+    if (state_owners_[inactive].compare_exchange_strong(
+          expected, StorageOwner::Writer,
+          std::memory_order_acquire, std::memory_order_relaxed))
+      break;
+    if (RuntimeOwnershipTestSeam * seam =
+          ownership_test_seam_.load(std::memory_order_acquire))
+      seam->writer_waiting_for_state.store(true, std::memory_order_release);
+    std::this_thread::yield();
+  }
 
   // CF-only: no by-name state transfer on hot-swap. Registers/arrays/slots
   // zero-init from the fresh kernel. The audio-owned clock is runtime-global,
   // so a state flip cannot repeat, skip, or race its sample position.
 
   states_[inactive] = std::move(new_state);
+  state_owners_[inactive].store(
+    StorageOwner::Free, std::memory_order_release);
   active_state_.store(inactive, std::memory_order_release);
   recompile_version_.fetch_add(1, std::memory_order_release);
   return true;
@@ -228,7 +241,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
     return ParamDispatchResult{false, std::move(error)};
   };
   auto commit = [&]() {
-    publish_control_snapshot(state);
+    publish_control_snapshot(state, state_idx);
     return ParamDispatchResult{true, {}};
   };
 

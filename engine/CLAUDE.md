@@ -94,7 +94,7 @@ built.
 At a callback boundary, `process()`:
 
 1. applies any stable even-sequence clock request;
-2. advertises, captures, and verifies the active state and one coherent
+2. CAS-owns, captures, and revalidates the active state and one coherent
    slot/coefficient generation;
 3. copies published slots into preallocated audio scratch and calls the kernel;
 4. advances the runtime-global audio clock and applies the smoothstep fade;
@@ -105,6 +105,10 @@ control-only scratch, and release-publish the complete slot/coefficient set as
 one generation. State and generation ownership atomics live outside movable
 kernel state, closing an ABA window during hot-swap. The audio path never
 locks or allocates; a bounded ownership failure emits silence and telemetry.
+
+Configure with `-DTROPICAL_TSAN=ON`, then build `check_runtime_tsan`, to run
+the barrier-driven clock/state/generation tests and concurrent publication
+stress under ThreadSanitizer when the compiler provides it.
 
 `render_window` evaluates the fused JIT kernel at arbitrary coordinates for
 scope/slave consumers. Metal sessions remain dual-loaded so this path stays on
@@ -188,7 +192,7 @@ int64 storage bit-punned to f64 like the JIT's array loads, then narrowed
 f64→f32 like slots) and `process_block` copies it into the MTLBuffer at
 encode (sync) or enqueue (pipelined, per-ring-entry buffers — the
 documented D-block param lag, no tear: the pack reads the ONE generation
-captured before `audio_processing_` went true). So a banked session on
+owned and revalidated by the callback). So a banked session on
 `TROPICAL_BACKEND=metal` runs the same typed split as the JIT: coefficient
 math at knob rate on CPU, the audio loop on GPU reading real columns.
 Gated by `msl-column-guard` (tropicaltest), the banked-resonator SNR case

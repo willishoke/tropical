@@ -11,9 +11,10 @@
 // publish/flip IS the Metal hot-swap; compilation happens on the control
 // thread like the LLVM JIT.
 //
-// v1 dispatch is synchronous per block (encode → commit → wait inside
-// process_block), keeping process()'s buffer-filled-on-return contract so
-// fades, sample_index, and render_window semantics are untouched.
+// Depth 0 dispatch is synchronous per block (encode → commit → wait inside
+// process_block); qualification may select a future-block pipeline depth.
+// Both keep process()'s buffer-filled-on-return contract so fades,
+// sample_index, and render_window semantics are untouched.
 
 #include <cstdint>
 #include <memory>

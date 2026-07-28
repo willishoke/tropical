@@ -317,7 +317,7 @@ bool process_block(MetalKernel & k,
     {
       // Coefficient columns, copied at ENCODE next to the slot snapshot.
       // `columns` is the f32 image of the ONE generation this process()
-      // call captured — captured BEFORE audio_processing_ went true, so
+      // call explicitly owns and revalidated, so
       // the copy inherits the whole-generation guarantee: the GPU reads
       // one consistent generation of columns, no cross-column tear on a
       // live knob move.

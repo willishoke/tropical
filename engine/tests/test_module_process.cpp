@@ -11,7 +11,9 @@
 
 #include "c_api/tropical_c.h"
 #include "dac/TropicalDAC.hpp"   // kDeviceOutputBound / clamp_to_device_bound
+#include "runtime/FlatRuntime.hpp"
 #include <atomic>
+#include <chrono>
 #include <cstddef>
 #include <cmath>
 #include <cstdio>
@@ -21,6 +23,7 @@
 #include <limits>
 #include <string>
 #include <thread>
+#include <unordered_set>
 #include <vector>
 
 static int g_pass = 0;
@@ -92,6 +95,17 @@ static std::string wrap_loop(const std::string& body)
     "lb:\n" + body +
     "  %sn = add i64 %s, 1\n  br label %lc\n"
     "le:\n  ret void\n}\n";
+}
+
+static bool wait_for_true(
+  const std::atomic<bool> & value,
+  std::chrono::milliseconds timeout = std::chrono::seconds(10))
+{
+  const auto deadline = std::chrono::steady_clock::now() + timeout;
+  while (!value.load(std::memory_order_acquire)
+         && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  return value.load(std::memory_order_acquire);
 }
 
 /**
@@ -221,9 +235,66 @@ static void test_clock_boundary_handoff()
       && (start - base) / stride < requests;
     ASSERT(continuation || whole_request);
   }
+
+  // Every observed non-continuation is one unique request, applied once and
+  // in publication order. A duplicated request application or a future value
+  // paired with an older even sequence fails these assertions.
+  std::unordered_set<uint64_t> applied_requests;
+  uint64_t previous_request = 0;
+  bool have_request = false;
+  for (std::size_t i = 1; i < starts.size(); ++i)
+  {
+    if (starts[i] == starts[i - 1] + buf) continue;
+    ASSERT(applied_requests.insert(starts[i]).second);
+    if (have_request) ASSERT(starts[i] > previous_request);
+    previous_request = starts[i];
+    have_request = true;
+  }
   ASSERT(static_cast<uint64_t>(tropical_runtime_current_sample_index(rt))
          == starts.back() + buf);
+  ASSERT(tropical_runtime_ownership_failure_count(rt) == 0);
   tropical_runtime_free(rt);
+}
+
+// Deterministically hold a clock request after its release-stored payload but
+// while its sequence is odd. Audio must defer it, then apply the completed
+// request at exactly one boundary and continue from there.
+static void test_clock_request_barrier()
+{
+  constexpr unsigned int buf = 16;
+  constexpr uint64_t requested = 1000000;
+  tropical_runtime::FlatRuntime rt(buf);
+  const std::string ir = wrap_loop(RAMP_BODY);
+  ASSERT(rt.load_ir(ir, RAMP_MANIFEST));
+  rt.process();
+  ASSERT(rt.outputBuffer[0] == 0.0);
+
+  tropical_runtime::RuntimeOwnershipTestSeam seam;
+  seam.pause_after_clock_payload.store(true, std::memory_order_relaxed);
+  rt.set_ownership_test_seam(&seam);
+  std::jthread control([&] { rt.set_sample_index(requested); });
+  const bool payload_stored = wait_for_true(seam.clock_payload_stored);
+  if (!payload_stored)
+  {
+    seam.release_clock.store(true, std::memory_order_release);
+    control.join();
+    ASSERT(payload_stored);
+  }
+
+  rt.process();
+  const uint64_t deferred_start = static_cast<uint64_t>(rt.outputBuffer[0]);
+  seam.release_clock.store(true, std::memory_order_release);
+  control.join();
+  rt.set_ownership_test_seam(nullptr);
+
+  rt.process();
+  const uint64_t applied_start = static_cast<uint64_t>(rt.outputBuffer[0]);
+  rt.process();
+  const uint64_t continued_start = static_cast<uint64_t>(rt.outputBuffer[0]);
+  ASSERT(deferred_start == buf);
+  ASSERT(applied_start == requested);
+  ASSERT(continued_start == requested + buf);
+  ASSERT(rt.ownership_failure_count() == 0);
 }
 
 // A coefficient transaction writes slot[1] = 2*slot[0], while the audio
@@ -329,6 +400,110 @@ static void test_hot_swap_state_handoff()
   tropical_runtime_free(rt);
 }
 
+// Pause after audio owns the published generation. Two complete control
+// publications must proceed through the other generations while the captured
+// generation remains immutable; the paused callback still renders its old
+// value, and the next callback sees the newest value.
+static void test_generation_ownership_barrier()
+{
+  constexpr unsigned int buf = 16;
+  tropical_runtime::FlatRuntime rt(buf);
+  const std::string ir = wrap_loop(
+    "  %xp = getelementptr inbounds double, ptr %slots, i64 0\n"
+    "  %x = load double, ptr %xp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %x, ptr %op, align 8\n");
+  const std::string manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":1,"slot_names":["param:x"],
+    "slot_defaults":[1.0]})";
+  ASSERT(rt.load_ir(ir, manifest));
+
+  tropical_runtime::RuntimeOwnershipTestSeam seam;
+  seam.pause_after_generation_ownership.store(true, std::memory_order_relaxed);
+  rt.set_ownership_test_seam(&seam);
+  std::jthread audio([&] { rt.process(); });
+  const bool acquired = wait_for_true(seam.generation_owned);
+  if (!acquired)
+  {
+    seam.release_generation.store(true, std::memory_order_release);
+    audio.join();
+    ASSERT(acquired);
+  }
+
+  rt.set_slot(0, 2.0);
+  rt.set_slot(0, 3.0);
+  seam.release_generation.store(true, std::memory_order_release);
+  audio.join();
+  rt.set_ownership_test_seam(nullptr);
+
+  for (double sample : rt.outputBuffer) ASSERT(sample == 1.0);
+  rt.process();
+  for (double sample : rt.outputBuffer) ASSERT(sample == 3.0);
+  ASSERT(rt.ownership_failure_count() == 0);
+}
+
+// Pause after audio owns the active state. One swap may publish into the
+// inactive state; the next swap's attempt to reuse the audio-owned old state
+// must block until the callback releases it.
+static void test_state_ownership_barrier()
+{
+  constexpr unsigned int buf = 16;
+  tropical_runtime::FlatRuntime rt(buf);
+  const std::string one = wrap_loop(
+    "  %p = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double 1.000000e+00, ptr %p, align 8\n");
+  const std::string two = wrap_loop(
+    "  %p = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double 2.000000e+00, ptr %p, align 8\n");
+  const std::string three = wrap_loop(
+    "  %p = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double 3.000000e+00, ptr %p, align 8\n");
+  ASSERT(rt.load_ir(one, RAMP_MANIFEST));
+  const uint64_t initial_version = rt.recompile_version();
+
+  tropical_runtime::RuntimeOwnershipTestSeam seam;
+  seam.pause_after_state_ownership.store(true, std::memory_order_relaxed);
+  rt.set_ownership_test_seam(&seam);
+  std::jthread audio([&] { rt.process(); });
+  const bool acquired = wait_for_true(seam.state_owned);
+  if (!acquired)
+  {
+    seam.release_state.store(true, std::memory_order_release);
+    audio.join();
+    ASSERT(acquired);
+  }
+
+  std::atomic<bool> loads_ok{true};
+  std::atomic<bool> control_done{false};
+  std::jthread control([&] {
+    if (!rt.load_ir(two, RAMP_MANIFEST)) loads_ok.store(false);
+    if (!rt.load_ir(three, RAMP_MANIFEST)) loads_ok.store(false);
+    control_done.store(true, std::memory_order_release);
+  });
+
+  const bool reuse_blocked = wait_for_true(seam.writer_waiting_for_state);
+  const uint64_t version_while_blocked = rt.recompile_version();
+  const bool completed_while_blocked =
+    control_done.load(std::memory_order_acquire);
+
+  seam.release_state.store(true, std::memory_order_release);
+  audio.join();
+  control.join();
+  rt.set_ownership_test_seam(nullptr);
+
+  ASSERT(reuse_blocked);
+  ASSERT(version_while_blocked == initial_version + 1);
+  ASSERT(!completed_while_blocked);
+  ASSERT(loads_ok.load(std::memory_order_acquire));
+  ASSERT(control_done.load(std::memory_order_acquire));
+  for (double sample : rt.outputBuffer) ASSERT(sample == 1.0);
+  rt.process();
+  for (double sample : rt.outputBuffer) ASSERT(sample == 3.0);
+  ASSERT(rt.ownership_failure_count() == 0);
+}
+
 // ─────────────────────────────────────────────────────────────
 // The device-boundary clamp (the safety-class gate)
 // ─────────────────────────────────────────────────────────────
@@ -413,6 +588,7 @@ static void test_dac_histogram_contract()
   ASSERT(tropical_dac_disconnect_count(nullptr) == 0);
   ASSERT(tropical_dac_reconnect_success_count(nullptr) == 0);
   ASSERT(tropical_dac_reconnect_failure_count(nullptr) == 0);
+  ASSERT(tropical_runtime_ownership_failure_count(nullptr) == 0);
 }
 
 struct CaptureTestSource
@@ -469,8 +645,11 @@ int main()
   run_test("constant kernel via load_ir",   test_ir_constant);
   run_test("closed-form index ramp",        test_ir_index_ramp);
   run_test("clock request boundary handoff", test_clock_boundary_handoff);
+  run_test("clock odd-sequence barrier", test_clock_request_barrier);
   run_test("coherent slot/coefficient generation", test_control_generation_coherence);
   run_test("hot-swap state handoff", test_hot_swap_state_handoff);
+  run_test("owned generation survives two publications", test_generation_ownership_barrier);
+  run_test("owned state blocks ABA reuse", test_state_ownership_barrier);
   run_test("device-boundary clamp",         test_device_bound_clamp);
   run_test("fixed DAC histogram/ABI contract", test_dac_histogram_contract);
   run_test("serial output-capture state machine", test_capture_serial_state_machine);

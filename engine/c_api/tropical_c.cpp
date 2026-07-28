@@ -387,6 +387,13 @@ unsigned int tropical_runtime_metal_pipeline_depth(tropical_runtime_t r)
   return static_cast<tropical_runtime::FlatRuntime*>(r)->metal_pipeline_depth();
 }
 
+uint64_t tropical_runtime_ownership_failure_count(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->ownership_failure_count();
+}
+
 void tropical_runtime_begin_fade_in(tropical_runtime_t r)
 {
   if (r) static_cast<tropical_runtime::FlatRuntime*>(r)->begin_fade_in();
