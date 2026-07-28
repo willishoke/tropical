@@ -63,7 +63,7 @@ def tropicalEngineTools (env : Engine.Env) : List Tool := [
   inProcNoArg               env "save"            "Serialize the current session to a tropical_program_2 object.",
   inProcTool Merge          env "merge"           "Merge a program/patch into the current session without clearing it.",
   -- control + audio
-  inProcTool SetParam       env "set_param"       "Set the value of a named Param (thread-safe, smoothed).",
+  inProcTool SetParam       env "set_param"       "Set a named parameter using the loaded plan's raw/glide/anchor/velocity discipline.",
   inProcNoArg               env "list_params"     "List all registered Params with their current values.",
   inProcTool StartAudio     env "start_audio"     "Start audio output.",
   inProcNoArg               env "stop_audio"      "Stop audio output.",

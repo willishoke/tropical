@@ -23,15 +23,17 @@ concepts are not intrinsically audio-specific.
 There are three supported construction paths:
 
 ```text
-Lean arrow builders ─┐
-MCP patch mutations ─┼─> ResolvedProgram / ExprArena
-program_2 patch JSON ┘              │
-                                    ├─ direct lowering
-                                    ├─ partition + stage-0 split
-                                    └─ tropical_plan_5
-                                          ├─ LLVM → ORC JIT
-                                          ├─ LLVM → wasm32
-                                          └─ MSL → Metal
+Lean arrow builders → assemble → per-program direct lowering → registered types
+                                                                  │
+MCP mutations / program_2 JSON → typed SessionSt → synthetic resolved root
+                                                                  │
+                                                                  ▼
+                                                   partition + stage-0 split
+                                                                  │
+                                                        tropical_plan_5
+                                                   ┌──────────────┼───────────┐
+                                                   ▼              ▼           ▼
+                                              LLVM → JIT    LLVM → wasm32  MSL → Metal
 ```
 
 The standard library is authored as fourteen-constructor
@@ -46,11 +48,12 @@ types. Their wiring decodes into the closed
 define a program body, and no front door can spell a state operation or
 feedback edge that reaches a backend.
 
-The direct lowering checks acyclicity, optionally inlines nested instances,
-eliminates identities, and copies the evaluator-reachable graph into the same
-vocabulary. Session compilation then partitions instance functions, allocates
-typed slots/sources/sinks, and performs a typed stage-0 split for
-parameter-derived coefficient work.
+Per-program direct lowering checks acyclicity, optionally inlines nested
+instances, eliminates identities, and copies the evaluator-reachable graph
+into the same vocabulary. Session compilation links those already-resolved
+types into a synthetic root, checks the session graph, then partitions
+instance functions, allocates typed slots/sources/sinks, and performs a typed
+stage-0 split for parameter-derived coefficient work.
 
 See [`design/architecture.md`](design/architecture.md) for the complete
 source-to-sound walkthrough and invariant index.

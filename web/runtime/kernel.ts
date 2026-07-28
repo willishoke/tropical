@@ -2,7 +2,7 @@
  * kernel.ts — WasmKernel: instantiate + drive a Lean-emitted wasm32 kernel.
  *
  * The Web Audio analog of `engine/runtime/FlatRuntime` (native): it owns one
- * imported linear memory, seeds register/slot state from the manifest, calls
+ * imported linear memory, initializes compatibility/register and slot regions, calls
  * the 11-argument kernel per audio block, and applies an anti-click fade. It is
  * a *player* — no live recompile, no state-transfer hot-swap (those live on the
  * native instrument). Depends only on `KernelManifest`; no compiler internals.
@@ -77,8 +77,8 @@ export class WasmKernel {
     return k
   }
 
-  /** Seed registers from state_init, array_sizes, and slots from slot_defaults
-   *  — mirrors the native engine's `build_kernel_state`. */
+  /** Initialize the compatibility register region (empty for production plan
+   *  5), array sizes, and slots from their defaults. */
   private initState(): void {
     const dv = new DataView(this.memory.buffer)
     const f64 = new Float64Array(this.memory.buffer)

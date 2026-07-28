@@ -1,11 +1,13 @@
 #pragma once
 
 /**
- * FlatRuntime.hpp — Minimal plan executor for JIT-compiled audio.
+ * FlatRuntime.hpp — publication and execution for emitted kernels.
  *
- * Receives a flat set of expression trees (outputs + registers) via JSON plan,
- * JIT-compiles them into a single native kernel, and runs it per sample.
- * No module boundaries, no graph, no orchestration.
+ * Receives Lean-emitted LLVM (and optionally MSL/coefficient LLVM) plus a
+ * tropical_plan_5 metadata manifest, compiles/loads the artifacts, constructs
+ * their backing regions, and atomically publishes the inactive KernelState.
+ * The plan instruction graph is diagnostic metadata here; C++ does not turn
+ * expression trees into executable code.
  */
 
 #include "ControlParam.hpp"
@@ -453,7 +455,7 @@ public:
   // concurrently with load_ir: the lock excludes the inactive-state rebuild,
   // and resolving + writing under one lock means a recompile can never land a
   // value in a stale slot index. build_mutex_ is held by publish_state only
-  // for the cheap by-name transfer + flip (microseconds) — never the LLVM
+  // for the cheap state publication + flip (microseconds) — never the LLVM
   // compile — so this contends only during the swap itself. Returns false if
   // no slot of that name exists in the active plan.
   bool set_slot_by_name_sync(const std::string & name, double value)
@@ -478,7 +480,8 @@ public:
   // without the lock a concurrent hot-swap could flip the active state
   // between resolve and write and land values at stale indices. Same
   // contention profile as set_slot_by_name_sync: publish_state holds the
-  // lock only for the cheap transfer + flip, never the LLVM compile.
+  // lock only for the cheap sample-index publication + flip, never the LLVM
+  // compile.
   // The coefficient re-run after `fn` covers any slot writes it made
   // (discipline dispatches write several slots per param event); it is
   // idempotent, so read-only callers pay one cheap one-sample kernel call.

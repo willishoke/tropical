@@ -14,15 +14,12 @@ open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
 -- ── v2 ingest (load / merge) ─────────────────────────────────────────────────
--- Port of `loadProgramAsSession` / `mergeProgramIntoSession` over the
--- engine's mirror: the normalized v2 node (Zod-stripped, key order
--- preserved by JsonV) is walked directly; instances resolve through the
--- engine specialization path with the load-path failure shapes; wires
--- store RAW (loadProgramAsSession sets inputExprNodes directly — no
--- auto-delay wrap). The wire is a PATCH BAY: program definitions
--- (programDecl) are refused at ingest — programs are authored in Lean
--- (arrow builders). All failures are plain TS Errors on the oracle →
--- `internal_error` with the verbatim message.
+-- The normalized v2 node is walked directly with key order preserved by
+-- `JsonV`. Instances resolve only through registered concrete types, and
+-- wires decode into the closed `WireExpr` grammar. The document is a PATCH
+-- BAY: `programDecl` is refused at ingest because programs are authored in
+-- Lean (arrow builders). Boundary failures retain their stable
+-- `internal_error` messages.
 
 open Tropical.Parse (JsonV) in
 private def jvBodyEntries (node : JsonV) (k : String) : Array JsonV :=

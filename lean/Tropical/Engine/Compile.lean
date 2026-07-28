@@ -164,10 +164,9 @@ def liftIfNeeded (env : Env) : EngineM Unit := do
       if (s.findInstance? synthName).isSome then s
       else s.addInstance synthName
         { baseTypeName := synthName, typeArgs := none, progMeta := pm, resolvedIdx }
-    -- Wire each free ref to its corresponding input on the lifted
-    -- instance (raw refs, NO delay wrap — `liftOneWire` set
-    -- inputExprNodes directly), then replace the original wire in
-    -- place (TS-Map position semantics).
+    -- Wire each free ref to its corresponding input on the lifted instance,
+    -- then replace the original typed wire in place without changing its
+    -- deterministic position.
     for ref in lifted.freeRefs do
       env.state.modify (·.setWireRaw synthName ref.inputName
         (.ref ref.instanceName (.name ref.outputName)))

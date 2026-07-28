@@ -51,20 +51,21 @@ inside the Lean engine):
 
 ```
 SessionState
-  → compileSession
-       → liftWiresToInstances  (anonymous-instance lift for array-literal wires)
-       → assertSessionAcyclic  (no cycles at all — a hard rule, nothing
-                                breaks cycles for you)
-       → compileSessionSlotted (sessionToResolvedRoot builds the root
-                                ResolvedProgram DIRECTLY → partitionKernel →
-                                instance_functions[] (root, nested) + sinks[])
-       → tropical_plan_5 JSON
-  → runtime.loadPlan  (C API: NumericProgramParser → OrcJitEngine → FlatRuntime hot-swap)
+  → syncCompile
+       → liftIfNeeded          (anonymous instances for array-literal wires)
+       → buildSessionInputVia
+            → assertSessionAcyclic
+            → sessionToResolvedRoot
+       → compileSessionStaged  (partition + typed stage-0 split)
+       → emit LLVM/MSL artifacts + tropical_plan_5 metadata
+  → loadKernel                (C API → OrcJitEngine/MetalKernel → FlatRuntime publication)
 ```
 
-The direct lowering (`assertAcyclic → inlineInstances → identityElim`
-→ the `toResolved` Core check) runs per-instance at instance-type
-resolution. (The old five-pass strata drop sequence was retired
+The direct `Ir.Strata` lowering (`assertAcyclic → inlineInstances →
+identityElim → toResolved`) runs when a program type is registered. The live
+synthetic session root instead links those already-resolved snapshots,
+checks the session graph, and copies the reachable resolved root before
+partitioning. (The old five-pass strata drop sequence was retired
 2026-07-25, and the elaborator followed it 2026-07-26 — program bodies
 no longer cross the wire at all: a loaded file carrying a `programDecl`
 is refused at ingest with the retirement message, and the session wire
@@ -87,22 +88,20 @@ error envelope (see below) and the previous kernel keeps playing.
 
 The engine owns one `SessionState`. The fields tools read and mutate:
 
-- `typeRegistry` — registered concrete types; the metadata-wrapper
-  form. Populated by the `Tropical.Stdlib` boot (the 15 arrow-builder
-  programs) and by any concrete definitions carried inline in a loaded
-  `tropical_program_2` file.
-- `programs` — the registry of every registered program. Concrete
-  only (lowered, `typeParams = []`): there are no generic
-  templates. New DSP types are authored as `Tropical.Stdlib` arrow
-  builders in Lean, not registered over the wire.
-- `instanceRegistry` — live instances.
-- `inputExprNodes` — wiring (`"inst:input" → ExprNode`).
+- `programs` / `templateByName` — registered concrete program metadata and
+  resolved roots. Populated by `Tropical.Stdlib` boot and
+  `export_program`; loaded patch files cannot carry definitions.
+- `instances` — ordered live instances with resolved type snapshots.
+- `wires` — typed `WireExpr` connections.
 - `graphOutputs` — what wires to dac.
-- `paramRegistry` — current control values by name (the session compiler
+- `params` — current control values by name (the session compiler
   materializes `param:<name>` module slots, which `set_param` writes without
   relowering).
-- `runtime` — native `tropical_runtime_t`.
-- `dac` — created lazily on first `start_audio`.
+- `paramDisciplines` — plan-carried `raw`, `glide`, `anchor`, or `velocity`
+  dispatch metadata for the loaded kernel.
+
+The engine environment also owns the native runtime handle and a DAC created
+lazily on first `start_audio`.
 
 The instance name `dac` is reserved — it's the audio-output boundary,
 not a real instance.
@@ -132,9 +131,8 @@ specialization cache) are gone; every registered program is concrete.
 
 ### Wiring
 
-All of these compile down to the same `inputExprNodes` mutation +
-recompile; they're shape-conveniences for the most common graph
-patterns.
+All of these update the same ordered, typed `SessionSt.wires` collection and
+recompile; they are shape conveniences for common graph patterns.
 
 - `wire` — set and/or remove input wires in a single recompile. The
   audio-output bus is `instance: "dac", input: "out"`; multiple wires
@@ -173,10 +171,11 @@ stateful sister runtime, "supertropical"; see `design/cf-only.md`.)
 
 ### Control parameters
 
-- `set_param` — update a smoothed `Param`. Thread-safe (atomic
-  store on the C++ side); the smoothing time-constant is set at
-  param creation. (Wire format still accepts `{op:'trigger', name}`
-  for backcompat — aliased to `{op:'param', name}` at materialization.)
+- `set_param` — apply the loaded plan's declared `raw`, `glide`, `anchor`, or
+  `velocity` host discipline, then update the corresponding runtime slots
+  without relowering. Glide ramps and anchor/velocity rebasing are explicit
+  closed-form companion-slot writes, not hidden per-sample state. Legacy
+  discipline-specific tool names remain aliases into the same dispatcher.
 - `list_params` — registered params and their current values.
 
 ### Audio control

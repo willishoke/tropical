@@ -25,12 +25,12 @@ was deleted.
 | 15 | Browser `KernelManifest.stateInit`/`registerTypes` and its initialization loop survive, while every production build supplies empty arrays. | compatibility-supported / sister-runtime candidate | Explicitly classified; assigned to the web-runtime owner for the 2026-10-01 extraction/API review. |
 | 16 | The lone checked-in plan-4 fixture is nested as `expected_plan` in a migration golden, but current golden code compiles only its `input` and never reads that plan. | historical/dead fixture payload | Classified as a migration record; no silent deletion in this sprint. |
 | 17 | Several completed design handoffs and bug reports used deleted vocabulary without an at-point-of-use status. | historical, not wrong in original context | Scoped status labels added only to documents returned by the stale-token audit. |
-| 18 | `PlanDecode.FlatPlan.ofWire` is documented as plan-5-only but does not itself validate the top-level schema tag. Production emitters always produce plan 5; `FlatRuntime` does validate before native load. | trust-boundary ambiguity, not legacy-state reachability | Assigned to the trust-boundary owner; no behavior change in the documentation lane. |
+| 18 | `PlanDecode.FlatPlan.ofWire` is documented as plan-5-only but does not itself validate the top-level schema tag. Production emitters always produce plan 5; `FlatRuntime` does validate before native load. | trust-boundary ambiguity, not legacy-state reachability | Resolved as an explicit precondition/limitation on `LEGACY_PLAN_4_IS_NOT_SOURCE_SEMANTICS` in the generated trusted-boundary ledger; no behavior changed. |
 
 ## Outstanding assignments
 
-- The [trusted-boundary ledger](trust-boundary.md) owns row 18 and any claim
-  about what schema validation proves.
+- The [trusted-boundary ledger](trust-boundary.md) owns row 18's explicit
+  direct-`ofWire` precondition and any future claim about schema validation.
 - The [performance baseline](../benchmarks/current_baseline/findings.md) owns
   all quantitative compile/control/runtime claims.
 - The [Metal qualification report](../benchmarks/metal_live/findings.md) owns

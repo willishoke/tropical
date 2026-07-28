@@ -16,20 +16,19 @@ the previous sample is not an input.
 There are three current construction paths:
 
 ```text
-Lean arrow builders ─┐
-MCP patch mutations ─┼─> ResolvedProgram / ExprArena
-program_2 patch JSON ┘              │
-                                    ├─ assert acyclic
-                                    ├─ optionally inline instances
-                                    ├─ eliminate identities
-                                    └─ copy the reachable graph
-                                                │
-                                                ├─ partition by instance
-                                                ├─ classify/hoist stage 0
-                                                └─ tropical_plan_5
-                                                      ├─ LLVM → ORC JIT
-                                                      ├─ LLVM → wasm32
-                                                      └─ MSL → Metal
+Lean arrow builders → assemble → Ir.Strata per-program lowering → registered types
+                                                                        │
+MCP mutations / program_2 JSON → typed SessionSt → synthetic resolved root
+                                                                        │
+                                                          assert session acyclic
+                                                                        │
+                                                                        ▼
+                                                   partition + classify/hoist stage 0
+                                                                        │
+                                                              tropical_plan_5
+                                                         ┌──────────────┼───────────┐
+                                                         ▼              ▼           ▼
+                                                    LLVM → JIT    LLVM → wasm32  MSL → Metal
 ```
 
 The first path is authoring-time construction. The other two edit a session
@@ -54,7 +53,7 @@ Keeping these phases separate prevents most architectural misunderstandings.
 | Phase | What happens | Current representation |
 |---|---|---|
 | Authoring time | Lean combinators build an expression tree and declarations; `assemble` interns them into the graph. | [`EmitArrow.Sig`](../lean/Tropical/EmitArrow/Sig.lean), then [`Ir.ENode`/`ExprArena`](../lean/Tropical/Ir/Nodes.lean) |
-| Compile time | Session construction, direct lowering, instance partition, binding-time classification, and backend emission run. | [`Engine.Compile`](../lean/Tropical/Engine/Compile.lean), [`Ir.Strata`](../lean/Tropical/Ir/Strata.lean), [`Compile`](../lean/Tropical/Compile.lean), [`Ir.Stage0`](../lean/Tropical/Ir/Stage0.lean) |
+| Compile time | Program registration performs direct `Ir.Strata` lowering. A structural session compile links those resolved types into a checked synthetic root, then partitions, classifies binding time, and emits backends. | [`Engine.Compile`](../lean/Tropical/Engine/Compile.lean), [`Ir.Strata`](../lean/Tropical/Ir/Strata.lean), [`Compile`](../lean/Tropical/Compile.lean), [`Ir.Stage0`](../lean/Tropical/Ir/Stage0.lean) |
 | Control time | A host dispatches a parameter write according to the plan-carried discipline and writes one or more slots. | [`Plan.ParamDiscipline`](../lean/Tropical/Plan.lean), [`Engine.Audio`](../lean/Tropical/Engine/Audio.lean), [`tropical_socket`](../engine/c_api/tropical_socket.cpp) |
 | Sample time | The selected backend evaluates the closed-form kernel at a coordinate and current slot values. | [`EmitLlvm`](../lean/Tropical/Ir/EmitLlvm.lean), [`EmitMsl`](../lean/Tropical/Ir/EmitMsl.lean), [`FlatRuntime`](../engine/runtime/FlatRuntime.hpp), [`WasmKernel`](../web/runtime/kernel.ts) |
 
@@ -73,9 +72,12 @@ arena. The standard library is a chain of these builders in
 [`Tropical.Stdlib`](../lean/Tropical/Stdlib.lean); there is no literate surface
 parser or name-resolution elaborator between a builder and the trunk IR.
 
-`Sig` and `ENode` share the executable vocabulary. `bankSum` is deliberate
-backend-visible data: it describes a bounded ordered reduction. It is not a
-combinator waiting for a later “sum lowering” pass.
+`Sig` is the fourteen-constructor authoring subset of the `ENode` executable
+trunk. Other current producers can use additional trunk nodes such as `bool`
+and `arraySet`; there is still one expression vocabulary rather than a rich
+AST/core twin. `bankSum` is deliberate backend-visible data: it describes a
+bounded ordered reduction, not a combinator waiting for a later “sum
+lowering” pass.
 
 ### MCP session mutations
 
@@ -212,8 +214,9 @@ store. This surface is below the production compiler boundary; see the
 
 Metal is selected with `TROPICAL_BACKEND=metal` on a Metal-enabled build.
 The runtime dual-loads the JIT artifact: `process()` uses Metal, while
-`render_window` retains the f64 reference. The current qualification,
-hardware, latency, and soak evidence is in the
+`render_window` retains the f64 reference. Hardware-specific latency,
+reliability, and any completed or blocked soak rows are reported without
+generalization in the
 [Metal findings](../benchmarks/metal_live/findings.md).
 
 ## What the test layers establish

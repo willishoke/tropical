@@ -151,10 +151,11 @@ ResolvedProgram (lowered)
   precondition) — a theorem since slice 3c (`EmitArrow/BankOrder.lean` +
   `Ir/EmitBankLaws.lean`; trusted base = one named assumption,
   `REDUCE_REGION_EXECUTES_IN_ARRAY_ORDER`). The waist of the
-  hourglass: the smallest sub-IR sufficient for any per-sample
-  evaluator — and, because `Sig` is this same constructor set, the
-  authoring layer and the trunk are ONE vocabulary with the `assemble`
-  seam between them.
+  hourglass: the smallest IR sufficient for any per-sample evaluator.
+  `Sig` is the fourteen-constructor authoring subset of this `ENode`
+  trunk (`ENode` also has current non-`Sig` producers such as `bool`
+  and `arraySet`); both sides share one expression vocabulary and meet
+  at the `assemble` seam.
 ```
 
 Sessions (the MCP/runtime view of a graph in flight) reuse the
