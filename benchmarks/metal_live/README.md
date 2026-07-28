@@ -12,6 +12,16 @@ benchmarks/metal_live/run.sh --mode soak \
   --duration-seconds 1800 --buffer 512 --depth 3
 ```
 
+## Current support envelope
+
+On the canonical M1 Pro, B=128/D=3 is a known unsupported configuration: its
+reviewed live row recorded a 5.422916 ms callback against the 2.902494 ms hard
+callback deadline, plus one underrun. B=256 remains untested. B=512/D=3 is the
+supported candidate, subject to the required final long soak; its passing
+short validation is not release qualification. The B=128 result blocks that
+configuration, not Metal universally. This records the product decision and
+does not authorize another DAC run.
+
 `TROPICAL_METAL_PIPELINE_DEPTH=1..3` is qualification-only. When both controls
 are present it overrides the legacy `TROPICAL_METAL_PIPELINE=1`; the legacy
 spelling retains D=3. Missing controls retain synchronous Metal. Invalid depth
@@ -56,6 +66,12 @@ blocked. Ordinary
 end captures wait at least pipeline depth plus one callback after the preceding
 write; jump and hot-swap checkpoints are tied to their observed re-prime
 progress callbacks.
+
+At B=512 and 44.1 kHz, each callback has an 11.610 ms hard processing
+deadline. D=3 ordinary-parameter transport is 34.830 ms from capture to the
+first output block. Pipeline transport latency does not enlarge the per-callback
+processing deadline; these are different measurements and gates.
+
 At least three post-warmup RSS samples are required; an empty or short series
 cannot pass the memory gate.
 

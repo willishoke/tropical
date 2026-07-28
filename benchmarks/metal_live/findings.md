@@ -12,6 +12,12 @@ its SHA-256 is
 That short validation passed all 24 gates, including four reference
 checkpoints at 142.543–144.013 dB.
 
+For B=512 at 44.1 kHz, the callback hard deadline is 11.610 ms. The D=3
+ordinary-parameter transport measured by the latency matrix is 34.830 ms
+(`3×512/44100`) from capture to the first output block. That transport delay
+does not provide a 34.8 ms callback processing budget; every callback still
+must meet the 11.61 ms hardware period.
+
 The subsequent B=128 row is retained unchanged as
 [`data/reviewed-oracle-fix-smoke-b128-d3-60s-a875b68-m1pro-20260728.jsonl`](data/reviewed-oracle-fix-smoke-b128-d3-60s-a875b68-m1pro-20260728.jsonl).
 It ran exactly once from commit
@@ -31,9 +37,12 @@ checkpoint measured 144.135 dB with error below 1e-14. The abort occurred
 before hot-swap, so this row makes no post-swap RSS claim.
 
 The approved sequence stopped at the B=128 failure. B=256 and the long-duration
-rows were not run and remain untested. The passing B=512 short validation does
-not override the B=128 failure or replace the missing rows: Metal release
-qualification remains **blocked/pending**.
+rows were not run and remain untested. The staff product decision scopes the
+observed hard-deadline miss to B=128/D=3, which is a known unsupported
+configuration on the canonical M1 Pro; it does not block Metal universally.
+B=512/D=3 is the supported candidate based on its passing short validation,
+but remains pending the required final long soak before release qualification.
+B=256 has no support decision until it is tested.
 
 ## 2026-07-28 blocked production-dispatch incident
 
@@ -137,8 +146,10 @@ Raw evidence is intentionally classified rather than blended:
 - `data/reviewed-oracle-fix-smoke-b128-d3-60s-a875b68-m1pro-20260728.jsonl`:
   reviewed genuine B=128 operating-envelope failure.
 
-The genuine B=128 failure and untested B=256 and long-duration rows keep Metal
-release qualification **blocked/pending**, not release-qualified.
+The genuine B=128 failure blocks the B=128/D=3 configuration on the canonical
+M1 Pro, not Metal universally. B=256 remains untested, while B=512/D=3 remains
+a supported candidate pending its required final long soak and is not yet
+release-qualified.
 
 **Date:** 2026-07-07
 **Host:** Apple M1 Pro, macOS 26.3, 44.1 kHz, B=512 (engine boot default)
@@ -217,12 +228,16 @@ The JIT remains the correctness reference, the scope path (`render_window`),
 and the portability fallback — dual-load makes that free.
 
 That recommendation is **not current release guidance**. The sprint evidence
-supports exact D-block transport and a corrected short smoke, but the required
-long live rows are still pending.
+supports exact D-block transport and a corrected B=512/D=3 short smoke. The
+required final long B=512/D=3 soak is pending, B=256 is untested, and B=128/D=3
+is outside the supported envelope on the canonical M1 Pro.
 
 ## Pending
 
-- Corrected 30-minute B=512 and 10-minute B=128/B=256 actual-DAC rows.
+- The required final 30-minute B=512/D=3 actual-DAC soak. No run is authorized
+  by this document.
+- A B=256 support decision; that configuration remains untested. B=128/D=3 is
+  not a pending candidate on the canonical M1 Pro.
 - Process user+system CPU seconds and measured-wall fraction are recorded.
   Per-core attribution, pipeline queue-depth samples, and Metal
   resource/object counts are not exposed by the current harness.
