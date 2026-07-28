@@ -45,6 +45,10 @@ Run the focused schema/provenance gates with:
 python3 benchmarks/current_baseline/test_run.py
 ```
 
+The accepted M1 Pro evidence row and its interpretation are linked from
+[`findings.md`](findings.md). Older schema-1/schema-2 rows are historical and
+must not be used for exact-product decisions.
+
 ## Cache safety
 
 The production default remains:
