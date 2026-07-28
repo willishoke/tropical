@@ -161,11 +161,8 @@ struct KernelState
   std::vector<uint64_t> array_sizes;
   std::vector<uint64_t> param_ptrs;
 
-  // Array slot names from the manifest (diagnostic/compatibility metadata).
+  // Array slot names from the manifest (diagnostic metadata).
   std::vector<std::string> array_names;
-
-  // Output extraction
-  uint32_t output_count = 0;
 
   // ── Slot model state ─────────────────────────────────────────────────────
   // Inter-module slot array. Control-plane writes via

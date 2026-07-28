@@ -9,8 +9,7 @@ Phase 2 deletes the C++ codegen, so the plan-text → kernel capability moves
 to Lean: `render-bytes <plan.json>` (and any consumer holding a serialized
 plan rather than an in-memory `FlatPlan`) parses here, then emits IR via
 `EmitLlvm` and loads it with `load_ir`. Mirrors `Plan.lean`'s `*.toWire`
-field-for-field. plan_5 only (the session output shape); legacy plan_4 hand
-fixtures are not parsed here.
+field-for-field. Plan 5 is the only accepted runtime schema.
 
 Decodes over `JsonV` (the array-backed twin with the `sizeOf` lemmas), so
 the instance-tree recursion is total by descent on the document — the
@@ -43,6 +42,14 @@ private def optNat (j : JsonV) (k : String) (dflt : Nat) : Nat :=
   | some (.num n) => n.toFloat.toUInt64.toNat
   | _ => dflt
 
+private def rejectRetiredFields (j : JsonV) : Except String Unit := do
+  for field in #[
+      "state_init", "register_names", "register_types", "register_targets",
+      "state_reg_offset", "output_targets", "outputs", "instructions",
+      "scheduler_function"] do
+    if (j.getField? field).isSome then
+      throw s!"PlanDecode: retired field '{field}' is not valid in tropical_plan_5"
+
 private def optNum (j : JsonV) (k : String) (dflt : JsonNumber) : JsonNumber :=
   match j.getField? k with
   | some (.num n) => n
@@ -68,8 +75,7 @@ private def operandOfWire (j : JsonV) : Except String NOperand := do
   | "param" => pure (.param (← reqStr j "ptr") (← scalarOfWire j))
   | "source" => pure (.source (← reqNat j "index") (← scalarOfWire j))
   | "slot" => pure (.slot (← reqNat j "index") (← scalarOfWire j))
-  -- Back-compat: an absent `id` decodes as 0 (the pre-nesting single-region
-  -- form; the emitters resolve id-0 against the one open region).
+  -- Canonical single-region plans omit the zero-valued binder id.
   | "loop_idx" => pure (.loopIdx (optNat j "id" 0))
   | k => .error s!"PlanDecode: bad operand kind '{k}'"
 
@@ -86,7 +92,7 @@ private def instrOfWire (j : JsonV) : Except String NInstr := do
   let dst ← dstOfWire j
   let args ← (optArr j "args").mapM operandOfWire
   let loopCount := optNat j "loop_count" 1
-  -- Back-compat: absent `loop_id` decodes as 0 (single-region plans).
+  -- Canonical single-region plans omit the zero-valued binder id.
   let loopId := optNat j "loop_id" 0
   let strides := (optArr j "strides").map fun x =>
     match x with | .num n => n.toFloat.toUInt64.toNat | _ => 0
@@ -134,6 +140,10 @@ private def natArr (j : JsonV) (k : String) : Array Nat :=
   (optArr j k).map fun x => match x with | .num n => n.toFloat.toUInt64.toNat | _ => 0
 
 private def ofWireV (j : JsonV) : Except String FlatPlan := do
+  let schema ← reqStr j "schema"
+  if schema != "tropical_plan_5" then
+    throw s!"PlanDecode: unsupported schema '{schema}'; expected 'tropical_plan_5'"
+  rejectRetiredFields j
   let sampleRate := match (j.getField? "config").bind (·.getField? "sampleRate") with
     | some (.num n) => n
     | _ => (44100 : JsonNumber)

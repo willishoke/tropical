@@ -24,12 +24,10 @@ Port of `compiler/flat_plan.ts` plus the instruction/operand types from
   omitted when empty. (Structural diff is key-order-insensitive, but
   key *presence* matters to it.)
 
-The legacy plan_4 carriers (`output_targets` / `outputs` temp-mix,
-`rate`/`tick` operand kinds) are wire-format backcompat the TS parser
-upgrades on read; the Lean side only ever *produces* plans, so they
-have no representation here.
+Plan 5 has no state-initialization or legacy temp-mix carriers. Runtime
+consumers reject older schemas instead of translating them.
 
-Numbers that are data (const vals, state init, slot defaults, sink
+Numbers that are data (const vals, slot defaults, sink
 gain) are `Lean.JsonNumber` so decimal text re-parses to the identical
 double on the TS/engine side.
 

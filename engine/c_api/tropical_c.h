@@ -109,11 +109,9 @@ uint64_t     tropical_dac_playback_position(tropical_dac_t);
 
 tropical_runtime_t tropical_runtime_new(unsigned int buffer_length);
 void             tropical_runtime_free(tropical_runtime_t);
-/* Load a kernel from textual LLVM IR plus a metadata manifest. Production
-   callers supply tropical_plan_5; a bounded tropical_plan_4 metadata lift is
-   retained for direct-C compatibility (see design/compatibility-matrix.md).
-   The instruction graph is metadata only — codegen comes from ir_text,
-   emitted by Lean's EmitLlvm. Always fused. */
+/* Load a kernel from textual LLVM IR plus a tropical_plan_5 metadata manifest.
+   Every other schema is rejected. The instruction graph is metadata only —
+   codegen comes from ir_text, emitted by Lean's EmitLlvm. Always fused. */
 bool             tropical_runtime_load_ir(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* manifest_json, size_t manifest_len);
 
 /* Dual load: LLVM IR -> JIT (always; render_window + the correctness

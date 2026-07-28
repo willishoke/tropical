@@ -22,7 +22,6 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
   KernelState new_state;
   new_state.mode           = parsed.compilation_mode;
   new_state.sample_rate    = parsed.sample_rate;
-  new_state.output_count   = static_cast<uint32_t>(parsed.program.output_targets.size());
   new_state.array_names    = parsed.array_slot_names;
 
   // Slot array
@@ -152,13 +151,11 @@ bool FlatRuntime::load_ir_staged(const std::string & ir_text,
   const json manifest = json::parse(manifest_json);
   const std::string schema = manifest.value("schema", std::string{});
 
-  tropical_plan5::ParsedPlan5 parsed;
-  if (schema == "tropical_plan_5")
-    parsed = tropical_plan5::parse_plan5(manifest);
-  else if (schema == "tropical_plan_4")
-    parsed = tropical_plan5::parse_plan4(manifest);
-  else
-    throw std::runtime_error("FlatRuntime: load_ir unsupported manifest schema '" + schema + "'");
+  if (schema != "tropical_plan_5")
+    throw std::runtime_error(
+      "FlatRuntime: load_ir unsupported manifest schema '" + schema +
+      "'; expected 'tropical_plan_5'");
+  tropical_plan5::ParsedPlan5 parsed = tropical_plan5::parse_plan5(manifest);
 
   KernelState new_state = build_kernel_state(parsed);
   // The IR path is always fused — Lean emits a single fused kernel.

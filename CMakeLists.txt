@@ -185,14 +185,6 @@ if(TROPICAL_BUILD_TESTS)
     target_link_libraries(test_module_process PRIVATE tropical_core)
     add_test(NAME current_module_process COMMAND test_module_process)
 
-    add_executable(test_compat_legacy_plan4
-        engine/tests/test_compat_legacy_plan4.cpp)
-    target_include_directories(test_compat_legacy_plan4 PRIVATE engine)
-    target_compile_features(test_compat_legacy_plan4 PRIVATE cxx_std_20)
-    target_link_libraries(test_compat_legacy_plan4 PRIVATE tropical_core)
-    add_test(NAME compat_legacy_plan4_manifest
-        COMMAND test_compat_legacy_plan4)
-
     if(TROPICAL_TSAN)
         target_compile_options(test_module_process PRIVATE -fsanitize=thread)
         target_link_options(test_module_process PRIVATE -fsanitize=thread)

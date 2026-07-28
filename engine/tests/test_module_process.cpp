@@ -150,8 +150,57 @@ static const char* RAMP_MANIFEST = R"({"schema":"tropical_plan_5",
   "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
   "sinks":[],"slot_count":0})";
 
+static bool load_fails_with(tropical_runtime_t runtime, const std::string& ir,
+                            const char* manifest, const char* expected)
+{
+  if (tropical_runtime_load_ir(runtime, ir.c_str(), ir.size(),
+                               manifest, std::strlen(manifest)))
+    return false;
+  const char* error = tropical_last_error();
+  return error && std::strstr(error, expected);
+}
+
 /**
- * 2. Closed-form ramp — output 0,1,2,… as a function of the sample index,
+ * 2. The native boundary accepts exactly tropical_plan_5. Plan 4, missing or
+ *    unknown schemas, retired state/output carriers, legacy operands, and
+ *    missing destination namespaces fail before caller-supplied IR is loaded.
+ */
+static void test_plan5_only_manifest_boundary()
+{
+  tropical_runtime_t rt = tropical_runtime_new(16);
+  ASSERT(rt != nullptr);
+  const std::string ir = wrap_loop(RAMP_BODY);
+
+  ASSERT(load_fails_with(
+    rt, ir, R"({"schema":"tropical_plan_4"})",
+    "unsupported manifest schema 'tropical_plan_4'; expected 'tropical_plan_5'"));
+  ASSERT(load_fails_with(
+    rt, ir, R"({})",
+    "unsupported manifest schema ''; expected 'tropical_plan_5'"));
+  ASSERT(load_fails_with(
+    rt, ir, R"({"schema":"tropical_plan_99"})",
+    "unsupported manifest schema 'tropical_plan_99'; expected 'tropical_plan_5'"));
+  ASSERT(load_fails_with(
+    rt, ir, R"({"schema":"tropical_plan_5","state_init":[1]})",
+    "retired field 'state_init' is not valid in tropical_plan_5"));
+  ASSERT(load_fails_with(
+    rt, ir,
+    R"({"schema":"tropical_plan_5","output_targets":[],"outputs":[]})",
+    "retired field 'output_targets' is not valid in tropical_plan_5"));
+  ASSERT(load_fails_with(
+    rt, ir,
+    R"({"schema":"tropical_plan_5","instance_functions":[{"instructions":[{"tag":"Add","dst":0,"args":[],"result_type":"float"}]}]})",
+    "plan-5 instruction missing required dst_kind"));
+  ASSERT(load_fails_with(
+    rt, ir,
+    R"({"schema":"tropical_plan_5","instance_functions":[{"instructions":[{"tag":"Add","dst":0,"dst_kind":"temp","args":[{"kind":"rate","scalar_type":"float"}],"result_type":"float"}]}]})",
+    "unknown operand kind 'rate'"));
+
+  tropical_runtime_free(rt);
+}
+
+/**
+ * 3. Closed-form ramp — output 0,1,2,… as a function of the sample index,
  *    continuing across process() because the sample counter advances.
  */
 static void test_ir_index_ramp()
@@ -754,6 +803,7 @@ int main()
   printf("test_module_process (load_ir engine)\n");
 
   run_test("constant kernel via load_ir",   test_ir_constant);
+  run_test("plan-5-only manifest boundary", test_plan5_only_manifest_boundary);
   run_test("closed-form index ramp",        test_ir_index_ramp);
   run_test("clock request boundary handoff", test_clock_boundary_handoff);
   run_test("clock odd-sequence barrier", test_clock_request_barrier);

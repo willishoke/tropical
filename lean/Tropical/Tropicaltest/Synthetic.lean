@@ -398,6 +398,35 @@ def runProductionNonEmission (arena : Arena)
 
 end ProductionNonEmission
 
+-- ── Serialized-plan schema boundary ────────────────────────────────────────
+
+/-- The Lean-owned serialized-plan entry point is deliberately Plan-5-only.
+    This is a separate boundary gate from production non-emission: even a
+    hand-authored document cannot revive an older schema or retired carrier. -/
+def runPlanSchemaRejection : IO Bool := do
+  let rejectsWith (j : Lean.Json) (needle : String) : Bool :=
+    match Tropical.Plan.FlatPlan.ofWire j with
+    | .ok _ => false
+    | .error e => (e.splitOn needle).length > 1
+  let plan4 := Lean.Json.mkObj [("schema", .str "tropical_plan_4")]
+  let unknown := Lean.Json.mkObj [("schema", .str "tropical_plan_99")]
+  let missing := Lean.Json.mkObj []
+  let retired := Lean.Json.mkObj [
+    ("schema", .str "tropical_plan_5"),
+    ("state_init", .arr #[])]
+  if rejectsWith plan4
+        "unsupported schema 'tropical_plan_4'; expected 'tropical_plan_5'"
+      && rejectsWith unknown
+        "unsupported schema 'tropical_plan_99'; expected 'tropical_plan_5'"
+      && rejectsWith missing "missing string field 'schema'"
+      && rejectsWith retired
+        "retired field 'state_init' is not valid in tropical_plan_5" then
+    passGate "plan5-schema-rejection"
+      "PlanDecode rejects plan_4, unknown/missing schemas, and retired carriers"
+  else
+    failGate "plan5-schema-rejection"
+      "PlanDecode accepted an unsupported schema/carrier or returned the wrong boundary error"
+
 def sortedNames (dir : String) (suffix : String) : IO (Array String) := do
   let entries ← (System.FilePath.mk dir).readDir
   let names := entries.filterMap fun e =>
