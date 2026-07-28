@@ -220,6 +220,7 @@ def prepare_artifacts(fixture: dict[str, Any], directory: Path,
     directory.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env["TROPICAL_STAGE0_DUMP"] = str(directory)
+    env["TROPICAL_KERNEL_CACHE_ROOT"] = str(directory / "prepare-cache")
     timings: dict[str, int | None] = {
         "frontend_plan_total_ns": None,
         "artifact_prepare_total_ns": None,

@@ -255,6 +255,8 @@ int main(int argc, char ** argv)
     tropical_dac_stats_t dac_stats{};
     std::vector<std::string> dac_snapshot_labels;
     std::vector<tropical_dac_stats_t> dac_snapshots;
+    bool dac_aborted = false;
+    std::string dac_abort_reason;
     if (o.dac)
     {
       tropical_dac_t dac =
@@ -297,6 +299,14 @@ int main(int argc, char ** argv)
       {
         tropical_dac_get_stats(dac, &dac_stats);
         block = dac_stats.callback_count;
+        if (dac_stats.underrun_count > 0 || dac_stats.overrun_count > 0)
+        {
+          dac_aborted = true;
+          dac_abort_reason = dac_stats.underrun_count > 0
+            ? "post_reset_underrun" : "post_reset_callback_overrun";
+          snapshot("measured_failure_abort");
+          break;
+        }
         if (!baseline_recorded && block >= baseline_blocks)
         {
           snapshot("clean_baseline_after_reset");
@@ -339,10 +349,13 @@ int main(int argc, char ** argv)
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(5));
       }
-      if (!baseline_recorded) snapshot("clean_baseline_after_reset");
-      if (!writes_recorded) snapshot("after_periodic_writes");
-      if (!jump_recorded) snapshot("after_clock_jump");
-      snapshot("after_hot_swap");
+      if (!dac_aborted)
+      {
+        if (!baseline_recorded) snapshot("clean_baseline_after_reset");
+        if (!writes_recorded) snapshot("after_periodic_writes");
+        if (!jump_recorded) snapshot("after_clock_jump");
+        snapshot("after_hot_swap");
+      }
       tropical_dac_get_stats(dac, &dac_stats);
       overrun_count = dac_stats.overrun_count;
       tropical_dac_stop(dac);
@@ -447,6 +460,11 @@ int main(int argc, char ** argv)
               << ",\"run_ns\":" << run_ns
               << ",\"blocks\":" << block
               << ",\"dac_mode\":" << (o.dac ? "true" : "false")
+              << ",\"dac_aborted\":" << (dac_aborted ? "true" : "false")
+              << ",\"dac_abort_reason\":";
+    if (dac_abort_reason.empty()) std::cout << "null";
+    else std::cout << '"' << dac_abort_reason << '"';
+    std::cout
               << ",\"deadline_ns\":" << deadline_ns
               << ",\"overrun_count\":" << overrun_count
               << ",\"nonfinite_count\":" << nonfinite_count

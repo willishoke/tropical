@@ -297,7 +297,8 @@ def run_soak(stream, work: Path, duration: float, buffer: int, depth: int) -> No
         "dac_stats": result["dac_stats"],
         "post_reset_underruns": post_reset_underruns,
         "qualification_status":
-            "blocked" if post_reset_underruns else "measured-window-pass",
+            "blocked" if result["dac_aborted"] or post_reset_underruns
+            else "measured-window-pass",
         "offline_support": offline,
         "raw": result,
     }
