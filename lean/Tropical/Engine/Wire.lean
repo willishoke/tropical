@@ -66,7 +66,7 @@ private def decodeWire (expr : Json) (path : String) (param : String) :
   | .error msg =>
     throwBare .invalidValue msg (param := some param) (value := some expr)
   | .ok e =>
-    -- Decoding is necessary but not sufficient: five constructors exist for
+    -- Decoding is necessary but not sufficient: three constructors exist for
     -- the engine's own use and no lowering compiles them. Refuse here, or
     -- they reach the store and detonate at the next compile.
     match e.uncompilableOp? with
