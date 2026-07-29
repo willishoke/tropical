@@ -1,7 +1,13 @@
 #include "metal/MetalRenderWorker.hpp"
 
 #include <chrono>
+#include <ctime>
 #include <utility>
+
+#ifdef __APPLE__
+#include <mach/mach.h>
+#include <mach/thread_info.h>
+#endif
 
 namespace tropical_metal
 {
@@ -9,6 +15,53 @@ namespace tropical_metal
 using tropical_runtime::EpochActivation;
 using tropical_runtime::EpochTileQueue;
 using tropical_runtime::TileTag;
+
+namespace
+{
+uint64_t current_thread_cpu_time_ns()
+{
+#ifdef __APPLE__
+  thread_basic_info_data_t info{};
+  mach_msg_type_number_t count = THREAD_BASIC_INFO_COUNT;
+  const thread_t thread = mach_thread_self();
+  const kern_return_t status = thread_info(
+    thread, THREAD_BASIC_INFO,
+    reinterpret_cast<thread_info_t>(&info), &count);
+  mach_port_deallocate(mach_task_self(), thread);
+  if (status != KERN_SUCCESS) return 0;
+  return (
+    static_cast<uint64_t>(info.user_time.seconds)
+    + static_cast<uint64_t>(info.system_time.seconds)) * 1000000000ULL
+    + (static_cast<uint64_t>(info.user_time.microseconds)
+       + static_cast<uint64_t>(info.system_time.microseconds)) * 1000ULL;
+#elif defined(CLOCK_THREAD_CPUTIME_ID)
+  timespec value{};
+  if (clock_gettime(CLOCK_THREAD_CPUTIME_ID, &value) != 0) return 0;
+  return static_cast<uint64_t>(value.tv_sec) * 1000000000ULL
+       + static_cast<uint64_t>(value.tv_nsec);
+#else
+  return 0;
+#endif
+}
+
+void update_min(std::atomic<uint64_t> & target, uint64_t value)
+{
+  uint64_t observed = target.load(std::memory_order_relaxed);
+  while (value < observed
+         && !target.compare_exchange_weak(
+           observed, value, std::memory_order_relaxed))
+  {}
+}
+
+void update_max(std::atomic<uint64_t> & target, uint64_t value)
+{
+  uint64_t observed = target.load(std::memory_order_relaxed);
+  while (value > observed
+         && !target.compare_exchange_weak(
+           observed, value, std::memory_order_relaxed))
+  {}
+}
+} // namespace
 
 MetalRenderWorker::MetalRenderWorker(
   EpochTileQueue & queue, RenderFunction render)
@@ -86,6 +139,10 @@ MetalRenderWorker::schedule(RenderEpochRequest request)
 
 void MetalRenderWorker::run()
 {
+  worker_start_time_ns_.store(
+    monotonic_time_ns(), std::memory_order_release);
+  worker_cpu_baseline_ns_.store(
+    current_thread_cpu_time_ns(), std::memory_order_release);
   for (;;)
   {
     observe_activation_acknowledgement();
@@ -94,9 +151,17 @@ void MetalRenderWorker::run()
     std::shared_ptr<PendingRequest> pending;
     {
       std::unique_lock<std::mutex> lock(mutex_);
-      if (stopping_) return;
+      if (stopping_)
+      {
+        worker_cpu_latest_ns_.store(
+          current_thread_cpu_time_ns(), std::memory_order_release);
+        return;
+      }
       if (pending_activation_epoch_ != 0 && active_epoch_ == 0
           && !requests_.empty()
+          && bank_cursors_[0].valid
+          && bank_cursors_[0].request.transition
+               == EpochTransitionKind::Fresh
           && queue_.cancel_unclaimed_activation(
             pending_activation_epoch_))
       {
@@ -111,10 +176,20 @@ void MetalRenderWorker::run()
       else if (!worked)
       {
         wake_.wait_for(lock, std::chrono::microseconds(100));
-        if (stopping_) return;
+        if (stopping_)
+        {
+          worker_cpu_latest_ns_.store(
+            current_thread_cpu_time_ns(), std::memory_order_release);
+          return;
+        }
       }
     }
-    if (!pending) continue;
+    if (!pending)
+    {
+      worker_cpu_latest_ns_.store(
+        current_thread_cpu_time_ns(), std::memory_order_release);
+      continue;
+    }
 
     pending->result = prepare_activation(std::move(pending->request));
     {
@@ -122,6 +197,8 @@ void MetalRenderWorker::run()
       pending->done = true;
     }
     pending->completed.notify_one();
+    worker_cpu_latest_ns_.store(
+      current_thread_cpu_time_ns(), std::memory_order_release);
   }
 }
 
@@ -131,8 +208,19 @@ bool MetalRenderWorker::observe_activation_acknowledgement()
       || queue_.activation_acknowledged() != pending_activation_epoch_)
     return false;
 
+  const uint64_t acknowledged = monotonic_time_ns();
   activation_acknowledged_time_.store(
-    monotonic_time_ns(), std::memory_order_release);
+    acknowledged, std::memory_order_release);
+  const uint64_t requested =
+    request_received_time_.load(std::memory_order_acquire);
+  if (requested != 0 && acknowledged >= requested)
+  {
+    const uint64_t latency = acknowledged - requested;
+    activation_latency_count_.fetch_add(1, std::memory_order_relaxed);
+    activation_latency_total_ns_.fetch_add(latency, std::memory_order_relaxed);
+    update_min(activation_latency_min_ns_, latency);
+    update_max(activation_latency_max_ns_, latency);
+  }
   const uint32_t previous = active_bank_;
   active_bank_ = queue_.audio_active_bank();
   active_epoch_ = pending_activation_epoch_;
@@ -364,6 +452,36 @@ MetalWorkerStageTimes MetalRenderWorker::stage_times() const noexcept
     activation_acknowledged_time_.load(std::memory_order_acquire),
     old_epoch_retired_time_.load(std::memory_order_acquire),
   };
+}
+
+MetalActivationLatencyStats
+MetalRenderWorker::activation_latency_stats() const noexcept
+{
+  const uint64_t count =
+    activation_latency_count_.load(std::memory_order_acquire);
+  return {
+    count,
+    activation_latency_total_ns_.load(std::memory_order_acquire),
+    count == 0 ? 0
+      : activation_latency_min_ns_.load(std::memory_order_acquire),
+    activation_latency_max_ns_.load(std::memory_order_acquire),
+  };
+}
+
+uint64_t MetalRenderWorker::worker_cpu_time_ns() const noexcept
+{
+  const uint64_t baseline =
+    worker_cpu_baseline_ns_.load(std::memory_order_acquire);
+  const uint64_t latest =
+    worker_cpu_latest_ns_.load(std::memory_order_acquire);
+  return latest >= baseline ? latest - baseline : 0;
+}
+
+uint64_t MetalRenderWorker::worker_wall_time_ns() const noexcept
+{
+  const uint64_t start =
+    worker_start_time_ns_.load(std::memory_order_acquire);
+  return start == 0 ? 0 : monotonic_time_ns() - start;
 }
 
 void MetalRenderWorker::set_test_seam(

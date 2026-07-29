@@ -881,6 +881,65 @@ public:
 #endif
   }
 
+  std::array<uint64_t, 8> metal_worker_stage_times() const
+  {
+    std::array<uint64_t, 8> result{};
+#ifdef TROPICAL_METAL
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    if (metal_worker_)
+    {
+      const auto times = metal_worker_->stage_times();
+      result = {
+        times.request_received,
+        times.activation_target_reserved,
+        times.candidate_render_submitted,
+        times.candidate_gpu_completion,
+        times.candidate_window_ready,
+        times.activation_published,
+        times.activation_acknowledged,
+        times.old_epoch_retired,
+      };
+    }
+#endif
+    return result;
+  }
+
+  std::array<uint64_t, 4> metal_activation_latency_stats() const
+  {
+    std::array<uint64_t, 4> result{};
+#ifdef TROPICAL_METAL
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    if (metal_worker_)
+    {
+      const auto stats = metal_worker_->activation_latency_stats();
+      result = {
+        stats.count, stats.total_ns, stats.min_ns, stats.max_ns
+      };
+    }
+#endif
+    return result;
+  }
+
+  uint64_t metal_worker_cpu_time_ns() const
+  {
+#ifdef TROPICAL_METAL
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    return metal_worker_ ? metal_worker_->worker_cpu_time_ns() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  uint64_t metal_worker_wall_time_ns() const
+  {
+#ifdef TROPICAL_METAL
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    return metal_worker_ ? metal_worker_->worker_wall_time_ns() : 0;
+#else
+    return 0;
+#endif
+  }
+
   // Test-only: install/remove the deterministic ownership pause seam.
   void set_ownership_test_seam(RuntimeOwnershipTestSeam * seam)
   {

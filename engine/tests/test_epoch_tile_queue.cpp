@@ -50,6 +50,16 @@ static bool publish_ramp(EpochTileQueue & queue, uint32_t bank,
   return queue.publish_tile(claim);
 }
 
+static bool publish_constant(EpochTileQueue & queue, uint32_t bank,
+                             uint32_t slot, const TileTag & tag,
+                             double value)
+{
+  EpochTileQueue::RenderClaim claim;
+  if (!queue.claim_tile(bank, slot, tag, claim)) return false;
+  std::fill_n(claim.destination, tag.frame_count, value);
+  return queue.publish_tile(claim);
+}
+
 static void prepare_epoch(EpochTileQueue & queue, uint32_t bank,
                           uint64_t epoch, uint64_t device_start,
                           uint64_t source_start, uint32_t count = 4)
@@ -199,6 +209,38 @@ static void test_wrap_and_bank_reuse()
   ASSERT(queue.begin_epoch(0, 3));
 }
 
+static void test_ten_thousand_epoch_bank_reuses()
+{
+  constexpr uint32_t frames = 512;
+  constexpr uint64_t epochs = 10000;
+  EpochTileQueue queue(frames, frames);
+  std::array<double, frames> out{};
+  uint32_t bank = 0;
+  for (uint64_t epoch = 1; epoch <= epochs; ++epoch)
+  {
+    ASSERT(queue.begin_epoch(bank, epoch));
+    for (uint32_t tile = 0; tile < EpochTileQueue::kTilesPerBank; ++tile)
+      ASSERT(publish_constant(
+        queue, bank, tile,
+        {epoch, epoch * frames + tile * frames,
+         epoch * frames + tile * frames, frames},
+        static_cast<double>(epoch)));
+    queue.synchronize_audio_coordinates(epoch * frames, epoch * frames);
+    ASSERT(queue.publish_activation(
+      {epoch, epoch * frames, epoch * frames, bank}));
+    const auto consumed = queue.consume(out.data(), frames);
+    ASSERT(consumed.status == TileConsumeStatus::Audio);
+    ASSERT(consumed.activated);
+    ASSERT(consumed.epoch_id == epoch);
+    ASSERT(queue.activation_acknowledged() == epoch);
+    for (double sample : out)
+      ASSERT(sample == static_cast<double>(epoch));
+    bank = 1U - bank;
+  }
+  ASSERT(queue.starvation_count() == 0);
+  ASSERT(queue.tag_mismatch_count() == 0);
+}
+
 int main()
 {
   std::printf("test_epoch_tile_queue\n");
@@ -210,6 +252,8 @@ int main()
   run_test("post-activation starvation is whole-buffer and sticky",
            test_starvation_latches_once);
   run_test("tile wrap and acknowledged bank reuse", test_wrap_and_bank_reuse);
+  run_test("10,000 acknowledged epoch/bank reuse cycles",
+           test_ten_thousand_epoch_bank_reuses);
   std::printf("\n  %d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }

@@ -234,6 +234,59 @@ static void test_teardown_waits_for_inflight_tile()
   ASSERT(destroyed.load(std::memory_order_acquire));
 }
 
+static void test_rapid_a_b_a_serializes_acknowledgements()
+{
+  EpochTileQueue queue(512, 512);
+  MetalRenderWorker worker(
+    queue,
+    [](const RenderEpochRequest & request, uint64_t, uint32_t frames,
+       double * destination) {
+      std::fill_n(
+        destination, frames, static_cast<double>(request.epoch_id));
+      return true;
+    });
+  ASSERT(worker.schedule(
+    request(1, EpochTransitionKind::Fresh, 0)).ok);
+  std::array<double, 512> output{};
+  ASSERT(queue.consume(output.data(), output.size()).activated);
+  ASSERT(wait_for([&] { return queue.activation_acknowledged() == 1; }));
+
+  std::array<tropical_metal::EpochScheduleResult, 3> results{};
+  for (uint32_t index = 0; index < results.size(); ++index)
+  {
+    const uint64_t epoch = index + 2;
+    const uint64_t expected_activation =
+      worker.reserve(EpochTransitionKind::Continuous).activation_frame;
+    std::jthread control([&, index, epoch] {
+      results[index] = worker.schedule(
+        request(epoch, EpochTransitionKind::Continuous));
+    });
+    ASSERT(wait_for([&] {
+      return queue.published_activation_epoch() == epoch;
+    }));
+    while (queue.published_device_frame()
+           < expected_activation)
+      ASSERT(queue.consume(output.data(), output.size()).status
+             == TileConsumeStatus::Audio);
+    const auto activated = queue.consume(output.data(), output.size());
+    ASSERT(activated.status == TileConsumeStatus::Audio);
+    ASSERT(activated.activated);
+    ASSERT(activated.epoch_id == epoch);
+    for (double sample : output)
+      ASSERT(sample == static_cast<double>(epoch));
+    control.join();
+    ASSERT(results[index].ok);
+    ASSERT(results[index].activation_frame == expected_activation);
+    ASSERT(queue.activation_acknowledged() == epoch);
+  }
+  ASSERT(results[0].activation_frame < results[1].activation_frame);
+  ASSERT(results[1].activation_frame < results[2].activation_frame);
+  ASSERT(worker.activation_failure_count() == 0);
+  ASSERT(worker.stale_completion_count() == 0);
+  ASSERT(queue.starvation_count() == 0);
+  ASSERT(queue.tag_mismatch_count() == 0);
+}
+
 int main()
 {
   std::printf("test_metal_render_worker (no DAC)\n");
@@ -245,6 +298,8 @@ int main()
            test_failed_candidate_keeps_active_epoch);
   run_test("control-thread teardown joins an in-flight tile safely",
            test_teardown_waits_for_inflight_tile);
+  run_test("rapid A/B/A promises serialize through acknowledgements",
+           test_rapid_a_b_a_serializes_acknowledgements);
   std::printf("\n  %d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }

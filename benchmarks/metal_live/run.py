@@ -242,6 +242,8 @@ def evaluate_acceptance(result: dict[str, Any],
     callback_count = result.get("dac_stats", {}).get("callback_count")
     event_blocks = result.get("event_blocks", {})
     activation_epochs = result.get("event_activation_epochs", {})
+    transition_evidence = result.get(
+        "transition_activation_evidence", {})
     start_block = event_blocks.get("start_reference")
     jump_request_block = event_blocks.get("clock_jump_request")
     jump_progress_block = event_blocks.get("clock_jump_progress")
@@ -258,6 +260,21 @@ def evaluate_acceptance(result: dict[str, Any],
     swap_activation_epoch = activation_epochs.get("hot_swap")
     last_write_activation_epoch = activation_epochs.get("last_write")
     acknowledged_final_epoch = activation_epochs.get("acknowledged_final")
+    stage_times = result.get("metal_worker_stage_times", {})
+    ordered_stage_names = (
+        "request_received",
+        "activation_target_reserved",
+        "candidate_render_submitted",
+        "candidate_gpu_completion",
+        "candidate_window_ready",
+        "activation_published",
+        "activation_acknowledged",
+        "old_epoch_retired",
+    )
+    ordered_stage_times = [
+        stage_times.get(name) for name in ordered_stage_names
+    ]
+    activation_latency = result.get("metal_activation_latency", {})
     measured_loop_ns = result.get("measured_loop_ns")
     measured_loop_callbacks = result.get("measured_loop_callback_count")
     expected_callbacks = (
@@ -297,6 +314,8 @@ def evaluate_acceptance(result: dict[str, Any],
             result.get("dac_stats", {}).get("underrun_count") == 0,
         "zero_callback_overruns":
             result.get("dac_stats", {}).get("overrun_count") == 0,
+        "zero_nonfinite_output":
+            result.get("nonfinite_count") == 0,
         "callback_p99_below_half_deadline":
             p99 is not None and p99 < deadline_ns / 2,
         "histogram_covers_all_measured_callbacks":
@@ -321,6 +340,30 @@ def evaluate_acceptance(result: dict[str, Any],
             result.get("metal_activation_failure_count") == 0,
         "zero_callback_thread_metal_violations":
             result.get("metal_callback_thread_violation_count") == 0,
+        "worker_stage_timestamps_complete_and_ordered":
+            all(
+                isinstance(value, int) and value > 0
+                for value in ordered_stage_times)
+            and ordered_stage_times == sorted(ordered_stage_times),
+        "activation_latency_distribution_reported":
+            isinstance(activation_latency.get("count"), int)
+            and activation_latency["count"] > 0
+            and isinstance(activation_latency.get("min_ns"), int)
+            and activation_latency["min_ns"] > 0
+            and activation_latency["min_ns"]
+                <= activation_latency.get("max_ns", -1)
+            and activation_latency["min_ns"]
+                <= activation_latency.get("mean_ns", -1)
+                <= activation_latency["max_ns"],
+        "worker_cpu_wall_fraction_reported":
+            isinstance(result.get("metal_worker_cpu_ns"), int)
+            and result["metal_worker_cpu_ns"] >= 0
+            and isinstance(result.get("metal_worker_wall_ns"), int)
+            and result["metal_worker_wall_ns"] > 0
+            and isinstance(
+                result.get("metal_worker_cpu_wall_fraction"), (int, float))
+            and math.isfinite(result["metal_worker_cpu_wall_fraction"])
+            and result["metal_worker_cpu_wall_fraction"] >= 0,
         "callback_max_below_deadline":
             isinstance(callback.get("max_exact_ns"), int)
             and callback["max_exact_ns"] < deadline_ns,
@@ -353,6 +396,17 @@ def evaluate_acceptance(result: dict[str, Any],
             and acknowledged_final_epoch >= swap_activation_epoch
             and jump_progress_block >= jump_request_block
             and swap_progress_block >= swap_publication_block,
+        "every_requested_jump_and_swap_acknowledged":
+            isinstance(
+                transition_evidence.get("clock_jump_requested"), int)
+            and transition_evidence["clock_jump_requested"] > 0
+            and transition_evidence.get("clock_jump_acknowledged")
+                == transition_evidence["clock_jump_requested"]
+            and isinstance(
+                transition_evidence.get("hot_swap_requested"), int)
+            and transition_evidence["hot_swap_requested"] > 0
+            and transition_evidence.get("hot_swap_acknowledged")
+                == transition_evidence["hot_swap_requested"],
         "final_reference_after_write_stop_and_last_activation":
             isinstance(end_block, int)
             and isinstance(last_write, int)
@@ -729,6 +783,13 @@ def run_soak(stream, work: Path, duration: float, buffer: int,
     rate = 44100
     expected_blocks = max(1, int(duration * rate / buffer))
     rss_every = max(1, int(2 * rate / buffer))
+    jump_every = max(1, int(5 * rate / buffer))
+    reload_every = max(1, int(30 * rate / buffer))
+    final_settle = max(1, int(10 * rate / buffer))
+    if expected_blocks <= reload_every + final_settle:
+        raise ValueError(
+            "Metal soak duration must exceed 40 seconds so the first swap "
+            "and final acknowledgement window both occur")
     common = [
         str(RUNTIME_BENCH),
         "--ir", str(artifacts["ir"]),
@@ -745,11 +806,13 @@ def run_soak(stream, work: Path, duration: float, buffer: int,
         "--warmup", "8",
         "--reference-slot", str(slots["reference_slot"]),
         "--write-every", str(max(1, int(rate / buffer))),
-        "--write-stop-at", str(expected_blocks * 3 // 4),
+        "--write-stop-at", str(expected_blocks - final_settle),
         "--rss-every", str(rss_every),
-        "--jump-at", str(expected_blocks // 4),
+        "--jump-at", str(jump_every),
+        "--jump-every", str(jump_every),
         "--jump-index", str(1 << 40),
-        "--reload-at", str(expected_blocks // 2),
+        "--reload-at", str(reload_every),
+        "--reload-every", str(reload_every),
     ]
     for discipline, name, low, high in slots["param_events"]:
         common += [
@@ -804,8 +867,8 @@ def run_soak(stream, work: Path, duration: float, buffer: int,
         "device_frames": buffer,
         "render_tile_frames": render_frames,
         "worker_capacity_frames": result.get("metal_worker_capacity_frames"),
-        "hot_swap_block": expected_blocks // 2,
-        "clock_jump_block": expected_blocks // 4,
+        "hot_swap_every_blocks": reload_every,
+        "clock_jump_every_blocks": jump_every,
         "rss_post_warmup": rss_analysis,
         "sink_contract":
             "the addressed 512-mode bank is the reference signal behind a "
@@ -822,12 +885,22 @@ def run_soak(stream, work: Path, duration: float, buffer: int,
         },
         "dac_stats": result["dac_stats"],
         "post_reset_underruns": post_reset_underruns,
+        "activation_latency_ns": result.get("metal_activation_latency"),
+        "activation_retarget_count":
+            result.get("metal_activation_retarget_count"),
+        "worker_stage_times": result.get("metal_worker_stage_times"),
+        "worker_cpu_wall": {
+            "cpu_ns": result.get("metal_worker_cpu_ns"),
+            "wall_ns": result.get("metal_worker_wall_ns"),
+            "fraction": result.get("metal_worker_cpu_wall_fraction"),
+        },
+        "transition_activation_evidence":
+            result.get("transition_activation_evidence"),
         "acceptance_gates": acceptance_gates,
         "failure_reasons": failure_reasons,
         "unavailable_measurements": [
             "Metal resource/object counts",
             "live inter-callback/block interval distribution",
-            "worker CPU/wall fraction",
         ],
         "qualification_status":
             "blocked" if failure_reasons else "measured-window-pass",
@@ -844,7 +917,7 @@ def run_soak(stream, work: Path, duration: float, buffer: int,
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("latency", "soak", "all"), default="latency")
-    parser.add_argument("--duration-seconds", type=float, default=1800)
+    parser.add_argument("--duration-seconds", type=float, default=600)
     parser.add_argument("--buffer", type=int, choices=(128, 256, 512), default=512)
     parser.add_argument(
         "--render-frames", type=int, choices=(512,), default=512)

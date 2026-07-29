@@ -34,7 +34,9 @@ def passing_result() -> dict:
     }
     return {
         "dac_aborted": False,
-        "pipeline_depth": 3,
+        "device_frames": 512,
+        "metal_render_tile_frames": 512,
+        "metal_worker_capacity_frames": 2048,
         "negotiated_buffer_frames": 512,
         "measured_loop_ns": 1_160_997_700,
         "measured_loop_callback_count": 100,
@@ -44,6 +46,32 @@ def passing_result() -> dict:
         "ownership_failure_count": 0,
         "reference_ownership_failure_count": 0,
         "metal_dispatch_failure_count": 0,
+        "metal_render_starvation_count": 0,
+        "metal_epoch_tag_mismatch_count": 0,
+        "metal_activation_retarget_count": 2,
+        "metal_activation_failure_count": 0,
+        "metal_callback_thread_violation_count": 0,
+        "metal_worker_stage_times": {
+            "request_received": 100,
+            "activation_target_reserved": 110,
+            "candidate_render_submitted": 120,
+            "candidate_gpu_completion": 130,
+            "candidate_window_ready": 140,
+            "activation_published": 150,
+            "activation_acknowledged": 160,
+            "old_epoch_retired": 170,
+        },
+        "metal_activation_latency": {
+            "count": 10,
+            "total_ns": 600,
+            "min_ns": 40,
+            "max_ns": 80,
+            "mean_ns": 60,
+        },
+        "metal_worker_cpu_ns": 10_000_000,
+        "metal_worker_wall_ns": 100_000_000,
+        "metal_worker_cpu_wall_fraction": 0.1,
+        "nonfinite_count": 0,
         "reload_artifacts_distinct": True,
         "dac_stats": {
             "callback_count": 100,
@@ -53,8 +81,21 @@ def passing_result() -> dict:
         "callback_summary_ns": {
             "count": 100,
             "p99_upper_bound_ns": 1_000_000,
+            "max_exact_ns": 2_000_000,
         },
         "event_completion": completed,
+        "event_activation_epochs": {
+            "last_write": 80,
+            "clock_jump": 30,
+            "hot_swap": 50,
+            "acknowledged_final": 90,
+        },
+        "transition_activation_evidence": {
+            "clock_jump_requested": 10,
+            "clock_jump_acknowledged": 10,
+            "hot_swap_requested": 2,
+            "hot_swap_acknowledged": 2,
+        },
         "event_blocks": {
             "baseline": 10,
             "clock_jump_request": 26,
@@ -110,7 +151,7 @@ class AcceptanceGateTests(unittest.TestCase):
             },
             buffer=512,
             rate=44100,
-            depth=3,
+            render_frames=512,
         )
 
     def test_passing_row(self) -> None:
@@ -132,29 +173,50 @@ class AcceptanceGateTests(unittest.TestCase):
         self.assertFalse(gates["callback_p99_below_half_deadline"])
         self.assertIn("callback_p99_below_half_deadline", failures)
 
-    def test_end_capture_inside_future_queue_blocks_qualification(self) -> None:
+    def test_nonfinite_output_blocks_qualification(self) -> None:
         result = passing_result()
-        result["event_blocks"]["end_preceding_write"] = 88
+        result["nonfinite_count"] = 1
+        gates, failures = self.evaluate(result)
+        self.assertFalse(gates["zero_nonfinite_output"])
+        self.assertIn("zero_nonfinite_output", failures)
+
+    def test_unacknowledged_last_write_blocks_final_reference(self) -> None:
+        result = passing_result()
+        result["event_activation_epochs"]["acknowledged_final"] = 79
         gates, failures = self.evaluate(result)
         self.assertFalse(
-            gates["final_reference_after_write_stop_and_clear_of_future_queue"])
+            gates["final_reference_after_write_stop_and_last_activation"])
         self.assertIn(
-            "final_reference_after_write_stop_and_clear_of_future_queue",
+            "final_reference_after_write_stop_and_last_activation",
             failures)
 
-    def test_clock_progress_before_future_queue_clear_blocks(self) -> None:
+    def test_missing_clock_activation_evidence_blocks(self) -> None:
         result = passing_result()
-        result["event_blocks"]["clock_jump_progress"] = 29
+        result["event_activation_epochs"]["clock_jump"] = None
         gates, failures = self.evaluate(result)
-        self.assertFalse(gates["clock_and_swap_clear_future_queue"])
-        self.assertIn("clock_and_swap_clear_future_queue", failures)
+        self.assertFalse(
+            gates["clock_and_swap_reach_acknowledged_activations"])
+        self.assertIn(
+            "clock_and_swap_reach_acknowledged_activations", failures)
 
-    def test_swap_progress_before_future_queue_clear_blocks(self) -> None:
+    def test_unacknowledged_swap_blocks(self) -> None:
         result = passing_result()
-        result["event_blocks"]["hot_swap_progress"] = 49
+        result["event_activation_epochs"]["acknowledged_final"] = 49
         gates, failures = self.evaluate(result)
-        self.assertFalse(gates["clock_and_swap_clear_future_queue"])
-        self.assertIn("clock_and_swap_clear_future_queue", failures)
+        self.assertFalse(
+            gates["clock_and_swap_reach_acknowledged_activations"])
+        self.assertIn(
+            "clock_and_swap_reach_acknowledged_activations", failures)
+
+    def test_missing_periodic_activation_ack_blocks(self) -> None:
+        result = passing_result()
+        result["transition_activation_evidence"][
+            "clock_jump_acknowledged"] = 9
+        gates, failures = self.evaluate(result)
+        self.assertFalse(
+            gates["every_requested_jump_and_swap_acknowledged"])
+        self.assertIn(
+            "every_requested_jump_and_swap_acknowledged", failures)
 
     def test_too_few_rss_samples_blocks_qualification(self) -> None:
         result = passing_result()
@@ -167,17 +229,17 @@ class AcceptanceGateTests(unittest.TestCase):
             },
             buffer=512,
             rate=44100,
-            depth=3,
+            render_frames=512,
         )
         self.assertFalse(gates["rss_sampling_sufficient"])
         self.assertIn("rss_sampling_sufficient", failures)
 
-    def test_requested_pipeline_depth_mismatch_blocks_qualification(self) -> None:
+    def test_render_quantum_mismatch_blocks_qualification(self) -> None:
         result = passing_result()
-        result["pipeline_depth"] = 2
+        result["metal_render_tile_frames"] = 256
         gates, failures = self.evaluate(result)
-        self.assertFalse(gates["observed_pipeline_depth_matches_requested"])
-        self.assertIn("observed_pipeline_depth_matches_requested", failures)
+        self.assertFalse(gates["device_and_render_quanta_match"])
+        self.assertIn("device_and_render_quanta_match", failures)
 
     def test_low_callback_coverage_blocks_qualification(self) -> None:
         result = passing_result()
@@ -249,6 +311,66 @@ class AcceptanceGateTests(unittest.TestCase):
         self.assertFalse(gates["zero_metal_dispatch_failures"])
         self.assertIn("zero_metal_dispatch_failures", failures)
 
+    def test_metal_render_starvation_blocks_qualification(self) -> None:
+        result = passing_result()
+        result["metal_render_starvation_count"] = 1
+        gates, failures = self.evaluate(result)
+        self.assertFalse(gates["zero_metal_render_starvations"])
+        self.assertIn("zero_metal_render_starvations", failures)
+
+    def test_metal_tag_mismatch_blocks_qualification(self) -> None:
+        result = passing_result()
+        result["metal_epoch_tag_mismatch_count"] = 1
+        gates, failures = self.evaluate(result)
+        self.assertFalse(gates["zero_metal_epoch_tag_mismatches"])
+        self.assertIn("zero_metal_epoch_tag_mismatches", failures)
+
+    def test_metal_activation_failure_blocks_qualification(self) -> None:
+        result = passing_result()
+        result["metal_activation_failure_count"] = 1
+        gates, failures = self.evaluate(result)
+        self.assertFalse(gates["zero_metal_activation_failures"])
+        self.assertIn("zero_metal_activation_failures", failures)
+
+    def test_callback_thread_metal_violation_blocks_qualification(self) -> None:
+        result = passing_result()
+        result["metal_callback_thread_violation_count"] = 1
+        gates, failures = self.evaluate(result)
+        self.assertFalse(gates["zero_callback_thread_metal_violations"])
+        self.assertIn("zero_callback_thread_metal_violations", failures)
+
+    def test_callback_max_at_deadline_blocks_qualification(self) -> None:
+        result = passing_result()
+        result["callback_summary_ns"]["max_exact_ns"] = int(
+            512 * 1e9 / 44100) + 1
+        gates, failures = self.evaluate(result)
+        self.assertFalse(gates["callback_max_below_deadline"])
+        self.assertIn("callback_max_below_deadline", failures)
+
+    def test_missing_worker_stage_blocks_qualification(self) -> None:
+        result = passing_result()
+        result["metal_worker_stage_times"]["activation_acknowledged"] = 0
+        gates, failures = self.evaluate(result)
+        self.assertFalse(
+            gates["worker_stage_timestamps_complete_and_ordered"])
+        self.assertIn(
+            "worker_stage_timestamps_complete_and_ordered", failures)
+
+    def test_missing_activation_latency_blocks_qualification(self) -> None:
+        result = passing_result()
+        result["metal_activation_latency"]["count"] = 0
+        gates, failures = self.evaluate(result)
+        self.assertFalse(
+            gates["activation_latency_distribution_reported"])
+        self.assertIn("activation_latency_distribution_reported", failures)
+
+    def test_missing_worker_wall_metric_blocks_qualification(self) -> None:
+        result = passing_result()
+        result["metal_worker_wall_ns"] = 0
+        gates, failures = self.evaluate(result)
+        self.assertFalse(gates["worker_cpu_wall_fraction_reported"])
+        self.assertIn("worker_cpu_wall_fraction_reported", failures)
+
     def test_missing_production_discipline_blocks_qualification(self) -> None:
         result = passing_result()
         result["param_events"][-1]["discipline"] = "raw"
@@ -269,7 +391,7 @@ class AcceptanceGateTests(unittest.TestCase):
         result["rss_bytes"] = [0, 0, 0]
         analysis = RUN.analyze_rss(result, rate=44100, buffer=512)
         gates, failures = RUN.evaluate_acceptance(
-            result, analysis, buffer=512, rate=44100, depth=3)
+            result, analysis, buffer=512, rate=44100, render_frames=512)
         self.assertFalse(gates["rss_samples_are_valid"])
         self.assertIn("rss_samples_are_valid", failures)
 
@@ -302,9 +424,9 @@ class AcceptanceGateTests(unittest.TestCase):
         result["event_blocks"]["end_preceding_write"] = 86
         gates, failures = self.evaluate(result)
         self.assertFalse(
-            gates["final_reference_after_write_stop_and_clear_of_future_queue"])
+            gates["final_reference_after_write_stop_and_last_activation"])
         self.assertIn(
-            "final_reference_after_write_stop_and_clear_of_future_queue",
+            "final_reference_after_write_stop_and_last_activation",
             failures)
 
     def test_end_capture_before_stop_queue_clear_blocks_qualification(self) -> None:
@@ -312,9 +434,9 @@ class AcceptanceGateTests(unittest.TestCase):
         result["event_blocks"]["end_reference"] = 87
         gates, failures = self.evaluate(result)
         self.assertFalse(
-            gates["final_reference_after_write_stop_and_clear_of_future_queue"])
+            gates["final_reference_after_write_stop_and_last_activation"])
         self.assertIn(
-            "final_reference_after_write_stop_and_clear_of_future_queue",
+            "final_reference_after_write_stop_and_last_activation",
             failures)
 
     def test_end_capture_before_duration_elapsed_blocks_qualification(self) -> None:
@@ -322,9 +444,9 @@ class AcceptanceGateTests(unittest.TestCase):
         result["event_blocks"]["duration_elapsed"] = 90
         gates, failures = self.evaluate(result)
         self.assertFalse(
-            gates["final_reference_after_write_stop_and_clear_of_future_queue"])
+            gates["final_reference_after_write_stop_and_last_activation"])
         self.assertIn(
-            "final_reference_after_write_stop_and_clear_of_future_queue",
+            "final_reference_after_write_stop_and_last_activation",
             failures)
 
     def test_rss_net_growth_with_one_dip_is_material(self) -> None:
@@ -342,7 +464,7 @@ class AcceptanceGateTests(unittest.TestCase):
         self.assertTrue(analysis["material_net_or_level_growth"])
         result = passing_result()
         gates, failures = RUN.evaluate_acceptance(
-            result, analysis, buffer=512, rate=44100, depth=3)
+            result, analysis, buffer=512, rate=44100, render_frames=512)
         self.assertFalse(gates["no_material_post_warmup_rss_growth"])
         self.assertIn("no_material_post_warmup_rss_growth", failures)
 
@@ -381,10 +503,55 @@ class AcceptanceGateTests(unittest.TestCase):
                 return_value=({"forced_failure": False}, ["forced_failure"])),
             self.assertRaises(RUN.QualificationBlocked),
         ):
-            RUN.run_soak(stream, Path("/tmp"), 1800, 512, 3)
+            RUN.run_soak(stream, Path("/tmp"), 1800, 512, 512)
         row = json.loads(stream.getvalue())
         self.assertEqual(row["qualification_status"], "blocked")
         self.assertEqual(row["failure_reasons"], ["forced_failure"])
+
+    def test_soak_uses_transition_intervals_and_render_quantum(self) -> None:
+        result = passing_result()
+        artifacts = {
+            key: Path(f"/tmp/{key}")
+            for key in (
+                "ir", "coeff", "msl", "manifest",
+                "reload_ir", "reload_coeff", "reload_msl", "reload_manifest",
+            )
+        }
+        slots = {
+            "reference_slot": 0,
+            "param_events": [
+                ("raw", "raw", 0.0, 1.0),
+                ("glide", "glide", 0.0, 1.0),
+                ("anchor", "anchor", 0.0, 1.0),
+                ("velocity", "velocity", 0.0, 1.0),
+            ],
+            "canary_amplitude_bound": 1e-12,
+        }
+        rss_analysis = {
+            "sample_count": 3,
+            "all_samples_positive": True,
+            "material_net_or_level_growth": False,
+        }
+        stream = io.StringIO()
+        with (
+            mock.patch.object(
+                RUN, "prepare_heavy_graph", return_value=(artifacts, slots)),
+            mock.patch.object(
+                RUN, "probe", side_effect=[{}, result]) as probe,
+            mock.patch.object(
+                RUN, "analyze_rss", return_value=rss_analysis),
+            mock.patch.object(
+                RUN, "evaluate_acceptance",
+                return_value=({"all": True}, [])),
+        ):
+            RUN.run_soak(stream, Path("/tmp"), 600, 512, 512)
+        live_args, live_env = probe.call_args_list[1].args
+        self.assertIn("--jump-every", live_args)
+        self.assertIn("--reload-every", live_args)
+        self.assertNotIn("1024", live_args)
+        self.assertEqual(
+            live_env["TROPICAL_METAL_RENDER_TILE_FRAMES"], "512")
+        self.assertNotIn("TROPICAL_METAL_PIPELINE_DEPTH", live_env)
 
     def test_main_returns_nonzero_for_blocked_soak_without_duplicate_row(
             self) -> None:
@@ -436,7 +603,7 @@ class AcceptanceGateTests(unittest.TestCase):
             requested_mode="all",
             duration=1800,
             buffer=512,
-            depth=3,
+            render_frames=512,
             error=RuntimeError("device vanished"),
         )
         row = json.loads(stream.getvalue())
@@ -445,8 +612,8 @@ class AcceptanceGateTests(unittest.TestCase):
             row["schema"], "tropical_metal_qualification_failure_1")
         self.assertEqual(row["mode"], "soak")
         self.assertEqual(row["requested_mode"], "all")
-        self.assertEqual(row["buffer_length"], 512)
-        self.assertEqual(row["pipeline_depth"], 3)
+        self.assertEqual(row["device_frames"], 512)
+        self.assertEqual(row["render_tile_frames"], 512)
         self.assertEqual(row["duration_requested_seconds"], 1800)
         self.assertEqual(row["exception_class"], "RuntimeError")
         self.assertEqual(row["exception_message"], "device vanished")

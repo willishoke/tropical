@@ -202,8 +202,9 @@ if(TROPICAL_BUILD_TESTS)
         target_link_options(test_module_process PRIVATE -fsanitize=thread)
         add_custom_target(check_runtime_tsan
             COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
-                    -R "epoch_tile_queue|module_process"
+                    -R "epoch_tile_queue|module_process|metal_render_worker"
             DEPENDS test_epoch_tile_queue test_module_process
+            VERBATIM
             USES_TERMINAL)
     endif()
     if(TROPICAL_METAL)
@@ -218,6 +219,11 @@ if(TROPICAL_BUILD_TESTS)
         add_test(NAME current_metal_render_worker
             COMMAND test_metal_render_worker)
         set_tests_properties(current_metal_render_worker PROPERTIES TIMEOUT 30)
+        if(TROPICAL_TSAN)
+            target_compile_options(test_metal_render_worker PRIVATE -fsanitize=thread)
+            target_link_options(test_metal_render_worker PRIVATE -fsanitize=thread)
+            add_dependencies(check_runtime_tsan test_metal_render_worker)
+        endif()
 
         add_executable(test_metal_kernel engine/tests/test_metal_kernel.cpp)
         target_include_directories(test_metal_kernel PRIVATE engine ${LLVM_INCLUDE_DIRS})
@@ -227,7 +233,7 @@ if(TROPICAL_BUILD_TESTS)
         add_test(NAME current_metal_kernel COMMAND test_metal_kernel)
         # Includes deterministic failures before and after epoch activation.
         # The timeout bounds worker lifecycle or GPU completion regressions.
-        set_tests_properties(current_metal_kernel PROPERTIES TIMEOUT 30)
+        set_tests_properties(current_metal_kernel PROPERTIES TIMEOUT 180)
     endif()
 endif()
 

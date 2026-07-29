@@ -11,6 +11,7 @@
 
 #include "c_api/tropical_c.h"
 #include "metal/MetalKernel.hpp"
+#include "metal/MetalRenderWorker.hpp"
 #include "runtime/FlatRuntime.hpp"
 
 #include <array>
@@ -22,6 +23,7 @@
 #include <cstring>
 #include <string>
 #include <thread>
+#include <vector>
 
 static int g_fail = 0;
 
@@ -70,6 +72,22 @@ static const char* JIT_CONST_IR =
   "lb:\n"
   "  %p = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
   "  store double 9.000000e-01, ptr %p, align 8\n"
+  "  %sn = add i64 %s, 1\n  br label %lc\n"
+  "le:\n  ret void\n}\n";
+
+static const char* JIT_SLOT0_IR =
+  "define void @kernel(ptr %inputs, ptr %registers, ptr %arrays, "
+  "ptr %array_sizes, ptr %temps, double %sampleRate, i64 %start_sample_index, "
+  "ptr %param_ptrs, ptr %output_buffer, i64 %buffer_length, ptr %slots) {\n"
+  "entry:\n"
+  "  %value = load double, ptr %slots, align 8\n"
+  "  br label %lc\n"
+  "lc:\n  %s = phi i64 [0, %entry], [%sn, %lb]\n"
+  "  %c = icmp ult i64 %s, %buffer_length\n"
+  "  br i1 %c, label %lb, label %le\n"
+  "lb:\n"
+  "  %p = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+  "  store double %value, ptr %p, align 8\n"
   "  %sn = add i64 %s, 1\n  br label %lc\n"
   "le:\n  ret void\n}\n";
 
@@ -130,6 +148,32 @@ static void test_metal_ramp()
   // would be the constant 0.9 — the ramp proves the Metal path ran.
   tropical_runtime_free(rt);
   printf("PASS  metal ramp + clock continuity\n");
+}
+
+static void test_offline_renderer_waits_for_worker_refill()
+{
+  const unsigned int buf = 512;
+  tropical_runtime_t rt = tropical_runtime_new(buf);
+  ASSERT(rt != nullptr);
+  const std::string msl = msl_kernel(
+    "    output_buffer[s] = float(current_idx);");
+  ASSERT(tropical_runtime_load_ir_msl(
+    rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
+    msl.c_str(), msl.size(), MANIFEST, strlen(MANIFEST)));
+
+  const double * output = tropical_runtime_output_buffer(rt);
+  for (uint64_t block = 0; block < 12; ++block)
+  {
+    ASSERT(tropical_runtime_process_offline(rt));
+    for (uint32_t sample = 0; sample < buf; ++sample)
+      ASSERT_NEAR(
+        output[sample],
+        static_cast<double>(block * buf + sample), 1e-5);
+  }
+  ASSERT(tropical_runtime_metal_render_starvation_count(rt) == 0);
+  ASSERT(tropical_runtime_metal_epoch_tag_mismatch_count(rt) == 0);
+  tropical_runtime_free(rt);
+  printf("PASS  offline renderer waits beyond the four-tile watermark\n");
 }
 
 static void test_callback_thread_provenance()
@@ -595,6 +639,269 @@ static void test_metal_dispatch_failure_fail_closed()
   printf("PASS  Metal failures refuse activation or latch active epochs silent\n");
 }
 
+static void test_metal_clock_jump_and_precompiled_swap_stress()
+{
+  constexpr uint32_t frames = 512;
+  constexpr uint64_t transitions = 10000;
+  const std::string body_a =
+    "    output_buffer[s] = float(current_idx & 4095l);";
+  const std::string body_b =
+    "    output_buffer[s] = float(current_idx & 4095l) + 0.25f;";
+  std::string error;
+  auto kernel_a = tropical_metal::create(
+    msl_kernel(body_a), frames, 0, 0, error);
+  ASSERT(kernel_a != nullptr);
+  auto kernel_b = tropical_metal::create(
+    msl_kernel(body_b), frames, 0, 0, error);
+  ASSERT(kernel_b != nullptr);
+
+  tropical_runtime::EpochTileQueue queue(frames, frames);
+  tropical_metal::MetalRenderWorker worker(queue);
+  auto make_request = [](uint64_t epoch,
+                         tropical_metal::MetalKernelPtr kernel,
+                         tropical_metal::EpochTransitionKind transition,
+                         uint64_t source) {
+    tropical_metal::RenderEpochRequest request;
+    request.epoch_id = epoch;
+    request.kernel = std::move(kernel);
+    request.sample_rate = 44100.0;
+    request.source_origin = source;
+    request.transition = transition;
+    return request;
+  };
+  auto expected = [](uint64_t source, uint32_t offset, double marker) {
+    return static_cast<double>(
+      static_cast<float>((source + offset) & 4095ULL)) + marker;
+  };
+  std::array<double, frames> output{};
+  auto consume = [&] {
+    tropical_metal::set_audio_callback_thread(true);
+    const auto result = queue.consume(output.data(), frames);
+    tropical_metal::set_audio_callback_thread(false);
+    return result;
+  };
+
+  tropical_metal::reset_callback_thread_violation_count();
+  ASSERT(worker.schedule(make_request(
+    1, kernel_a, tropical_metal::EpochTransitionKind::Fresh, 0)).ok);
+  auto active = consume();
+  ASSERT(active.status == tropical_runtime::TileConsumeStatus::Audio);
+  double active_marker = 0.0;
+  uint64_t active_source = frames;
+
+  for (uint64_t i = 0; i < transitions; ++i)
+  {
+    const uint64_t source = (i & 1ULL)
+      ? ((1ULL << 40) + i * frames)
+      : (i * 3ULL * frames);
+    const bool use_b = (i & 1ULL) != 0;
+    const auto scheduled = worker.schedule(make_request(
+      i + 2, use_b ? kernel_b : kernel_a,
+      tropical_metal::EpochTransitionKind::ClockJump, source));
+    ASSERT(scheduled.ok);
+
+    const auto old = consume();
+    ASSERT(old.status == tropical_runtime::TileConsumeStatus::Audio);
+    ASSERT(!old.activated);
+    ASSERT(old.source_start == active_source);
+    for (uint32_t sample = 0; sample < frames; ++sample)
+      ASSERT(output[sample]
+             == expected(active_source, sample, active_marker));
+
+    const auto switched = consume();
+    ASSERT(switched.status == tropical_runtime::TileConsumeStatus::Audio);
+    ASSERT(switched.activated);
+    ASSERT(switched.source_start == source);
+    const double marker = use_b ? 0.25 : 0.0;
+    for (uint32_t sample = 0; sample < frames; ++sample)
+      ASSERT(output[sample] == expected(source, sample, marker));
+    active_source = source + frames;
+    active_marker = marker;
+  }
+
+  ASSERT(worker.dispatch_failure_count() == 0);
+  ASSERT(worker.activation_failure_count() == 0);
+  ASSERT(worker.stale_completion_count() == 0);
+  ASSERT(queue.starvation_count() == 0);
+  ASSERT(queue.tag_mismatch_count() == 0);
+  ASSERT(tropical_metal::callback_thread_violation_count() == 0);
+  const auto latency = worker.activation_latency_stats();
+  ASSERT(latency.count >= transitions);
+  ASSERT(latency.min_ns > 0);
+  ASSERT(worker.worker_wall_time_ns() > 0);
+  printf("PASS  10,000 clock jumps + precompiled A/B swaps under Metal\n");
+}
+
+static void test_metal_control_transition_stress()
+{
+  constexpr unsigned int frames = 512;
+  constexpr uint64_t transitions = 10000;
+  constexpr double sr = 44100.0;
+  const std::string msl = msl_kernel(
+    "    output_buffer[s] = slots[0];");
+  const std::string manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":8,
+    "slot_names":["param:bank.freq","param:canary.morph#v0",
+      "param:canary.morph#v1","param:canary.morph#t0",
+      "param:canary.freq","param:canary.freq#phase",
+      "param:master.velocity","param:master.tau_base"],
+    "slot_defaults":[180.0,0.0,0.0,0.0,55.0,0.0,1.0,0.0],
+    "param_disciplines":[
+      {"name":"bank.freq","discipline":"raw","companions":[]},
+      {"name":"canary.morph","discipline":"glide",
+       "glide_dur_sec":0.02,
+       "companions":["canary.morph#v0","canary.morph#v1",
+         "canary.morph#t0"]},
+      {"name":"canary.freq","discipline":"anchor",
+       "companions":["canary.freq#phase"]},
+      {"name":"master.velocity","discipline":"velocity",
+       "companions":["master.tau_base"]}
+    ]})";
+  tropical_runtime::FlatRuntime rt(frames);
+  ASSERT(rt.load_ir_msl(JIT_CONST_IR, msl, manifest));
+  rt.process();
+  tropical_runtime::FlatRuntime jit_reference(frames);
+  ASSERT(jit_reference.load_ir(JIT_SLOT0_IR, manifest));
+
+  std::array<std::jthread, 2> contention{
+    std::jthread([](std::stop_token stop) {
+      volatile uint64_t value = 1;
+      while (!stop.stop_requested())
+        value = value * 6364136223846793005ULL + 1;
+    }),
+    std::jthread([](std::stop_token stop) {
+      volatile uint64_t value = 7;
+      while (!stop.stop_requested())
+        value = value * 2862933555777941757ULL + 3037000493ULL;
+    }),
+  };
+
+  tropical_metal::reset_callback_thread_violation_count();
+  std::vector<double> reference(frames);
+  const uint32_t slot_zero = 0;
+  for (uint64_t i = 0; i < transitions; ++i)
+  {
+    tropical_runtime::ParamDispatchResult result;
+    std::string name;
+    double value = 0.0;
+    switch (i % 4)
+    {
+      case 0:
+        name = "bank.freq";
+        value = 180.0 + static_cast<double>(i % 97);
+        result = rt.dispatch_param_sync(name, value);
+        break;
+      case 1:
+      {
+        const double old_v0 = rt.get_slot(1);
+        const double old_v1 = rt.get_slot(2);
+        const double old_t0 = rt.get_slot(3);
+        name = "canary.morph";
+        value = static_cast<double>(i % 101) / 100.0;
+        result = rt.dispatch_param_sync(name, value);
+        ASSERT(result.ok);
+        const double r =
+          (static_cast<double>(result.effective_sample_index) - old_t0)
+          / (0.02 * sr);
+        const double s = std::clamp(r, 0.0, 1.0);
+        ASSERT_NEAR(
+          rt.get_slot(1),
+          old_v0 + (old_v1 - old_v0) * (s * s * (3.0 - 2.0 * s)),
+          1e-9);
+        ASSERT_NEAR(
+          rt.get_slot(3),
+          static_cast<double>(result.effective_sample_index), 1e-9);
+        break;
+      }
+      case 2:
+      {
+        const double old_freq = rt.get_slot(4);
+        const double old_phase = rt.get_slot(5);
+        const double next_freq = 45.0 + static_cast<double>(i % 41);
+        name = "canary.freq";
+        value = next_freq;
+        result = rt.dispatch_param_sync(name, value);
+        ASSERT(result.ok);
+        const double e =
+          static_cast<double>(result.effective_sample_index);
+        const double inc0 = std::floor(old_freq * 4294967296.0 / sr);
+        const double inc1 = std::floor(next_freq * 4294967296.0 / sr);
+        const auto frac = [](double x) { return x - std::floor(x); };
+        ASSERT_NEAR(
+          frac(old_phase + inc0 * e / 4294967296.0),
+          frac(rt.get_slot(5) + inc1 * e / 4294967296.0), 1e-9);
+        break;
+      }
+      default:
+      {
+        const double old_velocity = rt.get_slot(6);
+        const double old_tau = rt.get_slot(7);
+        const double next_velocity =
+          0.5 + static_cast<double>(i % 31) / 100.0;
+        name = "master.velocity";
+        value = next_velocity;
+        result = rt.dispatch_param_sync(name, value);
+        ASSERT(result.ok);
+        const double e =
+          static_cast<double>(result.effective_sample_index);
+        ASSERT_NEAR(
+          old_tau * sr + old_velocity * e,
+          rt.get_slot(7) * sr + rt.get_slot(6) * e, 1e-6);
+        break;
+      }
+    }
+    ASSERT(result.ok);
+    const auto replay =
+      jit_reference.dispatch_param_sync_at_sample_index(
+        name, value, result.effective_sample_index);
+    ASSERT(replay.ok);
+    ASSERT(replay.effective_sample_index
+           == result.effective_sample_index);
+    const uint64_t epoch = rt.metal_published_activation_epoch();
+    while (rt.metal_acknowledged_activation_epoch() < epoch)
+      rt.process();
+    ASSERT(rt.current_sample_index()
+           == result.effective_sample_index + frames);
+    ASSERT(rt.render_window(
+      result.effective_sample_index, frames,
+      &slot_zero, 1, reference.data()));
+    jit_reference.set_sample_index(result.effective_sample_index);
+    jit_reference.process();
+    for (uint32_t sample = 0; sample < frames; ++sample)
+    {
+      ASSERT_NEAR(rt.outputBuffer[sample], reference[sample], 1e-4);
+      ASSERT_NEAR(
+        rt.outputBuffer[sample],
+        jit_reference.outputBuffer[sample], 1e-4);
+    }
+  }
+
+  for (auto & thread : contention) thread.request_stop();
+  ASSERT(rt.ownership_failure_count() == 0);
+  ASSERT(rt.metal_dispatch_failure_count() == 0);
+  ASSERT(rt.metal_render_starvation_count() == 0);
+  ASSERT(rt.metal_epoch_tag_mismatch_count() == 0);
+  ASSERT(rt.metal_activation_failure_count() == 0);
+  ASSERT(rt.metal_callback_thread_violation_count() == 0);
+  auto stages = rt.metal_worker_stage_times();
+  const auto observation_deadline =
+    std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (stages[6] < stages[5]
+         && std::chrono::steady_clock::now() < observation_deadline)
+  {
+    std::this_thread::yield();
+    stages = rt.metal_worker_stage_times();
+  }
+  ASSERT(stages[0] > 0);
+  ASSERT(stages[6] >= stages[5]);
+  const auto latency = rt.metal_activation_latency_stats();
+  ASSERT(latency[0] >= transitions);
+  ASSERT(rt.metal_worker_wall_time_ns() > 0);
+  printf("PASS  10,000 raw/glide/anchor/velocity epochs under contention\n");
+}
+
 /** 4. set_sample_index repositions the clock (the render --start hook). */
 static void test_metal_set_index()
 {
@@ -620,6 +927,7 @@ int main()
   test_callback_thread_provenance();
   test_independent_device_and_render_quanta();
   test_metal_ramp();
+  test_offline_renderer_waits_for_worker_refill();
   test_metal_slots();
   test_metal_hotswap();
   test_metal_set_index();
@@ -627,6 +935,8 @@ int main()
   test_metal_effective_dispatch_epochs();
   test_metal_retarget_recomputes_companions();
   test_metal_dispatch_failure_fail_closed();
+  test_metal_clock_jump_and_precompiled_swap_stress();
+  test_metal_control_transition_stress();
   if (g_fail == 0) printf("ALL METAL TESTS PASSED\n");
   return g_fail == 0 ? 0 : 1;
 }

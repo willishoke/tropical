@@ -13,6 +13,24 @@ typedef void* tropical_dac_t;
 typedef void* tropical_param_t;
 typedef void* tropical_runtime_t;
 
+typedef struct {
+  uint64_t request_received;
+  uint64_t activation_target_reserved;
+  uint64_t candidate_render_submitted;
+  uint64_t candidate_gpu_completion;
+  uint64_t candidate_window_ready;
+  uint64_t activation_published;
+  uint64_t activation_acknowledged;
+  uint64_t old_epoch_retired;
+} tropical_metal_worker_stage_times_t;
+
+typedef struct {
+  uint64_t count;
+  uint64_t total_ns;
+  uint64_t min_ns;
+  uint64_t max_ns;
+} tropical_metal_activation_latency_stats_t;
+
 /* Error handling — thread-local; valid until next call on this thread */
 const char* tropical_last_error(void);
 
@@ -160,6 +178,15 @@ unsigned int     tropical_runtime_metal_worker_capacity_frames(tropical_runtime_
    activation descriptors. Returns 0 when no Metal epoch exists. */
 uint64_t         tropical_runtime_metal_published_activation_epoch(tropical_runtime_t);
 uint64_t         tropical_runtime_metal_acknowledged_activation_epoch(tropical_runtime_t);
+/* Latest off-RT worker stage timestamps and accumulated activation latency.
+   Functions return false and zero the output for null runtimes. */
+bool             tropical_runtime_metal_worker_stage_times(
+                   tropical_runtime_t, tropical_metal_worker_stage_times_t*);
+bool             tropical_runtime_metal_activation_latency_stats(
+                   tropical_runtime_t,
+                   tropical_metal_activation_latency_stats_t*);
+uint64_t         tropical_runtime_metal_worker_cpu_time_ns(tropical_runtime_t);
+uint64_t         tropical_runtime_metal_worker_wall_time_ns(tropical_runtime_t);
 /* Sticky count of callbacks silenced because bounded state/generation
    ownership acquisition could not obtain a coherent snapshot. Qualification
    requires zero. */

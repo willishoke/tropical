@@ -94,6 +94,20 @@ uint64_t event_sample_index(uint64_t round)
   return kJumpIndex + (block - kJumpAppliedBlock) * kBuffer;
 }
 
+void acknowledge_latest(FlatRuntime & metal)
+{
+  const uint64_t requested =
+    metal.metal_published_activation_epoch();
+  for (uint32_t attempt = 0;
+       attempt < 8
+       && metal.metal_acknowledged_activation_epoch() < requested;
+       ++attempt)
+    metal.process_offline();
+  if (requested == 0
+      || metal.metal_acknowledged_activation_epoch() < requested)
+    throw std::runtime_error("Metal activation did not acknowledge");
+}
+
 Result run_scenario(
   const Artifacts & initial, const Artifacts & replacement,
   bool toggle_velocity)
@@ -106,6 +120,7 @@ Result run_scenario(
   // replacement here deliberately starts from its fresh post-swap defaults.
   load(metal, replacement, true);
   load(jit, replacement, false);
+  acknowledge_latest(metal);
 
   const uint32_t tau_slot = metal.slot_index("param:master.tau_base");
   if (tau_slot == UINT32_MAX
@@ -117,7 +132,7 @@ Result run_scenario(
     const uint64_t now = event_sample_index(round);
     metal.set_sample_index(now - kBuffer);
     jit.set_sample_index(now - kBuffer);
-    metal.process();
+    acknowledge_latest(metal);
     jit.process();
     if (metal.current_sample_index() != now
         || jit.current_sample_index() != now)
@@ -138,18 +153,21 @@ Result run_scenario(
       const auto metal_dispatch =
         metal.dispatch_param_sync(names[i], values[i]);
       const auto jit_dispatch =
-        jit.dispatch_param_sync(names[i], values[i]);
+        jit.dispatch_param_sync_at_sample_index(
+          names[i], values[i],
+          metal_dispatch.effective_sample_index);
       if (!metal_dispatch.ok || !jit_dispatch.ok
-          || metal_dispatch.effective_sample_index != now
-          || jit_dispatch.effective_sample_index != now)
+          || jit_dispatch.effective_sample_index
+               != metal_dispatch.effective_sample_index)
         throw std::runtime_error("event dispatch mismatch");
+      acknowledge_latest(metal);
     }
   }
 
   constexpr uint64_t capture_start =
     kJumpIndex + kCaptureOffsetBlocks * kBuffer;
   metal.set_sample_index(capture_start);
-  metal.process();
+  acknowledge_latest(metal);
   std::vector<double> reference(kBuffer, 0.0);
   if (!jit.render_window(
         capture_start, kBuffer, &kReferenceSlot, 1, reference.data()))
@@ -194,12 +212,13 @@ std::pair<Comparison, Comparison> run_delayed_oracle(
   load(metal, replacement, true);
   load(exact, replacement, false);
   load(stale, replacement, false);
+  acknowledge_latest(metal);
 
   for (uint64_t round = 0; round < 15; ++round)
   {
     const uint64_t batch_start = event_sample_index(round);
     metal.set_sample_index(batch_start - kBuffer);
-    metal.process();
+    acknowledge_latest(metal);
     const bool high = (round & 1U) == 0;
     const double values[] = {
       high ? 260.0 : 180.0,
@@ -217,10 +236,7 @@ std::pair<Comparison, Comparison> run_delayed_oracle(
       // exact replay use the later boundary; the legacy oracle incorrectly
       // holds batch_start for both anchor and the following velocity write.
       if (i == 2 && round == 14)
-      {
-        metal.set_sample_index(batch_start);
-        metal.process();
-      }
+        metal.process_offline();
       const auto production =
         metal.dispatch_param_sync(names[i], values[i]);
       const auto replay = exact.dispatch_param_sync_at_sample_index(
@@ -229,13 +245,14 @@ std::pair<Comparison, Comparison> run_delayed_oracle(
         names[i], values[i], batch_start);
       if (!production.ok || !replay.ok || !legacy.ok)
         throw std::runtime_error("delayed oracle dispatch failed");
+      acknowledge_latest(metal);
     }
   }
 
   constexpr uint64_t capture_start =
     kJumpIndex + kCaptureOffsetBlocks * kBuffer;
   metal.set_sample_index(capture_start);
-  metal.process();
+  acknowledge_latest(metal);
   const std::vector<double> actual = metal.outputBuffer;
   std::vector<double> exact_reference(kBuffer, 0.0);
   std::vector<double> stale_reference(kBuffer, 0.0);

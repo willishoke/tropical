@@ -430,6 +430,47 @@ uint64_t tropical_runtime_metal_acknowledged_activation_epoch(
     ->metal_acknowledged_activation_epoch();
 }
 
+bool tropical_runtime_metal_worker_stage_times(
+  tropical_runtime_t r, tropical_metal_worker_stage_times_t * out)
+{
+  if (!out) return false;
+  *out = {};
+  if (!r) return false;
+  const auto times = static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_worker_stage_times();
+  *out = {
+    times[0], times[1], times[2], times[3],
+    times[4], times[5], times[6], times[7],
+  };
+  return true;
+}
+
+bool tropical_runtime_metal_activation_latency_stats(
+  tropical_runtime_t r, tropical_metal_activation_latency_stats_t * out)
+{
+  if (!out) return false;
+  *out = {};
+  if (!r) return false;
+  const auto stats = static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_activation_latency_stats();
+  *out = {stats[0], stats[1], stats[2], stats[3]};
+  return true;
+}
+
+uint64_t tropical_runtime_metal_worker_cpu_time_ns(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_worker_cpu_time_ns();
+}
+
+uint64_t tropical_runtime_metal_worker_wall_time_ns(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_worker_wall_time_ns();
+}
+
 uint64_t tropical_runtime_ownership_failure_count(tropical_runtime_t r)
 {
   if (!r) return 0;

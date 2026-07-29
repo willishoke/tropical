@@ -66,6 +66,14 @@ struct MetalWorkerStageTimes
   uint64_t old_epoch_retired = 0;
 };
 
+struct MetalActivationLatencyStats
+{
+  uint64_t count = 0;
+  uint64_t total_ns = 0;
+  uint64_t min_ns = 0;
+  uint64_t max_ns = 0;
+};
+
 struct MetalRenderWorkerTestSeam
 {
   std::atomic<bool> pause_after_target_reserved{false};
@@ -99,6 +107,9 @@ public:
   uint64_t activation_failure_count() const noexcept;
   uint64_t stale_completion_count() const noexcept;
   MetalWorkerStageTimes stage_times() const noexcept;
+  MetalActivationLatencyStats activation_latency_stats() const noexcept;
+  uint64_t worker_cpu_time_ns() const noexcept;
+  uint64_t worker_wall_time_ns() const noexcept;
   void set_test_seam(MetalRenderWorkerTestSeam * seam) noexcept;
 
 private:
@@ -159,6 +170,13 @@ private:
   std::atomic<uint64_t> activation_published_time_{0};
   std::atomic<uint64_t> activation_acknowledged_time_{0};
   std::atomic<uint64_t> old_epoch_retired_time_{0};
+  std::atomic<uint64_t> activation_latency_count_{0};
+  std::atomic<uint64_t> activation_latency_total_ns_{0};
+  std::atomic<uint64_t> activation_latency_min_ns_{UINT64_MAX};
+  std::atomic<uint64_t> activation_latency_max_ns_{0};
+  std::atomic<uint64_t> worker_start_time_ns_{0};
+  std::atomic<uint64_t> worker_cpu_baseline_ns_{0};
+  std::atomic<uint64_t> worker_cpu_latest_ns_{0};
   std::atomic<MetalRenderWorkerTestSeam *> test_seam_{nullptr};
 };
 
