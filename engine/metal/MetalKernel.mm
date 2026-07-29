@@ -18,6 +18,7 @@
 #import <Foundation/Foundation.h>
 
 #include <algorithm>
+#include <atomic>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
@@ -29,6 +30,16 @@ namespace tropical_metal
 
 namespace
 {
+thread_local bool current_thread_is_audio_callback = false;
+std::atomic<uint64_t> callback_thread_violations{0};
+
+bool reject_audio_callback_entry()
+{
+  if (!current_thread_is_audio_callback) return false;
+  callback_thread_violations.fetch_add(1, std::memory_order_relaxed);
+  return true;
+}
+
 // Matches the MSL struct exactly (8 + 4 + 4).
 struct KernelConsts
 {
@@ -177,6 +188,102 @@ static void latch_dispatch_failure(MetalKernel & k)
   {
     k.dispatch_failure_latched = true;
     k.dispatch_failure_unreported = true;
+  }
+}
+
+static bool render_tile_impl(MetalKernel & k,
+                             const float * slots, uint32_t n_slots,
+                             const float * columns, uint32_t n_columns,
+                             double sample_rate, uint64_t source_start,
+                             uint32_t frames, double * destination)
+{
+  if (!destination || frames == 0 || frames > k.capacity
+      || k.dispatch_failure_latched)
+    return false;
+
+  @autoreleasepool
+  {
+    if (!k.pso || !k.out || !k.slots
+        || (k.column_count > 0 && !k.columns))
+    {
+      latch_dispatch_failure(k);
+      return false;
+    }
+
+    const uint32_t n = std::min<uint32_t>(n_slots, k.slot_count);
+    float * slot_destination = static_cast<float *>(k.slots.contents);
+    if (!slot_destination)
+    {
+      latch_dispatch_failure(k);
+      return false;
+    }
+    if (slots && n > 0)
+      std::memcpy(slot_destination, slots, n * sizeof(float));
+
+    id<MTLCommandQueue> queue = shared_queue();
+    if (!queue)
+    {
+      latch_dispatch_failure(k);
+      return false;
+    }
+    id<MTLCommandBuffer> command = [queue commandBuffer];
+    if (!command)
+    {
+      latch_dispatch_failure(k);
+      return false;
+    }
+    id<MTLComputeCommandEncoder> encoder =
+      [command computeCommandEncoder];
+    if (!encoder)
+    {
+      latch_dispatch_failure(k);
+      return false;
+    }
+    [encoder setComputePipelineState:k.pso];
+    [encoder setBuffer:k.out offset:0 atIndex:0];
+    [encoder setBuffer:k.slots offset:0 atIndex:1];
+    KernelConsts constants{
+      source_start, static_cast<float>(sample_rate), frames
+    };
+    [encoder setBytes:&constants length:sizeof(constants) atIndex:2];
+    if (k.column_count > 0)
+    {
+      const uint32_t count =
+        std::min<uint32_t>(n_columns, k.column_count);
+      void * column_destination = k.columns.contents;
+      if (!column_destination)
+      {
+        [encoder endEncoding];
+        latch_dispatch_failure(k);
+        return false;
+      }
+      if (columns && count > 0)
+        std::memcpy(
+          column_destination, columns, count * sizeof(float));
+      [encoder setBuffer:k.columns offset:0 atIndex:3];
+    }
+    const NSUInteger threads =
+      std::min<NSUInteger>(k.pso.maxTotalThreadsPerThreadgroup, frames);
+    [encoder dispatchThreads:MTLSizeMake(frames, 1, 1)
+       threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+    [encoder endEncoding];
+    [command commit];
+    [command waitUntilCompleted];
+    if (!completed_successfully(k, command))
+    {
+      latch_dispatch_failure(k);
+      return false;
+    }
+
+    const float * source = static_cast<const float *>(k.out.contents);
+    if (!source)
+    {
+      latch_dispatch_failure(k);
+      return false;
+    }
+    for (uint32_t i = 0; i < frames; ++i)
+      destination[i] = static_cast<double>(source[i]);
+    return true;
   }
 }
 
@@ -379,6 +486,7 @@ bool process_block(MetalKernel & k,
                    double sample_rate, uint64_t start_sample_index,
                    double * out_f64, uint32_t len)
 {
+  if (reject_audio_callback_entry()) return false;
   if (len == 0 || len > k.capacity) return false;
   // A failed command invalidates this kernel's dispatch stream. Do not submit,
   // wait, or expose any later ring contents until control publishes a fresh
@@ -452,94 +560,24 @@ bool process_block(MetalKernel & k,
     }
   }
 
-  @autoreleasepool
-  {
-    if (!k.pso || !k.out || !k.slots
-        || (k.column_count > 0 && !k.columns))
-    {
-      latch_dispatch_failure(k);
-      return false;
-    }
+  const uint32_t count = std::min<uint32_t>(n_slots, k.slot_count);
+  for (uint32_t i = 0; i < count; ++i)
+    k.slot_staging[i] = static_cast<float>(slots[i]);
+  return render_tile_impl(
+    k, k.slot_staging.data(), count, columns, n_columns,
+    sample_rate, start_sample_index, len, out_f64);
+}
 
-    // Slot snapshot: f64 host truth → f32 shared buffer, once per block.
-    const uint32_t n = std::min<uint32_t>(n_slots, k.slot_count);
-    float * sdst = static_cast<float *>(k.slots.contents);
-    if (!sdst)
-    {
-      latch_dispatch_failure(k);
-      return false;
-    }
-    for (uint32_t i = 0; i < n; ++i)
-      sdst[i] = static_cast<float>(slots[i]);
-
-    id<MTLCommandQueue> queue = shared_queue();
-    if (!queue)
-    {
-      latch_dispatch_failure(k);
-      return false;
-    }
-    id<MTLCommandBuffer> cb = [queue commandBuffer];
-    if (!cb)
-    {
-      latch_dispatch_failure(k);
-      return false;
-    }
-    id<MTLComputeCommandEncoder> enc = [cb computeCommandEncoder];
-    if (!enc)
-    {
-      latch_dispatch_failure(k);
-      return false;
-    }
-    [enc setComputePipelineState:k.pso];
-    [enc setBuffer:k.out offset:0 atIndex:0];
-    [enc setBuffer:k.slots offset:0 atIndex:1];
-    KernelConsts consts{ start_sample_index,
-                         static_cast<float>(sample_rate),
-                         len };
-    [enc setBytes:&consts length:sizeof(consts) atIndex:2];
-    if (k.column_count > 0)
-    {
-      // Coefficient columns, copied at ENCODE next to the slot snapshot.
-      // `columns` is the f32 image of the ONE generation this process()
-      // call explicitly owns and revalidated, so
-      // the copy inherits the whole-generation guarantee: the GPU reads
-      // one consistent generation of columns, no cross-column tear on a
-      // live knob move.
-      const uint32_t nc = std::min<uint32_t>(n_columns, k.column_count);
-      void * cdst = k.columns.contents;
-      if (!cdst)
-      {
-        [enc endEncoding];
-        latch_dispatch_failure(k);
-        return false;
-      }
-      if (columns && nc > 0)
-        std::memcpy(cdst, columns, nc * sizeof(float));
-      [enc setBuffer:k.columns offset:0 atIndex:3];
-    }
-    const NSUInteger tg =
-      std::min<NSUInteger>(k.pso.maxTotalThreadsPerThreadgroup, len);
-    [enc dispatchThreads:MTLSizeMake(len, 1, 1)
-        threadsPerThreadgroup:MTLSizeMake(tg, 1, 1)];
-    [enc endEncoding];
-    [cb commit];
-    [cb waitUntilCompleted];
-    if (!completed_successfully(k, cb))
-    {
-      latch_dispatch_failure(k);
-      return false;
-    }
-
-    const float * src = static_cast<const float *>(k.out.contents);
-    if (!src)
-    {
-      latch_dispatch_failure(k);
-      return false;
-    }
-    for (uint32_t i = 0; i < len; ++i)
-      out_f64[i] = static_cast<double>(src[i]);
-    return true;
-  }
+bool render_tile(MetalKernel & k,
+                 const float * slots, uint32_t n_slots,
+                 const float * columns, uint32_t n_columns,
+                 double sample_rate, uint64_t source_start,
+                 uint32_t frames, double * destination)
+{
+  if (reject_audio_callback_entry()) return false;
+  return render_tile_impl(
+    k, slots, n_slots, columns, n_columns,
+    sample_rate, source_start, frames, destination);
 }
 
 bool take_dispatch_failure(MetalKernel & k)
@@ -552,6 +590,21 @@ bool take_dispatch_failure(MetalKernel & k)
 uint32_t pipeline_depth(const MetalKernel & k)
 {
   return k.depth;
+}
+
+void set_audio_callback_thread(bool value)
+{
+  current_thread_is_audio_callback = value;
+}
+
+uint64_t callback_thread_violation_count()
+{
+  return callback_thread_violations.load(std::memory_order_acquire);
+}
+
+void reset_callback_thread_violation_count()
+{
+  callback_thread_violations.store(0, std::memory_order_release);
 }
 
 } // namespace tropical_metal

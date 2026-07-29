@@ -11,10 +11,9 @@
 // publish/flip IS the Metal hot-swap; compilation happens on the control
 // thread like the LLVM JIT.
 //
-// Depth 0 dispatch is synchronous per block (encode → commit → wait inside
-// process_block); qualification may select a future-block pipeline depth.
-// Both keep process()'s buffer-filled-on-return contract so fades,
-// sample_index, and render_window semantics are untouched.
+// Live epoch rendering uses render_tile() from a dedicated worker. The legacy
+// process_block entry point remains temporarily while the callback cutover is
+// staged; both fail closed if invoked from a thread marked as an audio callback.
 
 #include <cstdint>
 #include <memory>
@@ -40,6 +39,16 @@ MetalKernelPtr create(const std::string & msl_source,
                       uint32_t column_count,
                       std::string & err);
 
+/// Worker-only blocking primitive. `slots` and `columns` are immutable f32
+/// snapshots owned by one render epoch request. The destination is stable,
+/// preallocated tile storage. A command-buffer failure permanently latches the
+/// kernel closed.
+bool render_tile(MetalKernel & k,
+                 const float * slots, uint32_t n_slots,
+                 const float * columns, uint32_t n_columns,
+                 double sample_rate, uint64_t source_start,
+                 uint32_t frames, double * destination);
+
 /// Render one block synchronously: snapshot slots (f64→f32) and the packed
 /// coefficient columns (`columns` — already narrowed to f32 by the caller
 /// from ONE whole captured generation), encode one thread per sample,
@@ -62,5 +71,13 @@ bool take_dispatch_failure(MetalKernel & k);
 /// configured number of future blocks.  This is deliberately runtime-only;
 /// it does not alter the plan or protocol schema.
 uint32_t pipeline_depth(const MetalKernel & k);
+
+/// Deterministic provenance seam. Production callback code marks itself for
+/// the duration of FlatRuntime::process(); tests may also mark a thread
+/// directly. Every Metal submit/wait entry point refuses the call and records
+/// one violation while marked.
+void set_audio_callback_thread(bool value);
+uint64_t callback_thread_violation_count();
+void reset_callback_thread_violation_count();
 
 } // namespace tropical_metal

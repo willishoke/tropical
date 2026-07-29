@@ -65,7 +65,9 @@ if(TROPICAL_METAL)
     endif()
     enable_language(OBJCXX)
     set(CMAKE_OBJCXX_STANDARD 20)
-    target_sources(tropical_core PRIVATE engine/metal/MetalKernel.mm)
+    target_sources(tropical_core PRIVATE
+        engine/metal/MetalKernel.mm
+        engine/metal/MetalRenderWorker.cpp)
     set_source_files_properties(engine/metal/MetalKernel.mm PROPERTIES
         COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(tropical_core PRIVATE
@@ -205,6 +207,18 @@ if(TROPICAL_BUILD_TESTS)
             USES_TERMINAL)
     endif()
     if(TROPICAL_METAL)
+        add_executable(test_metal_render_worker
+            engine/tests/test_metal_render_worker.cpp)
+        target_include_directories(test_metal_render_worker
+            PRIVATE engine ${LLVM_INCLUDE_DIRS})
+        target_compile_definitions(test_metal_render_worker
+            PRIVATE ${LLVM_DEFINITIONS})
+        target_compile_features(test_metal_render_worker PRIVATE cxx_std_20)
+        target_link_libraries(test_metal_render_worker PRIVATE tropical_core)
+        add_test(NAME current_metal_render_worker
+            COMMAND test_metal_render_worker)
+        set_tests_properties(current_metal_render_worker PROPERTIES TIMEOUT 30)
+
         add_executable(test_metal_kernel engine/tests/test_metal_kernel.cpp)
         target_include_directories(test_metal_kernel PRIVATE engine ${LLVM_INCLUDE_DIRS})
         target_compile_definitions(test_metal_kernel PRIVATE ${LLVM_DEFINITIONS})

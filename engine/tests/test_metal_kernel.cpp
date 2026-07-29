@@ -10,6 +10,7 @@
  */
 
 #include "c_api/tropical_c.h"
+#include "metal/MetalKernel.hpp"
 #include "runtime/FlatRuntime.hpp"
 
 #include <array>
@@ -126,6 +127,32 @@ static void test_metal_ramp()
   // would be the constant 0.9 — the ramp proves the Metal path ran.
   tropical_runtime_free(rt);
   printf("PASS  metal ramp + clock continuity\n");
+}
+
+static void test_callback_thread_provenance()
+{
+  const std::string msl = msl_kernel(
+    "    output_buffer[s] = float(current_idx);");
+  std::string error;
+  auto kernel = tropical_metal::create(msl, 32, 0, 0, error);
+  ASSERT(kernel != nullptr);
+  std::array<double, 32> output{};
+
+  tropical_metal::reset_callback_thread_violation_count();
+  tropical_metal::set_audio_callback_thread(true);
+  const bool callback_render = tropical_metal::render_tile(
+    *kernel, nullptr, 0, nullptr, 0, 44100.0, 0,
+    static_cast<uint32_t>(output.size()), output.data());
+  tropical_metal::set_audio_callback_thread(false);
+  ASSERT(!callback_render);
+  ASSERT(tropical_metal::callback_thread_violation_count() == 1);
+
+  ASSERT(tropical_metal::render_tile(
+    *kernel, nullptr, 0, nullptr, 0, 44100.0, 0,
+    static_cast<uint32_t>(output.size()), output.data()));
+  for (uint32_t i = 0; i < output.size(); ++i)
+    ASSERT_NEAR(output[i], static_cast<double>(i), 1e-6);
+  printf("PASS  callback-thread Metal provenance guard\n");
 }
 
 /** 2. Slots reach the kernel (defaults from the manifest). */
@@ -711,6 +738,7 @@ static void test_metal_set_index()
 
 int main()
 {
+  test_callback_thread_provenance();
   test_metal_ramp();
   test_metal_slots();
   test_metal_hotswap();
