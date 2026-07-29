@@ -120,6 +120,13 @@ LEAN_EXPORT lean_obj_res shim_runtime_process(b_lean_obj_arg rt, lean_obj_arg wo
   return lean_io_result_mk_ok(lean_box(0));
 }
 
+LEAN_EXPORT lean_obj_res shim_runtime_process_offline(b_lean_obj_arg rt,
+                                                      lean_obj_arg world) {
+  (void)world;
+  return lean_io_result_mk_ok(
+      lean_box(tropical_runtime_process_offline(unwrap(rt))));
+}
+
 /* Copy the output buffer (buffer_length doubles) into a fresh ByteArray. */
 LEAN_EXPORT lean_obj_res shim_runtime_output_bytes(b_lean_obj_arg rt, lean_obj_arg world) {
   (void)world;

@@ -369,6 +369,25 @@ void tropical_runtime_process(tropical_runtime_t r)
   if (r) static_cast<tropical_runtime::FlatRuntime*>(r)->process();
 }
 
+bool tropical_runtime_process_offline(tropical_runtime_t r)
+{
+  if (!r)
+  {
+    set_error("runtime process offline: null runtime");
+    return false;
+  }
+  try
+  {
+    static_cast<tropical_runtime::FlatRuntime*>(r)->process_offline();
+    return true;
+  }
+  catch (const std::exception & e)
+  {
+    set_error(e.what());
+    return false;
+  }
+}
+
 const double* tropical_runtime_output_buffer(tropical_runtime_t r)
 {
   if (!r) return nullptr;
@@ -385,6 +404,13 @@ unsigned int tropical_runtime_metal_pipeline_depth(tropical_runtime_t r)
 {
   if (!r) return 0;
   return static_cast<tropical_runtime::FlatRuntime*>(r)->metal_pipeline_depth();
+}
+
+unsigned int tropical_runtime_metal_render_tile_frames(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_render_tile_frames();
 }
 
 uint64_t tropical_runtime_ownership_failure_count(tropical_runtime_t r)

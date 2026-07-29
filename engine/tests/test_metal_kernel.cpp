@@ -115,6 +115,8 @@ static void test_metal_ramp()
                                       msl.c_str(), msl.size(),
                                       MANIFEST, strlen(MANIFEST)));
   ASSERT(tropical_runtime_metal_pipeline_depth(rt) == 0);
+  ASSERT(tropical_runtime_metal_render_tile_frames(rt) == 512);
+  tropical_metal::reset_callback_thread_violation_count();
   tropical_runtime_process(rt);
   const double* out = tropical_runtime_output_buffer(rt);
   ASSERT(out != nullptr);
@@ -123,6 +125,7 @@ static void test_metal_ramp()
   tropical_runtime_process(rt);
   for (unsigned int i = 0; i < buf; ++i)
     ASSERT_NEAR(out[i], (double)(buf + i), 1e-6);
+  ASSERT(tropical_metal::callback_thread_violation_count() == 0);
   // If the GPU were silently falling back to the JIT kernel, the output
   // would be the constant 0.9 — the ramp proves the Metal path ran.
   tropical_runtime_free(rt);
@@ -152,7 +155,38 @@ static void test_callback_thread_provenance()
     static_cast<uint32_t>(output.size()), output.data()));
   for (uint32_t i = 0; i < output.size(); ++i)
     ASSERT_NEAR(output[i], static_cast<double>(i), 1e-6);
+  tropical_metal::reset_callback_thread_violation_count();
   printf("PASS  callback-thread Metal provenance guard\n");
+}
+
+static void test_independent_device_and_render_quanta()
+{
+  setenv("TROPICAL_METAL_RENDER_TILE_FRAMES", "512", 1);
+  const std::string msl = msl_kernel(
+    "    output_buffer[s] = float(current_idx);");
+  for (const unsigned int device_frames : {128U, 256U, 512U})
+  {
+    tropical_runtime_t rt = tropical_runtime_new(device_frames);
+    ASSERT(rt != nullptr);
+    ASSERT(tropical_runtime_metal_render_tile_frames(rt) == 0);
+    ASSERT(tropical_runtime_load_ir_msl(
+      rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
+      msl.c_str(), msl.size(), MANIFEST, strlen(MANIFEST)));
+    ASSERT(tropical_runtime_metal_render_tile_frames(rt) == 512);
+    const double * output = tropical_runtime_output_buffer(rt);
+    const unsigned callbacks = 512 / device_frames;
+    for (unsigned callback = 0; callback < callbacks; ++callback)
+    {
+      tropical_runtime_process(rt);
+      for (unsigned int i = 0; i < device_frames; ++i)
+        ASSERT_NEAR(
+          output[i],
+          static_cast<double>(callback * device_frames + i), 1e-5);
+    }
+    tropical_runtime_free(rt);
+  }
+  unsetenv("TROPICAL_METAL_RENDER_TILE_FRAMES");
+  printf("PASS  independent Bdev 128/256/512 and Rgpu 512\n");
 }
 
 /** 2. Slots reach the kernel (defaults from the manifest). */
@@ -739,6 +773,7 @@ static void test_metal_set_index()
 int main()
 {
   test_callback_thread_provenance();
+  test_independent_device_and_render_quanta();
   test_metal_ramp();
   test_metal_slots();
   test_metal_hotswap();

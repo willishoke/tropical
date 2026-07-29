@@ -42,6 +42,15 @@ opaque Runtime.new (bufferLength : UInt32) : IO Runtime
 @[extern "shim_runtime_process"]
 opaque Runtime.process (rt : @& Runtime) : IO Unit
 
+@[extern "shim_runtime_process_offline"]
+private opaque Runtime.processOfflineRaw (rt : @& Runtime) : IO Bool
+
+/-- Deterministic render tools only. Metal waits off-RT for the worker's next
+    exact tile, then executes the ordinary bounded callback path once. -/
+def Runtime.processOffline (rt : Runtime) : IO Unit := do
+  if !(← rt.processOfflineRaw) then
+    throw <| IO.userError s!"runtime processOffline failed: {← lastError}"
+
 /-- Copy of the output buffer: `bufferLength` little-endian float64s. -/
 @[extern "shim_runtime_output_bytes"]
 opaque Runtime.outputBytes (rt : @& Runtime) : IO ByteArray

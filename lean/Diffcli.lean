@@ -69,10 +69,11 @@ def renderBytes (args : List String) : IO UInt32 := do
   return 0
 
 /-- `diffcli render-metal <plan.json>` — render through the METAL backend
-    (EmitMsl → load_ir_msl → GPU dispatch per block), same byte protocol as
+    (EmitMsl → load_ir_msl → off-RT worker tiles), same byte protocol as
     `render-bytes`. The f64 JIT is dual-loaded but the output comes from the
     f32 GPU kernel — this is the device-under-test side of `metal_vs_jit`.
-    Requires libtropical built with TROPICAL_METAL. Always sync dispatch. -/
+    Requires libtropical built with TROPICAL_METAL. The render tool may wait
+    outside the callback so an offline tight loop cannot outrun the worker. -/
 def renderMetal (args : List String) : IO UInt32 := do
   let some planPath := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
     | IO.eprintln "usage: diffcli render-metal <plan.json> [--frames N] [--buffer N] [--start S]"
@@ -91,7 +92,7 @@ def renderMetal (args : List String) : IO UInt32 := do
   if start != 0 then rt.setSampleIndex start.toUInt64
   let stdout ← IO.getStdout
   for _ in [0:frames] do
-    rt.process
+    rt.processOffline
     stdout.write (← rt.outputBytes)
   stdout.flush
   return 0
@@ -130,7 +131,7 @@ def renderGraph (args : List String) : IO UInt32 := do
     if start != 0 then rt.setSampleIndex start.toUInt64
     let stdout ← IO.getStdout
     for _ in [0:frames] do
-      rt.process
+      if metal then rt.processOffline else rt.process
       stdout.write (← rt.outputBytes)
     stdout.flush
     return 0

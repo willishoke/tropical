@@ -164,12 +164,12 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
     const uint64_t observed_device = queue_.published_device_frame();
     const uint64_t observed_source = queue_.published_source_sample();
     const bool fresh = active_bank_ == EpochTileQueue::kNoBank;
-    const uint64_t activation_frame = fresh
-      ? observed_device
-      : observed_device + queue_.render_frames();
+    const uint64_t activation_frame =
+      fresh && observed_device == 0
+        ? 0
+        : observed_device + queue_.render_frames();
     const bool fixed_source =
-      request.transition == EpochTransitionKind::ClockJump
-      || request.transition == EpochTransitionKind::Fresh;
+      request.transition == EpochTransitionKind::ClockJump;
     const uint64_t source_start = fixed_source
       ? request.source_origin
       : observed_source + (activation_frame - observed_device);
@@ -203,7 +203,7 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
       monotonic_time_ns(), std::memory_order_release);
 
     const uint64_t device_after_render = queue_.published_device_frame();
-    if (!fresh
+    if (activation_frame != 0
         && activation_frame < device_after_render + queue_.device_frames())
     {
       activation_retargets_.fetch_add(1, std::memory_order_relaxed);

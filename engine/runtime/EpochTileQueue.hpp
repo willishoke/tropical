@@ -107,6 +107,16 @@ public:
     return kTilesPerBank * render_frames_;
   }
 
+  // Audio callback only. Used when an explicit JIT epoch hands the device
+  // boundary back to Metal; the two coordinates remain independent.
+  void synchronize_audio_coordinates(
+    uint64_t device_frame, uint64_t source_sample) noexcept
+  {
+    audio_device_frame_ = device_frame;
+    audio_source_sample_ = source_sample;
+    publish_audio_boundary();
+  }
+
   // Worker only. A bank may be staged only when no callback owns one of its
   // tiles and the callback no longer names it as active.
   bool begin_epoch(uint32_t bank_index, uint64_t epoch_id)
@@ -332,6 +342,56 @@ public:
     result.status = TileConsumeStatus::Audio;
     publish_audio_boundary();
     return result;
+  }
+
+  /**
+   * Offline-render thread only. Reports whether the next call to consume()
+   * can acquire its exact tile without faulting. This is deliberately not a
+   * callback wait primitive: deterministic render tools may poll it off-RT
+   * when they advance faster than the GPU worker's real-time watermark.
+   */
+  bool next_callback_ready_for_offline() const
+  {
+    if (active_faulted_) return false;
+    if (reading_tile_index_ != kNoTile) return true;
+
+    uint64_t epoch = audio_epoch_id_;
+    uint32_t bank_index = audio_active_bank_local_;
+    uint32_t tile_index = expected_tile_index_;
+    uint64_t device_start = expected_tile_device_;
+    uint64_t source_start = expected_tile_source_;
+
+    EpochActivation activation;
+    bool has_activation = false;
+    bool unstable_activation = false;
+    read_activation_once(
+      activation, has_activation, unstable_activation);
+    if (unstable_activation) return false;
+    if (has_activation && activation.epoch_id != audio_epoch_id_
+        && activation.activation_frame <= audio_device_frame_)
+    {
+      if (activation_claim_.load(std::memory_order_acquire) != 0)
+        return false;
+      epoch = activation.epoch_id;
+      bank_index = activation.bank_index;
+      tile_index = 0;
+      device_start = audio_device_frame_;
+      source_start = activation.source_start;
+    }
+
+    if (epoch == 0 || bank_index >= kBankCount
+        || tile_index >= kTilesPerBank)
+      return false;
+    const Tile & tile = banks_[bank_index].tiles[tile_index];
+    if (tile.state.load(std::memory_order_acquire) != TileState::Ready)
+      return false;
+    const TileTag & tag = tile.tag;
+    return tag.epoch_id == epoch
+        && tag.device_start == device_start
+        && tag.source_start == source_start
+        && tag.frame_count > 0
+        && tag.frame_count <= render_frames_
+        && device_frames_ <= tag.frame_count;
   }
 
   uint64_t activation_acknowledged() const noexcept

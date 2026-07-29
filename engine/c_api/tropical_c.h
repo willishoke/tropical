@@ -144,12 +144,19 @@ void             tropical_runtime_set_sample_index(tropical_runtime_t, uint64_t 
 uint8_t*         tropical_compile_ir_to_wasm(const char* ir_text, size_t ir_len, size_t* out_len);
 void             tropical_free_buffer(uint8_t* buf);
 void             tropical_runtime_process(tropical_runtime_t);
+/* Deterministic render-tool entry point. For Metal, waits off-RT until the
+   worker has prepared the next exact tile, then runs the ordinary bounded
+   callback path once. Never call from an audio callback. */
+bool             tropical_runtime_process_offline(tropical_runtime_t);
 const double*    tropical_runtime_output_buffer(tropical_runtime_t);
 unsigned int     tropical_runtime_get_buffer_length(tropical_runtime_t);
 /* Qualification diagnostic: 0 for JIT/synchronous Metal and on non-Metal
    builds (the stable sentinel), otherwise the number of future Metal blocks
    currently configured. */
 unsigned int     tropical_runtime_metal_pipeline_depth(tropical_runtime_t);
+/* Device-independent Metal render quantum. Returns 0 for JIT-only,
+   non-Metal, and unloaded runtimes. */
+unsigned int     tropical_runtime_metal_render_tile_frames(tropical_runtime_t);
 /* Sticky count of callbacks silenced because bounded state/generation
    ownership acquisition could not obtain a coherent snapshot. Qualification
    requires zero. */
