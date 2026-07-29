@@ -38,7 +38,7 @@ def main() -> int:
             str(artifacts["reload_manifest"]),
         ]
         env = harness.benchmark_env({
-            "TROPICAL_METAL_PIPELINE_DEPTH": None,
+            "TROPICAL_METAL_RENDER_TILE_FRAMES": None,
             "TROPICAL_KERNEL_CACHE_ROOT": str(Path(directory) / "run-cache"),
         })
         raw, wall_ns = harness.run(args, env)

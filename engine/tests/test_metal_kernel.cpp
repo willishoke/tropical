@@ -3,7 +3,7 @@
  * builds; no audio device required, needs a Metal GPU).
  *
  * Exercises `tropical_runtime_load_ir_msl`: dual-load (JIT + MSL→PSO),
- * GPU per-block dispatch through tropical_runtime_process, sample-clock
+ * worker-prepared GPU epochs consumed by tropical_runtime_process, sample-clock
  * continuity across blocks, hot-swap (double load) mid-stream, and the
  * set_sample_index test hook. Hand-written IR/MSL pairs mirror the two
  * emitters' ABIs exactly.
@@ -114,8 +114,8 @@ static void test_metal_ramp()
   ASSERT(tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
                                       msl.c_str(), msl.size(),
                                       MANIFEST, strlen(MANIFEST)));
-  ASSERT(tropical_runtime_metal_pipeline_depth(rt) == 0);
   ASSERT(tropical_runtime_metal_render_tile_frames(rt) == 512);
+  ASSERT(tropical_runtime_metal_worker_capacity_frames(rt) == 2048);
   tropical_metal::reset_callback_thread_violation_count();
   tropical_runtime_process(rt);
   const double* out = tropical_runtime_output_buffer(rt);
@@ -319,12 +319,9 @@ static std::string msl_kernel_columns(const std::string& body)
     + body + "\n}\n";
 }
 
-/** 5. Banked columns, LIVE (sync path): the coefficient kernel fills the
- *     column host-side (run at load, then on every set_slot), process()
- *     uploads the captured generation, and the GPU reads real values from
- *     buffer(3). A slot write must land in the NEXT block's columns —
- *     exactly the scalar live-slot contract of test 2, but through the
- *     generation-buffered column crossing. */
+/** 5. Banked columns in immutable render-epoch snapshots: the coefficient
+ *     kernel fills the column host-side at load and on every set_slot, then
+ *     the worker uploads one coherent captured generation for buffer(3). */
 static void test_metal_columns_live()
 {
   const unsigned int buf = 16;
@@ -358,122 +355,6 @@ static void test_metal_columns_live()
     ASSERT_NEAR(out[i], 1.5 + (double)(i % 4), 1e-7);
   tropical_runtime_free(rt);
   printf("PASS  metal coefficient columns reach the GPU + live knob refill\n");
-}
-
-/** 6. Banked columns, pipelined at explicit D=3: columns ride per-ring-entry
- *     buffers copied at enqueue, so a knob move lands with the D-block lag —
- *     never mid-flight, never torn. */
-static void test_metal_columns_pipelined()
-{
-  setenv("TROPICAL_METAL_PIPELINE_DEPTH", "3", 1);
-  const unsigned int buf = 16;
-  tropical_runtime_t rt = tropical_runtime_new(buf);
-  if (rt == nullptr)
-  {
-    unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
-    ++g_fail;
-    return;
-  }
-
-  const std::string msl = msl_kernel_columns(
-    "    output_buffer[s] = coeff_columns[s % 4u];");
-  const bool loaded =
-    tropical_runtime_load_ir_staged(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
-                                    msl.c_str(), msl.size(),
-                                    COEFF_FILL_IR, strlen(COEFF_FILL_IR),
-                                    STAGED_MANIFEST, strlen(STAGED_MANIFEST));
-  unsetenv("TROPICAL_METAL_PIPELINE_DEPTH"); // create() read it at load
-  if (!loaded)
-  {
-    printf("FAIL\n    pipelined staged load failed: %s\n", tropical_last_error());
-    ++g_fail;
-    tropical_runtime_free(rt);
-    return;
-  }
-  ASSERT(tropical_runtime_metal_pipeline_depth(rt) == 3);
-  const double* out = tropical_runtime_output_buffer(rt);
-  // Block 1 primes the ring (3 futures @ old columns) and reads the first.
-  tropical_runtime_process(rt);
-  for (unsigned int i = 0; i < buf; ++i)
-    ASSERT_NEAR(out[i], 0.25 + (double)(i % 4), 1e-7);
-  tropical_runtime_set_slot(rt, 0, 2.0);
-  // Blocks 2..4 drain futures enqueued BEFORE the write (the D-block lag);
-  // block 5 is the first enqueued after it.
-  for (int b = 0; b < 3; ++b)
-  {
-    tropical_runtime_process(rt);
-    for (unsigned int i = 0; i < buf; ++i)
-      ASSERT_NEAR(out[i], 0.25 + (double)(i % 4), 1e-7);
-  }
-  tropical_runtime_process(rt);
-  for (unsigned int i = 0; i < buf; ++i)
-    ASSERT_NEAR(out[i], 2.0 + (double)(i % 4), 1e-7);
-  tropical_runtime_free(rt);
-  printf("PASS  metal pipelined columns: per-ring upload, knob lands after the D-block lag\n");
-}
-
-/** 7. Qualification depth sweep. Every supported depth has the exact
- *     D-block slot-snapshot lag, while a clock jump drains queued futures
- *     and re-primes from the current slot snapshot immediately. */
-static void test_metal_pipeline_depth_sweep()
-{
-  const unsigned int buf = 16;
-  const std::string msl = msl_kernel("    output_buffer[s] = slots[0];");
-  for (unsigned int depth = 1; depth <= 3; ++depth)
-  {
-    const std::string raw = std::to_string(depth);
-    setenv("TROPICAL_METAL_PIPELINE_DEPTH", raw.c_str(), 1);
-    tropical_runtime_t rt = tropical_runtime_new(buf);
-    if (rt == nullptr)
-    {
-      unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
-      ++g_fail;
-      return;
-    }
-    const bool loaded =
-      tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
-                                   msl.c_str(), msl.size(),
-                                   MANIFEST, strlen(MANIFEST));
-    unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
-    ASSERT(loaded);
-    ASSERT(tropical_runtime_metal_pipeline_depth(rt) == depth);
-
-    tropical_runtime_process(rt); // prime and consume the first old block
-    tropical_runtime_set_slot(rt, 0, 0.75);
-    for (unsigned int b = 0; b < depth; ++b)
-    {
-      tropical_runtime_process(rt);
-      const double * out = tropical_runtime_output_buffer(rt);
-      for (unsigned int i = 0; i < buf; ++i) ASSERT_NEAR(out[i], 0.25, 1e-7);
-    }
-    tropical_runtime_process(rt);
-    const double * out = tropical_runtime_output_buffer(rt);
-    for (unsigned int i = 0; i < buf; ++i) ASSERT_NEAR(out[i], 0.75, 1e-7);
-
-    // A discontinuous clock move must discard every queued old snapshot.
-    tropical_runtime_set_slot(rt, 0, 0.5);
-    tropical_runtime_set_sample_index(rt, 1000000);
-    tropical_runtime_process(rt);
-    out = tropical_runtime_output_buffer(rt);
-    for (unsigned int i = 0; i < buf; ++i) ASSERT_NEAR(out[i], 0.5, 1e-7);
-
-    // Hot-swap builds a fresh ring at the carried coordinate. No completed
-    // future from the old kernel may be emitted after publication.
-    setenv("TROPICAL_METAL_PIPELINE_DEPTH", raw.c_str(), 1);
-    const std::string replacement =
-      msl_kernel("    output_buffer[s] = slots[0] + 1.0f;");
-    const bool swapped =
-      tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
-                                   replacement.c_str(), replacement.size(),
-                                   MANIFEST, strlen(MANIFEST));
-    unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
-    ASSERT(swapped);
-    tropical_runtime_process(rt);
-    out = tropical_runtime_output_buffer(rt);
-    for (unsigned int i = 0; i < buf; ++i) ASSERT_NEAR(out[i], 1.25, 1e-7);
-    tropical_runtime_free(rt);
-  }
-  printf("PASS  metal pipeline depths 1/2/3: lag + clock/hot-swap re-prime\n");
 }
 
 /** Exact E for all four parameter disciplines on the epoch worker path. */
@@ -629,126 +510,89 @@ static void test_metal_retarget_recomputes_companions()
   printf("PASS  missed Metal activation recomputes companions at new E\n");
 }
 
-/** 9. The retired broad pipeline alias must not silently re-enable D=3. */
-static void test_legacy_pipeline_alias_retired()
-{
-  setenv("TROPICAL_METAL_PIPELINE", "1", 1);
-  tropical_runtime_t rt = tropical_runtime_new(16);
-  ASSERT(rt != nullptr);
-  const std::string msl = msl_kernel("    output_buffer[s] = slots[0];");
-  const bool loaded =
-    tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
-                                 msl.c_str(), msl.size(),
-                                 MANIFEST, strlen(MANIFEST));
-  unsetenv("TROPICAL_METAL_PIPELINE");
-  ASSERT(loaded);
-  ASSERT(tropical_runtime_metal_pipeline_depth(rt) == 0);
-  tropical_runtime_free(rt);
-  printf("PASS  retired TROPICAL_METAL_PIPELINE alias remains inert\n");
-}
-
-/** 10. Invalid qualification configuration refuses at Metal construction
- *     with a stable, actionable diagnostic. */
-static void test_metal_pipeline_invalid_depth()
-{
-  setenv("TROPICAL_METAL_PIPELINE_DEPTH", "4", 1);
-  tropical_runtime_t rt = tropical_runtime_new(16);
-  ASSERT(rt != nullptr);
-  const std::string msl = msl_kernel("    output_buffer[s] = slots[0];");
-  const bool loaded =
-    tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
-                                 msl.c_str(), msl.size(),
-                                 MANIFEST, strlen(MANIFEST));
-  unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
-  ASSERT(!loaded);
-  ASSERT(std::strstr(tropical_last_error(),
-                     "TROPICAL_METAL_PIPELINE_DEPTH must be an integer in [1,3]")
-         != nullptr);
-  tropical_runtime_free(rt);
-  printf("PASS  metal invalid pipeline depth refuses clearly\n");
-}
-
-/** 9. A deterministic completion failure must reject the whole block before
- *     output copy, emit silence, increment sticky telemetry once, latch the
- *     failed kernel silent until replacement, and never strand either the
- *     synchronous or pipelined wait path. No DAC is opened. */
+/** A candidate render failure refuses activation. A failure after activation
+ *  drains already-prepared audio, then latches the active epoch silent with
+ *  sticky diagnostics until a fresh epoch activates. No DAC is opened. */
 static void test_metal_dispatch_failure_fail_closed()
 {
-  using Clock = std::chrono::steady_clock;
   const unsigned int buf = 16;
   const std::string msl = msl_kernel(
     "    output_buffer[s] = slots[0];");
 
-  for (const unsigned int depth : {0u, 3u})
+  setenv("TROPICAL_METAL_TEST_FAIL_DISPATCH_AT", "2", 1);
+  tropical_runtime_t refused = tropical_runtime_new(buf);
+  ASSERT(refused != nullptr);
+  const bool loaded =
+    tropical_runtime_load_ir_msl(
+      refused, JIT_CONST_IR, strlen(JIT_CONST_IR),
+      msl.c_str(), msl.size(), MANIFEST, strlen(MANIFEST));
+  unsetenv("TROPICAL_METAL_TEST_FAIL_DISPATCH_AT");
+  ASSERT(!loaded);
+  ASSERT(std::strstr(
+           tropical_last_error(), "initial Metal epoch failed") != nullptr);
+  ASSERT(tropical_runtime_metal_dispatch_failure_count(refused) == 1);
+  ASSERT(tropical_runtime_metal_activation_failure_count(refused) == 1);
+  tropical_runtime_free(refused);
+
+  setenv("TROPICAL_METAL_TEST_FAIL_DISPATCH_AT", "5", 1);
+  tropical_runtime_t rt = tropical_runtime_new(buf);
+  ASSERT(rt != nullptr);
+  ASSERT(tropical_runtime_load_ir_msl(
+    rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
+    msl.c_str(), msl.size(), MANIFEST, strlen(MANIFEST)));
+  unsetenv("TROPICAL_METAL_TEST_FAIL_DISPATCH_AT");
+  ASSERT(tropical_runtime_metal_dispatch_failure_count(rt) == 0);
+  ASSERT(tropical_runtime_metal_render_starvation_count(rt) == 0);
+
+  const double * out = tropical_runtime_output_buffer(rt);
+  for (unsigned int block = 0; block < 32; ++block)
+    tropical_runtime_process(rt);
+  bool failed = false;
+  const auto failure_deadline =
+    std::chrono::steady_clock::now() + std::chrono::seconds(2);
+  while (std::chrono::steady_clock::now() < failure_deadline)
   {
-    setenv("TROPICAL_METAL_TEST_FAIL_DISPATCH_AT", "2", 1);
-    if (depth > 0)
-      setenv("TROPICAL_METAL_PIPELINE_DEPTH", "3", 1);
-
-    tropical_runtime_t rt = tropical_runtime_new(buf);
-    if (!rt)
+    if (tropical_runtime_metal_dispatch_failure_count(rt) == 1)
     {
-      unsetenv("TROPICAL_METAL_TEST_FAIL_DISPATCH_AT");
-      unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
-      ++g_fail;
-      return;
+      failed = true;
+      break;
     }
-    const bool loaded =
-      tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
-                                   msl.c_str(), msl.size(),
-                                   MANIFEST, strlen(MANIFEST));
-    // create() captured both test controls; realtime dispatch never reads
-    // the environment.
-    unsetenv("TROPICAL_METAL_TEST_FAIL_DISPATCH_AT");
-    unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
-    ASSERT(loaded);
-    ASSERT(tropical_runtime_metal_pipeline_depth(rt) == depth);
-    ASSERT(tropical_runtime_metal_dispatch_failure_count(rt) == 0);
-
-    // Establish nonzero prior output so a failed command cannot pass by
-    // leaving stale samples in FlatRuntime's output buffer.
-    tropical_runtime_process(rt);
-    const double * out = tropical_runtime_output_buffer(rt);
-    for (unsigned int i = 0; i < buf; ++i)
-      ASSERT_NEAR(out[i], 0.25, 1e-7);
-
-    const auto failure_start = Clock::now();
-    tropical_runtime_process(rt);
-    const double failure_seconds =
-      std::chrono::duration<double>(Clock::now() - failure_start).count();
-    ASSERT(failure_seconds < 5.0);
-    for (unsigned int i = 0; i < buf; ++i)
-      ASSERT(out[i] == 0.0);
-    ASSERT(tropical_runtime_metal_dispatch_failure_count(rt) == 1);
-
-    // The failed kernel is latched: subsequent callbacks return silent without
-    // another wait/dispatch and do not count one underlying command twice.
-    const auto latched_start = Clock::now();
-    tropical_runtime_process(rt);
-    const double latched_seconds =
-      std::chrono::duration<double>(Clock::now() - latched_start).count();
-    ASSERT(latched_seconds < 1.0);
-    for (unsigned int i = 0; i < buf; ++i)
-      ASSERT(out[i] == 0.0);
-    ASSERT(tropical_runtime_metal_dispatch_failure_count(rt) == 1);
-
-    // A fresh MetalKernel clears the execution latch, while FlatRuntime's
-    // monotonic evidence survives the hot-swap.
-    if (depth > 0)
-      setenv("TROPICAL_METAL_PIPELINE_DEPTH", "3", 1);
-    const bool reloaded =
-      tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
-                                   msl.c_str(), msl.size(),
-                                   MANIFEST, strlen(MANIFEST));
-    unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
-    ASSERT(reloaded);
-    tropical_runtime_process(rt);
-    for (unsigned int i = 0; i < buf; ++i)
-      ASSERT_NEAR(out[i], 0.25, 1e-7);
-    ASSERT(tropical_runtime_metal_dispatch_failure_count(rt) == 1);
-    tropical_runtime_free(rt);
+    std::this_thread::sleep_for(std::chrono::milliseconds(1));
   }
-  printf("PASS  metal failure latches silent until fresh kernel (sync and pipeline)\n");
+  ASSERT(failed);
+
+  bool starved = false;
+  for (unsigned int block = 0; block < 512; ++block)
+  {
+    tropical_runtime_process(rt);
+    if (tropical_runtime_metal_render_starvation_count(rt) == 1)
+    {
+      starved = true;
+      break;
+    }
+    std::this_thread::yield();
+  }
+  ASSERT(starved);
+  for (unsigned int i = 0; i < buf; ++i) ASSERT(out[i] == 0.0);
+  ASSERT(tropical_runtime_metal_dispatch_failure_count(rt) == 1);
+  ASSERT(tropical_runtime_metal_epoch_tag_mismatch_count(rt) == 0);
+
+  ASSERT(tropical_runtime_load_ir_msl(
+    rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
+    msl.c_str(), msl.size(), MANIFEST, strlen(MANIFEST)));
+  const uint64_t replacement_epoch =
+    tropical_runtime_metal_published_activation_epoch(rt);
+  for (unsigned int block = 0; block < 64
+       && tropical_runtime_metal_acknowledged_activation_epoch(rt)
+            < replacement_epoch; ++block)
+    tropical_runtime_process(rt);
+  ASSERT(tropical_runtime_metal_acknowledged_activation_epoch(rt)
+         == replacement_epoch);
+  for (unsigned int i = 0; i < buf; ++i)
+    ASSERT_NEAR(out[i], 0.25, 1e-7);
+  ASSERT(tropical_runtime_metal_dispatch_failure_count(rt) == 1);
+  tropical_runtime_free(rt);
+  printf("PASS  Metal failures refuse activation or latch active epochs silent\n");
 }
 
 /** 4. set_sample_index repositions the clock (the render --start hook). */
@@ -780,12 +624,8 @@ int main()
   test_metal_hotswap();
   test_metal_set_index();
   test_metal_columns_live();
-  test_metal_columns_pipelined();
-  test_metal_pipeline_depth_sweep();
   test_metal_effective_dispatch_epochs();
   test_metal_retarget_recomputes_companions();
-  test_legacy_pipeline_alias_retired();
-  test_metal_pipeline_invalid_depth();
   test_metal_dispatch_failure_fail_closed();
   if (g_fail == 0) printf("ALL METAL TESTS PASSED\n");
   return g_fail == 0 ? 0 : 1;

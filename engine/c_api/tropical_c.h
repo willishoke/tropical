@@ -150,13 +150,16 @@ void             tropical_runtime_process(tropical_runtime_t);
 bool             tropical_runtime_process_offline(tropical_runtime_t);
 const double*    tropical_runtime_output_buffer(tropical_runtime_t);
 unsigned int     tropical_runtime_get_buffer_length(tropical_runtime_t);
-/* Qualification diagnostic: 0 for JIT/synchronous Metal and on non-Metal
-   builds (the stable sentinel), otherwise the number of future Metal blocks
-   currently configured. */
-unsigned int     tropical_runtime_metal_pipeline_depth(tropical_runtime_t);
 /* Device-independent Metal render quantum. Returns 0 for JIT-only,
    non-Metal, and unloaded runtimes. */
 unsigned int     tropical_runtime_metal_render_tile_frames(tropical_runtime_t);
+/* Total frames held in the active worker bank (four fixed render tiles).
+   Returns 0 for JIT-only, non-Metal, and unloaded runtimes. */
+unsigned int     tropical_runtime_metal_worker_capacity_frames(tropical_runtime_t);
+/* Epoch identities for the latest published and callback-acknowledged
+   activation descriptors. Returns 0 when no Metal epoch exists. */
+uint64_t         tropical_runtime_metal_published_activation_epoch(tropical_runtime_t);
+uint64_t         tropical_runtime_metal_acknowledged_activation_epoch(tropical_runtime_t);
 /* Sticky count of callbacks silenced because bounded state/generation
    ownership acquisition could not obtain a coherent snapshot. Qualification
    requires zero. */
@@ -166,6 +169,13 @@ uint64_t         tropical_runtime_ownership_failure_count(tropical_runtime_t);
    replacement does not erase the evidence. Always 0 for JIT/non-Metal builds;
    qualification requires zero. */
 uint64_t         tropical_runtime_metal_dispatch_failure_count(tropical_runtime_t);
+/* Sticky monotonic worker-handoff diagnostics. Qualification requires every
+   counter to remain zero. */
+uint64_t         tropical_runtime_metal_render_starvation_count(tropical_runtime_t);
+uint64_t         tropical_runtime_metal_epoch_tag_mismatch_count(tropical_runtime_t);
+uint64_t         tropical_runtime_metal_activation_retarget_count(tropical_runtime_t);
+uint64_t         tropical_runtime_metal_activation_failure_count(tropical_runtime_t);
+uint64_t         tropical_runtime_metal_callback_thread_violation_count(tropical_runtime_t);
 
 /* Fade control (for DAC) */
 void             tropical_runtime_begin_fade_in(tropical_runtime_t);

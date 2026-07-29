@@ -1,6 +1,6 @@
 // tropical demo — Electron main. Spawns ONE engine (`frontend --serve <sock>`,
-// Metal backend + pipelined dispatch: this app doubles as the GPU production
-// soak), speaks newline JSON-RPC over the Unix socket (the same single-socket
+// Metal backend + off-RT epoch rendering: this app doubles as a GPU production
+// soak. It speaks newline JSON-RPC over the Unix socket (the same single-socket
 // control/data-plane split the TUIs used), and bridges it to the renderer over
 // IPC. The renderer is the whole instrument; this file is plumbing.
 const { app, BrowserWindow, ipcMain } = require('electron')
@@ -26,10 +26,10 @@ function startEngine() {
     env: {
       ...process.env,
       // The demo runs on the GPU: every patch edit dual-loads (JIT stays the
-      // scope/render_window reference), audio dispatches pipelined on Metal.
+      // scope/render_window reference), while a worker prepares Metal tiles.
       TROPICAL_BACKEND: process.env.TROPICAL_DEMO_JIT ? '' : 'metal',
-      TROPICAL_METAL_PIPELINE_DEPTH:
-        process.env.TROPICAL_DEMO_JIT ? '' : '3',
+      TROPICAL_METAL_RENDER_TILE_FRAMES:
+        process.env.TROPICAL_DEMO_JIT ? '' : '512',
     },
     stdio: ['ignore', 'ignore', 'pipe'],
   })

@@ -400,17 +400,34 @@ unsigned int tropical_runtime_get_buffer_length(tropical_runtime_t r)
   return static_cast<tropical_runtime::FlatRuntime*>(r)->getBufferLength();
 }
 
-unsigned int tropical_runtime_metal_pipeline_depth(tropical_runtime_t r)
-{
-  if (!r) return 0;
-  return static_cast<tropical_runtime::FlatRuntime*>(r)->metal_pipeline_depth();
-}
-
 unsigned int tropical_runtime_metal_render_tile_frames(tropical_runtime_t r)
 {
   if (!r) return 0;
   return static_cast<tropical_runtime::FlatRuntime*>(r)
     ->metal_render_tile_frames();
+}
+
+unsigned int tropical_runtime_metal_worker_capacity_frames(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_worker_capacity_frames();
+}
+
+uint64_t tropical_runtime_metal_published_activation_epoch(
+  tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_published_activation_epoch();
+}
+
+uint64_t tropical_runtime_metal_acknowledged_activation_epoch(
+  tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_acknowledged_activation_epoch();
 }
 
 uint64_t tropical_runtime_ownership_failure_count(tropical_runtime_t r)
@@ -425,6 +442,42 @@ uint64_t tropical_runtime_metal_dispatch_failure_count(tropical_runtime_t r)
   if (!r) return 0;
   return static_cast<tropical_runtime::FlatRuntime*>(r)
     ->metal_dispatch_failure_count();
+}
+
+uint64_t tropical_runtime_metal_render_starvation_count(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_render_starvation_count();
+}
+
+uint64_t tropical_runtime_metal_epoch_tag_mismatch_count(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_epoch_tag_mismatch_count();
+}
+
+uint64_t tropical_runtime_metal_activation_retarget_count(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_activation_retarget_count();
+}
+
+uint64_t tropical_runtime_metal_activation_failure_count(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_activation_failure_count();
+}
+
+uint64_t tropical_runtime_metal_callback_thread_violation_count(
+  tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_callback_thread_violation_count();
 }
 
 void tropical_runtime_begin_fade_in(tropical_runtime_t r)

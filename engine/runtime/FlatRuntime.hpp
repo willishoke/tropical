@@ -148,18 +148,6 @@ struct KernelState
   std::vector<double> audio_slots;
   uint32_t control_published_gen = 0;
 
-  // Metal upload staging for the coefficient columns: the packed f32 image
-  // of the captured generation, rebuilt once per process() (audio thread,
-  // no allocation) and copied into the GPU column buffer per dispatch —
-  // at encode on the sync path, at enqueue on the pipelined path. Packed
-  // in `coeff_array_slots` order, each column at full capacity — the SAME
-  // layout EmitMsl bakes as compile-time offsets into the kernel text.
-  // Column storage is int64 bit-punned f64 (the JIT loads i64 + bitcast to
-  // double — see EmitLlvm.emitIndex), so the pack is bit_cast<double> then
-  // the same f64→f32 narrowing slots get. Sized at build; empty when the
-  // plan hoists no columns.
-  std::vector<float> metal_column_staging;
-
   // Flat buffers passed to kernel (matches NumericKernelFn signature)
   std::vector<int64_t> registers;
   std::vector<int64_t> temps;
@@ -418,14 +406,12 @@ public:
     }
 
     // The generation capture above is the boundary linearization point.
-    // After any successful callback (including a fresh/re-prime callback),
-    // the following capture is steady-state: JIT/sync Metal is audible at C;
-    // pipelined Metal is audible at C + D*B.
+    // JIT callbacks render the captured generation at this boundary. Metal
+    // callbacks returned above after consuming a worker-prepared epoch tile.
     next_capture_sample_index_.store(
       start_sample_index + buffer_length_, std::memory_order_relaxed);
     next_capture_effective_sample_index_.store(
-      steady_state_effective_sample_index(
-        state, start_sample_index + buffer_length_),
+      start_sample_index + buffer_length_,
       std::memory_order_relaxed);
     state_requires_reprime_[state_idx].store(
       false, std::memory_order_relaxed);
@@ -551,18 +537,6 @@ public:
   std::vector<double> outputBuffer;
 
   unsigned int getBufferLength() const { return buffer_length_; }
-
-  uint32_t metal_pipeline_depth() const
-  {
-    std::lock_guard<std::mutex> lock(build_mutex_);
-#ifdef TROPICAL_METAL
-    const uint32_t idx = active_state_.load(std::memory_order_acquire);
-    const auto & metal = states_[idx].metal;
-    return metal ? tropical_metal::pipeline_depth(*metal) : 0;
-#else
-    return 0;
-#endif
-  }
 
   uint32_t metal_render_tile_frames() const
   {
@@ -825,14 +799,86 @@ public:
   // zero.
   uint64_t metal_dispatch_failure_count() const
   {
-    uint64_t count =
-      metal_dispatch_failure_count_.load(std::memory_order_acquire);
 #ifdef TROPICAL_METAL
     std::lock_guard<std::mutex> lock(build_mutex_);
-    if (metal_worker_)
-      count += metal_worker_->dispatch_failure_count();
+    return metal_worker_ ? metal_worker_->dispatch_failure_count() : 0;
+#else
+    return 0;
 #endif
-    return count;
+  }
+
+  uint64_t metal_render_starvation_count() const
+  {
+#ifdef TROPICAL_METAL
+    return metal_tiles_ ? metal_tiles_->starvation_count() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  uint64_t metal_epoch_tag_mismatch_count() const
+  {
+#ifdef TROPICAL_METAL
+    return metal_tiles_ ? metal_tiles_->tag_mismatch_count() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  uint64_t metal_activation_retarget_count() const
+  {
+#ifdef TROPICAL_METAL
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    return metal_worker_ ? metal_worker_->activation_retarget_count() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  uint64_t metal_activation_failure_count() const
+  {
+#ifdef TROPICAL_METAL
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    return metal_worker_ ? metal_worker_->activation_failure_count() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  uint64_t metal_callback_thread_violation_count() const
+  {
+#ifdef TROPICAL_METAL
+    return tropical_metal::callback_thread_violation_count();
+#else
+    return 0;
+#endif
+  }
+
+  uint32_t metal_worker_capacity_frames() const
+  {
+#ifdef TROPICAL_METAL
+    return metal_tiles_ ? metal_tiles_->capacity_frames() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  uint64_t metal_published_activation_epoch() const
+  {
+#ifdef TROPICAL_METAL
+    return metal_tiles_ ? metal_tiles_->published_activation_epoch() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  uint64_t metal_acknowledged_activation_epoch() const
+  {
+#ifdef TROPICAL_METAL
+    return metal_tiles_ ? metal_tiles_->activation_acknowledged() : 0;
+#else
+    return 0;
+#endif
   }
 
   // Test-only: install/remove the deterministic ownership pause seam.
@@ -936,21 +982,6 @@ private:
 #endif
   }
 
-  uint64_t steady_state_effective_sample_index(
-    const KernelState & state, uint64_t capture_sample_index) const
-  {
-#ifdef TROPICAL_METAL
-    if (state.metal)
-      return capture_sample_index
-           + static_cast<uint64_t>(
-               tropical_metal::pipeline_depth(*state.metal))
-             * buffer_length_;
-#else
-    (void)state;
-#endif
-    return capture_sample_index;
-  }
-
   // build_kernel_state maps a parsed plan's *metadata* (everything except
   // the kernel handle) into a fresh KernelState; publish_state carries the
   // sample coordinate and performs the atomic double-buffer flip.
@@ -996,7 +1027,6 @@ private:
     control_generation_owners_{};
   std::atomic<uint64_t> recompile_version_{0};
   std::atomic<uint64_t> ownership_failure_count_{0};
-  std::atomic<uint64_t> metal_dispatch_failure_count_{0};
   std::atomic<RuntimeOwnershipTestSeam *> ownership_test_seam_{nullptr};
 
   // Buffer-boundary clock handoff. Only the audio thread touches plain

@@ -430,6 +430,10 @@ public:
   {
     return activation_acknowledged_.load(std::memory_order_acquire);
   }
+  uint64_t published_activation_epoch() const noexcept
+  {
+    return activation_epoch_.load(std::memory_order_acquire);
+  }
   uint32_t audio_active_bank() const noexcept
   {
     return audio_active_bank_.load(std::memory_order_acquire);

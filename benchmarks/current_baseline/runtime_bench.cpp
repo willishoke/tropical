@@ -377,7 +377,10 @@ int main(int argc, char ** argv)
     if (!load(rt, o, ir, manifest, coeff, msl))
       throw std::runtime_error(tropical_last_error());
     const uint64_t load_ns = elapsed_ns(load_start, Clock::now());
-    const uint32_t depth = tropical_runtime_metal_pipeline_depth(rt);
+    const uint32_t render_tile_frames =
+      tropical_runtime_metal_render_tile_frames(rt);
+    const uint32_t worker_capacity_frames =
+      tropical_runtime_metal_worker_capacity_frames(rt);
 
     for (uint64_t i = 0; i < o.warmup; ++i)
       tropical_runtime_process(rt);
@@ -421,9 +424,11 @@ int main(int argc, char ** argv)
     std::optional<uint64_t> writes_stopped_block;
     std::optional<uint64_t> jump_request_block;
     std::optional<uint64_t> jump_progress_block;
+    std::optional<uint64_t> jump_activation_epoch;
     std::optional<uint64_t> reload_request_block;
     std::optional<uint64_t> reload_publication_block;
     std::optional<uint64_t> reload_progress_block;
+    std::optional<uint64_t> reload_activation_epoch;
     std::optional<uint64_t> start_reference_block;
     std::optional<uint64_t> post_jump_reference_block;
     std::optional<uint64_t> midpoint_reference_block;
@@ -432,6 +437,7 @@ int main(int argc, char ** argv)
     std::optional<uint64_t> post_jump_preceding_write_block;
     std::optional<uint64_t> midpoint_preceding_write_block;
     std::optional<uint64_t> end_preceding_write_block;
+    std::optional<uint64_t> last_write_activation_epoch;
     std::optional<uint64_t> latency_blocks;
     std::optional<uint64_t> reload_ns;
     uint64_t overrun_count = 0;
@@ -443,6 +449,11 @@ int main(int argc, char ** argv)
     uint64_t ownership_failure_count = 0;
     uint64_t reference_ownership_failure_count = 0;
     uint64_t metal_dispatch_failure_count = 0;
+    uint64_t metal_render_starvation_count = 0;
+    uint64_t metal_epoch_tag_mismatch_count = 0;
+    uint64_t metal_activation_retarget_count = 0;
+    uint64_t metal_activation_failure_count = 0;
+    uint64_t metal_callback_thread_violation_count = 0;
     uint64_t nonfinite_count = 0;
     double checksum = 0.0;
     double write_value = o.slot_value;
@@ -721,6 +732,16 @@ int main(int argc, char ** argv)
           tropical_runtime_ownership_failure_count(reference_rt);
         metal_dispatch_failure_count =
           tropical_runtime_metal_dispatch_failure_count(rt);
+        metal_render_starvation_count =
+          tropical_runtime_metal_render_starvation_count(rt);
+        metal_epoch_tag_mismatch_count =
+          tropical_runtime_metal_epoch_tag_mismatch_count(rt);
+        metal_activation_retarget_count =
+          tropical_runtime_metal_activation_retarget_count(rt);
+        metal_activation_failure_count =
+          tropical_runtime_metal_activation_failure_count(rt);
+        metal_callback_thread_violation_count =
+          tropical_runtime_metal_callback_thread_violation_count(rt);
         if (tropical_dac_is_reconnecting(dac) || disconnect_count > 0
             || reconnect_success_count > 0 || reconnect_failure_count > 0)
         {
@@ -739,10 +760,23 @@ int main(int argc, char ** argv)
           snapshot("measured_failure_abort");
           break;
         }
-        if (metal_dispatch_failure_count > 0)
+        if (metal_dispatch_failure_count > 0
+            || metal_render_starvation_count > 0
+            || metal_epoch_tag_mismatch_count > 0
+            || metal_activation_failure_count > 0
+            || metal_callback_thread_violation_count > 0)
         {
           dac_aborted = true;
-          dac_abort_reason = "metal_dispatch_failure";
+          if (metal_dispatch_failure_count > 0)
+            dac_abort_reason = "metal_dispatch_failure";
+          else if (metal_render_starvation_count > 0)
+            dac_abort_reason = "metal_render_starvation";
+          else if (metal_epoch_tag_mismatch_count > 0)
+            dac_abort_reason = "metal_epoch_tag_mismatch";
+          else if (metal_activation_failure_count > 0)
+            dac_abort_reason = "metal_activation_failure";
+          else
+            dac_abort_reason = "metal_callback_thread_violation";
           snapshot("measured_failure_abort");
           break;
         }
@@ -810,6 +844,8 @@ int main(int argc, char ** argv)
           }
           if (!first_write_block) first_write_block = block;
           last_write_block = block;
+          last_write_activation_epoch =
+            tropical_runtime_metal_published_activation_epoch(rt);
           writes_completed = true;
           next_write += o.write_every;
         }
@@ -821,10 +857,14 @@ int main(int argc, char ** argv)
           jump_request_block = block;
           tropical_runtime_set_sample_index(rt, o.jump_index);
           tropical_runtime_set_sample_index(reference_rt, o.jump_index);
+          jump_activation_epoch =
+            tropical_runtime_metal_published_activation_epoch(rt);
           jumped = true;
         }
         if (jumped && !jump_progress_seen
-            && block >= *jump_request_block + depth + 1)
+            && jump_activation_epoch
+            && tropical_runtime_metal_acknowledged_activation_epoch(rt)
+                 >= *jump_activation_epoch)
         {
           jump_progress_seen = true;
           jump_completed = true;
@@ -857,13 +897,17 @@ int main(int argc, char ** argv)
           tropical_dac_stats_t published{};
           tropical_dac_get_stats(dac, &published);
           reload_publication_block = published.callback_count;
+          reload_activation_epoch =
+            tropical_runtime_metal_published_activation_epoch(rt);
           if (!load(reference_rt, o, reload_ir, reload_manifest,
                     reload_coeff, {}))
             throw std::runtime_error(tropical_last_error());
           reloaded = true;
         }
         if (reloaded && !reload_progress_seen
-            && block >= *reload_publication_block + depth + 1)
+            && reload_activation_epoch
+            && tropical_runtime_metal_acknowledged_activation_epoch(rt)
+                 >= *reload_activation_epoch)
         {
           reload_progress_seen = true;
           reload_completed = true;
@@ -904,8 +948,9 @@ int main(int argc, char ** argv)
       {
         const bool future_queue_clear =
           writes_stopped_block && last_write_block
-          && block >= *writes_stopped_block + depth + 1
-          && block >= *last_write_block + depth + 1;
+          && last_write_activation_epoch
+          && tropical_runtime_metal_acknowledged_activation_epoch(rt)
+               >= *last_write_activation_epoch;
         if (!reload_completed || !writes_stopped || !future_queue_clear)
         {
           dac_aborted = true;
@@ -955,6 +1000,16 @@ int main(int argc, char ** argv)
         tropical_runtime_ownership_failure_count(reference_rt);
       metal_dispatch_failure_count =
         tropical_runtime_metal_dispatch_failure_count(rt);
+      metal_render_starvation_count =
+        tropical_runtime_metal_render_starvation_count(rt);
+      metal_epoch_tag_mismatch_count =
+        tropical_runtime_metal_epoch_tag_mismatch_count(rt);
+      metal_activation_retarget_count =
+        tropical_runtime_metal_activation_retarget_count(rt);
+      metal_activation_failure_count =
+        tropical_runtime_metal_activation_failure_count(rt);
+      metal_callback_thread_violation_count =
+        tropical_runtime_metal_callback_thread_violation_count(rt);
 
       callback_histogram.resize(
         tropical_dac_callback_histogram_bin_count(), 0);
@@ -1088,6 +1143,16 @@ int main(int argc, char ** argv)
       tropical_runtime_ownership_failure_count(rt);
     metal_dispatch_failure_count =
       tropical_runtime_metal_dispatch_failure_count(rt);
+    metal_render_starvation_count =
+      tropical_runtime_metal_render_starvation_count(rt);
+    metal_epoch_tag_mismatch_count =
+      tropical_runtime_metal_epoch_tag_mismatch_count(rt);
+    metal_activation_retarget_count =
+      tropical_runtime_metal_activation_retarget_count(rt);
+    metal_activation_failure_count =
+      tropical_runtime_metal_activation_failure_count(rt);
+    metal_callback_thread_violation_count =
+      tropical_runtime_metal_callback_thread_violation_count(rt);
     const uint64_t final_rss = required_rss_bytes();
 
     auto print_optional = [](const std::optional<uint64_t> & value) {
@@ -1098,7 +1163,10 @@ int main(int argc, char ** argv)
               << ",\"buffer_length\":" << o.buffer
               << ",\"sample_rate\":" << std::setprecision(17) << o.rate
               << ",\"backend\":\"" << (msl.empty() ? "jit" : "metal") << "\""
-              << ",\"pipeline_depth\":" << depth
+              << ",\"device_frames\":" << o.buffer
+              << ",\"metal_render_tile_frames\":" << render_tile_frames
+              << ",\"metal_worker_capacity_frames\":"
+              << worker_capacity_frames
               << ",\"load_ns\":" << load_ns
               << ",\"run_ns\":" << run_ns
               << ",\"measured_loop_ns\":" << measured_loop_ns
@@ -1131,6 +1199,16 @@ int main(int argc, char ** argv)
               << reference_ownership_failure_count
               << ",\"metal_dispatch_failure_count\":"
               << metal_dispatch_failure_count
+              << ",\"metal_render_starvation_count\":"
+              << metal_render_starvation_count
+              << ",\"metal_epoch_tag_mismatch_count\":"
+              << metal_epoch_tag_mismatch_count
+              << ",\"metal_activation_retarget_count\":"
+              << metal_activation_retarget_count
+              << ",\"metal_activation_failure_count\":"
+              << metal_activation_failure_count
+              << ",\"metal_callback_thread_violation_count\":"
+              << metal_callback_thread_violation_count
               << ",\"reload_artifacts_distinct\":"
               << (reload_artifacts_distinct ? "true" : "false")
               << ",\"overrun_count\":" << overrun_count
@@ -1139,8 +1217,7 @@ int main(int argc, char ** argv)
               << ",\"final_rss_bytes\":" << final_rss
               << ",\"latency_blocks\":";
     if (latency_blocks) std::cout << *latency_blocks; else std::cout << "null";
-    std::cout << ",\"predicted_latency_blocks\":" << depth
-              << ",\"reload_ns\":";
+    std::cout << ",\"reload_ns\":";
     if (reload_ns) std::cout << *reload_ns; else std::cout << "null";
     std::cout << ",\"process_ns\":";
     print_array(process_ns);
@@ -1215,6 +1292,16 @@ int main(int argc, char ** argv)
               << (end_reference_completed ? "true" : "false")
               << ",\"callback_progress_stalled\":"
               << (callback_progress_stalled ? "true" : "false")
+              << '}';
+    std::cout << ",\"event_activation_epochs\":{";
+    std::cout << "\"last_write\":";
+    print_optional(last_write_activation_epoch);
+    std::cout << ",\"clock_jump\":";
+    print_optional(jump_activation_epoch);
+    std::cout << ",\"hot_swap\":";
+    print_optional(reload_activation_epoch);
+    std::cout << ",\"acknowledged_final\":"
+              << tropical_runtime_metal_acknowledged_activation_epoch(rt)
               << '}';
     std::cout << ",\"event_blocks\":{";
     std::cout << "\"baseline\":"; print_optional(baseline_block);
