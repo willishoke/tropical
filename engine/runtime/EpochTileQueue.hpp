@@ -213,8 +213,28 @@ public:
       activation.source_start, std::memory_order_relaxed);
     activation_bank_.store(
       activation.bank_index, std::memory_order_relaxed);
+    activation_claim_.store(0, std::memory_order_relaxed);
     activation_epoch_.store(
       activation.epoch_id, std::memory_order_relaxed);
+    activation_sequence_.fetch_add(1, std::memory_order_release);
+    return true;
+  }
+
+  // Worker only. Coalesces a fresh prepared epoch before any callback has
+  // claimed it. The claim CAS prevents overwriting a descriptor while audio
+  // may be acting on a stable read.
+  bool cancel_unclaimed_activation(uint64_t epoch_id)
+  {
+    if (epoch_id == 0
+        || activation_epoch_.load(std::memory_order_acquire) != epoch_id)
+      return false;
+    uint64_t expected = 0;
+    if (!activation_claim_.compare_exchange_strong(
+          expected, UINT64_MAX,
+          std::memory_order_acq_rel, std::memory_order_relaxed))
+      return false;
+    activation_sequence_.fetch_add(1, std::memory_order_acq_rel);
+    activation_epoch_.store(0, std::memory_order_relaxed);
     activation_sequence_.fetch_add(1, std::memory_order_release);
     return true;
   }
@@ -248,6 +268,18 @@ public:
       result.activation_deferred = true;
     else if (has_activation && activation.epoch_id != audio_epoch_id_
              && activation.activation_frame <= audio_device_frame_)
+    {
+      uint64_t unclaimed = 0;
+      if (!activation_claim_.compare_exchange_strong(
+            unclaimed, activation.epoch_id,
+            std::memory_order_acquire, std::memory_order_relaxed))
+      {
+        result.activation_deferred = true;
+        has_activation = false;
+      }
+    }
+    if (has_activation && activation.epoch_id != audio_epoch_id_
+        && activation.activation_frame <= audio_device_frame_)
     {
       release_reading_tile();
       audio_epoch_id_ = activation.epoch_id;
@@ -542,6 +574,7 @@ private:
   std::atomic<uint64_t> activation_source_{0};
   std::atomic<uint32_t> activation_bank_{kNoBank};
   std::atomic<uint64_t> activation_acknowledged_{0};
+  std::atomic<uint64_t> activation_claim_{0};
 
   // Fixed callback facts observed by the worker/control side.
   std::atomic<uint32_t> audio_active_bank_{kNoBank};

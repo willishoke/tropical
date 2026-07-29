@@ -252,21 +252,7 @@ public:
    * (the `--start` of render verbs — long-τ gates render windows at
    * arbitrary positions). Serialized against hot-swap.
    */
-  void set_sample_index(uint64_t idx)
-  {
-    std::lock_guard<std::mutex> lock(build_mutex_);
-    sample_index_request_seq_.fetch_add(1, std::memory_order_acq_rel);
-    requested_sample_index_.store(idx, std::memory_order_release);
-    if (RuntimeOwnershipTestSeam * seam =
-          ownership_test_seam_.load(std::memory_order_acquire);
-        seam && seam->pause_after_clock_payload.load(std::memory_order_acquire))
-    {
-      seam->clock_payload_stored.store(true, std::memory_order_release);
-      while (!seam->release_clock.load(std::memory_order_acquire))
-        std::this_thread::yield();
-    }
-    sample_index_request_seq_.fetch_add(1, std::memory_order_release);
-  }
+  void set_sample_index(uint64_t idx);
 
   /**
    * Process one buffer of audio. Called from the audio thread.
@@ -628,7 +614,16 @@ public:
     KernelState & state = states_[state_idx];
     if (idx < state.slots.size())
     {
+      const std::vector<double> previous = state.slots;
       state.slots[idx] = value;
+#ifdef TROPICAL_METAL
+      if (state.metal)
+      {
+        if (!publish_metal_control_snapshot_locked(state, state_idx).ok)
+          state.slots = previous;
+        return;
+      }
+#endif
       publish_control_snapshot(state, state_idx);
     }
   }
@@ -662,7 +657,20 @@ public:
     for (uint32_t i = 0; i < state.slot_names.size(); ++i)
       if (state.slot_names[i] == name)
       {
+        const std::vector<double> previous = state.slots;
         state.slots[i] = value;
+#ifdef TROPICAL_METAL
+        if (state.metal)
+        {
+          if (!publish_metal_control_snapshot_locked(
+                state, state_idx).ok)
+          {
+            state.slots = previous;
+            return false;
+          }
+          return true;
+        }
+#endif
         publish_control_snapshot(state, state_idx);
         return true;
       }
@@ -687,14 +695,31 @@ public:
     std::lock_guard<std::mutex> lock(build_mutex_);
     const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
     KernelState & state = states_[state_idx];
+    const std::vector<double> previous = state.slots;
     if constexpr (std::is_void_v<std::invoke_result_t<Fn &, KernelState &>>)
     {
       fn(state);
+#ifdef TROPICAL_METAL
+      if (state.metal)
+      {
+        if (!publish_metal_control_snapshot_locked(state, state_idx).ok)
+          state.slots = previous;
+        return;
+      }
+#endif
       publish_control_snapshot(state, state_idx);
     }
     else
     {
       auto result = fn(state);
+#ifdef TROPICAL_METAL
+      if (state.metal)
+      {
+        if (!publish_metal_control_snapshot_locked(state, state_idx).ok)
+          state.slots = previous;
+        return result;
+      }
+#endif
       publish_control_snapshot(state, state_idx);
       return result;
     }
@@ -816,6 +841,15 @@ public:
     ownership_test_seam_.store(seam, std::memory_order_release);
   }
 
+#ifdef TROPICAL_METAL
+  void set_metal_worker_test_seam(
+    tropical_metal::MetalRenderWorkerTestSeam * seam)
+  {
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    if (metal_worker_) metal_worker_->set_test_seam(seam);
+  }
+#endif
+
   // The active kernel's sample rate — the same value the kernel reads for
   // `sampleRate()` (opRate). The control plane needs it to reproduce the
   // phasor's `inc = floor(freq*2^32/SR)` when phase-anchoring a freq change.
@@ -928,7 +962,16 @@ private:
   tropical_metal::RenderEpochRequest make_metal_epoch_request(
     KernelState & state, uint64_t epoch_id,
     tropical_metal::EpochTransitionKind transition,
-    uint64_t source_origin) const;
+    uint64_t source_origin,
+    uint32_t generation = UINT32_MAX) const;
+  tropical_metal::EpochScheduleResult schedule_metal_epoch_locked(
+    KernelState & state,
+    tropical_metal::EpochTransitionKind transition,
+    uint64_t requested_source,
+    uint32_t generation = UINT32_MAX);
+  tropical_metal::EpochScheduleResult
+  publish_metal_control_snapshot_locked(
+    KernelState & state, uint32_t state_index);
   static uint32_t configure_metal_render_tile_frames(
     uint32_t device_frames);
 #endif

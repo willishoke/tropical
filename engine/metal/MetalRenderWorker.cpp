@@ -95,6 +95,14 @@ void MetalRenderWorker::run()
     {
       std::unique_lock<std::mutex> lock(mutex_);
       if (stopping_) return;
+      if (pending_activation_epoch_ != 0 && active_epoch_ == 0
+          && !requests_.empty()
+          && queue_.cancel_unclaimed_activation(
+            pending_activation_epoch_))
+      {
+        bank_cursors_[0].valid = false;
+        pending_activation_epoch_ = 0;
+      }
       if (pending_activation_epoch_ == 0 && !requests_.empty())
       {
         pending = requests_.front();
@@ -164,17 +172,28 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
     const uint64_t observed_device = queue_.published_device_frame();
     const uint64_t observed_source = queue_.published_source_sample();
     const bool fresh = active_bank_ == EpochTileQueue::kNoBank;
-    const uint64_t activation_frame =
-      fresh && observed_device == 0
-        ? 0
-        : observed_device + queue_.render_frames();
-    const bool fixed_source =
-      request.transition == EpochTransitionKind::ClockJump;
-    const uint64_t source_start = fixed_source
+    const uint64_t activation_frame = request.fixed_activation
+      ? request.activation_frame
+      : (fresh && observed_device == 0
+          ? 0
+          : observed_device + queue_.render_frames());
+    const uint64_t source_start = request.fixed_activation
       ? request.source_origin
-      : observed_source + (activation_frame - observed_device);
+      : (request.transition == EpochTransitionKind::ClockJump
+          ? request.source_origin
+          : observed_source + (activation_frame - observed_device));
     target_reserved_time_.store(
       monotonic_time_ns(), std::memory_order_release);
+    if (MetalRenderWorkerTestSeam * seam =
+          test_seam_.load(std::memory_order_acquire);
+        seam
+        && seam->pause_after_target_reserved.load(
+          std::memory_order_acquire))
+    {
+      seam->target_reserved.store(true, std::memory_order_release);
+      while (!seam->release_target.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    }
 
     if (!queue_.begin_epoch(staging_bank, request.epoch_id))
     {
@@ -207,6 +226,11 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
         && activation_frame < device_after_render + queue_.device_frames())
     {
       activation_retargets_.fetch_add(1, std::memory_order_relaxed);
+      if (request.fixed_activation)
+        return {
+          false, "MetalRenderWorker: activation target became inadmissible",
+          request.epoch_id, activation_frame, source_start, true
+        };
       continue;
     }
 
@@ -229,6 +253,24 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
       true, {}, request.epoch_id, activation_frame, source_start
     };
   }
+}
+
+EpochReservation MetalRenderWorker::reserve(
+  EpochTransitionKind transition,
+  uint64_t requested_source) const noexcept
+{
+  const uint64_t device = queue_.published_device_frame();
+  const uint64_t source = queue_.published_source_sample();
+  const bool no_active =
+    queue_.audio_active_bank() == EpochTileQueue::kNoBank;
+  const uint64_t frame =
+    no_active && device == 0 ? 0 : device + queue_.render_frames();
+  return {
+    frame,
+    transition == EpochTransitionKind::ClockJump
+      ? requested_source
+      : source + (frame - device)
+  };
 }
 
 bool MetalRenderWorker::render_one(
@@ -322,6 +364,12 @@ MetalWorkerStageTimes MetalRenderWorker::stage_times() const noexcept
     activation_acknowledged_time_.load(std::memory_order_acquire),
     old_epoch_retired_time_.load(std::memory_order_acquire),
   };
+}
+
+void MetalRenderWorker::set_test_seam(
+  MetalRenderWorkerTestSeam * seam) noexcept
+{
+  test_seam_.store(seam, std::memory_order_release);
 }
 
 } // namespace tropical_metal

@@ -98,7 +98,7 @@ tropical_metal::RenderEpochRequest
 FlatRuntime::make_metal_epoch_request(
   KernelState & state, uint64_t epoch_id,
   tropical_metal::EpochTransitionKind transition,
-  uint64_t source_origin) const
+  uint64_t source_origin, uint32_t generation) const
 {
   tropical_metal::RenderEpochRequest request;
   request.epoch_id = epoch_id;
@@ -106,9 +106,9 @@ FlatRuntime::make_metal_epoch_request(
   request.sample_rate = state.sample_rate;
   request.source_origin = source_origin;
   request.transition = transition;
-  const uint32_t generation =
-    std::atomic_ref(state.control_published_gen)
-      .load(std::memory_order_acquire);
+  if (generation == UINT32_MAX)
+    generation = std::atomic_ref(state.control_published_gen)
+                   .load(std::memory_order_acquire);
   const auto & slots = state.slot_generations[generation];
   request.slots.reserve(slots.size());
   for (double value : slots)
@@ -123,7 +123,72 @@ FlatRuntime::make_metal_epoch_request(
         static_cast<float>(std::bit_cast<double>(value)));
   return request;
 }
+
+tropical_metal::EpochScheduleResult
+FlatRuntime::schedule_metal_epoch_locked(
+  KernelState & state,
+  tropical_metal::EpochTransitionKind transition,
+  uint64_t requested_source, uint32_t generation)
+{
+  const uint64_t epoch_id = next_metal_epoch_id_++;
+  for (;;)
+  {
+    const auto reservation =
+      metal_worker_->reserve(transition, requested_source);
+    auto request = make_metal_epoch_request(
+      state, epoch_id, transition,
+      reservation.effective_sample_index, generation);
+    request.fixed_activation = true;
+    request.activation_frame = reservation.activation_frame;
+    auto result = metal_worker_->schedule(std::move(request));
+    if (result.retargeted) continue;
+    return result;
+  }
+}
+
+tropical_metal::EpochScheduleResult
+FlatRuntime::publish_metal_control_snapshot_locked(
+  KernelState & state, uint32_t state_index)
+{
+  auto generation = reserve_control_generation(state, state_index);
+  materialize_control_snapshot(state, generation.target);
+  auto scheduled = schedule_metal_epoch_locked(
+    state, tropical_metal::EpochTransitionKind::Continuous, 0,
+    generation.target);
+  if (scheduled.ok)
+    commit_control_snapshot(state, state_index, generation);
+  else
+    release_control_snapshot_reservation(state_index, generation);
+  return scheduled;
+}
 #endif
+
+void FlatRuntime::set_sample_index(uint64_t idx)
+{
+  std::lock_guard<std::mutex> lock(build_mutex_);
+#ifdef TROPICAL_METAL
+  const uint32_t state_index =
+    active_state_.load(std::memory_order_acquire);
+  KernelState & state = states_[state_index];
+  if (state.metal)
+  {
+    (void)schedule_metal_epoch_locked(
+      state, tropical_metal::EpochTransitionKind::ClockJump, idx);
+    return;
+  }
+#endif
+  sample_index_request_seq_.fetch_add(1, std::memory_order_acq_rel);
+  requested_sample_index_.store(idx, std::memory_order_release);
+  if (RuntimeOwnershipTestSeam * seam =
+        ownership_test_seam_.load(std::memory_order_acquire);
+      seam && seam->pause_after_clock_payload.load(std::memory_order_acquire))
+  {
+    seam->clock_payload_stored.store(true, std::memory_order_release);
+    while (!seam->release_clock.load(std::memory_order_acquire))
+      std::this_thread::yield();
+  }
+  sample_index_request_seq_.fetch_add(1, std::memory_order_release);
+}
 
 // Map a parsed plan's *metadata* (the manifest) into a fresh KernelState —
 // everything except the kernel handle, which load_ir fills (via
@@ -524,6 +589,57 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
     published_sample_index_.load(std::memory_order_acquire);
   const std::vector<double> base_slots = state.slots;
   auto reservation = reserve_control_generation(state, state_idx);
+
+#ifdef TROPICAL_METAL
+  if (state.metal)
+  {
+    const uint64_t epoch_id = next_metal_epoch_id_++;
+    for (;;)
+    {
+      const auto epoch = metal_worker_->reserve(
+        tropical_metal::EpochTransitionKind::Continuous);
+      state.slots = base_slots;
+      auto result = dispatch_param_sync_locked(
+        state, state_idx, name, value,
+        epoch.effective_sample_index);
+      result.observed_sample_index = observed_sample_index;
+      result.effective_sample_index =
+        epoch.effective_sample_index;
+      if (!result.ok)
+      {
+        state.slots = base_slots;
+        release_control_snapshot_reservation(
+          state_idx, reservation);
+        return result;
+      }
+
+      materialize_control_snapshot(state, reservation.target);
+      auto request = make_metal_epoch_request(
+        state, epoch_id,
+        tropical_metal::EpochTransitionKind::Continuous,
+        epoch.effective_sample_index, reservation.target);
+      request.fixed_activation = true;
+      request.activation_frame = epoch.activation_frame;
+      const auto scheduled =
+        metal_worker_->schedule(std::move(request));
+      if (scheduled.retargeted)
+        continue;
+      if (!scheduled.ok)
+      {
+        state.slots = base_slots;
+        release_control_snapshot_reservation(
+          state_idx, reservation);
+        result.ok = false;
+        result.error =
+          "set_param: Metal epoch preparation failed: "
+          + scheduled.error;
+        return result;
+      }
+      commit_control_snapshot(state, state_idx, reservation);
+      return result;
+    }
+  }
+#endif
 
   for (;;)
   {

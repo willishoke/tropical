@@ -206,6 +206,12 @@ static void test_metal_slots()
   for (unsigned int i = 0; i < buf; ++i) ASSERT_NEAR(out[i], 0.25, 1e-7);
   // Live slot write lands next block.
   tropical_runtime_set_slot(rt, 0, 0.75);
+  for (unsigned int block = 0; block < 512 / buf; ++block)
+  {
+    tropical_runtime_process(rt);
+    for (unsigned int i = 0; i < buf; ++i)
+      ASSERT_NEAR(out[i], 0.25, 1e-7);
+  }
   tropical_runtime_process(rt);
   for (unsigned int i = 0; i < buf; ++i) ASSERT_NEAR(out[i], 0.75, 1e-7);
   tropical_runtime_free(rt);
@@ -231,10 +237,17 @@ static void test_metal_hotswap()
   ASSERT(tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
                                       rampB.c_str(), rampB.size(),
                                       MANIFEST, strlen(MANIFEST)));
-  tropical_runtime_process(rt);
   const double* out = tropical_runtime_output_buffer(rt);
+  for (unsigned int block = 0; block < 512 / buf; ++block)
+  {
+    tropical_runtime_process(rt);
+    const uint64_t start = buf + static_cast<uint64_t>(block) * buf;
+    for (unsigned int i = 0; i < buf; ++i)
+      ASSERT_NEAR(out[i], static_cast<double>(start + i), 1e-5);
+  }
+  tropical_runtime_process(rt);
   for (unsigned int i = 0; i < buf; ++i)
-    ASSERT_NEAR(out[i], 2.0 * (buf + i), 1e-5);   // clock CONTINUED at 32
+    ASSERT_NEAR(out[i], 2.0 * (buf + 512 + i), 1e-5);
   tropical_runtime_free(rt);
   printf("PASS  metal hot-swap carries the sample clock\n");
 }
@@ -334,6 +347,12 @@ static void test_metal_columns_live()
   // Live knob: set_slot re-runs the coefficient kernel into a fresh
   // generation; the next block captures + uploads it.
   tropical_runtime_set_slot(rt, 0, 1.5);
+  for (unsigned int block = 0; block < 512 / buf; ++block)
+  {
+    tropical_runtime_process(rt);
+    for (unsigned int i = 0; i < buf; ++i)
+      ASSERT_NEAR(out[i], 0.25 + (double)(i % 4), 1e-7);
+  }
   tropical_runtime_process(rt);
   for (unsigned int i = 0; i < buf; ++i)
     ASSERT_NEAR(out[i], 1.5 + (double)(i % 4), 1e-7);
@@ -457,14 +476,11 @@ static void test_metal_pipeline_depth_sweep()
   printf("PASS  metal pipeline depths 1/2/3: lag + clock/hot-swap re-prime\n");
 }
 
-/** 8. Exact control timing at every Metal depth. Fresh/reset/hot-swap
- *     captures use E=C; steady captures use E=C+D*B. The deterministic seams
- *     force both before- and after-capture publication for all disciplines. */
-static void test_metal_effective_dispatch_depth_sweep()
+/** Exact E for all four parameter disciplines on the epoch worker path. */
+static void test_metal_effective_dispatch_epochs()
 {
   constexpr unsigned int buf = 16;
   constexpr double sr = 44100.0;
-  constexpr uint64_t jump = 1000000;
   const std::string msl = msl_kernel("    output_buffer[s] = slots[0];");
   const std::string manifest = R"({"schema":"tropical_plan_5",
     "config":{"sampleRate":44100},"register_count":0,
@@ -486,146 +502,131 @@ static void test_metal_effective_dispatch_depth_sweep()
       {"name":"master.velocity","discipline":"velocity",
        "companions":["master.tau_base"]}
     ]})";
-  const std::array<std::string, 4> names = {
-    "bank.freq", "canary.morph", "canary.freq", "master.velocity"
+  tropical_runtime::FlatRuntime rt(buf);
+  ASSERT(rt.load_ir_msl(JIT_CONST_IR, msl, manifest));
+  rt.process();
+  for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 180.0, 1e-5);
+
+  auto advance_to_activation = [&](uint64_t effective) {
+    while (rt.current_sample_index() < effective)
+      rt.process();
+    ASSERT(rt.current_sample_index() == effective);
+    rt.process();
   };
 
-  for (uint32_t depth = 1; depth <= 3; ++depth)
+  const auto raw = rt.dispatch_param_sync("bank.freq", 260.0);
+  ASSERT(raw.ok);
+  ASSERT(raw.observed_sample_index == buf);
+  ASSERT(raw.effective_sample_index == buf + 512);
+  while (rt.current_sample_index() < raw.effective_sample_index)
   {
-    const std::string raw_depth = std::to_string(depth);
-    setenv("TROPICAL_METAL_PIPELINE_DEPTH", raw_depth.c_str(), 1);
-    tropical_runtime::FlatRuntime rt(buf);
-    ASSERT(rt.load_ir_msl(JIT_CONST_IR, msl, manifest));
-    unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
-    const uint32_t observed_depth = rt.metal_pipeline_depth();
-    if (observed_depth != depth)
-      printf("    requested D=%u, observed D=%u\n", depth, observed_depth);
-    ASSERT(observed_depth == depth);
-
-    auto dispatch_all = [&](const std::array<double, 4> & values) {
-        std::array<tropical_runtime::ParamDispatchResult, 4> results;
-        for (std::size_t i = 0; i < names.size(); ++i)
-          results[i] = rt.dispatch_param_sync(names[i], values[i]);
-        return results;
-      };
-
-    // Fresh + forced before capture: all four transactions are audible at C.
-    tropical_runtime::RuntimeOwnershipTestSeam before;
-    before.pause_before_boundary_capture.store(true, std::memory_order_relaxed);
-    rt.set_ownership_test_seam(&before);
-    std::jthread first_audio([&] { rt.process(); });
-    ASSERT(wait_for_true(before.boundary_capture_pending));
-    const auto fresh =
-      dispatch_all({260.0, 0.5, 65.0, 0.75});
-    for (const auto & result : fresh)
-    {
-      ASSERT(result.ok);
-      ASSERT(result.observed_sample_index == 0);
-      ASSERT(result.effective_sample_index == 0);
-    }
-    before.release_boundary_capture.store(true, std::memory_order_release);
-    first_audio.join();
-    rt.set_ownership_test_seam(nullptr);
-    for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 260.0, 1e-5);
-
-    // Forced after capture: current output stays old; the next capture is
-    // C=2B and becomes audible at E=C+D*B.
-    const double old_v0 = rt.get_slot(1);
-    const double old_v1 = rt.get_slot(2);
-    const double old_t0 = rt.get_slot(3);
-    const double old_freq = rt.get_slot(4);
-    const double old_phase = rt.get_slot(5);
-    const double old_velocity = rt.get_slot(6);
-    const double old_tau = rt.get_slot(7);
-    tropical_runtime::RuntimeOwnershipTestSeam after;
-    after.pause_after_generation_ownership.store(
-      true, std::memory_order_relaxed);
-    rt.set_ownership_test_seam(&after);
-    std::jthread captured_audio([&] { rt.process(); });
-    ASSERT(wait_for_true(after.generation_owned));
-    const uint64_t steady_e =
-      static_cast<uint64_t>(2 + depth) * buf;
-    const auto steady =
-      dispatch_all({300.0, 0.0, 55.0, 1.0});
-    for (const auto & result : steady)
-    {
-      ASSERT(result.ok);
-      ASSERT(result.observed_sample_index == buf);
-      ASSERT(result.effective_sample_index == steady_e);
-    }
-    const double r =
-      (static_cast<double>(steady_e) - old_t0) / (0.02 * sr);
-    const double s = std::clamp(r, 0.0, 1.0);
-    ASSERT_NEAR(
-      rt.get_slot(1),
-      old_v0 + (old_v1 - old_v0) * (s * s * (3.0 - 2.0 * s)),
-      1e-12);
-    const double inc0 = std::floor(old_freq * 4294967296.0 / sr);
-    const double inc1 = std::floor(55.0 * 4294967296.0 / sr);
-    const auto frac = [](double x) { return x - std::floor(x); };
-    ASSERT_NEAR(
-      frac(old_phase + inc0 * steady_e / 4294967296.0),
-      frac(rt.get_slot(5) + inc1 * steady_e / 4294967296.0),
-      1e-12);
-    ASSERT_NEAR(
-      old_tau * sr + old_velocity * steady_e,
-      rt.get_slot(7) * sr + rt.get_slot(6) * steady_e,
-      1e-9);
-    after.release_generation.store(true, std::memory_order_release);
-    captured_audio.join();
-    rt.set_ownership_test_seam(nullptr);
-    for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 260.0, 1e-5);
-    for (uint32_t b = 0; b < depth; ++b)
-    {
-      rt.process();
-      for (double sample : rt.outputBuffer)
-        ASSERT_NEAR(sample, 260.0, 1e-5);
-    }
+    for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 180.0, 1e-5);
     rt.process();
-    for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 300.0, 1e-5);
-
-    // A pending clock discontinuity makes the next capture a re-prime: E=C.
-    const uint64_t observed_before_jump = rt.current_sample_index();
-    rt.set_sample_index(jump);
-    const auto reset =
-      dispatch_all({220.0, 0.25, 60.0, 0.8});
-    for (const auto & result : reset)
-    {
-      ASSERT(result.ok);
-      ASSERT(result.observed_sample_index == observed_before_jump);
-      ASSERT(result.effective_sample_index == jump);
-    }
-    rt.process();
-    for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 220.0, 1e-5);
-
-    // Hot-swap installs an unprimed kernel at the carried next C. Force the
-    // control transactions to win immediately before that capture.
-    setenv("TROPICAL_METAL_PIPELINE_DEPTH", raw_depth.c_str(), 1);
-    ASSERT(rt.load_ir_msl(JIT_CONST_IR, msl, manifest));
-    unsetenv("TROPICAL_METAL_PIPELINE_DEPTH");
-    const uint64_t swap_c = rt.current_sample_index();
-    tropical_runtime::RuntimeOwnershipTestSeam swap_before;
-    swap_before.pause_before_boundary_capture.store(
-      true, std::memory_order_relaxed);
-    rt.set_ownership_test_seam(&swap_before);
-    std::jthread swap_audio([&] { rt.process(); });
-    ASSERT(wait_for_true(swap_before.boundary_capture_pending));
-    const auto swapped =
-      dispatch_all({240.0, 0.4, 62.0, 0.9});
-    for (const auto & result : swapped)
-    {
-      ASSERT(result.ok);
-      ASSERT(result.observed_sample_index == swap_c);
-      ASSERT(result.effective_sample_index == swap_c);
-    }
-    swap_before.release_boundary_capture.store(
-      true, std::memory_order_release);
-    swap_audio.join();
-    rt.set_ownership_test_seam(nullptr);
-    for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 240.0, 1e-5);
-    ASSERT(rt.ownership_failure_count() == 0);
   }
-  printf("PASS  Metal D1/D2/D3 effective dispatch: steady + all re-primes\n");
+  rt.process();
+  for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 260.0, 1e-5);
+
+  const double old_v0 = rt.get_slot(1);
+  const double old_v1 = rt.get_slot(2);
+  const double old_t0 = rt.get_slot(3);
+  const auto glide = rt.dispatch_param_sync("canary.morph", 0.5);
+  ASSERT(glide.ok);
+  const double r =
+    (static_cast<double>(glide.effective_sample_index) - old_t0)
+    / (0.02 * sr);
+  const double s = std::clamp(r, 0.0, 1.0);
+  ASSERT_NEAR(
+    rt.get_slot(1),
+    old_v0 + (old_v1 - old_v0) * (s * s * (3.0 - 2.0 * s)),
+    1e-12);
+  ASSERT_NEAR(rt.get_slot(3),
+              static_cast<double>(glide.effective_sample_index), 1e-12);
+  advance_to_activation(glide.effective_sample_index);
+
+  const double old_freq = rt.get_slot(4);
+  const double old_phase = rt.get_slot(5);
+  const auto anchor = rt.dispatch_param_sync("canary.freq", 65.0);
+  ASSERT(anchor.ok);
+  const double inc0 = std::floor(old_freq * 4294967296.0 / sr);
+  const double inc1 = std::floor(65.0 * 4294967296.0 / sr);
+  const double ae = static_cast<double>(anchor.effective_sample_index);
+  const auto frac = [](double x) { return x - std::floor(x); };
+  ASSERT_NEAR(
+    frac(old_phase + inc0 * ae / 4294967296.0),
+    frac(rt.get_slot(5) + inc1 * ae / 4294967296.0), 1e-12);
+  advance_to_activation(anchor.effective_sample_index);
+
+  const double old_velocity = rt.get_slot(6);
+  const double old_tau = rt.get_slot(7);
+  const auto velocity =
+    rt.dispatch_param_sync("master.velocity", 0.75);
+  ASSERT(velocity.ok);
+  const double ve = static_cast<double>(velocity.effective_sample_index);
+  ASSERT_NEAR(
+    old_tau * sr + old_velocity * ve,
+    rt.get_slot(7) * sr + rt.get_slot(6) * ve, 1e-9);
+  advance_to_activation(velocity.effective_sample_index);
+  ASSERT(rt.ownership_failure_count() == 0);
+  printf("PASS  Metal exact-E raw/glide/anchor/velocity epochs\n");
+}
+
+static void test_metal_retarget_recomputes_companions()
+{
+  constexpr unsigned int buf = 16;
+  constexpr double sr = 44100.0;
+  const std::string msl = msl_kernel("    output_buffer[s] = slots[0];");
+  const std::string manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":4,
+    "slot_names":["param:bank.freq","param:canary.morph#v0",
+      "param:canary.morph#v1","param:canary.morph#t0"],
+    "slot_defaults":[180.0,0.0,1.0,0.0],
+    "param_disciplines":[
+      {"name":"bank.freq","discipline":"raw","companions":[]},
+      {"name":"canary.morph","discipline":"glide",
+       "glide_dur_sec":0.02,
+       "companions":["canary.morph#v0","canary.morph#v1",
+         "canary.morph#t0"]}
+    ]})";
+  tropical_runtime::FlatRuntime rt(buf);
+  ASSERT(rt.load_ir_msl(JIT_CONST_IR, msl, manifest));
+  rt.process();
+
+  const uint64_t provisional = rt.current_sample_index() + 512;
+  const double old_v0 = rt.get_slot(1);
+  const double old_v1 = rt.get_slot(2);
+  const double old_t0 = rt.get_slot(3);
+  tropical_metal::MetalRenderWorkerTestSeam seam;
+  seam.pause_after_target_reserved.store(true, std::memory_order_release);
+  rt.set_metal_worker_test_seam(&seam);
+
+  tropical_runtime::ParamDispatchResult result;
+  std::jthread control([&] {
+    result = rt.dispatch_param_sync("canary.morph", 0.5);
+  });
+  ASSERT(wait_for_true(seam.target_reserved));
+  for (unsigned int block = 0; block < 512 / buf; ++block)
+    rt.process();
+  seam.pause_after_target_reserved.store(false, std::memory_order_release);
+  seam.release_target.store(true, std::memory_order_release);
+  control.join();
+  rt.set_metal_worker_test_seam(nullptr);
+
+  ASSERT(result.ok);
+  ASSERT(result.effective_sample_index > provisional);
+  const double r =
+    (static_cast<double>(result.effective_sample_index) - old_t0)
+    / (0.02 * sr);
+  const double s = std::clamp(r, 0.0, 1.0);
+  ASSERT_NEAR(
+    rt.get_slot(1),
+    old_v0 + (old_v1 - old_v0) * (s * s * (3.0 - 2.0 * s)),
+    1e-12);
+  ASSERT_NEAR(
+    rt.get_slot(3),
+    static_cast<double>(result.effective_sample_index), 1e-12);
+  printf("PASS  missed Metal activation recomputes companions at new E\n");
 }
 
 /** 9. The retired broad pipeline alias must not silently re-enable D=3. */
@@ -781,7 +782,8 @@ int main()
   test_metal_columns_live();
   test_metal_columns_pipelined();
   test_metal_pipeline_depth_sweep();
-  test_metal_effective_dispatch_depth_sweep();
+  test_metal_effective_dispatch_epochs();
+  test_metal_retarget_recomputes_companions();
   test_legacy_pipeline_alias_retired();
   test_metal_pipeline_invalid_depth();
   test_metal_dispatch_failure_fail_closed();

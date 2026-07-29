@@ -34,6 +34,8 @@ struct RenderEpochRequest
   std::vector<float> columns;
   uint64_t source_origin = 0;
   EpochTransitionKind transition = EpochTransitionKind::Continuous;
+  bool fixed_activation = false;
+  uint64_t activation_frame = 0;
 };
 
 struct EpochScheduleResult
@@ -41,6 +43,13 @@ struct EpochScheduleResult
   bool ok = false;
   std::string error;
   uint64_t epoch_id = 0;
+  uint64_t activation_frame = 0;
+  uint64_t effective_sample_index = 0;
+  bool retargeted = false;
+};
+
+struct EpochReservation
+{
   uint64_t activation_frame = 0;
   uint64_t effective_sample_index = 0;
 };
@@ -55,6 +64,13 @@ struct MetalWorkerStageTimes
   uint64_t activation_published = 0;
   uint64_t activation_acknowledged = 0;
   uint64_t old_epoch_retired = 0;
+};
+
+struct MetalRenderWorkerTestSeam
+{
+  std::atomic<bool> pause_after_target_reserved{false};
+  std::atomic<bool> target_reserved{false};
+  std::atomic<bool> release_target{false};
 };
 
 class MetalRenderWorker
@@ -74,12 +90,16 @@ public:
   // Control-thread only. The caller may block; the callback never enters this
   // mailbox or touches the worker thread lifecycle.
   EpochScheduleResult schedule(RenderEpochRequest request);
+  EpochReservation reserve(
+    EpochTransitionKind transition,
+    uint64_t requested_source = 0) const noexcept;
 
   uint64_t dispatch_failure_count() const noexcept;
   uint64_t activation_retarget_count() const noexcept;
   uint64_t activation_failure_count() const noexcept;
   uint64_t stale_completion_count() const noexcept;
   MetalWorkerStageTimes stage_times() const noexcept;
+  void set_test_seam(MetalRenderWorkerTestSeam * seam) noexcept;
 
 private:
   struct PendingRequest
@@ -139,6 +159,7 @@ private:
   std::atomic<uint64_t> activation_published_time_{0};
   std::atomic<uint64_t> activation_acknowledged_time_{0};
   std::atomic<uint64_t> old_epoch_retired_time_{0};
+  std::atomic<MetalRenderWorkerTestSeam *> test_seam_{nullptr};
 };
 
 } // namespace tropical_metal
