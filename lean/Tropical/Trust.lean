@@ -102,15 +102,18 @@ def productionTrustSites : Array TrustSite := #[
 ]
 
 def obligations : Array Obligation := #[
-  { id := "LOWER_SIG_TREE_RELATIONAL"
-    statement := "lowerSigTree produces the all-constructor LowersTo relation over production Sig, ENode, ExprArena, and eintern."
+  { id := "LOWER_SIG_TREE_PRESERVES"
+    statement := "For every carrier algebra, environment, production Sig, and well-formed initial ExprArena, lowerSigTree returns a well-formed arena extension whose expression denotation equals the direct Sig denotation."
     evidence := #[.theorem]
-    implementationPaths := #["lean/Tropical/Semantics/LowerSig.lean"]
+    implementationPaths := #["lean/Tropical/Ir/Nodes.lean",
+      "lean/Tropical/Semantics/Arena.lean",
+      "lean/Tropical/Semantics/Expr.lean",
+      "lean/Tropical/Semantics/LowerSig.lean"]
     gateNames := #["lake-build:Tropical.Semantics", "semantics-production-fixtures"]
     owner := "Lean semantics"
     status := .proved
-    theoremSymbol := some "Tropical.Semantics.lowerSigTree_lowersTo"
-    limitation := "Approved fallback 1: this is structural/relational lowering, not denotational preservation. DedupSound preservation is the next prerequisite."
+    theoremSymbol := some "Tropical.Semantics.lowerSigTree_preserves"
+    limitation := "This proves the structural lowerSigTree reference. The unsafe pointer-memoized implementation remains the separate LOWER_SIG_PTR_REFINES_TREE obligation; no backend execution theorem is claimed."
     priority := .critical },
   { id := "CLOCK_RAIL_IS_EXACT"
     statement := "Per sample, runtime integer rail operations implement the Int denotation modulo the documented i64 image and shift/mask headroom rules."

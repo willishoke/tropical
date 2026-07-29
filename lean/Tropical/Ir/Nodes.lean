@@ -41,23 +41,23 @@ abbrev ScalarKind := Tropical.Parse.ScalarKind
     `InstanceDecl.inputs` — of the *target* program). -/
 structure InputIdx where
   idx : Nat
-deriving BEq, Repr, Inhabited
+deriving BEq, ReflBEq, LawfulBEq, Repr, Inhabited
 
 /-- Position in `ports.outputs` (enclosing program; on `NestedOut`, the
     target program's). -/
 structure OutputIdx where
   idx : Nat
-deriving BEq, Repr, Inhabited
+deriving BEq, ReflBEq, LawfulBEq, Repr, Inhabited
 
 /-- Position in the enclosing program's param table. -/
 structure ParamIdx where
   idx : Nat
-deriving BEq, Repr, Inhabited
+deriving BEq, ReflBEq, LawfulBEq, Repr, Inhabited
 
 /-- Position in the enclosing program's instance table. -/
 structure InstanceIdx where
   idx : Nat
-deriving BEq, Repr, Inhabited
+deriving BEq, ReflBEq, LawfulBEq, Repr, Inhabited
 
 -- Pool indices (arena-level identity).
 
@@ -69,7 +69,7 @@ deriving BEq, Repr, Inhabited
 /-- Dense index into the hash-consed expression arena (`ExprArena`). -/
 structure ExprId where
   idx : Nat
-deriving BEq, Hashable, Repr, Inhabited
+deriving BEq, ReflBEq, LawfulBEq, Hashable, Repr, Inhabited
 
 -- ─────────────────────────────────────────────────────────────
 -- Port types
@@ -94,7 +94,7 @@ inductive BinaryOpTag where
   | and | or
   | bitAnd | bitOr | bitXor | lshift | rshift
   | floorDiv | ldexp
-deriving BEq, Repr, Inhabited
+deriving BEq, ReflBEq, LawfulBEq, Repr, Inhabited
 
 def BinaryOpTag.wire : BinaryOpTag → String
   | .add => "add" | .sub => "sub" | .mul => "mul" | .div => "div" | .mod => "mod"
@@ -124,7 +124,7 @@ inductive UnaryOpTag where
   | neg | not | bitNot
   | sqrt | abs | floor | ceil | round
   | floatExponent | toInt | toBool | toFloat
-deriving BEq, Repr, Inhabited
+deriving BEq, ReflBEq, LawfulBEq, Repr, Inhabited
 
 def UnaryOpTag.wire : UnaryOpTag → String
   | .neg => "neg" | .not => "not" | .bitNot => "bitNot"
@@ -212,7 +212,7 @@ inductive ENode where
       the id must be unique along the region's nesting chain — see `loopIdx`). -/
   | bankSum (count : Nat) (tables : Array ExprId) (body : ExprId)
       (dynCount? : Option ExprId := none) (idxId : Nat := 0)
-deriving BEq, Repr, Inhabited
+deriving BEq, ReflBEq, LawfulBEq, Repr, Inhabited
 
 /-- O(1) structural hash — children are ids (no subtree recursion). Op tags and
     binders fold through hashable components (`.wire`, `.idx`, names). -/

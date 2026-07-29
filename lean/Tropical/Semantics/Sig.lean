@@ -36,20 +36,22 @@ def EnvWellFormed (env : SigEnv α) : Prop :=
   (∃ value, env.sampleRate = .scalar value) ∧
   (∃ value, env.sampleIndex = .scalar value)
 
-private def lookup (operation : String) (xs : Array (Value α)) (idx : Nat) :
+/-- Interpret one flat environment reference with the production refusal text. -/
+def lookupValue (operation : String) (xs : Array (Value α)) (idx : Nat) :
     Result α :=
   match xs[idx]? with
   | some value => .ok value
   | none => refusal operation s!"index {idx} is out of bounds (size {xs.size})"
 
-private def lookupNested (env : SigEnv α) (instanceIdx outputIdx : Nat) :
+/-- Interpret one nested-output reference with the production refusal text. -/
+def lookupNested (env : SigEnv α) (instanceIdx outputIdx : Nat) :
     Result α :=
   match env.nestedOutputs[instanceIdx]? with
   | none =>
     refusal "nestedOut"
       s!"instance index {instanceIdx} is out of bounds (size {env.nestedOutputs.size})"
   | some outputs =>
-    lookup "nestedOut.output" outputs outputIdx
+    lookupValue "nestedOut.output" outputs outputIdx
 
 /-- Static well-formedness for a `Sig` under an environment and a stack of open
     bank binder ids.  Bounds are propositions; failed primitive operations
@@ -111,8 +113,8 @@ def denoteSig (alg : Algebra α) (env : SigEnv α) :
   | .select cond then_ else_ =>
     applyTernary alg.select
       (denoteSig alg env cond) (denoteSig alg env then_) (denoteSig alg env else_)
-  | .inputRef idx => lookup "inputRef" env.inputs idx.idx
-  | .paramRef idx => lookup "paramRef" env.params idx.idx
+  | .inputRef idx => lookupValue "inputRef" env.inputs idx.idx
+  | .paramRef idx => lookupValue "paramRef" env.params idx.idx
   | .nestedOut instanceIdx outputIdx =>
     lookupNested env instanceIdx.idx outputIdx.idx
   | .sampleRate => .ok env.sampleRate

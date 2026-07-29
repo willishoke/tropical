@@ -53,7 +53,7 @@ def main (args : List String) : IO UInt32 := do
   let mut failed := 0
   let mut total := 0
 
-  -- ── Trusted-boundary ledger + semantic fallback fixtures ──────────────────
+  -- ── Trusted-boundary ledger + semantic preservation fixtures ──────────────
   IO.println "trusted boundary (typed ledger, report, production fixtures):"
   total := total + 1
   if !(← Tropical.Testing.Semantics.runTrustAudit) then failed := failed + 1

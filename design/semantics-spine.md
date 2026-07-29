@@ -2,7 +2,8 @@
 
 Decision date: 2026-07-27
 Owner: Lean semantics
-Decision: approved handoff fallback 1
+Follow-up date: 2026-07-29
+Decision: full first lowering seam proved
 
 ## What landed
 
@@ -14,48 +15,27 @@ id, converts dynamic bank counts to signed integers and clamps them to
 contributions from index zero upward with a scalar left fold. It assumes no
 associativity or commutativity.
 
-`Tropical.Semantics.lowerSigTree_lowersTo` is the checked sprint capstone. It
-proves that production `lowerSigTree` produces the mutual `LowersTo` /
-`LowersMany` relation for every constructor and every initial `ExprArena`.
-Arrays and bank tables lower from left to right; bank bodies lower after every
-table; a present dynamic count lowers after the body; the final production
-`eintern` step retains the static capacity and binder id.
+`Tropical.Semantics.lowerSigTree_preserves` is the checked capstone. For every
+carrier algebra, environment, production `Sig`, and well-formed initial
+`ExprArena`, it proves that structural `lowerSigTree` returns a well-formed
+arena extension and that the returned `ExprId` has exactly the direct
+`denoteSig` result. The equality includes explicit refusals and therefore does
+not depend on a source well-formedness premise.
 
-This is the authorized relational fallback. It is not the proposed
-denotational theorem and must not be cited as one.
+The supporting proof establishes the previously missing production facts:
 
-## Why the full theorem stopped here
+1. empty-arena well-formedness;
+2. lawful executable equality for node keys and indices, exposing the standard
+   hash-map insertion laws to Lean;
+3. qualified `eintern` preservation under `ChildrenInPrefix`;
+4. returned-node dereference and stability of every prior dereference;
+5. a total, child-descending `denoteExpr`;
+6. denotation stability across arena extension;
+7. mutual preservation for `LowersTo` and ordered `LowersMany` traces.
 
-Production exposes `ExprArena.wf`, which checks that child ids descend, but it
-does not expose or maintain a proposition connecting a `dedup.get? node = some
-id` hit to `arena.deref id = some node`. The semantics names that missing
-condition `DedupSound`. Without it, an arbitrary admitted arena can contain a
-malformed dedup map and `eintern` can return an unrelated existing id, so a
-total arena evaluator cannot soundly prove returned-node correctness.
-
-The custom `ENode` `BEq` and hash also do not currently provide the lawful
-instances used by the standard hash-map insertion lemmas. Adding those
-production invariants is a prerequisite, not something this proof may assume
-silently.
-
-## Exact next theorem boundary
-
-First prove, in production terms:
-
-1. an empty expression arena satisfies `ArenaWellFormed`;
-2. every final node assembled by a `LowersTo` constructor satisfies
-   `ChildrenInPrefix arena node`, meaning all of its children belong to the
-   frozen prefix produced by the preceding child lowerings;
-3. `eintern node` preserves `ArenaWellFormed` only under that
-   `ChildrenInPrefix` premise (the statement for an arbitrary node is false);
-4. under `DedupSound`, the id returned by that qualified `eintern node`
-   dereferences to `node`;
-5. existing prefix dereferences and denotations are stable across the
-   qualified `eintern`;
-6. a total, well-founded `denoteExpr` agrees with `denoteSig` along `LowersTo`.
-
-Only then state `lowerSigTree_preserves`. The pointer implementation remains a
-separate `LOWER_SIG_PTR_REFINES_TREE` runtime/unsafe obligation.
+`lowerSigTree_lowersTo` remains as the useful operational trace theorem. The
+unsafe pointer implementation remains the separate
+`LOWER_SIG_PTR_REFINES_TREE` obligation.
 
 ## Modeled refusals and evaluation order
 
@@ -76,18 +56,20 @@ narrow the admitted fragment.
 
 ## Production fixtures
 
-`Tropical.Testing.Semantics` checks the capstone against the root Q32.32 clock,
+`Tropical.Testing.Semantics` instantiates the preservation theorem against the
+root Q32.32 clock,
 a `bankFold` modal-column expression, a nested bank with distinct binder ids,
 and a parameterized `select`. The same corpus differentially compares compiled
 `lowerSig` with `lowerSigTree`; that differential is evidence for the unsafe
 optimization, not a pointer-identity theorem. After each lowering it also
 re-interns every emitted node and checks that the observed dedup hit returns
 the original id without changing the node/signature arrays. This is finite
-fixture evidence for the derived index, not a proof of `DedupSound`.
+fixture evidence for the unsafe pointer implementation. `DedupSound` itself is
+now maintained by the proved `eintern_preserves` theorem.
 
 ## Remaining spine
 
-After the full first seam closes, the remaining boundaries are:
+With the full first seam closed, the remaining boundaries are:
 
 1. expression arena denotation to lowered whole-program denotation;
 2. lowered program denotation to staged `tropical_plan_5`;

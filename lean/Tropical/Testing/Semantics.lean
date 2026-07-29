@@ -5,7 +5,7 @@ import Tropical.EmitArrow.Modal.Residue
 /-!
 # Production semantic fixtures and trust audit
 
-The four fixtures instantiate the checked relational fallback on the requested
+The four fixtures instantiate denotational preservation on the requested
 production shapes.  The differential calls `lowerSig` (therefore its compiled
 pointer implementation) and `lowerSigTree` independently; it is evidence for,
 not a theorem about, pointer identity.
@@ -61,26 +61,41 @@ example : bankTrips countAlgebra 4 (some (.ok (.scalar (-3)))) = .ok 0 := rfl
 
 example : bankTrips countAlgebra 4 (some (.ok (.scalar 9))) = .ok 4 := rfl
 
-example (arena : ExprArena) :
-    LowersTo clockLit arena (lowerSigTree clockLit arena).1
-      (lowerSigTree clockLit arena).2 :=
-  lowerSigTree_lowersTo _ _
+example (arena : ExprArena) (hArena : ArenaWellFormed arena)
+    (alg : Algebra α) (env : SigEnv α) :
+    let result := lowerSigTree clockLit arena
+    ∃ hResult : ArenaWellFormed result.2,
+      Extends arena result.2 ∧
+        denoteExpr alg env result.2 hResult result.1 =
+          denoteSig alg env clockLit :=
+  lowerSigTree_preserves _ _ hArena alg env
 
-example (arena : ExprArena) :
-    LowersTo modalBankFixture arena (lowerSigTree modalBankFixture arena).1
-      (lowerSigTree modalBankFixture arena).2 :=
-  lowerSigTree_lowersTo _ _
+example (arena : ExprArena) (hArena : ArenaWellFormed arena)
+    (alg : Algebra α) (env : SigEnv α) :
+    let result := lowerSigTree modalBankFixture arena
+    ∃ hResult : ArenaWellFormed result.2,
+      Extends arena result.2 ∧
+        denoteExpr alg env result.2 hResult result.1 =
+          denoteSig alg env modalBankFixture :=
+  lowerSigTree_preserves _ _ hArena alg env
 
-example (arena : ExprArena) :
-    LowersTo nestedBankFixture arena (lowerSigTree nestedBankFixture arena).1
-      (lowerSigTree nestedBankFixture arena).2 :=
-  lowerSigTree_lowersTo _ _
+example (arena : ExprArena) (hArena : ArenaWellFormed arena)
+    (alg : Algebra α) (env : SigEnv α) :
+    let result := lowerSigTree nestedBankFixture arena
+    ∃ hResult : ArenaWellFormed result.2,
+      Extends arena result.2 ∧
+        denoteExpr alg env result.2 hResult result.1 =
+          denoteSig alg env nestedBankFixture :=
+  lowerSigTree_preserves _ _ hArena alg env
 
-example (arena : ExprArena) :
-    LowersTo parameterSelectFixture arena
-      (lowerSigTree parameterSelectFixture arena).1
-      (lowerSigTree parameterSelectFixture arena).2 :=
-  lowerSigTree_lowersTo _ _
+example (arena : ExprArena) (hArena : ArenaWellFormed arena)
+    (alg : Algebra α) (env : SigEnv α) :
+    let result := lowerSigTree parameterSelectFixture arena
+    ∃ hResult : ArenaWellFormed result.2,
+      Extends arena result.2 ∧
+        denoteExpr alg env result.2 hResult result.1 =
+          denoteSig alg env parameterSelectFixture :=
+  lowerSigTree_preserves _ _ hArena alg env
 
 private def reinternObservesDedup (arena : ExprArena) : Bool :=
   (Array.range arena.nodes.size).all fun index =>
