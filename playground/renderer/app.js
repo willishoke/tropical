@@ -18,23 +18,28 @@ const rpc = (m, p) => window.tropical.call(m, p)
 // writes (see playground/README.md). The whole circuit now loads
 // cache-cold in a few seconds. Reverb BEFORE the filter —
 // compose small-into-big last.
+// This declaration is deliberately strict JSON after `const GRAPH =`. Lane D's
+// performance harness reads these exact bytes, so the measured flagship cannot
+// silently drift away from the circuit the renderer loads.
+// TROPICAL_EXACT_PRODUCT_GRAPH_BEGIN
 const GRAPH = {
-  nodes: [
-    { id: 'o1', kind: 'source', params: { freq: 0.11, morph: 0 }, sel: {}, in: {} },
-    { id: 'o2', kind: 'source', params: { freq: 2.2, morph: 0.6 }, sel: {}, in: {} },
-    { id: 'adr', kind: 'mix', params: {}, sel: {}, in: { in: ['o1', 'o2'] } },
-    { id: 'r1', kind: 'resonator', params: { freq: 110, decay: 4 }, sel: {}, in: { addr: ['adr'] } },
-    { id: 'r2', kind: 'resonator', params: { freq: 165, decay: 4 }, sel: {}, in: { addr: ['adr'] } },
-    { id: 'r3', kind: 'resonator', params: { freq: 220, decay: 4 }, sel: {}, in: { addr: ['adr'] } },
-    { id: 'r4', kind: 'resonator', params: { freq: 330, decay: 4 }, sel: {}, in: { addr: ['adr'] } },
-    { id: 'mx', kind: 'modalmix', params: {}, sel: {}, in: { in: ['r1', 'r2', 'r3', 'r4'] } },
-    { id: 'rv', kind: 'reverb', params: { rt60: 2 }, sel: {}, in: { in: ['mx'] } },
-    { id: 'flt', kind: 'filter', params: { cutoff: 800, resonance: 0.5 }, sel: {}, in: { in: ['rv'] } },
-    { id: 'out', kind: 'out', params: {}, sel: {}, in: { in: ['flt'] } },
+  "nodes": [
+    {"id": "o1", "kind": "source", "params": {"freq": 0.11, "morph": 0}, "sel": {}, "in": {}},
+    {"id": "o2", "kind": "source", "params": {"freq": 2.2, "morph": 0.6}, "sel": {}, "in": {}},
+    {"id": "adr", "kind": "mix", "params": {}, "sel": {}, "in": {"in": ["o1", "o2"]}},
+    {"id": "r1", "kind": "resonator", "params": {"freq": 110, "decay": 4}, "sel": {}, "in": {"addr": ["adr"]}},
+    {"id": "r2", "kind": "resonator", "params": {"freq": 165, "decay": 4}, "sel": {}, "in": {"addr": ["adr"]}},
+    {"id": "r3", "kind": "resonator", "params": {"freq": 220, "decay": 4}, "sel": {}, "in": {"addr": ["adr"]}},
+    {"id": "r4", "kind": "resonator", "params": {"freq": 330, "decay": 4}, "sel": {}, "in": {"addr": ["adr"]}},
+    {"id": "mx", "kind": "modalmix", "params": {}, "sel": {}, "in": {"in": ["r1", "r2", "r3", "r4"]}},
+    {"id": "rv", "kind": "reverb", "params": {"rt60": 2}, "sel": {}, "in": {"in": ["mx"]}},
+    {"id": "flt", "kind": "filter", "params": {"cutoff": 800, "resonance": 0.5}, "sel": {}, "in": {"in": ["rv"]}},
+    {"id": "out", "kind": "out", "params": {}, "sel": {}, "in": {"in": ["flt"]}}
   ],
-  out: 'out',
-  taps: true,
+  "out": "out",
+  "taps": true
 }
+// TROPICAL_EXACT_PRODUCT_GRAPH_END
 
 // The four wells, in signal order. Each names the tap (= node id) it watches.
 const SCOPES = [

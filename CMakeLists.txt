@@ -12,6 +12,7 @@ option(TROPICAL_BUILD_PYTHON "Build ctypes-based Python package support (install
 option(TROPICAL_LLVM_STATIC "Link LLVM statically into libtropical for self-contained wheel distribution" OFF)
 option(TROPICAL_WASM_EMIT "Build the in-process IR→wasm emitter (links the LLVM WebAssembly backend + lld as a library). Needed by the build-time compile-wasm tool, not by the shipped audio runtime." OFF)
 option(TROPICAL_METAL "Build the Metal compute backend (Apple only): MSL kernels compiled at runtime, audio dispatched per-block on the GPU. The JIT stays dual-loaded for render_window/goldens." OFF)
+option(TROPICAL_TSAN "Instrument the runtime process tests with ThreadSanitizer." OFF)
 
 # nlohmann/json — header-only JSON library (for plan loading)
 set(JSON_BuildTests OFF CACHE INTERNAL "")
@@ -70,7 +71,10 @@ if(TROPICAL_METAL)
     target_link_libraries(tropical_core PRIVATE
         "-framework Metal"
         "-framework Foundation")
-    target_compile_definitions(tropical_core PRIVATE TROPICAL_METAL)
+    # FlatRuntime.hpp changes KernelState layout and inline process() behavior
+    # under this definition, so every consumer compiling that public header
+    # must see the same value.
+    target_compile_definitions(tropical_core PUBLIC TROPICAL_METAL)
     # msl_check — stdin → newLibraryWithSource compile checker (dev tool;
     # the production compile path, no Xcode required).
     add_executable(msl_check engine/metal/msl_check.mm)
@@ -156,6 +160,21 @@ target_link_libraries(tropical_core PRIVATE rtaudio nlohmann_json::nlohmann_json
 target_include_directories(tropical_core PRIVATE engine)
 set_target_properties(tropical_core PROPERTIES OUTPUT_NAME "tropical")
 
+if(TROPICAL_TSAN)
+    include(CheckCXXSourceCompiles)
+    set(CMAKE_REQUIRED_FLAGS "-fsanitize=thread")
+    set(CMAKE_REQUIRED_LINK_OPTIONS "-fsanitize=thread")
+    check_cxx_source_compiles("int main() { return 0; }" TROPICAL_HAS_TSAN)
+    unset(CMAKE_REQUIRED_FLAGS)
+    unset(CMAKE_REQUIRED_LINK_OPTIONS)
+    if(NOT TROPICAL_HAS_TSAN)
+        message(FATAL_ERROR "TROPICAL_TSAN requested, but this compiler does not support -fsanitize=thread")
+    endif()
+    target_compile_options(rtaudio PRIVATE -fsanitize=thread)
+    target_compile_options(tropical_core PRIVATE -fsanitize=thread)
+    target_link_options(tropical_core PRIVATE -fsanitize=thread)
+endif()
+
 # ---- Tests -------------------------------------------------------------------
 
 option(TROPICAL_BUILD_TESTS "Build C++ process tests (no audio device required)" ON)
@@ -163,17 +182,56 @@ option(TROPICAL_BUILD_TESTS "Build C++ process tests (no audio device required)"
 if(TROPICAL_BUILD_TESTS)
     enable_testing()
     add_executable(test_module_process engine/tests/test_module_process.cpp)
-    target_include_directories(test_module_process PRIVATE engine)
+    target_include_directories(test_module_process PRIVATE engine ${LLVM_INCLUDE_DIRS})
+    target_compile_definitions(test_module_process PRIVATE ${LLVM_DEFINITIONS})
     target_compile_features(test_module_process PRIVATE cxx_std_20)
     target_link_libraries(test_module_process PRIVATE tropical_core)
-    add_test(NAME module_process COMMAND test_module_process)
+    add_test(NAME current_module_process COMMAND test_module_process)
+
+    if(TROPICAL_TSAN)
+        target_compile_options(test_module_process PRIVATE -fsanitize=thread)
+        target_link_options(test_module_process PRIVATE -fsanitize=thread)
+        add_custom_target(check_runtime_tsan
+            COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R module_process
+            DEPENDS test_module_process
+            USES_TERMINAL)
+    endif()
     if(TROPICAL_METAL)
         add_executable(test_metal_kernel engine/tests/test_metal_kernel.cpp)
-        target_include_directories(test_metal_kernel PRIVATE engine)
+        target_include_directories(test_metal_kernel PRIVATE engine ${LLVM_INCLUDE_DIRS})
+        target_compile_definitions(test_metal_kernel PRIVATE ${LLVM_DEFINITIONS})
         target_compile_features(test_metal_kernel PRIVATE cxx_std_20)
         target_link_libraries(test_metal_kernel PRIVATE tropical_core)
-        add_test(NAME metal_kernel COMMAND test_metal_kernel)
+        add_test(NAME current_metal_kernel COMMAND test_metal_kernel)
+        # Includes deterministic sync + pipelined command-failure injection.
+        # A stranded completion semaphore is a bounded test failure, not a
+        # wedged test runner.
+        set_tests_properties(current_metal_kernel PROPERTIES TIMEOUT 30)
     endif()
+endif()
+
+# Reproducible benchmark probe. It consumes emitted artifacts and reports raw
+# load/write/block samples; it is never installed as production surface.
+add_executable(tropical_runtime_bench
+    benchmarks/current_baseline/runtime_bench.cpp)
+target_include_directories(tropical_runtime_bench PRIVATE engine)
+target_include_directories(tropical_runtime_bench PRIVATE ${LLVM_INCLUDE_DIRS})
+target_compile_definitions(tropical_runtime_bench PRIVATE ${LLVM_DEFINITIONS})
+target_compile_features(tropical_runtime_bench PRIVATE cxx_std_20)
+target_link_libraries(tropical_runtime_bench PRIVATE tropical_core)
+
+if(TROPICAL_METAL)
+    # Deterministic, no-DAC reproducer for the large-clock host-dispatch
+    # reference-oracle incident. The Python driver emits the real heavy graph
+    # before invoking this artifact consumer.
+    add_executable(metal_velocity_oracle_discriminator
+        benchmarks/metal_live/velocity_oracle_discriminator.cpp)
+    target_include_directories(metal_velocity_oracle_discriminator
+        PRIVATE engine ${LLVM_INCLUDE_DIRS})
+    target_compile_definitions(metal_velocity_oracle_discriminator
+        PRIVATE ${LLVM_DEFINITIONS})
+    target_compile_features(metal_velocity_oracle_discriminator PRIVATE cxx_std_20)
+    target_link_libraries(metal_velocity_oracle_discriminator PRIVATE tropical_core)
 endif()
 
 # Install the public C header
@@ -185,4 +243,3 @@ if(TROPICAL_BUILD_PYTHON)
 else()
     install(TARGETS tropical_core DESTINATION lib)
 endif()
-

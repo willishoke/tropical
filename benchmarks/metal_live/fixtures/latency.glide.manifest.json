@@ -1,0 +1,28 @@
+{
+  "schema": "tropical_plan_5",
+  "config": {"sampleRate": 44100},
+  "register_count": 0,
+  "array_slot_count": 0,
+  "array_slot_sizes": [],
+  "instance_functions": [],
+  "sinks": [],
+  "slot_count": 3,
+  "slot_defaults": [0.25, 0.25, 0],
+  "slot_names": [
+    "param:probe.glide#v1",
+    "param:probe.glide#v0",
+    "param:probe.glide#t0"
+  ],
+  "param_disciplines": [
+    {
+      "name": "probe.glide",
+      "discipline": "glide",
+      "glide_dur_sec": 0.02,
+      "companions": [
+        "probe.glide#v0",
+        "probe.glide#v1",
+        "probe.glide#t0"
+      ]
+    }
+  ]
+}

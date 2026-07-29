@@ -18,8 +18,10 @@ Per patch, the build emits two artifacts the browser fetches:
   `env.round`. Produced by `diffcli compile-wasm` (engine LLVM + lld,
   in-process — no `wasm-ld` on PATH, no toolchain).
 - `<slug>.manifest.json` — a `KernelManifest`: the trimmed subset of
-  `tropical_plan_5` the runtime needs (sampleRate, register/array/slot sizing,
-  state_init, slot_defaults). This type IS the producer↔consumer contract.
+  `tropical_plan_5` the runtime needs (sample rate, SSA scratch sizing,
+  array/slot sizing, and slot defaults). Retired state/register metadata is
+  not part of this contract; see the
+  [compatibility matrix](../design/compatibility-matrix.md).
 
 ## Layout
 
@@ -85,8 +87,8 @@ imported `WebAssembly.Memory` and places each region above the module's
 ```
 __heap_base
   inputs        f64[64]            — zeroed (demo patches have no external input)
-  registers     i64[registerCount] — kernel state (float bitcast / int / bool)
-  temps         i64[registerCount] — per-sample scratch
+  registers     i64[registerCount] — zeroed kernel-ABI region (unused by current kernels)
+  temps         i64[registerCount] — per-sample SSA scratch
   arrays        f64[arraySlotSizes...] — array-register backing stores
   array_sizes   i64[arraySlotCount]    — element count per array slot
   slots         f64[slotCount]     — inter-module slots (output wires + params)
@@ -114,11 +116,12 @@ drops worklet messages containing a Module; the worklet compiles them itself.
 Two suites in `tests/web/` lock the wasm path to the JIT (both compare the
 kernel's f64 output, `WasmKernel.render` vs `diffcli render-bytes`):
 
-- `wasm_vs_jit.test.ts` — inline `tropical_program_2` patches (SinOsc,
-  OnePole, an array-zipWith writeback) compiled by `diffcli compile-wasm` vs
-  the JIT. Post-Phase-3 the two are the *same IR* through two LLVM targets, so
-  agreement is structural; the gate mainly guards FP-target divergence
-  (fp-contract/fast-math).
+- `wasm_vs_jit.test.ts` — current closed-form oscillator, nonlinear, and
+  operation-coverage patches compiled by `diffcli compile-wasm` vs the JIT.
+  The former array/writeback-shaped program is now a refusal case proving
+  `programDecl` cannot reintroduce retired state. The executable cases are the
+  *same IR* through two LLVM targets, so agreement mainly guards target-specific
+  FP divergence.
 - `web_plans_vs_jit.test.ts` — every shipped `web/dist/patches/<slug>.wasm` +
   manifest vs the JIT. If this passes, any browser bug is in the host/worklet
   glue, not codegen.

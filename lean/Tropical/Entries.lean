@@ -5,20 +5,18 @@ import Tropical.Ir.Emit
 /-!
 # Catalog entries — engine-side rendering
 
-Port of the compiler service's `concreteEntry` / `genericEntry`: the
-port-metadata shape `ProgMeta.fromEntry` consumes (and list_programs /
-get_info surface), rendered from the engine's own typed store instead
-of a service response. `type` is the display string
+The Lean frontend renders the port-metadata shape consumed by
+`ProgMeta.fromEntry` and exposed through `list_programs` / `get_info` directly
+from its typed store. `type` is the display string
 (`portTypeToString`), `type_obj` the structured IR PortType JSON
 (scalar / alias-with-decl / array), `default` the raw wire-format
 ExprNode lowered from the resolved input default (`literalDefault`),
-and `registers` carry the slot-table names with the array-init shape
-lift (`ensureSlots`' override).
+and the retained `registers` carrier is empty for current production
+programs.
 
 `resolved` is the program's own `tropical_resolved_1` encoding —
 `SessionSt.adoptResolved` decodes it back into the store, preserving
-the round-trip discipline the service path had (the adopted copy is
-the codec image, not the strata output by identity).
+the codec boundary between registration metadata and the session arena.
 -/
 
 namespace Tropical.Entries
@@ -95,7 +93,7 @@ decreasing_by
     apply Tropical.Ir.ExprArena.forall_children_lt hw ‹Tropical.Ir.ExprArena.deref _ _ = some _›
     simp_all [Tropical.Ir.ENode.children]
 
-/-- The service's `concreteEntry`, off the typed store. -/
+/-- A concrete registration entry rendered from the typed store. -/
 def concreteEntry (arena : Arena) (entryName : String) (idx : ProgramIdx) :
     Except String Json := do
   let some prog := arena.program? idx

@@ -3,9 +3,8 @@ import Tropical.Engine.ProgramIO
 /-!
 # Engine.Audio — audio lifecycle and param control
 
-Start/stop/status for the native DAC, and the param handlers: `set_param` and
-its glide/freq/velocity variants (dispatched by `handleSetParamDispatch`),
-plus param listing and the debug render tap.
+Start/stop/status for the native DAC, the single discipline-dispatched
+`set_param` operation, param listing, and the debug render tap.
 -/
 
 namespace Tropical.Engine
@@ -107,22 +106,23 @@ def handleSetParam (env : Env) (args : Json) : EngineM Json := do
     env.runtime.setSlot idx value
   pure <| Json.mkObj [("name", Json.str name), ("value", valueJ)]
 
-/-- `set_param_glide`: a CLOSED-FORM parameter ramp (no per-sample state). The
+/-- Apply the glide discipline for `set_param`: a CLOSED-FORM parameter ramp
+    (no per-sample state). The
     kernel evaluates `f(τ) = v0 + (v1−v0)·smoothstep(clamp((τ−t0)/dur, 0, 1))` from
     three slots (`param:<name>#v0/#v1/#t0`); this op RE-ANCHORS the ramp: read the
     current sample index `now`, evaluate the ramp at `now` (so the new ramp starts
     exactly where we are — no jump), then set `v0 = current, v1 = target, t0 = now`.
     Stateless and click-free — the "state" is the anchor slots, navigable like τ.
     `dur = 0.02·SR` samples (20 ms) matches the kernel's ramp, at any sample rate. -/
-def handleSetParamGlide (env : Env) (args : Json) : EngineM Json := do
+private def applyParamGlide (env : Env) (args : Json) : EngineM Json := do
   let name := (argStr? args "name").getD ""
   let target ← match getField? args "value" with
     | some (.num n) => pure n.toFloat
-    | _ => internalError "set_param_glide: value must be a number"
+    | _ => internalError "set_param: glide value must be a number"
   let slotOf (sfx : String) : EngineM (Option UInt32) :=
     env.runtime.slotIndex? s!"param:{name}#{sfx}"
   let some _ := ← slotOf "v0"
-    | internalError s!"set_param_glide: no glide slots for '{name}'"
+    | internalError s!"set_param: no glide slots for '{name}'"
   let read (sfx : String) : EngineM Float := do
     match ← slotOf sfx with | some i => env.runtime.getSlot i | none => pure 0.0
   let write (sfx : String) (v : Float) : EngineM Unit := do
@@ -141,7 +141,8 @@ def handleSetParamGlide (env : Env) (args : Json) : EngineM Json := do
   env.state.modify (·.setParamValue name (toJson target))
   pure <| Json.mkObj [("name", Json.str name), ("value", toJson target)]
 
-/-- `set_param_freq`: a PHASE-ANCHORED frequency change. `freq = f·τ + φ_off` — so
+/-- Apply the anchor discipline for `set_param`: a PHASE-ANCHORED frequency
+    change. `freq = f·τ + φ_off` — so
     changing `f` alone jumps the phase by `Δf·τ` (a click that grows with τ). If the
     source carries a `#phase` offset slot, this bumps it by the phase the frequency
     change would have jumped — `Δφ = ((inc₀ − inc₁)·T) / 2³²` cycles, `inc =
@@ -149,13 +150,13 @@ def handleSetParamGlide (env : Env) (args : Json) : EngineM Json := do
     stays CONTINUOUS across the change (a soft freq corner, not a hard click). This
     is the stateless anchor: the accumulated phase lives in a param, navigable like
     τ. No `#phase` slot (saw/morph, or knob-driven freq) ⇒ a raw freq write. -/
-def handleSetParamFreq (env : Env) (args : Json) : EngineM Json := do
+private def applyParamAnchor (env : Env) (args : Json) : EngineM Json := do
   let name := (argStr? args "name").getD ""
   let target ← match getField? args "value" with
     | some (.num n) => pure n.toFloat
-    | _ => internalError "set_param_freq: value must be a number"
+    | _ => internalError "set_param: anchor value must be a number"
   let some freqIdx := ← env.runtime.slotIndex? s!"param:{name}"
-    | internalError s!"set_param_freq: no slot '{name}'"
+    | internalError s!"set_param: no anchor slot '{name}'"
   match ← env.runtime.slotIndex? s!"param:{name}#phase" with
   | some phaseIdx =>
     let now ← env.runtime.currentSampleIndex
@@ -172,26 +173,27 @@ def handleSetParamFreq (env : Env) (args : Json) : EngineM Json := do
   env.state.modify (·.setParamValue name (toJson target))
   pure <| Json.mkObj [("name", Json.str name), ("value", toJson target)]
 
-/-- `set_param_velocity`: the GLOBAL TIME-WARP scrub. The master clock is
+/-- Apply the velocity discipline for `set_param`: the GLOBAL TIME-WARP scrub.
+    The master clock is
     `M(n) = tau_base·SR·2³² + velocity·2³²·n`; changing `velocity` alone would jump
     `M` by `Δv·n` (a click growing with n). This re-bases the host-held origin so
     `M` stays value-continuous across the change: read `now`, set
     `tau_base += (v_old − v_new)·now/SR`, then write the new velocity. Exactly the
     stateless `ScrubClock` host-split (and the clock-domain twin of
-    `set_param_freq`): the accumulator lives in a param, navigable like τ, so the
+    anchor discipline): the accumulator lives in a param, navigable like τ, so the
     kernel stays `f(τ)`. `velocity = 1` forward · `0` freeze · `−1` reverse · `>1`
     varispeed. `name` is the velocity slot (`master.velocity`); the origin slot is
     the sibling `master.tau_base`. -/
-def handleSetParamVelocity (env : Env) (args : Json) : EngineM Json := do
+private def applyParamVelocity (env : Env) (args : Json) : EngineM Json := do
   let name := (argStr? args "name").getD ""
   let target ← match getField? args "value" with
     | some (.num n) => pure n.toFloat
-    | _ => internalError "set_param_velocity: value must be a number"
+    | _ => internalError "set_param: velocity value must be a number"
   let some velIdx := ← env.runtime.slotIndex? s!"param:{name}"
-    | internalError s!"set_param_velocity: no slot '{name}'"
+    | internalError s!"set_param: no velocity slot '{name}'"
   let tauName := name.replace "velocity" "tau_base"
   let some tauIdx := ← env.runtime.slotIndex? s!"param:{tauName}"
-    | internalError s!"set_param_velocity: no origin slot '{tauName}'"
+    | internalError s!"set_param: no velocity origin slot '{tauName}'"
   let now ← env.runtime.currentSampleIndex
   let sr ← env.runtime.sampleRate
   let v0 ← env.runtime.getSlot velIdx
@@ -201,14 +203,13 @@ def handleSetParamVelocity (env : Env) (args : Json) : EngineM Json := do
   env.state.modify (·.setParamValue name (toJson target))
   pure <| Json.mkObj [("name", Json.str name), ("value", toJson target)]
 
-/-- ONE `set_param`, dispatched by the plan's own discipline table (the host
+/-- The one public `set_param`, dispatched by the plan's own discipline table
+    (the host
     contract, design/host-param-dispatch.md): the caller never chooses a write
     verb. Raw for table-less names (session-model patches, old plans) — with
     the one engine-owned exception that the reserved master-clock velocity
     param always re-bases, table or no table (the engine consulting its own
-    reserved name is not a client choosing semantics). The old
-    `set_param_glide/freq/velocity` methods remain as aliases into the same
-    internal handlers until the surfaces migrate (deleted in a later phase). -/
+    reserved name is not a client choosing semantics). -/
 def handleSetParamDispatch (env : Env) (args : Json) : EngineM Json := do
   let name := (argStr? args "name").getD ""
   let st ← env.state.get
@@ -216,9 +217,9 @@ def handleSetParamDispatch (env : Env) (args : Json) : EngineM Json := do
     | some d => d.discipline
     | none => if name == Tropical.Playground.masterVelocityParam then "velocity" else "raw"
   match disc with
-  | "glide" => handleSetParamGlide env args
-  | "anchor" => handleSetParamFreq env args
-  | "velocity" => handleSetParamVelocity env args
+  | "glide" => applyParamGlide env args
+  | "anchor" => applyParamAnchor env args
+  | "velocity" => applyParamVelocity env args
   | _ => handleSetParam env args
 
 def handleListParams (env : Env) : EngineM Json := do

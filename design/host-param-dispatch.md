@@ -33,8 +33,23 @@ Omitted when empty; a host that does not read it treats every write as `raw`
 All disciplines below are **stateless re-anchorings**: the "state" they touch
 lives in param slots the kernel reads as pure functions of τ — navigable,
 transferable by name across hot-swap, exactly like everything else. A write
-needs two ambient values from the host: `now` (the current sample index the
-kernel will next read) and `SR` (the kernel's sample rate).
+needs two ambient values from the host: `now` (the first output sample at
+which the transaction's captured generation is audible) and `SR` (the
+kernel's sample rate).
+
+For a callback starting at `C`, synchronous JIT/Metal uses `now = C`. A
+steady-state future-block Metal pipeline of depth `D` uses `now = C + D·B`,
+where `B` is the buffer length. Fresh kernels, hot-swaps, and clock-jump
+re-primes are exceptions: their ring is rebuilt from the current capture, so
+`now = C` at every depth. Publication racing a callback is linearized against
+generation capture: a transaction that wins is stamped for that callback; a
+transaction that loses is recomputed for the next capture. The audio callback
+must not wait, retry, allocate, or emit silence because control is publishing.
+
+Production dispatch evidence reports both `observed_sample_index` (the last
+completed callback boundary visible when dispatch began, diagnostic only) and
+`effective_sample_index` (the normative `now` used by discipline math and the
+first audible output index). Qualification replays the latter.
 
 ## `raw`
 
@@ -84,3 +99,6 @@ stays value-continuous:
 - A host that rounds differently, evaluates the glide with a different
   polynomial, or applies the phase bump un-quantized will pass casual
   listening and fail the differential — that is what the gate is for.
+- Current hosts expose `observed_sample_index` and `effective_sample_index`;
+  the retired `applied_sample_index` key in retained historical rows meant the
+  completed boundary observed by the older host and is not current evidence.

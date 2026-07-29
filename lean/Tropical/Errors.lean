@@ -3,14 +3,10 @@ import Lean.Data.Json
 /-!
 # The tool-error envelope (spec: mcp/ERRORS.md)
 
-Native port of the envelope the TS engine produces. Every tool failure
-is a structured value — machine-readable `code`, human `message`,
-`retryable`, the offending `param`/`value`, a `valid` descriptor of
-what the param accepts, and a nearest-match `suggestion` (Levenshtein).
-
-A failure is either an envelope constructed here or a verbatim envelope
-relayed from the compiler service (kept as raw Json so nothing is lost
-in a decode/re-encode round trip).
+Every Lean frontend tool failure is a structured value: machine-readable
+`code`, human `message`, `retryable`, the offending `param`/`value`, a `valid`
+descriptor, and an optional nearest-match suggestion. `raw` preserves an
+already-structured boundary error without a lossy decode/re-encode round trip.
 -/
 
 namespace Tropical
@@ -95,8 +91,7 @@ def ErrorEnvelope.toJson (e : ErrorEnvelope) : Json :=
     ++ (match e.valid with | some v => [("valid", v.toJson)] | none => [])
     ++ (match e.suggestion with | some s => [("suggestion", s)] | none => [])
 
-/-- A tool failure: an envelope built Lean-side, or one relayed verbatim
-    from the compiler service. -/
+/-- A tool failure built here or preserved verbatim from a lower boundary. -/
 inductive Failure where
   | env (e : ErrorEnvelope)
   | raw (j : Json)

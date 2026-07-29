@@ -1,0 +1,194 @@
+{
+  "schema": "tropical_baseline_matrix_2",
+  "fixtures": [
+    {
+      "name": "pure-fixed-sine",
+      "class": "program",
+      "path": "web/patches/pure-sine-440.json",
+      "smoke": true
+    },
+    {
+      "name": "through-zero-flanger",
+      "class": "program",
+      "path": "web/patches/tz-flanger.json",
+      "smoke": true
+    },
+    {
+      "name": "one-modal-ring",
+      "class": "graph",
+      "graph": {
+        "nodes": [
+          {"id": "ring", "kind": "resonator", "params": {"freq": 220, "decay": 4, "partials": 6}},
+          {"id": "out", "kind": "out", "in": {"in": ["ring"]}}
+        ],
+        "out": "out"
+      }
+    },
+    {
+      "name": "ring-reverb",
+      "class": "graph",
+      "graph": {
+        "nodes": [
+          {"id": "ring", "kind": "resonator", "params": {"freq": 220, "decay": 4, "partials": 6}},
+          {"id": "room", "kind": "reverb", "params": {"rt60": 2}, "in": {"in": ["ring"]}},
+          {"id": "out", "kind": "out", "in": {"in": ["room"]}}
+        ],
+        "out": "out"
+      }
+    },
+    {
+      "name": "four-ring-playground-exact-product",
+      "class": "graph",
+      "flagship": true,
+      "smoke": true,
+      "product_graph": {
+        "path": "playground/renderer/app.js",
+        "contract": "TROPICAL_EXACT_PRODUCT_GRAPH_1"
+      }
+    },
+    {
+      "name": "gong",
+      "class": "graph",
+      "graph": {
+        "nodes": [
+          {"id": "gong", "kind": "gong", "params": {"freq": 110, "beta": 0.05}},
+          {"id": "out", "kind": "out", "in": {"in": ["gong"]}}
+        ],
+        "out": "out"
+      }
+    },
+    {
+      "name": "plucked-string",
+      "class": "graph",
+      "graph": {
+        "nodes": [
+          {"id": "string", "kind": "string", "params": {"freq": 196, "decay": 0.996}},
+          {"id": "out", "kind": "out", "in": {"in": ["string"]}}
+        ],
+        "out": "out"
+      }
+    },
+    {
+      "name": "modal-bank-16",
+      "class": "graph",
+      "bank_capacity": 16,
+      "live_count": 16,
+      "smoke": true,
+      "graph": {
+        "nodes": [
+          {"id": "bank", "kind": "resonator", "params": {"freq": 220, "decay": 4, "partials": 16}},
+          {"id": "out", "kind": "out", "in": {"in": ["bank"]}}
+        ],
+        "out": "out"
+      }
+    },
+    {
+      "name": "modal-bank-64",
+      "class": "graph",
+      "bank_capacity": 64,
+      "live_count": 64,
+      "graph": {
+        "nodes": [
+          {"id": "bank", "kind": "resonator", "params": {"freq": 220, "decay": 4, "partials": 64}},
+          {"id": "out", "kind": "out", "in": {"in": ["bank"]}}
+        ],
+        "out": "out"
+      }
+    },
+    {
+      "name": "modal-bank-128",
+      "class": "graph",
+      "bank_capacity": 128,
+      "live_count": 128,
+      "graph": {
+        "nodes": [
+          {"id": "bank", "kind": "resonator", "params": {"freq": 220, "decay": 4, "partials": 128}},
+          {"id": "out", "kind": "out", "in": {"in": ["bank"]}}
+        ],
+        "out": "out"
+      }
+    },
+    {
+      "name": "modal-bank-256",
+      "class": "graph",
+      "bank_capacity": 256,
+      "live_count": 256,
+      "graph": {
+        "nodes": [
+          {"id": "bank", "kind": "resonator", "params": {"freq": 220, "decay": 4, "partials": 256}},
+          {"id": "out", "kind": "out", "in": {"in": ["bank"]}}
+        ],
+        "out": "out"
+      }
+    },
+    {
+      "name": "modal-bank-512",
+      "class": "graph",
+      "bank_capacity": 512,
+      "live_count": 512,
+      "smoke": true,
+      "graph": {
+        "nodes": [
+          {"id": "bank", "kind": "resonator", "params": {"freq": 220, "decay": 4, "partials": 512}},
+          {"id": "out", "kind": "out", "in": {"in": ["bank"]}}
+        ],
+        "out": "out"
+      }
+    },
+    {
+      "name": "dynamic-bank-512-live-16",
+      "class": "graph",
+      "bank_capacity": 512,
+      "live_count": 16,
+      "graph": {
+        "nodes": [
+          {"id": "bank", "kind": "resonator", "params": {"freq": 220, "decay": 4, "partials": 16, "partials_max": 512}},
+          {"id": "out", "kind": "out", "in": {"in": ["bank"]}}
+        ],
+        "out": "out"
+      }
+    },
+    {
+      "name": "dynamic-bank-512-live-128",
+      "class": "graph",
+      "bank_capacity": 512,
+      "live_count": 128,
+      "smoke": true,
+      "graph": {
+        "nodes": [
+          {"id": "bank", "kind": "resonator", "params": {"freq": 220, "decay": 4, "partials": 128, "partials_max": 512}},
+          {"id": "out", "kind": "out", "in": {"in": ["bank"]}}
+        ],
+        "out": "out"
+      }
+    },
+    {
+      "name": "dynamic-bank-512-live-512",
+      "class": "graph",
+      "bank_capacity": 512,
+      "live_count": 512,
+      "graph": {
+        "nodes": [
+          {"id": "bank", "kind": "resonator", "params": {"freq": 220, "decay": 4, "partials": 512, "partials_max": 512}},
+          {"id": "out", "kind": "out", "in": {"in": ["bank"]}}
+        ],
+        "out": "out"
+      }
+    },
+    {
+      "name": "nested-bank",
+      "class": "graph",
+      "nested": true,
+      "graph": {
+        "nodes": [
+          {"id": "a", "kind": "resonator", "params": {"freq": 110, "decay": 3, "partials": 64}},
+          {"id": "b", "kind": "resonator", "params": {"freq": 165, "decay": 5, "partials": 64}},
+          {"id": "sum", "kind": "modalmix", "in": {"in": ["a", "b"]}},
+          {"id": "room", "kind": "reverb", "params": {"rt60": 2.5}, "in": {"in": ["sum"]}},
+          {"id": "out", "kind": "out", "in": {"in": ["room"]}}
+        ],
+        "out": "out"
+      }
+    }
+  ]
+}

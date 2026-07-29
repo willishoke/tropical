@@ -62,8 +62,38 @@ typedef struct {
 
 void tropical_dac_get_stats(tropical_dac_t, tropical_dac_stats_t* out);
 void tropical_dac_reset_stats(tropical_dac_t);
+/* Race-free measured-window reset. Returns the applied epoch, or 0 if no
+   callback boundary acknowledged the reset within two seconds. */
+uint64_t tropical_dac_reset_stats_epoch(tropical_dac_t);
+uint64_t tropical_dac_get_stats_epoch(tropical_dac_t);
+/* Fixed callback-duration histogram: 1 us bins [0,20 ms), plus one >=20 ms
+   overflow bin. The audio thread performs one relaxed atomic increment and
+   never allocates, locks, or performs I/O. Returns bins copied, or 0. */
+size_t tropical_dac_callback_histogram_bin_count(void);
+uint64_t tropical_dac_callback_histogram_bin_width_ns(void);
+uint64_t tropical_dac_callback_histogram_overflow_floor_ns(void);
+size_t tropical_dac_copy_callback_histogram(
+  tropical_dac_t, uint64_t* out, size_t capacity, uint64_t* epoch);
+/* Qualification output capture. One buffer is preallocated at construction;
+   request/read never changes the audio path except for one bounded copy.
+   Exactly one request may be outstanding: request returns 0 unless the
+   capture state is idle, and only one reader can successfully consume a
+   ready sequence. A successful read returns the state to idle. */
+uint64_t tropical_dac_request_output_capture(tropical_dac_t);
+bool tropical_dac_read_output_capture(
+  tropical_dac_t, uint64_t sequence, uint64_t* start_index,
+  double* out, size_t capacity);
+/* Actual frame count negotiated by RtAudio (0 before stream open). */
+unsigned int tropical_dac_get_buffer_frames(tropical_dac_t);
 /* True while a device-disconnect has been detected and reconnection is in progress */
 bool tropical_dac_is_reconnecting(tropical_dac_t);
+/* Sticky continuity counters since tropical_dac_start. disconnect_count is
+   edge-counted from RtAudio device-disconnect events only; default-route
+   reopens and retries are reflected by the reconnect counters. Separate
+   accessors keep tropical_dac_stats_t ABI-frozen for older callers. */
+uint64_t tropical_dac_disconnect_count(tropical_dac_t);
+uint64_t tropical_dac_reconnect_success_count(tropical_dac_t);
+uint64_t tropical_dac_reconnect_failure_count(tropical_dac_t);
 
 /* Returns the device ID currently open for output (0 if not started) */
 unsigned int tropical_dac_get_active_device(tropical_dac_t);
@@ -79,10 +109,9 @@ uint64_t     tropical_dac_playback_position(tropical_dac_t);
 
 tropical_runtime_t tropical_runtime_new(unsigned int buffer_length);
 void             tropical_runtime_free(tropical_runtime_t);
-/* Load a kernel from textual LLVM IR plus a metadata manifest (a
-   tropical_plan_5 JSON; its instruction graph is metadata only — codegen
-   comes from ir_text, emitted by Lean's EmitLlvm). The sole load path:
-   the C++ plan compiler was retired in Phase 2. Always fused. */
+/* Load a kernel from textual LLVM IR plus a tropical_plan_5 metadata manifest.
+   Every other schema is rejected. The instruction graph is metadata only —
+   codegen comes from ir_text, emitted by Lean's EmitLlvm. Always fused. */
 bool             tropical_runtime_load_ir(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* manifest_json, size_t manifest_len);
 
 /* Dual load: LLVM IR -> JIT (always; render_window + the correctness
@@ -100,7 +129,8 @@ bool             tropical_runtime_load_ir_msl(tropical_runtime_t, const char* ir
    Its outputs land in coef:<n> module slots the audio kernel reads. */
 bool             tropical_runtime_load_ir_staged(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* manifest_json, size_t manifest_len);
 
-/* Control-plane/test-only: reposition the active kernel's sample clock
+/* Control-plane/test-only: request a sample-clock reposition. The audio thread
+   applies the newest stable request at its next process-buffer boundary
    (render verbs' --start; long-tau gates render at arbitrary positions). */
 void             tropical_runtime_set_sample_index(tropical_runtime_t, uint64_t idx);
 
@@ -116,6 +146,19 @@ void             tropical_free_buffer(uint8_t* buf);
 void             tropical_runtime_process(tropical_runtime_t);
 const double*    tropical_runtime_output_buffer(tropical_runtime_t);
 unsigned int     tropical_runtime_get_buffer_length(tropical_runtime_t);
+/* Qualification diagnostic: 0 for JIT/synchronous Metal and on non-Metal
+   builds (the stable sentinel), otherwise the number of future Metal blocks
+   currently configured. */
+unsigned int     tropical_runtime_metal_pipeline_depth(tropical_runtime_t);
+/* Sticky count of callbacks silenced because bounded state/generation
+   ownership acquisition could not obtain a coherent snapshot. Qualification
+   requires zero. */
+uint64_t         tropical_runtime_ownership_failure_count(tropical_runtime_t);
+/* Sticky monotonic count of underlying Metal dispatch failures. One failed
+   command latches its kernel silent but increments this counter only once;
+   replacement does not erase the evidence. Always 0 for JIT/non-Metal builds;
+   qualification requires zero. */
+uint64_t         tropical_runtime_metal_dispatch_failure_count(tropical_runtime_t);
 
 /* Fade control (for DAC) */
 void             tropical_runtime_begin_fade_in(tropical_runtime_t);

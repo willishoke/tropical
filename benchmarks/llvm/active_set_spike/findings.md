@@ -1,3 +1,5 @@
+Status: Historical — not a description of current main
+
 # Active-Set Architecture Spike Findings
 
 **Date:** 2026-05-11

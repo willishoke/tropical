@@ -8,21 +8,18 @@ import Tropical.Plan
 /-!
 # Session state — the authoritative graph topology
 
-Phase 1 of the Lean port: the session lives here, not in TypeScript.
-What Lean owns: program metadata mirror (port names/types/defaults,
-fed by the compiler service's catalog entries), instances (ordered),
-wires (ordered, canonical pre-extraction form), graph outputs, the
-param mirror, and name counters.
+The Lean frontend owns the complete live session: registered program metadata
+and resolved roots, ordered instances and typed wires, graph outputs, control
+values and disciplines, and name counters. `Engine.Compile.syncCompile`
+constructs a synthetic resolved root from this state and emits/loads the
+kernel directly; there is no compiler-service or TypeScript-session mirror.
 
-The compiler service receives this state as a snapshot on every
-compile (`sync`) and rebuilds its own TS session from it — Lean never
-stores compile-internal forms (`sessionSlot` rewrites, slot indices,
-delay registries). Wires keep the authored `delay()` shape end to end.
+Wires are already in the closed `WireExpr` grammar. Delay/state spellings are
+refused during decoding rather than preserved for a later pass.
 
-Ordering discipline: TS `Map` iterates in insertion order, and
-re-setting an existing key keeps its original position. `instances`
-and `wires` are ordered arrays with update-in-place to match —
-`list_instances`, `list_wiring`, and snapshot order all depend on it.
+`instances` and `wires` remain ordered arrays, and replacing a wire keeps its
+position. Tool output and deterministic session construction depend on that
+order.
 -/
 
 namespace Tropical
@@ -37,7 +34,9 @@ structure PortInfo where
   default : Option WireExpr := none -- typed ExprNode default (inputs only)
 deriving Inhabited
 
-/-- A registered program's metadata. -/
+/-- A registered program's current port metadata. `registers` is retained only
+    while old catalog-shaped inputs are decoded; production builders leave it
+    empty and current kernels have no persistent registers. -/
 structure ProgMeta where
   programName : String
   inputs      : Array PortInfo := #[]
@@ -71,13 +70,11 @@ def ProgMeta.fromEntry (j : Json) : ProgMeta :=
 def ProgMeta.inputNames (m : ProgMeta) : Array String := m.inputs.map (·.name)
 def ProgMeta.outputNames (m : ProgMeta) : Array String := m.outputs.map (·.name)
 
-/-- A live instance: base type name, type args (generics), the
-    (possibly specialized) port metadata, and a snapshot of the typed
-    store's program for this instance's type — captured at
-    add/replicate/lift/load-adoption time. The snapshot is the parity
-    image of TS instances holding their `compiled.prog`: the compile
-    root resolver links against the instance's snapshot, never a late
-    name lookup (redefinition would diverge otherwise). -/
+/-- A live instance: its registered type name, current port metadata, and the
+    resolved-root snapshot captured when the instance is created or adopted.
+    The root builder links that snapshot rather than performing a late name
+    lookup. `typeArgs` remains in the tool/session shape so obsolete generic
+    requests can be rejected explicitly; current programs are concrete. -/
 structure InstanceInfo where
   baseTypeName : String
   typeArgs     : Option Json := none
@@ -106,8 +103,7 @@ def ScopeTap.slot (tap : ScopeTap) : String :=
   s!"{tap.sourceInstance}.{tap.sourceOutput}"
 
 structure SessionSt where
-  /-- Program registration order — mirrors the service's `session.programs`
-      map order (stdlib, then session definitions). -/
+  /-- Program registration order (stdlib, then exported session types). -/
   catalogOrder : Array String := #[]
   programs     : Std.HashMap String ProgMeta := {}
   instances    : Array (String × InstanceInfo) := #[]
@@ -117,8 +113,8 @@ structure SessionSt where
       render_window-readable slot instead of the audio output. The keep-set
       the collapse honors: params ∪ dac ∪ scope-taps stay materialized. -/
   scopeTaps    : Array ScopeTap := #[]
-  /-- Param mirror: name → last-known value (raw Json to preserve lexical
-      number forms). The service owns the live Param handles. -/
+  /-- Param mirror: name → last-known value (raw Json preserves lexical number
+      forms). The loaded runtime owns the live module slots. -/
   params       : Array (String × Json) := #[]
   /-- Host-contract dispatch table for the LOADED plan (name → discipline),
       seeded from the plan's own `param_disciplines` at load — the unified
@@ -134,15 +130,11 @@ structure SessionSt where
       (the decoded `prog.name`). Redefinition overwrites; instances are
       insulated by their `resolvedIdx` snapshots. -/
   resolvedByName : Std.HashMap String Tropical.Ir.ProgramIdx := {}
-  /-- The registration-path mirror of TS `session.programs` (Phase 4
-      stage 4b): for every *registered* program name, the arena index of
-      the form the TS map holds — post-strata for concrete programs
-      (adopted from the entry). Cross-program references — the JSON front
-      door (`load`/`merge`/`export_program`) and the builder chain at boot
-      — resolve through this map via the elaborator's external resolver.
-      Distinct
-      from `resolvedByName`, which is keyed by *decoded* prog names and
-      also collects specializations adopted via `resolve_type`. -/
+  /-- Registered program name → resolved arena index. The historical field
+      name remains internal, but every current entry is concrete: JSON
+      load/merge/export and stdlib boot resolve registered instance types
+      through this map. Distinct from `resolvedByName`, which is keyed by the
+      decoded program's own name. -/
   templateByName : Std.HashMap String Tropical.Ir.ProgramIdx := {}
 
 namespace SessionSt
@@ -165,7 +157,7 @@ def addInstance (st : SessionSt) (name : String) (info : InstanceInfo) : Session
 def removeInstance (st : SessionSt) (name : String) : SessionSt :=
   { st with instances := st.instances.filter (·.1 != name) }
 
-/-- TS-Map semantics: replacing an existing key keeps its position. -/
+/-- Replacing an existing key keeps its deterministic position. -/
 def setWireRaw (st : SessionSt) (instName portName : String) (expr : WireExpr) : SessionSt :=
   match st.wires.findIdx? (fun w => w.instName == instName && w.portName == portName) with
   | some i => { st with wires := st.wires.set! i { instName, portName, expr } }
@@ -189,8 +181,8 @@ def setParamValue (st : SessionSt) (name : String) (value : Json) : SessionSt :=
 
 /-- Decode a catalog entry's `resolved` field (when present and
     non-null) into the typed store, recording the program under its own
-    decoded `name`. Returns the adopted store index — `none` for
-    generic templates, which ship `resolved: null`. The bridge from
+    decoded `name`. Returns `none` when an entry carries no resolved program;
+    current registered production entries do carry one. The bridge from
     `Lean.Json` to the codec's ordered `JsonV` is a re-parse of the
     compressed string (lossless: `JsonNumber` decimals survive, and the
     resolved wire has no order-sensitive objects). -/

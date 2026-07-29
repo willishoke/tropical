@@ -7,6 +7,7 @@
 
 #include <algorithm>
 #include <bit>
+#include <cmath>
 #include <stdexcept>
 
 namespace tropical_runtime
@@ -21,7 +22,6 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
   KernelState new_state;
   new_state.mode           = parsed.compilation_mode;
   new_state.sample_rate    = parsed.sample_rate;
-  new_state.output_count   = static_cast<uint32_t>(parsed.program.output_targets.size());
   new_state.array_names    = parsed.array_slot_names;
 
   // Slot array
@@ -33,6 +33,9 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
   {
     new_state.slots[i] = parsed.slot_defaults[i];
   }
+  for (auto & generation : new_state.slot_generations)
+    generation = new_state.slots;
+  new_state.audio_slots = new_state.slots;
 
   // Host-contract dispatch table — swaps with the plan it describes, like
   // slot_names. Field-copied because the runtime keeps its own struct (the
@@ -48,6 +51,8 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
   // (`register_count`) is the SSA scratch the kernel actually uses.
   new_state.registers.clear();
   new_state.temps.assign(parsed.program.register_count, 0);
+  new_state.coeff_registers = new_state.registers;
+  new_state.coeff_temps.assign(parsed.program.register_count, 0);
 
   const auto & sizes = parsed.program.array_slot_sizes;
   new_state.array_storage.resize(sizes.size());
@@ -65,7 +70,7 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
   // advertises (see the KernelState comment for the protocol). Three
   // generations per column, sized like the slot's base storage; the
   // coefficient kernel's pointer view starts as a copy of the audio view
-  // (run_coeff repoints the column entries at its write generation per run).
+  // (publish_control_snapshot repoints column entries to its target generation).
   for (uint32_t s : parsed.coeff_array_slots)
     if (s < new_state.array_storage.size())
       new_state.coeff_array_slots.push_back(s);
@@ -99,15 +104,53 @@ bool FlatRuntime::publish_state(KernelState && new_state)
   std::lock_guard<std::mutex> lock(build_mutex_);
   const uint32_t active   = active_state_.load(std::memory_order_acquire);
   const uint32_t inactive = 1U - active;
-  wait_for_state_available(inactive);
+  for (;;)
+  {
+    StorageOwner expected = StorageOwner::Free;
+    if (state_owners_[inactive].compare_exchange_strong(
+          expected, StorageOwner::Writer,
+          std::memory_order_acquire, std::memory_order_relaxed))
+      break;
+    if (RuntimeOwnershipTestSeam * seam =
+          ownership_test_seam_.load(std::memory_order_acquire))
+      seam->writer_waiting_for_state.store(true, std::memory_order_release);
+    std::this_thread::yield();
+  }
 
-  const auto & old_state = states_[active];
-
-  new_state.sample_index = old_state.sample_index;
   // CF-only: no by-name state transfer on hot-swap. Registers/arrays/slots
-  // zero-init from the fresh kernel; only the sample index carries over.
+  // zero-init from the fresh kernel. The audio-owned clock is runtime-global,
+  // so a state flip cannot repeat, skip, or race its sample position.
 
   states_[inactive] = std::move(new_state);
+  state_owners_[inactive].store(
+    StorageOwner::Free, std::memory_order_release);
+
+  // A new Metal kernel is unprimed (and JIT/sync Metal has the same E=C
+  // mapping). Publish the state and its initial generation through the same
+  // word audio captures. Audio never waits: if it is between its two phase
+  // increments this control thread simply retries.
+  state_requires_reprime_[inactive].store(true, std::memory_order_relaxed);
+  const uint64_t state_bits = static_cast<uint64_t>(inactive) << 2;
+  const uint64_t gen_bits =
+    std::atomic_ref(states_[inactive].control_published_gen)
+      .load(std::memory_order_acquire);
+  for (;;)
+  {
+    uint64_t expected =
+      capture_boundary_word_.load(std::memory_order_acquire);
+    if ((expected & kCapturePhaseBit_) != 0)
+    {
+      std::this_thread::yield();
+      continue;
+    }
+    const uint64_t desired =
+      (expected & ~(kCaptureStateMask_ | kCaptureGenerationMask_))
+      | state_bits | gen_bits;
+    if (capture_boundary_word_.compare_exchange_weak(
+          expected, desired,
+          std::memory_order_release, std::memory_order_acquire))
+      break;
+  }
   active_state_.store(inactive, std::memory_order_release);
   recompile_version_.fetch_add(1, std::memory_order_release);
   return true;
@@ -135,13 +178,11 @@ bool FlatRuntime::load_ir_staged(const std::string & ir_text,
   const json manifest = json::parse(manifest_json);
   const std::string schema = manifest.value("schema", std::string{});
 
-  tropical_plan5::ParsedPlan5 parsed;
-  if (schema == "tropical_plan_5")
-    parsed = tropical_plan5::parse_plan5(manifest);
-  else if (schema == "tropical_plan_4")
-    parsed = tropical_plan5::parse_plan4(manifest);
-  else
-    throw std::runtime_error("FlatRuntime: load_ir unsupported manifest schema '" + schema + "'");
+  if (schema != "tropical_plan_5")
+    throw std::runtime_error(
+      "FlatRuntime: load_ir unsupported manifest schema '" + schema +
+      "'; expected 'tropical_plan_5'");
+  tropical_plan5::ParsedPlan5 parsed = tropical_plan5::parse_plan5(manifest);
 
   KernelState new_state = build_kernel_state(parsed);
   // The IR path is always fused — Lean emits a single fused kernel.
@@ -194,9 +235,357 @@ bool FlatRuntime::load_ir_staged(const std::string & ir_text,
   // Materialize coefficient slots before the state becomes visible to the
   // audio thread or render_window — initial knob values exist, so a first
   // buffer reading zero-initialized coefficient slots would be a bug.
-  run_coeff(new_state);
+  publish_control_snapshot(new_state);
 
   return publish_state(std::move(new_state));
+}
+
+FlatRuntime::ControlGenerationReservation
+FlatRuntime::reserve_control_generation(
+  KernelState & state, uint32_t state_index)
+{
+  const uint32_t pub = std::atomic_ref(state.control_published_gen)
+                         .load(std::memory_order_acquire);
+  if (state_index == UINT32_MAX)
+  {
+    uint32_t target = 0;
+    while (target == pub) ++target;
+    return {target, false};
+  }
+
+  // Control writers are serialized by build_mutex_. They may wait/yield off
+  // the real-time thread until a non-published generation is free.
+  for (;;)
+  {
+    const uint32_t published =
+      std::atomic_ref(state.control_published_gen)
+        .load(std::memory_order_acquire);
+    for (uint32_t target = 0;
+         target < control_generation_owners_[state_index].size();
+         ++target)
+    {
+      if (target == published) continue;
+      StorageOwner expected = StorageOwner::Free;
+      if (control_generation_owners_[state_index][target]
+            .compare_exchange_strong(
+              expected, StorageOwner::Writer,
+              std::memory_order_acquire, std::memory_order_relaxed))
+        return {target, true};
+    }
+    std::this_thread::yield();
+  }
+}
+
+void FlatRuntime::materialize_control_snapshot(
+  KernelState & state, uint32_t target)
+{
+  int64_t ** arrays = state.array_ptrs.data();
+  if (!state.coeff_array_slots.empty())
+  {
+    for (std::size_t j = 0; j < state.coeff_array_slots.size(); ++j)
+      state.coeff_array_ptrs[state.coeff_array_slots[j]] =
+        state.coeff_generations[target][j].data();
+    arrays = state.coeff_array_ptrs.data();
+  }
+  if (state.coeff_kernel)
+  {
+    double scratch_out = 0.0;
+    state.coeff_kernel(
+      nullptr,
+      state.coeff_registers.data(),
+      arrays,
+      state.array_sizes.data(),
+      state.coeff_temps.data(),
+      state.sample_rate,
+      0,
+      state.param_ptrs.data(),
+      &scratch_out,
+      1,
+      state.slots.data());
+  }
+  std::copy(state.slots.begin(), state.slots.end(),
+            state.slot_generations[target].begin());
+}
+
+void FlatRuntime::release_control_snapshot_reservation(
+  uint32_t state_index, ControlGenerationReservation reservation)
+{
+  if (reservation.owned)
+    control_generation_owners_[state_index][reservation.target].store(
+      StorageOwner::Free, std::memory_order_release);
+}
+
+void FlatRuntime::commit_control_snapshot(
+  KernelState & state, uint32_t state_index,
+  ControlGenerationReservation reservation)
+{
+  if (state_index == UINT32_MAX)
+  {
+    std::atomic_ref(state.control_published_gen)
+      .store(reservation.target, std::memory_order_release);
+    return;
+  }
+
+  release_control_snapshot_reservation(state_index, reservation);
+  for (;;)
+  {
+    uint64_t expected =
+      capture_boundary_word_.load(std::memory_order_acquire);
+    if ((expected & kCapturePhaseBit_) != 0)
+    {
+      std::this_thread::yield();
+      continue;
+    }
+    const uint32_t captured_state =
+      static_cast<uint32_t>((expected & kCaptureStateMask_) >> 2);
+    if (captured_state != state_index)
+    {
+      // build_mutex_ excludes a state flip here; this is defensive.
+      std::this_thread::yield();
+      continue;
+    }
+    const uint64_t desired =
+      (expected & ~kCaptureGenerationMask_) | reservation.target;
+    if (capture_boundary_word_.compare_exchange_weak(
+          expected, desired,
+          std::memory_order_release, std::memory_order_acquire))
+      break;
+  }
+  std::atomic_ref(state.control_published_gen)
+    .store(reservation.target, std::memory_order_release);
+}
+
+ParamDispatchResult FlatRuntime::dispatch_param_sync(
+  const std::string & name, double value)
+{
+  if (!std::isfinite(value))
+  {
+    const uint64_t observed =
+      published_sample_index_.load(std::memory_order_acquire);
+    return {
+      false, "set_param: value must be finite", {},
+      observed, observed
+    };
+  }
+
+  std::lock_guard<std::mutex> lock(build_mutex_);
+  const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
+  KernelState & state = states_[state_idx];
+  const uint64_t observed_sample_index =
+    published_sample_index_.load(std::memory_order_acquire);
+  const std::vector<double> base_slots = state.slots;
+  auto reservation = reserve_control_generation(state, state_idx);
+
+  for (;;)
+  {
+    // Read C/E and the reset/fresh qualifiers under the audio boundary's
+    // seqlock. Any capture crossing this snapshot changes the word and makes
+    // the eventual publication CAS lose.
+    uint64_t boundary_word = 0;
+    uint64_t effective_sample_index = 0;
+    for (;;)
+    {
+      boundary_word =
+        capture_boundary_word_.load(std::memory_order_acquire);
+      if ((boundary_word & kCapturePhaseBit_) != 0)
+      {
+        std::this_thread::yield();
+        continue;
+      }
+      const uint64_t next_capture =
+        next_capture_sample_index_.load(std::memory_order_relaxed);
+      const uint64_t steady_effective =
+        next_capture_effective_sample_index_.load(
+          std::memory_order_relaxed);
+      const uint64_t request_seq =
+        sample_index_request_seq_.load(std::memory_order_acquire);
+      const uint64_t applied_request_seq =
+        audio_applied_sample_index_seq_.load(std::memory_order_relaxed);
+      if ((request_seq & 1U) == 0 && request_seq != applied_request_seq)
+        effective_sample_index =
+          requested_sample_index_.load(std::memory_order_acquire);
+      else if (state_requires_reprime_[state_idx].load(
+                 std::memory_order_relaxed))
+        effective_sample_index = next_capture;
+      else
+        effective_sample_index = steady_effective;
+      if (capture_boundary_word_.load(std::memory_order_acquire)
+          == boundary_word)
+        break;
+    }
+
+    state.slots = base_slots;
+    auto result = dispatch_param_sync_locked(
+      state, state_idx, name, value, effective_sample_index);
+    result.observed_sample_index = observed_sample_index;
+    result.effective_sample_index = effective_sample_index;
+    if (!result.ok)
+    {
+      state.slots = base_slots;
+      release_control_snapshot_reservation(state_idx, reservation);
+      return result;
+    }
+    materialize_control_snapshot(state, reservation.target);
+    if (RuntimeOwnershipTestSeam * seam =
+          ownership_test_seam_.load(std::memory_order_acquire);
+        seam
+        && seam->pause_after_dispatch_materialization.load(
+          std::memory_order_acquire))
+    {
+      seam->dispatch_materialized.store(true, std::memory_order_release);
+      while (!seam->release_dispatch.load(std::memory_order_acquire))
+        std::this_thread::yield();
+    }
+
+    // Make the completed target capturable, then atomically replace only the
+    // generation bits in the exact stable boundary word sampled above.
+    release_control_snapshot_reservation(state_idx, reservation);
+    const uint64_t desired =
+      (boundary_word & ~kCaptureGenerationMask_) | reservation.target;
+    if (capture_boundary_word_.compare_exchange_strong(
+          boundary_word, desired,
+          std::memory_order_release, std::memory_order_acquire))
+    {
+      std::atomic_ref(state.control_published_gen)
+        .store(reservation.target, std::memory_order_release);
+      return result;
+    }
+
+    // Audio crossed the candidate boundary (or another boundary-qualified
+    // state transition won). The unpublished target cannot be captured;
+    // reacquire it, recompute temporal companions at the new E, and retry.
+    for (;;)
+    {
+      StorageOwner expected = StorageOwner::Free;
+      if (control_generation_owners_[state_idx][reservation.target]
+            .compare_exchange_strong(
+              expected, StorageOwner::Writer,
+              std::memory_order_acquire, std::memory_order_relaxed))
+        break;
+      std::this_thread::yield();
+    }
+  }
+}
+
+ParamDispatchResult FlatRuntime::dispatch_param_sync_at_sample_index(
+  const std::string & name, double value, uint64_t sample_index)
+{
+  if (!std::isfinite(value))
+    return {
+      false, "set_param: value must be finite", {},
+      sample_index, sample_index
+    };
+
+  std::lock_guard<std::mutex> lock(build_mutex_);
+  const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
+  KernelState & state = states_[state_idx];
+  auto result = dispatch_param_sync_locked(
+    state, state_idx, name, value, sample_index);
+  result.observed_sample_index = sample_index;
+  result.effective_sample_index = sample_index;
+  if (result.ok)
+    publish_control_snapshot(state, state_idx);
+  return result;
+}
+
+ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
+  KernelState & state, uint32_t state_idx, const std::string & name,
+  double value, uint64_t sample_index)
+{
+  auto slot_of = [&state](const std::string & slot_name) -> uint32_t {
+    for (uint32_t i = 0; i < state.slot_names.size(); ++i)
+      if (state.slot_names[i] == slot_name) return i;
+    return UINT32_MAX;
+  };
+  auto read = [&state](uint32_t i) {
+    return i < state.slots.size() ? state.slots[i] : 0.0;
+  };
+  auto write = [&state](uint32_t i, double v) {
+    if (i < state.slots.size()) state.slots[i] = v;
+  };
+  const ParamDiscipline * pd = state.find_discipline(name);
+  const std::string discipline = pd ? pd->discipline : std::string{"raw"};
+  auto fail = [&](std::string error) {
+    return ParamDispatchResult{
+      false, std::move(error), discipline, sample_index, sample_index
+    };
+  };
+  auto commit = [&]() {
+    return ParamDispatchResult{
+      true, {}, discipline, sample_index, sample_index
+    };
+  };
+  const double now = static_cast<double>(sample_index);
+
+  if (discipline == "glide")
+  {
+    const uint32_t v0i = slot_of("param:" + name + "#v0");
+    const uint32_t v1i = slot_of("param:" + name + "#v1");
+    const uint32_t t0i = slot_of("param:" + name + "#t0");
+    if (v0i == UINT32_MAX)
+      return fail("set_param: no glide slots for '" + name + "'");
+    const double dur_sec = pd->glide_dur_sec > 0.0
+      ? pd->glide_dur_sec : 0.02;
+    const double dur = state.sample_rate * dur_sec;
+    const double v0 = read(v0i);
+    const double v1 = read(v1i);
+    const double t0 = read(t0i);
+    const double r = (now - t0) / dur;
+    const double s = r < 0.0 ? 0.0 : (r > 1.0 ? 1.0 : r);
+    write(v0i, v0 + (v1 - v0) * (s * s * (3.0 - 2.0 * s)));
+    write(v1i, value);
+    write(t0i, now);
+    return commit();
+  }
+
+  if (discipline == "anchor")
+  {
+    const uint32_t fi = slot_of("param:" + name);
+    if (fi == UINT32_MAX)
+      return fail("set_param: unknown param '" + name + "'");
+    const uint32_t pi = slot_of("param:" + name + "#phase");
+    if (pi == UINT32_MAX)
+    {
+      write(fi, value);
+      return commit();
+    }
+    const double inc0 =
+      std::floor(read(fi) * 4294967296.0 / state.sample_rate);
+    const double inc1 =
+      std::floor(value * 4294967296.0 / state.sample_rate);
+    const double dcyc = ((inc0 - inc1) * now) / 4294967296.0;
+    const double phase = read(pi) + dcyc;
+    write(pi, phase - std::floor(phase));
+    write(fi, value);
+    return commit();
+  }
+
+  if (discipline == "velocity")
+  {
+    const uint32_t vi = slot_of("param:" + name);
+    if (vi == UINT32_MAX)
+      return fail("set_param: unknown param '" + name + "'");
+    std::string tau;
+    if (!pd->companions.empty()) tau = pd->companions.front();
+    else
+    {
+      tau = name;
+      const std::size_t pos = tau.find("velocity");
+      if (pos != std::string::npos) tau.replace(pos, 8, "tau_base");
+    }
+    const uint32_t ti = slot_of("param:" + tau);
+    if (ti == UINT32_MAX)
+      return fail("set_param: no origin slot '" + tau + "'");
+    write(ti, read(ti) + (read(vi) - value) * now / state.sample_rate);
+    write(vi, value);
+    return commit();
+  }
+
+  const uint32_t bi = slot_of("param:" + name);
+  if (bi == UINT32_MAX)
+    return fail("set_param: unknown param '" + name + "'");
+  write(bi, value);
+  return commit();
 }
 
 } // namespace tropical_runtime

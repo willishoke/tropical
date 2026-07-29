@@ -16,7 +16,7 @@ open Tropical.Exact (DyadicI)
 -- ── The live master clock (global time-warp) ────────────────────────────────
 /-- The two reserved master-clock slots. `velocity` is the live scrub (forward /
     freeze / reverse / varispeed); `tau_base` is the host-held τ-origin the engine
-    re-bases on each velocity change (`set_param_velocity`) so the scrub stays
+    re-bases on each velocity-discipline `set_param` so the scrub stays
     value-continuous — the stateless `ScrubClock` host-split, promoted to the
     arrow patch's base clock. -/
 def masterVelocityParam : String := "master.velocity"

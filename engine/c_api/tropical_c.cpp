@@ -179,9 +179,76 @@ void tropical_dac_reset_stats(tropical_dac_t d)
   if (d) static_cast<RuntimeDAC*>(d)->reset_stats();
 }
 
+uint64_t tropical_dac_reset_stats_epoch(tropical_dac_t d)
+{
+  return d ? static_cast<RuntimeDAC*>(d)->reset_stats_epoch() : 0;
+}
+
+uint64_t tropical_dac_get_stats_epoch(tropical_dac_t d)
+{
+  return d ? static_cast<RuntimeDAC*>(d)->stats_epoch() : 0;
+}
+
+size_t tropical_dac_callback_histogram_bin_count(void)
+{
+  return kCallbackHistogramBins;
+}
+
+uint64_t tropical_dac_callback_histogram_bin_width_ns(void)
+{
+  return kCallbackHistogramBinNs;
+}
+
+uint64_t tropical_dac_callback_histogram_overflow_floor_ns(void)
+{
+  return kCallbackHistogramRegularBins * kCallbackHistogramBinNs;
+}
+
+size_t tropical_dac_copy_callback_histogram(
+  tropical_dac_t d, uint64_t* out, size_t capacity, uint64_t* epoch)
+{
+  if (!d || !out || !epoch) return 0;
+  return static_cast<RuntimeDAC*>(d)->copy_callback_histogram(
+    out, capacity, *epoch);
+}
+
+uint64_t tropical_dac_request_output_capture(tropical_dac_t d)
+{
+  return d ? static_cast<RuntimeDAC*>(d)->request_output_capture() : 0;
+}
+
+bool tropical_dac_read_output_capture(
+  tropical_dac_t d, uint64_t sequence, uint64_t* start_index,
+  double* out, size_t capacity)
+{
+  if (!d || !start_index) return false;
+  return static_cast<RuntimeDAC*>(d)->read_output_capture(
+    sequence, *start_index, out, capacity);
+}
+
+unsigned int tropical_dac_get_buffer_frames(tropical_dac_t d)
+{
+  return d ? static_cast<RuntimeDAC*>(d)->negotiated_buffer_frames() : 0;
+}
+
 bool tropical_dac_is_reconnecting(tropical_dac_t d)
 {
   return d && static_cast<RuntimeDAC*>(d)->is_reconnecting();
+}
+
+uint64_t tropical_dac_disconnect_count(tropical_dac_t d)
+{
+  return d ? static_cast<RuntimeDAC*>(d)->disconnect_count() : 0;
+}
+
+uint64_t tropical_dac_reconnect_success_count(tropical_dac_t d)
+{
+  return d ? static_cast<RuntimeDAC*>(d)->reconnect_success_count() : 0;
+}
+
+uint64_t tropical_dac_reconnect_failure_count(tropical_dac_t d)
+{
+  return d ? static_cast<RuntimeDAC*>(d)->reconnect_failure_count() : 0;
 }
 
 unsigned int tropical_dac_get_active_device(tropical_dac_t d)
@@ -312,6 +379,26 @@ unsigned int tropical_runtime_get_buffer_length(tropical_runtime_t r)
 {
   if (!r) return 0;
   return static_cast<tropical_runtime::FlatRuntime*>(r)->getBufferLength();
+}
+
+unsigned int tropical_runtime_metal_pipeline_depth(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)->metal_pipeline_depth();
+}
+
+uint64_t tropical_runtime_ownership_failure_count(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->ownership_failure_count();
+}
+
+uint64_t tropical_runtime_metal_dispatch_failure_count(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_dispatch_failure_count();
 }
 
 void tropical_runtime_begin_fade_in(tropical_runtime_t r)

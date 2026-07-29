@@ -1,3 +1,5 @@
+Status: Historical — not a description of current main
+
 # Voice-ports sprint — handoff
 
 Branch `feat/voice-ports` (PR #194), off `main` @ `13c51ea` (native-DAG merged).

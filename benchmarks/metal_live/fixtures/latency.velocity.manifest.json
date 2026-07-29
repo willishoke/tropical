@@ -1,0 +1,20 @@
+{
+  "schema": "tropical_plan_5",
+  "config": {"sampleRate": 44100},
+  "register_count": 0,
+  "array_slot_count": 0,
+  "array_slot_sizes": [],
+  "instance_functions": [],
+  "sinks": [],
+  "slot_count": 2,
+  "slot_defaults": [1, 0],
+  "slot_names": ["param:master.velocity", "param:master.tau_base"],
+  "param_disciplines": [
+    {
+      "name": "master.velocity",
+      "discipline": "velocity",
+      "companions": ["master.tau_base"]
+    },
+    {"name": "master.tau_base", "discipline": "raw"}
+  ]
+}

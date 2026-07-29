@@ -3,6 +3,7 @@ build/
 build-jit/
 build-profile/
 build-jit-profile/
+build-tsan/
 *.dylib
 *.so
 *.dll
@@ -17,6 +18,9 @@ build-jit-profile/
 node_modules/
 package-lock.json
 web/dist/
+
+# Python
+__pycache__/
 
 # Handoff / WIP working docs — keep them off the repo root (and off
 # main). Tracked design notes belong under design/.

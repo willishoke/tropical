@@ -1,3 +1,5 @@
+Status: Superseded by [the current architecture](architecture.md)
+
 # Native-DAG strata refactor (#190) — execution plan
 
 Worktree `tropical-dag`, branch `feat/native-dag-strata` off origin/main.

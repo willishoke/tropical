@@ -2,7 +2,7 @@
  * kernel.ts — WasmKernel: instantiate + drive a Lean-emitted wasm32 kernel.
  *
  * The Web Audio analog of `engine/runtime/FlatRuntime` (native): it owns one
- * imported linear memory, seeds register/slot state from the manifest, calls
+ * imported linear memory, initializes array/slot metadata and defaults, calls
  * the 11-argument kernel per audio block, and applies an anti-click fade. It is
  * a *player* — no live recompile, no state-transfer hot-swap (those live on the
  * native instrument). Depends only on `KernelManifest`; no compiler internals.
@@ -77,22 +77,12 @@ export class WasmKernel {
     return k
   }
 
-  /** Seed registers from state_init, array_sizes, and slots from slot_defaults
-   *  — mirrors the native engine's `build_kernel_state`. */
+  /** Initialize array sizes and slots from their defaults. The scratch and
+   * register regions begin zeroed with WebAssembly memory. */
   private initState(): void {
     const dv = new DataView(this.memory.buffer)
     const f64 = new Float64Array(this.memory.buffer)
     const m = this.manifest
-    for (let i = 0; i < m.stateInit.length; i++) {
-      const v = m.stateInit[i]
-      if (Array.isArray(v)) continue
-      const t = m.registerTypes[i] ?? 'float'
-      const off = this.layout.registers + i * 8
-      if (typeof v === 'boolean') dv.setBigInt64(off, v ? 1n : 0n, true)
-      else if (t === 'int') dv.setBigInt64(off, BigInt(Math.trunc(v)), true)
-      else if (t === 'bool') dv.setBigInt64(off, v !== 0 ? 1n : 0n, true)
-      else dv.setFloat64(off, v as number, true)
-    }
     m.arraySlotSizes.forEach((sz, i) =>
       dv.setBigInt64(this.layout.arraySizes + i * 8, BigInt(sz), true))
     for (let i = 0; i < m.slotCount; i++)

@@ -68,8 +68,6 @@ for (const { slug, title, description } of manifest) {
   writeFileSync(join(distDir, `${slug}.manifest.json`), JSON.stringify({
     sampleRate:     plan.config?.sampleRate ?? 44100,
     registerCount:  plan.register_count ?? 0,
-    registerTypes:  plan.register_types ?? [],
-    stateInit:      plan.state_init ?? [],
     arraySlotSizes: plan.array_slot_sizes ?? [],
     slotCount:      plan.slot_count ?? (plan.slot_defaults?.length ?? 0),
     slotDefaults:   plan.slot_defaults ?? [],

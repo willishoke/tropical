@@ -1,3 +1,5 @@
+Status: Historical — not a description of current main
+
 # The Lean port — top-down migration of the compiler
 
 Status: **COMPLETE — all eight phases landed. The production stack is

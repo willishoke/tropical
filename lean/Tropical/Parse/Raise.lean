@@ -1,11 +1,11 @@
 import Tropical.Parse.Nodes
 
 /-!
-# raise — `tropical_program_2` JSON → the patch-bay node + top-level metadata
+# raise — `tropical_program_2` JSON → the patch-bay node
 
 What survives of the raise layer: `normalizeProgramFile` — the
-schema-tag check (exact TS message), the Zod-strip structural
-validation, and the program-node / top-level-metadata split. The wire
+schema-tag check, structural validation, and canonical program-node
+normalization. The wire
 is a PATCH BAY (instances + wiring + params of registered types): the
 ingest (`Engine/ProgramIO.lean`) walks the returned `JsonV` node
 directly, wire expressions are validated by the session grammar
@@ -24,29 +24,6 @@ namespace Tropical.Parse.Raise
 
 open Lean (Json JsonNumber)
 open Tropical.Parse
-
--- ─────────────────────────────────────────────────────────────
--- Top-level metadata (deprecated `params` / `audio_outputs`)
--- ─────────────────────────────────────────────────────────────
-
-/-- One stripped top-level `params` entry. -/
-structure LegacyParam where
-  name : String
-  value : Option JsonNumber := none
-  timeConst : Option JsonNumber := none
-  /-- `'param' | 'trigger'`. -/
-  ptype : Option String := none
-
-/-- One stripped top-level `audio_outputs` entry. The `expr` arm keeps
-    the (shallowly validated) wire expression verbatim, mirroring how
-    the TS layer passes it through untouched. -/
-inductive AudioOutput where
-  | ref (inst : String) (output : JsonV)
-  | expr (e : JsonV)
-
-structure TopLevel where
-  params : Option (Array LegacyParam) := none
-  audioOutputs : Option (Array AudioOutput) := none
 
 -- ─────────────────────────────────────────────────────────────
 -- Schema validation (port of compiler/schema.ts parseProgramV2)
@@ -78,13 +55,6 @@ private def reqStr (path : String) (j : JsonV) (k : String) : Except String Stri
   | none => zerr (sub path k) "Required"
   | some (.str s) => pure s
   | some other => zerr (sub path k) s!"Expected string, received {received other}"
-
-private def optBool (path : String) (j : JsonV) (k : String) :
-    Except String (Option Bool) :=
-  match j.getField? k with
-  | none => pure none
-  | some (.bool b) => pure (some b)
-  | some other => zerr (sub path k) s!"Expected boolean, received {received other}"
 
 private def isInt (n : JsonNumber) : Bool :=
   let f := n.toFloat
@@ -211,63 +181,12 @@ def block (path : String) (v : JsonV) : Except String JsonV := do
     fields := fields.push ("value", e)
   pure (.obj fields)
 
-def topParams (v : JsonV) : Except String (Array LegacyParam) := do
-  let .arr items := v | zerr "params" s!"Expected array, received {received v}"
-  let mut out : Array LegacyParam := #[]
-  for h : i in [0:items.size] do
-    let p := items[i]
-    let pPath := sub "params" (toString i)
-    let name ← reqStr pPath p "name"
-    let numOpt (k : String) : Except String (Option JsonNumber) :=
-      match p.getField? k with
-      | none => pure none
-      | some (.num n) => pure (some n)
-      | some other => zerr (sub pPath k) s!"Expected number, received {received other}"
-    let value ← numOpt "value"
-    let timeConst ← numOpt "time_const"
-    let ptype ← match p.getField? "type" with
-      | none => pure none
-      | some (.str "param") => pure (some "param")
-      | some (.str "trigger") => pure (some "trigger")
-      | some other =>
-        zerr (sub pPath "type")
-          s!"Invalid enum value. Expected 'param' | 'trigger', received {other.compress}"
-    out := out.push { name, value, timeConst, ptype }
-  pure out
-
-def topAudioOutputs (v : JsonV) : Except String (Array AudioOutput) := do
-  let .arr items := v | zerr "audio_outputs" s!"Expected array, received {received v}"
-  let mut out : Array AudioOutput := #[]
-  for h : i in [0:items.size] do
-    let entry := items[i]
-    let ePath := sub "audio_outputs" (toString i)
-    -- Zod union: try {instance, output} first, then {expr}.
-    let refArm : Except String AudioOutput := do
-      let inst ← reqStr ePath entry "instance"
-      match entry.getField? "output" with
-      | some o@(.str _) | some o@(.num _) => pure (.ref inst o)
-      | _ => zerr ePath "Invalid input"
-    let exprArm : Except String AudioOutput := do
-      match entry.getField? "expr" with
-      | some e => do
-        exprNode (sub ePath "expr") e
-        pure (.expr e)
-      | none => zerr ePath "Invalid input"
-    match refArm with
-    | .ok a => out := out.push a
-    | .error _ =>
-      match exprArm with
-      | .ok a => out := out.push a
-      | .error _ => zerr ePath "Invalid input"
-  pure out
-
 end Schema
 
-/-- Port of `normalizeProgramFile` + `parseProgramV2`: schema-tag check
-    (exact TS message), structural validation with Zod strip semantics,
-    and the program-node / top-level-metadata split. The returned node
-    carries `op:'program'` plus the stripped program fields. -/
-def normalizeProgramFile (raw : JsonV) : Except String (JsonV × TopLevel) := do
+/-- Validate and normalize a Plan-2 patch document. The returned node carries
+    `op:'program'` plus the canonical program fields. Retired top-level
+    parameter/output carriers fail with their migration spelling. -/
+def normalizeProgramFile (raw : JsonV) : Except String JsonV := do
   if raw.getField? "schema" != some (.str "tropical_program_2") then
     let shown := match raw.getField? "schema" with
       | some v => v.jsString
@@ -276,6 +195,15 @@ def normalizeProgramFile (raw : JsonV) : Except String (JsonV × TopLevel) := do
   let name ← Schema.reqStr "" raw "name"
   if name.isEmpty then
     Schema.zerr "name" "String must contain at least 1 character(s)"
+  if (raw.getField? "params").isSome then
+    Schema.zerr "params"
+      "top-level params are retired; declare body.decls paramDecl entries instead"
+  if (raw.getField? "audio_outputs").isSome then
+    Schema.zerr "audio_outputs"
+      "audio_outputs is retired; declare body.assigns outputAssign{name:'dac.out',expr:{op:'ref',...}} instead"
+  if (raw.getField? "breaks_cycles").isSome then
+    Schema.zerr "breaks_cycles"
+      "breaks_cycles is retired; tropical patch graphs are closed-form and acyclic"
   let mut fields : Array (String × JsonV) :=
     #[("op", .str "program"), ("name", .str name)]
   if (raw.getField? "type_params").isSome then
@@ -288,22 +216,12 @@ def normalizeProgramFile (raw : JsonV) : Except String (JsonV × TopLevel) := do
     fields := fields.push ("sample_rate", .num n)
   | some other =>
     Schema.zerr "sample_rate" s!"Expected number, received {Schema.received other}"
-  match ← Schema.optBool "" raw "breaks_cycles" with
-  | none => pure ()
-  | some b => fields := fields.push ("breaks_cycles", .bool b)
   match raw.getField? "ports" with
   | none => pure ()
   | some p => fields := fields.push ("ports", ← Schema.ports "ports" p)
   match raw.getField? "body" with
   | none => Schema.zerr "body" "Required"
   | some b => fields := fields.push ("body", ← Schema.block "body" b)
-  let mut top : TopLevel := {}
-  match raw.getField? "params" with
-  | none => pure ()
-  | some p => top := { top with params := some (← Schema.topParams p) }
-  match raw.getField? "audio_outputs" with
-  | none => pure ()
-  | some a => top := { top with audioOutputs := some (← Schema.topAudioOutputs a) }
-  pure (.obj fields, top)
+  pure (.obj fields)
 
 end Tropical.Parse.Raise

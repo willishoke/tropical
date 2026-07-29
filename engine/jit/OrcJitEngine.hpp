@@ -58,8 +58,6 @@ enum class OpTag : uint8_t
   SetElement,  // args[0]=ArrayReg, args[1]=idx, args[2]=val; no dst slot written
   // arity N
   Pack,     // args = scalar values → arrays[dst]
-  // Stateful param ops (special handling)
-  SmoothParam,   // args[0]=Param(ptr), args[1]=StateReg(slot), args[2]=Const(coeff)
   // M6+: write a computed value to slots[dst]. `dst` is the slot index;
   // `args[0]` is the value to write (scalar). No temp slot consumed.
   WriteSlot,
@@ -77,12 +75,9 @@ enum class OperandKind : uint8_t
   Input,    // module input port (slot field)
   Reg,      // virtual register — scalar result in temps[slot]
   ArrayReg, // virtual register — array result in arrays[slot]
-  StateReg, // persistent module register in registers[slot]
   Param,    // ControlParam pointer (ptr field)
   Source,   // input source `sources[slot]` — resolved by kind at runtime
             // (slot field holds the source index; sources[i].kind → tick|rate)
-  Rate,     // [legacy plan_4] sample rate (runtime constant)
-  Tick,     // [legacy plan_4] sample index (runtime counter)
   Slot,     // shared inter-module slot (slot field, indexes slots[]) — M6+
 };
 
@@ -91,7 +86,7 @@ struct Operand
   OperandKind   kind        = OperandKind::Const;
   JitScalarType scalar_type = JitScalarType::Float;
   double        const_val   = 0.0;  // Const
-  uint32_t      slot        = 0;    // Input, Reg, StateReg
+  uint32_t      slot        = 0;    // Input, Reg, ArrayReg, Source, Slot
   uint64_t      ptr         = 0;    // Param
 
   static Operand make_const(double v, JitScalarType t = JitScalarType::Float)
@@ -102,14 +97,8 @@ struct Operand
   { Operand o; o.kind = OperandKind::Reg; o.scalar_type = t; o.slot = id; return o; }
   static Operand make_array_reg(uint32_t s)
   { Operand o; o.kind = OperandKind::ArrayReg; o.slot = s; return o; }
-  static Operand make_state(uint32_t s, JitScalarType t = JitScalarType::Float)
-  { Operand o; o.kind = OperandKind::StateReg; o.scalar_type = t; o.slot = s; return o; }
   static Operand make_param(uint64_t p)
   { Operand o; o.kind = OperandKind::Param; o.scalar_type = JitScalarType::Float; o.ptr = p; return o; }
-  static Operand make_rate()
-  { Operand o; o.kind = OperandKind::Rate; o.scalar_type = JitScalarType::Float; return o; }
-  static Operand make_tick()
-  { Operand o; o.kind = OperandKind::Tick; o.scalar_type = JitScalarType::Float; return o; }
   static Operand make_source(uint32_t index, JitScalarType t = JitScalarType::Float)
   { Operand o; o.kind = OperandKind::Source; o.scalar_type = t; o.slot = index; return o; }
   // M6: slot operand reads from the shared slots[] arg passed to the
@@ -169,18 +158,9 @@ struct InstanceProgram
    *  block) preserves sibling-to-sibling NestedOut dependencies: a
    *  later sibling's wire can read an earlier sibling's output slot
    *  because the earlier sibling's body has already executed. Empty
-   *  for top-level kernels and for the legacy flat-IR
-   *  (inlineNested:true) path. */
+   *  for top-level kernels. */
   std::vector<FlatInstr>       pre_input_instructions;
   uint32_t                     register_count = 0; // local temp count
-  /** State register writebacks for this instance. Each entry pairs a
-   *  state register slot index (absolute, into the unified register
-   *  array) with the temp index (also absolute) whose value feeds it. */
-  struct Writeback {
-    uint32_t state_slot;   // index into the unified state-register array
-    int32_t  temp_slot;    // index into the unified temp array (-1 = skip)
-  };
-  std::vector<Writeback>       writebacks;
   /** Nested child kernels. Emitted recursively inside this kernel's
    *  body. Empty for leaf kernels. */
   std::vector<InstanceProgram> children;
@@ -215,13 +195,9 @@ struct Source
 
 struct FlatProgram
 {
-  // ── Plan-wide unified state (shared across all instance functions) ──
+  // ── Plan-wide scratch/storage metadata ──
   uint32_t                   register_count   = 0;
   std::vector<uint32_t>      array_slot_sizes; // element count per array slot
-  std::vector<uint32_t>      output_targets;
-  std::vector<int32_t>       register_targets;
-  std::vector<uint32_t>      mix_output_temps;  // legacy (plan_4) temp-mix path
-  std::vector<JitScalarType> register_types;
 
   // ── Multi-function layout (tropical_plan_5) ──
   std::vector<InstanceProgram> instance_functions;
@@ -233,7 +209,7 @@ struct FlatProgram
 //
 //   Fused           — one monolithic LLVM kernel function that inlines
 //                     every instance body inside the outer sample loop.
-//                     Legacy default; consumed by FlatRuntime via
+//                     Canonical default; consumed by FlatRuntime via
 //                     NumericKernelFn.
 //   Microkernel     — N+3 LLVM functions in one module (preamble, N per-
 //                     instance kernels, state_evolution, postamble_mix);
@@ -259,8 +235,8 @@ enum class CompilationMode : uint8_t { Fused, Microkernel, MicrokernelDeep };
 // ── Fused-mode kernel signature ──
 // `slots` (M6+) is the shared inter-module slot array passed by
 // reference for both reads (slot operands) and writes (WriteSlot
-// instructions). Always passed; legacy plans pass an empty vector's
-// data ptr (the kernel just doesn't reference it). The argument is
+// instructions). Always passed; plans without slots pass an empty vector's
+// data ptr (the kernel does not reference it). The argument is
 // annotated `nocapture noalias` in the IR so GVN / store-to-load
 // forwarding can engage on slot reads (per spike #3).
 using NumericKernelFn = void (*)(

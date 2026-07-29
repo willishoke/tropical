@@ -236,9 +236,10 @@ private def cyclePatchJson (decls : Array Lean.Json) : Lean.Json :=
     ("schema", Lean.Json.str "tropical_program_2"),
     ("name", Lean.Json.str "cycle_probe"),
     ("body", Lean.Json.mkObj [("op", Lean.Json.str "block"),
-      ("decls", Lean.Json.arr decls), ("assigns", Lean.Json.arr #[])]),
-    ("audio_outputs", Lean.Json.arr #[Lean.Json.mkObj [
-      ("instance", Lean.Json.str "a"), ("output", Lean.Json.str "out")]])]
+      ("decls", Lean.Json.arr decls),
+      ("assigns", Lean.Json.arr #[Lean.Json.mkObj [
+        ("op", Lean.Json.str "outputAssign"), ("name", Lean.Json.str "dac.out"),
+        ("expr", refTo "a")]])])]
 
 private def expectCycleRefusal (label : String) (path : String)
     (decls : Array Lean.Json) : IO Bool := do
@@ -262,6 +263,170 @@ def runCycleRefusal : IO Bool := do
   pure (selfLoop && pair)
 
 end CycleRefusal
+
+-- ── Production legacy-state non-emission ───────────────────────────────────
+-- The current source/IR types have no persistent state constructor. NInstr's
+-- tag is intentionally open for backend structural operations, though, so this
+-- gate also checks representative production artifacts in hand. Wire text is
+-- consulted only for the schema tag; legacy-state absence is checked on typed
+-- plans before serialization.
+section ProductionNonEmission
+
+open Tropical.Plan
+open Tropical.Ir (Arena ProgramIdx)
+
+private def legacyStateTags : Array String := #[
+  "Register", "StateReg", "StateLoad", "StateStore", "Update", "NextUpdate",
+  "Delay", "DelayInit", "StateInit", "Writeback", "SmoothParam"]
+
+private def checkInstrBlock (path : String) (instrs : Array NInstr) :
+    Except String Unit := do
+  for i in instrs do
+    if legacyStateTags.contains i.tag then
+      throw s!"{path}: production plan emitted legacy state instruction '{i.tag}'"
+
+private def checkInstanceFunction (path : String)
+    (f : InstanceFunction) : Except String Unit := do
+  checkInstrBlock s!"{path}/preamble" f.preambleInstructions
+  checkInstrBlock s!"{path}/pre-input" f.preInputInstructions
+  checkInstrBlock s!"{path}/body" f.instructions
+  let _ ← f.children.attach.mapM fun c =>
+    checkInstanceFunction s!"{path}/{c.1.instanceName}" c.1
+  pure ()
+termination_by sizeOf f
+decreasing_by
+  exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children c.2
+
+private def checkFlatPlan (path : String) (plan : FlatPlan) :
+    Except String Unit := do
+  for f in plan.instanceFunctions do
+    checkInstanceFunction s!"{path}/{f.instanceName}" f
+  let wire ← plan.toWire
+  match wire.getObjVal? "schema" with
+  | .ok (.str "tropical_plan_5") => pure ()
+  | .ok got =>
+    throw s!"{path}: production plan schema is {got.compress}, expected tropical_plan_5"
+  | .error e => throw s!"{path}: production plan has no schema: {e}"
+
+private def checkPerInstancePlan (path : String) (plan : PerInstancePlan) :
+    Except String Unit := do
+  checkInstrBlock s!"{path}/body" plan.instructions
+  for (block, i) in plan.perChildPreInput.zipIdx do
+    checkInstrBlock s!"{path}/child-{i}" block
+
+private def playgroundProbe : Lean.Json :=
+  let source := Lean.Json.mkObj [
+    ("id", .str "source"), ("kind", .str "source"),
+    ("params", Lean.Json.mkObj [("freq", .num (jn 440))])]
+  let output := Lean.Json.mkObj [
+    ("id", .str "out"), ("kind", .str "out"),
+    ("in", Lean.Json.mkObj [("in", .arr #[.str "source"])])]
+  Lean.Json.mkObj [
+    ("nodes", .arr #[source, output]),
+    ("out", .str "out")]
+
+private def compileSessionProbe (path : String) :
+    IO (Except String FlatPlan) := do
+  let env ← Tropical.Engine.boot
+  let action : Tropical.EngineM FlatPlan := do
+    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", .str path)])
+    Tropical.Engine.compileMirrorFlatPlan env .fused
+  match ← action.run with
+  | .ok plan => pure (.ok plan)
+  | .error failure => pure (.error failure.toJson.compress)
+
+private def compileExportProbe : IO (Except String FlatPlan) := do
+  let env ← Tropical.Engine.boot
+  let action : Tropical.EngineM FlatPlan := do
+    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [
+      ("path", .str "web/patches/pure-sine-440.json")])
+    let _ ← Tropical.Engine.handleExportProgram env (Lean.Json.mkObj [
+      ("name", .str "NonEmissionExport"),
+      ("outputs", Lean.Json.mkObj [
+        ("out", Lean.Json.mkObj [
+          ("instance", .str "osc"), ("output", .str "sine")])])])
+    let _ ← Tropical.Engine.handleAddInstance env (Lean.Json.mkObj [
+      ("program", .str "NonEmissionExport"),
+      ("instance_name", .str "export_probe")])
+    Tropical.Engine.compileMirrorFlatPlan env .fused
+  match ← action.run with
+  | .ok plan => pure (.ok plan)
+  | .error failure => pure (.error failure.toJson.compress)
+
+/-- Representative production paths must remain unable to emit legacy state:
+    a stdlib builder's per-instance plan, a playground graph, a program_2/MCP
+    session, and an exported composite re-instantiated into that session. -/
+def runProductionNonEmission (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let mut failures : Array String := #[]
+
+  match resolved.find? (·.1 == "FixedSinOsc") with
+  | none => failures := failures.push "builder: FixedSinOsc missing from stdlib"
+  | some (_, idx) =>
+    match (Tropical.Ir.Strata.runResolved
+        { inlineNested := true } arena idx).mapError (·.message) with
+    | .error e => failures := failures.push s!"builder: lower: {firstLine e}"
+    | .ok (coreArena, core) =>
+      match Tropical.Ir.CompileResolved.compileResolved core coreArena with
+      | .error e => failures := failures.push s!"builder: compile: {firstLine e}"
+      | .ok plan =>
+        if let .error e := checkPerInstancePlan "builder/FixedSinOsc" plan then
+          failures := failures.push e
+
+  match Tropical.Playground.compilePlanPure arena resolved playgroundProbe with
+  | .error e => failures := failures.push s!"playground: {firstLine e}"
+  | .ok compiled =>
+    if let .error e := checkFlatPlan "playground" compiled.plan then
+      failures := failures.push e
+
+  match ← compileSessionProbe "web/patches/pure-sine-440.json" with
+  | .error e => failures := failures.push s!"session/program_2: {firstLine e}"
+  | .ok plan =>
+    if let .error e := checkFlatPlan "session/program_2" plan then
+      failures := failures.push e
+
+  match ← compileExportProbe with
+  | .error e => failures := failures.push s!"export: {firstLine e}"
+  | .ok plan =>
+    if let .error e := checkFlatPlan "export" plan then
+      failures := failures.push e
+
+  if failures.isEmpty then
+    passGate "production-non-emission"
+      "builder + playground + program_2/session + export emit typed state-free plan_5 only"
+  else
+    failGate "production-non-emission" (String.intercalate "; " failures.toList)
+
+end ProductionNonEmission
+
+-- ── Serialized-plan schema boundary ────────────────────────────────────────
+
+/-- The Lean-owned serialized-plan entry point is deliberately Plan-5-only.
+    This is a separate boundary gate from production non-emission: even a
+    hand-authored document cannot revive an older schema or retired carrier. -/
+def runPlanSchemaRejection : IO Bool := do
+  let rejectsWith (j : Lean.Json) (needle : String) : Bool :=
+    match Tropical.Plan.FlatPlan.ofWire j with
+    | .ok _ => false
+    | .error e => (e.splitOn needle).length > 1
+  let plan4 := Lean.Json.mkObj [("schema", .str "tropical_plan_4")]
+  let unknown := Lean.Json.mkObj [("schema", .str "tropical_plan_99")]
+  let missing := Lean.Json.mkObj []
+  let retired := Lean.Json.mkObj [
+    ("schema", .str "tropical_plan_5"),
+    ("state_init", .arr #[])]
+  if rejectsWith plan4
+        "unsupported schema 'tropical_plan_4'; expected 'tropical_plan_5'"
+      && rejectsWith unknown
+        "unsupported schema 'tropical_plan_99'; expected 'tropical_plan_5'"
+      && rejectsWith missing "missing string field 'schema'"
+      && rejectsWith retired
+        "retired field 'state_init' is not valid in tropical_plan_5" then
+    passGate "plan5-schema-rejection"
+      "PlanDecode rejects plan_4, unknown/missing schemas, and retired carriers"
+  else
+    failGate "plan5-schema-rejection"
+      "PlanDecode accepted an unsupported schema/carrier or returned the wrong boundary error"
 
 def sortedNames (dir : String) (suffix : String) : IO (Array String) := do
   let entries ← (System.FilePath.mk dir).readDir

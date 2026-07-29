@@ -15,17 +15,15 @@ import Tropical.Testing.EngineMirror
 import Tropical.Testing.PlanWire
 
 /-!
-The `diffcli` executable — differential-harness verbs that exercise the
-Lean-owned native runtime and (Phase 4) the parsed-layer port.
+The `diffcli` executable — build, inspection, render, and backend-qualification
+verbs over the Lean-owned compiler and native runtime.
 
     diffcli render-bytes <plan.json> [--frames N] [--buffer N]
 
 Loads a tropical_plan_5 JSON file into a fresh runtime, renders
 `frames × buffer` samples, and writes the raw little-endian float64
 stream to stdout. `… | shasum -a 256` reproduces the golden hashes in
-tests/golden/ when fed the same plans validate_stdlib.ts renders
-(frames=16, buffer=256) — the Phase 2 gate that the Lean FFI path is
-sample-for-sample the TS koffi path.
+tests/golden/ with the standard frame and buffer counts.
 
 The compile/render verbs — `compile`, `compile-wasm`, `render-bytes`,
 `render-metal`, `render-graph`, `emit-ir`, `emit-msl` — boot the engine

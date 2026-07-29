@@ -1,3 +1,5 @@
+Status: Historical — not a description of current main
+
 # Testing Philosophy
 
 An algebra for reasoning about what tests do, where they apply, and what's missing.

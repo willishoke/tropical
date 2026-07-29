@@ -383,6 +383,14 @@ describe('unknown_param', () => {
     expect(env.value).toBe('does_not_exist')
     expect(env.valid?.kind).toBe('enum')
   })
+
+  test('retired parameter-method aliases are not RPC methods', async () => {
+    for (const method of ['set_param_glide', 'set_param_freq', 'set_param_velocity']) {
+      const env = await client.callError(method, { name: 'does_not_matter', value: 1.0 })
+      expect(env.code).toBe('internal_error')
+      expect(env.message).toContain(`Unknown tool: '${method}'`)
+    }
+  })
 })
 
 // unknown_device intentionally untested — start_audio would open real hardware.
@@ -532,14 +540,11 @@ describe('wire expression decode — refusal site', () => {
     expect(env.value).toEqual({ op: 'matmul', args: [1, 2] })
   })
 
-  // Five constructors decode but no lowering compiles them: broadcastTo (the
-  // wiring adapter builds it), input / nestedOut (export's serializer),
-  // sessionSlot / sessionArraySlot (legacy state dumps). Admitting one used to
-  // write it to the store and detonate at the next syncCompile, permanently
-  // poisoning the session and persisting through `save` into an unloadable file.
+  // Three constructors are internal compiler forms: broadcastTo (the wiring
+  // adapter builds it), input / nestedOut (export's serializer). Admitting one
+  // would write it to the store and detonate at the next syncCompile,
+  // permanently poisoning the session and persisting through `save`.
   for (const expr of [
-    { op: 'sessionSlot', index: 7 },
-    { op: 'sessionArraySlot', index: 2, size: 4 },
     { op: 'input', name: 'zzz' },
     { op: 'nestedOut', ref: 'x', output: 'out' },
     { op: 'broadcastTo', args: [1], shape: [4] },
@@ -561,13 +566,13 @@ describe('wire expression decode — refusal site', () => {
     })
   }
 
-  test('an engine-internal form nested inside a legal expression is caught', async () => {
+  test('a retired alias nested inside a legal expression is caught', async () => {
     const env = await client.callError('wire', {
       set: [{ instance: inst, input: 'input',
-              expr: { op: 'add', args: [1, { op: 'sessionSlot', index: 3 }] } }],
+              expr: { op: 'add', args: [1, { op: 'paramExpr', name: 'pitch' }] } }],
     })
     expect(env.code).toBe('invalid_value')
-    expect(env.message).toContain("'sessionSlot' is not a wire a patch can carry")
+    expect(env.message).toContain("unknown op 'paramExpr'")
   })
 
   // handleWire commits each set[] entry as it goes, so a later refusal leaves
@@ -621,50 +626,33 @@ describe('wire expression decode — refusal site', () => {
   })
 })
 
-describe('wire expression decode — alias collapse', () => {
+describe('wire expression decode — retired aliases', () => {
   const inst = unique('sc')
   beforeAll(async () => {
     await client.callOk('add_instance', { program: 'SoftClip', instance_name: inst })
   })
 
-  // paramExpr/triggerParamExpr are legacy spellings; they collapse at decode, so
-  // both lowering paths see the same node and `save` persists the canonical one.
-  test('paramExpr collapses to param', async () => {
-    const data = (await client.callOk('wire', {
-      set: [{ instance: inst, input: 'input', expr: { op: 'paramExpr', name: 'pitch' } }],
-    })) as { set: Array<{ expr: { op: string; name: string } }> }
-    expect(data.set[0].expr).toEqual({ op: 'param', name: 'pitch' })
-  })
-
-  // Self-contained rather than reading the previous test's state, so it can run
-  // under -t filtering.
-  test('the collapsed form is what list_wiring renders', async () => {
-    await client.callOk('wire', {
-      set: [{ instance: inst, input: 'input', expr: { op: 'paramExpr', name: 'pitch' } }],
+  for (const op of [
+    'paramExpr',
+    'triggerParamExpr',
+    'trigger',
+    'array',
+    'arrayLiteral',
+    'sampleClock',
+    'sample_clock',
+    'array_set',
+    'sessionSlot',
+    'sessionArraySlot',
+  ]) {
+    test(`${op} is rejected instead of canonicalized`, async () => {
+      const env = await client.callError('wire', {
+        set: [{ instance: inst, input: 'input', expr: { op } }],
+      })
+      expect(env.code).toBe('invalid_value')
+      expect(env.param).toBe('set[].expr')
+      expect(env.message).toContain(`unknown op '${op}'`)
     })
-    const wiring = (await client.callOk('list_wiring', { instance: inst })) as Array<{
-      instance: string; input: string; expr: string
-    }>
-    expect(wiring.find(w => w.input === 'input')?.expr).toBe('param(pitch)')
-  })
-
-  test('save persists the collapsed form', async () => {
-    await client.callOk('wire', {
-      set: [{ instance: inst, input: 'input', expr: { op: 'paramExpr', name: 'pitch' } }],
-    })
-    const saved = (await client.callOk('save', {})) as {
-      program: { body: { decls: Array<{ name: string; inputs?: Record<string, unknown> }> } }
-    }
-    const decl = saved.program.body.decls.find(d => d.name === inst)
-    expect(decl?.inputs?.input).toEqual({ op: 'param', name: 'pitch' })
-  })
-
-  test('triggerParamExpr collapses to trigger', async () => {
-    const data = (await client.callOk('wire', {
-      set: [{ instance: inst, input: 'drive', expr: { op: 'triggerParamExpr', name: 'kick' } }],
-    })) as { set: Array<{ expr: { op: string; name: string } }> }
-    expect(data.set[0].expr).toEqual({ op: 'trigger', name: 'kick' })
-  })
+  }
 })
 
 describe('wire combine', () => {
@@ -792,29 +780,6 @@ describe('type_mismatch', () => {
     expect(data).toBeDefined()
   })
 
-  // The op-form array spellings decode to the same node as a bare array, so they
-  // get the same connection check — but `value` must echo what the caller wrote,
-  // not the canonicalized form the decoder produced.
-  test('{op:array} → scalar input, echoed verbatim', async () => {
-    const expr = { op: 'array', items: [1, 2, 3] }
-    const env = await client.callError('wire', {
-      set: [{ instance: inst, input: 'input', expr }],
-    })
-    expect(env.code).toBe('type_mismatch')
-    expect(env.value).toEqual(expr)
-    if (env.valid?.kind === 'predicate') {
-      expect(env.valid.got).toEqual({ kind: 'array', element: 'float', shape: [3] })
-    }
-  })
-
-  test('{op:arrayLiteral} → scalar input, echoed verbatim', async () => {
-    const expr = { op: 'arrayLiteral', values: [1, 2] }
-    const env = await client.callError('wire', {
-      set: [{ instance: inst, input: 'input', expr }],
-    })
-    expect(env.code).toBe('type_mismatch')
-    expect(env.value).toEqual(expr)
-  })
 })
 
 // ─── export_program: an instance outlives a re-registration of its type ───────
@@ -915,11 +880,30 @@ describe('internal_error fallback', () => {
     expect(env.message).toContain("unknown op 'fold'")
   })
 
-  test('an engine-internal form is refused on the ingest path too', async () => {
+  test('a retired alias is refused on the ingest path too', async () => {
     const env = await loadWith({ op: 'sessionSlot', index: 7 })
     expect(env.code).toBe('internal_error')
-    expect(env.message).toContain("'sessionSlot' is not a wire a patch can carry")
+    expect(env.message).toContain("unknown op 'sessionSlot'")
   })
+
+  for (const [field, message] of [
+    ['params', 'top-level params are retired'],
+    ['audio_outputs', 'audio_outputs is retired'],
+    ['breaks_cycles', 'breaks_cycles is retired'],
+  ] as const) {
+    test(`retired root field '${field}' is refused on ingest`, async () => {
+      const env = await client.callError('load', {
+        program: {
+          schema: 'tropical_program_2',
+          name: 'retired_root',
+          body: { op: 'block', decls: [], assigns: [] },
+          [field]: [],
+        },
+      })
+      expect(env.code).toBe('internal_error')
+      expect(env.message).toContain(message)
+    })
+  }
 })
 
 // ─── Suggestion-field behavior ────────────────────────────────────────────────

@@ -1,0 +1,12 @@
+{
+  "schema": "tropical_plan_5",
+  "config": {"sampleRate": 44100},
+  "register_count": 0,
+  "array_slot_count": 0,
+  "array_slot_sizes": [],
+  "instance_functions": [],
+  "sinks": [],
+  "slot_count": 4,
+  "slot_defaults": [0.25, 0, 0, 0],
+  "slot_names": ["param:probe", "param:probe#v0", "param:probe#v1", "param:probe#t0"]
+}

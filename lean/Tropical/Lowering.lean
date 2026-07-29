@@ -6,10 +6,10 @@ import Tropical.Session
 import Tropical.Ir.Cycles
 
 /-!
-# Session lowering — Phase 3 of the Lean port
+# Session-to-root lowering
 
-Ports of the TS session→root lowering passes, run per compile over the
-engine's mirror (pure — the durable mirror is never mutated here):
+These deterministic passes run inside the Lean frontend for every structural
+session compile (the durable `SessionSt` is never mutated here):
 
 - slot allocation (`allocateParamSlot` + `allocateOutputSlots` over the
   catalog port types, canonical order: params → instance outputs)
@@ -18,9 +18,9 @@ engine's mirror (pure — the durable mirror is never mutated here):
   (CF-only: inter-instance cycles are rejected outright)
 - `computeInstanceTopoOrder` — Kahn with sorted ties
 
-Wire *lifting* (array literals → anonymous `__wire_N` instances) stays
-in the compiler service — it needs strata. Lift detection is
-`WireExpr.needsLift` (typed, on the store's own wire type).
+Wire lifting (array literals → anonymous `__wire_N` instances) is handled by
+`Engine.Compile.liftIfNeeded` before this module builds the synthetic root.
+Lift detection is `WireExpr.needsLift` on the session's typed wire values.
 -/
 
 namespace Tropical.Lowering
@@ -29,7 +29,7 @@ open Lean (Json toJson)
 open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? PortType ScalarKind)
 
--- ── Slot allocation (compiler/session.ts expandPortToSlots discipline) ──────
+-- ── Slot allocation ──────────────────────────────────────────────────────────
 
 structure Alloc where
   slotCount   : Nat := 0
@@ -81,7 +81,7 @@ private def allocOutputPort (a : Alloc) (key : String) (typeObj : Option Json) :
       outputMeta := a.outputMeta.push (key, pmeta) }
 
 /-- Canonical allocation: params (registry order), then every instance's
-    output ports (instance order). Extraction delay slots continue after. -/
+    output ports (instance order). -/
 def allocate (params : Array String) (instances : Array (String × InstanceInfo)) : Alloc := Id.run do
   let mut a : Alloc := {}
   for p in params do
@@ -93,8 +93,8 @@ def allocate (params : Array String) (instances : Array (String × InstanceInfo)
 
 -- ── Dep graph, cycle tripwire, topo order ────────────────────────────────────
 
-/-- consumer → producers, in instance order; producer sets keep
-    discovery order (TS Set-insertion parity). -/
+/-- consumer → producers, in instance order; producer sets keep discovery
+    order. -/
 private def buildDeps (instances : Array (String × InstanceInfo)) (wires : Array Wire)
     (dropSelfEdges : Bool) : Array (String × Array String) := Id.run do
   let mut deps : Array (String × Array String) := instances.map fun (n, _) => (n, #[])
@@ -126,9 +126,8 @@ def assertSessionAcyclic (instances : Array (String × InstanceInfo))
       ["compileSession: CF-only — inter-instance cycles are not allowed:",
        s!"  - {Tropical.Ir.renderLoop names}"]
 
-/-- Kahn with lexicographically sorted ready-queues (port of
-    computeInstanceTopoOrder; incomplete orders append the remainder in
-    instance order). -/
+/-- Kahn with lexicographically sorted ready queues; incomplete orders append
+    the remainder in instance order. -/
 def computeInstanceTopoOrder (instances : Array (String × InstanceInfo))
     (wires : Array Wire) : Array String := Id.run do
   let deps := buildDeps instances wires (dropSelfEdges := true)

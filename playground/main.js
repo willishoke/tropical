@@ -28,7 +28,8 @@ function startEngine() {
       // The demo runs on the GPU: every patch edit dual-loads (JIT stays the
       // scope/render_window reference), audio dispatches pipelined on Metal.
       TROPICAL_BACKEND: process.env.TROPICAL_DEMO_JIT ? '' : 'metal',
-      TROPICAL_METAL_PIPELINE: process.env.TROPICAL_DEMO_JIT ? '' : '1',
+      TROPICAL_METAL_PIPELINE_DEPTH:
+        process.env.TROPICAL_DEMO_JIT ? '' : '3',
     },
     stdio: ['ignore', 'ignore', 'pipe'],
   })

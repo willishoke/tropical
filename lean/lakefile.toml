@@ -49,3 +49,7 @@ moreLinkArgs = [
   "-L../build", "-ltropical",
   "-Wl,-rpath,@executable_path/../../../../build",
 ]
+
+[[lean_exe]]
+name = "trustreport"
+root = "TrustReport"

@@ -6,16 +6,13 @@ import Tropical.Parse.Nodes
 /-!
 # Port types and connection checking
 
-Port of the post-strata `PortType` view (compiler/ir/port_type.ts) and
-`checkArrayConnection` (compiler/array_wiring.ts): scalar widening
-(bool → int → float), scalar→array broadcast insertion, array→array
-shape broadcasting. Error strings mirror the TS source exactly — they
-appear verbatim in `type_mismatch` envelopes.
+This module owns the session boundary's scalar widening
+(bool → int → float), scalar-to-array broadcast insertion, and array shape
+broadcasting. Registered Lean program entries carry structured port metadata;
+the session parses that metadata here when validating a connection.
 
-The Lean engine never *constructs* port types; they arrive as structured
-JSON in catalog entries from the compiler service and are parsed here
-only for checking. Display strings also travel precomputed in the
-catalog; `portTypeToString` exists for the connection-error messages.
+`portTypeToString` renders the same checked type for actionable
+`type_mismatch` envelopes.
 -/
 
 namespace Tropical.Wiring
@@ -79,12 +76,12 @@ def portTypeToString : PortType → String
 
 def portTypeEqual : PortType → PortType → Bool
   | .scalar a, .scalar b => a == b
-  | .alias a, .alias b   => a == b   -- TS compares alias decls by object identity; by name here
+  | .alias a, .alias b   => a == b
   | .array ea sa, .array eb sb =>
     sa == sb && ea.display == eb.display
   | _, _ => false
 
-/-- NumPy-style shape broadcasting (compiler/term.ts broadcastShapes). -/
+/-- NumPy-style shape broadcasting. -/
 def broadcastShapes (a b : Array Nat) : Option (Array Nat) := Id.run do
   let rank := Nat.max a.size b.size
   let mut result : Array Nat := Array.replicate rank 0
@@ -108,8 +105,8 @@ private def broadcastTo (refExpr : Tropical.WireExpr) (shape : Array Nat) : Trop
 
 private def floatT : PortType := .scalar .float
 
-/-- Port of compiler/array_wiring.ts `checkArrayConnection` — same
-    decision tree, same error strings. -/
+/-- Check a source value against a destination port, inserting a broadcast
+    expression when the declared shapes permit it. -/
 def checkArrayConnection (srcIn dstIn : Option PortType) (refExpr : Tropical.WireExpr) : ConnectionCheck := Id.run do
   let src := srcIn.getD floatT
   let dst := dstIn.getD floatT

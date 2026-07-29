@@ -13,9 +13,12 @@
         }
       }
     ],
-    "assigns": []
-  },
-  "audio_outputs": [
-    { "instance": "rr", "output": "out" }
-  ]
+    "assigns": [
+      {
+        "op": "outputAssign",
+        "name": "dac.out",
+        "expr": { "op": "ref", "instance": "rr", "output": "out" }
+      }
+    ]
+  }
 }

@@ -24,12 +24,10 @@ Port of `compiler/flat_plan.ts` plus the instruction/operand types from
   omitted when empty. (Structural diff is key-order-insensitive, but
   key *presence* matters to it.)
 
-The legacy plan_4 carriers (`output_targets` / `outputs` temp-mix,
-`rate`/`tick` operand kinds) are wire-format backcompat the TS parser
-upgrades on read; the Lean side only ever *produces* plans, so they
-have no representation here.
+Plan 5 has no state-initialization or legacy temp-mix carriers. Runtime
+consumers reject older schemas instead of translating them.
 
-Numbers that are data (const vals, state init, slot defaults, sink
+Numbers that are data (const vals, slot defaults, sink
 gain) are `Lean.JsonNumber` so decimal text re-parses to the identical
 double on the TS/engine side.
 
@@ -396,8 +394,8 @@ def withPreInput (f : InstanceFunction) (block : Array NInstr) : InstanceFunctio
   match f with
   | .mk n i pre instrs _ ro ao rc ch => .mk n i pre instrs block ro ao rc ch
 
-/-- Mirrors `toWireInstanceFn`: preamble/pre_input/children omitted
-    when empty so legacy JSON consumers see the bytes they expect. -/
+/-- Mirrors `toWireInstanceFn`: canonical empty preamble/pre_input/children
+    fields are omitted for a compact Plan-5 wire form. -/
 def toWire (f : InstanceFunction) : Except String Json := do
   let base := #[
     ("name", Json.str f.name),

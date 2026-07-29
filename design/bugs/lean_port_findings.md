@@ -1,3 +1,5 @@
+Status: Historical — not a description of current main
+
 # Bugs surfaced by the Lean port
 
 Production defects found while porting the engine to Lean

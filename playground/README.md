@@ -1,3 +1,5 @@
+Status: Current
+
 # tropical · demo
 
 One fixed circuit, four scopes, every knob live, no state anywhere:
@@ -24,6 +26,12 @@ cd playground && bun install && bunx electron .
 `TROPICAL_DEMO_JIT=1 bunx electron .` runs the CPU JIT instead.
 
 ## Finding: symbolic-composition compile scaling (2026-07-08)
+
+> Historical measurement record — not a current performance baseline. These
+> rounds predate banks-as-data and later compiler/runtime changes. Keep them for
+> causal history; use
+> [`benchmarks/current_baseline/findings.md`](../benchmarks/current_baseline/findings.md)
+> for current claims.
 
 The circuit's modal REVERB originally hit a compile wall super-linear in
 voice modes. Profiling (mid-compile `sample`, twice) put 100% of the time in
