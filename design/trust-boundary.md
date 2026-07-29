@@ -86,6 +86,19 @@ Generated MSL implements the plan within the documented f32 SNR contract.
 - Gates: `metal-vs-jit`, `metal-ctest`, `msl-goldens`
 - Limitation: Evidence is tolerance-based and hardware-dependent; it is not exact equality or a proof of Metal compiler behavior.
 
+## METAL_CALLBACK_CONSUMES_PREPARED_EPOCHS
+
+Live Metal submits and waits only on its render worker; the audio callback copies exact-tagged prepared tiles and activates old-before-E/new-at-E or fails silent.
+
+- Status: evidence-backed
+- Priority: critical
+- Owner: Metal runtime
+- Evidence: executable gate, differential, inspection
+- Formal symbol: none
+- Implementation: `engine/runtime/EpochTileQueue.hpp`, `engine/metal/MetalRenderWorker.cpp`, `engine/runtime/FlatRuntime.hpp`, `engine/metal/MetalKernel.mm`
+- Gates: `metal-ctest`, `manual:Metal callback source review`
+- Limitation: Finite stress, differential replay, and source inspection constrain ownership and activation behavior; they do not prove Metal scheduling deadlines, so release qualification remains hardware-scoped.
+
 ## WASM_SHARES_LLVM_SEMANTICS
 
 The wasm artifact is emitted from the same LLVM instruction semantics and remains sample-equivalent to native JIT on the gated corpus.
@@ -114,16 +127,16 @@ The Exact carrier bounds rounding of implemented formulas and shipped constants.
 
 ## HOST_PARAM_DISCIPLINES
 
-Lean and socket hosts apply the same re-anchoring formulas, slot order, and by-name control reapplication discipline.
+Lean and socket hosts apply the same re-anchoring formulas and slot order; Metal recomputes the whole transaction at its exact audible activation epoch E.
 
 - Status: open
 - Priority: high
 - Owner: Host integration
 - Evidence: differential, executable gate, inspection
 - Formal symbol: none
-- Implementation: `lean/Tropical/Engine`, `engine/runtime/FlatRuntime.cpp`, `mcp`
-- Gates: `mcp-protocol`, `manual:host re-anchor inspection`
-- Limitation: The runtime deliberately does not transfer slot values kernel-to-kernel; hosts must reapply them by name.
+- Implementation: `lean/Tropical/Engine`, `engine/runtime/FlatRuntime.cpp`, `engine/runtime/FlatRuntime.hpp`, `mcp`
+- Gates: `mcp-protocol`, `metal-ctest`, `manual:host re-anchor inspection`
+- Limitation: The runtime deliberately does not transfer slot values kernel-to-kernel; hosts must reapply them by name. Hot-swap and retarget exactness are established by finite replay and stress.
 
 ## CACHE_KEY_COHERENCE
 

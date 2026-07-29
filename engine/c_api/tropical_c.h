@@ -147,9 +147,10 @@ bool             tropical_runtime_load_ir_msl(tropical_runtime_t, const char* ir
    Its outputs land in coef:<n> module slots the audio kernel reads. */
 bool             tropical_runtime_load_ir_staged(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* manifest_json, size_t manifest_len);
 
-/* Control-plane/test-only: request a sample-clock reposition. The audio thread
-   applies the newest stable request at its next process-buffer boundary
-   (render verbs' --start; long-tau gates render at arbitrary positions). */
+/* Control-plane/test-only: request a sample-clock reposition. JIT applies it
+   at its next process-buffer boundary; Metal prepares and acknowledges an
+   exact future activation epoch. Physical device frames stay monotonic while
+   the source coordinate moves to idx. */
 void             tropical_runtime_set_sample_index(tropical_runtime_t, uint64_t idx);
 
 /* ---------- Build-time IR→wasm (TROPICAL_WASM_EMIT builds only) ----------
@@ -196,8 +197,9 @@ uint64_t         tropical_runtime_ownership_failure_count(tropical_runtime_t);
    replacement does not erase the evidence. Always 0 for JIT/non-Metal builds;
    qualification requires zero. */
 uint64_t         tropical_runtime_metal_dispatch_failure_count(tropical_runtime_t);
-/* Sticky monotonic worker-handoff diagnostics. Qualification requires every
-   counter to remain zero. */
+/* Sticky monotonic worker-handoff diagnostics. Starvation, tag mismatch,
+   activation failure, and callback-thread Metal entry must remain zero in
+   qualification. Retargets are permitted but measured explicitly. */
 uint64_t         tropical_runtime_metal_render_starvation_count(tropical_runtime_t);
 uint64_t         tropical_runtime_metal_epoch_tag_mismatch_count(tropical_runtime_t);
 uint64_t         tropical_runtime_metal_activation_retarget_count(tropical_runtime_t);

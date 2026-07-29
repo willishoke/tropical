@@ -13,8 +13,9 @@ that scrubs four modal rings (a signal driving a clock is a warp). The rings
 compose through the filter's exact conjugate pole pair by the residue
 calculus. The four wells are **random-access reads of the running kernel**
 (`render_window`) — the same closed-form function the audio thread evaluates,
-at any τ, while audio dispatches pipelined on the **Metal backend** (the JIT
-dual-loads as the scope reference). The whole client is `main.js` (socket
+at any τ, while an off-RT worker prepares exact-epoch **Metal** tiles for the
+audio callback (the JIT dual-loads as the scope reference). The whole client is
+`main.js` (socket
 plumbing), `preload.js` (one verb), and `renderer/` — the instrument is the
 protocol; the app just draws it.
 

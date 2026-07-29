@@ -92,7 +92,7 @@ buffer, advances the coordinate, and applies the smoothstep fade. The active
 state is published with a release store after the inactive state is fully
 built.
 
-At a callback boundary, `process()`:
+On the JIT callback path, `process()`:
 
 1. applies any stable even-sequence clock request;
 2. CAS-owns, captures, and revalidates the active state and one coherent
@@ -101,15 +101,18 @@ At a callback boundary, `process()`:
 4. advances the runtime-global audio clock and applies the smoothstep fade;
 5. publishes the completed sample boundary and releases ownership.
 
-Control writes serialize under `build_mutex_`, run the coefficient stage in
-control-only scratch, and release-publish the complete slot/coefficient set as
-one generation. State and generation ownership atomics live outside movable
-kernel state, closing an ABA window during hot-swap. The audio path never
-locks or allocates; a bounded ownership failure emits silence and telemetry.
+Control writes serialize under `build_mutex_` and run the coefficient stage in
+control-only scratch. JIT release-publishes the complete slot/coefficient set
+as one generation; Metal forms an immutable exact-epoch worker request. State
+and generation ownership atomics live outside movable kernel state, closing an
+ABA window during JIT hot-swap. Neither audio path locks or allocates; a
+bounded JIT ownership failure or Metal handoff fault emits silence and
+telemetry.
 
 Configure with `-DTROPICAL_TSAN=ON`, then build `check_runtime_tsan`, to run
-the barrier-driven clock/state/generation tests and concurrent publication
-stress under ThreadSanitizer when the compiler provides it.
+the barrier-driven clock/state/generation tests plus epoch-queue and
+render-worker mailbox publication stress under ThreadSanitizer when the
+compiler provides it.
 
 `render_window` evaluates the fused JIT kernel at arbitrary coordinates for
 scope/slave consumers. Metal sessions remain dual-loaded so this path stays on
@@ -150,9 +153,10 @@ and links it in-process with lld. This is a build-time capability used by
 ### Metal
 
 With `TROPICAL_METAL`, `MetalKernel` compiles Lean-emitted MSL at runtime and
-dispatches one thread per sample. `TROPICAL_BACKEND=metal` selects it for
-live audio. Host slots are f64 and narrow to f32 at encode; the clock rail
-stays i64. Hoisted coefficient columns cross in the packed `buffer(3)` binding.
+dispatches one thread per sample. `TROPICAL_BACKEND=metal` selects it for live
+audio. Host slots are f64 and narrow to f32 when an immutable render request is
+formed; the clock rail stays i64. Hoisted coefficient columns cross in the
+packed `buffer(3)` binding.
 
 The JIT always loads alongside Metal for scopes and reference rendering. Tests:
 
@@ -160,15 +164,34 @@ The JIT always loads alongside Metal for scopes and reference rendering. Tests:
 - `engine/tests/test_metal_kernel.cpp`;
 - MSL and coefficient-column gates in `tropicaltest`.
 
-`MetalKernel` (ObjC++ behind a pure-C++ header) executes the fused kernel on
-the GPU: MSL emitted by Lean (`EmitMsl`), compiled at runtime
-(`newLibraryWithSource`, `MTLMathModeSafe`), one thread per sample,
-synchronous per-block dispatch. It rides inside `KernelState` — the existing
-double-buffered publish/flip is the hot-swap; the runtime-global audio clock is
-independent of the swapped state. Loads are DUAL (`load_ir_msl`): the JIT always compiles too and keeps
-serving `render_window` (the scope) and the f64 reference; only `process()`
-dispatches to Metal. Slots stay f64 host-side, captured as a coherent
-generation at the buffer boundary, then snapshotted to f32 at encode.
+`MetalKernel` is ObjC++ behind a pure-C++ header. Its sole execution primitive,
+`render_tile`, performs a blocking submit/wait into stable caller-owned
+storage and permanently fails closed after a terminal command-buffer error.
+Only `MetalRenderWorker` may call it. A callback provenance guard rejects and
+counts any attempted Metal submission from an audio callback.
+
+Live Metal uses `EpochTileQueue`: two banks of four preallocated tiles, with
+worker-owned `Free → Rendering → Ready` transitions and callback-owned
+`Ready → Reading → Free` transitions. `Rgpu` is the tile render quantum and
+`Bdev` is the negotiated device callback quantum; `Rgpu` must be a positive
+multiple of `Bdev`. The callback only performs a bounded activation read,
+validates the exact epoch/device/source tag, copies one `Bdev` slice, advances
+its cursors, and releases the tile. It never packs slots or coefficient
+columns, allocates, waits, retries, or submits GPU work. Missing or mismatched
+tiles produce fail-silent output plus sticky diagnostics.
+
+Every raw, glide, anchor, velocity, clock-jump, and hot-swap transition
+reserves an exact activation epoch `E`. The old bank remains audible strictly
+before `E`; the prepared bank begins at `E`. If preparation misses its target,
+the worker retargets and the host recomputes every companion from the new
+exact epoch. Physical device frames remain monotonic while the source
+coordinate may jump. Activation descriptors are published and acknowledged
+in order before the old bank is reused.
+
+Loads remain dual (`load_ir_msl`): the JIT always compiles too and serves
+`render_window` scopes and the f64 reference. A hot-swap replaces both
+artifacts, but the runtime-global device/source coordinates are independent of
+the swapped state.
 
 Enable per session with `TROPICAL_BACKEND=metal` (read at engine boot).
 Correctness: `tests/web/metal_vs_jit.test.ts` (SNR vs the f64 JIT — f32
@@ -187,25 +210,22 @@ fourth binding — `constant float* coeff_columns [[buffer(3)]]`, ONE packed
 buffer whose per-slot offsets are compile-time literals in plan order —
 and reads those slots from it instead of declaring thread-private `arrN`
 locals it could never fill (columns-free plans keep the exact 3-binding
-ABI, byte-frozen by the msl-golden gates). Host side: `process()` packs the
-captured generation into f32 staging (`KernelState::metal_column_staging` —
-int64 storage bit-punned to f64 like the JIT's array loads, then narrowed
-f64→f32 like slots) and `process_block` copies it into the MTLBuffer at
-encode (sync) or enqueue (pipelined, per-ring-entry buffers — the
-documented D-block param lag, no tear: the pack reads the ONE generation
-owned and revalidated by the callback). So a banked session on
-`TROPICAL_BACKEND=metal` runs the same typed split as the JIT: coefficient
+ABI, byte-frozen by the msl-golden gates). The control path recomputes
+coefficient work at the exact activation epoch and narrows one coherent
+immutable slot/column snapshot into the worker request. Thus a banked session
+on `TROPICAL_BACKEND=metal` runs the same typed split as the JIT: coefficient
 math at knob rate on CPU, the audio loop on GPU reading real columns.
 Gated by `msl-column-guard` (tropicaltest), the banked-resonator SNR case
 in `metal_vs_jit`, and the column tests in `test_metal_kernel.cpp`.
 
-Qualification controls only: `TROPICAL_METAL_PIPELINE_DEPTH=1..3` selects the
-future-block depth. The retired `TROPICAL_METAL_PIPELINE` spelling is inert.
-Invalid explicit depths refuse at kernel construction.
-The read-only C diagnostic `tropical_runtime_metal_pipeline_depth` returns 0
-for sync/JIT/non-Metal builds. `TROPICAL_BUFFER_LENGTH=16..16384` selects the
-live engine block length before Runtime/DAC construction; absence preserves
-the 512 default.
+`TROPICAL_METAL_RENDER_TILE_FRAMES` selects `Rgpu`; absence defaults to 512,
+and invalid or non-divisible values refuse before live rendering.
+`TROPICAL_BUFFER_LENGTH=16..16384` selects `Bdev` before Runtime/DAC
+construction; absence preserves the 512 default. Read-only C diagnostics
+expose both quanta, four-tile bank capacity, published/acknowledged activation
+epochs, dispatch/starvation/tag/retarget/activation/provenance counters,
+worker stage timestamps, activation-latency statistics, and worker CPU/wall
+time. The retired pipeline-depth controls and diagnostic are absent.
 
 See [`benchmarks/metal_live/findings.md`](../benchmarks/metal_live/findings.md)
 for current qualification measurements.

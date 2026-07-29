@@ -1,5 +1,75 @@
 # Metal backend — live findings (V2 phase 6)
 
+## 2026-07-29 epoch-render Bdev=512/Rgpu=512 qualification failure
+
+The one authorized ten-minute epoch-worker actual-DAC row is retained
+unchanged as
+[`data/epoch-worker-soak-b512-r512-600s-29e0f7de0ada-m1pro-20260729.jsonl`](data/epoch-worker-soak-b512-r512-600s-29e0f7de0ada-m1pro-20260729.jsonl).
+It ran from the clean code candidate
+`29e0f7de0ada6feb9952b154dfc59ef656ad50b9`; the only manifest status
+entry is the output file created before the snapshot. Its SHA-256 is
+`580dc0c0ef697d3a3978a25e9c3ac0dc09574c56afd4359061d19db31b3df646`.
+The failed artifact is final for this candidate and was not retried.
+
+The row blocked when the control thread observed the sticky
+`metal_render_starvation_count` at one after the first post-reset callback.
+The queue counter is not reset or timestamped with the DAC statistics epoch,
+so the artifact cannot distinguish whether the starvation occurred during
+the 170-callback startup window or on that first measured callback. Either
+classification fails the required zero-starvation gate. The exact negotiated
+quanta were Bdev=512/Rgpu=512 with 2,048 frames of worker capacity. The one
+measured callback took 0.005875 ms with zero measured underruns or overruns;
+the pre-reset startup snapshot separately recorded one underrun.
+
+This is a callback render-window starvation, not an observed Metal device
+failure: Metal dispatch failures, epoch tag mismatches, activation failures,
+and callback-thread Metal provenance violations were all zero. The initial
+activation was acknowledged 19.793 ms after its request. Because the harness
+failed closed immediately, clock jumps, swaps, reference checkpoints, and RSS
+growth evidence are absent and must not be inferred. The accompanying
+offline-support record also reports one starvation because that retained
+benchmark loop advances the callback entry point faster than the worker; it
+does not repair or erase the actual-DAC failure.
+
+Live-Metal release support therefore remains withheld for
+Bdev=512/Rgpu=512 on this M1 Pro. No other epoch-worker device/render quantum
+is inferred. The deterministic ownership, exact-epoch, numeric, and TSAN
+evidence remains merge evidence for the architecture, not hardware deadline
+qualification.
+
+## 2026-07-28 epoch-render worker candidate
+
+The current candidate removes all Metal submit/wait work from the audio
+callback. A dedicated worker renders immutable exact-epoch snapshots into two
+banks of four preallocated tiles. The callback performs one bounded activation
+read, validates epoch/device/source tags, copies a prepared slice, advances
+monotonic device and requested source coordinates, and releases ownership.
+Raw, glide, anchor, velocity, repeated post-2^40 clock jumps, and hot-swaps all
+activate at an exact source epoch `E`; a retarget recomputes every companion
+for the replacement `E`.
+
+Deterministic evidence for the candidate includes:
+
+- 10,000 acknowledged queue bank reuses and rapid A/B/A worker serialization;
+- actual-GPU 10,000-event clock-jump/precompiled-swap stress and 10,000-event
+  raw/glide/anchor/velocity stress under two CPU burners, each checked by
+  exact-epoch JIT replay;
+- terminal command failure, starvation, tag-mismatch, interrupted activation
+  publication, retarget, callback-provenance, and fail-silent behavior;
+- Metal/JIT numeric, MSL/column, runtime, and qualification-harness gates.
+
+This is finite evidence for ownership and exact activation semantics, not
+proof that Metal or the worker will always meet a hardware deadline. The one
+authorized Bdev=512/Rgpu=512 actual-DAC row subsequently failed as recorded
+above, so release support remains withheld.
+
+## Historical callback-owned pipeline archive
+
+Everything below this heading is retained evidence for the superseded
+future-block, callback-owned Metal dispatch implementation. Its B=128/D=3 and
+B=512/D=3 failures remain unchanged as causal history. They do not describe
+the current worker/epoch runtime, and they are not current release evidence.
+
 ## 2026-07-28 final B=512/D=3 qualification failure
 
 The one authorized 30-minute B=512/D=3 actual-DAC soak is retained unchanged

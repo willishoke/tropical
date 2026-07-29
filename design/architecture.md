@@ -149,7 +149,9 @@ nothing is hoisted there is only the audio plan. Otherwise the load carries:
 
 Scalar coefficient slots tolerate the documented one-buffer race. Bank
 coefficient columns use three generations, so the audio block observes one
-whole published generation.
+whole published generation. For live Metal, the control thread narrows the
+selected slot/column generation into an immutable render-epoch request; the
+audio callback does not pack coefficient data.
 
 ## Invariant index
 
@@ -170,7 +172,7 @@ a refinement obligation; it is not by itself a proof of source semantics.
 
 | Edit | Compiler work | Publication behavior |
 |---|---|---|
-| Parameter value | No relower. The host applies `raw`, `glide`, `anchor`, or `velocity` discipline and writes slots; stage-0 work reruns when present. | Existing kernel continues. |
+| Parameter value | No relower. The host applies `raw`, `glide`, `anchor`, or `velocity` discipline and writes slots; stage-0 work reruns when present. | JIT publishes the captured generation at a callback boundary. Metal prepares a new render epoch off the callback and activates it at its reported exact `E`. |
 | Structural selector | Decode/lower/partition/emit again. Examples include a voice kind or a baked realization choice. | Publish a fresh kernel at the current coordinate. |
 | Topology | Rebuild the synthetic root, lower, partition, emit, and load. | Publish a fresh kernel at the current coordinate. |
 | Kernel publication | No semantic state migration. `FlatRuntime` carries only `sample_index`; fresh storage comes from the new manifest. Current parameter values are supplied by the control/session layer. | Atomic inactive-state build and flip; optional fade remains a device policy. |
@@ -217,6 +219,52 @@ reliability, and any completed or blocked soak rows are reported without
 generalization in the
 [Metal findings](../benchmarks/metal_live/findings.md).
 
+### Live Metal epoch handoff
+
+Live Metal submission is owned by one dedicated render worker, never by the
+audio callback. `MetalKernel::render_tile` is a blocking worker primitive.
+The worker renders into a fixed two-bank handoff with four preallocated tiles
+per bank. Tile ownership moves only through:
+
+```text
+worker:   Free → Rendering → Ready
+callback: Ready → Reading   → Free
+```
+
+The device callback quantum `Bdev` and GPU render quantum `Rgpu` are
+independent. `Rgpu` must be a positive multiple of `Bdev`; the default is at
+least 512 frames, rounded to that multiple. The callback consumes one exact
+`Bdev` slice from a prepared tile. It does not submit or wait for Metal, take a
+lock, allocate, reclaim worker state, inspect movable `KernelState` storage, or
+pack slots/columns.
+
+Each tile is tagged with an epoch id, monotonic device-frame start, independent
+Tropical source-sample start, and frame count. A control transaction first
+reserves a device activation boundary, computes its source-coordinate
+`effective_sample_index`, materializes every companion slot at that exact
+coordinate, renders a complete candidate window, and release-publishes one
+activation descriptor. The callback makes one bounded descriptor read and
+switches only at that boundary. Old audio is emitted strictly before `E`; the
+new epoch begins at `E`. Clock jumps change the source coordinate without
+rewinding the device frame; hot-swaps carry the source coordinate.
+
+A missed candidate target is retargeted off the callback and all companion
+math is recomputed at the replacement `E`. A candidate render failure refuses
+activation and leaves the active epoch intact. Once active, a missing exact
+tile, tag mismatch, or terminal Metal command failure produces whole-callback
+silence and latches that epoch fault until a fresh explicit epoch activates.
+The runtime never replays a tile, stretches a sample, waits, or falls back to
+JIT on the live callback.
+
+`TROPICAL_METAL_RENDER_TILE_FRAMES` is the qualification/test render-quantum
+override. Runtime diagnostics expose device/render quanta, worker capacity,
+published/acknowledged activation ids, dispatch failures, render starvation,
+tag mismatches, activation retargets/failures, callback-thread provenance
+violations, stage timestamps, activation-latency statistics, and worker
+CPU/wall time. These measurements separate callback deadline, activation
+latency, GPU tile duration, and render-ahead reserve; none may be substituted
+for another.
+
 ## What the test layers establish
 
 - Frozen audio goldens are the behavioral regression anchor.
@@ -249,9 +297,9 @@ lean/Tropical/
   Engine/                    session, MCP mutations, ingest/export, hot-swap
   Playground/                product graph decode/lower/report
 engine/
-  runtime/                   manifest parsing and double-buffered kernel host
+  runtime/                   manifest host and exact-epoch tile handoff
   jit/                       textual LLVM → ORC and LLVM → wasm32 support
-  metal/                     MetalKernel implementation
+  metal/                     Metal kernel plus dedicated render worker
   c_api/                     stable native and socket boundary
 web/
   runtime/                   precompiled WebAssembly player
