@@ -181,6 +181,11 @@ option(TROPICAL_BUILD_TESTS "Build C++ process tests (no audio device required)"
 
 if(TROPICAL_BUILD_TESTS)
     enable_testing()
+    add_executable(test_epoch_tile_queue engine/tests/test_epoch_tile_queue.cpp)
+    target_include_directories(test_epoch_tile_queue PRIVATE engine)
+    target_compile_features(test_epoch_tile_queue PRIVATE cxx_std_20)
+    add_test(NAME current_epoch_tile_queue COMMAND test_epoch_tile_queue)
+
     add_executable(test_module_process engine/tests/test_module_process.cpp)
     target_include_directories(test_module_process PRIVATE engine ${LLVM_INCLUDE_DIRS})
     target_compile_definitions(test_module_process PRIVATE ${LLVM_DEFINITIONS})
@@ -189,11 +194,14 @@ if(TROPICAL_BUILD_TESTS)
     add_test(NAME current_module_process COMMAND test_module_process)
 
     if(TROPICAL_TSAN)
+        target_compile_options(test_epoch_tile_queue PRIVATE -fsanitize=thread)
+        target_link_options(test_epoch_tile_queue PRIVATE -fsanitize=thread)
         target_compile_options(test_module_process PRIVATE -fsanitize=thread)
         target_link_options(test_module_process PRIVATE -fsanitize=thread)
         add_custom_target(check_runtime_tsan
-            COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R module_process
-            DEPENDS test_module_process
+            COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+                    -R "epoch_tile_queue|module_process"
+            DEPENDS test_epoch_tile_queue test_module_process
             USES_TERMINAL)
     endif()
     if(TROPICAL_METAL)
