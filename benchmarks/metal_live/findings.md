@@ -40,14 +40,30 @@ jump moved backward across that anchor. The test therefore protects the
 production contract that arbitrary forward/reverse clock jumps preserve the
 same closed-form control state on Metal and JIT.
 
-The leading precision hypothesis is retained as an inference, not a resolved
-cause. After the post-swap alternating far/near clock jumps and 20 velocity
-events, the host reference carries `tau_base ≈ -12466100.511927439` seconds
-while its Metal f32 representation is `-12466101`. The existing deterministic
-velocity discriminator captures after its final anchor and does not cover
-this reverse-crossing shape. A dedicated no-DAC reverse-crossing discriminator
-must separate Metal f32 clock-origin precision from an oracle/state-transfer
-defect before that gate can be changed or the support envelope widened.
+The deterministic no-DAC reverse-crossing discriminator now reproduces the
+retained event coordinates and final `E - 1,536` capture. Before the fix its
+full graph measured 78.900 dB with 2.840e-12 maximum error, while muting only
+the canary measured 140.230 dB. Disabling only the canary glide raised the
+full graph to 143.017 dB; disabling only its frequency anchor left it at
+80.051 dB. Rounding the JIT's `tau_base` to the Metal f32 value did not change
+the comparison. Those controls reject the clock-origin, hot-swap, and replay
+hypotheses and isolate the glided `canary.morph` value.
+
+The cause was the glide's absolute `#t0` source coordinate crossing the
+ordinary f32 Metal slot ABI before subtraction. Around 2^40, that loses far
+more than the 882-sample glide window, so a reverse window near the last
+activation evaluates a different smoothstep position than JIT. Glided
+parameters now carry four little-endian 16-bit `#t0#u0..u3` companions.
+Each limb survives both f64 and f32 slots exactly; emitted JIT/MSL reconstruct
+the integer coordinate and subtract it from `sampleIndex` before converting
+the bounded elapsed delta to float. The legacy scalar `#t0` remains for
+introspection and plans without the exact companions.
+
+After the fix, the full reverse crossing measures 143.021 dB with 2.679e-15
+maximum error. Capture-after-`E`, no-velocity, and no-swap controls measure
+143.015, 143.390, and 143.606 dB. A separately forced delayed-dispatch oracle
+measures 142.380 dB for exact replay and 83.429 dB for the deliberately stale
+batch-start replay, so the oracle remains discriminating.
 
 The earlier fixed-start candidate at `22b7ca8` is retained as
 [`data/startup-hardening-smoke-b512-r512-60s-22b7ca8-m1pro-20260729.jsonl`](data/startup-hardening-smoke-b512-r512-60s-22b7ca8-m1pro-20260729.jsonl),
@@ -59,10 +75,12 @@ offline support loop still used the callback entry point, and active-bank
 refills overwrote candidate-stage timestamps. It is evidence for those fixes,
 not a qualification pass.
 
-Live-Metal release support remains withheld because the final reference
-correctness gate is unresolved. The queue-aware startup and offline rendering
-fixes are nevertheless validated; the old prime-drain failure is not present
-in the final candidate.
+Live-Metal release support remains withheld pending a clean retained
+60-second Bdev=512/Rgpu=512 hardware validation of this fix. The existing
+`8f7eecb` row remains a blocked result for that exact commit; deterministic
+evidence does not rewrite it. The queue-aware startup and offline rendering
+fixes remain validated, and the old prime-drain failure is not present in the
+final candidate.
 
 ## 2026-07-29 prime-drain diagnostic
 

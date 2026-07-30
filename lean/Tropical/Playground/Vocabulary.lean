@@ -418,9 +418,9 @@ def pref (pidx : String → Option Nat) (name : String) (dflt : Sig) : Sig :=
 
 /-- How a continuous port's live writes land — the host contract's dispatch
     key. `raw` = plain slot write; `glide` = closed-form smoothstep re-anchor
-    (`#v0/#v1/#t0` companion slots); `anchor` = phase-anchored frequency
-    (`#phase` companion — gliding a frequency VALUE would reintroduce the
-    τ·f' chirp, so pitch keeps phase continuous instead). -/
+    (`#v0/#v1/#t0` plus exact-t0 limb companions); `anchor` =
+    phase-anchored frequency (`#phase` companion — gliding a frequency VALUE
+    would reintroduce the τ·f' chirp, so pitch keeps phase continuous instead). -/
 inductive Discipline where
   | raw | glide | anchor
 deriving BEq, Repr
@@ -619,17 +619,42 @@ def fallbackOf (kind kname : String) : Sig :=
 def displayRangeOf (kind kname : String) : Option (Float × Float) :=
   ((portOf kind kname).bind (·.display)).map (fun d => (d.min, d.max))
 
-/-- A closed-form smoothstep GLIDE of τ from three slots: `v0 + (v1−v0)·s²(3−2s)`,
-    `s = clamp((τ − t0)/dur, 0, 1)`, `dur = 0.02·sampleRate` samples (20 ms at any
-    rate, matching the engine's glide discipline for `set_param`). The value eases from `v0` to
-    `v1` starting at tick `t0`; the control plane re-anchors the slots on each turn.
-    Stateless — the ramp is a pure function of the ambient clock, not an accumulator. -/
+/-- Reassemble a signed i64 from four little-endian 16-bit float-slot limbs.
+    Every limb is exactly representable by both f64 JIT slots and f32 Metal
+    snapshots; shifting the top limb into bit 63 gives the same two's-complement
+    value on both backends. -/
+def exactI64Companion (pidx : String → Option Nat) (base : String) : Sig :=
+  let sampleZero := toFloatE (sub .sampleIndex .sampleIndex)
+  let limb := fun i =>
+    -- Make each slot read itself sample-stage. Pinning only the assembled
+    -- integer leaves this subtree stage-0, so the splitter transports the
+    -- already-assembled i64 through one f32 coefficient column.
+    toIntE (add (pref pidx s!"{base}#u{i}" (lit 0)) sampleZero)
+  bitOr (bitOr (limb 0) (lshift (limb 1) (lit 16)))
+    (bitOr (lshift (limb 2) (lit 32)) (lshift (limb 3) (lit 48)))
+
+/-- A closed-form smoothstep GLIDE of τ from value slots plus an exact t0
+    companion: `v0 + (v1−v0)·s²(3−2s)`,
+    `s = clamp(float(sampleIndex − t0_exact)/dur, 0, 1)`,
+    `dur = 0.02·sampleRate` samples (20 ms at any rate, matching the engine's
+    glide discipline for `set_param`). The subtraction stays on the i64 clock
+    rail, so Metal never rounds two post-2^24 absolute timestamps to f32 before
+    taking their small difference. The legacy scalar `#t0` remains manifest
+    state for old hosts and introspection; new plans reconstruct the kernel
+    coordinate from four exact 16-bit limbs. Stateless — the ramp is a pure
+    function of the ambient clock, not an accumulator. -/
 def glideExpr (pidx : String → Option Nat) (base : String) (dflt : Sig) : Sig :=
   let v0 := pref pidx s!"{base}#v0" dflt
   let v1 := pref pidx s!"{base}#v1" dflt
   let t0 := pref pidx s!"{base}#t0" (lit 0)
+  let exactNames := (Array.range 4).map fun i => s!"{base}#t0#u{i}"
+  let elapsed :=
+    if exactNames.all (fun name => (pidx name).isSome) then
+      toFloatE (sub .sampleIndex (exactI64Companion pidx s!"{base}#t0"))
+    else
+      sub (toFloatE .sampleIndex) t0
   let dur := mul (lit 2 2) .sampleRate   -- 0.02·SR = 20 ms
-  let s  := clampE (div (sub (toFloatE .sampleIndex) t0) dur) (lit 0) (lit 1)
+  let s  := clampE (div elapsed dur) (lit 0) (lit 1)
   let ss := mul (mul s s) (sub (lit 3) (mul (lit 2) s))
   add v0 (mul (sub v1 v0) ss)
 

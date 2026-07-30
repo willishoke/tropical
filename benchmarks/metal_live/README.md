@@ -51,14 +51,18 @@ records zero starvation before start, through startup, and across 5,170
 measured callbacks; its separate 1,000-block offline support row also records
 zero starvation. Worker-stage telemetry is complete and ordered.
 
-That row remains blocked on a distinct final-reference correctness gate:
-three Metal/JIT checkpoints measured above 142 dB, while a final reverse clock
-jump across the last velocity anchor measured 78.585 dB against the required
-greater-than-100 dB threshold. The leading hypothesis is Metal f32
-clock-origin precision after alternating far/near jumps, but it is not yet
-isolated from the replay oracle. Release support therefore stays withheld
-pending a deterministic reverse-crossing discriminator and cause-specific
-fix; the old prime-drain defect itself is closed.
+That retained row remains blocked on a distinct final-reference correctness
+gate: three Metal/JIT checkpoints measured above 142 dB, while a final reverse
+clock jump across the last velocity anchor measured 78.585 dB. A deterministic
+no-DAC reproducer has since isolated the cause: the glide start coordinate
+crossed the ordinary f32 Metal slot ABI before subtraction, so an absolute
+timestamp near 2^40 lost the entire 20 ms ramp's resolution. The fix transports
+that coordinate as four exact 16-bit limbs and performs the integer subtraction
+before converting the bounded elapsed delta to float. The reproducer's full
+reverse arm now measures 143.021 dB, with its exact/stale oracle control at
+142.380/83.429 dB. Release support remains withheld until a clean retained
+60-second hardware row validates the fix; the old prime-drain defect itself is
+closed.
 
 The retained B=128/D=3 and B=512/D=3 failures in
 [`findings.md`](findings.md) describe the superseded callback-owned
@@ -114,17 +118,18 @@ benchmark controls are explicitly set and recorded.
 
 ## Deterministic supporting gates
 
-The no-DAC large-clock discriminator reproduces the heavy graph and exact
-production control epochs:
+The no-DAC large-clock discriminator reproduces the heavy graph, all 20
+retained post-swap velocity epochs, and the final `E - 1,536` reverse capture:
 
 ```sh
 python3 benchmarks/metal_live/run_velocity_oracle_discriminator.py
 ```
 
-It requires true 1↔0.75 velocity toggles and the velocity-no-op control to
-remain above 140 dB on Metal versus JIT. It then forces a callback boundary
-between production dispatches: exact-epoch replay must remain above 140 dB
-while the obsolete batch-start oracle must fail below 100 dB.
+Its full reverse, capture-after-`E`, no-velocity, and no-swap arms must remain
+above 140 dB on Metal versus JIT. It records f64/f32 `tau_base`, includes
+glide/anchor causal controls, and forces a callback boundary between production
+dispatches: exact-epoch replay must remain above 140 dB while the obsolete
+batch-start oracle must fail below 100 dB.
 
 `engine/tests/test_metal_kernel.cpp` additionally covers queue ownership and
 bank reuse, callback isolation, terminal dispatch failures, retargeting,

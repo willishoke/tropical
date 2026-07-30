@@ -171,6 +171,13 @@ LEAN_EXPORT lean_obj_res shim_runtime_current_sample_index(b_lean_obj_arg rt,
       lean_box_float(tropical_runtime_current_sample_index(unwrap(rt))));
 }
 
+LEAN_EXPORT lean_obj_res shim_runtime_current_sample_index_u64(b_lean_obj_arg rt,
+                                                               lean_obj_arg world) {
+  (void)world;
+  return lean_io_result_mk_ok(
+      lean_box_uint64(tropical_runtime_current_sample_index_u64(unwrap(rt))));
+}
+
 LEAN_EXPORT lean_obj_res shim_runtime_sample_rate(b_lean_obj_arg rt,
                                                   lean_obj_arg world) {
   (void)world;

@@ -486,8 +486,8 @@ theorem CompilationMode.ofWire_wire (m : CompilationMode) :
     semantics (see design/host-param-dispatch.md for the normative
     re-anchoring math each discipline requires). `name` is the base param
     (slot `param:<name>`); `companions` are the discipline's implementation
-    slots (`#v0/#v1/#t0` for glide, `#phase` for anchor, the `tau_base`
-    sibling for velocity). -/
+    slots (`#v0/#v1/#t0` and exact-t0 limbs for glide, `#phase` for
+    anchor, the `tau_base` sibling for velocity). -/
 structure ParamDiscipline where
   name : String
   discipline : String

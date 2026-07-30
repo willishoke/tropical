@@ -302,6 +302,13 @@ static void test_clock_boundary_handoff()
   }
   ASSERT(static_cast<uint64_t>(tropical_runtime_current_sample_index(rt))
          == starts.back() + buf);
+  ASSERT(tropical_runtime_current_sample_index_u64(rt)
+         == starts.back() + buf);
+  constexpr uint64_t far_exact = (uint64_t{1} << 54) + 123;
+  tropical_runtime_set_sample_index(rt, far_exact);
+  tropical_runtime_process(rt);
+  ASSERT(tropical_runtime_current_sample_index_u64(rt)
+         == far_exact + buf);
   ASSERT(tropical_runtime_ownership_failure_count(rt) == 0);
   tropical_runtime_free(rt);
 }
