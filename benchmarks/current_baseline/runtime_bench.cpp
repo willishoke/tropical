@@ -67,7 +67,9 @@ struct Options
   std::optional<uint32_t> reference_slot;
   double slot_value = 0.75;
   std::optional<uint64_t> reload_at;
+  std::optional<uint64_t> reload_every;
   std::optional<uint64_t> jump_at;
+  std::optional<uint64_t> jump_every;
   uint64_t jump_index = (uint64_t{1} << 40);
   bool latency = false;
   bool dac = false;
@@ -198,7 +200,11 @@ Options parse_options(int argc, char ** argv)
       o.reference_slot = static_cast<uint32_t>(parse_u64(value(), "--reference-slot"));
     else if (flag == "--slot-value") o.slot_value = parse_double(value(), "--slot-value");
     else if (flag == "--reload-at") o.reload_at = parse_u64(value(), "--reload-at");
+    else if (flag == "--reload-every")
+      o.reload_every = parse_u64(value(), "--reload-every");
     else if (flag == "--jump-at") o.jump_at = parse_u64(value(), "--jump-at");
+    else if (flag == "--jump-every")
+      o.jump_every = parse_u64(value(), "--jump-every");
     else if (flag == "--jump-index") o.jump_index = parse_u64(value(), "--jump-index");
     else if (flag == "--latency") o.latency = true;
     else if (flag == "--realtime") o.realtime = true;
@@ -222,6 +228,10 @@ Options parse_options(int argc, char ** argv)
     throw std::runtime_error("--reference-every requires --reference-slot");
   if (o.dac && o.duration_seconds <= 0.0)
     throw std::runtime_error("--dac requires --duration-seconds");
+  if ((o.jump_every && *o.jump_every == 0)
+      || (o.reload_every && *o.reload_every == 0))
+    throw std::runtime_error(
+      "--jump-every and --reload-every must be positive");
   if (o.dac && o.write_every > 0 && !o.write_stop_at)
     throw std::runtime_error(
       "--dac writes require --write-stop-at before the final checkpoint");
@@ -377,10 +387,19 @@ int main(int argc, char ** argv)
     if (!load(rt, o, ir, manifest, coeff, msl))
       throw std::runtime_error(tropical_last_error());
     const uint64_t load_ns = elapsed_ns(load_start, Clock::now());
-    const uint32_t depth = tropical_runtime_metal_pipeline_depth(rt);
+    const uint32_t render_tile_frames =
+      tropical_runtime_metal_render_tile_frames(rt);
+    const uint32_t worker_capacity_frames =
+      tropical_runtime_metal_worker_capacity_frames(rt);
 
+    // Warm-up is an offline/control-thread concern. In particular, the Metal
+    // callback entry point consumes a finite render-ahead queue; driving it in
+    // a tight unpaced loop can drain the four prepared tiles before the
+    // worker observes their release. The offline entry point preserves the
+    // same clock/output warm-up while waiting for each exact Metal tile.
     for (uint64_t i = 0; i < o.warmup; ++i)
-      tropical_runtime_process(rt);
+      if (!tropical_runtime_process_offline(rt))
+        throw std::runtime_error(tropical_last_error());
 
     const double before =
       tropical_runtime_output_buffer(rt) ? tropical_runtime_output_buffer(rt)[0] : 0.0;
@@ -421,9 +440,11 @@ int main(int argc, char ** argv)
     std::optional<uint64_t> writes_stopped_block;
     std::optional<uint64_t> jump_request_block;
     std::optional<uint64_t> jump_progress_block;
+    std::optional<uint64_t> jump_activation_epoch;
     std::optional<uint64_t> reload_request_block;
     std::optional<uint64_t> reload_publication_block;
     std::optional<uint64_t> reload_progress_block;
+    std::optional<uint64_t> reload_activation_epoch;
     std::optional<uint64_t> start_reference_block;
     std::optional<uint64_t> post_jump_reference_block;
     std::optional<uint64_t> midpoint_reference_block;
@@ -432,6 +453,9 @@ int main(int argc, char ** argv)
     std::optional<uint64_t> post_jump_preceding_write_block;
     std::optional<uint64_t> midpoint_preceding_write_block;
     std::optional<uint64_t> end_preceding_write_block;
+    std::optional<uint64_t> last_write_activation_epoch;
+    std::vector<uint64_t> jump_activation_epochs;
+    std::vector<uint64_t> swap_activation_epochs;
     std::optional<uint64_t> latency_blocks;
     std::optional<uint64_t> reload_ns;
     uint64_t overrun_count = 0;
@@ -443,6 +467,17 @@ int main(int argc, char ** argv)
     uint64_t ownership_failure_count = 0;
     uint64_t reference_ownership_failure_count = 0;
     uint64_t metal_dispatch_failure_count = 0;
+    uint64_t metal_render_starvation_count = 0;
+    uint64_t metal_render_starvation_count_before_dac_start = 0;
+    uint64_t metal_render_starvation_count_after_dac_start = 0;
+    uint64_t metal_render_starvation_count_before_stats_reset = 0;
+    uint64_t metal_render_starvation_count_measured_delta = 0;
+    tropical_metal_starvation_snapshot_t
+      metal_first_starvation_snapshot{};
+    uint64_t metal_epoch_tag_mismatch_count = 0;
+    uint64_t metal_activation_retarget_count = 0;
+    uint64_t metal_activation_failure_count = 0;
+    uint64_t metal_callback_thread_violation_count = 0;
     uint64_t nonfinite_count = 0;
     double checksum = 0.0;
     double write_value = o.slot_value;
@@ -512,7 +547,11 @@ int main(int argc, char ** argv)
         rt, static_cast<unsigned int>(o.rate), 2));
       tropical_dac_t dac = dac_owner.get();
       if (!dac) throw std::runtime_error(tropical_last_error());
+      metal_render_starvation_count_before_dac_start =
+        tropical_runtime_metal_render_starvation_count(rt);
       tropical_dac_start(dac);
+      metal_render_starvation_count_after_dac_start =
+        tropical_runtime_metal_render_starvation_count(rt);
       if (!tropical_dac_is_running(dac))
       {
         const std::string error = tropical_last_error();
@@ -533,6 +572,8 @@ int main(int argc, char ** argv)
       // two-second boundary before any qualification event is scheduled.
       std::this_thread::sleep_for(std::chrono::seconds(2));
       snapshot("startup_warmup_before_reset");
+      metal_render_starvation_count_before_stats_reset =
+        tropical_runtime_metal_render_starvation_count(rt);
       negotiated_buffer_frames = tropical_dac_get_buffer_frames(dac);
       if (negotiated_buffer_frames != o.buffer)
       {
@@ -703,6 +744,11 @@ int main(int argc, char ** argv)
       bool jump_progress_seen = false;
       bool reloaded = false;
       bool reload_progress_seen = false;
+      bool replacement_live = false;
+      uint64_t jump_request_count = 0;
+      uint64_t swap_request_count = 0;
+      uint64_t next_jump_block = *o.jump_at;
+      uint64_t next_reload_block = *o.reload_at;
       while (!dac_aborted
              && std::chrono::duration<double>(
                   Clock::now() - measured_start).count()
@@ -721,6 +767,16 @@ int main(int argc, char ** argv)
           tropical_runtime_ownership_failure_count(reference_rt);
         metal_dispatch_failure_count =
           tropical_runtime_metal_dispatch_failure_count(rt);
+        metal_render_starvation_count =
+          tropical_runtime_metal_render_starvation_count(rt);
+        metal_epoch_tag_mismatch_count =
+          tropical_runtime_metal_epoch_tag_mismatch_count(rt);
+        metal_activation_retarget_count =
+          tropical_runtime_metal_activation_retarget_count(rt);
+        metal_activation_failure_count =
+          tropical_runtime_metal_activation_failure_count(rt);
+        metal_callback_thread_violation_count =
+          tropical_runtime_metal_callback_thread_violation_count(rt);
         if (tropical_dac_is_reconnecting(dac) || disconnect_count > 0
             || reconnect_success_count > 0 || reconnect_failure_count > 0)
         {
@@ -739,10 +795,23 @@ int main(int argc, char ** argv)
           snapshot("measured_failure_abort");
           break;
         }
-        if (metal_dispatch_failure_count > 0)
+        if (metal_dispatch_failure_count > 0
+            || metal_render_starvation_count > 0
+            || metal_epoch_tag_mismatch_count > 0
+            || metal_activation_failure_count > 0
+            || metal_callback_thread_violation_count > 0)
         {
           dac_aborted = true;
-          dac_abort_reason = "metal_dispatch_failure";
+          if (metal_dispatch_failure_count > 0)
+            dac_abort_reason = "metal_dispatch_failure";
+          else if (metal_render_starvation_count > 0)
+            dac_abort_reason = "metal_render_starvation";
+          else if (metal_epoch_tag_mismatch_count > 0)
+            dac_abort_reason = "metal_epoch_tag_mismatch";
+          else if (metal_activation_failure_count > 0)
+            dac_abort_reason = "metal_activation_failure";
+          else
+            dac_abort_reason = "metal_callback_thread_violation";
           snapshot("measured_failure_abort");
           break;
         }
@@ -810,21 +879,45 @@ int main(int argc, char ** argv)
           }
           if (!first_write_block) first_write_block = block;
           last_write_block = block;
+          last_write_activation_epoch =
+            tropical_runtime_metal_published_activation_epoch(rt);
           writes_completed = true;
           next_write += o.write_every;
         }
-        if (!jumped && baseline_completed && writes_completed
+        if (baseline_completed && writes_completed
             && last_write_block && block > *last_write_block
-            && o.jump_at && block >= *o.jump_at)
+            && (!jumped || jump_progress_seen)
+            && block >= next_jump_block)
         {
-          snapshot("before_clock_jump");
-          jump_request_block = block;
-          tropical_runtime_set_sample_index(rt, o.jump_index);
-          tropical_runtime_set_sample_index(reference_rt, o.jump_index);
-          jumped = true;
+          const bool first = !jumped;
+          if (first)
+          {
+            snapshot("before_clock_jump");
+            jump_request_block = block;
+          }
+          const uint64_t requested_index =
+            (jump_request_count & 1ULL) == 0
+              ? o.jump_index : block * static_cast<uint64_t>(o.buffer);
+          tropical_runtime_set_sample_index(rt, requested_index);
+          tropical_runtime_set_sample_index(
+            reference_rt, requested_index);
+          const uint64_t activation_epoch =
+            tropical_runtime_metal_published_activation_epoch(rt);
+          jump_activation_epochs.push_back(activation_epoch);
+          if (first)
+          {
+            jump_activation_epoch = activation_epoch;
+            jumped = true;
+          }
+          ++jump_request_count;
+          next_jump_block = o.jump_every
+            ? block + *o.jump_every
+            : std::numeric_limits<uint64_t>::max();
         }
         if (jumped && !jump_progress_seen
-            && block >= *jump_request_block + depth + 1)
+            && jump_activation_epoch
+            && tropical_runtime_metal_acknowledged_activation_epoch(rt)
+                 >= *jump_activation_epoch)
         {
           jump_progress_seen = true;
           jump_completed = true;
@@ -843,27 +936,54 @@ int main(int argc, char ** argv)
             break;
           }
         }
-        if (!reloaded && jump_completed && last_write_block
-            && block > *last_write_block && o.reload_at
-            && block >= *o.reload_at)
+        if (jump_completed && last_write_block
+            && block > *last_write_block
+            && (!reloaded || reload_progress_seen)
+            && block >= next_reload_block)
         {
-          snapshot("before_hot_swap");
-          reload_request_block = block;
+          const bool first = !reloaded;
+          if (first)
+          {
+            snapshot("before_hot_swap");
+            reload_request_block = block;
+          }
           const auto start = Clock::now();
-          if (!load(rt, o, reload_ir, reload_manifest,
-                    reload_coeff, reload_msl))
+          replacement_live = !replacement_live;
+          const std::string & next_ir =
+            replacement_live ? reload_ir : ir;
+          const std::string & next_manifest =
+            replacement_live ? reload_manifest : manifest;
+          const std::string & next_coeff =
+            replacement_live ? reload_coeff : coeff;
+          const std::string & next_msl =
+            replacement_live ? reload_msl : msl;
+          if (!load(rt, o, next_ir, next_manifest,
+                    next_coeff, next_msl))
             throw std::runtime_error(tropical_last_error());
           reload_ns = elapsed_ns(start, Clock::now());
           tropical_dac_stats_t published{};
           tropical_dac_get_stats(dac, &published);
-          reload_publication_block = published.callback_count;
-          if (!load(reference_rt, o, reload_ir, reload_manifest,
-                    reload_coeff, {}))
+          const uint64_t activation_epoch =
+            tropical_runtime_metal_published_activation_epoch(rt);
+          swap_activation_epochs.push_back(activation_epoch);
+          if (first)
+          {
+            reload_publication_block = published.callback_count;
+            reload_activation_epoch = activation_epoch;
+          }
+          if (!load(reference_rt, o, next_ir, next_manifest,
+                    next_coeff, {}))
             throw std::runtime_error(tropical_last_error());
-          reloaded = true;
+          if (first) reloaded = true;
+          ++swap_request_count;
+          next_reload_block = o.reload_every
+            ? block + *o.reload_every
+            : std::numeric_limits<uint64_t>::max();
         }
         if (reloaded && !reload_progress_seen
-            && block >= *reload_publication_block + depth + 1)
+            && reload_activation_epoch
+            && tropical_runtime_metal_acknowledged_activation_epoch(rt)
+                 >= *reload_activation_epoch)
         {
           reload_progress_seen = true;
           reload_completed = true;
@@ -904,8 +1024,15 @@ int main(int argc, char ** argv)
       {
         const bool future_queue_clear =
           writes_stopped_block && last_write_block
-          && block >= *writes_stopped_block + depth + 1
-          && block >= *last_write_block + depth + 1;
+          && last_write_activation_epoch
+          && tropical_runtime_metal_acknowledged_activation_epoch(rt)
+               >= std::max(
+                 *last_write_activation_epoch,
+                 std::max(
+                   jump_activation_epochs.empty()
+                     ? 0 : jump_activation_epochs.back(),
+                   swap_activation_epochs.empty()
+                     ? 0 : swap_activation_epochs.back()));
         if (!reload_completed || !writes_stopped || !future_queue_clear)
         {
           dac_aborted = true;
@@ -955,6 +1082,16 @@ int main(int argc, char ** argv)
         tropical_runtime_ownership_failure_count(reference_rt);
       metal_dispatch_failure_count =
         tropical_runtime_metal_dispatch_failure_count(rt);
+      metal_render_starvation_count =
+        tropical_runtime_metal_render_starvation_count(rt);
+      metal_epoch_tag_mismatch_count =
+        tropical_runtime_metal_epoch_tag_mismatch_count(rt);
+      metal_activation_retarget_count =
+        tropical_runtime_metal_activation_retarget_count(rt);
+      metal_activation_failure_count =
+        tropical_runtime_metal_activation_failure_count(rt);
+      metal_callback_thread_violation_count =
+        tropical_runtime_metal_callback_thread_violation_count(rt);
 
       callback_histogram.resize(
         tropical_dac_callback_histogram_bin_count(), 0);
@@ -1024,7 +1161,13 @@ int main(int argc, char ** argv)
         }
 
         const auto start = Clock::now();
-        tropical_runtime_process(rt);
+        // Only a wall-clock-paced loop models the callback entry point.
+        // Unpaced benchmark work is an offline renderer and must wait for the
+        // worker's exact next Metal tile instead of draining render-ahead.
+        if (o.realtime)
+          tropical_runtime_process(rt);
+        else if (!tropical_runtime_process_offline(rt))
+          throw std::runtime_error(tropical_last_error());
         const uint64_t ns = elapsed_ns(start, Clock::now());
         process_ns.push_back(ns);
         if (ns > deadline_ns) ++overrun_count;
@@ -1088,6 +1231,44 @@ int main(int argc, char ** argv)
       tropical_runtime_ownership_failure_count(rt);
     metal_dispatch_failure_count =
       tropical_runtime_metal_dispatch_failure_count(rt);
+    metal_render_starvation_count =
+      tropical_runtime_metal_render_starvation_count(rt);
+    metal_render_starvation_count_measured_delta =
+      metal_render_starvation_count
+        >= metal_render_starvation_count_before_stats_reset
+      ? metal_render_starvation_count
+          - metal_render_starvation_count_before_stats_reset
+      : metal_render_starvation_count;
+    (void)tropical_runtime_metal_first_starvation_snapshot(
+      rt, &metal_first_starvation_snapshot);
+    metal_epoch_tag_mismatch_count =
+      tropical_runtime_metal_epoch_tag_mismatch_count(rt);
+    metal_activation_retarget_count =
+      tropical_runtime_metal_activation_retarget_count(rt);
+    metal_activation_failure_count =
+      tropical_runtime_metal_activation_failure_count(rt);
+    metal_callback_thread_violation_count =
+      tropical_runtime_metal_callback_thread_violation_count(rt);
+    tropical_metal_worker_stage_times_t worker_stage_times{};
+    tropical_runtime_metal_worker_stage_times(rt, &worker_stage_times);
+    tropical_metal_activation_latency_stats_t activation_latency{};
+    tropical_runtime_metal_activation_latency_stats(
+      rt, &activation_latency);
+    const uint64_t metal_worker_cpu_ns =
+      tropical_runtime_metal_worker_cpu_time_ns(rt);
+    const uint64_t metal_worker_wall_ns =
+      tropical_runtime_metal_worker_wall_time_ns(rt);
+    const uint64_t acknowledged_activation_epoch =
+      tropical_runtime_metal_acknowledged_activation_epoch(rt);
+    const auto acknowledged_count =
+      [acknowledged_activation_epoch](
+        const std::vector<uint64_t> & epochs) {
+        return static_cast<uint64_t>(std::count_if(
+          epochs.begin(), epochs.end(),
+          [acknowledged_activation_epoch](uint64_t epoch) {
+            return epoch != 0 && epoch <= acknowledged_activation_epoch;
+          }));
+      };
     const uint64_t final_rss = required_rss_bytes();
 
     auto print_optional = [](const std::optional<uint64_t> & value) {
@@ -1098,7 +1279,10 @@ int main(int argc, char ** argv)
               << ",\"buffer_length\":" << o.buffer
               << ",\"sample_rate\":" << std::setprecision(17) << o.rate
               << ",\"backend\":\"" << (msl.empty() ? "jit" : "metal") << "\""
-              << ",\"pipeline_depth\":" << depth
+              << ",\"device_frames\":" << o.buffer
+              << ",\"metal_render_tile_frames\":" << render_tile_frames
+              << ",\"metal_worker_capacity_frames\":"
+              << worker_capacity_frames
               << ",\"load_ns\":" << load_ns
               << ",\"run_ns\":" << run_ns
               << ",\"measured_loop_ns\":" << measured_loop_ns
@@ -1131,6 +1315,89 @@ int main(int argc, char ** argv)
               << reference_ownership_failure_count
               << ",\"metal_dispatch_failure_count\":"
               << metal_dispatch_failure_count
+              << ",\"metal_render_starvation_count\":"
+              << metal_render_starvation_count
+              << ",\"metal_render_starvation_count_before_dac_start\":"
+              << metal_render_starvation_count_before_dac_start
+              << ",\"metal_render_starvation_count_after_dac_start\":"
+              << metal_render_starvation_count_after_dac_start
+              << ",\"metal_render_starvation_count_before_stats_reset\":"
+              << metal_render_starvation_count_before_stats_reset
+              << ",\"metal_render_starvation_count_measured_delta\":"
+              << metal_render_starvation_count_measured_delta
+              << ",\"metal_first_starvation_snapshot\":{"
+              << "\"valid\":"
+              << (metal_first_starvation_snapshot.valid ? "true" : "false")
+              << ",\"epoch_id\":"
+              << metal_first_starvation_snapshot.epoch_id
+              << ",\"device_frame\":"
+              << metal_first_starvation_snapshot.device_frame
+              << ",\"source_sample\":"
+              << metal_first_starvation_snapshot.source_sample
+              << ",\"expected_tile_device\":"
+              << metal_first_starvation_snapshot.expected_tile_device
+              << ",\"expected_tile_source\":"
+              << metal_first_starvation_snapshot.expected_tile_source
+              << ",\"last_published_epoch\":"
+              << metal_first_starvation_snapshot.last_published_epoch
+              << ",\"last_published_device_end\":"
+              << metal_first_starvation_snapshot.last_published_device_end
+              << ",\"last_published_source_end\":"
+              << metal_first_starvation_snapshot.last_published_source_end
+              << ",\"active_bank\":"
+              << metal_first_starvation_snapshot.active_bank
+              << ",\"expected_tile_index\":"
+              << metal_first_starvation_snapshot.expected_tile_index
+              << ",\"observed_tile_state\":"
+              << metal_first_starvation_snapshot.observed_tile_state
+              << ",\"ready_mask\":"
+              << metal_first_starvation_snapshot.ready_mask
+              << ",\"free_mask\":"
+              << metal_first_starvation_snapshot.free_mask
+              << ",\"rendering_mask\":"
+              << metal_first_starvation_snapshot.rendering_mask
+              << ",\"reading_mask\":"
+              << metal_first_starvation_snapshot.reading_mask << '}'
+              << ",\"metal_epoch_tag_mismatch_count\":"
+              << metal_epoch_tag_mismatch_count
+              << ",\"metal_activation_retarget_count\":"
+              << metal_activation_retarget_count
+              << ",\"metal_activation_failure_count\":"
+              << metal_activation_failure_count
+              << ",\"metal_callback_thread_violation_count\":"
+              << metal_callback_thread_violation_count
+              << ",\"metal_worker_stage_times\":{"
+              << "\"request_received\":"
+              << worker_stage_times.request_received
+              << ",\"activation_target_reserved\":"
+              << worker_stage_times.activation_target_reserved
+              << ",\"candidate_render_submitted\":"
+              << worker_stage_times.candidate_render_submitted
+              << ",\"candidate_gpu_completion\":"
+              << worker_stage_times.candidate_gpu_completion
+              << ",\"candidate_window_ready\":"
+              << worker_stage_times.candidate_window_ready
+              << ",\"activation_published\":"
+              << worker_stage_times.activation_published
+              << ",\"activation_acknowledged\":"
+              << worker_stage_times.activation_acknowledged
+              << ",\"old_epoch_retired\":"
+              << worker_stage_times.old_epoch_retired << '}'
+              << ",\"metal_activation_latency\":{"
+              << "\"count\":" << activation_latency.count
+              << ",\"total_ns\":" << activation_latency.total_ns
+              << ",\"min_ns\":" << activation_latency.min_ns
+              << ",\"max_ns\":" << activation_latency.max_ns
+              << ",\"mean_ns\":"
+              << (activation_latency.count
+                    ? activation_latency.total_ns
+                      / activation_latency.count : 0) << '}'
+              << ",\"metal_worker_cpu_ns\":" << metal_worker_cpu_ns
+              << ",\"metal_worker_wall_ns\":" << metal_worker_wall_ns
+              << ",\"metal_worker_cpu_wall_fraction\":"
+              << (metal_worker_wall_ns
+                    ? static_cast<double>(metal_worker_cpu_ns)
+                      / static_cast<double>(metal_worker_wall_ns) : 0.0)
               << ",\"reload_artifacts_distinct\":"
               << (reload_artifacts_distinct ? "true" : "false")
               << ",\"overrun_count\":" << overrun_count
@@ -1139,8 +1406,7 @@ int main(int argc, char ** argv)
               << ",\"final_rss_bytes\":" << final_rss
               << ",\"latency_blocks\":";
     if (latency_blocks) std::cout << *latency_blocks; else std::cout << "null";
-    std::cout << ",\"predicted_latency_blocks\":" << depth
-              << ",\"reload_ns\":";
+    std::cout << ",\"reload_ns\":";
     if (reload_ns) std::cout << *reload_ns; else std::cout << "null";
     std::cout << ",\"process_ns\":";
     print_array(process_ns);
@@ -1215,6 +1481,26 @@ int main(int argc, char ** argv)
               << (end_reference_completed ? "true" : "false")
               << ",\"callback_progress_stalled\":"
               << (callback_progress_stalled ? "true" : "false")
+              << '}';
+    std::cout << ",\"event_activation_epochs\":{";
+    std::cout << "\"last_write\":";
+    print_optional(last_write_activation_epoch);
+    std::cout << ",\"clock_jump\":";
+    print_optional(jump_activation_epoch);
+    std::cout << ",\"hot_swap\":";
+    print_optional(reload_activation_epoch);
+    std::cout << ",\"acknowledged_final\":"
+              << acknowledged_activation_epoch
+              << '}';
+    std::cout << ",\"transition_activation_evidence\":{"
+              << "\"clock_jump_requested\":"
+              << jump_activation_epochs.size()
+              << ",\"clock_jump_acknowledged\":"
+              << acknowledged_count(jump_activation_epochs)
+              << ",\"hot_swap_requested\":"
+              << swap_activation_epochs.size()
+              << ",\"hot_swap_acknowledged\":"
+              << acknowledged_count(swap_activation_epochs)
               << '}';
     std::cout << ",\"event_blocks\":{";
     std::cout << "\"baseline\":"; print_optional(baseline_block);

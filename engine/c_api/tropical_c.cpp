@@ -369,6 +369,25 @@ void tropical_runtime_process(tropical_runtime_t r)
   if (r) static_cast<tropical_runtime::FlatRuntime*>(r)->process();
 }
 
+bool tropical_runtime_process_offline(tropical_runtime_t r)
+{
+  if (!r)
+  {
+    set_error("runtime process offline: null runtime");
+    return false;
+  }
+  try
+  {
+    static_cast<tropical_runtime::FlatRuntime*>(r)->process_offline();
+    return true;
+  }
+  catch (const std::exception & e)
+  {
+    set_error(e.what());
+    return false;
+  }
+}
+
 const double* tropical_runtime_output_buffer(tropical_runtime_t r)
 {
   if (!r) return nullptr;
@@ -381,10 +400,75 @@ unsigned int tropical_runtime_get_buffer_length(tropical_runtime_t r)
   return static_cast<tropical_runtime::FlatRuntime*>(r)->getBufferLength();
 }
 
-unsigned int tropical_runtime_metal_pipeline_depth(tropical_runtime_t r)
+unsigned int tropical_runtime_metal_render_tile_frames(tropical_runtime_t r)
 {
   if (!r) return 0;
-  return static_cast<tropical_runtime::FlatRuntime*>(r)->metal_pipeline_depth();
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_render_tile_frames();
+}
+
+unsigned int tropical_runtime_metal_worker_capacity_frames(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_worker_capacity_frames();
+}
+
+uint64_t tropical_runtime_metal_published_activation_epoch(
+  tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_published_activation_epoch();
+}
+
+uint64_t tropical_runtime_metal_acknowledged_activation_epoch(
+  tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_acknowledged_activation_epoch();
+}
+
+bool tropical_runtime_metal_worker_stage_times(
+  tropical_runtime_t r, tropical_metal_worker_stage_times_t * out)
+{
+  if (!out) return false;
+  *out = {};
+  if (!r) return false;
+  const auto times = static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_worker_stage_times();
+  *out = {
+    times[0], times[1], times[2], times[3],
+    times[4], times[5], times[6], times[7],
+  };
+  return true;
+}
+
+bool tropical_runtime_metal_activation_latency_stats(
+  tropical_runtime_t r, tropical_metal_activation_latency_stats_t * out)
+{
+  if (!out) return false;
+  *out = {};
+  if (!r) return false;
+  const auto stats = static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_activation_latency_stats();
+  *out = {stats[0], stats[1], stats[2], stats[3]};
+  return true;
+}
+
+uint64_t tropical_runtime_metal_worker_cpu_time_ns(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_worker_cpu_time_ns();
+}
+
+uint64_t tropical_runtime_metal_worker_wall_time_ns(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_worker_wall_time_ns();
 }
 
 uint64_t tropical_runtime_ownership_failure_count(tropical_runtime_t r)
@@ -399,6 +483,71 @@ uint64_t tropical_runtime_metal_dispatch_failure_count(tropical_runtime_t r)
   if (!r) return 0;
   return static_cast<tropical_runtime::FlatRuntime*>(r)
     ->metal_dispatch_failure_count();
+}
+
+uint64_t tropical_runtime_metal_render_starvation_count(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_render_starvation_count();
+}
+
+bool tropical_runtime_metal_first_starvation_snapshot(
+  tropical_runtime_t r, tropical_metal_starvation_snapshot_t * out)
+{
+  if (!out) return false;
+  *out = {};
+  if (!r) return false;
+  const auto snapshot = static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_first_starvation_snapshot();
+  *out = {
+    snapshot[0] != 0,
+    snapshot[1],
+    snapshot[2],
+    snapshot[3],
+    snapshot[4],
+    snapshot[5],
+    snapshot[6],
+    snapshot[7],
+    snapshot[8],
+    static_cast<uint32_t>(snapshot[9]),
+    static_cast<uint32_t>(snapshot[10]),
+    static_cast<uint32_t>(snapshot[11]),
+    static_cast<uint32_t>(snapshot[12]),
+    static_cast<uint32_t>(snapshot[13]),
+    static_cast<uint32_t>(snapshot[14]),
+    static_cast<uint32_t>(snapshot[15]),
+  };
+  return out->valid;
+}
+
+uint64_t tropical_runtime_metal_epoch_tag_mismatch_count(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_epoch_tag_mismatch_count();
+}
+
+uint64_t tropical_runtime_metal_activation_retarget_count(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_activation_retarget_count();
+}
+
+uint64_t tropical_runtime_metal_activation_failure_count(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_activation_failure_count();
+}
+
+uint64_t tropical_runtime_metal_callback_thread_violation_count(
+  tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_callback_thread_violation_count();
 }
 
 void tropical_runtime_begin_fade_in(tropical_runtime_t r)

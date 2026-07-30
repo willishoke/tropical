@@ -29,6 +29,8 @@
 
 #ifdef TROPICAL_METAL
 #include "metal/MetalKernel.hpp"
+#include "metal/MetalRenderWorker.hpp"
+#include "runtime/EpochTileQueue.hpp"
 #endif
 
 namespace tropical_plan5 { struct ParsedPlan5; }
@@ -146,18 +148,6 @@ struct KernelState
   std::vector<double> audio_slots;
   uint32_t control_published_gen = 0;
 
-  // Metal upload staging for the coefficient columns: the packed f32 image
-  // of the captured generation, rebuilt once per process() (audio thread,
-  // no allocation) and copied into the GPU column buffer per dispatch —
-  // at encode on the sync path, at enqueue on the pipelined path. Packed
-  // in `coeff_array_slots` order, each column at full capacity — the SAME
-  // layout EmitMsl bakes as compile-time offsets into the kernel text.
-  // Column storage is int64 bit-punned f64 (the JIT loads i64 + bitcast to
-  // double — see EmitLlvm.emitIndex), so the pack is bit_cast<double> then
-  // the same f64→f32 narrowing slots get. Sized at build; empty when the
-  // plan hoists no columns.
-  std::vector<float> metal_column_staging;
-
   // Flat buffers passed to kernel (matches NumericKernelFn signature)
   std::vector<int64_t> registers;
   std::vector<int64_t> temps;
@@ -206,13 +196,8 @@ struct KernelState
 class FlatRuntime
 {
 public:
-  explicit FlatRuntime(unsigned int buffer_length)
-    : buffer_length_(buffer_length),
-      outputBuffer(buffer_length, 0.0)
-  {
-  }
-
-
+  explicit FlatRuntime(unsigned int buffer_length);
+  ~FlatRuntime();
 
   /**
    * Load a kernel from textual LLVM IR plus a metadata manifest.
@@ -255,21 +240,7 @@ public:
    * (the `--start` of render verbs — long-τ gates render windows at
    * arbitrary positions). Serialized against hot-swap.
    */
-  void set_sample_index(uint64_t idx)
-  {
-    std::lock_guard<std::mutex> lock(build_mutex_);
-    sample_index_request_seq_.fetch_add(1, std::memory_order_acq_rel);
-    requested_sample_index_.store(idx, std::memory_order_release);
-    if (RuntimeOwnershipTestSeam * seam =
-          ownership_test_seam_.load(std::memory_order_acquire);
-        seam && seam->pause_after_clock_payload.load(std::memory_order_acquire))
-    {
-      seam->clock_payload_stored.store(true, std::memory_order_release);
-      while (!seam->release_clock.load(std::memory_order_acquire))
-        std::this_thread::yield();
-    }
-    sample_index_request_seq_.fetch_add(1, std::memory_order_release);
-  }
+  void set_sample_index(uint64_t idx);
 
   /**
    * Process one buffer of audio. Called from the audio thread.
@@ -280,9 +251,28 @@ public:
     auto finish_silence = [&] {
       std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);
       audio_sample_index_ += buffer_length_;
-      published_sample_index_.store(
-        audio_sample_index_, std::memory_order_release);
+      audio_device_frame_ += buffer_length_;
+      publish_audio_boundary();
     };
+
+#ifdef TROPICAL_METAL
+    // Metal's audio-facing path never captures KernelState, owns a control
+    // generation, packs coefficients, submits work, or waits. The stable
+    // queue and its tile storage live for the FlatRuntime's whole lifetime.
+    if (metal_audio_enabled_.load(std::memory_order_acquire))
+    {
+      metal_tiles_->synchronize_audio_coordinates(
+        audio_device_frame_, audio_sample_index_);
+      tropical_metal::set_audio_callback_thread(true);
+      metal_tiles_->consume(outputBuffer.data(), buffer_length_);
+      tropical_metal::set_audio_callback_thread(false);
+      audio_device_frame_ = metal_tiles_->published_device_frame();
+      audio_sample_index_ = metal_tiles_->published_source_sample();
+      apply_fade_to_output();
+      publish_audio_boundary();
+      return;
+    }
+#endif
 
     if (RuntimeOwnershipTestSeam * seam =
           ownership_test_seam_.load(std::memory_order_acquire);
@@ -416,14 +406,12 @@ public:
     }
 
     // The generation capture above is the boundary linearization point.
-    // After any successful callback (including a fresh/re-prime callback),
-    // the following capture is steady-state: JIT/sync Metal is audible at C;
-    // pipelined Metal is audible at C + D*B.
+    // JIT callbacks render the captured generation at this boundary. Metal
+    // callbacks returned above after consuming a worker-prepared epoch tile.
     next_capture_sample_index_.store(
       start_sample_index + buffer_length_, std::memory_order_relaxed);
     next_capture_effective_sample_index_.store(
-      steady_state_effective_sample_index(
-        state, start_sample_index + buffer_length_),
+      start_sample_index + buffer_length_,
       std::memory_order_relaxed);
     state_requires_reprime_[state_idx].store(
       false, std::memory_order_relaxed);
@@ -467,8 +455,8 @@ public:
     {
       std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);
       audio_sample_index_ += buffer_length_;
-      published_sample_index_.store(
-        audio_sample_index_, std::memory_order_release);
+      audio_device_frame_ += buffer_length_;
+      publish_audio_boundary();
       control_generation_owners_[state_idx][control_gen].store(
         StorageOwner::Free, std::memory_order_release);
       state_owners_[state_idx].store(
@@ -486,50 +474,6 @@ public:
 
     if (state.mode == tropical_jit::CompilationMode::Fused)
     {
-#ifdef TROPICAL_METAL
-      if (state.metal)
-      {
-        // Pack the captured coefficient-column generation for the GPU.
-        // The generation was captured and advertised once above, so this pack
-        // (and the per-dispatch copy it feeds) inherits the whole-generation
-        // guarantee: the GPU reads one
-        // consistent generation of columns, no cross-column tear on a
-        // live knob move. Value semantics match the JIT's array access
-        // exactly: the int64 storage is bit-punned f64 (load i64 +
-        // bitcast to double), then narrowed f64→f32 like the slot
-        // snapshot.
-        if (!state.coeff_array_slots.empty())
-        {
-          std::size_t off = 0;
-          for (std::size_t j = 0; j < state.coeff_array_slots.size(); ++j)
-          {
-            const auto & col = state.coeff_generations[control_gen][j];
-            for (std::size_t e = 0; e < col.size(); ++e)
-              state.metal_column_staging[off + e] =
-                static_cast<float>(std::bit_cast<double>(col[e]));
-            off += col.size();
-          }
-        }
-        // GPU path: one thread per sample, synchronous per-block dispatch
-        // (v1). On a dispatch error, fall through to silence — the JIT
-        // kernel stays authoritative for render_window either way.
-        if (!tropical_metal::process_block(
-              *state.metal,
-              state.audio_slots.data(),
-              static_cast<uint32_t>(state.audio_slots.size()),
-              state.metal_column_staging.data(),
-              static_cast<uint32_t>(state.metal_column_staging.size()),
-              state.sample_rate, start_sample_index,
-              outputBuffer.data(), buffer_length_))
-        {
-          if (tropical_metal::take_dispatch_failure(*state.metal))
-            metal_dispatch_failure_count_.fetch_add(
-              1, std::memory_order_relaxed);
-          std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);
-        }
-      }
-      else
-#endif
       // Single kernel call processes the entire buffer.
       state.kernel(
         nullptr,                       // no inputs (all embedded in expressions)
@@ -571,60 +515,41 @@ public:
     }
 
     audio_sample_index_ += buffer_length_;
-
-    // Apply fade envelope
-    {
-      int fi = fade_in_remaining_.load(std::memory_order_relaxed);
-      int fo = fade_out_remaining_.load(std::memory_order_relaxed);
-      if (fi > 0 || fo != -1)
-      {
-        for (unsigned int s = 0; s < buffer_length_; ++s)
-        {
-          if (fi > 0)
-          {
-            const double t = 1.0 - static_cast<double>(fi) / kFadeSamples_;
-            outputBuffer[s] *= t * t * (3.0 - 2.0 * t);
-            --fi;
-          }
-          if (fo != -1)
-          {
-            if (fo > 0)
-            {
-              const double t = static_cast<double>(fo) / kFadeSamples_;
-              outputBuffer[s] *= t * t * (3.0 - 2.0 * t);
-              --fo;
-            }
-            else
-            {
-              outputBuffer[s] = 0.0;
-            }
-          }
-        }
-        fade_in_remaining_.store(fi, std::memory_order_relaxed);
-        fade_out_remaining_.store(fo, std::memory_order_relaxed);
-      }
-    }
+    audio_device_frame_ += buffer_length_;
+    apply_fade_to_output();
 
     // Publish the completed boundary only after all output processing for this
     // buffer (including fade) is complete.
-    published_sample_index_.store(audio_sample_index_, std::memory_order_release);
+    publish_audio_boundary();
     control_generation_owners_[state_idx][control_gen].store(
       StorageOwner::Free, std::memory_order_release);
     state_owners_[state_idx].store(
       StorageOwner::Free, std::memory_order_release);
   }
 
+  /**
+   * Deterministic/offline renderer only. Metal waits off the callback until
+   * the worker has prepared the next exact tile, then executes the ordinary
+   * bounded callback path once. JIT is identical to process().
+   */
+  void process_offline();
+
+  /**
+   * DAC start/control thread only. JIT retains the legacy cache warm-up
+   * process cycles. Metal does not consume prepared audio before the device
+   * clock starts; it waits off-RT until the exact first callback tile is ready.
+   */
+  void prepare_realtime_start(unsigned int process_cycles);
+
   std::vector<double> outputBuffer;
 
   unsigned int getBufferLength() const { return buffer_length_; }
 
-  uint32_t metal_pipeline_depth() const
+  uint32_t metal_render_tile_frames() const
   {
-    std::lock_guard<std::mutex> lock(build_mutex_);
 #ifdef TROPICAL_METAL
-    const uint32_t idx = active_state_.load(std::memory_order_acquire);
-    const auto & metal = states_[idx].metal;
-    return metal ? tropical_metal::pipeline_depth(*metal) : 0;
+    return metal_runtime_loaded_.load(std::memory_order_acquire)
+      ? metal_render_tile_frames_ : 0;
 #else
     return 0;
 #endif
@@ -670,7 +595,16 @@ public:
     KernelState & state = states_[state_idx];
     if (idx < state.slots.size())
     {
+      const std::vector<double> previous = state.slots;
       state.slots[idx] = value;
+#ifdef TROPICAL_METAL
+      if (state.metal)
+      {
+        if (!publish_metal_control_snapshot_locked(state, state_idx).ok)
+          state.slots = previous;
+        return;
+      }
+#endif
       publish_control_snapshot(state, state_idx);
     }
   }
@@ -704,7 +638,20 @@ public:
     for (uint32_t i = 0; i < state.slot_names.size(); ++i)
       if (state.slot_names[i] == name)
       {
+        const std::vector<double> previous = state.slots;
         state.slots[i] = value;
+#ifdef TROPICAL_METAL
+        if (state.metal)
+        {
+          if (!publish_metal_control_snapshot_locked(
+                state, state_idx).ok)
+          {
+            state.slots = previous;
+            return false;
+          }
+          return true;
+        }
+#endif
         publish_control_snapshot(state, state_idx);
         return true;
       }
@@ -729,14 +676,31 @@ public:
     std::lock_guard<std::mutex> lock(build_mutex_);
     const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
     KernelState & state = states_[state_idx];
+    const std::vector<double> previous = state.slots;
     if constexpr (std::is_void_v<std::invoke_result_t<Fn &, KernelState &>>)
     {
       fn(state);
+#ifdef TROPICAL_METAL
+      if (state.metal)
+      {
+        if (!publish_metal_control_snapshot_locked(state, state_idx).ok)
+          state.slots = previous;
+        return;
+      }
+#endif
       publish_control_snapshot(state, state_idx);
     }
     else
     {
       auto result = fn(state);
+#ifdef TROPICAL_METAL
+      if (state.metal)
+      {
+        if (!publish_metal_control_snapshot_locked(state, state_idx).ok)
+          state.slots = previous;
+        return result;
+      }
+#endif
       publish_control_snapshot(state, state_idx);
       return result;
     }
@@ -842,7 +806,175 @@ public:
   // zero.
   uint64_t metal_dispatch_failure_count() const
   {
-    return metal_dispatch_failure_count_.load(std::memory_order_acquire);
+#ifdef TROPICAL_METAL
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    return metal_worker_ ? metal_worker_->dispatch_failure_count() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  uint64_t metal_render_starvation_count() const
+  {
+#ifdef TROPICAL_METAL
+    return metal_tiles_ ? metal_tiles_->starvation_count() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  std::array<uint64_t, 16> metal_first_starvation_snapshot() const
+  {
+#ifdef TROPICAL_METAL
+    if (metal_tiles_)
+    {
+      const EpochTileStarvationSnapshot snapshot =
+        metal_tiles_->first_starvation_snapshot();
+      return {
+        snapshot.valid ? 1ULL : 0ULL,
+        snapshot.epoch_id,
+        snapshot.device_frame,
+        snapshot.source_sample,
+        snapshot.expected_tile_device,
+        snapshot.expected_tile_source,
+        snapshot.last_published_epoch,
+        snapshot.last_published_device_end,
+        snapshot.last_published_source_end,
+        snapshot.active_bank,
+        snapshot.expected_tile_index,
+        snapshot.observed_tile_state,
+        snapshot.ready_mask,
+        snapshot.free_mask,
+        snapshot.rendering_mask,
+        snapshot.reading_mask,
+      };
+    }
+#endif
+    return {};
+  }
+
+  uint64_t metal_epoch_tag_mismatch_count() const
+  {
+#ifdef TROPICAL_METAL
+    return metal_tiles_ ? metal_tiles_->tag_mismatch_count() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  uint64_t metal_activation_retarget_count() const
+  {
+#ifdef TROPICAL_METAL
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    return metal_worker_ ? metal_worker_->activation_retarget_count() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  uint64_t metal_activation_failure_count() const
+  {
+#ifdef TROPICAL_METAL
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    return metal_worker_ ? metal_worker_->activation_failure_count() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  uint64_t metal_callback_thread_violation_count() const
+  {
+#ifdef TROPICAL_METAL
+    return tropical_metal::callback_thread_violation_count();
+#else
+    return 0;
+#endif
+  }
+
+  uint32_t metal_worker_capacity_frames() const
+  {
+#ifdef TROPICAL_METAL
+    return metal_tiles_ ? metal_tiles_->capacity_frames() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  uint64_t metal_published_activation_epoch() const
+  {
+#ifdef TROPICAL_METAL
+    return metal_tiles_ ? metal_tiles_->published_activation_epoch() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  uint64_t metal_acknowledged_activation_epoch() const
+  {
+#ifdef TROPICAL_METAL
+    return metal_tiles_ ? metal_tiles_->activation_acknowledged() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  std::array<uint64_t, 8> metal_worker_stage_times() const
+  {
+    std::array<uint64_t, 8> result{};
+#ifdef TROPICAL_METAL
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    if (metal_worker_)
+    {
+      const auto times = metal_worker_->stage_times();
+      result = {
+        times.request_received,
+        times.activation_target_reserved,
+        times.candidate_render_submitted,
+        times.candidate_gpu_completion,
+        times.candidate_window_ready,
+        times.activation_published,
+        times.activation_acknowledged,
+        times.old_epoch_retired,
+      };
+    }
+#endif
+    return result;
+  }
+
+  std::array<uint64_t, 4> metal_activation_latency_stats() const
+  {
+    std::array<uint64_t, 4> result{};
+#ifdef TROPICAL_METAL
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    if (metal_worker_)
+    {
+      const auto stats = metal_worker_->activation_latency_stats();
+      result = {
+        stats.count, stats.total_ns, stats.min_ns, stats.max_ns
+      };
+    }
+#endif
+    return result;
+  }
+
+  uint64_t metal_worker_cpu_time_ns() const
+  {
+#ifdef TROPICAL_METAL
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    return metal_worker_ ? metal_worker_->worker_cpu_time_ns() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  uint64_t metal_worker_wall_time_ns() const
+  {
+#ifdef TROPICAL_METAL
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    return metal_worker_ ? metal_worker_->worker_wall_time_ns() : 0;
+#else
+    return 0;
+#endif
   }
 
   // Test-only: install/remove the deterministic ownership pause seam.
@@ -850,6 +982,15 @@ public:
   {
     ownership_test_seam_.store(seam, std::memory_order_release);
   }
+
+#ifdef TROPICAL_METAL
+  void set_metal_worker_test_seam(
+    tropical_metal::MetalRenderWorkerTestSeam * seam)
+  {
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    if (metal_worker_) metal_worker_->set_test_seam(seam);
+  }
+#endif
 
   // The active kernel's sample rate — the same value the kernel reads for
   // `sampleRate()` (opRate). The control plane needs it to reproduce the
@@ -895,19 +1036,46 @@ private:
   void release_control_snapshot_reservation(
     uint32_t state_index, ControlGenerationReservation reservation);
 
-  uint64_t steady_state_effective_sample_index(
-    const KernelState & state, uint64_t capture_sample_index) const
+  void apply_fade_to_output()
   {
+    int fi = fade_in_remaining_.load(std::memory_order_relaxed);
+    int fo = fade_out_remaining_.load(std::memory_order_relaxed);
+    if (fi <= 0 && fo == -1) return;
+    for (unsigned int s = 0; s < buffer_length_; ++s)
+    {
+      if (fi > 0)
+      {
+        const double t = 1.0 - static_cast<double>(fi) / kFadeSamples_;
+        outputBuffer[s] *= t * t * (3.0 - 2.0 * t);
+        --fi;
+      }
+      if (fo != -1)
+      {
+        if (fo > 0)
+        {
+          const double t = static_cast<double>(fo) / kFadeSamples_;
+          outputBuffer[s] *= t * t * (3.0 - 2.0 * t);
+          --fo;
+        }
+        else
+          outputBuffer[s] = 0.0;
+      }
+    }
+    fade_in_remaining_.store(fi, std::memory_order_relaxed);
+    fade_out_remaining_.store(fo, std::memory_order_relaxed);
+  }
+
+  void publish_audio_boundary()
+  {
+    published_device_frame_.store(
+      audio_device_frame_, std::memory_order_release);
+    published_sample_index_.store(
+      audio_sample_index_, std::memory_order_release);
 #ifdef TROPICAL_METAL
-    if (state.metal)
-      return capture_sample_index
-           + static_cast<uint64_t>(
-               tropical_metal::pipeline_depth(*state.metal))
-             * buffer_length_;
-#else
-    (void)state;
+    if (metal_queue_ready_.load(std::memory_order_acquire))
+      metal_tiles_->synchronize_audio_coordinates(
+        audio_device_frame_, audio_sample_index_);
 #endif
-    return capture_sample_index;
   }
 
   // build_kernel_state maps a parsed plan's *metadata* (everything except
@@ -916,6 +1084,25 @@ private:
   // load_ir fills the kernel handle (via compile_ir_text) between them.
   KernelState build_kernel_state(const tropical_plan5::ParsedPlan5 & parsed);
   bool publish_state(KernelState && new_state);
+
+#ifdef TROPICAL_METAL
+  tropical_metal::RenderEpochRequest make_metal_epoch_request(
+    KernelState & state, uint64_t epoch_id,
+    tropical_metal::EpochTransitionKind transition,
+    uint64_t source_origin,
+    uint32_t generation = UINT32_MAX) const;
+  tropical_metal::EpochScheduleResult schedule_metal_epoch_locked(
+    KernelState & state,
+    tropical_metal::EpochTransitionKind transition,
+    uint64_t requested_source,
+    uint32_t generation = UINT32_MAX);
+  tropical_metal::EpochScheduleResult
+  publish_metal_control_snapshot_locked(
+    KernelState & state, uint32_t state_index);
+  void wait_for_next_metal_tile(const char * purpose);
+  static uint32_t configure_metal_render_tile_frames(
+    uint32_t device_frames);
+#endif
 
   // Materialize one complete control transaction into a FREE generation.
   // Scalar coefficient slots, coefficient columns, and ordinary slots become
@@ -937,7 +1124,6 @@ private:
     control_generation_owners_{};
   std::atomic<uint64_t> recompile_version_{0};
   std::atomic<uint64_t> ownership_failure_count_{0};
-  std::atomic<uint64_t> metal_dispatch_failure_count_{0};
   std::atomic<RuntimeOwnershipTestSeam *> ownership_test_seam_{nullptr};
 
   // Buffer-boundary clock handoff. Only the audio thread touches plain
@@ -947,7 +1133,19 @@ private:
   std::atomic<uint64_t> sample_index_request_seq_{0};
   std::atomic<uint64_t> audio_applied_sample_index_seq_{0};
   uint64_t audio_sample_index_ = 0;
+  uint64_t audio_device_frame_ = 0;
   std::atomic<uint64_t> published_sample_index_{0};
+  std::atomic<uint64_t> published_device_frame_{0};
+
+#ifdef TROPICAL_METAL
+  uint32_t metal_render_tile_frames_ = 0;
+  std::unique_ptr<EpochTileQueue> metal_tiles_;
+  std::unique_ptr<tropical_metal::MetalRenderWorker> metal_worker_;
+  std::atomic<bool> metal_queue_ready_{false};
+  std::atomic<bool> metal_runtime_loaded_{false};
+  std::atomic<bool> metal_audio_enabled_{false};
+  uint64_t next_metal_epoch_id_ = 1;
+#endif
 
   // Atomic audio-boundary word:
   //   bits 0..1  published control generation (0..2)

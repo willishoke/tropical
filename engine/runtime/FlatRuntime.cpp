@@ -7,11 +7,208 @@
 
 #include <algorithm>
 #include <bit>
+#include <cerrno>
+#include <chrono>
 #include <cmath>
+#include <cstdlib>
+#include <limits>
 #include <stdexcept>
 
 namespace tropical_runtime
 {
+
+FlatRuntime::FlatRuntime(unsigned int buffer_length)
+  : buffer_length_(buffer_length),
+    outputBuffer(buffer_length, 0.0)
+{
+  if (buffer_length == 0)
+    throw std::invalid_argument(
+      "FlatRuntime: device buffer length must be nonzero");
+}
+
+FlatRuntime::~FlatRuntime() = default;
+
+void FlatRuntime::process_offline()
+{
+#ifdef TROPICAL_METAL
+  if (metal_audio_enabled_.load(std::memory_order_acquire))
+  {
+    wait_for_next_metal_tile("offline render");
+    const uint64_t starvation_before =
+      metal_tiles_->starvation_count();
+    const uint64_t tags_before =
+      metal_tiles_->tag_mismatch_count();
+    process();
+    if (metal_tiles_->starvation_count() != starvation_before
+        || metal_tiles_->tag_mismatch_count() != tags_before)
+      throw std::runtime_error(
+        "FlatRuntime: offline Metal tile changed before consumption");
+    return;
+  }
+#endif
+  process();
+}
+
+void FlatRuntime::prepare_realtime_start(unsigned int process_cycles)
+{
+#ifdef TROPICAL_METAL
+  if (metal_audio_enabled_.load(std::memory_order_acquire))
+  {
+    wait_for_next_metal_tile("real-time start");
+    return;
+  }
+#endif
+  for (unsigned int i = 0; i < process_cycles; ++i)
+    process();
+}
+
+#ifdef TROPICAL_METAL
+void FlatRuntime::wait_for_next_metal_tile(const char * purpose)
+{
+  const auto deadline =
+    std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  while (!metal_tiles_->next_callback_ready_for_offline())
+  {
+    if (metal_tiles_->active_faulted())
+      throw std::runtime_error(
+        std::string("FlatRuntime: Metal epoch is faulted before ")
+        + purpose);
+    if (std::chrono::steady_clock::now() >= deadline)
+      throw std::runtime_error(
+        std::string("FlatRuntime: timed out waiting for Metal tile before ")
+        + purpose);
+    std::this_thread::yield();
+  }
+}
+
+uint32_t FlatRuntime::configure_metal_render_tile_frames(
+  uint32_t device_frames)
+{
+  static constexpr uint32_t kDefaultMinimumFrames = 512;
+  static constexpr uint32_t kSafeAllocationCeiling = 16384;
+  uint64_t frames = std::max<uint32_t>(
+    kDefaultMinimumFrames, device_frames);
+  frames =
+    ((frames + device_frames - 1) / device_frames) * device_frames;
+
+  if (const char * raw = std::getenv(
+        "TROPICAL_METAL_RENDER_TILE_FRAMES");
+      raw && *raw)
+  {
+    errno = 0;
+    char * end = nullptr;
+    const unsigned long parsed = std::strtoul(raw, &end, 10);
+    if (errno != 0 || end == raw || *end != '\0'
+        || parsed > std::numeric_limits<uint32_t>::max())
+      throw std::invalid_argument(
+        "FlatRuntime: TROPICAL_METAL_RENDER_TILE_FRAMES must be an integer");
+    frames = parsed;
+  }
+
+  if (frames == 0 || frames < device_frames
+      || frames % device_frames != 0
+      || frames > kSafeAllocationCeiling)
+    throw std::invalid_argument(
+      "FlatRuntime: TROPICAL_METAL_RENDER_TILE_FRAMES must be a nonzero "
+      "multiple of the device buffer length in [Bdev,16384]");
+  return static_cast<uint32_t>(frames);
+}
+
+tropical_metal::RenderEpochRequest
+FlatRuntime::make_metal_epoch_request(
+  KernelState & state, uint64_t epoch_id,
+  tropical_metal::EpochTransitionKind transition,
+  uint64_t source_origin, uint32_t generation) const
+{
+  tropical_metal::RenderEpochRequest request;
+  request.epoch_id = epoch_id;
+  request.kernel = state.metal;
+  request.sample_rate = state.sample_rate;
+  request.source_origin = source_origin;
+  request.transition = transition;
+  if (generation == UINT32_MAX)
+    generation = std::atomic_ref(state.control_published_gen)
+                   .load(std::memory_order_acquire);
+  const auto & slots = state.slot_generations[generation];
+  request.slots.reserve(slots.size());
+  for (double value : slots)
+    request.slots.push_back(static_cast<float>(value));
+  std::size_t column_count = 0;
+  for (const auto & column : state.coeff_generations[generation])
+    column_count += column.size();
+  request.columns.reserve(column_count);
+  for (const auto & column : state.coeff_generations[generation])
+    for (int64_t value : column)
+      request.columns.push_back(
+        static_cast<float>(std::bit_cast<double>(value)));
+  return request;
+}
+
+tropical_metal::EpochScheduleResult
+FlatRuntime::schedule_metal_epoch_locked(
+  KernelState & state,
+  tropical_metal::EpochTransitionKind transition,
+  uint64_t requested_source, uint32_t generation)
+{
+  const uint64_t epoch_id = next_metal_epoch_id_++;
+  for (;;)
+  {
+    const auto reservation =
+      metal_worker_->reserve(transition, requested_source);
+    auto request = make_metal_epoch_request(
+      state, epoch_id, transition,
+      reservation.effective_sample_index, generation);
+    request.fixed_activation = true;
+    request.activation_frame = reservation.activation_frame;
+    auto result = metal_worker_->schedule(std::move(request));
+    if (result.retargeted) continue;
+    return result;
+  }
+}
+
+tropical_metal::EpochScheduleResult
+FlatRuntime::publish_metal_control_snapshot_locked(
+  KernelState & state, uint32_t state_index)
+{
+  auto generation = reserve_control_generation(state, state_index);
+  materialize_control_snapshot(state, generation.target);
+  auto scheduled = schedule_metal_epoch_locked(
+    state, tropical_metal::EpochTransitionKind::Continuous, 0,
+    generation.target);
+  if (scheduled.ok)
+    commit_control_snapshot(state, state_index, generation);
+  else
+    release_control_snapshot_reservation(state_index, generation);
+  return scheduled;
+}
+#endif
+
+void FlatRuntime::set_sample_index(uint64_t idx)
+{
+  std::lock_guard<std::mutex> lock(build_mutex_);
+#ifdef TROPICAL_METAL
+  const uint32_t state_index =
+    active_state_.load(std::memory_order_acquire);
+  KernelState & state = states_[state_index];
+  if (state.metal)
+  {
+    (void)schedule_metal_epoch_locked(
+      state, tropical_metal::EpochTransitionKind::ClockJump, idx);
+    return;
+  }
+#endif
+  sample_index_request_seq_.fetch_add(1, std::memory_order_acq_rel);
+  requested_sample_index_.store(idx, std::memory_order_release);
+  if (RuntimeOwnershipTestSeam * seam =
+        ownership_test_seam_.load(std::memory_order_acquire);
+      seam && seam->pause_after_clock_payload.load(std::memory_order_acquire))
+  {
+    seam->clock_payload_stored.store(true, std::memory_order_release);
+    while (!seam->release_clock.load(std::memory_order_acquire))
+      std::this_thread::yield();
+  }
+  sample_index_request_seq_.fetch_add(1, std::memory_order_release);
+}
 
 // Map a parsed plan's *metadata* (the manifest) into a fresh KernelState —
 // everything except the kernel handle, which load_ir fills (via
@@ -84,14 +281,6 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
           new_state.array_storage[new_state.coeff_array_slots[j]].size(), 0);
     }
     new_state.coeff_array_ptrs = new_state.array_ptrs;
-    // Metal upload staging: one f32 per column element, packed in
-    // coeff_array_slots order (EmitMsl's compile-time offset layout).
-    // Sized here so a hot-swap re-derives it with the plan; harmless
-    // (a few bytes) on JIT-only loads.
-    std::size_t column_floats = 0;
-    for (uint32_t s : new_state.coeff_array_slots)
-      column_floats += new_state.array_storage[s].size();
-    new_state.metal_column_staging.assign(column_floats, 0.0f);
   }
 
   return new_state;
@@ -102,6 +291,27 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
 bool FlatRuntime::publish_state(KernelState && new_state)
 {
   std::lock_guard<std::mutex> lock(build_mutex_);
+#ifdef TROPICAL_METAL
+  if (new_state.metal)
+  {
+    if (!metal_worker_)
+      metal_worker_ =
+        std::make_unique<tropical_metal::MetalRenderWorker>(
+          *metal_tiles_);
+    const uint64_t epoch_id = next_metal_epoch_id_++;
+    const auto transition =
+      metal_runtime_loaded_.load(std::memory_order_acquire)
+        ? tropical_metal::EpochTransitionKind::HotSwap
+        : tropical_metal::EpochTransitionKind::Fresh;
+    auto request = make_metal_epoch_request(
+      new_state, epoch_id, transition,
+      published_sample_index_.load(std::memory_order_acquire));
+    const auto scheduled = metal_worker_->schedule(std::move(request));
+    if (!scheduled.ok)
+      throw std::runtime_error(
+        "FlatRuntime: initial Metal epoch failed: " + scheduled.error);
+  }
+#endif
   const uint32_t active   = active_state_.load(std::memory_order_acquire);
   const uint32_t inactive = 1U - active;
   for (;;)
@@ -153,6 +363,11 @@ bool FlatRuntime::publish_state(KernelState && new_state)
   }
   active_state_.store(inactive, std::memory_order_release);
   recompile_version_.fetch_add(1, std::memory_order_release);
+#ifdef TROPICAL_METAL
+  const bool metal = static_cast<bool>(states_[inactive].metal);
+  metal_runtime_loaded_.store(metal, std::memory_order_release);
+  metal_audio_enabled_.store(metal, std::memory_order_release);
+#endif
   return true;
 }
 
@@ -219,11 +434,28 @@ bool FlatRuntime::load_ir_staged(const std::string & ir_text,
   if (!msl_source.empty())
   {
 #ifdef TROPICAL_METAL
+    if (!metal_queue_ready_.load(std::memory_order_acquire))
+    {
+      metal_render_tile_frames_ =
+        configure_metal_render_tile_frames(buffer_length_);
+      metal_tiles_ = std::make_unique<EpochTileQueue>(
+        buffer_length_, metal_render_tile_frames_);
+      metal_tiles_->synchronize_audio_coordinates(
+        published_device_frame_.load(std::memory_order_acquire),
+        published_sample_index_.load(std::memory_order_acquire));
+      metal_queue_ready_.store(true, std::memory_order_release);
+    }
     std::string err;
+    std::size_t column_floats = 0;
+    for (const auto & column :
+         new_state.coeff_generations[
+           std::atomic_ref(new_state.control_published_gen)
+             .load(std::memory_order_relaxed)])
+      column_floats += column.size();
     new_state.metal = tropical_metal::create(
-      msl_source, buffer_length_,
+      msl_source, metal_render_tile_frames_,
       static_cast<uint32_t>(new_state.slots.size()),
-      static_cast<uint32_t>(new_state.metal_column_staging.size()), err);
+      static_cast<uint32_t>(column_floats), err);
     if (!new_state.metal)
       throw std::runtime_error("FlatRuntime: " + err);
 #else
@@ -375,6 +607,57 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
     published_sample_index_.load(std::memory_order_acquire);
   const std::vector<double> base_slots = state.slots;
   auto reservation = reserve_control_generation(state, state_idx);
+
+#ifdef TROPICAL_METAL
+  if (state.metal)
+  {
+    const uint64_t epoch_id = next_metal_epoch_id_++;
+    for (;;)
+    {
+      const auto epoch = metal_worker_->reserve(
+        tropical_metal::EpochTransitionKind::Continuous);
+      state.slots = base_slots;
+      auto result = dispatch_param_sync_locked(
+        state, state_idx, name, value,
+        epoch.effective_sample_index);
+      result.observed_sample_index = observed_sample_index;
+      result.effective_sample_index =
+        epoch.effective_sample_index;
+      if (!result.ok)
+      {
+        state.slots = base_slots;
+        release_control_snapshot_reservation(
+          state_idx, reservation);
+        return result;
+      }
+
+      materialize_control_snapshot(state, reservation.target);
+      auto request = make_metal_epoch_request(
+        state, epoch_id,
+        tropical_metal::EpochTransitionKind::Continuous,
+        epoch.effective_sample_index, reservation.target);
+      request.fixed_activation = true;
+      request.activation_frame = epoch.activation_frame;
+      const auto scheduled =
+        metal_worker_->schedule(std::move(request));
+      if (scheduled.retargeted)
+        continue;
+      if (!scheduled.ok)
+      {
+        state.slots = base_slots;
+        release_control_snapshot_reservation(
+          state_idx, reservation);
+        result.ok = false;
+        result.error =
+          "set_param: Metal epoch preparation failed: "
+          + scheduled.error;
+        return result;
+      }
+      commit_control_snapshot(state, state_idx, reservation);
+      return result;
+    }
+  }
+#endif
 
   for (;;)
   {

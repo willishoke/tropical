@@ -167,15 +167,44 @@ struct TropicalDACImpl
 
   ~TropicalDACImpl() { stop(); }
 
+  /**
+   * Control/start thread only. Sources with an asynchronous render-ahead
+   * backend may replace the legacy process() warm-up with a readiness barrier.
+   * This keeps DAC startup from consuming a finite prepared queue before the
+   * device clock begins pacing callbacks.
+   */
+  void prepare_source_for_start()
+  {
+    if constexpr (requires { source->prime_numeric_jit(); })
+      source->prime_numeric_jit();
+    if constexpr (requires {
+                    source->prepare_realtime_start(kPrimeCycles);
+                  })
+      source->prepare_realtime_start(kPrimeCycles);
+    else
+      for (int i = 0; i < kPrimeCycles; ++i)
+        source->process();
+  }
+
+  /**
+   * A device switch/reconnect resumes an already-warm source. Readiness-aware
+   * asynchronous sources still need a non-consuming barrier before the new
+   * stream starts; legacy sources need no additional process cycles.
+   */
+  void prepare_source_for_stream_restart()
+  {
+    if constexpr (requires {
+                    source->prepare_realtime_start(0);
+                  })
+      source->prepare_realtime_start(0);
+  }
+
   void start()
   {
     if (running)
       return;
 
-    if constexpr (requires { source->prime_numeric_jit(); })
-      source->prime_numeric_jit();
-    for (int i = 0; i < kPrimeCycles; ++i)
-      source->process();
+    prepare_source_for_start();
 
     source->begin_fade_in();
 
@@ -421,6 +450,7 @@ struct TropicalDACImpl
     bool ok = true;
     try
     {
+      prepare_source_for_stream_restart();
       source->begin_fade_in();
       open_stream(device_id);
     }
@@ -636,6 +666,7 @@ private:
 
       try
       {
+        prepare_source_for_stream_restart();
         source->begin_fade_in();
         open_stream();
         rtaudio_disconnect_latched_.store(false, std::memory_order_release);

@@ -13,6 +13,43 @@ typedef void* tropical_dac_t;
 typedef void* tropical_param_t;
 typedef void* tropical_runtime_t;
 
+typedef struct {
+  uint64_t request_received;
+  uint64_t activation_target_reserved;
+  uint64_t candidate_render_submitted;
+  uint64_t candidate_gpu_completion;
+  uint64_t candidate_window_ready;
+  uint64_t activation_published;
+  uint64_t activation_acknowledged;
+  uint64_t old_epoch_retired;
+} tropical_metal_worker_stage_times_t;
+
+typedef struct {
+  uint64_t count;
+  uint64_t total_ns;
+  uint64_t min_ns;
+  uint64_t max_ns;
+} tropical_metal_activation_latency_stats_t;
+
+typedef struct {
+  bool valid;
+  uint64_t epoch_id;
+  uint64_t device_frame;
+  uint64_t source_sample;
+  uint64_t expected_tile_device;
+  uint64_t expected_tile_source;
+  uint64_t last_published_epoch;
+  uint64_t last_published_device_end;
+  uint64_t last_published_source_end;
+  uint32_t active_bank;
+  uint32_t expected_tile_index;
+  uint32_t observed_tile_state;
+  uint32_t ready_mask;
+  uint32_t free_mask;
+  uint32_t rendering_mask;
+  uint32_t reading_mask;
+} tropical_metal_starvation_snapshot_t;
+
 /* Error handling — thread-local; valid until next call on this thread */
 const char* tropical_last_error(void);
 
@@ -129,9 +166,10 @@ bool             tropical_runtime_load_ir_msl(tropical_runtime_t, const char* ir
    Its outputs land in coef:<n> module slots the audio kernel reads. */
 bool             tropical_runtime_load_ir_staged(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* manifest_json, size_t manifest_len);
 
-/* Control-plane/test-only: request a sample-clock reposition. The audio thread
-   applies the newest stable request at its next process-buffer boundary
-   (render verbs' --start; long-tau gates render at arbitrary positions). */
+/* Control-plane/test-only: request a sample-clock reposition. JIT applies it
+   at its next process-buffer boundary; Metal prepares and acknowledges an
+   exact future activation epoch. Physical device frames stay monotonic while
+   the source coordinate moves to idx. */
 void             tropical_runtime_set_sample_index(tropical_runtime_t, uint64_t idx);
 
 /* ---------- Build-time IR→wasm (TROPICAL_WASM_EMIT builds only) ----------
@@ -144,12 +182,31 @@ void             tropical_runtime_set_sample_index(tropical_runtime_t, uint64_t 
 uint8_t*         tropical_compile_ir_to_wasm(const char* ir_text, size_t ir_len, size_t* out_len);
 void             tropical_free_buffer(uint8_t* buf);
 void             tropical_runtime_process(tropical_runtime_t);
+/* Deterministic render-tool entry point. For Metal, waits off-RT until the
+   worker has prepared the next exact tile, then runs the ordinary bounded
+   callback path once. Never call from an audio callback. */
+bool             tropical_runtime_process_offline(tropical_runtime_t);
 const double*    tropical_runtime_output_buffer(tropical_runtime_t);
 unsigned int     tropical_runtime_get_buffer_length(tropical_runtime_t);
-/* Qualification diagnostic: 0 for JIT/synchronous Metal and on non-Metal
-   builds (the stable sentinel), otherwise the number of future Metal blocks
-   currently configured. */
-unsigned int     tropical_runtime_metal_pipeline_depth(tropical_runtime_t);
+/* Device-independent Metal render quantum. Returns 0 for JIT-only,
+   non-Metal, and unloaded runtimes. */
+unsigned int     tropical_runtime_metal_render_tile_frames(tropical_runtime_t);
+/* Total frames held in the active worker bank (four fixed render tiles).
+   Returns 0 for JIT-only, non-Metal, and unloaded runtimes. */
+unsigned int     tropical_runtime_metal_worker_capacity_frames(tropical_runtime_t);
+/* Epoch identities for the latest published and callback-acknowledged
+   activation descriptors. Returns 0 when no Metal epoch exists. */
+uint64_t         tropical_runtime_metal_published_activation_epoch(tropical_runtime_t);
+uint64_t         tropical_runtime_metal_acknowledged_activation_epoch(tropical_runtime_t);
+/* Latest off-RT worker stage timestamps and accumulated activation latency.
+   Functions return false and zero the output for null runtimes. */
+bool             tropical_runtime_metal_worker_stage_times(
+                   tropical_runtime_t, tropical_metal_worker_stage_times_t*);
+bool             tropical_runtime_metal_activation_latency_stats(
+                   tropical_runtime_t,
+                   tropical_metal_activation_latency_stats_t*);
+uint64_t         tropical_runtime_metal_worker_cpu_time_ns(tropical_runtime_t);
+uint64_t         tropical_runtime_metal_worker_wall_time_ns(tropical_runtime_t);
 /* Sticky count of callbacks silenced because bounded state/generation
    ownership acquisition could not obtain a coherent snapshot. Qualification
    requires zero. */
@@ -159,6 +216,21 @@ uint64_t         tropical_runtime_ownership_failure_count(tropical_runtime_t);
    replacement does not erase the evidence. Always 0 for JIT/non-Metal builds;
    qualification requires zero. */
 uint64_t         tropical_runtime_metal_dispatch_failure_count(tropical_runtime_t);
+/* Sticky monotonic worker-handoff diagnostics. Starvation, tag mismatch,
+   activation failure, and callback-thread Metal entry must remain zero in
+   qualification. Retargets are permitted but measured explicitly. */
+uint64_t         tropical_runtime_metal_render_starvation_count(tropical_runtime_t);
+/* First starvation only. The callback publishes one fixed atomic snapshot
+   before latching fail-silent state; no clock, allocation, lock, or I/O is
+   added to the callback. Tile-state values are Free=0, Rendering=1,
+   Ready=2, Reading=3. */
+bool             tropical_runtime_metal_first_starvation_snapshot(
+                   tropical_runtime_t,
+                   tropical_metal_starvation_snapshot_t*);
+uint64_t         tropical_runtime_metal_epoch_tag_mismatch_count(tropical_runtime_t);
+uint64_t         tropical_runtime_metal_activation_retarget_count(tropical_runtime_t);
+uint64_t         tropical_runtime_metal_activation_failure_count(tropical_runtime_t);
+uint64_t         tropical_runtime_metal_callback_thread_violation_count(tropical_runtime_t);
 
 /* Fade control (for DAC) */
 void             tropical_runtime_begin_fade_in(tropical_runtime_t);

@@ -24,8 +24,9 @@
  * Both sides come off the SAME plan compiled by the Lean engine:
  *   - Native: `diffcli render-bytes` (f64, ORC JIT) — the reference.
  *   - Metal:  `diffcli render-metal` (EmitMsl → newLibraryWithSource →
- *     per-block GPU dispatch; the JIT is dual-loaded but the output is
- *     the GPU's).
+ *     off-RT worker tiles; the JIT is dual-loaded but the output is the
+ *     GPU's). The offline adapter waits before entering the bounded callback
+ *     path so a tight render loop cannot outrun the real-time watermark.
  *
  * Requires libtropical built with TROPICAL_METAL on a Metal device —
  * otherwise the whole suite skips.

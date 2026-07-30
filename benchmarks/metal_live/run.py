@@ -41,7 +41,7 @@ BASE_CONTROLS: dict[str, str | None] = {
     "TROPICAL_KERNEL_CACHE_DISABLE": "0",
     "TROPICAL_BACKEND": None,
     "TROPICAL_BUFFER_LENGTH": None,
-    "TROPICAL_METAL_PIPELINE_DEPTH": None,
+    "TROPICAL_METAL_RENDER_TILE_FRAMES": "512",
     "TROPICAL_STAGE0_DUMP": None,
 }
 
@@ -100,6 +100,37 @@ def summarize(values: list[int]) -> dict[str, int | None]:
         "p99": percentile(values, .99),
         "max": max(values) if values else None,
     }
+
+
+def classify_starvation_phase(result: dict[str, Any]) -> str:
+    def count(name: str) -> int:
+        value = result.get(name, 0)
+        return (
+            value
+            if isinstance(value, int) and not isinstance(value, bool)
+            else 0
+        )
+
+    total = count("metal_render_starvation_count")
+    before_start = count(
+        "metal_render_starvation_count_before_dac_start")
+    after_start = count(
+        "metal_render_starvation_count_after_dac_start")
+    before_reset = count(
+        "metal_render_starvation_count_before_stats_reset")
+    measured_delta = count(
+        "metal_render_starvation_count_measured_delta")
+    if total == 0:
+        return "none"
+    if before_start > 0:
+        return "before_dac_start"
+    if after_start > before_start:
+        return "during_dac_start"
+    if before_reset > after_start:
+        return "startup_warmup"
+    if measured_delta > 0:
+        return "measured_window"
+    return "unclassified_sticky_count"
 
 
 def summarize_callback_histogram(result: dict[str, Any]) -> dict[str, Any]:
@@ -205,7 +236,7 @@ def analyze_rss(result: dict[str, Any], rate: int, buffer: int
 
 def evaluate_acceptance(result: dict[str, Any],
                         rss_analysis: dict[str, Any],
-                        buffer: int, rate: int, depth: int,
+                        buffer: int, rate: int, render_frames: int,
                         canary_amplitude_bound: float = 1e-12,
                         ) -> tuple[dict[str, bool], list[str]]:
     expected_labels = [
@@ -241,6 +272,9 @@ def evaluate_acceptance(result: dict[str, Any],
     histogram_count = callback.get("count")
     callback_count = result.get("dac_stats", {}).get("callback_count")
     event_blocks = result.get("event_blocks", {})
+    activation_epochs = result.get("event_activation_epochs", {})
+    transition_evidence = result.get(
+        "transition_activation_evidence", {})
     start_block = event_blocks.get("start_reference")
     jump_request_block = event_blocks.get("clock_jump_request")
     jump_progress_block = event_blocks.get("clock_jump_progress")
@@ -253,6 +287,25 @@ def evaluate_acceptance(result: dict[str, Any],
     end_preceding_write = event_blocks.get("end_preceding_write")
     last_write = event_blocks.get("last_write")
     writes_stopped = event_blocks.get("writes_stopped")
+    jump_activation_epoch = activation_epochs.get("clock_jump")
+    swap_activation_epoch = activation_epochs.get("hot_swap")
+    last_write_activation_epoch = activation_epochs.get("last_write")
+    acknowledged_final_epoch = activation_epochs.get("acknowledged_final")
+    stage_times = result.get("metal_worker_stage_times", {})
+    ordered_stage_names = (
+        "request_received",
+        "activation_target_reserved",
+        "candidate_render_submitted",
+        "candidate_gpu_completion",
+        "candidate_window_ready",
+        "activation_published",
+        "activation_acknowledged",
+        "old_epoch_retired",
+    )
+    ordered_stage_times = [
+        stage_times.get(name) for name in ordered_stage_names
+    ]
+    activation_latency = result.get("metal_activation_latency", {})
     measured_loop_ns = result.get("measured_loop_ns")
     measured_loop_callbacks = result.get("measured_loop_callback_count")
     expected_callbacks = (
@@ -284,12 +337,16 @@ def evaluate_acceptance(result: dict[str, Any],
         "runtime_not_aborted": not result.get("dac_aborted", True),
         "negotiated_frames_match":
             result.get("negotiated_buffer_frames") == buffer,
-        "observed_pipeline_depth_matches_requested":
-            result.get("pipeline_depth") == depth,
+        "device_and_render_quanta_match":
+            result.get("device_frames") == buffer
+            and result.get("metal_render_tile_frames") == render_frames
+            and result.get("metal_worker_capacity_frames") == 4 * render_frames,
         "zero_underruns":
             result.get("dac_stats", {}).get("underrun_count") == 0,
         "zero_callback_overruns":
             result.get("dac_stats", {}).get("overrun_count") == 0,
+        "zero_nonfinite_output":
+            result.get("nonfinite_count") == 0,
         "callback_p99_below_half_deadline":
             p99 is not None and p99 < deadline_ns / 2,
         "histogram_covers_all_measured_callbacks":
@@ -306,6 +363,41 @@ def evaluate_acceptance(result: dict[str, Any],
             and result.get("reference_ownership_failure_count") == 0,
         "zero_metal_dispatch_failures":
             result.get("metal_dispatch_failure_count") == 0,
+        "zero_metal_render_starvations":
+            result.get("metal_render_starvation_count") == 0,
+        "zero_metal_epoch_tag_mismatches":
+            result.get("metal_epoch_tag_mismatch_count") == 0,
+        "zero_metal_activation_failures":
+            result.get("metal_activation_failure_count") == 0,
+        "zero_callback_thread_metal_violations":
+            result.get("metal_callback_thread_violation_count") == 0,
+        "worker_stage_timestamps_complete_and_ordered":
+            all(
+                isinstance(value, int) and value > 0
+                for value in ordered_stage_times)
+            and ordered_stage_times == sorted(ordered_stage_times),
+        "activation_latency_distribution_reported":
+            isinstance(activation_latency.get("count"), int)
+            and activation_latency["count"] > 0
+            and isinstance(activation_latency.get("min_ns"), int)
+            and activation_latency["min_ns"] > 0
+            and activation_latency["min_ns"]
+                <= activation_latency.get("max_ns", -1)
+            and activation_latency["min_ns"]
+                <= activation_latency.get("mean_ns", -1)
+                <= activation_latency["max_ns"],
+        "worker_cpu_wall_fraction_reported":
+            isinstance(result.get("metal_worker_cpu_ns"), int)
+            and result["metal_worker_cpu_ns"] >= 0
+            and isinstance(result.get("metal_worker_wall_ns"), int)
+            and result["metal_worker_wall_ns"] > 0
+            and isinstance(
+                result.get("metal_worker_cpu_wall_fraction"), (int, float))
+            and math.isfinite(result["metal_worker_cpu_wall_fraction"])
+            and result["metal_worker_cpu_wall_fraction"] >= 0,
+        "callback_max_below_deadline":
+            isinstance(callback.get("max_exact_ns"), int)
+            and callback["max_exact_ns"] < deadline_ns,
         "all_required_events_completed":
             all(event_completion.get(name, False) for name in (
                 "baseline", "writes", "writes_stopped", "clock_jump", "hot_swap",
@@ -323,23 +415,41 @@ def evaluate_acceptance(result: dict[str, Any],
             and post_jump_block > event_blocks["clock_jump_progress"]
             and midpoint_block > event_blocks["hot_swap_progress"]
             and end_block > midpoint_block,
-        "clock_and_swap_clear_future_queue":
+        "clock_and_swap_reach_acknowledged_activations":
             all(isinstance(value, int) for value in (
                 jump_request_block, jump_progress_block,
                 swap_publication_block, swap_progress_block,
+                jump_activation_epoch, swap_activation_epoch,
+                acknowledged_final_epoch,
             ))
-            and jump_progress_block >= jump_request_block + depth + 1
-            and swap_progress_block >= swap_publication_block + depth + 1,
-        "final_reference_after_write_stop_and_clear_of_future_queue":
+            and jump_activation_epoch > 0
+            and swap_activation_epoch > jump_activation_epoch
+            and acknowledged_final_epoch >= swap_activation_epoch
+            and jump_progress_block >= jump_request_block
+            and swap_progress_block >= swap_publication_block,
+        "every_requested_jump_and_swap_acknowledged":
+            isinstance(
+                transition_evidence.get("clock_jump_requested"), int)
+            and transition_evidence["clock_jump_requested"] > 0
+            and transition_evidence.get("clock_jump_acknowledged")
+                == transition_evidence["clock_jump_requested"]
+            and isinstance(
+                transition_evidence.get("hot_swap_requested"), int)
+            and transition_evidence["hot_swap_requested"] > 0
+            and transition_evidence.get("hot_swap_acknowledged")
+                == transition_evidence["hot_swap_requested"],
+        "final_reference_after_write_stop_and_last_activation":
             isinstance(end_block, int)
             and isinstance(last_write, int)
             and isinstance(writes_stopped, int)
             and isinstance(duration_elapsed_block, int)
+            and isinstance(last_write_activation_epoch, int)
+            and isinstance(acknowledged_final_epoch, int)
             and end_preceding_write == last_write
             and last_write < writes_stopped <= end_block
             and end_block > duration_elapsed_block
-            and end_block >= writes_stopped + depth + 1
-            and end_block >= last_write + depth + 1,
+            and last_write_activation_epoch > 0
+            and acknowledged_final_epoch >= last_write_activation_epoch,
         "callback_progress_not_stalled":
             not event_completion.get("callback_progress_stalled", True),
         "reference_checkpoint_arrays_aligned":
@@ -428,8 +538,8 @@ def manifest(mode: str) -> dict[str, Any]:
         "llvm": output(["/opt/homebrew/opt/llvm/bin/llvm-config", "--version"]),
         "build": "RelWithDebInfo; TROPICAL_METAL=ON; TROPICAL_WASM_EMIT=ON",
         "sample_rate": 44100,
-        "pipeline_depth_control":
-            "TROPICAL_METAL_PIPELINE_DEPTH=1..3; unset selects sync Metal",
+        "render_tile_control":
+            "TROPICAL_METAL_RENDER_TILE_FRAMES=512",
         "cache":
             "TROPICAL_KERNEL_CACHE_ROOT points to a fresh harness-owned directory",
         "benchmark_controls": BASE_CONTROLS,
@@ -449,7 +559,7 @@ def probe(args: list[str], env: dict[str, str]) -> dict[str, Any]:
 
 
 def write_failure_row(stream, *, mode: str, requested_mode: str,
-                      duration: float, buffer: int, depth: int,
+                      duration: float, buffer: int, render_frames: int,
                       error: Exception) -> None:
     stream.write(json.dumps({
         "schema": "tropical_metal_qualification_failure_1",
@@ -458,7 +568,8 @@ def write_failure_row(stream, *, mode: str, requested_mode: str,
         "requested_mode": requested_mode,
         "duration_requested_seconds": duration,
         "buffer_length": buffer,
-        "pipeline_depth": depth,
+        "device_frames": buffer,
+        "render_tile_frames": render_frames,
         "exception_class": type(error).__name__,
         "exception_message": str(error),
         "qualification_status": "blocked",
@@ -507,8 +618,8 @@ def run_latency_matrix(stream, work: Path) -> None:
             stream.write(json.dumps({
                 "schema": "tropical_metal_latency_row_1",
                 "backend": "jit",
-                "buffer_length": buffer,
-                "pipeline_depth": 0,
+                "device_frames": buffer,
+                "render_tile_frames": 0,
                 "discipline": discipline,
                 "dispatch": jit["param_events"],
                 "predicted_seconds": 0,
@@ -517,42 +628,55 @@ def run_latency_matrix(stream, work: Path) -> None:
             }, separators=(",", ":")) + "\n")
             stream.flush()
 
-            for depth in (1, 2, 3):
-                env = benchmark_env({
-                    "TROPICAL_METAL_PIPELINE_DEPTH": str(depth),
-                    "TROPICAL_KERNEL_CACHE_ROOT": str(
-                        work / "cache" / f"metal-{buffer}-{depth}-{discipline}"
-                    ),
-                })
-                result = probe(latency_args(buffer, True, discipline), env)
-                observed = result["latency_blocks"]
-                if result.get("ownership_failure_count") != 0:
-                    raise RuntimeError(
-                        f"Metal ownership failure at B={buffer} D={depth} "
-                        f"{discipline}")
-                if result.get("metal_dispatch_failure_count") != 0:
-                    raise RuntimeError(
-                        f"Metal dispatch failure at B={buffer} D={depth} "
-                        f"{discipline}")
-                if result["pipeline_depth"] != depth or observed != depth:
-                    raise RuntimeError(
-                        f"stale/early future: B={buffer} D={depth} "
-                        f"{discipline}, observed={observed}"
-                    )
-                stream.write(json.dumps({
-                    "schema": "tropical_metal_latency_row_1",
-                    "backend": "metal",
-                    "buffer_length": buffer,
-                    "pipeline_depth": depth,
-                    "discipline": discipline,
-                    "dispatch": result["param_events"],
-                    "predicted_seconds": depth * buffer / rate,
-                    "observed_seconds": observed * buffer / rate,
-                    "detection_tolerance_samples": buffer,
-                    "raw": result,
-                }, separators=(",", ":")) + "\n")
-                stream.flush()
-                print(f"latency B={buffer} D={depth} {discipline}", file=os.sys.stderr)
+            render_frames = 512
+            env = benchmark_env({
+                "TROPICAL_METAL_RENDER_TILE_FRAMES": str(render_frames),
+                "TROPICAL_KERNEL_CACHE_ROOT": str(
+                    work / "cache" / f"metal-{buffer}-{render_frames}-{discipline}"
+                ),
+            })
+            result = probe(latency_args(buffer, True, discipline), env)
+            fault_fields = (
+                "metal_dispatch_failure_count",
+                "metal_render_starvation_count",
+                "metal_epoch_tag_mismatch_count",
+                "metal_activation_failure_count",
+                "metal_callback_thread_violation_count",
+            )
+            if result.get("ownership_failure_count") != 0:
+                raise RuntimeError(
+                    f"Metal ownership failure at Bdev={buffer} "
+                    f"Rgpu={render_frames} {discipline}")
+            if any(result.get(field) != 0 for field in fault_fields):
+                raise RuntimeError(
+                    f"Metal worker fault at Bdev={buffer} "
+                    f"Rgpu={render_frames} {discipline}")
+            if (result.get("device_frames") != buffer
+                    or result.get("metal_render_tile_frames") != render_frames):
+                raise RuntimeError(
+                    f"Metal quanta mismatch at Bdev={buffer} "
+                    f"Rgpu={render_frames} {discipline}")
+            dispatch = result["param_events"][0]
+            predicted_samples = (
+                dispatch["effective_sample_index"]
+                - dispatch["observed_sample_index"])
+            stream.write(json.dumps({
+                "schema": "tropical_metal_latency_row_2",
+                "backend": "metal",
+                "device_frames": buffer,
+                "render_tile_frames": render_frames,
+                "discipline": discipline,
+                "dispatch": result["param_events"],
+                "scheduled_activation_delta_samples": predicted_samples,
+                "scheduled_activation_seconds": predicted_samples / rate,
+                "observed_detection_blocks": result["latency_blocks"],
+                "detection_tolerance_samples": buffer,
+                "raw": result,
+            }, separators=(",", ":")) + "\n")
+            stream.flush()
+            print(
+                f"latency Bdev={buffer} Rgpu={render_frames} {discipline}",
+                file=os.sys.stderr)
 
 
 def prepare_heavy_graph(work: Path) -> tuple[dict[str, Path], dict[str, Any]]:
@@ -684,11 +808,19 @@ def prepare_heavy_graph(work: Path) -> tuple[dict[str, Path], dict[str, Any]]:
     }
 
 
-def run_soak(stream, work: Path, duration: float, buffer: int, depth: int) -> None:
+def run_soak(stream, work: Path, duration: float, buffer: int,
+             render_frames: int) -> None:
     artifacts, slots = prepare_heavy_graph(work)
     rate = 44100
     expected_blocks = max(1, int(duration * rate / buffer))
     rss_every = max(1, int(2 * rate / buffer))
+    jump_every = max(1, int(5 * rate / buffer))
+    reload_every = max(1, int(30 * rate / buffer))
+    final_settle = max(1, int(10 * rate / buffer))
+    if expected_blocks <= reload_every + final_settle:
+        raise ValueError(
+            "Metal soak duration must exceed 40 seconds so the first swap "
+            "and final acknowledgement window both occur")
     common = [
         str(RUNTIME_BENCH),
         "--ir", str(artifacts["ir"]),
@@ -705,11 +837,13 @@ def run_soak(stream, work: Path, duration: float, buffer: int, depth: int) -> No
         "--warmup", "8",
         "--reference-slot", str(slots["reference_slot"]),
         "--write-every", str(max(1, int(rate / buffer))),
-        "--write-stop-at", str(expected_blocks * 3 // 4),
+        "--write-stop-at", str(expected_blocks - final_settle),
         "--rss-every", str(rss_every),
-        "--jump-at", str(expected_blocks // 4),
+        "--jump-at", str(jump_every),
+        "--jump-every", str(jump_every),
         "--jump-index", str(1 << 40),
-        "--reload-at", str(expected_blocks // 2),
+        "--reload-at", str(reload_every),
+        "--reload-every", str(reload_every),
     ]
     for discipline, name, low, high in slots["param_events"]:
         common += [
@@ -717,7 +851,7 @@ def run_soak(stream, work: Path, duration: float, buffer: int, depth: int) -> No
             f"{discipline},{name},{low},{high}",
         ]
     env = benchmark_env({
-        "TROPICAL_METAL_PIPELINE_DEPTH": str(depth),
+        "TROPICAL_METAL_RENDER_TILE_FRAMES": str(render_frames),
         "TROPICAL_KERNEL_CACHE_ROOT": str(work / "soak-cache"),
     })
     offline_args = [
@@ -735,7 +869,7 @@ def run_soak(stream, work: Path, duration: float, buffer: int, depth: int) -> No
     result = probe(common + ["--dac"], env)
     rss_analysis = analyze_rss(result, rate, buffer)
     acceptance_gates, failure_reasons = evaluate_acceptance(
-        result, rss_analysis, buffer, rate, depth,
+        result, rss_analysis, buffer, rate, render_frames,
         slots["canary_amplitude_bound"])
     bank_fraction_lower_bounds = []
     for energy in result.get("reference_signal_energy", []):
@@ -761,10 +895,11 @@ def run_soak(stream, work: Path, duration: float, buffer: int, depth: int) -> No
         "schema": "tropical_metal_soak_row_2",
         "fixture": "modal-bank-512",
         "duration_requested_seconds": duration,
-        "buffer_length": buffer,
-        "pipeline_depth": depth,
-        "hot_swap_block": expected_blocks // 2,
-        "clock_jump_block": expected_blocks // 4,
+        "device_frames": buffer,
+        "render_tile_frames": render_frames,
+        "worker_capacity_frames": result.get("metal_worker_capacity_frames"),
+        "hot_swap_every_blocks": reload_every,
+        "clock_jump_every_blocks": jump_every,
         "rss_post_warmup": rss_analysis,
         "sink_contract":
             "the addressed 512-mode bank is the reference signal behind a "
@@ -781,12 +916,38 @@ def run_soak(stream, work: Path, duration: float, buffer: int, depth: int) -> No
         },
         "dac_stats": result["dac_stats"],
         "post_reset_underruns": post_reset_underruns,
+        "activation_latency_ns": result.get("metal_activation_latency"),
+        "activation_retarget_count":
+            result.get("metal_activation_retarget_count"),
+        "worker_stage_times": result.get("metal_worker_stage_times"),
+        "worker_cpu_wall": {
+            "cpu_ns": result.get("metal_worker_cpu_ns"),
+            "wall_ns": result.get("metal_worker_wall_ns"),
+            "fraction": result.get("metal_worker_cpu_wall_fraction"),
+        },
+        "transition_activation_evidence":
+            result.get("transition_activation_evidence"),
+        "starvation_diagnostic": {
+            "classified_phase": classify_starvation_phase(result),
+            "before_dac_start":
+                result.get(
+                    "metal_render_starvation_count_before_dac_start"),
+            "after_dac_start":
+                result.get(
+                    "metal_render_starvation_count_after_dac_start"),
+            "before_stats_reset":
+                result.get(
+                    "metal_render_starvation_count_before_stats_reset"),
+            "measured_window_delta":
+                result.get(
+                    "metal_render_starvation_count_measured_delta"),
+            "first_snapshot":
+                result.get("metal_first_starvation_snapshot"),
+        },
         "acceptance_gates": acceptance_gates,
         "failure_reasons": failure_reasons,
         "unavailable_measurements": [
-            "pipeline queue depth over time (configured depth only)",
             "Metal resource/object counts",
-            "GPU execution and re-prime duration",
             "live inter-callback/block interval distribution",
         ],
         "qualification_status":
@@ -804,9 +965,10 @@ def run_soak(stream, work: Path, duration: float, buffer: int, depth: int) -> No
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--mode", choices=("latency", "soak", "all"), default="latency")
-    parser.add_argument("--duration-seconds", type=float, default=1800)
+    parser.add_argument("--duration-seconds", type=float, default=600)
     parser.add_argument("--buffer", type=int, choices=(128, 256, 512), default=512)
-    parser.add_argument("--depth", type=int, choices=(1, 2, 3), default=3)
+    parser.add_argument(
+        "--render-frames", type=int, choices=(512,), default=512)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--skip-build", action="store_true")
     options = parser.parse_args()
@@ -833,7 +995,7 @@ def main() -> int:
                 if options.mode in {"soak", "all"}:
                     active_mode = "soak"
                     run_soak(stream, work, options.duration_seconds,
-                             options.buffer, options.depth)
+                             options.buffer, options.render_frames)
             except QualificationBlocked:
                 return 1
             except Exception as error:
@@ -843,7 +1005,7 @@ def main() -> int:
                     requested_mode=options.mode,
                     duration=options.duration_seconds,
                     buffer=options.buffer,
-                    depth=options.depth,
+                    render_frames=options.render_frames,
                     error=error,
                 )
                 raise

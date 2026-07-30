@@ -1,5 +1,178 @@
 # Metal backend — live findings (V2 phase 6)
 
+## 2026-07-29 queue-aware startup hardening
+
+The startup defect identified below is repaired by the candidate at
+`8f7eecb`. Benchmark warm-up and every unpaced non-DAC render now use the
+off-RT exact-tile waiting entry point. `TropicalDACImpl` delegates initial
+priming to a source readiness hook; `FlatRuntime` preserves the four legacy
+JIT warm-up renders but makes Metal startup a non-consuming exact-next-tile
+barrier. Device switch and reconnect use the same readiness-only barrier.
+The actual callback remains bounded and unchanged.
+
+The retained final 60-second Bdev=512/Rgpu=512 hardware row is
+[`data/hardened-worker-smoke-b512-r512-60s-8f7eecb-m1pro-20260729.jsonl`](data/hardened-worker-smoke-b512-r512-60s-8f7eecb-m1pro-20260729.jsonl);
+its SHA-256 is
+`058b5801c62c02d8d3e717d1ff12bbff1e90113a8d4e6e9e180ea5687a1aae6a`.
+It confirms the startup fix:
+
+- starvation was zero before DAC start, after DAC start, before the statistics
+  reset, and across the measured window;
+- the separate 1,000-block unpaced offline support row also completed with
+  zero starvation and zero tag mismatches;
+- 5,170 measured callbacks had zero underruns and overruns, with a 0.012958 ms
+  exact maximum against the 11.610 ms deadline;
+- all 11 requested clock jumps and the requested hot-swap were acknowledged;
+  dispatch, tag, activation, ownership, non-finite, device-continuity, and
+  callback-thread provenance failures were zero; and
+- candidate-stage telemetry was complete and monotonically ordered. The
+  candidate distinguishes transition-window renders from steady-state
+  refills, so refills can no longer overwrite the retained stage timeline.
+
+This row still blocks overall release qualification on a separate correctness
+gate. Start, post-2^40-jump, and post-swap Metal/JIT reference checkpoints
+measured 143.947, 143.639, and 142.676 dB, but the final checkpoint measured
+78.585 dB against the required greater-than-100 dB gate. Its maximum absolute
+error was 2.872e-12 on a deliberately 1e-8-trimmed signal. The final capture
+starts at source sample 1,099,511,829,504, which is 1,536 samples before the
+last velocity activation's effective sample 1,099,511,831,040: a later clock
+jump moved backward across that anchor. The test therefore protects the
+production contract that arbitrary forward/reverse clock jumps preserve the
+same closed-form control state on Metal and JIT.
+
+The leading precision hypothesis is retained as an inference, not a resolved
+cause. After the post-swap alternating far/near clock jumps and 20 velocity
+events, the host reference carries `tau_base ≈ -12466100.511927439` seconds
+while its Metal f32 representation is `-12466101`. The existing deterministic
+velocity discriminator captures after its final anchor and does not cover
+this reverse-crossing shape. A dedicated no-DAC reverse-crossing discriminator
+must separate Metal f32 clock-origin precision from an oracle/state-transfer
+defect before that gate can be changed or the support envelope widened.
+
+The earlier fixed-start candidate at `22b7ca8` is retained as
+[`data/startup-hardening-smoke-b512-r512-60s-22b7ca8-m1pro-20260729.jsonl`](data/startup-hardening-smoke-b512-r512-60s-22b7ca8-m1pro-20260729.jsonl),
+SHA-256
+`44ab0c829210193405cd4f9cd9973a818140bfe32bc3ff8c170730facb88d315`.
+Its actual-DAC path already had zero starvation, but it exposed two remaining
+harness/diagnostic defects subsequently fixed in `8f7eecb`: the unpaced
+offline support loop still used the callback entry point, and active-bank
+refills overwrote candidate-stage timestamps. It is evidence for those fixes,
+not a qualification pass.
+
+Live-Metal release support remains withheld because the final reference
+correctness gate is unresolved. The queue-aware startup and offline rendering
+fixes are nevertheless validated; the old prime-drain failure is not present
+in the final candidate.
+
+## 2026-07-29 prime-drain diagnostic
+
+The requested follow-up diagnostic is retained as
+[`data/diagnostic-prime-drain-b512-r512-45s-328d537-m1pro-20260729.jsonl`](data/diagnostic-prime-drain-b512-r512-45s-328d537-m1pro-20260729.jsonl).
+It ran from telemetry commit
+`328d53742b259973fa33bf30ff6024bc2cc95be1`; its SHA-256 is
+`a71c17bc2733088d7531bded828477cff526364a6a5cd5e7b799b7dbd21a89f8`.
+This was a short causal diagnostic, not a qualification retry. Its manifest
+also records a rejected ten-second preflight output: that invocation failed
+the harness's minimum-duration check before opening a DAC and was discarded.
+
+The first-fault snapshot resolves the earlier timing ambiguity:
+
+- starvation count was already one before `tropical_dac_start`, remained one
+  before the DAC statistics reset, and had measured-window delta zero;
+- the fault occurred at device/source frame 2,048, expecting epoch 1, bank 0,
+  wrapped tile 0 at device/source frame 2,048;
+- the worker's last published watermark ended at frame 2,048; and
+- all four tiles were `Free` (`free_mask=0xf`), with no tile `Ready`,
+  `Rendering`, or `Reading`.
+
+The deterministic cause is the benchmark's generic pre-DAC warm-up:
+`runtime_bench` calls the ordinary callback entry point eight times in a tight
+loop. The first four calls consume the complete four-tile primed window; the
+fifth wraps to tile 0 before the worker can observe the acknowledgement and
+refill it. The queue correctly latches fail-silent starvation. The generic
+four-cycle `TropicalDACImpl::start()` prime is a second instance of the same
+backend-blind drain hazard, although this run had already faulted before
+reaching it.
+
+This rejects the earlier leading explanation of an ordinary desktop
+scheduling tail exhausting a correctly paced worker window. The failed
+qualification row remains final and release support remains withheld. A fix
+must make both benchmark warm-up and DAC priming Metal-aware, then validate as
+a new code candidate; this diagnostic does not authorize reinterpreting the
+failed row as a pass.
+
+## 2026-07-29 epoch-render Bdev=512/Rgpu=512 qualification failure
+
+The one authorized ten-minute epoch-worker actual-DAC row is retained
+unchanged as
+[`data/epoch-worker-soak-b512-r512-600s-29e0f7de0ada-m1pro-20260729.jsonl`](data/epoch-worker-soak-b512-r512-600s-29e0f7de0ada-m1pro-20260729.jsonl).
+It ran from the clean code candidate
+`29e0f7de0ada6feb9952b154dfc59ef656ad50b9`; the only manifest status
+entry is the output file created before the snapshot. Its SHA-256 is
+`580dc0c0ef697d3a3978a25e9c3ac0dc09574c56afd4359061d19db31b3df646`.
+The failed artifact is final for this candidate and was not retried.
+
+The row blocked when the control thread observed the sticky
+`metal_render_starvation_count` at one after the first post-reset callback.
+The queue counter is not reset or timestamped with the DAC statistics epoch,
+so the artifact cannot distinguish whether the starvation occurred during
+the 170-callback startup window or on that first measured callback. Either
+classification fails the required zero-starvation gate. The exact negotiated
+quanta were Bdev=512/Rgpu=512 with 2,048 frames of worker capacity. The one
+measured callback took 0.005875 ms with zero measured underruns or overruns;
+the pre-reset startup snapshot separately recorded one underrun. The
+follow-up telemetry row above subsequently locates the same harness path's
+fault before DAC start in its generic warm-up.
+
+This is a callback render-window starvation, not an observed Metal device
+failure: Metal dispatch failures, epoch tag mismatches, activation failures,
+and callback-thread Metal provenance violations were all zero. The initial
+activation was acknowledged 19.793 ms after its request. Because the harness
+failed closed immediately, clock jumps, swaps, reference checkpoints, and RSS
+growth evidence are absent and must not be inferred. The accompanying
+offline-support record also reports one starvation because that retained
+benchmark loop advances the callback entry point faster than the worker; it
+does not repair or erase the actual-DAC failure.
+
+Live-Metal release support therefore remains withheld for
+Bdev=512/Rgpu=512 on this M1 Pro. No other epoch-worker device/render quantum
+is inferred. The deterministic ownership, exact-epoch, numeric, and TSAN
+evidence remains merge evidence for the architecture, not hardware deadline
+qualification.
+
+## 2026-07-28 epoch-render worker candidate
+
+The current candidate removes all Metal submit/wait work from the audio
+callback. A dedicated worker renders immutable exact-epoch snapshots into two
+banks of four preallocated tiles. The callback performs one bounded activation
+read, validates epoch/device/source tags, copies a prepared slice, advances
+monotonic device and requested source coordinates, and releases ownership.
+Raw, glide, anchor, velocity, repeated post-2^40 clock jumps, and hot-swaps all
+activate at an exact source epoch `E`; a retarget recomputes every companion
+for the replacement `E`.
+
+Deterministic evidence for the candidate includes:
+
+- 10,000 acknowledged queue bank reuses and rapid A/B/A worker serialization;
+- actual-GPU 10,000-event clock-jump/precompiled-swap stress and 10,000-event
+  raw/glide/anchor/velocity stress under two CPU burners, each checked by
+  exact-epoch JIT replay;
+- terminal command failure, starvation, tag-mismatch, interrupted activation
+  publication, retarget, callback-provenance, and fail-silent behavior;
+- Metal/JIT numeric, MSL/column, runtime, and qualification-harness gates.
+
+This is finite evidence for ownership and exact activation semantics, not
+proof that Metal or the worker will always meet a hardware deadline. The one
+authorized Bdev=512/Rgpu=512 actual-DAC row subsequently failed as recorded
+above, so release support remains withheld.
+
+## Historical callback-owned pipeline archive
+
+Everything below this heading is retained evidence for the superseded
+future-block, callback-owned Metal dispatch implementation. Its B=128/D=3 and
+B=512/D=3 failures remain unchanged as causal history. They do not describe
+the current worker/epoch runtime, and they are not current release evidence.
+
 ## 2026-07-28 final B=512/D=3 qualification failure
 
 The one authorized 30-minute B=512/D=3 actual-DAC soak is retained unchanged

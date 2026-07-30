@@ -1,100 +1,134 @@
 # Metal live qualification
 
-The qualification harness uses the real emitted Metal kernel and mandatory
-dual-loaded JIT. It has two modes:
+The current harness exercises the real emitted Metal kernel, the off-RT epoch
+render worker, and the mandatory dual-loaded JIT reference. It has two modes:
 
 ```sh
-# B=128/256/512 × D=1/2/3, four write disciplines
+# Bdev=128/256/512, Rgpu=512, all four write disciplines
 benchmarks/metal_live/run.sh --mode latency
 
-# Required live default-device row (30 minutes)
+# Authorized release-candidate row on the canonical M1 Pro
 benchmarks/metal_live/run.sh --mode soak \
-  --duration-seconds 1800 --buffer 512 --depth 3
+  --duration-seconds 600 --buffer 512 --render-frames 512
 ```
+
+`Bdev` is the exact RtAudio callback quantum. `Rgpu` is the Metal tile render
+quantum and must be a positive multiple of `Bdev`. The runtime owns two banks
+of four preallocated `Rgpu` tiles. A dedicated worker submits and waits for
+Metal; the callback only validates exact epoch/device/source tags and copies
+one `Bdev` slice from a ready tile.
+
+`TROPICAL_METAL_RENDER_TILE_FRAMES` selects `Rgpu` for qualification. The
+engine boot block length is independently selectable with
+`TROPICAL_BUFFER_LENGTH` (16..16384) before Runtime/DAC construction. Both
+default to 512 in the live product configuration. The retired future-block
+pipeline controls and depth diagnostic are absent.
 
 ## Current support envelope
 
-On the canonical M1 Pro, B=128/D=3 is a known unsupported configuration: its
-reviewed live row recorded a 5.422916 ms callback against the 2.902494 ms hard
-callback deadline, plus one underrun. B=256 remains untested. B=512/D=3 is
-also not release-qualified: its single final long-soak attempt aborted at the
-scheduled clock jump after 450.05 measured seconds when one 21.009750 ms
-callback exceeded the 11.609977 ms deadline. The row had zero measured-window
-underruns, ownership failures, Metal dispatch failures, or non-finite samples,
-but the deadline miss is release-blocking. These results scope two unsupported
-configurations on this machine; they do not establish a universal Metal
-failure. This document does not authorize another DAC run.
+Live-Metal release support is withheld. The original Bdev=512/Rgpu=512,
+600-second row on the canonical M1 Pro blocked on one latched render
+starvation observed at the first measured poll. The preserved
+[`artifact`](data/epoch-worker-soak-b512-r512-600s-29e0f7de0ada-m1pro-20260729.jsonl)
+records exact Bdev=512/Rgpu=512, a four-tile capacity, zero Metal dispatch
+failures, zero tag mismatches, and zero activation failures. It failed closed
+before the scheduled clock-jump, A/B-swap, reference, and RSS gates, so none
+of those results is inferred. No epoch-worker device/render configuration is
+currently release-qualified.
 
-`TROPICAL_METAL_PIPELINE_DEPTH=1..3` is qualification-only. Missing controls
-retain synchronous Metal; the retired `TROPICAL_METAL_PIPELINE` spelling is
-inert. Invalid depth values refuse during Metal kernel construction.
+A subsequent
+[`diagnostic`](data/diagnostic-prime-drain-b512-r512-45s-328d537-m1pro-20260729.jsonl)
+located the fault before DAC start: eight tight generic warm-up calls drained
+the four-tile primed window, and the fifth call wrapped to a still-free tile
+0. This was a benchmark/DAC priming defect, not a Metal command-buffer
+failure.
 
-The latency fixture changes an output-visible raw slot impulsively. The
-`write_count` rows preserve the host disciplines' slot-write shapes:
-raw=1, glide=3, anchor=2, velocity=2. This isolates future-block transport
-latency from intentionally subjective glide onset. The harness fails if the
-first changed block differs from D.
+Candidate `8f7eecb` repairs that defect with off-RT exact-tile waits for
+unpaced rendering and a non-consuming Metal readiness barrier for DAC start,
+device switch, and reconnect. Its retained
+[`60-second hardware row`](data/hardened-worker-smoke-b512-r512-60s-8f7eecb-m1pro-20260729.jsonl)
+records zero starvation before start, through startup, and across 5,170
+measured callbacks; its separate 1,000-block offline support row also records
+zero starvation. Worker-stage telemetry is complete and ordered.
 
-The soak compiles the real 512-partial bank. The bank stays reachable behind a
-live 1e-8 gain (−160 dB), and a continuous 55 Hz correctness canary runs at
-1e-12 amplitude (−240 dB). This is effectively silent at the default device but
-keeps every reference comparison nonzero, including after the 2^40 clock jump.
-It records:
+That row remains blocked on a distinct final-reference correctness gate:
+three Metal/JIT checkpoints measured above 142 dB, while a final reverse clock
+jump across the last velocity anchor measured 78.585 dB against the required
+greater-than-100 dB threshold. The leading hypothesis is Metal f32
+clock-origin precision after alternating far/near jumps, but it is not yet
+isolated from the replay oracle. Release support therefore stays withheld
+pending a deterministic reverse-crossing discriminator and cause-specific
+fix; the old prime-drain defect itself is closed.
 
-- real callback count/average/max plus p50/p95/p99 upper bounds from a
-  preallocated fixed histogram (1 us resolution, >=20 ms overflow bin);
-- a callback-boundary stats epoch, requested and negotiated RtAudio frames,
-  and RtAudio underrun/overrun counts;
-- progress-gated snapshots and actual callback indices for baseline, periodic
-  writes, clock jump, publication, and the first post-publication callback;
-- nonzero JIT-reference SNR/max error from a separate, control-thread-only JIT
-  runtime at start, post-2^40, midpoint-after-swap, and end;
-- resident memory every two seconds, with the growth window beginning two
-  seconds after observed hot-swap progress;
-- process user+system CPU seconds and measured-wall fraction;
-- write and hot-swap walls;
-- the last completed boundary observed by every production parameter
-  dispatch and the exact first audible sample index, with the isolated JIT
-  oracle replayed at the latter;
-- a separate offline per-block p50/p95/p99 supporting row.
+The retained B=128/D=3 and B=512/D=3 failures in
+[`findings.md`](findings.md) describe the superseded callback-owned
+future-dispatch implementation. They remain valuable causal evidence but do
+not qualify or disqualify this different runtime architecture. No document
+claims that a worker always meets a hardware deadline.
 
-The audio callback performs no allocation, lock, or I/O for telemetry: it adds
-one relaxed histogram increment and services at most one preallocated capture
-buffer. Startup status is preserved but separated by an epoch applied at an
-actual callback boundary. A negotiated-frame mismatch refuses before stream
-start. Any post-reset underrun, callback overrun/stall, missing event/reference,
-reference checkpoint not strictly above 100 dB, callback p99 at or above 50%
-of the block deadline, or monotonic post-warmup RSS growth marks the row
-blocked. Ordinary
-end captures wait at least pipeline depth plus one callback after the preceding
-write; jump and hot-swap checkpoints are tied to their observed re-prime
-progress callbacks.
+## What a row gates
 
-At B=512 and 44.1 kHz, each callback has an 11.610 ms hard processing
-deadline. D=3 ordinary-parameter transport is 34.830 ms from capture to the
-first output block. Pipeline transport latency does not enlarge the per-callback
-processing deadline; these are different measurements and gates.
+The soak compiles the real 512-partial bank. The addressed bank is the
+reference signal behind a 1e-8 trim, while a 55 Hz clock canary is bounded at
+1e-12. Every reference checkpoint requires the bank to contribute at least
+99% of the conservative signal-energy lower bound and Metal/JIT SNR to exceed
+100 dB, so the canary cannot mask the heavy graph.
 
-At least three post-warmup RSS samples are required; an empty or short series
-cannot pass the memory gate.
+The harness records and gates:
+
+- exact requested and negotiated `Bdev`, `Rgpu`, and four-tile worker
+  capacity;
+- real callback count, exact maximum, and p50/p95/p99 bounds from a
+  preallocated one-microsecond histogram;
+- zero measured-window RtAudio underruns/overruns, non-finite samples, device
+  continuity events, and runtime ownership failures;
+- zero Metal dispatch failures, render starvations, tag mismatches, activation
+  failures, and callback-thread Metal provenance violations;
+- ordered worker stage timestamps from request receipt through old-epoch
+  retirement, plus activation latency min/mean/max and worker CPU/wall time;
+- every requested periodic clock jump and hot-swap reaching an acknowledged
+  activation epoch, with the final reference after writes stop and the last
+  activation is acknowledged;
+- exact control `effective_sample_index` replay by an isolated JIT runtime at
+  start, after repeated post-2^40 jumps, after A/B swaps, and at the end;
+- resident memory every two seconds, with at least three positive post-warmup
+  samples and no material monotonic growth;
+- distinct original/replacement IR and MSL artifacts, hot-swap wall time,
+  dispatch wall time, and a separate offline supporting row.
+
+A row blocks if any required evidence is missing, the exact callback maximum
+reaches the Bdev deadline, callback p99 reaches half the deadline, measured
+callback coverage leaves [0.99, 1.01], a reference checkpoint is at or below
+100 dB, or any sticky fault counter is nonzero. Startup status is separated by
+a stats epoch applied at an actual callback boundary. The callback performs no
+allocation, lock, I/O, Metal submission, or control-state packing for the
+qualification surface.
+
+At Bdev=512 and 44.1 kHz, every callback has an 11.610 ms hard processing
+deadline. Activation latency, individual GPU tile duration, render-ahead
+reserve, and callback execution are distinct measurements; none enlarges that
+deadline.
 
 Before every subprocess, inherited `TROPICAL_*` variables are removed and the
 benchmark controls are explicitly set and recorded.
 
-The no-DAC large-clock oracle discriminator reproduces the real heavy graph,
-post-swap defaults, and final 15-event schedule from the blocked 60-second
-smoke:
+## Deterministic supporting gates
+
+The no-DAC large-clock discriminator reproduces the heavy graph and exact
+production control epochs:
 
 ```sh
 python3 benchmarks/metal_live/run_velocity_oracle_discriminator.py
 ```
 
 It requires true 1↔0.75 velocity toggles and the velocity-no-op control to
-remain above 140 dB on synchronous Metal versus JIT. It then forces a callback
-boundary between production dispatches: exact-index replay must remain above
-140 dB while the obsolete batch-start oracle must fail below 100 dB. This is a
-deterministic harness regression, not a DAC qualification row.
+remain above 140 dB on Metal versus JIT. It then forces a callback boundary
+between production dispatches: exact-epoch replay must remain above 140 dB
+while the obsolete batch-start oracle must fail below 100 dB.
 
-The engine boot block length is independently selectable with
-`TROPICAL_BUFFER_LENGTH` (16..16384) before runtime/DAC construction. The
-default remains 512 and diagnostics already expose the runtime buffer length.
+`engine/tests/test_metal_kernel.cpp` additionally covers queue ownership and
+bank reuse, callback isolation, terminal dispatch failures, retargeting,
+rapid A/B/A activation serialization, and 10,000-event clock/swap and
+parameter-epoch stress under CPU contention. These finite tests establish
+specific invariants; release qualification remains hardware-scoped empirical
+evidence.

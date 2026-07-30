@@ -890,6 +890,7 @@ static void test_dac_histogram_contract()
   ASSERT(tropical_dac_reconnect_success_count(nullptr) == 0);
   ASSERT(tropical_dac_reconnect_failure_count(nullptr) == 0);
   ASSERT(tropical_runtime_metal_dispatch_failure_count(nullptr) == 0);
+  ASSERT(tropical_runtime_metal_render_tile_frames(nullptr) == 0);
   ASSERT(tropical_runtime_ownership_failure_count(nullptr) == 0);
 }
 
@@ -898,6 +899,7 @@ struct CaptureTestSource
   explicit CaptureTestSource(unsigned int n) : outputBuffer(n, 0.0) {}
   void process()
   {
+    ++process_calls;
     for (unsigned int i = 0; i < outputBuffer.size(); ++i)
       outputBuffer[i] = static_cast<double>(sample_index + i);
     sample_index += outputBuffer.size();
@@ -913,7 +915,49 @@ struct CaptureTestSource
 
   std::vector<double> outputBuffer;
   uint64_t sample_index = 0;
+  unsigned int process_calls = 0;
 };
+
+struct ReadyAwareStartSource : CaptureTestSource
+{
+  using CaptureTestSource::CaptureTestSource;
+
+  void prepare_realtime_start(unsigned int process_cycles)
+  {
+    ++prepare_calls;
+    requested_process_cycles = process_cycles;
+  }
+
+  unsigned int prepare_calls = 0;
+  unsigned int requested_process_cycles = 0;
+};
+
+static void test_dac_start_source_preparation()
+{
+  constexpr unsigned int frames = 8;
+  CaptureTestSource legacy(frames);
+  TropicalDACImpl<CaptureTestSource> legacy_dac(&legacy, 44100, 1);
+  legacy_dac.prepare_source_for_start();
+  ASSERT(legacy.process_calls == kPrimeCycles);
+  ASSERT(legacy.sample_index == frames * kPrimeCycles);
+
+  ReadyAwareStartSource ready_aware(frames);
+  TropicalDACImpl<ReadyAwareStartSource> ready_dac(
+    &ready_aware, 44100, 1);
+  ready_dac.prepare_source_for_start();
+  ASSERT(ready_aware.prepare_calls == 1);
+  ASSERT(ready_aware.requested_process_cycles == kPrimeCycles);
+  ASSERT(ready_aware.process_calls == 0);
+  ASSERT(ready_aware.sample_index == 0);
+
+  ready_dac.prepare_source_for_stream_restart();
+  ASSERT(ready_aware.prepare_calls == 2);
+  ASSERT(ready_aware.requested_process_cycles == 0);
+  ASSERT(ready_aware.process_calls == 0);
+
+  legacy_dac.prepare_source_for_stream_restart();
+  ASSERT(legacy.process_calls == kPrimeCycles);
+}
 
 static void test_capture_serial_state_machine()
 {
@@ -959,6 +1003,8 @@ int main()
   run_test("owned state blocks ABA reuse", test_state_ownership_barrier);
   run_test("device-boundary clamp",         test_device_bound_clamp);
   run_test("fixed DAC histogram/ABI contract", test_dac_histogram_contract);
+  run_test("DAC startup honors source readiness barrier",
+           test_dac_start_source_preparation);
   run_test("serial output-capture state machine", test_capture_serial_state_machine);
 
   printf("\n  %d passed, %d failed\n", g_pass, g_fail);

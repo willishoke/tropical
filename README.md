@@ -83,8 +83,9 @@ conditions, machines, and percentiles live in the
 | LLVM → wasm32 | shared LLVM f64/i64 semantics | precompiled browser player |
 | MSL → Metal | f32 values plus exact i64 clock rail | heavy live modal audio on supported Apple builds |
 
-Metal-enabled sessions dual-load the JIT artifact: live audio can dispatch to
-Metal while scopes and the CPU reference keep using JIT. See the
+Metal-enabled sessions dual-load the JIT artifact: a dedicated worker renders
+exact-epoch Metal tiles while the audio callback consumes prepared slices;
+scopes and the CPU reference keep using JIT. See the
 [`metal_live` findings](benchmarks/metal_live/findings.md) for current
 qualification evidence.
 

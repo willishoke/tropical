@@ -33,23 +33,33 @@ Omitted when empty; a host that does not read it treats every write as `raw`
 All disciplines below are **stateless re-anchorings**: the "state" they touch
 lives in param slots the kernel reads as pure functions of τ — navigable,
 transferable by name across hot-swap, exactly like everything else. A write
-needs two ambient values from the host: `now` (the first output sample at
-which the transaction's captured generation is audible) and `SR` (the
-kernel's sample rate).
+needs two ambient values from the host: `now` (the exact source-sample epoch
+at which the transaction's captured generation becomes audible) and `SR`
+(the kernel's sample rate).
 
-For a callback starting at `C`, synchronous JIT/Metal uses `now = C`. A
-steady-state future-block Metal pipeline of depth `D` uses `now = C + D·B`,
-where `B` is the buffer length. Fresh kernels, hot-swaps, and clock-jump
-re-primes are exceptions: their ring is rebuilt from the current capture, so
-`now = C` at every depth. Publication racing a callback is linearized against
-generation capture: a transaction that wins is stamped for that callback; a
-transaction that loses is recomputed for the next capture. The audio callback
-must not wait, retry, allocate, or emit silence because control is publishing.
+For the JIT, a control transaction captured at callback boundary `C` uses
+`now = C`. Metal is a two-phase handoff: the host reserves a future physical
+device frame, maps that frame to an exact source epoch `E`, evaluates every
+discipline companion at `E`, and gives one immutable snapshot to the render
+worker. The old snapshot is audible strictly before `E`; the new snapshot is
+audible starting at `E`. If the worker cannot safely publish the prepared
+window for the reserved frame, it retargets a later physical frame and the
+host recomputes the whole transaction at the new `E`; it never reuses
+companions calculated for the missed epoch.
+
+Raw writes, glides, anchors, velocity changes, clock jumps, and hot-swaps all
+use the same exact-epoch rule. Device frames remain monotonic through a clock
+jump while the source coordinate changes to the requested index. Publication
+racing the callback is linearized by a bounded activation descriptor read.
+An unstable descriptor is deferred to a later callback; a missing or
+mismatched prepared tile is replaced with fault silence and a sticky
+diagnostic. The callback does not wait, retry, allocate, submit Metal work, or
+pack control state.
 
 Production dispatch evidence reports both `observed_sample_index` (the last
-completed callback boundary visible when dispatch began, diagnostic only) and
-`effective_sample_index` (the normative `now` used by discipline math and the
-first audible output index). Qualification replays the latter.
+completed source boundary visible when dispatch began, diagnostic only) and
+`effective_sample_index` (the normative exact epoch `E` used by discipline
+math and the first audible output index). Qualification replays the latter.
 
 ## `raw`
 

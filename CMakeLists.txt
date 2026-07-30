@@ -65,7 +65,9 @@ if(TROPICAL_METAL)
     endif()
     enable_language(OBJCXX)
     set(CMAKE_OBJCXX_STANDARD 20)
-    target_sources(tropical_core PRIVATE engine/metal/MetalKernel.mm)
+    target_sources(tropical_core PRIVATE
+        engine/metal/MetalKernel.mm
+        engine/metal/MetalRenderWorker.cpp)
     set_source_files_properties(engine/metal/MetalKernel.mm PROPERTIES
         COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(tropical_core PRIVATE
@@ -181,6 +183,11 @@ option(TROPICAL_BUILD_TESTS "Build C++ process tests (no audio device required)"
 
 if(TROPICAL_BUILD_TESTS)
     enable_testing()
+    add_executable(test_epoch_tile_queue engine/tests/test_epoch_tile_queue.cpp)
+    target_include_directories(test_epoch_tile_queue PRIVATE engine)
+    target_compile_features(test_epoch_tile_queue PRIVATE cxx_std_20)
+    add_test(NAME current_epoch_tile_queue COMMAND test_epoch_tile_queue)
+
     add_executable(test_module_process engine/tests/test_module_process.cpp)
     target_include_directories(test_module_process PRIVATE engine ${LLVM_INCLUDE_DIRS})
     target_compile_definitions(test_module_process PRIVATE ${LLVM_DEFINITIONS})
@@ -189,24 +196,44 @@ if(TROPICAL_BUILD_TESTS)
     add_test(NAME current_module_process COMMAND test_module_process)
 
     if(TROPICAL_TSAN)
+        target_compile_options(test_epoch_tile_queue PRIVATE -fsanitize=thread)
+        target_link_options(test_epoch_tile_queue PRIVATE -fsanitize=thread)
         target_compile_options(test_module_process PRIVATE -fsanitize=thread)
         target_link_options(test_module_process PRIVATE -fsanitize=thread)
         add_custom_target(check_runtime_tsan
-            COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure -R module_process
-            DEPENDS test_module_process
+            COMMAND ${CMAKE_CTEST_COMMAND} --output-on-failure
+                    -R "epoch_tile_queue|module_process|metal_render_worker"
+            DEPENDS test_epoch_tile_queue test_module_process
+            VERBATIM
             USES_TERMINAL)
     endif()
     if(TROPICAL_METAL)
+        add_executable(test_metal_render_worker
+            engine/tests/test_metal_render_worker.cpp)
+        target_include_directories(test_metal_render_worker
+            PRIVATE engine ${LLVM_INCLUDE_DIRS})
+        target_compile_definitions(test_metal_render_worker
+            PRIVATE ${LLVM_DEFINITIONS})
+        target_compile_features(test_metal_render_worker PRIVATE cxx_std_20)
+        target_link_libraries(test_metal_render_worker PRIVATE tropical_core)
+        add_test(NAME current_metal_render_worker
+            COMMAND test_metal_render_worker)
+        set_tests_properties(current_metal_render_worker PROPERTIES TIMEOUT 30)
+        if(TROPICAL_TSAN)
+            target_compile_options(test_metal_render_worker PRIVATE -fsanitize=thread)
+            target_link_options(test_metal_render_worker PRIVATE -fsanitize=thread)
+            add_dependencies(check_runtime_tsan test_metal_render_worker)
+        endif()
+
         add_executable(test_metal_kernel engine/tests/test_metal_kernel.cpp)
         target_include_directories(test_metal_kernel PRIVATE engine ${LLVM_INCLUDE_DIRS})
         target_compile_definitions(test_metal_kernel PRIVATE ${LLVM_DEFINITIONS})
         target_compile_features(test_metal_kernel PRIVATE cxx_std_20)
         target_link_libraries(test_metal_kernel PRIVATE tropical_core)
         add_test(NAME current_metal_kernel COMMAND test_metal_kernel)
-        # Includes deterministic sync + pipelined command-failure injection.
-        # A stranded completion semaphore is a bounded test failure, not a
-        # wedged test runner.
-        set_tests_properties(current_metal_kernel PROPERTIES TIMEOUT 30)
+        # Includes deterministic failures before and after epoch activation.
+        # The timeout bounds worker lifecycle or GPU completion regressions.
+        set_tests_properties(current_metal_kernel PROPERTIES TIMEOUT 180)
     endif()
 endif()
 
