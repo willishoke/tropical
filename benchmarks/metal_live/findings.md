@@ -1,5 +1,40 @@
 # Metal backend — live findings (V2 phase 6)
 
+## 2026-07-30 exact glide-coordinate release qualification
+
+Candidate `8d92a64c38329a24a064bc25eb97a7bc1c97a5b5`, containing the
+`4263faf` exact-limb fix plus its retained short-row evidence, has a passing
+600-second Bdev=512/Rgpu=512 release-qualification row:
+[`data/reverse-crossing-fix-soak-b512-r512-600s-8d92a64-m1pro-20260730.jsonl`](data/reverse-crossing-fix-soak-b512-r512-600s-8d92a64-m1pro-20260730.jsonl).
+Its SHA-256 is
+`474f38251b3207857d33fd37434c12826048a012932a7bbdf9c7c61b194741dd`.
+The environment record identifies the canonical Apple M1 Pro
+(`MacBookPro18,1`, 16 Metal cores), macOS 26.3, and the exact commit; its only
+status entry is the requested output artifact.
+
+All 35 acceptance gates are true:
+
+- start, post-2^40-jump, midpoint-after-hot-swap, and final Metal/JIT
+  checkpoints measure 143.947, 144.070, 142.615, and 143.968 dB, with maximum
+  absolute errors 9.876e-15, 1.008e-14, 2.727e-15, and 9.887e-15;
+- starvation is zero before DAC start, after start, before the statistics
+  reset, and across the measured window. Dispatch, epoch-tag, activation,
+  ownership, non-finite, and callback-thread provenance failures are also
+  zero in both the DAC row and the separate 1,000-block offline support row;
+- all 120 requested clock jumps and 20 requested hot-swaps were acknowledged.
+  Every required event completed, and the final reference followed write stop
+  and the last acknowledged activation;
+- 51,681 measured callbacks had zero underruns and overruns. The exact maximum
+  was 0.022208 ms against the 11.610 ms deadline, the p99 histogram upper
+  bound was 0.011 ms, and callback coverage was 1.00002; and
+- worker-stage and activation-latency telemetry were complete and ordered.
+  All 285 post-warmup RSS samples were valid, with 49,152 bytes of robust
+  level growth against a 1 MiB material-growth allowance.
+
+This row release-qualifies Live Metal only for Bdev=512/Rgpu=512 with the
+four-tile epoch worker on the recorded canonical M1 Pro. It does not infer
+support for other hardware, device quanta, or render quanta.
+
 ## 2026-07-30 exact glide-coordinate hardware validation
 
 Candidate `4263faf7b51de5a4b415bfc7ccae24a7530c438e` has a clean
@@ -29,10 +64,10 @@ All 35 acceptance gates are true:
   post-warmup RSS samples showed no material growth.
 
 This retained row validates the exact-limb glide fix on the canonical M1 Pro
-and closes the prior reverse-crossing correctness blocker. A new 600-second
-release-qualification row is now warranted. The 60-second row is not itself a
-release qualification, so Live-Metal support remains withheld until that long
-row passes.
+and closes the prior reverse-crossing correctness blocker. The subsequent
+`8d92a64` 600-second row above release-qualifies the exact Bdev=512/Rgpu=512
+envelope on that machine; the 60-second row remains supporting validation, not
+the qualification result.
 
 ## 2026-07-29 queue-aware startup hardening
 

@@ -26,15 +26,25 @@ pipeline controls and depth diagnostic are absent.
 
 ## Current support envelope
 
-Live-Metal release support is withheld. The original Bdev=512/Rgpu=512,
-600-second row on the canonical M1 Pro blocked on one latched render
-starvation observed at the first measured poll. The preserved
+The current release-qualified Live-Metal envelope is limited to
+Bdev=512/Rgpu=512 with a four-tile worker capacity on the canonical Apple M1
+Pro (`MacBookPro18,1`, 16 Metal cores, macOS 26.3). Candidate `8d92a64` has a
+retained
+[`600-second qualification row`](data/reverse-crossing-fix-soak-b512-r512-600s-8d92a64-m1pro-20260730.jsonl)
+with all 35 acceptance gates true across 51,681 measured callbacks. Its four
+Metal/JIT checkpoints measure 143.947, 144.070, 142.615, and 143.968 dB; all
+120 clock jumps and 20 hot-swaps were acknowledged; queue, callback,
+activation, ownership, and device-continuity faults were zero; and 285 valid
+post-warmup RSS samples showed no material growth. No other hardware or
+device/render quantum is inferred.
+
+An earlier Bdev=512/Rgpu=512 600-second row on the same M1 Pro blocked on one
+latched render starvation observed at the first measured poll. The preserved
 [`artifact`](data/epoch-worker-soak-b512-r512-600s-29e0f7de0ada-m1pro-20260729.jsonl)
 records exact Bdev=512/Rgpu=512, a four-tile capacity, zero Metal dispatch
 failures, zero tag mismatches, and zero activation failures. It failed closed
 before the scheduled clock-jump, A/B-swap, reference, and RSS gates, so none
-of those results is inferred. No epoch-worker device/render configuration is
-currently release-qualified.
+of those results is inferred.
 
 A subsequent
 [`diagnostic`](data/diagnostic-prime-drain-b512-r512-45s-328d537-m1pro-20260729.jsonl)
@@ -69,9 +79,8 @@ Its start, post-2^40-jump, post-swap, and final checkpoints measure 144.028,
 starvation at every startup/measured boundary, zero queue/callback/activation
 faults, complete ordered worker telemetry, and full clock-jump/hot-swap
 acknowledgement. This short validation closes the reverse-crossing blocker and
-warrants a new 600-second release-qualification row. It does not itself broaden
-the support envelope: Live-Metal release support remains withheld pending that
-long row.
+warranted a new 600-second release-qualification row. The subsequent passing
+`8d92a64` long row now qualifies only the exact envelope stated above.
 
 The retained B=128/D=3 and B=512/D=3 failures in
 [`findings.md`](findings.md) describe the superseded callback-owned
