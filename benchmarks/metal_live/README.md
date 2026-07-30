@@ -37,6 +37,14 @@ before the scheduled clock-jump, A/B-swap, reference, and RSS gates, so none
 of those results is inferred. No epoch-worker device/render configuration is
 currently release-qualified.
 
+A subsequent
+[`diagnostic`](data/diagnostic-prime-drain-b512-r512-45s-328d537-m1pro-20260729.jsonl)
+located the fault before DAC start: eight tight generic warm-up calls drained
+the four-tile primed window, and the fifth call wrapped to a still-free tile
+0. This is a benchmark/DAC priming defect, not evidence of a Metal
+command-buffer failure. It requires a new fixed candidate and does not turn
+the failed qualification row into a pass.
+
 The retained B=128/D=3 and B=512/D=3 failures in
 [`findings.md`](findings.md) describe the superseded callback-owned
 future-dispatch implementation. They remain valuable causal evidence but do

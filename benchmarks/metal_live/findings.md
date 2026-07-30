@@ -1,5 +1,42 @@
 # Metal backend — live findings (V2 phase 6)
 
+## 2026-07-29 prime-drain diagnostic
+
+The requested follow-up diagnostic is retained as
+[`data/diagnostic-prime-drain-b512-r512-45s-328d537-m1pro-20260729.jsonl`](data/diagnostic-prime-drain-b512-r512-45s-328d537-m1pro-20260729.jsonl).
+It ran from telemetry commit
+`328d53742b259973fa33bf30ff6024bc2cc95be1`; its SHA-256 is
+`a71c17bc2733088d7531bded828477cff526364a6a5cd5e7b799b7dbd21a89f8`.
+This was a short causal diagnostic, not a qualification retry. Its manifest
+also records a rejected ten-second preflight output: that invocation failed
+the harness's minimum-duration check before opening a DAC and was discarded.
+
+The first-fault snapshot resolves the earlier timing ambiguity:
+
+- starvation count was already one before `tropical_dac_start`, remained one
+  before the DAC statistics reset, and had measured-window delta zero;
+- the fault occurred at device/source frame 2,048, expecting epoch 1, bank 0,
+  wrapped tile 0 at device/source frame 2,048;
+- the worker's last published watermark ended at frame 2,048; and
+- all four tiles were `Free` (`free_mask=0xf`), with no tile `Ready`,
+  `Rendering`, or `Reading`.
+
+The deterministic cause is the benchmark's generic pre-DAC warm-up:
+`runtime_bench` calls the ordinary callback entry point eight times in a tight
+loop. The first four calls consume the complete four-tile primed window; the
+fifth wraps to tile 0 before the worker can observe the acknowledgement and
+refill it. The queue correctly latches fail-silent starvation. The generic
+four-cycle `TropicalDACImpl::start()` prime is a second instance of the same
+backend-blind drain hazard, although this run had already faulted before
+reaching it.
+
+This rejects the earlier leading explanation of an ordinary desktop
+scheduling tail exhausting a correctly paced worker window. The failed
+qualification row remains final and release support remains withheld. A fix
+must make both benchmark warm-up and DAC priming Metal-aware, then validate as
+a new code candidate; this diagnostic does not authorize reinterpreting the
+failed row as a pass.
+
 ## 2026-07-29 epoch-render Bdev=512/Rgpu=512 qualification failure
 
 The one authorized ten-minute epoch-worker actual-DAC row is retained
@@ -19,7 +56,9 @@ the 170-callback startup window or on that first measured callback. Either
 classification fails the required zero-starvation gate. The exact negotiated
 quanta were Bdev=512/Rgpu=512 with 2,048 frames of worker capacity. The one
 measured callback took 0.005875 ms with zero measured underruns or overruns;
-the pre-reset startup snapshot separately recorded one underrun.
+the pre-reset startup snapshot separately recorded one underrun. The
+follow-up telemetry row above subsequently locates the same harness path's
+fault before DAC start in its generic warm-up.
 
 This is a callback render-window starvation, not an observed Metal device
 failure: Metal dispatch failures, epoch tag mismatches, activation failures,
