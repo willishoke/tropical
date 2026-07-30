@@ -1,5 +1,39 @@
 # Metal backend — live findings (V2 phase 6)
 
+## 2026-07-30 exact glide-coordinate hardware validation
+
+Candidate `4263faf7b51de5a4b415bfc7ccae24a7530c438e` has a clean
+retained 60-second Bdev=512/Rgpu=512 hardware row:
+[`data/reverse-crossing-fix-smoke-b512-r512-60s-4263faf-m1pro-20260730.jsonl`](data/reverse-crossing-fix-smoke-b512-r512-60s-4263faf-m1pro-20260730.jsonl).
+Its SHA-256 is
+`fd0cff87c3627f166c7b37b22fd03e7300719cfe7039e914623084e118578c71`.
+The environment record names the exact candidate and has no status entry
+other than the requested output artifact.
+
+All 35 acceptance gates are true:
+
+- start, post-2^40-jump, midpoint-after-hot-swap, and final Metal/JIT
+  checkpoints measure 144.028, 144.163, 142.638, and 142.954 dB, with maximum
+  absolute errors 1.004e-14, 1.015e-14, 2.713e-15, and 2.586e-15;
+- starvation is zero before DAC start, after start, before the statistics
+  reset, and across the measured window. Dispatch, epoch-tag, activation,
+  ownership, non-finite, and callback-thread provenance failures are also
+  zero, both in the DAC row and the separate 1,000-block offline support row;
+- all 11 requested clock jumps and the requested hot-swap were acknowledged,
+  every required event completed, and the final reference followed both write
+  stop and the last acknowledged activation;
+- 5,170 measured callbacks had zero underruns and overruns. The exact maximum
+  was 0.013334 ms against the 11.610 ms deadline, the p99 histogram upper
+  bound was 0.011 ms, and measured callback coverage was 1.00017; and
+- worker-stage telemetry and activation latency were complete, while 13 valid
+  post-warmup RSS samples showed no material growth.
+
+This retained row validates the exact-limb glide fix on the canonical M1 Pro
+and closes the prior reverse-crossing correctness blocker. A new 600-second
+release-qualification row is now warranted. The 60-second row is not itself a
+release qualification, so Live-Metal support remains withheld until that long
+row passes.
+
 ## 2026-07-29 queue-aware startup hardening
 
 The startup defect identified below is repaired by the candidate at
@@ -75,12 +109,11 @@ offline support loop still used the callback entry point, and active-bank
 refills overwrote candidate-stage timestamps. It is evidence for those fixes,
 not a qualification pass.
 
-Live-Metal release support remains withheld pending a clean retained
-60-second Bdev=512/Rgpu=512 hardware validation of this fix. The existing
-`8f7eecb` row remains a blocked result for that exact commit; deterministic
-evidence does not rewrite it. The queue-aware startup and offline rendering
-fixes remain validated, and the old prime-drain failure is not present in the
-final candidate.
+The subsequent `4263faf` retained hardware row above validates the exact-limb
+fix at Bdev=512/Rgpu=512. This `8f7eecb` row remains a blocked result for its
+exact commit; later evidence does not rewrite it. The queue-aware startup and
+offline rendering fixes remain validated, and the old prime-drain failure is
+not present in the final candidate.
 
 ## 2026-07-29 prime-drain diagnostic
 

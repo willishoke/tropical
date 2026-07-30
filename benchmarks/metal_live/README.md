@@ -60,9 +60,18 @@ timestamp near 2^40 lost the entire 20 ms ramp's resolution. The fix transports
 that coordinate as four exact 16-bit limbs and performs the integer subtraction
 before converting the bounded elapsed delta to float. The reproducer's full
 reverse arm now measures 143.021 dB, with its exact/stale oracle control at
-142.380/83.429 dB. Release support remains withheld until a clean retained
-60-second hardware row validates the fix; the old prime-drain defect itself is
-closed.
+142.380/83.429 dB.
+
+Candidate `4263faf` now has a clean retained
+[`60-second hardware row`](data/reverse-crossing-fix-smoke-b512-r512-60s-4263faf-m1pro-20260730.jsonl).
+Its start, post-2^40-jump, post-swap, and final checkpoints measure 144.028,
+144.163, 142.638, and 142.954 dB. All 35 acceptance gates pass, including zero
+starvation at every startup/measured boundary, zero queue/callback/activation
+faults, complete ordered worker telemetry, and full clock-jump/hot-swap
+acknowledgement. This short validation closes the reverse-crossing blocker and
+warrants a new 600-second release-qualification row. It does not itself broaden
+the support envelope: Live-Metal release support remains withheld pending that
+long row.
 
 The retained B=128/D=3 and B=512/D=3 failures in
 [`findings.md`](findings.md) describe the superseded callback-owned
