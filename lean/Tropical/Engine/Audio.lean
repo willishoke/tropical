@@ -109,9 +109,10 @@ def handleSetParam (env : Env) (args : Json) : EngineM Json := do
 /-- Apply the glide discipline for `set_param`: a CLOSED-FORM parameter ramp
     (no per-sample state). The
     kernel evaluates `f(τ) = v0 + (v1−v0)·smoothstep(clamp((τ−t0)/dur, 0, 1))` from
-    three slots (`param:<name>#v0/#v1/#t0`); this op RE-ANCHORS the ramp: read the
-    current sample index `now`, evaluate the ramp at `now` (so the new ramp starts
-    exactly where we are — no jump), then set `v0 = current, v1 = target, t0 = now`.
+    value slots plus four exact 16-bit limbs for `t0`; this op RE-ANCHORS the
+    ramp: read the current sample index `now`, evaluate the ramp at `now` (so
+    the new ramp starts exactly where we are — no jump), then set
+    `v0 = current, v1 = target, t0 = now` and publish the exact t0 limbs.
     Stateless and click-free — the "state" is the anchor slots, navigable like τ.
     `dur = 0.02·SR` samples (20 ms) matches the kernel's ramp, at any sample rate. -/
 private def applyParamGlide (env : Env) (args : Json) : EngineM Json := do
@@ -125,17 +126,35 @@ private def applyParamGlide (env : Env) (args : Json) : EngineM Json := do
     | internalError s!"set_param: no glide slots for '{name}'"
   let read (sfx : String) : EngineM Float := do
     match ← slotOf sfx with | some i => env.runtime.getSlot i | none => pure 0.0
+  let readExactT0 : EngineM (Option UInt64) := do
+    let mut bits : UInt64 := 0
+    for i in [0:4] do
+      let some idx ← slotOf s!"t0#u{i}" | return none
+      let limb ← env.runtime.getSlot idx
+      bits := bits |||
+        ((limb.toUInt64 &&& 0xffff) <<< (16 * i).toUInt64)
+    return some bits
   let write (sfx : String) (v : Float) : EngineM Unit := do
     match ← slotOf sfx with | some i => env.runtime.setSlot i v | none => pure ()
-  let now ← env.runtime.currentSampleIndex
+  let nowBits ← env.runtime.currentSampleIndexU64
+  let now := nowBits.toFloat
   let dur := (← env.runtime.sampleRate) * 0.02   -- 20 ms, matching the kernel's ramp
   let v0 ← read "v0"; let v1 ← read "v1"; let t0 ← read "t0"
-  let raw := (now - t0) / dur
+  let elapsed ← match ← readExactT0 with
+    | some exactT0 =>
+      pure <| if nowBits >= exactT0
+        then (nowBits - exactT0).toFloat
+        else -((exactT0 - nowBits).toFloat)
+    | none => pure (now - t0)
+  let raw := elapsed / dur
   let s := if raw < 0.0 then 0.0 else if raw > 1.0 then 1.0 else raw
   let curr := v0 + (v1 - v0) * (s * s * (3.0 - 2.0 * s))
   write "v0" curr
   write "v1" target
   write "t0" now
+  for i in [0:4] do
+    write s!"t0#u{i}"
+      (((nowBits >>> (16 * i).toUInt64) &&& 0xffff).toFloat)
   -- the mirror tracks the ramp's TARGET (its settled value), like every
   -- other write path — a glide previously skipped this, so list_params lied.
   env.state.modify (·.setParamValue name (toJson target))

@@ -491,6 +491,11 @@ def collectParams (raws : Array Raw) : Array (String × JsonNumber) := Id.run do
           out := out.push (s!"{base}#v0", dflt)
           out := out.push (s!"{base}#v1", dflt)
           out := out.push (s!"{base}#t0", ⟨0, 0⟩)
+          -- Metal snapshots ordinary slots as f32, so an absolute t0 would
+          -- lose the whole 20 ms ramp past 2^24. Four exact 16-bit limbs carry
+          -- the signed i64 source coordinate used by `glideExpr`.
+          for i in [0:4] do
+            out := out.push (s!"{base}#t0#u{i}", ⟨0, 0⟩)
         else
           out := out.push (base, dflt)
           -- a frequency knob (source freq, fm carrier) carries a phase-anchor

@@ -45,7 +45,7 @@ def main() -> int:
     result = json.loads(raw)
     if (
         result.get("schema")
-        != "tropical_metal_velocity_oracle_discriminator_1"
+        != "tropical_metal_velocity_oracle_discriminator_2"
         or result.get("passed") is not True
     ):
         raise RuntimeError(f"velocity/oracle discriminator failed: {result}")

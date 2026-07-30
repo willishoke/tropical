@@ -17,6 +17,67 @@
 namespace tropical_runtime
 {
 
+namespace
+{
+
+uint64_t read_u64_limbs(
+  const KernelState & state, const std::string & base,
+  bool & complete)
+{
+  uint64_t value = 0;
+  complete = true;
+  for (uint32_t limb = 0; limb < 4; ++limb)
+  {
+    const std::string name =
+      "param:" + base + "#u" + std::to_string(limb);
+    auto it = std::find(
+      state.slot_names.begin(), state.slot_names.end(), name);
+    if (it == state.slot_names.end())
+    {
+      complete = false;
+      return 0;
+    }
+    const std::size_t index =
+      static_cast<std::size_t>(it - state.slot_names.begin());
+    if (index >= state.slots.size())
+    {
+      complete = false;
+      return 0;
+    }
+    const uint64_t part =
+      static_cast<uint64_t>(state.slots[index]) & UINT64_C(0xffff);
+    value |= part << (16 * limb);
+  }
+  return value;
+}
+
+void write_u64_limbs(
+  KernelState & state, const std::string & base, uint64_t value)
+{
+  for (uint32_t limb = 0; limb < 4; ++limb)
+  {
+    const std::string name =
+      "param:" + base + "#u" + std::to_string(limb);
+    auto it = std::find(
+      state.slot_names.begin(), state.slot_names.end(), name);
+    if (it == state.slot_names.end()) return;
+    const std::size_t index =
+      static_cast<std::size_t>(it - state.slot_names.begin());
+    if (index >= state.slots.size()) return;
+    state.slots[index] =
+      static_cast<double>((value >> (16 * limb)) & UINT64_C(0xffff));
+  }
+}
+
+double signed_sample_delta(uint64_t now, uint64_t then)
+{
+  return now >= then
+    ? static_cast<double>(now - then)
+    : -static_cast<double>(then - now);
+}
+
+} // namespace
+
 FlatRuntime::FlatRuntime(unsigned int buffer_length)
   : buffer_length_(buffer_length),
     outputBuffer(buffer_length, 0.0)
@@ -813,11 +874,18 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
     const double v0 = read(v0i);
     const double v1 = read(v1i);
     const double t0 = read(t0i);
-    const double r = (now - t0) / dur;
+    bool exact_t0_available = false;
+    const uint64_t exact_t0 =
+      read_u64_limbs(state, name + "#t0", exact_t0_available);
+    const double elapsed = exact_t0_available
+      ? signed_sample_delta(sample_index, exact_t0)
+      : now - t0;
+    const double r = elapsed / dur;
     const double s = r < 0.0 ? 0.0 : (r > 1.0 ? 1.0 : r);
     write(v0i, v0 + (v1 - v0) * (s * s * (3.0 - 2.0 * s)));
     write(v1i, value);
     write(t0i, now);
+    write_u64_limbs(state, name + "#t0", sample_index);
     return commit();
   }
 
