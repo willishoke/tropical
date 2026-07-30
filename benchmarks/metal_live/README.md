@@ -26,10 +26,9 @@ pipeline controls and depth diagnostic are absent.
 
 ## Current support envelope
 
-Live-Metal release support is withheld. The one authorized
-Bdev=512/Rgpu=512, 600-second row on the canonical M1 Pro blocked on one
-latched render starvation observed at the first measured poll and was not
-retried. The preserved
+Live-Metal release support is withheld. The original Bdev=512/Rgpu=512,
+600-second row on the canonical M1 Pro blocked on one latched render
+starvation observed at the first measured poll. The preserved
 [`artifact`](data/epoch-worker-soak-b512-r512-600s-29e0f7de0ada-m1pro-20260729.jsonl)
 records exact Bdev=512/Rgpu=512, a four-tile capacity, zero Metal dispatch
 failures, zero tag mismatches, and zero activation failures. It failed closed
@@ -41,9 +40,25 @@ A subsequent
 [`diagnostic`](data/diagnostic-prime-drain-b512-r512-45s-328d537-m1pro-20260729.jsonl)
 located the fault before DAC start: eight tight generic warm-up calls drained
 the four-tile primed window, and the fifth call wrapped to a still-free tile
-0. This is a benchmark/DAC priming defect, not evidence of a Metal
-command-buffer failure. It requires a new fixed candidate and does not turn
-the failed qualification row into a pass.
+0. This was a benchmark/DAC priming defect, not a Metal command-buffer
+failure.
+
+Candidate `8f7eecb` repairs that defect with off-RT exact-tile waits for
+unpaced rendering and a non-consuming Metal readiness barrier for DAC start,
+device switch, and reconnect. Its retained
+[`60-second hardware row`](data/hardened-worker-smoke-b512-r512-60s-8f7eecb-m1pro-20260729.jsonl)
+records zero starvation before start, through startup, and across 5,170
+measured callbacks; its separate 1,000-block offline support row also records
+zero starvation. Worker-stage telemetry is complete and ordered.
+
+That row remains blocked on a distinct final-reference correctness gate:
+three Metal/JIT checkpoints measured above 142 dB, while a final reverse clock
+jump across the last velocity anchor measured 78.585 dB against the required
+greater-than-100 dB threshold. The leading hypothesis is Metal f32
+clock-origin precision after alternating far/near jumps, but it is not yet
+isolated from the replay oracle. Release support therefore stays withheld
+pending a deterministic reverse-crossing discriminator and cause-specific
+fix; the old prime-drain defect itself is closed.
 
 The retained B=128/D=3 and B=512/D=3 failures in
 [`findings.md`](findings.md) describe the superseded callback-owned

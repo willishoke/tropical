@@ -1,5 +1,69 @@
 # Metal backend — live findings (V2 phase 6)
 
+## 2026-07-29 queue-aware startup hardening
+
+The startup defect identified below is repaired by the candidate at
+`8f7eecb`. Benchmark warm-up and every unpaced non-DAC render now use the
+off-RT exact-tile waiting entry point. `TropicalDACImpl` delegates initial
+priming to a source readiness hook; `FlatRuntime` preserves the four legacy
+JIT warm-up renders but makes Metal startup a non-consuming exact-next-tile
+barrier. Device switch and reconnect use the same readiness-only barrier.
+The actual callback remains bounded and unchanged.
+
+The retained final 60-second Bdev=512/Rgpu=512 hardware row is
+[`data/hardened-worker-smoke-b512-r512-60s-8f7eecb-m1pro-20260729.jsonl`](data/hardened-worker-smoke-b512-r512-60s-8f7eecb-m1pro-20260729.jsonl);
+its SHA-256 is
+`058b5801c62c02d8d3e717d1ff12bbff1e90113a8d4e6e9e180ea5687a1aae6a`.
+It confirms the startup fix:
+
+- starvation was zero before DAC start, after DAC start, before the statistics
+  reset, and across the measured window;
+- the separate 1,000-block unpaced offline support row also completed with
+  zero starvation and zero tag mismatches;
+- 5,170 measured callbacks had zero underruns and overruns, with a 0.012958 ms
+  exact maximum against the 11.610 ms deadline;
+- all 11 requested clock jumps and the requested hot-swap were acknowledged;
+  dispatch, tag, activation, ownership, non-finite, device-continuity, and
+  callback-thread provenance failures were zero; and
+- candidate-stage telemetry was complete and monotonically ordered. The
+  candidate distinguishes transition-window renders from steady-state
+  refills, so refills can no longer overwrite the retained stage timeline.
+
+This row still blocks overall release qualification on a separate correctness
+gate. Start, post-2^40-jump, and post-swap Metal/JIT reference checkpoints
+measured 143.947, 143.639, and 142.676 dB, but the final checkpoint measured
+78.585 dB against the required greater-than-100 dB gate. Its maximum absolute
+error was 2.872e-12 on a deliberately 1e-8-trimmed signal. The final capture
+starts at source sample 1,099,511,829,504, which is 1,536 samples before the
+last velocity activation's effective sample 1,099,511,831,040: a later clock
+jump moved backward across that anchor. The test therefore protects the
+production contract that arbitrary forward/reverse clock jumps preserve the
+same closed-form control state on Metal and JIT.
+
+The leading precision hypothesis is retained as an inference, not a resolved
+cause. After the post-swap alternating far/near clock jumps and 20 velocity
+events, the host reference carries `tau_base ≈ -12466100.511927439` seconds
+while its Metal f32 representation is `-12466101`. The existing deterministic
+velocity discriminator captures after its final anchor and does not cover
+this reverse-crossing shape. A dedicated no-DAC reverse-crossing discriminator
+must separate Metal f32 clock-origin precision from an oracle/state-transfer
+defect before that gate can be changed or the support envelope widened.
+
+The earlier fixed-start candidate at `22b7ca8` is retained as
+[`data/startup-hardening-smoke-b512-r512-60s-22b7ca8-m1pro-20260729.jsonl`](data/startup-hardening-smoke-b512-r512-60s-22b7ca8-m1pro-20260729.jsonl),
+SHA-256
+`44ab0c829210193405cd4f9cd9973a818140bfe32bc3ff8c170730facb88d315`.
+Its actual-DAC path already had zero starvation, but it exposed two remaining
+harness/diagnostic defects subsequently fixed in `8f7eecb`: the unpaced
+offline support loop still used the callback entry point, and active-bank
+refills overwrote candidate-stage timestamps. It is evidence for those fixes,
+not a qualification pass.
+
+Live-Metal release support remains withheld because the final reference
+correctness gate is unresolved. The queue-aware startup and offline rendering
+fixes are nevertheless validated; the old prime-drain failure is not present
+in the final candidate.
+
 ## 2026-07-29 prime-drain diagnostic
 
 The requested follow-up diagnostic is retained as
