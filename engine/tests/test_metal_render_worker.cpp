@@ -13,6 +13,7 @@ using tropical_metal::MetalRenderWorker;
 using tropical_metal::RenderEpochRequest;
 using tropical_runtime::EpochTileQueue;
 using tropical_runtime::TileConsumeStatus;
+using tropical_runtime::TileState;
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -107,6 +108,39 @@ static void test_worker_activation_and_refill()
   ASSERT(switched.status == TileConsumeStatus::Audio);
   ASSERT(switched.activated);
   ASSERT(switched.source_start == next.effective_sample_index);
+  ASSERT(wait_for([&] {
+    return worker.stage_times().old_epoch_retired != 0;
+  }));
+  const auto candidate_stages = worker.stage_times();
+  ASSERT(candidate_stages.request_received
+         <= candidate_stages.activation_target_reserved);
+  ASSERT(candidate_stages.activation_target_reserved
+         <= candidate_stages.candidate_render_submitted);
+  ASSERT(candidate_stages.candidate_render_submitted
+         <= candidate_stages.candidate_gpu_completion);
+  ASSERT(candidate_stages.candidate_gpu_completion
+         <= candidate_stages.candidate_window_ready);
+  ASSERT(candidate_stages.candidate_window_ready
+         <= candidate_stages.activation_published);
+  ASSERT(candidate_stages.activation_published
+         <= candidate_stages.activation_acknowledged);
+  ASSERT(candidate_stages.activation_acknowledged
+         <= candidate_stages.old_epoch_retired);
+
+  // Releasing active-bank tiles causes steady-state refills. Those renders
+  // must not overwrite the retained candidate-window timeline.
+  for (uint32_t callback = 0; callback < 8; ++callback)
+    ASSERT(queue.consume(output.data(), 128).status
+           == TileConsumeStatus::Audio);
+  ASSERT(wait_for([&] {
+    return queue.tile_state(queue.audio_active_bank(), 0)
+           == TileState::Ready;
+  }));
+  const auto after_refill = worker.stage_times();
+  ASSERT(after_refill.candidate_render_submitted
+         == candidate_stages.candidate_render_submitted);
+  ASSERT(after_refill.candidate_gpu_completion
+         == candidate_stages.candidate_gpu_completion);
 }
 
 static void test_candidate_late_retargets_off_audio()

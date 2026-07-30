@@ -162,7 +162,8 @@ static void test_offline_renderer_waits_for_worker_refill()
     msl.c_str(), msl.size(), MANIFEST, strlen(MANIFEST)));
 
   const double * output = tropical_runtime_output_buffer(rt);
-  for (uint64_t block = 0; block < 12; ++block)
+  constexpr uint64_t offline_blocks = 1000;
+  for (uint64_t block = 0; block < offline_blocks; ++block)
   {
     ASSERT(tropical_runtime_process_offline(rt));
     for (uint32_t sample = 0; sample < buf; ++sample)
@@ -188,7 +189,7 @@ static void test_offline_renderer_waits_for_worker_refill()
   ASSERT(tropical_runtime_metal_epoch_tag_mismatch_count(rt) == 0);
   tropical_runtime_free(rt);
   printf(
-    "PASS  offline warm-up refills and DAC readiness preserves callback 1\n");
+    "PASS  1,000 offline blocks refill and DAC readiness preserves callback 1\n");
 }
 
 static void test_callback_thread_provenance()

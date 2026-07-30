@@ -137,7 +137,9 @@ private:
   bool observe_activation_acknowledgement();
   bool refill_active_bank();
   EpochScheduleResult prepare_activation(RenderEpochRequest request);
-  bool render_one(uint32_t bank_index, BankRenderCursor & cursor);
+  bool render_one(
+    uint32_t bank_index, BankRenderCursor & cursor,
+    bool record_candidate_stage);
   bool render_window(uint32_t bank_index, BankRenderCursor & cursor);
   static uint64_t monotonic_time_ns();
 

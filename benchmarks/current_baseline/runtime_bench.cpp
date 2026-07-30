@@ -1161,7 +1161,13 @@ int main(int argc, char ** argv)
         }
 
         const auto start = Clock::now();
-        tropical_runtime_process(rt);
+        // Only a wall-clock-paced loop models the callback entry point.
+        // Unpaced benchmark work is an offline renderer and must wait for the
+        // worker's exact next Metal tile instead of draining render-ahead.
+        if (o.realtime)
+          tropical_runtime_process(rt);
+        else if (!tropical_runtime_process_offline(rt))
+          throw std::runtime_error(tropical_last_error());
         const uint64_t ns = elapsed_ns(start, Clock::now());
         process_ns.push_back(ns);
         if (ns > deadline_ns) ++overrun_count;

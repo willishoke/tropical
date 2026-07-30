@@ -242,12 +242,22 @@ bool MetalRenderWorker::refill_active_bank()
   if (queue_.tile_state(active_bank_, cursor.next_slot)
       != tropical_runtime::TileState::Free)
     return false;
-  return render_one(active_bank_, cursor);
+  return render_one(active_bank_, cursor, false);
 }
 
 EpochScheduleResult
 MetalRenderWorker::prepare_activation(RenderEpochRequest request)
 {
+  // Publish the new request identity only after clearing every later stage.
+  // Readers may observe an incomplete in-flight request, but never a prefix
+  // from this request combined with a suffix from the preceding activation.
+  target_reserved_time_.store(0, std::memory_order_relaxed);
+  render_submitted_time_.store(0, std::memory_order_relaxed);
+  gpu_completion_time_.store(0, std::memory_order_relaxed);
+  window_ready_time_.store(0, std::memory_order_relaxed);
+  activation_published_time_.store(0, std::memory_order_relaxed);
+  activation_acknowledged_time_.store(0, std::memory_order_relaxed);
+  old_epoch_retired_time_.store(0, std::memory_order_relaxed);
   request_received_time_.store(
     monotonic_time_ns(), std::memory_order_release);
   const uint32_t staging_bank =
@@ -362,7 +372,8 @@ EpochReservation MetalRenderWorker::reserve(
 }
 
 bool MetalRenderWorker::render_one(
-  uint32_t bank_index, BankRenderCursor & cursor)
+  uint32_t bank_index, BankRenderCursor & cursor,
+  bool record_candidate_stage)
 {
   EpochTileQueue::RenderClaim claim;
   const TileTag tag{
@@ -374,13 +385,15 @@ bool MetalRenderWorker::render_one(
   if (!queue_.claim_tile(
         bank_index, cursor.next_slot, tag, claim))
     return false;
-  render_submitted_time_.store(
-    monotonic_time_ns(), std::memory_order_release);
+  if (record_candidate_stage)
+    render_submitted_time_.store(
+      monotonic_time_ns(), std::memory_order_release);
   const bool rendered = render_(
     cursor.request, cursor.next_source,
     queue_.render_frames(), claim.destination);
-  gpu_completion_time_.store(
-    monotonic_time_ns(), std::memory_order_release);
+  if (record_candidate_stage)
+    gpu_completion_time_.store(
+      monotonic_time_ns(), std::memory_order_release);
   if (!rendered)
   {
     queue_.discard_tile(claim);
@@ -411,7 +424,7 @@ bool MetalRenderWorker::render_window(
   uint32_t bank_index, BankRenderCursor & cursor)
 {
   for (uint32_t i = 0; i < EpochTileQueue::kTilesPerBank; ++i)
-    if (!render_one(bank_index, cursor))
+    if (!render_one(bank_index, cursor, true))
       return false;
   return true;
 }
