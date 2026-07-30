@@ -816,6 +816,36 @@ public:
 #endif
   }
 
+  std::array<uint64_t, 16> metal_first_starvation_snapshot() const
+  {
+#ifdef TROPICAL_METAL
+    if (metal_tiles_)
+    {
+      const EpochTileStarvationSnapshot snapshot =
+        metal_tiles_->first_starvation_snapshot();
+      return {
+        snapshot.valid ? 1ULL : 0ULL,
+        snapshot.epoch_id,
+        snapshot.device_frame,
+        snapshot.source_sample,
+        snapshot.expected_tile_device,
+        snapshot.expected_tile_source,
+        snapshot.last_published_epoch,
+        snapshot.last_published_device_end,
+        snapshot.last_published_source_end,
+        snapshot.active_bank,
+        snapshot.expected_tile_index,
+        snapshot.observed_tile_state,
+        snapshot.ready_mask,
+        snapshot.free_mask,
+        snapshot.rendering_mask,
+        snapshot.reading_mask,
+      };
+    }
+#endif
+    return {};
+  }
+
   uint64_t metal_epoch_tag_mismatch_count() const
   {
 #ifdef TROPICAL_METAL

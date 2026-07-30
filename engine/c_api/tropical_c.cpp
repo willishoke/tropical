@@ -492,6 +492,35 @@ uint64_t tropical_runtime_metal_render_starvation_count(tropical_runtime_t r)
     ->metal_render_starvation_count();
 }
 
+bool tropical_runtime_metal_first_starvation_snapshot(
+  tropical_runtime_t r, tropical_metal_starvation_snapshot_t * out)
+{
+  if (!out) return false;
+  *out = {};
+  if (!r) return false;
+  const auto snapshot = static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_first_starvation_snapshot();
+  *out = {
+    snapshot[0] != 0,
+    snapshot[1],
+    snapshot[2],
+    snapshot[3],
+    snapshot[4],
+    snapshot[5],
+    snapshot[6],
+    snapshot[7],
+    snapshot[8],
+    static_cast<uint32_t>(snapshot[9]),
+    static_cast<uint32_t>(snapshot[10]),
+    static_cast<uint32_t>(snapshot[11]),
+    static_cast<uint32_t>(snapshot[12]),
+    static_cast<uint32_t>(snapshot[13]),
+    static_cast<uint32_t>(snapshot[14]),
+    static_cast<uint32_t>(snapshot[15]),
+  };
+  return out->valid;
+}
+
 uint64_t tropical_runtime_metal_epoch_tag_mismatch_count(tropical_runtime_t r)
 {
   if (!r) return 0;

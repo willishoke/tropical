@@ -9,6 +9,7 @@
 
 using tropical_runtime::EpochActivation;
 using tropical_runtime::EpochTileQueue;
+using tropical_runtime::EpochTileStarvationSnapshot;
 using tropical_runtime::EpochTileQueueTestSeam;
 using tropical_runtime::TileConsumeStatus;
 using tropical_runtime::TileState;
@@ -178,9 +179,29 @@ static void test_starvation_latches_once()
   ASSERT(queue.consume(out.data(), 128).status
          == TileConsumeStatus::FaultSilence);
   ASSERT(queue.starvation_count() == 1);
+  const EpochTileStarvationSnapshot snapshot =
+    queue.first_starvation_snapshot();
+  ASSERT(snapshot.valid);
+  ASSERT(snapshot.epoch_id == 1);
+  ASSERT(snapshot.device_frame == 512);
+  ASSERT(snapshot.source_sample == 512);
+  ASSERT(snapshot.expected_tile_device == 512);
+  ASSERT(snapshot.expected_tile_source == 512);
+  ASSERT(snapshot.last_published_epoch == 1);
+  ASSERT(snapshot.last_published_device_end == 512);
+  ASSERT(snapshot.last_published_source_end == 512);
+  ASSERT(snapshot.active_bank == 0);
+  ASSERT(snapshot.expected_tile_index == 1);
+  ASSERT(snapshot.observed_tile_state
+         == static_cast<uint32_t>(TileState::Free));
+  ASSERT(snapshot.ready_mask == 0);
+  ASSERT(snapshot.free_mask == 0xf);
+  ASSERT(snapshot.rendering_mask == 0);
+  ASSERT(snapshot.reading_mask == 0);
   ASSERT(queue.consume(out.data(), 128).status
          == TileConsumeStatus::FaultSilence);
   ASSERT(queue.starvation_count() == 1);
+  ASSERT(queue.first_starvation_snapshot().device_frame == 512);
   for (double sample : out) ASSERT(sample == 0.0);
 }
 

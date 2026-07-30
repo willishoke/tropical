@@ -462,6 +462,12 @@ int main(int argc, char ** argv)
     uint64_t reference_ownership_failure_count = 0;
     uint64_t metal_dispatch_failure_count = 0;
     uint64_t metal_render_starvation_count = 0;
+    uint64_t metal_render_starvation_count_before_dac_start = 0;
+    uint64_t metal_render_starvation_count_after_dac_start = 0;
+    uint64_t metal_render_starvation_count_before_stats_reset = 0;
+    uint64_t metal_render_starvation_count_measured_delta = 0;
+    tropical_metal_starvation_snapshot_t
+      metal_first_starvation_snapshot{};
     uint64_t metal_epoch_tag_mismatch_count = 0;
     uint64_t metal_activation_retarget_count = 0;
     uint64_t metal_activation_failure_count = 0;
@@ -535,7 +541,11 @@ int main(int argc, char ** argv)
         rt, static_cast<unsigned int>(o.rate), 2));
       tropical_dac_t dac = dac_owner.get();
       if (!dac) throw std::runtime_error(tropical_last_error());
+      metal_render_starvation_count_before_dac_start =
+        tropical_runtime_metal_render_starvation_count(rt);
       tropical_dac_start(dac);
+      metal_render_starvation_count_after_dac_start =
+        tropical_runtime_metal_render_starvation_count(rt);
       if (!tropical_dac_is_running(dac))
       {
         const std::string error = tropical_last_error();
@@ -556,6 +566,8 @@ int main(int argc, char ** argv)
       // two-second boundary before any qualification event is scheduled.
       std::this_thread::sleep_for(std::chrono::seconds(2));
       snapshot("startup_warmup_before_reset");
+      metal_render_starvation_count_before_stats_reset =
+        tropical_runtime_metal_render_starvation_count(rt);
       negotiated_buffer_frames = tropical_dac_get_buffer_frames(dac);
       if (negotiated_buffer_frames != o.buffer)
       {
@@ -1209,6 +1221,14 @@ int main(int argc, char ** argv)
       tropical_runtime_metal_dispatch_failure_count(rt);
     metal_render_starvation_count =
       tropical_runtime_metal_render_starvation_count(rt);
+    metal_render_starvation_count_measured_delta =
+      metal_render_starvation_count
+        >= metal_render_starvation_count_before_stats_reset
+      ? metal_render_starvation_count
+          - metal_render_starvation_count_before_stats_reset
+      : metal_render_starvation_count;
+    (void)tropical_runtime_metal_first_starvation_snapshot(
+      rt, &metal_first_starvation_snapshot);
     metal_epoch_tag_mismatch_count =
       tropical_runtime_metal_epoch_tag_mismatch_count(rt);
     metal_activation_retarget_count =
@@ -1285,6 +1305,47 @@ int main(int argc, char ** argv)
               << metal_dispatch_failure_count
               << ",\"metal_render_starvation_count\":"
               << metal_render_starvation_count
+              << ",\"metal_render_starvation_count_before_dac_start\":"
+              << metal_render_starvation_count_before_dac_start
+              << ",\"metal_render_starvation_count_after_dac_start\":"
+              << metal_render_starvation_count_after_dac_start
+              << ",\"metal_render_starvation_count_before_stats_reset\":"
+              << metal_render_starvation_count_before_stats_reset
+              << ",\"metal_render_starvation_count_measured_delta\":"
+              << metal_render_starvation_count_measured_delta
+              << ",\"metal_first_starvation_snapshot\":{"
+              << "\"valid\":"
+              << (metal_first_starvation_snapshot.valid ? "true" : "false")
+              << ",\"epoch_id\":"
+              << metal_first_starvation_snapshot.epoch_id
+              << ",\"device_frame\":"
+              << metal_first_starvation_snapshot.device_frame
+              << ",\"source_sample\":"
+              << metal_first_starvation_snapshot.source_sample
+              << ",\"expected_tile_device\":"
+              << metal_first_starvation_snapshot.expected_tile_device
+              << ",\"expected_tile_source\":"
+              << metal_first_starvation_snapshot.expected_tile_source
+              << ",\"last_published_epoch\":"
+              << metal_first_starvation_snapshot.last_published_epoch
+              << ",\"last_published_device_end\":"
+              << metal_first_starvation_snapshot.last_published_device_end
+              << ",\"last_published_source_end\":"
+              << metal_first_starvation_snapshot.last_published_source_end
+              << ",\"active_bank\":"
+              << metal_first_starvation_snapshot.active_bank
+              << ",\"expected_tile_index\":"
+              << metal_first_starvation_snapshot.expected_tile_index
+              << ",\"observed_tile_state\":"
+              << metal_first_starvation_snapshot.observed_tile_state
+              << ",\"ready_mask\":"
+              << metal_first_starvation_snapshot.ready_mask
+              << ",\"free_mask\":"
+              << metal_first_starvation_snapshot.free_mask
+              << ",\"rendering_mask\":"
+              << metal_first_starvation_snapshot.rendering_mask
+              << ",\"reading_mask\":"
+              << metal_first_starvation_snapshot.reading_mask << '}'
               << ",\"metal_epoch_tag_mismatch_count\":"
               << metal_epoch_tag_mismatch_count
               << ",\"metal_activation_retarget_count\":"

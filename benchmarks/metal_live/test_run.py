@@ -318,6 +318,24 @@ class AcceptanceGateTests(unittest.TestCase):
         self.assertFalse(gates["zero_metal_render_starvations"])
         self.assertIn("zero_metal_render_starvations", failures)
 
+    def test_starvation_phase_classification(self) -> None:
+        result = passing_result()
+        self.assertEqual(RUN.classify_starvation_phase(result), "none")
+        result["metal_render_starvation_count"] = 1
+        result["metal_render_starvation_count_before_dac_start"] = 0
+        result["metal_render_starvation_count_after_dac_start"] = 1
+        result["metal_render_starvation_count_before_stats_reset"] = 1
+        result["metal_render_starvation_count_measured_delta"] = 0
+        self.assertEqual(
+            RUN.classify_starvation_phase(result), "during_dac_start")
+        result["metal_render_starvation_count_after_dac_start"] = 0
+        self.assertEqual(
+            RUN.classify_starvation_phase(result), "startup_warmup")
+        result["metal_render_starvation_count_before_stats_reset"] = 0
+        result["metal_render_starvation_count_measured_delta"] = 1
+        self.assertEqual(
+            RUN.classify_starvation_phase(result), "measured_window")
+
     def test_metal_tag_mismatch_blocks_qualification(self) -> None:
         result = passing_result()
         result["metal_epoch_tag_mismatch_count"] = 1

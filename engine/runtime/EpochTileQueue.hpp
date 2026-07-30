@@ -52,6 +52,26 @@ struct TileConsumeResult
   bool activation_deferred = false;
 };
 
+struct EpochTileStarvationSnapshot
+{
+  bool valid = false;
+  uint64_t epoch_id = 0;
+  uint64_t device_frame = 0;
+  uint64_t source_sample = 0;
+  uint64_t expected_tile_device = 0;
+  uint64_t expected_tile_source = 0;
+  uint64_t last_published_epoch = 0;
+  uint64_t last_published_device_end = 0;
+  uint64_t last_published_source_end = 0;
+  uint32_t active_bank = 0;
+  uint32_t expected_tile_index = 0;
+  uint32_t observed_tile_state = 0;
+  uint32_t ready_mask = 0;
+  uint32_t free_mask = 0;
+  uint32_t rendering_mask = 0;
+  uint32_t reading_mask = 0;
+};
+
 // Test-only control-side pause. It makes the activation publication sequence
 // observably odd so a callback can prove that it defers after one read rather
 // than spinning.
@@ -165,9 +185,19 @@ public:
     Tile * tile = claimed_tile(claim);
     if (!tile) return false;
     TileState expected = TileState::Rendering;
-    return tile->state.compare_exchange_strong(
+    if (!tile->state.compare_exchange_strong(
       expected, TileState::Ready,
-      std::memory_order_release, std::memory_order_relaxed);
+      std::memory_order_release, std::memory_order_relaxed))
+      return false;
+    last_published_epoch_.store(
+      tile->tag.epoch_id, std::memory_order_relaxed);
+    last_published_device_end_.store(
+      tile->tag.device_start + tile->tag.frame_count,
+      std::memory_order_relaxed);
+    last_published_source_end_.store(
+      tile->tag.source_start + tile->tag.frame_count,
+      std::memory_order_release);
+    return true;
   }
 
   // Worker only. Used for obsolete or failed render completions.
@@ -327,7 +357,7 @@ public:
             expected, TileState::Reading,
             std::memory_order_acquire, std::memory_order_relaxed))
       {
-        latch_starvation();
+        latch_starvation(expected);
         std::fill_n(destination, frames, 0.0);
         advance_coordinates(frames);
         result.status = TileConsumeStatus::FaultSilence;
@@ -450,6 +480,47 @@ public:
   {
     return starvation_count_.load(std::memory_order_acquire);
   }
+  EpochTileStarvationSnapshot first_starvation_snapshot() const noexcept
+  {
+    EpochTileStarvationSnapshot snapshot;
+    if (first_starvation_valid_.load(std::memory_order_acquire) == 0)
+      return snapshot;
+    snapshot.valid = true;
+    snapshot.epoch_id =
+      first_starvation_epoch_.load(std::memory_order_relaxed);
+    snapshot.device_frame =
+      first_starvation_device_.load(std::memory_order_relaxed);
+    snapshot.source_sample =
+      first_starvation_source_.load(std::memory_order_relaxed);
+    snapshot.expected_tile_device =
+      first_starvation_expected_device_.load(std::memory_order_relaxed);
+    snapshot.expected_tile_source =
+      first_starvation_expected_source_.load(std::memory_order_relaxed);
+    snapshot.last_published_epoch =
+      first_starvation_last_published_epoch_.load(
+        std::memory_order_relaxed);
+    snapshot.last_published_device_end =
+      first_starvation_last_published_device_end_.load(
+        std::memory_order_relaxed);
+    snapshot.last_published_source_end =
+      first_starvation_last_published_source_end_.load(
+        std::memory_order_relaxed);
+    snapshot.active_bank =
+      first_starvation_bank_.load(std::memory_order_relaxed);
+    snapshot.expected_tile_index =
+      first_starvation_tile_.load(std::memory_order_relaxed);
+    snapshot.observed_tile_state =
+      first_starvation_state_.load(std::memory_order_relaxed);
+    snapshot.ready_mask =
+      first_starvation_ready_mask_.load(std::memory_order_relaxed);
+    snapshot.free_mask =
+      first_starvation_free_mask_.load(std::memory_order_relaxed);
+    snapshot.rendering_mask =
+      first_starvation_rendering_mask_.load(std::memory_order_relaxed);
+    snapshot.reading_mask =
+      first_starvation_reading_mask_.load(std::memory_order_relaxed);
+    return snapshot;
+  }
   uint64_t tag_mismatch_count() const noexcept
   {
     return tag_mismatch_count_.load(std::memory_order_acquire);
@@ -535,11 +606,67 @@ private:
     reading_offset_ = 0;
   }
 
-  void latch_starvation()
+  void latch_starvation(TileState observed_state)
   {
     if (!active_faulted_)
     {
       active_faulted_ = true;
+      if (first_starvation_valid_.load(std::memory_order_relaxed) == 0)
+      {
+        uint32_t ready_mask = 0;
+        uint32_t free_mask = 0;
+        uint32_t rendering_mask = 0;
+        uint32_t reading_mask = 0;
+        if (audio_active_bank_local_ < kBankCount)
+        {
+          for (uint32_t i = 0; i < kTilesPerBank; ++i)
+          {
+            const TileState state =
+              banks_[audio_active_bank_local_].tiles[i].state.load(
+                std::memory_order_relaxed);
+            const uint32_t bit = 1U << i;
+            if (state == TileState::Ready) ready_mask |= bit;
+            else if (state == TileState::Free) free_mask |= bit;
+            else if (state == TileState::Rendering) rendering_mask |= bit;
+            else if (state == TileState::Reading) reading_mask |= bit;
+          }
+        }
+        first_starvation_epoch_.store(
+          audio_epoch_id_, std::memory_order_relaxed);
+        first_starvation_device_.store(
+          audio_device_frame_, std::memory_order_relaxed);
+        first_starvation_source_.store(
+          audio_source_sample_, std::memory_order_relaxed);
+        first_starvation_expected_device_.store(
+          expected_tile_device_, std::memory_order_relaxed);
+        first_starvation_expected_source_.store(
+          expected_tile_source_, std::memory_order_relaxed);
+        first_starvation_last_published_epoch_.store(
+          last_published_epoch_.load(std::memory_order_relaxed),
+          std::memory_order_relaxed);
+        first_starvation_last_published_device_end_.store(
+          last_published_device_end_.load(std::memory_order_relaxed),
+          std::memory_order_relaxed);
+        first_starvation_last_published_source_end_.store(
+          last_published_source_end_.load(std::memory_order_relaxed),
+          std::memory_order_relaxed);
+        first_starvation_bank_.store(
+          audio_active_bank_local_, std::memory_order_relaxed);
+        first_starvation_tile_.store(
+          expected_tile_index_, std::memory_order_relaxed);
+        first_starvation_state_.store(
+          static_cast<uint32_t>(observed_state),
+          std::memory_order_relaxed);
+        first_starvation_ready_mask_.store(
+          ready_mask, std::memory_order_relaxed);
+        first_starvation_free_mask_.store(
+          free_mask, std::memory_order_relaxed);
+        first_starvation_rendering_mask_.store(
+          rendering_mask, std::memory_order_relaxed);
+        first_starvation_reading_mask_.store(
+          reading_mask, std::memory_order_relaxed);
+        first_starvation_valid_.store(1, std::memory_order_release);
+      }
       starvation_count_.fetch_add(1, std::memory_order_relaxed);
     }
   }
@@ -586,6 +713,25 @@ private:
   std::atomic<uint64_t> published_source_sample_{0};
   std::atomic<uint64_t> starvation_count_{0};
   std::atomic<uint64_t> tag_mismatch_count_{0};
+  std::atomic<uint64_t> last_published_epoch_{0};
+  std::atomic<uint64_t> last_published_device_end_{0};
+  std::atomic<uint64_t> last_published_source_end_{0};
+  std::atomic<uint64_t> first_starvation_valid_{0};
+  std::atomic<uint64_t> first_starvation_epoch_{0};
+  std::atomic<uint64_t> first_starvation_device_{0};
+  std::atomic<uint64_t> first_starvation_source_{0};
+  std::atomic<uint64_t> first_starvation_expected_device_{0};
+  std::atomic<uint64_t> first_starvation_expected_source_{0};
+  std::atomic<uint64_t> first_starvation_last_published_epoch_{0};
+  std::atomic<uint64_t> first_starvation_last_published_device_end_{0};
+  std::atomic<uint64_t> first_starvation_last_published_source_end_{0};
+  std::atomic<uint32_t> first_starvation_bank_{0};
+  std::atomic<uint32_t> first_starvation_tile_{0};
+  std::atomic<uint32_t> first_starvation_state_{0};
+  std::atomic<uint32_t> first_starvation_ready_mask_{0};
+  std::atomic<uint32_t> first_starvation_free_mask_{0};
+  std::atomic<uint32_t> first_starvation_rendering_mask_{0};
+  std::atomic<uint32_t> first_starvation_reading_mask_{0};
   std::atomic<EpochTileQueueTestSeam *> test_seam_{nullptr};
 
   // Audio-thread-owned cursor state.

@@ -31,6 +31,25 @@ typedef struct {
   uint64_t max_ns;
 } tropical_metal_activation_latency_stats_t;
 
+typedef struct {
+  bool valid;
+  uint64_t epoch_id;
+  uint64_t device_frame;
+  uint64_t source_sample;
+  uint64_t expected_tile_device;
+  uint64_t expected_tile_source;
+  uint64_t last_published_epoch;
+  uint64_t last_published_device_end;
+  uint64_t last_published_source_end;
+  uint32_t active_bank;
+  uint32_t expected_tile_index;
+  uint32_t observed_tile_state;
+  uint32_t ready_mask;
+  uint32_t free_mask;
+  uint32_t rendering_mask;
+  uint32_t reading_mask;
+} tropical_metal_starvation_snapshot_t;
+
 /* Error handling — thread-local; valid until next call on this thread */
 const char* tropical_last_error(void);
 
@@ -201,6 +220,13 @@ uint64_t         tropical_runtime_metal_dispatch_failure_count(tropical_runtime_
    activation failure, and callback-thread Metal entry must remain zero in
    qualification. Retargets are permitted but measured explicitly. */
 uint64_t         tropical_runtime_metal_render_starvation_count(tropical_runtime_t);
+/* First starvation only. The callback publishes one fixed atomic snapshot
+   before latching fail-silent state; no clock, allocation, lock, or I/O is
+   added to the callback. Tile-state values are Free=0, Rendering=1,
+   Ready=2, Reading=3. */
+bool             tropical_runtime_metal_first_starvation_snapshot(
+                   tropical_runtime_t,
+                   tropical_metal_starvation_snapshot_t*);
 uint64_t         tropical_runtime_metal_epoch_tag_mismatch_count(tropical_runtime_t);
 uint64_t         tropical_runtime_metal_activation_retarget_count(tropical_runtime_t);
 uint64_t         tropical_runtime_metal_activation_failure_count(tropical_runtime_t);

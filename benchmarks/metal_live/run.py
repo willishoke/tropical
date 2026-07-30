@@ -102,6 +102,37 @@ def summarize(values: list[int]) -> dict[str, int | None]:
     }
 
 
+def classify_starvation_phase(result: dict[str, Any]) -> str:
+    def count(name: str) -> int:
+        value = result.get(name, 0)
+        return (
+            value
+            if isinstance(value, int) and not isinstance(value, bool)
+            else 0
+        )
+
+    total = count("metal_render_starvation_count")
+    before_start = count(
+        "metal_render_starvation_count_before_dac_start")
+    after_start = count(
+        "metal_render_starvation_count_after_dac_start")
+    before_reset = count(
+        "metal_render_starvation_count_before_stats_reset")
+    measured_delta = count(
+        "metal_render_starvation_count_measured_delta")
+    if total == 0:
+        return "none"
+    if before_start > 0:
+        return "before_dac_start"
+    if after_start > before_start:
+        return "during_dac_start"
+    if before_reset > after_start:
+        return "startup_warmup"
+    if measured_delta > 0:
+        return "measured_window"
+    return "unclassified_sticky_count"
+
+
 def summarize_callback_histogram(result: dict[str, Any]) -> dict[str, Any]:
     histogram = result.get("callback_histogram", {})
     counts = histogram.get("counts", [])
@@ -896,6 +927,23 @@ def run_soak(stream, work: Path, duration: float, buffer: int,
         },
         "transition_activation_evidence":
             result.get("transition_activation_evidence"),
+        "starvation_diagnostic": {
+            "classified_phase": classify_starvation_phase(result),
+            "before_dac_start":
+                result.get(
+                    "metal_render_starvation_count_before_dac_start"),
+            "after_dac_start":
+                result.get(
+                    "metal_render_starvation_count_after_dac_start"),
+            "before_stats_reset":
+                result.get(
+                    "metal_render_starvation_count_before_stats_reset"),
+            "measured_window_delta":
+                result.get(
+                    "metal_render_starvation_count_measured_delta"),
+            "first_snapshot":
+                result.get("metal_first_starvation_snapshot"),
+        },
         "acceptance_gates": acceptance_gates,
         "failure_reasons": failure_reasons,
         "unavailable_measurements": [
