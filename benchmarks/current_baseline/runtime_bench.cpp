@@ -392,8 +392,14 @@ int main(int argc, char ** argv)
     const uint32_t worker_capacity_frames =
       tropical_runtime_metal_worker_capacity_frames(rt);
 
+    // Warm-up is an offline/control-thread concern. In particular, the Metal
+    // callback entry point consumes a finite render-ahead queue; driving it in
+    // a tight unpaced loop can drain the four prepared tiles before the
+    // worker observes their release. The offline entry point preserves the
+    // same clock/output warm-up while waiting for each exact Metal tile.
     for (uint64_t i = 0; i < o.warmup; ++i)
-      tropical_runtime_process(rt);
+      if (!tropical_runtime_process_offline(rt))
+        throw std::runtime_error(tropical_last_error());
 
     const double before =
       tropical_runtime_output_buffer(rt) ? tropical_runtime_output_buffer(rt)[0] : 0.0;

@@ -534,6 +534,13 @@ public:
    */
   void process_offline();
 
+  /**
+   * DAC start/control thread only. JIT retains the legacy cache warm-up
+   * process cycles. Metal does not consume prepared audio before the device
+   * clock starts; it waits off-RT until the exact first callback tile is ready.
+   */
+  void prepare_realtime_start(unsigned int process_cycles);
+
   std::vector<double> outputBuffer;
 
   unsigned int getBufferLength() const { return buffer_length_; }
@@ -1092,6 +1099,7 @@ private:
   tropical_metal::EpochScheduleResult
   publish_metal_control_snapshot_locked(
     KernelState & state, uint32_t state_index);
+  void wait_for_next_metal_tile(const char * purpose);
   static uint32_t configure_metal_render_tile_frames(
     uint32_t device_frames);
 #endif

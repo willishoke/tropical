@@ -33,18 +33,7 @@ void FlatRuntime::process_offline()
 #ifdef TROPICAL_METAL
   if (metal_audio_enabled_.load(std::memory_order_acquire))
   {
-    const auto deadline =
-      std::chrono::steady_clock::now() + std::chrono::seconds(30);
-    while (!metal_tiles_->next_callback_ready_for_offline())
-    {
-      if (metal_tiles_->active_faulted())
-        throw std::runtime_error(
-          "FlatRuntime: offline Metal epoch is faulted");
-      if (std::chrono::steady_clock::now() >= deadline)
-        throw std::runtime_error(
-          "FlatRuntime: timed out waiting for an offline Metal tile");
-      std::this_thread::yield();
-    }
+    wait_for_next_metal_tile("offline render");
     const uint64_t starvation_before =
       metal_tiles_->starvation_count();
     const uint64_t tags_before =
@@ -60,7 +49,38 @@ void FlatRuntime::process_offline()
   process();
 }
 
+void FlatRuntime::prepare_realtime_start(unsigned int process_cycles)
+{
 #ifdef TROPICAL_METAL
+  if (metal_audio_enabled_.load(std::memory_order_acquire))
+  {
+    wait_for_next_metal_tile("real-time start");
+    return;
+  }
+#endif
+  for (unsigned int i = 0; i < process_cycles; ++i)
+    process();
+}
+
+#ifdef TROPICAL_METAL
+void FlatRuntime::wait_for_next_metal_tile(const char * purpose)
+{
+  const auto deadline =
+    std::chrono::steady_clock::now() + std::chrono::seconds(30);
+  while (!metal_tiles_->next_callback_ready_for_offline())
+  {
+    if (metal_tiles_->active_faulted())
+      throw std::runtime_error(
+        std::string("FlatRuntime: Metal epoch is faulted before ")
+        + purpose);
+    if (std::chrono::steady_clock::now() >= deadline)
+      throw std::runtime_error(
+        std::string("FlatRuntime: timed out waiting for Metal tile before ")
+        + purpose);
+    std::this_thread::yield();
+  }
+}
+
 uint32_t FlatRuntime::configure_metal_render_tile_frames(
   uint32_t device_frames)
 {

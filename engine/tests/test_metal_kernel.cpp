@@ -170,10 +170,25 @@ static void test_offline_renderer_waits_for_worker_refill()
         output[sample],
         static_cast<double>(block * buf + sample), 1e-5);
   }
+
+  auto * runtime =
+    static_cast<tropical_runtime::FlatRuntime *>(rt);
+  const uint64_t before_start = runtime->current_sample_index();
+  runtime->prepare_realtime_start(4);
+  ASSERT(runtime->current_sample_index() == before_start);
+  ASSERT(tropical_runtime_metal_render_starvation_count(rt) == 0);
+
+  // The readiness barrier leaves the exact next tile intact for callback 1.
+  tropical_runtime_process(rt);
+  for (uint32_t sample = 0; sample < buf; ++sample)
+    ASSERT_NEAR(
+      output[sample],
+      static_cast<double>(before_start + sample), 1e-5);
   ASSERT(tropical_runtime_metal_render_starvation_count(rt) == 0);
   ASSERT(tropical_runtime_metal_epoch_tag_mismatch_count(rt) == 0);
   tropical_runtime_free(rt);
-  printf("PASS  offline renderer waits beyond the four-tile watermark\n");
+  printf(
+    "PASS  offline warm-up refills and DAC readiness preserves callback 1\n");
 }
 
 static void test_callback_thread_provenance()
