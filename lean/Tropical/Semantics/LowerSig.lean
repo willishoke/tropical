@@ -1,19 +1,13 @@
-import Tropical.Semantics.Arena
+import Tropical.Semantics.Expr
 
 /-!
-# Checked relational lowering for the production `lowerSigTree`
+# Denotational preservation for production `lowerSigTree`
 
-This is fallback 1 from the semantic-spine handoff.  `LowersTo` is an
-all-constructor operational relation over the production `Sig`, `ENode`,
-`ExprArena`, and `eintern`.  It exposes every child state transition and the
-exact final intern, including ordered arrays, optional dynamic counts, and bank
-binder ids.  The capstone theorem proves that the production structural
-reference produces this relation.
-
-The relation is intentionally not advertised as the requested denotational
-preservation theorem.  Completing that theorem requires preservation of
-`ArenaWellFormed.dedupSound` across `eintern`, which production does not yet
-make provable (see `Arena.lean` and the semantics map).
+`LowersTo` records every child state transition and exact final intern for the
+all-constructor production lowering.  `LowersTo.preserves` proves that any such
+trace maintains the arena invariants and carrier-parametric denotation.
+`lowerSigTree_preserves` combines that result with the checked trace generated
+by the production structural reference.
 -/
 
 namespace Tropical.Semantics
@@ -165,8 +159,8 @@ private theorem lowerMany_produces
       afterHead (acc.push headId)
     exact LowersMany.cons hHead hTail
 
-/-- The checked fallback capstone: the production structural reference realizes
-    `LowersTo` for all fourteen constructors, from every initial arena. -/
+/-- The production structural reference realizes `LowersTo` for all fourteen
+    constructors, from every initial arena. -/
 theorem lowerSigTree_lowersTo (sig : Sig) (arena : ExprArena) :
     LowersTo sig arena (lowerSigTree sig arena).1
       (lowerSigTree sig arena).2 := by
@@ -342,5 +336,409 @@ theorem lowerSigTree_lowersTo (sig : Sig) (arena : ExprArena) :
         (by simpa [hBodyRun] using ihBody afterTables)
         (by simpa [hCountRun] using ihCount tableIds afterBody)
         rfl
+
+private def LowersToSpec {sig before rootId after}
+    (_h : LowersTo sig before rootId after) : Prop :=
+  ∀ {α : Type} (alg : Algebra α) (env : SigEnv α)
+      (_hBefore : ArenaWellFormed before),
+    ∃ hAfter : ArenaWellFormed after,
+      Extends before after ∧
+        DenotesAt alg env after hAfter sig rootId
+
+private def LowersManySpec {items before acc result after}
+    (_h : LowersMany items before acc result after) : Prop :=
+  ∀ {α : Type} (alg : Algebra α) (env : SigEnv α)
+      (hBefore : ArenaWellFormed before)
+      (pre : List Sig),
+    DenotesMany alg env before hBefore pre acc.toList →
+      ∃ hAfter : ArenaWellFormed after,
+        Extends before after ∧
+          DenotesMany alg env after hAfter
+            (pre ++ items) result.toList
+
+private theorem intern_denotes {α : Type} {arena after : ExprArena}
+    {node : ENode} {rootId : ExprId} {sig : Sig}
+    (alg : Algebra α) (env : SigEnv α)
+    (hArena : ArenaWellFormed arena)
+    (hChildren : ChildrenInPrefix arena node)
+    (hIntern : eintern node arena = (rootId, after))
+    (hValue : ∀ (hAfter : ArenaWellFormed after),
+      Extends arena after →
+        denoteNode alg env node (fun childEnv child _ =>
+          denoteExpr alg childEnv after hAfter child) =
+          denoteSig alg env sig) :
+    ∃ hAfter : ArenaWellFormed after,
+      Extends arena after ∧
+        DenotesAt alg env after hAfter sig rootId := by
+  have hSpec := eintern_preserves hArena hChildren
+  rw [hIntern] at hSpec
+  obtain ⟨hAfter, hExtends, hDeref⟩ := hSpec
+  refine ⟨hAfter, hExtends, node, hDeref, ?_⟩
+  rw [denoteExpr_of_deref alg env after hAfter hDeref]
+  exact hValue hAfter hExtends
+
+/-- Every relational lowering trace preserves the carrier-parametric
+    denotation while maintaining the production arena invariants. -/
+theorem LowersTo.preserves {sig before rootId after}
+    (h : LowersTo sig before rootId after) : LowersToSpec h := by
+  apply LowersTo.rec
+    (motive_1 := fun _ _ _ _ h => LowersToSpec h)
+    (motive_2 := fun _ _ _ _ _ h => LowersManySpec h)
+  case num =>
+    intro number arena resultId arena' hIntern α alg env hArena
+    apply intern_denotes (sig := .num number) alg env hArena
+      (by simp [ChildrenInPrefix, ENode.children]) hIntern
+    intro hAfter hExtends
+    simp [denoteNode, denoteSig]
+  case binary =>
+    intro lhs arena lhsId afterLeft rhs rhsId afterRight tag resultId arena'
+      hLeft hRight hIntern ihLeft ihRight α alg env hArena
+    obtain ⟨hLeftArena, hExtLeft, hDenLeft⟩ :=
+      ihLeft alg env hArena
+    obtain ⟨hRightArena, hExtRight, hDenRight⟩ :=
+      ihRight alg env hLeftArena
+    have hDenLeft' := hDenLeft.extends hRightArena hExtRight
+    obtain ⟨hFinal, hExtFinal, hDenFinal⟩ :=
+      intern_denotes (sig := .binary tag lhs rhs) alg env hRightArena
+        (by
+          intro child hMem
+          simp [ENode.children] at hMem
+          rcases hMem with rfl | rfl
+          · obtain ⟨_, hDeref, _⟩ := hDenLeft'
+            exact deref_index_lt hDeref
+          · obtain ⟨_, hDeref, _⟩ := hDenRight
+            exact deref_index_lt hDeref)
+        hIntern
+        (by
+          intro hAfter hExtends
+          obtain ⟨_, _, hLeftValue⟩ :=
+            hDenLeft'.extends hAfter hExtends
+          obtain ⟨_, _, hRightValue⟩ :=
+            hDenRight.extends hAfter hExtends
+          simp only [denoteNode]
+          rw [denoteSig, hLeftValue, hRightValue])
+    exact ⟨hFinal, (hExtLeft.trans hExtRight).trans hExtFinal, hDenFinal⟩
+  case unary =>
+    intro arg arena argId afterArg tag resultId arena'
+      hArg hIntern ihArg α alg env hArena
+    obtain ⟨hArgArena, hExtArg, hDenArg⟩ := ihArg alg env hArena
+    obtain ⟨hFinal, hExtFinal, hDenFinal⟩ :=
+      intern_denotes (sig := .unary tag arg) alg env hArgArena
+        (by
+          intro child hMem
+          simp [ENode.children] at hMem
+          subst child
+          obtain ⟨_, hDeref, _⟩ := hDenArg
+          exact deref_index_lt hDeref)
+        hIntern
+        (by
+          intro hAfter hExtends
+          obtain ⟨_, _, hArgValue⟩ :=
+            hDenArg.extends hAfter hExtends
+          simp only [denoteNode]
+          rw [denoteSig, hArgValue]
+          rfl)
+    exact ⟨hFinal, hExtArg.trans hExtFinal, hDenFinal⟩
+  case clamp =>
+    intro value arena valueId afterValue lo loId afterLo hi hiId afterHi
+      resultId arena' hValue hLo hHi hIntern ihValue ihLo ihHi
+      α alg env hArena
+    obtain ⟨hValueArena, hExtValue, hDenValue⟩ :=
+      ihValue alg env hArena
+    obtain ⟨hLoArena, hExtLo, hDenLo⟩ :=
+      ihLo alg env hValueArena
+    obtain ⟨hHiArena, hExtHi, hDenHi⟩ :=
+      ihHi alg env hLoArena
+    have hDenValue' :=
+      (hDenValue.extends hLoArena hExtLo).extends hHiArena hExtHi
+    have hDenLo' := hDenLo.extends hHiArena hExtHi
+    obtain ⟨hFinal, hExtFinal, hDenFinal⟩ :=
+      intern_denotes (sig := .clamp value lo hi) alg env hHiArena
+        (by
+          intro child hMem
+          simp [ENode.children] at hMem
+          rcases hMem with rfl | rfl | rfl
+          · obtain ⟨_, hDeref, _⟩ := hDenValue'
+            exact deref_index_lt hDeref
+          · obtain ⟨_, hDeref, _⟩ := hDenLo'
+            exact deref_index_lt hDeref
+          · obtain ⟨_, hDeref, _⟩ := hDenHi
+            exact deref_index_lt hDeref)
+        hIntern
+        (by
+          intro hAfter hExtends
+          obtain ⟨_, _, hValueEq⟩ :=
+            hDenValue'.extends hAfter hExtends
+          obtain ⟨_, _, hLoEq⟩ := hDenLo'.extends hAfter hExtends
+          obtain ⟨_, _, hHiEq⟩ := hDenHi.extends hAfter hExtends
+          simp only [denoteNode]
+          rw [denoteSig, hValueEq, hLoEq, hHiEq])
+    exact ⟨hFinal,
+      ((hExtValue.trans hExtLo).trans hExtHi).trans hExtFinal,
+      hDenFinal⟩
+  case select =>
+    intro condition arena condId afterCond then_ thenId afterThen else_
+      elseId afterElse resultId arena' hCond hThen hElse hIntern
+      ihCond ihThen ihElse α alg env hArena
+    obtain ⟨hCondArena, hExtCond, hDenCond⟩ :=
+      ihCond alg env hArena
+    obtain ⟨hThenArena, hExtThen, hDenThen⟩ :=
+      ihThen alg env hCondArena
+    obtain ⟨hElseArena, hExtElse, hDenElse⟩ :=
+      ihElse alg env hThenArena
+    have hDenCond' :=
+      (hDenCond.extends hThenArena hExtThen).extends hElseArena hExtElse
+    have hDenThen' := hDenThen.extends hElseArena hExtElse
+    obtain ⟨hFinal, hExtFinal, hDenFinal⟩ :=
+      intern_denotes (sig := .select condition then_ else_) alg env hElseArena
+        (by
+          intro child hMem
+          simp [ENode.children] at hMem
+          rcases hMem with rfl | rfl | rfl
+          · obtain ⟨_, hDeref, _⟩ := hDenCond'
+            exact deref_index_lt hDeref
+          · obtain ⟨_, hDeref, _⟩ := hDenThen'
+            exact deref_index_lt hDeref
+          · obtain ⟨_, hDeref, _⟩ := hDenElse
+            exact deref_index_lt hDeref)
+        hIntern
+        (by
+          intro hAfter hExtends
+          obtain ⟨_, _, hCondEq⟩ :=
+            hDenCond'.extends hAfter hExtends
+          obtain ⟨_, _, hThenEq⟩ :=
+            hDenThen'.extends hAfter hExtends
+          obtain ⟨_, _, hElseEq⟩ :=
+            hDenElse.extends hAfter hExtends
+          simp only [denoteNode]
+          rw [denoteSig, hCondEq, hThenEq, hElseEq])
+    exact ⟨hFinal,
+      ((hExtCond.trans hExtThen).trans hExtElse).trans hExtFinal,
+      hDenFinal⟩
+  case inputRef =>
+    intro index arena resultId arena' hIntern α alg env hArena
+    apply intern_denotes (sig := .inputRef index) alg env hArena
+      (by simp [ChildrenInPrefix, ENode.children]) hIntern
+    intro hAfter hExtends
+    simp [denoteNode, denoteSig]
+  case paramRef =>
+    intro index arena resultId arena' hIntern α alg env hArena
+    apply intern_denotes (sig := .paramRef index) alg env hArena
+      (by simp [ChildrenInPrefix, ENode.children]) hIntern
+    intro hAfter hExtends
+    simp [denoteNode, denoteSig]
+  case nestedOut =>
+    intro instanceIdx outputIdx arena resultId arena' hIntern
+      α alg env hArena
+    apply intern_denotes (sig := .nestedOut instanceIdx outputIdx)
+      alg env hArena
+      (by simp [ChildrenInPrefix, ENode.children]) hIntern
+    intro hAfter hExtends
+    simp [denoteNode, denoteSig]
+  case sampleRate =>
+    intro arena resultId arena' hIntern α alg env hArena
+    apply intern_denotes (sig := .sampleRate) alg env hArena
+      (by simp [ChildrenInPrefix, ENode.children]) hIntern
+    intro hAfter hExtends
+    simp [denoteNode, denoteSig]
+  case sampleIndex =>
+    intro arena resultId arena' hIntern α alg env hArena
+    apply intern_denotes (sig := .sampleIndex) alg env hArena
+      (by simp [ChildrenInPrefix, ENode.children]) hIntern
+    intro hAfter hExtends
+    simp [denoteNode, denoteSig]
+  case arr =>
+    intro arena itemIds afterItems resultId arena' items hItems hIntern
+      ihItems α alg env hArena
+    obtain ⟨hItemsArena, hExtItems, hDenItems⟩ :=
+      ihItems alg env hArena [] (by exact .nil)
+    simp only [List.nil_append] at hDenItems
+    obtain ⟨hFinal, hExtFinal, hDenFinal⟩ :=
+      intern_denotes (sig := .arr items) alg env hItemsArena
+        (by
+          intro child hMem
+          obtain ⟨_, hDeref⟩ := hDenItems.deref_of_mem
+            (by simpa [ENode.children] using hMem)
+          exact deref_index_lt hDeref)
+        hIntern
+        (by
+          intro hAfter hExtends
+          have hItemsFinal := hDenItems.extends hAfter hExtends
+          have hMaps := hItemsFinal.array_map_eq
+          rw [denoteNode, denoteSig, attach_map_value, hMaps]
+          rfl)
+    exact ⟨hFinal, hExtItems.trans hExtFinal, hDenFinal⟩
+  case index =>
+    intro array arena arrayId afterArray index indexId afterIndex
+      resultId arena' hArray hIndex hIntern ihArray ihIndex
+      α alg env hArena
+    obtain ⟨hArrayArena, hExtArray, hDenArray⟩ :=
+      ihArray alg env hArena
+    obtain ⟨hIndexArena, hExtIndex, hDenIndex⟩ :=
+      ihIndex alg env hArrayArena
+    have hDenArray' := hDenArray.extends hIndexArena hExtIndex
+    obtain ⟨hFinal, hExtFinal, hDenFinal⟩ :=
+      intern_denotes (sig := .index array index) alg env hIndexArena
+        (by
+          intro child hMem
+          simp [ENode.children] at hMem
+          rcases hMem with rfl | rfl
+          · obtain ⟨_, hDeref, _⟩ := hDenArray'
+            exact deref_index_lt hDeref
+          · obtain ⟨_, hDeref, _⟩ := hDenIndex
+            exact deref_index_lt hDeref)
+        hIntern
+        (by
+          intro hAfter hExtends
+          obtain ⟨_, _, hArrayEq⟩ :=
+            hDenArray'.extends hAfter hExtends
+          obtain ⟨_, _, hIndexEq⟩ :=
+            hDenIndex.extends hAfter hExtends
+          simp only [denoteNode]
+          rw [denoteSig, hArrayEq, hIndexEq]
+          rfl)
+    exact ⟨hFinal, (hExtArray.trans hExtIndex).trans hExtFinal, hDenFinal⟩
+  case loopIdx =>
+    intro binderId arena resultId arena' hIntern α alg env hArena
+    apply intern_denotes (sig := .loopIdx binderId) alg env hArena
+      (by simp [ChildrenInPrefix, ENode.children]) hIntern
+    intro hAfter hExtends
+    rw [denoteNode, denoteSig]
+    rfl
+  case bankSumNone =>
+    intro arena tableIds afterTables body bodyId afterBody capacity binderId
+      resultId arena' tables hTables hBody hIntern ihTables ihBody
+      α alg env hArena
+    obtain ⟨hTablesArena, hExtTables, hDenTables⟩ :=
+      ihTables alg env hArena [] (by exact .nil)
+    simp only [List.nil_append] at hDenTables
+    obtain ⟨hBodyArena, hExtBody, hDenBody⟩ :=
+      ihBody alg env hTablesArena
+    have hDenTables' := hDenTables.extends hBodyArena hExtBody
+    obtain ⟨hFinal, hExtFinal, hDenFinal⟩ :=
+      intern_denotes
+        (sig := .bankSum capacity tables body none binderId)
+        alg env hBodyArena
+        (by
+          intro child hMem
+          simp [ENode.children] at hMem
+          rcases hMem with hTable | rfl
+          · obtain ⟨_, hDeref⟩ :=
+              hDenTables'.deref_of_mem (by simpa using hTable)
+            exact deref_index_lt hDeref
+          · obtain ⟨_, hDeref, _⟩ := hDenBody
+            exact deref_index_lt hDeref)
+        hIntern
+        (by
+          intro hAfter hExtends
+          have hTablesFinal := hDenTables'.extends hAfter hExtends
+          have hTableMaps := hTablesFinal.array_map_eq
+          have hBodyValue (loopValue : Value α) :
+              denoteExpr alg (env.bindLoop binderId loopValue)
+                  afterBody hBodyArena bodyId =
+                denoteSig alg (env.bindLoop binderId loopValue) body := by
+            obtain ⟨hBoundArena, _, hBoundBody⟩ :=
+              ihBody alg (env.bindLoop binderId loopValue) hTablesArena
+            obtain ⟨_, _, hBoundValue⟩ := hBoundBody
+            exact hBoundValue
+          have hBodyFinal (loopValue : Value α) :
+              denoteExpr alg (env.bindLoop binderId loopValue)
+                  arena' hAfter bodyId =
+                denoteSig alg (env.bindLoop binderId loopValue) body := by
+            obtain ⟨bodyNode, hBodyDeref, _⟩ := hDenBody
+            exact
+              (denoteExpr_extends hBodyArena hAfter hExtends alg
+                (env.bindLoop binderId loopValue) hBodyDeref).symm.trans
+                (hBodyValue loopValue)
+          simp only [denoteNode, attach_map_value]
+          rw [denoteSig, hTableMaps]
+          simp only [hBodyFinal]
+          rfl)
+    exact ⟨hFinal,
+      (hExtTables.trans hExtBody).trans hExtFinal, hDenFinal⟩
+  case bankSumSome =>
+    intro arena tableIds afterTables body bodyId afterBody count countId
+      afterCount capacity binderId resultId arena' tables hTables hBody
+      hCount hIntern ihTables ihBody ihCount α alg env hArena
+    obtain ⟨hTablesArena, hExtTables, hDenTables⟩ :=
+      ihTables alg env hArena [] (by exact .nil)
+    simp only [List.nil_append] at hDenTables
+    obtain ⟨hBodyArena, hExtBody, hDenBody⟩ :=
+      ihBody alg env hTablesArena
+    obtain ⟨hCountArena, hExtCount, hDenCount⟩ :=
+      ihCount alg env hBodyArena
+    have hDenTables' :=
+      (hDenTables.extends hBodyArena hExtBody).extends hCountArena hExtCount
+    have hDenBody' := hDenBody.extends hCountArena hExtCount
+    obtain ⟨hFinal, hExtFinal, hDenFinal⟩ :=
+      intern_denotes
+        (sig := .bankSum capacity tables body (some count) binderId)
+        alg env hCountArena
+        (by
+          intro child hMem
+          simp [ENode.children] at hMem
+          rcases hMem with (hTable | rfl) | rfl
+          · obtain ⟨_, hDeref⟩ :=
+              hDenTables'.deref_of_mem (by simpa using hTable)
+            exact deref_index_lt hDeref
+          · obtain ⟨_, hDeref, _⟩ := hDenBody'
+            exact deref_index_lt hDeref
+          · obtain ⟨_, hDeref, _⟩ := hDenCount
+            exact deref_index_lt hDeref)
+        hIntern
+        (by
+          intro hAfter hExtends
+          have hTablesFinal := hDenTables'.extends hAfter hExtends
+          have hTableMaps := hTablesFinal.array_map_eq
+          obtain ⟨_, _, hCountValue⟩ :=
+            hDenCount.extends hAfter hExtends
+          have hBodyFinal (loopValue : Value α) :
+              denoteExpr alg (env.bindLoop binderId loopValue)
+                  arena' hAfter bodyId =
+                denoteSig alg (env.bindLoop binderId loopValue) body := by
+            obtain ⟨hBoundArena, hExtBound, hBoundBody⟩ :=
+              ihBody alg (env.bindLoop binderId loopValue) hTablesArena
+            have hBoundBody' := hBoundBody.extends hCountArena hExtCount
+            obtain ⟨bodyNode, hBodyDeref, hBodyValue⟩ := hBoundBody'
+            exact
+              (denoteExpr_extends hCountArena hAfter hExtends alg
+                (env.bindLoop binderId loopValue) hBodyDeref).symm.trans
+                hBodyValue
+          simp only [denoteNode, attach_map_value]
+          rw [denoteSig, hTableMaps, hCountValue]
+          simp only [hBodyFinal]
+          rfl)
+    exact ⟨hFinal,
+      ((hExtTables.trans hExtBody).trans hExtCount).trans hExtFinal,
+      hDenFinal⟩
+  case nil =>
+    intro arena acc α alg env hArena pre hPre
+    refine ⟨hArena, Extends.refl arena, ?_⟩
+    simpa using hPre
+  case cons =>
+    intro head arena headId afterHead tail result finalArena acc
+      hHead hTail ihHead ihTail α alg env hArena pre hPre
+    obtain ⟨hHeadArena, hExtHead, hDenHead⟩ :=
+      ihHead alg env hArena
+    have hPre' := (hPre.extends hHeadArena hExtHead).snoc hDenHead
+    obtain ⟨hFinal, hExtTail, hDenTail⟩ :=
+      ihTail alg env hHeadArena (pre ++ [head])
+        (by simpa using hPre')
+    refine ⟨hFinal, hExtHead.trans hExtTail, ?_⟩
+    simpa [List.append_assoc] using hDenTail
+
+/-- The production structural lowering preserves denotation for every `Sig`
+    constructor and every well-formed initial arena. -/
+theorem lowerSigTree_preserves (sig : Sig) (arena : ExprArena)
+    (hArena : ArenaWellFormed arena) (alg : Algebra α) (env : SigEnv α) :
+    let result := lowerSigTree sig arena
+    ∃ hResult : ArenaWellFormed result.2,
+      Extends arena result.2 ∧
+        denoteExpr alg env result.2 hResult result.1 =
+          denoteSig alg env sig := by
+  have hTrace := lowerSigTree_lowersTo sig arena
+  obtain ⟨hResult, hExtends, node, hDeref, hValue⟩ :=
+    hTrace.preserves alg env hArena
+  exact ⟨hResult, hExtends, hValue⟩
 
 end Tropical.Semantics

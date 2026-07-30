@@ -8,18 +8,18 @@ Only entries with status `proved` and a checked theorem symbol are formal proofs
 
 Add one owned entry to `obligations`, use only maintained gate names (or an explicit `manual:` gate), and regenerate this report with `trustreport --write`. A new production `unsafe def` or `implemented_by` marker must also add one typed `productionTrustSites` row; `tools/audit_trust_sites.py` makes an unledgered or stale site fail validation.
 
-## LOWER_SIG_TREE_RELATIONAL
+## LOWER_SIG_TREE_PRESERVES
 
-lowerSigTree produces the all-constructor LowersTo relation over production Sig, ENode, ExprArena, and eintern.
+For every carrier algebra, environment, production Sig, and well-formed initial ExprArena, lowerSigTree returns a well-formed arena extension whose expression denotation equals the direct Sig denotation.
 
 - Status: proved
 - Priority: critical
 - Owner: Lean semantics
 - Evidence: theorem
-- Formal symbol: `Tropical.Semantics.lowerSigTree_lowersTo`
-- Implementation: `lean/Tropical/Semantics/LowerSig.lean`
+- Formal symbol: `Tropical.Semantics.lowerSigTree_preserves`
+- Implementation: `lean/Tropical/Ir/Nodes.lean`, `lean/Tropical/Semantics/Arena.lean`, `lean/Tropical/Semantics/Expr.lean`, `lean/Tropical/Semantics/LowerSig.lean`
 - Gates: `lake-build:Tropical.Semantics`, `semantics-production-fixtures`
-- Limitation: Approved fallback 1: this is structural/relational lowering, not denotational preservation. DedupSound preservation is the next prerequisite.
+- Limitation: This proves the structural lowerSigTree reference. The unsafe pointer-memoized implementation remains the separate LOWER_SIG_PTR_REFINES_TREE obligation; no backend execution theorem is claimed.
 
 ## CLOCK_RAIL_IS_EXACT
 
