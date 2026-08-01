@@ -54,8 +54,8 @@ the native 44.1 kHz production asset and integrated evidence are pending.
 | Scope/control priority | `current_module_process`; `playground/scope-arbiter.test.js`; exact-scene qualification JSONL | Focused tests pass. |
 | Epoch queue and admission | `current_epoch_tile_queue`; `current_metal_render_worker` | Exact-target, boot-zero, late candidate, admission, and A/B/A regressions pass. |
 | Whole-signal morph | `current_metal_render_worker`; `current_metal_kernel` | Offline oracle, hardware exact-E gates, and 10k stress pass. |
-| Explicit fixed room decoder | `runExplicitRoomModes` in `tropicaltest` | Lean gate passes for the rejected v1 path; dedicated production `groupedroom` work is pending. |
-| Exact-scene harness | `playground/qualification/run.js` | Short pre-room integration smoke passes; not release evidence. |
+| Explicit fixed room decoder | `runExplicitRoomModes` and `runGroupedRoomContract` in `tropicaltest` | Rejected ordinary-room compatibility and both direct/cache Plan-6 production seams pass. |
+| Exact-scene harness | `playground/qualification/run.js` | Selected-cache 90-second integration smoke passes; final long soaks remain. |
 
 ## Direct evaluator reserve failure
 
@@ -69,6 +69,16 @@ The required direct-path cost fork is recorded under
 
 Both runs retain their JSONL, summary, and manifest. They authorize work on the
 bounded fixed-scene cache; they are failed diagnostics, not release evidence.
+
+## Selected fixed-scene cache
+
+| Evidence | Location / result |
+|---|---|
+| Generator | `benchmarks/demo_release/room_audition/generate_grouped_room_scene_cache.py` |
+| Payload and manifest | `playground/assets/grouped-room/clouds-current-radii-mono-v1-scene-44100.{f32le,json}`; 5,644,800 bytes; SHA-256 `33dad76b92c7b11f297a1e32979e89f36fd1b16fbb8f923c726756ebce2d06f3` |
+| Endpoint/FLOW probe | `run_grouped_room_scene_cache_probe.py`; integer direct parity `<=2.62e-8`, fractional/reverse FLOW `<=1.74%` NRMSE, Metal endpoint read `<=2.85e-8` |
+| Integrated smoke | `2026-08-01_23-41-47-256-smoke-b128-r512`; pass, zero sticky runtime/Metal/DAC/capture faults and zero retargets |
+| Frozen balance | ROOM default `1.0`, range `0…1.5`; authored-level POSITION `-1/0/+1` peaks `-5.01/-5.59/-5.40` dBFS over the complete 16-second scene |
 
 ## Required release artifacts (not yet complete)
 

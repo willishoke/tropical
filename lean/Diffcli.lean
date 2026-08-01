@@ -43,6 +43,13 @@ def parseNatFlag (args : List String) (flag : String) (default : Nat) : Nat :=
     | none => default
   | none => default
 
+def parseFloatFlag (args : List String) (flag : String) : Option Float := do
+  let i ← args.idxOf? flag
+  let value ← args[i+1]?
+  match Lean.Json.parse value with
+  | .ok (.num n) => some n.toFloat
+  | _ => none
+
 def renderBytes (args : List String) : IO UInt32 := do
   let some planPath := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
     | IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N] [--start S]"
@@ -116,6 +123,8 @@ def renderGraph (args : List String) : IO UInt32 := do
   let buffer := parseNatFlag args "--buffer" 256
   let start := parseNatFlag args "--start" 0
   let metal := args.contains "--metal"
+  let velocity := parseFloatFlag args "--velocity"
+  let tauBase := parseFloatFlag args "--tau-base"
   let text ← IO.FS.readFile graphPath
   let j ← match Lean.Json.parse text with
     | .error e => IO.eprintln s!"render-graph: parse: {e}"; return 1
@@ -128,6 +137,10 @@ def renderGraph (args : List String) : IO UInt32 := do
     let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
     if metal then Tropical.StagedLoad.loadMslTyped rt compiled.plan compiled.stageBlocks
     else Tropical.StagedLoad.loadTyped rt compiled.plan compiled.stageBlocks
+    if let some value := velocity then
+      if let some idx ← rt.slotIndex? "param:master.velocity" then rt.setSlot idx value
+    if let some value := tauBase then
+      if let some idx ← rt.slotIndex? "param:master.tau_base" then rt.setSlot idx value
     if start != 0 then rt.setSampleIndex start.toUInt64
     let stdout ← IO.getStdout
     for _ in [0:frames] do

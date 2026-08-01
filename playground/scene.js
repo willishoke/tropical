@@ -177,7 +177,6 @@
   function buildSceneGraph() {
     const nodes = []
     const veilIds = []
-    const roomIds = []
     const hitIds = []
 
     nodes.push(
@@ -258,7 +257,6 @@
     for (let hitIndex = 0; hitIndex < 4; hitIndex += 1) {
       const number = hitIndex + 1
       const hitId = `metalHit${number}`
-      const roomId = `metalRoom${number}`
       const strikeTime = hitIndex * 4 * STEP_SECONDS + 2 * STEP_SECONDS
       nodes.push(
         {
@@ -271,16 +269,8 @@
           sel: {},
           in: {},
         },
-        {
-          id: roomId,
-          kind: 'groupedroom',
-          params: { profile: 'clouds-current-radii-mono-v1' },
-          sel: {},
-          in: { in: [hitId], position: ['positionControl'] },
-        },
       )
       hitIds.push(hitId)
-      roomIds.push(roomId)
     }
 
     nodes.push(
@@ -295,15 +285,15 @@
       },
       {
         id: 'room',
-        kind: 'mix',
-        params: {},
+        kind: 'groupedroomcache',
+        params: { profile: 'clouds-current-radii-mono-v1-scene-cache' },
         sel: {},
-        in: { in: roomIds },
+        in: { position: ['positionControl'] },
       },
       {
         id: 'spaceLevel',
         kind: 'glideknob',
-        params: { value: 36 },
+        params: { value: 1 },
         sel: {},
         in: {},
       },
@@ -397,11 +387,11 @@
       slot: 'spaceLevel.value',
       label: 'room',
       min: 0,
-      max: 80,
-      step: 1,
-      value: 36,
+      max: 1.5,
+      step: 0.05,
+      value: 1,
       unit: '×',
-      help: 'raise the long wet metal field against the strings',
+      help: 'raise the temporal Metal field against the strings',
     },
     {
       slot: 'positionControl.value',

@@ -128,6 +128,9 @@ inductive Node where
   /-- The frozen grouped-room TERMINAL: consumes an untouched modal source and
       produces a signal from the approved immutable prefix profile. -/
   | groupedRoom (input profile : String) (position : Sig)
+  /-- The bounded release-scene cache selected only after direct evaluator
+      reserve failure. It is a signal source addressed by the master clock. -/
+  | groupedRoomCache (profile : String) (position : Sig) (clk : Clock)
 
 structure PatchNode where
   id : String
@@ -156,6 +159,7 @@ def Node.inputIds : Node → Array String
   | .sflange i m _ => #[i, m]
   | .modalSource _ _ _ addr _ _ => (addr.map (#[·])).getD #[]
   | .modalReverb i _ _ | .modalGauge i _ | .groupedRoom i _ _ => #[i]
+  | .groupedRoomCache .. => #[]
 
 /-- Is `id` a modal-island node? Its output wire carries poles, not a `Sig`. A
     missing node reads as Sig (graceful — a half-built patch stays lowerable). -/
@@ -473,6 +477,10 @@ def lowerNode (g : PatchGraph) (rankOf : String → Option Nat)
         throw s!"groupedroom '{id}': connect the modal source directly; ordinary modal rooms are not composed before this terminal"
       validateGroupedRoomModes modes
       return groupedRoomTerm modes lowered.strikeAnchor position lowered.realizationClock
+  | .groupedRoomCache profile position clk => do
+    if profile != groupedRoomCacheProfile then
+      throw s!"groupedroomcache '{id}': unsupported profile '{profile}'; expected '{groupedRoomCacheProfile}'"
+    return groupedRoomCacheTerm position clk
   | _ =>
     .error s!"lower: modal node '{id}' reached Sig lowering — realize via lowerInput"
 termination_by (r, 1)

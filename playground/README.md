@@ -69,19 +69,20 @@ TROPICAL_DEMO_JIT=1 bun run start
 
 Each chord remains its own modal island until the signal boundary; this
 preserves all four strike anchors (a modal pole union has only one). The string
-lane has no room send. Only the four fixed twelve-pole Metal sources enter the
-native-rate `clouds-current-radii-mono-v1` grouped-room profile.
+lane has no room send. The room is the bounded 5.38 MiB fixed-scene fallback:
+two native-rate float32 bases generated from only the four fixed twelve-pole
+Metal sources and the approved `clouds-current-radii-mono-v1` direct evaluator.
 
-All filters read the shared `veil` and `edge` controls; all four grouped-room
-branches share the glided `position` control. A gesture is one parameter write,
+All filters read the shared `veil` and `edge` controls; the cached room reads
+the glided `position` control. A gesture is one parameter write,
 not a sequential fan-out across the chord islands. The renderer sends
 the first drag value immediately; while that request is in flight it retains
 the latest value and one direction-reversal point for that row. A fast
 out-and-back gesture therefore remains audible without allowing obsolete drag
 positions to accumulate in an unbounded FIFO.
 
-The demo opts into `Bdev = Rgpu = 128`. Continuous epochs reserve two render
-quanta ahead (5.8 ms at 44.1 kHz), publish after their first exact tile, and
-fill the other three staging tiles asynchronously. Boot-muted no-op writes
+The demo opts into `Bdev = 128`, `Rgpu = 512`. Continuous epochs reserve two
+device quanta ahead (5.8 ms at 44.1 kHz), publish after their first exact tile,
+and fill the other three staging tiles asynchronously. Boot-muted no-op writes
 prime the two coefficient families before the scene is rebased to zero.
 `TROPICAL_DEMO_QUANTUM` can override both quanta for qualification.

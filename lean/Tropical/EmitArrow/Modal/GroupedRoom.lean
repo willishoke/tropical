@@ -30,6 +30,16 @@ def groupedRoomReverseByteOffset : Nat := 1358976
 def groupedRoomForwardInputName : String := "__groupedroom_forward_prefix"
 def groupedRoomReverseInputName : String := "__groupedroom_reverse_prefix"
 
+def groupedRoomCacheProfile : String := "clouds-current-radii-mono-v1-scene-cache"
+def groupedRoomCacheAssetPath : String :=
+  "playground/assets/grouped-room/clouds-current-radii-mono-v1-scene-44100.f32le"
+def groupedRoomCacheAssetBytes : Nat := 5644800
+def groupedRoomCacheAssetSha256 : String :=
+  "33dad76b92c7b11f297a1e32979e89f36fd1b16fbb8f923c726756ebce2d06f3"
+def groupedRoomCacheElementCount : Nat := 705600
+def groupedRoomCacheForwardInputName : String := "__groupedroom_scene_forward"
+def groupedRoomCacheReverseInputName : String := "__groupedroom_scene_reverse"
+
 /-- The only large values in the grouped-room expression are external array
     inputs.  They are intentionally default-less: failure to bind the Plan-6
     asset is a compile/load error, never a silent zero-room fallback. -/
@@ -40,8 +50,20 @@ def groupedRoomInputDecls : Array AInputDecl := #[
     type? := some (.array .float #[(groupedRoomPrefixElementCount : Nat)]) }
 ]
 
+/-- The release-Mac reserve fallback is exactly two fixed-scene mono bases.
+    It remains Plan-6 immutable data; only the graph specialization changes. -/
+def groupedRoomCacheInputDecls : Array AInputDecl := #[
+  { name := groupedRoomCacheForwardInputName
+    type? := some (.array .float #[(groupedRoomCacheElementCount : Nat)]) },
+  { name := groupedRoomCacheReverseInputName
+    type? := some (.array .float #[(groupedRoomCacheElementCount : Nat)]) }
+]
+
 def groupedRoomForwardTable : Sig := .inputRef ⟨0⟩
 def groupedRoomReverseTable : Sig := .inputRef ⟨1⟩
+
+def groupedRoomCacheForwardTable : Sig := .inputRef ⟨0⟩
+def groupedRoomCacheReverseTable : Sig := .inputRef ⟨1⟩
 
 private def floorE (x : Sig) : Sig := .unary .floor x
 private def ceilE (x : Sig) : Sig := .unary .ceil x
@@ -242,6 +264,33 @@ def groupedRoomTerm (modes : Array ModalMode) (anchor position : Sig)
     (clk : Clock) : ArrowTerm :=
   .arrUn (fun c => groupedRoomSig modes c anchor position) (.clk clk)
 
+/-- Cyclic linear read for the exact 16-second scene basis.  FLOW may land at
+    fractional or negative scene coordinates; wrapping preserves the demo's
+    fixed loop and interpolation avoids integer-address stepping. -/
+private def groupedRoomCacheRead (table coordinate : Sig) : Sig :=
+  let count := lit groupedRoomCacheElementCount
+  let wrapped := sub coordinate (mul count (floorE (div coordinate count)))
+  let baseF := floorE wrapped
+  let base := toIntE baseF
+  let next := selectE (gteE base (litI (groupedRoomCacheElementCount - 1)))
+    (litI 0) (add base (litI 1))
+  let fraction := sub wrapped baseF
+  let a := Sig.index table base
+  let b := Sig.index table next
+  add a (mul fraction (sub b a))
+
+def groupedRoomCacheSig (clk position : Sig) : Sig :=
+  let coordinate := div (toFloatE clk) (lit 4294967296)
+  let forward := groupedRoomCacheRead groupedRoomCacheForwardTable coordinate
+  let reverse := groupedRoomCacheRead groupedRoomCacheReverseTable coordinate
+  let p := clampE position (lit (-1)) (lit 1)
+  let forwardGain := sqrtE (mul (lit 5 1) (add (lit 1) p))
+  let reverseGain := sqrtE (mul (lit 5 1) (sub (lit 1) p))
+  add (mul forwardGain forward) (mul reverseGain reverse)
+
+def groupedRoomCacheTerm (position : Sig) (clk : Clock) : ArrowTerm :=
+  .arrUn (fun c => groupedRoomCacheSig c position) (.clk clk)
+
 private def expectedOmega (frequency : Nat) : Sig :=
   let twoPi := DyadicI.ofJsonNumber ⟨6283185307179586, 15⟩
   litF (DyadicI.toFloat (DyadicI.mul twoPi (DyadicI.ofNat frequency)))
@@ -294,6 +343,29 @@ def bindGroupedRoomAsset (plan : Tropical.Plan.FlatPlan) :
         elementCount := groupedRoomPrefixElementCount },
       { slot := reverseSlot, byteOffset := groupedRoomReverseByteOffset,
         elementCount := groupedRoomPrefixElementCount }] }
+  pure { plan with immutableAssets := plan.immutableAssets.push asset }
+
+def bindGroupedRoomCacheAsset (plan : Tropical.Plan.FlatPlan) :
+    Except String Tropical.Plan.FlatPlan := do
+  let forwardName := s!"__root__.{groupedRoomCacheForwardInputName}"
+  let reverseName := s!"__root__.{groupedRoomCacheReverseInputName}"
+  let some forwardSlot := plan.arraySlotNames.idxOf? forwardName
+    | throw s!"groupedroomcache: immutable input slot '{forwardName}' was not allocated"
+  let some reverseSlot := plan.arraySlotNames.idxOf? reverseName
+    | throw s!"groupedroomcache: immutable input slot '{reverseName}' was not allocated"
+  if plan.arraySlotSizes[forwardSlot]? != some groupedRoomCacheElementCount
+      || plan.arraySlotSizes[reverseSlot]? != some groupedRoomCacheElementCount then
+    throw "groupedroomcache: immutable scene slot size does not match the frozen profile"
+  let asset : Tropical.Plan.ImmutableAsset := {
+    path := groupedRoomCacheAssetPath
+    byteCount := groupedRoomCacheAssetBytes
+    sha256 := groupedRoomCacheAssetSha256
+    sampleRate := groupedRoomSampleRate
+    arrays := #[
+      { slot := forwardSlot, byteOffset := 0,
+        elementCount := groupedRoomCacheElementCount },
+      { slot := reverseSlot, byteOffset := groupedRoomCacheElementCount * 4,
+        elementCount := groupedRoomCacheElementCount }] }
   pure { plan with immutableAssets := plan.immutableAssets.push asset }
 
 end Tropical.EmitArrow

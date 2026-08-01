@@ -228,6 +228,10 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
     let positionId := (portSources inObj "position")[0]?.getD ""
     (.groupedRoom inId (jStr params "profile" "")
       (controlValue positionId (lit 1)), #[])
+  | "groupedroomcache" =>
+    let positionId := (portSources inObj "position")[0]?.getD ""
+    (.groupedRoomCache (jStr params "profile" "")
+      (controlValue positionId (lit 1)) clk, #[])
   | "gauge" =>
     -- §5 excitation gauge: re-level the modal input's peak. g=0 identity (unity-DC,
     -- the strike gauge), g=1 unity-peak. A pure Modal ⇝ Modal effect (`normalizePeak`);
@@ -389,6 +393,13 @@ def checkGroupedRoomContracts (raws : Array Raw) : Except String Unit := do
       let positionCount := (portSources r.inObj "position").size
       if positionCount != 1 then
         throw s!"groupedroom '{r.id}': inlet 'position' requires exactly one control source; got {positionCount}"
+    else if r.kind == "groupedroomcache" then
+      let profile := jStr r.params "profile" ""
+      if profile != groupedRoomCacheProfile then
+        throw s!"groupedroomcache '{r.id}': unsupported profile '{profile}'; expected '{groupedRoomCacheProfile}'"
+      let positionCount := (portSources r.inObj "position").size
+      if positionCount != 1 then
+        throw s!"groupedroomcache '{r.id}': inlet 'position' requires exactly one control source; got {positionCount}"
   pure ()
 
 /-- The top-level `"out"` id must name an existing node — or be absent/empty,

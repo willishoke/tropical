@@ -228,3 +228,24 @@ uv run --with numpy python \
 
 The enforced worst-case absolute-error limits are `1e-9` for JIT and `1e-5`
 for Metal.
+
+## Selected fixed-scene cache fallback
+
+The release-Mac direct evaluator reserve failure is retained under
+`benchmarks/demo_release/data/`. Regenerate the selected two-arm, 16-second
+float32 basis directly from `playground/scene.js`, then run its endpoint and
+FLOW gate:
+
+```sh
+uv run --with numpy python \
+  benchmarks/demo_release/room_audition/generate_grouped_room_scene_cache.py
+
+uv run --with numpy python \
+  benchmarks/demo_release/room_audition/run_grouped_room_scene_cache_probe.py
+```
+
+The 5,644,800-byte payload contains causal then classic-reverse mono arrays.
+Runtime addressing is cyclic linear interpolation from the master scene
+coordinate; POSITION retains the direct evaluator's equal-power mix. Integer
+endpoints agree with the direct JIT at `2.62e-8` relative error, and the frozen
+fractional/stopped/reverse FLOW matrix stays below `1.74%` NRMSE.

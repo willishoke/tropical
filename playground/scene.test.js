@@ -12,14 +12,17 @@ test('scene is one acyclic-looking fixed graph with unique ids', () => {
   assert.equal(graph.nodes.filter((node) => node.kind === 'string').length, 8)
   assert.equal(graph.nodes.filter((node) => node.kind === 'modalmix').length, 0)
   assert.equal(graph.nodes.filter((node) => node.kind === 'reverb').length, 0)
-  assert.equal(graph.nodes.filter((node) => node.kind === 'groupedroom').length, 4)
+  assert.equal(graph.nodes.filter((node) => node.kind === 'groupedroom').length, 0)
+  assert.equal(graph.nodes.filter((node) => node.kind === 'groupedroomcache').length, 1)
   assert.equal(graph.nodes.filter((node) => node.kind === 'filter').length, 4)
   assert.equal(graph.nodes.filter((node) => node.kind === 'glideknob').length, 4)
   assert.equal(graph.nodes.filter((node) => node.kind === 'knob').length, 2)
   assert.deepEqual(graph.nodes.find((node) => node.id === 'veil').in.in,
     ['veil1', 'veil2', 'veil3', 'veil4'])
-  assert.deepEqual(graph.nodes.find((node) => node.id === 'room').in.in,
-    ['metalRoom1', 'metalRoom2', 'metalRoom3', 'metalRoom4'])
+  assert.equal(graph.nodes.find((node) => node.id === 'room').params.profile,
+    'clouds-current-radii-mono-v1-scene-cache')
+  assert.deepEqual(graph.nodes.find((node) => node.id === 'room').in.position,
+    ['positionControl'])
   assert.deepEqual(graph.nodes.find((node) => node.id === 'impact').in.in,
     ['metalHit1', 'metalHit2', 'metalHit3', 'metalHit4'])
   assert.deepEqual(graph.nodes.find((node) => node.id === 'leveled').in.in,
@@ -41,7 +44,9 @@ test('scene is one acyclic-looking fixed graph with unique ids', () => {
     },
   )
   assert.equal(scene.CONTROLS.find((control) =>
-    control.slot === 'spaceLevel.value').value, 36)
+    control.slot === 'spaceLevel.value').value, 1)
+  assert.equal(scene.CONTROLS.find((control) =>
+    control.slot === 'spaceLevel.value').max, 1.5)
   assert.deepEqual(graph.nodes.find((node) => node.id === 'out').in.in,
     ['leveled'])
   for (let index = 0; index < 4; index++) {
@@ -59,13 +64,9 @@ test('scene is one acyclic-looking fixed graph with unique ids', () => {
   }
   for (let index = 0; index < 4; index++) {
     const hit = graph.nodes.find((node) => node.id === `metalHit${index + 1}`)
-    const room = graph.nodes.find((node) => node.id === `metalRoom${index + 1}`)
     assert.equal(hit.params.t, index * 4 * scene.STEP_SECONDS + 2 * scene.STEP_SECONDS)
     assert.equal(hit.params.modes.length, 12)
-    assert.equal(room.kind, 'groupedroom')
-    assert.equal(room.params.profile, 'clouds-current-radii-mono-v1')
-    assert.deepEqual(room.in.in, [`metalHit${index + 1}`])
-    assert.deepEqual(room.in.position, ['positionControl'])
+    assert.equal(graph.nodes.find((node) => node.id === `metalRoom${index + 1}`), undefined)
   }
   assert.deepEqual(graph.nodes.find((node) => node.id === 'body').in.in,
     ['veil', 'wet', 'impact'])

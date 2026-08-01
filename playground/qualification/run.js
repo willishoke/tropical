@@ -361,7 +361,7 @@ async function main() {
       'reversal',
     )
     await gesture('edgeControl.value', Array.from({ length: 64 }, (_, i) => 0.1 + 0.85 * i / 63), 12)
-    await gesture('spaceLevel.value', [0, 8, 18, 32, 48, 64, 36], 16)
+    await gesture('spaceLevel.value', [0, 0.2, 0.45, 0.75, 1, 1.3, 1], 16)
     await gesture(
       'positionControl.value',
       [1, 0.5, 0, -0.5, -1, -0.25, 0.5, 1],

@@ -77,6 +77,13 @@ def runVocabDriven (arena : Arena)
         ("position", Lean.Json.arr #[.str "helper_p"])]
       dutParams := Lean.Json.mkObj
         [("profile", .str Tropical.EmitArrow.groupedRoomProfile)]
+    else if kind == "groupedroomcache" then
+      nodes := nodes.push (Lean.Json.mkObj
+        [("id", .str "helper_p"), ("kind", .str "glideknob"),
+         ("params", Lean.Json.mkObj [("value", Lean.toJson (1 : Nat))])])
+      inFields := [("position", Lean.Json.arr #[.str "helper_p"])]
+      dutParams := Lean.Json.mkObj
+        [("profile", .str Tropical.EmitArrow.groupedRoomCacheProfile)]
     else
       for p in portSpecs kind do
         if !p.accepts.isEmpty && p.name == "in" then
@@ -579,6 +586,29 @@ private def groupedRoomInstructions (f : Tropical.Plan.InstanceFunction) :
 termination_by sizeOf f
 decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children c.2
 
+private def groupedRoomCachePatchJson
+    (profile : String := Tropical.EmitArrow.groupedRoomCacheProfile)
+    (positionSources : Array String := #["position"]) : Lean.Json := Id.run do
+  let mut nodes : Array Lean.Json := #[
+    Lean.Json.mkObj [
+      ("id", .str "position"), ("kind", .str "glideknob"),
+      ("params", Lean.Json.mkObj [("value", Lean.toJson (1 : Nat))]),
+      ("in", Lean.Json.mkObj [])]]
+  if positionSources.size > 1 then
+    nodes := nodes.push (Lean.Json.mkObj [
+      ("id", .str "position2"), ("kind", .str "knob"),
+      ("params", Lean.Json.mkObj [("value", Lean.toJson (0 : Nat))]),
+      ("in", Lean.Json.mkObj [])])
+  nodes := nodes.push (Lean.Json.mkObj [
+    ("id", .str "room"), ("kind", .str "groupedroomcache"),
+    ("params", Lean.Json.mkObj [("profile", .str profile)]),
+    ("in", Lean.Json.mkObj [
+      ("position", Lean.Json.arr (positionSources.map Lean.Json.str))])])
+  nodes := nodes.push (Lean.Json.mkObj [
+    ("id", .str "outn"), ("kind", .str "out"),
+    ("in", Lean.Json.mkObj [("in", Lean.Json.arr #[.str "room"])])])
+  return Lean.Json.mkObj [("nodes", Lean.Json.arr nodes), ("out", .str "outn")]
+
 def runGroupedRoomContract (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : IO Bool := do
   let refusal := fun (j : Lean.Json) (needle : String) =>
@@ -595,6 +625,32 @@ def runGroupedRoomContract (arena : Arena)
     (groupedRoomPatchJson (firstFrequency := 212)) "does not match the frozen"
   let incumbentDirection := refusal
     (groupedRoomPatchJson (throughDirection := true)) "incumbent modal direction"
+  let cacheUnknown := refusal (groupedRoomCachePatchJson "unknown") "unsupported profile"
+  let cacheMissing := refusal
+    (groupedRoomCachePatchJson (positionSources := #[])) "requires exactly one control source"
+  let cacheAmbiguous := refusal
+    (groupedRoomCachePatchJson (positionSources := #["position", "position2"]))
+    "requires exactly one control source"
+  let cacheOk := match Tropical.Playground.compilePlanPure arena resolved groupedRoomCachePatchJson with
+    | .error _ => false
+    | .ok compiled =>
+      let cachePlan := compiled.plan
+      let cacheInstrs := cachePlan.instanceFunctions.flatMap groupedRoomInstructions
+      let assetOk := match cachePlan.immutableAssets[0]? with
+        | some asset =>
+          cachePlan.immutableAssets.size == 1
+            && asset.path == Tropical.EmitArrow.groupedRoomCacheAssetPath
+            && asset.sha256 == Tropical.EmitArrow.groupedRoomCacheAssetSha256
+            && asset.sampleRate == 44100 && asset.arrays.size == 2
+            && asset.arrays.all (·.elementCount == 705600)
+        | none => false
+      let noReduce := cacheInstrs.all (·.tag != "ReduceBegin")
+      let wireOk := (cachePlan.toWire.toOption.map
+        (·.compress.contains "tropical_plan_6")).getD false
+      let mslOk := match Tropical.Ir.EmitMsl.emitKernel cachePlan with
+        | .ok src => src.contains "immutable_asset [[buffer(4)]]"
+        | .error _ => false
+      assetOk && noReduce && wireOk && mslOk
   match Tropical.Playground.compilePlanPure arena resolved groupedRoomPatchJson with
   | .error e => failGate "grouped-room-contract" s!"compile: {firstLine e}"
   | .ok compiled =>
@@ -633,13 +689,15 @@ def runGroupedRoomContract (arena : Arena)
       | .error _ => false
     let refusals := unknownProfile && missingPosition && ambiguousPosition
       && coordinateMismatch && incumbentDirection
-    IO.println s!"        Plan-6 asset={assetOk && wireOk && mslOk} nested 12×12={reduceOk} no asset Pack={noAssetPack} refusals={refusals}"
-    if assetOk && wireOk && mslOk && reduceOk && noAssetPack && refusals then
+    let cacheRefusals := cacheUnknown && cacheMissing && cacheAmbiguous
+    IO.println s!"        direct Plan-6={assetOk && wireOk && mslOk} nested 12×12={reduceOk}; cache Plan-6/no-reduce={cacheOk}; no asset Pack={noAssetPack}; refusals={refusals && cacheRefusals}"
+    if assetOk && wireOk && mslOk && reduceOk && noAssetPack && refusals
+        && cacheOk && cacheRefusals then
       passGate "grouped-room-contract"
-        "frozen profile → one nested 12×12 Plan-6 evaluator; profile/coordinate/position/incumbent-dir mismatches refuse"
+        "direct profile keeps one nested 12×12 evaluator; selected scene cache is a loop-free Plan-6 linear read; mismatches refuse"
     else
       failGate "grouped-room-contract"
-        s!"asset={assetOk} wire={wireOk} msl={mslOk} reduce={reduceOk} noPack={noAssetPack} refusals={refusals}"
+        s!"asset={assetOk} wire={wireOk} msl={mslOk} reduce={reduceOk} cache={cacheOk} noPack={noAssetPack} refusals={refusals}/{cacheRefusals}"
 
 /-- Test 3: `osc ⋙ flange ⋙ flange` — the slide pushes the outer warps through
     the inner flanger's sum and fuses them, producing the oscillator read at the

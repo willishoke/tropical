@@ -546,6 +546,8 @@ def portSpecs : String → Array PortSpec
   | "groupedroom" => #[
       { name := "in", accepts := modalIn },
       { name := "position", accepts := ctrlIn }]
+  | "groupedroomcache" => #[
+      { name := "position", accepts := ctrlIn }]
   -- gauge: the §5 excitation-gauge adapter — re-levels its modal input's peak by the
   -- self-measured ‖H‖^{−g}. `g` is the gauge: 0 = unity-DC (strike, the identity),
   -- ½ = √Q trim, 1 = unity-peak (tuned-tone level-invariant). Glided (smooth sweep).
@@ -578,7 +580,7 @@ def outletOf : String → Option PortDomain
 def vocabularyKinds : Array String := #[
   "source", "pluck", "comb", "flange", "delay", "reverse", "fm", "sflange",
   "mix", "ring", "gong", "string", "resonator", "reverb", "filter",
-  "modalmix", "groupedroom", "gauge", "knob", "glideknob", "out"]
+  "modalmix", "groupedroom", "groupedroomcache", "gauge", "knob", "glideknob", "out"]
 
 /-- Every kind `buildNode` actually constructs (its match arms — the AUTHORITATIVE
     list, read straight off the arms below). The classification-drift gate and
@@ -590,7 +592,7 @@ def vocabularyKinds : Array String := #[
 def buildNodeKinds : Array String := #[
   "knob", "glideknob", "source", "pluck", "comb", "flange", "sflange", "fm", "delay",
   "reverse", "mix", "ring", "resonator", "reverb", "filter", "modalmix",
-  "groupedroom", "gauge", "gong", "bloomgong", "string"]
+  "groupedroom", "groupedroomcache", "gauge", "gong", "bloomgong", "string"]
 
 /-- Kinds `buildNode` builds but which are WITHHELD from the served surface. Their
     modal factor-site landing (`bloomComposedSig`) still lands `lit 268435456`
