@@ -1,0 +1,186 @@
+{
+  "profile": "clouds-current-radii-mono-v1",
+  "profile_version": 1,
+  "binary_format_version": 1,
+  "sample_rate": 44100,
+  "group_count": 12,
+  "source_pole_count": 12,
+  "periods": [
+    1116,
+    1188,
+    1277,
+    1356,
+    1422,
+    1491,
+    1557,
+    1617,
+    1112,
+    882,
+    682,
+    450
+  ],
+  "radii": [
+    0.9999608411563025,
+    0.9999608411563025,
+    0.9999608411563025,
+    0.9999608411563025,
+    0.9999608411563025,
+    0.9999608411563025,
+    0.9999608411563025,
+    0.9999608411563025,
+    0.9993579933935869,
+    0.9991915402588722,
+    0.9989527279195296,
+    0.9984134577393715
+  ],
+  "source_coordinates": [
+    {
+      "frequency_hz": 211,
+      "sigma": 7.5
+    },
+    {
+      "frequency_hz": 211,
+      "sigma": 95.5
+    },
+    {
+      "frequency_hz": 433,
+      "sigma": 8.65
+    },
+    {
+      "frequency_hz": 433,
+      "sigma": 100.35
+    },
+    {
+      "frequency_hz": 887,
+      "sigma": 9.8
+    },
+    {
+      "frequency_hz": 887,
+      "sigma": 105.2
+    },
+    {
+      "frequency_hz": 1511,
+      "sigma": 10.95
+    },
+    {
+      "frequency_hz": 1511,
+      "sigma": 110.05
+    },
+    {
+      "frequency_hz": 2837,
+      "sigma": 12.1
+    },
+    {
+      "frequency_hz": 2837,
+      "sigma": 114.9
+    },
+    {
+      "frequency_hz": 5081,
+      "sigma": 13.25
+    },
+    {
+      "frequency_hz": 5081,
+      "sigma": 119.75
+    }
+  ],
+  "binary_format": {
+    "magic_ascii": "TGRM",
+    "header_struct": "<4sHH7I9Q20x",
+    "header_bytes": 128,
+    "alignment_bytes": 64,
+    "endianness": "little",
+    "scalar_format": "IEEE-754 complex64, interleaved real/imag",
+    "table_order": "source-major, group-major, residue-major",
+    "offsets_bytes": {
+      "metadata": 128,
+      "periods": 128,
+      "radii": 176,
+      "source_coordinates": 272,
+      "group_offsets": 464,
+      "forward": 576,
+      "reverse": 1358976,
+      "file_bytes": 2717376,
+      "metadata_bytes": 388
+    },
+    "tables": {
+      "periods": {
+        "count": 12,
+        "scalar": "uint32"
+      },
+      "radii": {
+        "count": 12,
+        "scalar": "float64"
+      },
+      "source_coordinates": {
+        "count": 24,
+        "scalar": "float64",
+        "tuple": [
+          "frequency_hz",
+          "sigma"
+        ]
+      },
+      "group_offsets": {
+        "count": 13,
+        "scalar": "uint32"
+      },
+      "forward": {
+        "count": 169800,
+        "scalar": "complex64"
+      },
+      "reverse": {
+        "count": 169800,
+        "scalar": "complex64"
+      }
+    }
+  },
+  "generator": {
+    "revision": "tgrm-generator-v1",
+    "source": "benchmarks/demo_release/room_audition/generate_grouped_room_asset.py",
+    "source_sha256": "b32ca16f7903e59172192afccdec44b24b6903eac301a55dfcdb098e687c2c4f",
+    "command": "uv run --with numpy python benchmarks/demo_release/room_audition/generate_grouped_room_asset.py"
+  },
+  "hashes": {
+    "clouds_commit": "08460a69a7e1f7a81c5a2abcc7189c9a6b7208d4",
+    "frozen_clouds_target_mono_float64_le_sha256": "7117ead74870f455a7a058dce7f91bd74055115c8b68ee347a6b549ba0ba1266",
+    "fitted_carrier_source_sha256": "5317f24d0a74f7c4e562b281288b888de87428e207ef070f6d0853d8b68420d7",
+    "fitted_carrier_npz_sha256": "91f4a4f29f29e396489603f6a4a10857f1cadb80267fbfecfa6adec9c62aaf0c",
+    "binary_sha256": "838019933ddc885cb519ae0ba40233ee5d3e95cce4e8951ca566c8f1f5f65986"
+  },
+  "oracles": {
+    "passed": true,
+    "measurements": {
+      "forward_grouped_vs_convolution_relative_l2": 1.7394579959830294e-13,
+      "causal_integer_literal_relative_l2": 1.929540056447017e-13,
+      "causal_fractional_literal_relative_l2": 8.251196585888797e-13,
+      "reverse_integer_literal_relative_l2": 2.480068224421377e-13,
+      "reverse_fractional_literal_relative_l2": 2.9109960919556766e-13,
+      "whole_composite_mirror_vs_classic_nrmse": 1.0
+    }
+  },
+  "auditions": [
+    {
+      "role": "native wet impulse",
+      "filename": "grouped_fit_current_radii_impulse.wav",
+      "sha256": "4971e26b5387fc3474974ddb58df56e0e0662c4f02dfa19275601aa3485ff72d"
+    },
+    {
+      "role": "native forward Metal hit",
+      "filename": "position_1p0_wet.wav",
+      "sha256": "07bbf9f2080b816517bd97b1a259c8b5ea087f6ab67a7727aacdf4cb005ee558"
+    },
+    {
+      "role": "native reverse Metal hit",
+      "filename": "position_minus_1p0_wet.wav",
+      "sha256": "98ba7431741a801db9d5801a8cb7a330e28a8408a197eb38d822ee0e556105c2"
+    },
+    {
+      "role": "native POSITION scrub",
+      "filename": "position_scrub_forward_to_reverse_wet.wav",
+      "sha256": "4a4b8ff84829012ce63864674d11e8562a8c90a78f0f27c44b313149079df5e4"
+    }
+  ],
+  "listening": {
+    "status": "pending",
+    "approved_by": null
+  }
+}

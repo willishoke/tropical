@@ -1,0 +1,96 @@
+{
+  "question": "Is classic reverse-reverb position exact and economical for the fitted grouped room?",
+  "operation": "reverse(source) -> causal room -> reverse(result) == source * anti_causal(room)",
+  "asset": "benchmarks/demo_release/room_audition/native_rate_out/grouped_fit_current_radii.npz",
+  "sample_rate": 44100,
+  "output_contract": "mono",
+  "event_seconds": 6.0,
+  "validation": {
+    "analytic_vs_literal_finite_reverse_best_gain": 0.9999999999999298,
+    "analytic_vs_literal_finite_reverse_nrmse": 3.2904766292499635e-10,
+    "analytic_vs_literal_finite_reverse_max_abs": 3.490059088280406e-11,
+    "causal_integer_literal_relative_l2": 1.929540056447017e-13,
+    "causal_fractional_literal_relative_l2": 8.251196585888797e-13,
+    "reverse_integer_literal_relative_l2": 2.480068224421377e-13,
+    "reverse_fractional_literal_relative_l2": 2.9109960919556766e-13,
+    "whole_composite_mirror_vs_classic_best_gain": 2.6856886592622225e-10,
+    "whole_composite_mirror_vs_classic_nrmse": 1.0
+  },
+  "cost": {
+    "groups": 12,
+    "source_rows": 12,
+    "one_direction_interactions_per_hit": 144,
+    "intermediate_position_interactions_per_hit_direct": 288,
+    "four_hit_interactions_one_direction": 576,
+    "four_hit_interactions_intermediate_direct": 1152,
+    "reverse_cyclic_prefix_complex64_bytes": 1358400,
+    "forward_reverse_prefix_complex64_bytes": 2716800,
+    "cached_forward_reverse_16s_mono_float32_bytes": 5644800
+  },
+  "position": {
+    "minus_one": "classic reverse pre-tail",
+    "zero": "equal-power two-sided bloom",
+    "plus_one": "causal forward tail",
+    "gesture_constraint": "a live write changes only current/future playback; an upcoming authored event is analytically available",
+    "measured_static_positions": {
+      "position_minus_1p0": {
+        "pre_event_energy_fraction": 0.575691,
+        "energy_centroid_seconds_relative_to_event": -0.105973
+      },
+      "position_minus_0p5": {
+        "pre_event_energy_fraction": 0.547424,
+        "energy_centroid_seconds_relative_to_event": -0.0513
+      },
+      "position_0p0": {
+        "pre_event_energy_fraction": 0.380726,
+        "energy_centroid_seconds_relative_to_event": 0.05563
+      },
+      "position_0p5": {
+        "pre_event_energy_fraction": 0.182475,
+        "energy_centroid_seconds_relative_to_event": 0.165844
+      },
+      "position_1p0": {
+        "pre_event_energy_fraction": 0.0,
+        "energy_centroid_seconds_relative_to_event": 0.236562
+      }
+    }
+  },
+  "files": {
+    "position_minus_1p0_wet.wav": {
+      "sha256": "98ba7431741a801db9d5801a8cb7a330e28a8408a197eb38d822ee0e556105c2"
+    },
+    "position_minus_1p0_mix.wav": {
+      "sha256": "e66609f5e4d5e79b4f204111108b993cf40578a155504f8c20487055ea870389"
+    },
+    "position_minus_0p5_wet.wav": {
+      "sha256": "5bb40aa86205559454efff37d55ff70e20001b9951ead61dc5713d3ed1589ade"
+    },
+    "position_minus_0p5_mix.wav": {
+      "sha256": "4d4620b0d44e9dbd55e986ab699873a4bd97a30300ee93b70f38cd5bf2c17b53"
+    },
+    "position_0p0_wet.wav": {
+      "sha256": "7ac875a9ac2c5455d410736be817c647c776d71228c5afc8acc89fb41243a0ae"
+    },
+    "position_0p0_mix.wav": {
+      "sha256": "20d2f57f988d02b3de0c22adf0e09f9ef60bca75750d19d13728c969b0ac2ae5"
+    },
+    "position_0p5_wet.wav": {
+      "sha256": "808e7103e40720db02dc48b815c2cab60c604f9f06097be2ff2cc17ee50c14f0"
+    },
+    "position_0p5_mix.wav": {
+      "sha256": "b1a89feb2002afb3a0bdc5588ef0de2108f5f88027e701d6dd46737966262175"
+    },
+    "position_1p0_wet.wav": {
+      "sha256": "07bbf9f2080b816517bd97b1a259c8b5ea087f6ab67a7727aacdf4cb005ee558"
+    },
+    "position_1p0_mix.wav": {
+      "sha256": "30ea41a2591c5c5c32c7efe893bbe94e0d595cb927dfa08e63ef3aebc6ed9f83"
+    },
+    "position_scrub_forward_to_reverse_wet.wav": {
+      "sha256": "4a4b8ff84829012ce63864674d11e8562a8c90a78f0f27c44b313149079df5e4"
+    },
+    "position_scrub_forward_to_reverse_mix.wav": {
+      "sha256": "6366d6f742e31cf60dcc1835db37a81c119db5e02af76642c4a344fda12d2fd2"
+    }
+  }
+}
