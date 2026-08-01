@@ -1,0 +1,96 @@
+{
+  "pass": false,
+  "error": "timeout: set_param",
+  "final_telemetry": {
+    "buffer_length": 128,
+    "control_waiters": 1,
+    "metal": {
+      "acknowledged_epoch": 1,
+      "activation_failure_count": 0,
+      "activation_latency": {
+        "count": 1,
+        "max_ns": 151101250,
+        "min_ns": 151101250,
+        "total_ns": 151101250
+      },
+      "callback_thread_violation_count": 0,
+      "capacity_frames": 2048,
+      "device_frames": 128,
+      "dispatch_failure_count": 0,
+      "enabled": true,
+      "first_starvation": {
+        "active_bank": 0,
+        "device_frame": 2048,
+        "epoch_id": 1,
+        "expected_tile_device": 2048,
+        "expected_tile_index": 0,
+        "expected_tile_source": 2048,
+        "free_mask": 15,
+        "last_published_device_end": 1920,
+        "last_published_epoch": 2,
+        "last_published_source_end": 1920,
+        "observed_tile_state": 0,
+        "reading_mask": 0,
+        "ready_mask": 0,
+        "rendering_mask": 0,
+        "source_sample": 2048,
+        "valid": true
+      },
+      "morph_count": 444,
+      "morph_failure_count": 0,
+      "morph_render_time_ns": 9970740009,
+      "published_epoch": 1,
+      "render_frames": 512,
+      "retarget_count": 443,
+      "stage_times": {
+        "activation_acknowledged": 0,
+        "activation_published": 0,
+        "activation_target_reserved": 1187392986090458,
+        "candidate_gpu_completion": 1187393009757458,
+        "candidate_render_submitted": 1187393009758041,
+        "candidate_window_ready": 0,
+        "old_epoch_retired": 0,
+        "request_received": 1187392986090375
+      },
+      "stale_completion_count": 0,
+      "starvation_count": 1,
+      "tag_mismatch_count": 0,
+      "worker_cpu_time_ns": 36283000,
+      "worker_wall_time_ns": 15161531459
+    },
+    "recompile_version": 1,
+    "runtime": {
+      "device_frame": 662016,
+      "ownership_failure_count": 0,
+      "source_sample": 662016
+    },
+    "scope_preemptions": 0,
+    "slot_count": 89
+  },
+  "final_audio_status": {
+    "device": {
+      "id": 132,
+      "name": "Apple Inc.: MacBook Pro Speakers"
+    },
+    "is_reconnecting": false,
+    "is_running": true,
+    "runtime": {
+      "metalAcknowledgedEpoch": 1,
+      "metalActivationFailureCount": 0,
+      "metalCallbackThreadViolationCount": 0,
+      "metalDispatchFailureCount": 0,
+      "metalPublishedEpoch": 1,
+      "metalRetargetCount": 443,
+      "metalStarvationCount": 1,
+      "metalTagMismatchCount": 0,
+      "ownershipFailureCount": 0
+    },
+    "stats": {
+      "avgCallbackMs": 0.000511,
+      "callbackCount": 5172,
+      "maxCallbackMs": 0.00525,
+      "overrunCount": 0,
+      "underrunCount": 0
+    }
+  }
+}

@@ -128,22 +128,6 @@ private def complexTableRead (table sourceIdx groupOffset residue : Sig) : CplxE
   let floatBase := mul (litI 2) scalarBase
   (Sig.index table floatBase, Sig.index table (add floatBase (litI 1)))
 
-/-- The causal geometric block `S(L,u)` from the approved oracle. -/
-private def causalBlock (sigma frequency logRadius periodF l u : Sig) : CplxE :=
-  let eu := poleExpSamples sigma frequency u
-  let pl := mul periodF l
-  let tail := cscaleE (radiusPow logRadius pl)
-    (poleExpSamples sigma frequency (sub u pl))
-  let numerator := csubE eu tail
-  -- G = (r/p)^P = r^P exp(-(-σ+iω)P/Fs).
-  let g := cscaleE (radiusPow logRadius periodF)
-    (poleExpSamples sigma frequency (neg periodF))
-  let denom : CplxE := (sub (lit 1) g.1, neg g.2)
-  let nearOne := ltE
-    (sqrtE (add (mul denom.1 denom.1) (mul denom.2 denom.2)))
-    (lit 1 10)
-  cselectE nearOne (cscaleE l eu) (cdivE numerator denom)
-
 private def groupedRoomPair (sourceIdx groupIdx : Sig)
     (sigma frequency cre cim position u : Sig)
     (periods logRadii offsets forward reverse : Sig) : Sig :=
@@ -151,6 +135,15 @@ private def groupedRoomPair (sourceIdx groupIdx : Sig)
   let periodF := toFloatE periodI
   let logRadius := Sig.index logRadii groupIdx
   let groupOffset := toIntE (Sig.index offsets groupIdx)
+  let radiusP := radiusPow logRadius periodF
+
+  -- Share the expensive pole evaluations across both arms.  From
+  -- Z = r^P exp(eP), the causal ratio is G = r^P / exp(eP); one evaluation at
+  -- +P therefore supplies both denominators.
+  let ep := poleExpSamples sigma frequency periodF
+  let zP := cscaleE radiusP ep
+  let invEp := cdivE (lit 1, lit 0) ep
+  let g := cscaleE radiusP invEp
 
   -- Causal: discrete quotient/remainder comes from floor(u), while the analytic
   -- exponential retains the original fractional coordinate.  Unsupported
@@ -162,9 +155,25 @@ private def groupedRoomPair (sourceIdx groupIdx : Sig)
   let q := toFloatE qI
   let aR := complexTableRead forward sourceIdx groupOffset rI
   let aLast := complexTableRead forward sourceIdx groupOffset (sub periodI (litI 1))
-  let sQ1 := causalBlock sigma frequency logRadius periodF (add q (lit 1)) u
-  let sQ := causalBlock sigma frequency logRadius periodF q u
-  let forwardResponse := caddE (cmulE aR sQ1) (cmulE (csubE aLast aR) sQ)
+  -- A_R S(q+1) + (A_last-A_R) S(q)
+  --   = A_last S(q) + A_R exp(eu) G^q.
+  -- This exact rearrangement replaces two complete geometric-block
+  -- evaluations with one shared exp(eu) and one G^q evaluation.
+  let eu := poleExpSamples sigma frequency u
+  let pq := mul periodF q
+  let gq := cscaleE (radiusPow logRadius pq)
+    (poleExpSamples sigma frequency (neg pq))
+  let euGq := cmulE eu gq
+  let causalDenom : CplxE := (sub (lit 1) g.1, neg g.2)
+  let nearOne := ltE
+    (sqrtE (add (mul causalDenom.1 causalDenom.1)
+      (mul causalDenom.2 causalDenom.2)))
+    (lit 1 10)
+  let sQ := cselectE nearOne (cscaleE q eu)
+    (cdivE (csubE eu euGq) causalDenom)
+  let forwardNormal := caddE (cmulE aLast sQ) (cmulE aR euGq)
+  let forwardLimit := caddE (cmulE aLast (cscaleE q eu)) (cmulE aR eu)
+  let forwardResponse := cselectE nearOne forwardLimit forwardNormal
   let forwardReal := selectE causal
     (sub (mul cre forwardResponse.1) (mul cim forwardResponse.2)) (lit 0)
 
@@ -173,8 +182,6 @@ private def groupedRoomPair (sourceIdx groupIdx : Sig)
   let d := toIntE (selectE (gt d0 (lit 0)) d0 (lit 0))
   let dF := toFloatE d
   let b := complexTableRead reverse sourceIdx groupOffset (modE d periodI)
-  let zP := cscaleE (radiusPow logRadius periodF)
-    (poleExpSamples sigma frequency periodF)
   let reverseDenom : CplxE := (sub (lit 1) zP.1, neg zP.2)
   let reversePhase := poleExpSamples sigma frequency (add u dF)
   let reverseNumerator := cscaleE (radiusPow logRadius dF) (cmulE reversePhase b)

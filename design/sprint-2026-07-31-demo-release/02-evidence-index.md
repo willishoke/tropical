@@ -57,6 +57,19 @@ the native 44.1 kHz production asset and integrated evidence are pending.
 | Explicit fixed room decoder | `runExplicitRoomModes` in `tropicaltest` | Lean gate passes for the rejected v1 path; dedicated production `groupedroom` work is pending. |
 | Exact-scene harness | `playground/qualification/run.js` | Short pre-room integration smoke passes; not release evidence. |
 
+## Direct evaluator reserve failure
+
+The required direct-path cost fork is recorded under
+`benchmarks/demo_release/data/`:
+
+| Run | Result |
+|---|---|
+| `2026-08-01_23-12-23-338-smoke-b128-r512` | Pre-optimization direct evaluator: first priming write timed out; one starvation and 443 retargets. |
+| `2026-08-01_23-16-23-842-smoke-b128-r512` | Algebraically shared direct evaluator: first priming write still timed out; about 17.0 ms per 512-frame morph render, one starvation, and 185 retargets. |
+
+Both runs retain their JSONL, summary, and manifest. They authorize work on the
+bounded fixed-scene cache; they are failed diagnostics, not release evidence.
+
 ## Required release artifacts (not yet complete)
 
 The final candidate must populate `benchmarks/demo_release/data/` without

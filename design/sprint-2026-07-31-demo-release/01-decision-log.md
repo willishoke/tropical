@@ -21,7 +21,7 @@
 | DR-10 | implemented for audition | Freeze official Mutable Instruments Clouds commit `08460a69a7e1f7a81c5a2abcc7189c9a6b7208d4` as the room gold standard; render its native stereo output and mono fold-down at the exact demo source. | Gives the room lane a reproducible perceptual and quantitative target. The stateful reference is not linked into the product. |
 | DR-11 | enabling result | Preserve complete delay pole lattices as grouped periodic carriers and analytically convolve them with fixed modal sources, instead of pruning or independently rendering every pole. | A 9,133-mode teacher was recovered through 12 groups × 12 source rows with `2.72e-13` relative error and a 63.4× runtime-term reduction. DR-12 selects the reference-fitted use of this representation. |
 | DR-12 | **selected for production** | Ship the accepted mono `current_radii` grouped carrier on the four fixed Metal hits. Do not widen the mono engine contract for the stereo evidence asset. | User listening accepted the mono fitted impulse. The shipping version must be refitted and re-approved natively at 44.1 kHz before integration; architecture, group count, and output contract are frozen. |
-| DR-13 | **selected for production** | Add bipolar `POSITION` over the classic anti-causal grouped room and accepted forward room; do not reuse the incumbent whole-composite `dir` mirror. Prefer the direct dual evaluator and use a fixed-scene mono basis only if measured reserve fails. | Analytic reverse matches literal reverse/source/room/reverse at `1.88e-10`/`2.55e-10` NRMSE. Incumbent mirror NRMSE is `1.0`. Direct midpoint cost is 1,152 four-hit equivalents; native mono cached fallback is 5.38 MiB. |
+| DR-13 | **direct rejected; fallback authorized** | Add bipolar `POSITION` over the classic anti-causal grouped room and accepted forward room; do not reuse the incumbent whole-composite `dir` mirror. Implement the bounded fixed-scene mono basis after the direct evaluator failed measured reserve. | Exact algebraic sharing reduced the direct evaluator to one shared `exp(eu)`, `G^q`, and period pole per pair while retaining JIT `3.85e-13` and Metal `1.33e-6` oracle error. Even then, the exact-scene `Bdev=128`, `Rgpu=512` smoke averaged about 17.0 ms per morph render against an 11.6 ms tile, starved once, retargeted 185 times, and timed out its first priming write. The pre-optimization failure is retained beside it. The 5.38 MiB cache must still pass endpoint, FLOW, headroom, and zero-fault gates before final selection. |
 | DR-14 | **frozen production boundary** | Add a dedicated terminal `groupedroom` modal-to-signal node and versioned immutable binary asset binding; route only the four Metal hits, remove chord-room sends, replace LENGTH with a 20 ms glided POSITION, and defer size/decay variants. | Prevents grouped carriers from being flattened or assigned incumbent direction semantics. Avoids JSON literal expansion and per-tile static-data upload. Full contract: `06-room-position-production-handoff.md`. |
 | DR-15 | **frozen integration base** | Land room production directly atop `15e5a39` on `demo/modal-pocket-scene`, followed by the commit containing the handoff; do not restart from `91ecf0c`, `main`, or a historical room lane. | The checkpoint already integrates and validates the scope/control, epoch, morph, telemetry, capture, and qualification prerequisites. Recreating the room on the baseline would silently omit them. |
 
@@ -29,8 +29,9 @@
 
 1. The native 44.1 kHz regeneration must retain the accepted room by listening;
    failure blocks integration without silently changing architecture.
-2. Release-Mac timing selects direct analytic evaluation or its documented
-   5.38 MiB mono fixed-scene fallback.
+2. The direct evaluator failed release-Mac reserve. The documented 5.38 MiB
+   mono fixed-scene fallback must pass its correctness, timing, and listening
+   gates before it becomes the selected production path.
 3. If the exact reverse endpoint is not unmistakable in the integrated scene,
    stop for user review before auditioning a longer decay or transient-only
    room send.
