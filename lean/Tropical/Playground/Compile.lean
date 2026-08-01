@@ -23,6 +23,7 @@ open Tropical.Exact (DyadicI)
 def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j : Json) :
     Except String CompiledPatch := do
   let raws := rawsOf j
+  let usesGroupedRoom := raws.any (·.kind == "groupedroom")
   checkServedKinds raws                              -- reject withheld/unknown kinds FIRST (honest msg over the misleading type error)
   checkEdgeTypes raws                                -- reject ill-typed / dangling / wire-into-knob edges pre-lowering
   checkOutTarget j raws                              -- reject an "out" id that names no node
@@ -58,7 +59,8 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
     tapSigs.mapIdx fun i (_, s) => (.port ⟨i + 1⟩, s)
   -- Assemble through EmitArrow's lowering boundary (interns every `Sig` into the
   -- arena's DAG); the live param decls append after the instance decls.
-  let (arena1, idx) := Tropical.EmitArrow.assemble arena "__patch__" #[]
+  let rootInputs := if usesGroupedRoom then groupedRoomInputDecls else #[]
+  let (arena1, idx) := Tropical.EmitArrow.assemble arena "__patch__" rootInputs
     (#[{ name := "out", type? := some (.scalar .float) }] ++ tapOutputs)
     b.decls (#[(.port ⟨0⟩, out)] ++ tapAssigns) registry
     (extraDecls := paramDecls)
@@ -67,6 +69,7 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
     (params := paramTable.map (fun (nm, v) => (nm, Json.num v)))
     (alloc := Tropical.Lowering.allocate (paramTable.map (·.1)) #[])
   let (plan, stageBlocks) ← Tropical.Compile.compileSessionStaged input
+  let plan ← if usesGroupedRoom then bindGroupedRoomAsset plan else pure plan
   -- The host-contract dispatch table rides the manifest: any runtime host
   -- (C++ today, Swift/Metal or wasm tomorrow) reads per-slot disciplines from
   -- the plan itself and dispatches param writes locally.

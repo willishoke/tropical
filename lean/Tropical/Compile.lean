@@ -687,8 +687,23 @@ def compileSessionStaged (input : SessionInput) :
     if let some slot := s.paramSlots.get? rootParams[i]! then
       paramSlots := paramSlots.push (i, slot)
 
+  -- Root programs normally have no declared inputs, but package-owned
+  -- immutable tables enter through typed array inputs.  The recursive path
+  -- already builds these maps for child instances; mirror that work for the
+  -- synthetic root so an `inputRef` can resolve directly to the preallocated
+  -- session slot without manufacturing a Pack instruction.
+  let mut rootInputSlots : Array (Nat × Nat) := #[]
+  let mut rootInputArraySlots : Array (Nat × ArraySlotInfo) := #[]
+  for i in [0:input.root.inputs.size] do
+    let inputDecl := input.root.inputs[i]!
+    match lookupInputSlot s rootInstancePath inputDecl.name with
+    | some slot => rootInputSlots := rootInputSlots.push (i, slot)
+    | none =>
+      if let some info := lookupInputArraySlot s rootInstancePath inputDecl.name then
+        rootInputArraySlots := rootInputArraySlots.push (i, info)
+
   let partition ← partitionKernel rootInstancePath input.root input.arena
-    input.wiresPost s acc #[] #[] paramSlots #[]
+    input.wiresPost s acc rootInputSlots rootInputArraySlots paramSlots #[]
   s := partition.allocation
 
   let sinks ← emitSinks s input.graphOutputs

@@ -58,18 +58,38 @@ def runVocabDriven (arena : Arena)
     if kind == "out" then continue
     let mut nodes : Array Lean.Json := #[]
     let mut inFields : List (String × Lean.Json) := []
-    for p in portSpecs kind do
-      if !p.accepts.isEmpty && p.name == "in" then
-        if p.accepts == #[PortDomain.modal] then
-          nodes := nodes.push (Lean.Json.mkObj
-            [("id", .str "helper_m"), ("kind", .str "resonator"), ("params", Lean.Json.mkObj [])])
-          inFields := inFields ++ [("in", Lean.Json.arr #[.str "helper_m"])]
-        else
-          nodes := nodes.push (Lean.Json.mkObj
-            [("id", .str "helper_s"), ("kind", .str "source"), ("params", Lean.Json.mkObj [])])
-          inFields := inFields ++ [("in", Lean.Json.arr #[.str "helper_s"])]
+    let mut dutParams := Lean.Json.mkObj []
+    if kind == "groupedroom" then
+      let coords : Array (Nat × Int × Nat) := #[
+        (211, 75, 1), (211, 955, 1), (433, 865, 2), (433, 10035, 2),
+        (887, 98, 1), (887, 1052, 1), (1511, 1095, 2), (1511, 11005, 2),
+        (2837, 121, 1), (2837, 1149, 1), (5081, 1325, 2), (5081, 11975, 2)]
+      let modes := Lean.Json.arr (coords.map fun (frequency, sigma, exponent) =>
+        Lean.Json.arr #[Lean.toJson frequency, .num ⟨sigma, exponent⟩,
+          Lean.toJson (1 : Nat), Lean.toJson (0 : Nat)])
+      nodes := nodes.push (Lean.Json.mkObj
+        [("id", .str "helper_m"), ("kind", .str "string"),
+         ("params", Lean.Json.mkObj [("modes", modes)])])
+      nodes := nodes.push (Lean.Json.mkObj
+        [("id", .str "helper_p"), ("kind", .str "glideknob"),
+         ("params", Lean.Json.mkObj [("value", Lean.toJson (1 : Nat))])])
+      inFields := [("in", Lean.Json.arr #[.str "helper_m"]),
+        ("position", Lean.Json.arr #[.str "helper_p"])]
+      dutParams := Lean.Json.mkObj
+        [("profile", .str Tropical.EmitArrow.groupedRoomProfile)]
+    else
+      for p in portSpecs kind do
+        if !p.accepts.isEmpty && p.name == "in" then
+          if p.accepts == #[PortDomain.modal] then
+            nodes := nodes.push (Lean.Json.mkObj
+              [("id", .str "helper_m"), ("kind", .str "resonator"), ("params", Lean.Json.mkObj [])])
+            inFields := inFields ++ [("in", Lean.Json.arr #[.str "helper_m"])]
+          else
+            nodes := nodes.push (Lean.Json.mkObj
+              [("id", .str "helper_s"), ("kind", .str "source"), ("params", Lean.Json.mkObj [])])
+            inFields := inFields ++ [("in", Lean.Json.arr #[.str "helper_s"])]
     nodes := nodes.push (Lean.Json.mkObj
-      [("id", .str "dut"), ("kind", .str kind), ("params", Lean.Json.mkObj []),
+      [("id", .str "dut"), ("kind", .str kind), ("params", dutParams),
        ("in", Lean.Json.mkObj inFields)])
     -- a control-outlet kind (a bare Knob) drives nothing by itself — its
     -- natural minimal patch consumes it through a source's control inlet, so
@@ -507,6 +527,119 @@ def runExplicitRoomModes (arena : Arena)
             passGate "explicit-room-modes" "authored rows are exact structural room data: fixed count, no coefficient slots, finite audible render"
           else
             failGate "explicit-room-modes" s!"shape={roomShapeOk} frozen={frozenOk}/{planFrozen} finite={finite} peak={peak}"
+
+private def groupedRoomModesJson (firstFrequency : Nat := 211) : Lean.Json :=
+  let coords : Array (Nat × Int × Nat) := #[
+    (firstFrequency, 75, 1), (211, 955, 1), (433, 865, 2), (433, 10035, 2),
+    (887, 98, 1), (887, 1052, 1), (1511, 1095, 2), (1511, 11005, 2),
+    (2837, 121, 1), (2837, 1149, 1), (5081, 1325, 2), (5081, 11975, 2)]
+  Lean.Json.arr (coords.map fun (frequency, sigma, exponent) =>
+    Lean.Json.arr #[Lean.toJson frequency, .num ⟨sigma, exponent⟩,
+      Lean.toJson (1 : Nat), Lean.toJson (0 : Nat)])
+
+private def groupedRoomPatchJson (profile : String := Tropical.EmitArrow.groupedRoomProfile)
+    (positionSources : Array String := #["position"])
+    (firstFrequency : Nat := 211) (throughDirection : Bool := false) : Lean.Json := Id.run do
+  let mut nodes : Array Lean.Json := #[
+    Lean.Json.mkObj [
+      ("id", .str "hit"), ("kind", .str "string"),
+      ("params", Lean.Json.mkObj [("t", Lean.toJson (0 : Nat)),
+        ("modes", groupedRoomModesJson firstFrequency)]),
+      ("in", Lean.Json.mkObj [])],
+    Lean.Json.mkObj [
+      ("id", .str "position"), ("kind", .str "glideknob"),
+      ("params", Lean.Json.mkObj [("value", Lean.toJson (1 : Nat))]),
+      ("in", Lean.Json.mkObj [])]]
+  if positionSources.size > 1 then
+    nodes := nodes.push (Lean.Json.mkObj [
+      ("id", .str "position2"), ("kind", .str "knob"),
+      ("params", Lean.Json.mkObj [("value", Lean.toJson (0 : Nat))]),
+      ("in", Lean.Json.mkObj [])])
+  let roomInput := if throughDirection then "incumbent" else "hit"
+  if throughDirection then
+    nodes := nodes.push (Lean.Json.mkObj [
+      ("id", .str "incumbent"), ("kind", .str "reverb"),
+      ("params", Lean.Json.mkObj []),
+      ("in", Lean.Json.mkObj [("in", Lean.Json.arr #[.str "hit"])])])
+  nodes := nodes.push (Lean.Json.mkObj [
+    ("id", .str "room"), ("kind", .str "groupedroom"),
+    ("params", Lean.Json.mkObj [("profile", .str profile)]),
+    ("in", Lean.Json.mkObj [
+      ("in", Lean.Json.arr #[.str roomInput]),
+      ("position", Lean.Json.arr (positionSources.map Lean.Json.str))])])
+  nodes := nodes.push (Lean.Json.mkObj [
+    ("id", .str "outn"), ("kind", .str "out"),
+    ("in", Lean.Json.mkObj [("in", Lean.Json.arr #[.str "room"])])])
+  return Lean.Json.mkObj [("nodes", Lean.Json.arr nodes), ("out", .str "outn")]
+
+private def groupedRoomInstructions (f : Tropical.Plan.InstanceFunction) :
+    Array Tropical.Plan.NInstr :=
+  f.preambleInstructions ++ f.preInputInstructions ++ f.instructions
+    ++ f.children.attach.flatMap fun c => groupedRoomInstructions c.1
+termination_by sizeOf f
+decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children c.2
+
+def runGroupedRoomContract (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let refusal := fun (j : Lean.Json) (needle : String) =>
+    match Tropical.Playground.compilePlanPure arena resolved j with
+    | .ok _ => false
+    | .error e => e.contains needle
+  let unknownProfile := refusal (groupedRoomPatchJson "unknown") "unsupported profile"
+  let missingPosition := refusal
+    (groupedRoomPatchJson (positionSources := #[])) "requires exactly one control source"
+  let ambiguousPosition := refusal
+    (groupedRoomPatchJson (positionSources := #["position", "position2"]))
+    "requires exactly one control source"
+  let coordinateMismatch := refusal
+    (groupedRoomPatchJson (firstFrequency := 212)) "does not match the frozen"
+  let incumbentDirection := refusal
+    (groupedRoomPatchJson (throughDirection := true)) "incumbent modal direction"
+  match Tropical.Playground.compilePlanPure arena resolved groupedRoomPatchJson with
+  | .error e => failGate "grouped-room-contract" s!"compile: {firstLine e}"
+  | .ok compiled =>
+    let plan := compiled.plan
+    let instrs := plan.instanceFunctions.flatMap groupedRoomInstructions
+    let reduces := instrs.filter (·.tag == "ReduceBegin")
+    let mut depth := 0
+    let mut maxDepth := 0
+    let mut balanced := true
+    for ins in instrs do
+      if ins.tag == "ReduceBegin" then
+        depth := depth + 1
+        maxDepth := max maxDepth depth
+      else if ins.tag == "ReduceEnd" then
+        if depth == 0 then balanced := false else depth := depth - 1
+    balanced := balanced && depth == 0
+    let assetOk := match plan.immutableAssets[0]? with
+      | some asset =>
+        plan.immutableAssets.size == 1
+          && asset.path == Tropical.EmitArrow.groupedRoomAssetPath
+          && asset.sha256 == Tropical.EmitArrow.groupedRoomAssetSha256
+          && asset.sampleRate == 44100 && asset.arrays.size == 2
+          && asset.arrays.all (·.elementCount == 339600)
+      | none => false
+    let assetSlots := plan.immutableAssets.flatMap fun a => a.arrays.map (·.slot)
+    let noAssetPack := instrs.all fun ins =>
+      if ins.tag != "Pack" then true else match ins.dst with
+      | .array slot => !assetSlots.contains slot && ins.args.size ≤ 12
+      | _ => ins.args.size ≤ 12
+    let reduceOk := reduces.size == 2 && reduces.all (·.loopCount == 12)
+      && balanced && maxDepth == 2
+    let wireOk := (plan.toWire.toOption.map
+      (·.compress.contains "tropical_plan_6")).getD false
+    let mslOk := match Tropical.Ir.EmitMsl.emitKernel plan with
+      | .ok src => src.contains "immutable_asset [[buffer(4)]]"
+      | .error _ => false
+    let refusals := unknownProfile && missingPosition && ambiguousPosition
+      && coordinateMismatch && incumbentDirection
+    IO.println s!"        Plan-6 asset={assetOk && wireOk && mslOk} nested 12×12={reduceOk} no asset Pack={noAssetPack} refusals={refusals}"
+    if assetOk && wireOk && mslOk && reduceOk && noAssetPack && refusals then
+      passGate "grouped-room-contract"
+        "frozen profile → one nested 12×12 Plan-6 evaluator; profile/coordinate/position/incumbent-dir mismatches refuse"
+    else
+      failGate "grouped-room-contract"
+        s!"asset={assetOk} wire={wireOk} msl={mslOk} reduce={reduceOk} noPack={noAssetPack} refusals={refusals}"
 
 /-- Test 3: `osc ⋙ flange ⋙ flange` — the slide pushes the outer warps through
     the inner flanger's sum and fuses them, producing the oscillator read at the

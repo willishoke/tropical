@@ -223,6 +223,11 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
     (.modalReverb sig
       (filterPair (wp "cutoff" (dv "cutoff")) (wp "resonance" (dv "resonance"))) none, #[])
   | "modalmix" => (.modalMix (portSources inObj "in"), #[])
+  | "groupedroom" =>
+    let inId := (portSources inObj "in")[0]?.getD "__silence__"
+    let positionId := (portSources inObj "position")[0]?.getD ""
+    (.groupedRoom inId (jStr params "profile" "")
+      (controlValue positionId (lit 1)), #[])
   | "gauge" =>
     -- §5 excitation gauge: re-level the modal input's peak. g=0 identity (unity-DC,
     -- the strike gauge), g=1 unity-peak. A pure Modal ⇝ Modal effect (`normalizePeak`);
@@ -367,6 +372,23 @@ def checkEdgeTypes (raws : Array Raw) : Except String Unit := do
               unless p.accepts.contains col do
                 let accepted := String.intercalate "/" (p.accepts.toList.map domStr)
                 throw s!"connection type error: '{src.id}' ({src.kind}, {domStr col} outlet) → '{r.id}' ({r.kind}) inlet '{p.name}' which accepts {accepted} — outlet.color ∉ inlet.accepts (modal→signal realizes; signal→modal is a type error)"
+  pure ()
+
+/-- `groupedroom` is intentionally stricter than ordinary legal-incomplete
+    nodes: its asset/profile pairing and both source coordinates must be
+    unambiguous before any lowering begins. -/
+def checkGroupedRoomContracts (raws : Array Raw) : Except String Unit := do
+  for r in raws do
+    if r.kind == "groupedroom" then
+      let profile := jStr r.params "profile" ""
+      if profile != groupedRoomProfile then
+        throw s!"groupedroom '{r.id}': unsupported profile '{profile}'; expected '{groupedRoomProfile}'"
+      let sourceCount := (portSources r.inObj "in").size
+      if sourceCount != 1 then
+        throw s!"groupedroom '{r.id}': inlet 'in' requires exactly one modal source; got {sourceCount}"
+      let positionCount := (portSources r.inObj "position").size
+      if positionCount != 1 then
+        throw s!"groupedroom '{r.id}': inlet 'position' requires exactly one control source; got {positionCount}"
   pure ()
 
 /-- The top-level `"out"` id must name an existing node — or be absent/empty,
@@ -551,6 +573,7 @@ def decodeGraph (j : Json) : Except String (PatchGraph × Array (String × JsonN
     | some (.str s) => s
     | _ => ""
   let raws := rawsOf j
+  checkGroupedRoomContracts raws
   let params := collectParams raws
   let pidx : String → Option Nat := fun nm => params.findIdx? (·.1 == nm)
   let mut pnodes : Array PatchNode := #[]

@@ -210,3 +210,21 @@ header, aligned metadata, source/group table order, input and payload hashes,
 oracle results, and listening status. Native audition WAVs remain ignored;
 the accepted mono carrier `.npz`, summaries, production payload, and manifest
 are tracked.
+
+The production runtime probe compiles a real `groupedroom` graph, loads that
+tracked asset through Plan 6, renders the five endpoint/fractional fixtures,
+and compares the result with the analytic grouped-room oracle:
+
+```sh
+uv run --with numpy python \
+  benchmarks/demo_release/room_audition/run_grouped_room_runtime_probe.py \
+  --backend jit
+
+# Run on a release Mac with Metal available.
+uv run --with numpy python \
+  benchmarks/demo_release/room_audition/run_grouped_room_runtime_probe.py \
+  --backend both
+```
+
+The enforced worst-case absolute-error limits are `1e-9` for JIT and `1e-5`
+for Metal.

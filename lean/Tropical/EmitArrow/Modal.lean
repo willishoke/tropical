@@ -1,4 +1,5 @@
 import Tropical.EmitArrow.Modal.Realize
+import Tropical.EmitArrow.Modal.GroupedRoom
 
 /-!
 # EmitArrow.Modal

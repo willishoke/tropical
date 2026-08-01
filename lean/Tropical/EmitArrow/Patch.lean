@@ -125,6 +125,9 @@ inductive Node where
   -- effect. `g` is a live slot. The norm is measured on the SETTLED poles, so an
   -- un-settleable (per-sample-modulated) input DECLINES to identity, never an s1 norm.
   | modalGauge (input : String) (g : Sig)
+  /-- The frozen grouped-room TERMINAL: consumes an untouched modal source and
+      produces a signal from the approved immutable prefix profile. -/
+  | groupedRoom (input profile : String) (position : Sig)
 
 structure PatchNode where
   id : String
@@ -152,7 +155,7 @@ def Node.inputIds : Node → Array String
   | .fm i .. | .pm i .. => #[i]
   | .sflange i m _ => #[i, m]
   | .modalSource _ _ _ addr _ _ => (addr.map (#[·])).getD #[]
-  | .modalReverb i _ _ | .modalGauge i _ => #[i]
+  | .modalReverb i _ _ | .modalGauge i _ | .groupedRoom i _ _ => #[i]
 
 /-- Is `id` a modal-island node? Its output wire carries poles, not a `Sig`. A
     missing node reads as Sig (graceful — a half-built patch stays lowerable). -/
@@ -446,6 +449,30 @@ def lowerNode (g : PatchGraph) (rankOf : String → Option Nat)
     match terms.toList with
     | [] => return .konst (lit 0)
     | t :: ts => return ts.foldl (fun acc u => .prod acc u) t
+  | .groupedRoom inId profile position => do
+    if profile != groupedRoomProfile then
+      throw s!"groupedroom '{id}': unsupported profile '{profile}'; expected '{groupedRoomProfile}'"
+    let lowered ←
+      if inId == "__silence__" then pure silentModal
+      else match rankOf inId with
+        | none => throw s!"lowerModal: node '{inId}' not found"
+        | some ri =>
+          if h : ri < r then lowerModal g rankOf inId ri
+          else throw (cycleGuardMsg id inId)
+    if lowered.addressNode?.isSome then
+      throw s!"groupedroom '{id}': the frozen profile requires the source's direct relative clock (an address inlet is not supported)"
+    if lowered.direction?.isSome then
+      throw s!"groupedroom '{id}': incumbent modal direction is not part of the frozen grouped-room evaluator"
+    if lowered.modeCount?.isSome then
+      throw s!"groupedroom '{id}': the frozen profile requires all twelve source poles (a live mode count is not supported)"
+    match lowered.bank with
+    | .bloomed .. =>
+      throw s!"groupedroom '{id}': a pitch-bloomed source does not match the frozen source profile"
+    | .plain modes rooms =>
+      if !rooms.isEmpty then
+        throw s!"groupedroom '{id}': connect the modal source directly; ordinary modal rooms are not composed before this terminal"
+      validateGroupedRoomModes modes
+      return groupedRoomTerm modes lowered.strikeAnchor position lowered.realizationClock
   | _ =>
     .error s!"lower: modal node '{id}' reached Sig lowering — realize via lowerInput"
 termination_by (r, 1)
