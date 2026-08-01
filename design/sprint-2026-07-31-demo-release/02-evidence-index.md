@@ -10,13 +10,14 @@ release qualification result.
 |---|---|
 | Baseline commit | `91ecf0c8a590a416b25d5165dffc9d66a78aad68` |
 | Required implementation predecessor | `15e5a39bfce9dd242db59aa6ebc2460987aa2199` |
+| Handoff ref | `demo/room-position-handoff-2026-08-01` |
 | Branch | `demo/modal-pocket-scene` |
 | Primary quanta | `Bdev=128`, `Rgpu=512` |
 | Release scope | exact modal-pocket graph on the recorded release Mac |
 
-Production room work starts from the branch commit containing the handoff,
-directly atop the required implementation predecessor. It does not start from
-the baseline or a historical lane worktree.
+Production room work starts from the commit named by the handoff ref, directly
+atop the required implementation predecessor and handoff package. It does not
+start from the baseline or a historical lane worktree.
 
 ## Room audition
 

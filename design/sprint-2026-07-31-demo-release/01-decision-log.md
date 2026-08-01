@@ -2,6 +2,7 @@
 
 - Baseline: `91ecf0c8a590a416b25d5165dffc9d66a78aad68`
 - Required implementation predecessor: `15e5a39bfce9dd242db59aa6ebc2460987aa2199`
+- Handoff ref: `demo/room-position-handoff-2026-08-01`
 - Release branch: `demo/modal-pocket-scene`
 - Scope: the exact modal-pocket demo on the recorded release Mac; no general
   live-Metal support claim.

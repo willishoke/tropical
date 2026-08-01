@@ -2,6 +2,7 @@
 
 - **Baseline:** `91ecf0c` (`demo/modal-pocket-scene`)
 - **Required implementation checkpoint:** `15e5a39bfce9dd242db59aa6ebc2460987aa2199`
+- **Handoff ref:** `demo/room-position-handoff-2026-08-01`
 - **Sprint length:** four engineering days, with an audible candidate by the end
   of Day 2
 - **Product target:** the one fixed 16-second modal scene on the release Mac
@@ -496,9 +497,9 @@ Owned surface: `playground/` scene and renderer integration only.
 ## Current branch and integration topology
 
 The earlier parallel-lane topology has converged. Production room work begins
-on `demo/modal-pocket-scene` from the commit containing the authoritative
-handoff, whose required implementation predecessor is
-`15e5a39bfce9dd242db59aa6ebc2460987aa2199`:
+on `demo/modal-pocket-scene` from
+`demo/room-position-handoff-2026-08-01`, whose required implementation
+predecessor is `15e5a39bfce9dd242db59aa6ebc2460987aa2199`:
 
 ```text
 91ecf0c  original modal-pocket scene
