@@ -180,7 +180,7 @@
     }
   ],
   "listening": {
-    "status": "pending",
-    "approved_by": null
+    "status": "approved",
+    "approved_by": "user listening review 2026-08-01"
   }
 }
