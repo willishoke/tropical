@@ -1,6 +1,9 @@
 #include "runtime/FlatRuntime.hpp"
 #include "runtime/NumericProgramParser.hpp"
 
+#include <llvm/ADT/ArrayRef.h>
+#include <llvm/Support/SHA256.h>
+
 #ifdef TROPICAL_METAL
 #include "metal/MetalKernel.hpp"
 #endif
@@ -11,11 +14,188 @@
 #include <chrono>
 #include <cmath>
 #include <cstdlib>
+#include <filesystem>
+#include <fstream>
+#include <iomanip>
 #include <limits>
+#include <sstream>
 #include <stdexcept>
+#include <unordered_set>
 
 namespace tropical_runtime
 {
+
+namespace
+{
+constexpr std::size_t kImmutableAssetAlignment = 64;
+
+std::size_t align_asset(std::size_t value)
+{
+  return (value + kImmutableAssetAlignment - 1)
+       / kImmutableAssetAlignment * kImmutableAssetAlignment;
+}
+
+std::string sha256_hex(const std::vector<uint8_t> & bytes)
+{
+  const auto digest = llvm::SHA256::hash(
+    llvm::ArrayRef<uint8_t>(bytes.data(), bytes.size()));
+  std::ostringstream out;
+  out << std::hex << std::setfill('0');
+  for (uint8_t byte : digest)
+    out << std::setw(2) << static_cast<unsigned>(byte);
+  return out.str();
+}
+
+bool valid_sha256(const std::string & value)
+{
+  return value.size() == 64
+      && std::all_of(value.begin(), value.end(), [](char c) {
+           return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f');
+         });
+}
+
+bool path_is_within(const std::filesystem::path & root,
+                    const std::filesystem::path & candidate)
+{
+  auto root_it = root.begin();
+  auto candidate_it = candidate.begin();
+  for (; root_it != root.end(); ++root_it, ++candidate_it)
+    if (candidate_it == candidate.end() || *root_it != *candidate_it)
+      return false;
+  return true;
+}
+
+std::filesystem::path resolve_asset_path(const std::string & text)
+{
+  if (text.empty())
+    throw std::runtime_error("FlatRuntime: immutable asset path is empty");
+  const std::filesystem::path relative(text);
+  if (relative.is_absolute())
+    throw std::runtime_error(
+      "FlatRuntime: immutable asset path must be package-relative: '" + text + "'");
+  for (const auto & component : relative)
+    if (component == "..")
+      throw std::runtime_error(
+        "FlatRuntime: immutable asset path may not contain '..': '" + text + "'");
+
+  const auto root = std::filesystem::canonical(std::filesystem::current_path());
+  std::error_code ec;
+  const auto candidate = std::filesystem::weakly_canonical(root / relative, ec);
+  if (ec || !path_is_within(root, candidate))
+    throw std::runtime_error(
+      "FlatRuntime: immutable asset path escapes package root: '" + text + "'");
+  return candidate;
+}
+
+std::vector<uint8_t> read_asset(
+  const tropical_plan5::ParsedPlan5::ImmutableAsset & asset)
+{
+  if (asset.byte_count == 0
+      || asset.byte_count > std::numeric_limits<std::size_t>::max()
+      || asset.byte_count >
+           static_cast<uint64_t>(std::numeric_limits<std::streamsize>::max()))
+    throw std::runtime_error(
+      "FlatRuntime: immutable asset byte_count is invalid for '" + asset.path + "'");
+  if (!valid_sha256(asset.sha256))
+    throw std::runtime_error(
+      "FlatRuntime: immutable asset SHA-256 must be 64 lowercase hex digits");
+  const auto path = resolve_asset_path(asset.path);
+  std::error_code ec;
+  const auto actual_size = std::filesystem::file_size(path, ec);
+  if (ec)
+    throw std::runtime_error(
+      "FlatRuntime: immutable asset is missing or unreadable: '" + asset.path + "'");
+  if (actual_size != asset.byte_count)
+    throw std::runtime_error(
+      "FlatRuntime: immutable asset byte_count mismatch for '" + asset.path + "'");
+
+  std::vector<uint8_t> bytes(static_cast<std::size_t>(asset.byte_count));
+  std::ifstream input(path, std::ios::binary);
+  if (!input.read(
+        reinterpret_cast<char *>(bytes.data()),
+        static_cast<std::streamsize>(bytes.size())))
+    throw std::runtime_error(
+      "FlatRuntime: immutable asset read failed for '" + asset.path + "'");
+  if (sha256_hex(bytes) != asset.sha256)
+    throw std::runtime_error(
+      "FlatRuntime: immutable asset SHA-256 mismatch for '" + asset.path + "'");
+  return bytes;
+}
+
+void bind_immutable_assets(
+  const tropical_plan5::ParsedPlan5 & parsed, KernelState & state)
+{
+  std::unordered_set<uint32_t> bound_slots;
+  for (const auto & asset : parsed.immutable_assets)
+  {
+    if (asset.sample_rate != parsed.sample_rate)
+      throw std::runtime_error(
+        "FlatRuntime: immutable asset sample_rate mismatch for '" + asset.path + "'");
+    if (asset.arrays.empty())
+      throw std::runtime_error(
+        "FlatRuntime: immutable asset has no array_slots: '" + asset.path + "'");
+    const auto bytes = read_asset(asset);
+    if (state.immutable_asset_bytes.size()
+        > std::numeric_limits<std::size_t>::max()
+            - (kImmutableAssetAlignment - 1))
+      throw std::runtime_error("FlatRuntime: immutable asset alignment overflow");
+    const std::size_t packed_base = align_asset(state.immutable_asset_bytes.size());
+    if (packed_base > std::numeric_limits<std::size_t>::max() - bytes.size())
+      throw std::runtime_error("FlatRuntime: immutable asset pack size overflow");
+    state.immutable_asset_bytes.resize(packed_base + bytes.size(), 0);
+    std::copy(bytes.begin(), bytes.end(),
+              state.immutable_asset_bytes.begin() + packed_base);
+
+    for (const auto & binding : asset.arrays)
+    {
+      if (binding.slot >= state.array_ptrs.size())
+        throw std::runtime_error(
+          "FlatRuntime: immutable asset array slot is out of range");
+      if (!bound_slots.insert(binding.slot).second)
+        throw std::runtime_error(
+          "FlatRuntime: immutable asset array slot is bound more than once");
+      if (std::find(parsed.coeff_array_slots.begin(),
+                    parsed.coeff_array_slots.end(), binding.slot)
+          != parsed.coeff_array_slots.end())
+        throw std::runtime_error(
+          "FlatRuntime: immutable asset slot cannot be a coefficient column");
+      if (binding.scalar_format != "float32")
+        throw std::runtime_error(
+          "FlatRuntime: immutable asset scalar_format must be 'float32'");
+      if (binding.element_count == 0
+          || binding.element_count != state.array_sizes[binding.slot])
+        throw std::runtime_error(
+          "FlatRuntime: immutable asset element_count does not match array slot size");
+      if (binding.byte_offset % sizeof(float) != 0
+          || binding.byte_offset > asset.byte_count
+          || binding.element_count >
+               (asset.byte_count - binding.byte_offset) / sizeof(float))
+        throw std::runtime_error(
+          "FlatRuntime: immutable asset array byte range is invalid");
+
+      auto & converted = state.immutable_array_storage.emplace_back();
+      state.immutable_array_slots.push_back(binding.slot);
+      converted.resize(static_cast<std::size_t>(binding.element_count));
+      for (std::size_t i = 0; i < converted.size(); ++i)
+      {
+        const std::size_t offset =
+          static_cast<std::size_t>(binding.byte_offset) + i * sizeof(float);
+        const uint32_t bits =
+            static_cast<uint32_t>(bytes[offset])
+          | (static_cast<uint32_t>(bytes[offset + 1]) << 8)
+          | (static_cast<uint32_t>(bytes[offset + 2]) << 16)
+          | (static_cast<uint32_t>(bytes[offset + 3]) << 24);
+        const float value = std::bit_cast<float>(bits);
+        if (!std::isfinite(value))
+          throw std::runtime_error(
+            "FlatRuntime: immutable asset array contains a non-finite value");
+        converted[i] = std::bit_cast<int64_t>(static_cast<double>(value));
+      }
+      state.array_ptrs[binding.slot] = converted.data();
+    }
+  }
+}
+} // namespace
 
 FlatRuntime::FlatRuntime(unsigned int buffer_length)
   : buffer_length_(buffer_length),
@@ -269,6 +449,8 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
     new_state.array_sizes[i] = new_state.array_storage[i].size();
   }
 
+  bind_immutable_assets(parsed, new_state);
+
   // BANKS-AS-DATA: generation-buffer the coefficient columns the plan
   // advertises (see the KernelState comment for the protocol). Three
   // generations per column, sized like the slot's base storage; the
@@ -410,10 +592,10 @@ bool FlatRuntime::load_ir_staged(const std::string & ir_text,
   const json manifest = json::parse(manifest_json);
   const std::string schema = manifest.value("schema", std::string{});
 
-  if (schema != "tropical_plan_5")
+  if (schema != "tropical_plan_5" && schema != "tropical_plan_6")
     throw std::runtime_error(
       "FlatRuntime: load_ir unsupported manifest schema '" + schema +
-      "'; expected 'tropical_plan_5'");
+      "'; expected 'tropical_plan_5' or 'tropical_plan_6'");
   tropical_plan5::ParsedPlan5 parsed = tropical_plan5::parse_plan5(manifest);
 
   KernelState new_state = build_kernel_state(parsed);
@@ -472,7 +654,10 @@ bool FlatRuntime::load_ir_staged(const std::string & ir_text,
     new_state.metal = tropical_metal::create(
       msl_source, metal_render_tile_frames_,
       static_cast<uint32_t>(new_state.slots.size()),
-      static_cast<uint32_t>(column_floats), err);
+      static_cast<uint32_t>(column_floats),
+      new_state.immutable_asset_bytes.empty()
+        ? nullptr : new_state.immutable_asset_bytes.data(),
+      new_state.immutable_asset_bytes.size(), err);
     if (!new_state.metal)
       throw std::runtime_error("FlatRuntime: " + err);
 #else

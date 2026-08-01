@@ -176,6 +176,9 @@ structure St where
       `coeff_array_slots`, the SAME order the runtime packs the upload
       staging. Empty for ordinary plans (the byte-frozen 3-binding ABI). -/
   coeffOffsets : Std.HashMap Nat Nat := {}
+  /-- Plan-6 immutable array slot → float-element offset into the one packed
+      read-only asset buffer at `buffer(4)`. -/
+  assetOffsets : Std.HashMap Nat Nat := {}
   /-- The stack of open reduction regions, outermost first (`ReduceBegin`
       pushes, `ReduceEnd` pops). Nested banks: `loopIdx id` resolves by
       searching this stack for its binder id; accumulator writes search it
@@ -491,14 +494,18 @@ private def resolveF32 (o : NOperand) : M String := do
     local for in-kernel arrays, the packed device buffer at a
     compile-time offset for hoisted coefficient columns. -/
 private def arrayElem (slot : Nat) (idx : String) : M String := do
-  match (← get).coeffOffsets.get? slot with
-  | some off => pure s!"coeff_columns[{off} + {idx}]"
-  | none => pure s!"arr{slot}[{idx}]"
+  match (← get).assetOffsets.get? slot with
+  | some off => pure s!"immutable_asset[{off} + {idx}]"
+  | none => match (← get).coeffOffsets.get? slot with
+    | some off => pure s!"coeff_columns[{off} + {idx}]"
+    | none => pure s!"arr{slot}[{idx}]"
 
 /-- Hoisted columns are GPU-read-only (`constant` address space; the
     stage-0 kernel fills them host-side). A plan that still writes one
     in-kernel is a split bug — fail loudly, before the load. -/
 private def guardColumnWrite (slot : Nat) (what : String) : M Unit := do
+  if (← get).assetOffsets.contains slot then
+    fail s!"EmitMsl: {what} writes immutable asset array slot {slot}"
   if (← get).coeffOffsets.contains slot then
     fail s!"EmitMsl: {what} writes hoisted coefficient column {slot} (columns are filled host-side by the stage-0 kernel and read-only on the GPU)"
 
@@ -719,6 +726,43 @@ private def headerColumns : String :=
   "    if (s >= k.buffer_length) { return; }\n" ++
   "    const long current_idx = long(k.start_sample_index) + long(s);\n"
 
+private def headerAssets : String :=
+  "#include <metal_stdlib>\n" ++
+  "using namespace metal;\n\n" ++
+  "struct TropicalKernelConsts {\n" ++
+  "    ulong start_sample_index;\n" ++
+  "    float sample_rate;\n" ++
+  "    uint  buffer_length;\n" ++
+  "};\n\n" ++
+  "kernel void tropical_kernel(\n" ++
+  "    device float*                  output_buffer  [[buffer(0)]],\n" ++
+  "    constant float*                slots          [[buffer(1)]],\n" ++
+  "    constant TropicalKernelConsts& k              [[buffer(2)]],\n" ++
+  "    const device float*            immutable_asset [[buffer(4)]],\n" ++
+  "    uint s [[thread_position_in_grid]])\n" ++
+  "{\n" ++
+  "    if (s >= k.buffer_length) { return; }\n" ++
+  "    const long current_idx = long(k.start_sample_index) + long(s);\n"
+
+private def headerColumnsAssets : String :=
+  "#include <metal_stdlib>\n" ++
+  "using namespace metal;\n\n" ++
+  "struct TropicalKernelConsts {\n" ++
+  "    ulong start_sample_index;\n" ++
+  "    float sample_rate;\n" ++
+  "    uint  buffer_length;\n" ++
+  "};\n\n" ++
+  "kernel void tropical_kernel(\n" ++
+  "    device float*                  output_buffer   [[buffer(0)]],\n" ++
+  "    constant float*                slots           [[buffer(1)]],\n" ++
+  "    constant TropicalKernelConsts& k               [[buffer(2)]],\n" ++
+  "    constant float*                coeff_columns   [[buffer(3)]],\n" ++
+  "    const device float*            immutable_asset [[buffer(4)]],\n" ++
+  "    uint s [[thread_position_in_grid]])\n" ++
+  "{\n" ++
+  "    if (s >= k.buffer_length) { return; }\n" ++
+  "    const long current_idx = long(k.start_sample_index) + long(s);\n"
+
 /-- Emit the full MSL source for a FlatPlan's fused kernel. One thread
     per sample; the host dispatches `buffer_length` threads.
 
@@ -745,18 +789,41 @@ def emitKernel (plan : FlatPlan) : Except String String := do
       | throw s!"EmitMsl: coeff_array_slots entry {s} out of range (plan has {sizes.size} array slots)"
     coeffOffsets := coeffOffsets.insert s colOff
     colOff := colOff + max sz 1
+  -- Runtime packing rule: assets are concatenated in plan order at 64-byte
+  -- aligned bases. Each binding is float32 and indexes directly into
+  -- buffer(4), so the byte offset becomes a compile-time float offset.
+  let mut assetOffsets : Std.HashMap Nat Nat := {}
+  let mut packedBytes := 0
+  for asset in plan.immutableAssets do
+    let base := ((packedBytes + 63) / 64) * 64
+    for binding in asset.arrays do
+      let some sz := sizes[binding.slot]?
+        | throw s!"EmitMsl: immutable asset slot {binding.slot} out of range (plan has {sizes.size} array slots)"
+      if binding.scalarFormat != "float32" then
+        throw s!"EmitMsl: immutable asset slot {binding.slot} scalar_format must be float32"
+      if binding.byteOffset % 4 != 0 then
+        throw s!"EmitMsl: immutable asset slot {binding.slot} byte_offset is not float32-aligned"
+      if binding.elementCount != sz ||
+          binding.byteOffset + binding.elementCount * 4 > asset.byteCount then
+        throw s!"EmitMsl: immutable asset slot {binding.slot} range does not match its array slot"
+      if assetOffsets.contains binding.slot then
+        throw s!"EmitMsl: immutable asset slot {binding.slot} is bound more than once"
+      if coeffOffsets.contains binding.slot then
+        throw s!"EmitMsl: immutable asset slot {binding.slot} cannot be a coefficient column"
+      assetOffsets := assetOffsets.insert binding.slot ((base + binding.byteOffset) / 4)
+    packedBytes := base + asset.byteCount
   let body : M Unit := do
     -- thread-private array scratch (per-sample on CPU too); hoisted
     -- coefficient columns are read from the buffer(3) binding instead.
     for i in [0:plan.arraySlotCount] do
-      unless coeffOffsets.contains i do
+      unless coeffOffsets.contains i || assetOffsets.contains i do
         let sz := sizes[i]?.getD 1
         line s!"float arr{i}[{max sz 1}];"
     for inst in plan.instanceFunctions do
       emitKernelBlock sizes inst
     emitSinks plan.sinks
   let init : St := { sources := plan.sources, sampleRate := plan.sampleRate.toFloat,
-                     coeffOffsets }
+                     coeffOffsets, assetOffsets }
   match body.run init with
   | .error e _ => .error e
   | .ok _ st =>
@@ -764,7 +831,10 @@ def emitKernel (plan : FlatPlan) : Except String String := do
     -- `current_idx` may be unused after full folding; cast to void to
     -- keep -Wunused clean would misfire on use, so leave it — Metal's
     -- compiler doesn't warn on unused const locals by default.
-    let hdr := if plan.coeffArraySlots.isEmpty then header else headerColumns
+    let hdr :=
+      if plan.immutableAssets.isEmpty then
+        if plan.coeffArraySlots.isEmpty then header else headerColumns
+      else if plan.coeffArraySlots.isEmpty then headerAssets else headerColumnsAssets
     .ok (hdr ++ bodyText ++ "\n}\n")
 
 end Tropical.Ir.EmitMsl

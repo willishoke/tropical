@@ -196,7 +196,7 @@ def main (args : List String) : IO UInt32 := do
     total := total + 1
     if !(← runProductionNonEmission arena resolved) then failed := failed + 1
     total := total + 1
-    if !(← runPlanSchemaRejection) then failed := failed + 1
+    if !(← runPlan6AssetAbi) then failed := failed + 1
     -- ── (h′) The slide + patcher variants: FlangeSin built the OTHER two ways —
     -- a downstream-insert run through the slide, and a patch graph lowered end to
     -- end — must also reach the frozen artifact byte-for-byte (the arrow EDSL's

@@ -14,6 +14,7 @@
 // Live epoch rendering uses render_tile() from a dedicated worker. The
 // primitive fails closed if invoked from a thread marked as an audio callback.
 
+#include <cstddef>
 #include <cstdint>
 #include <memory>
 #include <string>
@@ -30,13 +31,27 @@ using MetalKernelPtr = std::shared_ptr<MetalKernel>;
 /// snapshot; `column_count` sizes the packed coefficient-column buffer
 /// (`buffer(3)`, banks-as-data) — 0 for plans without hoisted columns
 /// (the kernel then has the plain 3-binding ABI and no column buffer is
-/// allocated or bound). Returns nullptr on failure with the compiler
-/// diagnostic in `err`.
+/// allocated or bound). `asset_bytes` is the already-validated packed Plan-6
+/// payload; nonempty data is copied once into read-only `buffer(4)` while the
+/// kernel is created and never copied per render. Returns nullptr on failure
+/// with the compiler diagnostic in `err`.
 MetalKernelPtr create(const std::string & msl_source,
                       uint32_t buffer_length,
                       uint32_t slot_count,
                       uint32_t column_count,
+                      const uint8_t * asset_bytes,
+                      std::size_t asset_byte_count,
                       std::string & err);
+
+inline MetalKernelPtr create(const std::string & msl_source,
+                             uint32_t buffer_length,
+                             uint32_t slot_count,
+                             uint32_t column_count,
+                             std::string & err)
+{
+  return create(
+    msl_source, buffer_length, slot_count, column_count, nullptr, 0, err);
+}
 
 /// Worker-only blocking primitive. `slots` and `columns` are immutable f32
 /// snapshots owned by one render epoch request. The destination is stable,

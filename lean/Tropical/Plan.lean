@@ -3,7 +3,7 @@ import Tropical.Parse.Nodes
 import Tropical.Ir.Core
 
 /-!
-# Plan layer — `tropical_plan_5` as a type
+# Plan layer — `tropical_plan_5` / `tropical_plan_6` as a type
 
 Port of `compiler/flat_plan.ts` plus the instruction/operand types from
 `compiler/ir/emit_resolved.ts`. Two layers, exactly as in TS:
@@ -24,8 +24,10 @@ Port of `compiler/flat_plan.ts` plus the instruction/operand types from
   omitted when empty. (Structural diff is key-order-insensitive, but
   key *presence* matters to it.)
 
-Plan 5 has no state-initialization or legacy temp-mix carriers. Runtime
-consumers reject older schemas instead of translating them.
+Plan 5 has no state-initialization or legacy temp-mix carriers. Plan 6 is the
+same schema plus immutable asset-array bindings; plans without bindings remain
+byte-identical Plan 5. Runtime consumers reject older schemas instead of
+translating them.
 
 Numbers that are data (const vals, slot defaults, sink
 gain) are `Lean.JsonNumber` so decimal text re-parses to the identical
@@ -504,6 +506,45 @@ def ParamDiscipline.toWire (d : ParamDiscipline) : Json :=
     else fields.push ("companions", toJson d.companions)
   Json.mkObj fields.toList
 
+/-- One immutable float32 slice bound to an existing plan array slot. The
+    runtime validates the byte range against its parent asset, converts the
+    values once to the JIT array representation, and the MSL emitter indexes
+    the same bytes directly from `buffer(4)`. -/
+structure ImmutableAssetArray where
+  slot : Nat
+  byteOffset : Nat
+  elementCount : Nat
+  scalarFormat : String := "float32"
+deriving Repr, Inhabited
+
+def ImmutableAssetArray.toWire (a : ImmutableAssetArray) : Json :=
+  Json.mkObj [
+    ("slot", toJson a.slot),
+    ("byte_offset", toJson a.byteOffset),
+    ("element_count", toJson a.elementCount),
+    ("scalar_format", Json.str a.scalarFormat)]
+
+/-- A package-relative immutable binary loaded and hashed before kernel
+    publication. The runtime resolves it beneath the engine process's launch
+    working directory (the package root used by the shipped hosts). Multiple
+    assets are packed in plan order at 64-byte-aligned bases for the single
+    Metal `buffer(4)` binding. -/
+structure ImmutableAsset where
+  path : String
+  byteCount : Nat
+  sha256 : String
+  sampleRate : Nat
+  arrays : Array ImmutableAssetArray
+deriving Repr, Inhabited
+
+def ImmutableAsset.toWire (a : ImmutableAsset) : Json :=
+  Json.mkObj [
+    ("path", Json.str a.path),
+    ("byte_count", toJson a.byteCount),
+    ("sha256", Json.str a.sha256),
+    ("sample_rate", toJson a.sampleRate),
+    ("array_slots", Json.arr (a.arrays.map (·.toWire)))]
+
 structure FlatPlan where
   sampleRate : JsonNumber := (44100 : Nat)
   compilationMode : CompilationMode := .fused
@@ -529,11 +570,16 @@ structure FlatPlan where
       kernel reads a whole, consistent generation of columns (no cross-column
       tear on a live knob move). Empty ⇒ no double-buffering (omitted from wire). -/
   coeffArraySlots : Array Nat := #[]
+  /-- Immutable asset bindings. Empty keeps the canonical Plan-5 wire byte for
+      byte; nonempty selects Plan 6 and emits `immutable_assets`. -/
+  immutableAssets : Array ImmutableAsset := #[]
 deriving Inhabited
 
 /-- Mirrors `toWirePlan`'s omission rules. -/
 def FlatPlan.toWire (p : FlatPlan) : Except String Json := do
-  let fields := #[("schema", Json.str "tropical_plan_5"),
+  let schema := if p.immutableAssets.isEmpty
+    then "tropical_plan_5" else "tropical_plan_6"
+  let fields := #[("schema", Json.str schema),
     ("config", Json.mkObj [("sampleRate", Json.num p.sampleRate)])]
   let fields := if p.compilationMode == .fused then fields
     else fields.push ("compilation_mode", Json.str p.compilationMode.wire)
@@ -550,6 +596,8 @@ def FlatPlan.toWire (p : FlatPlan) : Except String Json := do
     else fields.push ("param_disciplines", Json.arr (p.paramDisciplines.map (·.toWire)))
   let fields := if p.coeffArraySlots.isEmpty then fields
     else fields.push ("coeff_array_slots", toJson p.coeffArraySlots)
+  let fields := if p.immutableAssets.isEmpty then fields
+    else fields.push ("immutable_assets", Json.arr (p.immutableAssets.map (·.toWire)))
   let fields := if p.sinks.isEmpty then fields
     else fields.push ("sinks", Json.arr (p.sinks.map (·.toWire)))
   let fields := if isDefaultSources p.sources then fields

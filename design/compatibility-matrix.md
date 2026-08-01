@@ -72,10 +72,10 @@ aliases listed above fail as unknown operations.
 
 - `current_module_process`: native schema/carrier rejection plus current ABI
   rendering.
-- `plan5-schema-rejection`: Lean decoder rejection of Plan 4,
-  unknown/missing schemas, and retired carriers.
+- `plan6-asset-abi`: Plan-5 wire stability; Plan-6 schema coherence and
+  immutable-asset decode; readonly JIT slots; packed Metal buffers 3/4.
 - `production-non-emission`: representative current front doors emit typed,
-  state-free Plan 5 only.
+  state-free Plan 5 when no immutable asset is present.
 - `mcp/errors.test.ts`: removed parameter methods, Program-2 root carriers,
   and wire aliases are refused at their public boundaries.
 - `param_dispatch_conformance.test.ts`: socket and Lean control-plane

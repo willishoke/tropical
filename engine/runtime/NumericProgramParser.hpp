@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * NumericProgramParser.hpp — Parse `tropical_plan_5` JSON metadata.
+ * NumericProgramParser.hpp — Parse `tropical_plan_5` / `_6` JSON metadata.
  *
  * Thin deserialiser. Since Phase 2 (Lean owns codegen) this is the
  * *manifest reader*: load_ir consumes the plan's metadata — temp pool size
@@ -16,9 +16,12 @@
 #include "jit/OrcJitEngine.hpp"
 
 #include <nlohmann/json.hpp>
+#include <algorithm>
+#include <filesystem>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 
 namespace tropical_plan5
@@ -182,7 +185,80 @@ struct ParsedPlan5
   // kernel reads a whole, consistent generation of columns across a live knob
   // move. An absent field is the canonical empty table.
   std::vector<uint32_t> coeff_array_slots;
+
+  struct ImmutableAssetArray
+  {
+    uint32_t    slot = 0;
+    uint64_t    byte_offset = 0;
+    uint64_t    element_count = 0;
+    std::string scalar_format;
+  };
+
+  struct ImmutableAsset
+  {
+    std::string path;
+    uint64_t byte_count = 0;
+    std::string sha256;
+    uint32_t sample_rate = 0;
+    std::vector<ImmutableAssetArray> arrays;
+  };
+  std::vector<ImmutableAsset> immutable_assets;
 };
+
+inline void validate_immutable_assets(const ParsedPlan5 & plan)
+{
+  std::unordered_set<uint32_t> bound_slots;
+  for (const auto & asset : plan.immutable_assets)
+  {
+    const std::filesystem::path path(asset.path);
+    if (asset.path.empty())
+      throw std::runtime_error(
+        "NumericProgramParser: immutable asset path is empty");
+    if (path.is_absolute())
+      throw std::runtime_error(
+        "NumericProgramParser: immutable asset path must be package-relative");
+    for (const auto & component : path)
+      if (component == "..")
+        throw std::runtime_error(
+          "NumericProgramParser: immutable asset path may not contain '..'");
+    if (asset.byte_count == 0)
+      throw std::runtime_error(
+        "NumericProgramParser: immutable asset byte_count must be nonzero");
+    if (asset.sample_rate != plan.sample_rate)
+      throw std::runtime_error(
+        "NumericProgramParser: immutable asset sample_rate mismatch");
+    if (asset.arrays.empty())
+      throw std::runtime_error(
+        "NumericProgramParser: immutable asset has no array_slots");
+    for (const auto & binding : asset.arrays)
+    {
+      if (binding.slot >= plan.program.array_slot_sizes.size())
+        throw std::runtime_error(
+          "NumericProgramParser: immutable asset array slot is out of range");
+      if (!bound_slots.insert(binding.slot).second)
+        throw std::runtime_error(
+          "NumericProgramParser: immutable asset array slot is bound more than once");
+      if (std::find(plan.coeff_array_slots.begin(),
+                    plan.coeff_array_slots.end(), binding.slot)
+          != plan.coeff_array_slots.end())
+        throw std::runtime_error(
+          "NumericProgramParser: immutable asset slot cannot be a coefficient column");
+      if (binding.scalar_format != "float32")
+        throw std::runtime_error(
+          "NumericProgramParser: immutable asset scalar_format must be 'float32'");
+      if (binding.element_count == 0
+          || binding.element_count != plan.program.array_slot_sizes[binding.slot])
+        throw std::runtime_error(
+          "NumericProgramParser: immutable asset element_count does not match array slot size");
+      if (binding.byte_offset % sizeof(float) != 0
+          || binding.byte_offset > asset.byte_count
+          || binding.element_count >
+               (asset.byte_count - binding.byte_offset) / sizeof(float))
+        throw std::runtime_error(
+          "NumericProgramParser: immutable asset array byte range is invalid");
+    }
+  }
+}
 
 // Parse the optional `compilation_mode` JSON string. Fails closed on
 // unknown values — mirrors parseCompilationMode in compiler/flat_plan.ts.
@@ -213,7 +289,7 @@ inline void reject_retired_fields(const nlohmann::json & plan)
     if (plan.contains(field))
       throw std::runtime_error(
         std::string{"NumericProgramParser: retired field '"} + field +
-        "' is not valid in tropical_plan_5");
+        "' is not valid in tropical_plan_5/6");
 }
 
 /** Parse a single `InstanceProgram` from JSON, recursing into nested
@@ -249,13 +325,18 @@ inline tropical_jit::InstanceProgram parse_instance_program(const nlohmann::json
   return inst;
 }
 
-/** Parse a tropical_plan_5 JSON object. The C++ side supports nested
+/** Parse a tropical_plan_5 or tropical_plan_6 JSON object. The C++ side supports nested
  *  `instance_functions` (the fractal architecture): each function may
  *  have `children: InstanceFunction[]` that emit recursively inside the
  *  parent's body. Canonical leaf kernels omit `children`. */
 inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
 {
   ParsedPlan5 result;
+  const std::string schema = plan.value("schema", std::string{});
+  if (schema != "tropical_plan_5" && schema != "tropical_plan_6")
+    throw std::runtime_error(
+      "NumericProgramParser: unsupported schema '" + schema
+      + "'; expected 'tropical_plan_5' or 'tropical_plan_6'");
   reject_retired_fields(plan);
 
   result.sample_rate = plan.value("config", nlohmann::json::object())
@@ -347,6 +428,43 @@ inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
   if (plan.contains("coeff_array_slots"))
     for (const auto & s : plan["coeff_array_slots"])
       result.coeff_array_slots.push_back(s.get<uint32_t>());
+
+  if (schema == "tropical_plan_5"
+      && plan.contains("immutable_assets")
+      && !plan["immutable_assets"].empty())
+    throw std::runtime_error(
+      "NumericProgramParser: tropical_plan_5 cannot carry immutable_assets");
+  if (schema == "tropical_plan_6"
+      && (!plan.contains("immutable_assets")
+          || !plan["immutable_assets"].is_array()
+          || plan["immutable_assets"].empty()))
+    throw std::runtime_error(
+      "NumericProgramParser: tropical_plan_6 requires nonempty immutable_assets");
+
+  if (plan.contains("immutable_assets"))
+    for (const auto & a : plan["immutable_assets"])
+    {
+      ParsedPlan5::ImmutableAsset asset;
+      asset.path = a.at("path").get<std::string>();
+      asset.byte_count = a.at("byte_count").get<uint64_t>();
+      asset.sha256 = a.at("sha256").get<std::string>();
+      asset.sample_rate = a.at("sample_rate").get<uint32_t>();
+      if (!a.contains("array_slots") || !a["array_slots"].is_array())
+        throw std::runtime_error(
+          "NumericProgramParser: immutable asset missing array_slots");
+      for (const auto & b : a["array_slots"])
+      {
+        ParsedPlan5::ImmutableAssetArray binding;
+        binding.slot = b.at("slot").get<uint32_t>();
+        binding.byte_offset = b.at("byte_offset").get<uint64_t>();
+        binding.element_count = b.at("element_count").get<uint64_t>();
+        binding.scalar_format = b.at("scalar_format").get<std::string>();
+        asset.arrays.push_back(std::move(binding));
+      }
+      result.immutable_assets.push_back(std::move(asset));
+    }
+
+  validate_immutable_assets(result);
 
   return result;
 }

@@ -399,34 +399,108 @@ def runProductionNonEmission (arena : Arena)
 
 end ProductionNonEmission
 
--- ── Serialized-plan schema boundary ────────────────────────────────────────
+-- ── Serialized-plan + immutable-asset ABI boundary ─────────────────────────
 
-/-- The Lean-owned serialized-plan entry point is deliberately Plan-5-only.
-    This is a separate boundary gate from production non-emission: even a
-    hand-authored document cannot revive an older schema or retired carrier. -/
-def runPlanSchemaRejection : IO Bool := do
+open Tropical.Plan
+
+private def immutableAbiPlan : Tropical.Plan.FlatPlan :=
+  let inst := InstanceFunction.mk "root" "root" #[] #[
+    instrIndex 0 #[.arrayReg 0, cI 0] .float,
+    instrIndex 1 #[.arrayReg 1, cI 0] .float,
+    instrScalar "Add" 2 #[rgF 0, rgF 1] .float,
+    instrWriteSlot 0 (rgF 2)] #[] 0 0 3 #[]
+  { sampleRate := jn 44100, compilationMode := .fused,
+    arraySlotNames := #["frozen-a", "frozen-b", "coeff"],
+    registerCount := 3, arraySlotCount := 3,
+    arraySlotSizes := #[4, 2, 1], instanceFunctions := #[inst],
+    sinks := #[{ inputs := #[0], gain := jn 1, target := 0 }],
+    sources := defaultSources, slotCount := 1, slotNames := #["out"],
+    slotDefaults := #[Lean.Json.num (jn 0)], coeffArraySlots := #[2],
+    immutableAssets := #[
+      { path := "assets/a.f32", byteCount := 16,
+        sha256 := "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        sampleRate := 44100,
+        arrays := #[{ slot := 0, byteOffset := 0, elementCount := 4 }] },
+      { path := "assets/b.f32", byteCount := 12,
+        sha256 := "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        sampleRate := 44100,
+        arrays := #[{ slot := 1, byteOffset := 4, elementCount := 2 }] }] }
+
+private def immutableWriterPlan : Tropical.Plan.FlatPlan :=
+  let inst := InstanceFunction.mk "root" "root" #[]
+    #[instrPack 0 #[cF 1, cF 2, cF 3, cF 4]] #[] 0 0 0 #[]
+  let plan := immutableAbiPlan
+  { plan with instanceFunctions := #[inst], registerCount := 0, sinks := #[] }
+
+/-- Plan 5 stays byte-stable and assets-free; Plan 6 is the narrow extension.
+    This also freezes the backend binding split: coefficient columns remain at
+    buffer(3), the one packed immutable table is buffer(4), its second asset is
+    64-byte aligned, and both emitters reject writes to asset-owned slots. -/
+def runPlan6AssetAbi : IO Bool := do
   let rejectsWith (j : Lean.Json) (needle : String) : Bool :=
     match Tropical.Plan.FlatPlan.ofWire j with
     | .ok _ => false
     | .error e => (e.splitOn needle).length > 1
+  let contains (text needle : String) := (text.splitOn needle).length > 1
   let plan4 := Lean.Json.mkObj [("schema", .str "tropical_plan_4")]
   let unknown := Lean.Json.mkObj [("schema", .str "tropical_plan_99")]
   let missing := Lean.Json.mkObj []
   let retired := Lean.Json.mkObj [
     ("schema", .str "tropical_plan_5"),
     ("state_init", .arr #[])]
+  let asset := Lean.Json.mkObj [
+    ("path", .str "assets/table.f32"),
+    ("byte_count", Lean.toJson 16),
+    ("sha256", .str "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"),
+    ("sample_rate", Lean.toJson 44100),
+    ("array_slots", .arr #[Lean.Json.mkObj [
+      ("slot", Lean.toJson 0), ("byte_offset", Lean.toJson 0),
+      ("element_count", Lean.toJson 4), ("scalar_format", .str "float32")]])]
+  let plan6 := Lean.Json.mkObj [
+    ("schema", .str "tropical_plan_6"),
+    ("immutable_assets", .arr #[asset])]
+  let plan5Assets := Lean.Json.mkObj [
+    ("schema", .str "tropical_plan_5"),
+    ("immutable_assets", .arr #[asset])]
+  let plan6Missing := Lean.Json.mkObj [("schema", .str "tropical_plan_6")]
+  let decode6 := match Tropical.Plan.FlatPlan.ofWire plan6 with
+    | .ok p => p.immutableAssets.size == 1 &&
+        (p.toWire.toOption.map (·.compress.contains "tropical_plan_6")).getD false
+    | .error _ => false
+  let plan5Wire := match Tropical.Plan.FlatPlan.toWire opCoveragePlan with
+    | .ok j => contains j.compress "\"schema\":\"tropical_plan_5\"" &&
+        !contains j.compress "immutable_assets"
+    | .error _ => false
+  let backendAbi := match Tropical.Ir.EmitLlvm.emitKernel immutableAbiPlan,
+      Tropical.Ir.EmitMsl.emitKernel immutableAbiPlan with
+    | .ok ir, .ok msl =>
+      contains ir "getelementptr inbounds ptr, ptr %arrays, i64 0" &&
+      contains ir "getelementptr inbounds ptr, ptr %arrays, i64 1" &&
+      contains msl "coeff_columns   [[buffer(3)]]" &&
+      contains msl "immutable_asset [[buffer(4)]]" &&
+      contains msl "immutable_asset[0 +" &&
+      contains msl "immutable_asset[17 +"
+    | _, _ => false
+  let writeGuards := match Tropical.Ir.EmitLlvm.emitKernel immutableWriterPlan,
+      Tropical.Ir.EmitMsl.emitKernel immutableWriterPlan with
+    | .error a, .error b => contains a "writes immutable asset array slot 0" &&
+        contains b "writes immutable asset array slot 0"
+    | _, _ => false
   if rejectsWith plan4
-        "unsupported schema 'tropical_plan_4'; expected 'tropical_plan_5'"
+        "unsupported schema 'tropical_plan_4'; expected 'tropical_plan_5' or 'tropical_plan_6'"
       && rejectsWith unknown
-        "unsupported schema 'tropical_plan_99'; expected 'tropical_plan_5'"
+        "unsupported schema 'tropical_plan_99'; expected 'tropical_plan_5' or 'tropical_plan_6'"
       && rejectsWith missing "missing string field 'schema'"
       && rejectsWith retired
-        "retired field 'state_init' is not valid in tropical_plan_5" then
-    passGate "plan5-schema-rejection"
-      "PlanDecode rejects plan_4, unknown/missing schemas, and retired carriers"
+        "retired field 'state_init' is not valid in tropical_plan_5/6"
+      && rejectsWith plan5Assets "tropical_plan_5 cannot carry immutable_assets"
+      && rejectsWith plan6Missing "tropical_plan_6 requires nonempty immutable_assets"
+      && decode6 && plan5Wire && backendAbi && writeGuards then
+    passGate "plan6-asset-abi"
+      "Plan-5 wire unchanged; Plan-6 decode + readonly JIT arrays + packed Metal buffers(3/4)"
   else
-    failGate "plan5-schema-rejection"
-      "PlanDecode accepted an unsupported schema/carrier or returned the wrong boundary error"
+    failGate "plan6-asset-abi"
+      "schema coherence, Plan-5 wire stability, backend offsets, or readonly guards failed"
 
 def sortedNames (dir : String) (suffix : String) : IO (Array String) := do
   let entries ← (System.FilePath.mk dir).readDir

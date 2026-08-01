@@ -21,6 +21,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <functional>
+#include <filesystem>
+#include <fstream>
 #include <limits>
 #include <string>
 #include <thread>
@@ -96,6 +98,57 @@ static std::string wrap_loop(const std::string& body)
     "lb:\n" + body +
     "  %sn = add i64 %s, 1\n  br label %lc\n"
     "le:\n  ret void\n}\n";
+}
+
+struct TestAssetFile
+{
+  TestAssetFile(std::string name, const std::vector<uint8_t>& bytes)
+    : path(std::move(name))
+  {
+    std::filesystem::remove(path);
+    std::ofstream out(path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(bytes.data()),
+              static_cast<std::streamsize>(bytes.size()));
+    if (!out) throw std::runtime_error("failed to write test asset");
+  }
+  ~TestAssetFile() { std::filesystem::remove(path); }
+  std::filesystem::path path;
+};
+
+static std::string plan6_manifest(
+  const std::string& path,
+  const std::string& sha =
+    "8edfe9d801000ee043eee7a06dcfe1f77a1ec553a4fa4f7990ad5770981ff890",
+  uint64_t byte_count = 16,
+  uint32_t sample_rate = 44100,
+  uint64_t byte_offset = 0,
+  uint64_t element_count = 4,
+  const std::string& scalar_format = "float32")
+{
+  return std::string(R"({"schema":"tropical_plan_6","config":{"sampleRate":44100},
+    "register_count":0,"array_slot_count":1,"array_slot_sizes":[4],
+    "array_slot_names":["frozen"],"instance_functions":[],"sinks":[],
+    "slot_count":0,"immutable_assets":[{"path":")") + path
+    + R"(","byte_count":)" + std::to_string(byte_count)
+    + R"(,"sha256":")" + sha
+    + R"(","sample_rate":)" + std::to_string(sample_rate)
+    + R"(,"array_slots":[{"slot":0,"byte_offset":)"
+    + std::to_string(byte_offset)
+    + R"(,"element_count":)" + std::to_string(element_count)
+    + R"(,"scalar_format":")" + scalar_format + R"("}]}]})";
+}
+
+static std::string immutable_index_ir()
+{
+  return wrap_loop(
+    "  %a0p = getelementptr inbounds ptr, ptr %arrays, i64 0\n"
+    "  %a0 = load ptr, ptr %a0p, align 8\n"
+    "  %idx = urem i64 %s, 4\n"
+    "  %ep = getelementptr inbounds i64, ptr %a0, i64 %idx\n"
+    "  %raw = load i64, ptr %ep, align 8\n"
+    "  %v = bitcast i64 %raw to double\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %v, ptr %op, align 8\n");
 }
 
 static bool wait_for_true(
@@ -195,6 +248,98 @@ static void test_plan5_only_manifest_boundary()
     rt, ir,
     R"({"schema":"tropical_plan_5","instance_functions":[{"instructions":[{"tag":"Add","dst":0,"dst_kind":"temp","args":[{"kind":"rate","scalar_type":"float"}],"result_type":"float"}]}]})",
     "unknown operand kind 'rate'"));
+  ASSERT(load_fails_with(
+    rt, ir, R"({"schema":"tropical_plan_6"})",
+    "tropical_plan_6 requires nonempty immutable_assets"));
+  ASSERT(load_fails_with(
+    rt, ir,
+    R"({"schema":"tropical_plan_5","immutable_assets":[{}]})",
+    "tropical_plan_5 cannot carry immutable_assets"));
+
+  tropical_runtime_free(rt);
+}
+
+static void test_plan6_immutable_asset_jit()
+{
+  const std::vector<uint8_t> bytes = {
+    0x00, 0x00, 0x80, 0x3e, // 0.25f
+    0x00, 0x00, 0xc0, 0xbf, // -1.5f
+    0x00, 0x00, 0x30, 0x40, // 2.75f
+    0x00, 0x00, 0x80, 0x40, // 4.0f
+  };
+  TestAssetFile asset("tropical-plan6-jit-test.f32", bytes);
+  const std::string ir = immutable_index_ir();
+  const std::string manifest = plan6_manifest(asset.path.string());
+  tropical_runtime_t rt = tropical_runtime_new(16);
+  ASSERT(rt != nullptr);
+  ASSERT_OK(tropical_runtime_load_ir(
+    rt, ir.c_str(), ir.size(), manifest.c_str(), manifest.size()));
+
+  // Removing the source after load proves process() performs no path lookup,
+  // I/O, hash, conversion, or allocation and that state ownership retains the
+  // converted immutable arrays.
+  std::filesystem::remove(asset.path);
+  tropical_runtime_process(rt);
+  const double expected[] = {0.25, -1.5, 2.75, 4.0};
+  const double* out = tropical_runtime_output_buffer(rt);
+  for (unsigned int i = 0; i < 16; ++i)
+    ASSERT_NEAR(out[i], expected[i % 4], 0.0);
+
+  // A normal Plan-5 hot-swap retires the owning state without carrying its
+  // immutable pointers into the replacement.
+  const std::string ramp = wrap_loop(RAMP_BODY);
+  ASSERT_OK(tropical_runtime_load_ir(
+    rt, ramp.c_str(), ramp.size(), RAMP_MANIFEST, std::strlen(RAMP_MANIFEST)));
+  tropical_runtime_process(rt);
+  out = tropical_runtime_output_buffer(rt);
+  for (unsigned int i = 0; i < 16; ++i)
+    ASSERT_NEAR(out[i], static_cast<double>(16 + i), 0.0);
+  tropical_runtime_free(rt);
+}
+
+static void test_plan6_immutable_asset_refusals()
+{
+  const std::vector<uint8_t> bytes = {
+    0x00, 0x00, 0x80, 0x3e, 0x00, 0x00, 0xc0, 0xbf,
+    0x00, 0x00, 0x30, 0x40, 0x00, 0x00, 0x80, 0x40,
+  };
+  TestAssetFile asset("tropical-plan6-refusal-test.f32", bytes);
+  const std::string ir = immutable_index_ir();
+  tropical_runtime_t rt = tropical_runtime_new(4);
+  ASSERT(rt != nullptr);
+  auto fails = [&](const std::string& manifest, const char* expected) {
+    return load_fails_with(rt, ir, manifest.c_str(), expected);
+  };
+
+  ASSERT(fails(plan6_manifest("/tmp/absolute.f32"), "must be package-relative"));
+  ASSERT(fails(plan6_manifest("../escape.f32"), "may not contain '..'"));
+  ASSERT(fails(plan6_manifest("missing-plan6-asset.f32"), "missing or unreadable"));
+  ASSERT(fails(plan6_manifest(asset.path.string(), std::string(64, '0')),
+               "SHA-256 mismatch"));
+  ASSERT(fails(plan6_manifest(asset.path.string(),
+               "8edfe9d801000ee043eee7a06dcfe1f77a1ec553a4fa4f7990ad5770981ff890",
+               20), "byte_count mismatch"));
+  ASSERT(fails(plan6_manifest(asset.path.string(),
+               "8edfe9d801000ee043eee7a06dcfe1f77a1ec553a4fa4f7990ad5770981ff890",
+               16, 32000), "sample_rate mismatch"));
+  ASSERT(fails(plan6_manifest(asset.path.string(),
+               "8edfe9d801000ee043eee7a06dcfe1f77a1ec553a4fa4f7990ad5770981ff890",
+               16, 44100, 4, 4), "byte range is invalid"));
+  ASSERT(fails(plan6_manifest(asset.path.string(),
+               "8edfe9d801000ee043eee7a06dcfe1f77a1ec553a4fa4f7990ad5770981ff890",
+               16, 44100, 0, 3), "element_count does not match"));
+  ASSERT(fails(plan6_manifest(asset.path.string(),
+               "8edfe9d801000ee043eee7a06dcfe1f77a1ec553a4fa4f7990ad5770981ff890",
+               16, 44100, 0, 4, "float64"), "scalar_format must be 'float32'"));
+
+  TestAssetFile nonfinite(
+    "tropical-plan6-nonfinite-test.f32",
+    {0x00, 0x00, 0xc0, 0x7f, 0x00, 0x00, 0x00, 0x00,
+     0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00});
+  ASSERT(fails(plan6_manifest(
+    nonfinite.path.string(),
+    "2ffb157a90d8b58f6114acbdf9474af21dee3cfabfe507dc0f3c29b02170423f",
+    16, 44100, 0, 4), "contains a non-finite value"));
 
   tropical_runtime_free(rt);
 }
@@ -1056,7 +1201,9 @@ int main()
   printf("test_module_process (load_ir engine)\n");
 
   run_test("constant kernel via load_ir",   test_ir_constant);
-  run_test("plan-5-only manifest boundary", test_plan5_only_manifest_boundary);
+  run_test("plan-5/6 manifest boundary", test_plan5_only_manifest_boundary);
+  run_test("Plan-6 immutable asset JIT/lifetime", test_plan6_immutable_asset_jit);
+  run_test("Plan-6 immutable asset refusals", test_plan6_immutable_asset_refusals);
   run_test("closed-form index ramp",        test_ir_index_ramp);
   run_test("clock request boundary handoff", test_clock_boundary_handoff);
   run_test("clock odd-sequence barrier", test_clock_request_barrier);

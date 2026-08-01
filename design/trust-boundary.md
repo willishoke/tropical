@@ -164,9 +164,9 @@ Lean core arithmetic, LLVM/lld, Metal, RtAudio, and Turnstile are distinct exter
 - Gates: `patch-goldens`, `wasm-vs-jit`, `metal-ctest`, `mcp-protocol`
 - Limitation: Pinning and tests constrain versions; they do not verify the implementations of external compilers, frameworks, drivers, or hardware.
 
-## SERIALIZED_PLAN_SCHEMA_IS_PLAN_5_ONLY
+## SERIALIZED_PLAN_SCHEMA_IS_PLAN_5_OR_6
 
-Serialized plan entry points accept tropical_plan_5 only and reject retired schema carriers instead of translating or ignoring them.
+Serialized plan entry points accept canonical tropical_plan_5 and its narrow immutable-asset tropical_plan_6 extension, and reject retired schema carriers instead of translating or ignoring them.
 
 - Status: evidence-backed
 - Priority: medium
@@ -174,8 +174,8 @@ Serialized plan entry points accept tropical_plan_5 only and reject retired sche
 - Evidence: inspection, executable gate
 - Formal symbol: none
 - Implementation: `engine/runtime/FlatRuntime.cpp`, `engine/runtime/NumericProgramParser.hpp`, `lean/Tropical/PlanDecode.lean`
-- Gates: `production-non-emission`, `plan5-schema-rejection`, `current_module_process`, `manual:serialized-plan boundary review`
-- Limitation: Canonical plan 5 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, the tick/rate source pair, empty child/instruction arrays, and zero loop ids.
+- Gates: `production-non-emission`, `plan6-asset-abi`, `current_module_process`, `manual:serialized-plan boundary review`
+- Limitation: Canonical Plan 5 keeps its existing omissions; Plan 6 only adds validated package-relative immutable float32 assets and does not provide a general compatibility envelope.
 
 ## FROZEN_AUDIO_GOLDENS_ANCHOR_CORRECTNESS
 

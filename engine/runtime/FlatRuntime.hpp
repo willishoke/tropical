@@ -204,6 +204,15 @@ struct KernelState
   std::vector<uint64_t> array_sizes;
   std::vector<uint64_t> param_ptrs;
 
+  // Plan-6 immutable asset ownership. Each advertised float32 slice is
+  // converted once into the JIT's exact f64-bit array representation and its
+  // array slot points here. The original asset bytes are packed at 64-byte
+  // aligned bases for Metal's one-time buffer(4) upload. Both live with the
+  // KernelState until hot-swap ownership proves no render can reference it.
+  std::vector<std::vector<int64_t>> immutable_array_storage;
+  std::vector<uint32_t> immutable_array_slots;
+  std::vector<uint8_t> immutable_asset_bytes;
+
   // Array slot names from the manifest (diagnostic metadata).
   std::vector<std::string> array_names;
 
@@ -806,6 +815,12 @@ public:
     }
     std::vector<int64_t *>            array_ptrs(arrays.size());
     for (size_t a = 0; a < arrays.size(); ++a) array_ptrs[a] = arrays[a].data();
+    // Plan-6 arrays are owned separately from the mutable per-render scratch.
+    // build_mutex_ holds the active KernelState stable for this whole window,
+    // so random-access JIT renders can safely share their immutable backing.
+    for (std::size_t j = 0; j < active.immutable_array_slots.size(); ++j)
+      array_ptrs[active.immutable_array_slots[j]] =
+        active.immutable_array_storage[j].data();
 
     double scratch_out = 0.0;
     for (uint32_t i = 0; i < count; ++i)

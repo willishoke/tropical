@@ -3,13 +3,14 @@ import Tropical.Plan
 import Tropical.Parse.OrderedJson
 
 /-!
-# PlanDecode — `tropical_plan_5 JSON → FlatPlan` (the inverse of `toWire`)
+# PlanDecode — Plan 5/6 JSON → `FlatPlan` (the inverse of `toWire`)
 
 Phase 2 deletes the C++ codegen, so the plan-text → kernel capability moves
 to Lean: `render-bytes <plan.json>` (and any consumer holding a serialized
 plan rather than an in-memory `FlatPlan`) parses here, then emits IR via
 `EmitLlvm` and loads it with `load_ir`. Mirrors `Plan.lean`'s `*.toWire`
-field-for-field. Plan 5 is the only accepted runtime schema.
+field-for-field. Plan 6 differs only by carrying nonempty immutable asset
+bindings; Plan 5 remains the canonical assets-free schema.
 
 Decodes over `JsonV` (the array-backed twin with the `sizeOf` lemmas), so
 the instance-tree recursion is total by descent on the document — the
@@ -48,7 +49,7 @@ private def rejectRetiredFields (j : JsonV) : Except String Unit := do
       "state_reg_offset", "output_targets", "outputs", "instructions",
       "scheduler_function"] do
     if (j.getField? field).isSome then
-      throw s!"PlanDecode: retired field '{field}' is not valid in tropical_plan_5"
+      throw s!"PlanDecode: retired field '{field}' is not valid in tropical_plan_5/6"
 
 private def optNum (j : JsonV) (k : String) (dflt : JsonNumber) : JsonNumber :=
   match j.getField? k with
@@ -133,6 +134,21 @@ private def sourceOfWire (j : JsonV) : Except String SourceKind := do
   | .str s => .error s!"PlanDecode: bad source kind '{s}'"
   | _ => .error "PlanDecode: source kind must be a string"
 
+private def immutableArrayOfWire (j : JsonV) : Except String ImmutableAssetArray := do
+  pure {
+    slot := ← reqNat j "slot"
+    byteOffset := ← reqNat j "byte_offset"
+    elementCount := ← reqNat j "element_count"
+    scalarFormat := ← reqStr j "scalar_format" }
+
+private def immutableAssetOfWire (j : JsonV) : Except String ImmutableAsset := do
+  pure {
+    path := ← reqStr j "path"
+    byteCount := ← reqNat j "byte_count"
+    sha256 := ← reqStr j "sha256"
+    sampleRate := ← reqNat j "sample_rate"
+    arrays := ← (optArr j "array_slots").mapM immutableArrayOfWire }
+
 private def strArr (j : JsonV) (k : String) : Array String :=
   (optArr j k).map fun x => match x with | .str s => s | _ => ""
 
@@ -141,9 +157,15 @@ private def natArr (j : JsonV) (k : String) : Array Nat :=
 
 private def ofWireV (j : JsonV) : Except String FlatPlan := do
   let schema ← reqStr j "schema"
-  if schema != "tropical_plan_5" then
-    throw s!"PlanDecode: unsupported schema '{schema}'; expected 'tropical_plan_5'"
+  if schema != "tropical_plan_5" && schema != "tropical_plan_6" then
+    throw s!"PlanDecode: unsupported schema '{schema}'; expected 'tropical_plan_5' or 'tropical_plan_6'"
   rejectRetiredFields j
+  let immutableItems := optArr j "immutable_assets"
+  if schema == "tropical_plan_5" && !immutableItems.isEmpty then
+    throw "PlanDecode: tropical_plan_5 cannot carry immutable_assets"
+  if schema == "tropical_plan_6" && immutableItems.isEmpty then
+    throw "PlanDecode: tropical_plan_6 requires nonempty immutable_assets"
+  let immutableAssets ← immutableItems.mapM immutableAssetOfWire
   let sampleRate := match (j.getField? "config").bind (·.getField? "sampleRate") with
     | some (.num n) => n
     | _ => (44100 : JsonNumber)
@@ -168,9 +190,11 @@ private def ofWireV (j : JsonV) : Except String FlatPlan := do
     sinks, sources,
     slotCount,
     slotNames := strArr j "slot_names",
-    slotDefaults }
+    slotDefaults,
+    coeffArraySlots := natArr j "coeff_array_slots",
+    immutableAssets }
 
-/-- Parse a tropical_plan_5 JSON object into a `FlatPlan`. -/
+/-- Parse a tropical_plan_5 or tropical_plan_6 JSON object into a `FlatPlan`. -/
 def FlatPlan.ofWire (j : Json) : Except String FlatPlan := do
   match Tropical.Parse.JsonV.parse j.compress with
   | .error e => .error s!"PlanDecode: internal reparse failure: {e}"

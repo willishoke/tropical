@@ -1,4 +1,5 @@
 import Std.Data.HashMap
+import Std.Data.HashSet
 import Lean.Data.Json
 import Tropical.Plan
 import Tropical.Ir.EmitCommon
@@ -105,6 +106,9 @@ structure St where
       search it innermost-first, so an inner-region instruction touching an
       OUTER accumulator finds the outer alloca. -/
   reduces : Array ReduceCtx := #[]
+  /-- Plan-6 immutable array slots are host-bound before publication and may
+      only be read by the kernel. -/
+  immutableSlots : Std.HashSet Nat := {}
 
 abbrev M := EStateM String St
 
@@ -441,9 +445,14 @@ private def emitIndex (dst : Nat) (args : Array NOperand) : M Unit := do
   let sel ← fresh; line s!"{sel} = select i1 {inRange}, double {val}, double {zeroF}"
   storeTempTyped dst ⟨sel, .float⟩
 
+private def guardImmutableWrite (slot : Nat) (what : String) : M Unit := do
+  if (← get).immutableSlots.contains slot then
+    fail s!"EmitLlvm: {what} writes immutable asset array slot {slot}"
+
 /-- `SetElement` — bounds-checked in-place write to `arrays[arr][idx]`. -/
 private def emitSetElement (args : Array NOperand) : M Unit := do
   let arrSlot ← arrayRegSlot args[0]!
+  guardImmutableWrite arrSlot "SetElement"
   let size ← loadArraySize arrSlot
   let arrPtr ← loadArrayPtr arrSlot
   let idxV ← match args[1]? with | some o => resolveOperand o | none => fail "SetElement missing idx"
@@ -468,6 +477,7 @@ private def emitSetElement (args : Array NOperand) : M Unit := do
     scalar (broadcast). Bit-identical to the C++ SIMD path (elementwise,
     no fast-math). -/
 private def emitElementwise (instr : NInstr) (dstSlot : Nat) : M Unit := do
+  guardImmutableWrite dstSlot "elementwise op"
   let nargs := instr.args.size
   -- Pre-resolve: array operands → base ptr; scalar operands → TVal.
   let mut argPtrs : Array (Option String) := #[]
@@ -573,7 +583,9 @@ def emitInstr (instr : NInstr) : M Unit := do
     storeSlotF64 idx (← coerceF64 v)
   | "SmoothParam", _ =>
     fail "EmitLlvm: SmoothParam is dead on the session path (params are slots)"
-  | "Pack", .array dst => emitPack dst instr.args
+  | "Pack", .array dst => do
+    guardImmutableWrite dst "Pack"
+    emitPack dst instr.args
   | "Index", .temp dst => emitIndex dst instr.args
   | "SetElement", .array _ => emitSetElement instr.args
   | _, .temp slot =>
@@ -642,11 +654,15 @@ private def intrinsicDecls : String :=
 /-- Emit the full LLVM module text for a FlatPlan's fused kernel. The
     function is named `tropical_kernel`; `compile_ir_text` renames it. -/
 def emitKernel (plan : FlatPlan) : Except String String := do
+  let mut immutableSlots : Std.HashSet Nat := {}
+  for asset in plan.immutableAssets do
+    for binding in asset.arrays do
+      immutableSlots := immutableSlots.insert binding.slot
   let body : M Unit := do
     for inst in plan.instanceFunctions do
       emitKernelBlock inst
     emitSinks plan.sinks
-  let init : St := { sources := plan.sources }
+  let init : St := { sources := plan.sources, immutableSlots }
   match body.run init with
   | .error e _ => .error e
   | .ok _ st =>

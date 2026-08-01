@@ -21,6 +21,8 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <filesystem>
+#include <fstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -104,6 +106,42 @@ static const char* MANIFEST = R"({"schema":"tropical_plan_5",
   "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
   "sinks":[],"slot_count":2,"slot_defaults":[0.25, 0]})";
 
+static const char* JIT_IMMUTABLE_IR =
+  "define void @kernel(ptr %inputs, ptr %registers, ptr %arrays, "
+  "ptr %array_sizes, ptr %temps, double %sampleRate, i64 %start_sample_index, "
+  "ptr %param_ptrs, ptr %output_buffer, i64 %buffer_length, ptr %slots) {\n"
+  "entry:\n  br label %lc\n"
+  "lc:\n  %s = phi i64 [0, %entry], [%sn, %lb]\n"
+  "  %c = icmp ult i64 %s, %buffer_length\n"
+  "  br i1 %c, label %lb, label %le\n"
+  "lb:\n"
+  "  %a0p = getelementptr inbounds ptr, ptr %arrays, i64 0\n"
+  "  %a0 = load ptr, ptr %a0p, align 8\n"
+  "  %current = add i64 %start_sample_index, %s\n"
+  "  %idx = urem i64 %current, 4\n"
+  "  %ep = getelementptr inbounds i64, ptr %a0, i64 %idx\n"
+  "  %raw = load i64, ptr %ep, align 8\n"
+  "  %v = bitcast i64 %raw to double\n"
+  "  store double %v, ptr %slots, align 8\n"
+  "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+  "  store double %v, ptr %op, align 8\n"
+  "  %sn = add i64 %s, 1\n  br label %lc\n"
+  "le:\n  ret void\n}\n";
+
+static std::string plan6_manifest(const std::string& path)
+{
+  return std::string(R"({"schema":"tropical_plan_6",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":1,"array_slot_sizes":[4],
+    "array_slot_names":["frozen"],"instance_functions":[],"sinks":[],
+    "slot_count":1,"slot_defaults":[0],"immutable_assets":[{"path":")")
+    + path
+    + R"(","byte_count":16,
+      "sha256":"8edfe9d801000ee043eee7a06dcfe1f77a1ec553a4fa4f7990ad5770981ff890",
+      "sample_rate":44100,"array_slots":[{"slot":0,"byte_offset":0,
+        "element_count":4,"scalar_format":"float32"}]}]})";
+}
+
 // MSL ABI mirror of EmitMsl's header.
 static std::string msl_kernel(const std::string& body)
 {
@@ -124,6 +162,83 @@ static std::string msl_kernel(const std::string& body)
     "    if (s >= k.buffer_length) { return; }\n"
     "    const long current_idx = long(k.start_sample_index) + long(s);\n")
     + body + "\n}\n";
+}
+
+static std::string msl_immutable_kernel(const std::string& body)
+{
+  return std::string(
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct TropicalKernelConsts {\n"
+    "    ulong start_sample_index;\n"
+    "    float sample_rate;\n"
+    "    uint  buffer_length;\n"
+    "};\n"
+    "kernel void tropical_kernel(\n"
+    "    device float*                  output_buffer  [[buffer(0)]],\n"
+    "    constant float*                slots          [[buffer(1)]],\n"
+    "    constant TropicalKernelConsts& k              [[buffer(2)]],\n"
+    "    const device float*            immutable_asset [[buffer(4)]],\n"
+    "    uint s [[thread_position_in_grid]])\n"
+    "{\n"
+    "    if (s >= k.buffer_length) { return; }\n"
+    "    const long current_idx = long(k.start_sample_index) + long(s);\n")
+    + body + "\n}\n";
+}
+
+/** Plan-6's frozen table has one owner per backend: a host f64-bit view for
+ *  JIT/scope and one packed readonly float buffer(4) for Metal. Removing the
+ *  source after load proves neither render path performs per-tile file I/O. */
+static void test_metal_immutable_asset_parity()
+{
+  const std::filesystem::path path = "tropical-plan6-metal-test.f32";
+  std::filesystem::remove(path);
+  const std::array<unsigned char, 16> bytes = {
+    0x00, 0x00, 0x80, 0x3e, // 0.25f
+    0x00, 0x00, 0xc0, 0xbf, // -1.5f
+    0x00, 0x00, 0x30, 0x40, // 2.75f
+    0x00, 0x00, 0x80, 0x40, // 4.0f
+  };
+  {
+    std::ofstream out(path, std::ios::binary);
+    out.write(reinterpret_cast<const char*>(bytes.data()), bytes.size());
+    ASSERT(out.good());
+  }
+
+  tropical_runtime::FlatRuntime rt(16);
+  const std::string manifest = plan6_manifest(path.string());
+  const std::string msl = msl_immutable_kernel(
+    "    output_buffer[s] = immutable_asset[current_idx % 4L];");
+  bool loaded = false;
+  try
+  {
+    loaded = rt.load_ir_msl(JIT_IMMUTABLE_IR, msl, manifest);
+  }
+  catch (...)
+  {
+    std::filesystem::remove(path);
+    throw;
+  }
+  std::filesystem::remove(path);
+  ASSERT(loaded);
+
+  rt.process();
+  const double expected[] = {0.25, -1.5, 2.75, 4.0};
+  for (unsigned int i = 0; i < rt.outputBuffer.size(); ++i)
+    ASSERT_NEAR(rt.outputBuffer[i], expected[i % 4], 0.0);
+
+  uint32_t slot_zero = 0;
+  std::array<double, 4> jit{};
+  ASSERT(rt.render_window(0, jit.size(), &slot_zero, 1, jit.data()));
+  for (unsigned int i = 0; i < jit.size(); ++i)
+  {
+    ASSERT_NEAR(jit[i], expected[i], 0.0);
+    ASSERT_NEAR(jit[i], rt.outputBuffer[i], 0.0);
+  }
+  ASSERT(rt.metal_dispatch_failure_count() == 0);
+  ASSERT(rt.metal_render_starvation_count() == 0);
+  ASSERT(rt.metal_callback_thread_violation_count() == 0);
+  printf("PASS  Plan-6 immutable table parity across JIT + Metal\n");
 }
 
 /** 1. GPU ramp: output = current_idx, continuous across process() calls —
@@ -1001,6 +1116,7 @@ int main()
   test_metal_hotswap();
   test_metal_set_index();
   test_metal_columns_live();
+  test_metal_immutable_asset_parity();
   test_metal_effective_dispatch_epochs();
   test_metal_retarget_recomputes_companions();
   test_metal_dispatch_failure_fail_closed();

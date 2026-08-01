@@ -7,6 +7,8 @@
 //   buffer(3) constant float*                coeff_columns   (ONLY when the
 //             plan advertises hoisted coefficient columns — column_count > 0;
 //             ordinary kernels keep the exact 3-binding signature)
+//   buffer(4) const device float*            immutable_asset (ONLY for Plan-6;
+//             uploaded once when the kernel is created)
 //   thread_position_in_grid                  = sample index
 //
 // with TropicalKernelConsts = { ulong start_sample_index; float sample_rate;
@@ -74,9 +76,11 @@ struct MetalKernel
   // capacities; a hot-swap creates a fresh MetalKernel, so the size follows
   // the plan across swaps like every other buffer here.
   id<MTLBuffer>               columns = nil; // packed immutable epoch columns
+  id<MTLBuffer>               immutable_asset = nil; // one-time Plan-6 upload
   uint32_t capacity     = 0;
   uint32_t slot_count   = 0;
   uint32_t column_count = 0;
+  std::size_t immutable_asset_bytes = 0;
 
   // Deterministic no-DAC test seam, captured once at construction so the
   // realtime path never reads the environment. 0 disables it; N classifies
@@ -142,7 +146,8 @@ static bool render_tile_impl(MetalKernel & k,
   @autoreleasepool
   {
     if (!k.pso || !k.out || !k.slots
-        || (k.column_count > 0 && !k.columns))
+        || (k.column_count > 0 && !k.columns)
+        || (k.immutable_asset_bytes > 0 && !k.immutable_asset))
     {
       latch_dispatch_failure(k);
       return false;
@@ -200,6 +205,8 @@ static bool render_tile_impl(MetalKernel & k,
           column_destination, columns, count * sizeof(float));
       [encoder setBuffer:k.columns offset:0 atIndex:3];
     }
+    if (k.immutable_asset_bytes > 0)
+      [encoder setBuffer:k.immutable_asset offset:0 atIndex:4];
     const NSUInteger threads =
       std::min<NSUInteger>(k.pso.maxTotalThreadsPerThreadgroup, frames);
     [encoder dispatchThreads:MTLSizeMake(frames, 1, 1)
@@ -229,6 +236,8 @@ MetalKernelPtr create(const std::string & msl_source,
                       uint32_t buffer_length,
                       uint32_t slot_count,
                       uint32_t column_count,
+                      const uint8_t * asset_bytes,
+                      std::size_t asset_byte_count,
                       std::string & err)
 {
   @autoreleasepool
@@ -272,6 +281,7 @@ MetalKernelPtr create(const std::string & msl_source,
     k->capacity     = buffer_length;
     k->slot_count   = slot_count;
     k->column_count = column_count;
+    k->immutable_asset_bytes = asset_byte_count;
     k->out = [dev newBufferWithLength:(NSUInteger)buffer_length * sizeof(float)
                               options:MTLResourceStorageModeShared];
     k->slots = [dev newBufferWithLength:(NSUInteger)std::max<uint32_t>(slot_count, 1) * sizeof(float)
@@ -282,6 +292,22 @@ MetalKernelPtr create(const std::string & msl_source,
       k->columns = [dev newBufferWithLength:(NSUInteger)column_count * sizeof(float)
                                     options:MTLResourceStorageModeShared];
       if (!k->columns) { err = "MetalKernel: column buffer allocation failed"; return nullptr; }
+    }
+    if (asset_byte_count > 0)
+    {
+      if (!asset_bytes)
+      {
+        err = "MetalKernel: immutable asset bytes are null";
+        return nullptr;
+      }
+      k->immutable_asset = [dev newBufferWithLength:(NSUInteger)asset_byte_count
+                                            options:MTLResourceStorageModeShared];
+      if (!k->immutable_asset || !k->immutable_asset.contents)
+      {
+        err = "MetalKernel: immutable asset buffer allocation failed";
+        return nullptr;
+      }
+      std::memcpy(k->immutable_asset.contents, asset_bytes, asset_byte_count);
     }
 
     if (!configure_test_failure(*k, err))
