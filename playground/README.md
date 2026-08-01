@@ -28,8 +28,9 @@ matched positive/negative decay pair, making a finite attack followed by a
 decay without introducing state or an envelope primitive.
 
 Four sparse inharmonic metal hits land halfway between the chords. Each is a
-finite causal attack pair sent into a longer 16-mode room; the room supplies
-the dense ringing field without turning the exciter itself into a large bank.
+finite causal attack pair sent into the frozen grouped Clouds room. `POSITION`
+moves only that wet field between its future-aware pre-tail and forward decay;
+the direct impact always remains causal.
 
 ## Surface
 
@@ -40,13 +41,14 @@ the dense ringing field without turning the exciter itself into a large bank.
 - `STRINGS / RESONANT VEIL` is the filtered direct string field.
 - `ROOM / METAL RETURN` is the wet modal room before its return-level control.
 
-`presence`, `veil`, `edge`, `room`, and `length` shape the scene. `flow` is a
+`presence`, `veil`, `edge`, `room`, and `position` shape the scene. `flow` is a
 continuous local clock velocity, including zero and reverse. `level` is the
 final relative listening gain. Amplitude rows use a shared closed-form 20 ms
-glide. `veil`, `edge`, and `length` remain epoch-rate modal controls so their
-coefficient banks stay hoistable; continuous Metal handoffs dezipper the
-resulting output seam over one 128-sample demo quantum instead of stepping
-from the old waveform to the new one.
+glide. `POSITION` is a 20 ms equal-power glide from `-1` (pre-tail) through `0`
+(two-sided bloom) to `+1` (forward decay). `veil` and `edge` remain epoch-rate
+modal controls so their coefficient banks stay hoistable; continuous Metal
+handoffs dezipper the resulting output seam over one 128-sample demo quantum
+instead of stepping from the old waveform to the new one.
 
 ## Run
 
@@ -66,14 +68,13 @@ TROPICAL_DEMO_JIT=1 bun run start
 ```
 
 Each chord remains its own modal island until the signal boundary; this
-preserves all four strike anchors (a modal pole union has only one). Its
-pre-veil send therefore acts directly on the modal chord bank. String branches
-request 12 room modes and metal-hit branches request 16; reverb graphs that
-omit the structural `modes` field retain the engine's existing 32-mode default.
+preserves all four strike anchors (a modal pole union has only one). The string
+lane has no room send. Only the four fixed twelve-pole Metal sources enter the
+native-rate `clouds-current-radii-mono-v1` grouped-room profile.
 
-All filters and room branches read three shared control nodes
-(`veil`, `edge`, and `length`). A gesture is one parameter write and one Metal
-epoch, not a sequential fan-out across the chord islands. The renderer sends
+All filters read the shared `veil` and `edge` controls; all four grouped-room
+branches share the glided `position` control. A gesture is one parameter write,
+not a sequential fan-out across the chord islands. The renderer sends
 the first drag value immediately; while that request is in flight it retains
 the latest value and one direction-reversal point for that row. A fast
 out-and-back gesture therefore remains audible without allowing obsolete drag
@@ -82,5 +83,5 @@ positions to accumulate in an unbounded FIFO.
 The demo opts into `Bdev = Rgpu = 128`. Continuous epochs reserve two render
 quanta ahead (5.8 ms at 44.1 kHz), publish after their first exact tile, and
 fill the other three staging tiles asynchronously. Boot-muted no-op writes
-prime the three coefficient families before the scene is rebased to zero.
+prime the two coefficient families before the scene is rebased to zero.
 `TROPICAL_DEMO_QUANTUM` can override both quanta for qualification.

@@ -362,6 +362,12 @@ async function main() {
     )
     await gesture('edgeControl.value', Array.from({ length: 64 }, (_, i) => 0.1 + 0.85 * i / 63), 12)
     await gesture('spaceLevel.value', [0, 8, 18, 32, 48, 64, 36], 16)
+    await gesture(
+      'positionControl.value',
+      [1, 0.5, 0, -0.5, -1, -0.25, 0.5, 1],
+      16,
+      'reversal',
+    )
     await control.call('set_param', { name: 'master.velocity', value: 0 })
     await sleep(120)
     await control.call('set_param', { name: 'master.velocity', value: -1 })

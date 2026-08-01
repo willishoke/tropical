@@ -196,12 +196,11 @@
         in: {},
       },
       {
-        id: 'lengthControl',
-        // RT60 changes remain epoch-rate: making the pole coordinate itself a
-        // sample-rate glide defeats stage-0 coefficient hoisting. The Metal
-        // control sender still applies latest-value backpressure to this row.
-        kind: 'knob',
-        params: { value: 8 },
+        id: 'positionControl',
+        // POSITION is a sample-rate equal-power pan between the profile's
+        // analytic reverse and forward arms. It does not rebuild an epoch.
+        kind: 'glideknob',
+        params: { value: 1 },
         sel: {},
         in: {},
       },
@@ -221,7 +220,6 @@
       const number = chordIndex + 1
       const sourceId = `chord${number}`
       const veilId = `veil${number}`
-      const roomId = `room${number}`
       const strikeTime = chord.startStep * STEP_SECONDS + 0.06
 
       // A chord is one modal bank with five exact-ratio voices. Distinct
@@ -250,23 +248,8 @@
             resonance: ['edgeControl'],
           },
         },
-        {
-          id: roomId,
-          kind: 'reverb',
-          params: {
-            rt60: 8,
-            dir: 0,
-            sway: 0.12,
-            rate: 0.21,
-            modes: 12,
-          },
-          sel: {},
-          // A pre-veil send: the room acts directly on this modal chord bank.
-          in: { in: [sourceId], rt60: ['lengthControl'] },
-        },
       )
       veilIds.push(veilId)
-      roomIds.push(roomId)
     })
 
     // One hard wet hit halfway between each chord. The direct modal cloud is
@@ -290,16 +273,10 @@
         },
         {
           id: roomId,
-          kind: 'reverb',
-          params: {
-            rt60: 8,
-            dir: 0,
-            sway: 0.18,
-            rate: 0.31,
-            modes: 16,
-          },
+          kind: 'groupedroom',
+          params: { profile: 'clouds-current-radii-mono-v1' },
           sel: {},
-          in: { in: [hitId], rt60: ['lengthControl'] },
+          in: { in: [hitId], position: ['positionControl'] },
         },
       )
       hitIds.push(hitId)
@@ -427,15 +404,14 @@
       help: 'raise the long wet metal field against the strings',
     },
     {
-      slot: 'lengthControl.value',
-      label: 'length',
-      min: 1.2,
-      max: 14,
-      step: 0,
-      log: true,
-      value: 8,
-      unit: 's',
-      help: 'change how long the room remembers each sonority',
+      slot: 'positionControl.value',
+      label: 'position',
+      min: -1,
+      max: 1,
+      step: 0.05,
+      value: 1,
+      unit: '',
+      help: 'move the room from a future-aware pre-tail to its forward decay',
     },
     {
       slot: 'master.velocity',
@@ -466,7 +442,6 @@
   const PRIME_SLOTS = [
     'veilControl.value',
     'edgeControl.value',
-    'lengthControl.value',
   ]
 
   return {

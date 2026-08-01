@@ -11,35 +11,47 @@ test('scene is one acyclic-looking fixed graph with unique ids', () => {
   assert.ok(ids.includes(graph.out))
   assert.equal(graph.nodes.filter((node) => node.kind === 'string').length, 8)
   assert.equal(graph.nodes.filter((node) => node.kind === 'modalmix').length, 0)
-  assert.equal(graph.nodes.filter((node) => node.kind === 'reverb').length, 8)
+  assert.equal(graph.nodes.filter((node) => node.kind === 'reverb').length, 0)
+  assert.equal(graph.nodes.filter((node) => node.kind === 'groupedroom').length, 4)
   assert.equal(graph.nodes.filter((node) => node.kind === 'filter').length, 4)
-  assert.equal(graph.nodes.filter((node) => node.kind === 'glideknob').length, 3)
-  assert.equal(graph.nodes.filter((node) => node.kind === 'knob').length, 3)
+  assert.equal(graph.nodes.filter((node) => node.kind === 'glideknob').length, 4)
+  assert.equal(graph.nodes.filter((node) => node.kind === 'knob').length, 2)
   assert.deepEqual(graph.nodes.find((node) => node.id === 'veil').in.in,
     ['veil1', 'veil2', 'veil3', 'veil4'])
   assert.deepEqual(graph.nodes.find((node) => node.id === 'room').in.in,
-    [
-      'room1', 'room2', 'room3', 'room4',
-      'metalRoom1', 'metalRoom2', 'metalRoom3', 'metalRoom4',
-    ])
+    ['metalRoom1', 'metalRoom2', 'metalRoom3', 'metalRoom4'])
+  assert.deepEqual(graph.nodes.find((node) => node.id === 'impact').in.in,
+    ['metalHit1', 'metalHit2', 'metalHit3', 'metalHit4'])
   assert.deepEqual(graph.nodes.find((node) => node.id === 'leveled').in.in,
     ['heard', 'levelControl'])
   assert.equal(graph.nodes.find((node) => node.id === 'levelControl').params.value, 0)
   assert.equal(scene.CONTROLS.find((control) =>
     control.slot === 'levelControl.value').value, 0.72)
+  assert.deepEqual(
+    scene.CONTROLS.find((control) => control.slot === 'positionControl.value'),
+    {
+      slot: 'positionControl.value',
+      label: 'position',
+      min: -1,
+      max: 1,
+      step: 0.05,
+      value: 1,
+      unit: '',
+      help: 'move the room from a future-aware pre-tail to its forward decay',
+    },
+  )
+  assert.equal(scene.CONTROLS.find((control) =>
+    control.slot === 'spaceLevel.value').value, 36)
   assert.deepEqual(graph.nodes.find((node) => node.id === 'out').in.in,
     ['leveled'])
   for (let index = 0; index < 4; index++) {
     const chord = graph.nodes.find((node) => node.id === `chord${index + 1}`)
-    const room = graph.nodes.find((node) => node.id === `room${index + 1}`)
     assert.equal(chord.params.modes.length, 30)
     assert.equal(
       chord.params.t,
       scene.CHORDS[index].startStep * scene.STEP_SECONDS + 0.06,
     )
-    assert.equal(room.params.modes, 12)
-    assert.deepEqual(room.in.in, [`chord${index + 1}`])
-    assert.deepEqual(room.in.rt60, ['lengthControl'])
+    assert.equal(graph.nodes.find((node) => node.id === `room${index + 1}`), undefined)
     assert.deepEqual(
       graph.nodes.find((node) => node.id === `veil${index + 1}`).in.cutoff,
       ['veilControl'],
@@ -50,9 +62,10 @@ test('scene is one acyclic-looking fixed graph with unique ids', () => {
     const room = graph.nodes.find((node) => node.id === `metalRoom${index + 1}`)
     assert.equal(hit.params.t, index * 4 * scene.STEP_SECONDS + 2 * scene.STEP_SECONDS)
     assert.equal(hit.params.modes.length, 12)
-    assert.equal(room.params.modes, 16)
+    assert.equal(room.kind, 'groupedroom')
+    assert.equal(room.params.profile, 'clouds-current-radii-mono-v1')
     assert.deepEqual(room.in.in, [`metalHit${index + 1}`])
-    assert.deepEqual(room.in.rt60, ['lengthControl'])
+    assert.deepEqual(room.in.position, ['positionControl'])
   }
   assert.deepEqual(graph.nodes.find((node) => node.id === 'body').in.in,
     ['veil', 'wet', 'impact'])
@@ -62,16 +75,18 @@ test('amplitudes glide while modal coefficients stay hoistable', () => {
   const graph = scene.buildSceneGraph()
   const byId = new Map(graph.nodes.map((node) => [node.id, node]))
   for (const id of [
-    'presence', 'spaceLevel', 'levelControl',
+    'presence', 'spaceLevel', 'positionControl', 'levelControl',
   ]) {
     assert.equal(byId.get(id)?.kind, 'glideknob')
     assert.ok(scene.CONTROLS.some((control) => control.slot === `${id}.value`))
   }
-  for (const id of ['veilControl', 'edgeControl', 'lengthControl']) {
+  for (const id of ['veilControl', 'edgeControl']) {
     assert.equal(byId.get(id)?.kind, 'knob')
     assert.ok(scene.CONTROLS.some((control) => control.slot === `${id}.value`))
   }
   assert.ok(scene.CONTROLS.some((control) => control.slot === 'master.velocity'))
+  assert.deepEqual(scene.PRIME_SLOTS, ['veilControl.value', 'edgeControl.value'])
+  assert.ok(!scene.PRIME_SLOTS.includes('positionControl.value'))
 })
 
 test('all chord anchors are rational multiples of the common 55 Hz root', () => {

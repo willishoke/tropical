@@ -561,7 +561,7 @@ async function boot() {
       status.textContent = 'priming / modal controls'
       // First-use coefficient pages and Metal command paths can add tens of
       // milliseconds even though steady-state activations are short. Exercise
-      // the three coefficient families at their no-op defaults while the graph
+      // the declared coefficient families at their no-op defaults while the graph
       // is boot-muted; user gestures then see the warm path.
       for (const slot of scene.PRIME_SLOTS) {
         await rpc('set_param', { name: slot, value: controlBySlot.get(slot).value })
