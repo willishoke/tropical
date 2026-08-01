@@ -1,0 +1,57 @@
+{
+  "reference": "Mutable Instruments Clouds reverb",
+  "source_commit": "08460a69a7e1f7a81c5a2abcc7189c9a6b7208d4",
+  "render_sample_rate": 32000,
+  "output_sample_rate": 44100,
+  "parameters": {
+    "time": 0.98,
+    "diffusion": 0.7,
+    "lp": 0.82,
+    "input_gain": 0.2,
+    "amount_for_wet_render": 1.0
+  },
+  "mix_wet_to_dry_rms": 1.15,
+  "common_headroom_gain": 6.064415017,
+  "mono_fold": "(left + right) / 2",
+  "impulse": {
+    "normalized_echo_density": {
+      "20ms": 0.2608,
+      "50ms": 0.3895,
+      "100ms": 0.6146,
+      "200ms": 0.7075,
+      "500ms": 1.0469,
+      "1000ms": 0.9719
+    },
+    "spectral_flatness": {
+      "100_300ms": 0.297612,
+      "500_1000ms": 0.107457
+    },
+    "stereo_correlation_100ms_5s": 0.003877
+  },
+  "files": {
+    "clouds_gold_wet_stereo.wav": {
+      "channels": 2,
+      "rms_dbfs_0_5s": -24.997,
+      "peak_dbfs": -10.222,
+      "sha256": "c7146c300191d0111efce6d031515138febd49fe2fe06fd8898a7b1d935fe096"
+    },
+    "clouds_gold_mix_stereo.wav": {
+      "channels": 2,
+      "rms_dbfs_0_5s": -22.217,
+      "peak_dbfs": -1.0,
+      "sha256": "e34163e6a7920eb366f2ef52f78ecf7f14fd8927b9d7349d768231c5945945cb"
+    },
+    "clouds_gold_wet_mono.wav": {
+      "channels": 1,
+      "rms_dbfs_0_5s": -26.916,
+      "peak_dbfs": -13.469,
+      "sha256": "77cab62c9ec0dfd40961f7a23592367f84a03085211c0dde0adbd61ee5a99cc9"
+    },
+    "clouds_gold_mix_mono.wav": {
+      "channels": 1,
+      "rms_dbfs_0_5s": -23.46,
+      "peak_dbfs": -1.0,
+      "sha256": "c8fb5134f276d0d826afa14ecc48750b92e7e82c9979bc2de004f9a5ac0144e2"
+    }
+  }
+}

@@ -1,0 +1,380 @@
+{
+  "question": "Can a stateful delay reverb be recovered economically in Tropical's closed-form modal realm?",
+  "teacher": {
+    "topology": "8 parallel homogeneous feedback combs -> 4 Schroeder allpasses",
+    "sample_rate": 32000,
+    "comb_delays": [
+      810,
+      862,
+      927,
+      984,
+      1032,
+      1082,
+      1130,
+      1173
+    ],
+    "allpass_delays": [
+      403,
+      320,
+      247,
+      163
+    ],
+    "rt60_seconds": 4.0,
+    "allpass_gain": 0.7,
+    "total_exact_complex_modes": 9133,
+    "stateful_delay_samples": 9133
+  },
+  "exactness": {
+    "full_modal_vs_stateful_max_abs_65536": 1.5685803350651284e-13,
+    "full_modal_vs_stateful_relative_l2_65536": 6.006398251848493e-13,
+    "structured_comb_vs_stateful_max_abs_supported": 2.8900493109773606e-14,
+    "structured_comb_vs_stateful_relative_l2_supported": 1.2047096575008635e-13,
+    "structured_comb_supported_samples": 65536,
+    "structured_full_teacher_vs_modal_convolution_max_abs": 4.1099068592842514e-14,
+    "structured_full_teacher_vs_modal_convolution_relative_l2": 2.723545833096679e-13
+  },
+  "cost_model": {
+    "stateful_teacher_per_sample": "8 comb delay reads/writes + 4 allpass stages; sequential only",
+    "full_diagonal_modal_per_sample": 9133,
+    "structured_comb_per_random_coordinate": "8 combs x 12 authored real modal rows",
+    "structured_full_teacher_per_random_coordinate": "12 pole-lattice tables x 12 authored real modal rows",
+    "structured_full_teacher_table_samples": 10266,
+    "structured_full_teacher_prefix_complex_samples": 123192,
+    "structured_full_teacher_prefix_bytes_complex64": 985536,
+    "runtime_term_reduction_vs_diagonal_modes": 63.424
+  },
+  "clouds_commit": "08460a69a7e1f7a81c5a2abcc7189c9a6b7208d4",
+  "clouds_features": {
+    "normalized_echo_density": {
+      "20ms": 0.2608,
+      "50ms": 0.3895,
+      "100ms": 0.6146,
+      "200ms": 0.7075,
+      "500ms": 1.0469,
+      "1000ms": 0.9719
+    },
+    "spectral_flatness": {
+      "100_300ms": 0.297612,
+      "500_1000ms": 0.107457
+    }
+  },
+  "teacher_features": {
+    "normalized_echo_density": {
+      "20ms": 0.0286,
+      "50ms": 0.6932,
+      "100ms": 0.854,
+      "200ms": 0.8754,
+      "500ms": 0.9147,
+      "1000ms": 0.9183
+    },
+    "spectral_flatness": {
+      "100_300ms": 0.350747,
+      "500_1000ms": 0.188176
+    }
+  },
+  "experiments": {
+    "energy_64": {
+      "requested_complex_modes": 64,
+      "actual_complex_modes": 64,
+      "conjugate_groups": 32,
+      "modal_energy_score_fraction": 0.24244815,
+      "best_scalar_gain": -0.0,
+      "teacher_impulse_nrmse_after_gain": 1.0,
+      "distance_to_teacher": {
+        "echo_density_rmse": 0.414376,
+        "log_band_energy_rmse": 3.441576
+      },
+      "distance_to_clouds": {
+        "echo_density_rmse": 0.43611,
+        "log_band_energy_rmse": 4.432277
+      },
+      "features": {
+        "normalized_echo_density": {
+          "20ms": 0.954,
+          "50ms": 1.0362,
+          "100ms": 1.0148,
+          "200ms": 0.9898,
+          "500ms": 1.0112,
+          "1000ms": 1.0076
+        },
+        "spectral_flatness": {
+          "100_300ms": 7e-06,
+          "500_1000ms": 2.7e-05
+        }
+      },
+      "synthesis_seconds": 0.01764
+    },
+    "stratified_64": {
+      "requested_complex_modes": 64,
+      "actual_complex_modes": 64,
+      "conjugate_groups": 32,
+      "modal_energy_score_fraction": 0.15442089,
+      "best_scalar_gain": -0.0,
+      "teacher_impulse_nrmse_after_gain": 1.0,
+      "distance_to_teacher": {
+        "echo_density_rmse": 0.416416,
+        "log_band_energy_rmse": 3.454959
+      },
+      "distance_to_clouds": {
+        "echo_density_rmse": 0.423205,
+        "log_band_energy_rmse": 4.445931
+      },
+      "features": {
+        "normalized_echo_density": {
+          "20ms": 0.9755,
+          "50ms": 0.9683,
+          "100ms": 0.9612,
+          "200ms": 1.0326,
+          "500ms": 1.0576,
+          "1000ms": 1.0255
+        },
+        "spectral_flatness": {
+          "100_300ms": 2.9e-05,
+          "500_1000ms": 3.7e-05
+        }
+      },
+      "synthesis_seconds": 0.017015
+    },
+    "energy_256": {
+      "requested_complex_modes": 256,
+      "actual_complex_modes": 256,
+      "conjugate_groups": 128,
+      "modal_energy_score_fraction": 0.31636043,
+      "best_scalar_gain": 0.004484188,
+      "teacher_impulse_nrmse_after_gain": 0.999999,
+      "distance_to_teacher": {
+        "echo_density_rmse": 0.413435,
+        "log_band_energy_rmse": 2.879556
+      },
+      "distance_to_clouds": {
+        "echo_density_rmse": 0.426403,
+        "log_band_energy_rmse": 3.838631
+      },
+      "features": {
+        "normalized_echo_density": {
+          "20ms": 0.954,
+          "50ms": 1.0326,
+          "100ms": 0.9647,
+          "200ms": 0.9683,
+          "500ms": 1.0398,
+          "1000ms": 1.0505
+        },
+        "spectral_flatness": {
+          "100_300ms": 0.000126,
+          "500_1000ms": 0.0
+        }
+      },
+      "synthesis_seconds": 0.016788
+    },
+    "stratified_256": {
+      "requested_complex_modes": 256,
+      "actual_complex_modes": 256,
+      "conjugate_groups": 128,
+      "modal_energy_score_fraction": 0.20151243,
+      "best_scalar_gain": 0.059179756,
+      "teacher_impulse_nrmse_after_gain": 0.999369,
+      "distance_to_teacher": {
+        "echo_density_rmse": 0.402261,
+        "log_band_energy_rmse": 1.119172
+      },
+      "distance_to_clouds": {
+        "echo_density_rmse": 0.42239,
+        "log_band_energy_rmse": 1.692941
+      },
+      "features": {
+        "normalized_echo_density": {
+          "20ms": 0.9433,
+          "50ms": 1.004,
+          "100ms": 0.9969,
+          "200ms": 0.9755,
+          "500ms": 0.954,
+          "1000ms": 0.9933
+        },
+        "spectral_flatness": {
+          "100_300ms": 0.000224,
+          "500_1000ms": 6e-06
+        }
+      },
+      "synthesis_seconds": 0.016686
+    },
+    "energy_1024": {
+      "requested_complex_modes": 1024,
+      "actual_complex_modes": 1024,
+      "conjugate_groups": 512,
+      "modal_energy_score_fraction": 0.41209411,
+      "best_scalar_gain": 0.698831074,
+      "teacher_impulse_nrmse_after_gain": 0.954293,
+      "distance_to_teacher": {
+        "echo_density_rmse": 0.410474,
+        "log_band_energy_rmse": 0.2234
+      },
+      "distance_to_clouds": {
+        "echo_density_rmse": 0.408778,
+        "log_band_energy_rmse": 0.806792
+      },
+      "features": {
+        "normalized_echo_density": {
+          "20ms": 1.0005,
+          "50ms": 0.9397,
+          "100ms": 0.9147,
+          "200ms": 0.9004,
+          "500ms": 0.9147,
+          "1000ms": 0.8826
+        },
+        "spectral_flatness": {
+          "100_300ms": 0.009913,
+          "500_1000ms": 0.000989
+        }
+      },
+      "synthesis_seconds": 0.01709
+    },
+    "stratified_1024": {
+      "requested_complex_modes": 1024,
+      "actual_complex_modes": 1024,
+      "conjugate_groups": 512,
+      "modal_energy_score_fraction": 0.29524493,
+      "best_scalar_gain": 0.289558227,
+      "teacher_impulse_nrmse_after_gain": 0.978512,
+      "distance_to_teacher": {
+        "echo_density_rmse": 0.41066,
+        "log_band_energy_rmse": 0.289188
+      },
+      "distance_to_clouds": {
+        "echo_density_rmse": 0.402626,
+        "log_band_energy_rmse": 0.849524
+      },
+      "features": {
+        "normalized_echo_density": {
+          "20ms": 0.9612,
+          "50ms": 0.979,
+          "100ms": 0.7504,
+          "200ms": 0.7646,
+          "500ms": 0.7396,
+          "1000ms": 0.8361
+        },
+        "spectral_flatness": {
+          "100_300ms": 0.026105,
+          "500_1000ms": 0.002418
+        }
+      },
+      "synthesis_seconds": 0.016947
+    },
+    "energy_3072": {
+      "requested_complex_modes": 3072,
+      "actual_complex_modes": 3072,
+      "conjugate_groups": 1537,
+      "modal_energy_score_fraction": 0.61496966,
+      "best_scalar_gain": 0.868956086,
+      "teacher_impulse_nrmse_after_gain": 0.792653,
+      "distance_to_teacher": {
+        "echo_density_rmse": 0.354393,
+        "log_band_energy_rmse": 0.169455
+      },
+      "distance_to_clouds": {
+        "echo_density_rmse": 0.330448,
+        "log_band_energy_rmse": 0.834183
+      },
+      "features": {
+        "normalized_echo_density": {
+          "20ms": 0.879,
+          "50ms": 0.8218,
+          "100ms": 0.7611,
+          "200ms": 0.8504,
+          "500ms": 0.8504,
+          "1000ms": 0.8969
+        },
+        "spectral_flatness": {
+          "100_300ms": 0.161339,
+          "500_1000ms": 0.02456
+        }
+      },
+      "synthesis_seconds": 0.017718
+    },
+    "stratified_3072": {
+      "requested_complex_modes": 3072,
+      "actual_complex_modes": 3072,
+      "conjugate_groups": 1537,
+      "modal_energy_score_fraction": 0.58456128,
+      "best_scalar_gain": 0.789076141,
+      "teacher_impulse_nrmse_after_gain": 0.823428,
+      "distance_to_teacher": {
+        "echo_density_rmse": 0.388782,
+        "log_band_energy_rmse": 0.201411
+      },
+      "distance_to_clouds": {
+        "echo_density_rmse": 0.379517,
+        "log_band_energy_rmse": 0.854221
+      },
+      "features": {
+        "normalized_echo_density": {
+          "20ms": 0.9576,
+          "50ms": 0.8969,
+          "100ms": 0.854,
+          "200ms": 0.879,
+          "500ms": 0.8861,
+          "1000ms": 0.879
+        },
+        "spectral_flatness": {
+          "100_300ms": 0.311244,
+          "500_1000ms": 0.048099
+        }
+      },
+      "synthesis_seconds": 0.017497
+    }
+  },
+  "timings": {
+    "derive_modal_decomposition_seconds": 0.020471,
+    "stateful_teacher_65536_seconds": 0.180253,
+    "full_modal_teacher_65536_seconds": 0.009147,
+    "structured_comb_modal_source_12s_seconds": 3.409999,
+    "structured_full_teacher_modal_source_12s_seconds": 10.535313
+  },
+  "common_headroom_gain": 3.640296764,
+  "files": {
+    "clouds_gold_wet_mono.wav": {
+      "sha256": "46f06edb32865895c016cf81ba613204968bceef48c134094a1aefb9371975d1"
+    },
+    "clouds_gold_mix_mono.wav": {
+      "sha256": "9d0330fde59ec15c1dad1a214ebc00c1b10ab3175ab2dc05a9e0f7ef2861cb20"
+    },
+    "freeverb_teacher_wet.wav": {
+      "sha256": "09747204854909048503ca9b525928eaa7f0c0d241843749e780345f2bff81b0"
+    },
+    "freeverb_teacher_mix.wav": {
+      "sha256": "e568518a7e5acba56d15f5a6dc4759c3064094c8317729f74732f80fc6bc43c1"
+    },
+    "freeverb_energy_1024_wet.wav": {
+      "sha256": "af299c6153fffc7c7f47032fb3f33f4d8c3834a1e9847b48efd2eb17d55e9d9e"
+    },
+    "freeverb_energy_1024_mix.wav": {
+      "sha256": "367271bee0015c8f802dc7a800d00c9af623866cb64370c1b58f43ac3042283a"
+    },
+    "freeverb_stratified_1024_wet.wav": {
+      "sha256": "e27b4512f616f06a8dec4e9d1e2c3480195a7dc58dd86904248f14e3c62428b3"
+    },
+    "freeverb_stratified_1024_mix.wav": {
+      "sha256": "163431c876640437d85edc3074388b871ee544767f56a76fafb172b73a79d772"
+    },
+    "freeverb_stratified_3072_wet.wav": {
+      "sha256": "074566cf9f87f43e90c1f079adc1e67ae65dd8b1ddc0aa677a63ffb8ebc196a5"
+    },
+    "freeverb_stratified_3072_mix.wav": {
+      "sha256": "7aa92867d0c4c4a32dda7768014b0d05f6623cc26b5e25e7b8001823afaafdeb"
+    },
+    "clouds_gold_impulse_mono.wav": {
+      "sha256": "9ee9f0a3d3296c9e47d379e6b4fd08403c6a03633cffc4159ec0f314e16f46c3"
+    },
+    "freeverb_teacher_impulse.wav": {
+      "sha256": "6f50a4fc3ec78360cc1971ecf4dc46faeebf1b9b05f21c6341d79d05f3a0e584"
+    },
+    "freeverb_energy_1024_impulse.wav": {
+      "sha256": "050eba49ec99b72a7e582898c81c4914b253c95c7ffc9c7af5a7134a52e9a532"
+    },
+    "freeverb_stratified_1024_impulse.wav": {
+      "sha256": "a775e6a4e697c756dd94d6eaa6be43740c97d97c1d886e874fbdc88717de79cb"
+    },
+    "freeverb_stratified_3072_impulse.wav": {
+      "sha256": "89b139991aa2872c1e7cdbfbd53407ca5737a867bb7a0dfc60f197a3e8cf7365"
+    }
+  }
+}

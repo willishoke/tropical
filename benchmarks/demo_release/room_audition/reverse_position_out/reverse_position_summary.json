@@ -1,0 +1,128 @@
+{
+  "question": "Is classic reverse-reverb position exact and economical for the fitted grouped room?",
+  "operation": "reverse(source) -> causal room -> reverse(result) == source * anti_causal(room)",
+  "asset": "grouped_fit_out/grouped_fit_current_radii.npz",
+  "event_seconds": 6.0,
+  "validation": {
+    "analytic_vs_literal_finite_reverse_best_gain": 1.000000000000089,
+    "analytic_vs_literal_finite_reverse_nrmse": 1.8814478959272446e-10,
+    "analytic_vs_literal_finite_reverse_max_abs": 1.7302295979142113e-11,
+    "stereo_side_analytic_vs_literal_best_gain": 1.0000000000000762,
+    "stereo_side_analytic_vs_literal_nrmse": 2.550765353374757e-10,
+    "stereo_side_analytic_vs_literal_max_abs": 1.8793873364699738e-11,
+    "whole_composite_mirror_vs_classic_best_gain": -4.246512843245923e-11,
+    "whole_composite_mirror_vs_classic_nrmse": 1.0
+  },
+  "cost": {
+    "groups": 12,
+    "source_rows": 12,
+    "one_direction_interactions_per_hit": 144,
+    "intermediate_position_interactions_per_hit_direct": 288,
+    "four_hit_interactions_one_direction": 576,
+    "four_hit_interactions_intermediate_direct": 1152,
+    "reverse_cyclic_prefix_complex64_bytes": 985536,
+    "cached_forward_reverse_16s_stereo_float32_bytes": 11289600
+  },
+  "position": {
+    "minus_one": "classic reverse pre-tail",
+    "zero": "equal-power two-sided bloom",
+    "plus_one": "causal forward tail",
+    "gesture_constraint": "a live write changes only current/future playback; an upcoming authored event is analytically available",
+    "measured_static_positions": {
+      "position_minus_1p0": {
+        "pre_event_energy_fraction": 0.568618,
+        "energy_centroid_seconds_relative_to_event": -0.112481
+      },
+      "position_minus_0p5": {
+        "pre_event_energy_fraction": 0.519409,
+        "energy_centroid_seconds_relative_to_event": -0.046295
+      },
+      "position_0p0": {
+        "pre_event_energy_fraction": 0.358355,
+        "energy_centroid_seconds_relative_to_event": 0.06277
+      },
+      "position_0p5": {
+        "pre_event_energy_fraction": 0.173136,
+        "energy_centroid_seconds_relative_to_event": 0.173548
+      },
+      "position_1p0": {
+        "pre_event_energy_fraction": 0.0,
+        "energy_centroid_seconds_relative_to_event": 0.248526
+      }
+    }
+  },
+  "files": {
+    "position_minus_1p0_wet.wav": {
+      "sha256": "81b2cf456db2694c977409c696d97e30c723740b5fc738b82e716732afafdfcd"
+    },
+    "position_minus_1p0_mix.wav": {
+      "sha256": "e6a7968d8753f04c01c230e75c1b94b2a1993b95caaece826f4e086d3ed92df7"
+    },
+    "position_minus_0p5_wet.wav": {
+      "sha256": "a30b4ea25c33a680cc66a63110e2b70d3f94249aaf78c94065e99d6c63e1a572"
+    },
+    "position_minus_0p5_mix.wav": {
+      "sha256": "ec9f3f3528425609812f29194ca786437679513ecc0d116b427d0d386b47992d"
+    },
+    "position_0p0_wet.wav": {
+      "sha256": "0e2d16992bbbc970fb9bef4286bc918be2f05b76a8ed4bf2fd45995c40e29eaa"
+    },
+    "position_0p0_mix.wav": {
+      "sha256": "751a542266df2c227b9fb0caf4fbff14cfa16da9de0c168d1d7ed32ebbc21817"
+    },
+    "position_0p5_wet.wav": {
+      "sha256": "6a9755148127b555277d920fb71ddbae5ff476f76fd2acd677a321e8b45d57eb"
+    },
+    "position_0p5_mix.wav": {
+      "sha256": "cf19479b644083c2f7acd2c3cf21774e6284247e78ebdd24075c7f3508c58ec8"
+    },
+    "position_1p0_wet.wav": {
+      "sha256": "e8d0720012543010fdac00f6d49c3637e9cc83a134ee211436c877709693f3be"
+    },
+    "position_1p0_mix.wav": {
+      "sha256": "715e2afb616953ed87350e8049067be47c2f46fe9da6e437b7adeaf012a576b2"
+    },
+    "position_scrub_forward_to_reverse_wet.wav": {
+      "sha256": "f7956241b8f340f63414b37fad54108067ca88a1816571032efddd24067b493a"
+    },
+    "position_scrub_forward_to_reverse_mix.wav": {
+      "sha256": "965b3dada0d69aeb6f0be87c9b0e0f789ab22919ff5023336895d2c008a8a46e"
+    },
+    "position_minus_1p0_stereo_wet.wav": {
+      "sha256": "b207ee373bb1f4625dd5cec769993dca817e154e216950eb8b9ec6e790e8a428"
+    },
+    "position_minus_1p0_stereo_mix.wav": {
+      "sha256": "664ce83d640782c70374bed716d1502be9bb3d512bb1410734ab5214a7ac48e8"
+    },
+    "position_minus_0p5_stereo_wet.wav": {
+      "sha256": "91322f82e917878af556402b0f15a054a6083d2cab70f64bc5d7e1fc00f3ec86"
+    },
+    "position_minus_0p5_stereo_mix.wav": {
+      "sha256": "f27175f51a922927bc7396484ce05396884b1c0b692bb374d0df238efdd60152"
+    },
+    "position_0p0_stereo_wet.wav": {
+      "sha256": "c886142d5046992ecff0aee2372d09eed41eb5d7931080052b83b1638176f037"
+    },
+    "position_0p0_stereo_mix.wav": {
+      "sha256": "bb07234e8c0a7a039786f8ef820ab66bed152191eba64950983eac00cd0cf218"
+    },
+    "position_0p5_stereo_wet.wav": {
+      "sha256": "c6ee414747970839a38d4f9789b0cb0a72cb4259d3d3d34852b545b912bfb9a1"
+    },
+    "position_0p5_stereo_mix.wav": {
+      "sha256": "cbacba51d1a740d26c5645501be707b2b0e37922b1c31b51d8230c4777d2b0f8"
+    },
+    "position_1p0_stereo_wet.wav": {
+      "sha256": "e4b7cc7271a5b3397a794417ea21f57cf64589d76b314e3963394333fc7707c9"
+    },
+    "position_1p0_stereo_mix.wav": {
+      "sha256": "712312f0dd85c655878148ea4f92a98645521dbec1b1e7541b6ae89545df62a6"
+    },
+    "position_scrub_forward_to_reverse_stereo_wet.wav": {
+      "sha256": "e8c905c64760644f366406e40048b7bfe78dd7aecf1223a11c366f9b323e31b2"
+    },
+    "position_scrub_forward_to_reverse_stereo_mix.wav": {
+      "sha256": "93cbea86036c54effe0700dd5ae0af48f6deab59d8fb923cd0093bb1d71ddf5f"
+    }
+  }
+}

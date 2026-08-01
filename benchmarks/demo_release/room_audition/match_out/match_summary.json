@@ -1,0 +1,322 @@
+{
+  "reference": "Mutable Instruments Clouds mono fold-down",
+  "source_commit": "08460a69a7e1f7a81c5a2abcc7189c9a6b7208d4",
+  "method": "modal capacity plus closed-form diffusion/smear experiment; spectral/decay projection and staged bloom shells",
+  "target_features": {
+    "normalized_echo_density": {
+      "20ms": 0.2608,
+      "50ms": 0.3895,
+      "100ms": 0.6146,
+      "200ms": 0.7075,
+      "500ms": 1.0469,
+      "1000ms": 0.9719
+    },
+    "spectral_flatness": {
+      "100_300ms": 0.297612,
+      "500_1000ms": 0.107457
+    }
+  },
+  "fitted_shell_energy": [
+    [
+      0.00299199,
+      0.01003949,
+      0.0,
+      0.19659184
+    ],
+    [
+      0.00785098,
+      0.0,
+      0.0,
+      0.09213259
+    ],
+    [
+      0.02584626,
+      0.0,
+      0.0,
+      3.2744597
+    ],
+    [
+      0.0656615,
+      0.0,
+      0.0,
+      1.3071275
+    ],
+    [
+      0.11892454,
+      0.0,
+      0.0,
+      1.99834686
+    ],
+    [
+      0.20776178,
+      0.0,
+      0.0,
+      21.08884641
+    ],
+    [
+      0.38533962,
+      0.0,
+      0.0,
+      37.49585983
+    ],
+    [
+      0.90406416,
+      0.0,
+      0.0,
+      42.25607957
+    ],
+    [
+      0.78872496,
+      0.0,
+      0.0,
+      22.25702019
+    ],
+    [
+      0.60155112,
+      0.0,
+      0.0,
+      4.50066716
+    ],
+    [
+      0.22874013,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.08876372,
+      0.0,
+      0.0,
+      0.0
+    ],
+    [
+      0.02308653,
+      0.0,
+      0.0,
+      0.00338711
+    ]
+  ],
+  "fitted_band_sigma": [
+    2.156128,
+    1.869883,
+    2.486193,
+    2.156128,
+    2.156128,
+    2.486193,
+    2.486193,
+    2.486193,
+    2.486193,
+    2.486193,
+    2.156128,
+    2.156128,
+    2.156128
+  ],
+  "candidates": {
+    "modal_cloud_256": {
+      "frequency_cells": 256,
+      "room_rows": 512,
+      "predelay_ms": 22.0,
+      "features": {
+        "normalized_echo_density": {
+          "20ms": 0.536,
+          "50ms": 0.9719,
+          "100ms": 0.9647,
+          "200ms": 0.9647,
+          "500ms": 0.9183,
+          "1000ms": 0.8933
+        },
+        "spectral_flatness": {
+          "100_300ms": 0.0,
+          "500_1000ms": 0.0
+        }
+      },
+      "distance_to_clouds_mono_impulse": {
+        "echo_density_rmse": 0.3231,
+        "log_band_energy_rmse": 1.142389
+      }
+    },
+    "modal_cloud_1024": {
+      "frequency_cells": 1024,
+      "room_rows": 2048,
+      "predelay_ms": 22.0,
+      "features": {
+        "normalized_echo_density": {
+          "20ms": 0.611,
+          "50ms": 0.9076,
+          "100ms": 1.0112,
+          "200ms": 0.7396,
+          "500ms": 0.7754,
+          "1000ms": 0.9612
+        },
+        "spectral_flatness": {
+          "100_300ms": 6.9e-05,
+          "500_1000ms": 1e-06
+        }
+      },
+      "distance_to_clouds_mono_impulse": {
+        "echo_density_rmse": 0.322288,
+        "log_band_energy_rmse": 0.497949
+      }
+    },
+    "modal_cloud_4096": {
+      "frequency_cells": 4096,
+      "room_rows": 8192,
+      "predelay_ms": 22.0,
+      "features": {
+        "normalized_echo_density": {
+          "20ms": 0.4717,
+          "50ms": 0.8361,
+          "100ms": 0.7539,
+          "200ms": 0.3895,
+          "500ms": 0.6467,
+          "1000ms": 0.5717
+        },
+        "spectral_flatness": {
+          "100_300ms": 0.011967,
+          "500_1000ms": 0.000796
+        }
+      },
+      "distance_to_clouds_mono_impulse": {
+        "echo_density_rmse": 0.337831,
+        "log_band_energy_rmse": 0.573259
+      }
+    },
+    "modal_cloud_1024_smear_mutable_rate": {
+      "base_frequency_cells": 1024,
+      "base_room_rows": 2048,
+      "diffuser": null,
+      "smear_stages": [
+        {
+          "depth_ms": 4.8,
+          "rate_hz": 0.173
+        },
+        {
+          "depth_ms": 3.1,
+          "rate_hz": 0.317
+        }
+      ],
+      "features": {
+        "normalized_echo_density": {
+          "20ms": 0.6289,
+          "50ms": 0.904,
+          "100ms": 0.9719,
+          "200ms": 0.8361,
+          "500ms": 0.904,
+          "1000ms": 0.9254
+        },
+        "spectral_flatness": {
+          "100_300ms": 0.035983,
+          "500_1000ms": 0.020258
+        }
+      },
+      "distance_to_clouds_mono_impulse": {
+        "echo_density_rmse": 0.307406,
+        "log_band_energy_rmse": 0.753352
+      }
+    },
+    "modal_cloud_1024_smear_wide_2": {
+      "base_frequency_cells": 1024,
+      "base_room_rows": 2048,
+      "diffuser": null,
+      "smear_stages": [
+        {
+          "depth_ms": 8.0,
+          "rate_hz": 0.23
+        },
+        {
+          "depth_ms": 5.0,
+          "rate_hz": 0.41
+        }
+      ],
+      "features": {
+        "normalized_echo_density": {
+          "20ms": 0.6003,
+          "50ms": 0.9719,
+          "100ms": 1.0183,
+          "200ms": 0.8611,
+          "500ms": 0.9683,
+          "1000ms": 1.0719
+        },
+        "spectral_flatness": {
+          "100_300ms": 0.041661,
+          "500_1000ms": 0.041493
+        }
+      },
+      "distance_to_clouds_mono_impulse": {
+        "echo_density_rmse": 0.330957,
+        "log_band_energy_rmse": 0.730744
+      }
+    },
+    "modal_cloud_1024_smear_wide_3": {
+      "base_frequency_cells": 1024,
+      "base_room_rows": 2048,
+      "diffuser": null,
+      "smear_stages": [
+        {
+          "depth_ms": 7.0,
+          "rate_hz": 0.23
+        },
+        {
+          "depth_ms": 4.8,
+          "rate_hz": 0.41
+        },
+        {
+          "depth_ms": 3.0,
+          "rate_hz": 0.67
+        }
+      ],
+      "features": {
+        "normalized_echo_density": {
+          "20ms": 0.6324,
+          "50ms": 0.9683,
+          "100ms": 1.004,
+          "200ms": 0.9504,
+          "500ms": 0.929,
+          "1000ms": 1.0219
+        },
+        "spectral_flatness": {
+          "100_300ms": 0.083353,
+          "500_1000ms": 0.051283
+        }
+      },
+      "distance_to_clouds_mono_impulse": {
+        "echo_density_rmse": 0.341597,
+        "log_band_energy_rmse": 0.894179
+      }
+    },
+    "modal_cloud_1024_diffused_smear_mutable_rate": {
+      "base_frequency_cells": 1024,
+      "base_room_rows": 2048,
+      "diffuser": "four six-repeat finite allpass projections",
+      "smear_stages": [
+        {
+          "depth_ms": 4.8,
+          "rate_hz": 0.173
+        },
+        {
+          "depth_ms": 3.1,
+          "rate_hz": 0.317
+        }
+      ],
+      "features": {
+        "normalized_echo_density": {
+          "20ms": 0.5896,
+          "50ms": 1.0541,
+          "100ms": 1.0433,
+          "200ms": 1.0576,
+          "500ms": 1.0183,
+          "1000ms": 0.9826
+        },
+        "spectral_flatness": {
+          "100_300ms": 0.034301,
+          "500_1000ms": 0.020274
+        }
+      },
+      "distance_to_clouds_mono_impulse": {
+        "echo_density_rmse": 0.377953,
+        "log_band_energy_rmse": 0.749633
+      }
+    }
+  },
+  "common_headroom_gain": 4.55794564
+}

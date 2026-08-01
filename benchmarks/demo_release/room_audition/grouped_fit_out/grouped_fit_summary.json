@@ -1,0 +1,272 @@
+{
+  "question": "Can Clouds' lush fixed impulse be fitted without increasing grouped runtime cost?",
+  "clouds_commit": "08460a69a7e1f7a81c5a2abcc7189c9a6b7208d4",
+  "method": "weighted offline least squares over complete periodic pole-lattice carriers",
+  "fit_sweeps": 14,
+  "periods": [
+    810,
+    862,
+    927,
+    984,
+    1032,
+    1082,
+    1130,
+    1173,
+    806,
+    640,
+    494,
+    326
+  ],
+  "runtime_cost": {
+    "groups": 12,
+    "metal_source_rows": 12,
+    "source_group_interactions_per_hit": 144,
+    "four_hit_interactions": 576,
+    "carrier_samples": 10266,
+    "prefix_bytes_complex64": 985536,
+    "stereo_prefix_bytes_complex64": 1971072,
+    "stereo_note": "same group/exponential evaluations; two prefix reads and accumulators"
+  },
+  "target_regions": [
+    {
+      "begin_seconds": 0.0,
+      "end_seconds": 0.02,
+      "target_rms": 0.00861533218638058
+    },
+    {
+      "begin_seconds": 0.02,
+      "end_seconds": 0.05,
+      "target_rms": 0.0067892427777009896
+    },
+    {
+      "begin_seconds": 0.05,
+      "end_seconds": 0.1,
+      "target_rms": 0.005987622399916195
+    },
+    {
+      "begin_seconds": 0.1,
+      "end_seconds": 0.2,
+      "target_rms": 0.005017021554923506
+    },
+    {
+      "begin_seconds": 0.2,
+      "end_seconds": 0.5,
+      "target_rms": 0.004063977140295699
+    },
+    {
+      "begin_seconds": 0.5,
+      "end_seconds": 1.0,
+      "target_rms": 0.002708263376479397
+    },
+    {
+      "begin_seconds": 1.0,
+      "end_seconds": 2.0,
+      "target_rms": 0.0012209375246453203
+    },
+    {
+      "begin_seconds": 2.0,
+      "end_seconds": 4.0,
+      "target_rms": 8.674415059756397e-05
+    },
+    {
+      "begin_seconds": 4.0,
+      "end_seconds": 8.0,
+      "target_rms": 0.0
+    },
+    {
+      "begin_seconds": 8.0,
+      "end_seconds": 12.0,
+      "target_rms": 0.0
+    }
+  ],
+  "profiles": {
+    "current_radii": {
+      "rt60_seconds": [
+        4.0,
+        4.0,
+        4.0,
+        4.0,
+        4.0,
+        4.0,
+        4.0,
+        4.0,
+        0.243904,
+        0.193671,
+        0.14949,
+        0.098651
+      ],
+      "weighted_fit_nrmse_history": [
+        0.82443386,
+        0.80114713,
+        0.78888393,
+        0.78083315,
+        0.77506664,
+        0.77073794,
+        0.76738696,
+        0.76473228,
+        0.76258917,
+        0.76083069,
+        0.75936677,
+        0.75813195,
+        0.75707775,
+        0.75616769
+      ],
+      "impulse_best_gain": 1.034951209,
+      "impulse_waveform_nrmse": 0.799783,
+      "modal_source_vs_actual_clouds_best_gain": 1.002113593,
+      "modal_source_vs_actual_clouds_waveform_nrmse": 0.978196,
+      "structured_source_vs_convolution_relative_l2": 3.4572169423874564e-13,
+      "features": {
+        "normalized_echo_density": {
+          "20ms": 0.2537,
+          "50ms": 0.4824,
+          "100ms": 0.8075,
+          "200ms": 0.9755,
+          "500ms": 0.9826,
+          "1000ms": 0.9183
+        },
+        "spectral_flatness": {
+          "100_300ms": 0.240965,
+          "500_1000ms": 0.099953
+        }
+      },
+      "distance_to_clouds": {
+        "echo_density_rmse": 0.144177,
+        "log_band_energy_rmse": 0.684447
+      },
+      "stereo": {
+        "side_method": "deterministic residue-phase scrambling with target side/mid energy",
+        "target_side_mid_full_ir_ratio": 0.897572,
+        "target_side_mid_100_1000ms_ratio": 0.993195,
+        "fitted_side_scale": 0.929741761,
+        "impulse_best_gain": 0.445081896,
+        "impulse_waveform_nrmse": 0.955642,
+        "modal_source_vs_actual_clouds_best_gain": 0.685664954,
+        "modal_source_vs_actual_clouds_waveform_nrmse": 0.989293,
+        "structured_side_vs_convolution_relative_l2": 3.617734516669717e-13,
+        "clouds_field": {
+          "100_300ms": {
+            "left_right_correlation": 0.003231,
+            "side_to_mid_rms": 0.996788
+          },
+          "500_1000ms": {
+            "left_right_correlation": 0.015309,
+            "side_to_mid_rms": 0.984807
+          }
+        },
+        "fitted_field": {
+          "100_300ms": {
+            "left_right_correlation": 0.013222,
+            "side_to_mid_rms": 0.986866
+          },
+          "500_1000ms": {
+            "left_right_correlation": 0.004226,
+            "side_to_mid_rms": 0.995783
+          }
+        }
+      }
+    },
+    "decay_ladder": {
+      "rt60_seconds": [
+        0.22,
+        0.32,
+        0.46,
+        0.68,
+        1.0,
+        1.45,
+        2.1,
+        3.0,
+        4.2,
+        5.8,
+        7.8,
+        10.5
+      ],
+      "weighted_fit_nrmse_history": [
+        0.78383696,
+        0.76696725,
+        0.75857799,
+        0.75319544,
+        0.74930739,
+        0.74630043,
+        0.74386975,
+        0.74184303,
+        0.74011375,
+        0.73861177,
+        0.73728855,
+        0.73610926,
+        0.73504809,
+        0.73408545
+      ],
+      "impulse_best_gain": 1.025650028,
+      "impulse_waveform_nrmse": 0.784445,
+      "modal_source_vs_actual_clouds_best_gain": 1.036951079,
+      "modal_source_vs_actual_clouds_waveform_nrmse": 0.962743,
+      "structured_source_vs_convolution_relative_l2": 3.2440883963635404e-13,
+      "features": {
+        "normalized_echo_density": {
+          "20ms": 0.2608,
+          "50ms": 0.3895,
+          "100ms": 0.7396,
+          "200ms": 1.0148,
+          "500ms": 1.0541,
+          "1000ms": 0.979
+        },
+        "spectral_flatness": {
+          "100_300ms": 0.242139,
+          "500_1000ms": 0.049385
+        }
+      },
+      "distance_to_clouds": {
+        "echo_density_rmse": 0.135499,
+        "log_band_energy_rmse": 1.057801
+      }
+    }
+  },
+  "files": {
+    "grouped_fit_current_radii.npz": {
+      "sha256": "e6728e181f4c138b100af5576810c429cbe324bf9a99a04f4a67794564aa77f9"
+    },
+    "grouped_fit_decay_ladder.npz": {
+      "sha256": "a7c806d05aca55db8df8ac5f8aa11e73383c9df2f11cc1d86dce334bcd604015"
+    },
+    "grouped_fit_current_radii_stereo.npz": {
+      "sha256": "ac82cebe3895d25e3fdfe6e03c7567d110b048c489a229dfb3f615dc860b03e6"
+    },
+    "clouds_gold_impulse.wav": {
+      "sha256": "b83dcc8d6c140f9b7cc423cb066969cc060bb7f8ed7e743cbe52620c1891580c"
+    },
+    "freeverb_teacher_impulse.wav": {
+      "sha256": "04d94000f263240921d02467051754583d7e19601ad50892bfc1b95c9091c823"
+    },
+    "grouped_fit_current_radii_impulse.wav": {
+      "sha256": "762cd9610a628ef659b9b2e83172fb6885e5605b651fa8edb34164df0d8c53b2"
+    },
+    "grouped_fit_decay_ladder_impulse.wav": {
+      "sha256": "cfe30b75e81fd67e4e39b9fb06e45b6b077e67037323ed7f4714d4b2b6b9205a"
+    },
+    "clouds_gold_stereo_impulse.wav": {
+      "sha256": "09576ea5c056f541ecd8e824bb481c14b0f30e4347e400a5c0ff903dda7c3713"
+    },
+    "grouped_fit_current_radii_stereo_impulse.wav": {
+      "sha256": "bc0cbcbf6bf1d09dd7eebef15eb08fe3e28445a7c9e7e0c39ef95fc22cfc38ca"
+    },
+    "clouds_gold_wet.wav": {
+      "sha256": "14d89134d5a6a77624140b8bc5c858d0ffe3be138c8fdb78b98f5f85616b4d7c"
+    },
+    "freeverb_teacher_wet.wav": {
+      "sha256": "1863e1512d3dcc101603d13be625553b70003c7e35b2fc5311fbb7d757e3243c"
+    },
+    "grouped_fit_current_radii_wet.wav": {
+      "sha256": "45d0de0a3396b3789079e2f84e393b97d0a308a4a329b8af4a04d4b5540fbab6"
+    },
+    "grouped_fit_decay_ladder_wet.wav": {
+      "sha256": "036f36df8deebae562c54d551e83aad9debb1972f807057a6fd512cb92239064"
+    },
+    "clouds_gold_stereo_wet.wav": {
+      "sha256": "608463ac1bd12cdc6a945453e0f7c4fb10d883f01ac7ef03c7c3619e39193083"
+    },
+    "grouped_fit_current_radii_stereo_wet.wav": {
+      "sha256": "982006fa628a41aa81f38908789c2298f5fdaa10c2b71e4dc9488c1ca1e0b300"
+    }
+  }
+}
