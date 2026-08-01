@@ -9,9 +9,11 @@ The runtime representation and analytic modal-source convolution are unchanged.
 
 from __future__ import annotations
 
+import argparse
 import hashlib
 import json
 import math
+import os
 import tempfile
 from pathlib import Path
 
@@ -26,7 +28,6 @@ from run_reference import (
     RENDER_SAMPLE_RATE,
     build_reference_binary,
     modal_signal,
-    parse_args,
     render_clouds,
     resample_linear,
     write_wav,
@@ -44,6 +45,21 @@ OUT_DIR = AUDITION_DIR / "grouped_fit_out"
 SAMPLE_RATE = RENDER_SAMPLE_RATE
 SAMPLE_COUNT = round(DURATION_SECONDS * SAMPLE_RATE)
 FIT_SWEEPS = 14
+NATIVE_SAMPLE_RATE = 44_100
+NATIVE_PERIODS = (
+    1116,
+    1188,
+    1277,
+    1356,
+    1422,
+    1491,
+    1557,
+    1617,
+    1112,
+    882,
+    682,
+    450,
+)
 DECAY_LADDER_RT60 = (
     0.22,
     0.32,
@@ -60,8 +76,68 @@ DECAY_LADDER_RT60 = (
 )
 
 
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--clouds-root",
+        type=Path,
+        default=Path(os.environ.get(
+            "CLOUDS_REFERENCE_ROOT", "/private/tmp/tropical-clouds-reference"
+        )),
+        help="official pichenettes/eurorack checkout at the frozen commit",
+    )
+    parser.add_argument(
+        "--sample-rate",
+        type=int,
+        choices=(RENDER_SAMPLE_RATE, NATIVE_SAMPLE_RATE),
+        default=RENDER_SAMPLE_RATE,
+        help="fit/evaluation rate after the single frozen-target resample",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        default=OUT_DIR,
+        help="directory for fitted carriers, summaries, and audition WAVs",
+    )
+    return parser.parse_args()
+
+
+def configure(sample_rate: int, output_dir: Path) -> None:
+    global OUT_DIR, SAMPLE_RATE, SAMPLE_COUNT
+    OUT_DIR = output_dir.resolve()
+    SAMPLE_RATE = sample_rate
+    SAMPLE_COUNT = round(DURATION_SECONDS * SAMPLE_RATE)
+
+
 def sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def array_sha256(array: np.ndarray, dtype: str) -> str:
+    canonical = np.ascontiguousarray(array, dtype=np.dtype(dtype))
+    return hashlib.sha256(canonical.tobytes(order="C")).hexdigest()
+
+
+def carrier_source_sha256(
+    sample_rate: int,
+    periods: tuple[int, ...],
+    radii: tuple[float, ...],
+    carriers: list[np.ndarray],
+) -> str:
+    digest = hashlib.sha256()
+    digest.update(b"tropical-grouped-room-carriers-v1\0")
+    digest.update(np.asarray([sample_rate], dtype="<u4").tobytes())
+    digest.update(np.asarray(periods, dtype="<u4").tobytes())
+    digest.update(np.asarray(radii, dtype="<f8").tobytes())
+    for carrier in carriers:
+        digest.update(np.asarray(carrier, dtype="<f8").tobytes())
+    return digest.hexdigest()
+
+
+def to_output_rate(signal: np.ndarray) -> np.ndarray:
+    if SAMPLE_RATE == OUTPUT_SAMPLE_RATE:
+        return signal.copy()
+    return resample_linear(signal, SAMPLE_RATE, OUTPUT_SAMPLE_RATE)
 
 
 def radius_for_rt60(rt60_seconds: float) -> float:
@@ -206,11 +282,13 @@ def best_gain_nrmse(candidate: np.ndarray, target: np.ndarray) -> tuple[float, f
 
 def save_carriers(
     path: Path,
+    sample_rate: int,
     periods: tuple[int, ...],
     radii: tuple[float, ...],
     carriers: list[np.ndarray],
 ) -> None:
     arrays: dict[str, np.ndarray] = {
+        "sample_rate": np.asarray(sample_rate, dtype=np.int32),
         "periods": np.asarray(periods, dtype=np.int32),
         "radii": np.asarray(radii, dtype=np.float64),
     }
@@ -282,28 +360,52 @@ def stereo_field_summary(signal: np.ndarray) -> dict[str, object]:
 
 def main() -> None:
     args = parse_args()
+    configure(args.sample_rate, args.output_dir)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="tropical-clouds-grouped-fit-") as temp:
         binary = Path(temp) / "clouds_reference"
         build_reference_binary(args.clouds_root, binary)
-        impulse = np.zeros(SAMPLE_COUNT, dtype=np.float64)
-        impulse[0] = 1.0
         dry_rows = snare_modes(0)
-        dry = modal_signal(dry_rows, SAMPLE_RATE, SAMPLE_COUNT)
-        clouds_impulse_stereo = render_clouds(binary, impulse)
-        clouds_wet_stereo = render_clouds(binary, dry)
+        reference_count = round(DURATION_SECONDS * RENDER_SAMPLE_RATE)
+        reference_impulse = np.zeros(reference_count, dtype=np.float64)
+        reference_impulse[0] = 1.0
+        reference_dry = modal_signal(
+            dry_rows, RENDER_SAMPLE_RATE, reference_count
+        )
+        reference_impulse_stereo = render_clouds(binary, reference_impulse)
+        reference_wet_stereo = render_clouds(binary, reference_dry)
+
+    # Clouds is always rendered at its frozen 32 kHz native rate.  Resample the
+    # complete target exactly once before fitting; every operation below runs
+    # at SAMPLE_RATE.
+    clouds_impulse_stereo = resample_linear(
+        reference_impulse_stereo, RENDER_SAMPLE_RATE, SAMPLE_RATE
+    )
+    clouds_wet_stereo = resample_linear(
+        reference_wet_stereo, RENDER_SAMPLE_RATE, SAMPLE_RATE
+    )
+    dry = modal_signal(dry_rows, SAMPLE_RATE, SAMPLE_COUNT)
 
     clouds_impulse = np.mean(clouds_impulse_stereo, axis=1)
     clouds_wet = np.mean(clouds_wet_stereo, axis=1)
     teacher_groups, teacher_direct = derive_modal_decomposition()
-    periods = tuple(
+    reference_periods = tuple(
         group.delay if group.kind == "comb" else 2 * group.delay
         for group in teacher_groups
     )
-    current_radii = tuple(group.radius for group in teacher_groups)
+    periods = (
+        NATIVE_PERIODS if SAMPLE_RATE == NATIVE_SAMPLE_RATE else reference_periods
+    )
+    current_radii = tuple(
+        group.radius ** (RENDER_SAMPLE_RATE / SAMPLE_RATE)
+        for group in teacher_groups
+    )
     decay_ladder_radii = tuple(radius_for_rt60(value) for value in DECAY_LADDER_RT60)
-    teacher_impulse = synthesize_modal_impulse(
-        teacher_groups, teacher_direct, SAMPLE_COUNT
+    reference_teacher_impulse = synthesize_modal_impulse(
+        teacher_groups, teacher_direct, reference_count
+    )
+    teacher_impulse = resample_linear(
+        reference_teacher_impulse, RENDER_SAMPLE_RATE, SAMPLE_RATE
     )
     teacher_wet = discrete_convolve(dry, teacher_impulse)
     weights_squared, target_regions = fit_weights(clouds_impulse)
@@ -336,19 +438,20 @@ def main() -> None:
             np.linalg.norm(structured_wet - convolution_wet)
             / max(np.linalg.norm(convolution_wet), 1e-30)
         )
-        impulse_44k = resample_linear(
-            fitted_impulse, SAMPLE_RATE, OUTPUT_SAMPLE_RATE
-        )
-        gold_44k = resample_linear(
-            clouds_impulse, SAMPLE_RATE, OUTPUT_SAMPLE_RATE
-        )
+        impulse_44k = to_output_rate(fitted_impulse)
+        gold_44k = to_output_rate(clouds_impulse)
         impulse_gain, impulse_nrmse = best_gain_nrmse(
             fitted_impulse, clouds_impulse
         )
         wet_gain, wet_nrmse = best_gain_nrmse(structured_wet, clouds_wet)
         profile_path = OUT_DIR / f"grouped_fit_{profile_name}.npz"
-        save_carriers(profile_path, periods, radii, carriers)
-        files[profile_path.name] = {"sha256": sha256(profile_path)}
+        save_carriers(profile_path, SAMPLE_RATE, periods, radii, carriers)
+        files[profile_path.name] = {
+            "sha256": sha256(profile_path),
+            "canonical_carrier_source_sha256": carrier_source_sha256(
+                SAMPLE_RATE, periods, radii, carriers
+            ),
+        }
         candidate_features = feature_summary(impulse_44k)
         gold_features = feature_summary(gold_44k)
         results[profile_name] = {
@@ -471,7 +574,7 @@ def main() -> None:
         ("wet", wet_32k, "clouds_gold"),
     ):
         tracks_44k = {
-            name: resample_linear(track, SAMPLE_RATE, OUTPUT_SAMPLE_RATE)
+            name: to_output_rate(track)
             for name, track in tracks.items()
         }
         target_rms = active_rms(tracks_44k[gold_name])
@@ -490,6 +593,10 @@ def main() -> None:
     summary = {
         "question": "Can Clouds' lush fixed impulse be fitted without increasing grouped runtime cost?",
         "clouds_commit": CLOUDS_COMMIT,
+        "reference_sample_rate": RENDER_SAMPLE_RATE,
+        "fit_sample_rate": SAMPLE_RATE,
+        "target_resampling": "one linear resample before optimizer",
+        "target_mono_float64_le_sha256": array_sha256(clouds_impulse, "<f8"),
         "method": "weighted offline least squares over complete periodic pole-lattice carriers",
         "fit_sweeps": FIT_SWEEPS,
         "periods": periods,

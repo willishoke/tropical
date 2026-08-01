@@ -179,3 +179,34 @@ The event is anchored at six seconds. Listen to:
 Wet-only and intermediate `±0.5` files are included. See
 `05-reverse-position-scope.md` for the proof, cost fork, demo timing, and hard
 integration gates.
+
+## Native 44.1 kHz production gate
+
+Gate 0 renders Clouds once at its frozen 32 kHz rate, resamples the complete
+target once before optimization, then fits and evaluates the frozen twelve
+native periods directly at 44.1 kHz:
+
+```sh
+uv run --with numpy python \
+  benchmarks/demo_release/room_audition/run_grouped_clouds_fit.py \
+  --sample-rate 44100 \
+  --output-dir benchmarks/demo_release/room_audition/native_rate_out \
+  --clouds-root /path/to/pichenettes/eurorack
+
+uv run --with numpy python \
+  benchmarks/demo_release/room_audition/run_reverse_position.py \
+  --sample-rate 44100 \
+  --asset benchmarks/demo_release/room_audition/native_rate_out/grouped_fit_current_radii.npz \
+  --output-dir benchmarks/demo_release/room_audition/native_rate_out \
+  --mono
+
+uv run --with numpy python \
+  benchmarks/demo_release/room_audition/generate_grouped_room_asset.py
+```
+
+The last command emits the tracked `.tgrm` payload and JSON manifest under
+`playground/assets/grouped-room/`. The manifest documents the fixed v1 binary
+header, aligned metadata, source/group table order, input and payload hashes,
+oracle results, and listening status. Native audition WAVs remain ignored;
+the accepted mono carrier `.npz`, summaries, production payload, and manifest
+are tracked.
