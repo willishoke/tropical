@@ -18,6 +18,15 @@ using tropical_runtime::TileTag;
 
 namespace
 {
+uint64_t activation_lead(const EpochTileQueue & queue)
+{
+  // One tile is ready before publication; a second quantum makes reservation
+  // insensitive to where the GPU submit lands inside the current device
+  // callback. With one-quantum lead, a render near the real-time budget could
+  // repeatedly lose the next-boundary race and retarget for 50–200 ms.
+  return static_cast<uint64_t>(queue.render_frames()) * 2;
+}
+
 uint64_t current_thread_cpu_time_ns()
 {
 #ifdef __APPLE__
@@ -146,7 +155,12 @@ void MetalRenderWorker::run()
   for (;;)
   {
     observe_activation_acknowledgement();
-    bool worked = refill_active_bank();
+    // Once an activation is published, fill its staging bank first. The old
+    // bank was topped up before the candidate was reserved and only needs to
+    // survive until E; the new bank needs depth behind its already-ready first
+    // tile before the callback crosses E.
+    bool worked = refill_pending_bank();
+    if (!worked) worked = refill_active_bank();
 
     std::shared_ptr<PendingRequest> pending;
     {
@@ -245,6 +259,22 @@ bool MetalRenderWorker::refill_active_bank()
   return render_one(active_bank_, cursor, false);
 }
 
+bool MetalRenderWorker::refill_pending_bank()
+{
+  if (pending_activation_epoch_ == 0) return false;
+  for (uint32_t bank = 0; bank < EpochTileQueue::kBankCount; ++bank)
+  {
+    BankRenderCursor & cursor = bank_cursors_[bank];
+    if (!cursor.valid
+        || cursor.request.epoch_id != pending_activation_epoch_
+        || queue_.tile_state(bank, cursor.next_slot)
+             != tropical_runtime::TileState::Free)
+      continue;
+    return render_one(bank, cursor, false);
+  }
+  return false;
+}
+
 EpochScheduleResult
 MetalRenderWorker::prepare_activation(RenderEpochRequest request)
 {
@@ -274,7 +304,7 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
       ? request.activation_frame
       : (fresh && observed_device == 0
           ? 0
-          : observed_device + queue_.render_frames());
+          : observed_device + activation_lead(queue_));
     const uint64_t source_start = request.fixed_activation
       ? request.source_origin
       : (request.transition == EpochTransitionKind::ClockJump
@@ -308,7 +338,16 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
     candidate.next_device = activation_frame;
     candidate.next_source = source_start;
     candidate.next_slot = 0;
-    if (!render_window(staging_bank, candidate))
+    // A continuous activation only needs its exact first tile before it can be
+    // published. Rendering all four here made every knob write pay four GPU
+    // dispatches before the UI received an acknowledgement. The worker fills
+    // the remaining staging tiles immediately after publication, while the
+    // full old bank covers the interval to E. Fresh loads retain the complete
+    // four-tile prefill so device startup still begins with maximum reserve.
+    const bool candidate_ready = request.transition == EpochTransitionKind::Fresh
+      ? render_window(staging_bank, candidate)
+      : render_one(staging_bank, candidate, true);
+    if (!candidate_ready)
     {
       activation_failures_.fetch_add(1, std::memory_order_relaxed);
       return {
@@ -334,7 +373,8 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
 
     if (!queue_.publish_activation(
           EpochActivation{
-            request.epoch_id, activation_frame, source_start, staging_bank
+            request.epoch_id, activation_frame, source_start, staging_bank,
+            request.transition == EpochTransitionKind::Continuous
           }))
     {
       activation_failures_.fetch_add(1, std::memory_order_relaxed);
@@ -362,7 +402,7 @@ EpochReservation MetalRenderWorker::reserve(
   const bool no_active =
     queue_.audio_active_bank() == EpochTileQueue::kNoBank;
   const uint64_t frame =
-    no_active && device == 0 ? 0 : device + queue_.render_frames();
+    no_active && device == 0 ? 0 : device + activation_lead(queue_);
   return {
     frame,
     transition == EpochTransitionKind::ClockJump

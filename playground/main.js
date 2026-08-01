@@ -1,8 +1,5 @@
-// tropical demo — Electron main. Spawns ONE engine (`frontend --serve <sock>`,
-// Metal backend + off-RT epoch rendering: this app doubles as a GPU production
-// soak. It speaks newline JSON-RPC over the Unix socket (the same single-socket
-// control/data-plane split the TUIs used), and bridges it to the renderer over
-// IPC. The renderer is the whole instrument; this file is plumbing.
+// tropical demo — Electron main. Spawns one engine (`frontend --serve <sock>`)
+// and bridges its newline JSON-RPC socket to the single-scene renderer.
 const { app, BrowserWindow, ipcMain } = require('electron')
 const { spawn } = require('node:child_process')
 const { connect } = require('node:net')
@@ -21,15 +18,22 @@ const pending = new Map()
 const outbox = []
 
 function startEngine() {
+  const useMetal = process.env.TROPICAL_DEMO_JIT !== '1'
   engine = spawn(BIN, ['--serve', SOCK], {
     cwd: REPO,
     env: {
       ...process.env,
-      // The demo runs on the GPU: every patch edit dual-loads (JIT stays the
-      // scope/render_window reference), while a worker prepares Metal tiles.
-      TROPICAL_BACKEND: process.env.TROPICAL_DEMO_JIT ? '' : 'metal',
+      // Metal owns live audio for this dense modal scene. The engine keeps its
+      // dual-loaded JIT artifact for the scopes' random-access reads.
+      TROPICAL_BACKEND: useMetal ? 'metal' : '',
+      // The general engine default remains 512. This fixed demo opts into a
+      // short device/render quantum; the worker's guarded activation horizon
+      // is two 2.9 ms blocks. Override both together for qualification.
+      TROPICAL_BUFFER_LENGTH: useMetal
+        ? (process.env.TROPICAL_DEMO_QUANTUM ?? '128')
+        : (process.env.TROPICAL_BUFFER_LENGTH ?? ''),
       TROPICAL_METAL_RENDER_TILE_FRAMES:
-        process.env.TROPICAL_DEMO_JIT ? '' : '512',
+        useMetal ? (process.env.TROPICAL_DEMO_QUANTUM ?? '128') : '',
     },
     stdio: ['ignore', 'ignore', 'pipe'],
   })
@@ -99,8 +103,7 @@ function call(method, params = {}) {
   return new Promise((resolve, reject) => {
     pending.set(id, { resolve, reject })
     sock ? sock.write(line) : outbox.push(line)
-    // load_patch_graph compiles the whole circuit into one kernel — the modal
-    // reverb's first (cache-cold) LLVM compile runs minutes-scale; be patient.
+    // A cache-cold modal graph can still take a few seconds to compile.
     const ms = method === 'load_patch_graph' ? 300000 : 15000
     setTimeout(() => {
       if (pending.has(id)) { pending.delete(id); reject(new Error(`timeout: ${method}`)) }
@@ -114,10 +117,12 @@ app.whenReady().then(() => {
   startEngine()
   tryConnect()
   const win = new BrowserWindow({
-    width: 1440,
-    height: 900,
-    backgroundColor: '#f2f0e8',
-    title: 'tropical',
+    width: 1240,
+    height: 790,
+    minWidth: 840,
+    minHeight: 620,
+    backgroundColor: '#0b0f12',
+    title: 'tropical / night scene 01',
     webPreferences: { preload: join(__dirname, 'preload.js') },
   })
   win.loadFile(join(__dirname, 'renderer/index.html'))

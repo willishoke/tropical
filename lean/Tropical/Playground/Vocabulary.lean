@@ -472,6 +472,9 @@ def portSpecs : String → Array PortSpec
   | "knob" => #[
       { name := "value", knob := some (0, 0),
         display := some { min := 0, max := 1000 } }]
+  | "glideknob" => #[
+      { name := "value", knob := some (0, 0), discipline := .glide,
+        display := some { min := 0, max := 1000 } }]
   | "source" => #[
       { name := "freq", accepts := ctrlIn, knob := some (220, 0), discipline := .anchor,
         display := some { min := 0.02, max := 2000, log := true, unit := "Hz" } },
@@ -525,7 +528,7 @@ def portSpecs : String → Array PortSpec
         display := some { min := 0.5, max := 50, log := true } }]
   | "reverb" => #[
       { name := "in", accepts := modalIn },
-      { name := "rt60", knob := some (2, 0),
+      { name := "rt60", accepts := ctrlIn, knob := some (2, 0),
         display := some { min := 0.2, max := 12, log := true, unit := "sec" } },
       { name := "dir", knob := some (0, 0),
         display := some { min := 0, max := 1 } },
@@ -535,9 +538,9 @@ def portSpecs : String → Array PortSpec
         display := some { min := 0.05, max := 8, log := true, unit := "Hz" } }]
   | "filter" => #[
       { name := "in", accepts := modalIn },
-      { name := "cutoff", knob := some (800, 0), discipline := .glide,
+      { name := "cutoff", accepts := ctrlIn, knob := some (800, 0), discipline := .glide,
         display := some { min := 20, max := 8000, log := true, unit := "Hz" } },
-      { name := "resonance", knob := some (5, 1), discipline := .glide,
+      { name := "resonance", accepts := ctrlIn, knob := some (5, 1), discipline := .glide,
         display := some { min := 0, max := 1 } }]
   | "modalmix" => #[{ name := "in", accepts := modalIn, multi := true }]
   -- gauge: the §5 excitation-gauge adapter — re-levels its modal input's peak by the
@@ -561,7 +564,7 @@ def portSpecs : String → Array PortSpec
 
 /-- Each kind's outlet color (`none` = no outlet, the dac sink). -/
 def outletOf : String → Option PortDomain
-  | "knob" => some .control
+  | "knob" | "glideknob" => some .control
   | "resonator" | "reverb" | "filter" | "modalmix" | "string" | "gauge" => some .modal
   | "out" => none
   | _ => some .signal
@@ -572,7 +575,7 @@ def outletOf : String → Option PortDomain
 def vocabularyKinds : Array String := #[
   "source", "pluck", "comb", "flange", "delay", "reverse", "fm", "sflange",
   "mix", "ring", "gong", "string", "resonator", "reverb", "filter",
-  "modalmix", "gauge", "knob", "out"]
+  "modalmix", "gauge", "knob", "glideknob", "out"]
 
 /-- Every kind `buildNode` actually constructs (its match arms — the AUTHORITATIVE
     list, read straight off the arms below). The classification-drift gate and
@@ -582,7 +585,7 @@ def vocabularyKinds : Array String := #[
     or explicitly withheld) and that no served kind drifts. (`out` is a dac sink,
     not a `buildNode` arm — it is in `vocabularyKinds`, not here.) -/
 def buildNodeKinds : Array String := #[
-  "knob", "source", "pluck", "comb", "flange", "sflange", "fm", "delay",
+  "knob", "glideknob", "source", "pluck", "comb", "flange", "sflange", "fm", "delay",
   "reverse", "mix", "ring", "resonator", "reverb", "filter", "modalmix",
   "gauge", "gong", "bloomgong", "string"]
 

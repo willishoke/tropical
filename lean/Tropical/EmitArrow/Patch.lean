@@ -73,11 +73,12 @@ inductive Node where
       sweeps the ±δ taps (an LFO, or any patched signal). `depthSec` is the sweep
       depth in seconds. The signal-warp distributes onto `input`'s generators. -/
   | sflange (input modInput : String) (depthSec : Sig)
-  /-- A KNOB: a program that is nothing but a param with one output. `idx` is the
-      `ParamIdx` of the root's param slot; it lowers to a τ-constant `paramRef`
-      leaf, so wiring it into a modulator/pitch position binds that parameter to a
-      live module slot (`param:<name>`), driven by `set_param` without a relower. -/
-  | knob (idx : Nat)
+  /-- A CONTROL: a program that is nothing but a scalar expression with one
+      output. A raw Knob supplies a `paramRef`; a GlideKnob supplies the same
+      closed-form smoothstep used by glided module parameters. Keeping the
+      expression here lets a shared control preserve its write discipline when
+      it is wired into several consumers. -/
+  | knob (value : Sig)
   /-- A one-sided resonant COMB: `input` read at a bank of clock-warped offsets,
       each weighted — `Σ wₖ·(warpₖ ⋙ input)`. `taps` is `(weight, clockShift)` per
       tap: tap 0 is usually the dry `(1, id)`, the rest a decaying series `(gᵏ,
@@ -436,7 +437,7 @@ def lowerNode (g : PatchGraph) (rankOf : String → Option Nat)
   | .sflange inId modId depthSec =>
     return sweptFlangeEffect (sflangeBack depthSec) (sflangeFwd depthSec)
       (← lowerInputGated g rankOf id modId r) (← lowerInputGated g rankOf id inId r)
-  | .knob idx => .ok (.konst (.paramRef ⟨idx⟩))
+  | .knob value => .ok (.konst value)
   | .comb inId taps => do
     let s ← lowerInputGated g rankOf id inId r
     return .sum (taps.map fun (w, φ) => .scale w (.warp φ s))

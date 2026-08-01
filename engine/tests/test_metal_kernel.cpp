@@ -38,6 +38,14 @@ static bool wait_for_true(
   return value.load(std::memory_order_acquire);
 }
 
+static void allow_live_staging_refill()
+{
+  // These C-API tests call the nominal audio callback in a tight CPU loop.
+  // Live audio supplies two Rgpu quanta between publication and activation;
+  // grant the asynchronous staging worker that same wall-time opportunity.
+  std::this_thread::sleep_for(std::chrono::milliseconds(25));
+}
+
 #define ASSERT(cond)                                                          \
   do {                                                                        \
     if (!(cond)) {                                                            \
@@ -266,12 +274,19 @@ static void test_metal_slots()
   for (unsigned int i = 0; i < buf; ++i) ASSERT_NEAR(out[i], 0.25, 1e-7);
   // Live slot write lands next block.
   tropical_runtime_set_slot(rt, 0, 0.75);
-  for (unsigned int block = 0; block < 512 / buf; ++block)
+  allow_live_staging_refill();
+  for (unsigned int block = 0; block < 1024 / buf; ++block)
   {
     tropical_runtime_process(rt);
     for (unsigned int i = 0; i < buf; ++i)
       ASSERT_NEAR(out[i], 0.25, 1e-7);
   }
+  tropical_runtime_process(rt);
+  ASSERT_NEAR(out[0], 0.25, 1e-7);
+  ASSERT(out[buf - 1] > 0.25 && out[buf - 1] < 0.75);
+  for (unsigned int block = 1; block < 512 / buf; ++block)
+    tropical_runtime_process(rt);
+  ASSERT_NEAR(out[buf - 1], 0.75, 1e-7);
   tropical_runtime_process(rt);
   for (unsigned int i = 0; i < buf; ++i) ASSERT_NEAR(out[i], 0.75, 1e-7);
   tropical_runtime_free(rt);
@@ -298,7 +313,7 @@ static void test_metal_hotswap()
                                       rampB.c_str(), rampB.size(),
                                       MANIFEST, strlen(MANIFEST)));
   const double* out = tropical_runtime_output_buffer(rt);
-  for (unsigned int block = 0; block < 512 / buf; ++block)
+  for (unsigned int block = 0; block < 1024 / buf; ++block)
   {
     tropical_runtime_process(rt);
     const uint64_t start = buf + static_cast<uint64_t>(block) * buf;
@@ -307,7 +322,7 @@ static void test_metal_hotswap()
   }
   tropical_runtime_process(rt);
   for (unsigned int i = 0; i < buf; ++i)
-    ASSERT_NEAR(out[i], 2.0 * (buf + 512 + i), 1e-5);
+    ASSERT_NEAR(out[i], 2.0 * (buf + 1024 + i), 1e-5);
   tropical_runtime_free(rt);
   printf("PASS  metal hot-swap carries the sample clock\n");
 }
@@ -404,12 +419,17 @@ static void test_metal_columns_live()
   // Live knob: set_slot re-runs the coefficient kernel into a fresh
   // generation; the next block captures + uploads it.
   tropical_runtime_set_slot(rt, 0, 1.5);
-  for (unsigned int block = 0; block < 512 / buf; ++block)
+  allow_live_staging_refill();
+  for (unsigned int block = 0; block < 1024 / buf; ++block)
   {
     tropical_runtime_process(rt);
     for (unsigned int i = 0; i < buf; ++i)
       ASSERT_NEAR(out[i], 0.25 + (double)(i % 4), 1e-7);
   }
+  tropical_runtime_process(rt);
+  ASSERT_NEAR(out[0], 0.25, 1e-7);
+  for (unsigned int block = 1; block < 512 / buf; ++block)
+    tropical_runtime_process(rt);
   tropical_runtime_process(rt);
   for (unsigned int i = 0; i < buf; ++i)
     ASSERT_NEAR(out[i], 1.5 + (double)(i % 4), 1e-7);
@@ -449,6 +469,7 @@ static void test_metal_effective_dispatch_epochs()
   for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 180.0, 1e-5);
 
   auto advance_to_activation = [&](uint64_t effective) {
+    allow_live_staging_refill();
     while (rt.current_sample_index() < effective)
       rt.process();
     ASSERT(rt.current_sample_index() == effective);
@@ -457,13 +478,20 @@ static void test_metal_effective_dispatch_epochs()
 
   const auto raw = rt.dispatch_param_sync("bank.freq", 260.0);
   ASSERT(raw.ok);
+  allow_live_staging_refill();
   ASSERT(raw.observed_sample_index == buf);
-  ASSERT(raw.effective_sample_index == buf + 512);
+  ASSERT(raw.effective_sample_index == buf + 1024);
   while (rt.current_sample_index() < raw.effective_sample_index)
   {
     for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 180.0, 1e-5);
     rt.process();
   }
+  rt.process();
+  ASSERT_NEAR(rt.outputBuffer.front(), 180.0, 1e-5);
+  ASSERT(rt.outputBuffer.back() > 180.0 && rt.outputBuffer.back() < 260.0);
+  for (unsigned int block = 1; block < 512 / buf; ++block)
+    rt.process();
+  ASSERT_NEAR(rt.outputBuffer.back(), 260.0, 1e-5);
   rt.process();
   for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 260.0, 1e-5);
 
@@ -534,7 +562,7 @@ static void test_metal_retarget_recomputes_companions()
   ASSERT(rt.load_ir_msl(JIT_CONST_IR, msl, manifest));
   rt.process();
 
-  const uint64_t provisional = rt.current_sample_index() + 512;
+  const uint64_t provisional = rt.current_sample_index() + 1024;
   const double old_v0 = rt.get_slot(1);
   const double old_v1 = rt.get_slot(2);
   const double old_t0 = rt.get_slot(3);
@@ -547,7 +575,7 @@ static void test_metal_retarget_recomputes_companions()
     result = rt.dispatch_param_sync("canary.morph", 0.5);
   });
   ASSERT(wait_for_true(seam.target_reserved));
-  for (unsigned int block = 0; block < 512 / buf; ++block)
+  for (unsigned int block = 0; block < 1024 / buf; ++block)
     rt.process();
   seam.pause_after_target_reserved.store(false, std::memory_order_release);
   seam.release_target.store(true, std::memory_order_release);
@@ -642,7 +670,7 @@ static void test_metal_dispatch_failure_fail_closed()
     msl.c_str(), msl.size(), MANIFEST, strlen(MANIFEST)));
   const uint64_t replacement_epoch =
     tropical_runtime_metal_published_activation_epoch(rt);
-  for (unsigned int block = 0; block < 64
+  for (unsigned int block = 0; block < 128
        && tropical_runtime_metal_acknowledged_activation_epoch(rt)
             < replacement_epoch; ++block)
     tropical_runtime_process(rt);
@@ -716,13 +744,17 @@ static void test_metal_clock_jump_and_precompiled_swap_stress()
       tropical_metal::EpochTransitionKind::ClockJump, source));
     ASSERT(scheduled.ok);
 
-    const auto old = consume();
-    ASSERT(old.status == tropical_runtime::TileConsumeStatus::Audio);
-    ASSERT(!old.activated);
-    ASSERT(old.source_start == active_source);
-    for (uint32_t sample = 0; sample < frames; ++sample)
-      ASSERT(output[sample]
-             == expected(active_source, sample, active_marker));
+    while (queue.published_device_frame() < scheduled.activation_frame)
+    {
+      const auto old = consume();
+      ASSERT(old.status == tropical_runtime::TileConsumeStatus::Audio);
+      ASSERT(!old.activated);
+      ASSERT(old.source_start == active_source);
+      for (uint32_t sample = 0; sample < frames; ++sample)
+        ASSERT(output[sample]
+               == expected(active_source, sample, active_marker));
+      active_source += frames;
+    }
 
     const auto switched = consume();
     ASSERT(switched.status == tropical_runtime::TileConsumeStatus::Audio);
@@ -885,13 +917,12 @@ static void test_metal_control_transition_stress()
       &slot_zero, 1, reference.data()));
     jit_reference.set_sample_index(result.effective_sample_index);
     jit_reference.process();
-    for (uint32_t sample = 0; sample < frames; ++sample)
-    {
-      ASSERT_NEAR(rt.outputBuffer[sample], reference[sample], 1e-4);
-      ASSERT_NEAR(
-        rt.outputBuffer[sample],
-        jit_reference.outputBuffer[sample], 1e-4);
-    }
+    // Continuous Metal epochs deliberately dezipper the old/new boundary over
+    // this render quantum. The correction is exactly zero at its final sample;
+    // the new epoch then agrees with both random-access and JIT references.
+    ASSERT_NEAR(rt.outputBuffer.back(), reference.back(), 1e-4);
+    ASSERT_NEAR(
+      rt.outputBuffer.back(), jit_reference.outputBuffer.back(), 1e-4);
   }
 
   for (auto & thread : contention) thread.request_stop();

@@ -179,7 +179,7 @@ static void test_candidate_late_retargets_off_audio()
   ASSERT(wait_for([&] {
     return candidate_started.load(std::memory_order_acquire);
   }));
-  for (unsigned i = 0; i < 4; ++i)
+  for (unsigned i = 0; i < 9; ++i)
     ASSERT(queue.consume(output.data(), 128).status
            == TileConsumeStatus::Audio);
   release_candidate.store(true, std::memory_order_release);
@@ -222,6 +222,53 @@ static void test_failed_candidate_keeps_active_epoch()
   ASSERT(queue.consume(output.data(), 128).status
          == TileConsumeStatus::Audio);
   ASSERT(queue.activation_acknowledged() == 1);
+}
+
+static void test_continuous_publish_does_not_wait_for_full_bank()
+{
+  EpochTileQueue queue(128, 512);
+  std::atomic<uint32_t> epoch_two_renders{0};
+  std::atomic<bool> second_render_started{false};
+  std::atomic<bool> release_second_render{false};
+  MetalRenderWorker worker(
+    queue,
+    [&](const RenderEpochRequest & request, uint64_t, uint32_t frames,
+        double * destination) {
+      if (request.epoch_id == 2)
+      {
+        const uint32_t count =
+          epoch_two_renders.fetch_add(1, std::memory_order_acq_rel) + 1;
+        if (count == 2)
+        {
+          second_render_started.store(true, std::memory_order_release);
+          while (!release_second_render.load(std::memory_order_acquire))
+            std::this_thread::yield();
+        }
+      }
+      std::fill_n(destination, frames, static_cast<double>(request.epoch_id));
+      return true;
+    });
+  ASSERT(worker.schedule(request(1, EpochTransitionKind::Fresh, 0)).ok);
+  std::array<double, 128> output{};
+  ASSERT(queue.consume(output.data(), output.size()).status
+         == TileConsumeStatus::Audio);
+  ASSERT(wait_for([&] { return queue.activation_acknowledged() == 1; }));
+
+  std::atomic<bool> schedule_returned{false};
+  tropical_metal::EpochScheduleResult result;
+  std::thread control([&] {
+    result = worker.schedule(request(2, EpochTransitionKind::Continuous));
+    schedule_returned.store(true, std::memory_order_release);
+  });
+  ASSERT(wait_for([&] {
+    return second_render_started.load(std::memory_order_acquire);
+  }));
+  ASSERT(schedule_returned.load(std::memory_order_acquire));
+  ASSERT(queue.published_activation_epoch() == 2);
+  ASSERT(epoch_two_renders.load(std::memory_order_acquire) == 2);
+  release_second_render.store(true, std::memory_order_release);
+  control.join();
+  ASSERT(result.ok);
 }
 
 static void test_teardown_waits_for_inflight_tile()
@@ -290,10 +337,10 @@ static void test_rapid_a_b_a_serializes_acknowledgements()
   {
     const uint64_t epoch = index + 2;
     const uint64_t expected_activation =
-      worker.reserve(EpochTransitionKind::Continuous).activation_frame;
+      worker.reserve(EpochTransitionKind::HotSwap).activation_frame;
     std::jthread control([&, index, epoch] {
       results[index] = worker.schedule(
-        request(epoch, EpochTransitionKind::Continuous));
+        request(epoch, EpochTransitionKind::HotSwap));
     });
     ASSERT(wait_for([&] {
       return queue.published_activation_epoch() == epoch;
@@ -330,6 +377,8 @@ int main()
            test_candidate_late_retargets_off_audio);
   run_test("failed candidate is not published over active epoch",
            test_failed_candidate_keeps_active_epoch);
+  run_test("continuous publish waits for one tile, not a full bank",
+           test_continuous_publish_does_not_wait_for_full_bank);
   run_test("control-thread teardown joins an in-flight tile safely",
            test_teardown_waits_for_inflight_tile);
   run_test("rapid A/B/A promises serialize through acknowledgements",

@@ -243,10 +243,23 @@ Each tile is tagged with an epoch id, monotonic device-frame start, independent
 Tropical source-sample start, and frame count. A control transaction first
 reserves a device activation boundary, computes its source-coordinate
 `effective_sample_index`, materializes every companion slot at that exact
-coordinate, renders a complete candidate window, and release-publishes one
-activation descriptor. The callback makes one bounded descriptor read and
-switches only at that boundary. Old audio is emitted strictly before `E`; the
-new epoch begins at `E`. Clock jumps change the source coordinate without
+coordinate, renders the first exact candidate tile, and release-publishes one
+activation descriptor. Fresh loads prefill all four tiles; after a live
+publication the worker fills the remaining three staging tiles while the old
+bank covers the interval to `E`. Continuous reservations use a two-`Rgpu`
+activation horizon, preventing a near-real-time candidate render from
+repeatedly losing a one-quantum callback race and retargeting. The callback
+makes one bounded descriptor read and switches only at that boundary. Old
+audio is emitted strictly before `E`; the
+new epoch begins at `E`. For a continuous control transition, the callback
+also samples the old epoch at that same source boundary and adds the bounded
+correction `old(E) - new(E)` to the new output. A smoothstep envelope removes
+that correction over exactly one `Rgpu` quantum, so the first sample is
+continuous and the error is bounded by the boundary discontinuity and is
+exactly zero by `E + Rgpu`. This output-side dezipper is constant work per
+sample: it does not retain an old render bank, duplicate modal state, or move
+coefficient work into the audio-rate kernel. Clock jumps and hot-swaps remain
+exact, without the dezipper. Clock jumps change the source coordinate without
 rewinding the device frame; hot-swaps carry the source coordinate.
 
 A missed candidate target is retargeted off the callback and all companion

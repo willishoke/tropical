@@ -2,12 +2,13 @@
   "name": "tropical-demo",
   "version": "0.1.0",
   "private": true,
-  "description": "tropical · the demo instrument — four scopes, one circuit, no state",
+  "description": "tropical · one exact-ratio modal night scene",
   "main": "main.js",
   "scripts": {
-    "start": "electron ."
+    "start": "electron .",
+    "test": "node --test scene.test.js param-sender.test.js"
   },
   "devDependencies": {
-    "electron": "^33.0.0"
+    "electron": "^33.4.11"
   }
 }

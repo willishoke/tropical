@@ -40,6 +40,7 @@ struct EpochActivation
   uint64_t activation_frame = 0;
   uint64_t source_start = 0;
   uint32_t bank_index = 0;
+  bool dezipper = false;
 };
 
 struct TileConsumeResult
@@ -243,6 +244,8 @@ public:
       activation.source_start, std::memory_order_relaxed);
     activation_bank_.store(
       activation.bank_index, std::memory_order_relaxed);
+    activation_dezipper_.store(
+      activation.dezipper ? 1U : 0U, std::memory_order_relaxed);
     activation_claim_.store(0, std::memory_order_relaxed);
     activation_epoch_.store(
       activation.epoch_id, std::memory_order_relaxed);
@@ -308,9 +311,16 @@ public:
         has_activation = false;
       }
     }
+    bool start_dezipper = false;
+    double old_boundary_sample = 0.0;
     if (has_activation && activation.epoch_id != audio_epoch_id_
         && activation.activation_frame <= audio_device_frame_)
     {
+      start_dezipper = activation.dezipper && audio_epoch_id_ != 0
+        && peek_current_sample(old_boundary_sample);
+      if (start_dezipper)
+        old_boundary_sample += current_dezipper_correction();
+      clear_dezipper();
       release_reading_tile();
       audio_epoch_id_ = activation.epoch_id;
       audio_active_bank_local_ = activation.bank_index;
@@ -391,6 +401,9 @@ public:
 
     std::copy_n(
       tile->samples.data() + reading_offset_, frames, destination);
+    if (start_dezipper)
+      begin_dezipper(old_boundary_sample, destination[0]);
+    apply_dezipper(destination, frames);
     reading_offset_ += frames;
     advance_coordinates(frames);
     if (reading_offset_ == tag.frame_count)
@@ -586,6 +599,8 @@ private:
       activation_source_.load(std::memory_order_relaxed);
     activation.bank_index =
       activation_bank_.load(std::memory_order_relaxed);
+    activation.dezipper =
+      activation_dezipper_.load(std::memory_order_relaxed) != 0;
     const uint64_t after =
       activation_sequence_.load(std::memory_order_acquire);
     if (before != after || (after & 1U) != 0)
@@ -604,6 +619,67 @@ private:
     tile.state.store(TileState::Free, std::memory_order_release);
     reading_tile_index_ = kNoTile;
     reading_offset_ = 0;
+  }
+
+  // Audio callback only. A continuous epoch changes a closed-form function at
+  // one exact boundary. Peek the old epoch at that SAME source/device sample,
+  // match the first new sample to it, then remove the correction with a
+  // smoothstep over one GPU render quantum. The approximation is bounded by
+  // |old(E) - new(E)| and identically zero after render_frames_ samples; no old
+  // bank ownership, extra mode, allocation, lock, or GPU dispatch is required.
+  bool peek_current_sample(double & sample) const noexcept
+  {
+    if (active_faulted_ || audio_epoch_id_ == 0
+        || audio_active_bank_local_ >= kBankCount)
+      return false;
+    const uint32_t index = reading_tile_index_ != kNoTile
+      ? reading_tile_index_ : expected_tile_index_;
+    if (index >= kTilesPerBank) return false;
+    const Tile & tile = banks_[audio_active_bank_local_].tiles[index];
+    const TileState state = tile.state.load(std::memory_order_acquire);
+    if (state != TileState::Ready && state != TileState::Reading) return false;
+    const uint32_t offset = reading_tile_index_ != kNoTile ? reading_offset_ : 0;
+    const TileTag & tag = tile.tag;
+    if (tag.epoch_id != audio_epoch_id_
+        || tag.device_start + offset != audio_device_frame_
+        || tag.source_start + offset != audio_source_sample_
+        || offset >= tag.frame_count)
+      return false;
+    sample = tile.samples[offset];
+    return true;
+  }
+
+  void begin_dezipper(double old_boundary, double new_boundary) noexcept
+  {
+    dezipper_delta_ = old_boundary - new_boundary;
+    dezipper_total_ = render_frames_;
+    dezipper_position_ = 0;
+  }
+
+  double current_dezipper_correction() const noexcept
+  {
+    if (dezipper_position_ >= dezipper_total_) return 0.0;
+    const double denominator = dezipper_total_ > 1
+      ? static_cast<double>(dezipper_total_ - 1) : 1.0;
+    const double x = static_cast<double>(dezipper_position_) / denominator;
+    const double smooth = x * x * (3.0 - 2.0 * x);
+    return dezipper_delta_ * (1.0 - smooth);
+  }
+
+  void clear_dezipper() noexcept
+  {
+    dezipper_delta_ = 0.0;
+    dezipper_total_ = 0;
+    dezipper_position_ = 0;
+  }
+
+  void apply_dezipper(double * destination, uint32_t frames) noexcept
+  {
+    if (!destination || dezipper_position_ >= dezipper_total_) return;
+    for (uint32_t i = 0;
+         i < frames && dezipper_position_ < dezipper_total_;
+         ++i, ++dezipper_position_)
+      destination[i] += current_dezipper_correction();
   }
 
   void latch_starvation(TileState observed_state)
@@ -704,6 +780,7 @@ private:
   std::atomic<uint64_t> activation_frame_{0};
   std::atomic<uint64_t> activation_source_{0};
   std::atomic<uint32_t> activation_bank_{kNoBank};
+  std::atomic<uint8_t> activation_dezipper_{0};
   std::atomic<uint64_t> activation_acknowledged_{0};
   std::atomic<uint64_t> activation_claim_{0};
 
@@ -744,6 +821,9 @@ private:
   uint32_t expected_tile_index_ = 0;
   uint32_t reading_tile_index_ = kNoTile;
   uint32_t reading_offset_ = 0;
+  double dezipper_delta_ = 0.0;
+  uint32_t dezipper_total_ = 0;
+  uint32_t dezipper_position_ = 0;
   bool active_faulted_ = false;
 };
 

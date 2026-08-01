@@ -63,6 +63,19 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
   let p := fun (kname : String) (dflt : Sig) =>
     if isGlided kind kname then glideExpr pidx s!"{id}.{kname}" dflt
     else pref pidx s!"{id}.{kname}" dflt
+  -- A wired control inlet supersedes this node's private slot. Its own
+  -- discipline remains attached to the SOURCE: a GlideKnob has a #v0/#v1/#t0
+  -- triple and therefore stays a closed-form glide after fan-out; a raw Knob
+  -- remains a plain paramRef. Several modal islands can consequently share one
+  -- smooth control and one host write without silently losing dezippering.
+  let controlValue := fun (controlId : String) (dflt : Sig) =>
+    let base := s!"{controlId}.value"
+    if (pidx s!"{base}#v0").isSome then glideExpr pidx base dflt
+    else pref pidx base dflt
+  let wp := fun (kname : String) (dflt : Sig) =>
+    match (portSources inObj kname)[0]? with
+    | some controlId => controlValue controlId dflt
+    | none => p kname dflt
   -- a knob's request-or-table default: the JSON params value if given, else the
   -- table's fallback — the one place buildNode learns a default from.
   let dv := fun (kname : String) => jExpr params kname (fallbackOf kind kname)
@@ -70,13 +83,15 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
   match kind with
   | "knob" =>
     match pidx s!"{id}.value" with
-    | some i => (.knob i, #[])
+    | some i => (.knob (.paramRef ⟨i⟩), #[])
     | none => (.mix #[], #[])   -- a knob missing from the table (unreachable): silence
+  | "glideknob" =>
+    (.knob (glideExpr pidx s!"{id}.value" (dv "value")), #[])
   | "source" =>
     -- a Knob wired into `freq` shadows the baked freq slot: read the WIRED knob's
     -- `<id>.value` slot instead.
     let pitchE := match (portSources inObj "freq")[0]? with
-      | some w => pref pidx s!"{w}.value" (dv "freq")
+      | some w => controlValue w (dv "freq")
       | none => p "freq" (dv "freq")
     let morphE := p "morph" (dv "morph")
     -- the anchor: (phase slot, compile-time freq). Present only when the source's
@@ -101,7 +116,7 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
     -- a plucked MorphOsc source: pitch (anchored), morph (glided), and event_rate
     -- (glided) drive the baked-in envelope. The dynamic content of the instrument.
     let pitchE := match (portSources inObj "freq")[0]? with
-      | some w => pref pidx s!"{w}.value" (dv "freq")
+      | some w => controlValue w (dv "freq")
       | none => p "freq" (dv "freq")
     let anchor := (pidx s!"{id}.freq#phase").map fun i => ((.paramRef ⟨i⟩ : Sig), dv "freq")
     (.source (pluckedVoiceE pitchE (p "morph" (dv "morph"))
@@ -170,7 +185,12 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
       let countE := pref pidx s!"{id}.partials" (lit (Int.ofNat npart))
       (.modalSource (resonatorBank f0 decay cap) (lit 0) clk addr? (some countE), #[])
   | "reverb" =>
-    let rt60 := p "rt60" (dv "rt60")
+    let rt60 := wp "rt60" (dv "rt60")
+    -- The room's structural mode count defaults to the served 32-mode bank.
+    -- A fixed demo instrument may request a smaller compiled room without
+    -- turning topology into a live knob; omitted graphs remain byte-for-byte
+    -- on the incumbent path.
+    let roomModes := (jInt params "modes" 32).toNat
     -- reading DIRECTION: θ (radians, live) rotates the composed tail's poles in the
     -- s-plane — 0 = forward decay, π = reverse (pre-verb), interior = a continuous
     -- U(1) morph (σ↔ω at π/2). `window` (live) nulls each mode at its horizon-
@@ -186,12 +206,14 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
     let sway := p "sway" (dv "sway")
     let swayRate := p "rate" (dv "rate")   -- 0.3 Hz: a slow breath
     let dir : ModalDir := { dir := dirX, damp := some (sway, swayRate) }
-    (.modalReverb sig (reverbRoom rt60 (displayRangeOf "reverb" "rt60") 32 (60, 0) (6000, 0)) (some dir), #[])
+    (.modalReverb sig
+      (reverbRoom rt60 (displayRangeOf "reverb" "rt60") roomModes (60, 0) (6000, 0))
+      (some dir), #[])
   | "filter" =>
     -- the filter IS a modalReverb with a computed 2-mode room: the residue
     -- calculus does the "filtering" at build time, knobs stay live through it.
     (.modalReverb sig
-      (filterPair (p "cutoff" (dv "cutoff")) (p "resonance" (dv "resonance"))) none, #[])
+      (filterPair (wp "cutoff" (dv "cutoff")) (wp "resonance" (dv "resonance"))) none, #[])
   | "modalmix" => (.modalMix (portSources inObj "in"), #[])
   | "gauge" =>
     -- §5 excitation gauge: re-level the modal input's peak. g=0 identity (unity-DC,
@@ -533,7 +555,7 @@ def decodeGraph (j : Json) : Except String (PatchGraph × Array (String × JsonN
   -- still lowers to silence: `__mixbus__` is an empty sum, `× gain` is still 0.
   let masterIdx := (pidx masterGainParam).getD 0
   pnodes := pnodes.push { id := "__mixbus__", node := .mix outIns }
-  pnodes := pnodes.push { id := "__master__", node := .knob masterIdx }
+  pnodes := pnodes.push { id := "__master__", node := .knob (.paramRef ⟨masterIdx⟩) }
   pnodes := pnodes.push { id := "__out__", node := .ring #["__mixbus__", "__master__"] }
   pnodes := pnodes.push { id := "__silence__", node := .mix #[] }
   pure ({ nodes := pnodes, output := "__out__" }, params)

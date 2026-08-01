@@ -191,13 +191,22 @@ def runMalformedRejection (arena : Arena)
   let unknownKind := "{\"nodes\":[" ++
     "{\"id\":\"x\",\"kind\":\"reverbb\",\"params\":{\"rt60\":2}}," ++
     "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"x\"]}}],\"out\":\"out\"}"
-  -- a non-empty WIRE INTO A KNOB (`rt60` is a set value, not an inlet): slips past
+  -- a non-empty WIRE INTO A KNOB (`dir` is a set value, not an inlet): slips past
   -- the color loop (empty accepts) yet suppresses the slot — a silently dead knob.
   let knobWire := "{\"nodes\":[" ++
     "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
     "{\"id\":\"k\",\"kind\":\"knob\",\"params\":{\"value\":3}}," ++
-    "{\"id\":\"rev\",\"kind\":\"reverb\",\"in\":{\"in\":[\"res\"],\"rt60\":[\"k\"]}}," ++
+    "{\"id\":\"rev\",\"kind\":\"reverb\",\"in\":{\"in\":[\"res\"],\"dir\":[\"k\"]}}," ++
     "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"rev\"]}}],\"out\":\"out\"}"
+  -- The positive twin: cutoff IS now a control inlet. Two modal islands may
+  -- share one glided control triple, with both private cutoff params absent.
+  let sharedFilter := "{\"nodes\":[" ++
+    "{\"id\":\"k\",\"kind\":\"glideknob\",\"params\":{\"value\":700}}," ++
+    "{\"id\":\"r1\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"r2\",\"kind\":\"resonator\",\"params\":{\"freq\":330,\"decay\":4}}," ++
+    "{\"id\":\"f1\",\"kind\":\"filter\",\"in\":{\"in\":[\"r1\"],\"cutoff\":[\"k\"]}}," ++
+    "{\"id\":\"f2\",\"kind\":\"filter\",\"in\":{\"in\":[\"r2\"],\"cutoff\":[\"k\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"f1\",\"f2\"]}}],\"out\":\"out\"}"
   -- the crisp boundary: a valid modal patch still compiles.
   let valid := "{\"nodes\":[" ++
     "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
@@ -210,6 +219,20 @@ def runMalformedRejection (arena : Arena)
   let mWithheld := compileErr withheldKind
   let mUnknown := compileErr unknownKind
   let mKnob := compileErr knobWire
+  let sharedOk := match Lean.Json.parse sharedFilter with
+    | .ok j => match Tropical.Playground.compilePlanPure arena resolved j with
+      | .ok compiled =>
+        compiled.plan.slotNames.contains "param:k.value#v0"
+          && compiled.plan.slotNames.contains "param:k.value#v1"
+          && compiled.plan.slotNames.contains "param:k.value#t0"
+          && !compiled.plan.slotNames.contains "param:k.value"
+          && !compiled.plan.slotNames.contains "param:f1.cutoff#v0"
+          && !compiled.plan.slotNames.contains "param:f2.cutoff#v0"
+          && compiled.plan.paramDisciplines.any (fun d =>
+            d.name == "k.value" && d.discipline == "glide")
+          && (unreadParamSlots compiled.plan).isEmpty
+      | .error _ => false
+    | .error _ => false
   let mValid := match Lean.Json.parse valid with
     | .ok j => (Tropical.Playground.compilePlanPure arena resolved j).toOption.isSome
     | .error _ => false
@@ -228,11 +251,12 @@ def runMalformedRejection (arena : Arena)
   IO.println s!"        withheld kind        {mWithheld}"
   IO.println s!"        unknown kind         {mUnknown}"
   IO.println s!"        wire into a knob     {mKnob}"
+  IO.println s!"        shared glided filter control compiles={sharedOk}"
   IO.println s!"        valid modal patch compiles={mValid}"
-  if revOk && mixOk && wireOk && outOk && withheldOk && unknownOk && knobOk && mValid then
-    passGate "malformed-rejection" "a color-legal cycle, a dangling wire/out, a WITHHELD kind (bloomgong), an UNKNOWN kind, and a wire-into-a-knob each return a clear error (no stack-overflow); a valid patch still compiles"
+  if revOk && mixOk && wireOk && outOk && withheldOk && unknownOk && knobOk && sharedOk && mValid then
+    passGate "malformed-rejection" "a color-legal cycle, a dangling wire/out, a WITHHELD kind (bloomgong), an UNKNOWN kind, and a wire-into-a-knob each return a clear error (no stack-overflow); shared glided control inlets and a valid patch compile"
   else
-    failGate "malformed-rejection" s!"revOk={revOk} mixOk={mixOk} wireOk={wireOk} outOk={outOk} withheldOk={withheldOk} unknownOk={unknownOk} knobOk={knobOk} valid={mValid}"
+    failGate "malformed-rejection" s!"revOk={revOk} mixOk={mixOk} wireOk={wireOk} outOk={outOk} withheldOk={withheldOk} unknownOk={unknownOk} knobOk={knobOk} sharedOk={sharedOk} valid={mValid}"
 
 open Tropical.Playground in
 /-- THE REALIZED-STATE REPORT gate. The `load_patch_graph` reply must state

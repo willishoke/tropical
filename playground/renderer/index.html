@@ -1,129 +1,388 @@
 <!doctype html>
-<html>
+<html lang="en">
 <head>
 <meta charset="utf-8">
-<title>tropical</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>tropical / night scene</title>
 <style>
-  /* ── the register: early-Apple 1-bit paper, CRT wells for the scopes ── */
-  * { margin: 0; padding: 0; box-sizing: border-box; }
+  * { box-sizing: border-box; }
+
   :root {
-    --paper: #f2f0e8;
-    --ink: #111111;
-    --phosphor: #3aff6e;
-    --phosphor-dim: #123a1c;
-    --crt: #060c07;
+    color-scheme: dark;
+    --ground: #0b0f12;
+    --surface: #11171b;
+    --raised: #161d21;
+    --rule: #293238;
+    --rule-live: #42514f;
+    --text: #cbd3d0;
+    --muted: #71807d;
+    --strings: #72b6a1;
+    --room: #d49a6a;
+    --focus: #d5c66f;
+    --fault: #c27386;
+    --ink-black: #070a0c;
   }
+
   html, body { height: 100%; }
+
   body {
-    background: var(--paper);
-    color: var(--ink);
-    font-family: "SF Mono", Menlo, monospace;
-    font-size: 13px;
+    margin: 0;
+    min-width: 840px;
+    min-height: 620px;
     overflow: hidden;
+    background: var(--ground);
+    color: var(--text);
+    font: 12px/1.35 "SFMono-Regular", "SF Mono", "Cascadia Mono",
+      "Liberation Mono", Menlo, monospace;
+    font-variant-numeric: tabular-nums;
     user-select: none;
+  }
+
+  button, input { font: inherit; }
+  button { color: inherit; }
+
+  #frame {
+    height: 100%;
+    display: grid;
+    grid-template-rows: auto auto minmax(170px, 0.86fr) minmax(250px, 1.14fr) auto;
+    gap: 10px;
+    padding: 13px 15px 11px;
+  }
+
+  #masthead,
+  .section-head,
+  .scope-head,
+  #transport {
+    display: flex;
+    align-items: center;
+  }
+
+  #masthead {
+    min-height: 28px;
+    gap: 14px;
+    border-bottom: 1px solid var(--rule);
+    padding: 0 1px 8px;
+  }
+
+  #mark {
+    color: var(--text);
+    font-weight: 700;
+    letter-spacing: 0.15em;
+  }
+
+  #scene-name {
+    color: var(--strings);
+    letter-spacing: 0.09em;
+  }
+
+  #status {
+    margin-left: auto;
+    color: var(--muted);
+    font-size: 10px;
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+
+  #status.fault { color: var(--fault); }
+
+  .section-head {
+    justify-content: space-between;
+    min-height: 22px;
+    color: var(--muted);
+    font-size: 10px;
+    letter-spacing: 0.11em;
+    text-transform: uppercase;
+  }
+
+  #sequence { min-height: 0; }
+
+  #steps {
+    display: grid;
+    grid-template-columns: repeat(16, minmax(0, 1fr));
+    gap: 4px;
+  }
+
+  .step {
+    position: relative;
+    min-width: 0;
+    height: 31px;
+    border: 1px solid var(--rule);
+    border-radius: 0;
+    padding: 5px 3px 4px;
+    background: var(--surface);
+    color: var(--muted);
+    cursor: pointer;
+    outline: none;
+  }
+
+  .step::after {
+    content: "";
+    position: absolute;
+    left: 5px;
+    right: 5px;
+    bottom: 3px;
+    height: 1px;
+    background: transparent;
+  }
+
+  .step.downbeat {
+    border-color: var(--rule-live);
+    color: var(--text);
+  }
+
+  .step.downbeat::after { background: var(--strings); }
+  .step:hover { border-color: var(--strings); color: var(--text); }
+  .step:focus-visible { border-color: var(--focus); }
+
+  .step.active {
+    border-color: var(--focus);
+    background: color-mix(in srgb, var(--focus) 12%, var(--surface));
+    color: var(--focus);
+  }
+
+  .step .ordinal {
+    display: block;
+    overflow: hidden;
+    text-align: center;
+    text-overflow: clip;
+    white-space: nowrap;
+  }
+
+  #chord-strip {
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 8px;
+    padding-top: 7px;
+  }
+
+  .chord {
+    min-width: 0;
+    border: 0;
+    border-left: 2px solid var(--rule-live);
+    border-radius: 0;
+    padding: 2px 8px 3px;
+    background: transparent;
+    cursor: pointer;
+    text-align: left;
+    outline: none;
+  }
+
+  .chord:hover, .chord:focus-visible { border-left-color: var(--focus); }
+  .chord.active { border-left-color: var(--strings); }
+
+  .chord-name {
+    display: block;
+    color: var(--text);
+    font-size: 11px;
+  }
+
+  .chord-ratios {
+    display: block;
+    overflow: hidden;
+    margin-top: 1px;
+    color: var(--muted);
+    font-size: 9px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  #scopes {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px;
+    min-height: 0;
+  }
+
+  .scope {
+    min-width: 0;
+    min-height: 0;
+    display: grid;
+    grid-template-rows: 27px minmax(0, 1fr);
+    border: 1px solid var(--rule);
+    background: var(--surface);
+  }
+
+  .scope-head {
+    justify-content: space-between;
+    gap: 12px;
+    border-bottom: 1px solid var(--rule);
+    padding: 0 9px;
+    font-size: 10px;
+    letter-spacing: 0.07em;
+  }
+
+  .scope-meta {
+    color: var(--muted);
+    font-size: 9px;
+    letter-spacing: 0;
+    white-space: nowrap;
+  }
+
+  .scope canvas {
+    display: block;
+    width: 100%;
+    height: 100%;
+    min-height: 0;
+  }
+
+  #controls {
+    min-height: 0;
+    overflow: hidden;
+    border-top: 1px solid var(--rule);
+    background: var(--surface);
+  }
+
+  .control {
+    display: grid;
+    grid-template-columns: 128px minmax(180px, 1fr) 88px minmax(190px, 0.75fr);
+    align-items: center;
+    min-height: 35px;
+    border-bottom: 1px solid var(--rule);
+    padding: 0 10px;
     cursor: default;
   }
 
-  #frame { display: flex; flex-direction: column; height: 100%; padding: 10px; gap: 8px; }
-
-  /* header: chunky title + pinstripe fill, like a System 6 title bar */
-  #titlebar {
-    display: flex; align-items: center; gap: 12px;
-    border: 2px solid var(--ink);
-    padding: 4px 10px;
-    background: var(--paper);
-  }
-  #titlebar .stripes {
-    flex: 1; height: 12px;
-    background: repeating-linear-gradient(0deg, var(--ink) 0 1px, transparent 1px 3px);
-  }
-  #titlebar h1 { font-size: 15px; letter-spacing: 3px; font-weight: 800; }
-  #status { font-size: 11px; white-space: nowrap; }
-
-  #main { display: flex; flex: 1; gap: 8px; min-height: 0; }
-
-  /* left column: the circuit diagram */
-  #circuit {
-    width: 240px; flex: none;
-    border: 2px solid var(--ink);
-    background: var(--paper);
-    display: flex; flex-direction: column;
-  }
-  #circuit .paneltitle, .paneltitle {
-    border-bottom: 2px solid var(--ink);
-    padding: 2px 6px;
-    font-size: 10px; letter-spacing: 2px; font-weight: 700;
-  }
-  #diagram { flex: 1; width: 100%; }
-
-  #right { flex: 1; display: flex; flex-direction: column; gap: 8px; min-width: 0; }
-
-  /* four CRT wells across the top */
-  #scopes { display: grid; grid-template-columns: repeat(4, 1fr); gap: 8px; height: 220px; flex: none; }
-  .well { border: 2px solid var(--ink); display: flex; flex-direction: column; background: var(--paper); }
-  .well .paneltitle { display: flex; justify-content: space-between; }
-  .well canvas {
-    flex: 1; width: 100%;
-    background: var(--crt);
-    image-rendering: pixelated;
+  .control.selected {
+    background: var(--raised);
+    box-shadow: inset 2px 0 var(--focus);
   }
 
-  /* module rows */
-  #modules { flex: 1; border: 2px solid var(--ink); overflow-y: auto; background: var(--paper); }
-  .modrow { display: flex; border-bottom: 1px solid var(--ink); align-items: stretch; }
-  .modrow:last-child { border-bottom: none; }
-  .modname {
-    width: 110px; flex: none;
-    padding: 8px 8px;
-    font-weight: 800; font-size: 11px; letter-spacing: 1px;
-    border-right: 2px solid var(--ink);
-    display: flex; align-items: center;
+  .control-label {
+    color: var(--text);
+    letter-spacing: 0.06em;
+    text-transform: uppercase;
   }
-  .knobs { display: flex; flex-wrap: wrap; gap: 2px 14px; padding: 6px 10px; align-items: center; }
-  .knob { display: flex; align-items: baseline; gap: 6px; padding: 2px 4px; }
-  .knob .lbl { font-size: 11px; }
-  .knob .bar { font-size: 12px; letter-spacing: -1px; }
-  .knob .val { font-size: 11px; min-width: 68px; }
-  .knob.sel { background: var(--ink); color: var(--paper); }
+
+  .control-value {
+    padding-left: 12px;
+    color: var(--strings);
+    text-align: right;
+  }
+
+  .control.transport-control .control-value { color: var(--focus); }
+
+  .control-help {
+    overflow: hidden;
+    padding-left: 18px;
+    color: var(--muted);
+    font-size: 9px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  input[type="range"] {
+    width: 100%;
+    height: 20px;
+    margin: 0;
+    padding: 0;
+    appearance: none;
+    background: transparent;
+    cursor: ew-resize;
+    outline: none;
+  }
+
+  input[type="range"]::-webkit-slider-runnable-track {
+    height: 2px;
+    background:
+      linear-gradient(to right,
+        var(--strings) 0 var(--fill),
+        var(--rule-live) var(--fill) 100%);
+  }
+
+  input[type="range"]::-webkit-slider-thumb {
+    width: 7px;
+    height: 16px;
+    margin-top: -7px;
+    appearance: none;
+    border: 0;
+    border-radius: 0;
+    background: var(--text);
+  }
+
+  input[type="range"]:focus-visible::-webkit-slider-thumb {
+    background: var(--focus);
+  }
 
   #transport {
-    border: 2px solid var(--ink); flex: none;
-    display: flex; align-items: center; gap: 16px;
-    padding: 6px 12px; font-size: 12px;
+    min-height: 34px;
+    gap: 7px;
+    border-top: 1px solid var(--rule);
+    padding-top: 9px;
   }
-  #transport .glyph { font-size: 16px; font-weight: 800; min-width: 34px; }
-  #tau { margin-left: auto; font-size: 11px; }
+
+  .transport-button {
+    height: 25px;
+    border: 1px solid var(--rule);
+    border-radius: 0;
+    padding: 0 9px;
+    background: var(--surface);
+    cursor: pointer;
+    outline: none;
+  }
+
+  .transport-button:hover { border-color: var(--strings); }
+  .transport-button:focus-visible { border-color: var(--focus); }
+  #play-button { min-width: 86px; color: var(--focus); }
+
+  #clock {
+    margin-left: auto;
+    color: var(--text);
+    letter-spacing: 0.04em;
+    white-space: nowrap;
+  }
+
+  #clock .dim, #tail-state { color: var(--muted); }
 
   #help {
-    flex: none; font-size: 10px; letter-spacing: 0.5px;
-    padding: 2px 4px; opacity: 0.75;
+    margin-left: 10px;
+    color: var(--muted);
+    font-size: 9px;
+    white-space: nowrap;
+  }
+
+  @media (max-height: 730px) {
+    #frame {
+      grid-template-rows: auto auto minmax(145px, 0.78fr) minmax(245px, 1.22fr) auto;
+      gap: 7px;
+      padding-top: 9px;
+    }
+    .control { min-height: 32px; }
+    .chord-ratios { display: none; }
   }
 </style>
 </head>
 <body>
-  <div id="frame">
-    <div id="titlebar">
-      <h1>TROPICAL</h1>
-      <div class="stripes"></div>
-      <div id="status">booting…</div>
-    </div>
-    <div id="main">
-      <div id="circuit">
-        <div class="paneltitle">CIRCUIT</div>
-        <canvas id="diagram"></canvas>
+  <main id="frame">
+    <header id="masthead">
+      <span id="mark">TROPICAL</span>
+      <span>/</span>
+      <span id="scene-name">NIGHT SCENE 01</span>
+      <span id="status">preparing strings + wet metal…</span>
+    </header>
+
+    <section id="sequence" aria-label="Scene sequence">
+      <div class="section-head">
+        <span>one scene / sixteen moments</span>
+        <span id="tail-state">16 s / closed circuit</span>
       </div>
-      <div id="right">
-        <div id="scopes"></div>
-        <div id="modules"></div>
-        <div id="transport">
-          <span class="glyph" id="tglyph">▶▶</span>
-          <span id="ttext">FORWARD 1.00×</span>
-          <span id="tau">τ 0</span>
-        </div>
-        <div id="help">↑↓ knob · ←→ adjust (⇧ fine) · SPACE freeze/run · R reverse · scopes are random-access reads of the running kernel</div>
-      </div>
-    </div>
-  </div>
+      <div id="steps"></div>
+      <div id="chord-strip"></div>
+    </section>
+
+    <section id="scopes" aria-label="Signal scopes"></section>
+    <section id="controls" aria-label="Scene controls"></section>
+
+    <footer id="transport">
+      <button class="transport-button" id="restart-button" type="button">↤ 00</button>
+      <button class="transport-button" id="reverse-button" type="button">REV</button>
+      <button class="transport-button" id="play-button" type="button">Ⅱ HOLD</button>
+      <span id="clock"><span class="dim">τ</span> 00.000 / 16.000</span>
+      <span id="help">↑↓ row · ←→ move · shift fine · click any moment</span>
+    </footer>
+  </main>
+
+  <script src="../scene.js"></script>
+  <script src="latest-value-sender.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

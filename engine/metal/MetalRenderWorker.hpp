@@ -136,6 +136,7 @@ private:
   void run();
   bool observe_activation_acknowledgement();
   bool refill_active_bank();
+  bool refill_pending_bank();
   EpochScheduleResult prepare_activation(RenderEpochRequest request);
   bool render_one(
     uint32_t bank_index, BankRenderCursor & cursor,

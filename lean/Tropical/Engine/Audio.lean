@@ -198,10 +198,17 @@ private def applyParamVelocity (env : Env) (args : Json) : EngineM Json := do
   let sr ← env.runtime.sampleRate
   let v0 ← env.runtime.getSlot velIdx
   let tb0 ← env.runtime.getSlot tauIdx
-  env.runtime.setSlot tauIdx (tb0 + (v0 - target) * now / sr)
+  let tb1 := tb0 + (v0 - target) * now / sr
+  env.runtime.setSlot tauIdx tb1
   env.runtime.setSlot velIdx target
-  env.state.modify (·.setParamValue name (toJson target))
-  pure <| Json.mkObj [("name", Json.str name), ("value", toJson target)]
+  env.state.modify fun st =>
+    (st.setParamValue tauName (toJson tb1)).setParamValue name (toJson target)
+  pure <| Json.mkObj [
+    ("name", Json.str name),
+    ("value", toJson target),
+    ("tau_base", toJson tb1),
+    ("observed_sample_index", toJson now),
+    ("effective_sample_index", toJson now)]
 
 /-- The one public `set_param`, dispatched by the plan's own discipline table
     (the host

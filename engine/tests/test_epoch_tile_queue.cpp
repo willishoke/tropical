@@ -75,6 +75,21 @@ static void prepare_epoch(EpochTileQueue & queue, uint32_t bank,
        queue.render_frames()}));
 }
 
+static void prepare_constant_epoch(EpochTileQueue & queue, uint32_t bank,
+                                   uint64_t epoch, uint64_t device_start,
+                                   uint64_t source_start, double value)
+{
+  ASSERT(queue.begin_epoch(bank, epoch));
+  for (uint32_t i = 0; i < EpochTileQueue::kTilesPerBank; ++i)
+    ASSERT(publish_constant(
+      queue, bank, i,
+      {epoch,
+       device_start + static_cast<uint64_t>(i) * queue.render_frames(),
+       source_start + static_cast<uint64_t>(i) * queue.render_frames(),
+       queue.render_frames()},
+      value));
+}
+
 static void test_independent_quanta()
 {
   for (uint32_t device : {128U, 256U, 512U})
@@ -111,6 +126,66 @@ static void test_activation_and_jump()
   ASSERT(activation.activated);
   ASSERT(out.front() == static_cast<double>(1ULL << 40));
   ASSERT(queue.activation_acknowledged() == 2);
+}
+
+static void test_continuous_activation_dezippers()
+{
+  EpochTileQueue queue(128, 512);
+  prepare_constant_epoch(queue, 0, 1, 0, 0, 1.0);
+  ASSERT(queue.publish_activation({1, 0, 0, 0, false}));
+  std::array<double, 128> block{};
+  ASSERT(queue.consume(block.data(), block.size()).status
+         == TileConsumeStatus::Audio);
+  for (double sample : block) ASSERT(sample == 1.0);
+
+  prepare_constant_epoch(queue, 1, 2, 128, 128, -1.0);
+  ASSERT(queue.publish_activation({2, 128, 128, 1, true}));
+  std::array<double, 512> transition{};
+  for (uint32_t callback = 0; callback < 4; ++callback)
+  {
+    const auto consumed = queue.consume(block.data(), block.size());
+    ASSERT(consumed.status == TileConsumeStatus::Audio);
+    if (callback == 0) ASSERT(consumed.activated);
+    std::copy_n(
+      block.begin(), block.size(),
+      transition.begin() + callback * block.size());
+  }
+  ASSERT(transition.front() == 1.0);
+  ASSERT(transition.back() == -1.0);
+  double largest_step = 0.0;
+  for (uint32_t i = 1; i < transition.size(); ++i)
+    largest_step = std::max(
+      largest_step, std::abs(transition[i] - transition[i - 1]));
+  ASSERT(largest_step < 0.01);
+  ASSERT(queue.activation_acknowledged() == 2);
+}
+
+static void test_new_activation_replaces_active_dezipper()
+{
+  EpochTileQueue queue(128, 512);
+  prepare_constant_epoch(queue, 0, 1, 0, 0, 1.0);
+  ASSERT(queue.publish_activation({1, 0, 0, 0, false}));
+  std::array<double, 128> block{};
+  ASSERT(queue.consume(block.data(), block.size()).status
+         == TileConsumeStatus::Audio);
+
+  prepare_constant_epoch(queue, 1, 2, 128, 128, -1.0);
+  ASSERT(queue.publish_activation({2, 128, 128, 1, true}));
+  ASSERT(queue.consume(block.data(), block.size()).status
+         == TileConsumeStatus::Audio);
+  const double emitted_boundary = block.back();
+
+  prepare_constant_epoch(queue, 0, 3, 256, 256, 0.5);
+  ASSERT(queue.publish_activation({3, 256, 256, 0, true}));
+  ASSERT(queue.consume(block.data(), block.size()).status
+         == TileConsumeStatus::Audio);
+  ASSERT(std::abs(block.front() - emitted_boundary) < 0.01);
+
+  prepare_constant_epoch(queue, 1, 4, 384, 384, 0.25);
+  ASSERT(queue.publish_activation({4, 384, 384, 1, false}));
+  ASSERT(queue.consume(block.data(), block.size()).status
+         == TileConsumeStatus::Audio);
+  for (double sample : block) ASSERT(sample == 0.25);
 }
 
 static void test_unstable_activation_defers()
@@ -267,6 +342,10 @@ int main()
   std::printf("test_epoch_tile_queue\n");
   run_test("Bdev 128/256/512 slices Rgpu 512", test_independent_quanta);
   run_test("continuous activation and exact clock jump", test_activation_and_jump);
+  run_test("continuous activation is dezippered over one render quantum",
+           test_continuous_activation_dezippers);
+  run_test("new activation replaces an in-progress dezipper",
+           test_new_activation_replaces_active_dezipper);
   run_test("unstable activation read defers without spinning",
            test_unstable_activation_defers);
   run_test("stale/source/device/short tags are refused", test_bad_tags_are_refused);

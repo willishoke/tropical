@@ -182,9 +182,17 @@ tiles produce fail-silent output plus sticky diagnostics.
 
 Every raw, glide, anchor, velocity, clock-jump, and hot-swap transition
 reserves an exact activation epoch `E`. The old bank remains audible strictly
-before `E`; the prepared bank begins at `E`. If preparation misses its target,
-the worker retargets and the host recomputes every companion from the new
-exact epoch. Physical device frames remain monotonic while the source
+before `E`; the prepared bank begins at `E`. Fresh loads prefill a complete
+four-tile bank. Later activations reserve two `Rgpu` quanta ahead, publish once
+their first exact tile is ready, and refill the remaining staging tiles while
+the old full bank covers the approach to `E`. Continuous control activations
+compare old and new output at the same source boundary and remove their scalar
+difference with a smoothstep envelope over one `Rgpu` quantum. The correction
+is bounded by that boundary difference and is exactly zero after the quantum;
+it adds no render bank, modal state, GPU dispatch, allocation, or lock.
+Clock-jump and hot-swap activations remain exact. If preparation misses its
+target, the worker retargets and the host recomputes every companion from the
+new exact epoch. Physical device frames remain monotonic while the source
 coordinate may jump. Activation descriptors are published and acknowledged
 in order before the old bank is reused.
 

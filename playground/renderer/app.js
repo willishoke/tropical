@@ -1,344 +1,555 @@
-// tropical demo — the instrument. One fixed circuit, everything live:
-//
-//   o1, o2 ──mix──► ADDRESS ──► r1 r2 r3 r4 ──modalmix──► REVERB ──► FILTER ──► out
-//   (the oscillator bank is the HAND: its summed waveform is the time-address
-//    that scrubs four modal rings; the rings compose through the filter's
-//    conjugate pole pair by the residue calculus — no state anywhere)
-//
-// Four scopes read the running kernel by RANDOM ACCESS (render_window): the
-// same closed-form function the audio thread evaluates, at any τ, while audio
-// runs on the GPU. The knobs are live param slots — no recompile, ever.
-const rpc = (m, p) => window.tropical.call(m, p)
+// A deliberately fixed instrument: twenty exact-ratio strings unfold as one
+// scene. The UI does not pretend to be a patcher or a sequencer. Its sixteen
+// moments are places in one closed-form signal, and seeking is a clock rebase.
+'use strict'
 
-// ── the circuit ──────────────────────────────────────────────────────────────
-// The modal REVERB is back, and the compile wall is gone: the strata passes
-// walk the shared DAG with memos, and stage-0 hoisting moves the composed
-// amplitudes (~90% of the flops — everything that scales with mode count)
-// into a one-sample coefficient kernel compiled dumb and re-run at knob
-// writes (see playground/README.md). The whole circuit now loads
-// cache-cold in a few seconds. Reverb BEFORE the filter —
-// compose small-into-big last.
-// This declaration is deliberately strict JSON after `const GRAPH =`. Lane D's
-// performance harness reads these exact bytes, so the measured flagship cannot
-// silently drift away from the circuit the renderer loads.
-// TROPICAL_EXACT_PRODUCT_GRAPH_BEGIN
-const GRAPH = {
-  "nodes": [
-    {"id": "o1", "kind": "source", "params": {"freq": 0.11, "morph": 0}, "sel": {}, "in": {}},
-    {"id": "o2", "kind": "source", "params": {"freq": 2.2, "morph": 0.6}, "sel": {}, "in": {}},
-    {"id": "adr", "kind": "mix", "params": {}, "sel": {}, "in": {"in": ["o1", "o2"]}},
-    {"id": "r1", "kind": "resonator", "params": {"freq": 110, "decay": 4}, "sel": {}, "in": {"addr": ["adr"]}},
-    {"id": "r2", "kind": "resonator", "params": {"freq": 165, "decay": 4}, "sel": {}, "in": {"addr": ["adr"]}},
-    {"id": "r3", "kind": "resonator", "params": {"freq": 220, "decay": 4}, "sel": {}, "in": {"addr": ["adr"]}},
-    {"id": "r4", "kind": "resonator", "params": {"freq": 330, "decay": 4}, "sel": {}, "in": {"addr": ["adr"]}},
-    {"id": "mx", "kind": "modalmix", "params": {}, "sel": {}, "in": {"in": ["r1", "r2", "r3", "r4"]}},
-    {"id": "rv", "kind": "reverb", "params": {"rt60": 2}, "sel": {}, "in": {"in": ["mx"]}},
-    {"id": "flt", "kind": "filter", "params": {"cutoff": 800, "resonance": 0.5}, "sel": {}, "in": {"in": ["rv"]}},
-    {"id": "out", "kind": "out", "params": {}, "sel": {}, "in": {"in": ["flt"]}}
-  ],
-  "out": "out",
-  "taps": true
-}
-// TROPICAL_EXACT_PRODUCT_GRAPH_END
+const rpc = (method, params = {}) => window.tropical.call(method, params)
+const scene = window.ModalScene
+const GRAPH = scene.buildSceneGraph()
+const CONTROLS = scene.CONTROLS.map((control) => ({ ...control }))
 
-// The four wells, in signal order. Each names the tap (= node id) it watches.
 const SCOPES = [
-  { tap: 'adr', label: 'ADDRESS', trig: false },
-  { tap: 'r1', label: 'RING I', trig: true },
-  { tap: 'mx', label: 'RINGS Σ', trig: true },
-  { tap: 'flt', label: 'FILTER', trig: true },
+  {
+    tap: 'veil',
+    label: 'STRINGS / RESONANT VEIL',
+    color: '--strings',
+    trigger: true,
+  },
+  {
+    tap: 'room',
+    label: 'ROOM / METAL RETURN',
+    color: '--room',
+    trigger: false,
+  },
 ]
 
-// The panel: rows are modules; every knob is a live `param:<node>.<name>` slot.
-// `fan` writes one gesture to several slots (the shared ring decay).
-const MODULES = [
-  { name: 'ADDRESS', knobs: [
-    { slot: 'o1.freq', label: 'drift', min: 0.02, max: 8, step: 0, log: true, value: 0.11, unit: 'Hz' },
-    { slot: 'o2.freq', label: 'wobble', min: 0.02, max: 60, step: 0, log: true, value: 2.2, unit: 'Hz' },
-    { slot: 'o2.morph', label: 'shape', min: 0, max: 1, step: 0.02, value: 0.6, unit: '' },
-  ]},
-  { name: 'RINGS', knobs: [
-    { slot: 'r1.freq', label: 'I', min: 40, max: 2000, step: 0, log: true, value: 110, unit: 'Hz' },
-    { slot: 'r2.freq', label: 'II', min: 40, max: 2000, step: 0, log: true, value: 165, unit: 'Hz' },
-    { slot: 'r3.freq', label: 'III', min: 40, max: 2000, step: 0, log: true, value: 220, unit: 'Hz' },
-    { slot: 'r4.freq', label: 'IV', min: 40, max: 2000, step: 0, log: true, value: 330, unit: 'Hz' },
-    { slot: 'r1.decay', label: 'decay', min: 0.5, max: 50, step: 0, log: true, value: 4, unit: '',
-      fan: ['r1.decay', 'r2.decay', 'r3.decay', 'r4.decay'] },
-  ]},
-  { name: 'REVERB', knobs: [
-    { slot: 'rv.rt60', label: 'size', min: 0.2, max: 12, step: 0, log: true, value: 2, unit: 's' },
-    { slot: 'rv.dir', label: 'dir', min: 0, max: 1, step: 0.02, value: 0, unit: '' },
-  ]},
-  { name: 'FILTER', knobs: [
-    { slot: 'flt.cutoff', label: 'cutoff', min: 20, max: 8000, step: 0, log: true, value: 800, unit: 'Hz' },
-    { slot: 'flt.resonance', label: 'reso', min: 0, max: 1, step: 0.02, value: 0.5, unit: '' },
-  ]},
-  { name: 'TRANSPORT', knobs: [
-    { slot: 'master.velocity', label: 'time warp', min: -2, max: 2, step: 0.05, value: 1, unit: '×' },
-  ]},
-  // Master VCA. The backend sink is a pure summer now — amplitude is ours. The
-  // default (3.7) is the compiled `master.gain` slot default, so UI and engine
-  // agree at load; nudging writes `set_param master.gain` live.
-  { name: 'MASTER', knobs: [
-    { slot: 'master.gain', label: 'volume', min: 0, max: 8, step: 0.1, value: 3.7, unit: '×' },
-  ]},
-]
-const KNOBS = MODULES.flatMap((m) => m.knobs)
+const DISPLAY_SAMPLES = 896
+const SEARCH_SAMPLES = 896
+const WARMUP_SAMPLES = 64
+const SCOPE_FPS = 24
+const SLIDER_RESOLUTION = 1000
 
-// ── knob mechanics ───────────────────────────────────────────────────────────
-let sel = 0
-const clamp = (v, lo, hi) => Math.max(lo, Math.min(hi, v))
-function nudge(k, dir, fine) {
-  if (k.log) {
-    const ratio = Math.pow(k.max / k.min, (fine ? 0.004 : 0.02) * dir)
-    k.value = clamp(k.value * ratio, k.min, k.max)
-  } else {
-    const st = k.step * (fine ? 0.2 : 1)
-    k.value = clamp(k.value + st * dir, k.min, k.max)
-  }
-  const v = k.value
-  for (const slot of (k.fan ?? [k.slot])) rpc('set_param', { name: slot, value: v })
+const clamp = (value, low, high) => Math.max(low, Math.min(high, value))
+const controlBySlot = new Map(CONTROLS.map((control) => [control.slot, control]))
+
+const transport = {
+  velocity: controlBySlot.get('master.velocity').value,
+  tauBase: 0,
+  lastNonzeroVelocity: 1,
+  playbackPosition: 0,
+  sceneTime: 0,
+  rebasing: false,
 }
 
-function fmt(k) {
-  const v = k.value
-  const s = k.log || Math.abs(v) >= 100 ? (v >= 100 ? v.toFixed(0) : v.toFixed(2)) : v.toFixed(2)
-  return k.unit ? `${s} ${k.unit}` : s
-}
-
-function bar(k, width = 10) {
-  const r = k.log
-    ? Math.log(k.value / k.min) / Math.log(k.max / k.min)
-    : (k.value - k.min) / (k.max - k.min)
-  const f = clamp(Math.round(r * width), 0, width)
-  return '█'.repeat(f) + '░'.repeat(width - f)
-}
-
-function renderPanel() {
-  const root = document.getElementById('modules')
-  root.innerHTML = ''
-  let idx = 0
-  for (const mod of MODULES) {
-    const row = document.createElement('div')
-    row.className = 'modrow'
-    const name = document.createElement('div')
-    name.className = 'modname'
-    name.textContent = mod.name
-    row.appendChild(name)
-    const knobs = document.createElement('div')
-    knobs.className = 'knobs'
-    for (const k of mod.knobs) {
-      const el = document.createElement('span')
-      el.className = 'knob' + (idx === sel ? ' sel' : '')
-      el.innerHTML = `<span class="lbl">${k.label}</span><span class="bar">${bar(k)}</span><span class="val">${fmt(k)}</span>`
-      knobs.appendChild(el)
-      idx++
-    }
-    row.appendChild(knobs)
-    root.appendChild(row)
-  }
-  renderTransport()
-}
-
-function renderTransport() {
-  const v = KNOBS.find((k) => k.slot === 'master.velocity').value
-  const g = document.getElementById('tglyph')
-  const t = document.getElementById('ttext')
-  if (v <= -0.025) { g.textContent = '◀◀'; t.textContent = `REVERSE ${Math.abs(v).toFixed(2)}×` }
-  else if (v < 0.025) { g.textContent = '⏸'; t.textContent = 'FROZEN' }
-  else { g.textContent = '▶▶'; t.textContent = `FORWARD ${v.toFixed(2)}×` }
-}
-
-window.addEventListener('keydown', (e) => {
-  const k = KNOBS[sel]
-  if (e.key === 'ArrowUp') sel = (sel + KNOBS.length - 1) % KNOBS.length
-  else if (e.key === 'ArrowDown') sel = (sel + 1) % KNOBS.length
-  else if (e.key === 'ArrowLeft') nudge(k, -1, e.shiftKey)
-  else if (e.key === 'ArrowRight') nudge(k, +1, e.shiftKey)
-  else if (e.key === ' ') {
-    const tw = KNOBS.find((x) => x.slot === 'master.velocity')
-    tw.value = tw.value === 0 ? 1 : 0
-    rpc('set_param', { name: 'master.velocity', value: tw.value })
-  } else if (e.key === 'r') {
-    const tw = KNOBS.find((x) => x.slot === 'master.velocity')
-    tw.value = tw.value <= 0 ? 1 : -1
-    rpc('set_param', { name: 'master.velocity', value: tw.value })
-  } else return
-  e.preventDefault()
-  renderPanel()
-})
-
-// ── scope wells ──────────────────────────────────────────────────────────────
-// Level trigger with hysteresis (ported from tui/scope/trigger.ts): lock the
-// window to a rising edge so the trace holds still while τ advances.
-function findTrigger(v, level, searchLen, hyst = 0.05) {
-  const lim = Math.min(searchLen, v.length)
-  let armed = (v[0] ?? 0) < level - hyst
-  for (let i = 1; i < lim; i++) {
-    if (v[i] < level - hyst) armed = true
-    else if (armed && v[i - 1] < level && v[i] >= level) return i
-  }
-  for (let i = 1; i < lim; i++) if (v[i - 1] < level && v[i] >= level) return i
-  return 0
-}
-
+let selectedControl = 0
+const committedValues = new Map(
+  CONTROLS.map((control) => [control.slot, control.value]),
+)
+let loopStarted = false
 const wells = []
+const stepElements = []
+const chordElements = []
+
+function normalizedValue(control) {
+  if (control.log) {
+    return Math.log(control.value / control.min)
+      / Math.log(control.max / control.min)
+  }
+  return (control.value - control.min) / (control.max - control.min)
+}
+
+function valueFromNormalized(control, normalized) {
+  if (control.log) {
+    return control.min * Math.pow(control.max / control.min, normalized)
+  }
+  return control.min + (control.max - control.min) * normalized
+}
+
+function quantize(control, value) {
+  if (!control.step) return value
+  const steps = Math.round((value - control.min) / control.step)
+  return control.min + steps * control.step
+}
+
+function formatValue(control) {
+  const value = Math.abs(control.value) < 5e-7 ? 0 : control.value
+  let digits = 2
+  if (control.slot === 'veilControl.value') digits = 0
+  else if (Math.abs(value) < 1) digits = 2
+  else if (Math.abs(value) >= 10) digits = 1
+  const number = value.toFixed(digits)
+  return control.unit ? `${number} ${control.unit}` : number
+}
+
+function setSelectedControl(index, focus = false) {
+  selectedControl = (index + CONTROLS.length) % CONTROLS.length
+  document.querySelectorAll('.control').forEach((row, rowIndex) => {
+    row.classList.toggle('selected', rowIndex === selectedControl)
+  })
+  if (focus) {
+    document.querySelector(`.control[data-index="${selectedControl}"] input`)?.focus()
+  }
+}
+
+function updateControlElement(index) {
+  const control = CONTROLS[index]
+  const row = document.querySelector(`.control[data-index="${index}"]`)
+  if (!row) return
+  const slider = row.querySelector('input')
+  const normalized = clamp(normalizedValue(control), 0, 1)
+  slider.value = String(Math.round(normalized * SLIDER_RESOLUTION))
+  slider.style.setProperty('--fill', `${(normalized * 100).toFixed(2)}%`)
+  row.querySelector('.control-value').textContent = formatValue(control)
+}
+
+async function commitParamWrite(_key, update) {
+  const { control, targetValue } = update
+  if (control.transport) {
+    const response = await rpc('set_param', {
+      name: control.slot,
+      value: targetValue,
+    })
+    const effective = (
+      response.effective_sample_index
+      ?? response.observed_sample_index
+      ?? transport.playbackPosition
+    )
+    transport.tauBase = response.tau_base ?? (
+      transport.tauBase
+      + (transport.velocity - targetValue) * effective / scene.SAMPLE_RATE
+    )
+    transport.velocity = targetValue
+    if (Math.abs(targetValue) > 1e-6) {
+      transport.lastNonzeroVelocity = targetValue
+    }
+    renderTransport()
+  } else {
+    const slots = control.slots || [control.slot]
+    for (const slot of slots) {
+      await rpc('set_param', { name: slot, value: targetValue })
+    }
+  }
+  committedValues.set(control.slot, targetValue)
+}
+
+function handleParamWriteError(error, _key, update) {
+  const { control, targetValue } = update
+  if (control.value === targetValue) {
+    control.value = committedValues.get(control.slot) ?? control.value
+    updateControlElement(CONTROLS.indexOf(control))
+  }
+  showFault(error)
+}
+
+const paramSender = new window.LatestValueSender(
+  commitParamWrite,
+  handleParamWriteError,
+  (update) => update.targetValue,
+)
+
+function enqueueParamWrite(control, nextValue) {
+  const targetValue = clamp(quantize(control, nextValue), control.min, control.max)
+  control.value = targetValue
+  updateControlElement(CONTROLS.indexOf(control))
+  paramSender.submit(control.slot, { control, targetValue })
+}
+
+function nudgeControl(control, direction, fine) {
+  let next
+  if (control.log) {
+    const ratio = Math.pow(
+      control.max / control.min,
+      direction * (fine ? 0.003 : 0.018),
+    )
+    next = control.value * ratio
+  } else {
+    const step = control.step
+      || (control.max - control.min) * (fine ? 0.002 : 0.012)
+    next = control.value + direction * step * (fine ? 0.2 : 1)
+  }
+  enqueueParamWrite(control, next)
+}
+
+function buildControls() {
+  const root = document.getElementById('controls')
+  root.innerHTML = ''
+
+  CONTROLS.forEach((control, index) => {
+    const row = document.createElement('div')
+    row.className = `control${control.transport ? ' transport-control' : ''}`
+    row.dataset.index = String(index)
+    row.innerHTML = `
+      <span class="control-label">${control.label}</span>
+      <input type="range" min="0" max="${SLIDER_RESOLUTION}" step="1"
+        aria-label="${control.label}">
+      <span class="control-value"></span>
+      <span class="control-help">${control.help}</span>
+    `
+    const slider = row.querySelector('input')
+    slider.addEventListener('pointerdown', () => setSelectedControl(index))
+    slider.addEventListener('focus', () => setSelectedControl(index))
+    slider.addEventListener('input', () => {
+      const normalized = Number(slider.value) / SLIDER_RESOLUTION
+      enqueueParamWrite(control, valueFromNormalized(control, normalized))
+    })
+    row.addEventListener('click', (event) => {
+      setSelectedControl(index)
+      if (event.target !== slider) slider.focus()
+    })
+    root.appendChild(row)
+    updateControlElement(index)
+  })
+
+  setSelectedControl(0)
+}
+
+function buildSequence() {
+  const steps = document.getElementById('steps')
+  const chords = document.getElementById('chord-strip')
+
+  for (let index = 0; index < scene.PATTERN_STEPS; index += 1) {
+    const chord = scene.CHORDS.find((candidate) => candidate.startStep === index)
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = `step${chord ? ' downbeat' : ''}`
+    button.title = chord
+      ? `${chord.label} · ${scene.ratioLabel(chord)}`
+      : `moment ${String(index + 1).padStart(2, '0')}`
+    button.innerHTML = `<span class="ordinal">${
+      chord ? chord.label : String(index + 1).padStart(2, '0')
+    }</span>`
+    button.addEventListener('click', () => seekScene(index * scene.STEP_SECONDS))
+    steps.appendChild(button)
+    stepElements.push(button)
+  }
+
+  scene.CHORDS.forEach((chord) => {
+    const button = document.createElement('button')
+    button.type = 'button'
+    button.className = 'chord'
+    button.innerHTML = `
+      <span class="chord-name">${chord.label} / ${chord.name}</span>
+      <span class="chord-ratios">${scene.ratioLabel(chord)}</span>
+    `
+    button.title = `seek ${chord.startStep * scene.STEP_SECONDS} s`
+    button.addEventListener('click', () => {
+      seekScene(chord.startStep * scene.STEP_SECONDS)
+    })
+    chords.appendChild(button)
+    chordElements.push(button)
+  })
+}
+
 function buildScopes() {
   const root = document.getElementById('scopes')
-  for (const s of SCOPES) {
-    const well = document.createElement('div')
-    well.className = 'well'
-    well.innerHTML = `<div class="paneltitle"><span>${s.label}</span><span class="tapname">scope.${s.tap}</span></div>`
+  SCOPES.forEach((scope) => {
+    const well = document.createElement('article')
+    well.className = 'scope'
+    well.innerHTML = `
+      <div class="scope-head">
+        <span>${scope.label}</span>
+        <span class="scope-meta">scope.${scope.tap} · waiting</span>
+      </div>
+    `
     const canvas = document.createElement('canvas')
     well.appendChild(canvas)
     root.appendChild(well)
-    wells.push({ ...s, canvas, slot: null })
-  }
+    wells.push({
+      ...scope,
+      canvas,
+      meta: well.querySelector('.scope-meta'),
+      slot: null,
+      peak: 1e-6,
+    })
+  })
 }
 
-function drawTrace(canvas, v) {
+function findTrigger(values, searchLength, hysteresis = 0.025) {
+  const limit = Math.min(searchLength, values.length)
+  let armed = (values[0] ?? 0) < -hysteresis
+  for (let index = 1; index < limit; index += 1) {
+    if (values[index] < -hysteresis) armed = true
+    else if (armed && values[index - 1] < 0 && values[index] >= 0) return index
+  }
+  return 0
+}
+
+function resizeCanvas(canvas) {
   const dpr = window.devicePixelRatio || 1
-  const w = canvas.clientWidth * dpr
-  const h = canvas.clientHeight * dpr
-  if (canvas.width !== w) canvas.width = w
-  if (canvas.height !== h) canvas.height = h
-  const ctx = canvas.getContext('2d')
-  const css = getComputedStyle(document.documentElement)
-  ctx.fillStyle = css.getPropertyValue('--crt')
-  ctx.fillRect(0, 0, w, h)
-  // centerline + faint graticule, 1-bit spirit
-  ctx.strokeStyle = css.getPropertyValue('--phosphor-dim')
-  ctx.lineWidth = 1
-  ctx.beginPath(); ctx.moveTo(0, h / 2); ctx.lineTo(w, h / 2); ctx.stroke()
-  for (let gx = 1; gx < 4; gx++) {
-    ctx.beginPath(); ctx.moveTo((w * gx) / 4, 0); ctx.lineTo((w * gx) / 4, h); ctx.stroke()
+  const width = Math.max(1, Math.round(canvas.clientWidth * dpr))
+  const height = Math.max(1, Math.round(canvas.clientHeight * dpr))
+  if (canvas.width !== width || canvas.height !== height) {
+    canvas.width = width
+    canvas.height = height
   }
-  if (!v || v.length < 2) return
-  // autoscale against a slow-decaying peak so quiet tails stay visible
-  let peak = 1e-6
-  for (const x of v) peak = Math.max(peak, Math.abs(x))
-  ctx.strokeStyle = css.getPropertyValue('--phosphor')
-  ctx.lineWidth = Math.max(1.5, dpr)
-  ctx.shadowColor = css.getPropertyValue('--phosphor')
-  ctx.shadowBlur = 4 * dpr
-  ctx.beginPath()
-  for (let i = 0; i < v.length; i++) {
-    const x = (i / (v.length - 1)) * w
-    const y = h / 2 - (v[i] / (peak * 1.15)) * (h / 2 - 4 * dpr)
-    i === 0 ? ctx.moveTo(x, y) : ctx.lineTo(x, y)
-  }
-  ctx.stroke()
-  ctx.shadowBlur = 0
+  return { width, height, dpr }
 }
 
-// ── boot + the render loop ───────────────────────────────────────────────────
-const DISPLAY = 1024      // samples per well
-const WARMUP = 64
-const FPS = 24
+function drawTrace(well, values) {
+  const { canvas } = well
+  const { width, height, dpr } = resizeCanvas(canvas)
+  const context = canvas.getContext('2d')
+  const palette = getComputedStyle(document.documentElement)
+  const ground = palette.getPropertyValue('--surface')
+  const grid = palette.getPropertyValue('--rule')
+  const trace = palette.getPropertyValue(well.color)
+
+  context.fillStyle = ground
+  context.fillRect(0, 0, width, height)
+  context.strokeStyle = grid
+  context.lineWidth = 1
+
+  context.beginPath()
+  context.moveTo(0, Math.round(height / 2) + 0.5)
+  context.lineTo(width, Math.round(height / 2) + 0.5)
+  context.stroke()
+
+  for (let division = 1; division < 8; division += 1) {
+    const x = Math.round(width * division / 8) + 0.5
+    context.beginPath()
+    context.moveTo(x, 0)
+    context.lineTo(x, height)
+    context.stroke()
+  }
+
+  if (!values || values.length < 2) {
+    well.meta.textContent = `scope.${well.tap} · no signal`
+    return
+  }
+
+  let framePeak = 1e-7
+  values.forEach((value) => { framePeak = Math.max(framePeak, Math.abs(value)) })
+  well.peak = Math.max(framePeak, well.peak * 0.91)
+  const scale = Math.max(framePeak, well.peak * 0.72, 1e-7)
+
+  context.strokeStyle = trace
+  context.lineWidth = Math.max(1, dpr)
+  context.beginPath()
+  values.forEach((value, index) => {
+    const x = index * width / (values.length - 1)
+    const y = height / 2 - value / (scale * 1.12) * (height / 2 - 5 * dpr)
+    if (index === 0) context.moveTo(x, y)
+    else context.lineTo(x, y)
+  })
+  context.stroke()
+
+  const milliseconds = values.length / scene.SAMPLE_RATE * 1000
+  well.meta.textContent = (
+    `scope.${well.tap} · ${milliseconds.toFixed(1)} ms · auto ±${formatPeak(framePeak)}`
+  )
+}
+
+function formatPeak(peak) {
+  if (peak >= 0.1) return peak.toFixed(2)
+  if (peak >= 0.001) return peak.toFixed(3)
+  return peak.toExponential(1)
+}
+
+function renderSequence(time) {
+  const inPhrase = time >= 0 && time < scene.PATTERN_SECONDS
+  const activeStep = inPhrase
+    ? clamp(Math.floor(time / scene.STEP_SECONDS), 0, scene.PATTERN_STEPS - 1)
+    : -1
+  stepElements.forEach((element, index) => {
+    element.classList.toggle('active', index === activeStep)
+  })
+
+  let activeChord = -1
+  scene.CHORDS.forEach((chord, index) => {
+    const next = scene.CHORDS[index + 1]
+    const chordStart = chord.startStep * scene.STEP_SECONDS
+    const chordEnd = next
+      ? next.startStep * scene.STEP_SECONDS
+      : scene.PATTERN_SECONDS
+    if (time >= chordStart && time < chordEnd) activeChord = index
+  })
+  chordElements.forEach((element, index) => {
+    element.classList.toggle('active', index === activeChord)
+  })
+
+  document.getElementById('tail-state').textContent = inPhrase
+    ? `moment ${String(activeStep + 1).padStart(2, '0')} / 16`
+    : `returning / ${scene.SCENE_SECONDS} s`
+}
+
+function renderTransport() {
+  const velocity = transport.velocity
+  const play = document.getElementById('play-button')
+  if (Math.abs(velocity) < 1e-6) play.textContent = '▶ FLOW'
+  else if (velocity < 0) play.textContent = '◀ REVERSE'
+  else play.textContent = 'Ⅱ HOLD'
+
+  const time = clamp(transport.sceneTime, 0, scene.SCENE_SECONDS)
+  document.getElementById('clock').innerHTML = (
+    `<span class="dim">τ</span> ${time.toFixed(3).padStart(6, '0')}`
+    + ` <span class="dim">/ ${scene.SCENE_SECONDS.toFixed(3)}</span>`
+  )
+}
+
+async function seekScene(targetSeconds) {
+  if (transport.rebasing) return
+  transport.rebasing = true
+  try {
+    const position = (await rpc('playback_position')).position
+    const target = clamp(targetSeconds, 0, scene.SCENE_SECONDS - 1 / scene.SAMPLE_RATE)
+    const base = target - transport.velocity * position / scene.SAMPLE_RATE
+    await rpc('set_param', { name: 'master.tau_base', value: base })
+    transport.playbackPosition = position
+    transport.tauBase = base
+    transport.sceneTime = target
+    renderSequence(target)
+    renderTransport()
+  } catch (error) {
+    showFault(error)
+  } finally {
+    transport.rebasing = false
+  }
+}
+
+function toggleFlow() {
+  const control = controlBySlot.get('master.velocity')
+  const next = Math.abs(control.value) < 1e-6
+    ? transport.lastNonzeroVelocity
+    : 0
+  enqueueParamWrite(control, next)
+}
+
+function reverseFlow() {
+  const control = controlBySlot.get('master.velocity')
+  const magnitude = Math.max(Math.abs(control.value), Math.abs(transport.lastNonzeroVelocity), 1)
+  enqueueParamWrite(control, control.value < 0 ? magnitude : -magnitude)
+}
+
+function installInteraction() {
+  document.getElementById('restart-button').addEventListener('click', () => seekScene(0))
+  document.getElementById('reverse-button').addEventListener('click', reverseFlow)
+  document.getElementById('play-button').addEventListener('click', toggleFlow)
+
+  window.addEventListener('keydown', (event) => {
+    const control = CONTROLS[selectedControl]
+    if (event.key === 'ArrowUp') setSelectedControl(selectedControl - 1, true)
+    else if (event.key === 'ArrowDown') setSelectedControl(selectedControl + 1, true)
+    else if (event.key === 'ArrowLeft') nudgeControl(control, -1, event.shiftKey)
+    else if (event.key === 'ArrowRight') nudgeControl(control, 1, event.shiftKey)
+    else if (event.key === ' ') toggleFlow()
+    else if (event.key.toLowerCase() === 'r') reverseFlow()
+    else if (event.key === 'Enter') seekScene(0)
+    else return
+    event.preventDefault()
+  })
+}
+
+function showFault(error) {
+  const status = document.getElementById('status')
+  status.classList.add('fault')
+  status.textContent = `fault / ${error?.message || String(error)}`
+}
+
+async function renderFrame() {
+  try {
+    const position = (await rpc('playback_position')).position
+    transport.playbackPosition = position
+    transport.sceneTime = (
+      transport.tauBase
+      + transport.velocity * position / scene.SAMPLE_RATE
+    )
+
+    if (!transport.rebasing && transport.velocity > 0
+      && transport.sceneTime >= scene.SCENE_SECONDS) {
+      await seekScene(0)
+    } else if (!transport.rebasing && transport.velocity < 0
+      && transport.sceneTime <= 0) {
+      await seekScene(scene.SCENE_SECONDS - 1 / scene.SAMPLE_RATE)
+    }
+
+    renderSequence(transport.sceneTime)
+    renderTransport()
+
+    const live = wells.filter((well) => well.slot !== null)
+    const count = DISPLAY_SAMPLES + SEARCH_SAMPLES + WARMUP_SAMPLES
+    const start = Math.max(0, position - count)
+    const response = await rpc('render_window', {
+      start,
+      count,
+      slots: live.map((well) => well.slot),
+    })
+
+    live.forEach((well, resultIndex) => {
+      const values = (response.values[resultIndex] || []).slice(WARMUP_SAMPLES)
+      const offset = well.trigger
+        ? findTrigger(values, SEARCH_SAMPLES)
+        : Math.min(SEARCH_SAMPLES, Math.max(0, values.length - DISPLAY_SAMPLES))
+      drawTrace(well, values.slice(offset, offset + DISPLAY_SAMPLES))
+    })
+  } catch {
+    // Compilation/hot-swap transitions can make one random-access read stale.
+    // The next frame is authoritative.
+  }
+  window.setTimeout(renderFrame, 1000 / SCOPE_FPS)
+}
 
 async function boot() {
-  const status = document.getElementById('status')
+  buildSequence()
   buildScopes()
-  renderPanel()
-  drawDiagram()
+  buildControls()
+  installInteraction()
+
+  const status = document.getElementById('status')
   try {
-    status.textContent = 'compiling the circuit… (one closed-form kernel incl. the 32-mode room — a few seconds)'
+    status.textContent = 'compiling / twenty strings + four metal returns'
     await rpc('load_patch_graph', GRAPH)
-    let audio = 'GPU · METAL'
-    try { await rpc('start_audio', {}) } catch { audio = 'NO AUDIO DEVICE' }
-    // resolve taps → render_window slots
-    const res = await rpc('list_scope_taps', {})
-    const taps = new Map((res.taps ?? []).map((t) => [t.name, t.slot]))
-    for (const wll of wells) wll.slot = taps.get(wll.tap) ?? null
-    const missing = wells.filter((s) => !s.slot).map((s) => s.tap)
-    status.textContent = `${audio} · 44100 · ${missing.length ? 'missing taps: ' + missing.join(',') : '4 taps live'}`
-    loop()
-  } catch (e) {
-    status.textContent = `boot failed: ${e.message}`
-  }
-}
 
-async function loop() {
-  try {
-    const p = (await rpc('playback_position', {})).position
-    document.getElementById('tau').textContent = `τ ${p}`
-    const live = wells.filter((s) => s.slot)
-    const count = DISPLAY * 2 // display + trigger search
-    const start = Math.max(0, p - count - WARMUP)
-    const res = await rpc('render_window', {
-      start, count: count + WARMUP, slots: live.map((s) => s.slot),
+    let audio = 'audio live'
+    let audioStarted = false
+    try {
+      await rpc('start_audio')
+      audioStarted = true
+    } catch {
+      audio = 'no audio device / scopes live'
+    }
+
+    if (audioStarted) {
+      status.textContent = 'priming / modal controls'
+      // First-use coefficient pages and Metal command paths can add tens of
+      // milliseconds even though steady-state activations are short. Exercise
+      // the three coefficient families at their no-op defaults while the graph
+      // is boot-muted; user gestures then see the warm path.
+      for (const slot of [
+        'veilControl.value', 'edgeControl.value', 'lengthControl.value',
+      ]) {
+        await rpc('set_param', { name: slot, value: controlBySlot.get(slot).value })
+      }
+    }
+    if (audioStarted) {
+      const position = (await rpc('playback_position')).position
+      const base = -transport.velocity * position / scene.SAMPLE_RATE
+      await rpc('set_param', { name: 'master.tau_base', value: base })
+      transport.playbackPosition = position
+      transport.tauBase = base
+      transport.sceneTime = 0
+    }
+    await rpc('set_param', {
+      name: 'levelControl.value',
+      value: controlBySlot.get('levelControl.value').value,
     })
-    live.forEach((s, i) => {
-      const v = (res.values[i] ?? []).slice(WARMUP)
-      const off = s.trig ? findTrigger(v, 0, DISPLAY) : 0
-      drawTrace(s.canvas, v.slice(off, off + DISPLAY))
-    })
-  } catch { /* transient (hot-swap) — skip frame */ }
-  setTimeout(loop, 1000 / FPS)
+
+    const response = await rpc('list_scope_taps')
+    const taps = new Map((response.taps || []).map((tap) => [tap.name, tap.slot]))
+    wells.forEach((well) => { well.slot = taps.get(well.tap) ?? null })
+    const missing = wells.filter((well) => well.slot === null)
+
+    status.classList.toggle('fault', missing.length > 0)
+    status.textContent = missing.length
+      ? `${audio} / missing ${missing.map((well) => `scope.${well.tap}`).join(', ')}`
+      : `${audio} / 44.1 kHz / twenty strings + wet metal`
+
+    if (!loopStarted) {
+      loopStarted = true
+      renderFrame()
+    }
+  } catch (error) {
+    showFault(error)
+  }
 }
 
-// ── the circuit diagram (1-bit, hand-drawn once) ─────────────────────────────
-function drawDiagram() {
-  const canvas = document.getElementById('diagram')
-  const dpr = window.devicePixelRatio || 1
-  const w = canvas.clientWidth * dpr
-  const h = canvas.clientHeight * dpr
-  canvas.width = w; canvas.height = h
-  const ctx = canvas.getContext('2d')
-  const ink = getComputedStyle(document.documentElement).getPropertyValue('--ink')
-  ctx.strokeStyle = ink
-  ctx.fillStyle = ink
-  ctx.lineWidth = 2 * dpr
-  ctx.font = `700 ${10 * dpr}px Menlo, monospace`
-  ctx.textAlign = 'center'
-  const u = h / 34   // vertical unit
-  const cx = w / 2
-  const box = (x, y, bw, bh, label) => {
-    ctx.strokeRect(x - bw / 2, y - bh / 2, bw, bh)
-    ctx.fillText(label, x, y + 3.5 * dpr)
-    return { x, y, bw, bh }
-  }
-  const wire = (x1, y1, x2, y2) => {
-    ctx.beginPath(); ctx.moveTo(x1, y1); ctx.lineTo(x2, y2); ctx.stroke()
-  }
-  const arrow = (x, y) => {
-    ctx.beginPath()
-    ctx.moveTo(x - 4 * dpr, y - 5 * dpr); ctx.lineTo(x + 4 * dpr, y)
-    ctx.lineTo(x - 4 * dpr, y + 5 * dpr); ctx.closePath(); ctx.fill()
-  }
-  const bw = w * 0.34, bh = u * 2.2
-  // oscillator bank
-  const o1 = box(cx - w * 0.22, u * 2.5, bw, bh, 'OSC o1')
-  const o2 = box(cx + w * 0.22, u * 2.5, bw, bh, 'OSC o2')
-  const adr = box(cx, u * 6, w * 0.5, bh, 'ADDRESS Σ')
-  wire(o1.x, o1.y + bh / 2, o1.x, adr.y - bh / 2 - u * 0.4); wire(o1.x, adr.y - bh / 2 - u * 0.4, adr.x - w * 0.12, adr.y - bh / 2)
-  wire(o2.x, o2.y + bh / 2, o2.x, adr.y - bh / 2 - u * 0.4); wire(o2.x, adr.y - bh / 2 - u * 0.4, adr.x + w * 0.12, adr.y - bh / 2)
-  // rings, addressed
-  const ys = u * 11
-  const ring = []
-  const labels = ['R I', 'R II', 'R III', 'R IV']
-  for (let i = 0; i < 4; i++) {
-    const x = w * (0.16 + 0.2267 * i)
-    ring.push(box(x, ys, w * 0.19, bh, labels[i]))
-    wire(adr.x, adr.y + bh / 2, adr.x, ys - bh / 2 - u * 0.8)
-    wire(adr.x, ys - bh / 2 - u * 0.8, x, ys - bh / 2 - u * 0.4)
-    wire(x, ys - bh / 2 - u * 0.4, x, ys - bh / 2)
-  }
-  ctx.fillText('addr — the hand that plays the rings', cx, ys - bh / 2 - u * 1.2)
-  // modal mix → reverb → filter → out (the modal island, one column)
-  const mx = box(cx, u * 15.5, w * 0.5, bh, 'MODAL Σ')
-  for (const r of ring) { wire(r.x, r.y + bh / 2, r.x, mx.y - bh / 2 - u * 0.4); wire(r.x, mx.y - bh / 2 - u * 0.4, mx.x, mx.y - bh / 2) }
-  const rv = box(cx, u * 19.3, w * 0.5, bh, 'REVERB ∿32')
-  wire(mx.x, mx.y + bh / 2, rv.x, rv.y - bh / 2); arrow(rv.x, rv.y - bh / 2 - 2 * dpr)
-  const flt = box(cx, u * 23.1, w * 0.5, bh, 'FILTER ~Q')
-  wire(rv.x, rv.y + bh / 2, flt.x, flt.y - bh / 2); arrow(flt.x, flt.y - bh / 2 - 2 * dpr)
-  const out = box(cx, u * 27, w * 0.36, bh, 'OUT')
-  wire(flt.x, flt.y + bh / 2, out.x, out.y - bh / 2); arrow(out.x, out.y - bh / 2 - 2 * dpr)
-  ctx.textAlign = 'left'
-  ctx.font = `${8.5 * dpr}px Menlo, monospace`
-  ctx.fillText('poles compose by residue —', 8 * dpr, u * 32)
-  ctx.fillText('no state, anywhere', 8 * dpr, u * 33.2)
-}
-
-window.addEventListener('resize', drawDiagram)
 boot()
