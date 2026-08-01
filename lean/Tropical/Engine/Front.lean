@@ -78,6 +78,8 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   | "start_audio"     => handleStartAudio env args
   | "stop_audio"      => handleStopAudio env
   | "audio_status"    => handleAudioStatus env
+  | "qualification_capture_next_block" =>
+      handleQualificationCaptureNextBlock env
   -- ONE set_param: discipline-dispatched from the loaded plan's table
   -- (raw for table-less names).
   | "set_param"       => handleSetParamDispatch env args

@@ -8,10 +8,11 @@
   if (root) root.LatestValueSender = api.LatestValueSender
 }(typeof globalThis === 'undefined' ? this : globalThis, () => {
   class LatestValueSender {
-    constructor(send, onError = () => {}, scalar = null) {
+    constructor(send, onError = () => {}, scalar = null, onBusyChange = () => {}) {
       this.send = send
       this.onError = onError
       this.scalar = scalar
+      this.onBusyChange = onBusyChange
       this.states = new Map()
     }
 
@@ -53,7 +54,9 @@
       state.latest = value
       state.hasLatest = true
       if (!state.busy) {
+        const wasBusy = this.isBusy()
         state.busy = true
+        if (!wasBusy) try { this.onBusyChange(true) } catch {}
         state.drain = this.drain(key, state)
       }
       return state.drain
@@ -78,6 +81,7 @@
       state.busy = false
       state.direction = 0
       state.drain = null
+      if (!this.isBusy()) try { this.onBusyChange(false) } catch {}
     }
 
     async whenIdle(key) {
@@ -86,6 +90,12 @@
         if (!state?.busy) return
         await state.drain
       }
+    }
+
+    isBusy(key = undefined) {
+      if (key !== undefined) return Boolean(this.states.get(key)?.busy)
+      for (const state of this.states.values()) if (state.busy) return true
+      return false
     }
   }
 

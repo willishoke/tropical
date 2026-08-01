@@ -79,6 +79,56 @@ opaque Runtime.currentSampleIndex (rt : @& Runtime) : IO Float
 @[extern "shim_runtime_sample_rate"]
 opaque Runtime.sampleRate (rt : @& Runtime) : IO Float
 
+@[extern "shim_runtime_ownership_failures"]
+private opaque Runtime.ownershipFailures (rt : @& Runtime) : IO UInt64
+
+@[extern "shim_runtime_metal_dispatch_failures"]
+private opaque Runtime.metalDispatchFailures (rt : @& Runtime) : IO UInt64
+
+@[extern "shim_runtime_metal_starvations"]
+private opaque Runtime.metalStarvations (rt : @& Runtime) : IO UInt64
+
+@[extern "shim_runtime_metal_tag_mismatches"]
+private opaque Runtime.metalTagMismatches (rt : @& Runtime) : IO UInt64
+
+@[extern "shim_runtime_metal_retargets"]
+private opaque Runtime.metalRetargets (rt : @& Runtime) : IO UInt64
+
+@[extern "shim_runtime_metal_activation_failures"]
+private opaque Runtime.metalActivationFailures (rt : @& Runtime) : IO UInt64
+
+@[extern "shim_runtime_metal_callback_violations"]
+private opaque Runtime.metalCallbackViolations (rt : @& Runtime) : IO UInt64
+
+@[extern "shim_runtime_metal_published_epoch"]
+private opaque Runtime.metalPublishedEpoch (rt : @& Runtime) : IO UInt64
+
+@[extern "shim_runtime_metal_acknowledged_epoch"]
+private opaque Runtime.metalAcknowledgedEpoch (rt : @& Runtime) : IO UInt64
+
+structure RuntimeFaultStats where
+  ownershipFailureCount : UInt64
+  metalDispatchFailureCount : UInt64
+  metalStarvationCount : UInt64
+  metalTagMismatchCount : UInt64
+  metalRetargetCount : UInt64
+  metalActivationFailureCount : UInt64
+  metalCallbackThreadViolationCount : UInt64
+  metalPublishedEpoch : UInt64
+  metalAcknowledgedEpoch : UInt64
+
+def Runtime.faultStats (rt : Runtime) : IO RuntimeFaultStats := do
+  pure {
+    ownershipFailureCount := ← rt.ownershipFailures
+    metalDispatchFailureCount := ← rt.metalDispatchFailures
+    metalStarvationCount := ← rt.metalStarvations
+    metalTagMismatchCount := ← rt.metalTagMismatches
+    metalRetargetCount := ← rt.metalRetargets
+    metalActivationFailureCount := ← rt.metalActivationFailures
+    metalCallbackThreadViolationCount := ← rt.metalCallbackViolations
+    metalPublishedEpoch := ← rt.metalPublishedEpoch
+    metalAcknowledgedEpoch := ← rt.metalAcknowledgedEpoch }
+
 /-- The C `UINT32_MAX` no-such-slot sentinel, mapped to `none`. -/
 def Runtime.slotIndex? (rt : Runtime) (name : String) : IO (Option UInt32) := do
   let idx ← rt.slotIndexRaw name
@@ -135,6 +185,9 @@ private opaque dacIsReconnecting (dac : @& DacHandle) : IO Bool
 @[extern "shim_dac_switch_device"]
 private opaque dacSwitchDevice (dac : @& DacHandle) (deviceId : UInt32) : IO Bool
 
+@[extern "shim_dac_active_device"]
+private opaque dacActiveDevice (dac : @& DacHandle) : IO UInt32
+
 @[extern "shim_dac_stat_callback_count"]
 private opaque dacStatCallbackCount (dac : @& DacHandle) : IO UInt64
 
@@ -149,6 +202,13 @@ private opaque dacStatUnderruns (dac : @& DacHandle) : IO UInt64
 
 @[extern "shim_dac_stat_overruns"]
 private opaque dacStatOverruns (dac : @& DacHandle) : IO UInt64
+
+@[extern "shim_dac_request_output_capture"]
+private opaque dacRequestOutputCapture (dac : @& DacHandle) : IO UInt64
+
+@[extern "shim_dac_read_output_capture"]
+private opaque dacReadOutputCapture (dac : @& DacHandle) (sequence : UInt64)
+    (capacity : UInt32) : IO (Option (UInt64 × ByteArray))
 
 /-- A DAC bound to the runtime it reads — the `runtime` field keeps the
     Lean runtime object (and so the C handle) alive for the DAC's
@@ -174,6 +234,12 @@ def stop (d : Dac) : IO Unit := dacStop d.handle
 def isRunning (d : Dac) : IO Bool := dacIsRunning d.handle
 def isReconnecting (d : Dac) : IO Bool := dacIsReconnecting d.handle
 def switchDevice (d : Dac) (deviceId : UInt32) : IO Bool := dacSwitchDevice d.handle deviceId
+def activeDevice (d : Dac) : IO UInt32 := dacActiveDevice d.handle
+def requestOutputCapture (d : Dac) : IO UInt64 :=
+  dacRequestOutputCapture d.handle
+def readOutputCapture (d : Dac) (sequence : UInt64) :
+    IO (Option (UInt64 × ByteArray)) := do
+  dacReadOutputCapture d.handle sequence (← d.runtime.bufferLength)
 
 def stats (d : Dac) : IO DacStats := do
   pure {

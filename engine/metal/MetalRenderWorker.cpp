@@ -75,7 +75,9 @@ void update_max(std::atomic<uint64_t> & target, uint64_t value)
 MetalRenderWorker::MetalRenderWorker(
   EpochTileQueue & queue, RenderFunction render)
   : queue_(queue),
-    render_(std::move(render))
+    render_(std::move(render)),
+    morph_old_scratch_(queue.render_frames(), 0.0),
+    morph_new_scratch_(queue.render_frames(), 0.0)
 {
   if (!render_)
   {
@@ -110,6 +112,7 @@ MetalRenderWorker::~MetalRenderWorker()
     requests_.clear();
   }
   wake_.notify_one();
+  admission_changed_.notify_all();
   if (thread_.joinable())
     thread_.join();
 }
@@ -146,6 +149,22 @@ MetalRenderWorker::schedule(RenderEpochRequest request)
   return pending->result;
 }
 
+bool MetalRenderWorker::wait_for_admission()
+{
+  std::unique_lock<std::mutex> lock(mutex_);
+  if (stopping_) return false;
+  ensure_started();
+  ++admission_waiters_;
+  wake_.notify_one();
+  admission_changed_.wait(lock, [&] {
+    return stopping_
+        || (pending_activation_epoch_.load(std::memory_order_acquire) == 0
+            && !preparing_request_ && requests_.empty());
+  });
+  --admission_waiters_;
+  return !stopping_;
+}
+
 void MetalRenderWorker::run()
 {
   worker_start_time_ns_.store(
@@ -171,21 +190,26 @@ void MetalRenderWorker::run()
           current_thread_cpu_time_ns(), std::memory_order_release);
         return;
       }
-      if (pending_activation_epoch_ != 0 && active_epoch_ == 0
-          && !requests_.empty()
+      const uint64_t pending_epoch =
+        pending_activation_epoch_.load(std::memory_order_acquire);
+      if (pending_epoch != 0 && active_epoch_ == 0
+          && (admission_waiters_ != 0 || !requests_.empty())
           && bank_cursors_[0].valid
           && bank_cursors_[0].request.transition
                == EpochTransitionKind::Fresh
           && queue_.cancel_unclaimed_activation(
-            pending_activation_epoch_))
+            pending_epoch))
       {
         bank_cursors_[0].valid = false;
-        pending_activation_epoch_ = 0;
+        pending_activation_epoch_.store(0, std::memory_order_release);
+        admission_changed_.notify_all();
       }
-      if (pending_activation_epoch_ == 0 && !requests_.empty())
+      if (pending_activation_epoch_.load(std::memory_order_acquire) == 0
+          && !requests_.empty())
       {
         pending = requests_.front();
         requests_.pop_front();
+        preparing_request_ = true;
       }
       else if (!worked)
       {
@@ -209,8 +233,10 @@ void MetalRenderWorker::run()
     {
       std::lock_guard<std::mutex> lock(mutex_);
       pending->done = true;
+      preparing_request_ = false;
     }
     pending->completed.notify_one();
+    admission_changed_.notify_all();
     worker_cpu_latest_ns_.store(
       current_thread_cpu_time_ns(), std::memory_order_release);
   }
@@ -218,8 +244,10 @@ void MetalRenderWorker::run()
 
 bool MetalRenderWorker::observe_activation_acknowledgement()
 {
-  if (pending_activation_epoch_ == 0
-      || queue_.activation_acknowledged() != pending_activation_epoch_)
+  const uint64_t pending_epoch =
+    pending_activation_epoch_.load(std::memory_order_acquire);
+  if (pending_epoch == 0
+      || queue_.activation_acknowledged() != pending_epoch)
     return false;
 
   const uint64_t acknowledged = monotonic_time_ns();
@@ -237,8 +265,9 @@ bool MetalRenderWorker::observe_activation_acknowledgement()
   }
   const uint32_t previous = active_bank_;
   active_bank_ = queue_.audio_active_bank();
-  active_epoch_ = pending_activation_epoch_;
-  pending_activation_epoch_ = 0;
+  active_epoch_ = pending_epoch;
+  pending_activation_epoch_.store(0, std::memory_order_release);
+  admission_changed_.notify_all();
   if (previous != EpochTileQueue::kNoBank && previous != active_bank_)
   {
     bank_cursors_[previous].valid = false;
@@ -261,12 +290,14 @@ bool MetalRenderWorker::refill_active_bank()
 
 bool MetalRenderWorker::refill_pending_bank()
 {
-  if (pending_activation_epoch_ == 0) return false;
+  const uint64_t pending_epoch =
+    pending_activation_epoch_.load(std::memory_order_acquire);
+  if (pending_epoch == 0) return false;
   for (uint32_t bank = 0; bank < EpochTileQueue::kBankCount; ++bank)
   {
     BankRenderCursor & cursor = bank_cursors_[bank];
     if (!cursor.valid
-        || cursor.request.epoch_id != pending_activation_epoch_
+        || cursor.request.epoch_id != pending_epoch
         || queue_.tile_state(bank, cursor.next_slot)
              != tropical_runtime::TileState::Free)
       continue;
@@ -338,15 +369,32 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
     candidate.next_device = activation_frame;
     candidate.next_source = source_start;
     candidate.next_slot = 0;
-    // A continuous activation only needs its exact first tile before it can be
-    // published. Rendering all four here made every knob write pay four GPU
-    // dispatches before the UI received an acknowledgement. The worker fills
-    // the remaining staging tiles immediately after publication, while the
-    // full old bank covers the interval to E. Fresh loads retain the complete
-    // four-tile prefill so device startup still begins with maximum reserve.
-    const bool candidate_ready = request.transition == EpochTransitionKind::Fresh
-      ? render_window(staging_bank, candidate)
-      : render_one(staging_bank, candidate, true);
+    // Publication requires two exact candidate tiles. One tile only covered a
+    // single Rgpu after activation and allowed the callback to outrun a refill
+    // immediately after E. Fresh loads retain the complete four-tile prefill.
+    const uint32_t candidate_tiles =
+      request.transition == EpochTransitionKind::Fresh
+        ? EpochTileQueue::kTilesPerBank : 2U;
+    bool candidate_ready = true;
+    uint32_t first_pure_tile = 0;
+    if (request.transition == EpochTransitionKind::Continuous
+        && active_bank_ != EpochTileQueue::kNoBank
+        && bank_cursors_[active_bank_].valid)
+    {
+      candidate_ready = render_morphed_first(
+        staging_bank, candidate,
+        bank_cursors_[active_bank_].request);
+      candidate.transition_morphed = candidate_ready;
+      first_pure_tile = 1;
+    }
+    for (uint32_t tile = first_pure_tile;
+         candidate_ready && tile < candidate_tiles;
+         ++tile)
+      if (!render_one(staging_bank, candidate, true))
+      {
+        candidate_ready = false;
+        break;
+      }
     if (!candidate_ready)
     {
       activation_failures_.fetch_add(1, std::memory_order_relaxed);
@@ -359,8 +407,12 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
       monotonic_time_ns(), std::memory_order_release);
 
     const uint64_t device_after_render = queue_.published_device_frame();
-    if (activation_frame != 0
-        && activation_frame < device_after_render + queue_.device_frames())
+    const bool zero_target_missed =
+      activation_frame == 0 && queue_.audio_callback_count() != 0;
+    if (zero_target_missed
+        || (activation_frame != 0
+            && activation_frame
+                 < device_after_render + queue_.device_frames()))
     {
       activation_retargets_.fetch_add(1, std::memory_order_relaxed);
       if (request.fixed_activation)
@@ -375,6 +427,7 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
           EpochActivation{
             request.epoch_id, activation_frame, source_start, staging_bank,
             request.transition == EpochTransitionKind::Continuous
+              && !candidate.transition_morphed
           }))
     {
       activation_failures_.fetch_add(1, std::memory_order_relaxed);
@@ -383,10 +436,30 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
         request.epoch_id, activation_frame, source_start
       };
     }
+    // The callback may have crossed E while descriptor publication was
+    // intentionally or involuntarily descheduled. If it observed the odd
+    // publication sequence it kept the old epoch; cancel that still-unclaimed
+    // descriptor and retry from a fresh boundary rather than applying an
+    // expired tile one callback late.
+    const bool publication_missed = activation_frame == 0
+      ? queue_.audio_callback_count() != 0
+      : activation_frame <= queue_.published_device_frame();
+    if (publication_missed
+        && queue_.cancel_unclaimed_activation(request.epoch_id))
+    {
+      activation_retargets_.fetch_add(1, std::memory_order_relaxed);
+      if (request.fixed_activation)
+        return {
+          false, "MetalRenderWorker: activation publication missed its target",
+          request.epoch_id, activation_frame, source_start, true
+        };
+      continue;
+    }
     activation_published_time_.store(
       monotonic_time_ns(), std::memory_order_release);
     bank_cursors_[staging_bank] = std::move(candidate);
-    pending_activation_epoch_ = request.epoch_id;
+    pending_activation_epoch_.store(
+      request.epoch_id, std::memory_order_release);
     return {
       true, {}, request.epoch_id, activation_frame, source_start
     };
@@ -460,6 +533,73 @@ bool MetalRenderWorker::render_one(
   return true;
 }
 
+bool MetalRenderWorker::render_morphed_first(
+  uint32_t bank_index, BankRenderCursor & cursor,
+  const RenderEpochRequest & old_request)
+{
+  EpochTileQueue::RenderClaim claim;
+  const TileTag tag{
+    cursor.request.epoch_id,
+    cursor.next_device,
+    cursor.next_source,
+    queue_.render_frames()
+  };
+  if (!queue_.claim_tile(
+        bank_index, cursor.next_slot, tag, claim))
+    return false;
+
+  const uint64_t started = monotonic_time_ns();
+  render_submitted_time_.store(started, std::memory_order_release);
+  const bool old_rendered = render_(
+    old_request, cursor.next_source,
+    queue_.render_frames(), morph_old_scratch_.data());
+  const bool new_rendered = old_rendered && render_(
+    cursor.request, cursor.next_source,
+    queue_.render_frames(), morph_new_scratch_.data());
+  const uint64_t completed = monotonic_time_ns();
+  gpu_completion_time_.store(completed, std::memory_order_release);
+  morph_render_time_ns_.fetch_add(
+    completed - started, std::memory_order_relaxed);
+
+  if (!old_rendered || !new_rendered)
+  {
+    queue_.discard_tile(claim);
+    morph_failures_.fetch_add(1, std::memory_order_relaxed);
+    if (!old_rendered && old_request.kernel
+        && tropical_metal::take_dispatch_failure(*old_request.kernel))
+      dispatch_failures_.fetch_add(1, std::memory_order_relaxed);
+    if (!new_rendered && cursor.request.kernel
+        && tropical_metal::take_dispatch_failure(*cursor.request.kernel))
+      dispatch_failures_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+
+  const uint32_t frames = queue_.render_frames();
+  const double denominator = frames > 1
+    ? static_cast<double>(frames - 1) : 1.0;
+  for (uint32_t k = 0; k < frames; ++k)
+  {
+    const double x = static_cast<double>(k) / denominator;
+    const double weight = x * x * (3.0 - 2.0 * x);
+    claim.destination[k] =
+      (1.0 - weight) * morph_old_scratch_[k]
+      + weight * morph_new_scratch_[k];
+  }
+  if (!queue_.publish_tile(claim))
+  {
+    stale_completions_.fetch_add(1, std::memory_order_relaxed);
+    morph_failures_.fetch_add(1, std::memory_order_relaxed);
+    return false;
+  }
+
+  morph_count_.fetch_add(1, std::memory_order_relaxed);
+  cursor.next_device += tag.frame_count;
+  cursor.next_source += tag.frame_count;
+  cursor.next_slot =
+    (cursor.next_slot + 1) % EpochTileQueue::kTilesPerBank;
+  return true;
+}
+
 bool MetalRenderWorker::render_window(
   uint32_t bank_index, BankRenderCursor & cursor)
 {
@@ -491,6 +631,18 @@ uint64_t MetalRenderWorker::activation_failure_count() const noexcept
 uint64_t MetalRenderWorker::stale_completion_count() const noexcept
 {
   return stale_completions_.load(std::memory_order_acquire);
+}
+uint64_t MetalRenderWorker::morph_count() const noexcept
+{
+  return morph_count_.load(std::memory_order_acquire);
+}
+uint64_t MetalRenderWorker::morph_failure_count() const noexcept
+{
+  return morph_failures_.load(std::memory_order_acquire);
+}
+uint64_t MetalRenderWorker::morph_render_time_ns() const noexcept
+{
+  return morph_render_time_ns_.load(std::memory_order_acquire);
 }
 
 MetalWorkerStageTimes MetalRenderWorker::stage_times() const noexcept

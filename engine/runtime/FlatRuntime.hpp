@@ -61,6 +61,46 @@ struct ParamDispatchResult
   // sample that can actually contain the published generation.
   uint64_t    observed_sample_index = 0;
   uint64_t    effective_sample_index = 0;
+  uint64_t    epoch_id = 0;
+  uint64_t    device_activation_frame = 0;
+  bool        activation_published = false;
+  bool        activation_audible = false;
+};
+
+// Low-priority random-access rendering has a distinct cooperative-cancel
+// outcome. The existing bool render_window surface maps only Rendered to true;
+// the socket path uses the full result so a renderer can freeze-hold its last
+// complete frame without presenting a partial buffer as data.
+enum class RenderWindowStatus : uint8_t
+{
+  Rendered,
+  Preempted,
+  InvalidArgument,
+  Unsupported,
+};
+
+// Counted, off-audio-thread priority publication. A control transaction raises
+// this signal before it waits for build_mutex_; a scope that already owns the
+// mutex observes it between coordinate evaluations and yields the lock.
+class ControlWaiterGuard
+{
+public:
+  explicit ControlWaiterGuard(std::atomic<uint32_t> & waiters)
+    : waiters_(waiters)
+  {
+    waiters_.fetch_add(1, std::memory_order_acq_rel);
+  }
+
+  ~ControlWaiterGuard()
+  {
+    waiters_.fetch_sub(1, std::memory_order_release);
+  }
+
+  ControlWaiterGuard(const ControlWaiterGuard &) = delete;
+  ControlWaiterGuard & operator=(const ControlWaiterGuard &) = delete;
+
+private:
+  std::atomic<uint32_t> & waiters_;
 };
 
 // Explicit ownership for storage that is mutated off the audio thread.
@@ -91,6 +131,9 @@ struct RuntimeOwnershipTestSeam
   std::atomic<bool> pause_after_dispatch_materialization{false};
   std::atomic<bool> dispatch_materialized{false};
   std::atomic<bool> release_dispatch{false};
+  std::atomic<bool> pause_after_render_coordinate{false};
+  std::atomic<bool> render_coordinate_completed{false};
+  std::atomic<bool> release_render_coordinate{false};
 };
 
 struct KernelState
@@ -590,6 +633,7 @@ public:
   // with hot-swap, then publish one coherent snapshot for the next buffer.
   void set_slot(uint32_t idx, double value)
   {
+    ControlWaiterGuard priority(control_waiter_count_);
     std::lock_guard<std::mutex> lock(build_mutex_);
     const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
     KernelState & state = states_[state_idx];
@@ -632,6 +676,7 @@ public:
   // no slot of that name exists in the active plan.
   bool set_slot_by_name_sync(const std::string & name, double value)
   {
+    ControlWaiterGuard priority(control_waiter_count_);
     std::lock_guard<std::mutex> lock(build_mutex_);
     const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
     KernelState & state = states_[state_idx];
@@ -673,6 +718,7 @@ public:
   template <typename Fn>
   auto with_active_state_sync(Fn && fn)
   {
+    ControlWaiterGuard priority(control_waiter_count_);
     std::lock_guard<std::mutex> lock(build_mutex_);
     const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
     KernelState & state = states_[state_idx];
@@ -707,25 +753,39 @@ public:
   }
 
   // ── Random-access render (scope / slave consumers) ─────────────────────────
-  // Render `count` samples starting at an arbitrary sample index, snapshotting
-  // the requested slots per sample. For a STATELESS (register-free) patch this
+  // Render `count` coordinates starting at an arbitrary sample index,
+  // snapshotting the requested slots per coordinate. For a STATELESS
+  // (register-free) patch this
   // is exact and safe to run concurrently with the audio thread: it renders
   // into private scratch temps/slots so it never disturbs the live state, and
   // holds build_mutex_ so a hot-swap can't rebuild the active state mid-render.
   // `out` is slot-major: out[k*count + i] = value of slot_ids[k] at sample
-  // start_index+i. Fused mode only; returns false otherwise or on a bad slot id.
-  bool render_window(uint64_t start_index, uint32_t count,
-                     const uint32_t * slot_ids, uint32_t n_slots,
-                     double * out)
+  // start_index+i*stride. Fused mode only. A waiting control transaction
+  // preempts this work between coordinates; partial output must be discarded.
+  RenderWindowStatus render_window_low_priority(
+    uint64_t start_index, uint32_t count, uint32_t stride,
+    const uint32_t * slot_ids, uint32_t n_slots, double * out)
   {
-    if (!out || (n_slots > 0 && !slot_ids)) return false;
-    std::lock_guard<std::mutex> lock(build_mutex_);
+    if (!out || stride == 0 || (n_slots > 0 && !slot_ids))
+      return RenderWindowStatus::InvalidArgument;
+    if (control_waiter_count_.load(std::memory_order_acquire) != 0)
+    {
+      scope_preemption_count_.fetch_add(1, std::memory_order_relaxed);
+      return RenderWindowStatus::Preempted;
+    }
+    std::unique_lock<std::mutex> lock(build_mutex_);
+    if (control_waiter_count_.load(std::memory_order_acquire) != 0)
+    {
+      scope_preemption_count_.fetch_add(1, std::memory_order_relaxed);
+      return RenderWindowStatus::Preempted;
+    }
     const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
     KernelState & active = states_[state_idx];
     if (active.mode != tropical_jit::CompilationMode::Fused || active.kernel == nullptr)
-      return false;
+      return RenderWindowStatus::Unsupported;
     for (uint32_t k = 0; k < n_slots; ++k)
-      if (slot_ids[k] >= active.slots.size()) return false;
+      if (slot_ids[k] >= active.slots.size())
+        return RenderWindowStatus::InvalidArgument;
 
     // Private scratch, isolated from the audio thread. Holding build_mutex_
     // excludes the inactive-state rebuild, so these copies can't tear
@@ -750,6 +810,11 @@ public:
     double scratch_out = 0.0;
     for (uint32_t i = 0; i < count; ++i)
     {
+      if (control_waiter_count_.load(std::memory_order_acquire) != 0)
+      {
+        scope_preemption_count_.fetch_add(1, std::memory_order_relaxed);
+        return RenderWindowStatus::Preempted;
+      }
       active.kernel(
         nullptr,
         registers.data(),
@@ -757,15 +822,48 @@ public:
         active.array_sizes.data(),
         temps.data(),
         active.sample_rate,
-        start_index + i,
+        start_index + static_cast<uint64_t>(i) * stride,
         active.param_ptrs.data(),
         &scratch_out,
         1,
         slots.data());
       for (uint32_t k = 0; k < n_slots; ++k)
         out[static_cast<size_t>(k) * count + i] = slots[slot_ids[k]];
+      if (i == 0)
+      {
+        if (RuntimeOwnershipTestSeam * seam =
+              ownership_test_seam_.load(std::memory_order_acquire);
+            seam && seam->pause_after_render_coordinate.load(
+              std::memory_order_acquire))
+        {
+          seam->render_coordinate_completed.store(
+            true, std::memory_order_release);
+          while (!seam->release_render_coordinate.load(
+            std::memory_order_acquire))
+            std::this_thread::yield();
+        }
+      }
     }
-    return true;
+    return RenderWindowStatus::Rendered;
+  }
+
+  bool render_window(uint64_t start_index, uint32_t count,
+                     const uint32_t * slot_ids, uint32_t n_slots,
+                     double * out)
+  {
+    return render_window_low_priority(
+      start_index, count, 1, slot_ids, n_slots, out)
+      == RenderWindowStatus::Rendered;
+  }
+
+  uint32_t control_waiter_count() const
+  {
+    return control_waiter_count_.load(std::memory_order_acquire);
+  }
+
+  uint64_t scope_preemption_count() const
+  {
+    return scope_preemption_count_.load(std::memory_order_acquire);
   }
 
   // Monotonic counter bumped on every successful hot-swap (publish_state).
@@ -778,9 +876,7 @@ public:
   // Slot count of the currently-active kernel (telemetry).
   uint32_t slot_count() const
   {
-    std::lock_guard<std::mutex> lock(build_mutex_);
-    const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
-    return static_cast<uint32_t>(states_[state_idx].slots.size());
+    return published_slot_count_.load(std::memory_order_acquire);
   }
 
   // The current sample index of the active kernel — the count of samples the
@@ -791,6 +887,11 @@ public:
   uint64_t current_sample_index() const
   {
     return published_sample_index_.load(std::memory_order_acquire);
+  }
+
+  uint64_t current_device_frame() const
+  {
+    return published_device_frame_.load(std::memory_order_acquire);
   }
 
   // Number of callbacks that emitted silence because bounded ownership
@@ -807,8 +908,8 @@ public:
   uint64_t metal_dispatch_failure_count() const
   {
 #ifdef TROPICAL_METAL
-    std::lock_guard<std::mutex> lock(build_mutex_);
-    return metal_worker_ ? metal_worker_->dispatch_failure_count() : 0;
+    auto * worker = metal_worker_view_.load(std::memory_order_acquire);
+    return worker ? worker->dispatch_failure_count() : 0;
 #else
     return 0;
 #endif
@@ -865,8 +966,8 @@ public:
   uint64_t metal_activation_retarget_count() const
   {
 #ifdef TROPICAL_METAL
-    std::lock_guard<std::mutex> lock(build_mutex_);
-    return metal_worker_ ? metal_worker_->activation_retarget_count() : 0;
+    auto * worker = metal_worker_view_.load(std::memory_order_acquire);
+    return worker ? worker->activation_retarget_count() : 0;
 #else
     return 0;
 #endif
@@ -875,10 +976,42 @@ public:
   uint64_t metal_activation_failure_count() const
   {
 #ifdef TROPICAL_METAL
-    std::lock_guard<std::mutex> lock(build_mutex_);
-    return metal_worker_ ? metal_worker_->activation_failure_count() : 0;
+    auto * worker = metal_worker_view_.load(std::memory_order_acquire);
+    return worker ? worker->activation_failure_count() : 0;
 #else
     return 0;
+#endif
+  }
+
+  uint64_t metal_stale_completion_count() const
+  {
+#ifdef TROPICAL_METAL
+    auto * worker = metal_worker_view_.load(std::memory_order_acquire);
+    return worker ? worker->stale_completion_count() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  std::array<uint64_t, 3> metal_morph_stats() const
+  {
+#ifdef TROPICAL_METAL
+    if (auto * worker = metal_worker_view_.load(std::memory_order_acquire))
+      return {
+        worker->morph_count(),
+        worker->morph_failure_count(),
+        worker->morph_render_time_ns(),
+      };
+#endif
+    return {};
+  }
+
+  bool metal_enabled() const
+  {
+#ifdef TROPICAL_METAL
+    return metal_audio_enabled_.load(std::memory_order_acquire);
+#else
+    return false;
 #endif
   }
 
@@ -922,10 +1055,9 @@ public:
   {
     std::array<uint64_t, 8> result{};
 #ifdef TROPICAL_METAL
-    std::lock_guard<std::mutex> lock(build_mutex_);
-    if (metal_worker_)
+    if (auto * worker = metal_worker_view_.load(std::memory_order_acquire))
     {
-      const auto times = metal_worker_->stage_times();
+      const auto times = worker->stage_times();
       result = {
         times.request_received,
         times.activation_target_reserved,
@@ -945,10 +1077,9 @@ public:
   {
     std::array<uint64_t, 4> result{};
 #ifdef TROPICAL_METAL
-    std::lock_guard<std::mutex> lock(build_mutex_);
-    if (metal_worker_)
+    if (auto * worker = metal_worker_view_.load(std::memory_order_acquire))
     {
-      const auto stats = metal_worker_->activation_latency_stats();
+      const auto stats = worker->activation_latency_stats();
       result = {
         stats.count, stats.total_ns, stats.min_ns, stats.max_ns
       };
@@ -960,8 +1091,8 @@ public:
   uint64_t metal_worker_cpu_time_ns() const
   {
 #ifdef TROPICAL_METAL
-    std::lock_guard<std::mutex> lock(build_mutex_);
-    return metal_worker_ ? metal_worker_->worker_cpu_time_ns() : 0;
+    auto * worker = metal_worker_view_.load(std::memory_order_acquire);
+    return worker ? worker->worker_cpu_time_ns() : 0;
 #else
     return 0;
 #endif
@@ -970,8 +1101,8 @@ public:
   uint64_t metal_worker_wall_time_ns() const
   {
 #ifdef TROPICAL_METAL
-    std::lock_guard<std::mutex> lock(build_mutex_);
-    return metal_worker_ ? metal_worker_->worker_wall_time_ns() : 0;
+    auto * worker = metal_worker_view_.load(std::memory_order_acquire);
+    return worker ? worker->worker_wall_time_ns() : 0;
 #else
     return 0;
 #endif
@@ -1125,6 +1256,8 @@ private:
   std::atomic<uint64_t> recompile_version_{0};
   std::atomic<uint64_t> ownership_failure_count_{0};
   std::atomic<RuntimeOwnershipTestSeam *> ownership_test_seam_{nullptr};
+  std::atomic<uint32_t> control_waiter_count_{0};
+  std::atomic<uint64_t> scope_preemption_count_{0};
 
   // Buffer-boundary clock handoff. Only the audio thread touches plain
   // audio_* fields. Control publishes an odd/even seqlock around the atomic
@@ -1136,11 +1269,13 @@ private:
   uint64_t audio_device_frame_ = 0;
   std::atomic<uint64_t> published_sample_index_{0};
   std::atomic<uint64_t> published_device_frame_{0};
+  std::atomic<uint32_t> published_slot_count_{0};
 
 #ifdef TROPICAL_METAL
   uint32_t metal_render_tile_frames_ = 0;
   std::unique_ptr<EpochTileQueue> metal_tiles_;
   std::unique_ptr<tropical_metal::MetalRenderWorker> metal_worker_;
+  std::atomic<tropical_metal::MetalRenderWorker *> metal_worker_view_{nullptr};
   std::atomic<bool> metal_queue_ready_{false};
   std::atomic<bool> metal_runtime_loaded_{false};
   std::atomic<bool> metal_audio_enabled_{false};

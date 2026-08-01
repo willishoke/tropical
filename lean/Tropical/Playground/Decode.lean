@@ -185,7 +185,11 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
       let countE := pref pidx s!"{id}.partials" (lit (Int.ofNat npart))
       (.modalSource (resonatorBank f0 decay cap) (lit 0) clk addr? (some countE), #[])
   | "reverb" =>
-    let rt60 := wp "rt60" (dv "rt60")
+    -- An authored room bank is a STRUCTURAL, frozen transfer. Its rows already
+    -- contain every pole and residue, so it admits no rt60/direction/sway/rate
+    -- coefficient path. The ordinary generated-room arm below is deliberately
+    -- unchanged when `room_modes` is absent (including all live controls).
+    let explicitRoom := jModes params "room_modes"
     -- The room's structural mode count defaults to the served 32-mode bank.
     -- A fixed demo instrument may request a smaller compiled room without
     -- turning topology into a live knob; omitted graphs remain byte-for-byte
@@ -199,16 +203,20 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
     -- DIR crossfades the tail's time-direction: 0 = forward ring, 1 = reverse
     -- (pre-verb into the strike), interior = both. Keeps σ/ω fixed, so it stays
     -- audible across the whole range (no pole rotation).
-    let dirX := p "dir" (dv "dir")
-    -- SWAY: the room's decay breathes — σ ↦ σ·(1 + sway·sin(2π·rate·t)) on the
-    -- envelope's clock only (pitch fixed). Continuous CF modulation of RT60 that
-    -- stays on-island (no ∫σ dτ, no state); scrubs/reverses with the master clock.
-    let sway := p "sway" (dv "sway")
-    let swayRate := p "rate" (dv "rate")   -- 0.3 Hz: a slow breath
-    let dir : ModalDir := { dir := dirX, damp := some (sway, swayRate) }
-    (.modalReverb sig
-      (reverbRoom rt60 (displayRangeOf "reverb" "rt60") roomModes (60, 0) (6000, 0))
-      (some dir), #[])
+    if explicitRoom.isEmpty then
+      let rt60 := wp "rt60" (dv "rt60")
+      let dirX := p "dir" (dv "dir")
+      -- SWAY: the room's decay breathes — σ ↦ σ·(1 + sway·sin(2π·rate·t)) on the
+      -- envelope's clock only (pitch fixed). Continuous CF modulation of RT60 that
+      -- stays on-island (no ∫σ dτ, no state); scrubs/reverses with the master clock.
+      let sway := p "sway" (dv "sway")
+      let swayRate := p "rate" (dv "rate")   -- 0.3 Hz: a slow breath
+      let dir : ModalDir := { dir := dirX, damp := some (sway, swayRate) }
+      (.modalReverb sig
+        (reverbRoom rt60 (displayRangeOf "reverb" "rt60") roomModes (60, 0) (6000, 0))
+        (some dir), #[])
+    else
+      (.modalReverb sig explicitRoom none, #[])
   | "filter" =>
     -- the filter IS a modalReverb with a computed 2-mode room: the residue
     -- calculus does the "filtering" at build time, knobs stay live through it.
@@ -497,9 +505,15 @@ def collectParams (raws : Array Raw) : Array (String × JsonNumber) := Id.run do
       (masterGainParam, masterGainDefault)]
   for r in raws do
     if r.kind == "out" then continue
+    let fixedRoom := r.kind == "reverb" && !(jModes r.params "room_modes").isEmpty
     for spec in portSpecs r.kind do
       if spec.knob.isNone then continue
       let kname := spec.name
+      -- Explicit room rows are the whole transfer. Registering any of the
+      -- generated room's coefficient controls here would create a dead slot at
+      -- best and an illicit coefficient epoch at worst. The wet return belongs
+      -- outside this node and remains an ordinary glided VCA.
+      if fixedRoom && #["rt60", "dir", "sway", "rate"].contains kname then continue
       let selfWired := !(portSources r.inObj kname).isEmpty
       let ownerWired := match spec.ownerPort with
         | some o => !(portSources r.inObj o).isEmpty

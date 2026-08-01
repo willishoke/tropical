@@ -2,20 +2,17 @@
 // and bridges its newline JSON-RPC socket to the single-scene renderer.
 const { app, BrowserWindow, ipcMain } = require('electron')
 const { spawn } = require('node:child_process')
-const { connect } = require('node:net')
 const { join } = require('node:path')
 const { tmpdir } = require('node:os')
+const { JsonLineRpcClient } = require('./rpc-client')
 
 const REPO = join(__dirname, '..')
 const SOCK = join(tmpdir(), `tropical-demo-${process.pid}.sock`)
 const BIN = process.env.TROPICAL_ENGINE ?? join(REPO, 'lean/.lake/build/bin/frontend')
 
 let engine = null
-let sock = null
-let buf = ''
-let nextId = 1
-const pending = new Map()
-const outbox = []
+const controlRpc = new JsonLineRpcClient({ path: SOCK })
+const scopeRpc = new JsonLineRpcClient({ path: SOCK })
 
 function startEngine() {
   const useMetal = process.env.TROPICAL_DEMO_JIT !== '1'
@@ -26,22 +23,29 @@ function startEngine() {
       // Metal owns live audio for this dense modal scene. The engine keeps its
       // dual-loaded JIT artifact for the scopes' random-access reads.
       TROPICAL_BACKEND: useMetal ? 'metal' : '',
-      // The general engine default remains 512. This fixed demo opts into a
-      // short device/render quantum; the worker's guarded activation horizon
-      // is two 2.9 ms blocks. Override both together for qualification.
+      // The fixed release candidate keeps the device callback short while the
+      // worker renders deeper 512-frame tiles. Qualification may override the
+      // two quanta independently; Rgpu must remain a multiple of Bdev.
       TROPICAL_BUFFER_LENGTH: useMetal
-        ? (process.env.TROPICAL_DEMO_QUANTUM ?? '128')
+        ? (process.env.TROPICAL_DEMO_DEVICE_QUANTUM
+          ?? process.env.TROPICAL_DEMO_QUANTUM
+          ?? '128')
         : (process.env.TROPICAL_BUFFER_LENGTH ?? ''),
       TROPICAL_METAL_RENDER_TILE_FRAMES:
-        useMetal ? (process.env.TROPICAL_DEMO_QUANTUM ?? '128') : '',
+        useMetal
+          ? (process.env.TROPICAL_DEMO_RENDER_QUANTUM
+            ?? process.env.TROPICAL_METAL_RENDER_TILE_FRAMES
+            ?? '512')
+          : '',
     },
     stdio: ['ignore', 'ignore', 'pipe'],
   })
   engine.stderr.on('data', (d) => process.stderr.write(`[engine] ${d}`))
   engine.on('exit', (code) => {
     engine = null
-    for (const { reject } of pending.values()) reject(new Error('engine exited'))
-    pending.clear()
+    const error = new Error('engine exited')
+    controlRpc.close(error)
+    scopeRpc.close(error)
     if (!app.isQuitting) console.error(`engine exited (${code})`)
   })
 }
@@ -57,65 +61,17 @@ function stopEngine() {
   child.on('exit', () => clearTimeout(t))
 }
 
-function tryConnect(attempt = 0) {
-  const s = connect({ path: SOCK })
-  s.on('connect', () => {
-    sock = s
-    for (const l of outbox) s.write(l)
-    outbox.length = 0
-  })
-  s.on('data', (c) => {
-    buf += c.toString()
-    let i
-    while ((i = buf.indexOf('\n')) >= 0) {
-      const line = buf.slice(0, i).trim()
-      buf = buf.slice(i + 1)
-      if (!line) continue
-      let msg
-      try { msg = JSON.parse(line) } catch { continue }
-      const p = pending.get(msg.id)
-      if (!p) continue
-      pending.delete(msg.id)
-      if (msg.error) { p.reject(new Error(JSON.stringify(msg.error))); continue }
-      const r = msg.result
-      const text = r?.content?.[0]?.text
-      if (typeof text === 'string') {
-        // control plane: MCP envelope wrapping {status, data|error}
-        try {
-          const inner = JSON.parse(text)
-          inner.status === 'ok'
-            ? p.resolve(inner.data)
-            : p.reject(new Error(`${inner.error?.code}: ${inner.error?.message}`))
-        } catch (e) { p.reject(e) }
-      } else p.resolve(r)   // data plane: plain result (render_window, playback_position)
-    }
-  })
-  s.on('error', () => {
-    try { s.destroy() } catch {}
-    if (sock) return
-    if (attempt < 200) setTimeout(() => tryConnect(attempt + 1), 100)
-  })
-}
-
 function call(method, params = {}) {
-  const id = nextId++
-  const line = JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n'
-  return new Promise((resolve, reject) => {
-    pending.set(id, { resolve, reject })
-    sock ? sock.write(line) : outbox.push(line)
-    // A cache-cold modal graph can still take a few seconds to compile.
-    const ms = method === 'load_patch_graph' ? 300000 : 15000
-    setTimeout(() => {
-      if (pending.has(id)) { pending.delete(id); reject(new Error(`timeout: ${method}`)) }
-    }, ms)
-  })
+  return (method === 'render_window' ? scopeRpc : controlRpc)
+    .call(method, params)
 }
 
 ipcMain.handle('rpc', (_e, method, params) => call(method, params))
 
 app.whenReady().then(() => {
   startEngine()
-  tryConnect()
+  controlRpc.start()
+  scopeRpc.start()
   const win = new BrowserWindow({
     width: 1240,
     height: 790,

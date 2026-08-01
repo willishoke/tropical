@@ -598,6 +598,73 @@ static void test_param_dispatch_effective_boundary_races()
   ASSERT(rt.ownership_failure_count() == 0);
 }
 
+// A control waiter publishes priority before blocking on the random-access
+// renderer's structural lock. The renderer notices it at the next coordinate,
+// returns an explicit preemption, and releases the lock for the control write.
+static void test_scope_yields_to_control_waiter()
+{
+  tropical_runtime::FlatRuntime rt(16);
+  const std::string ir = wrap_loop(
+    "  %idx = add i64 %start_sample_index, %s\n"
+    "  %v = sitofp i64 %idx to double\n"
+    "  %sp = getelementptr inbounds double, ptr %slots, i64 0\n"
+    "  store double %v, ptr %sp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %v, ptr %op, align 8\n");
+  const std::string manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":1,"slot_names":["param:x"],
+    "slot_defaults":[0.0],"param_disciplines":[
+      {"name":"x","discipline":"raw","companions":[]}
+    ]})";
+  ASSERT(rt.load_ir(ir, manifest));
+
+  const uint32_t slot = 0;
+  std::array<double, 3> strided{};
+  ASSERT(rt.render_window_low_priority(
+    10, static_cast<uint32_t>(strided.size()), 3,
+    &slot, 1, strided.data())
+    == tropical_runtime::RenderWindowStatus::Rendered);
+  ASSERT(strided[0] == 10.0);
+  ASSERT(strided[1] == 13.0);
+  ASSERT(strided[2] == 16.0);
+
+  tropical_runtime::RuntimeOwnershipTestSeam seam;
+  seam.pause_after_render_coordinate.store(true, std::memory_order_relaxed);
+  rt.set_ownership_test_seam(&seam);
+  std::array<double, 128> scope_output{};
+  tropical_runtime::RenderWindowStatus scope_status =
+    tropical_runtime::RenderWindowStatus::InvalidArgument;
+  std::jthread scope([&] {
+    scope_status = rt.render_window_low_priority(
+      0, static_cast<uint32_t>(scope_output.size()), 1,
+      &slot, 1, scope_output.data());
+  });
+  ASSERT(wait_for_true(seam.render_coordinate_completed));
+
+  tropical_runtime::ParamDispatchResult control_result;
+  std::jthread control([&] {
+    control_result = rt.dispatch_param_sync("x", 0.5);
+  });
+  const auto deadline =
+    std::chrono::steady_clock::now() + std::chrono::seconds(10);
+  while (rt.control_waiter_count() == 0
+         && std::chrono::steady_clock::now() < deadline)
+    std::this_thread::yield();
+  ASSERT(rt.control_waiter_count() == 1);
+
+  seam.release_render_coordinate.store(true, std::memory_order_release);
+  scope.join();
+  control.join();
+  rt.set_ownership_test_seam(nullptr);
+
+  ASSERT(scope_status == tropical_runtime::RenderWindowStatus::Preempted);
+  ASSERT(rt.scope_preemption_count() == 1);
+  ASSERT(control_result.ok);
+  ASSERT(rt.control_waiter_count() == 0);
+}
+
 // A coefficient transaction writes slot[1] = 2*slot[0], while the audio
 // kernel outputs slot[1] - 2*slot[0]. Old and new generations both produce
 // exact zero; any scalar/coeff publication tear is immediately nonzero.
@@ -997,6 +1064,8 @@ int main()
            test_param_dispatch_exact_sample_replay);
   run_test("param dispatch effective-boundary races",
            test_param_dispatch_effective_boundary_races);
+  run_test("scope yields to a waiting control transaction",
+           test_scope_yields_to_control_waiter);
   run_test("coherent slot/coefficient generation", test_control_generation_coherence);
   run_test("hot-swap state handoff", test_hot_swap_state_handoff);
   run_test("owned generation survives two publications", test_generation_ownership_barrier);

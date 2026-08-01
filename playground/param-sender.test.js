@@ -105,3 +105,23 @@ test('a failed value reports once and does not strand a newer value', async () =
   assert.deepEqual(calls, [1, 2])
   assert.deepEqual(errors, [['epoch refused', 'length', 1]])
 })
+
+test('busy notifications cover overlapping parameter lanes exactly', async () => {
+  const waits = new Map()
+  const busy = []
+  const sender = new LatestValueSender((key) => {
+    const wait = deferred()
+    waits.set(key, wait)
+    return wait.promise
+  }, () => {}, null, (value) => busy.push(value))
+
+  sender.submit('veil', 1)
+  sender.submit('edge', 2)
+  assert.deepEqual(busy, [true])
+  waits.get('veil').resolve()
+  await sender.whenIdle('veil')
+  assert.deepEqual(busy, [true])
+  waits.get('edge').resolve()
+  await sender.whenIdle('edge')
+  assert.deepEqual(busy, [true, false])
+})

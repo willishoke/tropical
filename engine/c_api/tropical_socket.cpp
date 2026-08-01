@@ -219,6 +219,14 @@ static std::string dispatch_set_param(tropical_runtime::FlatRuntime * rt,
                 {"value", value},
                 {"observed_sample_index", result.observed_sample_index},
                 {"effective_sample_index", result.effective_sample_index},
+                {"epoch_id", result.epoch_id},
+                {"device_activation_frame", result.device_activation_frame},
+                {"activation", {
+                  {"accepted", true},
+                  {"published", result.activation_published},
+                  {"audible", result.activation_audible},
+                  {"superseded", false},
+                }},
               }}}.dump();
 }
 
@@ -245,11 +253,77 @@ std::string SocketServer::handle_data(const std::string & line)
 
     if (method == "get_telemetry")
     {
+      const auto stages = runtime_->metal_worker_stage_times();
+      const auto latency = runtime_->metal_activation_latency_stats();
+      const auto morph = runtime_->metal_morph_stats();
+      const auto starvation = runtime_->metal_first_starvation_snapshot();
       return json{{"jsonrpc", "2.0"}, {"id", id},
                   {"result", {
                     {"recompile_version", static_cast<uint64_t>(runtime_->recompile_version())},
                     {"buffer_length", static_cast<uint32_t>(runtime_->getBufferLength())},
-                    {"slot_count", static_cast<uint32_t>(runtime_->slot_count())}}}}.dump();
+                    {"slot_count", static_cast<uint32_t>(runtime_->slot_count())},
+                    {"control_waiters", static_cast<uint32_t>(runtime_->control_waiter_count())},
+                    {"scope_preemptions", static_cast<uint64_t>(runtime_->scope_preemption_count())},
+                    {"runtime", {
+                      {"source_sample", runtime_->current_sample_index()},
+                      {"device_frame", runtime_->current_device_frame()},
+                      {"ownership_failure_count", runtime_->ownership_failure_count()},
+                    }},
+                    {"metal", {
+                      {"enabled", runtime_->metal_enabled()},
+                      {"device_frames", runtime_->getBufferLength()},
+                      {"render_frames", runtime_->metal_render_tile_frames()},
+                      {"capacity_frames", runtime_->metal_worker_capacity_frames()},
+                      {"published_epoch", runtime_->metal_published_activation_epoch()},
+                      {"acknowledged_epoch", runtime_->metal_acknowledged_activation_epoch()},
+                      {"dispatch_failure_count", runtime_->metal_dispatch_failure_count()},
+                      {"starvation_count", runtime_->metal_render_starvation_count()},
+                      {"tag_mismatch_count", runtime_->metal_epoch_tag_mismatch_count()},
+                      {"retarget_count", runtime_->metal_activation_retarget_count()},
+                      {"activation_failure_count", runtime_->metal_activation_failure_count()},
+                      {"stale_completion_count", runtime_->metal_stale_completion_count()},
+                      {"callback_thread_violation_count", runtime_->metal_callback_thread_violation_count()},
+                      {"morph_count", morph[0]},
+                      {"morph_failure_count", morph[1]},
+                      {"morph_render_time_ns", morph[2]},
+                      {"worker_cpu_time_ns", runtime_->metal_worker_cpu_time_ns()},
+                      {"worker_wall_time_ns", runtime_->metal_worker_wall_time_ns()},
+                      {"stage_times", {
+                        {"request_received", stages[0]},
+                        {"activation_target_reserved", stages[1]},
+                        {"candidate_render_submitted", stages[2]},
+                        {"candidate_gpu_completion", stages[3]},
+                        {"candidate_window_ready", stages[4]},
+                        {"activation_published", stages[5]},
+                        {"activation_acknowledged", stages[6]},
+                        {"old_epoch_retired", stages[7]},
+                      }},
+                      {"activation_latency", {
+                        {"count", latency[0]},
+                        {"total_ns", latency[1]},
+                        {"min_ns", latency[2]},
+                        {"max_ns", latency[3]},
+                      }},
+                      {"first_starvation", {
+                        {"valid", starvation[0] != 0},
+                        {"epoch_id", starvation[1]},
+                        {"device_frame", starvation[2]},
+                        {"source_sample", starvation[3]},
+                        {"expected_tile_device", starvation[4]},
+                        {"expected_tile_source", starvation[5]},
+                        {"last_published_epoch", starvation[6]},
+                        {"last_published_device_end", starvation[7]},
+                        {"last_published_source_end", starvation[8]},
+                        {"active_bank", starvation[9]},
+                        {"expected_tile_index", starvation[10]},
+                        {"observed_tile_state", starvation[11]},
+                        {"ready_mask", starvation[12]},
+                        {"free_mask", starvation[13]},
+                        {"rendering_mask", starvation[14]},
+                        {"reading_mask", starvation[15]},
+                      }},
+                    }},
+                  }}}.dump();
     }
 
     // Master clock: the audio thread's current sample index (advances one
@@ -267,10 +341,19 @@ std::string SocketServer::handle_data(const std::string & line)
     {
       const json & p = j.at("params");
       const uint64_t start = p.at("start").get<uint64_t>();
-      uint32_t count = p.at("count").get<uint32_t>();
-      if (count > 16384u)
+      const uint32_t requested_count = p.at("count").get<uint32_t>();
+      if (requested_count == 0 || requested_count > 16384u)
         return json{{"jsonrpc", "2.0"}, {"id", id},
-                    {"error", {{"code", -32602}, {"message", "render_window: count too large (max 16384)"}}}}.dump();
+                    {"error", {{"code", -32602}, {"message", "render_window: count must be in [1,16384]"}}}}.dump();
+      const uint32_t point_budget =
+        p.value("point_budget", requested_count);
+      if (point_budget == 0 || point_budget > 16384u)
+        return json{{"jsonrpc", "2.0"}, {"id", id},
+                    {"error", {{"code", -32602}, {"message", "render_window: point_budget must be in [1,16384]"}}}}.dump();
+      const uint32_t stride =
+        (requested_count + point_budget - 1) / point_budget;
+      const uint32_t count =
+        (requested_count + stride - 1) / stride;
       const auto names = p.at("slots").get<std::vector<std::string>>();
       std::vector<uint32_t> ids;
       ids.reserve(names.size());
@@ -283,10 +366,25 @@ std::string SocketServer::handle_data(const std::string & line)
         ids.push_back(sid);
       }
       std::vector<double> out(static_cast<size_t>(count) * ids.size(), 0.0);
-      if (!runtime_->render_window(start, count, ids.data(),
-                                   static_cast<uint32_t>(ids.size()), out.data()))
+      const auto render_status = runtime_->render_window_low_priority(
+        start, count, stride, ids.data(),
+        static_cast<uint32_t>(ids.size()), out.data());
+      if (render_status == tropical_runtime::RenderWindowStatus::Preempted)
+        return json{{"jsonrpc", "2.0"}, {"id", id},
+                    {"result", {
+                      {"start", start},
+                      {"count", 0},
+                      {"span", requested_count},
+                      {"stride", stride},
+                      {"preempted", true},
+                      {"values", json::array()},
+                    }}}.dump();
+      if (render_status == tropical_runtime::RenderWindowStatus::Unsupported)
         return json{{"jsonrpc", "2.0"}, {"id", id},
                     {"error", {{"code", -32603}, {"message", "render_window: active kernel is not fused"}}}}.dump();
+      if (render_status != tropical_runtime::RenderWindowStatus::Rendered)
+        return json{{"jsonrpc", "2.0"}, {"id", id},
+                    {"error", {{"code", -32602}, {"message", "render_window: invalid render request"}}}}.dump();
       json values = json::array();
       for (size_t k = 0; k < ids.size(); ++k)
       {
@@ -295,7 +393,14 @@ std::string SocketServer::handle_data(const std::string & line)
         values.push_back(std::move(ch));
       }
       return json{{"jsonrpc", "2.0"}, {"id", id},
-                  {"result", {{"start", start}, {"count", count}, {"values", std::move(values)}}}}.dump();
+                  {"result", {
+                    {"start", start},
+                    {"count", count},
+                    {"span", requested_count},
+                    {"stride", stride},
+                    {"preempted", false},
+                    {"values", std::move(values)},
+                  }}}.dump();
     }
   }
   catch (const std::exception & e)

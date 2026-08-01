@@ -478,6 +478,9 @@ static void test_metal_effective_dispatch_epochs()
 
   const auto raw = rt.dispatch_param_sync("bank.freq", 260.0);
   ASSERT(raw.ok);
+  ASSERT(raw.epoch_id != 0);
+  ASSERT(raw.activation_published);
+  ASSERT(raw.device_activation_frame >= raw.observed_sample_index);
   allow_live_staging_refill();
   ASSERT(raw.observed_sample_index == buf);
   ASSERT(raw.effective_sample_index == buf + 1024);
@@ -486,14 +489,30 @@ static void test_metal_effective_dispatch_epochs()
     for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 180.0, 1e-5);
     rt.process();
   }
+  std::array<double, 512> raw_transition{};
   rt.process();
-  ASSERT_NEAR(rt.outputBuffer.front(), 180.0, 1e-5);
-  ASSERT(rt.outputBuffer.back() > 180.0 && rt.outputBuffer.back() < 260.0);
+  std::copy_n(
+    rt.outputBuffer.begin(), buf, raw_transition.begin());
   for (unsigned int block = 1; block < 512 / buf; ++block)
+  {
     rt.process();
-  ASSERT_NEAR(rt.outputBuffer.back(), 260.0, 1e-5);
+    std::copy_n(
+      rt.outputBuffer.begin(), buf,
+      raw_transition.begin() + block * buf);
+  }
+  for (unsigned int k = 0; k < raw_transition.size(); ++k)
+  {
+    const double x = static_cast<double>(k)
+      / static_cast<double>(raw_transition.size() - 1);
+    const double weight = x * x * (3.0 - 2.0 * x);
+    const double expected = 180.0 + 80.0 * weight;
+    ASSERT_NEAR(raw_transition[k], expected, 1e-5);
+    ASSERT(std::abs(raw_transition[k]) <= 260.0 + 1e-5);
+  }
   rt.process();
   for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 260.0, 1e-5);
+  ASSERT(rt.metal_morph_stats()[0] == 1);
+  ASSERT(rt.metal_morph_stats()[1] == 0);
 
   const double old_v0 = rt.get_slot(1);
   const double old_v1 = rt.get_slot(2);
@@ -917,9 +936,8 @@ static void test_metal_control_transition_stress()
       &slot_zero, 1, reference.data()));
     jit_reference.set_sample_index(result.effective_sample_index);
     jit_reference.process();
-    // Continuous Metal epochs deliberately dezipper the old/new boundary over
-    // this render quantum. The correction is exactly zero at its final sample;
-    // the new epoch then agrees with both random-access and JIT references.
+    // Continuous Metal epochs render a whole-signal old/new smoothstep morph.
+    // Its final sample is exactly new, so it agrees with both references.
     ASSERT_NEAR(rt.outputBuffer.back(), reference.back(), 1e-4);
     ASSERT_NEAR(
       rt.outputBuffer.back(), jit_reference.outputBuffer.back(), 1e-4);
@@ -932,6 +950,10 @@ static void test_metal_control_transition_stress()
   ASSERT(rt.metal_epoch_tag_mismatch_count() == 0);
   ASSERT(rt.metal_activation_failure_count() == 0);
   ASSERT(rt.metal_callback_thread_violation_count() == 0);
+  const auto morph = rt.metal_morph_stats();
+  ASSERT(morph[0] == transitions);
+  ASSERT(morph[1] == 0);
+  ASSERT(morph[2] > 0);
   auto stages = rt.metal_worker_stage_times();
   const auto observation_deadline =
     std::chrono::steady_clock::now() + std::chrono::seconds(2);

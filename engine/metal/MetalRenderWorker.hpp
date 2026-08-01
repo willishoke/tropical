@@ -98,6 +98,11 @@ public:
   // Control-thread only. The caller may block; the callback never enters this
   // mailbox or touches the worker thread lifecycle.
   EpochScheduleResult schedule(RenderEpochRequest request);
+  // Control-thread admission barrier. Returns only when no prior request is
+  // being prepared and no published activation is awaiting callback
+  // acknowledgement. The caller then chooses E from the current queue
+  // boundary and schedules immediately.
+  bool wait_for_admission();
   EpochReservation reserve(
     EpochTransitionKind transition,
     uint64_t requested_source = 0) const noexcept;
@@ -106,6 +111,9 @@ public:
   uint64_t activation_retarget_count() const noexcept;
   uint64_t activation_failure_count() const noexcept;
   uint64_t stale_completion_count() const noexcept;
+  uint64_t morph_count() const noexcept;
+  uint64_t morph_failure_count() const noexcept;
+  uint64_t morph_render_time_ns() const noexcept;
   MetalWorkerStageTimes stage_times() const noexcept;
   MetalActivationLatencyStats activation_latency_stats() const noexcept;
   uint64_t worker_cpu_time_ns() const noexcept;
@@ -126,6 +134,7 @@ private:
   struct BankRenderCursor
   {
     bool valid = false;
+    bool transition_morphed = false;
     RenderEpochRequest request;
     uint64_t next_device = 0;
     uint64_t next_source = 0;
@@ -141,6 +150,9 @@ private:
   bool render_one(
     uint32_t bank_index, BankRenderCursor & cursor,
     bool record_candidate_stage);
+  bool render_morphed_first(
+    uint32_t bank_index, BankRenderCursor & cursor,
+    const RenderEpochRequest & old_request);
   bool render_window(uint32_t bank_index, BankRenderCursor & cursor);
   static uint64_t monotonic_time_ns();
 
@@ -149,21 +161,29 @@ private:
 
   mutable std::mutex mutex_;
   std::condition_variable wake_;
+  std::condition_variable admission_changed_;
   std::deque<std::shared_ptr<PendingRequest>> requests_;
   std::thread thread_;
   bool started_ = false;
   bool stopping_ = false;
+  bool preparing_request_ = false;
+  uint32_t admission_waiters_ = 0;
 
   std::array<BankRenderCursor, tropical_runtime::EpochTileQueue::kBankCount>
     bank_cursors_;
   uint32_t active_bank_ = tropical_runtime::EpochTileQueue::kNoBank;
   uint64_t active_epoch_ = 0;
-  uint64_t pending_activation_epoch_ = 0;
+  std::atomic<uint64_t> pending_activation_epoch_{0};
 
   std::atomic<uint64_t> dispatch_failures_{0};
   std::atomic<uint64_t> activation_retargets_{0};
   std::atomic<uint64_t> activation_failures_{0};
   std::atomic<uint64_t> stale_completions_{0};
+  std::atomic<uint64_t> morph_count_{0};
+  std::atomic<uint64_t> morph_failures_{0};
+  std::atomic<uint64_t> morph_render_time_ns_{0};
+  std::vector<double> morph_old_scratch_;
+  std::vector<double> morph_new_scratch_;
 
   std::atomic<uint64_t> request_received_time_{0};
   std::atomic<uint64_t> target_reserved_time_{0};

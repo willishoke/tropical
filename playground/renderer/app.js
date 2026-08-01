@@ -7,6 +7,7 @@ const rpc = (method, params = {}) => window.tropical.call(method, params)
 const scene = window.ModalScene
 const GRAPH = scene.buildSceneGraph()
 const CONTROLS = scene.CONTROLS.map((control) => ({ ...control }))
+const SCOPE_PROFILE = window.ModalScopeProfile
 
 const SCOPES = [
   {
@@ -23,10 +24,11 @@ const SCOPES = [
   },
 ]
 
-const DISPLAY_SAMPLES = 896
-const SEARCH_SAMPLES = 896
-const WARMUP_SAMPLES = 64
-const SCOPE_FPS = 24
+const DISPLAY_SAMPLES = SCOPE_PROFILE.displaySamples
+const SEARCH_SAMPLES = SCOPE_PROFILE.searchSamples
+const WARMUP_SAMPLES = SCOPE_PROFILE.warmupSamples
+const SCOPE_POINT_BUDGET = SCOPE_PROFILE.pointBudget
+const SCOPE_FPS = SCOPE_PROFILE.fps
 const SLIDER_RESOLUTION = 1000
 
 const clamp = (value, low, high) => Math.max(low, Math.min(high, value))
@@ -49,6 +51,9 @@ let loopStarted = false
 const wells = []
 const stepElements = []
 const chordElements = []
+const scopeArbiter = new window.ScopeArbiter({
+  quietMs: SCOPE_PROFILE.resumeQuietMs,
+})
 
 function normalizedValue(control) {
   if (control.log) {
@@ -145,6 +150,7 @@ const paramSender = new window.LatestValueSender(
   commitParamWrite,
   handleParamWriteError,
   (update) => update.targetValue,
+  (busy) => scopeArbiter.setSenderBusy(busy),
 )
 
 function enqueueParamWrite(control, nextValue) {
@@ -152,6 +158,7 @@ function enqueueParamWrite(control, nextValue) {
   control.value = targetValue
   updateControlElement(CONTROLS.indexOf(control))
   paramSender.submit(control.slot, { control, targetValue })
+  scopeArbiter.setSenderBusy(paramSender.isBusy())
 }
 
 function nudgeControl(control, direction, fine) {
@@ -186,7 +193,14 @@ function buildControls() {
       <span class="control-help">${control.help}</span>
     `
     const slider = row.querySelector('input')
-    slider.addEventListener('pointerdown', () => setSelectedControl(index))
+    slider.addEventListener('pointerdown', (event) => {
+      setSelectedControl(index)
+      scopeArbiter.begin(`pointer:${event.pointerId}`)
+      try { slider.setPointerCapture(event.pointerId) } catch {}
+    })
+    slider.addEventListener('lostpointercapture', (event) => {
+      scopeArbiter.end(`pointer:${event.pointerId}`)
+    })
     slider.addEventListener('focus', () => setSelectedControl(index))
     slider.addEventListener('input', () => {
       const normalized = Number(slider.value) / SLIDER_RESOLUTION
@@ -389,6 +403,7 @@ function renderTransport() {
 async function seekScene(targetSeconds) {
   if (transport.rebasing) return
   transport.rebasing = true
+  scopeArbiter.begin('rebase')
   try {
     const position = (await rpc('playback_position')).position
     const target = clamp(targetSeconds, 0, scene.SCENE_SECONDS - 1 / scene.SAMPLE_RATE)
@@ -403,6 +418,7 @@ async function seekScene(targetSeconds) {
     showFault(error)
   } finally {
     transport.rebasing = false
+    scopeArbiter.end('rebase')
   }
 }
 
@@ -429,17 +445,32 @@ function installInteraction() {
     const control = CONTROLS[selectedControl]
     if (event.key === 'ArrowUp') setSelectedControl(selectedControl - 1, true)
     else if (event.key === 'ArrowDown') setSelectedControl(selectedControl + 1, true)
-    else if (event.key === 'ArrowLeft') nudgeControl(control, -1, event.shiftKey)
-    else if (event.key === 'ArrowRight') nudgeControl(control, 1, event.shiftKey)
+    else if (event.key === 'ArrowLeft') {
+      scopeArbiter.begin(`key:${event.code}`)
+      nudgeControl(control, -1, event.shiftKey)
+    } else if (event.key === 'ArrowRight') {
+      scopeArbiter.begin(`key:${event.code}`)
+      nudgeControl(control, 1, event.shiftKey)
+    }
     else if (event.key === ' ') toggleFlow()
     else if (event.key.toLowerCase() === 'r') reverseFlow()
     else if (event.key === 'Enter') seekScene(0)
     else return
     event.preventDefault()
   })
+  window.addEventListener('keyup', (event) => {
+    scopeArbiter.end(`key:${event.code}`)
+  })
+  for (const eventName of ['pointerup', 'pointercancel']) {
+    window.addEventListener(eventName, (event) => {
+      scopeArbiter.end(`pointer:${event.pointerId}`)
+    })
+  }
+  window.addEventListener('blur', () => scopeArbiter.clearTransient())
 }
 
 function showFault(error) {
+  scopeArbiter.fault()
   const status = document.getElementById('status')
   status.classList.add('fault')
   status.textContent = `fault / ${error?.message || String(error)}`
@@ -465,21 +496,39 @@ async function renderFrame() {
     renderSequence(transport.sceneTime)
     renderTransport()
 
+    scopeArbiter.setSenderBusy(paramSender.isBusy())
+    if (scopeArbiter.isHeld()) {
+      window.setTimeout(renderFrame, 1000 / SCOPE_FPS)
+      return
+    }
+
     const live = wells.filter((well) => well.slot !== null)
     const count = DISPLAY_SAMPLES + SEARCH_SAMPLES + WARMUP_SAMPLES
     const start = Math.max(0, position - count)
     const response = await rpc('render_window', {
       start,
       count,
+      point_budget: SCOPE_POINT_BUDGET,
       slots: live.map((well) => well.slot),
     })
 
+    scopeArbiter.setSenderBusy(paramSender.isBusy())
+    if (response.preempted || scopeArbiter.isHeld()) {
+      window.setTimeout(renderFrame, 1000 / SCOPE_FPS)
+      return
+    }
+
+    const stride = response.stride ?? 1
+    const warmupPoints = Math.ceil(WARMUP_SAMPLES / stride)
+    const searchPoints = Math.ceil(SEARCH_SAMPLES / stride)
+    const displayPoints = Math.ceil(DISPLAY_SAMPLES / stride)
+
     live.forEach((well, resultIndex) => {
-      const values = (response.values[resultIndex] || []).slice(WARMUP_SAMPLES)
+      const values = (response.values[resultIndex] || []).slice(warmupPoints)
       const offset = well.trigger
-        ? findTrigger(values, SEARCH_SAMPLES)
-        : Math.min(SEARCH_SAMPLES, Math.max(0, values.length - DISPLAY_SAMPLES))
-      drawTrace(well, values.slice(offset, offset + DISPLAY_SAMPLES))
+        ? findTrigger(values, searchPoints)
+        : Math.min(searchPoints, Math.max(0, values.length - displayPoints))
+      drawTrace(well, values.slice(offset, offset + displayPoints))
     })
   } catch {
     // Compilation/hot-swap transitions can make one random-access read stale.
@@ -514,9 +563,7 @@ async function boot() {
       // milliseconds even though steady-state activations are short. Exercise
       // the three coefficient families at their no-op defaults while the graph
       // is boot-muted; user gestures then see the warm path.
-      for (const slot of [
-        'veilControl.value', 'edgeControl.value', 'lengthControl.value',
-      ]) {
+      for (const slot of scene.PRIME_SLOTS) {
         await rpc('set_param', { name: slot, value: controlBySlot.get(slot).value })
       }
     }

@@ -153,6 +153,11 @@ FlatRuntime::schedule_metal_epoch_locked(
   const uint64_t epoch_id = next_metal_epoch_id_++;
   for (;;)
   {
+    if (!metal_worker_->wait_for_admission())
+      return {
+        false, "MetalRenderWorker: shut down before admission",
+        epoch_id, 0, 0
+      };
     const auto reservation =
       metal_worker_->reserve(transition, requested_source);
     auto request = make_metal_epoch_request(
@@ -185,6 +190,7 @@ FlatRuntime::publish_metal_control_snapshot_locked(
 
 void FlatRuntime::set_sample_index(uint64_t idx)
 {
+  ControlWaiterGuard priority(control_waiter_count_);
   std::lock_guard<std::mutex> lock(build_mutex_);
 #ifdef TROPICAL_METAL
   const uint32_t state_index =
@@ -290,14 +296,22 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
 // Assumes new_state already carries a populated kernel handle.
 bool FlatRuntime::publish_state(KernelState && new_state)
 {
+  ControlWaiterGuard priority(control_waiter_count_);
   std::lock_guard<std::mutex> lock(build_mutex_);
 #ifdef TROPICAL_METAL
   if (new_state.metal)
   {
     if (!metal_worker_)
+    {
       metal_worker_ =
         std::make_unique<tropical_metal::MetalRenderWorker>(
           *metal_tiles_);
+      // The worker is created at most once and lives until FlatRuntime
+      // destruction. Publish a stable observation pointer so telemetry never
+      // waits behind a control transaction holding build_mutex_.
+      metal_worker_view_.store(
+        metal_worker_.get(), std::memory_order_release);
+    }
     const uint64_t epoch_id = next_metal_epoch_id_++;
     const auto transition =
       metal_runtime_loaded_.load(std::memory_order_acquire)
@@ -362,6 +376,9 @@ bool FlatRuntime::publish_state(KernelState && new_state)
       break;
   }
   active_state_.store(inactive, std::memory_order_release);
+  published_slot_count_.store(
+    static_cast<uint32_t>(states_[inactive].slots.size()),
+    std::memory_order_release);
   recompile_version_.fetch_add(1, std::memory_order_release);
 #ifdef TROPICAL_METAL
   const bool metal = static_cast<bool>(states_[inactive].metal);
@@ -600,38 +617,101 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
     };
   }
 
+  ControlWaiterGuard priority(control_waiter_count_);
   std::lock_guard<std::mutex> lock(build_mutex_);
   const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
   KernelState & state = states_[state_idx];
   const uint64_t observed_sample_index =
     published_sample_index_.load(std::memory_order_acquire);
   const std::vector<double> base_slots = state.slots;
-  auto reservation = reserve_control_generation(state, state_idx);
 
 #ifdef TROPICAL_METAL
   if (state.metal)
   {
+    // Validate without reserving either a control generation or an activation
+    // epoch. Raw parameter coefficient work is epoch-independent, so perform
+    // it now in local storage while an earlier activation may still be
+    // awaiting acknowledgement.
+    state.slots = base_slots;
+    auto preflight = dispatch_param_sync_locked(
+      state, state_idx, name, value, observed_sample_index);
+    preflight.observed_sample_index = observed_sample_index;
+    if (!preflight.ok)
+    {
+      state.slots = base_slots;
+      return preflight;
+    }
+    const bool raw = preflight.discipline == "raw";
+    std::vector<double> raw_slots;
+    std::vector<std::vector<int64_t>> raw_columns;
+    if (raw)
+    {
+      raw_slots = state.slots;
+      const uint32_t published_generation =
+        std::atomic_ref(state.control_published_gen)
+          .load(std::memory_order_acquire);
+      raw_columns = state.coeff_generations[published_generation];
+      std::vector<int64_t *> arrays = state.array_ptrs;
+      for (std::size_t j = 0; j < state.coeff_array_slots.size(); ++j)
+        arrays[state.coeff_array_slots[j]] = raw_columns[j].data();
+      if (state.coeff_kernel)
+      {
+        double scratch_out = 0.0;
+        state.coeff_kernel(
+          nullptr,
+          state.coeff_registers.data(),
+          arrays.data(),
+          state.array_sizes.data(),
+          state.coeff_temps.data(),
+          state.sample_rate,
+          0,
+          state.param_ptrs.data(),
+          &scratch_out,
+          1,
+          raw_slots.data());
+      }
+    }
+    state.slots = base_slots;
+
+    if (!metal_worker_->wait_for_admission())
+    {
+      preflight.ok = false;
+      preflight.error = "set_param: Metal worker shut down before admission";
+      return preflight;
+    }
+    auto reservation = reserve_control_generation(state, state_idx);
     const uint64_t epoch_id = next_metal_epoch_id_++;
     for (;;)
     {
       const auto epoch = metal_worker_->reserve(
         tropical_metal::EpochTransitionKind::Continuous);
-      state.slots = base_slots;
-      auto result = dispatch_param_sync_locked(
-        state, state_idx, name, value,
-        epoch.effective_sample_index);
+      ParamDispatchResult result = preflight;
       result.observed_sample_index = observed_sample_index;
-      result.effective_sample_index =
-        epoch.effective_sample_index;
-      if (!result.ok)
+      result.effective_sample_index = epoch.effective_sample_index;
+      state.slots = base_slots;
+      if (raw)
       {
-        state.slots = base_slots;
-        release_control_snapshot_reservation(
-          state_idx, reservation);
-        return result;
+        state.slots = raw_slots;
+        state.slot_generations[reservation.target] = raw_slots;
+        state.coeff_generations[reservation.target] = raw_columns;
+      }
+      else
+      {
+        result = dispatch_param_sync_locked(
+          state, state_idx, name, value,
+          epoch.effective_sample_index);
+        result.observed_sample_index = observed_sample_index;
+        result.effective_sample_index = epoch.effective_sample_index;
+        if (!result.ok)
+        {
+          state.slots = base_slots;
+          release_control_snapshot_reservation(
+            state_idx, reservation);
+          return result;
+        }
+        materialize_control_snapshot(state, reservation.target);
       }
 
-      materialize_control_snapshot(state, reservation.target);
       auto request = make_metal_epoch_request(
         state, epoch_id,
         tropical_metal::EpochTransitionKind::Continuous,
@@ -641,7 +721,19 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
       const auto scheduled =
         metal_worker_->schedule(std::move(request));
       if (scheduled.retargeted)
+      {
+        state.slots = base_slots;
+        if (!metal_worker_->wait_for_admission())
+        {
+          release_control_snapshot_reservation(
+            state_idx, reservation);
+          result.ok = false;
+          result.error =
+            "set_param: Metal worker shut down during retarget";
+          return result;
+        }
         continue;
+      }
       if (!scheduled.ok)
       {
         state.slots = base_slots;
@@ -654,10 +746,17 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
         return result;
       }
       commit_control_snapshot(state, state_idx, reservation);
+      result.epoch_id = scheduled.epoch_id;
+      result.device_activation_frame = scheduled.activation_frame;
+      result.activation_published = true;
+      result.activation_audible =
+        metal_tiles_->activation_acknowledged() == scheduled.epoch_id;
       return result;
     }
   }
 #endif
+
+  auto reservation = reserve_control_generation(state, state_idx);
 
   for (;;)
   {
@@ -759,6 +858,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_at_sample_index(
       sample_index, sample_index
     };
 
+  ControlWaiterGuard priority(control_waiter_count_);
   std::lock_guard<std::mutex> lock(build_mutex_);
   const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
   KernelState & state = states_[state_idx];

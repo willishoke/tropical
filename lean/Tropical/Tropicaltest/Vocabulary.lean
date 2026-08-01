@@ -466,6 +466,48 @@ def runDeadSlotLint (arena : Arena)
   else
     failGate "dead-slot-lint" s!"dead knobs (setSlot lands, no instruction reads): {deadAll}"
 
+open Tropical.Playground in
+/-- A structural `room_modes` bank is the whole fixed transfer: its exact row
+    count reaches the modal node, NONE of the incumbent coefficient knobs is
+    registered, and it compiles/renders as finite non-silence. This is the seam
+    the fixed demo room uses; omission remains covered by the canonical legacy
+    reverb patch in `dead-slot-lint` and the existing frozen patch goldens. -/
+def runExplicitRoomModes (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let src := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":211,\"decay\":8,\"partials\":2}}," ++
+    "{\"id\":\"rvb\",\"kind\":\"reverb\",\"params\":{" ++
+      "\"rt60\":99,\"dir\":1,\"sway\":0.9,\"rate\":8," ++
+      "\"room_modes\":[[111,0.812677,3,0],[111,115.812677,-3,0]," ++
+      "[887,1.255955,2,1.2],[887,116.255955,-2,1.2]]}," ++
+      "\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"rvb\"]}}],\"out\":\"out\"}"
+  match Lean.Json.parse src with
+  | .error e => failGate "explicit-room-modes" s!"json parse: {e}"
+  | .ok j =>
+    match decodeGraph j with
+    | .error e => failGate "explicit-room-modes" s!"decode: {firstLine e}"
+    | .ok (graph, params) =>
+      let roomShapeOk := match graph.nodes.find? (·.id == "rvb") with
+        | some { node := .modalReverb "res" room none, .. } => room.size == 4
+        | _ => false
+      let frozenOk := params.all fun (name, _) => !"rvb.".isPrefixOf name
+      match Tropical.Playground.compilePlanPure arena resolved j with
+      | .error e => failGate "explicit-room-modes" s!"compile: {firstLine e}"
+      | .ok compiled =>
+        match ← renderPlanSamples compiled.plan 4096 with
+        | .error e => failGate "explicit-room-modes" s!"render: {firstLine e}"
+        | .ok samples =>
+          let finite := samples.all (·.isFinite)
+          let peak := samples.foldl (fun p x => max p x.abs) 0.0
+          let planFrozen := compiled.plan.slotNames.all fun name =>
+            !"param:rvb.".isPrefixOf name
+          IO.println s!"        explicit rows=4 shape={roomShapeOk} frozen params={frozenOk && planFrozen} finite={finite} peak={peak}"
+          if roomShapeOk && frozenOk && planFrozen && finite && peak > 1.0e-8 then
+            passGate "explicit-room-modes" "authored rows are exact structural room data: fixed count, no coefficient slots, finite audible render"
+          else
+            failGate "explicit-room-modes" s!"shape={roomShapeOk} frozen={frozenOk}/{planFrozen} finite={finite} peak={peak}"
+
 /-- Test 3: `osc ⋙ flange ⋙ flange` — the slide pushes the outer warps through
     the inner flanger's sum and fuses them, producing the oscillator read at the
     nine convolved offsets automatically (the proper multiplicity, derived). We

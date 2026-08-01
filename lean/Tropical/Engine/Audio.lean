@@ -37,6 +37,16 @@ private def containsSub (hay needle : String) : Bool :=
 private def isRunningJson (dac : Ffi.Dac) : EngineM Json := do
   pure <| Json.mkObj [("is_running", Json.bool (← dac.isRunning))]
 
+private def awaitInitialMetalActivation (env : Env) : EngineM Unit := do
+  for _ in [0:400] do
+    let stats ← env.runtime.faultStats
+    if stats.metalPublishedEpoch == 0
+        || stats.metalAcknowledgedEpoch >= stats.metalPublishedEpoch then
+      return
+    IO.sleep 5
+  throwBare .invalidState
+    "start_audio: initial Metal epoch was not acknowledged within 2 seconds"
+
 def handleStartAudio (env : Env) (args : Json) : EngineM Json := do
   let dac ← match ← env.dac.get with
     | some d => pure d
@@ -60,10 +70,12 @@ def handleStartAudio (env : Env) (args : Json) : EngineM Json := do
       else
         dac.start
         let _ ← dac.switchDevice m.id
+      awaitInitialMetalActivation env
       pure <| Json.mkObj [("is_running", Json.bool (← dac.isRunning)),
                           ("device", Json.str m.name)]
   | none =>
     if !(← dac.isRunning) then dac.start
+    awaitInitialMetalActivation env
     isRunningJson dac
 
 def handleStopAudio (env : Env) : EngineM Json := do
@@ -74,19 +86,76 @@ def handleStopAudio (env : Env) : EngineM Json := do
     isRunningJson dac
 
 def handleAudioStatus (env : Env) : EngineM Json := do
+  let runtimeStats ← env.runtime.faultStats
+  let runtimeJson := Json.mkObj [
+    ("ownershipFailureCount", toJson runtimeStats.ownershipFailureCount.toNat),
+    ("metalDispatchFailureCount", toJson runtimeStats.metalDispatchFailureCount.toNat),
+    ("metalStarvationCount", toJson runtimeStats.metalStarvationCount.toNat),
+    ("metalTagMismatchCount", toJson runtimeStats.metalTagMismatchCount.toNat),
+    ("metalRetargetCount", toJson runtimeStats.metalRetargetCount.toNat),
+    ("metalActivationFailureCount", toJson runtimeStats.metalActivationFailureCount.toNat),
+    ("metalCallbackThreadViolationCount",
+      toJson runtimeStats.metalCallbackThreadViolationCount.toNat),
+    ("metalPublishedEpoch", toJson runtimeStats.metalPublishedEpoch.toNat),
+    ("metalAcknowledgedEpoch", toJson runtimeStats.metalAcknowledgedEpoch.toNat)]
   match ← env.dac.get with
-  | none => pure <| Json.mkObj [("is_running", Json.bool false)]
+  | none => pure <| Json.mkObj [
+      ("is_running", Json.bool false),
+      ("runtime", runtimeJson)]
   | some dac =>
     let stats ← dac.stats
+    let deviceId ← dac.activeDevice
+    let deviceName ← Ffi.audioDeviceName deviceId
     pure <| Json.mkObj [
       ("is_running", Json.bool (← dac.isRunning)),
       ("is_reconnecting", Json.bool (← dac.isReconnecting)),
+      ("device", Json.mkObj [
+        ("id", toJson deviceId.toNat),
+        ("name", Json.str deviceName)]),
+      ("runtime", runtimeJson),
       ("stats", Json.mkObj [
         ("callbackCount", toJson stats.callbackCount.toNat),
         ("avgCallbackMs", toJson stats.avgCallbackMs),
         ("maxCallbackMs", toJson stats.maxCallbackMs),
         ("underrunCount", toJson stats.underrunCount.toNat),
         ("overrunCount",  toJson stats.overrunCount.toNat)])]
+
+/-- Qualification-only exact next-callback capture. The DAC's storage and
+    state machine already exist and are callback-safe; this control-plane verb
+    only requests one block, polls its sequence, and serializes the consumed
+    f64 buffer. It is intentionally absent unless the process was launched with
+    `TROPICAL_QUALIFICATION=1`, so the product surface does not grow a general
+    streaming/capture API. -/
+def handleQualificationCaptureNextBlock (env : Env) : EngineM Json := do
+  unless (← IO.getEnv "TROPICAL_QUALIFICATION") == some "1" do
+    throwBare .invalidState
+      "qualification_capture_next_block is disabled; launch with TROPICAL_QUALIFICATION=1"
+  let some dac ← env.dac.get
+    | throwBare .invalidState "DAC has not been created yet."
+  unless ← dac.isRunning do
+    throwBare .invalidState "DAC is not running."
+  let sequence ← dac.requestOutputCapture
+  if sequence == 0 then
+    throwBare .invalidState "a qualification output capture is already outstanding"
+  let mut captured : Option (UInt64 × ByteArray) := none
+  for _ in [0:400] do
+    if captured.isSome then break
+    captured ← dac.readOutputCapture sequence
+    if captured.isNone then IO.sleep 5
+  let some (start, bytes) := captured
+    | throwBare .invalidState "qualification output capture timed out"
+  let count := bytes.size / 8
+  let mut samples : Array Json := Array.mkEmpty count
+  for i in [0:count] do
+    let mut bits : UInt64 := 0
+    for j in [0:8] do
+      bits := bits * 256 + (bytes.get! (i * 8 + (7 - j))).toUInt64
+    samples := samples.push (toJson (Float.ofBits bits))
+  pure <| Json.mkObj [
+    ("sequence", toJson sequence.toNat),
+    ("start_sample_index", toJson start.toNat),
+    ("count", toJson count),
+    ("samples", Json.arr samples)]
 
 /-- `set_param`: update the mirror AND drive the live `param:<name>`
     module slot. (The TS engine only wrote the detached Param handle,

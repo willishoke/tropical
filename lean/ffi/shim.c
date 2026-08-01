@@ -178,6 +178,33 @@ LEAN_EXPORT lean_obj_res shim_runtime_sample_rate(b_lean_obj_arg rt,
       lean_box_float(tropical_runtime_sample_rate(unwrap(rt))));
 }
 
+#define SHIM_RUNTIME_U64(name, expression)                                    \
+  LEAN_EXPORT lean_obj_res name(b_lean_obj_arg rt, lean_obj_arg world) {      \
+    (void)world;                                                               \
+    return lean_io_result_mk_ok(lean_box_uint64((expression)));               \
+  }
+
+SHIM_RUNTIME_U64(shim_runtime_ownership_failures,
+  tropical_runtime_ownership_failure_count(unwrap(rt)))
+SHIM_RUNTIME_U64(shim_runtime_metal_dispatch_failures,
+  tropical_runtime_metal_dispatch_failure_count(unwrap(rt)))
+SHIM_RUNTIME_U64(shim_runtime_metal_starvations,
+  tropical_runtime_metal_render_starvation_count(unwrap(rt)))
+SHIM_RUNTIME_U64(shim_runtime_metal_tag_mismatches,
+  tropical_runtime_metal_epoch_tag_mismatch_count(unwrap(rt)))
+SHIM_RUNTIME_U64(shim_runtime_metal_retargets,
+  tropical_runtime_metal_activation_retarget_count(unwrap(rt)))
+SHIM_RUNTIME_U64(shim_runtime_metal_activation_failures,
+  tropical_runtime_metal_activation_failure_count(unwrap(rt)))
+SHIM_RUNTIME_U64(shim_runtime_metal_callback_violations,
+  tropical_runtime_metal_callback_thread_violation_count(unwrap(rt)))
+SHIM_RUNTIME_U64(shim_runtime_metal_published_epoch,
+  tropical_runtime_metal_published_activation_epoch(unwrap(rt)))
+SHIM_RUNTIME_U64(shim_runtime_metal_acknowledged_epoch,
+  tropical_runtime_metal_acknowledged_activation_epoch(unwrap(rt)))
+
+#undef SHIM_RUNTIME_U64
+
 /* ── DAC ───────────────────────────────────────────────────────────────────── */
 
 LEAN_EXPORT lean_obj_res shim_dac_new_runtime(b_lean_obj_arg rt, uint32_t sample_rate,
@@ -216,6 +243,13 @@ LEAN_EXPORT lean_obj_res shim_dac_switch_device(b_lean_obj_arg dac, uint32_t dev
   return lean_io_result_mk_ok(lean_box(tropical_dac_switch_device(unwrap(dac), device_id)));
 }
 
+LEAN_EXPORT lean_obj_res shim_dac_active_device(b_lean_obj_arg dac,
+                                                lean_obj_arg world) {
+  (void)world;
+  return lean_io_result_mk_ok(
+    lean_box_uint32(tropical_dac_get_active_device(unwrap(dac))));
+}
+
 /* Stats — one getter per field; each refetches the (cheap) struct. */
 
 static tropical_dac_stats_t dac_stats(b_lean_obj_arg dac) {
@@ -248,6 +282,39 @@ LEAN_EXPORT lean_obj_res shim_dac_stat_underruns(b_lean_obj_arg dac, lean_obj_ar
 LEAN_EXPORT lean_obj_res shim_dac_stat_overruns(b_lean_obj_arg dac, lean_obj_arg world) {
   (void)world;
   return lean_io_result_mk_ok(lean_box_uint64(dac_stats(dac).overrun_count));
+}
+
+/* Qualification-only access to the DAC's existing one-buffer capture state
+   machine. The callback storage itself is preallocated by TropicalDAC; this
+   wrapper allocates only on the Lean control thread after the request. */
+LEAN_EXPORT lean_obj_res shim_dac_request_output_capture(
+    b_lean_obj_arg dac, lean_obj_arg world) {
+  (void)world;
+  return lean_io_result_mk_ok(
+      lean_box_uint64(tropical_dac_request_output_capture(unwrap(dac))));
+}
+
+/* `Option (UInt64 × ByteArray)`: none until the requested block is ready;
+   successful read consumes it and returns start sample plus f64 bytes. */
+LEAN_EXPORT lean_obj_res shim_dac_read_output_capture(
+    b_lean_obj_arg dac, uint64_t sequence, uint32_t capacity,
+    lean_obj_arg world) {
+  (void)world;
+  size_t bytes = (size_t)capacity * sizeof(double);
+  lean_object *arr = lean_alloc_sarray(1, bytes, bytes);
+  uint64_t start = 0;
+  if (!tropical_dac_read_output_capture(
+        unwrap(dac), sequence, &start,
+        (double *)lean_sarray_cptr(arr), capacity)) {
+    lean_dec(arr);
+    return lean_io_result_mk_ok(lean_box(0));
+  }
+  lean_object *pair = lean_alloc_ctor(0, 2, 0); /* Prod.mk */
+  lean_ctor_set(pair, 0, lean_box_uint64(start));
+  lean_ctor_set(pair, 1, arr);
+  lean_object *some = lean_alloc_ctor(1, 1, 0); /* Option.some */
+  lean_ctor_set(some, 0, pair);
+  return lean_io_result_mk_ok(some);
 }
 
 /* ── Device enumeration ────────────────────────────────────────────────────── */

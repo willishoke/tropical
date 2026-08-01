@@ -460,6 +460,15 @@
     },
   ]
 
+  // First-use Metal coefficient families exercised while `levelControl` keeps
+  // the boot graph muted. The app and noninteractive qualification runner both
+  // consume this list; neither maintains a second scene-specific copy.
+  const PRIME_SLOTS = [
+    'veilControl.value',
+    'edgeControl.value',
+    'lengthControl.value',
+  ]
+
   return {
     BASE_HZ,
     STEP_SECONDS,
@@ -469,6 +478,7 @@
     SAMPLE_RATE,
     CHORDS,
     CONTROLS,
+    PRIME_SLOTS,
     absoluteRatio,
     ratioLabel,
     voiceFrequency,

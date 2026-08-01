@@ -51,6 +51,7 @@ struct TileConsumeResult
   uint64_t source_start = 0;
   bool activated = false;
   bool activation_deferred = false;
+  bool activation_expired = false;
 };
 
 struct EpochTileStarvationSnapshot
@@ -123,6 +124,10 @@ public:
 
   uint32_t device_frames() const noexcept { return device_frames_; }
   uint32_t render_frames() const noexcept { return render_frames_; }
+  uint64_t audio_callback_count() const noexcept
+  {
+    return audio_callback_count_.load(std::memory_order_acquire);
+  }
   uint32_t capacity_frames() const noexcept
   {
     return kTilesPerBank * render_frames_;
@@ -279,6 +284,11 @@ public:
    */
   TileConsumeResult consume(double * destination, uint32_t frames)
   {
+    // Publish callback entry before the single activation-descriptor read.
+    // The worker uses this only to disambiguate the boot sentinel E=0: zero is
+    // safe before callback 1, but stale if callback 1 has already entered and
+    // did not observe the descriptor.
+    audio_callback_count_.fetch_add(1, std::memory_order_release);
     TileConsumeResult result;
     result.device_start = audio_device_frame_;
     result.source_start = audio_source_sample_;
@@ -299,6 +309,16 @@ public:
     read_activation_once(activation, has_activation, unstable_activation);
     if (unstable_activation)
       result.activation_deferred = true;
+    else if (has_activation && activation.epoch_id != audio_epoch_id_
+             && activation.activation_frame < audio_device_frame_)
+    {
+      // Never apply a candidate whose exact device tag is already behind the
+      // callback. The worker will observe the advanced boundary, cancel the
+      // still-unclaimed descriptor, and retarget while this callback continues
+      // consuming the old prepared bank.
+      result.activation_expired = true;
+      has_activation = false;
+    }
     else if (has_activation && activation.epoch_id != audio_epoch_id_
              && activation.activation_frame <= audio_device_frame_)
     {
@@ -445,6 +465,8 @@ public:
     if (has_activation && activation.epoch_id != audio_epoch_id_
         && activation.activation_frame <= audio_device_frame_)
     {
+      if (activation.activation_frame < audio_device_frame_)
+        return false;
       if (activation_claim_.load(std::memory_order_acquire) != 0)
         return false;
       epoch = activation.epoch_id;
@@ -786,6 +808,7 @@ private:
 
   // Fixed callback facts observed by the worker/control side.
   std::atomic<uint32_t> audio_active_bank_{kNoBank};
+  std::atomic<uint64_t> audio_callback_count_{0};
   std::atomic<uint64_t> published_device_frame_{0};
   std::atomic<uint64_t> published_source_sample_{0};
   std::atomic<uint64_t> starvation_count_{0};

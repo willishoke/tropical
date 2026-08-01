@@ -213,6 +213,50 @@ static void test_unstable_activation_defers()
   ASSERT(activated.status == TileConsumeStatus::Audio);
 }
 
+static void test_descriptor_publication_at_epoch_retargets_without_fault()
+{
+  EpochTileQueue queue(128, 512);
+  prepare_epoch(queue, 0, 1, 0, 0);
+  ASSERT(queue.publish_activation({1, 0, 0, 0}));
+  std::array<double, 128> out{};
+  ASSERT(queue.consume(out.data(), out.size()).status
+         == TileConsumeStatus::Audio);
+
+  prepare_epoch(queue, 1, 2, 128, 128, 2);
+  EpochTileQueueTestSeam seam;
+  seam.pause_activation_publication.store(true, std::memory_order_release);
+  queue.set_test_seam(&seam);
+  std::thread publisher([&] {
+    ASSERT(queue.publish_activation({2, 128, 128, 1}));
+  });
+  while (!seam.activation_publication_started.load(std::memory_order_acquire))
+    std::this_thread::yield();
+
+  const auto at_epoch = queue.consume(out.data(), out.size());
+  ASSERT(at_epoch.status == TileConsumeStatus::Audio);
+  ASSERT(at_epoch.activation_deferred);
+  ASSERT(!at_epoch.activated);
+  seam.release_activation_publication.store(true, std::memory_order_release);
+  publisher.join();
+  queue.set_test_seam(nullptr);
+
+  const auto expired = queue.consume(out.data(), out.size());
+  ASSERT(expired.status == TileConsumeStatus::Audio);
+  ASSERT(expired.activation_expired);
+  ASSERT(!expired.activated);
+  ASSERT(queue.activation_acknowledged() == 1);
+  ASSERT(queue.cancel_unclaimed_activation(2));
+
+  prepare_epoch(queue, 1, 2, 384, 384, 2);
+  ASSERT(queue.publish_activation({2, 384, 384, 1}));
+  const auto retargeted = queue.consume(out.data(), out.size());
+  ASSERT(retargeted.status == TileConsumeStatus::Audio);
+  ASSERT(retargeted.activated);
+  ASSERT(retargeted.device_start == 384);
+  ASSERT(queue.starvation_count() == 0);
+  ASSERT(queue.tag_mismatch_count() == 0);
+}
+
 static void test_bad_tags_are_refused()
 {
   {
@@ -348,6 +392,8 @@ int main()
            test_new_activation_replaces_active_dezipper);
   run_test("unstable activation read defers without spinning",
            test_unstable_activation_defers);
+  run_test("descriptor publication at E keeps old audio until retarget",
+           test_descriptor_publication_at_epoch_retargets_without_fault);
   run_test("stale/source/device/short tags are refused", test_bad_tags_are_refused);
   run_test("post-activation starvation is whole-buffer and sticky",
            test_starvation_latches_once);
