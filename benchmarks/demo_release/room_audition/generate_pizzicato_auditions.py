@@ -42,6 +42,7 @@ AUTHORED_LEVEL = 0.72
 PRESENCE = 0.82
 MASTER_GAIN = scene_cache.MASTER_SINK_GAIN
 INTEGRATED_GAIN = AUTHORED_LEVEL * PRESENCE * MASTER_GAIN
+PIZZICATO_SECTION_GAIN = 3.0
 WET_SEND_GAIN = 3.0
 TARGET_PEAK = math.pow(10.0, -1.0 / 20.0)
 POSITION_VALUES = (1.0, 0.5)
@@ -397,7 +398,11 @@ def main() -> None:
         pattern_id = str(pattern["id"])
         events = pattern["events"]
         source = render_source(events, score, source_count)
-        direct = INTEGRATED_GAIN * source[:output_count]
+        direct = (
+            INTEGRATED_GAIN
+            * PIZZICATO_SECTION_GAIN
+            * source[:output_count]
+        )
         forward, reverse = fft_convolve_spectra(
             source,
             forward_spectrum,
@@ -411,6 +416,7 @@ def main() -> None:
         for position in POSITION_VALUES:
             wet = (
                 INTEGRATED_GAIN
+                * PIZZICATO_SECTION_GAIN
                 * WET_SEND_GAIN
                 * reverse_room.equal_power_position(forward, reverse, position)
             )
@@ -483,6 +489,7 @@ def main() -> None:
             "presence": PRESENCE,
             "level": AUTHORED_LEVEL,
             "integrated_scene_path": INTEGRATED_GAIN,
+            "pizzicato_section": PIZZICATO_SECTION_GAIN,
             "pizzicato_room_send": WET_SEND_GAIN,
             "common_headroom_gain": common_gain,
             "per_file_normalization_or_limiter": "none",

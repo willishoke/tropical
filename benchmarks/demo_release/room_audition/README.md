@@ -203,7 +203,10 @@ and `+0.5`. The dry and mix files retain the exact production string bed; all
 files share one gain structure and one common headroom policy, with no per-file
 normalization or limiter. The tracked JSON summary records the exact score,
 events, asset/source hashes, timing, levels, and WAV hashes. Select a candidate
-by listening before regenerating the production room cache.
+by listening before regenerating the production room cache. The direct and wet
+pizzicato section carries a shared `3×` audition gain, and its wet branch has a
+further `3×` send gain to compensate for the fitted room's lower response to
+these pitched low-register transients.
 
 ## Native 44.1 kHz production gate
 
