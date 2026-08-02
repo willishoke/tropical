@@ -1,0 +1,2 @@
+The release-machine bundle intentionally has no final artwork yet.
+CFBundleIconFile is omitted so macOS uses the standard application icon.

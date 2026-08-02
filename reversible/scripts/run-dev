@@ -1,0 +1,15 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
+engine_bin="$repo_root/lean/.lake/build/bin/frontend"
+
+if test ! -x "$engine_bin"; then
+  printf 'run-dev: Tropical engine is not built: %s\n' "$engine_bin" >&2
+  printf 'run-dev: run `make lean` from %s first\n' "$repo_root" >&2
+  exit 1
+fi
+
+export TROPICAL_ENGINE_BIN="$engine_bin"
+exec swift run --package-path "$repo_root/reversible" Reversible "$@"

@@ -9,8 +9,10 @@ so reverse is just receding τ.
 
 ## Run
 
+From the Tropical repository root:
+
 ```bash
-swift run
+reversible/scripts/run-dev
 ```
 
 The app owns the Lean `frontend` binary over its Unix-socket JSON-RPC
@@ -22,9 +24,24 @@ C++ and never queue behind the Lean control thread — that is what keeps
 knob writes and the Scope module's traces live through a long compile.
 
 Engine resolution order:
-1. `TROPICAL_ENGINE_BIN` env var (path to the `frontend` binary)
-2. `~/tropical/lean/.lake/build/bin/frontend`
+
+1. `Reversible.app/Contents/Resources/Tropical/frontend`
+2. `TROPICAL_ENGINE_BIN` (an explicit developer/test override)
+
+`reversible/scripts/run-dev` resolves both the package and engine from the
+script's repository location. There is no implicit home-checkout fallback and
+the launcher's current working directory is irrelevant.
+
+Create a local ad-hoc-signed app bundle with:
+
+```bash
+reversible/scripts/bundle-app
+```
+
+The output is `build/Reversible.app`. The bundle contains the native app,
+Tropical frontend, and room-only grouped-carrier asset. It deliberately does
+not package the authored-score wet cache.
 
 The engine must be built from a branch that serves `load_patch_graph`
-(`perf/dag-to-emit` or later). Run the binary directly — never `lake exe`
+(`perf/dag-to-emit` or later). Run the binary directly—never `lake exe`
 (DYLD shadowing; see tropical/CLAUDE.md).
