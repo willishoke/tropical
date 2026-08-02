@@ -230,7 +230,10 @@ The shipping scope path has four parts:
    queue.
 3. `render_window` pins one immutable program/control snapshot and evaluates it
    in scope-owned workspace. Control publication swaps a new small control
-   image by name and never waits for a scope reader or its mutex.
+   image by name and never waits for a scope reader or its mutex. The workspace
+   separately caches the fully materialized scalar-coefficient slot image for
+   that control version; every frame resets kernel scratch from that image,
+   never from the pre-coefficient control projection.
 4. One canvas overlays the active chord's five modes. Each trace receives an
    independent interpolated positive-going zero-crossing lock at the center
    graticule and one shared analytic volts/div calibration. Carrier spacing is

@@ -199,6 +199,38 @@ data; nonfinite/clamped samples and all runtime, Metal, and DAC faults remain
 blocking. It intentionally emits no capture WAV. Subjective confirmation of
 the corrected A−11 and D7·9 display remains pending.
 
+### Consecutive-frame coefficient-cache correction
+
+The cycle-invariance oracle above was necessary but insufficient. It wrote
+`master.tau_base` before every `render_window`, producing a fresh control
+version every time. That accidentally forced the scope coefficient kernel to
+run on every observation. The real UI makes many reads of one immutable
+version. Its scope workspace reset scalar slots from the pre-coefficient RCU
+control image on every read, but reran the coefficient kernel only when the
+version changed. Consequently the first frame was correct and later frames
+used erased scalar coefficients—the apparent phase/amplitude jitter and
+constant traces reported in A−11 and D7·9.
+
+Candidate `9108ab2` preserves a separate fully materialized scalar-slot image
+for the pinned version and copies it into per-frame scratch. Candidate
+`5e769d0` makes the frontend and probes consume one shared production transform
+and adds a continuously advancing, muted hardware probe.
+
+| Gate | Evidence / result |
+|---|---|
+| Native same-version regression | `current_module_process` 23/23; a separate scope artifact renders the same scalar coefficient twice before and after a control publication |
+| Pre-fix discriminator | `playground/qualification/scope-live.js` reproduced A−11 mode 2 with zero positive crossings on live frame 2 while its raw peak remained nonzero |
+| Post-fix continuous content | 360/360 consecutive live frames pass: 90 for each chord through the exact shared frontend transform; captured nonzero output samples `0`, scope preemptions `0` |
+| A−11 / D7·9 stability | Maximum normalized frame-shape deltas `2.16e-4` / `2.52e-4`; maximum relative lock errors `4.75e-15` / `5.35e-15`; every frame active and locked |
+| Focused frontend and silent oracle | 36/36 frontend tests pass; 360/360 static production observations pass with audio never started |
+| Full repository/native | Bun 152 pass, 1 intentional capability skip, 0 fail across 12 files; CTest 4/4 including the 23-case module/RCU target and full Metal kernel target |
+| Muted integrated profile | `2026-08-02_06-20-19-550-smoke-b128-r512`; 10.05 measured seconds, 336 writes, scope p99 `4.634 ms`, frame p95 `17.93 ms`, `60.10 fps`, zero preemptions, zero underruns/overruns or other faults, and all 15 gates pass |
+
+This section corrects the causal claim attached to DR-22: envelope
+demodulation remains valid display processing, but it was not the source of the
+large production jitter. Only a repeated read at an unchanged control version
+distinguishes the actual defect.
+
 ## Release artifact status
 
 The evidence package now contains, without overwriting failed runs:
