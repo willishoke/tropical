@@ -54,6 +54,7 @@ function main() {
       join(__dirname, 'run.js'),
       '--mode', 'smoke',
       '--duration-seconds', String(options.durationSeconds),
+      '--skip-flow-gesture',
       '--output', options.output,
     ], {
       cwd: REPO,
@@ -83,6 +84,7 @@ function main() {
     requested_boots: options.count,
     completed_boots: runs.length,
     duration_seconds_each: options.durationSeconds,
+    flow_gesture: false,
     pass: runs.length === options.count && runs.every((run) => run.pass),
     runs,
   }

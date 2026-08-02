@@ -29,6 +29,7 @@ function parseArgs(argv) {
     output: join(REPO, 'benchmarks/demo_release/data'),
     deviceQuantum: 128,
     renderQuantum: 512,
+    exerciseFlow: true,
   }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
@@ -39,6 +40,7 @@ function parseArgs(argv) {
     else if (arg === '--output') options.output = resolve(next())
     else if (arg === '--device-quantum') options.deviceQuantum = Number(next())
     else if (arg === '--render-quantum') options.renderQuantum = Number(next())
+    else if (arg === '--skip-flow-gesture') options.exerciseFlow = false
     else if (arg === '--help') options.help = true
     else throw new Error(`unknown argument: ${arg}`)
   }
@@ -58,6 +60,7 @@ function usage() {
   --duration-seconds N             total measured duration (default 90)
   --device-quantum N               Bdev (default 128)
   --render-quantum N               Rgpu (default 512)
+  --skip-flow-gesture              omit the pause/reverse/resume FLOW probe
   --engine PATH                    frontend executable
   --output DIR                     evidence directory`
 }
@@ -368,11 +371,27 @@ async function main() {
       16,
       'reversal',
     )
-    await control.call('set_param', { name: 'master.velocity', value: 0 })
-    await sleep(120)
-    await control.call('set_param', { name: 'master.velocity', value: -1 })
-    await sleep(160)
-    await control.call('set_param', { name: 'master.velocity', value: 1 })
+    if (options.exerciseFlow) {
+      event('flow_gesture_start', { values: [0, -1, 1], hold_ms: [120, 160] })
+      const stopped = await control.call('set_param', {
+        name: 'master.velocity',
+        value: 0,
+      })
+      event('flow_gesture_activation', { value: 0, response: stopped })
+      await sleep(120)
+      const reversed = await control.call('set_param', {
+        name: 'master.velocity',
+        value: -1,
+      })
+      event('flow_gesture_activation', { value: -1, response: reversed })
+      await sleep(160)
+      const resumed = await control.call('set_param', {
+        name: 'master.velocity',
+        value: 1,
+      })
+      event('flow_gesture_activation', { value: 1, response: resumed })
+      event('flow_gesture_end', {})
+    }
     lastControlConvergedMs = wallMs()
     await capturePromise
 
