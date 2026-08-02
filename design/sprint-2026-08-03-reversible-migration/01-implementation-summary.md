@@ -184,6 +184,19 @@ downstream wire dangling. The handshake regression now scopes both an active
 audible source and a disconnected projection, proving the audio graph remains
 valid while the scope artifact publishes both explicit bindings.
 
+### S-18 — Project authored and realized truth without inventing semantics
+
+The toolbar and inspector show the authored revision beside the last adopted
+program/control generation, including compiling, failed, and superseded
+states. Canvas badges project node inclusion, inlet normals/wires, live versus
+structural parameters, document blockers, and v1 migration facts directly
+from the vocabulary and atomic realized handshake. Unknown authored nodes and
+ports remain visible and serializable; only an unserved inlet's add action is
+disabled, while existing authored edges remain removable. Scope monitors are
+labelled as client-owned read-only surfaces. A knob not advertised as live is
+committed as a new authored revision and relowered instead of guessing a
+parameter discipline.
+
 ## Open architecture gate
 
 The master handoff also asks for a literal serialized `gong → reverb` fixture.

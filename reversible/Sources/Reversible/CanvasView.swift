@@ -74,6 +74,7 @@ struct NodeView: View {
     @State private var dragOrigin: CGPoint?
 
     private var spec: NodeSpec { node.kind.spec }
+    private var truth: TruthBadgePresentation { model.nodeTruth(for: node) }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
@@ -91,7 +92,9 @@ struct NodeView: View {
                height: Double(spec.gridSize.h) * Grid.unit,
                alignment: .topLeading)
         .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 10))
-        .overlay(RoundedRectangle(cornerRadius: 10).stroke(Theme.edge))
+        .overlay(
+            RoundedRectangle(cornerRadius: 10)
+                .stroke(truth.color.opacity(0.8), lineWidth: 1.5))
         .shadow(color: .black.opacity(0.35), radius: 9, y: 6)
     }
 
@@ -99,6 +102,11 @@ struct NodeView: View {
         HStack(spacing: 6) {
             Circle().fill(node.color).frame(width: 9, height: 9)
             Text(spec.title).font(Theme.mono.bold()).foregroundStyle(Theme.text)
+            Image(systemName: truth.symbol)
+                .font(.system(size: 9))
+                .foregroundStyle(truth.color)
+                .help("\(truth.label): \(truth.detail)")
+                .accessibilityLabel(truth.label)
             Spacer(minLength: 8)
             Text(node.id).font(Theme.monoSmall).foregroundStyle(Theme.muted)
             if !spec.fixed {
@@ -172,6 +180,10 @@ struct InletView: View {
     let port: String
 
     private var sources: [String] { node.inputs[port] ?? [] }
+    private var truth: TruthBadgePresentation { model.inletTruth(for: node, port: port) }
+    private var isAuthorable: Bool {
+        node.kind.isMonitor || node.kind.descriptor?.port(named: port)?.isInlet == true
+    }
 
     var body: some View {
         HStack(spacing: 4) {
@@ -194,6 +206,7 @@ struct InletView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
+            .disabled(!isAuthorable)
             .help("patch a source into \(port)")
 
             ForEach(sources, id: \.self) { src in
@@ -205,6 +218,11 @@ struct InletView: View {
             }
 
             Text(port).font(Theme.monoSmall).foregroundStyle(Theme.muted)
+            Image(systemName: truth.symbol)
+                .font(.system(size: 8))
+                .foregroundStyle(truth.color)
+                .help("\(truth.label): \(truth.detail)")
+                .accessibilityLabel("\(port) \(truth.label)")
         }
     }
 }

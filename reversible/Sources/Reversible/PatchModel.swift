@@ -56,11 +56,9 @@ enum PatchCompileState: Equatable {
     case superseded(compiledRevision: Int, currentRevision: Int)
 }
 
-/// The patch graph + engine session, one object. TOPOLOGY RELOWERS, SCALARS
-/// ARE LIVE: every continuous knob is a live `param:<id>.<knob>` module slot —
-/// turning it drives `set_param` on the running kernel, no recompile. Only
-/// structural edits (add/remove/rewire) change the graph topology and trigger
-/// a relower + hot-swap.
+/// The patch graph + engine session, one object. The realized handshake owns
+/// whether an authored scalar is live or structural: live controls drive
+/// `set_param`, while topology and structural-value edits relower and hot-swap.
 @MainActor
 final class PatchModel: ObservableObject {
     @Published var nodes: [String: PatchNode] = [:]
@@ -509,6 +507,15 @@ final class PatchModel: ObservableObject {
         else { return }
         let name = "\(node.id).\(knob.name)"
         params.send(name, value)
+    }
+
+    /// Commit a value that the current realized graph did not advertise as a
+    /// live parameter. The drag already updated `nodes`; this boundary makes
+    /// it a new authored revision before asking the engine to realize it.
+    func commitStructuralKnobEdit(nodeID: String) {
+        guard let node = nodes[nodeID], !node.kind.isMonitor else { return }
+        authoredRevision += 1
+        schedulePush()
     }
 
     func setVelocity(_ v: Double) {

@@ -1,11 +1,10 @@
 import SwiftUI
 
 /// Knob: 38px dial, pointer sweeping −135°…+135° (styles.css .knob).
-/// Every continuous knob is a live param slot `<id>.<knob>` — a vertical
-/// drag (180px = full sweep) drives the running kernel with no relower
-/// (only topology edits recompile). A glided knob eases via
-/// The client always emits `set_param`; the loaded plan owns whether the
-/// accepted write is raw, glided, phase-anchored, or a velocity rebase.
+/// A vertical drag (180px = full sweep) edits the authored value. The realized
+/// handshake decides whether that edit can use `set_param` immediately or
+/// must be committed as a structural edit and relowered. For live values, the
+/// loaded plan—not the client—owns the write discipline.
 struct KnobView: View {
     @EnvironmentObject var model: PatchModel
     let node: PatchNode
@@ -13,6 +12,8 @@ struct KnobView: View {
     @State private var dragStartNorm: Double?
 
     private var value: Double { node.values[knob.name] ?? knob.def }
+    private var truth: TruthBadgePresentation { model.parameterTruth(for: node, knob: knob) }
+    private var canWriteLive: Bool { model.canWriteLive(node, knob: knob) }
 
     var body: some View {
         VStack(spacing: 2) {
@@ -25,15 +26,24 @@ struct KnobView: View {
                             dragStartNorm = t0
                             let v = knob.fromNorm(t0 - g.translation.height / 180)
                             model.nodes[node.id]?.values[knob.name] = v
-                            model.sendKnob(node, knob, v)
+                            if canWriteLive { model.sendKnob(node, knob, v) }
                         }
                         .onEnded { _ in
                             dragStartNorm = nil
-                            model.sendKnob(node, knob, value)
+                            let finalValue = model.nodes[node.id]?.values[knob.name] ?? value
+                            if canWriteLive {
+                                model.sendKnob(node, knob, finalValue)
+                            } else if !node.kind.isMonitor {
+                                model.commitStructuralKnobEdit(nodeID: node.id)
+                            }
                         }
                 )
             Text(knob.name).font(Theme.monoTiny).foregroundStyle(Theme.muted)
             Text(knob.format(value)).font(Theme.monoTiny).foregroundStyle(Theme.text)
+            Label(truth.label, systemImage: truth.symbol)
+                .truthPill(truth.color)
+                .labelStyle(.titleAndIcon)
+                .help(truth.detail)
         }
         .frame(width: 54)
     }

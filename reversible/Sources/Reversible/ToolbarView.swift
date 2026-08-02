@@ -5,6 +5,7 @@ import SwiftUI
 /// cluster); everything else is stock.
 struct PatchToolbar: ToolbarContent {
     @ObservedObject var model: PatchModel
+    @State private var showingTruth = false
 
     var body: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
@@ -52,6 +53,26 @@ struct PatchToolbar: ToolbarContent {
             .buttonStyle(.borderedProminent)
             .tint(model.audioOn ? Theme.transportOn : Theme.transportOff)
             .help(model.audioOn ? "stop audio" : "start audio")
+        }
+
+        ToolbarItem {
+            Button {
+                showingTruth.toggle()
+            } label: {
+                HStack(spacing: 5) {
+                    Image(systemName: model.compileTruth.symbol)
+                        .foregroundStyle(model.compileTruth.color)
+                    Text("A\(model.authoredRevision)")
+                    Text(model.runningGenerationText)
+                        .foregroundStyle(Theme.muted)
+                }
+                .font(Theme.monoSmall)
+            }
+            .buttonStyle(.borderless)
+            .help("\(model.compileTruth.detail) Click to inspect nodes, blockers, and migration facts.")
+            .popover(isPresented: $showingTruth, arrowEdge: .bottom) {
+                TruthInspectorView(model: model)
+            }
         }
 
         ToolbarItem {
