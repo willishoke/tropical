@@ -482,17 +482,41 @@ def modalClassificationDrift : Array String := Id.run do
       drift := drift.push kind
   return drift
 
-/-- The vocabulary as JSON — the ONE description of the node kinds, GENERATED
-    from the port-spec table (the hand-maintained `nodeSchema` this replaces
-    was the third copy, and the class of bug this file exists to kill). Per
-    kind: outlet color and ports; per port: inlet facts (accepts/multi), knob
-    facts (default, write discipline, display metadata), and `owner` when the
-    knob parameterizes another port's normal. Clients RENDER this — nothing
-    the engine knows may be re-encoded client-side. The connection rule rides
-    along: `outlet→inlet` valid iff `outlet.color ∈ inlet.accepts`; a modal
-    outlet into a signal inlet REALIZES at the seam; a control outlet is a
-    constant stream; signal into a modal inlet is the one hard type error. -/
-def vocabularyJson : Json :=
+/-- The stable wire identity for the engine-owned vocabulary envelope. The
+    version changes only when the response contract changes incompatibly; the
+    fingerprint below changes when its semantic payload changes. -/
+def vocabularySchema : String := "tropical_vocabulary"
+def vocabularySchemaVersion : Nat := 1
+
+/-- FNV-1a/64 over bytes, with UInt64 arithmetic providing the specified
+    modulo-2^64 wrap. This is a compatibility fingerprint, not a security
+    primitive: it gives every client a small deterministic identity for the
+    exact canonical vocabulary payload it decoded. -/
+def fnv1a64 (bytes : ByteArray) : UInt64 := Id.run do
+  let mut hash : UInt64 := 14695981039346656037
+  for byte in bytes do
+    hash := (hash ^^^ byte.toUInt64) * 1099511628211
+  return hash
+
+private def hexDigit (n : Nat) : Char :=
+  if n < 10 then Char.ofNat ('0'.toNat + n)
+  else Char.ofNat ('a'.toNat + n - 10)
+
+/-- A fixed-width lowercase spelling keeps the fingerprint stable across
+    platforms and independent of the host's integer formatting. -/
+def uint64Hex (value : UInt64) : String := Id.run do
+  let mut out := ""
+  for i in [0:16] do
+    let shift := 4 * (15 - i)
+    let nibble := ((value >>> shift.toUInt64) &&& 0xf).toNat
+    out := out.push (hexDigit nibble)
+  return out
+
+/-- The vocabulary's canonical SEMANTIC payload. Array order is authored table
+    order; `Json.compress` serializes object fields through Lean.Json's ordered
+    object map, so the byte spelling hashed below is deterministic. Schema and
+    fingerprint fields deliberately live outside this payload. -/
+def vocabularyPayloadJson : Json :=
   let portJson := fun (p : PortSpec) => Json.mkObj <|
     [("name", Json.str p.name)]
     ++ (if p.accepts.isEmpty then [] else
@@ -520,6 +544,36 @@ def vocabularyJson : Json :=
           | some d => Json.str (domStr d)
           | none => Json.null),
         ("ports", Json.arr ((portSpecs k).map portJson))]))]
+
+/-- Algorithm-labelled identity of `vocabularyPayloadJson`. The label is part
+    of the value so a future algorithm migration cannot be mistaken for a
+    semantic-table change. -/
+def vocabularyFingerprint : String :=
+  s!"fnv1a64:{uint64Hex (fnv1a64 vocabularyPayloadJson.compress.toUTF8)}"
+
+/-- The vocabulary as JSON — the ONE description of the node kinds, GENERATED
+    from the port-spec table (the hand-maintained `nodeSchema` this replaces
+    was the third copy, and the class of bug this file exists to kill). Per
+    kind: outlet color and ports; per port: inlet facts (accepts/multi), knob
+    facts (default, write discipline, display metadata), and `owner` when the
+    knob parameterizes another port's normal. Clients RENDER this — nothing
+    the engine knows may be re-encoded client-side. The connection rule rides
+    along: `outlet→inlet` valid iff `outlet.color ∈ inlet.accepts`; a modal
+    outlet into a signal inlet REALIZES at the seam; a control outlet is a
+    constant stream; signal into a modal inlet is the one hard type error. The
+    original `rule`/`colors`/`kinds` keys remain top-level for compatible
+    clients; schema metadata wraps that unchanged semantic payload. -/
+def vocabularyJson : Json :=
+  match vocabularyPayloadJson with
+  | .obj fields => .obj <|
+      fields.insert "schema" (Json.str vocabularySchema)
+        |>.insert "schema_version" (Lean.toJson vocabularySchemaVersion)
+        |>.insert "fingerprint" (Json.str vocabularyFingerprint)
+  | payload => Json.mkObj [
+      ("schema", Json.str vocabularySchema),
+      ("schema_version", Lean.toJson vocabularySchemaVersion),
+      ("fingerprint", Json.str vocabularyFingerprint),
+      ("payload", payload)]
 
 /-- The live param table: every node's continuous knobs as `(<id>.<knob>, default)`
     in scan order (node order, then knob order). The position IS the `ParamIdx` the
