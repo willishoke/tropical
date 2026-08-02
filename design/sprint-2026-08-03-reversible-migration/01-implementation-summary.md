@@ -46,6 +46,15 @@ nor a usable Swift Testing compatibility module, so `swift test` is recorded
 as host-blocked until the qualified Mac has a complete matching Xcode. CI uses
 `macos-14` and runs the unmodified build/test commands.
 
+### S-05 — Package only room-owned grouped-carrier data
+
+The app bundle mirrors the relative path compiled into the live
+`groupedroom` plan and includes the `.tgrm` carrier asset plus its manifest.
+It intentionally excludes the `*-scene-44100.f32le` wet-score cache and its
+scene manifest. The packaged engine runs with
+`Contents/Resources/Tropical` as its working directory; development runs use
+an explicit repository-rooted engine override supplied by `run-dev`.
+
 ## Qualification notes
 
 No release claim has been made. The listening decision, qualified-Mac

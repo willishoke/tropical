@@ -1,0 +1,56 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
+package_root="$repo_root/reversible"
+build_root="$repo_root/build"
+app_path="$build_root/Reversible.app"
+stage_path="$build_root/.Reversible.app.stage"
+engine_bin=${TROPICAL_ENGINE_BIN:-"$repo_root/lean/.lake/build/bin/frontend"}
+room_asset="$repo_root/playground/assets/grouped-room/clouds-current-radii-mono-v1-44100.tgrm"
+room_manifest="$repo_root/playground/assets/grouped-room/clouds-current-radii-mono-v1-44100.json"
+
+for required in "$engine_bin" "$room_asset" "$room_manifest"; do
+  if test ! -f "$required"; then
+    printf 'bundle-app: required input is missing: %s\n' "$required" >&2
+    exit 1
+  fi
+done
+
+swift build -c release --package-path "$package_root"
+swift_bin=$(swift build -c release --package-path "$package_root" --show-bin-path)
+app_bin="$swift_bin/Reversible"
+if test ! -x "$app_bin"; then
+  printf 'bundle-app: Reversible product is missing: %s\n' "$app_bin" >&2
+  exit 1
+fi
+
+rm -rf "$stage_path"
+mkdir -p "$stage_path/Contents/MacOS"
+mkdir -p "$stage_path/Contents/Resources/Tropical/playground/assets/grouped-room"
+cp "$package_root/Resources/Info.plist" "$stage_path/Contents/Info.plist"
+cp "$package_root/Resources/Icon-placeholder.txt" "$stage_path/Contents/Resources/Icon-placeholder.txt"
+cp "$app_bin" "$stage_path/Contents/MacOS/Reversible"
+cp "$engine_bin" "$stage_path/Contents/Resources/Tropical/frontend"
+cp "$room_asset" "$stage_path/Contents/Resources/Tropical/playground/assets/grouped-room/"
+cp "$room_manifest" "$stage_path/Contents/Resources/Tropical/playground/assets/grouped-room/"
+
+# The built frontend normally locates libtropical through its executable-path
+# rpath. Copy the dylib when this checkout emits it separately.
+for dylib in \
+  "$repo_root/build/libtropical.dylib" \
+  "$(dirname -- "$engine_bin")/libtropical.dylib"; do
+  if test -f "$dylib"; then
+    cp "$dylib" "$stage_path/Contents/Resources/Tropical/libtropical.dylib"
+    break
+  fi
+done
+
+rm -rf "$app_path"
+mv "$stage_path" "$app_path"
+if command -v codesign >/dev/null 2>&1; then
+  codesign --force --deep --sign - "$app_path"
+fi
+
+printf '%s\n' "$app_path"

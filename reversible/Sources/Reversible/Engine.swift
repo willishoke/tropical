@@ -15,6 +15,7 @@ enum EngineEvent {
 }
 
 enum EngineError: Error, LocalizedError {
+    case binaryNotFound([String])
     case notRunning
     case exited
     case timeout(method: String)
@@ -23,6 +24,8 @@ enum EngineError: Error, LocalizedError {
 
     var errorDescription: String? {
         switch self {
+        case .binaryNotFound(let paths):
+            return "Tropical engine not found. Checked: \(paths.joined(separator: ", "))"
         case .notRunning: return "engine not started"
         case .exited: return "engine exited"
         case .timeout(let m): return "timeout: \(m)"
@@ -59,13 +62,46 @@ actor Engine {
     private var nextId = 1
     private let events: @Sendable (EngineEvent) -> Void
 
-    /// Resolution order: TROPICAL_ENGINE_BIN, then the default checkout.
-    static func resolveBinary() -> URL {
-        if let p = ProcessInfo.processInfo.environment["TROPICAL_ENGINE_BIN"] {
-            return URL(fileURLWithPath: p)
+    /// Resolution order: bundled engine, then an explicit developer/test
+    /// override. Development launchers set the override from their own repo
+    /// location; production never guesses a checkout under the user's home.
+    static func resolveBinary() throws -> URL {
+        var checked: [URL] = []
+        if let resources = Bundle.main.resourceURL {
+            let bundled = resources
+                .appendingPathComponent("Tropical", isDirectory: true)
+                .appendingPathComponent("frontend", isDirectory: false)
+            checked.append(bundled)
+            if FileManager.default.isExecutableFile(atPath: bundled.path) {
+                return bundled
+            }
         }
-        return FileManager.default.homeDirectoryForCurrentUser
-            .appendingPathComponent("tropical/lean/.lake/build/bin/frontend")
+        if let p = ProcessInfo.processInfo.environment["TROPICAL_ENGINE_BIN"] {
+            let explicit = URL(fileURLWithPath: p).standardizedFileURL
+            checked.append(explicit)
+            if FileManager.default.isExecutableFile(atPath: explicit.path) {
+                return explicit
+            }
+        }
+        throw EngineError.binaryNotFound(checked.map(\.path))
+    }
+
+    static func workingDirectory(for binary: URL) -> URL {
+        if let resources = Bundle.main.resourceURL {
+            let tropicalResources = resources.appendingPathComponent(
+                "Tropical", isDirectory: true
+            ).standardizedFileURL
+            if binary.standardizedFileURL.path.hasPrefix(tropicalResources.path + "/") {
+                return tropicalResources
+            }
+        }
+        // Explicit developer override points at
+        // <repo>/lean/.lake/build/bin/frontend.
+        return binary.deletingLastPathComponent()  // bin/
+            .deletingLastPathComponent()            // build/
+            .deletingLastPathComponent()            // .lake/
+            .deletingLastPathComponent()            // lean/
+            .deletingLastPathComponent()            // repo root
     }
 
     init(events: @escaping @Sendable (EngineEvent) -> Void) {
@@ -76,14 +112,9 @@ actor Engine {
         // Reap any engine orphaned by a PREVIOUS instance that died before
         // teardown (SIGKILL, crash) — the one gap the graceful path can't close.
         Engine.sweepOrphans()
-        let bin = Engine.resolveBinary()
-        // The engine expects to run from the repo root (stdlib paths etc.):
-        // bin is <root>/lean/.lake/build/bin/frontend, so root is 5 up.
-        let root = bin.deletingLastPathComponent()  // bin/
-            .deletingLastPathComponent()            // build/
-            .deletingLastPathComponent()            // .lake/
-            .deletingLastPathComponent()            // lean/
-            .deletingLastPathComponent()            // root
+        let bin = try Engine.resolveBinary()
+        // The engine resolves production assets relative to this owned root.
+        let root = Engine.workingDirectory(for: bin)
         // sockaddr_un caps the path at ~104 bytes, so the per-user temp dir
         // (short on macOS) rather than the app scratch dir.
         sockPath = FileManager.default.temporaryDirectory
