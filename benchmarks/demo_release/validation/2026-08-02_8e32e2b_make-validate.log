@@ -3,7 +3,7 @@ cmake -S /private/tmp/tropical-modal-pocket-demo -B /private/tmp/tropical-modal-
 		-DTROPICAL_WASM_EMIT=ON \
 		-DTROPICAL_METAL=ON \
 		-DLLVM_DIR=/opt/homebrew/opt/llvm/lib/cmake/llvm \
-		
+
 -- Using the multi-header code from /private/tmp/tropical-modal-pocket-demo/lib/json/include/
 -- Using LLVM 22.1.7
 -- Configuring done (0.2s)
