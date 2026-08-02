@@ -18,6 +18,7 @@ const MODE_COLORS = [
 const DISPLAY_SAMPLES = SCOPE_PROFILE.displaySamples
 const SEARCH_SAMPLES = SCOPE_PROFILE.searchSamples
 const WARMUP_SAMPLES = SCOPE_PROFILE.warmupSamples
+const TIME_COMPRESSION = SCOPE_PROFILE.timeCompression
 const SCOPE_POINT_BUDGET = SCOPE_PROFILE.pointBudget
 const SCOPE_FPS = SCOPE_PROFILE.fps
 const SLIDER_RESOLUTION = 1000
@@ -324,9 +325,11 @@ function drawModeOverlay(well, frames, chord) {
   const ratios = chord.voices.map((voice) => scene.absoluteRatio(chord, voice).join('/'))
   const envelope = scopeView.envelopeFraction(frames, scene.SCOPE_FULL_SCALE)
   const cycles = visibleFrames.map((frame) => frame.cycles)
+  const milliseconds = visibleFrames[0].timeSpanSeconds * 1000
   well.meta.textContent = (
     `${chord.label} · ${ratios.join(' · ')} · env ${Math.round(envelope * 100)}%`
-    + ` · log phase ${Math.min(...cycles).toFixed(1)}–${Math.max(...cycles).toFixed(1)} cyc`
+    + ` · ${milliseconds.toFixed(1)} ms / ${TIME_COMPRESSION}× time`
+    + ` · ${Math.min(...cycles).toFixed(1)}–${Math.max(...cycles).toFixed(1)} cyc`
   )
 }
 
@@ -506,6 +509,7 @@ async function renderFrame() {
           stride: response.stride,
           warmupSamples: WARMUP_SAMPLES,
           displaySamples: DISPLAY_SAMPLES,
+          timeCompression: TIME_COMPRESSION,
           frequency: trace.frequency,
           chordIndex,
           voiceIndex: trace.voiceIndex,

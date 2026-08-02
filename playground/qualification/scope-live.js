@@ -87,6 +87,7 @@ async function probeChord(chordIndex, slots) {
         stride: response.stride,
         warmupSamples: scopeProfile.warmupSamples,
         displaySamples: scopeProfile.displaySamples,
+        timeCompression: scopeProfile.timeCompression,
         frequency,
         chordIndex,
         voiceIndex,

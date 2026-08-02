@@ -28,11 +28,12 @@ test('only active phase-locked traces are drawable', () => {
   assert.equal(scopeView.envelopeFraction([live, dc, silent], 0.04), 0.5)
 })
 
-test('log-period density narrows the pitch spread without erasing it', () => {
-  assert.equal(scopeView.visibleCycles(55), 1.5)
-  assert.equal(scopeView.visibleCycles(110), 2.25)
-  assert.equal(scopeView.visibleCycles(220), 3)
-  assert.ok(scopeView.visibleCycles(371.25) < 3.6)
+test('every mode shares one uniform time axis compressed by two', () => {
+  const low = scopeView.visibleCycles(55, 44100, 896, 2)
+  const high = scopeView.visibleCycles(220, 44100, 896, 2)
+  assert.equal(low / 55, high / 220)
+  assert.equal(low, 55 * 1792 / 44100)
+  assert.equal(high, 220 * 1792 / 44100)
 })
 
 test('pointwise demodulation removes envelope slope before phase locking', () => {
@@ -83,6 +84,7 @@ test('the shared production transform yields one invariant carrier', () => {
     stride: 1,
     warmupSamples: scopeProfile.warmupSamples,
     displaySamples: scopeProfile.displaySamples,
+    timeCompression: scopeProfile.timeCompression,
     frequency,
     chordIndex: 0,
     voiceIndex: 0,
@@ -117,4 +119,5 @@ test('projection scope requests retain every source sample', () => {
     scopeProfile.displaySamples + scopeProfile.searchSamples + scopeProfile.warmupSamples,
   )
   assert.equal(scopeProfile.fps, 60)
+  assert.equal(scopeProfile.timeCompression, 2)
 })

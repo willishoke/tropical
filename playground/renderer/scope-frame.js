@@ -17,6 +17,7 @@
     stride,
     warmupSamples,
     displaySamples,
+    timeCompression,
     frequency,
     chordIndex,
     voiceIndex,
@@ -39,18 +40,21 @@
     const carrier = scopeView.extractCarrier(
       raw, envelopes, scene.SCOPE_FULL_SCALE * 1e-6,
     )
-    const cycles = scopeView.visibleCycles(frequency, scene.BASE_HZ)
-    const periodPoints = scene.SAMPLE_RATE / frequency / safeStride
+    const cycles = scopeView.visibleCycles(
+      frequency, scene.SAMPLE_RATE, displaySamples, timeCompression,
+    )
+    const spanPoints = displaySamples * timeCompression / safeStride
     return {
       stride: safeStride,
       cycles,
+      timeSpanSeconds: displaySamples * timeCompression / scene.SAMPLE_RATE,
       displayEnvelope: scene.scopeEnvelopeAt(
         chordIndex,
         voiceIndex,
         tauBase + velocity * playbackPosition / scene.SAMPLE_RATE,
       ),
       ...phaseLock.centeredWindow(
-        carrier, displayPoints, cycles * periodPoints,
+        carrier, displayPoints, spanPoints,
       ),
     }
   }

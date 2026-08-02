@@ -6,15 +6,18 @@
   if (root) root.ModalScopeProfile = profile
 }(typeof globalThis === 'undefined' ? this : globalThis, () => {
   const displaySamples = 896
-  // 1,152 plus the 896-point display leaves more than one complete 55 Hz
-  // period in which a centered 1.5-cycle window can choose its crossing.
-  const searchSamples = 1152
+  const timeCompression = 2
+  // The visible span is twice the 896-sample base width. Another full base
+  // width leaves more than one 55 Hz period of slack in which the centered
+  // window can select a positive crossing without changing the time scale.
+  const searchSamples = displaySamples * timeCompression
   const warmupSamples = 64
   return Object.freeze({
     displaySamples,
     searchSamples,
     warmupSamples,
-    // The projection-only artifact measures about 4 ms p99 at full resolution.
+    timeCompression,
+    // The wider projection-only window remains below 10 ms p99 at full resolution.
     // Keeping stride=1 removes decimation/interpolation shimmer from the locks.
     pointBudget: displaySamples + searchSamples + warmupSamples,
     // requestAnimationFrame drives the product view; this cap follows ordinary

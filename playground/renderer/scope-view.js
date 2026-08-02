@@ -15,12 +15,10 @@
     ))
   }
 
-  function visibleCycles(frequency, baseFrequency = 55) {
-    if (!(frequency > 0) || !(baseFrequency > 0)) return 1.5
-    return Math.max(1.5, Math.min(
-      3.75,
-      1.5 + 0.75 * Math.log2(frequency / baseFrequency),
-    ))
+  function visibleCycles(frequency, sampleRate, displaySamples, timeCompression = 1) {
+    if (!(frequency > 0) || !(sampleRate > 0)
+      || !(displaySamples > 0) || !(timeCompression > 0)) return 0
+    return frequency * displaySamples * timeCompression / sampleRate
   }
 
   function normalizedAmplitude(value, fullScale) {
