@@ -35,15 +35,21 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
   let (g, paramTable) ← decodeGraph j
   let term ← lowerGraph g
   let (out, b0) := emitTerm (normalize term) {}
-  -- Per-node taps are opt-in (`"taps": true` in the request): they cost extra
-  -- kernel compute, so an audio-only consumer (the playground) omits them and
-  -- pays nothing. The final mix (`out`) is always tappable — its slot exists
-  -- regardless — so a scope attached to a taps-off patch still sees the output.
-  let emitTaps := match j.getObjVal? "taps" with | .ok (.bool b) => b | _ => false
+  -- Per-node taps are opt-in: `"taps": true` retains the inspection/debug
+  -- surface, while `"taps": ["id", ...]` emits only named projections. The
+  -- latter is the production scope path: it avoids re-emitting every visible
+  -- node's upstream cone when the UI needs a small, explicit set of signals.
+  -- The final mix (`out`) remains tappable regardless.
+  let visibleTapIds := tapNodeIds (rawsOf j)
+  let tapIds := match j.getObjVal? "taps" with
+    | .ok (.bool true) => visibleTapIds
+    | .ok (.arr requested) => requested.filterMap fun
+        | Json.str id => if visibleTapIds.contains id then some id else none
+        | _ => none
+    | _ => #[]
   -- Emit each user node's sub-term into the SAME builder (so instance names stay
   -- unique by `decls.size`), collecting `(id, signal)`. A node that fails to
   -- lower is simply not tapped.
-  let tapIds := if emitTaps then tapNodeIds (rawsOf j) else #[]
   let (tapSigs, b) : Array (String × Sig) × Builder :=
     tapIds.foldl (fun (acc : Array (String × Sig) × Builder) id =>
       match lowerAt g id with

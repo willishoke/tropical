@@ -18,6 +18,11 @@
     --muted: #71807d;
     --strings: #72b6a1;
     --room: #d49a6a;
+    --mode-1: #72b6a1;
+    --mode-2: #d5c66f;
+    --mode-3: #d49a6a;
+    --mode-4: #8fa7d1;
+    --mode-5: #bd8fb4;
     --focus: #d5c66f;
     --fault: #c27386;
     --ink-black: #070a0c;
@@ -188,7 +193,7 @@
 
   #scopes {
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 1fr);
     gap: 10px;
     min-height: 0;
   }
@@ -383,6 +388,7 @@
 
   <script src="../scene.js"></script>
   <script src="latest-value-sender.js"></script>
+  <script src="phase-lock.js"></script>
   <script src="scope-profile.js"></script>
   <script src="app.js"></script>
 </body>

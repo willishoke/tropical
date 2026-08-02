@@ -8,20 +8,10 @@ const scene = window.ModalScene
 const GRAPH = scene.buildSceneGraph()
 const CONTROLS = scene.CONTROLS.map((control) => ({ ...control }))
 const SCOPE_PROFILE = window.ModalScopeProfile
+const phaseLock = window.ModalPhaseLock
 
-const SCOPES = [
-  {
-    tap: 'veil',
-    label: 'STRINGS / RESONANT VEIL',
-    color: '--strings',
-    trigger: true,
-  },
-  {
-    tap: 'room',
-    label: 'ROOM / METAL RETURN',
-    color: '--room',
-    trigger: false,
-  },
+const MODE_COLORS = [
+  '--mode-1', '--mode-2', '--mode-3', '--mode-4', '--mode-5',
 ]
 
 const DISPLAY_SAMPLES = SCOPE_PROFILE.displaySamples
@@ -49,6 +39,7 @@ const committedValues = new Map(
 )
 let loopStarted = false
 const wells = []
+const scopeSlots = new Map()
 const stepElements = []
 const chordElements = []
 
@@ -247,36 +238,23 @@ function buildSequence() {
 
 function buildScopes() {
   const root = document.getElementById('scopes')
-  SCOPES.forEach((scope) => {
-    const well = document.createElement('article')
-    well.className = 'scope'
-    well.innerHTML = `
-      <div class="scope-head">
-        <span>${scope.label}</span>
-        <span class="scope-meta">scope.${scope.tap} · waiting</span>
-      </div>
-    `
-    const canvas = document.createElement('canvas')
-    well.appendChild(canvas)
-    root.appendChild(well)
-    wells.push({
-      ...scope,
-      canvas,
-      meta: well.querySelector('.scope-meta'),
-      slot: null,
-      peak: 1e-6,
-    })
+  const element = document.createElement('article')
+  element.className = 'scope'
+  element.innerHTML = `
+    <div class="scope-head">
+      <span>STRING MODES / PHASE VIEW</span>
+      <span class="scope-meta">five independent locks · waiting</span>
+    </div>
+  `
+  const canvas = document.createElement('canvas')
+  element.appendChild(canvas)
+  root.appendChild(element)
+  wells.push({
+    canvas,
+    meta: element.querySelector('.scope-meta'),
+    traces: MODE_COLORS.map((color, voiceIndex) => ({ color, voiceIndex })),
+    peak: 1e-6,
   })
-}
-
-function findTrigger(values, searchLength, hysteresis = 0.025) {
-  const limit = Math.min(searchLength, values.length)
-  let armed = (values[0] ?? 0) < -hysteresis
-  for (let index = 1; index < limit; index += 1) {
-    if (values[index] < -hysteresis) armed = true
-    else if (armed && values[index - 1] < 0 && values[index] >= 0) return index
-  }
-  return 0
 }
 
 function resizeCanvas(canvas) {
@@ -290,14 +268,13 @@ function resizeCanvas(canvas) {
   return { width, height, dpr }
 }
 
-function drawTrace(well, values) {
+function drawModeOverlay(well, frames, chord) {
   const { canvas } = well
   const { width, height, dpr } = resizeCanvas(canvas)
   const context = canvas.getContext('2d')
   const palette = getComputedStyle(document.documentElement)
   const ground = palette.getPropertyValue('--surface')
   const grid = palette.getPropertyValue('--rule')
-  const trace = palette.getPropertyValue(well.color)
 
   context.fillStyle = ground
   context.fillRect(0, 0, width, height)
@@ -317,37 +294,46 @@ function drawTrace(well, values) {
     context.stroke()
   }
 
-  if (!values || values.length < 2) {
-    well.meta.textContent = `scope.${well.tap} · no signal`
+  if (frames.length === 0 || frames.some((frame) => frame.values.length < 2)) {
+    well.meta.textContent = 'five independent locks · no signal'
     return
   }
 
   let framePeak = 1e-7
-  values.forEach((value) => { framePeak = Math.max(framePeak, Math.abs(value)) })
+  frames.forEach((frame) => frame.values.forEach((value) => {
+    framePeak = Math.max(framePeak, Math.abs(value))
+  }))
   well.peak = Math.max(framePeak, well.peak * 0.91)
   const scale = Math.max(framePeak, well.peak * 0.72, 1e-7)
 
-  context.strokeStyle = trace
-  context.lineWidth = Math.max(1, dpr)
-  context.beginPath()
-  values.forEach((value, index) => {
-    const x = index * width / (values.length - 1)
-    const y = height / 2 - value / (scale * 1.12) * (height / 2 - 5 * dpr)
-    if (index === 0) context.moveTo(x, y)
-    else context.lineTo(x, y)
+  frames.forEach((frame) => {
+    context.strokeStyle = palette.getPropertyValue(frame.trace.color)
+    context.lineWidth = Math.max(1, dpr)
+    context.beginPath()
+    frame.values.forEach((value, index) => {
+      const x = index * width / (frame.values.length - 1)
+      const y = height / 2 - value / (scale * 1.12) * (height / 2 - 5 * dpr)
+      if (index === 0) context.moveTo(x, y)
+      else context.lineTo(x, y)
+    })
+    context.stroke()
   })
-  context.stroke()
 
-  const milliseconds = values.length / scene.SAMPLE_RATE * 1000
+  const milliseconds = (
+    frames[0].values.length * frames[0].stride / scene.SAMPLE_RATE * 1000
+  )
+  const ratios = chord.voices.map((voice) => scene.absoluteRatio(chord, voice).join('/'))
   well.meta.textContent = (
-    `scope.${well.tap} · ${milliseconds.toFixed(1)} ms · auto ±${formatPeak(framePeak)}`
+    `${chord.label} · ${ratios.join(' · ')} · ${milliseconds.toFixed(1)} ms`
   )
 }
 
-function formatPeak(peak) {
-  if (peak >= 0.1) return peak.toFixed(2)
-  if (peak >= 0.001) return peak.toFixed(3)
-  return peak.toExponential(1)
+function chordIndexAt(time) {
+  return scene.CHORDS.findIndex((chord, index) => {
+    const next = scene.CHORDS[index + 1]
+    return time >= chord.startStep * scene.STEP_SECONDS
+      && time < (next ? next.startStep * scene.STEP_SECONDS : scene.PATTERN_SECONDS)
+  })
 }
 
 function renderSequence(time) {
@@ -359,15 +345,7 @@ function renderSequence(time) {
     element.classList.toggle('active', index === activeStep)
   })
 
-  let activeChord = -1
-  scene.CHORDS.forEach((chord, index) => {
-    const next = scene.CHORDS[index + 1]
-    const chordStart = chord.startStep * scene.STEP_SECONDS
-    const chordEnd = next
-      ? next.startStep * scene.STEP_SECONDS
-      : scene.PATTERN_SECONDS
-    if (time >= chordStart && time < chordEnd) activeChord = index
-  })
+  const activeChord = chordIndexAt(time)
   chordElements.forEach((element, index) => {
     element.classList.toggle('active', index === activeChord)
   })
@@ -473,7 +451,13 @@ async function renderFrame() {
     renderSequence(transport.sceneTime)
     renderTransport()
 
-    const live = wells.filter((well) => well.slot !== null)
+    const chordIndex = Math.max(0, chordIndexAt(transport.sceneTime))
+    const chord = scene.CHORDS[chordIndex]
+    const well = wells[0]
+    const live = well.traces.map((trace) => {
+      const tap = scene.scopeModeId(chordIndex, trace.voiceIndex)
+      return { ...trace, tap, slot: scopeSlots.get(tap) }
+    }).filter((trace) => trace.slot !== undefined)
     const count = DISPLAY_SAMPLES + SEARCH_SAMPLES + WARMUP_SAMPLES
     const start = Math.max(0, position - count)
     const response = await rpc('render_window', {
@@ -493,13 +477,15 @@ async function renderFrame() {
     const searchPoints = Math.ceil(SEARCH_SAMPLES / stride)
     const displayPoints = Math.ceil(DISPLAY_SAMPLES / stride)
 
-    live.forEach((well, resultIndex) => {
+    const frames = live.map((trace, resultIndex) => {
       const values = (response.values[resultIndex] || []).slice(warmupPoints)
-      const offset = well.trigger
-        ? findTrigger(values, searchPoints)
-        : Math.min(searchPoints, Math.max(0, values.length - displayPoints))
-      drawTrace(well, values.slice(offset, offset + displayPoints))
+      return {
+        trace,
+        stride,
+        ...phaseLock.window(values, searchPoints, displayPoints),
+      }
     })
+    drawModeOverlay(well, frames, chord)
   } catch {
     // Compilation/hot-swap transitions can make one random-access read stale.
     // The next frame is authoritative.
@@ -552,12 +538,13 @@ async function boot() {
 
     const response = await rpc('list_scope_taps')
     const taps = new Map((response.taps || []).map((tap) => [tap.name, tap.slot]))
-    wells.forEach((well) => { well.slot = taps.get(well.tap) ?? null })
-    const missing = wells.filter((well) => well.slot === null)
+    scopeSlots.clear()
+    taps.forEach((slot, name) => scopeSlots.set(name, slot))
+    const missing = scene.SCOPE_TAPS.filter((name) => !scopeSlots.has(name))
 
     status.classList.toggle('fault', missing.length > 0)
     status.textContent = missing.length
-      ? `${audio} / missing ${missing.map((well) => `scope.${well.tap}`).join(', ')}`
+      ? `${audio} / missing ${missing.map((name) => `scope.${name}`).join(', ')}`
       : `${audio} / 44.1 kHz / twenty strings + wet metal`
 
     if (!loopStarted) {

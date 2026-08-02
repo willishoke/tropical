@@ -344,7 +344,10 @@ async function main() {
     await control.call('set_param', { name: level.slot, value: level.value })
     const taps = await control.call('list_scope_taps')
     const tapMap = new Map(taps.taps.map((tap) => [tap.name, tap.slot]))
-    const tapSlots = ['veil', 'room'].map((name) => {
+    const qualificationTaps = scene.CHORDS[0].voices.map((_voice, voiceIndex) => (
+      scene.scopeModeId(0, voiceIndex)
+    ))
+    const tapSlots = qualificationTaps.map((name) => {
       if (!tapMap.has(name)) throw new Error(`missing scope tap: ${name}`)
       return tapMap.get(name)
     })

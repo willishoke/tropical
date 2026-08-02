@@ -9,7 +9,9 @@ test('scene is one acyclic-looking fixed graph with unique ids', () => {
   assert.equal(new Set(ids).size, ids.length)
   assert.equal(graph.out, 'out')
   assert.ok(ids.includes(graph.out))
-  assert.equal(graph.nodes.filter((node) => node.kind === 'string').length, 8)
+  assert.equal(graph.nodes.filter((node) => node.kind === 'string').length, 28)
+  assert.deepEqual(graph.taps, scene.SCOPE_TAPS)
+  assert.equal(graph.taps.length, 20)
   assert.equal(graph.nodes.filter((node) => node.kind === 'modalmix').length, 0)
   assert.equal(graph.nodes.filter((node) => node.kind === 'reverb').length, 0)
   assert.equal(graph.nodes.filter((node) => node.kind === 'groupedroom').length, 0)
@@ -61,6 +63,19 @@ test('scene is one acyclic-looking fixed graph with unique ids', () => {
       graph.nodes.find((node) => node.id === `veil${index + 1}`).in.cutoff,
       ['veilControl'],
     )
+    for (let voiceIndex = 0; voiceIndex < 5; voiceIndex++) {
+      const projection = graph.nodes.find(
+        (node) => node.id === scene.scopeModeId(index, voiceIndex),
+      )
+      assert.equal(projection.params.modes.length, 2)
+      assert.equal(projection.params.t, chord.params.t)
+      assert.ok(Math.abs(
+        projection.params.modes[0][0]
+        - scene.voiceFrequency(scene.CHORDS[index], scene.CHORDS[index].voices[voiceIndex]),
+      ) < 1e-8)
+      assert.equal(projection.params.modes[1][0], projection.params.modes[0][0])
+      assert.equal(projection.params.modes[1][2], -projection.params.modes[0][2])
+    }
   }
   for (let index = 0; index < 4; index++) {
     const hit = graph.nodes.find((node) => node.id === `metalHit${index + 1}`)

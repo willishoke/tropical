@@ -174,6 +174,13 @@
     return rows
   }
 
+  const scopeModeId = (chordIndex, voiceIndex) => (
+    `scopeChord${chordIndex + 1}Mode${voiceIndex + 1}`
+  )
+  const SCOPE_TAPS = CHORDS.flatMap((chord, chordIndex) => (
+    chord.voices.map((_voice, voiceIndex) => scopeModeId(chordIndex, voiceIndex))
+  ))
+
   function buildSceneGraph() {
     const nodes = []
     const veilIds = []
@@ -248,6 +255,24 @@
           },
         },
       )
+
+      // Scope projections are deliberately disconnected from the audible
+      // root. Each is one fundamental decay pair, giving the phase view five
+      // simple modes it can lock independently without re-evaluating every
+      // visible graph node as a tap.
+      chord.voices.forEach((voice, voiceIndex) => {
+        const fundamental = voiceFrequency(chord, voice)
+        nodes.push({
+          id: scopeModeId(chordIndex, voiceIndex),
+          kind: 'string',
+          params: {
+            t: rounded(strikeTime, 6),
+            modes: stringModes(fundamental, chordIndex, voiceIndex).slice(0, 2),
+          },
+          sel: {},
+          in: {},
+        })
+      })
       veilIds.push(veilId)
     })
 
@@ -348,7 +373,7 @@
       },
     )
 
-    return { nodes, out: 'out', taps: true }
+    return { nodes, out: 'out', taps: SCOPE_TAPS }
   }
 
   const CONTROLS = [
@@ -444,12 +469,14 @@
     CHORDS,
     CONTROLS,
     PRIME_SLOTS,
+    SCOPE_TAPS,
     absoluteRatio,
     ratioLabel,
     voiceFrequency,
     stringModes,
     chordModes,
     snareModes,
+    scopeModeId,
     buildSceneGraph,
   }
 })
