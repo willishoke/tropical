@@ -872,6 +872,61 @@ static void test_scope_snapshot_does_not_block_control()
   ASSERT(rt.control_waiter_count() == 0);
 }
 
+// Socket callers name taps rather than passing numeric slots. Name resolution
+// and evaluation must pin one program image so a hot-swap cannot reinterpret
+// an old tap name using the new program's slot layout.
+static void test_scope_named_render_pins_program()
+{
+  tropical_runtime::FlatRuntime rt(16);
+  const std::string ir = wrap_loop(
+    "  %sp = getelementptr inbounds double, ptr %slots, i64 0\n"
+    "  %v = load double, ptr %sp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %v, ptr %op, align 8\n");
+  const auto manifest = [](const char * name, double value) {
+    return std::string(R"({"schema":"tropical_plan_5",
+      "config":{"sampleRate":44100},"register_count":0,
+      "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+      "sinks":[],"slot_count":1,"slot_names":[")") + name
+      + R"("],"slot_defaults":[)" + std::to_string(value) + R"(],
+      "param_disciplines":[]})";
+  };
+  ASSERT(rt.load_ir(ir, manifest("tap:old", 1.0)));
+
+  tropical_runtime::RuntimeOwnershipTestSeam seam;
+  seam.pause_after_render_coordinate.store(true, std::memory_order_relaxed);
+  rt.set_ownership_test_seam(&seam);
+  std::array<double, 64> old_values{};
+  tropical_runtime::ScopeRenderResult old_result;
+  std::jthread old_scope([&] {
+    old_result = rt.render_window_low_priority_by_name(
+      0, static_cast<uint32_t>(old_values.size()), 1,
+      {"tap:old"}, old_values.data());
+  });
+  ASSERT(wait_for_true(seam.render_coordinate_completed));
+
+  ASSERT(rt.load_ir(ir, manifest("tap:new", 2.0)));
+  seam.release_render_coordinate.store(true, std::memory_order_release);
+  old_scope.join();
+  rt.set_ownership_test_seam(nullptr);
+
+  ASSERT(old_result.status == tropical_runtime::RenderWindowStatus::Rendered);
+  for (double value : old_values) ASSERT(value == 1.0);
+
+  std::array<double, 4> next_values{};
+  const auto missing = rt.render_window_low_priority_by_name(
+    0, static_cast<uint32_t>(next_values.size()), 1,
+    {"tap:old"}, next_values.data());
+  ASSERT(missing.status == tropical_runtime::RenderWindowStatus::InvalidArgument);
+  ASSERT(missing.unknown_slot == "tap:old");
+  const auto next = rt.render_window_low_priority_by_name(
+    0, static_cast<uint32_t>(next_values.size()), 1,
+    {"tap:new"}, next_values.data());
+  ASSERT(next.status == tropical_runtime::RenderWindowStatus::Rendered);
+  ASSERT(next.program_version > old_result.program_version);
+  for (double value : next_values) ASSERT(value == 2.0);
+}
+
 // Scope-side coefficient materialization is private to the immutable control
 // image: a column update becomes visible coherently without borrowing any of
 // the audio state's three mutable generations.
@@ -1331,6 +1386,8 @@ int main()
            test_param_dispatch_effective_boundary_races);
   run_test("scope snapshot never blocks control publication",
            test_scope_snapshot_does_not_block_control);
+  run_test("named scope render pins one hot-swap program",
+           test_scope_named_render_pins_program);
   run_test("scope snapshot materializes coefficient columns privately",
            test_scope_snapshot_materializes_coefficients);
   run_test("coherent slot/coefficient generation", test_control_generation_coherence);

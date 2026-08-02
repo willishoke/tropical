@@ -355,20 +355,13 @@ std::string SocketServer::handle_data(const std::string & line)
       const uint32_t count =
         (requested_count + stride - 1) / stride;
       const auto names = p.at("slots").get<std::vector<std::string>>();
-      std::vector<uint32_t> ids;
-      ids.reserve(names.size());
-      for (const auto & nm : names)
-      {
-        const uint32_t sid = runtime_->slot_index(nm);
-        if (sid == UINT32_MAX)
-          return json{{"jsonrpc", "2.0"}, {"id", id},
-                      {"error", {{"code", -32602}, {"message", "render_window: unknown slot '" + nm + "'"}}}}.dump();
-        ids.push_back(sid);
-      }
-      std::vector<double> out(static_cast<size_t>(count) * ids.size(), 0.0);
-      const auto render_status = runtime_->render_window_low_priority(
-        start, count, stride, ids.data(),
-        static_cast<uint32_t>(ids.size()), out.data());
+      std::vector<double> out(static_cast<size_t>(count) * names.size(), 0.0);
+      const auto render = runtime_->render_window_low_priority_by_name(
+        start, count, stride, names, out.data());
+      const auto render_status = render.status;
+      if (!render.unknown_slot.empty())
+        return json{{"jsonrpc", "2.0"}, {"id", id},
+                    {"error", {{"code", -32602}, {"message", "render_window: unknown slot '" + render.unknown_slot + "'"}}}}.dump();
       if (render_status == tropical_runtime::RenderWindowStatus::Preempted)
         return json{{"jsonrpc", "2.0"}, {"id", id},
                     {"result", {
@@ -377,6 +370,9 @@ std::string SocketServer::handle_data(const std::string & line)
                       {"span", requested_count},
                       {"stride", stride},
                       {"preempted", true},
+                      {"program_version", render.program_version},
+                      {"control_version", render.control_version},
+                      {"effective_sample_index", render.effective_sample_index},
                       {"values", json::array()},
                     }}}.dump();
       if (render_status == tropical_runtime::RenderWindowStatus::Unsupported)
@@ -386,7 +382,7 @@ std::string SocketServer::handle_data(const std::string & line)
         return json{{"jsonrpc", "2.0"}, {"id", id},
                     {"error", {{"code", -32602}, {"message", "render_window: invalid render request"}}}}.dump();
       json values = json::array();
-      for (size_t k = 0; k < ids.size(); ++k)
+      for (size_t k = 0; k < names.size(); ++k)
       {
         json ch = json::array();
         for (uint32_t i = 0; i < count; ++i) ch.push_back(out[k * count + i]);
@@ -399,6 +395,9 @@ std::string SocketServer::handle_data(const std::string & line)
                     {"span", requested_count},
                     {"stride", stride},
                     {"preempted", false},
+                    {"program_version", render.program_version},
+                    {"control_version", render.control_version},
+                    {"effective_sample_index", render.effective_sample_index},
                     {"values", std::move(values)},
                   }}}.dump();
     }

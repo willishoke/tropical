@@ -78,6 +78,15 @@ enum class RenderWindowStatus : uint8_t
   Unsupported,
 };
 
+struct ScopeRenderResult
+{
+  RenderWindowStatus status = RenderWindowStatus::InvalidArgument;
+  uint64_t program_version = 0;
+  uint64_t control_version = 0;
+  uint64_t effective_sample_index = 0;
+  std::string unknown_slot;
+};
+
 // Counted, off-audio-thread control activity. Retained as compatibility
 // telemetry during the snapshot cutover; scopes no longer consume this signal
 // or own build_mutex_.
@@ -835,12 +844,14 @@ public:
   // build_mutex_ ownership crosses the read side.
   RenderWindowStatus render_window_low_priority(
     uint64_t start_index, uint32_t count, uint32_t stride,
-    const uint32_t * slot_ids, uint32_t n_slots, double * out)
+    const uint32_t * slot_ids, uint32_t n_slots, double * out,
+    std::shared_ptr<const ScopeSnapshot> snapshot = {})
   {
     if (!out || stride == 0 || (n_slots > 0 && !slot_ids))
       return RenderWindowStatus::InvalidArgument;
-    const auto snapshot = std::atomic_load_explicit(
-      &scope_snapshot_, std::memory_order_acquire);
+    if (!snapshot)
+      snapshot = std::atomic_load_explicit(
+        &scope_snapshot_, std::memory_order_acquire);
     if (!snapshot || !snapshot->program || !snapshot->controls)
       return RenderWindowStatus::Unsupported;
     const ScopeProgramImage & program = *snapshot->program;
@@ -945,6 +956,45 @@ public:
       }
     }
     return RenderWindowStatus::Rendered;
+  }
+
+  // Resolve names and render against the same acquired program image. This is
+  // the socket-facing form: a hot-swap can no longer land between a separately
+  // locked slot_index() call and the actual frame evaluation.
+  ScopeRenderResult render_window_low_priority_by_name(
+    uint64_t start_index, uint32_t count, uint32_t stride,
+    const std::vector<std::string> & slot_names, double * out)
+  {
+    ScopeRenderResult result;
+    const auto snapshot = std::atomic_load_explicit(
+      &scope_snapshot_, std::memory_order_acquire);
+    if (!snapshot || !snapshot->program || !snapshot->controls)
+    {
+      result.status = RenderWindowStatus::Unsupported;
+      return result;
+    }
+    result.program_version = snapshot->program->program_version;
+    result.control_version = snapshot->controls->control_version;
+    result.effective_sample_index =
+      snapshot->controls->effective_sample_index;
+    std::vector<uint32_t> slot_ids;
+    slot_ids.reserve(slot_names.size());
+    for (const std::string & name : slot_names)
+    {
+      const auto found = snapshot->program->slot_lookup.find(name);
+      if (found == snapshot->program->slot_lookup.end())
+      {
+        result.status = RenderWindowStatus::InvalidArgument;
+        result.unknown_slot = name;
+        return result;
+      }
+      slot_ids.push_back(found->second);
+    }
+    result.status = render_window_low_priority(
+      start_index, count, stride,
+      slot_ids.data(), static_cast<uint32_t>(slot_ids.size()), out,
+      snapshot);
+    return result;
   }
 
   bool render_window(uint64_t start_index, uint32_t count,
