@@ -297,6 +297,68 @@ static void test_plan6_immutable_asset_jit()
   tropical_runtime_free(rt);
 }
 
+// A paused reader retains the old Plan-6 pack while two hot-swaps reuse both
+// bounded KernelState slots. The source file is already gone, so the completed
+// old frame can only succeed through the scope image's shared asset ownership.
+static void test_scope_snapshot_retains_plan6_asset()
+{
+  const std::vector<uint8_t> bytes = {
+    0x00, 0x00, 0x80, 0x3e, // 0.25f
+    0x00, 0x00, 0xc0, 0xbf, // -1.5f
+    0x00, 0x00, 0x30, 0x40, // 2.75f
+    0x00, 0x00, 0x80, 0x40, // 4.0f
+  };
+  TestAssetFile asset("tropical-plan6-scope-snapshot.f32", bytes);
+  const std::string ir = wrap_loop(
+    "  %a0p = getelementptr inbounds ptr, ptr %arrays, i64 0\n"
+    "  %a0 = load ptr, ptr %a0p, align 8\n"
+    "  %idx = urem i64 %s, 4\n"
+    "  %ep = getelementptr inbounds i64, ptr %a0, i64 %idx\n"
+    "  %raw = load i64, ptr %ep, align 8\n"
+    "  %v = bitcast i64 %raw to double\n"
+    "  %sp = getelementptr inbounds double, ptr %slots, i64 0\n"
+    "  store double %v, ptr %sp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %v, ptr %op, align 8\n");
+  std::string manifest = plan6_manifest(asset.path.string());
+  const std::string empty_slots = R"("slot_count":0)";
+  const std::string tap_slot =
+    R"("slot_count":1,"slot_names":["tap"],"slot_defaults":[0.0])";
+  const auto slot_pos = manifest.find(empty_slots);
+  ASSERT(slot_pos != std::string::npos);
+  manifest.replace(slot_pos, empty_slots.size(), tap_slot);
+
+  tropical_runtime::FlatRuntime rt(16);
+  ASSERT(rt.load_ir(ir, manifest));
+  std::filesystem::remove(asset.path);
+
+  tropical_runtime::RuntimeOwnershipTestSeam seam;
+  seam.pause_after_render_coordinate.store(true, std::memory_order_relaxed);
+  rt.set_ownership_test_seam(&seam);
+  const uint32_t slot = 0;
+  std::array<double, 16> values{};
+  tropical_runtime::RenderWindowStatus status =
+    tropical_runtime::RenderWindowStatus::InvalidArgument;
+  std::jthread scope([&] {
+    status = rt.render_window_low_priority(
+      0, static_cast<uint32_t>(values.size()), 1,
+      &slot, 1, values.data());
+  });
+  ASSERT(wait_for_true(seam.render_coordinate_completed));
+
+  const std::string ramp = wrap_loop(RAMP_BODY);
+  ASSERT(rt.load_ir(ramp, RAMP_MANIFEST));
+  ASSERT(rt.load_ir(ramp, RAMP_MANIFEST));
+
+  seam.release_render_coordinate.store(true, std::memory_order_release);
+  scope.join();
+  rt.set_ownership_test_seam(nullptr);
+  ASSERT(status == tropical_runtime::RenderWindowStatus::Rendered);
+  // render_window invokes the one-sample kernel once per coordinate, so this
+  // fixture's buffer-local `%s` index remains zero on every invocation.
+  for (double value : values) ASSERT_NEAR(value, 0.25, 0.0);
+}
+
 static void test_plan6_immutable_asset_refusals()
 {
   const std::vector<uint8_t> bytes = {
@@ -743,24 +805,22 @@ static void test_param_dispatch_effective_boundary_races()
   ASSERT(rt.ownership_failure_count() == 0);
 }
 
-// A control waiter publishes priority before blocking on the random-access
-// renderer's structural lock. The renderer notices it at the next coordinate,
-// returns an explicit preemption, and releases the lock for the control write.
-static void test_scope_yields_to_control_waiter()
+// A scope owns one immutable program/control image for its whole frame. A
+// control publication completes while that reader is deliberately paused, and
+// the old frame remains coherent instead of tearing to the new slot value.
+static void test_scope_snapshot_does_not_block_control()
 {
   tropical_runtime::FlatRuntime rt(16);
   const std::string ir = wrap_loop(
-    "  %idx = add i64 %start_sample_index, %s\n"
-    "  %v = sitofp i64 %idx to double\n"
     "  %sp = getelementptr inbounds double, ptr %slots, i64 0\n"
-    "  store double %v, ptr %sp, align 8\n"
+    "  %v = load double, ptr %sp, align 8\n"
     "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
     "  store double %v, ptr %op, align 8\n");
   const std::string manifest = R"({"schema":"tropical_plan_5",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":1,"slot_names":["param:x"],
-    "slot_defaults":[0.0],"param_disciplines":[
+    "slot_defaults":[1.0],"param_disciplines":[
       {"name":"x","discipline":"raw","companions":[]}
     ]})";
   ASSERT(rt.load_ir(ir, manifest));
@@ -771,9 +831,7 @@ static void test_scope_yields_to_control_waiter()
     10, static_cast<uint32_t>(strided.size()), 3,
     &slot, 1, strided.data())
     == tropical_runtime::RenderWindowStatus::Rendered);
-  ASSERT(strided[0] == 10.0);
-  ASSERT(strided[1] == 13.0);
-  ASSERT(strided[2] == 16.0);
+  for (double value : strided) ASSERT(value == 1.0);
 
   tropical_runtime::RuntimeOwnershipTestSeam seam;
   seam.pause_after_render_coordinate.store(true, std::memory_order_relaxed);
@@ -789,25 +847,83 @@ static void test_scope_yields_to_control_waiter()
   ASSERT(wait_for_true(seam.render_coordinate_completed));
 
   tropical_runtime::ParamDispatchResult control_result;
+  std::atomic<bool> control_done{false};
   std::jthread control([&] {
     control_result = rt.dispatch_param_sync("x", 0.5);
+    control_done.store(true, std::memory_order_release);
   });
-  const auto deadline =
-    std::chrono::steady_clock::now() + std::chrono::seconds(10);
-  while (rt.control_waiter_count() == 0
-         && std::chrono::steady_clock::now() < deadline)
-    std::this_thread::yield();
-  ASSERT(rt.control_waiter_count() == 1);
+  ASSERT(wait_for_true(control_done));
+  ASSERT(control_result.ok);
 
   seam.release_render_coordinate.store(true, std::memory_order_release);
   scope.join();
   control.join();
   rt.set_ownership_test_seam(nullptr);
 
-  ASSERT(scope_status == tropical_runtime::RenderWindowStatus::Preempted);
-  ASSERT(rt.scope_preemption_count() == 1);
-  ASSERT(control_result.ok);
+  ASSERT(scope_status == tropical_runtime::RenderWindowStatus::Rendered);
+  for (double value : scope_output) ASSERT(value == 1.0);
+  std::array<double, 4> next{};
+  ASSERT(rt.render_window_low_priority(
+    0, static_cast<uint32_t>(next.size()), 1,
+    &slot, 1, next.data())
+    == tropical_runtime::RenderWindowStatus::Rendered);
+  for (double value : next) ASSERT(value == 0.5);
+  ASSERT(rt.scope_preemption_count() == 0);
   ASSERT(rt.control_waiter_count() == 0);
+}
+
+// Scope-side coefficient materialization is private to the immutable control
+// image: a column update becomes visible coherently without borrowing any of
+// the audio state's three mutable generations.
+static void test_scope_snapshot_materializes_coefficients()
+{
+  tropical_runtime::FlatRuntime rt(16);
+  const std::string ir = wrap_loop(
+    "  %a0p = getelementptr inbounds ptr, ptr %arrays, i64 0\n"
+    "  %a0 = load ptr, ptr %a0p, align 8\n"
+    "  %raw = load i64, ptr %a0, align 8\n"
+    "  %v = bitcast i64 %raw to double\n"
+    "  %sp = getelementptr inbounds double, ptr %slots, i64 0\n"
+    "  store double %v, ptr %sp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %v, ptr %op, align 8\n");
+  const std::string coeff_ir = std::string("define void @kernel(")
+    + KERNEL_SIG + ") {\n"
+      "entry:\n"
+      "  %sp = getelementptr inbounds double, ptr %slots, i64 0\n"
+      "  %x = load double, ptr %sp, align 8\n"
+      "  %v = fmul double %x, 2.000000e+00\n"
+      "  %raw = bitcast double %v to i64\n"
+      "  %a0p = getelementptr inbounds ptr, ptr %arrays, i64 0\n"
+      "  %a0 = load ptr, ptr %a0p, align 8\n"
+      "  store i64 %raw, ptr %a0, align 8\n"
+      "  ret void\n}\n";
+  const std::string manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":1,"array_slot_sizes":[1],
+    "array_slot_names":["coef"],"coeff_array_slots":[0],
+    "instance_functions":[],"sinks":[],"slot_count":1,
+    "slot_names":["param:x"],"slot_defaults":[1.0],
+    "param_disciplines":[
+      {"name":"x","discipline":"raw","companions":[]}
+    ]})";
+  ASSERT(rt.load_ir_staged(ir, "", coeff_ir, manifest));
+
+  const uint32_t slot = 0;
+  std::array<double, 4> values{};
+  ASSERT(rt.render_window_low_priority(
+    0, static_cast<uint32_t>(values.size()), 1,
+    &slot, 1, values.data())
+    == tropical_runtime::RenderWindowStatus::Rendered);
+  for (double value : values) ASSERT(value == 2.0);
+
+  const auto update = rt.dispatch_param_sync("x", 3.0);
+  ASSERT(update.ok);
+  ASSERT(rt.render_window_low_priority(
+    0, static_cast<uint32_t>(values.size()), 1,
+    &slot, 1, values.data())
+    == tropical_runtime::RenderWindowStatus::Rendered);
+  for (double value : values) ASSERT(value == 6.0);
 }
 
 // A coefficient transaction writes slot[1] = 2*slot[0], while the audio
@@ -1203,6 +1319,8 @@ int main()
   run_test("constant kernel via load_ir",   test_ir_constant);
   run_test("plan-5/6 manifest boundary", test_plan5_only_manifest_boundary);
   run_test("Plan-6 immutable asset JIT/lifetime", test_plan6_immutable_asset_jit);
+  run_test("scope snapshot retains Plan-6 asset through state reuse",
+           test_scope_snapshot_retains_plan6_asset);
   run_test("Plan-6 immutable asset refusals", test_plan6_immutable_asset_refusals);
   run_test("closed-form index ramp",        test_ir_index_ramp);
   run_test("clock request boundary handoff", test_clock_boundary_handoff);
@@ -1211,8 +1329,10 @@ int main()
            test_param_dispatch_exact_sample_replay);
   run_test("param dispatch effective-boundary races",
            test_param_dispatch_effective_boundary_races);
-  run_test("scope yields to a waiting control transaction",
-           test_scope_yields_to_control_waiter);
+  run_test("scope snapshot never blocks control publication",
+           test_scope_snapshot_does_not_block_control);
+  run_test("scope snapshot materializes coefficient columns privately",
+           test_scope_snapshot_materializes_coefficients);
   run_test("coherent slot/coefficient generation", test_control_generation_coherence);
   run_test("hot-swap state handoff", test_hot_swap_state_handoff);
   run_test("owned generation survives two publications", test_generation_ownership_barrier);

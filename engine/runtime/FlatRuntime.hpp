@@ -67,10 +67,9 @@ struct ParamDispatchResult
   bool        activation_audible = false;
 };
 
-// Low-priority random-access rendering has a distinct cooperative-cancel
-// outcome. The existing bool render_window surface maps only Rendered to true;
-// the socket path uses the full result so a renderer can freeze-hold its last
-// complete frame without presenting a partial buffer as data.
+// Random-access rendering retains an explicit cancellation outcome for
+// latest-only/superseded scope work. The existing bool render_window surface
+// maps only Rendered to true; partial output is never presented as data.
 enum class RenderWindowStatus : uint8_t
 {
   Rendered,
@@ -79,9 +78,9 @@ enum class RenderWindowStatus : uint8_t
   Unsupported,
 };
 
-// Counted, off-audio-thread priority publication. A control transaction raises
-// this signal before it waits for build_mutex_; a scope that already owns the
-// mutex observes it between coordinate evaluations and yields the lock.
+// Counted, off-audio-thread control activity. Retained as compatibility
+// telemetry during the snapshot cutover; scopes no longer consume this signal
+// or own build_mutex_.
 class ControlWaiterGuard
 {
 public:
@@ -147,6 +146,59 @@ struct ImmutableAssetPack
   std::vector<std::vector<int64_t>> jit_arrays;
   std::vector<uint32_t>             array_slots;
   std::vector<uint8_t>              metal_bytes;
+};
+
+// Immutable read-side program/control images. They deliberately do not reuse
+// the audio state's bounded ownership pools: a slow scope reader retains one
+// heap image while control and audio continue publishing through their own
+// protocol. The mutable vectors required by the legacy kernel ABI are created
+// privately by each render call (and later by the dedicated scope worker).
+struct ScopeProgramImage
+{
+  uint64_t program_version = 0;
+  tropical_jit::CompilationMode mode = tropical_jit::CompilationMode::Fused;
+  tropical_jit::NumericKernelFn kernel = nullptr;
+  tropical_jit::NumericKernelFn coeff_kernel = nullptr;
+  double sample_rate = 44100.0;
+  std::size_t register_count = 0;
+  std::size_t temp_count = 0;
+  std::size_t coeff_register_count = 0;
+  std::size_t coeff_temp_count = 0;
+  std::vector<uint64_t> array_sizes;
+  std::vector<uint64_t> param_ptrs;
+  std::vector<uint32_t> coeff_array_slots;
+  std::vector<std::string> slot_names;
+  std::unordered_map<std::string, uint32_t> slot_lookup;
+  std::shared_ptr<const ImmutableAssetPack> immutable_assets;
+};
+
+struct ScopeControlImage
+{
+  uint64_t control_version = 0;
+  uint64_t effective_sample_index = 0;
+  std::vector<double> slots;
+};
+
+struct ScopeSnapshot
+{
+  std::shared_ptr<const ScopeProgramImage> program;
+  std::shared_ptr<const ScopeControlImage> controls;
+};
+
+// Mutable storage owned exclusively by the scope lane. Serializing scope
+// clients here is intentional: it enables allocation-free steady-state frames
+// and coefficient reuse without coupling them to control, hot-swap, or audio.
+struct ScopeRenderWorkspace
+{
+  uint64_t program_version = 0;
+  uint64_t control_version = 0;
+  std::vector<int64_t> registers;
+  std::vector<int64_t> temps;
+  std::vector<int64_t> coeff_registers;
+  std::vector<int64_t> coeff_temps;
+  std::vector<double> slots;
+  std::vector<std::vector<int64_t>> arrays;
+  std::vector<int64_t *> array_ptrs;
 };
 
 struct KernelState
@@ -775,92 +827,108 @@ public:
   // ── Random-access render (scope / slave consumers) ─────────────────────────
   // Render `count` coordinates starting at an arbitrary sample index,
   // snapshotting the requested slots per coordinate. For a STATELESS
-  // (register-free) patch this
-  // is exact and safe to run concurrently with the audio thread: it renders
-  // into private scratch temps/slots so it never disturbs the live state, and
-  // holds build_mutex_ so a hot-swap can't rebuild the active state mid-render.
+  // (register-free) patch this is exact and safe to run concurrently with the
+  // audio and control threads: one atomic ScopeSnapshot pins the complete
+  // program/control image while this call renders into private scratch.
   // `out` is slot-major: out[k*count + i] = value of slot_ids[k] at sample
-  // start_index+i*stride. Fused mode only. A waiting control transaction
-  // preempts this work between coordinates; partial output must be discarded.
+  // start_index+i*stride. Fused mode only. No live KernelState storage or
+  // build_mutex_ ownership crosses the read side.
   RenderWindowStatus render_window_low_priority(
     uint64_t start_index, uint32_t count, uint32_t stride,
     const uint32_t * slot_ids, uint32_t n_slots, double * out)
   {
     if (!out || stride == 0 || (n_slots > 0 && !slot_ids))
       return RenderWindowStatus::InvalidArgument;
-    if (control_waiter_count_.load(std::memory_order_acquire) != 0)
-    {
-      scope_preemption_count_.fetch_add(1, std::memory_order_relaxed);
-      return RenderWindowStatus::Preempted;
-    }
-    std::unique_lock<std::mutex> lock(build_mutex_);
-    if (control_waiter_count_.load(std::memory_order_acquire) != 0)
-    {
-      scope_preemption_count_.fetch_add(1, std::memory_order_relaxed);
-      return RenderWindowStatus::Preempted;
-    }
-    const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
-    KernelState & active = states_[state_idx];
-    if (active.mode != tropical_jit::CompilationMode::Fused || active.kernel == nullptr)
+    const auto snapshot = std::atomic_load_explicit(
+      &scope_snapshot_, std::memory_order_acquire);
+    if (!snapshot || !snapshot->program || !snapshot->controls)
+      return RenderWindowStatus::Unsupported;
+    const ScopeProgramImage & program = *snapshot->program;
+    if (program.mode != tropical_jit::CompilationMode::Fused
+        || program.kernel == nullptr)
       return RenderWindowStatus::Unsupported;
     for (uint32_t k = 0; k < n_slots; ++k)
-      if (slot_ids[k] >= active.slots.size())
+      if (slot_ids[k] >= snapshot->controls->slots.size())
         return RenderWindowStatus::InvalidArgument;
 
-    // Private scratch, isolated from the audio thread. Holding build_mutex_
-    // excludes the inactive-state rebuild, so these copies can't tear
-    // structurally (no concurrent resize); a register-free patch never writes
-    // registers/arrays, so the audio thread and this render don't fight.
-    std::vector<int64_t>              registers = active.registers;
-    std::vector<int64_t>              temps     = active.temps;
-    std::vector<double>               slots     = active.slots;
-    std::vector<std::vector<int64_t>> arrays    = active.array_storage;
-    // Coefficient columns live in the same immutable published generation as
-    // the control slot snapshot.
-    if (!active.coeff_array_slots.empty())
+    std::lock_guard<std::mutex> scope_lock(scope_render_mutex_);
+    ScopeRenderWorkspace & workspace = scope_workspace_;
+    if (workspace.program_version != program.program_version)
     {
-      const uint32_t gen = std::atomic_ref(active.control_published_gen)
-                             .load(std::memory_order_acquire);
-      for (std::size_t j = 0; j < active.coeff_array_slots.size(); ++j)
-        arrays[active.coeff_array_slots[j]] = active.coeff_generations[gen][j];
+      workspace.registers.assign(program.register_count, 0);
+      workspace.temps.assign(program.temp_count, 0);
+      workspace.coeff_registers.assign(program.coeff_register_count, 0);
+      workspace.coeff_temps.assign(program.coeff_temp_count, 0);
+      std::vector<bool> immutable_slot(program.array_sizes.size(), false);
+      if (program.immutable_assets)
+        for (uint32_t slot : program.immutable_assets->array_slots)
+          if (slot < immutable_slot.size()) immutable_slot[slot] = true;
+      workspace.arrays.clear();
+      workspace.arrays.resize(program.array_sizes.size());
+      for (std::size_t a = 0; a < workspace.arrays.size(); ++a)
+        if (!immutable_slot[a])
+          workspace.arrays[a].assign(
+            static_cast<std::size_t>(program.array_sizes[a]), 0);
+      workspace.array_ptrs.resize(workspace.arrays.size());
+      for (std::size_t a = 0; a < workspace.arrays.size(); ++a)
+        workspace.array_ptrs[a] = workspace.arrays[a].data();
+      if (program.immutable_assets)
+        for (std::size_t j = 0;
+             j < program.immutable_assets->array_slots.size(); ++j)
+          workspace.array_ptrs[program.immutable_assets->array_slots[j]] =
+            // The kernel ABI predates immutable inputs and spells this pointer
+            // mutable. Plan-6 validation proves that these slots are read-only.
+            const_cast<int64_t *>(
+              program.immutable_assets->jit_arrays[j].data());
+      workspace.program_version = program.program_version;
+      workspace.control_version = 0;
     }
-    std::vector<int64_t *>            array_ptrs(arrays.size());
-    for (size_t a = 0; a < arrays.size(); ++a) array_ptrs[a] = arrays[a].data();
-    // Plan-6 arrays are owned separately from the mutable per-render scratch.
-    // build_mutex_ holds the active KernelState stable for this whole window,
-    // so random-access JIT renders can safely share their immutable backing.
-    if (active.immutable_assets)
-      for (std::size_t j = 0;
-           j < active.immutable_assets->array_slots.size(); ++j)
-        array_ptrs[active.immutable_assets->array_slots[j]] =
-          // The legacy kernel ABI spells every array pointer mutable. Plan-6
-          // bindings are compiler-proven read-only; retain const ownership and
-          // remove the qualifier only at that ABI boundary.
-          const_cast<int64_t *>(
-            active.immutable_assets->jit_arrays[j].data());
+
+    // Kernel-written output slots are per-frame scratch. Reset them from the
+    // immutable control image every frame even when coefficient columns remain
+    // cached from this same control version.
+    workspace.slots = snapshot->controls->slots;
+
+    // Re-materialize coefficient scalars/columns in read-side private storage.
+    // Scope publication carries the complete discipline-updated slot vector;
+    // the coefficient kernel is a pure control-time function of that image.
+    if (workspace.control_version != snapshot->controls->control_version
+        && program.coeff_kernel)
+    {
+      double coeff_out = 0.0;
+      program.coeff_kernel(
+        nullptr,
+        workspace.coeff_registers.data(),
+        workspace.array_ptrs.data(),
+        program.array_sizes.data(),
+        workspace.coeff_temps.data(),
+        program.sample_rate,
+        0,
+        program.param_ptrs.data(),
+        &coeff_out,
+        1,
+        workspace.slots.data());
+    }
+    workspace.control_version = snapshot->controls->control_version;
 
     double scratch_out = 0.0;
     for (uint32_t i = 0; i < count; ++i)
     {
-      if (control_waiter_count_.load(std::memory_order_acquire) != 0)
-      {
-        scope_preemption_count_.fetch_add(1, std::memory_order_relaxed);
-        return RenderWindowStatus::Preempted;
-      }
-      active.kernel(
+      program.kernel(
         nullptr,
-        registers.data(),
-        array_ptrs.data(),
-        active.array_sizes.data(),
-        temps.data(),
-        active.sample_rate,
+        workspace.registers.data(),
+        workspace.array_ptrs.data(),
+        program.array_sizes.data(),
+        workspace.temps.data(),
+        program.sample_rate,
         start_index + static_cast<uint64_t>(i) * stride,
-        active.param_ptrs.data(),
+        program.param_ptrs.data(),
         &scratch_out,
         1,
-        slots.data());
+        workspace.slots.data());
       for (uint32_t k = 0; k < n_slots; ++k)
-        out[static_cast<size_t>(k) * count + i] = slots[slot_ids[k]];
+        out[static_cast<size_t>(k) * count + i] =
+          workspace.slots[slot_ids[k]];
       if (i == 0)
       {
         if (RuntimeOwnershipTestSeam * seam =
@@ -1198,6 +1266,9 @@ private:
     ControlGenerationReservation reservation);
   void release_control_snapshot_reservation(
     uint32_t state_index, ControlGenerationReservation reservation);
+  void publish_scope_controls_locked(
+    const KernelState & state,
+    uint64_t effective_sample_index = UINT64_MAX);
 
   void apply_fade_to_output()
   {
@@ -1286,6 +1357,13 @@ private:
   std::array<std::array<std::atomic<StorageOwner>, 3>, 2>
     control_generation_owners_{};
   std::atomic<uint64_t> recompile_version_{0};
+  // Use the C++ shared_ptr atomic free functions rather than atomic<shared_ptr>:
+  // the release SDK's libc++ predates that C++20 specialization. This member is
+  // still accessed atomically at every site.
+  std::shared_ptr<const ScopeSnapshot> scope_snapshot_;
+  uint64_t next_scope_control_version_ = 1;
+  std::mutex scope_render_mutex_;
+  ScopeRenderWorkspace scope_workspace_;
   std::atomic<uint64_t> ownership_failure_count_{0};
   std::atomic<RuntimeOwnershipTestSeam *> ownership_test_seam_{nullptr};
   std::atomic<uint32_t> control_waiter_count_{0};

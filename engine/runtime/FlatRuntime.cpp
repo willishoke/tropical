@@ -199,6 +199,41 @@ void bind_immutable_assets(
   }
   state.immutable_assets = std::move(storage);
 }
+
+std::shared_ptr<const ScopeProgramImage> make_scope_program_image(
+  const KernelState & state, uint64_t program_version)
+{
+  auto image = std::make_shared<ScopeProgramImage>();
+  image->program_version = program_version;
+  image->mode = state.mode;
+  image->kernel = state.kernel;
+  image->coeff_kernel = state.coeff_kernel;
+  image->sample_rate = state.sample_rate;
+  image->register_count = state.registers.size();
+  image->temp_count = state.temps.size();
+  image->coeff_register_count = state.coeff_registers.size();
+  image->coeff_temp_count = state.coeff_temps.size();
+  image->array_sizes = state.array_sizes;
+  image->param_ptrs = state.param_ptrs;
+  image->coeff_array_slots = state.coeff_array_slots;
+  image->slot_names = state.slot_names;
+  image->immutable_assets = state.immutable_assets;
+  image->slot_lookup.reserve(image->slot_names.size());
+  for (uint32_t i = 0; i < image->slot_names.size(); ++i)
+    image->slot_lookup.emplace(image->slot_names[i], i);
+  return image;
+}
+
+std::shared_ptr<const ScopeControlImage> make_scope_control_image(
+  const KernelState & state, uint64_t control_version,
+  uint64_t effective_sample_index)
+{
+  auto image = std::make_shared<ScopeControlImage>();
+  image->control_version = control_version;
+  image->effective_sample_index = effective_sample_index;
+  image->slots = state.slots;
+  return image;
+}
 } // namespace
 
 FlatRuntime::FlatRuntime(unsigned int buffer_length)
@@ -527,6 +562,20 @@ bool FlatRuntime::publish_state(KernelState && new_state)
     std::this_thread::yield();
   }
 
+  // Build the read-side image before moving the state. Its program storage is
+  // immutable and its Plan-6 pack is shared, so publication below never leaves
+  // the scope pointing into either movable KernelState slot.
+  const uint64_t program_version =
+    recompile_version_.load(std::memory_order_relaxed) + 1;
+  auto scope_program =
+    make_scope_program_image(new_state, program_version);
+  auto scope_controls = make_scope_control_image(
+    new_state, next_scope_control_version_++,
+    published_sample_index_.load(std::memory_order_acquire));
+  auto scope_snapshot = std::make_shared<ScopeSnapshot>();
+  scope_snapshot->program = std::move(scope_program);
+  scope_snapshot->controls = std::move(scope_controls);
+
   // CF-only: no by-name state transfer on hot-swap. Registers/arrays/slots
   // zero-init from the fresh kernel. The audio-owned clock is runtime-global,
   // so a state flip cannot repeat, skip, or race its sample position.
@@ -565,7 +614,11 @@ bool FlatRuntime::publish_state(KernelState && new_state)
   published_slot_count_.store(
     static_cast<uint32_t>(states_[inactive].slots.size()),
     std::memory_order_release);
-  recompile_version_.fetch_add(1, std::memory_order_release);
+  recompile_version_.store(program_version, std::memory_order_release);
+  std::atomic_store_explicit(
+    &scope_snapshot_,
+    std::shared_ptr<const ScopeSnapshot>(std::move(scope_snapshot)),
+    std::memory_order_release);
 #ifdef TROPICAL_METAL
   const bool metal = static_cast<bool>(states_[inactive].metal);
   metal_runtime_loaded_.store(metal, std::memory_order_release);
@@ -794,6 +847,26 @@ void FlatRuntime::commit_control_snapshot(
   }
   std::atomic_ref(state.control_published_gen)
     .store(reservation.target, std::memory_order_release);
+  publish_scope_controls_locked(state);
+}
+
+void FlatRuntime::publish_scope_controls_locked(
+  const KernelState & state, uint64_t effective_sample_index)
+{
+  const auto current = std::atomic_load_explicit(
+    &scope_snapshot_, std::memory_order_acquire);
+  if (!current || !current->program) return;
+  if (effective_sample_index == UINT64_MAX)
+    effective_sample_index =
+      published_sample_index_.load(std::memory_order_acquire);
+  auto next = std::make_shared<ScopeSnapshot>();
+  next->program = current->program;
+  next->controls = make_scope_control_image(
+    state, next_scope_control_version_++, effective_sample_index);
+  std::atomic_store_explicit(
+    &scope_snapshot_,
+    std::shared_ptr<const ScopeSnapshot>(std::move(next)),
+    std::memory_order_release);
 }
 
 ParamDispatchResult FlatRuntime::dispatch_param_sync(
@@ -1022,6 +1095,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
     {
       std::atomic_ref(state.control_published_gen)
         .store(reservation.target, std::memory_order_release);
+      publish_scope_controls_locked(state, result.effective_sample_index);
       return result;
     }
 
