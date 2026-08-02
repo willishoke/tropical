@@ -249,3 +249,29 @@ Runtime addressing is cyclic linear interpolation from the master scene
 coordinate; POSITION retains the direct evaluator's equal-power mix. Integer
 endpoints agree with the direct JIT at `2.62e-8` relative error, and the frozen
 fractional/stopped/reverse FLOW matrix stays below `1.74%` NRMSE.
+
+## Release listening set
+
+Generate the continuous, authored-level listening artifacts from a clean
+candidate with:
+
+```sh
+uv run --with numpy python \
+  benchmarks/demo_release/room_audition/generate_grouped_room_release_wavs.py
+```
+
+The renderer verifies the scene/cache hashes, renders dry and static endpoint
+graphs through the native JIT, applies the runtime equal-power law to the
+documented POSITION choreography, and refuses parity or PCM-headroom failure.
+It applies no normalization or limiter. Listen in this order:
+
+1. `release_out/wet_position_plus_1.wav` — causal wet endpoint.
+2. `release_out/wet_position_minus_1.wav` — classic reverse wet endpoint.
+3. `release_out/wet_position_scrub.wav` — forward/reverse choreography only.
+4. `release_out/final_scene_dry.wav` — strings and causal dry impacts.
+5. `release_out/final_scene_position_choreography.wav` — final review capture.
+
+`release_out/release_listening_summary.json` records the clean source commit,
+graph/cache hashes, endpoint parity, gain staging, peak/RMS values, and every
+WAV hash. The summary deliberately leaves headphone/monitor approval pending
+until a user listens to the final capture.

@@ -4,6 +4,8 @@
 - Required implementation predecessor: `15e5a39bfce9dd242db59aa6ebc2460987aa2199`
 - Handoff ref: `demo/room-position-handoff-2026-08-01`
 - Release branch: `demo/modal-pocket-scene`
+- Qualified runtime candidate: `6660f0668b652a8f3ed2df6088dc691790bd8c09`
+- Evidence checkpoint: `8e32e2bd2275517634bfef12fe55e77a6b755b1f`
 - Scope: the exact modal-pocket demo on the recorded release Mac; no general
   live-Metal support claim.
 
@@ -24,15 +26,16 @@
 | DR-13 | **selected for production** | Ship bipolar `POSITION` over the bounded 5.38 MiB fixed-scene causal/reverse basis; retain the direct evaluator as its generator and oracle, not the realtime scene path. Do not reuse the incumbent whole-composite `dir` mirror. | Exact algebraic sharing retained JIT `3.85e-13` and Metal `1.33e-6` direct-oracle error, but the optimized exact-scene direct smoke still averaged about 17.0 ms per 512-frame morph render against an 11.6 ms tile, starved once, retargeted 185 times, and timed out its first priming write. The cache is exactly 5,644,800 bytes (`33dad76…`), matches integer direct endpoints at `2.62e-8`, stays within `1.74%` NRMSE under the documented linear fractional/reverse FLOW reads, and passed `2026-08-01_23-41-47-256-smoke-b128-r512` with zero runtime/Metal/DAC/capture faults and zero retargets. The default three-position 16-second headroom matrix peaks between −5.59 and −5.01 dBFS. |
 | DR-14 | **frozen production boundary** | Add a dedicated terminal `groupedroom` modal-to-signal node and versioned immutable binary asset binding; route only the four Metal hits, remove chord-room sends, replace LENGTH with a 20 ms glided POSITION, and defer size/decay variants. | Prevents grouped carriers from being flattened or assigned incumbent direction semantics. Avoids JSON literal expansion and per-tile static-data upload. Full contract: `06-room-position-production-handoff.md`. |
 | DR-15 | **frozen integration base** | Land room production directly atop `15e5a39` on `demo/modal-pocket-scene`, followed by the commit containing the handoff; do not restart from `91ecf0c`, `main`, or a historical room lane. | The checkpoint already integrates and validates the scope/control, epoch, morph, telemetry, capture, and qualification prerequisites. Recreating the room on the baseline would silently omit them. |
+| DR-16 | **implemented** | Keep the five cold-boot runs transport-stable; retain pause/reverse/resume FLOW only in smoke and soak stress, with explicit activation events. | The original matrix deliberately stopped FLOW for 120 ms and reversed it for 160 ms in every five-second burst. A user heard that deterministic transport arrest as a dropout while all DAC, callback, and Metal counters remained clean. The replacement five-boot matrix passed from a clean candidate; FLOW remained covered by the clean 90-second smoke and 10-minute adversarial soak. |
+| DR-17 | **completed production gate** | Freeze the native 44.1 kHz direct asset as generator/oracle and ship the bounded fixed-scene cache selected by DR-13. | Native grouped proofs, Plan-6 refusals, JIT/Metal probes, fixed-scene cache parity, headroom, clean hardware qualification, and the continuous release listening set are committed. The final choreography peaks at −5.01 dBFS without normalization or a limiter. |
+| DR-18 | **explicit release waiver** | Accept the completed 10-minute adversarial soak as the long-duration release run and omit the remaining 30-minute normal soak. | The user stopped the 30-minute run and stated that ten minutes was enough. The partial normal run is not committed or represented as passing; this narrows the evidence package instead of silently satisfying the original master gate. |
 
 ## Remaining major decisions
 
-1. The native 44.1 kHz regeneration must retain the accepted room by listening;
-   failure blocks integration without silently changing architecture.
-2. If the exact reverse endpoint is not unmistakable in the integrated scene,
+1. If the exact reverse endpoint is not unmistakable in the integrated scene,
    stop for user review before auditioning a longer decay or transient-only
    room send.
-3. Final headphone/monitor acceptance of the integrated listening capture.
+2. Final headphone/monitor acceptance of the integrated listening capture.
 
 Room size, stereo output, and a longer default tail are deferred, not active
 production questions. All other choices follow the handoff, master fallback

@@ -1,0 +1,913 @@
+cmake -S /private/tmp/tropical-modal-pocket-demo -B /private/tmp/tropical-modal-pocket-demo/build \
+		-DTROPICAL_BUILD_PYTHON=ON \
+		-DTROPICAL_WASM_EMIT=ON \
+		-DTROPICAL_METAL=ON \
+		-DLLVM_DIR=/opt/homebrew/opt/llvm/lib/cmake/llvm \
+		
+-- Using the multi-header code from /private/tmp/tropical-modal-pocket-demo/lib/json/include/
+-- Using LLVM 22.1.7
+-- Configuring done (0.2s)
+-- Generating done (0.1s)
+-- Build files have been written to: /private/tmp/tropical-modal-pocket-demo/build
+cmake --build /private/tmp/tropical-modal-pocket-demo/build -j4
+[ 17%] Built target rtaudio
+[ 17%] Built target test_epoch_tile_queue
+[ 26%] Built target msl_check
+[ 56%] Built target tropical_core
+[ 65%] Built target test_metal_render_worker
+[ 73%] Built target test_metal_kernel
+[ 91%] Built target test_module_process
+[ 91%] Built target tropical_runtime_bench
+[100%] Built target metal_velocity_oracle_discriminator
+cd lean && PATH="$HOME/.elan/bin:$PATH" lake env leanc -c ffi/shim.c -o ffi/shim.o -I ../engine/c_api
+cd lean && PATH="$HOME/.elan/bin:$PATH" lake build frontend diffcli tropicaltest trustreport
+⚠ [17/228] Replayed Tropical.Ir.Codec
+warning: Tropical/Ir/Codec.lean:208:8: unused variable `hn`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Ir/Codec.lean:222:9: unused variable `hlt`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [26/228] Replayed Tropical.Ir.Strata.InlineInstances
+warning: Tropical/Ir/Strata/InlineInstances.lean:169:8: unused variable `hp`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Ir/Strata/InlineInstances.lean:179:14: unused variable `hr`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [31/228] Replayed Tropical.Ir.EmitLlvm
+warning: Tropical/Ir/EmitLlvm.lean:616:6: unused variable `h`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [33/228] Replayed Tropical.Ir.EmitMsl
+warning: Tropical/Ir/EmitMsl.lean:669:6: unused variable `h`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [34/228] Replayed Tropical.Ir.Stage0
+warning: Tropical/Ir/Stage0.lean:99:6: unused variable `h`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Ir/Stage0.lean:114:6: unused variable `h`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [39/228] Replayed Tropical.Compile
+warning: Tropical/Compile.lean:634:12: unused variable `hr`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Compile.lean:650:12: unused variable `hr`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [40/228] Replayed Tropical.Entries
+warning: Tropical/Entries.lean:62:8: unused variable `hd`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [59/228] Replayed Tropical.EmitArrow.Patch
+warning: Tropical/EmitArrow/Patch.lean:321:13: unused variable `h`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/EmitArrow/Patch.lean:354:13: unused variable `h`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/EmitArrow/Patch.lean:389:13: unused variable `h`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/EmitArrow/Patch.lean:422:7: unused variable `h`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/EmitArrow/Patch.lean:464:13: unused variable `h`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [168/228] Replayed Tropical.PlanDecode
+warning: Tropical/PlanDecode.lean:112:23: unused variable `hf`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [193/228] Replayed Tropical.Tropicaltest.Stress
+warning: Tropical/Tropicaltest/Stress.lean:168:6: unused variable `twoPi`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Stress.lean:228:6: unused variable `twoPi`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Stress.lean:279:6: unused variable `twoPi`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Stress.lean:335:6: unused variable `twoPi`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [194/228] Replayed Tropical.Tropicaltest.Slide
+warning: Tropical/Tropicaltest/Slide.lean:96:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Slide.lean:130:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Slide.lean:161:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Slide.lean:194:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Slide.lean:237:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Slide.lean:273:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Slide.lean:316:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [195/228] Replayed Tropical.Tropicaltest.Modal
+warning: Tropical/Tropicaltest/Modal.lean:145:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:197:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:253:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:292:23: unused variable `arena`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:293:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:321:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:369:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:421:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:465:26: unused variable `arena`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:466:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:490:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:542:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:1342:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:1624:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:1708:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:1751:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+Build completed successfully (228 jobs).
+cd lean && PATH="$HOME/.elan/bin:$PATH" lake build diffcli tropicaltest trustreport
+⚠ [6/204] Replayed Tropical.Ir.Codec
+warning: Tropical/Ir/Codec.lean:208:8: unused variable `hn`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Ir/Codec.lean:222:9: unused variable `hlt`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [11/204] Replayed Tropical.Ir.Strata.InlineInstances
+warning: Tropical/Ir/Strata/InlineInstances.lean:169:8: unused variable `hp`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Ir/Strata/InlineInstances.lean:179:14: unused variable `hr`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [19/204] Replayed Tropical.Ir.EmitLlvm
+warning: Tropical/Ir/EmitLlvm.lean:616:6: unused variable `h`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [21/204] Replayed Tropical.Ir.EmitMsl
+warning: Tropical/Ir/EmitMsl.lean:669:6: unused variable `h`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [22/204] Replayed Tropical.Ir.Stage0
+warning: Tropical/Ir/Stage0.lean:99:6: unused variable `h`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Ir/Stage0.lean:114:6: unused variable `h`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [24/204] Replayed Tropical.PlanDecode
+warning: Tropical/PlanDecode.lean:112:23: unused variable `hf`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [33/204] Replayed Tropical.Compile
+warning: Tropical/Compile.lean:634:12: unused variable `hr`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Compile.lean:650:12: unused variable `hr`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [34/204] Replayed Tropical.Entries
+warning: Tropical/Entries.lean:62:8: unused variable `hd`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [53/204] Replayed Tropical.EmitArrow.Patch
+warning: Tropical/EmitArrow/Patch.lean:321:13: unused variable `h`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/EmitArrow/Patch.lean:354:13: unused variable `h`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/EmitArrow/Patch.lean:389:13: unused variable `h`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/EmitArrow/Patch.lean:422:7: unused variable `h`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/EmitArrow/Patch.lean:464:13: unused variable `h`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [169/204] Replayed Tropical.Tropicaltest.Stress
+warning: Tropical/Tropicaltest/Stress.lean:168:6: unused variable `twoPi`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Stress.lean:228:6: unused variable `twoPi`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Stress.lean:279:6: unused variable `twoPi`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Stress.lean:335:6: unused variable `twoPi`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [170/204] Replayed Tropical.Tropicaltest.Slide
+warning: Tropical/Tropicaltest/Slide.lean:96:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Slide.lean:130:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Slide.lean:161:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Slide.lean:194:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Slide.lean:237:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Slide.lean:273:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Slide.lean:316:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+⚠ [171/204] Replayed Tropical.Tropicaltest.Modal
+warning: Tropical/Tropicaltest/Modal.lean:145:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:197:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:253:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:292:23: unused variable `arena`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:293:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:321:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:369:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:421:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:465:26: unused variable `arena`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:466:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:490:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:542:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:1342:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:1624:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:1708:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+warning: Tropical/Tropicaltest/Modal.lean:1751:5: unused variable `resolved`
+
+Note: This linter can be disabled with `set_option linter.unusedVariables false`
+Build completed successfully (204 jobs).
+/opt/homebrew/bin/python3 tools/audit_trust_sites.py
+trust source audit passed (3 sites)
+./lean/.lake/build/bin/tropicaltest
+trusted boundary (typed ledger, report, production fixtures):
+  PASS  trust-ledger
+patch goldens:
+migration goldens:
+  PASS  stdlib_sin  09058fccd11a9611
+exact bake carrier (dyadic/interval — the bake layer's libm exile):
+        9 production bake modules, 29906 lines of GENERATED C (the compiler's own answer, not the source's spelling)
+        libm call sites: 0 · retired Float-tier definitions still in production: 0 · unreadable modules: 0
+  PASS  exact-corpse  no libm call survives the production bake graph — checked in the EMITTED C across 9 modules and 29906 lines, so no spelling (dot notation, an unlisted Float extern, an operator) can hide one; and no retired Float-tier definition remains, the oracle tier having moved outside the compiler to Tropical.Testing
+        recomputed at 420 bits: π 3.141593 ±2^-411 · ln2 0.693147 ±2^-412
+        shipped literals (2^-300): π 3.141593 ±2^-299 · ln2 0.693147 ±2^-299
+  PASS  exact-constants  π (Machin) and ln2 (atanh ⅓) re-derived inside the carrier at 420 bits land INSIDE the shipped 2^-300 literals — the constants are gate-covered data, not trusted digits
+        240 Halton configs × 9 kernels vs the Float path:
+        worst |exact−float| 159.093297 ulp (at lgamma.im -10.699588,13.680000) · tightest-case certified bits 103.000000 (at sin -71000.000000) · poisoned 0
+  PASS  exact-elementary  exp/log/sin/cos/atan2/pow/lgamma track the float path to 159.093297 ulp over the shipped corpus while certifying ≥103.000000 bits (a double carries 53) — the bake layer's transcendentals are reproducible without libm
+        300 boxes × 3196 probes (corners, centre, axis crossings):
+        escaped 0 · box-poison-off-origin 0 · point-poison 0 · tightest point box certifies 122.000000 bits
+        ledger regressions — atan2 [-1,0] [-2,-1] = 0.000000 ±2^3 ⊇ atan2 0 -1 = 3.141593 ±2^-128 : true · atan2 1 [-1,3] = 0.850196 ±2^3 : true
+  PASS  exact-atan2  atan2 is a sound interval extension over 3196 probes of 300 boxes (axes included, where both open defects lived) and TOTAL wherever the origin is excluded, while still certifying ≥122.000000 bits on a point argument
+        20000 12-place literals: division 127 ms → cached reciprocal 58 ms (sinks 229873/229873)
+        bankLandExp × 8 over ~512-mode banks in 22 ms (Σk 0)
+  PASS  exact-recip10  the 10^-e reciprocal cache reproduces the division form BIT FOR BIT over 602 (mantissa, exponent) pairs spanning e ∈ [0, 42] — ofJsonNumber got faster without one enclosure getting wider or narrower, so no certLt/certGt verdict and no emitted program can have moved
+        120 Halton configs over the shipped register (κ to |170|, both sides of |a|=½):
+        serOnly M(1,a+1,κ): worst rel 0.000000 (at M1 a=1.992000,-125.356959 κ=-0.191875,121.028807) · literals 240/240 identical, 0 off-by-one, 0 further (worst 0) · poisoned 0
+        crossing Γ★/CF: worst rel 0.000000 (at Γ★ a=-0.744000,-5.274052) · literals 473/480 identical, 7 off-by-one, 0 further (worst 416) · poisoned 0
+        coincident dCoef/Φ/cexpm1: worst rel 0.000000 (at Φ a=-0.014062,-0.008642 κ=-0.973125,-4.897119) · literals 6480/6480 identical, 0 off-by-one, 0 further (worst 0) · poisoned 0
+        fold Q/DDaM: worst rel 0.000000 (at DDaM) · literals 6000/6000 identical, 0 off-by-one, 0 further (worst 0) · poisoned 0
+        emitted literals that moved at all: 7/13200 (0.000530) · both paths in 3269 ms
+  PASS  exact-values  the flipped bake-time values track the float path they replaced to 0.000000 relative over the shipped register, moving 7 of 13200 emitted literals (0.000530) — the values flip changed the arithmetic, not the program
+        string count: f0=196 → 48 (want 48) · f0=2000 → 11 (want 11) · f0=20 → 48 (want 48)
+        tie cliff   : f0=2.24 first ω (some 14.073620) — equals the N=19688 answer 14.073620, differs from N=19687 14.074335 : true
+        fork policy : ρ=0 → 0 · ρ=−0.5 → 0 · f0=0 → 0 (all want 0)
+        band edge   : 0 of 973 EMITTED ω at or above 2π·SR/2 (want 0 — the conjunct is redundant, proved on output)
+        differential: resonatorBank 0/1024 moved (worst rel 468345139.704276e-18) · reverbRoom 0/96 (10983914.623477e-18) · filterPair 0/1 (27160.014797e-18)
+        poison      : 0 (want 0 — litOfD's lit-0 arm is dead)
+  PASS  exact-playground  the served bake surface decides in exact arithmetic: the string's transit count is an Int round (pinned where the cliff is VISIBLE — the emitted pole table, not the mode count `min 48` saturates), the emit/skip fork emits only on a certified verdict, no emitted ω reaches Nyquist over 973 partials, the three baked builders emit LITERALLY what the libm they replaced emitted (1121 coefficients, 0 moved), and none of it came from poison
+        litF is a faithful 12-place quantizer only while |x|·10¹² < 2⁵³ (|x| ≤ 9007.199255):
+        below it  (337 samples): identical 329 · off-by-one 8 · worse 0
+        above it  (63 samples): worst drift 462 units of the 12th place (at x=-5368686.033257)
+        far edge — litF(1e8) = 18446744073709551615 (UInt64 saturation) vs exact 100000000000000000000; sub-resolution 1e-13 → 0 both sides true
+  PASS  exact-quantize  the exact decimal quantizer reproduces litF wherever litF is faithful (329/337 identical, 8 off-by-one) and diverges only where litF's own f64 product has run out of bits (drift up to 462 units past |x|>9007.199255, hard saturation past 1.8446744e7) — the litF→litD cutover's cost, measured
+op coverage (EmitLlvm, golden hash):
+  PASS  op-coverage
+reduce coverage (ReduceBegin/End ≡ unrolled, EmitLlvm):
+  PASS  reduce-coverage  loop ≡ unrolled, hash 7e5cea9663274157, MSL loop emitted
+patch-bay refusal (programDecl over the wire → retirement message):
+  PASS  patch-bay-refusal  programDecl refused at ingest: {"code":"internal_error","message":"loadProgramAsSession: programDecl 'P': program definitions over the wire are retired — programs are authored in Lean (arrow builders); load ingests instances + wiring + params of registered types.","retryable":false}
+cycle refusal (cyclic session wiring → CF-only message):
+  PASS  cycle-refusal/self  {"code":"internal_error","message":"compileSession: CF-only — inter-instance cycles are not allowed:\n  - a → a","retryable":false}
+  PASS  cycle-refusal/pair  {"code":"internal_error","message":"compileSession: CF-only — inter-instance cycles are not allowed:\n  - b → a → b","retryable":false}
+banks region hoist (all-s0 reduce region → coefficient kernel):
+        static count: regions audio=0 coeff=1 · coeff fills=1 · coef:0 slot=true · columns=#[0] · typed≡flow bitDiff=0/32768 · E=66909696.000000
+        dynamic count (slot, 2 < capacity 4): regions audio=0 coeff=1 · coeff fills=1 · coef:0 slot=true · columns=#[0] · typed≡flow bitDiff=0/32768 · E=5462016.000000
+  PASS  banks-region-hoist  all-s0 region moves AS A UNIT (delimiters + body + table Pack) to the coeff kernel; audio is region-free, reads the sum via coef:0; typed ≡ flow byte-exact, static AND dynamic count
+stage differential (typed StageSig vs Stage0 flow classification):
+  PASS  stage-diff  typed ⊑ flow over 1734 instructions (71 strictly earlier, 0 unmapped)
+split equivalence (typed hoist ≡ flow hoist, byte-for-byte):
+  PASS  split-equiv  typed split ≡ flow split byte-for-byte (2 patches)
+cf goldens:
+  PASS  reverse_reverb  0f65881dd2ddc5d0
+  PASS  scrub_reverb  0f65881dd2ddc5d0
+device boundary (the safety class):
+        device bound C = 256.000000; worst corpus peak 1.773908 (patches/reverse_reverb.json)
+  PASS  device-bound  every audio patch renders bounded and finite (worst 1.773908 ≤ C = 256.000000, 144.314176× headroom) — the early warning for the next rail
+msl emitter (EmitMsl text-frozen + the f64 fold):
+  PASS  msl-golden/pure-sine-440  (3863B, text-frozen)
+  PASS  msl-golden/tz-flanger  (44924B, text-frozen)
+  PASS  msl-golden/reverse_reverb  (69242B, text-frozen)
+  PASS  msl-fold  literal landing folded in f64: increment 42852281 present as i64 in the kernel
+arrow laws (warp algebra ≡ byte-identical audio):
+production non-emission (current front doors → state-free plan_5):
+  PASS  production-non-emission  builder + playground + program_2/session + export emit typed state-free plan_5 only
+  PASS  plan6-asset-abi  Plan-5 wire unchanged; Plan-6 decode + readonly JIT arrays + packed Metal buffers(3/4)
+emitarrow slide/patcher variants (≡ FlangeSin byte-identical):
+  PASS  corpus-gate/FlangeSinSlide  EmitArrow ≡ emit-stdlib FlangeSin (30620B)
+  PASS  corpus-gate/FlangeFromGraph  EmitArrow ≡ emit-stdlib FlangeSin (30620B)
+stdlib wire+port goldens (builder chain ≡ frozen):
+  PASS  stdlib-goldens  15 programs ≡ frozen wire+port goldens
+arrow laws (warp algebra ≡ byte-identical audio):
+  PASS  arrow-law/inverse  audio ≡ e3932ebf670f55fc (plans differ (expected))
+  PASS  arrow-law/additive  audio ≡ 0b6fbd1080f131be (plans differ (expected))
+        cost  shared:      pre-strata insts=5 post-strata decls=0 plan-instrs=266 regs=265
+        cost  independent: pre-strata insts=6 post-strata decls=0 plan-instrs=266 regs=265
+        cost  plans byte-identical: true  ·  CSE collapsed both to same 266-instr/265-reg DAG: true
+  PASS  arrow-law/diagonal  audio ≡ b4fd16b1ce764e23 (shared ≡ independent)
+  PASS  arrow-law/reverse-involution  audio ≡ e3932ebf670f55fc (plans differ (expected))
+  PASS  arrow-law/reverse-swaps-delay  audio ≡ 9d201f1d33dfe530 (plans differ (expected))
+        finding  byte-identical: true  ·  bit-differing samples: 0/4096  ·  max|Δ|=0.000000 (=0.000000e-15, ε=0.000001)  ·  lhs energy=1261.220813
+        finding  ±δ taps swap slot ⇒ float value-sum reassociates ((A+B)+C vs (A+C)+B); exact on the (fixed-point) clock (laws 1-2), float-tolerance on the (float) value sum — byte-exact with a fixed-point value carrier
+  PASS  arrow-law/reverse-flanger-commute  denotational ≡ (max|Δ|=0.000000 < ε; byte-identical=true)
+        gate  byte-identical: true  ·  bit-differing samples: 0/4096 (slice-5 float was 1271/4096)  ·  lhs energy=1194.173756
+        gate  integer add is associative — ±δ tap slot swap leaves the Q0.32 mix bit-identical; one toFloat·/2³² scale at the boundary
+  PASS  arrow-law/reverse-flanger-commute-fixedpoint  audio ≡ 1828180411a27b25 (0/4096 differing — byte-exact)
+  PASS  arrow-law/reverse-involution-fixedpoint  audio ≡ 302fd3fef24ac998 (byte-identical)
+  PASS  arrow-law/reverse-swaps-delay-fixedpoint  audio ≡ 9be17f2eced0efab (byte-identical)
+  PASS  arrow-law/additive-fixedpoint  audio ≡ 6c8318d33e239daf (byte-identical)
+convolution stress test (clock-warp FIR ≡ independent array-shift conv):
+  PASS  convolution-oracle  clock-warp FIR ≡ array-shift conv  (max|Δ|=0.000000, filter-effect=1.142258, samples=1022)
+modulated-clock stress test (fractional nonlinear warp ≡ closed form):
+        standard rep = same Horner Sin + same integer phasor (no true sine):
+        calibrate  engine bare vs standard rep:  max|Δ|=0.000000  ·  bit-differing 0/1016
+        result     engine fm   vs standard rep:  max|Δ|=0.000000  ·  bit-differing 0/1016  ·  warp effect |fm−bare| max=0.827949
+  PASS  modulated-clock  fractional nonlinear warp ≡ standard rep (fm err 0.000000 ≈ floor 0.000000; warp effect 0.827949)
+pm-of-pm stress test (nested warp ≡ nested standard rep):
+        nested standard rep (mod2→mod→carrier, same Horner Sin + integer phasor):
+        result   engine pm(pm) vs nested rep: max|Δ|=0.000000  ·  bit-differing 0/1016
+        nesting  |pm(pm) − single-level pm| max=0.072909  (level-2 must be non-trivial)
+  PASS  pm-of-pm  nested warp ≡ nested standard rep bit-for-bit (0/1016; nesting effect 0.072909)
+negative-time boundary (random access ≠ streaming zero-pad):
+        random-access rep: osc(φ), φ=(t−20)·2³², INCLUDING negative time:
+        result   engine vs random-access rep: bit-differing 0/1024  (neg-time samples 20, differing 0)
+        moat     |output| at negative time max=0.991328  (a streaming delay line would emit 0 here)
+  PASS  negative-clock  random-access exact at negative time (0/1024; 20 neg-time samples, |out|≤0.991328 where a stream emits 0)
+products/MIMO standard-rep differential (multi-port body ≡ closed form):
+        standard rep = same integer phasor + Horner Sin, same crossfade arithmetic:
+        result   engine MorphOsc vs std rep:  bit-differing  saw 0/1020 · sine 0/1020 · blend 0/1020
+        mimo     diagonal feeds distinct consumers: max|saw−sine|=1.551079
+  PASS  morphosc-mimo  ClockPhasor ⋙ (saw &&& Sin) ⋙ crossfade ≡ standard rep, bit-exact (saw/sine/blend 0/1020; max|saw−sine|=1.551079)
+warp-push slide (downstream insert → upstream warp, by the compiler):
+  PASS  slide-past-arr  warp commuted past the shaper: slide(osc ⋙ shaper ⋙ flange) ≡ upstream (31405B)
+        cascade osc ⋙ flange ⋙ flange: 9 generator instances (single flange: 3); the slide convolved the kernels — 9 = 3⊛3 taps, no coincident-offset merge
+  PASS  slide-cascade  9-tap multiplicity derived by the slide (energy=94.571740, |double−single|max=0.169551)
+  PASS  slide-past-prod  warp distributed over ×: slide(warp(x ⊗ y)) ≡ (warp x) ⊗ (warp y) (20951B)
+        term = Sin(2π·phasor) over the clock leaf, no gen; ref = .trop FixedSinOsc @220:
+        result   term vs .trop:  bit-differing 0/2048  ·  max|Δ|=0.000000  ·  energy=1020.288820
+  PASS  bootstrap-sin  phasor+sine as terms ≡ .trop FixedSinOsc, bit-exact (2048 samples, energy=1020.288820)
+        expSig(x) vs libm exp, x∈[−10,10] across 2048 samples:
+        result   max relative error = 0.000000  (at x=9.414062)
+  PASS  bootstrap-exp  emitted polynomial exp ≡ true exp to 0.000000 (minimax) — transcription correct
+        logSig(x) vs libm log, x∈[0.02,200] across 2048 samples:
+        result   max absolute error = 0.000000  (at x=180.977031)
+  PASS  bootstrap-log  emitted atanh-series log ≡ true log to 0.000000 abs (minimax) — transcription + range reduction correct
+        atan2E(sin θ, cos θ) vs θ, θ∈[−3.1,3.096] across 2048 samples (all quadrants):
+        result   max absolute error = 0.000000  (at θ=-2.879004)
+  PASS  bootstrap-atan2  emitted octant-reduced atan2 ≡ the true angle to 0.000000 (incl. sin/cos error) — quadrants + fold correct
+        settle: glide reads clock=true (ramp 2.003062→10.000000); settled reads clock=false val=10.000000 (flat Δ=0.000000); osc→none=true; const→some=true
+  PASS  settle  settle: glide (s1 ramp 2→10) ↦ its s0 ceiling 10 (=v1), clock read GONE by construction; a surviving clock read (osc) declines; a const passes through
+fixed-point datapath sine (scope A — the sample values in i64):
+        fixedSin(Q0.32 phasor @220) vs true sin at the exact integer phase, 4096 samples:
+        result   max abs error (sin scale) = 3.189523e-9  (at sample 3459)
+  PASS  fixedsin-accuracy  Q2.30 datapath sine ≡ true sine to 3.189523e-9 (≈ −160 dB floor)
+        fixed osc @ clk+(2³⁰+12345) samples vs origin osc phase-shifted (inc·K mod 2³²):
+        result   bit-differing 0/2048  ·  energy=1035.501493
+  PASS  fixedsin-longtau  modular phase identity byte-exact at τ+2³⁰ samples
+modal island (decaying-resonator bank as a term over the clock):
+        bank = Σ amp·e^(−σd)·cos(2πf·d) @ 220/330/440, struck @ sample 200 (d=clk/2³²/SR−anchor):
+        result   arrow vs straight-line:  bit-differing 0/2048  ·  pre-strike |max|=0.000000  ·  E[early]=115.293722  E[late]=93.867439
+  PASS  modal-bank  gated decaying-sinusoid bank: arrow ≡ straight-line bit-exact, causal (silent pre-strike), decaying (2048 samples)
+        bank = Σ amp·e^(−σd)·cos(2πf·d), 12 modes, struck @ 200 — unrolled vs looped:
+        result   bit-differing 0/2048  ·  pre-strike |max|=0.000000  ·  E[early]=127.023998  E[late]=3.467172
+        payoff   plan-instrs 12-mode: unrolled=1011 looped=184 (shrinks=true)
+        payoff   per-mode marginal (6→24 modes): unrolled +1440  ·  banked +72 (body no longer unrolls)
+  PASS  banks-as-data  looped ≡ unrolled bit-exact (2048 samples), causal, decaying; plan shrinks, marginal +72<+1440
+        dir[mid]  bit-identical (2048 samples)
+        dir[rev]  bit-identical (2048 samples), pre-strike E=123.220679
+        dir[sway]  bit-identical (2048 samples)
+        payoff   plan-instrs 12-mode: unrolled=1953 looped=317 (shrinks=true)
+        payoff   per-mode marginal (6→24 modes): unrolled +2790  ·  banked +72
+  PASS  banks-as-data-dir  looped ≡ unrolled bit-exact (mid/rev/sway), reverse audible; plan shrinks, marginal +72<+2790
+        float bank Σₖ ampₖ·t, 16 elements — unrolled vs looped (f64 accumulator):
+        result   bit-differing 0/2048 · energy=262.594840 · plan-instrs unrolled=38 looped=12
+  PASS  banks-float  looped ≡ unrolled bit-exact for a FLOAT fold (order preservation, no associativity); plan shrinks
+  PASS  retired-front-door  fold-bearing wire refused at ingest: {"code":"internal_error","message":"p.input: unknown op 'fold'","retryable":false}
+        bank-of-banks Σᵢ aᵢ·Σⱼ(bⱼ+aᵢ) (K=4,4), inner body reads the OUTER element:
+        result   bit-differing 0/2048 vs hand-unrolled · nonzero=true · regions=2 · delims=#[ReduceBegin, ReduceBegin, ReduceEnd, ReduceEnd]
+        payoff   plan-instrs: nested(4,4)=14 unrolled(4,4)=42 nested(16,16)=14 (Δ=0)
+        staged   typed-split render byte-equal to unroll: true
+  PASS  banks-nested  bank-of-banks emits NESTED regions (RB RB RE RE), byte-equal to unroll (plain + typed split), plan FLAT in both counts (Δ=0 ≤ 2, (4,4)→(16,16))
+  PASS  banks-nested-msl  two reduce for-loops, the inner strictly inside the outer (depths #[0, 1])
+strike comb (P = 4096 smp exact, 2-strike bar, 3-mode bank):
+        comb ≡ brute(j≥−16) rel 0.000001 · truncated brute(j≥0) misses by 0.144361 · pre-anchor E 4.428681 · finite true
+  PASS  strike-comb  one combed quotient read ≡ 40 anchored strikes (0.000001); the train is eternal (pre-anchor E 4.428681); overlap genuinely carried (truncated brute off by 0.144361)
+        deg-1 τ·e mode (σ=25, f=0) vs sinkGain·d·e^(−25d):
+        result   preMax=0.000000 · max rel err=0.000086 · peak @ sample 1964 (d=0.040000s, expect 1/σ=0.04)
+  PASS  modal-degree  τ·e swell ≡ d·e^(−σd) to 0.000086; rises to peak at d≈1/σ then decays
+        modal bank forward vs reversed (φ reflects scene time around sample 1024):
+        result   rev[i] vs fwd[2048−i]: bit-differing 0/2048  ·  rev≠fwd at 2046 samples  ·  rev energy=413.212769
+  PASS  modal-reverse  reversed reading ≡ forward time-mirrored, bit-exact — zero-latency reverse reverb (2048 samples)
+        bank @ origin vs struck+read 2³⁰ samples later (≈6.8h), fractional clocks, 1024 samples:
+        result   velocity-1.001 clock: bit-differing 0/1024 (E=253.458643)  ·  sub-sample offset: 0/1024 (E=253.588949)
+  PASS  modal-longtau  time-translation byte-exact at τ+2³⁰ samples on fractional (scrub-form) clocks
+residue calculus (voice ⋙ reverb composed at build time):
+        voice(2 poles) ⋙ reverb(4 poles) → 10 residue modes; jet-match k=0..6:
+        result   max relative moment error = 0.000000  ·  onset ΣA/Σ|A| = 0.000000
+  PASS  residue-moments  composed modes reproduce the convolution jet to k=6 (err=0.000000); ΣA=0 ⇒ click-free onset
+        buildModalReverb rendered (voice ⋙ reverb, struck @ sample 200):
+        result   pre-strike |max|=0.000000 · first-post |s|=0.000033 · peak=0.013977 · E[mid]=0.072198 E[late]=0.021009
+  PASS  modal-reverb  residue-composed bank renders: causal, click-free onset (|first|≪peak), decaying tail (16384 samples)
+        direction crossfade (forward↔reverse, σ/ω fixed):
+        (A) dir=0 vs fwd bitDiff=0  ·  (B) dir=1 mirror bitDiff=0 (differs-fwd @2046)
+        (C) dir=0.5 finite=true · E=121.377771 vs forward E=242.725654 (AUDIBLE ⇒ E ≫ 0)
+  PASS  modal-direction  dir=0 forward (bit-exact) · dir=1 reverse (mirror bit-exact) · dir=0.5 AUDIBLE (E=121.377771, 0.500062 of fwd)
+        decay sway (σ·(1+depth·sin 2πrt) on the envelope clock only):
+        (S1) depth 0 vs no-sway bitDiff=0  ·  (S2) depth>0 differs @1847/2048, pre-strike |max|=0.000000, peak=0.999184, finite=true
+  PASS  modal-sway  depth 0 ≡ un-swayed (bit-exact) · depth>0 breathes the decay, causal & bounded
+        voice pole = reverb pole #2 (sympathetic): 4 modes, 1 of degree 1:
+        result   deg-1 modes = 1  ·  degree-aware moment error k=0..6 = 0.000000
+  PASS  residue-degenerate  coincident pole → one τ·e double pole; jet still exact (err=0.000000) — no blow-up
+        collected (m+n=7) vs uncollected (m+m·n=15), voice(3)⋙reverb(4):
+        result   max|Δ|=28.871000e-9  ·  quantum bound=163.912773e-9
+  PASS  residue-collected  pole-union bank ≡ per-pair bank within the Q4.28 landing quantum (max|Δ| 28.871000e-9 < 163.912773e-9); 15→7 modes — fusion affordable as the default
+        divided-difference composition (voice(2)⋙reverb(4), DD 8 paired modes):
+        arm1     DD≡collected (well-sep) rel-L2=0.000002 (freq-grid floor)
+        arm2     DD@coincidence≡deg-1 τ·e max|Δ|=0.000000e-9 (bound 89.406967e-9, tight)
+        arm3     |c|max=0.728011 (<8, Q4.28-safe) · collected |a·r/Δ|@Δ=0.03=24.267033 (>8 overflows)
+        arm4     series-branch sweep max|Δ|=221.577895e-9 (bound 3000.000000e-9) @tgt=1.000000 · builds ok=true
+  PASS  residue-divdiff  fused paired modes: away-from-coincidence ≡ collected (rel 0.000002); coincidence ≡ τ·e within the Q4.28 quantum (max|Δ| 0.000000e-9, a tolerance — not bit-identity); near-coincidence series sweep ≡ direct-double oracle (max|Δ| 0.000000); |c|=0.728011<8 vs collected 1/Δ overflow — stable, no 1/Δ
+        banked Cauchy fills (collected form): equivalence + flatness
+        result   banked≡collected bit-diff 0/4096 · 6 modes · unrolled 2281 vs banked 1221 plan-instrs (6⋙6)
+  PASS  residue-banked  banked Cauchy fills ≡ collected bit-identical (6 modes); unrolled 2281 vs banked 1221 plan-instrs (6⋙6) — O(m+n) coeff regions
+        bloom⋙reverb Γ-bridge atom (4 pairs incl. the in-band crossing; β·|μ|/g up to ~178):
+        oracle   lgamma-recurrence 0.000000 · trapezoid h→h/2 self-distance 0.000004
+        result   ‖dut−ref(h/2)‖ 0.000014 · κ→0 vs residueComposeEC 0.000002 · depths ser/cf 119/59, 30/0, 19/0, 22/0
+  PASS  modal-bloom-gamma  the bloomed voice feeds the reverb in closed form — Γ-bridge atom at the datapath floor (rel 0.000014; ref self-distance 0.000004), κ→0 = the DD atom (0.000002), seam step-free
+        ∫ modal bank (a↦a/μ + DC atom), 2→3 modes:
+        oracle   jet max|μ·a_int − a|=0.000000 · onset |Σa_out|=0.000000 · struct=true
+        result   symbolic≡Float max|Δ|=0.000000e-9 (bound 44.703484e-9) · trapezoid rel-L2=0.000592
+  PASS  modal-integrate  antiderivative exact by the jet (μ·a_int=a, Σa=0), symbolic folds to Float within Q4.28, render ≡ cumulative trapezoid (rel 0.000592)
+        analytic (Re,Im) bank, 3 modes: pair vs table oracles:
+        result   Re bit-diff 0/4096 (vs table) · Im bit-diff 0/4096 (vs A↦−iA table) · E[Re]=1191.949549 E[Im]=1191.737799
+  PASS  modal-pair  analytic pair: Re ≡ table, Im ≡ (A↦−iA) table, both bit-identical — the twist/DD substrate
+        normalizePeak: render ratio ≡ norm^(-g) over σ∈#[40.000000, 10.000000, 3.000000, 0.500000, 0.100000, 0.030000], g∈0/½/1:
+        result   worst rel 0.000000 · ‖H‖ #[0.025197, 0.100708, 0.335678, 2.014061, 10.070306, 33.567685] (grows across the sweep: true)
+  PASS  gauge-adapter  the self-measured excitation gauge: g=0 no-op, g=1 unity-peak (÷‖H‖), g=½ √Q trim — render ≡ norm^(-g) to 0.000000 rel, ‖H‖ grows #[0.025197, 0.100708, 0.335678, 2.014061, 10.070306, 33.567685]
+        single cosine mode, |A| sweep #[10.000000, 30.000000, 40.000000, 60.000000, 70.000000, 130.000000] (k = 0,0,1,1,2,3):
+        result   peak/amp #[0.998973, 0.998973, 0.998973, 0.998973, 0.998973, 0.998973] · worst deviation from constant 0.000000
+  PASS  k-invariance  the landed value is k-invariant: peak/amp constant to 0.000000 across the k=0→3 boundaries (32/64/128) — the ·2^(28−k)/>>(28−k) cancel, a k-flip moves only the quantization LSB
+        emitted lgammaE vs build-time lgammaB, Re∈[−5,5] (crosses ½), Im = 1 and −2.5:
+        result   worst relative error 0.000000  (at z=(2.773438,-2.500000))
+  PASS  lgamma-emit  emitted complex lgamma ≡ build-time Lanczos to 0.000000 rel across the reflection boundary and both Im signs — WS-LP's live Γ★ bridge is sound
+        static-index FM (b=3.000000, ω_m=2π·308) fused to a Bessel bank:
+        oracle   recurrence err=0.000000 · Parseval |ΣJ²−1|=0.000000
+        result   ‖fuse(N)−fuse(19)‖/‖·‖: N=5 0.016551 → N=8 0.000121 → N=11 0.000000
+  PASS  modal-bessel  Jₙ correct (recurrence 0.000000, Parseval 0.000000); FM'd bank truncates superexponentially (N=5→8→11: 0.016551→0.000121→0.000000)
+        heterodyne twist vs besselFuse bank (b=3.000000, 2-mode carrier):
+        result   rel-L2 het≡fused-bank=0.000002 · plan-instrs het=366 fuse(19)=534 · E[het]=2004.570111
+  PASS  modal-heterodyne  heterodyne twist (Re·cosθ−Im·sinθ) ≡ the fused Bessel bank (rel 0.000002) — O(1)-in-sidebands FM, still a modal object (D6)
+        LFO→pole integrated reading vs RK4 of ẋ=μ(t)x (f0=5.000000, p=0.080000, fm=0.800000):
+        oracle   integrated vs RK4 rel err: n=500 0.000132 1000 0.000008 2000 0.000001 (ratios 16.007069, 16.004056; ~16=h⁴)
+        result   snapshot vs ODE=1.901259 (plateaus) · render pre-strike|max|=0.000000 E=1797.351704
+        render   ≡ env·cos(φ_int) max|Δ|=2917.171731e-9 (bound 30000.000000e-9) · raw-LFO variant max|Δ|=1.887819 (must exceed)
+  PASS  modal-vco  the integrated reading IS the modulated resonator (RK4 h⁴: ratios 16.007069, 16.004056); its RENDER ≡ env·cos(φ_int) (max|Δ| 0.000003); the raw-LFO variant diverges (max|Δ| 1.887819); snapshot plateaus (1.901259) (D1/D2)
+        affine reclock: (A) delay a=1,b·SR=10  (B) scale a=2:
+        result   armA max|Δ|=20.489097e-9 (bound 745.058060e-9, tight) · armB max|Δ|=4238.449037e-9 (bound 13224.779229e-9, freq-grid)
+  PASS  modal-reclock  amp rotation A↦A·e^(μb) exact (armA 20.489097e-9); pole scale ω↦2ω within the SR/2³² frequency grid (armB 4238.449037e-9)
+        Expr-residue (literal poles) vs Float-baked residue, voice(2)⋙reverb(4):
+        result   max|Δ|=3.725290e-9  ·  quantum bound=74.505806e-9
+  PASS  symbolic-residue  Expr couplings fold to the validated Float residue within the Q4.28 landing quantum (max|Δ| 3.725290e-9) — live-capable, same math
+seam-atom sweep (law re-checked over the admission region — not frozen points):
+        residueCompose: interior 8 configs worst-rel 0.000085 (oracle self 0.000000); boundary 7 admitted worst-rel 0.000002, 0 gracefully excluded
+        bloomGamma: interior 5 configs worst-rel 0.000022 (oracle self 0.000000); boundary 6 admitted worst-rel 0.000187, 0 gracefully excluded
+        law-EC-commute: filter∘filter symmetric — EC(b₁,b₂) ≡ EC(b₂,b₁) rel 0.000000
+        law-assoc: (v∘r₁)∘r₂ ≡ v∘(r₁∘r₂) rel 0.000000 — room-fold reassociation holds
+        bloomGamma coincidence deep-tail (a = 0 EXACT, κ≈19, ~2.2 s): series-DD region rel 0.000001, full rel 0.000001
+        bloomGamma small-κ coincidence (subtle bloom, |κ|≈6e-4, always series-DD): rel 0.000001
+        bloomGamma a≠0 coincidentCrossing tail (|a|≈0.083, |κ|≈19, general lgamma(a+1)/a bridge, ~2.2 s): series-DD region rel 0.000002, full rel 0.000001
+  PASS  seam-sweep  every registered atom holds its law over its admission region (incl. the τ·e coincidence deep-tail, small-κ direct-sum, AND the a≠0 general lgamma-bridge tail); composition laws (EC-commute, assoc) pinned
+Γ-bridge coefficient comparator (representable regime, series-shaped — not points):
+        regime   |κ|=0.523628 · |a|=10.473302 · depth N=12
+        witness  E1 Kummer closed form ≡ ∫ composition (ODE route), max coeff rel|Δ| = 0.000000
+  PASS  gamma-coeff  E1 series ≡ the composition integral coefficient-for-coefficient to d^12 (max |Δ| 0.000000) — the resummation algebra, not points
+gong⋙reverb from the patch surface (fold the room chain, cross the bloom once):
+        route    patch ≡ direct atom: single bitDiff 0, chain(⋙rev⋙rev) bitDiff 0
+        law2     chain ≡ oracle∘(indep fold) 0.000674 · single ≡ oracle 0.000002 · pre-E 0.000000 · E[early] 0.036571 E[late] 0.044321
+  PASS  gong-reverb  bloomed gong ⋙ reverb (and a reverb CHAIN) from the patch surface — reassociated fold-then-cross (bitC 0), chain ≡ oracle∘(indep fold) 0.000674, single 0.000002, audible
+ecdd erasure (per-coupling partition, θ_acc=0.464200 rad/s):
+        cold chain bitDiff 0 (deferred fold ≡ yesterday's collected chain)
+        tuned unison (|Δ|=1e-6, sub-grid): partitioned 0.000000 vs collected 1.000000 (oracle law)
+        tuned unison through a chain:      partitioned 0.000006 vs collected 0.999349
+        routing structure ok=true · lens-discriminated: rail routes true / small-amp cold true / extreme-Q refusal stated true · room-room coincident chain finite=true preE=0.000000 E=0.027487
+  PASS  ecdd-partition  the EC/DD choice is the compiler's: cold chain byte-identical (bitDiff 0), tuned unison served through the paired route (0.000000 vs collected 1.000000; chain 0.000006 vs 0.999349), routing structural + lens-discriminated (rail routes, small-amp cold, extreme-Q refusal stated), coincident room chain graceful
+ecdd σ-axis (the accuracy lens reads the whole pole distance):
+        witnesses: σ-separated cold true · σ-near paired true · ω-near paired true · live dipper paired true · out-of-span cold true · extreme-Q refusal retired true
+        route census, 1000 couplings drawn in the ±0.8 rad/s lens band:
+          live-rt60 room (shipped reverb topology): cold 425 · paired 575 · refused 0
+          baked const-σ room (data rows, fixtures):  cold 988 · paired 12 · refused 0
+  PASS  ecdd-sigma-axis  the lens reads BOTH axes: σ-only separation routes cold, σ-near still pairs, the ω axis is unmoved; live spans included (the dipper survives, an out-of-span partial separates, the extreme-Q refusal retires into ordinary cold) — census: live-room 575/1000 paired, baked-room 12/1000
+ecdd live-pole (interval classification over the declared rt60 span):
+        structure ok=true (tuned routes, untuned/rangeless stay collected, chain routes at the final fold)
+        law: rt60=2.0 rel 0.000000 · rt60=4.0 rel 0.000000 (one DD lane across the knob) · live+chain rel 0.000017
+        overdrive: rt60 driven to 0.1 (out of span) ≡ oracle at the declared edge 0.2 rel 0.000001 (the whole bank saturates together)
+  PASS  ecdd-live  a live-rt60 room tuned onto a partial classifies over its declared interval and takes the DD lane throughout (0.000000 / 0.000000 at two knob values, no runtime select to click); live+chain served on the plain arm (0.000017); untuned/rangeless live rooms stay collected; an out-of-span drive saturates the WHOLE bank to the declared edge (0.000001)
+ecdd gauge-over-hot (the norm on cancelling ±c/Δ amps):
+        scale law (Δ=1e-3, resolvable): gauged ≡ 1.310006 × collected rel 0.000000
+        sub-grid (|c/Δ|≈7e5): norm sane true (scale 1.310006) · landing-poison comparison 0.517536 (quantization-dominated, recorded) · E 0.000618
+  PASS  ecdd-gauge  gauge over a tuned-unison chain: the H-norm survives the ±c/Δ amps (sub-grid scale 1.310006, mirrored independently — no oblivion; scale law holds where the datapath resolves, 0.000000); the recorded residual is the collected floor PLUS the landing poison (huge amps size the bank's k, LSB over the cold modes)
+bloom live-pole crossing (WS-LP: serOnly + crossing + straddling, live rt60):
+        lift     pairs 6/6 · live consts (unfoldable) true · s0 true · coincident-dip pair drops to 2/3
+        serOnly  live ≡ baked crossing 21.082121e-9 · live ≡ oracle 0.000002 · pre-E 0.000000 · E 0.081964
+        crossing lifted (1 pair, CF lane) true · live ≡ baked 65.019876e-9 · live ≡ oracle 0.000004 (window 8192, seam inside)
+        straddle rt60=2 (seam in-window) ≡ baked 144.028540e-9, ≡ oracle 0.000002 · rt60=0.25 (serOnly side) ≡ baked-SER-ARM 127.638723e-9 (the bridge identity in-kernel), ≡ oracle 0.000002 · full bank 3/3 true
+  PASS  bloom-live-pole  a live-rt60 reverb CROSSES the bloom in every non-coincident region: serOnly 6/6 (≡ oracle 0.000002); crossing incl. live dSwitch seam (≡ oracle 0.000004); STRADDLING pair served by the union collapse on both sides (crossing side ≡ oracle 0.000002; serOnly side ≡ baked ser arm 127.638723e-9 — the bridge identity in-kernel); only the coincident dip drops per-pair
+seam region coverage (classify the shipped register — totality as a number):
+        shipped register (β=0.05): serOnly 988, crossing 12, coincidentCrossing 1000, excludedDepth 0 / 2000
+        admitted fraction 1.000000 · worst SAMPLED depth 220 of cap 300 (measured headroom 80; Halton interior + max-|κ| corner scan 220)
+        subtle-bloom box (B=0.000002): coincidentSubtle 1000 / 1000 reachable
+        knob-max box (β=0.5): excludedDepth 79 / 1000 — COUNTED, a graceful drop, not a silent cap
+  PASS  seam-coverage  the shipped register classifies TOTALLY: admitted fraction 1.000000 (0 depth drops, worst SAMPLED depth 220 < 300 — measured headroom, Halton + corner scan), all four served regions reachable, excludedDepth counted off-surface (79/1000)
+seam lane-clean (WS-CL): coincidentSubtle CF-drop bitDiff 0 (region-indexed emit vs pre-refactor baked-CF emit)
+  PASS  seam-laneclean  the region-indexed coincidentSubtle emit is BYTE-IDENTICAL to the pre-refactor always-bake-CF emit — the dropped CF lane was truly dead (const-true selectE)
+WS-DDF room-chain fold, two arms (collected residue |c/Δ|≈60.000000):
+        A near-coincident (Δ=0.005): DD rel 0.002138 · collected rel 0.006359 (oracle self 0.000000)
+        B separated (Δ=30, Δ.re≠0, direct cexpm1 lane): DD rel 0.003219 (oracle self 0.000000)
+  PASS  ddfold  the room-chain fold holds its law in both arms (A near-coincident DD 0.002138 ≤ collected 0.006359; B separated DD 0.003219 on the direct cexpm1 lane); the a-DD machinery transferred to the fold site (WS-DDF datum). Finding: the bloom's K factor keeps the collected fold from breaking at reachable Δ — the wound is narrower than assumed
+        patch: resonator(3) → reverb(3) → out, lowered from a PatchGraph:
+        result   pre-strike |max|=0.000000 · peak=0.004340 · E[early]=0.003193 E[late]=0.002879 · rev≡fwd-mirror bitDiff 0/2048
+  PASS  modal-patch  resonator→reverb→out compiles from a graph: causal, decaying, reverse-scrubs bit-exact
+        JSON resonator(freq,decay) → reverb(rt60) → out compiled via compilePlanPure:
+        result   JIT-loadable · slots: freq=true decay=true rt60=true · pre-move blocks identical=true · post-move ΔE/E=1.050210
+  PASS  modal-live  modal params are live slots AND the kernel reads them: moving res.freq moves the signal THROUGH the reverb (setSlot, no relower)
+        connection typing enforced at decode:
+        result   signal→modal rejected=true · modal→signal compiles=true
+        message  connection type error: 'osc' (source, signal outlet) → 'rev' (reverb) inlet 'in' which accepts modal — outlet.color ∉ inlet.accepts (modal→signal realizes; signal→modal is a type error)
+  PASS  patch-typing  signal→modal is a decode-time type error; a valid modal edge compiles — the served accepts-rule is enforced, not just documented
+        gong strike (t=5ms, β=0.06) via compilePlanPure → JIT:
+        result   pre-strike|max|=0.000000 · peak=10.641182@1348 · E[early]=49508.052876 E[late]=43384.284208
+  PASS  gong-strike  gong compiles + renders: causal (silent pre-strike), rings and decays (peak 10.641182@1348, E early 49508.052876 > late 43384.284208) — the struck resonator end to end
+        gong β as a live slot (param:g.beta):
+        result   slot present=true · pre-move blocks identical=true · post-move ΔE/E=1.769006
+  PASS  gong-live  gong β is a live slot AND the bloom warp reads it: moving g.beta diverges the ring (setSlot, no relower)
+        resonator→out (live freq/decay), banks-table=true:
+        result   reduce regions audio=1 coeff=0 · array fills coeff=2 audio=2 · typed≡flow bitDiff=0/32768 · E=23110.839751
+  PASS  banks-staging  bank looped (1 region, in audio; 0 in coeff — clock-dependent region stays); 2 live column(s) → s0 kernel via shared array_ptrs; 2 const baked; typed split ≡ flow byte-exact
+        resonator ⋙ filter(glided) ⋙ [gauge] ⋙ out — FloatExponent (audio, coeff):
+        result   without gauge (2, 0) · with gauge (2, 2)
+  PASS  gauge-stage  settle keeps the gauge norm s0: the gauge adds 0 FloatExponent to the audio kernel (stays 2) and 2 to the s0 coeff kernel — Metal-safe by construction
+        banked=true · hoisted columns=2 (12 floats packed) · buffer(3)=true · offset reads=true · locals suppressed=true · unsplit 3-binding=true
+  PASS  msl-column-guard  2 hoisted column(s) EMIT in column-binding mode: buffer(3) declared, reads at packed offsets, no arrN locals; columns-free plan keeps the frozen 3-binding header
+        bare resonator→out (live freq/decay), banks-table=true:
+        audio-kernel instrs: K=6 → 137   K=512 → 137   Δ=0
+        coeff-kernel instrs: K=6 → 49   K=512 → 3085
+  PASS  banks-bench  flag on: audio kernel FLAT in K (Δ=0 ≤ 8, K=6→512); coeff kernel scales with K (49→3085, grows=true) at knob rate
+        resonator partials_max=16 (LIVE partials slot) vs fully-static graphs:
+        result   default(16)≡static16 bitDiff=0/2048 · knob4≡static4 bitDiff=0/2048 · knob100≡static16 bitDiff=0/2048
+        result   E[static16]=15316.996964 · E[knob0]=0.000000 · slot live=true · static graph has slot=false (want false)
+  PASS  banks-count  live trip count ≡ static at 16/4, clamps at 100, silent at 0 — mode count is data, not topology
+        same graph, partials default 4 vs 12 (cap 16) vs cap 24:
+        result   knob-invariant IR: unsplit=true audio=true (30887B) · capacity moves IR: unsplit=true audio=true
+  PASS  banks-count-cache  IR text is knob-invariant (md5 cache hit across counts); partials_max changes it (capacity is topology)
+        filter = residue-composed conjugate pole pair (H exact); resonator → filter → out:
+        (A) E[cutoff 4kHz]=21739.595026 vs E[60Hz]=108.920048 (ratio 199.592227)
+        (B) Q≈44 ping: tail rings at 500.769231 Hz (fc=500, want ±3%), E[tail]=0.053010
+        (C) cutoff glide slots present=true · ΔE/E after move=1.084421
+  PASS  modal-filter  lowpass attenuates (199.592227x), Q≈44 pings at 500.769231 Hz, cutoff live through the composition
+        resonator(800,4) ⋙ filter(800, res) ⋙ out, production path (live amps ⇒ dynamic k):
+        res 0.91 (green control): peak=90.960415 spikes=0 finite=true
+        res 0.95 (red arm)      : peak=105.548650 spikes=0 finite=true
+  PASS  modal-rail  the top of the resonance knob renders SMOOTH through the fix (res 0.91 & 0.95 both spike-free; control peak 90.960415 proves the discriminator sees loud≠broken) — the i64 landing rail is gone on the production path
+        resonator(60,4) ⋙ reverb(rt60) ⋙ out, production dir path (60 Hz pole coincidence):
+        rt60 2.0 (green control)  : peak=0.302385 spikes=0 finite=true
+        rt60 1.238 (red arm)      : peak=0.279349 spikes=0 finite=true
+  PASS  modal-rail-dir  the reverb dir landing survives the 60 Hz pole coincidence (rt60 1.238 spike-free, peak 0.279349 — the pre-fix ±237 wrap is gone; control rt60 2.0 renders) — the i64 rail is fixed on the dir path too
+        static banks: small amp 0.2 ⇒ k=(some 0) (want 0), large amp 100 ⇒ k=(some 2) (want 2), deg-1 σ=0.1 amp=10 ⇒ k=(some 1) (want 1, env-lifted):
+        small IR keeps 2²⁸ landing=true · large IR rescales to 2²⁶ & drops 2²⁸=true · deg-1 env₂ lift=true
+  PASS  modal-rail-identity  k=0 emits the Q4.28 landing VERBATIM (byte-identical, reused kernel-cache); a loud static bank rescales to 2²⁶ (option E fires); a small-|A| deg-1 bank still lifts k via its env₂ peak (deg>0 is not amp-only) — pinned every way
+        addressed resonator (a patched CF signal AS the time coordinate):
+        result   identity-addr max|Δ| vs un-addressed=0.000000 · offset-addr pre-onset|max|=0.000000 post-onset peak=0.885652 · graph decode ok=true
+  PASS  modal-addr  a patched signal drives the bank's time: address=time ≡ un-addressed; offset relocates the strike; graph decode compiles
+        unwired: mod=(some normalled) rate-param=true · wired: mod=(some wired) rate-param=false · orphan=(some excluded)
+  PASS  realized-report  facts, not warnings: normalled/wired inputs, owned knobs absent when superseded, excluded nodes named
+        7+8 manifest entries checked against their plans' slots:
+        result   consistent
+  PASS  manifest-disciplines  param_disciplines ≡ the plan's slots — a host can dispatch from it blind
+        21 kinds, each compiled from a vocabulary-generated minimal patch:
+        result   every declared knob registers and is read
+  PASS  vocab-driven  the served vocabulary drives a compiling patch per kind — declared knobs live, nothing unread
+        22 built kinds: nodeIsModal(node) ⟺ outletOf == modal (served drift asserted empty)
+        served drift #[] · withheld drift (contained, rejected pre-lowering) #[bloomgong] · list-consistency ok
+  PASS  modal-class-agreement  outletOf and nodeIsModal agree for every SERVED kind, and buildNodeKinds ⊆ served∪withheld (the 1 withheld kind(s) may drift — rejected pre-lowering, so the drift cannot mis-type an edge)
+        malformed patches rejected (no crash); legal-incomplete unaffected:
+        cycle(reverb self)   connection cycle: rev → rev — patch graphs must be acyclic (you may only patch forward; there is no delay to break a loop through)
+        cycle(mix self)      connection cycle: m → m — patch graphs must be acyclic (you may only patch forward; there is no delay to break a loop through)
+        dangling wire        connection error: 'mx' (mix) inlet 'in' is wired from 'ghost', which is not a node in the patch — a wire must name an existing node
+        dangling out         output target error: the top-level "out" names node 'typo', which is not in the patch — route the dac from an existing node (or omit "out" for a silent patch)
+        withheld kind        unserved kind: 'bg' has kind 'bloomgong', which the engine builds but WITHHOLDS from the surface vocabulary (its modal factor-site landing has no admission guard yet) — not available as a patch node
+        unknown kind         unknown kind: 'x' has kind 'reverbb', which is not a served node kind — see get_vocabulary for the 22 kinds the surface builds
+        wire into a knob     connection error: 'rev' (reverb) has a wire into 'dir', which is a knob (a set value), not an inlet — set it via its param slot (or wire its owner port), do not wire the knob itself
+        shared glided filter control compiles=true
+        valid modal patch compiles=true
+  PASS  malformed-rejection  a color-legal cycle, a dangling wire/out, a WITHHELD kind (bloomgong), an UNKNOWN kind, and a wire-into-a-knob each return a clear error (no stack-overflow); shared glided control inlets and a valid patch compile
+        4 canonical patches over the full node vocabulary, 73 param:* slots:
+        result   unread param slots: none
+  PASS  dead-slot-lint  every registered param:* slot is read by an instruction — no dead knobs behind graceful exclusion
+        explicit rows=4 shape=true frozen params=true finite=true peak=0.023420
+  PASS  explicit-room-modes  authored rows are exact structural room data: fixed count, no coefficient slots, finite audible render
+        direct Plan-6=true nested 12×12=true; cache Plan-6/no-reduce=true; no asset Pack=true; refusals=true
+  PASS  grouped-room-contract  direct profile keeps one nested 12×12 evaluator; selected scene cache is a loop-free Plan-6 linear read; mismatches refuse
+patcher lowering (downstream-only patch graph → arrow term):
+  PASS  lowering-chain  lower(osc→flange→flange) ≡ hand-built nested term (70723B)
+        fan-out osc → (flange δ₁ &&& flange δ₂) → mix: 6 generator instances (the diagonal re-sources the osc per tap)
+  PASS  lowering-fanout  diagonal + mix through the lowering (6 instances, energy=429.561187)
+  PASS  modulated-node/fm  graph fm node ≡ hand-built carrier (21443B)
+  PASS  modulated-node/pm-of-pm  graph fm node ≡ hand-built carrier (31783B)
+  PASS  arrow-block-count  the arrow-laws block ran 98 gates, which is exactly what its elaboration-failure arm charges — a stdlib that fails to elaborate is reported as a total collapse, not as 13 failures
+
+123/123 passed
+bun web/build_patches.ts
+built pure-sine-440              740 B wasm
+built ring-mod                  1094 B wasm
+built tz-flanger                4130 B wasm
+
+manifest: 3 patches -> /private/tmp/tropical-modal-pocket-demo/web/dist/patches/index.json
+TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test
+bun test v1.3.12 (700fc117)
+
+mcp/errors.test.ts:
+(pass) envelope shape invariants > ok responses use status:"ok" and carry data [1.23ms]
+(pass) envelope shape invariants > error responses use status:"error" with full envelope + isError flag [0.18ms]
+(pass) envelope shape invariants > validation errors have retryable:false [1.34ms]
+(pass) envelope shape invariants > message is a single non-empty string, ≤ 200 chars [0.31ms]
+(pass) missing_argument > export_program without name [0.31ms]
+(pass) missing_argument > export_program without outputs [0.08ms]
+(pass) missing_argument > export_program with empty outputs dict [0.14ms]
+(pass) missing_argument > load without path or program [0.10ms]
+(pass) missing_argument > merge without program or patch [0.10ms]
+(pass) arity_error > wire_chain with <2 instances and no initial_expr [0.46ms]
+(pass) arity_error > fan_in with empty sources [0.08ms]
+(pass) length_mismatch > wire_zip with sources/targets length mismatch [0.12ms]
+(pass) unknown_instance — helper-routed across all wiring tools > remove_instance [0.16ms]
+(pass) unknown_instance — helper-routed across all wiring tools > get_info [0.11ms]
+(pass) unknown_instance — helper-routed across all wiring tools > wire set[].instance [0.26ms]
+(pass) unknown_instance — helper-routed across all wiring tools > wire remove[].instance [0.11ms]
+(pass) unknown_instance — helper-routed across all wiring tools > wire_chain [0.09ms]
+(pass) unknown_instance — helper-routed across all wiring tools > wire_zip sources[].instance [0.10ms]
+(pass) unknown_instance — helper-routed across all wiring tools > wire_zip targets[].instance [0.08ms]
+(pass) unknown_instance — helper-routed across all wiring tools > fan_in target.instance [0.08ms]
+(pass) unknown_instance — helper-routed across all wiring tools > fan_in sources[].instance [0.06ms]
+(pass) unknown_instance — helper-routed across all wiring tools > fan_out source.instance [0.07ms]
+(pass) unknown_instance — helper-routed across all wiring tools > fan_out targets[].instance [0.11ms]
+(pass) unknown_instance — helper-routed across all wiring tools > wire to dac.out — unknown source instance in ref expression [0.09ms]
+(pass) unknown_param > set_param with name not in registry [0.10ms]
+(pass) unknown_param > retired parameter-method aliases are not RPC methods [0.24ms]
+(pass) unknown_input / unknown_output — scoped enum > unknown_input — valid.options is exactly this instance's inputs [0.18ms]
+(pass) unknown_input / unknown_output — scoped enum > unknown_output — valid.options is exactly this instance's outputs [0.19ms]
+(pass) unknown_input / unknown_output — scoped enum > Levenshtein suggestion fires on close typo (input) [0.21ms]
+(pass) unknown_input / unknown_output — scoped enum > no suggestion on far typo [0.13ms]
+(pass) instance_exists > add_instance with duplicate name [0.16ms]
+(pass) invalid_value > replicate with count=0 [0.07ms]
+(pass) invalid_value > replicate with negative count [0.08ms]
+(pass) invalid_value > replicate with non-integer count [0.09ms]
+(pass) invalid_value > record field spec shape [0.12ms]
+(pass) wire expression decode — refusal site > retired combinator is refused by name [0.22ms]
+(pass) wire expression decode — refusal site > state op is refused with the closed-form-only message [0.08ms]
+(pass) wire expression decode — refusal site > wrong arity is refused at the tool, not at the next compile [0.09ms]
+(pass) wire expression decode — refusal site > a bare string is not an expression [0.09ms]
+(pass) wire expression decode — refusal site > the offending expression is echoed verbatim in value [0.09ms]
+(pass) wire expression decode — refusal site > engine-internal form 'input' is refused, not stored [7.41ms]
+(pass) wire expression decode — refusal site > engine-internal form 'nestedOut' is refused, not stored [0.96ms]
+(pass) wire expression decode — refusal site > engine-internal form 'broadcastTo' is refused, not stored [0.75ms]
+(pass) wire expression decode — refusal site > a retired alias nested inside a legal expression is caught [0.14ms]
+(pass) wire expression decode — refusal site > the refused entry of a multi-entry set does not land [0.14ms]
+(pass) wire expression decode — refusal site > wire_chain initial_expr is decoded [0.14ms]
+(pass) wire expression decode — refusal site > fan_out source is decoded [0.08ms]
+(pass) wire expression decode — refusal site > non-scalar ref.output on a dac wire is classified [0.07ms]
+(pass) wire expression decode — retired aliases > paramExpr is rejected instead of canonicalized [0.07ms]
+(pass) wire expression decode — retired aliases > triggerParamExpr is rejected instead of canonicalized [0.04ms]
+(pass) wire expression decode — retired aliases > trigger is rejected instead of canonicalized [0.03ms]
+(pass) wire expression decode — retired aliases > array is rejected instead of canonicalized [0.03ms]
+(pass) wire expression decode — retired aliases > arrayLiteral is rejected instead of canonicalized [0.03ms]
+(pass) wire expression decode — retired aliases > sampleClock is rejected instead of canonicalized [0.03ms]
+(pass) wire expression decode — retired aliases > sample_clock is rejected instead of canonicalized [0.04ms]
+(pass) wire expression decode — retired aliases > array_set is rejected instead of canonicalized [0.32ms]
+(pass) wire expression decode — retired aliases > sessionSlot is rejected instead of canonicalized [0.25ms]
+(pass) wire expression decode — retired aliases > sessionArraySlot is rejected instead of canonicalized [0.05ms]
+(pass) wire combine > a binary wire op combines with the existing wire, existing on the left [3.56ms]
+(pass) wire combine > a ternary op is not a combine [0.27ms]
+(pass) wire combine > an unknown op is not a combine [0.07ms]
+(pass) wire combine > combine on an unwired port is ignored, not validated [3.49ms]
+(pass) fan_out literal source > an expression source fans out to every target [4.19ms]
+(pass) unknown_program > add_instance with unregistered program [0.21ms]
+(pass) unknown_program > replicate with unregistered program [0.14ms]
+(pass) unknown_program > Levenshtein suggestion fires for 1-edit program typo [0.13ms]
+(pass) unknown_program > no suggestion for unrelated name [0.09ms]
+(pass) type_mismatch > array literal → scalar input [0.16ms]
+(pass) type_mismatch > scalar literal → scalar input is accepted (no error) [4.68ms]
+(pass) export_program over a re-registered type name > a stale unwired port does not abort a later export [10.56ms]
+(pass) invalid_state > stop_audio before start_audio [0.22ms]
+(pass) internal_error fallback > malformed program in load surfaces as internal_error [0.10ms]
+(pass) internal_error fallback > a wire the grammar refuses is internal_error on the ingest path [0.14ms]
+(pass) internal_error fallback > a retired alias is refused on the ingest path too [0.09ms]
+(pass) internal_error fallback > retired root field 'params' is refused on ingest [0.13ms]
+(pass) internal_error fallback > retired root field 'audio_outputs' is refused on ingest [0.07ms]
+(pass) internal_error fallback > retired root field 'breaks_cycles' is refused on ingest [0.07ms]
+(pass) suggestion field > suggestion is always a value of the expected type (string for enum) [0.19ms]
+(pass) suggestion field > suggestion is one of the valid.options for enum errors [0.17ms]
+(pass) suggestion field > suggestion omitted when no candidate within threshold [0.09ms]
+(pass) suggestion field > suggestion is not emitted for errors without valid.enum (instance_exists) [0.10ms]
+(pass) list_wiring non-error path > unknown instance filter returns empty list without error [0.09ms]
+(pass) success envelope shape > add_instance → status:"ok" with summary data [0.08ms]
+(pass) success envelope shape > list_programs → status:"ok" with array [0.27ms]
+
+mcp/wire_dac.test.ts:
+(pass) wire to dac.out — basic flow > ref-shaped expression to dac.out is accepted and routed [5.16ms]
+(pass) wire to dac.out — basic flow > multiple wires to dac.out accumulate (mix-bus) [4.86ms]
+(pass) wire to dac.out — basic flow > remove clears all dac wires at once [4.97ms]
+(pass) wire to dac.out — error envelopes > non-ref expression rejected [0.21ms]
+(pass) wire to dac.out — error envelopes > wrong dac port name rejected [0.19ms]
+(pass) wire to dac.out — error envelopes > ref to unknown instance rejected with helpful options [0.13ms]
+(pass) wire to dac.out — error envelopes > ref output index out of range rejected [0.16ms]
+(pass) wire to dac.out — error envelopes > remove with wrong dac port name rejected [0.10ms]
+(pass) dac is a reserved instance name > add_instance with name "dac" rejected [0.13ms]
+(pass) dac is a reserved instance name > replicate with name_prefix "dac" rejected [0.07ms]
+(pass) set_output is removed > calling set_output returns unknown-tool error [0.10ms]
+(pass) start_audio override validation (Phase A5) > rejects non-positive sample_rate [0.10ms]
+(pass) start_audio override validation (Phase A5) > rejects non-integer channels [0.16ms]
+(pass) start_audio override validation (Phase A5) > rejects negative channels [0.17ms]
+
+playground/scope-arbiter.test.js:
+(pass) pointer, sender, and quiet windows freeze-hold scope work [0.89ms]
+(pass) cancel and blur cannot strand a transient hold
+(pass) a surfaced fault keeps the last complete scope frame frozen
+
+playground/qualification.test.js:
+(pass) qualification percentiles use the observed upper sample
+(pass) every sticky runtime, Metal, DAC, and capture fault blocks
+(pass) capture assembly records gaps without inventing audio [0.73ms]
+(pass) scope metrics exclude intentional preemption and resume frames [0.21ms]
+
+playground/rpc-client.test.js:
+(pass) independent lanes own ids, buffering, and chunked responses [0.51ms]
+(pass) disconnect reconnects future work without replaying an ambiguous request [5.77ms]
+(pass) closing a lane rejects every pending request [0.65ms]
+
+playground/param-sender.test.js:
+(pass) the first value sends immediately and an in-flight drag keeps only its latest value [3.70ms]
+(pass) different parameters have independent in-flight lanes [0.92ms]
+(pass) a fast out-and-back gesture preserves its turning point and endpoint [19.15ms]
+(pass) a failed value reports once and does not strand a newer value [0.61ms]
+(pass) busy notifications cover overlapping parameter lanes exactly
+
+playground/scene.test.js:
+(pass) scene is one acyclic-looking fixed graph with unique ids [1.54ms]
+(pass) amplitudes glide while modal coefficients stay hoistable [0.10ms]
+(pass) all chord anchors are rational multiples of the common 55 Hz root [0.31ms]
+(pass) each string partial blooms causally from an exact amplitude pair [0.06ms]
+(pass) each metal hit is a causal inharmonic attack pair [0.17ms]
+(pass) the scene loops exactly at the end of the sixteen-step phrase
+
+tests/web/param_dispatch_conformance.test.ts:
+(pass) param dispatch conformance (C++ data-plane ≡ Lean reference) > identical write sequence → identical companion slots and audio [1345.70ms]
+
+tests/web/web_plans_vs_jit.test.ts:
+(pass) web/dist shipped artifacts vs native JIT > pure-sine-440 [1551.79ms]
+(pass) web/dist shipped artifacts vs native JIT > ring-mod [1537.86ms]
+(pass) web/dist shipped artifacts vs native JIT > tz-flanger [1573.79ms]
+
+tests/web/metal_vs_jit.test.ts:
+    pure-sine-440: SNR 141.5 dB (floor 125)
+(pass) metal vs native JIT (SNR gates) > pure-sine-440 — literal landing, f32 value floor [1811.76ms]
+    pure-sine-440 far: SNR 141.5 dB (floor 125)
+(pass) metal vs native JIT (SNR gates) > pure-sine-440 @ τ+2^40 — long-τ FLAT (the integer-phase proof) [1823.07ms]
+    tz-flanger: SNR 140.7 dB (floor 125)
+(pass) metal vs native JIT (SNR gates) > tz-flanger — warped reads, reduced phases [1884.17ms]
+    tz-flanger far: SNR 140.7 dB (floor 115)
+(pass) metal vs native JIT (SNR gates) > tz-flanger @ τ+2^40 — warps stay flat [1874.11ms]
+    reverse_reverb: SNR 141.2 dB (floor 125)
+(pass) metal vs native JIT (SNR gates) > reverse_reverb — future taps, modal voice [1921.64ms]
+    scrub_reverb: SNR 141.2 dB (floor 125)
+(pass) metal vs native JIT (SNR gates) > scrub_reverb — the scrub-transport patch [1919.37ms]
+    ring-mod: SNR 138.9 dB (floor 125)
+(pass) metal vs native JIT (SNR gates) > ring-mod — product of voices [1835.15ms]
+    banked resonator: 2 hoisted column(s), SNR 113.6 dB (floor 100)
+(pass) metal vs native JIT (SNR gates) > banked resonator — hoisted coefficient columns cross to the GPU (WS4) [583.99ms]
+    modal_heavy64: SNR 92.5 dB (floor 80)
+(pass) metal vs native JIT (SNR gates) > modal_heavy64 — the pre-scope-A unreduced-radian canary (short window only) [2151.28ms]
+(skip) metal vs native JIT > skipped — libtropical built without TROPICAL_METAL or no Metal device
+
+tests/web/wasm_vs_jit.test.ts:
+(pass) wasm vs native JIT > FixedSinOsc 440 Hz — first 64 samples [2804.75ms]
+(pass) wasm vs native JIT > FixedSinOsc 880 Hz — 128 samples [2827.77ms]
+(pass) wasm vs native JIT > FixedSinOsc → SoftClip(drive 4) — 256 samples [2803.17ms]
+(pass) wasm vs native JIT > program definitions over the wire — refused at ingest [1261.80ms]
+(pass) wasm vs native JIT > op-zoo (bitwise / shifts / float↔int casts / mod / clamp / select) — WASM matches JIT [2800.10ms]
+
+1 tests skipped:
+(skip) metal vs native JIT > skipped — libtropical built without TROPICAL_METAL or no Metal device
+
+ 137 pass
+ 1 skip
+ 0 fail
+ 1115 expect() calls
+Ran 138 tests across 11 files. [38.71s]
+ctest --test-dir /private/tmp/tropical-modal-pocket-demo/build --output-on-failure
+Test project /private/tmp/tropical-modal-pocket-demo/build
+    Start 1: current_epoch_tile_queue
+1/4 Test #1: current_epoch_tile_queue .........   Passed    0.01 sec
+    Start 2: current_module_process
+2/4 Test #2: current_module_process ...........   Passed    0.12 sec
+    Start 3: current_metal_render_worker
+3/4 Test #3: current_metal_render_worker ......   Passed    0.03 sec
+    Start 4: current_metal_kernel
+4/4 Test #4: current_metal_kernel .............   Passed   19.88 sec
+
+100% tests passed, 0 tests failed out of 4
+
+Total Test time (real) =  20.04 sec

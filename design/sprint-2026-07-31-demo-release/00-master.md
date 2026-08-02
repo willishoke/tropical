@@ -8,8 +8,8 @@
 - **Product target:** the one fixed 16-second modal scene on the release Mac
 - **Sprint type:** release recovery, interaction correctness, and perceptual
   finishing
-- **Status:** in progress; interaction/Metal lanes implemented, grouped room +
-  temporal POSITION authorized for production under the dedicated handoff
+- **Status:** engineering candidate qualified under an explicit user waiver of
+  the 30-minute soak; final headphone/monitor listening approval remains open
 
 ## 2026-08-01 room-lane production decision
 
@@ -21,11 +21,12 @@ LENGTH, the direct dual analytic evaluator with a fixed-scene mono cache only
 as its measured fallback, and no live room size or longer-decay work for this
 release.
 
-One production gate precedes compiler integration: all accepted audition and
-proof assets were generated at Clouds' native 32 kHz and only then resampled
-for listening, while the shipping engine is native 44.1 kHz. The same selected
-architecture must therefore be fitted, proved, and auditioned at 44.1 kHz.
-This is an asset qualification gap, not an open architecture decision.
+At handoff time, one production gate preceded compiler integration: all
+accepted audition and proof assets had been generated at Clouds' native 32 kHz
+and only then resampled for listening, while the shipping engine is native
+44.1 kHz. The same selected architecture therefore had to be fitted, proved,
+and auditioned at 44.1 kHz. The production result below records that this asset
+qualification gap is closed without reopening the architecture decision.
 
 The initial Foundry 24, Industrial Cathedral 32, and Tanker 48 auditions are
 all rejected. None is eligible for scene integration. Their sparse stationary
@@ -42,6 +43,31 @@ silently imported into the product.
 
 The earlier architecture fork is resolved by the production handoff. The
 paragraphs below retain the evidence trail for that decision.
+
+## 2026-08-02 production result
+
+The qualified runtime candidate is
+`6660f0668b652a8f3ed2df6088dc691790bd8c09`; the committed hardware evidence
+checkpoint is `8e32e2bd2275517634bfef12fe55e77a6b755b1f`. Production selected the
+5.38 MiB fixed-scene causal/reverse cache after the direct evaluator's recorded
+reserve failure. The native asset remains its generator and oracle.
+
+Five clean transport-stable cold boots, a clean 90-second exact-scene smoke,
+and the 10-minute adversarial soak pass at `Bdev=128`, `Rgpu=512`. The
+adversarial run dispatched 19,649 writes across 843 health records with zero
+runtime, Metal, callback, DAC, non-finite, clamped, or sampled-silent faults;
+scheduled-write p95 was `10.99 ms`, audible-activation p95 was `37.23 ms`, and
+scope cadence was `23.91 fps`. Full validation against the evidence checkpoint
+passes the trust audit, `tropicaltest` 123/123, Bun 137 pass/1 duplicate
+environment skip/0 fail, and CTest 4/4.
+
+At the user's direction, the 30-minute normal soak was cancelled and is
+explicitly waived in favor of the completed 10-minute adversarial result. It
+is not represented as a passing 30-minute run. Continuous cache-backed release
+WAVs are committed under `benchmarks/demo_release/room_audition/release_out/`;
+the final POSITION choreography peaks at `−5.01 dBFS` without normalization or
+a limiter. Final headphone/monitor approval of that capture remains the only
+open acceptance decision.
 
 Exploratory result DR-11 enabled the selected architecture. A 9,133-mode
 Freeverb-style LTI teacher was recovered exactly by collecting its complete
@@ -732,8 +758,8 @@ Lane F and G retain:
 - pre/post/first-fault runtime telemetry;
 - cutoff output captures and oracle comparison;
 - dry/incumbent/candidate/final-room WAVs;
-- per-commit 90-second smokes, 10-minute adversarial, and 30-minute final soak
-  results;
+- per-commit 90-second smokes, the 10-minute adversarial result, and either the
+  30-minute final soak or its explicit user-approved waiver;
 - focused and full validation logs; and
 - the final decision log, including every selected fallback.
 

@@ -12,6 +12,8 @@ release qualification result.
 | Required implementation predecessor | `15e5a39bfce9dd242db59aa6ebc2460987aa2199` |
 | Handoff ref | `demo/room-position-handoff-2026-08-01` |
 | Branch | `demo/modal-pocket-scene` |
+| Qualified runtime candidate | `6660f0668b652a8f3ed2df6088dc691790bd8c09` |
+| Evidence checkpoint | `8e32e2bd2275517634bfef12fe55e77a6b755b1f` |
 | Primary quanta | `Bdev=128`, `Rgpu=512` |
 | Release scope | exact modal-pocket graph on the recorded release Mac |
 
@@ -44,8 +46,9 @@ start from the baseline or a historical lane worktree.
 
 All v1 room candidates are rejected. The mono `current_radii` grouped room and
 classic reverse/forward POSITION are selected for production. Existing 32 kHz
-assets remain architecture and listening evidence, not release qualification;
-the native 44.1 kHz production asset and integrated evidence are pending.
+assets remain architecture and listening evidence, not release qualification.
+The native 44.1 kHz production asset, selected fixed-scene cache, integrated
+hardware evidence, and continuous release WAVs are now committed.
 
 ## Implemented gates
 
@@ -55,7 +58,7 @@ the native 44.1 kHz production asset and integrated evidence are pending.
 | Epoch queue and admission | `current_epoch_tile_queue`; `current_metal_render_worker` | Exact-target, boot-zero, late candidate, admission, and A/B/A regressions pass. |
 | Whole-signal morph | `current_metal_render_worker`; `current_metal_kernel` | Offline oracle, hardware exact-E gates, and 10k stress pass. |
 | Explicit fixed room decoder | `runExplicitRoomModes` and `runGroupedRoomContract` in `tropicaltest` | Rejected ordinary-room compatibility and both direct/cache Plan-6 production seams pass. |
-| Exact-scene harness | `playground/qualification/run.js` | Selected-cache 90-second integration smoke passes; final long soaks remain. |
+| Exact-scene harness | `playground/qualification/run.js` | Five clean cold boots, a clean 90-second smoke, and the 10-minute adversarial soak pass. The 30-minute normal soak was explicitly waived by the user, not passed. |
 
 ## Direct evaluator reserve failure
 
@@ -77,22 +80,48 @@ bounded fixed-scene cache; they are failed diagnostics, not release evidence.
 | Generator | `benchmarks/demo_release/room_audition/generate_grouped_room_scene_cache.py` |
 | Payload and manifest | `playground/assets/grouped-room/clouds-current-radii-mono-v1-scene-44100.{f32le,json}`; 5,644,800 bytes; SHA-256 `33dad76b92c7b11f297a1e32979e89f36fd1b16fbb8f923c726756ebce2d06f3` |
 | Endpoint/FLOW probe | `run_grouped_room_scene_cache_probe.py`; integer direct parity `<=2.62e-8`, fractional/reverse FLOW `<=1.74%` NRMSE, Metal endpoint read `<=2.85e-8` |
-| Integrated smoke | `2026-08-01_23-41-47-256-smoke-b128-r512`; pass, zero sticky runtime/Metal/DAC/capture faults and zero retargets |
+| Integrated smoke | `2026-08-02_00-09-48-317-smoke-b128-r512`; clean candidate, pass, zero sticky runtime/Metal/DAC/capture faults and zero retargets |
 | Frozen balance | ROOM default `1.0`, range `0…1.5`; authored-level POSITION `-1/0/+1` peaks `-5.01/-5.59/-5.40` dBFS over the complete 16-second scene |
 
-## Required release artifacts (not yet complete)
+## 2026-08-02 release qualification
 
-The final candidate must populate `benchmarks/demo_release/data/` without
-overwriting failed runs:
+| Gate | Evidence / result |
+|---|---|
+| Five cold boots | `2026-08-02_00-08-50-037-cold-boots`; 5/5 pass from clean `6660f06`, FLOW stress disabled only for boot stability; every runtime, Metal, and DAC fault counter zero |
+| 90-second smoke | `2026-08-02_00-09-48-317-smoke-b128-r512`; 2,971 dispatched writes, scheduled p95 `10.99 ms`, audible p95 `37.24 ms`, scope `23.98 fps`, zero faults/retargets |
+| 10-minute adversarial | `2026-08-02_00-11-44-755-adversarial-b128-r512`; 19,649 dispatched writes and 843 health records, scheduled p95 `10.99 ms`, audible p95 `37.23 ms`, scope `23.91 fps`; all transient and final fault counters zero |
+| 30-minute normal | Explicitly waived by the user after the completed 10-minute soak. The cancelled partial run is not committed and is not called a pass. |
+| Full validation | `validation/2026-08-02_8e32e2b_make-validate.log`; trust audit pass, `tropicaltest` 123/123, Bun 137 pass/1 environment duplicate skip/0 fail, CTest 4/4 |
+| Release listening set | `room_audition/release_out/`; six continuous 24-bit mono 44.1 kHz WAVs, native JIT/cache parity around `1e-16`, final choreography peak `−5.01 dBFS`, no normalization or limiter |
 
-- five cold-boot records;
-- per-integrated-change 90-second smoke;
-- 10-minute adversarial soak;
-- 30-minute normal soak;
-- JSONL, summary, manifest, and qualification capture WAV for every run;
-- final-room wet/dry/listening WAV and review result;
-- focused and full-validation logs; and
-- release commit SHA plus clean-worktree status.
+Every qualification manifest records commit `6660f06`, an empty worktree
+status, graph SHA-256 `db884d12d4b87a39fc8b854372ec903f1d6b90d531b89a0e4be154685e8680d1`,
+the MacBook Pro speaker device, 44.1 kHz, `Bdev=128`, and `Rgpu=512`.
+
+The qualification `capture.wav` files preserve sample indices from the
+qualification-only one-buffer next-callback sampler. They contain explicit
+zero-filled holes where control-plane polling skipped a callback and are not
+continuous listening files or evidence of DAC silence. The continuous
+endpoint, scrub, dry, and final-scene files under `release_out/` are the
+listening artifacts.
+
+## Release artifact status
+
+The evidence package now contains, without overwriting failed runs:
+
+- five cold-boot records, the clean 90-second smoke, and the completed
+  10-minute adversarial soak;
+- JSONL, summary, manifest, and qualification capture WAV for every completed
+  run;
+- final-room wet endpoints, scrub, dry reference, and integrated listening WAV;
+- the final full-validation log; and
+- qualified commit SHA, clean-worktree state, graph/profile hashes, machine
+  data, and raw telemetry.
+
+The original 30-minute normal-soak requirement is covered only by DR-18's
+explicit user waiver. Final headphone/monitor approval of
+`release_out/final_scene_position_choreography.wav` remains pending, so the
+listening gate must not yet be described as approved.
 
 Each qualification manifest records graph hash, commit/worktree state, OS/CPU,
 toolchain, selected audio device, sample rate, and negotiated quanta. Missing
