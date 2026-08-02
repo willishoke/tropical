@@ -517,8 +517,9 @@ Exit: one path passes short zero-fault smoke and listening.
 Exit: every handoff and master release gate passes.
 
 Implementation result: all engineering gates in scope pass under the explicit
-10-minute duration waiver recorded above. The listening exit remains pending
-user approval and is not inferred from objective telemetry.
+10-minute duration waiver recorded above. Listening and corrected phase-view
+visual acceptance remain pending user approval and are not inferred from
+objective telemetry.
 
 ## 10. Acceptance matrix
 

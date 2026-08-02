@@ -232,8 +232,9 @@ The shipping scope path has four parts:
    in scope-owned workspace. Control publication swaps a new small control
    image by name and never waits for a scope reader or its mutex.
 4. One canvas overlays the active chord's five modes. Each trace receives an
-   independent interpolated positive-going zero-crossing lock; requests retain
-   the measured strided point budget.
+   independent interpolated positive-going zero-crossing lock and one shared
+   analytic volts/div calibration, so its paired modal envelope remains
+   visible. The lightweight projection artifact is read at stride 1.
 
 The earlier preempt/freeze containment was removed after it produced visible
 gesture pauses. Ref-counted immutable program assets keep an in-flight frame
@@ -370,12 +371,15 @@ Owned surface: `engine/runtime/FlatRuntime.*`, focused runtime tests.
 
 Owned surface: `playground/main.js`, new transport tests.
 
-#### A3. Scope budget and gesture arbitration — 0.5 agent-day
+#### A3. Scope display profile — completed correction
 
-- Add the selected stride/point budget to the scope request.
-- Hold the last frame during pointer, keyboard-repeat, and sender-busy windows.
-- Resume after 80–120 ms of convergence; handle pointer cancel, blur, and fault.
-- Measure idle scope cost and frame rate before fixing the final constants.
+- Keep the scope request at stride 1 while the projection-only artifact remains
+  below the 20 ms RPC gate.
+- Calibrate every trace against the exact maximum of its paired modal envelope;
+  never normalize each frame by its own peak.
+- Select the freshest independently interpolated positive crossing and do not
+  draw silent or DC-only windows as locked traces.
+- Keep rendering through pointer, keyboard-repeat, and sender-busy windows.
 
 Owned surface: `playground/renderer/*` and narrow socket request parsing if
 needed. Coordinate the protocol field with A1.
@@ -625,6 +629,7 @@ log-frequency cutoff sweep at 8–16 ms input cadence:
   control gate remains green;
 - no blank or paused canvas during a gesture;
 - all five traces independently lock to a positive-going zero crossing; and
+- the shared fixed vertical scale exposes each trace's modal attack and decay;
 - a newly published control image appears within one displayed scope frame.
 
 ### Runtime correctness
@@ -707,8 +712,8 @@ selects the documented fallback. It is never reclassified as polish.
 
 Fallbacks preserve the release goal while cutting architecture.
 
-1. **Scopes:** reduce point budget and hold frames longer; never restore
-   control-blocking full windows.
+1. **Scopes:** reduce point budget only if the stride-1 projection exceeds its
+   RPC gate; preserve the immutable control-independent read lane.
 2. **Cutoff:** use the serialized demo-local dual-filter morph if the generic
    queue morph cannot satisfy two-bank ownership by Day 2.
 3. **Room:** use the 5.38 MiB mono fixed-scene causal/reverse bases only after a

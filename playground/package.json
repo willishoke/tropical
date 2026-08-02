@@ -7,6 +7,7 @@
   "scripts": {
     "start": "electron .",
     "test": "node --test scene.test.js param-sender.test.js phase-lock.test.js scope-view.test.js rpc-client.test.js qualification.test.js",
+    "test:scope-content": "node qualification/scope-content.js",
     "qualify": "node qualification/run.js",
     "qualify:cold-boots": "node qualification/cold-boots.js"
   },

@@ -116,7 +116,7 @@ zero-crossing lock.
 
 | Gate | Evidence / result |
 |---|---|
-| Focused frontend | `playground/phase-lock.test.js` plus scene/RPC/sender/qualification suites; 20/20 pass |
+| Focused frontend | `playground/phase-lock.test.js`, `playground/scope-view.test.js`, plus scene/RPC/sender/qualification suites; 27/27 pass |
 | Native runtime/backend | CTest 4/4; `current_module_process` 22/22 includes paused-reader publication, hot-swap name pinning, lifetime reuse, and mismatched-layout control projection |
 | Lean/JIT trust suite | `tropicaltest` 123/123 |
 | Full repository validation | `validation/2026-08-02_scope-rcu_make-validate.log`; `make validate` exits 0 with `tropicaltest` 123/123, web/frontend 136 pass plus 1 intentional skip, and CTest 4/4 including Metal |
@@ -131,6 +131,28 @@ Metal starvation/tag mismatch/retarget/dispatch/activation failure, ownership
 failure, callback-thread violation, non-finite sample, clamp, or all-zero
 capture block. The manifest's dirty entries are the documentation edits and
 the run's own evidence files; no code file differed from candidate `5d004cd`.
+
+### Phase-view visual correction
+
+The long soak above proved the RCU/control/audio path, but it did not detect a
+real visual regression: per-frame peak normalization exactly canceled the
+projected modal envelope, while the retained 384-point budget decimated each
+trace by five before fractional phase locking. Candidate `b706d17` replaces the
+normalizer with the analytic paired-envelope maximum, uses the freshest valid
+crossing, rejects silent/DC-only windows as unlocked, and raises the projection
+request to stride 1.
+
+| Gate | Evidence / result |
+|---|---|
+| Raw projection content | `playground/qualification/scope-content.js`; 120/120 production-socket observations pass across 20 taps × 6 envelope ages, with at least 1,791/1,792 distinct raw samples, maximum relative lock error `2.47e-15`, visible attack/decay per voice, and RPC p99 `3.907 ms` |
+| Focused frontend | 27/27 pass; fixed-scale amplitude, quiet-tail locking, freshest crossing, silent/DC refusal, and stride-1 profile are pinned |
+| Full web/JIT/Metal | 143 pass, 1 intentional capability skip, 0 fail across 12 files |
+| Integrated corrected profile | `2026-08-02_02-48-59-087-smoke-b128-r512`; 15.38 measured seconds, 521 dispatched writes, scope p99 `4.391 ms`, `24.00 fps`, zero preemptions, and all 15 gates pass |
+
+This short correction run does not replace or extend the user-approved
+10-minute duration gate. It specifically qualifies the more expensive
+stride-1 visual profile. Subjective confirmation of the corrected phase view
+remains a user acceptance item and is not inferred from telemetry.
 
 ## Release artifact status
 
