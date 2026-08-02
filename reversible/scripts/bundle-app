@@ -57,7 +57,9 @@ if test "$copied_dylib" != true; then
   printf 'bundle-app: libtropical.dylib is missing beside the native build\n' >&2
   exit 1
 fi
-if command -v install_name_tool >/dev/null 2>&1; then
+if command -v install_name_tool >/dev/null 2>&1 \
+  && ! otool -l "$stage_path/Contents/Resources/Tropical/frontend" \
+    | grep -Fq 'path @executable_path '; then
   install_name_tool -add_rpath @executable_path \
     "$stage_path/Contents/Resources/Tropical/frontend"
 fi
