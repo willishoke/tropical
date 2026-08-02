@@ -149,8 +149,9 @@ implementation agents.
 
 1. **The fixed demo wins over generality.** A containment repair is acceptable
    when it is safe, measured, and explicitly documented as demo-scoped.
-2. **Control outranks visualization.** A scope frame may be preempted, held, or
-   dropped. A control gesture may not wait behind a long random-access render.
+2. **Control and visualization are independent readers.** Controls publish a
+   small immutable image; a scope pins it without owning audio/control storage.
+   Neither lane may wait on the other's work.
 3. **Bounded supersession is intentional.** The first value, one direction
    reversal, and the final value are retained. The engine is not required to
    render every pointer event.
@@ -217,28 +218,26 @@ Lane D: room prototype + fixed implementation ───────────�
 
 ### Control and scope path
 
-The shipping containment has four parts:
+The shipping scope path has four parts:
 
 1. Electron opens independent high-priority control and low-priority scope
    socket connections. The existing server already supports multiple clients;
    connection separation prevents a long scope response from serializing later
    control lines in the same reader thread.
-2. A waiting control transaction publishes a small off-audio-thread priority
-   signal before it waits for `build_mutex_`. `render_window` checks that signal
-   between individual closed-form coordinate evaluations and aborts the frame.
-   It does not unlock halfway through a render or expose a movable kernel state.
-3. The renderer freeze-holds the last scope image while a pointer gesture or
-   control sender is active and resumes after a short quiet period. The canvas
-   never blanks.
-4. Scope requests evaluate a measured, strided point budget rather than all
-   1,856 coordinates. Visual fidelity is subordinate to the control budget.
+2. Audio and scope programs are separate artifacts published in one generation.
+   The audio plan contains no inspection outputs; the JIT-only scope plan holds
+   twenty explicit fundamental-mode projections and never enters the Metal
+   queue.
+3. `render_window` pins one immutable program/control snapshot and evaluates it
+   in scope-owned workspace. Control publication swaps a new small control
+   image by name and never waits for a scope reader or its mutex.
+4. One canvas overlays the active chord's five modes. Each trace receives an
+   independent interpolated positive-going zero-crossing lock; requests retain
+   the measured strided point budget.
 
-A second socket alone is not a fix: the current scope still owns the runtime
-lock. Lowering scope FPS alone is not a bound: a control can still arrive just
-after a 160 ms scope begins.
-
-The durable immutable/ref-counted JIT snapshot design is deferred unless this
-containment cannot pass hot-swap and concurrency tests.
+The earlier preempt/freeze containment was removed after it produced visible
+gesture pauses. Ref-counted immutable program assets keep an in-flight frame
+valid across hot-swap and state-slot reuse.
 
 ### Epoch admission and render safety
 
@@ -344,7 +343,7 @@ lane agents do not broaden the sprint after discovering a more general design.
 | ID | Decision | Rejected alternative | Evidence/constraint |
 |---|---|---|---|
 | DR-01 | Qualify one exact scene on the release Mac. | Reopen universal Metal qualification. | General support is already withheld; the product deadline is the fixed demo. |
-| DR-02 | Controls preempt, freeze, or drop scope work. | Let full-resolution scopes share one FIFO and global lock. | Scope-loaded cutoff p90 was 87.1 ms and worst case 171.2 ms. |
+| DR-02 | Publish independent immutable scope snapshots and a separate projection artifact. | Preempt/freeze scope work during gestures, or share the audio build lock. | Freeze was visibly discontinuous; snapshot tests prove controls publish while a reader is paused, with coherent old/new frames. |
 | DR-03 | Primary cutoff repair is a worker-rendered whole-signal epoch morph. | Retain the scalar callback dezipper or introduce callback-side DSP state. | Complete old/new trajectories give exact endpoints, a convex bound, and no downstream-commutation requirement. |
 | DR-04 | **Superseded after listening:** no v1 room profile ships; use the frozen Clouds reference to qualify the replacement architecture. | Select the least objectionable Foundry/Industrial/Tanker preset. | All three sparse stationary candidates were rejected as resonant objects without room-scale diffusion or smear. |
 | DR-05 | Start qualification at `Bdev=128`, `Rgpu=512`. | Continue forcing both quanta to 128. | One 128-frame tile gives only 2.9 ms reserve; independent quanta are already supported by the runtime contract. |
@@ -589,14 +588,14 @@ to release qualification.
 
 - E freezes scene wiring/defaults.
 - F runs the exact scope-loaded gesture matrix and repeated 90-second smokes.
-- F runs a 30-minute normal-demo soak plus a 10-minute adversarial cutoff soak.
+- F runs the user-approved 10-minute exact-scene soak; no 30-minute run.
 - G integrates only commits with focused evidence.
 - Fix P0 defects; make no new synthesis or UI feature.
 
 ### Day 4 — release candidate
 
 - Perform a clean rebuild and five cold launches.
-- Run the final 30-minute exact-scene soak and output-capture gates.
+- Run the final 10-minute exact-scene soak and output-capture gates.
 - Run full repository validation.
 - Verify clean worktree, release instructions, and evidence index.
 - Accept the fixed-demo release or record one explicit blocking failure.
@@ -605,7 +604,7 @@ to release qualification.
 
 ### Interaction latency
 
-On the release Mac, exact scene, two enabled scopes, and a two-second
+On the release Mac, exact scene, the five-trace phase view, and a two-second
 log-frequency cutoff sweep at 8–16 ms input cadence:
 
 - scheduled-write latency: p50 no more than 12 ms, p95 no more than 25 ms,
@@ -616,7 +615,7 @@ log-frequency cutoff sweep at 8–16 ms input cadence:
   pointer release;
 - first and final values always arrive; the bounded reversal case is covered;
 - no unbounded per-parameter or cross-parameter backlog; and
-- controls preempt scopes, not the reverse.
+- control and scope lanes remain mutually non-blocking.
 
 ### Scope behavior
 
@@ -624,13 +623,13 @@ log-frequency cutoff sweep at 8–16 ms input cadence:
 - average displayed cadence at least 23.5 fps and p95 frame interval no more
   than 50 ms; a 20 fps floor requires an explicit Day-2 scope cut while every
   control gate remains green;
-- no blank canvas during preemption or a gesture; and
-- scope activity resumes within 150 ms after the final control converges.
+- no blank or paused canvas during a gesture;
+- all five traces independently lock to a positive-going zero crossing; and
+- a newly published control image appears within one displayed scope frame.
 
 ### Runtime correctness
 
-Across gesture smoke, the 10-minute adversarial soak, and the 30-minute final
-soak:
+Across gesture smoke and the user-approved 10-minute final soak:
 
 - zero Metal starvation;
 - zero epoch-tag mismatch, including startup/priming;

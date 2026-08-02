@@ -508,18 +508,17 @@ Exit: one path passes short zero-fault smoke and listening.
 
 - run focused JS, Lean, C++, JIT, and Metal tests;
 - run `tropicaltest` and full validation;
-- run five cold boots, per-change 90-second smokes, the 10-minute adversarial
-  soak, and the 30-minute exact-scene soak;
+- run five cold boots, per-change 90-second smokes, and the user-approved
+  10-minute exact-scene soak;
 - produce wet-only endpoint/scrub WAVs and the final scene capture; and
 - record release SHA, clean-worktree state, machine data, graph hash, profile
   hash, selected direct/cached path, and all raw telemetry.
 
 Exit: every handoff and master release gate passes.
 
-Implementation result: all engineering gates in scope pass except that the
-30-minute duration was replaced by the explicit user waiver recorded above.
-The listening exit remains pending user approval and is not inferred from
-objective telemetry.
+Implementation result: all engineering gates in scope pass under the explicit
+10-minute duration waiver recorded above. The listening exit remains pending
+user approval and is not inferred from objective telemetry.
 
 ## 10. Acceptance matrix
 

@@ -1,0 +1,50 @@
+{
+  "schema": 1,
+  "run_id": "2026-08-02_02-07-59-280-adversarial-b128-r512",
+  "commit": "5d004cd5e7780eee7df744a8e9aeaa31e411f84c",
+  "worktree_status": "M design/sprint-2026-07-31-demo-release/00-master.md\n M design/sprint-2026-07-31-demo-release/06-room-position-production-handoff.md\n?? benchmarks/demo_release/data/2026-08-02_02-07-59-280-adversarial-b128-r512.capture.wav\n?? benchmarks/demo_release/data/2026-08-02_02-07-59-280-adversarial-b128-r512.jsonl",
+  "graph_sha256": "f7dab21a7dd2671608d27474a072266cfa7e7e6ebb2b5c7f97ddc54989b01abe",
+  "scene_file": "playground/scene.js",
+  "scope_profile": {
+    "displaySamples": 896,
+    "searchSamples": 896,
+    "warmupSamples": 64,
+    "pointBudget": 384,
+    "fps": 24
+  },
+  "options": {
+    "mode": "adversarial",
+    "durationSeconds": 600,
+    "engine": "/private/tmp/tropical-modal-pocket-demo/lean/.lake/build/bin/frontend",
+    "output": "/private/tmp/tropical-modal-pocket-demo/benchmarks/demo_release/data",
+    "deviceQuantum": 128,
+    "renderQuantum": 512,
+    "exerciseFlow": true
+  },
+  "platform": "darwin",
+  "arch": "arm64",
+  "machine": {
+    "hostname": "MacBookPro.home",
+    "os_release": "25.3.0",
+    "os_version": "Darwin Kernel Version 25.3.0: Wed Jan 28 20:53:15 PST 2026; root:xnu-12377.81.4~5/RELEASE_ARM64_T6000",
+    "cpu": "Apple M1 Pro",
+    "cpu_count": 10,
+    "memory_bytes": 17179869184
+  },
+  "toolchain": {
+    "macos": "26.3",
+    "clang": "Apple clang version 17.0.0 (clang-1700.6.3.2)",
+    "cmake": "cmake version 4.2.3",
+    "lean": "Lean (version 4.29.1, arm64-apple-darwin24.6.0, commit f72c35b3f637c8c6571d353742168ab66cc22c00, Release)",
+    "lake": "Lake version 5.0.0-src+f72c35b (Lean version 4.29.1)"
+  },
+  "node": "v22.17.0",
+  "engine": "frontend",
+  "audio_device": {
+    "id": 132,
+    "name": "Apple Inc.: MacBook Pro Speakers"
+  },
+  "negotiated_buffer_length": 128,
+  "sample_rate": 44100,
+  "engine_stderr_sha256": "f2237b2732b6da9d2584390aa49b8f81532f7a316a287d28f88995df3e0e6533"
+}

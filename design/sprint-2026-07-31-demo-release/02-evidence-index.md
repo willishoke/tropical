@@ -54,11 +54,11 @@ hardware evidence, and continuous release WAVs are now committed.
 
 | Surface | Reproducer | Current status |
 |---|---|---|
-| Scope/control priority | `current_module_process`; `playground/scope-arbiter.test.js`; exact-scene qualification JSONL | Focused tests pass. |
+| Scope/control independence | `current_module_process`; `playground/phase-lock.test.js`; exact-scene qualification JSONL | Immutable snapshot, hot-swap/name pinning, separate-artifact control projection, and independent phase-lock tests pass. |
 | Epoch queue and admission | `current_epoch_tile_queue`; `current_metal_render_worker` | Exact-target, boot-zero, late candidate, admission, and A/B/A regressions pass. |
 | Whole-signal morph | `current_metal_render_worker`; `current_metal_kernel` | Offline oracle, hardware exact-E gates, and 10k stress pass. |
 | Explicit fixed room decoder | `runExplicitRoomModes` and `runGroupedRoomContract` in `tropicaltest` | Rejected ordinary-room compatibility and both direct/cache Plan-6 production seams pass. |
-| Exact-scene harness | `playground/qualification/run.js` | Five clean cold boots, a clean 90-second smoke, and the 10-minute adversarial soak pass. The 30-minute normal soak was explicitly waived by the user, not passed. |
+| Exact-scene harness | `playground/qualification/run.js` | The RCU/projection candidate passes the user-approved 10-minute adversarial soak. The 30-minute normal soak was explicitly waived by the user, not passed. |
 
 ## Direct evaluator reserve failure
 
@@ -104,6 +104,33 @@ zero-filled holes where control-plane polling skipped a callback and are not
 continuous listening files or evidence of DAC silence. The continuous
 endpoint, scrub, dry, and final-scene files under `release_out/` are the
 listening artifacts.
+
+## 2026-08-02 immutable-scope correction
+
+The interaction freeze was superseded after it proved visibly discontinuous
+during knob scrubs. Code candidate `5d004cd` publishes ref-counted immutable
+scope snapshots and a separate JIT-only projection artifact; the audio plan no
+longer carries inspection outputs. One frontend canvas overlays five active
+fundamental modes, each with an independent interpolated positive-going
+zero-crossing lock.
+
+| Gate | Evidence / result |
+|---|---|
+| Focused frontend | `playground/phase-lock.test.js` plus scene/RPC/sender/qualification suites; 20/20 pass |
+| Native runtime/backend | CTest 4/4; `current_module_process` 22/22 includes paused-reader publication, hot-swap name pinning, lifetime reuse, and mismatched-layout control projection |
+| Lean/JIT trust suite | `tropicaltest` 123/123 |
+| Full repository validation | `validation/2026-08-02_scope-rcu_make-validate.log`; `make validate` exits 0 with `tropicaltest` 123/123, web/frontend 136 pass plus 1 intentional skip, and CTest 4/4 including Metal |
+| Production socket | cold graph load `960 ms`; 21 published scope entries; all 20 requested projections discovered; five-channel render succeeds |
+| 10-minute adversarial | `2026-08-02_02-07-59-280-adversarial-b128-r512`; 600.75 measured seconds, 19,667 dispatched writes, scheduled p95/p99 `11.18/22.15 ms`, audible p95/max `37.40/59.17 ms`, scope RPC p99 `0.738 ms`, `23.94 fps`, zero scope preemptions and zero faults |
+
+The correction soak records graph SHA-256
+`f7dab21a7dd2671608d27474a072266cfa7e7e6ebb2b5c7f97ddc54989b01abe`,
+MacBook Pro speakers, 44.1 kHz, `Bdev=128`, and `Rgpu=512`. Across 19,675
+acknowledged epochs and 207,080 callbacks it reports zero underruns, overruns,
+Metal starvation/tag mismatch/retarget/dispatch/activation failure, ownership
+failure, callback-thread violation, non-finite sample, clamp, or all-zero
+capture block. The manifest's dirty entries are the documentation edits and
+the run's own evidence files; no code file differed from candidate `5d004cd`.
 
 ## Release artifact status
 
