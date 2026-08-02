@@ -1,0 +1,70 @@
+{
+  "colors": [
+    "signal",
+    "modal",
+    "control"
+  ],
+  "fingerprint": "fnv1a64:0123456789abcdef",
+  "kinds": [
+    {
+      "kind": "control_source",
+      "outlet": "control",
+      "ports": [
+        {
+          "default": 0.5,
+          "discipline": "raw",
+          "log": false,
+          "max": 1,
+          "min": 0,
+          "name": "value",
+          "unit": ""
+        }
+      ]
+    },
+    {
+      "kind": "future_modal_cloud",
+      "outlet": "modal",
+      "ports": [
+        {
+          "accepts": [
+            "control"
+          ],
+          "default": 440,
+          "discipline": "future_anchor",
+          "log": true,
+          "max": 20000,
+          "min": 20,
+          "multi": false,
+          "name": "frequency",
+          "unit": "Hz"
+        },
+        {
+          "default": 0.25,
+          "discipline": "future_slew",
+          "log": false,
+          "max": 4,
+          "min": 0,
+          "name": "rate",
+          "owner": "frequency",
+          "unit": "Hz"
+        }
+      ]
+    },
+    {
+      "kind": "modal_sink",
+      "outlet": null,
+      "ports": [
+        {
+          "accepts": [
+            "modal"
+          ],
+          "multi": false,
+          "name": "in"
+        }
+      ]
+    }
+  ],
+  "rule": "outlet color must be accepted by inlet",
+  "schema": "tropical_vocabulary",
+  "schema_version": 1
+}
