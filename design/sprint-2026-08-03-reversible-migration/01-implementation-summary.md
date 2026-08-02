@@ -160,6 +160,20 @@ template until the shape is representable; it does not silently choose one
 duplicate or normalize the source document. Engine graphs request a stable,
 deduplicated array of only the tap node IDs actually observed by monitors.
 
+### S-16 — Publish five scope modes only as one pinned display frame
+
+The native scope requests all five explicit slots in one stride-1 projection,
+transforms the response off the main actor, and publishes no partial mode set.
+Preemption, malformed/partial data, inexact generations, and older generations
+drop the whole frame. The preliminary head read chooses only the request
+address; envelope restoration uses the render response's effective sample
+index, which is pinned to that response's program/control generation. A
+display link capped at 60 Hz is only a wake-up source, with one request in
+flight and superseded ticks dropped. The reusable scope accepts an
+exactly-five-mode scene binding; until the release scene is resolved, the
+legacy patcher scope remains the explicit fallback rather than inventing
+scene-specific node IDs.
+
 ## Open architecture gate
 
 The master handoff also asks for a literal serialized `gong → reverb` fixture.
