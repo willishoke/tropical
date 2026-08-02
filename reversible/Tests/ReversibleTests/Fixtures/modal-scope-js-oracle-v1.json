@@ -1,0 +1,203 @@
+{
+  "schema": "modal_scope_js_oracle_1",
+  "sourceCommit": "07a6b2517f8d24c8822d67e0337c0fd99d016bd8",
+  "profile": {
+    "sampleRate": 44100,
+    "displaySamples": 896,
+    "searchSamples": 1792,
+    "warmupSamples": 64,
+    "timeCompression": 2,
+    "pointBudget": 2752,
+    "fps": 60,
+    "fullScale": 0.040566876298965736,
+    "displayScale": 0.043812226402883
+  },
+  "sampleIndices": [0, 1, 111, 223, 447, 448, 672, 894, 895],
+  "cases": [
+    {
+      "name": "chord-1-mode-1",
+      "input": {
+        "frequency": 55,
+        "slowDecay": 0.42,
+        "fastDecay": 5.22,
+        "amplitude": 0.055,
+        "phase": 4.799926459,
+        "strikeTime": 0.06,
+        "responseStart": 19298,
+        "playbackPosition": 22050,
+        "stride": 1
+      },
+      "expected": {
+        "offset": 578.1017791260813,
+        "center": 1474.1017791260813,
+        "span": 1792,
+        "centerValue": 8.013338256840363e-16,
+        "peak": 0.9999917071991336,
+        "active": true,
+        "locked": true,
+        "displayEnvelope": 0.04018796844898594,
+        "cycles": 2.234920634920635,
+        "timeSpanSeconds": 0.040634920634920635,
+        "samples": [
+          { "index": 0, "value": -0.6728261898139695 },
+          { "index": 1, "value": -0.6611365116982604 },
+          { "index": 111, "value": 0.8433773237793672 },
+          { "index": 223, "value": 0.3716418394260984 },
+          { "index": 447, "value": -0.007844825339778427 },
+          { "index": 448, "value": 0.007844824911568269 },
+          { "index": 672, "value": -0.37164186531721877 },
+          { "index": 894, "value": 0.6611365839534304 },
+          { "index": 895, "value": 0.6728261898139715 }
+        ]
+      }
+    },
+    {
+      "name": "chord-1-mode-2",
+      "input": {
+        "frequency": 82.5,
+        "slowDecay": 0.42,
+        "fastDecay": 5.22,
+        "amplitude": 0.0495,
+        "phase": 4.233371994,
+        "strikeTime": 0.06,
+        "responseStart": 19298,
+        "playbackPosition": 22050,
+        "stride": 1
+      },
+      "expected": {
+        "offset": 630.0253620588444,
+        "center": 1526.0253620588444,
+        "span": 1792,
+        "centerValue": -2.7728470561316776e-16,
+        "peak": 0.9999761004935135,
+        "active": true,
+        "locked": true,
+        "displayEnvelope": 0.03616917160408735,
+        "cycles": 3.3523809523809525,
+        "timeSpanSeconds": 0.040634920634920635,
+        "samples": [
+          { "index": 0, "value": 0.8943758804362641 },
+          { "index": 1, "value": 0.8836016437078908 },
+          { "index": 111, "value": -0.9978437247123065 },
+          { "index": 223, "value": 0.8412546503792543 },
+          { "index": 447, "value": -0.011767100415566565 },
+          { "index": 448, "value": 0.011767098693113912 },
+          { "index": 672, "value": -0.8412546496920543 },
+          { "index": 894, "value": -0.8836019026775751 },
+          { "index": 895, "value": -0.8943758804362273 }
+        ]
+      }
+    },
+    {
+      "name": "chord-1-mode-3",
+      "input": {
+        "frequency": 132,
+        "slowDecay": 0.42,
+        "fastDecay": 5.22,
+        "amplitude": 0.04235,
+        "phase": 3.666817528,
+        "strikeTime": 0.06,
+        "responseStart": 19298,
+        "playbackPosition": 22050,
+        "stride": 1
+      },
+      "expected": {
+        "offset": 511.2317241660562,
+        "center": 1407.2317241660562,
+        "span": 1792,
+        "centerValue": 5.282232984349378e-16,
+        "peak": 0.9999851591188017,
+        "active": true,
+        "locked": true,
+        "displayEnvelope": 0.030944735705719175,
+        "cycles": 5.363809523809524,
+        "timeSpanSeconds": 0.040634920634920635,
+        "samples": [
+          { "index": 0, "value": 0.9098292004797172 },
+          { "index": 1, "value": 0.8935641387963552 },
+          { "index": 111, "value": -0.1045603252374579 },
+          { "index": 223, "value": -0.825469316047223 },
+          { "index": 447, "value": -0.018826123364574177 },
+          { "index": 448, "value": 0.0188261193770389 },
+          { "index": 672, "value": 0.8254693094482344 },
+          { "index": 894, "value": -0.893564517760828 },
+          { "index": 895, "value": -0.9098292004797176 }
+        ]
+      }
+    },
+    {
+      "name": "chord-1-mode-4",
+      "input": {
+        "frequency": 198,
+        "slowDecay": 0.42,
+        "fastDecay": 5.22,
+        "amplitude": 0.0374,
+        "phase": 3.100263062,
+        "strikeTime": 0.06,
+        "responseStart": 19298,
+        "playbackPosition": 22050,
+        "stride": 1
+      },
+      "expected": {
+        "offset": 512.783226475507,
+        "center": 1408.783226475507,
+        "span": 1792,
+        "centerValue": -2.2447321779139884e-15,
+        "peak": 0.9999892156567144,
+        "active": true,
+        "locked": true,
+        "displayEnvelope": 0.027327818545310443,
+        "cycles": 8.045714285714286,
+        "timeSpanSeconds": 0.040634920634920635,
+        "samples": [
+          { "index": 0, "value": -0.14311281446239496 },
+          { "index": 1, "value": -0.08701614044720965 },
+          { "index": 111, "value": -0.15648751952352266 },
+          { "index": 223, "value": -0.11391408657746487 },
+          { "index": 447, "value": -0.028236070795593732 },
+          { "index": 448, "value": 0.02823608500270352 },
+          { "index": 672, "value": 0.11391265139512274 },
+          { "index": 894, "value": 0.08701605272166286 },
+          { "index": 895, "value": 0.14311281446247856 }
+        ]
+      }
+    },
+    {
+      "name": "chord-1-mode-5",
+      "input": {
+        "frequency": 293.333333333,
+        "slowDecay": 0.42,
+        "fastDecay": 5.22,
+        "amplitude": 0.033,
+        "phase": 2.533708597,
+        "strikeTime": 0.06,
+        "responseStart": 19298,
+        "playbackPosition": 22050,
+        "stride": 1
+      },
+      "expected": {
+        "offset": 390.8348909250292,
+        "center": 1286.8348909250292,
+        "span": 1792,
+        "centerValue": -7.147060721024445e-16,
+        "peak": 0.9998769809854579,
+        "active": true,
+        "locked": true,
+        "displayEnvelope": 0.02411278106939157,
+        "cycles": 11.919576719563173,
+        "timeSpanSeconds": 0.040634920634920635,
+        "samples": [
+          { "index": 0, "value": 0.2499475730500212 },
+          { "index": 1, "value": 0.3299917008092419 },
+          { "index": 111, "value": -0.11600216110639977 },
+          { "index": 223, "value": 0.06351202009486906 },
+          { "index": 447, "value": -0.04182234351529367 },
+          { "index": 448, "value": 0.04182239812643786 },
+          { "index": 672, "value": -0.06351598635904518 },
+          { "index": 894, "value": -0.32999083828065306 },
+          { "index": 895, "value": -0.2499475730500317 }
+        ]
+      }
+    }
+  ]
+}
