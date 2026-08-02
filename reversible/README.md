@@ -15,10 +15,11 @@ From the Tropical repository root:
 reversible/scripts/run-dev
 ```
 
-The app owns the Lean `frontend` binary over its Unix-socket JSON-RPC
-surface (`--serve`, same newline-delimited framing as `--rpc`) and plays
-audio out of the host's device (RtAudio) — the window is purely a control
-surface. The socket carries a control/data plane split: `set_param`,
+The app owns the Lean `frontend` binary and Unix-socket namespace. It uses
+independent graph, control, scope, and telemetry JSON-RPC connections over the
+served surface (`--serve`, with the same newline-delimited framing as `--rpc`),
+while audio plays out of the host's device (RtAudio). The window is purely a
+control surface. The server carries a control/data plane split: `set_param`,
 `render_window`, and `playback_position` are answered synchronously in
 C++ and never queue behind the Lean control thread — that is what keeps
 knob writes and the Scope module's traces live through a long compile.
