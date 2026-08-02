@@ -1,4 +1,4 @@
-.PHONY: build repl run lean mcp-lean clean validate test-lean-engine reversible-build reversible-test
+.PHONY: build repl run lean mcp-lean clean validate test-lean-engine reversible-build reversible-test reversible-bundle reversible-bundle-smoke
 
 ROOT := $(shell pwd)
 BUILD_DIR := $(ROOT)/build
@@ -71,3 +71,11 @@ reversible-build:
 
 reversible-test:
 	swift test --package-path reversible
+
+# macOS release packaging. The bundle gate compiles a live grouped-room graph
+# after relocating the app beneath the system temporary directory.
+reversible-bundle: build lean
+	reversible/scripts/bundle-app
+
+reversible-bundle-smoke: reversible-bundle
+	node reversible/scripts/smoke-bundle.mjs

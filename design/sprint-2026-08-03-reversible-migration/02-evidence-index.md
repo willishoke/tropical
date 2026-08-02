@@ -53,7 +53,7 @@ Focused results recorded during integration:
 | Carrier | `playground/assets/grouped-room/clouds-current-radii-mono-v1-44100.tgrm`; 2,717,376 bytes; SHA-256 `838019933ddc885cb519ae0ba40233ee5d3e95cce4e8951ca566c8f1f5f65986` |
 | Manifest | `playground/assets/grouped-room/clouds-current-radii-mono-v1-44100.json`; 4,716 bytes; SHA-256 `5ab2fd7d9215df2db3b273395c9ff17cd576ac031dd1e7ed40af74d5c2a78804` |
 | Wet-score exclusion | `reversible/scripts/bundle-app` copies only the live carrier and manifest; no `*-scene-44100.f32le` cache is packaged |
-| Relocation | Release app copied beneath `/private/tmp`; signature verification passed; embedded frontend resolved its adjacent dylib, decoded the expected vocabulary, loaded the bundled carrier, and published active `groupedroom` at program version 1 |
+| Relocation | `reversible/scripts/smoke-bundle.mjs`; release app is copied beneath the system temporary directory, then its embedded frontend resolves the adjacent dylib, decodes the expected vocabulary, loads the bundled carrier, and publishes active `groupedroom` at program/control version 1/1 |
 
 ## Release gates still open
 
