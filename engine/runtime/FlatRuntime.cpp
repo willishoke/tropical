@@ -527,7 +527,7 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
 
 // Atomic double-buffer flip (CF-only: no by-name state transfer — see below).
 // Assumes new_state already carries a populated kernel handle.
-bool FlatRuntime::publish_state(
+PublishedGeneration FlatRuntime::publish_state(
   KernelState && new_state, std::optional<KernelState> scope_state)
 {
   ControlWaiterGuard priority(control_waiter_count_);
@@ -584,8 +584,9 @@ bool FlatRuntime::publish_state(
     ? *scope_state : new_state;
   auto scope_program =
     make_scope_program_image(scope_source, program_version);
+  const uint64_t control_version = next_scope_control_version_++;
   auto scope_controls = make_scope_control_image(
-    *scope_program, new_state, next_scope_control_version_++,
+    *scope_program, new_state, control_version,
     published_sample_index_.load(std::memory_order_acquire));
   auto scope_snapshot = std::make_shared<ScopeSnapshot>();
   scope_snapshot->program = std::move(scope_program);
@@ -639,7 +640,7 @@ bool FlatRuntime::publish_state(
   metal_runtime_loaded_.store(metal, std::memory_order_release);
   metal_audio_enabled_.store(metal, std::memory_order_release);
 #endif
-  return true;
+  return {program_version, control_version};
 }
 
 bool FlatRuntime::load_ir(const std::string & ir_text, const std::string & manifest_json)
@@ -659,11 +660,32 @@ bool FlatRuntime::load_ir_staged(const std::string & ir_text,
                                  const std::string & coeff_ir,
                                  const std::string & manifest_json)
 {
-  return load_ir_staged_with_scope(
+  (void)load_ir_staged_generation(
+    ir_text, msl_source, coeff_ir, manifest_json);
+  return true;
+}
+
+PublishedGeneration FlatRuntime::load_ir_staged_generation(
+  const std::string & ir_text, const std::string & msl_source,
+  const std::string & coeff_ir, const std::string & manifest_json)
+{
+  return load_ir_staged_with_scope_generation(
     ir_text, msl_source, coeff_ir, manifest_json, {}, {}, {});
 }
 
 bool FlatRuntime::load_ir_staged_with_scope(
+  const std::string & ir_text, const std::string & msl_source,
+  const std::string & coeff_ir, const std::string & manifest_json,
+  const std::string & scope_ir, const std::string & scope_coeff_ir,
+  const std::string & scope_manifest_json)
+{
+  (void)load_ir_staged_with_scope_generation(
+    ir_text, msl_source, coeff_ir, manifest_json,
+    scope_ir, scope_coeff_ir, scope_manifest_json);
+  return true;
+}
+
+PublishedGeneration FlatRuntime::load_ir_staged_with_scope_generation(
   const std::string & ir_text, const std::string & msl_source,
   const std::string & coeff_ir, const std::string & manifest_json,
   const std::string & scope_ir, const std::string & scope_coeff_ir,

@@ -13,6 +13,12 @@ typedef void* tropical_dac_t;
 typedef void* tropical_param_t;
 typedef void* tropical_runtime_t;
 
+/* Exact immutable program/control pair created by one successful load. */
+typedef struct {
+  uint64_t program_version;
+  uint64_t control_version;
+} tropical_runtime_generation_t;
+
 typedef struct {
   uint64_t request_received;
   uint64_t activation_target_reserved;
@@ -166,10 +172,18 @@ bool             tropical_runtime_load_ir_msl(tropical_runtime_t, const char* ir
    Its outputs land in coef:<n> module slots the audio kernel reads. */
 bool             tropical_runtime_load_ir_staged(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* manifest_json, size_t manifest_len);
 
+/* Generation-returning form used by atomic compile handshakes. `out` is
+   written only when the load succeeds. */
+bool             tropical_runtime_load_ir_staged_generation(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* manifest_json, size_t manifest_len, tropical_runtime_generation_t* out);
+
 /* Atomic dual-artifact load: the first staged artifact owns audio/Metal; the
    second JIT-only artifact owns random-access scope rendering. Controls cross
    the boundary by matching manifest slot names, never by shared indices. */
 bool             tropical_runtime_load_ir_staged_with_scope(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* manifest_json, size_t manifest_len, const char* scope_ir, size_t scope_ir_len, const char* scope_coeff_ir, size_t scope_coeff_len, const char* scope_manifest_json, size_t scope_manifest_len);
+
+/* Atomic dual-artifact load plus the exact generation published by that
+   operation. This avoids sampling a later scope-control snapshot. */
+bool             tropical_runtime_load_ir_staged_with_scope_generation(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* manifest_json, size_t manifest_len, const char* scope_ir, size_t scope_ir_len, const char* scope_coeff_ir, size_t scope_coeff_len, const char* scope_manifest_json, size_t scope_manifest_len, tropical_runtime_generation_t* out);
 
 /* Control-plane/test-only: request a sample-clock reposition. JIT applies it
    at its next process-buffer boundary; Metal prepares and acknowledges an

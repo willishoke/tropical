@@ -74,6 +74,15 @@ envelope restoration under one fixed scale. The five-mode Swift fixture
 matches the JavaScript oracle to a maximum observed error of `4.44e-16`.
 Display-link transport and canvas wiring consume this math in a later commit.
 
+### S-08 — Return the publication token from inside the atomic load
+
+`load_patch_graph` gets its program/control generation directly from the
+runtime publication operation; it does not sample telemetry after loading,
+which could observe a later control image. The response carries that token,
+the vocabulary fingerprint, and complete tap bindings. The legacy
+`list_scope_taps` method remains compatible for older clients, but new clients
+need no second request to adopt one realized generation.
+
 ## Qualification notes
 
 No release claim has been made. The listening decision, qualified-Mac

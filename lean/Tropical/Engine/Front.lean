@@ -64,12 +64,13 @@ private def graphNodesPartition (args : Json) (projectionIds : Array String)
     errors BEFORE the load, so the previous kernel keeps playing. -/
 def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
   let requestedTaps := selectedScopeTapNames args
-  let (compiled, publishedTaps) ← if requestedTaps.isEmpty then
+  let (compiled, publishedTaps, generation) ← if requestedTaps.isEmpty then
       let compiled ← match ← Tropical.Playground.compilePlan args with
         | .error e => internalError e
         | .ok p => pure p
-      loadKernel env compiled.plan (some compiled.stageBlocks)
-      pure (compiled, compiled.taps)
+      let generation ←
+        loadKernelPublished env compiled.plan (some compiled.stageBlocks)
+      pure (compiled, compiled.taps, generation)
     else
       -- The audio plan has no inspection outputs. The scope plan routes one
       -- lightweight projection to its otherwise-mandatory root and emits only
@@ -86,9 +87,9 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
       let scope ← match ← Tropical.Playground.compilePlan scopeArgs with
         | .error e => internalError e
         | .ok p => pure p
-      loadKernelWithScope env audio.plan scope.plan
+      let generation ← loadKernelWithScopePublished env audio.plan scope.plan
         audio.stageBlocks scope.stageBlocks
-      pure (audio, scope.taps)
+      pure (audio, scope.taps, generation)
   -- Seed the session param mirror with the graph's knobs so `set_param` — which
   -- guards on the mirror, then drives the live `param:<name>` slot — reaches them
   -- without a relower. Replaces (not appends): the mirror tracks the current graph.
@@ -100,9 +101,11 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
     scopeTaps := publishedTaps
     paramDisciplines := compiled.plan.paramDisciplines })
   -- The realized-state report: facts about what compiled (active/excluded
-  -- nodes, wired/normalled inputs, live params with disciplines, taps) —
-  -- never warnings. `ok` stays for callers that only ever looked at it.
-  pure <| Tropical.Playground.realizedReport args publishedTaps
+  -- nodes, wired/normalled inputs, live params with disciplines, complete tap
+  -- bindings, vocabulary identity, and exact runtime generation) — never
+  -- warnings. `ok` stays for callers that only ever looked at it.
+  pure <| Tropical.Playground.realizedReportForGeneration args publishedTaps
+    generation.programVersion generation.controlVersion
 
 def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   wrap <| match name with

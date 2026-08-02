@@ -138,6 +138,17 @@ def Runtime.slotIndex? (rt : Runtime) (name : String) : IO (Option UInt32) := do
 opaque Runtime.loadIrStagedRaw (rt : @& Runtime) (irText : @& String) (mslSource : @& String)
     (coeffIr : @& String) (manifestJson : @& String) : IO Bool
 
+/-- Exact immutable program/control identity created by one runtime load. -/
+structure PublishedGeneration where
+  programVersion : UInt64
+  controlVersion : UInt64
+deriving Repr, BEq
+
+@[extern "shim_runtime_load_ir_staged_generation"]
+private opaque Runtime.loadIrStagedGenerationRaw
+    (rt : @& Runtime) (irText : @& String) (mslSource : @& String)
+    (coeffIr : @& String) (manifestJson : @& String) : IO (UInt64 × UInt64)
+
 /-- Staged load: LLVM IR → JIT (always), MSL → Metal when non-empty, plus an
     optional stage-0 coefficient kernel (`coeffIr`, empty = no split) —
     a second single-function module the engine runs once before publish and
@@ -148,11 +159,27 @@ def Runtime.loadIrStaged (rt : Runtime) (irText mslSource coeffIr manifestJson :
   if !(← rt.loadIrStagedRaw irText mslSource coeffIr manifestJson) then
     throw <| IO.userError s!"runtime loadIrStaged failed: {← lastError}"
 
+/-- Generation-returning staged load for an atomic compile handshake. The pair
+    is returned by the publication operation itself, not sampled afterward. -/
+def Runtime.loadIrStagedGeneration (rt : Runtime)
+    (irText mslSource coeffIr manifestJson : String) :
+    IO PublishedGeneration := do
+  let (programVersion, controlVersion) ←
+    rt.loadIrStagedGenerationRaw irText mslSource coeffIr manifestJson
+  pure { programVersion, controlVersion }
+
 @[extern "shim_runtime_load_ir_staged_with_scope"]
 opaque Runtime.loadIrStagedWithScopeRaw (rt : @& Runtime)
     (irText : @& String) (mslSource : @& String) (coeffIr : @& String)
     (manifestJson : @& String) (scopeIr : @& String)
     (scopeCoeffIr : @& String) (scopeManifestJson : @& String) : IO Bool
+
+@[extern "shim_runtime_load_ir_staged_with_scope_generation"]
+private opaque Runtime.loadIrStagedWithScopeGenerationRaw (rt : @& Runtime)
+    (irText : @& String) (mslSource : @& String) (coeffIr : @& String)
+    (manifestJson : @& String) (scopeIr : @& String)
+    (scopeCoeffIr : @& String) (scopeManifestJson : @& String) :
+    IO (UInt64 × UInt64)
 
 /-- Publish an audio/Metal staged artifact and a distinct JIT-only scope
     projection as one runtime generation. Matching named controls are copied
@@ -165,6 +192,17 @@ def Runtime.loadIrStagedWithScope (rt : Runtime)
       scopeIr scopeCoeffIr scopeManifestJson) then
     throw <| IO.userError
       s!"runtime loadIrStagedWithScope failed: {← lastError}"
+
+/-- Generation-returning atomic audio/scope publication. -/
+def Runtime.loadIrStagedWithScopeGeneration (rt : Runtime)
+    (irText mslSource coeffIr manifestJson : String)
+    (scopeIr scopeCoeffIr scopeManifestJson : String) :
+    IO PublishedGeneration := do
+  let (programVersion, controlVersion) ←
+    rt.loadIrStagedWithScopeGenerationRaw
+      irText mslSource coeffIr manifestJson
+      scopeIr scopeCoeffIr scopeManifestJson
+  pure { programVersion, controlVersion }
 
 /-- Control-plane/test-only: reposition the active kernel's sample clock
     (render verbs' `--start`). -/

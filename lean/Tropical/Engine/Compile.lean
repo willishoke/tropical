@@ -102,25 +102,43 @@ private def buildLoadArtifacts (plan : Tropical.Plan.FlatPlan)
     buffer). Any emit failure errors BEFORE the load, so the
     previous kernel keeps playing — the same recoverable contract as the
     IR path. -/
+def loadKernelPublished (env : Env) (plan : Tropical.Plan.FlatPlan)
+    (stages? : Option (Array (Array (Option Tropical.Ir.Stage))) := none) :
+    EngineM Ffi.PublishedGeneration := do
+  let artifact ← buildLoadArtifacts plan stages? env.metalBackend
+  env.runtime.loadIrStagedGeneration
+    artifact.ir artifact.msl artifact.coeffIr artifact.manifest
+
+/-- Compatibility form for compile paths whose replies do not publish a
+    generation identity. -/
 def loadKernel (env : Env) (plan : Tropical.Plan.FlatPlan)
     (stages? : Option (Array (Array (Option Tropical.Ir.Stage))) := none) :
     EngineM Unit := do
-  let artifact ← buildLoadArtifacts plan stages? env.metalBackend
-  env.runtime.loadIrStaged
-    artifact.ir artifact.msl artifact.coeffIr artifact.manifest
+  let _ ← loadKernelPublished env plan stages?
+  pure ()
 
 /-- Publish separate realizations in one runtime generation. The scope plan is
     always JIT-only; it never enters the Metal audio queue and never borrows the
     audio artifact's mutable storage. -/
+def loadKernelWithScopePublished (env : Env)
+    (audioPlan scopePlan : Tropical.Plan.FlatPlan)
+    (audioStages scopeStages : Array (Array (Option Tropical.Ir.Stage))) :
+    EngineM Ffi.PublishedGeneration := do
+  let audio ← buildLoadArtifacts audioPlan (some audioStages) env.metalBackend
+  let scope ← buildLoadArtifacts scopePlan (some scopeStages) false
+  env.runtime.loadIrStagedWithScopeGeneration
+    audio.ir audio.msl audio.coeffIr audio.manifest
+    scope.ir scope.coeffIr scope.manifest
+
+/-- Compatibility form for callers that do not expose the publication
+    identity in their response. -/
 def loadKernelWithScope (env : Env)
     (audioPlan scopePlan : Tropical.Plan.FlatPlan)
     (audioStages scopeStages : Array (Array (Option Tropical.Ir.Stage))) :
     EngineM Unit := do
-  let audio ← buildLoadArtifacts audioPlan (some audioStages) env.metalBackend
-  let scope ← buildLoadArtifacts scopePlan (some scopeStages) false
-  env.runtime.loadIrStagedWithScope
-    audio.ir audio.msl audio.coeffIr audio.manifest
-    scope.ir scope.coeffIr scope.manifest
+  let _ ← loadKernelWithScopePublished env audioPlan scopePlan
+    audioStages scopeStages
+  pure ()
 
 -- ── Snapshot compile (`wire()` in TS) ────────────────────────────────────────
 

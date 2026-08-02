@@ -315,14 +315,31 @@ bool tropical_runtime_load_ir_staged(tropical_runtime_t r, const char* ir_text, 
                                      const char* coeff_ir, size_t coeff_len,
                                      const char* manifest_json, size_t manifest_len)
 {
-  if (!r || !ir_text || !manifest_json) return false;
+  tropical_runtime_generation_t ignored{};
+  return tropical_runtime_load_ir_staged_generation(
+    r, ir_text, ir_len, msl_source, msl_len, coeff_ir, coeff_len,
+    manifest_json, manifest_len, &ignored);
+}
+
+bool tropical_runtime_load_ir_staged_generation(
+  tropical_runtime_t r, const char* ir_text, size_t ir_len,
+  const char* msl_source, size_t msl_len,
+  const char* coeff_ir, size_t coeff_len,
+  const char* manifest_json, size_t manifest_len,
+  tropical_runtime_generation_t* out)
+{
+  if (!r || !ir_text || !manifest_json || !out) return false;
   try
   {
-    return static_cast<tropical_runtime::FlatRuntime*>(r)->load_ir_staged(
+    const auto generation = static_cast<tropical_runtime::FlatRuntime*>(r)
+      ->load_ir_staged_generation(
       std::string(ir_text, ir_len),
       msl_source ? std::string(msl_source, msl_len) : std::string{},
       coeff_ir ? std::string(coeff_ir, coeff_len) : std::string{},
       std::string(manifest_json, manifest_len));
+    out->program_version = generation.program_version;
+    out->control_version = generation.control_version;
+    return true;
   }
   catch (const std::exception& e) { set_error(e.what()); return false; }
 }
@@ -336,12 +353,31 @@ bool tropical_runtime_load_ir_staged_with_scope(
   const char* scope_coeff_ir, size_t scope_coeff_len,
   const char* scope_manifest_json, size_t scope_manifest_len)
 {
-  if (!r || !ir_text || !manifest_json || !scope_ir || !scope_manifest_json)
+  tropical_runtime_generation_t ignored{};
+  return tropical_runtime_load_ir_staged_with_scope_generation(
+    r, ir_text, ir_len, msl_source, msl_len, coeff_ir, coeff_len,
+    manifest_json, manifest_len, scope_ir, scope_ir_len,
+    scope_coeff_ir, scope_coeff_len, scope_manifest_json, scope_manifest_len,
+    &ignored);
+}
+
+bool tropical_runtime_load_ir_staged_with_scope_generation(
+  tropical_runtime_t r, const char* ir_text, size_t ir_len,
+  const char* msl_source, size_t msl_len,
+  const char* coeff_ir, size_t coeff_len,
+  const char* manifest_json, size_t manifest_len,
+  const char* scope_ir, size_t scope_ir_len,
+  const char* scope_coeff_ir, size_t scope_coeff_len,
+  const char* scope_manifest_json, size_t scope_manifest_len,
+  tropical_runtime_generation_t* out)
+{
+  if (!r || !ir_text || !manifest_json || !scope_ir
+      || !scope_manifest_json || !out)
     return false;
   try
   {
-    return static_cast<tropical_runtime::FlatRuntime*>(r)
-      ->load_ir_staged_with_scope(
+    const auto generation = static_cast<tropical_runtime::FlatRuntime*>(r)
+      ->load_ir_staged_with_scope_generation(
         std::string(ir_text, ir_len),
         msl_source ? std::string(msl_source, msl_len) : std::string{},
         coeff_ir ? std::string(coeff_ir, coeff_len) : std::string{},
@@ -350,6 +386,9 @@ bool tropical_runtime_load_ir_staged_with_scope(
         scope_coeff_ir
           ? std::string(scope_coeff_ir, scope_coeff_len) : std::string{},
         std::string(scope_manifest_json, scope_manifest_len));
+    out->program_version = generation.program_version;
+    out->control_version = generation.control_version;
+    return true;
   }
   catch (const std::exception& e) { set_error(e.what()); return false; }
 }

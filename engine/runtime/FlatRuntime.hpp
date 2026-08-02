@@ -196,6 +196,15 @@ struct ScopeSnapshot
   std::shared_ptr<const ScopeControlImage> controls;
 };
 
+// Identity of the immutable program/control pair created by one successful
+// kernel publication. The compile handshake returns this value directly;
+// sampling telemetry after the load would race a control-image publication.
+struct PublishedGeneration
+{
+  uint64_t program_version = 0;
+  uint64_t control_version = 0;
+};
+
 // Mutable storage owned exclusively by the scope lane. Serializing scope
 // clients here is intentional: it enables allocation-free steady-state frames
 // and coefficient reuse without coupling them to control, hot-swap, or audio.
@@ -365,6 +374,10 @@ public:
   bool load_ir_staged(const std::string & ir_text, const std::string & msl_source,
                       const std::string & coeff_ir, const std::string & manifest_json);
 
+  PublishedGeneration load_ir_staged_generation(
+    const std::string & ir_text, const std::string & msl_source,
+    const std::string & coeff_ir, const std::string & manifest_json);
+
   /**
    * Atomically publish distinct audio and scope artifacts. The audio artifact
    * may carry MSL and owns realtime execution; the scope artifact is JIT-only
@@ -372,6 +385,12 @@ public:
    * differ: control publication projects matching names into the scope image.
    */
   bool load_ir_staged_with_scope(
+    const std::string & ir_text, const std::string & msl_source,
+    const std::string & coeff_ir, const std::string & manifest_json,
+    const std::string & scope_ir, const std::string & scope_coeff_ir,
+    const std::string & scope_manifest_json);
+
+  PublishedGeneration load_ir_staged_with_scope_generation(
     const std::string & ir_text, const std::string & msl_source,
     const std::string & coeff_ir, const std::string & manifest_json,
     const std::string & scope_ir, const std::string & scope_coeff_ir,
@@ -1388,7 +1407,7 @@ private:
   // sample coordinate and performs the atomic double-buffer flip.
   // load_ir fills the kernel handle (via compile_ir_text) between them.
   KernelState build_kernel_state(const tropical_plan5::ParsedPlan5 & parsed);
-  bool publish_state(
+  PublishedGeneration publish_state(
     KernelState && new_state,
     std::optional<KernelState> scope_state = std::nullopt);
 
