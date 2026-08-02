@@ -136,6 +136,19 @@ struct RuntimeOwnershipTestSeam
   std::atomic<bool> release_render_coordinate{false};
 };
 
+// Heap-stable ownership for Plan-6 assets shared by every consumer of one
+// compiled program. KernelState remains movable during publication, while a
+// random-access scope snapshot may outlive the state slot that originally
+// loaded the asset. Keeping both the JIT-converted arrays and the packed Metal
+// bytes behind one shared owner makes those lifetimes explicit; raw kernel
+// pointers are rebuilt from this owner and never own the storage themselves.
+struct ImmutableAssetPack
+{
+  std::vector<std::vector<int64_t>> jit_arrays;
+  std::vector<uint32_t>             array_slots;
+  std::vector<uint8_t>              metal_bytes;
+};
+
 struct KernelState
 {
   // ── Metal execution backend (TROPICAL_METAL builds) ─────────────────────
@@ -206,12 +219,10 @@ struct KernelState
 
   // Plan-6 immutable asset ownership. Each advertised float32 slice is
   // converted once into the JIT's exact f64-bit array representation and its
-  // array slot points here. The original asset bytes are packed at 64-byte
-  // aligned bases for Metal's one-time buffer(4) upload. Both live with the
-  // KernelState until hot-swap ownership proves no render can reference it.
-  std::vector<std::vector<int64_t>> immutable_array_storage;
-  std::vector<uint32_t> immutable_array_slots;
-  std::vector<uint8_t> immutable_asset_bytes;
+  // array slot points into this heap-stable pack. The original bytes remain
+  // available for Metal's one-time buffer(4) upload. A future/read-only scope
+  // image can retain the same pack after this movable state is retired.
+  std::shared_ptr<const ImmutableAssetPack> immutable_assets;
 
   // Array slot names from the manifest (diagnostic metadata).
   std::vector<std::string> array_names;
@@ -818,9 +829,15 @@ public:
     // Plan-6 arrays are owned separately from the mutable per-render scratch.
     // build_mutex_ holds the active KernelState stable for this whole window,
     // so random-access JIT renders can safely share their immutable backing.
-    for (std::size_t j = 0; j < active.immutable_array_slots.size(); ++j)
-      array_ptrs[active.immutable_array_slots[j]] =
-        active.immutable_array_storage[j].data();
+    if (active.immutable_assets)
+      for (std::size_t j = 0;
+           j < active.immutable_assets->array_slots.size(); ++j)
+        array_ptrs[active.immutable_assets->array_slots[j]] =
+          // The legacy kernel ABI spells every array pointer mutable. Plan-6
+          // bindings are compiler-proven read-only; retain const ownership and
+          // remove the qualifier only at that ABI boundary.
+          const_cast<int64_t *>(
+            active.immutable_assets->jit_arrays[j].data());
 
     double scratch_out = 0.0;
     for (uint32_t i = 0; i < count; ++i)

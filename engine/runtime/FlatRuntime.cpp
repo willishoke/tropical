@@ -125,6 +125,9 @@ std::vector<uint8_t> read_asset(
 void bind_immutable_assets(
   const tropical_plan5::ParsedPlan5 & parsed, KernelState & state)
 {
+  if (parsed.immutable_assets.empty()) return;
+
+  auto storage = std::make_shared<ImmutableAssetPack>();
   std::unordered_set<uint32_t> bound_slots;
   for (const auto & asset : parsed.immutable_assets)
   {
@@ -135,16 +138,16 @@ void bind_immutable_assets(
       throw std::runtime_error(
         "FlatRuntime: immutable asset has no array_slots: '" + asset.path + "'");
     const auto bytes = read_asset(asset);
-    if (state.immutable_asset_bytes.size()
+    if (storage->metal_bytes.size()
         > std::numeric_limits<std::size_t>::max()
             - (kImmutableAssetAlignment - 1))
       throw std::runtime_error("FlatRuntime: immutable asset alignment overflow");
-    const std::size_t packed_base = align_asset(state.immutable_asset_bytes.size());
+    const std::size_t packed_base = align_asset(storage->metal_bytes.size());
     if (packed_base > std::numeric_limits<std::size_t>::max() - bytes.size())
       throw std::runtime_error("FlatRuntime: immutable asset pack size overflow");
-    state.immutable_asset_bytes.resize(packed_base + bytes.size(), 0);
+    storage->metal_bytes.resize(packed_base + bytes.size(), 0);
     std::copy(bytes.begin(), bytes.end(),
-              state.immutable_asset_bytes.begin() + packed_base);
+              storage->metal_bytes.begin() + packed_base);
 
     for (const auto & binding : asset.arrays)
     {
@@ -173,8 +176,8 @@ void bind_immutable_assets(
         throw std::runtime_error(
           "FlatRuntime: immutable asset array byte range is invalid");
 
-      auto & converted = state.immutable_array_storage.emplace_back();
-      state.immutable_array_slots.push_back(binding.slot);
+      auto & converted = storage->jit_arrays.emplace_back();
+      storage->array_slots.push_back(binding.slot);
       converted.resize(static_cast<std::size_t>(binding.element_count));
       for (std::size_t i = 0; i < converted.size(); ++i)
       {
@@ -194,6 +197,7 @@ void bind_immutable_assets(
       state.array_ptrs[binding.slot] = converted.data();
     }
   }
+  state.immutable_assets = std::move(storage);
 }
 } // namespace
 
@@ -655,9 +659,12 @@ bool FlatRuntime::load_ir_staged(const std::string & ir_text,
       msl_source, metal_render_tile_frames_,
       static_cast<uint32_t>(new_state.slots.size()),
       static_cast<uint32_t>(column_floats),
-      new_state.immutable_asset_bytes.empty()
-        ? nullptr : new_state.immutable_asset_bytes.data(),
-      new_state.immutable_asset_bytes.size(), err);
+      !new_state.immutable_assets
+          || new_state.immutable_assets->metal_bytes.empty()
+        ? nullptr : new_state.immutable_assets->metal_bytes.data(),
+      new_state.immutable_assets
+        ? new_state.immutable_assets->metal_bytes.size() : 0,
+      err);
     if (!new_state.metal)
       throw std::runtime_error("FlatRuntime: " + err);
 #else
