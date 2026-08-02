@@ -132,6 +132,18 @@ directory successfully decoded vocabulary fingerprint
 `fnv1a64:30da601c40478e7f` and compiled an active live `groupedroom` using only
 the bundled room carrier and manifest.
 
+### S-14 — Adopt compile truth once and keep scope traffic off control
+
+Swift decodes the complete `load_patch_graph` handshake into one immutable
+realized snapshot and advances it only for a newer published generation.
+Failed, superseded, or stale responses leave the prior running graph and tap
+bindings intact; the legacy tap-list call is satisfied from that snapshot and
+does not issue a second RPC. `playback_position` is routed with
+`render_window` on the scope connection, so a display-head read cannot occupy
+the live-control connection. Deterministic socket-pair tests pin per-lane IDs
+and buffers, out-of-order correlation, the 128-request bound, exactly-once
+terminal failure, bounded connection timeout, and graph/control independence.
+
 ## Open architecture gate
 
 The master handoff also asks for a literal serialized `gong → reverb` fixture.

@@ -22,7 +22,9 @@ while audio plays out of the host's device (RtAudio). The window is purely a
 control surface. The server carries a control/data plane split: `set_param`,
 `render_window`, and `playback_position` are answered synchronously in
 C++ and never queue behind the Lean control thread — that is what keeps
-knob writes and the Scope module's traces live through a long compile.
+knob writes and the Scope module's traces live through a long compile. The
+client puts `set_param` on its control connection and keeps both scope
+waveform and scope-head reads on its separate scope connection.
 
 Engine resolution order:
 
