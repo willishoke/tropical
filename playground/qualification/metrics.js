@@ -56,7 +56,7 @@ function faultEntries(telemetry, audioStatus, capture = {}) {
   return faults
 }
 
-function summarize({ writes, scopes, captures, telemetry, audioStatus }) {
+function summarize({ writes, scopes, captures, telemetry, audioStatus, expectSilence = false }) {
   const dispatched = writes.filter((event) => event.dispatched)
   const audible = dispatched.filter((event) => event.activation?.audible)
   const scopeCompleted = scopes.filter((event) => !event.preempted && !event.error)
@@ -87,6 +87,9 @@ function summarize({ writes, scopes, captures, telemetry, audioStatus }) {
       (block) => block.samples.length && block.samples.every((value) => value === 0),
     ).length,
   }
+  const blockingCaptureFaults = expectSilence
+    ? { ...captureFaults, all_zero_block_count: 0 }
+    : captureFaults
   return {
     generated_write_count: writes.filter((event) => !event.dispatched).length,
     dispatched_write_count: dispatched.length,
@@ -107,8 +110,9 @@ function summarize({ writes, scopes, captures, telemetry, audioStatus }) {
     scope_preempted: scopes.filter((event) => event.preempted).length,
     scope_errors: scopes.filter((event) => event.error).length,
     capture_blocks: captures.length,
+    capture_expected_silence: expectSilence,
     capture_faults: captureFaults,
-    faults: faultEntries(telemetry, audioStatus, captureFaults),
+    faults: faultEntries(telemetry, audioStatus, blockingCaptureFaults),
   }
 }
 

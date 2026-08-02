@@ -30,6 +30,7 @@ function parseArgs(argv) {
     deviceQuantum: 128,
     renderQuantum: 512,
     exerciseFlow: true,
+    muteOutput: false,
   }
   for (let index = 0; index < argv.length; index += 1) {
     const arg = argv[index]
@@ -41,6 +42,7 @@ function parseArgs(argv) {
     else if (arg === '--device-quantum') options.deviceQuantum = Number(next())
     else if (arg === '--render-quantum') options.renderQuantum = Number(next())
     else if (arg === '--skip-flow-gesture') options.exerciseFlow = false
+    else if (arg === '--mute-output') options.muteOutput = true
     else if (arg === '--help') options.help = true
     else throw new Error(`unknown argument: ${arg}`)
   }
@@ -61,6 +63,7 @@ function usage() {
   --device-quantum N               Bdev (default 128)
   --render-quantum N               Rgpu (default 512)
   --skip-flow-gesture              omit the pause/reverse/resume FLOW probe
+  --mute-output                    run the device clock with graph output at zero
   --engine PATH                    frontend executable
   --output DIR                     evidence directory`
 }
@@ -341,7 +344,10 @@ async function main() {
       value: -position / scene.SAMPLE_RATE,
     })
     const level = scene.CONTROLS.find((item) => item.slot === 'levelControl.value')
-    await control.call('set_param', { name: level.slot, value: level.value })
+    await control.call('set_param', {
+      name: level.slot,
+      value: options.muteOutput ? 0 : level.value,
+    })
     const taps = await control.call('list_scope_taps')
     const tapMap = new Map(taps.taps.map((tap) => [tap.name, tap.slot]))
     const qualificationTaps = scene.CHORDS[0].voices.map((_voice, voiceIndex) => (
@@ -425,7 +431,14 @@ async function main() {
     await scopePromise
     finalTelemetry = await scope.call('get_telemetry')
     finalAudioStatus = await scope.call('audio_status')
-    summary = summarize({ writes, scopes, captures, telemetry: finalTelemetry, audioStatus: finalAudioStatus })
+    summary = summarize({
+      writes,
+      scopes,
+      captures,
+      telemetry: finalTelemetry,
+      audioStatus: finalAudioStatus,
+      expectSilence: options.muteOutput,
+    })
     summary.run_id = runId
     summary.mode = options.mode
     summary.duration_seconds = (wallMs() - startedMs) / 1000
@@ -513,7 +526,8 @@ async function main() {
       gap_samples: timeline.gapSamples,
       overlap_samples: timeline.overlapSamples,
     }
-    if (timeline.samples.length && !summary.capture_faults.nonfinite_sample_count
+    if (!options.muteOutput && timeline.samples.length
+      && !summary.capture_faults.nonfinite_sample_count
       && !summary.capture_faults.clamped_sample_count) {
       try {
         summary.capture_wav = writeMonoFloat64Pcm24(capturePath, timeline.samples, scene.SAMPLE_RATE)

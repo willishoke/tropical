@@ -58,3 +58,21 @@ test('scope metrics exclude intentional preemption and resume frames', () => {
   assert.equal(summary.scope_frame_interval_ms.count, 2)
   assert.equal(summary.scope_frame_interval_ms.max, 42)
 })
+
+test('muted qualification expects zero capture but still blocks real faults', () => {
+  const summary = summarize({
+    writes: [], scopes: [], telemetry: {}, audioStatus: {}, expectSilence: true,
+    captures: [{ samples: [0, 0, 0] }],
+  })
+  assert.equal(summary.capture_expected_silence, true)
+  assert.equal(summary.capture_faults.all_zero_block_count, 1)
+  assert.deepEqual(summary.faults, [])
+
+  const faulty = summarize({
+    writes: [], scopes: [], telemetry: {}, audioStatus: {}, expectSilence: true,
+    captures: [{ samples: [0, NaN] }],
+  })
+  assert.deepEqual(faulty.faults.map((entry) => entry.name), [
+    'nonfinite_sample_count',
+  ])
+})
