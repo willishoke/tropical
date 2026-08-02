@@ -318,7 +318,7 @@ final class PatchModel: ObservableObject {
             // except a COLD first compile, which seeds master.velocity at its
             // default (1). Re-apply a non-default scrub so the slider and the
             // running clock agree (no-op if equal).
-            if velocity != 1 { params.send("set_param_velocity", "master.velocity", velocity) }
+            if velocity != 1 { params.send("master.velocity", velocity) }
             await refreshScopeTaps()
             setStatus(audioOn ? "playing" : "compiled", isError: false)
         } catch {
@@ -334,16 +334,12 @@ final class PatchModel: ObservableObject {
         // A monitor's knobs (Scope `window`) are view state, not param slots.
         guard !node.kind.spec.monitor else { return }
         let name = "\(node.id).\(knob.name)"
-        switch knob.mode {
-        case .live: params.send("set_param", name, value)
-        case .glide: params.send("set_param_glide", name, value)
-        case .anchor: params.send("set_param_freq", name, value)
-        }
+        params.send(name, value)
     }
 
     func setVelocity(_ v: Double) {
         velocity = v
-        params.send("set_param_velocity", "master.velocity", v)
+        params.send("master.velocity", v)
     }
 
     // ── Transport ─────────────────────────────────────────────────────────
@@ -546,22 +542,31 @@ private final class EventBox: @unchecked Sendable {
 /// as the slot default, after which subsequent turns are live.
 @MainActor
 final class ParamSender {
-    private var pending: [String: (method: String, value: Double)] = [:]
+    private var pending: [String: LatestValueBuffer] = [:]
     private var busy: Set<String> = []
     private weak var model: PatchModel?
 
     init(model: PatchModel) { self.model = model }
 
-    func send(_ method: String, _ name: String, _ value: Double) {
-        pending[name] = (method, value)
-        guard !busy.contains(name) else { return }
+    func send(_ name: String, _ value: Double) {
+        guard value.isFinite else { return }
+        if busy.contains(name) {
+            pending[name]?.offer(value)
+            return
+        }
         busy.insert(name)
+        pending[name] = LatestValueBuffer(first: value)
         Task { [weak self] in
-            defer { self?.busy.remove(name) }
-            while let (m, v) = self?.pending.removeValue(forKey: name) {
+            defer {
+                self?.busy.remove(name)
+                self?.pending.removeValue(forKey: name)
+            }
+            while let v = self?.pending[name]?.pop() {
                 guard let engine = self?.model?.engine else { return }
                 do {
-                    try await engine.call(m, .object(["name": .string(name), "value": .number(v)]))
+                    _ = try await engine.call("set_param", .object([
+                        "name": .string(name), "value": .number(v)
+                    ]))
                 } catch {
                     self?.model?.schedulePush()
                     return

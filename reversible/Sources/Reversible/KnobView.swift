@@ -4,8 +4,8 @@ import SwiftUI
 /// Every continuous knob is a live param slot `<id>.<knob>` — a vertical
 /// drag (180px = full sweep) drives the running kernel with no relower
 /// (only topology edits recompile). A glided knob eases via
-/// set_param_glide; freq-anchored knobs go phase-continuous via
-/// set_param_freq; the rest do a raw set_param write.
+/// The client always emits `set_param`; the loaded plan owns whether the
+/// accepted write is raw, glided, phase-anchored, or a velocity rebase.
 struct KnobView: View {
     @EnvironmentObject var model: PatchModel
     let node: PatchNode

@@ -1,16 +1,5 @@
 import SwiftUI
 
-/// How a knob writes to the running kernel: a raw slot write (steps at
-/// block rate), a closed-form glide (the engine re-anchors 3 ramp slots;
-/// the kernel eases f(τ) — click-free), or a phase-anchored freq change
-/// (the engine bumps the oscillator's phase offset so the waveform stays
-/// continuous across the pitch change).
-enum ParamSendMode {
-    case live      // set_param
-    case glide     // set_param_glide
-    case anchor    // set_param_freq
-}
-
 struct KnobSpec {
     let name: String
     let min: Double
@@ -18,7 +7,6 @@ struct KnobSpec {
     let def: Double
     var log = false
     var unit = ""
-    var mode = ParamSendMode.live
 }
 
 /// Node vocabulary, 1:1 with the Lean arrow patch-graph `Node` cases
@@ -85,8 +73,8 @@ extension NodeKind {
                     // it's a slow ramp you can patch into a Reson `addr` to
                     // scrub-trigger the resonance. A phasor is closed-form at
                     // any rate, so there's no low-frequency floor in the engine.
-                    KnobSpec(name: "freq", min: 0.02, max: 2000, def: 220, log: true, unit: "Hz", mode: .anchor),
-                    KnobSpec(name: "morph", min: 0, max: 1, def: 0, mode: .glide),
+                    KnobSpec(name: "freq", min: 0.02, max: 2000, def: 220, log: true, unit: "Hz"),
+                    KnobSpec(name: "morph", min: 0, max: 1, def: 0),
                 ])
         case .knob:
             // A program that is nothing but a param with one output — for a
@@ -99,13 +87,12 @@ extension NodeKind {
                 knobs: [KnobSpec(name: "value", min: 0, max: 1000, def: 220)])
         case .flange:
             // static δ comb — the pure plain-warp slide. `depth` is the GLIDE
-            // prototype: its turns drive set_param_glide (closed-form ramp),
-            // so A/B it against any other (raw set_param) knob to hear the
-            // difference.
+            // prototype: the engine-owned discipline drives a closed-form
+            // ramp, so A/B it against a raw parameter to hear the difference.
             return NodeSpec(
                 title: "Flange", accent: Color(hex: 0xFFCC66), summing: false,
                 inlets: ["in"], outlets: ["out"],
-                knobs: [KnobSpec(name: "depth", min: 0.0001, max: 0.01, def: 0.002, log: true, unit: "s", mode: .glide)])
+                knobs: [KnobSpec(name: "depth", min: 0.0001, max: 0.01, def: 0.002, log: true, unit: "s")])
         case .sflange:
             // SIGNAL-modulated comb. Patch a signal into `mod` to sweep it;
             // leave it open and the built-in LFO at `rate` drives the sweep.
@@ -114,7 +101,7 @@ extension NodeKind {
                 title: "SwFlange", accent: Color(hex: 0xFFD089), summing: false,
                 inlets: ["in", "mod"], outlets: ["out"],
                 knobs: [
-                    KnobSpec(name: "depth", min: 0.0002, max: 0.02, def: 0.005, log: true, unit: "s", mode: .glide),
+                    KnobSpec(name: "depth", min: 0.0002, max: 0.02, def: 0.005, log: true, unit: "s"),
                     KnobSpec(name: "rate", min: 0.02, max: 12, def: 0.3, log: true, unit: "Hz"),
                 ])
         case .fm:
@@ -122,14 +109,14 @@ extension NodeKind {
                 title: "FM", accent: Color(hex: 0xFF9EC7), summing: false,
                 inlets: ["in"], outlets: ["out"],
                 knobs: [
-                    KnobSpec(name: "carrier", min: 20, max: 2000, def: 330, log: true, unit: "Hz", mode: .anchor),
-                    KnobSpec(name: "depth", min: 1, max: 400, def: 60, log: true, mode: .glide),
+                    KnobSpec(name: "carrier", min: 20, max: 2000, def: 330, log: true, unit: "Hz"),
+                    KnobSpec(name: "depth", min: 1, max: 400, def: 60, log: true),
                 ])
         case .delay:
             return NodeSpec(
                 title: "Delay", accent: Color(hex: 0x86E8C0), summing: false,
                 inlets: ["in"], outlets: ["out"],
-                knobs: [KnobSpec(name: "amount", min: 0.0001, max: 0.02, def: 0.004, log: true, unit: "s", mode: .glide)])
+                knobs: [KnobSpec(name: "amount", min: 0.0001, max: 0.02, def: 0.004, log: true, unit: "s")])
         case .reverse:
             // clk -> -clk : the moat op, no parameter.
             return NodeSpec(
