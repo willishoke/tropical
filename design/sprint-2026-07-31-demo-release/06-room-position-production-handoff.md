@@ -1,5 +1,15 @@
 # Grouped room + temporal POSITION production handoff
 
+> **2026-08-02 sound-design addendum:** DR-25 supersedes the four fixed Metal
+> hits described below with the user-selected sixteen-beat downbeat-dyad/ghost
+> pizzicato score. The room transfer, POSITION law, mono contract, and fixed
+> 5.38 MiB cache ABI remain unchanged. Because the direct evaluator is frozen
+> to the retired Metal source coordinates, the revised cache is generated from
+> the accepted native grouped carriers and checked against the infinite
+> analytic grouped equations. See `01-decision-log.md` and the current cache
+> manifest for authoritative revised-source details; the remainder of this
+> document retains the original implementation history.
+
 Date: 2026-08-01
 
 Status: **implemented and engineering-qualified; 30-minute soak explicitly

@@ -78,10 +78,10 @@ bounded fixed-scene cache; they are failed diagnostics, not release evidence.
 | Evidence | Location / result |
 |---|---|
 | Generator | `benchmarks/demo_release/room_audition/generate_grouped_room_scene_cache.py` |
-| Payload and manifest | `playground/assets/grouped-room/clouds-current-radii-mono-v1-scene-44100.{f32le,json}`; 5,644,800 bytes; SHA-256 `33dad76b92c7b11f297a1e32979e89f36fd1b16fbb8f923c726756ebce2d06f3` |
-| Endpoint/FLOW probe | `run_grouped_room_scene_cache_probe.py`; integer direct parity `<=2.62e-8`, fractional/reverse FLOW `<=1.74%` NRMSE, Metal endpoint read `<=2.85e-8` |
+| Payload and manifest | `playground/assets/grouped-room/clouds-current-radii-mono-v1-scene-44100.{f32le,json}`; 5,644,800 bytes; SHA-256 `22b534e561aa1fef8aa4535ff321ee5df90c9cfb2743c274fc44d183216a615e` |
+| Endpoint/FLOW probe | `run_grouped_room_scene_cache_probe.py`; carrier convolution vs infinite grouped equations `5.04e-14` causal / `1.59e-13` reverse; JIT/Metal cache reads vs binary64 generation oracle `<=4.54e-8` across integer/fractional/stopped/reverse FLOW |
 | Integrated smoke | `2026-08-02_00-09-48-317-smoke-b128-r512`; clean candidate, pass, zero sticky runtime/Metal/DAC/capture faults and zero retargets |
-| Frozen balance | ROOM default `1.0`, range `0…1.5`; authored-level POSITION `-1/0/+1` peaks `-5.01/-5.59/-5.40` dBFS over the complete 16-second scene |
+| Revised pizzicato balance | ROOM default `1.0`, range `0…1.5`; shared section gain `3×`, fixed room compensation `3×`; authored-level dry / POSITION `+1` / `+0.5` peaks `−6.25/−2.43/−3.21` dBFS over the complete 16-second scene |
 
 ## 2026-08-02 release qualification
 

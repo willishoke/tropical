@@ -73,11 +73,20 @@ process.stdout.write(JSON.stringify({
   sampleRate: scene.SAMPLE_RATE,
   stepSeconds: scene.STEP_SECONDS,
   patternSteps: scene.PATTERN_STEPS,
+  stringAttackDelay: scene.STRING_ATTACK_DELAY,
+  pizzicatoSectionGain: scene.PIZZICATO_SECTION_GAIN,
+  pizzicatoRoomSend: scene.PIZZICATO_ROOM_SEND,
   chords: scene.CHORDS.map((chord) => ({
     label: chord.label,
     name: chord.name,
     ratios: chord.voices.map((voice) => scene.absoluteRatio(chord, voice)),
     frequencies: chord.voices.map((voice) => scene.voiceFrequency(chord, voice)),
+  })),
+  selectedBeats: Array.from({length: scene.PATTERN_STEPS}, (_, beatIndex) => ({
+    beatIndex,
+    modes: scene.pizzicatoBeatModes(
+      scene.CHORDS[Math.floor(beatIndex / 4)], beatIndex % 4,
+    ),
   })),
 }))
 """
@@ -92,6 +101,53 @@ process.stdout.write(JSON.stringify({
     if score["sampleRate"] != SAMPLE_RATE or score["patternSteps"] != PATTERN_BEATS:
         raise RuntimeError("scene score no longer matches the audition contract")
     return score
+
+
+def validate_selected_pattern(
+    score: dict[str, object],
+    events: list[dict[str, float | int]],
+) -> dict[str, float | int]:
+    """Prove candidate 02's score/rows are the production selection."""
+    event_rows_by_beat: list[list[list[float]]] = [
+        [] for _ in range(PATTERN_BEATS)
+    ]
+    for event in events:
+        beat_index = round(float(event["seconds"]) - PREROLL_SECONDS)
+        chord = score["chords"][int(event["chord_index"])]
+        frequency = float(chord["frequencies"][int(event["voice_index"])])
+        rows = pizzicato_modes(
+            frequency,
+            float(event["velocity"]),
+            int(event["voice_index"]),
+        )
+        event_rows_by_beat[beat_index].extend([
+            [row[0], row[1], row[2] * PIZZICATO_SECTION_GAIN, row[3]]
+            for row in rows
+        ])
+    max_absolute_error = 0.0
+    row_count = 0
+    for candidate, production in zip(
+        event_rows_by_beat, score["selectedBeats"], strict=True
+    ):
+        production_rows = production["modes"]
+        if len(candidate) != len(production_rows):
+            raise RuntimeError("selected audition/production row count drifted")
+        delta = np.asarray(candidate) - np.asarray(production_rows)
+        max_absolute_error = max(max_absolute_error, float(np.max(np.abs(delta))))
+        row_count += len(candidate)
+    if max_absolute_error > 1e-8:
+        raise RuntimeError(
+            "selected audition no longer matches production pizzicato rows: "
+            f"max absolute error {max_absolute_error}"
+        )
+    if score["pizzicatoSectionGain"] != PIZZICATO_SECTION_GAIN:
+        raise RuntimeError("production pizzicato section gain drifted")
+    if score["pizzicatoRoomSend"] != WET_SEND_GAIN:
+        raise RuntimeError("production pizzicato room send drifted")
+    return {
+        "row_count": row_count,
+        "max_absolute_error": max_absolute_error,
+    }
 
 
 def note_event(
@@ -368,6 +424,10 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     score = load_scene_score()
     patterns = build_patterns()
+    selected_parity = validate_selected_pattern(score, patterns[1]["events"])
+    # The parity measurement is the evidence; duplicating all 200 production
+    # rows into the listening summary only obscures the score and file metrics.
+    score.pop("selectedBeats")
     output_count = round(OUTPUT_SECONDS * SAMPLE_RATE)
     room_count = round(ROOM_SECONDS * SAMPLE_RATE)
     source_count = output_count + room_count - 1
@@ -457,7 +517,7 @@ def main() -> None:
     summary = {
         "schema": 1,
         "purpose": "offline replacement audition for the four metallic room hits",
-        "integration_status": "audition only; production scene and room cache unchanged",
+        "integration_status": "candidate 02 score and gains selected for production",
         "render_safety": "offline files only; no audio device opened",
         "sample_rate": SAMPLE_RATE,
         "output_seconds": OUTPUT_SECONDS,
@@ -484,6 +544,7 @@ def main() -> None:
             "attack": attack_metrics(score),
         },
         "validation": validation,
+        "selected_candidate_02_vs_production": selected_parity,
         "gain": {
             "master": MASTER_GAIN,
             "presence": PRESENCE,

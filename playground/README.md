@@ -27,10 +27,11 @@ Each voice is three harmonic partials. Every partial is represented by a
 matched positive/negative decay pair, making a finite attack followed by a
 decay without introducing state or an envelope primitive.
 
-Four sparse inharmonic metal hits land halfway between the chords. Each is a
-finite causal attack pair sent into the frozen grouped Clouds room. `POSITION`
-moves only that wet field between its future-aware pre-tail and forward decay;
-the direct impact always remains causal.
+A chord-derived pizzicato lands on every beat. Each chord opens with the
+listening-approved two-note downbeat voicing, followed by three lighter
+single-note ghosts. Only that causal transient lane enters the frozen grouped
+Clouds room. `POSITION` moves its wet field between a future-aware pre-tail and
+forward decay; the direct pizzicato always remains causal.
 
 ## Surface
 
@@ -39,7 +40,7 @@ the direct impact always remains causal.
 - Arrow up/down chooses a row; left/right changes it; Shift makes a fine move.
 - Space holds or resumes the scene. `R` reverses it. Enter returns to zero.
 - `STRINGS / RESONANT VEIL` is the filtered direct string field.
-- `ROOM / METAL RETURN` is the wet modal room before its return-level control.
+- `ROOM / PIZZICATO RETURN` is the wet modal room before its return-level control.
 
 `presence`, `veil`, `edge`, `room`, and `position` shape the scene. `flow` is a
 continuous local clock velocity, including zero and reverse. `level` is the
@@ -67,11 +68,12 @@ as a diagnostic fallback:
 TROPICAL_DEMO_JIT=1 bun run start
 ```
 
-Each chord remains its own modal island until the signal boundary; this
-preserves all four strike anchors (a modal pole union has only one). The string
-lane has no room send. The room is the bounded 5.38 MiB fixed-scene fallback:
-two native-rate float32 bases generated from only the four fixed twelve-pole
-Metal sources and the approved `clouds-current-radii-mono-v1` direct evaluator.
+Each chord remains its own modal island until the signal boundary. Each of the
+sixteen pizzicato beats does too, preserving every strike anchor (a modal pole
+union has only one). The string lane has no room send. The room is the bounded
+5.38 MiB fixed-scene path: two native-rate float32 bases generated from the
+fixed score and the accepted `clouds-current-radii-mono-v1` grouped carriers,
+then checked against the infinite analytic grouped equations.
 
 All filters read the shared `veil` and `edge` controls; the cached room reads
 the glided `position` control. A gesture is one parameter write,

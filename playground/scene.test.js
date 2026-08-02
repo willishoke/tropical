@@ -9,7 +9,7 @@ test('scene is one acyclic-looking fixed graph with unique ids', () => {
   assert.equal(new Set(ids).size, ids.length)
   assert.equal(graph.out, 'out')
   assert.ok(ids.includes(graph.out))
-  assert.equal(graph.nodes.filter((node) => node.kind === 'string').length, 28)
+  assert.equal(graph.nodes.filter((node) => node.kind === 'string').length, 40)
   assert.deepEqual(graph.taps, scene.SCOPE_TAPS)
   assert.equal(graph.taps.length, 20)
   assert.equal(graph.nodes.filter((node) => node.kind === 'modalmix').length, 0)
@@ -18,7 +18,7 @@ test('scene is one acyclic-looking fixed graph with unique ids', () => {
   assert.equal(graph.nodes.filter((node) => node.kind === 'groupedroomcache').length, 1)
   assert.equal(graph.nodes.filter((node) => node.kind === 'filter').length, 4)
   assert.equal(graph.nodes.filter((node) => node.kind === 'glideknob').length, 4)
-  assert.equal(graph.nodes.filter((node) => node.kind === 'knob').length, 2)
+  assert.equal(graph.nodes.filter((node) => node.kind === 'knob').length, 3)
   assert.deepEqual(graph.nodes.find((node) => node.id === 'veil').in.in,
     ['veil1', 'veil2', 'veil3', 'veil4'])
   assert.equal(graph.nodes.find((node) => node.id === 'room').params.profile,
@@ -26,7 +26,15 @@ test('scene is one acyclic-looking fixed graph with unique ids', () => {
   assert.deepEqual(graph.nodes.find((node) => node.id === 'room').in.position,
     ['positionControl'])
   assert.deepEqual(graph.nodes.find((node) => node.id === 'impact').in.in,
-    ['metalHit1', 'metalHit2', 'metalHit3', 'metalHit4'])
+    scene.PIZZICATO_BEAT_IDS)
+  assert.equal(
+    graph.nodes.find((node) => node.id === 'pizzicatoRoomCompensation').params.value,
+    scene.PIZZICATO_ROOM_SEND,
+  )
+  assert.deepEqual(graph.nodes.find((node) => node.id === 'compensatedRoom').in.in,
+    ['room', 'pizzicatoRoomCompensation'])
+  assert.deepEqual(graph.nodes.find((node) => node.id === 'wet').in.in,
+    ['compensatedRoom', 'spaceLevel'])
   assert.deepEqual(graph.nodes.find((node) => node.id === 'leveled').in.in,
     ['heard', 'levelControl'])
   assert.equal(graph.nodes.find((node) => node.id === 'levelControl').params.value, 0)
@@ -77,11 +85,17 @@ test('scene is one acyclic-looking fixed graph with unique ids', () => {
       assert.equal(projection.params.modes[1][2], -projection.params.modes[0][2])
     }
   }
-  for (let index = 0; index < 4; index++) {
-    const hit = graph.nodes.find((node) => node.id === `metalHit${index + 1}`)
-    assert.equal(hit.params.t, index * 4 * scene.STEP_SECONDS + 2 * scene.STEP_SECONDS)
-    assert.equal(hit.params.modes.length, 12)
-    assert.equal(graph.nodes.find((node) => node.id === `metalRoom${index + 1}`), undefined)
+  for (let beatIndex = 0; beatIndex < scene.PATTERN_STEPS; beatIndex++) {
+    const hit = graph.nodes.find((node) => node.id === scene.pizzicatoBeatId(beatIndex))
+    assert.equal(
+      hit.params.t,
+      beatIndex * scene.STEP_SECONDS + scene.STRING_ATTACK_DELAY,
+    )
+    assert.equal(hit.params.modes.length, beatIndex % 4 === 0 ? 20 : 10)
+    assert.equal(
+      graph.nodes.find((node) => node.id === `${scene.pizzicatoBeatId(beatIndex)}Room`),
+      undefined,
+    )
   }
   assert.deepEqual(graph.nodes.find((node) => node.id === 'body').in.in,
     ['veil', 'wet', 'impact'])
@@ -172,16 +186,46 @@ test('scope envelope follows the exact paired mode at audible-now', () => {
   })
 })
 
-test('each metal hit is a causal inharmonic attack pair', () => {
-  for (let hit = 0; hit < 4; hit++) {
-    const rows = scene.snareModes(hit)
-    assert.equal(rows.length, 12)
-    for (let row = 0; row < rows.length; row += 2) {
-      assert.equal(rows[row][0], rows[row + 1][0])
-      assert.equal(rows[row][2], -rows[row + 1][2])
-      assert.equal(rows[row][3], rows[row + 1][3])
-      assert.ok(rows[row][1] < rows[row + 1][1])
+test('each chord-derived pizzicato beat is a causal harmonic attack pair', () => {
+  assert.equal(scene.PIZZICATO_SECTION_GAIN, 3)
+  assert.equal(scene.PIZZICATO_ROOM_SEND, 3)
+  scene.CHORDS.forEach((chord) => {
+    for (let beatInChord = 0; beatInChord < 4; beatInChord++) {
+      const rows = scene.pizzicatoBeatModes(chord, beatInChord)
+      assert.equal(rows.length, beatInChord === 0 ? 20 : 10)
+      const voiceCount = beatInChord === 0 ? 2 : 1
+      assert.equal(rows.length, voiceCount * 5 * 2)
+      for (let row = 0; row < rows.length; row += 2) {
+        assert.equal(rows[row][0], rows[row + 1][0])
+        assert.equal(rows[row][2], -rows[row + 1][2])
+        assert.equal(rows[row][3], rows[row + 1][3])
+        assert.ok(rows[row][1] < rows[row + 1][1])
+      }
     }
+  })
+})
+
+test('pizzicato attack timing retains the approved prompt onset', () => {
+  const rows = scene.pizzicatoModes(55, 1, 0)
+  const values = Array.from({ length: Math.round(0.1 * scene.SAMPLE_RATE) }, (_, index) => {
+    const time = index / scene.SAMPLE_RATE
+    return rows.reduce((sum, [frequency, decay, amplitude, phase]) => (
+      sum + amplitude * Math.exp(-decay * time)
+        * Math.cos(2 * Math.PI * frequency * time + phase)
+    ), 0)
+  })
+  const peak = Math.max(...values.map(Math.abs))
+  const onsetIndex = values.findIndex((value) => Math.abs(value) >= 0.01 * peak)
+  const peakIndex = values.findIndex((value) => Math.abs(value) === peak)
+  assert.ok(onsetIndex / scene.SAMPLE_RATE * 1000 < 2)
+  assert.ok(peakIndex / scene.SAMPLE_RATE * 1000 > 14)
+  assert.ok(peakIndex / scene.SAMPLE_RATE * 1000 < 17)
+  assert.equal(values[0], 0)
+  for (let row = 0; row < rows.length; row += 2) {
+    assert.equal(rows[row][0], rows[row + 1][0])
+    assert.equal(rows[row][2], -rows[row + 1][2])
+    assert.equal(rows[row][3], rows[row + 1][3])
+    assert.ok(rows[row][1] < rows[row + 1][1])
   }
 })
 

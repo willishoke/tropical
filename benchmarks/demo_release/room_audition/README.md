@@ -183,8 +183,9 @@ integration gates.
 ## Chord-derived pizzicato replacement audition
 
 `generate_pizzicato_auditions.py` compares three less intrusive replacements
-for the four metallic hits without changing the production scene or its frozen
-cache. It renders entirely offline and does not open an audio device:
+for the original four metallic hits. Candidate 02 was selected and incorporated
+into the production scene; the comparison set remains an offline, device-free
+reproducer:
 
 ```sh
 uv run --with numpy python \
@@ -202,11 +203,11 @@ Each candidate has one dry scene render and wet/mix renders at POSITION `+1`
 and `+0.5`. The dry and mix files retain the exact production string bed; all
 files share one gain structure and one common headroom policy, with no per-file
 normalization or limiter. The tracked JSON summary records the exact score,
-events, asset/source hashes, timing, levels, and WAV hashes. Select a candidate
-by listening before regenerating the production room cache. The direct and wet
-pizzicato section carries a shared `3×` audition gain, and its wet branch has a
-further `3×` send gain to compensate for the fitted room's lower response to
-these pitched low-register transients.
+events, asset/source hashes, timing, levels, and WAV hashes. It also proves the
+selected candidate's 200 modal rows and two gain stages match production. The
+direct and wet pizzicato section carries the approved shared `3×` gain, and its
+wet branch has a further `3×` compensation for the fitted room's lower response
+to these pitched low-register transients.
 
 ## Native 44.1 kHz production gate
 
@@ -260,9 +261,10 @@ for Metal.
 ## Selected fixed-scene cache fallback
 
 The release-Mac direct evaluator reserve failure is retained under
-`benchmarks/demo_release/data/`. Regenerate the selected two-arm, 16-second
-float32 basis directly from `playground/scene.js`, then run its endpoint and
-FLOW gate:
+`benchmarks/demo_release/data/`. The original direct evaluator is intentionally
+frozen to the retired Metal source coordinates, so the selected pizzicato cache
+is generated from `playground/scene.js` and the underlying accepted native
+grouped-carrier fit. Run its analytic, endpoint, and FLOW gates with:
 
 ```sh
 uv run --with numpy python \
@@ -274,9 +276,11 @@ uv run --with numpy python \
 
 The 5,644,800-byte payload contains causal then classic-reverse mono arrays.
 Runtime addressing is cyclic linear interpolation from the master scene
-coordinate; POSITION retains the direct evaluator's equal-power mix. Integer
-endpoints agree with the direct JIT at `2.62e-8` relative error, and the frozen
-fractional/stopped/reverse FLOW matrix stays below `1.74%` NRMSE.
+coordinate; POSITION retains its equal-power mix. The binary64 generator agrees
+with the infinite analytic grouped equations at `5.04e-14` causal and
+`1.59e-13` reverse relative L2. Across the frozen integer, fractional, stopped,
+and reverse FLOW matrix, JIT and Metal read the float32 cache within `4.54e-8`
+relative error of that generator.
 
 ## Release listening set
 

@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "purpose": "offline replacement audition for the four metallic room hits",
-  "integration_status": "audition only; production scene and room cache unchanged",
+  "integration_status": "candidate 02 score and gains selected for production",
   "render_safety": "offline files only; no audio device opened",
   "sample_rate": 44100,
   "output_seconds": 20.0,
@@ -10,11 +10,14 @@
   "source_tail_seconds": 3.0,
   "scene": {
     "path": "playground/scene.js",
-    "sha256": "7ad223e2e7f3605c556356ae22dac9ef119acc058a44648db9d247143f80fcef",
+    "sha256": "7d1e81daed4a9497571491440914c96dc6aa4ca82363053b4dd4f63e645f1d5a",
     "score": {
       "sampleRate": 44100,
       "stepSeconds": 1,
       "patternSteps": 16,
+      "stringAttackDelay": 0.06,
+      "pizzicatoSectionGain": 3,
+      "pizzicatoRoomSend": 3,
       "chords": [
         {
           "label": "A\u221211",
@@ -183,6 +186,10 @@
     "reverse_fft_vs_literal_relative_l2": 3.778053258177371e-15,
     "paired_source_anchor_absolute": 0.0,
     "causal_pre_anchor_max_absolute": 1.823046513062769e-18
+  },
+  "selected_candidate_02_vs_production": {
+    "row_count": 200,
+    "max_absolute_error": 4.745066856798319e-10
   },
   "gain": {
     "master": 3.7,

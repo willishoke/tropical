@@ -35,13 +35,14 @@
 | DR-22 | **implemented but insufficient diagnosis** | Divide every raw projection point by its exact paired modal envelope before center locking, then apply the exact audible-now envelope once to the unit carrier. Qualify visual changes with output held at zero. | This removes within-window envelope slope, but did not cause the reported large production jitter. Its oracle changed the control version before every read and therefore masked DR-23's same-version coefficient-cache defect. |
 | DR-23 | **implemented root correction** | Cache the scope workspace's fully materialized scalar-coefficient slot image per immutable control version and reset every random-access frame from it. Gate two consecutive reads of one version natively and 90 consecutive real-clock frames per chord through the exact shared frontend transform. | The earlier oracle changed `master.tau_base` before every read, so every read received a new control version and reran the coefficient kernel. In production, frame one materialized coefficients, frame two reset slots from the pre-coefficient control image and skipped rematerialization. The new live test reproduced A−11 mode 2 losing every positive crossing on its second frame, then passed 360/360 frames after the fix with captured output exactly zero. |
 | DR-24 | **implemented presentation change** | Retire log-period spacing and use one uniform 1,792-sample (`40.63 ms`) span for every trace, twice the 896-sample base duration at the same canvas width. | Cycle count is now strictly proportional to frequency (`2.23` cycles at 55 Hz through `15.08` at 371.25 Hz). The larger stride-1 request retains 60 Hz cadence and passes all continuous phase/amplitude invariants. |
+| DR-25 | **selected production revision** | Replace the four inharmonic Metal hits with the auditioned downbeat-dyad/ghost pizzicato score: sixteen causal beat anchors, a shared `3×` section gain, and a further fixed `3×` room compensation. Keep the centered positive-zero scope locks unchanged. | User listening selected candidate 02 and requested its level increase, then approved integration. The source has 200 paired harmonic modal rows and a measured 1% onset at `1.38 ms` with a `15.53 ms` peak. Because the direct `groupedroom` oracle is frozen to the retired Metal coordinates, generate the unchanged 5.38 MiB cache ABI from the accepted carrier fit and validate it against the infinite grouped equations instead. New cache `22b534e…` agrees at `5.04e-14` causal / `1.59e-13` reverse; JIT/Metal reads remain within `4.54e-8`; the complete +1 scene peaks at `−2.43 dBFS` without a limiter. |
 
 ## Remaining major decisions
 
 1. If the exact reverse endpoint is not unmistakable in the integrated scene,
    stop for user review before auditioning a longer decay or transient-only
    room send.
-2. Final headphone/monitor acceptance of the integrated listening capture.
+2. Final headphone/monitor acceptance of the revised integrated listening capture.
 
 Room size, stereo output, and a longer default tail are deferred, not active
 production questions. All other choices follow the handoff, master fallback

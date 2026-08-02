@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Gate the fixed-scene cache against its reads and the direct evaluator."""
+"""Gate the fixed-scene cache against runtime reads and generation oracles."""
 
 from __future__ import annotations
 
@@ -22,10 +22,8 @@ SAMPLE_COUNT = generator.SAMPLE_COUNT
 MASTER_GAIN = generator.MASTER_SINK_GAIN
 
 
-def graph_for(position: float, direct: bool) -> dict[str, object]:
+def graph_for(position: float) -> dict[str, object]:
     graph = generator.export_scene()
-    if direct:
-        graph = generator.direct_reference_graph(graph)
     graph["taps"] = False
     next(node for node in graph["nodes"] if node["id"] == "positionControl")[
         "params"
@@ -70,8 +68,13 @@ def render(
             flush=True,
         )
         result = subprocess.run(
-            command, cwd=ROOT, check=True, capture_output=True, timeout=30
+            command, cwd=ROOT, capture_output=True, timeout=30
         )
+        if result.returncode:
+            raise RuntimeError(
+                f"{backend} cache renderer failed: "
+                + result.stderr.decode("utf-8", errors="replace").strip()
+            )
     rendered = np.frombuffer(result.stdout, dtype="<f8")
     if rendered.size != count or not np.all(np.isfinite(rendered)):
         raise RuntimeError(f"{backend} cache render was incomplete or non-finite")
@@ -110,6 +113,21 @@ def relative_l2(candidate: np.ndarray, reference: np.ndarray) -> float:
 
 def main() -> None:
     bases = np.fromfile(generator.OUTPUT, dtype="<f4").reshape(2, SAMPLE_COUNT)
+    source_graph = generator.export_scene()
+    periods, radii, carriers = generator.load_room_fit()
+    room_impulse = generator.synthesize_room_impulse(periods, radii, carriers)
+    generated_forward, generated_reverse = generator.render_endpoints(
+        source_graph, room_impulse
+    )
+    generated_bases = np.stack((generated_forward, generated_reverse))
+    analytic = generator.analytic_validation(
+        source_graph,
+        periods,
+        radii,
+        carriers,
+        generated_forward,
+        generated_reverse,
+    )
     cases = (
         ("forward_integer", 1.0, 110000, 512, 1.0, 0.0),
         ("reverse_integer", -1.0, 250000, 512, 1.0, 0.0),
@@ -120,10 +138,12 @@ def main() -> None:
     results: dict[str, dict[str, float | None]] = {}
     for name, position, start, count, velocity, tau_base in cases:
         print(f"case {name}", file=sys.stderr, flush=True)
-        cache_graph = graph_for(position, direct=False)
-        direct_graph = graph_for(position, direct=True)
+        cache_graph = graph_for(position)
         oracle = cache_oracle(
             bases, position, start, count, velocity, tau_base
+        )
+        generation_oracle = cache_oracle(
+            generated_bases, position, start, count, velocity, tau_base
         )
         cache_jit = render(cache_graph, "jit", start, count, velocity, tau_base)
         cache_metal = (
@@ -131,18 +151,22 @@ def main() -> None:
             if velocity == 1.0 and tau_base == 0.0
             else None
         )
-        direct_jit = render(direct_graph, "jit", start, count, velocity, tau_base)
         results[name] = {
             "cache_jit_vs_read_oracle": relative_l2(cache_jit, oracle),
             "cache_metal_vs_read_oracle": (
                 relative_l2(cache_metal, oracle) if cache_metal is not None else None
             ),
-            "cache_jit_vs_direct_jit": relative_l2(cache_jit, direct_jit),
-            "cache_vs_direct_max_absolute_error": float(
-                np.max(np.abs(cache_jit - direct_jit))
+            "cache_jit_vs_generation_oracle": relative_l2(
+                cache_jit, generation_oracle
+            ),
+            "cache_vs_generation_max_absolute_error": float(
+                np.max(np.abs(cache_jit - generation_oracle))
             ),
         }
-    print(json.dumps(results, indent=2, sort_keys=True))
+    print(json.dumps({
+        "analytic_generation": analytic,
+        "runtime_cases": results,
+    }, indent=2, sort_keys=True))
     failures: list[str] = []
     for name, measured in results.items():
         # The host writes velocity/tau as binary64, then the master clock
@@ -155,11 +179,11 @@ def main() -> None:
         metal_error = measured["cache_metal_vs_read_oracle"]
         if metal_error is not None and metal_error > 1e-5:
             failures.append(f"{name}: Metal read oracle")
-        # Linear interpolation is the documented approximation relative to the
-        # arbitrary-coordinate direct evaluator.  Two percent NRMSE bounds its
-        # full forward/reverse/stopped/reversed FLOW matrix.
-        if measured["cache_jit_vs_direct_jit"] > 2e-2:
-            failures.append(f"{name}: direct FLOW reference")
+        # The independent generator retains binary64 until the final asset
+        # quantization. This bound covers float32 storage plus Q32.32 clock
+        # coordinate quantization across the FLOW matrix.
+        if measured["cache_jit_vs_generation_oracle"] > 1e-6:
+            failures.append(f"{name}: generation FLOW reference")
     if failures:
         raise SystemExit("scene-cache probe failed: " + ", ".join(failures))
 

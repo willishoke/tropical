@@ -14,6 +14,8 @@
   const SCENE_SECONDS = PATTERN_SECONDS
   const SAMPLE_RATE = 44100
   const STRING_ATTACK_DELAY = 0.06
+  const PIZZICATO_SECTION_GAIN = 3
+  const PIZZICATO_ROOM_SEND = 3
 
   const CHORDS = [
     {
@@ -201,22 +203,23 @@
     chord.voices.map((_voice, voiceIndex) => scopeEnvelopePeak(chordIndex, voiceIndex))
   )))
 
-  // A short, inharmonic metal cloud for the wet-room witness. Like the string
-  // attack, each row is paired with an equal negative fast decay, so the hit is
-  // causal and click-free while remaining a finite closed-form modal bank.
-  // The frequencies are intentionally non-latticed: this is percussion, not a
-  // tempered pitch pretending to be noise.
-  const SNARE_FREQUENCIES = [
-    211, 433, 887, 1511, 2837, 5081,
-  ]
-
-  function snareModes(hitIndex) {
+  // A short, warm pizzicato derived from the exact chord lattice. The shared
+  // section gain is the listening-approved +9.5 dB lift; the room has a second
+  // explicit compensation gain below because this low-register source excites
+  // the fitted transfer much less strongly than the retired Metal cloud did.
+  function pizzicatoModes(fundamental, velocity, voiceIndex) {
     const rows = []
-    SNARE_FREQUENCIES.forEach((frequency, index) => {
-      const amplitude = 0.065 * Math.pow(1 + index, -0.32)
-      const bodyDecay = 7.5 + 1.15 * index
-      const attackDecay = bodyDecay + 88 + 3.7 * index
-      const phase = GOLDEN_ANGLE * (index + 11 * hitIndex + 1) % TWO_PI
+    for (let partial = 1; partial <= 5; partial += 1) {
+      const amplitude = (
+        0.04
+        * PIZZICATO_SECTION_GAIN
+        * velocity
+        / Math.pow(partial, 1.42)
+      )
+      const bodyDecay = 9.5 + 3.5 * (partial - 1)
+      const attackDecay = bodyDecay + 118 + 24 * (partial - 1)
+      const phase = GOLDEN_ANGLE * (voiceIndex + 3 * partial) % TWO_PI
+      const frequency = rounded(fundamental * partial)
       rows.push([
         frequency,
         rounded(bodyDecay, 6),
@@ -229,9 +232,31 @@
         rounded(-amplitude, 9),
         rounded(phase, 9),
       ])
-    })
+    }
     return rows
   }
+
+  const GHOST_VOICES = [2, 4, 1]
+  const GHOST_VELOCITIES = [0.44, 0.52, 0.4]
+
+  function pizzicatoBeatModes(chord, beatInChord) {
+    const voices = beatInChord === 0
+      ? [[0, 0.72], [3, 0.64]]
+      : [[GHOST_VOICES[beatInChord - 1], GHOST_VELOCITIES[beatInChord - 1]]]
+    return voices.flatMap(([voiceIndex, velocity]) => (
+      pizzicatoModes(
+        voiceFrequency(chord, chord.voices[voiceIndex]),
+        velocity,
+        voiceIndex,
+      )
+    ))
+  }
+
+  const pizzicatoBeatId = (beatIndex) => `pizzicatoBeat${beatIndex + 1}`
+  const PIZZICATO_BEAT_IDS = Array.from(
+    { length: PATTERN_STEPS },
+    (_unused, beatIndex) => pizzicatoBeatId(beatIndex),
+  )
 
   const scopeModeId = (chordIndex, voiceIndex) => (
     `scopeChord${chordIndex + 1}Mode${voiceIndex + 1}`
@@ -272,7 +297,7 @@
       {
         id: 'levelControl',
         kind: 'glideknob',
-        // Boot-muted while the Metal coefficient paths are primed. The UI's
+        // Boot-muted while the modal coefficient paths are primed. The UI's
         // authored level is applied immediately before the scene is rebased to
         // zero, so no false first chord leaks during warm-up.
         params: { value: 0 },
@@ -335,31 +360,32 @@
       veilIds.push(veilId)
     })
 
-    // One hard wet hit halfway between each chord. The direct modal cloud is
-    // retained at low level by its authored residues; the same source crosses
-    // a denser room so the return is unmistakably long, metallic, and spatial.
-    for (let hitIndex = 0; hitIndex < 4; hitIndex += 1) {
-      const number = hitIndex + 1
-      const hitId = `metalHit${number}`
-      const strikeTime = hitIndex * 4 * STEP_SECONDS + 2 * STEP_SECONDS
+    // The selected percussion score is one chord-derived pizzicato per beat:
+    // an open dyad on each chord downbeat, then three lighter single-note
+    // ghosts. Its strike offset matches the string lane so chord and pluck
+    // arrive as one gesture.
+    PIZZICATO_BEAT_IDS.forEach((hitId, beatIndex) => {
+      const chordIndex = Math.floor(beatIndex / 4)
+      const beatInChord = beatIndex % 4
+      const strikeTime = beatIndex * STEP_SECONDS + STRING_ATTACK_DELAY
       nodes.push(
         {
           id: hitId,
           kind: 'string',
           params: {
             t: rounded(strikeTime, 6),
-            modes: snareModes(hitIndex),
+            modes: pizzicatoBeatModes(CHORDS[chordIndex], beatInChord),
           },
           sel: {},
           in: {},
         },
       )
       hitIds.push(hitId)
-    }
+    })
 
     nodes.push(
       // These are ordinary signal sums. Each modal branch is realized on its
-      // own side of the boundary, so all four strike anchors survive.
+      // own side of the boundary, so all sixteen beat anchors survive.
       {
         id: 'veil',
         kind: 'mix',
@@ -382,11 +408,25 @@
         in: {},
       },
       {
+        id: 'pizzicatoRoomCompensation',
+        kind: 'knob',
+        params: { value: PIZZICATO_ROOM_SEND },
+        sel: {},
+        in: {},
+      },
+      {
+        id: 'compensatedRoom',
+        kind: 'ring',
+        params: {},
+        sel: {},
+        in: { in: ['room', 'pizzicatoRoomCompensation'] },
+      },
+      {
         id: 'wet',
         kind: 'ring',
         params: {},
         sel: {},
-        in: { in: ['room', 'spaceLevel'] },
+        in: { in: ['compensatedRoom', 'spaceLevel'] },
       },
       {
         id: 'impact',
@@ -475,7 +515,7 @@
       step: 0.05,
       value: 1,
       unit: '×',
-      help: 'raise the temporal Metal field against the strings',
+      help: 'raise the temporal pizzicato field against the strings',
     },
     {
       slot: 'positionControl.value',
@@ -510,7 +550,7 @@
     },
   ]
 
-  // First-use Metal coefficient families exercised while `levelControl` keeps
+  // First-use modal coefficient families exercised while `levelControl` keeps
   // the boot graph muted. The app and noninteractive qualification runner both
   // consume this list; neither maintains a second scene-specific copy.
   const PRIME_SLOTS = [
@@ -526,11 +566,14 @@
     SCENE_SECONDS,
     SAMPLE_RATE,
     STRING_ATTACK_DELAY,
+    PIZZICATO_SECTION_GAIN,
+    PIZZICATO_ROOM_SEND,
     CHORDS,
     CONTROLS,
     PRIME_SLOTS,
     SCOPE_TAPS,
     SCOPE_FULL_SCALE,
+    PIZZICATO_BEAT_IDS,
     absoluteRatio,
     ratioLabel,
     voiceFrequency,
@@ -540,7 +583,9 @@
     scopeEnvelopePeak,
     scopeEnvelopeAt,
     scopeEnvelopeSamples,
-    snareModes,
+    pizzicatoModes,
+    pizzicatoBeatModes,
+    pizzicatoBeatId,
     scopeModeId,
     buildSceneGraph,
   }

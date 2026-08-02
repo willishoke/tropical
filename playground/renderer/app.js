@@ -535,7 +535,7 @@ async function boot() {
 
   const status = document.getElementById('status')
   try {
-    status.textContent = 'compiling / twenty strings + four metal returns'
+    status.textContent = 'compiling / phase strings + sixteen-beat pizzicato room'
     await rpc('load_patch_graph', GRAPH)
 
     let audio = 'audio live'
@@ -579,7 +579,7 @@ async function boot() {
     status.classList.toggle('fault', missing.length > 0)
     status.textContent = missing.length
       ? `${audio} / missing ${missing.map((name) => `scope.${name}`).join(', ')}`
-      : `${audio} / 44.1 kHz / twenty strings + wet metal`
+      : `${audio} / 44.1 kHz / phase strings + pizzicato room`
 
     if (!loopStarted) {
       loopStarted = true

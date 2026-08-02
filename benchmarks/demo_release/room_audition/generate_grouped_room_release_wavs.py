@@ -60,7 +60,7 @@ def graph_for(position: float, room_level: float, wet_only: bool) -> dict[str, o
     by_id["levelControl"]["params"]["value"] = AUTHORED_LEVEL
     if wet_only:
         # Preserve the integrated presence, listening-level, and master-gain
-        # path while removing strings and the parallel dry Metal impact.
+        # path while removing strings and the parallel dry pizzicato impact.
         by_id["body"]["in"]["in"] = ["wet"]
     return graph
 
@@ -156,7 +156,17 @@ def main() -> None:
     dry = render(graph_for(1.0, 0.0, wet_only=False))
     full_forward = render(graph_for(1.0, ROOM_LEVEL, wet_only=False))
 
-    integrated_wet_gain = MASTER_GAIN * PRESENCE * AUTHORED_LEVEL * ROOM_LEVEL
+    room_compensation = next(
+        node for node in source_graph["nodes"]
+        if node["id"] == "pizzicatoRoomCompensation"
+    )["params"]["value"]
+    integrated_wet_gain = (
+        MASTER_GAIN
+        * PRESENCE
+        * AUTHORED_LEVEL
+        * ROOM_LEVEL
+        * room_compensation
+    )
     expected_forward = integrated_wet_gain * bases[0]
     expected_reverse = integrated_wet_gain * bases[1]
     endpoint_parity = {
@@ -222,15 +232,16 @@ def main() -> None:
             "presence": PRESENCE,
             "level": AUTHORED_LEVEL,
             "room": ROOM_LEVEL,
+            "pizzicato_room_compensation": room_compensation,
             "integrated_wet": integrated_wet_gain,
             "normalization_or_limiter": "none",
         },
         "position_choreography": {
             "start": 1.0,
             "forward_to_reverse_seconds": [3.0, 4.5],
-            "reverse_hold_includes_hit_seconds": 6.0,
+            "reverse_hold_pizzicato_beats_seconds": [5.06, 6.06, 7.06],
             "reverse_to_forward_seconds": [7.5, 9.0],
-            "later_forward_hit_seconds": 10.0,
+            "later_forward_pizzicato_beats_seconds": [9.06, 10.06],
             "curve": "smoothstep position into equal-power endpoint gains",
         },
         "endpoint_parity": endpoint_parity,

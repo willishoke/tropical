@@ -9,40 +9,66 @@
   "interpolation": "cyclic linear",
   "position_mix": "equal power: reverse=sqrt((1-p)/2), forward=sqrt((1+p)/2)",
   "source_scene": "playground/scene.js",
-  "source_graph_sha256": "383e3f393754b1096126ca6b619f4a0d1ad3515457e21e54ea5974dcb1baec70",
-  "source_direct_profile": "clouds-current-radii-mono-v1",
-  "source_direct_asset_sha256": "838019933ddc885cb519ae0ba40233ee5d3e95cce4e8951ca566c8f1f5f65986",
+  "source_graph_sha256": "f9ed4a6cc7ba3445bc72f65dd514d9d32e149e5d05b4cf431b0c8a47318c575b",
+  "source_room_fit": "benchmarks/demo_release/room_audition/native_rate_out/grouped_fit_current_radii.npz",
+  "source_room_fit_sha256": "91f4a4f29f29e396489603f6a4a10857f1cadb80267fbfecfa6adec9c62aaf0c",
+  "source_nodes": [
+    "pizzicatoBeat1",
+    "pizzicatoBeat2",
+    "pizzicatoBeat3",
+    "pizzicatoBeat4",
+    "pizzicatoBeat5",
+    "pizzicatoBeat6",
+    "pizzicatoBeat7",
+    "pizzicatoBeat8",
+    "pizzicatoBeat9",
+    "pizzicatoBeat10",
+    "pizzicatoBeat11",
+    "pizzicatoBeat12",
+    "pizzicatoBeat13",
+    "pizzicatoBeat14",
+    "pizzicatoBeat15",
+    "pizzicatoBeat16"
+  ],
+  "downstream_room_compensation": 3,
   "generation": {
-    "method": "room-bus endpoints rendered through direct JIT evaluator; master sink gain removed",
-    "master_sink_gain_removed": 3.7,
-    "buffer_frames": 512,
+    "method": "fixed modal score FFT-convolved with the accepted grouped carrier room and checked against infinite analytic grouped equations",
+    "room_impulse_seconds": 20,
+    "source_tail_seconds": 4,
     "command": "uv run --with numpy python benchmarks/demo_release/room_audition/generate_grouped_room_scene_cache.py"
+  },
+  "oracle": {
+    "source_rows": 200,
+    "sample_coordinates_checked": 9,
+    "causal_fft_vs_infinite_analytic_relative_l2": 5.035174810509401e-14,
+    "reverse_fft_vs_infinite_analytic_relative_l2": 1.5947933848262424e-13,
+    "max_absolute_error": 8.376979665492001e-15
   },
   "arrays": [
     {
       "role": "causal",
       "byte_offset": 0,
       "element_count": 705600,
-      "peak": 0.22433817386627197,
+      "peak": 0.07721111923456192,
       "float32_quantization": {
-        "relative_l2": 2.5233851032291723e-08,
-        "max_absolute_error": 7.439431265465757e-09
+        "relative_l2": 2.513561006653247e-08,
+        "max_absolute_error": 3.723482300266312e-09
       }
     },
     {
       "role": "classic_reverse",
       "byte_offset": 2822400,
       "element_count": 705600,
-      "peak": 0.08079387992620468,
+      "peak": 0.09220019727945328,
       "float32_quantization": {
-        "relative_l2": 2.5239721495044383e-08,
-        "max_absolute_error": 3.7228182342419203e-09
+        "relative_l2": 2.5318046454874464e-08,
+        "max_absolute_error": 3.724392433346324e-09
       }
     }
   ],
   "asset": {
     "path": "playground/assets/grouped-room/clouds-current-radii-mono-v1-scene-44100.f32le",
     "byte_count": 5644800,
-    "sha256": "33dad76b92c7b11f297a1e32979e89f36fd1b16fbb8f923c726756ebce2d06f3"
+    "sha256": "22b534e561aa1fef8aa4535ff321ee5df90c9cfb2743c274fc44d183216a615e"
   }
 }

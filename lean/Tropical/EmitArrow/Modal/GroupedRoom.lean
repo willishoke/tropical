@@ -35,7 +35,7 @@ def groupedRoomCacheAssetPath : String :=
   "playground/assets/grouped-room/clouds-current-radii-mono-v1-scene-44100.f32le"
 def groupedRoomCacheAssetBytes : Nat := 5644800
 def groupedRoomCacheAssetSha256 : String :=
-  "33dad76b92c7b11f297a1e32979e89f36fd1b16fbb8f923c726756ebce2d06f3"
+  "22b534e561aa1fef8aa4535ff321ee5df90c9cfb2743c274fc44d183216a615e"
 def groupedRoomCacheElementCount : Nat := 705600
 def groupedRoomCacheForwardInputName : String := "__groupedroom_scene_forward"
 def groupedRoomCacheReverseInputName : String := "__groupedroom_scene_reverse"

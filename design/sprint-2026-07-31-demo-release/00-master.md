@@ -69,6 +69,32 @@ the final POSITION choreography peaks at `−5.01 dBFS` without normalization or
 a limiter. Final headphone/monitor approval of that capture remains the only
 open acceptance decision.
 
+### 2026-08-02 chord-derived percussion revision
+
+Subsequent listening supersedes only the fixed percussion score and its cached
+room witness, not the accepted room transfer, POSITION semantics, cache ABI,
+scope lock, or mono output contract. The four inharmonic Metal hits are replaced
+by audition candidate 02: a chord-derived pizzicato on every beat, with an open
+dyad at each chord downbeat and three lighter single-note ghosts. The approved
+balance uses a shared `3×` pizzicato-section gain and a further fixed `3×` room
+compensation while ROOM retains its `0…1.5×` user range.
+
+The direct grouped evaluator is instrument-specific: its immutable tables and
+compiler admission check require the retired twelve Metal pole coordinates.
+It therefore remains historical room/ABI evidence rather than the revised
+scene-cache generator. The shipping cache ABI is unchanged at 5,644,800 bytes;
+its new arms are generated offline from the exact 200-row fixed score and the
+accepted native grouped-carrier fit. The finite FFT construction agrees with
+the infinite analytic grouped equations at `5.04e-14` causal and `1.59e-13`
+reverse relative L2; JIT/Metal reads agree with the binary64 generation oracle
+within `4.54e-8` across integer, fractional, stopped, and reverse FLOW cases.
+The new immutable cache hash is `22b534e561aa1fef8aa4535ff321ee5df90c9cfb2743c274fc44d183216a615e`.
+
+The complete offline native graph peaks at `−6.25 dBFS` dry, `−2.43 dBFS` at
+POSITION `+1`, and `−3.21 dBFS` at `+0.5`; there is no normalization or limiter.
+The prior hardware qualification remains evidence for the engine/cache path,
+but is not silently relabeled as qualification of this denser revised graph.
+
 Exploratory result DR-11 enabled the selected architecture. A 9,133-mode
 Freeverb-style LTI teacher was recovered exactly by collecting its complete
 delay pole lattices into 12 periodic carriers and analytically convolving those
