@@ -100,6 +100,25 @@ IDs, read buffer, 128-request bound, timeouts, and exactly-once exit failure.
 The public engine facade routes methods by traffic class, so delayed compile
 or scope response bytes cannot serialize a knob write on the client.
 
+### S-11 — Land the served live-room truth that does not prejudge gong admission
+
+The production serialized-path gate uses `string → reverb → out`, with a
+served resonator substitution. It proves exact silence after source removal,
+wet changes after source substitution and a structural string-mode edit, live
+`rt60`/`dir`/`sway`/`rate` writes under one program version, and bit-exact
+forward/hold/reverse/seek coordinate equivalence. It does not expose
+`bloomgong` or misrepresent signal-valued `gong` as modal.
+
+## Open architecture gate
+
+The master handoff also asks for a literal serialized `gong → reverb` fixture.
+At the frozen baseline, served `gong` lowers to a signal outlet while
+`reverb.in` accepts modal data; `bloomgong` is the only patch-surface modal
+gong and is explicitly withheld by the sprint. The user has been asked to
+choose between recording the string/resonator regression plus lower-level
+gong seam evidence as the honest scope, or expanding the sprint to resolve
+and admit the modal gong. No release claim treats this conflict as closed.
+
 ## Qualification notes
 
 No release claim has been made. The listening decision, qualified-Mac

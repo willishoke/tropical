@@ -21,6 +21,7 @@ import Tropical.Testing.Semantics
 import Lean.Data.Json
 import Tropical.Tropicaltest.Patcher
 import Tropical.Tropicaltest.Exact
+import Tropical.Tropicaltest.LiveRoom
 
 /-!
 # tropicaltest — the post-TS golden + native-equiv runner (Phase 8)
@@ -49,6 +50,9 @@ def arrowBlockGates : Nat := 98
 
 set_option maxRecDepth 1024 in
 def main (args : List String) : IO UInt32 := do
+  if args.contains "--live-room" then
+    IO.println "served modal room (serialized string → reverb → out):"
+    return if ← Tropical.Tropicaltest.LiveRoom.runLiveRoom then 0 else 1
   let writeMode := args.contains "--write"
   let mut failed := 0
   let mut total := 0
@@ -90,6 +94,11 @@ def main (args : List String) : IO UInt32 := do
   if !(← Tropical.Tropicaltest.ExactGates.runExactValues) then failed := failed + 1
   if !(← Tropical.Tropicaltest.ExactGates.runExactPlayground) then failed := failed + 1
   if !(← Tropical.Tropicaltest.ExactGates.runExactQuantize) then failed := failed + 1
+
+  -- ── (b″) Served modal-room truth (production graph → runtime path) ────────
+  IO.println "served modal room (serialized string → reverb → out):"
+  total := total + 1
+  if !(← Tropical.Tropicaltest.LiveRoom.runLiveRoom) then failed := failed + 1
 
   -- ── (c) Synthetic op-coverage: EmitLlvm over the rare ops, frozen hash ─────
   -- The patch corpus exercises 24 of 29 ops; this funnels the rest
