@@ -83,6 +83,14 @@ the vocabulary fingerprint, and complete tap bindings. The legacy
 `list_scope_taps` method remains compatible for older clients, but new clients
 need no second request to adopt one realized generation.
 
+### S-09 — Type missing live parameters without hiding runtime faults
+
+The socket data plane reports a missing or inactive name as JSON-RPC code
+`-32004` with `data.category = "unknown_param"` and the requested name.
+Operational Metal/runtime failures retain the internal-error code and a
+distinct `runtime_failure` category instead of being mislabeled as document
+or parameter mistakes.
+
 ## Qualification notes
 
 No release claim has been made. The listening decision, qualified-Mac

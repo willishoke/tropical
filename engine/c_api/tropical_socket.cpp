@@ -210,9 +210,24 @@ static std::string dispatch_set_param(tropical_runtime::FlatRuntime * rt,
 {
   const auto result = rt->dispatch_param_sync(name, value);
   if (!result.ok)
+  {
+    const bool missing_or_inactive =
+      result.error.rfind("set_param: unknown param", 0) == 0
+      || result.error.rfind("set_param: no glide slots", 0) == 0
+      || result.error.rfind("set_param: no anchor slot", 0) == 0
+      || result.error.rfind("set_param: no velocity slot", 0) == 0
+      || result.error.rfind("set_param: no origin slot", 0) == 0;
     return json{{"jsonrpc", "2.0"}, {"id", id},
-                {"error", {{"code", -32603},
-                           {"message", result.error}}}}.dump();
+                {"error", {
+                  {"code", missing_or_inactive ? -32004 : -32603},
+                  {"message", result.error},
+                  {"data", {
+                    {"category", missing_or_inactive
+                      ? "unknown_param" : "runtime_failure"},
+                    {"name", name},
+                  }},
+                }}}.dump();
+  }
   return json{{"jsonrpc", "2.0"}, {"id", id},
               {"result", {
                 {"name", name},
@@ -247,7 +262,14 @@ std::string SocketServer::handle_data(const std::string & line)
       const double value = p.at("value").get<double>();
       if (!std::isfinite(value))
         return json{{"jsonrpc", "2.0"}, {"id", id},
-                    {"error", {{"code", -32603}, {"message", "set_param: value must be finite"}}}}.dump();
+                    {"error", {
+                      {"code", -32602},
+                      {"message", "set_param: value must be finite"},
+                      {"data", {
+                        {"category", "invalid_value"},
+                        {"name", name},
+                      }},
+                    }}}.dump();
       return dispatch_set_param(runtime_, id, name, value);
     }
 

@@ -17,6 +17,13 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const frontendBin = resolve(repoRoot, 'lean/.lake/build/bin/frontend')
 
 type Pending = { resolve: (value: any) => void; reject: (error: Error) => void }
+let clientSerial = 0
+
+class EngineRPCError extends Error {
+  constructor(readonly rpcError: any) {
+    super(rpcError?.message ?? 'engine RPC error')
+  }
+}
 
 class EngineClient {
   private readonly process: ChildProcess
@@ -29,7 +36,10 @@ class EngineClient {
   private stopped = false
 
   constructor() {
-    this.socketPath = join(tmpdir(), `tropical-handshake-${process.pid}.sock`)
+    this.socketPath = join(
+      tmpdir(),
+      `tropical-handshake-${process.pid}-${++clientSerial}.sock`,
+    )
     this.process = spawn(frontendBin, ['--serve', this.socketPath], {
       cwd: repoRoot,
       stdio: ['ignore', 'ignore', 'ignore'],
@@ -79,7 +89,7 @@ class EngineClient {
       if (!pending) continue
       this.pending.delete(message.id)
       if (message.error) {
-        pending.reject(new Error(JSON.stringify(message.error)))
+        pending.reject(new EngineRPCError(message.error))
         continue
       }
       const textEnvelope = message.result?.content?.[0]?.text
@@ -175,6 +185,32 @@ describe('load_patch_graph compile handshake', () => {
       })
       expect(nextRendered.program_version).toBe(next.program_version)
       expect(nextRendered.control_version).toBe(next.control_version)
+    } finally {
+      client.stop()
+    }
+  })
+
+  test('missing parameters have typed socket errors', async () => {
+    if (!existsSync(frontendBin))
+      throw new Error(`frontend binary missing: ${frontendBin} (run \`make build lean\`)`)
+
+    const client = new EngineClient()
+    try {
+      await client.call('load_patch_graph', graph)
+
+      try {
+        await client.call('set_param', { name: 'missing.param', value: 1 })
+        throw new Error('missing parameter unexpectedly succeeded')
+      } catch (error) {
+        expect(error).toBeInstanceOf(EngineRPCError)
+        const rpcError = (error as EngineRPCError).rpcError
+        expect(rpcError.code).toBe(-32004)
+        expect(rpcError.data).toEqual({
+          category: 'unknown_param',
+          name: 'missing.param',
+        })
+      }
+
     } finally {
       client.stop()
     }
