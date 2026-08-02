@@ -981,6 +981,68 @@ static void test_separate_scope_artifact()
   for (double value : rt.outputBuffer) ASSERT(value == 0.25);
 }
 
+// A scope control image contains projected raw controls, not the scalar
+// coefficients privately materialized from them. Two reads of one immutable
+// control version must therefore reuse the materialized scalar slot image;
+// resetting to the raw image without rerunning the coefficient kernel makes
+// every read after the first render a different program.
+static void test_scope_reuses_materialized_scalar_coefficients()
+{
+  tropical_runtime::FlatRuntime rt(16);
+  const std::string audio_ir = wrap_loop(
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double 0.000000e+00, ptr %op, align 8\n");
+  const std::string scope_ir = wrap_loop(
+    "  %cp = getelementptr inbounds double, ptr %slots, i64 2\n"
+    "  %coef = load double, ptr %cp, align 8\n"
+    "  %tp = getelementptr inbounds double, ptr %slots, i64 0\n"
+    "  store double %coef, ptr %tp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %coef, ptr %op, align 8\n");
+  const std::string scope_coeff_ir = std::string("define void @kernel(")
+    + KERNEL_SIG + ") {\n"
+      "entry:\n"
+      "  %xp = getelementptr inbounds double, ptr %slots, i64 1\n"
+      "  %x = load double, ptr %xp, align 8\n"
+      "  %c = fmul double %x, 2.000000e+00\n"
+      "  %cp = getelementptr inbounds double, ptr %slots, i64 2\n"
+      "  store double %c, ptr %cp, align 8\n"
+      "  ret void\n}\n";
+  const std::string audio_manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":1,"slot_names":["param:x"],
+    "slot_defaults":[3.0],"param_disciplines":[
+      {"name":"x","discipline":"raw","companions":[]}
+    ]})";
+  const std::string scope_manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":3,
+    "slot_names":["__root__.tap:mode","param:x","coeff:x2"],
+    "slot_defaults":[0.0,-1.0,-99.0],"param_disciplines":[]})";
+
+  ASSERT(rt.load_ir_staged_with_scope(
+    audio_ir, "", "", audio_manifest,
+    scope_ir, scope_coeff_ir, scope_manifest));
+
+  const auto check_twice = [&](double expected) {
+    std::array<double, 4> values{};
+    for (unsigned int read = 0; read < 2; ++read)
+    {
+      const auto scope = rt.render_window_low_priority_by_name(
+        0, static_cast<uint32_t>(values.size()), 1,
+        {"__root__.tap:mode"}, values.data());
+      ASSERT(scope.status == tropical_runtime::RenderWindowStatus::Rendered);
+      for (double value : values) ASSERT(value == expected);
+    }
+  };
+  check_twice(6.0);
+  const auto update = rt.dispatch_param_sync("x", 7.0);
+  ASSERT(update.ok);
+  check_twice(14.0);
+}
+
 // Scope-side coefficient materialization is private to the immutable control
 // image: a column update becomes visible coherently without borrowing any of
 // the audio state's three mutable generations.
@@ -1444,6 +1506,8 @@ int main()
            test_scope_named_render_pins_program);
   run_test("separate scope artifact projects controls by name",
            test_separate_scope_artifact);
+  run_test("scope reuses materialized scalar coefficients",
+           test_scope_reuses_materialized_scalar_coefficients);
   run_test("scope snapshot materializes coefficient columns privately",
            test_scope_snapshot_materializes_coefficients);
   run_test("coherent slot/coefficient generation", test_control_generation_coherence);

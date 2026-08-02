@@ -207,6 +207,10 @@ struct ScopeRenderWorkspace
   std::vector<int64_t> temps;
   std::vector<int64_t> coeff_registers;
   std::vector<int64_t> coeff_temps;
+  // Coefficient kernels may write scalar slots as well as array columns.
+  // Preserve their materialized image across render_window calls; `slots`
+  // itself is per-coordinate scratch and is overwritten by the main kernel.
+  std::vector<double> materialized_slots;
   std::vector<double> slots;
   std::vector<std::vector<int64_t>> arrays;
   std::vector<int64_t *> array_ptrs;
@@ -884,6 +888,7 @@ public:
       workspace.temps.assign(program.temp_count, 0);
       workspace.coeff_registers.assign(program.coeff_register_count, 0);
       workspace.coeff_temps.assign(program.coeff_temp_count, 0);
+      workspace.materialized_slots.clear();
       std::vector<bool> immutable_slot(program.array_sizes.size(), false);
       if (program.immutable_assets)
         for (uint32_t slot : program.immutable_assets->array_slots)
@@ -909,32 +914,34 @@ public:
       workspace.control_version = 0;
     }
 
-    // Kernel-written output slots are per-frame scratch. Reset them from the
-    // immutable control image every frame even when coefficient columns remain
-    // cached from this same control version.
-    workspace.slots = snapshot->controls->slots;
-
     // Re-materialize coefficient scalars/columns in read-side private storage.
     // Scope publication carries the complete discipline-updated slot vector;
     // the coefficient kernel is a pure control-time function of that image.
     if (workspace.control_version != snapshot->controls->control_version
-        && program.coeff_kernel)
+        || workspace.materialized_slots.empty())
     {
+      workspace.materialized_slots = snapshot->controls->slots;
       double coeff_out = 0.0;
-      program.coeff_kernel(
-        nullptr,
-        workspace.coeff_registers.data(),
-        workspace.array_ptrs.data(),
-        program.array_sizes.data(),
-        workspace.coeff_temps.data(),
-        program.sample_rate,
-        0,
-        program.param_ptrs.data(),
-        &coeff_out,
-        1,
-        workspace.slots.data());
+      if (program.coeff_kernel)
+        program.coeff_kernel(
+          nullptr,
+          workspace.coeff_registers.data(),
+          workspace.array_ptrs.data(),
+          program.array_sizes.data(),
+          workspace.coeff_temps.data(),
+          program.sample_rate,
+          0,
+          program.param_ptrs.data(),
+          &coeff_out,
+          1,
+          workspace.materialized_slots.data());
     }
     workspace.control_version = snapshot->controls->control_version;
+
+    // Kernel-written output slots are per-frame scratch. Reset them from the
+    // cached, fully materialized control image—not the pre-coefficient RCU
+    // image—before evaluating the requested coordinates.
+    workspace.slots = workspace.materialized_slots;
 
     double scratch_out = 0.0;
     for (uint32_t i = 0; i < count; ++i)
