@@ -190,6 +190,7 @@ its modal envelope are unchanged.
 | Production carrier oracle | `playground/qualification/scope-content.js`; 360/360 observations pass across 20 taps × 6 ages × 3 equivalent 16-second loop positions, with audio never started |
 | Shape and repeatability | Maximum analytic carrier-shape error `3.50e-4`, carrier peak error `1.56e-4`, relative center-lock error `4.80e-15`, and equivalent-loop error `2.87e-7` of displayed amplitude |
 | Focused frontend | 35/35 pass across scene, scope, phase-lock, RPC, sender, and qualification suites |
+| Full repository | 151 pass, 1 intentional Metal capability skip, 0 fail across the unrestricted web/JIT/Metal run plus the two MCP contracts run against their documented built Lean RPC engine |
 | Muted integrated 60 Hz profile | `2026-08-02_05-51-52-039-smoke-b128-r512`; output level exactly zero, 10.07 measured seconds, 337 dispatched writes, scope p99 `5.742 ms`, frame p95 `17.90 ms`, `59.63 fps`, zero preemptions, zero underruns/overruns or other faults, and all 15 gates pass |
 
 The muted hardware mode still runs the actual device clock and Metal worker.
