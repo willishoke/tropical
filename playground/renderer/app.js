@@ -8,8 +8,8 @@ const scene = window.ModalScene
 const GRAPH = scene.buildSceneGraph()
 const CONTROLS = scene.CONTROLS.map((control) => ({ ...control }))
 const SCOPE_PROFILE = window.ModalScopeProfile
-const phaseLock = window.ModalPhaseLock
 const scopeView = window.ModalScopeView
+const scopeFrame = window.ModalScopeFrame
 
 const MODE_COLORS = [
   '--mode-1', '--mode-2', '--mode-3', '--mode-4', '--mode-5',
@@ -497,41 +497,22 @@ async function renderFrame() {
       return
     }
 
-    const stride = response.stride ?? 1
-    const warmupPoints = Math.ceil(WARMUP_SAMPLES / stride)
-    const displayPoints = Math.ceil(DISPLAY_SAMPLES / stride)
-
     const frames = live.map((trace, resultIndex) => {
-      const values = (response.values[resultIndex] || []).slice(warmupPoints)
-      const firstSample = (response.start ?? start) + warmupPoints * stride
-      const envelopes = scene.scopeEnvelopeSamples(
-        chordIndex,
-        trace.voiceIndex,
-        clock.tauBase + clock.velocity * firstSample / scene.SAMPLE_RATE,
-        clock.velocity * stride / scene.SAMPLE_RATE,
-        values.length,
-      )
-      // The projection is envelope(t) * sin(phase(t)). Locking that product
-      // directly leaves a visible amplitude slope across every low-frequency
-      // cycle. Divide out the exact analytic envelope at each source sample,
-      // phase-lock the unit carrier, then restore the one audible-now value.
-      const carrier = scopeView.extractCarrier(
-        values, envelopes, scene.SCOPE_FULL_SCALE * 1e-6,
-      )
-      const cycles = scopeView.visibleCycles(trace.frequency, scene.BASE_HZ)
-      const periodPoints = scene.SAMPLE_RATE / trace.frequency / stride
       return {
         trace,
-        stride,
-        cycles,
-        displayEnvelope: scene.scopeEnvelopeAt(
+        ...scopeFrame.fromProjection({
+          values: response.values[resultIndex],
+          responseStart: response.start ?? start,
+          stride: response.stride,
+          warmupSamples: WARMUP_SAMPLES,
+          displaySamples: DISPLAY_SAMPLES,
+          frequency: trace.frequency,
           chordIndex,
-          trace.voiceIndex,
-          clock.tauBase + clock.velocity * position / scene.SAMPLE_RATE,
-        ),
-        ...phaseLock.centeredWindow(
-          carrier, displayPoints, cycles * periodPoints,
-        ),
+          voiceIndex: trace.voiceIndex,
+          tauBase: clock.tauBase,
+          velocity: clock.velocity,
+          playbackPosition: position,
+        }),
       }
     })
     drawModeOverlay(well, frames, chord)

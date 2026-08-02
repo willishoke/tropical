@@ -5,6 +5,7 @@ const assert = require('node:assert/strict')
 
 const scopeView = require('./renderer/scope-view')
 const scopeProfile = require('./renderer/scope-profile')
+const scopeFrame = require('./renderer/scope-frame')
 const scene = require('./scene')
 
 test('fixed volts-per-division preserves modal envelope amplitude', () => {
@@ -64,6 +65,38 @@ test('batched scope envelopes equal the exact scalar envelope', () => {
     assert.ok(Math.abs(
       value - scene.scopeEnvelopeAt(0, 0, first + index * step)
     ) < 1e-15)
+  })
+})
+
+test('the shared production transform yields one invariant carrier', () => {
+  const frequency = scene.voiceFrequency(scene.CHORDS[0], scene.CHORDS[0].voices[0])
+  const tauBase = 0.4
+  const values = scene.scopeEnvelopeSamples(
+    0, 0, tauBase, 1 / scene.SAMPLE_RATE, scopeProfile.pointBudget,
+  ).map((envelope, index) => (
+    envelope * Math.sin(Math.PI * 2 * frequency
+      * (tauBase + index / scene.SAMPLE_RATE) + 0.7)
+  ))
+  const frame = scopeFrame.fromProjection({
+    values,
+    responseStart: 0,
+    stride: 1,
+    warmupSamples: scopeProfile.warmupSamples,
+    displaySamples: scopeProfile.displaySamples,
+    frequency,
+    chordIndex: 0,
+    voiceIndex: 0,
+    tauBase,
+    velocity: 1,
+    playbackPosition: scopeProfile.pointBudget,
+  })
+  const expected = frame.values.map((_value, index) => Math.sin(
+    Math.PI * 2 * frame.cycles
+      * (index - (frame.values.length - 1) / 2)
+      / (frame.values.length - 1),
+  ))
+  frame.values.forEach((value, index) => {
+    assert.ok(Math.abs(value - expected[index]) < 1e-4)
   })
 })
 

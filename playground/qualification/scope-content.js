@@ -8,7 +8,7 @@ const { join, resolve } = require('node:path')
 const { performance } = require('node:perf_hooks')
 
 const scene = require('../scene.js')
-const phaseLock = require('../renderer/phase-lock.js')
+const scopeFrame = require('../renderer/scope-frame.js')
 const scopeProfile = require('../renderer/scope-profile.js')
 const scopeView = require('../renderer/scope-view.js')
 const { JsonLineRpcClient } = require('../rpc-client.js')
@@ -83,27 +83,21 @@ async function probe() {
         assert.equal(response.stride, 1)
         response.values.forEach((values, voiceIndex) => {
           const raw = values.slice(scopeProfile.warmupSamples)
-          const firstSample = response.start + scopeProfile.warmupSamples
-          const envelopes = scene.scopeEnvelopeSamples(
+          const frequency = scene.voiceFrequency(chord, chord.voices[voiceIndex])
+          const frame = scopeFrame.fromProjection({
+            values,
+            responseStart: response.start,
+            stride: response.stride,
+            warmupSamples: scopeProfile.warmupSamples,
+            displaySamples: scopeProfile.displaySamples,
+            frequency,
             chordIndex,
             voiceIndex,
-            tauBase + firstSample / scene.SAMPLE_RATE,
-            1 / scene.SAMPLE_RATE,
-            raw.length,
-          )
-          const carrier = scopeView.extractCarrier(
-            raw, envelopes, scene.SCOPE_FULL_SCALE * 1e-6,
-          )
-          const frequency = scene.voiceFrequency(chord, chord.voices[voiceIndex])
-          const cycles = scopeView.visibleCycles(frequency, scene.BASE_HZ)
-          const frame = phaseLock.centeredWindow(
-            carrier,
-            scopeProfile.displaySamples,
-            cycles * scene.SAMPLE_RATE / frequency,
-          )
-          const displayEnvelope = scene.scopeEnvelopeAt(
-            chordIndex, voiceIndex, audibleSceneTime,
-          )
+            tauBase,
+            velocity: 1,
+            playbackPosition: position,
+          })
+          const { cycles, displayEnvelope } = frame
           const displayed = frame.values.map((value) => (
             scopeView.applyEnvelope(value, displayEnvelope)
           ))
