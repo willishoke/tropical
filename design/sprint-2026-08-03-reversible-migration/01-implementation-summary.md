@@ -120,6 +120,18 @@ cannot overwrite the source until the user explicitly saves as v2. Compile
 validation reports integrity blockers without repairing or pruning authored
 topology.
 
+### S-13 — Make the embedded engine loader-local before signing
+
+The checkout engine carries a development rpath back to the repository build
+directory. Packaging now copies `libtropical.dylib` beside the embedded
+frontend, adds `@executable_path` to the staged frontend, and only then signs
+and verifies the app. The package script uses a dedicated Swift scratch path
+and disables SwiftPM's nested sandbox so it is reproducible in managed build
+environments. A copy of the resulting app under a fresh `/private/tmp`
+directory successfully decoded vocabulary fingerprint
+`fnv1a64:30da601c40478e7f` and compiled an active live `groupedroom` using only
+the bundled room carrier and manifest.
+
 ## Open architecture gate
 
 The master handoff also asks for a literal serialized `gong → reverb` fixture.
@@ -129,6 +141,16 @@ gong and is explicitly withheld by the sprint. The user has been asked to
 choose between recording the string/resonator regression plus lower-level
 gong seam evidence as the honest scope, or expanding the sprint to resolve
 and admit the modal gong. No release claim treats this conflict as closed.
+
+The release-scene migration has a separate constraint: the production
+`groupedroom` implementation accepts only the frozen 12-pole source coordinate
+table recorded in its carrier manifest, while the accepted 16-second scene is
+an independently phased harmonic chord lattice. The engine rejects those
+scene sources at the live-room boundary, so replacing `groupedroomcache` is
+not a document-only edit. The release scene remains gated on either broadening
+the live-room profile to accept the authored lattice or explicitly approving
+a materially different composition; no smaller technical carrier demo is
+being relabelled as the accepted scene.
 
 ## Qualification notes
 
