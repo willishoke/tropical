@@ -91,6 +91,15 @@ Operational Metal/runtime failures retain the internal-error code and a
 distinct `runtime_failure` category instead of being mislabeled as document
 or parameter mistakes.
 
+### S-10 — Split traffic by connection under one process supervisor
+
+The existing lifecycle owner remains the single authority for spawn, socket
+namespace, crash/quit cleanup, and orphan sweeping. After readiness it opens
+four framed connections—graph, control, scope, and telemetry—each with its own
+IDs, read buffer, 128-request bound, timeouts, and exactly-once exit failure.
+The public engine facade routes methods by traffic class, so delayed compile
+or scope response bytes cannot serialize a knob write on the client.
+
 ## Qualification notes
 
 No release claim has been made. The listening decision, qualified-Mac

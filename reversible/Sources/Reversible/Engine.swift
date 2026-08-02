@@ -19,6 +19,7 @@ enum EngineError: Error, LocalizedError {
     case notRunning
     case exited
     case timeout(method: String)
+    case pendingLimit(lane: String, limit: Int)
     case rpc(String)
     case engine(code: String, message: String)
 
@@ -29,8 +30,26 @@ enum EngineError: Error, LocalizedError {
         case .notRunning: return "engine not started"
         case .exited: return "engine exited"
         case .timeout(let m): return "timeout: \(m)"
+        case .pendingLimit(let lane, let limit):
+            return "RPC \(lane) has \(limit) pending requests"
         case .rpc(let s): return "RPC \(s)"
         case .engine(let code, let message): return "\(code): \(message)"
+        }
+    }
+}
+
+enum EngineRPCLane: String, Sendable {
+    case graph
+    case control
+    case scope
+    case telemetry
+
+    static func lane(for method: String) -> EngineRPCLane {
+        switch method {
+        case "set_param", "playback_position": return .control
+        case "render_window": return .scope
+        case "get_telemetry", "audio_status": return .telemetry
+        default: return .graph
         }
     }
 }
@@ -40,26 +59,25 @@ enum EngineError: Error, LocalizedError {
 /// out of the HOST's native device (RtAudio); the app is purely a control
 /// surface.
 ///
-/// Transport mirrors playground/main.js: one JSON object per line on the
-/// socket; replies are matched by `id`. The socket has a control/data plane
-/// SPLIT (tropical_socket.hpp): `set_param` / `render_window` /
-/// `playback_position` / `get_telemetry` are answered synchronously in C++
-/// and never queue behind the single Lean control thread — so knob writes
-/// and scope frames stay live through a long compile. Control-plane replies
-/// wrap an inner {status,data} in result.content[0].text; data-plane replies
-/// are a plain `result`. We unwrap both.
+/// Transport mirrors playground/main.js: one JSON object per line, replies
+/// matched by `id`. One supervisor owns the process/socket namespace, while
+/// graph, control, scope, and telemetry each use an independent connection
+/// and bounded request table. The server's C++ data-plane methods therefore
+/// never sit behind a compile response's bytes on the client. Control-plane
+/// replies wrap an inner {status,data} in result.content[0].text; data-plane
+/// replies are a plain `result`. Each lane unwraps both forms.
 actor Engine {
     private var process: Process?
-    private var sock: FileHandle?
     private var sockPath = ""
     /// The child engine OUTLIVES the app unless someone reaps it — an orphaned
     /// engine keeps the DAC (and whatever it was playing) alive forever. The
     /// box holds the Process outside actor isolation so the app-termination
     /// path (a synchronous, can't-await context) can always reach it.
     private nonisolated let procBox = ProcessBox()
-    private var buf = ""
-    private var pending: [Int: CheckedContinuation<JSONValue, Error>] = [:]
-    private var nextId = 1
+    private var graphRPC: RPCConnection?
+    private var controlRPC: RPCConnection?
+    private var scopeRPC: RPCConnection?
+    private var telemetryRPC: RPCConnection?
     private let events: @Sendable (EngineEvent) -> Void
 
     /// Resolution order: bundled engine, then an explicit developer/test
@@ -147,14 +165,20 @@ actor Engine {
         }
         p.terminationHandler = { [weak self] proc in
             events(.exit(proc.terminationStatus))
-            Task { await self?.failAllPending() }
+            Task { await self?.childDidExit() }
         }
 
         try p.run()
         process = p
         procBox.process = p
         gEngineChildPID = sig_atomic_t(p.processIdentifier)
-        try await connectSocket()
+        do {
+            try await connectLanes()
+        } catch {
+            terminateChild()
+            await closeLanes(error: error)
+            throw error
+        }
         events(.up)
     }
 
@@ -208,21 +232,24 @@ actor Engine {
         }
     }
 
-    /// The socket node appears once Engine.boot finishes and binds, so retry
-    /// until it accepts (or the process dies under us).
-    private func connectSocket() async throws {
+    /// The socket node appears once Engine.boot finishes and binds. Establish
+    /// the compiler lane while checking child liveness, then attach the three
+    /// independent data lanes to the ready server.
+    private func connectLanes() async throws {
         let deadline = ContinuousClock.now.advanced(by: .seconds(20))
         while ContinuousClock.now < deadline {
             guard process?.isRunning == true else { throw EngineError.exited }
-            if let fd = Engine.connectOnce(path: sockPath) {
-                let h = FileHandle(fileDescriptor: fd, closeOnDealloc: true)
-                h.readabilityHandler = { [weak self] h in
-                    let data = h.availableData
-                    if data.isEmpty { h.readabilityHandler = nil; return }  // EOF
-                    guard let s = String(data: data, encoding: .utf8) else { return }
-                    Task { await self?.consume(s) }
-                }
-                sock = h
+            if let fd = RPCConnection.connectOnce(path: sockPath) {
+                graphRPC = RPCConnection(lane: .graph, fileDescriptor: fd)
+                controlRPC = try await RPCConnection.connect(
+                    lane: .control, path: sockPath
+                )
+                scopeRPC = try await RPCConnection.connect(
+                    lane: .scope, path: sockPath
+                )
+                telemetryRPC = try await RPCConnection.connect(
+                    lane: .telemetry, path: sockPath
+                )
                 return
             }
             try await Task.sleep(for: .milliseconds(100))
@@ -230,131 +257,43 @@ actor Engine {
         throw EngineError.timeout(method: "connect \(sockPath)")
     }
 
-    private static func connectOnce(path: String) -> Int32? {
-        let fd = Darwin.socket(AF_UNIX, SOCK_STREAM, 0)
-        guard fd >= 0 else { return nil }
-        var addr = sockaddr_un()
-        addr.sun_family = sa_family_t(AF_UNIX)
-        let bytes = Array(path.utf8CString)
-        guard bytes.count <= MemoryLayout.size(ofValue: addr.sun_path) else {
-            close(fd)
-            return nil
-        }
-        withUnsafeMutableBytes(of: &addr.sun_path) { dst in
-            bytes.withUnsafeBytes { src in
-                dst.copyMemory(from: src)
-            }
-        }
-        let r = withUnsafePointer(to: &addr) {
-            $0.withMemoryRebound(to: sockaddr.self, capacity: 1) { sa in
-                Darwin.connect(fd, sa, socklen_t(MemoryLayout<sockaddr_un>.size))
-            }
-        }
-        guard r == 0 else {
-            close(fd)
-            return nil
-        }
-        return fd
-    }
-
-    func kill() {
+    func kill() async {
         gEngineChildPID = 0
         process?.terminationHandler = nil
         process?.terminate()
         process = nil
         procBox.take()
-        sock?.readabilityHandler = nil
-        sock = nil
+        await closeLanes(error: EngineError.exited)
         unlink(sockPath)
     }
 
-    private func failAllPending() {
+    private func childDidExit() async {
         gEngineChildPID = 0
-        let waiting = pending.values
-        pending.removeAll()
-        for c in waiting { c.resume(throwing: EngineError.exited) }
         process = nil
         procBox.take()
-        sock?.readabilityHandler = nil
-        sock = nil
+        await closeLanes(error: EngineError.exited)
         unlink(sockPath)
     }
 
-    private func consume(_ chunk: String) {
-        buf += chunk
-        while let i = buf.firstIndex(of: "\n") {
-            let line = String(buf[..<i]).trimmingCharacters(in: .whitespaces)
-            buf = String(buf[buf.index(after: i)...])
-            guard !line.isEmpty, let data = line.data(using: .utf8),
-                  let msg = try? JSONDecoder().decode(JSONValue.self, from: data),
-                  let id = msg["id"]?.doubleValue,
-                  let cont = pending.removeValue(forKey: Int(id))
-            else { continue }
-            cont.resume(with: unwrap(msg))
-        }
-    }
-
-    /// Control-plane replies nest {status,data} as text in result.content[0];
-    /// data-plane replies are the bare result. Same unwrap as main.js.
-    private func unwrap(_ msg: JSONValue) -> Result<JSONValue, Error> {
-        if let err = msg["error"], err != .null {
-            let enc = (try? JSONEncoder().encode(err)).flatMap { String(data: $0, encoding: .utf8) }
-            return .failure(EngineError.rpc(enc ?? "unknown"))
-        }
-        let result = msg["result"] ?? .null
-        guard case .array(let content)? = result["content"],
-              let text = content.first?["text"]?.stringValue
-        else { return .success(result) }
-        guard let data = text.data(using: .utf8),
-              let inner = try? JSONDecoder().decode(JSONValue.self, from: data)
-        else { return .failure(EngineError.rpc("unparseable inner reply")) }
-        if inner["status"]?.stringValue == "ok" {
-            return .success(inner["data"] ?? .null)
-        }
-        return .failure(EngineError.engine(
-            code: inner["error"]?["code"]?.stringValue ?? "unknown",
-            message: inner["error"]?["message"]?.stringValue ?? "unknown"))
+    private func closeLanes(error: Error) async {
+        let lanes = [graphRPC, controlRPC, scopeRPC, telemetryRPC]
+        graphRPC = nil
+        controlRPC = nil
+        scopeRPC = nil
+        telemetryRPC = nil
+        for lane in lanes { await lane?.close(error: error) }
     }
 
     @discardableResult
     func call(_ method: String, _ params: JSONValue = .object([:])) async throws -> JSONValue {
-        guard let sock else { throw EngineError.notRunning }
-        let id = nextId
-        nextId += 1
-        let req = JSONValue.object([
-            "jsonrpc": .string("2.0"), "id": .number(Double(id)),
-            "method": .string(method), "params": params,
-        ])
-        var line = try JSONEncoder().encode(req)
-        line.append(0x0A)
-
-        // The compile+JIT is synchronous on the engine's one control thread, and
-        // a heavy kernel (a modal reverb) can take tens of seconds. A short
-        // timeout gives up while the engine is still grinding (the thread stays
-        // blocked, the late reply is dropped), so heavy compiles get a long leash
-        // while other CONTROL calls still fail fast. Data-plane methods
-        // (set_param/render_window/playback_position) answer in C++ and never
-        // wait on that thread. NOTE: a diagnostic band-aid — the real fix is
-        // compiling off the control thread.
-        let timeout: Duration = method == "load_patch_graph" ? .seconds(180) : .seconds(30)
-        let timer = Task { [weak self] in
-            try await Task.sleep(for: timeout)
-            await self?.timeOut(id: id, method: method)
+        let connection: RPCConnection? = switch EngineRPCLane.lane(for: method) {
+        case .graph: graphRPC
+        case .control: controlRPC
+        case .scope: scopeRPC
+        case .telemetry: telemetryRPC
         }
-        defer { timer.cancel() }
-
-        return try await withCheckedThrowingContinuation { cont in
-            pending[id] = cont
-            do { try sock.write(contentsOf: line) } catch {
-                pending.removeValue(forKey: id)
-                cont.resume(throwing: error)
-            }
-        }
-    }
-
-    private func timeOut(id: Int, method: String) {
-        guard let cont = pending.removeValue(forKey: id) else { return }
-        cont.resume(throwing: EngineError.timeout(method: method))
+        guard let connection else { throw EngineError.notRunning }
+        return try await connection.call(method, params)
     }
 }
 
