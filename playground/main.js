@@ -20,8 +20,9 @@ function startEngine() {
     cwd: REPO,
     env: {
       ...process.env,
-      // Metal owns live audio for this dense modal scene. The engine keeps its
-      // dual-loaded JIT artifact for the scopes' random-access reads.
+      // Metal owns live audio for this dense modal scene. Random-access scopes
+      // use their own JIT-only projection artifact, atomically published beside
+      // the audio program.
       TROPICAL_BACKEND: useMetal ? 'metal' : '',
       // The fixed release candidate keeps the device callback short while the
       // worker renders deeper 512-frame tiles. Qualification may override the

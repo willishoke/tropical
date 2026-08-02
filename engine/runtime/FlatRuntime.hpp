@@ -20,6 +20,7 @@
 #include <cstdint>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <thread>
 #include <type_traits>
@@ -177,6 +178,7 @@ struct ScopeProgramImage
   std::vector<uint64_t> param_ptrs;
   std::vector<uint32_t> coeff_array_slots;
   std::vector<std::string> slot_names;
+  std::vector<double> initial_slots;
   std::unordered_map<std::string, uint32_t> slot_lookup;
   std::shared_ptr<const ImmutableAssetPack> immutable_assets;
 };
@@ -358,6 +360,18 @@ public:
    */
   bool load_ir_staged(const std::string & ir_text, const std::string & msl_source,
                       const std::string & coeff_ir, const std::string & manifest_json);
+
+  /**
+   * Atomically publish distinct audio and scope artifacts. The audio artifact
+   * may carry MSL and owns realtime execution; the scope artifact is JIT-only
+   * and is retained solely by immutable ScopeSnapshots. Their slot layouts may
+   * differ: control publication projects matching names into the scope image.
+   */
+  bool load_ir_staged_with_scope(
+    const std::string & ir_text, const std::string & msl_source,
+    const std::string & coeff_ir, const std::string & manifest_json,
+    const std::string & scope_ir, const std::string & scope_coeff_ir,
+    const std::string & scope_manifest_json);
 
   /**
    * Control-plane/test-only: reposition the active kernel's sample clock
@@ -1367,7 +1381,9 @@ private:
   // sample coordinate and performs the atomic double-buffer flip.
   // load_ir fills the kernel handle (via compile_ir_text) between them.
   KernelState build_kernel_state(const tropical_plan5::ParsedPlan5 & parsed);
-  bool publish_state(KernelState && new_state);
+  bool publish_state(
+    KernelState && new_state,
+    std::optional<KernelState> scope_state = std::nullopt);
 
 #ifdef TROPICAL_METAL
   tropical_metal::RenderEpochRequest make_metal_epoch_request(

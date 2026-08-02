@@ -89,6 +89,26 @@ LEAN_EXPORT lean_obj_res shim_runtime_load_ir_staged(b_lean_obj_arg rt, b_lean_o
   return lean_io_result_mk_ok(lean_box(ok));
 }
 
+LEAN_EXPORT lean_obj_res shim_runtime_load_ir_staged_with_scope(
+    b_lean_obj_arg rt,
+    b_lean_obj_arg ir, b_lean_obj_arg msl, b_lean_obj_arg coeff,
+    b_lean_obj_arg manifest, b_lean_obj_arg scope_ir,
+    b_lean_obj_arg scope_coeff, b_lean_obj_arg scope_manifest,
+    lean_obj_arg world) {
+  (void)world;
+  const char *i = lean_string_cstr(ir);
+  const char *g = lean_string_cstr(msl);
+  const char *c = lean_string_cstr(coeff);
+  const char *m = lean_string_cstr(manifest);
+  const char *si = lean_string_cstr(scope_ir);
+  const char *sc = lean_string_cstr(scope_coeff);
+  const char *sm = lean_string_cstr(scope_manifest);
+  bool ok = tropical_runtime_load_ir_staged_with_scope(
+    unwrap(rt), i, strlen(i), g, strlen(g), c, strlen(c), m, strlen(m),
+    si, strlen(si), sc, strlen(sc), sm, strlen(sm));
+  return lean_io_result_mk_ok(lean_box(ok));
+}
+
 LEAN_EXPORT lean_obj_res shim_runtime_set_sample_index(b_lean_obj_arg rt, uint64_t idx,
                                                        lean_obj_arg world) {
   (void)world;

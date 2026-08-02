@@ -148,6 +148,24 @@ def Runtime.loadIrStaged (rt : Runtime) (irText mslSource coeffIr manifestJson :
   if !(← rt.loadIrStagedRaw irText mslSource coeffIr manifestJson) then
     throw <| IO.userError s!"runtime loadIrStaged failed: {← lastError}"
 
+@[extern "shim_runtime_load_ir_staged_with_scope"]
+opaque Runtime.loadIrStagedWithScopeRaw (rt : @& Runtime)
+    (irText : @& String) (mslSource : @& String) (coeffIr : @& String)
+    (manifestJson : @& String) (scopeIr : @& String)
+    (scopeCoeffIr : @& String) (scopeManifestJson : @& String) : IO Bool
+
+/-- Publish an audio/Metal staged artifact and a distinct JIT-only scope
+    projection as one runtime generation. Matching named controls are copied
+    into the scope snapshot; program storage and mutable workspaces remain
+    disjoint. -/
+def Runtime.loadIrStagedWithScope (rt : Runtime)
+    (irText mslSource coeffIr manifestJson : String)
+    (scopeIr scopeCoeffIr scopeManifestJson : String) : IO Unit := do
+  if !(← rt.loadIrStagedWithScopeRaw irText mslSource coeffIr manifestJson
+      scopeIr scopeCoeffIr scopeManifestJson) then
+    throw <| IO.userError
+      s!"runtime loadIrStagedWithScope failed: {← lastError}"
+
 /-- Control-plane/test-only: reposition the active kernel's sample clock
     (render verbs' `--start`). -/
 @[extern "shim_runtime_set_sample_index"]

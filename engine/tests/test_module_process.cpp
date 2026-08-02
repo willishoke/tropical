@@ -927,6 +927,60 @@ static void test_scope_named_render_pins_program()
   for (double value : next_values) ASSERT(value == 2.0);
 }
 
+// Audio and visualization may be different compiled programs. The scope JIT
+// owns its slot layout and workspace; named controls are projected from the
+// audio state into that layout on each immutable control publication.
+static void test_separate_scope_artifact()
+{
+  tropical_runtime::FlatRuntime rt(16);
+  const std::string audio_ir = wrap_loop(
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double 2.500000e-01, ptr %op, align 8\n");
+  const std::string scope_ir = wrap_loop(
+    "  %xp = getelementptr inbounds double, ptr %slots, i64 1\n"
+    "  %x = load double, ptr %xp, align 8\n"
+    "  %tp = getelementptr inbounds double, ptr %slots, i64 0\n"
+    "  store double %x, ptr %tp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %x, ptr %op, align 8\n");
+  const std::string audio_manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":1,"slot_names":["param:x"],
+    "slot_defaults":[3.0],"param_disciplines":[
+      {"name":"x","discipline":"raw","companions":[]}
+    ]})";
+  const std::string scope_manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":2,
+    "slot_names":["__root__.tap:mode","param:x"],
+    "slot_defaults":[0.0,-1.0],"param_disciplines":[]})";
+
+  ASSERT(rt.load_ir_staged_with_scope(
+    audio_ir, "", "", audio_manifest,
+    scope_ir, "", scope_manifest));
+  rt.process();
+  for (double value : rt.outputBuffer) ASSERT(value == 0.25);
+
+  std::array<double, 4> values{};
+  auto scope = rt.render_window_low_priority_by_name(
+    0, static_cast<uint32_t>(values.size()), 1,
+    {"__root__.tap:mode"}, values.data());
+  ASSERT(scope.status == tropical_runtime::RenderWindowStatus::Rendered);
+  for (double value : values) ASSERT(value == 3.0);
+
+  const auto update = rt.dispatch_param_sync("x", 7.0);
+  ASSERT(update.ok);
+  scope = rt.render_window_low_priority_by_name(
+    0, static_cast<uint32_t>(values.size()), 1,
+    {"__root__.tap:mode"}, values.data());
+  ASSERT(scope.status == tropical_runtime::RenderWindowStatus::Rendered);
+  for (double value : values) ASSERT(value == 7.0);
+  rt.process();
+  for (double value : rt.outputBuffer) ASSERT(value == 0.25);
+}
+
 // Scope-side coefficient materialization is private to the immutable control
 // image: a column update becomes visible coherently without borrowing any of
 // the audio state's three mutable generations.
@@ -1388,6 +1442,8 @@ int main()
            test_scope_snapshot_does_not_block_control);
   run_test("named scope render pins one hot-swap program",
            test_scope_named_render_pins_program);
+  run_test("separate scope artifact projects controls by name",
+           test_separate_scope_artifact);
   run_test("scope snapshot materializes coefficient columns privately",
            test_scope_snapshot_materializes_coefficients);
   run_test("coherent slot/coefficient generation", test_control_generation_coherence);

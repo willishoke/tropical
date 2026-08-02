@@ -327,6 +327,33 @@ bool tropical_runtime_load_ir_staged(tropical_runtime_t r, const char* ir_text, 
   catch (const std::exception& e) { set_error(e.what()); return false; }
 }
 
+bool tropical_runtime_load_ir_staged_with_scope(
+  tropical_runtime_t r, const char* ir_text, size_t ir_len,
+  const char* msl_source, size_t msl_len,
+  const char* coeff_ir, size_t coeff_len,
+  const char* manifest_json, size_t manifest_len,
+  const char* scope_ir, size_t scope_ir_len,
+  const char* scope_coeff_ir, size_t scope_coeff_len,
+  const char* scope_manifest_json, size_t scope_manifest_len)
+{
+  if (!r || !ir_text || !manifest_json || !scope_ir || !scope_manifest_json)
+    return false;
+  try
+  {
+    return static_cast<tropical_runtime::FlatRuntime*>(r)
+      ->load_ir_staged_with_scope(
+        std::string(ir_text, ir_len),
+        msl_source ? std::string(msl_source, msl_len) : std::string{},
+        coeff_ir ? std::string(coeff_ir, coeff_len) : std::string{},
+        std::string(manifest_json, manifest_len),
+        std::string(scope_ir, scope_ir_len),
+        scope_coeff_ir
+          ? std::string(scope_coeff_ir, scope_coeff_len) : std::string{},
+        std::string(scope_manifest_json, scope_manifest_len));
+  }
+  catch (const std::exception& e) { set_error(e.what()); return false; }
+}
+
 void tropical_runtime_set_sample_index(tropical_runtime_t r, uint64_t idx)
 {
   if (!r) return;

@@ -26,16 +26,69 @@ def handleListScopeTaps (env : Env) : EngineM Json := do
                 ("slot", Json.str tap.slot)]
   pure <| Json.mkObj [("taps", Json.arr taps)]
 
+private def selectedScopeTapNames (args : Json) : Array String :=
+  match args.getObjVal? "taps" with
+  | .ok (.arr taps) => taps.filterMap fun
+      | Json.str name => some name
+      | _ => none
+  | _ => #[]
+
+private def graphArtifactArgs (args : Json) (taps : Json)
+    (out? : Option String := none) : Json :=
+  match args with
+  | .obj fields =>
+    let fields := fields.insert "taps" taps
+    let fields := match out? with
+      | some out => fields.insert "out" (Json.str out)
+      | none => fields
+    .obj fields
+  | _ => args
+
+private def graphNodesPartition (args : Json) (projectionIds : Array String)
+    (keepProjections : Bool) : Json :=
+  let nodes := match args.getObjVal? "nodes" with
+    | .ok (.arr values) => values.filter fun node =>
+        let isProjection := match node.getObjVal? "id" with
+          | .ok (.str id) => projectionIds.contains id
+          | _ => false
+        isProjection == keepProjections
+    | _ => #[]
+  match args with
+  | .obj fields => .obj (fields.insert "nodes" (Json.arr nodes))
+  | _ => args
+
 /-- EXPERIMENT (`load_patch_graph`): compile a downstream-only patch graph (the
     playground GUI) through the EmitArrow arrow lowering — `lowerGraph → normalize
     (the slide) → emitTerm` — to a session root, then the production
     `compileSession → buildKernelIr → loadIrStaged` tail. A compile failure
     errors BEFORE the load, so the previous kernel keeps playing. -/
 def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
-  let compiled ← match ← Tropical.Playground.compilePlan args with
-    | .error e => internalError e
-    | .ok p => pure p
-  loadKernel env compiled.plan (some compiled.stageBlocks)
+  let requestedTaps := selectedScopeTapNames args
+  let (compiled, publishedTaps) ← if requestedTaps.isEmpty then
+      let compiled ← match ← Tropical.Playground.compilePlan args with
+        | .error e => internalError e
+        | .ok p => pure p
+      loadKernel env compiled.plan (some compiled.stageBlocks)
+      pure (compiled, compiled.taps)
+    else
+      -- The audio plan has no inspection outputs. The scope plan routes one
+      -- lightweight projection to its otherwise-mandatory root and emits only
+      -- the explicitly requested tap set. Both compile completely before the
+      -- runtime performs one atomic dual-artifact publication.
+      let audioArgs := graphNodesPartition
+        (graphArtifactArgs args (Json.bool false)) requestedTaps false
+      let scopeArgs := graphNodesPartition
+        (graphArtifactArgs args (Json.arr (requestedTaps.map Json.str))
+          requestedTaps[0]?) requestedTaps true
+      let audio ← match ← Tropical.Playground.compilePlan audioArgs with
+        | .error e => internalError e
+        | .ok p => pure p
+      let scope ← match ← Tropical.Playground.compilePlan scopeArgs with
+        | .error e => internalError e
+        | .ok p => pure p
+      loadKernelWithScope env audio.plan scope.plan
+        audio.stageBlocks scope.stageBlocks
+      pure (audio, scope.taps)
   -- Seed the session param mirror with the graph's knobs so `set_param` — which
   -- guards on the mirror, then drives the live `param:<name>` slot — reaches them
   -- without a relower. Replaces (not appends): the mirror tracks the current graph.
@@ -44,12 +97,12 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
   -- this graph's inspection points via `list_scope_taps` with no session wiring.
   env.state.modify (fun st => { st with
     params := Tropical.Playground.knobParams args
-    scopeTaps := compiled.taps
+    scopeTaps := publishedTaps
     paramDisciplines := compiled.plan.paramDisciplines })
   -- The realized-state report: facts about what compiled (active/excluded
   -- nodes, wired/normalled inputs, live params with disciplines, taps) —
   -- never warnings. `ok` stays for callers that only ever looked at it.
-  pure <| Tropical.Playground.realizedReport args compiled.taps
+  pure <| Tropical.Playground.realizedReport args publishedTaps
 
 def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   wrap <| match name with

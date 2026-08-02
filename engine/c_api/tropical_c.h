@@ -166,6 +166,11 @@ bool             tropical_runtime_load_ir_msl(tropical_runtime_t, const char* ir
    Its outputs land in coef:<n> module slots the audio kernel reads. */
 bool             tropical_runtime_load_ir_staged(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* manifest_json, size_t manifest_len);
 
+/* Atomic dual-artifact load: the first staged artifact owns audio/Metal; the
+   second JIT-only artifact owns random-access scope rendering. Controls cross
+   the boundary by matching manifest slot names, never by shared indices. */
+bool             tropical_runtime_load_ir_staged_with_scope(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* manifest_json, size_t manifest_len, const char* scope_ir, size_t scope_ir_len, const char* scope_coeff_ir, size_t scope_coeff_len, const char* scope_manifest_json, size_t scope_manifest_len);
+
 /* Control-plane/test-only: request a sample-clock reposition. JIT applies it
    at its next process-buffer boundary; Metal prepares and acknowledges an
    exact future activation epoch. Physical device frames stay monotonic while

@@ -217,6 +217,7 @@ std::shared_ptr<const ScopeProgramImage> make_scope_program_image(
   image->param_ptrs = state.param_ptrs;
   image->coeff_array_slots = state.coeff_array_slots;
   image->slot_names = state.slot_names;
+  image->initial_slots = state.slots;
   image->immutable_assets = state.immutable_assets;
   image->slot_lookup.reserve(image->slot_names.size());
   for (uint32_t i = 0; i < image->slot_names.size(); ++i)
@@ -225,13 +226,24 @@ std::shared_ptr<const ScopeProgramImage> make_scope_program_image(
 }
 
 std::shared_ptr<const ScopeControlImage> make_scope_control_image(
-  const KernelState & state, uint64_t control_version,
+  const ScopeProgramImage & program, const KernelState & audio_state,
+  uint64_t control_version,
   uint64_t effective_sample_index)
 {
   auto image = std::make_shared<ScopeControlImage>();
   image->control_version = control_version;
   image->effective_sample_index = effective_sample_index;
-  image->slots = state.slots;
+  image->slots = program.initial_slots;
+  std::unordered_map<std::string, double> audio_controls;
+  audio_controls.reserve(audio_state.slot_names.size());
+  for (std::size_t i = 0;
+       i < audio_state.slot_names.size() && i < audio_state.slots.size(); ++i)
+    audio_controls.emplace(audio_state.slot_names[i], audio_state.slots[i]);
+  for (std::size_t i = 0;
+       i < program.slot_names.size() && i < image->slots.size(); ++i)
+    if (const auto found = audio_controls.find(program.slot_names[i]);
+        found != audio_controls.end())
+      image->slots[i] = found->second;
   return image;
 }
 } // namespace
@@ -515,7 +527,8 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
 
 // Atomic double-buffer flip (CF-only: no by-name state transfer — see below).
 // Assumes new_state already carries a populated kernel handle.
-bool FlatRuntime::publish_state(KernelState && new_state)
+bool FlatRuntime::publish_state(
+  KernelState && new_state, std::optional<KernelState> scope_state)
 {
   ControlWaiterGuard priority(control_waiter_count_);
   std::lock_guard<std::mutex> lock(build_mutex_);
@@ -567,10 +580,12 @@ bool FlatRuntime::publish_state(KernelState && new_state)
   // the scope pointing into either movable KernelState slot.
   const uint64_t program_version =
     recompile_version_.load(std::memory_order_relaxed) + 1;
+  const KernelState & scope_source = scope_state
+    ? *scope_state : new_state;
   auto scope_program =
-    make_scope_program_image(new_state, program_version);
+    make_scope_program_image(scope_source, program_version);
   auto scope_controls = make_scope_control_image(
-    new_state, next_scope_control_version_++,
+    *scope_program, new_state, next_scope_control_version_++,
     published_sample_index_.load(std::memory_order_acquire));
   auto scope_snapshot = std::make_shared<ScopeSnapshot>();
   scope_snapshot->program = std::move(scope_program);
@@ -644,48 +659,68 @@ bool FlatRuntime::load_ir_staged(const std::string & ir_text,
                                  const std::string & coeff_ir,
                                  const std::string & manifest_json)
 {
+  return load_ir_staged_with_scope(
+    ir_text, msl_source, coeff_ir, manifest_json, {}, {}, {});
+}
+
+bool FlatRuntime::load_ir_staged_with_scope(
+  const std::string & ir_text, const std::string & msl_source,
+  const std::string & coeff_ir, const std::string & manifest_json,
+  const std::string & scope_ir, const std::string & scope_coeff_ir,
+  const std::string & scope_manifest_json)
+{
   using json = nlohmann::json;
+  auto compile_jit_state = [this](
+      const std::string & kernel_ir, const std::string & coefficient_ir,
+      const std::string & manifest_text) {
+    const json manifest = json::parse(manifest_text);
+    const std::string schema = manifest.value("schema", std::string{});
+    if (schema != "tropical_plan_5" && schema != "tropical_plan_6")
+      throw std::runtime_error(
+        "FlatRuntime: load_ir unsupported manifest schema '" + schema +
+        "'; expected 'tropical_plan_5' or 'tropical_plan_6'");
+    auto parsed = tropical_plan5::parse_plan5(manifest);
+    KernelState state = build_kernel_state(parsed);
+    state.mode = tropical_jit::CompilationMode::Fused;
 
-  const json manifest = json::parse(manifest_json);
-  const std::string schema = manifest.value("schema", std::string{});
-
-  if (schema != "tropical_plan_5" && schema != "tropical_plan_6")
-    throw std::runtime_error(
-      "FlatRuntime: load_ir unsupported manifest schema '" + schema +
-      "'; expected 'tropical_plan_5' or 'tropical_plan_6'");
-  tropical_plan5::ParsedPlan5 parsed = tropical_plan5::parse_plan5(manifest);
-
-  KernelState new_state = build_kernel_state(parsed);
-  // The IR path is always fused — Lean emits a single fused kernel.
-  new_state.mode = tropical_jit::CompilationMode::Fused;
-
-  // The JIT kernel loads ALWAYS — it keeps serving render_window (the
-  // scope) and the correctness reference even when audio runs on Metal.
-  auto kernel_result = tropical_jit::OrcJitEngine::instance().compile_ir_text(ir_text);
-  if (!kernel_result)
-  {
-    std::string err;
-    llvm::handleAllErrors(kernel_result.takeError(),
-      [&err](const llvm::ErrorInfoBase & e) { err = e.message(); });
-    throw std::runtime_error("FlatRuntime: IR JIT compilation failed: " + err);
-  }
-  new_state.kernel = *kernel_result;
-
-  if (!coeff_ir.empty())
-  {
-    // O0: the coefficient kernel runs once per control write — codegen
-    // quality is irrelevant, and O2 on its thousands-of-flops block is
-    // exactly the compile wall the stage-0 split removes.
-    auto coeff_result = tropical_jit::OrcJitEngine::instance().compile_ir_text(coeff_ir, true);
-    if (!coeff_result)
+    auto kernel_result =
+      tropical_jit::OrcJitEngine::instance().compile_ir_text(kernel_ir);
+    if (!kernel_result)
     {
       std::string err;
-      llvm::handleAllErrors(coeff_result.takeError(),
+      llvm::handleAllErrors(kernel_result.takeError(),
         [&err](const llvm::ErrorInfoBase & e) { err = e.message(); });
-      throw std::runtime_error("FlatRuntime: coefficient IR JIT compilation failed: " + err);
+      throw std::runtime_error(
+        "FlatRuntime: IR JIT compilation failed: " + err);
     }
-    new_state.coeff_kernel = *coeff_result;
-  }
+    state.kernel = *kernel_result;
+
+    if (!coefficient_ir.empty())
+    {
+      // O0: the coefficient kernel runs once per control write — codegen
+      // quality is irrelevant, and O2 on its thousands-of-flops block is
+      // exactly the compile wall the stage-0 split removes.
+      auto coeff_result =
+        tropical_jit::OrcJitEngine::instance().compile_ir_text(
+          coefficient_ir, true);
+      if (!coeff_result)
+      {
+        std::string err;
+        llvm::handleAllErrors(coeff_result.takeError(),
+          [&err](const llvm::ErrorInfoBase & e) { err = e.message(); });
+        throw std::runtime_error(
+          "FlatRuntime: coefficient IR JIT compilation failed: " + err);
+      }
+      state.coeff_kernel = *coeff_result;
+    }
+    // Initial coefficient slots/columns must exist before either artifact can
+    // be published. This operates on an unpublished local state.
+    publish_control_snapshot(state);
+    return state;
+  };
+
+  KernelState new_state =
+    compile_jit_state(ir_text, coeff_ir, manifest_json);
 
   if (!msl_source.empty())
   {
@@ -726,12 +761,17 @@ bool FlatRuntime::load_ir_staged(const std::string & ir_text,
 #endif
   }
 
-  // Materialize coefficient slots before the state becomes visible to the
-  // audio thread or render_window — initial knob values exist, so a first
-  // buffer reading zero-initialized coefficient slots would be a bug.
-  publish_control_snapshot(new_state);
+  std::optional<KernelState> scope_state;
+  if (!scope_ir.empty())
+  {
+    if (scope_manifest_json.empty())
+      throw std::invalid_argument(
+        "FlatRuntime: scope IR requires a scope manifest");
+    scope_state.emplace(compile_jit_state(
+      scope_ir, scope_coeff_ir, scope_manifest_json));
+  }
 
-  return publish_state(std::move(new_state));
+  return publish_state(std::move(new_state), std::move(scope_state));
 }
 
 FlatRuntime::ControlGenerationReservation
@@ -862,7 +902,8 @@ void FlatRuntime::publish_scope_controls_locked(
   auto next = std::make_shared<ScopeSnapshot>();
   next->program = current->program;
   next->controls = make_scope_control_image(
-    state, next_scope_control_version_++, effective_sample_index);
+    *current->program, state, next_scope_control_version_++,
+    effective_sample_index);
   std::atomic_store_explicit(
     &scope_snapshot_,
     std::shared_ptr<const ScopeSnapshot>(std::move(next)),
