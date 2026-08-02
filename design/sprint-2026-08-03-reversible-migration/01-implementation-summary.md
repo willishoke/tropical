@@ -174,6 +174,16 @@ exactly-five-mode scene binding; until the release scene is resolved, the
 legacy patcher scope remains the explicit fallback rather than inventing
 scene-specific node IDs.
 
+### S-17 — Let reachability split audio and scope artifacts
+
+Requested tap IDs stay in the complete authored graph for both compilation
+artifacts. Each artifact's selected roots perform the exclusion naturally.
+Pre-filtering requested IDs as if every tap were a disconnected projection
+made an active audible node disappear from the audio graph and left its
+downstream wire dangling. The handshake regression now scopes both an active
+audible source and a disconnected projection, proving the audio graph remains
+valid while the scope artifact publishes both explicit bindings.
+
 ## Open architecture gate
 
 The master handoff also asks for a literal serialized `gong → reverb` fixture.

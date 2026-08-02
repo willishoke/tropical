@@ -44,19 +44,6 @@ private def graphArtifactArgs (args : Json) (taps : Json)
     .obj fields
   | _ => args
 
-private def graphNodesPartition (args : Json) (projectionIds : Array String)
-    (keepProjections : Bool) : Json :=
-  let nodes := match args.getObjVal? "nodes" with
-    | .ok (.arr values) => values.filter fun node =>
-        let isProjection := match node.getObjVal? "id" with
-          | .ok (.str id) => projectionIds.contains id
-          | _ => false
-        isProjection == keepProjections
-    | _ => #[]
-  match args with
-  | .obj fields => .obj (fields.insert "nodes" (Json.arr nodes))
-  | _ => args
-
 /-- EXPERIMENT (`load_patch_graph`): compile a downstream-only patch graph (the
     playground GUI) through the EmitArrow arrow lowering — `lowerGraph → normalize
     (the slide) → emitTerm` — to a session root, then the production
@@ -76,11 +63,13 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
       -- lightweight projection to its otherwise-mandatory root and emits only
       -- the explicitly requested tap set. Both compile completely before the
       -- runtime performs one atomic dual-artifact publication.
-      let audioArgs := graphNodesPartition
-        (graphArtifactArgs args (Json.bool false)) requestedTaps false
-      let scopeArgs := graphNodesPartition
-        (graphArtifactArgs args (Json.arr (requestedTaps.map Json.str))
-          requestedTaps[0]?) requestedTaps true
+      -- Keep the complete authored graph in both artifacts. Reachability from
+      -- each artifact's selected roots excludes unrelated branches itself.
+      -- Removing a requested tap node here is incorrect when that node is also
+      -- on the audible path: its downstream audio wire would become dangling.
+      let audioArgs := graphArtifactArgs args (Json.bool false)
+      let scopeArgs := graphArtifactArgs args
+        (Json.arr (requestedTaps.map Json.str)) requestedTaps[0]?
       let audio ← match ← Tropical.Playground.compilePlan audioArgs with
         | .error e => internalError e
         | .ok p => pure p

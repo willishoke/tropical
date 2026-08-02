@@ -133,7 +133,10 @@ const graph = {
     { id: 'out', kind: 'out', params: {}, sel: {}, in: { in: ['src'] } },
   ],
   out: 'out',
-  taps: ['scopeProbe'],
+  // Scope both an active audible node and a disconnected projection. The
+  // dual-artifact split must retain `src` in the audio graph while also
+  // lowering both explicit scope roots.
+  taps: ['src', 'scopeProbe'],
 }
 
 describe('load_patch_graph compile handshake', () => {
@@ -160,7 +163,7 @@ describe('load_patch_graph compile handshake', () => {
         expect(Object.keys(tap).sort()).toEqual(['instance', 'name', 'output', 'slot'])
         expect(tap.slot).toBe(`${tap.instance}.${tap.output}`)
       }
-      expect(report.taps.map((tap: any) => tap.name)).toEqual(['out', 'scopeProbe'])
+      expect(report.taps.map((tap: any) => tap.name)).toEqual(['out', 'src', 'scopeProbe'])
 
       // The first scope frame proves these bindings and versions identify the
       // very immutable image published by the compile, with no list call.
