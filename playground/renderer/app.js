@@ -9,6 +9,7 @@ const GRAPH = scene.buildSceneGraph()
 const CONTROLS = scene.CONTROLS.map((control) => ({ ...control }))
 const SCOPE_PROFILE = window.ModalScopeProfile
 const phaseLock = window.ModalPhaseLock
+const scopeView = window.ModalScopeView
 
 const MODE_COLORS = [
   '--mode-1', '--mode-2', '--mode-3', '--mode-4', '--mode-5',
@@ -253,7 +254,6 @@ function buildScopes() {
     canvas,
     meta: element.querySelector('.scope-meta'),
     traces: MODE_COLORS.map((color, voiceIndex) => ({ color, voiceIndex })),
-    peak: 1e-6,
   })
 }
 
@@ -294,25 +294,25 @@ function drawModeOverlay(well, frames, chord) {
     context.stroke()
   }
 
-  if (frames.length === 0 || frames.some((frame) => frame.values.length < 2)) {
+  const visibleFrames = scopeView.visibleFrames(frames)
+  if (visibleFrames.length === 0) {
     well.meta.textContent = 'five independent locks · no signal'
     return
   }
 
-  let framePeak = 1e-7
-  frames.forEach((frame) => frame.values.forEach((value) => {
-    framePeak = Math.max(framePeak, Math.abs(value))
-  }))
-  well.peak = Math.max(framePeak, well.peak * 0.91)
-  const scale = Math.max(framePeak, well.peak * 0.72, 1e-7)
+  // A fixed volts/div calibration is the point: changing modal amplitude must
+  // move the trace. Per-frame peak normalization made a decaying, phase-locked
+  // sinusoid mathematically indistinguishable from a frozen one.
+  const scale = scene.SCOPE_FULL_SCALE * 1.08
 
-  frames.forEach((frame) => {
+  visibleFrames.forEach((frame) => {
     context.strokeStyle = palette.getPropertyValue(frame.trace.color)
     context.lineWidth = Math.max(1, dpr)
     context.beginPath()
     frame.values.forEach((value, index) => {
       const x = index * width / (frame.values.length - 1)
-      const y = height / 2 - value / (scale * 1.12) * (height / 2 - 5 * dpr)
+      const y = height / 2 - scopeView.normalizedAmplitude(value, scale)
+        * (height / 2 - 5 * dpr)
       if (index === 0) context.moveTo(x, y)
       else context.lineTo(x, y)
     })
@@ -323,8 +323,10 @@ function drawModeOverlay(well, frames, chord) {
     frames[0].values.length * frames[0].stride / scene.SAMPLE_RATE * 1000
   )
   const ratios = chord.voices.map((voice) => scene.absoluteRatio(chord, voice).join('/'))
+  const envelope = scopeView.envelopeFraction(frames, scene.SCOPE_FULL_SCALE)
   well.meta.textContent = (
-    `${chord.label} · ${ratios.join(' · ')} · ${milliseconds.toFixed(1)} ms`
+    `${chord.label} · ${ratios.join(' · ')} · env ${Math.round(envelope * 100)}%`
+    + ` · ${milliseconds.toFixed(1)} ms`
   )
 }
 

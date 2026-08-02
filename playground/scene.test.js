@@ -143,6 +143,18 @@ test('each string partial blooms causally from an exact amplitude pair', () => {
   }
 })
 
+test('scope volts-per-division is the exact shared fundamental envelope peak', () => {
+  const peaks = scene.CHORDS.flatMap((chord, chordIndex) => (
+    chord.voices.map((_voice, voiceIndex) => (
+      scene.scopeEnvelopePeak(chordIndex, voiceIndex)
+    ))
+  ))
+  assert.equal(scene.SCOPE_FULL_SCALE, Math.max(...peaks))
+  assert.ok(scene.SCOPE_FULL_SCALE > 0.04)
+  assert.ok(scene.SCOPE_FULL_SCALE < 0.041)
+  peaks.forEach((peak) => assert.ok(peak <= scene.SCOPE_FULL_SCALE))
+})
+
 test('each metal hit is a causal inharmonic attack pair', () => {
   for (let hit = 0; hit < 4; hit++) {
     const rows = scene.snareModes(hit)

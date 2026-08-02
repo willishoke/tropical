@@ -142,6 +142,29 @@
     ))
   }
 
+  // The scope uses one shared, immutable volts/div calibration. Derive it from
+  // the exact paired exponential carried by each projected fundamental so the
+  // canvas cannot normalize away the audible attack/decay envelope.
+  function pairedEnvelopePeak(slowDecay, fastDecay, amplitude) {
+    if (!(slowDecay > 0) || !(fastDecay > slowDecay)) return 0
+    const peakTime = Math.log(fastDecay / slowDecay) / (fastDecay - slowDecay)
+    return Math.abs(amplitude) * (
+      Math.exp(-slowDecay * peakTime) - Math.exp(-fastDecay * peakTime)
+    )
+  }
+
+  function scopeEnvelopePeak(chordIndex, voiceIndex) {
+    const chord = CHORDS[chordIndex]
+    const voice = chord?.voices[voiceIndex]
+    if (!chord || !voice) return 0
+    const rows = stringModes(voiceFrequency(chord, voice), chordIndex, voiceIndex)
+    return pairedEnvelopePeak(rows[0][1], rows[1][1], rows[0][2])
+  }
+
+  const SCOPE_FULL_SCALE = Math.max(...CHORDS.flatMap((chord, chordIndex) => (
+    chord.voices.map((_voice, voiceIndex) => scopeEnvelopePeak(chordIndex, voiceIndex))
+  )))
+
   // A short, inharmonic metal cloud for the wet-room witness. Like the string
   // attack, each row is paired with an equal negative fast decay, so the hit is
   // causal and click-free while remaining a finite closed-form modal bank.
@@ -470,11 +493,14 @@
     CONTROLS,
     PRIME_SLOTS,
     SCOPE_TAPS,
+    SCOPE_FULL_SCALE,
     absoluteRatio,
     ratioLabel,
     voiceFrequency,
     stringModes,
     chordModes,
+    pairedEnvelopePeak,
+    scopeEnvelopePeak,
     snareModes,
     scopeModeId,
     buildSceneGraph,

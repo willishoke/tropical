@@ -26,3 +26,28 @@ test('relative arming keeps a quiet modal tail phase locked', () => {
   assert.ok(Math.abs(loud.offset - quiet.offset) < 1e-12)
   assert.ok(Math.abs(quiet.values[0]) < 1e-18)
 })
+
+test('the freshest eligible crossing keeps the envelope close to audible-now', () => {
+  const locked = phaseLock.window(sine(0.11, 2.2), 256, 128)
+  const period = Math.PI * 2 / 0.11
+  assert.equal(locked.locked, true)
+  assert.ok(locked.offset > 256 - period - 2)
+  assert.ok(locked.offset < 256)
+})
+
+test('a fixed scale sees the modal envelope decay across locked frames', () => {
+  const loud = phaseLock.window(sine(0.19, 1.7, 1), 256, 128)
+  const tail = phaseLock.window(sine(0.19, 1.7, 0.25), 256, 128)
+  assert.equal(loud.locked, true)
+  assert.equal(tail.locked, true)
+  assert.ok(Math.abs(tail.peak / loud.peak - 0.25) < 1e-12)
+})
+
+test('silence and DC cannot masquerade as phase-locked modes', () => {
+  const silent = phaseLock.window(Array(512).fill(0), 256, 128)
+  const dc = phaseLock.window(Array(512).fill(0.02), 256, 128)
+  assert.equal(silent.active, false)
+  assert.equal(silent.locked, false)
+  assert.equal(dc.active, true)
+  assert.equal(dc.locked, false)
+})
