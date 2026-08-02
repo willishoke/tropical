@@ -36,10 +36,19 @@
     return Math.max(0, Math.min(1, peak / fullScale))
   }
 
-  function envelopeScaledValue(value, observedPeak, displayEnvelope) {
-    if (!Number.isFinite(value) || !(observedPeak > 0)
-      || !(displayEnvelope >= 0)) return 0
-    return value / observedPeak * displayEnvelope
+  function extractCarrier(values, envelopes, envelopeFloor = 1e-12) {
+    if (!Array.isArray(values) || !Array.isArray(envelopes)) return []
+    return values.map((value, index) => {
+      const envelope = envelopes[index]
+      if (!Number.isFinite(value) || !Number.isFinite(envelope)
+        || Math.abs(envelope) <= envelopeFloor) return 0
+      return value / envelope
+    })
+  }
+
+  function applyEnvelope(carrierValue, displayEnvelope) {
+    if (!Number.isFinite(carrierValue) || !(displayEnvelope >= 0)) return 0
+    return carrierValue * displayEnvelope
   }
 
   function frameDecision(deadline, timestamp, fps) {
@@ -60,7 +69,8 @@
     visibleCycles,
     normalizedAmplitude,
     envelopeFraction,
-    envelopeScaledValue,
+    extractCarrier,
+    applyEnvelope,
     frameDecision,
   }
 }))

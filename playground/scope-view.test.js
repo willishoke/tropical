@@ -5,6 +5,7 @@ const assert = require('node:assert/strict')
 
 const scopeView = require('./renderer/scope-view')
 const scopeProfile = require('./renderer/scope-profile')
+const scene = require('./scene')
 
 test('fixed volts-per-division preserves modal envelope amplitude', () => {
   assert.equal(scopeView.normalizedAmplitude(0.04, 0.04), 1)
@@ -33,10 +34,37 @@ test('log-period density narrows the pitch spread without erasing it', () => {
   assert.ok(scopeView.visibleCycles(371.25) < 3.6)
 })
 
-test('trigger-cycle peak jitter cannot modulate the displayed envelope', () => {
-  const envelope = 0.018
-  assert.equal(scopeView.envelopeScaledValue(0.01, 0.02, envelope), 0.009)
-  assert.equal(scopeView.envelopeScaledValue(0.015, 0.03, envelope), 0.009)
+test('pointwise demodulation removes envelope slope before phase locking', () => {
+  const carrier = Array.from({ length: 256 }, (_unused, index) => (
+    Math.sin(0.11 * index + 0.7)
+  ))
+  const envelope = carrier.map((_unused, index) => (
+    0.004 + 0.026 * Math.exp(-index / 47)
+  ))
+  const projection = carrier.map((value, index) => value * envelope[index])
+  const extracted = scopeView.extractCarrier(projection, envelope)
+  extracted.forEach((value, index) => {
+    assert.ok(Math.abs(value - carrier[index]) < 1e-12)
+  })
+  assert.equal(scopeView.applyEnvelope(0.5, 0.018), 0.009)
+})
+
+test('envelope extraction refuses silent and invalid source samples', () => {
+  assert.deepEqual(
+    scopeView.extractCarrier([1, 2, NaN, 4], [0, 1e-14, 1, Infinity], 1e-12),
+    [0, 0, 0, 0],
+  )
+})
+
+test('batched scope envelopes equal the exact scalar envelope', () => {
+  const first = 0.041
+  const step = 1 / scene.SAMPLE_RATE
+  const envelopes = scene.scopeEnvelopeSamples(0, 0, first, step, 2048)
+  envelopes.forEach((value, index) => {
+    assert.ok(Math.abs(
+      value - scene.scopeEnvelopeAt(0, 0, first + index * step)
+    ) < 1e-15)
+  })
 })
 
 test('display-synchronized scheduling caps a 120 Hz panel at 60 scope frames', () => {

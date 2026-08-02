@@ -312,9 +312,7 @@ function drawModeOverlay(well, frames, chord) {
     context.beginPath()
     frame.values.forEach((value, index) => {
       const x = index * width / (frame.values.length - 1)
-      const displayed = scopeView.envelopeScaledValue(
-        value, frame.peak, frame.displayEnvelope,
-      )
+      const displayed = scopeView.applyEnvelope(value, frame.displayEnvelope)
       const y = height / 2 - scopeView.normalizedAmplitude(displayed, scale)
         * (height / 2 - 5 * dpr)
       if (index === 0) context.moveTo(x, y)
@@ -452,10 +450,18 @@ function showFault(error) {
 async function renderFrame() {
   try {
     const position = (await rpc('playback_position')).position
+    // Keep one clock mapping for the projection request, its pointwise
+    // envelope removal, and the audible-now envelope restored on the canvas.
+    // A transport write can otherwise split those three calculations across
+    // two mappings even though the render response itself is immutable.
+    const clock = {
+      tauBase: transport.tauBase,
+      velocity: transport.velocity,
+    }
     transport.playbackPosition = position
     transport.sceneTime = (
-      transport.tauBase
-      + transport.velocity * position / scene.SAMPLE_RATE
+      clock.tauBase
+      + clock.velocity * position / scene.SAMPLE_RATE
     )
 
     if (!transport.rebasing && transport.velocity > 0
@@ -497,6 +503,21 @@ async function renderFrame() {
 
     const frames = live.map((trace, resultIndex) => {
       const values = (response.values[resultIndex] || []).slice(warmupPoints)
+      const firstSample = (response.start ?? start) + warmupPoints * stride
+      const envelopes = scene.scopeEnvelopeSamples(
+        chordIndex,
+        trace.voiceIndex,
+        clock.tauBase + clock.velocity * firstSample / scene.SAMPLE_RATE,
+        clock.velocity * stride / scene.SAMPLE_RATE,
+        values.length,
+      )
+      // The projection is envelope(t) * sin(phase(t)). Locking that product
+      // directly leaves a visible amplitude slope across every low-frequency
+      // cycle. Divide out the exact analytic envelope at each source sample,
+      // phase-lock the unit carrier, then restore the one audible-now value.
+      const carrier = scopeView.extractCarrier(
+        values, envelopes, scene.SCOPE_FULL_SCALE * 1e-6,
+      )
       const cycles = scopeView.visibleCycles(trace.frequency, scene.BASE_HZ)
       const periodPoints = scene.SAMPLE_RATE / trace.frequency / stride
       return {
@@ -504,10 +525,12 @@ async function renderFrame() {
         stride,
         cycles,
         displayEnvelope: scene.scopeEnvelopeAt(
-          chordIndex, trace.voiceIndex, transport.sceneTime,
+          chordIndex,
+          trace.voiceIndex,
+          clock.tauBase + clock.velocity * position / scene.SAMPLE_RATE,
         ),
         ...phaseLock.centeredWindow(
-          values, displayPoints, cycles * periodPoints,
+          carrier, displayPoints, cycles * periodPoints,
         ),
       }
     })

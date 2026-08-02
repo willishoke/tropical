@@ -176,6 +176,27 @@
     )
   }
 
+  function scopeEnvelopeSamples(
+    chordIndex, voiceIndex, firstSceneTime, sceneStep, count,
+  ) {
+    const chord = CHORDS[chordIndex]
+    const voice = chord?.voices[voiceIndex]
+    if (!chord || !voice || !Number.isFinite(firstSceneTime)
+      || !Number.isFinite(sceneStep) || !(count > 0)) return []
+    const rows = stringModes(voiceFrequency(chord, voice), chordIndex, voiceIndex)
+    const amplitude = Math.abs(rows[0][2])
+    const slowDecay = rows[0][1]
+    const fastDecay = rows[1][1]
+    const strikeTime = chord.startStep * STEP_SECONDS + STRING_ATTACK_DELAY
+    return Array.from({ length: Math.floor(count) }, (_unused, index) => {
+      const age = firstSceneTime + index * sceneStep - strikeTime
+      if (!(age > 0)) return 0
+      return amplitude * (
+        Math.exp(-slowDecay * age) - Math.exp(-fastDecay * age)
+      )
+    })
+  }
+
   const SCOPE_FULL_SCALE = Math.max(...CHORDS.flatMap((chord, chordIndex) => (
     chord.voices.map((_voice, voiceIndex) => scopeEnvelopePeak(chordIndex, voiceIndex))
   )))
@@ -518,6 +539,7 @@
     pairedEnvelopePeak,
     scopeEnvelopePeak,
     scopeEnvelopeAt,
+    scopeEnvelopeSamples,
     snareModes,
     scopeModeId,
     buildSceneGraph,
