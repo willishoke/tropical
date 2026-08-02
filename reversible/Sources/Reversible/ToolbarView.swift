@@ -63,7 +63,8 @@ struct PatchToolbar: ToolbarContent {
 /// Master clock (global time-warp scrub). One control rides
 /// `master.velocity`, the base clock of EVERY generator, so a scrub
 /// reverses / freezes / varispeeds the whole patch — voices, envelopes, and
-/// the modal reverb tail — coherently. `set_param_velocity` re-bases the
+/// the modal reverb tail—coherently. The engine's `set_param` velocity
+/// discipline re-bases the
 /// τ-origin (`master.tau_base`) so the change is value-continuous
 /// (click-free). Closed-form: nothing downstream holds history, so reverse
 /// is just f(τ) read at receding τ.

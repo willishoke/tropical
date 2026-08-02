@@ -55,6 +55,15 @@ scene manifest. The packaged engine runs with
 `Contents/Resources/Tropical` as its working directory; development runs use
 an explicit repository-rooted engine override supplied by `run-dev`.
 
+### S-06 — Bound continuous writes to first, one turn, and final
+
+The Swift sender now has one public verb, `set_param`. While a write is in
+flight it retains the first gesture value, the first direction-turning point,
+and the newest final value; intermediate events are superseded. The unsent
+buffer is therefore bounded at three values before issuance and two after the
+first request begins. Non-finite pointer events are rejected client-side, and
+the engine remains authoritative for write discipline and acceptance.
+
 ## Qualification notes
 
 No release claim has been made. The listening decision, qualified-Mac
