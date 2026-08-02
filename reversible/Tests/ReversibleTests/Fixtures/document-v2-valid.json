@@ -1,0 +1,63 @@
+{
+  "monitors": [
+    {
+      "id": "scope5",
+      "in": {"ch1": ["processor3"]},
+      "kind": "client.monitor.scope",
+      "state": {"window": 0.04063},
+      "vendor_monitor": "kept"
+    }
+  ],
+  "nodes": [
+    {
+      "id": "source1",
+      "in": {"freq": []},
+      "kind": "source",
+      "params": {"freq": 440},
+      "vendor_node": {"kept": true}
+    },
+    {
+      "id": "control2",
+      "in": {},
+      "kind": "control_source",
+      "params": {"value": 0.5}
+    },
+    {
+      "id": "processor3",
+      "in": {"in": ["source1"]},
+      "kind": "future_processor",
+      "params": {"future_structural": [1, {"nested": true}]}
+    },
+    {
+      "id": "out4",
+      "in": {"in": ["processor3"]},
+      "kind": "out",
+      "params": {}
+    }
+  ],
+  "output": "out4",
+  "presentation": {
+    "auto_arrange": false,
+    "order": ["source1", "control2", "processor3", "out4", "scope5"],
+    "pan_x": 11,
+    "pan_y": -9,
+    "positions": {
+      "control2": {"hue": 80, "x": 20, "y": 140},
+      "out4": {"hue": 180, "x": 500, "y": 40},
+      "processor3": {"hue": 120, "x": 260, "y": 40},
+      "scope5": {"hue": 100, "x": 260, "y": 240},
+      "source1": {"hue": 20, "x": 20, "y": 40}
+    },
+    "workspace": "patch"
+  },
+  "scene": {"id": "fixture-scene", "title": "Future-safe patch"},
+  "transport": {"position": 44100, "velocity": 1, "vendor_clock": "kept"},
+  "vendor_top": {"kept": [1, 2, 3]},
+  "version": 2,
+  "vocabulary": {
+    "fingerprint": "fnv1a64:4444444444444444",
+    "schema": "tropical_vocabulary",
+    "schema_version": 1,
+    "vendor_vocabulary": true
+  }
+}

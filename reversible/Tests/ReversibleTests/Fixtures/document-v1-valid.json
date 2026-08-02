@@ -1,0 +1,39 @@
+{
+  "autoArrange": true,
+  "nodes": [
+    {
+      "hue": 20,
+      "id": "source1",
+      "inputs": {"freq": []},
+      "kind": "source",
+      "values": {"freq": 330, "future_value": {"curve": [0, 1, 0]}},
+      "vendor_node": {"kept": true},
+      "x": 20,
+      "y": 40
+    },
+    {
+      "hue": 180,
+      "id": "out2",
+      "inputs": {"in": ["source1"]},
+      "kind": "out",
+      "values": {},
+      "x": 120,
+      "y": 240
+    },
+    {
+      "hue": 100,
+      "id": "scope3",
+      "inputs": {"ch1": ["source1"], "ch2": [], "ch3": [], "ch4": []},
+      "kind": "scope",
+      "values": {"window": 0.04063},
+      "x": 300,
+      "y": 40
+    }
+  ],
+  "order": ["source1", "out2", "scope3"],
+  "panX": -12,
+  "panY": 8,
+  "velocity": -1,
+  "vendor_top": {"author": "future-client"},
+  "version": 1
+}

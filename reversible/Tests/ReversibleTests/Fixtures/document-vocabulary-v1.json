@@ -1,0 +1,55 @@
+{
+  "colors": ["signal", "control"],
+  "fingerprint": "fnv1a64:4444444444444444",
+  "kinds": [
+    {
+      "kind": "source",
+      "outlet": "signal",
+      "ports": [
+        {
+          "accepts": ["control"],
+          "default": 220,
+          "discipline": "anchor",
+          "log": true,
+          "max": 2000,
+          "min": 0.02,
+          "multi": false,
+          "name": "freq",
+          "unit": "Hz"
+        }
+      ]
+    },
+    {
+      "kind": "control_source",
+      "outlet": "control",
+      "ports": [
+        {
+          "default": 0,
+          "discipline": "raw",
+          "log": false,
+          "max": 1,
+          "min": 0,
+          "name": "value",
+          "unit": ""
+        }
+      ]
+    },
+    {
+      "kind": "future_processor",
+      "outlet": "signal",
+      "ports": [
+        {"accepts": ["signal"], "multi": false, "name": "in"}
+      ]
+    },
+    {
+      "kind": "out",
+      "outlet": null,
+      "ports": [
+        {"accepts": ["signal"], "multi": true, "name": "in"}
+      ]
+    }
+  ],
+  "rule": "outlet color must be accepted by inlet",
+  "schema": "tropical_vocabulary",
+  "schema_version": 1
+}

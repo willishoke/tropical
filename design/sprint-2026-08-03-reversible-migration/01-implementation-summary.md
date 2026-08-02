@@ -109,6 +109,17 @@ wet changes after source substitution and a structural string-mode edit, live
 forward/hold/reverse/seek coordinate equivalence. It does not expose
 `bloomgong` or misrepresent signal-valued `gong` as modal.
 
+### S-12 — Preserve blocked documents as authored data, not approximations
+
+Version 2 stores engine node kinds as open string IDs, structural values as
+arbitrary JSON, and client monitors in their own namespace. Unknown fields are
+retained at every document layer and are written back unchanged. The v1
+migrator operates on raw JSON so an unknown kind, port, edge, value, or vendor
+field survives into a precise blocked v2 document; migration is in-memory and
+cannot overwrite the source until the user explicitly saves as v2. Compile
+validation reports integrity blockers without repairing or pruning authored
+topology.
+
 ## Open architecture gate
 
 The master handoff also asks for a literal serialized `gong → reverb` fixture.

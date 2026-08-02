@@ -1,0 +1,43 @@
+{
+  "monitors": [],
+  "nodes": [
+    {
+      "id": "processor1",
+      "in": {"in": ["processor2"]},
+      "kind": "future_processor",
+      "params": {}
+    },
+    {
+      "id": "processor2",
+      "in": {"in": ["processor1"]},
+      "kind": "future_processor",
+      "params": {}
+    },
+    {
+      "id": "out3",
+      "in": {"in": ["processor1"]},
+      "kind": "out",
+      "params": {}
+    }
+  ],
+  "output": "out3",
+  "presentation": {
+    "auto_arrange": false,
+    "order": ["processor1", "processor2", "out3"],
+    "pan_x": 0,
+    "pan_y": 0,
+    "positions": {
+      "out3": {"hue": 180, "x": 500, "y": 40},
+      "processor1": {"hue": 60, "x": 20, "y": 40},
+      "processor2": {"hue": 120, "x": 260, "y": 40}
+    }
+  },
+  "scene": {},
+  "transport": {"velocity": 1},
+  "version": 2,
+  "vocabulary": {
+    "fingerprint": "fnv1a64:4444444444444444",
+    "schema": "tropical_vocabulary",
+    "schema_version": 1
+  }
+}
