@@ -8,6 +8,12 @@ let package = Package(
         .executableTarget(
             name: "Reversible",
             path: "Sources/Reversible"
+        ),
+        .testTarget(
+            name: "ReversibleTests",
+            dependencies: ["Reversible"],
+            path: "Tests/ReversibleTests",
+            resources: [.process("Fixtures")]
         )
     ]
 )
