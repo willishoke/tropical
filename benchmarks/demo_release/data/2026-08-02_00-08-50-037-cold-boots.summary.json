@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "kind": "cold_boot_matrix",
+  "started": "2026-08-02T00:08:50.037Z",
+  "finished": "2026-08-02T00:09:30.243Z",
+  "requested_boots": 5,
+  "completed_boots": 5,
+  "duration_seconds_each": 5,
+  "flow_gesture": false,
+  "pass": true,
+  "runs": [
+    {
+      "boot": 1,
+      "exit_code": 0,
+      "summary_path": "/private/tmp/tropical-release-p5-clean/2026-08-02_00-08-50-079-smoke-b128-r512.summary.json",
+      "run_id": "2026-08-02_00-08-50-079-smoke-b128-r512",
+      "pass": true,
+      "error": null
+    },
+    {
+      "boot": 2,
+      "exit_code": 0,
+      "summary_path": "/private/tmp/tropical-release-p5-clean/2026-08-02_00-08-58-768-smoke-b128-r512.summary.json",
+      "run_id": "2026-08-02_00-08-58-768-smoke-b128-r512",
+      "pass": true,
+      "error": null
+    },
+    {
+      "boot": 3,
+      "exit_code": 0,
+      "summary_path": "/private/tmp/tropical-release-p5-clean/2026-08-02_00-09-06-670-smoke-b128-r512.summary.json",
+      "run_id": "2026-08-02_00-09-06-670-smoke-b128-r512",
+      "pass": true,
+      "error": null
+    },
+    {
+      "boot": 4,
+      "exit_code": 0,
+      "summary_path": "/private/tmp/tropical-release-p5-clean/2026-08-02_00-09-14-531-smoke-b128-r512.summary.json",
+      "run_id": "2026-08-02_00-09-14-531-smoke-b128-r512",
+      "pass": true,
+      "error": null
+    },
+    {
+      "boot": 5,
+      "exit_code": 0,
+      "summary_path": "/private/tmp/tropical-release-p5-clean/2026-08-02_00-09-22-407-smoke-b128-r512.summary.json",
+      "run_id": "2026-08-02_00-09-22-407-smoke-b128-r512",
+      "pass": true,
+      "error": null
+    }
+  ]
+}

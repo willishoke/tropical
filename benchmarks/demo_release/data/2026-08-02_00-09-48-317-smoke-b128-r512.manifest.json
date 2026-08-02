@@ -1,0 +1,51 @@
+{
+  "schema": 1,
+  "run_id": "2026-08-02_00-09-48-317-smoke-b128-r512",
+  "commit": "6660f0668b652a8f3ed2df6088dc691790bd8c09",
+  "worktree_status": "",
+  "graph_sha256": "db884d12d4b87a39fc8b854372ec903f1d6b90d531b89a0e4be154685e8680d1",
+  "scene_file": "playground/scene.js",
+  "scope_profile": {
+    "displaySamples": 896,
+    "searchSamples": 896,
+    "warmupSamples": 64,
+    "pointBudget": 384,
+    "fps": 24,
+    "resumeQuietMs": 100
+  },
+  "options": {
+    "mode": "smoke",
+    "durationSeconds": 90,
+    "engine": "/private/tmp/tropical-modal-pocket-demo/lean/.lake/build/bin/frontend",
+    "output": "/private/tmp/tropical-release-p5-clean",
+    "deviceQuantum": 128,
+    "renderQuantum": 512,
+    "exerciseFlow": true
+  },
+  "platform": "darwin",
+  "arch": "arm64",
+  "machine": {
+    "hostname": "MacBookPro.home",
+    "os_release": "25.3.0",
+    "os_version": "Darwin Kernel Version 25.3.0: Wed Jan 28 20:53:15 PST 2026; root:xnu-12377.81.4~5/RELEASE_ARM64_T6000",
+    "cpu": "Apple M1 Pro",
+    "cpu_count": 10,
+    "memory_bytes": 17179869184
+  },
+  "toolchain": {
+    "macos": "26.3",
+    "clang": "Apple clang version 17.0.0 (clang-1700.6.3.2)",
+    "cmake": "cmake version 4.2.3",
+    "lean": "Lean (version 4.29.1, arm64-apple-darwin24.6.0, commit f72c35b3f637c8c6571d353742168ab66cc22c00, Release)",
+    "lake": "Lake version 5.0.0-src+f72c35b (Lean version 4.29.1)"
+  },
+  "node": "v22.17.0",
+  "engine": "frontend",
+  "audio_device": {
+    "id": 132,
+    "name": "Apple Inc.: MacBook Pro Speakers"
+  },
+  "negotiated_buffer_length": 128,
+  "sample_rate": 44100,
+  "engine_stderr_sha256": "0ca3d0cf321bd8d05cc71f558b4f4810ce05d2714a6053e8b2ace49e14bfc403"
+}
