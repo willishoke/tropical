@@ -1,4 +1,4 @@
-.PHONY: build repl run lean mcp-lean clean validate test-lean-engine
+.PHONY: build repl run lean mcp-lean clean validate test-lean-engine reversible-build reversible-test
 
 ROOT := $(shell pwd)
 BUILD_DIR := $(ROOT)/build
@@ -63,3 +63,11 @@ validate: build lean
 # Behavioral MCP protocol suites against the live Lean engine.
 test-lean-engine: build lean
 	TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test mcp/errors.test.ts mcp/wire_dac.test.ts
+
+# Native Reversible gates. SwiftUI is a macOS surface; Linux CI must not
+# pretend to compile it.
+reversible-build:
+	swift build --package-path reversible
+
+reversible-test:
+	swift test --package-path reversible
