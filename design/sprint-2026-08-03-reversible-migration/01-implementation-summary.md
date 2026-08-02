@@ -10,6 +10,7 @@ and architecture decisions remain in `00-master.md`.
 - Integration baseline: `07a6b2517f8d24c8822d67e0337c0fd99d016bd8`
 - Committed handoff: `3bf81bc47ca52ec1e30b72a5a013e34c1241e4ec`
 - Corrected 15-commit replay head: `6a0e0c3765ed1ce263b8f96e8c096863ddd28710`
+- Final implementation checkpoint: `4731701f0fc99e0bc55ab59e66aa93f1d5e0803e`
 - History proof: passing
 - Remote recovery: corrected replay read back from `origin/sprint/reversible-migration`
 
@@ -230,7 +231,7 @@ being relabelled as the accepted scene.
 ## Qualification notes
 
 No release claim has been made. The listening decision, qualified-Mac
-hardware gates, ten-minute workload, and lifecycle/package evidence remain
-required even if implementation and automated tests are complete. The local
-Swift package build is green; the local Swift test gate is toolchain-blocked as
-described in S-04.
+hardware gates, ten-minute workload, and lifecycle evidence remain required
+even if implementation and automated tests are complete. The relocated
+production bundle smoke is green. The local Swift package build is green; the
+local Swift test gate is toolchain-blocked as described in S-04.
