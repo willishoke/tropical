@@ -32,6 +32,7 @@ __pycache__/
 /benchmarks/demo_release/room_audition/grouped_fit_out/*.wav
 /benchmarks/demo_release/room_audition/reverse_position_out/*.wav
 /benchmarks/demo_release/room_audition/native_rate_out/*.wav
+/benchmarks/demo_release/room_audition/pizzicato_audition_out/*.wav
 /benchmarks/demo_release/room_audition/match_out/modal_profiles.json
 /benchmarks/demo_release/room_audition/grouped_fit_out/grouped_fit_current_radii_stereo.npz
 /benchmarks/demo_release/room_audition/grouped_fit_out/grouped_fit_decay_ladder.npz

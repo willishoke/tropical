@@ -1,0 +1,719 @@
+{
+  "schema": 1,
+  "purpose": "offline replacement audition for the four metallic room hits",
+  "integration_status": "audition only; production scene and room cache unchanged",
+  "render_safety": "offline files only; no audio device opened",
+  "sample_rate": 44100,
+  "output_seconds": 20.0,
+  "preroll_seconds": 1.0,
+  "room_impulse_seconds": 12.0,
+  "source_tail_seconds": 3.0,
+  "scene": {
+    "path": "playground/scene.js",
+    "sha256": "7ad223e2e7f3605c556356ae22dac9ef119acc058a44648db9d247143f80fcef",
+    "score": {
+      "sampleRate": 44100,
+      "stepSeconds": 1,
+      "patternSteps": 16,
+      "chords": [
+        {
+          "label": "A\u221211",
+          "name": "minor eleven",
+          "ratios": [
+            [
+              1,
+              1
+            ],
+            [
+              3,
+              2
+            ],
+            [
+              12,
+              5
+            ],
+            [
+              18,
+              5
+            ],
+            [
+              16,
+              3
+            ]
+          ],
+          "frequencies": [
+            55,
+            82.5,
+            132,
+            198,
+            293.3333333333333
+          ]
+        },
+        {
+          "label": "D7\u00b79",
+          "name": "harmonic nine",
+          "ratios": [
+            [
+              4,
+              3
+            ],
+            [
+              2,
+              1
+            ],
+            [
+              7,
+              3
+            ],
+            [
+              10,
+              3
+            ],
+            [
+              6,
+              1
+            ]
+          ],
+          "frequencies": [
+            73.33333333333333,
+            110,
+            128.33333333333334,
+            183.33333333333334,
+            330
+          ]
+        },
+        {
+          "label": "F\u0394\u266f11",
+          "name": "bright crossing",
+          "ratios": [
+            [
+              8,
+              5
+            ],
+            [
+              12,
+              5
+            ],
+            [
+              3,
+              1
+            ],
+            [
+              4,
+              1
+            ],
+            [
+              9,
+              2
+            ]
+          ],
+          "frequencies": [
+            88,
+            132,
+            165,
+            220,
+            247.5
+          ]
+        },
+        {
+          "label": "E9",
+          "name": "harmonic return",
+          "ratios": [
+            [
+              3,
+              2
+            ],
+            [
+              21,
+              8
+            ],
+            [
+              15,
+              4
+            ],
+            [
+              9,
+              2
+            ],
+            [
+              27,
+              4
+            ]
+          ],
+          "frequencies": [
+            82.5,
+            144.375,
+            206.25,
+            247.5,
+            371.25
+          ]
+        }
+      ]
+    },
+    "bed": "native JIT render of the production veil branches only"
+  },
+  "room_asset": {
+    "path": "benchmarks/demo_release/room_audition/native_rate_out/grouped_fit_current_radii.npz",
+    "sha256": "91f4a4f29f29e396489603f6a4a10857f1cadb80267fbfecfa6adec9c62aaf0c",
+    "groups": 12
+  },
+  "pizzicato": {
+    "partials": 5,
+    "body_decays_per_second": [
+      9.5,
+      13.0,
+      16.5,
+      20.0,
+      23.5
+    ],
+    "paired_attack_decay_offsets_per_second": [
+      118.0,
+      142.0,
+      166.0,
+      190.0,
+      214.0
+    ],
+    "attack": {
+      "one_percent_onset_ms": 1.383219954648526,
+      "peak_latency_ms": 15.532879818594104
+    }
+  },
+  "validation": {
+    "causal_fft_vs_literal_relative_l2": 6.782288750961095e-16,
+    "reverse_fft_vs_literal_relative_l2": 3.778053258177371e-15,
+    "paired_source_anchor_absolute": 0.0,
+    "causal_pre_anchor_max_absolute": 1.823046513062769e-18
+  },
+  "gain": {
+    "master": 3.7,
+    "presence": 0.82,
+    "level": 0.72,
+    "integrated_scene_path": 2.1844799999999998,
+    "pizzicato_room_send": 3.0,
+    "common_headroom_gain": 1.0,
+    "per_file_normalization_or_limiter": "none"
+  },
+  "patterns": {
+    "01_rotating_single": {
+      "label": "rotating single note every beat",
+      "note_event_count": 16,
+      "events": [
+        {
+          "seconds": 1.0,
+          "chord_index": 0,
+          "voice_index": 0,
+          "velocity": 1.0
+        },
+        {
+          "seconds": 2.0,
+          "chord_index": 0,
+          "voice_index": 2,
+          "velocity": 0.68
+        },
+        {
+          "seconds": 3.0,
+          "chord_index": 0,
+          "voice_index": 4,
+          "velocity": 0.78
+        },
+        {
+          "seconds": 4.0,
+          "chord_index": 0,
+          "voice_index": 1,
+          "velocity": 0.62
+        },
+        {
+          "seconds": 5.0,
+          "chord_index": 1,
+          "voice_index": 0,
+          "velocity": 1.0
+        },
+        {
+          "seconds": 6.0,
+          "chord_index": 1,
+          "voice_index": 2,
+          "velocity": 0.68
+        },
+        {
+          "seconds": 7.0,
+          "chord_index": 1,
+          "voice_index": 4,
+          "velocity": 0.78
+        },
+        {
+          "seconds": 8.0,
+          "chord_index": 1,
+          "voice_index": 1,
+          "velocity": 0.62
+        },
+        {
+          "seconds": 9.0,
+          "chord_index": 2,
+          "voice_index": 0,
+          "velocity": 1.0
+        },
+        {
+          "seconds": 10.0,
+          "chord_index": 2,
+          "voice_index": 2,
+          "velocity": 0.68
+        },
+        {
+          "seconds": 11.0,
+          "chord_index": 2,
+          "voice_index": 4,
+          "velocity": 0.78
+        },
+        {
+          "seconds": 12.0,
+          "chord_index": 2,
+          "voice_index": 1,
+          "velocity": 0.62
+        },
+        {
+          "seconds": 13.0,
+          "chord_index": 3,
+          "voice_index": 0,
+          "velocity": 1.0
+        },
+        {
+          "seconds": 14.0,
+          "chord_index": 3,
+          "voice_index": 2,
+          "velocity": 0.68
+        },
+        {
+          "seconds": 15.0,
+          "chord_index": 3,
+          "voice_index": 4,
+          "velocity": 0.78
+        },
+        {
+          "seconds": 16.0,
+          "chord_index": 3,
+          "voice_index": 1,
+          "velocity": 0.62
+        }
+      ],
+      "isolated_direct": {
+        "sample_count": 882000,
+        "peak": 0.11495834397706353,
+        "peak_dbfs": -18.789190020441715,
+        "rms": 0.009453685402348685,
+        "rms_dbfs": -40.48797708296652
+      },
+      "positions": {
+        "plus_1": {
+          "pre_first_event_energy_fraction": 3.4100652587238925e-33
+        },
+        "plus_0p5": {
+          "pre_first_event_energy_fraction": 0.00962697987351796
+        }
+      }
+    },
+    "02_downbeat_dyad_ghosts": {
+      "label": "downbeat dyad with single-note ghost beats",
+      "note_event_count": 20,
+      "events": [
+        {
+          "seconds": 1.0,
+          "chord_index": 0,
+          "voice_index": 0,
+          "velocity": 0.72
+        },
+        {
+          "seconds": 1.0,
+          "chord_index": 0,
+          "voice_index": 3,
+          "velocity": 0.64
+        },
+        {
+          "seconds": 2.0,
+          "chord_index": 0,
+          "voice_index": 2,
+          "velocity": 0.44
+        },
+        {
+          "seconds": 3.0,
+          "chord_index": 0,
+          "voice_index": 4,
+          "velocity": 0.52
+        },
+        {
+          "seconds": 4.0,
+          "chord_index": 0,
+          "voice_index": 1,
+          "velocity": 0.4
+        },
+        {
+          "seconds": 5.0,
+          "chord_index": 1,
+          "voice_index": 0,
+          "velocity": 0.72
+        },
+        {
+          "seconds": 5.0,
+          "chord_index": 1,
+          "voice_index": 3,
+          "velocity": 0.64
+        },
+        {
+          "seconds": 6.0,
+          "chord_index": 1,
+          "voice_index": 2,
+          "velocity": 0.44
+        },
+        {
+          "seconds": 7.0,
+          "chord_index": 1,
+          "voice_index": 4,
+          "velocity": 0.52
+        },
+        {
+          "seconds": 8.0,
+          "chord_index": 1,
+          "voice_index": 1,
+          "velocity": 0.4
+        },
+        {
+          "seconds": 9.0,
+          "chord_index": 2,
+          "voice_index": 0,
+          "velocity": 0.72
+        },
+        {
+          "seconds": 9.0,
+          "chord_index": 2,
+          "voice_index": 3,
+          "velocity": 0.64
+        },
+        {
+          "seconds": 10.0,
+          "chord_index": 2,
+          "voice_index": 2,
+          "velocity": 0.44
+        },
+        {
+          "seconds": 11.0,
+          "chord_index": 2,
+          "voice_index": 4,
+          "velocity": 0.52
+        },
+        {
+          "seconds": 12.0,
+          "chord_index": 2,
+          "voice_index": 1,
+          "velocity": 0.4
+        },
+        {
+          "seconds": 13.0,
+          "chord_index": 3,
+          "voice_index": 0,
+          "velocity": 0.72
+        },
+        {
+          "seconds": 13.0,
+          "chord_index": 3,
+          "voice_index": 3,
+          "velocity": 0.64
+        },
+        {
+          "seconds": 14.0,
+          "chord_index": 3,
+          "voice_index": 2,
+          "velocity": 0.44
+        },
+        {
+          "seconds": 15.0,
+          "chord_index": 3,
+          "voice_index": 4,
+          "velocity": 0.52
+        },
+        {
+          "seconds": 16.0,
+          "chord_index": 3,
+          "voice_index": 1,
+          "velocity": 0.4
+        }
+      ],
+      "isolated_direct": {
+        "sample_count": 882000,
+        "peak": 0.12684468825127418,
+        "peak_dbfs": -17.93455429158231,
+        "rms": 0.007536813945952232,
+        "rms_dbfs": -42.456244112087404
+      },
+      "positions": {
+        "plus_1": {
+          "pre_first_event_energy_fraction": 3.730233506855636e-33
+        },
+        "plus_0p5": {
+          "pre_first_event_energy_fraction": 0.023459899075782605
+        }
+      }
+    },
+    "03_chord_tone_rake": {
+      "label": "one low-to-high chord-tone rake per chord",
+      "note_event_count": 20,
+      "events": [
+        {
+          "seconds": 1.0,
+          "chord_index": 0,
+          "voice_index": 0,
+          "velocity": 0.58
+        },
+        {
+          "seconds": 1.034,
+          "chord_index": 0,
+          "voice_index": 1,
+          "velocity": 0.58
+        },
+        {
+          "seconds": 1.068,
+          "chord_index": 0,
+          "voice_index": 2,
+          "velocity": 0.58
+        },
+        {
+          "seconds": 1.102,
+          "chord_index": 0,
+          "voice_index": 3,
+          "velocity": 0.58
+        },
+        {
+          "seconds": 1.136,
+          "chord_index": 0,
+          "voice_index": 4,
+          "velocity": 0.58
+        },
+        {
+          "seconds": 5.0,
+          "chord_index": 1,
+          "voice_index": 0,
+          "velocity": 0.58
+        },
+        {
+          "seconds": 5.034,
+          "chord_index": 1,
+          "voice_index": 1,
+          "velocity": 0.58
+        },
+        {
+          "seconds": 5.068,
+          "chord_index": 1,
+          "voice_index": 2,
+          "velocity": 0.58
+        },
+        {
+          "seconds": 5.102,
+          "chord_index": 1,
+          "voice_index": 3,
+          "velocity": 0.58
+        },
+        {
+          "seconds": 5.136,
+          "chord_index": 1,
+          "voice_index": 4,
+          "velocity": 0.58
+        },
+        {
+          "seconds": 9.0,
+          "chord_index": 2,
+          "voice_index": 0,
+          "velocity": 0.58
+        },
+        {
+          "seconds": 9.034,
+          "chord_index": 2,
+          "voice_index": 1,
+          "velocity": 0.58
+        },
+        {
+          "seconds": 9.068,
+          "chord_index": 2,
+          "voice_index": 2,
+          "velocity": 0.58
+        },
+        {
+          "seconds": 9.102,
+          "chord_index": 2,
+          "voice_index": 3,
+          "velocity": 0.58
+        },
+        {
+          "seconds": 9.136,
+          "chord_index": 2,
+          "voice_index": 4,
+          "velocity": 0.58
+        },
+        {
+          "seconds": 13.0,
+          "chord_index": 3,
+          "voice_index": 0,
+          "velocity": 0.58
+        },
+        {
+          "seconds": 13.034,
+          "chord_index": 3,
+          "voice_index": 1,
+          "velocity": 0.58
+        },
+        {
+          "seconds": 13.068,
+          "chord_index": 3,
+          "voice_index": 2,
+          "velocity": 0.58
+        },
+        {
+          "seconds": 13.102,
+          "chord_index": 3,
+          "voice_index": 3,
+          "velocity": 0.58
+        },
+        {
+          "seconds": 13.136,
+          "chord_index": 3,
+          "voice_index": 4,
+          "velocity": 0.58
+        }
+      ],
+      "isolated_direct": {
+        "sample_count": 882000,
+        "peak": 0.11531232775080853,
+        "peak_dbfs": -18.762485217860466,
+        "rms": 0.007885693475653545,
+        "rms_dbfs": -42.06320216742047
+      },
+      "positions": {
+        "plus_1": {
+          "pre_first_event_energy_fraction": 3.732103789797417e-33
+        },
+        "plus_0p5": {
+          "pre_first_event_energy_fraction": 0.026895222864812413
+        }
+      }
+    }
+  },
+  "files": {
+    "01_rotating_single_dry.wav": {
+      "sample_count": 882000,
+      "peak": 0.48749772561254556,
+      "peak_dbfs": -6.240548122641209,
+      "rms": 0.08147628941053393,
+      "rms_dbfs": -21.779375156820958,
+      "sha256": "2137fa725b492a63fef391f674475b9db9019ac58204b22f154060c150f1d7b8"
+    },
+    "01_rotating_single_position_plus_1_wet.wav": {
+      "sample_count": 882000,
+      "peak": 0.1515934950953096,
+      "peak_dbfs": -16.386388679201083,
+      "rms": 0.025786048500583605,
+      "rms_dbfs": -31.772304096268208,
+      "sha256": "c2611e347dab47387e79758c3e92d1c34decdfaa3fe30549891f4c66cc2a3f34"
+    },
+    "01_rotating_single_position_plus_1_mix.wav": {
+      "sample_count": 882000,
+      "peak": 0.4900748610369944,
+      "peak_dbfs": -6.194751491184981,
+      "rms": 0.0845118773970247,
+      "rms_dbfs": -21.46164501023826,
+      "sha256": "712ea4b354426dd01459f089ea25692af8fbfcf5df07e7ecd6ec9373717a49e3"
+    },
+    "01_rotating_single_position_plus_0p5_wet.wav": {
+      "sample_count": 882000,
+      "peak": 0.1534144573053664,
+      "peak_dbfs": -16.282674237715913,
+      "rms": 0.02671644687263727,
+      "rms_dbfs": -31.46442601840166,
+      "sha256": "23dba008e2d34fbf6a2726edf27d0fd24418d9f6ad5e7d41aa6ff98f6fd76bcc"
+    },
+    "01_rotating_single_position_plus_0p5_mix.wav": {
+      "sample_count": 882000,
+      "peak": 0.49131224826569353,
+      "peak_dbfs": -6.172848178003826,
+      "rms": 0.08496379849483346,
+      "rms_dbfs": -21.415321594633202,
+      "sha256": "edb484b0cf4440108a48ecc8ed5dd991e933a4f0adef89214d749c50d517d97a"
+    },
+    "02_downbeat_dyad_ghosts_dry.wav": {
+      "sample_count": 882000,
+      "peak": 0.4874557759804445,
+      "peak_dbfs": -6.241295583672769,
+      "rms": 0.08148495175952779,
+      "rms_dbfs": -21.778451744518776,
+      "sha256": "45a547f672459774008dbae50517b094549004fd33e50d510b3636c606c14c68"
+    },
+    "02_downbeat_dyad_ghosts_position_plus_1_wet.wav": {
+      "sample_count": 882000,
+      "peak": 0.16866614056370036,
+      "peak_dbfs": -15.459441850558317,
+      "rms": 0.020197582575588787,
+      "rms_dbfs": -33.89401215256137,
+      "sha256": "e6e3e6bf3667dd434a3eeb664ee2a2fe5a5b19954176cee323ae92054058e8ff"
+    },
+    "02_downbeat_dyad_ghosts_position_plus_1_mix.wav": {
+      "sample_count": 882000,
+      "peak": 0.4892382088179722,
+      "peak_dbfs": -6.209592650425217,
+      "rms": 0.08283961568973136,
+      "rms_dbfs": -21.635238491133304,
+      "sha256": "2a8ac26a25e24087d7e655f335695ef1657d5b70150cc500f3c32cae90219b48"
+    },
+    "02_downbeat_dyad_ghosts_position_plus_0p5_wet.wav": {
+      "sample_count": 882000,
+      "peak": 0.14929087134244876,
+      "peak_dbfs": -16.519334943531405,
+      "rms": 0.020904649343626475,
+      "rms_dbfs": -33.595142258904005,
+      "sha256": "6b3ff367f223f1cb6bd26f96cbc5bfd18625fb1938bde81b830887d72abcaa58"
+    },
+    "02_downbeat_dyad_ghosts_position_plus_0p5_mix.wav": {
+      "sample_count": 882000,
+      "peak": 0.500469420127362,
+      "peak_dbfs": -6.012449076007977,
+      "rms": 0.08322050767149472,
+      "rms_dbfs": -21.595392784017818,
+      "sha256": "dfd6d59b6044f7c6d1405474e3ffea5c5f1e5f5e6568f7b8a0e69bb207ce8bfa"
+    },
+    "03_chord_tone_rake_dry.wav": {
+      "sample_count": 882000,
+      "peak": 0.5122784048138053,
+      "peak_dbfs": -5.809879029960081,
+      "rms": 0.08140276210093055,
+      "rms_dbfs": -21.78721717375382,
+      "sha256": "f822431afc182c632996bb2502344db070baf91240633724be6c55443484f0ac"
+    },
+    "03_chord_tone_rake_position_plus_1_wet.wav": {
+      "sample_count": 882000,
+      "peak": 0.21879871670311826,
+      "peak_dbfs": -13.199104591048991,
+      "rms": 0.021219895656076432,
+      "rms_dbfs": -33.46513511943969,
+      "sha256": "33686600407501a529e3c280b00004c8c2f6eb094eb872fa83e1d237be6ea0e6"
+    },
+    "03_chord_tone_rake_position_plus_1_mix.wav": {
+      "sample_count": 882000,
+      "peak": 0.487544711971502,
+      "peak_dbfs": -6.239710993275399,
+      "rms": 0.08270740784048738,
+      "rms_dbfs": -21.649111806490616,
+      "sha256": "dc80f403652c4a876bff71c4b39f62b899bcc3cca3df117c178dce07a625665d"
+    },
+    "03_chord_tone_rake_position_plus_0p5_wet.wav": {
+      "sample_count": 882000,
+      "peak": 0.24986189159594585,
+      "peak_dbfs": -12.045999529862888,
+      "rms": 0.02212806137136479,
+      "rms_dbfs": -33.101132654666266,
+      "sha256": "a9edecc5ef4e50910a7ebe8d3de2755653aadd8d51d9413242e57868b9c9dc92"
+    },
+    "03_chord_tone_rake_position_plus_0p5_mix.wav": {
+      "sample_count": 882000,
+      "peak": 0.4813639310440697,
+      "peak_dbfs": -6.350529096981803,
+      "rms": 0.08291363430578956,
+      "rms_dbfs": -21.627480965136108,
+      "sha256": "30306dbc5e568ebd62803a3975ee037c3722dd15b833c3e3e2cda557d0d5b30c"
+    }
+  }
+}

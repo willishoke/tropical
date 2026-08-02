@@ -180,6 +180,31 @@ Wet-only and intermediate `±0.5` files are included. See
 `05-reverse-position-scope.md` for the proof, cost fork, demo timing, and hard
 integration gates.
 
+## Chord-derived pizzicato replacement audition
+
+`generate_pizzicato_auditions.py` compares three less intrusive replacements
+for the four metallic hits without changing the production scene or its frozen
+cache. It renders entirely offline and does not open an audio device:
+
+```sh
+uv run --with numpy python \
+  benchmarks/demo_release/room_audition/generate_pizzicato_auditions.py
+```
+
+The local `pizzicato_audition_out/` WAV set contains:
+
+1. `01_rotating_single_*` — one rotating chord tone on every beat.
+2. `02_downbeat_dyad_ghosts_*` — a downbeat dyad followed by three lighter
+   single-note beats.
+3. `03_chord_tone_rake_*` — a low-to-high five-note rake at each chord change.
+
+Each candidate has one dry scene render and wet/mix renders at POSITION `+1`
+and `+0.5`. The dry and mix files retain the exact production string bed; all
+files share one gain structure and one common headroom policy, with no per-file
+normalization or limiter. The tracked JSON summary records the exact score,
+events, asset/source hashes, timing, levels, and WAV hashes. Select a candidate
+by listening before regenerating the production room cache.
+
 ## Native 44.1 kHz production gate
 
 Gate 0 renders Clouds once at its frozen 32 kHz rate, resamples the complete
