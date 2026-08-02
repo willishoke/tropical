@@ -154,6 +154,27 @@ This short correction run does not replace or extend the user-approved
 stride-1 visual profile. Subjective confirmation of the corrected phase view
 remains a user acceptance item and is not inferred from telemetry.
 
+### Centered 60 Hz log-phase correction
+
+The first fixed-scale correction still chose a physical trigger cycle for each
+frame. At 24 fps, the 55–73 Hz fundamentals in the first two chords changed
+cycle age in visibly larger steps than the later, higher register. Candidate
+`26a3262` separates the two responsibilities: raw scope data supplies the
+centered carrier shape, while the exact paired modal envelope at audible-now
+supplies its displayed height. Visible cycle count grows logarithmically from
+`1.5` at 55 Hz instead of linearly with frequency.
+
+| Gate | Evidence / result |
+|---|---|
+| Center/content oracle | `playground/qualification/scope-content.js`; 120/120 observations pass, at least 2,047/2,048 distinct raw points, maximum relative center-lock error `5.71e-15`, RPC p99 `5.171 ms` |
+| Focused frontend | 31/31 pass; exact audible-now envelope, centered crossings, log-period density, amplitude-jitter rejection, stride 1, and a 60-on-120-Hz scheduler are pinned |
+| Full web/JIT/Metal | 147 pass, 1 intentional capability skip, 0 fail across 12 files |
+| Integrated 60 Hz profile | `2026-08-02_03-12-06-662-smoke-b128-r512`; 15.54 measured seconds, 527 dispatched writes, scope p99 `4.462 ms`, frame p95 `19.30 ms`, `59.84 fps`, zero preemptions, and all 15 gates pass |
+
+The 60 Hz run specifically replaces the earlier 24 fps visual-profile smoke;
+it does not repeat or extend the accepted 10-minute runtime-duration gate.
+Subjective confirmation remains pending.
+
 ## Release artifact status
 
 The evidence package now contains, without overwriting failed runs:

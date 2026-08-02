@@ -232,9 +232,10 @@ The shipping scope path has four parts:
    in scope-owned workspace. Control publication swaps a new small control
    image by name and never waits for a scope reader or its mutex.
 4. One canvas overlays the active chord's five modes. Each trace receives an
-   independent interpolated positive-going zero-crossing lock and one shared
-   analytic volts/div calibration, so its paired modal envelope remains
-   visible. The lightweight projection artifact is read at stride 1.
+   independent interpolated positive-going zero-crossing lock at the center
+   graticule and one shared analytic volts/div calibration. Carrier spacing is
+   log-period mapped while amplitude comes from the exact modal envelope at
+   audible-now. The stride-1 view is display-synchronized at a 60 Hz cap.
 
 The earlier preempt/freeze containment was removed after it produced visible
 gesture pauses. Ref-counted immutable program assets keep an in-flight frame
@@ -377,9 +378,12 @@ Owned surface: `playground/main.js`, new transport tests.
   below the 20 ms RPC gate.
 - Calibrate every trace against the exact maximum of its paired modal envelope;
   never normalize each frame by its own peak.
-- Select the freshest independently interpolated positive crossing and do not
-  draw silent or DC-only windows as locked traces.
+- Select the nearest independently interpolated positive crossing and do not
+  draw silent or DC-only windows as locked traces. Center the crossing and
+  log-map each mode's visible cycle count.
 - Keep rendering through pointer, keyboard-repeat, and sender-busy windows.
+- Drive ordinary displays at 60 Hz through `requestAnimationFrame`; cap 120 Hz
+  panels at 60 rather than doubling read and JSON work.
 
 Owned surface: `playground/renderer/*` and narrow socket request parsing if
 needed. Coordinate the protocol field with A1.
@@ -624,11 +628,11 @@ log-frequency cutoff sweep at 8–16 ms input cadence:
 ### Scope behavior
 
 - idle scope RPC p99 no more than 20 ms at the selected point budget;
-- average displayed cadence at least 23.5 fps and p95 frame interval no more
-  than 50 ms; a 20 fps floor requires an explicit Day-2 scope cut while every
-  control gate remains green;
+- average displayed cadence at least 57 fps and p95 frame interval no more
+  than 20.83 ms at the 60 Hz profile;
 - no blank or paused canvas during a gesture;
-- all five traces independently lock to a positive-going zero crossing; and
+- all five traces independently lock to a positive-going zero crossing at the
+  center graticule;
 - the shared fixed vertical scale exposes each trace's modal attack and decay;
 - a newly published control image appears within one displayed scope frame.
 
