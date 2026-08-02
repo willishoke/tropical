@@ -234,8 +234,10 @@ The shipping scope path has four parts:
 4. One canvas overlays the active chord's five modes. Each trace receives an
    independent interpolated positive-going zero-crossing lock at the center
    graticule and one shared analytic volts/div calibration. Carrier spacing is
-   log-period mapped while amplitude comes from the exact modal envelope at
-   audible-now. The stride-1 view is display-synchronized at a 60 Hz cap.
+   log-period mapped. The exact envelope is divided out point-by-point before
+   phase locking, then its single audible-now value restores display amplitude;
+   envelope slope therefore cannot change one visible cycle relative to the
+   next. The stride-1 view is display-synchronized at a 60 Hz cap.
 
 The earlier preempt/freeze containment was removed after it produced visible
 gesture pauses. Ref-counted immutable program assets keep an in-flight frame
@@ -381,6 +383,9 @@ Owned surface: `playground/main.js`, new transport tests.
 - Select the nearest independently interpolated positive crossing and do not
   draw silent or DC-only windows as locked traces. Center the crossing and
   log-map each mode's visible cycle count.
+- Demodulate each projection sample by that mode's exact paired envelope before
+  locking; multiply the resulting unit carrier only by the audible-now
+  envelope. Gate analytic cycle shape and equivalent 16-second loop frames.
 - Keep rendering through pointer, keyboard-repeat, and sender-busy windows.
 - Drive ordinary displays at 60 Hz through `requestAnimationFrame`; cap 120 Hz
   panels at 60 rather than doubling read and JSON work.
@@ -633,6 +638,8 @@ log-frequency cutoff sweep at 8–16 ms input cadence:
 - no blank or paused canvas during a gesture;
 - all five traces independently lock to a positive-going zero crossing at the
   center graticule;
+- every cycle in a locked trace matches one analytic unit carrier, and
+  equivalent frames remain invariant across scene-loop rebases;
 - the shared fixed vertical scale exposes each trace's modal attack and decay;
 - a newly published control image appears within one displayed scope frame.
 

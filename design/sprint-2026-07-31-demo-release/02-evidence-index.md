@@ -175,14 +175,38 @@ The 60 Hz run specifically replaces the earlier 24 fps visual-profile smoke;
 it does not repeat or extend the accepted 10-minute runtime-duration gate.
 Subjective confirmation remains pending.
 
+### Cycle-invariant envelope demodulation
+
+Centered locking alone did not make the low A−11 and D7·9 fundamentals a
+stationary display: a 55 Hz cycle spans enough time for the paired attack/decay
+envelope to change visibly within that cycle. Candidate `2aea011` now divides
+the raw projection by the exact envelope at every source sample, locks and
+resamples that unit carrier, and restores amplitude once from the exact
+audible-now envelope. This is display-only demodulation; the audio graph and
+its modal envelope are unchanged.
+
+| Gate | Evidence / result |
+|---|---|
+| Production carrier oracle | `playground/qualification/scope-content.js`; 360/360 observations pass across 20 taps × 6 ages × 3 equivalent 16-second loop positions, with audio never started |
+| Shape and repeatability | Maximum analytic carrier-shape error `3.50e-4`, carrier peak error `1.56e-4`, relative center-lock error `4.80e-15`, and equivalent-loop error `2.87e-7` of displayed amplitude |
+| Focused frontend | 35/35 pass across scene, scope, phase-lock, RPC, sender, and qualification suites |
+| Muted integrated 60 Hz profile | `2026-08-02_05-51-52-039-smoke-b128-r512`; output level exactly zero, 10.07 measured seconds, 337 dispatched writes, scope p99 `5.742 ms`, frame p95 `17.90 ms`, `59.63 fps`, zero preemptions, zero underruns/overruns or other faults, and all 15 gates pass |
+
+The muted hardware mode still runs the actual device clock and Metal worker.
+Its 32 all-zero capture blocks are the asserted output condition, not suppressed
+data; nonfinite/clamped samples and all runtime, Metal, and DAC faults remain
+blocking. It intentionally emits no capture WAV. Subjective confirmation of
+the corrected A−11 and D7·9 display remains pending.
+
 ## Release artifact status
 
 The evidence package now contains, without overwriting failed runs:
 
 - five cold-boot records, the clean 90-second smoke, and the completed
   10-minute adversarial soak;
-- JSONL, summary, manifest, and qualification capture WAV for every completed
-  run;
+- JSONL, summary, and manifest for every completed run, plus qualification
+  capture WAVs for audible runs (the muted visual diagnostic intentionally has
+  none);
 - final-room wet endpoints, scrub, dry reference, and integrated listening WAV;
 - the final full-validation log; and
 - qualified commit SHA, clean-worktree state, graph/profile hashes, machine
