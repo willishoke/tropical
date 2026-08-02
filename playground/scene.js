@@ -13,6 +13,7 @@
   const PATTERN_SECONDS = STEP_SECONDS * PATTERN_STEPS
   const SCENE_SECONDS = PATTERN_SECONDS
   const SAMPLE_RATE = 44100
+  const STRING_ATTACK_DELAY = 0.06
 
   const CHORDS = [
     {
@@ -161,6 +162,20 @@
     return pairedEnvelopePeak(rows[0][1], rows[1][1], rows[0][2])
   }
 
+  function scopeEnvelopeAt(chordIndex, voiceIndex, sceneTime) {
+    const chord = CHORDS[chordIndex]
+    const voice = chord?.voices[voiceIndex]
+    if (!chord || !voice || !Number.isFinite(sceneTime)) return 0
+    const age = sceneTime - (
+      chord.startStep * STEP_SECONDS + STRING_ATTACK_DELAY
+    )
+    if (!(age > 0)) return 0
+    const rows = stringModes(voiceFrequency(chord, voice), chordIndex, voiceIndex)
+    return Math.abs(rows[0][2]) * (
+      Math.exp(-rows[0][1] * age) - Math.exp(-rows[1][1] * age)
+    )
+  }
+
   const SCOPE_FULL_SCALE = Math.max(...CHORDS.flatMap((chord, chordIndex) => (
     chord.voices.map((_voice, voiceIndex) => scopeEnvelopePeak(chordIndex, voiceIndex))
   )))
@@ -249,7 +264,7 @@
       const number = chordIndex + 1
       const sourceId = `chord${number}`
       const veilId = `veil${number}`
-      const strikeTime = chord.startStep * STEP_SECONDS + 0.06
+      const strikeTime = chord.startStep * STEP_SECONDS + STRING_ATTACK_DELAY
 
       // A chord is one modal bank with five exact-ratio voices. Distinct
       // chords must remain distinct modal islands: modalMix is a pole union
@@ -489,6 +504,7 @@
     PATTERN_SECONDS,
     SCENE_SECONDS,
     SAMPLE_RATE,
+    STRING_ATTACK_DELAY,
     CHORDS,
     CONTROLS,
     PRIME_SLOTS,
@@ -501,6 +517,7 @@
     chordModes,
     pairedEnvelopePeak,
     scopeEnvelopePeak,
+    scopeEnvelopeAt,
     snareModes,
     scopeModeId,
     buildSceneGraph,

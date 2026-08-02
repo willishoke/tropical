@@ -39,6 +39,7 @@ const committedValues = new Map(
   CONTROLS.map((control) => [control.slot, control.value]),
 )
 let loopStarted = false
+let nextScopeAnimationMs = 0
 const wells = []
 const scopeSlots = new Map()
 const stepElements = []
@@ -311,7 +312,10 @@ function drawModeOverlay(well, frames, chord) {
     context.beginPath()
     frame.values.forEach((value, index) => {
       const x = index * width / (frame.values.length - 1)
-      const y = height / 2 - scopeView.normalizedAmplitude(value, scale)
+      const displayed = scopeView.envelopeScaledValue(
+        value, frame.peak, frame.displayEnvelope,
+      )
+      const y = height / 2 - scopeView.normalizedAmplitude(displayed, scale)
         * (height / 2 - 5 * dpr)
       if (index === 0) context.moveTo(x, y)
       else context.lineTo(x, y)
@@ -319,15 +323,27 @@ function drawModeOverlay(well, frames, chord) {
     context.stroke()
   })
 
-  const milliseconds = (
-    frames[0].values.length * frames[0].stride / scene.SAMPLE_RATE * 1000
-  )
   const ratios = chord.voices.map((voice) => scene.absoluteRatio(chord, voice).join('/'))
   const envelope = scopeView.envelopeFraction(frames, scene.SCOPE_FULL_SCALE)
+  const cycles = visibleFrames.map((frame) => frame.cycles)
   well.meta.textContent = (
     `${chord.label} · ${ratios.join(' · ')} · env ${Math.round(envelope * 100)}%`
-    + ` · ${milliseconds.toFixed(1)} ms`
+    + ` · log phase ${Math.min(...cycles).toFixed(1)}–${Math.max(...cycles).toFixed(1)} cyc`
   )
+}
+
+function scheduleScopeFrame() {
+  window.requestAnimationFrame((timestamp) => {
+    const decision = scopeView.frameDecision(
+      nextScopeAnimationMs, timestamp, SCOPE_FPS,
+    )
+    nextScopeAnimationMs = decision.next
+    if (!decision.due) {
+      scheduleScopeFrame()
+      return
+    }
+    renderFrame()
+  })
 }
 
 function chordIndexAt(time) {
@@ -458,7 +474,8 @@ async function renderFrame() {
     const well = wells[0]
     const live = well.traces.map((trace) => {
       const tap = scene.scopeModeId(chordIndex, trace.voiceIndex)
-      return { ...trace, tap, slot: scopeSlots.get(tap) }
+      const frequency = scene.voiceFrequency(chord, chord.voices[trace.voiceIndex])
+      return { ...trace, tap, frequency, slot: scopeSlots.get(tap) }
     }).filter((trace) => trace.slot !== undefined)
     const count = DISPLAY_SAMPLES + SEARCH_SAMPLES + WARMUP_SAMPLES
     const start = Math.max(0, position - count)
@@ -470,21 +487,28 @@ async function renderFrame() {
     })
 
     if (response.preempted) {
-      window.setTimeout(renderFrame, 1000 / SCOPE_FPS)
+      scheduleScopeFrame()
       return
     }
 
     const stride = response.stride ?? 1
     const warmupPoints = Math.ceil(WARMUP_SAMPLES / stride)
-    const searchPoints = Math.ceil(SEARCH_SAMPLES / stride)
     const displayPoints = Math.ceil(DISPLAY_SAMPLES / stride)
 
     const frames = live.map((trace, resultIndex) => {
       const values = (response.values[resultIndex] || []).slice(warmupPoints)
+      const cycles = scopeView.visibleCycles(trace.frequency, scene.BASE_HZ)
+      const periodPoints = scene.SAMPLE_RATE / trace.frequency / stride
       return {
         trace,
         stride,
-        ...phaseLock.window(values, searchPoints, displayPoints),
+        cycles,
+        displayEnvelope: scene.scopeEnvelopeAt(
+          chordIndex, trace.voiceIndex, transport.sceneTime,
+        ),
+        ...phaseLock.centeredWindow(
+          values, displayPoints, cycles * periodPoints,
+        ),
       }
     })
     drawModeOverlay(well, frames, chord)
@@ -492,7 +516,7 @@ async function renderFrame() {
     // Compilation/hot-swap transitions can make one random-access read stale.
     // The next frame is authoritative.
   }
-  window.setTimeout(renderFrame, 1000 / SCOPE_FPS)
+  scheduleScopeFrame()
 }
 
 async function boot() {
@@ -551,7 +575,7 @@ async function boot() {
 
     if (!loopStarted) {
       loopStarted = true
-      renderFrame()
+      scheduleScopeFrame()
     }
   } catch (error) {
     showFault(error)

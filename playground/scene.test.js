@@ -155,6 +155,23 @@ test('scope volts-per-division is the exact shared fundamental envelope peak', (
   peaks.forEach((peak) => assert.ok(peak <= scene.SCOPE_FULL_SCALE))
 })
 
+test('scope envelope follows the exact paired mode at audible-now', () => {
+  scene.CHORDS.forEach((chord, chordIndex) => {
+    chord.voices.forEach((_voice, voiceIndex) => {
+      const strike = chord.startStep * scene.STEP_SECONDS + scene.STRING_ATTACK_DELAY
+      const rows = scene.stringModes(
+        scene.voiceFrequency(chord, chord.voices[voiceIndex]), chordIndex, voiceIndex,
+      )
+      const peakAge = Math.log(rows[1][1] / rows[0][1]) / (rows[1][1] - rows[0][1])
+      assert.equal(scene.scopeEnvelopeAt(chordIndex, voiceIndex, strike), 0)
+      assert.ok(Math.abs(
+        scene.scopeEnvelopeAt(chordIndex, voiceIndex, strike + peakAge)
+        - scene.scopeEnvelopePeak(chordIndex, voiceIndex)
+      ) < 1e-15)
+    })
+  })
+})
+
 test('each metal hit is a causal inharmonic attack pair', () => {
   for (let hit = 0; hit < 4; hit++) {
     const rows = scene.snareModes(hit)

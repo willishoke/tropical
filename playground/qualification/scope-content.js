@@ -10,6 +10,7 @@ const { performance } = require('node:perf_hooks')
 const scene = require('../scene.js')
 const phaseLock = require('../renderer/phase-lock.js')
 const scopeProfile = require('../renderer/scope-profile.js')
+const scopeView = require('../renderer/scope-view.js')
 const { JsonLineRpcClient } = require('../rpc-client.js')
 
 const repo = resolve(__dirname, '../..')
@@ -66,8 +67,12 @@ async function probe() {
       assert.equal(response.stride, 1)
       response.values.forEach((values, voiceIndex) => {
         const raw = values.slice(scopeProfile.warmupSamples)
-        const frame = phaseLock.window(
-          raw, scopeProfile.searchSamples, scopeProfile.displaySamples,
+        const frequency = scene.voiceFrequency(chord, chord.voices[voiceIndex])
+        const cycles = scopeView.visibleCycles(frequency, scene.BASE_HZ)
+        const frame = phaseLock.centeredWindow(
+          raw,
+          scopeProfile.displaySamples,
+          cycles * scene.SAMPLE_RATE / frequency,
         )
         const distinct = new Set(raw.map((value) => value.toPrecision(15))).size
         assert.ok(
@@ -76,7 +81,7 @@ async function probe() {
         )
         assert.equal(frame.active, true, `${chord.label}/${voiceIndex} became silent`)
         assert.equal(frame.locked, true, `${chord.label}/${voiceIndex} lost phase lock`)
-        const lockError = Math.abs(frame.values[0]) / frame.peak
+        const lockError = Math.abs(frame.centerValue) / frame.peak
         assert.ok(lockError < 1e-12, `${chord.label}/${voiceIndex} lock error ${lockError}`)
         observations.push({
           chord: chord.label,
@@ -84,6 +89,7 @@ async function probe() {
           age,
           distinct,
           peak: peak(raw),
+          cycles,
           lock_error: lockError,
         })
       })

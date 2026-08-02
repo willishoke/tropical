@@ -482,9 +482,12 @@ async function main() {
       audible_p95: within(summary.audible_activation_latency_ms.p95, 50),
       audible_max: within(summary.audible_activation_latency_ms.max, 75),
       scope_p99: within(summary.scope_rpc_ms.p99, 20),
-      scope_interval_p95: within(summary.scope_frame_interval_ms.p95, 50),
+      scope_interval_p95: within(
+        summary.scope_frame_interval_ms.p95,
+        (1000 / scopeProfile.fps) * 1.25,
+      ),
       scope_average_fps: Number.isFinite(summary.scope_idle_fps)
-        && summary.scope_idle_fps >= 23.5,
+        && summary.scope_idle_fps >= scopeProfile.fps * 0.95,
       scope_resume: within(summary.scope_resume_latency_ms, 150),
       first_final_delivery: cutoffDelivery.length > 0
         && cutoffDelivery.every((delivery) => (

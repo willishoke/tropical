@@ -51,3 +51,14 @@ test('silence and DC cannot masquerade as phase-locked modes', () => {
   assert.equal(dc.active, true)
   assert.equal(dc.locked, false)
 })
+
+test('centered locks put every positive crossing at the middle graticule', () => {
+  const low = phaseLock.centeredWindow(sine(0.04, 1.2, 1, 2048), 896, 1200)
+  const high = phaseLock.centeredWindow(sine(0.22, -2.1, 1, 2048), 896, 430)
+  for (const frame of [low, high]) {
+    assert.equal(frame.locked, true)
+    assert.ok(Math.abs(frame.centerValue) < 1e-12)
+    assert.ok(frame.values[447] < 0)
+    assert.ok(frame.values[448] > 0)
+  }
+})
