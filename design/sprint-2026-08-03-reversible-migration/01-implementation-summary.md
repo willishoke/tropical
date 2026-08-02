@@ -64,6 +64,16 @@ buffer is therefore bounded at three values before issuance and two after the
 first request begins. Non-finite pointer events are rejected client-side, and
 the engine remains authoritative for write discipline and acceptance.
 
+### S-07 — Freeze scope math against the qualified JavaScript oracle first
+
+The native scope core uses the accepted geometry and phase algorithm as a
+cross-language fixture: 1,792 samples / 40.63 ms on a linear axis, exact
+paired-envelope removal before lock, an independent interpolated
+positive-going center crossing for each of five modes, and audible-now
+envelope restoration under one fixed scale. The five-mode Swift fixture
+matches the JavaScript oracle to a maximum observed error of `4.44e-16`.
+Display-link transport and canvas wiring consume this math in a later commit.
+
 ## Qualification notes
 
 No release claim has been made. The listening decision, qualified-Mac
