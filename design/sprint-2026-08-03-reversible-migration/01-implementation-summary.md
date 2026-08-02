@@ -144,6 +144,22 @@ the live-control connection. Deterministic socket-pair tests pin per-lane IDs
 and buffers, out-of-order correlation, the 128-request bound, exactly-once
 terminal failure, bounded connection timeout, and graph/control independence.
 
+### S-15 — Keep UI identity open while preserving unrepresentable documents
+
+The canvas now wraps either an engine-owned open `NodeKindID` descriptor or a
+client-owned `client.monitor.*` identity; no exhaustive served-kind switch
+defines semantics. Generic labels and colors are presentation fallbacks only.
+Sink nodes are fixed and omitted from Add, and the boot graph selects its sink
+and source-like node from descriptor shape. The legacy four-channel scope and
+its window value remain explicitly client-owned.
+
+The current canvas stores nodes in an ID-keyed dictionary and therefore cannot
+faithfully edit duplicate IDs or malformed order/position shapes. Such v2
+documents still open visibly blocked, but save/export returns the exact decoded
+template until the shape is representable; it does not silently choose one
+duplicate or normalize the source document. Engine graphs request a stable,
+deduplicated array of only the tap node IDs actually observed by monitors.
+
 ## Open architecture gate
 
 The master handoff also asks for a literal serialized `gong → reverb` fixture.

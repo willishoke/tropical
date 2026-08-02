@@ -9,7 +9,11 @@ struct PatchToolbar: ToolbarContent {
     var body: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
             Menu {
-                ForEach(NodeKind.allCases.filter { !$0.spec.fixed }, id: \.self) { kind in
+                ForEach(model.availableKinds.filter { !$0.spec.fixed }, id: \.self) { kind in
+                    Button(kind.spec.title) { model.addNode(kind) }
+                }
+                Divider()
+                ForEach(model.monitorKinds, id: \.self) { kind in
                     Button(kind.spec.title) { model.addNode(kind) }
                 }
             } label: {

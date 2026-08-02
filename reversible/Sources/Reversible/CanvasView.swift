@@ -78,7 +78,7 @@ struct NodeView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             titleBar
-            if node.kind == .scope {
+            if node.kind.isMonitor {
                 ScopeBody(node: node)
             } else {
                 knobRow

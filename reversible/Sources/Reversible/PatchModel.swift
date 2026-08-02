@@ -4,7 +4,9 @@ struct PatchNode: Identifiable {
     let id: String
     let kind: NodeKind
     var position: CGPoint
-    var values: [String: Double]
+    /// Exact authored parameters. Numeric values are projected through
+    /// `values` for the current knob UI, without erasing unknown JSON fields.
+    var structuralParams: [String: JSONValue]
     /// inlet port → ordered source node ids
     var inputs: [String: [String]]
     /// Identity hue (degrees). Connections render as COLOR, not cables: an
@@ -12,11 +14,46 @@ struct PatchNode: Identifiable {
     /// appearing at many inlets. Golden-angle spacing keeps neighbors apart.
     let hue: Double
 
+    var values: [String: Double] {
+        get { structuralParams.compactMapValues(\.doubleValue) }
+        set {
+            for (name, value) in newValue where value.isFinite {
+                structuralParams[name] = .number(value)
+            }
+        }
+    }
+
     var allInputs: [String] { inputs.values.flatMap { $0 } }
 
     var color: Color {
         Color(hue: hue / 360, saturation: 0.62, brightness: 0.88)
     }
+}
+
+/// The engine-acknowledged graph is separate from the mutable authored graph.
+/// A failed or superseded compile never replaces either side with a hybrid.
+struct RealizedPatchSnapshot: Equatable {
+    let authoredRevision: Int
+    let graph: JSONValue
+    let patch: RealizedPatch
+
+    var vocabularyFingerprint: String { patch.vocabularyFingerprint }
+    var generation: EngineGeneration { patch.generation }
+    var nodes: [RealizedNode] { patch.nodes }
+    var inlets: [RealizedInlet] { patch.inlets }
+    var taps: [ScopeTapBinding] { patch.taps }
+
+    func parameterStatus(nodeID: String, port: String) -> RealizedParameterStatus {
+        patch.parameterStatus(nodeID: nodeID, port: port)
+    }
+}
+
+enum PatchCompileState: Equatable {
+    case idle
+    case compiling(authoredRevision: Int)
+    case running(authoredRevision: Int, programVersion: Int?, controlVersion: Int?)
+    case failed(authoredRevision: Int, message: String)
+    case superseded(compiledRevision: Int, currentRevision: Int)
 }
 
 /// The patch graph + engine session, one object. TOPOLOGY RELOWERS, SCALARS
@@ -40,6 +77,26 @@ final class PatchModel: ObservableObject {
     /// The file this patch came from / saves to (nil = never saved). Drives
     /// the window title and whether ⌘S needs to ask.
     @Published var documentURL: URL?
+    @Published private(set) var vocabulary: EngineVocabulary?
+    @Published var authoredRevision = 0
+    @Published private(set) var realizedPatch: RealizedPatchSnapshot?
+    @Published var compileState: PatchCompileState = .idle
+    @Published var documentBlockers: [PatchDocumentBlocker] = []
+    @Published var migrationReport: PatchMigrationReport?
+
+    var documentTemplate: PatchDocumentV2?
+    var outputNodeID: String?
+    var requiresExplicitV2Save = false
+    let themes = EngineNodeThemeCatalog()
+
+    var availableKinds: [NodeKind] {
+        guard let vocabulary else { return [] }
+        return vocabulary.kinds.map {
+            .engine(id: $0.kind, descriptor: $0, theme: themes.override(for: $0.kind))
+        }
+    }
+
+    var monitorKinds: [NodeKind] { [.scope()] }
 
     /// Sources an inlet may legally take — the connection UI shows ONLY
     /// these (the type discipline enforced by omission: control inlets
@@ -123,8 +180,6 @@ final class PatchModel: ObservableObject {
         AppDelegate.onTerminate = { [engine] in engine.terminateChild() }
 
         startEngine()
-        seedBootPatch()
-        setStatus("engine up · patch something", isError: false)
         startScopePolling()
     }
 
@@ -140,13 +195,30 @@ final class PatchModel: ObservableObject {
     private func handle(_ event: EngineEvent) {
         switch event {
         case .up:
-            setStatus("engine up", isError: false)
-            Task { await syncAudioState() }
+            Task { await loadVocabularyAndBoot() }
         case .exit(let code):
             setStatus("engine exited (code \(code))", isError: true)
         case .stderr(let text):
             // Diagnostic only — the Electron app console.warn'd these.
             FileHandle.standardError.write(Data("[engine] \(text)".utf8))
+        }
+    }
+
+    private func loadVocabularyAndBoot() async {
+        do {
+            let raw = try await engine.call("get_vocabulary")
+            let decoded = try EngineVocabulary.decode(from: JSONEncoder().encode(raw))
+            vocabulary = decoded
+            if nodes.isEmpty {
+                seedBootPatch()
+                await pushGraph()
+            }
+            await syncAudioState()
+            if realizedPatch == nil {
+                setStatus("engine up · patch something", isError: false)
+            }
+        } catch {
+            setStatus("vocabulary: \(error.localizedDescription)", isError: true)
         }
     }
 
@@ -157,13 +229,35 @@ final class PatchModel: ObservableObject {
 
     /// The patch you start with, and the one `New Patch` returns to.
     func seedBootPatch() {
-        addNode(.out, at: CGPoint(x: 1180, y: 360))
-        addNode(.source, at: CGPoint(x: 120, y: 200))
+        guard let vocabulary else { return }
+        // The engine vocabulary determines both roles. No Swift kind name is
+        // needed to construct a bootable authored graph.
+        guard let sink = vocabulary.kinds.first(where: { $0.outlet == nil }) else {
+            setStatus("vocabulary has no output sink", isError: true)
+            return
+        }
+        let source = vocabulary.kinds.first {
+            $0.outlet != nil && $0.inlets.isEmpty
+        } ?? vocabulary.kinds.first { $0.outlet != nil }
+        let sinkKind = NodeKind.engine(
+            id: sink.kind, descriptor: sink, theme: themes.override(for: sink.kind))
+        outputNodeID = addNode(sinkKind, at: CGPoint(x: 1180, y: 360), schedule: false)?.id
+        if let source {
+            let sourceKind = NodeKind.engine(
+                id: source.kind, descriptor: source,
+                theme: themes.override(for: source.kind))
+            _ = addNode(sourceKind, at: CGPoint(x: 120, y: 200), schedule: false)
+        }
+        authoredRevision += 1
     }
 
     // ── Node lifecycle ───────────────────────────────────────────────────
     @discardableResult
-    func addNode(_ kind: NodeKind, at point: CGPoint? = nil) -> PatchNode? {
+    func addNode(
+        _ kind: NodeKind,
+        at point: CGPoint? = nil,
+        schedule shouldSchedule: Bool = true
+    ) -> PatchNode? {
         let spec = kind.spec
         if spec.fixed && nodes.values.contains(where: { $0.kind == kind }) { return nil }
         counter += 1
@@ -171,16 +265,21 @@ final class PatchModel: ObservableObject {
         let pos = Grid.snap(point ?? CGPoint(
             x: 80 + Double(counter % 6) * 34,
             y: 90 + Double(counter % 6) * 30))
-        var values: [String: Double] = [:]
-        for k in spec.knobs { values[k.name] = k.def }
+        var structuralParams: [String: JSONValue] = [:]
+        for k in spec.knobs { structuralParams[k.name] = .number(k.def) }
         var inputs: [String: [String]] = [:]
         for p in spec.inlets { inputs[p] = [] }
         let n = PatchNode(
-            id: id, kind: kind, position: pos, values: values, inputs: inputs,
+            id: id, kind: kind, position: pos,
+            structuralParams: structuralParams, inputs: inputs,
             hue: Double((counter * 137) % 360))
         nodes[id] = n
         order.append(id)
         autoArrangeIfOn()
+        if shouldSchedule {
+            authoredRevision += 1
+            schedulePush()
+        }
         return n
     }
 
@@ -193,6 +292,7 @@ final class PatchModel: ObservableObject {
             nodes[m.id] = m
         }
         autoArrangeIfOn()
+        authoredRevision += 1
         schedulePush()
     }
 
@@ -207,24 +307,24 @@ final class PatchModel: ObservableObject {
     }
 
     func canConnect(from fromId: String, to toId: String, port: String) -> Bool {
-        guard fromId != toId,
+        guard let vocabulary,
+              fromId != toId,
               let from = nodes[fromId], let to = nodes[toId],
-              to.kind.spec.inlets.contains(port),
+              let sourceKind = from.kind.engineID,
               !(to.inputs[port] ?? []).contains(fromId)
         else { return false }
-        let fromIsKnob = from.kind == .knob
-        // A sink (Out, Scope) has no outlet, so it is never a source — except
-        // the final mix, which is always tappable (`__root__.out`), so Out may
-        // feed a Scope channel.
-        if from.kind.spec.outlets.isEmpty && !(to.kind == .scope && from.kind == .out) { return false }
-        // A knob is a control value: it may only drive a control inlet (freq/mod).
-        if fromIsKnob && !NodeKind.controlInlets.contains(port) { return false }
-        // `freq` is control-only — audio-rate into the pitch port is not FM.
-        if !fromIsKnob && port == "freq" { return false }
-        // A modal inlet (Reverb/Modal∪) carries poles: only a modal node may
-        // drive it. (A modal outlet INTO a Sig inlet is fine — it realizes at
-        // the seam.)
-        if to.kind.wantsModal(inlet: port) && !from.kind.spec.modal { return false }
+        if to.kind.isMonitor {
+            return to.kind.spec.inlets.contains(port)
+                && (vocabulary.descriptor(for: sourceKind)?.outlet != nil || fromId == outputNodeID)
+                && (to.inputs[port]?.isEmpty ?? true)
+        }
+        guard let destinationKind = to.kind.engineID else { return false }
+        guard vocabulary.canConnect(
+            from: sourceKind,
+            to: destinationKind,
+            port: port,
+            existingConnectionCount: to.inputs[port]?.count ?? 0)
+        else { return false }
         var seen = Set<String>()
         if reaches(fromId, toId, &seen) { return false }   // would form a cycle
         return true
@@ -232,10 +332,13 @@ final class PatchModel: ObservableObject {
 
     func connect(from fromId: String, to toId: String, port: String) {
         guard canConnect(from: fromId, to: toId, port: port), var to = nodes[toId] else { return }
-        if !to.kind.spec.summing { to.inputs[port] = [] }   // single inlet: replace
+        if to.kind.isMonitor || to.kind.descriptor?.port(named: port)?.multi != true {
+            to.inputs[port] = []
+        }
         to.inputs[port, default: []].append(fromId)
         nodes[toId] = to
         autoArrangeIfOn()
+        authoredRevision += 1
         schedulePush()
     }
 
@@ -244,41 +347,48 @@ final class PatchModel: ObservableObject {
         to.inputs[port]?.removeAll { $0 == fromId }
         nodes[toId] = to
         autoArrangeIfOn()
+        authoredRevision += 1
         schedulePush()
     }
 
     // ── Serialization → load_patch_graph ─────────────────────────────────
-    /// Taps cost kernel compute (each re-emits its upstream cone), so request
-    /// them only while a scope channel actually watches a node. Out is exempt:
-    /// the final-mix slot `__root__.out` exists in every compile.
-    var tapsWanted: Bool {
-        nodes.values.contains { n in
-            n.kind == .scope && n.allInputs.contains { nodes[$0]?.kind != .out }
+    /// Exact, deterministic tap request. The final output already has
+    /// `__root__.out`, so only monitored intermediate engine nodes are listed.
+    var requestedTapNodeIDs: [String] {
+        var result: [String] = []
+        var seen = Set<String>()
+        for id in order {
+            guard let monitor = nodes[id], monitor.kind.isMonitor else { continue }
+            for port in monitor.kind.spec.inlets {
+                for source in monitor.inputs[port] ?? []
+                    where source != outputNodeID && nodes[source]?.kind.engineID != nil
+                {
+                    if seen.insert(source).inserted { result.append(source) }
+                }
+            }
         }
+        return result
     }
 
     func serialize() -> JSONValue {
         var out: [JSONValue] = []
         for id in order {
-            guard let n = nodes[id], !n.kind.spec.monitor else { continue }
-            let spec = n.kind.spec
-            var params: [String: JSONValue] = [:]
-            for k in spec.knobs { params[k.name] = .number(n.values[k.name] ?? k.def) }
-            var inputs: [String: JSONValue] = [:]
-            for p in spec.inlets { inputs[p] = .array((n.inputs[p] ?? []).map(JSONValue.string)) }
+            guard let n = nodes[id], let kind = n.kind.engineID else { continue }
+            let inputs: [String: JSONValue] = n.inputs.mapValues {
+                JSONValue.array($0.map(JSONValue.string))
+            }
             out.append(.object([
                 "id": .string(n.id),
-                "kind": .string(n.kind.rawValue),
-                "params": .object(params),
+                "kind": .string(kind.rawValue),
+                "params": .object(n.structuralParams),
                 "sel": .object([:]),
                 "in": .object(inputs),
             ]))
         }
-        let outNode = nodes.values.first { $0.kind == .out }
         return .object([
             "nodes": .array(out),
-            "out": outNode.map { .string($0.id) } ?? .null,
-            "taps": .bool(tapsWanted),
+            "out": outputNodeID.map(JSONValue.string) ?? .null,
+            "taps": .array(requestedTapNodeIDs.map(JSONValue.string)),
         ])
     }
 
@@ -295,6 +405,19 @@ final class PatchModel: ObservableObject {
     private var lastPushed: JSONValue?
 
     func pushGraph() async {
+        guard vocabulary != nil else { return }
+        guard let authoredDocument = try? makeDocument() else { return }
+        let validation = authoredDocument.validate(against: vocabulary)
+        documentBlockers = validation.blockers
+        guard validation.canCompile else {
+            compileState = .failed(
+                authoredRevision: authoredRevision,
+                message: validation.blockers.first?.detail ?? "document is not compilable")
+            setStatus(
+                "blocked · \(validation.blockers.count) authored issue\(validation.blockers.count == 1 ? "" : "s")",
+                isError: true)
+            return
+        }
         if pushInFlight { pushAgain = true; return }
         pushInFlight = true
         defer {
@@ -304,7 +427,20 @@ final class PatchModel: ObservableObject {
         // A monitor-only edit (e.g. scoping the Out mix) leaves the engine
         // graph byte-identical — skip the recompile, not just debounce it.
         let graph = serialize()
-        if graph == lastPushed { return }
+        let revision = authoredRevision
+        if graph == lastPushed {
+            if let realizedPatch {
+                self.realizedPatch = RealizedPatchSnapshot(
+                    authoredRevision: revision,
+                    graph: realizedPatch.graph,
+                    patch: realizedPatch.patch)
+                compileState = .running(
+                    authoredRevision: revision,
+                    programVersion: Int(exactly: realizedPatch.generation.programVersion),
+                    controlVersion: Int(exactly: realizedPatch.generation.controlVersion))
+            }
+            return
+        }
         do {
             // The compile+JIT is synchronous on the engine's single control
             // thread, so a heavy node (e.g. a modal reverb: ~10⁵ IR lines →
@@ -312,17 +448,50 @@ final class PatchModel: ObservableObject {
             // "compiling" is distinguishable from "hung" — the acute failure
             // mode of the live-patch loop.
             setStatus("compiling…", isError: false)
-            try await engine.call("load_patch_graph", graph)
+            compileState = .compiling(authoredRevision: revision)
+            let adoption = try await engine.loadPatchGraph(graph)
+            guard case .adopted(let patch) = adoption else {
+                switch adoption {
+                case .superseded:
+                    compileState = .superseded(
+                        compiledRevision: revision, currentRevision: authoredRevision)
+                    setStatus("compile superseded · running patch unchanged", isError: false)
+                case .stale:
+                    compileState = .superseded(
+                        compiledRevision: revision, currentRevision: authoredRevision)
+                    setStatus("stale compile ignored · running patch unchanged", isError: false)
+                case .adopted:
+                    break
+                }
+                return
+            }
             lastPushed = graph
+            realizedPatch = RealizedPatchSnapshot(
+                authoredRevision: revision, graph: graph, patch: patch)
+            scopeTapSlots = Dictionary(
+                patch.taps.map { ($0.name, $0.slot) },
+                uniquingKeysWith: { first, _ in first })
+            let programVersion = Int(exactly: patch.generation.programVersion)
+            let controlVersion = Int(exactly: patch.generation.controlVersion)
             // A relower transfers slots by name, so a live scrub survives it —
             // except a COLD first compile, which seeds master.velocity at its
             // default (1). Re-apply a non-default scrub so the slider and the
             // running clock agree (no-op if equal).
             if velocity != 1 { params.send("master.velocity", velocity) }
-            await refreshScopeTaps()
-            setStatus(audioOn ? "playing" : "compiled", isError: false)
+            if revision == authoredRevision {
+                compileState = .running(
+                    authoredRevision: revision,
+                    programVersion: programVersion,
+                    controlVersion: controlVersion)
+                setStatus(audioOn ? "playing" : "compiled", isError: false)
+            } else {
+                compileState = .superseded(
+                    compiledRevision: revision, currentRevision: authoredRevision)
+                setStatus("compiled revision superseded by edits", isError: false)
+            }
         } catch {
-            lastPushed = nil
+            compileState = .failed(
+                authoredRevision: revision, message: error.localizedDescription)
             setStatus("compile: \(error.localizedDescription)", isError: true)
         }
     }
@@ -332,7 +501,12 @@ final class PatchModel: ObservableObject {
 
     func sendKnob(_ node: PatchNode, _ knob: KnobSpec, _ value: Double) {
         // A monitor's knobs (Scope `window`) are view state, not param slots.
-        guard !node.kind.spec.monitor else { return }
+        guard !node.kind.spec.monitor,
+              let realizedPatch,
+              realizedPatch.authoredRevision == authoredRevision,
+              case .live = realizedPatch.parameterStatus(
+                nodeID: node.id, port: knob.name)
+        else { return }
         let name = "\(node.id).\(knob.name)"
         params.send(name, value)
     }
@@ -406,32 +580,18 @@ final class PatchModel: ObservableObject {
     }
 
     // ── Scope taps ────────────────────────────────────────────────────────
-    // A scope channel names a NODE; the engine names a SLOT. After each
-    // compile `list_scope_taps` rebinds node id → `__root__.tap:<id>` (a node
-    // that failed to lower simply has no tap and its trace goes dark). The
-    // final mix is the one slot that exists in every compile, so Out maps
-    // statically — no taps build required to watch the output.
+    // A scope channel names a NODE; the engine names a SLOT. An adopted
+    // compile handshake atomically replaces this binding table (a node that
+    // failed to lower has no tap and its trace goes dark). The final mix is
+    // always `__root__.out`, so it needs no requested tap.
     private var scopeTapSlots: [String: String] = [:]
 
     /// Latest triggered trace per scope channel, keyed "<scopeId>.<port>".
     @Published var scopeTraces: [String: [Double]] = [:]
 
     func scopeSlot(for sourceId: String) -> String? {
-        if nodes[sourceId]?.kind == .out { return "__root__.out" }
+        if sourceId == outputNodeID { return "__root__.out" }
         return scopeTapSlots[sourceId]
-    }
-
-    private func refreshScopeTaps() async {
-        guard tapsWanted else { scopeTapSlots = [:]; return }
-        guard let r = try? await engine.call("list_scope_taps"),
-              case .array(let taps)? = r["taps"] else { return }
-        var map: [String: String] = [:]
-        for t in taps {
-            guard let name = t["name"]?.stringValue,
-                  let slot = t["slot"]?.stringValue, name != "out" else { continue }
-            map[name] = slot
-        }
-        scopeTapSlots = map
     }
 
     // ── Scope poll loop ───────────────────────────────────────────────────
@@ -456,7 +616,7 @@ final class PatchModel: ObservableObject {
 
     private func pollScopes() async {
         let scopes = order.compactMap { nodes[$0] }
-            .filter { $0.kind == .scope && !$0.allInputs.isEmpty }
+            .filter { $0.kind.isMonitor && !$0.allInputs.isEmpty }
         guard !scopes.isEmpty else {
             if !scopeTraces.isEmpty { scopeTraces = [:] }
             return
