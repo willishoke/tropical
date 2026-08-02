@@ -10,5 +10,4 @@
   warmupSamples: 64,
   pointBudget: 384,
   fps: 24,
-  resumeQuietMs: 100,
 })))

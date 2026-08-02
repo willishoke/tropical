@@ -6,7 +6,7 @@
   "main": "main.js",
   "scripts": {
     "start": "electron .",
-    "test": "node --test scene.test.js param-sender.test.js rpc-client.test.js scope-arbiter.test.js qualification.test.js",
+    "test": "node --test scene.test.js param-sender.test.js rpc-client.test.js qualification.test.js",
     "qualify": "node qualification/run.js",
     "qualify:cold-boots": "node qualification/cold-boots.js"
   },

@@ -51,9 +51,6 @@ let loopStarted = false
 const wells = []
 const stepElements = []
 const chordElements = []
-const scopeArbiter = new window.ScopeArbiter({
-  quietMs: SCOPE_PROFILE.resumeQuietMs,
-})
 
 function normalizedValue(control) {
   if (control.log) {
@@ -150,7 +147,6 @@ const paramSender = new window.LatestValueSender(
   commitParamWrite,
   handleParamWriteError,
   (update) => update.targetValue,
-  (busy) => scopeArbiter.setSenderBusy(busy),
 )
 
 function enqueueParamWrite(control, nextValue) {
@@ -158,7 +154,6 @@ function enqueueParamWrite(control, nextValue) {
   control.value = targetValue
   updateControlElement(CONTROLS.indexOf(control))
   paramSender.submit(control.slot, { control, targetValue })
-  scopeArbiter.setSenderBusy(paramSender.isBusy())
 }
 
 function nudgeControl(control, direction, fine) {
@@ -195,11 +190,7 @@ function buildControls() {
     const slider = row.querySelector('input')
     slider.addEventListener('pointerdown', (event) => {
       setSelectedControl(index)
-      scopeArbiter.begin(`pointer:${event.pointerId}`)
       try { slider.setPointerCapture(event.pointerId) } catch {}
-    })
-    slider.addEventListener('lostpointercapture', (event) => {
-      scopeArbiter.end(`pointer:${event.pointerId}`)
     })
     slider.addEventListener('focus', () => setSelectedControl(index))
     slider.addEventListener('input', () => {
@@ -403,7 +394,6 @@ function renderTransport() {
 async function seekScene(targetSeconds) {
   if (transport.rebasing) return
   transport.rebasing = true
-  scopeArbiter.begin('rebase')
   try {
     const position = (await rpc('playback_position')).position
     const target = clamp(targetSeconds, 0, scene.SCENE_SECONDS - 1 / scene.SAMPLE_RATE)
@@ -418,7 +408,6 @@ async function seekScene(targetSeconds) {
     showFault(error)
   } finally {
     transport.rebasing = false
-    scopeArbiter.end('rebase')
   }
 }
 
@@ -446,10 +435,8 @@ function installInteraction() {
     if (event.key === 'ArrowUp') setSelectedControl(selectedControl - 1, true)
     else if (event.key === 'ArrowDown') setSelectedControl(selectedControl + 1, true)
     else if (event.key === 'ArrowLeft') {
-      scopeArbiter.begin(`key:${event.code}`)
       nudgeControl(control, -1, event.shiftKey)
     } else if (event.key === 'ArrowRight') {
-      scopeArbiter.begin(`key:${event.code}`)
       nudgeControl(control, 1, event.shiftKey)
     }
     else if (event.key === ' ') toggleFlow()
@@ -458,19 +445,9 @@ function installInteraction() {
     else return
     event.preventDefault()
   })
-  window.addEventListener('keyup', (event) => {
-    scopeArbiter.end(`key:${event.code}`)
-  })
-  for (const eventName of ['pointerup', 'pointercancel']) {
-    window.addEventListener(eventName, (event) => {
-      scopeArbiter.end(`pointer:${event.pointerId}`)
-    })
-  }
-  window.addEventListener('blur', () => scopeArbiter.clearTransient())
 }
 
 function showFault(error) {
-  scopeArbiter.fault()
   const status = document.getElementById('status')
   status.classList.add('fault')
   status.textContent = `fault / ${error?.message || String(error)}`
@@ -496,12 +473,6 @@ async function renderFrame() {
     renderSequence(transport.sceneTime)
     renderTransport()
 
-    scopeArbiter.setSenderBusy(paramSender.isBusy())
-    if (scopeArbiter.isHeld()) {
-      window.setTimeout(renderFrame, 1000 / SCOPE_FPS)
-      return
-    }
-
     const live = wells.filter((well) => well.slot !== null)
     const count = DISPLAY_SAMPLES + SEARCH_SAMPLES + WARMUP_SAMPLES
     const start = Math.max(0, position - count)
@@ -512,8 +483,7 @@ async function renderFrame() {
       slots: live.map((well) => well.slot),
     })
 
-    scopeArbiter.setSenderBusy(paramSender.isBusy())
-    if (response.preempted || scopeArbiter.isHeld()) {
+    if (response.preempted) {
       window.setTimeout(renderFrame, 1000 / SCOPE_FPS)
       return
     }
