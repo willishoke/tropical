@@ -79,6 +79,20 @@ struct ReversibleApp: App {
                     .keyboardShortcut("n")
                 Button("Open Patch…") { model.open() }
                     .keyboardShortcut("o")
+                Menu("Open Recent") {
+                    if model.recentDocumentURLs.isEmpty {
+                        Text("No Recent Patches")
+                    } else {
+                        ForEach(model.recentDocumentURLs, id: \.self) { url in
+                            Button(url.deletingPathExtension().lastPathComponent) {
+                                model.openRecent(url)
+                            }
+                            .help(url.path)
+                        }
+                        Divider()
+                        Button("Clear Menu") { model.clearRecentDocuments() }
+                    }
+                }
             }
             CommandGroup(replacing: .saveItem) {
                 Button("Save") { model.save() }
@@ -101,9 +115,15 @@ struct RootView: View {
         .background(Theme.bg)
         .toolbar { PatchToolbar(model: model) }
         .environmentObject(model)
-        // Title tracks the open file, so the window says which patch this is.
+        // The title and native close-button dot share the same canonical dirty
+        // comparison, so every authored surface tells one document-state truth.
         .navigationTitle(model.documentURL?.deletingPathExtension().lastPathComponent
                          ?? "untitled patch")
+        .background(
+            WindowDocumentState(
+                representedURL: model.documentURL,
+                isEdited: model.isDocumentDirty)
+            .frame(width: 0, height: 0))
     }
 
     private var footer: some View {
@@ -116,5 +136,38 @@ struct RootView: View {
             .padding(.vertical, 5)
             .background(Theme.panel)
             .overlay(Rectangle().frame(height: 1).foregroundStyle(Theme.edge), alignment: .top)
+    }
+}
+
+/// Bridge document state into the hosting NSWindow without creating a second
+/// document/model owner. AppKit supplies the standard edited indicator and
+/// represented-file behavior while SwiftUI continues to own the scene.
+private struct WindowDocumentState: NSViewRepresentable {
+    let representedURL: URL?
+    let isEdited: Bool
+
+    func makeNSView(context: Context) -> WindowDocumentStateView {
+        WindowDocumentStateView()
+    }
+
+    func updateNSView(_ view: WindowDocumentStateView, context: Context) {
+        view.representedURL = representedURL
+        view.isEdited = isEdited
+        view.apply()
+    }
+}
+
+private final class WindowDocumentStateView: NSView {
+    var representedURL: URL?
+    var isEdited = false
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        apply()
+    }
+
+    func apply() {
+        window?.representedURL = representedURL
+        window?.isDocumentEdited = isEdited
     }
 }

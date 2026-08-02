@@ -197,6 +197,16 @@ labelled as client-owned read-only surfaces. A knob not advertised as live is
 committed as a new authored revision and relowered instead of guessing a
 parameter discipline.
 
+### S-19 — Derive document dirtiness from canonical authored data
+
+The app compares the current canonical v2 document with the last opened or
+saved canonical snapshot, so topology, values, transport, layout, monitors,
+and preserved unknown data share one dirty-state rule. That state drives the
+native window edited indicator. Successful open/save operations use AppKit's
+persistent recent-document registry; the File menu exposes those URLs and a
+clear action. A v1 migration stays dirty with no writable source URL until an
+explicit v2 Save As succeeds.
+
 ## Open architecture gate
 
 The master handoff also asks for a literal serialized `gong → reverb` fixture.

@@ -175,6 +175,7 @@ extension PatchModel {
         outputNodeID = nil
         seedBootPatch()
         documentURL = nil
+        savedDocumentData = nil
         await pushGraph()
         setVelocity(velocity)
     }
@@ -185,6 +186,8 @@ extension PatchModel {
         documentTemplate = document
         requiresExplicitV2Save = false
         documentURL = url
+        savedDocumentData = try document.encoded(prettyPrinted: false)
+        noteRecentDocument(url)
         setStatus("saved v2 · \(url.lastPathComponent)", isError: false)
     }
 
@@ -203,6 +206,8 @@ extension PatchModel {
             requiresExplicitV2Save = false
             await apply(document)
             documentURL = url
+            savedDocumentData = try document.encoded(prettyPrinted: false)
+            noteRecentDocument(url)
             if documentBlockers.isEmpty {
                 setStatus("loaded v2 · \(url.lastPathComponent)", isError: false)
             }
@@ -214,6 +219,7 @@ extension PatchModel {
             await apply(result.document)
             // Migration is memory-only and must never write through the v1 URL.
             documentURL = nil
+            savedDocumentData = nil
             setStatus(
                 "migrated v1 in memory · Save As required",
                 isError: !result.report.canCompile)
@@ -254,5 +260,29 @@ extension PatchModel {
                 setStatus("open: \(error.localizedDescription)", isError: true)
             }
         }
+    }
+
+    func openRecent(_ url: URL) {
+        Task {
+            do { try await read(from: url) } catch {
+                setStatus("open: \(error.localizedDescription)", isError: true)
+                refreshRecentDocuments()
+            }
+        }
+    }
+
+    func clearRecentDocuments() {
+        NSDocumentController.shared.clearRecentDocuments(nil)
+        refreshRecentDocuments()
+    }
+
+    private func noteRecentDocument(_ url: URL) {
+        NSDocumentController.shared.noteNewRecentDocumentURL(url)
+        refreshRecentDocuments()
+    }
+
+    private func refreshRecentDocuments() {
+        recentDocumentURLs = Array(
+            NSDocumentController.shared.recentDocumentURLs.prefix(10))
     }
 }

@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 struct PatchNode: Identifiable {
@@ -75,6 +76,12 @@ final class PatchModel: ObservableObject {
     /// The file this patch came from / saves to (nil = never saved). Drives
     /// the window title and whether ⌘S needs to ask.
     @Published var documentURL: URL?
+    /// Canonical last-saved document bytes. Comparing the current authored
+    /// document against this snapshot makes layout, transport, and unknown
+    /// field changes participate in one dirty-state rule.
+    @Published var savedDocumentData: Data?
+    @Published var recentDocumentURLs: [URL] =
+        Array(NSDocumentController.shared.recentDocumentURLs.prefix(10))
     @Published private(set) var vocabulary: EngineVocabulary?
     @Published var authoredRevision = 0
     @Published private(set) var realizedPatch: RealizedPatchSnapshot?
@@ -95,6 +102,14 @@ final class PatchModel: ObservableObject {
     }
 
     var monitorKinds: [NodeKind] { [.scope()] }
+
+    var isDocumentDirty: Bool {
+        if requiresExplicitV2Save { return true }
+        guard vocabulary != nil,
+              let current = try? makeDocument().encoded(prettyPrinted: false)
+        else { return false }
+        return current != savedDocumentData
+    }
 
     /// Sources an inlet may legally take — the connection UI shows ONLY
     /// these (the type discipline enforced by omission: control inlets
