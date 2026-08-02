@@ -231,6 +231,22 @@ demodulation remains valid display processing, but it was not the source of the
 large production jitter. Only a repeated read at an unchanged control version
 distinguishes the actual defect.
 
+### Uniform 2× time scale
+
+Candidate `91232a6` removes DR-21's logarithmic cycle-density mapping. Every
+mode now occupies the same 1,792-sample (`40.63 ms`) centered span—twice the
+896-sample base duration in the same width. The request grows to 2,752 stride-1
+points so the 55 Hz mode retains a complete crossing-selection period outside
+the visible span.
+
+| Gate | Evidence / result |
+|---|---|
+| Uniform-axis invariant | Cycle count is exactly `frequency × 1792 / 44100`; all traces therefore share one physical time-per-width ratio |
+| Silent production oracle | 360/360 observations pass; scope RPC p99 `7.084 ms`, maximum carrier-shape error `3.50e-4`, and maximum equivalent-loop error `6.46e-7` of displayed amplitude |
+| Consecutive live content | 360/360 frames pass with every trace active and locked; A−11 / D7·9 maximum frame-shape deltas `2.18e-4` / `2.56e-4`; captured nonzero output samples `0` |
+| Focused frontend | 36/36 pass, including the uniform 2× physical-time invariant |
+| Muted integrated profile | `2026-08-02_06-40-36-235-smoke-b128-r512`; 10.07 measured seconds, 336 writes, scope p99 `5.567 ms`, frame p95 `17.97 ms`, `59.98 fps`, zero preemptions, zero underruns/overruns or other faults, and all 15 gates pass |
+
 ## Release artifact status
 
 The evidence package now contains, without overwriting failed runs:

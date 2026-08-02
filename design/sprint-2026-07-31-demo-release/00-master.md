@@ -236,8 +236,9 @@ The shipping scope path has four parts:
    never from the pre-coefficient control projection.
 4. One canvas overlays the active chord's five modes. Each trace receives an
    independent interpolated positive-going zero-crossing lock at the center
-   graticule and one shared analytic volts/div calibration. Carrier spacing is
-   log-period mapped. The exact envelope is divided out point-by-point before
+   graticule and one shared analytic volts/div calibration. Every trace uses
+   one uniform 1,792-sample / 40.63 ms time span (2× the 896-sample base view).
+   The exact envelope is divided out point-by-point before
    phase locking, then its single audible-now value restores display amplitude;
    envelope slope therefore cannot change one visible cycle relative to the
    next. The stride-1 view is display-synchronized at a 60 Hz cap.
@@ -384,8 +385,8 @@ Owned surface: `playground/main.js`, new transport tests.
 - Calibrate every trace against the exact maximum of its paired modal envelope;
   never normalize each frame by its own peak.
 - Select the nearest independently interpolated positive crossing and do not
-  draw silent or DC-only windows as locked traces. Center the crossing and
-  log-map each mode's visible cycle count.
+  draw silent or DC-only windows as locked traces. Center the crossing and use
+  one physical time scale for every mode; do not remap spacing by frequency.
 - Demodulate each projection sample by that mode's exact paired envelope before
   locking; multiply the resulting unit carrier only by the audible-now
   envelope. Gate analytic cycle shape and equivalent 16-second loop frames.
