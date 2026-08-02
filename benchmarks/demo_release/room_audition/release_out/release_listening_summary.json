@@ -1,0 +1,96 @@
+{
+  "schema": 1,
+  "generated_at": "2026-08-02T00:27:39.435215+00:00",
+  "commit": "ef59eb92921127093ed26a1f41f2fbfdebde495e",
+  "worktree_status_at_start": "",
+  "sample_rate": 44100,
+  "scene_seconds": 16,
+  "source_graph_sha256": "383e3f393754b1096126ca6b619f4a0d1ad3515457e21e54ea5974dcb1baec70",
+  "selected_path": "bounded fixed-scene causal/reverse cache",
+  "cache": {
+    "path": "playground/assets/grouped-room/clouds-current-radii-mono-v1-scene-44100.f32le",
+    "sha256": "33dad76b92c7b11f297a1e32979e89f36fd1b16fbb8f923c726756ebce2d06f3"
+  },
+  "render_backend": "native JIT diffcli plus analytic equal-power cache mix",
+  "gain": {
+    "master": 3.7,
+    "presence": 0.82,
+    "level": 0.72,
+    "room": 1.0,
+    "integrated_wet": 2.1844799999999998,
+    "normalization_or_limiter": "none"
+  },
+  "position_choreography": {
+    "start": 1.0,
+    "forward_to_reverse_seconds": [
+      3.0,
+      4.5
+    ],
+    "reverse_hold_includes_hit_seconds": 6.0,
+    "reverse_to_forward_seconds": [
+      7.5,
+      9.0
+    ],
+    "later_forward_hit_seconds": 10.0,
+    "curve": "smoothstep position into equal-power endpoint gains"
+  },
+  "endpoint_parity": {
+    "forward_relative_l2": 1.1454858967545317e-16,
+    "forward_max_absolute_error": 1.1102230246251565e-16,
+    "reverse_relative_l2": 1.140098814430447e-16,
+    "reverse_max_absolute_error": 2.7755575615628914e-17,
+    "full_forward_vs_dry_plus_wet_relative_l2": 1.1589120652239747e-16,
+    "full_forward_vs_dry_plus_wet_max_absolute_error": 1.6653345369377348e-16
+  },
+  "files": {
+    "wet_position_plus_1.wav": {
+      "sample_count": 705600,
+      "peak": 0.4900622540473938,
+      "peak_dbfs": -6.194974935269814,
+      "rms": 0.034010199342458136,
+      "rms_dbfs": -29.36781645098045,
+      "sha256": "f98af7f0e38ea3d6b79bc5eada63ea84b3e536d29e919696b88bf2e003abd941"
+    },
+    "wet_position_minus_1.wav": {
+      "sample_count": 705600,
+      "peak": 0.17649261482119558,
+      "peak_dbfs": -15.065469251359536,
+      "rms": 0.012988342885464663,
+      "rms_dbfs": -37.7289250949466,
+      "sha256": "bb4faa72b5325111484ead7e7dc94b88bdc209a1b33a5f299b703953761530dd"
+    },
+    "wet_position_scrub.wav": {
+      "sample_count": 705600,
+      "peak": 0.4900622540473938,
+      "peak_dbfs": -6.194974935269814,
+      "rms": 0.029881406871622575,
+      "rms_dbfs": -30.49197917983774,
+      "sha256": "a892d10c25a666127b5eb5478ab223dcc7dd95d6099a83938ebd8417f164a00f"
+    },
+    "final_scene_dry.wav": {
+      "sample_count": 705600,
+      "peak": 0.5298423293799162,
+      "peak_dbfs": -5.5170669728040655,
+      "rms": 0.09228995210348155,
+      "rms_dbfs": -20.69691158805195,
+      "sha256": "672e46aefa1385a415d79ef6530daf81a52e6cf34891ad773610ca523eb82472"
+    },
+    "final_scene_position_plus_1.wav": {
+      "sample_count": 705600,
+      "peak": 0.5370985080170632,
+      "peak_dbfs": -5.398921080617226,
+      "rms": 0.09814687150967201,
+      "rms_dbfs": -20.162470784802757,
+      "sha256": "c8f68a123d5b1752b16e01ce7fcdb7e3246ffbc97f91ad43738cdacc2e630d44"
+    },
+    "final_scene_position_choreography.wav": {
+      "sample_count": 705600,
+      "peak": 0.561597592497468,
+      "peak_dbfs": -5.01149525286794,
+      "rms": 0.09677047816141655,
+      "rms_dbfs": -20.285142260252695,
+      "sha256": "56d3a3bb834037a858a3e5153459667324829647ea347499578dbbe5c086de1c"
+    }
+  },
+  "subjective_headphone_monitor_review": "pending user approval"
+}
