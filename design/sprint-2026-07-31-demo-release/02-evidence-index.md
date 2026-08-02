@@ -83,6 +83,17 @@ bounded fixed-scene cache; they are failed diagnostics, not release evidence.
 | Integrated smoke | `2026-08-02_00-09-48-317-smoke-b128-r512`; clean candidate, pass, zero sticky runtime/Metal/DAC/capture faults and zero retargets |
 | Revised pizzicato balance | ROOM default `1.0`, range `0…1.5`; shared section gain `3×`, fixed room compensation `3×`; authored-level dry / POSITION `+1` / `+0.5` peaks `−6.25/−2.43/−3.21` dBFS over the complete 16-second scene |
 
+## 2026-08-02 pizzicato integration qualification
+
+| Gate | Evidence / result |
+|---|---|
+| Candidate | `4c5f2e86e5a5ba3c2beb6934bda3f6f085d74c60`; graph SHA-256 `bfd717f75fa68ee871a1f0ac11625a8f71094b978eaf470002fa217a4047893f`; exact 16-beat production scene |
+| Muted 90-second smoke | `2026-08-02_07-56-20-619-smoke-b128-r512`; 90.09 measured seconds at `Bdev=128`, `Rgpu=512`; output forced to zero after load; all 32 captures intentionally silent |
+| Controls | 2,950 dispatched writes; scheduled p95/p99 `11.50/21.43 ms`; audible-activation p95/max `38.02/56.99 ms`; every first/reversal/final delivery gate passed |
+| Scopes | 5,420 completed frames, zero preemptions/errors; 59.75 idle fps; RPC p95/p99 `5.36/5.54 ms`; frame-interval p95 `18.89 ms` |
+| Runtime/Metal/DAC | Average 512-frame morph render `6.14 ms`; zero starvation, tag mismatch, retarget, dispatch, activation, morph, stale-completion, ownership, callback-thread, underrun, overrun, non-finite, or clamp faults |
+| Release WAVs | `room_audition/release_out/`; six continuous 24-bit mono 44.1 kHz files from clean integration commit `8c9f76a`; endpoint parity about `1.1e-16`; final +1/choreography peak `−2.43 dBFS`; no normalization or limiter |
+
 ## 2026-08-02 release qualification
 
 | Gate | Evidence / result |

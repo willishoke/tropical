@@ -94,6 +94,11 @@ The complete offline native graph peaks at `−6.25 dBFS` dry, `−2.43 dBFS` at
 POSITION `+1`, and `−3.21 dBFS` at `+0.5`; there is no normalization or limiter.
 The prior hardware qualification remains evidence for the engine/cache path,
 but is not silently relabeled as qualification of this denser revised graph.
+The committed revised candidate `4c5f2e8` passed a separate output-muted
+90.09-second exact-scene smoke at `Bdev=128`, `Rgpu=512`: 2,950 dispatched
+writes, 59.75 scope fps, 5.54 ms scope-RPC p99, zero preemptions, and zero
+runtime, Metal, callback, DAC, ownership, non-finite, or clamp faults. All 32
+qualification captures were intentionally and verifiably silent.
 
 Exploratory result DR-11 enabled the selected architecture. A 9,133-mode
 Freeverb-style LTI teacher was recovered exactly by collecting its complete
