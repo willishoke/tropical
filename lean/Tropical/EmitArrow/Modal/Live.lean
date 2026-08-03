@@ -11,11 +11,65 @@ namespace Tropical.EmitArrow
 open Tropical.Ir
 open Tropical.Exact (DyadicI CplxD CplxDI)
 
+/-- Why one requested voice×room bloom crossing could not be materialized.  The
+    reason is data, not a silent `continue`: callers may inspect every refused
+    pair and the Patch lowerer turns any nonempty set into an explicit error. -/
+inductive BloomExclusionReason where
+  | voiceSigmaNotConstant
+  | voiceOmegaNotConstant
+  | roomOmegaNotConstant
+  | liveSigmaRangeMissing
+  | liveSigmaNotS0
+  | liveRegionUnsupported
+  | excludedConditioning
+  | excludedDepth
+  | coefficientMaterialization
+deriving Inhabited, DecidableEq
+
+def BloomExclusionReason.label : BloomExclusionReason → String
+  | .voiceSigmaNotConstant      => "voiceSigmaNotConstant"
+  | .voiceOmegaNotConstant      => "voiceOmegaNotConstant"
+  | .roomOmegaNotConstant       => "roomOmegaNotConstant"
+  | .liveSigmaRangeMissing      => "liveSigmaRangeMissing"
+  | .liveSigmaNotS0             => "liveSigmaNotS0"
+  | .liveRegionUnsupported      => "liveRegionUnsupported"
+  | .excludedConditioning       => "excludedConditioning"
+  | .excludedDepth              => "excludedDepth"
+  | .coefficientMaterialization => "coefficientMaterialization"
+
+structure BloomPairExclusion where
+  voiceIndex : Option Nat
+  roomIndex  : Option Nat
+  reason     : BloomExclusionReason
+deriving Inhabited
+
+structure BloomComposition where
+  expectedPairs : Nat
+  pairs          : Array BloomPair
+  exclusions     : Array BloomPairExclusion
+deriving Inhabited
+
+def BloomComposition.isComplete (c : BloomComposition) : Bool :=
+  c.exclusions.isEmpty && c.pairs.size == c.expectedPairs
+
+/-- Compatibility lens for direct atom tests. Production lowering inspects the
+    typed exclusions and reports them; this helper never turns an exclusion
+    into a partial bank. -/
+def BloomComposition.toOption (c : BloomComposition) : Option (Array BloomPair) :=
+  if c.isComplete then some c.pairs else none
+
+def BloomComposition.refusalSummary (c : BloomComposition) : String :=
+  String.intercalate ", " (c.exclusions.toList.map fun x =>
+    match x.voiceIndex, x.roomIndex with
+    | some vi, some ri => s!"voice[{vi}]×room[{ri}]:{x.reason.label}"
+    | _, _ => s!"global:{x.reason.label}")
+
 /-- The two regions the LIVE classifier can emit — a two-constructor sum, so
     `bloomCompose`'s match is exhaustive BY TYPE rather than by an
-    "unreachable" comment (the coincident regions and the depth exclusion are
-    not representable here: they return `none` and stay baked-only). The
-    baked classifier keeps the full five-region `SeamRegion`. -/
+    "unreachable" comment (the coincident regions, conditioning stop-line, and
+    depth exclusion are not representable here: the checked classifier returns
+    a typed refusal and the compatibility lens returns `none`). The baked
+    classifier keeps the full six-region `SeamRegion`. -/
 inductive LiveRegion where
   | serOnly
   | crossing
@@ -25,12 +79,10 @@ structure LiveBloomPairPlan where
   nDepth : Nat
   kDepth : Nat
 
-/-- WS-LP: classify a live-σ pair over its whole σ interval — `some plan` iff
-    the pair sits in ONE non-coincident region at EVERY
-    σ ∈ `[sigLo, sigHi]` (`serOnly` throughout, phase 1, or `crossing`
-    throughout, phase 2), else `none` (the pair drops gracefully; a pair that
-    CHANGES region across the interval is phase 3's union emit, and the
-    coincident regions are with it). Only `Re a = (σ_μ − σ_ν)/g` moves with σ_ν
+/-- WS-LP: classify a live-σ pair over its whole σ interval. A supported interval
+    is series-only throughout or uses the crossing lanes (including a safe
+    series/crossing straddle); conditioning, depth, and coincident-region cases
+    return typed refusals. Only `Re a = (σ_μ − σ_ν)/g` moves with σ_ν
     (`Im a` and `κ = μ·B` are σ_ν-independent), so the region conditions reduce
     to interval extrema of `|a + c|` along a horizontal segment — the min at
     `Re a = −c` clamped to the segment, the max at an endpoint (convexity).
@@ -38,8 +90,8 @@ structure LiveBloomPairPlan where
     approach to `−1`, where `|a+1|` bottoms out), with the baked classifier's
     `zBnd` per region (κ itself for serOnly; the branch-boundary `|z| = |a+1|`
     for crossing), same `+8` guard and `≤ 300` cap. -/
-def classifyBloomPairLive (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
-    (B g : Float) : Option LiveBloomPairPlan := Id.run do
+def classifyBloomPairLiveChecked (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
+    (B g : Float) : Except BloomExclusionReason LiveBloomPairPlan := Id.run do
   let kappa := mu.scale B
   let imA := (nuOmega - mu.im) / g
   -- Re a = (−σ_ν − Re μ)/g, decreasing in σ_ν
@@ -49,8 +101,7 @@ def classifyBloomPairLive (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
   -- a live-σ pair is emitted at all and with which lanes, so it may not depend
   -- on a platform's rounding. `absKappa`/`absAt`/`minAbsAt` are the same
   -- expressions, evaluated as enclosures; each threshold is taken in the
-  -- direction that DROPS a pair it cannot certify (graceful exclusion is the
-  -- house rule for a legal-but-unservable config, never a warning).
+  -- conservative direction. Failure to certify support becomes a typed refusal.
   let imAD := DyadicI.ofFloat imA
   let reLoD := DyadicI.ofFloat reLo
   let reHiD := DyadicI.ofFloat reHi
@@ -59,15 +110,20 @@ def classifyBloomPairLive (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
     DyadicI.sqrt (DyadicI.add (DyadicI.square (DyadicI.add re c)) (DyadicI.square imAD))
   let minAbsAtD := fun (c : DyadicI) =>
     absAtD (DyadicI.max reLoD (DyadicI.min reHiD (DyadicI.neg c))) c
+  if bloomExcludedConditioningLive reLo reHi imA kappa then
+    return .error .excludedConditioning
   -- ¬coincident throughout: min |a| ≥ ½ (the τ·e coincidence stays baked-only)
-  if !DyadicI.certGt (minAbsAtD DyadicI.zero) (DyadicI.ofFloat 0.5) then return none
+  if !DyadicI.certGt (minAbsAtD DyadicI.zero) (DyadicI.ofFloat 0.5) then
+    return .error .liveRegionUnsupported
+  if absKappaD.ok && absKappaD.lo.isZero && absKappaD.hi.isZero then
+    return .ok { region := .serOnly, nDepth := 0, kDepth := 0 }
   let samples := #[reLo, reHi, max reLo (min reHi (-1.0))]
   if !DyadicI.certLt (minAbsAtD DyadicI.one) absKappaD then
     -- serOnly throughout: |a+1| never falls below |κ|
     let nRaw := samples.foldl (fun m re =>
       max m (bloomM1DepthD (CplxD.ofFloats re imA) kappa.toPoint bloomM1TolD)) 0
-    if nRaw + 8 > 300 then return none
-    return some { region := .serOnly, nDepth := nRaw + 8, kDepth := 0 }
+    if nRaw + 8 > bloomDepthCap then return .error .excludedDepth
+    return .ok { region := .serOnly, nDepth := nRaw + 8, kDepth := 0 }
   -- |a+1| dips below |κ| somewhere: crossing-throughout OR straddling (phase 3a
   -- — the union COLLAPSES onto the crossing lanes: on a serOnly-side config
   -- `dSwitch < 0`, the per-sample select sits on the series lane from d = 0,
@@ -95,8 +151,14 @@ def classifyBloomPairLive (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
     let zBnd := CplxD.scale ratio kP
     nRaw := max nRaw (bloomM1DepthD aP (if straddles then kP else zBnd) bloomM1TolD)
     kRaw := max kRaw (bloomCFDepthD aP zBnd bloomCFTolD)
-  if nRaw + 8 > 300 || kRaw + 8 > 300 then return none
-  return some { region := .crossing, nDepth := nRaw + 8, kDepth := kRaw + 8 }
+  if nRaw + 8 > bloomDepthCap || kRaw + 8 > bloomDepthCap then return .error .excludedDepth
+  return .ok { region := .crossing, nDepth := nRaw + 8, kDepth := kRaw + 8 }
+
+/-- Compatibility lens for existing direct callers. New production lowering uses
+    `classifyBloomPairLiveChecked` so the refusal reason remains available. -/
+def classifyBloomPairLive (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
+    (B g : Float) : Option LiveBloomPairPlan :=
+  (classifyBloomPairLiveChecked mu nuOmega sigLo sigHi B g).toOption
 
 /-- `bloomedVoice ⋙ reverb` as Γ-bridge pairs — the residue composition ACROSS a
     pitch-bloom warp (`B = β·scale/g` seconds of total clock advance, `g` the
@@ -107,14 +169,11 @@ def classifyBloomPairLive (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
     `sigmaRange` from the authoring site: the pair's constants are then built as
     s0 `CplxE` expressions of the live pole (Stage0 hoists them; rt60 turns with
     no relower), the live σ clamped to the classified interval so the region
-    choice is sound by construction. A live pair must be `serOnly` over the
-    WHOLE interval (`classifyBloomPairLiveSer`) — a pair that crosses a region
-    boundary across the rt60 range drops gracefully (per pair, `continue`; the
-    Phase 3 region-union emit removes this limit). Amps stay live as always.
-    Admission drops (graceful exclusion, the documented v1 scope) are the
-    `classifyBloomPair` `excludedDepth` region and are now depth-only: pairs whose
-    envelope depth exceeds 300 (cockpit-measured shipped max ≈ 250 incl. the
-    coincident CF side; the cap is headroom, not a tuning). The per-pair emit is
+    choice is sound by construction. `classifyBloomPairLiveChecked` admits a
+    serOnly, crossing-throughout, or safe straddling interval; conditioning,
+    depth, coincidence, and pole-contract failures are typed reasons that make
+    the outer composition all-or-nothing. Amps stay live as always. The shared
+    `bloomDepthCap` is headroom, not a tuning. The per-pair emit is
     REGION-INDEXED (WS-CL): the exhaustive `match plan.region` bakes exactly each
     region's lanes — the coincident regions no longer carry the dead E1 (`invA`)
     lane, and `coincidentSubtle` (`dSwitch < 0`) drops the whole CF lane the
@@ -125,7 +184,7 @@ def classifyBloomPairLive (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
     `residueComposeEC`'s coincidence. `B = 0` (or κ→0) degenerates every pair to
     series-only with `M ≡ 1` — the WS-B2 divided-difference atom, which the
     `modal-bloom-gamma` gate pins. -/
-def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
+private def bloomComposePairs? (voice reverb : Array ModalMode) (B g : Float) :
     Option (Array BloomPair) := Id.run do
   let mut out : Array BloomPair := #[]
   for v in voice do
@@ -139,13 +198,13 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
       | none =>
         -- WS-LP Phase 1: a LIVE reverb σ (the rt60 pole). Admissible only when
         -- the pole read is s0 (a raw slot, not a glide — `settle` a glided pole
-        -- first) and the authoring site declared its interval; otherwise the
-        -- pre-WS-LP baked-pole fallback (`none` ⇒ the caller's bare bloom).
+        -- first) and the authoring site declared its interval; the checked
+        -- preflight reports either violation before this private materializer runs.
         let some (sLo, sHi) := r.sigmaRange | return none
         if !(sigIsS0 r.sigma) then return none
-        match classifyBloomPairLive mu rOm sLo sHi B g with
-        | none => continue   -- coincident / region-changing over the interval: graceful per-pair drop (Phase 3 widens)
-        | some plan =>
+        match classifyBloomPairLiveChecked mu rOm sLo sHi B g with
+        | .error _ => continue
+        | .ok plan =>
           -- the lift: every baked constant re-expressed as an s0 `CplxE` of the
           -- live pole. The clamp ENFORCES the classified interval in-kernel, so
           -- an out-of-range slot write saturates the crossing's σ instead of
@@ -198,11 +257,10 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
               dSwitch, invA, cfB, cfN }
       | some rSig =>
         let nu : CplxB := ⟨-rSig, rOm⟩
-        -- the shared classifier (WS-CL): `excludedDepth` ⇒ this pair is out of scope
-        -- (a COUNTED graceful drop — the coverage gate tallies it, not a silent
-        -- `continue`); every other region emits EXACTLY its own lanes (region-indexed
-        -- — the coincident regions no longer bake the dead E1/CF lanes). `bloomCompose`
-        -- and the seam-sweep harness consult THIS classifier, one answer in code.
+        -- The checked preflight has already rejected every excluded region for
+        -- the whole composition. This private materializer therefore emits only
+        -- supported region-indexed lanes; its defensive `continue` arms cannot
+        -- create a production partial bank.
         let plan := classifyBloomPair mu nu B g
         let aC := plan.aC
         let kappa := plan.kappa
@@ -214,11 +272,13 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
         -- dyadic), so nothing is lost crossing.
         let aD := aC.toExact
         let kD := kappa.toExact
+        let kAbs := CplxDI.abs kD
+        let kZero := kAbs.ok && kAbs.lo.isZero && kAbs.hi.isZero
         let gD := DyadicI.ofFloat g
         let invNuMuD := CplxDI.div CplxDI.one (CplxDI.sub nu.toExact mu.toExact)
         let aP1D := CplxDI.add aD CplxDI.one
         -- `ln(|κ|/|a+1|)/g` — the per-sample series↔CF bridge point
-        let dSwitchD := DyadicI.div
+        let dSwitchD := if kZero then DyadicI.zero else DyadicI.div
           (DyadicI.log (DyadicI.div (CplxDI.abs kD) (CplxDI.abs aP1D))) gD
         let invAD := (Array.range plan.nDepth).map (fun k =>
           CplxDI.div CplxDI.one (CplxDI.add aD (CplxDI.ofNat (k + 1))))
@@ -228,14 +288,15 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
           let jf := CplxDI.ofNat (j + 1)
           CplxDI.mul jf (CplxDI.sub jf aD))
         match plan.region with
+        | .excludedConditioning => continue
         | .excludedDepth => continue
         | .serOnly =>
           -- M(κ)'s own term count is a REPRODUCIBILITY question (point carrier);
           -- the sum it sizes is an ACCURACY question (enclosure). Note this count
           -- is not `plan.nDepth`: that one sizes the emitted `invA` at `zBnd`,
           -- this one converges the κ-side constant.
-          let nK := bloomM1DepthD aC.toPoint kappa.toPoint bloomM1TolD
-          let mK := bloomM1D aD kD nK
+          let nK := if kZero then 0 else bloomM1DepthD aC.toPoint kappa.toPoint bloomM1TolD
+          let mK := if kZero then CplxDI.one else bloomM1D aD kD nK
           let some k1SerE := cplxLitD? (CplxDI.mul mK invNuMuD) | return none
           let some kappaE := cplxLitD? kD | return none
           let some fSerE  := cplxLitD? (CplxDI.neg invNuMuD) | return none
@@ -333,6 +394,85 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
             secCoef := (litF (vSig - rSig), litF (rOm - vOm)) }
   return some out
 
+/-- Classify the complete requested Cartesian product before materializing any
+    coefficient arrays.  This is the stop-line inventory: every unsupported or
+    excluded pair has stable indices and a named reason. -/
+private def bloomCompositionExclusions (voice reverb : Array ModalMode) (B g : Float) :
+    Array BloomPairExclusion := Id.run do
+  let mut out : Array BloomPairExclusion := #[]
+  for vi in [0:voice.size] do
+    let some v := voice[vi]? | continue
+    let some vSig := sigConstF? v.sigma
+      | for ri in [0:reverb.size] do
+          out := out.push { voiceIndex := some vi, roomIndex := some ri,
+                            reason := .voiceSigmaNotConstant }
+        continue
+    let some vOm := sigConstF? v.omega
+      | for ri in [0:reverb.size] do
+          out := out.push { voiceIndex := some vi, roomIndex := some ri,
+                            reason := .voiceOmegaNotConstant }
+        continue
+    let mu : CplxB := ⟨-vSig, vOm⟩
+    for ri in [0:reverb.size] do
+      let some r := reverb[ri]? | continue
+      let some rOm := sigConstF? r.omega
+        | out := out.push { voiceIndex := some vi, roomIndex := some ri,
+                            reason := .roomOmegaNotConstant }
+          continue
+      match sigConstF? r.sigma with
+      | none =>
+        let some (sLo, sHi) := r.sigmaRange
+          | out := out.push { voiceIndex := some vi, roomIndex := some ri,
+                              reason := .liveSigmaRangeMissing }
+            continue
+        if !(sigIsS0 r.sigma) then
+          out := out.push { voiceIndex := some vi, roomIndex := some ri,
+                            reason := .liveSigmaNotS0 }
+          continue
+        match classifyBloomPairLiveChecked mu rOm sLo sHi B g with
+        | .ok _ => pure ()
+        | .error reason =>
+          out := out.push { voiceIndex := some vi, roomIndex := some ri, reason }
+      | some rSig =>
+        let nu : CplxB := ⟨-rSig, rOm⟩
+        match (classifyBloomPair mu nu B g).region with
+        | .excludedConditioning =>
+          out := out.push { voiceIndex := some vi, roomIndex := some ri,
+                            reason := .excludedConditioning }
+        | .excludedDepth =>
+          out := out.push { voiceIndex := some vi, roomIndex := some ri,
+                            reason := .excludedDepth }
+        | _ => pure ()
+  return out
+
+/-- Typed, all-or-nothing bloom composition.  `pairs` is populated only when
+    every requested voice×room pair is supported; otherwise the complete
+    exclusion inventory is returned and no partial room response exists for a
+    caller to realize accidentally. -/
+def bloomComposeChecked (voice reverb : Array ModalMode) (B g : Float) : BloomComposition :=
+  let expectedPairs := voice.size * reverb.size
+  let exclusions := bloomCompositionExclusions voice reverb B g
+  if !exclusions.isEmpty then
+    { expectedPairs, pairs := #[], exclusions }
+  else
+    match bloomComposePairs? voice reverb B g with
+    | some pairs =>
+      if pairs.size == expectedPairs then
+        { expectedPairs, pairs, exclusions := #[] }
+      else
+        { expectedPairs, pairs := #[], exclusions := #[{
+            voiceIndex := none, roomIndex := none,
+            reason := .coefficientMaterialization }] }
+    | none =>
+      { expectedPairs, pairs := #[], exclusions := #[{
+          voiceIndex := none, roomIndex := none,
+          reason := .coefficientMaterialization }] }
+
+/-- Compatibility lens preserving the historical `Option (Array BloomPair)`
+    API. New production lowering uses `bloomComposeChecked` and reports reasons. -/
+def bloomCompose (voice reverb : Array ModalMode) (B g : Float) : Option (Array BloomPair) :=
+  (bloomComposeChecked voice reverb B g).toOption
+
 /-- The bloom-composed pair bank as a pure `Sig` over the clock: per pair, TWO
     Q-rotator carriers — the reverb ring `e^{νd}` on the straight relative clock
     and the bloomed voice mode `e^{μφ(d)}` on the OFFSET clock (the same Q32.32
@@ -347,42 +487,23 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) :
     (the `modalBankSigTableDD` skeleton). Unrolled per pair — envelope depths
     are per-pair ragged, the non-uniform route. Causal gate on `clkRel > 0`.
 
-    RANGE (WS-AA range lens). **Rail**: `|env·w| < 32` PER CARRIER, PER pair (2
-    `land` calls for non-coincident pairs, 3 with the τ·e secular). A FACTOR site:
-    each `w` carries the region-selected series-M / continued-fraction / Γ★ / τ·e
-    factor, so the sup must be taken over d≥0 on the SELECTED lane only (a naive
-    both-lane sup over-estimates by ~1e10 — the unselected series-M reaches ~5e10
-    at z=κ where the selected CF weight is ~0.2). **Reachable max at every config
-    that fires today: ≪ 32** (measured: SeamSweep gong-reverb 0.005; WS-A4
-    coincident 0.27–0.92; a baked filterPair(Q44) stress config 2.48), so this
-    site is **unprotected but not broken** at every config reachable today, and
-    option E at k=0 is a byte-identical no-op for it. **Two reasons it is NOT landed
-    in this pass, DEFERRED to the factor-site follow-on**: (a) it is UNREACHABLE from
-    the surface — `bloomgong` (its only surface producer) is a WITHHELD kind, rejected
-    by `Playground.checkServedKinds` (WS-LP made the live-rt60 CROSSING compile, but
-    the surface stays sealed until this factor site carries the per-pair `k`), so
-    only the tropicaltest gates and authored/loaded literal-pole programs emit it;
-    (b) there is a reachable-by-baked-poles case option E CANNOT absorb — filtering a
-    gong ON one of its own partials (room pole tuned to a voice partial: `Im a ≈ 0`)
-    with `a` near a negative integer `−n` (`Re a ≈ −(σ_ν−σ_μ)/g`, so a resonance
-    sweep walks `Re a` down the lattice −1,−2,…) AND large `|z|=|κ|`: there the
-    fixed-depth float64 series-M Horner catastrophically cancels (the `1/(a+k+1)`
-    factor at `k≈n−1` is near-singular — MEASURED rel error ~1e8, e.g. `|M_float|`
-    ≈ 3.7e11 vs true ≈ 971 at `a=−0.98, |κ|=76.8`), so the LANDED weight can reach
-    ~5e12–1e19, past the k≤28 ceiling of 32·2²⁸≈8.6e9. This is a CONDITIONING
-    failure of the series REALIZATION, **not** a defect in the Γ★ bridge, which is
-    EXACT there — the two lane-totals agree to 74+ digits at high precision (the
-    identity `−M(z)/(ga) − CF(z)/g = −Γ(a)z^{−a}eᶻ/g`, verified
-    `demos/bridge_verify.py`); the earlier "semantically invalid / lanes disagree by
-    ~1e8" reading conflated the float64 Horner's own cancellation error with a lane
-    disagreement. The near-integer configs are NOT incidentally depth-excluded
-    (`zBnd ≈ |a+1|` is small, so `classifyBloomPair` admits them as `crossing`). Its
-    correct remedy is a new `classifyBloomPair` admission guard rejecting a DISC
-    around each negative integer (`|a+n| ≲ ε`), NOT the half-plane `Re a ≲ −1` (which
-    excludes ~91% of the benign shipped register — measured), to a NEW `SeamRegion`
-    (not `excludedDepth`, which the coverage gate's totality assertion relies on),
-    landed ALONGSIDE the per-pair exponent — a correctness fix, not a landing-scale
-    one. -/
+    RANGE (WS-AA range lens). The selected two or three `env·w` factors still
+    land at fixed Q4.28. A per-sample exponent is not an acceptable patch: these
+    factors depend on `dPos`, and moving `floatExponent`/`ldexp` into every audio
+    sample and pair would violate the coefficient-time landing invariant, make
+    backend precision affect exponent choices, and scale badly for a 672-pair
+    room. A correct selected-lane supremum remains an explicit architecture gate.
+
+    Landing also cannot repair an ill-conditioned value. The measured
+    `a=-0.98, |κ|≈72.2` Horner witness is wrong by >1e8 and can exceed the
+    `k≤28` ceiling. `classifyBloomPair` therefore names and refuses the
+    CF-crossing intersection with the exact-binary radius-`1/32` discs around
+    `-1,…,-300`; the live classifier applies the conservative interval analogue.
+    `BloomComposition` makes any such or depth/contract exclusion explicit, and
+    Patch lowering refuses the requested room crossing rather than rendering a
+    bare bloom or partial room. The fixed factor landing is not a proof for
+    arbitrary authored tables outside this measured admission contract, which is
+    why the public `bloomgong` surface remains withheld. -/
 def bloomComposedSig (pairs : Array BloomPair) (clkInt anchorSamples : Sig) : Sig :=
   let clkRel := relClockQ clkInt anchorSamples
   let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
@@ -559,7 +680,7 @@ def bloomFoldCompose (voice : Array ModalMode) (r1 r2 : ModalMode) (B g : Float)
     if !DyadicI.certGt (CplxDI.abs (CplxDI.add a1D CplxDI.one)) (CplxDI.abs kD) then continue
     let nRaw := bloomM1DepthD a1.toPoint kappa.toPoint bloomM1TolD
     let nDepth := nRaw + 8    -- M(a1;z) depth; the a-DD's Hₙ factor is a small (~log) tail
-    if nDepth > 300 then continue
+    if nDepth > bloomDepthCap then continue
     -- the constants, exact and then projected — `CplxB ⟨toFloat re, toFloat im⟩`
     -- emits bit-identically to `cplxLitD?`, since `cplxLitE` is `litF` of exactly
     -- those two doubles; a poisoned constant drops the mode rather than emitting
@@ -660,11 +781,11 @@ def bloomFoldComposedSig (pairs : Array BloomFoldPair) (clkInt anchorSamples : S
 def bloomFoldComposedTerm (pairs : Array BloomFoldPair) (anchor : Sig) (c : Clock) : ArrowTerm :=
   ArrowTerm.arrUn (fun clkSig => bloomFoldComposedSig pairs clkSig anchor) (ArrowTerm.clk c)
 
-/-- The pitch-bloom clock warp for a BARE bloomed source (no room to cross): the
+/-- The pitch-bloom clock warp for a BARE bloomed source (no room requested): the
     offset `B·(1−e^{−g·d⁺})` added to the untouched integer clock — `B` already
     folds the register scale (`B = β·scale/g`). The scale-1 sibling of
     `gongBloomWarp` (which lives one layer up, in `Gong.lean`), defined here so
-    `Patch.lowerInput` can realize a bloomed source's bare fallback without a
+    `Patch.lowerInput` can realize the explicitly bare source without a
     circular import. `W(0)=0`, monotone, so the bank's own causal gate is
     untouched. -/
 def bloomWarpClock (anchorSamples : Sig) (B g : Float) : Clock → Clock :=

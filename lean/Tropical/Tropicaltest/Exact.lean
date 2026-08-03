@@ -436,8 +436,8 @@ private def benchBank (n : Nat) : Array Tropical.EmitArrow.ModalMode :=
     value feeds `landK`'s power-of-two read and every `certLt` in the EC/DD
     router, where an enclosure one ulp wider OR NARROWER is not a rounding
     difference but a different emitted program. Narrower is not the safe
-    direction: a tighter interval turns `overlap` into a verdict, and
-    `classifyBloomPairLive` DROPS what it cannot certify.
+    direction: a tighter interval turns `overlap` into a verdict, and the checked
+    live classifier REFUSES what it cannot certify.
 
     Exponents past the table's end are included so the division fallback is
     exercised rather than assumed. The two timings are PRINTED, never gated — a
@@ -561,9 +561,9 @@ open Tropical.EmitArrow in
     second number to read: a literal disagrees only when the true value sits
     within the float path's own error of a half-grid boundary.
 
-    `poisoned == 0` is a hard assertion. A poisoned constant makes `bloomCompose`
-    return `none` and the caller fall back to the bare bloom — silently, and
-    correctly, but the shipped register must never take that path. -/
+    `poisoned == 0` is a hard assertion. A poisoned constant becomes a typed
+    `coefficientMaterialization` refusal, and Patch lowering reports it explicitly;
+    the shipped register must never take that path. -/
 def runExactValues : IO Bool := do
   let tStart ← IO.monoMsNow
   let n := 120
