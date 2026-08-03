@@ -70,7 +70,9 @@ The required direct-path cost fork is recorded under
 | `2026-08-01_23-12-23-338-smoke-b128-r512` | Pre-optimization direct evaluator: first priming write timed out; one starvation and 443 retargets. |
 | `2026-08-01_23-16-23-842-smoke-b128-r512` | Algebraically shared direct evaluator: first priming write still timed out; about 17.0 ms per 512-frame morph render, one starvation, and 185 retargets. |
 
-Both runs retain their JSONL, summary, and manifest. They authorize work on the
+Both runs retain compact summaries and manifests. Their raw JSONL and original
+verbose summaries are in the checksummed qualification archive documented in
+`benchmarks/demo_release/EVIDENCE_ARCHIVE.md`. They authorize work on the
 bounded fixed-scene cache; they are failed diagnostics, not release evidence.
 
 ## Selected fixed-scene cache
@@ -92,7 +94,7 @@ bounded fixed-scene cache; they are failed diagnostics, not release evidence.
 | Controls | 2,950 dispatched writes; scheduled p95/p99 `11.50/21.43 ms`; audible-activation p95/max `38.02/56.99 ms`; every first/reversal/final delivery gate passed |
 | Scopes | 5,420 completed frames, zero preemptions/errors; 59.75 idle fps; RPC p95/p99 `5.36/5.54 ms`; frame-interval p95 `18.89 ms` |
 | Runtime/Metal/DAC | Average 512-frame morph render `6.14 ms`; zero starvation, tag mismatch, retarget, dispatch, activation, morph, stale-completion, ownership, callback-thread, underrun, overrun, non-finite, or clamp faults |
-| Release WAVs | `room_audition/release_out/`; six continuous 24-bit mono 44.1 kHz files from clean integration commit `8c9f76a`; endpoint parity about `1.1e-16`; final +1/choreography peak `−2.43 dBFS`; no normalization or limiter |
+| Release WAVs | Checksummed qualification archive; six continuous 24-bit mono 44.1 kHz files from clean integration commit `8c9f76a`; endpoint parity about `1.1e-16`; final +1/choreography peak `−2.43 dBFS`; no normalization or limiter |
 
 ## 2026-08-02 release qualification
 
@@ -103,18 +105,19 @@ bounded fixed-scene cache; they are failed diagnostics, not release evidence.
 | 10-minute adversarial | `2026-08-02_00-11-44-755-adversarial-b128-r512`; 19,649 dispatched writes and 843 health records, scheduled p95 `10.99 ms`, audible p95 `37.23 ms`, scope `23.91 fps`; all transient and final fault counters zero |
 | 30-minute normal | Explicitly waived by the user after the completed 10-minute soak. The cancelled partial run is not committed and is not called a pass. |
 | Full validation | `validation/2026-08-02_8e32e2b_make-validate.log`; trust audit pass, `tropicaltest` 123/123, Bun 137 pass/1 environment duplicate skip/0 fail, CTest 4/4 |
-| Release listening set | `room_audition/release_out/`; six continuous 24-bit mono 44.1 kHz WAVs, native JIT/cache parity around `1e-16`, final choreography peak `−5.01 dBFS`, no normalization or limiter |
+| Release listening set | Checksummed qualification archive; six continuous 24-bit mono 44.1 kHz WAVs, native JIT/cache parity around `1e-16`, final choreography peak `−5.01 dBFS`, no normalization or limiter |
 
 Every qualification manifest records commit `6660f06`, an empty worktree
 status, graph SHA-256 `db884d12d4b87a39fc8b854372ec903f1d6b90d531b89a0e4be154685e8680d1`,
 the MacBook Pro speaker device, 44.1 kHz, `Bdev=128`, and `Rgpu=512`.
 
-The qualification `capture.wav` files preserve sample indices from the
-qualification-only one-buffer next-callback sampler. They contain explicit
+The archived qualification `capture.wav` files preserve sample indices from
+the qualification-only one-buffer next-callback sampler. They contain explicit
 zero-filled holes where control-plane polling skipped a callback and are not
 continuous listening files or evidence of DAC silence. The continuous
-endpoint, scrub, dry, and final-scene files under `release_out/` are the
-listening artifacts.
+endpoint, scrub, dry, and final-scene files in the same archive are the
+listening artifacts. See `benchmarks/demo_release/EVIDENCE_ARCHIVE.md` for the
+release URL and checksum.
 
 ## 2026-08-02 immutable-scope correction
 
@@ -264,18 +267,21 @@ The evidence package now contains, without overwriting failed runs:
 
 - five cold-boot records, the clean 90-second smoke, and the completed
   10-minute adversarial soak;
-- JSONL, summary, and manifest for every completed run, plus qualification
-  capture WAVs for audible runs (the muted visual diagnostic intentionally has
-  none);
-- final-room wet endpoints, scrub, dry reference, and integrated listening WAV;
+- archived JSONL, original verbose summary, and qualification capture WAVs for
+  every applicable completed run (the muted visual diagnostic intentionally
+  has no capture), with compact summaries and manifests retained in Git;
+- archived final-room wet endpoints, scrub, dry reference, and integrated
+  listening WAV;
 - the final full-validation log; and
 - qualified commit SHA, clean-worktree state, graph/profile hashes, machine
   data, and raw telemetry.
 
 The original 30-minute normal-soak requirement is covered only by DR-18's
-explicit user waiver. Final headphone/monitor approval of
+explicit user waiver. Final headphone/monitor approval of the archived
 `release_out/final_scene_position_choreography.wav` remains pending, so the
-listening gate must not yet be described as approved.
+listening gate must not yet be described as approved. The immutable archive,
+checksum, and restoration details are recorded in
+`benchmarks/demo_release/EVIDENCE_ARCHIVE.md`.
 
 Each qualification manifest records graph hash, commit/worktree state, OS/CPU,
 toolchain, selected audio device, sample rate, and negotiated quanta. Missing

@@ -64,10 +64,12 @@ environment skip/0 fail, and CTest 4/4.
 At the user's direction, the 30-minute normal soak was cancelled and is
 explicitly waived in favor of the completed 10-minute adversarial result. It
 is not represented as a passing 30-minute run. Continuous cache-backed release
-WAVs are committed under `benchmarks/demo_release/room_audition/release_out/`;
-the final POSITION choreography peaks at `−5.01 dBFS` without normalization or
-a limiter. Final headphone/monitor approval of that capture remains the only
-open acceptance decision.
+WAVs are stored in the checksummed archive documented by
+`benchmarks/demo_release/EVIDENCE_ARCHIVE.md`; their compact listening summary
+remains under `benchmarks/demo_release/room_audition/release_out/`. The final
+POSITION choreography peaks at `−5.01 dBFS` without normalization or a limiter.
+Final headphone/monitor approval of that capture remains the only open
+acceptance decision.
 
 ### 2026-08-02 chord-derived percussion revision
 

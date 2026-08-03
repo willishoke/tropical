@@ -295,7 +295,9 @@ uv run --with numpy python \
 The renderer verifies the scene/cache hashes, renders dry and static endpoint
 graphs through the native JIT, applies the runtime equal-power law to the
 documented POSITION choreography, and refuses parity or PCM-headroom failure.
-It applies no normalization or limiter. Listen in this order:
+It applies no normalization or limiter. Generated WAVs are ignored by Git; the
+qualified set is published in the checksummed release documented by
+`benchmarks/demo_release/EVIDENCE_ARCHIVE.md`. Listen in this order:
 
 1. `release_out/wet_position_plus_1.wav` — causal wet endpoint.
 2. `release_out/wet_position_minus_1.wav` — classic reverse wet endpoint.

@@ -38,6 +38,12 @@ __pycache__/
 /benchmarks/demo_release/room_audition/grouped_fit_out/grouped_fit_decay_ladder.npz
 /benchmarks/demo_release/room_audition/native_rate_out/grouped_fit_current_radii_stereo.npz
 /benchmarks/demo_release/room_audition/native_rate_out/grouped_fit_decay_ladder.npz
+/benchmarks/demo_release/room_audition/release_out/*.wav
+
+# Raw qualification streams and callback-sampler audio are archived as
+# checksummed release evidence. Keep compact summaries and manifests in Git.
+/benchmarks/demo_release/data/*.jsonl
+/benchmarks/demo_release/data/*.capture.wav
 
 # Handoff / WIP working docs — keep them off the repo root (and off
 # main). Tracked design notes belong under design/.
