@@ -1,6 +1,7 @@
 #include "runtime/FlatRuntime.hpp"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <cstdint>
 #include <fstream>
@@ -19,11 +20,24 @@ namespace
 
 constexpr uint32_t kBuffer = 512;
 constexpr uint64_t kJumpIndex = uint64_t{1} << 40;
-constexpr uint32_t kReferenceSlot = 13;
+constexpr uint64_t kReverseDistance = 1536;
+constexpr uint64_t kBatchLeadFrames = 8 * kBuffer;
 constexpr uint64_t kFirstEventBlock = 2666;
 constexpr uint64_t kEventStrideBlocks = 86;
 constexpr uint64_t kJumpAppliedBlock = 1292;
 constexpr uint64_t kCaptureOffsetBlocks = 3878;
+
+// The retained 60-second row's 20 post-swap velocity effective coordinates.
+// The no-DAC probe steers the source far enough ahead of each batch that the
+// four production dispatches land the velocity transaction at this exact E.
+constexpr std::array<uint64_t, 20> kBatchCoordinates = {
+  1369600, 1413120, 1457152, 1501696, 1545216,
+  1099511654400, 1099511698432, 1099511743488, 1099511785984,
+  1099511830016,
+  1809408, 1853952, 1899520, 1942016, 1986560,
+  1099511654400, 1099511698432, 1099511743488, 1099511787008,
+  1099511831040,
+};
 
 std::string read_file(const std::string & path)
 {
@@ -51,55 +65,84 @@ void load(FlatRuntime & rt, const Artifacts & a, bool metal)
     throw std::runtime_error("load failed");
 }
 
-struct Result
+struct Event
 {
-  double snr = 0.0;
-  double max_error = 0.0;
-  double signal = 0.0;
-  double reference_max = 0.0;
-  double actual_max = 0.0;
-  double tau_base = 0.0;
-  float tau_base_f32 = 0.0f;
+  uint64_t jump_coordinate = 0;
+  uint64_t observed = 0;
+  uint64_t effective = 0;
+  double velocity = 0.0;
 };
 
 struct Comparison
 {
   double snr = 0.0;
   double max_error = 0.0;
+  double signal = 0.0;
+  double reference_checksum = 0.0;
+  double actual_checksum = 0.0;
 };
+
+struct Result
+{
+  Comparison exact;
+  Comparison f32_origin;
+  std::vector<Event> velocity_events;
+  uint64_t final_velocity_e = 0;
+  uint64_t capture_start = 0;
+  double final_velocity = 0.0;
+  double tau_base = 0.0;
+  float tau_base_f32 = 0.0f;
+};
+
+struct DelayedOracleResult
+{
+  Comparison exact;
+  Comparison stale;
+};
+
+uint64_t delayed_event_sample_index(uint64_t round)
+{
+  const uint64_t block = kFirstEventBlock + round * kEventStrideBlocks;
+  return kJumpIndex + (block - kJumpAppliedBlock) * kBuffer;
+}
 
 Comparison compare(
   const std::vector<double> & reference,
   const std::vector<double> & actual)
 {
+  if (reference.size() != actual.size())
+    throw std::runtime_error("comparison length mismatch");
   double signal = 0.0;
   double error = 0.0;
   double max_error = 0.0;
+  double reference_checksum = 0.0;
+  double actual_checksum = 0.0;
   for (std::size_t i = 0; i < reference.size(); ++i)
   {
     signal += reference[i] * reference[i];
     const double delta = reference[i] - actual[i];
     error += delta * delta;
     max_error = std::max(max_error, std::fabs(delta));
+    const double weight = static_cast<double>(i + 1);
+    reference_checksum += weight * reference[i];
+    actual_checksum += weight * actual[i];
   }
   return {
-    error == 0.0 ? 999.0 : 10.0 * std::log10(signal / error),
+    error == 0.0
+      ? (signal > 0.0 ? 999.0 : 0.0)
+      : (signal > 0.0 ? 10.0 * std::log10(signal / error) : -999.0),
     max_error,
+    signal,
+    reference_checksum,
+    actual_checksum,
   };
-}
-
-uint64_t event_sample_index(uint64_t round)
-{
-  const uint64_t block = kFirstEventBlock + round * kEventStrideBlocks;
-  return kJumpIndex + (block - kJumpAppliedBlock) * kBuffer;
 }
 
 void acknowledge_latest(FlatRuntime & metal)
 {
-  const uint64_t requested =
-    metal.metal_published_activation_epoch();
+  const uint64_t requested = metal.metal_published_activation_epoch();
   for (uint32_t attempt = 0;
-       attempt < 8
+       attempt < 16
        && metal.metal_acknowledged_activation_epoch() < requested;
        ++attempt)
     metal.process_offline();
@@ -108,41 +151,61 @@ void acknowledge_latest(FlatRuntime & metal)
     throw std::runtime_error("Metal activation did not acknowledge");
 }
 
+std::vector<double> render_reference(
+  FlatRuntime & jit, uint32_t reference_slot, uint64_t capture_start)
+{
+  std::vector<double> output(kBuffer, 0.0);
+  if (!jit.render_window(
+        capture_start, kBuffer, &reference_slot, 1, output.data()))
+    throw std::runtime_error("reference render failed");
+  return output;
+}
+
 Result run_scenario(
   const Artifacts & initial, const Artifacts & replacement,
-  bool toggle_velocity)
+  bool toggle_velocity, bool toggle_glide, bool toggle_anchor,
+  bool hot_swap, bool reverse_crossing,
+  bool diagnostic_f32_origin)
 {
   FlatRuntime metal(kBuffer);
-  FlatRuntime jit(kBuffer);
+  FlatRuntime exact(kBuffer);
+  FlatRuntime f32_origin(kBuffer);
   load(metal, initial, true);
-  load(jit, initial, false);
-  // The actual row hot-swapped before this 15-write tail. Loading the
-  // replacement here deliberately starts from its fresh post-swap defaults.
-  load(metal, replacement, true);
-  load(jit, replacement, false);
+  load(exact, initial, false);
+  load(f32_origin, initial, false);
+  if (hot_swap)
+  {
+    load(metal, replacement, true);
+    load(exact, replacement, false);
+    load(f32_origin, replacement, false);
+  }
   acknowledge_latest(metal);
 
   const uint32_t tau_slot = metal.slot_index("param:master.tau_base");
-  if (tau_slot == UINT32_MAX
-      || jit.slot_index("param:master.tau_base") != tau_slot)
-    throw std::runtime_error("tau slot missing");
+  const uint32_t velocity_slot =
+    metal.slot_index("param:master.velocity");
+  const uint32_t reference_slot = metal.slot_index("__root__.out");
+  if (tau_slot == UINT32_MAX || velocity_slot == UINT32_MAX
+      || reference_slot == UINT32_MAX
+      || exact.slot_index("param:master.tau_base") != tau_slot
+      || exact.slot_index("param:master.velocity") != velocity_slot
+      || exact.slot_index("__root__.out") != reference_slot)
+    throw std::runtime_error("master clock slots missing");
 
-  for (uint64_t round = 0; round < 15; ++round)
+  std::vector<Event> velocity_events;
+  uint64_t final_velocity_e = 0;
+  for (uint64_t round = 0; round < kBatchCoordinates.size(); ++round)
   {
-    const uint64_t now = event_sample_index(round);
-    metal.set_sample_index(now - kBuffer);
-    jit.set_sample_index(now - kBuffer);
+    const uint64_t jump_coordinate =
+      kBatchCoordinates[round] - kBatchLeadFrames;
+    metal.set_sample_index(jump_coordinate);
     acknowledge_latest(metal);
-    jit.process();
-    if (metal.current_sample_index() != now
-        || jit.current_sample_index() != now)
-      throw std::runtime_error("failed to publish exact event index");
 
     const bool high = (round & 1U) == 0;
     const double values[] = {
       high ? 260.0 : 180.0,
-      high ? 0.5 : 0.0,
-      high ? 65.0 : 55.0,
+      toggle_glide ? (high ? 0.5 : 0.0) : 0.0,
+      toggle_anchor ? (high ? 65.0 : 55.0) : 55.0,
       toggle_velocity ? (high ? 0.75 : 1.0) : 1.0,
     };
     const char * names[] = {
@@ -150,57 +213,65 @@ Result run_scenario(
     };
     for (std::size_t i = 0; i < 4; ++i)
     {
-      const auto metal_dispatch =
+      const auto production =
         metal.dispatch_param_sync(names[i], values[i]);
-      const auto jit_dispatch =
-        jit.dispatch_param_sync_at_sample_index(
-          names[i], values[i],
-          metal_dispatch.effective_sample_index);
-      if (!metal_dispatch.ok || !jit_dispatch.ok
-          || jit_dispatch.effective_sample_index
-               != metal_dispatch.effective_sample_index)
+      const auto replay =
+        exact.dispatch_param_sync_at_sample_index(
+          names[i], values[i], production.effective_sample_index);
+      const auto f32_replay =
+        f32_origin.dispatch_param_sync_at_sample_index(
+          names[i], values[i], production.effective_sample_index);
+      if (!production.ok || !replay.ok || !f32_replay.ok
+          || replay.effective_sample_index
+               != production.effective_sample_index)
         throw std::runtime_error("event dispatch mismatch");
       acknowledge_latest(metal);
+      if (i == 3)
+      {
+        final_velocity_e = production.effective_sample_index;
+        velocity_events.push_back({
+          jump_coordinate,
+          production.observed_sample_index,
+          production.effective_sample_index,
+          values[i],
+        });
+      }
     }
   }
 
-  constexpr uint64_t capture_start =
-    kJumpIndex + kCaptureOffsetBlocks * kBuffer;
+  if (final_velocity_e < kReverseDistance)
+    throw std::runtime_error("final velocity E is too small");
+  const uint64_t capture_start = reverse_crossing
+    ? final_velocity_e - kReverseDistance
+    : final_velocity_e + kReverseDistance;
   metal.set_sample_index(capture_start);
   acknowledge_latest(metal);
-  std::vector<double> reference(kBuffer, 0.0);
-  if (!jit.render_window(
-        capture_start, kBuffer, &kReferenceSlot, 1, reference.data()))
-    throw std::runtime_error("reference render failed");
+  const std::vector<double> actual = metal.outputBuffer;
+  const std::vector<double> exact_reference =
+    render_reference(exact, reference_slot, capture_start);
 
-  double signal = 0.0;
-  double error = 0.0;
-  double max_error = 0.0;
-  double reference_max = 0.0;
-  double actual_max = 0.0;
-  for (uint32_t i = 0; i < kBuffer; ++i)
+  Result result;
+  result.exact = compare(exact_reference, actual);
+  if (diagnostic_f32_origin)
   {
-    const double actual = metal.outputBuffer[i];
-    reference_max = std::max(reference_max, std::fabs(reference[i]));
-    actual_max = std::max(actual_max, std::fabs(actual));
-    signal += reference[i] * reference[i];
-    const double delta = reference[i] - actual;
-    error += delta * delta;
-    max_error = std::max(max_error, std::fabs(delta));
+    f32_origin.set_slot(
+      tau_slot,
+      static_cast<double>(
+        static_cast<float>(f32_origin.get_slot(tau_slot))));
+    result.f32_origin =
+      compare(
+        render_reference(f32_origin, reference_slot, capture_start), actual);
   }
-  const double tau = jit.get_slot(tau_slot);
-  return {
-    error == 0.0 ? 999.0 : 10.0 * std::log10(signal / error),
-    max_error,
-    signal,
-    reference_max,
-    actual_max,
-    tau,
-    static_cast<float>(tau),
-  };
+  result.velocity_events = std::move(velocity_events);
+  result.final_velocity_e = final_velocity_e;
+  result.capture_start = capture_start;
+  result.final_velocity = exact.get_slot(velocity_slot);
+  result.tau_base = exact.get_slot(tau_slot);
+  result.tau_base_f32 = static_cast<float>(result.tau_base);
+  return result;
 }
 
-std::pair<Comparison, Comparison> run_delayed_oracle(
+DelayedOracleResult run_delayed_oracle(
   const Artifacts & initial, const Artifacts & replacement)
 {
   FlatRuntime metal(kBuffer);
@@ -214,9 +285,15 @@ std::pair<Comparison, Comparison> run_delayed_oracle(
   load(stale, replacement, false);
   acknowledge_latest(metal);
 
+  const uint32_t reference_slot = metal.slot_index("__root__.out");
+  if (reference_slot == UINT32_MAX
+      || exact.slot_index("__root__.out") != reference_slot
+      || stale.slot_index("__root__.out") != reference_slot)
+    throw std::runtime_error("delayed oracle reference slot missing");
+
   for (uint64_t round = 0; round < 15; ++round)
   {
-    const uint64_t batch_start = event_sample_index(round);
+    const uint64_t batch_start = delayed_event_sample_index(round);
     metal.set_sample_index(batch_start - kBuffer);
     acknowledge_latest(metal);
     const bool high = (round & 1U) == 0;
@@ -231,10 +308,9 @@ std::pair<Comparison, Comparison> run_delayed_oracle(
     };
     for (std::size_t i = 0; i < 4; ++i)
     {
-      // A batch takes up to 10.264 ms against an 11.610 ms callback period.
-      // Force one possible crossing before the final anchor. Production and
-      // exact replay use the later boundary; the legacy oracle incorrectly
-      // holds batch_start for both anchor and the following velocity write.
+      // Force a callback boundary inside the final control batch.
+      // Production and exact replay observe the later effective epoch; the
+      // obsolete oracle assigns every write to batch_start.
       if (i == 2 && round == 14)
         metal.process_offline();
       const auto production =
@@ -254,17 +330,36 @@ std::pair<Comparison, Comparison> run_delayed_oracle(
   metal.set_sample_index(capture_start);
   acknowledge_latest(metal);
   const std::vector<double> actual = metal.outputBuffer;
-  std::vector<double> exact_reference(kBuffer, 0.0);
-  std::vector<double> stale_reference(kBuffer, 0.0);
-  if (!exact.render_window(
-        capture_start, kBuffer, &kReferenceSlot, 1, exact_reference.data())
-      || !stale.render_window(
-        capture_start, kBuffer, &kReferenceSlot, 1, stale_reference.data()))
-    throw std::runtime_error("delayed oracle reference render failed");
   return {
-    compare(exact_reference, actual),
-    compare(stale_reference, actual),
+    compare(
+      render_reference(exact, reference_slot, capture_start), actual),
+    compare(
+      render_reference(stale, reference_slot, capture_start), actual),
   };
+}
+
+void print_comparison(const char * name, const Comparison & c)
+{
+  std::cout << '"' << name << "\":{"
+            << "\"snr_db\":" << c.snr
+            << ",\"max_error\":" << c.max_error
+            << ",\"signal_energy\":" << c.signal
+            << ",\"reference_checksum\":" << c.reference_checksum
+            << ",\"actual_checksum\":" << c.actual_checksum
+            << '}';
+}
+
+void print_result(const char * name, const Result & result)
+{
+  std::cout << '"' << name << "\":{"
+            << "\"final_velocity_e\":" << result.final_velocity_e
+            << ",\"capture_start\":" << result.capture_start
+            << ",\"final_velocity\":" << result.final_velocity
+            << ",\"tau_base_f64\":" << result.tau_base
+            << ",\"tau_base_f32\":" << result.tau_base_f32
+            << ',';
+  print_comparison("comparison", result.exact);
+  std::cout << '}';
 }
 
 } // namespace
@@ -277,44 +372,74 @@ try
       "expected initial/replacement ir coeff msl manifest paths");
   const Artifacts initial{argv[1], argv[2], argv[3], argv[4]};
   const Artifacts replacement{argv[5], argv[6], argv[7], argv[8]};
-  const Result a = run_scenario(initial, replacement, true);
-  const Result b = run_scenario(initial, replacement, false);
-  const auto [exact, stale] = run_delayed_oracle(initial, replacement);
+
+  const Result no_glide = run_scenario(
+    initial, replacement, true, false, true, true, true, false);
+  const Result no_anchor = run_scenario(
+    initial, replacement, true, true, false, true, true, false);
+  const Result reverse = run_scenario(
+    initial, replacement, true, true, true, true, true, true);
+  const Result forward = run_scenario(
+    initial, replacement, true, true, true, true, false, false);
+  const Result no_velocity = run_scenario(
+    initial, replacement, false, true, true, true, true, false);
+  const Result no_swap = run_scenario(
+    initial, replacement, true, true, true, false, true, false);
+  const DelayedOracleResult delayed_oracle =
+    run_delayed_oracle(initial, replacement);
+
   const bool passed =
-    a.snr > 140.0 && b.snr > 140.0
-    && exact.snr > 140.0 && stale.snr < 100.0;
+    reverse.exact.snr > 140.0
+    && forward.exact.snr > 140.0
+    && no_velocity.exact.snr > 140.0
+    && no_swap.exact.snr > 140.0
+    && no_glide.exact.snr > 140.0
+    && no_anchor.exact.snr > 140.0
+    && delayed_oracle.exact.snr > 140.0
+    && delayed_oracle.stale.snr < 100.0;
 
   std::cout << std::setprecision(17)
-            << "{\"schema\":\"tropical_metal_velocity_oracle_discriminator_1\""
+            << "{\"schema\":"
+               "\"tropical_metal_velocity_oracle_discriminator_2\""
             << ",\"passed\":" << (passed ? "true" : "false")
             << ",\"buffer_length\":" << kBuffer
-            << ",\"jump_index\":" << kJumpIndex
-            << ",\"event_sample_indices\":[";
-  for (uint64_t round = 0; round < 15; ++round)
+            << ",\"far_jump_index\":" << kJumpIndex
+            << ",\"reverse_distance\":" << kReverseDistance
+            << ",\"jump_coordinates\":[";
+  for (std::size_t i = 0; i < kBatchCoordinates.size(); ++i)
   {
-    if (round) std::cout << ',';
-    std::cout << event_sample_index(round);
+    if (i) std::cout << ',';
+    std::cout << kBatchCoordinates[i] - kBatchLeadFrames;
   }
-  std::cout << "],\"A_velocity_toggle\":{\"snr_db\":" << a.snr
-            << ",\"max_error\":" << a.max_error
-            << ",\"signal\":" << a.signal
-            << ",\"reference_max\":" << a.reference_max
-            << ",\"actual_max\":" << a.actual_max
-            << ",\"tau_base_f64\":" << a.tau_base
-            << ",\"tau_base_f32\":" << a.tau_base_f32
-            << "},\"B_velocity_noop\":{\"snr_db\":" << b.snr
-            << ",\"max_error\":" << b.max_error
-            << ",\"signal\":" << b.signal
-            << ",\"reference_max\":" << b.reference_max
-            << ",\"actual_max\":" << b.actual_max
-            << ",\"tau_base_f64\":" << b.tau_base
-            << ",\"tau_base_f32\":" << b.tau_base_f32
-            << "},\"C_forced_stale_oracle\":{"
-            << "\"exact_replay_snr_db\":" << exact.snr
-            << ",\"exact_replay_max_error\":" << exact.max_error
-            << ",\"legacy_batch_start_snr_db\":" << stale.snr
-            << ",\"legacy_batch_start_max_error\":" << stale.max_error
-            << "}}\n";
+  std::cout << "],\"velocity_events\":[";
+  for (std::size_t i = 0; i < reverse.velocity_events.size(); ++i)
+  {
+    if (i) std::cout << ',';
+    const auto & event = reverse.velocity_events[i];
+    std::cout << "{\"jump_coordinate\":" << event.jump_coordinate
+              << ",\"observed_sample_index\":" << event.observed
+              << ",\"effective_sample_index\":" << event.effective
+              << ",\"value\":" << event.velocity << '}';
+  }
+  std::cout << "],";
+  print_result("diagnostic_no_glide", no_glide);
+  std::cout << ',';
+  print_result("diagnostic_no_anchor", no_anchor);
+  std::cout << ',';
+  print_result("A_full_reverse_crossing", reverse);
+  std::cout << ',';
+  print_result("B_capture_after_last_E", forward);
+  std::cout << ',';
+  print_result("C_no_velocity_toggles", no_velocity);
+  std::cout << ',';
+  print_result("D_no_hot_swap", no_swap);
+  std::cout << ",\"E_f32_origin_jit_oracle\":{";
+  print_comparison("comparison", reverse.f32_origin);
+  std::cout << "},\"F_stale_E_oracle\":{";
+  print_comparison("exact_replay", delayed_oracle.exact);
+  std::cout << ',';
+  print_comparison("stale_replay", delayed_oracle.stale);
+  std::cout << "}}\n";
   return passed ? 0 : 1;
 }
 catch (const std::exception & error)

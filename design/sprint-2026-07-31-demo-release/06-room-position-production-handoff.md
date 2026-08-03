@@ -75,9 +75,11 @@ at the frozen quanta with zero runtime, Metal, callback, or DAC faults. Full
 validation passes with `tropicaltest` 123/123, Bun 137 pass/1 duplicate
 environment skip, and CTest 4/4. At the user's direction, the 30-minute normal
 soak was cancelled and waived; no partial run is committed or called a pass.
-The cache-backed endpoint, scrub, dry, and final-scene WAVs are committed under
-`benchmarks/demo_release/room_audition/release_out/`. Final subjective review
-of the listening capture remains open.
+The cache-backed endpoint, scrub, dry, and final-scene WAVs are stored in the
+checksummed archive documented by
+`benchmarks/demo_release/EVIDENCE_ARCHIVE.md`; their compact listening summary
+remains under `benchmarks/demo_release/room_audition/release_out/`. Final
+subjective review of the listening capture remains open.
 
 ## 1. Shipping decision
 

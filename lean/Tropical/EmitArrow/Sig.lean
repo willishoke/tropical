@@ -218,6 +218,9 @@ def neg (a : Sig) : Sig := .unary .neg a
 def div (a b : Sig) : Sig := .binary .div a b
 /-- Bitwise AND on the integer (fixed-point) clock/value (`& (2³²−1)` masks). -/
 def bitAnd (a b : Sig) : Sig := .binary .bitAnd a b
+/-- Bitwise OR on the integer clock/value (used to assemble exact limb
+    companions transported through float slots). -/
+def bitOr (a b : Sig) : Sig := .binary .bitOr a b
 /-- Logical/arithmetic right shift (`clk >> 32` etc.; the mask makes the choice
     irrelevant where it follows a `& (2³²−1)`). -/
 def rshift (a b : Sig) : Sig := .binary .rshift a b

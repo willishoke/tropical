@@ -26,15 +26,25 @@ pipeline controls and depth diagnostic are absent.
 
 ## Current support envelope
 
-Live-Metal release support is withheld. The original Bdev=512/Rgpu=512,
-600-second row on the canonical M1 Pro blocked on one latched render
-starvation observed at the first measured poll. The preserved
+The current release-qualified Live-Metal envelope is limited to
+Bdev=512/Rgpu=512 with a four-tile worker capacity on the canonical Apple M1
+Pro (`MacBookPro18,1`, 16 Metal cores, macOS 26.3). Candidate `8d92a64` has a
+retained
+[`600-second qualification row`](data/reverse-crossing-fix-soak-b512-r512-600s-8d92a64-m1pro-20260730.jsonl)
+with all 35 acceptance gates true across 51,681 measured callbacks. Its four
+Metal/JIT checkpoints measure 143.947, 144.070, 142.615, and 143.968 dB; all
+120 clock jumps and 20 hot-swaps were acknowledged; queue, callback,
+activation, ownership, and device-continuity faults were zero; and 285 valid
+post-warmup RSS samples showed no material growth. No other hardware or
+device/render quantum is inferred.
+
+An earlier Bdev=512/Rgpu=512 600-second row on the same M1 Pro blocked on one
+latched render starvation observed at the first measured poll. The preserved
 [`artifact`](data/epoch-worker-soak-b512-r512-600s-29e0f7de0ada-m1pro-20260729.jsonl)
 records exact Bdev=512/Rgpu=512, a four-tile capacity, zero Metal dispatch
 failures, zero tag mismatches, and zero activation failures. It failed closed
 before the scheduled clock-jump, A/B-swap, reference, and RSS gates, so none
-of those results is inferred. No epoch-worker device/render configuration is
-currently release-qualified.
+of those results is inferred.
 
 A subsequent
 [`diagnostic`](data/diagnostic-prime-drain-b512-r512-45s-328d537-m1pro-20260729.jsonl)
@@ -51,14 +61,26 @@ records zero starvation before start, through startup, and across 5,170
 measured callbacks; its separate 1,000-block offline support row also records
 zero starvation. Worker-stage telemetry is complete and ordered.
 
-That row remains blocked on a distinct final-reference correctness gate:
-three Metal/JIT checkpoints measured above 142 dB, while a final reverse clock
-jump across the last velocity anchor measured 78.585 dB against the required
-greater-than-100 dB threshold. The leading hypothesis is Metal f32
-clock-origin precision after alternating far/near jumps, but it is not yet
-isolated from the replay oracle. Release support therefore stays withheld
-pending a deterministic reverse-crossing discriminator and cause-specific
-fix; the old prime-drain defect itself is closed.
+That retained row remains blocked on a distinct final-reference correctness
+gate: three Metal/JIT checkpoints measured above 142 dB, while a final reverse
+clock jump across the last velocity anchor measured 78.585 dB. A deterministic
+no-DAC reproducer has since isolated the cause: the glide start coordinate
+crossed the ordinary f32 Metal slot ABI before subtraction, so an absolute
+timestamp near 2^40 lost the entire 20 ms ramp's resolution. The fix transports
+that coordinate as four exact 16-bit limbs and performs the integer subtraction
+before converting the bounded elapsed delta to float. The reproducer's full
+reverse arm now measures 143.021 dB, with its exact/stale oracle control at
+142.380/83.429 dB.
+
+Candidate `4263faf` now has a clean retained
+[`60-second hardware row`](data/reverse-crossing-fix-smoke-b512-r512-60s-4263faf-m1pro-20260730.jsonl).
+Its start, post-2^40-jump, post-swap, and final checkpoints measure 144.028,
+144.163, 142.638, and 142.954 dB. All 35 acceptance gates pass, including zero
+starvation at every startup/measured boundary, zero queue/callback/activation
+faults, complete ordered worker telemetry, and full clock-jump/hot-swap
+acknowledgement. This short validation closes the reverse-crossing blocker and
+warranted a new 600-second release-qualification row. The subsequent passing
+`8d92a64` long row now qualifies only the exact envelope stated above.
 
 The retained B=128/D=3 and B=512/D=3 failures in
 [`findings.md`](findings.md) describe the superseded callback-owned
@@ -114,17 +136,18 @@ benchmark controls are explicitly set and recorded.
 
 ## Deterministic supporting gates
 
-The no-DAC large-clock discriminator reproduces the heavy graph and exact
-production control epochs:
+The no-DAC large-clock discriminator reproduces the heavy graph, all 20
+retained post-swap velocity epochs, and the final `E - 1,536` reverse capture:
 
 ```sh
 python3 benchmarks/metal_live/run_velocity_oracle_discriminator.py
 ```
 
-It requires true 1↔0.75 velocity toggles and the velocity-no-op control to
-remain above 140 dB on Metal versus JIT. It then forces a callback boundary
-between production dispatches: exact-epoch replay must remain above 140 dB
-while the obsolete batch-start oracle must fail below 100 dB.
+Its full reverse, capture-after-`E`, no-velocity, and no-swap arms must remain
+above 140 dB on Metal versus JIT. It records f64/f32 `tau_base`, includes
+glide/anchor causal controls, and forces a callback boundary between production
+dispatches: exact-epoch replay must remain above 140 dB while the obsolete
+batch-start oracle must fail below 100 dB.
 
 `engine/tests/test_metal_kernel.cpp` additionally covers queue ownership and
 bank reuse, callback isolation, terminal dispatch failures, retargeting,
