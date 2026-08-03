@@ -20,7 +20,9 @@ document is the intent and the code is the bug.
   { "name": "master.velocity", "discipline": "velocity",
     "companions": ["master.tau_base"] },
   { "name": "sf.depth", "discipline": "glide", "glide_dur_sec": 0.02,
-    "companions": ["sf.depth#v0", "sf.depth#v1", "sf.depth#t0"] },
+    "companions": ["sf.depth#v0", "sf.depth#v1", "sf.depth#t0",
+      "sf.depth#t0#u0", "sf.depth#t0#u1",
+      "sf.depth#t0#u2", "sf.depth#t0#u3"] },
   { "name": "osc.freq", "discipline": "anchor",
     "companions": ["osc.freq#phase"] },
   { "name": "res.decay", "discipline": "raw" }
@@ -68,13 +70,20 @@ Write `value` to `param:<name>`. Nothing else.
 ## `glide` — closed-form smoothstep re-anchor
 
 The kernel evaluates
-`f(τ) = v0 + (v1 − v0) · s²(3 − 2s)`, `s = clamp((τ − t0)/dur, 0, 1)`,
-`dur = glide_dur_sec · SR` samples, from the three companion slots. A write
+`f(τ) = v0 + (v1 − v0) · s²(3 − 2s)`,
+`s = clamp(float(τ − t0_exact)/dur, 0, 1)`,
+`dur = glide_dur_sec · SR` samples. `t0_exact` is reconstructed as a signed
+i64 from four little-endian 16-bit limbs. Each limb is exactly representable
+in both the JIT's f64 slots and Metal's f32 snapshot, so the absolute
+timestamps are subtracted on the integer clock rail before the bounded
+elapsed delta enters float arithmetic. `#t0` remains the host-readable scalar
+companion and backward-compatible fallback for plans without limbs. A write
 re-anchors the ramp so it departs from the CURRENT value (no jump):
 
-1. read `v0, v1, t0`;
+1. read `v0`, `v1`, and `t0_exact` (or scalar `t0` for a legacy plan);
 2. `curr = f(now)` (the formula above, evaluated at `now`);
-3. write `v0 := curr`, `v1 := target`, `t0 := now`.
+3. write `v0 := curr`, `v1 := target`, `t0 := now`, and the four exact
+   16-bit limbs of `now`.
 
 The base slot `param:<name>` is not written (glided knobs have no base slot;
 the companions are the value).

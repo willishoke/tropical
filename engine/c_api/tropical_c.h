@@ -277,6 +277,9 @@ double           tropical_runtime_get_slot(tropical_runtime_t, unsigned int slot
    start-tick with this so a closed-form parameter ramp `f(τ)` anchors to "now".
    Returned as a double (sample indices are exact in f64 well past any session). */
 double           tropical_runtime_current_sample_index(tropical_runtime_t);
+/* Exact companion for control paths that transport the source coordinate as
+   integer state rather than ordinary float slots. */
+uint64_t         tropical_runtime_current_sample_index_u64(tropical_runtime_t);
 
 /* The active kernel's sample rate (the same value the kernel reads for
    `sampleRate()`), so the control plane can reproduce the phasor's quantized

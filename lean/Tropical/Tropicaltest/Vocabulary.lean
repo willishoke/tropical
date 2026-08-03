@@ -28,15 +28,26 @@ decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children c.2
 /-- `param:*` entries of `slotNames` referenced by NO instruction operand in the
     plan. Sink `inputs` are slot reads too (they consume the `__root__.out`-style
     output slots), but a param slot whose only consumer is a sink would itself be
-    a wiring bug, so the lint demands an instruction read for `param:*`. A hit is
-    a dead knob: `setSlot` succeeds, no instruction listens — the class the
-    reverb-discards-the-voice's-poles regression shipped in. -/
+    a wiring bug, so the lint demands an instruction read for `param:*`.
+
+    The one manifest-derived exception is a glide's scalar `#t0` when all four
+    exact-t0 limbs are present. That scalar deliberately remains write-only
+    compatibility/introspection state; the kernel must read the limbs instead.
+    A scalar `#t0` without the complete exact representation is NOT exempt,
+    because it is the legacy glide's live clock input. -/
 def unreadParamSlots (plan : Tropical.Plan.FlatPlan) : Array String := Id.run do
   let reads := plan.instanceFunctions.flatMap slotReadsOf
+  let isCompatibilityT0 := fun (name : String) =>
+    plan.paramDisciplines.any fun d =>
+      d.discipline == "glide"
+        && name == s!"param:{d.name}#t0"
+        && (Array.range 4).all fun i =>
+          d.companions.contains s!"{d.name}#t0#u{i}"
   let mut dead : Array String := #[]
   for i in [0:plan.slotNames.size] do
     let name := plan.slotNames[i]!
-    if "param:".isPrefixOf name && !reads.contains i then
+    if "param:".isPrefixOf name && !reads.contains i
+        && !isCompatibilityT0 name then
       dead := dead.push name
   return dead
 
@@ -436,17 +447,18 @@ def runManifestDisciplines (arena : Arena)
 
 /-- THE DEAD-SLOT LINT gate (the systemic net for the dead-knob class). Canonical
     patches covering every playground node kind compile through the real
-    `compilePlanPure`, and every `param:*` slot each plan registers must be READ
-    by some instruction operand. Presence-only checks pass a dead knob — the slot
-    exists, `setSlot` succeeds, nothing listens — which is exactly how the
-    reverb-drops-the-source's-poles regression stayed invisible; unreadness in the
-    PLAN is the property that catches the whole class, whatever node grows it next. -/
+    `compilePlanPure`, and every kernel-consumed `param:*` slot each plan registers
+    must be READ by some instruction operand. Presence-only checks pass a dead
+    knob — the slot exists, `setSlot` succeeds, nothing listens — which is exactly
+    how the reverb-drops-the-source's-poles regression stayed invisible;
+    unreadness in the PLAN is the property that catches the whole class, whatever
+    node grows it next. The exact-glide scalar `#t0` exception is derived narrowly
+    from the manifest by `unreadParamSlots`, not blanket-allowlisted here. -/
 def runDeadSlotLint (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : IO Bool := do
-  -- Allowlist for slots proven legitimately unread, one justified entry at a
-  -- time (`<patch-label>:<slot>`); a blanket param exclusion would re-open the
-  -- hole the gate exists to close. Currently empty: every registered knob in
-  -- the canonical patches must be live.
+  -- Allowlist for any further slots proven legitimately unread, one justified
+  -- entry at a time (`<patch-label>:<slot>`); a blanket param exclusion would
+  -- re-open the hole the gate exists to close. Currently empty.
   let allow : Array String := #[]
   -- Every buildNode kind: knob, source, pluck, comb, flange, sflange, fm,
   -- delay, reverse, mix, ring, resonator, reverb, modalmix, out. The top-level

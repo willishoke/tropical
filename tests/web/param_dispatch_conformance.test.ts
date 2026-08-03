@@ -18,12 +18,9 @@
  * they should typically be EXACTLY equal; a material difference means the C++
  * math diverged from the reference (fix the C++, do not widen the tolerance).
  *
- * TIMING: neither run starts audio, so current_sample_index is frozen at 0
- * for both — `now` is identical and the trajectories are exactly comparable
- * (verified via `playback_position` before driving writes). With now = 0 the
- * anchor/velocity bumps multiply by zero by construction, so the glide's
- * smoothstep is exercised numerically by pre-seeding its companions (t0 < 0:
- * a ramp already in flight) through raw writes identical in both runs.
+ * TIMING: neither run starts audio. One explicit debug-render advances both
+ * runtimes to the same 512-sample boundary before the writes, so every
+ * discipline exercises nonzero timing math while remaining exactly comparable.
  */
 
 import { describe, test, expect, setDefaultTimeout } from 'bun:test'
@@ -233,7 +230,7 @@ class RpcEngineClient implements Client {
 // source → sflange → out (playground vocabulary), covering all four
 // disciplines in the plan's table:
 //   src.freq        anchor    (#phase companion)
-//   sfl.depth       glide     (#v0/#v1/#t0 companions, no base slot)
+//   sfl.depth       glide     (#v0/#v1/#t0 plus exact t0 limbs, no base slot)
 //   sfl.rate        raw
 //   master.velocity velocity  (master.tau_base companion; always in the table)
 const graph = {
@@ -253,6 +250,10 @@ const observedSlots = [
   'param:sfl.depth#v0',
   'param:sfl.depth#v1',
   'param:sfl.depth#t0',
+  'param:sfl.depth#t0#u0',
+  'param:sfl.depth#t0#u1',
+  'param:sfl.depth#t0#u2',
+  'param:sfl.depth#t0#u3',
   'param:src.freq',
   'param:src.freq#phase',
   'param:master.velocity',
@@ -260,15 +261,15 @@ const observedSlots = [
   'param:sfl.rate',
 ]
 
-// Companion pre-seed: a glide ramp already in flight (t0 in the past — with
-// now frozen at 0 that means t0 < 0), and a nonzero phase offset, so the
-// smoothstep evaluation has a nontrivial value to re-anchor from. Companion
+// Companion pre-seed: a glide ramp anchored at zero and a nonzero phase
+// offset. The explicit render below advances `now`, so smoothstep has a
+// nontrivial value to re-anchor from. Companion
 // names are absent from the discipline table, so these dispatch as raw slot
 // writes — identical in both runs by construction (setup, not the gate).
 const seedWrites: Array<[string, number]> = [
   ['sfl.depth#v0', 0.001],
   ['sfl.depth#v1', 0.02],
-  ['sfl.depth#t0', -400],
+  ['sfl.depth#t0', 0],
   ['src.freq#phase', 0.7],
 ]
 
@@ -278,8 +279,7 @@ const driveValues = { 'sfl.depth': 0.012, 'src.freq': 440, 'master.velocity': -0
 async function loadAndSeed(c: Client, verifyPosition: boolean): Promise<string> {
   const report = await c.call('load_patch_graph', graph)
   expect(report.ok).toBe(true)
-  // No DAC is running, so the master clock is frozen: `now` = 0 for every
-  // write in both runs, making the re-anchorings exactly comparable.
+  // No DAC is running, so the master clock moves only when the test asks it to.
   if (verifyPosition) {
     const pos = await c.call('playback_position', {})
     expect(pos.position).toBe(0)
@@ -314,6 +314,15 @@ describe('param dispatch conformance (C++ data-plane ≡ Lean reference)', () =>
       ])
       expect(tapA).toBe(tapB)
 
+      // One process quantum places both runtimes at the same nonzero boundary.
+      const [advanceA, advanceB] = await Promise.all([
+        a.call('debug_render', { frames: 1 }),
+        b.call('debug_render', { frames: 1 }),
+      ])
+      expect(advanceA.hex).toBe(advanceB.hex)
+      const posA = await a.call('playback_position', {})
+      expect(posA.position).toBe(512)
+
       // The glided param has NO base slot — only companions. render_window
       // must reject it before AND after the write (the C++ dispatch must not
       // create or write one).
@@ -328,11 +337,11 @@ describe('param dispatch conformance (C++ data-plane ≡ Lean reference)', () =>
       ]
       // The data plane reports both the completed boundary it observed and
       // the first audible sample used by the discipline math. No DAC runs in
-      // this differential, so both are frozen at zero.
+      // this differential, so both equal the explicit render boundary.
       for (const result of productionDispatches)
       {
-        expect(result.observed_sample_index).toBe(0)
-        expect(result.effective_sample_index).toBe(0)
+        expect(result.observed_sample_index).toBe(512)
+        expect(result.effective_sample_index).toBe(512)
       }
 
       await b.call('set_param', { name: 'sfl.depth', value: driveValues['sfl.depth'] })
@@ -344,19 +353,27 @@ describe('param dispatch conformance (C++ data-plane ≡ Lean reference)', () =>
       const slotsA = await readSlots(a, observedSlots)
       const v = Object.fromEntries(observedSlots.map((n, i) => [n, slotsA[i]]))
       // glide: dur = 0.02·SR (SR = 44100 for the arrow patch plan);
-      // s = clamp((0 − (−400))/882, 0, 1), curr = v0 + (v1−v0)·s²(3−2s).
-      const s = Math.min(1, Math.max(0, (0 - -400) / (0.02 * 44100)))
+      // s = clamp((512 − 0)/882, 0, 1), curr = v0 + (v1−v0)·s²(3−2s).
+      const s = Math.min(1, Math.max(0, 512 / (0.02 * 44100)))
       const expectedV0 = 0.001 + (0.02 - 0.001) * (s * s * (3 - 2 * s))
       expect(Math.abs(v['param:sfl.depth#v0'] - expectedV0)).toBeLessThanOrEqual(1e-12)
       expect(v['param:sfl.depth#v1']).toBe(driveValues['sfl.depth']) // target lands in v1
-      expect(v['param:sfl.depth#t0']).toBe(0) // re-anchored to now
-      // anchor: Δφ = (inc0 − inc1)·now/2³² = 0 at now = 0 — phase unchanged,
-      // base written after the bump.
+      expect(v['param:sfl.depth#t0']).toBe(512) // re-anchored to now
+      expect(v['param:sfl.depth#t0#u0']).toBe(512)
+      expect(v['param:sfl.depth#t0#u1']).toBe(0)
+      expect(v['param:sfl.depth#t0#u2']).toBe(0)
+      expect(v['param:sfl.depth#t0#u3']).toBe(0)
+      // anchor: phase is corrected at the same nonzero boundary, then the
+      // base frequency is written.
       expect(v['param:src.freq']).toBe(driveValues['src.freq'])
-      expect(v['param:src.freq#phase']).toBe(0.7)
-      // velocity: tau_base += (v0 − target)·now/SR = 0 at now = 0.
+      const inc0 = Math.floor(220 * 4294967296 / 44100)
+      const inc1 = Math.floor(440 * 4294967296 / 44100)
+      const expectedPhase = ((0.7 + (inc0 - inc1) * 512 / 4294967296) % 1 + 1) % 1
+      expect(Math.abs(v['param:src.freq#phase'] - expectedPhase)).toBeLessThanOrEqual(1e-12)
+      // velocity: tau_base += (v0 − target)·now/SR.
       expect(v['param:master.velocity']).toBe(driveValues['master.velocity'])
-      expect(v['param:master.tau_base']).toBe(0)
+      const expectedTauBase = (1 - driveValues['master.velocity']) * 512 / 44100
+      expect(Math.abs(v['param:master.tau_base'] - expectedTauBase)).toBeLessThanOrEqual(1e-12)
       // raw dispatches as a plain base-slot write, exactly as before.
       expect(v['param:sfl.rate']).toBe(driveValues['sfl.rate'])
 
