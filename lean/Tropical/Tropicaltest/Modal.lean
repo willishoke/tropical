@@ -1390,6 +1390,72 @@ def runModalPatch (arena : Arena)
     | .error e, _ | _, .error e => failGate "modal-patch" s!"render: {firstLine e}"
   | .error e, _ | _, .error e => failGate "modal-patch" s!"build: {firstLine e}"
 
+open Tropical.EmitArrow in
+/-- THE MODAL-FOREST M1 gate. Same-metadata branches retain the incumbent pole
+    union byte-for-byte; branches with different anchors remain independent and
+    enter the realized sum only at their own causal onset. The second arm is the
+    regression for the old `modalMix` behavior, which copied its first input's
+    anchor onto every later bank. -/
+def runModalForestAnchors (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let aModes : Array ModalMode := #[
+    ModalMode.hz (lit 220) (lit 4) (lit 7 1),
+    ModalMode.hz (lit 440) (lit 6) (lit 3 1)]
+  let bModes : Array ModalMode := #[
+    ModalMode.hz (lit 330) (lit 5) (lit 5 1),
+    ModalMode.hz (lit 660) (lit 8) (lit 2 1)]
+  let firstAnchor := lit 200
+  let secondAnchor := lit 700
+  let source := fun (id : String) (modes : Array ModalMode) (anchor : Sig) =>
+    ({ id, node := Node.modalSource modes anchor clockLit none } : PatchNode)
+  let sameGraph : PatchGraph := {
+    nodes := #[source "a" aModes firstAnchor, source "b" bModes firstAnchor,
+      { id := "mix", node := .modalMix #["a", "b"] }]
+    output := "mix" }
+  let unionGraph : PatchGraph := {
+    nodes := #[source "union" (aModes ++ bModes) firstAnchor]
+    output := "union" }
+  let differentGraph : PatchGraph := {
+    nodes := #[source "a" aModes firstAnchor, source "b" bModes secondAnchor,
+      { id := "mix", node := .modalMix #["a", "b"] }]
+    output := "mix" }
+  let firstOnlyGraph : PatchGraph := {
+    nodes := #[source "a" aModes firstAnchor]
+    output := "a" }
+  let carrier := fun (name : String) (graph : PatchGraph) => (do
+    let term ← lowerGraph graph
+    let (out, _) := emitTerm (normalize term) {}
+    .ok (buildExprCarrier name out arena) : Except String (Arena × ProgramIdx))
+  match buildAndFinish (carrier "mf_same" sameGraph),
+        buildAndFinish (carrier "mf_union" unionGraph),
+        buildAndFinish (carrier "mf_different" differentGraph),
+        buildAndFinish (carrier "mf_first" firstOnlyGraph) with
+  | .ok samePlan, .ok unionPlan, .ok differentPlan, .ok firstPlan =>
+    match ← renderPlanSamples samePlan 2048, ← renderPlanSamples unionPlan 2048,
+          ← renderPlanSamples differentPlan 2048, ← renderPlanSamples firstPlan 2048 with
+    | .ok same, .ok union, .ok different, .ok firstOnly =>
+      let n := min (min same.size union.size) (min different.size firstOnly.size)
+      let mut sameBitDiff := 0
+      let mut beforeSecondBitDiff := 0
+      let mut afterSecondBitDiff := 0
+      for i in [0:n] do
+        if same[i]! != union[i]! then sameBitDiff := sameBitDiff + 1
+        if i ≤ 700 then
+          if different[i]! != firstOnly[i]! then
+            beforeSecondBitDiff := beforeSecondBitDiff + 1
+        else if different[i]! != firstOnly[i]! then
+          afterSecondBitDiff := afterSecondBitDiff + 1
+      IO.println "        ModalForest modal-mix, same-anchor compatibility and different-anchor causality:"
+      IO.println s!"        result   same-anchor union bitDiff={sameBitDiff}/{n} · before second anchor={beforeSecondBitDiff}/701 · after second anchor differing={afterSecondBitDiff}/{n - 701}"
+      if sameBitDiff == 0 && beforeSecondBitDiff == 0 && afterSecondBitDiff > 0 then
+        passGate "modal-forest-anchors" "same metadata keeps the incumbent union byte-exact; a later branch retains its own anchor and joins the stable signal sum only after that onset"
+      else
+        failGate "modal-forest-anchors" s!"same={sameBitDiff} beforeSecond={beforeSecondBitDiff} afterSecond={afterSecondBitDiff}"
+    | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
+      failGate "modal-forest-anchors" s!"render: {firstLine e}"
+  | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
+    failGate "modal-forest-anchors" s!"build: {firstLine e}"
+
 /-- THE MODAL LIVE gate (the payoff). A JSON patch `resonator(freq) → reverb → out`
     compiled through the real `compilePlanPure` — decode → lowerModal → symbolic
     residue → realize → strata → session compile → a JIT-loadable kernel — and its
