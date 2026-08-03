@@ -266,36 +266,95 @@ std::string SocketServer::handle_data(const std::string & line)
     if (method == "render_window")
     {
       const json & p = j.at("params");
-      const uint64_t start = p.at("start").get<uint64_t>();
-      uint32_t count = p.at("count").get<uint32_t>();
-      if (count > 16384u)
+      const uint32_t requested_count = p.at("count").get<uint32_t>();
+      if (requested_count == 0 || requested_count > 16384u)
         return json{{"jsonrpc", "2.0"}, {"id", id},
-                    {"error", {{"code", -32602}, {"message", "render_window: count too large (max 16384)"}}}}.dump();
+                    {"error", {{"code", -32602}, {"message", "render_window: count must be in [1,16384]"}}}}.dump();
+      const std::string anchor = p.value("anchor", std::string{});
+      if (!anchor.empty() && anchor != "playback")
+        return json{{"jsonrpc", "2.0"}, {"id", id},
+                    {"error", {{"code", -32602}, {"message", "render_window: anchor must be 'playback'"}}}}.dump();
+      const bool playback_anchored = anchor == "playback";
+      if (!playback_anchored && !p.contains("start"))
+        return json{{"jsonrpc", "2.0"}, {"id", id},
+                    {"error", {{"code", -32602}, {"message", "render_window: start is required without a playback anchor"}}}}.dump();
+      const uint64_t playback_position = playback_anchored
+        ? runtime_->current_sample_index()
+        : 0;
+      const uint64_t start = playback_anchored
+        ? (playback_position >= requested_count
+             ? playback_position - requested_count
+             : 0)
+        : p.at("start").get<uint64_t>();
+      const uint32_t point_budget =
+        p.value("point_budget", requested_count);
+      if (point_budget == 0 || point_budget > 16384u)
+        return json{{"jsonrpc", "2.0"}, {"id", id},
+                    {"error", {{"code", -32602}, {"message", "render_window: point_budget must be in [1,16384]"}}}}.dump();
+      const uint32_t stride =
+        (requested_count + point_budget - 1) / point_budget;
+      const uint32_t count =
+        (requested_count + stride - 1) / stride;
       const auto names = p.at("slots").get<std::vector<std::string>>();
-      std::vector<uint32_t> ids;
-      ids.reserve(names.size());
-      for (const auto & nm : names)
+      std::vector<double> out(
+        static_cast<size_t>(count) * names.size(), 0.0);
+      const auto render = runtime_->render_window_observation_by_name(
+        start, count, stride, names, out.data());
+      if (!render.unknown_slot.empty())
+        return json{{"jsonrpc", "2.0"}, {"id", id},
+                    {"error", {{"code", -32602}, {"message", "render_window: unknown slot '" + render.unknown_slot + "'"}}}}.dump();
+      if (render.status == tropical_runtime::RenderWindowStatus::Preempted)
       {
-        const uint32_t sid = runtime_->slot_index(nm);
-        if (sid == UINT32_MAX)
-          return json{{"jsonrpc", "2.0"}, {"id", id},
-                      {"error", {{"code", -32602}, {"message", "render_window: unknown slot '" + nm + "'"}}}}.dump();
-        ids.push_back(sid);
+        json result = {
+          {"start", start},
+          {"count", 0},
+          {"span", requested_count},
+          {"stride", stride},
+          {"preempted", true},
+          {"program_version", render.program_version},
+          {"control_version", render.control_version},
+          {"effective_sample_index", render.effective_sample_index},
+          {"values", json::array()},
+        };
+        if (playback_anchored)
+        {
+          result["anchor"] = "playback";
+          result["playback_position"] = playback_position;
+        }
+        return json{{"jsonrpc", "2.0"}, {"id", id},
+                    {"result", std::move(result)}}.dump();
       }
-      std::vector<double> out(static_cast<size_t>(count) * ids.size(), 0.0);
-      if (!runtime_->render_window(start, count, ids.data(),
-                                   static_cast<uint32_t>(ids.size()), out.data()))
+      if (render.status == tropical_runtime::RenderWindowStatus::Unsupported)
         return json{{"jsonrpc", "2.0"}, {"id", id},
                     {"error", {{"code", -32603}, {"message", "render_window: active kernel is not fused"}}}}.dump();
+      if (render.status != tropical_runtime::RenderWindowStatus::Rendered)
+        return json{{"jsonrpc", "2.0"}, {"id", id},
+                    {"error", {{"code", -32602}, {"message", "render_window: invalid render request"}}}}.dump();
       json values = json::array();
-      for (size_t k = 0; k < ids.size(); ++k)
+      for (size_t k = 0; k < names.size(); ++k)
       {
         json ch = json::array();
         for (uint32_t i = 0; i < count; ++i) ch.push_back(out[k * count + i]);
         values.push_back(std::move(ch));
       }
+      json result = {
+        {"start", start},
+        {"count", count},
+        {"span", requested_count},
+        {"stride", stride},
+        {"preempted", false},
+        {"program_version", render.program_version},
+        {"control_version", render.control_version},
+        {"effective_sample_index", render.effective_sample_index},
+        {"values", std::move(values)},
+      };
+      if (playback_anchored)
+      {
+        result["anchor"] = "playback";
+        result["playback_position"] = playback_position;
+      }
       return json{{"jsonrpc", "2.0"}, {"id", id},
-                  {"result", {{"start", start}, {"count", count}, {"values", std::move(values)}}}}.dump();
+                  {"result", std::move(result)}}.dump();
     }
   }
   catch (const std::exception & e)
