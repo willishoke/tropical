@@ -93,6 +93,17 @@ def Runtime.slotIndex? (rt : Runtime) (name : String) : IO (Option UInt32) := do
 opaque Runtime.loadIrStagedRaw (rt : @& Runtime) (irText : @& String) (mslSource : @& String)
     (coeffIr : @& String) (manifestJson : @& String) : IO Bool
 
+/-- Exact immutable program/control identity created by one runtime load. -/
+structure PublishedGeneration where
+  programVersion : UInt64
+  controlVersion : UInt64
+deriving Repr, BEq
+
+@[extern "shim_runtime_load_ir_staged_generation"]
+private opaque Runtime.loadIrStagedGenerationRaw
+    (rt : @& Runtime) (irText : @& String) (mslSource : @& String)
+    (coeffIr : @& String) (manifestJson : @& String) : IO (UInt64 × UInt64)
+
 /-- Staged load: LLVM IR → JIT (always), MSL → Metal when non-empty, plus an
     optional stage-0 coefficient kernel (`coeffIr`, empty = no split) —
     a second single-function module the engine runs once before publish and
@@ -102,6 +113,35 @@ def Runtime.loadIrStaged (rt : Runtime) (irText mslSource coeffIr manifestJson :
     IO Unit := do
   if !(← rt.loadIrStagedRaw irText mslSource coeffIr manifestJson) then
     throw <| IO.userError s!"runtime loadIrStaged failed: {← lastError}"
+
+/-- Generation-returning staged load for an atomic compile handshake. The pair
+    comes from the publication operation itself, rather than a later sample. -/
+def Runtime.loadIrStagedGeneration (rt : Runtime)
+    (irText mslSource coeffIr manifestJson : String) :
+    IO PublishedGeneration := do
+  let (programVersion, controlVersion) ←
+    rt.loadIrStagedGenerationRaw irText mslSource coeffIr manifestJson
+  pure { programVersion, controlVersion }
+
+@[extern "shim_runtime_load_ir_staged_with_observation_generation"]
+private opaque Runtime.loadIrStagedWithObservationGenerationRaw (rt : @& Runtime)
+    (irText : @& String) (mslSource : @& String) (coeffIr : @& String)
+    (manifestJson : @& String) (observationIr : @& String)
+    (observationCoeffIr : @& String) (observationManifestJson : @& String) :
+    IO (UInt64 × UInt64)
+
+/-- Atomically publish an audio/Metal staged artifact and a distinct JIT-only
+    observation projection. Matching controls are copied by slot name; program
+    storage and mutable workspaces remain disjoint. -/
+def Runtime.loadIrStagedWithObservationGeneration (rt : Runtime)
+    (irText mslSource coeffIr manifestJson : String)
+    (observationIr observationCoeffIr observationManifestJson : String) :
+    IO PublishedGeneration := do
+  let (programVersion, controlVersion) ←
+    rt.loadIrStagedWithObservationGenerationRaw
+      irText mslSource coeffIr manifestJson
+      observationIr observationCoeffIr observationManifestJson
+  pure { programVersion, controlVersion }
 
 /-- Control-plane/test-only: reposition the active kernel's sample clock
     (render verbs' `--start`). -/
