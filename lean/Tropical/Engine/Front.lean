@@ -38,15 +38,10 @@ private def selectedObservationTapNames (args : Json) : Array String :=
       | _ => selected
   | _ => #[]
 
-private def graphArtifactArgs (args : Json) (taps : Json)
-    (out? : Option String := none) : Json :=
+private def graphArtifactArgs (args : Json) (taps : Json) : Json :=
   match args with
   | .obj fields =>
-    let fields := fields.insert "taps" taps
-    let fields := match out? with
-      | some out => fields.insert "out" (Json.str out)
-      | none => fields
-    .obj fields
+    .obj (fields.insert "taps" taps)
   | _ => args
 
 /-- EXPERIMENT (`load_patch_graph`): compile a downstream-only patch graph (the
@@ -65,11 +60,13 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
       pure (compiled, compiled.taps, generation)
     else
       -- Both artifacts retain the complete authored graph. Their distinct
-      -- reachability roots prune work safely, including when an observed node
-      -- also participates in the audible path.
+      -- output sets prune work safely, including when an observed node also
+      -- participates in the audible path. Keep the authored final output as
+      -- observation port `out`; explicit probes are additional roots, never a
+      -- replacement that silently changes what the `out` binding means.
       let audioArgs := graphArtifactArgs args (Json.bool false)
       let observationArgs := graphArtifactArgs args
-        (Json.arr (requestedTaps.map Json.str)) requestedTaps[0]?
+        (Json.arr (requestedTaps.map Json.str))
       let audio ← match ← Tropical.Playground.compilePlan audioArgs with
         | .error e => internalError e
         | .ok p => pure p
