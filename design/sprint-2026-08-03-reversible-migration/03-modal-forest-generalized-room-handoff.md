@@ -2,7 +2,7 @@
 
 Date: 2026-08-02 (America/Los_Angeles)
 
-Status: **proposal for the architecture follow-on; not yet implemented or
+Status: **architecture follow-on initialized; not yet implemented or
 release-qualified**
 
 This document is a restartable handoff for resolving the two coupled release
@@ -26,21 +26,22 @@ intermediate representation, not a property of the instrument.
 | Item | Current value |
 |---|---|
 | Repository | `/Users/willishoke/tropical` |
-| Isolated sprint worktree | `/private/tmp/tropical-reversible-migration-corrected` |
-| Local worktree branch | `sprint/reversible-migration-corrected` |
-| Canonical remote branch | `origin/sprint/reversible-migration` |
-| Branch/evidence head reviewed here | `16e2cb9fecd3c59fa535b948da070658cd00090f` |
+| Isolated follow-on worktree | `/private/tmp/tropical-modal-forest-grouped-room` |
+| Follow-on branch | `sprint/modal-forest-grouped-room` |
+| Follow-on base / migration head | `78c12a955ba42af356e6e43b776339f495743096` |
+| Canonical migration branch | `origin/sprint/reversible-migration` |
 | Final implementation checkpoint | `4731701f0fc99e0bc55ab59e66aa93f1d5e0803e` |
 | Corrected 15-commit replay head | `6a0e0c3765ed1ce263b8f96e8c096863ddd28710` |
 | Committed sprint handoff | `3bf81bc47ca52ec1e30b72a5a013e34c1241e4ec` |
 | Integration baseline | `07a6b2517f8d24c8822d67e0337c0fd99d016bd8` |
+| Demo PR | `#221`: `demo/modal-pocket-scene` -> `main` |
+| Migration PR | `#222`: `sprint/reversible-migration` -> `demo/modal-pocket-scene` |
 
-At handoff creation, the isolated worktree is clean and local `HEAD` equals the
-remote branch. The original checkout contains user-owned untracked design
-material and was intentionally not used for sprint edits. Preserve that
-isolation. The `/private/tmp` worktree may disappear after a reboot; if it does,
-create a new worktree from `origin/sprint/reversible-migration` rather than
-cleaning or repurposing the primary checkout.
+The follow-on branch was created and published from the exact canonical
+migration head. The original checkout contains user-owned work and is not used
+for sprint edits. Preserve that isolation. The `/private/tmp` worktree may
+disappear after a reboot; if it does, recreate it from the published follow-on
+branch rather than cleaning or repurposing the primary checkout.
 
 There is also an older local worktree at
 `/private/tmp/tropical-reversible-migration` on local branch
@@ -54,7 +55,7 @@ The untouched standalone source remains `/Users/willishoke/reversible` at
 `/Users/willishoke/reversible-before-tropical-2026-08-02.bundle`, SHA-256
 `b60ee44f9ac18cb9f43be973bff6cd17d530325cc6b93a965fb4fe071bafd5e1`.
 
-Recommended follow-on isolation:
+The initialized follow-on isolation is equivalent to:
 
 ```sh
 git -C /Users/willishoke/tropical fetch origin
@@ -68,7 +69,38 @@ Do not rewrite the migration branch's history. It is the remotely recoverable
 integration checkpoint. Push the architectural work in small checkpoints and
 merge or retarget only after the semantic and cost gates below pass.
 
-### 1.2 Existing sprint evidence
+### 1.2 Branch and qualification-artifact hygiene
+
+The branch stack is intentional:
+
+1. demo PR `#221` targets `main`;
+2. migration PR `#222` targets the demo branch; and
+3. this follow-on targets the migration branch after its first distinct
+   checkpoint.
+
+After `#221` merges, retarget `#222` to `main` without rebasing it. The
+migration contains a verified replay whose import map, commit identities, and
+evidence are made harder to audit by history rewriting.
+
+The demo's apparent 157,174 inserted lines are not all maintained product
+code. Of those, 135,671 lines (about 86 percent) are qualification evidence
+under `benchmarks/demo_release/data`: 96,512 lines of raw JSONL telemetry,
+38,296 lines of verbose summary JSON, and 863 manifest lines. The durable tree
+should contain source, tests, design records, compact run manifests and
+aggregate results, plus assets required for a self-contained runtime. Raw
+telemetry and listening/capture WAV files should move to a durable immutable
+release artifact with a checksum manifest before they are removed from the
+branch tip.
+
+Removing those files at the branch tip will clean the maintained tree and PR
+diff, but a normal merge commit will retain their historical blobs. That is an
+accepted tradeoff: do not rewrite or squash the qualified demo history merely
+to expunge those blobs, because doing so would force a migration transplant
+and invalidate the current replay provenance. Until the external artifact is
+published and verified, retain the raw evidence rather than deleting the only
+recoverable copy.
+
+### 1.3 Existing sprint evidence
 
 - `00-master.md` is the frozen sprint contract.
 - `01-implementation-summary.md` records implementation decisions S-01 through
@@ -83,7 +115,7 @@ merge or retarget only after the semantic and cost gates below pass.
   defines the accepted grouped carrier and POSITION behavior that this work
   must preserve unless a new listening decision explicitly supersedes it.
 
-### 1.3 Green implementation baseline
+### 1.4 Green implementation baseline
 
 The following passed before this architecture handoff:
 
