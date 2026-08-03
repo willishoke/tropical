@@ -69,6 +69,29 @@ def buildKernelIr (plan : Tropical.Plan.FlatPlan) : EngineM (String × String) :
     | .ok s => pure s
   pure (ir, planJson)
 
+private structure KernelLoadArtifacts where
+  ir : String
+  msl : String
+  coeffIr : String
+  manifest : String
+
+private def buildLoadArtifacts (plan : Tropical.Plan.FlatPlan)
+    (stages? : Option (Array (Array (Option Tropical.Ir.Stage))))
+    (emitMsl : Bool) : EngineM KernelLoadArtifacts := do
+  let split ← match stages? with
+    | some blocks => Tropical.StagedLoad.splitTyped plan blocks
+    | none => Tropical.StagedLoad.split plan
+  let (ir, manifest) ← buildKernelIr split.audio
+  let coeffIr ← match Tropical.StagedLoad.coeffIr split with
+    | .error msg => internalError s!"EmitLlvm (coeff): {msg}"
+    | .ok s => pure s
+  let msl ← if emitMsl then
+      match Tropical.Ir.EmitMsl.emitKernel split.audio with
+      | .error msg => internalError s!"EmitMsl: {msg}"
+      | .ok s => pure s
+    else pure ""
+  pure { ir, msl, coeffIr, manifest }
+
 /-- Emit the plan's kernel artifacts and load them into the runtime: the
     stage-0 split first (Stage0.hoist, gated by `TROPICAL_STAGE0`), then
     LLVM IR for the audio kernel — and the coefficient kernel when
@@ -79,31 +102,34 @@ def buildKernelIr (plan : Tropical.Plan.FlatPlan) : EngineM (String × String) :
     buffer). Any emit failure errors BEFORE the load, so the
     previous kernel keeps playing — the same recoverable contract as the
     IR path. -/
+def loadKernelPublished (env : Env) (plan : Tropical.Plan.FlatPlan)
+    (stages? : Option (Array (Array (Option Tropical.Ir.Stage))) := none) :
+    EngineM Ffi.PublishedGeneration := do
+  let artifact ← buildLoadArtifacts plan stages? env.metalBackend
+  env.runtime.loadIrStagedGeneration
+    artifact.ir artifact.msl artifact.coeffIr artifact.manifest
+
+/-- Compatibility form for compile paths whose replies do not expose the
+    publication identity. -/
 def loadKernel (env : Env) (plan : Tropical.Plan.FlatPlan)
     (stages? : Option (Array (Array (Option Tropical.Ir.Stage))) := none) :
     EngineM Unit := do
-  let split ← match stages? with
-    | some blocks => Tropical.StagedLoad.splitTyped plan blocks
-    | none => Tropical.StagedLoad.split plan
-  let (ir, planJson) ← buildKernelIr split.audio
-  let coeffIr ← match Tropical.StagedLoad.coeffIr split with
-    | .error msg => internalError s!"EmitLlvm (coeff): {msg}"
-    | .ok s => pure s
-  if env.metalBackend then
-    -- Hoisted coefficient columns (banks-as-data) cross to the GPU as
-    -- a packed `coeff_columns` device buffer (`buffer(3)`): EmitMsl
-    -- emits column reads for the slots the split advertises, the
-    -- stage-0 coefficient kernel fills the generation-buffered storage
-    -- host-side in f64, and process() uploads the captured generation
-    -- per dispatch (f64→f32, like slots). So the metal backend runs
-    -- the SAME typed split as the JIT — coefficient math at knob rate
-    -- on CPU, the audio loop on GPU reading real columns.
-    let msl ← match Tropical.Ir.EmitMsl.emitKernel split.audio with
-      | .error msg => internalError s!"EmitMsl: {msg}"
-      | .ok s => pure s
-    env.runtime.loadIrStaged ir msl coeffIr planJson
-  else
-    env.runtime.loadIrStaged ir "" coeffIr planJson
+  let _ ← loadKernelPublished env plan stages?
+  pure ()
+
+/-- Compile and atomically publish separate audio and read-only observation
+    realizations. The observation artifact is always JIT-only and owns no
+    realtime storage; controls project into it by matching slot names. -/
+def loadKernelWithObservationPublished (env : Env)
+    (audioPlan observationPlan : Tropical.Plan.FlatPlan)
+    (audioStages observationStages : Array (Array (Option Tropical.Ir.Stage))) :
+    EngineM Ffi.PublishedGeneration := do
+  let audio ← buildLoadArtifacts audioPlan (some audioStages) env.metalBackend
+  let observation ←
+    buildLoadArtifacts observationPlan (some observationStages) false
+  env.runtime.loadIrStagedWithObservationGeneration
+    audio.ir audio.msl audio.coeffIr audio.manifest
+    observation.ir observation.coeffIr observation.manifest
 
 -- ── Snapshot compile (`wire()` in TS) ────────────────────────────────────────
 

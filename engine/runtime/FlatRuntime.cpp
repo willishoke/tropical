@@ -95,6 +95,7 @@ make_observation_program_image(
   image->param_ptrs = state.param_ptrs;
   image->coeff_array_slots = state.coeff_array_slots;
   image->slot_names = state.slot_names;
+  image->initial_slots = state.slots;
   image->slot_lookup.reserve(image->slot_names.size());
   for (uint32_t i = 0; i < image->slot_names.size(); ++i)
     image->slot_lookup.emplace(image->slot_names[i], i);
@@ -103,13 +104,22 @@ make_observation_program_image(
 
 std::shared_ptr<const ObservationControlImage>
 make_observation_control_image(
-  const KernelState & state, uint64_t control_version,
+  const ObservationProgramImage & program,
+  const KernelState & audio_state, uint64_t control_version,
   uint64_t effective_sample_index)
 {
   auto image = std::make_shared<ObservationControlImage>();
   image->control_version = control_version;
   image->effective_sample_index = effective_sample_index;
-  image->slots = state.slots;
+  image->slots = program.initial_slots;
+  for (std::size_t i = 0;
+       i < audio_state.slot_names.size() && i < audio_state.slots.size(); ++i)
+  {
+    const auto found = program.slot_lookup.find(audio_state.slot_names[i]);
+    if (found != program.slot_lookup.end()
+        && found->second < image->slots.size())
+      image->slots[found->second] = audio_state.slots[i];
+  }
   return image;
 }
 
@@ -387,7 +397,8 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & 
 
 // Atomic double-buffer flip (CF-only: no by-name state transfer — see below).
 // Assumes new_state already carries a populated kernel handle.
-bool FlatRuntime::publish_state(KernelState && new_state)
+PublishedGeneration FlatRuntime::publish_state(
+  KernelState && new_state, const KernelState * observation_state)
 {
   std::lock_guard<std::mutex> lock(build_mutex_);
 #ifdef TROPICAL_METAL
@@ -433,12 +444,17 @@ bool FlatRuntime::publish_state(KernelState && new_state)
   // Build the read-side image before moving the state. It contains only
   // immutable metadata, JIT function pointers, and copied controls, so the
   // observer never points into either movable KernelState slot.
-  const uint64_t program_version =
-    recompile_version_.load(std::memory_order_relaxed) + 1;
+  const PublishedGeneration generation = {
+    recompile_version_.load(std::memory_order_relaxed) + 1,
+    next_observation_control_version_++,
+  };
+  const KernelState & observation_source = observation_state
+    ? *observation_state : new_state;
   auto observation_program =
-    make_observation_program_image(new_state, program_version);
+    make_observation_program_image(
+      observation_source, generation.program_version);
   auto observation_controls = make_observation_control_image(
-    new_state, next_observation_control_version_++,
+    *observation_program, new_state, generation.control_version,
     published_sample_index_.load(std::memory_order_acquire));
   auto observation_snapshot = std::make_shared<ObservationSnapshot>();
   observation_snapshot->program = std::move(observation_program);
@@ -475,7 +491,8 @@ bool FlatRuntime::publish_state(KernelState && new_state)
       break;
   }
   active_state_.store(inactive, std::memory_order_release);
-  recompile_version_.store(program_version, std::memory_order_release);
+  recompile_version_.store(
+    generation.program_version, std::memory_order_release);
   std::atomic_store_explicit(
     &observation_snapshot_,
     std::shared_ptr<const ObservationSnapshot>(
@@ -486,7 +503,7 @@ bool FlatRuntime::publish_state(KernelState && new_state)
   metal_runtime_loaded_.store(metal, std::memory_order_release);
   metal_audio_enabled_.store(metal, std::memory_order_release);
 #endif
-  return true;
+  return generation;
 }
 
 bool FlatRuntime::load_ir(const std::string & ir_text, const std::string & manifest_json)
@@ -506,50 +523,93 @@ bool FlatRuntime::load_ir_staged(const std::string & ir_text,
                                  const std::string & coeff_ir,
                                  const std::string & manifest_json)
 {
+  return load_ir_staged_generation(
+    ir_text, msl_source, coeff_ir, manifest_json).program_version != 0;
+}
+
+PublishedGeneration FlatRuntime::load_ir_staged_generation(
+  const std::string & ir_text, const std::string & msl_source,
+  const std::string & coeff_ir, const std::string & manifest_json)
+{
+  return load_ir_staged_with_observation_generation(
+    ir_text, msl_source, coeff_ir, manifest_json, {}, {}, {});
+}
+
+PublishedGeneration
+FlatRuntime::load_ir_staged_with_observation_generation(
+  const std::string & audio_ir, const std::string & audio_msl_source,
+  const std::string & audio_coeff_ir,
+  const std::string & audio_manifest_json,
+  const std::string & observation_ir,
+  const std::string & observation_coeff_ir,
+  const std::string & observation_manifest_json)
+{
   using json = nlohmann::json;
+  auto compile_jit_state = [this](
+      const std::string & kernel_ir,
+      const std::string & coefficient_ir,
+      const std::string & manifest_text) {
+    const json manifest = json::parse(manifest_text);
+    const std::string schema = manifest.value("schema", std::string{});
+    if (schema != "tropical_plan_5")
+      throw std::runtime_error(
+        "FlatRuntime: load_ir unsupported manifest schema '" + schema +
+        "'; expected 'tropical_plan_5'");
+    auto parsed = tropical_plan5::parse_plan5(manifest);
+    KernelState state = build_kernel_state(parsed);
+    state.mode = tropical_jit::CompilationMode::Fused;
 
-  const json manifest = json::parse(manifest_json);
-  const std::string schema = manifest.value("schema", std::string{});
-
-  if (schema != "tropical_plan_5")
-    throw std::runtime_error(
-      "FlatRuntime: load_ir unsupported manifest schema '" + schema +
-      "'; expected 'tropical_plan_5'");
-  tropical_plan5::ParsedPlan5 parsed = tropical_plan5::parse_plan5(manifest);
-
-  KernelState new_state = build_kernel_state(parsed);
-  // The IR path is always fused — Lean emits a single fused kernel.
-  new_state.mode = tropical_jit::CompilationMode::Fused;
-
-  // The JIT kernel loads ALWAYS — it keeps serving render_window (the
-  // scope) and the correctness reference even when audio runs on Metal.
-  auto kernel_result = tropical_jit::OrcJitEngine::instance().compile_ir_text(ir_text);
-  if (!kernel_result)
-  {
-    std::string err;
-    llvm::handleAllErrors(kernel_result.takeError(),
-      [&err](const llvm::ErrorInfoBase & e) { err = e.message(); });
-    throw std::runtime_error("FlatRuntime: IR JIT compilation failed: " + err);
-  }
-  new_state.kernel = *kernel_result;
-
-  if (!coeff_ir.empty())
-  {
-    // O0: the coefficient kernel runs once per control write — codegen
-    // quality is irrelevant, and O2 on its thousands-of-flops block is
-    // exactly the compile wall the stage-0 split removes.
-    auto coeff_result = tropical_jit::OrcJitEngine::instance().compile_ir_text(coeff_ir, true);
-    if (!coeff_result)
+    auto kernel_result =
+      tropical_jit::OrcJitEngine::instance().compile_ir_text(kernel_ir);
+    if (!kernel_result)
     {
       std::string err;
-      llvm::handleAllErrors(coeff_result.takeError(),
+      llvm::handleAllErrors(kernel_result.takeError(),
         [&err](const llvm::ErrorInfoBase & e) { err = e.message(); });
-      throw std::runtime_error("FlatRuntime: coefficient IR JIT compilation failed: " + err);
+      throw std::runtime_error(
+        "FlatRuntime: IR JIT compilation failed: " + err);
     }
-    new_state.coeff_kernel = *coeff_result;
-  }
+    state.kernel = *kernel_result;
 
-  if (!msl_source.empty())
+    if (!coefficient_ir.empty())
+    {
+      // Coefficient code runs only on control/observation lanes; O0 minimizes
+      // compile latency for what may be a large uniform instruction block.
+      auto coeff_result =
+        tropical_jit::OrcJitEngine::instance().compile_ir_text(
+          coefficient_ir, true);
+      if (!coeff_result)
+      {
+        std::string err;
+        llvm::handleAllErrors(coeff_result.takeError(),
+          [&err](const llvm::ErrorInfoBase & e) { err = e.message(); });
+        throw std::runtime_error(
+          "FlatRuntime: coefficient IR JIT compilation failed: " + err);
+      }
+      state.coeff_kernel = *coeff_result;
+    }
+
+    // Both artifacts must be fully initialized before the single publication.
+    publish_control_snapshot(state);
+    return state;
+  };
+
+  const bool has_observation_artifact =
+    !observation_ir.empty() || !observation_coeff_ir.empty()
+    || !observation_manifest_json.empty();
+  if (has_observation_artifact
+      && (observation_ir.empty() || observation_manifest_json.empty()))
+    throw std::invalid_argument(
+      "FlatRuntime: observation IR and manifest must be supplied together");
+
+  KernelState new_state = compile_jit_state(
+    audio_ir, audio_coeff_ir, audio_manifest_json);
+  std::unique_ptr<KernelState> observation_state;
+  if (has_observation_artifact)
+    observation_state = std::make_unique<KernelState>(compile_jit_state(
+      observation_ir, observation_coeff_ir, observation_manifest_json));
+
+  if (!audio_msl_source.empty())
   {
 #ifdef TROPICAL_METAL
     if (!metal_queue_ready_.load(std::memory_order_acquire))
@@ -571,7 +631,7 @@ bool FlatRuntime::load_ir_staged(const std::string & ir_text,
              .load(std::memory_order_relaxed)])
       column_floats += column.size();
     new_state.metal = tropical_metal::create(
-      msl_source, metal_render_tile_frames_,
+      audio_msl_source, metal_render_tile_frames_,
       static_cast<uint32_t>(new_state.slots.size()),
       static_cast<uint32_t>(column_floats), err);
     if (!new_state.metal)
@@ -582,12 +642,8 @@ bool FlatRuntime::load_ir_staged(const std::string & ir_text,
 #endif
   }
 
-  // Materialize coefficient slots before the state becomes visible to the
-  // audio thread or render_window — initial knob values exist, so a first
-  // buffer reading zero-initialized coefficient slots would be a bug.
-  publish_control_snapshot(new_state);
-
-  return publish_state(std::move(new_state));
+  return publish_state(
+    std::move(new_state), observation_state.get());
 }
 
 FlatRuntime::ControlGenerationReservation
@@ -719,7 +775,8 @@ void FlatRuntime::publish_observation_controls_locked(
   auto next = std::make_shared<ObservationSnapshot>();
   next->program = current->program;
   next->controls = make_observation_control_image(
-    state, next_observation_control_version_++, effective_sample_index);
+    *current->program, state, next_observation_control_version_++,
+    effective_sample_index);
   std::atomic_store_explicit(
     &observation_snapshot_,
     std::shared_ptr<const ObservationSnapshot>(std::move(next)),

@@ -807,6 +807,168 @@ static void test_named_observation_pins_hot_swap_program()
   for (double value : next_values) ASSERT(value == 2.0);
 }
 
+// Audio and observation may be different compiled programs with unrelated
+// slot indices. One publication installs both; controls project by exact name
+// and the observation artifact owns its own coefficient materialization.
+static void test_separate_observation_artifact_projects_controls()
+{
+  tropical_runtime::FlatRuntime rt(16);
+  const std::string audio_ir = wrap_loop(
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double 2.500000e-01, ptr %op, align 8\n");
+  const std::string observation_ir = wrap_loop(
+    "  %cp = getelementptr inbounds double, ptr %slots, i64 2\n"
+    "  %coef = load double, ptr %cp, align 8\n"
+    "  %tp = getelementptr inbounds double, ptr %slots, i64 0\n"
+    "  store double %coef, ptr %tp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %coef, ptr %op, align 8\n");
+  const std::string observation_coeff_ir =
+    std::string("define void @kernel(") + KERNEL_SIG + ") {\n"
+      "entry:\n"
+      "  %xp = getelementptr inbounds double, ptr %slots, i64 1\n"
+      "  %x = load double, ptr %xp, align 8\n"
+      "  %c = fmul double %x, 2.000000e+00\n"
+      "  %cp = getelementptr inbounds double, ptr %slots, i64 2\n"
+      "  store double %c, ptr %cp, align 8\n"
+      "  ret void\n}\n";
+  const std::string audio_manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":1,"slot_names":["param:x"],
+    "slot_defaults":[3.0],"param_disciplines":[
+      {"name":"x","discipline":"raw","companions":[]}
+    ]})";
+  const std::string observation_manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":3,
+    "slot_names":["tap:mode","param:x","coeff:x2"],
+    "slot_defaults":[0.0,-1.0,-99.0],"param_disciplines":[]})";
+
+  const auto generation =
+    rt.load_ir_staged_with_observation_generation(
+      audio_ir, "", "", audio_manifest,
+      observation_ir, observation_coeff_ir, observation_manifest);
+  ASSERT(generation.program_version == rt.recompile_version());
+  rt.process();
+  for (double value : rt.outputBuffer) ASSERT(value == 0.25);
+
+  std::array<double, 4> values{};
+  auto observation = rt.render_window_observation_by_name(
+    0, static_cast<uint32_t>(values.size()), 1,
+    {"tap:mode"}, values.data());
+  ASSERT(observation.status == tropical_runtime::RenderWindowStatus::Rendered);
+  ASSERT(observation.program_version == generation.program_version);
+  ASSERT(observation.control_version == generation.control_version);
+  for (double value : values) ASSERT(value == 6.0);
+
+  const auto update = rt.dispatch_param_sync("x", 7.0);
+  ASSERT(update.ok);
+  observation = rt.render_window_observation_by_name(
+    0, static_cast<uint32_t>(values.size()), 1,
+    {"tap:mode"}, values.data());
+  ASSERT(observation.program_version == generation.program_version);
+  ASSERT(observation.control_version > generation.control_version);
+  for (double value : values) ASSERT(value == 14.0);
+  rt.process();
+  for (double value : rt.outputBuffer) ASSERT(value == 0.25);
+}
+
+// C generation APIs return the exact initial pair from their publication,
+// while a failed second-artifact compile publishes neither half and zeros its
+// out-param. Existing single-artifact behavior remains the first case here.
+static void test_publication_generation_tokens_and_atomic_failure()
+{
+  tropical_runtime_t handle = tropical_runtime_new(16);
+  ASSERT(handle != nullptr);
+  auto & rt = *static_cast<tropical_runtime::FlatRuntime *>(handle);
+  const std::string single_ir = wrap_loop(
+    "  %sp = getelementptr inbounds double, ptr %slots, i64 0\n"
+    "  %v = load double, ptr %sp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %v, ptr %op, align 8\n");
+  const std::string single_manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":1,"slot_names":["tap:single"],
+    "slot_defaults":[1.25]})";
+  tropical_runtime_generation_t first{};
+  ASSERT(tropical_runtime_load_ir_staged_generation(
+    handle, single_ir.data(), single_ir.size(), nullptr, 0, nullptr, 0,
+    single_manifest.data(), single_manifest.size(), &first));
+  std::array<double, 2> values{};
+  auto rendered = rt.render_window_observation_by_name(
+    0, static_cast<uint32_t>(values.size()), 1,
+    {"tap:single"}, values.data());
+  ASSERT(rendered.program_version == first.program_version);
+  ASSERT(rendered.control_version == first.control_version);
+  for (double value : values) ASSERT(value == 1.25);
+
+  const std::string audio_ir = wrap_loop(
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double 2.500000e-01, ptr %op, align 8\n");
+  const std::string observation_ir = wrap_loop(
+    "  %xp = getelementptr inbounds double, ptr %slots, i64 1\n"
+    "  %x = load double, ptr %xp, align 8\n"
+    "  %tp = getelementptr inbounds double, ptr %slots, i64 0\n"
+    "  store double %x, ptr %tp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %x, ptr %op, align 8\n");
+  const std::string audio_manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":1,"slot_names":["param:x"],
+    "slot_defaults":[3.0],"param_disciplines":[
+      {"name":"x","discipline":"raw","companions":[]}
+    ]})";
+  const std::string observation_manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":2,
+    "slot_names":["tap:projected","param:x"],
+    "slot_defaults":[0.0,-1.0]})";
+  tropical_runtime_generation_t second{};
+  ASSERT(tropical_runtime_load_ir_staged_with_observation_generation(
+    handle,
+    audio_ir.data(), audio_ir.size(), nullptr, 0, nullptr, 0,
+    audio_manifest.data(), audio_manifest.size(),
+    observation_ir.data(), observation_ir.size(), nullptr, 0,
+    observation_manifest.data(), observation_manifest.size(), &second));
+  ASSERT(second.program_version == first.program_version + 1);
+  ASSERT(second.control_version > first.control_version);
+  rendered = rt.render_window_observation_by_name(
+    0, static_cast<uint32_t>(values.size()), 1,
+    {"tap:projected"}, values.data());
+  ASSERT(rendered.program_version == second.program_version);
+  ASSERT(rendered.control_version == second.control_version);
+  for (double value : values) ASSERT(value == 3.0);
+
+  tropical_runtime_generation_t failed{99, 101};
+  const std::string replacement_audio = wrap_loop(
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double 7.500000e-01, ptr %op, align 8\n");
+  const std::string invalid_observation = "not LLVM IR";
+  ASSERT(!tropical_runtime_load_ir_staged_with_observation_generation(
+    handle,
+    replacement_audio.data(), replacement_audio.size(), nullptr, 0,
+    nullptr, 0, audio_manifest.data(), audio_manifest.size(),
+    invalid_observation.data(), invalid_observation.size(), nullptr, 0,
+    observation_manifest.data(), observation_manifest.size(), &failed));
+  ASSERT(failed.program_version == 0);
+  ASSERT(failed.control_version == 0);
+  ASSERT(rt.recompile_version() == second.program_version);
+  rt.process();
+  for (double value : rt.outputBuffer) ASSERT(value == 0.25);
+  rendered = rt.render_window_observation_by_name(
+    0, static_cast<uint32_t>(values.size()), 1,
+    {"tap:projected"}, values.data());
+  ASSERT(rendered.program_version == second.program_version);
+  ASSERT(rendered.control_version == second.control_version);
+  for (double value : values) ASSERT(value == 3.0);
+  tropical_runtime_free(handle);
+}
+
 // Scalar coefficient materialization is cached per immutable control version.
 // Repeated frames cannot regress to the pre-coefficient slot image after the
 // main kernel overwrites its private scratch.
@@ -1431,6 +1593,10 @@ int main()
            test_observation_snapshot_does_not_block_control);
   run_test("named observation pins one strided hot-swap program",
            test_named_observation_pins_hot_swap_program);
+  run_test("separate observation artifact projects named controls",
+           test_separate_observation_artifact_projects_controls);
+  run_test("publication generation tokens and atomic dual failure",
+           test_publication_generation_tokens_and_atomic_failure);
   run_test("observation reuses materialized scalar coefficients",
            test_observation_reuses_materialized_scalar_coefficients);
   run_test("observation retains constant/banked array storage",

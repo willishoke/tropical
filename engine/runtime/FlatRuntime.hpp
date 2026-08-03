@@ -63,6 +63,15 @@ struct ParamDispatchResult
   uint64_t    effective_sample_index = 0;
 };
 
+// Exact graph generation created by one successful publication. Returning the
+// pair from inside the publication critical section avoids a compile caller
+// racing a subsequent control-only publication while sampling two counters.
+struct PublishedGeneration
+{
+  uint64_t program_version = 0;
+  uint64_t control_version = 0;
+};
+
 // Random-access observation retains an explicit cancellation outcome for
 // latest-only/superseded callers. Snapshot rendering itself does not preempt;
 // the status remains part of the wire contract so callers can discard partial
@@ -137,6 +146,7 @@ struct ObservationProgramImage
   std::vector<uint64_t> param_ptrs;
   std::vector<uint32_t> coeff_array_slots;
   std::vector<std::string> slot_names;
+  std::vector<double> initial_slots;
   std::unordered_map<std::string, uint32_t> slot_lookup;
 };
 
@@ -312,6 +322,25 @@ public:
    */
   bool load_ir_staged(const std::string & ir_text, const std::string & msl_source,
                       const std::string & coeff_ir, const std::string & manifest_json);
+
+  /** Publish one audio/observation artifact and return its exact initial pair. */
+  PublishedGeneration load_ir_staged_generation(
+    const std::string & ir_text, const std::string & msl_source,
+    const std::string & coeff_ir, const std::string & manifest_json);
+
+  /**
+   * Atomically publish distinct audio and observation artifacts. The audio
+   * artifact may own Metal execution; observation is JIT-only. Slot layouts
+   * may differ: each audio control image is projected by exact manifest name
+   * into the observation program's initial slot image.
+   */
+  PublishedGeneration load_ir_staged_with_observation_generation(
+    const std::string & audio_ir, const std::string & audio_msl_source,
+    const std::string & audio_coeff_ir,
+    const std::string & audio_manifest_json,
+    const std::string & observation_ir,
+    const std::string & observation_coeff_ir,
+    const std::string & observation_manifest_json);
 
   /**
    * Control-plane/test-only: reposition the active kernel's sample clock
@@ -1258,7 +1287,9 @@ private:
   // sample coordinate and performs the atomic double-buffer flip.
   // load_ir fills the kernel handle (via compile_ir_text) between them.
   KernelState build_kernel_state(const tropical_plan5::ParsedPlan5 & parsed);
-  bool publish_state(KernelState && new_state);
+  PublishedGeneration publish_state(
+    KernelState && new_state,
+    const KernelState * observation_state = nullptr);
 
 #ifdef TROPICAL_METAL
   tropical_metal::RenderEpochRequest make_metal_epoch_request(
