@@ -391,17 +391,27 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
       -- Pole union remains the compatibility optimization for a forest whose
       -- branches have structurally identical realization metadata. Different
       -- anchors/clocks/addresses/directions remain independent branches.
-      let normalizeBranch : ModalBranch → Except String ModalBranch := fun branch =>
+      let normalizeBranch : ModalBranch → ModalBranch := fun branch =>
         match branch.bank with
-        | .plain ms rooms => .ok { branch with
+        | .plain ms rooms => { branch with
             bank := .plain (foldRoomsEC ms rooms) #[]
             modeCount? := none }
-        | .bloomed .. => .error s!"modalMix '{id}': a bloomed source has a pitch-bloom warp pole-union can't merge (v1) — cross it through a reverb before mixing"
-      let normalized ← parts.mapM normalizeBranch
+        -- A bloomed branch cannot participate in a pole union: its clock warp
+        -- is part of the branch's realization. Keep it in its authored slot and
+        -- let the Modal→Sig seam realize it independently.
+        | .bloomed .. => branch
+      let normalized := parts.map normalizeBranch
       match normalized.toList with
       | [] => .error s!"modalMix '{id}': no inputs"
       | first :: _ =>
-        if normalized.all (ModalBranch.sameRealizationMetadata first) then
+        -- Preserve the incumbent pole-union optimization only when the WHOLE
+        -- forest is plain and metadata-compatible. In a heterogeneous forest,
+        -- even compatible plain branches stay in place so no bloomed branch is
+        -- crossed, merged, or reordered as an accidental side effect.
+        let allPlain := normalized.all fun branch => match branch.bank with
+          | .plain .. => true
+          | .bloomed .. => false
+        if allPlain && normalized.all (ModalBranch.sameRealizationMetadata first) then
           let union := normalized.foldl (fun acc branch => match branch.bank with
             | .plain modes _ => acc ++ modes
             | .bloomed .. => acc) #[]

@@ -1456,6 +1456,149 @@ def runModalForestAnchors (arena : Arena)
   | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
     failGate "modal-forest-anchors" s!"build: {firstLine e}"
 
+open Tropical.EmitArrow in
+/-- THE MODAL-FOREST M2 gate. A compact, test-only score models sixteen authored
+    timed islands without importing the demo scene or its grouped-room cache.
+    Every fourth island is bloomed, so the fixture exercises a heterogeneous
+    forest: modalMix must retain all sixteen branches in authored order and the
+    Modal→Sig seam must realize each at its own anchor. An ordinary signal mix of
+    the same sixteen modal sources is the independent seam oracle.
+
+    The oracle is checked under forward, velocity-zero hold, reverse, and seek
+    clocks. Hold/reverse/seek are also compared directly with the corresponding
+    coordinates of the forward render, pinning the closed-form random-access
+    reading rather than merely comparing two compiler plans. Finally, removing
+    each island is silent until that island's anchor and audible afterwards. -/
+def runModalForestTimedIslands (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let islandCount : Nat := 16
+  let frameCount : Nat := 2048
+  let anchors := (Array.range islandCount).map fun i => 60 + 100 * i
+  let ids := (Array.range islandCount).map fun i => s!"timed-island-{i}"
+  let bloomB : Float := 0.0004
+  let bloomG : Float := 2.0
+  let modesFor := fun (i : Nat) => (#[
+    ModalMode.hz (lit (Int.ofNat (180 + 19 * i)))
+      (lit (Int.ofNat (6 + i % 5)))
+      (lit (Int.ofNat (1 + i % 3)) 1)] : Array ModalMode)
+  let sourceFor := fun (clk : Clock) (i : Nat) =>
+    let modes := modesFor i
+    let anchor := lit (Int.ofNat anchors[i]!)
+    let bloom? := if i % 4 == 0 then some (bloomB, bloomG) else none
+    ({ id := ids[i]!, node := .modalSource modes anchor clk none none bloom? } : PatchNode)
+  let sourcesFor := fun (clk : Clock) =>
+    (Array.range islandCount).map (sourceFor clk)
+  let modalGraphFor := fun (clk : Clock) (inputs : Array String) => ({
+    nodes := (sourcesFor clk).push { id := "timed-modal-mix", node := .modalMix inputs }
+    output := "timed-modal-mix" } : PatchGraph)
+  let signalGraphFor := fun (clk : Clock) => ({
+    nodes := (sourcesFor clk).push { id := "timed-signal-mix", node := .mix ids }
+    output := "timed-signal-mix" } : PatchGraph)
+
+  -- Inspect the modal value before realization: size, stable order, anchors,
+  -- and the plain/bloomed pattern are all compiler facts, not audio inferences.
+  let rankOf := fun (id : String) =>
+    if id == "timed-modal-mix" then some 1
+    else if ids.contains id then some 0
+    else none
+  let structureOk := match lowerModal (modalGraphFor clockLit ids)
+      rankOf "timed-modal-mix" 1 with
+    | .error _ => false
+    | .ok forest => forest.size == islandCount &&
+        (Array.range islandCount).all fun i => match forest[i]? with
+          | none => false
+          | some branch =>
+            let anchorOk := branch.strikeAnchor == lit (Int.ofNat anchors[i]!)
+            let bankOk := match branch.bank with
+              | .bloomed voice room B g =>
+                i % 4 == 0 && voice.size == 1 && room.isEmpty &&
+                  B == bloomB && g == bloomG
+              | .plain voice rooms =>
+                i % 4 != 0 && voice.size == 1 && rooms.isEmpty
+            anchorOk && bankOk
+
+  let carrier := fun (name : String) (graph : PatchGraph) => (do
+    let term ← lowerGraph graph
+    let (out, _) := emitTerm (normalize term) {}
+    .ok (buildExprCarrier name out arena) : Except String (Arena × ProgramIdx))
+  let renderPair : String → Clock → Nat →
+      IO (Except String (Array Float × Array Float)) := fun tag clk n => do
+    match buildAndFinish (carrier s!"timed_forest_{tag}" (modalGraphFor clk ids)),
+          buildAndFinish (carrier s!"timed_oracle_{tag}" (signalGraphFor clk)) with
+    | .error e, _ => pure (.error s!"forest {tag}: {e}")
+    | _, .error e => pure (.error s!"oracle {tag}: {e}")
+    | .ok forestPlan, .ok oraclePlan =>
+      match ← renderPlanSamples forestPlan n, ← renderPlanSamples oraclePlan n with
+      | .ok forest, .ok oracle => pure (.ok (forest, oracle))
+      | .error e, _ => pure (.error s!"forest render {tag}: {e}")
+      | _, .error e => pure (.error s!"oracle render {tag}: {e}")
+
+  let q : Int := 4294967296
+  let holdAt : Nat := 1234
+  let seekBy : Nat := 257
+  let holdClock : Clock := litI (Int.ofNat holdAt * q)
+  let reverseClock : Clock := sub (litI (Int.ofNat frameCount * q)) clockLit
+  let seekClock : Clock := add clockLit (litI (Int.ofNat seekBy * q))
+  match ← renderPair "forward" clockLit frameCount,
+        ← renderPair "hold" holdClock frameCount,
+        ← renderPair "reverse" reverseClock frameCount,
+        ← renderPair "seek" seekClock (frameCount - seekBy) with
+  | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
+    failGate "modal-forest-timed-islands" (firstLine e)
+  | .ok (forward, forwardOracle), .ok (held, heldOracle),
+      .ok (reversed, reversedOracle), .ok (sought, soughtOracle) =>
+    let forwardOracleDiff := bitDiffCount forward forwardOracle
+    let holdOracleDiff := bitDiffCount held heldOracle
+    let reverseOracleDiff := bitDiffCount reversed reversedOracle
+    let seekOracleDiff := bitDiffCount sought soughtOracle
+    let heldValue := forward[holdAt]!
+    let mut holdCoordinateDiff := 0
+    for i in [0:held.size] do
+      if held[i]! != heldValue then holdCoordinateDiff := holdCoordinateDiff + 1
+    let mut reverseCoordinateDiff := 0
+    for i in [1:min reversed.size forward.size] do
+      if reversed[i]! != forward[frameCount - i]! then
+        reverseCoordinateDiff := reverseCoordinateDiff + 1
+    let mut seekCoordinateDiff := 0
+    for i in [0:min sought.size (forward.size - seekBy)] do
+      if sought[i]! != forward[i + seekBy]! then
+        seekCoordinateDiff := seekCoordinateDiff + 1
+
+    -- Source-removal is the onset oracle. Before the removed island's anchor it
+    -- contributed exact zero; afterwards its one-mode ring must be observable.
+    let mut removalsBuilt := true
+    let mut preOnsetDiff := 0
+    let mut survivingOnsets := 0
+    for island in [0:islandCount] do
+      let kept := ids.filter (· != ids[island]!)
+      match buildAndFinish (carrier s!"timed_without_{island}"
+          (modalGraphFor clockLit kept)) with
+      | .error _ => removalsBuilt := false
+      | .ok removedPlan =>
+        match ← renderPlanSamples removedPlan frameCount with
+        | .error _ => removalsBuilt := false
+        | .ok removed =>
+          let anchor := anchors[island]!
+          for i in [0:min (anchor + 1) (min forward.size removed.size)] do
+            if forward[i]! != removed[i]! then preOnsetDiff := preOnsetDiff + 1
+          let mut deltaEnergy : Float := 0.0
+          for i in [anchor + 1:min forward.size removed.size] do
+            let d := forward[i]! - removed[i]!
+            deltaEnergy := deltaEnergy + d * d
+          if deltaEnergy > 1e-9 then survivingOnsets := survivingOnsets + 1
+
+    IO.println "        ModalForest 16-island heterogeneous timed score (4 bloom, 12 plain):"
+    IO.println s!"        structure order/anchors={structureOk} · explicit-sum bitDiff fwd/hold/rev/seek={forwardOracleDiff}/{holdOracleDiff}/{reverseOracleDiff}/{seekOracleDiff}"
+    IO.println s!"        random access hold/rev/seek coordinate bitDiff={holdCoordinateDiff}/{reverseCoordinateDiff}/{seekCoordinateDiff} · removal pre-onset diff={preOnsetDiff} · surviving onsets={survivingOnsets}/{islandCount}"
+    if structureOk && removalsBuilt && survivingOnsets == islandCount && preOnsetDiff == 0 &&
+        forwardOracleDiff == 0 && holdOracleDiff == 0 && reverseOracleDiff == 0 &&
+        seekOracleDiff == 0 && holdCoordinateDiff == 0 && reverseCoordinateDiff == 0 &&
+        seekCoordinateDiff == 0 then
+      passGate "modal-forest-timed-islands" "16 independently timed plain/bloomed branches retain authored order and onsets; forward, hold, reverse, and seek equal the explicit branch sum and its random-access coordinates byte-for-byte"
+    else
+      failGate "modal-forest-timed-islands"
+        s!"structure={structureOk} removalsBuilt={removalsBuilt} onsets={survivingOnsets} pre={preOnsetDiff} oracle={forwardOracleDiff}/{holdOracleDiff}/{reverseOracleDiff}/{seekOracleDiff} coordinates={holdCoordinateDiff}/{reverseCoordinateDiff}/{seekCoordinateDiff}"
+
 /-- THE MODAL LIVE gate (the payoff). A JSON patch `resonator(freq) → reverb → out`
     compiled through the real `compilePlanPure` — decode → lowerModal → symbolic
     residue → realize → strata → session compile → a JIT-loadable kernel — and its
