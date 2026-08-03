@@ -121,7 +121,9 @@ const graph = {
   ],
   out: 'out',
   // Exercise both an audible node and a disconnected observation-only node.
-  taps: ['src', 'scopeProbe'],
+  // Put the disconnected probe first: it must not replace the authored final
+  // mix's stable `out` binding in the separate observation artifact.
+  taps: ['scopeProbe', 'src'],
 }
 
 describe('load_patch_graph compile handshake', () => {
@@ -148,21 +150,33 @@ describe('load_patch_graph compile handshake', () => {
         expect(Object.keys(tap).sort()).toEqual(['instance', 'name', 'output', 'slot'])
         expect(tap.slot).toBe(`${tap.instance}.${tap.output}`)
       }
-      expect(report.taps.map((tap: any) => tap.name)).toEqual(['out', 'src', 'scopeProbe'])
+      expect(report.taps.map((tap: any) => tap.name)).toEqual(['out', 'scopeProbe', 'src'])
 
       const rendered = await client.call('render_window', {
         start: 0,
-        count: 4,
+        count: 32,
         slots: report.taps.map((tap: any) => tap.slot),
       })
       expect(rendered.program_version).toBe(report.program_version)
       expect(rendered.control_version).toBe(report.control_version)
+      expect(rendered.values[0]).not.toEqual(rendered.values[1])
 
       const listed = await client.call('list_scope_taps')
       expect(listed.taps).toEqual(report.taps)
 
+      // Removing projections selects the single audio artifact. Its authored
+      // final mix must be byte-identical to the dual artifact's `out` binding.
+      const audioOnly = await client.call('load_patch_graph', { ...graph, taps: [] })
+      expect(audioOnly.taps.map((tap: any) => tap.name)).toEqual(['out'])
+      const audioOnlyRendered = await client.call('render_window', {
+        start: 0,
+        count: 32,
+        slots: audioOnly.taps.map((tap: any) => tap.slot),
+      })
+      expect(audioOnlyRendered.values[0]).toEqual(rendered.values[0])
+
       const next = await client.call('load_patch_graph', graph)
-      expect(next.program_version).toBeGreaterThan(report.program_version)
+      expect(next.program_version).toBeGreaterThan(audioOnly.program_version)
       const nextRendered = await client.call('render_window', {
         start: 0,
         count: 1,
