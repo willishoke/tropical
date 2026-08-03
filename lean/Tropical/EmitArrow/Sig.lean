@@ -51,7 +51,7 @@ inductive Sig where
   -- `idxId` names the binder the body's `loopIdx id` refers to.
   | bankSum (count : Nat) (tables : Array Sig) (body : Sig)
       (dynCount? : Option Sig) (idxId : Nat)
-deriving Repr, Inhabited
+deriving Repr, Inhabited, BEq
 
 /-- A clock-as-value expression (Q32.32 fixed-point sample coordinate). -/
 abbrev Clock := Sig
