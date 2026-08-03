@@ -3,13 +3,41 @@ import Foundation
 /// A closed JSON term — the RPC surface is schemaless at the transport
 /// layer (each method returns its own shape), so replies land as a
 /// `JSONValue` and callers project the fields they know.
-enum JSONValue: Equatable {
+enum JSONValue: Equatable, Sendable {
     case null
     case bool(Bool)
     case number(Double)
     case string(String)
     case array([JSONValue])
     case object([String: JSONValue])
+}
+
+/// JSON numbers currently decode through Double. Protocol counters must stay
+/// inside its exact integer range; silently rounded generations are rejected.
+enum JSONExact {
+    static let largestExactlyRepresentableInteger = 9_007_199_254_740_991.0
+
+    static func uint64(_ value: JSONValue?) -> UInt64? {
+        guard let number = value?.doubleValue,
+              number.isFinite,
+              number >= 0,
+              number <= largestExactlyRepresentableInteger,
+              number.rounded(.towardZero) == number,
+              let exact = UInt64(exactly: number)
+        else { return nil }
+        return exact
+    }
+
+    static func int(_ value: JSONValue?) -> Int? {
+        guard let number = value?.doubleValue,
+              number.isFinite,
+              number >= 0,
+              number <= largestExactlyRepresentableInteger,
+              number.rounded(.towardZero) == number,
+              let exact = Int(exactly: number)
+        else { return nil }
+        return exact
+    }
 }
 
 extension JSONValue: Codable {

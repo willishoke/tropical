@@ -1,0 +1,23 @@
+{
+  "ok": true,
+  "vocabulary_fingerprint": "fnv1a64:0123456789abcdef",
+  "program_version": 41,
+  "control_version": 77,
+  "nodes": [
+    {"id": "src", "kind": "future_source", "status": "active"},
+    {"id": "parked", "kind": "future_processor", "status": "excluded"},
+    {"id": "out", "kind": "out", "status": "active"}
+  ],
+  "inputs": [
+    {"node": "src", "port": "frequency", "state": "normalled"},
+    {"node": "out", "port": "in", "state": "wired", "sources": ["src"]}
+  ],
+  "params": [
+    {"name": "src.frequency", "value": 440, "discipline": "future_anchor"},
+    {"name": "master.velocity", "value": 1, "discipline": "velocity"}
+  ],
+  "taps": [
+    {"name": "out", "instance": "__root__", "output": "out", "slot": "__root__.out"},
+    {"name": "src", "instance": "__root__", "output": "tap:src", "slot": "__root__.tap:src"}
+  ]
+}
