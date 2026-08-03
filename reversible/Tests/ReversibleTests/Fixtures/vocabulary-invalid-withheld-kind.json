@@ -1,0 +1,10 @@
+{
+  "colors": ["modal"],
+  "fingerprint": "fnv1a64:3333333333333333",
+  "kinds": [
+    {"kind": "bloomgong", "outlet": "modal", "ports": []}
+  ],
+  "rule": "fixture",
+  "schema": "tropical_vocabulary",
+  "schema_version": 1
+}

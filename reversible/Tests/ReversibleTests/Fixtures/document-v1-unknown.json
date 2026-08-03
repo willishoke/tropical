@@ -1,0 +1,48 @@
+{
+  "autoArrange": false,
+  "nodes": [
+    {
+      "hue": 20,
+      "id": "source1",
+      "inputs": {"freq": []},
+      "kind": "source",
+      "values": {"freq": 220},
+      "x": 20,
+      "y": 40
+    },
+    {
+      "hue": 60,
+      "id": "processor2",
+      "inputs": {"in": ["source1"], "unknown_port": ["source1"]},
+      "kind": "future_processor",
+      "values": {"unknown_value": {"shape": [1, 2, 3]}},
+      "x": 160,
+      "y": 40
+    },
+    {
+      "future_node_field": {"must": "survive"},
+      "hue": 90,
+      "id": "mystery3",
+      "inputs": {"future_port": ["missing9", "mystery3"]},
+      "kind": "future_unserved_kind",
+      "values": {"future_structural": {"rows": [[1, 2], [3, 4]]}},
+      "x": 300,
+      "y": 40
+    },
+    {
+      "hue": 180,
+      "id": "out4",
+      "inputs": {"in": ["processor2", "mystery3"]},
+      "kind": "out",
+      "values": {},
+      "x": 500,
+      "y": 40
+    }
+  ],
+  "order": ["source1", "processor2", "mystery3", "out4"],
+  "panX": 0,
+  "panY": 0,
+  "unknown_top_field": {"must": "survive"},
+  "velocity": 1,
+  "version": 1
+}

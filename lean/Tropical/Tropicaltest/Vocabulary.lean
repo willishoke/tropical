@@ -65,6 +65,40 @@ def runVocabDriven (arena : Arena)
   let mut ok := true
   let mut covered := 0
   let mut issues : Array String := #[]
+  -- Served identifiers are protocol keys, not display labels: every kind must
+  -- occur exactly once, and an explicitly withheld implementation must never
+  -- leak into the surface vocabulary. Keep these as direct set facts in
+  -- addition to the compile-driven checks below, so a duplicate cannot pass by
+  -- compiling the same minimal patch twice.
+  let mut seen : Array String := #[]
+  for kind in vocabularyKinds do
+    if seen.contains kind then
+      ok := false
+      issues := issues.push s!"duplicate served kind: {kind}"
+    else
+      seen := seen.push kind
+  for kind in withheldKinds do
+    if vocabularyKinds.contains kind then
+      ok := false
+      issues := issues.push s!"withheld kind served: {kind}"
+  -- Envelope identity and the algorithm-labelled deterministic fingerprint are
+  -- part of the same vocabulary contract the generated patches exercise.
+  let schemaOk := (vocabularyJson.getObjVal? "schema").toOption
+      == some (Lean.Json.str vocabularySchema)
+    && (vocabularyJson.getObjVal? "schema_version").toOption
+      == some (Lean.toJson vocabularySchemaVersion)
+  let fingerprintOk := (vocabularyJson.getObjVal? "fingerprint").toOption
+      == some (Lean.Json.str vocabularyFingerprint)
+    && vocabularyFingerprint.startsWith "fnv1a64:"
+    && vocabularyFingerprint.length == "fnv1a64:".length + 16
+    && vocabularyFingerprint
+      == s!"fnv1a64:{uint64Hex (fnv1a64 vocabularyPayloadJson.compress.toUTF8)}"
+  if !schemaOk then
+    ok := false
+    issues := issues.push "vocabulary schema identifier/version missing or changed"
+  if !fingerprintOk then
+    ok := false
+    issues := issues.push "vocabulary fingerprint is not deterministic labelled FNV-1a/64"
   for kind in vocabularyKinds do
     if kind == "out" then continue
     let mut nodes : Array Lean.Json := #[]
@@ -112,10 +146,11 @@ def runVocabDriven (arena : Arena)
       let dead := unreadParamSlots plan
       if !dead.isEmpty then
         ok := false; issues := issues.push s!"{kind}: unread {dead}"
-  IO.println s!"        {covered} kinds, each compiled from a vocabulary-generated minimal patch:"
+  IO.println s!"        schema {vocabularySchema} v{vocabularySchemaVersion} · fingerprint {vocabularyFingerprint}"
+  IO.println s!"        {covered} non-sink served kinds compiled from vocabulary-generated minimal patches; all served identifiers unique, withheld absent:"
   IO.println s!"        result   {if issues.isEmpty then "every declared knob registers and is read" else toString issues}"
   if ok then
-    passGate "vocab-driven" "the served vocabulary drives a compiling patch per kind — declared knobs live, nothing unread"
+    passGate "vocab-driven" "versioned/fingerprinted vocabulary has unique served kinds, withholds unavailable kinds, and drives one compiling patch per kind — declared knobs live, nothing unread"
   else
     failGate "vocab-driven" s!"{issues}"
 

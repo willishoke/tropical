@@ -1,0 +1,70 @@
+#!/bin/sh
+set -eu
+
+script_dir=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
+repo_root=$(CDPATH= cd -- "$script_dir/../.." && pwd)
+package_root="$repo_root/reversible"
+build_root="$repo_root/build"
+app_path="$build_root/Reversible.app"
+stage_path="$build_root/.Reversible.app.stage"
+swift_scratch="$build_root/reversible-swift-release"
+engine_bin=${TROPICAL_ENGINE_BIN:-"$repo_root/lean/.lake/build/bin/frontend"}
+
+for required in "$engine_bin"; do
+  if test ! -f "$required"; then
+    printf 'bundle-app: required input is missing: %s\n' "$required" >&2
+    exit 1
+  fi
+done
+
+swift build -c release --disable-sandbox --package-path "$package_root" \
+  --scratch-path "$swift_scratch"
+swift_bin=$(swift build -c release --package-path "$package_root" \
+  --disable-sandbox --scratch-path "$swift_scratch" --show-bin-path)
+app_bin="$swift_bin/Reversible"
+if test ! -x "$app_bin"; then
+  printf 'bundle-app: Reversible product is missing: %s\n' "$app_bin" >&2
+  exit 1
+fi
+
+rm -rf "$stage_path"
+mkdir -p "$stage_path/Contents/MacOS"
+mkdir -p "$stage_path/Contents/Resources/Tropical"
+cp "$package_root/Resources/Info.plist" "$stage_path/Contents/Info.plist"
+cp "$app_bin" "$stage_path/Contents/MacOS/Reversible"
+cp "$engine_bin" "$stage_path/Contents/Resources/Tropical/frontend"
+
+# The checkout frontend's development rpath points back into the checkout.
+# A release bundle must carry the dylib beside the embedded frontend and add a
+# loader-local rpath to the staged copy so relocation never depends on that
+# checkout path.
+copied_dylib=false
+for dylib in \
+  "$repo_root/build/libtropical.dylib" \
+  "$(dirname -- "$engine_bin")/libtropical.dylib"; do
+  if test -f "$dylib"; then
+    cp "$dylib" "$stage_path/Contents/Resources/Tropical/libtropical.dylib"
+    copied_dylib=true
+    break
+  fi
+done
+if test "$copied_dylib" != true; then
+  printf 'bundle-app: libtropical.dylib is missing beside the native build\n' >&2
+  exit 1
+fi
+if command -v install_name_tool >/dev/null 2>&1 \
+  && ! otool -l "$stage_path/Contents/Resources/Tropical/frontend" \
+    | grep -Fq 'path @executable_path '; then
+  install_name_tool -add_rpath @executable_path \
+    "$stage_path/Contents/Resources/Tropical/frontend"
+fi
+
+rm -rf "$app_path"
+mv "$stage_path" "$app_path"
+if command -v codesign >/dev/null 2>&1; then
+  codesign --force --deep --sign - "$app_path"
+  codesign --verify --deep --strict "$app_path"
+fi
+plutil -lint "$app_path/Contents/Info.plist" >/dev/null
+
+printf '%s\n' "$app_path"

@@ -5,6 +5,16 @@ on:
     branches: [main]
 
 jobs:
+  reversible:
+    name: Reversible Swift build and test
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build native app package
+        run: swift build --package-path reversible
+      - name: Test native app package
+        run: swift test --package-path reversible
+
   typecheck:
     name: TypeScript type-check
     runs-on: ubuntu-latest

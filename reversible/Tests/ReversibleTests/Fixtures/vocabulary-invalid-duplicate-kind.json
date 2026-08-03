@@ -1,0 +1,11 @@
+{
+  "colors": ["signal"],
+  "fingerprint": "fnv1a64:1111111111111111",
+  "kinds": [
+    {"kind": "duplicate", "outlet": "signal", "ports": []},
+    {"kind": "duplicate", "outlet": "signal", "ports": []}
+  ],
+  "rule": "fixture",
+  "schema": "tropical_vocabulary",
+  "schema_version": 1
+}
