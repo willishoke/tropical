@@ -113,9 +113,10 @@ final class PatchModel: ObservableObject {
     init() {
         // Bounce engine events onto the main actor; Engine is created with a
         // plain sendable callback so the actor never touches UI state itself.
-        var forward: (@Sendable (EngineEvent) -> Void)!
         let box = EventBox()
-        forward = { event in Task { @MainActor in box.handler?(event) } }
+        let forward: @Sendable (EngineEvent) -> Void = { [box] event in
+            Task { @MainActor [box] in box.handler?(event) }
+        }
         engine = Engine(events: forward)
         box.handler = { [weak self] event in self?.handle(event) }
         // Every exit path must reap the child engine or it orphans with the
@@ -534,6 +535,8 @@ final class PatchModel: ObservableObject {
 /// and the @MainActor model that wants to receive the events.
 private final class EventBox: @unchecked Sendable {
     @MainActor var handler: ((EngineEvent) -> Void)?
+
+    @MainActor init() {}
 }
 
 /// Live param drive: set the `param:<name>` slot on the running kernel — no

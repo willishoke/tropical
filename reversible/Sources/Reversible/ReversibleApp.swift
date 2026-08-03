@@ -17,6 +17,7 @@ private func reapEngineOnCrash(_ sig: Int32) {
 /// holding the DAC — audio that nothing can stop. Funnel every exit path
 /// (Cmd-Q, last window closed, SIGTERM/SIGINT) through willTerminate, where
 /// the model has registered the engine's synchronous child-kill.
+@MainActor
 final class AppDelegate: NSObject, NSApplicationDelegate {
     static var onTerminate: (() -> Void)?
 

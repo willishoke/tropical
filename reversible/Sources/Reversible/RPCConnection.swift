@@ -26,11 +26,13 @@ actor RPCConnection {
             let data = handle.availableData
             if data.isEmpty {
                 handle.readabilityHandler = nil
-                Task { await self?.close(error: EngineError.exited) }
+                guard let connection = self else { return }
+                Task { await connection.close(error: EngineError.exited) }
                 return
             }
             guard let text = String(data: data, encoding: .utf8) else { return }
-            Task { await self?.consume(text) }
+            guard let connection = self else { return }
+            Task { await connection.consume(text) }
         }
     }
 

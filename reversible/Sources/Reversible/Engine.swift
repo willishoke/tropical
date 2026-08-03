@@ -4,17 +4,17 @@ import Foundation
 /// fatal crash (see reapEngineOnCrash), so it must be a `sig_atomic_t`, not a
 /// lock-guarded value — locking isn't async-signal-safe. Written only on
 /// spawn and reap.
-var gEngineChildPID: sig_atomic_t = 0
+nonisolated(unsafe) var gEngineChildPID: sig_atomic_t = 0
 
 /// Lifecycle/diagnostic events from the engine process — mirrors the
 /// Electron main-process `onStatus` channel.
-enum EngineEvent {
+enum EngineEvent: Sendable {
     case up
     case stderr(String)
     case exit(Int32)
 }
 
-enum EngineError: Error, LocalizedError {
+enum EngineError: Error, LocalizedError, Sendable {
     case binaryNotFound([String])
     case notRunning
     case exited
@@ -165,7 +165,8 @@ actor Engine {
         }
         p.terminationHandler = { [weak self] proc in
             events(.exit(proc.terminationStatus))
-            Task { await self?.childDidExit() }
+            guard let engine = self else { return }
+            Task { await engine.childDidExit() }
         }
 
         try p.run()
