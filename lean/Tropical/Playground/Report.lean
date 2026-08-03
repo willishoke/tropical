@@ -40,7 +40,9 @@ def paramDisciplinesOf (raws : Array Raw) :
           | .glide =>
             -- 0.02 s: the engine's glide window
             { name := base, discipline := "glide", glideDurSec := some ⟨2, 2⟩,
-              companions := #[s!"{base}#v0", s!"{base}#v1", s!"{base}#t0"] }
+              companions := #[s!"{base}#v0", s!"{base}#v1", s!"{base}#t0",
+                s!"{base}#t0#u0", s!"{base}#t0#u1",
+                s!"{base}#t0#u2", s!"{base}#t0#u3"] }
           | .anchor =>
             { name := base, discipline := "anchor", companions := #[s!"{base}#phase"] }
           | .raw =>
@@ -90,7 +92,8 @@ def realizedReport (args : Json) (taps : Array Tropical.ScopeTap) : Json := Id.r
                ("sources", Json.arr (srcs.map Json.str))])))
   let kindOf : String → Option String := fun id => (raws.find? (·.id == id)).map (·.kind)
   let paramsJ := (collectParams raws).filterMap fun (nm, v) =>
-    if nm.endsWith "#v1" || nm.endsWith "#t0" || nm.endsWith "#phase" then none
+    if nm.endsWith "#v1" || nm.endsWith "#t0" || nm.endsWith "#phase"
+        || (nm.splitOn "#t0#u").length > 1 then none
     else if nm.endsWith "#v0" then
       some (Json.mkObj [("name", Json.str (nm.dropEnd 3).toString),
         ("value", Json.num v), ("discipline", Json.str "glide")])

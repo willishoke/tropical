@@ -620,6 +620,12 @@ double tropical_runtime_current_sample_index(tropical_runtime_t r)
     static_cast<tropical_runtime::FlatRuntime*>(r)->current_sample_index());
 }
 
+uint64_t tropical_runtime_current_sample_index_u64(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)->current_sample_index();
+}
+
 double tropical_runtime_sample_rate(tropical_runtime_t r)
 {
   if (!r) return 44100.0;

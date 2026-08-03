@@ -1,5 +1,74 @@
 # Metal backend — live findings (V2 phase 6)
 
+## 2026-07-30 exact glide-coordinate release qualification
+
+Candidate `8d92a64c38329a24a064bc25eb97a7bc1c97a5b5`, containing the
+`4263faf` exact-limb fix plus its retained short-row evidence, has a passing
+600-second Bdev=512/Rgpu=512 release-qualification row:
+[`data/reverse-crossing-fix-soak-b512-r512-600s-8d92a64-m1pro-20260730.jsonl`](data/reverse-crossing-fix-soak-b512-r512-600s-8d92a64-m1pro-20260730.jsonl).
+Its SHA-256 is
+`474f38251b3207857d33fd37434c12826048a012932a7bbdf9c7c61b194741dd`.
+The environment record identifies the canonical Apple M1 Pro
+(`MacBookPro18,1`, 16 Metal cores), macOS 26.3, and the exact commit; its only
+status entry is the requested output artifact.
+
+All 35 acceptance gates are true:
+
+- start, post-2^40-jump, midpoint-after-hot-swap, and final Metal/JIT
+  checkpoints measure 143.947, 144.070, 142.615, and 143.968 dB, with maximum
+  absolute errors 9.876e-15, 1.008e-14, 2.727e-15, and 9.887e-15;
+- starvation is zero before DAC start, after start, before the statistics
+  reset, and across the measured window. Dispatch, epoch-tag, activation,
+  ownership, non-finite, and callback-thread provenance failures are also
+  zero in both the DAC row and the separate 1,000-block offline support row;
+- all 120 requested clock jumps and 20 requested hot-swaps were acknowledged.
+  Every required event completed, and the final reference followed write stop
+  and the last acknowledged activation;
+- 51,681 measured callbacks had zero underruns and overruns. The exact maximum
+  was 0.022208 ms against the 11.610 ms deadline, the p99 histogram upper
+  bound was 0.011 ms, and callback coverage was 1.00002; and
+- worker-stage and activation-latency telemetry were complete and ordered.
+  All 285 post-warmup RSS samples were valid, with 49,152 bytes of robust
+  level growth against a 1 MiB material-growth allowance.
+
+This row release-qualifies Live Metal only for Bdev=512/Rgpu=512 with the
+four-tile epoch worker on the recorded canonical M1 Pro. It does not infer
+support for other hardware, device quanta, or render quanta.
+
+## 2026-07-30 exact glide-coordinate hardware validation
+
+Candidate `4263faf7b51de5a4b415bfc7ccae24a7530c438e` has a clean
+retained 60-second Bdev=512/Rgpu=512 hardware row:
+[`data/reverse-crossing-fix-smoke-b512-r512-60s-4263faf-m1pro-20260730.jsonl`](data/reverse-crossing-fix-smoke-b512-r512-60s-4263faf-m1pro-20260730.jsonl).
+Its SHA-256 is
+`fd0cff87c3627f166c7b37b22fd03e7300719cfe7039e914623084e118578c71`.
+The environment record names the exact candidate and has no status entry
+other than the requested output artifact.
+
+All 35 acceptance gates are true:
+
+- start, post-2^40-jump, midpoint-after-hot-swap, and final Metal/JIT
+  checkpoints measure 144.028, 144.163, 142.638, and 142.954 dB, with maximum
+  absolute errors 1.004e-14, 1.015e-14, 2.713e-15, and 2.586e-15;
+- starvation is zero before DAC start, after start, before the statistics
+  reset, and across the measured window. Dispatch, epoch-tag, activation,
+  ownership, non-finite, and callback-thread provenance failures are also
+  zero, both in the DAC row and the separate 1,000-block offline support row;
+- all 11 requested clock jumps and the requested hot-swap were acknowledged,
+  every required event completed, and the final reference followed both write
+  stop and the last acknowledged activation;
+- 5,170 measured callbacks had zero underruns and overruns. The exact maximum
+  was 0.013334 ms against the 11.610 ms deadline, the p99 histogram upper
+  bound was 0.011 ms, and measured callback coverage was 1.00017; and
+- worker-stage telemetry and activation latency were complete, while 13 valid
+  post-warmup RSS samples showed no material growth.
+
+This retained row validates the exact-limb glide fix on the canonical M1 Pro
+and closes the prior reverse-crossing correctness blocker. The subsequent
+`8d92a64` 600-second row above release-qualifies the exact Bdev=512/Rgpu=512
+envelope on that machine; the 60-second row remains supporting validation, not
+the qualification result.
+
 ## 2026-07-29 queue-aware startup hardening
 
 The startup defect identified below is repaired by the candidate at
@@ -40,14 +109,30 @@ jump moved backward across that anchor. The test therefore protects the
 production contract that arbitrary forward/reverse clock jumps preserve the
 same closed-form control state on Metal and JIT.
 
-The leading precision hypothesis is retained as an inference, not a resolved
-cause. After the post-swap alternating far/near clock jumps and 20 velocity
-events, the host reference carries `tau_base ≈ -12466100.511927439` seconds
-while its Metal f32 representation is `-12466101`. The existing deterministic
-velocity discriminator captures after its final anchor and does not cover
-this reverse-crossing shape. A dedicated no-DAC reverse-crossing discriminator
-must separate Metal f32 clock-origin precision from an oracle/state-transfer
-defect before that gate can be changed or the support envelope widened.
+The deterministic no-DAC reverse-crossing discriminator now reproduces the
+retained event coordinates and final `E - 1,536` capture. Before the fix its
+full graph measured 78.900 dB with 2.840e-12 maximum error, while muting only
+the canary measured 140.230 dB. Disabling only the canary glide raised the
+full graph to 143.017 dB; disabling only its frequency anchor left it at
+80.051 dB. Rounding the JIT's `tau_base` to the Metal f32 value did not change
+the comparison. Those controls reject the clock-origin, hot-swap, and replay
+hypotheses and isolate the glided `canary.morph` value.
+
+The cause was the glide's absolute `#t0` source coordinate crossing the
+ordinary f32 Metal slot ABI before subtraction. Around 2^40, that loses far
+more than the 882-sample glide window, so a reverse window near the last
+activation evaluates a different smoothstep position than JIT. Glided
+parameters now carry four little-endian 16-bit `#t0#u0..u3` companions.
+Each limb survives both f64 and f32 slots exactly; emitted JIT/MSL reconstruct
+the integer coordinate and subtract it from `sampleIndex` before converting
+the bounded elapsed delta to float. The legacy scalar `#t0` remains for
+introspection and plans without the exact companions.
+
+After the fix, the full reverse crossing measures 143.021 dB with 2.679e-15
+maximum error. Capture-after-`E`, no-velocity, and no-swap controls measure
+143.015, 143.390, and 143.606 dB. A separately forced delayed-dispatch oracle
+measures 142.380 dB for exact replay and 83.429 dB for the deliberately stale
+batch-start replay, so the oracle remains discriminating.
 
 The earlier fixed-start candidate at `22b7ca8` is retained as
 [`data/startup-hardening-smoke-b512-r512-60s-22b7ca8-m1pro-20260729.jsonl`](data/startup-hardening-smoke-b512-r512-60s-22b7ca8-m1pro-20260729.jsonl),
@@ -59,10 +144,11 @@ offline support loop still used the callback entry point, and active-bank
 refills overwrote candidate-stage timestamps. It is evidence for those fixes,
 not a qualification pass.
 
-Live-Metal release support remains withheld because the final reference
-correctness gate is unresolved. The queue-aware startup and offline rendering
-fixes are nevertheless validated; the old prime-drain failure is not present
-in the final candidate.
+The subsequent `4263faf` retained hardware row above validates the exact-limb
+fix at Bdev=512/Rgpu=512. This `8f7eecb` row remains a blocked result for its
+exact commit; later evidence does not rewrite it. The queue-aware startup and
+offline rendering fixes remain validated, and the old prime-drain failure is
+not present in the final candidate.
 
 ## 2026-07-29 prime-drain diagnostic
 

@@ -73,6 +73,11 @@ opaque Runtime.getSlot (rt : @& Runtime) (idx : UInt32) : IO Float
 @[extern "shim_runtime_current_sample_index"]
 opaque Runtime.currentSampleIndex (rt : @& Runtime) : IO Float
 
+/-- The same source coordinate without the legacy f64 projection. Glide
+    dispatch uses this to publish exact timestamp limbs. -/
+@[extern "shim_runtime_current_sample_index_u64"]
+opaque Runtime.currentSampleIndexU64 (rt : @& Runtime) : IO UInt64
+
 /-- The active kernel's sample rate — the value the kernel reads for `sampleRate()`.
     The control plane uses it to reproduce the phasor's quantized increment when
     phase-anchoring a live frequency change (and for the glide's ms→sample dur). -/
