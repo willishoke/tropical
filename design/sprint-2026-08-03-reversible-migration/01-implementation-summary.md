@@ -210,13 +210,22 @@ explicit v2 Save As succeeds.
 
 ## Open architecture gate
 
+The proposed repair and restart context are detailed in
+[`03-modal-forest-generalized-room-handoff.md`](03-modal-forest-generalized-room-handoff.md).
+It corrects the shorthand below: `gong` does not inherently have to be signal;
+the current builder realizes its two modal registers through signal-domain
+pitch-bloom warps. The recommended follow-on is a timed modal forest, a modal
+served `gong` after bloom-seam hardening, and a source-generic batched grouped
+room backed by room-only carrier data.
+
 The master handoff also asks for a literal serialized `gong → reverb` fixture.
 At the frozen baseline, served `gong` lowers to a signal outlet while
 `reverb.in` accepts modal data; `bloomgong` is the only patch-surface modal
 gong and is explicitly withheld by the sprint. The user has been asked to
 choose between recording the string/resonator regression plus lower-level
-gong seam evidence as the honest scope, or expanding the sprint to resolve
-and admit the modal gong. No release claim treats this conflict as closed.
+gong seam evidence as the honest interim scope, or expanding the sprint to
+implement the modal-forest repair. Merely un-withholding `bloomgong` is not the
+recommended resolution. No release claim treats this conflict as closed.
 
 The release-scene migration has a separate constraint: the production
 `groupedroom` implementation accepts only the frozen 12-pole source coordinate

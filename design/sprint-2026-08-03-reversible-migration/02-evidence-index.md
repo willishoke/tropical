@@ -65,8 +65,8 @@ Final automated results recorded on the implementation checkpoint:
 
 | Gate | Status and required evidence |
 |---|---|
-| Literal `gong → reverb` serialized regression | **Blocked by served type contract.** Served `gong` has a signal outlet; `reverb.in` accepts modal. The modal `bloomgong` is withheld. The architecture choice is recorded in `01-implementation-summary.md`. |
-| Accepted release `.rvpatch` | **Blocked by live-room source contract.** `groupedroom` accepts only its frozen 12-pole source table, while the accepted scene is a distinct harmonic chord lattice. A broader profile or explicit composition change is required. |
+| Literal `gong → reverb` serialized regression | **Blocked by the current representation, not mathematical necessity.** Served `gong` realizes its two modal registers through signal-domain live pitch-bloom warps; `reverb.in` accepts modal. The proposed timed-modal-forest repair, seam hardening, and live-`beta` obligation are in [`03-modal-forest-generalized-room-handoff.md`](03-modal-forest-generalized-room-handoff.md). |
+| Accepted release `.rvpatch` | **Blocked by live-room source contract.** `groupedroom` accepts only its frozen 12-pole source table, while the accepted scene has 16 timed islands and 200 modal rows. A room-only profile plus graph specialization/batched evaluator is proposed in [`03-modal-forest-generalized-room-handoff.md`](03-modal-forest-generalized-room-handoff.md). |
 | Sonic decision and captures | **Blocked.** No dry/wet/full release capture or user listening acceptance exists for a live-room native scene. Earlier fixed-cache audition evidence cannot qualify this migration. |
 | Qualified hardware | **Blocked.** Audio device, device/render buffers, display refresh, five cold boots, ten-minute exact-scene workload, and lifecycle/orphan matrix remain to be recorded on the qualified Mac. |
 | Swift XCTest | **Environment-blocked here.** Run `swift test --package-path reversible` under a complete Xcode installation or CI `macos-14` image. |
