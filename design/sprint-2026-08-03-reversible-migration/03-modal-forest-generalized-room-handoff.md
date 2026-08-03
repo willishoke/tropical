@@ -2,8 +2,8 @@
 
 Date: 2026-08-02 (America/Los_Angeles)
 
-Status: **architecture follow-on initialized; not yet implemented or
-release-qualified**
+Status: **M0/M1 implemented and integration-qualified; M2+ remain follow-on
+work and the release candidate is not yet qualified**
 
 This document is a restartable handoff for resolving the two coupled release
 gates left by the Reversible migration sprint:
@@ -28,20 +28,25 @@ intermediate representation, not a property of the instrument.
 | Repository | `/Users/willishoke/tropical` |
 | Isolated follow-on worktree | `/private/tmp/tropical-modal-forest-grouped-room` |
 | Follow-on branch | `sprint/modal-forest-grouped-room` |
-| Follow-on base / migration head | `78c12a955ba42af356e6e43b776339f495743096` |
+| Follow-on head after current-base integration | `5c30142` |
+| Modal-forest M1 checkpoint | `86283d57a83393b3856b616438f4ea150b458f5d` |
+| Follow-on base / migration head | `2b02a4d3d6ac3e7b58c6012f34f412ac5476c428` |
 | Canonical migration branch | `origin/sprint/reversible-migration` |
 | Final implementation checkpoint | `4731701f0fc99e0bc55ab59e66aa93f1d5e0803e` |
 | Corrected 15-commit replay head | `6a0e0c3765ed1ce263b8f96e8c096863ddd28710` |
 | Committed sprint handoff | `3bf81bc47ca52ec1e30b72a5a013e34c1241e4ec` |
-| Integration baseline | `07a6b2517f8d24c8822d67e0337c0fd99d016bd8` |
+| Current demo base | `b8b0576` |
 | Demo PR | `#221`: `demo/modal-pocket-scene` -> `main` |
 | Migration PR | `#222`: `sprint/reversible-migration` -> `demo/modal-pocket-scene` |
+| Follow-on PR | `#223`: `sprint/modal-forest-grouped-room` -> `sprint/reversible-migration` |
 
-The follow-on branch was created and published from the exact canonical
-migration head. The original checkout contains user-owned work and is not used
-for sprint edits. Preserve that isolation. The `/private/tmp` worktree may
-disappear after a reboot; if it does, recreate it from the published follow-on
-branch rather than cleaning or repurposing the primary checkout.
+The follow-on branch was created and published from the canonical migration
+head, implemented M1 in isolation, and then merged the cleaned/current
+migration head without rewriting history. The original checkout contains
+user-owned work and is not used for sprint edits. Preserve that isolation. The
+`/private/tmp` worktree may disappear after a reboot; if it does, recreate it
+from the published follow-on branch rather than cleaning or repurposing the
+primary checkout.
 
 There is also an older local worktree at
 `/private/tmp/tropical-reversible-migration` on local branch
@@ -82,23 +87,25 @@ After `#221` merges, retarget `#222` to `main` without rebasing it. The
 migration contains a verified replay whose import map, commit identities, and
 evidence are made harder to audit by history rewriting.
 
-The demo's apparent 157,174 inserted lines are not all maintained product
-code. Of those, 135,671 lines (about 86 percent) are qualification evidence
-under `benchmarks/demo_release/data`: 96,512 lines of raw JSONL telemetry,
-38,296 lines of verbose summary JSON, and 863 manifest lines. The durable tree
-should contain source, tests, design records, compact run manifests and
-aggregate results, plus assets required for a self-contained runtime. Raw
-telemetry and listening/capture WAV files should move to a durable immutable
-release artifact with a checksum manifest before they are removed from the
-branch tip.
+The demo originally appeared as 157,174 inserted lines because 135,671 lines
+(about 86 percent) were qualification evidence under
+`benchmarks/demo_release/data`: 96,512 lines of raw JSONL telemetry, 38,296
+lines of verbose summary JSON, and 863 manifest lines. That cleanup is now
+complete. Raw telemetry and listening/capture WAV files are published in the
+immutable GitHub release
+`demo-modal-pocket-qualification-2026-08-02`; the 16 MB archive contains 75
+entries and has SHA-256
+`4a9b0796f46b91df816ee8ce2261c0a5ae2469e1ab261ba402cdc189630cf5e0`.
+The release asset was downloaded again and its checksum, gzip integrity, and
+entry count were independently reverified before the branch-tip copies were
+removed. Compact manifests and aggregate summaries remain in the repository.
+PR #221 now reports 25,343 additions, 947 deletions, and 145 changed files.
 
-Removing those files at the branch tip will clean the maintained tree and PR
-diff, but a normal merge commit will retain their historical blobs. That is an
-accepted tradeoff: do not rewrite or squash the qualified demo history merely
-to expunge those blobs, because doing so would force a migration transplant
-and invalidate the current replay provenance. Until the external artifact is
-published and verified, retain the raw evidence rather than deleting the only
-recoverable copy.
+The normal merge history still retains the historical evidence blobs. That is
+an accepted tradeoff: do not rewrite or squash the qualified demo history
+merely to expunge those blobs, because doing so would force a migration
+transplant and invalidate the current replay provenance. The live tree and PR
+diff no longer carry the raw qualification payload.
 
 ### 1.3 Existing sprint evidence
 
@@ -115,14 +122,15 @@ recoverable copy.
   defines the accepted grouped carrier and POSITION behavior that this work
   must preserve unless a new listening decision explicitly supersedes it.
 
-### 1.4 Green implementation baseline
+### 1.4 Green integrated M1 baseline
 
-The following passed before this architecture handoff:
+The following passed on the integrated M1 head after merging the cleaned demo,
+current `main`, and current migration base:
 
 - `make validate`;
-- native `tropicaltest`: 124/124;
-- Bun: 155 passed, one intentional Metal-capability skip, zero failed, 1,139
-  assertions across 13 files;
+- native `tropicaltest`: 125/125;
+- Bun: 155 passed, one intentional Metal-capability skip, zero failed, and
+  1,145 expectations across 13 files;
 - full Lean build and trust audit;
 - CTest: 4/4, including the Metal kernel target;
 - Swift debug and production builds using the compatible macOS 15.4 SDK; and
