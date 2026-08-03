@@ -72,7 +72,7 @@ reversible-build:
 reversible-test:
 	swift test --package-path reversible
 
-# macOS release packaging. The bundle gate compiles a live grouped-room graph
+# macOS release packaging. The bundle gate compiles a canonical source graph
 # after relocating the app beneath the system temporary directory.
 reversible-bundle: build lean
 	reversible/scripts/bundle-app

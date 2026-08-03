@@ -9,10 +9,8 @@ app_path="$build_root/Reversible.app"
 stage_path="$build_root/.Reversible.app.stage"
 swift_scratch="$build_root/reversible-swift-release"
 engine_bin=${TROPICAL_ENGINE_BIN:-"$repo_root/lean/.lake/build/bin/frontend"}
-room_asset="$repo_root/playground/assets/grouped-room/clouds-current-radii-mono-v1-44100.tgrm"
-room_manifest="$repo_root/playground/assets/grouped-room/clouds-current-radii-mono-v1-44100.json"
 
-for required in "$engine_bin" "$room_asset" "$room_manifest"; do
+for required in "$engine_bin"; do
   if test ! -f "$required"; then
     printf 'bundle-app: required input is missing: %s\n' "$required" >&2
     exit 1
@@ -31,13 +29,10 @@ fi
 
 rm -rf "$stage_path"
 mkdir -p "$stage_path/Contents/MacOS"
-mkdir -p "$stage_path/Contents/Resources/Tropical/playground/assets/grouped-room"
+mkdir -p "$stage_path/Contents/Resources/Tropical"
 cp "$package_root/Resources/Info.plist" "$stage_path/Contents/Info.plist"
-cp "$package_root/Resources/Icon-placeholder.txt" "$stage_path/Contents/Resources/Icon-placeholder.txt"
 cp "$app_bin" "$stage_path/Contents/MacOS/Reversible"
 cp "$engine_bin" "$stage_path/Contents/Resources/Tropical/frontend"
-cp "$room_asset" "$stage_path/Contents/Resources/Tropical/playground/assets/grouped-room/"
-cp "$room_manifest" "$stage_path/Contents/Resources/Tropical/playground/assets/grouped-room/"
 
 # The checkout frontend's development rpath points back into the checkout.
 # A release bundle must carry the dylib beside the embedded frontend and add a

@@ -3,7 +3,7 @@
 import { cpSync, existsSync, mkdtempSync, readdirSync, rmSync } from 'node:fs'
 import { connect } from 'node:net'
 import { tmpdir } from 'node:os'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, dirname, join, relative, resolve } from 'node:path'
 import { spawn } from 'node:child_process'
 
 const scriptDir = dirname(new URL(import.meta.url).pathname)
@@ -13,14 +13,6 @@ const temporaryRoot = mkdtempSync(join(tmpdir(), 'reversible-bundle-smoke-'))
 const relocatedApp = join(temporaryRoot, basename(sourceApp))
 const tropicalRoot = join(relocatedApp, 'Contents/Resources/Tropical')
 const frontend = join(tropicalRoot, 'frontend')
-const carrier = join(
-  tropicalRoot,
-  'playground/assets/grouped-room/clouds-current-radii-mono-v1-44100.tgrm',
-)
-const manifest = join(
-  tropicalRoot,
-  'playground/assets/grouped-room/clouds-current-radii-mono-v1-44100.json',
-)
 const socketPath = join(temporaryRoot, 'engine.sock')
 
 function requireFile(path) {
@@ -119,27 +111,11 @@ async function connectWhenReady(engine) {
   throw new Error(`could not connect to embedded engine at ${socketPath}`)
 }
 
-const modes = [
-  [211, 7.5, 1, 0], [211, 95.5, 1, 0],
-  [433, 8.65, 1, 0], [433, 100.35, 1, 0],
-  [887, 9.8, 1, 0], [887, 105.2, 1, 0],
-  [1511, 10.95, 1, 0], [1511, 110.05, 1, 0],
-  [2837, 12.1, 1, 0], [2837, 114.9, 1, 0],
-  [5081, 13.25, 1, 0], [5081, 119.75, 1, 0],
-]
-
 const node = (id, kind, params, inputs) => ({ id, kind, params, sel: {}, in: inputs })
 const graph = {
   nodes: [
-    node('hit', 'string', { t: 0, modes }, {}),
-    node('position', 'glideknob', { value: 1 }, {}),
-    node(
-      'room',
-      'groupedroom',
-      { profile: 'clouds-current-radii-mono-v1' },
-      { in: ['hit'], position: ['position'] },
-    ),
-    node('out', 'out', {}, { in: ['room'] }),
+    node('tone', 'source', { freq: 220, morph: 0 }, {}),
+    node('out', 'out', {}, { in: ['tone'] }),
   ],
   out: 'out',
 }
@@ -149,13 +125,16 @@ let client
 try {
   requireFile(sourceApp)
   cpSync(sourceApp, relocatedApp, { recursive: true })
-  for (const path of [frontend, join(tropicalRoot, 'libtropical.dylib'), carrier, manifest]) {
+  for (const path of [frontend, join(tropicalRoot, 'libtropical.dylib')]) {
     requireFile(path)
   }
-  const forbidden = filesBelow(relocatedApp).filter((path) => (
-    path.endsWith('-scene-44100.f32le') || path.includes('groupedroomcache')
-  ))
-  if (forbidden.length) throw new Error(`bundle contains fixed wet-score data: ${forbidden}`)
+  const runtimeFiles = filesBelow(tropicalRoot)
+    .map((path) => relative(tropicalRoot, path))
+    .sort()
+  const expectedRuntimeFiles = ['frontend', 'libtropical.dylib']
+  if (JSON.stringify(runtimeFiles) !== JSON.stringify(expectedRuntimeFiles)) {
+    throw new Error(`unexpected embedded runtime files: ${runtimeFiles}`)
+  }
 
   engine = spawn(frontend, ['--serve', socketPath], {
     cwd: tropicalRoot,
@@ -164,22 +143,20 @@ try {
   client = await connectWhenReady(engine)
   const vocabulary = await client.call('get_vocabulary')
   const realized = await client.call('load_patch_graph', graph)
-  const room = realized.nodes?.find((item) => item.id === 'room')
-  if (vocabulary.fingerprint !== realized.vocabulary_fingerprint) {
-    throw new Error('compile fingerprint differs from decoded vocabulary')
+  const tone = realized.nodes?.find((item) => item.id === 'tone')
+  if (typeof vocabulary.fingerprint !== 'string' || !vocabulary.fingerprint.startsWith('fnv1a64:')) {
+    throw new Error(`invalid vocabulary fingerprint: ${vocabulary.fingerprint}`)
   }
-  if (room?.kind !== 'groupedroom' || room?.status !== 'active') {
-    throw new Error(`live room was not active: ${JSON.stringify(room)}`)
+  if (realized.ok !== true || tone?.kind !== 'source' || tone?.status !== 'active') {
+    throw new Error(`canonical source patch was not active: ${JSON.stringify(realized)}`)
   }
   console.log(JSON.stringify({
     schema: 'reversible_bundle_smoke_1',
     relocated_app: relocatedApp,
     vocabulary_fingerprint: vocabulary.fingerprint,
-    program_version: realized.program_version,
-    control_version: realized.control_version,
     taps: realized.taps?.map((tap) => tap.name),
-    room,
-    fixed_wet_score_files: 0,
+    node: tone,
+    packaged_runtime_files: runtimeFiles,
     status: 'pass',
   }))
 } finally {
