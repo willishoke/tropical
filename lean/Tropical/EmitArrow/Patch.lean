@@ -492,16 +492,19 @@ def lowerInput (g : PatchGraph) (rankOf : String → Option Nat)
             | some d => modalBankTermDir (foldRoomsEC ms rooms) modal.strikeAnchor
                 modal.realizationClock d.dir d.damp modal.modeCount?)
         | .bloomed voice room B gr =>
-          -- A bare bloomed branch and its graceful crossing fallback retain the
-          -- existing path, now without constraining sibling branch metadata.
+          -- A genuinely bare bloom keeps its clock-warp realization. Once a
+          -- room crossing was requested, however, composition is all-or-nothing:
+          -- an unsupported or numerically excluded pair is a named lowering
+          -- error, never a bare-bloom or partial-room substitution.
           let bare := ArrowTerm.warp (bloomWarpClock modal.strikeAnchor B gr)
             (modalBankTerm voice modal.strikeAnchor modal.realizationClock modal.modeCount?)
           if room.isEmpty then .ok bare
-          else match bloomCompose voice room B gr with
-            | some pairs =>
-              if pairs.isEmpty then .ok bare
-              else .ok (bloomComposedTerm pairs modal.strikeAnchor modal.realizationClock)
-            | none => .ok bare
+          else
+            let composed := bloomComposeChecked voice room B gr
+            if composed.isComplete then
+              .ok (bloomComposedTerm composed.pairs modal.strikeAnchor modal.realizationClock)
+            else
+              .error s!"lower: bloomed room crossing at '{id}' refused ({composed.refusalSummary})"
       match modal.addressNode? with
       | none => .ok term
       -- A patched address signal becomes only this branch's clock.

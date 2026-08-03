@@ -1232,7 +1232,8 @@ def runModalBloomGamma (arena : Arena)
   let anchor := lit 200
   let n : Nat := 32768
   let fabs := fun (x : Float) => if x < 0.0 then -x else x
-  match bloomCompose voice reverb B g, bloomCompose voice reverb 1e-12 g with
+  match bloomCompose voice reverb B g,
+        bloomCompose voice reverb 1e-12 g with
   | none, _ | _, none =>
     failGate "modal-bloom-gamma" "bloomCompose: a live pole reached the baked-pole contract"
   | some pairs, some pairs0 =>
