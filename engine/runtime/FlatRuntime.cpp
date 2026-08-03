@@ -76,6 +76,43 @@ double signed_sample_delta(uint64_t now, uint64_t then)
     : -static_cast<double>(then - now);
 }
 
+std::shared_ptr<const ObservationProgramImage>
+make_observation_program_image(
+  const KernelState & state, uint64_t program_version)
+{
+  auto image = std::make_shared<ObservationProgramImage>();
+  image->program_version = program_version;
+  image->mode = state.mode;
+  image->kernel = state.kernel;
+  image->coeff_kernel = state.coeff_kernel;
+  image->sample_rate = state.sample_rate;
+  image->register_count = state.registers.size();
+  image->temp_count = state.temps.size();
+  image->coeff_register_count = state.coeff_registers.size();
+  image->coeff_temp_count = state.coeff_temps.size();
+  image->array_storage = state.array_storage;
+  image->array_sizes = state.array_sizes;
+  image->param_ptrs = state.param_ptrs;
+  image->coeff_array_slots = state.coeff_array_slots;
+  image->slot_names = state.slot_names;
+  image->slot_lookup.reserve(image->slot_names.size());
+  for (uint32_t i = 0; i < image->slot_names.size(); ++i)
+    image->slot_lookup.emplace(image->slot_names[i], i);
+  return image;
+}
+
+std::shared_ptr<const ObservationControlImage>
+make_observation_control_image(
+  const KernelState & state, uint64_t control_version,
+  uint64_t effective_sample_index)
+{
+  auto image = std::make_shared<ObservationControlImage>();
+  image->control_version = control_version;
+  image->effective_sample_index = effective_sample_index;
+  image->slots = state.slots;
+  return image;
+}
+
 } // namespace
 
 FlatRuntime::FlatRuntime(unsigned int buffer_length)
@@ -237,7 +274,8 @@ FlatRuntime::publish_metal_control_snapshot_locked(
     state, tropical_metal::EpochTransitionKind::Continuous, 0,
     generation.target);
   if (scheduled.ok)
-    commit_control_snapshot(state, state_index, generation);
+    commit_control_snapshot(
+      state, state_index, generation, scheduled.effective_sample_index);
   else
     release_control_snapshot_reservation(state_index, generation);
   return scheduled;
@@ -392,6 +430,20 @@ bool FlatRuntime::publish_state(KernelState && new_state)
   // zero-init from the fresh kernel. The audio-owned clock is runtime-global,
   // so a state flip cannot repeat, skip, or race its sample position.
 
+  // Build the read-side image before moving the state. It contains only
+  // immutable metadata, JIT function pointers, and copied controls, so the
+  // observer never points into either movable KernelState slot.
+  const uint64_t program_version =
+    recompile_version_.load(std::memory_order_relaxed) + 1;
+  auto observation_program =
+    make_observation_program_image(new_state, program_version);
+  auto observation_controls = make_observation_control_image(
+    new_state, next_observation_control_version_++,
+    published_sample_index_.load(std::memory_order_acquire));
+  auto observation_snapshot = std::make_shared<ObservationSnapshot>();
+  observation_snapshot->program = std::move(observation_program);
+  observation_snapshot->controls = std::move(observation_controls);
+
   states_[inactive] = std::move(new_state);
   state_owners_[inactive].store(
     StorageOwner::Free, std::memory_order_release);
@@ -423,7 +475,12 @@ bool FlatRuntime::publish_state(KernelState && new_state)
       break;
   }
   active_state_.store(inactive, std::memory_order_release);
-  recompile_version_.fetch_add(1, std::memory_order_release);
+  recompile_version_.store(program_version, std::memory_order_release);
+  std::atomic_store_explicit(
+    &observation_snapshot_,
+    std::shared_ptr<const ObservationSnapshot>(
+      std::move(observation_snapshot)),
+    std::memory_order_release);
 #ifdef TROPICAL_METAL
   const bool metal = static_cast<bool>(states_[inactive].metal);
   metal_runtime_loaded_.store(metal, std::memory_order_release);
@@ -610,7 +667,8 @@ void FlatRuntime::release_control_snapshot_reservation(
 
 void FlatRuntime::commit_control_snapshot(
   KernelState & state, uint32_t state_index,
-  ControlGenerationReservation reservation)
+  ControlGenerationReservation reservation,
+  uint64_t effective_sample_index)
 {
   if (state_index == UINT32_MAX)
   {
@@ -646,6 +704,26 @@ void FlatRuntime::commit_control_snapshot(
   }
   std::atomic_ref(state.control_published_gen)
     .store(reservation.target, std::memory_order_release);
+  publish_observation_controls_locked(state, effective_sample_index);
+}
+
+void FlatRuntime::publish_observation_controls_locked(
+  const KernelState & state, uint64_t effective_sample_index)
+{
+  const auto current = std::atomic_load_explicit(
+    &observation_snapshot_, std::memory_order_acquire);
+  if (!current || !current->program) return;
+  if (effective_sample_index == UINT64_MAX)
+    effective_sample_index =
+      published_sample_index_.load(std::memory_order_acquire);
+  auto next = std::make_shared<ObservationSnapshot>();
+  next->program = current->program;
+  next->controls = make_observation_control_image(
+    state, next_observation_control_version_++, effective_sample_index);
+  std::atomic_store_explicit(
+    &observation_snapshot_,
+    std::shared_ptr<const ObservationSnapshot>(std::move(next)),
+    std::memory_order_release);
 }
 
 ParamDispatchResult FlatRuntime::dispatch_param_sync(
@@ -714,7 +792,8 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
           + scheduled.error;
         return result;
       }
-      commit_control_snapshot(state, state_idx, reservation);
+      commit_control_snapshot(
+        state, state_idx, reservation, result.effective_sample_index);
       return result;
     }
   }
@@ -792,6 +871,8 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
     {
       std::atomic_ref(state.control_published_gen)
         .store(reservation.target, std::memory_order_release);
+      publish_observation_controls_locked(
+        state, result.effective_sample_index);
       return result;
     }
 
@@ -828,7 +909,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_at_sample_index(
   result.observed_sample_index = sample_index;
   result.effective_sample_index = sample_index;
   if (result.ok)
-    publish_control_snapshot(state, state_idx);
+    publish_control_snapshot(state, state_idx, sample_index);
   return result;
 }
 

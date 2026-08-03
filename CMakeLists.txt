@@ -192,7 +192,8 @@ if(TROPICAL_BUILD_TESTS)
     target_include_directories(test_module_process PRIVATE engine ${LLVM_INCLUDE_DIRS})
     target_compile_definitions(test_module_process PRIVATE ${LLVM_DEFINITIONS})
     target_compile_features(test_module_process PRIVATE cxx_std_20)
-    target_link_libraries(test_module_process PRIVATE tropical_core)
+    target_link_libraries(test_module_process PRIVATE
+        tropical_core nlohmann_json::nlohmann_json)
     add_test(NAME current_module_process COMMAND test_module_process)
 
     if(TROPICAL_TSAN)
