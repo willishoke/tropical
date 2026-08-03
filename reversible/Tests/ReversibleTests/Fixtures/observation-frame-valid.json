@@ -1,0 +1,16 @@
+{
+  "anchor": "playback",
+  "playback_position": 100,
+  "start": 94,
+  "count": 3,
+  "span": 6,
+  "stride": 2,
+  "preempted": false,
+  "program_version": 41,
+  "control_version": 80,
+  "effective_sample_index": 88,
+  "values": [
+    [0.25, 0.5, 0.75],
+    [-1, 0, 1]
+  ]
+}

@@ -106,6 +106,7 @@ extension PatchModel {
         pan = CGSize(width: doc.panX, height: doc.panY)
         autoArrange = doc.autoArrange
         velocity = doc.velocity
+        advanceAuthoredRevision()
         // New nodes must not collide with loaded ids: resume the counter past
         // the highest numeric suffix in the file.
         adoptCounter(from: known)
@@ -114,7 +115,7 @@ extension PatchModel {
         // pushGraph re-applies a non-default velocity after a COLD compile, but
         // a load whose graph happens to match what's already running skips the
         // compile entirely — so drive the clock here regardless.
-        setVelocity(doc.velocity)
+        setVelocity(doc.velocity, force: true)
     }
 
     /// Reset to the boot patch (Out + one Osc), forgetting the file.
