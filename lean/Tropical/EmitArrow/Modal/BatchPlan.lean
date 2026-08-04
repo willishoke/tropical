@@ -210,6 +210,176 @@ def planTimedBloomBetaPair (mu : CplxB) (nuOmega sigLo sigHi betaMax scale g : F
     extra := pushUniqueFloat extra worstSigma
   return .error .depthBoxUnresolved
 
+-- ── Pure capacity/cost accounting for the fixed-shape terminal spike ─────────
+
+/-- One pure storage/audio/emit estimate. `recurrenceStepsPerSample` counts one
+    complex Horner or bottom-up-CF level; it deliberately does not pretend a
+    level costs one machine instruction. The byte fields describe the packed
+    f32 Metal image and the runtime's three f64 coefficient generations. They
+    remain lower bounds on total residency: ordinary array storage, request
+    vectors, Metal buffers, hot-swap state, and observation are additional. -/
+structure TimedBloomCostEstimate where
+  pairRows : Nat
+  paddedRows : Nat
+  groups : Nat
+  shapes : Nat
+  maxSeriesDepth : Nat
+  maxCfDepth : Nat
+  recurrenceStepsPerSample : Nat
+  recurrenceScalarCells : Nat
+  rowScalarCells : Nat
+  branchScalarCells : Nat
+  coefficientCells : Nat
+  packedF32Bytes : Nat
+  oneHostF64GenerationBytes : Nat
+  threeHostF64GenerationBytes : Nat
+  logicalColumns : Nat
+  planInstructionsEstimate : Nat
+deriving Inhabited, Repr
+
+/-- Both layouts requested by the spike. `globalPadded` is the executable
+    terminal's present branch×max-pairs coefficient rectangle and one mixed
+    audio body, whose dynamic inner count skips padding but evaluates both
+    max-depth lanes for every real pair. `bucketedLowerBound` is an optimistic
+    specialization: within each branch it groups pairs by rounded-up
+    `(seriesDepth, cfDepth)`, drops the unreachable CF lane for series-only
+    groups, and charges only each group's depth. This reordering is bit-safe
+    because pair contributions remain i64 Q values under modular addition;
+    the branch boundary and its sole `fixedOutQ` do not move. No executable
+    bucket terminal is claimed here. -/
+structure TimedBloomCostReport where
+  branches : Nat
+  pairs : Nat
+  capacity : Nat
+  globalPadded : TimedBloomCostEstimate
+  bucketedLowerBound : TimedBloomCostEstimate
+deriving Inhabited, Repr
+
+private def timedBloomDepthBin (depth : Nat) (bins : Array Nat) : Nat :=
+  (bins.find? (depth <= ·)).getD depth
+
+private def timedBloomRunColumns (hasCf : Bool) : Nat :=
+  -- 18 scalar row columns, one complex M array, and (when reachable) the two
+  -- complex CF arrays. Branch-count/anchor columns are charged separately.
+  20 + if hasCf then 4 else 0
+
+private def timedBloomBodyInstructionEstimate (nDepth kDepth columns : Nat) : Nat :=
+  let fixedBody := 160
+  let cfTerminal := if kDepth == 0 then 0 else 13
+  fixedBody + columns + 14 * nDepth + 15 * kDepth + cfTerminal
+
+/-- Pure cost model over the already-planned branches.  It allocates no
+    coefficient payload and emits no program.  Default bins are fixed and
+    reviewable; a pair whose measured depth is outside them keeps its exact
+    depth, making the report fail toward cost rather than truncating it. -/
+def measureTimedBloomBetaCost
+    (branches : Array (Array TimedBloomBetaPairPlan))
+    (capacity : Nat := 384)
+    (bins : Array Nat := #[64, 128, 192, 256, 320, 384]) : TimedBloomCostReport := Id.run do
+  let pairCount := branches.foldl (fun n ps => n + ps.size) 0
+  let pairCapacity := branches.foldl (fun n ps => max n ps.size) 0
+  let rectangularRows := branches.size * pairCapacity
+  let branchCells := 5 * branches.size
+  let rowColumns := 18
+  let maxN := branches.foldl (fun n ps =>
+    ps.foldl (fun m p => max m p.nDepth) n) 0
+  let maxK := branches.foldl (fun n ps =>
+    ps.foldl (fun m p => max m p.kDepth) n) 0
+  let globalRecurrenceCellsPerRow :=
+    2 * maxN + if maxK == 0 then 0 else 4 * maxK + 2
+  let globalRecurrenceCells := rectangularRows * globalRecurrenceCellsPerRow
+  let globalRowCells := rectangularRows * rowColumns
+  let globalCells := globalRecurrenceCells + globalRowCells + branchCells
+  let globalColumns := 5 + timedBloomRunColumns (maxK > 0)
+  let globalEstimate : TimedBloomCostEstimate :=
+    { pairRows := pairCount
+      paddedRows := rectangularRows - pairCount
+      groups := if pairCount == 0 then 0 else 1
+      shapes := if pairCount == 0 then 0 else 1
+      maxSeriesDepth := maxN
+      maxCfDepth := maxK
+      recurrenceStepsPerSample := pairCount * (maxN + maxK)
+      recurrenceScalarCells := globalRecurrenceCells
+      rowScalarCells := globalRowCells
+      branchScalarCells := branchCells
+      coefficientCells := globalCells
+      packedF32Bytes := globalCells * 4
+      oneHostF64GenerationBytes := globalCells * 8
+      threeHostF64GenerationBytes := globalCells * 8 * 3
+      logicalColumns := globalColumns
+      planInstructionsEstimate :=
+        if pairCount == 0 then 0
+        else timedBloomBodyInstructionEstimate maxN maxK globalColumns }
+
+  let mut bucketGroups := 0
+  let mut bucketShapes : Array (Nat × Nat) := #[]
+  let mut bucketSteps := 0
+  let mut bucketRecurrenceCells := 0
+  let mut bucketColumns := 5 * branches.size
+  let mut bucketInstructions := 64 -- run sequencing and final branch landings
+  for ps in branches do
+    let mut branchShapes : Array (Nat × Nat) := #[]
+    for p in ps do
+      let nBin := timedBloomDepthBin p.nDepth bins
+      let kBin := if p.kDepth == 0 then 0 else timedBloomDepthBin p.kDepth bins
+      let key := (nBin, kBin)
+      bucketSteps := bucketSteps + nBin + kBin
+      bucketRecurrenceCells := bucketRecurrenceCells + 2 * nBin
+      if kBin > 0 then
+        bucketRecurrenceCells := bucketRecurrenceCells + 4 * kBin + 2
+      if !branchShapes.contains key then branchShapes := branchShapes.push key
+      if !bucketShapes.contains key then bucketShapes := bucketShapes.push key
+    for key in branchShapes do
+      bucketGroups := bucketGroups + 1
+      let nBin := key.1
+      let kBin := key.2
+      let columns := timedBloomRunColumns (kBin > 0)
+      bucketColumns := bucketColumns + columns
+      bucketInstructions := bucketInstructions +
+        timedBloomBodyInstructionEstimate nBin kBin columns
+  let bucketRowCells := pairCount * rowColumns
+  let bucketCells := bucketRecurrenceCells + bucketRowCells + branchCells
+  let bucketEstimate : TimedBloomCostEstimate :=
+    { pairRows := pairCount
+      paddedRows := 0
+      groups := bucketGroups
+      shapes := bucketShapes.size
+      maxSeriesDepth := maxN
+      maxCfDepth := maxK
+      recurrenceStepsPerSample := bucketSteps
+      recurrenceScalarCells := bucketRecurrenceCells
+      rowScalarCells := bucketRowCells
+      branchScalarCells := branchCells
+      coefficientCells := bucketCells
+      packedF32Bytes := bucketCells * 4
+      oneHostF64GenerationBytes := bucketCells * 8
+      threeHostF64GenerationBytes := bucketCells * 8 * 3
+      logicalColumns := bucketColumns
+      planInstructionsEstimate := bucketInstructions }
+  return { branches := branches.size
+           pairs := pairCount
+           capacity := capacity
+           globalPadded := globalEstimate
+           bucketedLowerBound := bucketEstimate }
+
+/-- Static packed-column ABI safety. FlatRuntime/Metal narrow the aggregate
+    float count to uint32, so admission must bound the sum, not merely each
+    constituent column. A device `maxBufferLength` check remains a runtime gate. -/
+def TimedBloomCostEstimate.fitsPackedUInt32 (c : TimedBloomCostEstimate) : Bool :=
+  c.coefficientCells <= 4294967295
+
+/-- An intentionally optimistic comparison with retained canonical-Mac
+    evidence: a 512-frame Metal block has about 4.7× headroom at 512 ordinary
+    fixed modal partials, implying roughly 2,000 simple partials before GPU
+    saturation. One complex M/CF recurrence level is strictly fatter than one
+    such partial, so 2,048 levels/sample is an upper-bound discriminator, not a
+    new release budget. A candidate above it is outside existing evidence; a
+    candidate below it would still require artifact, load, update, and hardware
+    timing gates. -/
+def TimedBloomCostEstimate.withinOptimisticExistingAudioEnvelope
+    (c : TimedBloomCostEstimate) : Bool :=
+  c.recurrenceStepsPerSample <= 2048
+
 /-- Materialize one fixed-beta/fixed-sigma non-coincident pair at a measured
     moved seam.  This is an oracle instrument for the terminal spike, not a
     production composer.  The seam radius is fixed from the beta-max box; when

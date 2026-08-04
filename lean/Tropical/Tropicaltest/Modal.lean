@@ -1771,7 +1771,9 @@ def runTimedBloomBetaPlannerSpike : IO Bool := do
   let mut refinements := 0
   let mut minT := 1.0
   let mut maxT := 0.0
+  let mut plannedBranches : Array (Array TimedBloomBetaPairPlan) := #[]
   for bank in #[(full, 1.0), (half, 0.5)] do
+    let mut branchPlans : Array TimedBloomBetaPairPlan := #[]
     for vi in [0:bank.1.size] do
       let some v := bank.1[vi]? | continue
       let some vs := sigConstF? v.sigma
@@ -1788,6 +1790,7 @@ def runTimedBloomBetaPlannerSpike : IO Bool := do
         | .error e =>
           refused := refused.push s!"voice[{vi}]×room[{ri}]:{e.label}"
         | .ok p =>
+          branchPlans := branchPlans.push p
           maxN := max maxN p.nDepth
           maxK := max maxK p.kDepth
           maxSamples := max maxSamples p.sigmaSamples
@@ -1797,14 +1800,32 @@ def runTimedBloomBetaPlannerSpike : IO Bool := do
             let t := p.radialFraction
             minT := min minT t
             maxT := max maxT t
+    plannedBranches := plannedBranches.push branchPlans
+  let cost := measureTimedBloomBetaCost plannedBranches
+  let global := cost.globalPadded
+  let bucketed := cost.bucketedLowerBound
+  let bytesToMiB := fun n : Nat => n.toFloat / (1024.0 * 1024.0)
+  let globalWithin := global.withinOptimisticExistingAudioEnvelope
+  let bucketedWithin := bucketed.withinOptimisticExistingAudioEnvelope
+  let costWitness := cost.branches == 2 && cost.pairs == 672
+    && global.pairRows == 672 && global.paddedRows == 160
+    && global.maxSeriesDepth == 384 && global.maxCfDepth == 351
+    && global.fitsPackedUInt32 && bucketed.fitsPackedUInt32
+    && bucketed.recurrenceStepsPerSample < global.recurrenceStepsPerSample
+    && bucketed.coefficientCells < global.coefficientCells
+    && !globalWithin && !bucketedWithin
   IO.println "        measured live-beta radial-seam planner (default 21×32 box):"
   IO.println s!"        pairs={total} incumbent={incumbent} moved={moved} refused={refused.size} · depth={maxN}/{maxK} of 384 · moved t-range={minT}…{maxT}"
   IO.println s!"        fixed sigma samples≤{maxSamples} · adversarial refinements={refinements} · first refusals={refused.extract 0 (min refused.size 4)}"
+  IO.println "        full two-register terminal cost (current global padding vs optimistic safe buckets):"
+  IO.println s!"        global: active/padded={global.pairRows}/{global.paddedRows} · recurrence levels/sample={global.recurrenceStepsPerSample} · packed={bytesToMiB global.packedF32Bytes} MiB f32 · 3 host generations={bytesToMiB global.threeHostF64GenerationBytes} MiB · columns/body-est={global.logicalColumns}/{global.planInstructionsEstimate}"
+  IO.println s!"        bucket lower bound: groups/shapes={bucketed.groups}/{bucketed.shapes} · recurrence levels/sample={bucketed.recurrenceStepsPerSample} · packed={bytesToMiB bucketed.packedF32Bytes} MiB f32 · 3 host generations={bytesToMiB bucketed.threeHostF64GenerationBytes} MiB · columns/body-est={bucketed.logicalColumns}/{bucketed.planInstructionsEstimate}"
+  IO.println s!"        within optimistic existing-audio-envelope discriminator (2,048 simple-mode-equivalent ceiling): global={globalWithin} bucketed={bucketedWithin}; both must remain non-public"
   if total == 672 && incumbent == 578 && moved == 94 && refused.isEmpty
-      && max maxN maxK <= 384 then
-    passGate "timed-bloom-beta-plan" s!"the beta-max 21×32 box retains {incumbent} incumbent pairs and finds measured cap-384 radial seams for all {moved} depth-only exclusions (largest series-fitting Q16 radius; no production admission change; oracle/backend/cost still pending)"
+      && max maxN maxK <= 384 && costWitness then
+    passGate "timed-bloom-beta-plan" s!"the beta-max 21×32 box retains {incumbent} incumbent pairs and finds measured cap-384 radial seams for all {moved} exclusions; both the current global batch and an optimistic lane/depth-bucket lower bound exceed the existing 2,048-level Metal envelope, so this terminal is explicitly refused for public gong/live-beta use"
   else
-    failGate "timed-bloom-beta-plan" s!"total={total} incumbent={incumbent} moved={moved} refused={refused.size} depth={maxN}/{maxK}"
+    failGate "timed-bloom-beta-plan" s!"total={total} incumbent={incumbent} moved={moved} refused={refused.size} depth={maxN}/{maxK} costWitness={costWitness} globalWithin={globalWithin} bucketedWithin={bucketedWithin}"
 
 /-- THE MODAL LIVE gate (the payoff). A JSON patch `resonator(freq) → reverb → out`
     compiled through the real `compilePlanPure` — decode → lowerModal → symbolic

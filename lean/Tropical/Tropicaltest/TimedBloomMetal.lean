@@ -3,11 +3,13 @@ import Tropical.Tropicaltest.Modal
 /-!
 # Tropical.Tropicaltest.TimedBloomMetal
 
-Focused backend parity for the non-public timed bloom-batch terminal.  This
+Focused backend probe for the non-public timed bloom-batch terminal. This
 fixture never enters Patch lowering or the served vocabulary: it builds one of
-the measured moved-radial-seam pairs directly, places it at a far negative
-fractional Q32.32 anchor, and runs the same typed plan through the JIT and Metal
-load paths.
+the measured moved-radial-seam pairs directly and places it at a far negative
+fractional Q32.32 anchor. Ordinary validation proves the typed split and MSL
+column crossing structurally. `TROPICAL_TIMED_BLOOM_METAL=1` opts into the real
+JIT↔Metal render; callers must impose an external timeout because the first
+host-GPU qualification attempt exceeded five minutes in Metal compile/render.
 -/
 
 open Tropical
@@ -17,7 +19,7 @@ namespace Tropical.Tropicaltest.TimedBloomMetal
 
 open Tropical.EmitArrow
 
-private def gateName : String := "timed-bloom-batch-metal"
+private def gateName : String := "timed-bloom-batch-backend-shape"
 
 private def farAnchorNumber : Lean.JsonNumber := ⟨-150000000075, 2⟩
 private def farAnchor : Float := -1500000000.75
@@ -119,12 +121,14 @@ private def renderMetal (plan : Tropical.Plan.FlatPlan)
 private def metalUnavailable (e : String) : Bool :=
   e.contains "without TROPICAL_METAL" || e.contains "no Metal device"
 
-/-- One measured moved-seam pair through the real typed JIT and Metal runtime
-    paths.  The far anchor is a live s0 parameter so its four 16-bit limbs must
+/-- One moved-seam pair through the typed JIT and Metal runtime paths. The far
+    anchor is a live s0 parameter so its four 16-bit limbs must
     cross through `coeff_columns`; the logical clock is translated by the exact
     matching Q32.32 value, making the rendered window start at the pair's onset.
 
-    Metal is an optional build/device capability.  A build explicitly lacking
+    The runtime half is intentionally opt-in: this terminal is a rejected cost
+    spike, and an unbounded driver compile may not stall ordinary validation.
+    When opted in, Metal is still an optional build/device capability. A build explicitly lacking
     `TROPICAL_METAL`, or a host with no Metal device, records a portable skip;
     every emitter, loader, pipeline, dispatch, or numerical failure on a Metal-
     capable build remains a gate failure. -/
@@ -178,6 +182,17 @@ def runTimedBloomMetalParity (arena : Arena) : IO Bool := do
   if anchorColumns != 4 then
     return ← failGate gateName
       s!"expected four hoisted Q32.32 anchor-limb columns; got {anchorColumns}"
+
+  let runDevice := (← IO.getEnv "TROPICAL_TIMED_BLOOM_METAL") == some "1"
+  if !runDevice then
+    match Tropical.Ir.EmitMsl.emitKernel split.audio with
+    | .error e => return ← failGate gateName s!"MSL emit: {firstLine e}"
+    | .ok msl =>
+      let hasColumns := msl.contains "coeff_columns [[buffer(3)]]"
+      if !hasColumns then
+        return ← failGate gateName "typed MSL omitted coeff_columns buffer(3)"
+      return ← passGate gateName
+        s!"typed moved-pair MSL emits four far-anchor columns ({msl.length} bytes); real JIT↔Metal render is an explicit timeout-bounded diagnostic because the first host attempt exceeded five minutes"
 
   let buffer : Nat := 512
   let frames : Nat := 16
