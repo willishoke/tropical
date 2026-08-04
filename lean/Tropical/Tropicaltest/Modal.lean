@@ -1600,6 +1600,96 @@ def runModalForestTimedIslands (arena : Arena)
       failGate "modal-forest-timed-islands"
         s!"structure={structureOk} removalsBuilt={removalsBuilt} onsets={survivingOnsets} pre={preOnsetDiff} oracle={forwardOracleDiff}/{holdOracleDiff}/{reverseOracleDiff}/{seekOracleDiff} coordinates={holdCoordinateDiff}/{reverseCoordinateDiff}/{seekCoordinateDiff}"
 
+open Tropical.EmitArrow in
+/-- M3-B terminal spike gate.  Two independently timed, already-checked bloom
+    compositions are packed into one nested branch×pair reduction.  The batch
+    must remain byte-identical to the existing explicit branch sum, emit the
+    same properly nested loops in LLVM/MSL, stay flat in pair count when the
+    coefficient-depth shape is unchanged, and refuse unsupported coincidence
+    with exact branch/pair identity.  No Patch/vocabulary route reaches this
+    constructor. -/
+def runTimedBloomBatchSpike (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let mode := fun (sigma omega amp : Float) =>
+    ({ sigma := litF sigma, omega := litF omega, cre := litF amp } : ModalMode)
+  let voiceA : Array ModalMode := #[mode 1.0 800.0 0.7, mode 1.4 1700.0 0.35]
+  let voiceB : Array ModalMode := #[mode 0.8 2600.0 0.22]
+  let room : Array ModalMode :=
+    #[mode 3.0 790.0 0.8, mode 4.0 3100.0 0.4, mode 5.0 5000.0 0.2]
+  let g : Float := 1.8
+  let bA : Float := 0.05 / g
+  let bB : Float := 0.025 / g
+  let some pairsA := bloomCompose voiceA room bA g
+    | return ← failGate "timed-bloom-batch" "fixture A was refused by the checked composer"
+  let some pairsB := bloomCompose voiceB room bB g
+    | return ← failGate "timed-bloom-batch" "fixture B was refused by the checked composer"
+  -- A +2^30-sample translation forces the terminal's anchor columns through
+  -- the exact four-limb path; one f32 anchor column would collapse these.
+  let farSamples : Int := 1073741824
+  let anchorA := lit (farSamples + 200)
+  let anchorB := lit (farSamples + 700)
+  let evalClock := add clockLit (litI (farSamples * 4294967296))
+  let banks : Array TimedBloomBank :=
+    #[{ pairs := pairsA, anchor := anchorA }, { pairs := pairsB, anchor := anchorB }]
+  let reference := add (bloomComposedSig pairsA evalClock anchorA)
+                       (bloomComposedSig pairsB evalClock anchorB)
+  let batch ← match bloomTimedBatchSig banks evalClock with
+    | .ok x => pure x
+    | .error e => return ← failGate "timed-bloom-batch" e
+  let planFor := fun (name : String) (s : Sig) =>
+    buildAndFinish (.ok (buildExprCarrier name s arena))
+  match planFor "timed_bloom_batch" batch, planFor "timed_bloom_reference" reference with
+  | .error e, _ | _, .error e => failGate "timed-bloom-batch" s!"build: {firstLine e}"
+  | .ok batchPlan, .ok referencePlan =>
+    match ← renderPlanSamples batchPlan 4096, ← renderPlanSamples referencePlan 4096 with
+    | .error e, _ | _, .error e => failGate "timed-bloom-batch" s!"render: {firstLine e}"
+    | .ok actual, .ok expected =>
+      let bitDiff := bitDiffCount actual expected
+      let nonzero := actual.any (· != 0.0)
+      let regions := planTagCount "ReduceBegin" batchPlan
+      let delims := reduceDelims batchPlan
+      let nested := delims == #["ReduceBegin", "ReduceBegin", "ReduceEnd", "ReduceEnd"]
+      let shape := timedBloomBatchShape banks
+      let one : Array TimedBloomBank := #[{ pairs := pairsA, anchor := anchorA }]
+      let manyPairs := pairsA ++ pairsA ++ pairsA ++ pairsA
+      let many : Array TimedBloomBank := #[{ pairs := manyPairs, anchor := anchorA }]
+      let flatOk := match bloomTimedBatchSig one evalClock, bloomTimedBatchSig many evalClock with
+        | .ok oneSig, .ok manySig =>
+          match planFor "timed_bloom_one" oneSig, planFor "timed_bloom_many" manySig with
+          | .ok onePlan, .ok manyPlan =>
+            let delta := planInstrCount manyPlan - planInstrCount onePlan
+            delta ≤ 2
+          | _, _ => false
+        | _, _ => false
+      let mslOk := match Tropical.Ir.EmitMsl.emitKernel batchPlan with
+        | .error _ => false
+        | .ok msl => Id.run do
+          let mut depth : Nat := 0
+          let mut forDepths : Array Nat := #[]
+          for l in msl.splitOn "\n" do
+            let t := l.trimAscii
+            if t.startsWith "for (long rd" then
+              forDepths := forDepths.push depth
+              depth := depth + 1
+            else if t == "}" && depth > 0 then
+              depth := depth - 1
+          return forDepths == #[0, 1]
+      let refusalOk := match pairsA[0]? with
+        | none => false
+        | some p =>
+          let bad : Array TimedBloomBank :=
+            #[{ pairs := #[{ p with coincident := true }], anchor := anchorA }]
+          match bloomTimedBatchSig bad clockLit with
+          | .error e => e.contains "branch[0]×pair[0]"
+          | .ok _ => false
+      IO.println "        non-public timed bloom terminal (nested branch×pair batch):"
+      IO.println s!"        parity bitDiff={bitDiff}/{min actual.size expected.size} · nonzero={nonzero} · regions={regions} nested={nested} MSL={mslOk}"
+      IO.println s!"        shape branches={shape.branches} pairs={shape.totalPairs} cap={shape.pairCapacity} depth={shape.maxSeriesDepth}/{shape.maxCfDepth} scalar coefficient cells={shape.coefficientCells} · flat-in-pairs={flatOk} · refusal={refusalOk}"
+      if bitDiff == 0 && nonzero && regions == 2 && nested && mslOk && flatOk && refusalOk then
+        passGate "timed-bloom-batch" s!"one non-public nested terminal preserves two authored anchors and the existing Γ atom byte-for-byte; plan instructions are flat in pair count, MSL nests branch/pair loops, and unsupported coincidence refuses by exact index (shape {shape.totalPairs} pairs, depth {shape.maxSeriesDepth}/{shape.maxCfDepth})"
+      else
+        failGate "timed-bloom-batch" s!"bitDiff={bitDiff} nonzero={nonzero} regions={regions} nested={nested} msl={mslOk} flat={flatOk} refusal={refusalOk}"
+
 /-- THE MODAL LIVE gate (the payoff). A JSON patch `resonator(freq) → reverb → out`
     compiled through the real `compilePlanPure` — decode → lowerModal → symbolic
     residue → realize → strata → session compile → a JIT-loadable kernel — and its
