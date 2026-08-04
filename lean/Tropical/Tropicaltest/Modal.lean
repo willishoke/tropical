@@ -1623,6 +1623,8 @@ def runTimedBloomBatchSpike (arena : Arena)
     | return ← failGate "timed-bloom-batch" "fixture A was refused by the checked composer"
   let some pairsB := bloomCompose voiceB room bB g
     | return ← failGate "timed-bloom-batch" "fixture B was refused by the checked composer"
+  let some pair0 := pairsA[0]?
+    | return ← failGate "timed-bloom-batch" "fixture A unexpectedly contained no pairs"
   -- A +2^30-sample translation forces the terminal's anchor columns through
   -- the exact four-limb path; one f32 anchor column would collapse these.
   let farSamples : Int := 1073741824
@@ -1682,13 +1684,67 @@ def runTimedBloomBatchSpike (arena : Arena)
           match bloomTimedBatchSig bad clockLit with
           | .error e => e.contains "branch[0]×pair[0]"
           | .ok _ => false
+      -- Exercise the signed top limb and fractional low limbs at the complete
+      -- Q32.32 anchor domain's hard points.  Each decoded batch clock must equal
+      -- the existing direct relative-clock path byte-for-byte and remain live.
+      let anchorCases : Array (String × Sig × Int) := #[
+        ("pos", lit 150000000025 2, 6442450945073741824),
+        ("neg", lit (-150000000075) 2, -6442450947221225472),
+        ("hi",  lit 21474836475 1, 9223372034707292160),
+        ("lo",  lit (-2147483648), -9223372036854775808)]
+      let mut anchorsOk := true
+      let mut anchorDiffs : Array Nat := #[]
+      for (tag, anchor, anchorQ) in anchorCases do
+        let clk := add clockLit (litI anchorQ)
+        let oneBank : Array TimedBloomBank := #[{ pairs := #[pair0], anchor }]
+        match bloomTimedBatchSig oneBank clk with
+        | .error _ => anchorsOk := false
+        | .ok got =>
+          match planFor s!"timed_anchor_{tag}_batch" got,
+                planFor s!"timed_anchor_{tag}_direct" (bloomComposedSig #[pair0] clk anchor) with
+          | .ok gp, .ok rp =>
+            match ← renderPlanSamples gp 256, ← renderPlanSamples rp 256 with
+            | .ok gs, .ok rs =>
+              let d := bitDiffCount gs rs
+              anchorDiffs := anchorDiffs.push d
+              if d != 0 || !(gs.any (· != 0.0)) then anchorsOk := false
+            | _, _ => anchorsOk := false
+          | _, _ => anchorsOk := false
+      -- A literal array can stay in the audio plan, so separately make the
+      -- anchor a genuine s0 parameter.  The typed split must hoist exactly its
+      -- four 16-bit limbs into shared coefficient columns, and emitted MSL must
+      -- reconstruct the signed high limb arithmetically (never `<< 48`).
+      let stagedAnchorOk := match bloomTimedBatchSig
+          #[{ pairs := #[pair0], anchor := (Sig.paramRef ⟨0⟩ : Sig) }] clockLit with
+        | .error _ => false
+        | .ok stagedSig =>
+          let built := assemble arena "timed_anchor_staged"
+            #[] #[{ name := "out", type? := some (.scalar .float) }]
+            #[] #[(.port ⟨0⟩, stagedSig)] #[]
+            (extraDecls := #[.param "anchor" none])
+          match buildAndFinishStaged (.ok built) with
+          | .error _ => false
+          | .ok (stagedPlan, stagedBlocks) =>
+            match Tropical.Ir.Stage0.hoistTyped stagedPlan stagedBlocks with
+            | .error _ => false
+            | .ok split =>
+              match Tropical.Ir.EmitMsl.emitKernel split.audio with
+              | .error _ => false
+              | .ok msl =>
+                let has := fun needle => (msl.splitOn needle).length > 1
+                split.audio.coeffArraySlots.size == 4
+                  && has "coeff_columns [[buffer(3)]]"
+                  && has "32767L" && has "65536L" && has "281474976710656L"
+                  && !(has "<< 48L")
       IO.println "        non-public timed bloom terminal (nested branch×pair batch):"
       IO.println s!"        parity bitDiff={bitDiff}/{min actual.size expected.size} · nonzero={nonzero} · regions={regions} nested={nested} MSL={mslOk}"
       IO.println s!"        shape branches={shape.branches} pairs={shape.totalPairs} cap={shape.pairCapacity} depth={shape.maxSeriesDepth}/{shape.maxCfDepth} scalar coefficient cells={shape.coefficientCells} · flat-in-pairs={flatOk} · refusal={refusalOk}"
-      if bitDiff == 0 && nonzero && regions == 2 && nested && mslOk && flatOk && refusalOk then
-        passGate "timed-bloom-batch" s!"one non-public nested terminal preserves two authored anchors and the existing Γ atom byte-for-byte; plan instructions are flat in pair count, MSL nests branch/pair loops, and unsupported coincidence refuses by exact index (shape {shape.totalPairs} pairs, depth {shape.maxSeriesDepth}/{shape.maxCfDepth})"
+      IO.println s!"        anchor Q32.32 signed/fractional vectors bitDiff={anchorDiffs} · staged four-limb Metal columns={stagedAnchorOk}"
+      if bitDiff == 0 && nonzero && regions == 2 && nested && mslOk && flatOk
+          && refusalOk && anchorsOk && stagedAnchorOk then
+        passGate "timed-bloom-batch" s!"one non-public nested terminal preserves authored anchors and the existing Γ atom byte-for-byte; signed/fractional Q32.32 anchors use four hoisted 16-bit Metal columns; plan instructions are flat in pair count, MSL nests branch/pair loops, and unsupported coincidence refuses by exact index (shape {shape.totalPairs} pairs, depth {shape.maxSeriesDepth}/{shape.maxCfDepth})"
       else
-        failGate "timed-bloom-batch" s!"bitDiff={bitDiff} nonzero={nonzero} regions={regions} nested={nested} msl={mslOk} flat={flatOk} refusal={refusalOk}"
+        failGate "timed-bloom-batch" s!"bitDiff={bitDiff} nonzero={nonzero} regions={regions} nested={nested} msl={mslOk} flat={flatOk} refusal={refusalOk} anchors={anchorsOk}/{anchorDiffs} stagedAnchor={stagedAnchorOk}"
 
 /-- THE MODAL LIVE gate (the payoff). A JSON patch `resonator(freq) → reverb → out`
     compiled through the real `compilePlanPure` — decode → lowerModal → symbolic

@@ -183,6 +183,27 @@ private def batchPairBody (c : TimedBloomBatchCols) (clkRel dPos : Sig)
 /-- Admission for the first executable slice.  Keeping this separate from the
     renderer prevents a term wrapper from turning a refusal into silence. -/
 private def validateTimedBloomBanks (banks : Array TimedBloomBank) : Except String Unit := do
+  let pairCapacity := banks.foldl (fun n b => max n b.pairs.size) 0
+  -- The dynamic trip count crosses the coefficient boundary as f32.  Integers
+  -- through 2^24 are exact there; larger counts need their own limb transport.
+  for bi in [0:banks.size] do
+    let some bank := banks[bi]? | continue
+    if bank.pairs.size > 16777216 then
+      throw s!"timed bloom batch: branch[{bi}] pair count {bank.pairs.size} exceeds the exact f32 integer range (2^24)"
+  -- FlatRuntime and the Metal column ABI use uint32 lengths.  Refuse before
+  -- constructing padded rows or flattened recurrence columns.
+  let maxColumnLength : Nat := 4294967295
+  if pairCapacity > 0 && banks.size > maxColumnLength / pairCapacity then
+    throw "timed bloom batch: padded branch×pair row count exceeds the uint32 coefficient-column ABI"
+  let rows := banks.size * pairCapacity
+  let maxSeriesDepth := banks.foldl (fun n b =>
+    b.pairs.foldl (fun m p => max m p.invA.size) n) 0
+  let maxCfWidth := banks.foldl (fun n b =>
+    b.pairs.foldl (fun m p => max m p.cfB.size) n) 0
+  if maxSeriesDepth > 0 && rows > maxColumnLength / maxSeriesDepth then
+    throw "timed bloom batch: flattened series column exceeds the uint32 coefficient-column ABI"
+  if maxCfWidth > 0 && rows > maxColumnLength / maxCfWidth then
+    throw "timed bloom batch: flattened continued-fraction column exceeds the uint32 coefficient-column ABI"
   for bi in [0:banks.size] do
     let some bank := banks[bi]? | continue
     if !sigIsS0 bank.anchor then
