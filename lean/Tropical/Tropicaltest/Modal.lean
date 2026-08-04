@@ -1746,6 +1746,66 @@ def runTimedBloomBatchSpike (arena : Arena)
       else
         failGate "timed-bloom-batch" s!"bitDiff={bitDiff} nonzero={nonzero} regions={regions} nested={nested} msl={mslOk} flat={flatOk} refusal={refusalOk} anchors={anchorsOk}/{anchorDiffs} stagedAnchor={stagedAnchorOk}"
 
+open Tropical.EmitArrow in
+/-- Live-beta capacity-planner spike.  The actual 21×32 default source×room box
+    is classified at beta max.  Incumbent-safe pairs retain the production
+    300-term plan; depth-only exclusions must find a guarded Q16 radial seam
+    under the proposed 384 capacity, pass the sampled radial-monotonicity audit,
+    and fit every fixed sigma knot.  This is measured capacity evidence only:
+    it neither changes production admission nor substitutes for the quadrature
+    and backend/cost gates. -/
+def runTimedBloomBetaPlannerSpike : IO Bool := do
+  let g : Float := 1.8
+  let betaMax : Float := 0.5
+  let sigLo : Float := 6.91 / 12.0
+  let sigHi : Float := 6.91 / 0.2
+  let (full, half) := defaultGongModes 110.0
+  let room := Tropical.Playground.bakedReverbProbe 32
+  let mut total := 0
+  let mut incumbent := 0
+  let mut moved := 0
+  let mut refused : Array String := #[]
+  let mut maxN := 0
+  let mut maxK := 0
+  let mut maxSamples := 0
+  let mut refinements := 0
+  let mut minT := 1.0
+  let mut maxT := 0.0
+  for bank in #[(full, 1.0), (half, 0.5)] do
+    for vi in [0:bank.1.size] do
+      let some v := bank.1[vi]? | continue
+      let some vs := sigConstF? v.sigma
+        | refused := refused.push s!"voice[{vi}]:sigma"; continue
+      let some vo := sigConstF? v.omega
+        | refused := refused.push s!"voice[{vi}]:omega"; continue
+      let mu : CplxB := ⟨-vs, vo⟩
+      for ri in [0:room.size] do
+        let some r := room[ri]? | continue
+        total := total + 1
+        let some ro := sigConstF? r.omega
+          | refused := refused.push s!"voice[{vi}]×room[{ri}]:omega"; continue
+        match planTimedBloomBetaPair mu ro sigLo sigHi betaMax bank.2 g with
+        | .error e =>
+          refused := refused.push s!"voice[{vi}]×room[{ri}]:{e.label}"
+        | .ok p =>
+          maxN := max maxN p.nDepth
+          maxK := max maxK p.kDepth
+          maxSamples := max maxSamples p.sigmaSamples
+          refinements := refinements + p.refinementRounds
+          if p.incumbent then incumbent := incumbent + 1 else
+            moved := moved + 1
+            let t := p.radialFraction
+            minT := min minT t
+            maxT := max maxT t
+  IO.println "        measured live-beta radial-seam planner (default 21×32 box):"
+  IO.println s!"        pairs={total} incumbent={incumbent} moved={moved} refused={refused.size} · depth={maxN}/{maxK} of 384 · moved t-range={minT}…{maxT}"
+  IO.println s!"        fixed sigma samples≤{maxSamples} · adversarial refinements={refinements} · first refusals={refused.extract 0 (min refused.size 4)}"
+  if total == 672 && incumbent == 578 && moved == 94 && refused.isEmpty
+      && max maxN maxK <= 384 then
+    passGate "timed-bloom-beta-plan" s!"the beta-max 21×32 box retains {incumbent} incumbent pairs and finds measured cap-384 radial seams for all {moved} depth-only exclusions (largest series-fitting Q16 radius; no production admission change; oracle/backend/cost still pending)"
+  else
+    failGate "timed-bloom-beta-plan" s!"total={total} incumbent={incumbent} moved={moved} refused={refused.size} depth={maxN}/{maxK}"
+
 /-- THE MODAL LIVE gate (the payoff). A JSON patch `resonator(freq) → reverb → out`
     compiled through the real `compilePlanPure` — decode → lowerModal → symbolic
     residue → realize → strata → session compile → a JIT-loadable kernel — and its

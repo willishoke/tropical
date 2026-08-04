@@ -1,4 +1,4 @@
-import Tropical.EmitArrow.Modal.Live
+import Tropical.EmitArrow.Modal.BatchPlan
 
 /-!
 # EmitArrow.Modal.Batch
