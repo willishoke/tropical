@@ -200,10 +200,23 @@ private def validateTimedBloomBanks (banks : Array TimedBloomBank) : Except Stri
     b.pairs.foldl (fun m p => max m p.invA.size) n) 0
   let maxCfWidth := banks.foldl (fun n b =>
     b.pairs.foldl (fun m p => max m p.cfB.size) n) 0
+  let maxCfDepth := banks.foldl (fun n b =>
+    b.pairs.foldl (fun m p => max m p.cfN.size) n) 0
   if maxSeriesDepth > 0 && rows > maxColumnLength / maxSeriesDepth then
     throw "timed bloom batch: flattened series column exceeds the uint32 coefficient-column ABI"
   if maxCfWidth > 0 && rows > maxColumnLength / maxCfWidth then
     throw "timed bloom batch: flattened continued-fraction column exceeds the uint32 coefficient-column ABI"
+  -- Metal receives all hoisted columns as one packed f32 buffer, whose total
+  -- float count is narrowed to uint32 by the runtime. Bound the aggregate as
+  -- well as every constituent array. The 18 row columns and five per-branch
+  -- count/anchor columns are easy to miss when reasoning only from recurrence
+  -- storage.
+  let packedCells := 5 * banks.size + 18 * rows
+    + 2 * rows * maxSeriesDepth
+    + 2 * rows * maxCfWidth
+    + 2 * rows * maxCfDepth
+  if packedCells > maxColumnLength then
+    throw "timed bloom batch: aggregate packed coefficient columns exceed the uint32 Metal ABI"
   for bi in [0:banks.size] do
     let some bank := banks[bi]? | continue
     if !sigIsS0 bank.anchor then
