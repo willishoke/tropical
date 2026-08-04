@@ -17,7 +17,7 @@ remains a separate oracle obligation.
 
 namespace Tropical.EmitArrow
 
-open Tropical.Exact (CplxD)
+open Tropical.Exact (CplxD CplxDI DyadicI)
 
 /-- Why the measured spike planner could not cover one live parameter box. -/
 inductive TimedBloomBetaRefusal where
@@ -209,5 +209,64 @@ def planTimedBloomBetaPair (mu : CplxB) (nuOmega sigLo sigHi betaMax scale g : F
     if round == 4 then return .error .depthBoxUnresolved
     extra := pushUniqueFloat extra worstSigma
   return .error .depthBoxUnresolved
+
+/-- Materialize one fixed-beta/fixed-sigma non-coincident pair at a measured
+    moved seam.  This is an oracle instrument for the terminal spike, not a
+    production composer.  The seam radius is fixed from the beta-max box; when
+    the current beta begins below it, the κ-side constant is computed from the
+    convergent series directly instead of evaluating CF(κ) outside its qualified
+    lane.  Topology/depth remain the box plan's fixed values. -/
+def materializeTimedBloomBetaPair? (mu nu : CplxB) (c : CplxE)
+    (beta betaMax scale g : Float) (plan : TimedBloomBetaPairPlan) : Option BloomPair := do
+  if plan.incumbent || plan.radialDenominator == 0 || g <= 0.0 then none else
+  let B := beta * scale / g
+  let Bmax := betaMax * scale / g
+  let aC := (nu.sub mu).scale (1.0 / g)
+  let aD := aC.toExact
+  let kappa := mu.scale B
+  let kD := kappa.toExact
+  let kMaxD := (mu.scale Bmax).toExact
+  let tI := DyadicI.div (DyadicI.ofNat plan.radialNumerator)
+    (DyadicI.ofNat plan.radialDenominator)
+  let rhoD := CplxDI.scale tI kMaxD
+  let absK := CplxDI.abs kD
+  let absRho := CplxDI.abs rhoD
+  if !absRho.ok || DyadicI.straddlesZero absRho then none else
+  let kZero := absK.ok && absK.lo.isZero && absK.hi.isZero
+  let crossing := plan.kDepth > 0 && !kZero && DyadicI.certGt absK absRho
+  let gD := DyadicI.ofFloat g
+  let invNuMuD := CplxDI.div CplxDI.one (CplxDI.sub nu.toExact mu.toExact)
+  let invAD := (Array.range plan.nDepth).map fun k =>
+    CplxDI.div CplxDI.one (CplxDI.add aD (CplxDI.ofNat (k + 1)))
+  let cfBD := (Array.range (plan.kDepth + 1)).map fun j =>
+    CplxDI.mkI (DyadicI.sub (DyadicI.ofNat (2 * j + 1)) aD.re) (DyadicI.neg aD.im)
+  let cfND := (Array.range plan.kDepth).map fun j =>
+    let jf := CplxDI.ofNat (j + 1)
+    CplxDI.mul jf (CplxDI.sub jf aD)
+  let k1 := if crossing then
+      let (cfKp, _) := bloomCFPointD aC.toPoint kappa.toPoint bloomCFTolD
+      let cfOverG := CplxDI.scale (DyadicI.inv gD) cfKp.asPointI
+      (CplxDI.sub (bloomGammaStarD aD kD gD) cfOverG, CplxDI.neg cfOverG)
+    else
+      let nK := if kZero then 0 else
+        bloomM1DepthD aC.toPoint kappa.toPoint bloomM1TolD (plan.nDepth + 1)
+      let mK := if kZero then CplxDI.one else bloomM1D aD kD nK
+      (CplxDI.mul mK invNuMuD, CplxDI.zero)
+  let dSwitchD := if kZero || plan.kDepth == 0 then DyadicI.ofFloat (-1.0e30)
+    else DyadicI.div (DyadicI.log (DyadicI.div absK absRho)) gD
+  let kappaE ← cplxLitD? kD
+  let k1SerE ← cplxLitD? k1.1
+  let k1CfE ← cplxLitD? k1.2
+  let fSerE ← cplxLitD? (CplxDI.neg invNuMuD)
+  let invAE ← invAD.mapM cplxLitD?
+  let cfBE ← cfBD.mapM cplxLitD?
+  let cfNE ← cfND.mapM cplxLitD?
+  pure {
+    muSigma := litF (-mu.re), muOmega := litF mu.im
+    nuSigma := litF (-nu.re), nuOmega := litF nu.im
+    bloomB := B, gRate := g, c, kappa := kappaE
+    k1Ser := k1SerE, k1Cf := k1CfE, fSer := fSerE
+    dSwitch := litF (DyadicI.toFloat dSwitchD)
+    invA := invAE, cfB := cfBE, cfN := cfNE }
 
 end Tropical.EmitArrow

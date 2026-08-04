@@ -1124,6 +1124,82 @@ def runBloomSafety (arena : Arena)
   else
     failGate "bloom-safety" s!"tuned={tunedOk} live={liveEdge}/{liveNoCross}/{liveReversed}/{liveIm}/{liveImOutside} census={censusOk} mixed={mixedRefusal} patch={patchRefused} depth={depthTyped}/{depthPatch} k0={k0Typed}/{k0RenderOk} bare={bareOk}"
 
+/-- Terminal-spike numerical-overlap gate for the four cap-384 capacity
+    outliers.  Each moved-seam pair is materialized at beta max and checked
+    through the nested timed terminal against the independent quadrature law in
+    a window long enough to cross `dSwitch`.  The worst full-register case also
+    probes beta=.05 and betaSwitch±one Q16 step, including the coefficient-side
+    series/CF transition at onset.  This is representative measured evidence,
+    not continuous-box qualification and not a production admission change. -/
+def runTimedBloomMovedSeamOracle (arena : Arena) : IO Bool := do
+  let g : Float := 1.8
+  let betaMax : Float := 0.5
+  let sigLo : Float := 6.91 / 12.0
+  let sigHi : Float := 6.91 / 0.2
+  let sigMid := (sigLo + sigHi) * 0.5
+  let (full, half) := defaultGongModes 110.0
+  let room := Tropical.Playground.bakedReverbProbe 32
+  let specs : Array (String × Bool × Nat × Nat × Float × Float) := #[
+    ("f10r20", false, 10, 20, 1.0, sigLo),
+    ("f11r21", false, 11, 21, 1.0, sigHi),
+    ("h6r25", true, 6, 25, 0.5, sigHi),
+    ("h7r25", true, 7, 25, 0.5, sigHi)]
+  let nLen : Nat := 8192
+  let lo := anchorNat + 1
+  let mut ok := true
+  let mut probes := 0
+  let mut worst := 0.0
+  let mut worstTag := ""
+  for (tag, isHalf, vi, ri, scale, worstSigma) in specs do
+    let bank := if isHalf then half else full
+    let some v := bank[vi]? | ok := false; continue
+    let some r0 := room[ri]? | ok := false; continue
+    let some vs := sigConstF? v.sigma | ok := false; continue
+    let some vo := sigConstF? v.omega | ok := false; continue
+    let some vaRe := sigConstF? v.cre | ok := false; continue
+    let some vaIm := sigConstF? v.cim | ok := false; continue
+    let some ro := sigConstF? r0.omega | ok := false; continue
+    let some raRe := sigConstF? r0.cre | ok := false; continue
+    let some raIm := sigConstF? r0.cim | ok := false; continue
+    let mu : CplxB := ⟨-vs, vo⟩
+    let planE := planTimedBloomBetaPair mu ro sigLo sigHi betaMax scale g
+    let some plan := planE.toOption | ok := false; continue
+    if plan.incumbent then ok := false; continue
+    let betaSwitch := plan.radialFraction * betaMax
+    let betaStep := betaMax / 65536.0
+    let localProbes := if tag == "f10r20" then #[
+        (worstSigma, betaMax), (sigMid, 0.05),
+        (sigMid, max 0.0 (betaSwitch - betaStep)),
+        (sigMid, betaSwitch),
+        (sigMid, min betaMax (betaSwitch + betaStep))]
+      else #[(worstSigma, betaMax)]
+    for (sigma, beta) in localProbes do
+      let nu : CplxB := ⟨-sigma, ro⟩
+      let c := cmulE v.ampE r0.ampE
+      let some pair := materializeTimedBloomBetaPair? mu nu c beta betaMax scale g plan
+        | ok := false; continue
+      let banks : Array TimedBloomBank := #[{ pairs := #[pair], anchor := anchorSig }]
+      let some sig := (bloomTimedBatchSig banks clockLit).toOption
+        | ok := false; continue
+      match ← renderConfig arena s!"moved_seam_{tag}_{probes}" sig nLen with
+      | .error _ => ok := false
+      | .ok dut =>
+        let vS : SeamMode := { sigma := vs, omega := vo, are := vaRe, aim := vaIm }
+        let rS : SeamMode := { sigma, omega := ro, are := raRe, aim := raIm }
+        let B := beta * scale / g
+        let phi := fun s => s + B * (1.0 - Float.exp (-g * s))
+        let ref := oracleSeam #[vS] #[rS] phi (fun _ _ => true) 8 nLen
+        let e := relL2Win dut ref lo nLen
+        probes := probes + 1
+        if e > worst then worst := e; worstTag := s!"{tag}@sigma={sigma},beta={beta}"
+        if !(allFinite dut) || energyWin dut lo nLen <= 1e-12 || e >= 3e-4 then
+          ok := false
+  IO.println s!"        moved radial-seam quadrature: probes={probes} worst rel-L2={worst} @ {worstTag}"
+  if ok && probes == 8 && worst < 3e-4 then
+    passGate "timed-bloom-moved-seam" s!"four cap-384 outliers plus betaSwitch±Q16 agree with the independent composition quadrature (worst rel-L2 {worst}); representative overlap only, production remains unchanged"
+  else
+    failGate "timed-bloom-moved-seam" s!"ok={ok} probes={probes} worst={worst} @ {worstTag}"
+
 -- ── WS-CL: the lane-tidying bit-clean witness ─────────────────────────────────
 
 /-- Re-bake BOTH dropped lanes onto a `coincidentSubtle` `BloomPair` — reconstructs
