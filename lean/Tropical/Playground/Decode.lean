@@ -171,14 +171,12 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
       (.modalSource (resonatorBank f0 decay cap) (lit 0) clk addr? (some countE), #[])
   | "reverb" =>
     let rt60 := p "rt60" (dv "rt60")
-    -- reading DIRECTION: θ (radians, live) rotates the composed tail's poles in the
-    -- s-plane — 0 = forward decay, π = reverse (pre-verb), interior = a continuous
-    -- U(1) morph (σ↔ω at π/2). `window` (live) nulls each mode at its horizon-
-    -- crossing (`σ²/(σ²+w²)`), offset off 0 so the kernel never divides 0/0: at the
-    -- knob's floor it is near-bare rotation, opened up it is the polite morph.
-    -- DIR crossfades the tail's time-direction: 0 = forward ring, 1 = reverse
-    -- (pre-verb into the strike), interior = both. Keeps σ/ω fixed, so it stays
-    -- audible across the whole range (no pole rotation).
+    -- ROOM-KERNEL DIRECTION: for this room impulse response `h`, `dir` selects
+    -- `h[dir] = (1-dir)·h + dir·T(h)`, then the room composes `h[dir]` with its
+    -- modal input. Thus 0 is the forward kernel, 1 the reversed kernel, and an
+    -- interior value contains both. Direction is local to this room: it does not
+    -- reverse the upstream modal value or the complete composed output. σ and ω
+    -- stay fixed, so the crossfade remains audible across the whole range.
     let dirX := p "dir" (dv "dir")
     -- SWAY: the room's decay breathes — σ ↦ σ·(1 + sway·sin(2π·rate·t)) on the
     -- envelope's clock only (pitch fixed). Continuous CF modulation of RT60 that

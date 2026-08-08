@@ -15,7 +15,8 @@ its bit-identical banked twins. Composition (`voice ⋙ reverb`) is the
 SYMBOLIC residue calculus (`residueComposeE`/`residueComposeEC`) over
 `CplxE` — pure `+−×÷` on `Sig`, so poles and amps stay live param slots
 through a room. The direction operator crossfades causal/anti-causal tails
-without touching σ or ω.
+without touching σ or ω. For public reverb this operator belongs to the room
+kernel before convolution; it is not a reversal of the complete upstream value.
 -/
 
 namespace Tropical.EmitArrow
