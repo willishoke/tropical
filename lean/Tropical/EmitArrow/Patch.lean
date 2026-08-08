@@ -130,8 +130,9 @@ inductive Node where
   | modalMix (inputs : Array String)
   -- `modalGauge` is the excitation-gauge adapter (§5): it re-levels its modal input's
   -- residues by the self-measured `‖H‖^{−g}` (`normalizePeak`), a pure Modal ⇝ Modal
-  -- effect. `g` is a live slot. The norm is measured on the SETTLED poles, so an
-  -- un-settleable (per-sample-modulated) input DECLINES to identity, never an s1 norm.
+  -- effect. `g` is a live slot. The norm is measured on the complete current modal
+  -- universe at this exact authored stage; it is not independently settled or
+  -- distributed over branches/support arms.
   | modalGauge (input : String) (g : Sig)
   | modalGaugeControl (input : String) (g : ModalControlRef)
 

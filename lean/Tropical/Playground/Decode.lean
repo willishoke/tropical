@@ -214,8 +214,8 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
   | "gauge" =>
     -- §5 excitation gauge: re-level the modal input's peak. g=0 identity (unity-DC,
     -- the strike gauge), g=1 unity-peak. A pure Modal ⇝ Modal effect (`normalizePeak`);
-    -- the norm is self-measured on the SETTLED poles, so a glided filter input is
-    -- Metal-safe and an un-settleable input declines to identity.
+    -- the norm is self-measured on the complete current modal universe at this
+    -- authored stage, using the same terminal clock context as adjacent rooms.
     let inId := (portSources inObj "in")[0]?.getD "__silence__"
     (.modalGaugeControl inId (modalControl "g"), #[])
   | "gong" =>
