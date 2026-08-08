@@ -26,6 +26,73 @@ structure TerminalBank where
 
 def TerminalBank.ofBank (bank : Bank) : TerminalBank := { bank }
 
+private def samePhysicalFrequency (left right : ModalMode) : Bool :=
+  left.omega == right.omega || match sigConstF? left.omega, sigConstF? right.omega with
+    | some l, some r => l == r
+    | _, _ => false
+
+/-- Terminal DD routing is allowed to be more conservative than the fixed-point
+    EC/DD carrier: equal physical frequencies must stay continuous when two
+    independently authored live damping expressions cross.  The terminal uses
+    a float carrier below, so it does not inherit the old fixed Q4.28 amplitude
+    cap that required compile-time residue bounds. -/
+private def terminalHot (left right : ModalMode) : Bool :=
+  samePhysicalFrequency left right || couplingHot left right
+
+private def terminalSameSide (left right : Array ModalMode) :
+    Array ModalMode × Array PairedMode := Id.run do
+  if left.isEmpty then return (#[], #[])
+  let hot := left.map fun l => right.map fun r => terminalHot l r
+  if hot.all (fun row => row.all (!·)) then
+    return (residueComposeEC left right, #[])
+  let isHot := fun i j => (hot[i]!)[j]!
+  let forced := left.mapIdx fun i l =>
+    let transfer := right.zipIdx.foldl (fun total (r, j) =>
+      if isHot i j then total
+      else caddE total (cdivE r.ampE (csubE l.poleE r.poleE))) (natE 0)
+    modeOfE l.poleE (cmulE l.ampE transfer)
+  let ringing := right.mapIdx fun j r =>
+    let coupling := left.zipIdx.foldl (fun total (l, i) =>
+      if isHot i j then total
+      else caddE total (cdivE l.ampE (csubE l.poleE r.poleE))) (natE 0)
+    modeOfE r.poleE (cnegE (cmulE r.ampE coupling))
+  let mut paired := #[]
+  for (l, i) in left.zipIdx do
+    for (r, j) in right.zipIdx do
+      if isHot i j then
+        paired := paired.push {
+          lam := clampedPoleE l
+          nu := clampedPoleE r
+          c := cmulE l.ampE r.ampE }
+  return (forced ++ ringing, paired)
+
+/-- Float terminal realization of stable divided differences.  This avoids the
+    fixed-amplitude admission needed by `modalBankSigTableDD`, which cannot
+    certify residues produced by an earlier live room. -/
+private def pairedSig (pairs : Array PairedMode) (clkInt anchorSamples : Sig) : Sig :=
+  let clkRel := relClockQ clkInt anchorSamples
+  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
+  let value := pairs.foldl (fun total pair =>
+    let delta := csubE pair.lam pair.nu
+    let z : CplxE := (mul delta.1 dSec, mul delta.2 dSec)
+    let zsq := add (mul z.1 z.1) (mul z.2 z.2)
+    let directLane := gt zsq (litF 0.01)
+    let zsafe : CplxE :=
+      (selectE directLane z.1 (lit 1), selectE directLane z.2 (lit 0))
+    let ezr := expSig z.1
+    let ez : CplxE := (mul ezr (cosSig z.2), mul ezr (sinSig z.2))
+    let direct := cdivE (csubE ez (natE 1)) zsafe
+    let series := cexpm1SeriesE z
+    let cx : CplxE :=
+      (selectE directLane direct.1 series.1,
+       selectE directLane direct.2 series.2)
+    let secular := cmulE pair.c (scaleRealE dSec cx)
+    let env := expSig (mul pair.nu.1 dSec)
+    let phase := modePhaseQ pair.nu.2 clkRel
+    let carrier : CplxE := (mul env (cosSig phase), mul env (sinSig phase))
+    add total (cmulE secular carrier).1) (lit 0)
+  selectE (gt clkRel (lit 0)) value (lit 0)
+
 /-- Read both strict half-axis banks and supply the continuous mixed-orientation
     convolution value at the strike itself. -/
 def Bank.realizeSig (bank : Bank) (clkInt anchorSamples : Sig) : Sig :=
@@ -39,10 +106,10 @@ def Bank.realizeSig (bank : Bank) (clkInt anchorSamples : Sig) : Sig :=
     the exact clock mirror of the existing causal divided-difference carrier. -/
 def TerminalBank.realizeSig (terminal : TerminalBank)
     (clkInt anchorSamples : Sig) : Sig :=
-  let future := modalBankSigTableDD terminal.futurePaired clkInt anchorSamples
+  let future := pairedSig terminal.futurePaired clkInt anchorSamples
   let anchorQ := toIntE (mul anchorSamples (lit 4294967296))
   let mirroredClock := sub (mul (lit 2) anchorQ) clkInt
-  let past := modalBankSigTableDD terminal.pastPaired mirroredClock anchorSamples
+  let past := pairedSig terminal.pastPaired mirroredClock anchorSamples
   add (terminal.bank.realizeSig clkInt anchorSamples) (add future past)
 
 private def mixedPairs (left right : Array ModalMode)
@@ -58,8 +125,8 @@ private def mixedPairs (left right : Array ModalMode)
 def Bank.convolveKernelTerminal (input : Bank) (room : Array ModalMode)
     (direction : Sig) : TerminalBank :=
   let kernel := Bank.kernel room direction
-  let (future, futurePaired) := residueComposePartitioned input.future kernel.future
-  let (past, pastPaired) := residueComposePartitioned input.past kernel.past
+  let (future, futurePaired) := terminalSameSide input.future kernel.future
+  let (past, pastPaired) := terminalSameSide input.past kernel.past
   let fp := mixedPairs input.future kernel.past fun f p =>
     convolveFuturePast (Atom.ofMode f) (Atom.ofMode p)
   let pf := mixedPairs input.past kernel.future fun p f =>
