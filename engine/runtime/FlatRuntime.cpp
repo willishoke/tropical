@@ -629,7 +629,14 @@ FlatRuntime::load_ir_staged_with_observation_generation(
          new_state.coeff_generations[
            std::atomic_ref(new_state.control_published_gen)
              .load(std::memory_order_relaxed)])
+    {
+      if (column.size() > std::numeric_limits<uint32_t>::max()
+          || column_floats
+               > std::numeric_limits<uint32_t>::max() - column.size())
+        throw std::runtime_error(
+          "FlatRuntime: aggregate Metal coefficient columns exceed uint32");
       column_floats += column.size();
+    }
     new_state.metal = tropical_metal::create(
       audio_msl_source, metal_render_tile_frames_,
       static_cast<uint32_t>(new_state.slots.size()),
