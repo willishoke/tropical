@@ -77,6 +77,29 @@ controls are evaluated, so patch algebra retimes both normally. In particular,
 an addressed response under context `κ` is `κ(address(κ, t))`, not an
 after-the-fact transformation of an already resolved coordinate.
 
+Room direction is local to the room kernel, not a reversal of the complete
+upstream modal value.  For a room impulse response `h`, input `x`, time reversal
+`T(f)(t) = f(-t)`, and the incumbent linear direction control `d`, the room law
+is:
+
+```text
+h[d] = (1 - d) * h + d * T(h)
+room(h, d, x) = h[d] convolution x
+```
+
+Thus every nonterminal room owns an independent direction: a later room acts
+on the earlier room's result but never overwrites or reverses the earlier
+source.  Endpoint `d = 0` selects the forward kernel and `d = 1` the reversed
+kernel.  A separate modal reverse operator, if exposed, would mean `T(x)` and
+is not the meaning of `room.dir`.  Mixed forward/reverse convolution may have
+nonzero past and future arms, so production modal values retain both supports
+until a true signal terminal.
+
+An authored gauge remains a `Modal -> Modal` operator at its exact graph
+position.  It rescales the complete modal value by one self-measured norm; it
+is not an automatic stability repair and may not be distributed independently
+over past/future arms or modalMix branches without an equality proof.
+
 Rooms may use fixed structural topology, immutable tables, and bounded
 capacities, but they do not contain parameter-history state or consult prior
 control values. Generic closed-form glide sources are ordinary members of
