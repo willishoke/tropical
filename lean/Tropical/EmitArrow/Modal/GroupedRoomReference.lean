@@ -70,6 +70,7 @@ structure RoomReferenceGroup where
     produced it.  Pole coordinates/residues and generated prefixes live here,
     never in `RoomProfile`. -/
 structure RoomReferenceSpecialization where
+  private mk ::
   profileId : String
   profileVersion : Nat
   evaluatorVersion : String
@@ -87,6 +88,26 @@ private def exclusion (kind : RoomExclusionKind) (detail : String)
 
 private def jsonD (n : Lean.JsonNumber) : DyadicI := DyadicI.ofJsonNumber n
 
+/-- The evaluator emits exact, twelve-place decimal literals and refuses any
+    generated coefficient outside this fixed envelope.  The bound is part of
+    the v1 evaluator contract: prefix growth can never reach `litF`'s lossy
+    UInt64 path or hand an unbounded coefficient to the runtime. -/
+private def roomPrefixMagnitudeLimit : DyadicI := DyadicI.ofNat 1000000
+
+private def withinPrefixEnvelope (x : DyadicI) : Bool :=
+  x.ok && Dyadic.ble (DyadicI.abs x).hi roomPrefixMagnitudeLimit.lo
+
+/-- Deterministic exact-carrier emission.  The mantissa is computed in
+    unbounded `Int` arithmetic, after the fixed evaluator envelope is checked;
+    no intermediate `Float` or `UInt64` can saturate. -/
+private def emittedD? (x : DyadicI) : Option Sig :=
+  if withinPrefixEnvelope x then
+    let mantissa := Dyadic.toDecimalMantissa (DyadicI.mid x) 12
+    -- `JsonNumber`'s textual form for zero with a decimal exponent is not a
+    -- valid JSON numeral (`0.e-…`); canonical zero has no exponent.
+    some (if mantissa == 0 then lit 0 else lit mantissa 12)
+  else none
+
 private def containsI (lo hi x : DyadicI) : Bool :=
   lo.ok && hi.ok && x.ok && Dyadic.ble lo.lo x.lo && Dyadic.ble x.hi hi.hi
 
@@ -99,10 +120,21 @@ private def validDomain (d : RoomPoleDomain) : Bool :=
     !DyadicI.certLt f0 DyadicI.zero && DyadicI.certLt f0 f1 &&
     DyadicI.certGt s0 DyadicI.zero && DyadicI.certLt s0 s1
 
-private def sourcePole? (m : ModalMode) : Option (DyadicI × DyadicI) := do
-  let sigma ← sigConstD? m.sigma
-  let omega ← sigConstD? m.omega
-  if sigma.ok && omega.ok then some (sigma, omega) else none
+private inductive SourcePoleRead where
+  | nonconstant
+  | nonfinite
+  | value (sigma omega : DyadicI)
+
+private def sourcePoleRead (m : ModalMode) : SourcePoleRead :=
+  match sigConstD? m.sigma, sigConstD? m.omega with
+  | none, _ | _, none => .nonconstant
+  | some sigma, some omega =>
+    if sigma.ok && omega.ok then .value sigma omega else .nonfinite
+
+private def sourcePole? (m : ModalMode) : Option (DyadicI × DyadicI) :=
+  match sourcePoleRead m with
+  | .value sigma omega => some (sigma, omega)
+  | _ => none
 
 private def collectAdmissionExclusions (profile : RoomProfile)
     (sampleRate : Nat) (modes : Array ModalMode) : Array RoomExclusion := Id.run do
@@ -169,25 +201,28 @@ private def collectAdmissionExclusions (profile : RoomProfile)
   let fHi := jsonD profile.admission.poles.maxFrequencyHz
   let sLo := jsonD profile.admission.poles.minSigma
   let sHi := jsonD profile.admission.poles.maxSigma
-  let twoPi := Tropical.Exact.twoPiI
+  -- Admission uses the same authored decimal constant as `ModalMode.hz`.
+  -- That makes the documented inclusive Hz boundary attainable exactly.
+  let twoPi := jsonD ⟨6283185307179586, 15⟩
   for (mode, row) in modes.zipIdx do
     if mode.deg != 0 then
       out := out.push (exclusion .unsupportedDegree
         s!"degree {mode.deg} is unsupported; the reference admits degree zero"
         (some row))
-    match sourcePole? mode with
-    | none =>
+    match sourcePoleRead mode with
+    | .nonconstant =>
       out := out.push (exclusion .nonconstantPole
-        "sigma and omega must be finite build-time constants" (some row))
-    | some (sigma, omega) =>
-      if !sigma.ok || !omega.ok then
-        out := out.push (exclusion .nonfinitePole
-          "sigma and omega must be finite" (some row))
-      else
-        let frequency := DyadicI.div (DyadicI.abs omega) twoPi
-        if !containsI sLo sHi sigma || !containsI fLo fHi frequency then
-          out := out.push (exclusion .poleOutOfDomain
-            s!"source pole is outside profile '{profile.id}' admission" (some row))
+        "sigma and omega must be build-time constants" (some row))
+    | .nonfinite =>
+      out := out.push (exclusion .nonfinitePole
+        "sigma and omega must be finite" (some row))
+    | .value sigma omega =>
+      let omegaAbs := DyadicI.abs omega
+      let omegaLo := DyadicI.mul fLo twoPi
+      let omegaHi := DyadicI.mul fHi twoPi
+      if !containsI sLo sHi sigma || !containsI omegaLo omegaHi omegaAbs then
+        out := out.push (exclusion .poleOutOfDomain
+          s!"source pole is outside profile '{profile.id}' admission" (some row))
   return out
 
 private def exactPolePerSample (sigma omega : DyadicI) (sampleRate : Nat) : CplxDI :=
@@ -195,7 +230,10 @@ private def exactPolePerSample (sigma omega : DyadicI) (sampleRate : Nat) : Cplx
   CplxDI.exp ⟨DyadicI.neg (DyadicI.div sigma rate), DyadicI.div omega rate⟩
 
 private def emittedCplx? (z : CplxDI) : Option CplxE :=
-  if z.ok then some (litF z.re.toFloat, litF z.im.toFloat) else none
+  if !z.ok then none else do
+  let re ← emittedD? z.re
+  let im ← emittedD? z.im
+  pure (re, im)
 
 /-- Prefix law computed entirely in the exact bake carrier:
     `A[r] = Σ_{k=0}^r carrier[k]·(radius/pole)^k` and
@@ -245,14 +283,16 @@ def specializeGroupedRoomReference (profile : RoomProfile) (sampleRate : Nat)
   for group in profile.groups do
     let radius := jsonD group.radius
     let logRadius := DyadicI.log radius
-    if !logRadius.ok then
+    let logRadiusE := emittedD? logRadius
+    if !logRadius.ok || logRadiusE.isNone then
       throw { exclusions := #[exclusion .prefixComputation
-        "exact log(radius) failed" none (some groups.size)] }
+        "log(radius) failed or exceeded the v1 coefficient envelope"
+        none (some groups.size)] }
     groups := groups.push {
       id := group.id
       period := group.period
       prefixOffset := prefixStride
-      logRadius := litF logRadius.toFloat }
+      logRadius := logRadiusE.get! }
     prefixStride := prefixStride + group.period
 
   let mut forwardPrefix : Array CplxE := #[]
@@ -335,8 +375,8 @@ private def cselectE (c : Sig) (a b : CplxE) : CplxE :=
 /-- `exp((-sigma+i*omega)t/Fs)`, with `t` in samples.  The caller supplies a
     clock already made relative in integer Q32.32, so far absolute seeks do not
     spend phase or envelope mantissa bits. -/
-private def roomPoleExpSamples (sigma omega t : Sig) : CplxE :=
-  let sec := div t .sampleRate
+private def roomPoleExpSamples (bakedRate sigma omega t : Sig) : CplxE :=
+  let sec := div t bakedRate
   let env := roomExpSig (neg (mul sigma sec))
   let phase := mul omega sec
   (mul env (roomCosSig phase), mul env (roomSinSig phase))
@@ -350,14 +390,14 @@ private def complexTableRead (reTable imTable sourceIdx groupOffset residue
   (Sig.index reTable i, Sig.index imTable i)
 
 private def groupedRoomReferencePair (sourceIdx groupIdx : Sig)
-    (sigma omega cre cim position u : Sig)
+    (bakedRate sigma omega cre cim position u : Sig)
     (sourceStride periods logRadii offsets forwardRe forwardIm reverseRe reverseIm : Sig) : Sig :=
   let periodI := toIntE (Sig.index periods groupIdx)
   let periodF := toFloatE periodI
   let logRadius := Sig.index logRadii groupIdx
   let groupOffset := toIntE (Sig.index offsets groupIdx)
   let radiusP := radiusPow logRadius periodF
-  let ep := roomPoleExpSamples sigma omega periodF
+  let ep := roomPoleExpSamples bakedRate sigma omega periodF
   let zP := cscaleE radiusP ep
   let invEp := cdivE (lit 1, lit 0) ep
   let g := cscaleE radiusP invEp
@@ -370,10 +410,10 @@ private def groupedRoomReferencePair (sourceIdx groupIdx : Sig)
   let aR := complexTableRead forwardRe forwardIm sourceIdx groupOffset rI sourceStride
   let aLast := complexTableRead forwardRe forwardIm sourceIdx groupOffset
     (sub periodI (litI 1)) sourceStride
-  let eu := roomPoleExpSamples sigma omega u
+  let eu := roomPoleExpSamples bakedRate sigma omega u
   let pq := mul periodF q
   let gq := cscaleE (radiusPow logRadius pq)
-    (roomPoleExpSamples sigma omega (neg pq))
+    (roomPoleExpSamples bakedRate sigma omega (neg pq))
   let euGq := cmulE eu gq
   let causalDenom : CplxE := (sub (lit 1) g.1, neg g.2)
   let nearOne := ltE
@@ -394,7 +434,7 @@ private def groupedRoomReferencePair (sourceIdx groupIdx : Sig)
   let b := complexTableRead reverseRe reverseIm sourceIdx groupOffset
     (modE d periodI) sourceStride
   let reverseDenom : CplxE := (sub (lit 1) zP.1, neg zP.2)
-  let reversePhase := roomPoleExpSamples sigma omega (add u dF)
+  let reversePhase := roomPoleExpSamples bakedRate sigma omega (add u dF)
   let reverseNumerator := cscaleE (radiusPow logRadius dF)
     (cmulE reversePhase b)
   let reverseResponse := cdivE reverseNumerator reverseDenom
@@ -411,6 +451,7 @@ private def groupedRoomReferencePair (sourceIdx groupIdx : Sig)
 def groupedRoomReferenceSig (specialization : RoomReferenceSpecialization)
     (clk anchor position : Sig) : Sig :=
   if specialization.modes.isEmpty || specialization.groups.isEmpty then lit 0 else
+  let bakedRate := lit specialization.sampleRate
   let sigma := Sig.arr (specialization.modes.map (·.sigma))
   let omega := Sig.arr (specialization.modes.map (·.omega))
   let cre := Sig.arr (specialization.modes.map (·.cre))
@@ -431,12 +472,16 @@ def groupedRoomReferenceSig (specialization : RoomReferenceSpecialization)
     forwardRe, forwardIm, reverseRe, reverseIm]
   let inner := Sig.bankSum specialization.groups.size columns
     (groupedRoomReferencePair sourceIdx groupIdx
+      bakedRate
       (Sig.index sigma sourceIdx) (Sig.index omega sourceIdx)
       (Sig.index cre sourceIdx) (Sig.index cim sourceIdx)
       position u sourceStride periods logRadii offsets
       forwardRe forwardIm reverseRe reverseIm)
     none 4301
-  Sig.bankSum specialization.modes.size columns inner none 4300
+  let room := Sig.bankSum specialization.modes.size columns inner none 4300
+  -- Prefixes and pole evolution are baked against one rate.  A plan with a
+  -- different runtime rate fails closed instead of combining two time bases.
+  selectE (.binary .eq .sampleRate bakedRate) room (lit 0)
 
 /-- Arrow terminal over the caller's clock rail.  POSITION is live; room amount
     remains an external gain. -/
