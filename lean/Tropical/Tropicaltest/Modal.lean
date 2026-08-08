@@ -1510,12 +1510,10 @@ def runModalForestTimedIslands (arena : Arena)
           | none => false
           | some branch =>
             let anchorOk := branch.strikeAnchor == lit (Int.ofNat anchors[i]!)
-            let bankOk := match branch.bank with
-              | .bloomed voice room B g =>
-                i % 4 == 0 && voice.size == 1 && room.isEmpty &&
-                  B == bloomB && g == bloomG
-              | .plain voice rooms =>
-                i % 4 != 0 && voice.size == 1 && rooms.isEmpty
+            let bankOk := branch.stages.isEmpty && match branch.source with
+              | .bloomed voice B g =>
+                i % 4 == 0 && voice.size == 1 && B == bloomB && g == bloomG
+              | .plain voice => i % 4 != 0 && voice.size == 1
             anchorOk && bankOk
 
   let carrier := fun (name : String) (graph : PatchGraph) => (do
@@ -1737,8 +1735,8 @@ def runModalUniverseHistory (arena : Arena)
       let ranks := fun id => if id == "s" then some 0 else if id == "a" then some 1
         else if id == "b" then some 2 else none
       let deferred := match Tropical.EmitArrow.lowerModal graph ranks "b" 2 with
-        | .ok #[branch] => match branch.bank with
-          | .plain _ rooms => rooms.size == 2
+        | .ok #[branch] => match branch.source with
+          | .plain _ => branch.stages.size == 2
           | _ => false
         | _ => false
       let modalThroughChain := Tropical.EmitArrow.nodeIsModal graph "a" &&

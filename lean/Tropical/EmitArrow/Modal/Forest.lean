@@ -3,55 +3,81 @@ import Tropical.EmitArrow.Modal.Realize
 /-!
 # EmitArrow.Modal.Forest
 
-Deferred modal compiler values and their source-local room-folding helpers.
+Deferred modal compiler values and their authored-order stage spine.
 -/
 
 namespace Tropical.EmitArrow
 
-/-- The lowered modal value: a PLAIN source with its room chain DEFERRED
-    (accumulated, folded at realization — the EC/DD partition site) or a
-    BLOOMED source kept modal — its voice modes and the FOLDED room chain held
-    SEPARATE, so the pitch bloom is crossed ONCE (`bloomCompose`) at
-    realization, AFTER the rooms fold. Rooms fold by the residue calculus
-    reinterpreted as filter∘filter (the two-hats reading: a bank is both a
-    struck source `Σaᵢe^{λᵢd}` and a transfer function `Σaᵢ/(s−λᵢ)`, same
-    data), so gong⋙reverb⋙reverb crosses each nonlinearity exactly once.
+/-- A live room control keeps its authored fallback expression and, when the
+    port is patched, the signal-node id that supersedes it.  The id remains a
+    graph dependency; its `ArrowTerm` is resolved only at the terminal modal
+    seam, so a room never materializes a signal while it is still modal. -/
+structure ModalControlRef where
+  fallback : ArrowTerm
+  signalNode? : Option String := none
 
-    Why the plain arm defers (fork 3′): rooms COMMUTE (filter∘filter, the
-    bit-exact registered EC-commute law), so the fold order is free — and the
-    partition wants hot rooms (couplings near coincidence, `couplingHot`) to
-    fold LAST, where their couplings become `PairedMode` atoms that never need
-    to re-compose. A cold chain folds in arrival order through
-    `residueComposeEC` — byte-identical to the eager fold this replaced. -/
-inductive ModalBank where
-  | plain (voice : Array ModalMode) (rooms : Array (Array ModalMode))
-  | bloomed (voice room : Array ModalMode) (bloomB gRate : Float)
+def ModalControlRef.constant (value : Sig) : ModalControlRef :=
+  { fallback := .konst value }
+
+/-- A room kernel is either already expressed as modal modes (filters and
+    internal fixtures) or constructed from one live control after all controls
+    have been frozen at the terminal observation coordinate. -/
+inductive ModalRoomKernel where
+  | fixed (modes : Array ModalMode)
+  | controlled (control : ModalControlRef) (build : Sig → Array ModalMode)
+
+/-- One ordinary room operator.  Direction belongs to this kernel, never to the
+    source prefix or the complete branch.  Sway likewise belongs to the room's
+    decay law and therefore travels with the stage that authored it. -/
+structure OrdinaryRoomStage where
+  kernel : ModalRoomKernel
+  direction : ModalControlRef := ModalControlRef.constant (lit 0)
+  sway? : Option (ModalControlRef × ModalControlRef) := none
+
+/-- Modal→Modal operators in authored order.  A gauge is deliberately a peer
+    of a room rather than an eager lowering special case. -/
+inductive ModalStage where
+  | ordinaryRoom (room : OrdinaryRoomStage)
+  | gauge (control : ModalControlRef)
+
+/-- The deferred source representation.  Rooms and gauges live exclusively on
+    `ModalBranch.stages`, so heterogeneous ordering is never encoded by mutating
+    or prematurely folding this payload. -/
+inductive ModalSource where
+  | plain (voice : Array ModalMode)
+  | bloomed (voice : Array ModalMode) (bloomB gRate : Float)
 
 /-- One independently timed branch of a lowered modal island. The bank is the
     spectral payload; the remaining fields describe how and where only this
     branch is realized. Keeping that metadata per branch is what prevents a
     modal fan-in from borrowing its first input's strike anchor or clock. -/
 structure ModalBranch where
-  bank : ModalBank
+  source : ModalSource
+  stages : Array ModalStage := #[]
   strikeAnchor : Sig
   realizationClock : Clock
   addressNode? : Option String
-  direction? : Option ModalDir
   modeCount? : Option Sig
 
 /-- The compiler value carried by a modal edge. Authored order is semantic:
     effects map over it and a Modal→Sig seam realizes and sums it left-to-right. -/
 abbrev ModalForest := Array ModalBranch
 
-/-- Structural equality for the metadata that permits a legacy pole union.
-    The bank is deliberately excluded: compatible plain banks are concatenated
-    after their deferred rooms fold. -/
-def ModalBranch.sameRealizationMetadata (a b : ModalBranch) : Bool :=
-  a.strikeAnchor == b.strikeAnchor &&
-  a.realizationClock == b.realizationClock &&
-  a.addressNode? == b.addressNode? &&
-  a.direction? == b.direction? &&
-  a.modeCount? == b.modeCount?
+/-- Control dependencies in their terminal binding order. -/
+def ModalRoomKernel.controls : ModalRoomKernel → Array ModalControlRef
+  | .fixed _ => #[]
+  | .controlled control _ => #[control]
+
+def OrdinaryRoomStage.controls (room : OrdinaryRoomStage) : Array ModalControlRef :=
+  room.kernel.controls ++ #[room.direction] ++
+    (room.sway?.map (fun (sway, rate) => #[sway, rate])).getD #[]
+
+def ModalStage.controls : ModalStage → Array ModalControlRef
+  | .ordinaryRoom room => room.controls
+  | .gauge control => #[control]
+
+def ModalBranch.controls (branch : ModalBranch) : Array ModalControlRef :=
+  branch.stages.foldl (fun controls stage => controls ++ stage.controls) #[]
 
 /-- The COLLECTED chain fold, arrival order — today's exact expressions (the
     byte-identity comparator, and the fallback for the surfaces that need a

@@ -1,4 +1,5 @@
 import Tropical.EmitArrow.Modal
+import Tropical.EmitArrow.Modal.OrientedRealize
 import Tropical.Ir.Cycles
 
 /-!
@@ -117,7 +118,15 @@ inductive Node where
   | modalSource (modes : Array ModalMode) (anchor : Sig) (clk : Clock)
       (addr : Option String) (count : Option Sig := none)
       (bloom : Option (Float × Float) := none)
+  /-- A fixed modal room used by filters and internal fixtures.  Its optional
+      direction is still room-local; this constructor remains convenient for
+      structural banks that do not own a wireable RT60 control. -/
   | modalReverb (input : String) (room : Array ModalMode) (dir : Option ModalDir)
+  /-- The public ordinary room.  Its topology is a function of the frozen RT60
+      value, while all four controls retain their optional signal dependencies
+      until the terminal multi-input binding seam. -/
+  | modalRoom (input : String) (build : Sig → Array ModalMode)
+      (rt60 direction sway rate : ModalControlRef)
   | modalMix (inputs : Array String)
   -- `modalGauge` is the excitation-gauge adapter (§5): it re-levels its modal input's
   -- residues by the self-measured `‖H‖^{−g}` (`normalizePeak`), a pure Modal ⇝ Modal
@@ -152,6 +161,8 @@ def Node.inputIds : Node → Array String
   | .sflange i m _ => #[i, m]
   | .modalSource _ _ _ addr _ _ => (addr.map (#[·])).getD #[]
   | .modalReverb i _ _ | .modalGauge i _ => #[i]
+  | .modalRoom i _ rt60 direction sway rate =>
+      #[i] ++ (#[rt60, direction, sway, rate].filterMap (fun control => control.signalNode?))
 
 /-- Is `id` a modal-island node? Its output wire carries poles, not a `Sig`. A
     missing node reads as Sig (graceful — a half-built patch stays lowerable). -/
@@ -161,17 +172,17 @@ def nodeIsModal (g : PatchGraph) (id : String) : Bool :=
   | some pn => match pn.node with
     | .modalSource .. => true
     | .modalReverb .. => true
+    | .modalRoom .. => true
     | .modalMix .. => true
     | .modalGauge .. => true
     | _ => false
 
 /-- The empty modal value (`__silence__`, the graceful-silence contract). -/
 private def silentModal : ModalBranch where
-  bank := .plain #[] #[]
+  source := .plain #[]
   strikeAnchor := lit 0
   realizationClock := clockLit
   addressNode? := none
-  direction? := none
   modeCount? := none
 
 /-- Silence remains a singleton so terminals that historically accepted an
@@ -213,19 +224,17 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
     let ms := clampSigmas ms
     match bloom? with
     | none => .ok #[{
-        bank := .plain ms #[]
+        source := .plain ms
         strikeAnchor := a
         realizationClock := clk
         addressNode? := addr
-        direction? := none
         modeCount? := count }]
     -- a bloomed source starts modal with an EMPTY room; reverbs fold in downstream
     | some (B, gr) => .ok #[{
-        bank := .bloomed ms #[] B gr
+        source := .bloomed ms B gr
         strikeAnchor := a
         realizationClock := clk
         addressNode? := addr
-        direction? := none
         modeCount? := count }]
   | .modalReverb inId room dir => do
     let lowered ←
@@ -241,23 +250,29 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
     -- Room unit modes enter clamped (the uniform-bank σ clamp — see
     -- `.modalSource`); in-span drives are value-identical.
     let room := clampSigmas room
+    let direction := ModalControlRef.constant (dir.map (fun d => d.dir) |>.getD (lit 0))
+    let sway? := dir.bind (fun d => d.damp) |>.map fun (sway, rate) =>
+      (ModalControlRef.constant sway, ModalControlRef.constant rate)
+    let stage : ModalStage := .ordinaryRoom {
+      kernel := .fixed (clampSigmas room)
+      direction
+      sway? }
     return lowered.map fun branch =>
-      match branch.bank with
-      | .plain v rooms =>
-        -- source ⋙ filter: ACCUMULATE the room independently on every
-        -- branch. Amps stay symbolic, so live source knobs survive the room.
-        { branch with
-          bank := .plain v (rooms.push room)
-          direction? := dir.orElse (fun _ => branch.direction?)
-          modeCount? := none }
-      | .bloomed voice acc B gr =>
-        -- filter ∘ filter: fold this room into this branch's accumulated
-        -- room chain while leaving its voice and bloom uncrossed.
-        let folded := if acc.isEmpty then room else residueComposeEC acc room
-        { branch with
-          bank := .bloomed voice folded B gr
-          direction? := dir.orElse (fun _ => branch.direction?)
-          modeCount? := none }
+      { branch with stages := branch.stages.push stage, modeCount? := none }
+  | .modalRoom inId build rt60 direction sway rate => do
+    let lowered ←
+      if inId == "__silence__" then pure silentForest
+      else match rankOf inId with
+        | none => throw s!"lowerModal: node '{inId}' not found"
+        | some ri =>
+          if h : ri < r then lowerModal g rankOf inId ri
+          else throw (cycleGuardMsg id inId)
+    let stage : ModalStage := .ordinaryRoom {
+      kernel := .controlled rt60 (fun value => clampSigmas (build value))
+      direction
+      sway? := some (sway, rate) }
+    return lowered.map fun branch =>
+      { branch with stages := branch.stages.push stage, modeCount? := none }
   | .modalGauge inId gExpr => do
     let lowered ←
       if inId == "__silence__" then pure silentForest
@@ -266,21 +281,9 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
         | some ri =>
           if h : ri < r then lowerModal g rankOf inId ri
           else throw (cycleGuardMsg id inId)
-    -- re-level in place: `normalizePeak` scales residues by the SETTLED norm (s0),
-    -- preserving the pole set — so `count` (the live mode count) survives, unlike a
-    -- reverb's composition. An un-settleable input declines to identity inside
-    -- `normalizePeak`. A bloomed source gauges its VOICE modes; the folded room and
-    -- the uncrossed bloom are untouched.
+    let stage : ModalStage := .gauge (ModalControlRef.constant gExpr)
     return lowered.map fun branch =>
-      match branch.bank with
-      -- gauge is a COLLECTED surface in v1: each branch self-measures its own
-      -- composed bank. Its output amps keep the existing collected behavior.
-      | .plain v rooms =>
-        { branch with
-          bank := .plain (normalizePeak gExpr (foldRoomsEC v rooms)) #[] }
-      | .bloomed voice acc B gr =>
-        { branch with
-          bank := .bloomed (normalizePeak gExpr voice) acc B gr }
+      { branch with stages := branch.stages.push stage }
   | .modalMix inputs => do
     let forests ← inputs.mapM fun i =>
       if i == "__silence__" then pure silentForest
@@ -293,39 +296,40 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
     if parts.isEmpty then
       .error s!"modalMix '{id}': no inputs"
     else
-      -- Pole union remains the compatibility optimization for a forest whose
-      -- branches have structurally identical realization metadata. Different
-      -- anchors/clocks/addresses/directions remain independent branches.
-      let normalizeBranch : ModalBranch → ModalBranch := fun branch =>
-        match branch.bank with
-        | .plain ms rooms => { branch with
-            bank := .plain (foldRoomsEC ms rooms) #[]
-            modeCount? := none }
-        -- A bloomed branch cannot participate in a pole union: its clock warp
-        -- is part of the branch's realization. Keep it in its authored slot and
-        -- let the Modal→Sig seam realize it independently.
-        | .bloomed .. => branch
-      let normalized := parts.map normalizeBranch
-      match normalized.toList with
-      | [] => .error s!"modalMix '{id}': no inputs"
-      | first :: _ =>
-        -- Preserve the incumbent pole-union optimization only when the WHOLE
-        -- forest is plain and metadata-compatible. In a heterogeneous forest,
-        -- even compatible plain branches stay in place so no bloomed branch is
-        -- crossed, merged, or reordered as an accidental side effect.
-        let allPlain := normalized.all fun branch => match branch.bank with
-          | .plain .. => true
-          | .bloomed .. => false
-        if allPlain && normalized.all (ModalBranch.sameRealizationMetadata first) then
-          let union := normalized.foldl (fun acc branch => match branch.bank with
-            | .plain modes _ => acc ++ modes
-            | .bloomed .. => acc) #[]
-          .ok #[{ first with bank := .plain union #[], modeCount? := none }]
-        else
-          .ok normalized
+      -- A modal mix is the authored-order forest constructor.  It performs no
+      -- eager room fold or pole union: either would erase heterogeneous stage
+      -- position or make extensional equality depend on current controls.
+      .ok parts
   | _ => .error s!"a modal inlet (reverb/modal-mix) needs a modal SOURCE — resonator or modal-mix — but '{id}' is a signal node; a Sig has no poles to compose"
 termination_by r
 decreasing_by all_goals exact h
+
+/-- Fold an authored stage spine over one plain source after the response clock
+    and every control have been bound at the terminal coordinate.  The cursor
+    follows `ModalStage.controls` exactly: kernel control, direction, optional
+    sway/rate, then gauge. -/
+private def resolvePlainStages (voice : Array ModalMode) (stages : Array ModalStage)
+    (responseClock : Sig) (values : Array Sig) : Oriented.Bank :=
+  let initial := (0, Oriented.Bank.ofFuture voice)
+  (stages.foldl (fun (state : Nat × Oriented.Bank) stage =>
+    let (cursor, bank) := state
+    match stage with
+    | .ordinaryRoom room =>
+      let (kernel, cursor) := match room.kernel with
+        | .fixed modes => (modes, cursor)
+        | .controlled _ build => (build ((values[cursor]?).getD (lit 0)), cursor + 1)
+      let direction := clampE ((values[cursor]?).getD (lit 0)) (lit 0) (lit 1)
+      let cursor := cursor + 1
+      let (kernel, cursor) := match room.sway? with
+        | none => (kernel, cursor)
+        | some _ =>
+          let sway := clampE ((values[cursor]?).getD (lit 0)) (lit 0) (lit 9 1)
+          let rate := clampE ((values[cursor + 1]?).getD (lit 0)) (lit 0) (lit 8)
+          (Oriented.swayKernel kernel sway rate responseClock, cursor + 2)
+      (cursor, bank.convolveKernel kernel direction Oriented.syntacticSameSideClassifier)
+    | .gauge _ =>
+      let g := clampE ((values[cursor]?).getD (lit 0)) (lit 0) (lit 1)
+      (cursor + 1, bank.gauge g)) initial).2
 
 mutual
 /-- The gated `Sig`-side recursion step: rank lookup, dangling refusal
@@ -385,36 +389,47 @@ def lowerInput (g : PatchGraph) (rankOf : String → Option Nat)
     let terms ← forest.mapM fun modal => do
       -- Realize each branch independently at THIS edge. The forest order is the
       -- authored order and therefore the signal-sum order.
-      let term ← match modal.bank with
-        | .plain ms rooms =>
-          -- A DIRECTION rotates this branch's poles and reads them through the
-          -- per-mode gate; otherwise its deferred room chain folds here.
-          .ok (match modal.direction? with
-            | none =>
-              let (plain, paired) := foldRoomsPartitioned ms rooms
-              modalBankTermPartitioned plain paired modal.strikeAnchor
-                modal.realizationClock modal.modeCount?
-            | some d => modalBankTermDir (foldRoomsEC ms rooms) modal.strikeAnchor
-                modal.realizationClock d.dir d.damp modal.modeCount?)
-        | .bloomed voice room B gr =>
-          -- A genuinely bare bloom keeps its clock-warp realization. Once a
-          -- room crossing was requested, however, composition is all-or-nothing:
-          -- an unsupported or numerically excluded pair is a named lowering
-          -- error, never a bare-bloom or partial-room substitution.
+      let controlTerms ← modal.controls.mapM fun control =>
+        match control.signalNode? with
+        | none => pure control.fallback
+        | some controlId => lowerInputGated g rankOf id controlId r
+      match modal.source with
+      | .plain modes =>
+        if modal.stages.isEmpty then
+          let bare := modalBankTerm modes modal.strikeAnchor modal.realizationClock
+            modal.modeCount?
+          match modal.addressNode? with
+          | none => .ok bare
+          | some addrId =>
+            .ok (.swarp modalAddrWarp
+              (← lowerInputGated g rankOf id addrId r) bare)
+        else
+          -- The address warp is confined to the response-clock child. Control
+          -- terms remain siblings, so branch address does not implicitly retime
+          -- an independent control source; an ordinary downstream warp still
+          -- reaches every child through `arrN`'s shared clock context.
+          let response : ArrowTerm ← match modal.addressNode? with
+            | none => pure (.clk modal.realizationClock)
+            | some addrId => pure (.swarp modalAddrWarp
+                (← lowerInputGated g rankOf id addrId r)
+                (.clk modal.realizationClock))
+          .ok (.arrN (fun inputs =>
+            let responseClock := (inputs[0]?).getD modal.realizationClock
+            let values := inputs.extract 1 inputs.size
+            let bank := resolvePlainStages modes modal.stages responseClock values
+            bank.realizeSig responseClock modal.strikeAnchor)
+            (#[response] ++ controlTerms))
+      | .bloomed voice B gr =>
+        if !modal.stages.isEmpty then
+          .error s!"lower: bloomed stage crossing at '{id}' refused (room-kernel reverse/gauge closure requires the oriented Gamma bridge)"
+        else
           let bare := ArrowTerm.warp (bloomWarpClock modal.strikeAnchor B gr)
             (modalBankTerm voice modal.strikeAnchor modal.realizationClock modal.modeCount?)
-          if room.isEmpty then .ok bare
-          else
-            let composed := bloomComposeChecked voice room B gr
-            if composed.isComplete then
-              .ok (bloomComposedTerm composed.pairs modal.strikeAnchor modal.realizationClock)
-            else
-              .error s!"lower: bloomed room crossing at '{id}' refused ({composed.refusalSummary})"
-      match modal.addressNode? with
-      | none => .ok term
-      -- A patched address signal becomes only this branch's clock.
-      | some addrId =>
-        .ok (.swarp modalAddrWarp (← lowerInputGated g rankOf id addrId r) term)
+          match modal.addressNode? with
+          | none => .ok bare
+          | some addrId =>
+            .ok (.swarp modalAddrWarp
+              (← lowerInputGated g rankOf id addrId r) bare)
     -- Keep every pre-forest singleton plan structurally identical. Forests with
     -- multiple branches cross once as a stable authored-order signal sum.
     match terms.toList with
