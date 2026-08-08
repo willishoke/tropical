@@ -1392,11 +1392,10 @@ def runModalPatch (arena : Arena)
   | .error e, _ | _, .error e => failGate "modal-patch" s!"build: {firstLine e}"
 
 open Tropical.EmitArrow in
-/-- THE MODAL-FOREST M1 gate. Same-metadata branches retain the incumbent pole
-    union byte-for-byte; branches with different anchors remain independent and
-    enter the realized sum only at their own causal onset. The second arm is the
-    regression for the old `modalMix` behavior, which copied its first input's
-    anchor onto every later bank. -/
+/-- THE MODAL-FOREST M1 gate. A modal mix remains an authored-order forest and
+    therefore agrees byte-for-byte with an explicit signal-side sum of the same
+    independently realized branches. Different anchors remain independent and
+    enter that sum only at their own causal onset. -/
 def runModalForestAnchors (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : IO Bool := do
   let aModes : Array ModalMode := #[
@@ -1413,9 +1412,10 @@ def runModalForestAnchors (arena : Arena)
     nodes := #[source "a" aModes firstAnchor, source "b" bModes firstAnchor,
       { id := "mix", node := .modalMix #["a", "b"] }]
     output := "mix" }
-  let unionGraph : PatchGraph := {
-    nodes := #[source "union" (aModes ++ bModes) firstAnchor]
-    output := "union" }
+  let explicitGraph : PatchGraph := {
+    nodes := #[source "a" aModes firstAnchor, source "b" bModes firstAnchor,
+      { id := "sum", node := .mix #["a", "b"] }]
+    output := "sum" }
   let differentGraph : PatchGraph := {
     nodes := #[source "a" aModes firstAnchor, source "b" bModes secondAnchor,
       { id := "mix", node := .modalMix #["a", "b"] }]
@@ -1428,28 +1428,28 @@ def runModalForestAnchors (arena : Arena)
     let (out, _) := emitTerm (normalize term) {}
     .ok (buildExprCarrier name out arena) : Except String (Arena × ProgramIdx))
   match buildAndFinish (carrier "mf_same" sameGraph),
-        buildAndFinish (carrier "mf_union" unionGraph),
+        buildAndFinish (carrier "mf_explicit" explicitGraph),
         buildAndFinish (carrier "mf_different" differentGraph),
         buildAndFinish (carrier "mf_first" firstOnlyGraph) with
-  | .ok samePlan, .ok unionPlan, .ok differentPlan, .ok firstPlan =>
-    match ← renderPlanSamples samePlan 2048, ← renderPlanSamples unionPlan 2048,
+  | .ok samePlan, .ok explicitPlan, .ok differentPlan, .ok firstPlan =>
+    match ← renderPlanSamples samePlan 2048, ← renderPlanSamples explicitPlan 2048,
           ← renderPlanSamples differentPlan 2048, ← renderPlanSamples firstPlan 2048 with
-    | .ok same, .ok union, .ok different, .ok firstOnly =>
-      let n := min (min same.size union.size) (min different.size firstOnly.size)
+    | .ok same, .ok explicit, .ok different, .ok firstOnly =>
+      let n := min (min same.size explicit.size) (min different.size firstOnly.size)
       let mut sameBitDiff := 0
       let mut beforeSecondBitDiff := 0
       let mut afterSecondBitDiff := 0
       for i in [0:n] do
-        if same[i]! != union[i]! then sameBitDiff := sameBitDiff + 1
+        if same[i]! != explicit[i]! then sameBitDiff := sameBitDiff + 1
         if i ≤ 700 then
           if different[i]! != firstOnly[i]! then
             beforeSecondBitDiff := beforeSecondBitDiff + 1
         else if different[i]! != firstOnly[i]! then
           afterSecondBitDiff := afterSecondBitDiff + 1
-      IO.println "        ModalForest modal-mix, same-anchor compatibility and different-anchor causality:"
-      IO.println s!"        result   same-anchor union bitDiff={sameBitDiff}/{n} · before second anchor={beforeSecondBitDiff}/701 · after second anchor differing={afterSecondBitDiff}/{n - 701}"
+      IO.println "        ModalForest modal-mix, authored-order sum and different-anchor causality:"
+      IO.println s!"        result   forest≡explicit-sum bitDiff={sameBitDiff}/{n} · before second anchor={beforeSecondBitDiff}/701 · after second anchor differing={afterSecondBitDiff}/{n - 701}"
       if sameBitDiff == 0 && beforeSecondBitDiff == 0 && afterSecondBitDiff > 0 then
-        passGate "modal-forest-anchors" "same metadata keeps the incumbent union byte-exact; a later branch retains its own anchor and joins the stable signal sum only after that onset"
+        passGate "modal-forest-anchors" "modalMix preserves authored branch order and equals the explicit terminal sum; a later branch retains its own anchor and joins only after that onset"
       else
         failGate "modal-forest-anchors" s!"same={sameBitDiff} beforeSecond={beforeSecondBitDiff} afterSecond={afterSecondBitDiff}"
     | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
