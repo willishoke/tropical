@@ -466,7 +466,7 @@ def lowerInput (g : PatchGraph) (rankOf : String → Option Nat)
             let responseClock := (inputs[0]?).getD modal.realizationClock
             let values := inputs.extract 1 inputs.size
             let bank := resolvePlainStages modes modal.stages responseClock values
-            bank.realizeSig responseClock modal.strikeAnchor)
+            bank.realizeSig responseClock modal.strikeAnchor modal.modeCount?)
             (#[response] ++ controlTerms))
       | .bloomed voice B gr =>
         let term ← match fixedForwardBloomRooms? modal.stages with

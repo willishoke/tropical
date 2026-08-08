@@ -95,22 +95,28 @@ private def pairedSig (pairs : Array PairedMode) (clkInt anchorSamples : Sig) : 
 
 /-- Read both strict half-axis banks and supply the continuous mixed-orientation
     convolution value at the strike itself. -/
-def Bank.realizeSig (bank : Bank) (clkInt anchorSamples : Sig) : Sig :=
+def Bank.realizeSig (bank : Bank) (clkInt anchorSamples : Sig)
+    (count? : Option Sig := none) : Sig :=
+  let anchorQ := toIntE (mul anchorSamples (lit 4294967296))
+  let mirroredClock := sub (mul (lit 2) anchorQ) clkInt
+  let future := if bankIsUniform bank.future && count?.isSome then
+      modalBankSigTable bank.future clkInt anchorSamples count?
+    else modalBankSig bank.future clkInt anchorSamples
   let sides := add
-    (modalBankSig bank.future clkInt anchorSamples)
-    (modalBankSigDir bank.past clkInt anchorSamples (lit 1))
+    future
+    (modalBankSig bank.past mirroredClock anchorSamples)
   let atStrike := Sig.binary .eq (relClockQ clkInt anchorSamples) (lit 0)
   selectE atStrike bank.atZero.1 sides
 
 /-- Stable terminal read for hot same-side couplings.  A past paired atom is
     the exact clock mirror of the existing causal divided-difference carrier. -/
 def TerminalBank.realizeSig (terminal : TerminalBank)
-    (clkInt anchorSamples : Sig) : Sig :=
+    (clkInt anchorSamples : Sig) (count? : Option Sig := none) : Sig :=
   let future := pairedSig terminal.futurePaired clkInt anchorSamples
   let anchorQ := toIntE (mul anchorSamples (lit 4294967296))
   let mirroredClock := sub (mul (lit 2) anchorQ) clkInt
   let past := pairedSig terminal.pastPaired mirroredClock anchorSamples
-  add (terminal.bank.realizeSig clkInt anchorSamples) (add future past)
+  add (terminal.bank.realizeSig clkInt anchorSamples count?) (add future past)
 
 private def mixedPairs (left right : Array ModalMode)
     (pair : ModalMode → ModalMode → Expansion) : Expansion :=
@@ -160,8 +166,13 @@ def Bank.transferAt (bank : Bank) (omega : Sig) : CplxE :=
     current static universe, so it deliberately does not settle live controls to
     a target value before measuring them. -/
 def Bank.gaugeScale (g : Sig) (bank : Bank) : Sig :=
-  let frequencies := bank.future.map (fun mode => mode.omega) ++
+  let candidates := bank.future.map (fun mode => mode.omega) ++
     bank.past.map (fun mode => neg mode.omega)
+  -- Probe identity belongs to the transfer function, not its partial-fraction
+  -- spelling: splitting one atom into two half-amplitude atoms must not double
+  -- its contribution to the p-norm's outer sample grid.
+  let frequencies := candidates.foldl (fun probes frequency =>
+    if probes.contains frequency then probes else probes.push frequency) #[]
   let energy8 := frequencies.foldl (fun total omega =>
     let h := bank.transferAt omega
     let h2 := add (mul h.1 h.1) (mul h.2 h.2)
