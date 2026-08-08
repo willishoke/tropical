@@ -55,6 +55,57 @@ def runSlideProd (arena : Arena)
     | .error e, _ | _, .error e => failGate "slide-past-prod" s!"emit: {firstLine e}"
   | .error e, _ | _, .error e => failGate "slide-past-prod" s!"build: {firstLine e}"
 
+open Tropical.EmitArrow in
+/-- Build one side of the `arrN` seam differential. The `arrN` side binds two
+    distinct generators into `2·x + 3·y`; the reference spells the same value as
+    an authored-order sum. With `warped`, one downstream warp surrounds `arrN`
+    while the reference places that same warp on both children. -/
+private def buildArrNProbe (name : String) (useArrN warped : Bool)
+    (arena : Arena) (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) :=
+  let x : ArrowTerm := .gen (litPitchVoice 220) "arrn_x" clockLit
+  let y : ArrowTerm := .gen (litPitchVoice 330) "arrn_y" clockLit
+  let pointwise : Array Sig → Sig := fun xs =>
+    add (mul (lit 2) xs[0]!) (mul (lit 3) xs[1]!)
+  let arrTerm : ArrowTerm := .arrN pointwise #[x, y]
+  let refTerm : ArrowTerm := .sum #[.scale (lit 2) x, .scale (lit 3) y]
+  let term :=
+    if warped then
+      if useArrN then .warp slideBack arrTerm
+      else .sum #[.scale (lit 2) (.warp slideBack x),
+                  .scale (lit 3) (.warp slideBack y)]
+    else if useArrN then arrTerm else refTerm
+  let (out, b) := emitTerm (normalize term) {}
+  buildVoiceProgram name b.decls out arena resolved
+
+/-- THE MULTI-INPUT ARR gate. `arrN` must (1) emit children left-to-right so its
+    scalar bundle agrees with an authored-order reference and (2) thread one
+    enclosing clock transform into every child, so a downstream warp agrees
+    byte-for-byte with the same warp written on each input. -/
+def runArrN (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  match buildArrNProbe "ArrNPlain" true false arena resolved,
+        buildArrNProbe "ArrNPlainRef" false false arena resolved,
+        buildArrNProbe "ArrNWarp" true true arena resolved,
+        buildArrNProbe "ArrNWarpRef" false true arena resolved with
+  | .ok (plainA, plainI), .ok (plainRA, plainRI),
+    .ok (warpA, warpI), .ok (warpRA, warpRI) =>
+    match emitResolvedWire plainA plainI, emitResolvedWire plainRA plainRI,
+          emitResolvedWire warpA warpI, emitResolvedWire warpRA warpRI with
+    | .ok plain, .ok plainRef, .ok warped, .ok warpedRef =>
+      let plainOk := plain == plainRef
+      let warpOk := warped == warpedRef
+      if plainOk && warpOk then
+        passGate "arr-n"
+          s!"authored-order bundle and shared-cmod warp agree with explicit references (plain {plain.length}B, warped {warped.length}B)"
+      else
+        failGate "arr-n"
+          s!"plainEq={plainOk} warpEq={warpOk} (plain {plain.length}/{plainRef.length}B, warped {warped.length}/{warpedRef.length}B)"
+    | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
+      failGate "arr-n" s!"emit: {firstLine e}"
+  | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
+    failGate "arr-n" s!"build: {firstLine e}"
+
 /-- THE BOOTSTRAP gate. A `FixedSinOsc` built as a TERM over `{clk, +, ×, round}`
     (`fixedSinOscTerm` = `Sin(2π·phasor)`, no `gen`, no `.trop` instance) must
     render bit-for-bit identical to the `.trop` `FixedSinOsc` at the same pitch and

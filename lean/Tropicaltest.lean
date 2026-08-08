@@ -46,9 +46,9 @@ open Tropical.Ir (Arena ProgramIdx)
     reported as the total collapse it is; the `arrow-block-count` gate at the end
     of `main` checks the number against what the block actually ran, so it is
     verified rather than maintained. -/
-def arrowBlockGates : Nat := 101
+def arrowBlockGates : Nat := 102
 
-set_option maxRecDepth 1024 in
+set_option maxRecDepth 2048 in
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   let mut failed := 0
@@ -345,6 +345,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runSlideProd arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runArrN arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runBootstrapSin arena resolved) then

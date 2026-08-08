@@ -209,14 +209,20 @@ def clockLit : Clock := .binary .lshift .sampleIndex (lit 32)
 
 /-- A reified, inspectable arrow term. `gen` is a voice instance whose clock arg
     is the warp target; `warp φ t` is `warp(φ) ⋙ t` kept unreduced; `scale`/`arrUn`
-    are pointwise (clock-agnostic) `arr`s; `sum` is the left-assoc weighted sum
-    (the cartesian product collapse). Functions are carried opaquely — the slide
-    composes/applies them, never inspects them. -/
+    and `arrN` are pointwise (clock-agnostic) `arr`s; `sum` is the left-assoc
+    weighted sum (the cartesian product collapse). Functions are carried
+    opaquely — the slide composes/applies them, never inspects them. -/
 inductive ArrowTerm where
   | gen (v : Voice) (name : String) (clk : Clock)
   | warp (φ : Clock → Clock) (t : ArrowTerm)
   | scale (w : Sig) (t : ArrowTerm)
   | arrUn (f : Sig → Sig) (t : ArrowTerm)
+  /-- A pointwise map over an authored-order bundle of sub-terms. Every child is
+      emitted under the SAME enclosing clock transform, left-to-right, before
+      `f` rewires their resulting scalar signals. This is the reified arrow's
+      generic cartesian seam: it binds several independently sourced terms
+      without realizing any one of them early or introducing a runtime closure. -/
+  | arrN (f : Array Sig → Sig) (ts : Array ArrowTerm)
   | sum (ts : Array ArrowTerm)
   /-- A SIGNAL-dependent warp — the data-into-clock edge, made first-class. Bends
       the clock of `t` by `mw baseClk modSig`, where `modSig` is the SIGNAL of
@@ -276,6 +282,7 @@ def normalize : ArrowTerm → ArrowTerm
   | .gen v name clk => .gen v name clk
   | .scale w t => .scale w (normalize t)
   | .arrUn f t => .arrUn f (normalize t)
+  | .arrN f ts => .arrN f (ts.attach.map fun ⟨x, _⟩ => normalize x)
   | .sum ts => .sum (ts.attach.map fun ⟨x, _⟩ => normalize x)
   | .warp φ t => .warp φ (normalize t)
   | .swarp mw mod t => .swarp mw (normalize mod) (normalize t)
@@ -306,6 +313,16 @@ def emitTermC (cmod : Clock → Builder → Clock × Builder) :
     b.osc v s!"{name}{b.decls.size}" clk'
   | .scale w t, b => let (s, b) := emitTermC cmod t b; (mul w s, b)
   | .arrUn f t, b => let (s, b) := emitTermC cmod t b; (f s, b)
+  -- A multi-input pointwise map is the cartesian sibling of `arrUn`: emit each
+  -- child under the SAME enclosing transform in authored order, then apply the
+  -- build-time rewiring function to the resulting scalar bundle.
+  | .arrN f ts, b =>
+    let (sigs, b) := ts.attach.foldl
+      (fun (acc : Array Sig × Builder) ti =>
+        let (s, b') := emitTermC cmod ti.1 acc.2
+        (acc.1.push s, b'))
+      ((#[] : Array Sig), b)
+    (f sigs, b)
   -- a plain warp composes into the threaded transform (R1/R2/R4 in one line).
   | .warp φ t, b => emitTermC (fun c b => cmod (φ c) b) t b
   -- a signal warp: source the modulator (pinned through the SAME enclosing `cmod`,
