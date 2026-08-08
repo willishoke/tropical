@@ -659,6 +659,28 @@ def glideExprAt (pidx : String → Option Nat) (base : String) (dflt coordinate 
   let ss := mul (mul s s) (sub (lit 3) (mul (lit 2) s))
   add v0 (mul (sub v1 v0) ss)
 
+/-- `glideExprAt` on a Q32.32 clock coordinate.  The exact-timestamp path
+    subtracts on the integer rail before converting to seconds-of-samples, so a
+    fractional downstream warp reaches a modal control without being truncated
+    to whole samples. -/
+def glideExprQAt (pidx : String → Option Nat) (base : String)
+    (dflt coordinateQ : Sig) : Sig :=
+  let v0 := pref pidx s!"{base}#v0" dflt
+  let v1 := pref pidx s!"{base}#v1" dflt
+  let t0 := pref pidx s!"{base}#t0" (lit 0)
+  let exactNames := (Array.range 4).map fun i => s!"{base}#t0#u{i}"
+  let qScale := lit 4294967296
+  let elapsed :=
+    if exactNames.all (fun name => (pidx name).isSome) then
+      div (toFloatE (sub coordinateQ
+        (lshift (exactI64Companion pidx s!"{base}#t0") (lit 32)))) qScale
+    else
+      sub (div (toFloatE coordinateQ) qScale) t0
+  let dur := mul (lit 2 2) .sampleRate
+  let s := clampE (div elapsed dur) (lit 0) (lit 1)
+  let ss := mul (mul s s) (sub (lit 3) (mul (lit 2) s))
+  add v0 (mul (sub v1 v0) ss)
+
 def glideExpr (pidx : String → Option Nat) (base : String) (dflt : Sig) : Sig :=
   glideExprAt pidx base dflt .sampleIndex
 

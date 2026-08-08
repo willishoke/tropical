@@ -348,9 +348,7 @@ private def resolvePlainStageState (initial : Nat × Oriented.Bank)
       (cursor + 1, bank.gauge g)) initial
 
 /-- Fold an authored stage spine after binding the current static universe.  A
-    final room uses the stable EC/DD carrier for hot same-side couplings.  The
-    paired result is explicitly terminal; a later gauge/room keeps using the
-    composable oriented bank until generalized divided differences land. -/
+    final room uses the stable EC/DD carrier for hot same-side couplings. -/
 private def resolvePlainStages (voice : Array ModalMode) (stages : Array ModalStage)
     (responseClock : Sig) (values : Array Sig) : Oriented.TerminalBank :=
   let initial := (0, Oriented.Bank.ofFuture voice)
@@ -362,6 +360,19 @@ private def resolvePlainStages (voice : Array ModalMode) (stages : Array ModalSt
   | _ =>
     Oriented.TerminalBank.ofBank
       (resolvePlainStageState initial stages responseClock values).2
+
+/-- The present composable carrier can safely cross one nonterminal room.  A
+    second room must remain terminal: making it cross a later room or gauge
+    would require generalized composable divided differences when independently
+    authored damping expressions happen to have the same runtime value. -/
+private def plainStageSpineAdmitted (stages : Array ModalStage) : Bool := Id.run do
+  let mut roomsSeen := 0
+  for (stage, index) in stages.zipIdx do
+    if stage matches .ordinaryRoom _ then
+      if roomsSeen > 0 && index + 1 < stages.size then
+        return false
+      roomsSeen := roomsSeen + 1
+  return true
 
 /-- The already-proven causal bloom bridge remains available for a spine of
     fixed, unswayed, exactly-forward rooms.  Any live/local direction, sway,
@@ -444,7 +455,9 @@ def lowerInput (g : PatchGraph) (rankOf : String → Option Nat)
         | some controlId => lowerInputGated g rankOf id controlId r
       match modal.source with
       | .plain modes =>
-        if modal.stages.isEmpty then
+        if !plainStageSpineAdmitted modal.stages then
+          .error s!"lower: nonterminal repeated-room crossing at '{id}' refused (a later room or gauge requires the composable divided-difference carrier)"
+        else if modal.stages.isEmpty then
           let bare := modalBankTerm modes modal.strikeAnchor modal.realizationClock
             modal.modeCount?
           match modal.addressNode? with

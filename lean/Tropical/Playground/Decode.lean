@@ -70,13 +70,13 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
   -- A modal-room control remains an independently authored term until the
   -- terminal binding seam. Its signal wire wins; otherwise its knob fallback
   -- reads the same terminal clock context (including ordinary downstream
-  -- warps), expressed in integer samples for the glide law.
+  -- warps), retaining the terminal clock's fractional Q32.32 coordinate.
   let modalControl := fun (kname : String) =>
     let dflt := dv kname
     let fallback : ArrowTerm :=
       if isGlided kind kname then
-        .arrUn (fun clkQ => glideExprAt pidx s!"{id}.{kname}" dflt
-          (rshift clkQ (lit 32))) (.clk clk)
+        .arrUn (fun clkQ => glideExprQAt pidx s!"{id}.{kname}" dflt clkQ)
+          (.clk clk)
       else
         .konst (pref pidx s!"{id}.{kname}" dflt)
     ({ fallback
@@ -185,6 +185,7 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
       (.modalSource (resonatorBank f0 decay cap) (lit 0) clk addr? (some countE), #[])
   | "reverb" =>
     let rt60 := modalControl "rt60"
+    let rtRange := displayRangeOf "reverb" "rt60"
     -- ROOM-KERNEL DIRECTION: for this room impulse response `h`, `dir` selects
     -- `h[dir] = (1-dir)·h + dir·T(h)`, then the room composes `h[dir]` with its
     -- modal input. Thus 0 is the forward kernel, 1 the reversed kernel, and an
@@ -198,8 +199,11 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
     let sway := modalControl "sway"
     let swayRate := modalControl "rate"   -- 0.3 Hz: a slow breath
     (.modalRoom sig
-      (fun frozenRt60 => reverbRoom frozenRt60
-        (displayRangeOf "reverb" "rt60") 32 (60, 0) (6000, 0))
+      (fun frozenRt60 =>
+        let boundedRt60 := match rtRange with
+          | some (lo, hi) => clampE frozenRt60 (litF lo) (litF hi)
+          | none => frozenRt60
+        reverbRoom boundedRt60 rtRange 32 (60, 0) (6000, 0))
       rt60 dirX sway swayRate, #[])
   | "filter" =>
     -- the filter IS a modalReverb with a computed 2-mode room: the residue

@@ -39,6 +39,12 @@ private def samePhysicalFrequency (left right : ModalMode) : Bool :=
 private def terminalHot (left right : ModalMode) : Bool :=
   samePhysicalFrequency left right || couplingHot left right
 
+/-- Syntactically identical physical poles take the exact beta-limit route. -/
+def syntacticSameSideClassifier : SameSideClassifier := fun _ left right =>
+  if left.sigma == right.sigma && left.omega == right.omega
+  then .coincident
+  else .distinct
+
 private def terminalSameSide (left right : Array ModalMode) :
     Array ModalMode × Array PairedMode := Id.run do
   if left.isEmpty then return (#[], #[])
@@ -99,12 +105,18 @@ def Bank.realizeSig (bank : Bank) (clkInt anchorSamples : Sig)
     (count? : Option Sig := none) : Sig :=
   let anchorQ := toIntE (mul anchorSamples (lit 4294967296))
   let mirroredClock := sub (mul (lit 2) anchorQ) clkInt
-  let future := if bankIsUniform bank.future && count?.isSome then
+  let futureBanked := bankIsUniform bank.future &&
+    (count?.isSome || banksTableEnabled)
+  let pastBanked := bankIsUniform bank.past && banksTableEnabled
+  let future := if futureBanked then
       modalBankSigTable bank.future clkInt anchorSamples count?
     else modalBankSig bank.future clkInt anchorSamples
+  let past := if pastBanked then
+      modalBankSigTable bank.past mirroredClock anchorSamples none
+    else modalBankSig bank.past mirroredClock anchorSamples
   let sides := add
     future
-    (modalBankSig bank.past mirroredClock anchorSamples)
+    past
   let atStrike := Sig.binary .eq (relClockQ clkInt anchorSamples) (lit 0)
   selectE atStrike bank.atZero.1 sides
 
@@ -131,19 +143,30 @@ private def mixedPairs (left right : Array ModalMode)
 def Bank.convolveKernelTerminal (input : Bank) (room : Array ModalMode)
     (direction : Sig) : TerminalBank :=
   let kernel := Bank.kernel room direction
-  let (future, futurePaired) := terminalSameSide input.future kernel.future
-  let (past, pastPaired) := terminalSameSide input.past kernel.past
-  let fp := mixedPairs input.future kernel.past fun f p =>
-    convolveFuturePast (Atom.ofMode f) (Atom.ofMode p)
-  let pf := mixedPairs input.past kernel.future fun p f =>
-    convolvePastFuture (Atom.ofMode p) (Atom.ofMode f)
-  let mixed := fp.add pf |>.toBank
-  { bank := {
-      future := future ++ mixed.future
-      past := past ++ mixed.past
-      atZero := mixed.atZero }
-    futurePaired
-    pastPaired }
+  let degreeZero := (input.future ++ input.past ++ kernel.future ++ kernel.past).all
+    fun mode => mode.deg == 0
+  if !degreeZero then
+    -- The float paired carrier below is presently degree-zero.  General
+    -- exponential-polynomial inputs therefore stay on the exact algebraic
+    -- path instead of silently losing their polynomial factors.  Its
+    -- classifier recognizes structural coincidence; a generalized live DD
+    -- carrier remains the named boundary for runtime-equal higher degrees.
+    TerminalBank.ofBank
+      (input.convolveKernel room direction syntacticSameSideClassifier)
+  else
+    let (future, futurePaired) := terminalSameSide input.future kernel.future
+    let (past, pastPaired) := terminalSameSide input.past kernel.past
+    let fp := mixedPairs input.future kernel.past fun f p =>
+      convolveFuturePast (Atom.ofMode f) (Atom.ofMode p)
+    let pf := mixedPairs input.past kernel.future fun p f =>
+      convolvePastFuture (Atom.ofMode p) (Atom.ofMode f)
+    let mixed := fp.add pf |>.toBank
+    { bank := {
+        future := future ++ mixed.future
+        past := past ++ mixed.past
+        atZero := mixed.atZero }
+      futurePaired
+      pastPaired }
 
 /-- The bilateral transfer value at `s = i·omega`.  Future atoms contribute
     `A·p!/(s-λ)^(p+1)`; mirrored past atoms contribute
@@ -195,14 +218,5 @@ def swayKernel (modes : Array ModalMode) (sway rate responseClock : Sig) : Array
   let phase := phasorPhaseSig rate (lit 0) responseClock
   let scale := add (lit 1) (mul sway (sinSig (mul twoPiE phase)))
   modes.map fun mode => { mode with sigma := mul mode.sigma scale }
-
-/-- Syntactically identical physical poles take the exact beta-limit route.
-    All other pairs use the distinct expression.  Interval-wide coincidence
-    admission is a separate compiler gate; this classifier never guesses that
-    two different live expressions are equal. -/
-def syntacticSameSideClassifier : SameSideClassifier := fun _ left right =>
-  if left.sigma == right.sigma && left.omega == right.omega
-  then .coincident
-  else .distinct
 
 end Tropical.EmitArrow.Oriented
