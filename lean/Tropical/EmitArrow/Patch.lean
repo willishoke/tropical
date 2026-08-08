@@ -133,6 +133,7 @@ inductive Node where
   -- effect. `g` is a live slot. The norm is measured on the SETTLED poles, so an
   -- un-settleable (per-sample-modulated) input DECLINES to identity, never an s1 norm.
   | modalGauge (input : String) (g : Sig)
+  | modalGaugeControl (input : String) (g : ModalControlRef)
 
 structure PatchNode where
   id : String
@@ -161,6 +162,7 @@ def Node.inputIds : Node → Array String
   | .sflange i m _ => #[i, m]
   | .modalSource _ _ _ addr _ _ => (addr.map (#[·])).getD #[]
   | .modalReverb i _ _ | .modalGauge i _ => #[i]
+  | .modalGaugeControl i g => #[i] ++ (g.signalNode?.map (#[·])).getD #[]
   | .modalRoom i _ rt60 direction sway rate =>
       #[i] ++ (#[rt60, direction, sway, rate].filterMap (fun control => control.signalNode?))
 
@@ -175,6 +177,7 @@ def nodeIsModal (g : PatchGraph) (id : String) : Bool :=
     | .modalRoom .. => true
     | .modalMix .. => true
     | .modalGauge .. => true
+    | .modalGaugeControl .. => true
     | _ => false
 
 /-- The empty modal value (`__silence__`, the graceful-silence contract). -/
@@ -282,6 +285,17 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
           if h : ri < r then lowerModal g rankOf inId ri
           else throw (cycleGuardMsg id inId)
     let stage : ModalStage := .gauge (ModalControlRef.constant gExpr)
+    return lowered.map fun branch =>
+      { branch with stages := branch.stages.push stage }
+  | .modalGaugeControl inId control => do
+    let lowered ←
+      if inId == "__silence__" then pure silentForest
+      else match rankOf inId with
+        | none => throw s!"lowerModal: node '{inId}' not found"
+        | some ri =>
+          if h : ri < r then lowerModal g rankOf inId ri
+          else throw (cycleGuardMsg id inId)
+    let stage : ModalStage := .gauge control
     return lowered.map fun branch =>
       { branch with stages := branch.stages.push stage }
   | .modalMix inputs => do

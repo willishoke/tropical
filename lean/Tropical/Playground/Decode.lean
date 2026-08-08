@@ -71,7 +71,7 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
   -- terminal binding seam. Its signal wire wins; otherwise its knob fallback
   -- reads the same terminal clock context (including ordinary downstream
   -- warps), expressed in integer samples for the glide law.
-  let roomControl := fun (kname : String) =>
+  let modalControl := fun (kname : String) =>
     let dflt := dv kname
     let fallback : ArrowTerm :=
       if isGlided kind kname then
@@ -184,19 +184,19 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
       let countE := pref pidx s!"{id}.partials" (lit (Int.ofNat npart))
       (.modalSource (resonatorBank f0 decay cap) (lit 0) clk addr? (some countE), #[])
   | "reverb" =>
-    let rt60 := roomControl "rt60"
+    let rt60 := modalControl "rt60"
     -- ROOM-KERNEL DIRECTION: for this room impulse response `h`, `dir` selects
     -- `h[dir] = (1-dir)·h + dir·T(h)`, then the room composes `h[dir]` with its
     -- modal input. Thus 0 is the forward kernel, 1 the reversed kernel, and an
     -- interior value contains both. Direction is local to this room: it does not
     -- reverse the upstream modal value or the complete composed output. σ and ω
     -- stay fixed, so the crossfade remains audible across the whole range.
-    let dirX := roomControl "dir"
+    let dirX := modalControl "dir"
     -- SWAY: the room's decay breathes — σ ↦ σ·(1 + sway·sin(2π·rate·t)) on the
     -- envelope's clock only (pitch fixed). Continuous CF modulation of RT60 that
     -- stays on-island (no ∫σ dτ, no state); scrubs/reverses with the master clock.
-    let sway := roomControl "sway"
-    let swayRate := roomControl "rate"   -- 0.3 Hz: a slow breath
+    let sway := modalControl "sway"
+    let swayRate := modalControl "rate"   -- 0.3 Hz: a slow breath
     (.modalRoom sig
       (fun frozenRt60 => reverbRoom frozenRt60
         (displayRangeOf "reverb" "rt60") 32 (60, 0) (6000, 0))
@@ -213,7 +213,7 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
     -- the norm is self-measured on the SETTLED poles, so a glided filter input is
     -- Metal-safe and an un-settleable input declines to identity.
     let inId := (portSources inObj "in")[0]?.getD "__silence__"
-    (.modalGauge inId (p "g" (dv "g")), #[])
+    (.modalGaugeControl inId (modalControl "g"), #[])
   | "gong" =>
     -- One STRIKE of the struck nonlinear resonator: two anchored modal banks
     -- (full-glide + stiff half-glide registers) behind per-strike pitch-bloom

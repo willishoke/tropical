@@ -545,7 +545,7 @@ def portSpecs : String → Array PortSpec
   -- ½ = √Q trim, 1 = unity-peak (tuned-tone level-invariant). Glided (smooth sweep).
   | "gauge" => #[
       { name := "in", accepts := modalIn },
-      { name := "g", knob := some (0, 0), discipline := .glide,
+      { name := "g", accepts := sigIn, knob := some (0, 0), discipline := .glide,
         display := some { min := 0, max := 1 } }]
   -- gong: a struck resonator whose strike data (`t`, `g`, `modes_full`,
   -- `modes_half`) is structural (carried in `params`), EXCEPT the pitch-bloom
