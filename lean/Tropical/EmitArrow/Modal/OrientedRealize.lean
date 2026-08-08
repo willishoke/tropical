@@ -31,13 +31,18 @@ private def samePhysicalFrequency (left right : ModalMode) : Bool :=
     | some l, some r => l == r
     | _, _ => false
 
+private def withUnitAmplitude (mode : ModalMode) : ModalMode :=
+  { mode with cre := lit 1, cim := lit 0 }
+
 /-- Terminal DD routing is allowed to be more conservative than the fixed-point
-    EC/DD carrier: equal physical frequencies must stay continuous when two
-    independently authored live damping expressions cross.  The terminal uses
-    a float carrier below, so it does not inherit the old fixed Q4.28 amplitude
-    cap that required compile-time residue bounds. -/
+    EC/DD carrier: equal physical frequencies and accuracy-lens-near physical
+    poles must stay continuous even after a live direction weight has made the
+    mode amplitude non-classifiable.  The terminal uses a float carrier below,
+    so it does not inherit the old fixed Q4.28 amplitude cap that required
+    compile-time residue bounds. -/
 private def terminalHot (left right : ModalMode) : Bool :=
-  samePhysicalFrequency left right || couplingHot left right
+  samePhysicalFrequency left right || couplingHot left right ||
+    couplingHot (withUnitAmplitude left) (withUnitAmplitude right)
 
 /-- Syntactically identical physical poles take the exact beta-limit route. -/
 def syntacticSameSideClassifier : SameSideClassifier := fun _ left right =>
@@ -94,8 +99,14 @@ private def pairedSig (pairs : Array PairedMode) (clkInt anchorSamples : Sig) : 
        selectE directLane direct.2 series.2)
     let secular := cmulE pair.c (scaleRealE dSec cx)
     let env := expSig (mul pair.nu.1 dSec)
-    let phase := modePhaseQ pair.nu.2 clkRel
-    let carrier : CplxE := (mul env (cosSig phase), mul env (sinSig phase))
+    -- `modePhaseQ` is a Q0.32 cycle word, not a radian-valued float.  Keep the
+    -- same integer-reduced rotator used by the incumbent DD realization; feeding
+    -- that word to `cosSig`/`sinSig` would rotate complex modes incorrectly while
+    -- accidentally remaining invisible for the real-pole (omega=0) case.
+    let phaseQ := modePhaseQ pair.nu.2 clkRel
+    let carrierCos := div (toFloatE (fixedCosCycSig phaseQ)) (lit 1073741824)
+    let carrierSin := div (toFloatE (fixedSinCycSig phaseQ)) (lit 1073741824)
+    let carrier : CplxE := (mul env carrierCos, mul env carrierSin)
     add total (cmulE secular carrier).1) (lit 0)
   selectE (gt clkRel (lit 0)) value (lit 0)
 
