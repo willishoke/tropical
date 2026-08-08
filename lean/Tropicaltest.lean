@@ -21,6 +21,7 @@ import Tropical.Testing.Semantics
 import Lean.Data.Json
 import Tropical.Tropicaltest.Patcher
 import Tropical.Tropicaltest.Exact
+import Tropical.Tropicaltest.GroupedRoomReference
 
 /-!
 # tropicaltest — the post-TS golden + native-equiv runner (Phase 8)
@@ -45,7 +46,7 @@ open Tropical.Ir (Arena ProgramIdx)
     reported as the total collapse it is; the `arrow-block-count` gate at the end
     of `main` checks the number against what the block actually ran, so it is
     verified rather than maintained. -/
-def arrowBlockGates : Nat := 99
+def arrowBlockGates : Nat := 100
 
 set_option maxRecDepth 1024 in
 def main (args : List String) : IO UInt32 := do
@@ -503,6 +504,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runModalForestTimedIslands arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← Tropical.Tropicaltest.GroupedRoomReference.runGroupedRoomReference arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runModalLive arena resolved) then
