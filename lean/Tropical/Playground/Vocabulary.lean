@@ -659,6 +659,11 @@ def glideExprAt (pidx : String → Option Nat) (base : String) (dflt coordinate 
   let ss := mul (mul s s) (sub (lit 3) (mul (lit 2) s))
   add v0 (mul (sub v1 v0) ss)
 
+/-- Convert a Q32.32 coordinate difference to fractional samples without first
+    discarding the low 32 bits. -/
+def q32DeltaSamples (coordinateQ originQ : Sig) : Sig :=
+  div (toFloatE (sub coordinateQ originQ)) (lit 4294967296)
+
 /-- `glideExprAt` on a Q32.32 clock coordinate.  The exact-timestamp path
     subtracts on the integer rail before converting to seconds-of-samples, so a
     fractional downstream warp reaches a modal control without being truncated
@@ -672,8 +677,8 @@ def glideExprQAt (pidx : String → Option Nat) (base : String)
   let qScale := lit 4294967296
   let elapsed :=
     if exactNames.all (fun name => (pidx name).isSome) then
-      div (toFloatE (sub coordinateQ
-        (lshift (exactI64Companion pidx s!"{base}#t0") (lit 32)))) qScale
+      q32DeltaSamples coordinateQ
+        (lshift (exactI64Companion pidx s!"{base}#t0") (lit 32))
     else
       sub (div (toFloatE coordinateQ) qScale) t0
   let dur := mul (lit 2 2) .sampleRate

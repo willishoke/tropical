@@ -1,4 +1,5 @@
 import Tropical.EmitArrow.Patch
+import Tropical.Playground.Vocabulary
 import Tropical.Tropicaltest.Stress
 
 /-!
@@ -185,6 +186,10 @@ private def degreePositiveOracle (relativeSeconds : Float) : Float :=
       1.0 / 9.0 * Float.exp (-5.0 * relativeSeconds)
   else 0.0
 
+private def fractionalControlClockOk : Bool :=
+  sigConstF? (Tropical.Playground.q32DeltaSamples
+    (lit 2147483648) (lit 0)) == some 0.5
+
 private def maxOracleError (samples : Array Float) (oracle : Float → Float) :
     Float := Id.run do
   let mut maximum := 0.0
@@ -326,6 +331,7 @@ def runOrientedPatch (arena : Arena) : IO Bool := do
       IO.println s!"        two rooms FF/FR/RF/RR max oracle error {two.maximumOracleError} · min pair distance {two.minimumPairDifference} · authored stage order {two.authoredOrder}"
       IO.println s!"        equal RT60 independently authored: finite {two.equalRt60Finite} · repeated-pole oracle error {two.equalRt60Error} · peak {two.equalRt60Peak}"
       IO.println s!"        degree-positive terminal: finite {two.degreePositiveFinite} · oracle error {two.degreePositiveError}; guarded crossings: room-room-room {two.repeatedRoomRefused} · room-room-gauge {two.roomRoomGaugeRefused}"
+      IO.println s!"        terminal control clock retains a half-sample Q32.32 offset: {fractionalControlClockOk}"
       let pass := one.localError < 2.0e-6 && one.outputReverseError < 2.0e-6 &&
         one.localVsOutputReverse > 1.0e-2 && one.localPost > 1.0e-2 &&
         one.outputReversePost < 1.0e-12 &&
@@ -334,10 +340,11 @@ def runOrientedPatch (arena : Arena) : IO Bool := do
         two.equalRt60Finite && two.equalRt60Error < 2.0e-6 &&
         two.equalRt60Peak > 1.0e-6 &&
         two.degreePositiveFinite && two.degreePositiveError < 2.0e-6 &&
-        two.repeatedRoomRefused && two.roomRoomGaugeRefused
+        two.repeatedRoomRefused && two.roomRoomGaugeRefused &&
+        fractionalControlClockOk
       if pass then
         passGate "modal-oriented-patch"
-          "room reverse is kernel-local (not complete-output reverse); two rooms retain independent FF/FR/RF/RR controls and authored stage order; equal frozen RT60 takes a finite repeated-pole limit; general-degree terminals preserve polynomial factors; unsupported nonterminal DD crossings refuse"
+          "room reverse is kernel-local (not complete-output reverse); two rooms retain independent FF/FR/RF/RR controls and authored stage order; equal frozen RT60 takes a finite repeated-pole limit; general-degree terminals preserve polynomial factors; unsupported nonterminal DD crossings refuse; terminal controls retain fractional Q32.32 time"
       else
         failGate "modal-oriented-patch" "numeric or structural contract failed"
   | .error error, _ | _, .error error =>
