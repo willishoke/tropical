@@ -46,6 +46,55 @@ graph. Structural selector changes and topology changes do. Publication is
 clickless because a new closed-form kernel resumes at the current coordinate,
 not because arbitrary kernel state is copied.
 
+## Live parameters select complete universes
+
+Every closed-form graph with live numeric controls follows one temporal law.
+For the complete deferred graph `G`, the vector `p` of its live controls, and
+the observation coordinate `t`:
+
+```text
+renderLive(G, p, t) = renderStatic(G, freeze(p, t), t)
+```
+
+`freeze(p, t)` samples every control under the terminal clock context through
+that control's authored clock path, then uses the resulting single parameter
+vector throughout the static rendering of the whole graph. It does not freeze
+each node after an
+upstream node has already rendered its history. Consequently, changing a live
+control rewrites observations of earlier coordinates to the counterfactual
+history selected by the new value. Restoring the same frozen vector restores
+the same output at the same effective observation coordinate. Hold, seek, and
+reverse are different routes to such coordinates; they do not add hidden
+history to the result.
+
+Modal effects preserve this law by remaining deferred until an actual signal
+consumer or observation tap. A branch address changes only that branch's modal
+response coordinate; it does not implicitly retime an independent control
+source. Room-local sway follows the branch response clock, while its numeric
+depth and rate come from the frozen terminal universe. An ordinary downstream
+graph warp pushes a new terminal clock context before branch addresses or
+controls are evaluated, so patch algebra retimes both normally. In particular,
+an addressed response under context `κ` is `κ(address(κ, t))`, not an
+after-the-fact transformation of an already resolved coordinate.
+
+Rooms may use fixed structural topology, immutable tables, and bounded
+capacities, but they do not contain parameter-history state or consult prior
+control values. Generic closed-form glide sources are ordinary members of
+`p`; a room consumes their value in the selected universe, not their previous
+targets. In particular, the public room envelope for source age `|t-u|` is
+`exp(-6.91 * |t-u| / rt60(t))`: RT60 names the nominal ratio-one decay of the
+universe frozen at `t`, using the incumbent approximation to `ln(1000)`. It is
+not the accumulated physical loss
+`exp(-integral(u..t, 6.91 / rt60(τ), dτ))`.
+
+A physically accumulated response would therefore be a separately named
+stateful module in a sister runtime, not an implementation of this contract.
+The generic lifting and canonical whole-graph commutation obligation are
+formalized in
+[`Semantics.ModalUniverse`](../lean/Tropical/Semantics/ModalUniverse.lean).
+Production modal lowering must refine that canonical stage model; the theorem
+is not, by itself, permission to optimize or collapse the production forest.
+
 ## Four different times
 
 Keeping these phases separate prevents most architectural misunderstandings.
@@ -159,6 +208,7 @@ audio callback does not pack coefficient data.
 |---|---|---|---|
 | Acyclic graph | session compilation and direct program/export construction in [`Ir.Cycles`](../lean/Tropical/Ir/Cycles.lean), [`Tropical.Lowering`](../lean/Tropical/Lowering.lean), and [`ProgramIO.Export`](../lean/Tropical/Engine/ProgramIO/Export.lean) | topological order plus explicit cycle refusal | direct lowering, partition, and all emitters |
 | Closed-form kernel | the authoring and wire vocabularies | absence of state/register/delay/update constructors in [`EmitArrow.Sig`](../lean/Tropical/EmitArrow/Sig.lean), [`Ir.ENode`](../lean/Tropical/Ir/Nodes.lean), and [`WireExpr`](../lean/Tropical/WireExpr.lean) | LLVM, wasm32, and Metal execution |
+| Whole-graph parameter universe | canonical modal proof; production refinement is tracked as an open trust obligation | one terminal-context control freeze, with branch address isolated to response-coordinate resolution | random-access JIT/wasm/Metal rendering and observation taps |
 | Typed wire | [`WireExpr` JSON decoder](../lean/Tropical/WireExpr.lean) and port validation in [`Engine.Wire`](../lean/Tropical/Engine/Wire.lean) | `Tropical.WireExpr` plus declared port positions/types | `sessionToResolvedRoot` and export construction |
 | Source-expression meaning | direct [`Sig` denotation](../lean/Tropical/Semantics/Sig.lean), total [`ExprArena` denotation](../lean/Tropical/Semantics/Expr.lean), and [`lowerSigTree_preserves`](../lean/Tropical/Semantics/LowerSig.lean) | refusal-aware carrier-parametric equality across structural lowering | whole-program lowering and later refinement proofs |
 | Bank order | authoring and emitter laws in [`EmitArrow.BankOrder`](../lean/Tropical/EmitArrow/BankOrder.lean) and [`Ir.EmitBankLaws`](../lean/Tropical/Ir/EmitBankLaws.lean) | `ENode.bankSum`, `ReduceBegin`/`ReduceEnd`, ordered tables | LLVM/JIT, wasm32, and MSL/Metal |

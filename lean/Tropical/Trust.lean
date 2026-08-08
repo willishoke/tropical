@@ -58,6 +58,7 @@ deriving BEq, Repr, Inhabited
 
 def knownGates : Array String := #[
   "lake-build:Tropical.Semantics",
+  "modal-universe-history",
   "semantics-production-fixtures",
   "semantics-pointer-differential",
   "clock-algebra-theorems",
@@ -102,6 +103,27 @@ def productionTrustSites : Array TrustSite := #[
 ]
 
 def obligations : Array Obligation := #[
+  { id := "MODAL_UNIVERSE_CANONICAL_COMMUTES"
+    statement := "For the canonical deferred modal graph, lowering sources, authored-order heterogeneous stages, modalMix, branch clocks/addresses, and an enclosing clock context under live controls equals rendering the whole lowered forest in the one static universe frozen at the terminal coordinate."
+    evidence := #[.theorem]
+    implementationPaths := #["lean/Tropical/Semantics/ModalUniverse.lean"]
+    gateNames := #["lake-build:Tropical.Semantics"]
+    owner := "Modal semantics"
+    status := .proved
+    theoremSymbol := some "Tropical.Semantics.ModalUniverse.compileLive_eq_compileStatic_freeze"
+    limitation := "This theorem is carrier-generic for the canonical stage model and faithfully states clock-context composition. It is not a refinement theorem for EmitArrow.PatchGraph or lowerModal."
+    priority := .critical },
+  { id := "PRODUCTION_MODAL_UNIVERSE_REFINES_CANONICAL"
+    statement := "Production PatchGraph modal lowering and terminal realization refine the canonical whole-graph frozen-universe semantics for every admitted heterogeneous stage chain."
+    evidence := #[.executableGate, .inspection]
+    implementationPaths := #["lean/Tropical/EmitArrow/Patch.lean",
+      "lean/Tropical/EmitArrow/Modal/Forest.lean",
+      "lean/Tropical/Tropicaltest/Modal.lean"]
+    gateNames := #["modal-universe-history", "manual:production modal refinement review"]
+    owner := "Modal compiler"
+    status := .open
+    limitation := "The executable gate covers nested ordinary rooms, independent RT60 rewrites, restore/seek-order/hold/reverse, modal deferral, and known legacy-state non-emission. A structural refinement remains open until the production representation closes over repeated stage-local direction/sway and every heterogeneous modal ordering."
+    priority := .critical },
   { id := "LOWER_SIG_TREE_PRESERVES"
     statement := "For every carrier algebra, environment, production Sig, and well-formed initial ExprArena, lowerSigTree returns a well-formed arena extension whose expression denotation equals the direct Sig denotation."
     evidence := #[.theorem]

@@ -8,6 +8,32 @@ Only entries with status `proved` and a checked theorem symbol are formal proofs
 
 Add one owned entry to `obligations`, use only maintained gate names (or an explicit `manual:` gate), and regenerate this report with `trustreport --write`. A new production `unsafe def` or `implemented_by` marker must also add one typed `productionTrustSites` row; `tools/audit_trust_sites.py` makes an unledgered or stale site fail validation.
 
+## MODAL_UNIVERSE_CANONICAL_COMMUTES
+
+For the canonical deferred modal graph, lowering sources, authored-order heterogeneous stages, modalMix, branch clocks/addresses, and an enclosing clock context under live controls equals rendering the whole lowered forest in the one static universe frozen at the terminal coordinate.
+
+- Status: proved
+- Priority: critical
+- Owner: Modal semantics
+- Evidence: theorem
+- Formal symbol: `Tropical.Semantics.ModalUniverse.compileLive_eq_compileStatic_freeze`
+- Implementation: `lean/Tropical/Semantics/ModalUniverse.lean`
+- Gates: `lake-build:Tropical.Semantics`
+- Limitation: This theorem is carrier-generic for the canonical stage model and faithfully states clock-context composition. It is not a refinement theorem for EmitArrow.PatchGraph or lowerModal.
+
+## PRODUCTION_MODAL_UNIVERSE_REFINES_CANONICAL
+
+Production PatchGraph modal lowering and terminal realization refine the canonical whole-graph frozen-universe semantics for every admitted heterogeneous stage chain.
+
+- Status: open
+- Priority: critical
+- Owner: Modal compiler
+- Evidence: executable gate, inspection
+- Formal symbol: none
+- Implementation: `lean/Tropical/EmitArrow/Patch.lean`, `lean/Tropical/EmitArrow/Modal/Forest.lean`, `lean/Tropical/Tropicaltest/Modal.lean`
+- Gates: `modal-universe-history`, `manual:production modal refinement review`
+- Limitation: The executable gate covers nested ordinary rooms, independent RT60 rewrites, restore/seek-order/hold/reverse, modal deferral, and known legacy-state non-emission. A structural refinement remains open until the production representation closes over repeated stage-local direction/sway and every heterogeneous modal ordering.
+
 ## LOWER_SIG_TREE_PRESERVES
 
 For every carrier algebra, environment, production Sig, and well-formed initial ExprArena, lowerSigTree returns a well-formed arena extension whose expression denotation equals the direct Sig denotation.

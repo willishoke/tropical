@@ -1600,6 +1600,168 @@ def runModalForestTimedIslands (arena : Arena)
       failGate "modal-forest-timed-islands"
         s!"structure={structureOk} removalsBuilt={removalsBuilt} onsets={survivingOnsets} pre={preOnsetDiff} oracle={forwardOracleDiff}/{holdOracleDiff}/{reverseOracleDiff}/{seekOracleDiff} coordinates={holdCoordinateDiff}/{reverseCoordinateDiff}/{seekCoordinateDiff}"
 
+private def modalUniverseLegacyStateTags : Array String := #[
+  "Register", "StateReg", "StateLoad", "StateStore", "Update", "NextUpdate",
+  "Delay", "DelayInit", "StateInit", "Writeback", "SmoothParam"]
+
+private def modalUniverseFunctionHasNoLegacyState
+    (f : Tropical.Plan.InstanceFunction) : Bool :=
+  let blocks := f.preambleInstructions ++ f.preInputInstructions ++ f.instructions
+  blocks.all (fun i => !modalUniverseLegacyStateTags.contains i.tag) &&
+    f.children.attach.all fun child =>
+      modalUniverseFunctionHasNoLegacyState child.1
+termination_by sizeOf f
+decreasing_by
+  exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children child.2
+
+/-- The U1 temporal-law gate. Production-compiled
+    `resonator → room A → room B` fixtures are sampled under live room images,
+    a constant absolute branch address, and a downstream reverse warp. Each
+    room independently rewrites an already-observed output block; restoring
+    the same complete image restores its bytes; seek order, a true held
+    response clock, and reverse traversal are exact at equal effective
+    coordinates. The graph remains modal through both rooms, and every emitted
+    fixture excludes the production vocabulary's known legacy state/history
+    instructions. -/
+def runModalUniverseHistory (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let forwardSrc := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"room_a\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.6},\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"room_b\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.9},\"in\":{\"in\":[\"room_a\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"room_b\"]}}],\"out\":\"out\"}"
+  let holdSrc := "{\"nodes\":[" ++
+    "{\"id\":\"hold\",\"kind\":\"knob\",\"params\":{\"value\":0.25}}," ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4},\"in\":{\"addr\":[\"hold\"]}}," ++
+    "{\"id\":\"room_a\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.6},\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"room_b\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.9},\"in\":{\"in\":[\"room_a\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"room_b\"]}}],\"out\":\"out\"}"
+  let reverseSrc := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"room_a\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.6},\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"room_b\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.9},\"in\":{\"in\":[\"room_a\"]}}," ++
+    "{\"id\":\"reverse\",\"kind\":\"reverse\",\"in\":{\"in\":[\"room_b\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"reverse\"]}}],\"out\":\"out\"}"
+  let compile := fun source => do
+    let json ← Lean.Json.parse source
+    Tropical.Playground.compilePlanPure arena resolved json
+  match compile forwardSrc, compile holdSrc, compile reverseSrc with
+  | .error e, _, _ | _, .error e, _ | _, _, .error e =>
+    failGate "modal-universe-history" s!"compile: {firstLine e}"
+  | .ok compiled, .ok holdCompiled, .ok reverseCompiled =>
+    let loadRooms := fun (fixture : Tropical.Playground.CompiledPatch) => do
+      let rt ← Tropical.Ffi.Runtime.new 128
+      Tropical.StagedLoad.loadTyped rt fixture.plan fixture.stageBlocks
+      let a? ← rt.slotIndex? "param:room_a.rt60"
+      let b? ← rt.slotIndex? "param:room_b.rt60"
+      pure (rt, a?, b?)
+    let (rtA, aA?, bA?) ← loadRooms compiled
+    let (rtB, aB?, bB?) ← loadRooms compiled
+    let (rtHold, aHold?, bHold?) ← loadRooms holdCompiled
+    let (rtReverse, aReverse?, bReverse?) ← loadRooms reverseCompiled
+    match aA?, bA?, aB?, bB?, aHold?, bHold?, aReverse?, bReverse? with
+    | some aA, some bA, some aB, some bB, some aHold, some bHold,
+        some aReverse, some bReverse =>
+      let setImage := fun (rt : Tropical.Ffi.Runtime) (a b : UInt32)
+          (x y : Float) => do
+        rt.setSlot a x
+        rt.setSlot b y
+      let renderAt := fun (rt : Tropical.Ffi.Runtime) (t : UInt64) => do
+        rt.setSampleIndex t
+        rt.process
+        rt.outputBytes
+
+      -- Either room must independently affect the selected counterfactual.
+      setImage rtA aA bA 0.6 0.9
+      let old ← renderAt rtA 8192
+      setImage rtA aA bA 6.0 0.9
+      let rewrittenA ← renderAt rtA 8192
+      setImage rtA aA bA 0.6 0.9
+      let restoredA ← renderAt rtA 8192
+      setImage rtA aA bA 0.6 9.0
+      let rewrittenB ← renderAt rtA 8192
+      setImage rtA aA bA 0.6 0.9
+      let restoredB ← renderAt rtA 8192
+
+      -- Visit the same frozen universe in opposite coordinate orders.
+      setImage rtA aA bA 1.7 3.4
+      setImage rtB aB bB 1.7 3.4
+      let a0 ← renderAt rtA 2048
+      let a1 ← renderAt rtA 6144
+      let a2 ← renderAt rtA 12288
+      let b2 ← renderAt rtB 12288
+      let b1 ← renderAt rtB 6144
+      let b0 ← renderAt rtB 2048
+
+      -- A constant absolute address is a genuine velocity-zero response clock.
+      setImage rtHold aHold bHold 1.7 3.4
+      setImage rtA aA bA 1.7 3.4
+      let held0 ← renderAt rtHold 0
+      let held1 ← renderAt rtHold 15000
+      let heldForward ← renderAt rtA 11025
+      let heldSamples := decodeF64LE held0
+      let heldForwardSamples := decodeF64LE heldForward
+      let heldConstant := match heldSamples[0]? with
+        | none => false
+        | some first => heldSamples.all (· == first)
+      let heldWitness := match heldSamples[0]?, heldForwardSamples[0]? with
+        | some held, some forward => held != 0.0 && held == forward
+        | _, _ => false
+
+      -- The public downstream reverse node visits the same effective response
+      -- coordinates as a forward block, in the opposite order. Negative runtime
+      -- indices are supplied in the Runtime's documented two's-complement image.
+      setImage rtA aA bA 1.7 3.4
+      setImage rtReverse aReverse bReverse 1.7 3.4
+      let reverseBase : Nat := 12288
+      let forwardBlock ← renderAt rtA (UInt64.ofNat (reverseBase - 127))
+      let reverseBlock ← renderAt rtReverse (0 - UInt64.ofNat reverseBase)
+      let forwardSamples := decodeF64LE forwardBlock
+      let reverseSamples := decodeF64LE reverseBlock
+      let reverseExact := forwardSamples.size == reverseSamples.size &&
+        forwardSamples.any (· != 0.0) &&
+        (Array.range reverseSamples.size).all fun i =>
+          reverseSamples[i]! == forwardSamples[forwardSamples.size - 1 - i]!
+
+      -- Production structure: two deferred rooms and no early Modal→Sig seam.
+      let unit : Array Tropical.EmitArrow.ModalMode := #[
+        Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 220)
+          (Tropical.EmitArrow.lit 4) (Tropical.EmitArrow.lit 1)]
+      let graph : Tropical.EmitArrow.PatchGraph := {
+        nodes := #[
+          { id := "s", node := .modalSource unit (Tropical.EmitArrow.lit 0)
+              Tropical.EmitArrow.clockLit none },
+          { id := "a", node := .modalReverb "s" unit none },
+          { id := "b", node := .modalReverb "a" unit none }]
+        output := "b" }
+      let ranks := fun id => if id == "s" then some 0 else if id == "a" then some 1
+        else if id == "b" then some 2 else none
+      let deferred := match Tropical.EmitArrow.lowerModal graph ranks "b" 2 with
+        | .ok #[branch] => match branch.bank with
+          | .plain _ rooms => rooms.size == 2
+          | _ => false
+        | _ => false
+      let modalThroughChain := Tropical.EmitArrow.nodeIsModal graph "a" &&
+        Tropical.EmitArrow.nodeIsModal graph "b"
+      let eachRoomRewrites := old != rewrittenA && old != rewrittenB
+      let restoredExact := old == restoredA && old == restoredB
+      let seekOrderExact := a0 == b0 && a1 == b1 && a2 == b2
+      let holdExact := held0 == held1 && heldConstant && heldWitness
+      let noLegacyState := #[compiled.plan, holdCompiled.plan,
+        reverseCompiled.plan].all fun plan =>
+          plan.instanceFunctions.all modalUniverseFunctionHasNoLegacyState
+      IO.println "        nested room universe: history rewrite + random-access image equality:"
+      IO.println s!"        result   each-room-changed={eachRoomRewrites} restored-bytes={restoredExact} order={seekOrderExact} hold={holdExact} reverse={reverseExact} deferred={deferred} modal={modalThroughChain} no-legacy-state={noLegacyState}"
+      if eachRoomRewrites && restoredExact && seekOrderExact && holdExact &&
+          reverseExact && deferred && modalThroughChain && noLegacyState then
+        passGate "modal-universe-history"
+          "each room rewrites the nested counterfactual; restore/seek-order/true-hold/reverse are exact at equal effective coordinates, both rooms remain modal, and no known legacy state/history instruction is emitted"
+      else
+        failGate "modal-universe-history"
+          s!"eachRoom={eachRoomRewrites} restored={restoredExact} order={seekOrderExact} hold={holdExact} reverse={reverseExact} deferred={deferred} modal={modalThroughChain} noLegacyState={noLegacyState}"
+    | _, _, _, _, _, _, _, _ =>
+      failGate "modal-universe-history" "nested room RT60 slots missing"
+
 /-- THE MODAL LIVE gate (the payoff). A JSON patch `resonator(freq) → reverb → out`
     compiled through the real `compilePlanPure` — decode → lowerModal → symbolic
     residue → realize → strata → session compile → a JIT-loadable kernel — and its
