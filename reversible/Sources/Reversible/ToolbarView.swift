@@ -51,12 +51,30 @@ struct PatchToolbar: ToolbarContent {
         }
 
         ToolbarItem {
+            Text(truthSummary)
+                .font(Theme.monoSmall)
+                .foregroundStyle(Theme.muted)
+                .monospacedDigit()
+                .help("authored revision · realized revision · latest acknowledged program/control generation")
+        }
+
+        ToolbarItem {
             Text(model.status)
                 .font(Theme.monoSmall)
                 .foregroundStyle(model.statusIsError ? Theme.err : Theme.muted)
                 .lineLimit(1)
                 .frame(minWidth: 180, alignment: .trailing)
         }
+    }
+
+    private var truthSummary: String {
+        let realizedRevision = model.realizedPatch.map {
+            String($0.authoredRevision)
+        } ?? "—"
+        guard let generation = model.runningGeneration else {
+            return "A\(model.authoredRevision) · R\(realizedRevision) · P—/C—"
+        }
+        return "A\(model.authoredRevision) · R\(realizedRevision) · P\(generation.programVersion)/C\(generation.controlVersion)"
     }
 }
 

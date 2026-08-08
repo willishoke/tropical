@@ -10,8 +10,10 @@
  */
 
 #include "c_api/tropical_c.h"
+#include "c_api/tropical_socket.hpp"
 #include "dac/TropicalDAC.hpp"   // kDeviceOutputBound / clamp_to_device_bound
 #include "runtime/FlatRuntime.hpp"
+#include <nlohmann/json.hpp>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -26,6 +28,10 @@
 #include <thread>
 #include <unordered_set>
 #include <vector>
+
+#include <sys/socket.h>
+#include <sys/un.h>
+#include <unistd.h>
 
 static int g_pass = 0;
 static int g_fail = 0;
@@ -107,6 +113,56 @@ static bool wait_for_true(
          && std::chrono::steady_clock::now() < deadline)
     std::this_thread::yield();
   return value.load(std::memory_order_acquire);
+}
+
+static bool socket_request(
+  const std::string & path, const std::string & request,
+  std::string & response)
+{
+  const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
+  if (fd < 0) return false;
+  struct sockaddr_un address{};
+  address.sun_family = AF_UNIX;
+  if (path.size() >= sizeof(address.sun_path))
+  {
+    ::close(fd);
+    return false;
+  }
+  std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
+  if (::connect(
+        fd, reinterpret_cast<struct sockaddr *>(&address),
+        sizeof(address)) != 0)
+  {
+    ::close(fd);
+    return false;
+  }
+  const std::string line = request + "\n";
+  std::size_t sent = 0;
+  while (sent < line.size())
+  {
+    const ssize_t n = ::send(fd, line.data() + sent, line.size() - sent, 0);
+    if (n <= 0)
+    {
+      ::close(fd);
+      return false;
+    }
+    sent += static_cast<std::size_t>(n);
+  }
+  response.clear();
+  std::array<char, 1024> buffer{};
+  while (response.find('\n') == std::string::npos)
+  {
+    const ssize_t n = ::recv(fd, buffer.data(), buffer.size(), 0);
+    if (n <= 0)
+    {
+      ::close(fd);
+      return false;
+    }
+    response.append(buffer.data(), static_cast<std::size_t>(n));
+  }
+  ::close(fd);
+  response.resize(response.find('\n'));
+  return true;
 }
 
 /**
@@ -605,6 +661,535 @@ static void test_param_dispatch_effective_boundary_races()
   ASSERT(rt.ownership_failure_count() == 0);
 }
 
+// One immutable observation generation remains coherent while a raw control
+// publication completes. The paused reader must neither block control nor tear
+// to the newly published slot image.
+static void test_observation_snapshot_does_not_block_control()
+{
+  tropical_runtime::FlatRuntime rt(16);
+  const std::string ir = wrap_loop(
+    "  %xp = getelementptr inbounds double, ptr %slots, i64 0\n"
+    "  %x = load double, ptr %xp, align 8\n"
+    "  %tp = getelementptr inbounds double, ptr %slots, i64 1\n"
+    "  store double %x, ptr %tp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %x, ptr %op, align 8\n");
+  const std::string manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":2,"slot_names":["param:x","tap:x"],
+    "slot_defaults":[1.0,0.0],"param_disciplines":[
+      {"name":"x","discipline":"raw","companions":[]}
+    ]})";
+  ASSERT(rt.load_ir(ir, manifest));
+
+  tropical_runtime::RuntimeOwnershipTestSeam seam;
+  seam.pause_after_observation_coordinate.store(
+    true, std::memory_order_relaxed);
+  rt.set_ownership_test_seam(&seam);
+  std::array<double, 64> old_values{};
+  tropical_runtime::ObservationRenderResult old_result;
+  std::jthread observer([&] {
+    old_result = rt.render_window_observation_by_name(
+      0, static_cast<uint32_t>(old_values.size()), 1,
+      {"tap:x"}, old_values.data());
+  });
+  const bool paused = wait_for_true(seam.observation_coordinate_completed);
+  if (!paused)
+  {
+    seam.release_observation_coordinate.store(
+      true, std::memory_order_release);
+    observer.join();
+    rt.set_ownership_test_seam(nullptr);
+    ASSERT(paused);
+  }
+
+  tropical_runtime::ParamDispatchResult control_result;
+  std::atomic<bool> control_done{false};
+  std::jthread control([&] {
+    control_result = rt.dispatch_param_sync("x", 0.5);
+    control_done.store(true, std::memory_order_release);
+  });
+  const bool completed_while_paused = wait_for_true(control_done);
+  seam.release_observation_coordinate.store(true, std::memory_order_release);
+  observer.join();
+  control.join();
+  rt.set_ownership_test_seam(nullptr);
+
+  ASSERT(completed_while_paused);
+  ASSERT(control_result.ok);
+  ASSERT(old_result.status == tropical_runtime::RenderWindowStatus::Rendered);
+  for (double value : old_values) ASSERT(value == 1.0);
+
+  std::array<double, 4> next_values{};
+  const auto next = rt.render_window_observation_by_name(
+    0, static_cast<uint32_t>(next_values.size()), 1,
+    {"tap:x"}, next_values.data());
+  ASSERT(next.status == tropical_runtime::RenderWindowStatus::Rendered);
+  ASSERT(next.program_version == old_result.program_version);
+  ASSERT(next.control_version > old_result.control_version);
+  ASSERT(next.effective_sample_index ==
+         control_result.effective_sample_index);
+  for (double value : next_values) ASSERT(value == 0.5);
+}
+
+// Name resolution, strided coordinates, and evaluation all pin one program
+// image. A hot-swap while the old observer is paused cannot reinterpret the
+// old name through the new slot layout.
+static void test_named_observation_pins_hot_swap_program()
+{
+  tropical_runtime::FlatRuntime rt(16);
+  const std::string coordinate_ir = wrap_loop(
+    "  %idx = add i64 %start_sample_index, %s\n"
+    "  %v = uitofp i64 %idx to double\n"
+    "  %sp = getelementptr inbounds double, ptr %slots, i64 0\n"
+    "  store double %v, ptr %sp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %v, ptr %op, align 8\n");
+  const std::string value_ir = wrap_loop(
+    "  %sp = getelementptr inbounds double, ptr %slots, i64 0\n"
+    "  %v = load double, ptr %sp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %v, ptr %op, align 8\n");
+  const auto manifest = [](const char * name, double value) {
+    return std::string(R"({"schema":"tropical_plan_5",
+      "config":{"sampleRate":44100},"register_count":0,
+      "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+      "sinks":[],"slot_count":1,"slot_names":[")") + name
+      + R"("],"slot_defaults":[)" + std::to_string(value) + R"(],
+      "param_disciplines":[]})";
+  };
+  ASSERT(rt.load_ir(coordinate_ir, manifest("tap:old", 0.0)));
+
+  tropical_runtime::RuntimeOwnershipTestSeam seam;
+  seam.pause_after_observation_coordinate.store(
+    true, std::memory_order_relaxed);
+  rt.set_ownership_test_seam(&seam);
+  std::array<double, 3> old_values{};
+  tropical_runtime::ObservationRenderResult old_result;
+  std::jthread old_observer([&] {
+    old_result = rt.render_window_observation_by_name(
+      10, static_cast<uint32_t>(old_values.size()), 3,
+      {"tap:old"}, old_values.data());
+  });
+  const bool paused = wait_for_true(seam.observation_coordinate_completed);
+  if (!paused)
+  {
+    seam.release_observation_coordinate.store(
+      true, std::memory_order_release);
+    old_observer.join();
+    rt.set_ownership_test_seam(nullptr);
+    ASSERT(paused);
+  }
+
+  ASSERT(rt.load_ir(value_ir, manifest("tap:new", 2.0)));
+  seam.release_observation_coordinate.store(true, std::memory_order_release);
+  old_observer.join();
+  rt.set_ownership_test_seam(nullptr);
+
+  ASSERT(old_result.status == tropical_runtime::RenderWindowStatus::Rendered);
+  ASSERT(old_values[0] == 10.0);
+  ASSERT(old_values[1] == 13.0);
+  ASSERT(old_values[2] == 16.0);
+
+  std::array<double, 4> next_values{};
+  const auto missing = rt.render_window_observation_by_name(
+    0, static_cast<uint32_t>(next_values.size()), 1,
+    {"tap:old"}, next_values.data());
+  ASSERT(missing.status ==
+         tropical_runtime::RenderWindowStatus::InvalidArgument);
+  ASSERT(missing.unknown_slot == "tap:old");
+  const auto next = rt.render_window_observation_by_name(
+    0, static_cast<uint32_t>(next_values.size()), 1,
+    {"tap:new"}, next_values.data());
+  ASSERT(next.status == tropical_runtime::RenderWindowStatus::Rendered);
+  ASSERT(next.program_version > old_result.program_version);
+  for (double value : next_values) ASSERT(value == 2.0);
+}
+
+// Audio and observation may be different compiled programs with unrelated
+// slot indices. One publication installs both; controls project by exact name
+// and the observation artifact owns its own coefficient materialization.
+static void test_separate_observation_artifact_projects_controls()
+{
+  tropical_runtime::FlatRuntime rt(16);
+  const std::string audio_ir = wrap_loop(
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double 2.500000e-01, ptr %op, align 8\n");
+  const std::string observation_ir = wrap_loop(
+    "  %cp = getelementptr inbounds double, ptr %slots, i64 2\n"
+    "  %coef = load double, ptr %cp, align 8\n"
+    "  %tp = getelementptr inbounds double, ptr %slots, i64 0\n"
+    "  store double %coef, ptr %tp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %coef, ptr %op, align 8\n");
+  const std::string observation_coeff_ir =
+    std::string("define void @kernel(") + KERNEL_SIG + ") {\n"
+      "entry:\n"
+      "  %xp = getelementptr inbounds double, ptr %slots, i64 1\n"
+      "  %x = load double, ptr %xp, align 8\n"
+      "  %c = fmul double %x, 2.000000e+00\n"
+      "  %cp = getelementptr inbounds double, ptr %slots, i64 2\n"
+      "  store double %c, ptr %cp, align 8\n"
+      "  ret void\n}\n";
+  const std::string audio_manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":1,"slot_names":["param:x"],
+    "slot_defaults":[3.0],"param_disciplines":[
+      {"name":"x","discipline":"raw","companions":[]}
+    ]})";
+  const std::string observation_manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":3,
+    "slot_names":["tap:mode","param:x","coeff:x2"],
+    "slot_defaults":[0.0,-1.0,-99.0],"param_disciplines":[]})";
+
+  const auto generation =
+    rt.load_ir_staged_with_observation_generation(
+      audio_ir, "", "", audio_manifest,
+      observation_ir, observation_coeff_ir, observation_manifest);
+  ASSERT(generation.program_version == rt.recompile_version());
+  rt.process();
+  for (double value : rt.outputBuffer) ASSERT(value == 0.25);
+
+  std::array<double, 4> values{};
+  auto observation = rt.render_window_observation_by_name(
+    0, static_cast<uint32_t>(values.size()), 1,
+    {"tap:mode"}, values.data());
+  ASSERT(observation.status == tropical_runtime::RenderWindowStatus::Rendered);
+  ASSERT(observation.program_version == generation.program_version);
+  ASSERT(observation.control_version == generation.control_version);
+  for (double value : values) ASSERT(value == 6.0);
+
+  const auto update = rt.dispatch_param_sync("x", 7.0);
+  ASSERT(update.ok);
+  observation = rt.render_window_observation_by_name(
+    0, static_cast<uint32_t>(values.size()), 1,
+    {"tap:mode"}, values.data());
+  ASSERT(observation.program_version == generation.program_version);
+  ASSERT(observation.control_version > generation.control_version);
+  for (double value : values) ASSERT(value == 14.0);
+  rt.process();
+  for (double value : rt.outputBuffer) ASSERT(value == 0.25);
+}
+
+// C generation APIs return the exact initial pair from their publication,
+// while a failed second-artifact compile publishes neither half and zeros its
+// out-param. Existing single-artifact behavior remains the first case here.
+static void test_publication_generation_tokens_and_atomic_failure()
+{
+  tropical_runtime_t handle = tropical_runtime_new(16);
+  ASSERT(handle != nullptr);
+  auto & rt = *static_cast<tropical_runtime::FlatRuntime *>(handle);
+  const std::string single_ir = wrap_loop(
+    "  %sp = getelementptr inbounds double, ptr %slots, i64 0\n"
+    "  %v = load double, ptr %sp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %v, ptr %op, align 8\n");
+  const std::string single_manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":1,"slot_names":["tap:single"],
+    "slot_defaults":[1.25]})";
+  tropical_runtime_generation_t first{};
+  ASSERT(tropical_runtime_load_ir_staged_generation(
+    handle, single_ir.data(), single_ir.size(), nullptr, 0, nullptr, 0,
+    single_manifest.data(), single_manifest.size(), &first));
+  std::array<double, 2> values{};
+  auto rendered = rt.render_window_observation_by_name(
+    0, static_cast<uint32_t>(values.size()), 1,
+    {"tap:single"}, values.data());
+  ASSERT(rendered.program_version == first.program_version);
+  ASSERT(rendered.control_version == first.control_version);
+  for (double value : values) ASSERT(value == 1.25);
+
+  const std::string audio_ir = wrap_loop(
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double 2.500000e-01, ptr %op, align 8\n");
+  const std::string observation_ir = wrap_loop(
+    "  %xp = getelementptr inbounds double, ptr %slots, i64 1\n"
+    "  %x = load double, ptr %xp, align 8\n"
+    "  %tp = getelementptr inbounds double, ptr %slots, i64 0\n"
+    "  store double %x, ptr %tp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %x, ptr %op, align 8\n");
+  const std::string audio_manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":1,"slot_names":["param:x"],
+    "slot_defaults":[3.0],"param_disciplines":[
+      {"name":"x","discipline":"raw","companions":[]}
+    ]})";
+  const std::string observation_manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":2,
+    "slot_names":["tap:projected","param:x"],
+    "slot_defaults":[0.0,-1.0]})";
+  tropical_runtime_generation_t second{};
+  ASSERT(tropical_runtime_load_ir_staged_with_observation_generation(
+    handle,
+    audio_ir.data(), audio_ir.size(), nullptr, 0, nullptr, 0,
+    audio_manifest.data(), audio_manifest.size(),
+    observation_ir.data(), observation_ir.size(), nullptr, 0,
+    observation_manifest.data(), observation_manifest.size(), &second));
+  ASSERT(second.program_version == first.program_version + 1);
+  ASSERT(second.control_version > first.control_version);
+  rendered = rt.render_window_observation_by_name(
+    0, static_cast<uint32_t>(values.size()), 1,
+    {"tap:projected"}, values.data());
+  ASSERT(rendered.program_version == second.program_version);
+  ASSERT(rendered.control_version == second.control_version);
+  for (double value : values) ASSERT(value == 3.0);
+
+  tropical_runtime_generation_t failed{99, 101};
+  const std::string replacement_audio = wrap_loop(
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double 7.500000e-01, ptr %op, align 8\n");
+  const std::string invalid_observation = "not LLVM IR";
+  ASSERT(!tropical_runtime_load_ir_staged_with_observation_generation(
+    handle,
+    replacement_audio.data(), replacement_audio.size(), nullptr, 0,
+    nullptr, 0, audio_manifest.data(), audio_manifest.size(),
+    invalid_observation.data(), invalid_observation.size(), nullptr, 0,
+    observation_manifest.data(), observation_manifest.size(), &failed));
+  ASSERT(failed.program_version == 0);
+  ASSERT(failed.control_version == 0);
+  ASSERT(rt.recompile_version() == second.program_version);
+  rt.process();
+  for (double value : rt.outputBuffer) ASSERT(value == 0.25);
+  rendered = rt.render_window_observation_by_name(
+    0, static_cast<uint32_t>(values.size()), 1,
+    {"tap:projected"}, values.data());
+  ASSERT(rendered.program_version == second.program_version);
+  ASSERT(rendered.control_version == second.control_version);
+  for (double value : values) ASSERT(value == 3.0);
+  tropical_runtime_free(handle);
+}
+
+// Scalar coefficient materialization is cached per immutable control version.
+// Repeated frames cannot regress to the pre-coefficient slot image after the
+// main kernel overwrites its private scratch.
+static void test_observation_reuses_materialized_scalar_coefficients()
+{
+  tropical_runtime::FlatRuntime rt(16);
+  const std::string ir = wrap_loop(
+    "  %cp = getelementptr inbounds double, ptr %slots, i64 2\n"
+    "  %coef = load double, ptr %cp, align 8\n"
+    "  %tp = getelementptr inbounds double, ptr %slots, i64 0\n"
+    "  store double %coef, ptr %tp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %coef, ptr %op, align 8\n");
+  const std::string coeff_ir = std::string("define void @kernel(")
+    + KERNEL_SIG + ") {\n"
+      "entry:\n"
+      "  %xp = getelementptr inbounds double, ptr %slots, i64 1\n"
+      "  %x = load double, ptr %xp, align 8\n"
+      "  %c = fmul double %x, 2.000000e+00\n"
+      "  %cp = getelementptr inbounds double, ptr %slots, i64 2\n"
+      "  store double %c, ptr %cp, align 8\n"
+      "  ret void\n}\n";
+  const std::string manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":3,
+    "slot_names":["tap:mode","param:x","coeff:x2"],
+    "slot_defaults":[0.0,3.0,-99.0],"param_disciplines":[
+      {"name":"x","discipline":"raw","companions":[]}
+    ]})";
+  ASSERT(rt.load_ir_staged(ir, "", coeff_ir, manifest));
+
+  const auto check_twice = [&](double expected) {
+    std::array<double, 4> values{};
+    for (unsigned int read = 0; read < 2; ++read)
+    {
+      const auto observation = rt.render_window_observation_by_name(
+        0, static_cast<uint32_t>(values.size()), 1,
+        {"tap:mode"}, values.data());
+      ASSERT(observation.status ==
+             tropical_runtime::RenderWindowStatus::Rendered);
+      for (double value : values) ASSERT(value == expected);
+    }
+  };
+  check_twice(6.0);
+  const auto update = rt.dispatch_param_sync("x", 7.0);
+  ASSERT(update.ok);
+  check_twice(14.0);
+}
+
+// Program publication retains constant/banked array contents, not merely their
+// shapes. The load-time coefficient pass seeds a regular array; after the
+// control flag changes, subsequent coefficient passes deliberately leave that
+// bank untouched, so observation can recover it only from the program image.
+static void test_observation_retains_constant_array_storage()
+{
+  tropical_runtime::FlatRuntime rt(16);
+  const std::string ir = wrap_loop(
+    "  %a0p = getelementptr inbounds ptr, ptr %arrays, i64 0\n"
+    "  %a0 = load ptr, ptr %a0p, align 8\n"
+    "  %raw = load i64, ptr %a0, align 8\n"
+    "  %v = bitcast i64 %raw to double\n"
+    "  %tp = getelementptr inbounds double, ptr %slots, i64 1\n"
+    "  store double %v, ptr %tp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %v, ptr %op, align 8\n");
+  const std::string coeff_ir = std::string("define void @kernel(")
+    + KERNEL_SIG + ") {\n"
+      "entry:\n"
+      "  %fp = getelementptr inbounds double, ptr %slots, i64 0\n"
+      "  %flag = load double, ptr %fp, align 8\n"
+      "  %initialize = fcmp oeq double %flag, 0.000000e+00\n"
+      "  br i1 %initialize, label %write, label %done\n"
+      "write:\n"
+      "  %a0p = getelementptr inbounds ptr, ptr %arrays, i64 0\n"
+      "  %a0 = load ptr, ptr %a0p, align 8\n"
+      "  %raw = bitcast double 4.250000e+00 to i64\n"
+      "  store i64 %raw, ptr %a0, align 8\n"
+      "  br label %done\n"
+      "done:\n"
+      "  ret void\n}\n";
+  const std::string manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":1,"array_slot_sizes":[1],
+    "array_slot_names":["constant-bank"],"instance_functions":[],
+    "sinks":[],"slot_count":2,
+    "slot_names":["param:initialized","tap:bank"],
+    "slot_defaults":[0.0,0.0],"param_disciplines":[
+      {"name":"initialized","discipline":"raw","companions":[]}
+    ]})";
+  ASSERT(rt.load_ir_staged(ir, "", coeff_ir, manifest));
+  const auto initialized = rt.dispatch_param_sync("initialized", 1.0);
+  ASSERT(initialized.ok);
+
+  std::array<double, 4> values{};
+  const auto observation = rt.render_window_observation_by_name(
+    0, static_cast<uint32_t>(values.size()), 1,
+    {"tap:bank"}, values.data());
+  ASSERT(observation.status == tropical_runtime::RenderWindowStatus::Rendered);
+  for (double value : values) ASSERT(value == 4.25);
+}
+
+// Coefficient columns are rebuilt in observer-owned arrays and change
+// coherently with the control image instead of borrowing an audio generation.
+static void test_observation_materializes_coefficient_columns()
+{
+  tropical_runtime::FlatRuntime rt(16);
+  const std::string ir = wrap_loop(
+    "  %a0p = getelementptr inbounds ptr, ptr %arrays, i64 0\n"
+    "  %a0 = load ptr, ptr %a0p, align 8\n"
+    "  %raw = load i64, ptr %a0, align 8\n"
+    "  %v = bitcast i64 %raw to double\n"
+    "  %sp = getelementptr inbounds double, ptr %slots, i64 1\n"
+    "  store double %v, ptr %sp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %v, ptr %op, align 8\n");
+  const std::string coeff_ir = std::string("define void @kernel(")
+    + KERNEL_SIG + ") {\n"
+      "entry:\n"
+      "  %sp = getelementptr inbounds double, ptr %slots, i64 0\n"
+      "  %x = load double, ptr %sp, align 8\n"
+      "  %v = fmul double %x, 2.000000e+00\n"
+      "  %raw = bitcast double %v to i64\n"
+      "  %a0p = getelementptr inbounds ptr, ptr %arrays, i64 0\n"
+      "  %a0 = load ptr, ptr %a0p, align 8\n"
+      "  store i64 %raw, ptr %a0, align 8\n"
+      "  ret void\n}\n";
+  const std::string manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":1,"array_slot_sizes":[1],
+    "array_slot_names":["coef"],"coeff_array_slots":[0],
+    "instance_functions":[],"sinks":[],"slot_count":2,
+    "slot_names":["param:x","tap:column"],"slot_defaults":[1.0,0.0],
+    "param_disciplines":[
+      {"name":"x","discipline":"raw","companions":[]}
+    ]})";
+  ASSERT(rt.load_ir_staged(ir, "", coeff_ir, manifest));
+
+  std::array<double, 4> values{};
+  auto observation = rt.render_window_observation_by_name(
+    0, static_cast<uint32_t>(values.size()), 1,
+    {"tap:column"}, values.data());
+  ASSERT(observation.status == tropical_runtime::RenderWindowStatus::Rendered);
+  for (double value : values) ASSERT(value == 2.0);
+
+  const auto update = rt.dispatch_param_sync("x", 3.0);
+  ASSERT(update.ok);
+  observation = rt.render_window_observation_by_name(
+    0, static_cast<uint32_t>(values.size()), 1,
+    {"tap:column"}, values.data());
+  ASSERT(observation.status == tropical_runtime::RenderWindowStatus::Rendered);
+  for (double value : values) ASSERT(value == 6.0);
+}
+
+// The playback-anchored socket form captures the authoritative runtime
+// position and returns it with one version-pinned, point-budgeted frame. The
+// explicit-start spelling remains accepted for existing callers.
+static void test_playback_anchored_observation_socket_frame()
+{
+  tropical_runtime::FlatRuntime rt(16);
+  const std::string ir = wrap_loop(
+    "  %idx = add i64 %start_sample_index, %s\n"
+    "  %v = uitofp i64 %idx to double\n"
+    "  %sp = getelementptr inbounds double, ptr %slots, i64 0\n"
+    "  store double %v, ptr %sp, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  store double %v, ptr %op, align 8\n");
+  const std::string manifest = R"({"schema":"tropical_plan_5",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":1,"slot_names":["tap:ramp"],
+    "slot_defaults":[0.0]})";
+  ASSERT(rt.load_ir(ir, manifest));
+  rt.process();
+  rt.process();
+  ASSERT(rt.current_sample_index() == 32);
+
+  const std::string socket_path =
+    "/tmp/tropical-observation-" + std::to_string(::getpid()) + ".sock";
+  tropical_socket::SocketServer server(&rt, socket_path);
+  ASSERT(server.start());
+
+  nlohmann::json request = {
+    {"jsonrpc", "2.0"}, {"id", 1}, {"method", "render_window"},
+    {"params", {
+      {"anchor", "playback"}, {"count", 6}, {"point_budget", 3},
+      {"slots", {"tap:ramp"}},
+    }},
+  };
+  std::string response_text;
+  ASSERT(socket_request(socket_path, request.dump(), response_text));
+  const auto response = nlohmann::json::parse(response_text);
+  const auto & result = response.at("result");
+  ASSERT(result.at("anchor") == "playback");
+  ASSERT(result.at("playback_position") == 32);
+  ASSERT(result.at("start") == 26);
+  ASSERT(result.at("span") == 6);
+  ASSERT(result.at("stride") == 2);
+  ASSERT(result.at("count") == 3);
+  ASSERT(!result.at("preempted").get<bool>());
+  ASSERT(result.at("program_version").get<uint64_t>() > 0);
+  ASSERT(result.at("control_version").get<uint64_t>() > 0);
+  ASSERT(result.at("values")[0][0] == 26.0);
+  ASSERT(result.at("values")[0][1] == 28.0);
+  ASSERT(result.at("values")[0][2] == 30.0);
+
+  request["id"] = 2;
+  request["params"] = {
+    {"start", 5}, {"count", 3}, {"slots", {"tap:ramp"}},
+  };
+  ASSERT(socket_request(socket_path, request.dump(), response_text));
+  const auto explicit_response = nlohmann::json::parse(response_text);
+  const auto & explicit_result = explicit_response.at("result");
+  ASSERT(explicit_result.at("start") == 5);
+  ASSERT(!explicit_result.contains("playback_position"));
+  ASSERT(explicit_result.at("values")[0][0] == 5.0);
+  ASSERT(explicit_result.at("values")[0][1] == 6.0);
+  ASSERT(explicit_result.at("values")[0][2] == 7.0);
+  server.stop();
+}
+
 // A coefficient transaction writes slot[1] = 2*slot[0], while the audio
 // kernel outputs slot[1] - 2*slot[0]. Old and new generations both produce
 // exact zero; any scalar/coeff publication tear is immediately nonzero.
@@ -1004,6 +1589,22 @@ int main()
            test_param_dispatch_exact_sample_replay);
   run_test("param dispatch effective-boundary races",
            test_param_dispatch_effective_boundary_races);
+  run_test("observation snapshot never blocks control publication",
+           test_observation_snapshot_does_not_block_control);
+  run_test("named observation pins one strided hot-swap program",
+           test_named_observation_pins_hot_swap_program);
+  run_test("separate observation artifact projects named controls",
+           test_separate_observation_artifact_projects_controls);
+  run_test("publication generation tokens and atomic dual failure",
+           test_publication_generation_tokens_and_atomic_failure);
+  run_test("observation reuses materialized scalar coefficients",
+           test_observation_reuses_materialized_scalar_coefficients);
+  run_test("observation retains constant/banked array storage",
+           test_observation_retains_constant_array_storage);
+  run_test("observation materializes coefficient columns privately",
+           test_observation_materializes_coefficient_columns);
+  run_test("playback-anchored observation socket frame",
+           test_playback_anchored_observation_socket_frame);
   run_test("coherent slot/coefficient generation", test_control_generation_coherence);
   run_test("hot-swap state handoff", test_hot_swap_state_handoff);
   run_test("owned generation survives two publications", test_generation_ownership_barrier);

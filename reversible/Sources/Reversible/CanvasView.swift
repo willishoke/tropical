@@ -75,6 +75,18 @@ struct NodeView: View {
 
     private var spec: NodeSpec { node.kind.spec }
 
+    private var truthBadge: (label: String, color: Color, help: String)? {
+        switch model.presentationStatus(for: node) {
+        case .active:
+            ("active", Theme.truthActive, "active in the running program")
+        case .excluded:
+            ("excluded", Theme.truthExcluded, "authored but excluded from the running program")
+        case .pending:
+            ("pending", Theme.truthPending, "awaiting realized compile truth")
+        case nil: nil
+        }
+    }
+
     var body: some View {
         VStack(alignment: .leading, spacing: 0) {
             titleBar
@@ -100,6 +112,17 @@ struct NodeView: View {
             Circle().fill(node.color).frame(width: 9, height: 9)
             Text(spec.title).font(Theme.mono.bold()).foregroundStyle(Theme.text)
             Spacer(minLength: 8)
+            if let truthBadge {
+                Text(truthBadge.label)
+                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                    .foregroundStyle(truthBadge.color)
+                    .padding(.horizontal, 4).padding(.vertical, 2)
+                    .background(
+                        truthBadge.color.opacity(0.13),
+                        in: Capsule()
+                    )
+                    .help(truthBadge.help)
+            }
             Text(node.id).font(Theme.monoSmall).foregroundStyle(Theme.muted)
             if !spec.fixed {
                 Button {

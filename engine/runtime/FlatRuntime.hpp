@@ -63,6 +63,36 @@ struct ParamDispatchResult
   uint64_t    effective_sample_index = 0;
 };
 
+// Exact graph generation created by one successful publication. Returning the
+// pair from inside the publication critical section avoids a compile caller
+// racing a subsequent control-only publication while sampling two counters.
+struct PublishedGeneration
+{
+  uint64_t program_version = 0;
+  uint64_t control_version = 0;
+};
+
+// Random-access observation retains an explicit cancellation outcome for
+// latest-only/superseded callers. Snapshot rendering itself does not preempt;
+// the status remains part of the wire contract so callers can discard partial
+// work if a future observation scheduler adds cooperative cancellation.
+enum class RenderWindowStatus : uint8_t
+{
+  Rendered,
+  Preempted,
+  InvalidArgument,
+  Unsupported,
+};
+
+struct ObservationRenderResult
+{
+  RenderWindowStatus status = RenderWindowStatus::InvalidArgument;
+  uint64_t program_version = 0;
+  uint64_t control_version = 0;
+  uint64_t effective_sample_index = 0;
+  std::string unknown_slot;
+};
+
 // Explicit ownership for storage that is mutated off the audio thread.
 // These atomics deliberately live outside KernelState: KernelState is movable
 // during hot-swap, while ownership must remain at a stable address.
@@ -91,6 +121,64 @@ struct RuntimeOwnershipTestSeam
   std::atomic<bool> pause_after_dispatch_materialization{false};
   std::atomic<bool> dispatch_materialized{false};
   std::atomic<bool> release_dispatch{false};
+  std::atomic<bool> pause_after_observation_coordinate{false};
+  std::atomic<bool> observation_coordinate_completed{false};
+  std::atomic<bool> release_observation_coordinate{false};
+};
+
+// Immutable read-side program/control images for every random-access
+// observer. A slow reader retains one heap image while audio and control keep
+// publishing through their bounded ownership protocol; no pointer below
+// aliases either movable KernelState slot.
+struct ObservationProgramImage
+{
+  uint64_t program_version = 0;
+  tropical_jit::CompilationMode mode = tropical_jit::CompilationMode::Fused;
+  tropical_jit::NumericKernelFn kernel = nullptr;
+  tropical_jit::NumericKernelFn coeff_kernel = nullptr;
+  double sample_rate = 44100.0;
+  std::size_t register_count = 0;
+  std::size_t temp_count = 0;
+  std::size_t coeff_register_count = 0;
+  std::size_t coeff_temp_count = 0;
+  std::vector<std::vector<int64_t>> array_storage;
+  std::vector<uint64_t> array_sizes;
+  std::vector<uint64_t> param_ptrs;
+  std::vector<uint32_t> coeff_array_slots;
+  std::vector<std::string> slot_names;
+  std::vector<double> initial_slots;
+  std::unordered_map<std::string, uint32_t> slot_lookup;
+};
+
+struct ObservationControlImage
+{
+  uint64_t control_version = 0;
+  uint64_t effective_sample_index = 0;
+  std::vector<double> slots;
+};
+
+struct ObservationSnapshot
+{
+  std::shared_ptr<const ObservationProgramImage> program;
+  std::shared_ptr<const ObservationControlImage> controls;
+};
+
+// Mutable scratch is serialized only with other observers. Keeping it outside
+// the live state makes control publication and hot-swap independent of a slow
+// room/scope/telemetry consumer, while retaining allocation-free steady-state
+// frames and coefficient reuse.
+struct ObservationRenderWorkspace
+{
+  uint64_t program_version = 0;
+  uint64_t control_version = 0;
+  std::vector<int64_t> registers;
+  std::vector<int64_t> temps;
+  std::vector<int64_t> coeff_registers;
+  std::vector<int64_t> coeff_temps;
+  std::vector<double> materialized_slots;
+  std::vector<double> slots;
+  std::vector<std::vector<int64_t>> arrays;
+  std::vector<int64_t *> array_ptrs;
 };
 
 struct KernelState
@@ -234,6 +322,25 @@ public:
    */
   bool load_ir_staged(const std::string & ir_text, const std::string & msl_source,
                       const std::string & coeff_ir, const std::string & manifest_json);
+
+  /** Publish one audio/observation artifact and return its exact initial pair. */
+  PublishedGeneration load_ir_staged_generation(
+    const std::string & ir_text, const std::string & msl_source,
+    const std::string & coeff_ir, const std::string & manifest_json);
+
+  /**
+   * Atomically publish distinct audio and observation artifacts. The audio
+   * artifact may own Metal execution; observation is JIT-only. Slot layouts
+   * may differ: each audio control image is projected by exact manifest name
+   * into the observation program's initial slot image.
+   */
+  PublishedGeneration load_ir_staged_with_observation_generation(
+    const std::string & audio_ir, const std::string & audio_msl_source,
+    const std::string & audio_coeff_ir,
+    const std::string & audio_manifest_json,
+    const std::string & observation_ir,
+    const std::string & observation_coeff_ir,
+    const std::string & observation_manifest_json);
 
   /**
    * Control-plane/test-only: reposition the active kernel's sample clock
@@ -706,66 +813,159 @@ public:
     }
   }
 
-  // ── Random-access render (scope / slave consumers) ─────────────────────────
-  // Render `count` samples starting at an arbitrary sample index, snapshotting
-  // the requested slots per sample. For a STATELESS (register-free) patch this
-  // is exact and safe to run concurrently with the audio thread: it renders
-  // into private scratch temps/slots so it never disturbs the live state, and
-  // holds build_mutex_ so a hot-swap can't rebuild the active state mid-render.
-  // `out` is slot-major: out[k*count + i] = value of slot_ids[k] at sample
-  // start_index+i. Fused mode only; returns false otherwise or on a bad slot id.
-  bool render_window(uint64_t start_index, uint32_t count,
-                     const uint32_t * slot_ids, uint32_t n_slots,
-                     double * out)
+  // ── Random-access observation (room / scope / telemetry consumers) ─────────
+  // Render `count` coordinates from one atomically acquired program/control
+  // image. `out` is slot-major: out[k*count+i] is slot_ids[k] at
+  // start_index+i*stride. This path never borrows a live KernelState or takes
+  // build_mutex_, so a paused observer cannot delay control or hot-swap.
+  RenderWindowStatus render_window_observation(
+    uint64_t start_index, uint32_t count, uint32_t stride,
+    const uint32_t * slot_ids, uint32_t n_slots, double * out,
+    std::shared_ptr<const ObservationSnapshot> snapshot = {})
   {
-    if (!out || (n_slots > 0 && !slot_ids)) return false;
-    std::lock_guard<std::mutex> lock(build_mutex_);
-    const uint32_t state_idx = active_state_.load(std::memory_order_acquire);
-    KernelState & active = states_[state_idx];
-    if (active.mode != tropical_jit::CompilationMode::Fused || active.kernel == nullptr)
-      return false;
+    if (!out || stride == 0 || (n_slots > 0 && !slot_ids))
+      return RenderWindowStatus::InvalidArgument;
+    if (!snapshot)
+      snapshot = std::atomic_load_explicit(
+        &observation_snapshot_, std::memory_order_acquire);
+    if (!snapshot || !snapshot->program || !snapshot->controls)
+      return RenderWindowStatus::Unsupported;
+    const ObservationProgramImage & program = *snapshot->program;
+    if (program.mode != tropical_jit::CompilationMode::Fused
+        || program.kernel == nullptr)
+      return RenderWindowStatus::Unsupported;
     for (uint32_t k = 0; k < n_slots; ++k)
-      if (slot_ids[k] >= active.slots.size()) return false;
+      if (slot_ids[k] >= snapshot->controls->slots.size())
+        return RenderWindowStatus::InvalidArgument;
 
-    // Private scratch, isolated from the audio thread. Holding build_mutex_
-    // excludes the inactive-state rebuild, so these copies can't tear
-    // structurally (no concurrent resize); a register-free patch never writes
-    // registers/arrays, so the audio thread and this render don't fight.
-    std::vector<int64_t>              registers = active.registers;
-    std::vector<int64_t>              temps     = active.temps;
-    std::vector<double>               slots     = active.slots;
-    std::vector<std::vector<int64_t>> arrays    = active.array_storage;
-    // Coefficient columns live in the same immutable published generation as
-    // the control slot snapshot.
-    if (!active.coeff_array_slots.empty())
+    std::lock_guard<std::mutex> observation_lock(observation_render_mutex_);
+    ObservationRenderWorkspace & workspace = observation_workspace_;
+    if (workspace.program_version != program.program_version)
     {
-      const uint32_t gen = std::atomic_ref(active.control_published_gen)
-                             .load(std::memory_order_acquire);
-      for (std::size_t j = 0; j < active.coeff_array_slots.size(); ++j)
-        arrays[active.coeff_array_slots[j]] = active.coeff_generations[gen][j];
+      workspace.registers.assign(program.register_count, 0);
+      workspace.temps.assign(program.temp_count, 0);
+      workspace.coeff_registers.assign(program.coeff_register_count, 0);
+      workspace.coeff_temps.assign(program.coeff_temp_count, 0);
+      workspace.materialized_slots.clear();
+      workspace.arrays = program.array_storage;
+      workspace.arrays.resize(program.array_sizes.size());
+      for (std::size_t a = 0; a < workspace.arrays.size(); ++a)
+        workspace.arrays[a].resize(
+          static_cast<std::size_t>(program.array_sizes[a]), 0);
+      workspace.array_ptrs.resize(workspace.arrays.size());
+      for (std::size_t a = 0; a < workspace.arrays.size(); ++a)
+        workspace.array_ptrs[a] = workspace.arrays[a].data();
+      workspace.program_version = program.program_version;
+      workspace.control_version = 0;
     }
-    std::vector<int64_t *>            array_ptrs(arrays.size());
-    for (size_t a = 0; a < arrays.size(); ++a) array_ptrs[a] = arrays[a].data();
+
+    // Re-materialize scalar coefficients and coefficient columns solely in
+    // observer-owned storage. Preserve the resulting scalar image across
+    // repeated reads of one control version; the main kernel may overwrite its
+    // per-frame slot scratch.
+    if (workspace.control_version != snapshot->controls->control_version
+        || workspace.materialized_slots.empty())
+    {
+      workspace.materialized_slots = snapshot->controls->slots;
+      double coeff_out = 0.0;
+      if (program.coeff_kernel)
+        program.coeff_kernel(
+          nullptr,
+          workspace.coeff_registers.data(),
+          workspace.array_ptrs.data(),
+          program.array_sizes.data(),
+          workspace.coeff_temps.data(),
+          program.sample_rate,
+          0,
+          program.param_ptrs.data(),
+          &coeff_out,
+          1,
+          workspace.materialized_slots.data());
+    }
+    workspace.control_version = snapshot->controls->control_version;
+    workspace.slots = workspace.materialized_slots;
 
     double scratch_out = 0.0;
     for (uint32_t i = 0; i < count; ++i)
     {
-      active.kernel(
+      program.kernel(
         nullptr,
-        registers.data(),
-        array_ptrs.data(),
-        active.array_sizes.data(),
-        temps.data(),
-        active.sample_rate,
-        start_index + i,
-        active.param_ptrs.data(),
+        workspace.registers.data(),
+        workspace.array_ptrs.data(),
+        program.array_sizes.data(),
+        workspace.temps.data(),
+        program.sample_rate,
+        start_index + static_cast<uint64_t>(i) * stride,
+        program.param_ptrs.data(),
         &scratch_out,
         1,
-        slots.data());
+        workspace.slots.data());
       for (uint32_t k = 0; k < n_slots; ++k)
-        out[static_cast<size_t>(k) * count + i] = slots[slot_ids[k]];
+        out[static_cast<size_t>(k) * count + i] =
+          workspace.slots[slot_ids[k]];
+      if (i == 0)
+      {
+        if (RuntimeOwnershipTestSeam * seam =
+              ownership_test_seam_.load(std::memory_order_acquire);
+            seam && seam->pause_after_observation_coordinate.load(
+              std::memory_order_acquire))
+        {
+          seam->observation_coordinate_completed.store(
+            true, std::memory_order_release);
+          while (!seam->release_observation_coordinate.load(
+            std::memory_order_acquire))
+            std::this_thread::yield();
+        }
+      }
     }
-    return true;
+    return RenderWindowStatus::Rendered;
+  }
+
+  // Resolve names and evaluate against the same pinned generation. A hot-swap
+  // cannot reinterpret an old room/tap name through the new program's layout.
+  ObservationRenderResult render_window_observation_by_name(
+    uint64_t start_index, uint32_t count, uint32_t stride,
+    const std::vector<std::string> & slot_names, double * out)
+  {
+    ObservationRenderResult result;
+    const auto snapshot = std::atomic_load_explicit(
+      &observation_snapshot_, std::memory_order_acquire);
+    if (!snapshot || !snapshot->program || !snapshot->controls)
+    {
+      result.status = RenderWindowStatus::Unsupported;
+      return result;
+    }
+    result.program_version = snapshot->program->program_version;
+    result.control_version = snapshot->controls->control_version;
+    result.effective_sample_index =
+      snapshot->controls->effective_sample_index;
+    std::vector<uint32_t> slot_ids;
+    slot_ids.reserve(slot_names.size());
+    for (const std::string & name : slot_names)
+    {
+      const auto found = snapshot->program->slot_lookup.find(name);
+      if (found == snapshot->program->slot_lookup.end())
+      {
+        result.status = RenderWindowStatus::InvalidArgument;
+        result.unknown_slot = name;
+        return result;
+      }
+      slot_ids.push_back(found->second);
+    }
+    result.status = render_window_observation(
+      start_index, count, stride,
+      slot_ids.data(), static_cast<uint32_t>(slot_ids.size()), out,
+      snapshot);
+    return result;
+  }
+
+  bool render_window(uint64_t start_index, uint32_t count,
+                     const uint32_t * slot_ids, uint32_t n_slots,
+                     double * out)
+  {
+    return render_window_observation(
+      start_index, count, 1, slot_ids, n_slots, out)
+      == RenderWindowStatus::Rendered;
   }
 
   // Monotonic counter bumped on every successful hot-swap (publish_state).
@@ -1032,9 +1232,13 @@ private:
     KernelState & state, uint32_t target);
   void commit_control_snapshot(
     KernelState & state, uint32_t state_index,
-    ControlGenerationReservation reservation);
+    ControlGenerationReservation reservation,
+    uint64_t effective_sample_index = UINT64_MAX);
   void release_control_snapshot_reservation(
     uint32_t state_index, ControlGenerationReservation reservation);
+  void publish_observation_controls_locked(
+    const KernelState & state,
+    uint64_t effective_sample_index = UINT64_MAX);
 
   void apply_fade_to_output()
   {
@@ -1083,7 +1287,9 @@ private:
   // sample coordinate and performs the atomic double-buffer flip.
   // load_ir fills the kernel handle (via compile_ir_text) between them.
   KernelState build_kernel_state(const tropical_plan5::ParsedPlan5 & parsed);
-  bool publish_state(KernelState && new_state);
+  PublishedGeneration publish_state(
+    KernelState && new_state,
+    const KernelState * observation_state = nullptr);
 
 #ifdef TROPICAL_METAL
   tropical_metal::RenderEpochRequest make_metal_epoch_request(
@@ -1109,11 +1315,13 @@ private:
   // visible together through one release-published generation word. Called
   // under build_mutex_, except while constructing an unpublished local state.
   void publish_control_snapshot(
-    KernelState & state, uint32_t state_index = UINT32_MAX)
+    KernelState & state, uint32_t state_index = UINT32_MAX,
+    uint64_t effective_sample_index = UINT64_MAX)
   {
     auto reservation = reserve_control_generation(state, state_index);
     materialize_control_snapshot(state, reservation.target);
-    commit_control_snapshot(state, state_index, reservation);
+    commit_control_snapshot(
+      state, state_index, reservation, effective_sample_index);
   }
 
   unsigned int buffer_length_;
@@ -1123,6 +1331,12 @@ private:
   std::array<std::array<std::atomic<StorageOwner>, 3>, 2>
     control_generation_owners_{};
   std::atomic<uint64_t> recompile_version_{0};
+  // C++ shared_ptr atomic free functions support the release SDK where the
+  // C++20 atomic<shared_ptr> specialization is unavailable.
+  std::shared_ptr<const ObservationSnapshot> observation_snapshot_;
+  uint64_t next_observation_control_version_ = 1;
+  std::mutex observation_render_mutex_;
+  ObservationRenderWorkspace observation_workspace_;
   std::atomic<uint64_t> ownership_failure_count_{0};
   std::atomic<RuntimeOwnershipTestSeam *> ownership_test_seam_{nullptr};
 

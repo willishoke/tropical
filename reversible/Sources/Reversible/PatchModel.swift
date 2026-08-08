@@ -19,11 +19,69 @@ struct PatchNode: Identifiable {
     }
 }
 
-/// The patch graph + engine session, one object. TOPOLOGY RELOWERS, SCALARS
-/// ARE LIVE: every continuous knob is a live `param:<id>.<knob>` module slot —
-/// turning it drives `set_param` on the running kernel, no recompile. Only
-/// structural edits (add/remove/rewire) change the graph topology and trigger
-/// a relower + hot-swap.
+enum ScopeTraceProjection {
+    /// Preserve each scope's own 2× trigger-search horizon when several
+    /// different window sizes share one larger generation-pinned RPC.
+    static func triggeredSamples(_ values: [Double], displayCount: Int) -> [Double] {
+        guard displayCount > 0, !values.isEmpty else { return [] }
+        let horizon = min(values.count, min(16_384, displayCount * 2))
+        let suffix = Array(values.suffix(horizon))
+        let trigger = triggerIndex(suffix, display: displayCount)
+        return Array(suffix[trigger..<min(trigger + displayCount, suffix.count)])
+    }
+
+    /// Rising level-trigger with hysteresis (the playground scope's port of
+    /// tui/scope/trigger.ts).
+    static func triggerIndex(_ samples: [Double], display: Int) -> Int {
+        let searchEnd = samples.count - display
+        guard searchEnd > 0 else { return 0 }
+        let peak = samples.reduce(0) { max($0, abs($1)) }
+        let hysteresis = peak * 0.05
+        guard hysteresis > 0 else { return 0 }
+        var armed = false
+        for index in 0..<searchEnd {
+            if samples[index] < -hysteresis { armed = true }
+            else if armed && samples[index] >= hysteresis { return index }
+        }
+        return 0
+    }
+}
+
+enum ObservationTapSelection {
+    static func stableSourceIDs(
+        candidates: [String],
+        allowedEngineNodeIDs: Set<String>
+    ) -> [String] {
+        var seen = Set<String>()
+        return candidates.filter {
+            allowedEngineNodeIDs.contains($0) && seen.insert($0).inserted
+        }
+    }
+
+    static func expectedHandshakeNames(requestedSourceIDs: [String]) -> [String] {
+        ["out"] + requestedSourceIDs
+    }
+}
+
+enum PatchCompileState: Equatable, Sendable {
+    case idle
+    case compiling(authoredRevision: Int)
+    case running(authoredRevision: Int, generation: EngineGeneration)
+    case failed(authoredRevision: Int, message: String)
+    case superseded(compiledRevision: Int, currentRevision: Int)
+}
+
+enum NodePresentationStatus: Equatable, Sendable {
+    case active
+    case excluded
+    case pending
+}
+
+/// The patch graph + engine session, one object. The realized compile handshake
+/// owns scalar routing: live parameters drive `set_param`; structural values
+/// and topology edits relower and hot-swap. Authored revision and lowering
+/// compatibility remain separate so acknowledged live editing does not invent
+/// a structural invalidation.
 @MainActor
 final class PatchModel: ObservableObject {
     @Published var nodes: [String: PatchNode] = [:]
@@ -40,6 +98,11 @@ final class PatchModel: ObservableObject {
     /// The file this patch came from / saves to (nil = never saved). Drives
     /// the window title and whether ⌘S needs to ask.
     @Published var documentURL: URL?
+    @Published private(set) var vocabulary: EngineVocabulary?
+    @Published private(set) var authoredRevision = 0
+    @Published private(set) var realizedPatch: RealizedPatchSnapshot?
+    @Published private(set) var runningGeneration: EngineGeneration?
+    @Published private(set) var compileState: PatchCompileState = .idle
 
     /// Sources an inlet may legally take — the connection UI shows ONLY
     /// these (the type discipline enforced by omission: control inlets
@@ -47,6 +110,29 @@ final class PatchModel: ObservableObject {
     func legalSources(for nodeId: String, port: String) -> [PatchNode] {
         order.compactMap { nodes[$0] }
             .filter { canConnect(from: $0.id, to: nodeId, port: port) }
+    }
+
+    func presentationStatus(for node: PatchNode) -> NodePresentationStatus? {
+        guard !node.kind.spec.monitor else { return nil }
+        guard let realizedPatch,
+              realizedPatch.loweringRevision == loweringRevision,
+              let realizedNode = realizedPatch.patch.node(id: node.id)
+        else { return .pending }
+        return realizedNode.status == .active ? .active : .excluded
+    }
+
+    func parameterStatus(
+        for node: PatchNode,
+        knob: KnobSpec
+    ) -> RealizedParameterStatus {
+        if node.kind.spec.monitor { return .structural }
+        guard let realizedPatch,
+              realizedPatch.loweringRevision == loweringRevision
+        else { return .inactive }
+        return realizedPatch.patch.parameterStatus(
+            nodeID: node.id,
+            port: knob.name
+        )
     }
 
     // ── Topological layout ────────────────────────────────────────────────
@@ -93,6 +179,10 @@ final class PatchModel: ObservableObject {
     }
 
     let engine: Engine
+    private let observationSampler: ObservationSampler
+    private let observationDisplayLink: ObservationDisplayLink
+    private var truth = PatchTruthStore()
+    private var loweringRevision = 0
     private var counter = 0
 
     // Node ids are "<kind><n>" and must stay unique for the lifetime of a
@@ -117,8 +207,14 @@ final class PatchModel: ObservableObject {
         let forward: @Sendable (EngineEvent) -> Void = { [box] event in
             Task { @MainActor [box] in box.handler?(event) }
         }
-        engine = Engine(events: forward)
+        let engine = Engine(events: forward)
+        self.engine = engine
+        observationSampler = ObservationSampler(rpc: engine)
+        observationDisplayLink = ObservationDisplayLink()
         box.handler = { [weak self] event in self?.handle(event) }
+        observationSampler.onFrame = { [weak self] frame in
+            self?.adoptObservationFrame(frame)
+        }
         // Every exit path must reap the child engine or it orphans with the
         // DAC running (see AppDelegate).
         AppDelegate.onTerminate = { [engine] in engine.terminateChild() }
@@ -142,13 +238,40 @@ final class PatchModel: ObservableObject {
         switch event {
         case .up:
             setStatus("engine up", isError: false)
-            Task { await syncAudioState() }
+            Task { await synchronizeEngineState() }
         case .exit(let code):
+            vocabulary = nil
+            lastPushed = nil
+            truth.reset()
+            publishTruth()
+            observationSampler.clear()
+            scopeTraces = [:]
+            compileState = .idle
             setStatus("engine exited (code \(code))", isError: true)
         case .stderr(let text):
             // Diagnostic only — the Electron app console.warn'd these.
             FileHandle.standardError.write(Data("[engine] \(text)".utf8))
         }
+    }
+
+    private func synchronizeEngineState() async {
+        do {
+            vocabulary = try await engine.loadVocabulary()
+            await syncAudioState()
+            schedulePush()
+        } catch {
+            setStatus("engine vocabulary: \(error.localizedDescription)", isError: true)
+        }
+    }
+
+    private func publishTruth() {
+        realizedPatch = truth.realized
+        runningGeneration = truth.runningGeneration
+    }
+
+    func advanceAuthoredRevision(requiresCompile: Bool = true) {
+        authoredRevision += 1
+        if requiresCompile { loweringRevision += 1 }
     }
 
     func setStatus(_ text: String, isError: Bool) {
@@ -182,6 +305,8 @@ final class PatchModel: ObservableObject {
         nodes[id] = n
         order.append(id)
         autoArrangeIfOn()
+        advanceAuthoredRevision(requiresCompile: !kind.spec.monitor)
+        schedulePush()
         return n
     }
 
@@ -194,6 +319,7 @@ final class PatchModel: ObservableObject {
             nodes[m.id] = m
         }
         autoArrangeIfOn()
+        advanceAuthoredRevision()
         schedulePush()
     }
 
@@ -237,6 +363,7 @@ final class PatchModel: ObservableObject {
         to.inputs[port, default: []].append(fromId)
         nodes[toId] = to
         autoArrangeIfOn()
+        advanceAuthoredRevision()
         schedulePush()
     }
 
@@ -245,17 +372,35 @@ final class PatchModel: ObservableObject {
         to.inputs[port]?.removeAll { $0 == fromId }
         nodes[toId] = to
         autoArrangeIfOn()
+        advanceAuthoredRevision()
         schedulePush()
     }
 
     // ── Serialization → load_patch_graph ─────────────────────────────────
-    /// Taps cost kernel compute (each re-emits its upstream cone), so request
-    /// them only while a scope channel actually watches a node. Out is exempt:
-    /// the final-mix slot `__root__.out` exists in every compile.
-    var tapsWanted: Bool {
-        nodes.values.contains { n in
-            n.kind == .scope && n.allInputs.contains { nodes[$0]?.kind != .out }
+    /// Stable, explicit observation projection. Monitor order and inlet order
+    /// define the request; repeated sources are kept once, and Out is omitted
+    /// because its final-mix binding is always published as `out`.
+    var requestedTapNodeIDs: [String] {
+        var candidates: [String] = []
+        for id in order {
+            guard let monitor = nodes[id], monitor.kind.spec.monitor else { continue }
+            for port in monitor.kind.spec.inlets {
+                candidates.append(contentsOf: monitor.inputs[port] ?? [])
+            }
         }
+        let allowed = Set(nodes.values.compactMap { node in
+            node.kind != .out && !node.kind.spec.monitor ? node.id : nil
+        })
+        return ObservationTapSelection.stableSourceIDs(
+            candidates: candidates,
+            allowedEngineNodeIDs: allowed
+        )
+    }
+
+    private var expectedTapNames: [String] {
+        ObservationTapSelection.expectedHandshakeNames(
+            requestedSourceIDs: requestedTapNodeIDs
+        )
     }
 
     func serialize() -> JSONValue {
@@ -279,7 +424,7 @@ final class PatchModel: ObservableObject {
         return .object([
             "nodes": .array(out),
             "out": outNode.map { .string($0.id) } ?? .null,
-            "taps": .bool(tapsWanted),
+            "taps": .array(requestedTapNodeIDs.map(JSONValue.string)),
         ])
     }
 
@@ -296,6 +441,7 @@ final class PatchModel: ObservableObject {
     private var lastPushed: JSONValue?
 
     func pushGraph() async {
+        guard let vocabulary else { return }
         if pushInFlight { pushAgain = true; return }
         pushInFlight = true
         defer {
@@ -305,7 +451,22 @@ final class PatchModel: ObservableObject {
         // A monitor-only edit (e.g. scoping the Out mix) leaves the engine
         // graph byte-identical — skip the recompile, not just debounce it.
         let graph = serialize()
-        if graph == lastPushed { return }
+        let revision = authoredRevision
+        let compiledLoweringRevision = loweringRevision
+        if graph == lastPushed {
+            truth.retagCurrent(
+                authoredRevision: revision,
+                loweringRevision: compiledLoweringRevision
+            )
+            publishTruth()
+            if let runningGeneration {
+                compileState = .running(
+                    authoredRevision: revision,
+                    generation: runningGeneration
+                )
+            }
+            return
+        }
         do {
             // The compile+JIT is synchronous on the engine's single control
             // thread, so a heavy node (e.g. a modal reverb: ~10⁵ IR lines →
@@ -313,17 +474,64 @@ final class PatchModel: ObservableObject {
             // "compiling" is distinguishable from "hung" — the acute failure
             // mode of the live-patch loop.
             setStatus("compiling…", isError: false)
-            try await engine.call("load_patch_graph", graph)
+            compileState = .compiling(authoredRevision: revision)
+            let adoption = try await engine.loadPatchGraph(
+                graph,
+                expectedTapNames: expectedTapNames,
+                vocabularyFingerprint: vocabulary.fingerprint
+            )
+            guard truth.adoptCompile(
+                adoption,
+                authoredRevision: revision,
+                loweringRevision: compiledLoweringRevision,
+                graph: graph
+            ) else {
+                switch adoption {
+                case .superseded, .stale:
+                    compileState = .superseded(
+                        compiledRevision: revision,
+                        currentRevision: authoredRevision
+                    )
+                    setStatus(
+                        "compile superseded · running patch unchanged",
+                        isError: false
+                    )
+                case .adopted:
+                    break
+                }
+                return
+            }
             lastPushed = graph
+            publishTruth()
+            if let realizedPatch {
+                observationSampler.adoptCompileGeneration(
+                    realizedPatch.generation
+                )
+            }
+            scopeTraces = [:]
             // A relower transfers slots by name, so a live scrub survives it —
             // except a COLD first compile, which seeds master.velocity at its
             // default (1). Re-apply a non-default scrub so the slider and the
             // running clock agree (no-op if equal).
             if velocity != 1 { params.send("master.velocity", velocity) }
-            await refreshScopeTaps()
-            setStatus(audioOn ? "playing" : "compiled", isError: false)
+            if revision == authoredRevision, let runningGeneration {
+                compileState = .running(
+                    authoredRevision: revision,
+                    generation: runningGeneration
+                )
+                setStatus(audioOn ? "playing" : "compiled", isError: false)
+            } else {
+                compileState = .superseded(
+                    compiledRevision: revision,
+                    currentRevision: authoredRevision
+                )
+                setStatus("compiled revision superseded by edits", isError: false)
+            }
         } catch {
-            lastPushed = nil
+            compileState = .failed(
+                authoredRevision: revision,
+                message: error.localizedDescription
+            )
             setStatus("compile: \(error.localizedDescription)", isError: true)
         }
     }
@@ -331,16 +539,45 @@ final class PatchModel: ObservableObject {
     // ── Live param drive ──────────────────────────────────────────────────
     lazy var params = ParamSender(model: self)
 
-    func sendKnob(_ node: PatchNode, _ knob: KnobSpec, _ value: Double) {
-        // A monitor's knobs (Scope `window`) are view state, not param slots.
-        guard !node.kind.spec.monitor else { return }
+    func setKnob(_ node: PatchNode, _ knob: KnobSpec, _ value: Double) {
+        guard value.isFinite, var current = nodes[node.id],
+              current.values[knob.name] != value
+        else { return }
+        current.values[knob.name] = value
+        nodes[node.id] = current
+
+        // A monitor's knobs (Scope `window`) are authored view state, not
+        // parameter slots and do not invalidate lowering compatibility.
+        guard !node.kind.spec.monitor else {
+            advanceAuthoredRevision(requiresCompile: false)
+            return
+        }
         let name = "\(node.id).\(knob.name)"
+        guard let realizedPatch,
+              realizedPatch.loweringRevision == loweringRevision,
+              case .live = realizedPatch.patch.parameterStatus(
+                nodeID: node.id,
+                port: knob.name
+              )
+        else {
+            // Absent live truth means the edit is structural (or belongs to a
+            // not-yet-realized lowering revision).
+            advanceAuthoredRevision()
+            schedulePush(after: .milliseconds(90))
+            return
+        }
+        advanceAuthoredRevision(requiresCompile: false)
         params.send(name, value)
     }
 
-    func setVelocity(_ v: Double) {
-        velocity = v
-        params.send("master.velocity", v)
+    func setVelocity(_ v: Double, force: Bool = false) {
+        guard v.isFinite else { return }
+        let changed = velocity != v
+        if changed {
+            velocity = v
+            advanceAuthoredRevision(requiresCompile: false)
+        }
+        if changed || force { params.send("master.velocity", v) }
     }
 
     // ── Transport ─────────────────────────────────────────────────────────
@@ -406,111 +643,100 @@ final class PatchModel: ObservableObject {
         }
     }
 
-    // ── Scope taps ────────────────────────────────────────────────────────
-    // A scope channel names a NODE; the engine names a SLOT. After each
-    // compile `list_scope_taps` rebinds node id → `__root__.tap:<id>` (a node
-    // that failed to lower simply has no tap and its trace goes dark). The
-    // final mix is the one slot that exists in every compile, so Out maps
-    // statically — no taps build required to watch the output.
-    private var scopeTapSlots: [String: String] = [:]
-
-    /// Latest triggered trace per scope channel, keyed "<scopeId>.<port>".
+    // ── Generation-pinned observations ────────────────────────────────────
+    /// Latest complete trace set, keyed "<scopeId>.<port>". The dictionary is
+    /// replaced only from one immutable ObservationFrame.
     @Published var scopeTraces: [String: [Double]] = [:]
 
+    private struct ScopeProjection: Equatable {
+        let binding: ObservationBinding
+        let displayCounts: [String: Int]
+    }
+
     func scopeSlot(for sourceId: String) -> String? {
-        if nodes[sourceId]?.kind == .out { return "__root__.out" }
-        return scopeTapSlots[sourceId]
+        guard let realizedPatch else { return nil }
+        let tapName = nodes[sourceId]?.kind == .out ? "out" : sourceId
+        return realizedPatch.patch.tap(named: tapName)?.slot
     }
 
-    private func refreshScopeTaps() async {
-        guard tapsWanted else { scopeTapSlots = [:]; return }
-        guard let r = try? await engine.call("list_scope_taps"),
-              case .array(let taps)? = r["taps"] else { return }
-        var map: [String: String] = [:]
-        for t in taps {
-            guard let name = t["name"]?.stringValue,
-                  let slot = t["slot"]?.stringValue, name != "out" else { continue }
-            map[name] = slot
-        }
-        scopeTapSlots = map
-    }
-
-    // ── Scope poll loop ───────────────────────────────────────────────────
-    // `render_window` + `playback_position` are data-plane methods: answered
-    // synchronously in C++ off the audio thread, never queued behind the Lean
-    // control thread — so the trace stays live through a compile and works
-    // with the transport stopped (the kernel is closed-form; a frozen clock
-    // just yields a still waveform). One serial loop, so a slow frame can
-    // never pile up requests.
     static let sampleRate = 44100.0
-    private var scopeTask: Task<Void, Never>?
-
     private func startScopePolling() {
-        scopeTask = Task { [weak self] in
-            while !Task.isCancelled {
-                try? await Task.sleep(for: .milliseconds(33))
-                guard !Task.isCancelled else { return }
-                await self?.pollScopes()
-            }
+        observationDisplayLink.start { [weak self] in
+            self?.pollScopes()
         }
     }
 
-    private func pollScopes() async {
-        let scopes = order.compactMap { nodes[$0] }
-            .filter { $0.kind == .scope && !$0.allInputs.isEmpty }
-        guard !scopes.isEmpty else {
+    private func pollScopes() {
+        guard let projection = makeScopeProjection() else {
             if !scopeTraces.isEmpty { scopeTraces = [:] }
             return
         }
-        guard let pos = try? await engine.call("playback_position"),
-              let position = pos["position"]?.doubleValue else { return }
-        var fresh: [String: [Double]] = [:]
+        observationSampler.request(projection.binding)
+    }
+
+    private func makeScopeProjection() -> ScopeProjection? {
+        guard let realizedPatch else { return nil }
+        let scopes = order.compactMap { nodes[$0] }
+            .filter { $0.kind == .scope && !$0.allInputs.isEmpty }
+        guard !scopes.isEmpty else { return nil }
+
+        var channels: [ObservationChannel] = []
+        var displayCounts: [String: Int] = [:]
+        var maximumFetch = 0
         for scope in scopes {
             let window = scope.values["window"] ?? 0.02
-            let count = min(8192, max(128, Int(window * Self.sampleRate)))
-            // Fetch 2× the display span so the trigger can align a full
-            // window ending at the live head.
-            let fetch = min(16384, count * 2)
-            let start = max(0, Int(position) - fetch)
-            var slots: [String] = [], keys: [String] = []
+            let displayCount = min(
+                8_192,
+                max(128, Int(window * Self.sampleRate))
+            )
+            maximumFetch = max(maximumFetch, min(16_384, displayCount * 2))
             for port in scope.kind.spec.inlets {
                 guard let src = scope.inputs[port]?.first,
                       let slot = scopeSlot(for: src) else { continue }
-                slots.append(slot)
-                keys.append("\(scope.id).\(port)")
-            }
-            guard !slots.isEmpty,
-                  let r = try? await engine.call("render_window", .object([
-                      "start": .number(Double(start)),
-                      "count": .number(Double(fetch)),
-                      "slots": .array(slots.map(JSONValue.string)),
-                  ])),
-                  case .array(let chans)? = r["values"] else { continue }
-            for (i, key) in keys.enumerated() {
-                guard i < chans.count, case .array(let raw) = chans[i] else { continue }
-                let samples = raw.compactMap(\.doubleValue)
-                let t = Self.triggerIndex(samples, display: count)
-                fresh[key] = Array(samples[t..<min(t + count, samples.count)])
+                let key = "\(scope.id).\(port)"
+                channels.append(.init(key: key, slot: slot))
+                displayCounts[key] = displayCount
             }
         }
-        scopeTraces = fresh
+        guard maximumFetch > 0, !channels.isEmpty,
+              let binding = try? ObservationBinding(
+                expectedGeneration: realizedPatch.generation,
+                span: maximumFetch,
+                pointBudget: maximumFetch,
+                channels: channels
+              )
+        else { return nil }
+        return .init(binding: binding, displayCounts: displayCounts)
     }
 
-    /// Rising level-trigger with hysteresis (the playground scope's port of
-    /// tui/scope/trigger.ts): arm below −h, fire on the first climb past +h,
-    /// searching only far enough back that a full display window remains.
-    static func triggerIndex(_ s: [Double], display: Int) -> Int {
-        let searchEnd = s.count - display
-        guard searchEnd > 0 else { return 0 }
-        let peak = s.reduce(0) { max($0, abs($1)) }
-        let h = peak * 0.05
-        guard h > 0 else { return 0 }
-        var armed = false
-        for i in 0..<searchEnd {
-            if s[i] < -h { armed = true }
-            else if armed && s[i] >= h { return i }
+    private func adoptObservationFrame(_ frame: ObservationFrame) {
+        if truth.adoptObservation(frame.generation) {
+            publishTruth()
+            if case .running(let revision, _) = compileState,
+               let runningGeneration {
+                compileState = .running(
+                    authoredRevision: revision,
+                    generation: runningGeneration
+                )
+            }
         }
-        return 0
+
+        // The authored monitor wiring may have changed while the socket request
+        // was in flight. Never publish old channel identities into a new view.
+        guard let projection = makeScopeProjection(),
+              projection.binding == frame.binding
+        else { return }
+        var fresh: [String: [Double]] = [:]
+        for channel in frame.channels {
+            guard let displayCount = projection.displayCounts[channel.channel.key]
+            else { continue }
+            fresh[channel.channel.key] = ScopeTraceProjection.triggeredSamples(
+                channel.values,
+                displayCount: displayCount
+            )
+        }
+        guard fresh.count == frame.channels.count else { return }
+        scopeTraces = fresh
     }
 
     private func pollTelemetry() async {

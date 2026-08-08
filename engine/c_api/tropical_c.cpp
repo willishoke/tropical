@@ -327,6 +327,69 @@ bool tropical_runtime_load_ir_staged(tropical_runtime_t r, const char* ir_text, 
   catch (const std::exception& e) { set_error(e.what()); return false; }
 }
 
+bool tropical_runtime_load_ir_staged_generation(
+  tropical_runtime_t r, const char* ir_text, size_t ir_len,
+  const char* msl_source, size_t msl_len,
+  const char* coeff_ir, size_t coeff_len,
+  const char* manifest_json, size_t manifest_len,
+  tropical_runtime_generation_t* out_generation)
+{
+  if (out_generation) *out_generation = {};
+  if (!r || !ir_text || !manifest_json || !out_generation) return false;
+  try
+  {
+    const auto generation =
+      static_cast<tropical_runtime::FlatRuntime*>(r)
+        ->load_ir_staged_generation(
+          std::string(ir_text, ir_len),
+          msl_source ? std::string(msl_source, msl_len) : std::string{},
+          coeff_ir ? std::string(coeff_ir, coeff_len) : std::string{},
+          std::string(manifest_json, manifest_len));
+    out_generation->program_version = generation.program_version;
+    out_generation->control_version = generation.control_version;
+    return generation.program_version != 0;
+  }
+  catch (const std::exception& e) { set_error(e.what()); return false; }
+}
+
+bool tropical_runtime_load_ir_staged_with_observation_generation(
+  tropical_runtime_t r, const char* audio_ir, size_t audio_ir_len,
+  const char* audio_msl_source, size_t audio_msl_len,
+  const char* audio_coeff_ir, size_t audio_coeff_len,
+  const char* audio_manifest_json, size_t audio_manifest_len,
+  const char* observation_ir, size_t observation_ir_len,
+  const char* observation_coeff_ir, size_t observation_coeff_len,
+  const char* observation_manifest_json, size_t observation_manifest_len,
+  tropical_runtime_generation_t* out_generation)
+{
+  if (out_generation) *out_generation = {};
+  if (!r || !audio_ir || !audio_manifest_json || !observation_ir
+      || !observation_manifest_json || !out_generation)
+    return false;
+  try
+  {
+    const auto generation =
+      static_cast<tropical_runtime::FlatRuntime*>(r)
+        ->load_ir_staged_with_observation_generation(
+          std::string(audio_ir, audio_ir_len),
+          audio_msl_source
+            ? std::string(audio_msl_source, audio_msl_len) : std::string{},
+          audio_coeff_ir
+            ? std::string(audio_coeff_ir, audio_coeff_len) : std::string{},
+          std::string(audio_manifest_json, audio_manifest_len),
+          std::string(observation_ir, observation_ir_len),
+          observation_coeff_ir
+            ? std::string(observation_coeff_ir, observation_coeff_len)
+            : std::string{},
+          std::string(
+            observation_manifest_json, observation_manifest_len));
+    out_generation->program_version = generation.program_version;
+    out_generation->control_version = generation.control_version;
+    return generation.program_version != 0;
+  }
+  catch (const std::exception& e) { set_error(e.what()); return false; }
+}
+
 void tropical_runtime_set_sample_index(tropical_runtime_t r, uint64_t idx)
 {
   if (!r) return;

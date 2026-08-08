@@ -13,6 +13,11 @@ typedef void* tropical_dac_t;
 typedef void* tropical_param_t;
 typedef void* tropical_runtime_t;
 
+typedef struct tropical_runtime_generation {
+  uint64_t program_version;
+  uint64_t control_version;
+} tropical_runtime_generation_t;
+
 typedef struct {
   uint64_t request_received;
   uint64_t activation_target_reserved;
@@ -165,6 +170,16 @@ bool             tropical_runtime_load_ir_msl(tropical_runtime_t, const char* ir
    state before publish and re-run after every control-plane slot write.
    Its outputs land in coef:<n> module slots the audio kernel reads. */
 bool             tropical_runtime_load_ir_staged(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* manifest_json, size_t manifest_len);
+
+/* Staged single-artifact load returning the exact program/control generation
+   pair constructed by this publication. The pair is written before the load
+   returns and is not sampled from mutable counters afterward. */
+bool             tropical_runtime_load_ir_staged_generation(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* manifest_json, size_t manifest_len, tropical_runtime_generation_t* out_generation);
+
+/* Atomic dual-artifact publication. The first staged artifact owns audio and
+   optional Metal execution; the second JIT-only artifact owns observation.
+   Controls project between differing slot layouts by exact manifest name. */
+bool             tropical_runtime_load_ir_staged_with_observation_generation(tropical_runtime_t, const char* audio_ir, size_t audio_ir_len, const char* audio_msl_source, size_t audio_msl_len, const char* audio_coeff_ir, size_t audio_coeff_len, const char* audio_manifest_json, size_t audio_manifest_len, const char* observation_ir, size_t observation_ir_len, const char* observation_coeff_ir, size_t observation_coeff_len, const char* observation_manifest_json, size_t observation_manifest_len, tropical_runtime_generation_t* out_generation);
 
 /* Control-plane/test-only: request a sample-clock reposition. JIT applies it
    at its next process-buffer boundary; Metal prepares and acknowledges an

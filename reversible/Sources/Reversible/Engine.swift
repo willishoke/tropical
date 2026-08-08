@@ -78,6 +78,7 @@ actor Engine {
     private var controlRPC: RPCConnection?
     private var scopeRPC: RPCConnection?
     private var telemetryRPC: RPCConnection?
+    private var realizedPatches = RealizedPatchStore()
     private let events: @Sendable (EngineEvent) -> Void
 
     /// Resolution order: bundled engine, then an explicit developer/test
@@ -127,6 +128,7 @@ actor Engine {
     }
 
     func start() async throws {
+        realizedPatches = RealizedPatchStore()
         // Reap any engine orphaned by a PREVIOUS instance that died before
         // teardown (SIGKILL, crash) — the one gap the graceful path can't close.
         Engine.sweepOrphans()
@@ -264,6 +266,7 @@ actor Engine {
         process?.terminate()
         process = nil
         procBox.take()
+        realizedPatches = RealizedPatchStore()
         await closeLanes(error: EngineError.exited)
         unlink(sockPath)
     }
@@ -272,6 +275,7 @@ actor Engine {
         gEngineChildPID = 0
         process = nil
         procBox.take()
+        realizedPatches = RealizedPatchStore()
         await closeLanes(error: EngineError.exited)
         unlink(sockPath)
     }
@@ -285,8 +289,43 @@ actor Engine {
         for lane in lanes { await lane?.close(error: error) }
     }
 
+    func loadVocabulary() async throws -> EngineVocabulary {
+        let raw = try await callRaw("get_vocabulary")
+        let data = try JSONEncoder().encode(raw)
+        return try EngineVocabulary.decode(from: data)
+    }
+
+    /// Typed compiler lane. The expected vocabulary and ordered tap names come
+    /// from the model's already-adopted authored semantics; a mismatch is
+    /// rejected before the engine-side realized store advances.
+    @discardableResult
+    func loadPatchGraph(
+        _ graph: JSONValue,
+        expectedTapNames: [String],
+        vocabularyFingerprint: String
+    ) async throws -> CompileAdoption {
+        let raw = try await callRaw("load_patch_graph", graph)
+        let response = try PatchCompileResponse.decode(
+            raw,
+            expectedTapNames: expectedTapNames,
+            expectedVocabularyFingerprint: vocabularyFingerprint
+        )
+        return realizedPatches.adopt(response)
+    }
+
+    func currentRealizedPatch() -> RealizedPatch? {
+        realizedPatches.current
+    }
+
     @discardableResult
     func call(_ method: String, _ params: JSONValue = .object([:])) async throws -> JSONValue {
+        try await callRaw(method, params)
+    }
+
+    private func callRaw(
+        _ method: String,
+        _ params: JSONValue = .object([:])
+    ) async throws -> JSONValue {
         let connection: RPCConnection? = switch EngineRPCLane.lane(for: method) {
         case .graph: graphRPC
         case .control: controlRPC

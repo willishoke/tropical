@@ -18,6 +18,9 @@ enum Theme {
     static let transportOn = Color(hex: 0x8A3C3C)
     static let clockOn = Color(hex: 0x2C5A6E)
     static let scrubAccent = Color(hex: 0x4FD6C4)   // reversing — the moat gesture
+    static let truthActive = Color(hex: 0x55C98A)
+    static let truthExcluded = Color(hex: 0xD7A35A)
+    static let truthPending = Color(hex: 0x768195)
 
     static let mono = Font.system(size: 13, design: .monospaced)
     static let monoSmall = Font.system(size: 11, design: .monospaced)

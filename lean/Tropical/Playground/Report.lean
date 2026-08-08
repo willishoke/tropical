@@ -65,7 +65,8 @@ def paramDisciplinesOf (raws : Array Raw) :
     glide/anchor companion slots are the discipline's implementation detail,
     not surface. Plus the taps. The silence-with-`{ok:true}` class dies here:
     a patch that gracefully compiled to nothing now SAYS so, as facts. -/
-def realizedReport (args : Json) (taps : Array Tropical.ScopeTap) : Json := Id.run do
+def realizedReportForGeneration (args : Json) (taps : Array Tropical.ScopeTap)
+    (programVersion controlVersion : UInt64) : Json := Id.run do
   let raws := rawsOf args
   let outId := match (args.getObjVal? "out").toOption with
     | some (.str s) => s
@@ -107,10 +108,22 @@ def realizedReport (args : Json) (taps : Array Tropical.ScopeTap) : Json := Id.r
         ("value", Json.num v), ("discipline", Json.str disc)])
   let tapsJ := taps.map fun tap =>
     Json.mkObj [("name", Json.str tap.name),
+      ("instance", Json.str tap.sourceInstance),
+      ("output", Json.str tap.sourceOutput),
       ("slot", Json.str tap.slot)]
-  return Json.mkObj [("ok", Json.bool true), ("nodes", Json.arr nodesJ),
+  return Json.mkObj [("ok", Json.bool true),
+    ("vocabulary_fingerprint", Json.str vocabularyFingerprint),
+    -- Keep this handshake's versions as JSON integers, matching render_window.
+    ("program_version", Lean.toJson programVersion.toNat),
+    ("control_version", Lean.toJson controlVersion.toNat),
+    ("nodes", Json.arr nodesJ),
     ("inputs", Json.arr inputsJ), ("params", Json.arr paramsJ),
     ("taps", Json.arr tapsJ)]
+
+/-- Pure-report compatibility seam for tests and non-publishing consumers.
+    Production loads always supply the exact runtime publication identity. -/
+def realizedReport (args : Json) (taps : Array Tropical.ScopeTap) : Json :=
+  realizedReportForGeneration args taps 0 0
 
 -- ── Scope taps ──────────────────────────────────────────────────────────────
 /-- For the arrow path the source instance is always the synthetic root, and

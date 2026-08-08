@@ -1,11 +1,11 @@
 import SwiftUI
 
 /// Knob: 38px dial, pointer sweeping −135°…+135° (styles.css .knob).
-/// Every continuous knob is a live param slot `<id>.<knob>` — a vertical
-/// drag (180px = full sweep) drives the running kernel with no relower
-/// (only topology edits recompile). A glided knob eases via
-/// The client always emits `set_param`; the loaded plan owns whether the
-/// accepted write is raw, glided, phase-anchored, or a velocity rebase.
+/// A vertical drag (180px = full sweep) edits authored scalar truth. The
+/// realized handshake decides whether that scalar is live (`set_param`) or
+/// structural (relower); the client never guesses from a hard-coded knob list.
+/// For live values the loaded plan owns the write discipline: raw, glide,
+/// phase-anchor, or velocity rebase.
 struct KnobView: View {
     @EnvironmentObject var model: PatchModel
     let node: PatchNode
@@ -14,9 +14,32 @@ struct KnobView: View {
 
     private var value: Double { node.values[knob.name] ?? knob.def }
 
+    private var truthBadge: (label: String, color: Color, help: String) {
+        switch model.parameterStatus(for: node, knob: knob) {
+        case .live(let discipline):
+            ("live", Theme.truthActive, "live · \(discipline.rawValue)")
+        case .structural:
+            ("struct", Theme.truthExcluded, "structural · relowers on edit")
+        case .inactive:
+            ("inactive", Theme.truthPending, "inactive in the running patch")
+        }
+    }
+
     var body: some View {
         VStack(spacing: 2) {
             dial
+                .overlay(alignment: .bottomTrailing) {
+                    Text(truthBadge.label)
+                        .font(.system(size: 7, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(truthBadge.color)
+                        .padding(.horizontal, 3).padding(.vertical, 1)
+                        .background(
+                            truthBadge.color.opacity(0.16),
+                            in: Capsule()
+                        )
+                        .offset(x: 7, y: 4)
+                        .help(truthBadge.help)
+                }
                 .contentShape(Circle())
                 .gesture(
                     DragGesture(minimumDistance: 0)
@@ -24,12 +47,11 @@ struct KnobView: View {
                             let t0 = dragStartNorm ?? knob.toNorm(value)
                             dragStartNorm = t0
                             let v = knob.fromNorm(t0 - g.translation.height / 180)
-                            model.nodes[node.id]?.values[knob.name] = v
-                            model.sendKnob(node, knob, v)
+                            model.setKnob(node, knob, v)
                         }
                         .onEnded { _ in
                             dragStartNorm = nil
-                            model.sendKnob(node, knob, value)
+                            model.setKnob(node, knob, value)
                         }
                 )
             Text(knob.name).font(Theme.monoTiny).foregroundStyle(Theme.muted)
