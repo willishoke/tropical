@@ -363,6 +363,23 @@ private def resolvePlainStages (voice : Array ModalMode) (stages : Array ModalSt
     Oriented.TerminalBank.ofBank
       (resolvePlainStageState initial stages responseClock values).2
 
+/-- The already-proven causal bloom bridge remains available for a spine of
+    fixed, unswayed, exactly-forward rooms.  Any live/local direction, sway,
+    controlled kernel, or gauge requires the oriented Gamma extension and is
+    refused as one named unsupported crossing. -/
+private def fixedForwardBloomRooms? (stages : Array ModalStage) :
+    Option (Array (Array ModalMode)) := do
+  let mut rooms := #[]
+  for stage in stages do
+    let .ordinaryRoom room := stage | none
+    let .fixed modes := room.kernel | none
+    if room.direction.signalNode?.isSome || room.sway?.isSome then none
+    let .konst direction := room.direction.fallback | none
+    let some value := sigConstF? direction | none
+    if value != 0.0 then none
+    rooms := rooms.push modes
+  pure rooms
+
 mutual
 /-- The gated `Sig`-side recursion step: rank lookup, dangling refusal
     (today's message), and the strict-decrease check that carries the
@@ -452,16 +469,25 @@ def lowerInput (g : PatchGraph) (rankOf : String → Option Nat)
             bank.realizeSig responseClock modal.strikeAnchor)
             (#[response] ++ controlTerms))
       | .bloomed voice B gr =>
-        if !modal.stages.isEmpty then
-          .error s!"lower: bloomed stage crossing at '{id}' refused (room-kernel reverse/gauge closure requires the oriented Gamma bridge)"
-        else
-          let bare := ArrowTerm.warp (bloomWarpClock modal.strikeAnchor B gr)
-            (modalBankTerm voice modal.strikeAnchor modal.realizationClock modal.modeCount?)
-          match modal.addressNode? with
-          | none => .ok bare
-          | some addrId =>
-            .ok (.swarp modalAddrWarp
-              (← lowerInputGated g rankOf id addrId r) bare)
+        let term ← match fixedForwardBloomRooms? modal.stages with
+          | none =>
+            .error s!"lower: bloomed stage crossing at '{id}' refused (live room-kernel direction/sway or gauge requires the oriented Gamma bridge)"
+          | some rooms =>
+            if rooms.isEmpty then
+              .ok (ArrowTerm.warp (bloomWarpClock modal.strikeAnchor B gr)
+                (modalBankTerm voice modal.strikeAnchor modal.realizationClock modal.modeCount?))
+            else
+              let folded := foldRoomsEC rooms[0]! (rooms.extract 1 rooms.size)
+              let composed := bloomComposeChecked voice folded B gr
+              if composed.isComplete then
+                .ok (bloomComposedTerm composed.pairs modal.strikeAnchor modal.realizationClock)
+              else
+                .error s!"lower: bloomed room crossing at '{id}' refused ({composed.refusalSummary})"
+        match modal.addressNode? with
+        | none => .ok term
+        | some addrId =>
+          .ok (.swarp modalAddrWarp
+            (← lowerInputGated g rankOf id addrId r) term)
     -- Keep every pre-forest singleton plan structurally identical. Forests with
     -- multiple branches cross once as a stable authored-order signal sum.
     match terms.toList with
