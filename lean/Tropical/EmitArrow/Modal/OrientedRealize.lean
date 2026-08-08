@@ -14,6 +14,18 @@ namespace Tropical.EmitArrow.Oriented
 open Tropical.Ir
 open Tropical.EmitArrow
 
+/-- Terminal extension of the composable bank.  Divided-difference atoms are
+    introduced only for the last same-side convolution, where they can be
+    rendered stably without pretending they can already cross another modal
+    stage.  The composable carrier remains `Bank`; this type makes the current
+    closure boundary explicit. -/
+structure TerminalBank where
+  bank : Bank
+  futurePaired : Array PairedMode := #[]
+  pastPaired : Array PairedMode := #[]
+
+def TerminalBank.ofBank (bank : Bank) : TerminalBank := { bank }
+
 /-- Read both strict half-axis banks and supply the continuous mixed-orientation
     convolution value at the strike itself. -/
 def Bank.realizeSig (bank : Bank) (clkInt anchorSamples : Sig) : Sig :=
@@ -22,6 +34,43 @@ def Bank.realizeSig (bank : Bank) (clkInt anchorSamples : Sig) : Sig :=
     (modalBankSigDir bank.past clkInt anchorSamples (lit 1))
   let atStrike := Sig.binary .eq (relClockQ clkInt anchorSamples) (lit 0)
   selectE atStrike bank.atZero.1 sides
+
+/-- Stable terminal read for hot same-side couplings.  A past paired atom is
+    the exact clock mirror of the existing causal divided-difference carrier. -/
+def TerminalBank.realizeSig (terminal : TerminalBank)
+    (clkInt anchorSamples : Sig) : Sig :=
+  let future := modalBankSigTableDD terminal.futurePaired clkInt anchorSamples
+  let anchorQ := toIntE (mul anchorSamples (lit 4294967296))
+  let mirroredClock := sub (mul (lit 2) anchorQ) clkInt
+  let past := modalBankSigTableDD terminal.pastPaired mirroredClock anchorSamples
+  add (terminal.bank.realizeSig clkInt anchorSamples) (add future past)
+
+private def mixedPairs (left right : Array ModalMode)
+    (pair : ModalMode → ModalMode → Expansion) : Expansion :=
+  left.foldl (fun accumulated leftMode =>
+    right.foldl (fun accumulated rightMode =>
+      accumulated.add (pair leftMode rightMode)) accumulated) {}
+
+/-- Compose the last room with EC/DD stability on both same-side arms.  Mixed
+    future/past pairs have no stable-pole coincidence and use the exact closed
+    form directly.  This is intentionally terminal: paired atoms are not yet a
+    generally composable modal source for a later room or gauge. -/
+def Bank.convolveKernelTerminal (input : Bank) (room : Array ModalMode)
+    (direction : Sig) : TerminalBank :=
+  let kernel := Bank.kernel room direction
+  let (future, futurePaired) := residueComposePartitioned input.future kernel.future
+  let (past, pastPaired) := residueComposePartitioned input.past kernel.past
+  let fp := mixedPairs input.future kernel.past fun f p =>
+    convolveFuturePast (Atom.ofMode f) (Atom.ofMode p)
+  let pf := mixedPairs input.past kernel.future fun p f =>
+    convolvePastFuture (Atom.ofMode p) (Atom.ofMode f)
+  let mixed := fp.add pf |>.toBank
+  { bank := {
+      future := future ++ mixed.future
+      past := past ++ mixed.past
+      atZero := mixed.atZero }
+    futurePaired
+    pastPaired }
 
 /-- The bilateral transfer value at `s = i·omega`.  Future atoms contribute
     `A·p!/(s-λ)^(p+1)`; mirrored past atoms contribute

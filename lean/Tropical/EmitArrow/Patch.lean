@@ -304,32 +304,50 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
 termination_by r
 decreasing_by all_goals exact h
 
-/-- Fold an authored stage spine over one plain source after the response clock
-    and every control have been bound at the terminal coordinate.  The cursor
-    follows `ModalStage.controls` exactly: kernel control, direction, optional
-    sway/rate, then gauge. -/
-private def resolvePlainStages (voice : Array ModalMode) (stages : Array ModalStage)
-    (responseClock : Sig) (values : Array Sig) : Oriented.Bank :=
-  let initial := (0, Oriented.Bank.ofFuture voice)
-  (stages.foldl (fun (state : Nat × Oriented.Bank) stage =>
+/-- Resolve one room's controls in `ModalStage.controls` order. -/
+private def resolveRoomStage (room : OrdinaryRoomStage) (responseClock : Sig)
+    (values : Array Sig) (cursor : Nat) : Array ModalMode × Sig × Nat :=
+  let (kernel, cursor) := match room.kernel with
+    | .fixed modes => (modes, cursor)
+    | .controlled _ build => (build ((values[cursor]?).getD (lit 0)), cursor + 1)
+  let direction := clampE ((values[cursor]?).getD (lit 0)) (lit 0) (lit 1)
+  let cursor := cursor + 1
+  let (kernel, cursor) := match room.sway? with
+    | none => (kernel, cursor)
+    | some _ =>
+      let sway := clampE ((values[cursor]?).getD (lit 0)) (lit 0) (lit 9 1)
+      let rate := clampE ((values[cursor + 1]?).getD (lit 0)) (lit 0) (lit 8)
+      (Oriented.swayKernel kernel sway rate responseClock, cursor + 2)
+  (kernel, direction, cursor)
+
+private def resolvePlainStageState (initial : Nat × Oriented.Bank)
+    (stages : Array ModalStage) (responseClock : Sig) (values : Array Sig) :
+    Nat × Oriented.Bank :=
+  stages.foldl (fun (state : Nat × Oriented.Bank) stage =>
     let (cursor, bank) := state
     match stage with
     | .ordinaryRoom room =>
-      let (kernel, cursor) := match room.kernel with
-        | .fixed modes => (modes, cursor)
-        | .controlled _ build => (build ((values[cursor]?).getD (lit 0)), cursor + 1)
-      let direction := clampE ((values[cursor]?).getD (lit 0)) (lit 0) (lit 1)
-      let cursor := cursor + 1
-      let (kernel, cursor) := match room.sway? with
-        | none => (kernel, cursor)
-        | some _ =>
-          let sway := clampE ((values[cursor]?).getD (lit 0)) (lit 0) (lit 9 1)
-          let rate := clampE ((values[cursor + 1]?).getD (lit 0)) (lit 0) (lit 8)
-          (Oriented.swayKernel kernel sway rate responseClock, cursor + 2)
+      let (kernel, direction, cursor) := resolveRoomStage room responseClock values cursor
       (cursor, bank.convolveKernel kernel direction Oriented.syntacticSameSideClassifier)
     | .gauge _ =>
       let g := clampE ((values[cursor]?).getD (lit 0)) (lit 0) (lit 1)
-      (cursor + 1, bank.gauge g)) initial).2
+      (cursor + 1, bank.gauge g)) initial
+
+/-- Fold an authored stage spine after binding the current static universe.  A
+    final room uses the stable EC/DD carrier for hot same-side couplings.  The
+    paired result is explicitly terminal; a later gauge/room keeps using the
+    composable oriented bank until generalized divided differences land. -/
+private def resolvePlainStages (voice : Array ModalMode) (stages : Array ModalStage)
+    (responseClock : Sig) (values : Array Sig) : Oriented.TerminalBank :=
+  let initial := (0, Oriented.Bank.ofFuture voice)
+  match stages.back? with
+  | some (.ordinaryRoom room) =>
+    let (cursor, bank) := resolvePlainStageState initial stages.pop responseClock values
+    let (kernel, direction, _) := resolveRoomStage room responseClock values cursor
+    bank.convolveKernelTerminal kernel direction
+  | _ =>
+    Oriented.TerminalBank.ofBank
+      (resolvePlainStageState initial stages responseClock values).2
 
 mutual
 /-- The gated `Sig`-side recursion step: rank lookup, dangling refusal
