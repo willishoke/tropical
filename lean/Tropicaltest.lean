@@ -22,6 +22,7 @@ import Lean.Data.Json
 import Tropical.Tropicaltest.Patcher
 import Tropical.Tropicaltest.Exact
 import Tropical.Tropicaltest.GroupedRoomReference
+import Tropical.Tropicaltest.Oriented
 
 /-!
 # tropicaltest — the post-TS golden + native-equiv runner (Phase 8)
@@ -91,6 +92,11 @@ def main (args : List String) : IO UInt32 := do
   if !(← Tropical.Tropicaltest.ExactGates.runExactValues) then failed := failed + 1
   if !(← Tropical.Tropicaltest.ExactGates.runExactPlayground) then failed := failed + 1
   if !(← Tropical.Tropicaltest.ExactGates.runExactQuantize) then failed := failed + 1
+
+  -- ── (b″) Per-kernel oriented modal convolution ──────────────────────
+  IO.println "oriented modal convolution (local room direction):"
+  total := total + 1
+  if !(← Tropical.Tropicaltest.Oriented.runOriented) then failed := failed + 1
 
   -- ── (c) Synthetic op-coverage: EmitLlvm over the rare ops, frozen hash ─────
   -- The patch corpus exercises 24 of 29 ops; this funnels the rest
