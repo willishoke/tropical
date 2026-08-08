@@ -475,7 +475,7 @@ deriving Inhabited
 /-- The bloom crossing's region for one composed (μ, ν) pair — a TOTAL partition
     of config space (`classifyBloomPair` is total, never `Option`). Dispatch is an
     exhaustive match, so a region without a handler is a compile error, and the
-    depth-cap drop is a NAMED outcome (`excludedDepth`) the coverage gate tallies
+    depth-cap refusal is a NAMED outcome (`excludedDepth`) the coverage gate tallies
     rather than a silent `continue`. This is the type the island's totality claim
     hangs off. The four served regions differ only in which per-pair lanes the
     realizer emits; the two axes are coincidence (`|a| < ½`, the pole on the
@@ -497,8 +497,14 @@ inductive SeamRegion where
       `selectE` is const-true) and is NOT emitted — the tightest region, series-DD
       + secular only. -/
   | coincidentSubtle
-  /-- Envelope depth over the 300 cap: a graceful drop (no lanes emitted). Counted,
-      never silent — the coverage gate reports the excluded fraction. -/
+  /-- The E1 Horner would cross to the CF while `a` lies in the measured
+      ill-conditioned disc around one of `-1, …, -300`.  At the concrete
+      `a = -0.98`, `|κ| ≈ 72.2` witness the f64 Horner is wrong by more than
+      eight orders of magnitude.  This is a numerical refusal, not a semantic
+      zero and not a depth-cap event. -/
+  | excludedConditioning
+  /-- Envelope depth over the shared cap. The checked composer treats this as an
+      explicit whole-composition refusal; the coverage gate reports its count. -/
   | excludedDepth
 deriving Inhabited, DecidableEq
 
@@ -508,16 +514,87 @@ def SeamRegion.label : SeamRegion → String
   | .crossing           => "crossing"
   | .coincidentCrossing => "coincidentCrossing"
   | .coincidentSubtle   => "coincidentSubtle"
+  | .excludedConditioning => "excludedConditioning"
   | .excludedDepth      => "excludedDepth"
+
+/-- Radius of the stop-line around the negative-integer `a` lattice.  The
+    measured failure is at distance `0.02` from `-1`; `1/32 = 0.03125` is the
+    next outward exact binary radius, giving a reproducible 1.5625× guard.
+    This is intentionally a measured admission boundary, not a claim that the
+    Horner error has an analytic bound outside it. -/
+def bloomConditioningRadius : Float := 0.03125
+
+/-- One source of truth for the emitted Horner/CF depth limit and for the
+    negative-integer lattice whose denominators those arrays can materialize. -/
+def bloomDepthCap : Nat := 300
+
+/-- The inspected conditioning lattice is exactly `-1, …, -bloomDepthCap`. -/
+def bloomConditioningLatticeDepth : Nat := bloomDepthCap
+
+/-- Point diagnostic reported by the seam gate: distance from `a` to the
+    nearest negative integer represented by the bounded Horner. -/
+def bloomConditioningMetric (a : CplxB) : Float := Id.run do
+  let mut d := Float.sqrt ((a.re + 1.0) * (a.re + 1.0) + a.im * a.im)
+  for j in [1:bloomConditioningLatticeDepth] do
+    let n := (j + 1).toFloat
+    d := min d (Float.sqrt ((a.re + n) * (a.re + n) + a.im * a.im))
+  return d
+
+/-- Evidence-carrier version of the conditioning stop-line for a baked pair.
+    A pair is refused only where the CF crossing is reached; `κ = 0` and other
+    series-only pairs retain their exact degeneration.  Failure to certify that
+    the point lies outside the disc fails toward refusal. -/
+def bloomExcludedConditioningD (a kappa : CplxDI) : Bool := Id.run do
+  let absAP1 := CplxDI.abs (CplxDI.add a CplxDI.one)
+  let absKappa := CplxDI.abs kappa
+  if absKappa.ok && absKappa.lo.isZero && absKappa.hi.isZero then return false
+  -- Equality/overlap is not a certificate that the crossing is unreachable.
+  -- Fail open only with positive evidence that `|a+1| > |κ|`; otherwise the
+  -- disc test decides and uncertainty fails toward refusal.
+  if DyadicI.certGt absAP1 absKappa then return false
+  let radius := DyadicI.ofFloat bloomConditioningRadius
+  for j in [0:bloomConditioningLatticeDepth] do
+    let n := CplxDI.ofNat (j + 1)
+    if !DyadicI.certGt (CplxDI.abs (CplxDI.add a n)) radius then
+      return true
+  return false
+
+/-- Interval-aware stop-line for live room damping. `Re a` walks the horizontal
+    segment `[reLo,reHi]`; for each negative integer the closest point is its
+    projection onto that segment. A disc intersection and CF reachability are
+    certified independently anywhere on the interval, so uncertainty can only
+    over-refuse, never miss an edge whose two witnesses occur at different points. -/
+def bloomExcludedConditioningLive (reLo reHi imA : Float) (kappa : CplxB) : Bool := Id.run do
+  let lo := DyadicI.ofFloat (min reLo reHi)
+  let hi := DyadicI.ofFloat (max reLo reHi)
+  let im := DyadicI.ofFloat imA
+  let absAt := fun (re c : DyadicI) =>
+    DyadicI.sqrt (DyadicI.add (DyadicI.square (DyadicI.add re c)) (DyadicI.square im))
+  let radius := DyadicI.ofFloat bloomConditioningRadius
+  let absKappa := CplxDI.abs kappa.toExact
+  if absKappa.ok && absKappa.lo.isZero && absKappa.hi.isZero then return false
+  -- Conservative conjunction of two interval facts.  The crossing and disc
+  -- witnesses need not be the same endpoint: coupling them at the disc-centre
+  -- projection can miss a segment whose right disc edge enters the crossing.
+  let reCross := DyadicI.max lo (DyadicI.min hi (DyadicI.neg DyadicI.one))
+  if DyadicI.certGt (absAt reCross DyadicI.one) absKappa then return false
+  for j in [0:bloomConditioningLatticeDepth] do
+    let n := DyadicI.ofNat (j + 1)
+    let re := DyadicI.max lo (DyadicI.min hi (DyadicI.neg n))
+    let discDistance := absAt re n
+    if !DyadicI.certGt discDistance radius then
+      return true
+  return false
 
 /-- The per-pair classification + baking data for one composed (μ, ν) pair — the
     executable form of the bloom atom's region partition (the sprint's epistemics
     fix: the boundary is an apparatus output, not a comment). TOTAL: `region` is
     always one of `SeamRegion`'s constructors (`excludedDepth` for a depth-cap
-    drop, never a `none`). `bloomCompose` matches on `region` exhaustively to emit
-    exactly that region's lanes; the seam-sweep harness and the coverage gate
-    consult the SAME classifier, so "which region is this pair, and does the atom
-    promise anything there" has one answer, in code. `nDepth`/`kDepth` size the
+    refusal, never a `none`). The checked composer inspects that region before
+    materialization, and supported regions emit exactly their own lanes; the
+    seam-sweep harness and the coverage gate consult the SAME classifier, so
+    "which region is this pair, and does the atom promise anything there" has
+    one answer, in code. `nDepth`/`kDepth` size the
     coefficient arrays (`kDepth = 0` where no CF is reached). -/
 structure BloomPairPlan where
   mu      : CplxB
@@ -532,10 +609,10 @@ structure BloomPairPlan where
 deriving Inhabited
 
 /-- Classify one composed (μ, ν) pair into its `SeamRegion` and size its depths —
-    TOTAL (replaces the `Option`-with-flags `bloomPairPlan?`: the depth-cap drop is
-    now the `excludedDepth` region, not a `none`). The control flow is preserved
-    byte-for-byte from the old predicate — same `zBnd`, same `nRaw`/`kRaw` depth
-    caps, same admission set — so the region label is the only new information; the
+    TOTAL (replaces the `Option`-with-flags `bloomPairPlan?`: depth and measured
+    conditioning exclusions are typed regions, not `none`). Away from the new
+    conditioning stop-line and exact `κ = 0` identity, the depth control flow is
+    preserved — same `zBnd`, same `nRaw`/`kRaw` depth caps. The
     two axes (coincidence `|a| < ½` and the CF boundary `|κ|` vs `|a+1|`) name the
     branches the old flags already encoded.
 
@@ -558,6 +635,14 @@ def classifyBloomPair (mu nu : CplxB) (B g : Float) : BloomPairPlan := Id.run do
   let kappa := mu.scale B
   let absAP1 := CplxDI.abs (CplxDI.add aD CplxDI.one)
   let absKappa := CplxDI.abs kappa.toExact
+  -- κ=0 is the exact identity M(1,a+1,0)=1 for every a, including the
+  -- negative-integer lattice where evaluating unused Horner reciprocals would
+  -- divide by zero. Emit the empty Horner explicitly.
+  if !coincident && absKappa.ok && absKappa.lo.isZero && absKappa.hi.isZero then
+    return { mu, nu, aC, kappa, region := .serOnly, nDepth := 0, kDepth := 0 }
+  if bloomExcludedConditioningD aD kappa.toExact then
+    return { mu, nu, aC, kappa, region := .excludedConditioning,
+             nDepth := 0, kDepth := 0 }
   let serOnly := !coincident && !DyadicI.certLt absAP1 absKappa
   let excluded : BloomPairPlan :=
     { mu, nu, aC, kappa, region := .excludedDepth, nDepth := 0, kDepth := 0 }
@@ -573,12 +658,12 @@ def classifyBloomPair (mu nu : CplxB) (B g : Float) : BloomPairPlan := Id.run do
                   (CplxD.abs (CplxD.add aP CplxD.one)) (CplxD.abs kP)).getD 1
   let zBnd := if serOnly then kP else CplxD.scale ratio kP
   let nRaw := bloomM1DepthD aP zBnd bloomM1TolD
-  if nRaw + 8 > 300 then return excluded
+  if nRaw + 8 > bloomDepthCap then return excluded
   if serOnly then
     return { mu, nu, aC, kappa, region := .serOnly, nDepth := nRaw + 8, kDepth := 0 }
   else
     let kRaw := bloomCFDepthD aP zBnd bloomCFTolD
-    if kRaw + 8 > 300 then return excluded
+    if kRaw + 8 > bloomDepthCap then return excluded
     -- non-coincident here is always the CF-bridged crossing; coincident splits on
     -- the CF boundary (`dSwitch` sign = sign of `|κ| − |a+1|`): `|κ| ≥ |a+1|`
     -- reaches the CF (coincidentCrossing), else the CF lane is dead (subtle).
@@ -596,7 +681,7 @@ def classifyBloomPair (mu nu : CplxB) (B g : Float) : BloomPairPlan := Id.run do
     Executable data the sweep probes at its edges, not an annotation. -/
 def bloomAdmitsPair (mu nu : CplxB) (B g : Float) : Bool :=
   match (classifyBloomPair mu nu B g).region with
-  | .excludedDepth => false
+  | .excludedConditioning | .excludedDepth => false
   | _ => true
 
 

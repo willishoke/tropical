@@ -231,9 +231,9 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
     -- lowering folds the room chain first and crosses the bloom ONCE. Baked-pole-
     -- bloom contract (besselFuse parity): β, g, scale baked (a change relowers);
     -- amps stay live. Wired to `out` it plays the bare bloom-warped register;
-    -- wired to a reverb it crosses — including a LIVE-rt60 reverb since WS-LP
-    -- (serOnly pairs lift to s0 CplxE of the live pole; region-crossing pairs
-    -- drop gracefully per pair until the Phase 3 region-union emit).
+    -- wired to a reverb it crosses — including a supported LIVE-rt60 interval.
+    -- Any conditioning/depth/pole-contract exclusion refuses the whole requested
+    -- crossing at lowering; there is no partial-room or bare-room fallback.
     -- β, g and scale stay `Float` here: they feed `modalSource`'s
     -- `(Float × Float)` bloom pair, whose type this pass does not reach.
     let beta := jFloat params "beta" 0.05
@@ -364,7 +364,7 @@ def checkOutTarget (j : Json) (raws : Array Raw) : Except String Unit :=
 def checkServedKinds (raws : Array Raw) : Except String Unit := do
   for r in raws do
     if withheldKinds.contains r.kind then
-      throw s!"unserved kind: '{r.id}' has kind '{r.kind}', which the engine builds but WITHHOLDS from the surface vocabulary (its modal factor-site landing has no admission guard yet) — not available as a patch node"
+      throw s!"unserved kind: '{r.id}' has kind '{r.kind}', which the engine builds but WITHHOLDS from the surface vocabulary (conditioning is guarded, but arbitrary-table factor landing, profile bounds, cost, and live-beta topology are not yet a served contract) — not available as a patch node"
     unless vocabularyKinds.contains r.kind do
       throw s!"unknown kind: '{r.id}' has kind '{r.kind}', which is not a served node kind — see get_vocabulary for the {vocabularyKinds.size} kinds the surface builds"
   pure ()

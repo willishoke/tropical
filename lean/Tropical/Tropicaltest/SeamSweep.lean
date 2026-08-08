@@ -102,8 +102,8 @@ private def qOm (om : Float) : Float :=
     `y(d) = a·r·∫₀^d e^{ν(d−s)}·e^{μ·φ(s)} ds`, `Re` taken, summed, sink-gain
     applied. Generic over `φ` (id → residue atoms; bloom → Γ-bridge) — the
     unification the island never wrote down. `admits` filters to the pairs the
-    atom's realization actually includes (bloom drops non-admitted pairs; the
-    residue atoms compose all). Composite Simpson per sample-interval (`hdiv`
+    isolated config admits. Bloom composition itself is all-or-nothing; mixed
+    refusal is covered separately by `runBloomSafety`. Composite Simpson per sample-interval (`hdiv`
     EVEN subintervals) — the O(h⁴) rule, needed because `e^{iωs}` at audio ω is
     oscillatory and trapezoid (h²) would undersample it. `hdiv=4` vs `hdiv=8`
     gives the h→h/2 self-distance that certifies the oracle itself. NOT the
@@ -167,8 +167,8 @@ structure SeamAtom where
   realize : Array SeamMode → Array SeamMode → Sig
   /-- the admission region, as an executable predicate (not a comment). -/
   admitsPair : SeamMode → SeamMode → Bool
-  /-- `true`: the atom actively DROPS non-admitted pairs (excluded pairs must
-      render as graceful silence, and the oracle sums admitted pairs only).
+  /-- `true`: an isolated non-admitted probe refuses the whole atom (the harness
+      represents that isolated refusal as silence, and its oracle sums nothing).
       `false`: total/passive (composes every pair; the predicate marks only
       WHERE it is accurate, and the oracle sums all pairs). -/
   activeExclusion : Bool
@@ -179,11 +179,12 @@ structure SeamAtom where
   interior : Array (Array SeamMode × Array SeamMode)
   /-- boundary probes: candidate isolated pairs at the admission edges; the
       harness tags each LIVE via `admitsPair` (admitted → accuracy; actively
-      excluded → graceful silence; passively excluded → out of contract, skip). -/
+      excluded isolated probe → refusal represented as silence; passively excluded
+      → out of contract, skip). -/
   boundary : Array (SeamMode × SeamMode)
 
-/-- Which pairs the oracle sums for this atom: admitted-only when the atom
-    actively excludes (bloom), all pairs otherwise (residue atoms compose all). -/
+/-- Which pairs the isolated-probe oracle sums: admitted-only for an actively
+    refusing atom, all pairs otherwise. Mixed all-or-nothing is tested elsewhere. -/
 private def SeamAtom.oracleAdmits (atom : SeamAtom) : SeamMode → SeamMode → Bool :=
   if atom.activeExclusion then atom.admitsPair else (fun _ _ => true)
 
@@ -277,12 +278,12 @@ private def composeAtom : SeamAtom :=
 private def bloomBg : Float × Float := (0.05 / 1.8, 1.8)
 private def bloomWarp : Float → Float := fun s => s + bloomBg.1 * (1.0 - Float.exp (-bloomBg.2 * s))
 
-/-- `bloomCompose` — the Γ-bridge atom (`bloomed voice ⋙ reverb`), NOW TOTAL over
+/-- `bloomCompose` — the Γ-bridge atom (`bloomed voice ⋙ reverb`), total over
     the crossing after atom four (WS-A4): the `|a| < ½` coincidence hole (a room
     pole tuned to a settled partial — the τ·e resonance) is admitted and accurate,
     the coincident divided difference bridging the CF branch (large `z`) to the
-    series-DD branch (small `z`). ACTIVE exclusion still drops depth > 300 pairs and
-    live poles. Baked-pole v1 (the sweep pole set is all literal). NOTE: the 0.09 s
+    series-DD branch (small `z`). Conditioning/depth/unsupported exclusions are
+    typed whole-composition refusals. Baked-pole v1 (the sweep pole set is all literal). NOTE: the 0.09 s
     interior/boundary window only exercises the CF branch (which is accidentally
     stable at coincidence); the series-DD resonance lives in the tail, witnessed by
     the long-render checks in `runSeamSweep` — the `coincidence deep-tail` (a = 0
@@ -582,8 +583,8 @@ private def gongVerdict (voice room1 room2 : Array SeamMode)
     first; (2) the chain matches the INDEPENDENT double-convolution `oracleChain`
     (raw filter product, not EC's fold) — law 2, the reassociation is correct,
     not just self-consistent; (3) causal + decaying + nonzero — it is audible.
-    Baked room (the live-rt60 reverb gracefully drops to the bare bloom — the
-    recorded baked-pole-bloom v1 limitation). -/
+    This fixture uses a baked room; live-rt60 coverage and explicit refusal are
+    exercised by `runBloomLivePole` and `runBloomSafety`. -/
 def runGongReverb (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let (B, g) := bloomBg
@@ -626,7 +627,8 @@ def runGongReverb (arena : Arena)
     constant-fold (the surface shape: `6.91/rt60` with rt60 a slot read; here the
     un-foldable stand-in is the same expression over a clamped literal, so the
     carrier path can render it without a param table). Asserts:
-    (1) `bloomCompose` LIFTS the pairs instead of dropping to the bare bloom
+    (1) `bloomCompose` LIFTS every supported pair (the checked Patch route would
+        explicitly refuse, never substitute a bare bloom, on any exclusion)
         (all voice×room pairs present, and their constants are genuinely live —
         `sigConstF?` fails on them — and genuinely s0 — `sigIsS0` holds, the
         Stage0-hoist precondition);
@@ -635,8 +637,8 @@ def runGongReverb (arena : Arena)
         build-time arithmetic — identical up to last-bit float noise);
     (3) the live crossing ≈ `oracleSeam` under the bloom warp (the law, not just
         self-consistency), causal and finite;
-    (4) a pair that is NOT serOnly over the whole rt60 range (a room mode ON a
-        voice partial) drops gracefully PER PAIR — the rest of the bank lifts. -/
+    (4) a pair that is unsupported over the whole rt60 range refuses the typed
+        composition; no partial room bank is returned. -/
 def runBloomLivePole (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let (B, g) := bloomBg
@@ -657,7 +659,7 @@ def runBloomLivePole (arena : Arena)
   let rMBaked := room.map (·.toModal)
   -- (1) the lift engages: all 6 pairs, live and s0
   let some pairsLive := bloomCompose vM rMLive B g
-    | failGate "bloom-live-pole" "bloomCompose returned none for the live-rt60 room (dropped to bare bloom)"
+    | failGate "bloom-live-pole" "bloomCompose explicitly refused the supported live-rt60 room"
   -- NOT `k1Ser`: the lifted Horner shares subterms by REFERENCE, so its DAG is
   -- small but its TREE is exponential in depth — a structural walk (`sigConstF?`
   -- / `sigIsS0`, unmemoized) would never return. Its leaves are exactly the
@@ -668,17 +670,18 @@ def runBloomLivePole (arena : Arena)
     p.invA.foldl (fun a ik => a ++ #[ik.1, ik.2]) #[]) #[]
   let genuinelyLive := pairsLive.all (fun p => (sigConstF? p.nuSigma).isNone)
   let allS0 := liveConsts.all sigIsS0
-  -- (4) graceful per-pair drop: a room mode 0.05 Hz off the 220 Hz partial is
+  -- (4) explicit whole-composition refusal: a room mode 0.05 Hz off the 220 Hz partial is
   -- COINCIDENT-dipping (|Im a| ≈ 0.17 < ½, and the rt60 range walks Re a
-  -- through the disc) — the one remaining per-pair drop after phase 3a (the
+  -- through the disc) — the remaining unsupported interval after phase 3a (the
   -- τ·e lanes stay baked-only). The drop set shrank twice: phase 1's
   -- on-partial probe (220.5 Hz) lifted with phase 2's crossing arm, and
   -- phase 2's region-CHANGING probe (230.5 Hz) lifted with phase 3a's
   -- union collapse — it is now witness (6) below.
   let nearRoom := liveRoom #[mkMode 220.05 sigLive 0.5]
-  let dropCount := match bloomCompose vM nearRoom B g with
-    | some ps => ps.size
-    | none => 1000
+  let nearComposition := bloomComposeChecked vM nearRoom B g
+  let nearRefused := !nearComposition.isComplete && nearComposition.pairs.isEmpty &&
+    nearComposition.exclusions.any (fun x =>
+      x.reason == .liveRegionUnsupported || x.reason == .excludedConditioning)
   -- (6) phase 3a — the STRADDLING pair (region-changing over the interval):
   -- room 230.5 Hz vs voice 220 (|a+1| straddles |κ| = 38.4: serOnly at low
   -- rt60, crossing at high). Served by the crossing lanes alone (the union
@@ -750,7 +753,7 @@ def runBloomLivePole (arena : Arena)
     let eBakedX := relL2Win pLX pBX lo nX
     let eOracleX := relL2Win pLX (oracleSeam voiceX roomX bloomWarp adm 8 nX) lo nX
     IO.println s!"bloom live-pole crossing (WS-LP: serOnly + crossing + straddling, live rt60):"
-    IO.println s!"        lift     pairs {pairsLive.size}/6 · live consts (unfoldable) {genuinelyLive} · s0 {allS0} · coincident-dip pair drops to {dropCount}/3"
+    IO.println s!"        lift     pairs {pairsLive.size}/6 · live consts (unfoldable) {genuinelyLive} · s0 {allS0} · coincident-dip composition explicitly refused {nearRefused}"
     IO.println s!"        serOnly  live ≡ baked crossing {eBaked * 1e9}e-9 · live ≡ oracle {eOracle} · pre-E {preE} · E {e}"
     IO.println s!"        crossing lifted (1 pair, CF lane) {crossingLifted} · live ≡ baked {eBakedX * 1e9}e-9 · live ≡ oracle {eOracleX} (window {nX}, seam inside)"
     IO.println s!"        straddle rt60=2 (seam in-window) ≡ baked {eBS2 * 1e9}e-9, ≡ oracle {eOS2} · rt60=0.25 (serOnly side) ≡ baked-SER-ARM {eBS0 * 1e9}e-9 (the bridge identity in-kernel), ≡ oracle {eOS0} · full bank 3/3 {straddleBankFull}"
@@ -758,13 +761,13 @@ def runBloomLivePole (arena : Arena)
     -- baked constants come from build-time forward summation (`bloomM1`) and
     -- `lgammaB`, the lifted ones from the emitted Horner/fraction/`lgammaE` —
     -- real reassociations, so the honest bar is ~1e-6, not bit-identity.
-    if pairsLive.size == 6 && genuinelyLive && allS0 && dropCount == 2
+    if pairsLive.size == 6 && genuinelyLive && allS0 && nearRefused
         && eBaked < 1e-6 && eOracle < 3e-4 && preE < 1e-18 && e > 1e-9 && allFinite pL
         && crossingLifted && eBakedX < 1e-6 && eOracleX < 3e-4 && allFinite pLX
         && eBS2 < 1e-6 && eOS2 < 3e-4 && eBS0 < 1e-6 && eOS0 < 3e-4 && straddleBankFull then
-      passGate "bloom-live-pole" s!"a live-rt60 reverb CROSSES the bloom in every non-coincident region: serOnly 6/6 (≡ oracle {eOracle}); crossing incl. live dSwitch seam (≡ oracle {eOracleX}); STRADDLING pair served by the union collapse on both sides (crossing side ≡ oracle {eOS2}; serOnly side ≡ baked ser arm {eBS0 * 1e9}e-9 — the bridge identity in-kernel); only the coincident dip drops per-pair"
+      passGate "bloom-live-pole" s!"a live-rt60 reverb CROSSES the bloom in every supported non-coincident region: serOnly 6/6 (≡ oracle {eOracle}); crossing incl. live dSwitch seam (≡ oracle {eOracleX}); STRADDLING pair served by the union collapse on both sides (crossing side ≡ oracle {eOS2}; serOnly side ≡ baked ser arm {eBS0 * 1e9}e-9); an unsupported coincident dip explicitly refuses the whole typed composition"
     else
-      failGate "bloom-live-pole" s!"pairs={pairsLive.size} live={genuinelyLive} s0={allS0} drop={dropCount} eBaked={eBaked * 1e9}e-9 eOracle={eOracle} preE={preE} E={e} finite={allFinite pL} xLift={crossingLifted} eBakedX={eBakedX * 1e9}e-9 eOracleX={eOracleX} finiteX={allFinite pLX} eBS2={eBS2 * 1e9}e-9 eOS2={eOS2} eBS0={eBS0 * 1e9}e-9 eOS0={eOS0} bank3={straddleBankFull}"
+      failGate "bloom-live-pole" s!"pairs={pairsLive.size} live={genuinelyLive} s0={allS0} nearRefused={nearRefused} eBaked={eBaked * 1e9}e-9 eOracle={eOracle} preE={preE} E={e} finite={allFinite pL} xLift={crossingLifted} eBakedX={eBakedX * 1e9}e-9 eOracleX={eOracleX} finiteX={allFinite pLX} eBS2={eBS2 * 1e9}e-9 eOS2={eOS2} eBS0={eBS0 * 1e9}e-9 eOS0={eOS0} bank3={straddleBankFull}"
   | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
     failGate "bloom-live-pole" s!"build/render: {e}"
 
@@ -867,8 +870,8 @@ def runGammaCoeff (_arena : Arena)
 -- headroom (a sampled max over the Halton batch + the max-|κ| corner scan —
 -- empirical, never a typed bound; only the exhaustive match is type-proven).
 -- Per-region ACCURACY stays the seam-sweep's job (the contract's division of
--- labor: types for coverage, the sweep + SNR for the law). Depth-cap drops are
--- counted and printed — never a silent cap.
+-- labor: types for coverage, the sweep + SNR for the law). Depth-cap exclusions
+-- are counted and printed — never a silent cap.
 
 /-- Per-region tally + worst envelope depth over a Halton batch. -/
 private structure RegionTally where
@@ -876,6 +879,7 @@ private structure RegionTally where
   crossing : Nat := 0
   coincX   : Nat := 0        -- coincidentCrossing
   coincS   : Nat := 0        -- coincidentSubtle
+  cond     : Nat := 0        -- excludedConditioning
   excl     : Nat := 0        -- excludedDepth
   maxN     : Nat := 0        -- worst series depth (admitted samples; excluded carry 0)
   maxK     : Nat := 0        -- worst CF depth
@@ -908,6 +912,7 @@ private def tallyBatch (count : Nat) (B g : Float) (near : Bool) : RegionTally :
     | .crossing           => t := { t with crossing := t.crossing + 1 }
     | .coincidentCrossing => t := { t with coincX   := t.coincX   + 1 }
     | .coincidentSubtle   => t := { t with coincS   := t.coincS   + 1 }
+    | .excludedConditioning => t := { t with cond   := t.cond     + 1 }
     | .excludedDepth      => t := { t with excl     := t.excl     + 1 }
   return t
 
@@ -932,14 +937,14 @@ private def cornerMaxDepth (B g : Float) : Nat := Id.run do
 /-- THE REGION-COVERAGE GATE (WS-CL). Halton-classify the shipped bloom register
     and report totality as a number: the region histogram, the admitted fraction,
     and the worst envelope depth vs the 300 cap. Asserts (1) the SHIPPED surface
-    (β = 0.05, the default register) is depth-total — zero drops, worst SAMPLED
+    (β = 0.05, the default register) has zero exclusions, worst SAMPLED
     depth (Halton interior + the max-|κ| corner scan) < 300, so the cap is MEASURED
     headroom (empirical, not proven — a config in a sampling gap could differ, but
     would still become a counted `excludedDepth`, never a silent error); (2) all
     FOUR served regions are reachable — serOnly, crossing, coincidentCrossing,
     coincidentSubtle (the partition claims no region nothing lands in); (3)
-    `excludedDepth` IS reachable off-surface (β = 0.5, knob max) and is COUNTED, not
-    silently dropped. Accuracy per region is the seam-sweep's job (types for
+    `excludedDepth` IS reachable off-surface (β = 0.5, knob max), is COUNTED, and
+    makes the checked composer refuse the whole requested crossing. Accuracy per region is the seam-sweep's job (types for
     coverage, the sweep for the law). -/
 def runSeamCoverage (_arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
@@ -953,14 +958,14 @@ def runSeamCoverage (_arena : Arena)
   let over   := tallyBatch 1000 Bover g false    -- knob-max β → the depth cap bites
   let corner    := cornerMaxDepth Bship g        -- the max-|κ| worst-corner scan
   let shipTotal := uni.total + near.total
-  let shipExcl  := uni.excl + near.excl
+  let shipExcl  := uni.excl + near.excl + uni.cond + near.cond
   let admitFrac := (shipTotal - shipExcl).toFloat / shipTotal.toFloat
   let maxDepth  := max (max (max uni.maxN uni.maxK) (max near.maxN near.maxK)) corner
   IO.println "seam region coverage (classify the shipped register — totality as a number):"
-  IO.println s!"        shipped register (β=0.05): serOnly {uni.serOnly + near.serOnly}, crossing {uni.crossing + near.crossing}, coincidentCrossing {near.coincX}, excludedDepth {shipExcl} / {shipTotal}"
+  IO.println s!"        shipped register (β=0.05): serOnly {uni.serOnly + near.serOnly}, crossing {uni.crossing + near.crossing}, coincidentCrossing {near.coincX}, excludedConditioning {uni.cond + near.cond}, excludedDepth {uni.excl + near.excl} / {shipTotal}"
   IO.println s!"        admitted fraction {admitFrac} · worst SAMPLED depth {maxDepth} of cap 300 (measured headroom {300 - maxDepth}; Halton interior + max-|κ| corner scan {corner})"
   IO.println s!"        subtle-bloom box (B={bSmall}): coincidentSubtle {subtle.coincS} / {subtle.total} reachable"
-  IO.println s!"        knob-max box (β=0.5): excludedDepth {over.excl} / {over.total} — COUNTED, a graceful drop, not a silent cap"
+  IO.println s!"        knob-max box (β=0.5): excludedDepth {over.excl} / {over.total} — counted explicit refusal, not a silent cap"
   let mut ok := true
   -- (1) the shipped register is depth-total: the ≤300 cap is measured headroom
   --     (sampled max incl. the worst corner; empirical, never a typed bound)
@@ -972,18 +977,152 @@ def runSeamCoverage (_arena : Arena)
   if uni.serOnly == 0 || uni.crossing + near.crossing == 0 || near.coincX == 0 || subtle.coincS == 0 then
     IO.println s!"        COVERAGE VIOLATION: a served region is unreachable (serOnly {uni.serOnly}, crossing {uni.crossing + near.crossing}, coincidentCrossing {near.coincX}, coincidentSubtle {subtle.coincS}) — the partition claims a region nothing lands in"
     ok := false
-  -- (3) excludedDepth is reachable off-surface AND counted (the drop is named).
-  --     Graceful SILENCE for an excluded pair is structural, not rendered here: the
-  --     `| .excludedDepth => continue` (Modal.lean) drops the pair from the bank
-  --     entirely, so a mixed bank is byte-identical to the bank without it — nothing
-  --     to render. This gate proves the region is reachable and counted, not silent.
+  -- (3) excludedDepth is reachable off-surface AND counted. `runBloomSafety`
+  --     separately proves the typed composer and Patch refuse it all-or-nothing.
   if over.excl == 0 then
     IO.println s!"        COVERAGE VIOLATION: knob-max β did not exceed the depth cap — excludedDepth is never exercised, so 'counted not silent' is untested"
     ok := false
   if ok then
-    passGate "seam-coverage" s!"the shipped register classifies TOTALLY: admitted fraction {admitFrac} (0 depth drops, worst SAMPLED depth {maxDepth} < 300 — measured headroom, Halton + corner scan), all four served regions reachable, excludedDepth counted off-surface ({over.excl}/{over.total})"
+    passGate "seam-coverage" s!"the shipped register classifies TOTALLY: admitted fraction {admitFrac} (0 exclusions, worst SAMPLED depth {maxDepth} < 300 — measured headroom, Halton + corner scan), all four served regions reachable, excludedDepth counted off-surface ({over.excl}/{over.total})"
   else
     failGate "seam-coverage" "the region partition is not total over the shipped register — see the lines above"
+
+/-- M3-A stop-line gate: the measured negative-integer witness and its exact
+    boundary, the conservative live-interval conjunction edge, the real default
+    21×32 register/room endpoint census, κ=0 identity classification, and explicit
+    Patch refusal with no partial/bare-room fallback. -/
+def runBloomSafety (arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let g : Float := 1.8
+  let B : Float := 0.05 / g
+  let mu : CplxB := ⟨-0.5, tp * 413.867122763⟩
+  let planAt := fun (reA : Float) (b : Float) =>
+    let nu := mu.add ⟨g * reA, 0⟩
+    classifyBloomPair mu nu b g
+  let hazard := planAt (-0.98) B
+  let metric := bloomConditioningMetric hazard.aC
+  let boundary := planAt (-1.0 + bloomConditioningRadius) B
+  let outside := planAt (-1.0 + bloomConditioningRadius + 0.0009765625) B
+  let latticeEnd := planAt (-300.0 + bloomConditioningRadius) 1.0
+  let equalityRefused := bloomExcludedConditioningD
+    (⟨-0.984375, 0⟩ : CplxB).toExact (⟨0.015625, 0⟩ : CplxB).toExact
+  let k0 := planAt (-0.98) 0.0
+  let k0ExactPole := planAt (-1.0) 0.0
+  let k0Live := !bloomExcludedConditioningLive (-1.0) (-1.0) 0.0 ⟨0, 0⟩
+  let tunedOk := hazard.region == .excludedConditioning && metric < bloomConditioningRadius
+    && boundary.region == .excludedConditioning
+    && outside.region != .excludedConditioning
+    && latticeEnd.region == .excludedConditioning
+    && equalityRefused
+    && k0.region != .excludedConditioning
+    && k0ExactPole.region != .excludedConditioning && k0Live
+  -- The disc is witnessed at the left/centre end while the crossing is reached
+  -- only at the right edge. This is the conjunction the former coupled-point
+  -- check missed.
+  let liveEdge := bloomExcludedConditioningLive (-2.0) (-1.96875) 0.0 ⟨0.98, 0⟩
+  let liveNoCross := !bloomExcludedConditioningLive (-2.0) (-1.96875) 0.0 ⟨0.96, 0⟩
+  let liveReversed := bloomExcludedConditioningLive (-1.96875) (-2.0) 0.0 ⟨0.98, 0⟩
+  let liveIm := bloomExcludedConditioningLive (-1.0) (-1.0) 0.015625 ⟨0.1, 0⟩
+  let liveImOutside := !bloomExcludedConditioningLive (-1.0) (-1.0) 0.04 ⟨0.1, 0⟩
+
+  -- Actual default structures: 13 full + 8 half gong modes against the emitted
+  -- 32-mode ordinary room, classified at both rt60 damping endpoints.
+  let (full, half) := defaultGongModes 110.0
+  let room := Tropical.Playground.bakedReverbProbe 32
+  let sLo : Float := 6.91 / 12.0
+  let sHi : Float := 6.91 / 0.2
+  let mut endpointTotal := 0
+  let mut endpointExcluded := 0
+  let mut liveExcluded := 0
+  for vb in #[(full, B), (half, B * 0.5)] do
+    for v in vb.1 do
+      let some vs := sigConstF? v.sigma | liveExcluded := liveExcluded + room.size; continue
+      let some vo := sigConstF? v.omega | liveExcluded := liveExcluded + room.size; continue
+      let vmu : CplxB := ⟨-vs, vo⟩
+      for r in room do
+        let some ro := sigConstF? r.omega | liveExcluded := liveExcluded + 1; continue
+        match classifyBloomPairLiveChecked vmu ro sLo sHi vb.2 g with
+        | .ok _ => pure ()
+        | .error _ => liveExcluded := liveExcluded + 1
+        for rs in #[sLo, sHi] do
+          endpointTotal := endpointTotal + 1
+          match (classifyBloomPair vmu ⟨-rs, ro⟩ vb.2 g).region with
+          | .excludedConditioning | .excludedDepth =>
+            endpointExcluded := endpointExcluded + 1
+          | _ => pure ()
+  let censusOk := full.size == 13 && half.size == 8 && room.size == 32
+    && endpointTotal == 1344 && endpointExcluded == 0 && liveExcluded == 0
+
+  -- One safe and one unsafe pair: the typed result must contain no partial bank,
+  -- and Patch lowering must name the conditioning refusal. Bare bloom is intact.
+  let unsafeNu := mu.add ⟨g * (-0.98), 0⟩
+  let mkModePole := fun (p : CplxB) =>
+    ({ sigma := litF (-p.re), omega := litF p.im, cre := lit 1 } : ModalMode)
+  let voices := #[mkModePole mu, mkMode 610.0 1.0 0.5 |>.toModal]
+  let rooms := #[mkModePole unsafeNu]
+  let comp := bloomComposeChecked voices rooms B g
+  let safeMu : CplxB := ⟨-1.0, tp * 610.0⟩
+  let safePlan := classifyBloomPair safeMu unsafeNu B g
+  let mixedRefusal := !comp.isComplete && comp.pairs.isEmpty && comp.expectedPairs == 2
+    && safePlan.region != .excludedConditioning && safePlan.region != .excludedDepth
+    && comp.exclusions.size == 1 && match comp.exclusions[0]? with
+      | some x => x.voiceIndex == some 0 && x.roomIndex == some 0 && x.reason == .excludedConditioning
+      | none => false
+  let crossed : PatchGraph :=
+    { nodes := #[{ id := "src", node := .modalSource voices anchorSig clockLit none none (some (B, g)) },
+                 { id := "rev", node := .modalReverb "src" rooms none }], output := "rev" }
+  let bare : PatchGraph :=
+    { nodes := #[{ id := "src", node := .modalSource voices anchorSig clockLit none none (some (B, g)) }],
+      output := "src" }
+  let patchRefused := match lowerGraph crossed with
+    | .error e => (e.splitOn "excludedConditioning").length > 1
+    | .ok _ => false
+  let bareOk := match lowerGraph bare with | .ok _ => true | .error _ => false
+
+  -- Exact κ=0, a=-1: empty Horner identity, complete composition, finite render;
+  -- the live point classifier takes the same zero-depth route.
+  let k0Nu := mu.add ⟨-g, 0⟩
+  let k0Comp := bloomComposeChecked #[mkModePole mu] #[mkModePole k0Nu] 0.0 g
+  let k0LivePlan := classifyBloomPairLiveChecked mu mu.im (-k0Nu.re) (-k0Nu.re) 0.0 g
+  let k0Typed := k0Comp.isComplete && k0Comp.pairs.size == 1 && match k0LivePlan with
+    | .ok { region := .serOnly, nDepth, kDepth } => nDepth == 0 && kDepth == 0
+    | .ok { region := .crossing, .. } => false
+    | .error _ => false
+  let k0Render ← match k0Comp.toOption with
+    | some ps => renderConfig arena "bloom_kappa_zero" (bloomComposedSig ps clockLit anchorSig)
+    | none => pure (.error "κ=0 composition refused")
+  let k0Ref ← renderConfig arena "bloom_kappa_zero_ref"
+    (modalBankSig (residueComposeEC #[mkModePole mu] #[mkModePole k0Nu]) clockLit anchorSig)
+  let k0Error := match k0Render, k0Ref with
+    | .ok xs, .ok ys => relL2Win xs ys (anchorNat + 1) nProbe
+    | _, _ => 1.0
+  let k0RenderOk := match k0Render, k0Ref with
+    | .ok xs, .ok ys => allFinite xs && allFinite ys && k0Error < 3e-4
+    | _, _ => false
+
+  -- Depth exclusion is the same all-or-nothing contract as conditioning.
+  let depthB : Float := 0.5 / g
+  let depthMu : CplxB := ⟨-0.2, tp * 1023.0⟩
+  let depthNu : CplxB := ⟨-0.58, tp * 500.0⟩
+  let depthComp := bloomComposeChecked #[mkModePole depthMu] #[mkModePole depthNu] depthB g
+  let depthGraph : PatchGraph :=
+    { nodes := #[{ id := "src", node := .modalSource #[mkModePole depthMu] anchorSig clockLit none none (some (depthB, g)) },
+                 { id := "rev", node := .modalReverb "src" #[mkModePole depthNu] none }], output := "rev" }
+  let depthTyped := !depthComp.isComplete && depthComp.pairs.isEmpty
+    && depthComp.exclusions.size == 1 && match depthComp.exclusions[0]? with
+      | some x => x.voiceIndex == some 0 && x.roomIndex == some 0 && x.reason == .excludedDepth
+      | none => false
+  let depthPatch := match lowerGraph depthGraph with
+    | .error e => (e.splitOn "excludedDepth").length > 1
+    | .ok _ => false
+
+  IO.println s!"bloom M3-A safety: metric {metric} (radius {bloomConditioningRadius}) · live conjunction {liveEdge}/{liveNoCross}, reverse {liveReversed}, im {liveIm}/{liveImOutside} · default endpoints {endpointTotal} excluded {endpointExcluded}, live excluded {liveExcluded} · conditioning refusal {mixedRefusal}/{patchRefused}, depth {depthTyped}/{depthPatch}, κ0 {k0Typed}/{k0RenderOk} rel {k0Error}, bare {bareOk}"
+  if tunedOk && liveEdge && liveNoCross && liveReversed && liveIm && liveImOutside
+      && censusOk && mixedRefusal && patchRefused && depthTyped && depthPatch
+      && k0Typed && k0RenderOk && bareOk then
+    passGate "bloom-safety" s!"conditioning is named/refused at a≈-0.98, -300, exact disc/equality edges, reversed intervals, and nonzero-im live points; exact κ=0,a=-1 composes with an empty Horner and matches the unwarped residue atom (rel {k0Error}); the actual 21×32 default endpoint box is total; conditioning and depth refuse all-or-nothing with exact pair indices; bare bloom remains intact"
+  else
+    failGate "bloom-safety" s!"tuned={tunedOk} live={liveEdge}/{liveNoCross}/{liveReversed}/{liveIm}/{liveImOutside} census={censusOk} mixed={mixedRefusal} patch={patchRefused} depth={depthTyped}/{depthPatch} k0={k0Typed}/{k0RenderOk} bare={bareOk}"
 
 -- ── WS-CL: the lane-tidying bit-clean witness ─────────────────────────────────
 

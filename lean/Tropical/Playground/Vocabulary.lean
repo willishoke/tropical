@@ -586,18 +586,19 @@ def buildNodeKinds : Array String := #[
   "reverse", "mix", "ring", "resonator", "reverb", "filter", "modalmix",
   "gauge", "gong", "bloomgong", "string"]
 
-/-- Kinds `buildNode` builds but which are WITHHELD from the served surface. Their
-    modal factor-site landing (`bloomComposedSig`) still lands `lit 268435456`
-    unconditionally — no per-region sup, no admission guard for the conditioning
-    hazard when `a` is near a negative integer (the fixed-depth float64 series-M
-    Horner catastrophically cancels; see that def's RANGE block). `checkServedKinds`
+/-- Kinds `buildNode` builds but which are WITHHELD from the served surface.
+    The measured negative-integer conditioning discs are now named refusals, but
+    `bloomComposedSig`'s admitted selected factors still use fixed Q4.28 landing,
+    and arbitrary authored mode tables are not proven total outside the measured
+    admission contract; full live β would also change topology/depth rather than
+    only coefficients. `checkServedKinds`
     rejects a withheld kind with an honest message rather than letting it die
     downstream as a MISLEADING `signal→modal` type error: `outletOf` falls through
     to `signal` for it, which DRIFTS from its modal constructed node — the exact
     drift the `modal-class-agreement` gate now sees because it drives off
-    `buildNodeKinds`. Un-withholding one is NOT a one-line `outletOf` edit: it
-    re-admits the unguarded factor site, so it waits on the per-region-sup landing
-    (`design/seam-hardening-optionE-handoff.local.md`, the factor-site follow-on). -/
+    `buildNodeKinds`. Un-withholding one is NOT a one-line `outletOf` edit: the
+    accepted structural profile, factor bound/landing strategy, refusal semantics,
+    cost, and any live-β topology contract must be bounded first. -/
 def withheldKinds : Array String := #["bloomgong"]
 
 -- Derived views — the ONLY readers of glide/anchor/knob facts from here down.
