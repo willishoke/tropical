@@ -30,9 +30,9 @@ Production PatchGraph modal lowering and terminal realization refine the canonic
 - Owner: Modal compiler
 - Evidence: executable gate, inspection
 - Formal symbol: none
-- Implementation: `lean/Tropical/EmitArrow/Patch.lean`, `lean/Tropical/EmitArrow/Modal/Forest.lean`, `lean/Tropical/Tropicaltest/Modal.lean`
-- Gates: `modal-universe-history`, `manual:production modal refinement review`
-- Limitation: The executable gate covers nested ordinary rooms, independent RT60 rewrites, restore/seek-order/hold/reverse, modal deferral, and known legacy-state non-emission. A structural refinement remains open until the production representation closes over repeated stage-local direction/sway and every heterogeneous modal ordering.
+- Implementation: `lean/Tropical/EmitArrow/Patch.lean`, `lean/Tropical/EmitArrow/Modal/Forest.lean`, `lean/Tropical/EmitArrow/Modal/Oriented.lean`, `lean/Tropical/EmitArrow/Modal/OrientedRealize.lean`, `lean/Tropical/Tropicaltest/Modal.lean`, `lean/Tropical/Tropicaltest/OrientedPatch.lean`
+- Gates: `modal-universe-history`, `modal-oriented-patch`, `manual:production modal refinement review`
+- Limitation: Production now retains an authored ordinary-room/gauge stage spine, binds room controls together at the true terminal, and carries plain sources through explicit future/past algebra with a stable terminal divided-difference route. Full refinement remains open: hot/equal-pole divided differences are not yet composable through a later room or gauge; arbitrary live source-frequency crossings need a declared pole envelope; live reverse/sway/gauge after bloom needs the oriented Gamma bridge; and the bilateral live-gauge cost/backend envelope is not qualified.
 
 ## LOWER_SIG_TREE_PRESERVES
 

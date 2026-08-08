@@ -59,6 +59,7 @@ deriving BEq, Repr, Inhabited
 def knownGates : Array String := #[
   "lake-build:Tropical.Semantics",
   "modal-universe-history",
+  "modal-oriented-patch",
   "semantics-production-fixtures",
   "semantics-pointer-differential",
   "clock-algebra-theorems",
@@ -118,11 +119,15 @@ def obligations : Array Obligation := #[
     evidence := #[.executableGate, .inspection]
     implementationPaths := #["lean/Tropical/EmitArrow/Patch.lean",
       "lean/Tropical/EmitArrow/Modal/Forest.lean",
-      "lean/Tropical/Tropicaltest/Modal.lean"]
-    gateNames := #["modal-universe-history", "manual:production modal refinement review"]
+      "lean/Tropical/EmitArrow/Modal/Oriented.lean",
+      "lean/Tropical/EmitArrow/Modal/OrientedRealize.lean",
+      "lean/Tropical/Tropicaltest/Modal.lean",
+      "lean/Tropical/Tropicaltest/OrientedPatch.lean"]
+    gateNames := #["modal-universe-history", "modal-oriented-patch",
+      "manual:production modal refinement review"]
     owner := "Modal compiler"
     status := .open
-    limitation := "The executable gate covers nested ordinary rooms, independent RT60 rewrites, restore/seek-order/hold/reverse, modal deferral, and known legacy-state non-emission. A structural refinement remains open until the production representation closes over repeated stage-local direction/sway and every heterogeneous modal ordering."
+    limitation := "Production now retains an authored ordinary-room/gauge stage spine, binds room controls together at the true terminal, and carries plain sources through explicit future/past algebra with a stable terminal divided-difference route. Full refinement remains open: hot/equal-pole divided differences are not yet composable through a later room or gauge; arbitrary live source-frequency crossings need a declared pole envelope; live reverse/sway/gauge after bloom needs the oriented Gamma bridge; and the bilateral live-gauge cost/backend envelope is not qualified."
     priority := .critical },
   { id := "LOWER_SIG_TREE_PRESERVES"
     statement := "For every carrier algebra, environment, production Sig, and well-formed initial ExprArena, lowerSigTree returns a well-formed arena extension whose expression denotation equals the direct Sig denotation."
