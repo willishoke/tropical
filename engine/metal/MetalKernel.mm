@@ -77,6 +77,9 @@ struct MetalKernel
   uint32_t capacity     = 0;
   uint32_t slot_count   = 0;
   uint32_t column_count = 0;
+  DispatchKind dispatch_kind = DispatchKind::SampleThreads;
+  uint32_t threadgroup_width = 0;
+  uint32_t threadgroup_scratch_bytes = 0;
 
   // Deterministic no-DAC test seam, captured once at construction so the
   // realtime path never reads the environment. 0 disables it; N classifies
@@ -200,10 +203,18 @@ static bool render_tile_impl(MetalKernel & k,
           column_destination, columns, count * sizeof(float));
       [encoder setBuffer:k.columns offset:0 atIndex:3];
     }
-    const NSUInteger threads =
-      std::min<NSUInteger>(k.pso.maxTotalThreadsPerThreadgroup, frames);
-    [encoder dispatchThreads:MTLSizeMake(frames, 1, 1)
-       threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+    if (k.dispatch_kind == DispatchKind::SampleThreadgroups)
+    {
+      [encoder dispatchThreadgroups:MTLSizeMake(frames, 1, 1)
+         threadsPerThreadgroup:MTLSizeMake(k.threadgroup_width, 1, 1)];
+    }
+    else
+    {
+      const NSUInteger threads =
+        std::min<NSUInteger>(k.pso.maxTotalThreadsPerThreadgroup, frames);
+      [encoder dispatchThreads:MTLSizeMake(frames, 1, 1)
+         threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+    }
     [encoder endEncoding];
     [command commit];
     [command waitUntilCompleted];
@@ -229,7 +240,9 @@ MetalKernelPtr create(const std::string & msl_source,
                       uint32_t buffer_length,
                       uint32_t slot_count,
                       uint32_t column_count,
-                      std::string & err)
+                      std::string & err,
+                      DispatchKind dispatch_kind,
+                      uint32_t threadgroup_scratch_bytes)
 {
   @autoreleasepool
   {
@@ -272,6 +285,37 @@ MetalKernelPtr create(const std::string & msl_source,
     k->capacity     = buffer_length;
     k->slot_count   = slot_count;
     k->column_count = column_count;
+    k->dispatch_kind = dispatch_kind;
+    if (dispatch_kind == DispatchKind::SampleThreadgroups)
+    {
+      const NSUInteger width = pso.threadExecutionWidth;
+      const NSUInteger actual_scratch = pso.staticThreadgroupMemoryLength;
+      const NSUInteger device_limit = dev.maxThreadgroupMemoryLength;
+      const NSUInteger qualified_limit = (device_limit * 3u) / 4u;
+      if (width == 0 || width > pso.maxTotalThreadsPerThreadgroup)
+      {
+        err = "MetalKernel: invalid cooperative pipeline execution width";
+        return nullptr;
+      }
+      if (threadgroup_scratch_bytes == 0)
+      {
+        err = "MetalKernel: cooperative dispatch requires declared threadgroup scratch";
+        return nullptr;
+      }
+      if (actual_scratch > threadgroup_scratch_bytes)
+      {
+        err = "MetalKernel: emitted threadgroup storage exceeds declared scratch bytes";
+        return nullptr;
+      }
+      if (threadgroup_scratch_bytes > qualified_limit
+          || actual_scratch > device_limit)
+      {
+        err = "MetalKernel: cooperative threadgroup scratch exceeds device publication limit";
+        return nullptr;
+      }
+      k->threadgroup_width = static_cast<uint32_t>(width);
+      k->threadgroup_scratch_bytes = threadgroup_scratch_bytes;
+    }
     k->out = [dev newBufferWithLength:(NSUInteger)buffer_length * sizeof(float)
                               options:MTLResourceStorageModeShared];
     k->slots = [dev newBufferWithLength:(NSUInteger)std::max<uint32_t>(slot_count, 1) * sizeof(float)
@@ -288,6 +332,21 @@ MetalKernelPtr create(const std::string & msl_source,
       return nullptr;
     return k;
   }
+}
+
+DispatchKind dispatch_kind(const MetalKernel & k)
+{
+  return k.dispatch_kind;
+}
+
+uint32_t threadgroup_width(const MetalKernel & k)
+{
+  return k.threadgroup_width;
+}
+
+uint32_t threadgroup_scratch_bytes(const MetalKernel & k)
+{
+  return k.threadgroup_scratch_bytes;
 }
 
 bool render_tile(MetalKernel & k,

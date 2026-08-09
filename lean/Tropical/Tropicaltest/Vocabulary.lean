@@ -99,6 +99,21 @@ def runVocabDriven (arena : Arena)
   if !fingerprintOk then
     ok := false
     issues := issues.push "vocabulary fingerprint is not deterministic labelled FNV-1a/64"
+  -- The served room contract is deliberately signal-capable and glided on every
+  -- numeric control. This direct table assertion plus the payload hash above pins
+  -- the metadata clients actually receive; a decoder-only implementation cannot
+  -- make a wire compile while leaving the public vocabulary knob-only.
+  let roomControlNames := #["rt60", "dir", "sway", "rate"]
+  let roomSurfaceOk := roomControlNames.all fun name =>
+    match portOf "reverb" name with
+    | some spec => spec.accepts == sigIn && spec.knob.isSome && spec.discipline == .glide
+    | none => false
+  let roomInputOk := match portOf "reverb" "in" with
+    | some spec => spec.accepts == modalIn && spec.knob.isNone
+    | none => false
+  if !roomSurfaceOk || !roomInputOk then
+    ok := false
+    issues := issues.push "reverb: served rt60/dir/sway/rate are not signal-capable glided controls over a modal input"
   for kind in vocabularyKinds do
     if kind == "out" then continue
     let mut nodes : Array Lean.Json := #[]
@@ -147,10 +162,10 @@ def runVocabDriven (arena : Arena)
       if !dead.isEmpty then
         ok := false; issues := issues.push s!"{kind}: unread {dead}"
   IO.println s!"        schema {vocabularySchema} v{vocabularySchemaVersion} · fingerprint {vocabularyFingerprint}"
-  IO.println s!"        {covered} non-sink served kinds compiled from vocabulary-generated minimal patches; all served identifiers unique, withheld absent:"
+  IO.println s!"        {covered} non-sink served kinds compiled from vocabulary-generated minimal patches; room controls signal+glide={roomSurfaceOk}; all served identifiers unique, withheld absent:"
   IO.println s!"        result   {if issues.isEmpty then "every declared knob registers and is read" else toString issues}"
   if ok then
-    passGate "vocab-driven" "versioned/fingerprinted vocabulary has unique served kinds, withholds unavailable kinds, and drives one compiling patch per kind — declared knobs live, nothing unread"
+    passGate "vocab-driven" "versioned/fingerprinted vocabulary serves all four reverb controls as signal-capable glided knobs and drives one compiling patch per kind — declared knobs live, nothing unread"
   else
     failGate "vocab-driven" s!"{issues}"
 
@@ -191,7 +206,7 @@ def runModalClassAgreement : IO Bool := do
 
 /-- THE MALFORMED-DOCUMENT REJECTION gate (Findings 1 & 3). A malformed patch is a
     BROKEN document — distinct from a legal-incomplete one (an unwired inlet →
-    silence, no error). Three malformations must each return a clear `Except.error`
+    silence, no error). These malformations must each return a clear `Except.error`
     and, critically for the live MCP server, must NOT crash the process:
       · a color-LEGAL CYCLE — a reverb whose modal outlet feeds its own modal
         inlet, a mix fed by itself — passes `checkEdgeTypes` (the colors match);
@@ -200,7 +215,9 @@ def runModalClassAgreement : IO Bool := do
       · a WIRE naming no node (a typo'd source) — previously died downstream as
         `lower: node '…' not found`, or vanished silently if unreferenced;
       · a top-level `"out"` naming no node — previously rendered the WHOLE patch as
-        silence with no error.
+        silence with no error;
+      · a cycle entering a room through a signal-capable numeric control — control
+        references are graph dependencies, not side channels around cycle refusal.
     The boundary stays crisp: a valid modal patch still compiles. -/
 def runMalformedRejection (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : IO Bool := do
@@ -237,12 +254,18 @@ def runMalformedRejection (arena : Arena)
   let unknownKind := "{\"nodes\":[" ++
     "{\"id\":\"x\",\"kind\":\"reverbb\",\"params\":{\"rt60\":2}}," ++
     "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"x\"]}}],\"out\":\"out\"}"
-  -- a non-empty WIRE INTO A KNOB (`rt60` is a set value, not an inlet): slips past
-  -- the color loop (empty accepts) yet suppresses the slot — a silently dead knob.
-  let knobWire := "{\"nodes\":[" ++
+  -- A room numeric control is now a real signal inlet with a knob fallback. This
+  -- exact graph used to be rejected as a wire into a set-only knob; it must compile.
+  let wiredRoomControl := "{\"nodes\":[" ++
     "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
     "{\"id\":\"k\",\"kind\":\"knob\",\"params\":{\"value\":3}}," ++
     "{\"id\":\"rev\",\"kind\":\"reverb\",\"in\":{\"in\":[\"res\"],\"rt60\":[\"k\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"rev\"]}}],\"out\":\"out\"}"
+  -- The same signal-capable port must participate in the ordinary graph cycle
+  -- check. A room cannot source the control that selects its own universe.
+  let cycleRoomControl := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"rev\",\"kind\":\"reverb\",\"in\":{\"in\":[\"res\"],\"rt60\":[\"rev\"]}}," ++
     "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"rev\"]}}],\"out\":\"out\"}"
   -- the crisp boundary: a valid modal patch still compiles.
   let valid := "{\"nodes\":[" ++
@@ -255,7 +278,10 @@ def runMalformedRejection (arena : Arena)
   let mOut := compileErr danglingOut
   let mWithheld := compileErr withheldKind
   let mUnknown := compileErr unknownKind
-  let mKnob := compileErr knobWire
+  let mControlCycle := compileErr cycleRoomControl
+  let wiredControlOk := match Lean.Json.parse wiredRoomControl with
+    | .ok j => (Tropical.Playground.compilePlanPure arena resolved j).toOption.isSome
+    | .error _ => false
   let mValid := match Lean.Json.parse valid with
     | .ok j => (Tropical.Playground.compilePlanPure arena resolved j).toOption.isSome
     | .error _ => false
@@ -265,7 +291,7 @@ def runMalformedRejection (arena : Arena)
   let outOk := hasSub mOut "output target error"
   let withheldOk := hasSub mWithheld "unserved kind"
   let unknownOk := hasSub mUnknown "unknown kind"
-  let knobOk := hasSub mKnob "is a knob"
+  let controlCycleOk := hasSub mControlCycle "connection cycle"
   IO.println s!"        malformed patches rejected (no crash); legal-incomplete unaffected:"
   IO.println s!"        cycle(reverb self)   {mRev}"
   IO.println s!"        cycle(mix self)      {mMix}"
@@ -273,12 +299,14 @@ def runMalformedRejection (arena : Arena)
   IO.println s!"        dangling out         {mOut}"
   IO.println s!"        withheld kind        {mWithheld}"
   IO.println s!"        unknown kind         {mUnknown}"
-  IO.println s!"        wire into a knob     {mKnob}"
+  IO.println s!"        cycle(room.rt60)     {mControlCycle}"
+  IO.println s!"        wired room.rt60 compiles={wiredControlOk}"
   IO.println s!"        valid modal patch compiles={mValid}"
-  if revOk && mixOk && wireOk && outOk && withheldOk && unknownOk && knobOk && mValid then
-    passGate "malformed-rejection" "a color-legal cycle, a dangling wire/out, a WITHHELD kind (bloomgong), an UNKNOWN kind, and a wire-into-a-knob each return a clear error (no stack-overflow); a valid patch still compiles"
+  if revOk && mixOk && wireOk && outOk && withheldOk && unknownOk &&
+      controlCycleOk && wiredControlOk && mValid then
+    passGate "malformed-rejection" "ordinary and room-control cycles, a dangling wire/out, a WITHHELD kind, and an UNKNOWN kind return clear errors; wiring room.rt60 is valid and compiles"
   else
-    failGate "malformed-rejection" s!"revOk={revOk} mixOk={mixOk} wireOk={wireOk} outOk={outOk} withheldOk={withheldOk} unknownOk={unknownOk} knobOk={knobOk} valid={mValid}"
+    failGate "malformed-rejection" s!"revOk={revOk} mixOk={mixOk} wireOk={wireOk} outOk={outOk} withheldOk={withheldOk} unknownOk={unknownOk} controlCycle={controlCycleOk} wiredControl={wiredControlOk} valid={mValid}"
 
 open Tropical.Playground in
 /-- THE REALIZED-STATE REPORT gate. The `load_patch_graph` reply must state
@@ -296,6 +324,12 @@ def runRealizedReport : IO Bool := do
       (if withMod then ",\"mod\":[\"lfo\"]" else "") ++ "}}," ++
       "{\"id\":\"outn\",\"kind\":\"out\",\"in\":{\"in\":[\"sfw\"]}}],\"out\":\"outn\"}"
     base
+  let mkRoomPatch := fun (wiredRt60 : Bool) => "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    (if wiredRt60 then "{\"id\":\"k\",\"kind\":\"knob\",\"params\":{\"value\":3}}," else "") ++
+    "{\"id\":\"room\",\"kind\":\"reverb\",\"params\":{\"rt60\":2,\"dir\":0,\"sway\":0,\"rate\":0.3},\"in\":{\"in\":[\"res\"]" ++
+    (if wiredRt60 then ",\"rt60\":[\"k\"]" else "") ++ "}}," ++
+    "{\"id\":\"outn\",\"kind\":\"out\",\"in\":{\"in\":[\"room\"]}}],\"out\":\"outn\"}"
   let inputState := fun (rep : Lean.Json) (node port : String) =>
     match rep.getObjVal? "inputs" with
     | .ok (.arr a) => (a.find? fun ij =>
@@ -314,26 +348,46 @@ def runRealizedReport : IO Bool := do
         ((nj.getObjVal? "id").toOption.bind (·.getStr?.toOption)) == some id).bind
         fun nj => (nj.getObjVal? "status").toOption.bind (·.getStr?.toOption)
     | _ => none
+  let fingerprintOf := fun (rep : Lean.Json) =>
+    (rep.getObjVal? "vocabulary_fingerprint").toOption.bind (·.getStr?.toOption)
   match Lean.Json.parse (mkPatch false false), Lean.Json.parse (mkPatch true false),
-        Lean.Json.parse (mkPatch false true) with
-  | .ok jUnwired, .ok jWired, .ok jDangler =>
+        Lean.Json.parse (mkPatch false true), Lean.Json.parse (mkRoomPatch false),
+        Lean.Json.parse (mkRoomPatch true) with
+  | .ok jUnwired, .ok jWired, .ok jDangler, .ok jRoomU, .ok jRoomW =>
     let repU := realizedReport jUnwired #[]
     let repW := realizedReport jWired #[]
     let repD := realizedReport jDangler #[]
+    let repRoomU := realizedReport jRoomU #[]
+    let repRoomW := realizedReport jRoomW #[]
     let unwiredOk := inputState repU "sfw" "mod" == some "normalled"
       && (paramNames repU).contains "sfw.rate"
     let wiredOk := inputState repW "sfw" "mod" == some "wired"
       && !(paramNames repW).contains "sfw.rate"
     let danglerOk := nodeStatus repD "orphan" == some "excluded"
       && nodeStatus repD "osc" == some "active"
+    let roomControls := #["rt60", "dir", "sway", "rate"]
+    let roomUnwiredOk := roomControls.all fun name =>
+      inputState repRoomU "room" name == some "normalled" &&
+        (paramNames repRoomU).contains s!"room.{name}"
+    let roomWiredOk := inputState repRoomW "room" "rt60" == some "wired" &&
+      !(paramNames repRoomW).contains "room.rt60" &&
+      (paramNames repRoomW).contains "k.value" &&
+      #["dir", "sway", "rate"].all fun name =>
+        inputState repRoomW "room" name == some "normalled" &&
+          (paramNames repRoomW).contains s!"room.{name}"
+    let reportFingerprintOk := #[repU, repW, repD, repRoomU, repRoomW].all fun rep =>
+      fingerprintOf rep == some vocabularyFingerprint
     -- the no-warnings contract, checked on the wire form itself
-    let noWarnOk := ((repU.compress ++ repW.compress ++ repD.compress).toLower.splitOn "warn").length == 1
-    IO.println s!"        unwired: mod={inputState repU "sfw" "mod"} rate-param={((paramNames repU).contains "sfw.rate")} · wired: mod={inputState repW "sfw" "mod"} rate-param={((paramNames repW).contains "sfw.rate")} · orphan={nodeStatus repD "orphan"}"
-    if unwiredOk && wiredOk && danglerOk && noWarnOk then
-      passGate "realized-report" "facts, not warnings: normalled/wired inputs, owned knobs absent when superseded, excluded nodes named"
+    let reports := repU.compress ++ repW.compress ++ repD.compress ++
+      repRoomU.compress ++ repRoomW.compress
+    let noWarnOk := (reports.toLower.splitOn "warn").length == 1
+    IO.println s!"        unwired: mod={inputState repU "sfw" "mod"} rate-param={((paramNames repU).contains "sfw.rate")} · wired: mod={inputState repW "sfw" "mod"} rate-param={((paramNames repW).contains "sfw.rate")} · room={roomUnwiredOk}/{roomWiredOk} · fingerprint={reportFingerprintOk} · orphan={nodeStatus repD "orphan"}"
+    if unwiredOk && wiredOk && danglerOk && roomUnwiredOk && roomWiredOk &&
+        reportFingerprintOk && noWarnOk then
+      passGate "realized-report" "facts, not warnings: room controls report normalled/wired truth, wired fallbacks disappear, every report carries the authoritative vocabulary fingerprint, and excluded nodes are named"
     else
-      failGate "realized-report" s!"unwired={unwiredOk} wired={wiredOk} dangler={danglerOk} noWarn={noWarnOk}"
-  | _, _, _ => failGate "realized-report" "patch json parse"
+      failGate "realized-report" s!"unwired={unwiredOk} wired={wiredOk} room={roomUnwiredOk}/{roomWiredOk} fingerprint={reportFingerprintOk} dangler={danglerOk} noWarn={noWarnOk}"
+  | _, _, _, _, _ => failGate "realized-report" "patch json parse"
 
 open Tropical.Playground in
 /-- THE MANIFEST-DISCIPLINE gate. `param_disciplines` is host-contract data:
@@ -350,6 +404,12 @@ def runManifestDisciplines (arena : Arena)
     "{\"id\":\"sfw\",\"kind\":\"sflange\",\"params\":{\"depth\":0.002,\"rate\":0.3},\"in\":{\"in\":[\"osc\"]" ++
     (if withMod then ",\"mod\":[\"lfo\"]" else "") ++ "}}," ++
     "{\"id\":\"outn\",\"kind\":\"out\",\"in\":{\"in\":[\"sfw\"]}}],\"out\":\"outn\"}"
+  let roomPatch := fun (wired : Bool) => "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    (if wired then "{\"id\":\"driver\",\"kind\":\"knob\",\"params\":{\"value\":1}}," else "") ++
+    "{\"id\":\"room\",\"kind\":\"reverb\",\"params\":{\"rt60\":2,\"dir\":0,\"sway\":0,\"rate\":0.3},\"in\":{\"in\":[\"res\"]" ++
+    (if wired then ",\"rt60\":[\"driver\"],\"dir\":[\"driver\"],\"sway\":[\"driver\"],\"rate\":[\"driver\"]" else "") ++ "}}," ++
+    "{\"id\":\"outn\",\"kind\":\"out\",\"in\":{\"in\":[\"room\"]}}],\"out\":\"outn\"}"
   let check := fun (label : String) (plan : Tropical.Plan.FlatPlan) => Id.run do
     let mut issues : Array String := #[]
     let names := plan.slotNames
@@ -369,30 +429,46 @@ def runManifestDisciplines (arena : Arena)
           issues := issues.push s!"{label}: {d.discipline} {d.name} has no base slot"
       | other => issues := issues.push s!"{label}: unknown discipline {other}"
     return issues
-  match Lean.Json.parse (patch false), Lean.Json.parse (patch true) with
-  | .ok ju, .ok jw =>
+  match Lean.Json.parse (patch false), Lean.Json.parse (patch true),
+        Lean.Json.parse (roomPatch false), Lean.Json.parse (roomPatch true) with
+  | .ok ju, .ok jw, .ok jru, .ok jrw =>
     match Tropical.Playground.compilePlanPure arena resolved ju,
-          Tropical.Playground.compilePlanPure arena resolved jw with
-    | .ok compiledU, .ok compiledW =>
+          Tropical.Playground.compilePlanPure arena resolved jw,
+          Tropical.Playground.compilePlanPure arena resolved jru,
+          Tropical.Playground.compilePlanPure arena resolved jrw with
+    | .ok compiledU, .ok compiledW, .ok compiledRoomU, .ok compiledRoomW =>
       let pu := compiledU.plan
       let pw := compiledW.plan
-      let mut issues := check "unwired" pu ++ check "wired" pw
+      let pru := compiledRoomU.plan
+      let prw := compiledRoomW.plan
+      let mut issues := check "unwired" pu ++ check "wired" pw ++
+        check "room-unwired" pru ++ check "room-wired" prw
       if !(pu.paramDisciplines.any (·.name == "sfw.rate")) then
         issues := issues.push "unwired: sfw.rate missing from disciplines"
       if pw.paramDisciplines.any (·.name == "sfw.rate") then
         issues := issues.push "wired: superseded sfw.rate present in disciplines"
+      for name in #["rt60", "dir", "sway", "rate"] do
+        if !(pru.paramDisciplines.any fun d =>
+            d.name == s!"room.{name}" && d.discipline == "glide") then
+          issues := issues.push s!"room-unwired: room.{name} missing glide discipline"
+        if prw.paramDisciplines.any (·.name == s!"room.{name}") then
+          issues := issues.push s!"room-wired: superseded room.{name} present in disciplines"
+      if !(prw.paramDisciplines.any fun d =>
+          d.name == "driver.value" && d.discipline == "raw") then
+        issues := issues.push "room-wired: driver.value missing raw discipline"
       if !(pu.paramDisciplines.any fun d => d.name == "master.velocity"
             && d.discipline == "velocity" && d.companions.contains "master.tau_base") then
         issues := issues.push "master.velocity entry wrong"
-      IO.println s!"        {pu.paramDisciplines.size}+{pw.paramDisciplines.size} manifest entries checked against their plans' slots:"
+      IO.println s!"        {pu.paramDisciplines.size}+{pw.paramDisciplines.size}+{pru.paramDisciplines.size}+{prw.paramDisciplines.size} manifest entries checked against their plans' slots:"
       IO.println s!"        result   {if issues.isEmpty then "consistent" else toString issues}"
       if issues.isEmpty then
-        passGate "manifest-disciplines" "param_disciplines ≡ the plan's slots — a host can dispatch from it blind"
+        passGate "manifest-disciplines" "param_disciplines ≡ the plan's slots; all four unwired room controls are glided and wiring them removes their fallback disciplines"
       else
         failGate "manifest-disciplines" s!"{issues}"
-    | .error e, _ | _, .error e =>
+    | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ |
+        _, _, _, .error e =>
       failGate "manifest-disciplines" s!"compile: {firstLine e}"
-  | _, _ => failGate "manifest-disciplines" "json parse"
+  | _, _, _, _ => failGate "manifest-disciplines" "json parse"
 
 /-- THE DEAD-SLOT LINT gate (the systemic net for the dead-knob class). Canonical
     patches covering every playground node kind compile through the real
@@ -447,9 +523,20 @@ def runDeadSlotLint (arena : Arena)
     "{\"id\":\"lfo\",\"kind\":\"source\",\"params\":{\"freq\":0.4,\"morph\":1}}," ++
     "{\"id\":\"sfw\",\"kind\":\"sflange\",\"params\":{\"depth\":0.002,\"rate\":0.3},\"in\":{\"in\":[\"osc\"],\"mod\":[\"lfo\"]}}," ++
     "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"sfw\"]}}],\"out\":\"out\"}"
+  -- Four independent drivers make each terminal room-control binding observable:
+  -- if any one is dropped, its source knob becomes an unread param. The room's own
+  -- four glided fallbacks must be absent, not merely registered-but-unused.
+  let reverbWired := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"krt\",\"kind\":\"knob\",\"params\":{\"value\":2}}," ++
+    "{\"id\":\"kdir\",\"kind\":\"knob\",\"params\":{\"value\":0.5}}," ++
+    "{\"id\":\"ksway\",\"kind\":\"knob\",\"params\":{\"value\":0.2}}," ++
+    "{\"id\":\"krate\",\"kind\":\"knob\",\"params\":{\"value\":0.3}}," ++
+    "{\"id\":\"rvw\",\"kind\":\"reverb\",\"in\":{\"in\":[\"res\"],\"rt60\":[\"krt\"],\"dir\":[\"kdir\"],\"sway\":[\"ksway\"],\"rate\":[\"krate\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"rvw\"]}}],\"out\":\"out\"}"
   let patches : Array (String × String) := #[
     ("signal-chain", signalChain), ("modal-chain", modalChain), ("modal-mix", modalMix),
-    ("sflange-wired", sflangeWired)]
+    ("sflange-wired", sflangeWired), ("reverb-wired", reverbWired)]
   let mut ok := true
   let mut checked := 0
   let mut deadAll : Array String := #[]
@@ -482,10 +569,25 @@ def runDeadSlotLint (arena : Arena)
         if label == "sflange-wired" && plan.slotNames.contains "param:sfw.rate" then
           IO.println s!"  FAIL  dead-slot-lint  {label}: param:sfw.rate registered despite wired mod — the owned-knob rule regressed"
           ok := false
+        if label == "modal-chain" then
+          for control in #["rt60", "dir", "sway", "rate"] do
+            if !plan.slotNames.contains s!"param:rvb.{control}#v0" then
+              IO.println s!"  FAIL  dead-slot-lint  {label}: unwired rvb.{control} glide fallback missing"
+              ok := false
+        if label == "reverb-wired" then
+          for control in #["rt60", "dir", "sway", "rate"] do
+            let slotPrefix := s!"param:rvw.{control}"
+            if plan.slotNames.any (slotPrefix.isPrefixOf ·) then
+              IO.println s!"  FAIL  dead-slot-lint  {label}: wired {slotPrefix} fallback still registered"
+              ok := false
+          for driver in #["krt", "kdir", "ksway", "krate"] do
+            if !plan.slotNames.contains s!"param:{driver}.value" then
+              IO.println s!"  FAIL  dead-slot-lint  {label}: param:{driver}.value missing"
+              ok := false
   IO.println s!"        {patches.size} canonical patches over the full node vocabulary, {checked} param:* slots:"
   IO.println s!"        result   unread param slots: {if deadAll.isEmpty then "none" else toString deadAll}"
   if ok then
-    passGate "dead-slot-lint" "every registered param:* slot is read by an instruction — no dead knobs behind graceful exclusion"
+    passGate "dead-slot-lint" "every registered param:* slot is read; unwired room glides stay live, while four independently wired room controls suppress their fallbacks and consume all four drivers"
   else
     failGate "dead-slot-lint" s!"dead knobs (setSlot lands, no instruction reads): {deadAll}"
 

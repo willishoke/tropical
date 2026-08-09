@@ -67,6 +67,20 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
   -- table's fallback — the one place buildNode learns a default from.
   let dv := fun (kname : String) => jExpr params kname (fallbackOf kind kname)
   let clk := masterClock pidx
+  -- A modal-room control remains an independently authored term until the
+  -- terminal binding seam. Its signal wire wins; otherwise its knob fallback
+  -- reads the same terminal clock context (including ordinary downstream
+  -- warps), retaining the terminal clock's fractional Q32.32 coordinate.
+  let modalControl := fun (kname : String) =>
+    let dflt := dv kname
+    let fallback : ArrowTerm :=
+      if isGlided kind kname then
+        .arrUn (fun clkQ => glideExprQAt pidx s!"{id}.{kname}" dflt clkQ)
+          (.clk clk)
+      else
+        .konst (pref pidx s!"{id}.{kname}" dflt)
+    ({ fallback
+       signalNode? := (portSources inObj kname)[0]? } : ModalControlRef)
   match kind with
   | "knob" =>
     match pidx s!"{id}.value" with
@@ -170,23 +184,27 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
       let countE := pref pidx s!"{id}.partials" (lit (Int.ofNat npart))
       (.modalSource (resonatorBank f0 decay cap) (lit 0) clk addr? (some countE), #[])
   | "reverb" =>
-    let rt60 := p "rt60" (dv "rt60")
-    -- reading DIRECTION: θ (radians, live) rotates the composed tail's poles in the
-    -- s-plane — 0 = forward decay, π = reverse (pre-verb), interior = a continuous
-    -- U(1) morph (σ↔ω at π/2). `window` (live) nulls each mode at its horizon-
-    -- crossing (`σ²/(σ²+w²)`), offset off 0 so the kernel never divides 0/0: at the
-    -- knob's floor it is near-bare rotation, opened up it is the polite morph.
-    -- DIR crossfades the tail's time-direction: 0 = forward ring, 1 = reverse
-    -- (pre-verb into the strike), interior = both. Keeps σ/ω fixed, so it stays
-    -- audible across the whole range (no pole rotation).
-    let dirX := p "dir" (dv "dir")
+    let rt60 := modalControl "rt60"
+    let rtRange := displayRangeOf "reverb" "rt60"
+    -- ROOM-KERNEL DIRECTION: for this room impulse response `h`, `dir` selects
+    -- `h[dir] = (1-dir)·h + dir·T(h)`, then the room composes `h[dir]` with its
+    -- modal input. Thus 0 is the forward kernel, 1 the reversed kernel, and an
+    -- interior value contains both. Direction is local to this room: it does not
+    -- reverse the upstream modal value or the complete composed output. σ and ω
+    -- stay fixed, so the crossfade remains audible across the whole range.
+    let dirX := modalControl "dir"
     -- SWAY: the room's decay breathes — σ ↦ σ·(1 + sway·sin(2π·rate·t)) on the
     -- envelope's clock only (pitch fixed). Continuous CF modulation of RT60 that
     -- stays on-island (no ∫σ dτ, no state); scrubs/reverses with the master clock.
-    let sway := p "sway" (dv "sway")
-    let swayRate := p "rate" (dv "rate")   -- 0.3 Hz: a slow breath
-    let dir : ModalDir := { dir := dirX, damp := some (sway, swayRate) }
-    (.modalReverb sig (reverbRoom rt60 (displayRangeOf "reverb" "rt60") 32 (60, 0) (6000, 0)) (some dir), #[])
+    let sway := modalControl "sway"
+    let swayRate := modalControl "rate"   -- 0.3 Hz: a slow breath
+    (.modalRoom sig
+      (fun frozenRt60 =>
+        let boundedRt60 := match rtRange with
+          | some (lo, hi) => clampE frozenRt60 (litF lo) (litF hi)
+          | none => frozenRt60
+        reverbRoom boundedRt60 rtRange 32 (60, 0) (6000, 0))
+      rt60 dirX sway swayRate, #[])
   | "filter" =>
     -- the filter IS a modalReverb with a computed 2-mode room: the residue
     -- calculus does the "filtering" at build time, knobs stay live through it.
@@ -196,10 +214,10 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
   | "gauge" =>
     -- §5 excitation gauge: re-level the modal input's peak. g=0 identity (unity-DC,
     -- the strike gauge), g=1 unity-peak. A pure Modal ⇝ Modal effect (`normalizePeak`);
-    -- the norm is self-measured on the SETTLED poles, so a glided filter input is
-    -- Metal-safe and an un-settleable input declines to identity.
+    -- the norm is self-measured on the complete current modal universe at this
+    -- authored stage, using the same terminal clock context as adjacent rooms.
     let inId := (portSources inObj "in")[0]?.getD "__silence__"
-    (.modalGauge inId (p "g" (dv "g")), #[])
+    (.modalGaugeControl inId (modalControl "g"), #[])
   | "gong" =>
     -- One STRIKE of the struck nonlinear resonator: two anchored modal banks
     -- (full-glide + stiff half-glide registers) behind per-strike pitch-bloom

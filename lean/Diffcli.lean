@@ -20,7 +20,7 @@ verbs over the Lean-owned compiler and native runtime.
 
     diffcli render-bytes <plan.json> [--frames N] [--buffer N]
 
-Loads a tropical_plan_5 JSON file into a fresh runtime, renders
+Loads a tropical_plan_6 JSON file into a fresh runtime, renders
 `frames × buffer` samples, and writes the raw little-endian float64
 stream to stdout. `… | shasum -a 256` reproduces the golden hashes in
 tests/golden/ with the standard frame and buffer counts.
@@ -210,7 +210,7 @@ def emitMslVerb (args : List String) : IO UInt32 := do
 
 /-- `diffcli compile-wasm <patch.json> --out <out.wasm>` → a complete wasm32
     module, emitted in-process (Lean IR → engine LLVM+lld, no subprocess). The
-    plan_5 JSON from `diffcli compile` serves as the browser-side manifest. -/
+    plan_6 JSON from `diffcli compile` serves as the browser-side manifest. -/
 def compileWasmVerb (args : List String) : IO UInt32 := do
   let some patch := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
     | IO.eprintln "usage: diffcli compile-wasm <patch.json> --out <out.wasm> [--fixtures]"; return 1

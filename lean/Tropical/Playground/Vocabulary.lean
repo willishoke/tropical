@@ -525,13 +525,13 @@ def portSpecs : String → Array PortSpec
         display := some { min := 0.5, max := 50, log := true } }]
   | "reverb" => #[
       { name := "in", accepts := modalIn },
-      { name := "rt60", knob := some (2, 0),
+      { name := "rt60", accepts := sigIn, knob := some (2, 0), discipline := .glide,
         display := some { min := 0.2, max := 12, log := true, unit := "sec" } },
-      { name := "dir", knob := some (0, 0),
+      { name := "dir", accepts := sigIn, knob := some (0, 0), discipline := .glide,
         display := some { min := 0, max := 1 } },
-      { name := "sway", knob := some (0, 0),
+      { name := "sway", accepts := sigIn, knob := some (0, 0), discipline := .glide,
         display := some { min := 0, max := 0.9 } },
-      { name := "rate", knob := some (3, 1),
+      { name := "rate", accepts := sigIn, knob := some (3, 1), discipline := .glide,
         display := some { min := 0.05, max := 8, log := true, unit := "Hz" } }]
   | "filter" => #[
       { name := "in", accepts := modalIn },
@@ -545,7 +545,7 @@ def portSpecs : String → Array PortSpec
   -- ½ = √Q trim, 1 = unity-peak (tuned-tone level-invariant). Glided (smooth sweep).
   | "gauge" => #[
       { name := "in", accepts := modalIn },
-      { name := "g", knob := some (0, 0), discipline := .glide,
+      { name := "g", accepts := sigIn, knob := some (0, 0), discipline := .glide,
         display := some { min := 0, max := 1 } }]
   -- gong: a struck resonator whose strike data (`t`, `g`, `modes_full`,
   -- `modes_half`) is structural (carried in `params`), EXCEPT the pitch-bloom
@@ -644,20 +644,50 @@ def exactI64Companion (pidx : String → Option Nat) (base : String) : Sig :=
     state for old hosts and introspection; new plans reconstruct the kernel
     coordinate from four exact 16-bit limbs. Stateless — the ramp is a pure
     function of the ambient clock, not an accumulator. -/
-def glideExpr (pidx : String → Option Nat) (base : String) (dflt : Sig) : Sig :=
+def glideExprAt (pidx : String → Option Nat) (base : String) (dflt coordinate : Sig) : Sig :=
   let v0 := pref pidx s!"{base}#v0" dflt
   let v1 := pref pidx s!"{base}#v1" dflt
   let t0 := pref pidx s!"{base}#t0" (lit 0)
   let exactNames := (Array.range 4).map fun i => s!"{base}#t0#u{i}"
   let elapsed :=
     if exactNames.all (fun name => (pidx name).isSome) then
-      toFloatE (sub .sampleIndex (exactI64Companion pidx s!"{base}#t0"))
+      toFloatE (sub coordinate (exactI64Companion pidx s!"{base}#t0"))
     else
-      sub (toFloatE .sampleIndex) t0
+      sub (toFloatE coordinate) t0
   let dur := mul (lit 2 2) .sampleRate   -- 0.02·SR = 20 ms
   let s  := clampE (div elapsed dur) (lit 0) (lit 1)
   let ss := mul (mul s s) (sub (lit 3) (mul (lit 2) s))
   add v0 (mul (sub v1 v0) ss)
+
+/-- Convert a Q32.32 coordinate difference to fractional samples without first
+    discarding the low 32 bits. -/
+def q32DeltaSamples (coordinateQ originQ : Sig) : Sig :=
+  div (toFloatE (sub coordinateQ originQ)) (lit 4294967296)
+
+/-- `glideExprAt` on a Q32.32 clock coordinate.  The exact-timestamp path
+    subtracts on the integer rail before converting to seconds-of-samples, so a
+    fractional downstream warp reaches a modal control without being truncated
+    to whole samples. -/
+def glideExprQAt (pidx : String → Option Nat) (base : String)
+    (dflt coordinateQ : Sig) : Sig :=
+  let v0 := pref pidx s!"{base}#v0" dflt
+  let v1 := pref pidx s!"{base}#v1" dflt
+  let t0 := pref pidx s!"{base}#t0" (lit 0)
+  let exactNames := (Array.range 4).map fun i => s!"{base}#t0#u{i}"
+  let qScale := lit 4294967296
+  let elapsed :=
+    if exactNames.all (fun name => (pidx name).isSome) then
+      q32DeltaSamples coordinateQ
+        (lshift (exactI64Companion pidx s!"{base}#t0") (lit 32))
+    else
+      sub (div (toFloatE coordinateQ) qScale) t0
+  let dur := mul (lit 2 2) .sampleRate
+  let s := clampE (div elapsed dur) (lit 0) (lit 1)
+  let ss := mul (mul s s) (sub (lit 3) (mul (lit 2) s))
+  add v0 (mul (sub v1 v0) ss)
+
+def glideExpr (pidx : String → Option Nat) (base : String) (dflt : Sig) : Sig :=
+  glideExprAt pidx base dflt .sampleIndex
 
 
 end Tropical.Playground

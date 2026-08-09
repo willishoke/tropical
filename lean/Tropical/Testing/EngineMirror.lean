@@ -4,7 +4,7 @@ import Tropical.Testing.ArrowFixtures
 /-!
 # EngineMirror — harness-only session recompiles (test support, not production)
 
-The `compileMirror*` family: rebuild a `tropical_plan_5` from the engine's
+The `compileMirror*` family: rebuild a `tropical_plan_6` from the engine's
 current session mirror at an arbitrary compilation mode, WITHOUT loading it
 or touching the runtime. The production path compiles AND loads through
 `syncCompile`; these entry points exist so a harness can hold the compiled

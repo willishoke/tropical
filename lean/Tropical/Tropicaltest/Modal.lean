@@ -1392,11 +1392,10 @@ def runModalPatch (arena : Arena)
   | .error e, _ | _, .error e => failGate "modal-patch" s!"build: {firstLine e}"
 
 open Tropical.EmitArrow in
-/-- THE MODAL-FOREST M1 gate. Same-metadata branches retain the incumbent pole
-    union byte-for-byte; branches with different anchors remain independent and
-    enter the realized sum only at their own causal onset. The second arm is the
-    regression for the old `modalMix` behavior, which copied its first input's
-    anchor onto every later bank. -/
+/-- THE MODAL-FOREST M1 gate. A modal mix remains an authored-order forest and
+    therefore agrees byte-for-byte with an explicit signal-side sum of the same
+    independently realized branches. Different anchors remain independent and
+    enter that sum only at their own causal onset. -/
 def runModalForestAnchors (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : IO Bool := do
   let aModes : Array ModalMode := #[
@@ -1413,9 +1412,10 @@ def runModalForestAnchors (arena : Arena)
     nodes := #[source "a" aModes firstAnchor, source "b" bModes firstAnchor,
       { id := "mix", node := .modalMix #["a", "b"] }]
     output := "mix" }
-  let unionGraph : PatchGraph := {
-    nodes := #[source "union" (aModes ++ bModes) firstAnchor]
-    output := "union" }
+  let explicitGraph : PatchGraph := {
+    nodes := #[source "a" aModes firstAnchor, source "b" bModes firstAnchor,
+      { id := "sum", node := .mix #["a", "b"] }]
+    output := "sum" }
   let differentGraph : PatchGraph := {
     nodes := #[source "a" aModes firstAnchor, source "b" bModes secondAnchor,
       { id := "mix", node := .modalMix #["a", "b"] }]
@@ -1428,28 +1428,28 @@ def runModalForestAnchors (arena : Arena)
     let (out, _) := emitTerm (normalize term) {}
     .ok (buildExprCarrier name out arena) : Except String (Arena × ProgramIdx))
   match buildAndFinish (carrier "mf_same" sameGraph),
-        buildAndFinish (carrier "mf_union" unionGraph),
+        buildAndFinish (carrier "mf_explicit" explicitGraph),
         buildAndFinish (carrier "mf_different" differentGraph),
         buildAndFinish (carrier "mf_first" firstOnlyGraph) with
-  | .ok samePlan, .ok unionPlan, .ok differentPlan, .ok firstPlan =>
-    match ← renderPlanSamples samePlan 2048, ← renderPlanSamples unionPlan 2048,
+  | .ok samePlan, .ok explicitPlan, .ok differentPlan, .ok firstPlan =>
+    match ← renderPlanSamples samePlan 2048, ← renderPlanSamples explicitPlan 2048,
           ← renderPlanSamples differentPlan 2048, ← renderPlanSamples firstPlan 2048 with
-    | .ok same, .ok union, .ok different, .ok firstOnly =>
-      let n := min (min same.size union.size) (min different.size firstOnly.size)
+    | .ok same, .ok explicit, .ok different, .ok firstOnly =>
+      let n := min (min same.size explicit.size) (min different.size firstOnly.size)
       let mut sameBitDiff := 0
       let mut beforeSecondBitDiff := 0
       let mut afterSecondBitDiff := 0
       for i in [0:n] do
-        if same[i]! != union[i]! then sameBitDiff := sameBitDiff + 1
+        if same[i]! != explicit[i]! then sameBitDiff := sameBitDiff + 1
         if i ≤ 700 then
           if different[i]! != firstOnly[i]! then
             beforeSecondBitDiff := beforeSecondBitDiff + 1
         else if different[i]! != firstOnly[i]! then
           afterSecondBitDiff := afterSecondBitDiff + 1
-      IO.println "        ModalForest modal-mix, same-anchor compatibility and different-anchor causality:"
-      IO.println s!"        result   same-anchor union bitDiff={sameBitDiff}/{n} · before second anchor={beforeSecondBitDiff}/701 · after second anchor differing={afterSecondBitDiff}/{n - 701}"
+      IO.println "        ModalForest modal-mix, authored-order sum and different-anchor causality:"
+      IO.println s!"        result   forest≡explicit-sum bitDiff={sameBitDiff}/{n} · before second anchor={beforeSecondBitDiff}/701 · after second anchor differing={afterSecondBitDiff}/{n - 701}"
       if sameBitDiff == 0 && beforeSecondBitDiff == 0 && afterSecondBitDiff > 0 then
-        passGate "modal-forest-anchors" "same metadata keeps the incumbent union byte-exact; a later branch retains its own anchor and joins the stable signal sum only after that onset"
+        passGate "modal-forest-anchors" "modalMix preserves authored branch order and equals the explicit terminal sum; a later branch retains its own anchor and joins only after that onset"
       else
         failGate "modal-forest-anchors" s!"same={sameBitDiff} beforeSecond={beforeSecondBitDiff} afterSecond={afterSecondBitDiff}"
     | .error e, _, _, _ | _, .error e, _, _ | _, _, .error e, _ | _, _, _, .error e =>
@@ -1510,12 +1510,10 @@ def runModalForestTimedIslands (arena : Arena)
           | none => false
           | some branch =>
             let anchorOk := branch.strikeAnchor == lit (Int.ofNat anchors[i]!)
-            let bankOk := match branch.bank with
-              | .bloomed voice room B g =>
-                i % 4 == 0 && voice.size == 1 && room.isEmpty &&
-                  B == bloomB && g == bloomG
-              | .plain voice rooms =>
-                i % 4 != 0 && voice.size == 1 && rooms.isEmpty
+            let bankOk := branch.stages.isEmpty && match branch.source with
+              | .bloomed voice B g =>
+                i % 4 == 0 && voice.size == 1 && B == bloomB && g == bloomG
+              | .plain voice => i % 4 != 0 && voice.size == 1
             anchorOk && bankOk
 
   let carrier := fun (name : String) (graph : PatchGraph) => (do
@@ -1600,6 +1598,221 @@ def runModalForestTimedIslands (arena : Arena)
       failGate "modal-forest-timed-islands"
         s!"structure={structureOk} removalsBuilt={removalsBuilt} onsets={survivingOnsets} pre={preOnsetDiff} oracle={forwardOracleDiff}/{holdOracleDiff}/{reverseOracleDiff}/{seekOracleDiff} coordinates={holdCoordinateDiff}/{reverseCoordinateDiff}/{seekCoordinateDiff}"
 
+private def modalUniverseLegacyStateTags : Array String := #[
+  "Register", "StateReg", "StateLoad", "StateStore", "Update", "NextUpdate",
+  "Delay", "DelayInit", "StateInit", "Writeback", "SmoothParam"]
+
+private def modalUniverseFunctionHasNoLegacyState
+    (f : Tropical.Plan.InstanceFunction) : Bool :=
+  let blocks := f.preambleInstructions ++ f.preInputInstructions ++ f.instructions
+  blocks.all (fun i => !modalUniverseLegacyStateTags.contains i.tag) &&
+    f.children.attach.all fun child =>
+      modalUniverseFunctionHasNoLegacyState child.1
+termination_by sizeOf f
+decreasing_by
+  exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children child.2
+
+/-- Approximate backend work without invoking LLVM.  Counting operands as well
+    as instructions makes a packed coefficient table visible: one `Pack`
+    instruction still emits one store per operand in the native kernel. -/
+private def modalUniversePlanFootprint (plan : Tropical.Plan.FlatPlan) : Nat :=
+  plan.instanceFunctions.foldl (fun total function =>
+    (Tropical.Ir.Stage0.collectBlocks function).foldl (fun total block =>
+      block.foldl (fun total instruction => total + 1 + instruction.args.size)
+        total) total) 0
+
+private def modalUniverseSplitFootprint
+    (fixture : Tropical.Playground.CompiledPatch) : Except String Nat := do
+  let split ← Tropical.Ir.Stage0.hoistTyped fixture.plan fixture.stageBlocks
+  let coefficient := split.coeff?.map modalUniversePlanFootprint |>.getD 0
+  return modalUniversePlanFootprint split.audio + coefficient
+
+/-- The U1 temporal-law gate. Production-compiled
+    `resonator → room A → room B` fixtures are sampled under live room images,
+    a constant absolute branch address, and a downstream reverse warp. Each
+    room independently rewrites an already-observed output block; restoring
+    the same complete image restores its bytes; seek order and reverse traversal
+    are exact at equal effective coordinates, while a true held response clock
+    remains stable, block-constant, and nonzero. The graph remains modal through
+    both rooms, and every emitted fixture excludes the production vocabulary's
+    known legacy state/history instructions. -/
+def runModalUniverseHistory (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let oneRoomSrc := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"room_a\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.6},\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"room_a\"]}}],\"out\":\"out\"}"
+  let forwardSrc := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"room_a\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.6},\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"room_b\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.9},\"in\":{\"in\":[\"room_a\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"room_b\"]}}],\"out\":\"out\"}"
+  let holdSrc := "{\"nodes\":[" ++
+    "{\"id\":\"hold\",\"kind\":\"knob\",\"params\":{\"value\":0.25}}," ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4},\"in\":{\"addr\":[\"hold\"]}}," ++
+    "{\"id\":\"room_a\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.6},\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"room_b\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.9},\"in\":{\"in\":[\"room_a\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"room_b\"]}}],\"out\":\"out\"}"
+  let reverseSrc := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"room_a\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.6},\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"room_b\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.9},\"in\":{\"in\":[\"room_a\"]}}," ++
+    "{\"id\":\"reverse\",\"kind\":\"reverse\",\"in\":{\"in\":[\"room_b\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"reverse\"]}}],\"out\":\"out\"}"
+  let compile := fun source => do
+    let json ← Lean.Json.parse source
+    Tropical.Playground.compilePlanPure arena resolved json
+  match compile forwardSrc, compile holdSrc, compile reverseSrc with
+  | .error e, _, _ | _, .error e, _ | _, _, .error e =>
+    failGate "modal-universe-history" s!"compile: {firstLine e}"
+  | .ok compiled, .ok holdCompiled, .ok reverseCompiled =>
+    let baseline ← match compile oneRoomSrc with
+      | .error error =>
+          return ← failGate "modal-universe-history"
+            s!"one-room footprint compile: {firstLine error}"
+      | .ok fixture => pure fixture
+    let (oneRoomFootprint, twoRoomFootprint) ←
+      match modalUniverseSplitFootprint baseline,
+          modalUniverseSplitFootprint compiled with
+      | .ok one, .ok two => pure (one, two)
+      | .error error, _ | _, .error error =>
+          return ← failGate "modal-universe-history"
+            s!"footprint split: {firstLine error}"
+    -- Banking makes the one-room terminal unusually small; the second room
+    -- legitimately adds four oriented Cauchy families plus its hot DD rows.
+    -- Sevenfold still rejects the measured Cartesian form (8.6×) while the
+    -- absolute ceiling prevents both sides from drifting upward together.
+    let compact := twoRoomFootprint ≤ 7 * oneRoomFootprint &&
+      twoRoomFootprint ≤ 350000
+    IO.println s!"        split compile footprint: one-room={oneRoomFootprint} two-room={twoRoomFootprint} compact={compact}"
+    if !compact then
+      return ← failGate "modal-universe-history"
+        "two-room modal plan exceeds the linear compile-footprint envelope"
+    let loadRooms := fun (fixture : Tropical.Playground.CompiledPatch) => do
+      let rt ← Tropical.Ffi.Runtime.new 128
+      Tropical.StagedLoad.loadTyped rt fixture.plan fixture.stageBlocks
+      let glideSlots := fun (name : String) => do
+        let v0? ← rt.slotIndex? s!"param:{name}#v0"
+        let v1? ← rt.slotIndex? s!"param:{name}#v1"
+        pure (v0?.bind fun v0 => v1?.map fun v1 => (v0, v1))
+      let a? ← glideSlots "room_a.rt60"
+      let b? ← glideSlots "room_b.rt60"
+      pure (rt, a?, b?)
+    let (rtA, aA?, bA?) ← loadRooms compiled
+    let (rtB, aB?, bB?) ← loadRooms compiled
+    let (rtHold, aHold?, bHold?) ← loadRooms holdCompiled
+    let (rtReverse, aReverse?, bReverse?) ← loadRooms reverseCompiled
+    match aA?, bA?, aB?, bB?, aHold?, bHold?, aReverse?, bReverse? with
+    | some aA, some bA, some aB, some bB, some aHold, some bHold,
+        some aReverse, some bReverse =>
+      let setImage := fun (rt : Tropical.Ffi.Runtime)
+          (a b : UInt32 × UInt32)
+          (x y : Float) => do
+        rt.setSlot a.1 x
+        rt.setSlot a.2 x
+        rt.setSlot b.1 y
+        rt.setSlot b.2 y
+      let renderAt := fun (rt : Tropical.Ffi.Runtime) (t : UInt64) => do
+        rt.setSampleIndex t
+        rt.process
+        rt.outputBytes
+
+      -- Either room must independently affect the selected counterfactual.
+      setImage rtA aA bA 0.6 0.9
+      let old ← renderAt rtA 8192
+      setImage rtA aA bA 6.0 0.9
+      let rewrittenA ← renderAt rtA 8192
+      setImage rtA aA bA 0.6 0.9
+      let restoredA ← renderAt rtA 8192
+      setImage rtA aA bA 0.6 9.0
+      let rewrittenB ← renderAt rtA 8192
+      setImage rtA aA bA 0.6 0.9
+      let restoredB ← renderAt rtA 8192
+
+      -- Visit the same frozen universe in opposite coordinate orders.
+      setImage rtA aA bA 1.7 3.4
+      setImage rtB aB bB 1.7 3.4
+      let a0 ← renderAt rtA 2048
+      let a1 ← renderAt rtA 6144
+      let a2 ← renderAt rtA 12288
+      let b2 ← renderAt rtB 12288
+      let b1 ← renderAt rtB 6144
+      let b0 ← renderAt rtB 2048
+
+      -- A constant absolute address is a genuine velocity-zero response clock.
+      setImage rtHold aHold bHold 1.7 3.4
+      setImage rtA aA bA 1.7 3.4
+      let held0 ← renderAt rtHold 0
+      let held1 ← renderAt rtHold 15000
+      let heldSamples := decodeF64LE held0
+      let heldConstant := match heldSamples[0]? with
+        | none => false
+        | some first => heldSamples.all (· == first)
+      -- The address warp owns only the response-clock child. Live room-control
+      -- terms intentionally remain siblings on the ambient clock, so this is
+      -- not the same term as a complete master-clock hold. The hold contract is
+      -- the observable response law: invariant across visits, constant within
+      -- a block, and non-silent. `grouped-room-reference` separately checks the
+      -- held response against its independent scalar oracle.
+      let heldNonzero := heldSamples.any (· != 0.0)
+      let heldStable := held0 == held1
+      IO.println s!"        hold witness: stable={heldStable} constant={heldConstant} nonzero={heldNonzero} held0={heldSamples[0]?}"
+
+      -- The public downstream reverse node visits the same effective response
+      -- coordinates as a forward block, in the opposite order. Negative runtime
+      -- indices are supplied in the Runtime's documented two's-complement image.
+      setImage rtA aA bA 1.7 3.4
+      setImage rtReverse aReverse bReverse 1.7 3.4
+      let reverseBase : Nat := 12288
+      let forwardBlock ← renderAt rtA (UInt64.ofNat (reverseBase - 127))
+      let reverseBlock ← renderAt rtReverse (0 - UInt64.ofNat reverseBase)
+      let forwardSamples := decodeF64LE forwardBlock
+      let reverseSamples := decodeF64LE reverseBlock
+      let reverseExact := forwardSamples.size == reverseSamples.size &&
+        forwardSamples.any (· != 0.0) &&
+        (Array.range reverseSamples.size).all fun i =>
+          reverseSamples[i]! == forwardSamples[forwardSamples.size - 1 - i]!
+
+      -- Production structure: two deferred rooms and no early Modal→Sig seam.
+      let unit : Array Tropical.EmitArrow.ModalMode := #[
+        Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 220)
+          (Tropical.EmitArrow.lit 4) (Tropical.EmitArrow.lit 1)]
+      let graph : Tropical.EmitArrow.PatchGraph := {
+        nodes := #[
+          { id := "s", node := .modalSource unit (Tropical.EmitArrow.lit 0)
+              Tropical.EmitArrow.clockLit none },
+          { id := "a", node := .modalReverb "s" unit none },
+          { id := "b", node := .modalReverb "a" unit none }]
+        output := "b" }
+      let ranks := fun id => if id == "s" then some 0 else if id == "a" then some 1
+        else if id == "b" then some 2 else none
+      let deferred := match Tropical.EmitArrow.lowerModal graph ranks "b" 2 with
+        | .ok #[branch] => match branch.source with
+          | .plain _ => branch.stages.size == 2
+          | _ => false
+        | _ => false
+      let modalThroughChain := Tropical.EmitArrow.nodeIsModal graph "a" &&
+        Tropical.EmitArrow.nodeIsModal graph "b"
+      let eachRoomRewrites := old != rewrittenA && old != rewrittenB
+      let restoredExact := old == restoredA && old == restoredB
+      let seekOrderExact := a0 == b0 && a1 == b1 && a2 == b2
+      let holdExact := heldStable && heldConstant && heldNonzero
+      let noLegacyState := #[compiled.plan, holdCompiled.plan,
+        reverseCompiled.plan].all fun plan =>
+          plan.instanceFunctions.all modalUniverseFunctionHasNoLegacyState
+      IO.println "        nested room universe: history rewrite + random-access image equality:"
+      IO.println s!"        result   each-room-changed={eachRoomRewrites} restored-bytes={restoredExact} order={seekOrderExact} hold={holdExact} reverse={reverseExact} deferred={deferred} modal={modalThroughChain} no-legacy-state={noLegacyState}"
+      if eachRoomRewrites && restoredExact && seekOrderExact && holdExact &&
+          reverseExact && deferred && modalThroughChain && noLegacyState then
+        passGate "modal-universe-history"
+          "each room rewrites the nested counterfactual; restore and seek/reverse coordinate laws are exact; the response clock truly holds; both rooms remain modal; no known legacy state/history instruction is emitted"
+      else
+        failGate "modal-universe-history"
+          s!"eachRoom={eachRoomRewrites} restored={restoredExact} order={seekOrderExact} hold={holdExact} reverse={reverseExact} deferred={deferred} modal={modalThroughChain} noLegacyState={noLegacyState}"
+    | _, _, _, _, _, _, _, _ =>
+      failGate "modal-universe-history"
+        s!"nested room RT60 slots missing: forward-a={aA?.isSome}/{bA?.isSome} forward-b={aB?.isSome}/{bB?.isSome} hold={aHold?.isSome}/{bHold?.isSome} reverse={aReverse?.isSome}/{bReverse?.isSome}"
+
 /-- THE MODAL LIVE gate (the payoff). A JSON patch `resonator(freq) → reverb → out`
     compiled through the real `compilePlanPure` — decode → lowerModal → symbolic
     residue → realize → strata → session compile → a JIT-loadable kernel — and its
@@ -1639,7 +1852,7 @@ def runModalLive (arena : Arena)
       Tropical.StagedLoad.loadTyped rt2 plan stageBlocks
       let fIdx? ← rt.slotIndex? "param:res.freq"
       let dPresent := (← rt.slotIndex? "param:res.decay").isSome
-      let rtPresent := (← rt.slotIndex? "param:rev.rt60").isSome
+      let rtPresent := (← rt.slotIndex? "param:rev.rt60#v0").isSome
       rt.process
       rt2.process
       let b1a := decodeF64LE (← rt.outputBytes)

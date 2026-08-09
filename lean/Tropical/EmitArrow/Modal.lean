@@ -1,5 +1,8 @@
 import Tropical.EmitArrow.Modal.Realize
+import Tropical.EmitArrow.Modal.Oriented
+import Tropical.EmitArrow.Modal.OrientedRealize
 import Tropical.EmitArrow.Modal.GroupedRoomReference
+import Tropical.EmitArrow.Modal.Forest
 
 /-!
 # EmitArrow.Modal

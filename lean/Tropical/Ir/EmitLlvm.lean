@@ -79,9 +79,23 @@ structure ReduceCtx where
   savedTempVals : Std.HashMap Nat TVal
 deriving Inhabited
 
+structure RoutedCtx where
+  id : Nat
+  dst : Nat
+  dstPtr : String
+  routeGlobal : String
+  routeCount : Nat
+  fanout : Nat
+  idxPtr : String
+  condLabel : String
+  endLabel : String
+  savedTempVals : Std.HashMap Nat TVal
+deriving Inhabited
+
 structure St where
   next : Nat := 0
   lines : Array String := #[]
+  globals : Array String := #[]
   /-- Global temp slot → the SSA value last written there. Temps are pure
       intra-call scratch in the fused kernel (sinks read module slots; the
       runtime never reads `%temps` back), so instruction results stay SSA
@@ -105,6 +119,7 @@ structure St where
       search it innermost-first, so an inner-region instruction touching an
       OUTER accumulator finds the outer alloca. -/
   reduces : Array ReduceCtx := #[]
+  routeds : Array RoutedCtx := #[]
 
 abbrev M := EStateM String St
 
@@ -233,11 +248,15 @@ def resolveOperand : NOperand → M TVal
   | .loopIdx id => do
     -- Resolve the binder id against the stack of open regions (unique along
     -- a nesting chain, so first match is THE match).
-    let some rc := (← get).reduces.find? (fun rc => rc.id == id)
-      | fail s!"EmitLlvm: loop_idx id={id} matches no open ReduceBegin/ReduceEnd region"
-    let v ← fresh
-    line s!"{v} = load i64, ptr {rc.idxPtr}, align 8"
-    pure ⟨v, .int⟩
+    if let some rc := (← get).reduces.find? (fun rc => rc.id == id) then
+      let v ← fresh
+      line s!"{v} = load i64, ptr {rc.idxPtr}, align 8"
+      return ⟨v, .int⟩
+    if let some rc := (← get).routeds.find? (fun rc => rc.id == id) then
+      let v ← fresh
+      line s!"{v} = load i64, ptr {rc.idxPtr}, align 8"
+      return ⟨v, .int⟩
+    fail s!"EmitLlvm: loop_idx id={id} matches no open reduction region"
   | .source idx _ => do
     let srcs := (← get).sources
     match srcs[idx]? with
@@ -568,6 +587,91 @@ def emitInstr (instr : NInstr) : M Unit := do
     line s!"{acc} = load {llTy rc.accTy}, ptr {rc.accPtr}, align 8"
     let newVals := rc.savedTempVals.insert accTemp ⟨acc, rc.accTy⟩
     modify fun s => { s with reduces := s.reduces.pop, tempVals := newVals }
+  | "RoutedSumBegin", .array dst =>
+    if ( ← get).reduces.any (fun rc => rc.id == instr.loopId) ||
+        ( ← get).routeds.any (fun rc => rc.id == instr.loopId) then
+      fail s!"EmitLlvm: RoutedSumBegin id={instr.loopId} collides with an open ancestor region"
+    if instr.loopCount == 0 || instr.routedOutputCount == 0 ||
+        instr.routedRoutes.isEmpty then
+      fail "EmitLlvm: RoutedSumBegin has empty structural metadata"
+    if instr.routedRoutes.size % instr.loopCount != 0 then
+      fail "EmitLlvm: RoutedSumBegin route count is not divisible by capacity"
+    let fanout := instr.routedRoutes.size / instr.loopCount
+    let bound ← match instr.args[0]? with
+      | none => pure (toString instr.loopCount)
+      | some o =>
+        let v ← resolveOperand o
+        let iv := (← coerce v .int).ref
+        let neg ← fresh; line s!"{neg} = icmp slt i64 {iv}, 0"
+        let lo ← fresh; line s!"{lo} = select i1 {neg}, i64 0, i64 {iv}"
+        let over ← fresh; line s!"{over} = icmp sgt i64 {lo}, {instr.loopCount}"
+        let cl ← fresh; line s!"{cl} = select i1 {over}, i64 {instr.loopCount}, i64 {lo}"
+        pure cl
+    let dstPtr ← loadArrayPtr dst
+    for output in [0:instr.routedOutputCount] do
+      let ep ← fresh
+      line s!"{ep} = getelementptr inbounds i64, ptr {dstPtr}, i64 {output}"
+      line s!"store i64 0, ptr {ep}, align 8"
+    let n ← freshId
+    let routeGlobal := s!"@routed_routes_{n}"
+    let routeValues := String.intercalate ", " <|
+      instr.routedRoutes.toList.map fun route =>
+        s!"i64 {match route with | none => -1 | some output => Int.ofNat output}"
+    let globalLine :=
+      s!"{routeGlobal} = private constant [{instr.routedRoutes.size} x i64] [{routeValues}]"
+    modify fun s => { s with globals := s.globals.push globalLine }
+    let idxPtr ← fresh
+    line s!"{idxPtr} = alloca i64, align 8"
+    line s!"store i64 0, ptr {idxPtr}, align 8"
+    let condbb := s!"rs_cond_{n}"; let bodybb := s!"rs_body_{n}";
+    let endbb := s!"rs_end_{n}"
+    line s!"br label %{condbb}"
+    labelLine condbb
+    let k ← fresh; line s!"{k} = load i64, ptr {idxPtr}, align 8"
+    let c ← fresh; line s!"{c} = icmp ult i64 {k}, {bound}"
+    line s!"br i1 {c}, label %{bodybb}, label %{endbb}"
+    labelLine bodybb
+    modify fun s => { s with routeds := s.routeds.push {
+      id := instr.loopId, dst, dstPtr, routeGlobal,
+      routeCount := instr.routedRoutes.size, fanout, idxPtr,
+      condLabel := condbb, endLabel := endbb, savedTempVals := s.tempVals } }
+  | "RoutedSumYield", .array dst =>
+    let some rc := (← get).routeds.back?
+      | fail "EmitLlvm: RoutedSumYield without an open routed region"
+    if rc.dst != dst || instr.args.size != rc.fanout then
+      fail "EmitLlvm: RoutedSumYield shape does not match its open region"
+    let item ← fresh; line s!"{item} = load i64, ptr {rc.idxPtr}, align 8"
+    for emitPos in [0:instr.args.size] do
+      let recordBase ← fresh; line s!"{recordBase} = mul i64 {item}, {rc.fanout}"
+      let record ← fresh; line s!"{record} = add i64 {recordBase}, {emitPos}"
+      let routePtr ← fresh
+      line s!"{routePtr} = getelementptr inbounds [{rc.routeCount} x i64], ptr {rc.routeGlobal}, i64 0, i64 {record}"
+      let target ← fresh; line s!"{target} = load i64, ptr {routePtr}, align 8"
+      let active ← fresh; line s!"{active} = icmp sge i64 {target}, 0"
+      let branchId ← freshId
+      let applybb := s!"rs_apply_{branchId}"; let contbb := s!"rs_cont_{branchId}"
+      line s!"br i1 {active}, label %{applybb}, label %{contbb}"
+      labelLine applybb
+      let contribution ← resolveF64 instr.args[emitPos]!
+      let ep ← fresh; line s!"{ep} = getelementptr inbounds i64, ptr {rc.dstPtr}, i64 {target}"
+      let raw ← fresh; line s!"{raw} = load i64, ptr {ep}, align 8"
+      let current ← fresh; line s!"{current} = bitcast i64 {raw} to double"
+      let next ← fresh; line s!"{next} = fadd double {current}, {contribution}"
+      let bits ← fresh; line s!"{bits} = bitcast double {next} to i64"
+      line s!"store i64 {bits}, ptr {ep}, align 8"
+      line s!"br label %{contbb}"
+      labelLine contbb
+  | "RoutedSumEnd", .array dst =>
+    let some rc := (← get).routeds.back?
+      | fail "EmitLlvm: RoutedSumEnd without an open routed region"
+    if rc.dst != dst then
+      fail "EmitLlvm: RoutedSumEnd destination does not match its open region"
+    let k ← fresh; line s!"{k} = load i64, ptr {rc.idxPtr}, align 8"
+    let k1 ← fresh; line s!"{k1} = add i64 {k}, 1"
+    line s!"store i64 {k1}, ptr {rc.idxPtr}, align 8"
+    line s!"br label %{rc.condLabel}"
+    labelLine rc.endLabel
+    modify fun s => { s with routeds := s.routeds.pop, tempVals := rc.savedTempVals }
   | "WriteSlot", .moduleSlot idx =>
     let v ← match instr.args[0]? with | some o => resolveOperand o | none => fail "WriteSlot missing arg"
     storeSlotF64 idx (← coerceF64 v)
@@ -651,6 +755,7 @@ def emitKernel (plan : FlatPlan) : Except String String := do
   | .error e _ => .error e
   | .ok _ st =>
     let bodyText := String.intercalate "\n" st.lines.toList
+    let globalsText := String.intercalate "\n" st.globals.toList
     -- The loop back-edge leaves the *final* body block (array ops open
     -- new blocks), and the counter phi must name it as its predecessor.
     let lastBlock := st.curBlock
@@ -670,6 +775,7 @@ def emitKernel (plan : FlatPlan) : Except String String := do
       "loop_end:\n" ++
       "  ret void\n" ++
       "}\n\n"
-    .ok (header ++ bodyText ++ tail ++ intrinsicDecls)
+    .ok (globalsText ++ (if globalsText.isEmpty then "" else "\n\n") ++
+      header ++ bodyText ++ tail ++ intrinsicDecls)
 
 end Tropical.Ir.EmitLlvm

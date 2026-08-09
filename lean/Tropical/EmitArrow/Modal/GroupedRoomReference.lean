@@ -4,7 +4,7 @@ import Tropical.EmitArrow.Modal.Residue
 /-!
 # Graph-specialized grouped-room reference
 
-This is the deliberately internal Plan-5 M5 reference.  It specializes one
+This is the deliberately internal Plan-6 M5 reference.  It specializes one
 source-independent `RoomProfile` against one arbitrary admitted modal island,
 materializing forward and cyclic-future prefix tables as coefficient arrays.
 It is an executable semantic oracle and cost probe, not a public node, asset
@@ -195,7 +195,7 @@ private def collectAdmissionExclusions (profile : RoomProfile)
   let scalarCount := 4 * modes.size * prefixStride
   if scalarCount > profile.admission.maxGeneratedScalars || scalarCount > 4294967295 then
     out := out.push (exclusion .generatedScalarCapacity
-      s!"{scalarCount} generated scalars exceed the admitted/Plan-5 limit")
+      s!"{scalarCount} generated scalars exceed the admitted/Plan-6 limit")
 
   let fLo := jsonD profile.admission.poles.minFrequencyHz
   let fHi := jsonD profile.admission.poles.maxFrequencyHz
@@ -445,7 +445,7 @@ private def groupedRoomReferencePair (sourceIdx groupIdx : Sig)
   let reverseGain := sqrtE (mul (lit 5 1) (sub (lit 1) p))
   add (mul forwardGain forwardReal) (mul reverseGain reverseReal)
 
-/-- Evaluate one graph specialization.  The room's prefix tables are Plan-5
+/-- Evaluate one graph specialization.  The room's prefix tables are Plan-6
     coefficient arrays; source/group trip counts affect data, not expression
     size. -/
 def groupedRoomReferenceSig (specialization : RoomReferenceSpecialization)

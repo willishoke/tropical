@@ -25,6 +25,12 @@ struct MetalKernel;  // opaque — ObjC++ members live in the .mm
 
 using MetalKernelPtr = std::shared_ptr<MetalKernel>;
 
+enum class DispatchKind : uint8_t
+{
+  SampleThreads,
+  SampleThreadgroups,
+};
+
 /// Compile MSL source and build the pipeline + buffers. Control-thread only.
 /// `buffer_length` sizes the output buffer; `slot_count` sizes the slot
 /// snapshot; `column_count` sizes the packed coefficient-column buffer
@@ -36,7 +42,13 @@ MetalKernelPtr create(const std::string & msl_source,
                       uint32_t buffer_length,
                       uint32_t slot_count,
                       uint32_t column_count,
-                      std::string & err);
+                      std::string & err,
+                      DispatchKind dispatch_kind = DispatchKind::SampleThreads,
+                      uint32_t threadgroup_scratch_bytes = 0);
+
+DispatchKind dispatch_kind(const MetalKernel & k);
+uint32_t threadgroup_width(const MetalKernel & k);
+uint32_t threadgroup_scratch_bytes(const MetalKernel & k);
 
 /// Worker-only blocking primitive. `slots` and `columns` are immutable f32
 /// snapshots owned by one render epoch request. The destination is stable,

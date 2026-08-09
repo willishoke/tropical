@@ -3,7 +3,7 @@
  *
  * A `KernelManifest` is everything the runtime needs to drive a Lean-emitted
  * wasm32 kernel: scratch/array/slot sizing, slot defaults, and sample rate. It is
- * a *subset* of `tropical_plan_5` — the runtime never sees the instruction
+ * a *subset* of `tropical_plan_6` — the runtime never sees the instruction
  * stream or any other compiler internal. This type IS the boundary between
  * tropical (the producer, via `diffcli compile-wasm`) and any consumer (this
  * demo today; an extracted `@tropical/runtime-wasm` package tomorrow).

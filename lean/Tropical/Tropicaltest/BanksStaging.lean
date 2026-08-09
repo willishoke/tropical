@@ -749,18 +749,12 @@ def runModalAddr (arena : Arena)
     | .error e, _, _ | _, .error e, _ | _, _, .error e => failGate "modal-addr" s!"render: {firstLine e}"
   | _, _, _ => failGate "modal-addr" "build"
 
-/-- THE GAUGE-STAGE gate (§5, Hamilton's "make the s0 contract mechanical"). The
-    gauge's self-measured norm uses `logSig` → `floatExponent`; `settle` measures it
-    on the SETTLED poles, so that op is s0 (the coefficient kernel), NOT per-sample.
-    Proven by DELTA against `resonator ⋙ filter(glided cutoff/res) ⋙ out` without the
-    gauge: the filter's own option-E landing already emits `FloatExponent` in the
-    audio kernel (a glided-amp bank), so the invariant is not "zero in audio" but
-    "the GAUGE adds zero": with `settle`, inserting the gauge leaves the audio
-    kernel's `FloatExponent` count UNCHANGED and moves its norm's `FloatExponent`
-    into the s0 coeff kernel. Remove `settle` from `gaugeScale` (the norm folds the
-    live glided poles) and the gauge's `FloatExponent` lands per-sample → the audio
-    delta jumps → red. Contract enforced by the compiler's own stage split, not a
-    docstring. -/
+/-- THE GAUGE-STAGE gate (§5).  Gauge measures the complete current modal
+    universe at its authored position.  With glided poles that norm is therefore
+    sample-stage: inserting gauge must add `FloatExponent` work to the audio
+    kernel instead of silently settling the controls or declining to identity.
+    This gate makes that semantic choice explicit; the trust ledger separately
+    keeps the bilateral live-gauge cost/backend envelope open. -/
 def runGaugeStage (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : IO Bool := do
   let mk := fun (withGauge : Bool) =>
@@ -784,9 +778,7 @@ def runGaugeStage (arena : Arena)
   let some (aGauge, cGauge) ← feOf true | return (← failGate "gauge-stage" "gauge compile")
   IO.println s!"        resonator ⋙ filter(glided) ⋙ [gauge] ⋙ out — FloatExponent (audio, coeff):"
   IO.println s!"        result   without gauge ({aBare}, {cBare}) · with gauge ({aGauge}, {cGauge})"
-  -- the gauge adds ZERO per-sample FloatExponent (its norm is s0), and DOES add its
-  -- norm's FloatExponent to the coeff kernel (so the gauge is genuinely present).
-  if aGauge == aBare && cGauge > cBare then
-    passGate "gauge-stage" s!"settle keeps the gauge norm s0: the gauge adds 0 FloatExponent to the audio kernel (stays {aBare}) and {cGauge - cBare} to the s0 coeff kernel — Metal-safe by construction"
+  if aGauge > aBare then
+    passGate "gauge-stage" s!"current-universe gauge remains live: its norm adds {aGauge - aBare} FloatExponent operations to the audio kernel (coeff {cBare}→{cGauge}); backend qualification remains an open trust obligation"
   else
-    failGate "gauge-stage" s!"audio {aBare}→{aGauge} (want equal), coeff {cBare}→{cGauge} (want grow) — the gauge norm leaked into the per-sample kernel"
+    failGate "gauge-stage" s!"audio {aBare}→{aGauge} (must grow for a live current-universe norm), coeff {cBare}→{cGauge}"

@@ -169,6 +169,13 @@ private def convExprId (ea : ExprArena) (hw : ea.wf = true) (eid : ExprId) :
           | none => pure none
           | some d => pure (some (← convExprId ea hw d))
         pure (.bankSum c ts' b' dc' ii)
+      | some (.routedSum c oc rs ts vs dc ii) => do
+        let ts' ← ts.attach.mapM fun ⟨t, _⟩ => convExprId ea hw t
+        let vs' ← vs.attach.mapM fun ⟨v, _⟩ => convExprId ea hw v
+        let dc' ← match _hdc : dc with
+          | none => pure none
+          | some d => pure (some (← convExprId ea hw d))
+        pure (.routedSum c oc rs ts' vs' dc' ii)
     let st ← get
     let (cid, ca') := (eintern cn).run st.1
     set (ca', st.2.insert eid.idx cid)
@@ -312,6 +319,13 @@ def mapExprIdGo (src : ExprArena) (hw : src.wf = true) (h : MapHooksId)
           einternP (.bankSum c
             (← ts.attach.mapM fun ⟨t, _⟩ => mapExprIdGo src hw h t)
             (← mapExprIdGo src hw h b)
+            (← match _hdc : dc with
+                | none => pure none
+                | some d => some <$> mapExprIdGo src hw h d) ii)
+        | .routedSum c oc rs ts vs dc ii =>
+          einternP (.routedSum c oc rs
+            (← ts.attach.mapM fun ⟨t, _⟩ => mapExprIdGo src hw h t)
+            (← vs.attach.mapM fun ⟨v, _⟩ => mapExprIdGo src hw h v)
             (← match _hdc : dc with
                 | none => pure none
                 | some d => some <$> mapExprIdGo src hw h d) ii)

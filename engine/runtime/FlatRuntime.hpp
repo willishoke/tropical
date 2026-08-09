@@ -4,7 +4,7 @@
  * FlatRuntime.hpp — publication and execution for emitted kernels.
  *
  * Receives Lean-emitted LLVM (and optionally MSL/coefficient LLVM) plus a
- * tropical_plan_5 metadata manifest, compiles/loads the artifacts, constructs
+ * tropical_plan_6 metadata manifest, compiles/loads the artifacts, constructs
  * their backing regions, and atomically publishes the inactive KernelState.
  * The plan instruction graph is diagnostic metadata here; C++ does not turn
  * expression trees into executable code.
@@ -33,7 +33,7 @@
 #include "runtime/EpochTileQueue.hpp"
 #endif
 
-namespace tropical_plan5 { struct ParsedPlan5; }
+namespace tropical_plan6 { struct ParsedPlan6; }
 namespace tropical_metal { struct MetalKernel; }
 
 namespace tropical_runtime
@@ -41,7 +41,7 @@ namespace tropical_runtime
 
 // Host-contract param write discipline (design/host-param-dispatch.md),
 // carried by the plan manifest exactly like slot_names / slot_defaults.
-// Runtime copy of ParsedPlan5::ParamDiscipline so this header stays free
+// Runtime copy of ParsedPlan6::ParamDiscipline so this header stays free
 // of the parser header.
 struct ParamDiscipline
 {
@@ -190,6 +190,8 @@ struct KernelState
   // by the same publish/flip as everything else in this state. shared_ptr
   // over an incomplete type: non-Metal builds never construct one.
   std::shared_ptr<tropical_metal::MetalKernel> metal;
+  bool metal_sample_threadgroups = false;
+  uint32_t metal_threadgroup_scratch_bytes = 0;
 
   // ── Execution mode + kernel handles ──────────────────────────────────────
   // Fused mode populates `kernel` (single NumericKernelFn). Microkernel
@@ -290,7 +292,7 @@ public:
   /**
    * Load a kernel from textual LLVM IR plus a metadata manifest.
    *
-   * `manifest_json` is a tropical_plan_5 JSON whose instruction graph is
+   * `manifest_json` is a tropical_plan_6 JSON whose instruction graph is
    * ignored — codegen comes from `ir_text` (JIT-compiled via
    * OrcJitEngine::compile_ir_text). The manifest's metadata (temp pool
    * size, array/slot names + sizes, sample_rate, slot defaults) drives
@@ -1286,7 +1288,7 @@ private:
   // the kernel handle) into a fresh KernelState; publish_state carries the
   // sample coordinate and performs the atomic double-buffer flip.
   // load_ir fills the kernel handle (via compile_ir_text) between them.
-  KernelState build_kernel_state(const tropical_plan5::ParsedPlan5 & parsed);
+  KernelState build_kernel_state(const tropical_plan6::ParsedPlan6 & parsed);
   PublishedGeneration publish_state(
     KernelState && new_state,
     const KernelState * observation_state = nullptr);

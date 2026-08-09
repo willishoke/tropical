@@ -82,6 +82,14 @@ def SigWellFormed (env : SigEnv α) (openBinders : List Nat := []) : Sig → Pro
       (∀ table ∈ tables, SigWellFormed env openBinders table) ∧
       SigWellFormed env (idxId :: openBinders) body ∧
       (∀ count ∈ dynCount?, SigWellFormed env openBinders count)
+  | .routedSum capacity outputCount routes tables values dynCount? idxId =>
+    capacity > 0 ∧ outputCount > 0 ∧ values.size > 0 ∧
+      routes.size = capacity * values.size ∧
+      (∀ route ∈ routes, ∀ output ∈ route, output < outputCount) ∧
+      idxId ∉ openBinders ∧
+      (∀ table ∈ tables, SigWellFormed env openBinders table) ∧
+      (∀ value ∈ values, SigWellFormed env (idxId :: openBinders) value) ∧
+      (∀ count ∈ dynCount?, SigWellFormed env openBinders count)
 
 /-- The number of iterations a bank executes.  This is the exact clamp shape
     used by production `Tropical.Ir.regionTrips`: conversion to `Int` is owned
@@ -94,6 +102,50 @@ def bankTrips (alg : Algebra α) (capacity : Nat) (dynCount? : Option (Result α
   | some result =>
     let value ← result
     return min (← alg.dynamicCount value).toNat capacity
+
+/-- The shared routed-fold denotation used by both `Sig` and `ENode`.
+    `mapped loopValue` evaluates every emit position exactly once for one item;
+    route application then follows emit order. -/
+def denoteRoutedSum (alg : Algebra α) (capacity outputCount fanout : Nat)
+    (routes : Array (Option Nat)) (tables : Array (Result α))
+    (mapped : Value α → Array (Result α))
+    (dynCount? : Option (Result α)) : Result α := (do
+  if capacity == 0 then
+    throw { operation := "routedSum", detail := "capacity must be nonzero" }
+  if outputCount == 0 then
+    throw { operation := "routedSum", detail := "output count must be nonzero" }
+  if fanout == 0 then
+    throw { operation := "routedSum", detail := "fanout must be nonzero" }
+  if routes.size != capacity * fanout then
+    throw { operation := "routedSum", detail :=
+      s!"route count {routes.size} does not equal capacity×fanout {capacity * fanout}" }
+  if let some output := routes.findSome? fun route => match route with
+      | some output => if output >= outputCount then some output else none
+      | none => none then
+    throw { operation := "routedSum", detail :=
+      s!"route target {output} is out of bounds (output count {outputCount})" }
+  discard <| sequence tables
+  let trips ← bankTrips alg capacity dynCount?
+  let zero ← alg.zero
+  let step : Array (Value α) → Nat → Outcome (Array (Value α)) :=
+    fun acc item => do
+      let loopValue ← alg.loopIndex item
+      let values := mapped loopValue
+      if values.size != fanout then
+        throw { operation := "routedSum", detail :=
+          s!"mapped fanout {values.size} changed from structural fanout {fanout}" }
+      let mappedValues ← sequence values
+      let emitStep : Array (Value α) → Nat →
+          Outcome (Array (Value α)) := fun current emit => do
+        match routes[item * fanout + emit]! with
+        | none => pure current
+        | some output =>
+          let next ← alg.binary .add current[output]! mappedValues[emit]!
+          pure (current.set! output next)
+      List.foldlM emitStep acc (List.range fanout)
+  let result ← List.foldlM step
+    (Array.replicate outputCount zero) (List.range trips)
+  pure (.array result) : Outcome (Value α))
 
 /-- Denotation of every current production `Sig` constructor.  Array literals
     and bank tables are evaluated in source order.  A bank accumulator is a
@@ -155,6 +207,14 @@ def denoteSig (alg : Algebra α) (env : SigEnv α) :
             let contribution ← denoteSig alg (env.bindLoop idxId loopValue) body
             alg.binary .add acc contribution
           (List.foldlM step zero (List.range trips) : Outcome (Value α))
+  | .routedSum capacity outputCount routes tables values dynCount? idxId =>
+    denoteRoutedSum alg capacity outputCount values.size routes
+      (tables.map (denoteSig alg env))
+      (fun loopValue =>
+        values.map (denoteSig alg (env.bindLoop idxId loopValue)))
+      (match dynCount? with
+        | none => none
+        | some count => some (denoteSig alg env count))
 termination_by sig => sizeOf sig
 decreasing_by
   all_goals first

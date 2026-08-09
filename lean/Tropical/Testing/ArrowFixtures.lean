@@ -1065,15 +1065,17 @@ def buildModalReverbBanked (name : String) (voice reverb : Array ModalMode)
 
 /-- Emit the modal bank read through a clock warp φ, via the arrow `.warp` (so φ
     threads through the `.clk` leaf exactly as the master clock does) — for the
-    reverse-reverb gate: a reversing φ makes the closed-form tail play backward. -/
+    complete-output reverse gate: a reversing φ makes the closed-form modal value
+    play backward. This is deliberately distinct from orienting a room kernel. -/
 def buildModalBankWarped (name : String) (modes : Array ModalMode) (anchor : Sig)
     (φ : Clock → Clock) (arena : Arena) : Arena × ProgramIdx :=
   let (out, _) := emitTerm (normalize (ArrowTerm.warp φ (modalBankTerm modes anchor clockLit))) {}
   buildExprCarrier name out arena
 
-/-- Emit a bank read through a DIRECTION (rotation + per-mode gate + optional
-    residue window) — the `modal-direction` gate's device-under-test, mirroring
-    what `lowerInput` emits for a reverb carrying a `ModalDir`. -/
+/-- Emit one bank through the low-level forward↔reverse orientation primitive —
+    the `modal-direction` gate's device-under-test. When these modes describe a
+    room, this is the oriented kernel that public reverb composes with its input;
+    it is not a complete composed-output reversal. -/
 def buildModalBankDir (name : String) (modes : Array ModalMode) (anchor : Sig)
     (dir : Sig) (arena : Arena)
     (damp? : Option (Sig × Sig) := none) : Arena × ProgramIdx :=

@@ -47,7 +47,7 @@ const index: Array<Entry & { wasmPath: string; manifestPath: string }> = []
 for (const { slug, title, description } of manifest) {
   const src = resolve(patchesDir, `${slug}.json`)
 
-  // 1. Compile to plan_5 — the source of the runtime's manifest fields.
+  // 1. Compile to plan_6 — the source of the runtime's manifest fields.
   const c = spawnSync([diffcli, 'compile', src, '--mode=fused'], { cwd: root })
   if (c.exitCode !== 0) {
     console.warn(`SKIP  ${slug}: diffcli compile failed\n${c.stderr.toString()}`)
@@ -64,7 +64,7 @@ for (const { slug, title, description } of manifest) {
     continue
   }
 
-  // 3. Trim plan_5 down to the KernelManifest the runtime consumes.
+  // 3. Trim plan_6 down to the KernelManifest the runtime consumes.
   writeFileSync(join(distDir, `${slug}.manifest.json`), JSON.stringify({
     sampleRate:     plan.config?.sampleRate ?? 44100,
     registerCount:  plan.register_count ?? 0,

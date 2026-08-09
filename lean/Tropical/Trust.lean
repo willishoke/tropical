@@ -58,10 +58,13 @@ deriving BEq, Repr, Inhabited
 
 def knownGates : Array String := #[
   "lake-build:Tropical.Semantics",
+  "modal-universe-history",
+  "modal-oriented-patch",
   "semantics-production-fixtures",
   "semantics-pointer-differential",
   "clock-algebra-theorems",
   "reduce-coverage",
+  "routed-sum-coverage",
   "msl-goldens",
   "msl-column-guard",
   "exact-carrier",
@@ -75,7 +78,7 @@ def knownGates : Array String := #[
   "mcp-protocol",
   "patch-bay-refusal",
   "production-non-emission",
-  "plan5-schema-rejection",
+  "plan6-schema-rejection",
   "current_module_process"
 ]
 
@@ -102,6 +105,31 @@ def productionTrustSites : Array TrustSite := #[
 ]
 
 def obligations : Array Obligation := #[
+  { id := "MODAL_UNIVERSE_CANONICAL_COMMUTES"
+    statement := "For the canonical deferred modal graph, lowering sources, authored-order heterogeneous stages, modalMix, branch clocks/addresses, and an enclosing clock context under live controls equals rendering the whole lowered forest in the one static universe frozen at the terminal coordinate."
+    evidence := #[.theorem]
+    implementationPaths := #["lean/Tropical/Semantics/ModalUniverse.lean"]
+    gateNames := #["lake-build:Tropical.Semantics"]
+    owner := "Modal semantics"
+    status := .proved
+    theoremSymbol := some "Tropical.Semantics.ModalUniverse.compileLive_eq_compileStatic_freeze"
+    limitation := "This theorem is carrier-generic for the canonical stage model and faithfully states clock-context composition. It is not a refinement theorem for EmitArrow.PatchGraph or lowerModal."
+    priority := .critical },
+  { id := "PRODUCTION_MODAL_UNIVERSE_REFINES_CANONICAL"
+    statement := "Production PatchGraph modal lowering and terminal realization refine the canonical whole-graph frozen-universe semantics for every admitted heterogeneous stage chain."
+    evidence := #[.executableGate, .inspection]
+    implementationPaths := #["lean/Tropical/EmitArrow/Patch.lean",
+      "lean/Tropical/EmitArrow/Modal/Forest.lean",
+      "lean/Tropical/EmitArrow/Modal/Oriented.lean",
+      "lean/Tropical/EmitArrow/Modal/OrientedRealize.lean",
+      "lean/Tropical/Tropicaltest/Modal.lean",
+      "lean/Tropical/Tropicaltest/OrientedPatch.lean"]
+    gateNames := #["modal-universe-history", "modal-oriented-patch",
+      "manual:production modal refinement review"]
+    owner := "Modal compiler"
+    status := .open
+    limitation := "Production now retains an authored ordinary-room/gauge stage spine, binds room controls together at the true terminal, and carries plain sources through explicit future/past algebra with a stable terminal divided-difference route. Full refinement remains open: hot/equal-pole divided differences are not yet composable through a later room or gauge; arbitrary live source-frequency crossings need a declared pole envelope; live reverse/sway/gauge after bloom needs the oriented Gamma bridge; and the bilateral live-gauge cost/backend envelope is not qualified."
+    priority := .critical },
   { id := "LOWER_SIG_TREE_PRESERVES"
     statement := "For every carrier algebra, environment, production Sig, and well-formed initial ExprArena, lowerSigTree returns a well-formed arena extension whose expression denotation equals the direct Sig denotation."
     evidence := #[.theorem]
@@ -133,6 +161,15 @@ def obligations : Array Obligation := #[
     status := .open
     limitation := "Tree order, region shape, and prefix clamp are proved; backend execution of the region remains a named runtime assumption."
     priority := .critical },
+  { id := "ROUTED_SUM_PRESERVES_AUTHORED_ORDER"
+    statement := "Routed reductions map each item once and fold active contributions per output in authored item/emit order; cooperative Metal may parallelize the map but not reassociate the gather."
+    evidence := #[.theorem, .executableGate, .inspection]
+    implementationPaths := #["lean/Tropical/Semantics/Sig.lean", "lean/Tropical/Semantics/LowerSig.lean", "lean/Tropical/Ir/EmitLlvm.lean", "lean/Tropical/Ir/EmitMsl.lean", "engine/metal/MetalKernel.mm"]
+    gateNames := #["routed-sum-coverage", "metal-ctest", "manual:routed backend inspection"]
+    owner := "Backend correctness"
+    status := .evidenceBacked
+    limitation := "Source-to-arena preservation is proved and scalar/cooperative schedules are differentially exercised; LLVM, Metal compiler, driver, and hardware execution remain external refinement assumptions."
+    priority := .critical },
   { id := "LOWER_SIG_PTR_REFINES_TREE"
     statement := "For immutable Sig, pointer-memoized lowerSigPtr returns the same id and expression-arena result as structural lowerSigTree."
     evidence := #[.unsafeOptimization, .differential, .inspection]
@@ -143,7 +180,7 @@ def obligations : Array Obligation := #[
     limitation := "Differential fixtures cover representative sharing, arrays, nested banks, and re-intern every emitted node to observe its dedup hit; this remains finite evidence, and ptrAddrUnsafe identity is intentionally not modeled as a theorem."
     priority := .critical },
   { id := "LLVM_TEXT_EXECUTES_PLAN"
-    statement := "Generated LLVM implements tropical_plan_5 instruction, source, instance, and sink semantics."
+    statement := "Generated LLVM implements tropical_plan_6 instruction, source, instance, and sink semantics."
     evidence := #[.executableGate, .golden, .inspection]
     implementationPaths := #["lean/Tropical/Ir/EmitLlvm.lean", "engine/jit/OrcJitEngine.cpp", "engine/runtime/NumericProgramParser.hpp"]
     gateNames := #["patch-goldens", "native-mode-equivalence", "manual:LLVM emitter review"]
@@ -214,15 +251,15 @@ def obligations : Array Obligation := #[
     status := .external
     limitation := "Pinning and tests constrain versions; they do not verify the implementations of external compilers, frameworks, drivers, or hardware."
     priority := .high },
-  { id := "SERIALIZED_PLAN_SCHEMA_IS_PLAN_5_ONLY"
-    statement := "Serialized plan entry points accept tropical_plan_5 only and reject retired schema carriers instead of translating or ignoring them."
+  { id := "SERIALIZED_PLAN_SCHEMA_IS_PLAN_6_ONLY"
+    statement := "Serialized plan entry points accept tropical_plan_6 only and reject retired schema carriers instead of translating or ignoring them."
     evidence := #[.inspection, .executableGate]
     implementationPaths := #["engine/runtime/FlatRuntime.cpp", "engine/runtime/NumericProgramParser.hpp", "lean/Tropical/PlanDecode.lean"]
-    gateNames := #["production-non-emission", "plan5-schema-rejection",
+    gateNames := #["production-non-emission", "plan6-schema-rejection",
       "current_module_process", "manual:serialized-plan boundary review"]
     owner := "Compatibility"
     status := .evidenceBacked
-    limitation := "Canonical plan 5 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, the tick/rate source pair, empty child/instruction arrays, and zero loop ids."
+    limitation := "Canonical plan 6 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, the tick/rate source pair, empty child/instruction arrays, zero loop ids, and the ordinary sample-thread Metal execution description."
     priority := .medium },
   { id := "FROZEN_AUDIO_GOLDENS_ANCHOR_CORRECTNESS"
     statement := "Frozen audio hashes are the independent behavioral anchor after retirement of the TypeScript compiler."

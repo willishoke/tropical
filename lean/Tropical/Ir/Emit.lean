@@ -160,6 +160,7 @@ structure EmitSt where
   stageCtx : Staging.StageCtx := {}
   curStage : Option Stage := none
   instrStages : Array (Option Stage) := #[]
+  routedDepth : Nat := 0
 deriving Inhabited
 
 abbrev EmitM := StateT EmitSt (Except String)
@@ -351,6 +352,18 @@ private def compileNodeUncached (arena : ExprArena) (hw : arena.wf = true)
       (hch body (by simp [ENode.children]))
       (fun d hd => hch d (by
         simp only [ENode.children, Array.mem_append, Array.mem_push]
+        exact Or.inr (by rw [Option.mem_def.mp hd]; simp)))
+  | .routedSum capacity outputCount routes tables values dynCount? idxId, hch =>
+    compileRoutedSum arena hw bound capacity outputCount routes tables values
+      dynCount? idxId
+      (fun t ht => hch t (by
+        simp only [ENode.children, Array.mem_append]
+        exact Or.inl (Or.inl ht)))
+      (fun v hv => hch v (by
+        simp only [ENode.children, Array.mem_append]
+        exact Or.inl (Or.inr hv)))
+      (fun d hd => hch d (by
+        simp only [ENode.children, Array.mem_append]
         exact Or.inr (by rw [Option.mem_def.mp hd]; simp)))
   | .num _, _ | .bool _, _ | .paramRef _, _ | .sampleRate, _ | .sampleIndex, _
   | .loopIdx _, _ =>
@@ -555,6 +568,67 @@ termination_by (bound, 0)
 decreasing_by
   all_goals first
     | (have := _hts _ ‹_ ∈ tables›; apply Prod.Lex.left; omega)
+    | (have := hdc _ rfl; apply Prod.Lex.left; omega)
+    | (apply Prod.Lex.left; omega)
+
+private def compileRoutedSum (arena : ExprArena) (hw : arena.wf = true)
+    (bound capacity outputCount : Nat) (routes : Array (Option Nat))
+    (tables values : Array ExprId) (dynCount? : Option ExprId) (idxId : Nat)
+    (_hts : ∀ t ∈ tables, t.idx < bound)
+    (_hvs : ∀ v ∈ values, v.idx < bound)
+    (hdc : ∀ d ∈ dynCount?, d.idx < bound) : EmitM CompileResult := do
+  if ( ← get).routedDepth != 0 then
+    throw "emit_resolved: nested routedSum regions are not supported"
+  if capacity == 0 then
+    throw "emit_resolved: routedSum capacity must be nonzero"
+  if outputCount == 0 then
+    throw "emit_resolved: routedSum output count must be nonzero"
+  if values.isEmpty then
+    throw "emit_resolved: routedSum fanout must be nonzero"
+  if routes.size != capacity * values.size then
+    throw s!"emit_resolved: routedSum route count {routes.size} does not equal capacity×fanout {capacity * values.size}"
+  if let some target := routes.findSome? fun route => match route with
+      | some target => if target >= outputCount then some target else none
+      | none => none then
+    throw s!"emit_resolved: routedSum route target {target} is out of bounds for {outputCount} outputs"
+  tables.attach.forM fun ⟨table, _⟩ =>
+    discard (compileNode arena hw table)
+  let countOp? ← match _hdo : dynCount? with
+    | none => pure none
+    | some count => do
+      let r ← compileNode arena hw count (some .int)
+      if r.isArray then
+        throw "emit_resolved: routedSum dynamic count is array-valued; the effective trip count must be a scalar"
+      pure (some r.op)
+  let dst ← allocArraySlot outputCount
+  let memo0 := (← get).memo
+  let regionStart := (← get).instrs.size
+  modify fun s => { s with routedDepth := s.routedDepth + 1 }
+  let mapped ← values.attach.mapM fun ⟨value, _⟩ => do
+    let r ← compileNode arena hw value (some .float)
+    if r.isArray then
+      throw "emit_resolved: routedSum mapped values must be scalar"
+    if r.scalarType != .float then
+      throw "emit_resolved: routedSum results are float-only until typed array slots are supported"
+    pure r.op
+  modify fun s => { s with routedDepth := s.routedDepth - 1 }
+  let bodyEnd := (← get).instrs.size
+  for instr in (← get).instrs.extract regionStart bodyEnd do
+    if instr.tag == "WriteSlot" || instr.tag == "SetElement" then
+      throw s!"emit_resolved: effectful instruction '{instr.tag}' is not allowed inside routedSum"
+  modify fun s => { s with
+    instrs := s.instrs.insertIdx! regionStart
+      (Tropical.Plan.instrRoutedSumBegin dst capacity outputCount routes countOp? idxId)
+    instrStages := s.instrStages.insertIdx! regionStart s.curStage }
+  emit (Tropical.Plan.instrRoutedSumYield dst mapped)
+  emit (Tropical.Plan.instrRoutedSumEnd dst)
+  modify fun s => { s with memo := memo0 }
+  pure (.array (.arrayReg dst) outputCount .float)
+termination_by (bound, 0)
+decreasing_by
+  all_goals first
+    | (have := _hts _ ‹_ ∈ tables›; apply Prod.Lex.left; omega)
+    | (have := _hvs _ ‹_ ∈ values›; apply Prod.Lex.left; omega)
     | (have := hdc _ rfl; apply Prod.Lex.left; omega)
     | (apply Prod.Lex.left; omega)
 

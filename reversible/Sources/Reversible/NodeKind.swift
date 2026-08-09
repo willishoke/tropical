@@ -164,24 +164,21 @@ extension NodeKind {
                 modal: true)
         case .reverb:
             // A room bank (32 log-spaced modes, 60–6000 Hz) composed with its
-            // MODAL input by the residue calculus (voice ⋙ reverb). Modal in →
-            // modal out; only the room damping `rt60` is live. Feeds a Sig
-            // inlet (realized) or Modal∪.
+            // MODAL input. Modal in → modal out, feeding another modal stage or
+            // a Sig inlet where the complete value is realized.
             //
-            // `dir` rotates the composed tail's poles in the s-plane (a live
-            // U(1) morph): 0 = forward decay, π = reverse (pre-verb), π/2 =
-            // decay↔frequency swap. Any continuous path forward→reverse
-            // crosses an undamped-ring axis; `window` nulls each mode AT its
-            // crossing (σ²/(σ²+w²)) — 0 = bare rotation (rings through the
-            // horizon), open = the click-free morph.
+            // For the room kernel h, `dir` selects
+            // h[dir] = (1-dir)·h + dir·T(h), and this node convolves h[dir] with
+            // its input. Direction is local to this room: it never reverses the
+            // upstream modal value or the complete composed output.
             return NodeSpec(
                 title: "Reverb", accent: Color(hex: 0x3FB8B0), summing: false,
                 inlets: ["in"], outlets: ["out"],
                 knobs: [
                     KnobSpec(name: "rt60", min: 0.2, max: 12, def: 2, log: true, unit: "sec"),
-                    // dir crossfades the tail's direction: 0 = forward, 1 =
-                    // reverse (pre-verb). Keeps σ/ω fixed so it stays audible
-                    // across the range (heard on re-strike/scrub).
+                    // dir crossfades this room kernel: 0 = forward, 1 =
+                    // reversed. It keeps σ/ω fixed and is independent of
+                    // complete-output reversal by the master clock.
                     KnobSpec(name: "dir", min: 0, max: 1, def: 0),
                     // decay SWAY: the room breathes — σ modulated on the
                     // envelope clock only, so the tail's decay time undulates

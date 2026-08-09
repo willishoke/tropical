@@ -16,9 +16,10 @@ Audit base: sprint integration line, 2026-07-28.
 | `programDecl` inside `program_2` | retired/refused | N | N | refused | refused | refused | N |
 | retired Program-2 root carriers | retired/refused | N | N | refused | refused | refused | N |
 | retired wire aliases/state spellings | retired/refused | N | N | refused | refused | refused | N |
-| `tropical_plan_5` typed/wire plan | current plan | Y | Y | Y | Y | Y | required |
+| `tropical_plan_6` typed/wire plan | current plan | Y | Y | Y | Y | Y | required |
 | any other serialized plan schema | unsupported/refused | N | N | N | refused | N | refused |
-| retired top-level state/output carriers in Plan 5 | unsupported/refused | N | N | N | refused | N | refused |
+| `tropical_plan_5` and older plans | unsupported/refused | N | N | N | refused | N | refused |
+| retired top-level state/output carriers in Plan 6 | unsupported/refused | N | N | N | refused | N | refused |
 | public parameter method `set_param` | current | N | Y | Y | N | future host | socket/RPC |
 | specialized parameter-method aliases | removed | N | N | refused | N | N | refused |
 
@@ -50,15 +51,15 @@ patch-bay front door.
 ## Required rejection behavior
 
 Both `Tropical.Plan.FlatPlan.ofWire` and the native C load tail require an
-explicit `schema: "tropical_plan_5"`. Missing, unknown, and older schemas fail
-with an error naming the unsupported boundary. Plan 5 rejects these retired
+explicit `schema: "tropical_plan_6"`. Missing, unknown, and older schemas fail
+with an error naming the unsupported boundary. Plan 6 rejects these retired
 top-level fields rather than ignoring them:
 
 `state_init`, `register_names`, `register_types`, `register_targets`,
 `state_reg_offset`, `output_targets`, `outputs`, top-level `instructions`, and
 `scheduler_function`.
 
-Canonical Plan-5 omissions are not legacy compatibility. The current encoder
+Canonical Plan-6 omissions are not legacy compatibility. The current encoder
 may omit fused `compilation_mode`, the default tick/rate `sources` pair, empty
 child/instruction arrays, and zero loop ids. Decoders retain those current
 defaults.
@@ -72,10 +73,10 @@ aliases listed above fail as unknown operations.
 
 - `current_module_process`: native schema/carrier rejection plus current ABI
   rendering.
-- `plan5-schema-rejection`: Lean decoder rejection of Plan 4,
+- `plan6-schema-rejection`: Lean decoder rejection of Plan 4 and Plan 5,
   unknown/missing schemas, and retired carriers.
 - `production-non-emission`: representative current front doors emit typed,
-  state-free Plan 5 only.
+  state-free Plan 6 only.
 - `mcp/errors.test.ts`: removed parameter methods, Program-2 root carriers,
   and wire aliases are refused at their public boundaries.
 - `param_dispatch_conformance.test.ts`: socket and Lean control-plane

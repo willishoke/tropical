@@ -50,6 +50,14 @@ private def collectNestedOutDeps (ea : ExprArena) (hw : ea.wf = true)
       (match _hdc : dc with
         | some d => collectNestedOutDeps ea hw numInstances acc d
         | none => acc) b
+  | some (.routedSum _ _ _ ts vs dc _) =>
+    let acc := ts.attach.foldl
+      (fun a ⟨t, _⟩ => collectNestedOutDeps ea hw numInstances a t) acc
+    let acc := vs.attach.foldl
+      (fun a ⟨v, _⟩ => collectNestedOutDeps ea hw numInstances a v) acc
+    match _hdc : dc with
+    | some d => collectNestedOutDeps ea hw numInstances acc d
+    | none => acc
   | some (.inputRef _) | some (.paramRef _)
   | some (.sampleRate) | some (.sampleIndex)
   | some (.loopIdx _) => acc

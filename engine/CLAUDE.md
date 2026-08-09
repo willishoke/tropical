@@ -26,7 +26,7 @@ Lean FlatPlan
   ├─ EmitLlvm → audio LLVM IR
   ├─ Stage0    → optional coefficient LLVM IR
   ├─ EmitMsl   → optional MSL
-  └─ toWire    → tropical_plan_5 metadata
+  └─ toWire    → tropical_plan_6 metadata
         │
         ▼
 tropical_runtime_load_ir_staged
@@ -48,7 +48,7 @@ Three C entry points share the same tail:
 - `tropical_runtime_load_ir_msl`;
 - `tropical_runtime_load_ir_staged`.
 
-All three require a `tropical_plan_5` manifest. Older or unknown schemas and
+All three require a `tropical_plan_6` manifest. Older or unknown schemas and
 retired state/output carriers fail at the load boundary; see
 [`design/compatibility-matrix.md`](../design/compatibility-matrix.md).
 
@@ -278,6 +278,6 @@ ctest --test-dir build --output-on-failure
 - Keep public C ABI changes explicit and separately reviewed.
 - No interpreter or C++ plan-codegen fallback belongs on the production path.
 - Audio-thread code must not allocate, lock, log, or throw.
-- Do not add state-shaped compatibility carriers to the Plan-5 runtime.
+- Do not add state-shaped compatibility carriers to the Plan-6 runtime.
 - Update the compatibility matrix and negative boundary gates when changing
   serialized-plan dispatch.

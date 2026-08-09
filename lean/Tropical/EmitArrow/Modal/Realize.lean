@@ -153,22 +153,22 @@ def strikeTrainTerm (modes : Array ModalMode) (anchor : Sig) (c : Clock)
     (ArrowTerm.clk c)
 
 -- ── The DIRECTION operator: forward↔reverse crossfade ─────────────────────────
--- A bank's reading DIRECTION crossfades between the CAUSAL tail (energy at d>0, a
--- forward ring) and the ANTI-CAUSAL tail (energy at d<0, a pre-verb blooming INTO
--- the strike). Both keep the mode's own σ AND ω — only which side of the strike the
--- energy sits on changes. (An earlier version ROTATED the pole `μ↦e^{iθ}μ`; elegant,
--- but for audio modes `ω≫σ`, so any interior angle throws ω into the damping and the
--- tail decays in microseconds — silent. The crossfade never touches the decay, so it
--- stays audible across the whole knob. The rotation's cost was invisible because the
--- gate checked "bounded", not "audible".)
+-- This low-level primitive crossfades one bank between its CAUSAL tail (energy at
+-- d>0) and ANTI-CAUSAL time mirror (energy at d<0). Both keep the mode's own σ and
+-- ω; only which side of the strike carries energy changes. Public `reverb.dir`
+-- applies this orientation to that room's kernel before convolution with its modal
+-- input. Applying it to an already-composed source/room bank would instead reverse
+-- the complete output, which is a separate clock/warp operation.
 
-/-- A modal bank read with a forward↔reverse DIRECTION crossfade `dir ∈ [0,1]`.
+/-- A modal bank read with a forward↔reverse orientation crossfade `dir ∈ [0,1]`.
     Per mode: the CAUSAL ring `e^{−σd}` gated `d>0`, and the ANTI-CAUSAL ring
     `e^{+σd} = e^{−σ|d|}` gated `d<0` reading the time-mirrored oscillator (`cos`
     even, `sin` odd), blended `(1−dir)·forward + dir·reverse`. σ and ω are untouched,
     so no setting can swing the frequency into the damping. `dir=0` reduces
     bit-for-bit to the forward bank (`modalBankSig`); `dir=1` is its exact time-mirror
-    (reverse reverb). `dampScale?` bends the decay clock (sway) on both sides. Pure
+    as a bank. When the bank is a room kernel, the public room law convolves this
+    oriented kernel with the upstream value; it does not orient their complete
+    composed output. `dampScale?` bends the decay clock (sway) on both sides. Pure
     `f(clk)`: no state. -/
 def modalBankSigDir (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Sig)
     (dir : Sig) (dampScale? : Option Sig := none) : Sig :=
@@ -289,9 +289,9 @@ def modalBankTermDir (modes : Array ModalMode) (anchor : Sig) (c : Clock)
     else fun ms clk a d s? => modalBankSigDir ms clk a d s?
   modalBankTermDirWith lower modes anchor c dir damp?
 
-/-- A bank's reading DIRECTION as data: the forward↔reverse crossfade `dir`
-    (0 = forward tail, 1 = reverse/pre-verb) plus optional decay sway `(depth,
-    rateHz)`. Attached to a `modalReverb` node, carried to `lowerInput`. -/
+/-- A room kernel's orientation as data: the forward↔reverse crossfade `dir`
+    (0 = forward kernel, 1 = reversed kernel) plus optional decay sway `(depth,
+    rateHz)`. Each room owns its value; it is not complete-output reversal data. -/
 structure ModalDir where
   dir : Sig := lit 0
   damp : Option (Sig × Sig) := none

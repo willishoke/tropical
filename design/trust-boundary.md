@@ -8,6 +8,32 @@ Only entries with status `proved` and a checked theorem symbol are formal proofs
 
 Add one owned entry to `obligations`, use only maintained gate names (or an explicit `manual:` gate), and regenerate this report with `trustreport --write`. A new production `unsafe def` or `implemented_by` marker must also add one typed `productionTrustSites` row; `tools/audit_trust_sites.py` makes an unledgered or stale site fail validation.
 
+## MODAL_UNIVERSE_CANONICAL_COMMUTES
+
+For the canonical deferred modal graph, lowering sources, authored-order heterogeneous stages, modalMix, branch clocks/addresses, and an enclosing clock context under live controls equals rendering the whole lowered forest in the one static universe frozen at the terminal coordinate.
+
+- Status: proved
+- Priority: critical
+- Owner: Modal semantics
+- Evidence: theorem
+- Formal symbol: `Tropical.Semantics.ModalUniverse.compileLive_eq_compileStatic_freeze`
+- Implementation: `lean/Tropical/Semantics/ModalUniverse.lean`
+- Gates: `lake-build:Tropical.Semantics`
+- Limitation: This theorem is carrier-generic for the canonical stage model and faithfully states clock-context composition. It is not a refinement theorem for EmitArrow.PatchGraph or lowerModal.
+
+## PRODUCTION_MODAL_UNIVERSE_REFINES_CANONICAL
+
+Production PatchGraph modal lowering and terminal realization refine the canonical whole-graph frozen-universe semantics for every admitted heterogeneous stage chain.
+
+- Status: open
+- Priority: critical
+- Owner: Modal compiler
+- Evidence: executable gate, inspection
+- Formal symbol: none
+- Implementation: `lean/Tropical/EmitArrow/Patch.lean`, `lean/Tropical/EmitArrow/Modal/Forest.lean`, `lean/Tropical/EmitArrow/Modal/Oriented.lean`, `lean/Tropical/EmitArrow/Modal/OrientedRealize.lean`, `lean/Tropical/Tropicaltest/Modal.lean`, `lean/Tropical/Tropicaltest/OrientedPatch.lean`
+- Gates: `modal-universe-history`, `modal-oriented-patch`, `manual:production modal refinement review`
+- Limitation: Production now retains an authored ordinary-room/gauge stage spine, binds room controls together at the true terminal, and carries plain sources through explicit future/past algebra with a stable terminal divided-difference route. Full refinement remains open: hot/equal-pole divided differences are not yet composable through a later room or gauge; arbitrary live source-frequency crossings need a declared pole envelope; live reverse/sway/gauge after bloom needs the oriented Gamma bridge; and the bilateral live-gauge cost/backend envelope is not qualified.
+
 ## LOWER_SIG_TREE_PRESERVES
 
 For every carrier algebra, environment, production Sig, and well-formed initial ExprArena, lowerSigTree returns a well-formed arena extension whose expression denotation equals the direct Sig denotation.
@@ -47,6 +73,19 @@ JIT, wasm, and MSL execute bank bodies at increasing indices with a scalar left 
 - Gates: `reduce-coverage`, `msl-column-guard`, `manual:backend reduce-loop inspection`
 - Limitation: Tree order, region shape, and prefix clamp are proved; backend execution of the region remains a named runtime assumption.
 
+## ROUTED_SUM_PRESERVES_AUTHORED_ORDER
+
+Routed reductions map each item once and fold active contributions per output in authored item/emit order; cooperative Metal may parallelize the map but not reassociate the gather.
+
+- Status: evidence-backed
+- Priority: critical
+- Owner: Backend correctness
+- Evidence: theorem, executable gate, inspection
+- Formal symbol: none
+- Implementation: `lean/Tropical/Semantics/Sig.lean`, `lean/Tropical/Semantics/LowerSig.lean`, `lean/Tropical/Ir/EmitLlvm.lean`, `lean/Tropical/Ir/EmitMsl.lean`, `engine/metal/MetalKernel.mm`
+- Gates: `routed-sum-coverage`, `metal-ctest`, `manual:routed backend inspection`
+- Limitation: Source-to-arena preservation is proved and scalar/cooperative schedules are differentially exercised; LLVM, Metal compiler, driver, and hardware execution remain external refinement assumptions.
+
 ## LOWER_SIG_PTR_REFINES_TREE
 
 For immutable Sig, pointer-memoized lowerSigPtr returns the same id and expression-arena result as structural lowerSigTree.
@@ -62,7 +101,7 @@ For immutable Sig, pointer-memoized lowerSigPtr returns the same id and expressi
 
 ## LLVM_TEXT_EXECUTES_PLAN
 
-Generated LLVM implements tropical_plan_5 instruction, source, instance, and sink semantics.
+Generated LLVM implements tropical_plan_6 instruction, source, instance, and sink semantics.
 
 - Status: open
 - Priority: critical
@@ -164,9 +203,9 @@ Lean core arithmetic, LLVM/lld, Metal, RtAudio, and Turnstile are distinct exter
 - Gates: `patch-goldens`, `wasm-vs-jit`, `metal-ctest`, `mcp-protocol`
 - Limitation: Pinning and tests constrain versions; they do not verify the implementations of external compilers, frameworks, drivers, or hardware.
 
-## SERIALIZED_PLAN_SCHEMA_IS_PLAN_5_ONLY
+## SERIALIZED_PLAN_SCHEMA_IS_PLAN_6_ONLY
 
-Serialized plan entry points accept tropical_plan_5 only and reject retired schema carriers instead of translating or ignoring them.
+Serialized plan entry points accept tropical_plan_6 only and reject retired schema carriers instead of translating or ignoring them.
 
 - Status: evidence-backed
 - Priority: medium
@@ -174,8 +213,8 @@ Serialized plan entry points accept tropical_plan_5 only and reject retired sche
 - Evidence: inspection, executable gate
 - Formal symbol: none
 - Implementation: `engine/runtime/FlatRuntime.cpp`, `engine/runtime/NumericProgramParser.hpp`, `lean/Tropical/PlanDecode.lean`
-- Gates: `production-non-emission`, `plan5-schema-rejection`, `current_module_process`, `manual:serialized-plan boundary review`
-- Limitation: Canonical plan 5 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, the tick/rate source pair, empty child/instruction arrays, and zero loop ids.
+- Gates: `production-non-emission`, `plan6-schema-rejection`, `current_module_process`, `manual:serialized-plan boundary review`
+- Limitation: Canonical plan 6 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, the tick/rate source pair, empty child/instruction arrays, zero loop ids, and the ordinary sample-thread Metal execution description.
 
 ## FROZEN_AUDIO_GOLDENS_ANCHOR_CORRECTNESS
 

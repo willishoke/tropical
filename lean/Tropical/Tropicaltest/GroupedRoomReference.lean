@@ -444,12 +444,12 @@ def runGroupedRoomReference (arena : Arena)
           runtimeRateMismatchZero && emptyZero && forwardPreZero && reversePreNonzero &&
           farTranslationExact && holdReverseOk
         IO.println s!"        room-only profile: groups={profile.groups.size}, generated={specA.generatedScalarCount} scalars, source grids A/B both admitted"
-        IO.println s!"        direct carrier-train oracle worst relative L2={oracleWorst}; nested Plan-5 reductions={planShape}"
+        IO.println s!"        direct carrier-train oracle worst relative L2={oracleWorst}; nested Plan-6 reductions={planShape}"
         IO.println s!"        profile/prefix separation={structural}; indexed refusals={refusals}; rate/zero/mutations={runtimeRateMismatchZero}/{zeroResiduesZero}/{isolatedMutations}"
         IO.println s!"        empty/endpoint/translation/hold/reverse={emptyZero}/{forwardPreZero}/{farTranslationExact}/{holdReverseOk}"
         if ok then
           passGate "grouped-room-reference"
-            "one unchanged room profile specializes unrelated modal poles; exact prefixes and Plan-5 evaluator agree with the direct causal/reverse oracle"
+            "one unchanged room profile specializes unrelated modal poles; exact prefixes and Plan-6 evaluator agree with the direct causal/reverse oracle"
         else
           failGate "grouped-room-reference" s!"structural={structural} refusals={refusals} shape={planShape} oracle={oracleWorst} sourceB={sourceBOracleOk} amp={amplitudeChanges} mutations={isolatedMutations} zeroResidues={zeroResiduesZero} rateMismatch={runtimeRateMismatchZero} empty={emptyZero} fwdPre={forwardPreZero} revPre={reversePreNonzero} far={farTranslationExact} holdRev={holdReverseOk}"
 

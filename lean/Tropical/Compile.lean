@@ -656,7 +656,7 @@ private def preallocInputs (s : SessionAlloc) (wires : Array Tropical.Wire)
 termination_by sizeOf prog
 decreasing_by exact CoreProgram.sizeOf_lt_of_registryGet? hr
 
-/-- The session → `tropical_plan_5` lowering: two-phase slot
+/-- The session → `tropical_plan_6` lowering: two-phase slot
     pre-allocation, accumulator seeding from the session I/O array
     space, one `partitionKernel` over the synthetic root, sinks, and
     slot metadata. The staged variant also returns the per-instruction

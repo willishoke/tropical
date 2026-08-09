@@ -57,7 +57,7 @@ SessionState
             → assertSessionAcyclic
             → sessionToResolvedRoot
        → compileSessionStaged  (partition + typed stage-0 split)
-       → emit LLVM/MSL artifacts + tropical_plan_5 metadata
+       → emit LLVM/MSL artifacts + tropical_plan_6 metadata
   → loadKernel                (C API → OrcJitEngine/MetalKernel → FlatRuntime publication)
 ```
 
@@ -78,7 +78,7 @@ every boundary that constructs a graph (`Ir/Cycles.lean`). (A
 recursive filter on live or broadband input has no closed form; that
 island is ceded on purpose to a future stateful sister runtime,
 "supertropical" — see `design/cf-only.md`.) The WASM backend consumes
-the same `tropical_plan_5` and is held to sample-for-sample equivalence
+the same `tropical_plan_6` and is held to sample-for-sample equivalence
 with the JIT (`tests/web/wasm_vs_jit`).
 
 A compile error doesn't kill the session; it returns a structured

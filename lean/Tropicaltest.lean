@@ -22,6 +22,8 @@ import Lean.Data.Json
 import Tropical.Tropicaltest.Patcher
 import Tropical.Tropicaltest.Exact
 import Tropical.Tropicaltest.GroupedRoomReference
+import Tropical.Tropicaltest.Oriented
+import Tropical.Tropicaltest.OrientedPatch
 
 /-!
 # tropicaltest — the post-TS golden + native-equiv runner (Phase 8)
@@ -46,11 +48,31 @@ open Tropical.Ir (Arena ProgramIdx)
     reported as the total collapse it is; the `arrow-block-count` gate at the end
     of `main` checks the number against what the block actually ran, so it is
     verified rather than maintained. -/
-def arrowBlockGates : Nat := 100
+def arrowBlockGates : Nat := 103
 
-set_option maxRecDepth 1024 in
+set_option maxRecDepth 2048 in
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
+  if args.contains "--routed-only" then
+    return if ← runRoutedSumCoverage then 0 else 1
+  if args.contains "--oriented-patch-only" then
+    return if ← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch {} then 0 else 1
+  if args.contains "--ecdd-only" then
+    match ← Tropical.Playground.getStdlib with
+    | .error error =>
+        IO.eprintln error
+        return 1
+    | .ok (arena, resolved) =>
+        let partitionOk ← Tropical.Tropicaltest.SeamSweep.runEcddPartition arena resolved
+        let liveOk ← Tropical.Tropicaltest.SeamSweep.runEcddLive arena resolved
+        return if partitionOk && liveOk then 0 else 1
+  if args.contains "--modal-universe-history-only" then
+    match ← Tropical.Playground.getStdlib with
+    | .error error =>
+        IO.eprintln error
+        return 1
+    | .ok (arena, resolved) =>
+        return if ← runModalUniverseHistory arena resolved then 0 else 1
   let mut failed := 0
   let mut total := 0
 
@@ -92,6 +114,11 @@ def main (args : List String) : IO UInt32 := do
   if !(← Tropical.Tropicaltest.ExactGates.runExactPlayground) then failed := failed + 1
   if !(← Tropical.Tropicaltest.ExactGates.runExactQuantize) then failed := failed + 1
 
+  -- ── (b″) Per-kernel oriented modal convolution ──────────────────────
+  IO.println "oriented modal convolution (local room direction):"
+  total := total + 1
+  if !(← Tropical.Tropicaltest.Oriented.runOriented) then failed := failed + 1
+
   -- ── (c) Synthetic op-coverage: EmitLlvm over the rare ops, frozen hash ─────
   -- The patch corpus exercises 24 of 29 ops; this funnels the rest
   -- (GreaterEq, NotEqual, Or, BitOr, BitNot, FloorDiv, Sqrt, Floor, Ceil,
@@ -115,6 +142,11 @@ def main (args : List String) : IO UInt32 := do
   IO.println "reduce coverage (ReduceBegin/End ≡ unrolled, EmitLlvm):"
   total := total + 1
   if !(← runReduceCoverage) then failed := failed + 1
+
+  -- ── (c⁗⁺) Static routed reduction: semantics + compact Plan 6 region ──────
+  IO.println "routed reduction (compact region ≡ authored-order unrolling):"
+  total := total + 1
+  if !(← runRoutedSumCoverage) then failed := failed + 1
 
   -- ── (c⁗ᵃ) The patch-bay refusal (elaborator retirement, phase 5) ───────────
   -- Program definitions over the wire are retired: a programDecl-bearing
@@ -193,7 +225,7 @@ def main (args : List String) : IO UInt32 := do
   | .ok (arena, resolved) =>
     arrowRan := true
     -- ── Production legacy-state non-emission (Lane F quarantine) ────────────
-    IO.println "production non-emission (current front doors → state-free plan_5):"
+    IO.println "production non-emission (current front doors → state-free plan_6):"
     total := total + 1
     if !(← runProductionNonEmission arena resolved) then failed := failed + 1
     total := total + 1
@@ -345,6 +377,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runSlideProd arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runArrN arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runBootstrapSin arena resolved) then
@@ -500,10 +535,16 @@ def main (args : List String) : IO UInt32 := do
     if !(← runModalPatch arena resolved) then
       failed := failed + 1
     total := total + 1
+    if !(← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch arena) then
+      failed := failed + 1
+    total := total + 1
     if !(← runModalForestAnchors arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runModalForestTimedIslands arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runModalUniverseHistory arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← Tropical.Tropicaltest.GroupedRoomReference.runGroupedRoomReference arena resolved) then

@@ -25,7 +25,7 @@ was deleted.
 | 15 | Browser `KernelManifest.stateInit`/`registerTypes` and its initialization loop survived, while every production build supplied empty arrays. | historical/dead carrier | Removed from the browser manifest contract under S-09. |
 | 16 | The lone checked-in plan-4 fixture was nested as `expected_plan` in a migration golden, but current golden code compiled only its `input` and never read that plan. | historical/dead fixture payload | Removed; the useful `tropical_program_2` input and migration golden remain. |
 | 17 | Several completed design handoffs and bug reports used deleted vocabulary without an at-point-of-use status. | historical, not wrong in original context | Scoped status labels added only to documents returned by the stale-token audit. |
-| 18 | `PlanDecode.FlatPlan.ofWire` was documented as Plan-5-only but did not itself validate the top-level schema tag. | wrong boundary behavior | Resolved: `FlatPlan.ofWire` now requires exact Plan 5 and rejects retired carriers; `plan5-schema-rejection` gates it. |
+| 18 | `PlanDecode.FlatPlan.ofWire` was documented as schema-exact but did not itself validate the top-level schema tag. | wrong boundary behavior | Resolved: `FlatPlan.ofWire` now requires exact Plan 6 and rejects Plan 5, older plans, and retired carriers; `plan6-schema-rejection` gates it. |
 
 ## Outstanding assignments
 

@@ -5,7 +5,7 @@ import Tropical.Exact.Cplx
 
 This module is deliberately data-only.  A `RoomProfile` describes periodic
 room carriers and the finite source/capacity envelope in which the internal
-Plan-5 reference may specialize them.  Source poles, residues, strike anchors,
+Plan-6 reference may specialize them.  Source poles, residues, strike anchors,
 generated prefix tables, and rendered samples do not belong here.
 
 This is not an asset ABI or a public patch node.  It is the smallest executable

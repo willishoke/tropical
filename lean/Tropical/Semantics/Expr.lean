@@ -87,6 +87,16 @@ def denoteNode (alg : Algebra α) (env : SigEnv α) (node : ENode)
                 (by simp [ENode.children])
             alg.binary .add acc contribution
           (List.foldlM step zero (List.range trips) : Outcome (Value α))
+  | .routedSum capacity outputCount routes tables values dynCount? binderId =>
+    denoteRoutedSum alg capacity outputCount values.size routes
+      (tables.attach.map fun ⟨table, hMem⟩ =>
+        recur env table (by simp [ENode.children, hMem]))
+      (fun loopValue => values.attach.map fun ⟨value, hMem⟩ =>
+        recur (env.bindLoop binderId loopValue) value
+          (by simp [ENode.children, hMem]))
+      (match dynCount? with
+        | none => none
+        | some count => some (recur env count (by simp [ENode.children])))
 
 /-- Denotation of a production expression DAG rooted at `id`. -/
 def denoteExpr (alg : Algebra α) (env : SigEnv α) (arena : ExprArena)
@@ -135,6 +145,13 @@ inductive DenotesMany (alg : Algebra α) (env : SigEnv α)
       (head : DenotesAt alg env arena hArena sig rootId)
       (tail : DenotesMany alg env arena hArena sigs ids) :
       DenotesMany alg env arena hArena (sig :: sigs) (rootId :: ids)
+
+theorem DenotesMany.length_eq
+    (h : DenotesMany alg env arena hArena sigs ids) :
+    ids.length = sigs.length := by
+  induction h with
+  | nil => rfl
+  | cons _ _ ih => simp [ih]
 
 /-- Appending nodes does not change the meaning of any addressable old root. -/
 theorem denoteExpr_extends {before after : ExprArena}
@@ -225,6 +242,46 @@ theorem denoteExpr_extends {before after : ExprArena}
       simp only [hBody]
     | some count =>
       simp only [hChild count (by simp [ENode.children]), hBody]
+  | routedSum capacity outputCount routes tables values dynCount? binderId =>
+    simp only [denoteNode]
+    have hTableArray :
+        tables.attach.map
+            (fun item => denoteExpr alg env before hBefore item.1) =
+          tables.attach.map
+            (fun item => denoteExpr alg env after hAfter item.1) := by
+      apply Array.ext
+      · simp
+      · intro i hiBefore hiAfter
+        simp only [Array.getElem_map, Array.getElem_attach]
+        apply hChild
+        simp [ENode.children]
+    have hValueArray (loopValue : Value α) :
+        values.attach.map
+            (fun item => denoteExpr alg (env.bindLoop binderId loopValue)
+              before hBefore item.1) =
+          values.attach.map
+            (fun item => denoteExpr alg (env.bindLoop binderId loopValue)
+              after hAfter item.1) := by
+      apply Array.ext
+      · simp
+      · intro i hiBefore hiAfter
+        simp only [Array.getElem_map, Array.getElem_attach]
+        have hi : i < values.size := by simpa using hiBefore
+        let value := values[i]
+        have hMem : value ∈ values := Array.getElem_mem hi
+        obtain ⟨valueNode, hValueDeref⟩ :=
+          deref_of_index_lt
+            (Nat.lt_trans
+              (hBefore.childrenDescend hDeref value
+                (by simp [ENode.children, hMem]))
+              (deref_index_lt hDeref))
+        exact denoteExpr_extends hBefore hAfter hExtends alg
+          (env.bindLoop binderId loopValue) hValueDeref
+    rw [hTableArray]
+    cases dynCount? with
+    | none => simp only [hValueArray]
+    | some count =>
+      simp only [hChild count (by simp [ENode.children]), hValueArray]
 termination_by id.idx
 decreasing_by
   all_goals

@@ -168,6 +168,182 @@ def runReduceCoverage : IO Bool := do
 
 end ReduceCoverage
 
+-- ── Static routed reduction (Plan 6) ───────────────────────────────────────
+section RoutedSumCoverage
+open Tropical.Plan
+
+private def routedRoutes4 : Array (Option Nat) := #[
+  some 0, none,   some 1,
+  some 2, some 0, some 1,
+  none,   some 2, some 0,
+  some 1, some 2, none]
+
+/-- Three mapped values for one authored item.  Keeping the arithmetic in the
+    plan (instead of pre-folding literals here) makes the differential exercise
+    the routed body's `loopIdx` binder and temporary lifetime. -/
+private def routedMapped (k : NOperand) (t : Nat) : Array NInstr := #[
+  instrScalar "ToFloat" t #[k] .float,
+  instrScalar "Add" (t+1) #[rgF t, cF 1] .float,
+  instrScalar "Mul" (t+2) #[rgF (t+1), cF 1 1] .float,
+  instrScalar "Mul" (t+3) #[rgF (t+1), cF (-25) 1] .float]
+
+private def routedPlan (capacity : Nat := 4)
+    (count? : Option NOperand := none) : FlatPlan :=
+  let routes := if capacity == 4 then routedRoutes4
+    else Array.replicate (capacity * 3) (some 0)
+  let body := #[instrRoutedSumBegin 0 capacity 3 routes count? 17]
+    ++ routedMapped (.loopIdx 17) 0
+    ++ #[instrRoutedSumYield 0 #[rgF 1, rgF 2, rgF 3],
+         instrRoutedSumEnd 0,
+         instrIndex 4 #[.arrayReg 0, cI 0] .float,
+         instrIndex 5 #[.arrayReg 0, cI 1] .float,
+         instrIndex 6 #[.arrayReg 0, cI 2] .float,
+         instrWriteSlot 0 (rgF 4), instrWriteSlot 1 (rgF 5),
+         instrWriteSlot 2 (rgF 6)]
+  let inst := InstanceFunction.mk "root" "root" #[] body #[] 0 0 7 #[]
+  { sampleRate := jn 44100, compilationMode := .fused,
+    arraySlotNames := #["routed-output"], registerCount := 7,
+    arraySlotCount := 1, arraySlotSizes := #[3], instanceFunctions := #[inst],
+    sinks := #[{ inputs := #[0], gain := jn 1, target := 0 },
+      { inputs := #[1], gain := jn 1, target := 1 },
+      { inputs := #[2], gain := jn 1, target := 2 }],
+    sources := defaultSources, slotCount := 4,
+    slotNames := #["out:0", "out:1", "out:2", "param:count"],
+    slotDefaults := #[Lean.Json.num (jn 0), Lean.Json.num (jn 0),
+      Lean.Json.num (jn 0), Lean.Json.num (jn 3)] }
+
+/-- Literal-index twin with the exact routed contract's fold order:
+    item-major, then authored emit order within each item. -/
+private def routedUnrolledPlan (trips : Nat) : FlatPlan := Id.run do
+  let mut body : Array NInstr := #[]
+  let mut acc : Array (Option Nat) := Array.replicate 3 none
+  let mut next := 0
+  for item in [0:trips] do
+    body := body ++ routedMapped (cI (Int.ofNat item)) next
+    let values := #[next+1, next+2, next+3]
+    next := next + 4
+    for emit in [0:3] do
+      if let some output := routedRoutes4[item * 3 + emit]! then
+        let lhs := match acc[output]! with
+          | some t => rgF t
+          | none => cF 0
+        body := body.push (instrScalar "Add" next #[lhs, rgF values[emit]!] .float)
+        acc := acc.set! output (some next)
+        next := next + 1
+  for output in [0:3] do
+    let value := match acc[output]! with | some t => rgF t | none => cF 0
+    body := body.push (instrWriteSlot output value)
+  let inst := InstanceFunction.mk "root" "root" #[] body #[] 0 0 next #[]
+  return ({ sampleRate := jn 44100, compilationMode := .fused,
+            arraySlotNames := #[], registerCount := next, arraySlotCount := 0,
+            arraySlotSizes := #[], instanceFunctions := #[inst],
+            sinks := #[{ inputs := #[0], gain := jn 1, target := 0 },
+              { inputs := #[1], gain := jn 1, target := 1 },
+              { inputs := #[2], gain := jn 1, target := 2 }],
+            sources := defaultSources, slotCount := 3,
+            slotNames := #["out:0", "out:1", "out:2"],
+            slotDefaults := #[Lean.Json.num (jn 0), Lean.Json.num (jn 0),
+              Lean.Json.num (jn 0)] } : FlatPlan)
+
+private def routedTags (plan : FlatPlan) : Array String :=
+  plan.instanceFunctions.foldl (fun out f =>
+    out ++ (f.instructions.filterMap fun i =>
+      if i.tag.startsWith "RoutedSum" then some i.tag else none)) #[]
+
+private def renderRoutedMsl (plan : FlatPlan) : IO (Except String ByteArray) := do
+  try
+    let rt ← Tropical.Ffi.Runtime.new BUFFER.toUInt32
+    Tropical.StagedLoad.loadMsl rt plan
+    let mut acc := ByteArray.empty
+    -- One prepared worker tile is enough to validate the cooperative kernel.
+    -- Draining many blocks in a tight offline loop would intentionally outrun
+    -- the asynchronous refill owner and measure starvation silence instead.
+    for _ in [0:1] do
+      rt.process
+      acc := acc ++ (← rt.outputBytes)
+    pure (.ok acc)
+  catch e => pure (.error e.toString)
+
+private def routedDecodeF64 (bytes : ByteArray) : Array Float := Id.run do
+  let mut out : Array Float := #[]
+  for sample in [0:bytes.size / 8] do
+    let mut bits : UInt64 := 0
+    for j in [0:8] do
+      bits := bits * 256 + (bytes.get! (sample * 8 + (7 - j))).toUInt64
+    out := out.push (Float.ofBits bits)
+  return out
+
+private def routedMetalUnavailable (e : String) : Bool :=
+  e.endsWith
+    "FlatRuntime: MSL source supplied but the engine was built without TROPICAL_METAL"
+
+def runRoutedSumCoverage : IO Bool := do
+  let static := routedPlan
+  let dynamic := routedPlan 4 (some (.slot 3 .float))
+  let large := routedPlan 64
+  let staticBody := static.instanceFunctions[0]!.instructions
+  let largeBody := large.instanceFunctions[0]!.instructions
+  let compact := staticBody.size == largeBody.size && routedTags static ==
+    #["RoutedSumBegin", "RoutedSumYield", "RoutedSumEnd"]
+  let roundTrip := match static.toWire with
+    | .error _ => false
+    | .ok wire => match FlatPlan.ofWire wire with
+      | .error _ => false
+      | .ok decoded =>
+        match decoded.toWire with
+        | .error _ => false
+        | .ok decodedWire =>
+          decodedWire == wire && routedTags decoded == routedTags static
+  let allS0 : Array (Option Tropical.Ir.Stage) :=
+    Array.replicate staticBody.size (some .s0)
+  let atomic := match Tropical.Ir.Stage0.hoistTyped static #[#[], allS0] with
+    | .error _ => false
+    | .ok split =>
+      routedTags split.audio == routedTags static &&
+        (match split.coeff? with | none => true | some p => routedTags p |>.isEmpty)
+  let sourceSmoke := match Tropical.Ir.EmitLlvm.emitKernel static,
+      Tropical.Ir.EmitMsl.emitKernel static with
+    | .ok llvm, .ok msl =>
+      (llvm.splitOn "@routed_routes_").length > 1 &&
+        (msl.splitOn "threadgroup_position_in_grid").length > 1 &&
+        (msl.splitOn "threadgroup_barrier").length >= 4 &&
+        (msl.splitOn "constant uint routed_csr_0").length > 1 &&
+        (msl.splitOn "switch (rs").length == 1 &&
+        (msl.splitOn s!"tropical.threadgroup_scratch_bytes={static.metalThreadgroupScratchBytes}").length > 1
+    | _, _ => false
+  match ← renderIrBytes static, ← renderIrBytes (routedUnrolledPlan 4),
+      ← renderIrBytes dynamic, ← renderIrBytes (routedUnrolledPlan 3) with
+  | .ok routedStatic, .ok unrolledStatic, .ok routedDynamic, .ok unrolledDynamic =>
+    let coreOk := compact && roundTrip && atomic && sourceSmoke &&
+      routedStatic == unrolledStatic && routedDynamic == unrolledDynamic
+    if !coreOk then
+      failGate "routed-sum-coverage" s!"compact={compact} roundTrip={roundTrip} atomic={atomic} source={sourceSmoke} staticEq={routedStatic == unrolledStatic} dynamicEq={routedDynamic == unrolledDynamic}"
+    else
+      match ← renderRoutedMsl static with
+      | .ok metalStatic =>
+        let cpu := routedDecodeF64 unrolledStatic
+        let gpu := routedDecodeF64 metalStatic
+        let metalError := (Array.range (min cpu.size gpu.size)).foldl
+          (fun worst i => max worst (Float.abs (cpu[i]! - gpu[i]!))) 0.0
+        if !gpu.isEmpty && gpu.size <= cpu.size && metalError < 1e-5 then
+          passGate "routed-sum-coverage"
+            s!"static+dynamic routed folds equal authored-order unrolling; cooperative Metal max error={metalError}; compact Plan 6 round-trips; Stage0 atomic"
+        else
+          failGate "routed-sum-coverage"
+            s!"cooperative Metal returned samples={gpu.size}/{cpu.size} maxError={metalError}"
+      | .error e =>
+        if routedMetalUnavailable e then
+          passGate "routed-sum-coverage"
+            "static+dynamic routed folds equal authored-order unrolling; compact Plan 6 round-trips; Stage0 atomic; MSL source contract checked (Metal execution unavailable in this build)"
+        else
+          failGate "routed-sum-coverage" s!"cooperative Metal: {firstLine e}"
+  | .error e, _, _, _ => failGate "routed-sum-coverage" s!"static routed: {firstLine e}"
+  | _, .error e, _, _ => failGate "routed-sum-coverage" s!"static unrolled: {firstLine e}"
+  | _, _, .error e, _ => failGate "routed-sum-coverage" s!"dynamic routed: {firstLine e}"
+  | _, _, _, .error e => failGate "routed-sum-coverage" s!"dynamic unrolled: {firstLine e}"
+
+end RoutedSumCoverage
+
 -- ── The patch-bay refusal gate (elaborator retirement, phase 5) ──────────────
 -- The wire is a patch bay: a tropical_program_2 file carrying a programDecl is
 -- refused at ingest with the retirement message. (The transitional
@@ -303,9 +479,9 @@ private def checkFlatPlan (path : String) (plan : FlatPlan) :
     checkInstanceFunction s!"{path}/{f.instanceName}" f
   let wire ← plan.toWire
   match wire.getObjVal? "schema" with
-  | .ok (.str "tropical_plan_5") => pure ()
+  | .ok (.str "tropical_plan_6") => pure ()
   | .ok got =>
-    throw s!"{path}: production plan schema is {got.compress}, expected tropical_plan_5"
+    throw s!"{path}: production plan schema is {got.compress}, expected tropical_plan_6"
   | .error e => throw s!"{path}: production plan has no schema: {e}"
 
 private def checkPerInstancePlan (path : String) (plan : PerInstancePlan) :
@@ -393,7 +569,7 @@ def runProductionNonEmission (arena : Arena)
 
   if failures.isEmpty then
     passGate "production-non-emission"
-      "builder + playground + program_2/session + export emit typed state-free plan_5 only"
+      "builder + playground + program_2/session + export emit typed state-free plan_6 only"
   else
     failGate "production-non-emission" (String.intercalate "; " failures.toList)
 
@@ -401,7 +577,7 @@ end ProductionNonEmission
 
 -- ── Serialized-plan schema boundary ────────────────────────────────────────
 
-/-- The Lean-owned serialized-plan entry point is deliberately Plan-5-only.
+/-- The Lean-owned serialized-plan entry point is deliberately Plan-6-only.
     This is a separate boundary gate from production non-emission: even a
     hand-authored document cannot revive an older schema or retired carrier. -/
 def runPlanSchemaRejection : IO Bool := do
@@ -410,22 +586,25 @@ def runPlanSchemaRejection : IO Bool := do
     | .ok _ => false
     | .error e => (e.splitOn needle).length > 1
   let plan4 := Lean.Json.mkObj [("schema", .str "tropical_plan_4")]
+  let plan5 := Lean.Json.mkObj [("schema", .str "tropical_plan_5")]
   let unknown := Lean.Json.mkObj [("schema", .str "tropical_plan_99")]
   let missing := Lean.Json.mkObj []
   let retired := Lean.Json.mkObj [
-    ("schema", .str "tropical_plan_5"),
+    ("schema", .str "tropical_plan_6"),
     ("state_init", .arr #[])]
   if rejectsWith plan4
-        "unsupported schema 'tropical_plan_4'; expected 'tropical_plan_5'"
+        "unsupported schema 'tropical_plan_4'; expected 'tropical_plan_6'"
+      && rejectsWith plan5
+        "unsupported schema 'tropical_plan_5'; expected 'tropical_plan_6'"
       && rejectsWith unknown
-        "unsupported schema 'tropical_plan_99'; expected 'tropical_plan_5'"
+        "unsupported schema 'tropical_plan_99'; expected 'tropical_plan_6'"
       && rejectsWith missing "missing string field 'schema'"
       && rejectsWith retired
-        "retired field 'state_init' is not valid in tropical_plan_5" then
-    passGate "plan5-schema-rejection"
-      "PlanDecode rejects plan_4, unknown/missing schemas, and retired carriers"
+        "retired field 'state_init' is not valid in tropical_plan_6" then
+    passGate "plan6-schema-rejection"
+      "PlanDecode rejects plan_4, plan_5, unknown/missing schemas, and retired carriers"
   else
-    failGate "plan5-schema-rejection"
+    failGate "plan6-schema-rejection"
       "PlanDecode accepted an unsupported schema/carrier or returned the wrong boundary error"
 
 def sortedNames (dir : String) (suffix : String) : IO (Array String) := do

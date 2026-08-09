@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * NumericProgramParser.hpp — Parse `tropical_plan_5` JSON metadata.
+ * NumericProgramParser.hpp — Parse `tropical_plan_6` JSON metadata.
  *
  * Thin deserialiser. Since Phase 2 (Lean owns codegen) this is the
  * *manifest reader*: load_ir consumes the plan's metadata — temp pool size
@@ -15,13 +15,14 @@
 
 #include "jit/OrcJitEngine.hpp"
 
+#include <algorithm>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 #include <string>
 #include <unordered_map>
 #include <vector>
 
-namespace tropical_plan5
+namespace tropical_plan6
 {
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -72,6 +73,9 @@ inline tropical_jit::OpTag parse_op_tag(const std::string & s)
     {"WriteSlot",   T::WriteSlot},
     {"ReduceBegin", T::ReduceBegin},
     {"ReduceEnd",   T::ReduceEnd},
+    {"RoutedSumBegin", T::RoutedSumBegin},
+    {"RoutedSumYield", T::RoutedSumYield},
+    {"RoutedSumEnd",   T::RoutedSumEnd},
   };
   const auto it = MAP.find(s);
   if (it == MAP.end())
@@ -133,9 +137,10 @@ inline tropical_jit::FlatInstr parse_instr(const nlohmann::json & ji)
   instr.result_type = parse_scalar_type(ji.value("result_type", "float"));
   instr.dst         = ji.at("dst").get<uint32_t>();
   instr.loop_count  = ji.value("loop_count", 1u);
+  instr.loop_id     = ji.value("loop_id", 0u);
   if (!ji.contains("dst_kind"))
     throw std::runtime_error(
-      "NumericProgramParser: plan-5 instruction missing required dst_kind");
+      "NumericProgramParser: plan-6 instruction missing required dst_kind");
   instr.dst_kind = parse_dst_kind(ji["dst_kind"].get<std::string>());
   if (ji.contains("args"))
     for (const auto & a : ji["args"])
@@ -143,14 +148,20 @@ inline tropical_jit::FlatInstr parse_instr(const nlohmann::json & ji)
   if (ji.contains("strides"))
     for (const auto & s : ji["strides"])
       instr.strides.push_back(s.get<uint8_t>());
+  if (instr.tag == tropical_jit::OpTag::RoutedSumBegin)
+  {
+    instr.routed_output_count = ji.at("output_count").get<uint32_t>();
+    for (const auto & route : ji.at("routes"))
+      instr.routed_routes.push_back(route.is_null() ? -1 : route.get<int32_t>());
+  }
   return instr;
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Parsed plan_5 result
+// Parsed plan_6 result
 // ─────────────────────────────────────────────────────────────────────────────
 
-struct ParsedPlan5
+struct ParsedPlan6
 {
   tropical_jit::FlatProgram                program;
   std::vector<std::string>                 array_slot_names;
@@ -182,6 +193,8 @@ struct ParsedPlan5
   // kernel reads a whole, consistent generation of columns across a live knob
   // move. An absent field is the canonical empty table.
   std::vector<uint32_t> coeff_array_slots;
+  bool metal_sample_threadgroups = false;
+  uint32_t metal_threadgroup_scratch_bytes = 0;
 };
 
 // Parse the optional `compilation_mode` JSON string. Fails closed on
@@ -213,7 +226,7 @@ inline void reject_retired_fields(const nlohmann::json & plan)
     if (plan.contains(field))
       throw std::runtime_error(
         std::string{"NumericProgramParser: retired field '"} + field +
-        "' is not valid in tropical_plan_5");
+        "' is not valid in tropical_plan_6");
 }
 
 /** Parse a single `InstanceProgram` from JSON, recursing into nested
@@ -229,7 +242,7 @@ inline tropical_jit::InstanceProgram parse_instance_program(const nlohmann::json
     for (const auto & ji : jf["instructions"])
       inst.instructions.push_back(parse_instr(ji));
   // Slot-based parent→child input wiring. Empty arrays are omitted by the
-  // canonical Plan-5 encoder. Same instruction
+  // canonical Plan-6 encoder. Same instruction
   // shape as `instructions`; difference is purely WHEN they emit —
   // the parent's emit_kernel_block runs each child's
   // pre_input_instructions immediately before recursing into that
@@ -249,14 +262,44 @@ inline tropical_jit::InstanceProgram parse_instance_program(const nlohmann::json
   return inst;
 }
 
-/** Parse a tropical_plan_5 JSON object. The C++ side supports nested
+inline bool has_routed_sum(const tropical_jit::InstanceProgram & inst)
+{
+  for (const auto & instr : inst.preamble_instructions)
+    if (instr.tag == tropical_jit::OpTag::RoutedSumBegin) return true;
+  for (const auto & instr : inst.pre_input_instructions)
+    if (instr.tag == tropical_jit::OpTag::RoutedSumBegin) return true;
+  for (const auto & instr : inst.instructions)
+    if (instr.tag == tropical_jit::OpTag::RoutedSumBegin) return true;
+  for (const auto & child : inst.children)
+    if (has_routed_sum(child)) return true;
+  return false;
+}
+
+/** Parse a tropical_plan_6 JSON object. The C++ side supports nested
  *  `instance_functions` (the fractal architecture): each function may
  *  have `children: InstanceFunction[]` that emit recursively inside the
  *  parent's body. Canonical leaf kernels omit `children`. */
-inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
+inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
 {
-  ParsedPlan5 result;
+  ParsedPlan6 result;
   reject_retired_fields(plan);
+
+  if (plan.contains("metal_execution"))
+  {
+    const auto & execution = plan.at("metal_execution");
+    const std::string kind = execution.at("kind").get<std::string>();
+    if (kind != "sample_threads" && kind != "sample_threadgroups")
+      throw std::runtime_error(
+        "NumericProgramParser: unknown metal execution kind '" + kind + "'");
+    result.metal_sample_threadgroups = kind == "sample_threadgroups";
+    result.metal_threadgroup_scratch_bytes =
+      execution.value("threadgroup_scratch_bytes", 0u);
+    const std::string policy =
+      execution.value("requested_group_policy", std::string{"pipeline_width"});
+    if (result.metal_sample_threadgroups && policy != "pipeline_width")
+      throw std::runtime_error(
+        "NumericProgramParser: unsupported Metal group policy '" + policy + "'");
+  }
 
   result.sample_rate = plan.value("config", nlohmann::json::object())
                            .value("sampleRate", 44100.0);
@@ -280,6 +323,16 @@ inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
     for (const auto & jf : plan["instance_functions"])
       prog.instance_functions.push_back(parse_instance_program(jf));
   }
+  const bool routed = std::any_of(
+    prog.instance_functions.begin(), prog.instance_functions.end(),
+    [](const auto & inst) { return has_routed_sum(inst); });
+  if (routed && (!result.metal_sample_threadgroups
+                 || result.metal_threadgroup_scratch_bytes == 0))
+    throw std::runtime_error(
+      "NumericProgramParser: routed Plan 6 requires cooperative Metal execution metadata");
+  if (!routed && result.metal_sample_threadgroups)
+    throw std::runtime_error(
+      "NumericProgramParser: cooperative Metal execution requires a routed region");
 
   // ── sinks: device-bound outputs (slot-mix path) ──
   if (plan.contains("sinks"))
@@ -296,7 +349,7 @@ inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
     }
   }
 
-  // ── sources: runtime-bound inputs (the dual of sinks). The Plan-5 encoder
+  // ── sources: runtime-bound inputs (the dual of sinks). The Plan-6 encoder
   //    omits the canonical pair [tick, rate], which is restored here. ──
   if (plan.contains("sources"))
   {
@@ -334,7 +387,7 @@ inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
   if (plan.contains("param_disciplines"))
     for (const auto & d : plan["param_disciplines"])
     {
-      ParsedPlan5::ParamDiscipline pd;
+      ParsedPlan6::ParamDiscipline pd;
       pd.name       = d.value("name", std::string{});
       pd.discipline = d.value("discipline", std::string{"raw"});
       pd.glide_dur_sec = d.value("glide_dur_sec", 0.0);
@@ -351,4 +404,4 @@ inline ParsedPlan5 parse_plan5(const nlohmann::json & plan)
   return result;
 }
 
-} // namespace tropical_plan5
+} // namespace tropical_plan6

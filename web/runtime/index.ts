@@ -1,7 +1,7 @@
 /**
  * @tropical/runtime-wasm (in-repo for now) — the browser-side consumer of
  * tropical's wasm codegen. Depends only on the KernelManifest contract; knows
- * nothing of tropical_plan_5 or the compiler. Extract to its own package when
+ * nothing of tropical_plan_6 or the compiler. Extract to its own package when
  * a second consumer appears (see design notes / CLAUDE.md).
  */
 export type { KernelManifest } from './manifest.js'
