@@ -44,6 +44,48 @@ private def terminalHot (left right : ModalMode) : Bool :=
   samePhysicalFrequency left right || couplingHot left right ||
     couplingHot (withUnitAmplitude left) (withUnitAmplitude right)
 
+/-- Columns for one live Cauchy reduction.  Keeping physical pole coordinates
+    here avoids reconstructing `omega` from the oscillator increment. -/
+private structure CauchyCols where
+  count : Nat
+  poleRe : Sig
+  poleIm : Sig
+  ampRe : Sig
+  ampIm : Sig
+
+private structure CauchyModeSym where
+  pole : CplxE
+  amp : CplxE
+
+private def cauchyCols (modes : Array ModalMode) : CauchyCols where
+  count := modes.size
+  poleRe := Sig.arr (modes.map fun mode => mode.poleE.1)
+  poleIm := Sig.arr (modes.map fun mode => mode.poleE.2)
+  ampRe := Sig.arr (modes.map fun mode => mode.ampE.1)
+  ampIm := Sig.arr (modes.map fun mode => mode.ampE.2)
+
+/-- Ordered complex reduction over a mode table.  Binder 1 is reserved for
+    these coefficient-side loops; the terminal oscillator bank uses binder 0.
+    Two scalar reductions are required by today's scalar `bankSum`, but share
+    the same symbolic quotient and authored row order. -/
+private def cauchyFold (modes : Array ModalMode)
+    (body : CauchyModeSym → CplxE) : CplxE :=
+  if modes.isEmpty then natE 0 else
+  let cols := cauchyCols modes
+  let index := Sig.loopIdx 1
+  let value := body {
+    pole := (Sig.index cols.poleRe index, Sig.index cols.poleIm index)
+    amp := (Sig.index cols.ampRe index, Sig.index cols.ampIm index) }
+  let tables := #[cols.poleRe, cols.poleIm, cols.ampRe, cols.ampIm]
+  (Sig.bankSum cols.count tables value.1 none 1,
+   Sig.bankSum cols.count tables value.2 none 1)
+
+private def differenceSum (pole : CplxE) (modes : Array ModalMode) : CplxE :=
+  cauchyFold modes fun mode => cdivE mode.amp (csubE pole mode.pole)
+
+private def physicalSum (pole : CplxE) (modes : Array ModalMode) : CplxE :=
+  cauchyFold modes fun mode => cdivE mode.amp (caddE pole mode.pole)
+
 /-- Syntactically identical physical poles take the exact beta-limit route. -/
 def syntacticSameSideClassifier : SameSideClassifier := fun _ left right =>
   if left.sigma == right.sigma && left.omega == right.omega
@@ -52,21 +94,25 @@ def syntacticSameSideClassifier : SameSideClassifier := fun _ left right =>
 
 private def terminalSameSide (left right : Array ModalMode) :
     Array ModalMode × Array PairedMode := Id.run do
-  if left.isEmpty then return (#[], #[])
+  -- Keep a zero-residue row for the nonempty origin even when this same-side
+  -- product is empty.  The terminal collector may still add an FP/PF residue
+  -- to that pole below (notably a future-only source and a reversed room).
+  if left.isEmpty then
+    return (right.map fun mode => modeOfE mode.poleE (natE 0), #[])
+  if right.isEmpty then
+    return (left.map fun mode => modeOfE mode.poleE (natE 0), #[])
   let hot := left.map fun l => right.map fun r => terminalHot l r
-  if hot.all (fun row => row.all (!·)) then
-    return (residueComposeEC left right, #[])
   let isHot := fun i j => (hot[i]!)[j]!
   let forced := left.mapIdx fun i l =>
-    let transfer := right.zipIdx.foldl (fun total (r, j) =>
-      if isHot i j then total
-      else caddE total (cdivE r.ampE (csubE l.poleE r.poleE))) (natE 0)
+    let cold := right.zipIdx.filterMap fun (r, j) =>
+      if isHot i j then none else some r
+    let transfer := differenceSum l.poleE cold
     modeOfE l.poleE (cmulE l.ampE transfer)
   let ringing := right.mapIdx fun j r =>
-    let coupling := left.zipIdx.foldl (fun total (l, i) =>
-      if isHot i j then total
-      else caddE total (cdivE l.ampE (csubE l.poleE r.poleE))) (natE 0)
-    modeOfE r.poleE (cnegE (cmulE r.ampE coupling))
+    let cold := left.zipIdx.filterMap fun (l, i) =>
+      if isHot i j then none else some l
+    let coupling := differenceSum r.poleE cold
+    modeOfE r.poleE (cmulE r.ampE coupling)
   let mut paired := #[]
   for (l, i) in left.zipIdx do
     for (r, j) in right.zipIdx do
@@ -144,16 +190,27 @@ def TerminalBank.realizeSig (terminal : TerminalBank)
   let past := pairedSig terminal.pastPaired mirroredClock anchorSamples
   add (terminal.bank.realizeSig clkInt anchorSamples count?) (add future past)
 
-private def mixedPairs (left right : Array ModalMode)
-    (pair : ModalMode → ModalMode → Expansion) : Expansion :=
-  left.foldl (fun accumulated leftMode =>
-    right.foldl (fun accumulated rightMode =>
-      accumulated.add (pair leftMode rightMode)) accumulated) {}
+/-- Add the exact mixed-orientation residue contribution to a mode already
+    carrying its cold same-side residue.  For degree-zero `F(λ,a) * P(μ,b)`,
+    both surviving pole residues receive `-a*b/(λ+μ)`.  Collecting those
+    contributions on the existing poles avoids materializing two modes per
+    Cartesian pair while preserving the bilateral partial fraction. -/
+private def mixedResidue (original : ModalMode)
+    (opposite : Array ModalMode) : CplxE :=
+  cnegE (cmulE original.ampE (physicalSum original.poleE opposite))
 
-/-- Compose the last room with EC/DD stability on both same-side arms.  Mixed
-    future/past pairs have no stable-pole coincidence and use the exact closed
-    form directly.  This is intentionally terminal: paired atoms are not yet a
-    generally composable modal source for a later room or gauge. -/
+private def addMixedResidue (sameSide : ModalMode)
+    (contribution : CplxE) : ModalMode :=
+  { sameSide with
+    cre := add sameSide.cre contribution.1
+    cim := add sameSide.cim contribution.2 }
+
+/-- Compose the last room with EC/DD stability on both same-side arms.  The
+    degree-zero mixed `FP`/`PF` pairs are collected onto their existing poles;
+    this is the exact partial fraction, but keeps the terminal carrier linear
+    rather than Cartesian in bank size.  This is intentionally terminal:
+    paired atoms are not yet a generally composable modal source for a later
+    room or gauge. -/
 def Bank.convolveKernelTerminal (input : Bank) (room : Array ModalMode)
     (direction : Sig) : TerminalBank :=
   let kernel := Bank.kernel room direction
@@ -170,15 +227,32 @@ def Bank.convolveKernelTerminal (input : Bank) (room : Array ModalMode)
   else
     let (future, futurePaired) := terminalSameSide input.future kernel.future
     let (past, pastPaired) := terminalSameSide input.past kernel.past
-    let fp := mixedPairs input.future kernel.past fun f p =>
-      convolveFuturePast (Atom.ofMode f) (Atom.ofMode p)
-    let pf := mixedPairs input.past kernel.future fun p f =>
-      convolvePastFuture (Atom.ofMode p) (Atom.ofMode f)
-    let mixed := fp.add pf |>.toBank
+    -- `terminalSameSide` retains authored input modes followed by authored
+    -- kernel modes.  Add each opposite-axis Cauchy gain to that matching row;
+    -- hot same-side pairs remain excluded there and occur once in the DD bank.
+    let futureInput := (future.extract 0 input.future.size).zip input.future
+      |>.map fun (mode, original) =>
+        let contribution := mixedResidue original kernel.past
+        (addMixedResidue mode contribution, contribution)
+    let futureKernel := (future.extract input.future.size future.size).zip kernel.future
+      |>.map fun (mode, original) =>
+        let contribution := mixedResidue original input.past
+        (addMixedResidue mode contribution, contribution)
+    let pastInput := (past.extract 0 input.past.size).zip input.past
+      |>.map fun (mode, original) =>
+        addMixedResidue mode (mixedResidue original kernel.future)
+    let pastKernel := (past.extract input.past.size past.size).zip kernel.past
+      |>.map fun (mode, original) =>
+        addMixedResidue mode (mixedResidue original input.future)
+    -- Either origin side contains the exact mixed value at the strike.  Reuse
+    -- the future-origin contribution nodes already feeding those residues;
+    -- a separate Cartesian seam fold would duplicate the same live quotients.
+    let atZero := (futureInput ++ futureKernel).foldl (fun total row =>
+      caddE total row.2) (natE 0)
     { bank := {
-        future := future ++ mixed.future
-        past := past ++ mixed.past
-        atZero := mixed.atZero }
+        future := (futureInput ++ futureKernel).map (fun row => row.1)
+        past := pastInput ++ pastKernel
+        atZero }
       futurePaired
       pastPaired }
 

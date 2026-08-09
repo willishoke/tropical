@@ -1612,6 +1612,21 @@ termination_by sizeOf f
 decreasing_by
   exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children child.2
 
+/-- Approximate backend work without invoking LLVM.  Counting operands as well
+    as instructions makes a packed coefficient table visible: one `Pack`
+    instruction still emits one store per operand in the native kernel. -/
+private def modalUniversePlanFootprint (plan : Tropical.Plan.FlatPlan) : Nat :=
+  plan.instanceFunctions.foldl (fun total function =>
+    (Tropical.Ir.Stage0.collectBlocks function).foldl (fun total block =>
+      block.foldl (fun total instruction => total + 1 + instruction.args.size)
+        total) total) 0
+
+private def modalUniverseSplitFootprint
+    (fixture : Tropical.Playground.CompiledPatch) : Except String Nat := do
+  let split ← Tropical.Ir.Stage0.hoistTyped fixture.plan fixture.stageBlocks
+  let coefficient := split.coeff?.map modalUniversePlanFootprint |>.getD 0
+  return modalUniversePlanFootprint split.audio + coefficient
+
 /-- The U1 temporal-law gate. Production-compiled
     `resonator → room A → room B` fixtures are sampled under live room images,
     a constant absolute branch address, and a downstream reverse warp. Each
@@ -1623,6 +1638,10 @@ decreasing_by
     instructions. -/
 def runModalUniverseHistory (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let oneRoomSrc := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"room_a\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.6},\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"room_a\"]}}],\"out\":\"out\"}"
   let forwardSrc := "{\"nodes\":[" ++
     "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
     "{\"id\":\"room_a\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.6},\"in\":{\"in\":[\"res\"]}}," ++
@@ -1647,11 +1666,37 @@ def runModalUniverseHistory (arena : Arena)
   | .error e, _, _ | _, .error e, _ | _, _, .error e =>
     failGate "modal-universe-history" s!"compile: {firstLine e}"
   | .ok compiled, .ok holdCompiled, .ok reverseCompiled =>
+    let baseline ← match compile oneRoomSrc with
+      | .error error =>
+          return ← failGate "modal-universe-history"
+            s!"one-room footprint compile: {firstLine error}"
+      | .ok fixture => pure fixture
+    let (oneRoomFootprint, twoRoomFootprint) ←
+      match modalUniverseSplitFootprint baseline,
+          modalUniverseSplitFootprint compiled with
+      | .ok one, .ok two => pure (one, two)
+      | .error error, _ | _, .error error =>
+          return ← failGate "modal-universe-history"
+            s!"footprint split: {firstLine error}"
+    -- Banking makes the one-room terminal unusually small; the second room
+    -- legitimately adds four oriented Cauchy families plus its hot DD rows.
+    -- Sevenfold still rejects the measured Cartesian form (8.6×) while the
+    -- absolute ceiling prevents both sides from drifting upward together.
+    let compact := twoRoomFootprint ≤ 7 * oneRoomFootprint &&
+      twoRoomFootprint ≤ 350000
+    IO.println s!"        split compile footprint: one-room={oneRoomFootprint} two-room={twoRoomFootprint} compact={compact}"
+    if !compact then
+      return ← failGate "modal-universe-history"
+        "two-room modal plan exceeds the linear compile-footprint envelope"
     let loadRooms := fun (fixture : Tropical.Playground.CompiledPatch) => do
       let rt ← Tropical.Ffi.Runtime.new 128
       Tropical.StagedLoad.loadTyped rt fixture.plan fixture.stageBlocks
-      let a? ← rt.slotIndex? "param:room_a.rt60"
-      let b? ← rt.slotIndex? "param:room_b.rt60"
+      let glideSlots := fun (name : String) => do
+        let v0? ← rt.slotIndex? s!"param:{name}#v0"
+        let v1? ← rt.slotIndex? s!"param:{name}#v1"
+        pure (v0?.bind fun v0 => v1?.map fun v1 => (v0, v1))
+      let a? ← glideSlots "room_a.rt60"
+      let b? ← glideSlots "room_b.rt60"
       pure (rt, a?, b?)
     let (rtA, aA?, bA?) ← loadRooms compiled
     let (rtB, aB?, bB?) ← loadRooms compiled
@@ -1660,10 +1705,13 @@ def runModalUniverseHistory (arena : Arena)
     match aA?, bA?, aB?, bB?, aHold?, bHold?, aReverse?, bReverse? with
     | some aA, some bA, some aB, some bB, some aHold, some bHold,
         some aReverse, some bReverse =>
-      let setImage := fun (rt : Tropical.Ffi.Runtime) (a b : UInt32)
+      let setImage := fun (rt : Tropical.Ffi.Runtime)
+          (a b : UInt32 × UInt32)
           (x y : Float) => do
-        rt.setSlot a x
-        rt.setSlot b y
+        rt.setSlot a.1 x
+        rt.setSlot a.2 x
+        rt.setSlot b.1 y
+        rt.setSlot b.2 y
       let renderAt := fun (rt : Tropical.Ffi.Runtime) (t : UInt64) => do
         rt.setSampleIndex t
         rt.process
@@ -1758,7 +1806,8 @@ def runModalUniverseHistory (arena : Arena)
         failGate "modal-universe-history"
           s!"eachRoom={eachRoomRewrites} restored={restoredExact} order={seekOrderExact} hold={holdExact} reverse={reverseExact} deferred={deferred} modal={modalThroughChain} noLegacyState={noLegacyState}"
     | _, _, _, _, _, _, _, _ =>
-      failGate "modal-universe-history" "nested room RT60 slots missing"
+      failGate "modal-universe-history"
+        s!"nested room RT60 slots missing: forward-a={aA?.isSome}/{bA?.isSome} forward-b={aB?.isSome}/{bB?.isSome} hold={aHold?.isSome}/{bHold?.isSome} reverse={aReverse?.isSome}/{bReverse?.isSome}"
 
 /-- THE MODAL LIVE gate (the payoff). A JSON patch `resonator(freq) → reverb → out`
     compiled through the real `compilePlanPure` — decode → lowerModal → symbolic
@@ -1799,7 +1848,7 @@ def runModalLive (arena : Arena)
       Tropical.StagedLoad.loadTyped rt2 plan stageBlocks
       let fIdx? ← rt.slotIndex? "param:res.freq"
       let dPresent := (← rt.slotIndex? "param:res.decay").isSome
-      let rtPresent := (← rt.slotIndex? "param:rev.rt60").isSome
+      let rtPresent := (← rt.slotIndex? "param:rev.rt60#v0").isSome
       rt.process
       rt2.process
       let b1a := decodeF64LE (← rt.outputBytes)
