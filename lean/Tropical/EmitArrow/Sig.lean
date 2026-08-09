@@ -51,6 +51,11 @@ inductive Sig where
   -- `idxId` names the binder the body's `loopIdx id` refers to.
   | bankSum (count : Nat) (tables : Array Sig) (body : Sig)
       (dynCount? : Option Sig) (idxId : Nat)
+  /-- Static-capacity pure map followed by an authored-order routed additive
+      fold. Routed results are deliberately float-only until Plan array slots
+      carry element types end to end. -/
+  | routedSum (capacity outputCount : Nat) (routes : Array (Option Nat))
+      (tables values : Array Sig) (dynCount? : Option Sig) (idxId : Nat)
 deriving Repr, Inhabited, BEq
 
 /-- A clock-as-value expression (Q32.32 fixed-point sample coordinate). -/
@@ -85,6 +90,18 @@ def lowerSigTree : Sig → EArenaM ExprId
       | none => pure none
       | some d => do pure (some (← lowerSigTree d))
     eintern (.bankSum c ts' b' dc' ii)
+  | .routedSum c oc rs ts vs dc ii => do
+    let ts' ← ts.attach.mapM fun ⟨x, _⟩ => lowerSigTree x
+    let vs' ← vs.attach.mapM fun ⟨x, _⟩ => lowerSigTree x
+    let dc' ← match dc with
+      | none => pure none
+      | some d => do pure (some (← lowerSigTree d))
+    eintern (.routedSum c oc rs ts' vs' dc' ii)
+termination_by sig => sizeOf sig
+decreasing_by
+  all_goals first
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ _›; simp_all; omega)
+    | (simp_all; omega)
 
 /-- Pointer-identity-memoized lowering: a hash map from object address to
     interned id, threaded alongside the arena. Sound because `Sig` values
@@ -113,6 +130,9 @@ private unsafe def lowerSigPtrGo (s : Sig) :
     | .loopIdx id     => intern1 (.loopIdx id)
     | .bankSum c ts b dc ii => do
       intern1 (.bankSum c (← ts.mapM lowerSigPtrGo) (← lowerSigPtrGo b) (← dc.mapM lowerSigPtrGo) ii)
+    | .routedSum c oc rs ts vs dc ii => do
+      intern1 (.routedSum c oc rs (← ts.mapM lowerSigPtrGo)
+        (← vs.mapM lowerSigPtrGo) (← dc.mapM lowerSigPtrGo) ii)
   modify fun (a, m) => (a, m.insert key r)
   return r
 
@@ -254,7 +274,16 @@ def readsSampleIndex : Sig → Bool
   | .arr items          => items.attach.any fun ⟨x, _⟩ => readsSampleIndex x
   | .bankSum _ ts b _ _  =>
     (ts.attach.any fun ⟨x, _⟩ => readsSampleIndex x) || readsSampleIndex b
+  | .routedSum _ _ _ ts vs dc _ =>
+    (ts.attach.any fun ⟨x, _⟩ => readsSampleIndex x) ||
+      (vs.attach.any fun ⟨x, _⟩ => readsSampleIndex x) ||
+      (match dc with | none => false | some d => readsSampleIndex d)
   | _                   => false
+termination_by sig => sizeOf sig
+decreasing_by
+  all_goals first
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ _›; simp_all; omega)
+    | (simp_all; omega)
 
 private def isZeroLit : Sig → Bool | .num n => n.mantissa == 0 | _ => false
 private def isOneLit  : Sig → Bool | .num n => n.mantissa == 1 && n.exponent == 0 | _ => false
@@ -275,7 +304,17 @@ def settleRamps : Sig → Sig
   | .arr items          => .arr (items.attach.map fun ⟨x, _⟩ => settleRamps x)
   | .bankSum c ts b dc ii =>
     .bankSum c (ts.attach.map fun ⟨x, _⟩ => settleRamps x) (settleRamps b) dc ii
+  | .routedSum c oc rs ts vs dc ii =>
+    .routedSum c oc rs
+      (ts.attach.map fun ⟨x, _⟩ => settleRamps x)
+      (vs.attach.map fun ⟨x, _⟩ => settleRamps x)
+      (match dc with | none => none | some d => some (settleRamps d)) ii
   | s                   => s
+termination_by sig => sizeOf sig
+decreasing_by
+  all_goals first
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ _›; simp_all; omega)
+    | (simp_all; omega)
 
 /-- `settle e` — the τ-independent (s0) value `e` converges to as the clock runs,
     when that value exists; `none` otherwise. The one converging τ-dependent

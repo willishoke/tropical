@@ -64,10 +64,11 @@ private def cauchyCols (modes : Array ModalMode) : CauchyCols where
   ampRe := Sig.arr (modes.map fun mode => mode.ampE.1)
   ampIm := Sig.arr (modes.map fun mode => mode.ampE.2)
 
-/-- Ordered complex reduction over a mode table.  Binder 1 is reserved for
+/-- Ordered complex reduction over a mode table. Binder 1 is reserved for
     these coefficient-side loops; the terminal oscillator bank uses binder 0.
-    Two scalar reductions are required by today's scalar `bankSum`, but share
-    the same symbolic quotient and authored row order. -/
+    Real and imaginary components are two routed outputs of ONE mapped body,
+    so a complex reciprocal is evaluated once and both authored left folds see
+    the same item order. -/
 private def cauchyFold (modes : Array ModalMode)
     (body : CauchyModeSym → CplxE) : CplxE :=
   if modes.isEmpty then natE 0 else
@@ -77,8 +78,10 @@ private def cauchyFold (modes : Array ModalMode)
     pole := (Sig.index cols.poleRe index, Sig.index cols.poleIm index)
     amp := (Sig.index cols.ampRe index, Sig.index cols.ampIm index) }
   let tables := #[cols.poleRe, cols.poleIm, cols.ampRe, cols.ampIm]
-  (Sig.bankSum cols.count tables value.1 none 1,
-   Sig.bankSum cols.count tables value.2 none 1)
+  let routes := (Array.range cols.count).foldl
+    (fun out _ => out.push (some 0) |>.push (some 1)) #[]
+  let image := Sig.routedSum cols.count 2 routes tables #[value.1, value.2] none 1
+  (Sig.index image (lit 0), Sig.index image (lit 1))
 
 private def differenceSum (pole : CplxE) (modes : Array ModalMode) : CplxE :=
   cauchyFold modes fun mode => cdivE mode.amp (csubE pole mode.pole)

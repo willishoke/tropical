@@ -47,7 +47,7 @@ const dacOut = (instance: string, output: string) => ({
   expr: { op: 'ref', instance, output },
 })
 
-/** Compile a `ProgramFile` to a `tropical_plan_5` wire plan JSON string via
+/** Compile a `ProgramFile` to a `tropical_plan_6` wire plan JSON string via
  *  the Lean `diffcli compile` front door (native oracle + manifest source).
  *  `--fixtures` registers the builder-authored test programs (`OpZoo`) on top
  *  of the stdlib so patch-bay fixtures can instantiate them by name. */
@@ -58,7 +58,7 @@ function compileViaLean(program: ProgramFile): string {
   return r.stdout.toString().trim()
 }
 
-/** Trim a plan_5 JSON to the KernelManifest the runtime consumes. */
+/** Trim a plan_6 JSON to the KernelManifest the runtime consumes. */
 function manifestFromPlan(planJson: string): KernelManifest {
   const p = JSON.parse(planJson)
   return {

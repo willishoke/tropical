@@ -53,6 +53,8 @@ def arrowBlockGates : Nat := 103
 set_option maxRecDepth 2048 in
 def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
+  if args.contains "--routed-only" then
+    return if ← runRoutedSumCoverage then 0 else 1
   if args.contains "--oriented-patch-only" then
     return if ← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch {} then 0 else 1
   if args.contains "--ecdd-only" then
@@ -141,6 +143,11 @@ def main (args : List String) : IO UInt32 := do
   total := total + 1
   if !(← runReduceCoverage) then failed := failed + 1
 
+  -- ── (c⁗⁺) Static routed reduction: semantics + compact Plan 6 region ──────
+  IO.println "routed reduction (compact region ≡ authored-order unrolling):"
+  total := total + 1
+  if !(← runRoutedSumCoverage) then failed := failed + 1
+
   -- ── (c⁗ᵃ) The patch-bay refusal (elaborator retirement, phase 5) ───────────
   -- Program definitions over the wire are retired: a programDecl-bearing
   -- file dies at ingest with the retirement message.
@@ -218,7 +225,7 @@ def main (args : List String) : IO UInt32 := do
   | .ok (arena, resolved) =>
     arrowRan := true
     -- ── Production legacy-state non-emission (Lane F quarantine) ────────────
-    IO.println "production non-emission (current front doors → state-free plan_5):"
+    IO.println "production non-emission (current front doors → state-free plan_6):"
     total := total + 1
     if !(← runProductionNonEmission arena resolved) then failed := failed + 1
     total := total + 1

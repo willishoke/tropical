@@ -3,13 +3,13 @@ import Tropical.Plan
 import Tropical.Parse.OrderedJson
 
 /-!
-# PlanDecode — `tropical_plan_5 JSON → FlatPlan` (the inverse of `toWire`)
+# PlanDecode — `tropical_plan_6 JSON → FlatPlan` (the inverse of `toWire`)
 
 Phase 2 deletes the C++ codegen, so the plan-text → kernel capability moves
 to Lean: `render-bytes <plan.json>` (and any consumer holding a serialized
 plan rather than an in-memory `FlatPlan`) parses here, then emits IR via
 `EmitLlvm` and loads it with `load_ir`. Mirrors `Plan.lean`'s `*.toWire`
-field-for-field. Plan 5 is the only accepted runtime schema.
+field-for-field. Plan 6 is the only accepted runtime schema.
 
 Decodes over `JsonV` (the array-backed twin with the `sizeOf` lemmas), so
 the instance-tree recursion is total by descent on the document — the
@@ -48,7 +48,7 @@ private def rejectRetiredFields (j : JsonV) : Except String Unit := do
       "state_reg_offset", "output_targets", "outputs", "instructions",
       "scheduler_function"] do
     if (j.getField? field).isSome then
-      throw s!"PlanDecode: retired field '{field}' is not valid in tropical_plan_5"
+      throw s!"PlanDecode: retired field '{field}' is not valid in tropical_plan_6"
 
 private def optNum (j : JsonV) (k : String) (dflt : JsonNumber) : JsonNumber :=
   match j.getField? k with
@@ -97,7 +97,17 @@ private def instrOfWire (j : JsonV) : Except String NInstr := do
   let strides := (optArr j "strides").map fun x =>
     match x with | .num n => n.toFloat.toUInt64.toNat | _ => 0
   let resultType ← scalarOfWire j "result_type"
-  pure { tag, dst, args, loopCount, strides, resultType, loopId }
+  let routedOutputCount := optNat j "output_count" 0
+  let routedRoutes : Array (Option Nat) ← if tag == "RoutedSumBegin" then
+      (optArr j "routes").mapM fun route => match route with
+        | .null => pure none
+        | .num n => pure (some n.toFloat.toUInt64.toNat)
+        | _ => throw "PlanDecode: routed route must be a natural number or null"
+    else pure #[]
+  pure ({ tag := tag, dst := dst, args := args, loopCount := loopCount,
+          strides := strides, resultType := resultType, loopId := loopId,
+          routedOutputCount := routedOutputCount,
+          routedRoutes := routedRoutes } : NInstr)
 
 private def instanceOfWire (j : JsonV) : Except String InstanceFunction := do
   let name ← reqStr j "name"
@@ -141,8 +151,8 @@ private def natArr (j : JsonV) (k : String) : Array Nat :=
 
 private def ofWireV (j : JsonV) : Except String FlatPlan := do
   let schema ← reqStr j "schema"
-  if schema != "tropical_plan_5" then
-    throw s!"PlanDecode: unsupported schema '{schema}'; expected 'tropical_plan_5'"
+  if schema != "tropical_plan_6" then
+    throw s!"PlanDecode: unsupported schema '{schema}'; expected 'tropical_plan_6'"
   rejectRetiredFields j
   let sampleRate := match (j.getField? "config").bind (·.getField? "sampleRate") with
     | some (.num n) => n
@@ -170,7 +180,7 @@ private def ofWireV (j : JsonV) : Except String FlatPlan := do
     slotNames := strArr j "slot_names",
     slotDefaults }
 
-/-- Parse a tropical_plan_5 JSON object into a `FlatPlan`. -/
+/-- Parse a tropical_plan_6 JSON object into a `FlatPlan`. -/
 def FlatPlan.ofWire (j : Json) : Except String FlatPlan := do
   match Tropical.Parse.JsonV.parse j.compress with
   | .error e => .error s!"PlanDecode: internal reparse failure: {e}"

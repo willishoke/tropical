@@ -212,6 +212,11 @@ inductive ENode where
       the id must be unique along the region's nesting chain — see `loopIdx`). -/
   | bankSum (count : Nat) (tables : Array ExprId) (body : ExprId)
       (dynCount? : Option ExprId := none) (idxId : Nat := 0)
+  /-- A fixed map domain with structural one-to-many routes into a fixed float
+      result image. Contributions fold in `(item, emit)` order. -/
+  | routedSum (capacity outputCount : Nat) (routes : Array (Option Nat))
+      (tables values : Array ExprId) (dynCount? : Option ExprId := none)
+      (idxId : Nat := 0)
 deriving BEq, ReflBEq, LawfulBEq, Repr, Inhabited
 
 /-- O(1) structural hash — children are ids (no subtree recursion). Op tags and
@@ -233,6 +238,19 @@ def enodeHash : ENode → UInt64
   | .sampleIndex    => 17
   | .loopIdx id     => mixHash 28 (hash id)
   | .bankSum c ts b dc ii => mixHash (mixHash (mixHash (mixHash (mixHash 29 (hash c)) (hash (ts.map (·.idx)))) (hash b.idx)) (hash (dc.map (·.idx)))) (hash ii)
+  | .routedSum c oc rs ts vs dc ii =>
+    mixHash
+      (mixHash
+        (mixHash
+          (mixHash
+            (mixHash
+              (mixHash
+                (mixHash 30 (hash c)) (hash oc))
+              (hash rs))
+            (hash (ts.map (·.idx))))
+          (hash (vs.map (·.idx))))
+        (hash (dc.map (·.idx))))
+      (hash ii)
 
 instance : Hashable ENode := ⟨enodeHash⟩
 
@@ -349,6 +367,12 @@ def enodeSig (sigs : Array StageSig) : ENode → StageSig
     match dc with
     | some d => s.join (sigAt sigs d)
     | none => s
+  | .routedSum _ _ _ ts vs dc _ =>
+    let s := (ts ++ vs).foldl
+      (fun acc id => acc.join (sigAt sigs id)) ({ base := .fold } : StageSig)
+    match dc with
+    | some d => s.join (sigAt sigs d)
+    | none => s
 
 /-- Interned resolved-expression node store. Append-only; ids are assigned in
     first-seen order; `dedup` collapses equal nodes; `sigs[id]` is the node's
@@ -399,6 +423,7 @@ def ENode.children : ENode → Array ExprId
   | .arraySet a b c => #[a, b, c]
   | .index a b => #[a, b]
   | .bankSum _ ts b dc _ => (ts.push b) ++ dc.toArray
+  | .routedSum _ _ _ ts vs dc _ => ts ++ vs ++ dc.toArray
 
 /-- Child-descending well-formedness: every edge points to a strictly
     smaller id. `eintern` assigns `⟨nodes.size⟩` to each fresh node, so

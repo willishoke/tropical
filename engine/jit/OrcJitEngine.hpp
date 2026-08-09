@@ -67,6 +67,9 @@ enum class OpTag : uint8_t
   // Metadata-only here — codegen is Lean's (EmitLlvm/EmitMsl).
   ReduceBegin,
   ReduceEnd,
+  RoutedSumBegin,
+  RoutedSumYield,
+  RoutedSumEnd,
 };
 
 enum class OperandKind : uint8_t
@@ -130,6 +133,9 @@ struct FlatInstr
   std::vector<Operand> args;
   uint32_t             loop_count  = 1;       // iteration count for elementwise emission
   std::vector<uint8_t> strides;               // per-arg: 1 = iterate, 0 = broadcast
+  uint32_t             loop_id = 0;
+  uint32_t             routed_output_count = 0;
+  std::vector<int32_t> routed_routes;
 };
 
 // Per-instance kernel slice. Each session instance contributes one of
@@ -199,10 +205,10 @@ struct FlatProgram
   uint32_t                   register_count   = 0;
   std::vector<uint32_t>      array_slot_sizes; // element count per array slot
 
-  // ── Multi-function layout (tropical_plan_5) ──
+  // ── Multi-function layout (tropical_plan_6) ──
   std::vector<InstanceProgram> instance_functions;
-  std::vector<Sink>            sinks;    // device-bound outputs (plan_5 mix path)
-  std::vector<Source>          sources;  // runtime-bound inputs (plan_5 source path)
+  std::vector<Sink>            sinks;    // device-bound outputs (plan_6 mix path)
+  std::vector<Source>          sources;  // runtime-bound inputs (plan_6 source path)
 };
 
 // Engine realization strategy.

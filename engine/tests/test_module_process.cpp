@@ -177,7 +177,7 @@ static void test_ir_constant()
   std::string ir = wrap_loop(
     "  %p = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
     "  store double 5.000000e-01, ptr %p, align 8\n");
-  std::string manifest = R"({"schema":"tropical_plan_5","config":{"sampleRate":44100},
+  std::string manifest = R"({"schema":"tropical_plan_6","config":{"sampleRate":44100},
     "register_count":0,"array_slot_count":0,"array_slot_sizes":[],
     "instance_functions":[],"sinks":[],"slot_count":0})";
 
@@ -201,7 +201,7 @@ static const char* RAMP_BODY =
   "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
   "  store double %v, ptr %op, align 8\n";
 
-static const char* RAMP_MANIFEST = R"({"schema":"tropical_plan_5",
+static const char* RAMP_MANIFEST = R"({"schema":"tropical_plan_6",
   "config":{"sampleRate":44100},"register_count":0,
   "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
   "sinks":[],"slot_count":0})";
@@ -217,11 +217,11 @@ static bool load_fails_with(tropical_runtime_t runtime, const std::string& ir,
 }
 
 /**
- * 2. The native boundary accepts exactly tropical_plan_5. Plan 4, missing or
+ * 2. The native boundary accepts exactly tropical_plan_6. Plan 5, missing or
  *    unknown schemas, retired state/output carriers, legacy operands, and
  *    missing destination namespaces fail before caller-supplied IR is loaded.
  */
-static void test_plan5_only_manifest_boundary()
+static void test_plan6_only_manifest_boundary()
 {
   tropical_runtime_t rt = tropical_runtime_new(16);
   ASSERT(rt != nullptr);
@@ -229,27 +229,30 @@ static void test_plan5_only_manifest_boundary()
 
   ASSERT(load_fails_with(
     rt, ir, R"({"schema":"tropical_plan_4"})",
-    "unsupported manifest schema 'tropical_plan_4'; expected 'tropical_plan_5'"));
+    "unsupported manifest schema 'tropical_plan_4'; expected 'tropical_plan_6'"));
+  ASSERT(load_fails_with(
+    rt, ir, R"({"schema":"tropical_plan_5"})",
+    "unsupported manifest schema 'tropical_plan_5'; expected 'tropical_plan_6'"));
   ASSERT(load_fails_with(
     rt, ir, R"({})",
-    "unsupported manifest schema ''; expected 'tropical_plan_5'"));
+    "unsupported manifest schema ''; expected 'tropical_plan_6'"));
   ASSERT(load_fails_with(
     rt, ir, R"({"schema":"tropical_plan_99"})",
-    "unsupported manifest schema 'tropical_plan_99'; expected 'tropical_plan_5'"));
+    "unsupported manifest schema 'tropical_plan_99'; expected 'tropical_plan_6'"));
   ASSERT(load_fails_with(
-    rt, ir, R"({"schema":"tropical_plan_5","state_init":[1]})",
-    "retired field 'state_init' is not valid in tropical_plan_5"));
-  ASSERT(load_fails_with(
-    rt, ir,
-    R"({"schema":"tropical_plan_5","output_targets":[],"outputs":[]})",
-    "retired field 'output_targets' is not valid in tropical_plan_5"));
+    rt, ir, R"({"schema":"tropical_plan_6","state_init":[1]})",
+    "retired field 'state_init' is not valid in tropical_plan_6"));
   ASSERT(load_fails_with(
     rt, ir,
-    R"({"schema":"tropical_plan_5","instance_functions":[{"instructions":[{"tag":"Add","dst":0,"args":[],"result_type":"float"}]}]})",
-    "plan-5 instruction missing required dst_kind"));
+    R"({"schema":"tropical_plan_6","output_targets":[],"outputs":[]})",
+    "retired field 'output_targets' is not valid in tropical_plan_6"));
   ASSERT(load_fails_with(
     rt, ir,
-    R"({"schema":"tropical_plan_5","instance_functions":[{"instructions":[{"tag":"Add","dst":0,"dst_kind":"temp","args":[{"kind":"rate","scalar_type":"float"}],"result_type":"float"}]}]})",
+    R"({"schema":"tropical_plan_6","instance_functions":[{"instructions":[{"tag":"Add","dst":0,"args":[],"result_type":"float"}]}]})",
+    "plan-6 instruction missing required dst_kind"));
+  ASSERT(load_fails_with(
+    rt, ir,
+    R"({"schema":"tropical_plan_6","instance_functions":[{"instructions":[{"tag":"Add","dst":0,"dst_kind":"temp","args":[{"kind":"rate","scalar_type":"float"}],"result_type":"float"}]}]})",
     "unknown operand kind 'rate'"));
 
   tropical_runtime_free(rt);
@@ -424,7 +427,7 @@ static void test_param_dispatch_exact_sample_replay()
   const std::string ir = wrap_loop(
     "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
     "  store double 0.000000e+00, ptr %op, align 8\n");
-  const std::string manifest = R"({"schema":"tropical_plan_5",
+  const std::string manifest = R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":8,
@@ -534,7 +537,7 @@ static void test_param_dispatch_effective_boundary_races()
     "  %v = load double, ptr %sp, align 8\n"
     "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
     "  store double %v, ptr %op, align 8\n");
-  const std::string manifest = R"({"schema":"tropical_plan_5",
+  const std::string manifest = R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":8,
@@ -674,7 +677,7 @@ static void test_observation_snapshot_does_not_block_control()
     "  store double %x, ptr %tp, align 8\n"
     "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
     "  store double %x, ptr %op, align 8\n");
-  const std::string manifest = R"({"schema":"tropical_plan_5",
+  const std::string manifest = R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":2,"slot_names":["param:x","tap:x"],
@@ -752,7 +755,7 @@ static void test_named_observation_pins_hot_swap_program()
     "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
     "  store double %v, ptr %op, align 8\n");
   const auto manifest = [](const char * name, double value) {
-    return std::string(R"({"schema":"tropical_plan_5",
+    return std::string(R"({"schema":"tropical_plan_6",
       "config":{"sampleRate":44100},"register_count":0,
       "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
       "sinks":[],"slot_count":1,"slot_names":[")") + name
@@ -832,14 +835,14 @@ static void test_separate_observation_artifact_projects_controls()
       "  %cp = getelementptr inbounds double, ptr %slots, i64 2\n"
       "  store double %c, ptr %cp, align 8\n"
       "  ret void\n}\n";
-  const std::string audio_manifest = R"({"schema":"tropical_plan_5",
+  const std::string audio_manifest = R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":1,"slot_names":["param:x"],
     "slot_defaults":[3.0],"param_disciplines":[
       {"name":"x","discipline":"raw","companions":[]}
     ]})";
-  const std::string observation_manifest = R"({"schema":"tropical_plan_5",
+  const std::string observation_manifest = R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":3,
@@ -888,7 +891,7 @@ static void test_publication_generation_tokens_and_atomic_failure()
     "  %v = load double, ptr %sp, align 8\n"
     "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
     "  store double %v, ptr %op, align 8\n");
-  const std::string single_manifest = R"({"schema":"tropical_plan_5",
+  const std::string single_manifest = R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":1,"slot_names":["tap:single"],
@@ -915,14 +918,14 @@ static void test_publication_generation_tokens_and_atomic_failure()
     "  store double %x, ptr %tp, align 8\n"
     "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
     "  store double %x, ptr %op, align 8\n");
-  const std::string audio_manifest = R"({"schema":"tropical_plan_5",
+  const std::string audio_manifest = R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":1,"slot_names":["param:x"],
     "slot_defaults":[3.0],"param_disciplines":[
       {"name":"x","discipline":"raw","companions":[]}
     ]})";
-  const std::string observation_manifest = R"({"schema":"tropical_plan_5",
+  const std::string observation_manifest = R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":2,
@@ -991,7 +994,7 @@ static void test_observation_reuses_materialized_scalar_coefficients()
       "  %cp = getelementptr inbounds double, ptr %slots, i64 2\n"
       "  store double %c, ptr %cp, align 8\n"
       "  ret void\n}\n";
-  const std::string manifest = R"({"schema":"tropical_plan_5",
+  const std::string manifest = R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":3,
@@ -1050,7 +1053,7 @@ static void test_observation_retains_constant_array_storage()
       "  br label %done\n"
       "done:\n"
       "  ret void\n}\n";
-  const std::string manifest = R"({"schema":"tropical_plan_5",
+  const std::string manifest = R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":1,"array_slot_sizes":[1],
     "array_slot_names":["constant-bank"],"instance_functions":[],
@@ -1096,7 +1099,7 @@ static void test_observation_materializes_coefficient_columns()
       "  %a0 = load ptr, ptr %a0p, align 8\n"
       "  store i64 %raw, ptr %a0, align 8\n"
       "  ret void\n}\n";
-  const std::string manifest = R"({"schema":"tropical_plan_5",
+  const std::string manifest = R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":1,"array_slot_sizes":[1],
     "array_slot_names":["coef"],"coeff_array_slots":[0],
@@ -1136,7 +1139,7 @@ static void test_playback_anchored_observation_socket_frame()
     "  store double %v, ptr %sp, align 8\n"
     "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
     "  store double %v, ptr %op, align 8\n");
-  const std::string manifest = R"({"schema":"tropical_plan_5",
+  const std::string manifest = R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":1,"slot_names":["tap:ramp"],
@@ -1216,7 +1219,7 @@ static void test_control_generation_coherence()
       "  %cp = getelementptr inbounds double, ptr %slots, i64 1\n"
       "  store double %v, ptr %cp, align 8\n"
       "  ret void\n}\n";
-  const std::string manifest = R"({"schema":"tropical_plan_5",
+  const std::string manifest = R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":2,"slot_names":["param:x","coef:y"],
@@ -1306,7 +1309,7 @@ static void test_generation_ownership_barrier()
     "  %x = load double, ptr %xp, align 8\n"
     "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
     "  store double %x, ptr %op, align 8\n");
-  const std::string manifest = R"({"schema":"tropical_plan_5",
+  const std::string manifest = R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":1,"slot_names":["param:x"],
@@ -1581,7 +1584,7 @@ int main()
   printf("test_module_process (load_ir engine)\n");
 
   run_test("constant kernel via load_ir",   test_ir_constant);
-  run_test("plan-5-only manifest boundary", test_plan5_only_manifest_boundary);
+  run_test("plan-6-only manifest boundary", test_plan6_only_manifest_boundary);
   run_test("closed-form index ramp",        test_ir_index_ramp);
   run_test("clock request boundary handoff", test_clock_boundary_handoff);
   run_test("clock odd-sequence barrier", test_clock_request_barrier);

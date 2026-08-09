@@ -18,7 +18,7 @@ Per patch, the build emits two artifacts the browser fetches:
   `env.round`. Produced by `diffcli compile-wasm` (engine LLVM + lld,
   in-process — no `wasm-ld` on PATH, no toolchain).
 - `<slug>.manifest.json` — a `KernelManifest`: the trimmed subset of
-  `tropical_plan_5` the runtime needs (sample rate, SSA scratch sizing,
+  `tropical_plan_6` the runtime needs (sample rate, SSA scratch sizing,
   array/slot sizing, and slot defaults). Retired state/register metadata is
   not part of this contract; see the
   [compatibility matrix](../design/compatibility-matrix.md).
@@ -47,7 +47,7 @@ web/
 ```
 
 `web/runtime/` depends **only** on `KernelManifest` — nothing from the
-compiler or `tropical_plan_5`. It is a self-contained consumer of tropical's
+compiler or `tropical_plan_6`. It is a self-contained consumer of tropical's
 artifact contract, ready to extract to its own package once a second consumer
 (an Electron app, a hosted player) appears. The forcing function is the
 dependency edge, not the repo boundary.

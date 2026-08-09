@@ -98,7 +98,7 @@ flat instruction stream in emit order marks each instruction `fold`
 (τ-independent but param-slot-derived — hoisted), or `s1` (per-sample).
 The `s0` instructions — the composed modal amplitudes, ~90% of the
 demo's flops — move verbatim into a one-sample **coefficient kernel**
-(the same `tropical_plan_5`/`EmitLlvm` pipeline, a second module) that
+(the same `tropical_plan_6`/`EmitLlvm` pipeline, a second module) that
 the engine runs once at load and after every slot write; boundary values
 cross to the audio kernel through fresh `coef:<n>` module slots.
 

@@ -176,9 +176,9 @@ SessionState  (instances + wiring + dac.out + params)
   │         post-elaborate-shaped, so the resolved root `Program` is
   │         built DIRECTLY — instances → InstanceDecls linking each
   │         instance's already-resolved type snapshot, wires → Ir.Expr
-  │       → partitionKernel → tropical_plan_5
+  │       → partitionKernel → tropical_plan_6
   ▼
-tropical_plan_5  (instance_functions[] + sinks[] + sources[])
+tropical_plan_6  (instance_functions[] + sinks[] + sources[])
 ```
 
 **The IR is acyclic by construction.** There is no register to break a
@@ -198,7 +198,7 @@ Three execution targets consume the same typed `FlatPlan`; they are target
 interpretations, not more source-language stages.
 
 ```
-tropical_plan_5 / FlatPlan
+tropical_plan_6 / FlatPlan
   ├─ EmitLlvm → textual LLVM → OrcJitEngine::compile_ir_text → FlatRuntime
   ├─ EmitLlvm → the same LLVM → wasm32 TargetMachine + lld → browser player
   └─ EmitMsl  → MSL → MetalKernel → supported Apple live audio
@@ -255,7 +255,7 @@ Two distinct JSON schemas; do not confuse them.
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
 | `tropical_program_2` | `lean/Tropical/Parse/Raise.lean` (JSON ingest) | The PATCH-BAY shape: instances of registered types + wiring + params, a body block of instanceDecls/paramDecls/outputAssigns. The JSON front door for `load`/`merge` (and `save`/`export_program`'s output serialization). Program DEFINITIONS over the wire are retired — a programDecl is refused at ingest with the retirement message; wire expressions decode into the typed session grammar (`Tropical.WireExpr`), which cannot spell combinators/binders/state ops. (Programs are authored as `Tropical.Stdlib`/EmitArrow arrow builders, not this schema.) |
-| `tropical_plan_5`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: nested instance blocks plus `sinks[]`, `sources[]`, typed slots, stage metadata, and optional bank regions. Lean emits LLVM/MSL from the typed plan; native and web hosts consume trimmed metadata manifests. Serialized-plan entry points accept this schema only and reject older schemas and retired state/output carriers. See `design/compatibility-matrix.md`. |
+| `tropical_plan_6`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: nested instance blocks plus `sinks[]`, `sources[]`, typed slots, stage metadata, bank/routed regions, and cooperative-Metal metadata where required. Lean emits LLVM/MSL from the typed plan; native and web hosts consume trimmed metadata manifests. Serialized-plan entry points accept this schema only and reject older schemas and retired state/output carriers. See `design/compatibility-matrix.md`. |
 
 Going from the first to the second without losing meaning is exactly
 what the session compile does (ingest → sessionToResolvedRoot →
@@ -287,7 +287,7 @@ lean/                 Lean 4: the production compiler + MCP server (one binary)
       Strata.lean (the direct lowering) + Strata/{Basic,EArena,InlineInstances,IdentityElim}
       Core, Nodes, Cycles, Emit, CompileResolved, Codec, WireProgram
     Engine, Session, Compile, Lowering, Wiring   engine-side session compile
-    Plan.lean         tropical_plan_5 schema
+    Plan.lean         tropical_plan_6 schema
     Ffi.lean          FFI bridge to libtropical (Runtime, DAC, Param)
     Tools, Rpc, Relay, Resources, Frontend, …    MCP tool surface + RPC
 engine/               C++: plan parsing, LLVM JIT, per-sample execution, audio output

@@ -65,6 +65,10 @@ def LoopFree (id : Nat) : Sig → Prop
   | .bankSum _ ts b dc ii =>
     (∀ x ∈ ts, LoopFree id x) ∧ (ii = id ∨ LoopFree id b) ∧
       (∀ d ∈ dc, LoopFree id d)
+  | .routedSum _ _ _ ts vs dc ii =>
+    (∀ x ∈ ts, LoopFree id x) ∧
+      (ii = id ∨ ∀ x ∈ vs, LoopFree id x) ∧
+      (∀ d ∈ dc, LoopFree id d)
 
 /-- `s` contains no `bankSum` node at all (so the reference realization
     `unrollBanks` is the identity on it). -/
@@ -83,6 +87,9 @@ def BankFree : Sig → Prop
   | .index a b => BankFree a ∧ BankFree b
   | .loopIdx _ => True
   | .bankSum _ _ _ _ _ => False
+  | .routedSum _ _ _ ts vs dc _ =>
+    (∀ x ∈ ts, BankFree x) ∧ (∀ x ∈ vs, BankFree x) ∧
+      (∀ d ∈ dc, BankFree d)
 
 -- ─────────────────────────────────────────────────────────────
 -- instLoop — the binder's β-rule
@@ -126,6 +133,12 @@ def instLoop (id k : Nat) : Sig → Sig
     .bankSum c (ts.attach.map fun ⟨x, _⟩ => instLoop id k x)
       (if ii = id then b else instLoop id k b)
       (match dc with | none => none | some d => some (instLoop id k d)) ii
+  | .routedSum c oc rs ts vs dc ii =>
+    .routedSum c oc rs
+      (ts.attach.map fun ⟨x, _⟩ => instLoop id k x)
+      (if ii = id then vs else
+        vs.attach.map fun ⟨x, _⟩ => instLoop id k x)
+      (match dc with | none => none | some d => some (instLoop id k d)) ii
 
 -- ─────────────────────────────────────────────────────────────
 -- unrollBanks — the reference realization
@@ -162,6 +175,11 @@ def unrollBanks : Sig → Sig
   | .bankSum c ts b (some d) ii =>
     .bankSum c (ts.attach.map fun ⟨x, _⟩ => unrollBanks x)
       (unrollBanks b) (some (unrollBanks d)) ii
+  | .routedSum c oc rs ts vs dc ii =>
+    .routedSum c oc rs
+      (ts.attach.map fun ⟨x, _⟩ => unrollBanks x)
+      (vs.attach.map fun ⟨x, _⟩ => unrollBanks x)
+      (match dc with | none => none | some d => some (unrollBanks d)) ii
 
 -- ─────────────────────────────────────────────────────────────
 -- refFold — the handoff's carrier-parametric vocabulary
@@ -256,6 +274,24 @@ theorem instLoop_of_loopFree {id k : Nat} :
       simp only [instLoop]
       rw [attach_map_eq_of_id ts (fun x hx => ihts x hx (h.1 x hx)), hbody,
         ihdc (h.2.2 d rfl)]
+  | case18 c oc rs ts vs dc ii ihts ihvs ihdc =>
+    intro h; simp only [LoopFree] at h
+    have hvalues :
+        (if ii = id then vs else
+          vs.attach.map fun ⟨x, _⟩ => instLoop id k x) = vs := by
+      split
+      · rfl
+      · rename_i hii
+        rw [attach_map_eq_of_id vs (fun x hx =>
+          ihvs x hx (h.2.1.resolve_left hii x hx))]
+    cases dc with
+    | none =>
+      simp only [instLoop]
+      rw [attach_map_eq_of_id ts (fun x hx => ihts x hx (h.1 x hx)), hvalues]
+    | some d =>
+      simp only [instLoop]
+      rw [attach_map_eq_of_id ts (fun x hx => ihts x hx (h.1 x hx)), hvalues,
+        ihdc (h.2.2 d rfl)]
 
 /-- The reference realization is the identity on a bank-free tree. -/
 theorem unrollBanks_of_bankFree :
@@ -292,6 +328,18 @@ theorem unrollBanks_of_bankFree :
     intro hf; simp only [BankFree] at hf
   | case15 c ts b d ii ihts ihb ihd =>
     intro hf; simp only [BankFree] at hf
+  | case16 c oc rs ts vs dc ii ihts ihvs ihdc =>
+    intro h; simp only [BankFree] at h
+    cases dc with
+    | none =>
+      simp only [unrollBanks]
+      rw [attach_map_eq_of_id ts (fun x hx => ihts x hx (h.1 x hx)),
+        attach_map_eq_of_id vs (fun x hx => ihvs x hx (h.2.1 x hx))]
+    | some d =>
+      simp only [unrollBanks]
+      rw [attach_map_eq_of_id ts (fun x hx => ihts x hx (h.1 x hx)),
+        attach_map_eq_of_id vs (fun x hx => ihvs x hx (h.2.1 x hx)),
+        ihdc (h.2.2 d rfl)]
 -- ─────────────────────────────────────────────────────────────
 -- Freshness composes through folds and the landing-exponent builder
 -- ─────────────────────────────────────────────────────────────

@@ -1,9 +1,10 @@
 import Lean.Data.Json
+import Std.Data.HashSet
 import Tropical.Parse.Nodes
 import Tropical.Ir.Core
 
 /-!
-# Plan layer — `tropical_plan_5` as a type
+# Plan layer — `tropical_plan_6` as a type
 
 Port of `compiler/flat_plan.ts` plus the instruction/operand types from
 `compiler/ir/emit_resolved.ts`. Two layers, exactly as in TS:
@@ -24,7 +25,7 @@ Port of `compiler/flat_plan.ts` plus the instruction/operand types from
   omitted when empty. (Structural diff is key-order-insensitive, but
   key *presence* matters to it.)
 
-Plan 5 has no state-initialization or legacy temp-mix carriers. Runtime
+Plan 6 has no state-initialization or legacy temp-mix carriers. Runtime
 consumers reject older schemas instead of translating them.
 
 Numbers that are data (const vals, slot defaults, sink
@@ -148,7 +149,7 @@ inductive PlanOp where
   | select | clamp
 deriving BEq, Repr, Inhabited
 
-/-- The plan wire tag for a scalar op (Capitalized; the `tropical_plan_5`
+/-- The plan wire tag for a scalar op (Capitalized; the `tropical_plan_6`
     instruction `tag`). -/
 def PlanOp.name : PlanOp → String
   | .add => "Add" | .sub => "Sub" | .mul => "Mul" | .div => "Div"
@@ -236,6 +237,10 @@ structure NInstr where
       single-region plans stay byte-identical; decoding an absent field yields
       0, and a plan with one open region resolves id-0 `loopIdx` against it. -/
   loopId : Nat := 0
+  /-- `RoutedSumBegin` only: fixed result image and structural authored-order
+      routes. Omitted on every other instruction. -/
+  routedOutputCount : Nat := 0
+  routedRoutes : Array (Option Nat) := #[]
 deriving Repr, Inhabited
 
 def NInstr.toWire (i : NInstr) : Except String Json := do
@@ -246,6 +251,9 @@ def NInstr.toWire (i : NInstr) : Except String Json := do
     ("args", Json.arr (i.args.map (·.toWire))),
     ("loop_count", toJson i.loopCount)]
     ++ (if i.loopId == 0 then [] else [("loop_id", toJson i.loopId)])
+    ++ (if i.tag == "RoutedSumBegin" then
+      [("output_count", toJson i.routedOutputCount),
+       ("routes", toJson i.routedRoutes)] else [])
     ++ [
     ("strides", toJson i.strides),
     ("result_type", scalarJson i.resultType)]
@@ -312,6 +320,21 @@ def instrReduceBegin (accTemp : Nat) (init : NOperand) (loopCount : Nat)
 /-- Close the innermost reduction region opened on `accTemp`. -/
 def instrReduceEnd (accTemp : Nat) (resultType : ScalarType) : NInstr :=
   { tag := "ReduceEnd", dst := .temp accTemp, args := #[], resultType }
+
+def instrRoutedSumBegin (dst : Nat) (capacity outputCount : Nat)
+    (routes : Array (Option Nat)) (count? : Option NOperand := none)
+    (loopId : Nat := 0) : NInstr :=
+  { tag := "RoutedSumBegin", dst := .array dst,
+    args := count?.toArray, loopCount := capacity, resultType := .float,
+    loopId, routedOutputCount := outputCount, routedRoutes := routes }
+
+def instrRoutedSumYield (dst : Nat) (values : Array NOperand) : NInstr :=
+  { tag := "RoutedSumYield", dst := .array dst, args := values,
+    resultType := .float }
+
+def instrRoutedSumEnd (dst : Nat) : NInstr :=
+  { tag := "RoutedSumEnd", dst := .array dst, args := #[],
+    resultType := .float }
 
 -- ─────────────────────────────────────────────────────────────
 -- PerInstancePlan — output of compileResolved
@@ -395,7 +418,7 @@ def withPreInput (f : InstanceFunction) (block : Array NInstr) : InstanceFunctio
   | .mk n i pre instrs _ ro ao rc ch => .mk n i pre instrs block ro ao rc ch
 
 /-- Mirrors `toWireInstanceFn`: canonical empty preamble/pre_input/children
-    fields are omitted for a compact Plan-5 wire form. -/
+    fields are omitted for a compact Plan-6 wire form. -/
 def toWire (f : InstanceFunction) : Except String Json := do
   let base := #[
     ("name", Json.str f.name),
@@ -531,9 +554,73 @@ structure FlatPlan where
   coeffArraySlots : Array Nat := #[]
 deriving Inhabited
 
+/-- Instructions in the exact recursive order used by both code emitters. -/
+private def InstanceFunction.linearInstrs (f : InstanceFunction) : Array NInstr := Id.run do
+  let mut out := f.preambleInstructions
+  for h : child in f.children do
+    out := out ++ child.preInputInstructions ++ child.linearInstrs
+  return out ++ f.instructions
+termination_by sizeOf f
+decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children h
+
+private def FlatPlan.linearInstrs (p : FlatPlan) : Array NInstr :=
+  p.instanceFunctions.foldl (fun out f => out ++ f.linearInstrs) #[]
+
+def FlatPlan.hasRoutedSum (p : FlatPlan) : Bool :=
+  p.linearInstrs.any (·.tag == "RoutedSumBegin")
+
+private def scalarStorageBytes : ScalarType → Nat
+  | .float => 4 | .int => 8 | .bool => 1
+
+/-- Conservative static threadgroup-storage contract for cooperative Metal.
+    Scalar execution is lane-0-only, so its externally visible temps/slots and
+    ordinary arrays live in threadgroup storage.  Sequential routed regions
+    reuse one mapped-record/result arena, hence the maxima rather than a sum.
+    The final eight-byte rounding is deliberate host-side headroom for target
+    address-space alignment. -/
+def FlatPlan.metalThreadgroupScratchBytes (p : FlatPlan) : Nat := Id.run do
+  if !p.hasRoutedSum then return 0
+  let mut bytes := 0
+  for slot in [0:p.arraySlotCount] do
+    if !p.coeffArraySlots.contains slot then
+      bytes := bytes + 4 * max (p.arraySlotSizes[slot]?.getD 1) 1
+  let mut declared : Std.HashSet String := {}
+  let mut routedDepth := 0
+  let mut maxRecords := 0
+  let mut maxOutputs := 0
+  for instr in p.linearInstrs do
+    if instr.tag == "RoutedSumBegin" then
+      routedDepth := routedDepth + 1
+      maxRecords := max maxRecords instr.routedRoutes.size
+      maxOutputs := max maxOutputs instr.routedOutputCount
+    if routedDepth == 0 then
+      match instr.dst with
+      | .temp slot =>
+        let key := s!"temp:{slot}:{repr instr.resultType}"
+        unless declared.contains key do
+          declared := declared.insert key
+          bytes := bytes + scalarStorageBytes instr.resultType
+      | .moduleSlot slot =>
+        let key := s!"slot:{slot}:{repr instr.resultType}"
+        unless declared.contains key do
+          declared := declared.insert key
+          bytes := bytes + scalarStorageBytes instr.resultType
+      | _ => pure ()
+    if instr.tag == "RoutedSumEnd" then routedDepth := routedDepth - 1
+  bytes := bytes + 4 * maxRecords + 4 * maxOutputs + 4
+  return ((bytes + 7) / 8) * 8
+
+def FlatPlan.metalExecutionToWire (p : FlatPlan) : Option Json :=
+  if p.hasRoutedSum then
+    some <| Json.mkObj [
+      ("kind", Json.str "sample_threadgroups"),
+      ("threadgroup_scratch_bytes", toJson p.metalThreadgroupScratchBytes),
+      ("requested_group_policy", Json.str "pipeline_width")]
+  else none
+
 /-- Mirrors `toWirePlan`'s omission rules. -/
 def FlatPlan.toWire (p : FlatPlan) : Except String Json := do
-  let fields := #[("schema", Json.str "tropical_plan_5"),
+  let fields := #[("schema", Json.str "tropical_plan_6"),
     ("config", Json.mkObj [("sampleRate", Json.num p.sampleRate)])]
   let fields := if p.compilationMode == .fused then fields
     else fields.push ("compilation_mode", Json.str p.compilationMode.wire)
@@ -550,6 +637,9 @@ def FlatPlan.toWire (p : FlatPlan) : Except String Json := do
     else fields.push ("param_disciplines", Json.arr (p.paramDisciplines.map (·.toWire)))
   let fields := if p.coeffArraySlots.isEmpty then fields
     else fields.push ("coeff_array_slots", toJson p.coeffArraySlots)
+  let fields := match p.metalExecutionToWire with
+    | some execution => fields.push ("metal_execution", execution)
+    | none => fields
   let fields := if p.sinks.isEmpty then fields
     else fields.push ("sinks", Json.arr (p.sinks.map (·.toWire)))
   let fields := if isDefaultSources p.sources then fields

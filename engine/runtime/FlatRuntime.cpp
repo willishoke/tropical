@@ -323,12 +323,15 @@ void FlatRuntime::set_sample_index(uint64_t idx)
 // everything except the kernel handle, which load_ir fills (via
 // compile_ir_text) between this and publish_state. The plan's instruction
 // graph is metadata-only now; codegen is Lean's (EmitLlvm).
-KernelState FlatRuntime::build_kernel_state(const tropical_plan5::ParsedPlan5 & parsed)
+KernelState FlatRuntime::build_kernel_state(const tropical_plan6::ParsedPlan6 & parsed)
 {
   KernelState new_state;
   new_state.mode           = parsed.compilation_mode;
   new_state.sample_rate    = parsed.sample_rate;
   new_state.array_names    = parsed.array_slot_names;
+  new_state.metal_sample_threadgroups = parsed.metal_sample_threadgroups;
+  new_state.metal_threadgroup_scratch_bytes =
+    parsed.metal_threadgroup_scratch_bytes;
 
   // Slot array
   new_state.slots.assign(parsed.slot_count, 0.0);
@@ -551,11 +554,11 @@ FlatRuntime::load_ir_staged_with_observation_generation(
       const std::string & manifest_text) {
     const json manifest = json::parse(manifest_text);
     const std::string schema = manifest.value("schema", std::string{});
-    if (schema != "tropical_plan_5")
+    if (schema != "tropical_plan_6")
       throw std::runtime_error(
         "FlatRuntime: load_ir unsupported manifest schema '" + schema +
-        "'; expected 'tropical_plan_5'");
-    auto parsed = tropical_plan5::parse_plan5(manifest);
+        "'; expected 'tropical_plan_6'");
+    auto parsed = tropical_plan6::parse_plan6(manifest);
     KernelState state = build_kernel_state(parsed);
     state.mode = tropical_jit::CompilationMode::Fused;
 
@@ -640,7 +643,11 @@ FlatRuntime::load_ir_staged_with_observation_generation(
     new_state.metal = tropical_metal::create(
       audio_msl_source, metal_render_tile_frames_,
       static_cast<uint32_t>(new_state.slots.size()),
-      static_cast<uint32_t>(column_floats), err);
+      static_cast<uint32_t>(column_floats), err,
+      new_state.metal_sample_threadgroups
+        ? tropical_metal::DispatchKind::SampleThreadgroups
+        : tropical_metal::DispatchKind::SampleThreads,
+      new_state.metal_threadgroup_scratch_bytes);
     if (!new_state.metal)
       throw std::runtime_error("FlatRuntime: " + err);
 #else

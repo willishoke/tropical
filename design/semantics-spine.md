@@ -72,6 +72,6 @@ now maintained by the proved `eintern_preserves` theorem.
 With the full first seam closed, the remaining boundaries are:
 
 1. expression arena denotation to lowered whole-program denotation;
-2. lowered program denotation to staged `tropical_plan_5`;
+2. lowered program denotation to staged `tropical_plan_6`;
 3. plan instruction semantics to LLVM/JIT and wasm execution;
 4. plan semantics to MSL under its documented f32 numeric contract.

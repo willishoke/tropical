@@ -21,6 +21,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <limits>
 #include <string>
 #include <thread>
 #include <vector>
@@ -91,7 +92,7 @@ static const char* JIT_SLOT0_IR =
   "  %sn = add i64 %s, 1\n  br label %lc\n"
   "le:\n  ret void\n}\n";
 
-static const char* MANIFEST = R"({"schema":"tropical_plan_5",
+static const char* MANIFEST = R"({"schema":"tropical_plan_6",
   "config":{"sampleRate":44100},"register_count":0,
   "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
   "sinks":[],"slot_count":2,"slot_defaults":[0.25, 0]})";
@@ -219,6 +220,52 @@ static void test_callback_thread_provenance()
   printf("PASS  callback-thread Metal provenance guard\n");
 }
 
+static void test_cooperative_dispatch_geometry()
+{
+  const std::string msl =
+    "#include <metal_stdlib>\n"
+    "using namespace metal;\n"
+    "struct TropicalKernelConsts { ulong start_sample_index; float sample_rate; uint buffer_length; };\n"
+    "kernel void tropical_kernel(device float* out [[buffer(0)]], "
+    "constant float* slots [[buffer(1)]], "
+    "constant TropicalKernelConsts& k [[buffer(2)]], "
+    "uint3 group [[threadgroup_position_in_grid]], "
+    "uint lane [[thread_index_in_threadgroup]], "
+    "uint3 width [[threads_per_threadgroup]]) {\n"
+    "  threadgroup float shared_value;\n"
+    "  const uint sample = group.x;\n"
+    "  if (sample >= k.buffer_length) return;\n"
+    "  if (lane == 0u) shared_value = float(k.start_sample_index + sample);\n"
+    "  threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+    "  if (lane == width.x - 1u) out[sample] = shared_value;\n"
+    "}\n";
+  std::string error;
+  auto kernel = tropical_metal::create(
+    msl, 64, 0, 0, error,
+    tropical_metal::DispatchKind::SampleThreadgroups, 64);
+  ASSERT(kernel != nullptr);
+  ASSERT(tropical_metal::dispatch_kind(*kernel)
+         == tropical_metal::DispatchKind::SampleThreadgroups);
+  ASSERT(tropical_metal::threadgroup_width(*kernel) > 0);
+  ASSERT(tropical_metal::threadgroup_scratch_bytes(*kernel) == 64);
+  std::array<double, 64> output{};
+  ASSERT(tropical_metal::render_tile(
+    *kernel, nullptr, 0, nullptr, 0, 44100.0, 100,
+    static_cast<uint32_t>(output.size()), output.data()));
+  for (uint32_t i = 0; i < output.size(); ++i)
+    ASSERT_NEAR(output[i], static_cast<double>(100 + i), 1e-6);
+
+  error.clear();
+  auto over_cap = tropical_metal::create(
+    msl, 64, 0, 0, error,
+    tropical_metal::DispatchKind::SampleThreadgroups,
+    std::numeric_limits<uint32_t>::max());
+  ASSERT(over_cap == nullptr);
+  ASSERT(error.find("scratch exceeds device publication limit")
+         != std::string::npos);
+  printf("PASS  cooperative threadgroup geometry + scratch refusal\n");
+}
+
 static void test_independent_device_and_render_quanta()
 {
   setenv("TROPICAL_METAL_RENDER_TILE_FRAMES", "512", 1);
@@ -320,7 +367,7 @@ static void test_metal_hotswap()
 // exactly as EmitLlvm's Pack does — and the GPU kernel reads it from the
 // packed `coeff_columns` buffer(3) binding.
 
-static const char* STAGED_MANIFEST = R"({"schema":"tropical_plan_5",
+static const char* STAGED_MANIFEST = R"({"schema":"tropical_plan_6",
   "config":{"sampleRate":44100},"register_count":0,
   "array_slot_count":1,"array_slot_sizes":[4],"array_slot_names":["col"],
   "coeff_array_slots":[0],
@@ -423,7 +470,7 @@ static void test_metal_effective_dispatch_epochs()
   constexpr unsigned int buf = 16;
   constexpr double sr = 44100.0;
   const std::string msl = msl_kernel("    output_buffer[s] = slots[0];");
-  const std::string manifest = R"({"schema":"tropical_plan_5",
+  const std::string manifest = R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":8,
@@ -516,7 +563,7 @@ static void test_metal_retarget_recomputes_companions()
   constexpr unsigned int buf = 16;
   constexpr double sr = 44100.0;
   const std::string msl = msl_kernel("    output_buffer[s] = slots[0];");
-  const std::string manifest = R"({"schema":"tropical_plan_5",
+  const std::string manifest = R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":4,
@@ -755,7 +802,7 @@ static void test_metal_control_transition_stress()
   constexpr double sr = 44100.0;
   const std::string msl = msl_kernel(
     "    output_buffer[s] = slots[0];");
-  const std::string manifest = R"({"schema":"tropical_plan_5",
+  const std::string manifest = R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":8,
@@ -941,6 +988,7 @@ static void test_metal_set_index()
 int main()
 {
   test_callback_thread_provenance();
+  test_cooperative_dispatch_geometry();
   test_independent_device_and_render_quanta();
   test_metal_ramp();
   test_offline_renderer_waits_for_worker_refill();

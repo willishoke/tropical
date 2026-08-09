@@ -111,6 +111,21 @@ def encExpr (arena : Arena) (hw : arena.exprs.wf = true) (id : ExprId) : EncM Js
                         ("tables", Json.arr ts), ("body", ← encExpr arena hw body)]
                         ++ optField "dyn_count" dynField
                         ++ optField "idx_id" idField
+  | some (.routedSum capacity outputCount routes tables values dynCount? idxId) => do
+    let ts ← tables.attach.mapM fun ⟨t, _⟩ => encExpr arena hw t
+    let vs ← values.attach.mapM fun ⟨v, _⟩ => encExpr arena hw v
+    let routeJson := routes.map fun route => match route with
+      | none => Json.null
+      | some output => Lean.toJson output
+    let dynField : Option Json ← match _hdo : dynCount? with
+      | none => pure none
+      | some d => pure (some (← encExpr arena hw d))
+    let idField : Option Json := if idxId == 0 then none else some (Lean.toJson idxId)
+    pure <| Json.mkObj <|
+      [("op", Json.str "routedSum"), ("capacity", Lean.toJson capacity),
+       ("output_count", Lean.toJson outputCount), ("routes", Json.arr routeJson),
+       ("tables", Json.arr ts), ("values", Json.arr vs)]
+      ++ optField "dyn_count" dynField ++ optField "idx_id" idField
 termination_by id.idx
 decreasing_by
   all_goals
@@ -397,6 +412,30 @@ private def expr (ctx : String) (j : JsonV) : DecM ExprId := do
       let count ← reqNat ctx j "count"
       let ⟨bodyJ, _⟩ ← reqFieldD ctx j "body"
       internD (.bankSum count tables (← expr s!"{ctx}.body" bodyJ) dc? idxId)
+    | "routedSum" => do
+      let ⟨ts, _⟩ ← reqArrD ctx j "tables"
+      let tables ← ts.attach.zipIdx.mapM fun (⟨t, _⟩, i) =>
+        expr s!"{ctx}.tables[{i}]" t
+      let ⟨vs, _⟩ ← reqArrD ctx j "values"
+      let values ← vs.attach.zipIdx.mapM fun (⟨v, _⟩, i) =>
+        expr s!"{ctx}.values[{i}]" v
+      let ⟨routeValues, _⟩ ← reqArrD ctx j "routes"
+      let routes ← routeValues.attach.zipIdx.mapM fun (⟨route, _⟩, i) =>
+        match route with
+        | .null => pure none
+        | .num n =>
+          if n.exponent == 0 && n.mantissa ≥ 0 then
+            pure (some n.mantissa.toNat)
+          else err s!"{ctx}.routes[{i}]" "expected a natural number or null"
+        | _ => err s!"{ctx}.routes[{i}]" "expected a natural number or null"
+      let dc? ← match hdc : j.getField? "dyn_count" with
+        | some dj => some <$> expr s!"{ctx}.dyn_count" dj
+        | none => pure none
+      let idxId ← match j.getField? "idx_id" with
+        | some _ => reqNat ctx j "idx_id"
+        | none => pure 0
+      internD (.routedSum (← reqNat ctx j "capacity")
+        (← reqNat ctx j "output_count") routes tables values dc? idxId)
     | other => err ctx s!"unknown expression op '{other}'"
   | _ => err ctx "expected an expression value"
 termination_by sizeOf j
@@ -406,7 +445,8 @@ decreasing_by
     | (simp_all <;> omega)
     | (have := Array.sizeOf_lt_of_mem ‹_ ∈ items›; simp_all <;> omega)
     | (have := Array.sizeOf_lt_of_mem ‹_ ∈ ts›; simp_all <;> omega)
-    | (have := Tropical.Parse.JsonV.sizeOf_lt_of_getField hdc; simp_all <;> omega)
+    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ vs›; simp_all <;> omega)
+    | (have := Tropical.Parse.JsonV.sizeOf_lt_of_getField (by assumption); simp_all <;> omega)
 
 private def decodePortType (ctx : String) (j : JsonV) : Except String PortType := do
   let kind ← reqStr ctx j "kind"

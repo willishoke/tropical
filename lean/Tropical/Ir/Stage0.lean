@@ -202,6 +202,10 @@ private def analyze (plan : FlatPlan) (blocks : Array (Array NInstr)) : Analysis
   let mut rewrites : HashMap Nat (Array (Nat × Nat)) := {}
   let mut tempDef : HashMap Nat Nat := {}
   let mut slotStage : HashMap Nat Stage := {}
+  -- Routed reductions are placement-atomic: neither delimiter nor any mapped
+  -- body instruction may peel into the coefficient stream.  Keep the depth
+  -- across block boundaries because `blocks` is the emitter's linear order.
+  let mut routedDepth : Nat := 0
   let mut idx := 0
   for block in blocks do
     for instr in block do
@@ -213,13 +217,15 @@ private def analyze (plan : FlatPlan) (blocks : Array (Array NInstr)) : Analysis
         if let .reg t _ := arg then
           if let some d := tempDef.get? t then
             rds := rds.push d
+      let inRouted := routedDepth > 0 || instr.tag == "RoutedSumBegin"
       let (hoist, vStage) :=
+        if inRouted then (false, Stage.s1)
         -- Reduce delimiters are per-sample loop structure — never moved.
         -- (The FLOW classifier is the fallback splitter for plans parsed
         -- from JSON, where the arena is gone; it stays conservative and
         -- never hoists regions. Whole-region moves are a TYPED-placement
         -- decision — see `tryRegion` in `placementFromStages`.)
-        if instr.tag == "ReduceBegin" || instr.tag == "ReduceEnd" then (false, Stage.s1)
+        else if instr.tag == "ReduceBegin" || instr.tag == "ReduceEnd" then (false, Stage.s1)
         else match instr.dst with
         | .temp _ => (stage == .s0, stage)
         -- Strictly s0, like temps: a fold-valued slot write must STAY —
@@ -256,6 +262,10 @@ private def analyze (plan : FlatPlan) (blocks : Array (Array NInstr)) : Analysis
         -- until the audio kernel runs (s1).
         slotStage := slotStage.insert m (if hoist then .s0 else .s1)
       | _ => defMeta := defMeta.push none
+      if instr.tag == "RoutedSumBegin" then
+        routedDepth := routedDepth + 1
+      else if instr.tag == "RoutedSumEnd" then
+        routedDepth := routedDepth - 1
       idx := idx + 1
 
   -- Fold-support closure: fold-stage defs read by hoisted instructions
@@ -492,10 +502,24 @@ private def placementFromStages (blocks : Array (Array NInstr))
   if flat.size != linStages.size then
     throw s!"Stage0.placementFromStages: {flat.size} instructions but {linStages.size} stages"
 
+  -- Static routed reductions are indivisible placement regions.  Mark their
+  -- full delimiter spans once, then make the ordinary placement lattice see
+  -- every member as s1.  This prevents both delimiter/body separation and
+  -- accidental whole-region movement through an enclosing ordinary reduce.
+  let routedMask : Array Bool := Id.run do
+    let mut mask := Array.replicate flat.size false
+    let mut depth : Nat := 0
+    for i in [0:flat.size] do
+      if flat[i]!.tag == "RoutedSumBegin" then depth := depth + 1
+      if depth > 0 then mask := mask.set! i true
+      if flat[i]!.tag == "RoutedSumEnd" then depth := depth - 1
+    return mask
+
   let stageAt (i : Nat) : Stage :=
-    match linStages[i]? with
-    | some (some s) => if overlayS1 flat[i]! then .s1 else s
-    | _ => .s1
+    if routedMask[i]! then .s1
+    else match linStages[i]? with
+      | some (some s) => if overlayS1 flat[i]! then .s1 else s
+      | _ => .s1
   -- Region-neutral value stage: for the WHOLE-REGION decision the
   -- delimiters and `loopIdx` are defined by the region itself, so only
   -- the session-I/O / FFI pins apply.

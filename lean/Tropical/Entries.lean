@@ -48,6 +48,7 @@ private def wireOpName : ENode → String
   | .nestedOut .. => "nestedOut"
   | .sampleRate => "sampleRate" | .sampleIndex => "sampleIndex"
   | .loopIdx _ => "loopIdx" | .bankSum .. => "bankSum"
+  | .routedSum .. => "routedSum"
   | .num _ => "num" | .bool _ => "bool" | .arr _ => "arr"
 
 private def mkOpNode (op : String) (args : Array Json) : Json :=

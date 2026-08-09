@@ -73,6 +73,19 @@ JIT, wasm, and MSL execute bank bodies at increasing indices with a scalar left 
 - Gates: `reduce-coverage`, `msl-column-guard`, `manual:backend reduce-loop inspection`
 - Limitation: Tree order, region shape, and prefix clamp are proved; backend execution of the region remains a named runtime assumption.
 
+## ROUTED_SUM_PRESERVES_AUTHORED_ORDER
+
+Routed reductions map each item once and fold active contributions per output in authored item/emit order; cooperative Metal may parallelize the map but not reassociate the gather.
+
+- Status: evidence-backed
+- Priority: critical
+- Owner: Backend correctness
+- Evidence: theorem, executable gate, inspection
+- Formal symbol: none
+- Implementation: `lean/Tropical/Semantics/Sig.lean`, `lean/Tropical/Semantics/LowerSig.lean`, `lean/Tropical/Ir/EmitLlvm.lean`, `lean/Tropical/Ir/EmitMsl.lean`, `engine/metal/MetalKernel.mm`
+- Gates: `routed-sum-coverage`, `metal-ctest`, `manual:routed backend inspection`
+- Limitation: Source-to-arena preservation is proved and scalar/cooperative schedules are differentially exercised; LLVM, Metal compiler, driver, and hardware execution remain external refinement assumptions.
+
 ## LOWER_SIG_PTR_REFINES_TREE
 
 For immutable Sig, pointer-memoized lowerSigPtr returns the same id and expression-arena result as structural lowerSigTree.
@@ -88,7 +101,7 @@ For immutable Sig, pointer-memoized lowerSigPtr returns the same id and expressi
 
 ## LLVM_TEXT_EXECUTES_PLAN
 
-Generated LLVM implements tropical_plan_5 instruction, source, instance, and sink semantics.
+Generated LLVM implements tropical_plan_6 instruction, source, instance, and sink semantics.
 
 - Status: open
 - Priority: critical
@@ -190,9 +203,9 @@ Lean core arithmetic, LLVM/lld, Metal, RtAudio, and Turnstile are distinct exter
 - Gates: `patch-goldens`, `wasm-vs-jit`, `metal-ctest`, `mcp-protocol`
 - Limitation: Pinning and tests constrain versions; they do not verify the implementations of external compilers, frameworks, drivers, or hardware.
 
-## SERIALIZED_PLAN_SCHEMA_IS_PLAN_5_ONLY
+## SERIALIZED_PLAN_SCHEMA_IS_PLAN_6_ONLY
 
-Serialized plan entry points accept tropical_plan_5 only and reject retired schema carriers instead of translating or ignoring them.
+Serialized plan entry points accept tropical_plan_6 only and reject retired schema carriers instead of translating or ignoring them.
 
 - Status: evidence-backed
 - Priority: medium
@@ -200,8 +213,8 @@ Serialized plan entry points accept tropical_plan_5 only and reject retired sche
 - Evidence: inspection, executable gate
 - Formal symbol: none
 - Implementation: `engine/runtime/FlatRuntime.cpp`, `engine/runtime/NumericProgramParser.hpp`, `lean/Tropical/PlanDecode.lean`
-- Gates: `production-non-emission`, `plan5-schema-rejection`, `current_module_process`, `manual:serialized-plan boundary review`
-- Limitation: Canonical plan 5 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, the tick/rate source pair, empty child/instruction arrays, and zero loop ids.
+- Gates: `production-non-emission`, `plan6-schema-rejection`, `current_module_process`, `manual:serialized-plan boundary review`
+- Limitation: Canonical plan 6 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, the tick/rate source pair, empty child/instruction arrays, zero loop ids, and the ordinary sample-thread Metal execution description.
 
 ## FROZEN_AUDIO_GOLDENS_ANCHOR_CORRECTNESS
 

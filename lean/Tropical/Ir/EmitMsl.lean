@@ -9,7 +9,7 @@ import Tropical.Ir.EmitCommon
 # EmitMsl — `FlatPlan → Metal Shading Language source` (the Metal backend)
 
 The MSL sibling of `EmitLlvm`: the same fractal walk over the same
-`tropical_plan_5`, emitting a compute kernel instead of a CPU loop. The
+`tropical_plan_6`, emitting a compute kernel instead of a CPU loop. The
 per-sample loop collapses — one thread per sample
 (`thread_position_in_grid`), legal because kernels are closed-form
 `f(τ, params)` with no per-sample state.
@@ -138,6 +138,20 @@ structure ReduceCtx where
   savedDeclared : Std.HashSet String
 deriving Inhabited
 
+structure RoutedCtx where
+  region : Nat
+  id : Nat
+  dst : Nat
+  capacity : Nat
+  outputCount : Nat
+  fanout : Nat
+  routes : Array (Option Nat)
+  idxVar : String
+  savedTempTypes : Std.HashMap Nat ScalarType
+  savedConstTemps : Std.HashMap Nat CVal
+  savedDeclared : Std.HashSet String
+deriving Inhabited
+
 structure St where
   next : Nat := 0
   lines : Array String := #[]
@@ -182,6 +196,14 @@ structure St where
       innermost-first, so an inner-region instruction adding into an OUTER
       accumulator finds the outer local. -/
   reduces : Array ReduceCtx := #[]
+  routeds : Array RoutedCtx := #[]
+  /-- Cooperative routed kernels execute ordinary instructions on lane 0 and
+      mapped bodies on all lanes.  Body temp definitions use distinct private
+      names so they cannot race with captured lane-0 temps in threadgroup
+      storage. -/
+  cooperative : Bool := false
+  routedLocalTemps : Std.HashSet Nat := {}
+  nextRoutedRegion : Nat := 0
 
 abbrev M := EStateM String St
 
@@ -241,10 +263,20 @@ def tempVarName (slot : Nat) (ty : ScalarType) : String :=
   match ty with
   | .float => s!"tf{slot}" | .int => s!"ti{slot}" | .bool => s!"tb{slot}"
 
+def routedTempVarName (slot : Nat) (ty : ScalarType) : String :=
+  match ty with
+  | .float => s!"rtf{slot}" | .int => s!"rti{slot}" | .bool => s!"rtb{slot}"
+
+private def activeTempVarName (slot : Nat) (ty : ScalarType) : M String := do
+  let st ← get
+  if st.cooperative && !st.routeds.isEmpty && st.routedLocalTemps.contains slot then
+    pure (routedTempVarName slot ty)
+  else pure (tempVarName slot ty)
+
 def loadTempTyped (slot : Nat) (ty : ScalarType) : M TVal := do
   match (← get).constTemps.get? slot with
   | some c => pure ⟨cvalText c, c.ty, some c⟩
-  | none => pure ⟨tempVarName slot ty, ty, none⟩
+  | none => pure ⟨← activeTempVarName slot ty, ty, none⟩
 
 /-- Store a typed value into temp `slot`: declare-or-assign the typed
     local, record the type, kill any stale const. Constant stores don't
@@ -254,7 +286,7 @@ def loadTempTyped (slot : Nat) (ty : ScalarType) : M TVal := do
 def storeTempTyped (slot : Nat) (v : TVal) : M Unit := do
   if let some rc ← findAccCtx slot then
     let cv ← coerce v rc.accTy
-    line s!"{tempVarName slot rc.accTy} = {cv.ref};"
+    line s!"{← activeTempVarName slot rc.accTy} = {cv.ref};"
     modify fun s => { s with constTemps := s.constTemps.erase slot }
     return
   match v.cv with
@@ -263,7 +295,9 @@ def storeTempTyped (slot : Nat) (v : TVal) : M Unit := do
       tempTypes := s.tempTypes.insert slot v.ty
       constTemps := s.constTemps.insert slot c }
   | none =>
-    let name := tempVarName slot v.ty
+    if (← get).cooperative && !(← get).routeds.isEmpty then
+      modify fun s => { s with routedLocalTemps := s.routedLocalTemps.insert slot }
+    let name ← activeTempVarName slot v.ty
     if (← get).declared.contains name then
       line s!"{name} = {v.ref};"
     else
@@ -338,9 +372,11 @@ def resolveOperand : NOperand → M TVal
   | .loopIdx id => do
     -- Resolve the binder id against the stack of open regions (unique along
     -- a nesting chain, so first match is THE match).
-    let some rc := (← get).reduces.find? (fun rc => rc.id == id)
-      | fail s!"EmitMsl: loop_idx id={id} matches no open ReduceBegin/ReduceEnd region"
-    pure ⟨rc.idxVar, .int, none⟩
+    if let some rc := (← get).reduces.find? (fun rc => rc.id == id) then
+      return ⟨rc.idxVar, .int, none⟩
+    if let some rc := (← get).routeds.find? (fun rc => rc.id == id) then
+      return ⟨rc.idxVar, .int, none⟩
+    fail s!"EmitMsl: loop_idx id={id} matches no open reduction region"
 
 -- ─────────────────────────────────────────────────────────────
 -- Operation emit (mirrors EmitLlvm.emitOp, expression-style)
@@ -632,6 +668,116 @@ def emitInstr (sizes : Array Nat) (instr : NInstr) : M Unit := do
       tempTypes := rc.savedTempTypes
       constTemps := rc.savedConstTemps
       declared := rc.savedDeclared }
+  | "RoutedSumBegin", .array dst =>
+    if ( ← get).reduces.any (fun rc => rc.id == instr.loopId) ||
+        ( ← get).routeds.any (fun rc => rc.id == instr.loopId) then
+      fail s!"EmitMsl: RoutedSumBegin id={instr.loopId} collides with an open ancestor region"
+    if instr.loopCount == 0 || instr.routedOutputCount == 0 ||
+        instr.routedRoutes.isEmpty ||
+        instr.routedRoutes.size % instr.loopCount != 0 then
+      fail "EmitMsl: invalid RoutedSumBegin structural metadata"
+    let fanout := instr.routedRoutes.size / instr.loopCount
+    let bound ← match instr.args[0]? with
+      | none => pure s!"{instr.loopCount}L"
+      | some o =>
+        let v ← resolveOperand o
+        let iv ← coerce v .int
+        let b ← bindVal .int s!"min(max({iv.ref}, 0L), {instr.loopCount}L)"
+        pure b.ref
+    let st ← get
+    if st.cooperative then
+      let region := st.nextRoutedRegion
+      line s!"routed_trips = uint({bound});"
+      popIndent
+      line "}"
+      line "threadgroup_barrier(mem_flags::mem_threadgroup);"
+      let idxVar := s!"long(routed_item_{region})"
+      line s!"for (uint routed_item_{region} = lane; routed_item_{region} < routed_trips; routed_item_{region} += groupSize.x) \{"
+      modify fun s => { s with
+        indent := s.indent + 1
+        nextRoutedRegion := region + 1
+        routedLocalTemps := {}
+        routeds := s.routeds.push {
+          region, id := instr.loopId, dst, capacity := instr.loopCount,
+          outputCount := instr.routedOutputCount, fanout,
+          routes := instr.routedRoutes, idxVar,
+          savedTempTypes := st.tempTypes
+          savedConstTemps := st.constTemps
+          savedDeclared := st.declared } }
+    else
+      for output in [0:instr.routedOutputCount] do
+        line s!"arr{dst}[{output}] = 0.0f;"
+      let n ← fresh
+      let idxVar := s!"rs{n}"
+      line s!"for (long {idxVar} = 0; {idxVar} < {bound}; ++{idxVar}) \{"
+      modify fun s => { s with
+        indent := s.indent + 1
+        routeds := s.routeds.push {
+          region := 0, id := instr.loopId, dst, capacity := instr.loopCount,
+          outputCount := instr.routedOutputCount, fanout,
+          routes := instr.routedRoutes, idxVar,
+          savedTempTypes := st.tempTypes
+          savedConstTemps := st.constTemps
+          savedDeclared := st.declared } }
+  | "RoutedSumYield", .array dst =>
+    let some rc := (← get).routeds.back?
+      | fail "EmitMsl: RoutedSumYield without an open routed region"
+    if rc.dst != dst || instr.args.size != rc.fanout then
+      fail "EmitMsl: RoutedSumYield shape does not match its open region"
+    let args ← instr.args.mapM fun arg => do coerceF32 (← resolveOperand arg)
+    if (← get).cooperative then
+      for emitPos in [0:rc.fanout] do
+        line s!"routed_records[routed_item_{rc.region} * {rc.fanout}u + {emitPos}u] = {args[emitPos]!};"
+    else
+      line s!"switch ({rc.idxVar}) \{"
+      pushIndent
+      for item in [0:rc.capacity] do
+        line s!"case {item}:"
+        pushIndent
+        for emitPos in [0:rc.fanout] do
+          if let some output := rc.routes[item * rc.fanout + emitPos]! then
+            line s!"arr{dst}[{output}] = arr{dst}[{output}] + {args[emitPos]!};"
+        line "break;"
+        popIndent
+      line "default: break;"
+      popIndent
+      line "}"
+  | "RoutedSumEnd", .array dst =>
+    let some rc := (← get).routeds.back?
+      | fail "EmitMsl: RoutedSumEnd without an open routed region"
+    if rc.dst != dst then
+      fail "EmitMsl: RoutedSumEnd destination does not match its open region"
+    modify fun s => { s with indent := s.indent - 1 }
+    line "}"
+    if (← get).cooperative then
+      line "threadgroup_barrier(mem_flags::mem_threadgroup);"
+      line s!"for (uint routed_output_{rc.region} = lane; routed_output_{rc.region} < {rc.outputCount}u; routed_output_{rc.region} += groupSize.x) \{"
+      pushIndent
+      line s!"float routed_acc_{rc.region} = 0.0f;"
+      line s!"for (uint routed_cursor_{rc.region} = routed_offsets_{rc.region}[routed_output_{rc.region}]; routed_cursor_{rc.region} < routed_offsets_{rc.region}[routed_output_{rc.region} + 1u]; ++routed_cursor_{rc.region}) \{"
+      pushIndent
+      line s!"uint routed_record_{rc.region} = routed_csr_{rc.region}[routed_cursor_{rc.region}];"
+      line s!"if (routed_record_{rc.region} / {rc.fanout}u < routed_trips) \{"
+      pushIndent
+      line s!"routed_acc_{rc.region} = routed_acc_{rc.region} + routed_records[routed_record_{rc.region}];"
+      popIndent
+      line "}"
+      popIndent
+      line "}"
+      line s!"routed_outputs[routed_output_{rc.region}] = routed_acc_{rc.region};"
+      popIndent
+      line "}"
+      line "threadgroup_barrier(mem_flags::mem_threadgroup);"
+      line "if (lane == 0u) {"
+      pushIndent
+      for output in [0:rc.outputCount] do
+        line s!"arr{dst}[{output}] = routed_outputs[{output}];"
+    modify fun s => { s with
+      routeds := s.routeds.pop
+      routedLocalTemps := {}
+      tempTypes := rc.savedTempTypes
+      constTemps := rc.savedConstTemps
+      declared := rc.savedDeclared }
   | "WriteSlot", .moduleSlot idx =>
     let v ← match instr.args[0]? with | some o => resolveOperand o | none => fail "WriteSlot missing arg"
     storeSlot idx v
@@ -719,6 +865,62 @@ private def headerColumns : String :=
   "    if (s >= k.buffer_length) { return; }\n" ++
   "    const long current_idx = long(k.start_sample_index) + long(s);\n"
 
+private def cooperativeHeader (withColumns : Bool) (routeConstants : String)
+    (scratchBytes : Nat) : String :=
+  "#include <metal_stdlib>\n" ++
+  "using namespace metal;\n\n" ++
+  "struct TropicalKernelConsts {\n" ++
+  "    ulong start_sample_index;\n" ++
+  "    float sample_rate;\n" ++
+  "    uint  buffer_length;\n" ++
+  "};\n\n" ++ routeConstants ++
+  s!"// tropical.threadgroup_scratch_bytes={scratchBytes}\n" ++
+  "kernel void tropical_kernel(\n" ++
+  "    device float*                  output_buffer [[buffer(0)]],\n" ++
+  "    constant float*                slots         [[buffer(1)]],\n" ++
+  "    constant TropicalKernelConsts& k             [[buffer(2)]]" ++
+  (if withColumns then
+    ",\n    constant float*                coeff_columns [[buffer(3)]]" else "") ++
+  ",\n    uint3 sampleGroup [[threadgroup_position_in_grid]],\n" ++
+  "    uint lane [[thread_index_in_threadgroup]],\n" ++
+  "    uint3 groupSize [[threads_per_threadgroup]])\n" ++
+  "{\n" ++
+  "    const uint s = sampleGroup.x;\n" ++
+  "    if (s >= k.buffer_length) { return; }\n" ++
+  "    const long current_idx = long(k.start_sample_index) + long(s);\n"
+
+private def linearInstrs (f : InstanceFunction) : Array NInstr := Id.run do
+  let mut out := f.preambleInstructions
+  for h : child in f.children do
+    out := out ++ child.preInputInstructions ++ linearInstrs child
+  return out ++ f.instructions
+termination_by sizeOf f
+decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children h
+
+private def planInstrs (p : FlatPlan) : Array NInstr :=
+  p.instanceFunctions.foldl (fun out f => out ++ linearInstrs f) #[]
+
+private def cooperativeRouteConstants (begins : Array NInstr) : String :=
+  String.intercalate "\n" <| begins.toList.zipIdx.map fun (instr, region) =>
+    let (offsets, records) := Id.run do
+      let mut offsets : Array Nat := #[0]
+      let mut records : Array Nat := #[]
+      for output in [0:instr.routedOutputCount] do
+        for record in [0:instr.routedRoutes.size] do
+          if instr.routedRoutes[record]! == some output then
+            records := records.push record
+        offsets := offsets.push records.size
+      return (offsets, records)
+    let offsetText := String.intercalate ", " <|
+      offsets.toList.map fun value => s!"{value}u"
+    let storedRecords := if records.isEmpty then #[0] else records
+    let recordText := String.intercalate ", " <|
+      storedRecords.toList.map fun value => s!"{value}u"
+    s!"constant uint routed_offsets_{region}[{offsets.size}] = " ++
+      "{" ++ offsetText ++ "};\n" ++
+      s!"constant uint routed_csr_{region}[{storedRecords.size}] = " ++
+      "{" ++ recordText ++ "};"
+
 /-- Emit the full MSL source for a FlatPlan's fused kernel. One thread
     per sample; the host dispatches `buffer_length` threads.
 
@@ -735,6 +937,9 @@ private def headerColumns : String :=
     header, byte-frozen by the msl-golden gates. -/
 def emitKernel (plan : FlatPlan) : Except String String := do
   let sizes := plan.arraySlotSizes
+  let cooperative := plan.hasRoutedSum
+  let flat := planInstrs plan
+  let routedBegins := flat.filter (·.tag == "RoutedSumBegin")
   -- Packed offsets for the hoisted columns, in the plan's advertised
   -- order — MUST match FlatRuntime's upload packing (it walks
   -- coeff_array_slots in the same order).
@@ -745,18 +950,56 @@ def emitKernel (plan : FlatPlan) : Except String String := do
       | throw s!"EmitMsl: coeff_array_slots entry {s} out of range (plan has {sizes.size} array slots)"
     coeffOffsets := coeffOffsets.insert s colOff
     colOff := colOff + max sz 1
+  -- Cooperative scalar phases may be split by several all-lane regions.
+  -- Predeclare every outside-region scalar destination in threadgroup storage;
+  -- this is a conservative capture/liveness closure, while mapped-body locals
+  -- retain private names.  It executes the scalar graph once (lane 0) and
+  -- makes every value that can cross a region boundary available to all lanes.
+  let (scalarDecls, predeclared) := Id.run do
+    let mut lines : Array String := #[]
+    let mut names : Std.HashSet String := {}
+    let mut depth := 0
+    for instr in flat do
+      if instr.tag == "RoutedSumBegin" then depth := depth + 1
+      if depth == 0 then
+        let candidate := match instr.dst with
+          | .temp slot => some (tempVarName slot instr.resultType)
+          | .moduleSlot slot => some (slotVarName slot instr.resultType)
+          | _ => none
+        if let some name := candidate then
+          unless names.contains name do
+            names := names.insert name
+            lines := lines.push s!"threadgroup {mslTy instr.resultType} {name};"
+      if instr.tag == "RoutedSumEnd" then depth := depth - 1
+    return (lines, names)
+  let maxRecords := routedBegins.foldl
+    (fun n instr => max n instr.routedRoutes.size) 0
+  let maxOutputs := routedBegins.foldl
+    (fun n instr => max n instr.routedOutputCount) 0
   let body : M Unit := do
     -- thread-private array scratch (per-sample on CPU too); hoisted
     -- coefficient columns are read from the buffer(3) binding instead.
     for i in [0:plan.arraySlotCount] do
       unless coeffOffsets.contains i do
         let sz := sizes[i]?.getD 1
-        line s!"float arr{i}[{max sz 1}];"
+        if cooperative then line s!"threadgroup float arr{i}[{max sz 1}];"
+        else line s!"float arr{i}[{max sz 1}];"
+    if cooperative then
+      for declaration in scalarDecls do line declaration
+      line s!"threadgroup float routed_records[{max maxRecords 1}];"
+      line s!"threadgroup float routed_outputs[{max maxOutputs 1}];"
+      line "threadgroup uint routed_trips;"
+      line "if (lane == 0u) {"
+      pushIndent
     for inst in plan.instanceFunctions do
       emitKernelBlock sizes inst
     emitSinks plan.sinks
+    if cooperative then
+      popIndent
+      line "}"
   let init : St := { sources := plan.sources, sampleRate := plan.sampleRate.toFloat,
-                     coeffOffsets }
+                     coeffOffsets, cooperative,
+                     declared := if cooperative then predeclared else {} }
   match body.run init with
   | .error e _ => .error e
   | .ok _ st =>
@@ -764,7 +1007,11 @@ def emitKernel (plan : FlatPlan) : Except String String := do
     -- `current_idx` may be unused after full folding; cast to void to
     -- keep -Wunused clean would misfire on use, so leave it — Metal's
     -- compiler doesn't warn on unused const locals by default.
-    let hdr := if plan.coeffArraySlots.isEmpty then header else headerColumns
+    let hdr := if cooperative then
+      cooperativeHeader (!plan.coeffArraySlots.isEmpty)
+        (cooperativeRouteConstants routedBegins ++ "\n")
+        plan.metalThreadgroupScratchBytes
+      else if plan.coeffArraySlots.isEmpty then header else headerColumns
     .ok (hdr ++ bodyText ++ "\n}\n")
 
 end Tropical.Ir.EmitMsl

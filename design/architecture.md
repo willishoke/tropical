@@ -25,7 +25,7 @@ MCP mutations / program_2 JSON → typed SessionSt → synthetic resolved root
                                                                         ▼
                                                    partition + classify/hoist stage 0
                                                                         │
-                                                              tropical_plan_5
+                                                              tropical_plan_6
                                                          ┌──────────────┼───────────┐
                                                          ▼              ▼           ▼
                                                     LLVM → JIT    LLVM → wasm32  MSL → Metal
@@ -217,7 +217,7 @@ nothing is hoisted there is only the audio plan. Otherwise the load carries:
 - an audio LLVM kernel;
 - a coefficient LLVM kernel, run once at load and after control writes;
 - on Metal, an MSL audio kernel;
-- one `tropical_plan_5` metadata manifest for the loaded artifacts.
+- one `tropical_plan_6` metadata manifest for the loaded artifacts.
 
 Scalar coefficient slots tolerate the documented one-buffer race. Bank
 coefficient columns use three generations, so the audio block observes one
@@ -259,7 +259,7 @@ percentiles live in the [performance baseline](../benchmarks/current_baseline/fi
 ## Plan and retired-schema boundary
 
 [`Tropical.Plan`](../lean/Tropical/Plan.lean) is the typed
-`tropical_plan_5` producer contract. It carries:
+`tropical_plan_6` producer contract. It carries:
 
 - typed instruction and destination forms;
 - nested instance functions;
@@ -267,12 +267,14 @@ percentiles live in the [performance baseline](../benchmarks/current_baseline/fi
 - module slots and defaults;
 - stage-0 coefficient-column metadata;
 - host parameter disciplines.
+- compact `RoutedSumBegin` / `RoutedSumYield` / `RoutedSumEnd` regions and
+  optional cooperative-Metal execution metadata.
 
 Lean's type has no legacy state initialization, state-register types/names, or
 register update targets. The wire field `register_count` sizes the SSA temp
 pool; `NOperand.reg` is a temp read, not persistent state.
 
-The native C APIs and Lean `FlatPlan.ofWire` accept `tropical_plan_5` only.
+The native C APIs and Lean `FlatPlan.ofWire` accept `tropical_plan_6` only.
 Older or unknown schema tags and retired state/output carriers fail clearly at
 the serialized-plan boundary; there is no compatibility lift. The C++ runtime
 allocates no persistent state-register backing store. See the
@@ -364,7 +366,7 @@ lean/Tropical/
   EmitArrow/                 fourteen-constructor authoring tree and builders
   Ir/Nodes.lean              ResolvedProgram / ENode / ExprArena trunk
   Ir/Strata.lean             direct lowering
-  Compile.lean               partition + tropical_plan_5 construction
+  Compile.lean               partition + tropical_plan_6 construction
   Ir/Stage0.lean             typed binding-time split
   Ir/EmitLlvm.lean           LLVM kernel emitter
   Ir/EmitMsl.lean            Metal kernel emitter

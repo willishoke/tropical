@@ -99,6 +99,23 @@ mutual
             afterCount = (resultId, arena')) :
         LowersTo (.bankSum capacity tables body (some count) binderId)
           arena resultId arena'
+    | routedSumNone
+        (hTables : LowersMany tables.toList arena #[] tableIds afterTables)
+        (hValues : LowersMany values.toList afterTables #[] valueIds afterValues)
+        (hIntern :
+          (eintern (.routedSum capacity outputCount routes tableIds valueIds
+            none binderId)).run afterValues = (resultId, arena')) :
+        LowersTo (.routedSum capacity outputCount routes tables values none binderId)
+          arena resultId arena'
+    | routedSumSome
+        (hTables : LowersMany tables.toList arena #[] tableIds afterTables)
+        (hValues : LowersMany values.toList afterTables #[] valueIds afterValues)
+        (hCount : LowersTo count afterValues countId afterCount)
+        (hIntern :
+          (eintern (.routedSum capacity outputCount routes tableIds valueIds
+            (some countId) binderId)).run afterCount = (resultId, arena')) :
+        LowersTo (.routedSum capacity outputCount routes tables values
+          (some count) binderId) arena resultId arena'
 
   /-- Ordered trace for `Array.mapM lowerSigTree`, expressed over the list view
       used by Lean's lawful-monad lemma.  `acc` makes the push order explicit. -/
@@ -336,6 +353,60 @@ theorem lowerSigTree_lowersTo (sig : Sig) (arena : ExprArena) :
         (by simpa [hBodyRun] using ihBody afterTables)
         (by simpa [hCountRun] using ihCount tableIds afterBody)
         rfl
+  | case15 capacity outputCount routes tables values dynCount? binderId
+      ihTables ihValues ihCount =>
+    rw [lowerSigTree.eq_15, lower_attach_mapM, lower_attach_mapM]
+    rw [Array.mapM_eq_foldlM, ← Array.foldlM_toList]
+    simp only [StateT.bind, bind, pure]
+    generalize hTablesRun :
+      List.foldlM
+        (fun ids table => ids.push <$> lowerSigTree table) #[] tables.toList arena
+        = tablesResult
+    obtain ⟨tableIds, afterTables⟩ := tablesResult
+    simp only
+    rw [Array.mapM_eq_foldlM, ← Array.foldlM_toList]
+    generalize hValuesRun :
+      List.foldlM
+        (fun ids value => ids.push <$> lowerSigTree value) #[] values.toList afterTables
+        = valuesResult
+    obtain ⟨valueIds, afterValues⟩ := valuesResult
+    have hTablesTrace : LowersMany tables.toList arena #[] tableIds afterTables := by
+      have hMany := lowerMany_produces tables.toList
+        (fun table hmem nextArena =>
+          ihTables table (by simpa using hmem) nextArena)
+        arena #[]
+      change LowersMany tables.toList arena #[]
+        (List.foldlM
+          (fun ids table => ids.push <$> lowerSigTree table)
+          #[] tables.toList arena).1
+        (List.foldlM
+          (fun ids table => ids.push <$> lowerSigTree table)
+          #[] tables.toList arena).2 at hMany
+      simpa [hTablesRun] using hMany
+    have hValuesTrace :
+        LowersMany values.toList afterTables #[] valueIds afterValues := by
+      have hMany := lowerMany_produces values.toList
+        (fun value hmem nextArena =>
+          ihValues value (by simpa using hmem) nextArena)
+        afterTables #[]
+      change LowersMany values.toList afterTables #[]
+        (List.foldlM
+          (fun ids value => ids.push <$> lowerSigTree value)
+          #[] values.toList afterTables).1
+        (List.foldlM
+          (fun ids value => ids.push <$> lowerSigTree value)
+          #[] values.toList afterTables).2 at hMany
+      simpa [hValuesRun] using hMany
+    cases dynCount? with
+    | none =>
+      simp only [StateT.bind, StateT.pure, bind, pure]
+      exact .routedSumNone hTablesTrace hValuesTrace rfl
+    | some count =>
+      simp only [StateT.bind, StateT.pure, bind, pure]
+      generalize hCountRun : lowerSigTree count afterValues = countResult
+      obtain ⟨countId, afterCount⟩ := countResult
+      exact .routedSumSome hTablesTrace hValuesTrace
+        (by simpa [hCountRun] using ihCount tableIds valueIds afterValues) rfl
 
 private def LowersToSpec {sig before rootId after}
     (_h : LowersTo sig before rootId after) : Prop :=
@@ -710,6 +781,118 @@ theorem LowersTo.preserves {sig before rootId after}
           rfl)
     exact ⟨hFinal,
       ((hExtTables.trans hExtBody).trans hExtCount).trans hExtFinal,
+      hDenFinal⟩
+  case routedSumNone =>
+    intro arena tableIds afterTables valueIds afterValues capacity outputCount
+      routes binderId resultId arena' tables values hTables hValues hIntern
+      ihTables ihValues α alg env hArena
+    obtain ⟨hTablesArena, hExtTables, hDenTables⟩ :=
+      ihTables alg env hArena [] (by exact .nil)
+    simp only [List.nil_append] at hDenTables
+    obtain ⟨hValuesArena, hExtValues, hDenValues⟩ :=
+      ihValues alg env hTablesArena [] (by exact .nil)
+    simp only [List.nil_append] at hDenValues
+    have hFanout : valueIds.size = values.size := by
+      simpa using hDenValues.length_eq
+    have hDenTables' := hDenTables.extends hValuesArena hExtValues
+    obtain ⟨hFinal, hExtFinal, hDenFinal⟩ :=
+      intern_denotes
+        (sig := .routedSum capacity outputCount routes tables values none binderId)
+        alg env hValuesArena
+        (by
+          intro child hMem
+          simp [ENode.children] at hMem
+          rcases hMem with hTable | hValue
+          · obtain ⟨_, hDeref⟩ :=
+              hDenTables'.deref_of_mem (by simpa using hTable)
+            exact deref_index_lt hDeref
+          · obtain ⟨_, hDeref⟩ :=
+              hDenValues.deref_of_mem (by simpa using hValue)
+            exact deref_index_lt hDeref)
+        hIntern
+        (by
+          intro hAfter hExtends
+          have hTablesFinal := hDenTables'.extends hAfter hExtends
+          have hTableMaps := hTablesFinal.array_map_eq
+          have hValueMaps (loopValue : Value α) :
+              valueIds.map
+                  (denoteExpr alg (env.bindLoop binderId loopValue)
+                    arena' hAfter) =
+                values.map
+                  (denoteSig alg (env.bindLoop binderId loopValue)) := by
+            obtain ⟨hBoundArena, _, hBoundValues⟩ :=
+              ihValues alg (env.bindLoop binderId loopValue)
+                hTablesArena [] (by exact .nil)
+            simp only [List.nil_append] at hBoundValues
+            exact (hBoundValues.extends hAfter hExtends).array_map_eq
+          simp only [denoteNode, attach_map_value]
+          rw [denoteSig, hTableMaps]
+          simp only [hValueMaps]
+          rw [hFanout])
+    exact ⟨hFinal,
+      (hExtTables.trans hExtValues).trans hExtFinal, hDenFinal⟩
+  case routedSumSome =>
+    intro arena tableIds afterTables valueIds afterValues count countId
+      afterCount capacity outputCount routes binderId resultId arena' tables
+      values hTables hValues hCount hIntern ihTables ihValues ihCount
+      α alg env hArena
+    obtain ⟨hTablesArena, hExtTables, hDenTables⟩ :=
+      ihTables alg env hArena [] (by exact .nil)
+    simp only [List.nil_append] at hDenTables
+    obtain ⟨hValuesArena, hExtValues, hDenValues⟩ :=
+      ihValues alg env hTablesArena [] (by exact .nil)
+    simp only [List.nil_append] at hDenValues
+    have hFanout : valueIds.size = values.size := by
+      simpa using hDenValues.length_eq
+    obtain ⟨hCountArena, hExtCount, hDenCount⟩ :=
+      ihCount alg env hValuesArena
+    have hDenTables' :=
+      (hDenTables.extends hValuesArena hExtValues).extends hCountArena hExtCount
+    have hDenValues' := hDenValues.extends hCountArena hExtCount
+    obtain ⟨hFinal, hExtFinal, hDenFinal⟩ :=
+      intern_denotes
+        (sig := .routedSum capacity outputCount routes tables values
+          (some count) binderId)
+        alg env hCountArena
+        (by
+          intro child hMem
+          have hCases :
+              child ∈ tableIds ∨ child ∈ valueIds ∨ child = countId := by
+            simpa [ENode.children] using hMem
+          rcases hCases with hTable | hValue | rfl
+          · obtain ⟨_, hDeref⟩ :=
+              hDenTables'.deref_of_mem (by simpa using hTable)
+            exact deref_index_lt hDeref
+          · obtain ⟨_, hDeref⟩ :=
+              hDenValues'.deref_of_mem (by simpa using hValue)
+            exact deref_index_lt hDeref
+          · obtain ⟨_, hDeref, _⟩ := hDenCount
+            exact deref_index_lt hDeref)
+        hIntern
+        (by
+          intro hAfter hExtends
+          have hTablesFinal := hDenTables'.extends hAfter hExtends
+          have hTableMaps := hTablesFinal.array_map_eq
+          obtain ⟨_, _, hCountValue⟩ := hDenCount.extends hAfter hExtends
+          have hValueMaps (loopValue : Value α) :
+              valueIds.map
+                  (denoteExpr alg (env.bindLoop binderId loopValue)
+                    arena' hAfter) =
+                values.map
+                  (denoteSig alg (env.bindLoop binderId loopValue)) := by
+            obtain ⟨hBoundArena, hExtBound, hBoundValues⟩ :=
+              ihValues alg (env.bindLoop binderId loopValue)
+                hTablesArena [] (by exact .nil)
+            simp only [List.nil_append] at hBoundValues
+            have hBoundValues' :=
+              hBoundValues.extends hCountArena hExtCount
+            exact (hBoundValues'.extends hAfter hExtends).array_map_eq
+          simp only [denoteNode, attach_map_value]
+          rw [denoteSig, hTableMaps, hCountValue]
+          simp only [hValueMaps]
+          rw [hFanout])
+    exact ⟨hFinal,
+      ((hExtTables.trans hExtValues).trans hExtCount).trans hExtFinal,
       hDenFinal⟩
   case nil =>
     intro arena acc α alg env hArena pre hPre
