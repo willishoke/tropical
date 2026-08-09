@@ -273,6 +273,10 @@ private def routedDecodeF64 (bytes : ByteArray) : Array Float := Id.run do
     out := out.push (Float.ofBits bits)
   return out
 
+private def routedMetalUnavailable (e : String) : Bool :=
+  e.endsWith
+    "FlatRuntime: MSL source supplied but the engine was built without TROPICAL_METAL"
+
 def runRoutedSumCoverage : IO Bool := do
   let static := routedPlan
   let dynamic := routedPlan 4 (some (.slot 3 .float))
@@ -308,26 +312,35 @@ def runRoutedSumCoverage : IO Bool := do
         (msl.splitOn s!"tropical.threadgroup_scratch_bytes={static.metalThreadgroupScratchBytes}").length > 1
     | _, _ => false
   match ← renderIrBytes static, ← renderIrBytes (routedUnrolledPlan 4),
-      ← renderIrBytes dynamic, ← renderIrBytes (routedUnrolledPlan 3),
-      ← renderRoutedMsl static with
-  | .ok routedStatic, .ok unrolledStatic, .ok routedDynamic, .ok unrolledDynamic,
-      .ok metalStatic =>
-    let cpu := routedDecodeF64 unrolledStatic
-    let gpu := routedDecodeF64 metalStatic
-    let metalError := (Array.range (min cpu.size gpu.size)).foldl
-      (fun worst i => max worst (Float.abs (cpu[i]! - gpu[i]!))) 0.0
-    if compact && roundTrip && atomic && sourceSmoke &&
-        routedStatic == unrolledStatic && routedDynamic == unrolledDynamic &&
-        !gpu.isEmpty && gpu.size <= cpu.size && metalError < 1e-5 then
-      passGate "routed-sum-coverage"
-        s!"static+dynamic routed folds equal authored-order unrolling; cooperative Metal max error={metalError}; compact Plan 6 round-trips; Stage0 atomic"
+      ← renderIrBytes dynamic, ← renderIrBytes (routedUnrolledPlan 3) with
+  | .ok routedStatic, .ok unrolledStatic, .ok routedDynamic, .ok unrolledDynamic =>
+    let coreOk := compact && roundTrip && atomic && sourceSmoke &&
+      routedStatic == unrolledStatic && routedDynamic == unrolledDynamic
+    if !coreOk then
+      failGate "routed-sum-coverage" s!"compact={compact} roundTrip={roundTrip} atomic={atomic} source={sourceSmoke} staticEq={routedStatic == unrolledStatic} dynamicEq={routedDynamic == unrolledDynamic}"
     else
-      failGate "routed-sum-coverage" s!"compact={compact} roundTrip={roundTrip} atomic={atomic} source={sourceSmoke} staticEq={routedStatic == unrolledStatic} dynamicEq={routedDynamic == unrolledDynamic} metalError={metalError}"
-  | .error e, _, _, _, _ => failGate "routed-sum-coverage" s!"static routed: {firstLine e}"
-  | _, .error e, _, _, _ => failGate "routed-sum-coverage" s!"static unrolled: {firstLine e}"
-  | _, _, .error e, _, _ => failGate "routed-sum-coverage" s!"dynamic routed: {firstLine e}"
-  | _, _, _, .error e, _ => failGate "routed-sum-coverage" s!"dynamic unrolled: {firstLine e}"
-  | _, _, _, _, .error e => failGate "routed-sum-coverage" s!"cooperative Metal: {firstLine e}"
+      match ← renderRoutedMsl static with
+      | .ok metalStatic =>
+        let cpu := routedDecodeF64 unrolledStatic
+        let gpu := routedDecodeF64 metalStatic
+        let metalError := (Array.range (min cpu.size gpu.size)).foldl
+          (fun worst i => max worst (Float.abs (cpu[i]! - gpu[i]!))) 0.0
+        if !gpu.isEmpty && gpu.size <= cpu.size && metalError < 1e-5 then
+          passGate "routed-sum-coverage"
+            s!"static+dynamic routed folds equal authored-order unrolling; cooperative Metal max error={metalError}; compact Plan 6 round-trips; Stage0 atomic"
+        else
+          failGate "routed-sum-coverage"
+            s!"cooperative Metal returned samples={gpu.size}/{cpu.size} maxError={metalError}"
+      | .error e =>
+        if routedMetalUnavailable e then
+          passGate "routed-sum-coverage"
+            "static+dynamic routed folds equal authored-order unrolling; compact Plan 6 round-trips; Stage0 atomic; MSL source contract checked (Metal execution unavailable in this build)"
+        else
+          failGate "routed-sum-coverage" s!"cooperative Metal: {firstLine e}"
+  | .error e, _, _, _ => failGate "routed-sum-coverage" s!"static routed: {firstLine e}"
+  | _, .error e, _, _ => failGate "routed-sum-coverage" s!"static unrolled: {firstLine e}"
+  | _, _, .error e, _ => failGate "routed-sum-coverage" s!"dynamic routed: {firstLine e}"
+  | _, _, _, .error e => failGate "routed-sum-coverage" s!"dynamic unrolled: {firstLine e}"
 
 end RoutedSumCoverage
 
