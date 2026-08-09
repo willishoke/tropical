@@ -64,6 +64,13 @@ def main (args : List String) : IO UInt32 := do
         let partitionOk ← Tropical.Tropicaltest.SeamSweep.runEcddPartition arena resolved
         let liveOk ← Tropical.Tropicaltest.SeamSweep.runEcddLive arena resolved
         return if partitionOk && liveOk then 0 else 1
+  if args.contains "--modal-universe-history-only" then
+    match ← Tropical.Playground.getStdlib with
+    | .error error =>
+        IO.eprintln error
+        return 1
+    | .ok (arena, resolved) =>
+        return if ← runModalUniverseHistory arena resolved then 0 else 1
   let mut failed := 0
   let mut total := 0
 
