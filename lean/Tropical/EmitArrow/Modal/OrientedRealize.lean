@@ -79,12 +79,15 @@ private def terminalSameSide (left right : Array ModalMode) :
 
 /-- Float terminal realization of stable divided differences.  This avoids the
     fixed-amplitude admission needed by `modalBankSigTableDD`, which cannot
-    certify residues produced by an earlier live room. -/
+    certify residues produced by an earlier live room.  The paired rows remain
+    data: one float reduction body serves every row in authored order instead
+    of meta-unrolling the complex DD expression once per coupling. -/
 private def pairedSig (pairs : Array PairedMode) (clkInt anchorSamples : Sig) : Sig :=
+  if pairs.isEmpty then lit 0 else
   let clkRel := relClockQ clkInt anchorSamples
   let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-  let value := pairs.foldl (fun total pair =>
-    let delta := csubE pair.lam pair.nu
+  let value := bankFoldPaired (pairedBankCols pairs) fun pair =>
+    let delta : CplxE := (neg pair.ds, pair.wd)
     let z : CplxE := (mul delta.1 dSec, mul delta.2 dSec)
     let zsq := add (mul z.1 z.1) (mul z.2 z.2)
     let directLane := gt zsq (litF 0.01)
@@ -97,17 +100,17 @@ private def pairedSig (pairs : Array PairedMode) (clkInt anchorSamples : Sig) : 
     let cx : CplxE :=
       (selectE directLane direct.1 series.1,
        selectE directLane direct.2 series.2)
-    let secular := cmulE pair.c (scaleRealE dSec cx)
-    let env := expSig (mul pair.nu.1 dSec)
+    let secular := cmulE (pair.cre, pair.cim) (scaleRealE dSec cx)
+    let env := expSig (neg (mul pair.sigmaNu dSec))
     -- `modePhaseQ` is a Q0.32 cycle word, not a radian-valued float.  Keep the
     -- same integer-reduced rotator used by the incumbent DD realization; feeding
     -- that word to `cosSig`/`sinSig` would rotate complex modes incorrectly while
     -- accidentally remaining invisible for the real-pole (omega=0) case.
-    let phaseQ := modePhaseQ pair.nu.2 clkRel
+    let phaseQ := modePhaseQFromIncr (toIntE pair.incrNu) clkRel
     let carrierCos := div (toFloatE (fixedCosCycSig phaseQ)) (lit 1073741824)
     let carrierSin := div (toFloatE (fixedSinCycSig phaseQ)) (lit 1073741824)
     let carrier : CplxE := (mul env carrierCos, mul env carrierSin)
-    add total (cmulE secular carrier).1) (lit 0)
+    (cmulE secular carrier).1
   selectE (gt clkRel (lit 0)) value (lit 0)
 
 /-- Read both strict half-axis banks and supply the continuous mixed-orientation

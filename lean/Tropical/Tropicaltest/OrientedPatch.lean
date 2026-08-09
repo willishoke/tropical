@@ -105,6 +105,20 @@ private def degreePositiveGraph : PatchGraph :=
       { id := "room", node := .modalReverb "source" roomOne (direction false) }]
     output := "room" }
 
+/-- One complex repeated-pole DD atom.  The non-real coefficient makes the
+    carrier phase observable; installing it on each terminal arm separately
+    pins both the causal reduction and its anchor-mirrored past read. -/
+private def complexTerminalPair : PairedMode :=
+  { lam := (neg (lit 5), lit 700)
+    nu := (neg (lit 5), lit 700)
+    c := (lit 34 2, lit (-13) 2) }
+
+private def complexTerminalSig (past : Bool) : Sig :=
+  let terminal : Oriented.TerminalBank :=
+    if past then { bank := {}, pastPaired := #[complexTerminalPair] }
+    else { bank := {}, futurePaired := #[complexTerminalPair] }
+  terminal.realizeSig clockLit anchorSig
+
 private def graphPlan (arena : Arena) (name : String) (graph : PatchGraph) :
     Except String FlatPlan := do
   let term ← lowerGraph graph
@@ -114,6 +128,12 @@ private def graphPlan (arena : Arena) (name : String) (graph : PatchGraph) :
 private def renderGraph (arena : Arena) (name : String) (graph : PatchGraph) :
     IO (Except String (Array Float)) :=
   match graphPlan arena name graph with
+  | .error error => pure (.error error)
+  | .ok plan => renderPlanSamples plan frameCount
+
+private def renderSignal (arena : Arena) (name : String) (signal : Sig) :
+    IO (Except String (Array Float)) :=
+  match buildAndFinish (.ok (buildExprCarrier name signal arena)) with
   | .error error => pure (.error error)
   | .ok plan => renderPlanSamples plan frameCount
 
@@ -186,6 +206,14 @@ private def degreePositiveOracle (relativeSeconds : Float) : Float :=
       1.0 / 9.0 * Float.exp (-5.0 * relativeSeconds)
   else 0.0
 
+private def complexPairOracle (past : Bool) (relativeSeconds : Float) : Float :=
+  let active := if past then relativeSeconds < 0.0 else relativeSeconds > 0.0
+  if active then
+    let age := relativeSeconds.abs
+    age * Float.exp (-5.0 * age) *
+      (0.34 * Float.cos (700.0 * age) + 0.13 * Float.sin (700.0 * age))
+  else 0.0
+
 private def fractionalControlClockOk : Bool :=
   sigConstF? (Tropical.Playground.q32DeltaSamples
     (lit 2147483648) (lit 0)) == some 0.5
@@ -219,6 +247,12 @@ private structure OneRoomResult where
   localPost : Float
   outputReversePost : Float
 
+private structure ComplexPairResult where
+  futureError : Float
+  pastError : Float
+  mirrorDifference : Float
+  finite : Bool
+
 private def checkOneRoom (arena : Arena) : IO (Except String OneRoomResult) := do
   match ← renderGraph arena "oriented_local_reverse" oneRoomLocalReverse,
         ← renderGraph arena "oriented_output_reverse" oneRoomOutputReverse with
@@ -229,6 +263,22 @@ private def checkOneRoom (arena : Arena) : IO (Except String OneRoomResult) := d
         localVsOutputReverse := maxDifference localSamples outputReverse
         localPost := maxWindow localSamples (anchorNat + 1) frameCount
         outputReversePost := maxWindow outputReverse (anchorNat + 1) frameCount })
+  | .error error, _ | _, .error error => pure (.error error)
+
+private def checkComplexPair (arena : Arena) : IO (Except String ComplexPairResult) := do
+  match ← renderSignal arena "oriented_complex_pair_future" (complexTerminalSig false),
+        ← renderSignal arena "oriented_complex_pair_past" (complexTerminalSig true) with
+  | .ok future, .ok past =>
+      let mut mirrorDifference := 0.0
+      for offset in [1:min anchorNat (frameCount - anchorNat)] do
+        let difference := (future[anchorNat + offset]! - past[anchorNat - offset]!).abs
+        if difference > mirrorDifference then mirrorDifference := difference
+      pure (.ok {
+        futureError := maxOracleError future (complexPairOracle false)
+        pastError := maxOracleError past (complexPairOracle true)
+        mirrorDifference
+        finite := future.all (fun sample => sample.isFinite) &&
+          past.all (fun sample => sample.isFinite) })
   | .error error, _ | _, .error error => pure (.error error)
 
 private def controlConstant (control : ModalControlRef) : Option Float :=
@@ -324,13 +374,14 @@ private def checkTwoRooms (arena : Arena) : IO (Except String TwoRoomResult) := 
 
 /-- End-to-end production gate for local room direction. -/
 def runOrientedPatch (arena : Arena) : IO Bool := do
-  match ← checkOneRoom arena, ← checkTwoRooms arena with
-  | .ok one, .ok two =>
+  match ← checkOneRoom arena, ← checkTwoRooms arena, ← checkComplexPair arena with
+  | .ok one, .ok two, .ok complex =>
       IO.println "room-local direction from hand-built PatchGraphs:"
       IO.println s!"        one room  local oracle {one.localError} · output-reverse oracle {one.outputReverseError} · local≠output-reverse {one.localVsOutputReverse} · post {one.localPost}/{one.outputReversePost}"
       IO.println s!"        two rooms FF/FR/RF/RR max oracle error {two.maximumOracleError} · min pair distance {two.minimumPairDifference} · authored stage order {two.authoredOrder}"
       IO.println s!"        equal RT60 independently authored: finite {two.equalRt60Finite} · repeated-pole oracle error {two.equalRt60Error} · peak {two.equalRt60Peak}"
       IO.println s!"        degree-positive terminal: finite {two.degreePositiveFinite} · oracle error {two.degreePositiveError}; guarded crossings: room-room-room {two.repeatedRoomRefused} · room-room-gauge {two.roomRoomGaugeRefused}"
+      IO.println s!"        float-banked complex DD: finite {complex.finite} · future/past oracle {complex.futureError}/{complex.pastError} · mirror diff {complex.mirrorDifference}"
       IO.println s!"        terminal control clock retains a half-sample Q32.32 offset: {fractionalControlClockOk}"
       let pass := one.localError < 2.0e-6 && one.outputReverseError < 2.0e-6 &&
         one.localVsOutputReverse > 1.0e-2 && one.localPost > 1.0e-2 &&
@@ -341,13 +392,15 @@ def runOrientedPatch (arena : Arena) : IO Bool := do
         two.equalRt60Peak > 1.0e-6 &&
         two.degreePositiveFinite && two.degreePositiveError < 2.0e-6 &&
         two.repeatedRoomRefused && two.roomRoomGaugeRefused &&
+        complex.finite && complex.futureError < 2.0e-6 &&
+        complex.pastError < 2.0e-6 && complex.mirrorDifference == 0.0 &&
         fractionalControlClockOk
       if pass then
         passGate "modal-oriented-patch"
-          "room reverse is kernel-local (not complete-output reverse); two rooms retain independent FF/FR/RF/RR controls and authored stage order; equal frozen RT60 takes a finite repeated-pole limit; general-degree terminals preserve polynomial factors; unsupported nonterminal DD crossings refuse; terminal controls retain fractional Q32.32 time"
+          "room reverse is kernel-local (not complete-output reverse); two rooms retain independent FF/FR/RF/RR controls and authored stage order; float-banked complex DD preserves future/past phase and exact mirroring; equal frozen RT60 takes a finite repeated-pole limit; general-degree terminals preserve polynomial factors; unsupported nonterminal DD crossings refuse; terminal controls retain fractional Q32.32 time"
       else
         failGate "modal-oriented-patch" "numeric or structural contract failed"
-  | .error error, _ | _, .error error =>
+  | .error error, _, _ | _, .error error, _ | _, _, .error error =>
       failGate "modal-oriented-patch" s!"build/render: {firstLine error}"
 
 end Tropical.Tropicaltest.OrientedPatch
