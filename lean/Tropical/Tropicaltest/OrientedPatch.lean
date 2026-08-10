@@ -105,6 +105,33 @@ private def degreePositiveGraph : PatchGraph :=
       { id := "room", node := .modalReverb "source" roomOne (direction false) }]
     output := "room" }
 
+private def sourceCrossingGraph (near triple : Bool) : PatchGraph :=
+  let sourceSigma := if near then lit 50001 4 else add (lit 2) (lit 3)
+  let source := #[({ (realMode 5) with sigma := sourceSigma } : ModalMode)]
+  let second := if triple then
+      #[({ (realMode 5) with sigma := sub (lit 6) (lit 1) } : ModalMode)]
+    else roomTwo
+  { nodes := #[
+      { id := "source", node := .modalSource source anchorSig clockLit none },
+      { id := "crossing-room-one",
+        node := .modalReverb "source" #[realMode 5] (direction false) },
+      { id := "crossing-room-two",
+        node := .modalReverb "crossing-room-one" second (direction false) }]
+    output := "crossing-room-two" }
+
+/-- The same exact source/room crossing with the resonant room authored second.
+    The terminal convolution is commutative, but this ordering exercises the
+    room-2 confluence bookkeeping independently of the room-1 path. -/
+private def sourceSecondCrossingGraph : PatchGraph :=
+  let source := #[realMode 5]
+  { nodes := #[
+      { id := "source", node := .modalSource source anchorSig clockLit none },
+      { id := "ordinary-room-one",
+        node := .modalReverb "source" roomTwo (direction false) },
+      { id := "crossing-room-two",
+        node := .modalReverb "ordinary-room-one" #[realMode 5] (direction false) }]
+    output := "crossing-room-two" }
+
 /-- One complex repeated-pole DD atom.  The non-real coefficient makes the
     carrier phase observable; installing it on each terminal arm separately
     pins both the causal reduction and its anchor-mirrored past read. -/
@@ -205,6 +232,24 @@ private def degreePositiveOracle (relativeSeconds : Float) : Float :=
         Float.exp (-2.0 * relativeSeconds) +
       1.0 / 9.0 * Float.exp (-5.0 * relativeSeconds)
   else 0.0
+
+private def sourceCrossingOracle (relativeSeconds : Float) : Float :=
+  if relativeSeconds > 0.0 then
+    let e5 := Float.exp (-5.0 * relativeSeconds)
+    (-e5 / 16.0 + relativeSeconds * e5 / 4.0 +
+      Float.exp (-9.0 * relativeSeconds) / 16.0)
+  else 0.0
+
+private def sourceTripleCrossingOracle (relativeSeconds : Float) : Float :=
+  if relativeSeconds > 0.0 then
+    relativeSeconds * relativeSeconds * Float.exp (-5.0 * relativeSeconds) / 2.0
+  else 0.0
+
+private def sourceNearCrossingOracle (relativeSeconds : Float) : Float :=
+  analyticOracle #[
+    { physicalPole := -5.0001 },
+    { physicalPole := -5.0 },
+    { physicalPole := -9.0 }] relativeSeconds
 
 private def complexPairOracle (past : Bool) (relativeSeconds : Float) : Float :=
   let active := if past then relativeSeconds < 0.0 else relativeSeconds > 0.0
@@ -321,6 +366,11 @@ private structure TwoRoomResult where
   equalRt60Peak : Float
   degreePositiveError : Float
   degreePositiveFinite : Bool
+  sourceCrossingError : Float
+  sourceSecondCrossingError : Float
+  sourceTripleCrossingError : Float
+  sourceNearCrossingError : Float
+  sourceCrossingsFinite : Bool
   repeatedRoomRefused : Bool
   roomRoomGaugeRefused : Bool
 
@@ -352,6 +402,22 @@ private def checkTwoRooms (arena : Arena) : IO (Except String TwoRoomResult) := 
       match ← renderGraph arena "oriented_degree_positive" degreePositiveGraph with
       | .error error => pure (.error error)
       | .ok degreePositive =>
+          let crossing ← renderGraph arena "oriented_source_crossing"
+            (sourceCrossingGraph false false)
+          let tripleCrossing ← renderGraph arena "oriented_source_triple_crossing"
+            (sourceCrossingGraph false true)
+          let secondCrossing ← renderGraph arena "oriented_source_second_crossing"
+            sourceSecondCrossingGraph
+          let nearCrossing ← renderGraph arena "oriented_source_near_crossing"
+            (sourceCrossingGraph true false)
+          let (.ok crossing) := crossing
+            | return .error "source crossing render"
+          let (.ok tripleCrossing) := tripleCrossing
+            | return .error "source triple crossing render"
+          let (.ok secondCrossing) := secondCrossing
+            | return .error "source second-room crossing render"
+          let (.ok nearCrossing) := nearCrossing
+            | return .error "source near crossing render"
           let repeatedRoomRefused := match lowerGraph
               (repeatedRoomCrossingGraph false) with
             | .error error => error == "lower: nonterminal repeated-room crossing at 'equal-room-three' refused (a later room or gauge requires the composable divided-difference carrier)"
@@ -369,6 +435,15 @@ private def checkTwoRooms (arena : Arena) : IO (Except String TwoRoomResult) := 
             equalRt60Peak := maxWindow equalRt60 (anchorNat + 1) frameCount
             degreePositiveError := maxOracleError degreePositive degreePositiveOracle
             degreePositiveFinite := degreePositive.all (fun sample => sample.isFinite)
+            sourceCrossingError := maxOracleError crossing sourceCrossingOracle
+            sourceSecondCrossingError := maxOracleError secondCrossing sourceCrossingOracle
+            sourceTripleCrossingError := maxOracleError tripleCrossing
+              sourceTripleCrossingOracle
+            sourceNearCrossingError := maxOracleError nearCrossing sourceNearCrossingOracle
+            sourceCrossingsFinite := crossing.all (fun sample => sample.isFinite) &&
+              secondCrossing.all (fun sample => sample.isFinite) &&
+              tripleCrossing.all (fun sample => sample.isFinite) &&
+              nearCrossing.all (fun sample => sample.isFinite)
             repeatedRoomRefused
             roomRoomGaugeRefused })
 
@@ -381,6 +456,7 @@ def runOrientedPatch (arena : Arena) : IO Bool := do
       IO.println s!"        two rooms FF/FR/RF/RR max oracle error {two.maximumOracleError} · min pair distance {two.minimumPairDifference} · authored stage order {two.authoredOrder}"
       IO.println s!"        equal RT60 independently authored: finite {two.equalRt60Finite} · repeated-pole oracle error {two.equalRt60Error} · peak {two.equalRt60Peak}"
       IO.println s!"        degree-positive terminal: finite {two.degreePositiveFinite} · oracle error {two.degreePositiveError}; guarded crossings: room-room-room {two.repeatedRoomRefused} · room-room-gauge {two.roomRoomGaugeRefused}"
+      IO.println s!"        source/room confluence: finite {two.sourceCrossingsFinite} · room-1/room-2/three-pole/near oracle {two.sourceCrossingError}/{two.sourceSecondCrossingError}/{two.sourceTripleCrossingError}/{two.sourceNearCrossingError}"
       IO.println s!"        float-banked complex DD: finite {complex.finite} · future/past oracle {complex.futureError}/{complex.pastError} · mirror diff {complex.mirrorDifference}"
       IO.println s!"        terminal control clock retains a half-sample Q32.32 offset: {fractionalControlClockOk}"
       let pass := one.localError < 2.0e-6 && one.outputReverseError < 2.0e-6 &&
@@ -391,6 +467,10 @@ def runOrientedPatch (arena : Arena) : IO Bool := do
         two.equalRt60Finite && two.equalRt60Error < 2.0e-6 &&
         two.equalRt60Peak > 1.0e-6 &&
         two.degreePositiveFinite && two.degreePositiveError < 2.0e-6 &&
+        two.sourceCrossingsFinite && two.sourceCrossingError < 2.0e-6 &&
+        two.sourceSecondCrossingError < 2.0e-6 &&
+        two.sourceTripleCrossingError < 2.0e-6 &&
+        two.sourceNearCrossingError < 2.0e-6 &&
         two.repeatedRoomRefused && two.roomRoomGaugeRefused &&
         complex.finite && complex.futureError < 2.0e-6 &&
         complex.pastError < 2.0e-6 && complex.mirrorDifference == 0.0 &&

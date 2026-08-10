@@ -307,6 +307,8 @@ def runRoutedSumCoverage : IO Bool := do
       (llvm.splitOn "@routed_routes_").length > 1 &&
         (msl.splitOn "threadgroup_position_in_grid").length > 1 &&
         (msl.splitOn "threadgroup_barrier").length >= 4 &&
+        (msl.splitOn "routed_outputs").length == 1 &&
+        (msl.splitOn "routed_record_0 / 3u < routed_trips").length == 1 &&
         (msl.splitOn "constant uint routed_csr_0").length > 1 &&
         (msl.splitOn "switch (rs").length == 1 &&
         (msl.splitOn s!"tropical.threadgroup_scratch_bytes={static.metalThreadgroupScratchBytes}").length > 1

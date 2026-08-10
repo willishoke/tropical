@@ -295,8 +295,10 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
     result.metal_threadgroup_scratch_bytes =
       execution.value("threadgroup_scratch_bytes", 0u);
     const std::string policy =
-      execution.value("requested_group_policy", std::string{"pipeline_width"});
-    if (result.metal_sample_threadgroups && policy != "pipeline_width")
+      execution.value("requested_group_policy",
+                      std::string{"four_pipeline_widths_capped"});
+    if (result.metal_sample_threadgroups
+        && policy != "four_pipeline_widths_capped")
       throw std::runtime_error(
         "NumericProgramParser: unsupported Metal group policy '" + policy + "'");
   }
