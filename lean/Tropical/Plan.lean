@@ -605,6 +605,119 @@ def FlatPlan.metalSharedScalarKeys (p : FlatPlan) : Std.HashSet String := Id.run
     if instr.tag == "RoutedSumEnd" then depth := depth - 1
   return shared
 
+/-- One physical threadgroup arena for the logical array slots in a
+    cooperative kernel. `offsets[slot]` is measured in f32 elements. Slots
+    whose instruction live ranges do not overlap may intentionally have the
+    same offset. Coefficient columns are host-owned device buffers and do not
+    participate in this arena. -/
+structure MetalArrayScratchLayout where
+  offsets : Array Nat
+  peakFloats : Nat
+  unreusedFloats : Nat
+deriving Repr, Inhabited
+
+private structure MetalArrayInterval where
+  slot : Nat
+  first : Nat
+  last : Nat
+  size : Nat
+deriving Inhabited
+
+private structure MetalArrayBlock where
+  offset : Nat
+  size : Nat
+deriving Inhabited
+
+private structure MetalActiveArray where
+  last : Nat
+  block : MetalArrayBlock
+deriving Inhabited
+
+private def NInstr.arrayStorageSlots (instr : NInstr) : Array Nat := Id.run do
+  let mut slots : Array Nat := #[]
+  match instr.dst with
+  | .array slot | .sessionArray slot => slots := slots.push slot
+  | _ => pure ()
+  for operand in instr.args do
+    let slot? := match operand with
+      | .arrayReg slot | .sessionArrayReg slot => some slot
+      | _ => none
+    if let some slot := slot? then
+      unless slots.contains slot do slots := slots.push slot
+  return slots
+
+private def coalesceMetalArrayBlocks
+    (blocks : Array MetalArrayBlock) : Array MetalArrayBlock := Id.run do
+  let sorted := blocks.qsort fun a b => a.offset < b.offset
+  let mut out : Array MetalArrayBlock := #[]
+  for block in sorted do
+    match out.back? with
+    | some previous =>
+      if previous.offset + previous.size == block.offset then
+        out := out.set! (out.size - 1)
+          { offset := previous.offset, size := previous.size + block.size }
+      else
+        out := out.push block
+    | none => out := out.push block
+  return out
+
+/-- Linear-scan allocation for cooperative array scratch. An array is live
+    from its first read/write instruction through its last. Expired physical
+    ranges are coalesced and reused by later logical arrays; operands and a
+    destination touched by the same instruction therefore still overlap. -/
+def FlatPlan.metalArrayScratchLayout (p : FlatPlan) : MetalArrayScratchLayout := Id.run do
+  let flat := p.linearInstrs
+  let mut intervals : Array MetalArrayInterval := #[]
+  let mut unreusedFloats := 0
+  for slot in [0:p.arraySlotCount] do
+    unless p.coeffArraySlots.contains slot do
+      let mut first? : Option Nat := none
+      let mut last? : Option Nat := none
+      for instructionIndex in [0:flat.size] do
+        if flat[instructionIndex]!.arrayStorageSlots.contains slot then
+          if first?.isNone then first? := some instructionIndex
+          last? := some instructionIndex
+      if let some first := first? then
+        if let some last := last? then
+          let size := max (p.arraySlotSizes[slot]?.getD 1) 1
+          intervals := intervals.push { slot, first, last, size }
+          unreusedFloats := unreusedFloats + size
+  intervals := intervals.qsort fun a b =>
+    a.first < b.first || (a.first == b.first && a.slot < b.slot)
+
+  let mut offsets := Array.replicate p.arraySlotCount 0
+  let mut active : Array MetalActiveArray := #[]
+  let mut free : Array MetalArrayBlock := #[]
+  let mut peakFloats := 0
+  for interval in intervals do
+    let mut stillActive : Array MetalActiveArray := #[]
+    for allocation in active do
+      if allocation.last < interval.first then
+        free := free.push allocation.block
+      else
+        stillActive := stillActive.push allocation
+    active := stillActive
+    free := coalesceMetalArrayBlocks free
+
+    let offset ← match free.findIdx? (fun block => block.size ≥ interval.size) with
+      | some freeIndex =>
+        let block := free[freeIndex]!
+        free := free.eraseIdxIfInBounds freeIndex
+        if block.size > interval.size then
+          free := free.push {
+            offset := block.offset + interval.size
+            size := block.size - interval.size }
+        pure block.offset
+      | none =>
+        let offset := peakFloats
+        peakFloats := peakFloats + interval.size
+        pure offset
+    offsets := offsets.set! interval.slot offset
+    active := active.push {
+      last := interval.last
+      block := { offset, size := interval.size } }
+  return { offsets, peakFloats, unreusedFloats }
+
 private def scalarStorageBytes : ScalarType → Nat
   | .float => 4 | .int => 8 | .bool => 1
 
@@ -620,10 +733,7 @@ private def scalarStorageBytes : ScalarType → Nat
     declaration block to sixteen bytes. -/
 def FlatPlan.metalThreadgroupScratchBytes (p : FlatPlan) : Nat := Id.run do
   if !p.hasRoutedSum then return 0
-  let mut bytes := 0
-  for slot in [0:p.arraySlotCount] do
-    if !p.coeffArraySlots.contains slot then
-      bytes := bytes + 4 * max (p.arraySlotSizes[slot]?.getD 1) 1
+  let mut bytes := 4 * p.metalArrayScratchLayout.peakFloats
   let mut declared : Std.HashSet String := {}
   let sharedScalars := p.metalSharedScalarKeys
   let mut routedDepth := 0

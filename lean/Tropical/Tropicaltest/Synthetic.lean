@@ -217,6 +217,33 @@ private def routedPlan (capacity : Nat := 4)
     slotDefaults := #[Lean.Json.num (jn 0), Lean.Json.num (jn 0),
       Lean.Json.num (jn 0), Lean.Json.num (jn 3), Lean.Json.num (jn 1 1)] }
 
+/-- Two sequential cooperative regions with disjoint logical result arrays.
+    Their physical Metal storage should alias while the scalar extracted from
+    the first remains live in lane 0. -/
+private def routedSequentialPlan : FlatPlan :=
+  let body := #[instrScalar "Add" 7 #[.slot 4 .float, cF 0] .float,
+      instrRoutedSumBegin 0 4 3 routedRoutes4 none 17]
+    ++ routedMapped (.loopIdx 17) (rgF 7) 0
+    ++ #[instrRoutedSumYield 0 #[rgF 1, rgF 2, rgF 3],
+         instrRoutedSumEnd 0,
+         instrIndex 4 #[.arrayReg 0, cI 0] .float,
+         instrRoutedSumBegin 1 4 3 routedRoutes4 none 18]
+    ++ routedMapped (.loopIdx 18) (rgF 7) 8
+    ++ #[instrRoutedSumYield 1 #[rgF 9, rgF 10, rgF 11],
+         instrRoutedSumEnd 1,
+         instrIndex 12 #[.arrayReg 1, cI 0] .float,
+         instrScalar "Add" 13 #[rgF 4, rgF 12] .float,
+         instrWriteSlot 0 (rgF 13)]
+  let inst := InstanceFunction.mk "root" "root" #[] body #[] 0 0 14 #[]
+  { sampleRate := jn 44100, compilationMode := .fused,
+    arraySlotNames := #["first", "second"], registerCount := 14,
+    arraySlotCount := 2, arraySlotSizes := #[3, 3], instanceFunctions := #[inst],
+    sinks := #[{ inputs := #[0], gain := jn 1, target := 0 }],
+    sources := defaultSources, slotCount := 5,
+    slotNames := #["out", "unused:1", "unused:2", "param:count", "param:scale"],
+    slotDefaults := #[Lean.Json.num (jn 0), Lean.Json.num (jn 0),
+      Lean.Json.num (jn 0), Lean.Json.num (jn 3), Lean.Json.num (jn 1 1)] }
+
 /-- Literal-index twin with the exact routed contract's fold order:
     item-major, then authored emit order within each item. -/
 private def routedUnrolledPlan (trips : Nat) : FlatPlan := Id.run do
@@ -288,6 +315,7 @@ def runRoutedSumCoverage : IO Bool := do
   let static := routedPlan
   let dynamic := routedPlan 4 (some (.slot 3 .float))
   let large := routedPlan 64
+  let sequential := routedSequentialPlan
   let staticBody := static.instanceFunctions[0]!.instructions
   let largeBody := large.instanceFunctions[0]!.instructions
   let compact := staticBody.size == largeBody.size && routedTags static ==
@@ -309,8 +337,10 @@ def runRoutedSumCoverage : IO Bool := do
       routedTags split.audio == routedTags static &&
         (match split.coeff? with | none => true | some p => routedTags p |>.isEmpty)
   let sourceSmoke := match Tropical.Ir.EmitLlvm.emitKernel static,
-      Tropical.Ir.EmitMsl.emitKernel static with
-    | .ok llvm, .ok msl =>
+      Tropical.Ir.EmitMsl.emitKernel static,
+      Tropical.Ir.EmitMsl.emitKernel sequential with
+    | .ok llvm, .ok msl, .ok sequentialMsl =>
+      let layout := sequential.metalArrayScratchLayout
       (llvm.splitOn "@routed_routes_").length > 1 &&
         (msl.splitOn "threadgroup_position_in_grid").length > 1 &&
         (msl.splitOn "threadgroup_barrier").length >= 4 &&
@@ -320,38 +350,55 @@ def runRoutedSumCoverage : IO Bool := do
         (msl.splitOn "threadgroup float tf7;").length == 2 &&
         (msl.splitOn "    float tf4;").length == 2 &&
         (msl.splitOn "switch (rs").length == 1 &&
-        (msl.splitOn s!"tropical.threadgroup_scratch_bytes={static.metalThreadgroupScratchBytes}").length > 1
-    | _, _ => false
+        (msl.splitOn s!"tropical.threadgroup_scratch_bytes={static.metalThreadgroupScratchBytes}").length > 1 &&
+        layout.offsets == #[0, 0] && layout.peakFloats == 3 &&
+        layout.unreusedFloats == 6 &&
+        sequential.metalThreadgroupScratchBytes == static.metalThreadgroupScratchBytes &&
+        (sequentialMsl.splitOn "tropical.array_scratch_floats=3/6").length == 2 &&
+        (sequentialMsl.splitOn "threadgroup float* arr0 = array_scratch + 0;").length == 2 &&
+        (sequentialMsl.splitOn "threadgroup float* arr1 = array_scratch + 0;").length == 2
+    | _, _, _ => false
   match ← renderIrBytes static, ← renderIrBytes (routedUnrolledPlan 4),
-      ← renderIrBytes dynamic, ← renderIrBytes (routedUnrolledPlan 3) with
-  | .ok routedStatic, .ok unrolledStatic, .ok routedDynamic, .ok unrolledDynamic =>
+      ← renderIrBytes dynamic, ← renderIrBytes (routedUnrolledPlan 3),
+      ← renderIrBytes sequential with
+  | .ok routedStatic, .ok unrolledStatic, .ok routedDynamic, .ok unrolledDynamic,
+      .ok sequentialCpu =>
     let coreOk := compact && roundTrip && atomic && sourceSmoke &&
       routedStatic == unrolledStatic && routedDynamic == unrolledDynamic
     if !coreOk then
       failGate "routed-sum-coverage" s!"compact={compact} roundTrip={roundTrip} atomic={atomic} source={sourceSmoke} staticEq={routedStatic == unrolledStatic} dynamicEq={routedDynamic == unrolledDynamic}"
     else
-      match ← renderRoutedMsl static with
-      | .ok metalStatic =>
+      match ← renderRoutedMsl static, ← renderRoutedMsl sequential with
+      | .ok metalStatic, .ok sequentialMetal =>
         let cpu := routedDecodeF64 unrolledStatic
         let gpu := routedDecodeF64 metalStatic
         let metalError := (Array.range (min cpu.size gpu.size)).foldl
           (fun worst i => max worst (Float.abs (cpu[i]! - gpu[i]!))) 0.0
-        if !gpu.isEmpty && gpu.size <= cpu.size && metalError < 1e-5 then
+        let sequentialReference := routedDecodeF64 sequentialCpu
+        let sequentialGpu := routedDecodeF64 sequentialMetal
+        let sequentialError :=
+          (Array.range (min sequentialReference.size sequentialGpu.size)).foldl
+            (fun worst i => max worst
+              (Float.abs (sequentialReference[i]! - sequentialGpu[i]!))) 0.0
+        if !gpu.isEmpty && gpu.size <= cpu.size && metalError < 1e-5 &&
+            !sequentialGpu.isEmpty && sequentialGpu.size <= sequentialReference.size &&
+            sequentialError < 1e-5 then
           passGate "routed-sum-coverage"
-            s!"static+dynamic routed folds equal authored-order unrolling; cooperative Metal max error={metalError}; compact Plan 6 round-trips; Stage0 atomic"
+            s!"static+dynamic routed folds equal authored-order unrolling; cooperative Metal max error={metalError}; liveness-aliased sequential max error={sequentialError}; compact Plan 6 round-trips; Stage0 atomic"
         else
           failGate "routed-sum-coverage"
-            s!"cooperative Metal returned samples={gpu.size}/{cpu.size} maxError={metalError}"
-      | .error e =>
+            s!"cooperative Metal samples={gpu.size}/{cpu.size} maxError={metalError}; sequential={sequentialGpu.size}/{sequentialReference.size} maxError={sequentialError}"
+      | .error e, _ | _, .error e =>
         if routedMetalUnavailable e then
           passGate "routed-sum-coverage"
             "static+dynamic routed folds equal authored-order unrolling; compact Plan 6 round-trips; Stage0 atomic; MSL source contract checked (Metal execution unavailable in this build)"
         else
           failGate "routed-sum-coverage" s!"cooperative Metal: {firstLine e}"
-  | .error e, _, _, _ => failGate "routed-sum-coverage" s!"static routed: {firstLine e}"
-  | _, .error e, _, _ => failGate "routed-sum-coverage" s!"static unrolled: {firstLine e}"
-  | _, _, .error e, _ => failGate "routed-sum-coverage" s!"dynamic routed: {firstLine e}"
-  | _, _, _, .error e => failGate "routed-sum-coverage" s!"dynamic unrolled: {firstLine e}"
+  | .error e, _, _, _, _ => failGate "routed-sum-coverage" s!"static routed: {firstLine e}"
+  | _, .error e, _, _, _ => failGate "routed-sum-coverage" s!"static unrolled: {firstLine e}"
+  | _, _, .error e, _, _ => failGate "routed-sum-coverage" s!"dynamic routed: {firstLine e}"
+  | _, _, _, .error e, _ => failGate "routed-sum-coverage" s!"dynamic unrolled: {firstLine e}"
+  | _, _, _, _, .error e => failGate "routed-sum-coverage" s!"sequential routed: {firstLine e}"
 
 end RoutedSumCoverage
 

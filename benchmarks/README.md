@@ -9,6 +9,8 @@ experiments with recorded findings.
   baseline, on CPU.
 - **`gpu_time_partition/`** — the same time-partition axis taken to the GPU (Apple
   Silicon / Metal, UMA): is a per-block dispatch realtime-feasible? See its `findings.md`.
+- **`pure_kernel_partition/`** — liveness reuse versus a pure multi-kernel split when
+  a graph's cooperative working set crosses Metal's per-kernel memory ceiling.
 - **`llvm/`** — LLVM-level optimization spikes (active-set inlining, compile-time
   scaling, cross-module inlining) that backed the fractal-compilation choices. See
   `llvm/README.md` for the index.

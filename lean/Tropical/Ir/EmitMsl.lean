@@ -961,6 +961,7 @@ def emitKernel (plan : FlatPlan) : Except String String := do
   let cooperative := plan.hasRoutedSum
   let flat := planInstrs plan
   let routedBegins := flat.filter (·.tag == "RoutedSumBegin")
+  let arrayScratch := plan.metalArrayScratchLayout
   -- Packed offsets for the hoisted columns, in the plan's advertised
   -- order — MUST match FlatRuntime's upload packing (it walks
   -- coeff_array_slots in the same order).
@@ -1002,13 +1003,19 @@ def emitKernel (plan : FlatPlan) : Except String String := do
   let maxRecords := routedBegins.foldl
     (fun n instr => max n instr.routedRoutes.size) 0
   let body : M Unit := do
-    -- thread-private array scratch (per-sample on CPU too); hoisted
-    -- coefficient columns are read from the buffer(3) binding instead.
-    for i in [0:plan.arraySlotCount] do
-      unless coeffOffsets.contains i do
-        let sz := sizes[i]?.getD 1
-        if cooperative then line s!"threadgroup float arr{i}[{max sz 1}];"
-        else line s!"float arr{i}[{max sz 1}];"
+    -- Cooperative logical arrays are pointers into one liveness-allocated
+    -- threadgroup arena. Ordinary kernels retain distinct private arrays;
+    -- hoisted coefficient columns remain reads from buffer(3).
+    if cooperative then
+      line s!"threadgroup float array_scratch[{max arrayScratch.peakFloats 1}];"
+      for i in [0:plan.arraySlotCount] do
+        unless coeffOffsets.contains i do
+          line s!"threadgroup float* arr{i} = array_scratch + {arrayScratch.offsets[i]?.getD 0};"
+    else
+      for i in [0:plan.arraySlotCount] do
+        unless coeffOffsets.contains i do
+          let sz := sizes[i]?.getD 1
+          line s!"float arr{i}[{max sz 1}];"
     if cooperative then
       for declaration in scalarDecls do line declaration
       line s!"threadgroup float routed_records[{max maxRecords 1}];"
@@ -1036,7 +1043,9 @@ def emitKernel (plan : FlatPlan) : Except String String := do
     -- compiler doesn't warn on unused const locals by default.
     let hdr := if cooperative then
       cooperativeHeader (!plan.coeffArraySlots.isEmpty)
-        (cooperativeRouteConstants routedBegins ++ "\n")
+        (cooperativeRouteConstants routedBegins ++ "\n" ++
+          s!"// tropical.array_scratch_floats={arrayScratch.peakFloats}" ++
+          s!"/{arrayScratch.unreusedFloats}\n")
         plan.metalThreadgroupScratchBytes
       else if plan.coeffArraySlots.isEmpty then header else headerColumns
     .ok (hdr ++ bodyText ++ "\n}\n")
