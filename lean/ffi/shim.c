@@ -303,6 +303,12 @@ LEAN_EXPORT lean_obj_res shim_dac_stat_overruns(b_lean_obj_arg dac, lean_obj_arg
   return lean_io_result_mk_ok(lean_box_uint64(dac_stats(dac).overrun_count));
 }
 
+LEAN_EXPORT lean_obj_res shim_dac_buffer_frames(b_lean_obj_arg dac, lean_obj_arg world) {
+  (void)world;
+  return lean_io_result_mk_ok(
+      lean_box_uint32(tropical_dac_get_buffer_frames(unwrap(dac))));
+}
+
 /* ── Device enumeration ────────────────────────────────────────────────────── */
 
 LEAN_EXPORT lean_obj_res shim_audio_device_count(lean_obj_arg world) {

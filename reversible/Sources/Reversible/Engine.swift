@@ -123,6 +123,17 @@ actor Engine {
             .deletingLastPathComponent()            // repo root
     }
 
+    static func childEnvironment(
+        inherited: [String: String]
+    ) -> [String: String] {
+        var environment = inherited
+        environment["TROPICAL_ARROW"] = "1"
+        if environment["TROPICAL_BACKEND"] == nil {
+            environment["TROPICAL_BACKEND"] = "metal"
+        }
+        return environment
+    }
+
     init(events: @escaping @Sendable (EngineEvent) -> Void) {
         self.events = events
     }
@@ -146,8 +157,16 @@ actor Engine {
         // The arrow patch-graph path does not route through syncCompile, but we
         // set the var anyway so any session-path compile in this process also
         // takes the session → resolved-root (arrow) path. Inert if ignored.
-        var env = ProcessInfo.processInfo.environment
-        env["TROPICAL_ARROW"] = "1"
+        // Preserve explicit developer overrides while selecting the qualified
+        // live backend for a normal product launch.
+        let env = Engine.childEnvironment(
+            inherited: ProcessInfo.processInfo.environment
+        )
+        // Reversible is the live product surface for the routed modal backend.
+        // Its heavyweight two-room kernels are qualified for Metal and exceed
+        // the real-time deadline on the scalar f64 JIT. Keep an explicit
+        // developer override (`TROPICAL_BACKEND=jit`) for diagnosis, but do not
+        // silently launch the product on the reference backend.
         p.environment = env
 
         let outPipe = Pipe(), errPipe = Pipe()

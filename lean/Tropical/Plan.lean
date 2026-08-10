@@ -557,11 +557,11 @@ deriving Inhabited
 /-- Instructions in the exact recursive order used by both code emitters. -/
 private def InstanceFunction.linearInstrs (f : InstanceFunction) : Array NInstr := Id.run do
   let mut out := f.preambleInstructions
-  for h : child in f.children do
+  for _h : child in f.children do
     out := out ++ child.preInputInstructions ++ child.linearInstrs
   return out ++ f.instructions
 termination_by sizeOf f
-decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children h
+decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children _h
 
 private def FlatPlan.linearInstrs (p : FlatPlan) : Array NInstr :=
   p.instanceFunctions.foldl (fun out f => out ++ f.linearInstrs) #[]
@@ -569,16 +569,55 @@ private def FlatPlan.linearInstrs (p : FlatPlan) : Array NInstr :=
 def FlatPlan.hasRoutedSum (p : FlatPlan) : Bool :=
   p.linearInstrs.any (·.tag == "RoutedSumBegin")
 
+private def NInstr.scalarStorageKey? (instr : NInstr) : Option String :=
+  match instr.dst with
+  | .temp slot => some s!"temp:{slot}:{repr instr.resultType}"
+  | .moduleSlot slot => some s!"slot:{slot}:{repr instr.resultType}"
+  | _ => none
+
+private def NOperand.scalarStorageKey? : NOperand → Option String
+  | .reg index ty => some s!"temp:{index}:{repr ty}"
+  | .slot index ty => some s!"slot:{index}:{repr ty}"
+  | _ => none
+
+/-- Scalar destinations written by lane 0 and subsequently read by an
+    all-lane routed region.  Only these values cross a thread boundary and
+    require threadgroup storage; ordinary lane-0 temporaries can remain
+    thread-private across the emitter's reopened lane-0 scopes. -/
+def FlatPlan.metalSharedScalarKeys (p : FlatPlan) : Std.HashSet String := Id.run do
+  let flat := p.linearInstrs
+  let mut outside : Std.HashSet String := {}
+  let mut depth := 0
+  for instr in flat do
+    if instr.tag == "RoutedSumBegin" then depth := depth + 1
+    if depth == 0 then
+      if let some key := instr.scalarStorageKey? then
+        outside := outside.insert key
+    if instr.tag == "RoutedSumEnd" then depth := depth - 1
+  let mut shared : Std.HashSet String := {}
+  depth := 0
+  for instr in flat do
+    if instr.tag == "RoutedSumBegin" then depth := depth + 1
+    if depth > 0 then
+      for operand in instr.args do
+        if let some key := operand.scalarStorageKey? then
+          if outside.contains key then shared := shared.insert key
+    if instr.tag == "RoutedSumEnd" then depth := depth - 1
+  return shared
+
 private def scalarStorageBytes : ScalarType → Nat
   | .float => 4 | .int => 8 | .bool => 1
 
-/-- Conservative static threadgroup-storage contract for cooperative Metal.
-    Scalar execution is lane-0-only, so its externally visible temps/slots and
-    ordinary arrays live in threadgroup storage.  Sequential routed regions
-    reuse one mapped-record arena; result gathers write their already-counted
-    destination arrays directly, hence the maximum rather than a sum.
-    The final eight-byte rounding is deliberate host-side headroom for target
-    address-space alignment. -/
+/-- Static threadgroup-storage contract for cooperative Metal. Ordinary arrays
+    and scalar values captured by an all-lane routed region live in threadgroup
+    storage; lane-0-only scalars remain thread-private. Sequential routed
+    regions reuse one mapped-record arena; result gathers write their
+    already-counted destination arrays directly, hence the maximum rather than
+    a sum.
+    The final sixteen-byte rounding mirrors Metal's aggregate static
+    threadgroup allocation granularity. Individual i64 values require
+    eight-byte alignment, but the compiled allocation can round the complete
+    declaration block to sixteen bytes. -/
 def FlatPlan.metalThreadgroupScratchBytes (p : FlatPlan) : Nat := Id.run do
   if !p.hasRoutedSum then return 0
   let mut bytes := 0
@@ -586,6 +625,7 @@ def FlatPlan.metalThreadgroupScratchBytes (p : FlatPlan) : Nat := Id.run do
     if !p.coeffArraySlots.contains slot then
       bytes := bytes + 4 * max (p.arraySlotSizes[slot]?.getD 1) 1
   let mut declared : Std.HashSet String := {}
+  let sharedScalars := p.metalSharedScalarKeys
   let mut routedDepth := 0
   let mut maxRecords := 0
   let mut hasDynamicRoutedCount := false
@@ -598,12 +638,12 @@ def FlatPlan.metalThreadgroupScratchBytes (p : FlatPlan) : Nat := Id.run do
       match instr.dst with
       | .temp slot =>
         let key := s!"temp:{slot}:{repr instr.resultType}"
-        unless declared.contains key do
+        if sharedScalars.contains key && !declared.contains key then
           declared := declared.insert key
           bytes := bytes + scalarStorageBytes instr.resultType
       | .moduleSlot slot =>
         let key := s!"slot:{slot}:{repr instr.resultType}"
-        unless declared.contains key do
+        if sharedScalars.contains key && !declared.contains key then
           declared := declared.insert key
           bytes := bytes + scalarStorageBytes instr.resultType
       | _ => pure ()
@@ -613,7 +653,7 @@ def FlatPlan.metalThreadgroupScratchBytes (p : FlatPlan) : Nat := Id.run do
   -- lane 0 resumes.  Only mapped records need a separate reusable arena.
   bytes := bytes + 4 * maxRecords
   if hasDynamicRoutedCount then bytes := bytes + 4
-  return ((bytes + 7) / 8) * 8
+  return ((bytes + 15) / 16) * 16
 
 def FlatPlan.metalExecutionToWire (p : FlatPlan) : Option Json :=
   if p.hasRoutedSum then

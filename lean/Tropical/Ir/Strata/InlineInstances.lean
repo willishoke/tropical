@@ -166,7 +166,7 @@ private def substDeclNestedE (d : BodyDecl) : PassM BodyDecl := do
     the `toResolved` GC renumbers away. -/
 private def goE (pool : Array Program) (hwp : progPoolWf pool = true)
     (rootIdx : ProgramIdx) : PassM ProgramIdx := do
-  match hp : pool[rootIdx.idx]? with
+  match _hp : pool[rootIdx.idx]? with
   | none => failP s!"inlineInstances: program pool index {rootIdx.idx} out of range"
   | some prog => do
     unless prog.decls.any (fun d => match d with | .inst .. => true | _ => false) do
@@ -176,7 +176,7 @@ private def goE (pool : Array Program) (hwp : progPoolWf pool = true)
     let flats : Array (Option (Program × Program)) ← prog.decls.mapM fun d => do
       match d with
       | .inst name typeKey _ =>
-        match hr : prog.registryGet? typeKey with
+        match _hr : prog.registryGet? typeKey with
         | some declTypeIdx =>
           match pool[declTypeIdx.idx]? with
           | none =>
@@ -240,7 +240,7 @@ private def goE (pool : Array Program) (hwp : progPoolWf pool = true)
       assigns := newAssigns
       registry := #[] }
 termination_by rootIdx.idx
-decreasing_by exact progPool_registry_lt hwp hp hr
+decreasing_by exact progPool_registry_lt hwp _hp _hr
 
 /-- The pass entry: snapshot the program pool, check pool-wf once (an
     O(edges) sweep that buys the whole recursion's termination measure

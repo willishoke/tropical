@@ -220,7 +220,7 @@ termination_by (bound, 1)
 def encBodyDecl (arena : Arena) (hw : arena.exprs.wf = true)
     (hwp : progPoolWf arena.programs = true) (bound : Nat) (d : BodyDecl)
     (hpd : ∀ name t, d = .prog name t → t.idx < bound) : EncM Json := do
-  match hn : d with
+  match _hn : d with
   | .param name value? =>
     pure <| Json.mkObj <|
       [("op", Json.str "paramDecl"), ("name", Json.str name)]
@@ -234,7 +234,7 @@ def encBodyDecl (arena : Arena) (hw : arena.exprs.wf = true)
       ("op", Json.str "instanceDecl"), ("name", Json.str name),
       ("typeKey", Json.str typeKey), ("inputs", Json.arr ins)]
   | .prog name program => do
-    have hlt : program.idx < bound := hpd name program rfl
+    have _hlt : program.idx < bound := hpd name program rfl
     pure <| Json.mkObj [("op", Json.str "programDecl"), ("name", Json.str name),
                         ("program", Lean.toJson (← programId arena hw hwp program))]
 termination_by (bound, 0)

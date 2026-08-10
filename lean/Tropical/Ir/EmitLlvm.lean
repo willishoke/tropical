@@ -705,12 +705,12 @@ def emitInstr (instr : NInstr) : M Unit := do
 def emitKernelBlock (inst : InstanceFunction) : M Unit := do
   -- preamble → per-child {pre_input, child} → body
   for i in inst.preambleInstructions do emitInstr i
-  for h : child in inst.children do
+  for _h : child in inst.children do
     for i in child.preInputInstructions do emitInstr i
     emitKernelBlock child
   for i in inst.instructions do emitInstr i
 termination_by sizeOf inst
-decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children h
+decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children _h
 
 -- ─────────────────────────────────────────────────────────────
 -- Sinks (mirrors the loop-body sink mix)

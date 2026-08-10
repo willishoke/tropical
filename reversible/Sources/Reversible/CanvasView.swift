@@ -108,34 +108,49 @@ struct NodeView: View {
     }
 
     private var titleBar: some View {
-        HStack(spacing: 6) {
-            Circle().fill(node.color).frame(width: 9, height: 9)
-            Text(spec.title).font(Theme.mono.bold()).foregroundStyle(Theme.text)
-            Spacer(minLength: 8)
-            if let truthBadge {
-                Text(truthBadge.label)
-                    .font(.system(size: 8, weight: .semibold, design: .monospaced))
-                    .foregroundStyle(truthBadge.color)
-                    .padding(.horizontal, 4).padding(.vertical, 2)
-                    .background(
-                        truthBadge.color.opacity(0.13),
-                        in: Capsule()
-                    )
-                    .help(truthBadge.help)
-            }
-            Text(node.id).font(Theme.monoSmall).foregroundStyle(Theme.muted)
-            if !spec.fixed {
-                Button {
-                    model.deleteNode(node.id)
-                } label: {
-                    Image(systemName: "xmark.circle.fill")
-                        .foregroundStyle(Theme.muted)
+        VStack(spacing: 3) {
+            HStack(spacing: 6) {
+                Circle().fill(node.color).frame(width: 9, height: 9)
+                Text(spec.title)
+                    .font(Theme.mono.bold())
+                    .foregroundStyle(Theme.text)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
+                Spacer(minLength: 4)
+                if !spec.fixed {
+                    Button {
+                        model.deleteNode(node.id)
+                    } label: {
+                        Image(systemName: "xmark.circle.fill")
+                            .foregroundStyle(Theme.muted)
+                    }
+                    .buttonStyle(.plain)
+                    .help("remove module")
                 }
-                .buttonStyle(.plain)
-                .help("remove module")
+            }
+
+            HStack(spacing: 6) {
+                if let truthBadge {
+                    Text(truthBadge.label)
+                        .font(.system(size: 8, weight: .semibold, design: .monospaced))
+                        .foregroundStyle(truthBadge.color)
+                        .padding(.horizontal, 4).padding(.vertical, 2)
+                        .background(
+                            truthBadge.color.opacity(0.13),
+                            in: Capsule()
+                        )
+                        .fixedSize()
+                        .help(truthBadge.help)
+                }
+                Spacer(minLength: 4)
+                Text(node.id)
+                    .font(Theme.monoSmall)
+                    .foregroundStyle(Theme.muted)
+                    .lineLimit(1)
+                    .fixedSize(horizontal: true, vertical: false)
             }
         }
-        .padding(.horizontal, 9).padding(.vertical, 6)
+        .padding(.horizontal, 9).padding(.vertical, 5)
         .overlay(Rectangle().frame(height: 1).foregroundStyle(Theme.edge), alignment: .bottom)
         .contentShape(Rectangle())
         .gesture(
