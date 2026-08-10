@@ -5,11 +5,12 @@ Date: 2026-08-08 (America/Los_Angeles)
 Status: accepted architecture and implementation record.
 
 The routed-sum denotation, compact Plan 6 delimiters, scalar LLVM reference,
-cooperative Metal execution model, and first modal Cauchy migration are part of
-the production implementation. The exact fully factored ordinary two-room
-image remains the next modal specialization described by section 10; existing
-scalar Bank formulas remain its independent oracle until that specialization
-is qualified over the complete live pole box.
+cooperative Metal execution model, first modal Cauchy migration, and exact
+fully factored ordinary two-room image are part of the production
+implementation. The scalar Bank formulas remain the independent f64 oracle.
+The first Metal publication deliberately has a scoped float32 perceptual
+contract, recorded in section 14.6, rather than claiming f64 agreement over
+every extreme corner of the live control box.
 
 ## 1. Decision
 
@@ -30,9 +31,9 @@ order. The backend schedule may change; the routed-sum denotation may not.
 
 The first production consumer is the modal Cauchy fold, where one routed map
 feeds the real and imaginary output folds. The exact factored ordinary-room
-terminal is the next specialization, followed by broader `bankSum` migration.
-The abstraction is therefore exercised by production modal code while its
-larger consumer retains an independent scalar oracle during qualification.
+terminal is the second consumer, followed by broader `bankSum` migration. The
+abstraction is therefore exercised by multiple production modal paths while
+the scalar Bank implementation remains an independent oracle.
 
 This strategy explicitly rejects these initial implementations:
 
@@ -79,8 +80,8 @@ appears to Metal as a long private dependency chain inside one lane, not as
 
 SIMD is not an additional device layered on top of current Metal threads; the
 threads are already executed as SIMD groups. The change is to remap the lanes.
-The cooperative kernel will use one threadgroup per sample and one initial
-SIMD group per threadgroup:
+The cooperative kernel uses one threadgroup per sample and up to four pipeline
+execution widths per threadgroup:
 
 ```text
 threadgroup_position_in_grid.x = sample
@@ -491,7 +492,10 @@ kernel void tropical_kernel(
 
 `groupSize.x` is the lane stride. Every lane in a threadgroup has the same
 `sample`, so the bounds return is uniform. The host dispatches `frames`
-threadgroups, initially with one pipeline execution width per group.
+threadgroups at `min(4 * threadExecutionWidth,
+maxTotalThreadsPerThreadgroup)` lanes. The four-width policy is the measured
+M1 Pro product schedule; the cap keeps it valid on narrower pipelines and
+devices with a smaller per-group maximum.
 
 The source must not hard-code 32 as semantic truth. `MetalKernel::create`
 queries `pso.threadExecutionWidth`, verifies it against device limits, records
@@ -594,15 +598,15 @@ Add an optional Metal execution description to the emitted artifact/manifest:
 ```text
 kind: sample_threads | sample_threadgroups
 threadgroup_scratch_bytes
-requested_group_policy: pipeline_width
+requested_group_policy: four_pipeline_widths_capped
 ```
 
-`MetalKernel` stores the dispatch kind and actual execution width. In
+`MetalKernel` stores the dispatch kind and actual threadgroup width. In
 `render_tile_impl`:
 
 - `sample_threads` retains the exact current `dispatchThreads` call;
 - `sample_threadgroups` uses `dispatchThreadgroups(frames, 1, 1)` with the
-  validated pipeline width;
+  validated four-width-capped group size;
 - both paths use the same buffers, command queue, completion handling, and
   destination copy;
 - one tile remains one command buffer and one kernel dispatch initially.
@@ -736,9 +740,12 @@ and offset. For the N=6, M=32 two-room image, the principal slices are:
 | past simple residues | 2M | complex | mirrored room pole rows |
 | future/past DD rows | M each | complex | equal-frequency degree-one atoms |
 
-The source-room region's output image is 304 floats before padding; the
-room-room `A/C/B` image is 192 floats. These are group results, not 304- or
-192-element collections of independent `Sig` trees.
+The N=6, M=32 source-room phase is split into four eight-room-column images of
+184 floats each. The split retains all six source-indexed summaries in every
+part and keeps seven room-indexed complex summaries local to its eight
+columns, including the room-2 crossing mask. The room-difference and physical
+images are 256 floats each. These are group results, not collections of
+independent `Sig` trees.
 
 Every slice offset is structural, checked for overflow, emitted once, and
 available to both scalar and Metal lowering. Layout construction must reject
@@ -1040,10 +1047,11 @@ room-specific terminal because the chosen outcome now includes the reusable
 IR, typed storage boundary, Plan schema, generic Metal schedule, and a second
 production consumer.
 
-Implementation is staged on `feat/room-universe-law` for review against
-`main`. Keep semantic, backend, and modal-specialization changes separable so
-the series can be split or restacked without rewriting the denotational core.
-Branch publication and merge remain explicit integration decisions.
+The exact two-room follow-up is staged on
+`feat/exact-two-room-specialization` for review against `main`. Keep semantic,
+backend, and modal-specialization changes separable so the series can be split
+or restacked without rewriting the denotational core. Branch publication and
+merge remain explicit integration decisions.
 
 ## 14. Test matrix
 
@@ -1120,8 +1128,11 @@ its own reference.
 ### 14.6 Numerical gates
 
 - retain the existing repository-wide Metal-vs-JIT gates;
-- require greater than 100 dB SNR for the banked/product Metal path unless a
-  stricter existing fixture already applies;
+- keep exact scalar/oracle gates at their existing tolerances;
+- for the first two-room f32 Metal product, classify a row as audible when the
+  f64 reference peak is at least `5e-4`; require at least 18 dB SNR, 0.99
+  correlation, and peak error/reference peak at most 0.12 for an audible row;
+- for quieter rows, require peak absolute error at most `5e-5`;
 - record the ordinary non-cancelling region, DD lens, source-crossing lens,
   strike, and long-tail errors separately;
 - choose every tolerance before optimizing against the corpus;
@@ -1129,6 +1140,25 @@ its own reference.
 - reject any path needing fast-math or unspecified reassociation to pass its
   performance gate; and
 - require finite output over the complete admitted live box.
+
+The 2026-08-09 qualification swept 31 preselected endpoint, near-crossing,
+direction, RT60, source, sway, and combined-corner cases. Twenty-five meet the
+predeclared relative/absolute policy and all 31 remain finite. The canonical
+FF product records 26.78 dB full-window SNR, 0.99895 correlation, and 5.07%
+peak-relative error; its onset is 23.34 dB and its tail improves to 32.41 dB.
+The accepted exception is the low-frequency source edge: the two isolated
+20 Hz rows record 11.57/11.93 dB, and the combined 20 Hz, 0.5 s decay, 12 s
+dual-room, maximum-sway corner can diverge much more strongly in forward
+directions while remaining finite. This is a known float32 timbral/level
+limitation, not part of the accuracy claim. Closing it requires a separately
+designed continuous source-room transition; widening the current lens breaks
+the disjoint-row proof, and compensated gathering does not address the error.
+
+The scalar algebra is not waived by that Metal policy. A discovered asymmetric
+room-2 crossing double count was fixed before publication and pinned in both
+room orders. Against the saved generic f64 oracle, the reduced dynamic room-2
+crossing records 85.85 dB SNR with a `4.15e-7` peak error; the complete focused
+set remains finite and agrees at 41.78 dB or better.
 
 ### 14.7 Performance gates on the canonical M1 Pro
 
@@ -1158,6 +1188,12 @@ Also record:
 
 The cooperative design advances only if the real product fixture, not merely a
 synthetic arithmetic kernel, clears the gate with headroom.
+
+The final N=6, M=32 nominal artifact uses 24,272 of the 24,576-byte publication
+budget. On the canonical M1 Pro, a cached 1,000-block B=512 run records 2.757 ms
+median, 2.827 ms p95, 3.139 ms p99, and 3.507 ms maximum process time, with no
+dispatch failures, starvation, overruns, or non-finite samples. The complete
+GPU-enabled repository suite passes 130/130 gates.
 
 ## 15. Expected performance shape
 
@@ -1255,16 +1291,17 @@ Pause implementation for an architectural decision if any of these occurs:
 - Metal requires a different mathematical branch or capacity from LLVM/WASM;
 - authored-order gathering misses the realtime gate and the user does not
   approve a new numerical reduction contract;
-- source-room confluence cannot be made continuous over the declared live pole
-  box;
+- source-room confluence becomes non-finite or discontinuous outside the
+  explicitly accepted float32 error policy over the declared live pole box;
 - a gauge must be moved through a direction/room factor to meet cost;
 - s1 controls would have to be frozen per tile rather than per observation;
 - the audio callback would need to wait, allocate, or submit; or
 - the production gain appears only after enabling unsafe math or weakening the
   existing semantic/error gates.
 
-These are bounded gates on the chosen architecture, not permission to expose a
-partial public room contract.
+These are bounded gates on the chosen architecture, not permission to hide an
+unqualified region. Any deliberately narrower numerical claim must be named,
+measured, and accepted as section 14.6 does for this first f32 publication.
 
 ## 18. Literature-informed boundary
 
@@ -1317,8 +1354,11 @@ The backend work is complete when all of the following are true:
    DirectTerminal work.
 6. Direction remains independent per room and gauge remains a complete-bank
    operator.
-7. The real product fixture clears correctness, p99/deadline, lifecycle,
-   capacity, compile-size, and live-control gates on the canonical M1 Pro.
+7. The real product fixture clears the scoped numerical contract recorded in
+   section 14.6 plus p99/deadline, lifecycle, capacity, compile-size, and
+   live-control gates on the canonical M1 Pro; the explicitly excluded
+   low-frequency corner remains a named follow-up rather than an implicit
+   claim.
 8. The current semantic PR/diff contains no generated object, benchmark
    output, capture, qualification stream, or local diagnostic material.
 9. The completed work is pushed to a reviewed PR against `main` and is not

@@ -348,18 +348,45 @@ private def resolvePlainStageState (initial : Nat × Oriented.Bank)
       let g := clampE ((values[cursor]?).getD (lit 0)) (lit 0) (lit 1)
       (cursor + 1, bank.gauge g)) initial
 
+private inductive PlainTerminal where
+  | generic (terminal : Oriented.TerminalBank)
+  | factored (terminal : Oriented.FactoredTwoRoomTerminal)
+
+private def PlainTerminal.realizeSig (terminal : PlainTerminal)
+    (clkInt anchorSamples : Sig) (count? : Option Sig) : Sig :=
+  match terminal with
+  | .generic value => value.realizeSig clkInt anchorSamples count?
+  | .factored value => value.realizeSig clkInt anchorSamples
+
 /-- Fold an authored stage spine after binding the current static universe.  A
     final room uses the stable EC/DD carrier for hot same-side couplings. -/
 private def resolvePlainStages (voice : Array ModalMode) (stages : Array ModalStage)
-    (responseClock : Sig) (values : Array Sig) : Oriented.TerminalBank :=
+    (responseClock : Sig) (values : Array Sig) : PlainTerminal :=
   let initial := (0, Oriented.Bank.ofFuture voice)
+  if stages.size == 2 then
+    match stages[0]?, stages[1]? with
+    | some (ModalStage.ordinaryRoom first), some (ModalStage.ordinaryRoom second) =>
+      let (room1, direction1, cursor) :=
+        resolveRoomStage first responseClock values 0
+      let (room2, direction2, _) :=
+        resolveRoomStage second responseClock values cursor
+      match Oriented.factoredTwoRoomTerminal? voice room1 room2 direction1 direction2 with
+      | some terminal => .factored terminal
+      | none =>
+        let bank := (Oriented.Bank.ofFuture voice).convolveKernel room1 direction1
+          Oriented.syntacticSameSideClassifier
+        .generic (bank.convolveKernelTerminal room2 direction2)
+    | _, _ =>
+      .generic <| Oriented.TerminalBank.ofBank
+        (resolvePlainStageState initial stages responseClock values).2
+  else
   match stages.back? with
   | some (.ordinaryRoom room) =>
     let (cursor, bank) := resolvePlainStageState initial stages.pop responseClock values
     let (kernel, direction, _) := resolveRoomStage room responseClock values cursor
-    bank.convolveKernelTerminal kernel direction
+    .generic (bank.convolveKernelTerminal kernel direction)
   | _ =>
-    Oriented.TerminalBank.ofBank
+    .generic <| Oriented.TerminalBank.ofBank
       (resolvePlainStageState initial stages responseClock values).2
 
 /-- The present composable carrier can safely cross one nonterminal room.  A

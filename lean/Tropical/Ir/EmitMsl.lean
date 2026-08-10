@@ -145,6 +145,7 @@ structure RoutedCtx where
   capacity : Nat
   outputCount : Nat
   fanout : Nat
+  dynamicCount : Bool
   routes : Array (Option Nat)
   idxVar : String
   savedTempTypes : Std.HashMap Nat ScalarType
@@ -202,6 +203,10 @@ structure St where
       names so they cannot race with captured lane-0 temps in threadgroup
       storage. -/
   cooperative : Bool := false
+  /-- Whether ordinary scalar emission is currently inside the lane-0 block.
+      A routed close deliberately leaves it shut so an immediately adjacent
+      static region can reuse the publishing barrier. -/
+  cooperativeLane0Open : Bool := false
   routedLocalTemps : Std.HashSet Nat := {}
   nextRoutedRegion : Nat := 0
 
@@ -225,6 +230,13 @@ def line (l : String) : M Unit :=
 
 def pushIndent : M Unit := modify fun s => { s with indent := s.indent + 1 }
 def popIndent : M Unit := modify fun s => { s with indent := s.indent - 1 }
+
+private def ensureCooperativeLane0 : M Unit := do
+  let st ← get
+  if st.cooperative && st.routeds.isEmpty && !st.cooperativeLane0Open then
+    line "if (lane == 0u) {"
+    pushIndent
+    modify fun s => { s with cooperativeLane0Open := true }
 
 def fail {α} (msg : String) : M α := throw msg
 
@@ -611,6 +623,7 @@ private def emitElementwise (sizes : Array Nat) (instr : NInstr) (dstSlot : Nat)
   line "}"
 
 def emitInstr (sizes : Array Nat) (instr : NInstr) : M Unit := do
+  if instr.tag != "RoutedSumBegin" then ensureCooperativeLane0
   match instr.tag, instr.dst with
   | "ReduceBegin", .temp accTemp =>
     -- Nested regions are supported; an ancestor with the SAME binder id is a
@@ -687,19 +700,26 @@ def emitInstr (sizes : Array Nat) (instr : NInstr) : M Unit := do
     let st ← get
     if st.cooperative then
       let region := st.nextRoutedRegion
-      line s!"routed_trips = uint({bound});"
-      popIndent
-      line "}"
-      line "threadgroup_barrier(mem_flags::mem_threadgroup);"
+      let dynamicCount := !instr.args.isEmpty
+      if dynamicCount then
+        ensureCooperativeLane0
+        line s!"routed_trips = uint({bound});"
+      if (← get).cooperativeLane0Open then
+        popIndent
+        line "}"
+        line "threadgroup_barrier(mem_flags::mem_threadgroup);"
+        modify fun s => { s with cooperativeLane0Open := false }
       let idxVar := s!"long(routed_item_{region})"
-      line s!"for (uint routed_item_{region} = lane; routed_item_{region} < routed_trips; routed_item_{region} += groupSize.x) \{"
+      let tripLimit := if dynamicCount then "routed_trips"
+        else s!"{instr.loopCount}u"
+      line s!"for (uint routed_item_{region} = lane; routed_item_{region} < {tripLimit}; routed_item_{region} += groupSize.x) \{"
       modify fun s => { s with
         indent := s.indent + 1
         nextRoutedRegion := region + 1
         routedLocalTemps := {}
         routeds := s.routeds.push {
           region, id := instr.loopId, dst, capacity := instr.loopCount,
-          outputCount := instr.routedOutputCount, fanout,
+          outputCount := instr.routedOutputCount, fanout, dynamicCount,
           routes := instr.routedRoutes, idxVar,
           savedTempTypes := st.tempTypes
           savedConstTemps := st.constTemps
@@ -715,6 +735,7 @@ def emitInstr (sizes : Array Nat) (instr : NInstr) : M Unit := do
         routeds := s.routeds.push {
           region := 0, id := instr.loopId, dst, capacity := instr.loopCount,
           outputCount := instr.routedOutputCount, fanout,
+          dynamicCount := !instr.args.isEmpty,
           routes := instr.routedRoutes, idxVar,
           savedTempTypes := st.tempTypes
           savedConstTemps := st.constTemps
@@ -757,21 +778,21 @@ def emitInstr (sizes : Array Nat) (instr : NInstr) : M Unit := do
       line s!"for (uint routed_cursor_{rc.region} = routed_offsets_{rc.region}[routed_output_{rc.region}]; routed_cursor_{rc.region} < routed_offsets_{rc.region}[routed_output_{rc.region} + 1u]; ++routed_cursor_{rc.region}) \{"
       pushIndent
       line s!"uint routed_record_{rc.region} = routed_csr_{rc.region}[routed_cursor_{rc.region}];"
-      line s!"if (routed_record_{rc.region} / {rc.fanout}u < routed_trips) \{"
-      pushIndent
-      line s!"routed_acc_{rc.region} = routed_acc_{rc.region} + routed_records[routed_record_{rc.region}];"
+      if rc.dynamicCount then
+        line s!"if (routed_record_{rc.region} / {rc.fanout}u < routed_trips) \{"
+        pushIndent
+        line s!"routed_acc_{rc.region} = routed_acc_{rc.region} + routed_records[routed_record_{rc.region}];"
+        popIndent
+        line "}"
+      else
+        line s!"routed_acc_{rc.region} = routed_acc_{rc.region} + routed_records[routed_record_{rc.region}];"
       popIndent
       line "}"
-      popIndent
-      line "}"
-      line s!"routed_outputs[routed_output_{rc.region}] = routed_acc_{rc.region};"
+      line s!"arr{dst}[routed_output_{rc.region}] = routed_acc_{rc.region};"
       popIndent
       line "}"
       line "threadgroup_barrier(mem_flags::mem_threadgroup);"
-      line "if (lane == 0u) {"
-      pushIndent
-      for output in [0:rc.outputCount] do
-        line s!"arr{dst}[{output}] = routed_outputs[{output}];"
+      modify fun s => { s with cooperativeLane0Open := false }
     modify fun s => { s with
       routeds := s.routeds.pop
       routedLocalTemps := {}
@@ -974,8 +995,6 @@ def emitKernel (plan : FlatPlan) : Except String String := do
     return (lines, names)
   let maxRecords := routedBegins.foldl
     (fun n instr => max n instr.routedRoutes.size) 0
-  let maxOutputs := routedBegins.foldl
-    (fun n instr => max n instr.routedOutputCount) 0
   let body : M Unit := do
     -- thread-private array scratch (per-sample on CPU too); hoisted
     -- coefficient columns are read from the buffer(3) binding instead.
@@ -987,12 +1006,14 @@ def emitKernel (plan : FlatPlan) : Except String String := do
     if cooperative then
       for declaration in scalarDecls do line declaration
       line s!"threadgroup float routed_records[{max maxRecords 1}];"
-      line s!"threadgroup float routed_outputs[{max maxOutputs 1}];"
-      line "threadgroup uint routed_trips;"
+      if routedBegins.any (fun instr => !instr.args.isEmpty) then
+        line "threadgroup uint routed_trips;"
       line "if (lane == 0u) {"
       pushIndent
+      modify fun s => { s with cooperativeLane0Open := true }
     for inst in plan.instanceFunctions do
       emitKernelBlock sizes inst
+    if cooperative then ensureCooperativeLane0
     emitSinks plan.sinks
     if cooperative then
       popIndent

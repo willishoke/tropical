@@ -575,7 +575,8 @@ private def scalarStorageBytes : ScalarType → Nat
 /-- Conservative static threadgroup-storage contract for cooperative Metal.
     Scalar execution is lane-0-only, so its externally visible temps/slots and
     ordinary arrays live in threadgroup storage.  Sequential routed regions
-    reuse one mapped-record/result arena, hence the maxima rather than a sum.
+    reuse one mapped-record arena; result gathers write their already-counted
+    destination arrays directly, hence the maximum rather than a sum.
     The final eight-byte rounding is deliberate host-side headroom for target
     address-space alignment. -/
 def FlatPlan.metalThreadgroupScratchBytes (p : FlatPlan) : Nat := Id.run do
@@ -587,12 +588,12 @@ def FlatPlan.metalThreadgroupScratchBytes (p : FlatPlan) : Nat := Id.run do
   let mut declared : Std.HashSet String := {}
   let mut routedDepth := 0
   let mut maxRecords := 0
-  let mut maxOutputs := 0
+  let mut hasDynamicRoutedCount := false
   for instr in p.linearInstrs do
     if instr.tag == "RoutedSumBegin" then
       routedDepth := routedDepth + 1
       maxRecords := max maxRecords instr.routedRoutes.size
-      maxOutputs := max maxOutputs instr.routedOutputCount
+      if !instr.args.isEmpty then hasDynamicRoutedCount := true
     if routedDepth == 0 then
       match instr.dst with
       | .temp slot =>
@@ -607,7 +608,11 @@ def FlatPlan.metalThreadgroupScratchBytes (p : FlatPlan) : Nat := Id.run do
           bytes := bytes + scalarStorageBytes instr.resultType
       | _ => pure ()
     if instr.tag == "RoutedSumEnd" then routedDepth := routedDepth - 1
-  bytes := bytes + 4 * maxRecords + 4 * maxOutputs + 4
+  -- The routed destination array is itself the gather result arena: one lane
+  -- owns each output, then the closing barrier publishes those writes before
+  -- lane 0 resumes.  Only mapped records need a separate reusable arena.
+  bytes := bytes + 4 * maxRecords
+  if hasDynamicRoutedCount then bytes := bytes + 4
   return ((bytes + 7) / 8) * 8
 
 def FlatPlan.metalExecutionToWire (p : FlatPlan) : Option Json :=
@@ -615,7 +620,7 @@ def FlatPlan.metalExecutionToWire (p : FlatPlan) : Option Json :=
     some <| Json.mkObj [
       ("kind", Json.str "sample_threadgroups"),
       ("threadgroup_scratch_bytes", toJson p.metalThreadgroupScratchBytes),
-      ("requested_group_policy", Json.str "pipeline_width")]
+      ("requested_group_policy", Json.str "four_pipeline_widths_capped")]
   else none
 
 /-- Mirrors `toWirePlan`'s omission rules. -/

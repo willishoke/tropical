@@ -1627,6 +1627,12 @@ private def modalUniverseSplitFootprint
   let coefficient := split.coeff?.map modalUniversePlanFootprint |>.getD 0
   return modalUniversePlanFootprint split.audio + coefficient
 
+private def modalUniverseRoutedBegins
+    (plan : Tropical.Plan.FlatPlan) : Array Tropical.Plan.NInstr :=
+  plan.instanceFunctions.foldl (fun out function =>
+    (Tropical.Ir.Stage0.collectBlocks function).foldl (fun out block =>
+      out ++ block.filter (·.tag == "RoutedSumBegin")) out) #[]
+
 /-- The U1 temporal-law gate. Production-compiled
     `resonator → room A → room B` fixtures are sampled under live room images,
     a constant absolute branch address, and a downstream reverse warp. Each
@@ -1684,10 +1690,41 @@ def runModalUniverseHistory (arena : Arena)
     -- absolute ceiling prevents both sides from drifting upward together.
     let compact := twoRoomFootprint ≤ 7 * oneRoomFootprint &&
       twoRoomFootprint ≤ 350000
+    let split ← match Tropical.Ir.Stage0.hoistTyped compiled.plan compiled.stageBlocks with
+      | .error error =>
+          return ← failGate "modal-universe-history"
+            s!"scratch split: {firstLine error}"
+      | .ok split => pure split
+    let scratch := split.audio.metalThreadgroupScratchBytes
+    let routed := modalUniverseRoutedBegins split.audio
+    let sourceItems := routed.foldl (fun total begin =>
+      if begin.routedOutputCount == 184 &&
+          begin.routedRoutes.size == begin.loopCount * 26
+      then total + begin.loopCount else total) 0
+    let differenceItems := routed.foldl (fun total begin =>
+      if begin.routedOutputCount == 256 && begin.loopCount == 124 &&
+          begin.routedRoutes.size == begin.loopCount * 16
+      then total + begin.loopCount else total) 0
+    let physicalItems := routed.foldl (fun total begin =>
+      if begin.routedOutputCount == 256 && begin.loopCount == 132 &&
+          begin.routedRoutes.size == begin.loopCount * 16
+      then total + begin.loopCount else total) 0
+    let confluenceRows := routed.filter fun begin =>
+      begin.loopCount ≤ 192 && begin.routedOutputCount == 2 &&
+        begin.routedRoutes.size == 2 * begin.loopCount
+    let confluenceItems := confluenceRows.foldl (· + ·.loopCount) 0
+    let reciprocalCount := 4 * sourceItems + differenceItems + physicalItems
+    let declaredStats := Tropical.EmitArrow.Oriented.factoredTerminalStats 6 32
+    let factoredShape := sourceItems == 192 && differenceItems == 496 &&
+      physicalItems == 528 && reciprocalCount == 1792 &&
+      declaredStats.totalReciprocals == 1792 && confluenceRows.size ≤ 1
+    let scratchOk := scratch ≤ 24576
     IO.println s!"        split compile footprint: one-room={oneRoomFootprint} two-room={twoRoomFootprint} compact={compact}"
-    if !compact then
+    IO.println s!"        routed terminal: source={sourceItems}×4 difference={differenceItems} physical={physicalItems} total reciprocals={reciprocalCount} confluence rows={confluenceItems}"
+    IO.println s!"        two-room Metal audio scratch: {scratch}/24576 bytes (75% M1 Pro cap)"
+    if !compact || !factoredShape || !scratchOk then
       return ← failGate "modal-universe-history"
-        "two-room modal plan exceeds the linear compile-footprint envelope"
+        "two-room modal plan misses the factored schedule, compile envelope, or scratch cap"
     let loadRooms := fun (fixture : Tropical.Playground.CompiledPatch) => do
       let rt ← Tropical.Ffi.Runtime.new 128
       Tropical.StagedLoad.loadTyped rt fixture.plan fixture.stageBlocks

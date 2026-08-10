@@ -289,10 +289,13 @@ MetalKernelPtr create(const std::string & msl_source,
     if (dispatch_kind == DispatchKind::SampleThreadgroups)
     {
       const NSUInteger width = pso.threadExecutionWidth;
+      const NSUInteger group_width = std::min<NSUInteger>(
+        pso.maxTotalThreadsPerThreadgroup, width * 4u);
       const NSUInteger actual_scratch = pso.staticThreadgroupMemoryLength;
       const NSUInteger device_limit = dev.maxThreadgroupMemoryLength;
       const NSUInteger qualified_limit = (device_limit * 3u) / 4u;
-      if (width == 0 || width > pso.maxTotalThreadsPerThreadgroup)
+      if (width == 0 || group_width < width
+          || group_width > pso.maxTotalThreadsPerThreadgroup)
       {
         err = "MetalKernel: invalid cooperative pipeline execution width";
         return nullptr;
@@ -313,7 +316,7 @@ MetalKernelPtr create(const std::string & msl_source,
         err = "MetalKernel: cooperative threadgroup scratch exceeds device publication limit";
         return nullptr;
       }
-      k->threadgroup_width = static_cast<uint32_t>(width);
+      k->threadgroup_width = static_cast<uint32_t>(group_width);
       k->threadgroup_scratch_bytes = threadgroup_scratch_bytes;
     }
     k->out = [dev newBufferWithLength:(NSUInteger)buffer_length * sizeof(float)
