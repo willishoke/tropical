@@ -16,7 +16,7 @@ struct KnobSpec {
 /// composable, so effects stack freely.
 enum NodeKind: String, CaseIterable, Codable {
     case source, knob, flange, sflange, fm, delay, reverse, mix, ring
-    case resonator, reverb, modalmix
+    case resonator, reverb, phaser, modalmix
     case scope
     case out
 }
@@ -187,6 +187,22 @@ extension NodeKind {
                     KnobSpec(name: "rate", min: 0.05, max: 8, def: 0.3, log: true, unit: "Hz"),
                 ],
                 modal: true)
+        case .phaser:
+            // A Tropical-native current-universe modal phaser. At each response
+            // coordinate its LFO freezes one six-section continuous-time analog
+            // all-pass cascade and composes that rational filter with the modal
+            // bank. It scrubs, freezes, and reverses with the master clock; it is
+            // intentionally not a history-dependent pedal recurrence.
+            return NodeSpec(
+                title: "Phaser", accent: Color(hex: 0x72C5FF), summing: false,
+                inlets: ["in"], outlets: ["out"],
+                knobs: [
+                    KnobSpec(name: "center", min: 40, max: 4000, def: 700, log: true, unit: "Hz"),
+                    KnobSpec(name: "sweep", min: 0, max: 3, def: 1.5, unit: "oct"),
+                    KnobSpec(name: "rate", min: 0.02, max: 8, def: 0.2, log: true, unit: "Hz"),
+                    KnobSpec(name: "mix", min: 0, max: 1, def: 0.5),
+                ],
+                modal: true)
         case .modalmix:
             // Pole UNION (∪) of its modal inputs — the modal twin of Mix's
             // sum. Many modal in → one modal out; no knobs (structural).
@@ -219,13 +235,13 @@ extension NodeKind {
     /// Control inlets accept a Knob node's output (a control value, not audio).
     static let controlInlets: Set<String> = ["freq", "mod"]
 
-    /// Inlets that carry POLES, not audio: a modal node's input (Reverb's
-    /// `in`, Modal∪'s `in`). They accept ONLY a modal-output node — the
+    /// Inlets that carry POLES, not audio: a modal node's input (Reverb,
+    /// Phaser, and Modal∪). They accept ONLY a modal-output node — the
     /// residue calculus composes pole banks at build time (`lowerModal`), and
     /// a Sig source there would throw at compile. A Sig inlet, by contrast,
     /// accepts either: a modal source realizes to a Sig at the seam
     /// (`lowerInput`), but never the reverse.
-    static let modalInlets: Set<String> = ["reverb:in", "modalmix:in"]
+    static let modalInlets: Set<String> = ["reverb:in", "phaser:in", "modalmix:in"]
 
     func wantsModal(inlet: String) -> Bool {
         Self.modalInlets.contains("\(rawValue):\(inlet)")

@@ -53,3 +53,15 @@ moreLinkArgs = [
 [[lean_exe]]
 name = "trustreport"
 root = "TrustReport"
+
+# Focused modal-phaser qualification runner.  Keeping this gate separate avoids
+# paying the full tropicaltest module-initialization cost during product-layout
+# iteration; the same gate is also called by the repository-wide runner.
+[[lean_exe]]
+name = "phasercheck"
+root = "Phasercheck"
+moreLinkArgs = [
+  "ffi/shim.o",
+  "-L../build", "-ltropical",
+  "-Wl,-rpath,@executable_path/../../../../build",
+]

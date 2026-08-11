@@ -210,6 +210,13 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
     -- calculus does the "filtering" at build time, knobs stay live through it.
     (.modalReverb sig
       (filterPair (p "cutoff" (dv "cutoff")) (p "resonance" (dv "resonance"))) none, #[])
+  | "phaser" =>
+    -- Current-universe modal phaser: controls remain deferred until the
+    -- terminal response coordinate freezes one static analog all-pass cascade.
+    -- This is not the history-dependent recurrence of a conventional pedal.
+    (.modalPhaser sig
+      (modalControl "center") (modalControl "sweep")
+      (modalControl "rate") (modalControl "mix") modalPhaserRatios, #[])
   | "modalmix" => (.modalMix (portSources inObj "in"), #[])
   | "gauge" =>
     -- §5 excitation gauge: re-level the modal input's peak. g=0 identity (unity-DC,

@@ -465,6 +465,17 @@ def sigIn : Array PortDomain := #[.signal, .modal, .control]
 def modalIn : Array PortDomain := #[.modal]
 def ctrlIn : Array PortDomain := #[.control]
 
+/-- Structural section topology for the first current-universe modal phaser.
+    Six half-octave-spaced sections are symmetric around the center frequency;
+    none coincide, and their geometric mean is one. -/
+def modalPhaserRatios : Array Float := #[
+  0.42044820762685725,
+  0.5946035575013605,
+  0.8408964152537145,
+  1.189207115002721,
+  1.681792830507429,
+  2.378414230005442]
+
 /-- THE table. Order matters twice: knob-bearing entries in declaration order
     define the `ParamIdx` scan order (`collectParams`), and the whole layout is
     what `get_vocabulary` will serve. -/
@@ -539,6 +550,16 @@ def portSpecs : String → Array PortSpec
         display := some { min := 20, max := 8000, log := true, unit := "Hz" } },
       { name := "resonance", knob := some (5, 1), discipline := .glide,
         display := some { min := 0, max := 1 } }]
+  | "phaser" => #[
+      { name := "in", accepts := modalIn },
+      { name := "center", knob := some (700, 0), discipline := .glide,
+        display := some { min := 40, max := 4000, log := true, unit := "Hz" } },
+      { name := "sweep", knob := some (15, 1), discipline := .glide,
+        display := some { min := 0, max := 3, unit := "oct" } },
+      { name := "rate", knob := some (2, 1), discipline := .glide,
+        display := some { min := 0.02, max := 8, log := true, unit := "Hz" } },
+      { name := "mix", knob := some (5, 1), discipline := .glide,
+        display := some { min := 0, max := 1 } }]
   | "modalmix" => #[{ name := "in", accepts := modalIn, multi := true }]
   -- gauge: the §5 excitation-gauge adapter — re-levels its modal input's peak by the
   -- self-measured ‖H‖^{−g}. `g` is the gauge: 0 = unity-DC (strike, the identity),
@@ -562,7 +583,7 @@ def portSpecs : String → Array PortSpec
 /-- Each kind's outlet color (`none` = no outlet, the dac sink). -/
 def outletOf : String → Option PortDomain
   | "knob" => some .control
-  | "resonator" | "reverb" | "filter" | "modalmix" | "string" | "gauge" => some .modal
+  | "resonator" | "reverb" | "filter" | "phaser" | "modalmix" | "string" | "gauge" => some .modal
   | "out" => none
   | _ => some .signal
 
@@ -571,7 +592,7 @@ def outletOf : String → Option PortDomain
     client renders them from `vocabularyJson`. -/
 def vocabularyKinds : Array String := #[
   "source", "pluck", "comb", "flange", "delay", "reverse", "fm", "sflange",
-  "mix", "ring", "gong", "string", "resonator", "reverb", "filter",
+  "mix", "ring", "gong", "string", "resonator", "reverb", "filter", "phaser",
   "modalmix", "gauge", "knob", "out"]
 
 /-- Every kind `buildNode` actually constructs (its match arms — the AUTHORITATIVE
@@ -583,7 +604,7 @@ def vocabularyKinds : Array String := #[
     not a `buildNode` arm — it is in `vocabularyKinds`, not here.) -/
 def buildNodeKinds : Array String := #[
   "knob", "source", "pluck", "comb", "flange", "sflange", "fm", "delay",
-  "reverse", "mix", "ring", "resonator", "reverb", "filter", "modalmix",
+  "reverse", "mix", "ring", "resonator", "reverb", "filter", "phaser", "modalmix",
   "gauge", "gong", "bloomgong", "string"]
 
 /-- Kinds `buildNode` builds but which are WITHHELD from the served surface.

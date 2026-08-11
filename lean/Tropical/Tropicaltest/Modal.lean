@@ -1698,8 +1698,8 @@ def runModalUniverseHistory (arena : Arena)
     let scratch := split.audio.metalThreadgroupScratchBytes
     let routed := modalUniverseRoutedBegins split.audio
     let sourceItems := routed.foldl (fun total begin =>
-      if begin.routedOutputCount == 184 &&
-          begin.routedRoutes.size == begin.loopCount * 26
+      if begin.routedOutputCount == 160 &&
+          begin.routedRoutes.size == begin.loopCount * 22
       then total + begin.loopCount else total) 0
     let differenceItems := routed.foldl (fun total begin =>
       if begin.routedOutputCount == 256 && begin.loopCount == 124 &&

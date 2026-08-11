@@ -60,6 +60,7 @@ def knownGates : Array String := #[
   "lake-build:Tropical.Semantics",
   "modal-universe-history",
   "modal-oriented-patch",
+  "modal-phaser",
   "semantics-production-fixtures",
   "semantics-pointer-differential",
   "clock-algebra-theorems",
@@ -122,13 +123,15 @@ def obligations : Array Obligation := #[
       "lean/Tropical/EmitArrow/Modal/Forest.lean",
       "lean/Tropical/EmitArrow/Modal/Oriented.lean",
       "lean/Tropical/EmitArrow/Modal/OrientedRealize.lean",
+      "lean/Tropical/EmitArrow/Modal/FactoredTerminal.lean",
       "lean/Tropical/Tropicaltest/Modal.lean",
-      "lean/Tropical/Tropicaltest/OrientedPatch.lean"]
-    gateNames := #["modal-universe-history", "modal-oriented-patch",
+      "lean/Tropical/Tropicaltest/OrientedPatch.lean",
+      "lean/Tropical/Tropicaltest/Phaser.lean"]
+    gateNames := #["modal-universe-history", "modal-oriented-patch", "modal-phaser",
       "manual:production modal refinement review"]
     owner := "Modal compiler"
     status := .open
-    limitation := "Production now retains an authored ordinary-room/gauge stage spine, binds room controls together at the true terminal, and carries plain sources through explicit future/past algebra with a stable terminal divided-difference route. Full refinement remains open: hot/equal-pole divided differences are not yet composable through a later room or gauge; arbitrary live source-frequency crossings need a declared pole envelope; live reverse/sway/gauge after bloom needs the oriented Gamma bridge; and the bilateral live-gauge cost/backend envelope is not qualified."
+    limitation := "Production now retains an authored ordinary-room/gauge/phaser stage spine, binds live controls together at the true terminal, and carries plain sources through explicit future/past algebra with stable divided-difference and exact fused two-room/phaser routes. Full refinement remains open: hot/equal-pole divided differences are not yet composable through a later room or gauge; arbitrary live source-frequency crossings need a declared pole envelope; phaser and live reverse/sway/gauge after bloom need the oriented Gamma bridge; and the bilateral live-gauge cost/backend envelope is not qualified."
     priority := .critical },
   { id := "LOWER_SIG_TREE_PRESERVES"
     statement := "For every carrier algebra, environment, production Sig, and well-formed initial ExprArena, lowerSigTree returns a well-formed arena extension whose expression denotation equals the direct Sig denotation."

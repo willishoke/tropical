@@ -60,8 +60,6 @@ structure SourceRoomLayout where
   m2 : FactoredSlice
   tf : FactoredSlice
   tp : FactoredSlice
-  x12 : FactoredSlice
-  x21 : FactoredSlice
   floatCount : Nat
 deriving Repr, BEq
 
@@ -70,17 +68,10 @@ private def SourceRoomLayout.create (n m : Nat) : SourceRoomLayout :=
   let p1 := { name := "P[0]", offset := d1.endOffset, extent := n : FactoredSlice }
   let d2 := { name := "D[1]", offset := p1.endOffset, extent := n : FactoredSlice }
   let p2 := { name := "P[1]", offset := d2.endOffset, extent := n : FactoredSlice }
-  -- When a source pole enters room 1's confluence lens but not room 2's,
-  -- `x12` retains the matching room-2 term that must be removed from the
-  -- off-diagonal transfer before the three-pole carrier is added. `x21` is
-  -- the symmetric summary.  They reuse the already-computed source/room
-  -- inverse and cost only `4*N` floats in each of the four chunk images.
-  let x12 := { name := "X[1→2]", offset := p2.endOffset, extent := n : FactoredSlice }
-  let x21 := { name := "X[2→1]", offset := x12.endOffset, extent := n : FactoredSlice }
   -- Room-indexed slices follow the source-indexed prefix so splitting the map
   -- by room columns can use compact local extents while every source slice
   -- retains one common offset across parts.
-  let e1 := { name := "E[0]", offset := x21.endOffset, extent := m : FactoredSlice }
+  let e1 := { name := "E[0]", offset := p2.endOffset, extent := m : FactoredSlice }
   -- The room-pair diagonal is already present in the exact three-pole
   -- confluence when a source crosses room 2.  Mask those rows before the
   -- reduction instead of subtracting two large summaries after it: the latter
@@ -91,12 +82,12 @@ private def SourceRoomLayout.create (n m : Nat) : SourceRoomLayout :=
   let m2 := { name := "M[1]", offset := e2.endOffset, extent := m : FactoredSlice }
   let tf := { name := "TF", offset := m2.endOffset, extent := m : FactoredSlice }
   let tp := { name := "TP", offset := tf.endOffset, extent := m : FactoredSlice }
-  { d1, p1, e1, e1Cold2, m1, d2, p2, e2, m2, tf, tp, x12, x21,
+  { d1, p1, e1, e1Cold2, m1, d2, p2, e2, m2, tf, tp,
     floatCount := tp.endOffset }
 
 private def SourceRoomLayout.slices (layout : SourceRoomLayout) : Array FactoredSlice :=
-  #[layout.d1, layout.p1, layout.d2, layout.p2, layout.x12, layout.x21,
-    layout.e1, layout.e1Cold2, layout.m1, layout.e2, layout.m2, layout.tf, layout.tp]
+  #[layout.d1, layout.p1, layout.d2, layout.p2, layout.e1,
+    layout.e1Cold2, layout.m1, layout.e2, layout.m2, layout.tf, layout.tp]
 
 private def SourceRoomLayout.valid (layout : SourceRoomLayout) : Bool :=
   let slices := layout.slices
@@ -305,14 +296,10 @@ private def sourceRoomImage? (source room1 room2 : Array ModalMode) :
       let m2 := cmulE amp v2
       let tf := unlessHot anyHot (cmulE amp (cmulE u1 u2))
       let tp := cmulE amp (cmulE v1 v2)
-      let x12 := unlessHot (Sig.binary .or (Sig.unary .not hot1) hot2)
-        (cmulE residue2 u2)
-      let x21 := unlessHot (Sig.binary .or (Sig.unary .not hot2) hot1)
-        (cmulE residue1 u1)
       let values := #[d1.1, d1.2, p1.1, p1.2,
         e1.1, e1.2, e1Cold2.1, e1Cold2.2, m1.1, m1.2,
         d2.1, d2.2, p2.1, p2.2, e2.1, e2.2, m2.1, m2.2,
-        tf.1, tf.2, tp.1, tp.2, x12.1, x12.2, x21.1, x21.2]
+        tf.1, tf.2, tp.1, tp.2]
       let routes := (Array.range capacity).foldl (fun routes k =>
         let i := k / width
         let j := k % width
@@ -326,9 +313,7 @@ private def sourceRoomImage? (source room1 room2 : Array ModalMode) :
         let routes := appendComplexRoute routes layout.e2 j
         let routes := appendComplexRoute routes layout.m2 j
         let routes := appendComplexRoute routes layout.tf j
-        let routes := appendComplexRoute routes layout.tp j
-        let routes := appendComplexRoute routes layout.x12 i
-        appendComplexRoute routes layout.x21 i) #[]
+        appendComplexRoute routes layout.tp j) #[]
       let image ← routedImage? capacity layout.floatCount routes tables values 2
       parts := parts.push { image, layout, roomStart := start }
   let _ ← parts[0]?
@@ -704,8 +689,17 @@ private def confluenceAssemblyImage? (source room1 room2 : Array ModalMode)
       let sourceP1 := sourceRoom.readSource (fun layout => layout.p1) sourceIndex
       let sourceD2 := sourceRoom.readSource (fun layout => layout.d2) sourceIndex
       let sourceP2 := sourceRoom.readSource (fun layout => layout.p2) sourceIndex
-      let x12 := sourceRoom.readSource (fun layout => layout.x12) sourceIndex
-      let x21 := sourceRoom.readSource (fun layout => layout.x21) sourceIndex
+      -- These two hot-row exclusions used to occupy four source-indexed
+      -- columns in every source/room chunk.  Room-frequency separation proves
+      -- there is at most one contributing row, so recomputing them in this
+      -- already-mapped confluence phase is exact and reclaims the persistent
+      -- image columns for product effects.
+      let u1 := safeInverseFor delta1 hot1
+      let u2 := safeInverseFor delta2 hot2
+      let x12 := unlessHot (Sig.binary .or (Sig.unary .not hot1) hot2)
+        (cmulE b2 u2)
+      let x21 := unlessHot (Sig.binary .or (Sig.unary .not hot2) hot1)
+        (cmulE b1 u1)
       let diffLeft := difference.read (fun layout => layout.left) roomIndex
       let diffRight := difference.read (fun layout => layout.right) roomIndex
       let diffLeftPrime := difference.read
@@ -799,6 +793,18 @@ private def separatedRoomFrequencies (modes : Array ModalMode) : Bool :=
       if j >= k then true else
       match sigConstF? left.omega, sigConstF? right.omega with
       | some l, some r => (l - r).abs >= 2.0 * ecddThetaAcc
+      | _, _ => false
+
+/-- A constant imaginary-frequency gap is enough to prove that the full
+    complex pole distance never enters the source/room confluence lens.  This
+    is especially useful for the real phaser tails (`omega = 0`) against an
+    authored room whose modes are all audible-frequency conjugate pairs. -/
+private def sourceRoomConfluenceCold (source room1 room2 : Array ModalMode) : Bool :=
+  source.all fun sourceMode =>
+    (room1 ++ room2).all fun roomMode =>
+      match sigConstF? sourceMode.omega, sigConstF? roomMode.omega with
+      | some sourceOmega, some roomOmega =>
+          (sourceOmega - roomOmega).abs >= ecddThetaAcc
       | _, _ => false
 
 /-- Does this terminal have the exact topology served by the factored image?
@@ -1017,6 +1023,27 @@ private def routedSourceSideSig (factored : FactoredTwoRoomTerminal)
   let image := Sig.routedSum capacity 2 routes tables values none 15
   (Sig.index image (lit 0), Sig.index image (lit 1))
 
+/-- The structurally cold source lane has no DD or collision correction.  Do
+    not merely feed zero confluence images through `routedSourceSideSig`: the
+    symbolic backend is eager, so spelling the unreachable DD carrier would
+    still consume threadgroup scalar scratch. -/
+private def routedColdSourceSideSig (factored : FactoredTwoRoomTerminal)
+    (clkInt anchorSamples : Sig) : Sig × Sig :=
+  let capacity := factored.source.size
+  if capacity == 0 then (lit 0, lit 0) else
+  let sourceCols := modeColumns factored.source
+  let sourceIndex := Sig.loopIdx 15
+  let lam := sourceCols.readPole sourceIndex
+  let sourceAmp := factored.sourceAmps.readDynamic
+    factored.sourceAssembly sourceIndex
+  let clkRel := relClockQ clkInt anchorSamples
+  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
+  let side := cmulE sourceAmp (poleCarrierE lam dSec clkRel)
+  let value := selectE (gt clkRel (lit 0)) side.1 (lit 0)
+  let image := Sig.routedSum capacity 1 (sumRoutes capacity)
+    (sourceCols.tables ++ #[factored.sourceAssembly]) #[value] none 15
+  (Sig.index image (lit 0), lit 0)
+
 /-- Fuse both ordinary room carriers and their paired DD row into one routed
     phase.  Besides removing two barrier triplets per side, the room-2 carrier
     is shared with the DD evaluation. -/
@@ -1046,7 +1073,9 @@ def FactoredTwoRoomTerminal.realizeSig (factored : FactoredTwoRoomTerminal)
     (clkInt anchorSamples : Sig) : Sig :=
   let anchorQ := toIntE (mul anchorSamples (lit 4294967296))
   let mirroredClock := sub (mul (lit 2) anchorQ) clkInt
-  let source := routedSourceSideSig factored clkInt anchorSamples
+  let source := if factored.confluenceImages.isEmpty then
+      routedColdSourceSideSig factored clkInt anchorSamples
+    else routedSourceSideSig factored clkInt anchorSamples
   let future := routedRoomSideSig factored.room1 factored.room2
     factored.roomAssembly factored.roomFuture1 factored.roomFuture2
     factored.roomFutureDD clkInt anchorSamples 8
@@ -1066,8 +1095,12 @@ def factoredTwoRoomTerminal? (source room1 room2 : Array ModalMode)
   let sourceImage ← sourceRoomImage? source room1 room2
   let difference ← differenceImage? room1 room2
   let physical ← physicalImage? room1 room2
-  let confluence ← confluenceAssemblyImage? source room1 room2 sourceImage
-    difference physical direction1 direction2
+  let confluence ← if sourceRoomConfluenceCold source room1 room2 then
+      let layout := ConfluenceLayout.create source.size
+      some { images := #[], layout }
+    else
+      confluenceAssemblyImage? source room1 room2 sourceImage difference physical
+        direction1 direction2
   let sourceAssembly ← sourceAssemblyImage? source sourceImage direction1 direction2
   let roomAssembly ← roomAssemblyImage? room1 room2 sourceImage difference physical
     direction1 direction2
@@ -1097,5 +1130,313 @@ def factoredTwoRoomTerminal? (source room1 room2 : Array ModalMode)
     roomFutureDD := roomAssembly.layout.futureDD
     roomPastDD := roomAssembly.layout.pastDD
     atZero }
+
+/-! ## Six-section product extension
+
+The phaser-pole rows are structurally outside every room-frequency confluence
+lens.  The product schedule therefore folds their room-indexed contributions
+into the incumbent source/room images, retains one compact 4-complex source
+summary for those rows, and publishes their live poles/residues once through a
+24-float cooperative image.  Persistent scratch grows by only those summaries
+and the six additional source amplitudes; room-pair and room-assembly images
+remain shared. -/
+
+private def inlineModeField (modes : Array ModalMode) (index : Sig)
+    (field : ModalMode → CplxE) : CplxE :=
+  modes.zipIdx.foldl (fun selected (mode, i) =>
+    cselectE (Sig.binary .eq index (litI (Int.ofNat i))) (field mode) selected)
+    (natE 0)
+
+/-- Evaluate all live phaser rows once in one small cooperative image.  The
+    interleaved layout avoids serial scalar scratch and lets every larger map
+    use indexed reads instead of respelling six-way selections. -/
+private def liveModeImage? (modes : Array ModalMode) : Option Sig := do
+  if modes.isEmpty then none
+  let index := Sig.loopIdx 16
+  let pole := inlineModeField modes index (fun mode => mode.poleE)
+  let amp := inlineModeField modes index (fun mode => mode.ampE)
+  let values := #[pole.1, pole.2, amp.1, amp.2]
+  let routes := (Array.range modes.size).foldl (fun routes i =>
+    routes.push (some (4 * i)) |>.push (some (4 * i + 1))
+      |>.push (some (4 * i + 2)) |>.push (some (4 * i + 3))) #[]
+  routedImage? modes.size (4 * modes.size) routes #[] values 16
+
+private def liveModePole (image index : Sig) : CplxE :=
+  (Sig.index image (mul (lit 4) index),
+   Sig.index image (add (lit 1) (mul (lit 4) index)))
+
+private def liveModeAmp (image index : Sig) : CplxE :=
+  (Sig.index image (add (lit 2) (mul (lit 4) index)),
+   Sig.index image (add (lit 3) (mul (lit 4) index)))
+
+private structure ColdSourceLayout where
+  d1 : FactoredSlice
+  p1 : FactoredSlice
+  d2 : FactoredSlice
+  p2 : FactoredSlice
+  floatCount : Nat
+
+private def ColdSourceLayout.create (n : Nat) : ColdSourceLayout :=
+  let d1 := { name := "phaser-D[0]", offset := 0, extent := n : FactoredSlice }
+  let p1 : FactoredSlice := { name := "phaser-P[0]", offset := d1.endOffset, extent := n }
+  let d2 : FactoredSlice := { name := "phaser-D[1]", offset := p1.endOffset, extent := n }
+  let p2 : FactoredSlice := { name := "phaser-P[1]", offset := d2.endOffset, extent := n }
+  { d1, p1, d2, p2, floatCount := p2.endOffset }
+
+private structure ColdSourceSummary where
+  image : Sig
+  layout : ColdSourceLayout
+
+private def ColdSourceSummary.read (summary : ColdSourceSummary)
+    (slice : ColdSourceLayout → FactoredSlice) (index : Sig) : CplxE :=
+  (slice summary.layout).readDynamic summary.image index
+
+/-- Add the cold phaser rows only to the room-indexed columns of each incumbent
+    source/room chunk.  After removing the redundant hot-row `X` columns, the
+    combined `12×8×22` mapped-record shape is exactly the existing maximum
+    physical-room route arena (`2112` records). -/
+private def sourceRoomPhaserImage? (source phaserRows room1 room2 : Array ModalMode)
+    (phaserImage : Sig) : Option SourceRoomImage := do
+  let n := source.size
+  let k := phaserRows.size
+  let m := room1.size
+  if n == 0 || k == 0 || m == 0 || room2.size != m then none
+  let sourceCols := modeColumns source
+  let room1Cols := modeColumns room1
+  let room2Cols := modeColumns room2
+  let tables := sourceCols.tables ++ room1Cols.tables ++ room2Cols.tables ++
+    #[phaserImage]
+  let mut parts := #[]
+  for chunk in [0:4] do
+    let start := chunk * m / 4
+    let stop := (chunk + 1) * m / 4
+    if start < stop then
+      let width := stop - start
+      let capacity := (n + k) * width
+      let layout := SourceRoomLayout.create n width
+      if !layout.valid then none
+      let index := Sig.loopIdx 2
+      let row := Sig.binary .floorDiv index (litI (Int.ofNat width))
+      let roomLocal := Sig.binary .mod index (litI (Int.ofNat width))
+      let roomIndex := add roomLocal (litI (Int.ofNat start))
+      let original := Sig.binary .lt row (litI (Int.ofNat n))
+      let sourceIndex := selectE original row (litI 0)
+      let phaserIndex := selectE original (litI 0)
+        (sub row (litI (Int.ofNat n)))
+      let lam := cselectE original (sourceCols.readPole sourceIndex)
+        (liveModePole phaserImage phaserIndex)
+      let amp := cselectE original (sourceCols.readAmp sourceIndex)
+        (liveModeAmp phaserImage phaserIndex)
+      let pole1 := room1Cols.readPole roomIndex
+      let residue1 := room1Cols.readAmp roomIndex
+      let pole2 := room2Cols.readPole roomIndex
+      let residue2 := room2Cols.readAmp roomIndex
+      let q1 := cnegE pole1
+      let q2 := cnegE pole2
+      let delta1 := csubE lam pole1
+      let delta2 := csubE lam pole2
+      let hot1 := sourceCrossingHot delta1
+      let hot2 := sourceCrossingHot delta2
+      let anyHot := Sig.binary .or hot1 hot2
+      let u1 := safeInverseFor delta1 hot1
+      let v1 := cinvSharedE (csubE q1 lam)
+      let u2 := safeInverseFor delta2 hot2
+      let v2 := cinvSharedE (csubE q2 lam)
+      let d1 := unlessHot hot1 (cmulE residue1 u1)
+      let p1 := cmulE residue1 v1
+      let e1 := unlessHot hot1 (cnegE (cmulE amp u1))
+      let e1Cold2 := unlessHot hot2 e1
+      let m1 := cmulE amp v1
+      let d2 := unlessHot hot2 (cmulE residue2 u2)
+      let p2 := cmulE residue2 v2
+      let e2 := unlessHot hot2 (cnegE (cmulE amp u2))
+      let m2 := cmulE amp v2
+      let tf := unlessHot anyHot (cmulE amp (cmulE u1 u2))
+      let tp := cmulE amp (cmulE v1 v2)
+      let values := #[d1.1, d1.2, p1.1, p1.2,
+        e1.1, e1.2, e1Cold2.1, e1Cold2.2, m1.1, m1.2,
+        d2.1, d2.2, p2.1, p2.2, e2.1, e2.2, m2.1, m2.2,
+        tf.1, tf.2, tp.1, tp.2]
+      let routes := (Array.range capacity).foldl (fun routes item =>
+        let sourceRow := item / width
+        let j := item % width
+        let routes := if sourceRow < n then
+            appendComplexRoute
+              (appendComplexRoute routes layout.d1 sourceRow) layout.p1 sourceRow
+          else routes.push none |>.push none |>.push none |>.push none
+        let routes := appendComplexRoute
+          (appendComplexRoute
+            (appendComplexRoute routes layout.e1 j) layout.e1Cold2 j) layout.m1 j
+        let routes := if sourceRow < n then
+            appendComplexRoute
+              (appendComplexRoute routes layout.d2 sourceRow) layout.p2 sourceRow
+          else routes.push none |>.push none |>.push none |>.push none
+        let routes := appendComplexRoute
+          (appendComplexRoute
+            (appendComplexRoute
+              (appendComplexRoute routes layout.e2 j) layout.m2 j) layout.tf j)
+          layout.tp j
+        routes) #[]
+      let image ← routedImage? capacity layout.floatCount routes tables values 2
+      parts := parts.push { image, layout, roomStart := start }
+  let _ ← parts[0]?
+  pure { parts }
+
+/-- One reused mapped region computes the four room transfer summaries needed
+    to assemble all six phaser-pole source residues. -/
+private def coldSourceSummaryImage? (phaserRows room1 room2 : Array ModalMode)
+    (phaserImage : Sig) : Option ColdSourceSummary := do
+  let k := phaserRows.size
+  let m := room1.size
+  if k == 0 || m == 0 || room2.size != m then none
+  let layout := ColdSourceLayout.create k
+  let room1Cols := modeColumns room1
+  let room2Cols := modeColumns room2
+  let index := Sig.loopIdx 10
+  let sourceIndex := Sig.binary .floorDiv index (litI (Int.ofNat m))
+  let roomIndex := Sig.binary .mod index (litI (Int.ofNat m))
+  let lam := liveModePole phaserImage sourceIndex
+  let pole1 := room1Cols.readPole roomIndex
+  let pole2 := room2Cols.readPole roomIndex
+  let residue1 := room1Cols.readAmp roomIndex
+  let residue2 := room2Cols.readAmp roomIndex
+  let d1 := cmulE residue1 (cinvSharedE (csubE lam pole1))
+  let p1 := cmulE residue1 (cinvSharedE (csubE (cnegE pole1) lam))
+  let d2 := cmulE residue2 (cinvSharedE (csubE lam pole2))
+  let p2 := cmulE residue2 (cinvSharedE (csubE (cnegE pole2) lam))
+  let values := #[d1.1, d1.2, p1.1, p1.2, d2.1, d2.2, p2.1, p2.2]
+  let routes := (Array.range (k * m)).foldl (fun routes item =>
+    let i := item / m
+    appendComplexRoute
+      (appendComplexRoute
+        (appendComplexRoute
+          (appendComplexRoute routes layout.d1 i) layout.p1 i) layout.d2 i)
+      layout.p2 i) #[]
+  let image ← routedImage? (k * m) layout.floatCount routes
+    (room1Cols.tables ++ room2Cols.tables ++ #[phaserImage]) values 10
+  pure { image, layout }
+
+private def phaserSourceAssemblyImage? (source phaserRows : Array ModalMode)
+    (sourceRoom : SourceRoomImage) (cold : ColdSourceSummary)
+    (phaserImage direction1 direction2 : Sig) :
+    Option (AssemblyImage SourceAssemblyLayout) := do
+  let n := source.size
+  let k := phaserRows.size
+  if n == 0 || k == 0 then none
+  let layout := SourceAssemblyLayout.create (n + k)
+  let sourceCols := modeColumns source
+  let index := Sig.loopIdx 5
+  let original := Sig.binary .lt index (litI (Int.ofNat n))
+  let sourceIndex := selectE original index (litI 0)
+  let phaserIndex := selectE original (litI 0)
+    (sub index (litI (Int.ofNat n)))
+  let chooseSummary := fun
+      (sourceSlice : SourceRoomLayout → FactoredSlice)
+      (coldSlice : ColdSourceLayout → FactoredSlice) =>
+    cselectE original (sourceRoom.readSource sourceSlice sourceIndex)
+      (cold.read coldSlice phaserIndex)
+  let gain1 := caddE
+    (cscaleE (sub (lit 1) direction1) (chooseSummary (fun l => l.d1) (fun l => l.d1)))
+    (cscaleE direction1 (chooseSummary (fun l => l.p1) (fun l => l.p1)))
+  let gain2 := caddE
+    (cscaleE (sub (lit 1) direction2) (chooseSummary (fun l => l.d2) (fun l => l.d2)))
+    (cscaleE direction2 (chooseSummary (fun l => l.p2) (fun l => l.p2)))
+  let rawAmp := cselectE original (sourceCols.readAmp sourceIndex)
+    (liveModeAmp phaserImage phaserIndex)
+  let amp := cmulE rawAmp (cmulE gain1 gain2)
+  let values := #[amp.1, amp.2, amp.1, amp.2]
+  let routes := (Array.range (n + k)).foldl (fun routes i =>
+    appendComplexRoute (appendComplexRoute routes layout.amps i) layout.strike 0) #[]
+  let image ← routedImage? (n + k) layout.floatCount routes
+    (sourceRoom.images ++ #[cold.image, phaserImage] ++ sourceCols.tables) values 5
+  pure { image, layout }
+
+/-- Exact fused terminal for `source → room → six-section phaser → room`.
+    The caller has already proved the frozen-LTI commutation that moves the
+    phaser beside the source for this terminal coordinate. -/
+structure FactoredTwoRoomPhaserTerminal where
+  base : FactoredTwoRoomTerminal
+  phaserRows : Array ModalMode
+  phaserImage : Sig
+  sourceAssembly : Sig
+  phaserAmps : FactoredSlice
+
+private def routedInlineColdSourceSideSig (modes : Array ModalMode)
+    (modeImage assembly : Sig) (amps : FactoredSlice)
+    (clkInt anchorSamples : Sig) : Sig :=
+  let capacity := modes.size
+  if capacity == 0 then lit 0 else
+  let index := Sig.loopIdx 15
+  let pole := liveModePole modeImage index
+  let amp := amps.readDynamic assembly index
+  let clkRel := relClockQ clkInt anchorSamples
+  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
+  let side := cmulE amp (poleCarrierE pole dSec clkRel)
+  let image := Sig.routedSum capacity 1 (sumRoutes capacity)
+    #[modeImage, assembly]
+    #[selectE (gt clkRel (lit 0)) side.1 (lit 0)] none 15
+  Sig.index image (lit 0)
+
+def FactoredTwoRoomPhaserTerminal.realizeSig
+    (factored : FactoredTwoRoomPhaserTerminal)
+    (clkInt anchorSamples : Sig) : Sig :=
+  add (factored.base.realizeSig clkInt anchorSamples)
+    (routedInlineColdSourceSideSig factored.phaserRows factored.phaserImage
+      factored.sourceAssembly factored.phaserAmps clkInt anchorSamples)
+
+def factoredTwoRoomPhaserTerminal? (source tails room1 room2 : Array ModalMode)
+    (mix direction1 direction2 : Sig) : Option FactoredTwoRoomPhaserTerminal := do
+  if tails.isEmpty || !factoredTwoRoomAdmitted source room1 room2 then none
+  let decorated := decorateDegreeZeroCausalPhaser source tails mix
+  let phaserRows := decorated.extract source.size decorated.size
+  if phaserRows.size != tails.size ||
+      !sourceRoomConfluenceCold phaserRows room1 room2 then none
+  let phaserImage ← liveModeImage? phaserRows
+  let sourceImage ← sourceRoomPhaserImage? source phaserRows room1 room2 phaserImage
+  let cold ← coldSourceSummaryImage? phaserRows room1 room2 phaserImage
+  let difference ← differenceImage? room1 room2
+  let physical ← physicalImage? room1 room2
+  let confluence ← confluenceAssemblyImage? source room1 room2 sourceImage
+    difference physical direction1 direction2
+  let sourceAssembly ← phaserSourceAssemblyImage? source phaserRows sourceImage
+    cold phaserImage direction1 direction2
+  let roomAssembly ← roomAssemblyImage? room1 room2 sourceImage difference physical
+    direction1 direction2
+  let atZero := caddE
+    (sourceAssembly.layout.strike.read sourceAssembly.image 0)
+    (roomAssembly.layout.strike.read roomAssembly.image 0)
+  let base : FactoredTwoRoomTerminal := {
+    source, room1, room2
+    direction1, direction2
+    confluenceImages := confluence.images
+    confluencePair1DD := confluence.layout.pair1DD
+    confluencePair1Simple := confluence.layout.pair1Simple
+    confluencePair2DD := confluence.layout.pair2DD
+    confluencePair2Simple := confluence.layout.pair2Simple
+    confluenceTriple := confluence.layout.triple
+    confluencePole1 := confluence.layout.pole1
+    confluencePole2 := confluence.layout.pole2
+    confluenceHot1Offset := confluence.layout.hot1Offset
+    confluenceHot2Offset := confluence.layout.hot2Offset
+    sourceAssembly := sourceAssembly.image
+    sourceAmps := { sourceAssembly.layout.amps with extent := source.size }
+    roomAssembly := roomAssembly.image
+    roomFuture1 := roomAssembly.layout.future1
+    roomFuture2 := roomAssembly.layout.future2
+    roomPast1 := roomAssembly.layout.past1
+    roomPast2 := roomAssembly.layout.past2
+    roomFutureDD := roomAssembly.layout.futureDD
+    roomPastDD := roomAssembly.layout.pastDD
+    atZero }
+  let phaserAmps : FactoredSlice := {
+    name := "phaser-source-future"
+    offset := 2 * source.size
+    extent := phaserRows.size }
+  pure {
+    base := base
+    phaserRows := phaserRows
+    phaserImage := phaserImage
+    sourceAssembly := sourceAssembly.image
+    phaserAmps := phaserAmps }
 
 end Tropical.EmitArrow.Oriented

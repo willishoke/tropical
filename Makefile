@@ -29,13 +29,13 @@ repl: build
 run: repl
 
 # Lean front-door. Builds the lean/ subtree (the production compiler + MCP
-# server, one binary), which pulls Turnstile via Lake. Builds ALL THREE
+# server, one binary), which pulls Turnstile via Lake. Builds every declared
 # executables, not just the default `frontend`: the gate runners are meant
 # to be invoked as built binaries (never `lake exe`), and a bare
 # `lake build` leaves stale tropicaltest/diffcli binaries in place.
 lean:
 	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake env leanc -c ffi/shim.c -o ffi/shim.o -I ../engine/c_api
-	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build frontend diffcli tropicaltest trustreport
+	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build frontend diffcli tropicaltest trustreport phasercheck
 
 # Launch the Lean MCP server. As of Phase 6 the whole stack is the one
 # binary (session, compiler, runtime FFI) — no bun subprocess.
@@ -53,7 +53,7 @@ clean:
 # libLLVM with Lean's (no AMDGPU target) and the lld wasm emitter then dies at
 # load (_LLVMInitializeAMDGPUAsmParser). See CLAUDE.md "Test".
 validate: build lean
-	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build diffcli tropicaltest trustreport
+	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build diffcli tropicaltest trustreport phasercheck
 	$(PYTHON) tools/audit_trust_sites.py
 	./lean/.lake/build/bin/tropicaltest
 	bun web/build_patches.ts

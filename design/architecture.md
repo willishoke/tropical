@@ -100,6 +100,34 @@ position.  It rescales the complete modal value by one self-measured norm; it
 is not an automatic stability repair and may not be distributed independently
 over past/future arms or modalMix branches without an equality proof.
 
+The served Phaser is likewise a deferred `Modal -> Modal` operator, but it is
+linear. At each terminal response coordinate its live `center`, `sweep`,
+`rate`, and `mix` values select one static six-section continuous-time all-pass
+cascade, with each section `(s-a)/(s+a)`. This is a current-universe rational
+filter: it scrubs, freezes, seeks, and reverses with the response clock and has
+no recursive pedal history or hidden oscillator state. Frozen LTI convolution
+allows `room -> phaser -> room` to canonicalize the phaser beside a plain
+source, but never across gauge or bloom. Bloom/phaser crossings are a named
+refusal until an oriented live all-pass/Gamma bridge exists.
+
+The exact product terminal keeps the ordinary two-room images shared, folds
+the six real phaser-pole contributions into those mapped phases, and retains a
+small cold-source summary. Its specialization is an EmitArrow construction;
+LLVM and MSL consume the same ordinary routed plan and contain no phaser opcode.
+The generic sequential identity-plus-tail carrier remains the correctness
+reference.
+
+The canonical `Reson(6) → Room(32) → Phaser(6) → Room(32)` qualification
+on the 10-core M1 Pro (B=512, 2026-08-09) records 2,112 routed floats in the
+largest reusable arena, 24,232/24,576 bytes of threadgroup scratch, 31 audio
+array slots (two coefficient columns), 951,161 bytes / 17,086 lines of MSL,
+and a 1.151 s fresh-cache Metal load. Across 1,000 blocks its process times
+were 4.727/4.819/4.893/5.162 ms median/p95/p99/max against the 5.805 ms half
+deadline, with zero overruns, nonfinite values, dispatch failures, or worker
+starvation. The nominal and far fast/wide Metal rows remain above the routed
+f32 18 dB SNR floor; the dry/wet notch row uses the declared `6e-4` absolute
+lens and measured `5.246e-4`.
+
 Rooms may use fixed structural topology, immutable tables, and bounded
 capacities, but they do not contain parameter-history state or consult prior
 control values. Generic closed-form glide sources are ordinary members of

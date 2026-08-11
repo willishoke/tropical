@@ -119,12 +119,13 @@ function gate(name: string, patch: string, samples: number, minDb: number, start
  *  count the verb reports on stderr, so the gate can assert the crossing
  *  was actually exercised (a zero-column render would pass vacuously). */
 function renderGraph(graphPath: string, metal: boolean,
-                     samples: number): { out: Float64Array, columns: number } {
+                     samples: number, start: bigint = 0n): { out: Float64Array, columns: number } {
   const buffer = 512
   const frames = Math.ceil(samples / buffer)
   const args = [diffcli, 'render-graph', graphPath,
                 '--frames', String(frames), '--buffer', String(buffer)]
   if (metal) args.push('--metal')
+  if (start !== 0n) args.push('--start', start.toString())
   const r = spawnSync(args, { cwd: repoRoot, env: cliEnv })
   if (r.exitCode !== 0) throw new Error(`diffcli render-graph failed: ${r.stderr?.toString()}`)
   const m = /hoisted columns=(\d+)/.exec(r.stderr?.toString() ?? '')
@@ -186,6 +187,46 @@ describe.skipIf(!METAL)('metal vs native JIT (SNR gates)', () => {
     const snr = snrDb(ref.out, gpu.out)
     console.log(`    banked resonator: ${ref.columns} hoisted column(s), SNR ${snr.toFixed(1)} dB (floor 100)`)
     expect(snr).toBeGreaterThan(100)
+  })
+
+  test('modal phaser — exact routed product across live values and a notch', () => {
+    const cases = [
+      { name: 'nominal', center: 700, sweep: 1.5, rate: 0.2, mix: 0.5,
+        start: 0n, lens: 'snr' },
+      { name: 'fast-wide-far', center: 2000, sweep: 3, rate: 8, mix: 0.75,
+        start: 2n ** 32n, lens: 'snr' },
+      // The first dry/wet cancellation neighborhood for the 220 Hz source.
+      // Relative error is meaningless here, so this row uses the predeclared
+      // routed-f32 absolute lens instead of SNR.
+      { name: 'notch', center: 949.4, sweep: 0, rate: 0.2, mix: 0.5,
+        start: 0n, lens: 'absolute' },
+    ] as const
+    for (const row of cases) {
+      const graph = planFile(`modal-phaser-${row.name}`, JSON.stringify({
+        nodes: [
+          { id: 'res', kind: 'resonator', params: { freq: 220, decay: 4 } },
+          { id: 'room_a', kind: 'reverb', params: { rt60: 0.6 }, in: { in: ['res'] } },
+          { id: 'phaser', kind: 'phaser',
+            params: { center: row.center, sweep: row.sweep, rate: row.rate, mix: row.mix },
+            in: { in: ['room_a'] } },
+          { id: 'room_b', kind: 'reverb', params: { rt60: 0.9 }, in: { in: ['phaser'] } },
+          { id: 'out', kind: 'out', in: { in: ['room_b'] } },
+        ],
+        out: 'out',
+      }))
+      const ref = renderGraph(graph, false, 4096, row.start)
+      expect(ref.columns).toBeGreaterThan(0)
+      const gpu = renderGraph(graph, true, 4096, row.start)
+      expect(gpu.columns).toBe(ref.columns)
+      const snr = snrDb(ref.out, gpu.out)
+      let maxAbs = 0
+      for (let i = 0; i < ref.out.length; i++) {
+        maxAbs = Math.max(maxAbs, Math.abs(ref.out[i]! - gpu.out[i]!))
+      }
+      console.log(`    modal phaser ${row.name}: SNR ${snr.toFixed(1)} dB, max|error| ${maxAbs.toExponential(3)}`)
+      if (row.lens === 'snr') expect(snr).toBeGreaterThan(18)
+      else expect(maxAbs).toBeLessThan(6e-4)
+    }
   })
 
   test('modal_heavy64 — the pre-scope-A unreduced-radian canary (short window only)', () => {

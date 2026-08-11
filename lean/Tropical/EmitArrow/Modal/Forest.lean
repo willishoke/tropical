@@ -34,11 +34,22 @@ structure OrdinaryRoomStage where
   direction : ModalControlRef := ModalControlRef.constant (lit 0)
   sway? : Option (ModalControlRef × ModalControlRef) := none
 
-/-- Modal→Modal operators in authored order.  A gauge is deliberately a peer
-    of a room rather than an eager lowering special case. -/
+/-- A current-universe modal phaser.  The four controls remain authored terms
+    until the terminal response coordinate is known; the six positive,
+    pairwise-distinct ratios are structural topology. -/
+structure PhaserStage where
+  center : ModalControlRef
+  sweep : ModalControlRef
+  rate : ModalControlRef
+  mix : ModalControlRef
+  ratios : Array Float
+
+/-- Modal→Modal operators in authored order.  Gauges and phasers are deliberate
+    peers of rooms rather than eager lowering special cases. -/
 inductive ModalStage where
   | ordinaryRoom (room : OrdinaryRoomStage)
   | gauge (control : ModalControlRef)
+  | phaser (stage : PhaserStage)
 
 /-- The deferred source representation.  Rooms and gauges live exclusively on
     `ModalBranch.stages`, so heterogeneous ordering is never encoded by mutating
@@ -75,6 +86,7 @@ def OrdinaryRoomStage.controls (room : OrdinaryRoomStage) : Array ModalControlRe
 def ModalStage.controls : ModalStage → Array ModalControlRef
   | .ordinaryRoom room => room.controls
   | .gauge control => #[control]
+  | .phaser stage => #[stage.center, stage.sweep, stage.rate, stage.mix]
 
 def ModalBranch.controls (branch : ModalBranch) : Array ModalControlRef :=
   branch.stages.foldl (fun controls stage => controls ++ stage.controls) #[]

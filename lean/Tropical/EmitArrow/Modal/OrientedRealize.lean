@@ -89,12 +89,6 @@ private def differenceSum (pole : CplxE) (modes : Array ModalMode) : CplxE :=
 private def physicalSum (pole : CplxE) (modes : Array ModalMode) : CplxE :=
   cauchyFold modes fun mode => cdivE mode.amp (caddE pole mode.pole)
 
-/-- Syntactically identical physical poles take the exact beta-limit route. -/
-def syntacticSameSideClassifier : SameSideClassifier := fun _ left right =>
-  if left.sigma == right.sigma && left.omega == right.omega
-  then .coincident
-  else .distinct
-
 private def terminalSameSide (left right : Array ModalMode) :
     Array ModalMode × Array PairedMode := Id.run do
   -- Keep a zero-residue row for the nonempty origin even when this same-side
