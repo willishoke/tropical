@@ -448,6 +448,9 @@ deriving Repr
 structure PortSpec where
   name : String
   accepts : Array PortDomain := #[]
+  /-- Multiple authored wires may enter this port.  Ordinary `in` ports use
+      domain-directed implicit fan-in (signal sum or modal-forest merge);
+      explicitly variadic operators such as ring retain their own reducer. -/
   multi : Bool := false
   knob : Option (Int × Nat) := none
   discipline : Discipline := .raw
@@ -464,6 +467,17 @@ deriving Repr
 def sigIn : Array PortDomain := #[.signal, .modal, .control]
 def modalIn : Array PortDomain := #[.modal]
 def ctrlIn : Array PortDomain := #[.control]
+
+/-- Structural section topology for the first current-universe modal phaser.
+    Six half-octave-spaced sections are symmetric around the center frequency;
+    none coincide, and their geometric mean is one. -/
+def modalPhaserRatios : Array Float := #[
+  0.42044820762685725,
+  0.5946035575013605,
+  0.8408964152537145,
+  1.189207115002721,
+  1.681792830507429,
+  2.378414230005442]
 
 /-- THE table. Order matters twice: knob-bearing entries in declaration order
     define the `ParamIdx` scan order (`collectParams`), and the whole layout is
@@ -486,17 +500,17 @@ def portSpecs : String → Array PortSpec
       { name := "event_rate", knob := some (2, 0), discipline := .glide,
         display := some { min := 0.1, max := 20, log := true, unit := "Hz" } }]
   | "comb" => #[
-      { name := "in", accepts := sigIn },
+      { name := "in", accepts := sigIn, multi := true },
       { name := "delay", knob := some (12, 3), discipline := .glide,
         display := some { min := 0.0005, max := 0.05, log := true, unit := "s" } },
       { name := "decay", knob := some (7, 1), discipline := .glide,
         display := some { min := 0, max := 0.95 } }]
   | "flange" => #[
-      { name := "in", accepts := sigIn },
+      { name := "in", accepts := sigIn, multi := true },
       { name := "depth", knob := some (7, 4), discipline := .glide,
         display := some { min := 0.0001, max := 0.01, log := true, unit := "s" } }]
   | "sflange" => #[
-      { name := "in", accepts := sigIn },
+      { name := "in", accepts := sigIn, multi := true },
       { name := "mod", accepts := sigIn },
       { name := "depth", knob := some (2, 3), discipline := .glide,
         display := some { min := 0.0002, max := 0.02, log := true, unit := "s" } },
@@ -505,16 +519,16 @@ def portSpecs : String → Array PortSpec
       { name := "rate", knob := some (3, 1), ownerPort := some "mod",
         display := some { min := 0.02, max := 12, log := true, unit := "Hz" } }]
   | "fm" => #[
-      { name := "in", accepts := sigIn },
+      { name := "in", accepts := sigIn, multi := true },
       { name := "carrier", knob := some (330, 0), discipline := .anchor,
         display := some { min := 20, max := 2000, log := true, unit := "Hz" } },
       { name := "depth", knob := some (8, 0), discipline := .glide,
         display := some { min := 1, max := 400, log := true } }]
   | "delay" => #[
-      { name := "in", accepts := sigIn },
+      { name := "in", accepts := sigIn, multi := true },
       { name := "amount", knob := some (4, 3), discipline := .glide,
         display := some { min := 0.0001, max := 0.02, log := true, unit := "s" } }]
-  | "reverse" => #[{ name := "in", accepts := sigIn }]
+  | "reverse" => #[{ name := "in", accepts := sigIn, multi := true }]
   | "mix" => #[{ name := "in", accepts := sigIn, multi := true }]
   | "ring" => #[{ name := "in", accepts := sigIn, multi := true }]
   | "resonator" => #[
@@ -524,7 +538,7 @@ def portSpecs : String → Array PortSpec
       { name := "decay", knob := some (4, 0),
         display := some { min := 0.5, max := 50, log := true } }]
   | "reverb" => #[
-      { name := "in", accepts := modalIn },
+      { name := "in", accepts := modalIn, multi := true },
       { name := "rt60", accepts := sigIn, knob := some (2, 0), discipline := .glide,
         display := some { min := 0.2, max := 12, log := true, unit := "sec" } },
       { name := "dir", accepts := sigIn, knob := some (0, 0), discipline := .glide,
@@ -534,17 +548,27 @@ def portSpecs : String → Array PortSpec
       { name := "rate", accepts := sigIn, knob := some (3, 1), discipline := .glide,
         display := some { min := 0.05, max := 8, log := true, unit := "Hz" } }]
   | "filter" => #[
-      { name := "in", accepts := modalIn },
+      { name := "in", accepts := modalIn, multi := true },
       { name := "cutoff", knob := some (800, 0), discipline := .glide,
         display := some { min := 20, max := 8000, log := true, unit := "Hz" } },
       { name := "resonance", knob := some (5, 1), discipline := .glide,
+        display := some { min := 0, max := 1 } }]
+  | "phaser" => #[
+      { name := "in", accepts := modalIn, multi := true },
+      { name := "center", knob := some (700, 0), discipline := .glide,
+        display := some { min := 40, max := 4000, log := true, unit := "Hz" } },
+      { name := "sweep", knob := some (15, 1), discipline := .glide,
+        display := some { min := 0, max := 3, unit := "oct" } },
+      { name := "rate", knob := some (2, 1), discipline := .glide,
+        display := some { min := 0.02, max := 8, log := true, unit := "Hz" } },
+      { name := "mix", knob := some (5, 1), discipline := .glide,
         display := some { min := 0, max := 1 } }]
   | "modalmix" => #[{ name := "in", accepts := modalIn, multi := true }]
   -- gauge: the §5 excitation-gauge adapter — re-levels its modal input's peak by the
   -- self-measured ‖H‖^{−g}. `g` is the gauge: 0 = unity-DC (strike, the identity),
   -- ½ = √Q trim, 1 = unity-peak (tuned-tone level-invariant). Glided (smooth sweep).
   | "gauge" => #[
-      { name := "in", accepts := modalIn },
+      { name := "in", accepts := modalIn, multi := true },
       { name := "g", accepts := sigIn, knob := some (0, 0), discipline := .glide,
         display := some { min := 0, max := 1 } }]
   -- gong: a struck resonator whose strike data (`t`, `g`, `modes_full`,
@@ -562,7 +586,7 @@ def portSpecs : String → Array PortSpec
 /-- Each kind's outlet color (`none` = no outlet, the dac sink). -/
 def outletOf : String → Option PortDomain
   | "knob" => some .control
-  | "resonator" | "reverb" | "filter" | "modalmix" | "string" | "gauge" => some .modal
+  | "resonator" | "reverb" | "filter" | "phaser" | "modalmix" | "string" | "gauge" => some .modal
   | "out" => none
   | _ => some .signal
 
@@ -571,7 +595,7 @@ def outletOf : String → Option PortDomain
     client renders them from `vocabularyJson`. -/
 def vocabularyKinds : Array String := #[
   "source", "pluck", "comb", "flange", "delay", "reverse", "fm", "sflange",
-  "mix", "ring", "gong", "string", "resonator", "reverb", "filter",
+  "mix", "ring", "gong", "string", "resonator", "reverb", "filter", "phaser",
   "modalmix", "gauge", "knob", "out"]
 
 /-- Every kind `buildNode` actually constructs (its match arms — the AUTHORITATIVE
@@ -583,7 +607,7 @@ def vocabularyKinds : Array String := #[
     not a `buildNode` arm — it is in `vocabularyKinds`, not here.) -/
 def buildNodeKinds : Array String := #[
   "knob", "source", "pluck", "comb", "flange", "sflange", "fm", "delay",
-  "reverse", "mix", "ring", "resonator", "reverb", "filter", "modalmix",
+  "reverse", "mix", "ring", "resonator", "reverb", "filter", "phaser", "modalmix",
   "gauge", "gong", "bloomgong", "string"]
 
 /-- Kinds `buildNode` builds but which are WITHHELD from the served surface.

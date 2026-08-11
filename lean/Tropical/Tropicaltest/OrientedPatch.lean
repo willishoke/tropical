@@ -420,11 +420,11 @@ private def checkTwoRooms (arena : Arena) : IO (Except String TwoRoomResult) := 
             | return .error "source near crossing render"
           let repeatedRoomRefused := match lowerGraph
               (repeatedRoomCrossingGraph false) with
-            | .error error => error == "lower: nonterminal repeated-room crossing at 'equal-room-three' refused (a later room or gauge requires the composable divided-difference carrier)"
+            | .error error => error == "lower: nonterminal repeated-room crossing at 'equal-room-three' refused (a later room, phaser, or gauge requires the composable divided-difference carrier)"
             | .ok _ => false
           let roomRoomGaugeRefused := match lowerGraph
               (repeatedRoomCrossingGraph true) with
-            | .error error => error == "lower: nonterminal repeated-room crossing at 'gauge' refused (a later room or gauge requires the composable divided-difference carrier)"
+            | .error error => error == "lower: nonterminal repeated-room crossing at 'gauge' refused (a later room, phaser, or gauge requires the composable divided-difference carrier)"
             | .ok _ => false
           pure (.ok {
             maximumOracleError := maximumError

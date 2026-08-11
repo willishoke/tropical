@@ -127,6 +127,10 @@ inductive Node where
       until the terminal multi-input binding seam. -/
   | modalRoom (input : String) (build : Sig → Array ModalMode)
       (rt60 direction sway rate : ModalControlRef)
+  /-- A feed-forward current-universe analog all-pass cascade.  Its ratios are
+      structural; center/sweep/rate/mix retain live terminal control binding. -/
+  | modalPhaser (input : String) (center sweep rate mix : ModalControlRef)
+      (ratios : Array Float)
   | modalMix (inputs : Array String)
   -- `modalGauge` is the excitation-gauge adapter (§5): it re-levels its modal input's
   -- residues by the self-measured `‖H‖^{−g}` (`normalizePeak`), a pure Modal ⇝ Modal
@@ -166,6 +170,8 @@ def Node.inputIds : Node → Array String
   | .modalGaugeControl i g => #[i] ++ (g.signalNode?.map (#[·])).getD #[]
   | .modalRoom i _ rt60 direction sway rate =>
       #[i] ++ (#[rt60, direction, sway, rate].filterMap (fun control => control.signalNode?))
+  | .modalPhaser i center sweep rate mixControl _ =>
+      #[i] ++ (#[center, sweep, rate, mixControl].filterMap (fun control => control.signalNode?))
 
 /-- Is `id` a modal-island node? Its output wire carries poles, not a `Sig`. A
     missing node reads as Sig (graceful — a half-built patch stays lowerable). -/
@@ -176,6 +182,7 @@ def nodeIsModal (g : PatchGraph) (id : String) : Bool :=
     | .modalSource .. => true
     | .modalReverb .. => true
     | .modalRoom .. => true
+    | .modalPhaser .. => true
     | .modalMix .. => true
     | .modalGauge .. => true
     | .modalGaugeControl .. => true
@@ -277,6 +284,20 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
       sway? := some (sway, rate) }
     return lowered.map fun branch =>
       { branch with stages := branch.stages.push stage, modeCount? := none }
+  | .modalPhaser inId center sweep rate mixControl ratios => do
+    if ratios.size != 6 || !(ratios.zipIdx.all fun (ratio, index) =>
+        ratio > 0.0 && (ratios.extract 0 index).all (· != ratio)) then
+      throw s!"modal phaser '{id}': expected six distinct positive structural ratios"
+    let lowered ←
+      if inId == "__silence__" then pure silentForest
+      else match rankOf inId with
+        | none => throw s!"lowerModal: node '{inId}' not found"
+        | some ri =>
+          if h : ri < r then lowerModal g rankOf inId ri
+          else throw (cycleGuardMsg id inId)
+    let stage : ModalStage := .phaser { center, sweep, rate, mix := mixControl, ratios }
+    return lowered.map fun branch =>
+      { branch with stages := branch.stages.push stage, modeCount? := none }
   | .modalGauge inId gExpr => do
     let lowered ←
       if inId == "__silence__" then pure silentForest
@@ -335,6 +356,27 @@ private def resolveRoomStage (room : OrdinaryRoomStage) (responseClock : Sig)
       (Oriented.swayKernel kernel sway rate responseClock, cursor + 2)
   (kernel, direction, cursor)
 
+/-- Freeze one current-universe phaser at the terminal response coordinate.
+    Public controls are clamped to their served ranges before the log-frequency
+    sweep is formed; each live section damping carries its complete declared
+    envelope for later admission checks. -/
+private def resolvePhaserStage (stage : PhaserStage) (responseClock : Sig)
+    (values : Array Sig) (cursor : Nat) : Array ModalMode × Sig × Nat :=
+  let center := clampE ((values[cursor]?).getD (lit 700)) (lit 40) (lit 4000)
+  let sweep := clampE ((values[cursor + 1]?).getD (lit 15 1)) (lit 0) (lit 3)
+  let rate := clampE ((values[cursor + 2]?).getD (lit 2 1)) (lit 2 2) (lit 8)
+  let mix := clampE ((values[cursor + 3]?).getD (lit 5 1)) (lit 0) (lit 1)
+  let phase := phasorPhaseSig rate (lit 0) responseClock
+  let octaveOffset := mul sweep (sinSig (mul twoPiE phase))
+  let frequencyScale := expSig (mul octaveOffset (lit 6931471805599453 16))
+  let tails := stage.ratios.map fun ratio =>
+    let frequency := mul (mul center (litF ratio)) frequencyScale
+    let a := mul twoPiE frequency
+    let sigmaLo : Float := 6.283185307179586 * 40.0 * ratio * 0.125
+    let sigmaHi : Float := 6.283185307179586 * 4000.0 * ratio * 8.0
+    Oriented.allpassTail a (some (sigmaLo, sigmaHi))
+  (tails, mix, cursor + 4)
+
 private def resolvePlainStageState (initial : Nat × Oriented.Bank)
     (stages : Array ModalStage) (responseClock : Sig) (values : Array Sig) :
     Nat × Oriented.Bank :=
@@ -346,24 +388,41 @@ private def resolvePlainStageState (initial : Nat × Oriented.Bank)
       (cursor, bank.convolveKernel kernel direction Oriented.syntacticSameSideClassifier)
     | .gauge _ =>
       let g := clampE ((values[cursor]?).getD (lit 0)) (lit 0) (lit 1)
-      (cursor + 1, bank.gauge g)) initial
+      (cursor + 1, bank.gauge g)
+    | .phaser phaser =>
+      let (tails, mix, cursor) := resolvePhaserStage phaser responseClock values cursor
+      (cursor, bank.phaser tails mix)) initial
 
 private inductive PlainTerminal where
   | generic (terminal : Oriented.TerminalBank)
   | factored (terminal : Oriented.FactoredTwoRoomTerminal)
+  | factoredPhaser (terminal : Oriented.FactoredTwoRoomPhaserTerminal)
 
 private def PlainTerminal.realizeSig (terminal : PlainTerminal)
     (clkInt anchorSamples : Sig) (count? : Option Sig) : Sig :=
   match terminal with
   | .generic value => value.realizeSig clkInt anchorSamples count?
   | .factored value => value.realizeSig clkInt anchorSamples
+  | .factoredPhaser value => value.realizeSig clkInt anchorSamples
 
 /-- Fold an authored stage spine after binding the current static universe.  A
     final room uses the stable EC/DD carrier for hot same-side couplings. -/
 private def resolvePlainStages (voice : Array ModalMode) (stages : Array ModalStage)
     (responseClock : Sig) (values : Array Sig) : PlainTerminal :=
   let initial := (0, Oriented.Bank.ofFuture voice)
-  if stages.size == 2 then
+  if stages.size == 1 then
+    match stages[0]? with
+    | some (ModalStage.phaser phaser) =>
+      let (tails, mix, _) := resolvePhaserStage phaser responseClock values 0
+      .generic <| Oriented.TerminalBank.ofBank <| Oriented.Bank.ofFuture
+        (Oriented.decorateDegreeZeroCausalPhaser voice tails mix)
+    | some (ModalStage.ordinaryRoom room) =>
+      let (kernel, direction, _) := resolveRoomStage room responseClock values 0
+      .generic ((Oriented.Bank.ofFuture voice).convolveKernelTerminal kernel direction)
+    | _ =>
+      .generic <| Oriented.TerminalBank.ofBank
+        (resolvePlainStageState initial stages responseClock values).2
+  else if stages.size == 2 then
     match stages[0]?, stages[1]? with
     | some (ModalStage.ordinaryRoom first), some (ModalStage.ordinaryRoom second) =>
       let (room1, direction1, cursor) :=
@@ -376,7 +435,31 @@ private def resolvePlainStages (voice : Array ModalMode) (stages : Array ModalSt
         let bank := (Oriented.Bank.ofFuture voice).convolveKernel room1 direction1
           Oriented.syntacticSameSideClassifier
         .generic (bank.convolveKernelTerminal room2 direction2)
+    | some (ModalStage.phaser phaser), some (ModalStage.ordinaryRoom room) =>
+      let (tails, mix, cursor) := resolvePhaserStage phaser responseClock values 0
+      let decorated := Oriented.decorateDegreeZeroCausalPhaser voice tails mix
+      let (kernel, direction, _) := resolveRoomStage room responseClock values cursor
+      .generic ((Oriented.Bank.ofFuture decorated).convolveKernelTerminal kernel direction)
     | _, _ =>
+      .generic <| Oriented.TerminalBank.ofBank
+        (resolvePlainStageState initial stages responseClock values).2
+  else if stages.size == 3 then
+    match stages[0]?, stages[1]?, stages[2]? with
+    | some (ModalStage.ordinaryRoom first), some (ModalStage.phaser phaser),
+        some (ModalStage.ordinaryRoom second) =>
+      let (room1, direction1, cursor) :=
+        resolveRoomStage first responseClock values 0
+      let (tails, mix, cursor) := resolvePhaserStage phaser responseClock values cursor
+      let (room2, direction2, _) :=
+        resolveRoomStage second responseClock values cursor
+      match Oriented.factoredTwoRoomPhaserTerminal? voice tails room1 room2 mix
+          direction1 direction2 with
+      | some terminal => .factoredPhaser terminal
+      | none =>
+        let bank := (Oriented.Bank.ofFuture voice).convolveKernel room1 direction1
+          Oriented.syntacticSameSideClassifier
+        .generic ((bank.phaser tails mix).convolveKernelTerminal room2 direction2)
+    | _, _, _ =>
       .generic <| Oriented.TerminalBank.ofBank
         (resolvePlainStageState initial stages responseClock values).2
   else
@@ -390,7 +473,7 @@ private def resolvePlainStages (voice : Array ModalMode) (stages : Array ModalSt
       (resolvePlainStageState initial stages responseClock values).2
 
 /-- The present composable carrier can safely cross one nonterminal room.  A
-    second room must remain terminal: making it cross a later room or gauge
+    second room must remain terminal: making it cross a later room, phaser, or gauge
     would require generalized composable divided differences when independently
     authored damping expressions happen to have the same runtime value. -/
 private def plainStageSpineAdmitted (stages : Array ModalStage) : Bool := Id.run do
@@ -484,7 +567,7 @@ def lowerInput (g : PatchGraph) (rankOf : String → Option Nat)
       match modal.source with
       | .plain modes =>
         if !plainStageSpineAdmitted modal.stages then
-          .error s!"lower: nonterminal repeated-room crossing at '{id}' refused (a later room or gauge requires the composable divided-difference carrier)"
+          .error s!"lower: nonterminal repeated-room crossing at '{id}' refused (a later room, phaser, or gauge requires the composable divided-difference carrier)"
         else if modal.stages.isEmpty then
           let bare := modalBankTerm modes modal.strikeAnchor modal.realizationClock
             modal.modeCount?
@@ -510,6 +593,10 @@ def lowerInput (g : PatchGraph) (rankOf : String → Option Nat)
             bank.realizeSig responseClock modal.strikeAnchor modal.modeCount?)
             (#[response] ++ controlTerms))
       | .bloomed voice B gr =>
+        let hasPhaser := modal.stages.any fun stage => stage matches .phaser _
+        if hasPhaser then
+          .error s!"lower: bloomed phaser crossing at '{id}' refused (the live all-pass/Gamma crossing is not implemented)"
+        else
         let term ← match fixedForwardBloomRooms? modal.stages with
           | none =>
             .error s!"lower: bloomed stage crossing at '{id}' refused (live room-kernel direction/sway or gauge requires the oriented Gamma bridge)"

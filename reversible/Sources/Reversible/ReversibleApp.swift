@@ -78,6 +78,9 @@ struct ReversibleApp: App {
             CommandGroup(replacing: .newItem) {
                 Button("New Patch") { Task { await model.newPatch() } }
                     .keyboardShortcut("n")
+                Button("New Modal Phaser Demo") {
+                    Task { await model.newPhaserDemo() }
+                }
                 Button("Open Patch…") { model.open() }
                     .keyboardShortcut("o")
             }

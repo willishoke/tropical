@@ -16,6 +16,7 @@ const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '../..')
 const frontendBin = resolve(repoRoot, 'lean/.lake/build/bin/frontend')
 
 type Pending = { resolve: (value: any) => void; reject: (error: Error) => void }
+let engineClientSerial = 0
 
 class EngineClient {
   private readonly process: ChildProcess
@@ -28,7 +29,9 @@ class EngineClient {
   private stopped = false
 
   constructor() {
-    this.socketPath = join(tmpdir(), `tropical-handshake-${process.pid}.sock`)
+    this.socketPath = join(
+      tmpdir(), `tropical-handshake-${process.pid}-${engineClientSerial++}.sock`,
+    )
     this.process = spawn(frontendBin, ['--serve', this.socketPath], {
       cwd: repoRoot,
       stdio: ['ignore', 'ignore', 'ignore'],
@@ -184,6 +187,97 @@ describe('load_patch_graph compile handshake', () => {
       })
       expect(nextRendered.program_version).toBe(next.program_version)
       expect(nextRendered.control_version).toBe(next.control_version)
+    } finally {
+      client.stop()
+    }
+  })
+
+  test('ordinary signal and modal inlets provide typed implicit fan-in', async () => {
+    if (!existsSync(frontendBin))
+      throw new Error(`frontend binary missing: ${frontendBin} (run \`make build lean\`)`)
+
+    const client = new EngineClient()
+    try {
+      const vocabulary = await client.call('get_vocabulary')
+      const port = (kind: string, name: string) =>
+        vocabulary.kinds.find((entry: any) => entry.kind === kind)
+          ?.ports.find((entry: any) => entry.name === name)
+
+      expect(port('delay', 'in')?.multi).toBe(true)
+      expect(port('phaser', 'in')).toMatchObject({ accepts: ['modal'], multi: true })
+      expect(port('reverb', 'rt60')?.multi).toBe(false)
+
+      const implicitSignal = {
+        nodes: [
+          { id: 'a', kind: 'source', params: { freq: 220 }, in: {} },
+          { id: 'b', kind: 'source', params: { freq: 330 }, in: {} },
+          { id: 'delay', kind: 'delay', params: { amount: 0.004 }, in: { in: ['a', 'b'] } },
+          { id: 'out', kind: 'out', params: {}, in: { in: ['delay'] } },
+        ],
+        out: 'out',
+        taps: [],
+      }
+      const explicitSignal = {
+        nodes: [
+          { id: 'a', kind: 'source', params: { freq: 220 }, in: {} },
+          { id: 'b', kind: 'source', params: { freq: 330 }, in: {} },
+          { id: 'mix', kind: 'mix', params: {}, in: { in: ['a', 'b'] } },
+          { id: 'delay', kind: 'delay', params: { amount: 0.004 }, in: { in: ['mix'] } },
+          { id: 'out', kind: 'out', params: {}, in: { in: ['delay'] } },
+        ],
+        out: 'out',
+        taps: [],
+      }
+
+      const implicitReport = await client.call('load_patch_graph', implicitSignal)
+      expect(implicitReport.inputs).toContainEqual({
+        node: 'delay', port: 'in', state: 'wired', sources: ['a', 'b'],
+      })
+      const implicitRendered = await client.call('render_window', {
+        start: 0, count: 64, slots: [implicitReport.taps[0].slot],
+      })
+
+      const explicitReport = await client.call('load_patch_graph', explicitSignal)
+      const explicitRendered = await client.call('render_window', {
+        start: 0, count: 64, slots: [explicitReport.taps[0].slot],
+      })
+      expect(implicitRendered.values[0]).toEqual(explicitRendered.values[0])
+
+      const modalReport = await client.call('load_patch_graph', {
+        nodes: [
+          { id: 'low', kind: 'resonator', params: { freq: 180, decay: 4 }, in: {} },
+          { id: 'high', kind: 'resonator', params: { freq: 360, decay: 3 }, in: {} },
+          {
+            id: 'phaser', kind: 'phaser',
+            params: { center: 700, sweep: 1.5, rate: 0.2, mix: 0.5 },
+            in: { in: ['low', 'high'] },
+          },
+          { id: 'out', kind: 'out', params: {}, in: { in: ['phaser'] } },
+        ],
+        out: 'out',
+        taps: [],
+      })
+      expect(modalReport.inputs).toContainEqual({
+        node: 'phaser', port: 'in', state: 'wired', sources: ['low', 'high'],
+      })
+      const modalRendered = await client.call('render_window', {
+        start: 0, count: 64, slots: [modalReport.taps[0].slot],
+      })
+      expect(modalRendered.values[0].every(Number.isFinite)).toBe(true)
+
+      await expect(client.call('load_patch_graph', {
+        nodes: [
+          { id: 'a', kind: 'source', params: { freq: 1 }, in: {} },
+          { id: 'b', kind: 'source', params: { freq: 2 }, in: {} },
+          { id: 'res', kind: 'resonator', params: { freq: 180, decay: 4 }, in: {} },
+          {
+            id: 'room', kind: 'reverb', params: {},
+            in: { in: ['res'], rt60: ['a', 'b'] },
+          },
+          { id: 'out', kind: 'out', params: {}, in: { in: ['room'] } },
+        ],
+        out: 'out',
+      })).rejects.toThrow('accepts one source')
     } finally {
       client.stop()
     }

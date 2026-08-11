@@ -276,6 +276,15 @@ does not guess equality from live `Sig` syntax. -/
 abbrev SameSideClassifier :=
   Orientation → ModalMode → ModalMode → SameSideRoute
 
+/-- Syntactically identical physical poles take the exact beta-limit route.
+    Live phaser section poles are structurally distinct expressions, so their
+    fixed ratio contract keeps them on the distinct route without a floating
+    equality or epsilon decision. -/
+def syntacticSameSideClassifier : SameSideClassifier := fun _ left right =>
+  if left.sigma == right.sigma && left.omega == right.omega
+  then .coincident
+  else .distinct
+
 /-- Compose one production same-side pair.  The incumbent degree-zero
 distinct-pole residue transform is reused exactly where it is sound.  General
 polynomial degrees and the certified coincidence route use the closed forms
@@ -396,6 +405,77 @@ def Bank.convolveKernel (input : Bank) (room : Array ModalMode)
     convolveKernelDegZeroCollected input kernel
   else
     convolveKernelPairwise classify input kernel
+
+/-- Scale every support arm and the exact-zero value by one complex scalar.
+    Pole order, degrees, and admission metadata are unchanged. -/
+def Bank.scale (bank : Bank) (scale : CplxE) : Bank :=
+  { future := bank.future.map (scaleModeAmp scale)
+    past := bank.past.map (scaleModeAmp scale)
+    atZero := cmulE scale bank.atZero }
+
+/-- Add complete banks in authored left-to-right order.  Addition concatenates
+    atoms; it never guesses pole equality from live floating expressions. -/
+protected def Bank.add (left right : Bank) : Bank :=
+  { future := left.future ++ right.future
+    past := left.past ++ right.past
+    atZero := caddE left.atZero right.atZero }
+
+/-- Dry/wet linear blend of two complete oriented values. -/
+def Bank.blend (dry wet : Bank) (mix : Sig) : Bank :=
+  let dryScale : CplxE := (sub (lit 1) mix, lit 0)
+  let wetScale : CplxE := (mix, lit 0)
+  (dry.scale dryScale).add (wet.scale wetScale)
+
+/-- The causal tail of one continuous-time first-order all-pass section,
+    `A_a(s) = 1 - 2a/(s+a)`.  The direct identity path is supplied by
+    `Bank.allpassSection`; this row is only the exponential tail. -/
+def allpassTail (a : Sig) (sigmaRange : Option (Float × Float) := none) : ModalMode :=
+  { sigma := a
+    omega := lit 0
+    cre := neg (mul (lit 2) a)
+    sigmaRange }
+
+/-- One exact current-universe all-pass section.  The direct bank term is
+    semantically load-bearing: the convolution alone would be a low-pass-like
+    resonator, not an all-pass. -/
+def Bank.allpassSection (bank : Bank) (tail : ModalMode) : Bank :=
+  bank.add (bank.convolveKernel #[tail] (lit 0) syntacticSameSideClassifier)
+
+/-- Sequential identity-plus-tail reference cascade followed by the audible
+    dry/wet blend.  This intentionally preserves duplicate atoms introduced by
+    generic addition; product terminals use `decorateDegreeZeroCausalPhaser`
+    below to collect the structurally known source and section poles exactly. -/
+def Bank.phaser (bank : Bank) (tails : Array ModalMode) (mix : Sig) : Bank :=
+  let wet := tails.foldl (fun value tail => value.allpassSection tail) bank
+  bank.blend wet mix
+
+/-- Stable sequential source decoration for the exact two-room product route.
+    Preconditions are structural at its caller: the source and all tails are
+    causal degree-zero rows, every section pole is distinct, and shipped source
+    frequencies are nonzero while section frequencies are zero.  It emits one
+    row per original source pole followed by one row per section pole.
+
+    For a new tail `b/(s-p)`, existing residues gain `1+b/(q-p)` and the new
+    residue is `b·X(p)`.  This avoids the ill-conditioned raw product formula for
+    section residues while collecting only identities established by topology. -/
+def decorateDegreeZeroCausalPhaser (source tails : Array ModalMode)
+    (mix : Sig) : Array ModalMode :=
+  let wet := tails.foldl (fun modes tail =>
+    let atTail := modes.foldl (fun total mode =>
+      caddE total (cdivE mode.ampE (csubE tail.poleE mode.poleE))) (natE 0)
+    let existing := modes.map fun mode =>
+      let gain := caddE (natE 1)
+        (cdivE tail.ampE (csubE mode.poleE tail.poleE))
+      scaleModeAmp gain mode
+    existing.push (scaleModeAmp atTail tail)) source
+  let dryScale : CplxE := (sub (lit 1) mix, lit 0)
+  let wetScale : CplxE := (mix, lit 0)
+  let sourceRows := (wet.extract 0 source.size).zip source |>.map fun (wetMode, dryMode) =>
+    let amp := caddE (cmulE wetScale wetMode.ampE)
+      (cmulE dryScale dryMode.ampE)
+    { wetMode with cre := amp.1, cim := amp.2 }
+  let sectionRows := (wet.extract source.size wet.size).map (scaleModeAmp wetScale)
+  sourceRows ++ sectionRows
 
 @[simp] theorem Bank.ofFuture_future (modes : Array ModalMode) :
     (Bank.ofFuture modes).future = modes := rfl

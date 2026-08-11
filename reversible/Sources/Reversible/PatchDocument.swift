@@ -130,6 +130,36 @@ extension PatchModel {
         setVelocity(velocity)
     }
 
+    /// Factory patch for the supported modal-phaser product path.  The Scope
+    /// observes only Out, so its recipe stays presentation-only and does not
+    /// request duplicate intermediate modal realizations.
+    func newPhaserDemo() async {
+        nodes = [:]
+        order = []
+        pan = .zero
+        resetCounter()
+
+        let resonator = addNode(.resonator, at: CGPoint(x: 88, y: 132))
+        let roomA = addNode(.reverb, at: CGPoint(x: 330, y: 132))
+        let phaser = addNode(.phaser, at: CGPoint(x: 610, y: 132))
+        let roomB = addNode(.reverb, at: CGPoint(x: 930, y: 132))
+        let output = addNode(.out, at: CGPoint(x: 1210, y: 240))
+        let scope = addNode(.scope, at: CGPoint(x: 930, y: 430))
+
+        if let resonator, let roomA, let phaser, let roomB, let output {
+            connect(from: resonator.id, to: roomA.id, port: "in")
+            connect(from: roomA.id, to: phaser.id, port: "in")
+            connect(from: phaser.id, to: roomB.id, port: "in")
+            connect(from: roomB.id, to: output.id, port: "in")
+            if let scope {
+                connect(from: output.id, to: scope.id, port: "ch1")
+            }
+        }
+        documentURL = nil
+        await pushGraph()
+        setVelocity(velocity)
+    }
+
     // ── File I/O ──────────────────────────────────────────────────────────
     func write(to url: URL) throws {
         let enc = JSONEncoder()

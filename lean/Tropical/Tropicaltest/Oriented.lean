@@ -1,4 +1,4 @@
-import Tropical.EmitArrow.Modal.Oriented
+import Tropical.EmitArrow.Modal.OrientedRealize
 
 /-!
 # Focused tests for per-kernel oriented modal convolution
@@ -14,6 +14,7 @@ namespace Tropical.Tropicaltest.Oriented
 open Tropical
 open Tropical.EmitArrow
 open Tropical.EmitArrow.Oriented
+open Tropical.Ir
 
 private def passGate (label detail : String) : IO Bool := do
   IO.println s!"  PASS  {label}  {detail}"
@@ -23,9 +24,38 @@ private def failGate (label detail : String) : IO Bool := do
   IO.println s!"  FAIL  {label}  {detail}"
   pure false
 
+/-- Read one child from an already-evaluated, child-descending expression DAG. -/
+private def constValueAt (values : Array (Option Float)) (id : ExprId) : Option Float :=
+  (values[id.idx]?).getD none
+
+/-- Evaluate one constant `+−×÷/neg` DAG node.  `lowerSig` interns children
+    before parents, so every operand is already present in `values`. -/
+private def evalConstNode (values : Array (Option Float)) : ENode → Option Float
+  | .num n            => some n.toFloat
+  | .unary .neg a     => (constValueAt values a).map (fun x => -x)
+  | .unary .toFloat a => constValueAt values a
+  | .binary .add a b  => do pure ((← constValueAt values a) + (← constValueAt values b))
+  | .binary .sub a b  => do pure ((← constValueAt values a) - (← constValueAt values b))
+  | .binary .mul a b  => do pure ((← constValueAt values a) * (← constValueAt values b))
+  | .binary .div a b  => do
+      let x ← constValueAt values a
+      let y ← constValueAt values b
+      pure (if y == 0.0 then 0.0 else x / y)
+  | _                 => none
+
+/-- Lower a shared constant authoring expression through production's trusted,
+    pointer-memoized `lowerSig` boundary, then evaluate its interned DAG once in
+    child order.  The exact interval folder is independently gate-covered; this
+    gate needs the platform-Float coefficients used by its numerical oracle. -/
+private def evalConstSigFast (s : Sig) : Option Float :=
+  let (root, arena) := (lowerSig s).run {}
+  let values := arena.nodes.foldl
+    (fun values node => values.push (evalConstNode values node)) #[]
+  constValueAt values root
+
 private def foldCplx (value : CplxE) : Option (Float × Float) := do
-  let re ← sigConstF? value.1
-  let im ← sigConstF? value.2
+  let re ← evalConstSigFast value.1
+  let im ← evalConstSigFast value.2
   pure (re, im)
 
 private def powNat (base : Float) : Nat → Float
@@ -76,6 +106,20 @@ private def evalBank (bank : Bank) (coordinate : Float) : Option Float :=
 private def close (actual expected : Float) (tolerance : Float := 1.0e-10) :
     Bool :=
   (actual - expected).abs < tolerance
+
+private abbrev CplxF := Float × Float
+
+private def caddF (a b : CplxF) : CplxF := (a.1 + b.1, a.2 + b.2)
+private def cmulF (a b : CplxF) : CplxF :=
+  (a.1 * b.1 - a.2 * b.2, a.1 * b.2 + a.2 * b.1)
+private def cdivF (a b : CplxF) : CplxF :=
+  let d := b.1 * b.1 + b.2 * b.2
+  ((a.1 * b.1 + a.2 * b.2) / d,
+   (a.2 * b.1 - a.1 * b.2) / d)
+private def cscaleF (scale : Float) (a : CplxF) : CplxF :=
+  (scale * a.1, scale * a.2)
+private def cdistF (a b : CplxF) : Float :=
+  Float.sqrt ((a.1 - b.1) * (a.1 - b.1) + (a.2 - b.2) * (a.2 - b.2))
 
 private def sourceMode : ModalMode :=
   { sigma := lit 2, omega := lit 0, cre := lit 3 }
@@ -168,16 +212,132 @@ private def coincidenceCheck : Bool :=
         | none => false
   | _, _ => false
 
+private def phaserPoleValues : Array Float :=
+  let ratios : Array Float := #[
+    0.42044820762685725, 0.5946035575013605, 0.8408964152537145,
+    1.189207115002721, 1.681792830507429, 2.378414230005442]
+  ratios.map fun ratio => 6.283185307179586 * 700.0 * ratio
+
+private def phaserTails : Array ModalMode :=
+  phaserPoleValues.map fun a => allpassTail (litF a)
+
+private def bankTransfer (bank : Bank) (omega : Float) : Option CplxF :=
+  foldCplx (bank.transferAt (litF omega))
+
+/-- Independent direct rational evaluator for one fixed all-pass product.  It
+    does not inspect modal residues emitted by either phaser construction. -/
+private def phaserOracleFor (poles : Array Float) (omega mix : Float) : CplxF :=
+  let s : CplxF := (0.0, omega)
+  let source := cdivF (3.0, 0.0) (2.0, omega)
+  let allpass := poles.foldl (fun value a =>
+    cmulF value (cdivF (s.1 - a, s.2) (s.1 + a, s.2))) (1.0, 0.0)
+  cmulF source (caddF (1.0 - mix, 0.0) (cscaleF mix allpass))
+
+/-- Whole-bank scale/add/blend keep authored arm order and one exact-zero
+    scalar. -/
+private def linearBankCheck : Bool :=
+  let left : Bank := { future := #[sourceMode], atZero := (lit 1, lit 2) }
+  let right : Bank := { future := #[roomMode], atZero := (lit 3, lit 4) }
+  let sum := left.add right
+  let scaled := sum.scale (lit 2, lit (-1))
+  match sum.future[0]?, sum.future[1]?, foldCplx sum.atZero,
+      foldCplx scaled.atZero with
+  | some first, some second, some atZero, some scaledZero =>
+      sigConstF? first.sigma == some 2.0 && sigConstF? second.sigma == some 5.0 &&
+        atZero == (4.0, 6.0) && scaledZero == (14.0, 8.0)
+  | _, _, _, _ => false
+
+/-- One identity-plus-tail section agrees in time with a direct convolution;
+    the direct path is observable in the `-7e^-2t + 10e^-5t` result. -/
+private def oneSectionCheck : Bool :=
+  let filtered := (Bank.ofFuture #[sourceMode]).allpassSection (allpassTail (lit 5))
+  let cases : Array Float := #[0.0, 0.01, 0.1, 0.5]
+  cases.all fun coordinate =>
+    let expected := if coordinate == 0.0 then 0.0 else
+      -7.0 * Float.exp (-2.0 * coordinate) + 10.0 * Float.exp (-5.0 * coordinate)
+    match evalBank filtered coordinate with
+    | some actual => close actual expected 2.0e-10
+    | none => false
+
+/-- A two-section generic cascade (the induction witness) and the full
+    six-section compact decorator each agree with their independent rational
+    products over mix endpoints, cancellation neighborhoods, and the audible
+    frequency grid.  The generic reference intentionally preserves duplicate
+    identity-plus-tail rows and therefore doubles in size at each section; the
+    separate Phaser gate covers the complete six-section product terminal. -/
+private def phaserRationalCheck : Bool :=
+  let dry := Bank.ofFuture #[sourceMode]
+  let referencePoles := phaserPoleValues.extract 0 2
+  let referenceTails := phaserTails.extract 0 2
+  let frequencies : Array Float := #[
+    20.0, 162.211, 699.9, 700.0, 700.1, 3020.766, 20000.0]
+  let mixes : Array Float := #[0.0, 0.5, 1.0]
+  mixes.all fun mix =>
+    let mixE := litF mix
+    let reference := dry.phaser referenceTails mixE
+    let compact := Bank.ofFuture
+      (decorateDegreeZeroCausalPhaser #[sourceMode] phaserTails mixE)
+    frequencies.all fun frequency =>
+      let omega := 6.283185307179586 * frequency
+      match bankTransfer reference omega, bankTransfer compact omega with
+      | some actual, some decorated =>
+          let referenceExpected := phaserOracleFor referencePoles omega mix
+          let compactExpected := phaserOracleFor phaserPoleValues omega mix
+          cdistF actual referenceExpected < 2.0e-9 &&
+            cdistF decorated compactExpected < 2.0e-9
+      | _, _ => false
+
+private def wetUnitMagnitudeCheck : Bool :=
+  let frequencies : Array Float := #[20.0, 40.0, 100.0, 700.0, 4000.0, 20000.0]
+  frequencies.all fun frequency =>
+    let omega := 6.283185307179586 * frequency
+    let s : CplxF := (0.0, omega)
+    let wet := phaserPoleValues.foldl (fun value a =>
+      cmulF value (cdivF (s.1 - a, s.2) (s.1 + a, s.2))) (1.0, 0.0)
+    close (Float.sqrt (wet.1 * wet.1 + wet.2 * wet.2)) 1.0 2.0e-15
+
+/-- Frozen LTI room/phaser commutation across FF/interior/PP room orientation,
+    witnessed with two sequential sections so the intentionally uncollected
+    generic reference remains small.  The section law composes inductively;
+    full six-section product-terminal behavior is gated separately.  This is
+    the numerical law used by the exact two-room canonicalizer; no such rewrite
+    is defined for gauge or bloom stages. -/
+private def phaserRoomCommutationCheck : Bool :=
+  let room : Array ModalMode := #[
+    { sigma := lit 11, omega := lit 37, cre := lit 7 1, cim := lit (-2) 1 }]
+  let directions : Array Sig := #[lit 0, lit 4 1, lit 1]
+  let frequencies : Array Float := #[31.0, 700.0, 4700.0]
+  let witnessTails := phaserTails.extract 0 2
+  directions.all fun direction =>
+    let source := Bank.ofFuture #[sourceMode]
+    let roomThenPhaser :=
+      (source.convolveKernel room direction syntacticSameSideClassifier).phaser
+        witnessTails (lit 5 1)
+    let phaserThenRoom :=
+      (source.phaser witnessTails (lit 5 1)).convolveKernel room direction
+        syntacticSameSideClassifier
+    frequencies.all fun frequency =>
+      let omega := 6.283185307179586 * frequency
+      match bankTransfer roomThenPhaser omega, bankTransfer phaserThenRoom omega with
+      | some left, some right => cdistF left right < 5.0e-8
+      | _, _ => false
+
 def runOriented : IO Bool := do
   let fp := futurePastAxisCheck
   let direction := directionCheck
   let collected := collectedPairwiseCheck
   let coincidence := coincidenceCheck
-  if fp && direction && collected && coincidence then
+  let linear := linearBankCheck
+  let oneSection := oneSectionCheck
+  let rational := phaserRationalCheck
+  let unitMagnitude := wetUnitMagnitudeCheck
+  let commutation := phaserRoomCommutationCheck
+  if fp && direction && collected && coincidence && linear && oneSection &&
+      rational && unitMagnitude && commutation then
     passGate "modal-oriented"
-      "FP axes + exact zero seam; local direction endpoints/interior; collected=pairwise; repeated-pole beta limit"
+      "FP axes + exact zero seam; local direction; collected=pairwise; repeated-pole beta limit; bank linearity; current-universe all-pass cascade=independent rational oracle; wet |A|=1; compact decoration exact; frozen room/phaser commutation"
   else
     failGate "modal-oriented"
-      s!"futurePast={fp} direction={direction} collectedPairwise={collected} coincidence={coincidence}"
+      s!"futurePast={fp} direction={direction} collectedPairwise={collected} coincidence={coincidence} linear={linear} section={oneSection} rational={rational} unit={unitMagnitude} commute={commutation}"
 
 end Tropical.Tropicaltest.Oriented
