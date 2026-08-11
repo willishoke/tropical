@@ -416,6 +416,9 @@ private def resolvePlainStages (voice : Array ModalMode) (stages : Array ModalSt
       let (tails, mix, _) := resolvePhaserStage phaser responseClock values 0
       .generic <| Oriented.TerminalBank.ofBank <| Oriented.Bank.ofFuture
         (Oriented.decorateDegreeZeroCausalPhaser voice tails mix)
+    | some (ModalStage.ordinaryRoom room) =>
+      let (kernel, direction, _) := resolveRoomStage room responseClock values 0
+      .generic ((Oriented.Bank.ofFuture voice).convolveKernelTerminal kernel direction)
     | _ =>
       .generic <| Oriented.TerminalBank.ofBank
         (resolvePlainStageState initial stages responseClock values).2

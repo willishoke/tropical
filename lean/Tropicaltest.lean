@@ -49,7 +49,7 @@ open Tropical.Ir (Arena ProgramIdx)
     reported as the total collapse it is; the `arrow-block-count` gate at the end
     of `main` checks the number against what the block actually ran, so it is
     verified rather than maintained. -/
-def arrowBlockGates : Nat := 104
+def arrowBlockGates : Nat := 105
 
 set_option maxRecDepth 2048 in
 def main (args : List String) : IO UInt32 := do

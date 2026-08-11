@@ -14,6 +14,7 @@ namespace Tropical.Tropicaltest.Oriented
 open Tropical
 open Tropical.EmitArrow
 open Tropical.EmitArrow.Oriented
+open Tropical.Ir
 
 private def passGate (label detail : String) : IO Bool := do
   IO.println s!"  PASS  {label}  {detail}"
@@ -23,9 +24,38 @@ private def failGate (label detail : String) : IO Bool := do
   IO.println s!"  FAIL  {label}  {detail}"
   pure false
 
+/-- Read one child from an already-evaluated, child-descending expression DAG. -/
+private def constValueAt (values : Array (Option Float)) (id : ExprId) : Option Float :=
+  (values[id.idx]?).getD none
+
+/-- Evaluate one constant `+−×÷/neg` DAG node.  `lowerSig` interns children
+    before parents, so every operand is already present in `values`. -/
+private def evalConstNode (values : Array (Option Float)) : ENode → Option Float
+  | .num n            => some n.toFloat
+  | .unary .neg a     => (constValueAt values a).map (fun x => -x)
+  | .unary .toFloat a => constValueAt values a
+  | .binary .add a b  => do pure ((← constValueAt values a) + (← constValueAt values b))
+  | .binary .sub a b  => do pure ((← constValueAt values a) - (← constValueAt values b))
+  | .binary .mul a b  => do pure ((← constValueAt values a) * (← constValueAt values b))
+  | .binary .div a b  => do
+      let x ← constValueAt values a
+      let y ← constValueAt values b
+      pure (if y == 0.0 then 0.0 else x / y)
+  | _                 => none
+
+/-- Lower a shared constant authoring expression through production's trusted,
+    pointer-memoized `lowerSig` boundary, then evaluate its interned DAG once in
+    child order.  The exact interval folder is independently gate-covered; this
+    gate needs the platform-Float coefficients used by its numerical oracle. -/
+private def evalConstSigFast (s : Sig) : Option Float :=
+  let (root, arena) := (lowerSig s).run {}
+  let values := arena.nodes.foldl
+    (fun values node => values.push (evalConstNode values node)) #[]
+  constValueAt values root
+
 private def foldCplx (value : CplxE) : Option (Float × Float) := do
-  let re ← sigConstF? value.1
-  let im ← sigConstF? value.2
+  let re ← evalConstSigFast value.1
+  let im ← evalConstSigFast value.2
   pure (re, im)
 
 private def powNat (base : Float) : Nat → Float
@@ -194,12 +224,12 @@ private def phaserTails : Array ModalMode :=
 private def bankTransfer (bank : Bank) (omega : Float) : Option CplxF :=
   foldCplx (bank.transferAt (litF omega))
 
-/-- Independent direct rational evaluator for the fixed all-pass product.  It
-    does not inspect modal residues emitted by `Bank.phaser`. -/
-private def phaserOracle (omega mix : Float) : CplxF :=
+/-- Independent direct rational evaluator for one fixed all-pass product.  It
+    does not inspect modal residues emitted by either phaser construction. -/
+private def phaserOracleFor (poles : Array Float) (omega mix : Float) : CplxF :=
   let s : CplxF := (0.0, omega)
   let source := cdivF (3.0, 0.0) (2.0, omega)
-  let allpass := phaserPoleValues.foldl (fun value a =>
+  let allpass := poles.foldl (fun value a =>
     cmulF value (cdivF (s.1 - a, s.2) (s.1 + a, s.2))) (1.0, 0.0)
   cmulF source (caddF (1.0 - mix, 0.0) (cscaleF mix allpass))
 
@@ -229,25 +259,32 @@ private def oneSectionCheck : Bool :=
     | some actual => close actual expected 2.0e-10
     | none => false
 
-/-- Six sequential sections and the compact degree-zero decorator both agree
-    with the independent rational product over mix endpoints, cancellation
-    neighborhoods, and the audible frequency grid. -/
+/-- A two-section generic cascade (the induction witness) and the full
+    six-section compact decorator each agree with their independent rational
+    products over mix endpoints, cancellation neighborhoods, and the audible
+    frequency grid.  The generic reference intentionally preserves duplicate
+    identity-plus-tail rows and therefore doubles in size at each section; the
+    separate Phaser gate covers the complete six-section product terminal. -/
 private def phaserRationalCheck : Bool :=
   let dry := Bank.ofFuture #[sourceMode]
+  let referencePoles := phaserPoleValues.extract 0 2
+  let referenceTails := phaserTails.extract 0 2
   let frequencies : Array Float := #[
     20.0, 162.211, 699.9, 700.0, 700.1, 3020.766, 20000.0]
   let mixes : Array Float := #[0.0, 0.5, 1.0]
   mixes.all fun mix =>
     let mixE := litF mix
-    let reference := dry.phaser phaserTails mixE
+    let reference := dry.phaser referenceTails mixE
     let compact := Bank.ofFuture
       (decorateDegreeZeroCausalPhaser #[sourceMode] phaserTails mixE)
     frequencies.all fun frequency =>
       let omega := 6.283185307179586 * frequency
       match bankTransfer reference omega, bankTransfer compact omega with
       | some actual, some decorated =>
-          let expected := phaserOracle omega mix
-          cdistF actual expected < 2.0e-9 && cdistF decorated expected < 2.0e-9
+          let referenceExpected := phaserOracleFor referencePoles omega mix
+          let compactExpected := phaserOracleFor phaserPoleValues omega mix
+          cdistF actual referenceExpected < 2.0e-9 &&
+            cdistF decorated compactExpected < 2.0e-9
       | _, _ => false
 
 private def wetUnitMagnitudeCheck : Bool :=
@@ -259,21 +296,25 @@ private def wetUnitMagnitudeCheck : Bool :=
       cmulF value (cdivF (s.1 - a, s.2) (s.1 + a, s.2))) (1.0, 0.0)
     close (Float.sqrt (wet.1 * wet.1 + wet.2 * wet.2)) 1.0 2.0e-15
 
-/-- Frozen LTI room/phaser commutation across FF/interior/PP room orientation.
-    This is the numerical law used by the exact two-room canonicalizer; no such
-    rewrite is defined for gauge or bloom stages. -/
+/-- Frozen LTI room/phaser commutation across FF/interior/PP room orientation,
+    witnessed with two sequential sections so the intentionally uncollected
+    generic reference remains small.  The section law composes inductively;
+    full six-section product-terminal behavior is gated separately.  This is
+    the numerical law used by the exact two-room canonicalizer; no such rewrite
+    is defined for gauge or bloom stages. -/
 private def phaserRoomCommutationCheck : Bool :=
   let room : Array ModalMode := #[
     { sigma := lit 11, omega := lit 37, cre := lit 7 1, cim := lit (-2) 1 }]
   let directions : Array Sig := #[lit 0, lit 4 1, lit 1]
   let frequencies : Array Float := #[31.0, 700.0, 4700.0]
+  let witnessTails := phaserTails.extract 0 2
   directions.all fun direction =>
     let source := Bank.ofFuture #[sourceMode]
     let roomThenPhaser :=
       (source.convolveKernel room direction syntacticSameSideClassifier).phaser
-        phaserTails (lit 5 1)
+        witnessTails (lit 5 1)
     let phaserThenRoom :=
-      (source.phaser phaserTails (lit 5 1)).convolveKernel room direction
+      (source.phaser witnessTails (lit 5 1)).convolveKernel room direction
         syntacticSameSideClassifier
     frequencies.all fun frequency =>
       let omega := 6.283185307179586 * frequency
