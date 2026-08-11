@@ -118,15 +118,21 @@ The generic sequential identity-plus-tail carrier remains the correctness
 reference.
 
 The canonical `Reson(6) → Room(32) → Phaser(6) → Room(32)` qualification
-on the 10-core M1 Pro (B=512, 2026-08-09) records 2,112 routed floats in the
-largest reusable arena, 24,232/24,576 bytes of threadgroup scratch, 31 audio
-array slots (two coefficient columns), 951,161 bytes / 17,086 lines of MSL,
-and a 1.151 s fresh-cache Metal load. Across 1,000 blocks its process times
-were 4.727/4.819/4.893/5.162 ms median/p95/p99/max against the 5.805 ms half
-deadline, with zero overruns, nonfinite values, dispatch failures, or worker
-starvation. The nominal and far fast/wide Metal rows remain above the routed
-f32 18 dB SNR floor; the dry/wet notch row uses the declared `6e-4` absolute
-lens and measured `5.246e-4`.
+on the 10-core M1 Pro (B=512, refreshed 2026-08-10 after the scalar-liveness
+headroom fix) records 2,112 routed floats in the largest reusable arena,
+22,688/24,576 bytes of threadgroup scratch, 31 audio array slots (two
+coefficient columns), 947,585 bytes / 17,086 lines of MSL, and a 1.255 s first
+post-merge Metal load. Three consecutive warmed 1,000-block rows measured
+4.676–4.696/5.035–5.069/5.294–5.327/5.621–7.875 ms
+median/p95/p99/max: every p99 remains below the 5.805 ms half-deadline, every
+maximum remains below the 11.610 ms full deadline, and all three rows have
+zero overruns, nonfinite values, dispatch failures, or worker starvation. The
+first two process rows after rebuilding showed cold/transient maxima of
+19.241 ms and 14.115 ms with one and two overruns respectively, so startup
+behavior is not claimed by the warmed throughput qualification. The nominal
+and far fast/wide Metal rows remain above the routed f32 18 dB SNR floor; the
+dry/wet notch row uses the declared `6e-4` absolute lens and measured
+`5.246e-4`.
 
 Rooms may use fixed structural topology, immutable tables, and bounded
 capacities, but they do not contain parameter-history state or consult prior
