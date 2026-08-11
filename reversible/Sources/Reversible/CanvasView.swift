@@ -203,7 +203,9 @@ struct NodeView: View {
 
 // ── Ports ───────────────────────────────────────────────────────────────────
 /// An inlet: a menu of legal sources plus one color chip per connection.
-/// Tap a chip to disconnect. The menu is the whole patching gesture.
+/// Ordinary `in` ports retain every compatible selection as an implicit typed
+/// fan-in; control/address/modulation ports replace their single source. Tap a
+/// chip to disconnect. The menu is the whole patching gesture.
 struct InletView: View {
     @EnvironmentObject var model: PatchModel
     let node: PatchNode

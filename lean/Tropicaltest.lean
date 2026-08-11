@@ -618,6 +618,9 @@ def main (args : List String) : IO UInt32 := do
     if !(← runModalClassAgreement) then
       failed := failed + 1
     total := total + 1
+    if !(← runImplicitFanIn) then
+      failed := failed + 1
+    total := total + 1
     if !(← runMalformedRejection arena resolved) then
       failed := failed + 1
     total := total + 1

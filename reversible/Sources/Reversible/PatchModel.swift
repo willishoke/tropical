@@ -356,7 +356,7 @@ final class PatchModel: ObservableObject {
         if fromIsKnob && !NodeKind.controlInlets.contains(port) { return false }
         // `freq` is control-only — audio-rate into the pitch port is not FM.
         if !fromIsKnob && port == "freq" { return false }
-        // A modal inlet (Reverb/Modal∪) carries poles: only a modal node may
+        // A modal inlet (Reverb/Phaser/Modal∪) carries poles: only a modal node may
         // drive it. (A modal outlet INTO a Sig inlet is fine — it realizes at
         // the seam.)
         if to.kind.wantsModal(inlet: port) && !from.kind.spec.modal { return false }
@@ -367,7 +367,17 @@ final class PatchModel: ObservableObject {
 
     func connect(from fromId: String, to toId: String, port: String) {
         guard canConnect(from: fromId, to: toId, port: port), var to = nodes[toId] else { return }
-        if !to.kind.spec.summing { to.inputs[port] = [] }   // single inlet: replace
+        let servedMulti: Bool? = {
+            guard let vocabulary,
+                  let kind = NodeKindID(rawValue: to.kind.rawValue),
+                  let descriptor = vocabulary.descriptor(for: kind),
+                  let inlet = descriptor.port(named: port)
+            else { return nil }
+            return inlet.multi
+        }()
+        if !(servedMulti ?? to.kind.allowsMultiple(inlet: port)) {
+            to.inputs[port] = []
+        }
         to.inputs[port, default: []].append(fromId)
         nodes[toId] = to
         autoArrangeIfOn()

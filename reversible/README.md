@@ -26,6 +26,13 @@ Reversible selects the Metal audio backend by default; the f64 JIT remains
 dual-loaded for scopes and reference rendering. Set `TROPICAL_BACKEND=jit`
 when launching `run-dev` to opt into the CPU reference path for diagnosis.
 
+Ordinary `in` jacks accept multiple compatible sources directly. Signal
+inlets sum them; modal inlets retain them as an ordered modal forest before
+applying Reverb, Phaser, or another modal stage. Control, address, modulation,
+and Scope-channel ports remain single-source. Legacy `Mix` and `Modal ∪`
+nodes still load from saved documents, but the Add Module menu omits those
+plumbing-only nodes because fan-in now lives on the receiving inlet.
+
 Engine resolution order:
 
 1. `Reversible.app/Contents/Resources/Tropical/frontend`

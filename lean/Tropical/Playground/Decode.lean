@@ -57,7 +57,23 @@ def masterClock (pidx : String → Option Nat) : Clock :=
     `masterClock` as its base, so global time-warp reaches all of them. -/
 def buildNode (pidx : String → Option Nat) (id kind : String)
     (_sel params inObj : Json) : Node × Array PatchNode :=
-  let sig := (portSources inObj "in")[0]?.getD "__silence__"
+  -- Ordinary effect inlets are implicit typed fan-ins.  The inlet's served
+  -- domain has already rejected signal→modal edges; here multiple signal-side
+  -- sources become an ordinary sum, while multiple modal-side sources become
+  -- an authored-order modal forest.  A singleton retains the historical graph
+  -- exactly, and an empty inlet retains graceful silence.
+  let implicitFanIn : Bool → String × Array PatchNode := fun modal =>
+    let inputs := portSources inObj "in"
+    match inputs.toList with
+    | [] => ("__silence__", #[])
+    | [input] => (input, #[])
+    | _ =>
+      let domain := if modal then "modal" else "signal"
+      let helperId := s!"__fanin_{domain}_{id}_in"
+      let helperNode := if modal then Node.modalMix inputs else Node.mix inputs
+      (helperId, #[{ id := helperId, node := helperNode }])
+  let (sig, sigFanIn) := implicitFanIn false
+  let (modal, modalFanIn) := implicitFanIn true
   -- this node's own knob `kname` as a live value: a closed-form glide if glided,
   -- else a raw slot read; falling back to the baked literal if unallocated.
   let p := fun (kname : String) (dflt : Sig) =>
@@ -130,28 +146,29 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
     let tail : Array (Sig × (Clock → Clock)) := (Array.range K).map fun j =>
       let k := j + 1
       (gPow g k, fun c => add c (mul (lit (Int.ofNat k)) d))
-    (.comb sig (#[(lit 1, fun c => c)] ++ tail), #[])
+    (.comb sig (#[(lit 1, fun c => c)] ++ tail), sigFanIn)
   | "flange" =>
     let d := deltaOf (p "depth" (dv "depth"))
-    (.flange sig (fun c => sub c d) (fun c => add c d), #[])
+    (.flange sig (fun c => sub c d) (fun c => add c d), sigFanIn)
   | "delay" =>
     let d := deltaOf (p "amount" (dv "amount"))
-    (.warpFx sig (fun c => sub c d), #[])
-  | "reverse" => (.warpFx sig (fun c => neg c), #[])
+    (.warpFx sig (fun c => sub c d), sigFanIn)
+  | "reverse" => (.warpFx sig (fun c => neg c), sigFanIn)
   | "fm" =>
     -- `carrier` is a frequency → phase-anchored (own #phase slot); `depth` glides.
     let carAnchor := (pidx s!"{id}.carrier#phase").map fun i => ((.paramRef ⟨i⟩ : Sig), dv "carrier")
     (.fm sig (sineVoiceE (p "carrier" (dv "carrier")) carAnchor)
-      clk (p "depth" (dv "depth")), #[])
+      clk (p "depth" (dv "depth")), sigFanIn)
   | "sflange" =>
     let depthSec := p "depth" (dv "depth")
     match (portSources inObj "mod")[0]? with
-    | some modId => (.sflange sig modId depthSec, #[])
+    | some modId => (.sflange sig modId depthSec, sigFanIn)
     | none =>
       -- no modulator patched: synthesize a built-in LFO sine at the `rate` knob.
       let lfoId := s!"__lfo_{id}"
       (.sflange sig lfoId depthSec,
-       #[ { id := lfoId, node := .source (sineVoiceE (p "rate" (dv "rate"))) clk } ])
+       sigFanIn ++
+         #[{ id := lfoId, node := .source (sineVoiceE (p "rate" (dv "rate"))) clk }])
   | "mix" => (.mix (portSources inObj "in"), #[])
   | "ring" => (.ring (portSources inObj "in"), #[])
   -- MODAL-island nodes: they carry poles, compose by the residue calculus at
@@ -198,33 +215,33 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
     -- stays on-island (no ∫σ dτ, no state); scrubs/reverses with the master clock.
     let sway := modalControl "sway"
     let swayRate := modalControl "rate"   -- 0.3 Hz: a slow breath
-    (.modalRoom sig
+    (.modalRoom modal
       (fun frozenRt60 =>
         let boundedRt60 := match rtRange with
           | some (lo, hi) => clampE frozenRt60 (litF lo) (litF hi)
           | none => frozenRt60
         reverbRoom boundedRt60 rtRange 32 (60, 0) (6000, 0))
-      rt60 dirX sway swayRate, #[])
+      rt60 dirX sway swayRate, modalFanIn)
   | "filter" =>
     -- the filter IS a modalReverb with a computed 2-mode room: the residue
     -- calculus does the "filtering" at build time, knobs stay live through it.
-    (.modalReverb sig
-      (filterPair (p "cutoff" (dv "cutoff")) (p "resonance" (dv "resonance"))) none, #[])
+    (.modalReverb modal
+      (filterPair (p "cutoff" (dv "cutoff")) (p "resonance" (dv "resonance"))) none,
+      modalFanIn)
   | "phaser" =>
     -- Current-universe modal phaser: controls remain deferred until the
     -- terminal response coordinate freezes one static analog all-pass cascade.
     -- This is not the history-dependent recurrence of a conventional pedal.
-    (.modalPhaser sig
+    (.modalPhaser modal
       (modalControl "center") (modalControl "sweep")
-      (modalControl "rate") (modalControl "mix") modalPhaserRatios, #[])
+      (modalControl "rate") (modalControl "mix") modalPhaserRatios, modalFanIn)
   | "modalmix" => (.modalMix (portSources inObj "in"), #[])
   | "gauge" =>
     -- §5 excitation gauge: re-level the modal input's peak. g=0 identity (unity-DC,
     -- the strike gauge), g=1 unity-peak. A pure Modal ⇝ Modal effect (`normalizePeak`);
     -- the norm is self-measured on the complete current modal universe at this
     -- authored stage, using the same terminal clock context as adjacent rooms.
-    let inId := (portSources inObj "in")[0]?.getD "__silence__"
-    (.modalGaugeControl inId (modalControl "g"), #[])
+    (.modalGaugeControl modal (modalControl "g"), modalFanIn)
   | "gong" =>
     -- One STRIKE of the struck nonlinear resonator: two anchored modal banks
     -- (full-glide + stiff half-glide registers) behind per-strike pitch-bloom
@@ -331,21 +348,25 @@ def discStr : Discipline → String
     wired inlet, the source's outlet color must be in the inlet's `accepts`:
     `modal→signal` realizes, `control→signal` is a constant stream, but `signal→modal`
     (a Sig has no poles to compose) is a type error — as is feeding an outletless
-    sink (`out`) as a source. A derived reader of the single-source table, so it
-    cannot drift from the served rule. Silence-on-legal-states is preserved: an
-    unwired inlet is not an edge, so it is never flagged. -/
+    sink (`out`) as a source. Port cardinality is enforced from the same served
+    table before lowering, so non-multi controls cannot silently discard extra
+    wires. Silence-on-legal-states is preserved: an unwired inlet is not an edge,
+    so it is never flagged. -/
 def checkEdgeTypes (raws : Array Raw) : Except String Unit := do
   for r in raws do
     for p in portSpecs r.kind do
+      let sources := portSources r.inObj p.name
       -- A knob-only port (`accepts = #[]`, `knob` set — `rt60`, `decay`, `cutoff`,
       -- …) is a SET value, never a wired inlet. A wire into it slips past the
       -- color loop below (empty accepts) yet makes `collectParams`' `selfWired`
       -- SUPPRESS the slot — a silently dead knob. Reject a non-empty wire here
       -- (an empty `in[knob]` entry is a harmless surface convention, kept legal).
-      if p.accepts.isEmpty && p.knob.isSome && !(portSources r.inObj p.name).isEmpty then
+      if p.accepts.isEmpty && p.knob.isSome && !sources.isEmpty then
         throw s!"connection error: '{r.id}' ({r.kind}) has a wire into '{p.name}', which is a knob (a set value), not an inlet — set it via its param slot (or wire its owner port), do not wire the knob itself"
       unless p.accepts.isEmpty do
-        for srcId in portSources r.inObj p.name do
+        if !p.multi && sources.size > 1 then
+          throw s!"connection arity error: '{r.id}' ({r.kind}) inlet '{p.name}' accepts one source but has {sources.size} authored wires"
+        for srcId in sources do
           match raws.find? (·.id == srcId) with
           | none =>
             -- A wire that NAMES no node is a broken document (a typo'd source),

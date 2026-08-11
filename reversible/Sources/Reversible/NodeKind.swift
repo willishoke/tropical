@@ -24,7 +24,6 @@ enum NodeKind: String, CaseIterable, Codable {
 struct NodeSpec {
     let title: String
     let accent: Color
-    let summing: Bool
     let inlets: [String]
     let outlets: [String]
     let knobs: [KnobSpec]
@@ -60,6 +59,20 @@ enum Grid {
 }
 
 extension NodeKind {
+    /// The engine serves `multi` per inlet. This local answer is the startup
+    /// fallback before that vocabulary arrives: ordinary `in` jacks are typed
+    /// implicit fan-ins; controls, addresses, modulators, and scope channels
+    /// remain single-source.
+    func allowsMultiple(inlet: String) -> Bool {
+        !spec.monitor && inlet == "in"
+    }
+
+    /// Plumbing-only reducers remain decodable for old documents, but ordinary
+    /// module inlets now provide the same fan-in without canvas machinery.
+    var appearsInAddMenu: Bool {
+        !spec.fixed && self != .mix && self != .modalmix
+    }
+
     var spec: NodeSpec {
         switch self {
         case .source:
@@ -68,7 +81,7 @@ extension NodeKind {
             // patch a Knob to drive pitch from a live slot (only a knob;
             // audio-rate into the pitch port is not FM).
             return NodeSpec(
-                title: "Osc", accent: Color(hex: 0x6CC7FF), summing: false,
+                title: "Osc", accent: Color(hex: 0x6CC7FF),
                 inlets: ["freq"], outlets: ["out"],
                 knobs: [
                     // spans sub-Hz LFO → audio (log): dial it below ~1 Hz and
@@ -84,7 +97,7 @@ extension NodeKind {
             // control inlet). Every knob is live; this one is also a
             // first-class wire source.
             return NodeSpec(
-                title: "Knob", accent: Color(hex: 0xB7A4FF), summing: false,
+                title: "Knob", accent: Color(hex: 0xB7A4FF),
                 inlets: [], outlets: ["out"],
                 knobs: [KnobSpec(name: "value", min: 0, max: 1000, def: 220)])
         case .flange:
@@ -92,7 +105,7 @@ extension NodeKind {
             // prototype: the engine-owned discipline drives a closed-form
             // ramp, so A/B it against a raw parameter to hear the difference.
             return NodeSpec(
-                title: "Flange", accent: Color(hex: 0xFFCC66), summing: false,
+                title: "Flange", accent: Color(hex: 0xFFCC66),
                 inlets: ["in"], outlets: ["out"],
                 knobs: [KnobSpec(name: "depth", min: 0.0001, max: 0.01, def: 0.002, log: true, unit: "s")])
         case .sflange:
@@ -100,7 +113,7 @@ extension NodeKind {
             // leave it open and the built-in LFO at `rate` drives the sweep.
             // The signal-warp composes.
             return NodeSpec(
-                title: "SwFlange", accent: Color(hex: 0xFFD089), summing: false,
+                title: "SwFlange", accent: Color(hex: 0xFFD089),
                 inlets: ["in", "mod"], outlets: ["out"],
                 knobs: [
                     KnobSpec(name: "depth", min: 0.0002, max: 0.02, def: 0.005, log: true, unit: "s"),
@@ -108,7 +121,7 @@ extension NodeKind {
                 ])
         case .fm:
             return NodeSpec(
-                title: "FM", accent: Color(hex: 0xFF9EC7), summing: false,
+                title: "FM", accent: Color(hex: 0xFF9EC7),
                 inlets: ["in"], outlets: ["out"],
                 knobs: [
                     KnobSpec(name: "carrier", min: 20, max: 2000, def: 330, log: true, unit: "Hz"),
@@ -116,17 +129,17 @@ extension NodeKind {
                 ])
         case .delay:
             return NodeSpec(
-                title: "Delay", accent: Color(hex: 0x86E8C0), summing: false,
+                title: "Delay", accent: Color(hex: 0x86E8C0),
                 inlets: ["in"], outlets: ["out"],
                 knobs: [KnobSpec(name: "amount", min: 0.0001, max: 0.02, def: 0.004, log: true, unit: "s")])
         case .reverse:
             // clk -> -clk : the moat op, no parameter.
             return NodeSpec(
-                title: "Reverse", accent: Color(hex: 0x7AD0AA), summing: false,
+                title: "Reverse", accent: Color(hex: 0x7AD0AA),
                 inlets: ["in"], outlets: ["out"], knobs: [])
         case .mix:
             return NodeSpec(
-                title: "Mix", accent: Color(hex: 0xC7CED9), summing: true,
+                title: "Mix", accent: Color(hex: 0xC7CED9),
                 inlets: ["in"], outlets: ["out"], knobs: [])
         case .ring:
             // multiplicative fan-in (⊗) — the ring-product twin of Mix's sum.
@@ -134,7 +147,7 @@ extension NodeKind {
             // VCA. A downstream warp reclocks every factor (the slide
             // distributes over the product).
             return NodeSpec(
-                title: "Ring ⊗", accent: Color(hex: 0xD0A0E0), summing: true,
+                title: "Ring ⊗", accent: Color(hex: 0xD0A0E0),
                 inlets: ["in"], outlets: ["out"], knobs: [])
 
         // ── MODAL ISLAND ──────────────────────────────────────────────────
@@ -142,7 +155,7 @@ extension NodeKind {
         // calculus at BUILD time and realize to a Sig at their boundary. A
         // modal OUTLET carries poles, not audio — it may feed a Sig inlet
         // (realized at the seam by `lowerInput`) or another modal node; a
-        // modal INLET (Reverb/Modal∪) accepts ONLY a modal node (a Sig source
+        // modal INLET (Reverb/Phaser/Modal∪) accepts ONLY a modal node (a Sig source
         // there is ill-typed — see `wantsModal`).
         case .resonator:
             // A struck resonator: 6 harmonics of `freq` decaying at rate
@@ -157,7 +170,7 @@ extension NodeKind {
             // relocates the strike to the signal. Unpatched ⇒ reads the
             // master clock as before.
             return NodeSpec(
-                title: "Reson", accent: Color(hex: 0x4FD6C4), summing: false,
+                title: "Reson", accent: Color(hex: 0x4FD6C4),
                 inlets: ["addr"], outlets: ["out"],
                 knobs: [
                     KnobSpec(name: "freq", min: 20, max: 2000, def: 220, log: true, unit: "Hz"),
@@ -174,7 +187,7 @@ extension NodeKind {
             // its input. Direction is local to this room: it never reverses the
             // upstream modal value or the complete composed output.
             return NodeSpec(
-                title: "Reverb", accent: Color(hex: 0x3FB8B0), summing: false,
+                title: "Reverb", accent: Color(hex: 0x3FB8B0),
                 inlets: ["in"], outlets: ["out"],
                 knobs: [
                     KnobSpec(name: "rt60", min: 0.2, max: 12, def: 2, log: true, unit: "sec"),
@@ -196,7 +209,7 @@ extension NodeKind {
             // bank. It scrubs, freezes, and reverses with the master clock; it is
             // intentionally not a history-dependent pedal recurrence.
             return NodeSpec(
-                title: "Phaser", accent: Color(hex: 0x72C5FF), summing: false,
+                title: "Phaser", accent: Color(hex: 0x72C5FF),
                 inlets: ["in"], outlets: ["out"],
                 knobs: [
                     KnobSpec(name: "center", min: 40, max: 4000, def: 700, log: true, unit: "Hz"),
@@ -209,7 +222,7 @@ extension NodeKind {
             // Pole UNION (∪) of its modal inputs — the modal twin of Mix's
             // sum. Many modal in → one modal out; no knobs (structural).
             return NodeSpec(
-                title: "Modal ∪", accent: Color(hex: 0x6FE0D0), summing: true,
+                title: "Modal ∪", accent: Color(hex: 0x6FE0D0),
                 inlets: ["in"], outlets: ["out"], knobs: [],
                 modal: true)
         case .scope:
@@ -222,13 +235,13 @@ extension NodeKind {
             // upstream cone, so taps are paid for only while a scope looks).
             // `window` is view state (the trace's time span), not a param.
             return NodeSpec(
-                title: "Scope", accent: Color(hex: 0x7FE08C), summing: false,
+                title: "Scope", accent: Color(hex: 0x7FE08C),
                 inlets: ["ch1", "ch2", "ch3", "ch4"], outlets: [],
                 knobs: [KnobSpec(name: "window", min: 0.002, max: 0.35, def: 0.02, log: true, unit: "s")],
                 monitor: true, gridOverride: (w: 16, h: 12))
         case .out:
             return NodeSpec(
-                title: "Out · dac", accent: Color(hex: 0xFF8A8A), summing: true,
+                title: "Out · dac", accent: Color(hex: 0xFF8A8A),
                 inlets: ["in"], outlets: [], knobs: [],
                 fixed: true)
         }

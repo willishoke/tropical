@@ -204,6 +204,85 @@ def runModalClassAgreement : IO Bool := do
   else
     failGate "modal-class-agreement" s!"servedDrift {servedDrift} · setIssues {setIssues}"
 
+open Tropical.Playground in
+/-- Ordinary module inputs are variadic at the surface but remain explicitly
+    typed in the lowering. Signal ports synthesize an authored-order `.mix`,
+    modal ports synthesize an authored-order `.modalMix`, singleton inputs keep
+    their historical graph, and non-`in` controls remain exclusive. -/
+def runImplicitFanIn : IO Bool := do
+  let empty := Lean.Json.mkObj []
+  let pair := Lean.Json.mkObj
+    [("in", Lean.Json.arr #[.str "a", .str "b"])]
+  let single := Lean.Json.mkObj
+    [("in", Lean.Json.arr #[.str "a"])]
+  let noParams : String → Option Nat := fun _ => none
+
+  let (delayNode, delayExtras) :=
+    buildNode noParams "delayN" "delay" empty empty pair
+  let signalHelperId := "__fanin_signal_delayN_in"
+  let signalNodeOk := match delayNode with
+    | .warpFx input _ => input == signalHelperId
+    | _ => false
+  let signalHelperOk := match delayExtras[0]? with
+    | some helper => helper.id == signalHelperId && match helper.node with
+      | .mix inputs => inputs == #["a", "b"]
+      | _ => false
+    | none => false
+
+  let (phaserNode, phaserExtras) :=
+    buildNode noParams "phaserN" "phaser" empty empty pair
+  let modalHelperId := "__fanin_modal_phaserN_in"
+  let modalNodeOk := match phaserNode with
+    | .modalPhaser input _ _ _ _ _ => input == modalHelperId
+    | _ => false
+  let modalHelperOk := match phaserExtras[0]? with
+    | some helper => helper.id == modalHelperId && match helper.node with
+      | .modalMix inputs => inputs == #["a", "b"]
+      | _ => false
+    | none => false
+
+  let (singleNode, singleExtras) :=
+    buildNode noParams "singleN" "delay" empty empty single
+  let singletonOk := singleExtras.isEmpty && match singleNode with
+    | .warpFx input _ => input == "a"
+    | _ => false
+
+  let implicitKinds :=
+    #["comb", "flange", "sflange", "fm", "delay", "reverse",
+      "reverb", "filter", "phaser", "gauge"]
+  let servedMultiOk := implicitKinds.all fun kind =>
+    match portOf kind "in" with
+    | some spec => spec.multi
+    | none => false
+  let exclusivePorts := #[
+    ("source", "pm"), ("sflange", "mod"), ("resonator", "addr"),
+    ("reverb", "rt60"), ("phaser", "center")]
+  let exclusiveOk := exclusivePorts.all fun (kind, port) =>
+    match portOf kind port with
+    | some spec => !spec.multi
+    | none => false
+
+  let duplicateControl := Lean.Json.mkObj [("nodes", Lean.Json.arr #[
+    Lean.Json.mkObj [("id", .str "a"), ("kind", .str "source")],
+    Lean.Json.mkObj [("id", .str "b"), ("kind", .str "source")],
+    Lean.Json.mkObj [("id", .str "res"), ("kind", .str "resonator")],
+    Lean.Json.mkObj [("id", .str "room"), ("kind", .str "reverb"),
+      ("in", Lean.Json.mkObj [
+        ("in", Lean.Json.arr #[.str "res"]),
+        ("rt60", Lean.Json.arr #[.str "a", .str "b"])])]])]
+  let exclusiveRejected := match checkEdgeTypes (rawsOf duplicateControl) with
+    | .error e => (e.splitOn "accepts one source").length > 1
+    | .ok _ => false
+
+  let ok := signalNodeOk && signalHelperOk && modalNodeOk && modalHelperOk &&
+    singletonOk && servedMultiOk && exclusiveOk && exclusiveRejected
+  IO.println s!"        signal helper={signalNodeOk && signalHelperOk} · modal helper={modalNodeOk && modalHelperOk} · singleton identity={singletonOk}"
+  IO.println s!"        ordinary inlets multi={servedMultiOk} · control/address/modulation ports exclusive={exclusiveOk}/{exclusiveRejected}"
+  if ok then
+    passGate "implicit-fan-in" "ordinary signal/modal inlets synthesize ordered typed fan-in; singleton graphs stay identical; controls, addresses, and modulators remain exclusive"
+  else
+    failGate "implicit-fan-in" s!"signal={signalNodeOk}/{signalHelperOk} modal={modalNodeOk}/{modalHelperOk} singleton={singletonOk} servedMulti={servedMultiOk} exclusive={exclusiveOk}/{exclusiveRejected}"
+
 /-- THE MALFORMED-DOCUMENT REJECTION gate (Findings 1 & 3). A malformed patch is a
     BROKEN document — distinct from a legal-incomplete one (an unwired inlet →
     silence, no error). These malformations must each return a clear `Except.error`
