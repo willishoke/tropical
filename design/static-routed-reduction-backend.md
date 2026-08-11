@@ -1189,11 +1189,17 @@ Also record:
 The cooperative design advances only if the real product fixture, not merely a
 synthetic arithmetic kernel, clears the gate with headroom.
 
-The final N=6, M=32 nominal artifact uses 24,272 of the 24,576-byte publication
-budget. On the canonical M1 Pro, a cached 1,000-block B=512 run records 2.757 ms
-median, 2.827 ms p95, 3.139 ms p99, and 3.507 ms maximum process time, with no
-dispatch failures, starvation, overruns, or non-finite samples. The complete
-GPU-enabled repository suite passes 130/130 gates.
+The current N=6, M=32 addressed product artifact uses 22,704 of the
+24,576-byte publication budget. This includes the Reversible shape in which an
+oscillator drives the resonator address; that graph exposed the previous
+conservative scalar allocation, whose 24,864-byte estimate exceeded the cap
+even though most of those scalars never crossed from lane 0 into a routed
+region. On the canonical M1 Pro, a cached 1,000-block B=512 run records
+2.766 ms median, 3.282 ms p99, and 3.798 ms maximum process time, with no
+dispatch failures, starvation, overruns, or non-finite samples. The f64 JIT
+reference averages 17.919 ms for the same graph and misses the 11.610 ms
+deadline on every measured block. The complete GPU-enabled repository suite
+passes 130/130 gates.
 
 ## 15. Expected performance shape
 

@@ -88,6 +88,7 @@ final class PatchModel: ObservableObject {
     @Published var order: [String] = []   // stable z/render order
     @Published var status = "booting engine…"
     @Published var statusIsError = false
+    private var telemetryOwnsStatus = false
     @Published var audioOn = false
     @Published var velocity: Double = 1
     /// World → view offset for the infinite plane. Lives on the model so
@@ -161,7 +162,7 @@ final class PatchModel: ObservableObject {
         let rows = Dictionary(grouping: nodes.values) { ranks[$0.id] ?? 0 }
         let margin = 2.0 * Grid.unit
         let gap = 2.0 * Grid.unit
-        let rowPitch = 8.0 * Grid.unit   // tallest module (6u) + breathing room
+        let rowPitch = 8.0 * Grid.unit   // tallest ordinary module (7u) + breathing room
         withAnimation(.snappy(duration: 0.35)) {
             for (r, members) in rows {
                 var x = margin
@@ -277,6 +278,13 @@ final class PatchModel: ObservableObject {
     func setStatus(_ text: String, isError: Bool) {
         status = text
         statusIsError = isError
+        telemetryOwnsStatus = false
+    }
+
+    private func setTelemetryStatus(_ text: String, isError: Bool) {
+        status = text
+        statusIsError = isError
+        telemetryOwnsStatus = true
     }
 
     /// The patch you start with, and the one `New Patch` returns to.
@@ -611,17 +619,13 @@ final class PatchModel: ObservableObject {
     }
 
     // ── Live audio-load telemetry ─────────────────────────────────────────
-    // Compile latency is one failure mode; RUNTIME cost is the other, and
-    // it's the one that's silent. A heavy kernel (a modal reverb: ~200 modes
-    // × transcendentals per sample) can blow the ~11.6 ms buffer deadline
-    // (512 frames @ 44.1k), and RtAudio responds to a missed deadline by
-    // emitting a zero buffer → "no sound" with a perfectly healthy compile.
-    // The DAC already counts it (`audio_status`); poll it so the meter reads
-    // "load 130% · ⚠ xruns" instead of leaving you guessing.
-    private static let bufferMs = (512.0 / 44100.0) * 1000   // ≈ 11.61 ms deadline
+    // Compile latency is one failure mode; runtime deadline cost is the
+    // other. Difference the DAC's cumulative callback totals into recent
+    // windows; a lifetime max is useful qualification evidence but a bad UI
+    // meter because one spike otherwise remains at (say) 230% forever.
     private var telemetryTask: Task<Void, Never>?
     private var telemetryInFlight = false
-    private var underrunBase = 0
+    private var audioLoadMeter = AudioLoadMeter()
 
     func stopTelemetry() {
         telemetryTask?.cancel()
@@ -632,8 +636,10 @@ final class PatchModel: ObservableObject {
         stopTelemetry()
         telemetryTask = Task { [weak self] in
             if let self {
-                let st = try? await self.engine.call("audio_status")
-                self.underrunBase = Int(st?["stats"]?["underrunCount"]?.doubleValue ?? 0)
+                if let status = try? await self.engine.call("audio_status"),
+                   let sample = AudioTelemetrySample(status: status) {
+                    self.audioLoadMeter.reset(to: sample)
+                }
             }
             while !Task.isCancelled {
                 try? await Task.sleep(for: .milliseconds(750))
@@ -740,20 +746,29 @@ final class PatchModel: ObservableObject {
     }
 
     private func pollTelemetry() async {
-        // Single-in-flight: the control thread is shared with compiles and
-        // knobs, so if a poll is stuck behind a long op we must NOT keep
-        // enqueuing more — that turns a slow compile into a pile-up.
-        if !audioOn || pushInFlight || telemetryInFlight || statusIsError { return }
+        // Single-in-flight: if a poll is delayed we must not enqueue another.
+        // Keep polling after a warning so load can recover; `statusIsError`
+        // used to freeze the first over-budget reading permanently.
+        if !audioOn || pushInFlight || telemetryInFlight ||
+            (statusIsError && !telemetryOwnsStatus) { return }
         telemetryInFlight = true
         defer { telemetryInFlight = false }
-        guard let st = try? await engine.call("audio_status"),
-              let stats = st["stats"], stats != .null,
-              let maxMs = stats["maxCallbackMs"]?.doubleValue else { return }
-        let pct = Int((maxMs / Self.bufferMs * 100).rounded())
-        let xruns = max(0, Int(stats["underrunCount"]?.doubleValue ?? 0) - underrunBase)
-        let over = pct > 90 || xruns > 0
-        let xrunText = xruns > 0 ? " · ⚠ \(xruns) xrun\(xruns > 1 ? "s" : "") — dropout" : ""
-        setStatus("playing · load \(pct)%\(xrunText)", isError: over)
+        guard let status = try? await engine.call("audio_status"),
+              let sample = AudioTelemetrySample(status: status),
+              let reading = audioLoadMeter.update(sample) else { return }
+        let hasDeadlineProblem = reading.xruns > 0 || reading.deadlineMisses > 0
+        let issueText: String
+        if reading.xruns > 0 {
+            issueText = " · ⚠ \(reading.xruns) xrun\(reading.xruns == 1 ? "" : "s") — dropout"
+        } else if reading.deadlineMisses > 0 {
+            issueText = " · ⚠ \(reading.deadlineMisses) deadline miss\(reading.deadlineMisses == 1 ? "" : "es")"
+        } else {
+            issueText = ""
+        }
+        setTelemetryStatus(
+            "\(reading.backend) · load \(reading.percent)%\(issueText)",
+            isError: reading.percent > 90 || hasDeadlineProblem
+        )
     }
 }
 

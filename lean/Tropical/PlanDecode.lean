@@ -118,14 +118,14 @@ private def instanceOfWire (j : JsonV) : Except String InstanceFunction := do
   let regOff ← reqNat j "register_offset"
   let arrOff ← reqNat j "array_slot_offset"
   let regCount ← reqNat j "register_count"
-  let children ← match hf : j.getField? "children" with
+  let children ← match _hf : j.getField? "children" with
     | some (.arr items) =>
       items.attach.mapM fun ⟨c, _⟩ => instanceOfWire c
     | _ => pure #[]
   pure (.mk name inm preamble instrs preInput regOff arrOff regCount children)
 termination_by sizeOf j
 decreasing_by
-  have := Tropical.Parse.JsonV.sizeOf_lt_of_getField hf
+  have := Tropical.Parse.JsonV.sizeOf_lt_of_getField _hf
   have := Array.sizeOf_lt_of_mem ‹_ ∈ items›
   simp_all <;> omega
 

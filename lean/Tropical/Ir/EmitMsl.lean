@@ -826,12 +826,12 @@ def emitInstr (sizes : Array Nat) (instr : NInstr) : M Unit := do
 
 def emitKernelBlock (sizes : Array Nat) (inst : InstanceFunction) : M Unit := do
   for i in inst.preambleInstructions do emitInstr sizes i
-  for h : child in inst.children do
+  for _h : child in inst.children do
     for i in child.preInputInstructions do emitInstr sizes i
     emitKernelBlock sizes child
   for i in inst.instructions do emitInstr sizes i
 termination_by sizeOf inst
-decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children h
+decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children _h
 
 def emitSinks (sinks : Array SinkSpec) : M Unit := do
   for sink in sinks do
@@ -912,11 +912,11 @@ private def cooperativeHeader (withColumns : Bool) (routeConstants : String)
 
 private def linearInstrs (f : InstanceFunction) : Array NInstr := Id.run do
   let mut out := f.preambleInstructions
-  for h : child in f.children do
+  for _h : child in f.children do
     out := out ++ child.preInputInstructions ++ linearInstrs child
   return out ++ f.instructions
 termination_by sizeOf f
-decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children h
+decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children _h
 
 private def planInstrs (p : FlatPlan) : Array NInstr :=
   p.instanceFunctions.foldl (fun out f => out ++ linearInstrs f) #[]
@@ -972,10 +972,11 @@ def emitKernel (plan : FlatPlan) : Except String String := do
     coeffOffsets := coeffOffsets.insert s colOff
     colOff := colOff + max sz 1
   -- Cooperative scalar phases may be split by several all-lane regions.
-  -- Predeclare every outside-region scalar destination in threadgroup storage;
-  -- this is a conservative capture/liveness closure, while mapped-body locals
-  -- retain private names.  It executes the scalar graph once (lane 0) and
-  -- makes every value that can cross a region boundary available to all lanes.
+  -- Predeclare outside-region scalar destinations at function scope so lane 0
+  -- retains them across reopened scopes. Only values actually read by an
+  -- all-lane region need threadgroup storage; the rest stay thread-private.
+  -- Mapped-body locals retain their distinct private names.
+  let sharedScalars := plan.metalSharedScalarKeys
   let (scalarDecls, predeclared) := Id.run do
     let mut lines : Array String := #[]
     let mut names : Std.HashSet String := {}
@@ -984,13 +985,18 @@ def emitKernel (plan : FlatPlan) : Except String String := do
       if instr.tag == "RoutedSumBegin" then depth := depth + 1
       if depth == 0 then
         let candidate := match instr.dst with
-          | .temp slot => some (tempVarName slot instr.resultType)
-          | .moduleSlot slot => some (slotVarName slot instr.resultType)
+          | .temp slot => some
+              (tempVarName slot instr.resultType,
+                s!"temp:{slot}:{repr instr.resultType}")
+          | .moduleSlot slot => some
+              (slotVarName slot instr.resultType,
+                s!"slot:{slot}:{repr instr.resultType}")
           | _ => none
-        if let some name := candidate then
+        if let some (name, key) := candidate then
           unless names.contains name do
             names := names.insert name
-            lines := lines.push s!"threadgroup {mslTy instr.resultType} {name};"
+            let qualifier := if sharedScalars.contains key then "threadgroup " else ""
+            lines := lines.push s!"{qualifier}{mslTy instr.resultType} {name};"
       if instr.tag == "RoutedSumEnd" then depth := depth - 1
     return (lines, names)
   let maxRecords := routedBegins.foldl

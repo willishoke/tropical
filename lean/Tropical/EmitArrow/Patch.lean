@@ -253,7 +253,7 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
       else match rankOf inId with
         | none => throw s!"lowerModal: node '{inId}' not found"
         | some ri =>
-          if h : ri < r then lowerModal g rankOf inId ri
+          if _h : ri < r then lowerModal g rankOf inId ri
           else throw (cycleGuardMsg id inId)
     -- The live count does NOT survive composition (the composed modes are no
     -- longer a prefix of the source's) — realize at full capacity (graceful-
@@ -276,7 +276,7 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
       else match rankOf inId with
         | none => throw s!"lowerModal: node '{inId}' not found"
         | some ri =>
-          if h : ri < r then lowerModal g rankOf inId ri
+          if _h : ri < r then lowerModal g rankOf inId ri
           else throw (cycleGuardMsg id inId)
     let stage : ModalStage := .ordinaryRoom {
       kernel := .controlled rt60 (fun value => clampSigmas (build value))
@@ -304,7 +304,7 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
       else match rankOf inId with
         | none => throw s!"lowerModal: node '{inId}' not found"
         | some ri =>
-          if h : ri < r then lowerModal g rankOf inId ri
+          if _h : ri < r then lowerModal g rankOf inId ri
           else throw (cycleGuardMsg id inId)
     let stage : ModalStage := .gauge (ModalControlRef.constant gExpr)
     return lowered.map fun branch =>
@@ -315,7 +315,7 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
       else match rankOf inId with
         | none => throw s!"lowerModal: node '{inId}' not found"
         | some ri =>
-          if h : ri < r then lowerModal g rankOf inId ri
+          if _h : ri < r then lowerModal g rankOf inId ri
           else throw (cycleGuardMsg id inId)
     let stage : ModalStage := .gauge control
     return lowered.map fun branch =>
@@ -326,7 +326,7 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
       else match rankOf i with
         | none => throw s!"lowerModal: node '{i}' not found"
         | some ri =>
-          if h : ri < r then lowerModal g rankOf i ri
+          if _h : ri < r then lowerModal g rankOf i ri
           else throw (cycleGuardMsg id i)
     let parts := forests.foldl (fun acc forest => acc ++ forest) #[]
     if parts.isEmpty then
@@ -338,7 +338,7 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
       .ok parts
   | _ => .error s!"a modal inlet (reverb/modal-mix) needs a modal SOURCE — resonator or modal-mix — but '{id}' is a signal node; a Sig has no poles to compose"
 termination_by r
-decreasing_by all_goals exact h
+decreasing_by all_goals assumption
 
 /-- Resolve one room's controls in `ModalStage.controls` order. -/
 private def resolveRoomStage (room : OrdinaryRoomStage) (responseClock : Sig)
@@ -508,7 +508,7 @@ def lowerInputGated (g : PatchGraph) (rankOf : String → Option Nat)
   match rankOf i with
   | none => throw s!"lower: node '{i}' not found"
   | some ri =>
-    if h : ri < r then lowerInput g rankOf i ri
+    if _h : ri < r then lowerInput g rankOf i ri
     else throw (cycleGuardMsg srcId i)
 termination_by (r, 0)
 /-- Lower one Sig node to its arrow term, recursing UP its input wires via
