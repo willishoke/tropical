@@ -22,6 +22,10 @@ control surface. The server carries a control/data plane split: `set_param`,
 C++ and never queue behind the Lean control thread — that is what keeps
 knob writes and the Scope module's traces live through a long compile.
 
+Reversible selects the Metal audio backend by default; the f64 JIT remains
+dual-loaded for scopes and reference rendering. Set `TROPICAL_BACKEND=jit`
+when launching `run-dev` to opt into the CPU reference path for diagnosis.
+
 Engine resolution order:
 
 1. `Reversible.app/Contents/Resources/Tropical/frontend`

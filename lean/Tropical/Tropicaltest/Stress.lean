@@ -165,7 +165,6 @@ def runModulatedClock (arena : Arena)
   let n : Nat := 1024
   let lo : Nat := 8
   let depth : Float := 3.0
-  let twoPi : Float := 6.283185307179586
   let two32 : Float := 4294967296.0
   let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat   -- scales OUTPUTS, not the mid-graph warp
   match buildAndFinish (Tropical.EmitArrow.buildTapCarrier "BareFc"
@@ -225,7 +224,6 @@ def runPmPm (arena : Arena)
   let lo : Nat := 8
   let d1 : Float := 3.0
   let d2 : Float := 3.0
-  let twoPi : Float := 6.283185307179586
   let two32 : Float := 4294967296.0
   let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
   match buildAndFinish (Tropical.EmitArrow.buildPmPmCarrier "PmPm" 2000 200 700 3 3 arena resolved),
@@ -276,7 +274,6 @@ def runNegativeClock (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : IO Bool := do
   let n : Nat := 1024
   let delta : Nat := 20
-  let twoPi : Float := 6.283185307179586
   let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
   let delayTap : Tropical.EmitArrow.Tap :=
     { name := "d"
@@ -332,7 +329,6 @@ def runMorphOscDifferential (arena : Arena)
   let n : Nat := 1024
   let lo : Nat := 4
   let freqHz : Int := 2000
-  let twoPi : Float := 6.283185307179586
   let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
   -- the standard rep: the SAME crossfade arithmetic the engine emits, on the
   -- SAME integer phasor + Horner Sin (`(1−m)·(2·phase−1) + m·Sin(2π·phase)`).

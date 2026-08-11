@@ -142,7 +142,7 @@ def runBanksNestedMsl (arena : Arena)
     must RISE to a peak at d≈1/σ before decaying — the τ·e signature a simple pole
     (monotone decay) cannot produce. -/
 def runModalDegree (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let modes : Array Tropical.EmitArrow.ModalMode := #[
     { sigma := Tropical.EmitArrow.lit 25, omega := Tropical.EmitArrow.lit 0,
       cre := Tropical.EmitArrow.lit 1, deg := 1 }]
@@ -194,7 +194,7 @@ def runModalDegree (arena : Arena)
     at ANY low bits, so every downstream op sees identical bytes. Energy floors
     keep silent agreement from passing. -/
 def runLongTauModal (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let modes : Array Tropical.EmitArrow.ModalMode := #[
     Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 220) (Tropical.EmitArrow.lit 30 1) (Tropical.EmitArrow.lit 6 1),
     Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 330) (Tropical.EmitArrow.lit 40 1) (Tropical.EmitArrow.lit 4 1),
@@ -250,7 +250,7 @@ def runLongTauModal (arena : Arena)
     velocity, impossible on a streaming delay line. The warp threads through the
     modal `arrUn … (.clk c)` via the same `.warp` a master-clock scrub uses. -/
 def runModalReverse (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let modes : Array Tropical.EmitArrow.ModalMode := #[
     Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 220) (Tropical.EmitArrow.lit 30 1) (Tropical.EmitArrow.lit 6 1),
     Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 330) (Tropical.EmitArrow.lit 40 1) (Tropical.EmitArrow.lit 4 1)]
@@ -289,8 +289,8 @@ open Tropical.EmitArrow
     sign, denominator, or a missing ringing term breaks one). `Σ A = 0` also means
     the composed tail starts continuously — the reverb has no onset click for free.
     Pure complex ±×÷; the emit path is checked separately by `modal-reverb`. -/
-def runResidueMoments (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+def runResidueMoments (_arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let tp := 6.283185307179586
   let voice : Array (Cplx × Cplx) := #[
     (⟨-2.0, tp * 220.0⟩, ⟨1.0, 0.0⟩),
@@ -318,7 +318,7 @@ def runResidueMoments (arena : Arena)
     post-strike sample is ≈0 and grows (no onset click), unlike an authored bank
     whose partials all start at full amplitude. -/
 def runModalReverb (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let tp := 6.283185307179586
   let voice : Array (Cplx × Cplx) := #[
     (⟨-2.0, tp * 220.0⟩, ⟨1.0, 0.0⟩),
@@ -366,7 +366,7 @@ def runModalReverb (arena : Arena)
     AND carries real energy (a substantial fraction of the forward bank's), i.e. it is
     audible, not a collapsed transient — the property the rotation version lacked. -/
 def runModalDirection (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let modes : Array ModalMode := #[
     ModalMode.hz (lit 220) (lit 30 1) (lit 6 1),
     ModalMode.hz (lit 330) (lit 40 1) (lit 4 1)]
@@ -418,7 +418,7 @@ def runModalDirection (arena : Arena)
     untouched by construction (the oscillator reads the plain `dSec`); the LFO rides
     the same clock leaf as the bank, so a master scrub reverses it coherently. -/
 def runModalSway (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let modes : Array ModalMode := #[
     ModalMode.hz (lit 220) (lit 30 1) (lit 6 1),
     ModalMode.hz (lit 330) (lit 40 1) (lit 4 1)]
@@ -462,8 +462,8 @@ def runModalSway (arena : Arena)
     degree-aware moments must STILL reproduce the convolution jet (the double pole
     contributes `A·k·μ^{k−1}`), so the exact-coincidence limit is handled, not
     dodged. -/
-def runResidueDegenerate (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+def runResidueDegenerate (_arena : Arena)
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let tp := 6.283185307179586
   let voice : Array (Cplx × Cplx) := #[
     (⟨-3.0, tp * 260.0⟩, ⟨1.0, 0.0⟩)]        -- λ sits exactly on reverb pole #2
@@ -487,7 +487,7 @@ def runResidueDegenerate (arena : Arena)
     reverb built both ways renders equal (differing only by litF input-vs-output
     rounding). This is what makes modal params live without changing the math. -/
 def runResidueSymbolic (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let tp := 6.283185307179586
   let voiceF : Array (Cplx × Cplx) := #[
     (⟨-2.0, tp * 220.0⟩, ⟨1.0, 0.0⟩),
@@ -539,7 +539,7 @@ def runResidueSymbolic (arena : Arena)
     transcendentals — which is in turn what lets a reverb keep its source's
     spectrum (and live pitch knob) instead of discarding them. -/
 def runResidueCollected (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let tp := 6.283185307179586
   let toMode := fun (pa : Cplx × Cplx) =>
     ({ sigma := litF (-pa.1.re), omega := litF pa.1.im,
@@ -1340,7 +1340,7 @@ open Tropical.EmitArrow in
     signal — and, read through a reversing master clock, play the tail backward
     bit-for-bit. This is the whole seam end to end: a patch graph, not a builder. -/
 def runModalPatch (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let res : Array ModalMode := #[
     ModalMode.hz (lit 220) (lit 30 1) (lit 6 1),
     ModalMode.hz (lit 440) (lit 45 1) (lit 3 1),
@@ -1397,7 +1397,7 @@ open Tropical.EmitArrow in
     independently realized branches. Different anchors remain independent and
     enter that sum only at their own causal onset. -/
 def runModalForestAnchors (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let aModes : Array ModalMode := #[
     ModalMode.hz (lit 220) (lit 4) (lit 7 1),
     ModalMode.hz (lit 440) (lit 6) (lit 3 1)]
@@ -1471,7 +1471,7 @@ open Tropical.EmitArrow in
     reading rather than merely comparing two compiler plans. Finally, removing
     each island is silent until that island's anchor and audible afterwards. -/
 def runModalForestTimedIslands (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let islandCount : Nat := 16
   let frameCount : Nat := 2048
   let anchors := (Array.range islandCount).map fun i => 60 + 100 * i
@@ -1653,6 +1653,17 @@ def runModalUniverseHistory (arena : Arena)
     "{\"id\":\"room_a\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.6},\"in\":{\"in\":[\"res\"]}}," ++
     "{\"id\":\"room_b\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.9},\"in\":{\"in\":[\"room_a\"]}}," ++
     "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"room_b\"]}}],\"out\":\"out\"}"
+  -- The product UI path: an oscillator supplies the resonator's absolute
+  -- address before the same two-room terminal.  Its extra cross-region clock
+  -- captures used to push Metal scratch from 24,272 to 24,864 bytes, just over
+  -- the 24,576-byte publication ceiling, even though the unaddressed fixture
+  -- passed.
+  let addressedSrc := "{\"nodes\":[" ++
+    "{\"id\":\"osc\",\"kind\":\"source\",\"params\":{\"freq\":0.63,\"morph\":0}}," ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":56.78,\"decay\":15.48},\"in\":{\"addr\":[\"osc\"]}}," ++
+    "{\"id\":\"room_a\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.21,\"dir\":1},\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"room_b\",\"kind\":\"reverb\",\"params\":{\"rt60\":2},\"in\":{\"in\":[\"room_a\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"room_b\"]}}],\"out\":\"out\"}"
   let holdSrc := "{\"nodes\":[" ++
     "{\"id\":\"hold\",\"kind\":\"knob\",\"params\":{\"value\":0.25}}," ++
     "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4},\"in\":{\"addr\":[\"hold\"]}}," ++
@@ -1677,6 +1688,11 @@ def runModalUniverseHistory (arena : Arena)
           return ← failGate "modal-universe-history"
             s!"one-room footprint compile: {firstLine error}"
       | .ok fixture => pure fixture
+    let addressed ← match compile addressedSrc with
+      | .error error =>
+          return ← failGate "modal-universe-history"
+            s!"addressed two-room compile: {firstLine error}"
+      | .ok fixture => pure fixture
     let (oneRoomFootprint, twoRoomFootprint) ←
       match modalUniverseSplitFootprint baseline,
           modalUniverseSplitFootprint compiled with
@@ -1695,7 +1711,14 @@ def runModalUniverseHistory (arena : Arena)
           return ← failGate "modal-universe-history"
             s!"scratch split: {firstLine error}"
       | .ok split => pure split
+    let addressedSplit ← match Tropical.Ir.Stage0.hoistTyped
+        addressed.plan addressed.stageBlocks with
+      | .error error =>
+          return ← failGate "modal-universe-history"
+            s!"addressed scratch split: {firstLine error}"
+      | .ok split => pure split
     let scratch := split.audio.metalThreadgroupScratchBytes
+    let addressedScratch := addressedSplit.audio.metalThreadgroupScratchBytes
     let routed := modalUniverseRoutedBegins split.audio
     let sourceItems := routed.foldl (fun total begin =>
       if begin.routedOutputCount == 184 &&
@@ -1718,10 +1741,10 @@ def runModalUniverseHistory (arena : Arena)
     let factoredShape := sourceItems == 192 && differenceItems == 496 &&
       physicalItems == 528 && reciprocalCount == 1792 &&
       declaredStats.totalReciprocals == 1792 && confluenceRows.size ≤ 1
-    let scratchOk := scratch ≤ 24576
+    let scratchOk := scratch ≤ 24576 && addressedScratch ≤ 24576
     IO.println s!"        split compile footprint: one-room={oneRoomFootprint} two-room={twoRoomFootprint} compact={compact}"
     IO.println s!"        routed terminal: source={sourceItems}×4 difference={differenceItems} physical={physicalItems} total reciprocals={reciprocalCount} confluence rows={confluenceItems}"
-    IO.println s!"        two-room Metal audio scratch: {scratch}/24576 bytes (75% M1 Pro cap)"
+    IO.println s!"        two-room Metal audio scratch: base={scratch}, addressed={addressedScratch}/24576 bytes (75% M1 Pro cap)"
     if !compact || !factoredShape || !scratchOk then
       return ← failGate "modal-universe-history"
         "two-room modal plan misses the factored schedule, compile envelope, or scratch cap"
@@ -2081,7 +2104,7 @@ open Tropical.EmitArrow in
     FREQUENCY peak ‖H‖·scale = 1 is level-invariant (unity-peak); (3) g=½ the √Q
     trim (ratio = ‖H‖^{−½}). -/
 def runGaugeAdapter (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let f1 := 300.0; let f2 := 520.0; let a1 := 1.0; let a2 := 0.7
   let tp := 6.283185307179586
   let ws := #[tp * f1, tp * f2]; let amps := #[a1, a2]
@@ -2165,7 +2188,7 @@ open Tropical.EmitArrow in
     error (lgamma grows near the negative reals). This is the primitive under WS-LP's
     live Γ★ bridge; without it the crossing stays baked-pole. -/
 def runLgammaEmit (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
   let step := 10.0 / 2048.0
   let reRamp := sub (mul (toFloatE (rshift clockLit (lit 32))) (litF step)) (lit 5)
@@ -2208,7 +2231,7 @@ open Tropical.EmitArrow in
     lands the SAME value to within one quantization LSB — not a 2× divergence, and
     wasm≡jit (both f64 ⇒ same k) is bit-identical regardless. -/
 def runKInvariance (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let amps := #[10.0, 30.0, 40.0, 60.0, 70.0, 130.0]   -- k = 0,0,1,1,2,3 (crosses 32/64/128)
   let peakOf := fun (amp : Float) => do
     let modes := #[ModalMode.hz (litF 300.0) (litF 5.0) (litF amp)]

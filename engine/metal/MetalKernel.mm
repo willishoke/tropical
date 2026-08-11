@@ -307,7 +307,9 @@ MetalKernelPtr create(const std::string & msl_source,
       }
       if (actual_scratch > threadgroup_scratch_bytes)
       {
-        err = "MetalKernel: emitted threadgroup storage exceeds declared scratch bytes";
+        err = "MetalKernel: emitted threadgroup storage exceeds declared scratch bytes"
+          " (actual " + std::to_string(actual_scratch)
+          + ", declared " + std::to_string(threadgroup_scratch_bytes) + ")";
         return nullptr;
       }
       if (threadgroup_scratch_bytes > qualified_limit

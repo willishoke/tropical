@@ -96,12 +96,12 @@ deriving Inhabited
     Public: the stage differential linearizes plans the same way. -/
 def collectBlocks (f : InstanceFunction) : Array (Array NInstr) := Id.run do
   let mut out := #[f.preambleInstructions]
-  for h : child in f.children do
+  for _h : child in f.children do
     out := out.push child.preInputInstructions
     out := out ++ collectBlocks child
   return out.push f.instructions
 termination_by sizeOf f
-decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children h
+decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children _h
 
 /-- Reassemble an instance function from rewritten blocks, consuming them
     in the same order `collectBlocks` produced. Returns the rebuilt
@@ -111,7 +111,7 @@ private def rebuildFn (f : InstanceFunction) (blocks : Array (Array NInstr))
   let preamble := blocks[start]!
   let mut i := start + 1
   let mut children : Array InstanceFunction := #[]
-  for h : child in f.children do
+  for _h : child in f.children do
     let preInput := blocks[i]!
     let (child', i') := rebuildFn child blocks (i + 1)
     children := children.push (child'.withPreInput preInput)
@@ -120,7 +120,7 @@ private def rebuildFn (f : InstanceFunction) (blocks : Array (Array NInstr))
   return (.mk f.name f.instanceName preamble body f.preInputInstructions
     f.registerOffset f.arraySlotOffset f.registerCount children, i + 1)
 termination_by sizeOf f
-decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children h
+decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children _h
 
 -- ─────────────────────────────────────────────────────────────
 -- Analysis — one forward pass in emit order

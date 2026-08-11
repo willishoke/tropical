@@ -421,9 +421,9 @@ def partitionKernel (instancePath : String) (prog : CoreProgram)
     -- the recursion below stays inside the for-loop (see the sizeOf
     -- workhorse next to `registryGet?`).
     let declTypeS : {q : CoreProgram // sizeOf q < sizeOf prog} ←
-      match hr : prog.registryGet? typeKey with
+      match _hr : prog.registryGet? typeKey with
       | some c =>
-        pure (⟨c, CoreProgram.sizeOf_lt_of_registryGet? hr⟩ :
+        pure (⟨c, CoreProgram.sizeOf_lt_of_registryGet? _hr⟩ :
           {q : CoreProgram // sizeOf q < sizeOf prog})
       | none =>
         throw s!"partitionKernel: instance '{childPath}' typeKey '{typeKey}' missing from registry"
@@ -631,14 +631,14 @@ private def preallocOutputs (s : SessionAlloc) (path : String)
   let mut s ← allocateOutputSlots s path prog
   for d in prog.instances do
     if let some (childName, typeKey) := instParts d then
-      match hr : prog.registryGet? typeKey with
+      match _hr : prog.registryGet? typeKey with
       | none =>
         throw s!"compileSession: instance '{path}.{childName}' typeKey '{typeKey}' missing from registry"
       | some childType =>
         s ← preallocOutputs s (joinInstancePath path childName) childType
   return s
 termination_by sizeOf prog
-decreasing_by exact CoreProgram.sizeOf_lt_of_registryGet? hr
+decreasing_by exact CoreProgram.sizeOf_lt_of_registryGet? _hr
 
 /-- `preallocateInputsRecursive`: runs AFTER all outputs so the alias
     check can see every producer's meta. -/
@@ -647,14 +647,14 @@ private def preallocInputs (s : SessionAlloc) (wires : Array Tropical.Wire)
   let mut s ← allocateInputSlots s wires path prog
   for d in prog.instances do
     if let some (childName, typeKey) := instParts d then
-      match hr : prog.registryGet? typeKey with
+      match _hr : prog.registryGet? typeKey with
       | none =>
         throw s!"compileSession: instance '{path}.{childName}' typeKey '{typeKey}' missing from registry"
       | some childType =>
         s ← preallocInputs s wires (joinInstancePath path childName) childType
   return s
 termination_by sizeOf prog
-decreasing_by exact CoreProgram.sizeOf_lt_of_registryGet? hr
+decreasing_by exact CoreProgram.sizeOf_lt_of_registryGet? _hr
 
 /-- The session → `tropical_plan_6` lowering: two-phase slot
     pre-allocation, accumulator seeding from the session I/O array

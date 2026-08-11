@@ -74,13 +74,21 @@ def handleStopAudio (env : Env) : EngineM Json := do
     isRunningJson dac
 
 def handleAudioStatus (env : Env) : EngineM Json := do
+  let backend := if env.metalBackend then "metal" else "jit"
   match ← env.dac.get with
-  | none => pure <| Json.mkObj [("is_running", Json.bool false)]
+  | none => pure <| Json.mkObj [
+      ("is_running", Json.bool false),
+      ("backend", Json.str backend)]
   | some dac =>
     let stats ← dac.stats
+    let sampleRate ← env.runtime.sampleRate
+    let bufferFrames ← dac.bufferFrames
     pure <| Json.mkObj [
       ("is_running", Json.bool (← dac.isRunning)),
       ("is_reconnecting", Json.bool (← dac.isReconnecting)),
+      ("backend", Json.str backend),
+      ("sampleRate", toJson sampleRate),
+      ("bufferFrames", toJson bufferFrames.toNat),
       ("stats", Json.mkObj [
         ("callbackCount", toJson stats.callbackCount.toNat),
         ("avgCallbackMs", toJson stats.avgCallbackMs),

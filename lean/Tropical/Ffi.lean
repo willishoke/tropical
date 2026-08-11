@@ -195,6 +195,9 @@ private opaque dacStatUnderruns (dac : @& DacHandle) : IO UInt64
 @[extern "shim_dac_stat_overruns"]
 private opaque dacStatOverruns (dac : @& DacHandle) : IO UInt64
 
+@[extern "shim_dac_buffer_frames"]
+private opaque dacBufferFrames (dac : @& DacHandle) : IO UInt32
+
 /-- A DAC bound to the runtime it reads — the `runtime` field keeps the
     Lean runtime object (and so the C handle) alive for the DAC's
     lifetime. -/
@@ -219,6 +222,7 @@ def stop (d : Dac) : IO Unit := dacStop d.handle
 def isRunning (d : Dac) : IO Bool := dacIsRunning d.handle
 def isReconnecting (d : Dac) : IO Bool := dacIsReconnecting d.handle
 def switchDevice (d : Dac) (deviceId : UInt32) : IO Bool := dacSwitchDevice d.handle deviceId
+def bufferFrames (d : Dac) : IO UInt32 := dacBufferFrames d.handle
 
 def stats (d : Dac) : IO DacStats := do
   pure {

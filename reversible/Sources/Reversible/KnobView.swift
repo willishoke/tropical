@@ -27,19 +27,17 @@ struct KnobView: View {
 
     var body: some View {
         VStack(spacing: 2) {
+            Text(truthBadge.label)
+                .font(.system(size: 7, weight: .semibold, design: .monospaced))
+                .foregroundStyle(truthBadge.color)
+                .padding(.horizontal, 3).padding(.vertical, 1)
+                .background(
+                    truthBadge.color.opacity(0.16),
+                    in: Capsule()
+                )
+                .fixedSize()
+                .help(truthBadge.help)
             dial
-                .overlay(alignment: .bottomTrailing) {
-                    Text(truthBadge.label)
-                        .font(.system(size: 7, weight: .semibold, design: .monospaced))
-                        .foregroundStyle(truthBadge.color)
-                        .padding(.horizontal, 3).padding(.vertical, 1)
-                        .background(
-                            truthBadge.color.opacity(0.16),
-                            in: Capsule()
-                        )
-                        .offset(x: 7, y: 4)
-                        .help(truthBadge.help)
-                }
                 .contentShape(Circle())
                 .gesture(
                     DragGesture(minimumDistance: 0)
@@ -54,8 +52,15 @@ struct KnobView: View {
                             model.setKnob(node, knob, value)
                         }
                 )
-            Text(knob.name).font(Theme.monoTiny).foregroundStyle(Theme.muted)
-            Text(knob.format(value)).font(Theme.monoTiny).foregroundStyle(Theme.text)
+            Text(knob.name)
+                .font(Theme.monoTiny)
+                .foregroundStyle(Theme.muted)
+                .lineLimit(1)
+            Text(knob.format(value))
+                .font(Theme.monoTiny)
+                .foregroundStyle(Theme.text)
+                .lineLimit(1)
+                .minimumScaleFactor(0.8)
         }
         .frame(width: 54)
     }

@@ -38,11 +38,13 @@ struct NodeSpec {
 
     /// Module footprint in grid units (VCV-style: every module has a defined
     /// width and height on the grid). Derived from content: 54px per knob +
-    /// chrome for width; title + knob block + jacks for height.
+    /// chrome for width; a two-line identity header, knob block, and jacks for
+    /// height. Six units is the minimum that can show title, truth, and id
+    /// without SwiftUI compressing each label into an ellipsis.
     var gridSize: (w: Int, h: Int) {
         if let o = gridOverride { return o }
-        let w = max(4, Int(ceil((Double(knobs.count) * 54 + Double(max(0, knobs.count - 1)) * 8 + 18) / Grid.unit)))
-        let h = knobs.isEmpty ? 3 : 6
+        let w = max(6, Int(ceil((Double(knobs.count) * 54 + Double(max(0, knobs.count - 1)) * 8 + 18) / Grid.unit)))
+        let h = knobs.isEmpty ? 4 : 7
         return (w, h)
     }
 }

@@ -64,6 +64,7 @@ struct PatchToolbar: ToolbarContent {
                 .foregroundStyle(model.statusIsError ? Theme.err : Theme.muted)
                 .lineLimit(1)
                 .frame(minWidth: 180, alignment: .trailing)
+                .help(model.status)
         }
     }
 

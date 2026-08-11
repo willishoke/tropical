@@ -60,7 +60,7 @@ private def mkOpNode (op : String) (args : Array Json) : Json :=
     their parent, so the walk descends `id.idx`. -/
 def literalDefault (ea : ExprArena) (hw : ea.wf = true) (portName : String)
     (id : ExprId) : Except String Json :=
-  match hd : ea.deref id with
+  match _hd : ea.deref id with
   | none => .error s!"Compiled: input '{portName}' default references a dangling ExprId {id.idx}"
   | some node => match node with
     | .num n => .ok (Json.num n)

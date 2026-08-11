@@ -144,7 +144,7 @@ def runBootstrapSin (arena : Arena)
     second copy of the same polynomial), so a transcribed-coefficient typo shows
     up as error ≫ 1e-5. This is the envelope's `bootstrap-sin`. -/
 def runBootstrapExp (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   match buildAndFinish (.ok (Tropical.EmitArrow.buildExpProbe "exp_probe" arena)) with
   | .ok p =>
     match ← renderPlanSamples p 2048 with
@@ -178,7 +178,7 @@ def runBootstrapExp (arena : Arena)
     x→1 (log→0) region is not a false relative-error blowup. `logSig`'s
     `bootstrap-exp`. -/
 def runBootstrapLog (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   match buildAndFinish (.ok (Tropical.EmitArrow.buildLogProbe "log_probe" arena)) with
   | .ok p =>
     match ← renderPlanSamples p 2048 with
@@ -209,7 +209,7 @@ def runBootstrapLog (arena : Arena)
     oracle (the known angle), so a bad octant fold or quadrant `select` shows as error
     ≫ 1e-5. Absolute error on the angle scale. `logSig`'s `bootstrap-exp`, for atan2. -/
 def runBootstrapAtan2 (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   match buildAndFinish (.ok (Tropical.EmitArrow.buildAtan2Probe "atan2_probe" arena)) with
   | .ok p =>
     match ← renderPlanSamples p 2048 with
@@ -242,7 +242,7 @@ open Tropical.EmitArrow in
     surviving clock read → decline); (4) `settle (const) = some const`. This is what
     lets the gauge norm be Metal-safe by construction, not by precondition. -/
 def runSettle (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   -- a synthetic glide v0=2 → v1=10, glideExpr's shape (smoothstep of a clamped ramp)
   let dur := mul (lit 2 2) .sampleRate
   let s := clampE (div (sub (toFloatE .sampleIndex) (lit 0)) dur) (lit 0) (lit 1)
@@ -285,7 +285,7 @@ def runSettle (arena : Arena)
     or a mis-shifted Horner step shows up directly). Budget: coefficient
     rounding + 9 floor-shifts ≈ 1e-8 abs on the sin scale (−160 dB). -/
 def runFixedSinAccuracy (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   match buildAndFinish (.ok (Tropical.EmitArrow.buildExprCarrier "fixedsin_acc"
       (Tropical.EmitArrow.fixedOutQ 30
         (Tropical.EmitArrow.fixedSinCycSig
@@ -321,7 +321,7 @@ def runFixedSinAccuracy (arena : Arena)
     identity: its phase argument grew without bound.) K deliberately has low
     bits set so nothing is accidentally exact. -/
 def runFixedSinLongTau (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let K : Int := 1073741824 + 12345
   let Kq : Int := K * 4294967296
   let offset : Int := (21426140 * K) % 4294967296
@@ -364,7 +364,7 @@ def runFixedSinLongTau (arena : Arena)
     Bit-exact ⇒ the arrow layer realises the bank without corruption; silent+
     decaying ⇒ it is a real closed-form resonator bank, random-access by clk. -/
 def runModalBank (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+    (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let modes : Array Tropical.EmitArrow.ModalMode := #[
     Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 220) (Tropical.EmitArrow.lit 30 1) (Tropical.EmitArrow.lit 6 1),
     Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 330) (Tropical.EmitArrow.lit 40 1) (Tropical.EmitArrow.lit 4 1),

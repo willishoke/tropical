@@ -181,18 +181,23 @@ private def routedRoutes4 : Array (Option Nat) := #[
 /-- Three mapped values for one authored item.  Keeping the arithmetic in the
     plan (instead of pre-folding literals here) makes the differential exercise
     the routed body's `loopIdx` binder and temporary lifetime. -/
-private def routedMapped (k : NOperand) (t : Nat) : Array NInstr := #[
+private def routedMapped (k scale : NOperand) (t : Nat) : Array NInstr := #[
   instrScalar "ToFloat" t #[k] .float,
   instrScalar "Add" (t+1) #[rgF t, cF 1] .float,
-  instrScalar "Mul" (t+2) #[rgF (t+1), cF 1 1] .float,
+  instrScalar "Mul" (t+2) #[rgF (t+1), scale] .float,
   instrScalar "Mul" (t+3) #[rgF (t+1), cF (-25) 1] .float]
 
 private def routedPlan (capacity : Nat := 4)
     (count? : Option NOperand := none) : FlatPlan :=
   let routes := if capacity == 4 then routedRoutes4
     else Array.replicate (capacity * 3) (some 0)
-  let body := #[instrRoutedSumBegin 0 capacity 3 routes count? 17]
-    ++ routedMapped (.loopIdx 17) 0
+  -- Materialize a host slot on lane 0, then consume it in the all-lane map.
+  -- This is the smallest fixture that distinguishes a true cross-lane scalar
+  -- capture (`tf7`, threadgroup) from the lane-0-only post-gather values
+  -- (`tf4`..`tf6`, private).
+  let body := #[instrScalar "Add" 7 #[.slot 4 .float, cF 0] .float,
+      instrRoutedSumBegin 0 capacity 3 routes count? 17]
+    ++ routedMapped (.loopIdx 17) (rgF 7) 0
     ++ #[instrRoutedSumYield 0 #[rgF 1, rgF 2, rgF 3],
          instrRoutedSumEnd 0,
          instrIndex 4 #[.arrayReg 0, cI 0] .float,
@@ -200,26 +205,27 @@ private def routedPlan (capacity : Nat := 4)
          instrIndex 6 #[.arrayReg 0, cI 2] .float,
          instrWriteSlot 0 (rgF 4), instrWriteSlot 1 (rgF 5),
          instrWriteSlot 2 (rgF 6)]
-  let inst := InstanceFunction.mk "root" "root" #[] body #[] 0 0 7 #[]
+  let inst := InstanceFunction.mk "root" "root" #[] body #[] 0 0 8 #[]
   { sampleRate := jn 44100, compilationMode := .fused,
-    arraySlotNames := #["routed-output"], registerCount := 7,
+    arraySlotNames := #["routed-output"], registerCount := 8,
     arraySlotCount := 1, arraySlotSizes := #[3], instanceFunctions := #[inst],
     sinks := #[{ inputs := #[0], gain := jn 1, target := 0 },
       { inputs := #[1], gain := jn 1, target := 1 },
       { inputs := #[2], gain := jn 1, target := 2 }],
-    sources := defaultSources, slotCount := 4,
-    slotNames := #["out:0", "out:1", "out:2", "param:count"],
+    sources := defaultSources, slotCount := 5,
+    slotNames := #["out:0", "out:1", "out:2", "param:count", "param:scale"],
     slotDefaults := #[Lean.Json.num (jn 0), Lean.Json.num (jn 0),
-      Lean.Json.num (jn 0), Lean.Json.num (jn 3)] }
+      Lean.Json.num (jn 0), Lean.Json.num (jn 3), Lean.Json.num (jn 1 1)] }
 
 /-- Literal-index twin with the exact routed contract's fold order:
     item-major, then authored emit order within each item. -/
 private def routedUnrolledPlan (trips : Nat) : FlatPlan := Id.run do
-  let mut body : Array NInstr := #[]
+  let mut body : Array NInstr := #[
+    instrScalar "Add" 0 #[.slot 4 .float, cF 0] .float]
   let mut acc : Array (Option Nat) := Array.replicate 3 none
-  let mut next := 0
+  let mut next := 1
   for item in [0:trips] do
-    body := body ++ routedMapped (cI (Int.ofNat item)) next
+    body := body ++ routedMapped (cI (Int.ofNat item)) (rgF 0) next
     let values := #[next+1, next+2, next+3]
     next := next + 4
     for emit in [0:3] do
@@ -240,10 +246,11 @@ private def routedUnrolledPlan (trips : Nat) : FlatPlan := Id.run do
             sinks := #[{ inputs := #[0], gain := jn 1, target := 0 },
               { inputs := #[1], gain := jn 1, target := 1 },
               { inputs := #[2], gain := jn 1, target := 2 }],
-            sources := defaultSources, slotCount := 3,
-            slotNames := #["out:0", "out:1", "out:2"],
+            sources := defaultSources, slotCount := 5,
+            slotNames := #["out:0", "out:1", "out:2", "param:count", "param:scale"],
             slotDefaults := #[Lean.Json.num (jn 0), Lean.Json.num (jn 0),
-              Lean.Json.num (jn 0)] } : FlatPlan)
+              Lean.Json.num (jn 0), Lean.Json.num (jn 3),
+              Lean.Json.num (jn 1 1)] } : FlatPlan)
 
 private def routedTags (plan : FlatPlan) : Array String :=
   plan.instanceFunctions.foldl (fun out f =>
@@ -310,6 +317,8 @@ def runRoutedSumCoverage : IO Bool := do
         (msl.splitOn "routed_outputs").length == 1 &&
         (msl.splitOn "routed_record_0 / 3u < routed_trips").length == 1 &&
         (msl.splitOn "constant uint routed_csr_0").length > 1 &&
+        (msl.splitOn "threadgroup float tf7;").length == 2 &&
+        (msl.splitOn "    float tf4;").length == 2 &&
         (msl.splitOn "switch (rs").length == 1 &&
         (msl.splitOn s!"tropical.threadgroup_scratch_bytes={static.metalThreadgroupScratchBytes}").length > 1
     | _, _ => false
