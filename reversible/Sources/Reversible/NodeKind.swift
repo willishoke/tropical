@@ -17,6 +17,11 @@ struct KnobSpec {
 enum NodeKind: String, CaseIterable, Codable {
     case source, knob, flange, sflange, fm, delay, reverse, mix, ring
     case resonator, reverb, phaser, modalmix
+    case allpass
+    case modalTail = "modal_allpass_tail"
+    case modalBlend = "modalblend"
+    case moduleInput = "module_input"
+    case moduleOutput = "module_output"
     case scope
     case out
 }
@@ -70,7 +75,9 @@ extension NodeKind {
     /// Plumbing-only reducers remain decodable for old documents, but ordinary
     /// module inlets now provide the same fan-in without canvas machinery.
     var appearsInAddMenu: Bool {
-        !spec.fixed && self != .mix && self != .modalmix
+        !spec.fixed && self != .mix && self != .modalmix &&
+            self != .allpass && self != .modalTail && self != .modalBlend &&
+            self != .moduleInput && self != .moduleOutput
     }
 
     var spec: NodeSpec {
@@ -218,6 +225,40 @@ extension NodeKind {
                     KnobSpec(name: "mix", min: 0, max: 1, def: 0.5),
                 ],
                 modal: true)
+        case .allpass:
+            return NodeSpec(
+                title: "Allpass 1", accent: Color(hex: 0x68B8F2),
+                inlets: ["in"], outlets: ["out"],
+                knobs: [
+                    KnobSpec(name: "center", min: 40, max: 4000, def: 700, log: true, unit: "Hz"),
+                    KnobSpec(name: "sweep", min: 0, max: 3, def: 1.5, unit: "oct"),
+                    KnobSpec(name: "rate", min: 0.02, max: 8, def: 0.2, log: true, unit: "Hz"),
+                    KnobSpec(name: "ratio", min: 0.125, max: 8, def: 1, log: true),
+                ], modal: true)
+        case .modalTail:
+            return NodeSpec(
+                title: "Pole Tail 1", accent: Color(hex: 0x4B9ED3),
+                inlets: ["in"], outlets: ["out"],
+                knobs: [
+                    KnobSpec(name: "center", min: 40, max: 4000, def: 700, log: true, unit: "Hz"),
+                    KnobSpec(name: "sweep", min: 0, max: 3, def: 1.5, unit: "oct"),
+                    KnobSpec(name: "rate", min: 0.02, max: 8, def: 0.2, log: true, unit: "Hz"),
+                    KnobSpec(name: "ratio", min: 0.125, max: 8, def: 1, log: true),
+                ], modal: true)
+        case .modalBlend:
+            return NodeSpec(
+                title: "Modal Blend", accent: Color(hex: 0x79D6C9),
+                inlets: ["dry", "wet"], outlets: ["out"],
+                knobs: [KnobSpec(name: "mix", min: 0, max: 1, def: 0.5)],
+                modal: true)
+        case .moduleInput:
+            return NodeSpec(
+                title: "Modal In", accent: Color(hex: 0x55CABB),
+                inlets: [], outlets: ["out"], knobs: [], modal: true, fixed: true)
+        case .moduleOutput:
+            return NodeSpec(
+                title: "Modal Out", accent: Color(hex: 0x55CABB),
+                inlets: ["in"], outlets: [], knobs: [], modal: true, fixed: true)
         case .modalmix:
             // Pole UNION (∪) of its modal inputs — the modal twin of Mix's
             // sum. Many modal in → one modal out; no knobs (structural).
@@ -256,7 +297,13 @@ extension NodeKind {
     /// a Sig source there would throw at compile. A Sig inlet, by contrast,
     /// accepts either: a modal source realizes to a Sig at the seam
     /// (`lowerInput`), but never the reverse.
-    static let modalInlets: Set<String> = ["reverb:in", "phaser:in", "modalmix:in"]
+    static let modalInlets: Set<String> = [
+        "reverb:in", "phaser:in", "modalmix:in", "allpass:in",
+        "modal_allpass_tail:in", "modalblend:dry", "modalblend:wet",
+        "module_output:in",
+    ]
+
+    var isModule: Bool { self == .phaser || self == .allpass }
 
     func wantsModal(inlet: String) -> Bool {
         Self.modalInlets.contains("\(rawValue):\(inlet)")

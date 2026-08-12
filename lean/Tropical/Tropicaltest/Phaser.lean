@@ -48,8 +48,8 @@ private def cscale (scale : Float) (a : CplxF) : CplxF :=
 private def constantControl (value : Sig) : ModalControlRef :=
   ModalControlRef.constant value
 
-private def testPhaser (input : String) : Node :=
-  .modalPhaser input
+private def testPhaser (id input : String) : Node × Array PatchNode :=
+  modalPhaserTopology id input
     (constantControl (lit 700)) (constantControl (lit 15 1))
     (constantControl (lit 2 1)) (constantControl (lit 5 1))
     modalPhaserRatios
@@ -58,10 +58,11 @@ private def sourceMode (sigma : Int := 3) : ModalMode :=
   ModalMode.hz (lit 220) (lit sigma) (lit 1)
 
 private def phaserGraph : PatchGraph :=
+  let (phaser, topology) := testPhaser "phaser" "source"
   { nodes := #[
       { id := "source", node := .modalSource #[sourceMode] (lit (Int.ofNat anchor))
           clockLit none },
-      { id := "phaser", node := testPhaser "source" }]
+      { id := "phaser", node := phaser }] ++ topology
     output := "phaser" }
 
 private def graphPlan (arena : Arena) (name : String) (graph : PatchGraph) :
@@ -167,33 +168,86 @@ private def controlValue (control : ModalControlRef) : Option Float := do
   let .konst expression := control.fallback | none
   sigConstF? expression
 
-private def deferredStructureCheck : Bool :=
-  let rankOf := fun id => if id == "source" then some 0 else
-    if id == "phaser" then some 1 else none
-  match lowerModal phaserGraph rankOf "phaser" 1 with
-  | .ok #[branch] =>
-      nodeIsModal phaserGraph "phaser" && match branch.stages.toList with
-      | [.phaser stage] =>
-          stage.ratios == modalPhaserRatios &&
-            controlValue stage.center == some 700.0 &&
-            controlValue stage.sweep == some 1.5 &&
-            controlValue stage.rate == some 0.2 &&
-            controlValue stage.mix == some 0.5 &&
-            branch.controls.size == 4
+private def lowerModalRoot (graph : PatchGraph) (id : String) : Except String ModalForest := do
+  let ids := graph.nodes.map (·.id)
+  let deps := graph.nodes.map fun node => node.node.inputIds.filterMap ids.idxOf?
+  let some ranks := Tropical.Ir.topoRanks? deps | throw "fixture cycle"
+  let some index := ids.idxOf? id | throw s!"fixture node '{id}' not found"
+  let some rank := ranks[index]? | throw s!"fixture node '{id}' has no rank"
+  lowerModal graph (fun name => (ids.idxOf? name).bind (ranks[·]?)) id rank
+
+/-- Visible topology and retained compiler structure both grow by one factor
+    per authored section; no parallel product is distributed here. -/
+private def retainedSizeCheck (ratios : Array Float) : Bool :=
+  let (phaser, topology) := modalPhaserTopology "phaser" "source"
+    (constantControl (lit 700)) (constantControl (lit 15 1))
+    (constantControl (lit 2 1)) (constantControl (lit 5 1)) ratios
+  let graph : PatchGraph := {
+    nodes := #[
+      { id := "source", node := .modalSource #[sourceMode] (lit 0) clockLit none },
+      { id := "phaser", node := phaser }] ++ topology
+    output := "phaser" }
+  let tailNodes := topology.countP fun node => node.node matches .modalLinear _ _
+  let junctions := topology.countP fun node => node.node matches .modalMix _
+  match lowerModalRoot graph "phaser" with
+  | .ok #[branch] => match branch.stages.toList with
+      | [.linear stage] =>
+          let values := branch.controls.filterMap controlValue |>.map litF
+          match (stage.build clockLit values).dryWetAllpassCascadeShape? with
+          | some (tails, _) =>
+              topology.size == 2 * ratios.size && tailNodes == ratios.size &&
+                junctions == ratios.size && tails.size == ratios.size &&
+                branch.controls.size == 3 * ratios.size + 1
+          | none => false
       | _ => false
   | _ => false
 
+private def deferredStructureCheck : Bool :=
+  let explicitTails := phaserGraph.nodes.countP fun node =>
+    node.node matches .modalLinear _ _
+  let explicitJunctions := phaserGraph.nodes.countP fun node =>
+    node.node matches .modalMix _
+  retainedSizeCheck (modalPhaserRatios.extract 0 1) &&
+    retainedSizeCheck (modalPhaserRatios.extract 0 2) &&
+    retainedSizeCheck modalPhaserRatios &&
+  match lowerModalRoot phaserGraph "phaser" with
+  | .ok #[branch] =>
+      explicitTails == 6 && explicitJunctions == 6 &&
+        nodeIsModal phaserGraph "phaser" && match branch.stages.toList with
+      | [.linear stage] =>
+          let values := branch.controls.filterMap controlValue |>.map litF
+          match (stage.build clockLit values).dryWetAllpassCascadeShape? with
+          | some (tails, mix) =>
+              tails.size == 6 && sigConstF? mix == some 0.5 &&
+                branch.controls.size == 19 &&
+                branch.controls[0]?.bind controlValue == some 700.0 &&
+                branch.controls[1]?.bind controlValue == some 1.5 &&
+                branch.controls[2]?.bind controlValue == some 0.2
+          | none => false
+      | _ => false
+  | _ => false
+
+/-- Filter is the independent second producer proving the retained algebra is
+    not merely a renamed phaser stage. -/
+private def filterUsesGenericKernelCheck : Bool :=
+  let empty := Lean.Json.mkObj []
+  let (node, _) := buildNode (fun _ => none) "filter" "filter" empty empty empty
+  match node with
+  | .modalLinear _ stage =>
+      let values := stage.controls.filterMap controlValue |>.map litF
+      (stage.build clockLit values).orientedShape?.isSome
+  | _ => false
+
 private def modalMixOrderCheck : Bool :=
+  let (phaser, topology) := testPhaser "phaser" "mix"
   let graph : PatchGraph :=
     { nodes := #[
         { id := "a", node := .modalSource #[sourceMode 3] (lit 0) clockLit none },
         { id := "b", node := .modalSource #[sourceMode 7] (lit 0) clockLit none },
         { id := "mix", node := .modalMix #["b", "a"] },
-        { id := "phaser", node := testPhaser "mix" }]
+        { id := "phaser", node := phaser }] ++ topology
       output := "phaser" }
-  let rankOf := fun id => if id == "a" then some 0 else if id == "b" then some 1
-    else if id == "mix" then some 2 else if id == "phaser" then some 3 else none
-  match lowerModal graph rankOf "phaser" 3 with
+  match lowerModalRoot graph "phaser" with
   | .ok #[first, second] =>
       let sigmaOf := fun branch => match branch.source with
         | .plain modes => modes[0]?.bind (sigConstF? ·.sigma)
@@ -203,34 +257,35 @@ private def modalMixOrderCheck : Bool :=
   | _ => false
 
 private def refusalChecks : Bool :=
+  let (phaser, topology) := testPhaser "phaser" "bloom"
   let bloomed : PatchGraph :=
     { nodes := #[
         { id := "bloom", node := .modalSource #[sourceMode] (lit 0) clockLit none
             none (some (0.1, 1.8)) },
-        { id := "phaser", node := testPhaser "bloom" }]
-      output := "phaser" }
-  let badRatios : PatchGraph :=
-    { nodes := #[
-        { id := "source", node := .modalSource #[sourceMode] (lit 0) clockLit none },
-        { id := "phaser", node := .modalPhaser "source"
-            (constantControl (lit 700)) (constantControl (lit 1))
-            (constantControl (lit 1)) (constantControl (lit 5 1))
-            #[1.0, 1.0, 2.0, 3.0, 4.0, 5.0] }]
+        { id := "phaser", node := phaser }] ++ topology
       output := "phaser" }
   let bloomOk := match lowerGraph bloomed with
-    | .error error => error == "lower: bloomed phaser crossing at 'phaser' refused (the live all-pass/Gamma crossing is not implemented)"
+    | .error error => error == "lower: bloomed linear-kernel crossing at 'phaser' refused (the live linear/Gamma crossing is not implemented)"
     | .ok _ => false
-  let ranks := fun id => if id == "source" then some 0 else if id == "phaser" then some 1 else none
-  let ratiosOk := match lowerModal badRatios ranks "phaser" 1 with
-    | .error error => error == "modal phaser 'phaser': expected six distinct positive structural ratios"
-    | .ok _ => false
-  bloomOk && ratiosOk
+  bloomOk
 
 private def phaserPatchJson : String :=
   "{\"nodes\":[" ++
     "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
     "{\"id\":\"ph\",\"kind\":\"phaser\",\"params\":{\"center\":700,\"sweep\":1.5,\"rate\":0.2,\"mix\":0.5},\"in\":{\"in\":[\"res\"]}}," ++
     "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"ph\"]}}],\"out\":\"out\"}"
+
+private def hierarchicalPhaserPatchJson : String :=
+  "{\"version\":3,\"scene\":{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"ph\",\"kind\":\"module\",\"definition\":\"tropical.modal.phaser\",\"definition_version\":1,\"params\":{\"center\":700,\"sweep\":1.5,\"rate\":0.2,\"mix\":0.5},\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"ph\"]}}],\"out\":\"out\"}}"
+
+private def illegalSignalToModalModuleJson : String :=
+  "{\"version\":3,\"scene\":{\"nodes\":[" ++
+    "{\"id\":\"osc\",\"kind\":\"source\",\"params\":{\"freq\":220}}," ++
+    "{\"id\":\"ph\",\"kind\":\"module\",\"definition\":\"tropical.modal.phaser\",\"definition_version\":1,\"in\":{\"in\":[\"osc\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"ph\"]}}],\"out\":\"out\"}}"
 
 private def blockDifference (left right : Array Float) : Float := Id.run do
   let mut energy := 0.0
@@ -270,6 +325,99 @@ private def surfaceAndLiveCheck (arena : Arena)
   let rate ← oneControlLive compiled "rate" 3.0
   let mix ← oneControlLive compiled "mix" 0.1
   pure (.ok (center && sweep && rate && mix))
+
+private def hierarchyEquivalenceCheck (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO (Except String Bool) := do
+  let prepared : Except String
+      (Lean.Json × CompiledPatch × CompiledPatch × CompiledPatch × Bool) := do
+    let legacy ← Lean.Json.parse phaserPatchJson
+    let hierarchical ← Lean.Json.parse hierarchicalPhaserPatchJson
+    let flat ← elaboratePatchHierarchy hierarchical
+    let libraryDefinitions ← (hierarchyLibraryJson.getObjVal? "definitions")
+      |>.bind (fun value => value.getArr?)
+    let some installedPhaser := libraryDefinitions[1]?
+      | throw "module library has no Phaser definition"
+    let customPhaser := match installedPhaser with
+      | .obj fields => .obj (fields.insert "id" (.str "user.ph.definition"))
+      | _ => installedPhaser
+    let authored := match hierarchical with
+      | .obj fields =>
+        let scene := match fields["scene"]? with
+          | some (.obj sceneFields) => .obj <| sceneFields.insert "nodes" (.arr #[
+              Lean.Json.mkObj [
+                ("id", .str "res"), ("kind", .str "resonator"),
+                ("params", Lean.Json.mkObj [("freq", .num ⟨220, 0⟩), ("decay", .num ⟨4, 0⟩)])],
+              Lean.Json.mkObj [
+                ("id", .str "ph"), ("kind", .str "module"),
+                ("definition", .str "user.ph.definition"),
+                ("definition_version", Lean.toJson 1),
+                ("params", Lean.Json.mkObj [("center", .num ⟨700, 0⟩),
+                  ("sweep", .num ⟨15, 1⟩), ("rate", .num ⟨2, 1⟩),
+                  ("mix", .num ⟨5, 1⟩)]),
+                ("in", Lean.Json.mkObj [("in", .arr #[.str "res"])])],
+              Lean.Json.mkObj [
+                ("id", .str "out"), ("kind", .str "out"),
+                ("in", Lean.Json.mkObj [("in", .arr #[.str "ph"])])]])
+          | other => other.getD (.obj {})
+        .obj <| fields.insert "definitions" (.arr #[customPhaser])
+          |>.insert "scene" scene
+      | _ => hierarchical
+    let legacyCompiled ← compilePlanPure arena resolved legacy
+    let hierarchicalCompiled ← compilePlanPure arena resolved hierarchical
+    let authoredCompiled ← compilePlanPure arena resolved authored
+    let illegal ← Lean.Json.parse illegalSignalToModalModuleJson
+    let typedBoundaryRefusal := match compilePlanPure arena resolved illegal with
+      | .error error => (error.splitOn "signal→modal").length > 1
+      | .ok _ => false
+    pure (flat, legacyCompiled, hierarchicalCompiled, authoredCompiled,
+      typedBoundaryRefusal)
+  match prepared with
+  | .error error => pure (.error error)
+  | .ok (flat, legacyCompiled, hierarchicalCompiled, authoredCompiled,
+      typedBoundaryRefusal) =>
+    let flatRaws := rawsOf flat
+    let sourceMapSize := match flat.getObjVal? "source_map" with
+      | .ok (.arr entries) => entries.size
+      | _ => 0
+    match ← renderPlanSamples legacyCompiled.plan frameCount,
+        ← renderPlanSamples hierarchicalCompiled.plan frameCount,
+        ← renderPlanSamples authoredCompiled.plan frameCount with
+    | .error error, _, _ | _, .error error, _ | _, _, .error error => pure (.error error)
+    | .ok legacySamples, .ok hierarchicalSamples, .ok authoredSamples =>
+      let maxDifference := (Array.range (min legacySamples.size hierarchicalSamples.size)).foldl
+        (fun worst index => max worst (legacySamples[index]! - hierarchicalSamples[index]!).abs) 0.0
+      let authoredDifference := (Array.range (min legacySamples.size authoredSamples.size)).foldl
+        (fun worst index => max worst (legacySamples[index]! - authoredSamples[index]!).abs) 0.0
+      let aliases := #["center", "sweep", "rate", "mix"].all fun knob =>
+        hierarchicalCompiled.plan.paramDisciplines.any (·.name == s!"ph.{knob}")
+      let noLeakedInternals := !hierarchicalCompiled.plan.paramDisciplines.any fun discipline =>
+        "__h3_".isPrefixOf discipline.name
+      IO.eprintln s!"        hierarchy flat={flatRaws.size}/15 source-map={sourceMapSize}/13 aliases={aliases} leaked-internals={!noLeakedInternals} typed-boundary={typedBoundaryRefusal} shipped-diff={maxDifference} authored-diff={authoredDifference}"
+      pure <| Except.ok <| flatRaws.size == 15 && sourceMapSize == 13 &&
+        flatRaws.any (fun raw => raw.id == "ph" && raw.kind == "modalblend") &&
+        aliases && noLeakedInternals && typedBoundaryRefusal &&
+        maxDifference < 2.0e-5 && authoredDifference < 2.0e-5
+
+private def hierarchyValidationCheck : Bool :=
+  let selfReference :=
+    "{\"version\":3,\"definitions\":[{\"id\":\"user.loop\",\"version\":1,\"input\":\"input\",\"output\":\"output\",\"input_domain\":\"modal\",\"output_domain\":\"modal\",\"parameters\":[],\"nodes\":[{\"id\":\"input\",\"kind\":\"module_input\"},{\"id\":\"again\",\"kind\":\"module\",\"definition\":\"user.loop\",\"definition_version\":1,\"in\":{\"in\":[\"input\"]}},{\"id\":\"output\",\"kind\":\"module_output\",\"in\":{\"in\":[\"again\"]}}]}],\"scene\":{\"nodes\":[],\"out\":\"\"}}"
+  let innerCycle :=
+    "{\"version\":3,\"definitions\":[{\"id\":\"user.cycle\",\"version\":1,\"input\":\"input\",\"output\":\"output\",\"input_domain\":\"modal\",\"output_domain\":\"modal\",\"parameters\":[],\"nodes\":[{\"id\":\"input\",\"kind\":\"module_input\"},{\"id\":\"a\",\"kind\":\"modalmix\",\"in\":{\"in\":[\"b\"]}},{\"id\":\"b\",\"kind\":\"modalmix\",\"in\":{\"in\":[\"a\"]}},{\"id\":\"output\",\"kind\":\"module_output\",\"in\":{\"in\":[\"a\"]}}]}],\"scene\":{\"nodes\":[],\"out\":\"\"}}"
+  let installedOverride :=
+    "{\"version\":3,\"definitions\":[{\"id\":\"tropical.modal.allpass1\",\"version\":1,\"input\":\"input\",\"output\":\"output\",\"parameters\":[],\"nodes\":[{\"id\":\"input\",\"kind\":\"module_input\"},{\"id\":\"output\",\"kind\":\"module_output\",\"in\":{\"in\":[\"input\"]}}]}],\"scene\":{\"nodes\":[],\"out\":\"\"}}"
+  let errorsAsExpected := fun source needle => match Lean.Json.parse source with
+    | .error _ => false
+    | .ok json => match elaboratePatchHierarchy json with
+      | .error error => (error.splitOn needle).length > 1
+      | .ok _ => false
+  let stable := match Lean.Json.parse hierarchicalPhaserPatchJson with
+    | .error _ => false
+    | .ok json => match elaboratePatchHierarchy json, elaboratePatchHierarchy json with
+      | .ok left, .ok right => left.compress == right.compress
+      | _, _ => false
+  errorsAsExpected selfReference "definition-reference cycle" &&
+    errorsAsExpected innerCycle "cycle in definition 'user.cycle'" &&
+    errorsAsExpected installedOverride "cannot replace installed definition" && stable
 
 /-- Compile the product shape through the exact two-room terminal and report its
     actual Metal scratch publication.  The hard support gate remains 24,576 B. -/
@@ -326,37 +474,44 @@ private def productScratchCheck (arena : Arena)
 def runPhaser (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Bool := do
   IO.eprintln "current-universe modal phaser: structural gates"
   let structural := deferredStructureCheck
+  let genericFilter := filterUsesGenericKernelCheck
   let forestOrder := modalMixOrderCheck
   let refusals := refusalChecks
+  let hierarchyValidation := hierarchyValidationCheck
   IO.eprintln "        rendering independent-oracle fixture"
   let numeric ← renderGraph arena "modal_phaser_oracle" phaserGraph
   let fused ← fusedProductError arena
   IO.eprintln "        compiling and driving four live controls"
   let live ← surfaceAndLiveCheck arena resolved
+  IO.eprintln "        expanding nested v3 Phaser/Allpass definitions"
+  let hierarchy ← hierarchyEquivalenceCheck arena resolved
   IO.eprintln "        compiling canonical two-room product scratch fixture"
   let product := productScratchCheck arena resolved
-  match numeric, fused, live, product with
-  | .ok samples, .ok fusedError, .ok controlsLive, .ok (scratch, baseline) =>
+  match numeric, fused, live, hierarchy, product with
+  | .ok samples, .ok fusedError, .ok controlsLive, .ok hierarchyEquivalent,
+      .ok (scratch, baseline) =>
       let oracleError := maximumOracleError samples
-      IO.println s!"        deferred={structural} forest-order={forestOrder} refusals={refusals} oracle max abs={oracleError}"
+      IO.println s!"        topology-derived={structural} generic-filter={genericFilter} forest-order={forestOrder} refusals={refusals} hierarchy-validation={hierarchyValidation} oracle max abs={oracleError}"
       IO.println s!"        fused two-room JIT vs generic max abs={fusedError} ({fusedError * 1.0e9}e-9)"
       IO.println s!"        four served controls live without relower={controlsLive}; canonical 6→32→6-section→32 Metal scratch={scratch.total}/24576 (arrays={scratch.arrays}, max-routes={scratch.maxRoutedRecords}×4, slots={scratch.arraySlots}/{scratch.coeffArraySlots} coeff)"
+      IO.println s!"        nested v3 Phaser→Allpass expansion equivalent={hierarchyEquivalent}; public ph.* aliases retained"
       IO.println s!"        two-room baseline scratch={baseline.total} (arrays={baseline.arrays}, max-routes={baseline.maxRoutedRecords}×4, slots={baseline.arraySlots}/{baseline.coeffArraySlots} coeff)"
       IO.println s!"        product non-coeff array floats={repr scratch.nonCoeffSizes}; baseline={repr baseline.nonCoeffSizes}"
-      if structural && forestOrder && refusals && oracleError < 2.0e-5 &&
+      if structural && genericFilter && forestOrder && refusals && hierarchyValidation && oracleError < 2.0e-5 &&
           -- The two exact schedules sum the same analytic rows in different
           -- routed orders.  This absolute lens is below two accumulated
           -- Q4.28 quanta per participating row and remains meaningful at
           -- dry/wet cancellation zeros where relative error is not.
           fusedError < 2.0e-7 &&
-          controlsLive && scratch.total ≤ 24576 then
+          controlsLive && hierarchyEquivalent && scratch.total ≤ 24576 then
         passGate "modal-phaser"
-          "deferred current-universe stage; independent rational render oracle; authored modalMix order; live center/sweep/rate/mix; named bloom/collision refusals; exact two-room product stays inside Metal scratch policy"
+          "topology-derived generic kernel; Filter is a second producer; independent rational render oracle; authored modalMix order; live controls; named bloom crossing refusal; exact two-room product stays inside Metal scratch policy"
       else
         failGate "modal-phaser" "structural, numerical, live-control, or product scratch contract failed"
-  | .error error, _, _, _ => failGate "modal-phaser" s!"render: {firstLine error}"
-  | _, .error error, _, _ => failGate "modal-phaser" s!"fused: {firstLine error}"
-  | _, _, .error error, _ => failGate "modal-phaser" s!"surface/live: {firstLine error}"
-  | _, _, _, .error error => failGate "modal-phaser" s!"product: {firstLine error}"
+  | .error error, _, _, _, _ => failGate "modal-phaser" s!"render: {firstLine error}"
+  | _, .error error, _, _, _ => failGate "modal-phaser" s!"fused: {firstLine error}"
+  | _, _, .error error, _, _ => failGate "modal-phaser" s!"surface/live: {firstLine error}"
+  | _, _, _, .error error, _ => failGate "modal-phaser" s!"hierarchy: {firstLine error}"
+  | _, _, _, _, .error error => failGate "modal-phaser" s!"product: {firstLine error}"
 
 end Tropical.Tropicaltest.Phaser

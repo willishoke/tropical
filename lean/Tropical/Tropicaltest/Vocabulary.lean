@@ -187,20 +187,24 @@ def runModalClassAgreement : IO Bool := do
   let vocab    := Tropical.Playground.vocabularyKinds
   let built    := Tropical.Playground.buildNodeKinds
   let withheld := Tropical.Playground.withheldKinds
+  let hierarchyAtoms := Tropical.Playground.hierarchyAtomKinds
   let drift    := Tropical.Playground.modalClassificationDrift          -- over `built`
   let servedDrift   := drift.filter (fun k => !withheld.contains k)
   let withheldDrift := drift.filter (fun k => withheld.contains k)
   -- list-consistency: served/withheld ⊆ built, built ⊆ served ∪ withheld
   let servedNotBuilt   := (vocab.filter (· != "out")).filter (fun k => !built.contains k)
   let withheldNotBuilt := withheld.filter (fun k => !built.contains k)
-  let builtUnaccounted := built.filter (fun k => !vocab.contains k && !withheld.contains k)
+  let hierarchyNotBuilt := hierarchyAtoms.filter (fun k => !built.contains k)
+  let builtUnaccounted := built.filter (fun k =>
+    !vocab.contains k && !withheld.contains k && !hierarchyAtoms.contains k)
   let setIssues := servedNotBuilt.map (s!"served-not-built {·}")
     ++ withheldNotBuilt.map (s!"withheld-not-built {·}")
+    ++ hierarchyNotBuilt.map (s!"hierarchy-atom-not-built {·}")
     ++ builtUnaccounted.map (s!"built-unaccounted {·}")
   IO.println s!"        {built.size} built kinds: nodeIsModal(node) ⟺ outletOf == modal (served drift asserted empty)"
   IO.println s!"        served drift {servedDrift} · withheld drift (contained, rejected pre-lowering) {withheldDrift} · list-consistency {if setIssues.isEmpty then "ok" else toString setIssues}"
   if servedDrift.isEmpty && setIssues.isEmpty then
-    passGate "modal-class-agreement" s!"outletOf and nodeIsModal agree for every SERVED kind, and buildNodeKinds ⊆ served∪withheld (the {withheldDrift.size} withheld kind(s) may drift — rejected pre-lowering, so the drift cannot mis-type an edge)"
+    passGate "modal-class-agreement" s!"outletOf and nodeIsModal agree for every served/internal hierarchy kind, and buildNodeKinds ⊆ served∪withheld∪hierarchy-atoms (the {withheldDrift.size} withheld kind(s) may drift — rejected pre-lowering, so the drift cannot mis-type an edge)"
   else
     failGate "modal-class-agreement" s!"servedDrift {servedDrift} · setIssues {setIssues}"
 
@@ -233,7 +237,7 @@ def runImplicitFanIn : IO Bool := do
     buildNode noParams "phaserN" "phaser" empty empty pair
   let modalHelperId := "__fanin_modal_phaserN_in"
   let modalNodeOk := match phaserNode with
-    | .modalPhaser input _ _ _ _ _ => input == modalHelperId
+    | .modalBlend dry _ _ => dry == modalHelperId
     | _ => false
   let modalHelperOk := match phaserExtras[0]? with
     | some helper => helper.id == modalHelperId && match helper.node with

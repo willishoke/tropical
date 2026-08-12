@@ -563,6 +563,17 @@ def portSpecs : String → Array PortSpec
         display := some { min := 0.02, max := 8, log := true, unit := "Hz" } },
       { name := "mix", knob := some (5, 1), discipline := .glide,
         display := some { min := 0, max := 1 } }]
+  -- Compiler-private atoms used only after a v3 definition has been expanded.
+  -- They share the public phaser parameter schema through explicit aliases.
+  | "modal_allpass_tail" => #[
+      { name := "in", accepts := modalIn, multi := true },
+      { name := "center", knob := some (700, 0), discipline := .glide },
+      { name := "sweep", knob := some (15, 1), discipline := .glide },
+      { name := "rate", knob := some (2, 1), discipline := .glide }]
+  | "modalblend" => #[
+      { name := "dry", accepts := modalIn },
+      { name := "wet", accepts := modalIn },
+      { name := "mix", knob := some (5, 1), discipline := .glide }]
   | "modalmix" => #[{ name := "in", accepts := modalIn, multi := true }]
   -- gauge: the §5 excitation-gauge adapter — re-levels its modal input's peak by the
   -- self-measured ‖H‖^{−g}. `g` is the gauge: 0 = unity-DC (strike, the identity),
@@ -586,7 +597,8 @@ def portSpecs : String → Array PortSpec
 /-- Each kind's outlet color (`none` = no outlet, the dac sink). -/
 def outletOf : String → Option PortDomain
   | "knob" => some .control
-  | "resonator" | "reverb" | "filter" | "phaser" | "modalmix" | "string" | "gauge" => some .modal
+  | "resonator" | "reverb" | "filter" | "phaser" | "modalmix" | "string" | "gauge"
+  | "modal_allpass_tail" | "modalblend" => some .modal
   | "out" => none
   | _ => some .signal
 
@@ -598,6 +610,9 @@ def vocabularyKinds : Array String := #[
   "mix", "ring", "gong", "string", "resonator", "reverb", "filter", "phaser",
   "modalmix", "gauge", "knob", "out"]
 
+/-- Non-public atoms admitted only after hygienic v3 definition expansion. -/
+def hierarchyAtomKinds : Array String := #["modal_allpass_tail", "modalblend"]
+
 /-- Every kind `buildNode` actually constructs (its match arms — the AUTHORITATIVE
     list, read straight off the arms below). The classification-drift gate and
     `checkServedKinds` both derive from THIS, so `buildNode` cannot grow a kind the
@@ -608,7 +623,7 @@ def vocabularyKinds : Array String := #[
 def buildNodeKinds : Array String := #[
   "knob", "source", "pluck", "comb", "flange", "sflange", "fm", "delay",
   "reverse", "mix", "ring", "resonator", "reverb", "filter", "phaser", "modalmix",
-  "gauge", "gong", "bloomgong", "string"]
+  "modal_allpass_tail", "modalblend", "gauge", "gong", "bloomgong", "string"]
 
 /-- Kinds `buildNode` builds but which are WITHHELD from the served surface.
     The measured negative-integer conditioning discs are now named refusals, but

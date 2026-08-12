@@ -9,13 +9,28 @@ struct PatchToolbar: ToolbarContent {
     var body: some ToolbarContent {
         ToolbarItem(placement: .navigation) {
             Menu {
-                ForEach(NodeKind.allCases.filter(\.appearsInAddMenu), id: \.self) { kind in
+                ForEach(model.addableKinds, id: \.self) { kind in
                     Button(kind.spec.title) { model.addNode(kind) }
                 }
             } label: {
                 Label("Add Module", systemImage: "plus")
             }
             .help("add a module to the patch")
+        }
+
+        ToolbarItem(placement: .navigation) {
+            HStack(spacing: 6) {
+                Button {
+                    model.exitModule()
+                } label: {
+                    Image(systemName: "chevron.left")
+                }
+                .disabled(model.isAtScene)
+                .help("return to containing graph")
+                Text(model.hierarchyTitle)
+                    .font(Theme.monoSmall)
+                    .lineLimit(1)
+            }
         }
 
         // Rank layout: one row per topological rank, sources at the top,

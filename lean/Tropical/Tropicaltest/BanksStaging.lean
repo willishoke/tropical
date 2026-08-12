@@ -463,8 +463,8 @@ private def tailEnergy (xs : Array Float) (lo : Nat) : Float := Id.run do
     acc := acc + xs[i]! * xs[i]!
   pure acc
 
-/-- THE MODAL FILTER gate (the VCFQ). A `filter` node is a `modalReverb`
-    whose room is one EXACT conjugate pole pair (`filterPair`), so three
+/-- THE MODAL FILTER gate (the VCFQ). A `filter` node contributes one generic
+    proper kernel containing an EXACT conjugate pole pair (`filterPair`), so three
     behaviors must hold, all through the ordinary graph surface:
     (A) LOWPASS: the same struck resonator through cutoff=4000 vs cutoff=60
         loses most of its energy (the composition's forced modes carry

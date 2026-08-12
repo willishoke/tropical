@@ -35,7 +35,7 @@ def paramDisciplinesOf (raws : Array Raw) :
         | some o => !(portSources r.inObj o).isEmpty
         | none => false
       if !selfWired && !ownerWired then
-        let base := s!"{r.id}.{spec.name}"
+        let base := paramNameOf r spec.name
         let d : Tropical.Plan.ParamDiscipline := match spec.discipline with
           | .glide =>
             -- 0.02 s: the engine's glide window
@@ -47,7 +47,8 @@ def paramDisciplinesOf (raws : Array Raw) :
             { name := base, discipline := "anchor", companions := #[s!"{base}#phase"] }
           | .raw =>
             { name := base, discipline := "raw" }
-        out := out.push d
+        unless out.any (fun existing => existing.name == base) do
+          out := out.push d
     -- Trip-count-as-data: the live `partials` slot (present only with the
     -- STATIC `partials_max` capacity) is a plain raw write — same walk and
     -- skip rules as `collectParams`.
@@ -66,7 +67,7 @@ def paramDisciplinesOf (raws : Array Raw) :
     not surface. Plus the taps. The silence-with-`{ok:true}` class dies here:
     a patch that gracefully compiled to nothing now SAYS so, as facts. -/
 def realizedReportForGeneration (args : Json) (taps : Array Tropical.ScopeTap)
-    (programVersion controlVersion : UInt64) : Json := Id.run do
+    (programVersion controlVersion : UInt64) (authored? : Option Json := none) : Json := Id.run do
   let raws := rawsOf args
   let outId := match (args.getObjVal? "out").toOption with
     | some (.str s) => s
@@ -79,9 +80,33 @@ def realizedReportForGeneration (args : Json) (taps : Array Tropical.ScopeTap)
         for spec in portSpecs r.kind do
           for src in portSources r.inObj spec.name do
             if !reach.contains src then reach := reach.push src
+  let authoredNodes := match authored? with
+    | some authored => match authored.getObjVal? "scene" with
+      | .ok scene => match scene.getObjVal? "nodes" with
+        | .ok (.arr nodes) => nodes
+        | _ => #[]
+      | _ => match authored.getObjVal? "nodes" with
+        | .ok (.arr nodes) => nodes
+        | _ => #[]
+    | none => #[]
+  let moduleSurfaces := authoredNodes.filterMap fun node => do
+    let id ← match node.getObjVal? "id" with | .ok (.str id) => some id | _ => none
+    let kind ← match node.getObjVal? "kind" with | .ok (.str kind) => some kind | _ => none
+    if kind != "module" && kind != "phaser" then none else
+      let displayKind := if kind == "phaser" then "phaser" else
+        match node.getObjVal? "definition" with
+        | .ok (.str "tropical.modal.phaser") => "phaser"
+        | .ok (.str "tropical.modal.allpass1") => "allpass"
+        | _ => "module"
+      let sources := match node.getObjVal? "in" with
+        | .ok inObj => portSources inObj "in"
+        | _ => #[]
+      some (id, displayKind, sources)
   let nodesJ := raws.map fun r =>
+    let reportedKind := (moduleSurfaces.find? (·.1 == r.id)).map (·.2.1) |>.getD r.kind
     Json.mkObj [("id", Json.str r.id), ("kind", Json.str r.kind),
       ("status", Json.str (if reach.contains r.id then "active" else "excluded"))]
+      |>.setObjVal! "kind" (Json.str reportedKind)
   let inputsJ := raws.foldl (init := #[]) fun acc r =>
     (portSpecs r.kind).foldl (init := acc) fun acc spec =>
       if spec.accepts.isEmpty then acc else
@@ -91,6 +116,12 @@ def realizedReportForGeneration (args : Json) (taps : Array Tropical.ScopeTap)
         (if srcs.isEmpty then [("state", Json.str "normalled")]
          else [("state", Json.str "wired"),
                ("sources", Json.arr (srcs.map Json.str))])))
+  let inputsJ := moduleSurfaces.foldl (init := inputsJ) fun acc surface =>
+    acc.push <| Json.mkObj <|
+      [("node", Json.str surface.1), ("port", Json.str "in")] ++
+      (if surface.2.2.isEmpty then [("state", Json.str "normalled")]
+       else [("state", Json.str "wired"),
+             ("sources", Json.arr (surface.2.2.map Json.str))])
   let kindOf : String → Option String := fun id => (raws.find? (·.id == id)).map (·.kind)
   let paramsJ := (collectParams raws).filterMap fun (nm, v) =>
     if nm.endsWith "#v1" || nm.endsWith "#t0" || nm.endsWith "#phase"
@@ -111,6 +142,9 @@ def realizedReportForGeneration (args : Json) (taps : Array Tropical.ScopeTap)
       ("instance", Json.str tap.sourceInstance),
       ("output", Json.str tap.sourceOutput),
       ("slot", Json.str tap.slot)]
+  let sourceMap := match args.getObjVal? "source_map" with
+    | .ok (.arr entries) => entries
+    | _ => #[]
   return Json.mkObj [("ok", Json.bool true),
     ("vocabulary_fingerprint", Json.str vocabularyFingerprint),
     -- Keep this handshake's versions as JSON integers, matching render_window.
@@ -118,7 +152,8 @@ def realizedReportForGeneration (args : Json) (taps : Array Tropical.ScopeTap)
     ("control_version", Lean.toJson controlVersion.toNat),
     ("nodes", Json.arr nodesJ),
     ("inputs", Json.arr inputsJ), ("params", Json.arr paramsJ),
-    ("taps", Json.arr tapsJ)]
+    ("taps", Json.arr tapsJ),
+    ("source_map", Json.arr sourceMap)]
 
 /-- Pure-report compatibility seam for tests and non-publishing consumers.
     Production loads always supply the exact runtime publication identity. -/

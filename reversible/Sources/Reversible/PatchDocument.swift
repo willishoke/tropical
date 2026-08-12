@@ -2,14 +2,9 @@ import AppKit
 import SwiftUI
 import UniformTypeIdentifiers
 
-/// The patch as a FILE. `PatchModel.serialize()` targets the engine — it drops
-/// monitors, positions, and hues because the kernel has no use for them. A
-/// document is the SURFACE: everything you'd lose by quitting, including the
-/// scope you left watching the mix and where you put it.
-///
-/// Deliberately a flat, hand-readable JSON term (same shape family as the
-/// engine graph) rather than an opaque archive: a patch is small, diffable,
-/// and worth being able to hand-edit.
+/// Complete authoring document. V3 separates the root scene from reusable
+/// definition graphs; the engine receives a presentation-free projection and
+/// owns its hygienic expansion. The decoder retains a deterministic v1 migration.
 struct PatchDocument: Codable {
     struct Node: Codable {
         let id: String
@@ -18,28 +13,146 @@ struct PatchDocument: Codable {
         let y: Double
         let hue: Double
         let values: [String: Double]
-        /// inlet port → ordered source node ids
         let inputs: [String: [String]]
+        var module: ModuleReference?
+        var bindings: [String: String]
+
+        init(
+            id: String,
+            kind: NodeKind,
+            x: Double,
+            y: Double,
+            hue: Double,
+            values: [String: Double],
+            inputs: [String: [String]],
+            module: ModuleReference? = nil,
+            bindings: [String: String] = [:]
+        ) {
+            self.id = id
+            self.kind = kind
+            self.x = x
+            self.y = y
+            self.hue = hue
+            self.values = values
+            self.inputs = inputs
+            self.module = module
+            self.bindings = bindings
+        }
+
+        private enum CodingKeys: String, CodingKey {
+            case id, kind, x, y, hue, values, inputs, module, bindings
+        }
+
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            id = try c.decode(String.self, forKey: .id)
+            kind = try c.decode(NodeKind.self, forKey: .kind)
+            x = try c.decode(Double.self, forKey: .x)
+            y = try c.decode(Double.self, forKey: .y)
+            hue = try c.decode(Double.self, forKey: .hue)
+            values = try c.decodeIfPresent([String: Double].self, forKey: .values) ?? [:]
+            inputs = try c.decodeIfPresent([String: [String]].self, forKey: .inputs) ?? [:]
+            module = try c.decodeIfPresent(ModuleReference.self, forKey: .module)
+            bindings = try c.decodeIfPresent([String: String].self, forKey: .bindings) ?? [:]
+        }
     }
 
-    /// Bumped only on a breaking shape change; a reader refuses a version it
-    /// doesn't know rather than silently loading half a patch.
-    static let currentVersion = 1
+    struct Graph: Codable {
+        var nodes: [Node]
+        var order: [String]
+        var panX: Double
+        var panY: Double
+    }
 
-    var version = PatchDocument.currentVersion
-    var nodes: [Node]
-    /// stable z/render order (also the order inlet menus list sources in)
-    var order: [String]
+    struct Definition: Codable {
+        var id: String
+        var version: Int
+        var title: String
+        var input: String
+        var output: String
+        var parameters: [ModuleParameter]
+        var graph: Graph
+    }
+
+    static let currentVersion = 3
+
+    var version: Int
+    var scene: Graph
+    var definitions: [Definition]
     var velocity: Double
-    var panX: Double
-    var panY: Double
     var autoArrange: Bool
+
+    // Compatibility projections keep existing callers source-compatible while
+    // every newly encoded file uses the explicit v3 scene envelope.
+    var nodes: [Node] { scene.nodes }
+    var order: [String] { scene.order }
+    var panX: Double { scene.panX }
+    var panY: Double { scene.panY }
+
+    init(
+        nodes: [Node],
+        order: [String],
+        velocity: Double,
+        panX: Double,
+        panY: Double,
+        autoArrange: Bool,
+        definitions: [Definition] = []
+    ) {
+        version = Self.currentVersion
+        scene = .init(nodes: nodes, order: order, panX: panX, panY: panY)
+        self.definitions = definitions
+        self.velocity = velocity
+        self.autoArrange = autoArrange
+        migrateLegacyPhasers()
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case version, scene, definitions
+        case nodes, order, velocity, panX, panY, autoArrange
+    }
+
+    init(from decoder: Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        version = try c.decodeIfPresent(Int.self, forKey: .version) ?? 1
+        guard version <= Self.currentVersion else {
+            throw PatchDocumentError.unsupportedVersion(version)
+        }
+        velocity = try c.decodeIfPresent(Double.self, forKey: .velocity) ?? 1
+        autoArrange = try c.decodeIfPresent(Bool.self, forKey: .autoArrange) ?? false
+        if version >= 3 {
+            scene = try c.decode(Graph.self, forKey: .scene)
+            definitions = try c.decodeIfPresent([Definition].self, forKey: .definitions) ?? []
+        } else {
+            scene = .init(
+                nodes: try c.decode([Node].self, forKey: .nodes),
+                order: try c.decode([String].self, forKey: .order),
+                panX: try c.decodeIfPresent(Double.self, forKey: .panX) ?? 0,
+                panY: try c.decodeIfPresent(Double.self, forKey: .panY) ?? 0
+            )
+            definitions = []
+            migrateLegacyPhasers()
+            version = Self.currentVersion
+        }
+    }
+
+    private mutating func migrateLegacyPhasers() {
+        for index in scene.nodes.indices where scene.nodes[index].kind == .phaser {
+            guard scene.nodes[index].module == nil else { continue }
+            scene.nodes[index].module = StandardModuleLibrary.phaser
+        }
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(Self.currentVersion, forKey: .version)
+        try c.encode(scene, forKey: .scene)
+        try c.encode(definitions, forKey: .definitions)
+        try c.encode(velocity, forKey: .velocity)
+        try c.encode(autoArrange, forKey: .autoArrange)
+    }
 
     static let fileExtension = "rvpatch"
 
-    /// A dynamic UTI is fine here — the panels only need it to filter and to
-    /// stamp the extension, and a bare SwiftPM binary has no Info.plist to
-    /// declare an exported type in.
     static var contentType: UTType {
         UTType(filenameExtension: fileExtension) ?? .json
     }
@@ -50,93 +163,151 @@ enum PatchDocumentError: LocalizedError {
 
     var errorDescription: String? {
         switch self {
-        case .unsupportedVersion(let v):
-            return "patch version \(v) is newer than this build (\(PatchDocument.currentVersion))"
+        case .unsupportedVersion(let version):
+            "patch version \(version) is newer than this build (\(PatchDocument.currentVersion))"
         }
     }
 }
 
-// ── Model ↔ document ──────────────────────────────────────────────────────
 extension PatchModel {
-    func makeDocument() -> PatchDocument {
-        PatchDocument(
-            nodes: order.compactMap { nodes[$0] }.map { n in
-                PatchDocument.Node(
-                    id: n.id, kind: n.kind,
-                    x: n.position.x, y: n.position.y, hue: n.hue,
-                    values: n.values, inputs: n.inputs)
-            },
-            order: order,
-            velocity: velocity,
-            panX: pan.width, panY: pan.height,
-            autoArrange: autoArrange)
+    private func documentNode(_ node: PatchNode) -> PatchDocument.Node {
+        .init(
+            id: node.id,
+            kind: node.kind,
+            x: node.position.x,
+            y: node.position.y,
+            hue: node.hue,
+            values: node.values,
+            inputs: node.inputs,
+            module: node.module,
+            bindings: node.bindings
+        )
     }
 
-    /// Adopt a document as the live patch. Everything is rebuilt through the
-    /// same invariants `addNode` maintains — a knob absent from the file takes
-    /// its spec default, an inlet the spec no longer has is dropped, and an
-    /// edge to a node that isn't in the file is dropped — so a patch written by
-    /// an older build (or hand-edited) loads as the nearest VALID patch rather
-    /// than a half-wired one.
-    func apply(_ doc: PatchDocument) async throws {
-        guard doc.version <= PatchDocument.currentVersion else {
-            throw PatchDocumentError.unsupportedVersion(doc.version)
+    private func documentGraph(_ graph: PatchGraphState) -> PatchDocument.Graph {
+        .init(
+            nodes: graph.order.compactMap { graph.nodes[$0] }.map(documentNode),
+            order: graph.order,
+            panX: graph.pan.width,
+            panY: graph.pan.height
+        )
+    }
+
+    func makeDocument() -> PatchDocument {
+        snapshotActiveGraph()
+        let encodedDefinitions = definitions.values.sorted {
+            ($0.reference.id, $0.reference.version) <
+                ($1.reference.id, $1.reference.version)
+        }.map { definition in
+            PatchDocument.Definition(
+                id: definition.reference.id,
+                version: definition.reference.version,
+                title: definition.title,
+                input: definition.inputNodeID,
+                output: definition.outputNodeID,
+                parameters: definition.parameters,
+                graph: documentGraph(definition.graph)
+            )
         }
-        let known = Set(doc.nodes.map(\.id))
+        return PatchDocument(
+            nodes: documentGraph(sceneGraph).nodes,
+            order: sceneGraph.order,
+            velocity: velocity,
+            panX: sceneGraph.pan.width,
+            panY: sceneGraph.pan.height,
+            autoArrange: autoArrange,
+            definitions: encodedDefinitions
+        )
+    }
+
+    private func modelGraph(_ graph: PatchDocument.Graph) -> PatchGraphState {
+        let known = Set(graph.nodes.map(\.id))
         var fresh: [String: PatchNode] = [:]
-        for d in doc.nodes {
-            let spec = d.kind.spec
+        for stored in graph.nodes {
+            let spec = stored.kind.spec
             var values: [String: Double] = [:]
-            for k in spec.knobs { values[k.name] = d.values[k.name] ?? k.def }
-            var inputs: [String: [String]] = [:]
-            for p in spec.inlets {
-                inputs[p] = (d.inputs[p] ?? []).filter { known.contains($0) && $0 != d.id }
+            for knob in spec.knobs {
+                values[knob.name] = stored.values[knob.name] ?? knob.def
             }
-            fresh[d.id] = PatchNode(
-                id: d.id, kind: d.kind,
-                position: CGPoint(x: d.x, y: d.y),
-                values: values, inputs: inputs, hue: d.hue)
+            var inputs: [String: [String]] = [:]
+            for port in spec.inlets {
+                inputs[port] = (stored.inputs[port] ?? []).filter {
+                    known.contains($0) && $0 != stored.id
+                }
+            }
+            fresh[stored.id] = PatchNode(
+                id: stored.id,
+                kind: stored.kind,
+                position: CGPoint(x: stored.x, y: stored.y),
+                values: values,
+                inputs: inputs,
+                hue: stored.hue,
+                module: stored.module,
+                bindings: stored.bindings
+            )
         }
-        nodes = fresh
-        // The file's order is authoritative, but never let it lose or invent a
-        // node (a hand-edit that forgets an id would make it unrenderable).
         var seen = Set<String>()
-        order = doc.order.filter { known.contains($0) && seen.insert($0).inserted }
-            + doc.nodes.map(\.id).filter { !seen.contains($0) }
-        pan = CGSize(width: doc.panX, height: doc.panY)
-        autoArrange = doc.autoArrange
-        velocity = doc.velocity
+        let stableOrder = graph.order.filter {
+            known.contains($0) && seen.insert($0).inserted
+        } + graph.nodes.map(\.id).filter { seen.insert($0).inserted }
+        return .init(
+            nodes: fresh,
+            order: stableOrder,
+            pan: CGSize(width: graph.panX, height: graph.panY)
+        )
+    }
+
+    func apply(_ document: PatchDocument) async throws {
+        guard document.version <= PatchDocument.currentVersion else {
+            throw PatchDocumentError.unsupportedVersion(document.version)
+        }
+
+        var loadedDefinitions: [ModuleReference: ModuleDefinitionState] = [:]
+        for stored in document.definitions {
+            let reference = ModuleReference(id: stored.id, version: stored.version)
+            loadedDefinitions[reference] = .init(
+                reference: reference,
+                title: stored.title,
+                inputNodeID: stored.input,
+                outputNodeID: stored.output,
+                parameters: stored.parameters,
+                graph: modelGraph(stored.graph)
+            )
+        }
+
+        var root = modelGraph(document.scene)
+        // Defensive compatibility for programmatic documents that bypassed
+        // PatchDocument's decoder migration.
+        for id in root.order {
+            guard var node = root.nodes[id], node.kind == .phaser,
+                  node.module == nil else { continue }
+            node.module = StandardModuleLibrary.phaser
+            root.nodes[id] = node
+        }
+
+        resetHierarchy(to: root)
+        definitions = loadedDefinitions
+        autoArrange = document.autoArrange
+        velocity = document.velocity
         advanceAuthoredRevision()
-        // New nodes must not collide with loaded ids: resume the counter past
-        // the highest numeric suffix in the file.
-        adoptCounter(from: known)
+        adoptCounter(from: root.nodes.keys)
 
         await pushGraph()
-        // pushGraph re-applies a non-default velocity after a COLD compile, but
-        // a load whose graph happens to match what's already running skips the
-        // compile entirely — so drive the clock here regardless.
-        setVelocity(doc.velocity, force: true)
+        setVelocity(document.velocity, force: true)
     }
 
-    /// Reset to the boot patch (Out + one Osc), forgetting the file.
     func newPatch() async {
-        nodes = [:]
-        order = []
-        pan = .zero
+        resetHierarchy(to: .init(nodes: [:], order: [], pan: .zero))
         resetCounter()
         seedBootPatch()
+        snapshotActiveGraph()
         documentURL = nil
         await pushGraph()
         setVelocity(velocity)
     }
 
-    /// Factory patch for the supported modal-phaser product path.  The Scope
-    /// observes only Out, so its recipe stays presentation-only and does not
-    /// request duplicate intermediate modal realizations.
     func newPhaserDemo() async {
-        nodes = [:]
-        order = []
-        pan = .zero
+        resetHierarchy(to: .init(nodes: [:], order: [], pan: .zero))
         resetCounter()
 
         let resonator = addNode(.resonator, at: CGPoint(x: 88, y: 132))
@@ -151,37 +322,36 @@ extension PatchModel {
             connect(from: roomA.id, to: phaser.id, port: "in")
             connect(from: phaser.id, to: roomB.id, port: "in")
             connect(from: roomB.id, to: output.id, port: "in")
-            if let scope {
-                connect(from: output.id, to: scope.id, port: "ch1")
-            }
+            if let scope { connect(from: output.id, to: scope.id, port: "ch1") }
         }
+        snapshotActiveGraph()
         documentURL = nil
         await pushGraph()
         setVelocity(velocity)
     }
 
-    // ── File I/O ──────────────────────────────────────────────────────────
     func write(to url: URL) throws {
-        let enc = JSONEncoder()
-        enc.outputFormatting = [.prettyPrinted, .sortedKeys]
-        try enc.encode(makeDocument()).write(to: url, options: .atomic)
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
+        try encoder.encode(makeDocument()).write(to: url, options: .atomic)
         documentURL = url
         setStatus("saved · \(url.lastPathComponent)", isError: false)
     }
 
     func read(from url: URL) async throws {
-        let doc = try JSONDecoder().decode(PatchDocument.self, from: Data(contentsOf: url))
-        try await apply(doc)
+        let document = try JSONDecoder().decode(
+            PatchDocument.self,
+            from: Data(contentsOf: url)
+        )
+        try await apply(document)
         documentURL = url
         setStatus("loaded · \(url.lastPathComponent)", isError: false)
     }
 
-    /// Save to the open file, or ask where if there isn't one yet.
     func save() {
         guard let url = documentURL else { return saveAs() }
-        do { try write(to: url) } catch {
-            setStatus("save: \(error.localizedDescription)", isError: true)
-        }
+        do { try write(to: url) }
+        catch { setStatus("save: \(error.localizedDescription)", isError: true) }
     }
 
     func saveAs() {
@@ -191,12 +361,9 @@ extension PatchModel {
             documentURL?.lastPathComponent ?? "patch.\(PatchDocument.fileExtension)"
         panel.canCreateDirectories = true
         guard panel.runModal() == .OK, var url = panel.url else { return }
-        if url.pathExtension.isEmpty {
-            url.appendPathExtension(PatchDocument.fileExtension)
-        }
-        do { try write(to: url) } catch {
-            setStatus("save: \(error.localizedDescription)", isError: true)
-        }
+        if url.pathExtension.isEmpty { url.appendPathExtension(PatchDocument.fileExtension) }
+        do { try write(to: url) }
+        catch { setStatus("save: \(error.localizedDescription)", isError: true) }
     }
 
     func open() {
@@ -205,9 +372,8 @@ extension PatchModel {
         panel.allowsMultipleSelection = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
         Task {
-            do { try await read(from: url) } catch {
-                setStatus("open: \(error.localizedDescription)", isError: true)
-            }
+            do { try await read(from: url) }
+            catch { setStatus("open: \(error.localizedDescription)", isError: true) }
         }
     }
 }

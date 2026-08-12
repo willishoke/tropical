@@ -55,7 +55,8 @@ def masterClock (pidx : String → Option Nat) : Clock :=
     `paramRef`; only structural selectors (`voice`, warp `mode`) and topology are
     baked, so only they trigger a relower. Every generator reads the live
     `masterClock` as its base, so global time-warp reaches all of them. -/
-def buildNode (pidx : String → Option Nat) (id kind : String)
+def buildNodeWithParamNames (pidx : String → Option Nat)
+    (paramName : String → String) (id kind : String)
     (_sel params inObj : Json) : Node × Array PatchNode :=
   -- Ordinary effect inlets are implicit typed fan-ins.  The inlet's served
   -- domain has already rejected signal→modal edges; here multiple signal-side
@@ -77,8 +78,8 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
   -- this node's own knob `kname` as a live value: a closed-form glide if glided,
   -- else a raw slot read; falling back to the baked literal if unallocated.
   let p := fun (kname : String) (dflt : Sig) =>
-    if isGlided kind kname then glideExpr pidx s!"{id}.{kname}" dflt
-    else pref pidx s!"{id}.{kname}" dflt
+    if isGlided kind kname then glideExpr pidx (paramName kname) dflt
+    else pref pidx (paramName kname) dflt
   -- a knob's request-or-table default: the JSON params value if given, else the
   -- table's fallback — the one place buildNode learns a default from.
   let dv := fun (kname : String) => jExpr params kname (fallbackOf kind kname)
@@ -91,15 +92,15 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
     let dflt := dv kname
     let fallback : ArrowTerm :=
       if isGlided kind kname then
-        .arrUn (fun clkQ => glideExprQAt pidx s!"{id}.{kname}" dflt clkQ)
+        .arrUn (fun clkQ => glideExprQAt pidx (paramName kname) dflt clkQ)
           (.clk clk)
       else
-        .konst (pref pidx s!"{id}.{kname}" dflt)
+        .konst (pref pidx (paramName kname) dflt)
     ({ fallback
        signalNode? := (portSources inObj kname)[0]? } : ModalControlRef)
   match kind with
   | "knob" =>
-    match pidx s!"{id}.value" with
+    match pidx (paramName "value") with
     | some i => (.knob i, #[])
     | none => (.mix #[], #[])   -- a knob missing from the table (unreachable): silence
   | "source" =>
@@ -112,7 +113,7 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
     -- the anchor: (phase slot, compile-time freq). Present only when the source's
     -- own freq is a live slot; the compile-time freq is the reference the warped
     -- copies' phase correction is measured from.
-    let anchor := (pidx s!"{id}.freq#phase").map fun i => ((.paramRef ⟨i⟩ : Sig), dv "freq")
+    let anchor := (pidx s!"{paramName "freq"}#phase").map fun i => ((.paramRef ⟨i⟩ : Sig), dv "freq")
     -- dedicated `pm` inlet: an AUDIO node wired here through-zero phase-modulates
     -- this carrier — `depth·mod` (cycles) added to the phase port, NOT the clock, so
     -- the carrier pitch stays put. `freq` is untouched, so the carrier's own freq
@@ -133,7 +134,7 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
     let pitchE := match (portSources inObj "freq")[0]? with
       | some w => pref pidx s!"{w}.value" (dv "freq")
       | none => p "freq" (dv "freq")
-    let anchor := (pidx s!"{id}.freq#phase").map fun i => ((.paramRef ⟨i⟩ : Sig), dv "freq")
+    let anchor := (pidx s!"{paramName "freq"}#phase").map fun i => ((.paramRef ⟨i⟩ : Sig), dv "freq")
     (.source (pluckedVoiceE pitchE (p "morph" (dv "morph"))
        (p "event_rate" (dv "event_rate")) anchor) clk, #[])
   | "comb" =>
@@ -156,7 +157,7 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
   | "reverse" => (.warpFx sig (fun c => neg c), sigFanIn)
   | "fm" =>
     -- `carrier` is a frequency → phase-anchored (own #phase slot); `depth` glides.
-    let carAnchor := (pidx s!"{id}.carrier#phase").map fun i => ((.paramRef ⟨i⟩ : Sig), dv "carrier")
+    let carAnchor := (pidx s!"{paramName "carrier"}#phase").map fun i => ((.paramRef ⟨i⟩ : Sig), dv "carrier")
     (.fm sig (sineVoiceE (p "carrier" (dv "carrier")) carAnchor)
       clk (p "depth" (dv "depth")), sigFanIn)
   | "sflange" =>
@@ -198,7 +199,7 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
       (.modalSource (resonatorBank f0 decay npart) (lit 0) clk addr?, #[])
     | some _ =>
       let cap := (jInt params "partials_max" 6).toNat
-      let countE := pref pidx s!"{id}.partials" (lit (Int.ofNat npart))
+      let countE := pref pidx (paramName "partials") (lit (Int.ofNat npart))
       (.modalSource (resonatorBank f0 decay cap) (lit 0) clk addr? (some countE), #[])
   | "reverb" =>
     let rt60 := modalControl "rt60"
@@ -223,18 +224,32 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
         reverbRoom boundedRt60 rtRange 32 (60, 0) (6000, 0))
       rt60 dirX sway swayRate, modalFanIn)
   | "filter" =>
-    -- the filter IS a modalReverb with a computed 2-mode room: the residue
-    -- calculus does the "filtering" at build time, knobs stay live through it.
-    (.modalReverb modal
-      (filterPair (p "cutoff" (dv "cutoff")) (p "resonance" (dv "resonance"))) none,
-      modalFanIn)
+    -- A filter is now an ordinary proper modal-kernel atom.  Its public module
+    -- remains a convenience surface, but no filter-specific stage survives
+    -- into the modal compiler algebra.
+    let stage : ModalLinearStage := {
+      controls := #[ModalControlRef.constant (lit 0)]
+      build := fun _ values =>
+        .proper (.oriented
+          (filterPair (p "cutoff" (dv "cutoff")) (p "resonance" (dv "resonance")))
+          ((values[0]?).getD (lit 0))) }
+    (.modalLinear modal stage, modalFanIn)
   | "phaser" =>
-    -- Current-universe modal phaser: controls remain deferred until the
-    -- terminal response coordinate freezes one static analog all-pass cascade.
-    -- This is not the history-dependent recurrence of a conventional pedal.
-    (.modalPhaser modal
+    -- The convenience module expands into six ordinary identity-plus-tail
+    -- junctions and one final blend.  Structural lowering, not this product
+    -- name, recovers and retains the all-pass factors.
+    let (node, topology) := modalPhaserTopology id modal
       (modalControl "center") (modalControl "sweep")
-      (modalControl "rate") (modalControl "mix") modalPhaserRatios, modalFanIn)
+      (modalControl "rate") (modalControl "mix") modalPhaserRatios
+    (node, modalFanIn ++ topology)
+  | "modal_allpass_tail" =>
+    (.modalLinear modal <| modalAllpassTailStage
+      (modalControl "center") (modalControl "sweep")
+      (modalControl "rate") (jFloat params "ratio" 1.0), modalFanIn)
+  | "modalblend" =>
+    let dry := ((portSources inObj "dry")[0]?).getD "__silence__"
+    let wet := ((portSources inObj "wet")[0]?).getD "__silence__"
+    (.modalBlend dry wet (modalControl "mix"), #[])
   | "modalmix" => (.modalMix (portSources inObj "in"), #[])
   | "gauge" =>
     -- §5 excitation gauge: re-level the modal input's peak. g=0 identity (unity-DC,
@@ -307,12 +322,19 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
     (.modalSource modes anchor clk addr?, #[])
   | _ => (.mix (portSources inObj "in"), #[])
 
+/-- Construct an ordinary flat node whose public parameter namespace is its id. -/
+def buildNode (pidx : String → Option Nat) (id kind : String)
+    (sel params inObj : Json) : Node × Array PatchNode :=
+  buildNodeWithParamNames pidx (fun knob => s!"{id}.{knob}")
+    id kind sel params inObj
+
 structure Raw where
   id : String
   kind : String
   sel : Json
   params : Json
   inObj : Json
+  paramAliases : Json
 
 def decodeRaw (nj : Json) : Option Raw :=
   match nj.getObjVal? "id", nj.getObjVal? "kind" with
@@ -320,13 +342,21 @@ def decodeRaw (nj : Json) : Option Raw :=
     let sel := (nj.getObjVal? "sel").toOption.getD (Json.mkObj [])
     let params := (nj.getObjVal? "params").toOption.getD (Json.mkObj [])
     let inObj := (nj.getObjVal? "in").toOption.getD (Json.mkObj [])
-    some { id, kind, sel, params, inObj }
+    let paramAliases := (nj.getObjVal? "param_aliases").toOption.getD (Json.mkObj [])
+    some { id, kind, sel, params, inObj, paramAliases }
   | _, _ => none
 
 def rawsOf (j : Json) : Array Raw :=
   match (j.getObjVal? "nodes").toOption.bind (·.getArr?.toOption) with
   | some arr => arr.filterMap decodeRaw
   | none => #[]
+
+/-- A hierarchy leaf may forward one of its local knobs to a stable parameter
+    on its containing public module. Flat v1/v2 nodes have no aliases. -/
+def paramNameOf (raw : Raw) (knob : String) : String :=
+  match raw.paramAliases.getObjVal? knob with
+  | .ok (.str name) => name
+  | _ => s!"{raw.id}.{knob}"
 
 /-- The continuous knobs each node kind carries, DERIVED from the port-spec
     table (declaration order = `ParamIdx` scan order). Structural selectors
@@ -411,7 +441,7 @@ def checkServedKinds (raws : Array Raw) : Except String Unit := do
   for r in raws do
     if withheldKinds.contains r.kind then
       throw s!"unserved kind: '{r.id}' has kind '{r.kind}', which the engine builds but WITHHOLDS from the surface vocabulary (conditioning is guarded, but arbitrary-table factor landing, profile bounds, cost, and live-beta topology are not yet a served contract) — not available as a patch node"
-    unless vocabularyKinds.contains r.kind do
+    unless (vocabularyKinds.contains r.kind) || (hierarchyAtomKinds.contains r.kind) do
       throw s!"unknown kind: '{r.id}' has kind '{r.kind}', which is not a served node kind — see get_vocabulary for the {vocabularyKinds.size} kinds the surface builds"
   pure ()
 
@@ -583,8 +613,11 @@ def collectParams (raws : Array Raw) : Array (String × JsonNumber) := Id.run do
         | some o => !(portSources r.inObj o).isEmpty
         | none => false
       if !selfWired && !ownerWired then
-        let base := s!"{r.id}.{kname}"
+        let base := paramNameOf r kname
         let dflt := (jNum? r.params kname).getD ⟨0, 0⟩
+        let alreadyRegistered := out.any fun (name, _) =>
+          name == base || name == s!"{base}#v0" || name == s!"{base}#phase"
+        if alreadyRegistered then continue
         if isGlided r.kind kname then
           -- three anchor slots for the closed-form ramp; v0=v1=current value and
           -- t0=0 means it starts flat at the knob's value (no ramp until re-anchored).
@@ -625,7 +658,8 @@ def decodeGraph (j : Json) : Except String (PatchGraph × Array (String × JsonN
   let mut pnodes : Array PatchNode := #[]
   for r in raws do
     if r.kind == "out" then continue
-    let (node, extras) := buildNode pidx r.id r.kind r.sel r.params r.inObj
+    let (node, extras) := buildNodeWithParamNames pidx (paramNameOf r)
+      r.id r.kind r.sel r.params r.inObj
     pnodes := pnodes.push { id := r.id, node }
     for e in extras do pnodes := pnodes.push e
   let outIns := match raws.find? (·.id == outId) with
