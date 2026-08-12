@@ -56,6 +56,14 @@ struct ScopeTapBinding: Equatable, Sendable {
     let slot: String
 }
 
+struct RealizedSourceLocation: Equatable, Sendable {
+    let expandedID: String
+    let definitionID: String
+    let definitionVersion: Int
+    let localID: String
+    let instancePath: [String]
+}
+
 /// Complete realized truth published by one successful load_patch_graph call.
 /// Nothing in this value is inferred from the authored graph or a follow-up
 /// diagnostic request.
@@ -66,6 +74,7 @@ struct RealizedPatch: Equatable, Sendable {
     let inlets: [RealizedInlet]
     let liveParameters: [RealizedLiveParameter]
     let taps: [ScopeTapBinding]
+    var sourceMap: [RealizedSourceLocation] = []
 
     func node(id: String) -> RealizedNode? {
         nodes.first { $0.id == id }
@@ -89,6 +98,15 @@ struct RealizedPatch: Equatable, Sendable {
 
     func tap(named name: String) -> ScopeTapBinding? {
         taps.first { $0.name == name }
+    }
+
+    func nodes(atInstancePath path: [String], localID: String?) -> [RealizedNode] {
+        sourceMap.compactMap { location in
+            guard location.instancePath == path,
+                  localID.map({ location.localID == $0 }) ?? true
+            else { return nil }
+            return node(id: location.expandedID)
+        }
     }
 }
 
@@ -268,13 +286,55 @@ enum PatchCompileResponse: Equatable, Sendable {
             throw RealizedPatchDecodeError.invalidField("taps")
         }
 
+
+        var sourceMap: [RealizedSourceLocation] = []
+        if case .array(let entries)? = object["source_map"] {
+            for (index, raw) in entries.enumerated() {
+                guard case .object(let fields) = raw else {
+                    throw RealizedPatchDecodeError.invalidField("source_map[\(index)]")
+                }
+                let expanded = try requiredString(
+                    fields, "expanded", path: "source_map[\(index)].expanded"
+                )
+                let definition = try requiredString(
+                    fields, "definition", path: "source_map[\(index)].definition"
+                )
+                let local = try requiredString(
+                    fields, "local", path: "source_map[\(index)].local"
+                )
+                guard let versionValue = fields["definition_version"],
+                      let version64 = JSONExact.uint64(versionValue),
+                      let version = Int(exactly: version64),
+                      case .array(let pathValues)? = fields["path"]
+                else {
+                    throw RealizedPatchDecodeError.invalidField("source_map[\(index)]")
+                }
+                let path = try pathValues.enumerated().map { pathIndex, value in
+                    guard let segment = value.stringValue, !segment.isEmpty else {
+                        throw RealizedPatchDecodeError.invalidField(
+                            "source_map[\(index)].path[\(pathIndex)]"
+                        )
+                    }
+                    return segment
+                }
+                sourceMap.append(.init(
+                    expandedID: expanded,
+                    definitionID: definition,
+                    definitionVersion: version,
+                    localID: local,
+                    instancePath: path
+                ))
+            }
+        }
+
         return .published(.init(
             vocabularyFingerprint: fingerprint,
             generation: generation,
             nodes: nodes,
             inlets: inlets,
             liveParameters: parameters,
-            taps: taps
+            taps: taps,
+            sourceMap: sourceMap
         ))
     }
 }

@@ -117,6 +117,16 @@ struct NodeView: View {
                     .lineLimit(1)
                     .fixedSize(horizontal: true, vertical: false)
                 Spacer(minLength: 4)
+                if node.kind.isModule {
+                    Button {
+                        model.openModule(node.id)
+                    } label: {
+                        Image(systemName: "square.grid.3x3.square")
+                            .foregroundStyle(Theme.muted)
+                    }
+                    .buttonStyle(.plain)
+                    .help("open module")
+                }
                 if !spec.fixed {
                     Button {
                         model.deleteNode(node.id)
@@ -172,7 +182,9 @@ struct NodeView: View {
     private var knobRow: some View {
         // A knob whose name matches a wired inlet is overridden by the patch
         // (e.g. `freq` driven by a Knob node), so hide it.
-        let shown = spec.knobs.filter { (node.inputs[$0.name] ?? []).isEmpty }
+        let shown = spec.knobs.filter {
+            (node.inputs[$0.name] ?? []).isEmpty && node.bindings[$0.name] == nil
+        }
         if !shown.isEmpty {
             HStack(alignment: .top, spacing: 8) {
                 ForEach(shown, id: \.name) { k in

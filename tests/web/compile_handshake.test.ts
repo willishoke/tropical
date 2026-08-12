@@ -282,4 +282,59 @@ describe('load_patch_graph compile handshake', () => {
       client.stop()
     }
   })
+
+  test('serves and elaborates the versioned modal module library', async () => {
+    if (!existsSync(frontendBin))
+      throw new Error(`frontend binary missing: ${frontendBin} (run \`make build lean\`)`)
+
+    const client = new EngineClient()
+    try {
+      const library = await client.call('get_module_library')
+      expect(library).toMatchObject({
+        schema: 'tropical_module_library',
+        schema_version: 1,
+      })
+      const allpass = library.definitions.find(
+        (definition: any) => definition.id === 'tropical.modal.allpass1',
+      )
+      const phaser = library.definitions.find(
+        (definition: any) => definition.id === 'tropical.modal.phaser',
+      )
+      expect(allpass.nodes.map((node: any) => node.kind)).toEqual([
+        'module_input', 'modal_allpass_tail', 'modalmix', 'module_output',
+      ])
+      expect(phaser.nodes.filter((node: any) => node.kind === 'module')).toHaveLength(6)
+
+      const report = await client.call('load_patch_graph', {
+        version: 3,
+        definitions: [],
+        scene: {
+          nodes: [
+            {
+              id: 'ph', kind: 'module',
+              definition: 'tropical.modal.phaser', definition_version: 1,
+              params: { center: 700, sweep: 1.5, rate: 0.2, mix: 0.5 },
+              in: { in: [] },
+            },
+            { id: 'out', kind: 'out', params: {}, in: { in: ['ph'] } },
+          ],
+          out: 'out',
+        },
+        taps: [],
+      })
+      expect(report.source_map).toHaveLength(13)
+      expect(report.source_map).toContainEqual(expect.objectContaining({
+        expanded: 'ph', definition: 'tropical.modal.phaser', local: 'blend',
+        path: ['ph'],
+      }))
+      for (const name of ['center', 'sweep', 'rate', 'mix']) {
+        expect(report.params.some((parameter: any) => parameter.name === `ph.${name}`))
+          .toBe(true)
+      }
+      expect(report.params.some((parameter: any) => parameter.name.startsWith('__h3_')))
+        .toBe(false)
+    } finally {
+      client.stop()
+    }
+  })
 })

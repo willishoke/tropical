@@ -314,6 +314,10 @@ actor Engine {
         return try EngineVocabulary.decode(from: data)
     }
 
+    func loadModuleLibrary() async throws -> [ModuleReference: ModuleDefinitionState] {
+        try EngineModuleLibrary.decode(try await callRaw("get_module_library"))
+    }
+
     /// Typed compiler lane. The expected vocabulary and ordered tap names come
     /// from the model's already-adopted authored semantics; a mismatch is
     /// rejected before the engine-side realized store advances.

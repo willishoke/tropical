@@ -11,6 +11,9 @@ struct PatchNode: Identifiable {
     /// inlet wears the hues of its sources, so fan-out is the same color
     /// appearing at many inlets. Golden-angle spacing keeps neighbors apart.
     let hue: Double
+    var module: ModuleReference? = nil
+    /// local knob name → containing module parameter name
+    var bindings: [String: String] = [:]
 
     var allInputs: [String] { inputs.values.flatMap { $0 } }
 
@@ -86,6 +89,12 @@ enum NodePresentationStatus: Equatable, Sendable {
 final class PatchModel: ObservableObject {
     @Published var nodes: [String: PatchNode] = [:]
     @Published var order: [String] = []   // stable z/render order
+    @Published var definitions: [ModuleReference: ModuleDefinitionState] = [:]
+    @Published var hierarchyPath: [HierarchyFrame] = [
+        .init(location: .scene, title: "Patch", instanceID: nil)
+    ]
+    var currentHierarchyLocation: HierarchyLocation = .scene
+    var sceneGraph = PatchGraphState(nodes: [:], order: [], pan: .zero)
     @Published var status = "booting engine…"
     @Published var statusIsError = false
     private var telemetryOwnsStatus = false
@@ -100,6 +109,9 @@ final class PatchModel: ObservableObject {
     /// the window title and whether ⌘S needs to ask.
     @Published var documentURL: URL?
     @Published private(set) var vocabulary: EngineVocabulary?
+    @Published private(set) var installedDefinitions: [
+        ModuleReference: ModuleDefinitionState
+    ] = [:]
     @Published private(set) var authoredRevision = 0
     @Published private(set) var realizedPatch: RealizedPatchSnapshot?
     @Published private(set) var runningGeneration: EngineGeneration?
@@ -116,9 +128,28 @@ final class PatchModel: ObservableObject {
     func presentationStatus(for node: PatchNode) -> NodePresentationStatus? {
         guard !node.kind.spec.monitor else { return nil }
         guard let realizedPatch,
-              realizedPatch.loweringRevision == loweringRevision,
-              let realizedNode = realizedPatch.patch.node(id: node.id)
+              realizedPatch.loweringRevision == loweringRevision
         else { return .pending }
+        let realizedNode: RealizedNode?
+        if isAtScene {
+            realizedNode = realizedPatch.patch.node(id: node.id)
+        } else {
+            let path = hierarchyPath.compactMap(\.instanceID)
+            let candidates: [RealizedNode]
+            if node.kind.isModule {
+                candidates = realizedPatch.patch.nodes(
+                    atInstancePath: path + [node.id],
+                    localID: nil
+                )
+            } else {
+                candidates = realizedPatch.patch.nodes(
+                    atInstancePath: path,
+                    localID: node.id
+                )
+            }
+            realizedNode = candidates.first { $0.status == .active } ?? candidates.first
+        }
+        guard let realizedNode else { return nil }
         return realizedNode.status == .active ? .active : .excluded
     }
 
@@ -222,6 +253,7 @@ final class PatchModel: ObservableObject {
 
         startEngine()
         seedBootPatch()
+        snapshotActiveGraph()
         setStatus("engine up · patch something", isError: false)
         startScopePolling()
     }
@@ -242,6 +274,7 @@ final class PatchModel: ObservableObject {
             Task { await synchronizeEngineState() }
         case .exit(let code):
             vocabulary = nil
+            installedDefinitions = [:]
             lastPushed = nil
             truth.reset()
             publishTruth()
@@ -258,11 +291,16 @@ final class PatchModel: ObservableObject {
     private func synchronizeEngineState() async {
         do {
             vocabulary = try await engine.loadVocabulary()
+            installedDefinitions = try await engine.loadModuleLibrary()
             await syncAudioState()
             schedulePush()
         } catch {
             setStatus("engine vocabulary: \(error.localizedDescription)", isError: true)
         }
+    }
+
+    func moduleTemplate(for reference: ModuleReference) -> ModuleDefinitionState? {
+        installedDefinitions[reference]
     }
 
     private func publishTruth() {
@@ -307,9 +345,15 @@ final class PatchModel: ObservableObject {
         for k in spec.knobs { values[k.name] = k.def }
         var inputs: [String: [String]] = [:]
         for p in spec.inlets { inputs[p] = [] }
+        var module: ModuleReference?
+        if kind == .phaser {
+            module = StandardModuleLibrary.phaser
+        } else if kind == .allpass {
+            module = StandardModuleLibrary.allpass
+        }
         let n = PatchNode(
             id: id, kind: kind, position: pos, values: values, inputs: inputs,
-            hue: Double((counter * 137) % 360))
+            hue: Double((counter * 137) % 360), module: module)
         nodes[id] = n
         order.append(id)
         autoArrangeIfOn()
@@ -399,14 +443,15 @@ final class PatchModel: ObservableObject {
     /// define the request; repeated sources are kept once, and Out is omitted
     /// because its final-mix binding is always published as `out`.
     var requestedTapNodeIDs: [String] {
+        snapshotActiveGraph()
         var candidates: [String] = []
-        for id in order {
-            guard let monitor = nodes[id], monitor.kind.spec.monitor else { continue }
+        for id in sceneGraph.order {
+            guard let monitor = sceneGraph.nodes[id], monitor.kind.spec.monitor else { continue }
             for port in monitor.kind.spec.inlets {
                 candidates.append(contentsOf: monitor.inputs[port] ?? [])
             }
         }
-        let allowed = Set(nodes.values.compactMap { node in
+        let allowed = Set(sceneGraph.nodes.values.compactMap { node in
             node.kind != .out && !node.kind.spec.monitor ? node.id : nil
         })
         return ObservationTapSelection.stableSourceIDs(
@@ -422,26 +467,72 @@ final class PatchModel: ObservableObject {
     }
 
     func serialize() -> JSONValue {
-        var out: [JSONValue] = []
-        for id in order {
-            guard let n = nodes[id], !n.kind.spec.monitor else { continue }
-            let spec = n.kind.spec
-            var params: [String: JSONValue] = [:]
-            for k in spec.knobs { params[k.name] = .number(n.values[k.name] ?? k.def) }
-            var inputs: [String: JSONValue] = [:]
-            for p in spec.inlets { inputs[p] = .array((n.inputs[p] ?? []).map(JSONValue.string)) }
-            out.append(.object([
-                "id": .string(n.id),
-                "kind": .string(n.kind.rawValue),
-                "params": .object(params),
-                "sel": .object([:]),
-                "in": .object(inputs),
-            ]))
+        snapshotActiveGraph()
+
+        func engineNodes(_ graph: PatchGraphState) -> [JSONValue] {
+            var result: [JSONValue] = []
+            for id in graph.order {
+                guard let node = graph.nodes[id], !node.kind.spec.monitor else { continue }
+                let spec = node.kind.spec
+                var params: [String: JSONValue] = [:]
+                for knob in spec.knobs {
+                    params[knob.name] = .number(node.values[knob.name] ?? knob.def)
+                }
+                var inputs: [String: JSONValue] = [:]
+                for port in spec.inlets {
+                    inputs[port] = .array((node.inputs[port] ?? []).map(JSONValue.string))
+                }
+                var encoded: [String: JSONValue] = [
+                    "id": .string(node.id),
+                    "kind": .string(node.module == nil ? node.kind.rawValue : "module"),
+                    "params": .object(params),
+                    "sel": .object([:]),
+                    "in": .object(inputs),
+                ]
+                if let module = node.module {
+                    encoded["definition"] = .string(module.id)
+                    encoded["definition_version"] = .number(Double(module.version))
+                }
+                if !node.bindings.isEmpty {
+                    encoded["bindings"] = .object(
+                        node.bindings.mapValues(JSONValue.string)
+                    )
+                }
+                result.append(.object(encoded))
+            }
+            return result
         }
-        let outNode = nodes.values.first { $0.kind == .out }
+
+        let definitionValues: [JSONValue] = definitions.values
+            .sorted {
+                ($0.reference.id, $0.reference.version) <
+                    ($1.reference.id, $1.reference.version)
+            }
+            .map { definition in
+                .object([
+                    "id": .string(definition.reference.id),
+                    "version": .number(Double(definition.reference.version)),
+                    "input": .string(definition.inputNodeID),
+                    "output": .string(definition.outputNodeID),
+                    "input_domain": .string("modal"),
+                    "output_domain": .string("modal"),
+                    "parameters": .array(definition.parameters.map { parameter in
+                        .object([
+                            "name": .string(parameter.name),
+                            "default": .number(parameter.defaultValue),
+                        ])
+                    }),
+                    "nodes": .array(engineNodes(definition.graph)),
+                ])
+            }
+        let outNode = sceneGraph.nodes.values.first { $0.kind == .out }
         return .object([
-            "nodes": .array(out),
-            "out": outNode.map { .string($0.id) } ?? .null,
+            "version": .number(3),
+            "definitions": .array(definitionValues),
+            "scene": .object([
+                "nodes": .array(engineNodes(sceneGraph)),
+                "out": outNode.map { .string($0.id) } ?? .null,
+            ]),
             "taps": .array(requestedTapNodeIDs.map(JSONValue.string)),
         ])
     }

@@ -1,4 +1,5 @@
 import Tropical.Playground.Report
+import Tropical.Playground.Hierarchy
 
 /-!
 # Playground.Compile
@@ -22,6 +23,7 @@ open Tropical.Exact (DyadicI)
     upstream cone), so they're for the inspection build, not a lean audio path. -/
 def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j : Json) :
     Except String CompiledPatch := do
+  let j ← elaboratePatchHierarchy j
   let raws := rawsOf j
   checkServedKinds raws                              -- reject withheld/unknown kinds FIRST (honest msg over the misleading type error)
   checkEdgeTypes raws                                -- reject ill-typed / dangling / wire-into-knob edges pre-lowering

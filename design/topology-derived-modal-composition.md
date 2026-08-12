@@ -2,12 +2,12 @@
 
 Date: 2026-08-11 (America/Los_Angeles)
 
-Status: grounded architectural direction. The first compiler milestone in
-section 10 is implemented on this branch; hierarchy, editable definitions, and
-the Reversible views remain future work. This document does not supersede
+Status: grounded architectural direction with the first two vertical slices in
+section 10 implemented on this branch. Lower coefficient atoms, the response /
+pole view, and predictive cost UX remain future work. This document does not supersede
 [`architecture.md`](architecture.md).
 
-## 0. Milestone landed on this branch
+## 0. Milestones landed on this branch
 
 This branch is no longer document-only. It lands the first compiler vertical
 slice:
@@ -18,8 +18,9 @@ slice:
 - `ModalStage.phaser` and `Node.modalPhaser` are removed in favor of one generic
   `ModalStage.linear`, plus ordinary `modalLinear`, `modalMix`, and `modalBlend`
   graph nodes;
-- the served Phaser decoder expands to six explicit proper-tail transforms,
-  six `identity + tail` topology junctions, and one dry/wet blend;
+- the legacy Phaser input migrates through the hierarchy boundary to six
+  explicit proper-tail transforms, six `identity + tail` topology junctions,
+  and one dry/wet blend;
 - lowering recognizes those junctions strictly from shared node identity,
   retains six factors, and selects the compact terminal from generic kernel
   structure rather than an effect tag;
@@ -30,11 +31,27 @@ slice:
   exercises the Filter as a second producer, and retains the 22,688-byte
   canonical product scratch row (22,320-byte baseline).
 
-What has not landed yet is equally important: the Phaser expansion is
-compiler-visible flat topology, not yet a persisted, user-expandable library
-definition. Reversible still displays the compact public Phaser node. Document
-v3, nested editing, the lower atomic/control floor, diagnostics/source maps,
-and filter-designer views remain the next phase.
+The second vertical slice promotes that topology into the authoring language:
+
+- a Lean-owned v3 hierarchy elaborator validates definition and inner-graph
+  cycles, protects installed definition versions, topologically orders graphs,
+  assigns length-delimited hygienic ids, forwards one public parameter slot to
+  every bound leaf, and emits nested source maps before ordinary graph checks;
+- versioned installed `Allpass1` and six-section `Phaser` definitions are now
+  the hierarchical source of truth, and an authored detached Phaser definition
+  qualifies against the legacy compact surface and installed definition;
+- the engine serves the installed module library and still emits no hierarchy,
+  Phaser, or module backend opcode;
+- Reversible writes document v3, deterministically migrates v1 Phaser nodes to
+  installed definition references, persists nested presentation/order/bindings, and lets a
+  user enter Phaser and Allpass canvases through a breadcrumb; and
+- realized reports carry the elaborator source map, allowing nested nodes to
+  show the active/excluded truth of their expanded atoms.
+
+The lower public coefficient/control floor is still intentionally deferred: the
+first-order tail remains a compiler-private bootstrap atom. The response/pole
+view, predictive cost feedback, and bounded linear-feedback spike also remain
+future work.
 
 ## 1. Decision requested
 
@@ -61,12 +78,12 @@ them, and permits exact structural specializations. The choice is therefore not
 > Topology is the user notation; an algebra is the compiler meaning of that
 > topology.
 
-The compiler milestone on this branch makes the shipped six-section Phaser an
+The first compiler milestone on this branch makes the shipped six-section Phaser an
 ordinary flat graph assembled from first-order modal sections and typed wiring,
 and recovers the same compact product and production terminal schedule. The
 existing resonant low-pass Filter passes through the same generic kernel
 algebra as a second consumer, so the representation is not merely a renamed
-Phaser. The next product milestone promotes that factory to a versioned library
+Phaser. The second milestone now promotes that factory to a versioned library
 definition users can expand and edit.
 
 This phase remains feed-forward and closed-form. It does not relax Tropical's
@@ -137,7 +154,7 @@ The proposal builds beside the current paths rather than replacing the trunk.
 | `ModalMode` already carries live `Sig` expressions and a declared damping interval. | [`Modal.Residue`](../lean/Tropical/EmitArrow/Modal/Residue.lean) | Atomic pole nodes can remain current-universe and participate in admission without baking live controls. |
 | The executable trunk has no modal or Phaser opcode. It has ordinary scalar DAG nodes plus bounded `bankSum` and `routedSum` regions. | [`Ir.Nodes`](../lean/Tropical/Ir/Nodes.lean) | The first phase should eliminate the new modal algebra at the Modal-to-Sig seam and keep LLVM, WASM, MSL, and Plan 6 unchanged. |
 | The product vocabulary is closed in Lean and mirrored by a closed Swift `NodeKind`. | `portSpecs`/`buildNode` in [`Playground`](../lean/Tropical/Playground/) and [`NodeKind.swift`](../reversible/Sources/Reversible/NodeKind.swift) | Atomic nodes must first become registered kinds. Reusable user modules require dynamic descriptors rather than another growing Swift enum. |
-| Reversible's v2 document is one flat `nodes` array plus presentation, monitors, transport, and one output. | [`PatchDocumentV2.swift`](../reversible/Sources/Reversible/PatchDocumentV2.swift) | There is nowhere to persist a module definition or nested graph today. A versioned document change is required. |
+| Reversible's active file path is the flat v1 `PatchDocument`; the richer lossless `PatchDocumentV2` exists beside it but is not wired into app open/save. | [`PatchDocument.swift`](../reversible/Sources/Reversible/PatchDocument.swift) and [`PatchDocumentV2.swift`](../reversible/Sources/Reversible/PatchDocumentV2.swift) | V3 must migrate the format users actually save, rather than accidentally extending the inactive v2 experiment. |
 | Reversible and the engine now accept multiple ordered wires on ordinary `in` ports, while controls, addresses, and modulation ports remain exclusive. | `PortSpec.multi`, `buildNode` implicit fan-in, `PatchModel.connect`, and their gates | The needed visual composition gesture has landed. It should remain type-directed and implicit. |
 | Cycles are rejected in the Reversible model, v2 validation, `Patch.lowerAt`, session compilation, and direct program/export construction. | [`PatchModel.swift`](../reversible/Sources/Reversible/PatchModel.swift), [`PatchDocumentV2.swift`](../reversible/Sources/Reversible/PatchDocumentV2.swift), and [`Ir.Cycles`](../lean/Tropical/Ir/Cycles.lean) | A filter-design loop must be a separate scoped source form with a total elaboration, not a normal patch edge. |
 | `tropical_program_2` is a patch bay over registered types and rejects `programDecl`. | [`Engine.ProgramIO.Ingest`](../lean/Tropical/Engine/ProgramIO/Ingest.lean) | Hierarchical Reversible definitions must not silently revive the retired general wire program language. They should expand hygienically to served atomic graph nodes before the current patch lowering. |
@@ -415,8 +432,8 @@ The hierarchy slice should finish that move:
 - keep only presentation overrides client-side;
 - introduce a module-instance descriptor synthesized from its definition;
 - add a navigation stack for the scene and nested definition graphs; and
-- retain v2 loading as an explicit one-way migration to a v3 scene with no
-  definitions.
+- retain v1 loading as an explicit one-way migration to a v3 scene, referencing
+  installed definitions for legacy product modules such as Phaser.
 
 Unknown-field preservation in v2 is useful but insufficient: a v2 client can
 round-trip an unfamiliar field, yet its validator and compiler cannot give a
@@ -566,33 +583,36 @@ Deliverables:
 - compiler-private typed linear-tail and blend lowering actions;
 - explicit direct-plus-tail topology sufficient to express one all-pass
   section;
-- programmatic first-order-section and six-section Phaser graph factories;
-- the served legacy Phaser kind expands through that graph factory; and
+- programmatic first-order-section and six-section Phaser oracle factories;
+- the served legacy Phaser kind migrates through the installed definition; and
 - no production semantic match on the string `"phaser"` or
   `ModalStage.phaser` remains.
 
 The existing Filter lowers through `KernelExpr.proper` in this milestone.
 
-### Next milestone: hierarchical Lean elaboration, library definitions, and document v3
+### Landed: hierarchical Lean elaboration, library definitions, and document v3
 
-Add definitions, typed boundary ports, hygienic expansion, source maps, and v2
-migration. Keep `tropical_program_2` unchanged.
+This branch adds definitions, typed boundary ports, hygienic expansion, source
+maps, and legacy-document migration while keeping `tropical_program_2`
+unchanged.
 
 Deliverables:
 
 - a closed v3 schema and round-trip fixtures;
 - versioned `Allpass1` and six-section `Phaser` library definitions replacing
   the programmatic factories as the product source of truth;
-- legacy Phaser documents migrate to an instance of the shipped definition;
+- legacy Phaser documents migrate to the installed definition and detach only
+  when its internals are opened for editing;
 - definition-reference and inner-graph cycle refusal;
 - stable expansion ids and one-slot parameter forwarding;
 - expanded/collapsed plan equivalence; and
 - realized diagnostics mapped back to the nested authored path.
 
-### Following milestone: Reversible hierarchy and filter view
+### Partially landed: Reversible hierarchy; filter view remains next
 
-Move the canvas to dynamic vocabulary descriptors, add expand/collapse and
-breadcrumbs, and render the first response/pole view.
+This branch adds expand/collapse, breadcrumbs, nested persistence, and detached
+editing. Moving the full canvas to dynamic vocabulary descriptors and rendering
+the first response/pole and cost views remain next.
 
 Deliverables:
 
@@ -664,7 +684,7 @@ The phase is complete only when all of the following are true.
   same terminal realization.
 - The backend plan contains ordinary routed/bank regions and no Phaser or
   hierarchy opcode.
-- Untouched v2 documents migrate deterministically and retain connection order.
+- Untouched v1 documents migrate deterministically and retain connection order.
 - Signal-to-modal edges are rejected at the typed boundary in every view.
 
 ### Performance qualification

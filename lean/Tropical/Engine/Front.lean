@@ -50,9 +50,12 @@ private def graphArtifactArgs (args : Json) (taps : Json) : Json :=
     `compileSession → buildKernelIr → loadIrStaged` tail. A compile failure
     errors BEFORE the load, so the previous kernel keeps playing. -/
 def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
-  let requestedTaps := selectedObservationTapNames args
+  let flatArgs ← match Tropical.Playground.elaboratePatchHierarchy args with
+    | .error e => internalError e
+    | .ok graph => pure graph
+  let requestedTaps := selectedObservationTapNames flatArgs
   let (compiled, publishedTaps, generation) ← if requestedTaps.isEmpty then
-      let compiled ← match ← Tropical.Playground.compilePlan args with
+      let compiled ← match ← Tropical.Playground.compilePlan flatArgs with
         | .error e => internalError e
         | .ok p => pure p
       let generation ←
@@ -64,8 +67,8 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
       -- participates in the audible path. Keep the authored final output as
       -- observation port `out`; explicit probes are additional roots, never a
       -- replacement that silently changes what the `out` binding means.
-      let audioArgs := graphArtifactArgs args (Json.bool false)
-      let observationArgs := graphArtifactArgs args
+      let audioArgs := graphArtifactArgs flatArgs (Json.bool false)
+      let observationArgs := graphArtifactArgs flatArgs
         (Json.arr (requestedTaps.map Json.str))
       let audio ← match ← Tropical.Playground.compilePlan audioArgs with
         | .error e => internalError e
@@ -83,14 +86,14 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
   -- `render_window`-readable root output slot), so an attached scope discovers
   -- this graph's inspection points via `list_scope_taps` with no session wiring.
   env.state.modify (fun st => { st with
-    params := Tropical.Playground.knobParams args
+    params := Tropical.Playground.knobParams flatArgs
     scopeTaps := publishedTaps
     paramDisciplines := compiled.plan.paramDisciplines })
   -- The realized-state report: facts about what compiled (active/excluded
   -- nodes, wired/normalled inputs, live params with disciplines, taps) —
   -- never warnings. `ok` stays for callers that only ever looked at it.
-  pure <| Tropical.Playground.realizedReportForGeneration args publishedTaps
-    generation.programVersion generation.controlVersion
+  pure <| Tropical.Playground.realizedReportForGeneration flatArgs publishedTaps
+    generation.programVersion generation.controlVersion (some args)
 
 def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   wrap <| match name with
@@ -99,6 +102,7 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   -- disciplines, display metadata) — clients render it, never re-encode it.
   -- Session-independent, so it just echoes.
   | "get_vocabulary" => pure Tropical.Playground.vocabularyJson
+  | "get_module_library" => pure Tropical.Playground.hierarchyLibraryJson
   | "add_instance"    => handleAddInstance env args
   | "remove_instance" => handleRemoveInstance env args
   | "replicate"       => handleReplicate env args
