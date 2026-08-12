@@ -48,8 +48,8 @@ private def cscale (scale : Float) (a : CplxF) : CplxF :=
 private def constantControl (value : Sig) : ModalControlRef :=
   ModalControlRef.constant value
 
-private def testPhaser (input : String) : Node :=
-  .modalPhaser input
+private def testPhaser (id input : String) : Node × Array PatchNode :=
+  modalPhaserTopology id input
     (constantControl (lit 700)) (constantControl (lit 15 1))
     (constantControl (lit 2 1)) (constantControl (lit 5 1))
     modalPhaserRatios
@@ -58,10 +58,11 @@ private def sourceMode (sigma : Int := 3) : ModalMode :=
   ModalMode.hz (lit 220) (lit sigma) (lit 1)
 
 private def phaserGraph : PatchGraph :=
+  let (phaser, topology) := testPhaser "phaser" "source"
   { nodes := #[
       { id := "source", node := .modalSource #[sourceMode] (lit (Int.ofNat anchor))
           clockLit none },
-      { id := "phaser", node := testPhaser "source" }]
+      { id := "phaser", node := phaser }] ++ topology
     output := "phaser" }
 
 private def graphPlan (arena : Arena) (name : String) (graph : PatchGraph) :
@@ -167,33 +168,86 @@ private def controlValue (control : ModalControlRef) : Option Float := do
   let .konst expression := control.fallback | none
   sigConstF? expression
 
-private def deferredStructureCheck : Bool :=
-  let rankOf := fun id => if id == "source" then some 0 else
-    if id == "phaser" then some 1 else none
-  match lowerModal phaserGraph rankOf "phaser" 1 with
-  | .ok #[branch] =>
-      nodeIsModal phaserGraph "phaser" && match branch.stages.toList with
-      | [.phaser stage] =>
-          stage.ratios == modalPhaserRatios &&
-            controlValue stage.center == some 700.0 &&
-            controlValue stage.sweep == some 1.5 &&
-            controlValue stage.rate == some 0.2 &&
-            controlValue stage.mix == some 0.5 &&
-            branch.controls.size == 4
+private def lowerModalRoot (graph : PatchGraph) (id : String) : Except String ModalForest := do
+  let ids := graph.nodes.map (·.id)
+  let deps := graph.nodes.map fun node => node.node.inputIds.filterMap ids.idxOf?
+  let some ranks := Tropical.Ir.topoRanks? deps | throw "fixture cycle"
+  let some index := ids.idxOf? id | throw s!"fixture node '{id}' not found"
+  let some rank := ranks[index]? | throw s!"fixture node '{id}' has no rank"
+  lowerModal graph (fun name => (ids.idxOf? name).bind (ranks[·]?)) id rank
+
+/-- Visible topology and retained compiler structure both grow by one factor
+    per authored section; no parallel product is distributed here. -/
+private def retainedSizeCheck (ratios : Array Float) : Bool :=
+  let (phaser, topology) := modalPhaserTopology "phaser" "source"
+    (constantControl (lit 700)) (constantControl (lit 15 1))
+    (constantControl (lit 2 1)) (constantControl (lit 5 1)) ratios
+  let graph : PatchGraph := {
+    nodes := #[
+      { id := "source", node := .modalSource #[sourceMode] (lit 0) clockLit none },
+      { id := "phaser", node := phaser }] ++ topology
+    output := "phaser" }
+  let tailNodes := topology.countP fun node => node.node matches .modalLinear _ _
+  let junctions := topology.countP fun node => node.node matches .modalMix _
+  match lowerModalRoot graph "phaser" with
+  | .ok #[branch] => match branch.stages.toList with
+      | [.linear stage] =>
+          let values := branch.controls.filterMap controlValue |>.map litF
+          match (stage.build clockLit values).dryWetAllpassCascadeShape? with
+          | some (tails, _) =>
+              topology.size == 2 * ratios.size && tailNodes == ratios.size &&
+                junctions == ratios.size && tails.size == ratios.size &&
+                branch.controls.size == 3 * ratios.size + 1
+          | none => false
       | _ => false
   | _ => false
 
+private def deferredStructureCheck : Bool :=
+  let explicitTails := phaserGraph.nodes.countP fun node =>
+    node.node matches .modalLinear _ _
+  let explicitJunctions := phaserGraph.nodes.countP fun node =>
+    node.node matches .modalMix _
+  retainedSizeCheck (modalPhaserRatios.extract 0 1) &&
+    retainedSizeCheck (modalPhaserRatios.extract 0 2) &&
+    retainedSizeCheck modalPhaserRatios &&
+  match lowerModalRoot phaserGraph "phaser" with
+  | .ok #[branch] =>
+      explicitTails == 6 && explicitJunctions == 6 &&
+        nodeIsModal phaserGraph "phaser" && match branch.stages.toList with
+      | [.linear stage] =>
+          let values := branch.controls.filterMap controlValue |>.map litF
+          match (stage.build clockLit values).dryWetAllpassCascadeShape? with
+          | some (tails, mix) =>
+              tails.size == 6 && sigConstF? mix == some 0.5 &&
+                branch.controls.size == 19 &&
+                branch.controls[0]?.bind controlValue == some 700.0 &&
+                branch.controls[1]?.bind controlValue == some 1.5 &&
+                branch.controls[2]?.bind controlValue == some 0.2
+          | none => false
+      | _ => false
+  | _ => false
+
+/-- Filter is the independent second producer proving the retained algebra is
+    not merely a renamed phaser stage. -/
+private def filterUsesGenericKernelCheck : Bool :=
+  let empty := Lean.Json.mkObj []
+  let (node, _) := buildNode (fun _ => none) "filter" "filter" empty empty empty
+  match node with
+  | .modalLinear _ stage =>
+      let values := stage.controls.filterMap controlValue |>.map litF
+      (stage.build clockLit values).orientedShape?.isSome
+  | _ => false
+
 private def modalMixOrderCheck : Bool :=
+  let (phaser, topology) := testPhaser "phaser" "mix"
   let graph : PatchGraph :=
     { nodes := #[
         { id := "a", node := .modalSource #[sourceMode 3] (lit 0) clockLit none },
         { id := "b", node := .modalSource #[sourceMode 7] (lit 0) clockLit none },
         { id := "mix", node := .modalMix #["b", "a"] },
-        { id := "phaser", node := testPhaser "mix" }]
+        { id := "phaser", node := phaser }] ++ topology
       output := "phaser" }
-  let rankOf := fun id => if id == "a" then some 0 else if id == "b" then some 1
-    else if id == "mix" then some 2 else if id == "phaser" then some 3 else none
-  match lowerModal graph rankOf "phaser" 3 with
+  match lowerModalRoot graph "phaser" with
   | .ok #[first, second] =>
       let sigmaOf := fun branch => match branch.source with
         | .plain modes => modes[0]?.bind (sigConstF? ·.sigma)
@@ -203,28 +257,17 @@ private def modalMixOrderCheck : Bool :=
   | _ => false
 
 private def refusalChecks : Bool :=
+  let (phaser, topology) := testPhaser "phaser" "bloom"
   let bloomed : PatchGraph :=
     { nodes := #[
         { id := "bloom", node := .modalSource #[sourceMode] (lit 0) clockLit none
             none (some (0.1, 1.8)) },
-        { id := "phaser", node := testPhaser "bloom" }]
-      output := "phaser" }
-  let badRatios : PatchGraph :=
-    { nodes := #[
-        { id := "source", node := .modalSource #[sourceMode] (lit 0) clockLit none },
-        { id := "phaser", node := .modalPhaser "source"
-            (constantControl (lit 700)) (constantControl (lit 1))
-            (constantControl (lit 1)) (constantControl (lit 5 1))
-            #[1.0, 1.0, 2.0, 3.0, 4.0, 5.0] }]
+        { id := "phaser", node := phaser }] ++ topology
       output := "phaser" }
   let bloomOk := match lowerGraph bloomed with
-    | .error error => error == "lower: bloomed phaser crossing at 'phaser' refused (the live all-pass/Gamma crossing is not implemented)"
+    | .error error => error == "lower: bloomed linear-kernel crossing at 'phaser' refused (the live linear/Gamma crossing is not implemented)"
     | .ok _ => false
-  let ranks := fun id => if id == "source" then some 0 else if id == "phaser" then some 1 else none
-  let ratiosOk := match lowerModal badRatios ranks "phaser" 1 with
-    | .error error => error == "modal phaser 'phaser': expected six distinct positive structural ratios"
-    | .ok _ => false
-  bloomOk && ratiosOk
+  bloomOk
 
 private def phaserPatchJson : String :=
   "{\"nodes\":[" ++
@@ -326,6 +369,7 @@ private def productScratchCheck (arena : Arena)
 def runPhaser (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Bool := do
   IO.eprintln "current-universe modal phaser: structural gates"
   let structural := deferredStructureCheck
+  let genericFilter := filterUsesGenericKernelCheck
   let forestOrder := modalMixOrderCheck
   let refusals := refusalChecks
   IO.eprintln "        rendering independent-oracle fixture"
@@ -338,12 +382,12 @@ def runPhaser (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Boo
   match numeric, fused, live, product with
   | .ok samples, .ok fusedError, .ok controlsLive, .ok (scratch, baseline) =>
       let oracleError := maximumOracleError samples
-      IO.println s!"        deferred={structural} forest-order={forestOrder} refusals={refusals} oracle max abs={oracleError}"
+      IO.println s!"        topology-derived={structural} generic-filter={genericFilter} forest-order={forestOrder} refusals={refusals} oracle max abs={oracleError}"
       IO.println s!"        fused two-room JIT vs generic max abs={fusedError} ({fusedError * 1.0e9}e-9)"
       IO.println s!"        four served controls live without relower={controlsLive}; canonical 6→32→6-section→32 Metal scratch={scratch.total}/24576 (arrays={scratch.arrays}, max-routes={scratch.maxRoutedRecords}×4, slots={scratch.arraySlots}/{scratch.coeffArraySlots} coeff)"
       IO.println s!"        two-room baseline scratch={baseline.total} (arrays={baseline.arrays}, max-routes={baseline.maxRoutedRecords}×4, slots={baseline.arraySlots}/{baseline.coeffArraySlots} coeff)"
       IO.println s!"        product non-coeff array floats={repr scratch.nonCoeffSizes}; baseline={repr baseline.nonCoeffSizes}"
-      if structural && forestOrder && refusals && oracleError < 2.0e-5 &&
+      if structural && genericFilter && forestOrder && refusals && oracleError < 2.0e-5 &&
           -- The two exact schedules sum the same analytic rows in different
           -- routed orders.  This absolute lens is below two accumulated
           -- Q4.28 quanta per participating row and remains meaningful at
@@ -351,7 +395,7 @@ def runPhaser (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Boo
           fusedError < 2.0e-7 &&
           controlsLive && scratch.total ≤ 24576 then
         passGate "modal-phaser"
-          "deferred current-universe stage; independent rational render oracle; authored modalMix order; live center/sweep/rate/mix; named bloom/collision refusals; exact two-room product stays inside Metal scratch policy"
+          "topology-derived generic kernel; Filter is a second producer; independent rational render oracle; authored modalMix order; live controls; named bloom crossing refusal; exact two-room product stays inside Metal scratch policy"
       else
         failGate "modal-phaser" "structural, numerical, live-control, or product scratch contract failed"
   | .error error, _, _, _ => failGate "modal-phaser" s!"render: {firstLine error}"

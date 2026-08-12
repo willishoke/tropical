@@ -2,9 +2,39 @@
 
 Date: 2026-08-11 (America/Los_Angeles)
 
-Status: grounded proposal for the next development phase. This document does
-not supersede [`architecture.md`](architecture.md); it proposes a bounded route
-from the implementation on `main` to a more deeply composable authoring model.
+Status: grounded architectural direction. The first compiler milestone in
+section 10 is implemented on this branch; hierarchy, editable definitions, and
+the Reversible views remain future work. This document does not supersede
+[`architecture.md`](architecture.md).
+
+## 0. Milestone landed on this branch
+
+This branch is no longer document-only. It lands the first compiler vertical
+slice:
+
+- `ModalKernelExpr` represents explicit identity, proper kernels, scale,
+  authored-order parallel/cascade, and dry/wet blend without adding a backend
+  opcode;
+- `ModalStage.phaser` and `Node.modalPhaser` are removed in favor of one generic
+  `ModalStage.linear`, plus ordinary `modalLinear`, `modalMix`, and `modalBlend`
+  graph nodes;
+- the served Phaser decoder expands to six explicit proper-tail transforms,
+  six `identity + tail` topology junctions, and one dry/wet blend;
+- lowering recognizes those junctions strictly from shared node identity,
+  retains six factors, and selects the compact terminal from generic kernel
+  structure rather than an effect tag;
+- the served resonant Filter is an independent producer of
+  `KernelExpr.proper`, while preserving its existing live parameter path; and
+- the qualifier proves one-, two-, and six-section retained size is linear,
+  checks the independent rational render oracle and four live Phaser controls,
+  exercises the Filter as a second producer, and retains the 22,688-byte
+  canonical product scratch row (22,320-byte baseline).
+
+What has not landed yet is equally important: the Phaser expansion is
+compiler-visible flat topology, not yet a persisted, user-expandable library
+definition. Reversible still displays the compact public Phaser node. Document
+v3, nested editing, the lower atomic/control floor, diagnostics/source maps,
+and filter-designer views remain the next phase.
 
 ## 1. Decision requested
 
@@ -31,13 +61,13 @@ them, and permits exact structural specializations. The choice is therefore not
 > Topology is the user notation; an algebra is the compiler meaning of that
 > topology.
 
-The first landing milestone should make the shipped six-section Phaser a
-versioned library graph assembled from first-order modal sections and ordinary
-typed wiring. Expanding it must expose an editable patch; compiling the
-expanded graph must recover the same compact product and the same production
-terminal schedule as the current privileged Phaser path. The existing
-resonant low-pass filter should pass through the same generic kernel algebra as
-a second consumer, so the new representation is not merely a renamed Phaser.
+The compiler milestone on this branch makes the shipped six-section Phaser an
+ordinary flat graph assembled from first-order modal sections and typed wiring,
+and recovers the same compact product and production terminal schedule. The
+existing resonant low-pass Filter passes through the same generic kernel
+algebra as a second consumer, so the representation is not merely a renamed
+Phaser. The next product milestone promotes that factory to a versioned library
+definition users can expand and edit.
 
 This phase remains feed-forward and closed-form. It does not relax Tropical's
 global cycle rule. A later filter-designer feedback graph may be useful, but it
@@ -99,8 +129,8 @@ The proposal builds beside the current paths rather than replacing the trunk.
 |---|---|---|
 | The product graph is a downstream-only DAG and lowering uses topological rank as its termination measure. | `Node.inputIds`, `lowerAt`, and `lowerModal` in [`EmitArrow.Patch`](../lean/Tropical/EmitArrow/Patch.lean) | Feed-forward topology can be elaborated directly. Global feedback cannot be admitted by weakening one check. |
 | The public modal compiler value is an authored-order `ModalForest`; a stage maps over every branch and modal mix concatenates branches. | [`Modal.Forest`](../lean/Tropical/EmitArrow/Modal/Forest.lean) and `Semantics.ModalUniverse.lowerGraph` | This preserves meaning and ordering but distributes later stages over earlier sums. A factor-preserving expression must sit before or replace that eager distribution for linear regions. |
-| Production stages are a closed enum. | `ModalStage = ordinaryRoom | gauge | phaser` in [`Modal.Forest`](../lean/Tropical/EmitArrow/Modal/Forest.lean) | Adding every effect as another stage case will recreate a curated ceiling and another terminal pattern matrix. |
-| Terminal selection pattern-matches stage count and exact case order. | `resolvePlainStages` in [`EmitArrow.Patch`](../lean/Tropical/EmitArrow/Patch.lean) | Specialization should move from effect names to normalized kernel structure. |
+| Production stages are a closed enum. | Before this branch, `ModalStage = ordinaryRoom | gauge | phaser`; this branch replaces the privileged effect case with generic `linear` in [`Modal.Forest`](../lean/Tropical/EmitArrow/Modal/Forest.lean). | Future linear effects should enter through the algebra rather than recreate a curated stage ceiling. |
+| Terminal selection pattern-matches stage count and exact case order. | `resolvePlainStages` in [`EmitArrow.Patch`](../lean/Tropical/EmitArrow/Patch.lean) still recognizes carrier order, but this branch selects the all-pass specialization from `KernelExpr` structure rather than a Phaser case. | Later work should make more carrier selection structural without weakening existing room/gauge admission. |
 | The semantic forest model is already generic over `Source` and `Stage`. | [`Semantics.ModalUniverse.Graph`](../lean/Tropical/Semantics/ModalUniverse.lean) | The whole-universe and authored-order laws can be retained while production grows a richer linear-stage meaning. |
 | The oriented algebra already supplies convolution, addition, scaling, blending, first-order all-pass tails, a generic section, and a compact Phaser decoration. | [`Modal.Oriented`](../lean/Tropical/EmitArrow/Modal/Oriented.lean) | These are the initial interpreter and oracle for a topology-derived kernel expression. |
 | A `Bank` carries future atoms, past atoms, and a point value at exactly zero. | `Oriented.Bank` | The identity/direct path must be represented separately. `Bank.atZero` is a function value at one point, not a Dirac impulse and cannot stand for feedthrough. |
@@ -482,14 +512,16 @@ the feed-forward topology phase and must earn its own JIT/Metal cost witness.
 
 ## 10. Landing plan
 
-The phase should land as a sequence of independently gated PRs. Later PRs must
-not be started by copying the current Phaser special case into a new enum.
+The larger phase can still land as independently gated slices. The current
+branch combines the useful compiler core of the first three originally
+proposed PRs so the architectural claim is backed by production code. Later
+work must not copy the retired Phaser stage into another effect-specific enum.
 
-### PR 1: kernel semantics and factor-preserving prototype
+### Milestone A: kernel semantics and factor-preserving topology — landed here
 
-Add a new semantic module, tentatively
-`Tropical.Semantics.ModalKernel`, and a production representation,
-tentatively `Tropical.EmitArrow.Modal.Kernel`.
+The production representation is
+`Tropical.EmitArrow.Modal.Kernel`. A separate theorem-oriented semantic module
+is still optional future hardening rather than a prerequisite for this slice.
 
 Deliverables:
 
@@ -501,9 +533,9 @@ Deliverables:
   linearly with section count; and
 - an independent rational-transfer differential.
 
-This PR has no product UI and no trunk/backend change.
+There is no trunk/backend change.
 
-### PR 2: structural terminal selection
+### Milestone B: structural terminal selection — landed for the served shapes
 
 Replace effect-name selection with normalized-kernel selection for the served
 linear shapes.
@@ -518,28 +550,30 @@ Deliverables:
 - add a pre-emission cost witness; and
 - keep emitted Plan 6, LLVM, WASM, and MSL vocabularies unchanged.
 
-The old `.phaser` stage may coexist as a compatibility producer during this
-PR, but it must elaborate to the generic kernel expression.
+No `.phaser` modal stage remains. Existing specialized terminal implementation
+names remain internal carrier names, but their selection reads generic
+identity-plus-tail cascade structure.
 
-### PR 3: served atoms and library-graph prototype
+### Milestone C: served topology factory and second producer — landed as bootstrap
 
-Add the minimum registered atom floor and replace the privileged Phaser stage
-producer with a programmatically constructed flat `PatchGraph` fixture. This
-proves the atom graph before the persistence format depends on it.
+The privileged Phaser stage producer is replaced with a programmatically
+constructed flat `PatchGraph` topology, and Filter enters through the same
+generic algebra. The lower public atom/control floor is intentionally deferred;
+the current bootstrap tail node owns its swept coefficient builder.
 
 Deliverables:
 
-- typed atom descriptors and lowering actions;
-- direct, tail, scale, and coefficient routing sufficient to express one
-  all-pass section;
-- programmatic `Allpass1` and six-section Phaser graph factories;
+- compiler-private typed linear-tail and blend lowering actions;
+- explicit direct-plus-tail topology sufficient to express one all-pass
+  section;
+- programmatic first-order-section and six-section Phaser graph factories;
 - the served legacy Phaser kind expands through that graph factory; and
 - no production semantic match on the string `"phaser"` or
-  `ModalStage.phaser` remains after the compatibility window.
+  `ModalStage.phaser` remains.
 
-The existing filter must also lower through `KernelExpr.proper` in this PR.
+The existing Filter lowers through `KernelExpr.proper` in this milestone.
 
-### PR 4: hierarchical Lean elaboration, library definitions, and document v3
+### Next milestone: hierarchical Lean elaboration, library definitions, and document v3
 
 Add definitions, typed boundary ports, hygienic expansion, source maps, and v2
 migration. Keep `tropical_program_2` unchanged.
@@ -555,7 +589,7 @@ Deliverables:
 - expanded/collapsed plan equivalence; and
 - realized diagnostics mapped back to the nested authored path.
 
-### PR 5: Reversible hierarchy and filter view
+### Following milestone: Reversible hierarchy and filter view
 
 Move the canvas to dynamic vocabulary descriptors, add expand/collapse and
 breadcrumbs, and render the first response/pole view.
@@ -569,16 +603,17 @@ Deliverables:
 - detach-and-edit behavior for shipped definitions; and
 - visible cost/admission feedback before a compile is attempted.
 
-### Optional PR 6: bounded linear-feedback spike
+### Optional later spike: bounded linear feedback
 
-This PR is not required to declare the feed-forward topology phase landed. It
-must remain a spike until one second-order feedback circuit solves to the same
-filter response and meets an explicit cost/stability contract.
+This is not required for the feed-forward topology phase. It must remain a
+spike until one second-order feedback circuit solves to the same filter
+response and meets an explicit cost/stability contract.
 
 ## 11. Cost and admission contract
 
-`KernelExpr` needs a structural cost result before it can become a served
-authoring feature. At minimum record:
+The focused gate already records the retained factor count and actual product
+scratch row. Before arbitrary user-authored definitions become served,
+`KernelExpr` also needs a predictive structural cost result. At minimum record:
 
 - source modal rows;
 - proper kernel rows by factor;

@@ -233,7 +233,7 @@ def runImplicitFanIn : IO Bool := do
     buildNode noParams "phaserN" "phaser" empty empty pair
   let modalHelperId := "__fanin_modal_phaserN_in"
   let modalNodeOk := match phaserNode with
-    | .modalPhaser input _ _ _ _ _ => input == modalHelperId
+    | .modalBlend dry _ _ => dry == modalHelperId
     | _ => false
   let modalHelperOk := match phaserExtras[0]? with
     | some helper => helper.id == modalHelperId && match helper.node with

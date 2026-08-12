@@ -1,4 +1,4 @@
-import Tropical.EmitArrow.Modal.Realize
+import Tropical.EmitArrow.Modal.Kernel
 
 /-!
 # EmitArrow.Modal.Forest
@@ -8,19 +8,8 @@ Deferred modal compiler values and their authored-order stage spine.
 
 namespace Tropical.EmitArrow
 
-/-- A live room control keeps its authored fallback expression and, when the
-    port is patched, the signal-node id that supersedes it.  The id remains a
-    graph dependency; its `ArrowTerm` is resolved only at the terminal modal
-    seam, so a room never materializes a signal while it is still modal. -/
-structure ModalControlRef where
-  fallback : ArrowTerm
-  signalNode? : Option String := none
-
-def ModalControlRef.constant (value : Sig) : ModalControlRef :=
-  { fallback := .konst value }
-
-/-- A room kernel is either already expressed as modal modes (filters and
-    internal fixtures) or constructed from one live control after all controls
+/-- A room kernel is either already expressed as modal modes (internal
+    fixtures) or constructed from one live control after all controls
     have been frozen at the terminal observation coordinate. -/
 inductive ModalRoomKernel where
   | fixed (modes : Array ModalMode)
@@ -34,22 +23,14 @@ structure OrdinaryRoomStage where
   direction : ModalControlRef := ModalControlRef.constant (lit 0)
   sway? : Option (ModalControlRef × ModalControlRef) := none
 
-/-- A current-universe modal phaser.  The four controls remain authored terms
-    until the terminal response coordinate is known; the six positive,
-    pairwise-distinct ratios are structural topology. -/
-structure PhaserStage where
-  center : ModalControlRef
-  sweep : ModalControlRef
-  rate : ModalControlRef
-  mix : ModalControlRef
-  ratios : Array Float
-
-/-- Modal→Modal operators in authored order.  Gauges and phasers are deliberate
-    peers of rooms rather than eager lowering special cases. -/
+/-- Modal→Modal operators in authored order.  Ordinary rooms retain their
+    bloom-bridge metadata; every other linear construction enters through the
+    generic factor-preserving stage.  Gauges remain separate because they are
+    nonlinear in the complete current modal value. -/
 inductive ModalStage where
   | ordinaryRoom (room : OrdinaryRoomStage)
+  | linear (stage : ModalLinearStage)
   | gauge (control : ModalControlRef)
-  | phaser (stage : PhaserStage)
 
 /-- The deferred source representation.  Rooms and gauges live exclusively on
     `ModalBranch.stages`, so heterogeneous ordering is never encoded by mutating
@@ -85,8 +66,8 @@ def OrdinaryRoomStage.controls (room : OrdinaryRoomStage) : Array ModalControlRe
 
 def ModalStage.controls : ModalStage → Array ModalControlRef
   | .ordinaryRoom room => room.controls
+  | .linear stage => stage.controls
   | .gauge control => #[control]
-  | .phaser stage => #[stage.center, stage.sweep, stage.rate, stage.mix]
 
 def ModalBranch.controls (branch : ModalBranch) : Array ModalControlRef :=
   branch.stages.foldl (fun controls stage => controls ++ stage.controls) #[]

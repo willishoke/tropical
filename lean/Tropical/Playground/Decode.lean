@@ -223,18 +223,24 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
         reverbRoom boundedRt60 rtRange 32 (60, 0) (6000, 0))
       rt60 dirX sway swayRate, modalFanIn)
   | "filter" =>
-    -- the filter IS a modalReverb with a computed 2-mode room: the residue
-    -- calculus does the "filtering" at build time, knobs stay live through it.
-    (.modalReverb modal
-      (filterPair (p "cutoff" (dv "cutoff")) (p "resonance" (dv "resonance"))) none,
-      modalFanIn)
+    -- A filter is now an ordinary proper modal-kernel atom.  Its public module
+    -- remains a convenience surface, but no filter-specific stage survives
+    -- into the modal compiler algebra.
+    let stage : ModalLinearStage := {
+      controls := #[ModalControlRef.constant (lit 0)]
+      build := fun _ values =>
+        .proper (.oriented
+          (filterPair (p "cutoff" (dv "cutoff")) (p "resonance" (dv "resonance")))
+          ((values[0]?).getD (lit 0))) }
+    (.modalLinear modal stage, modalFanIn)
   | "phaser" =>
-    -- Current-universe modal phaser: controls remain deferred until the
-    -- terminal response coordinate freezes one static analog all-pass cascade.
-    -- This is not the history-dependent recurrence of a conventional pedal.
-    (.modalPhaser modal
+    -- The convenience module expands into six ordinary identity-plus-tail
+    -- junctions and one final blend.  Structural lowering, not this product
+    -- name, recovers and retains the all-pass factors.
+    let (node, topology) := modalPhaserTopology id modal
       (modalControl "center") (modalControl "sweep")
-      (modalControl "rate") (modalControl "mix") modalPhaserRatios, modalFanIn)
+      (modalControl "rate") (modalControl "mix") modalPhaserRatios
+    (node, modalFanIn ++ topology)
   | "modalmix" => (.modalMix (portSources inObj "in"), #[])
   | "gauge" =>
     -- §5 excitation gauge: re-level the modal input's peak. g=0 identity (unity-DC,
