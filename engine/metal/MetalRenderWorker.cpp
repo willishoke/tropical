@@ -260,6 +260,8 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
   old_epoch_retired_time_.store(0, std::memory_order_relaxed);
   request_received_time_.store(
     monotonic_time_ns(), std::memory_order_release);
+  const uint64_t retarget_started = monotonic_time_ns();
+  uint32_t retargets = 0;
   const uint32_t staging_bank =
     active_bank_ == EpochTileQueue::kNoBank ? 0U : 1U - active_bank_;
 
@@ -274,7 +276,11 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
       ? request.activation_frame
       : (fresh && observed_device == 0
           ? 0
-          : observed_device + queue_.render_frames());
+          // Preparing an activation renders the complete candidate bank, not
+          // one tile. Reserving only one render quantum made a qualified
+          // four-tile hot-swap perpetually chase the audio callback whenever
+          // candidate preparation took longer than that single quantum.
+          : observed_device + queue_.capacity_frames());
     const uint64_t source_start = request.fixed_activation
       ? request.source_origin
       : (request.transition == EpochTransitionKind::ClockJump
@@ -329,6 +335,19 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
           false, "MetalRenderWorker: activation target became inadmissible",
           request.epoch_id, activation_frame, source_start, true
         };
+      ++retargets;
+      const uint64_t now = monotonic_time_ns();
+      if (retargets >= kActivationRetargetLimit
+          || now - retarget_started >= kActivationRetargetTimeoutNs)
+      {
+        activation_failures_.fetch_add(1, std::memory_order_relaxed);
+        return {
+          false,
+          "MetalRenderWorker: candidate remained late after "
+            + std::to_string(retargets) + " retargets",
+          request.epoch_id, activation_frame, source_start
+        };
+      }
       continue;
     }
 
@@ -362,7 +381,7 @@ EpochReservation MetalRenderWorker::reserve(
   const bool no_active =
     queue_.audio_active_bank() == EpochTileQueue::kNoBank;
   const uint64_t frame =
-    no_active && device == 0 ? 0 : device + queue_.render_frames();
+    no_active && device == 0 ? 0 : device + queue_.capacity_frames();
   return {
     frame,
     transition == EpochTransitionKind::ClockJump

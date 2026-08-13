@@ -17,6 +17,13 @@
 namespace tropical_metal
 {
 
+// A candidate that cannot stay ahead of the callback must fail closed instead
+// of occupying the compiler/control lane forever. The elapsed bound covers
+// unusually slow device work; the attempt bound keeps deterministic failures
+// prompt even when a fake/test renderer advances the device instantaneously.
+inline constexpr uint32_t kActivationRetargetLimit = 8;
+inline constexpr uint64_t kActivationRetargetTimeoutNs = 2000000000ULL;
+
 enum class EpochTransitionKind : uint8_t
 {
   Fresh,

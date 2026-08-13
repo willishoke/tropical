@@ -143,7 +143,7 @@ static void test_worker_activation_and_refill()
          == candidate_stages.candidate_gpu_completion);
 }
 
-static void test_candidate_late_retargets_off_audio()
+static void test_candidate_within_bank_horizon_does_not_retarget()
 {
   EpochTileQueue queue(128, 512);
   std::atomic<bool> candidate_started{false};
@@ -185,7 +185,7 @@ static void test_candidate_late_retargets_off_audio()
   release_candidate.store(true, std::memory_order_release);
   control.join();
   ASSERT(result.ok);
-  ASSERT(worker.activation_retarget_count() >= 1);
+  ASSERT(worker.activation_retarget_count() == 0);
   ASSERT(result.effective_sample_index == result.activation_frame);
 
   while (queue.published_device_frame() < result.activation_frame)
@@ -194,6 +194,48 @@ static void test_candidate_late_retargets_off_audio()
   const auto activated = queue.consume(output.data(), 128);
   ASSERT(activated.activated);
   ASSERT(activated.source_start == result.effective_sample_index);
+}
+
+static void test_perpetually_late_candidate_fails_bounded()
+{
+  EpochTileQueue queue(128, 512);
+  std::array<double, 128> callback_output{};
+  MetalRenderWorker worker(
+    queue,
+    [&](const RenderEpochRequest & request, uint64_t source, uint32_t frames,
+        double * destination) {
+      std::fill_n(destination, frames, static_cast<double>(source));
+      if (request.epoch_id == 2)
+      {
+        // Advance one complete bank while every candidate bank renders. This
+        // deterministic adversary used to make prepare_activation loop
+        // forever; it must now return a diagnostic after a bounded number of
+        // discarded windows.
+        for (uint32_t callback = 0;
+             callback < queue.capacity_frames() / callback_output.size();
+             ++callback)
+          (void)queue.consume(
+            callback_output.data(), callback_output.size());
+      }
+      return true;
+    });
+  ASSERT(worker.schedule(
+    request(1, EpochTransitionKind::Fresh, 0)).ok);
+  ASSERT(queue.consume(
+    callback_output.data(), callback_output.size()).status
+    == TileConsumeStatus::Audio);
+  ASSERT(wait_for([&] { return queue.activation_acknowledged() == 1; }));
+
+  const auto started = std::chrono::steady_clock::now();
+  const auto failed =
+    worker.schedule(request(2, EpochTransitionKind::Continuous));
+  const auto elapsed = std::chrono::steady_clock::now() - started;
+  ASSERT(!failed.ok);
+  ASSERT(failed.error.find("candidate remained late") != std::string::npos);
+  ASSERT(worker.activation_retarget_count()
+         == tropical_metal::kActivationRetargetLimit);
+  ASSERT(worker.activation_failure_count() == 1);
+  ASSERT(elapsed < std::chrono::seconds(2));
 }
 
 static void test_failed_candidate_keeps_active_epoch()
@@ -326,8 +368,10 @@ int main()
   std::printf("test_metal_render_worker (no DAC)\n");
   run_test("lazy worker activation, refill, and continuous handoff",
            test_worker_activation_and_refill);
-  run_test("late candidate retargets while old coverage stays audible",
-           test_candidate_late_retargets_off_audio);
+  run_test("candidate inside full-bank horizon avoids a retarget",
+           test_candidate_within_bank_horizon_does_not_retarget);
+  run_test("perpetually late candidate fails after bounded retargets",
+           test_perpetually_late_candidate_fails_bounded);
   run_test("failed candidate is not published over active epoch",
            test_failed_candidate_keeps_active_epoch);
   run_test("control-thread teardown joins an in-flight tile safely",

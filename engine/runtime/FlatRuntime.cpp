@@ -259,6 +259,10 @@ FlatRuntime::schedule_metal_epoch_locked(
   uint64_t requested_source, uint32_t generation)
 {
   const uint64_t epoch_id = next_metal_epoch_id_++;
+  const auto retarget_deadline = std::chrono::steady_clock::now()
+    + std::chrono::nanoseconds(
+        tropical_metal::kActivationRetargetTimeoutNs);
+  uint32_t retargets = 0;
   for (;;)
   {
     const auto reservation =
@@ -269,7 +273,20 @@ FlatRuntime::schedule_metal_epoch_locked(
     request.fixed_activation = true;
     request.activation_frame = reservation.activation_frame;
     auto result = metal_worker_->schedule(std::move(request));
-    if (result.retargeted) continue;
+    if (result.retargeted)
+    {
+      ++retargets;
+      if (retargets >= tropical_metal::kActivationRetargetLimit
+          || std::chrono::steady_clock::now() >= retarget_deadline)
+      {
+        result.retargeted = false;
+        result.error =
+          "MetalRenderWorker: fixed activation remained late after "
+          + std::to_string(retargets) + " retargets";
+        return result;
+      }
+      continue;
+    }
     return result;
   }
 }
@@ -822,6 +839,10 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
   if (state.metal)
   {
     const uint64_t epoch_id = next_metal_epoch_id_++;
+    const auto retarget_deadline = std::chrono::steady_clock::now()
+      + std::chrono::nanoseconds(
+          tropical_metal::kActivationRetargetTimeoutNs);
+    uint32_t retargets = 0;
     for (;;)
     {
       const auto epoch = metal_worker_->reserve(
@@ -851,7 +872,22 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
       const auto scheduled =
         metal_worker_->schedule(std::move(request));
       if (scheduled.retargeted)
+      {
+        ++retargets;
+        if (retargets >= tropical_metal::kActivationRetargetLimit
+            || std::chrono::steady_clock::now() >= retarget_deadline)
+        {
+          state.slots = base_slots;
+          release_control_snapshot_reservation(
+            state_idx, reservation);
+          result.ok = false;
+          result.error =
+            "set_param: Metal activation remained late after "
+            + std::to_string(retargets) + " retargets";
+          return result;
+        }
         continue;
+      }
       if (!scheduled.ok)
       {
         state.slots = base_slots;
