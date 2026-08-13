@@ -421,12 +421,21 @@ enum FactoryPatches {
             node(3, .phaser, at: CGPoint(x: 360, y: 132), inputs: [
                 "in": ["resonator2"],
             ]),
-            node(4, .out, at: CGPoint(x: 700, y: 240), inputs: [
+            node(4, .reverb, at: CGPoint(x: 700, y: 132), inputs: [
                 "in": ["phaser3"],
             ]),
-            node(5, .scope, at: CGPoint(x: 700, y: 430), inputs: [
-                "ch1": ["out4"],
+            node(5, .out, at: CGPoint(x: 980, y: 240), inputs: [
+                "in": ["reverb4"],
             ]),
+            node(
+                6,
+                .scope,
+                at: CGPoint(x: 980, y: 430),
+                values: ["window": ScopeSignalKnowledge.visibleCycles / 220],
+                inputs: [
+                    "ch1": ["out5"],
+                ]
+            ),
         ]
         return PatchGraphState(
             nodes: Dictionary(uniqueKeysWithValues: authored.map { ($0.id, $0) }),

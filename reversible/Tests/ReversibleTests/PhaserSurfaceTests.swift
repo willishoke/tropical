@@ -7,18 +7,87 @@ final class PhaserSurfaceTests: XCTestCase {
         let graph = FactoryPatches.modalPhaser
 
         XCTAssertEqual(graph.order, [
-            "source1", "resonator2", "phaser3", "out4", "scope5",
+            "source1", "resonator2", "phaser3", "reverb4", "out5", "scope6",
         ])
         XCTAssertEqual(graph.nodes["source1"]?.values["freq"], 0.63)
         XCTAssertEqual(graph.nodes["resonator2"]?.inputs["addr"], ["source1"])
         XCTAssertEqual(graph.nodes["phaser3"]?.inputs["in"], ["resonator2"])
-        XCTAssertEqual(graph.nodes["out4"]?.inputs["in"], ["phaser3"])
-        XCTAssertEqual(graph.nodes["scope5"]?.inputs["ch1"], ["out4"])
+        XCTAssertEqual(graph.nodes["reverb4"]?.inputs["in"], ["phaser3"])
+        XCTAssertEqual(graph.nodes["out5"]?.inputs["in"], ["reverb4"])
+        XCTAssertEqual(graph.nodes["scope6"]?.inputs["ch1"], ["out5"])
+        XCTAssertEqual(
+            graph.nodes["scope6"]?.values["window"],
+            ScopeSignalKnowledge.visibleCycles / 220
+        )
         XCTAssertTrue(graph.nodes["phaser3"]?.kind.spec.modal == true)
     }
 
     func testReverbExposesOnlyItsUsefulDecayControl() {
         XCTAssertEqual(NodeKind.reverb.spec.knobs.map(\.name), ["rt60"])
+    }
+
+    func testScopeDerivesTimebaseFromConnectedSignalKnowledge() throws {
+        var graph = FactoryPatches.modalPhaser
+
+        // The sub-Hz source addresses/retriggers the resonator; it is not the
+        // pitch seen at the terminal scope. Follow the modal/audio chain to
+        // the resonator fundamental instead.
+        XCTAssertEqual(
+            ScopeSignalKnowledge.frequencies(
+                for: "out5",
+                nodes: graph.nodes
+            ),
+            [220]
+        )
+        let originalWindow = try XCTUnwrap(
+            ScopeSignalKnowledge.recommendedWindow(
+                for: ["out5"],
+                nodes: graph.nodes
+            )
+        )
+        XCTAssertEqual(originalWindow, 4.0 / 220, accuracy: 1e-12)
+
+        var resonator = try XCTUnwrap(graph.nodes["resonator2"])
+        resonator.values["freq"] = 40
+        graph.nodes[resonator.id] = resonator
+        let retunedWindow = try XCTUnwrap(
+            ScopeSignalKnowledge.recommendedWindow(
+                for: ["out5"],
+                nodes: graph.nodes
+            )
+        )
+        XCTAssertEqual(retunedWindow, 0.1, accuracy: 1e-12)
+        XCTAssertTrue(ScopeSignalKnowledge.isAutomaticWindow(
+            0.1,
+            sourceIDs: ["out5"],
+            nodes: graph.nodes
+        ))
+        XCTAssertFalse(ScopeSignalKnowledge.isAutomaticWindow(
+            0.08,
+            sourceIDs: ["out5"],
+            nodes: graph.nodes
+        ))
+    }
+
+    func testScopeTimebaseClampsForSubHertzSignals() throws {
+        let graph = FactoryPatches.modalPhaser
+        let window = try XCTUnwrap(
+            ScopeSignalKnowledge.recommendedWindow(
+                for: ["source1"],
+                nodes: graph.nodes
+            )
+        )
+        XCTAssertEqual(window, ScopeSignalKnowledge.maximumWindow)
+        XCTAssertGreaterThan(
+            ScopeSignalKnowledge.acquisitionSpanSamples(
+                displaySpanSamples: Int(
+                    ScopeSignalKnowledge.maximumWindow * PatchModel.sampleRate
+                ),
+                frequency: 0.63,
+                sampleRate: PatchModel.sampleRate
+            ),
+            ObservationBinding.maximumPointBudget
+        )
     }
 
     func testConnectedInletMenuDoesNotClaimItHasNoSources() {
