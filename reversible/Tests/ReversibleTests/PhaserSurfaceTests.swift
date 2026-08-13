@@ -7,14 +7,28 @@ final class PhaserSurfaceTests: XCTestCase {
         let graph = FactoryPatches.modalPhaser
 
         XCTAssertEqual(graph.order, [
-            "resonator1", "reverb2", "phaser3", "reverb4", "out5", "scope6",
+            "source7", "resonator1", "reverb2", "phaser3",
+            "reverb4", "out5", "scope6",
         ])
+        XCTAssertEqual(graph.nodes["source7"]?.values["freq"], 0.63)
+        XCTAssertEqual(graph.nodes["resonator1"]?.inputs["addr"], ["source7"])
         XCTAssertEqual(graph.nodes["reverb2"]?.inputs["in"], ["resonator1"])
         XCTAssertEqual(graph.nodes["phaser3"]?.inputs["in"], ["reverb2"])
         XCTAssertEqual(graph.nodes["reverb4"]?.inputs["in"], ["phaser3"])
         XCTAssertEqual(graph.nodes["out5"]?.inputs["in"], ["reverb4"])
         XCTAssertEqual(graph.nodes["scope6"]?.inputs["ch1"], ["out5"])
         XCTAssertTrue(graph.nodes["phaser3"]?.kind.spec.modal == true)
+    }
+
+    func testConnectedInletMenuDoesNotClaimItHasNoSources() {
+        XCTAssertEqual(
+            InletMenuCopy.noLegalSources(hasExistingConnections: true),
+            "No additional legal sources"
+        )
+        XCTAssertEqual(
+            InletMenuCopy.noLegalSources(hasExistingConnections: false),
+            "No legal sources"
+        )
     }
 
     func testNativePhaserSurfaceMatchesServedContract() {

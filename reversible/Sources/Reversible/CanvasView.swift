@@ -225,16 +225,43 @@ struct InletView: View {
 
     private var sources: [String] { node.inputs[port] ?? [] }
 
+    private func sourceTitle(_ sourceID: String) -> String {
+        guard let source = model.nodes[sourceID] else { return sourceID }
+        return "\(source.kind.spec.title) · \(sourceID)"
+    }
+
     var body: some View {
         HStack(spacing: 4) {
             Menu {
                 let legal = model.legalSources(for: node.id, port: port)
-                if legal.isEmpty {
-                    Text("no legal sources")
-                } else {
-                    ForEach(legal) { src in
-                        Button("\(src.kind.spec.title) · \(src.id)") {
-                            model.connect(from: src.id, to: node.id, port: port)
+                if !sources.isEmpty {
+                    Section("Connected to \(port)") {
+                        ForEach(sources, id: \.self) { sourceID in
+                            Button(role: .destructive) {
+                                model.deleteEdge(
+                                    to: node.id,
+                                    port: port,
+                                    from: sourceID
+                                )
+                            } label: {
+                                Label(
+                                    sourceTitle(sourceID),
+                                    systemImage: "xmark.circle"
+                                )
+                            }
+                        }
+                    }
+                }
+                Section(sources.isEmpty ? "Connect source" : "Add source") {
+                    if legal.isEmpty {
+                        Text(InletMenuCopy.noLegalSources(
+                            hasExistingConnections: !sources.isEmpty
+                        ))
+                    } else {
+                        ForEach(legal) { src in
+                            Button("\(src.kind.spec.title) · \(src.id)") {
+                                model.connect(from: src.id, to: node.id, port: port)
+                            }
                         }
                     }
                 }
@@ -246,18 +273,50 @@ struct InletView: View {
             .menuStyle(.borderlessButton)
             .menuIndicator(.hidden)
             .fixedSize()
-            .help("patch a source into \(port)")
+            .help(sources.isEmpty
+                  ? "patch a source into \(port)"
+                  : "view, add, or disconnect sources for \(port)")
 
-            ForEach(sources, id: \.self) { src in
-                Circle()
-                    .fill(model.nodes[src]?.color ?? Theme.jack)
-                    .frame(width: 10, height: 10)
-                    .onTapGesture { model.deleteEdge(to: node.id, port: port, from: src) }
-                    .help("\(src) → \(port) · click to disconnect")
+            ForEach(Array(sources.prefix(2)), id: \.self) { sourceID in
+                HStack(spacing: 3) {
+                    Circle()
+                        .fill(model.nodes[sourceID]?.color ?? Theme.jack)
+                        .frame(width: 10, height: 10)
+                    Text(sourceID)
+                        .font(.system(size: 8, design: .monospaced))
+                        .foregroundStyle(Theme.text)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                        .frame(maxWidth: 62)
+                }
+                .padding(.horizontal, 4).padding(.vertical, 2)
+                .background(
+                    (model.nodes[sourceID]?.color ?? Theme.jack).opacity(0.13),
+                    in: Capsule()
+                )
+                .contentShape(Capsule())
+                .onTapGesture {
+                    model.deleteEdge(to: node.id, port: port, from: sourceID)
+                }
+                .help("\(sourceTitle(sourceID)) → \(port) · click to disconnect")
+            }
+            if sources.count > 2 {
+                Text("+\(sources.count - 2)")
+                    .font(.system(size: 8, design: .monospaced))
+                    .foregroundStyle(Theme.muted)
+                    .help("\(sources.count - 2) more connected sources; open the menu to inspect")
             }
 
             Text(port).font(Theme.monoSmall).foregroundStyle(Theme.muted)
         }
+    }
+}
+
+enum InletMenuCopy {
+    static func noLegalSources(hasExistingConnections: Bool) -> String {
+        hasExistingConnections
+            ? "No additional legal sources"
+            : "No legal sources"
     }
 }
 

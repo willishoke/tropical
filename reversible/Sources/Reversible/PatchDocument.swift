@@ -373,12 +373,16 @@ enum FactoryPatches {
             _ index: Int,
             _ kind: NodeKind,
             at position: CGPoint,
+            values authoredValues: [String: Double] = [:],
             inputs authoredInputs: [String: [String]] = [:]
         ) -> PatchNode {
             let spec = kind.spec
-            let values = Dictionary(uniqueKeysWithValues: spec.knobs.map {
+            var values = Dictionary(uniqueKeysWithValues: spec.knobs.map {
                 ($0.name, $0.def)
             })
+            for (name, value) in authoredValues where values[name] != nil {
+                values[name] = value
+            }
             var inputs = Dictionary(uniqueKeysWithValues: spec.inlets.map {
                 ($0, [String]())
             })
@@ -402,7 +406,16 @@ enum FactoryPatches {
         }
 
         let authored = [
-            node(1, .resonator, at: CGPoint(x: 88, y: 132)),
+            // An unaddressed resonator strikes only at master time zero. The
+            // demo is hot-swapped after startup, so that strike may already
+            // be in the past. This qualified sub-Hz saw repeatedly crosses
+            // zero and therefore gives the scene an audible re-trigger.
+            node(7, .source, at: CGPoint(x: 88, y: 420), values: [
+                "freq": 0.63,
+            ]),
+            node(1, .resonator, at: CGPoint(x: 88, y: 132), inputs: [
+                "addr": ["source7"],
+            ]),
             node(2, .reverb, at: CGPoint(x: 330, y: 132), inputs: [
                 "in": ["resonator1"],
             ]),
