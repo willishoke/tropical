@@ -81,28 +81,72 @@ actor Engine {
     private var realizedPatches = RealizedPatchStore()
     private let events: @Sendable (EngineEvent) -> Void
 
-    /// Resolution order: bundled engine, then an explicit developer/test
-    /// override. Development launchers set the override from their own repo
-    /// location; production never guesses a checkout under the user's home.
+    /// Resolution order: bundled engine, an explicit developer/test override,
+    /// then the checkout that owns a directly launched SwiftPM executable.
+    /// The last candidate is anchored to the executable itself; it never scans
+    /// the user's home directory or depends on the launcher's current working
+    /// directory.
     static func resolveBinary() throws -> URL {
-        var checked: [URL] = []
-        if let resources = Bundle.main.resourceURL {
-            let bundled = resources
-                .appendingPathComponent("Tropical", isDirectory: true)
-                .appendingPathComponent("frontend", isDirectory: false)
-            checked.append(bundled)
-            if FileManager.default.isExecutableFile(atPath: bundled.path) {
-                return bundled
-            }
-        }
-        if let p = ProcessInfo.processInfo.environment["TROPICAL_ENGINE_BIN"] {
-            let explicit = URL(fileURLWithPath: p).standardizedFileURL
-            checked.append(explicit)
-            if FileManager.default.isExecutableFile(atPath: explicit.path) {
-                return explicit
-            }
+        let checked = binaryCandidates(
+            resourceURL: Bundle.main.resourceURL,
+            environment: ProcessInfo.processInfo.environment,
+            executableURL: Bundle.main.executableURL
+        )
+        if let binary = checked.first(where: {
+            FileManager.default.isExecutableFile(atPath: $0.path)
+        }) {
+            return binary
         }
         throw EngineError.binaryNotFound(checked.map(\.path))
+    }
+
+    static func binaryCandidates(
+        resourceURL: URL?,
+        environment: [String: String],
+        executableURL: URL?
+    ) -> [URL] {
+        var candidates: [URL] = []
+        if let resourceURL {
+            candidates.append(
+                resourceURL
+                    .appendingPathComponent("Tropical", isDirectory: true)
+                    .appendingPathComponent("frontend", isDirectory: false)
+            )
+        }
+        if let path = environment["TROPICAL_ENGINE_BIN"] {
+            candidates.append(URL(fileURLWithPath: path).standardizedFileURL)
+        }
+        if let development = developmentBinaryCandidate(for: executableURL) {
+            candidates.append(development)
+        }
+
+        var seen = Set<String>()
+        return candidates.compactMap { candidate in
+            let standardized = candidate.standardizedFileURL
+            return seen.insert(standardized.path).inserted ? standardized : nil
+        }
+    }
+
+    /// `swift run --package-path <repo>/reversible Reversible` places the
+    /// executable below `<repo>/reversible/.build`. Walk only that executable's
+    /// ancestors and accept the package root by its fixed directory name.
+    private static func developmentBinaryCandidate(for executableURL: URL?) -> URL? {
+        guard let executableURL,
+              executableURL.lastPathComponent == "Reversible"
+        else { return nil }
+
+        var directory = executableURL.standardizedFileURL.deletingLastPathComponent()
+        while directory.path != "/" {
+            if directory.lastPathComponent == "reversible" {
+                return directory.deletingLastPathComponent()
+                    .appendingPathComponent("lean/.lake/build/bin/frontend")
+                    .standardizedFileURL
+            }
+            let parent = directory.deletingLastPathComponent()
+            guard parent != directory else { break }
+            directory = parent
+        }
+        return nil
     }
 
     static func workingDirectory(for binary: URL) -> URL {

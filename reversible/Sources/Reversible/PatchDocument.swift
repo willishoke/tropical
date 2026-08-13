@@ -307,24 +307,9 @@ extension PatchModel {
     }
 
     func newPhaserDemo() async {
-        resetHierarchy(to: .init(nodes: [:], order: [], pan: .zero))
         resetCounter()
-
-        let resonator = addNode(.resonator, at: CGPoint(x: 88, y: 132))
-        let roomA = addNode(.reverb, at: CGPoint(x: 330, y: 132))
-        let phaser = addNode(.phaser, at: CGPoint(x: 610, y: 132))
-        let roomB = addNode(.reverb, at: CGPoint(x: 930, y: 132))
-        let output = addNode(.out, at: CGPoint(x: 1210, y: 240))
-        let scope = addNode(.scope, at: CGPoint(x: 930, y: 430))
-
-        if let resonator, let roomA, let phaser, let roomB, let output {
-            connect(from: resonator.id, to: roomA.id, port: "in")
-            connect(from: roomA.id, to: phaser.id, port: "in")
-            connect(from: phaser.id, to: roomB.id, port: "in")
-            connect(from: roomB.id, to: output.id, port: "in")
-            if let scope { connect(from: output.id, to: scope.id, port: "ch1") }
-        }
-        snapshotActiveGraph()
+        resetHierarchy(to: FactoryPatches.modalPhaser)
+        advanceAuthoredRevision()
         documentURL = nil
         await pushGraph()
         setVelocity(velocity)
@@ -375,5 +360,69 @@ extension PatchModel {
             do { try await read(from: url) }
             catch { setStatus("open: \(error.localizedDescription)", isError: true) }
         }
+    }
+}
+
+/// Built-in scenes are complete immutable values before the model adopts
+/// them. Loading one therefore publishes its nodes and edges together instead
+/// of exposing a sequence of partially connected live edits to the UI and
+/// engine startup tasks.
+enum FactoryPatches {
+    static var modalPhaser: PatchGraphState {
+        func node(
+            _ index: Int,
+            _ kind: NodeKind,
+            at position: CGPoint,
+            inputs authoredInputs: [String: [String]] = [:]
+        ) -> PatchNode {
+            let spec = kind.spec
+            let values = Dictionary(uniqueKeysWithValues: spec.knobs.map {
+                ($0.name, $0.def)
+            })
+            var inputs = Dictionary(uniqueKeysWithValues: spec.inlets.map {
+                ($0, [String]())
+            })
+            for (port, sources) in authoredInputs where inputs[port] != nil {
+                inputs[port] = sources
+            }
+            let module: ModuleReference? = switch kind {
+            case .phaser: StandardModuleLibrary.phaser
+            case .allpass: StandardModuleLibrary.allpass
+            default: nil
+            }
+            return PatchNode(
+                id: "\(kind.rawValue)\(index)",
+                kind: kind,
+                position: Grid.snap(position),
+                values: values,
+                inputs: inputs,
+                hue: Double((index * 137) % 360),
+                module: module
+            )
+        }
+
+        let authored = [
+            node(1, .resonator, at: CGPoint(x: 88, y: 132)),
+            node(2, .reverb, at: CGPoint(x: 330, y: 132), inputs: [
+                "in": ["resonator1"],
+            ]),
+            node(3, .phaser, at: CGPoint(x: 610, y: 132), inputs: [
+                "in": ["reverb2"],
+            ]),
+            node(4, .reverb, at: CGPoint(x: 930, y: 132), inputs: [
+                "in": ["phaser3"],
+            ]),
+            node(5, .out, at: CGPoint(x: 1210, y: 240), inputs: [
+                "in": ["reverb4"],
+            ]),
+            node(6, .scope, at: CGPoint(x: 930, y: 430), inputs: [
+                "ch1": ["out5"],
+            ]),
+        ]
+        return PatchGraphState(
+            nodes: Dictionary(uniqueKeysWithValues: authored.map { ($0.id, $0) }),
+            order: authored.map(\.id),
+            pan: .zero
+        )
     }
 }

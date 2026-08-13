@@ -1,7 +1,31 @@
+import Foundation
 import XCTest
 @testable import Reversible
 
 final class EngineRPCLaneTests: XCTestCase {
+    func testDirectSwiftPMLaunchFindsEngineInOwningCheckout() {
+        let candidates = Engine.binaryCandidates(
+            resourceURL: nil,
+            environment: [:],
+            executableURL: URL(
+                fileURLWithPath: "/work/tropical/reversible/.build/arm64-apple-macosx/debug/Reversible"
+            )
+        )
+
+        XCTAssertEqual(
+            candidates.map(\.path),
+            ["/work/tropical/lean/.lake/build/bin/frontend"]
+        )
+    }
+
+    func testEngineLookupDoesNotInferCheckoutForUnrelatedExecutable() {
+        XCTAssertTrue(Engine.binaryCandidates(
+            resourceURL: nil,
+            environment: [:],
+            executableURL: URL(fileURLWithPath: "/Applications/Other.app/Contents/MacOS/Other")
+        ).isEmpty)
+    }
+
     func testChildDefaultsToMetalButPreservesExplicitJITOverride() {
         let product = Engine.childEnvironment(inherited: [:])
         XCTAssertEqual(product["TROPICAL_BACKEND"], "metal")
