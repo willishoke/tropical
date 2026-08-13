@@ -363,6 +363,80 @@ static void test_rapid_a_b_a_serializes_acknowledgements()
   ASSERT(queue.tag_mismatch_count() == 0);
 }
 
+static void test_unclaimed_epochs_coalesce_without_audio_callback()
+{
+  EpochTileQueue queue(128, 512);
+  MetalRenderWorker worker(
+    queue,
+    [](const RenderEpochRequest & request, uint64_t, uint32_t frames,
+       double * destination) {
+      std::fill_n(
+        destination, frames, static_cast<double>(request.epoch_id));
+      return true;
+    });
+
+  // There is deliberately no consume() between these publications. Before
+  // coalescing applied to every unclaimed descriptor, the third schedule
+  // waited forever for a callback that cannot exist while the DAC is stopped.
+  ASSERT(worker.schedule(
+    request(1, EpochTransitionKind::Fresh, 0)).ok);
+  ASSERT(worker.schedule(
+    request(2, EpochTransitionKind::Continuous)).ok);
+  const auto started = std::chrono::steady_clock::now();
+  const auto latest = worker.schedule(
+    request(3, EpochTransitionKind::Continuous));
+  ASSERT(latest.ok);
+  ASSERT(std::chrono::steady_clock::now() - started
+         < std::chrono::seconds(1));
+  ASSERT(queue.published_activation_epoch() == 3);
+
+  std::array<double, 128> output{};
+  const auto activated = queue.consume(output.data(), output.size());
+  ASSERT(activated.status == TileConsumeStatus::Audio);
+  ASSERT(activated.activated);
+  ASSERT(activated.epoch_id == 3);
+  for (double sample : output) ASSERT(sample == 3.0);
+}
+
+static void test_unclaimed_epochs_coalesce_after_audio_stops()
+{
+  EpochTileQueue queue(128, 512);
+  MetalRenderWorker worker(
+    queue,
+    [](const RenderEpochRequest & request, uint64_t, uint32_t frames,
+       double * destination) {
+      std::fill_n(
+        destination, frames, static_cast<double>(request.epoch_id));
+      return true;
+    });
+  ASSERT(worker.schedule(
+    request(1, EpochTransitionKind::Fresh, 0)).ok);
+  std::array<double, 128> output{};
+  ASSERT(queue.consume(output.data(), output.size()).activated);
+  ASSERT(wait_for([&] { return queue.activation_acknowledged() == 1; }));
+
+  // Model a stopped DAC by ceasing callbacks after an active epoch exists.
+  ASSERT(worker.schedule(
+    request(2, EpochTransitionKind::Continuous)).ok);
+  const auto latest = worker.schedule(
+    request(3, EpochTransitionKind::Continuous));
+  ASSERT(latest.ok);
+  ASSERT(queue.published_activation_epoch() == 3);
+
+  while (queue.published_device_frame() < latest.activation_frame)
+  {
+    ASSERT(wait_for([&] { return queue.next_callback_ready_for_offline(); }));
+    ASSERT(queue.consume(output.data(), output.size()).status
+           == TileConsumeStatus::Audio);
+  }
+  ASSERT(wait_for([&] { return queue.next_callback_ready_for_offline(); }));
+  const auto activated = queue.consume(output.data(), output.size());
+  ASSERT(activated.status == TileConsumeStatus::Audio);
+  ASSERT(activated.activated);
+  ASSERT(activated.epoch_id == 3);
+  for (double sample : output) ASSERT(sample == 3.0);
+}
+
 int main()
 {
   std::printf("test_metal_render_worker (no DAC)\n");
@@ -378,6 +452,10 @@ int main()
            test_teardown_waits_for_inflight_tile);
   run_test("rapid A/B/A promises serialize through acknowledgements",
            test_rapid_a_b_a_serializes_acknowledgements);
+  run_test("unclaimed controls coalesce before audio starts",
+           test_unclaimed_epochs_coalesce_without_audio_callback);
+  run_test("unclaimed controls coalesce after audio stops",
+           test_unclaimed_epochs_coalesce_after_audio_stops);
   std::printf("\n  %d passed, %d failed\n", g_pass, g_fail);
   return g_fail == 0 ? 0 : 1;
 }

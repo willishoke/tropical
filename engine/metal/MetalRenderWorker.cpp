@@ -157,15 +157,22 @@ void MetalRenderWorker::run()
           current_thread_cpu_time_ns(), std::memory_order_release);
         return;
       }
-      if (pending_activation_epoch_ != 0 && active_epoch_ == 0
-          && !requests_.empty()
-          && bank_cursors_[0].valid
-          && bank_cursors_[0].request.transition
-               == EpochTransitionKind::Fresh
+      // schedule() returns once a complete activation has been published; it
+      // does not wait for the audio callback to reach that future boundary.
+      // A later request is another complete kernel/slot image, so if audio has
+      // not claimed the earlier descriptor yet, replace it. Besides coalescing
+      // rapid live edits, this is what lets controls work while the DAC is
+      // stopped: there is no callback available to acknowledge an intermediate
+      // epoch. The queue's claim CAS makes cancellation lose safely to a
+      // callback that has already committed to the activation.
+      if (pending_activation_epoch_ != 0 && !requests_.empty()
           && queue_.cancel_unclaimed_activation(
             pending_activation_epoch_))
       {
-        bank_cursors_[0].valid = false;
+        for (BankRenderCursor & cursor : bank_cursors_)
+          if (cursor.valid
+              && cursor.request.epoch_id == pending_activation_epoch_)
+            cursor.valid = false;
         pending_activation_epoch_ = 0;
       }
       if (pending_activation_epoch_ == 0 && !requests_.empty())

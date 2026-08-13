@@ -881,10 +881,27 @@ private final class EventBox: @unchecked Sendable {
     @MainActor init() {}
 }
 
+enum ParamWriteFailureRecovery: Equatable {
+    case reportOnly
+}
+
+enum ParamWriteFailurePolicy {
+    /// A failed write says nothing about the authored graph. In particular,
+    /// transport timeouts and publication failures must not turn a live
+    /// control gesture into an unrelated graph compile.
+    static func recovery(for _: Error) -> ParamWriteFailureRecovery {
+        .reportOnly
+    }
+
+    static func status(name: String, error: Error) -> String {
+        "parameter \(name): \(error.localizedDescription)"
+    }
+}
+
 /// Live param drive: set the `param:<name>` slot on the running kernel — no
-/// recompile. Rapid drags coalesce to the latest value per name; a cold-start
-/// miss (slot not compiled yet) falls back to a relower that bakes the value
-/// as the slot default, after which subsequent turns are live.
+/// recompile. Rapid drags coalesce to the latest value per name. Cold-start
+/// lowering is decided by `setKnob` before a write reaches this sender; once
+/// a control is live, an RPC failure is reported and never relowers the graph.
 @MainActor
 final class ParamSender {
     private var pending: [String: LatestValueBuffer] = [:]
@@ -913,7 +930,14 @@ final class ParamSender {
                         "name": .string(name), "value": .number(v)
                     ]))
                 } catch {
-                    self?.model?.schedulePush()
+                    guard let model = self?.model else { return }
+                    switch ParamWriteFailurePolicy.recovery(for: error) {
+                    case .reportOnly:
+                        model.setStatus(
+                            ParamWriteFailurePolicy.status(name: name, error: error),
+                            isError: true
+                        )
+                    }
                     return
                 }
             }

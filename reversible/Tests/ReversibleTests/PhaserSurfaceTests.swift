@@ -31,6 +31,31 @@ final class PhaserSurfaceTests: XCTestCase {
         )
     }
 
+    func testLiveParameterFailuresNeverRequestGraphRelowering() {
+        let failures: [EngineError] = [
+            .notRunning,
+            .exited,
+            .timeout(method: "set_param"),
+            .pendingLimit(lane: "control", limit: 8),
+            .rpc("socket closed"),
+            .engine(code: "unknown_param", message: "missing slot"),
+        ]
+
+        for failure in failures {
+            XCTAssertEqual(
+                ParamWriteFailurePolicy.recovery(for: failure),
+                .reportOnly
+            )
+        }
+        XCTAssertEqual(
+            ParamWriteFailurePolicy.status(
+                name: "master.velocity",
+                error: EngineError.timeout(method: "set_param")
+            ),
+            "parameter master.velocity: timeout: set_param"
+        )
+    }
+
     func testNativePhaserSurfaceMatchesServedContract() {
         let spec = NodeKind.phaser.spec
 
