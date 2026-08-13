@@ -540,13 +540,7 @@ def portSpecs : String → Array PortSpec
   | "reverb" => #[
       { name := "in", accepts := modalIn, multi := true },
       { name := "rt60", accepts := sigIn, knob := some (2, 0), discipline := .glide,
-        display := some { min := 0.2, max := 12, log := true, unit := "sec" } },
-      { name := "dir", accepts := sigIn, knob := some (0, 0), discipline := .glide,
-        display := some { min := 0, max := 1 } },
-      { name := "sway", accepts := sigIn, knob := some (0, 0), discipline := .glide,
-        display := some { min := 0, max := 0.9 } },
-      { name := "rate", accepts := sigIn, knob := some (3, 1), discipline := .glide,
-        display := some { min := 0.05, max := 8, log := true, unit := "Hz" } }]
+        display := some { min := 0.2, max := 12, log := true, unit := "sec" } }]
   | "filter" => #[
       { name := "in", accepts := modalIn, multi := true },
       { name := "cutoff", knob := some (800, 0), discipline := .glide,
@@ -676,7 +670,7 @@ def exactI64Companion (pidx : String → Option Nat) (base : String) : Sig :=
 /-- A closed-form smoothstep GLIDE of τ from value slots plus an exact t0
     companion: `v0 + (v1−v0)·s²(3−2s)`,
     `s = clamp(float(sampleIndex − t0_exact)/dur, 0, 1)`,
-    `dur = 0.02·sampleRate` samples (20 ms at any rate, matching the engine's
+    `dur = 0.01·sampleRate` samples (10 ms at any rate, matching the engine's
     glide discipline for `set_param`). The subtraction stays on the i64 clock
     rail, so Metal never rounds two post-2^24 absolute timestamps to f32 before
     taking their small difference. The legacy scalar `#t0` remains manifest
@@ -693,7 +687,7 @@ def glideExprAt (pidx : String → Option Nat) (base : String) (dflt coordinate 
       toFloatE (sub coordinate (exactI64Companion pidx s!"{base}#t0"))
     else
       sub (toFloatE coordinate) t0
-  let dur := mul (lit 2 2) .sampleRate   -- 0.02·SR = 20 ms
+  let dur := mul (lit 1 2) .sampleRate   -- 0.01·SR = 10 ms
   let s  := clampE (div elapsed dur) (lit 0) (lit 1)
   let ss := mul (mul s s) (sub (lit 3) (mul (lit 2) s))
   add v0 (mul (sub v1 v0) ss)
@@ -720,7 +714,7 @@ def glideExprQAt (pidx : String → Option Nat) (base : String)
         (lshift (exactI64Companion pidx s!"{base}#t0") (lit 32))
     else
       sub (div (toFloatE coordinateQ) qScale) t0
-  let dur := mul (lit 2 2) .sampleRate
+  let dur := mul (lit 1 2) .sampleRate
   let s := clampE (div elapsed dur) (lit 0) (lit 1)
   let ss := mul (mul s s) (sub (lit 3) (mul (lit 2) s))
   add v0 (mul (sub v1 v0) ss)

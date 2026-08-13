@@ -188,25 +188,11 @@ extension NodeKind {
             // A room bank (32 log-spaced modes, 60–6000 Hz) composed with its
             // MODAL input. Modal in → modal out, feeding another modal stage or
             // a Sig inlet where the complete value is realized.
-            //
-            // For the room kernel h, `dir` selects
-            // h[dir] = (1-dir)·h + dir·T(h), and this node convolves h[dir] with
-            // its input. Direction is local to this room: it never reverses the
-            // upstream modal value or the complete composed output.
             return NodeSpec(
                 title: "Reverb", accent: Color(hex: 0x3FB8B0),
                 inlets: ["in"], outlets: ["out"],
                 knobs: [
                     KnobSpec(name: "rt60", min: 0.2, max: 12, def: 2, log: true, unit: "sec"),
-                    // dir crossfades this room kernel: 0 = forward, 1 =
-                    // reversed. It keeps σ/ω fixed and is independent of
-                    // complete-output reversal by the master clock.
-                    KnobSpec(name: "dir", min: 0, max: 1, def: 0),
-                    // decay SWAY: the room breathes — σ modulated on the
-                    // envelope clock only, so the tail's decay time undulates
-                    // while pitch holds. Continuous, stateless.
-                    KnobSpec(name: "sway", min: 0, max: 0.9, def: 0),
-                    KnobSpec(name: "rate", min: 0.05, max: 8, def: 0.3, log: true, unit: "Hz"),
                 ],
                 modal: true)
         case .phaser:

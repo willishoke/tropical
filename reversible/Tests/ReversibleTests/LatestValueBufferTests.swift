@@ -14,16 +14,15 @@ final class LatestValueBufferTests: XCTestCase {
         XCTAssertNil(buffer.pop())
     }
 
-    func testOneTurningPointAndFinalAreRetained() {
+    func testTurningPointsCollapseToTheCurrentPointerValue() {
         var buffer = LatestValueBuffer(first: 0)
         buffer.offer(0.4)
         buffer.offer(0.8)
         buffer.offer(0.7)
         buffer.offer(0.3)
 
-        XCTAssertEqual(buffer.pendingCount, 3)
+        XCTAssertEqual(buffer.pendingCount, 2)
         XCTAssertEqual(buffer.pop(), 0)
-        XCTAssertEqual(buffer.pop(), 0.8)
         XCTAssertEqual(buffer.pop(), 0.3)
         XCTAssertNil(buffer.pop())
     }
@@ -32,7 +31,7 @@ final class LatestValueBufferTests: XCTestCase {
         var buffer = LatestValueBuffer(first: 0.5)
         for index in 0..<10_000 {
             buffer.offer(index.isMultiple(of: 2) ? 1 : 0)
-            XCTAssertLessThanOrEqual(buffer.pendingCount, 3)
+            XCTAssertLessThanOrEqual(buffer.pendingCount, 2)
         }
     }
 

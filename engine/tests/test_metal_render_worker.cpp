@@ -130,8 +130,11 @@ static void test_worker_activation_and_refill()
   // Releasing active-bank tiles causes steady-state refills. Those renders
   // must not overwrite the retained candidate-window timeline.
   for (uint32_t callback = 0; callback < 8; ++callback)
+  {
+    ASSERT(wait_for([&] { return queue.next_callback_ready_for_offline(); }));
     ASSERT(queue.consume(output.data(), 128).status
            == TileConsumeStatus::Audio);
+  }
   ASSERT(wait_for([&] {
     return queue.tile_state(queue.audio_active_bank(), 0)
            == TileState::Ready;
@@ -174,7 +177,7 @@ static void test_candidate_within_bank_horizon_does_not_retarget()
   tropical_metal::EpochScheduleResult result;
   std::thread control([&] {
     result = worker.schedule(
-      request(2, EpochTransitionKind::Continuous));
+      request(2, EpochTransitionKind::HotSwap));
   });
   ASSERT(wait_for([&] {
     return candidate_started.load(std::memory_order_acquire);
@@ -310,9 +313,10 @@ static void test_teardown_waits_for_inflight_tile()
   ASSERT(destroyed.load(std::memory_order_acquire));
 }
 
-static void test_rapid_a_b_a_serializes_acknowledgements()
+static void test_running_controls_serialize_acknowledgements()
 {
   EpochTileQueue queue(512, 512);
+  std::atomic<bool> realtime_running{true};
   MetalRenderWorker worker(
     queue,
     [](const RenderEpochRequest & request, uint64_t, uint32_t frames,
@@ -320,47 +324,87 @@ static void test_rapid_a_b_a_serializes_acknowledgements()
       std::fill_n(
         destination, frames, static_cast<double>(request.epoch_id));
       return true;
-    });
+    }, &realtime_running);
   ASSERT(worker.schedule(
     request(1, EpochTransitionKind::Fresh, 0)).ok);
   std::array<double, 512> output{};
   ASSERT(queue.consume(output.data(), output.size()).activated);
   ASSERT(wait_for([&] { return queue.activation_acknowledged() == 1; }));
 
-  std::array<tropical_metal::EpochScheduleResult, 3> results{};
-  for (uint32_t index = 0; index < results.size(); ++index)
-  {
-    const uint64_t epoch = index + 2;
-    const uint64_t expected_activation =
-      worker.reserve(EpochTransitionKind::Continuous).activation_frame;
-    std::jthread control([&, index, epoch] {
-      results[index] = worker.schedule(
-        request(epoch, EpochTransitionKind::Continuous));
-    });
-    ASSERT(wait_for([&] {
-      return queue.published_activation_epoch() == epoch;
-    }));
-    while (queue.published_device_frame()
-           < expected_activation)
-      ASSERT(queue.consume(output.data(), output.size()).status
-             == TileConsumeStatus::Audio);
-    const auto activated = queue.consume(output.data(), output.size());
-    ASSERT(activated.status == TileConsumeStatus::Audio);
-    ASSERT(activated.activated);
-    ASSERT(activated.epoch_id == epoch);
-    for (double sample : output)
-      ASSERT(sample == static_cast<double>(epoch));
-    control.join();
-    ASSERT(results[index].ok);
-    ASSERT(results[index].activation_frame == expected_activation);
-    ASSERT(queue.activation_acknowledged() == epoch);
-  }
-  ASSERT(results[0].activation_frame < results[1].activation_frame);
-  ASSERT(results[1].activation_frame < results[2].activation_frame);
+  const auto second = worker.schedule(
+    request(2, EpochTransitionKind::Continuous));
+  ASSERT(second.ok);
+  ASSERT(queue.published_activation_epoch() == 2);
+
+  tropical_metal::EpochScheduleResult third;
+  std::atomic<bool> third_returned{false};
+  std::jthread control([&] {
+    third = worker.schedule(request(3, EpochTransitionKind::Continuous));
+    third_returned.store(true, std::memory_order_release);
+  });
+  // If running-audio cancellation regresses, epoch 2 is replaced and this
+  // call returns immediately. It must instead remain pending until callback
+  // acknowledgement makes epoch 2's projected glide state real.
+  ASSERT(!wait_for(
+    [&] { return third_returned.load(std::memory_order_acquire); },
+    std::chrono::milliseconds(20)));
+  ASSERT(queue.published_activation_epoch() == 2);
+
+  while (queue.published_device_frame() < second.activation_frame)
+    ASSERT(queue.consume(output.data(), output.size()).status
+           == TileConsumeStatus::Audio);
+  const auto activated_two = queue.consume(output.data(), output.size());
+  ASSERT(activated_two.activated);
+  ASSERT(activated_two.epoch_id == 2);
+  ASSERT(wait_for(
+    [&] { return third_returned.load(std::memory_order_acquire); }));
+  control.join();
+  ASSERT(third.ok);
+  ASSERT(third.activation_frame > second.activation_frame);
+  while (queue.published_device_frame() < third.activation_frame)
+    ASSERT(queue.consume(output.data(), output.size()).status
+           == TileConsumeStatus::Audio);
+  const auto activated_three = queue.consume(output.data(), output.size());
+  ASSERT(activated_three.activated);
+  ASSERT(activated_three.epoch_id == 3);
   ASSERT(worker.activation_failure_count() == 0);
   ASSERT(worker.stale_completion_count() == 0);
   ASSERT(queue.starvation_count() == 0);
   ASSERT(queue.tag_mismatch_count() == 0);
+}
+
+static void test_live_control_primes_one_tile_before_publication()
+{
+  EpochTileQueue queue(128, 512);
+  std::atomic<uint32_t> epoch_two_renders{0};
+  MetalRenderWorker worker(
+    queue,
+    [&](const RenderEpochRequest & request, uint64_t, uint32_t frames,
+        double * destination) {
+      if (request.epoch_id == 2)
+        epoch_two_renders.fetch_add(1, std::memory_order_relaxed);
+      std::fill_n(destination, frames, static_cast<double>(request.epoch_id));
+      return true;
+    });
+  ASSERT(worker.schedule(request(1, EpochTransitionKind::Fresh, 0)).ok);
+  std::array<double, 128> output{};
+  ASSERT(queue.consume(output.data(), output.size()).activated);
+  ASSERT(wait_for([&] { return queue.activation_acknowledged() == 1; }));
+
+  const uint64_t before = queue.published_device_frame();
+  const auto live = worker.schedule(
+    request(2, EpochTransitionKind::Continuous));
+  ASSERT(live.ok);
+  ASSERT(live.activation_frame == before + queue.render_frames());
+  // schedule() returns as soon as one live-control tile is ready. Depending
+  // on scheduling, background refill may already have progressed, but the
+  // candidate publication itself records exactly one submitted prime tile.
+  ASSERT(worker.stage_times().candidate_window_ready != 0);
+  ASSERT(epoch_two_renders.load(std::memory_order_acquire) >= 1);
+  ASSERT(wait_for([&] {
+    return epoch_two_renders.load(std::memory_order_acquire)
+           == EpochTileQueue::kTilesPerBank;
+  }));
 }
 
 static void test_unclaimed_epochs_coalesce_without_audio_callback()
@@ -450,8 +494,10 @@ int main()
            test_failed_candidate_keeps_active_epoch);
   run_test("control-thread teardown joins an in-flight tile safely",
            test_teardown_waits_for_inflight_tile);
-  run_test("rapid A/B/A promises serialize through acknowledgements",
-           test_rapid_a_b_a_serializes_acknowledgements);
+  run_test("running controls serialize through acknowledgements",
+           test_running_controls_serialize_acknowledgements);
+  run_test("live controls publish with a one-tile activation lead",
+           test_live_control_primes_one_tile_before_publication);
   run_test("unclaimed controls coalesce before audio starts",
            test_unclaimed_epochs_coalesce_without_audio_callback);
   run_test("unclaimed controls coalesce after audio stops",

@@ -38,8 +38,8 @@ def paramDisciplinesOf (raws : Array Raw) :
         let base := paramNameOf r spec.name
         let d : Tropical.Plan.ParamDiscipline := match spec.discipline with
           | .glide =>
-            -- 0.02 s: the engine's glide window
-            { name := base, discipline := "glide", glideDurSec := some ⟨2, 2⟩,
+            -- 0.01 s: the engine's glide window
+            { name := base, discipline := "glide", glideDurSec := some ⟨1, 2⟩,
               companions := #[s!"{base}#v0", s!"{base}#v1", s!"{base}#t0",
                 s!"{base}#t0#u0", s!"{base}#t0#u1",
                 s!"{base}#t0#u2", s!"{base}#t0#u3"] }

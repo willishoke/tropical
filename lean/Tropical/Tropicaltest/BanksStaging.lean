@@ -414,9 +414,9 @@ def runBanksCountCache (arena : Arena)
     else
       failGate "banks-count-cache" s!"knobInvariant={knobInvariant} capMoves={capMoves}"
 
-/-- Build the resonator → reverb → out patch graph as Json (the dir-landing path:
-    a `reverb` node attaches a `ModalDir` unconditionally, so it routes through
-    `modalBankSigDirTable`). `rt60` is a `.raw` slot, so the value sets its default. -/
+/-- Build the resonator → reverb → out patch graph as Json. The public room fixes
+    its low-level orientation at forward, which still routes through the oriented
+    table and therefore retains rail coverage for that implementation path. -/
 private def reverbPatchJson (srcF srcDecay : Int) (rtM : Int) (rtE : Nat) : Lean.Json :=
   let node := fun (id kind : String) (params : List (String × Lean.Json))
                   (ins : List (String × Lean.Json)) =>
@@ -594,11 +594,11 @@ def runModalRail (arena : Arena)
     else
       failGate "modal-rail" s!"spikes green={spG} red={spR} (want 0/0), finite {finiteG}/{finiteR}, control peak {pkG} (want >50) — the datapath wraps or the render is trivial"
 
-/-- THE MODAL DIR-RAIL WITNESS (option E, the reverb/dir-path red witness). The
+/-- THE MODAL DIR-RAIL WITNESS (option E, the oriented-room-path red witness). The
     `modalBankSigDirTable` landing had ZERO rail coverage, yet every `reverb` node
-    in the vocabulary routes through it (`reverb` attaches a `ModalDir`
-    unconditionally, unlike `filter`), so the same i64 wrap lived there unwitnessed.
-    At the default dir knob (0) the dir table reduces to its forward accumulator,
+    in the vocabulary routes through it with a fixed forward orientation (unlike
+    `filter`), so the same i64 wrap lived there unwitnessed. At direction zero the
+    oriented table reduces to its forward accumulator,
     whose per-mode Q4.28 landing is the SAME overflow site as the plain table.
 
     The gesture: `resonator(60,4) ⋙ reverb(rt60) ⋙ out`. The reverb room mode 0
@@ -607,7 +607,7 @@ def runModalRail (arena : Arena)
     neighbourhood of the coincidence (σ_room = 6.91/rt60 crossing σ_res = decay·1.4
     = 5.6 at rt60 ≈ 1.234) drives the collected |A| past the rail.
 
-    MEASURED on the production dir path (the derivation lab, fix forced off):
+    MEASURED on the production oriented-room path (the derivation lab, fix forced off):
     the red set is ERRATIC — the wrap needs differing per-mode wrap counts, so it
     is necessary-not-sufficient and fires only at some rt60 in the neighbourhood
     (rt60 1.230/1.236/1.238 → peak ≈237 with 15/3/21 spikes; the exact-coincidence
@@ -633,11 +633,11 @@ def runModalRailDir (arena : Arena)
     let (pkR, spR) := spikeStats red
     let finiteG := green.all (·.isFinite)
     let finiteR := red.all (·.isFinite)
-    IO.println s!"        resonator(60,4) ⋙ reverb(rt60) ⋙ out, production dir path (60 Hz pole coincidence):"
+    IO.println s!"        resonator(60,4) ⋙ reverb(rt60) ⋙ out, production oriented-room path (60 Hz pole coincidence):"
     IO.println s!"        rt60 2.0 (green control)  : peak={pkG} spikes={spG} finite={finiteG}"
     IO.println s!"        rt60 1.238 (red arm)      : peak={pkR} spikes={spR} finite={finiteR}"
     if spG == 0 && spR == 0 && finiteG && finiteR && pkG > 0.05 && pkR < 10.0 then
-      passGate "modal-rail-dir" s!"the reverb dir landing survives the 60 Hz pole coincidence (rt60 1.238 spike-free, peak {pkR} — the pre-fix ±237 wrap is gone; control rt60 2.0 renders) — the i64 rail is fixed on the dir path too"
+      passGate "modal-rail-dir" s!"the oriented room landing survives the 60 Hz pole coincidence (rt60 1.238 spike-free, peak {pkR} — the pre-fix ±237 wrap is gone; control rt60 2.0 renders) — the i64 rail is fixed on that path too"
     else
       failGate "modal-rail-dir" s!"spikes green={spG} red={spR} (want 0/0), finite {finiteG}/{finiteR}, control peak {pkG} (>0.05), red peak {pkR} (want <10 — the wrap is ≈237)"
 

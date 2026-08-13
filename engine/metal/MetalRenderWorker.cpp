@@ -64,9 +64,12 @@ void update_max(std::atomic<uint64_t> & target, uint64_t value)
 } // namespace
 
 MetalRenderWorker::MetalRenderWorker(
-  EpochTileQueue & queue, RenderFunction render)
+  EpochTileQueue & queue, RenderFunction render,
+  std::atomic<bool> * realtime_running)
   : queue_(queue),
-    render_(std::move(render))
+    render_(std::move(render)),
+    realtime_running_source_(
+      realtime_running ? realtime_running : &realtime_running_)
 {
   if (!render_)
   {
@@ -146,7 +149,12 @@ void MetalRenderWorker::run()
   for (;;)
   {
     observe_activation_acknowledgement();
-    bool worked = refill_active_bank();
+    // Finish the newly published bank before servicing the old active bank.
+    // Live controls publish after one prime tile; the remaining tiles are
+    // rendered during the one-tile lead instead of delaying publication by a
+    // complete four-tile window.
+    bool worked = refill_pending_bank();
+    if (!worked) worked = refill_active_bank();
 
     std::shared_ptr<PendingRequest> pending;
     {
@@ -159,13 +167,15 @@ void MetalRenderWorker::run()
       }
       // schedule() returns once a complete activation has been published; it
       // does not wait for the audio callback to reach that future boundary.
-      // A later request is another complete kernel/slot image, so if audio has
-      // not claimed the earlier descriptor yet, replace it. Besides coalescing
-      // rapid live edits, this is what lets controls work while the DAC is
-      // stopped: there is no callback available to acknowledge an intermediate
-      // epoch. The queue's claim CAS makes cancellation lose safely to a
-      // callback that has already committed to the activation.
+      // With no device callback, an intermediate epoch can never be
+      // acknowledged, so stopped-DAC edits coalesce to the newest complete
+      // image. While audio is running we must preserve activation order:
+      // FlatRuntime's glide companions project the state at each activation,
+      // and reusing a projection from a cancelled epoch causes a discontinuity.
+      // The queue's claim CAS still makes stopped-DAC cancellation lose safely
+      // to a callback that has already committed to the activation.
       if (pending_activation_epoch_ != 0 && !requests_.empty()
+          && !realtime_running_source_->load(std::memory_order_acquire)
           && queue_.cancel_unclaimed_activation(
             pending_activation_epoch_))
       {
@@ -252,6 +262,23 @@ bool MetalRenderWorker::refill_active_bank()
   return render_one(active_bank_, cursor, false);
 }
 
+bool MetalRenderWorker::refill_pending_bank()
+{
+  if (pending_activation_epoch_ == 0) return false;
+  for (uint32_t bank = 0; bank < EpochTileQueue::kBankCount; ++bank)
+  {
+    BankRenderCursor & cursor = bank_cursors_[bank];
+    if (!cursor.valid
+        || cursor.request.epoch_id != pending_activation_epoch_)
+      continue;
+    if (queue_.tile_state(bank, cursor.next_slot)
+        != tropical_runtime::TileState::Free)
+      return false;
+    return render_one(bank, cursor, false);
+  }
+  return false;
+}
+
 EpochScheduleResult
 MetalRenderWorker::prepare_activation(RenderEpochRequest request)
 {
@@ -283,11 +310,7 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
       ? request.activation_frame
       : (fresh && observed_device == 0
           ? 0
-          // Preparing an activation renders the complete candidate bank, not
-          // one tile. Reserving only one render quantum made a qualified
-          // four-tile hot-swap perpetually chase the audio callback whenever
-          // candidate preparation took longer than that single quantum.
-          : observed_device + queue_.capacity_frames());
+          : observed_device + activation_lead_frames(request.transition));
     const uint64_t source_start = request.fixed_activation
       ? request.source_origin
       : (request.transition == EpochTransitionKind::ClockJump
@@ -321,7 +344,8 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
     candidate.next_device = activation_frame;
     candidate.next_source = source_start;
     candidate.next_slot = 0;
-    if (!render_window(staging_bank, candidate))
+    if (!render_tiles(
+          staging_bank, candidate, prime_tile_count(request.transition)))
     {
       activation_failures_.fetch_add(1, std::memory_order_relaxed);
       return {
@@ -388,7 +412,7 @@ EpochReservation MetalRenderWorker::reserve(
   const bool no_active =
     queue_.audio_active_bank() == EpochTileQueue::kNoBank;
   const uint64_t frame =
-    no_active && device == 0 ? 0 : device + queue_.capacity_frames();
+    no_active && device == 0 ? 0 : device + activation_lead_frames(transition);
   return {
     frame,
     transition == EpochTransitionKind::ClockJump
@@ -446,13 +470,43 @@ bool MetalRenderWorker::render_one(
   return true;
 }
 
-bool MetalRenderWorker::render_window(
-  uint32_t bank_index, BankRenderCursor & cursor)
+bool MetalRenderWorker::render_tiles(
+  uint32_t bank_index, BankRenderCursor & cursor, uint32_t tile_count)
 {
-  for (uint32_t i = 0; i < EpochTileQueue::kTilesPerBank; ++i)
+  for (uint32_t i = 0; i < tile_count; ++i)
     if (!render_one(bank_index, cursor, true))
       return false;
   return true;
+}
+
+uint64_t MetalRenderWorker::activation_lead_frames(
+  EpochTransitionKind transition) const noexcept
+{
+  switch (transition)
+  {
+    case EpochTransitionKind::Continuous:
+    case EpochTransitionKind::ClockJump:
+      return queue_.render_frames();
+    case EpochTransitionKind::Fresh:
+    case EpochTransitionKind::HotSwap:
+      return queue_.capacity_frames();
+  }
+  return queue_.capacity_frames();
+}
+
+uint32_t MetalRenderWorker::prime_tile_count(
+  EpochTransitionKind transition) noexcept
+{
+  switch (transition)
+  {
+    case EpochTransitionKind::Continuous:
+    case EpochTransitionKind::ClockJump:
+      return 1;
+    case EpochTransitionKind::Fresh:
+    case EpochTransitionKind::HotSwap:
+      return EpochTileQueue::kTilesPerBank;
+  }
+  return EpochTileQueue::kTilesPerBank;
 }
 
 uint64_t MetalRenderWorker::monotonic_time_ns()
@@ -521,6 +575,12 @@ uint64_t MetalRenderWorker::worker_wall_time_ns() const noexcept
   const uint64_t start =
     worker_start_time_ns_.load(std::memory_order_acquire);
   return start == 0 ? 0 : monotonic_time_ns() - start;
+}
+
+void MetalRenderWorker::set_realtime_running(bool running) noexcept
+{
+  realtime_running_source_->store(running, std::memory_order_release);
+  wake_.notify_one();
 }
 
 void MetalRenderWorker::set_test_seam(

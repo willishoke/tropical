@@ -7,17 +7,18 @@ final class PhaserSurfaceTests: XCTestCase {
         let graph = FactoryPatches.modalPhaser
 
         XCTAssertEqual(graph.order, [
-            "source7", "resonator1", "reverb2", "phaser3",
-            "reverb4", "out5", "scope6",
+            "source1", "resonator2", "phaser3", "out4", "scope5",
         ])
-        XCTAssertEqual(graph.nodes["source7"]?.values["freq"], 0.63)
-        XCTAssertEqual(graph.nodes["resonator1"]?.inputs["addr"], ["source7"])
-        XCTAssertEqual(graph.nodes["reverb2"]?.inputs["in"], ["resonator1"])
-        XCTAssertEqual(graph.nodes["phaser3"]?.inputs["in"], ["reverb2"])
-        XCTAssertEqual(graph.nodes["reverb4"]?.inputs["in"], ["phaser3"])
-        XCTAssertEqual(graph.nodes["out5"]?.inputs["in"], ["reverb4"])
-        XCTAssertEqual(graph.nodes["scope6"]?.inputs["ch1"], ["out5"])
+        XCTAssertEqual(graph.nodes["source1"]?.values["freq"], 0.63)
+        XCTAssertEqual(graph.nodes["resonator2"]?.inputs["addr"], ["source1"])
+        XCTAssertEqual(graph.nodes["phaser3"]?.inputs["in"], ["resonator2"])
+        XCTAssertEqual(graph.nodes["out4"]?.inputs["in"], ["phaser3"])
+        XCTAssertEqual(graph.nodes["scope5"]?.inputs["ch1"], ["out4"])
         XCTAssertTrue(graph.nodes["phaser3"]?.kind.spec.modal == true)
+    }
+
+    func testReverbExposesOnlyItsUsefulDecayControl() {
+        XCTAssertEqual(NodeKind.reverb.spec.knobs.map(\.name), ["rt60"])
     }
 
     func testConnectedInletMenuDoesNotClaimItHasNoSources() {

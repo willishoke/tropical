@@ -101,6 +101,7 @@ static inline void update_max(std::atomic<uint64_t>& cur, uint64_t val)
  *   void begin_fade_in(int samples = 2048);
  *   void begin_fade_out(int samples = 2048);
  *   bool is_fade_out_complete() const;
+ *   void set_realtime_running(bool) noexcept;  // optional async scheduler hint
  *
  * Both Graph and FlatRuntime satisfy this.
  */
@@ -199,41 +200,63 @@ struct TropicalDACImpl
       source->prepare_realtime_start(0);
   }
 
+  void set_source_realtime_running(bool value) noexcept
+  {
+    if constexpr (requires {
+                    { source->set_realtime_running(value) } noexcept;
+                  })
+      source->set_realtime_running(value);
+  }
+
   void start()
   {
     if (running)
       return;
 
-    prepare_source_for_start();
+    // Declare realtime intent before preparation/opening so a control request
+    // racing startup cannot cancel a glide epoch whose projection the callback
+    // is about to consume.
+    set_source_realtime_running(true);
+    try
+    {
+      prepare_source_for_start();
 
-    source->begin_fade_in();
+      source->begin_fade_in();
 
-    callback_count_.store(0, std::memory_order_relaxed);
-    total_callback_ns_.store(0, std::memory_order_relaxed);
-    max_callback_ns_.store(0, std::memory_order_relaxed);
-    underrun_count_.store(0, std::memory_order_relaxed);
-    overrun_count_.store(0, std::memory_order_relaxed);
-    for (auto & bank : callback_histogram_)
-      for (auto & bin : bank)
-        bin.store(0, std::memory_order_relaxed);
-    active_histogram_.store(0, std::memory_order_relaxed);
-    requested_histogram_.store(0, std::memory_order_relaxed);
-    stats_epoch_.store(1, std::memory_order_relaxed);
-    requested_stats_epoch_.store(1, std::memory_order_relaxed);
-    capture_requested_.store(0, std::memory_order_relaxed);
-    capture_ready_.store(0, std::memory_order_relaxed);
-    capture_state_.store(CaptureState::Idle, std::memory_order_relaxed);
-    disconnect_count_.store(0, std::memory_order_relaxed);
-    reconnect_success_count_.store(0, std::memory_order_relaxed);
-    reconnect_failure_count_.store(0, std::memory_order_relaxed);
-    rtaudio_disconnect_latched_.store(false, std::memory_order_relaxed);
+      callback_count_.store(0, std::memory_order_relaxed);
+      total_callback_ns_.store(0, std::memory_order_relaxed);
+      max_callback_ns_.store(0, std::memory_order_relaxed);
+      underrun_count_.store(0, std::memory_order_relaxed);
+      overrun_count_.store(0, std::memory_order_relaxed);
+      for (auto & bank : callback_histogram_)
+        for (auto & bin : bank)
+          bin.store(0, std::memory_order_relaxed);
+      active_histogram_.store(0, std::memory_order_relaxed);
+      requested_histogram_.store(0, std::memory_order_relaxed);
+      stats_epoch_.store(1, std::memory_order_relaxed);
+      requested_stats_epoch_.store(1, std::memory_order_relaxed);
+      capture_requested_.store(0, std::memory_order_relaxed);
+      capture_ready_.store(0, std::memory_order_relaxed);
+      capture_state_.store(CaptureState::Idle, std::memory_order_relaxed);
+      disconnect_count_.store(0, std::memory_order_relaxed);
+      reconnect_success_count_.store(0, std::memory_order_relaxed);
+      reconnect_failure_count_.store(0, std::memory_order_relaxed);
+      rtaudio_disconnect_latched_.store(false, std::memory_order_relaxed);
 
-    open_stream();
-    running = true;
+      open_stream();
+      running = true;
 
-    device_disconnected_.store(false, std::memory_order_relaxed);
-    watcher_shutdown_.store(false, std::memory_order_relaxed);
-    watcher_thread_ = std::thread(&TropicalDACImpl::watcher_loop, this);
+      device_disconnected_.store(false, std::memory_order_relaxed);
+      watcher_shutdown_.store(false, std::memory_order_relaxed);
+      watcher_thread_ = std::thread(&TropicalDACImpl::watcher_loop, this);
+    }
+    catch (...)
+    {
+      try { close_stream(/*fade=*/false); } catch (...) {}
+      running = false;
+      set_source_realtime_running(false);
+      throw;
+    }
   }
 
   void stop()
@@ -244,6 +267,9 @@ struct TropicalDACImpl
 
     close_stream(/*fade=*/true);
     running = false;
+    // This is a lock-free scheduler signal, so it can release an in-flight
+    // control request even after a disconnect removed the last callback.
+    set_source_realtime_running(false);
   }
 
   bool is_reconnecting() const

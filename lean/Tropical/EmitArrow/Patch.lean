@@ -122,11 +122,12 @@ inductive Node where
       direction is still room-local; this constructor remains convenient for
       structural banks that do not own a wireable RT60 control. -/
   | modalReverb (input : String) (room : Array ModalMode) (dir : Option ModalDir)
-  /-- The public ordinary room.  Its topology is a function of the frozen RT60
-      value, while all four controls retain their optional signal dependencies
-      until the terminal multi-input binding seam. -/
+  /-- The public ordinary room. Its topology is a function of the frozen RT60
+      value. Direction and decay modulation remain low-level modal tools, not
+      public room controls: reverse-room energy is predominantly pre-strike and
+      therefore misleadingly quiet in an ordinary forward-playing patch. -/
   | modalRoom (input : String) (build : Sig → Array ModalMode)
-      (rt60 direction sway rate : ModalControlRef)
+      (rt60 : ModalControlRef)
   /-- One generic linear modal-kernel action.  The stage builds a retained
       identity/proper/parallel/cascade expression only after its controls are
       frozen at the terminal response coordinate. -/
@@ -215,8 +216,8 @@ def Node.inputIds : Node → Array String
   | .modalBlend dry wet mixControl =>
       #[dry, wet] ++ (mixControl.signalNode?.map (#[·])).getD #[]
   | .modalGaugeControl i g => #[i] ++ (g.signalNode?.map (#[·])).getD #[]
-  | .modalRoom i _ rt60 direction sway rate =>
-      #[i] ++ (#[rt60, direction, sway, rate].filterMap (fun control => control.signalNode?))
+  | .modalRoom i _ rt60 =>
+      #[i] ++ (rt60.signalNode?.map (#[·])).getD #[]
 
 /-- Is `id` a modal-island node? Its output wire carries poles, not a `Sig`. A
     missing node reads as Sig (graceful — a half-built patch stays lowerable). -/
@@ -345,7 +346,7 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
       sway? }
     return lowered.map fun branch =>
       { branch with stages := branch.stages.push stage, modeCount? := none }
-  | .modalRoom inId build rt60 direction sway rate => do
+  | .modalRoom inId build rt60 => do
     let lowered ←
       if inId == "__silence__" then pure silentForest
       else match rankOf inId with
@@ -355,8 +356,8 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
           else throw (cycleGuardMsg id inId)
     let stage : ModalStage := .ordinaryRoom {
       kernel := .controlled rt60 (fun value => clampSigmas (build value))
-      direction
-      sway? := some (sway, rate) }
+      direction := .constant (lit 0)
+      sway? := none }
     return lowered.map fun branch =>
       { branch with stages := branch.stages.push stage, modeCount? := none }
   | .modalLinear inId linear => do

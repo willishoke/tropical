@@ -1074,8 +1074,8 @@ def buildModalBankWarped (name : String) (modes : Array ModalMode) (anchor : Sig
 
 /-- Emit one bank through the low-level forward↔reverse orientation primitive —
     the `modal-direction` gate's device-under-test. When these modes describe a
-    room, this is the oriented kernel that public reverb composes with its input;
-    it is not a complete composed-output reversal. -/
+    room, this is the oriented kernel path that public reverb uses at fixed
+    forward orientation; it is not a complete composed-output reversal. -/
 def buildModalBankDir (name : String) (modes : Array ModalMode) (anchor : Sig)
     (dir : Sig) (arena : Arena)
     (damp? : Option (Sig × Sig) := none) : Arena × ProgramIdx :=

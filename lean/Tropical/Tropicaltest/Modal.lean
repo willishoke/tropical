@@ -1661,7 +1661,7 @@ def runModalUniverseHistory (arena : Arena)
   let addressedSrc := "{\"nodes\":[" ++
     "{\"id\":\"osc\",\"kind\":\"source\",\"params\":{\"freq\":0.63,\"morph\":0}}," ++
     "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":56.78,\"decay\":15.48},\"in\":{\"addr\":[\"osc\"]}}," ++
-    "{\"id\":\"room_a\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.21,\"dir\":1},\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"room_a\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.21},\"in\":{\"in\":[\"res\"]}}," ++
     "{\"id\":\"room_b\",\"kind\":\"reverb\",\"params\":{\"rt60\":2},\"in\":{\"in\":[\"room_a\"]}}," ++
     "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"room_b\"]}}],\"out\":\"out\"}"
   let holdSrc := "{\"nodes\":[" ++

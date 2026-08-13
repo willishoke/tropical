@@ -204,25 +204,13 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
   | "reverb" =>
     let rt60 := modalControl "rt60"
     let rtRange := displayRangeOf "reverb" "rt60"
-    -- ROOM-KERNEL DIRECTION: for this room impulse response `h`, `dir` selects
-    -- `h[dir] = (1-dir)·h + dir·T(h)`, then the room composes `h[dir]` with its
-    -- modal input. Thus 0 is the forward kernel, 1 the reversed kernel, and an
-    -- interior value contains both. Direction is local to this room: it does not
-    -- reverse the upstream modal value or the complete composed output. σ and ω
-    -- stay fixed, so the crossfade remains audible across the whole range.
-    let dirX := modalControl "dir"
-    -- SWAY: the room's decay breathes — σ ↦ σ·(1 + sway·sin(2π·rate·t)) on the
-    -- envelope's clock only (pitch fixed). Continuous CF modulation of RT60 that
-    -- stays on-island (no ∫σ dτ, no state); scrubs/reverses with the master clock.
-    let sway := modalControl "sway"
-    let swayRate := modalControl "rate"   -- 0.3 Hz: a slow breath
     (.modalRoom modal
       (fun frozenRt60 =>
         let boundedRt60 := match rtRange with
           | some (lo, hi) => clampE frozenRt60 (litF lo) (litF hi)
           | none => frozenRt60
         reverbRoom boundedRt60 rtRange 32 (60, 0) (6000, 0))
-      rt60 dirX sway swayRate, modalFanIn)
+      rt60, modalFanIn)
   | "filter" =>
     -- A filter is now an ordinary proper modal-kernel atom.  Its public module
     -- remains a convenience surface, but no filter-specific stage survives
@@ -625,7 +613,7 @@ def collectParams (raws : Array Raw) : Array (String × JsonNumber) := Id.run do
           out := out.push (s!"{base}#v1", dflt)
           out := out.push (s!"{base}#t0", ⟨0, 0⟩)
           -- Metal snapshots ordinary slots as f32, so an absolute t0 would
-          -- lose the whole 20 ms ramp past 2^24. Four exact 16-bit limbs carry
+          -- lose the whole 10 ms ramp past 2^24. Four exact 16-bit limbs carry
           -- the signed i64 source coordinate used by `glideExpr`.
           for i in [0:4] do
             out := out.push (s!"{base}#t0#u{i}", ⟨0, 0⟩)

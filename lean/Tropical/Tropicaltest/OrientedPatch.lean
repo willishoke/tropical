@@ -73,8 +73,7 @@ equal.  Each builds the same physical pole `sigma = 10/rt60 = 5`; the second
 convolution must take the repeated-pole beta route instead of dividing by zero. -/
 private def equalRt60Graph : PatchGraph :=
   let room := fun input => Node.modalRoom input equalRt60Modes
-    (constantControl (lit 2)) (constantControl (lit 0))
-    (constantControl (lit 0)) (constantControl (lit 0))
+    (constantControl (lit 2))
   { nodes := #[
       { id := "source", node := .modalSource sourceModes anchorSig clockLit none },
       { id := "equal-room-one", node := room "source" },
@@ -83,8 +82,7 @@ private def equalRt60Graph : PatchGraph :=
 
 private def repeatedRoomCrossingGraph (afterGauge : Bool) : PatchGraph :=
   let room := fun input => Node.modalRoom input equalRt60Modes
-    (constantControl (lit 2)) (constantControl (lit 0))
-    (constantControl (lit 0)) (constantControl (lit 0))
+    (constantControl (lit 2))
   let nodesPrefix : Array PatchNode := #[
     { id := "source", node := .modalSource sourceModes anchorSig clockLit none },
     { id := "equal-room-one", node := room "source" },

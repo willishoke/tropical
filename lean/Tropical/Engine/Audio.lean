@@ -122,7 +122,7 @@ def handleSetParam (env : Env) (args : Json) : EngineM Json := do
     the new ramp starts exactly where we are — no jump), then set
     `v0 = current, v1 = target, t0 = now` and publish the exact t0 limbs.
     Stateless and click-free — the "state" is the anchor slots, navigable like τ.
-    `dur = 0.02·SR` samples (20 ms) matches the kernel's ramp, at any sample rate. -/
+    `dur = 0.01·SR` samples (10 ms) matches the kernel's ramp, at any sample rate. -/
 private def applyParamGlide (env : Env) (args : Json) : EngineM Json := do
   let name := (argStr? args "name").getD ""
   let target ← match getField? args "value" with
@@ -146,7 +146,7 @@ private def applyParamGlide (env : Env) (args : Json) : EngineM Json := do
     match ← slotOf sfx with | some i => env.runtime.setSlot i v | none => pure ()
   let nowBits ← env.runtime.currentSampleIndexU64
   let now := nowBits.toFloat
-  let dur := (← env.runtime.sampleRate) * 0.02   -- 20 ms, matching the kernel's ramp
+  let dur := (← env.runtime.sampleRate) * 0.01   -- 10 ms, matching the kernel's ramp
   let v0 ← read "v0"; let v1 ← read "v1"; let t0 ← read "t0"
   let elapsed ← match ← readExactT0 with
     | some exactT0 =>

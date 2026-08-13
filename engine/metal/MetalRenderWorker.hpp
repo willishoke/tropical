@@ -96,7 +96,8 @@ public:
 
   explicit MetalRenderWorker(
     tropical_runtime::EpochTileQueue & queue,
-    RenderFunction render = {});
+    RenderFunction render = {},
+    std::atomic<bool> * realtime_running = nullptr);
   ~MetalRenderWorker();
 
   MetalRenderWorker(const MetalRenderWorker &) = delete;
@@ -117,6 +118,7 @@ public:
   MetalActivationLatencyStats activation_latency_stats() const noexcept;
   uint64_t worker_cpu_time_ns() const noexcept;
   uint64_t worker_wall_time_ns() const noexcept;
+  void set_realtime_running(bool running) noexcept;
   void set_test_seam(MetalRenderWorkerTestSeam * seam) noexcept;
 
 private:
@@ -142,12 +144,18 @@ private:
   void ensure_started();
   void run();
   bool observe_activation_acknowledgement();
+  bool refill_pending_bank();
   bool refill_active_bank();
   EpochScheduleResult prepare_activation(RenderEpochRequest request);
   bool render_one(
     uint32_t bank_index, BankRenderCursor & cursor,
     bool record_candidate_stage);
-  bool render_window(uint32_t bank_index, BankRenderCursor & cursor);
+  bool render_tiles(
+    uint32_t bank_index, BankRenderCursor & cursor, uint32_t tile_count);
+  uint64_t activation_lead_frames(
+    EpochTransitionKind transition) const noexcept;
+  static uint32_t prime_tile_count(
+    EpochTransitionKind transition) noexcept;
   static uint64_t monotonic_time_ns();
 
   tropical_runtime::EpochTileQueue & queue_;
@@ -186,6 +194,8 @@ private:
   std::atomic<uint64_t> worker_start_time_ns_{0};
   std::atomic<uint64_t> worker_cpu_baseline_ns_{0};
   std::atomic<uint64_t> worker_cpu_latest_ns_{0};
+  std::atomic<bool> realtime_running_{false};
+  std::atomic<bool> * realtime_running_source_ = &realtime_running_;
   std::atomic<MetalRenderWorkerTestSeam *> test_seam_{nullptr};
 };
 

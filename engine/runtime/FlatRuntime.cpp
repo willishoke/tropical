@@ -425,9 +425,12 @@ PublishedGeneration FlatRuntime::publish_state(
   if (new_state.metal)
   {
     if (!metal_worker_)
+    {
       metal_worker_ =
         std::make_unique<tropical_metal::MetalRenderWorker>(
-          *metal_tiles_);
+          *metal_tiles_, tropical_metal::MetalRenderWorker::RenderFunction{},
+          &realtime_running_);
+    }
     const uint64_t epoch_id = next_metal_epoch_id_++;
     const auto transition =
       metal_runtime_loaded_.load(std::memory_order_acquire)
@@ -1057,7 +1060,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
     if (v0i == UINT32_MAX)
       return fail("set_param: no glide slots for '" + name + "'");
     const double dur_sec = pd->glide_dur_sec > 0.0
-      ? pd->glide_dur_sec : 0.02;
+      ? pd->glide_dur_sec : 0.01;
     const double dur = state.sample_rate * dur_sec;
     const double v0 = read(v0i);
     const double v1 = read(v1i);

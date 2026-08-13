@@ -1523,8 +1523,16 @@ struct ReadyAwareStartSource : CaptureTestSource
     requested_process_cycles = process_cycles;
   }
 
+  void set_realtime_running(bool value) noexcept
+  {
+    realtime_running = value;
+    ++realtime_signals;
+  }
+
   unsigned int prepare_calls = 0;
   unsigned int requested_process_cycles = 0;
+  bool realtime_running = false;
+  unsigned int realtime_signals = 0;
 };
 
 static void test_dac_start_source_preparation()
@@ -1549,6 +1557,12 @@ static void test_dac_start_source_preparation()
   ASSERT(ready_aware.prepare_calls == 2);
   ASSERT(ready_aware.requested_process_cycles == 0);
   ASSERT(ready_aware.process_calls == 0);
+
+  ready_dac.set_source_realtime_running(true);
+  ASSERT(ready_aware.realtime_running);
+  ready_dac.set_source_realtime_running(false);
+  ASSERT(!ready_aware.realtime_running);
+  ASSERT(ready_aware.realtime_signals == 2);
 
   legacy_dac.prepare_source_for_stream_restart();
   ASSERT(legacy.process_calls == kPrimeCycles);

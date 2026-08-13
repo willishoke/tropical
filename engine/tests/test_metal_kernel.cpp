@@ -512,7 +512,7 @@ static void test_metal_effective_dispatch_epochs()
   ASSERT(raw.ok);
   ASSERT(raw.observed_sample_index == buf);
   ASSERT(raw.effective_sample_index
-         == buf + rt.metal_worker_capacity_frames());
+         == buf + rt.metal_render_tile_frames());
   while (rt.current_sample_index() < raw.effective_sample_index)
   {
     for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 180.0, 1e-5);
@@ -589,7 +589,7 @@ static void test_metal_retarget_recomputes_companions()
   rt.process();
 
   const uint64_t provisional =
-    rt.current_sample_index() + rt.metal_worker_capacity_frames();
+    rt.current_sample_index() + rt.metal_render_tile_frames();
   const double old_v0 = rt.get_slot(1);
   const double old_v1 = rt.get_slot(2);
   const double old_t0 = rt.get_slot(3);
@@ -775,8 +775,7 @@ static void test_metal_clock_jump_and_precompiled_swap_stress()
       tropical_metal::EpochTransitionKind::ClockJump, source));
     ASSERT(scheduled.ok);
 
-    for (uint32_t block = 0;
-         block < queue.capacity_frames() / frames; ++block)
+    while (queue.published_device_frame() < scheduled.activation_frame)
     {
       const auto old = consume();
       ASSERT(old.status == tropical_runtime::TileConsumeStatus::Audio);
