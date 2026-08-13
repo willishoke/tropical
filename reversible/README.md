@@ -37,6 +37,8 @@ Engine resolution order:
 
 1. `Reversible.app/Contents/Resources/Tropical/frontend`
 2. `TROPICAL_ENGINE_BIN` (an explicit developer/test override)
+3. The owning checkout's `lean/.lake/build/bin/frontend` for a direct
+   `swift run --package-path reversible Reversible` development launch
 
 `reversible/scripts/run-dev` resolves both the package and engine from the
 script's repository location. There is no implicit home-checkout fallback and

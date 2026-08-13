@@ -3,6 +3,20 @@ import XCTest
 @testable import Reversible
 
 final class PhaserSurfaceTests: XCTestCase {
+    func testModalPhaserDemoLoadsItsCompleteConnectionChain() {
+        let graph = FactoryPatches.modalPhaser
+
+        XCTAssertEqual(graph.order, [
+            "resonator1", "reverb2", "phaser3", "reverb4", "out5", "scope6",
+        ])
+        XCTAssertEqual(graph.nodes["reverb2"]?.inputs["in"], ["resonator1"])
+        XCTAssertEqual(graph.nodes["phaser3"]?.inputs["in"], ["reverb2"])
+        XCTAssertEqual(graph.nodes["reverb4"]?.inputs["in"], ["phaser3"])
+        XCTAssertEqual(graph.nodes["out5"]?.inputs["in"], ["reverb4"])
+        XCTAssertEqual(graph.nodes["scope6"]?.inputs["ch1"], ["out5"])
+        XCTAssertTrue(graph.nodes["phaser3"]?.kind.spec.modal == true)
+    }
+
     func testNativePhaserSurfaceMatchesServedContract() {
         let spec = NodeKind.phaser.spec
 
