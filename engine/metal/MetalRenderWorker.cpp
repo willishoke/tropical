@@ -362,10 +362,13 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
     {
       activation_retargets_.fetch_add(1, std::memory_order_relaxed);
       if (request.fixed_activation)
+      {
+        learn_live_activation_lead(request, device_after_render, true);
         return {
           false, "MetalRenderWorker: activation target became inadmissible",
           request.epoch_id, activation_frame, source_start, true
         };
+      }
       ++retargets;
       const uint64_t now = monotonic_time_ns();
       if (retargets >= kActivationRetargetLimit
@@ -381,6 +384,9 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
       }
       continue;
     }
+
+    if (request.fixed_activation)
+      learn_live_activation_lead(request, device_after_render, false);
 
     if (!queue_.publish_activation(
           EpochActivation{
@@ -414,6 +420,7 @@ EpochReservation MetalRenderWorker::reserve(
   const uint64_t frame =
     no_active && device == 0 ? 0 : device + activation_lead_frames(transition);
   return {
+    device,
     frame,
     transition == EpochTransitionKind::ClockJump
       ? requested_source
@@ -486,12 +493,40 @@ uint64_t MetalRenderWorker::activation_lead_frames(
   {
     case EpochTransitionKind::Continuous:
     case EpochTransitionKind::ClockJump:
-      return queue_.render_frames();
+      return std::max<uint64_t>(
+        queue_.render_frames(),
+        live_activation_lead_frames_.load(std::memory_order_acquire));
     case EpochTransitionKind::Fresh:
     case EpochTransitionKind::HotSwap:
       return queue_.capacity_frames();
   }
   return queue_.capacity_frames();
+}
+
+void MetalRenderWorker::learn_live_activation_lead(
+  const RenderEpochRequest & request,
+  uint64_t device_after_render,
+  bool candidate_was_late) noexcept
+{
+  if ((request.transition != EpochTransitionKind::Continuous
+       && request.transition != EpochTransitionKind::ClockJump)
+      || request.reservation_device_frame == UINT64_MAX)
+    return;
+
+  const uint64_t admissible_frame =
+    device_after_render > UINT64_MAX - queue_.device_frames()
+      ? UINT64_MAX
+      : device_after_render + queue_.device_frames();
+  const uint64_t elapsed_horizon =
+    admissible_frame > request.reservation_device_frame
+      ? admissible_frame - request.reservation_device_frame
+      : 0;
+  const uint64_t learned = std::max<uint64_t>(
+    queue_.render_frames(), elapsed_horizon);
+  if (candidate_was_late)
+    update_max(live_activation_lead_frames_, learned);
+  else
+    live_activation_lead_frames_.store(learned, std::memory_order_release);
 }
 
 uint32_t MetalRenderWorker::prime_tile_count(

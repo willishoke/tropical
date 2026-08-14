@@ -272,6 +272,7 @@ FlatRuntime::schedule_metal_epoch_locked(
       reservation.effective_sample_index, generation);
     request.fixed_activation = true;
     request.activation_frame = reservation.activation_frame;
+    request.reservation_device_frame = reservation.device_frame;
     auto result = metal_worker_->schedule(std::move(request));
     if (result.retargeted)
     {
@@ -872,6 +873,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
         epoch.effective_sample_index, reservation.target);
       request.fixed_activation = true;
       request.activation_frame = epoch.activation_frame;
+      request.reservation_device_frame = epoch.device_frame;
       const auto scheduled =
         metal_worker_->schedule(std::move(request));
       if (scheduled.retargeted)

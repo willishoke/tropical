@@ -407,6 +407,53 @@ static void test_live_control_primes_one_tile_before_publication()
   }));
 }
 
+static void test_fixed_live_control_learns_late_render_horizon()
+{
+  EpochTileQueue queue(128, 512);
+  std::array<double, 128> output{};
+  std::atomic<bool> callback_failed{false};
+  MetalRenderWorker worker(
+    queue,
+    [&](const RenderEpochRequest & request, uint64_t, uint32_t frames,
+        double * destination) {
+      std::fill_n(destination, frames, static_cast<double>(request.epoch_id));
+      if (request.epoch_id == 2)
+      {
+        // A real modal graph can spend a complete render tile between the
+        // control reservation and candidate readiness. Repeating the same
+        // one-tile reservation can therefore never catch the device clock.
+        for (uint32_t callback = 0; callback < 4; ++callback)
+          if (queue.consume(output.data(), output.size()).status
+              != TileConsumeStatus::Audio)
+            callback_failed.store(true, std::memory_order_release);
+      }
+      return true;
+    });
+  ASSERT(worker.schedule(request(1, EpochTransitionKind::Fresh, 0)).ok);
+  ASSERT(queue.consume(output.data(), output.size()).activated);
+  ASSERT(wait_for([&] { return queue.activation_acknowledged() == 1; }));
+
+  tropical_metal::EpochScheduleResult scheduled;
+  uint32_t attempts = 0;
+  for (; attempts < tropical_metal::kActivationRetargetLimit; ++attempts)
+  {
+    const auto reservation = worker.reserve(EpochTransitionKind::Continuous);
+    auto candidate = request(
+      2, EpochTransitionKind::Continuous,
+      reservation.effective_sample_index);
+    candidate.fixed_activation = true;
+    candidate.activation_frame = reservation.activation_frame;
+    candidate.reservation_device_frame = reservation.device_frame;
+    scheduled = worker.schedule(std::move(candidate));
+    if (!scheduled.retargeted) break;
+  }
+
+  ASSERT(!callback_failed.load(std::memory_order_acquire));
+  ASSERT(scheduled.ok);
+  ASSERT(attempts < 3);
+  ASSERT(worker.activation_retarget_count() == 1);
+}
+
 static void test_unclaimed_epochs_coalesce_without_audio_callback()
 {
   EpochTileQueue queue(128, 512);
@@ -498,6 +545,8 @@ int main()
            test_running_controls_serialize_acknowledgements);
   run_test("live controls publish with a one-tile activation lead",
            test_live_control_primes_one_tile_before_publication);
+  run_test("fixed controls learn enough lead after one late candidate",
+           test_fixed_live_control_learns_late_render_horizon);
   run_test("unclaimed controls coalesce before audio starts",
            test_unclaimed_epochs_coalesce_without_audio_callback);
   run_test("unclaimed controls coalesce after audio stops",

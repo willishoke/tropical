@@ -311,10 +311,10 @@ static void test_metal_slots()
   tropical_runtime_process(rt);
   const double* out = tropical_runtime_output_buffer(rt);
   for (unsigned int i = 0; i < buf; ++i) ASSERT_NEAR(out[i], 0.25, 1e-7);
-  // Live slot write lands next block.
+  // Live slot write lands at the one-render-tile control boundary.
   tropical_runtime_set_slot(rt, 0, 0.75);
   const unsigned int activation_blocks =
-    tropical_runtime_metal_worker_capacity_frames(rt) / buf;
+    tropical_runtime_metal_render_tile_frames(rt) / buf;
   for (unsigned int block = 0; block < activation_blocks; ++block)
   {
     ASSERT(tropical_runtime_process_offline(rt));
@@ -453,10 +453,10 @@ static void test_metal_columns_live()
   for (unsigned int i = 0; i < buf; ++i)
     ASSERT_NEAR(out[i], 0.25 + (double)(i % 4), 1e-7);
   // Live knob: set_slot re-runs the coefficient kernel into a fresh
-  // generation; the next block captures + uploads it.
+  // generation; the next render-tile boundary captures + uploads it.
   tropical_runtime_set_slot(rt, 0, 1.5);
   const unsigned int activation_blocks =
-    tropical_runtime_metal_worker_capacity_frames(rt) / buf;
+    tropical_runtime_metal_render_tile_frames(rt) / buf;
   for (unsigned int block = 0; block < activation_blocks; ++block)
   {
     ASSERT(tropical_runtime_process_offline(rt));

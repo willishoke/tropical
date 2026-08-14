@@ -43,6 +43,11 @@ struct RenderEpochRequest
   EpochTransitionKind transition = EpochTransitionKind::Continuous;
   bool fixed_activation = false;
   uint64_t activation_frame = 0;
+  // Device coordinate captured by reserve(). Fixed live epochs use it to
+  // learn how much of their original horizon elapsed before the candidate was
+  // ready. UINT64_MAX distinguishes an unreserved direct worker request from
+  // the valid initial device coordinate zero.
+  uint64_t reservation_device_frame = UINT64_MAX;
 };
 
 struct EpochScheduleResult
@@ -57,6 +62,7 @@ struct EpochScheduleResult
 
 struct EpochReservation
 {
+  uint64_t device_frame = 0;
   uint64_t activation_frame = 0;
   uint64_t effective_sample_index = 0;
 };
@@ -154,6 +160,10 @@ private:
     uint32_t bank_index, BankRenderCursor & cursor, uint32_t tile_count);
   uint64_t activation_lead_frames(
     EpochTransitionKind transition) const noexcept;
+  void learn_live_activation_lead(
+    const RenderEpochRequest & request,
+    uint64_t device_after_render,
+    bool candidate_was_late) noexcept;
   static uint32_t prime_tile_count(
     EpochTransitionKind transition) noexcept;
   static uint64_t monotonic_time_ns();
@@ -194,6 +204,10 @@ private:
   std::atomic<uint64_t> worker_start_time_ns_{0};
   std::atomic<uint64_t> worker_cpu_baseline_ns_{0};
   std::atomic<uint64_t> worker_cpu_latest_ns_{0};
+  // Continuous parameter writes and clock scrubs normally activate one tile
+  // ahead. A real graph that misses that boundary teaches the next retry its
+  // measured preparation horizon instead of repeating the same late target.
+  std::atomic<uint64_t> live_activation_lead_frames_{0};
   std::atomic<bool> realtime_running_{false};
   std::atomic<bool> * realtime_running_source_ = &realtime_running_;
   std::atomic<MetalRenderWorkerTestSeam *> test_seam_{nullptr};
