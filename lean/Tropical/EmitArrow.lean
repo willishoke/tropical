@@ -1,4 +1,5 @@
 import Tropical.EmitArrow.Sig
+import Tropical.EmitArrow.ArenaSig
 import Tropical.EmitArrow.Term
 import Tropical.EmitArrow.Numerics
 import Tropical.EmitArrow.Modal
@@ -24,8 +25,10 @@ applied to it, drawn from the same operation set used on values.
 
 The modules:
 
-* `Sig` — the authoring substrate: the build-time expression tree, its
-  arena lowering, `assemble`, and the smart-constructor op set.
+* `Sig` — the current recursive authoring substrate, retained temporarily
+  during the arena-native cutover.
+* `ArenaSig` — the phase-1 ID-valued builder and immediate-interning smart
+  constructors; its `ArenaNative` namespace is promoted at final cutover.
 * `Term` — `Voice`, the cartesian combinator surface (`Mor`), and
   `ArrowTerm` + the slide (`normalize`/`emitTermC`): downstream-presented
   warps pushed up to generator clocks.
