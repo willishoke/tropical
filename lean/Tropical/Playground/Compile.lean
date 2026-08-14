@@ -1,5 +1,6 @@
 import Tropical.Playground.Report
 import Tropical.Playground.Hierarchy
+import Tropical.Playground.ArenaDecode
 
 /-!
 # Playground.Compile
@@ -11,7 +12,7 @@ namespace Tropical.Playground
 
 open Lean (Json JsonNumber)
 open Tropical.Ir
-open Tropical.EmitArrow
+open Tropical.EmitArrow.ArenaNative
 open Tropical.Exact (DyadicI)
 
 -- ── Graph → loadable FlatPlan (mirrors Tropicaltest.compileArrowCarrier) ─────
@@ -30,9 +31,7 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
   checkOutTarget j raws                              -- reject an "out" id that names no node
   -- (cycles are refused by `lowerGraph` itself now — the topo sort that
   -- funds the lowering's termination IS the cycle check, loop named)
-  let (g, paramTable) ← decodeGraph j
-  let term ← lowerGraph g
-  let (out, b0) := emitTerm (normalize term) {}
+  let paramTable := collectParams raws
   -- Per-node taps are opt-in: `"taps": true` retains the inspection/debug
   -- surface, while `"taps": ["id", ...]` emits only named projections. The
   -- named form is the observation path: it avoids re-emitting every visible
@@ -45,31 +44,39 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
         | Json.str id => if visibleTapIds.contains id then some id else none
         | _ => none
     | _ => #[]
-  -- Emit each user node's sub-term into the SAME builder (so instance names stay
-  -- unique by `decls.size`), collecting `(id, signal)`. A node that fails to
-  -- lower is simply not tapped.
-  let (tapSigs, b) : Array (String × Sig) × Builder :=
-    tapIds.foldl (fun (acc : Array (String × Sig) × Builder) id =>
-      match lowerAt g id with
-      | .ok t => let (s, b') := emitTerm (normalize t) acc.2; (acc.1.push (id, s), b')
-      | .error _ => acc) (#[], b0)
   let registry ← buildRegistry arena resolved #["FixedSinOsc", "MorphOsc", "PluckedMorphOsc"]
   -- One `.param` decl per live knob, appended AFTER the instance decls: declaration
   -- order = `ParamIdx` = the index each `paramRef` carries, and keeping params after
   -- instances leaves the emitted voices' `InstanceIdx` untouched. `compileSession`
   -- allocates each a `param:<id>.<knob>` module slot, driven live by `set_param`.
   let paramDecls : Array BodyDecl := paramTable.map (fun (nm, v) => .param nm (some v))
-  -- Output port 0 is the audible mix; ports 1.. are the taps (`tap:<id>`).
-  let tapOutputs := tapSigs.map fun (id, _) =>
-    ({ name := s!"tap:{id}", type? := some (.scalar .float) } : OutputDecl)
-  let tapAssigns : Array (Tropical.Ir.OutputTarget × Sig) :=
-    tapSigs.mapIdx fun i (_, s) => (.port ⟨i + 1⟩, s)
-  -- Assemble through EmitArrow's lowering boundary (interns every `Sig` into the
-  -- arena's DAG); the live param decls append after the instance decls.
-  let (arena1, idx) := Tropical.EmitArrow.assemble arena "__patch__" #[]
-    (#[{ name := "out", type? := some (.scalar .float) }] ++ tapOutputs)
-    b.decls (#[(.port ⟨0⟩, out)] ++ tapAssigns) registry
-    (extraDecls := paramDecls)
+  -- Decode, lower, emit the audible root, and emit all requested projections in
+  -- one builder state. A failed tap attempt restores its pre-attempt state and
+  -- remains absent, preserving the inspection surface's historical policy.
+  let (arena1, idx, successfulTapIds) ←
+    Tropical.EmitArrow.ArenaNative.assembleCompleteWithResult arena "__patch__"
+    registry (extraDecls := paramDecls) do
+      let g ← ArenaCompiler.decodeGraph j paramTable
+      let term ← lowerGraph g
+      let out ← emitTerm (normalize term)
+      let tapSigs ← tapIds.foldlM (fun (acc : Array (String × Sig)) id => do
+        let before ← get
+        match (do
+            let term ← lowerAt g id
+            let signal ← emitTerm (normalize term)
+            pure signal).run before with
+        | .ok (signal, after) =>
+          set after
+          pure (acc.push (id, signal))
+        | .error _ => pure acc) #[]
+      let tapAssigns : Array (Tropical.Ir.OutputTarget × Sig) :=
+        tapSigs.mapIdx fun i (_, signal) => (.port ⟨i + 1⟩, signal)
+      let tapOutputs := tapSigs.map fun (id, _) =>
+        ({ name := s!"tap:{id}", type? := some (.scalar .float) } : OutputDecl)
+      let body : CompleteProgramBody := {
+        outputs := #[{ name := "out", type? := some (.scalar .float) }] ++ tapOutputs
+        assigns := #[(.port ⟨0⟩, out)] ++ tapAssigns }
+      pure (body, tapSigs.map (·.1))
   let (coreArena, core) ← (Tropical.Ir.Strata.runResolved {} arena1 idx).mapError (·.message)
   let input := Tropical.Compile.SessionInput.forRoot core coreArena
     (params := paramTable.map (fun (nm, v) => (nm, Json.num v)))
@@ -86,7 +93,7 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
       name := "out"
       sourceInstance := root
       sourceOutput := "out" }]
-    ++ tapSigs.map (fun (id, _) => {
+    ++ successfulTapIds.map (fun id => {
       name := id
       sourceInstance := root
       sourceOutput := s!"tap:{id}" })

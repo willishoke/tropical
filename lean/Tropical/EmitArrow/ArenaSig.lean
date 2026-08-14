@@ -65,6 +65,15 @@ structure ProgramBody where
   assigns : Array (OutputTarget × Sig) := #[]
 deriving Inhabited, Repr
 
+/-- A program whose output surface is discovered during the arena build.  The
+    playground uses this for optional taps: a refused projection must publish
+    neither an assignment nor a dangling output declaration. -/
+structure CompleteProgramBody where
+  inputs : Array AInputDecl := #[]
+  outputs : Array OutputDecl := #[]
+  assigns : Array (OutputTarget × Sig) := #[]
+deriving Inhabited, Repr
+
 /-- The sole expression-arena mutation in the authoring API.  Raw `ENode`
     construction stays local to this module; ordinary callers use the smart
     constructors below. -/
@@ -149,6 +158,8 @@ def ldexpE (mantissa exponent : Sig) : BuildM Sig :=
 
 def toIntE (a : Sig) : BuildM Sig := unary .toInt a
 def neg (a : Sig) : BuildM Sig := unary .neg a
+def absE (a : Sig) : BuildM Sig := unary .abs a
+def floatExponentE (a : Sig) : BuildM Sig := unary .floatExponent a
 def roundE (a : Sig) : BuildM Sig := unary .round a
 def toFloatE (a : Sig) : BuildM Sig := unary .toFloat a
 def clampE (value lo hi : Sig) : BuildM Sig := clamp value lo hi
@@ -226,5 +237,29 @@ def assemble (arena : Arena) (name : String) (outputs : Array OutputDecl)
   pure ({ arena with
     programs := arena.programs.push program
     exprs := builder.exprs }, idx)
+
+/-- Assemble a program whose output declarations, plus arbitrary pure caller
+    metadata, are determined inside the same atomic builder transaction. -/
+def assembleCompleteWithResult {α : Type} (arena : Arena) (name : String)
+    (registry : Array (String × ProgramIdx))
+    (build : BuildM (CompleteProgramBody × α))
+    (extraDecls : Array BodyDecl := #[]) :
+    Except String (Arena × ProgramIdx × α) := do
+  let initial : Builder := { exprs := arena.exprs }
+  let ((body, result), builder) ← build.run initial
+  let inputs : Array InputDecl := body.inputs.map fun decl =>
+    { name := decl.name, type? := decl.type?, default? := decl.defaultSig }
+  let decls : Array BodyDecl := builder.decls.map fun decl =>
+    .inst decl.name decl.programName (decl.inputs.map fun input =>
+      { port := input.port, value := input.value })
+  let assigns : Array OutputAssign := body.assigns.map fun (target, expr) =>
+    { target, expr }
+  let program : Program := {
+    name, inputs, outputs := body.outputs
+    decls := decls ++ extraDecls, assigns, registry }
+  let idx : ProgramIdx := ⟨arena.programs.size⟩
+  pure ({ arena with
+    programs := arena.programs.push program
+    exprs := builder.exprs }, idx, result)
 
 end Tropical.EmitArrow.ArenaNative

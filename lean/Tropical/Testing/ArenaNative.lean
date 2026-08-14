@@ -3,6 +3,8 @@ import Tropical.EmitArrow.Term
 import Tropical.EmitArrow.Numerics
 import Tropical.EmitArrow.ArenaSig
 import Tropical.EmitArrow.ArenaTerm
+import Tropical.EmitArrow.Patch
+import Tropical.EmitArrow.ArenaPatch
 import Tropical.Stdlib
 import Tropical.Ir.Strata
 import Tropical.Ir.CompileResolved
@@ -46,6 +48,13 @@ structure Phase2Evidence where
   carrierInstances : Nat
   carrierReachableNodes : Nat
   carrierWireBytes : Nat
+deriving Repr
+
+structure Phase3Evidence where
+  authoredUniqueNodes : Nat
+  reachableUniqueNodes : Nat
+  routedReductions : Nat
+  wireBytes : Nat
 deriving Repr
 
 private def output : Array OutputDecl :=
@@ -476,6 +485,118 @@ def runPhase2Gate : IO Bool := do
     pure true
   | .error error =>
     IO.println s!"  FAIL  arena-native-phase2  {error}"
+    pure false
+
+/-! Phase 3 retains a room → factored all-pass product → room spine.  This is
+    deliberately small enough for an exact recursive/native comparison while
+    still crossing the specialized routed terminal used by production Phaser. -/
+private def buildLegacyModalCarrier : Except String (Arena × ProgramIdx) := do
+  let mode := fun (sigma omega cre cim : Int) =>
+    ({ sigma := Tropical.EmitArrow.lit sigma 1
+       omega := Tropical.EmitArrow.lit omega
+       cre := Tropical.EmitArrow.lit cre 1
+       cim := Tropical.EmitArrow.lit cim 1 } : Tropical.EmitArrow.ModalMode)
+  let source := #[mode 4 220 8 1, mode 6 (-330) 5 (-2)]
+  let room1 := #[mode 8 37 3 1, mode 11 (-51) 2 (-1)]
+  let room2 := #[mode 13 73 2 1, mode 17 (-91) 1 (-1)]
+  let zero := Tropical.EmitArrow.lit 0
+  let control := fun value => Tropical.EmitArrow.ModalControlRef.constant value
+  let (phaser, topology) := Tropical.EmitArrow.modalPhaserTopology
+    "fixture" "room1" (control (Tropical.EmitArrow.lit 700))
+    (control (Tropical.EmitArrow.lit 15 1))
+    (control (Tropical.EmitArrow.lit 2 1))
+    (control (Tropical.EmitArrow.lit 5 1)) #[1.0]
+  let graph : Tropical.EmitArrow.PatchGraph := {
+    nodes := #[
+      { id := "source", node := .modalSource source zero Tropical.EmitArrow.clockLit none },
+      { id := "room1", node := .modalReverb "source" room1 (some { dir := zero }) }]
+      ++ topology ++ #[
+      { id := "fixture", node := phaser },
+      { id := "room2", node := .modalReverb "fixture" room2 (some { dir := zero }) }]
+    output := "room2" }
+  let term ← Tropical.EmitArrow.lowerGraph graph
+  let (signal, builder) := Tropical.EmitArrow.emitTerm
+    (Tropical.EmitArrow.normalize term) {}
+  pure (Tropical.EmitArrow.assemble {} "Phase3ModalCarrier" #[] output
+    builder.decls #[(.port ⟨0⟩, signal)] #[])
+
+private def buildNativeModalCarrier : Except String (Arena × ProgramIdx) :=
+  Tropical.EmitArrow.ArenaNative.assemble {} "Phase3ModalCarrier" output #[] do
+    let mode := fun (sigma omega cre cim : Int) => do
+      let sigma ← Tropical.EmitArrow.ArenaNative.lit sigma 1
+      let omega ← Tropical.EmitArrow.ArenaNative.lit omega
+      let cre ← Tropical.EmitArrow.ArenaNative.lit cre 1
+      let cim ← Tropical.EmitArrow.ArenaNative.lit cim 1
+      pure ({ sigma, omega, cre, cim } : Tropical.EmitArrow.ArenaNative.ModalMode)
+    let source ← #[ (4, 220, 8, 1), (6, -330, 5, -2) ].mapM
+      fun (sigma, omega, cre, cim) => mode sigma omega cre cim
+    let room1 ← #[ (8, 37, 3, 1), (11, -51, 2, -1) ].mapM
+      fun (sigma, omega, cre, cim) => mode sigma omega cre cim
+    let room2 ← #[ (13, 73, 2, 1), (17, -91, 1, -1) ].mapM
+      fun (sigma, omega, cre, cim) => mode sigma omega cre cim
+    let zero ← Tropical.EmitArrow.ArenaNative.lit 0
+    let center ← Tropical.EmitArrow.ArenaNative.lit 700
+    let sweep ← Tropical.EmitArrow.ArenaNative.lit 15 1
+    let rate ← Tropical.EmitArrow.ArenaNative.lit 2 1
+    let mix ← Tropical.EmitArrow.ArenaNative.lit 5 1
+    let clock ← Tropical.EmitArrow.ArenaNative.clockLit
+    let control := Tropical.EmitArrow.ArenaNative.ModalControlRef.constant
+    let (phaser, topology) := Tropical.EmitArrow.ArenaNative.modalPhaserTopology
+      "fixture" "room1" (control center) (control sweep) (control rate)
+      (control mix) #[1.0]
+    let graph : Tropical.EmitArrow.ArenaNative.PatchGraph := {
+      nodes := #[
+        { id := "source", node := .modalSource source zero clock none },
+        { id := "room1", node := .modalReverb "source" room1 (some { dir := zero }) }]
+        ++ topology ++ #[
+        { id := "fixture", node := phaser },
+        { id := "room2", node := .modalReverb "fixture" room2 (some { dir := zero }) }]
+      output := "room2" }
+    let term ← Tropical.EmitArrow.ArenaNative.lowerGraph graph
+    let signal ← Tropical.EmitArrow.ArenaNative.emitTerm
+      (Tropical.EmitArrow.ArenaNative.normalize term)
+    pure ({ assigns := #[(.port ⟨0⟩, signal)] } : NativeBody)
+
+private def routedReductionCount (exprs : ExprArena) : Nat :=
+  exprs.nodes.foldl (fun total node =>
+    if node matches .routedSum .. then total + 1 else total) 0
+
+def phase3Evidence : Except String Phase3Evidence := do
+  let (legacyArena, legacyProgram) ← buildLegacyModalCarrier
+  let (nativeArena, nativeProgram) ← buildNativeModalCarrier
+  unless nativeArena.exprs.wf do
+    throw "ArenaNative phase-3 fixture: authored modal arena is not child-descending"
+  let legacyCorpus : FixtureCorpus := {
+    arena := legacyArena, leaf := legacyProgram, root := legacyProgram }
+  let nativeCorpus : FixtureCorpus := {
+    arena := nativeArena, leaf := nativeProgram, root := nativeProgram }
+  let (legacyExprs, legacyWire) ← resolvedWire legacyCorpus legacyProgram
+  let (nativeExprs, nativeWire) ← resolvedWire nativeCorpus nativeProgram
+  unless nativeExprs.wf do
+    throw "ArenaNative phase-3 fixture: reachable modal arena is not child-descending"
+  unless nativeExprs.nodes == legacyExprs.nodes && nativeWire == legacyWire do
+    let mut firstDifference := "none"
+    for index in [0:max nativeExprs.nodes.size legacyExprs.nodes.size] do
+      if firstDifference == "none" &&
+          nativeExprs.nodes[index]? != legacyExprs.nodes[index]? then
+        firstDifference := s!"{index}: native={repr nativeExprs.nodes[index]?} legacy={repr legacyExprs.nodes[index]?}"
+    throw s!"ArenaNative phase-3 fixture: factored Phaser modal carrier differs from recursive baseline (nodes {nativeExprs.nodes.size}/{legacyExprs.nodes.size}, wire {nativeWire.length}/{legacyWire.length}, first {firstDifference})"
+  let routed := routedReductionCount nativeExprs
+  unless routed > 0 do
+    throw "ArenaNative phase-3 fixture: specialized modal carrier emitted no routed reduction"
+  pure {
+    authoredUniqueNodes := nativeArena.exprs.nodes.size
+    reachableUniqueNodes := nativeExprs.nodes.size
+    routedReductions := routed
+    wireBytes := nativeWire.length }
+
+def runPhase3Gate : IO Bool := do
+  match phase3Evidence with
+  | .ok evidence =>
+    IO.println s!"  PASS  arena-native-phase3  {repr evidence}"
+    pure true
+  | .error error =>
+    IO.println s!"  FAIL  arena-native-phase3  {error}"
     pure false
 
 end Tropical.Testing.ArenaNative
