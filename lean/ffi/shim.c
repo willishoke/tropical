@@ -231,6 +231,20 @@ LEAN_EXPORT lean_obj_res shim_runtime_sample_rate(b_lean_obj_arg rt,
       lean_box_float(tropical_runtime_sample_rate(unwrap(rt))));
 }
 
+LEAN_EXPORT lean_obj_res shim_runtime_metal_render_time_ns(
+    b_lean_obj_arg rt, lean_obj_arg world) {
+  (void)world;
+  return lean_io_result_mk_ok(lean_box_uint64(
+      tropical_runtime_metal_render_time_ns(unwrap(rt))));
+}
+
+LEAN_EXPORT lean_obj_res shim_runtime_metal_rendered_frame_count(
+    b_lean_obj_arg rt, lean_obj_arg world) {
+  (void)world;
+  return lean_io_result_mk_ok(lean_box_uint64(
+      tropical_runtime_metal_rendered_frame_count(unwrap(rt))));
+}
+
 /* ── DAC ───────────────────────────────────────────────────────────────────── */
 
 LEAN_EXPORT lean_obj_res shim_dac_new_runtime(b_lean_obj_arg rt, uint32_t sample_rate,

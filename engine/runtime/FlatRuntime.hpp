@@ -1192,6 +1192,26 @@ public:
 #endif
   }
 
+  uint64_t metal_render_time_ns() const
+  {
+#ifdef TROPICAL_METAL
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    return metal_worker_ ? metal_worker_->render_time_ns() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  uint64_t metal_rendered_frame_count() const
+  {
+#ifdef TROPICAL_METAL
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    return metal_worker_ ? metal_worker_->rendered_frame_count() : 0;
+#else
+    return 0;
+#endif
+  }
+
   // Test-only: install/remove the deterministic ownership pause seam.
   void set_ownership_test_seam(RuntimeOwnershipTestSeam * seam)
   {

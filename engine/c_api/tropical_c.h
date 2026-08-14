@@ -222,6 +222,11 @@ bool             tropical_runtime_metal_activation_latency_stats(
                    tropical_metal_activation_latency_stats_t*);
 uint64_t         tropical_runtime_metal_worker_cpu_time_ns(tropical_runtime_t);
 uint64_t         tropical_runtime_metal_worker_wall_time_ns(tropical_runtime_t);
+/* Cumulative wall time spent inside tile rendering and the corresponding
+   attempted sample frames. Their interval ratio is the Metal render load;
+   unlike DAC callback time it includes synchronous GPU completion. */
+uint64_t         tropical_runtime_metal_render_time_ns(tropical_runtime_t);
+uint64_t         tropical_runtime_metal_rendered_frame_count(tropical_runtime_t);
 /* Sticky count of callbacks silenced because bounded state/generation
    ownership acquisition could not obtain a coherent snapshot. Qualification
    requires zero. */

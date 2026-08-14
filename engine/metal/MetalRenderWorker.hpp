@@ -48,6 +48,10 @@ struct RenderEpochRequest
   // ready. UINT64_MAX distinguishes an unreserved direct worker request from
   // the valid initial device coordinate zero.
   uint64_t reservation_device_frame = UINT64_MAX;
+  // Device coordinate immediately before schedule(). This separates actual
+  // control materialization from time spent queued behind an earlier
+  // unacknowledged activation.
+  uint64_t enqueue_device_frame = UINT64_MAX;
 };
 
 struct EpochScheduleResult
@@ -115,6 +119,9 @@ public:
   EpochReservation reserve(
     EpochTransitionKind transition,
     uint64_t requested_source = 0) const noexcept;
+  uint64_t device_frame() const noexcept;
+  bool wait_for_activation_acknowledgement(
+    uint64_t epoch_id) const noexcept;
 
   uint64_t dispatch_failure_count() const noexcept;
   uint64_t activation_retarget_count() const noexcept;
@@ -124,6 +131,8 @@ public:
   MetalActivationLatencyStats activation_latency_stats() const noexcept;
   uint64_t worker_cpu_time_ns() const noexcept;
   uint64_t worker_wall_time_ns() const noexcept;
+  uint64_t render_time_ns() const noexcept;
+  uint64_t rendered_frame_count() const noexcept;
   void set_realtime_running(bool running) noexcept;
   void set_test_seam(MetalRenderWorkerTestSeam * seam) noexcept;
 
@@ -162,6 +171,7 @@ private:
     EpochTransitionKind transition) const noexcept;
   void learn_live_activation_lead(
     const RenderEpochRequest & request,
+    uint64_t preparation_device_frame,
     uint64_t device_after_render,
     bool candidate_was_late) noexcept;
   static uint32_t prime_tile_count(
@@ -204,6 +214,8 @@ private:
   std::atomic<uint64_t> worker_start_time_ns_{0};
   std::atomic<uint64_t> worker_cpu_baseline_ns_{0};
   std::atomic<uint64_t> worker_cpu_latest_ns_{0};
+  std::atomic<uint64_t> render_time_ns_{0};
+  std::atomic<uint64_t> rendered_frame_count_{0};
   // Continuous parameter writes and clock scrubs normally activate one tile
   // ahead. A real graph that misses that boundary teaches the next retry its
   // measured preparation horizon instead of repeating the same late target.

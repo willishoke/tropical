@@ -22,6 +22,10 @@ structure OrdinaryRoomStage where
   kernel : ModalRoomKernel
   direction : ModalControlRef := ModalControlRef.constant (lit 0)
   sway? : Option (ModalControlRef × ModalControlRef) := none
+  /-- Product-facing temporal direction needs a perceptual output correction:
+      its exact anti-causal arm lives mostly before a normal playback strike.
+      Low-level oriented kernels keep their unscaled mathematical meaning. -/
+  normalizeDirectionLevel : Bool := false
 
 /-- Modal→Modal operators in authored order.  Ordinary rooms retain their
     bloom-bridge metadata; every other linear construction enters through the

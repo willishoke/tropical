@@ -84,6 +84,16 @@ opaque Runtime.currentSampleIndexU64 (rt : @& Runtime) : IO UInt64
 @[extern "shim_runtime_sample_rate"]
 opaque Runtime.sampleRate (rt : @& Runtime) : IO Float
 
+/-- Cumulative wall time spent rendering Metal tiles and the number of sample
+    frames those attempts produced. Their interval ratio is render utilization;
+    the DAC callback itself only copies prepared samples and is intentionally
+    not a useful Metal load measurement. -/
+@[extern "shim_runtime_metal_render_time_ns"]
+opaque Runtime.metalRenderTimeNs (rt : @& Runtime) : IO UInt64
+
+@[extern "shim_runtime_metal_rendered_frame_count"]
+opaque Runtime.metalRenderedFrameCount (rt : @& Runtime) : IO UInt64
+
 /-- The C `UINT32_MAX` no-such-slot sentinel, mapped to `none`. -/
 def Runtime.slotIndex? (rt : Runtime) (name : String) : IO (Option UInt32) := do
   let idx ← rt.slotIndexRaw name

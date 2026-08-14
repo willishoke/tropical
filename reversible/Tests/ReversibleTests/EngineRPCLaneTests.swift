@@ -30,11 +30,17 @@ final class EngineRPCLaneTests: XCTestCase {
         let product = Engine.childEnvironment(inherited: [:])
         XCTAssertEqual(product["TROPICAL_BACKEND"], "metal")
         XCTAssertEqual(product["TROPICAL_ARROW"], "1")
+        XCTAssertEqual(product["TROPICAL_BUFFER_LENGTH"], "128")
+        XCTAssertEqual(product["TROPICAL_METAL_RENDER_TILE_FRAMES"], "128")
 
         let diagnostic = Engine.childEnvironment(inherited: [
-            "TROPICAL_BACKEND": "jit"
+            "TROPICAL_BACKEND": "jit",
+            "TROPICAL_BUFFER_LENGTH": "512",
+            "TROPICAL_METAL_RENDER_TILE_FRAMES": "1024",
         ])
         XCTAssertEqual(diagnostic["TROPICAL_BACKEND"], "jit")
+        XCTAssertEqual(diagnostic["TROPICAL_BUFFER_LENGTH"], "512")
+        XCTAssertEqual(diagnostic["TROPICAL_METAL_RENDER_TILE_FRAMES"], "1024")
     }
 
     func testTrafficClassesHaveIndependentConnections() {

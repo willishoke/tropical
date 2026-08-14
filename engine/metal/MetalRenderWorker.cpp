@@ -282,6 +282,8 @@ bool MetalRenderWorker::refill_pending_bank()
 EpochScheduleResult
 MetalRenderWorker::prepare_activation(RenderEpochRequest request)
 {
+  const uint64_t preparation_device_frame =
+    queue_.published_device_frame();
   // Publish the new request identity only after clearing every later stage.
   // Readers may observe an incomplete in-flight request, but never a prefix
   // from this request combined with a suffix from the preceding activation.
@@ -329,6 +331,25 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
         std::this_thread::yield();
     }
 
+    // A fixed request can become stale while it waits behind a previously
+    // published activation. Reject that coordinate before spending another
+    // GPU tile on a candidate FlatRuntime must recompute at a fresh E.
+    const uint64_t admissible_before_render =
+      observed_device > UINT64_MAX - queue_.device_frames()
+        ? UINT64_MAX
+        : observed_device + queue_.device_frames();
+    if (request.fixed_activation && activation_frame != 0
+        && activation_frame < admissible_before_render)
+    {
+      activation_retargets_.fetch_add(1, std::memory_order_relaxed);
+      learn_live_activation_lead(
+        request, preparation_device_frame, observed_device, true);
+      return {
+        false, "MetalRenderWorker: activation target became inadmissible",
+        request.epoch_id, activation_frame, source_start, true
+      };
+    }
+
     if (!queue_.begin_epoch(staging_bank, request.epoch_id))
     {
       activation_failures_.fetch_add(1, std::memory_order_relaxed);
@@ -363,7 +384,8 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
       activation_retargets_.fetch_add(1, std::memory_order_relaxed);
       if (request.fixed_activation)
       {
-        learn_live_activation_lead(request, device_after_render, true);
+        learn_live_activation_lead(
+          request, preparation_device_frame, device_after_render, true);
         return {
           false, "MetalRenderWorker: activation target became inadmissible",
           request.epoch_id, activation_frame, source_start, true
@@ -386,7 +408,8 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
     }
 
     if (request.fixed_activation)
-      learn_live_activation_lead(request, device_after_render, false);
+      learn_live_activation_lead(
+        request, preparation_device_frame, device_after_render, false);
 
     if (!queue_.publish_activation(
           EpochActivation{
@@ -428,6 +451,31 @@ EpochReservation MetalRenderWorker::reserve(
   };
 }
 
+uint64_t MetalRenderWorker::device_frame() const noexcept
+{
+  return queue_.published_device_frame();
+}
+
+bool MetalRenderWorker::wait_for_activation_acknowledgement(
+  uint64_t epoch_id) const noexcept
+{
+  if (epoch_id == 0
+      || !realtime_running_source_->load(std::memory_order_acquire))
+    return true;
+  const uint64_t started = monotonic_time_ns();
+  while (queue_.activation_acknowledged() != epoch_id)
+  {
+    // A DAC stop removes the only consumer that can acknowledge the future
+    // boundary. Stopped-audio controls deliberately coalesce instead.
+    if (!realtime_running_source_->load(std::memory_order_acquire))
+      return true;
+    if (monotonic_time_ns() - started >= kActivationRetargetTimeoutNs)
+      return false;
+    std::this_thread::yield();
+  }
+  return true;
+}
+
 bool MetalRenderWorker::render_one(
   uint32_t bank_index, BankRenderCursor & cursor,
   bool record_candidate_stage)
@@ -445,9 +493,15 @@ bool MetalRenderWorker::render_one(
   if (record_candidate_stage)
     render_submitted_time_.store(
       monotonic_time_ns(), std::memory_order_release);
+  const uint64_t render_started = monotonic_time_ns();
   const bool rendered = render_(
     cursor.request, cursor.next_source,
     queue_.render_frames(), claim.destination);
+  const uint64_t render_finished = monotonic_time_ns();
+  render_time_ns_.fetch_add(
+    render_finished - render_started, std::memory_order_relaxed);
+  rendered_frame_count_.fetch_add(
+    queue_.render_frames(), std::memory_order_relaxed);
   if (record_candidate_stage)
     gpu_completion_time_.store(
       monotonic_time_ns(), std::memory_order_release);
@@ -505,6 +559,7 @@ uint64_t MetalRenderWorker::activation_lead_frames(
 
 void MetalRenderWorker::learn_live_activation_lead(
   const RenderEpochRequest & request,
+  uint64_t preparation_device_frame,
   uint64_t device_after_render,
   bool candidate_was_late) noexcept
 {
@@ -513,14 +568,23 @@ void MetalRenderWorker::learn_live_activation_lead(
       || request.reservation_device_frame == UINT64_MAX)
     return;
 
-  const uint64_t admissible_frame =
-    device_after_render > UINT64_MAX - queue_.device_frames()
-      ? UINT64_MAX
-      : device_after_render + queue_.device_frames();
-  const uint64_t elapsed_horizon =
-    admissible_frame > request.reservation_device_frame
-      ? admissible_frame - request.reservation_device_frame
+  const uint64_t control_progress =
+    request.enqueue_device_frame != UINT64_MAX
+      && request.enqueue_device_frame > request.reservation_device_frame
+      ? request.enqueue_device_frame - request.reservation_device_frame
       : 0;
+  const uint64_t worker_progress =
+    device_after_render > preparation_device_frame
+      ? device_after_render - preparation_device_frame
+      : 0;
+  const uint64_t preparation_progress =
+    control_progress > UINT64_MAX - worker_progress
+      ? UINT64_MAX
+      : control_progress + worker_progress;
+  const uint64_t elapsed_horizon =
+    preparation_progress > UINT64_MAX - queue_.device_frames()
+      ? UINT64_MAX
+      : preparation_progress + queue_.device_frames();
   const uint64_t learned = std::max<uint64_t>(
     queue_.render_frames(), elapsed_horizon);
   if (candidate_was_late)
@@ -610,6 +674,16 @@ uint64_t MetalRenderWorker::worker_wall_time_ns() const noexcept
   const uint64_t start =
     worker_start_time_ns_.load(std::memory_order_acquire);
   return start == 0 ? 0 : monotonic_time_ns() - start;
+}
+
+uint64_t MetalRenderWorker::render_time_ns() const noexcept
+{
+  return render_time_ns_.load(std::memory_order_acquire);
+}
+
+uint64_t MetalRenderWorker::rendered_frame_count() const noexcept
+{
+  return rendered_frame_count_.load(std::memory_order_acquire);
 }
 
 void MetalRenderWorker::set_realtime_running(bool running) noexcept

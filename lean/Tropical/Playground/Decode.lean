@@ -203,14 +203,15 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
       (.modalSource (resonatorBank f0 decay cap) (lit 0) clk addr? (some countE), #[])
   | "reverb" =>
     let rt60 := modalControl "rt60"
+    let direction := modalControl "dir"
     let rtRange := displayRangeOf "reverb" "rt60"
     (.modalRoom modal
       (fun frozenRt60 =>
         let boundedRt60 := match rtRange with
           | some (lo, hi) => clampE frozenRt60 (litF lo) (litF hi)
           | none => frozenRt60
-        reverbRoom boundedRt60 rtRange 32 (60, 0) (6000, 0))
-      rt60, modalFanIn)
+        reverbRoom boundedRt60 rtRange 14 (60, 0) (6000, 0))
+      rt60 direction, modalFanIn)
   | "filter" =>
     -- A filter is now an ordinary proper modal-kernel atom.  Its public module
     -- remains a convenience surface, but no filter-specific stage survives
@@ -456,7 +457,7 @@ def checkServedKinds (raws : Array Raw) : Except String Unit := do
 def bakedResonatorProbe (npart : Nat) : Array ModalMode :=
   resonatorBank (lit 1) (lit 1) npart
 
-/-- The shipped reverb room's 32 modes over 60…6000 Hz, as emitted. -/
+/-- A reverb-room probe over the shipped 60…6000 Hz band, at a requested size. -/
 def bakedReverbProbe (nmode : Nat) : Array ModalMode :=
   reverbRoom (lit 1) none nmode (60, 0) (6000, 0)
 
@@ -613,7 +614,7 @@ def collectParams (raws : Array Raw) : Array (String × JsonNumber) := Id.run do
           out := out.push (s!"{base}#v1", dflt)
           out := out.push (s!"{base}#t0", ⟨0, 0⟩)
           -- Metal snapshots ordinary slots as f32, so an absolute t0 would
-          -- lose the whole 10 ms ramp past 2^24. Four exact 16-bit limbs carry
+          -- lose the whole 5 ms ramp past 2^24. Four exact 16-bit limbs carry
           -- the signed i64 source coordinate used by `glideExpr`.
           for i in [0:4] do
             out := out.push (s!"{base}#t0#u{i}", ⟨0, 0⟩)

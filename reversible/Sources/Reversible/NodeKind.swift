@@ -185,14 +185,17 @@ extension NodeKind {
                 ],
                 modal: true)
         case .reverb:
-            // A room bank (32 log-spaced modes, 60–6000 Hz) composed with its
+            // A room bank (14 log-spaced modes, 60–6000 Hz) composed with its
             // MODAL input. Modal in → modal out, feeding another modal stage or
             // a Sig inlet where the complete value is realized.
+            // `dir` orients this room kernel locally: 0 forward, 1 reverse.
+            // Sway/rate remain deliberately absent from the public surface.
             return NodeSpec(
                 title: "Reverb", accent: Color(hex: 0x3FB8B0),
                 inlets: ["in"], outlets: ["out"],
                 knobs: [
                     KnobSpec(name: "rt60", min: 0.2, max: 12, def: 2, log: true, unit: "sec"),
+                    KnobSpec(name: "dir", min: 0, max: 1, def: 0),
                 ],
                 modal: true)
         case .phaser:

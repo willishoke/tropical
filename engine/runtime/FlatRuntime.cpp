@@ -273,6 +273,7 @@ FlatRuntime::schedule_metal_epoch_locked(
     request.fixed_activation = true;
     request.activation_frame = reservation.activation_frame;
     request.reservation_device_frame = reservation.device_frame;
+    request.enqueue_device_frame = metal_worker_->device_frame();
     auto result = metal_worker_->schedule(std::move(request));
     if (result.retargeted)
     {
@@ -874,6 +875,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
       request.fixed_activation = true;
       request.activation_frame = epoch.activation_frame;
       request.reservation_device_frame = epoch.device_frame;
+      request.enqueue_device_frame = metal_worker_->device_frame();
       const auto scheduled =
         metal_worker_->schedule(std::move(request));
       if (scheduled.retargeted)
@@ -906,6 +908,16 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
       }
       commit_control_snapshot(
         state, state_idx, reservation, result.effective_sample_index);
+      // The UI sender coalesces pointer events while this request is in
+      // flight. Returning at audible acknowledgement, rather than candidate
+      // publication, keeps the next write out of the worker queue and makes it
+      // carry the latest pointer value at one clean activation boundary.
+      if (!metal_worker_->wait_for_activation_acknowledgement(epoch_id))
+      {
+        result.ok = false;
+        result.error =
+          "set_param: Metal activation acknowledgement timed out";
+      }
       return result;
     }
   }

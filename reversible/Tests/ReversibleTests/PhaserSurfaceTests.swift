@@ -22,8 +22,8 @@ final class PhaserSurfaceTests: XCTestCase {
         XCTAssertTrue(graph.nodes["phaser3"]?.kind.spec.modal == true)
     }
 
-    func testReverbExposesOnlyItsUsefulDecayControl() {
-        XCTAssertEqual(NodeKind.reverb.spec.knobs.map(\.name), ["rt60"])
+    func testReverbKeepsDecayAndLocalDirectionWithoutSway() {
+        XCTAssertEqual(NodeKind.reverb.spec.knobs.map(\.name), ["rt60", "dir"])
     }
 
     func testScopeDerivesTimebaseFromConnectedSignalKnowledge() throws {

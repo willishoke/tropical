@@ -99,10 +99,9 @@ def runVocabDriven (arena : Arena)
   if !fingerprintOk then
     ok := false
     issues := issues.push "vocabulary fingerprint is not deterministic labelled FNV-1a/64"
-  -- The public room has one useful control: its signal-capable, glided RT60.
-  -- Direction and decay modulation remain low-level modal operations rather
-  -- than exposing misleading or inaudible surface knobs.
-  let roomControlNames := #["rt60"]
+  -- The public room retains RT60 and local kernel direction. Decay sway/rate
+  -- remain low-level modal operations rather than surface knobs.
+  let roomControlNames := #["rt60", "dir"]
   let roomSurfaceOk := roomControlNames.all fun name =>
     match portOf "reverb" name with
     | some spec => spec.accepts == sigIn && spec.knob.isSome && spec.discipline == .glide
@@ -112,7 +111,7 @@ def runVocabDriven (arena : Arena)
     | none => false
   if !roomSurfaceOk || !roomInputOk then
     ok := false
-    issues := issues.push "reverb: served rt60 is not a signal-capable glided control over a modal input"
+    issues := issues.push "reverb: served rt60/dir controls are not signal-capable glides over a modal input"
   for kind in vocabularyKinds do
     if kind == "out" then continue
     let mut nodes : Array Lean.Json := #[]
@@ -447,12 +446,14 @@ def runRealizedReport : IO Bool := do
       && !(paramNames repW).contains "sfw.rate"
     let danglerOk := nodeStatus repD "orphan" == some "excluded"
       && nodeStatus repD "osc" == some "active"
-    let roomControls := #["rt60"]
+    let roomControls := #["rt60", "dir"]
     let roomUnwiredOk := roomControls.all fun name =>
       inputState repRoomU "room" name == some "normalled" &&
         (paramNames repRoomU).contains s!"room.{name}"
     let roomWiredOk := inputState repRoomW "room" "rt60" == some "wired" &&
       !(paramNames repRoomW).contains "room.rt60" &&
+      inputState repRoomW "room" "dir" == some "normalled" &&
+      (paramNames repRoomW).contains "room.dir" &&
       (paramNames repRoomW).contains "k.value"
     let reportFingerprintOk := #[repU, repW, repD, repRoomU, repRoomW].all fun rep =>
       fingerprintOf rep == some vocabularyFingerprint
@@ -526,12 +527,15 @@ def runManifestDisciplines (arena : Arena)
         issues := issues.push "unwired: sfw.rate missing from disciplines"
       if pw.paramDisciplines.any (·.name == "sfw.rate") then
         issues := issues.push "wired: superseded sfw.rate present in disciplines"
-      for name in #["rt60"] do
+      for name in #["rt60", "dir"] do
         if !(pru.paramDisciplines.any fun d =>
             d.name == s!"room.{name}" && d.discipline == "glide") then
           issues := issues.push s!"room-unwired: room.{name} missing glide discipline"
-        if prw.paramDisciplines.any (·.name == s!"room.{name}") then
-          issues := issues.push s!"room-wired: superseded room.{name} present in disciplines"
+      if prw.paramDisciplines.any (·.name == "room.rt60") then
+        issues := issues.push "room-wired: superseded room.rt60 present in disciplines"
+      if !(prw.paramDisciplines.any fun d =>
+          d.name == "room.dir" && d.discipline == "glide") then
+        issues := issues.push "room-wired: normalled room.dir missing glide discipline"
       if !(prw.paramDisciplines.any fun d =>
           d.name == "driver.value" && d.discipline == "raw") then
         issues := issues.push "room-wired: driver.value missing raw discipline"
@@ -645,7 +649,7 @@ def runDeadSlotLint (arena : Arena)
           IO.println s!"  FAIL  dead-slot-lint  {label}: param:sfw.rate registered despite wired mod — the owned-knob rule regressed"
           ok := false
         if label == "modal-chain" then
-          for control in #["rt60"] do
+          for control in #["rt60", "dir"] do
             if !plan.slotNames.contains s!"param:rvb.{control}#v0" then
               IO.println s!"  FAIL  dead-slot-lint  {label}: unwired rvb.{control} glide fallback missing"
               ok := false
@@ -655,6 +659,9 @@ def runDeadSlotLint (arena : Arena)
             if plan.slotNames.any (slotPrefix.isPrefixOf ·) then
               IO.println s!"  FAIL  dead-slot-lint  {label}: wired {slotPrefix} fallback still registered"
               ok := false
+          if !plan.slotNames.contains "param:rvw.dir#v0" then
+            IO.println s!"  FAIL  dead-slot-lint  {label}: unwired param:rvw.dir glide fallback missing"
+            ok := false
           for driver in #["krt"] do
             if !plan.slotNames.contains s!"param:{driver}.value" then
               IO.println s!"  FAIL  dead-slot-lint  {label}: param:{driver}.value missing"

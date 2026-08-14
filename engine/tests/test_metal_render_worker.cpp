@@ -444,6 +444,7 @@ static void test_fixed_live_control_learns_late_render_horizon()
     candidate.fixed_activation = true;
     candidate.activation_frame = reservation.activation_frame;
     candidate.reservation_device_frame = reservation.device_frame;
+    candidate.enqueue_device_frame = reservation.device_frame;
     scheduled = worker.schedule(std::move(candidate));
     if (!scheduled.retargeted) break;
   }
@@ -452,6 +453,93 @@ static void test_fixed_live_control_learns_late_render_horizon()
   ASSERT(scheduled.ok);
   ASSERT(attempts < 3);
   ASSERT(worker.activation_retarget_count() == 1);
+}
+
+static void test_queued_control_wait_does_not_inflate_lead()
+{
+  EpochTileQueue queue(128, 512);
+  std::atomic<bool> realtime_running{true};
+  MetalRenderWorker worker(
+    queue,
+    [](const RenderEpochRequest & request, uint64_t, uint32_t frames,
+       double * destination) {
+      std::fill_n(destination, frames, static_cast<double>(request.epoch_id));
+      return true;
+    }, &realtime_running);
+  ASSERT(worker.schedule(request(1, EpochTransitionKind::Fresh, 0)).ok);
+  std::array<double, 128> output{};
+  ASSERT(queue.consume(output.data(), output.size()).activated);
+  ASSERT(wait_for([&] { return queue.activation_acknowledged() == 1; }));
+
+  const auto second = worker.schedule(
+    request(2, EpochTransitionKind::Continuous));
+  ASSERT(second.ok);
+  const auto reservation = worker.reserve(EpochTransitionKind::Continuous);
+  auto candidate = request(
+    3, EpochTransitionKind::Continuous,
+    reservation.effective_sample_index);
+  candidate.fixed_activation = true;
+  candidate.activation_frame = reservation.activation_frame;
+  candidate.reservation_device_frame = reservation.device_frame;
+  candidate.enqueue_device_frame = reservation.device_frame;
+
+  tropical_metal::EpochScheduleResult third;
+  std::atomic<bool> returned{false};
+  std::jthread control([&] {
+    third = worker.schedule(std::move(candidate));
+    returned.store(true, std::memory_order_release);
+  });
+  ASSERT(!wait_for(
+    [&] { return returned.load(std::memory_order_acquire); },
+    std::chrono::milliseconds(20)));
+  while (queue.published_device_frame() < second.activation_frame)
+    ASSERT(queue.consume(output.data(), output.size()).status
+           == TileConsumeStatus::Audio);
+  ASSERT(queue.consume(output.data(), output.size()).activated);
+  ASSERT(wait_for([&] { return returned.load(std::memory_order_acquire); }));
+  control.join();
+  ASSERT(third.retargeted);
+
+  const uint64_t current = queue.published_device_frame();
+  const auto next = worker.reserve(EpochTransitionKind::Continuous);
+  ASSERT(next.activation_frame == current + queue.render_frames());
+}
+
+static void test_running_control_waits_for_audible_acknowledgement()
+{
+  EpochTileQueue queue(128, 512);
+  std::atomic<bool> realtime_running{true};
+  MetalRenderWorker worker(
+    queue,
+    [](const RenderEpochRequest & request, uint64_t, uint32_t frames,
+       double * destination) {
+      std::fill_n(destination, frames, static_cast<double>(request.epoch_id));
+      return true;
+    }, &realtime_running);
+  ASSERT(worker.schedule(request(1, EpochTransitionKind::Fresh, 0)).ok);
+  std::array<double, 128> output{};
+  ASSERT(queue.consume(output.data(), output.size()).activated);
+  ASSERT(wait_for([&] { return queue.activation_acknowledged() == 1; }));
+
+  const auto control = worker.schedule(
+    request(2, EpochTransitionKind::Continuous));
+  ASSERT(control.ok);
+  std::atomic<bool> returned{false};
+  bool acknowledged = false;
+  std::jthread waiter([&] {
+    acknowledged = worker.wait_for_activation_acknowledgement(2);
+    returned.store(true, std::memory_order_release);
+  });
+  ASSERT(!wait_for(
+    [&] { return returned.load(std::memory_order_acquire); },
+    std::chrono::milliseconds(20)));
+  while (queue.published_device_frame() < control.activation_frame)
+    ASSERT(queue.consume(output.data(), output.size()).status
+           == TileConsumeStatus::Audio);
+  ASSERT(queue.consume(output.data(), output.size()).activated);
+  ASSERT(wait_for([&] { return returned.load(std::memory_order_acquire); }));
+  waiter.join();
+  ASSERT(acknowledged);
 }
 
 static void test_unclaimed_epochs_coalesce_without_audio_callback()
@@ -547,6 +635,10 @@ int main()
            test_live_control_primes_one_tile_before_publication);
   run_test("fixed controls learn enough lead after one late candidate",
            test_fixed_live_control_learns_late_render_horizon);
+  run_test("queued wait does not inflate activation lead",
+           test_queued_control_wait_does_not_inflate_lead);
+  run_test("running control returns at audible acknowledgement",
+           test_running_control_waits_for_audible_acknowledgement);
   run_test("unclaimed controls coalesce before audio starts",
            test_unclaimed_epochs_coalesce_without_audio_callback);
   run_test("unclaimed controls coalesce after audio stops",
