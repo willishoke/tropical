@@ -101,6 +101,22 @@ final class PhaserSurfaceTests: XCTestCase {
         )
     }
 
+    func testKnobDragFinishesAtGestureValueNotViewSnapshot() throws {
+        let knob = try XCTUnwrap(NodeKind.source.spec.knobs.first {
+            $0.name == "freq"
+        })
+        var drag = KnobDragSession()
+        let moved = drag.update(
+            knob: knob,
+            currentValue: 220,
+            translation: -90
+        )
+
+        XCTAssertGreaterThan(moved, 220)
+        XCTAssertEqual(try XCTUnwrap(drag.finish()), moved)
+        XCTAssertNil(drag.finish())
+    }
+
     func testLiveParameterFailuresNeverRequestGraphRelowering() {
         let failures: [EngineError] = [
             .notRunning,

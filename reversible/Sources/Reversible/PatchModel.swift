@@ -544,10 +544,12 @@ final class PatchModel: ObservableObject {
     private func retuneScopes(_ scopeIDs: Set<String>) {
         for id in scopeIDs {
             guard var scope = nodes[id], scope.kind == .scope else { continue }
-            scope.values["window"] = ScopeSignalKnowledge.recommendedWindow(
+            let recommended = ScopeSignalKnowledge.recommendedWindow(
                 for: scope.allInputs,
                 nodes: nodes
             ) ?? ScopeSignalKnowledge.defaultWindow
+            guard scope.values["window"] != recommended else { continue }
+            scope.values["window"] = recommended
             nodes[id] = scope
         }
     }
@@ -845,37 +847,67 @@ final class PatchModel: ObservableObject {
     lazy var params = ParamSender(model: self)
 
     func setKnob(_ node: PatchNode, _ knob: KnobSpec, _ value: Double) {
-        guard value.isFinite, var current = nodes[node.id],
-              current.values[knob.name] != value
-        else { return }
-        let automaticScopes = current.kind.spec.monitor
-            ? Set<String>()
-            : automaticallyTunedScopeIDs(in: nodes)
-        current.values[knob.name] = value
-        nodes[node.id] = current
-        retuneScopes(automaticScopes)
+        applyKnob(
+            nodeID: node.id,
+            knob: knob,
+            value: value,
+            guaranteeDelivery: false
+        )
+    }
+
+    /// End-of-gesture delivery does not trust the view's node snapshot. Even
+    /// when authored truth already equals the final pointer value, enqueue it
+    /// once more so coalescing cannot leave the engine at an intermediate
+    /// value when the gesture produces no further events.
+    func finishKnobGesture(nodeID: String, knob: KnobSpec, value: Double) {
+        applyKnob(
+            nodeID: nodeID,
+            knob: knob,
+            value: value,
+            guaranteeDelivery: true
+        )
+    }
+
+    private func applyKnob(
+        nodeID: String,
+        knob: KnobSpec,
+        value: Double,
+        guaranteeDelivery: Bool
+    ) {
+        guard value.isFinite, var current = nodes[nodeID] else { return }
+        let changed = current.values[knob.name] != value
+        guard changed || guaranteeDelivery else { return }
+        if changed {
+            let automaticScopes = current.kind.spec.monitor
+                ? Set<String>()
+                : automaticallyTunedScopeIDs(in: nodes)
+            current.values[knob.name] = value
+            nodes[nodeID] = current
+            retuneScopes(automaticScopes)
+        }
 
         // A monitor's knobs (Scope `window`) are authored view state, not
         // parameter slots and do not invalidate lowering compatibility.
-        guard !node.kind.spec.monitor else {
-            advanceAuthoredRevision(requiresCompile: false)
+        guard !current.kind.spec.monitor else {
+            if changed { advanceAuthoredRevision(requiresCompile: false) }
             return
         }
-        let name = "\(node.id).\(knob.name)"
+        let name = "\(nodeID).\(knob.name)"
         guard let realizedPatch,
               realizedPatch.loweringRevision == loweringRevision,
               case .live = realizedPatch.patch.parameterStatus(
-                nodeID: node.id,
+                nodeID: nodeID,
                 port: knob.name
               )
         else {
+            guard changed else { return }
             // Absent live truth means the edit is structural (or belongs to a
             // not-yet-realized lowering revision).
             advanceAuthoredRevision()
             schedulePush(after: .milliseconds(90))
             return
         }
-        advanceAuthoredRevision(requiresCompile: false)
+        if changed { advanceAuthoredRevision(requiresCompile: false) }
         params.send(name, value)
     }
 
