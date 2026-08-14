@@ -58,7 +58,9 @@ def main (args : List String) : IO UInt32 := do
   if args.contains "--routed-only" then
     return if ← runRoutedSumCoverage then 0 else 1
   if args.contains "--arena-native-only" then
-    return if ← Tropical.Testing.ArenaNative.runPhase1Gate then 0 else 1
+    let phase1 ← Tropical.Testing.ArenaNative.runPhase1Gate
+    let phase2 ← Tropical.Testing.ArenaNative.runPhase2Gate
+    return if phase1 && phase2 then 0 else 1
   if args.contains "--oriented-patch-only" then
     return if ← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch {} then 0 else 1
   if args.contains "--phaser-only" then
@@ -96,6 +98,8 @@ def main (args : List String) : IO UInt32 := do
   IO.println "arena-native authoring foundation:"
   total := total + 1
   if !(← Tropical.Testing.ArenaNative.runPhase1Gate) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Testing.ArenaNative.runPhase2Gate) then failed := failed + 1
 
   -- ── (a) Patch audio goldens (tests/golden/*.hash) ──────────────────────────
   IO.println "patch goldens:"

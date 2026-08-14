@@ -154,6 +154,14 @@ def toFloatE (a : Sig) : BuildM Sig := unary .toFloat a
 def clampE (value lo hi : Sig) : BuildM Sig := clamp value lo hi
 def selectE (cond then_ else_ : Sig) : BuildM Sig := select cond then_ else_
 
+/-- Authored-order, left-associated addition over an array of already-built
+    IDs.  The empty sum constructs the same numeric zero as the recursive
+    authoring surface. -/
+def sumLeft (items : Array Sig) : BuildM Sig := do
+  match items[0]? with
+  | none => lit 0
+  | some first => (items.extract 1 items.size).foldlM add first
+
 /-- Encode a build-time `Float` as the same decimal literal used by the
     recursive authoring path. -/
 def litF (x : Float) : BuildM Sig :=
@@ -179,6 +187,22 @@ def declareInst (decl : AInst) : BuildM InstanceIdx := do
 def inst (name programName : String) (inputs : Array AInput := #[]) :
     BuildM InstanceIdx :=
   declareInst { name, programName, inputs }
+
+/-- Mirror the elaborator's deterministic transitive registry merge. -/
+def buildRegistry (arena : Arena) (resolved : Array (String × ProgramIdx))
+    (programNames : Array String) : Except String (Array (String × ProgramIdx)) := do
+  let mut registry : Array (String × ProgramIdx) := #[]
+  for programName in programNames do
+    let some index := (resolved.find? (·.1 == programName)).map (·.2)
+      | .error s!"EmitArrow: program '{programName}' not found in the elaborated stdlib chain"
+    let some program := arena.program? index
+      | .error s!"EmitArrow: program '{programName}' index out of range"
+    if !registry.any (·.1 == program.name) then
+      registry := registry.push (program.name, index)
+    for (name, registeredIndex) in program.registry do
+      if !registry.any (·.1 == name) then
+        registry := registry.push (name, registeredIndex)
+  pure registry
 
 /-- Assemble one ID-native program.  The build starts from `arena.exprs`; only
     an `.ok` result publishes the updated expression arena and appends exactly

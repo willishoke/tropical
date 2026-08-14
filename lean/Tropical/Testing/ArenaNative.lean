@@ -1,5 +1,9 @@
 import Tropical.EmitArrow.Sig
+import Tropical.EmitArrow.Term
+import Tropical.EmitArrow.Numerics
 import Tropical.EmitArrow.ArenaSig
+import Tropical.EmitArrow.ArenaTerm
+import Tropical.Stdlib
 import Tropical.Ir.Strata
 import Tropical.Ir.CompileResolved
 import Tropical.Testing.PlanWire
@@ -32,6 +36,16 @@ structure Phase1Evidence where
   rootReachableNodes : Nat
   leafWireBytes : Nat
   rootWireBytes : Nat
+deriving Repr
+
+structure Phase2Evidence where
+  stdlibPrograms : Nat
+  stdlibUniqueNodes : Nat
+  numericReachableNodes : Nat
+  numericWireBytes : Nat
+  carrierInstances : Nat
+  carrierReachableNodes : Nat
+  carrierWireBytes : Nat
 deriving Repr
 
 private def output : Array OutputDecl :=
@@ -208,6 +222,260 @@ def runPhase1Gate : IO Bool := do
     pure true
   | .error error =>
     IO.println s!"  FAIL  arena-native-phase1  {error}"
+    pure false
+
+private def buildLegacyArrowCarrier (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let registry ← Tropical.EmitArrow.buildRegistry arena resolved #["FixedSinOsc"]
+  let base := Tropical.EmitArrow.clockLit
+  let delta := Tropical.EmitArrow.litI 17
+  let voice := fun (pitch : Int) => ({
+    programName := "FixedSinOsc"
+    wire := fun clock => #[
+      { port := ⟨0⟩, value := Tropical.EmitArrow.lit pitch },
+      { port := ⟨1⟩, value := clock },
+      { port := ⟨2⟩, value := Tropical.EmitArrow.lit 0 }]
+    phaseAnchor := some (⟨2⟩, fun shift =>
+      Tropical.EmitArrow.mul (Tropical.EmitArrow.toFloatE shift)
+        (Tropical.EmitArrow.lit 1 9))
+  } : Tropical.EmitArrow.Voice)
+  let modulator : Tropical.EmitArrow.ArrowTerm :=
+    .gen (voice 11) "mod" base
+  let carrier : Tropical.EmitArrow.ArrowTerm :=
+    .gen (voice 220) "carrier" base
+  let signalWarp := fun clock signal =>
+    Tropical.EmitArrow.sub clock (Tropical.EmitArrow.toIntE
+      (Tropical.EmitArrow.mul signal (Tropical.EmitArrow.lit 8)))
+  let warped : Tropical.EmitArrow.ArrowTerm := .warp
+    (fun clock => Tropical.EmitArrow.add clock delta)
+    (.swarp signalWarp modulator carrier)
+  let sibling : Tropical.EmitArrow.ArrowTerm := .warp
+    (fun clock => Tropical.EmitArrow.sub clock delta)
+    (.gen (voice 330) "sibling" base)
+  let combine := fun (signals : Array Tropical.EmitArrow.Sig) =>
+    Tropical.EmitArrow.add
+      (Tropical.EmitArrow.mul (Tropical.EmitArrow.lit 2) signals[0]!)
+      (Tropical.EmitArrow.mul (Tropical.EmitArrow.lit 3) signals[1]!)
+  let term : Tropical.EmitArrow.ArrowTerm := .arrN combine #[warped, sibling]
+  let (outputSignal, builder) :=
+    Tropical.EmitArrow.emitTerm (Tropical.EmitArrow.normalize term) {}
+  unless builder.decls.map (·.name) == #["mod0", "carrier1", "sibling2"] do
+    throw "ArenaNative phase-2 fixture: legacy instance order changed"
+  pure (Tropical.EmitArrow.assemble arena "Phase2ArrowCarrier" #[] output
+    builder.decls #[(.port ⟨0⟩, outputSignal)] registry)
+
+private def numericOutputs : Array OutputDecl := #[
+  { name := "fixed_sin", type? := some (.scalar .int) },
+  { name := "fixed_cos", type? := some (.scalar .int) },
+  { name := "fixed_out", type? := some (.scalar .float) },
+  { name := "phasor", type? := some (.scalar .float) },
+  { name := "sin", type? := some (.scalar .float) },
+  { name := "exp", type? := some (.scalar .float) },
+  { name := "log", type? := some (.scalar .float) },
+  { name := "atan2", type? := some (.scalar .float) },
+  { name := "cos", type? := some (.scalar .float) },
+  { name := "two_pi", type? := some (.scalar .float) },
+  { name := "half_pi", type? := some (.scalar .float) }]
+
+private def buildLegacyNumerics : Except String (Arena × ProgramIdx) :=
+  let phaseQ : Tropical.EmitArrow.Sig := .inputRef ⟨0⟩
+  let freq : Tropical.EmitArrow.Sig := .inputRef ⟨1⟩
+  let offset : Tropical.EmitArrow.Sig := .inputRef ⟨2⟩
+  let clk : Tropical.EmitArrow.Sig := .inputRef ⟨3⟩
+  let x : Tropical.EmitArrow.Sig := .inputRef ⟨4⟩
+  let y : Tropical.EmitArrow.Sig := .inputRef ⟨5⟩
+  let fixedSin := Tropical.EmitArrow.fixedSinCycSig phaseQ
+  let inputs : Array Tropical.EmitArrow.AInputDecl := #[
+    { name := "phase", type? := some (.scalar .int),
+      defaultSig := some (Tropical.EmitArrow.lit 0) },
+    { name := "freq", type? := some (.scalar .float),
+      defaultSig := some (Tropical.EmitArrow.lit 220) },
+    { name := "offset", type? := some (.scalar .float),
+      defaultSig := some (Tropical.EmitArrow.lit 0) },
+    { name := "clk", type? := some (.scalar .int),
+      defaultSig := some (Tropical.EmitArrow.lit 0) },
+    { name := "x", type? := some (.scalar .float),
+      defaultSig := some (Tropical.EmitArrow.lit 1) },
+    { name := "y", type? := some (.scalar .float),
+      defaultSig := some (Tropical.EmitArrow.lit 5 1) }]
+  let assigns : Array (OutputTarget × Tropical.EmitArrow.Sig) := #[
+    (.port ⟨0⟩, fixedSin),
+    (.port ⟨1⟩, Tropical.EmitArrow.fixedCosCycSig phaseQ),
+    (.port ⟨2⟩, Tropical.EmitArrow.fixedOutQ 30 fixedSin),
+    (.port ⟨3⟩, Tropical.EmitArrow.phasorPhaseSig freq offset clk),
+    (.port ⟨4⟩, Tropical.EmitArrow.sinSig x),
+    (.port ⟨5⟩, Tropical.EmitArrow.expSig x),
+    (.port ⟨6⟩, Tropical.EmitArrow.logSig x),
+    (.port ⟨7⟩, Tropical.EmitArrow.atan2E y x),
+    (.port ⟨8⟩, Tropical.EmitArrow.cosSig x),
+    (.port ⟨9⟩, Tropical.EmitArrow.twoPiE),
+    (.port ⟨10⟩, Tropical.EmitArrow.halfPiE)]
+  .ok (Tropical.EmitArrow.assemble {} "Phase2Numerics" inputs
+    numericOutputs #[] assigns #[])
+
+private def buildNativeNumerics : Except String (Arena × ProgramIdx) :=
+  Tropical.EmitArrow.ArenaNative.assemble {} "Phase2Numerics"
+      numericOutputs #[] do
+    let phaseQ ← Tropical.EmitArrow.ArenaNative.inputRef ⟨0⟩
+    let freq ← Tropical.EmitArrow.ArenaNative.inputRef ⟨1⟩
+    let offset ← Tropical.EmitArrow.ArenaNative.inputRef ⟨2⟩
+    let clk ← Tropical.EmitArrow.ArenaNative.inputRef ⟨3⟩
+    let x ← Tropical.EmitArrow.ArenaNative.inputRef ⟨4⟩
+    let y ← Tropical.EmitArrow.ArenaNative.inputRef ⟨5⟩
+    let fixedSin ← Tropical.EmitArrow.ArenaNative.fixedSinCycSig phaseQ
+    let fixedCos ← Tropical.EmitArrow.ArenaNative.fixedCosCycSig phaseQ
+    let fixedOut ← Tropical.EmitArrow.ArenaNative.fixedOutQ 30 fixedSin
+    let phasor ← Tropical.EmitArrow.ArenaNative.phasorPhaseSig freq offset clk
+    let sine ← Tropical.EmitArrow.ArenaNative.sinSig x
+    let exponential ← Tropical.EmitArrow.ArenaNative.expSig x
+    let logarithm ← Tropical.EmitArrow.ArenaNative.logSig x
+    let angle ← Tropical.EmitArrow.ArenaNative.atan2E y x
+    let cosine ← Tropical.EmitArrow.ArenaNative.cosSig x
+    let twoPi ← Tropical.EmitArrow.ArenaNative.twoPiE
+    let halfPi ← Tropical.EmitArrow.ArenaNative.halfPiE
+    let zero ← Tropical.EmitArrow.ArenaNative.lit 0
+    let twoTwenty ← Tropical.EmitArrow.ArenaNative.lit 220
+    let one ← Tropical.EmitArrow.ArenaNative.lit 1
+    let half ← Tropical.EmitArrow.ArenaNative.lit 5 1
+    let inputs : Array Tropical.EmitArrow.ArenaNative.AInputDecl := #[
+      { name := "phase", type? := some (.scalar .int), defaultSig := some zero },
+      { name := "freq", type? := some (.scalar .float), defaultSig := some twoTwenty },
+      { name := "offset", type? := some (.scalar .float), defaultSig := some zero },
+      { name := "clk", type? := some (.scalar .int), defaultSig := some zero },
+      { name := "x", type? := some (.scalar .float), defaultSig := some one },
+      { name := "y", type? := some (.scalar .float), defaultSig := some half }]
+    pure ({ inputs, assigns := #[
+      (.port ⟨0⟩, fixedSin), (.port ⟨1⟩, fixedCos),
+      (.port ⟨2⟩, fixedOut), (.port ⟨3⟩, phasor),
+      (.port ⟨4⟩, sine), (.port ⟨5⟩, exponential),
+      (.port ⟨6⟩, logarithm), (.port ⟨7⟩, angle),
+      (.port ⟨8⟩, cosine), (.port ⟨9⟩, twoPi),
+      (.port ⟨10⟩, halfPi)] } : NativeBody)
+
+private def buildNativeArrowCarrier (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) :
+    Except String (Arena × ProgramIdx) := do
+  let registry ← Tropical.EmitArrow.ArenaNative.buildRegistry arena resolved
+    #["FixedSinOsc"]
+  Tropical.EmitArrow.ArenaNative.assemble arena "Phase2ArrowCarrier" output
+      registry do
+    let base ← Tropical.EmitArrow.ArenaNative.clockLit
+    let delta ← Tropical.EmitArrow.ArenaNative.litI 17
+    -- Independently reconstructing an equal node must hit the same interner,
+    -- while the bound IDs below are the values actually reused by the term.
+    let reuseA ← Tropical.EmitArrow.ArenaNative.add base delta
+    let reuseB ← Tropical.EmitArrow.ArenaNative.add base delta
+    unless reuseA == reuseB do
+      throw "ArenaNative phase-2 fixture: repeated scalar construction missed eintern"
+    let voice := fun (pitch : Int) => ({
+      programName := "FixedSinOsc"
+      wire := fun clock => do
+        let pitch ← Tropical.EmitArrow.ArenaNative.lit pitch
+        let zero ← Tropical.EmitArrow.ArenaNative.lit 0
+        pure #[
+          { port := ⟨0⟩, value := pitch },
+          { port := ⟨1⟩, value := clock },
+          { port := ⟨2⟩, value := zero }]
+      phaseAnchor := some (⟨2⟩, fun shift => do
+        let shiftFloat ← Tropical.EmitArrow.ArenaNative.toFloatE shift
+        let scale ← Tropical.EmitArrow.ArenaNative.lit 1 9
+        Tropical.EmitArrow.ArenaNative.mul shiftFloat scale)
+    } : Tropical.EmitArrow.ArenaNative.Voice)
+    let modulator : Tropical.EmitArrow.ArenaNative.ArrowTerm :=
+      .gen (voice 11) "mod" base
+    let carrier : Tropical.EmitArrow.ArenaNative.ArrowTerm :=
+      .gen (voice 220) "carrier" base
+    let signalWarp := fun clock signal => do
+      let eight ← Tropical.EmitArrow.ArenaNative.lit 8
+      let scaled ← Tropical.EmitArrow.ArenaNative.mul signal eight
+      let delta ← Tropical.EmitArrow.ArenaNative.toIntE scaled
+      Tropical.EmitArrow.ArenaNative.sub clock delta
+    let warped : Tropical.EmitArrow.ArenaNative.ArrowTerm := .warp
+      (fun clock => Tropical.EmitArrow.ArenaNative.add clock delta)
+      (.swarp signalWarp modulator carrier)
+    let sibling : Tropical.EmitArrow.ArenaNative.ArrowTerm := .warp
+      (fun clock => Tropical.EmitArrow.ArenaNative.sub clock delta)
+      (.gen (voice 330) "sibling" base)
+    let combine := fun (signals : Array Tropical.EmitArrow.ArenaNative.Sig) => do
+      let two ← Tropical.EmitArrow.ArenaNative.lit 2
+      let left ← Tropical.EmitArrow.ArenaNative.mul two signals[0]!
+      let three ← Tropical.EmitArrow.ArenaNative.lit 3
+      let right ← Tropical.EmitArrow.ArenaNative.mul three signals[1]!
+      Tropical.EmitArrow.ArenaNative.add left right
+    let term : Tropical.EmitArrow.ArenaNative.ArrowTerm :=
+      .arrN combine #[warped, sibling]
+    let outputSignal ← Tropical.EmitArrow.ArenaNative.emitTerm
+      (Tropical.EmitArrow.ArenaNative.normalize term)
+    let builder ← get
+    unless builder.decls.map (·.name) == #["mod0", "carrier1", "sibling2"] do
+      throw "ArenaNative phase-2 fixture: instance effects are not left-to-right"
+    pure ({ assigns := #[(.port ⟨0⟩, outputSignal)] } : NativeBody)
+
+def phase2Evidence : Except String Phase2Evidence := do
+  let (legacyNumerics, legacyNumericProgram) ← buildLegacyNumerics
+  let (nativeNumerics, nativeNumericProgram) ← buildNativeNumerics
+  let legacyNumericCorpus : FixtureCorpus := {
+    arena := legacyNumerics, leaf := legacyNumericProgram,
+    root := legacyNumericProgram }
+  let nativeNumericCorpus : FixtureCorpus := {
+    arena := nativeNumerics, leaf := nativeNumericProgram,
+    root := nativeNumericProgram }
+  let (legacyNumericExprs, legacyNumericWire) ←
+    resolvedWire legacyNumericCorpus legacyNumericProgram
+  let (nativeNumericExprs, nativeNumericWire) ←
+    resolvedWire nativeNumericCorpus nativeNumericProgram
+  unless nativeNumericExprs.nodes == legacyNumericExprs.nodes &&
+      nativeNumericWire == legacyNumericWire do
+    let mut firstDifference := "none"
+    for index in [0:max nativeNumericExprs.nodes.size legacyNumericExprs.nodes.size] do
+      if firstDifference == "none" &&
+          nativeNumericExprs.nodes[index]? != legacyNumericExprs.nodes[index]? then
+        firstDifference := s!"{index}: native={repr nativeNumericExprs.nodes[index]?} legacy={repr legacyNumericExprs.nodes[index]?}"
+    throw s!"ArenaNative phase-2 fixture: numeric helpers differ from recursive baseline (nodes {nativeNumericExprs.nodes.size}/{legacyNumericExprs.nodes.size}, wire {nativeNumericWire.length}/{legacyNumericWire.length}, first {firstDifference})"
+  let (legacyStdlib, legacyResolved) ← Tropical.EmitArrow.buildStdlibChain
+  let (nativeStdlib, nativeResolved) ← Tropical.EmitArrow.buildStdlibChain
+  unless nativeStdlib.programs.size == 15 do
+    throw s!"ArenaNative phase-2 fixture: expected 15 stdlib programs, got {nativeStdlib.programs.size}"
+  unless nativeStdlib.exprs.wf do
+    throw "ArenaNative phase-2 fixture: stdlib authored arena is not child-descending"
+  let (legacyArena, legacyCarrier) ←
+    buildLegacyArrowCarrier legacyStdlib legacyResolved
+  let (nativeArena, nativeCarrier) ←
+    buildNativeArrowCarrier nativeStdlib nativeResolved
+  let some _legacyProgram := legacyArena.program? legacyCarrier
+    | throw "ArenaNative phase-2 fixture: legacy carrier missing"
+  let some nativeProgram := nativeArena.program? nativeCarrier
+    | throw "ArenaNative phase-2 fixture: native carrier missing"
+  unless nativeProgram.decls.size == 3 do
+    throw s!"ArenaNative phase-2 fixture: expected 3 carrier instances, got {nativeProgram.decls.size}"
+  let legacyCorpus : FixtureCorpus :=
+    { arena := legacyArena, leaf := legacyCarrier, root := legacyCarrier }
+  let nativeCorpus : FixtureCorpus :=
+    { arena := nativeArena, leaf := nativeCarrier, root := nativeCarrier }
+  let (legacyExprs, legacyWire) ← resolvedWire legacyCorpus legacyCarrier
+  let (nativeExprs, nativeWire) ← resolvedWire nativeCorpus nativeCarrier
+  unless nativeExprs.wf do
+    throw "ArenaNative phase-2 fixture: reachable arrow arena is not child-descending"
+  unless nativeExprs.nodes == legacyExprs.nodes && nativeWire == legacyWire do
+    throw "ArenaNative phase-2 fixture: monadic ArrowTerm differs from recursive baseline"
+  pure {
+    stdlibPrograms := nativeStdlib.programs.size
+    stdlibUniqueNodes := nativeStdlib.exprs.nodes.size
+    numericReachableNodes := nativeNumericExprs.nodes.size
+    numericWireBytes := nativeNumericWire.length
+    carrierInstances := nativeProgram.decls.size
+    carrierReachableNodes := nativeExprs.nodes.size
+    carrierWireBytes := nativeWire.length
+  }
+
+def runPhase2Gate : IO Bool := do
+  match phase2Evidence with
+  | .ok evidence =>
+    IO.println s!"  PASS  arena-native-phase2  {repr evidence}"
+    pure true
+  | .error error =>
+    IO.println s!"  FAIL  arena-native-phase2  {error}"
     pure false
 
 end Tropical.Testing.ArenaNative

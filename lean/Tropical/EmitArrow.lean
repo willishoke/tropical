@@ -1,5 +1,7 @@
 import Tropical.EmitArrow.Sig
 import Tropical.EmitArrow.ArenaSig
+import Tropical.EmitArrow.ArenaNumerics
+import Tropical.EmitArrow.ArenaTerm
 import Tropical.EmitArrow.Term
 import Tropical.EmitArrow.Numerics
 import Tropical.EmitArrow.Modal
@@ -29,6 +31,8 @@ The modules:
   during the arena-native cutover.
 * `ArenaSig` — the phase-1 ID-valued builder and immediate-interning smart
   constructors; its `ArenaNative` namespace is promoted at final cutover.
+* `ArenaNumerics` / `ArenaTerm` — the phase-2 ID-valued scalar kernels,
+  voices, cartesian morphisms, and reified-arrow emitter.
 * `Term` — `Voice`, the cartesian combinator surface (`Mor`), and
   `ArrowTerm` + the slide (`normalize`/`emitTermC`): downstream-presented
   warps pushed up to generator clocks.
