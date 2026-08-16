@@ -26,8 +26,13 @@ open Tropical.Ir
     triggers and scrubs the resonance by its own zero-crossing, and its read rate
     `ds/dτ` pitch-bends the ring. The master scrub still reaches it — `s` is itself
     read through the enclosing clock transform (`emitTermC`'s `swarp` case). -/
-def modalAddrWarp : Clock → Sig → Clock :=
-  fun _ s => toIntE (mul s (mul .sampleRate (lit 4294967296)))
+def modalAddrWarp : Clock → Sig → BuildM Clock :=
+  fun _ s => do
+    let sr ← sampleRate
+    let twoPow32 ← lit 4294967296
+    let scale ← mul sr twoPow32
+    let fixed ← mul s scale
+    toIntE fixed
 
 -- ─────────────────────────────────────────────────────────────
 -- M9 — the PATCHER LOWERING: a downstream-only patch graph → arrow term
@@ -58,9 +63,9 @@ def modalAddrWarp : Clock → Sig → Clock :=
     morphisms. -/
 inductive Node where
   | source (v : Voice) (clk : Clock)
-  | flange (input : String) (back fwd : Clock → Clock)
-  | shaper (input : String) (f : Sig → Sig)
-  | warpFx (input : String) (φ : Clock → Clock)
+  | flange (input : String) (back fwd : Clock → BuildM Clock)
+  | shaper (input : String) (f : Sig → BuildM Sig)
+  | warpFx (input : String) (φ : Clock → BuildM Clock)
   | mix (inputs : Array String)
   /-- A MODULATED carrier: `input`'s signal modulates this carrier's clock
       (FM/PM). The signal-into-clock edge — patch `mod.out → carrier.fm`. -/
@@ -87,7 +92,7 @@ inductive Node where
       reverse the tail flips (echo ↔ pre-echo). A future shift (`c + kD`, `D > 0`)
       reads AHEAD — an audible pre-echo, impossible on a stream. The slide
       distributes each tap's warp onto the generators, exactly like the flanger. -/
-  | comb (input : String) (taps : Array (Sig × (Clock → Clock)))
+  | comb (input : String) (taps : Array (Sig × (Clock → BuildM Clock)))
   /-- The multiplicative fan-in — `⊗` over its inputs, the ring-product twin of
       `mix`'s `sum`. Two inputs is ring modulation; an input × an envelope-generator
       is a VCA; and because the slide distributes over `prod`, a downstream warp
@@ -125,9 +130,8 @@ inductive Node where
   /-- The public ordinary room. Its topology is a function of the frozen RT60
       value and its local direction remains a live terminal control. Decay
       sway remains a low-level modal operation. -/
-  | modalRoom (input : String) (build : Sig → Array ModalMode)
-      (rt60 : ModalControlRef)
-      (direction : ModalControlRef := ModalControlRef.constant (lit 0))
+  | modalRoom (input : String) (build : Sig → BuildM (Array ModalMode))
+      (rt60 direction : ModalControlRef)
   /-- One generic linear modal-kernel action.  The stage builds a retained
       identity/proper/parallel/cascade expression only after its controls are
       frozen at the terminal response coordinate. -/
@@ -158,8 +162,13 @@ structure PatchGraph where
     Q32.32 clock by `depth · m` samples — `clk − toInt(depth · m · 2³²)`. `depth`
     is an EXPRESSION (a literal, or a live `paramRef` slot), so the depth knob can
     be a live param. Closed form in τ (`m` is a closed-form signal) either way. -/
-def fmWarp (depthE : Sig) : Clock → Sig → Clock :=
-  fun base m => sub base (toIntE (mul (mul depthE m) (lit 4294967296)))
+def fmWarp (depthE : Sig) : Clock → Sig → BuildM Clock :=
+  fun base m => do
+    let modulation ← mul depthE m
+    let twoPow32 ← lit 4294967296
+    let fixed ← mul modulation twoPow32
+    let shift ← toIntE fixed
+    sub base shift
 
 /-- The proper tail half of one swept first-order all-pass section.  This is a
     generic linear modal stage: the all-pass direct path is supplied by an
@@ -167,18 +176,35 @@ def fmWarp (depthE : Sig) : Clock → Sig → Clock :=
 def modalAllpassTailStage (center sweep rate : ModalControlRef)
     (ratio : Float) : ModalLinearStage where
   controls := #[center, sweep, rate]
-  build := fun responseClock values =>
-    let center := clampE ((values[0]?).getD (lit 700)) (lit 40) (lit 4000)
-    let sweep := clampE ((values[1]?).getD (lit 15 1)) (lit 0) (lit 3)
-    let rate := clampE ((values[2]?).getD (lit 2 1)) (lit 2 2) (lit 8)
-    let phase := phasorPhaseSig rate (lit 0) responseClock
-    let octaveOffset := mul sweep (sinSig (mul twoPiE phase))
-    let frequencyScale := expSig (mul octaveOffset (lit 6931471805599453 16))
-    let frequency := mul (mul center (litF ratio)) frequencyScale
-    let a := mul twoPiE frequency
+  build := fun responseClock values => do
+    let centerValue ← match values[0]? with | some value => pure value | none => lit 700
+    let centerLo ← lit 40
+    let centerHi ← lit 4000
+    let center ← clampE centerValue centerLo centerHi
+    let sweepValue ← match values[1]? with | some value => pure value | none => lit 15 1
+    let zero ← lit 0
+    let three ← lit 3
+    let sweep ← clampE sweepValue zero three
+    let rateValue ← match values[2]? with | some value => pure value | none => lit 2 1
+    let rateLo ← lit 2 2
+    let rateHi ← lit 8
+    let rate ← clampE rateValue rateLo rateHi
+    let phase ← phasorPhaseSig rate zero responseClock
+    let twoPi ← twoPiE
+    let radians ← mul twoPi phase
+    let sine ← sinSig radians
+    let octaveOffset ← mul sweep sine
+    let ln2 ← lit 6931471805599453 16
+    let exponent ← mul octaveOffset ln2
+    let frequencyScale ← expSig exponent
+    let ratioSig ← litF ratio
+    let centerFrequency ← mul center ratioSig
+    let frequency ← mul centerFrequency frequencyScale
+    let a ← mul twoPi frequency
     let sigmaLo : Float := 6.283185307179586 * 40.0 * ratio * 0.125
     let sigmaHi : Float := 6.283185307179586 * 4000.0 * ratio * 8.0
-    .proper (.causalTail (Oriented.allpassTail a (some (sigmaLo, sigmaHi))))
+    let tail ← Oriented.allpassTail a (some (sigmaLo, sigmaHi))
+    pure (.proper (.causalTail tail))
 
 /-- Expand a convenience phaser module into ordinary modal patch topology:
     six `identity + tail` junctions in cascade, followed by a dry/wet blend.
@@ -217,8 +243,7 @@ def Node.inputIds : Node → Array String
       #[dry, wet] ++ (mixControl.signalNode?.map (#[·])).getD #[]
   | .modalGaugeControl i g => #[i] ++ (g.signalNode?.map (#[·])).getD #[]
   | .modalRoom i _ rt60 direction =>
-      #[i] ++ (rt60.signalNode?.map (#[·])).getD #[] ++
-        (direction.signalNode?.map (#[·])).getD #[]
+      #[i] ++ (#[rt60, direction].filterMap (fun control => control.signalNode?))
 
 /-- Is `id` a modal-island node? Its output wire carries poles, not a `Sig`. A
     missing node reads as Sig (graceful — a half-built patch stays lowerable). -/
@@ -266,16 +291,20 @@ private def linearChainFrom? (g : PatchGraph) (base current : String) :
   go (g.nodes.size + 1) current
 
 /-- The empty modal value (`__silence__`, the graceful-silence contract). -/
-private def silentModal : ModalBranch where
-  source := .plain #[]
-  strikeAnchor := lit 0
-  realizationClock := clockLit
-  addressNode? := none
-  modeCount? := none
+private def silentModal : BuildM ModalBranch := do
+  let strikeAnchor ← lit 0
+  let realizationClock ← clockLit
+  pure {
+    source := .plain #[]
+    strikeAnchor
+    realizationClock
+    addressNode? := none
+    modeCount? := none }
 
 /-- Silence remains a singleton so terminals that historically accepted an
     unwired modal inlet retain their exact graceful-silence path. -/
-private def silentForest : ModalForest := #[silentModal]
+private def silentForest : BuildM ModalForest := do
+  pure #[← silentModal]
 
 /-- The rank-certificate breach message. Dead by invariant — `lowerAt`
     refuses cyclic graphs (with the full loop named) before any lowering
@@ -292,14 +321,14 @@ private def cycleGuardMsg (src dst : String) : String :=
     `lowerModal`. Total: recursion descends the caller-supplied topological
     rank (`rankOf`, built by `lowerAt`); `r` is this node's own rank. -/
 def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (r : Nat) :
-    Except String ModalForest := do
+    BuildM ModalForest := do
   -- An unconnected modal inlet points at `__silence__`; a modal node with no modal
   -- source is a legal, incomplete patch — it compiles to an EMPTY bank (silence),
   -- not an error. (The graceful-silence contract, same as `mix []`.)
   if id == "__silence__" then
-    return silentForest
+    return ← silentForest
   let some pn := g.nodes.find? (·.id == id)
-    | .error s!"lowerModal: node '{id}' not found"
+    | throw s!"lowerModal: node '{id}' not found"
   -- The gated modal recursion (inlined at each site for the WF measure):
   -- `__silence__` short-circuits, a dangling id keeps today's message, and
   -- a rank breach is the dead-by-invariant refusal.
@@ -309,16 +338,16 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
     -- (`clampSigmas` — the uniform-bank clamp; every downstream fold,
     -- partition, gauge, and mix inherits it, so the whole bank saturates
     -- together under knob overdrive). In-span drives are value-identical.
-    let ms := clampSigmas ms
+    let ms ← clampSigmas ms
     match bloom? with
-    | none => .ok #[{
+    | none => pure #[{
         source := .plain ms
         strikeAnchor := a
         realizationClock := clk
         addressNode? := addr
         modeCount? := count }]
     -- a bloomed source starts modal with an EMPTY room; reverbs fold in downstream
-    | some (B, gr) => .ok #[{
+    | some (B, gr) => pure #[{
         source := .bloomed ms B gr
         strikeAnchor := a
         realizationClock := clk
@@ -326,7 +355,7 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
         modeCount? := count }]
   | .modalReverb inId room dir => do
     let lowered ←
-      if inId == "__silence__" then pure silentForest
+      if inId == "__silence__" then silentForest
       else match rankOf inId with
         | none => throw s!"lowerModal: node '{inId}' not found"
         | some ri =>
@@ -337,26 +366,31 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
     -- silent through a reverb; v1, no warning, legal state).
     -- Room unit modes enter clamped (the uniform-bank σ clamp — see
     -- `.modalSource`); in-span drives are value-identical.
-    let room := clampSigmas room
-    let direction := ModalControlRef.constant (dir.map (fun d => d.dir) |>.getD (lit 0))
+    let room ← clampSigmas room
+    let directionSig ← match dir with
+      | some d => pure d.dir
+      | none => lit 0
+    let direction := ModalControlRef.constant directionSig
     let sway? := dir.bind (fun d => d.damp) |>.map fun (sway, rate) =>
       (ModalControlRef.constant sway, ModalControlRef.constant rate)
     let stage : ModalStage := .ordinaryRoom {
-      kernel := .fixed (clampSigmas room)
+      kernel := .fixed room
       direction
       sway? }
     return lowered.map fun branch =>
       { branch with stages := branch.stages.push stage, modeCount? := none }
   | .modalRoom inId build rt60 direction => do
     let lowered ←
-      if inId == "__silence__" then pure silentForest
+      if inId == "__silence__" then silentForest
       else match rankOf inId with
         | none => throw s!"lowerModal: node '{inId}' not found"
         | some ri =>
           if _h : ri < r then lowerModal g rankOf inId ri
           else throw (cycleGuardMsg id inId)
     let stage : ModalStage := .ordinaryRoom {
-      kernel := .controlled rt60 (fun value => clampSigmas (build value))
+      kernel := .controlled rt60 (fun value => do
+        let modes ← build value
+        clampSigmas modes)
       direction
       sway? := none
       normalizeDirectionLevel := true }
@@ -364,7 +398,7 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
       { branch with stages := branch.stages.push stage, modeCount? := none }
   | .modalLinear inId linear => do
     let lowered ←
-      if inId == "__silence__" then pure silentForest
+      if inId == "__silence__" then silentForest
       else match rankOf inId with
         | none => throw s!"lowerModal: node '{inId}' not found"
         | some ri =>
@@ -376,7 +410,7 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
     match linearChainFrom? g dryId wetId with
     | some stages =>
       let dry ←
-        if dryId == "__silence__" then pure silentForest
+        if dryId == "__silence__" then silentForest
         else match rankOf dryId with
           | none => throw s!"lowerModal: node '{dryId}' not found"
           | some ri =>
@@ -387,14 +421,14 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
         { branch with stages := branch.stages.push stage, modeCount? := none }
     | none =>
       let dry ←
-        if dryId == "__silence__" then pure silentForest
+        if dryId == "__silence__" then silentForest
         else match rankOf dryId with
           | none => throw s!"lowerModal: node '{dryId}' not found"
           | some ri =>
             if _h : ri < r then lowerModal g rankOf dryId ri
             else throw (cycleGuardMsg id dryId)
       let wet ←
-        if wetId == "__silence__" then pure silentForest
+        if wetId == "__silence__" then silentForest
         else match rankOf wetId with
           | none => throw s!"lowerModal: node '{wetId}' not found"
           | some ri =>
@@ -408,7 +442,7 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
           { branch with stages := branch.stages.push wetStage, modeCount? := none })
   | .modalGauge inId gExpr => do
     let lowered ←
-      if inId == "__silence__" then pure silentForest
+      if inId == "__silence__" then silentForest
       else match rankOf inId with
         | none => throw s!"lowerModal: node '{inId}' not found"
         | some ri =>
@@ -419,7 +453,7 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
       { branch with stages := branch.stages.push stage }
   | .modalGaugeControl inId control => do
     let lowered ←
-      if inId == "__silence__" then pure silentForest
+      if inId == "__silence__" then silentForest
       else match rankOf inId with
         | none => throw s!"lowerModal: node '{inId}' not found"
         | some ri =>
@@ -432,7 +466,7 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
     match directLinearFactor? g inputs with
     | some (baseId, linear) =>
       let lowered ←
-        if baseId == "__silence__" then pure silentForest
+        if baseId == "__silence__" then silentForest
         else match rankOf baseId with
           | none => throw s!"lowerModal: node '{baseId}' not found"
           | some ri =>
@@ -442,7 +476,7 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
         { branch with stages := branch.stages.push (.linear linear), modeCount? := none }
     | none =>
       let forests ← inputs.mapM fun i =>
-        if i == "__silence__" then pure silentForest
+        if i == "__silence__" then silentForest
         else match rankOf i with
           | none => throw s!"lowerModal: node '{i}' not found"
           | some ri =>
@@ -450,75 +484,98 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
             else throw (cycleGuardMsg id i)
       let parts := forests.foldl (fun acc forest => acc ++ forest) #[]
       if parts.isEmpty then
-        .error s!"modalMix '{id}': no inputs"
+        throw s!"modalMix '{id}': no inputs"
       else
         -- A general modal mix is the authored-order forest constructor.  The
         -- exact shared `x + linear(x)` topology above retains one factor; all
         -- other sums preserve independent branch metadata and order.
-        .ok parts
-  | _ => .error s!"a modal inlet (reverb/modal-mix) needs a modal SOURCE — resonator or modal-mix — but '{id}' is a signal node; a Sig has no poles to compose"
+        pure parts
+  | _ => throw s!"a modal inlet (reverb/modal-mix) needs a modal SOURCE — resonator or modal-mix — but '{id}' is a signal node; a Sig has no poles to compose"
 termination_by r
 decreasing_by all_goals assumption
+
+/-- Resolve a missing control to an arena-owned zero. -/
+private def valueOrZero (values : Array Sig) (cursor : Nat) : BuildM Sig :=
+  match values[cursor]? with
+  | some value => pure value
+  | none => lit 0
 
 /-- Resolve one room's controls in `ModalStage.controls` order. -/
 private def resolveRoomStage (room : OrdinaryRoomStage) (responseClock : Sig)
     (values : Array Sig) (cursor : Nat) :
-    Array ModalMode × Sig × Option Sig × Nat :=
-  let (kernel, cursor) := match room.kernel with
-    | .fixed modes => (modes, cursor)
-    | .controlled _ build => (build ((values[cursor]?).getD (lit 0)), cursor + 1)
-  let direction := clampE ((values[cursor]?).getD (lit 0)) (lit 0) (lit 1)
+    BuildM (Array ModalMode × Sig × Option Sig × Nat) := do
+  let (kernel, cursor) ← match room.kernel with
+    | .fixed modes => pure (modes, cursor)
+    | .controlled _ build => do
+        let value ← valueOrZero values cursor
+        pure (← build value, cursor + 1)
+  let directionValue ← valueOrZero values cursor
+  let zero ← lit 0
+  let one ← lit 1
+  let direction ← clampE directionValue zero one
   let cursor := cursor + 1
-  let (kernel, cursor) := match room.sway? with
-    | none => (kernel, cursor)
-    | some _ =>
-      let sway := clampE ((values[cursor]?).getD (lit 0)) (lit 0) (lit 9 1)
-      let rate := clampE ((values[cursor + 1]?).getD (lit 0)) (lit 0) (lit 8)
-      (Oriented.swayKernel kernel sway rate responseClock, cursor + 2)
+  let (kernel, cursor) ← match room.sway? with
+    | none => pure (kernel, cursor)
+    | some _ => do
+        let swayValue ← valueOrZero values cursor
+        let rateValue ← valueOrZero values (cursor + 1)
+        let zero ← lit 0
+        let swayMax ← lit 9 1
+        let rateMax ← lit 8
+        let sway ← clampE swayValue zero swayMax
+        let rate ← clampE rateValue zero rateMax
+        pure (← Oriented.swayKernel kernel sway rate responseClock, cursor + 2)
   -- Fixed-coordinate qualification of the shipped phaser room gives the
   -- reverse/forward level curve closely enough with `1 + 3.5·d²` (endpoints
-  -- within 0.1 dB, interior within 1.2 dB).  Apply it once after realization,
+  -- within 0.1 dB, interior within 1.2 dB). Apply it once after realization,
   -- never through each modal row, so it costs one multiply and does not deepen
   -- or duplicate the specialized phaser→room graph.
-  let levelGain := if room.normalizeDirectionLevel then
-      some (add (lit 1) (mul (lit 35 1) (mul direction direction)))
-    else none
-  (kernel, direction, levelGain, cursor)
+  let levelGain? ← if room.normalizeDirectionLevel then do
+      let directionSquared ← mul direction direction
+      let scale ← lit 35 1
+      let correction ← mul scale directionSquared
+      pure (some (← add one correction))
+    else
+      pure none
+  pure (kernel, direction, levelGain?, cursor)
 
 private def resolveLinearStage (stage : ModalLinearStage) (responseClock : Sig)
-    (values : Array Sig) (cursor : Nat) : ModalKernelExpr × Nat :=
+    (values : Array Sig) (cursor : Nat) : BuildM (ModalKernelExpr × Nat) := do
   let next := cursor + stage.controls.size
-  (stage.build responseClock (values.extract cursor next), next)
+  pure (← stage.build responseClock (values.extract cursor next), next)
 
 private structure PlainStageState where
   cursor : Nat
   bank : Oriented.Bank
   levelGain? : Option Sig := none
 
-private def combineLevelGain (left right : Option Sig) : Option Sig :=
+private def combineLevelGain (left right : Option Sig) : BuildM (Option Sig) :=
   match left, right with
-  | none, value | value, none => value
-  | some a, some b => some (mul a b)
+  | none, value | value, none => pure value
+  | some a, some b => return some (← mul a b)
 
 private def resolvePlainStageState (initial : PlainStageState)
     (stages : Array ModalStage) (responseClock : Sig) (values : Array Sig) :
-    PlainStageState :=
-  stages.foldl (fun (state : PlainStageState) stage =>
+    BuildM PlainStageState :=
+  stages.foldlM (fun (state : PlainStageState) stage => do
     let cursor := state.cursor
     let bank := state.bank
     match stage with
     | .ordinaryRoom room =>
-      let (kernel, direction, gain?, cursor) :=
+      let (kernel, direction, gain?, cursor) ←
         resolveRoomStage room responseClock values cursor
-      { cursor
-        bank := bank.convolveKernel kernel direction Oriented.syntacticSameSideClassifier
-        levelGain? := combineLevelGain state.levelGain? gain? }
+      let bank ← bank.convolveKernel kernel direction Oriented.syntacticSameSideClassifier
+      let levelGain? ← combineLevelGain state.levelGain? gain?
+      pure { cursor, bank, levelGain? }
     | .linear linear =>
-      let (kernel, cursor) := resolveLinearStage linear responseClock values cursor
-      { state with cursor, bank := kernel.applyGeneric bank }
+      let (kernel, cursor) ← resolveLinearStage linear responseClock values cursor
+      pure { state with cursor, bank := ← kernel.applyGeneric bank }
     | .gauge _ =>
-      let g := clampE ((values[cursor]?).getD (lit 0)) (lit 0) (lit 1)
-      { state with cursor := cursor + 1, bank := bank.gauge g }) initial
+      let value ← valueOrZero values cursor
+      let zero ← lit 0
+      let one ← lit 1
+      let g ← clampE value zero one
+      pure { state with cursor := cursor + 1, bank := ← bank.gauge g }) initial
 
 private inductive PlainTerminal where
   | generic (terminal : Oriented.TerminalBank)
@@ -528,107 +585,124 @@ private inductive PlainTerminal where
 
 private def PlainTerminal.withLevelGain (terminal : PlainTerminal)
     (gain? : Option Sig) : PlainTerminal :=
-  match gain? with | none => terminal | some gain => .scaled gain terminal
+  match gain? with
+  | none => terminal
+  | some gain => .scaled gain terminal
 
 private def PlainTerminal.realizeSig (terminal : PlainTerminal)
-    (clkInt anchorSamples : Sig) (count? : Option Sig) : Sig :=
+    (clkInt anchorSamples : Sig) (count? : Option Sig) : BuildM Sig :=
   match terminal with
   | .generic value => value.realizeSig clkInt anchorSamples count?
   | .factored value => value.realizeSig clkInt anchorSamples
   | .factoredPhaser value => value.realizeSig clkInt anchorSamples
-  | .scaled gain value => mul gain (value.realizeSig clkInt anchorSamples count?)
+  | .scaled gain value => do
+      mul gain (← value.realizeSig clkInt anchorSamples count?)
 
 /-- Fold an authored stage spine after binding the current static universe.  A
     final room uses the stable EC/DD carrier for hot same-side couplings. -/
 private def resolvePlainStages (voice : Array ModalMode) (stages : Array ModalStage)
-    (responseClock : Sig) (values : Array Sig) : PlainTerminal :=
-  let initial : PlainStageState := { cursor := 0, bank := Oriented.Bank.ofFuture voice }
+    (responseClock : Sig) (values : Array Sig) : BuildM PlainTerminal := do
+  let initialBank ← Oriented.Bank.ofFuture voice
+  let initial : PlainStageState := { cursor := 0, bank := initialBank }
   if stages.size == 1 then
     match stages[0]? with
     | some (ModalStage.linear linear) =>
-      let (kernel, _) := resolveLinearStage linear responseClock values 0
+      let (kernel, _) ← resolveLinearStage linear responseClock values 0
       match kernel.dryWetAllpassCascadeShape? with
       | some (tails, mix) =>
-        .generic <| Oriented.TerminalBank.ofBank <| Oriented.Bank.ofFuture
-          (Oriented.decorateDegreeZeroCausalPhaser voice tails mix)
+        let decorated ← Oriented.decorateDegreeZeroCausalPhaser voice tails mix
+        let bank ← Oriented.Bank.ofFuture decorated
+        pure (.generic (Oriented.TerminalBank.ofBank bank))
       | none => match kernel.orientedShape? with
         | some (modes, direction) =>
-          .generic ((Oriented.Bank.ofFuture voice).convolveKernelTerminal modes direction)
-        | none => .generic <| Oriented.TerminalBank.ofBank
-            (kernel.applyGeneric (Oriented.Bank.ofFuture voice))
+          pure (.generic (← initialBank.convolveKernelTerminal modes direction))
+        | none =>
+          let bank ← kernel.applyGeneric initialBank
+          pure (.generic (Oriented.TerminalBank.ofBank bank))
     | some (ModalStage.ordinaryRoom room) =>
-      let (kernel, direction, gain?, _) := resolveRoomStage room responseClock values 0
-      (PlainTerminal.generic ((Oriented.Bank.ofFuture voice).convolveKernelTerminal kernel direction))
+      let (kernel, direction, gain?, _) ← resolveRoomStage room responseClock values 0
+      pure <| (PlainTerminal.generic (← initialBank.convolveKernelTerminal kernel direction))
         |>.withLevelGain gain?
     | _ =>
-      let state := resolvePlainStageState initial stages responseClock values
-      (PlainTerminal.generic <| Oriented.TerminalBank.ofBank state.bank).withLevelGain state.levelGain?
+      let state ← resolvePlainStageState initial stages responseClock values
+      pure <| (PlainTerminal.generic (Oriented.TerminalBank.ofBank state.bank))
+        |>.withLevelGain state.levelGain?
   else if stages.size == 2 then
     match stages[0]?, stages[1]? with
     | some (ModalStage.ordinaryRoom first), some (ModalStage.ordinaryRoom second) =>
-      let (room1, direction1, gain1?, cursor) :=
+      let (room1, direction1, gain1?, cursor) ←
         resolveRoomStage first responseClock values 0
-      let (room2, direction2, gain2?, _) :=
+      let (room2, direction2, gain2?, _) ←
         resolveRoomStage second responseClock values cursor
-      let gain? := combineLevelGain gain1? gain2?
-      match Oriented.factoredTwoRoomTerminal? voice room1 room2 direction1 direction2 with
-      | some terminal => (PlainTerminal.factored terminal).withLevelGain gain?
+      let gain? ← combineLevelGain gain1? gain2?
+      match ← Oriented.factoredTwoRoomTerminal? voice room1 room2 direction1 direction2 with
+      | some terminal => pure <| (PlainTerminal.factored terminal).withLevelGain gain?
       | none =>
-        let bank := (Oriented.Bank.ofFuture voice).convolveKernel room1 direction1
+        let bank ← initialBank.convolveKernel room1 direction1
           Oriented.syntacticSameSideClassifier
-        (PlainTerminal.generic (bank.convolveKernelTerminal room2 direction2)).withLevelGain gain?
+        pure <| (PlainTerminal.generic (← bank.convolveKernelTerminal room2 direction2))
+          |>.withLevelGain gain?
     | some (ModalStage.linear linear), some (ModalStage.ordinaryRoom room) =>
-      let (linearKernel, cursor) := resolveLinearStage linear responseClock values 0
+      let (linearKernel, cursor) ← resolveLinearStage linear responseClock values 0
       match linearKernel.dryWetAllpassCascadeShape? with
       | some (tails, mix) =>
-        let decorated := Oriented.decorateDegreeZeroCausalPhaser voice tails mix
-        let (kernel, direction, gain?, _) :=
+        let decorated ← Oriented.decorateDegreeZeroCausalPhaser voice tails mix
+        let decoratedBank ← Oriented.Bank.ofFuture decorated
+        let (kernel, direction, gain?, _) ←
           resolveRoomStage room responseClock values cursor
-        (PlainTerminal.generic ((Oriented.Bank.ofFuture decorated).convolveKernelTerminal kernel direction))
+        pure <| (PlainTerminal.generic (← decoratedBank.convolveKernelTerminal kernel direction))
           |>.withLevelGain gain?
       | none =>
-        let state := resolvePlainStageState initial stages responseClock values
-        (PlainTerminal.generic <| Oriented.TerminalBank.ofBank state.bank).withLevelGain state.levelGain?
+        let state ← resolvePlainStageState initial stages responseClock values
+        pure <| (PlainTerminal.generic (Oriented.TerminalBank.ofBank state.bank))
+          |>.withLevelGain state.levelGain?
     | _, _ =>
-      let state := resolvePlainStageState initial stages responseClock values
-      (PlainTerminal.generic <| Oriented.TerminalBank.ofBank state.bank).withLevelGain state.levelGain?
+      let state ← resolvePlainStageState initial stages responseClock values
+      pure <| (PlainTerminal.generic (Oriented.TerminalBank.ofBank state.bank))
+        |>.withLevelGain state.levelGain?
   else if stages.size == 3 then
     match stages[0]?, stages[1]?, stages[2]? with
     | some (ModalStage.ordinaryRoom first), some (ModalStage.linear linear),
         some (ModalStage.ordinaryRoom second) =>
-      let (room1, direction1, gain1?, cursor) :=
+      let (room1, direction1, gain1?, cursor) ←
         resolveRoomStage first responseClock values 0
-      let (linearKernel, cursor) := resolveLinearStage linear responseClock values cursor
+      let (linearKernel, cursor) ← resolveLinearStage linear responseClock values cursor
       match linearKernel.dryWetAllpassCascadeShape? with
       | some (tails, mix) =>
-        let (room2, direction2, gain2?, _) :=
+        let (room2, direction2, gain2?, _) ←
           resolveRoomStage second responseClock values cursor
-        let gain? := combineLevelGain gain1? gain2?
-        match Oriented.factoredTwoRoomPhaserTerminal? voice tails room1 room2 mix
+        let gain? ← combineLevelGain gain1? gain2?
+        match ← Oriented.factoredTwoRoomPhaserTerminal? voice tails room1 room2 mix
             direction1 direction2 with
-        | some terminal => (PlainTerminal.factoredPhaser terminal).withLevelGain gain?
+        | some terminal =>
+          pure <| (PlainTerminal.factoredPhaser terminal).withLevelGain gain?
         | none =>
-          let bank := (Oriented.Bank.ofFuture voice).convolveKernel room1 direction1
+          let bank ← initialBank.convolveKernel room1 direction1
             Oriented.syntacticSameSideClassifier
-          (PlainTerminal.generic ((linearKernel.applyGeneric bank).convolveKernelTerminal room2 direction2))
+          let bank ← linearKernel.applyGeneric bank
+          pure <| (PlainTerminal.generic (← bank.convolveKernelTerminal room2 direction2))
             |>.withLevelGain gain?
       | none =>
-        let state := resolvePlainStageState initial stages responseClock values
-        (PlainTerminal.generic <| Oriented.TerminalBank.ofBank state.bank).withLevelGain state.levelGain?
+        let state ← resolvePlainStageState initial stages responseClock values
+        pure <| (PlainTerminal.generic (Oriented.TerminalBank.ofBank state.bank))
+          |>.withLevelGain state.levelGain?
     | _, _, _ =>
-      let state := resolvePlainStageState initial stages responseClock values
-      (PlainTerminal.generic <| Oriented.TerminalBank.ofBank state.bank).withLevelGain state.levelGain?
+      let state ← resolvePlainStageState initial stages responseClock values
+      pure <| (PlainTerminal.generic (Oriented.TerminalBank.ofBank state.bank))
+        |>.withLevelGain state.levelGain?
   else
-  match stages.back? with
-  | some (.ordinaryRoom room) =>
-    let state := resolvePlainStageState initial stages.pop responseClock values
-    let (kernel, direction, gain?, _) :=
-      resolveRoomStage room responseClock values state.cursor
-    (PlainTerminal.generic (state.bank.convolveKernelTerminal kernel direction))
-      |>.withLevelGain (combineLevelGain state.levelGain? gain?)
-  | _ =>
-    let state := resolvePlainStageState initial stages responseClock values
-    (PlainTerminal.generic <| Oriented.TerminalBank.ofBank state.bank).withLevelGain state.levelGain?
+    match stages.back? with
+    | some (.ordinaryRoom room) =>
+      let state ← resolvePlainStageState initial stages.pop responseClock values
+      let (kernel, direction, gain?, _) ←
+        resolveRoomStage room responseClock values state.cursor
+      let gain? ← combineLevelGain state.levelGain? gain?
+      pure <| (PlainTerminal.generic (← state.bank.convolveKernelTerminal kernel direction))
+        |>.withLevelGain gain?
+    | _ =>
+      let state ← resolvePlainStageState initial stages responseClock values
+      pure <| (PlainTerminal.generic (Oriented.TerminalBank.ofBank state.bank))
+        |>.withLevelGain state.levelGain?
 
 /-- The present composable carrier can safely cross one nonterminal room.  A
     second room must remain terminal: making it cross a later room, phaser, or gauge
@@ -648,15 +722,15 @@ private def plainStageSpineAdmitted (stages : Array ModalStage) : Bool := Id.run
     controlled kernel, or gauge requires the oriented Gamma extension and is
     refused as one named unsupported crossing. -/
 private def fixedForwardBloomRooms? (stages : Array ModalStage) :
-    Option (Array (Array ModalMode)) := do
+    BuildM (Option (Array (Array ModalMode))) := do
   let mut rooms := #[]
   for stage in stages do
-    let .ordinaryRoom room := stage | none
-    let .fixed modes := room.kernel | none
-    if room.direction.signalNode?.isSome || room.sway?.isSome then none
-    let .konst direction := room.direction.fallback | none
-    let some value := sigConstF? direction | none
-    if value != 0.0 then none
+    let .ordinaryRoom room := stage | return none
+    let .fixed modes := room.kernel | return none
+    if room.direction.signalNode?.isSome || room.sway?.isSome then return none
+    let .konst direction := room.direction.fallback | return none
+    let some value ← sigConstF? direction | return none
+    if value != 0.0 then return none
     rooms := rooms.push modes
   pure rooms
 
@@ -665,7 +739,7 @@ mutual
     (today's message), and the strict-decrease check that carries the
     whole mutual block's termination. -/
 def lowerInputGated (g : PatchGraph) (rankOf : String → Option Nat)
-    (srcId i : String) (r : Nat) : Except String ArrowTerm := do
+    (srcId i : String) (r : Nat) : BuildM ArrowTerm := do
   match rankOf i with
   | none => throw s!"lower: node '{i}' not found"
   | some ri =>
@@ -677,13 +751,13 @@ termination_by (r, 0)
     is the shared upstream term; a mixer is the sum; `fm` routes its input's signal
     into the carrier's clock. Result is the UNREDUCED downstream term. -/
 def lowerNode (g : PatchGraph) (rankOf : String → Option Nat)
-    (id : String) (r : Nat) : Except String ArrowTerm := do
+    (id : String) (r : Nat) : BuildM ArrowTerm := do
   let some pn := g.nodes.find? (·.id == id)
-    | .error s!"lower: node '{id}' not found"
+    | throw s!"lower: node '{id}' not found"
   match pn.node with
-  | .source v clk => .ok (.gen v id clk)
+  | .source v clk => pure (.gen v id clk)
   | .flange inId back fwd =>
-    return flangeEffectWith back fwd (← lowerInputGated g rankOf id inId r)
+    flangeEffectWith back fwd (← lowerInputGated g rankOf id inId r)
   | .shaper inId f => return .arrUn f (← lowerInputGated g rankOf id inId r)
   | .warpFx inId φ => return .warp φ (← lowerInputGated g rankOf id inId r)
   | .mix inputs => return .sum (← inputs.mapM (lowerInputGated g rankOf id · r))
@@ -692,19 +766,19 @@ def lowerNode (g : PatchGraph) (rankOf : String → Option Nat)
   | .pm inId carrier base depth =>
     return .pmGen carrier id base depth (← lowerInputGated g rankOf id inId r)
   | .sflange inId modId depthSec =>
-    return sweptFlangeEffect (sflangeBack depthSec) (sflangeFwd depthSec)
+    sweptFlangeEffect (sflangeBack depthSec) (sflangeFwd depthSec)
       (← lowerInputGated g rankOf id modId r) (← lowerInputGated g rankOf id inId r)
-  | .knob idx => .ok (.konst (.paramRef ⟨idx⟩))
+  | .knob idx => pure (.konst (← paramRef ⟨idx⟩))
   | .comb inId taps => do
     let s ← lowerInputGated g rankOf id inId r
     return .sum (taps.map fun (w, φ) => .scale w (.warp φ s))
   | .ring inputs => do
     let terms ← inputs.mapM (lowerInputGated g rankOf id · r)
     match terms.toList with
-    | [] => return .konst (lit 0)
+    | [] => pure (.konst (← lit 0))
     | t :: ts => return ts.foldl (fun acc u => .prod acc u) t
   | _ =>
-    .error s!"lower: modal node '{id}' reached Sig lowering — realize via lowerInput"
+    throw s!"lower: modal node '{id}' reached Sig lowering — realize via lowerInput"
 termination_by (r, 1)
 
 /-- Lower an input wire: a modal node realizes its island (pole bank →
@@ -712,7 +786,7 @@ termination_by (r, 1)
     This is the one-directional seam — modal grafts into Sig here, never the
     reverse (a Sig node has no modal input, so lowerModal is never asked for one). -/
 def lowerInput (g : PatchGraph) (rankOf : String → Option Nat)
-    (id : String) (r : Nat) : Except String ArrowTerm := do
+    (id : String) (r : Nat) : BuildM ArrowTerm := do
   if nodeIsModal g id then
     let forest ← lowerModal g rankOf id r
     let terms ← forest.mapM fun modal => do
@@ -725,14 +799,14 @@ def lowerInput (g : PatchGraph) (rankOf : String → Option Nat)
       match modal.source with
       | .plain modes =>
         if !plainStageSpineAdmitted modal.stages then
-          .error s!"lower: nonterminal repeated-room crossing at '{id}' refused (a later room, phaser, or gauge requires the composable divided-difference carrier)"
+          throw s!"lower: nonterminal repeated-room crossing at '{id}' refused (a later room, phaser, or gauge requires the composable divided-difference carrier)"
         else if modal.stages.isEmpty then
           let bare := modalBankTerm modes modal.strikeAnchor modal.realizationClock
             modal.modeCount?
           match modal.addressNode? with
-          | none => .ok bare
+          | none => pure bare
           | some addrId =>
-            .ok (.swarp modalAddrWarp
+            pure (.swarp modalAddrWarp
               (← lowerInputGated g rankOf id addrId r) bare)
         else
           -- The address warp is confined to the response-clock child. Control
@@ -744,42 +818,42 @@ def lowerInput (g : PatchGraph) (rankOf : String → Option Nat)
             | some addrId => pure (.swarp modalAddrWarp
                 (← lowerInputGated g rankOf id addrId r)
                 (.clk modal.realizationClock))
-          .ok (.arrN (fun inputs =>
+          pure (.arrN (fun inputs => do
             let responseClock := (inputs[0]?).getD modal.realizationClock
             let values := inputs.extract 1 inputs.size
-            let bank := resolvePlainStages modes modal.stages responseClock values
+            let bank ← resolvePlainStages modes modal.stages responseClock values
             bank.realizeSig responseClock modal.strikeAnchor modal.modeCount?)
             (#[response] ++ controlTerms))
       | .bloomed voice B gr =>
         let hasLinear := modal.stages.any fun stage => stage matches .linear _
         if hasLinear then
-          .error s!"lower: bloomed linear-kernel crossing at '{id}' refused (the live linear/Gamma crossing is not implemented)"
+          throw s!"lower: bloomed linear-kernel crossing at '{id}' refused (the live linear/Gamma crossing is not implemented)"
         else
-        let term ← match fixedForwardBloomRooms? modal.stages with
+        let term ← match ← fixedForwardBloomRooms? modal.stages with
           | none =>
-            .error s!"lower: bloomed stage crossing at '{id}' refused (live room-kernel direction/sway or gauge requires the oriented Gamma bridge)"
+            throw s!"lower: bloomed stage crossing at '{id}' refused (live room-kernel direction/sway or gauge requires the oriented Gamma bridge)"
           | some rooms =>
             if rooms.isEmpty then
-              .ok (ArrowTerm.warp (bloomWarpClock modal.strikeAnchor B gr)
+              pure (ArrowTerm.warp (bloomWarpClock modal.strikeAnchor B gr)
                 (modalBankTerm voice modal.strikeAnchor modal.realizationClock modal.modeCount?))
             else
-              let folded := foldRoomsEC rooms[0]! (rooms.extract 1 rooms.size)
-              let composed := bloomComposeChecked voice folded B gr
+              let folded ← foldRoomsEC rooms[0]! (rooms.extract 1 rooms.size)
+              let composed ← bloomComposeChecked voice folded B gr
               if composed.isComplete then
-                .ok (bloomComposedTerm composed.pairs modal.strikeAnchor modal.realizationClock)
+                pure (bloomComposedTerm composed.pairs modal.strikeAnchor modal.realizationClock)
               else
-                .error s!"lower: bloomed room crossing at '{id}' refused ({composed.refusalSummary})"
+                throw s!"lower: bloomed room crossing at '{id}' refused ({composed.refusalSummary})"
         match modal.addressNode? with
-        | none => .ok term
+        | none => pure term
         | some addrId =>
-          .ok (.swarp modalAddrWarp
+          pure (.swarp modalAddrWarp
             (← lowerInputGated g rankOf id addrId r) term)
     -- Keep every pre-forest singleton plan structurally identical. Forests with
     -- multiple branches cross once as a stable authored-order signal sum.
     match terms.toList with
-    | [] => .ok (.sum #[])
-    | [term] => .ok term
-    | _ => .ok (.sum terms)
+    | [] => pure (.sum #[])
+    | [term] => pure term
+    | _ => pure (.sum terms)
   else lowerNode g rankOf id r
 termination_by (r, 2)
 end
@@ -789,7 +863,7 @@ end
     and it covers every caller — hand-built `PatchGraph`s included, which
     used to bypass the playground's separate pre-pass), then lowers with
     the Kahn rank as the termination measure. -/
-def lowerAt (g : PatchGraph) (rootId : String) : Except String ArrowTerm := do
+def lowerAt (g : PatchGraph) (rootId : String) : BuildM ArrowTerm := do
   let ids := g.nodes.map (·.id)
   let deps : Array (Array Nat) := g.nodes.map fun pn =>
     pn.node.inputIds.filterMap ids.idxOf?
@@ -804,6 +878,6 @@ def lowerAt (g : PatchGraph) (rootId : String) : Except String ArrowTerm := do
 /-- Lower a whole patch to its (downstream, unreduced) arrow term. The output may
     be a modal island (realized at the tap) or a Sig graph. Compose with
     `normalize` (the slide), then `emitTerm`. -/
-def lowerGraph (g : PatchGraph) : Except String ArrowTerm := lowerAt g g.output
+def lowerGraph (g : PatchGraph) : BuildM ArrowTerm := lowerAt g g.output
 
 end Tropical.EmitArrow

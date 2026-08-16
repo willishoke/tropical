@@ -1,4 +1,4 @@
-import Tropical.Semantics.Sig
+import Tropical.Semantics.Environment
 import Std.Data.HashMap.Lemmas
 
 /-!

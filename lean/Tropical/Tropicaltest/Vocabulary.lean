@@ -1,4 +1,6 @@
 import Tropical.Tropicaltest.BanksStaging
+import Tropical.Playground.Decode
+import Tropical.Playground.DecodeMetadata
 
 /-!
 # Tropical.Tropicaltest.Vocabulary
@@ -9,6 +11,9 @@ The vocabulary contract gates: dead-slot lint (every param slot is read), the se
 open Tropical
 open Tropical.Plan
 open Tropical.Ir (Arena ProgramIdx)
+open Tropical.Playground.Metadata
+open Tropical.EmitArrow
+open Tropical.Testing.ArrowFixtures
 
 -- ── THE DEAD-SLOT LINT ─────────────────────────────────────────────────────
 /-- Module-slot indices READ by an instance function: every `.slot` operand of
@@ -181,12 +186,26 @@ def runVocabDriven (arena : Arena)
     (2) the three kind lists are mutually consistent — every served (non-`out`) and
     withheld kind is BUILT, and every built kind is served-or-withheld — so
     `buildNode` cannot grow a kind the vocabulary/withholding machinery misses. -/
-def runModalClassAgreement : IO Bool := do
-  let vocab    := Tropical.Playground.vocabularyKinds
-  let built    := Tropical.Playground.buildNodeKinds
-  let withheld := Tropical.Playground.withheldKinds
-  let hierarchyAtoms := Tropical.Playground.hierarchyAtomKinds
-  let drift    := Tropical.Playground.modalClassificationDrift          -- over `built`
+def runModalClassAgreement (arena : Arena) : IO Bool := do
+  let vocab    := vocabularyKinds
+  let built    := buildNodeKinds
+  let withheld := withheldKinds
+  let hierarchyAtoms := hierarchyAtomKinds
+  let drift ← match runBuild arena do
+      let empty := Lean.Json.mkObj []
+      let mut drift : Array String := #[]
+      for kind in built do
+        let (node, extras) ← Tropical.Playground.Compiler.buildNode
+          (fun _ => none) "n" kind empty empty empty
+        let graph : PatchGraph := {
+          nodes := #[{ id := "n", node := node }] ++ extras
+          output := "n" }
+        if nodeIsModal graph "n" != (outletOf kind == some .modal) then
+          drift := drift.push kind
+      pure drift with
+    | .error error =>
+      return ← failGate "modal-class-agreement" s!"native buildNode probe: {error}"
+    | .ok (_, drift) => pure drift
   let servedDrift   := drift.filter (fun k => !withheld.contains k)
   let withheldDrift := drift.filter (fun k => withheld.contains k)
   -- list-consistency: served/withheld ⊆ built, built ⊆ served ∪ withheld
@@ -211,43 +230,51 @@ open Tropical.Playground in
     typed in the lowering. Signal ports synthesize an authored-order `.mix`,
     modal ports synthesize an authored-order `.modalMix`, singleton inputs keep
     their historical graph, and non-`in` controls remain exclusive. -/
-def runImplicitFanIn : IO Bool := do
+def runImplicitFanIn (arena : Arena) : IO Bool := do
   let empty := Lean.Json.mkObj []
   let pair := Lean.Json.mkObj
     [("in", Lean.Json.arr #[.str "a", .str "b"])]
   let single := Lean.Json.mkObj
     [("in", Lean.Json.arr #[.str "a"])]
   let noParams : String → Option Nat := fun _ => none
+  let built ← match runBuild arena do
+      let (delayNode, delayExtras) ←
+        Tropical.Playground.Compiler.buildNode noParams
+          "delayN" "delay" empty empty pair
+      let signalHelperId := "__fanin_signal_delayN_in"
+      let signalNodeOk := match delayNode with
+        | .warpFx input _ => input == signalHelperId
+        | _ => false
+      let signalHelperOk := match delayExtras[0]? with
+        | some helper => helper.id == signalHelperId && match helper.node with
+          | .mix inputs => inputs == #["a", "b"]
+          | _ => false
+        | none => false
 
-  let (delayNode, delayExtras) :=
-    buildNode noParams "delayN" "delay" empty empty pair
-  let signalHelperId := "__fanin_signal_delayN_in"
-  let signalNodeOk := match delayNode with
-    | .warpFx input _ => input == signalHelperId
-    | _ => false
-  let signalHelperOk := match delayExtras[0]? with
-    | some helper => helper.id == signalHelperId && match helper.node with
-      | .mix inputs => inputs == #["a", "b"]
-      | _ => false
-    | none => false
+      let (phaserNode, phaserExtras) ←
+        Tropical.Playground.Compiler.buildNode noParams
+          "phaserN" "phaser" empty empty pair
+      let modalHelperId := "__fanin_modal_phaserN_in"
+      let modalNodeOk := match phaserNode with
+        | .modalBlend dry _ _ => dry == modalHelperId
+        | _ => false
+      let modalHelperOk := match phaserExtras[0]? with
+        | some helper => helper.id == modalHelperId && match helper.node with
+          | .modalMix inputs => inputs == #["a", "b"]
+          | _ => false
+        | none => false
 
-  let (phaserNode, phaserExtras) :=
-    buildNode noParams "phaserN" "phaser" empty empty pair
-  let modalHelperId := "__fanin_modal_phaserN_in"
-  let modalNodeOk := match phaserNode with
-    | .modalBlend dry _ _ => dry == modalHelperId
-    | _ => false
-  let modalHelperOk := match phaserExtras[0]? with
-    | some helper => helper.id == modalHelperId && match helper.node with
-      | .modalMix inputs => inputs == #["a", "b"]
-      | _ => false
-    | none => false
-
-  let (singleNode, singleExtras) :=
-    buildNode noParams "singleN" "delay" empty empty single
-  let singletonOk := singleExtras.isEmpty && match singleNode with
-    | .warpFx input _ => input == "a"
-    | _ => false
+      let (singleNode, singleExtras) ←
+        Tropical.Playground.Compiler.buildNode noParams
+          "singleN" "delay" empty empty single
+      let singletonOk := singleExtras.isEmpty && match singleNode with
+        | .warpFx input _ => input == "a"
+        | _ => false
+      pure (signalNodeOk && signalHelperOk,
+        modalNodeOk && modalHelperOk, singletonOk) with
+    | .error error => return ← failGate "implicit-fan-in" s!"native buildNode probe: {error}"
+    | .ok (_, checks) => pure checks
+  let (signalOk, modalOk, singletonOk) := built
 
   let implicitKinds :=
     #["comb", "flange", "sflange", "fm", "delay", "reverse",
@@ -276,14 +303,13 @@ def runImplicitFanIn : IO Bool := do
     | .error e => (e.splitOn "accepts one source").length > 1
     | .ok _ => false
 
-  let ok := signalNodeOk && signalHelperOk && modalNodeOk && modalHelperOk &&
-    singletonOk && servedMultiOk && exclusiveOk && exclusiveRejected
-  IO.println s!"        signal helper={signalNodeOk && signalHelperOk} · modal helper={modalNodeOk && modalHelperOk} · singleton identity={singletonOk}"
+  let ok := signalOk && modalOk && singletonOk && servedMultiOk && exclusiveOk && exclusiveRejected
+  IO.println s!"        signal helper={signalOk} · modal helper={modalOk} · singleton identity={singletonOk}"
   IO.println s!"        ordinary inlets multi={servedMultiOk} · control/address/modulation ports exclusive={exclusiveOk}/{exclusiveRejected}"
   if ok then
     passGate "implicit-fan-in" "ordinary signal/modal inlets synthesize ordered typed fan-in; singleton graphs stay identical; controls, addresses, and modulators remain exclusive"
   else
-    failGate "implicit-fan-in" s!"signal={signalNodeOk}/{signalHelperOk} modal={modalNodeOk}/{modalHelperOk} singleton={singletonOk} servedMulti={servedMultiOk} exclusive={exclusiveOk}/{exclusiveRejected}"
+    failGate "implicit-fan-in" s!"signal={signalOk} modal={modalOk} singleton={singletonOk} servedMulti={servedMultiOk} exclusive={exclusiveOk}/{exclusiveRejected}"
 
 /-- THE MALFORMED-DOCUMENT REJECTION gate (Findings 1 & 3). A malformed patch is a
     BROKEN document — distinct from a legal-incomplete one (an unwired inlet →

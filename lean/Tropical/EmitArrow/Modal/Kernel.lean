@@ -48,32 +48,40 @@ instance : Inhabited ModalKernelExpr := ⟨.identity⟩
     returns only generic kernel topology; effect names do not survive here. -/
 structure ModalLinearStage where
   controls : Array ModalControlRef := #[]
-  build : Sig → Array Sig → ModalKernelExpr
+  build : Sig → Array Sig → BuildM ModalKernelExpr
 
 private def ModalProperKernel.applyGeneric (kernel : ModalProperKernel)
-    (input : Oriented.Bank) : Oriented.Bank :=
+    (input : Oriented.Bank) : BuildM Oriented.Bank :=
   match kernel with
   | .oriented modes direction =>
       input.convolveKernel modes direction Oriented.syntacticSameSideClassifier
   | .causalTail tail =>
-      input.convolveKernel #[tail] (lit 0) Oriented.syntacticSameSideClassifier
+      do
+        let zero ← lit 0
+        input.convolveKernel #[tail] zero Oriented.syntacticSameSideClassifier
 
 /-- Literal reference interpretation.  This may expand parallel products and
     is therefore reserved for small or oracle shapes; production terminals
     inspect the retained factors first. -/
-def ModalKernelExpr.applyGeneric (input : Oriented.Bank) : ModalKernelExpr → Oriented.Bank
-  | .identity => input
+def ModalKernelExpr.applyGeneric (input : Oriented.Bank) : ModalKernelExpr → BuildM Oriented.Bank
+  | .identity => pure input
   | .proper kernel => kernel.applyGeneric input
-  | .scale value kernel =>
-      (kernel.applyGeneric input).scale (value, lit 0)
-  | .parallel kernels =>
-      kernels.attach.foldl (fun total kernel =>
-        total.add (kernel.1.applyGeneric input)) {}
-  | .cascade kernels =>
-      kernels.attach.foldl (fun value kernel =>
+  | .scale value kernel => do
+      let bank ← kernel.applyGeneric input
+      let zero ← lit 0
+      bank.scale (value, zero)
+  | .parallel kernels => do
+      let zeroBank ← Oriented.Bank.ofFuture #[]
+      kernels.attach.foldlM (fun total kernel => do
+        let branch ← kernel.1.applyGeneric input
+        total.add branch) zeroBank
+  | .cascade kernels => do
+      kernels.attach.foldlM (fun value kernel =>
         kernel.1.applyGeneric value) input
-  | .blend mix dry wet =>
-      Oriented.Bank.blend (dry.applyGeneric input) (wet.applyGeneric input) mix
+  | .blend mix dry wet => do
+      let dryBank ← dry.applyGeneric input
+      let wetBank ← wet.applyGeneric input
+      Oriented.Bank.blend dryBank wetBank mix
 termination_by kernel => sizeOf kernel
 decreasing_by
   all_goals first
@@ -120,36 +128,46 @@ def ModalKernelExpr.orientedShape? : ModalKernelExpr → Option (Array ModalMode
     any control early.  Their control bundles remain in authored stage order. -/
 def ModalLinearStage.cascade (stages : Array ModalLinearStage) : ModalLinearStage where
   controls := stages.foldl (fun out stage => out ++ stage.controls) #[]
-  build := fun response values =>
-    let (_, kernels) := stages.foldl (fun (state : Nat × Array ModalKernelExpr) stage =>
+  build := fun response values => do
+    let (_, kernels) ← stages.foldlM (fun (state : Nat × Array ModalKernelExpr) stage => do
       let cursor := state.1
       let next := cursor + stage.controls.size
-      (next, state.2.push (stage.build response (values.extract cursor next)))) (0, #[])
-    .cascade kernels
+      let kernel ← stage.build response (values.extract cursor next)
+      pure (next, state.2.push kernel)) (0, #[])
+    pure (.cascade kernels)
 
 /-- The topology `x + proper(x)` represented as one retained kernel factor. -/
 def ModalLinearStage.withDirect (stage : ModalLinearStage) : ModalLinearStage where
   controls := stage.controls
-  build := fun response values =>
-    .parallel #[.identity, stage.build response values]
+  build := fun response values => do
+    let kernel ← stage.build response values
+    pure (.parallel #[.identity, kernel])
 
 /-- Scale the complete input value by one deferred control. -/
 def ModalLinearStage.scale (control : ModalControlRef)
     (complement : Bool := false) : ModalLinearStage where
   controls := #[control]
-  build := fun _ values =>
-    let value := (values[0]?).getD (lit 0)
-    .scale (if complement then sub (lit 1) value else value) .identity
+  build := fun _ values => do
+    let value ← match values[0]? with
+      | some value => pure value
+      | none => lit 0
+    let value ← if complement then do
+      let one ← lit 1
+      sub one value
+    else pure value
+    pure (.scale value .identity)
 
 /-- Put an independently authored wet stage chain beside its untouched input. -/
 def ModalLinearStage.dryWet (stages : Array ModalLinearStage)
     (mix : ModalControlRef) : ModalLinearStage :=
   let wet := ModalLinearStage.cascade stages
   { controls := wet.controls.push mix
-    build := fun response values =>
+    build := fun response values => do
       let wetCount := wet.controls.size
-      let wetKernel := wet.build response (values.extract 0 wetCount)
-      let mixValue := (values[wetCount]?).getD (lit 0)
-      .blend mixValue .identity wetKernel }
+      let wetKernel ← wet.build response (values.extract 0 wetCount)
+      let mixValue ← match values[wetCount]? with
+        | some value => pure value
+        | none => lit 0
+      pure (.blend mixValue .identity wetKernel) }
 
 end Tropical.EmitArrow

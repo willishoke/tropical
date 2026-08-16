@@ -1,181 +1,111 @@
 import Tropical.EmitArrow.Modal.Residue
 
 /-!
-# Per-kernel oriented modal convolution
+# Arena-native per-kernel oriented modal convolution
 
-This module records the algebra required when a room's direction orients only
-that room kernel.  It is deliberately independent of patch lowering: a caller
-convolves the already-oriented prefix with the future/past pieces of the next
-room instead of attaching one direction to the complete prefix.
-
-The formulas below are for complex analytic atoms.  Conjugate completion and
-taking the real part remain the surrounding `ModalMode` convention.  For a
-decaying pole `lam`, amplitude `a`, and degree `p`, write
-
-```text
-F(lam,a,p)(t) = 1_{t>0} a t^p exp(lam t)
-P(lam,a,p)(t) = 1_{t<0} a (-t)^p exp(-lam t).
-```
-
-Both use the same left-half-plane physical pole.  `P` is the exact time mirror
-of `F`.  Axis gates are strict, matching modal realization.  A convolution of
-oppositely oriented atoms is nevertheless generally nonzero at exactly zero,
-so `Expansion.atZero` carries that value explicitly.
-
-For two same-side atoms, put `delta = lam - nu`, `m = p+1`, and `n = q+1`.
-When `delta != 0`, partial fractions give, for `0 <= r <= p`,
-
-```text
- [F/P lam,r] : a*b*p!*q!*(-1)^(p-r)*choose(q+p-r,p-r)
-               / (r!*delta^(q+p-r+1))
-```
-
-and, for `0 <= s <= q`,
-
-```text
- [F/P nu,s]  : a*b*p!*q!*(-1)^(p+1)*choose(p+q-s,q-s)
-               / (s!*delta^(p+q-s+1)).
-```
-
-At `lam = nu` the finite beta-function limit is the single atom
-
-```text
- a*b*p!*q!/(p+q+1)! * F/P(lam, p+q+1).
-```
-
-For `F(lam,a,p) * P(nu,b,q)`, let `rho = -(lam+nu)`.  Stable physical poles
-make `Re rho > 0`, so this mixed case has no admissible coincident-pole
-singularity.  Its future arm has, for `0 <= i <= p`,
-
-```text
- [F lam,p-i] : a*b*choose(p,i)*(q+i)! / rho^(q+i+1),
-```
-
-its past arm has, for `0 <= j <= q`,
-
-```text
- [P nu,q-j]  : a*b*choose(q,j)*(p+j)! / rho^(p+j+1),
-```
-
-and both one-sided limits agree at
-`a*b*(p+q)!/rho^(p+q+1)`.  `P*F` is this formula with the operands swapped.
+The modal carrier remains factored by future and past support.  Scalar
+construction is sequenced in `BuildM`; topology, degrees, and route choices
+remain pure and retain authored order.
 -/
 
 namespace Tropical.EmitArrow.Oriented
 
 open Tropical.Ir
 
-/-- Which strict half-axis supports an analytic modal atom. -/
 inductive Orientation where
   | future
   | past
 deriving BEq, Repr
 
-/-- One analytic exponential-polynomial atom.  `pole` is always the physical
-decaying pole: the past interpretation negates it in the exponential. -/
 structure Atom where
   pole : CplxE
   amp : CplxE
   deg : Nat := 0
 
-/-- An atom with its half-axis support attached. -/
 structure DirectedAtom extends Atom where
   orientation : Orientation
 
-/-- A two-sided convolution result.  The arrays are evaluated only on their
-strict half-axes; `atZero` is the exact point value. -/
 structure Expansion where
   future : Array Atom := #[]
   past : Array Atom := #[]
-  atZero : CplxE := (lit 0, lit 0)
+  atZero : CplxE
 
-/-- Production-facing oriented carrier.  It deliberately keeps the two axes
-separate because a later room must convolve against both, not realize the
-prefix and direction-crossfade it as one signal. -/
 structure Bank where
   future : Array ModalMode := #[]
   past : Array ModalMode := #[]
-  atZero : CplxE := (lit 0, lit 0)
+  atZero : CplxE
 
-/-- The caller's certified route for a same-side pole pair.  The `.distinct`
-route requires `lam - nu != 0`; `.coincident` requires `lam = nu`.  Keeping the
-certificate outside `CplxE` is intentional: live `Sig` expressions cannot be
-soundly classified by syntactic equality. -/
 inductive SameSideRoute where
   | distinct
   | coincident
 deriving BEq, Repr
 
-/-- Embed an exact natural scalar as a complex `Sig` expression. -/
-def natE (n : Nat) : CplxE := (lit (Int.ofNat n), lit 0)
+def natE (n : Nat) : BuildM CplxE := do
+  let value ← lit (Int.ofNat n)
+  let zero ← lit 0
+  pure (value, zero)
 
-/-- Exact natural factorial; kept local because the project intentionally does
-not depend on a general-purpose mathematics library. -/
 def factorial : Nat → Nat
   | 0 => 1
   | n + 1 => (n + 1) * factorial n
 
-/-- Exact binomial coefficient, with `choose n k = 0` for `k > n`. -/
 def choose : Nat → Nat → Nat
   | _, 0 => 1
   | 0, _ + 1 => 0
   | n + 1, k + 1 => choose n k + choose n (k + 1)
 
-/-- Complex exponentiation by a small natural degree. -/
-def cpowE (base : CplxE) : Nat → CplxE
+def cpowE (base : CplxE) : Nat → BuildM CplxE
   | 0 => natE 1
-  | n + 1 => cmulE (cpowE base n) base
+  | n + 1 => do
+      let power ← cpowE base n
+      cmulE power base
 
-/-- Scale an amplitude by an exact signed natural divided by
-`factorial * pole^power`. -/
 def scaledPoleQuotient (amp : CplxE) (numerator factorial : Nat)
-    (pole : CplxE) (power : Nat) (negative : Bool := false) : CplxE :=
-  let signed := if negative then cnegE (natE numerator) else natE numerator
-  cdivE (cmulE amp signed) (cmulE (natE factorial) (cpowE pole power))
+    (pole : CplxE) (power : Nat) (negative : Bool := false) : BuildM CplxE := do
+  let numerator ← natE numerator
+  let signed ← if negative then cnegE numerator else pure numerator
+  let scaledAmp ← cmulE amp signed
+  let factorial ← natE factorial
+  let polePower ← cpowE pole power
+  let denominator ← cmulE factorial polePower
+  cdivE scaledAmp denominator
 
-/-- Scale an amplitude by an exact rational natural. -/
-def scaledNatQuotient (amp : CplxE) (numerator denominator : Nat) : CplxE :=
-  cdivE (cmulE amp (natE numerator)) (natE denominator)
+def scaledNatQuotient (amp : CplxE) (numerator denominator : Nat) : BuildM CplxE := do
+  let numerator ← natE numerator
+  let scaled ← cmulE amp numerator
+  let denominator ← natE denominator
+  cdivE scaled denominator
 
-/-- View an existing modal mode as an analytic atom.  Admission/range metadata
-is intentionally not copied: this module states algebra, not a lowering route. -/
-def Atom.ofMode (mode : ModalMode) : Atom :=
-  { pole := mode.poleE, amp := mode.ampE, deg := mode.deg }
+def Atom.ofMode (mode : ModalMode) : BuildM Atom := do
+  pure { pole := ← mode.poleE, amp := mode.ampE, deg := mode.deg }
 
-/-- Return an analytic atom to the existing rectangular carrier. -/
-def Atom.toMode (atom : Atom) : ModalMode :=
+def Atom.toMode (atom : Atom) : BuildM ModalMode :=
   modeOfE atom.pole atom.amp atom.deg
 
-/-- A source/modal prefix starts on the future axis. -/
-def Bank.ofFuture (modes : Array ModalMode) : Bank :=
-  { future := modes }
+def Bank.ofFuture (modes : Array ModalMode) : BuildM Bank := do
+  let zero ← natE 0
+  pure { future := modes, atZero := zero }
 
-/-- Multiply a mode's analytic amplitude while preserving its pole, degree,
-and admission metadata. -/
-def scaleModeAmp (scale : CplxE) (mode : ModalMode) : ModalMode :=
-  let amp := cmulE mode.ampE scale
-  { mode with cre := amp.1, cim := amp.2 }
+def scaleModeAmp (scale : CplxE) (mode : ModalMode) : BuildM ModalMode := do
+  let amp ← cmulE mode.ampE scale
+  pure { mode with cre := amp.1, cim := amp.2 }
 
-/-- Orient only this kernel: `(1-direction)` scales its future half and
-`direction` scales its past half.  No prefix direction is stored or replaced. -/
-def Bank.kernel (modes : Array ModalMode) (direction : Sig) : Bank :=
-  let futureWeight : CplxE := (sub (lit 1) direction, lit 0)
-  let pastWeight : CplxE := (direction, lit 0)
-  { future := modes.map (scaleModeAmp futureWeight)
-    past := modes.map (scaleModeAmp pastWeight) }
+def Bank.kernel (modes : Array ModalMode) (direction : Sig) : BuildM Bank := do
+  let one ← lit 1
+  let forward ← sub one direction
+  let zero ← lit 0
+  let future ← modes.mapM (scaleModeAmp (forward, zero))
+  let past ← modes.mapM (scaleModeAmp (direction, zero))
+  pure { future, past, atZero := (zero, zero) }
 
-/-- Split one room atom into the two pieces selected by its own direction
-control.  Applying this to each room at its convolution step is the local-room
-orientation contract. -/
-def Atom.orientKernel (atom : Atom) (direction : Sig) : Array DirectedAtom :=
-  let forwardWeight : CplxE := (sub (lit 1) direction, lit 0)
-  let pastWeight : CplxE := (direction, lit 0)
-  #[{ atom with
-        amp := cmulE atom.amp forwardWeight
-        orientation := .future },
-    { atom with
-        amp := cmulE atom.amp pastWeight
-        orientation := .past }]
+def Atom.orientKernel (atom : Atom) (direction : Sig) : BuildM (Array DirectedAtom) := do
+  let one ← lit 1
+  let forward ← sub one direction
+  let zero ← lit 0
+  let futureAmp ← cmulE atom.amp (forward, zero)
+  let pastAmp ← cmulE atom.amp (direction, zero)
+  pure #[{ atom with amp := futureAmp, orientation := .future },
+    { atom with amp := pastAmp, orientation := .past }]
 
 private def onSide (orientation : Orientation) (atoms : Array Atom)
     (atZero : CplxE) : Expansion :=
@@ -183,184 +113,174 @@ private def onSide (orientation : Orientation) (atoms : Array Atom)
   | .future => { future := atoms, atZero }
   | .past => { past := atoms, atZero }
 
-/-- Sum two analytic expansions in stable left-to-right atom order. -/
-def Expansion.add (left right : Expansion) : Expansion :=
-  { future := left.future ++ right.future
-    past := left.past ++ right.past
-    atZero := caddE left.atZero right.atZero }
+def Expansion.add (left right : Expansion) : BuildM Expansion := do
+  let atZero ← caddE left.atZero right.atZero
+  pure { future := left.future ++ right.future, past := left.past ++ right.past, atZero }
 
-/-- Flatten analytic atoms into the production rectangular carrier. -/
-def Expansion.toBank (expansion : Expansion) : Bank :=
-  { future := expansion.future.map Atom.toMode
-    past := expansion.past.map Atom.toMode
-    atZero := expansion.atZero }
+def Expansion.toBank (expansion : Expansion) : BuildM Bank := do
+  let future ← expansion.future.mapM Atom.toMode
+  let past ← expansion.past.mapM Atom.toMode
+  pure { future, past, atZero := expansion.atZero }
 
-/-- Distinct-pole `FF` or `PP` convolution in finite partial-fraction form. -/
 def convolveSameSideDistinct (orientation : Orientation) (left right : Atom) :
-    Expansion :=
+    BuildM Expansion := do
   let p := left.deg
   let q := right.deg
-  let ab := cmulE left.amp right.amp
-  let delta := csubE left.pole right.pole
-  let atLeft := (Array.range (p + 1)).map fun r =>
+  let ab ← cmulE left.amp right.amp
+  let delta ← csubE left.pole right.pole
+  let atLeft ← (Array.range (p + 1)).mapM fun r => do
     let distance := p - r
-    let numerator :=
-      factorial p * factorial q * choose (q + p - r) distance
-    let amp := scaledPoleQuotient ab numerator (factorial r) delta
+    let numerator := factorial p * factorial q * choose (q + p - r) distance
+    let amp ← scaledPoleQuotient ab numerator (factorial r) delta
       (q + p - r + 1) (distance % 2 == 1)
-    ({ pole := left.pole, amp, deg := r } : Atom)
-  let atRight := (Array.range (q + 1)).map fun s =>
+    pure ({ pole := left.pole, amp, deg := r } : Atom)
+  let atRight ← (Array.range (q + 1)).mapM fun s => do
     let distance := q - s
-    let numerator :=
-      factorial p * factorial q * choose (p + q - s) distance
-    let amp := scaledPoleQuotient ab numerator (factorial s) delta
+    let numerator := factorial p * factorial q * choose (p + q - s) distance
+    let amp ← scaledPoleQuotient ab numerator (factorial s) delta
       (p + q - s + 1) ((p + 1) % 2 == 1)
-    ({ pole := right.pole, amp, deg := s } : Atom)
-  onSide orientation (atLeft ++ atRight) (natE 0)
+    pure ({ pole := right.pole, amp, deg := s } : Atom)
+  let zero ← natE 0
+  pure (onSide orientation (atLeft ++ atRight) zero)
 
-/-- Coincident-pole beta-function limit of `FF` or `PP`.  The caller certifies
-that the two physical poles are equal. -/
 def convolveSameSideCoincident (orientation : Orientation)
-    (left right : Atom) : Expansion :=
+    (left right : Atom) : BuildM Expansion := do
   let p := left.deg
   let q := right.deg
-  let ab := cmulE left.amp right.amp
-  let amp := scaledNatQuotient ab (factorial p * factorial q)
+  let ab ← cmulE left.amp right.amp
+  let amp ← scaledNatQuotient ab (factorial p * factorial q)
     (factorial (p + q + 1))
-  onSide orientation #[{ pole := left.pole, amp, deg := p + q + 1 }] (natE 0)
+  let zero ← natE 0
+  pure (onSide orientation #[{ pole := left.pole, amp, deg := p + q + 1 }] zero)
 
-/-- Certified same-side dispatch. -/
 def convolveSameSide (route : SameSideRoute) (orientation : Orientation)
-    (left right : Atom) : Expansion :=
+    (left right : Atom) : BuildM Expansion :=
   match route with
   | .distinct => convolveSameSideDistinct orientation left right
   | .coincident => convolveSameSideCoincident orientation left right
 
-/-- Exact mixed `F * P` expansion.  For stable physical poles,
-`rho = -(lam + nu)` has positive real part and every improper integral
-converges. -/
-def convolveFuturePast (future past : Atom) : Expansion :=
+def convolveFuturePast (future past : Atom) : BuildM Expansion := do
   let p := future.deg
   let q := past.deg
-  let ab := cmulE future.amp past.amp
-  let rho := cnegE (caddE future.pole past.pole)
-  let futureTerms := (Array.range (p + 1)).map fun i =>
+  let ab ← cmulE future.amp past.amp
+  let poleSum ← caddE future.pole past.pole
+  let rho ← cnegE poleSum
+  let futureTerms ← (Array.range (p + 1)).mapM fun i => do
     let numerator := choose p i * factorial (q + i)
-    let amp := scaledPoleQuotient ab numerator 1 rho (q + i + 1)
-    ({ pole := future.pole, amp, deg := p - i } : Atom)
-  let pastTerms := (Array.range (q + 1)).map fun j =>
+    let amp ← scaledPoleQuotient ab numerator 1 rho (q + i + 1)
+    pure ({ pole := future.pole, amp, deg := p - i } : Atom)
+  let pastTerms ← (Array.range (q + 1)).mapM fun j => do
     let numerator := choose q j * factorial (p + j)
-    let amp := scaledPoleQuotient ab numerator 1 rho (p + j + 1)
-    ({ pole := past.pole, amp, deg := q - j } : Atom)
-  let atZero := scaledPoleQuotient ab (factorial (p + q)) 1 rho (p + q + 1)
-  { future := futureTerms, past := pastTerms, atZero }
+    let amp ← scaledPoleQuotient ab numerator 1 rho (p + j + 1)
+    pure ({ pole := past.pole, amp, deg := q - j } : Atom)
+  let atZero ← scaledPoleQuotient ab (factorial (p + q)) 1 rho (p + q + 1)
+  pure { future := futureTerms, past := pastTerms, atZero }
 
-/-- Exact mixed `P * F` expansion, definitionally reduced by convolution
-commutativity to `F * P` with swapped operands. -/
-def convolvePastFuture (past future : Atom) : Expansion :=
+def convolvePastFuture (past future : Atom) : BuildM Expansion :=
   convolveFuturePast future past
 
-/-- Convolve two directed analytic atoms.  `sameSideRoute` is inspected only
-for `FF` and `PP`; stable mixed pairs need no coincidence route. -/
 def convolve (sameSideRoute : SameSideRoute) (left right : DirectedAtom) :
-    Expansion :=
+    BuildM Expansion :=
   match left.orientation, right.orientation with
   | .future, .future => convolveSameSide sameSideRoute .future left.toAtom right.toAtom
   | .past, .past => convolveSameSide sameSideRoute .past left.toAtom right.toAtom
   | .future, .past => convolveFuturePast left.toAtom right.toAtom
   | .past, .future => convolvePastFuture left.toAtom right.toAtom
 
-/-- A production classifier supplies the certified same-side route per mode
-pair.  It may use the existing pole-region admission machinery; this module
-does not guess equality from live `Sig` syntax. -/
 abbrev SameSideClassifier :=
   Orientation → ModalMode → ModalMode → SameSideRoute
 
-/-- Syntactically identical physical poles take the exact beta-limit route.
-    Live phaser section poles are structurally distinct expressions, so their
-    fixed ratio contract keeps them on the distinct route without a floating
-    equality or epsilon decision. -/
 def syntacticSameSideClassifier : SameSideClassifier := fun _ left right =>
-  if left.sigma == right.sigma && left.omega == right.omega
-  then .coincident
+  if left.sigma == right.sigma && left.omega == right.omega then .coincident
   else .distinct
 
-/-- Compose one production same-side pair.  The incumbent degree-zero
-distinct-pole residue transform is reused exactly where it is sound.  General
-polynomial degrees and the certified coincidence route use the closed forms
-above. -/
 private def convolveSameSideModes (classify : SameSideClassifier)
-    (orientation : Orientation) (left right : ModalMode) : Expansion :=
+    (orientation : Orientation) (left right : ModalMode) : BuildM Expansion := do
   match classify orientation left right with
   | .distinct =>
       if left.deg == 0 && right.deg == 0 then
-        onSide orientation
-          ((residueComposeE #[left] #[right]).map Atom.ofMode) (natE 0)
+        let modes ← residueComposeE #[left] #[right]
+        let atoms ← modes.mapM Atom.ofMode
+        let zero ← natE 0
+        pure (onSide orientation atoms zero)
       else
-        convolveSameSideDistinct orientation (Atom.ofMode left) (Atom.ofMode right)
+        convolveSameSideDistinct orientation (← Atom.ofMode left) (← Atom.ofMode right)
   | .coincident =>
-      convolveSameSideCoincident orientation (Atom.ofMode left) (Atom.ofMode right)
+      convolveSameSideCoincident orientation (← Atom.ofMode left) (← Atom.ofMode right)
+
+private def emptyExpansion : BuildM Expansion := do
+  pure { atZero := ← natE 0 }
 
 private def convolvePairs (left right : Array ModalMode)
-    (pair : ModalMode → ModalMode → Expansion) : Expansion :=
-  left.foldl (fun accumulated leftMode =>
-    right.foldl (fun accumulated rightMode =>
-      accumulated.add (pair leftMode rightMode)) accumulated)
-    {}
+    (pair : ModalMode → ModalMode → BuildM Expansion) : BuildM Expansion := do
+  let initial ← emptyExpansion
+  left.foldlM (fun accumulated leftMode =>
+    right.foldlM (fun accumulated rightMode => do
+      let expansion ← pair leftMode rightMode
+      accumulated.add expansion) accumulated) initial
 
-private def sumAtDifference (pole : CplxE) (modes : Array ModalMode) : CplxE :=
-  modes.foldl (fun total mode =>
-    caddE total (cdivE mode.ampE (csubE pole mode.poleE))) (natE 0)
+private def sumAtDifference (pole : CplxE)
+    (modes : Array ModalMode) : BuildM CplxE := do
+  let zero ← natE 0
+  modes.foldlM (fun total mode => do
+    let modePole ← mode.poleE
+    let difference ← csubE pole modePole
+    let quotient ← cdivE mode.ampE difference
+    caddE total quotient) zero
 
-private def sumAtPhysicalSum (pole : CplxE) (modes : Array ModalMode) : CplxE :=
-  modes.foldl (fun total mode =>
-    caddE total (cdivE mode.ampE (caddE pole mode.poleE))) (natE 0)
+private def sumAtPhysicalSum (pole : CplxE)
+    (modes : Array ModalMode) : BuildM CplxE := do
+  let zero ← natE 0
+  modes.foldlM (fun total mode => do
+    let modePole ← mode.poleE
+    let sum ← caddE pole modePole
+    let quotient ← cdivE mode.ampE sum
+    caddE total quotient) zero
 
-/-- The mixed-pair value at exactly zero, summed without materializing its two
-axis modes. -/
-private def mixedAtZero (future past : Array ModalMode) : CplxE :=
-  future.foldl (fun total futureMode =>
-    past.foldl (fun total pastMode =>
-      csubE total (cdivE (cmulE futureMode.ampE pastMode.ampE)
-        (caddE futureMode.poleE pastMode.poleE))) total) (natE 0)
+private def mixedAtZero (future past : Array ModalMode) : BuildM CplxE := do
+  let zero ← natE 0
+  future.foldlM (fun total futureMode =>
+    past.foldlM (fun total pastMode => do
+      let numerator ← cmulE futureMode.ampE pastMode.ampE
+      let futurePole ← futureMode.poleE
+      let pastPole ← pastMode.poleE
+      let denominator ← caddE futurePole pastPole
+      let quotient ← cdivE numerator denominator
+      csubE total quotient) total) zero
 
-/-- Collected degree-zero formula.  Its future poles are definitionally the
-input-future/kernel-future union and its past poles the input-past/kernel-past
-union; mixed pairs alter residues but introduce no poles. -/
-private def convolveKernelDegZeroCollected (input kernel : Bank) : Bank :=
-  let inputFuture := input.future.map fun mode =>
-    let gain := csubE
-      (sumAtDifference mode.poleE kernel.future)
-      (sumAtPhysicalSum mode.poleE kernel.past)
-    scaleModeAmp gain mode
-  let kernelFuture := kernel.future.map fun mode =>
-    let gain := csubE
-      (sumAtDifference mode.poleE input.future)
-      (sumAtPhysicalSum mode.poleE input.past)
-    scaleModeAmp gain mode
-  let inputPast := input.past.map fun mode =>
-    let gain := csubE
-      (sumAtDifference mode.poleE kernel.past)
-      (sumAtPhysicalSum mode.poleE kernel.future)
-    scaleModeAmp gain mode
-  let kernelPast := kernel.past.map fun mode =>
-    let gain := csubE
-      (sumAtDifference mode.poleE input.past)
-      (sumAtPhysicalSum mode.poleE input.future)
-    scaleModeAmp gain mode
-  { future := inputFuture ++ kernelFuture
-    past := inputPast ++ kernelPast
-    atZero := caddE (mixedAtZero input.future kernel.past)
-      (mixedAtZero kernel.future input.past) }
+private def convolveKernelDegZeroCollected (input kernel : Bank) : BuildM Bank := do
+  let inputFuture ← input.future.mapM fun mode => do
+    let pole ← mode.poleE
+    let difference ← sumAtDifference pole kernel.future
+    let physical ← sumAtPhysicalSum pole kernel.past
+    scaleModeAmp (← csubE difference physical) mode
+  let kernelFuture ← kernel.future.mapM fun mode => do
+    let pole ← mode.poleE
+    let difference ← sumAtDifference pole input.future
+    let physical ← sumAtPhysicalSum pole input.past
+    scaleModeAmp (← csubE difference physical) mode
+  let inputPast ← input.past.mapM fun mode => do
+    let pole ← mode.poleE
+    let difference ← sumAtDifference pole kernel.past
+    let physical ← sumAtPhysicalSum pole kernel.future
+    scaleModeAmp (← csubE difference physical) mode
+  let kernelPast ← kernel.past.mapM fun mode => do
+    let pole ← mode.poleE
+    let difference ← sumAtDifference pole input.past
+    let physical ← sumAtPhysicalSum pole input.future
+    scaleModeAmp (← csubE difference physical) mode
+  let leftZero ← mixedAtZero input.future kernel.past
+  let rightZero ← mixedAtZero kernel.future input.past
+  let atZero ← caddE leftZero rightZero
+  pure { future := inputFuture ++ kernelFuture, past := inputPast ++ kernelPast, atZero }
 
 private def modesDegreeZero (modes : Array ModalMode) : Bool :=
   modes.all fun mode => mode.deg == 0
 
 private def sameSidePairsDistinct (classify : SameSideClassifier)
     (orientation : Orientation) (left right : Array ModalMode) : Bool :=
-  left.all fun leftMode =>
-    right.all fun rightMode =>
-      classify orientation leftMode rightMode == .distinct
+  left.all fun leftMode => right.all fun rightMode =>
+    classify orientation leftMode rightMode == .distinct
 
 private def canCollectDegreeZero (classify : SameSideClassifier)
     (input kernel : Bank) : Bool :=
@@ -369,147 +289,92 @@ private def canCollectDegreeZero (classify : SameSideClassifier)
     sameSidePairsDistinct classify .future input.future kernel.future &&
     sameSidePairsDistinct classify .past input.past kernel.past
 
-/-- General-degree/certified-coincidence oracle path.  It keeps the four cases
-literal and is also the foundation against which the collected path is checked. -/
 private def convolveKernelPairwise (classify : SameSideClassifier)
-    (input kernel : Bank) : Bank :=
-  let ff := convolvePairs input.future kernel.future
+    (input kernel : Bank) : BuildM Bank := do
+  let ff ← convolvePairs input.future kernel.future
     (convolveSameSideModes classify .future)
-  let pp := convolvePairs input.past kernel.past
+  let pp ← convolvePairs input.past kernel.past
     (convolveSameSideModes classify .past)
-  let fp := convolvePairs input.future kernel.past fun future past =>
-    convolveFuturePast (Atom.ofMode future) (Atom.ofMode past)
-  let pf := convolvePairs input.past kernel.future fun past future =>
-    convolvePastFuture (Atom.ofMode past) (Atom.ofMode future)
-  (ff.add pp |>.add fp |>.add pf).toBank
+  let fp ← convolvePairs input.future kernel.past fun future past => do
+    convolveFuturePast (← Atom.ofMode future) (← Atom.ofMode past)
+  let pf ← convolvePairs input.past kernel.future fun past future => do
+    convolvePastFuture (← Atom.ofMode past) (← Atom.ofMode future)
+  let combined ← (← (← (← ff.add pp).add fp).add pf).toBank
+  pure combined
 
-/-- Convolve an oriented prefix with one newly authored room kernel.
-
-For certified-distinct degree-zero banks this uses a collected `m+n` carrier:
-
-* at an input future pole `lam`, the gain is
-  `sum Bf/(lam-nu) - sum Bp/(lam+mu)`;
-* at a kernel future pole `nu`, it is
-  `sum Af/(nu-lam) - sum Ap/(nu+mu)`;
-* the two past origins use the reflected formulas.
-
-Thus repeated room application does not multiply the mode count.  General
-degrees or a certified same-side coincidence route fall back to the exact
-pairwise expansion.  Mixed `atZero` values are summed in either route.
-`input.atZero` is a point value, not a Dirac mass, so it has measure zero in the
-next continuous convolution and correctly does not enter either fold. -/
 def Bank.convolveKernel (input : Bank) (room : Array ModalMode)
-    (direction : Sig) (classify : SameSideClassifier) : Bank :=
-  let kernel := Bank.kernel room direction
+    (direction : Sig) (classify : SameSideClassifier) : BuildM Bank := do
+  let kernel ← Bank.kernel room direction
   if canCollectDegreeZero classify input kernel then
     convolveKernelDegZeroCollected input kernel
   else
     convolveKernelPairwise classify input kernel
 
-/-- Scale every support arm and the exact-zero value by one complex scalar.
-    Pole order, degrees, and admission metadata are unchanged. -/
-def Bank.scale (bank : Bank) (scale : CplxE) : Bank :=
-  { future := bank.future.map (scaleModeAmp scale)
-    past := bank.past.map (scaleModeAmp scale)
-    atZero := cmulE scale bank.atZero }
+def Bank.scale (bank : Bank) (scale : CplxE) : BuildM Bank := do
+  let future ← bank.future.mapM (scaleModeAmp scale)
+  let past ← bank.past.mapM (scaleModeAmp scale)
+  let atZero ← cmulE scale bank.atZero
+  pure { future, past, atZero }
 
-/-- Add complete banks in authored left-to-right order.  Addition concatenates
-    atoms; it never guesses pole equality from live floating expressions. -/
-protected def Bank.add (left right : Bank) : Bank :=
-  { future := left.future ++ right.future
-    past := left.past ++ right.past
-    atZero := caddE left.atZero right.atZero }
+protected def Bank.add (left right : Bank) : BuildM Bank := do
+  let atZero ← caddE left.atZero right.atZero
+  pure { future := left.future ++ right.future, past := left.past ++ right.past, atZero }
 
-/-- Dry/wet linear blend of two complete oriented values. -/
-def Bank.blend (dry wet : Bank) (mix : Sig) : Bank :=
-  let dryScale : CplxE := (sub (lit 1) mix, lit 0)
-  let wetScale : CplxE := (mix, lit 0)
-  (dry.scale dryScale).add (wet.scale wetScale)
+def Bank.blend (dry wet : Bank) (mix : Sig) : BuildM Bank := do
+  let one ← lit 1
+  let dryAmount ← sub one mix
+  let zero ← lit 0
+  let dry ← dry.scale (dryAmount, zero)
+  let wet ← wet.scale (mix, zero)
+  dry.add wet
 
-/-- The causal tail of one continuous-time first-order all-pass section,
-    `A_a(s) = 1 - 2a/(s+a)`.  The direct identity path is supplied by
-    `Bank.allpassSection`; this row is only the exponential tail. -/
-def allpassTail (a : Sig) (sigmaRange : Option (Float × Float) := none) : ModalMode :=
-  { sigma := a
-    omega := lit 0
-    cre := neg (mul (lit 2) a)
-    sigmaRange }
+def allpassTail (a : Sig)
+    (sigmaRange : Option (Float × Float) := none) : BuildM ModalMode := do
+  let zero ← lit 0
+  let two ← lit 2
+  let doubled ← mul two a
+  let cre ← neg doubled
+  pure { sigma := a, omega := zero, cre, cim := zero, sigmaRange }
 
-/-- One exact current-universe all-pass section.  The direct bank term is
-    semantically load-bearing: the convolution alone would be a low-pass-like
-    resonator, not an all-pass. -/
-def Bank.allpassSection (bank : Bank) (tail : ModalMode) : Bank :=
-  bank.add (bank.convolveKernel #[tail] (lit 0) syntacticSameSideClassifier)
+def Bank.allpassSection (bank : Bank) (tail : ModalMode) : BuildM Bank := do
+  let zero ← lit 0
+  let convolved ← bank.convolveKernel #[tail] zero syntacticSameSideClassifier
+  bank.add convolved
 
-/-- Sequential identity-plus-tail reference cascade followed by the audible
-    dry/wet blend.  This intentionally preserves duplicate atoms introduced by
-    generic addition; product terminals use `decorateDegreeZeroCausalPhaser`
-    below to collect the structurally known source and section poles exactly. -/
-def Bank.phaser (bank : Bank) (tails : Array ModalMode) (mix : Sig) : Bank :=
-  let wet := tails.foldl (fun value tail => value.allpassSection tail) bank
+def Bank.phaser (bank : Bank) (tails : Array ModalMode) (mix : Sig) : BuildM Bank := do
+  let wet ← tails.foldlM (fun value tail => value.allpassSection tail) bank
   bank.blend wet mix
 
-/-- Stable sequential source decoration for the exact two-room product route.
-    Preconditions are structural at its caller: the source and all tails are
-    causal degree-zero rows, every section pole is distinct, and shipped source
-    frequencies are nonzero while section frequencies are zero.  It emits one
-    row per original source pole followed by one row per section pole.
-
-    For a new tail `b/(s-p)`, existing residues gain `1+b/(q-p)` and the new
-    residue is `b·X(p)`.  This avoids the ill-conditioned raw product formula for
-    section residues while collecting only identities established by topology. -/
 def decorateDegreeZeroCausalPhaser (source tails : Array ModalMode)
-    (mix : Sig) : Array ModalMode :=
-  let wet := tails.foldl (fun modes tail =>
-    let atTail := modes.foldl (fun total mode =>
-      caddE total (cdivE mode.ampE (csubE tail.poleE mode.poleE))) (natE 0)
-    let existing := modes.map fun mode =>
-      let gain := caddE (natE 1)
-        (cdivE tail.ampE (csubE mode.poleE tail.poleE))
+    (mix : Sig) : BuildM (Array ModalMode) := do
+  let wet ← tails.foldlM (fun modes tail => do
+    let tailPole ← tail.poleE
+    let zero ← natE 0
+    let atTail ← modes.foldlM (fun total mode => do
+      let modePole ← mode.poleE
+      let difference ← csubE tailPole modePole
+      let quotient ← cdivE mode.ampE difference
+      caddE total quotient) zero
+    let existing ← modes.mapM fun mode => do
+      let one ← natE 1
+      let modePole ← mode.poleE
+      let difference ← csubE modePole tailPole
+      let quotient ← cdivE tail.ampE difference
+      let gain ← caddE one quotient
       scaleModeAmp gain mode
-    existing.push (scaleModeAmp atTail tail)) source
-  let dryScale : CplxE := (sub (lit 1) mix, lit 0)
-  let wetScale : CplxE := (mix, lit 0)
-  let sourceRows := (wet.extract 0 source.size).zip source |>.map fun (wetMode, dryMode) =>
-    let amp := caddE (cmulE wetScale wetMode.ampE)
-      (cmulE dryScale dryMode.ampE)
-    { wetMode with cre := amp.1, cim := amp.2 }
-  let sectionRows := (wet.extract source.size wet.size).map (scaleModeAmp wetScale)
-  sourceRows ++ sectionRows
-
-@[simp] theorem Bank.ofFuture_future (modes : Array ModalMode) :
-    (Bank.ofFuture modes).future = modes := rfl
-
-@[simp] theorem Bank.ofFuture_past (modes : Array ModalMode) :
-    (Bank.ofFuture modes).past = #[] := rfl
-
-@[simp] theorem Bank.ofFuture_atZero (modes : Array ModalMode) :
-    (Bank.ofFuture modes).atZero = natE 0 := rfl
-
-@[simp] theorem Bank.kernel_atZero (modes : Array ModalMode) (direction : Sig) :
-    (Bank.kernel modes direction).atZero = natE 0 := rfl
-
-@[simp] theorem convolveSameSideDistinct_atZero
-    (orientation : Orientation) (left right : Atom) :
-    (convolveSameSideDistinct orientation left right).atZero = natE 0 := by
-  cases orientation <;> rfl
-
-@[simp] theorem convolveSameSideCoincident_atZero
-    (orientation : Orientation) (left right : Atom) :
-    (convolveSameSideCoincident orientation left right).atZero = natE 0 := by
-  cases orientation <;> rfl
-
-@[simp] theorem convolvePastFuture_eq_swapped
-    (past future : Atom) :
-    convolvePastFuture past future = convolveFuturePast future past := rfl
-
-/-- The strict-gate zero convention for a mixed pair is the shared continuous
-one-sided limit, not zero. -/
-theorem convolveFuturePast_atZero (future past : Atom) :
-    (convolveFuturePast future past).atZero =
-      let ab := cmulE future.amp past.amp
-      let rho := cnegE (caddE future.pole past.pole)
-      scaledPoleQuotient ab (factorial (future.deg + past.deg)) 1 rho
-        (future.deg + past.deg + 1) := rfl
+    let tail ← scaleModeAmp atTail tail
+    pure (existing.push tail)) source
+  let one ← lit 1
+  let dryAmount ← sub one mix
+  let zero ← lit 0
+  let dryScale : CplxE := (dryAmount, zero)
+  let wetScale : CplxE := (mix, zero)
+  let sourceRows ← (wet.extract 0 source.size).zip source |>.mapM fun (wetMode, dryMode) => do
+    let wetAmp ← cmulE wetScale wetMode.ampE
+    let dryAmp ← cmulE dryScale dryMode.ampE
+    let amp ← caddE wetAmp dryAmp
+    pure { wetMode with cre := amp.1, cim := amp.2 }
+  let sectionRows ← (wet.extract source.size wet.size).mapM (scaleModeAmp wetScale)
+  pure (sourceRows ++ sectionRows)
 
 end Tropical.EmitArrow.Oriented

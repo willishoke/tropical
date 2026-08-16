@@ -70,7 +70,9 @@ def compileMirrorPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
     --fixtures`). Harness-only: nothing production calls this. -/
 def registerTestFixtures (env : Env) : EngineM Unit := do
   let st ← env.state.get
-  let (arena', rawIdx) := Tropical.EmitArrow.buildOpZoo st.arena
+  let (arena', rawIdx) ← match Tropical.EmitArrow.buildOpZoo st.arena with
+    | .ok result => pure result
+    | .error message => internalError message
   let _ ← registerResolved env "OpZoo" arena' rawIdx
 
 end Tropical.Engine

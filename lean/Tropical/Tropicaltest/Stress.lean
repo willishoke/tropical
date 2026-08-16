@@ -27,22 +27,25 @@ open Tropical.Ir (Arena ProgramIdx)
 
 /-- A j-sample clock delay: subtract `j·2³²` (Q32.32) from the clock. `j = 0` is
     identity (`sub c 0 = c`). -/
-private def firShift (j : Nat) : Tropical.EmitArrow.Clock → Tropical.EmitArrow.Clock :=
-  fun c => Tropical.EmitArrow.sub c
-    (Tropical.EmitArrow.toIntE (Tropical.EmitArrow.lit (Int.ofNat j * 4294967296)))
+private def firShift (j : Nat) : Tropical.EmitArrow.Clock →
+    Tropical.EmitArrow.BuildM Tropical.EmitArrow.Clock :=
+  fun clock => do
+    let value ← Tropical.EmitArrow.lit (Int.ofNat j * 4294967296)
+    let shift ← Tropical.EmitArrow.toIntE value
+    Tropical.EmitArrow.sub clock shift
 
 /-- 3-tap FIR `[0.25, 0.5, 0.25]` at integer-sample delays `[0,1,2]`, as a bank
     of CLOCK warps over the closed-form 12 kHz voice (pitch high enough that the
     lowpass visibly attenuates). -/
 private def firTaps : Array Tropical.EmitArrow.Tap := #[
-  { name := "k0", warp := fun c => c, weight := Tropical.EmitArrow.lit 25 2 },
+  { name := "k0", warp := pure, weight := Tropical.EmitArrow.lit 25 2 },
   { name := "k1", warp := firShift 1, weight := Tropical.EmitArrow.lit 5 1 },
   { name := "k2", warp := firShift 2, weight := Tropical.EmitArrow.lit 25 2 } ]
 
 /-- The bare voice: a single identity tap, weight 1 — the source samples the
     oracle convolves by hand. -/
 private def bareTaps : Array Tropical.EmitArrow.Tap := #[
-  { name := "x", warp := fun c => c, weight := Tropical.EmitArrow.lit 1 } ]
+  { name := "x", warp := pure, weight := Tropical.EmitArrow.lit 1 } ]
 
 /-- Compile a closed-form tap-bank carrier (the 12 kHz voice) to a runnable
     `FlatPlan` via the production session path — same recipe as
@@ -277,8 +280,10 @@ def runNegativeClock (arena : Arena)
   let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
   let delayTap : Tropical.EmitArrow.Tap :=
     { name := "d"
-      warp := fun c => Tropical.EmitArrow.sub c
-        (Tropical.EmitArrow.toIntE (Tropical.EmitArrow.lit (Int.ofNat delta * 4294967296)))
+      warp := fun clock => do
+        let value ← Tropical.EmitArrow.lit (Int.ofNat delta * 4294967296)
+        let shift ← Tropical.EmitArrow.toIntE value
+        Tropical.EmitArrow.sub clock shift
       weight := Tropical.EmitArrow.lit 1 }
   match buildAndFinish (Tropical.EmitArrow.buildTapCarrier "DelayFc"
           (Tropical.EmitArrow.litPitchVoice 2000) #[delayTap] arena resolved) with
@@ -335,7 +340,8 @@ def runMorphOscDifferential (arena : Arena)
   let refOut := fun (morphF : Float) (clk : Int) =>
     let phase := phasorPhase clk freqHz
     sinkGain * ((1.0 - morphF) * (2.0 * phase - 1.0) + morphF * voiceSin phase)
-  let render := fun (nm : String) (m : Tropical.EmitArrow.Sig) =>
+  let render := fun (nm : String) (m : Tropical.EmitArrow.BuildM
+      Tropical.EmitArrow.Sig) =>
     match buildAndFinish (Tropical.EmitArrow.buildMorphOscLit nm freqHz m arena resolved) with
     | .error e => (pure (.error e) : IO (Except String (Array Float)))
     | .ok plan => renderPlanSamples plan n

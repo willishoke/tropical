@@ -1,6 +1,8 @@
 import Tropical.Tropicaltest.Harness
 import Tropical.Exact.Gamma
-import Tropical.EmitArrow.Modal
+import Tropical.Playground.Vocabulary
+import Tropical.Testing.ArrowFixtures
+import Tropical.Testing.ArrowOracles
 
 /-!
 # Tropical.Tropicaltest.Exact — the exact-carrier gates (P0)
@@ -54,6 +56,14 @@ open Tropical.Exact
 open Tropical.Exact.DyadicI
 
 namespace Tropical.Tropicaltest.ExactGates
+
+open Tropical.EmitArrow
+open Tropical.Testing.ArrowFixtures
+
+private abbrev CplxB := Tropical.Testing.ArrowOracles.CplxB
+
+private def dutCplx (value : CplxB) : Tropical.EmitArrow.CplxB :=
+  ⟨value.re, value.im⟩
 
 /-- Precision the constants are RE-derived at: well above the 300 bits the
     literals carry, so the check has room to be decisive. -/
@@ -213,7 +223,7 @@ def runExactElementary : IO Bool := do
     let gr := (u2 * 2.0 - 1.0) * 40.0
     let gi := (u3 * 2.0 - 1.0) * 150.0
     let lgE := CplxDI.lgamma (CplxDI.ofFloats gr gi)
-    let lgF := Tropical.EmitArrow.lgammaB ⟨gr, gi⟩
+    let lgF := Tropical.Testing.ArrowOracles.lgammaB ⟨gr, gi⟩
     sc := sc.note s!"lgamma.re {gr},{gi}" lgE.re lgF.re
     sc := sc.note s!"lgamma.im {gr},{gi}" lgE.im lgF.im
   IO.println s!"        {n} Halton configs × 9 kernels vs the Float path:"
@@ -347,9 +357,13 @@ def runExactAtan2 : IO Bool := do
 
 /-- Read `litF`'s emitted decimal back as a 12-place mantissa. -/
 private def litFMantissa (x : Float) : Int :=
-  match Tropical.EmitArrow.litF x with
-  | .num jn => if jn.exponent == 12 then jn.mantissa else jn.mantissa * 1000000000000
-  | _ => 0
+  match freezeBuild {} (litF x) with
+  | .ok (arena, signal) => match arena.nodes[signal.idx]? with
+    | some (.num number) =>
+        if number.exponent == 12 then number.mantissa
+        else number.mantissa * 1000000000000
+    | _ => 0
+  | .error _ => 0
 
 /-- `Dyadic.toDecimalMantissa` against `litF` — the emit funnel, measured.
 
@@ -415,12 +429,11 @@ def runExactQuantize : IO Bool := do
 /-- A synthetic all-literal deg-0 bank — the shape `bankLandExp` takes the
     STATIC path on (`ModalMode.hz` makes `cre` a 12-place `litF` literal and
     leaves `cim` at `lit 0`). Built outside the timer. -/
-private def benchBank (n : Nat) : Array Tropical.EmitArrow.ModalMode :=
-  (Array.range n).map fun i =>
-    Tropical.EmitArrow.ModalMode.hz
-      (Tropical.EmitArrow.litF (110.0 * (i + 1).toFloat))
-      (Tropical.EmitArrow.litF (2.0 + 0.01 * i.toFloat))
-      (Tropical.EmitArrow.litF (1.0 / (1.0 + i.toFloat)))
+private def benchBank (n : Nat) : BuildM (Array ModalMode) :=
+  (Array.range n).mapM fun i => do
+    ModalMode.hz (← litF (110.0 * (i + 1).toFloat))
+      (← litF (2.0 + 0.01 * i.toFloat))
+      (← litF (1.0 / (1.0 + i.toFloat)))
 
 /-- `recip10Table` is a CACHE, not a second algorithm — held to the BIT.
 
@@ -475,13 +488,18 @@ def runExactRecip10 : IO Bool := do
     sinkNew := sinkNew + (DyadicI.ofJsonNumber ⟨(i : Int) * 271828182845, 12⟩).hi.magBits
   let t2 ← IO.monoMsNow
   -- eight DISTINCT banks, so the folds cannot collapse into one
-  let banks := (Array.range 8).map fun j => benchBank (512 + j)
+  let prepared := freezeBuild {} do
+    (Array.range 8).mapM fun j => benchBank (512 + j)
+  let (frozen, banks) ← match prepared with
+    | .error error =>
+        return ← failGate "exact-recip10" s!"arena-native bench bank: {firstLine error}"
+    | .ok value => pure value
   let t3 ← IO.monoMsNow
   let mut ksum := 0
   for b in banks do
-    ksum := ksum + (match Tropical.EmitArrow.bankLandExp b with
-                    | .static k  => k
-                    | .dynamic _ => 0)
+    match runBuild { exprs := frozen } (bankLandExp b) with
+    | .ok (_, .static k) => ksum := ksum + k
+    | _ => pure ()
   let t4 ← IO.monoMsNow
   IO.println s!"        20000 12-place literals: division {t1 - t0} ms → cached reciprocal {t2 - t1} ms (sinks {sinkOld}/{sinkNew})"
   IO.println s!"        bankLandExp × 8 over ~512-mode banks in {t4 - t3} ms (Σk {ksum})"
@@ -493,7 +511,6 @@ def runExactRecip10 : IO Bool := do
 
 -- ── the P2 differential: the flipped values against the pre-flip float path ────
 
-open Tropical.EmitArrow in
 /-- Relative distance between a carrier value and its float twin, complex. -/
 private def relC (m : CplxDI) (ref : CplxB) : Float :=
   let (mr, mi) := m.toFloats
@@ -514,7 +531,6 @@ private structure Diff where
   poisoned: Nat := 0
 deriving Inhabited
 
-open Tropical.EmitArrow in
 /-- Score one (exact, float) pair on BOTH axes. The literal axis is the one that
     matters for the emitted program, and both sides go through `litF` so the
     `x·10¹²` f64 product — which itself rounds, disagreeing on ~2e-4 of literals
@@ -545,7 +561,6 @@ private def Diff.note (d : Diff) (name : String) (m : CplxDI) (ref : CplxB) : Di
     let d := step (step d mr ref.re) mi ref.im
     if r > d.worst then { d with worst := r, at? := name } else d
 
-open Tropical.EmitArrow in
 /-- THE VALUES-FLIP DIFFERENTIAL (P2). Every bake-time value function whose float
     twin still exists is evaluated BOTH ways over the shipped bloom register, and
     the two are compared on two axes: the VALUE relatively, and the EMITTED
@@ -606,39 +621,43 @@ def runExactValues : IO Bool := do
     let aCroD := CplxDI.ofFloats aCro.re aCro.im
     let aNearD := CplxDI.ofFloats aNear.re aNear.im
     -- serOnly arm: the κ-side M constant at the count the point carrier returns
-    let nK := bloomM1DepthD aSer.toPoint kappa.toPoint bloomM1TolD
-    let (mKf, _) := bloomM1 aSer kappa
+    let nK := bloomM1DepthD (dutCplx aSer).toPoint (dutCplx kappa).toPoint bloomM1TolD
+    let (mKf, _) := Tropical.Testing.ArrowOracles.bloomM1 aSer kappa
     ser := ser.note s!"M1 a={aSer.re},{aSer.im} κ={kappa.re},{kappa.im}"
                     (bloomM1D aSerD kD nK) mKf
     -- crossing arm: Γ★ and the Lentz CF
     cro := cro.note s!"Γ★ a={aCro.re},{aCro.im}"
-                    (bloomGammaStarD aCroD kD gD) (bloomGammaStar aCro kappa g)
-    let (cfKf, _) := bloomCF aCro kappa
-    let (cfKp, _) := bloomCFPointD aCro.toPoint kappa.toPoint bloomCFTolD
+                    (bloomGammaStarD aCroD kD gD)
+                    (Tropical.Testing.ArrowOracles.bloomGammaStar aCro kappa g)
+    let (cfKf, _) := Tropical.Testing.ArrowOracles.bloomCF aCro kappa
+    let (cfKp, _) := bloomCFPointD (dutCplx aCro).toPoint
+      (dutCplx kappa).toPoint bloomCFTolD
     cro := cro.note s!"CF a={aCro.re},{aCro.im}" cfKp.asPointI cfKf
     -- coincident arm: cexpm1 on both sides of its 0.01 split, dCoef, Φ
     let wSmall : CplxB := ⟨0.02 * (u1 - 0.5), 0.02 * (u2 - 0.5)⟩
     let wBig : CplxB := ⟨2.0 * (u1 - 0.5), 2.0 * (u2 - 0.5)⟩
     coi := coi.note s!"cexpm1 small {wSmall.re}" (cexpm1D (CplxDI.ofFloats wSmall.re wSmall.im))
-                    (cexpm1B wSmall)
+                    (Tropical.Testing.ArrowOracles.cexpm1B wSmall)
     coi := coi.note s!"cexpm1 big {wBig.re}" (cexpm1D (CplxDI.ofFloats wBig.re wBig.im))
-                    (cexpm1B wBig)
-    let dcF := bloomDCoef aNear 24
+                    (Tropical.Testing.ArrowOracles.cexpm1B wBig)
+    let dcF := Tropical.Testing.ArrowOracles.bloomDCoef aNear 24
     let dcD := bloomDCoefD aNearD 24
     for k in [0:24] do
       coi := coi.note s!"dCoef[{k}] a={aNear.re},{aNear.im}" dcD[k]! dcF[k]!
     coi := coi.note s!"Φ a={aNear.re},{aNear.im} κ={kappa.re},{kappa.im}"
                     (bloomPhiKappaOverGD aNearD kD (CplxDI.ofFloats cfKf.re cfKf.im) dcD gD)
-                    (bloomPhiKappaOverG aNear kappa cfKf dcF g)
+                    (Tropical.Testing.ArrowOracles.bloomPhiKappaOverG
+                      aNear kappa cfKf dcF g)
     -- the fold arm (WS-DDF): two nearby a's, the stable Q recurrence, on the
     -- same series-side admission as `bloomFoldCompose` (`|a+1| ≥ |κ|`)
     let a2 : CplxB := ⟨aSer.re + 0.05, aSer.im - 0.03⟩
     let a2D := CplxDI.ofFloats a2.re a2.im
-    let qF := bloomFoldQCoef aSer a2 24
+    let qF := Tropical.Testing.ArrowOracles.bloomFoldQCoef aSer a2 24
     let qD := bloomFoldQCoefD aSerD a2D 24
     for k in [0:24] do
       fol := fol.note s!"Q[{k}]" qD[k]! qF[k]!
-    fol := fol.note s!"DDaM" (bloomFoldDDaMD qD kD) (bloomFoldDDaM qF kappa)
+    fol := fol.note s!"DDaM" (bloomFoldDDaMD qD kD)
+      (Tropical.Testing.ArrowOracles.bloomFoldDDaM qF kappa)
   let fams := #[("serOnly M(1,a+1,κ)", ser), ("crossing Γ★/CF", cro),
                 ("coincident dCoef/Φ/cexpm1", coi), ("fold Q/DDaM", fol)]
   let mut worst : Float := 0.0
@@ -748,38 +767,62 @@ private def SiteDiff.note (d : SiteDiff) (emitted : Option Float) (ref : Float) 
        counts are frozen: a value that starts moving is a red gate, not a
        printed number nobody reads. -/
 def runExactPlayground : IO Bool := do
-  let count := fun (f0 rho : Int × Nat) => (Tropical.Playground.defaultStringModes f0 rho).size
+  let prepared := freezeBuild {} do
+    let defaultModes ← Tropical.Playground.Compiler.defaultStringModes
+      (196, 0) (996, 3)
+    let highModes ← Tropical.Playground.Compiler.defaultStringModes
+      (2000, 0) (996, 3)
+    let lowModes ← Tropical.Playground.Compiler.defaultStringModes
+      (20, 0) (996, 3)
+    let quantBank ← Tropical.Playground.Compiler.defaultStringModes
+      (224, 2) (996, 3)
+    let zeroRho ← Tropical.Playground.Compiler.defaultStringModes
+      (196, 0) (0, 0)
+    let negativeRho ← Tropical.Playground.Compiler.defaultStringModes
+      (196, 0) (-5, 1)
+    let zeroFrequency ← Tropical.Playground.Compiler.defaultStringModes
+      (0, 0) (996, 3)
+    let bandBanks ← (Array.range 40).mapM fun i =>
+      Tropical.Playground.Compiler.defaultStringModes
+        (20 + 60 * Int.ofNat i, 0) (996, 3)
+    let resonator ← Tropical.Playground.Compiler.bakedResonatorProbe 512
+    let reverb ← Tropical.Playground.Compiler.bakedReverbProbe 32
+    let filterLn80 ← Tropical.Playground.Compiler.bakedFilterLn80
+    pure (defaultModes.size, highModes.size, lowModes.size, quantBank,
+      zeroRho.size, negativeRho.size, zeroFrequency.size, bandBanks,
+      resonator, reverb, filterLn80)
+  let (frozen, cDefault, cHigh, cLow, quantBank, cZeroRho, cNegRho,
+      cZeroF0, bandBanks, resonator, reverb, filterLn80) ← match prepared with
+    | .error error =>
+        return ← failGate "exact-playground" s!"arena-native probes: {firstLine error}"
+    | .ok (frozen, (cDefault, cHigh, cLow, quantBank, cZeroRho, cNegRho,
+        cZeroF0, bandBanks, resonator, reverb, filterLn80)) =>
+      pure (frozen, cDefault, cHigh, cLow, quantBank, cZeroRho, cNegRho,
+        cZeroF0, bandBanks, resonator, reverb, filterLn80)
+  let constants := sigConstTable frozen
+  let fold := fun signal => (sigConstDFrom? constants signal).map (·.toFloat)
   -- (1) the count cliff, read where it is observable
-  let cDefault := count (196, 0) (996, 3)          -- N = 225, kmax = min 48 112
-  let cHigh    := count (2000, 0) (996, 3)         -- N = 22,  kmax = 11
-  let cLow     := count (20, 0) (996, 3)           -- N = 2205, kmax = 48
-  let quantBank := Tropical.Playground.defaultStringModes (224, 2) (996, 3)
-  let quantOm := (quantBank.toList.head?).bind (fun m => Tropical.Playground.probeFold m.omega)
+  let quantOm := (quantBank.toList.head?).bind (fun mode => fold mode.omega)
   let wantTie := stringOmega1 19688      -- the exact half-away-from-zero answer
   let notTie  := stringOmega1 19687      -- what the f64 quotient rounded to
   let tieOk := match quantOm with
     | some w => litFMantissa w == litFMantissa wantTie && litFMantissa w != litFMantissa notTie
     | none => false
   -- (2) the fork policy
-  let cZeroRho := count (196, 0) (0, 0)            -- g ≡ 0 ⇒ overlap ⇒ drop all
-  let cNegRho  := count (196, 0) (-5, 1)           -- g < 0 certified ⇒ drop all
-  let cZeroF0  := count (0, 0) (996, 3)            -- FORCED change: was 48 DC modes
   -- (3) the band edge, on EMITTED ω across the served f0 range
   let nyquist := (DyadicI.mul twoPiDecimal (DyadicI.ofNat 22050)).toFloat
   let mut bandViolations := 0
   let mut bandModes := 0
-  for i in [0:40] do
-    let f0 : Int := 20 + 60 * (i : Int)             -- 20 … 2360 Hz
-    for m in Tropical.Playground.defaultStringModes (f0, 0) (996, 3) do
+  for bank in bandBanks do
+    for m in bank do
       bandModes := bandModes + 1
-      match Tropical.Playground.probeFold m.omega with
+      match fold m.omega with
       | some w => if !(w < nyquist) then bandViolations := bandViolations + 1
       | none => bandViolations := bandViolations + 1
   -- (4) the differential, against the builders themselves
-  let fold := Tropical.Playground.probeFold
   let mut res : SiteDiff := {}
   let mut i := 0
-  for m in Tropical.Playground.bakedResonatorProbe 512 do
+  for m in resonator do
     let k := (i + 1).toFloat
     i := i + 1
     res := res.note (fold m.sigma) (1.0 + 0.4 * k)
@@ -787,7 +830,7 @@ def runExactPlayground : IO Bool := do
   let mut rev : SiteDiff := {}
   let twoPiF := 6.283185307179586
   let mut j := 0
-  for m in Tropical.Playground.bakedReverbProbe 32 do
+  for m in reverb do
     let jf := j.toFloat
     j := j + 1
     let fq := 60.0 * Float.pow (6000.0 / 60.0) (jf / 31.0)
@@ -798,11 +841,11 @@ def runExactPlayground : IO Bool := do
   -- filterPair's one authored transcendental: the `ln 80` its Q mapping is
   -- written in terms of, against the libm value it replaced
   let mut flt : SiteDiff := {}
-  flt := flt.note (fold Tropical.Playground.bakedFilterLn80) (Float.log 80.0)
+  flt := flt.note (fold filterLn80) (Float.log 80.0)
   let mut poison := 0
-  for m in Tropical.Playground.bakedResonatorProbe 512 do
+  for m in resonator do
     if (fold m.cre).isNone then poison := poison + 1
-  for m in Tropical.Playground.bakedReverbProbe 32 do
+  for m in reverb do
     if (fold m.omega).isNone then poison := poison + 1
   IO.println s!"        string count: f0=196 → {cDefault} (want 48) · f0=2000 → {cHigh} (want 11) · f0=20 → {cLow} (want 48)"
   IO.println s!"        tie cliff   : f0=2.24 first ω {quantOm} — equals the N=19688 answer {wantTie}, differs from N=19687 {notTie} : {tieOk}"
@@ -882,24 +925,27 @@ private def callsC (line name : String) : Bool := Id.run do
     how the call was written.
 
     The source is still read for the RETIRED DEFINITIONS: `CplxB`'s three
-    transcendental methods and the nine functions that used them left for
-    `Tropical.Testing.ArrowFixtures`, one floor outside the compiler, where they
-    are now the INDEPENDENT oracle (the DUT is exact arithmetic; the reference is
-    the platform's `libm`). `structure CplxB` itself stays — it is the plain data
-    type `BloomPairPlan` and the depth-loop inputs are written in.
+    transcendental methods and the nine functions that use them must be absent
+    from every production module and present in `Tropical.Testing.ArrowOracles`,
+    one floor outside the compiler, where they are the INDEPENDENT oracle (the
+    DUT is exact arithmetic; the reference is the platform's `libm`).
 
     A missing `.c` is a FAILURE, never a silent pass: this gate reporting "zero
     libm sites" because it read zero files would be the worst outcome available
     to it. -/
 def runExactCorpse : IO Bool := do
-  let dir := "lean/Tropical/EmitArrow"
-  let emitMods ← (do
-    let entries ← (System.FilePath.mk dir).readDir
-    let names := entries.filterMap fun e =>
-      if e.fileName.endsWith ".lean" then some (e.fileName.dropEnd 5).toString else none
-    pure (names.qsort fun a b => decide (a < b)))
-  let mods := (emitMods.map (fun m => ("EmitArrow/" ++ m, s!"{dir}/{m}.lean")))
-    |>.push ("Playground", "lean/Tropical/Playground.lean")
+  let sourceDirs := #[
+    ("EmitArrow", "lean/Tropical/EmitArrow"),
+    ("EmitArrow/Modal", "lean/Tropical/EmitArrow/Modal"),
+    ("Playground", "lean/Tropical/Playground")]
+  let mut mods : Array (String × String) := #[
+    ("Playground", "lean/Tropical/Playground.lean")]
+  for (modulePrefix, dir) in sourceDirs do
+    for entry in ← (System.FilePath.mk dir).readDir do
+      if entry.fileName.endsWith ".lean" then
+        let stem := (entry.fileName.dropEnd 5).toString
+        mods := mods.push (s!"{modulePrefix}/{stem}", s!"{dir}/{stem}.lean")
+  mods := mods.qsort fun a b => decide (a.1 < b.1)
   let corpseNames := #["def lgammaB", "def bloomM1 ", "def bloomCF ", "def cexpm1B",
                        "def bloomGammaStar ", "def bloomPhiKappaOverG (",
                        "def bloomDCoef ", "def bloomFoldQCoef ", "def bloomFoldDDaM ",
@@ -908,6 +954,7 @@ def runExactCorpse : IO Bool := do
   let mut hits : Array String := #[]
   let mut corpses : Array String := #[]
   let mut missing : Array String := #[]
+  let mut oracleMissing : Array String := #[]
   let mut scanned := 0
   for (modName, srcPath) in mods do
     -- the compiler's own answer: what did this module actually call?
@@ -923,13 +970,18 @@ def runExactCorpse : IO Bool := do
     let src ← IO.FS.readFile srcPath
     for name in corpseNames do
       if (src.splitOn name).length != 1 then corpses := corpses.push s!"{srcPath}: {name}"
+  let oraclePath := "lean/Tropical/Testing/ArrowOracles.lean"
+  let oracleSource ← IO.FS.readFile oraclePath
+  for name in corpseNames do
+    if name != "def sigmaInterval?" && (oracleSource.splitOn name).length == 1 then
+      oracleMissing := oracleMissing.push name
   IO.println s!"        {mods.size} production bake modules, {scanned} lines of GENERATED C (the compiler's own answer, not the source's spelling)"
-  IO.println s!"        libm call sites: {hits.size} · retired Float-tier definitions still in production: {corpses.size} · unreadable modules: {missing.size}"
-  if hits.isEmpty && corpses.isEmpty && missing.isEmpty && scanned > 1000 then
+  IO.println s!"        libm call sites: {hits.size} · retired Float-tier definitions still in production: {corpses.size} · oracle definitions missing: {oracleMissing.size} · unreadable modules: {missing.size}"
+  if hits.isEmpty && corpses.isEmpty && oracleMissing.isEmpty && missing.isEmpty && scanned > 1000 then
     passGate "exact-corpse"
       s!"no libm call survives the production bake graph — checked in the EMITTED C across {mods.size} modules and {scanned} lines, so no spelling (dot notation, an unlisted Float extern, an operator) can hide one; and no retired Float-tier definition remains, the oracle tier having moved outside the compiler to Tropical.Testing"
   else
     failGate "exact-corpse"
-      s!"libm {hits} · corpses {corpses} · missing {missing} · scanned {scanned}"
+      s!"libm {hits} · corpses {corpses} · oracleMissing {oracleMissing} · missing {missing} · scanned {scanned}"
 
 end Tropical.Tropicaltest.ExactGates

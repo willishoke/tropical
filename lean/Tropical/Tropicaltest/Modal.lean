@@ -34,25 +34,26 @@ open Tropical.EmitArrow in
     and outside it (the aᵢ· factor) as ONE hash-consed DAG node — exactly
     what makes unique binder ids load-bearing (de Bruijn spellings would
     fork it). -/
-private def nestedBankProbe (k1 k2 : Nat) : Sig :=
-  let aL (i : Nat) : Sig := lit (Int.ofNat (31 + 7 * i)) 2   -- aᵢ = 0.31 + 0.07·i
-  let bL (j : Nat) : Sig := lit (Int.ofNat (11 + 5 * j)) 2   -- bⱼ = 0.11 + 0.05·j
-  let colA := Sig.arr ((Array.range k1).map aL)
-  let colB := Sig.arr ((Array.range k2).map bL)
-  let aElem := Sig.index colA (Sig.loopIdx 0)
-  let bElem := Sig.index colB (Sig.loopIdx 1)
-  let inner := Sig.bankSum k2 #[colB] (add bElem aElem) none 1
-  Sig.bankSum k1 #[colA] (mul aElem inner) none 0
+private def nestedBankProbe (k1 k2 : Nat) : BuildM Sig := do
+  let aValues ← (Array.range k1).mapM fun i => lit (Int.ofNat (31 + 7 * i)) 2
+  let bValues ← (Array.range k2).mapM fun j => lit (Int.ofNat (11 + 5 * j)) 2
+  let colA ← arr aValues
+  let colB ← arr bValues
+  let aElem ← index colA (← loopIdx 0)
+  let bElem ← index colB (← loopIdx 1)
+  let inner ← bankSum k2 #[colB] (← add bElem aElem) none 1
+  bankSum k1 #[colA] (← mul aElem inner) none 0
 
 open Tropical.EmitArrow in
 /-- The probe's hand-unrolled reference, in the reduce loop's own visit
     order: ((0 + a₀·S₀) + a₁·S₁) + … with Sᵢ = ((0 + (b₀+aᵢ)) + (b₁+aᵢ)) + …. -/
-private def nestedBankUnrolled (k1 k2 : Nat) : Sig :=
-  let aL (i : Nat) : Sig := lit (Int.ofNat (31 + 7 * i)) 2
-  let bL (j : Nat) : Sig := lit (Int.ofNat (11 + 5 * j)) 2
-  (Array.range k1).foldl (fun acc i =>
-    let s := (Array.range k2).foldl (fun a j => add a (add (bL j) (aL i))) (lit 0)
-    add acc (mul (aL i) s)) (lit 0)
+private def nestedBankUnrolled (k1 k2 : Nat) : BuildM Sig := do
+  (Array.range k1).foldlM (fun accumulated i => do
+    let aValue ← lit (Int.ofNat (31 + 7 * i)) 2
+    let inner ← (Array.range k2).foldlM (fun sum j => do
+      let bValue ← lit (Int.ofNat (11 + 5 * j)) 2
+      add sum (← add bValue aValue)) (← lit 0)
+    add accumulated (← mul aValue inner)) (← lit 0)
 
 open Tropical.EmitArrow in
 /-- THE NESTED-BANKS gate (WS5): the nested-`bankSum` probe must emit exactly
@@ -66,8 +67,10 @@ open Tropical.EmitArrow in
     is always a region.) -/
 def runBanksNested (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
-  let fPlan := buildAndFinish (.ok (buildExprCarrier "nested_f4" (nestedBankProbe 4 4) arena))
-  let uPlan := buildAndFinish (.ok (buildExprCarrier "nested_u4" (nestedBankUnrolled 4 4) arena))
+  let fPlan := buildAndFinish (Tropical.EmitArrow.buildExprCarrier
+    "nested_f4" (nestedBankProbe 4 4) arena)
+  let uPlan := buildAndFinish (Tropical.EmitArrow.buildExprCarrier
+    "nested_u4" (nestedBankUnrolled 4 4) arena)
   match fPlan, uPlan with
   | .ok fp, .ok up =>
     match ← renderPlanSamples fp 2048, ← renderPlanSamples up 2048 with
@@ -75,7 +78,8 @@ def runBanksNested (arena : Arena)
       let n := min fS.size uS.size
       let bitDiff := bitDiffCount fS uS
       let nonzero := fS.any (· != 0.0)
-      match buildAndFinish (.ok (buildExprCarrier "nested_f16" (nestedBankProbe 16 16) arena)) with
+      match buildAndFinish (Tropical.EmitArrow.buildExprCarrier
+          "nested_f16" (nestedBankProbe 16 16) arena) with
       | .ok f16 =>
         let d := planInstrCount f16 - planInstrCount fp
         let regions := planTagCount "ReduceBegin" fp
@@ -88,8 +92,10 @@ def runBanksNested (arena : Arena)
         -- The TYPED Stage0 split must traverse the nested delimiters and
         -- still render byte-equal.
         let stagedOk ← do
-          match buildAndFinishStaged (.ok (buildExprCarrier "nested_f4s" (nestedBankProbe 4 4) arena)),
-                buildAndFinishStaged (.ok (buildExprCarrier "nested_u4s" (nestedBankUnrolled 4 4) arena)) with
+          match buildAndFinishStaged (Tropical.EmitArrow.buildExprCarrier
+                  "nested_f4s" (nestedBankProbe 4 4) arena),
+                buildAndFinishStaged (Tropical.EmitArrow.buildExprCarrier
+                  "nested_u4s" (nestedBankUnrolled 4 4) arena) with
           | .ok (pf, bf), .ok (pu, bu) =>
             let sf ← renderTypedBytes pf bf
             let su ← renderTypedBytes pu bu
@@ -114,7 +120,8 @@ open Tropical.EmitArrow in
     the loops close). -/
 def runBanksNestedMsl (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
-  match buildAndFinish (.ok (buildExprCarrier "nested_msl" (nestedBankProbe 4 4) arena)) with
+  match buildAndFinish (Tropical.EmitArrow.buildExprCarrier
+      "nested_msl" (nestedBankProbe 4 4) arena) with
   | .error e => failGate "banks-nested-msl" s!"build: {firstLine e}"
   | .ok fp =>
     match Tropical.Ir.EmitMsl.emitKernel fp with
@@ -143,11 +150,14 @@ def runBanksNestedMsl (arena : Arena)
     (monotone decay) cannot produce. -/
 def runModalDegree (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
-  let modes : Array Tropical.EmitArrow.ModalMode := #[
-    { sigma := Tropical.EmitArrow.lit 25, omega := Tropical.EmitArrow.lit 0,
-      cre := Tropical.EmitArrow.lit 1, deg := 1 }]
+  let modes : Tropical.EmitArrow.ModesM := do
+    let sigma ← Tropical.EmitArrow.lit 25
+    let zero ← Tropical.EmitArrow.lit 0
+    let one ← Tropical.EmitArrow.lit 1
+    pure #[{ sigma, omega := zero, cre := one, cim := zero, deg := 1 }]
   let anchor := Tropical.EmitArrow.lit 200
-  match buildAndFinish (.ok (Tropical.EmitArrow.buildModalBankArrow "modal_deg" modes anchor arena)) with
+  match buildAndFinish (Tropical.EmitArrow.buildModalBankArrow
+      "modal_deg" modes anchor arena) with
   | .ok p =>
     match ← renderPlanSamples p 8192 with
     | .ok s =>
@@ -195,20 +205,30 @@ def runModalDegree (arena : Arena)
     keep silent agreement from passing. -/
 def runLongTauModal (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
-  let modes : Array Tropical.EmitArrow.ModalMode := #[
-    Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 220) (Tropical.EmitArrow.lit 30 1) (Tropical.EmitArrow.lit 6 1),
-    Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 330) (Tropical.EmitArrow.lit 40 1) (Tropical.EmitArrow.lit 4 1),
-    Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 440) (Tropical.EmitArrow.lit 55 1) (Tropical.EmitArrow.lit 3 1)]
+  let mode (frequency sigma amplitude : Int) : Tropical.EmitArrow.BuildM
+      Tropical.EmitArrow.ModalMode := do
+    Tropical.EmitArrow.ModalMode.hz
+      (← Tropical.EmitArrow.lit frequency)
+      (← Tropical.EmitArrow.lit sigma 1)
+      (← Tropical.EmitArrow.lit amplitude 1)
+  let modes : Tropical.EmitArrow.ModesM :=
+    Tropical.EmitArrow.modeArray #[
+      mode 220 30 6, mode 330 40 4, mode 440 55 3]
   let K : Int := 1073741824                    -- 2³⁰ samples
   let Kq : Int := K * 4294967296               -- the same shift as a Q32.32 clock offset
-  let mkPair (tag : String) (clk : Tropical.EmitArrow.Clock) :
+  let mkPair (tag : String) (clk : Tropical.EmitArrow.BuildM
+      Tropical.EmitArrow.Clock) :
       Except String Tropical.Plan.FlatPlan × Except String Tropical.Plan.FlatPlan :=
-    (buildAndFinish (.ok (Tropical.EmitArrow.buildExprCarrier s!"modal_lt_{tag}_base"
-        (Tropical.EmitArrow.modalBankSig modes clk (Tropical.EmitArrow.lit 200)) arena)),
-     buildAndFinish (.ok (Tropical.EmitArrow.buildExprCarrier s!"modal_lt_{tag}_far"
-        (Tropical.EmitArrow.modalBankSig modes
-          (Tropical.EmitArrow.add clk (Tropical.EmitArrow.litI Kq))
-          (Tropical.EmitArrow.lit (K + 200)) ) arena)))
+    (buildAndFinish (Tropical.EmitArrow.buildExprCarrier
+      s!"modal_lt_{tag}_base" (do
+        Tropical.EmitArrow.modalBankSig (← modes) (← clk)
+          (← Tropical.EmitArrow.lit 200)) arena),
+     buildAndFinish (Tropical.EmitArrow.buildExprCarrier
+      s!"modal_lt_{tag}_far" (do
+        let farClock ← Tropical.EmitArrow.add (← clk)
+          (← Tropical.EmitArrow.litI Kq)
+        Tropical.EmitArrow.modalBankSig (← modes) farClock
+          (← Tropical.EmitArrow.lit (K + 200))) arena))
   let check (tag : String) (pair : Except String Tropical.Plan.FlatPlan × Except String Tropical.Plan.FlatPlan) :
       IO (Option (Nat × Float)) := do
     match pair with
@@ -228,11 +248,16 @@ def runLongTauModal (arena : Arena)
   -- (toInt(1.001·2³²) = 4299262263) — every sample has populated low bits. The
   -- literals ride `litI`: a bare `lit` would float-promote the clock arithmetic
   -- and round the very bits this gate exists to protect.
-  let velClk := Tropical.EmitArrow.mul
-    (Tropical.EmitArrow.rshift Tropical.EmitArrow.clockLit (Tropical.EmitArrow.lit 32))
-    (Tropical.EmitArrow.litI 4299262263)
+  let velClk : Tropical.EmitArrow.BuildM Tropical.EmitArrow.Clock := do
+    let samples ← Tropical.EmitArrow.rshift
+      (← Tropical.EmitArrow.clockLit)
+      (← Tropical.EmitArrow.lit 32)
+    Tropical.EmitArrow.mul samples
+      (← Tropical.EmitArrow.litI 4299262263)
   -- a bare sub-sample offset: one 2⁻³² unit off the whole-sample grid.
-  let subClk := Tropical.EmitArrow.add Tropical.EmitArrow.clockLit (Tropical.EmitArrow.litI 1)
+  let subClk : Tropical.EmitArrow.BuildM Tropical.EmitArrow.Clock := do
+    Tropical.EmitArrow.add (← Tropical.EmitArrow.clockLit)
+      (← Tropical.EmitArrow.litI 1)
   match ← check "vel" (mkPair "vel" velClk), ← check "sub" (mkPair "sub" subClk) with
   | some (d1, e1), some (d2, e2) =>
     IO.println s!"        bank @ origin vs struck+read 2³⁰ samples later (≈6.8h), fractional clocks, 1024 samples:"
@@ -251,15 +276,25 @@ def runLongTauModal (arena : Arena)
     modal `arrUn … (.clk c)` via the same `.warp` a master-clock scrub uses. -/
 def runModalReverse (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
-  let modes : Array Tropical.EmitArrow.ModalMode := #[
-    Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 220) (Tropical.EmitArrow.lit 30 1) (Tropical.EmitArrow.lit 6 1),
-    Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 330) (Tropical.EmitArrow.lit 40 1) (Tropical.EmitArrow.lit 4 1)]
+  let mode (frequency sigma amplitude : Int) : Tropical.EmitArrow.BuildM
+      Tropical.EmitArrow.ModalMode := do
+    Tropical.EmitArrow.ModalMode.hz
+      (← Tropical.EmitArrow.lit frequency)
+      (← Tropical.EmitArrow.lit sigma 1)
+      (← Tropical.EmitArrow.lit amplitude 1)
+  let modes : Tropical.EmitArrow.ModesM :=
+    Tropical.EmitArrow.modeArray #[mode 220 30 6, mode 330 40 4]
   let anchor := Tropical.EmitArrow.lit 200
   let twoC : Int := 2048 * 4294967296          -- reflect around sample C = 1024
-  let revφ : Tropical.EmitArrow.Clock → Tropical.EmitArrow.Clock :=
-    fun c => Tropical.EmitArrow.sub (Tropical.EmitArrow.lit twoC) c
-  match buildAndFinish (.ok (Tropical.EmitArrow.buildModalBankArrow "modal_fwd" modes anchor arena)),
-        buildAndFinish (.ok (Tropical.EmitArrow.buildModalBankWarped "modal_rev" modes anchor revφ arena)) with
+  let revφ : Tropical.EmitArrow.Clock →
+      Tropical.EmitArrow.BuildM Tropical.EmitArrow.Clock :=
+    fun clock => do
+      let center ← Tropical.EmitArrow.lit twoC
+      Tropical.EmitArrow.sub center clock
+  match buildAndFinish (Tropical.EmitArrow.buildModalBankArrow
+          "modal_fwd" modes anchor arena),
+        buildAndFinish (Tropical.EmitArrow.buildModalBankWarped
+          "modal_rev" modes anchor revφ arena) with
   | .ok fp, .ok rp =>
     match ← renderPlanSamples fp 2048, ← renderPlanSamples rp 2048 with
     | .ok fwd, .ok rev =>
@@ -283,8 +318,32 @@ def runModalReverse (arena : Arena)
 section ResidueGates
 open Tropical.EmitArrow
 
+private abbrev OracleCplx := Tropical.Testing.ArrowOracles.Cplx
+private abbrev OracleCplxB := Tropical.Testing.ArrowOracles.CplxB
+private abbrev NativeModes := BuildM (Array ModalMode)
+
+/-- Turn independent Float oracle data into arena-native modal fields.  Keeping
+    this conversion monadic ensures every field is allocated in the builder
+    whose frozen arena is later inspected or published. -/
+private def nativeMode
+    (pa : OracleCplx × OracleCplx) (deg : Nat := 0) : BuildM ModalMode := do
+  pure {
+    sigma := ← litF (-pa.1.re)
+    omega := ← litF pa.1.im
+    cre := ← litF pa.2.re
+    cim := ← litF pa.2.im
+    deg
+  }
+
+private def nativeModes (items : Array (OracleCplx × OracleCplx)) : NativeModes :=
+  items.mapM nativeMode
+
+private def nativeHz (frequency sigma amplitude : Float)
+    (deg : Nat := 0) : BuildM ModalMode := do
+  ModalMode.hz (← litF frequency) (← litF sigma) (← litF amplitude) deg
+
 /-- THE RESIDUE CALCULUS gate (exact, build-time). `voice ⋙ reverb` composed by
-    `residueCompose` must reproduce the convolution's Taylor jet at t=0: moment
+    `Tropical.Testing.ArrowOracles.residueCompose` must reproduce the convolution's Taylor jet at t=0: moment
     `Σ Aᵢμᵢᵏ` equals `y⁽ᵏ⁾(0)` for k=0..6, and the 0th moment `Σ A = 0` (a wrong
     sign, denominator, or a missing ringing term breaks one). `Σ A = 0` also means
     the composed tail starts continuously — the reverb has no onset click for free.
@@ -292,17 +351,17 @@ open Tropical.EmitArrow
 def runResidueMoments (_arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let tp := 6.283185307179586
-  let voice : Array (Cplx × Cplx) := #[
+  let voice : Array (Tropical.Testing.ArrowOracles.Cplx × Tropical.Testing.ArrowOracles.Cplx) := #[
     (⟨-2.0, tp * 220.0⟩, ⟨1.0, 0.0⟩),
     (⟨-2.5, tp * 330.0⟩, ⟨0.6, 0.0⟩)]
-  let reverb : Array (Cplx × Cplx) := #[
+  let reverb : Array (Tropical.Testing.ArrowOracles.Cplx × Tropical.Testing.ArrowOracles.Cplx) := #[
     (⟨-3.0, tp * 180.0⟩, ⟨0.7, 0.2⟩),
     (⟨-4.0, tp * 260.0⟩, ⟨-0.5, 0.4⟩),
     (⟨-5.0, tp * 350.0⟩, ⟨0.3, -0.6⟩),
     (⟨-6.0, tp * 500.0⟩, ⟨0.4, 0.1⟩)]
-  let modes := residueCompose voice reverb
-  let err := residueMomentError voice reverb 6
-  let sumA := modes.foldl (fun s m => s.add m.amp) (⟨0.0, 0.0⟩ : Cplx)
+  let modes := Tropical.Testing.ArrowOracles.residueCompose voice reverb
+  let err := Tropical.Testing.ArrowOracles.residueMomentError voice reverb 6
+  let sumA := modes.foldl (fun s m => s.add m.amp) (⟨0.0, 0.0⟩ : Tropical.Testing.ArrowOracles.Cplx)
   let sumAbsA := modes.foldl (fun s m => s + m.amp.abs) 0.0
   let onset := sumA.abs / (sumAbsA + 1e-300)
   IO.println s!"        voice(2 poles) ⋙ reverb(4 poles) → {modes.size} residue modes; jet-match k=0..6:"
@@ -312,7 +371,7 @@ def runResidueMoments (_arena : Arena)
   else
     failGate "residue-moments" s!"err={err} (want <1e-9) onset={onset} (want <1e-9)"
 
-/-- THE RESIDUE REVERB gate (emit). `buildModalReverb` runs the residue calculus
+/-- THE RESIDUE REVERB gate (emit). `Tropical.EmitArrow.buildModalReverb` runs the residue calculus
     and emits the composed bank; it must render a real, causal, DECAYING signal
     that starts CONTINUOUSLY at the strike — the `Σ A = 0` property means the first
     post-strike sample is ≈0 and grows (no onset click), unlike an authored bank
@@ -320,18 +379,19 @@ def runResidueMoments (_arena : Arena)
 def runModalReverb (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let tp := 6.283185307179586
-  let voice : Array (Cplx × Cplx) := #[
+  let voice : Array (Tropical.Testing.ArrowOracles.Cplx × Tropical.Testing.ArrowOracles.Cplx) := #[
     (⟨-2.0, tp * 220.0⟩, ⟨1.0, 0.0⟩),
     (⟨-2.5, tp * 330.0⟩, ⟨0.6, 0.0⟩)]
-  let reverb : Array (Cplx × Cplx) := #[
+  let reverb : Array (Tropical.Testing.ArrowOracles.Cplx × Tropical.Testing.ArrowOracles.Cplx) := #[
     (⟨-3.0, tp * 180.0⟩, ⟨0.7, 0.2⟩),
     (⟨-4.0, tp * 260.0⟩, ⟨-0.5, 0.4⟩),
     (⟨-5.0, tp * 350.0⟩, ⟨0.3, -0.6⟩),
     (⟨-6.0, tp * 500.0⟩, ⟨0.4, 0.1⟩)]
-  let anchor := lit 200
+  let anchor := Tropical.EmitArrow.lit 200
   -- render ~370 ms: the composed tail ramps up (click-free onset) over the first
   -- tens of ms, then decays over its RT — so compare energy AFTER the onset peak.
-  match buildAndFinish (.ok (buildModalReverb "modal_reverb" voice reverb anchor arena)) with
+  match buildAndFinish (Tropical.EmitArrow.buildModalReverb
+      "modal_reverb" voice reverb anchor arena) with
   | .ok p =>
     match ← renderPlanSamples p 16384 with
     | .ok s =>
@@ -349,7 +409,7 @@ def runModalReverb (arena : Arena)
       let mut eLate : Float := 0.0
       for i in [2048:6144] do eMid := eMid + s[i]! * s[i]!
       for i in [12288:16384] do eLate := eLate + s[i]! * s[i]!
-      IO.println s!"        buildModalReverb rendered (voice ⋙ reverb, struck @ sample 200):"
+      IO.println s!"        Tropical.EmitArrow.buildModalReverb rendered (voice ⋙ reverb, struck @ sample 200):"
       IO.println s!"        result   pre-strike |max|={preMax} · first-post |s|={firstPost} · peak={peak} · E[mid]={eMid} E[late]={eLate}"
       if preMax == 0.0 && peak > 1e-4 && firstPost < 0.02 * peak && eLate < eMid then
         passGate "modal-reverb" s!"residue-composed bank renders: causal, click-free onset (|first|≪peak), decaying tail ({n} samples)"
@@ -367,16 +427,24 @@ def runModalReverb (arena : Arena)
     audible, not a collapsed transient — the property the rotation version lacked. -/
 def runModalDirection (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
-  let modes : Array ModalMode := #[
-    ModalMode.hz (lit 220) (lit 30 1) (lit 6 1),
-    ModalMode.hz (lit 330) (lit 40 1) (lit 4 1)]
-  let anchor := lit 1024                        -- mid of 2048 ⇒ 2C = 2048
-  let fwdB := buildModalBankArrow "dir_fwd" modes anchor arena
-  let idB  := buildModalBankDir "dir_id"  modes anchor (lit 0) arena        -- forward
-  let revB := buildModalBankDir "dir_rev" modes anchor (lit 1) arena        -- reverse
-  let midB := buildModalBankDir "dir_mid" modes anchor (litF 0.5) arena     -- crossfade
-  match buildAndFinish (.ok fwdB), buildAndFinish (.ok idB),
-        buildAndFinish (.ok revB), buildAndFinish (.ok midB) with
+  let mode (frequency sigma amplitude : Int) : Tropical.EmitArrow.BuildM
+      Tropical.EmitArrow.ModalMode := do
+    Tropical.EmitArrow.ModalMode.hz
+      (← Tropical.EmitArrow.lit frequency)
+      (← Tropical.EmitArrow.lit sigma 1)
+      (← Tropical.EmitArrow.lit amplitude 1)
+  let modes : Tropical.EmitArrow.ModesM :=
+    Tropical.EmitArrow.modeArray #[mode 220 30 6, mode 330 40 4]
+  let anchor := Tropical.EmitArrow.lit 1024 -- mid of 2048 ⇒ 2C = 2048
+  let fwdB := Tropical.EmitArrow.buildModalBankArrow "dir_fwd" modes anchor arena
+  let idB := Tropical.EmitArrow.buildModalBankDir "dir_id" modes anchor
+    (Tropical.EmitArrow.lit 0) arena
+  let revB := Tropical.EmitArrow.buildModalBankDir "dir_rev" modes anchor
+    (Tropical.EmitArrow.lit 1) arena
+  let midB := Tropical.EmitArrow.buildModalBankDir "dir_mid" modes anchor
+    (Tropical.EmitArrow.litF 0.5) arena
+  match buildAndFinish fwdB, buildAndFinish idB,
+        buildAndFinish revB, buildAndFinish midB with
   | .ok fp, .ok ip, .ok rp, .ok mp =>
     match ← renderPlanSamples fp 2048, ← renderPlanSamples ip 2048,
           ← renderPlanSamples rp 2048, ← renderPlanSamples mp 2048 with
@@ -419,14 +487,25 @@ def runModalDirection (arena : Arena)
     the same clock leaf as the bank, so a master scrub reverses it coherently. -/
 def runModalSway (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
-  let modes : Array ModalMode := #[
-    ModalMode.hz (lit 220) (lit 30 1) (lit 6 1),
-    ModalMode.hz (lit 330) (lit 40 1) (lit 4 1)]
-  let anchor := lit 200
-  let noSway := buildModalBankDir "sway_no" modes anchor (lit 0) arena
-  let sway0  := buildModalBankDir "sway_0"  modes anchor (lit 0) arena (some (lit 0, lit 3 1))
-  let swayD  := buildModalBankDir "sway_d"  modes anchor (lit 0) arena (some (lit 5 1, lit 20 1))
-  match buildAndFinish (.ok noSway), buildAndFinish (.ok sway0), buildAndFinish (.ok swayD) with
+  let mode (frequency sigma amplitude : Int) : Tropical.EmitArrow.BuildM
+      Tropical.EmitArrow.ModalMode := do
+    Tropical.EmitArrow.ModalMode.hz
+      (← Tropical.EmitArrow.lit frequency)
+      (← Tropical.EmitArrow.lit sigma 1)
+      (← Tropical.EmitArrow.lit amplitude 1)
+  let modes : Tropical.EmitArrow.ModesM :=
+    Tropical.EmitArrow.modeArray #[mode 220 30 6, mode 330 40 4]
+  let anchor := Tropical.EmitArrow.lit 200
+  let direction := Tropical.EmitArrow.lit 0
+  let noSway := Tropical.EmitArrow.buildModalBankDir
+    "sway_no" modes anchor direction arena
+  let sway0 := Tropical.EmitArrow.buildModalBankDir
+    "sway_0" modes anchor direction arena (some
+      (Tropical.EmitArrow.lit 0, Tropical.EmitArrow.lit 3 1))
+  let swayD := Tropical.EmitArrow.buildModalBankDir
+    "sway_d" modes anchor direction arena (some
+      (Tropical.EmitArrow.lit 5 1, Tropical.EmitArrow.lit 20 1))
+  match buildAndFinish noSway, buildAndFinish sway0, buildAndFinish swayD with
   | .ok np, .ok zp, .ok dp =>
     match ← renderPlanSamples np 2048, ← renderPlanSamples zp 2048, ← renderPlanSamples dp 2048 with
     | .ok nos, .ok zos, .ok dos =>
@@ -458,22 +537,22 @@ def runModalSway (arena : Arena)
 
 /-- THE DEGENERATE RESIDUE gate. A voice pole placed EXACTLY on a reverb pole
     (sympathetic resonance) must compose to a `τ·e^{μd}` DOUBLE POLE, not blow up.
-    residueCompose must emit exactly one deg-1 mode, and — crucially — the
+    Tropical.Testing.ArrowOracles.residueCompose must emit exactly one deg-1 mode, and — crucially — the
     degree-aware moments must STILL reproduce the convolution jet (the double pole
     contributes `A·k·μ^{k−1}`), so the exact-coincidence limit is handled, not
     dodged. -/
 def runResidueDegenerate (_arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let tp := 6.283185307179586
-  let voice : Array (Cplx × Cplx) := #[
+  let voice : Array (Tropical.Testing.ArrowOracles.Cplx × Tropical.Testing.ArrowOracles.Cplx) := #[
     (⟨-3.0, tp * 260.0⟩, ⟨1.0, 0.0⟩)]        -- λ sits exactly on reverb pole #2
-  let reverb : Array (Cplx × Cplx) := #[
+  let reverb : Array (Tropical.Testing.ArrowOracles.Cplx × Tropical.Testing.ArrowOracles.Cplx) := #[
     (⟨-3.0, tp * 180.0⟩, ⟨0.7, 0.2⟩),
     (⟨-3.0, tp * 260.0⟩, ⟨-0.5, 0.4⟩),        -- ν = λ (coincident)
     (⟨-5.0, tp * 350.0⟩, ⟨0.3, -0.6⟩)]
-  let modes := residueCompose voice reverb
+  let modes := Tropical.Testing.ArrowOracles.residueCompose voice reverb
   let nDeg1 := modes.foldl (fun c m => if m.deg == 1 then c + 1 else c) 0
-  let err := residueMomentError voice reverb 6
+  let err := Tropical.Testing.ArrowOracles.residueMomentError voice reverb 6
   IO.println s!"        voice pole = reverb pole #2 (sympathetic): {modes.size} modes, {nDeg1} of degree 1:"
   IO.println s!"        result   deg-1 modes = {nDeg1}  ·  degree-aware moment error k=0..6 = {err}"
   if nDeg1 == 1 && err < 1e-9 then
@@ -483,26 +562,35 @@ def runResidueDegenerate (_arena : Arena)
 
 /-- THE SYMBOLIC RESIDUE gate. The residue calculus emitted as `Expr` couplings
     (`residueComposeE`, so poles/coeffs can be live slots) must, on LITERAL poles,
-    fold to the same bank as the validated Float `residueCompose`. Same voice ⋙
+    fold to the same bank as the validated Float `Tropical.Testing.ArrowOracles.residueCompose`. Same voice ⋙
     reverb built both ways renders equal (differing only by litF input-vs-output
     rounding). This is what makes modal params live without changing the math. -/
 def runResidueSymbolic (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let tp := 6.283185307179586
-  let voiceF : Array (Cplx × Cplx) := #[
+  let voiceF : Array (Tropical.Testing.ArrowOracles.Cplx × Tropical.Testing.ArrowOracles.Cplx) := #[
     (⟨-2.0, tp * 220.0⟩, ⟨1.0, 0.0⟩),
     (⟨-2.5, tp * 330.0⟩, ⟨0.6, 0.0⟩)]
-  let reverbF : Array (Cplx × Cplx) := #[
+  let reverbF : Array (Tropical.Testing.ArrowOracles.Cplx × Tropical.Testing.ArrowOracles.Cplx) := #[
     (⟨-3.0, tp * 180.0⟩, ⟨0.7, 0.2⟩),
     (⟨-4.0, tp * 260.0⟩, ⟨-0.5, 0.4⟩),
     (⟨-5.0, tp * 350.0⟩, ⟨0.3, -0.6⟩),
     (⟨-6.0, tp * 500.0⟩, ⟨0.4, 0.1⟩)]
-  let toMode := fun (pa : Cplx × Cplx) =>
-    ({ sigma := litF (-pa.1.re), omega := litF pa.1.im,
-       cre := litF pa.2.re, cim := litF pa.2.im } : ModalMode)
-  let anchor := lit 200
-  match buildAndFinish (.ok (buildModalReverb "rv_baked" voiceF reverbF anchor arena)),
-        buildAndFinish (.ok (buildModalReverbSym "rv_sym" (voiceF.map toMode) (reverbF.map toMode) anchor arena)) with
+  let toMode := fun (pa : Tropical.Testing.ArrowOracles.Cplx ×
+      Tropical.Testing.ArrowOracles.Cplx) => do
+    pure ({
+      sigma := ← Tropical.EmitArrow.litF (-pa.1.re)
+      omega := ← Tropical.EmitArrow.litF pa.1.im
+      cre := ← Tropical.EmitArrow.litF pa.2.re
+      cim := ← Tropical.EmitArrow.litF pa.2.im
+    } : Tropical.EmitArrow.ModalMode)
+  let voice : Tropical.EmitArrow.ModesM := (voiceF.map toMode).mapM id
+  let reverb : Tropical.EmitArrow.ModesM := (reverbF.map toMode).mapM id
+  let anchor := Tropical.EmitArrow.lit 200
+  match buildAndFinish (Tropical.EmitArrow.buildModalReverb
+          "rv_baked" voiceF reverbF anchor arena),
+        buildAndFinish (Tropical.EmitArrow.buildModalReverbSym
+          "rv_sym" voice reverb anchor arena) with
   | .ok bp, .ok sp =>
     match ← renderPlanSamples bp 4096, ← renderPlanSamples sp 4096 with
     | .ok bs, .ok ss =>
@@ -541,23 +629,36 @@ def runResidueSymbolic (arena : Arena)
 def runResidueCollected (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let tp := 6.283185307179586
-  let toMode := fun (pa : Cplx × Cplx) =>
-    ({ sigma := litF (-pa.1.re), omega := litF pa.1.im,
-       cre := litF pa.2.re, cim := litF pa.2.im } : ModalMode)
-  let voice : Array ModalMode := #[
+  let toMode := fun (pa : Tropical.Testing.ArrowOracles.Cplx ×
+      Tropical.Testing.ArrowOracles.Cplx) => do
+    pure ({
+      sigma := ← Tropical.EmitArrow.litF (-pa.1.re)
+      omega := ← Tropical.EmitArrow.litF pa.1.im
+      cre := ← Tropical.EmitArrow.litF pa.2.re
+      cim := ← Tropical.EmitArrow.litF pa.2.im
+    } : Tropical.EmitArrow.ModalMode)
+  let voice : Tropical.EmitArrow.ModesM := (#[
     (⟨-2.0, tp * 220.0⟩, ⟨1.0, 0.0⟩),
     (⟨-2.5, tp * 330.0⟩, ⟨0.6, 0.0⟩),
-    (⟨-3.5, tp * 440.0⟩, (⟨0.4, -0.2⟩ : Cplx))].map toMode
-  let reverb : Array ModalMode := #[
+    (⟨-3.5, tp * 440.0⟩, (⟨0.4, -0.2⟩ : Tropical.Testing.ArrowOracles.Cplx))].map toMode).mapM id
+  let reverb : Tropical.EmitArrow.ModesM := (#[
     (⟨-3.0, tp * 180.0⟩, ⟨0.7, 0.2⟩),
     (⟨-4.0, tp * 260.0⟩, ⟨-0.5, 0.4⟩),
     (⟨-5.0, tp * 350.0⟩, ⟨0.3, -0.6⟩),
-    (⟨-6.0, tp * 500.0⟩, ⟨0.4, 0.1⟩)].map toMode
-  let nU := (residueComposeE voice reverb).size
-  let nC := (residueComposeEC voice reverb).size
-  let anchor := lit 200
-  match buildAndFinish (.ok (buildModalReverbSym "rv_unc" voice reverb anchor arena)),
-        buildAndFinish (.ok (buildModalReverbSymC "rv_col" voice reverb anchor arena)) with
+    (⟨-6.0, tp * 500.0⟩, ⟨0.4, 0.1⟩)].map toMode).mapM id
+  let (nU, nC) := match Tropical.Testing.ArrowFixtures.runBuild arena do
+      let voice ← voice
+      let reverb ← reverb
+      let uncollected ← Tropical.EmitArrow.residueComposeE voice reverb
+      let collected ← Tropical.EmitArrow.residueComposeEC voice reverb
+      pure (uncollected.size, collected.size) with
+    | .ok (_, sizes) => sizes
+    | .error _ => (0, 0)
+  let anchor := Tropical.EmitArrow.lit 200
+  match buildAndFinish (Tropical.EmitArrow.buildModalReverbSym
+          "rv_unc" voice reverb anchor arena),
+        buildAndFinish (Tropical.EmitArrow.buildModalReverbSymC
+          "rv_col" voice reverb anchor arena) with
   | .ok up, .ok cp =>
     match ← renderPlanSamples up 4096, ← renderPlanSamples cp 4096 with
     | .ok us, .ok cs =>
@@ -580,31 +681,16 @@ def runResidueCollected (arena : Arena)
     | .error e, _ | _, .error e => failGate "residue-collected" s!"render: {firstLine e}"
   | .error e, _ | _, .error e => failGate "residue-collected" s!"build: {firstLine e}"
 
-/-- Evaluate a CONSTANT authoring `Sig` (the litF/±×÷/neg subtree the residue
-    algebra emits) back to its `Float`, so a gate can read a production
-    constructor's REAL emitted coefficients (hardening 0a-4c). Partial: `none` on
-    any non-constant/unsupported node. Div mirrors the kernel's zero-guard. Used
-    only in tests — never on a compile path. -/
-private def evalConstSig : Tropical.EmitArrow.Sig → Option Float
-  | .num n            => some n.toFloat
-  | .unary .neg a     => (evalConstSig a).map (fun x => -x)
-  | .unary .toFloat a => evalConstSig a
-  | .binary .add a b  => do pure ((← evalConstSig a) + (← evalConstSig b))
-  | .binary .sub a b  => do pure ((← evalConstSig a) - (← evalConstSig b))
-  | .binary .mul a b  => do pure ((← evalConstSig a) * (← evalConstSig b))
-  | .binary .div a b  => do
-      let x ← evalConstSig a; let y ← evalConstSig b
-      pure (if y == 0.0 then 0.0 else x / y)
-  | _                 => none
-
 /-- Read a `ModalMode`'s emitted (constant) fields back as `(pole μ = −σ+iω,
-    amp A = c_re+i·c_im)` — the inverse of `cmodeToModalMode`, for checking a
-    residue constructor's real output numerically. -/
-private def modeConst (m : Tropical.EmitArrow.ModalMode) : Option (Cplx × Cplx) := do
-  let σ ← evalConstSig m.sigma
-  let ω ← evalConstSig m.omega
-  let cr ← evalConstSig m.cre
-  let ci ← evalConstSig m.cim
+    amp A = c_re+i·c_im)` from the actual frozen expression arena. -/
+private def modeConst (constants : Array (Option Tropical.Exact.DyadicI))
+    (m : ModalMode) : Option (OracleCplx × OracleCplx) := do
+  let get := fun signal =>
+    (sigConstDFrom? constants signal).map Tropical.Exact.DyadicI.toFloat
+  let σ ← get m.sigma
+  let ω ← get m.omega
+  let cr ← get m.cre
+  let ci ← get m.cim
   pure (⟨-σ, ω⟩, ⟨cr, ci⟩)
 
 /-- THE INTEGRATE gate. `integrateBank` — the antiderivative as a build-time pole
@@ -624,17 +710,15 @@ def runModalIntegrate (arena : Arena)
   let tp := 6.283185307179586
   -- one undamped (σ=0, an LFO atom) + one damped mode, so the DC atom carries a
   -- nonzero real constant (the onset-zero property is genuinely exercised).
-  let srcF : Array (Cplx × Cplx) := #[
+  let srcF : Array (Tropical.Testing.ArrowOracles.Cplx × Tropical.Testing.ArrowOracles.Cplx) := #[
     (⟨0.0,  tp * 5.0⟩, ⟨1.0, 0.0⟩),
     (⟨-2.0, tp * 7.0⟩, ⟨0.6, 0.0⟩)]
-  let toMode := fun (pa : Cplx × Cplx) =>
-    ({ sigma := litF (-pa.1.re), omega := litF pa.1.im,
-       cre := litF pa.2.re, cim := litF pa.2.im } : ModalMode)
+  let source : NativeModes := nativeModes srcF
   -- (A) Float oracle bank: a ↦ a/μ, plus the DC atom −Σ a/μ. A re-derivation used
   -- ONLY as the RENDER reference for arm (B) (`int_ora`, below).
-  let integC : Array (Cplx × Cplx) := srcF.map (fun pa => (pa.1, pa.2.div pa.1))
-  let sumA := integC.foldl (fun s pa => s.add pa.2) (⟨0.0, 0.0⟩ : Cplx)
-  let oracleF : Array (Cplx × Cplx) := integC.push (⟨0.0, 0.0⟩, sumA.neg)
+  let integC : Array (Tropical.Testing.ArrowOracles.Cplx × Tropical.Testing.ArrowOracles.Cplx) := srcF.map (fun pa => (pa.1, pa.2.div pa.1))
+  let sumA := integC.foldl (fun s pa => s.add pa.2) (⟨0.0, 0.0⟩ : Tropical.Testing.ArrowOracles.Cplx)
+  let oracleF : Array (Tropical.Testing.ArrowOracles.Cplx × Tropical.Testing.ArrowOracles.Cplx) := integC.push (⟨0.0, 0.0⟩, sumA.neg)
   -- (A′, hardening 0a-4c) the JET LAW checked against `integrateBank`'s REAL
   -- output — the production `Sig` bank read back with `evalConstSig`, NOT a
   -- re-derivation of its `a↦a/μ` formula. (The OLD arms built a local oracle with
@@ -645,8 +729,13 @@ def runModalIntegrate (arena : Arena)
   -- arm is invariant to a coupled pole-shift — it certifies the `cdivE` amp half;
   -- arm (B)'s `int_ora` (built from the source pole) and arm (C)'s source-render
   -- trapezoid pin the pole PLACEMENT.
-  let integOut := integrateBank (srcF.map toMode)
-  let integCplx := integOut.filterMap modeConst          -- (pole μ, amp A_int) per mode
+  let (frozen, integOut) :=
+    match Tropical.Testing.ArrowFixtures.freezeBuild arena do
+        integrateBank (← source) with
+    | .ok result => result
+    | .error _ => ({}, #[])
+  let constants := sigConstTable frozen
+  let integCplx := integOut.filterMap (modeConst constants) -- (pole μ, amp A_int) per mode
   let mut jetErr : Float := 0.0
   for i in [0:srcF.size] do
     match integCplx[i]? with
@@ -655,7 +744,7 @@ def runModalIntegrate (arena : Arena)
       let e := (recovered.add (srcF[i]!.2).neg).abs
       if e > jetErr then jetErr := e
     | none => jetErr := 1.0e9                              -- an unreadable mode ⇒ fail
-  let onsetA := (integCplx.foldl (fun s pa => s.add pa.2) (⟨0.0, 0.0⟩ : Cplx)).abs
+  let onsetA := (integCplx.foldl (fun s pa => s.add pa.2) (⟨0.0, 0.0⟩ : Tropical.Testing.ArrowOracles.Cplx)).abs
   let structOk :=
     integOut.size == srcF.size + 1
       && integCplx.size == integOut.size                   -- every emitted mode read back
@@ -663,9 +752,9 @@ def runModalIntegrate (arena : Arena)
           | some (μ, _) => μ.re == 0.0 && μ.im == 0.0      -- the DC atom sits at pole 0
           | none => false)
   let anchor := lit 0                                            -- strike at sample 0
-  match buildAndFinish (.ok (buildModalBankArrow "int_src" (srcF.map toMode) anchor arena)),
-        buildAndFinish (.ok (buildModalBankArrow "int_sym" (integrateBank (srcF.map toMode)) anchor arena)),
-        buildAndFinish (.ok (buildModalBankArrow "int_ora" (oracleF.map toMode) anchor arena)) with
+  match buildAndFinish (buildModalBankArrow "int_src" source anchor arena),
+        buildAndFinish (buildModalBankArrow "int_sym" (do integrateBank (← source)) anchor arena),
+        buildAndFinish (buildModalBankArrow "int_ora" (nativeModes oracleF) anchor arena) with
   | .ok srcP, .ok symP, .ok oraP =>
     match ← renderPlanSamples srcP 4096, ← renderPlanSamples symP 4096,
           ← renderPlanSamples oraP 4096 with
@@ -716,19 +805,21 @@ def runModalIntegrate (arena : Arena)
 def runModalPair (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let tp := 6.283185307179586
-  let toMode := fun (pa : Cplx × Cplx) =>
-    ({ sigma := litF (-pa.1.re), omega := litF pa.1.im,
-       cre := litF pa.2.re, cim := litF pa.2.im } : ModalMode)
-  let modes : Array ModalMode := #[
-    (⟨-2.0, tp * 220.0⟩, (⟨0.6, 0.2⟩ : Cplx)),
+  let modeData : Array (OracleCplx × OracleCplx) := #[
+    (⟨-2.0, tp * 220.0⟩, (⟨0.6, 0.2⟩ : Tropical.Testing.ArrowOracles.Cplx)),
     (⟨-3.0, tp * 337.0⟩, ⟨0.4, -0.3⟩),
-    (⟨-4.0, tp * 511.0⟩, ⟨0.3, 0.1⟩)].map toMode
-  let rot := modes.map (fun m => { m with cre := m.cim, cim := neg m.cre })
+    (⟨-4.0, tp * 511.0⟩, ⟨0.3, 0.1⟩)]
+  let modes : NativeModes := nativeModes modeData
+  let rot : NativeModes := do
+    (← modes).mapM fun m => do pure { m with cre := m.cim, cim := ← neg m.cre }
   let anchor := lit 200
-  let ((reA, reP), (imA, imP)) := buildModalBankPair "pair_re" "pair_im" modes anchor arena
-  match buildAndFinish (.ok (reA, reP)), buildAndFinish (.ok (imA, imP)),
-        buildAndFinish (.ok (buildModalBankTable "pair_ref_re" modes anchor arena)),
-        buildAndFinish (.ok (buildModalBankTable "pair_ref_im" rot anchor arena)) with
+  let reBuild : Except String (Arena × ProgramIdx) := do
+    pure (← buildModalBankPair "pair_re" "pair_im" modes anchor arena).1
+  let imBuild : Except String (Arena × ProgramIdx) := do
+    pure (← buildModalBankPair "pair_re" "pair_im" modes anchor arena).2
+  match buildAndFinish reBuild, buildAndFinish imBuild,
+        buildAndFinish (buildModalBankTable "pair_ref_re" modes anchor arena),
+        buildAndFinish (buildModalBankTable "pair_ref_im" rot anchor arena) with
   | .ok rePlan, .ok imPlan, .ok refRe, .ok refIm =>
     match ← renderPlanSamples rePlan 4096, ← renderPlanSamples imPlan 4096,
           ← renderPlanSamples refRe 4096, ← renderPlanSamples refIm 4096 with
@@ -775,12 +866,12 @@ def runModalBessel (arena : Arena)
     energy := energy + jn * jn
   let parseval := fabs (energy - 1.0)
   -- (iii) superexponential render convergence (self-reference to N=19 ≈ exact)
-  let carrier : Array ModalMode := #[ModalMode.hz (lit 220) (lit 20 1) (lit 1)]
+  let carrier : NativeModes := do pure #[← nativeHz 220.0 2.0 1.0]
   let anchor := lit 200
   let fuse := fun (nm : String) (N : Nat) =>
-    buildModalBankArrow nm (besselFuse carrier wm b N) anchor arena
-  match buildAndFinish (.ok (fuse "fz5" 5)), buildAndFinish (.ok (fuse "fz8" 8)),
-        buildAndFinish (.ok (fuse "fz11" 11)), buildAndFinish (.ok (fuse "fzR" 19)) with
+    buildModalBankArrow nm (do besselFuse (← carrier) wm b N) anchor arena
+  match buildAndFinish (fuse "fz5" 5), buildAndFinish (fuse "fz8" 8),
+        buildAndFinish (fuse "fz11" 11), buildAndFinish (fuse "fzR" 19) with
   | .ok p5, .ok p8, .ok p11, .ok pR =>
     match ← renderPlanSamples p5 4096, ← renderPlanSamples p8 4096,
           ← renderPlanSamples p11 4096, ← renderPlanSamples pR 4096 with
@@ -822,12 +913,13 @@ def runModalHeterodyne (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let b := 3.0
   let wm := 2.0 * 3.141592653589793 * 308.0
-  let carrier : Array ModalMode := #[
-    ModalMode.hz (lit 220) (lit 20 1) (lit 1),
-    ModalMode.hz (lit 330) (lit 30 1) (lit 5 1)]
+  let carrier : NativeModes := do pure #[
+    ← nativeHz 220.0 2.0 1.0,
+    ← nativeHz 330.0 3.0 0.5]
   let anchor := lit 200
-  match buildAndFinish (.ok (buildHeterodyne "het" carrier wm b anchor arena)),
-        buildAndFinish (.ok (buildModalBankArrow "hetFuse" (besselFuse carrier wm b 19) anchor arena)) with
+  match buildAndFinish (buildHeterodyne "het" carrier wm b anchor arena),
+        buildAndFinish (buildModalBankArrow "hetFuse"
+          (do besselFuse (← carrier) wm b 19) anchor arena) with
   | .ok hetP, .ok fuseP =>
     match ← renderPlanSamples hetP 4096, ← renderPlanSamples fuseP 4096 with
     | .ok hS, .ok fS =>
@@ -852,10 +944,10 @@ def runModalHeterodyne (arena : Arena)
 
 /-- RK4 of the modulated-resonator ODE `ẋ = μ(t)·x`, `μ(t) = −σ + iω₀(1 + p·cos ω_m t)`,
     from `x(0)=1` to `T` in `n` steps — the independent oracle for `modal-vco`. -/
-private def rk4Osc (sigma om0 p wm T : Float) (n : Nat) : Cplx := Id.run do
+private def rk4Osc (sigma om0 p wm T : Float) (n : Nat) : Tropical.Testing.ArrowOracles.Cplx := Id.run do
   let h := T / n.toFloat
-  let mu := fun (t : Float) => (⟨-sigma, om0 * (1.0 + p * Float.cos (wm * t))⟩ : Cplx)
-  let mut x : Cplx := ⟨1.0, 0.0⟩
+  let mu := fun (t : Float) => (⟨-sigma, om0 * (1.0 + p * Float.cos (wm * t))⟩ : Tropical.Testing.ArrowOracles.Cplx)
+  let mut x : Tropical.Testing.ArrowOracles.Cplx := ⟨1.0, 0.0⟩
   let mut t : Float := 0.0
   for _ in [0:n] do
     let k1 := (mu t).mul x
@@ -889,11 +981,11 @@ def runModalVco (arena : Arena)
   let env := Float.exp (-sigma * T)
   -- integrated reading closed form: phase = ω₀(T + p·sin(ω_m T)/ω_m)
   let phiInt := om0 * (T + p * Float.sin (wm * T) / wm)
-  let xInt : Cplx := ⟨env * Float.cos phiInt, env * Float.sin phiInt⟩
+  let xInt : Tropical.Testing.ArrowOracles.Cplx := ⟨env * Float.cos phiInt, env * Float.sin phiInt⟩
   -- snapshot reading: pole read at T, applied over the whole elapsed T
   let omSnap := om0 * (1.0 + p * Float.cos (wm * T))
-  let xSnap : Cplx := ⟨env * Float.cos (omSnap * T), env * Float.sin (omSnap * T)⟩
-  let relTo := fun (a b : Cplx) => (a.add b.neg).abs / (b.abs + 1e-300)
+  let xSnap : Tropical.Testing.ArrowOracles.Cplx := ⟨env * Float.cos (omSnap * T), env * Float.sin (omSnap * T)⟩
+  let relTo := fun (a b : Tropical.Testing.ArrowOracles.Cplx) => (a.add b.neg).abs / (b.abs + 1e-300)
   let e500 := relTo xInt (rk4Osc sigma om0 p wm T 500)
   let e1000 := relTo xInt (rk4Osc sigma om0 p wm T 1000)
   let e2000 := relTo xInt (rk4Osc sigma om0 p wm T 2000)
@@ -902,18 +994,22 @@ def runModalVco (arena : Arena)
   let snapErr := relTo xSnap (rk4Osc sigma om0 p wm T 4000)
   -- the integrated realization + a RAW-BANK variant (hardening 0a-1): the same
   -- carrier, but θ from the un-integrated LFO bank instead of `integrateBank lfo`
-  -- — a LOCAL fixture copy (production `buildIntegratedPoleReading` untouched). Its
+  -- — a LOCAL fixture copy (production `Tropical.EmitArrow.buildIntegratedPoleReading` untouched). Its
   -- θ = ω₀p·cos(ω_m d), NOT ω₀p·sin(ω_m d)/ω_m, so it must DIVERGE from the oracle:
   -- the proof that the render-vs-oracle check below has teeth.
-  let carrier : Array ModalMode := #[ModalMode.hz (litF f0) (litF sigma) (lit 1)]
-  let lfo : Array ModalMode := #[ModalMode.hz (litF fm) (lit 0) (lit 1)]
+  let carrier : NativeModes := do pure #[← nativeHz f0 sigma 1.0]
+  let lfo : NativeModes := do pure #[← nativeHz fm 0.0 1.0]
   let anchor := lit 200
-  let rawVariant : Arena × ProgramIdx :=
-    let (re, im) := modalBankSigPairTable carrier clockLit anchor
-    let thetaRaw := mul (litF (om0 * p)) (modalBankSig lfo clockLit anchor)
-    buildExprCarrier "vco_raw" (sub (mul re (cosSig thetaRaw)) (mul im (sinSig thetaRaw))) arena
-  match buildAndFinish (.ok (buildIntegratedPoleReading "vco" carrier lfo (om0 * p) anchor arena)),
-        buildAndFinish (.ok rawVariant) with
+  let rawVariant := buildExprCarrier "vco_raw" (do
+    let clock ← clockLit
+    let anchor ← anchor
+    let (re, im) ← modalBankSigPairTable (← carrier) clock anchor
+    let thetaRaw ← mul (← litF (om0 * p))
+      (← modalBankSig (← lfo) clock anchor)
+    sub (← mul re (← cosSig thetaRaw)) (← mul im (← sinSig thetaRaw))) arena
+  match buildAndFinish (buildIntegratedPoleReading "vco" carrier lfo
+          (om0 * p) (lit 200) arena),
+        buildAndFinish rawVariant with
   | .ok vp, .ok rawP =>
     match ← renderPlanSamples vp 4096, ← renderPlanSamples rawP 4096 with
     | .ok s, .ok sRaw =>
@@ -925,7 +1021,7 @@ def runModalVco (arena : Arena)
       -- oracle `sinkGain·env(d)·cos(φ_int(d))` at MATCHED sample offsets — the
       -- render is samples at SR anchored @200, so d = (i−200)/SR; the oracle is
       -- Re(x_int(d)), env=e^{−σd}, φ_int=ω₀(d + p·sin(ω_m d)/ω_m). This exercises
-      -- `buildIntegratedPoleReading`'s ACTUAL render (was only smoke-checked). The
+      -- `Tropical.EmitArrow.buildIntegratedPoleReading`'s ACTUAL render (was only smoke-checked). The
       -- raw variant is measured against the SAME oracle and must blow past `bound`.
       let n := min (min s.size sRaw.size) 4096
       let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
@@ -970,19 +1066,18 @@ def runModalReclock (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let tp := 6.283185307179586
   let fabs := fun (x : Float) => if x < 0.0 then -x else x
-  let toMode := fun (pa : Cplx × Cplx) =>
-    ({ sigma := litF (-pa.1.re), omega := litF pa.1.im,
-       cre := litF pa.2.re, cim := litF pa.2.im } : ModalMode)
-  let modes : Array ModalMode := #[
-    (⟨-2.0, tp * 220.0⟩, (⟨0.6, 0.2⟩ : Cplx)),
-    (⟨-3.0, tp * 337.0⟩, ⟨0.4, -0.3⟩)].map toMode
+  let modes : NativeModes := nativeModes #[
+    (⟨-2.0, tp * 220.0⟩, (⟨0.6, 0.2⟩ : Tropical.Testing.ArrowOracles.Cplx)),
+    (⟨-3.0, tp * 337.0⟩, ⟨0.4, -0.3⟩)]
   let anchor := lit 0
   let dS : Nat := 10
-  let recA := reclockAffine (litF 1.0) (litF (dS.toFloat / 44100.0)) modes   -- delay
-  let recB := reclockAffine (litF 2.0) (litF 0.0) modes                       -- scale
-  match buildAndFinish (.ok (buildModalBankArrow "rc_o" modes anchor arena)),
-        buildAndFinish (.ok (buildModalBankArrow "rc_a" recA anchor arena)),
-        buildAndFinish (.ok (buildModalBankArrow "rc_b" recB anchor arena)) with
+  let recA : NativeModes := do
+    reclockAffine (← litF 1.0) (← litF (dS.toFloat / 44100.0)) (← modes)
+  let recB : NativeModes := do
+    reclockAffine (← litF 2.0) (← litF 0.0) (← modes)
+  match buildAndFinish (buildModalBankArrow "rc_o" modes anchor arena),
+        buildAndFinish (buildModalBankArrow "rc_a" recA anchor arena),
+        buildAndFinish (buildModalBankArrow "rc_b" recB anchor arena) with
   | .ok op, .ok ap, .ok bp =>
     match ← renderPlanSamples op 8192, ← renderPlanSamples ap 4096,
           ← renderPlanSamples bp 4096 with
@@ -1025,36 +1120,37 @@ def runResidueDivDiff (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let tp := 6.283185307179586
   let fabs := fun (x : Float) => if x < 0.0 then -x else x
-  let toMode := fun (pa : Cplx × Cplx) =>
-    ({ sigma := litF (-pa.1.re), omega := litF pa.1.im,
-       cre := litF pa.2.re, cim := litF pa.2.im } : ModalMode)
-  let voiceF : Array (Cplx × Cplx) := #[
+  let voiceF : Array (Tropical.Testing.ArrowOracles.Cplx × Tropical.Testing.ArrowOracles.Cplx) := #[
     (⟨-2.0, tp * 220.0⟩, ⟨1.0, 0.0⟩), (⟨-2.5, tp * 330.0⟩, ⟨0.6, 0.0⟩)]
-  let reverbF : Array (Cplx × Cplx) := #[
+  let reverbF : Array (Tropical.Testing.ArrowOracles.Cplx × Tropical.Testing.ArrowOracles.Cplx) := #[
     (⟨-3.0, tp * 180.0⟩, ⟨0.7, 0.2⟩), (⟨-4.0, tp * 260.0⟩, ⟨-0.5, 0.4⟩),
     (⟨-5.0, tp * 350.0⟩, ⟨0.3, -0.6⟩), (⟨-6.0, tp * 500.0⟩, ⟨0.4, 0.1⟩)]
-  let voice := voiceF.map toMode
-  let reverb := reverbF.map toMode
+  let voice : NativeModes := nativeModes voiceF
+  let reverb : NativeModes := nativeModes reverbF
   let anchor := lit 200
-  let nDD := (residueComposeDD voice reverb).size
+  let nDD := match Tropical.Testing.ArrowFixtures.runBuild arena do
+      pure (← residueComposeDD (← voice) (← reverb)).size with
+    | .ok (_, count) => count
+    | .error _ => 0
   -- arm 3 (algebraic): |c|=|a·r| bounded; collected |a·r/Δ| overflows at Δ=0.03
   let mut cMax : Float := 0.0
   for pa in voiceF do
     for pr in reverbF do
-      let m := (Cplx.mul pa.2 pr.2).abs
+      let m := (Tropical.Testing.ArrowOracles.Cplx.mul pa.2 pr.2).abs
       if m > cMax then cMax := m
   let overflowsAt003 := cMax / 0.03
   -- arm 2 (coincidence): one paired mode λ=ν ≡ a deg-1 τ·e bank at ω=2π·220
-  let cpole : Cplx := ⟨-2.0, tp * 220.0⟩
-  let vC := #[(cpole, (⟨1.0, 0.0⟩ : Cplx))].map toMode
-  let rC := #[(cpole, (⟨0.5, 0.2⟩ : Cplx))].map toMode
-  let ar := Cplx.mul ⟨1.0, 0.0⟩ ⟨0.5, 0.2⟩
-  let deg1 : Array ModalMode := #[
-    { sigma := litF 2.0, omega := litF (tp * 220.0), cre := litF ar.re, cim := litF ar.im, deg := 1 }]
-  match buildAndFinish (.ok (buildModalReverbDD "dd_far" voice reverb anchor arena)),
-        buildAndFinish (.ok (buildModalReverbSymC "col_far" voice reverb anchor arena)),
-        buildAndFinish (.ok (buildModalReverbDD "dd_coin" vC rC anchor arena)),
-        buildAndFinish (.ok (buildModalBankArrow "deg1_ref" deg1 anchor arena)) with
+  let cpole : Tropical.Testing.ArrowOracles.Cplx := ⟨-2.0, tp * 220.0⟩
+  let vC : NativeModes := nativeModes #[(cpole, (⟨1.0, 0.0⟩ : OracleCplx))]
+  let rC : NativeModes := nativeModes #[(cpole, (⟨0.5, 0.2⟩ : OracleCplx))]
+  let ar := Tropical.Testing.ArrowOracles.Cplx.mul ⟨1.0, 0.0⟩ ⟨0.5, 0.2⟩
+  let deg1 : NativeModes := do pure #[{
+    sigma := ← litF 2.0, omega := ← litF (tp * 220.0)
+    cre := ← litF ar.re, cim := ← litF ar.im, deg := 1 }]
+  match buildAndFinish (buildModalReverbDD "dd_far" voice reverb anchor arena),
+        buildAndFinish (buildModalReverbSymC "col_far" voice reverb anchor arena),
+        buildAndFinish (buildModalReverbDD "dd_coin" vC rC anchor arena),
+        buildAndFinish (buildModalBankArrow "deg1_ref" deg1 anchor arena) with
   | .ok ddF, .ok colF, .ok ddC, .ok refC =>
     match ← renderPlanSamples ddF 4096, ← renderPlanSamples colF 4096,
           ← renderPlanSamples ddC 4096, ← renderPlanSamples refC 4096 with
@@ -1087,24 +1183,24 @@ def runResidueDivDiff (arena : Arena)
       -- can't be the oracle here: its |a·r/Δ| overflows Q4.28 at small Δ (arm 3). At
       -- tgt=1.0 z reaches ~0.088 (<0.1 ⇒ still the series branch), where the
       -- low-order z²/z³ coefficients bite.
-      let cexp := fun (w : Cplx) =>
+      let cexp := fun (w : Tropical.Testing.ArrowOracles.Cplx) =>
         let m := Float.exp w.re
-        (⟨m * Float.cos w.im, m * Float.sin w.im⟩ : Cplx)
-      let dirC : Cplx := ⟨Float.cos 0.7, Float.sin 0.7⟩
-      let nuC : Cplx := ⟨-2.0, tp * 220.0⟩            -- the shared reverb pole ν
-      let rC2 : Cplx := ⟨0.7, 0.2⟩                    -- reverb residue r
-      let aC : Cplx := ⟨1.0, 0.0⟩                     -- voice amp a
-      let cC := Cplx.mul aC rC2                        -- c = a·r (bounded)
+        (⟨m * Float.cos w.im, m * Float.sin w.im⟩ : Tropical.Testing.ArrowOracles.Cplx)
+      let dirC : Tropical.Testing.ArrowOracles.Cplx := ⟨Float.cos 0.7, Float.sin 0.7⟩
+      let nuC : Tropical.Testing.ArrowOracles.Cplx := ⟨-2.0, tp * 220.0⟩            -- the shared reverb pole ν
+      let rC2 : Tropical.Testing.ArrowOracles.Cplx := ⟨0.7, 0.2⟩                    -- reverb residue r
+      let aC : Tropical.Testing.ArrowOracles.Cplx := ⟨1.0, 0.0⟩                     -- voice amp a
+      let cC := Tropical.Testing.ArrowOracles.Cplx.mul aC rC2                        -- c = a·r (bounded)
       let targets : Array Float := #[1.0, 3e-1, 1e-1, 3e-2, 1e-2, 1e-3, 1e-4, 1e-6]
       let mut sweepMax : Float := 0.0
       let mut sweepOk := true
       let mut sweepWorstTgt : Float := 0.0
       for ti in [0:targets.size] do
         let tgt := targets[ti]!
-        let lamC : Cplx := nuC.add (dirC.mul ⟨tgt, 0.0⟩)   -- λ = ν + tgt·e^{i·0.7}
-        let vS := #[(lamC, aC)].map toMode
-        let rS := #[(nuC, rC2)].map toMode
-        match buildAndFinish (.ok (buildModalReverbDD s!"dd_sw{ti}" vS rS anchor arena)) with
+        let lamC : Tropical.Testing.ArrowOracles.Cplx := nuC.add (dirC.mul ⟨tgt, 0.0⟩)   -- λ = ν + tgt·e^{i·0.7}
+        let vS : NativeModes := nativeModes #[(lamC, aC)]
+        let rS : NativeModes := nativeModes #[(nuC, rC2)]
+        match buildAndFinish (buildModalReverbDD s!"dd_sw{ti}" vS rS anchor arena) with
         | .error _ => sweepOk := false
         | .ok ddP =>
           match ← renderPlanSamples ddP 4096 with
@@ -1112,8 +1208,8 @@ def runResidueDivDiff (arena : Arena)
           | .ok ds =>
             for i in [201:min ds.size 4096] do
               let d := (i.toFloat - 200.0) / 44100.0
-              let z := (Cplx.sub lamC nuC).mul ⟨d, 0.0⟩              -- (λ−ν)·d
-              let cxm1 := (Cplx.sub (cexp z) ⟨1.0, 0.0⟩).div z        -- (e^z−1)/z direct
+              let z := (Tropical.Testing.ArrowOracles.Cplx.sub lamC nuC).mul ⟨d, 0.0⟩              -- (λ−ν)·d
+              let cxm1 := (Tropical.Testing.ArrowOracles.Cplx.sub (cexp z) ⟨1.0, 0.0⟩).div z        -- (e^z−1)/z direct
               let enu := cexp (nuC.mul ⟨d, 0.0⟩)                      -- e^{νd}
               let contrib := ((cC.mul ⟨d, 0.0⟩).mul enu).mul cxm1     -- c·d·e^{νd}·cexpm1
               let e := fabs (ds[i]! - Tropical.Plan.defaultSinkGain.toFloat * contrib.re)
@@ -1126,7 +1222,7 @@ def runResidueDivDiff (arena : Arena)
       IO.println s!"        arm4     series-branch sweep max|Δ|={sweepMax*1e9}e-9 (bound {sweepBound*1e9}e-9) @tgt={sweepWorstTgt} · builds ok={sweepOk}"
       -- (hardening 0a-4) arm 1 tightened from 2e-3 to 2e-5 (~10× the observed
       -- ~2e-6 SR/2³² frequency-grid floor); the old 2e-3 was ~1000× above it.
-      if nDD == voice.size * reverb.size && rel1 < 2e-5 && m2 < bound2 && e2 > 1e-9
+      if nDD == voiceF.size * reverbF.size && rel1 < 2e-5 && m2 < bound2 && e2 > 1e-9
           && cMax < 8.0 && overflowsAt003 > 8.0 && sweepOk && sweepMax < sweepBound then
         passGate "residue-divdiff" s!"fused paired modes: away-from-coincidence ≡ collected (rel {rel1}); coincidence ≡ τ·e within the Q4.28 quantum (max|Δ| {m2*1e9}e-9, a tolerance — not bit-identity); near-coincidence series sweep ≡ direct-double oracle (max|Δ| {sweepMax}); |c|={cMax}<8 vs collected 1/Δ overflow — stable, no 1/Δ"
       else
@@ -1147,22 +1243,27 @@ def runResidueDivDiff (arena : Arena)
 def runResidueBanked (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let tp := 6.283185307179586
-  let toMode := fun (pa : Cplx × Cplx) =>
-    ({ sigma := litF (-pa.1.re), omega := litF pa.1.im,
-       cre := litF pa.2.re, cim := litF pa.2.im } : ModalMode)
-  let voice := #[
-    (⟨-2.0, tp * 220.0⟩, (⟨1.0, 0.0⟩ : Cplx)), (⟨-2.5, tp * 330.0⟩, ⟨0.6, 0.0⟩)].map toMode
-  let reverb := #[
-    (⟨-3.0, tp * 180.0⟩, (⟨0.7, 0.2⟩ : Cplx)), (⟨-4.0, tp * 260.0⟩, ⟨-0.5, 0.4⟩),
-    (⟨-5.0, tp * 350.0⟩, ⟨0.3, -0.6⟩), (⟨-6.0, tp * 500.0⟩, ⟨0.4, 0.1⟩)].map toMode
+  let voiceData : Array (OracleCplx × OracleCplx) := #[
+    (⟨-2.0, tp * 220.0⟩, (⟨1.0, 0.0⟩ : Tropical.Testing.ArrowOracles.Cplx)), (⟨-2.5, tp * 330.0⟩, ⟨0.6, 0.0⟩)]
+  let reverbData : Array (OracleCplx × OracleCplx) := #[
+    (⟨-3.0, tp * 180.0⟩, (⟨0.7, 0.2⟩ : Tropical.Testing.ArrowOracles.Cplx)), (⟨-4.0, tp * 260.0⟩, ⟨-0.5, 0.4⟩),
+    (⟨-5.0, tp * 350.0⟩, ⟨0.3, -0.6⟩), (⟨-6.0, tp * 500.0⟩, ⟨0.4, 0.1⟩)]
+  let voice : NativeModes := nativeModes voiceData
+  let reverb : NativeModes := nativeModes reverbData
   let anchor := lit 200
-  let nB := (residueComposeBanked voice reverb).size
+  let nB := match Tropical.Testing.ArrowFixtures.runBuild arena do
+      pure (← residueComposeBanked (← voice) (← reverb)).size with
+    | .ok (_, count) => count
+    | .error _ => 0
   -- flatness: live paramRef poles keep the Cauchy sums out of the const-folder
-  let pr := fun (i : Nat) => (Sig.paramRef ⟨i⟩ : Sig)
-  let mkLive := fun (b : Nat) =>
-    ({ sigma := pr b, omega := pr (b + 1), cre := pr (b + 2), cim := pr (b + 3) } : ModalMode)
-  let voiceL := (Array.range 6).map (fun i => mkLive (4 * i))
-  let reverbL := (Array.range 6).map (fun i => mkLive (24 + 4 * i))
+  let mkLive := fun (b : Nat) => do
+    let sigma ← paramRef ⟨b⟩
+    let omega ← paramRef ⟨b + 1⟩
+    let cre ← paramRef ⟨b + 2⟩
+    let cim ← paramRef ⟨b + 3⟩
+    pure ({ sigma, omega, cre, cim } : ModalMode)
+  let voiceL : NativeModes := (Array.range 6).mapM (fun i => mkLive (4 * i))
+  let reverbL : NativeModes := (Array.range 6).mapM (fun i => mkLive (24 + 4 * i))
   -- FLATNESS (hardening 0a-3): the live-pole (paramRef) builds keep the Cauchy
   -- inner sums out of the const-folder, so the O(m+n) vs O(m·n) plan-instr gap
   -- is observable. A build `.error` here is a REAL failure — route it to
@@ -1170,15 +1271,15 @@ def runResidueBanked (arena : Arena)
   -- and then `flatOk := match … | none => true`, so a live-build FAILURE printed
   -- "n/a" inside a PASSING gate — a build failure mapped to a green result.) A
   -- genuine success still checks `b < c`.
-  match buildAndFinish (.ok (buildModalReverbSymC "rbcL" voiceL reverbL anchor arena)),
-        buildAndFinish (.ok (buildModalReverbBanked "rbbL" voiceL reverbL anchor arena)) with
+  match buildAndFinish (buildModalReverbSymC "rbcL" voiceL reverbL anchor arena),
+        buildAndFinish (buildModalReverbBanked "rbbL" voiceL reverbL anchor arena) with
   | .ok clp, .ok blp =>
     let cN := planInstrCount clp
     let bN := planInstrCount blp
     let flatStr := s!"unrolled {cN} vs banked {bN} plan-instrs (6⋙6)"
     let flatOk := decide (bN < cN)
-    match buildAndFinish (.ok (buildModalReverbSymC "rbc" voice reverb anchor arena)),
-          buildAndFinish (.ok (buildModalReverbBanked "rbb" voice reverb anchor arena)) with
+    match buildAndFinish (buildModalReverbSymC "rbc" voice reverb anchor arena),
+          buildAndFinish (buildModalReverbBanked "rbb" voice reverb anchor arena) with
     | .ok cp, .ok bp =>
       match ← renderPlanSamples cp 4096, ← renderPlanSamples bp 4096 with
       | .ok cs, .ok bs =>
@@ -1186,7 +1287,7 @@ def runResidueBanked (arena : Arena)
         let e := bs.foldl (fun a x => a + x * x) 0.0
         IO.println s!"        banked Cauchy fills (collected form): equivalence + flatness"
         IO.println s!"        result   banked≡collected bit-diff {bitDiff}/4096 · {nB} modes · {flatStr}"
-        if bitDiff == 0 && e > 1e-9 && nB == voice.size + reverb.size && flatOk then
+        if bitDiff == 0 && e > 1e-9 && nB == voiceData.size + reverbData.size && flatOk then
           passGate "residue-banked" s!"banked Cauchy fills ≡ collected bit-identical ({nB} modes); {flatStr} — O(m+n) coeff regions"
         else
           failGate "residue-banked" s!"bitDiff={bitDiff} nB={nB} e={e} flatOk={flatOk} flat={flatStr}"
@@ -1224,31 +1325,47 @@ def runModalBloomGamma (arena : Arena)
   let B := 0.05 / g                    -- β = 0.05, scale 1: the shipped full register
   let vData : Array (Float × Float × Float) := #[(1023.0, 1.13, 1.0), (353.1, 0.56, 0.6)]
   let rData : Array (Float × Float × Float) := #[(1040.0, 1.0, 0.4), (700.0, 1.5, 0.3)]
-  let mk := fun ((f, s, a) : Float × Float × Float) =>
-    ({ sigma := litF s, omega := litF (tp * f), cre := litF a } : ModalMode)
-  let voice := vData.map mk
-  let reverb := rData.map mk
+  let mk := fun ((f, s, a) : Float × Float × Float) => do
+    let sigma ← litF s
+    let omega ← litF (tp * f)
+    let cre ← litF a
+    let cim ← lit 0
+    pure ({ sigma, omega, cre, cim } : ModalMode)
+  let voice : NativeModes := vData.mapM mk
+  let reverb : NativeModes := rData.mapM mk
   let anchorN : Nat := 200
   let anchor := lit 200
   let n : Nat := 32768
   let fabs := fun (x : Float) => if x < 0.0 then -x else x
-  match bloomCompose voice reverb B g,
-        bloomCompose voice reverb 1e-12 g with
-  | none, _ | _, none =>
+  match Tropical.Testing.ArrowFixtures.freezeBuild arena do
+      let voice ← voice
+      let reverb ← reverb
+      pure (← bloomCompose voice reverb B g, ← bloomCompose voice reverb 1e-12 g) with
+  | .error error =>
+    failGate "modal-bloom-gamma" s!"bloomCompose: {firstLine error}"
+  | .ok (_, (none, _)) | .ok (_, (_, none)) =>
     failGate "modal-bloom-gamma" "bloomCompose: a live pole reached the baked-pole contract"
-  | some pairs, some pairs0 =>
+  | .ok (frozen, (some pairs, some _pairs0)) =>
     -- (o) the lgamma recurrence on the actual a values (the pairs are BAKED, so
     -- the `Sig` fields fold back to their Floats via `sigConstF?`)
-    let cf := fun (s : Tropical.EmitArrow.Sig) => (Tropical.EmitArrow.sigConstF? s).getD 0.0
+    let constants := sigConstTable frozen
+    let cf := fun (s : Sig) =>
+      (sigConstDFrom? constants s).map Tropical.Exact.DyadicI.toFloat |>.getD 0.0
     let mut lgErr : Float := 0.0
     for p in pairs do
-      let aC : CplxB := ⟨(cf p.nuSigma - cf p.muSigma) / g * (-1.0), (cf p.nuOmega - cf p.muOmega) / g⟩
-      let ratio := (CplxB.exp ((lgammaB (aC.add ⟨1, 0⟩)).sub (lgammaB aC))).div aC
+      let aC : OracleCplxB := ⟨(cf p.nuSigma - cf p.muSigma) / g * (-1.0), (cf p.nuOmega - cf p.muOmega) / g⟩
+      let ratio := (Tropical.Testing.ArrowOracles.CplxB.exp
+        ((Tropical.Testing.ArrowOracles.lgammaB (aC.add ⟨1, 0⟩)).sub
+          (Tropical.Testing.ArrowOracles.lgammaB aC))).div aC
       lgErr := max lgErr ((ratio.sub ⟨1, 0⟩).abs)
-    match buildAndFinish (.ok (buildBloomComposed "bloomg" pairs anchor arena)),
-          buildAndFinish (.ok (buildBloomComposed "bloomg0" pairs0 anchor arena)),
-          buildAndFinish (.ok (buildModalBankTable "bloomg0r"
-            (residueComposeEC voice reverb) anchor arena)) with
+    let compose := fun (depth : Float) => do
+      let some result ← bloomCompose (← voice) (← reverb) depth g
+        | throw "bloomCompose: unsupported pair"
+      pure result
+    match buildAndFinish (buildBloomComposed "bloomg" (compose B) anchor arena),
+          buildAndFinish (buildBloomComposed "bloomg0" (compose 1e-12) anchor arena),
+          buildAndFinish (buildModalBankTable "bloomg0r"
+            (do residueComposeEC (← voice) (← reverb)) anchor arena) with
     | .ok plan, .ok plan0, .ok plan0r =>
       match ← renderPlanSamples plan n, ← renderPlanSamples plan0 4096,
             ← renderPlanSamples plan0r 4096 with
@@ -1267,14 +1384,15 @@ def runModalBloomGamma (arena : Arena)
         let refRender := fun (hdiv : Nat) => Id.run do
           let mut y : Array Float := Array.replicate n 0.0
           for (fv, sv, av) in vData do
-            let mu : CplxB := ⟨-sv, qOm (tp * fv)⟩
+            let mu : OracleCplxB := ⟨-sv, qOm (tp * fv)⟩
             for (fr, srr, ar) in rData do
-              let nuC : CplxB := ⟨-srr, qOm (tp * fr)⟩
+              let nuC : OracleCplxB := ⟨-srr, qOm (tp * fr)⟩
               if ((nuC.sub mu).scale (1.0 / g)).abs < 0.5 then continue
               let cAmp := av * ar * sinkGain
               let h := 1.0 / (sr * hdiv.toFloat)
-              let fint := fun (s : Float) => CplxB.exp ((mu.scale (phi s)).sub (nuC.scale s))
-              let mut J : CplxB := ⟨0, 0⟩
+              let fint := fun (s : Float) => Tropical.Testing.ArrowOracles.CplxB.exp
+                ((mu.scale (phi s)).sub (nuC.scale s))
+              let mut J : OracleCplxB := ⟨0, 0⟩
               let mut fPrev := fint 0.0
               for i in [anchorN + 1 : n] do
                 let dBase := (i - 1 - anchorN).toFloat / sr
@@ -1283,7 +1401,7 @@ def runModalBloomGamma (arena : Arena)
                   J := J.add ((fPrev.add fNext).scale (h * 0.5))
                   fPrev := fNext
                 let d := (i - anchorN).toFloat / sr
-                let yc := (CplxB.exp (nuC.scale d)).mul J
+                let yc := (Tropical.Testing.ArrowOracles.CplxB.exp (nuC.scale d)).mul J
                 y := y.set! i (y[i]! + cAmp * yc.re)
           return y
         let ref1 := refRender 1
@@ -1341,26 +1459,31 @@ open Tropical.EmitArrow in
     bit-for-bit. This is the whole seam end to end: a patch graph, not a builder. -/
 def runModalPatch (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
-  let res : Array ModalMode := #[
-    ModalMode.hz (lit 220) (lit 30 1) (lit 6 1),
-    ModalMode.hz (lit 440) (lit 45 1) (lit 3 1),
-    ModalMode.hz (lit 660) (lit 60 1) (lit 2 1)]
-  let room : Array ModalMode := #[
-    { sigma := lit 3, omega := mul twoPiE (lit 180), cre := lit 7 1, cim := lit 2 1 },
-    { sigma := lit 4, omega := mul twoPiE (lit 300), cre := lit (-5) 1, cim := lit 4 1 },
-    { sigma := lit 5, omega := mul twoPiE (lit 520), cre := lit 3 1, cim := lit (-6) 1 }]
-  let anchor := lit 200
   let twoC : Int := 2048 * 4294967296
-  let mkGraph := fun (clk : Clock) => ({
-    nodes := #[
-      { id := "res", node := .modalSource res anchor clk none },
-      { id := "rev", node := .modalReverb "res" room none }],
-    output := "rev" } : PatchGraph)
-  let carrier := fun (name : String) (clk : Clock) => (do
-    let term ← lowerGraph (mkGraph clk)
-    let (out, _) := emitTerm (normalize term) {}
-    .ok (buildExprCarrier name out arena) : Except String (Arena × ProgramIdx))
-  let revClk : Clock := sub (lit twoC) clockLit
+  let carrier := fun (name : String) (clock : BuildM Clock) =>
+    buildExprCarrier name (do
+      let res := #[
+        ← ModalMode.hz (← lit 220) (← lit 30 1) (← lit 6 1),
+        ← ModalMode.hz (← lit 440) (← lit 45 1) (← lit 3 1),
+        ← ModalMode.hz (← lit 660) (← lit 60 1) (← lit 2 1)]
+      let roomMode := fun (sigma frequency real imaginary : Int) => do
+        let sigma ← lit sigma
+        let omega ← mul (← twoPiE) (← lit frequency)
+        let cre ← lit real 1
+        let cim ← lit imaginary 1
+        pure ({ sigma, omega, cre, cim } : ModalMode)
+      let room := #[
+        ← roomMode 3 180 7 2, ← roomMode 4 300 (-5) 4,
+        ← roomMode 5 520 3 (-6)]
+      let anchor ← lit 200
+      let clock ← clock
+      let graph : PatchGraph := {
+        nodes := #[
+          { id := "res", node := .modalSource res anchor clock none },
+          { id := "rev", node := .modalReverb "res" room none }]
+        output := "rev" }
+      emitTerm (normalize (← lowerGraph graph))) arena
+  let revClk : BuildM Clock := do sub (← lit twoC) (← clockLit)
   match buildAndFinish (carrier "mp_fwd" clockLit),
         buildAndFinish (carrier "mp_rev" revClk) with
   | .ok fp, .ok rp =>
@@ -1398,39 +1521,31 @@ open Tropical.EmitArrow in
     enter that sum only at their own causal onset. -/
 def runModalForestAnchors (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
-  let aModes : Array ModalMode := #[
-    ModalMode.hz (lit 220) (lit 4) (lit 7 1),
-    ModalMode.hz (lit 440) (lit 6) (lit 3 1)]
-  let bModes : Array ModalMode := #[
-    ModalMode.hz (lit 330) (lit 5) (lit 5 1),
-    ModalMode.hz (lit 660) (lit 8) (lit 2 1)]
-  let firstAnchor := lit 200
-  let secondAnchor := lit 700
-  let source := fun (id : String) (modes : Array ModalMode) (anchor : Sig) =>
-    ({ id, node := Node.modalSource modes anchor clockLit none } : PatchNode)
-  let sameGraph : PatchGraph := {
-    nodes := #[source "a" aModes firstAnchor, source "b" bModes firstAnchor,
-      { id := "mix", node := .modalMix #["a", "b"] }]
-    output := "mix" }
-  let explicitGraph : PatchGraph := {
-    nodes := #[source "a" aModes firstAnchor, source "b" bModes firstAnchor,
-      { id := "sum", node := .mix #["a", "b"] }]
-    output := "sum" }
-  let differentGraph : PatchGraph := {
-    nodes := #[source "a" aModes firstAnchor, source "b" bModes secondAnchor,
-      { id := "mix", node := .modalMix #["a", "b"] }]
-    output := "mix" }
-  let firstOnlyGraph : PatchGraph := {
-    nodes := #[source "a" aModes firstAnchor]
-    output := "a" }
-  let carrier := fun (name : String) (graph : PatchGraph) => (do
-    let term ← lowerGraph graph
-    let (out, _) := emitTerm (normalize term) {}
-    .ok (buildExprCarrier name out arena) : Except String (Arena × ProgramIdx))
-  match buildAndFinish (carrier "mf_same" sameGraph),
-        buildAndFinish (carrier "mf_explicit" explicitGraph),
-        buildAndFinish (carrier "mf_different" differentGraph),
-        buildAndFinish (carrier "mf_first" firstOnlyGraph) with
+  let carrier := fun (name : String) (variant : Nat) => buildExprCarrier name (do
+    let aModes := #[
+      ← ModalMode.hz (← lit 220) (← lit 4) (← lit 7 1),
+      ← ModalMode.hz (← lit 440) (← lit 6) (← lit 3 1)]
+    let bModes := #[
+      ← ModalMode.hz (← lit 330) (← lit 5) (← lit 5 1),
+      ← ModalMode.hz (← lit 660) (← lit 8) (← lit 2 1)]
+    let firstAnchor ← lit 200
+    let secondAnchor ← lit 700
+    let clock ← clockLit
+    let source := fun (id : String) (modes : Array ModalMode) (anchor : Sig) =>
+      ({ id, node := Node.modalSource modes anchor clock none } : PatchNode)
+    let graph : PatchGraph := match variant with
+      | 0 => { nodes := #[source "a" aModes firstAnchor, source "b" bModes firstAnchor,
+          { id := "mix", node := .modalMix #["a", "b"] }], output := "mix" }
+      | 1 => { nodes := #[source "a" aModes firstAnchor, source "b" bModes firstAnchor,
+          { id := "sum", node := .mix #["a", "b"] }], output := "sum" }
+      | 2 => { nodes := #[source "a" aModes firstAnchor, source "b" bModes secondAnchor,
+          { id := "mix", node := .modalMix #["a", "b"] }], output := "mix" }
+      | _ => { nodes := #[source "a" aModes firstAnchor], output := "a" }
+    emitTerm (normalize (← lowerGraph graph))) arena
+  match buildAndFinish (carrier "mf_same" 0),
+        buildAndFinish (carrier "mf_explicit" 1),
+        buildAndFinish (carrier "mf_different" 2),
+        buildAndFinish (carrier "mf_first" 3) with
   | .ok samePlan, .ok explicitPlan, .ok differentPlan, .ok firstPlan =>
     match ← renderPlanSamples samePlan 2048, ← renderPlanSamples explicitPlan 2048,
           ← renderPlanSamples differentPlan 2048, ← renderPlanSamples firstPlan 2048 with
@@ -1478,23 +1593,25 @@ def runModalForestTimedIslands (arena : Arena)
   let ids := (Array.range islandCount).map fun i => s!"timed-island-{i}"
   let bloomB : Float := 0.0004
   let bloomG : Float := 2.0
-  let modesFor := fun (i : Nat) => (#[
-    ModalMode.hz (lit (Int.ofNat (180 + 19 * i)))
-      (lit (Int.ofNat (6 + i % 5)))
-      (lit (Int.ofNat (1 + i % 3)) 1)] : Array ModalMode)
-  let sourceFor := fun (clk : Clock) (i : Nat) =>
-    let modes := modesFor i
-    let anchor := lit (Int.ofNat anchors[i]!)
+  let modesFor := fun (i : Nat) => do pure #[
+    ← ModalMode.hz (← lit (Int.ofNat (180 + 19 * i)))
+      (← lit (Int.ofNat (6 + i % 5)))
+      (← lit (Int.ofNat (1 + i % 3)) 1)]
+  let sourcesFor := fun (clock : Clock) => (Array.range islandCount).mapM fun i => do
+    let modes ← modesFor i
+    let anchor ← lit (Int.ofNat anchors[i]!)
     let bloom? := if i % 4 == 0 then some (bloomB, bloomG) else none
-    ({ id := ids[i]!, node := .modalSource modes anchor clk none none bloom? } : PatchNode)
-  let sourcesFor := fun (clk : Clock) =>
-    (Array.range islandCount).map (sourceFor clk)
-  let modalGraphFor := fun (clk : Clock) (inputs : Array String) => ({
-    nodes := (sourcesFor clk).push { id := "timed-modal-mix", node := .modalMix inputs }
-    output := "timed-modal-mix" } : PatchGraph)
-  let signalGraphFor := fun (clk : Clock) => ({
-    nodes := (sourcesFor clk).push { id := "timed-signal-mix", node := .mix ids }
-    output := "timed-signal-mix" } : PatchGraph)
+    pure ({ id := ids[i]!, node := .modalSource modes anchor clock none none bloom? } : PatchNode)
+  let modalGraphFor := fun (clock : BuildM Clock) (inputs : Array String) => do
+    let sources ← sourcesFor (← clock)
+    let nodes := sources.push
+      ({ id := "timed-modal-mix", node := .modalMix inputs } : PatchNode)
+    pure (PatchGraph.mk nodes "timed-modal-mix")
+  let signalGraphFor := fun (clock : BuildM Clock) => do
+    let sources ← sourcesFor (← clock)
+    let nodes := sources.push
+      ({ id := "timed-signal-mix", node := .mix ids } : PatchNode)
+    pure (PatchGraph.mk nodes "timed-signal-mix")
 
   -- Inspect the modal value before realization: size, stable order, anchors,
   -- and the plain/bloomed pattern are all compiler facts, not audio inferences.
@@ -1502,25 +1619,26 @@ def runModalForestTimedIslands (arena : Arena)
     if id == "timed-modal-mix" then some 1
     else if ids.contains id then some 0
     else none
-  let structureOk := match lowerModal (modalGraphFor clockLit ids)
-      rankOf "timed-modal-mix" 1 with
-    | .error _ => false
-    | .ok forest => forest.size == islandCount &&
+  let structureOk := match Tropical.Testing.ArrowFixtures.runBuild arena do
+      let forest ← lowerModal (← modalGraphFor clockLit ids)
+        rankOf "timed-modal-mix" 1
+      let anchorsBuilt ← anchors.mapM fun anchor => lit (Int.ofNat anchor)
+      pure (forest.size == islandCount &&
         (Array.range islandCount).all fun i => match forest[i]? with
           | none => false
           | some branch =>
-            let anchorOk := branch.strikeAnchor == lit (Int.ofNat anchors[i]!)
+            let anchorOk := branch.strikeAnchor == anchorsBuilt[i]!
             let bankOk := branch.stages.isEmpty && match branch.source with
               | .bloomed voice B g =>
                 i % 4 == 0 && voice.size == 1 && B == bloomB && g == bloomG
               | .plain voice => i % 4 != 0 && voice.size == 1
-            anchorOk && bankOk
+            anchorOk && bankOk) with
+    | .error _ => false
+    | .ok (_, result) => result
 
-  let carrier := fun (name : String) (graph : PatchGraph) => (do
-    let term ← lowerGraph graph
-    let (out, _) := emitTerm (normalize term) {}
-    .ok (buildExprCarrier name out arena) : Except String (Arena × ProgramIdx))
-  let renderPair : String → Clock → Nat →
+  let carrier := fun (name : String) (graph : BuildM PatchGraph) =>
+    buildExprCarrier name (do emitTerm (normalize (← lowerGraph (← graph)))) arena
+  let renderPair : String → BuildM Clock → Nat →
       IO (Except String (Array Float × Array Float)) := fun tag clk n => do
     match buildAndFinish (carrier s!"timed_forest_{tag}" (modalGraphFor clk ids)),
           buildAndFinish (carrier s!"timed_oracle_{tag}" (signalGraphFor clk)) with
@@ -1535,9 +1653,11 @@ def runModalForestTimedIslands (arena : Arena)
   let q : Int := 4294967296
   let holdAt : Nat := 1234
   let seekBy : Nat := 257
-  let holdClock : Clock := litI (Int.ofNat holdAt * q)
-  let reverseClock : Clock := sub (litI (Int.ofNat frameCount * q)) clockLit
-  let seekClock : Clock := add clockLit (litI (Int.ofNat seekBy * q))
+  let holdClock : BuildM Clock := litI (Int.ofNat holdAt * q)
+  let reverseClock : BuildM Clock := do
+    sub (← litI (Int.ofNat frameCount * q)) (← clockLit)
+  let seekClock : BuildM Clock := do
+    add (← clockLit) (← litI (Int.ofNat seekBy * q))
   match ← renderPair "forward" clockLit frameCount,
         ← renderPair "hold" holdClock frameCount,
         ← renderPair "reverse" reverseClock frameCount,
@@ -1836,25 +1956,33 @@ def runModalUniverseHistory (arena : Arena)
           reverseSamples[i]! == forwardSamples[forwardSamples.size - 1 - i]!
 
       -- Production structure: two deferred rooms and no early Modal→Sig seam.
-      let unit : Array Tropical.EmitArrow.ModalMode := #[
-        Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 220)
-          (Tropical.EmitArrow.lit 4) (Tropical.EmitArrow.lit 1)]
-      let graph : Tropical.EmitArrow.PatchGraph := {
-        nodes := #[
-          { id := "s", node := .modalSource unit (Tropical.EmitArrow.lit 0)
-              Tropical.EmitArrow.clockLit none },
-          { id := "a", node := .modalReverb "s" unit none },
-          { id := "b", node := .modalReverb "a" unit none }]
-        output := "b" }
       let ranks := fun id => if id == "s" then some 0 else if id == "a" then some 1
         else if id == "b" then some 2 else none
-      let deferred := match Tropical.EmitArrow.lowerModal graph ranks "b" 2 with
-        | .ok #[branch] => match branch.source with
-          | .plain _ => branch.stages.size == 2
+      let nativeProbe : Tropical.EmitArrow.BuildM (Bool × Bool) := do
+        let unit := #[← Tropical.EmitArrow.ModalMode.hz
+          (← Tropical.EmitArrow.lit 220)
+          (← Tropical.EmitArrow.lit 4)
+          (← Tropical.EmitArrow.lit 1)]
+        let graph : Tropical.EmitArrow.PatchGraph := {
+          nodes := #[
+            { id := "s", node := .modalSource unit
+                (← Tropical.EmitArrow.lit 0)
+                (← Tropical.EmitArrow.clockLit) none },
+            { id := "a", node := .modalReverb "s" unit none },
+            { id := "b", node := .modalReverb "a" unit none }]
+          output := "b" }
+        let forest ← Tropical.EmitArrow.lowerModal graph ranks "b" 2
+        let deferred := match forest with
+          | #[branch] => match branch.source with
+            | .plain _ => branch.stages.size == 2
+            | _ => false
           | _ => false
-        | _ => false
-      let modalThroughChain := Tropical.EmitArrow.nodeIsModal graph "a" &&
-        Tropical.EmitArrow.nodeIsModal graph "b"
+        pure (deferred, Tropical.EmitArrow.nodeIsModal graph "a" &&
+          Tropical.EmitArrow.nodeIsModal graph "b")
+      let (deferred, modalThroughChain) :=
+        match Tropical.Testing.ArrowFixtures.runBuild arena nativeProbe with
+        | .ok (_, result) => result
+        | .error _ => (false, false)
       let eachRoomRewrites := old != rewrittenA && old != rewrittenB
       let restoredExact := old == restoredA && old == restoredB
       let seekOrderExact := a0 == b0 && a1 == b1 && a2 == b2
@@ -2127,12 +2255,12 @@ def runGaugeAdapter (arena : Arena)
       let h2 := hr * hr + hi * hi
       S := S + h2 * h2 * h2 * h2
     return Float.exp (Float.log S / 8.0)              -- S^{1/8}
-  let mkModes := fun (sig : Float) => #[
-    ModalMode.hz (litF f1) (litF sig) (litF a1),
-    ModalMode.hz (litF f2) (litF sig) (litF a2)]
-  let peakOf := fun (modes : Array ModalMode) => do
-    match buildAndFinish (.ok (buildExprCarrier "gauge_probe"
-        (modalBankSig modes clockLit (lit 200)) arena)) with
+  let mkModes := fun (sig : Float) => do pure #[
+    ← ModalMode.hz (← litF f1) (← litF sig) (← litF a1),
+    ← ModalMode.hz (← litF f2) (← litF sig) (← litF a2)]
+  let peakOf := fun (modes : BuildM (Array ModalMode)) => do
+    match buildAndFinish (buildExprCarrier "gauge_probe" (do
+        modalBankSig (← modes) (← clockLit) (← lit 200)) arena) with
     | .ok p => match ← renderPlanSamples p 2048 with
       | .ok s => do
           let mut mx := 0.0
@@ -2148,7 +2276,7 @@ def runGaugeAdapter (arena : Arena)
     norms := norms.push nrm
     let some pBare ← peakOf (mkModes sig) | return (← failGate "gauge-adapter" "bare render")
     for g in #[(0.0, "0"), (0.5, "½"), (1.0, "1")] do
-      let some pG ← peakOf (normalizePeak (litF g.1) (mkModes sig))
+      let some pG ← peakOf (do normalizePeak (← litF g.1) (← mkModes sig))
         | return (← failGate "gauge-adapter" s!"g={g.2} render")
       let ratio := pG / pBare
       let oracle := Float.exp (Float.log nrm * (-g.1))   -- ‖H‖^{−g}
@@ -2166,9 +2294,9 @@ def runGaugeAdapter (arena : Arena)
   -- the floor path (S→0): an all-zero-residue bank has S = 0, clamped to 1e-30 (not
   -- to `litF 1e-30`'s collapsed 0, which would send logSig(0) ≈ −712 → scale ≈ e⁸⁸);
   -- the render must stay silent (0·anything = 0), never amplified numerical dust.
-  let silentBank := #[ModalMode.hz (litF f1) (litF 3.0) (lit 0),
-                       ModalMode.hz (litF f2) (litF 3.0) (lit 0)]
-  let some pSilent ← peakOf (normalizePeak (litF 1.0) silentBank)
+  let silentBank := do pure #[← ModalMode.hz (← litF f1) (← litF 3.0) (← lit 0),
+    ← ModalMode.hz (← litF f2) (← litF 3.0) (← lit 0)]
+  let some pSilent ← peakOf (do normalizePeak (← litF 1.0) (← silentBank))
     | return (← failGate "gauge-adapter" "silent render")
   let silentOk := pSilent < 1e-9
   if !silentOk then
@@ -2193,20 +2321,21 @@ def runLgammaEmit (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
   let step := 10.0 / 2048.0
-  let reRamp := sub (mul (toFloatE (rshift clockLit (lit 32))) (litF step)) (lit 5)
+  let reRamp : BuildM Sig := do
+    sub (← mul (← toFloatE (← rshift (← clockLit) (← lit 32))) (← litF step)) (← lit 5)
   let mut worst : Float := 0.0
   let mut worstAt : String := ""
   let mut ok := true
   for imVal in #[1.0, -2.5] do
-    let lg := lgammaE (reRamp, litF imVal)
-    match buildAndFinish (.ok (buildExprCarrier "lg_re" lg.1 arena)),
-          buildAndFinish (.ok (buildExprCarrier "lg_im" lg.2 arena)) with
+    let lg : BuildM (Sig × Sig) := do lgammaE (← reRamp, ← litF imVal)
+    match buildAndFinish (buildExprCarrier "lg_re" (do pure (← lg).1) arena),
+          buildAndFinish (buildExprCarrier "lg_im" (do pure (← lg).2) arena) with
     | .ok pRe, .ok pIm =>
       match ← renderPlanSamples pRe 2048, ← renderPlanSamples pIm 2048 with
       | .ok sRe, .ok sIm =>
         for i in [0:min sRe.size sIm.size] do
           let re := -5.0 + i.toFloat * step
-          let ref := lgammaB ⟨re, imVal⟩
+          let ref := Tropical.Testing.ArrowOracles.lgammaB ⟨re, imVal⟩
           let scale := max (ref.re.abs + ref.im.abs) 1.0
           let e := (max (sRe[i]! / sinkGain - ref.re).abs (sIm[i]! / sinkGain - ref.im).abs) / scale
           if e > worst then worst := e; worstAt := s!"z=({re},{imVal})"
@@ -2236,8 +2365,10 @@ def runKInvariance (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let amps := #[10.0, 30.0, 40.0, 60.0, 70.0, 130.0]   -- k = 0,0,1,1,2,3 (crosses 32/64/128)
   let peakOf := fun (amp : Float) => do
-    let modes := #[ModalMode.hz (litF 300.0) (litF 5.0) (litF amp)]
-    match buildAndFinish (.ok (buildExprCarrier "kinv" (modalBankSig modes clockLit (lit 200)) arena)) with
+    let modes : BuildM (Array ModalMode) := do pure #[
+      ← ModalMode.hz (← litF 300.0) (← litF 5.0) (← litF amp)]
+    match buildAndFinish (buildExprCarrier "kinv" (do
+        modalBankSig (← modes) (← clockLit) (← lit 200)) arena) with
     | .ok p => match ← renderPlanSamples p 2048 with
       | .ok s => do
           let mut mx := 0.0

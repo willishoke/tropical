@@ -1,9 +1,10 @@
 import Tropical.EmitArrow.Sig
-import Tropical.EmitArrow.Term
-import Tropical.EmitArrow.Numerics
-import Tropical.EmitArrow.Modal
-import Tropical.EmitArrow.BankOrder
+import Tropical.EmitArrow.Inspect
 import Tropical.EmitArrow.ClockAlgebra
+import Tropical.EmitArrow.BankOrder
+import Tropical.EmitArrow.Numerics
+import Tropical.EmitArrow.Term
+import Tropical.EmitArrow.Modal
 import Tropical.EmitArrow.Patch
 import Tropical.EmitArrow.Gong
 
@@ -24,21 +25,14 @@ applied to it, drawn from the same operation set used on values.
 
 The modules:
 
-* `Sig` — the authoring substrate: the build-time expression tree, its
-  arena lowering, `assemble`, and the smart-constructor op set.
-* `Term` — `Voice`, the cartesian combinator surface (`Mor`), and
-  `ArrowTerm` + the slide (`normalize`/`emitTermC`): downstream-presented
-  warps pushed up to generator clocks.
-* `Numerics` — the closed-form scalar kernels (fixed-point sine, integer
-  phasor, polynomial transcendentals).
-* `Modal` — the pole island: modal banks, banked coefficient-column
-  reductions, and the symbolic residue calculus.
-* `Patch` — the patcher lowering: downstream-only patch DAG → arrow term.
-* `Gong` — the struck nonlinear resonator: amplitude-bloom mode pairs,
-  the analytic pitch-bloom clock warp, and the alias-free polynomial
-  drive, all composed from existing node kinds.
-
-The byte-gate carriers that certify all of this against the hand-written
-stdlib programs live in `Tropical.Testing.ArrowFixtures`, outside the
-production import graph.
+* `Sig` — the ID-valued builder and immediate-interning smart
+  constructors.
+* `ClockAlgebra` — the clock-rail judgment and laws stated
+  directly on `ExprId` roots and frozen `ExprArena` dereference evidence.
+* `Numerics` / `Term` — ID-valued scalar kernels,
+  voices, cartesian morphisms, and reified-arrow emitter.
+* `Modal` / `Patch` / `Gong` — the ID-valued modal
+  compiler, graph lowering seam, and struck-register authoring.
+The recursive authoring representation has been retired; this is the single
+production authoring surface.
 -/

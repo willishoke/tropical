@@ -13,14 +13,14 @@ namespace Tropical.EmitArrow
     have been frozen at the terminal observation coordinate. -/
 inductive ModalRoomKernel where
   | fixed (modes : Array ModalMode)
-  | controlled (control : ModalControlRef) (build : Sig → Array ModalMode)
+  | controlled (control : ModalControlRef) (build : Sig → BuildM (Array ModalMode))
 
 /-- One ordinary room operator.  Direction belongs to this kernel, never to the
     source prefix or the complete branch.  Sway likewise belongs to the room's
     decay law and therefore travels with the stage that authored it. -/
 structure OrdinaryRoomStage where
   kernel : ModalRoomKernel
-  direction : ModalControlRef := ModalControlRef.constant (lit 0)
+  direction : ModalControlRef
   sway? : Option (ModalControlRef × ModalControlRef) := none
   /-- Product-facing temporal direction needs a perceptual output correction:
       its exact anti-causal arm lives mostly before a normal playback strike.
@@ -80,8 +80,8 @@ def ModalBranch.controls (branch : ModalBranch) : Array ModalControlRef :=
     byte-identity comparator, and the fallback for the surfaces that need a
     plain `Array ModalMode`: gauge, mix, direction). -/
 def foldRoomsEC (voice : Array ModalMode) (rooms : Array (Array ModalMode)) :
-    Array ModalMode :=
-  rooms.foldl residueComposeEC voice
+    BuildM (Array ModalMode) :=
+  rooms.foldlM residueComposeEC voice
 
 /-- The PARTITIONED chain fold: cold rooms fold first in arrival order
     (collected, verbatim), rooms carrying a hot coupling fold LAST, and only
@@ -108,22 +108,31 @@ def foldRoomsEC (voice : Array ModalMode) (rooms : Array (Array ModalMode)) :
     status-quo floor, served gracefully, not silently wrong. -/
 def foldRoomsPartitioned (voice : Array ModalMode)
     (rooms : Array (Array ModalMode)) :
-    Array ModalMode × Array PairedMode :=
-  if rooms.isEmpty then (voice, #[]) else
+    BuildM (Array ModalMode × Array PairedMode) := do
+  if rooms.isEmpty then return (voice, #[])
   let units := #[voice] ++ rooms
-  let roomHot := fun (j : Nat) (room : Array ModalMode) =>
-    room.any fun q => units.zipIdx.any fun (u, i) =>
-      i != j + 1 && u.any fun p => couplingHot p q || couplingHot q p
-  if (rooms.zipIdx.all fun (r, j) => !roomHot j r) then
-    (foldRoomsEC voice rooms, #[])
+  let mut hotFlags : Array Bool := #[]
+  for (room, j) in rooms.zipIdx do
+    let mut roomHot := false
+    for q in room do
+      for (unit, i) in units.zipIdx do
+        if i != j + 1 then
+          for p in unit do
+            if ← couplingHot p q then roomHot := true
+            else if ← couplingHot q p then roomHot := true
+    hotFlags := hotFlags.push roomHot
+  if hotFlags.all (· == false) then
+    let folded ← foldRoomsEC voice rooms
+    pure (folded, #[])
   else
     let cold := rooms.zipIdx.filterMap fun (r, j) =>
-      if roomHot j r then none else some r
+      if hotFlags[j]! then none else some r
     let hot := rooms.zipIdx.filterMap fun (r, j) =>
-      if roomHot j r then some r else none
+      if hotFlags[j]! then some r else none
     let ordered := cold ++ hot
     let front := ordered.pop
     let last := ordered.back!
-    residueComposePartitioned (foldRoomsEC voice front) last
+    let folded ← foldRoomsEC voice front
+    residueComposePartitioned folded last
 
 end Tropical.EmitArrow

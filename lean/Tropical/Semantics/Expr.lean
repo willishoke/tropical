@@ -127,32 +127,6 @@ theorem denoteExpr_of_deref (alg : Algebra α) (env : SigEnv α)
     subst actual
     rfl
 
-/-- A root has the denotation of a source `Sig` and is addressable in its
-    arena.  Recording addressability makes the fact stable under extension. -/
-def DenotesAt (alg : Algebra α) (env : SigEnv α) (arena : ExprArena)
-    (hArena : ArenaWellFormed arena) (sig : Tropical.EmitArrow.Sig)
-    (id : ExprId) : Prop :=
-  ∃ node, arena.deref id = some node ∧
-    denoteExpr alg env arena hArena id = denoteSig alg env sig
-
-/-- Ordered pointwise denotation for source terms and their lowered roots. -/
-inductive DenotesMany (alg : Algebra α) (env : SigEnv α)
-    (arena : ExprArena) (hArena : ArenaWellFormed arena) :
-    List Tropical.EmitArrow.Sig → List ExprId → Prop where
-  | nil : DenotesMany alg env arena hArena [] []
-  | cons {sig : Tropical.EmitArrow.Sig} {rootId : ExprId}
-      {sigs : List Tropical.EmitArrow.Sig} {ids : List ExprId}
-      (head : DenotesAt alg env arena hArena sig rootId)
-      (tail : DenotesMany alg env arena hArena sigs ids) :
-      DenotesMany alg env arena hArena (sig :: sigs) (rootId :: ids)
-
-theorem DenotesMany.length_eq
-    (h : DenotesMany alg env arena hArena sigs ids) :
-    ids.length = sigs.length := by
-  induction h with
-  | nil => rfl
-  | cons _ _ ih => simp [ih]
-
 /-- Appending nodes does not change the meaning of any addressable old root. -/
 theorem denoteExpr_extends {before after : ExprArena}
     (hBefore : ArenaWellFormed before) (hAfter : ArenaWellFormed after)
@@ -287,73 +261,6 @@ decreasing_by
   all_goals
     apply hBefore.childrenDescend hDeref
     simp_all [ENode.children]
-
-/-- A single denotation fact survives arena extension. -/
-theorem DenotesAt.extends {before after : ExprArena}
-    {hBefore : ArenaWellFormed before} (hAfter : ArenaWellFormed after)
-    {sig : Tropical.EmitArrow.Sig} {rootId : ExprId}
-    (hExtends : Extends before after)
-    (h : DenotesAt alg env before hBefore sig rootId) :
-    DenotesAt alg env after hAfter sig rootId := by
-  obtain ⟨node, hDeref, hValue⟩ := h
-  exact ⟨node, hExtends hDeref,
-    (denoteExpr_extends hBefore hAfter hExtends alg env hDeref).symm.trans
-      hValue⟩
-
-/-- Pointwise denotation facts survive arena extension. -/
-theorem DenotesMany.extends {before after : ExprArena}
-    {hBefore : ArenaWellFormed before} (hAfter : ArenaWellFormed after)
-    (hExtends : Extends before after)
-    (h : DenotesMany alg env before hBefore sigs ids) :
-    DenotesMany alg env after hAfter sigs ids := by
-  induction h with
-  | nil => exact .nil
-  | cons head tail ih =>
-    exact .cons (head.extends hAfter hExtends) ih
-
-theorem DenotesMany.snoc
-    (h : DenotesMany alg env arena hArena sigs ids)
-    {sig : Tropical.EmitArrow.Sig} {rootId : ExprId}
-    (last : DenotesAt alg env arena hArena sig rootId) :
-    DenotesMany alg env arena hArena (sigs ++ [sig]) (ids ++ [rootId]) := by
-  induction h with
-  | nil => exact .cons last .nil
-  | cons head tail ih =>
-    exact .cons head ih
-
-/-- Pointwise denotation implies equality of the corresponding result lists. -/
-theorem DenotesMany.map_eq
-    (h : DenotesMany alg env arena hArena sigs ids) :
-    ids.map (denoteExpr alg env arena hArena) =
-      sigs.map (denoteSig alg env) := by
-  induction h with
-  | nil => rfl
-  | cons head tail ih =>
-    obtain ⟨_, _, hValue⟩ := head
-    simp only [List.map_cons, hValue, ih]
-
-theorem DenotesMany.deref_of_mem
-    (h : DenotesMany alg env arena hArena sigs ids)
-    {rootId : ExprId} (hMem : rootId ∈ ids) :
-    ∃ node, arena.deref rootId = some node := by
-  induction h with
-  | nil => simp at hMem
-  | cons head tail ih =>
-    simp only [List.mem_cons] at hMem
-    rcases hMem with rfl | hMem
-    · obtain ⟨node, hDeref, _⟩ := head
-      exact ⟨node, hDeref⟩
-    · exact ih hMem
-
-/-- Array-shaped pointwise denotations give the map equality used by literal
-    arrays and eager bank tables. -/
-theorem DenotesMany.array_map_eq
-    {sigs : Array Tropical.EmitArrow.Sig} {ids : Array ExprId}
-    (h : DenotesMany alg env arena hArena sigs.toList ids.toList) :
-    ids.map (denoteExpr alg env arena hArena) =
-      sigs.map (denoteSig alg env) := by
-  rw [← Array.toList_inj]
-  simpa using h.map_eq
 
 theorem attach_map_value (xs : Array β) (f : β → γ) :
     xs.attach.map (fun item => f item.1) = xs.map f := by

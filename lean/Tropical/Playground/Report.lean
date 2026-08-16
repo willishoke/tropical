@@ -1,4 +1,5 @@
-import Tropical.Playground.Decode
+import Tropical.Playground.DecodeMetadata
+import Tropical.Session
 
 /-!
 # Playground.Report
@@ -10,8 +11,7 @@ namespace Tropical.Playground
 
 open Lean (Json JsonNumber)
 open Tropical.Ir
-open Tropical.EmitArrow
-open Tropical.Exact (DyadicI)
+open Metadata
 
 -- ── Host-contract dispatch table (param_disciplines in the manifest) ────────
 /-- The per-param write-discipline table this graph's plan carries — the same

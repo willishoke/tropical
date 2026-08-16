@@ -61,7 +61,10 @@ def div (a b : CplxB) : CplxB :=
 end CplxB
 
 /-- A build-time complex constant as a `CplxE` literal pair. -/
-def cplxLitE (x : CplxB) : CplxE := (litF x.re, litF x.im)
+def cplxLitE (x : CplxB) : BuildM CplxE := do
+  let real ← litF x.re
+  let imag ← litF x.im
+  pure (real, imag)
 
 /-- The EXACT carrier's constant as a `CplxE` literal pair — `cplxLitE`'s twin
     and the one place the carrier meets the emit funnel. `litF` is UNCHANGED:
@@ -75,19 +78,30 @@ def cplxLitE (x : CplxB) : CplxE := (litF x.re, litF x.im)
     zero constant is bit-for-bit the `sigConstF? (x/0) = 0` pathology this whole
     campaign exists to delete, reintroduced one floor up. A caller that gets
     `none` must refuse the pair, never emit a fabricated zero. -/
-def cplxLitD? (x : CplxDI) : Option CplxE :=
-  if x.ok then some (litF (DyadicI.toFloat x.re), litF (DyadicI.toFloat x.im)) else none
+def cplxLitD? (x : CplxDI) : BuildM (Option CplxE) := do
+  if x.ok then
+    let real ← litF (DyadicI.toFloat x.re)
+    let imag ← litF (DyadicI.toFloat x.im)
+    pure (some (real, imag))
+  else pure none
 
 /-- The `CplxE` unit — the Kummer Horner's seed and the CF's numerator. -/
-def cOneE : CplxE := (lit 1, lit 0)
+def cOneE : BuildM CplxE := do
+  let one ← lit 1
+  let zero ← lit 0
+  pure (one, zero)
 
 /-- The fixed-depth Kummer `M(1, a+1, z)` Horner over the emitted reciprocals
     `invA[k] = 1/(a+k+1)` — THE series lane's expression, shared verbatim by the
     per-sample lane in `bloomComposedSig` (z live) and the live-pole lift's
     `mK = M(1,a+1,κ)` constant in `bloomCompose` (z = κ, a coefficient — s0), so
     the constant is computed by the SAME arithmetic the lane renders with. -/
-def bloomM1E (invA : Array CplxE) (z : CplxE) : CplxE :=
-  invA.foldr (fun ik h => caddE cOneE (cmulE (cmulE z ik) h)) cOneE
+def bloomM1E (invA : Array CplxE) (z : CplxE) : BuildM CplxE := do
+  let one ← cOneE
+  invA.foldrM (fun ik h => do
+    let zik ← cmulE z ik
+    let product ← cmulE zik h
+    caddE one product) one
 
 /-- The fixed-depth bottom-up continued fraction `CF(z) = Γ(a,z)eᶻz^{−a}` over
     the emitted constants `cfB` (b-terms, `z` added per level) and `cfN`
@@ -96,31 +110,26 @@ def bloomM1E (invA : Array CplxE) (z : CplxE) : CplxE :=
     constant in `bloomCompose` (z = κ, s0), so the constant is computed by the
     SAME arithmetic the lane renders with (WS-LP phase 2, `bloomM1E`'s twin).
     Requires `cfB.size = cfN.size + 1`. -/
-def bloomCFE (cfB cfN : Array CplxE) (z : CplxE) : CplxE := Id.run do
+def bloomCFE (cfB cfN : Array CplxE) (z : CplxE) : BuildM CplxE := do
   let kk := cfN.size
-  let mut h : CplxE := caddE z cfB[kk]!
+  let mut h : CplxE ← caddE z cfB[kk]!
   for jr in [0:kk] do
     let j := kk - 1 - jr
-    h := csubE (caddE z cfB[j]!) (cdivE cfN[j]! h)
-  return cdivE cOneE h
+    let sum ← caddE z cfB[j]!
+    let quotient ← cdivE cfN[j]! h
+    h ← csubE sum quotient
+  let one ← cOneE
+  cdivE one h
 
-/-- Is this `Sig` a pure s0 value — a function of knob slots and constants only
+/- Is this `Sig` a pure s0 value — a function of knob slots and constants only
     (no `τ`/tick, no input, no bank machinery)? The live-pole lift's admission
     check: the lifted pair constants are correct (and Stage0-hoistable) only if
     the pole read is knob-invariant per sample. A GLIDED pole (`.sampleIndex`
     inside `glideExpr`) fails here — `settle` it first (the recorded WS-LP
     discipline; reverb rt60 is raw ⇒ s0, filter cutoff/resonance are glided).
-    UNMEMOIZED structural walk (like `sigConstF?`): call it only on SHALLOW
-    authored expressions (a pole read), never on combinator-built values whose
-    subterms share by reference — their TREE is exponential in the DAG depth
-    (a Horner like `bloomM1E`'s output would never return). -/
-def sigIsS0 : Sig → Bool
-  | .num _ | .paramRef _ | .sampleRate => true
-  | .unary _ a => sigIsS0 a
-  | .binary _ a b => sigIsS0 a && sigIsS0 b
-  | .clamp a b c | .select a b c => sigIsS0 a && sigIsS0 b && sigIsS0 c
-  | _ => false
-
+    The frozen arena is classified once in child-before-parent order, so shared
+    subgraphs are visited once. A dangling child or queried ID reads false and
+    admission therefore fails closed. -/
 -- ── The EMITTED complex transcendentals (WS-LP: the live Γ★ bridge) ────────────
 -- The bloom crossing's bake-time constants are lifted from build-time `CplxB` to
 -- emitted `CplxE` (Sig × Sig) so a LIVE pole survives the crossing. The one new
@@ -128,56 +137,107 @@ def sigIsS0 : Sig → Bool
 
 /-- Complex log at Sig level: `⟨½·log|z|², atan2(Im, Re)⟩` — `logSig` supplies the
     modulus half, `atan2E` the phase. The live twin of `CplxB.log`. -/
-def clogE (z : CplxE) : CplxE :=
-  (mul (lit 5 1) (logSig (add (mul z.1 z.1) (mul z.2 z.2))), atan2E z.2 z.1)
+def clogE (z : CplxE) : BuildM CplxE := do
+  let real2 ← mul z.1 z.1
+  let imag2 ← mul z.2 z.2
+  let norm2 ← add real2 imag2
+  let logarithm ← logSig norm2
+  let half ← lit 5 1
+  let real ← mul half logarithm
+  let imag ← atan2E z.2 z.1
+  pure (real, imag)
 
 /-- Complex exp at Sig level: `e^{Re}·⟨cos Im, sin Im⟩`. The live twin of `CplxB.exp`. -/
-def cexpE (z : CplxE) : CplxE :=
-  let e := expSig z.1
-  (mul e (cosSig z.2), mul e (sinSig z.2))
+def cexpE (z : CplxE) : BuildM CplxE := do
+  let exponential ← expSig z.1
+  let cosine ← cosSig z.2
+  let real ← mul exponential cosine
+  let sine ← sinSig z.2
+  let imag ← mul exponential sine
+  pure (real, imag)
 
 /-- Complex log-gamma at Sig level — the EMITTED twin of `lgammaB`. Same Lanczos
     (g=7, n=9) core, same reflection for `Re z < ½` on the dominant half of
     `log sin πz`; the build-time `if z.re<½` / `if z.im<0` branches become `selectE`s
     (the unselected core lane may go non-finite off its region — the select discards
     it, the bloom's established discipline). Both `clogE`/`cexpE` reachable. -/
-def lgammaE (z : CplxE) : CplxE :=
+def lgammaE (z : CplxE) : BuildM CplxE := do
   let lanczos : Array Float := #[0.99999999999980993, 676.5203681218851,
     -1259.1392167224028, 771.32342877765313, -176.61502916214059,
     12.507343278686905, -0.13857109526572012, 9.9843695780195716e-6,
     1.5056327351493116e-7]
-  let core : CplxE → CplxE := fun z =>
-    let zz := csubE z (lit 1, lit 0)
-    let x := (Array.range 8).foldl
-      (fun acc i => caddE acc (cdivE ((litF lanczos[i+1]!, lit 0) : CplxE)
-        (caddE zz ((litF (i+1).toFloat, lit 0) : CplxE))))
-      ((litF lanczos[0]!, lit 0) : CplxE)
-    let t := caddE zz ((litF 7.5, lit 0) : CplxE)
-    caddE (csubE (cmulE (caddE zz ((lit 5 1, lit 0) : CplxE)) (clogE t)) t)
-          (caddE (clogE x)
-            ((litF (DyadicI.toFloat ((DyadicI.log Tropical.Exact.twoPiI).shift (-1))), lit 0) : CplxE))
-  let pi := lit 3141592653589793 15
-  let imNeg := gt (lit 0) z.2                                    -- Im z < 0
-  let s : CplxE := (selectE imNeg (neg (mul pi z.2)) (mul pi z.2),
-                    selectE imNeg (mul pi z.1) (neg (mul pi z.1)))
-  let log2i : CplxE := ((litF (DyadicI.toFloat Tropical.Exact.ln2I) : Sig),
-                        selectE imNeg (lit 15707963267948966 16) (neg (lit 15707963267948966 16)))
-  let logsin := csubE (caddE s (clogE (csubE ((lit 1, lit 0) : CplxE)
-                  (cexpE (scaleRealE (lit (-2)) s))))) log2i
-  let reflected := csubE (csubE
-                           ((litF (DyadicI.toFloat (DyadicI.log Tropical.Exact.piI)), lit 0) : CplxE)
-                           logsin)
-                         (core (csubE ((lit 1, lit 0) : CplxE) z))
-  let base := core z
-  let useRefl := gt (lit 5 1) z.1                                -- Re z < ½
-  (selectE useRefl reflected.1 base.1, selectE useRefl reflected.2 base.2)
+  let core : CplxE → BuildM CplxE := fun z => do
+    let one ← lit 1
+    let zero ← lit 0
+    let zz ← csubE z (one, zero)
+    let initial ← litF lanczos[0]!
+    let x ← (Array.range 8).foldlM (fun acc i => do
+      let coefficient ← litF lanczos[i + 1]!
+      let index ← litF (i + 1).toFloat
+      let denominator ← caddE zz (index, zero)
+      let quotient ← cdivE (coefficient, zero) denominator
+      caddE acc quotient) (initial, zero)
+    let sevenHalf ← litF 7.5
+    let t ← caddE zz (sevenHalf, zero)
+    let half ← lit 5 1
+    let zzHalf ← caddE zz (half, zero)
+    let logT ← clogE t
+    let product ← cmulE zzHalf logT
+    let left ← csubE product t
+    let logX ← clogE x
+    let normalization ← litF
+      (DyadicI.toFloat ((DyadicI.log Tropical.Exact.twoPiI).shift (-1)))
+    let right ← caddE logX (normalization, zero)
+    caddE left right
+  let pi ← lit 3141592653589793 15
+  let zero ← lit 0
+  let imNeg ← gt zero z.2                                    -- Im z < 0
+  let piImag ← mul pi z.2
+  let negativePiImag ← neg piImag
+  let sReal ← selectE imNeg negativePiImag piImag
+  let piReal ← mul pi z.1
+  let negativePiReal ← neg piReal
+  let sImag ← selectE imNeg piReal negativePiReal
+  let s : CplxE := (sReal, sImag)
+  let logTwo ← litF (DyadicI.toFloat Tropical.Exact.ln2I)
+  let halfPi ← lit 15707963267948966 16
+  let negativeHalfPi ← neg halfPi
+  let logTwoImag ← selectE imNeg halfPi negativeHalfPi
+  let log2i : CplxE := (logTwo, logTwoImag)
+  let one ← lit 1
+  let oneC : CplxE := (one, zero)
+  let negativeTwo ← lit (-2)
+  let scaledS ← scaleRealE negativeTwo s
+  let expScaled ← cexpE scaledS
+  let oneMinus ← csubE oneC expScaled
+  let logOneMinus ← clogE oneMinus
+  let sum ← caddE s logOneMinus
+  let logsin ← csubE sum log2i
+  let logPi ← litF (DyadicI.toFloat (DyadicI.log Tropical.Exact.piI))
+  let reflectionLeft ← csubE (logPi, zero) logsin
+  let reflectedArg ← csubE oneC z
+  let reflectedCore ← core reflectedArg
+  let reflected ← csubE reflectionLeft reflectedCore
+  let base ← core z
+  let half ← lit 5 1
+  let useRefl ← gt half z.1                                -- Re z < ½
+  let real ← selectE useRefl reflected.1 base.1
+  let imag ← selectE useRefl reflected.2 base.2
+  pure (real, imag)
 
 /-- Γ★ = `exp(lgamma(a) − a·log κ + κ)/g` at Sig level — the live twin of
     `bloomGammaStar`, the bloom crossing's d-constant bridge between the two envelope
     branches (its `e^{±π|Im a|/2}` blowups cancel in the exponent). -/
-def bloomGammaStarE (a kappa : CplxE) (g : Sig) : CplxE :=
-  scaleRealE (div (lit 1) g)
-    (cexpE (caddE (csubE (lgammaE a) (cmulE a (clogE kappa))) kappa))
+def bloomGammaStarE (a kappa : CplxE) (g : Sig) : BuildM CplxE := do
+  let one ← lit 1
+  let inverseG ← div one g
+  let logGamma ← lgammaE a
+  let logKappa ← clogE kappa
+  let product ← cmulE a logKappa
+  let difference ← csubE logGamma product
+  let exponent ← caddE difference kappa
+  let exponential ← cexpE exponent
+  scaleRealE inverseG exponential
 
 -- ── The CERTIFIED DEPTHS: structure that cannot come from rounding ────────────
 -- `bloomM1`/`bloomCF` above are iterate-until-tolerance loops, and the count
@@ -465,11 +525,11 @@ structure BloomPair where
   -- across `dSwitch`, and the τ·e secular rides a straight-μ carrier.
   coincident : Bool := false
   dCoef      : Array CplxE := #[]     -- dₙ, n = 1..N (the a-divided-difference Horner coeffs)
-  k1SerDD    : CplxE := (lit 0, lit 0)  -- Φ(a,κ)/g (series-DD e^{νd} const, via the lgamma(a+1) bridge)
-  eKappa     : CplxE := (lit 0, lit 0)  -- e^κ (the secular coeff c·e^κ)
+  k1SerDD    : CplxE := default  -- Φ(a,κ)/g (series-DD e^{νd} const, via the lgamma(a+1) bridge)
+  eKappa     : CplxE := default  -- e^κ (the secular coeff c·e^κ)
   -- (μ−ν as the τ·e secular's z-coefficients: (Re, −Im) — a FIELD so the baked
   -- path emits the same single literals as before the CplxE lift.)
-  secCoef    : CplxE := (lit 0, lit 0)
+  secCoef    : CplxE := default
 deriving Inhabited
 
 /-- The bloom crossing's region for one composed (μ, ν) pair — a TOTAL partition
@@ -530,15 +590,6 @@ def bloomDepthCap : Nat := 300
 
 /-- The inspected conditioning lattice is exactly `-1, …, -bloomDepthCap`. -/
 def bloomConditioningLatticeDepth : Nat := bloomDepthCap
-
-/-- Point diagnostic reported by the seam gate: distance from `a` to the
-    nearest negative integer represented by the bounded Horner. -/
-def bloomConditioningMetric (a : CplxB) : Float := Id.run do
-  let mut d := Float.sqrt ((a.re + 1.0) * (a.re + 1.0) + a.im * a.im)
-  for j in [1:bloomConditioningLatticeDepth] do
-    let n := (j + 1).toFloat
-    d := min d (Float.sqrt ((a.re + n) * (a.re + n) + a.im * a.im))
-  return d
 
 /-- Evidence-carrier version of the conditioning stop-line for a baked pair.
     A pair is refused only where the CF crossing is reached; `κ = 0` and other

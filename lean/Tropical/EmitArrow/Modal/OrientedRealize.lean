@@ -26,13 +26,16 @@ structure TerminalBank where
 
 def TerminalBank.ofBank (bank : Bank) : TerminalBank := { bank }
 
-private def samePhysicalFrequency (left right : ModalMode) : Bool :=
-  left.omega == right.omega || match sigConstF? left.omega, sigConstF? right.omega with
-    | some l, some r => l == r
-    | _, _ => false
+private def samePhysicalFrequency (left right : ModalMode) : BuildM Bool := do
+  if left.omega == right.omega then return true
+  match ← sigConstF? left.omega, ← sigConstF? right.omega with
+  | some l, some r => pure (l == r)
+  | _, _ => pure false
 
-private def withUnitAmplitude (mode : ModalMode) : ModalMode :=
-  { mode with cre := lit 1, cim := lit 0 }
+private def withUnitAmplitude (mode : ModalMode) : BuildM ModalMode := do
+  let one ← lit 1
+  let zero ← lit 0
+  pure { mode with cre := one, cim := zero }
 
 /-- Terminal DD routing is allowed to be more conservative than the fixed-point
     EC/DD carrier: equal physical frequencies and accuracy-lens-near physical
@@ -40,9 +43,12 @@ private def withUnitAmplitude (mode : ModalMode) : ModalMode :=
     mode amplitude non-classifiable.  The terminal uses a float carrier below,
     so it does not inherit the old fixed Q4.28 amplitude cap that required
     compile-time residue bounds. -/
-private def terminalHot (left right : ModalMode) : Bool :=
-  samePhysicalFrequency left right || couplingHot left right ||
-    couplingHot (withUnitAmplitude left) (withUnitAmplitude right)
+private def terminalHot (left right : ModalMode) : BuildM Bool := do
+  if ← samePhysicalFrequency left right then return true
+  if ← couplingHot left right then return true
+  let unitLeft ← withUnitAmplitude left
+  let unitRight ← withUnitAmplitude right
+  couplingHot unitLeft unitRight
 
 /-- Columns for one live Cauchy reduction.  Keeping physical pole coordinates
     here avoids reconstructing `omega` from the oscillator increment. -/
@@ -57,12 +63,14 @@ private structure CauchyModeSym where
   pole : CplxE
   amp : CplxE
 
-private def cauchyCols (modes : Array ModalMode) : CauchyCols where
-  count := modes.size
-  poleRe := Sig.arr (modes.map fun mode => mode.poleE.1)
-  poleIm := Sig.arr (modes.map fun mode => mode.poleE.2)
-  ampRe := Sig.arr (modes.map fun mode => mode.ampE.1)
-  ampIm := Sig.arr (modes.map fun mode => mode.ampE.2)
+private def cauchyCols (modes : Array ModalMode) : BuildM CauchyCols := do
+  let poles ← modes.mapM (·.poleE)
+  let amps := modes.map (·.ampE)
+  let poleRe ← arr (poles.map (·.1))
+  let poleIm ← arr (poles.map (·.2))
+  let ampRe ← arr (amps.map (·.1))
+  let ampIm ← arr (amps.map (·.2))
+  pure { count := modes.size, poleRe, poleIm, ampRe, ampIm }
 
 /-- Ordered complex reduction over a mode table. Binder 1 is reserved for
     these coefficient-side loops; the terminal oscillator bank uses binder 0.
@@ -70,54 +78,79 @@ private def cauchyCols (modes : Array ModalMode) : CauchyCols where
     so a complex reciprocal is evaluated once and both authored left folds see
     the same item order. -/
 private def cauchyFold (modes : Array ModalMode)
-    (body : CauchyModeSym → CplxE) : CplxE :=
-  if modes.isEmpty then natE 0 else
-  let cols := cauchyCols modes
-  let index := Sig.loopIdx 1
-  let value := body {
-    pole := (Sig.index cols.poleRe index, Sig.index cols.poleIm index)
-    amp := (Sig.index cols.ampRe index, Sig.index cols.ampIm index) }
+    (body : CauchyModeSym → BuildM CplxE) : BuildM CplxE := do
+  if modes.isEmpty then return ← natE 0
+  let cols ← cauchyCols modes
+  let tableIndex ← loopIdx 1
+  let poleRe ← index cols.poleRe tableIndex
+  let poleIm ← index cols.poleIm tableIndex
+  let ampRe ← index cols.ampRe tableIndex
+  let ampIm ← index cols.ampIm tableIndex
+  let value ← body {
+    pole := (poleRe, poleIm)
+    amp := (ampRe, ampIm) }
   let tables := #[cols.poleRe, cols.poleIm, cols.ampRe, cols.ampIm]
   let routes := (Array.range cols.count).foldl
     (fun out _ => out.push (some 0) |>.push (some 1)) #[]
-  let image := Sig.routedSum cols.count 2 routes tables #[value.1, value.2] none 1
-  (Sig.index image (lit 0), Sig.index image (lit 1))
+  let image ← routedSum cols.count 2 routes tables #[value.1, value.2] none 1
+  let zero ← lit 0
+  let real ← index image zero
+  let one ← lit 1
+  let imag ← index image one
+  pure (real, imag)
 
-private def differenceSum (pole : CplxE) (modes : Array ModalMode) : CplxE :=
-  cauchyFold modes fun mode => cdivE mode.amp (csubE pole mode.pole)
+private def differenceSum (pole : CplxE) (modes : Array ModalMode) : BuildM CplxE :=
+  cauchyFold modes fun mode => do
+    let denominator ← csubE pole mode.pole
+    cdivE mode.amp denominator
 
-private def physicalSum (pole : CplxE) (modes : Array ModalMode) : CplxE :=
-  cauchyFold modes fun mode => cdivE mode.amp (caddE pole mode.pole)
+private def physicalSum (pole : CplxE) (modes : Array ModalMode) : BuildM CplxE :=
+  cauchyFold modes fun mode => do
+    let denominator ← caddE pole mode.pole
+    cdivE mode.amp denominator
 
 private def terminalSameSide (left right : Array ModalMode) :
-    Array ModalMode × Array PairedMode := Id.run do
+    BuildM (Array ModalMode × Array PairedMode) := do
   -- Keep a zero-residue row for the nonempty origin even when this same-side
   -- product is empty.  The terminal collector may still add an FP/PF residue
   -- to that pole below (notably a future-only source and a reversed room).
   if left.isEmpty then
-    return (right.map fun mode => modeOfE mode.poleE (natE 0), #[])
+    let modes ← right.mapM fun mode => do
+      let pole ← mode.poleE
+      let zero ← natE 0
+      modeOfE pole zero
+    return (modes, #[])
   if right.isEmpty then
-    return (left.map fun mode => modeOfE mode.poleE (natE 0), #[])
-  let hot := left.map fun l => right.map fun r => terminalHot l r
+    let modes ← left.mapM fun mode => do
+      let pole ← mode.poleE
+      let zero ← natE 0
+      modeOfE pole zero
+    return (modes, #[])
+  let hot ← left.mapM fun l => right.mapM fun r => terminalHot l r
   let isHot := fun i j => (hot[i]!)[j]!
-  let forced := left.mapIdx fun i l =>
+  let forced ← left.zipIdx.mapM fun (l, i) => do
     let cold := right.zipIdx.filterMap fun (r, j) =>
       if isHot i j then none else some r
-    let transfer := differenceSum l.poleE cold
-    modeOfE l.poleE (cmulE l.ampE transfer)
-  let ringing := right.mapIdx fun j r =>
+    let pole ← l.poleE
+    let transfer ← differenceSum pole cold
+    let amplitude ← cmulE l.ampE transfer
+    modeOfE pole amplitude
+  let ringing ← right.zipIdx.mapM fun (r, j) => do
     let cold := left.zipIdx.filterMap fun (l, i) =>
       if isHot i j then none else some l
-    let coupling := differenceSum r.poleE cold
-    modeOfE r.poleE (cmulE r.ampE coupling)
+    let pole ← r.poleE
+    let coupling ← differenceSum pole cold
+    let amplitude ← cmulE r.ampE coupling
+    modeOfE pole amplitude
   let mut paired := #[]
   for (l, i) in left.zipIdx do
     for (r, j) in right.zipIdx do
       if isHot i j then
+        let lam ← clampedPoleE l
+        let nu ← clampedPoleE r
+        let c ← cmulE l.ampE r.ampE
         paired := paired.push {
-          lam := clampedPoleE l
-          nu := clampedPoleE r
-          c := cmulE l.ampE r.ampE }
+          lam, nu, c }
   return (forced ++ ringing, paired)
 
 /-- Float terminal realization of stable divided differences.  This avoids the
@@ -125,67 +158,111 @@ private def terminalSameSide (left right : Array ModalMode) :
     certify residues produced by an earlier live room.  The paired rows remain
     data: one float reduction body serves every row in authored order instead
     of meta-unrolling the complex DD expression once per coupling. -/
-private def pairedSig (pairs : Array PairedMode) (clkInt anchorSamples : Sig) : Sig :=
-  if pairs.isEmpty then lit 0 else
-  let clkRel := relClockQ clkInt anchorSamples
-  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-  let value := bankFoldPaired (pairedBankCols pairs) fun pair =>
-    let delta : CplxE := (neg pair.ds, pair.wd)
-    let z : CplxE := (mul delta.1 dSec, mul delta.2 dSec)
-    let zsq := add (mul z.1 z.1) (mul z.2 z.2)
-    let directLane := gt zsq (litF 0.01)
-    let zsafe : CplxE :=
-      (selectE directLane z.1 (lit 1), selectE directLane z.2 (lit 0))
-    let ezr := expSig z.1
-    let ez : CplxE := (mul ezr (cosSig z.2), mul ezr (sinSig z.2))
-    let direct := cdivE (csubE ez (natE 1)) zsafe
-    let series := cexpm1SeriesE z
-    let cx : CplxE :=
-      (selectE directLane direct.1 series.1,
-       selectE directLane direct.2 series.2)
-    let secular := cmulE (pair.cre, pair.cim) (scaleRealE dSec cx)
-    let env := expSig (neg (mul pair.sigmaNu dSec))
+private def pairedSig (pairs : Array PairedMode) (clkInt anchorSamples : Sig) : BuildM Sig := do
+  if pairs.isEmpty then return ← lit 0
+  let clkRel ← relClockQ clkInt anchorSamples
+  let clkFloat ← toFloatE clkRel
+  let twoPow32 ← lit 4294967296
+  let secondsTimesRate ← div clkFloat twoPow32
+  let sr ← sampleRate
+  let dSec ← div secondsTimesRate sr
+  let cols ← pairedBankCols pairs
+  let value ← bankFoldPaired cols fun pair => do
+    let deltaReal ← neg pair.ds
+    let delta : CplxE := (deltaReal, pair.wd)
+    let zReal ← mul delta.1 dSec
+    let zImag ← mul delta.2 dSec
+    let z : CplxE := (zReal, zImag)
+    let zrealSq ← mul z.1 z.1
+    let zimagSq ← mul z.2 z.2
+    let zsq ← add zrealSq zimagSq
+    let threshold ← litF 0.01
+    let directLane ← gt zsq threshold
+    let oneReal ← lit 1
+    let zeroImag ← lit 0
+    let zsafeReal ← selectE directLane z.1 oneReal
+    let zsafeImag ← selectE directLane z.2 zeroImag
+    let zsafe : CplxE := (zsafeReal, zsafeImag)
+    let ezr ← expSig z.1
+    let cosine ← cosSig z.2
+    let ezReal ← mul ezr cosine
+    let sine ← sinSig z.2
+    let ezImag ← mul ezr sine
+    let ez : CplxE := (ezReal, ezImag)
+    let one ← natE 1
+    let numerator ← csubE ez one
+    let direct ← cdivE numerator zsafe
+    let series ← cexpm1SeriesE z
+    let cxReal ← selectE directLane direct.1 series.1
+    let cxImag ← selectE directLane direct.2 series.2
+    let cx : CplxE := (cxReal, cxImag)
+    let scaledCx ← scaleRealE dSec cx
+    let secular ← cmulE (pair.cre, pair.cim) scaledCx
+    let sigmaTime ← mul pair.sigmaNu dSec
+    let negativeSigmaTime ← neg sigmaTime
+    let env ← expSig negativeSigmaTime
     -- `modePhaseQ` is a Q0.32 cycle word, not a radian-valued float.  Keep the
     -- same integer-reduced rotator used by the incumbent DD realization; feeding
     -- that word to `cosSig`/`sinSig` would rotate complex modes incorrectly while
     -- accidentally remaining invisible for the real-pole (omega=0) case.
-    let phaseQ := modePhaseQFromIncr (toIntE pair.incrNu) clkRel
-    let carrierCos := div (toFloatE (fixedCosCycSig phaseQ)) (lit 1073741824)
-    let carrierSin := div (toFloatE (fixedSinCycSig phaseQ)) (lit 1073741824)
-    let carrier : CplxE := (mul env carrierCos, mul env carrierSin)
-    (cmulE secular carrier).1
-  selectE (gt clkRel (lit 0)) value (lit 0)
+    let increment ← toIntE pair.incrNu
+    let phaseQ ← modePhaseQFromIncr increment clkRel
+    let fixedCos ← fixedCosCycSig phaseQ
+    let floatCos ← toFloatE fixedCos
+    let scale ← lit 1073741824
+    let carrierCos ← div floatCos scale
+    let fixedSin ← fixedSinCycSig phaseQ
+    let floatSin ← toFloatE fixedSin
+    let carrierSin ← div floatSin scale
+    let carrierReal ← mul env carrierCos
+    let carrierImag ← mul env carrierSin
+    let carrier : CplxE := (carrierReal, carrierImag)
+    let product ← cmulE secular carrier
+    pure product.1
+  let zero ← lit 0
+  let afterStrike ← gt clkRel zero
+  selectE afterStrike value zero
 
 /-- Read both strict half-axis banks and supply the continuous mixed-orientation
     convolution value at the strike itself. -/
 def Bank.realizeSig (bank : Bank) (clkInt anchorSamples : Sig)
-    (count? : Option Sig := none) : Sig :=
-  let anchorQ := toIntE (mul anchorSamples (lit 4294967296))
-  let mirroredClock := sub (mul (lit 2) anchorQ) clkInt
+    (count? : Option Sig := none) : BuildM Sig := do
+  let twoPow32 ← lit 4294967296
+  let anchorFixed ← mul anchorSamples twoPow32
+  let anchorQ ← toIntE anchorFixed
+  let two ← lit 2
+  let twiceAnchor ← mul two anchorQ
+  let mirroredClock ← sub twiceAnchor clkInt
   let futureBanked := bankIsUniform bank.future &&
     (count?.isSome || banksTableEnabled)
   let pastBanked := bankIsUniform bank.past && banksTableEnabled
-  let future := if futureBanked then
+  let future ← if futureBanked then
       modalBankSigTable bank.future clkInt anchorSamples count?
     else modalBankSig bank.future clkInt anchorSamples
-  let past := if pastBanked then
+  let past ← if pastBanked then
       modalBankSigTable bank.past mirroredClock anchorSamples none
     else modalBankSig bank.past mirroredClock anchorSamples
-  let sides := add
-    future
-    past
-  let atStrike := Sig.binary .eq (relClockQ clkInt anchorSamples) (lit 0)
+  let sides ← add future past
+  let relativeClock ← relClockQ clkInt anchorSamples
+  let zero ← lit 0
+  let atStrike ← binary .eq relativeClock zero
   selectE atStrike bank.atZero.1 sides
 
 /-- Stable terminal read for hot same-side couplings.  A past paired atom is
     the exact clock mirror of the existing causal divided-difference carrier. -/
 def TerminalBank.realizeSig (terminal : TerminalBank)
-    (clkInt anchorSamples : Sig) (count? : Option Sig := none) : Sig :=
-  let future := pairedSig terminal.futurePaired clkInt anchorSamples
-  let anchorQ := toIntE (mul anchorSamples (lit 4294967296))
-  let mirroredClock := sub (mul (lit 2) anchorQ) clkInt
-  let past := pairedSig terminal.pastPaired mirroredClock anchorSamples
-  add (terminal.bank.realizeSig clkInt anchorSamples count?) (add future past)
+    (clkInt anchorSamples : Sig) (count? : Option Sig := none) : BuildM Sig := do
+  let future ← pairedSig terminal.futurePaired clkInt anchorSamples
+  let twoPow32 ← lit 4294967296
+  let anchorFixed ← mul anchorSamples twoPow32
+  let anchorQ ← toIntE anchorFixed
+  let two ← lit 2
+  let twiceAnchor ← mul two anchorQ
+  let mirroredClock ← sub twiceAnchor clkInt
+  let past ← pairedSig terminal.pastPaired mirroredClock anchorSamples
+  let bank ← terminal.bank.realizeSig clkInt anchorSamples count?
+  let paired ← add future past
+  add bank paired
 
 /-- Add the exact mixed-orientation residue contribution to a mode already
     carrying its cold same-side residue.  For degree-zero `F(λ,a) * P(μ,b)`,
@@ -193,14 +270,17 @@ def TerminalBank.realizeSig (terminal : TerminalBank)
     contributions on the existing poles avoids materializing two modes per
     Cartesian pair while preserving the bilateral partial fraction. -/
 private def mixedResidue (original : ModalMode)
-    (opposite : Array ModalMode) : CplxE :=
-  cnegE (cmulE original.ampE (physicalSum original.poleE opposite))
+    (opposite : Array ModalMode) : BuildM CplxE := do
+  let pole ← original.poleE
+  let sum ← physicalSum pole opposite
+  let product ← cmulE original.ampE sum
+  cnegE product
 
 private def addMixedResidue (sameSide : ModalMode)
-    (contribution : CplxE) : ModalMode :=
-  { sameSide with
-    cre := add sameSide.cre contribution.1
-    cim := add sameSide.cim contribution.2 }
+    (contribution : CplxE) : BuildM ModalMode := do
+  let cre ← add sameSide.cre contribution.1
+  let cim ← add sameSide.cim contribution.2
+  pure { sameSide with cre, cim }
 
 /-- Compose the last room with EC/DD stability on both same-side arms.  The
     degree-zero mixed `FP`/`PF` pairs are collected onto their existing poles;
@@ -209,8 +289,8 @@ private def addMixedResidue (sameSide : ModalMode)
     paired atoms are not yet a generally composable modal source for a later
     room or gauge. -/
 def Bank.convolveKernelTerminal (input : Bank) (room : Array ModalMode)
-    (direction : Sig) : TerminalBank :=
-  let kernel := Bank.kernel room direction
+    (direction : Sig) : BuildM TerminalBank := do
+  let kernel ← Bank.kernel room direction
   let degreeZero := (input.future ++ input.past ++ kernel.future ++ kernel.past).all
     fun mode => mode.deg == 0
   if !degreeZero then
@@ -219,89 +299,128 @@ def Bank.convolveKernelTerminal (input : Bank) (room : Array ModalMode)
     -- path instead of silently losing their polynomial factors.  Its
     -- classifier recognizes structural coincidence; a generalized live DD
     -- carrier remains the named boundary for runtime-equal higher degrees.
-    TerminalBank.ofBank
-      (input.convolveKernel room direction syntacticSameSideClassifier)
+    let bank ← input.convolveKernel room direction syntacticSameSideClassifier
+    pure (TerminalBank.ofBank bank)
   else
-    let (future, futurePaired) := terminalSameSide input.future kernel.future
-    let (past, pastPaired) := terminalSameSide input.past kernel.past
+    let (future, futurePaired) ← terminalSameSide input.future kernel.future
+    let (past, pastPaired) ← terminalSameSide input.past kernel.past
     -- `terminalSameSide` retains authored input modes followed by authored
     -- kernel modes.  Add each opposite-axis Cauchy gain to that matching row;
     -- hot same-side pairs remain excluded there and occur once in the DD bank.
-    let futureInput := (future.extract 0 input.future.size).zip input.future
-      |>.map fun (mode, original) =>
-        let contribution := mixedResidue original kernel.past
-        (addMixedResidue mode contribution, contribution)
-    let futureKernel := (future.extract input.future.size future.size).zip kernel.future
-      |>.map fun (mode, original) =>
-        let contribution := mixedResidue original input.past
-        (addMixedResidue mode contribution, contribution)
-    let pastInput := (past.extract 0 input.past.size).zip input.past
-      |>.map fun (mode, original) =>
-        addMixedResidue mode (mixedResidue original kernel.future)
-    let pastKernel := (past.extract input.past.size past.size).zip kernel.past
-      |>.map fun (mode, original) =>
-        addMixedResidue mode (mixedResidue original input.future)
+    let futureInput ← (future.extract 0 input.future.size).zip input.future
+      |>.mapM fun (mode, original) => do
+        let contribution ← mixedResidue original kernel.past
+        let combined ← addMixedResidue mode contribution
+        pure (combined, contribution)
+    let futureKernel ← (future.extract input.future.size future.size).zip kernel.future
+      |>.mapM fun (mode, original) => do
+        let contribution ← mixedResidue original input.past
+        let combined ← addMixedResidue mode contribution
+        pure (combined, contribution)
+    let pastInput ← (past.extract 0 input.past.size).zip input.past
+      |>.mapM fun (mode, original) => do
+        let contribution ← mixedResidue original kernel.future
+        addMixedResidue mode contribution
+    let pastKernel ← (past.extract input.past.size past.size).zip kernel.past
+      |>.mapM fun (mode, original) => do
+        let contribution ← mixedResidue original input.future
+        addMixedResidue mode contribution
     -- Either origin side contains the exact mixed value at the strike.  Reuse
     -- the future-origin contribution nodes already feeding those residues;
     -- a separate Cartesian seam fold would duplicate the same live quotients.
-    let atZero := (futureInput ++ futureKernel).foldl (fun total row =>
-      caddE total row.2) (natE 0)
-    { bank := {
+    let zero ← natE 0
+    let atZero ← (futureInput ++ futureKernel).foldlM (fun total row =>
+      caddE total row.2) zero
+    pure {
+      bank := {
         future := (futureInput ++ futureKernel).map (fun row => row.1)
         past := pastInput ++ pastKernel
-        atZero }
-      futurePaired
-      pastPaired }
+        atZero := atZero }
+      futurePaired := futurePaired
+      pastPaired := pastPaired }
 
 /-- The bilateral transfer value at `s = i·omega`.  Future atoms contribute
     `A·p!/(s-λ)^(p+1)`; mirrored past atoms contribute
     `A·p!·(-1)^(p+1)/(s+λ)^(p+1)`. -/
-def Bank.transferAt (bank : Bank) (omega : Sig) : CplxE :=
-  let s : CplxE := (lit 0, omega)
-  let future := bank.future.foldl (fun total mode =>
-    let denominator := cpowE (csubE s mode.poleE) (mode.deg + 1)
-    caddE total (cdivE (cmulE mode.ampE (natE (factorial mode.deg))) denominator))
-    (natE 0)
-  bank.past.foldl (fun total mode =>
-    let numerator := cmulE mode.ampE (natE (factorial mode.deg))
-    let numerator := if (mode.deg + 1) % 2 == 1 then cnegE numerator else numerator
-    let denominator := cpowE (caddE s mode.poleE) (mode.deg + 1)
-    caddE total (cdivE numerator denominator)) future
+def Bank.transferAt (bank : Bank) (omega : Sig) : BuildM CplxE := do
+  let zeroReal ← lit 0
+  let s : CplxE := (zeroReal, omega)
+  let zero ← natE 0
+  let future ← bank.future.foldlM (fun total mode => do
+    let pole ← mode.poleE
+    let difference ← csubE s pole
+    let denominator ← cpowE difference (mode.deg + 1)
+    let coefficient ← natE (factorial mode.deg)
+    let numerator ← cmulE mode.ampE coefficient
+    let quotient ← cdivE numerator denominator
+    caddE total quotient) zero
+  bank.past.foldlM (fun total mode => do
+    let coefficient ← natE (factorial mode.deg)
+    let rawNumerator ← cmulE mode.ampE coefficient
+    let numerator ← if (mode.deg + 1) % 2 == 1 then cnegE rawNumerator else pure rawNumerator
+    let pole ← mode.poleE
+    let sum ← caddE s pole
+    let denominator ← cpowE sum (mode.deg + 1)
+    let quotient ← cdivE numerator denominator
+    caddE total quotient) future
 
 /-- One authored gauge scalar for the complete current modal value.  Both arms
     are sampled in one p=8 norm and receive one scalar; they are never normalized
     independently.  Unlike the older causal-only adapter this expression is the
     current static universe, so it deliberately does not settle live controls to
     a target value before measuring them. -/
-def Bank.gaugeScale (g : Sig) (bank : Bank) : Sig :=
-  let candidates := bank.future.map (fun mode => mode.omega) ++
-    bank.past.map (fun mode => neg mode.omega)
+def Bank.gaugeScale (g : Sig) (bank : Bank) : BuildM Sig := do
+  let pastFrequencies ← bank.past.mapM fun mode => neg mode.omega
+  let candidates := bank.future.map (fun mode => mode.omega) ++ pastFrequencies
   -- Probe identity belongs to the transfer function, not its partial-fraction
   -- spelling: splitting one atom into two half-amplitude atoms must not double
   -- its contribution to the p-norm's outer sample grid.
   let frequencies := candidates.foldl (fun probes frequency =>
     if probes.contains frequency then probes else probes.push frequency) #[]
-  let energy8 := frequencies.foldl (fun total omega =>
-    let h := bank.transferAt omega
-    let h2 := add (mul h.1 h.1) (mul h.2 h.2)
-    add total (mul (mul h2 h2) (mul h2 h2))) (lit 0)
-  expSig (mul (mul (neg g) (lit 125 3))
-    (logSig (clampE energy8 (lit 1 30) (lit (10^30)))))
+  let zero ← lit 0
+  let energy8 ← frequencies.foldlM (fun total omega => do
+    let h ← bank.transferAt omega
+    let realSquared ← mul h.1 h.1
+    let imagSquared ← mul h.2 h.2
+    let h2 ← add realSquared imagSquared
+    let h4 ← mul h2 h2
+    let h8 ← mul h4 h4
+    add total h8) zero
+  let lower ← lit 1 30
+  let upper ← lit (10^30)
+  let clamped ← clampE energy8 lower upper
+  let logarithm ← logSig clamped
+  let negativeG ← neg g
+  let exponent ← lit 125 3
+  let scaledG ← mul negativeG exponent
+  let power ← mul scaledG logarithm
+  expSig power
 
 /-- Gauge a complete oriented modal value in place.  The exact strike seam is
     scaled with the same value as both exponential-polynomial arms. -/
-def Bank.gauge (bank : Bank) (g : Sig) : Bank :=
-  if bank.future.isEmpty && bank.past.isEmpty then bank else
-  let scale : CplxE := (bank.gaugeScale g, lit 0)
-  { future := bank.future.map (scaleModeAmp scale)
-    past := bank.past.map (scaleModeAmp scale)
-    atZero := cmulE scale bank.atZero }
+def Bank.gauge (bank : Bank) (g : Sig) : BuildM Bank := do
+  if bank.future.isEmpty && bank.past.isEmpty then return bank
+  let scaleReal ← bank.gaugeScale g
+  let zero ← lit 0
+  let scale : CplxE := (scaleReal, zero)
+  let future ← bank.future.mapM (scaleModeAmp scale)
+  let past ← bank.past.mapM (scaleModeAmp scale)
+  let atZero ← cmulE scale bank.atZero
+  pure { future, past, atZero }
 
 /-- Sway changes only this room kernel's physical damping before convolution.
     Pitch, the source prefix, and every other room remain untouched. -/
-def swayKernel (modes : Array ModalMode) (sway rate responseClock : Sig) : Array ModalMode :=
-  let phase := phasorPhaseSig rate (lit 0) responseClock
-  let scale := add (lit 1) (mul sway (sinSig (mul twoPiE phase)))
-  modes.map fun mode => { mode with sigma := mul mode.sigma scale }
+def swayKernel (modes : Array ModalMode) (sway rate responseClock : Sig) : BuildM (Array ModalMode) := do
+  let zero ← lit 0
+  let phase ← phasorPhaseSig rate zero responseClock
+  let twoPi ← twoPiE
+  let radians ← mul twoPi phase
+  let sine ← sinSig radians
+  let modulation ← mul sway sine
+  let one ← lit 1
+  let scale ← add one modulation
+  modes.mapM fun mode => do
+    let sigma ← mul mode.sigma scale
+    pure { mode with sigma }
 
 end Tropical.EmitArrow.Oriented
