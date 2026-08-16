@@ -6,9 +6,9 @@ import Tropical.EmitArrow.BankOrder
 
 `compileBankSum` (`Ir/Emit.lean`) lowers `ENode.bankSum` to a
 `ReduceBegin`/body/`ReduceEnd` region. The frontend half
-(`EmitArrow/BankOrder.lean`) proves the banked and unrolled builders are
-the same tree under the reference realization; this file proves the emit
-half: **the instruction stream `compileBankSum` produces has exactly the
+(`EmitArrow/BankOrder.lean`) proves the production bank denotation is
+the authored increasing-index fold; this file proves the emit half: **the
+instruction stream `compileBankSum` produces has exactly the
 region shape** — everything the sub-compiles emitted for the tables and
 the optional runtime count (loop-invariant, BEFORE the region), then
 `ReduceBegin` spliced IMMEDIATELY before the body's instructions, then the
@@ -289,9 +289,9 @@ theorem regionTrips_le (capacity : Nat) (dyn? : Option Int) :
       local — same shape, same order.
 
     Everything else — that the two builder branches are the same tree
-    (`unrollBanks_modalBankSigTable`), that the fold is the array-order
-    fold (`denote_unrollBanks_bankSum`), that nesting composes row-major
-    (`unrollBanks_bankSum_nested`), that the emitted stream has exactly
+    (`denoteExpr_staticBank_order`), that the fold is the array-order
+    fold (`refFold`), that nesting composes row-major (`refFold_nested`),
+    that the emitted stream has exactly
     the region shape with the tables hoisted before it
     (`compileBankSum_stream`), and that an over-capacity live count runs
     a prefix (`regionTrips_le`) — is a theorem. -/
@@ -299,25 +299,12 @@ def regionDenotation {α : Type _} (op : α → α → α) (init : α)
     (body : Nat → α) (capacity : Nat) (dyn? : Option Int) : α :=
   Tropical.EmitArrow.refFold op init body (regionTrips capacity dyn?)
 
-/-- The capstone corollary: read through the named assumption
-    (`regionDenotation`), a STATIC region computes exactly what the
-    unrolled realization computes, for ANY carrier and any denotation
-    that is a homomorphism on `add` alone — the two realizations perform
-    the same operations on the same operands in the same sequence, so
-    bit-identity is a corollary of the determinism of `op`, floats
-    included. -/
-theorem regionDenotation_static_eq_unrolled {α : Type _}
-    (d : Tropical.EmitArrow.Sig → α) (op : α → α → α) (z : α)
-    (hadd : ∀ a b, d (Tropical.EmitArrow.add a b) = op (d a) (d b))
-    (hz : d (Tropical.EmitArrow.litI 0) = z)
-    {n : Nat} {ts : Array Tropical.EmitArrow.Sig}
-    {b : Tropical.EmitArrow.Sig} {ii : Nat} :
-    regionDenotation op z
-        (fun j => d (Tropical.EmitArrow.instLoop ii j
-          (Tropical.EmitArrow.unrollBanks b))) n none
-      = d (Tropical.EmitArrow.unrollBanks (.bankSum n ts b none ii)) := by
-  rw [Tropical.EmitArrow.denote_unrollBanks_bankSum d op z hadd hz]
-  rfl
+/-- The arena-native capstone: under the named backend assumption encoded by
+    `regionDenotation`, a static emitted region performs exactly the same
+    increasing-index left fold as the direct `ENode.bankSum` denotation. -/
+theorem regionDenotation_static_eq_refFold {α : Type _}
+    (op : α → α → α) (zero : α) (body : Nat → α) (capacity : Nat) :
+    regionDenotation op zero body capacity none =
+      Tropical.EmitArrow.refFold op zero body capacity := rfl
 
 end Tropical.Ir.Emit
-

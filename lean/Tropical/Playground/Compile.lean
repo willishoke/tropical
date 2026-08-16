@@ -1,6 +1,9 @@
 import Tropical.Playground.Report
 import Tropical.Playground.Hierarchy
-import Tropical.Playground.ArenaDecode
+import Tropical.Playground.Decode
+import Tropical.Ir.Strata
+import Tropical.Compile
+import Tropical.StdlibChain
 
 /-!
 # Playground.Compile
@@ -12,8 +15,9 @@ namespace Tropical.Playground
 
 open Lean (Json JsonNumber)
 open Tropical.Ir
-open Tropical.EmitArrow.ArenaNative
+open Tropical.EmitArrow
 open Tropical.Exact (DyadicI)
+open Metadata
 
 -- ── Graph → loadable FlatPlan (mirrors Tropicaltest.compileArrowCarrier) ─────
 /-- Compile the GUI graph to a loadable `FlatPlan`, plus the scope taps it
@@ -54,9 +58,9 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
   -- one builder state. A failed tap attempt restores its pre-attempt state and
   -- remains absent, preserving the inspection surface's historical policy.
   let (arena1, idx, successfulTapIds) ←
-    Tropical.EmitArrow.ArenaNative.assembleCompleteWithResult arena "__patch__"
+    Tropical.EmitArrow.assembleCompleteWithResult arena "__patch__"
     registry (extraDecls := paramDecls) do
-      let g ← ArenaCompiler.decodeGraph j paramTable
+      let g ← Compiler.decodeGraph j paramTable
       let term ← lowerGraph g
       let out ← emitTerm (normalize term)
       let tapSigs ← tapIds.foldlM (fun (acc : Array (String × Sig)) id => do

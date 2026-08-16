@@ -1,4 +1,5 @@
 import Tropical.EmitArrow.Numerics
+import Tropical.EmitArrow.Inspect
 import Tropical.Ir.BanksFlag
 import Tropical.EmitArrow.Term
 import Tropical.Exact.Gamma
@@ -34,7 +35,7 @@ structure ModalMode where
   sigma : Sig           -- σ = −Re μ  (decay)
   omega : Sig           -- ω = Im μ   (rad/s)
   cre   : Sig           -- Re A
-  cim   : Sig := lit 0   -- Im A
+  cim   : Sig           -- Im A
   deg   : Nat := 0
   /-- WS-LP: the closed interval a LIVE `sigma` ranges over (the knob's span,
       supplied by the authoring site — e.g. the rt60 knob's display range mapped
@@ -46,16 +47,21 @@ structure ModalMode where
 
 /-- Authored mode from (freq Hz, decay σ, real amp): `ω = 2π·f`, `c_re = amp`,
     `c_im = 0`. Any of `fHz`/`sigma`/`amp` may be a live `paramRef`. -/
-def ModalMode.hz (fHz sigma amp : Sig) (deg : Nat := 0) : ModalMode :=
-  { sigma, omega := mul twoPiE fHz, cre := amp, deg }
+def ModalMode.hz (fHz sigma amp : Sig) (deg : Nat := 0) : BuildM ModalMode := do
+  let twoPi ← twoPiE
+  let omega ← mul twoPi fHz
+  let zero ← lit 0
+  pure { sigma, omega, cre := amp, cim := zero, deg }
 
 /-- `base^k` by repeated multiply (k is a mode's small polynomial order). -/
-def powE (base : Sig) : Nat → Sig
+def powE (base : Sig) : Nat → BuildM Sig
   | 0 => lit 1
-  | 1 => base
-  | n + 1 => mul (powE base n) base
+  | 1 => pure base
+  | n + 1 => do
+      let power ← powE base n
+      mul power base
 
-/-- Fold an authored-constant `Sig` to a certified enclosure. This is what every
+/- Fold an authored-constant `Sig` to a certified enclosure. This is what every
     DECISION site reads, because a decision made from a platform `libm`'s last
     bit can change the emitted program's shape (see `Tropical.Exact`), and since
     P3 it is the ONLY fold: `sigConstF?` below is its projection, so there is one
@@ -72,17 +78,7 @@ def powE (base : Sig) : Nat → Sig
     * Division by zero POISONS instead of computing something. A caller that
       checks `ok` treats the mode as non-const and falls back to the live path,
       rather than folding a value that does not exist. -/
-def sigConstD? : Sig → Option DyadicI
-  | .num n            => some (DyadicI.ofJsonNumber n)
-  | .unary .neg a     => (sigConstD? a).map DyadicI.neg
-  | .unary .toFloat a => sigConstD? a
-  | .binary .add a b  => do pure (DyadicI.add (← sigConstD? a) (← sigConstD? b))
-  | .binary .sub a b  => do pure (DyadicI.sub (← sigConstD? a) (← sigConstD? b))
-  | .binary .mul a b  => do pure (DyadicI.mul (← sigConstD? a) (← sigConstD? b))
-  | .binary .div a b  => do pure (DyadicI.div (← sigConstD? a) (← sigConstD? b))
-  | _                 => none
-
-/-- The same fold projected to its nearest `Float` — for the sites that BUILD a
+/- The same fold projected to its nearest `Float` — for the sites that BUILD a
     literal rather than decide with one (a baked pole read in `bloomCompose`, a
     clamp endpoint, a comb factor's ω), and for the test witnesses that read
     baked `BloomPair` fields back as doubles. Since P3 this is a projection of
@@ -95,8 +91,6 @@ def sigConstD? : Sig → Option DyadicI
     preserved deliberately rather than fixed inside a carrier commit. Every
     DECISION site is already off this function and on `sigConstD?`, where the
     poison is visible. -/
-def sigConstF? (s : Sig) : Option Float := (sigConstD? s).map DyadicI.toFloat
-
 -- ── Option E: the per-bank Q-landing exponent (the modal-datapath rail fix) ────
 -- Every modal weight lands as Q4.28 (×2²⁸) and multiplies an exact Q2.30 rotator
 -- in i64, so `w·env·2²⁸·2³⁰ = w·env·2⁵⁸` wraps against i64's 2⁶³ once the LANDED
@@ -159,16 +153,22 @@ inductive LandExp where
 
 /-- `2^(28−k)` — the Q-landing scale multiplied before `toInt`. `lit 268435456`
     verbatim at `static 0`; `ldexp(1, 28−k)` (an exact power of two) when live. -/
-def LandExp.scale : LandExp → Sig
+def LandExp.scale : LandExp → BuildM Sig
   | .static k  => lit (Int.pow 2 (28 - k))
-  | .dynamic k => ldexpE (lit 1) (sub (lit 28) k)
+  | .dynamic k => do
+      let one ← lit 1
+      let twentyEight ← lit 28
+      let exponent ← sub twentyEight k
+      ldexpE one exponent
 
 /-- `28−k` — the per-mode right shift (the operand of `rshift`). `lit 28` verbatim
     at `static 0`. Always in `[0,28]` by construction, so the emitted `ashr`/`>>`
     is never the out-of-range poison/UB LLVM and MSL leave undefined. -/
-def LandExp.shift : LandExp → Sig
+def LandExp.shift : LandExp → BuildM Sig
   | .static k  => lit (28 - k)
-  | .dynamic k => sub (lit 28) k
+  | .dynamic k => do
+      let twentyEight ← lit 28
+      sub twentyEight k
 
 /-- The envelope-peak factor `sup_{d≥0} d^p·e^{−σd} = (p/(σe))^p` for a mode of
     degree `p` (the polynomial-order lift): `1` for `p=0` (`e^{−σd} ≤ 1`), else the
@@ -199,10 +199,17 @@ private def envPeakD (deg : Nat) (sigma : DyadicI) : Option DyadicI :=
 /-- The `Sig` mirror of `envPeakF` for the DYNAMIC max fold: `(p/(σe))^p·(|cre|+
     |cim|)`. Reduces to exactly `|cre|+|cim|` at `deg=0`, so a deg-0 bank's `maxSig`
     is unchanged (byte-identical dynamic path). -/
-def modeWeightBoundSig (m : ModalMode) : Sig :=
-  let amp := add (.unary .abs m.cre) (.unary .abs m.cim)
-  if m.deg == 0 then amp
-  else mul (powE (div (litF m.deg.toFloat) (mul m.sigma (litF 2.718281828459045))) m.deg) amp
+def modeWeightBoundSig (m : ModalMode) : BuildM Sig := do
+  let absCre ← absE m.cre
+  let absCim ← absE m.cim
+  let amp ← add absCre absCim
+  if m.deg == 0 then pure amp else
+    let degree ← litF m.deg.toFloat
+    let euler ← litF 2.718281828459045
+    let denominator ← mul m.sigma euler
+    let ratio ← div degree denominator
+    let peak ← powE ratio m.deg
+    mul peak amp
 
 /-- The per-bank landing exponent from a bank's mode weights. The guarded
     magnitude is `maxAbs = maxₘ sup_d |env₂ₘ·Aₘ| = maxₘ (p/(σe))^p·(|creₘ|+|cimₘ|)`,
@@ -216,7 +223,9 @@ def modeWeightBoundSig (m : ModalMode) : Sig :=
     kernel. `floatExponent` is `⌊log₂⌋` and fails toward HEADROOM: `floatExponent 0
     = −1023 ⇒ k=0` (silent bank), `floatExponent NaN/∞ = 1024 ⇒ k=28` (max
     headroom), never k=0-toward-the-wrap. Both paths clamp `k∈[0,28]`. -/
-def bankLandExp (modes : Array ModalMode) : LandExp := Id.run do
+def bankLandExp (modes : Array ModalMode) : BuildM LandExp := do
+  let builder ← get
+  let constants := sigConstTable builder.exprs
   let mut mx : DyadicI := DyadicI.zero
   let mut unbounded := false
   let mut allConst := true
@@ -224,13 +233,14 @@ def bankLandExp (modes : Array ModalMode) : LandExp := Id.run do
     -- deg-0 (the whole plain vocabulary) never queries σ, so a live-σ deg-0 bank
     -- still takes the static path when its amps const-fold.
     if m.deg == 0 then
-      match sigConstD? m.cre, sigConstD? m.cim with
+      match sigConstDFrom? constants m.cre, sigConstDFrom? constants m.cim with
       | some cr, some ci =>
         let v := DyadicI.add (DyadicI.abs cr) (DyadicI.abs ci)
         if v.ok then mx := DyadicI.max mx v else allConst := false
       | _, _ => allConst := false
     else
-      match sigConstD? m.cre, sigConstD? m.cim, sigConstD? m.sigma with
+      match sigConstDFrom? constants m.cre, sigConstDFrom? constants m.cim,
+          sigConstDFrom? constants m.sigma with
       | some cr, some ci, some sg =>
         let amp := DyadicI.add (DyadicI.abs cr) (DyadicI.abs ci)
         if !amp.ok then allConst := false
@@ -243,10 +253,17 @@ def bankLandExp (modes : Array ModalMode) : LandExp := Id.run do
       | _, _, _ => allConst := false
   if allConst then
     return .static (if unbounded then 28 else landK mx)
-  let maxSig := modes.foldl (fun acc m =>
-    let a := modeWeightBoundSig m
-    selectE (gt acc a) acc a) (lit 0)
-  return .dynamic (clampE (sub (.unary .floatExponent maxSig) (lit 4)) (lit 0) (lit 28))
+  let zero ← lit 0
+  let maxSig ← modes.foldlM (fun acc m => do
+    let a ← modeWeightBoundSig m
+    let greater ← gt acc a
+    selectE greater acc a) zero
+  let exponent ← floatExponentE maxSig
+  let four ← lit 4
+  let reduced ← sub exponent four
+  let zero ← lit 0
+  let twentyEight ← lit 28
+  return .dynamic (← clampE reduced zero twentyEight)
 
 /-- The RELATIVE clock `clkRel = clk − anchor·2³²` as an EXACT i64 subtract.
     (A float-relative clock — `toFloat(clk)/2³² − anchor` — loses mantissa bits
@@ -254,8 +271,11 @@ def bankLandExp (modes : Array ModalMode) : LandExp := Id.run do
     the integer clock first keeps time-translation exact at any τ; everything
     downstream (phase reduction, the bounded envelope coordinate, the causal gate)
     sees only the bounded relative value. -/
-def relClockQ (clkInt anchorSamples : Sig) : Sig :=
-  sub clkInt (toIntE (mul anchorSamples (lit 4294967296)))
+def relClockQ (clkInt anchorSamples : Sig) : BuildM Sig := do
+  let twoPow32 ← lit 4294967296
+  let anchorFixed ← mul anchorSamples twoPow32
+  let anchorInt ← toIntE anchorFixed
+  sub clkInt anchorInt
 
 /-- A mode's oscillator phase over the RELATIVE clock, integer-reduced (the
     FixedPhasor pattern): the frequency lands ONCE as `incr = ⌊(ω/2π)·2³²/SR⌋`
@@ -267,16 +287,33 @@ def relClockQ (clkInt anchorSamples : Sig) : Sig :=
     `rshift` is `ashr`, so `clkRel = (clkRel>>32)·2³² + (clkRel & (2³²−1))` holds
     exactly on NEGATIVE relative clocks (pre-strike, mirrored reads). Returns the
     phase in RADIANS `[0, 2π)` for the `sinSig`/`cosSig` polynomials. -/
-def modePhaseQ (omega clkRel : Sig) : Sig :=
-  let incr := toIntE (div (mul (div omega twoPiE) (lit 4294967296)) .sampleRate)
-  let thi := rshift clkRel (lit 32)
-  let tlo := bitAnd clkRel (lit 4294967295)
-  bitAnd (add (mul incr thi) (rshift (mul incr tlo) (lit 32))) (lit 4294967295)
+def modePhaseQ (omega clkRel : Sig) : BuildM Sig := do
+  let twoPi ← twoPiE
+  let frequency ← div omega twoPi
+  let twoPow32 ← lit 4294967296
+  let scaled ← mul frequency twoPow32
+  let sr ← sampleRate
+  let incrementFloat ← div scaled sr
+  let increment ← toIntE incrementFloat
+  let thirtyTwo ← lit 32
+  let thi ← rshift clkRel thirtyTwo
+  let mask ← lit 4294967295
+  let tlo ← bitAnd clkRel mask
+  let highProduct ← mul increment thi
+  let lowProduct ← mul increment tlo
+  let lowShifted ← rshift lowProduct thirtyTwo
+  let phase ← add highProduct lowShifted
+  bitAnd phase mask
 
 /-- `modePhaseQ` scaled to RADIANS `[0, 2π)` — for float-polynomial consumers
     (`sinSig`/`cosSig`). The fixed datapath consumes `modePhaseQ` directly. -/
-def modePhaseW (omega clkRel : Sig) : Sig :=
-  mul twoPiE (div (toFloatE (modePhaseQ omega clkRel)) (lit 4294967296))
+def modePhaseW (omega clkRel : Sig) : BuildM Sig := do
+  let twoPi ← twoPiE
+  let phase ← modePhaseQ omega clkRel
+  let phaseFloat ← toFloatE phase
+  let twoPow32 ← lit 4294967296
+  let cycles ← div phaseFloat twoPow32
+  mul twoPi cycles
 
 /-- `modePhaseQ` with the quantized increment supplied DIRECTLY, skipping the
     `incr = ⌊(ω/2π)·2³²/SR⌋` step. The banked path stores `incr`'s pre-`toInt`
@@ -284,10 +321,16 @@ def modePhaseW (omega clkRel : Sig) : Sig :=
     recovers the SAME i64 (f64 storage round-trips the value exactly, < 2^53), so
     `modePhaseQFromIncr (toIntE incrFloat) clkRel` is bit-identical to
     `modePhaseQ ω clkRel`. -/
-def modePhaseQFromIncr (incr clkRel : Sig) : Sig :=
-  let thi := rshift clkRel (lit 32)
-  let tlo := bitAnd clkRel (lit 4294967295)
-  bitAnd (add (mul incr thi) (rshift (mul incr tlo) (lit 32))) (lit 4294967295)
+def modePhaseQFromIncr (incr clkRel : Sig) : BuildM Sig := do
+  let thirtyTwo ← lit 32
+  let thi ← rshift clkRel thirtyTwo
+  let mask ← lit 4294967295
+  let tlo ← bitAnd clkRel mask
+  let highProduct ← mul incr thi
+  let lowProduct ← mul incr tlo
+  let lowShifted ← rshift lowProduct thirtyTwo
+  let phase ← add highProduct lowShifted
+  bitAnd phase mask
 
 /-- The PERIODIC relative clock — `(τ − anchor) mod P` on the tick grid, exact
     and drift-free: the strike-train quotient computed the way every oscillator
@@ -307,7 +350,7 @@ def modePhaseQFromIncr (incr clkRel : Sig) : Sig :=
     gate) sees the quotient. Period in SECONDS (the physics unit, like σ/ω);
     the tick conversion reads the runtime sample rate. Requires P ≥ one
     sample (incr ≤ 2³² — the same headroom bound as an audio-rate ω). -/
-def relClockQuot (clkInt anchorSamples : Sig) (pSec : Float) : Sig :=
+def relClockQuot (clkInt anchorSamples : Sig) (pSec : Float) : BuildM Sig := do
   -- The range is (0, P] — one tick pre-subtracted before the reduction and
   -- re-added after — NOT [0, P): at the exact strike sample the quotient must
   -- read d = P (the stack as of one period ago, tails-without-fresh), because
@@ -316,12 +359,29 @@ def relClockQuot (clkInt anchorSamples : Sig) (pSec : Float) : Sig :=
   -- read would zero the WHOLE tail stack for that one sample per bar — the
   -- gate misfiring on the eternal train's oldest coordinate. Off the strike
   -- samples the tick shift is a uniform ~2e-14 s lag — sub-quantization.
-  let clkRel := sub (relClockQ clkInt anchorSamples) (litI 1)
-  let incr := toIntE (roundE (div (lit 4294967296) (mul (litF pSec) .sampleRate)))
-  let thi := rshift clkRel (lit 32)
-  let tlo := bitAnd clkRel (lit 4294967295)
-  let phase := bitAnd (add (mul incr thi) (rshift (mul incr tlo) (lit 32))) (lit 4294967295)
-  add (toIntE (mul (toFloatE phase) (mul (litF pSec) .sampleRate))) (litI 1)
+  let relative ← relClockQ clkInt anchorSamples
+  let oneInt ← litI 1
+  let clkRel ← sub relative oneInt
+  let twoPow32 ← lit 4294967296
+  let period ← litF pSec
+  let sr ← sampleRate
+  let periodSamples ← mul period sr
+  let quotient ← div twoPow32 periodSamples
+  let rounded ← roundE quotient
+  let incr ← toIntE rounded
+  let thirtyTwo ← lit 32
+  let thi ← rshift clkRel thirtyTwo
+  let mask ← lit 4294967295
+  let tlo ← bitAnd clkRel mask
+  let highProduct ← mul incr thi
+  let lowProduct ← mul incr tlo
+  let lowShifted ← rshift lowProduct thirtyTwo
+  let phaseSum ← add highProduct lowShifted
+  let phase ← bitAnd phaseSum mask
+  let phaseFloat ← toFloatE phase
+  let tickFloat ← mul phaseFloat periodSamples
+  let tick ← toIntE tickFloat
+  add tick oneInt
 
 /-- A modal bank as a pure `Sig` over the (already-warped) clock: shift each pole
     to its time-since-strike on the INTEGER clock (`relClockQ`, exact at any τ),
@@ -332,9 +392,14 @@ def relClockQuot (clkInt anchorSamples : Sig) (pSec : Float) : Sig :=
     the BOUNDED relative clock (`expSig` clamps; decay makes far-field precision
     irrelevant). Every sample is `f(clk)`: no state, random-access. Rides
     `arrUn … (.clk c)`, so warps reach it through the clock leaf. -/
-def modalBankSig (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Sig) : Sig :=
-  let clkRel := relClockQ clkInt anchorSamples
-  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
+def modalBankSig (modes : Array ModalMode) (clkInt : Sig)
+    (anchorSamples : Sig) : BuildM Sig := do
+  let clkRel ← relClockQ clkInt anchorSamples
+  let clkFloat ← toFloatE clkRel
+  let twoPow32 ← lit 4294967296
+  let secondsTimesRate ← div clkFloat twoPow32
+  let sr ← sampleRate
+  let dSec ← div secondsTimesRate sr
   -- Q datapath: per mode, the slow scalars (envelope × residue weight) land ONCE
   -- as Q(4+k).(28−k) (`le`, option E — `k=0`/Q4.28 unless the bank's collected
   -- `|A|` crosses the i64 rail of 32; quantum 3.7e-9·2^k ≈ −168 dB at k=0 — a
@@ -342,19 +407,35 @@ def modalBankSig (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Sig) 
   -- exact Q2.30 off the integer phase, and the mode SUM is i64 — modular, hence
   -- associative and commutative: reordering modes cannot move a bit, which float
   -- summation never gave us. One float scale at the boundary.
-  let le := bankLandExp modes
-  let bankQ := modes.foldl
-    (fun acc m =>
-      let phQ := modePhaseQ m.omega clkRel
-      let env := expSig (neg (mul m.sigma dSec))
-      let env2 := if m.deg == 0 then env else mul (powE dSec m.deg) env
-      let wCre := toIntE (mul (mul env2 m.cre) le.scale)
-      let wCim := toIntE (mul (mul env2 m.cim) le.scale)
-      let oscQ := rshift (sub (mul wCre (fixedCosCycSig phQ))
-                              (mul wCim (fixedSinCycSig phQ))) le.shift
-      add acc oscQ)
-    (litI 0)
-  selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
+  let le ← bankLandExp modes
+  let landingScale ← le.scale
+  let landingShift ← le.shift
+  let zeroInt ← litI 0
+  let bankQ ← modes.foldlM (fun acc m => do
+      let phQ ← modePhaseQ m.omega clkRel
+      let sigmaTime ← mul m.sigma dSec
+      let negative ← neg sigmaTime
+      let env ← expSig negative
+      let env2 ← if m.deg == 0 then pure env else do
+        let power ← powE dSec m.deg
+        mul power env
+      let weightedCre ← mul env2 m.cre
+      let landedCre ← mul weightedCre landingScale
+      let wCre ← toIntE landedCre
+      let weightedCim ← mul env2 m.cim
+      let landedCim ← mul weightedCim landingScale
+      let wCim ← toIntE landedCim
+      let cos ← fixedCosCycSig phQ
+      let cosProduct ← mul wCre cos
+      let sin ← fixedSinCycSig phQ
+      let sinProduct ← mul wCim sin
+      let difference ← sub cosProduct sinProduct
+      let oscQ ← rshift difference landingShift
+      add acc oscQ) zeroInt
+  let zero ← lit 0
+  let afterStrike ← gt clkRel zero
+  let output ← fixedOutQ 30 bankQ
+  selectE afterStrike output zero
 
 /-- The SYMBOLIC mode: a bank body's per-mode scalars as column reads at the
     loop index. A body written against `ModeSym` is the same lambda the unrolled
@@ -393,14 +474,19 @@ structure BankCols where
   cre   : Sig
   cim   : Sig
 
-def bankCols (modes : Array ModalMode) (live? : Option Sig := none) : BankCols where
-  count := modes.size
-  live? := live?
-  incr  := Sig.arr (modes.map fun m =>
-    div (mul (div m.omega twoPiE) (lit 4294967296)) .sampleRate)
-  sigma := Sig.arr (modes.map (·.sigma))
-  cre   := Sig.arr (modes.map (·.cre))
-  cim   := Sig.arr (modes.map (·.cim))
+def bankCols (modes : Array ModalMode) (live? : Option Sig := none) : BuildM BankCols := do
+  let twoPi ← twoPiE
+  let twoPow32 ← lit 4294967296
+  let sr ← sampleRate
+  let increments ← modes.mapM fun m => do
+    let frequency ← div m.omega twoPi
+    let scaled ← mul frequency twoPow32
+    div scaled sr
+  let incr ← arr increments
+  let sigma ← arr (modes.map (·.sigma))
+  let cre ← arr (modes.map (·.cre))
+  let cim ← arr (modes.map (·.cim))
+  pure { count := modes.size, live?, incr, sigma, cre, cim }
 
 /-- THE generic banked fold: `Σₖ body(mode k)` as one indexed reduction
     (`Sig.bankSum` → a `ReduceBegin` region — O(1) plan instructions in mode
@@ -410,15 +496,15 @@ def bankCols (modes : Array ModalMode) (live? : Option Sig := none) : BankCols w
     to its own body, never a hand-built table twin. The loop visits modes in
     array order — the same order the unrolled `foldl` nests its adds — so for
     the i64 mode sum the render is BIT-IDENTICAL to the unroll. -/
-def bankFold (cols : BankCols) (body : ModeSym → Sig) : Sig :=
-  let k := Sig.loopIdx cols.idxId
-  Sig.bankSum cols.count #[cols.incr, cols.sigma, cols.cre, cols.cim]
-    (body { incr  := Sig.index cols.incr k
-          , sigma := Sig.index cols.sigma k
-          , cre   := Sig.index cols.cre k
-          , cim   := Sig.index cols.cim k })
-    cols.live?
-    cols.idxId
+def bankFold (cols : BankCols) (body : ModeSym → BuildM Sig) : BuildM Sig := do
+  let k ← loopIdx cols.idxId
+  let incr ← index cols.incr k
+  let sigma ← index cols.sigma k
+  let cre ← index cols.cre k
+  let cim ← index cols.cim k
+  let contribution ← body { incr, sigma, cre, cim }
+  bankSum cols.count #[cols.incr, cols.sigma, cols.cre, cols.cim]
+    contribution cols.live? cols.idxId
 
 /-- The BANKED lowering of a modal bank (banks-as-data): the SAME value
     as `modalBankSig`, but the mode sum is a `bankFold` indexed reduction over
@@ -432,18 +518,39 @@ def bankFold (cols : BankCols) (body : ModeSym → Sig) : Sig :=
     rides `modalBankTerm`'s `arrUn` (warps reach it through the already-warped
     clock leaf) unchanged. -/
 def modalBankSigTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
-    (live? : Option Sig := none) : Sig :=
-  let clkRel := relClockQ clkInt anchorSamples
-  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-  let le := bankLandExp modes                                    -- option E: per-bank Q exponent
-  let bankQ := bankFold (bankCols modes live?) fun m =>
-    let phQ  := modePhaseQFromIncr (toIntE m.incr) clkRel
-    let env  := expSig (neg (mul m.sigma dSec))
-    let wCre := toIntE (mul (mul env m.cre) le.scale)
-    let wCim := toIntE (mul (mul env m.cim) le.scale)
-    rshift (sub (mul wCre (fixedCosCycSig phQ))
-                (mul wCim (fixedSinCycSig phQ))) le.shift
-  selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
+    (live? : Option Sig := none) : BuildM Sig := do
+  let clkRel ← relClockQ clkInt anchorSamples
+  let clkFloat ← toFloatE clkRel
+  let twoPow32 ← lit 4294967296
+  let secondsTimesRate ← div clkFloat twoPow32
+  let sr ← sampleRate
+  let dSec ← div secondsTimesRate sr
+  let le ← bankLandExp modes                                    -- option E: per-bank Q exponent
+  let landingScale ← le.scale
+  let landingShift ← le.shift
+  let cols ← bankCols modes live?
+  let bankQ ← bankFold cols fun m => do
+    let increment ← toIntE m.incr
+    let phQ ← modePhaseQFromIncr increment clkRel
+    let sigmaTime ← mul m.sigma dSec
+    let negative ← neg sigmaTime
+    let env ← expSig negative
+    let weightedCre ← mul env m.cre
+    let landedCre ← mul weightedCre landingScale
+    let wCre ← toIntE landedCre
+    let weightedCim ← mul env m.cim
+    let landedCim ← mul weightedCim landingScale
+    let wCim ← toIntE landedCim
+    let cos ← fixedCosCycSig phQ
+    let cosProduct ← mul wCre cos
+    let sin ← fixedSinCycSig phQ
+    let sinProduct ← mul wCim sin
+    let difference ← sub cosProduct sinProduct
+    rshift difference landingShift
+  let zero ← lit 0
+  let afterStrike ← gt clkRel zero
+  let output ← fixedOutQ 30 bankQ
+  selectE afterStrike output zero
 
 /-- The ANALYTIC bank: the `(Re, Im)` pair of `Σ A·e^{iφ}·env` over ONE column
     set — the substrate for a phase TWIST (heterodyne) and for the
@@ -457,24 +564,53 @@ def modalBankSigTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
     component equals the `re` bank of the amp-rotated modes `(cre,cim)↦(cim,−cre)`
     — a bit-identical oracle, no new numerics. deg-0 (uniform) only. -/
 def modalBankSigPairTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
-    (live? : Option Sig := none) : Sig × Sig :=
-  let clkRel := relClockQ clkInt anchorSamples
-  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-  let cols := bankCols modes live?
-  let le := bankLandExp modes                                    -- option E: shared by Re and Im
-  let body (imag : Bool) : ModeSym → Sig := fun m =>
-    let phQ  := modePhaseQFromIncr (toIntE m.incr) clkRel
-    let env  := expSig (neg (mul m.sigma dSec))
-    let wCre := toIntE (mul (mul env m.cre) le.scale)
-    let wCim := toIntE (mul (mul env m.cim) le.scale)
+    (live? : Option Sig := none) : BuildM (Sig × Sig) := do
+  let clkRel ← relClockQ clkInt anchorSamples
+  let clkFloat ← toFloatE clkRel
+  let twoPow32 ← lit 4294967296
+  let secondsTimesRate ← div clkFloat twoPow32
+  let sr ← sampleRate
+  let dSec ← div secondsTimesRate sr
+  let cols ← bankCols modes live?
+  let le ← bankLandExp modes                                    -- option E: shared by Re and Im
+  let landingScale ← le.scale
+  let landingShift ← le.shift
+  let body (imag : Bool) : ModeSym → BuildM Sig := fun m => do
+    let increment ← toIntE m.incr
+    let phQ ← modePhaseQFromIncr increment clkRel
+    let sigmaTime ← mul m.sigma dSec
+    let negative ← neg sigmaTime
+    let env ← expSig negative
+    let weightedCre ← mul env m.cre
+    let landedCre ← mul weightedCre landingScale
+    let wCre ← toIntE landedCre
+    let weightedCim ← mul env m.cim
+    let landedCim ← mul weightedCim landingScale
+    let wCim ← toIntE landedCim
     if imag then
-      rshift (add (mul wCre (fixedSinCycSig phQ))
-                  (mul wCim (fixedCosCycSig phQ))) le.shift
+      let sin ← fixedSinCycSig phQ
+      let left ← mul wCre sin
+      let cos ← fixedCosCycSig phQ
+      let right ← mul wCim cos
+      let sum ← add left right
+      rshift sum landingShift
     else
-      rshift (sub (mul wCre (fixedCosCycSig phQ))
-                  (mul wCim (fixedSinCycSig phQ))) le.shift
-  let gate := fun q => selectE (gt clkRel (lit 0)) (fixedOutQ 30 q) (lit 0)
-  (gate (bankFold cols (body false)), gate (bankFold cols (body true)))
+      let cos ← fixedCosCycSig phQ
+      let left ← mul wCre cos
+      let sin ← fixedSinCycSig phQ
+      let right ← mul wCim sin
+      let difference ← sub left right
+      rshift difference landingShift
+  let realQ ← bankFold cols (body false)
+  let imagQ ← bankFold cols (body true)
+  let gate := fun q => do
+    let zero ← lit 0
+    let afterStrike ← gt clkRel zero
+    let output ← fixedOutQ 30 q
+    selectE afterStrike output zero
+  let real ← gate realQ
+  let imag ← gate imagQ
+  pure (real, imag)
 
 /-- True when a bank is eligible for the table lowering: every mode `deg == 0`
     (the uniform datapath). Ragged banks (mixed degree) must route to the
@@ -487,19 +623,51 @@ def bankIsUniform (modes : Array ModalMode) : Bool := modes.all (·.deg == 0)
     every op constant-folds to the baked value; with a `paramRef` operand it stays
     a live expression the kernel re-evaluates when the slot moves. Only `+−×÷`. -/
 abbrev CplxE := Sig × Sig
-def caddE (a b : CplxE) : CplxE := (add a.1 b.1, add a.2 b.2)
-def csubE (a b : CplxE) : CplxE := (sub a.1 b.1, sub a.2 b.2)
-def cmulE (a b : CplxE) : CplxE := (sub (mul a.1 b.1) (mul a.2 b.2), add (mul a.1 b.2) (mul a.2 b.1))
-def cdivE (a b : CplxE) : CplxE :=
-  let d := add (mul b.1 b.1) (mul b.2 b.2)
-  (div (add (mul a.1 b.1) (mul a.2 b.2)) d, div (sub (mul a.2 b.1) (mul a.1 b.2)) d)
-def cnegE (a : CplxE) : CplxE := (neg a.1, neg a.2)
+def caddE (a b : CplxE) : BuildM CplxE := do
+  let real ← add a.1 b.1
+  let imag ← add a.2 b.2
+  pure (real, imag)
+
+def csubE (a b : CplxE) : BuildM CplxE := do
+  let real ← sub a.1 b.1
+  let imag ← sub a.2 b.2
+  pure (real, imag)
+
+def cmulE (a b : CplxE) : BuildM CplxE := do
+  let rr ← mul a.1 b.1
+  let ii ← mul a.2 b.2
+  let real ← sub rr ii
+  let ri ← mul a.1 b.2
+  let ir ← mul a.2 b.1
+  let imag ← add ri ir
+  pure (real, imag)
+
+def cdivE (a b : CplxE) : BuildM CplxE := do
+  let br2 ← mul b.1 b.1
+  let bi2 ← mul b.2 b.2
+  let denominator ← add br2 bi2
+  let arbr ← mul a.1 b.1
+  let aibi ← mul a.2 b.2
+  let realNumerator ← add arbr aibi
+  let real ← div realNumerator denominator
+  let aibr ← mul a.2 b.1
+  let arbi ← mul a.1 b.2
+  let imagNumerator ← sub aibr arbi
+  let imag ← div imagNumerator denominator
+  pure (real, imag)
+
+def cnegE (a : CplxE) : BuildM CplxE := do
+  let real ← neg a.1
+  let imag ← neg a.2
+  pure (real, imag)
 
 /-- The pole `μ = −σ + iω` and complex amp `A = c_re + i·c_im` of a mode, as `CplxE`. -/
-def ModalMode.poleE (m : ModalMode) : CplxE := (neg m.sigma, m.omega)
+def ModalMode.poleE (m : ModalMode) : BuildM CplxE := do
+  pure (← neg m.sigma, m.omega)
 def ModalMode.ampE (m : ModalMode) : CplxE := (m.cre, m.cim)
-def modeOfE (pole amp : CplxE) (deg : Nat := 0) : ModalMode :=
-  { sigma := neg pole.1, omega := pole.2, cre := amp.1, cim := amp.2, deg }
+def modeOfE (pole amp : CplxE) (deg : Nat := 0) : BuildM ModalMode := do
+  let sigma ← neg pole.1
+  pure { sigma, omega := pole.2, cre := amp.1, cim := amp.2, deg }
 
 /-- The residue calculus, SYMBOLICALLY — `voice ⋙ reverb` with every pole/coeff an
     `Sig`. Same law as the build-time `residueCompose`: forced mode at each voice
@@ -508,14 +676,27 @@ def modeOfE (pole amp : CplxE) (deg : Nat := 0) : ModalMode :=
     poles; an exact coincidence is measure-zero for continuous knobs, and a NEAR
     coincidence gives a large finite coupling (the resonance you want). Validated
     against the Float `residueCompose` on literal poles (`symbolic-residue`). -/
-def residueComposeE (voice reverb : Array ModalMode) : Array ModalMode :=
-  voice.foldl (fun acc v =>
-    let lam := v.poleE
+def residueComposeE (voice reverb : Array ModalMode) : BuildM (Array ModalMode) := do
+  voice.foldlM (fun acc v => do
+    let lam ← v.poleE
     let a := v.ampE
-    let Hlam := reverb.foldl (fun s r => caddE s (cdivE r.ampE (csubE lam r.poleE))) ((lit 0, lit 0) : CplxE)
-    let acc := acc.push (modeOfE lam (cmulE a Hlam))
-    reverb.foldl (fun acc r =>
-      acc.push (modeOfE r.poleE (cnegE (cdivE (cmulE a r.ampE) (csubE lam r.poleE))))) acc) #[]
+    let zero ← lit 0
+    let Hlam ← reverb.foldlM (fun sum r => do
+      let pole ← r.poleE
+      let difference ← csubE lam pole
+      let quotient ← cdivE r.ampE difference
+      caddE sum quotient) (zero, zero)
+    let forcedAmp ← cmulE a Hlam
+    let forced ← modeOfE lam forcedAmp
+    let acc := acc.push forced
+    reverb.foldlM (fun acc r => do
+      let pole ← r.poleE
+      let numerator ← cmulE a r.ampE
+      let difference ← csubE lam pole
+      let quotient ← cdivE numerator difference
+      let ringingAmp ← cnegE quotient
+      let mode ← modeOfE pole ringingAmp
+      pure (acc.push mode)) acc) #[]
 
 /-- `residueComposeE` COLLECTED to `m + n` modes. The uncollected form pushes one
     ringing mode per (λ, ν) pair — `m·n` modes all sitting at the same `n` reverb
@@ -531,17 +712,101 @@ def residueComposeE (voice reverb : Array ModalMode) : Array ModalMode :=
     is a large finite coupling — the sympathetic resonance you want). An empty
     voice composes to the empty bank (silence), preserving the graceful-silence
     contract for a reverb with nothing patched into it. -/
-def residueComposeEC (voice reverb : Array ModalMode) : Array ModalMode :=
-  if voice.isEmpty then #[] else
-  let forced := voice.map (fun v =>
-    let Hlam := reverb.foldl (fun s r => caddE s (cdivE r.ampE (csubE v.poleE r.poleE)))
-      ((lit 0, lit 0) : CplxE)
-    modeOfE v.poleE (cmulE v.ampE Hlam))
-  let ringing := reverb.map (fun r =>
-    let coupling := voice.foldl (fun s v => caddE s (cdivE v.ampE (csubE v.poleE r.poleE)))
-      ((lit 0, lit 0) : CplxE)
-    modeOfE r.poleE (cnegE (cmulE r.ampE coupling)))
-  forced ++ ringing
+def residueComposeEC (voice reverb : Array ModalMode) : BuildM (Array ModalMode) := do
+  if voice.isEmpty then pure #[] else
+  let forced ← voice.mapM fun v => do
+    let pole ← v.poleE
+    let zero ← lit 0
+    let Hlam ← reverb.foldlM (fun sum r => do
+      let roomPole ← r.poleE
+      let difference ← csubE pole roomPole
+      let quotient ← cdivE r.ampE difference
+      caddE sum quotient) (zero, zero)
+    let amp ← cmulE v.ampE Hlam
+    modeOfE pole amp
+  let ringing ← reverb.mapM fun r => do
+    let pole ← r.poleE
+    let zero ← lit 0
+    let coupling ← voice.foldlM (fun sum v => do
+      let voicePole ← v.poleE
+      let difference ← csubE voicePole pole
+      let quotient ← cdivE v.ampE difference
+      caddE sum quotient) (zero, zero)
+    let product ← cmulE r.ampE coupling
+    let amp ← cnegE product
+    modeOfE pole amp
+  pure (forced ++ ringing)
+
+/-! Phase 3 needs the gauge's existing settling decision before the general
+arena-rewrite proof surface moves in phase 4.  These two focused utilities walk
+the frozen, child-descending arena in ID order: each source ID is classified or
+rebuilt once, so shared subgraphs stay shared and malformed/unsupported shapes
+fail closed. -/
+
+private def readsSampleTable (arena : ExprArena) : Array Bool := Id.run do
+  let mut reads : Array Bool := #[]
+  for node in arena.nodes do
+    let getRead := fun (id : ExprId) => (reads[id.idx]?).getD true
+    let value := match node with
+      | .sampleIndex => true
+      | .binary _ a b => getRead a || getRead b
+      | .unary _ a => getRead a
+      | .clamp value lo hi => getRead value || getRead lo || getRead hi
+      | .select condition then_ else_ =>
+          getRead condition || getRead then_ || getRead else_
+      | .index array index => getRead array || getRead index
+      | .arr items => items.any getRead
+      | .bankSum _ tables body _ _ => tables.any getRead || getRead body
+      | .routedSum _ _ _ tables values count? _ =>
+          tables.any getRead || values.any getRead || count?.any getRead
+      | _ => false
+    reads := reads.push value
+  pure reads
+
+private def isZeroNode (arena : ExprArena) (id : ExprId) : Bool :=
+  match arena.deref id with
+  | some (.num number) => number.mantissa == 0
+  | _ => false
+
+private def isOneNode (arena : ExprArena) (id : ExprId) : Bool :=
+  match arena.deref id with
+  | some (.num number) => number.mantissa == 1 && number.exponent == 0
+  | _ => false
+
+def settleSignals (roots : Array Sig) : BuildM (Option (Array Sig)) := do
+  let source ← get
+  let sourceReads := readsSampleTable source.exprs
+  let mut mapped : Array Sig := #[]
+  for node in source.exprs.nodes do
+    let sourceId : Sig := ⟨mapped.size⟩
+    let mappedAt := fun (id : ExprId) => (mapped[id.idx]?).getD sourceId
+    let rebuilt ← match node with
+      | .binary tag lhs rhs => binary tag (mappedAt lhs) (mappedAt rhs)
+      | .unary tag arg => unary tag (mappedAt arg)
+      | .clamp value lo hi =>
+          if isZeroNode source.exprs lo && isOneNode source.exprs hi &&
+              (sourceReads[value.idx]?).getD true then
+            lit 1
+          else
+            clamp (mappedAt value) (mappedAt lo) (mappedAt hi)
+      | .select condition then_ else_ =>
+          select (mappedAt condition) (mappedAt then_) (mappedAt else_)
+      | .arr items => arr (items.map mappedAt)
+      | .index array idx => index (mappedAt array) (mappedAt idx)
+      | .bankSum count tables body count? idxId =>
+          bankSum count (tables.map mappedAt) (mappedAt body) count? idxId
+      | .routedSum capacity outputCount routes tables values count? idxId =>
+          routedSum capacity outputCount routes (tables.map mappedAt)
+            (values.map mappedAt) (count?.map mappedAt) idxId
+      | _ => pure sourceId
+    mapped := mapped.push rebuilt
+  let settled := roots.map fun root => (mapped[root.idx]?).getD root
+  let result ← get
+  let reads := readsSampleTable result.exprs
+  if settled.any fun root => (reads[root.idx]?).getD true then
+    pure none
+  else
+    pure (some settled)
 
 /-- The excitation-gauge adapter (§5): rescale every residue by the self-measured
     `1/‖H‖^g`, with `g` a LIVE scalar. `‖H‖` is the p=8 norm of the bank's OWN
@@ -568,33 +833,57 @@ def residueComposeEC (voice reverb : Array ModalMode) : Array ModalMode :=
     (taste-adjacent but a correctness caveat): deg 0.** `H` is the deg-0 form
     `Aᵢ/(iω−μᵢ)`; a deg-`p` mode's `Aᵢ·p!/(iω−μᵢ)^{p+1}` is under-weighted (exact for
     the shipped `filterPair`/`reverbRoom`/`resonatorBank`, all deg-0). -/
-def gaugeScale (g : Sig) (modes : Array ModalMode) : Option Sig := do
+def gaugeScale (g : Sig) (modes : Array ModalMode) : BuildM (Option Sig) := do
   -- SETTLE every pole first — the whole scale then reads no clock (s0), so the
   -- `floatExponent` inside `logSig` is coefficient-time. `none` if any won't settle.
-  let sm ← modes.mapM fun m => do
-    let sg ← settle m.sigma; let om ← settle m.omega
-    let cr ← settle m.cre;   let ci ← settle m.cim
-    pure ({ m with sigma := sg, omega := om, cre := cr, cim := ci } : ModalMode)
+  let roots := modes.flatMap fun mode => #[mode.sigma, mode.omega, mode.cre, mode.cim]
+  let some settled ← settleSignals roots | pure none
+  let sm := modes.mapIdx fun index mode =>
+    ({ mode with
+      sigma := settled[4 * index]!
+      omega := settled[4 * index + 1]!
+      cre := settled[4 * index + 2]!
+      cim := settled[4 * index + 3]! } : ModalMode)
   -- H(iωₖ) = Σᵢ Aᵢ/(σᵢ + i(ωₖ − ωᵢ))   (iωₖ − μᵢ, with μᵢ = −σᵢ + iωᵢ)
-  let hAt := fun (wk : Sig) => sm.foldl (fun acc m =>
-      caddE acc (cdivE m.ampE ((m.sigma, sub wk m.omega) : CplxE))) ((lit 0, lit 0) : CplxE)
+  let hAt := fun (wk : Sig) => do
+    let zero ← lit 0
+    sm.foldlM (fun acc m => do
+      let difference ← sub wk m.omega
+      let quotient ← cdivE m.ampE (m.sigma, difference)
+      caddE acc quotient) (zero, zero)
   -- S = Σₖ |H(iωₖ)|⁸ = Σₖ (|H|²)⁴  (p = 8; even power ⇒ no sqrt)
-  let S := sm.foldl (fun acc m =>
-      let h := hAt m.omega
-      let h2 := add (mul h.1 h.1) (mul h.2 h.2)
-      add acc (mul (mul h2 h2) (mul h2 h2))) (lit 0)
+  let zero ← lit 0
+  let S ← sm.foldlM (fun acc m => do
+      let h ← hAt m.omega
+      let real2 ← mul h.1 h.1
+      let imag2 ← mul h.2 h.2
+      let h2 ← add real2 imag2
+      let h4a ← mul h2 h2
+      let h4b ← mul h2 h2
+      let h8 ← mul h4a h4b
+      add acc h8) zero
   -- ‖H‖⁻ᵍ = S^{−g/8} = exp(−(g/8)·ln S). Floor S ∈ [1e−30, 1e30] (via `lit`, NOT
   -- `litF` — `litF 1e−30` rounds to 0, `litF 1e300` saturates to ≈1.8e7): the floor
   -- guards a silent bank (S→0 ⇒ logSig 0), the ceiling a non-finite one (S=∞ ⇒
   -- logSig ∞ = NaN), and 1e30 stays under f32-max so Metal never overflows the clamp.
-  pure (expSig (mul (mul (neg g) (lit 125 3))
-                    (logSig (clampE S (lit 1 30) (lit (10^30))))))
+  let negativeG ← neg g
+  let oneEighth ← lit 125 3
+  let exponentScale ← mul negativeG oneEighth
+  let floor ← lit 1 30
+  let ceiling ← lit (10^30)
+  let bounded ← clampE S floor ceiling
+  let logarithm ← logSig bounded
+  let exponent ← mul exponentScale logarithm
+  pure (some (← expSig exponent))
 
-def normalizePeak (g : Sig) (modes : Array ModalMode) : Array ModalMode :=
-  if modes.isEmpty then #[] else
-  match gaugeScale g modes with
-  | some scale => modes.map fun m => { m with cre := mul m.cre scale, cim := mul m.cim scale }
-  | none => modes   -- un-settleable poles: decline to identity, never an s1 norm
+def normalizePeak (g : Sig) (modes : Array ModalMode) : BuildM (Array ModalMode) := do
+  if modes.isEmpty then pure #[] else
+  match ← gaugeScale g modes with
+  | some scale => modes.mapM fun m => do
+      let cre ← mul m.cre scale
+      let cim ← mul m.cim scale
+      pure { m with cre, cim }
+  | none => pure modes   -- un-settleable poles: decline to identity, never an s1 norm
 
 /-- `residueComposeEC` with the Cauchy inner sums BANKED (WS-F). Each output mode's
     amp (`Hlam`/`coupling`) becomes a scalar `Sig.bankSum` over the SOURCE columns
@@ -607,42 +896,58 @@ def normalizePeak (g : Sig) (modes : Array ModalMode) : Array ModalMode :=
     `residueComposeDD`'s stability (the `1/Δ` still appears — this is the COLLECTED
     form). Inner binder id 1 (the audio bank is 0; the fills are sequential, emitted
     before the audio region). -/
-def residueComposeBanked (voice reverb : Array ModalMode) : Array ModalMode :=
-  if voice.isEmpty then #[] else
+def residueComposeBanked (voice reverb : Array ModalMode) : BuildM (Array ModalMode) := do
+  if voice.isEmpty then pure #[] else
   let idH : Nat := 1
   -- Σₖ (rRe+i·rIm)/((pRe−nRe[k]) + i(pIm−nIm[k])), real or imag part, as a scalar
   -- bankSum; per term = `cdivE` (r·conj(d)/|d|²), left-associative.
-  let cauchy := fun (pRe pIm nRe nIm rRe rIm : Sig) (count : Nat) (imag : Bool) =>
-    Sig.bankSum count #[nRe, nIm, rRe, rIm]
-      (let k := Sig.loopIdx idH
-       let dRe := sub pRe (Sig.index nRe k)
-       let dIm := sub pIm (Sig.index nIm k)
-       let den := add (mul dRe dRe) (mul dIm dIm)
-       let rkRe := Sig.index rRe k
-       let rkIm := Sig.index rIm k
-       if imag then div (sub (mul rkIm dRe) (mul rkRe dIm)) den
-       else div (add (mul rkRe dRe) (mul rkIm dIm)) den)
-      none idH
-  let revNuRe := Sig.arr (reverb.map (·.poleE.1))
-  let revNuIm := Sig.arr (reverb.map (·.poleE.2))
-  let revRRe := Sig.arr (reverb.map (·.ampE.1))
-  let revRIm := Sig.arr (reverb.map (·.ampE.2))
-  let voNuRe := Sig.arr (voice.map (·.poleE.1))
-  let voNuIm := Sig.arr (voice.map (·.poleE.2))
-  let voARe := Sig.arr (voice.map (·.ampE.1))
-  let voAIm := Sig.arr (voice.map (·.ampE.2))
+  let cauchy := fun (pRe pIm nRe nIm rRe rIm : Sig)
+      (count : Nat) (imag : Bool) => do
+    let k ← loopIdx idH
+    let nReK ← index nRe k
+    let dRe ← sub pRe nReK
+    let nImK ← index nIm k
+    let dIm ← sub pIm nImK
+    let dRe2 ← mul dRe dRe
+    let dIm2 ← mul dIm dIm
+    let denominator ← add dRe2 dIm2
+    let rkRe ← index rRe k
+    let rkIm ← index rIm k
+    let contribution ← if imag then do
+      let left ← mul rkIm dRe
+      let right ← mul rkRe dIm
+      let numerator ← sub left right
+      div numerator denominator
+    else do
+      let left ← mul rkRe dRe
+      let right ← mul rkIm dIm
+      let numerator ← add left right
+      div numerator denominator
+    bankSum count #[nRe, nIm, rRe, rIm] contribution none idH
+  let reverbPoles ← reverb.mapM (·.poleE)
+  let voicePoles ← voice.mapM (·.poleE)
+  let revNuRe ← arr (reverbPoles.map (·.1))
+  let revNuIm ← arr (reverbPoles.map (·.2))
+  let revRRe ← arr (reverb.map (·.ampE.1))
+  let revRIm ← arr (reverb.map (·.ampE.2))
+  let voNuRe ← arr (voicePoles.map (·.1))
+  let voNuIm ← arr (voicePoles.map (·.2))
+  let voARe ← arr (voice.map (·.ampE.1))
+  let voAIm ← arr (voice.map (·.ampE.2))
   -- forced (over reverb): Hlam = Σᵣ r/(λ−ν), amp = a·Hlam
-  let forced := voice.map (fun v =>
-    let hRe := cauchy v.poleE.1 v.poleE.2 revNuRe revNuIm revRRe revRIm reverb.size false
-    let hIm := cauchy v.poleE.1 v.poleE.2 revNuRe revNuIm revRRe revRIm reverb.size true
-    modeOfE v.poleE (cmulE v.ampE (hRe, hIm)))
+  let forced ← voice.zip voicePoles |>.mapM fun (v, pole) => do
+    let hRe ← cauchy pole.1 pole.2 revNuRe revNuIm revRRe revRIm reverb.size false
+    let hIm ← cauchy pole.1 pole.2 revNuRe revNuIm revRRe revRIm reverb.size true
+    let amp ← cmulE v.ampE (hRe, hIm)
+    modeOfE pole amp
   -- ringing (over voice): with pole=ν the bankSum gives Σᵥ a/(ν−λ) = −coupling, so
   -- the EC amp `−r·coupling` becomes `r·(bankSum)` — no `cnegE`.
-  let ringing := reverb.map (fun r =>
-    let cRe := cauchy r.poleE.1 r.poleE.2 voNuRe voNuIm voARe voAIm voice.size false
-    let cIm := cauchy r.poleE.1 r.poleE.2 voNuRe voNuIm voARe voAIm voice.size true
-    modeOfE r.poleE (cmulE r.ampE (cRe, cIm)))
-  forced ++ ringing
+  let ringing ← reverb.zip reverbPoles |>.mapM fun (r, pole) => do
+    let cRe ← cauchy pole.1 pole.2 voNuRe voNuIm voARe voAIm voice.size false
+    let cIm ← cauchy pole.1 pole.2 voNuRe voNuIm voARe voAIm voice.size true
+    let amp ← cmulE r.ampE (cRe, cIm)
+    modeOfE pole amp
+  pure (forced ++ ringing)
 
 /-- `∫`: the antiderivative of a modal bank, exactly, as a build-time pole move.
     `∫ Σₖ Aₖ e^{μₖ d} dd = Σₖ (Aₖ/μₖ) e^{μₖ d} + C`, and choosing `C = −Σₖ Aₖ/μₖ`
@@ -654,10 +959,16 @@ def residueComposeBanked (voice reverb : Array ModalMode) : Array ModalMode :=
     `a ↦ a/μ` behind "FM is PM of the integrated bank" (`demos/modal_vco.py` D3). A DC
     input mode (`μ=0`) would integrate to a `d·e^{0}` deg-1 ramp — out of scope for
     v1, and division by its zero pole is the caller's contract to avoid. -/
-def integrateBank (modes : Array ModalMode) : Array ModalMode :=
-  let integ := modes.map (fun m => modeOfE m.poleE (cdivE m.ampE m.poleE))
-  let sumAmp := integ.foldl (fun s m => caddE s m.ampE) ((lit 0, lit 0) : CplxE)
-  integ.push (modeOfE (lit 0, lit 0) (cnegE sumAmp))
+def integrateBank (modes : Array ModalMode) : BuildM (Array ModalMode) := do
+  let integ ← modes.mapM fun m => do
+    let pole ← m.poleE
+    let amp ← cdivE m.ampE pole
+    modeOfE pole amp
+  let zero ← lit 0
+  let sumAmp ← integ.foldlM (fun sum m => caddE sum m.ampE) (zero, zero)
+  let constantAmp ← cnegE sumAmp
+  let constant ← modeOfE (zero, zero) constantAmp
+  pure (integ.push constant)
 
 /-- The quadrature node table `(θᵢ, sin θᵢ)` for the default 256-panel trapezoid,
     certified once. A nullary `def`, so it is built at module init and every
@@ -710,19 +1021,25 @@ def besselJ (nf b : Float) (quad : Nat := 256) : Float :=
     `Jₙ(b)`). `N` is the sideband capacity — the tail `|n| > b` decays
     superexponentially, so `N ≈ ⌈b⌉ + few` is exact to machine precision
     (`demos/modal_fm.py` D4). deg-0. -/
-def besselFuse (modes : Array ModalMode) (wm b : Float) (N : Nat) : Array ModalMode := Id.run do
+def besselFuse (modes : Array ModalMode) (wm b : Float)
+    (N : Nat) : BuildM (Array ModalMode) := do
   let mut out : Array ModalMode := #[]
   for m in modes do
     for i in [0:2 * N + 1] do
       let nf := i.toFloat - N.toFloat
       let jn := besselJ nf b
+      let offset ← litF (nf * wm)
+      let omega ← add m.omega offset
+      let coefficient ← litF jn
+      let cre ← mul m.cre coefficient
+      let cim ← mul m.cim coefficient
       out := out.push
         { sigma := m.sigma
-        , omega := add m.omega (litF (nf * wm))
-        , cre := mul m.cre (litF jn)
-        , cim := mul m.cim (litF jn)
+        , omega
+        , cre
+        , cim
         , deg := m.deg }
-  return out
+  pure out
 
 /-- Affine pole reclock: the pole-space image of the affine clock warp `d ↦ a·d+b`.
     `e^{μ(a d + b)} = e^{μb}·e^{(μa)d}`, so the pole scales `μ ↦ μa` (`σ↦σa, ω↦ωa`)
@@ -731,12 +1048,20 @@ def besselFuse (modes : Array ModalMode) (wm b : Float) (N : Nat) : Array ModalM
     warp does not preserve poles (the varispeed case is deferred, per
     `design/modal-island.local.md`); `b` in seconds, `a` dimensionless. deg-0 (the
     `(a d+b)^k` binomial for `deg>0` is out of scope for v1). -/
-def reclockAffine (a b : Sig) (modes : Array ModalMode) : Array ModalMode :=
-  modes.map fun m =>
-    let envB := expSig (neg (mul m.sigma b))
-    let eMub : CplxE := (mul envB (cosSig (mul m.omega b)), mul envB (sinSig (mul m.omega b)))
-    let a' := cmulE m.ampE eMub
-    { sigma := mul m.sigma a, omega := mul m.omega a, cre := a'.1, cim := a'.2, deg := m.deg }
+def reclockAffine (a b : Sig) (modes : Array ModalMode) : BuildM (Array ModalMode) :=
+  modes.mapM fun m => do
+    let sigmaOffset ← mul m.sigma b
+    let negative ← neg sigmaOffset
+    let envB ← expSig negative
+    let omegaOffset ← mul m.omega b
+    let cosine ← cosSig omegaOffset
+    let real ← mul envB cosine
+    let sine ← sinSig omegaOffset
+    let imag ← mul envB sine
+    let amp ← cmulE m.ampE (real, imag)
+    let sigma ← mul m.sigma a
+    let omega ← mul m.omega a
+    pure { sigma, omega, cre := amp.1, cim := amp.2, deg := m.deg }
 
 -- ── The DIVIDED-DIFFERENCE paired-mode family (WS-B2) ─────────────────────────
 -- Near-degenerate composition without the `1/Δ` cancellation: each (λ, ν) coupling
@@ -759,9 +1084,14 @@ structure PairedMode where
     reintroduce the `1/Δ` that `residueComposeEC` suffers) — the stability trade for
     the factor-m saving. The near-degenerate form: a live pole sweeping through a
     room pole stays finite and reproduces the resonance (`demos/modal_divdiff.py`). -/
-def residueComposeDD (voice reverb : Array ModalMode) : Array PairedMode :=
-  voice.flatMap fun v => reverb.map fun r =>
-    { lam := v.poleE, nu := r.poleE, c := cmulE v.ampE r.ampE }
+def residueComposeDD (voice reverb : Array ModalMode) : BuildM (Array PairedMode) := do
+  let rows ← voice.mapM fun v => do
+    let lam ← v.poleE
+    reverb.mapM fun r => do
+      let nu ← r.poleE
+      let c ← cmulE v.ampE r.ampE
+      pure { lam, nu, c }
+  pure (rows.foldl (· ++ ·) #[])
 
 -- ── The EC/DD PARTITIONED compose (fork 3′ erasure, Phase 1) ──────────────────
 -- The compiler owns the EC-vs-DD choice PER COUPLING: a (λ, ν) pair routes to
@@ -831,10 +1161,15 @@ def ecddPairCapD  : DyadicI := DyadicI.ofFloat ecddPairCap
     σ without a range is unclassifiable (`none` ⇒ the coupling stays collected). A declared
     `sigmaRange` is a pair of authored `Float`s and enters the carrier exactly
     (a finite double is a dyadic), so nothing about the declaration moves. -/
-def sigmaIntervalD? (m : ModalMode) : Option (DyadicI × DyadicI) :=
-  match sigConstD? m.sigma with
+private def sigmaIntervalDFrom? (constants : Array (Option DyadicI))
+    (m : ModalMode) : Option (DyadicI × DyadicI) :=
+  match sigConstDFrom? constants m.sigma with
   | some s => some (s, s)
   | none => m.sigmaRange.map (fun (lo, hi) => (DyadicI.ofFloat lo, DyadicI.ofFloat hi))
+
+def sigmaIntervalD? (m : ModalMode) : BuildM (Option (DyadicI × DyadicI)) := do
+  let builder ← get
+  pure (sigmaIntervalDFrom? (sigConstTable builder.exprs) m)
 
 /-- A mode's pole with a LIVE σ CLAMPED to its declared interval (coefficient-
     time, the WS-LP kernel-clamp precedent) — what makes the paired route's
@@ -843,10 +1178,19 @@ def sigmaIntervalD? (m : ModalMode) : Option (DyadicI × DyadicI) :=
     unit modes arrive PRE-clamped (`clampSigmas` at graph ingestion), making
     this a value-identical second wrap there; it stays as defense in depth for
     direct callers (fixtures, the seam sweep) that own their own discipline. -/
-def clampedPoleE (m : ModalMode) : CplxE :=
-  match sigConstF? m.sigma, m.sigmaRange with
-  | none, some (lo, hi) => (neg (clampE m.sigma (litF lo) (litF hi)), m.omega)
+private def clampedPoleEWith (constants : Array (Option DyadicI))
+    (m : ModalMode) : BuildM CplxE := do
+  match sigConstDFrom? constants m.sigma, m.sigmaRange with
+  | none, some (lo, hi) =>
+      let lo ← litF lo
+      let hi ← litF hi
+      let sigma ← clampE m.sigma lo hi
+      pure (← neg sigma, m.omega)
   | _, _ => m.poleE
+
+def clampedPoleE (m : ModalMode) : BuildM CplxE := do
+  let builder ← get
+  clampedPoleEWith (sigConstTable builder.exprs) m
 
 /-- Clamp every LIVE σ with a declared interval to that interval, in-kernel —
     the UNIFORM-BANK extension of `clampedPoleE`, applied to unit modes at
@@ -862,11 +1206,17 @@ def clampedPoleE (m : ModalMode) : CplxE :=
     classifiers still read it); the wrap is value-identity for any in-span
     drive, so in-range behavior is bit-identical. Const σ passes untouched
     (the cold byte-identity discipline). -/
-def clampSigmas (ms : Array ModalMode) : Array ModalMode :=
-  ms.map fun m =>
-    match sigConstF? m.sigma, m.sigmaRange with
-    | none, some (lo, hi) => { m with sigma := clampE m.sigma (litF lo) (litF hi) }
-    | _, _ => m
+def clampSigmas (modes : Array ModalMode) : BuildM (Array ModalMode) := do
+  let builder ← get
+  let constants := sigConstTable builder.exprs
+  modes.mapM fun mode => do
+    match sigConstDFrom? constants mode.sigma, mode.sigmaRange with
+    | none, some (lo, hi) =>
+        let lo ← litF lo
+        let hi ← litF hi
+        let sigma ← clampE mode.sigma lo hi
+        pure { mode with sigma }
+    | _, _ => pure mode
 
 /-- Where a (v, r) coupling lands — the routing verdict with the paired range
     cap made a FIRST-CLASS outcome rather than a silent fallback, so the seam
@@ -899,17 +1249,18 @@ deriving DecidableEq
     frequency but differently damped are SEPARATED, not coincident — which is
     what the σ axis is for, and what it did not do until the `dSig` repair
     (gate `ecdd-sigma-axis`). -/
-def classifyCoupling (v r : ModalMode) : CouplingRoute :=
+private def classifyCouplingWith (constants : Array (Option DyadicI))
+    (v r : ModalMode) : CouplingRoute :=
   if !(v.deg == 0 && r.deg == 0) then .cold else
   Id.run do
-    let some (svLo, svHi) := sigmaIntervalD? v | return .cold
-    let some (srLo, srHi) := sigmaIntervalD? r | return .cold
-    let some wv := sigConstD? v.omega | return .cold
-    let some wr := sigConstD? r.omega | return .cold
-    let some ar := sigConstD? v.cre | return .cold
-    let some ai := sigConstD? v.cim | return .cold
-    let some rr := sigConstD? r.cre | return .cold
-    let some ri := sigConstD? r.cim | return .cold
+    let some (svLo, svHi) := sigmaIntervalDFrom? constants v | return .cold
+    let some (srLo, srHi) := sigmaIntervalDFrom? constants r | return .cold
+    let some wv := sigConstDFrom? constants v.omega | return .cold
+    let some wr := sigConstDFrom? constants r.omega | return .cold
+    let some ar := sigConstDFrom? constants v.cre | return .cold
+    let some ai := sigConstDFrom? constants v.cim | return .cold
+    let some rr := sigConstDFrom? constants r.cre | return .cold
+    let some ri := sigConstDFrom? constants r.cim | return .cold
     -- min |Δ| over the σ interval(s): the SPAN DISTANCE between `[svLo,svHi]`
     -- and `[srLo,srHi]` — `max(0, max(svLo,srLo) − min(svHi,srHi))`, so zero
     -- when the spans overlap (the dipper) and the gap when they are separated —
@@ -957,16 +1308,20 @@ def classifyCoupling (v r : ModalMode) : CouplingRoute :=
                             ecddPairCapD)
     return if capOk then .paired else .refused
 
+def classifyCoupling (v r : ModalMode) : BuildM CouplingRoute := do
+  let builder ← get
+  pure (classifyCouplingWith (sigConstTable builder.exprs) v r)
+
 /-- `true` ⇒ the (v, r) coupling leaves the collected sums and becomes one
     `PairedMode` (`classifyCoupling = .paired`). -/
-def couplingHot (v r : ModalMode) : Bool :=
-  classifyCoupling v r == .paired
+def couplingHot (v r : ModalMode) : BuildM Bool := do
+  pure ((← classifyCoupling v r) == .paired)
 
 /-- `true` ⇒ a lens fired but the paired range cap refused the coupling: it
     renders collected at the status-quo floor. The merged seam atom's admission
     predicate is the negation of this — the refusal is stated, not certified. -/
-def couplingRefused (v r : ModalMode) : Bool :=
-  classifyCoupling v r == .refused
+def couplingRefused (v r : ModalMode) : BuildM Bool := do
+  pure ((← classifyCoupling v r) == .refused)
 
 /-- The PARTITIONED compose — the one `residueCompose` seam. Cold couplings take
     `residueComposeEC`'s collected shapes; hot couplings (per `couplingHot`)
@@ -977,42 +1332,67 @@ def couplingRefused (v r : ModalMode) : Bool :=
     call), so the cold path is byte-identical to the pre-partition compiler —
     the erasure gate's discipline. -/
 def residueComposePartitioned (voice reverb : Array ModalMode) :
-    Array ModalMode × Array PairedMode := Id.run do
+    BuildM (Array ModalMode × Array PairedMode) := do
   if voice.isEmpty then return (#[], #[])
-  let hotM := voice.map fun v => reverb.map fun r => couplingHot v r
-  if hotM.all (·.all (!·)) then return (residueComposeEC voice reverb, #[])
+  let builder ← get
+  let constants := sigConstTable builder.exprs
+  let hotM := voice.map fun v => reverb.map fun r =>
+    classifyCouplingWith constants v r == .paired
+  if hotM.all (·.all (!·)) then return (← residueComposeEC voice reverb, #[])
   let isHot := fun (i q : Nat) => (hotM[i]!)[q]!
-  let forced := voice.mapIdx fun i v =>
-    let Hlam := reverb.zipIdx.foldl (init := ((lit 0, lit 0) : CplxE)) fun s (r, q) =>
-      if isHot i q then s
-      else caddE s (cdivE r.ampE (csubE v.poleE r.poleE))
-    modeOfE v.poleE (cmulE v.ampE Hlam)
-  let ringing := reverb.mapIdx fun q r =>
-    let coupling := voice.zipIdx.foldl (init := ((lit 0, lit 0) : CplxE)) fun s (v, i) =>
-      if isHot i q then s
-      else caddE s (cdivE v.ampE (csubE v.poleE r.poleE))
-    modeOfE r.poleE (cnegE (cmulE r.ampE coupling))
+  let forced ← voice.mapIdxM fun i v => do
+    let pole ← v.poleE
+    let zero ← lit 0
+    let Hlam ← reverb.zipIdx.foldlM (init := (zero, zero)) fun sum (r, q) => do
+      if isHot i q then pure sum else
+      let roomPole ← r.poleE
+      let difference ← csubE pole roomPole
+      let quotient ← cdivE r.ampE difference
+      caddE sum quotient
+    let amp ← cmulE v.ampE Hlam
+    modeOfE pole amp
+  let ringing ← reverb.mapIdxM fun q r => do
+    let pole ← r.poleE
+    let zero ← lit 0
+    let coupling ← voice.zipIdx.foldlM (init := (zero, zero)) fun sum (v, i) => do
+      if isHot i q then pure sum else
+      let voicePole ← v.poleE
+      let difference ← csubE voicePole pole
+      let quotient ← cdivE v.ampE difference
+      caddE sum quotient
+    let product ← cmulE r.ampE coupling
+    let amp ← cnegE product
+    modeOfE pole amp
   let mut paired : Array PairedMode := #[]
   for (v, i) in voice.zipIdx do
     for (r, q) in reverb.zipIdx do
       if isHot i q then
         -- live-σ poles enter the paired atom CLAMPED to their declared
         -- interval, keeping the routing's range cap sound (Phase 2)
-        paired := paired.push
-          { lam := clampedPoleE v, nu := clampedPoleE r, c := cmulE v.ampE r.ampE }
+        let lam ← clampedPoleEWith constants v
+        let nu ← clampedPoleEWith constants r
+        let c ← cmulE v.ampE r.ampE
+        paired := paired.push { lam, nu, c }
   return (forced ++ ringing, paired)
 
 /-- Multiply a `CplxE` by a real `Sig`. -/
-def scaleRealE (s : Sig) (z : CplxE) : CplxE := (mul s z.1, mul s z.2)
+def scaleRealE (s : Sig) (z : CplxE) : BuildM CplxE := do
+  let real ← mul s z.1
+  let imag ← mul s z.2
+  pure (real, imag)
 
 /-- `(e^z − 1)/z` for a complex `z` as the Horner series `Σ_{k≥0} zᵏ/(k+1)!`, N=6
     terms — the STABLE branch for small `|z|`, where the `−1` in the direct form
     catastrophically cancels. Coeffs `1/(k+1)!`. Limit 1 at z=0 (the τ·e resonance).
     Validated: series↔direct discontinuity at the threshold is 2.5e-12. -/
-def cexpm1SeriesE (z : CplxE) : CplxE :=
-  let step := fun (ck : Float) (acc : CplxE) => caddE (litF ck, lit 0) (cmulE z acc)
-  step 1.0 (step (1.0/2.0) (step (1.0/6.0) (step (1.0/24.0)
-    (step (1.0/120.0) (step (1.0/720.0) (litF (1.0/5040.0), lit 0))))))
+def cexpm1SeriesE (z : CplxE) : BuildM CplxE := do
+  let base ← litF (1.0 / 5040.0)
+  let zero ← lit 0
+  #[1.0 / 720.0, 1.0 / 120.0, 1.0 / 24.0, 1.0 / 6.0,
+      1.0 / 2.0, 1.0].foldlM (fun acc coefficient => do
+    let coefficient ← litF coefficient
+    let product ← cmulE z acc
+    caddE (coefficient, zero) product) (base, zero)
 
 /-- The paired bank's coefficient columns — 7 (vs the single-pole `BankCols`'s 4):
     the ν rotator increment, the SIGNED difference (`ω_λ−ω_ν`) rotator increment,
@@ -1039,26 +1419,46 @@ structure PairedModeSym where
   cre      : Sig
   cim      : Sig
 
-def pairedBankCols (modes : Array PairedMode) (live? : Option Sig := none) : PairedBankCols where
-  count := modes.size
-  live? := live?
-  incrNu   := Sig.arr (modes.map fun m => div (mul (div m.nu.2 twoPiE) (lit 4294967296)) .sampleRate)
-  incrDiff := Sig.arr (modes.map fun m =>
-    div (mul (div (sub m.lam.2 m.nu.2) twoPiE) (lit 4294967296)) .sampleRate)
-  sigmaNu  := Sig.arr (modes.map fun m => neg m.nu.1)
-  ds       := Sig.arr (modes.map fun m => sub m.nu.1 m.lam.1)
-  wd       := Sig.arr (modes.map fun m => sub m.lam.2 m.nu.2)
-  cre      := Sig.arr (modes.map fun m => m.c.1)
-  cim      := Sig.arr (modes.map fun m => m.c.2)
+def pairedBankCols (modes : Array PairedMode)
+    (live? : Option Sig := none) : BuildM PairedBankCols := do
+  let twoPi ← twoPiE
+  let twoPow32 ← lit 4294967296
+  let sr ← sampleRate
+  let incrNuValues ← modes.mapM fun m => do
+    let frequency ← div m.nu.2 twoPi
+    let scaled ← mul frequency twoPow32
+    div scaled sr
+  let incrDiffValues ← modes.mapM fun m => do
+    let difference ← sub m.lam.2 m.nu.2
+    let frequency ← div difference twoPi
+    let scaled ← mul frequency twoPow32
+    div scaled sr
+  let sigmaNuValues ← modes.mapM fun m => neg m.nu.1
+  let dsValues ← modes.mapM fun m => sub m.nu.1 m.lam.1
+  let wdValues ← modes.mapM fun m => sub m.lam.2 m.nu.2
+  let incrNu ← arr incrNuValues
+  let incrDiff ← arr incrDiffValues
+  let sigmaNu ← arr sigmaNuValues
+  let ds ← arr dsValues
+  let wd ← arr wdValues
+  let cre ← arr (modes.map fun m => m.c.1)
+  let cim ← arr (modes.map fun m => m.c.2)
+  pure { count := modes.size, live?, incrNu, incrDiff, sigmaNu, ds, wd, cre, cim }
 
-def bankFoldPaired (cols : PairedBankCols) (body : PairedModeSym → Sig) : Sig :=
-  let k := Sig.loopIdx cols.idxId
-  Sig.bankSum cols.count
+def bankFoldPaired (cols : PairedBankCols)
+    (body : PairedModeSym → BuildM Sig) : BuildM Sig := do
+  let k ← loopIdx cols.idxId
+  let incrNu ← index cols.incrNu k
+  let incrDiff ← index cols.incrDiff k
+  let sigmaNu ← index cols.sigmaNu k
+  let ds ← index cols.ds k
+  let wd ← index cols.wd k
+  let cre ← index cols.cre k
+  let cim ← index cols.cim k
+  let contribution ← body { incrNu, incrDiff, sigmaNu, ds, wd, cre, cim }
+  bankSum cols.count
     #[cols.incrNu, cols.incrDiff, cols.sigmaNu, cols.ds, cols.wd, cols.cre, cols.cim]
-    (body { incrNu := Sig.index cols.incrNu k, incrDiff := Sig.index cols.incrDiff k
-          , sigmaNu := Sig.index cols.sigmaNu k, ds := Sig.index cols.ds k
-          , wd := Sig.index cols.wd k, cre := Sig.index cols.cre k, cim := Sig.index cols.cim k })
-    cols.live? cols.idxId
+    contribution cols.live? cols.idxId
 
 /-- The divided-difference paired-mode bank body (qA). Per mode: the ν rotator (exact
     integer phase) plus a SECOND integer-phase rotator at the signed difference
@@ -1083,29 +1483,70 @@ def bankFoldPaired (cols : PairedBankCols) (body : PairedModeSym → Sig) : Sig 
     (the divisor needs only relative precision; the rotator phase is integer-reduced,
     consistent because `e^z` is periodic). -/
 def modalBankSigTableDD (modes : Array PairedMode) (clkInt anchorSamples : Sig)
-    (live? : Option Sig := none) : Sig :=
-  let clkRel := relClockQ clkInt anchorSamples
-  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-  let bankQ := bankFoldPaired (pairedBankCols modes live?) fun m =>
-    let phQnu := modePhaseQFromIncr (toIntE m.incrNu) clkRel
-    let phQdf := modePhaseQFromIncr (toIntE m.incrDiff) clkRel
-    let cosDf := div (toFloatE (fixedCosCycSig phQdf)) (lit 1073741824)   -- Q2.30 → float
-    let sinDf := div (toFloatE (fixedSinCycSig phQdf)) (lit 1073741824)
-    let envNu := expSig (neg (mul m.sigmaNu dSec))
-    let envDf := expSig (neg (mul m.ds dSec))
-    let ez : CplxE := (mul envDf cosDf, mul envDf sinDf)                  -- e^z (float)
-    let z : CplxE := (neg (mul m.ds dSec), mul m.wd dSec)                 -- z = (λ−ν)d
-    let zsq := add (mul z.1 z.1) (mul z.2 z.2)
-    let big := gt zsq (litF 0.01)                                        -- |z|² ≥ thr² (thr=0.1)
-    let zsafe : CplxE := (selectE big z.1 (lit 1), selectE big z.2 (lit 0))
-    let direct := cdivE (csubE ez (lit 1, lit 0)) zsafe                  -- (e^z−1)/z
-    let series := cexpm1SeriesE z
-    let cx : CplxE := (selectE big direct.1 series.1, selectE big direct.2 series.2)
-    let wc := cmulE (m.cre, m.cim) (scaleRealE (mul envNu dSec) cx)      -- c·(e^{νd}·d·cexpm1)
-    let wCre := toIntE (mul wc.1 (lit 268435456))
-    let wCim := toIntE (mul wc.2 (lit 268435456))
-    rshift (sub (mul wCre (fixedCosCycSig phQnu)) (mul wCim (fixedSinCycSig phQnu))) (lit 28)
-  selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
+    (live? : Option Sig := none) : BuildM Sig := do
+  let clkRel ← relClockQ clkInt anchorSamples
+  let clkFloat ← toFloatE clkRel
+  let twoPow32 ← lit 4294967296
+  let secondsTimesRate ← div clkFloat twoPow32
+  let sr ← sampleRate
+  let dSec ← div secondsTimesRate sr
+  let cols ← pairedBankCols modes live?
+  let bankQ ← bankFoldPaired cols fun m => do
+    let incrNu ← toIntE m.incrNu
+    let phQnu ← modePhaseQFromIncr incrNu clkRel
+    let incrDiff ← toIntE m.incrDiff
+    let phQdf ← modePhaseQFromIncr incrDiff clkRel
+    let cosQ ← fixedCosCycSig phQdf
+    let cosFloat ← toFloatE cosQ
+    let q30 ← lit 1073741824
+    let cosDf ← div cosFloat q30
+    let sinQ ← fixedSinCycSig phQdf
+    let sinFloat ← toFloatE sinQ
+    let sinDf ← div sinFloat q30
+    let sigmaTime ← mul m.sigmaNu dSec
+    let negativeSigmaTime ← neg sigmaTime
+    let envNu ← expSig negativeSigmaTime
+    let differenceTime ← mul m.ds dSec
+    let negativeDifferenceTime ← neg differenceTime
+    let envDf ← expSig negativeDifferenceTime
+    let ezReal ← mul envDf cosDf
+    let ezImag ← mul envDf sinDf
+    let zReal ← neg differenceTime
+    let zImag ← mul m.wd dSec
+    let z : CplxE := (zReal, zImag)
+    let zReal2 ← mul zReal zReal
+    let zImag2 ← mul zImag zImag
+    let zsq ← add zReal2 zImag2
+    let threshold ← litF 0.01
+    let big ← gt zsq threshold
+    let one ← lit 1
+    let zero ← lit 0
+    let safeReal ← selectE big zReal one
+    let safeImag ← selectE big zImag zero
+    let numerator ← csubE (ezReal, ezImag) (one, zero)
+    let direct ← cdivE numerator (safeReal, safeImag)
+    let series ← cexpm1SeriesE z
+    let cxReal ← selectE big direct.1 series.1
+    let cxImag ← selectE big direct.2 series.2
+    let envTime ← mul envNu dSec
+    let scaled ← scaleRealE envTime (cxReal, cxImag)
+    let wc ← cmulE (m.cre, m.cim) scaled
+    let q28 ← lit 268435456
+    let landedCre ← mul wc.1 q28
+    let wCre ← toIntE landedCre
+    let landedCim ← mul wc.2 q28
+    let wCim ← toIntE landedCim
+    let carrierCos ← fixedCosCycSig phQnu
+    let real ← mul wCre carrierCos
+    let carrierSin ← fixedSinCycSig phQnu
+    let imag ← mul wCim carrierSin
+    let difference ← sub real imag
+    let twentyEight ← lit 28
+    rshift difference twentyEight
+  let zero ← lit 0
+  let afterStrike ← gt clkRel zero
+  let output ← fixedOutQ 30 bankQ
+  selectE afterStrike output zero
 
 
 

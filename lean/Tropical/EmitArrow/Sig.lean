@@ -1,13 +1,12 @@
 import Tropical.Ir.Nodes
 
 /-!
-# EmitArrow.Sig — the authoring substrate
+# EmitArrow.Sig — ID-native authoring foundation
 
-The build-time expression tree (`Sig`), its lowering into the resolved-IR
-arena (`lowerSig` — pointer-memoized), the authoring-side decls, and
-`assemble`, THE one boundary through which every EmitArrow-built `Program`
-enters the arena. Plus the smart-constructor op set (`lit`/`mul`/…/`ldexpE`):
-one algebra of scalar operations, applied to values or to the clock alike.
+Signals are stable `ExprId`s in the `ExprArena` owned by `Builder`; smart
+constructors intern `ENode`s immediately, after their child IDs already exist.
+
+These declarations are the stable `Tropical.EmitArrow` authoring API.
 -/
 
 namespace Tropical.EmitArrow
@@ -15,350 +14,249 @@ namespace Tropical.EmitArrow
 open Lean (JsonNumber)
 open Tropical.Ir
 
--- ─────────────────────────────────────────────────────────────
--- Builder substrate: smart constructors over a local authoring tree
--- ─────────────────────────────────────────────────────────────
+/-- An authored signal is a stable handle into the active builder arena. -/
+abbrev Sig := ExprId
 
-/-- EmitArrow's authoring-tree expression: the scalar subset the combinators
-    build, kept as a small tree (like the parser's `ParsedExpr`) and lowered
-    into the resolved-IR arena (`lowerSig`) when a `Program` is assembled. The
-    resolved IR itself is id-only (`ExprId`); this is a build-time frontend. -/
-inductive Sig where
-  | num (n : JsonNumber)
-  | binary (tag : BinaryOpTag) (lhs rhs : Sig)
-  | unary (tag : UnaryOpTag) (arg : Sig)
-  | clamp (value lo hi : Sig)
-  | select (cond then_ else_ : Sig)
-  | inputRef (idx : InputIdx)
-  | paramRef (idx : ParamIdx)
-  | nestedOut (instance_ : InstanceIdx) (output : OutputIdx)
-  | sampleRate
-  | sampleIndex
-  -- Banks-as-data: the authoring tree can express an indexed
-  -- reduction over coefficient columns. `arr`/`index`/`loopIdx` lower to the
-  -- like-named IR nodes; `bankSum` to `ENode.bankSum` (a `ReduceBegin` region).
-  -- `loopIdx` carries the UNIQUE BINDER ID of the `bankSum` it reads (nested
-  -- banks: unique along a nesting chain; Sig-level authoring uses `bankFold`,
-  -- whose banks never nest today — tables materialize before their region —
-  -- so `BankCols.idxId` defaults to 0).
-  | arr (items : Array Sig)
-  | index (arr idx : Sig)
-  | loopIdx (id : Nat)
-  -- `count` is the static CAPACITY; `dynCount?` (trip-count-as-data) is the
-  -- optional RUNTIME effective count, clamped to `[0, count]` at the loop head.
-  -- (No `:= none` default here: `Option Sig` is a NESTED occurrence of the
-  -- inductive, and the kernel rejects optParam defaults on nested fields.)
-  -- `idxId` names the binder the body's `loopIdx id` refers to.
-  | bankSum (count : Nat) (tables : Array Sig) (body : Sig)
-      (dynCount? : Option Sig) (idxId : Nat)
-  /-- Static-capacity pure map followed by an authored-order routed additive
-      fold. Routed results are deliberately float-only until Plan array slots
-      carry element types end to end. -/
-  | routedSum (capacity outputCount : Nat) (routes : Array (Option Nat))
-      (tables values : Array Sig) (dynCount? : Option Sig) (idxId : Nat)
-deriving Repr, Inhabited, BEq
-
-/-- A clock-as-value expression (Q32.32 fixed-point sample coordinate). -/
+/-- The Q32.32 clock rail uses the same expression vocabulary and handles. -/
 abbrev Clock := Sig
 
-/-- Reference (tree-walk) lowering of an authoring `Sig` into the resolved
-    arena, interning bottom-up. Runtime uses the memoized `lowerSigPtr`:
-    the combinators build `Sig` values that share subterms by Lean object
-    REFERENCE (e.g. residue composition embeds one voice's H(ν) sum into
-    every coupling amp), so the structural walk pays for the fully
-    expanded tree only for `eintern` to collapse it straight back into a
-    shared DAG — super-linear on composed patches. -/
-def lowerSigTree : Sig → EArenaM ExprId
-  | .num n          => eintern (.num n)
-  | .binary t a b   => do eintern (.binary t (← lowerSigTree a) (← lowerSigTree b))
-  | .unary t a      => do eintern (.unary t (← lowerSigTree a))
-  | .clamp a b c    => do eintern (.clamp (← lowerSigTree a) (← lowerSigTree b) (← lowerSigTree c))
-  | .select a b c   => do eintern (.select (← lowerSigTree a) (← lowerSigTree b) (← lowerSigTree c))
-  | .inputRef i     => eintern (.inputRef i)
-  | .paramRef i     => eintern (.paramRef i)
-  | .nestedOut i o  => eintern (.nestedOut i o)
-  | .sampleRate     => eintern .sampleRate
-  | .sampleIndex    => eintern .sampleIndex
-  | .arr items      => do
-    eintern (.arr (← items.attach.mapM fun ⟨x, _⟩ => lowerSigTree x))
-  | .index a b      => do eintern (.index (← lowerSigTree a) (← lowerSigTree b))
-  | .loopIdx id     => eintern (.loopIdx id)
-  | .bankSum c ts b dc ii => do
-    let ts' ← ts.attach.mapM fun ⟨x, _⟩ => lowerSigTree x
-    let b' ← lowerSigTree b
-    let dc' ← match dc with
-      | none => pure none
-      | some d => do pure (some (← lowerSigTree d))
-    eintern (.bankSum c ts' b' dc' ii)
-  | .routedSum c oc rs ts vs dc ii => do
-    let ts' ← ts.attach.mapM fun ⟨x, _⟩ => lowerSigTree x
-    let vs' ← vs.attach.mapM fun ⟨x, _⟩ => lowerSigTree x
-    let dc' ← match dc with
-      | none => pure none
-      | some d => do pure (some (← lowerSigTree d))
-    eintern (.routedSum c oc rs ts' vs' dc' ii)
-termination_by sig => sizeOf sig
-decreasing_by
-  all_goals first
-    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ _›; simp_all; omega)
-    | (simp_all; omega)
-
-/-- Pointer-identity-memoized lowering: a hash map from object address to
-    interned id, threaded alongside the arena. Sound because `Sig` values
-    are immutable — a shared pointer IS the same subterm — and lowering a
-    subterm is deterministic (`eintern` returns equal ids for equal nodes),
-    so a pointer MISS merely re-lowers structurally to the same id. -/
-private unsafe def lowerSigPtrGo (s : Sig) :
-    StateM (ExprArena × Std.HashMap USize ExprId) ExprId := do
-  let key := ptrAddrUnsafe s
-  if let some r := (← get).2.get? key then return r
-  let intern1 (n : ENode) : StateM (ExprArena × Std.HashMap USize ExprId) ExprId :=
-    fun (a, m) => let (id, a') := (eintern n).run a; (id, (a', m))
-  let r ← match s with
-    | .num n          => intern1 (.num n)
-    | .binary t a b   => do intern1 (.binary t (← lowerSigPtrGo a) (← lowerSigPtrGo b))
-    | .unary t a      => do intern1 (.unary t (← lowerSigPtrGo a))
-    | .clamp a b c    => do intern1 (.clamp (← lowerSigPtrGo a) (← lowerSigPtrGo b) (← lowerSigPtrGo c))
-    | .select a b c   => do intern1 (.select (← lowerSigPtrGo a) (← lowerSigPtrGo b) (← lowerSigPtrGo c))
-    | .inputRef i     => intern1 (.inputRef i)
-    | .paramRef i     => intern1 (.paramRef i)
-    | .nestedOut i o  => intern1 (.nestedOut i o)
-    | .sampleRate     => intern1 .sampleRate
-    | .sampleIndex    => intern1 .sampleIndex
-    | .arr items      => do intern1 (.arr (← items.mapM lowerSigPtrGo))
-    | .index a b      => do intern1 (.index (← lowerSigPtrGo a) (← lowerSigPtrGo b))
-    | .loopIdx id     => intern1 (.loopIdx id)
-    | .bankSum c ts b dc ii => do
-      intern1 (.bankSum c (← ts.mapM lowerSigPtrGo) (← lowerSigPtrGo b) (← dc.mapM lowerSigPtrGo) ii)
-    | .routedSum c oc rs ts vs dc ii => do
-      intern1 (.routedSum c oc rs (← ts.mapM lowerSigPtrGo)
-        (← vs.mapM lowerSigPtrGo) (← dc.mapM lowerSigPtrGo) ii)
-  modify fun (a, m) => (a, m.insert key r)
-  return r
-
-private unsafe def lowerSigPtr (s : Sig) : EArenaM ExprId := fun arena =>
-  let (id, (arena', _)) := (lowerSigPtrGo s).run (arena, {})
-  (id, arena')
-
-/-- Lower an authoring `Sig` into the resolved arena, interning bottom-up.
-    Compiled implementation is the pointer-memoized walk (`lowerSigPtr`);
-    `lowerSigTree` is the structural reference it agrees with. -/
-@[implemented_by lowerSigPtr]
-def lowerSig (s : Sig) : EArenaM ExprId := lowerSigTree s
-
-/-- Lower an optional authoring default. -/
-def lowerSigOpt : Option Sig → EArenaM (Option ExprId)
-  | none => pure none
-  | some s => some <$> lowerSig s
-
--- ─────────────────────────────────────────────────────────────
--- Authoring-side decls (tree-valued) + the one lowering boundary
--- ─────────────────────────────────────────────────────────────
-
-/-- An instance input at the authoring layer (tree `Sig` value). -/
+/-- An instance input already carrying an arena-native expression ID. -/
 structure AInput where
   port : InputIdx
   value : Sig
-deriving Inhabited
+deriving Inhabited, Repr
 
-/-- An instance decl at the authoring layer. -/
+/-- An authoring-side instance declaration.  Declaration order determines
+    `InstanceIdx`, just as it does on the recursive path. -/
 structure AInst where
   name : String
   programName : String
   inputs : Array AInput := #[]
-deriving Inhabited
+deriving Inhabited, Repr
 
-/-- An input-port decl at the authoring layer (tree `Sig` default). -/
+/-- An input declaration whose optional default is already an expression ID. -/
 structure AInputDecl where
   name : String
   type? : Option PortType := none
   defaultSig : Option Sig := none
+deriving Inhabited, Repr
+
+/-- The complete state needed while authoring one program.  Expression IDs are
+    scoped by convention to this append-only arena; declarations share that
+    same scope. -/
+structure Builder where
+  exprs : ExprArena := {}
+  decls : Array AInst := #[]
 deriving Inhabited
 
-/-- THE lowering boundary: assemble an authoring carrier into a resolved
-    `Program`, interning every tree `Sig` into `arena.exprs`, and push it into
-    the arena. All of EmitArrow's `Sig`-into-`Program` conversion funnels here. -/
-def assemble (arena : Arena) (name : String) (inputs : Array AInputDecl)
-    (outputs : Array OutputDecl) (decls : Array AInst)
-    (assigns : Array (OutputTarget × Sig))
-    (registry : Array (String × ProgramIdx))
-    (extraDecls : Array BodyDecl := #[]) :
-    Arena × ProgramIdx :=
-  let build : EArenaM Program := do
-    let inputsR ← inputs.mapM fun d => do
-      pure ({ name := d.name, type? := d.type?, default? := ← lowerSigOpt d.defaultSig } : InputDecl)
-    let declsR ← decls.mapM fun a => do
-      let ins ← a.inputs.mapM fun i => do
-        pure ({ port := i.port, value := ← lowerSig i.value } : InstanceInput)
-      pure (BodyDecl.inst a.name a.programName ins)
-    let assignsR ← assigns.mapM fun (t, s) => do
-      pure ({ target := t, expr := ← lowerSig s } : OutputAssign)
-    pure { name, inputs := inputsR, outputs, decls := declsR ++ extraDecls,
-           assigns := assignsR, registry }
-  let (prog, exprs) := build.run arena.exprs
-  ({ arena with programs := arena.programs.push prog, exprs }, ⟨arena.programs.size⟩)
+/-- Expression allocation and declaration construction are atomic with
+    respect to the outer `Except`: a failed build never publishes a `Program`.
+-/
+abbrev BuildM := StateT Builder (Except String)
 
-/-- Decimal literal `mantissa · 10^(-exponent)`. The exponent defaults to 0
-    (an integer). This mirrors the `JsonNumber` the JSON parser produces, so
-    the emitted bytes match: `lit 5 1 = 0.5`, `lit 25 2 = 0.25`, `lit 7 4 =
-    0.0007`, `lit 4294967296 = 2³²`. -/
-def lit (mantissa : Int) (exponent : Nat := 0) : Sig := .num ⟨mantissa, exponent⟩
+/-- The ID-valued portion returned by a program build.  Keeping this inside the
+    build action makes input defaults and output assignments use IDs from the
+    same active builder arena. -/
+structure ProgramBody where
+  inputs : Array AInputDecl := #[]
+  assigns : Array (OutputTarget × Sig) := #[]
+deriving Inhabited, Repr
 
-/-- An INTEGER literal for clock arithmetic. A bare `lit` only narrows to int
-    inside an int-EXPECTED context (bitwise ops, `to_int`); in plain `add`/
-    `mul`/`sub` against the integer clock it stays float and PROMOTES the whole
-    op to float (`inferResultType`/`promoteTypes`) — the clock gets `sitofp`'d
-    and loses sub-sample bits once the value passes 2⁵³ (≈ 47 seconds of
-    absolute Q32.32 clock at 44.1k). Wrapping the literal in `toInt` pins the
-    op to exact i64. Use this for every literal that meets a clock. -/
-def litI (mantissa : Int) : Sig := .unary .toInt (.num ⟨mantissa, 0⟩)
+/-- A program whose output surface is discovered during the arena build.  The
+    playground uses this for optional taps: a refused projection must publish
+    neither an assignment nor a dangling output declaration. -/
+structure CompleteProgramBody where
+  inputs : Array AInputDecl := #[]
+  outputs : Array OutputDecl := #[]
+  assigns : Array (OutputTarget × Sig) := #[]
+deriving Inhabited, Repr
 
-/-- `arr`-level pointwise multiply. -/
-def mul (a b : Sig) : Sig := .binary .mul a b
-/-- `arr`-level pointwise add. -/
-def add (a b : Sig) : Sig := .binary .add a b
-/-- `arr`-level pointwise subtract. -/
-def sub (a b : Sig) : Sig := .binary .sub a b
-/-- `arr`-level truncate-to-int (the Q32.32 offset is an integer sample count). -/
-def toIntE (a : Sig) : Sig := .unary .toInt a
-/-- Negate — the negate EFFECT (`.unary .neg`, emitted `sub i64 0, c`). The SAME
-    operation whether applied to a signal value or to the clock; applied to the
-    clock it IS `reverse`. There is one algebra of operations on expressions; the
-    clock is one of those expressions. -/
-def neg (a : Sig) : Sig := .unary .neg a
+/-- The sole expression-arena mutation in the authoring API.  Raw `ENode`
+    construction stays local to this module; ordinary callers use the smart
+    constructors below. -/
+private def internSig (node : ENode) : BuildM Sig := do
+  let builder ← get
+  let (id, exprs) := (eintern node).run builder.exprs
+  set { builder with exprs }
+  pure id
 
-/-! More of the universal scalar op set — plain `.binary`/`.unary`/`.clamp`
-    wrappers, staying scalar (the post-strata IR is scalar by definition). These
-    are what a generator/closed-form voice (phasor arithmetic + polynomial)
-    needs beyond the flanger's add/sub/mul: division, the bit ops the fixed-point
-    phasor speaks, rounding, the int⇆float casts, and the bounded-type clamp the
-    elaborator inserts for `unipolar`/`freq` ports. -/
+-- ─────────────────────────────────────────────────────────────
+-- Direct expression smart constructors
+-- ─────────────────────────────────────────────────────────────
 
-/-- `arr`-level pointwise divide. -/
-def div (a b : Sig) : Sig := .binary .div a b
-/-- Bitwise AND on the integer (fixed-point) clock/value (`& (2³²−1)` masks). -/
-def bitAnd (a b : Sig) : Sig := .binary .bitAnd a b
-/-- Bitwise OR on the integer clock/value (used to assemble exact limb
-    companions transported through float slots). -/
-def bitOr (a b : Sig) : Sig := .binary .bitOr a b
-/-- Logical/arithmetic right shift (`clk >> 32` etc.; the mask makes the choice
-    irrelevant where it follows a `& (2³²−1)`). -/
-def rshift (a b : Sig) : Sig := .binary .rshift a b
-/-- Left shift (`sampleIndex << 32` — the root clock). -/
-def lshift (a b : Sig) : Sig := .binary .lshift a b
-/-- `gt` comparison (the bounded-default `select(hz > 0, …)`). -/
-def gt (a b : Sig) : Sig := .binary .gt a b
-/-- Round to nearest integer-as-float (`Sin`'s half-cycle count `n`). -/
-def roundE (a : Sig) : Sig := .unary .round a
-/-- Reinterpret int → float (`toFloat(acc & mask)` at the phasor boundary). -/
-def toFloatE (a : Sig) : Sig := .unary .toFloat a
-/-- Clamp into `[lo, hi]` — the elaborator's lowering of a bounded port type
-    (`unipolar` ⇒ `clamp _ 0 1`). -/
-def clampE (value lo hi : Sig) : Sig := .clamp value lo hi
-/-- Select (`cond ? then : else`) — the bounded-default `select(hz > 0, hz, 0)`. -/
-def selectE (cond then_ else_ : Sig) : Sig := .select cond then_ else_
-/-- `ldexp(m, n) = m·2ⁿ` — the exact float-exponent bump `stdlib/Exp` uses for the
-    integer part of range reduction. `n` is an integer-valued float (`round …`). -/
-def ldexpE (m n : Sig) : Sig := .binary .ldexp m n
+def num (n : JsonNumber) : BuildM Sig := internSig (.num n)
 
-/-- Does this expression read the sample clock (`.sampleIndex`)? That read is the
-    authoring layer's source of per-sample (s1) τ-dependence — a value with none is
-    a function of settled parameters alone (s0). -/
-def readsSampleIndex : Sig → Bool
-  | .sampleIndex        => true
-  | .binary _ a b       => readsSampleIndex a || readsSampleIndex b
-  | .unary _ a          => readsSampleIndex a
-  | .clamp v lo hi      => readsSampleIndex v || readsSampleIndex lo || readsSampleIndex hi
-  | .select c t e       => readsSampleIndex c || readsSampleIndex t || readsSampleIndex e
-  | .index a b          => readsSampleIndex a || readsSampleIndex b
-  | .arr items          => items.attach.any fun ⟨x, _⟩ => readsSampleIndex x
-  | .bankSum _ ts b _ _  =>
-    (ts.attach.any fun ⟨x, _⟩ => readsSampleIndex x) || readsSampleIndex b
-  | .routedSum _ _ _ ts vs dc _ =>
-    (ts.attach.any fun ⟨x, _⟩ => readsSampleIndex x) ||
-      (vs.attach.any fun ⟨x, _⟩ => readsSampleIndex x) ||
-      (match dc with | none => false | some d => readsSampleIndex d)
-  | _                   => false
-termination_by sig => sizeOf sig
-decreasing_by
-  all_goals first
-    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ _›; simp_all; omega)
-    | (simp_all; omega)
+/-- Decimal literal `mantissa · 10^(-exponent)`. -/
+def lit (mantissa : Int) (exponent : Nat := 0) : BuildM Sig :=
+  num ⟨mantissa, exponent⟩
 
-private def isZeroLit : Sig → Bool | .num n => n.mantissa == 0 | _ => false
-private def isOneLit  : Sig → Bool | .num n => n.mantissa == 1 && n.exponent == 0 | _ => false
+def binary (tag : BinaryOpTag) (lhs rhs : Sig) : BuildM Sig :=
+  internSig (.binary tag lhs rhs)
 
-/-- Collapse every SATURATING glide ramp to its terminal value — a `clampE(r, 0, 1)`
-    whose ramp `r` reads the clock (`glideExpr`'s smoothstep parameter, the only
-    converging τ-dependent construct authored today) reaches `1` as the clock runs,
-    so it settles to its ceiling. Every other subterm settles pointwise. This is the
-    mechanical half of `settle`; use `settle` for the totality contract. -/
-def settleRamps : Sig → Sig
-  | .clamp v lo hi =>
-    if isZeroLit lo && isOneLit hi && readsSampleIndex v then lit 1
-    else .clamp (settleRamps v) (settleRamps lo) (settleRamps hi)
-  | .binary t a b       => .binary t (settleRamps a) (settleRamps b)
-  | .unary t a          => .unary t (settleRamps a)
-  | .select c t e       => .select (settleRamps c) (settleRamps t) (settleRamps e)
-  | .index a b          => .index (settleRamps a) (settleRamps b)
-  | .arr items          => .arr (items.attach.map fun ⟨x, _⟩ => settleRamps x)
-  | .bankSum c ts b dc ii =>
-    .bankSum c (ts.attach.map fun ⟨x, _⟩ => settleRamps x) (settleRamps b) dc ii
-  | .routedSum c oc rs ts vs dc ii =>
-    .routedSum c oc rs
-      (ts.attach.map fun ⟨x, _⟩ => settleRamps x)
-      (vs.attach.map fun ⟨x, _⟩ => settleRamps x)
-      (match dc with | none => none | some d => some (settleRamps d)) ii
-  | s                   => s
-termination_by sig => sizeOf sig
-decreasing_by
-  all_goals first
-    | (have := Array.sizeOf_lt_of_mem ‹_ ∈ _›; simp_all; omega)
-    | (simp_all; omega)
+def unary (tag : UnaryOpTag) (arg : Sig) : BuildM Sig :=
+  internSig (.unary tag arg)
 
-/-- `settle e` — the τ-independent (s0) value `e` converges to as the clock runs,
-    when that value exists; `none` otherwise. The one converging τ-dependent
-    construct today is `glideExpr`'s saturating ramp, which `settleRamps` collapses
-    to its ceiling; a `.sampleIndex` that SURVIVES that collapse is a genuine
-    modulation (an LFO on a pole never settles — it has no fixed point), so `settle`
-    returns `none` and the caller must DECLINE rather than measure a value the signal
-    never sits at. The guarantee that makes this a contract, not a hope: a `some`
-    result reads no clock — **s0 by construction**. So a coefficient built through
-    `settle` (a self-measuring gauge norm) cannot emit a per-sample op, and the
-    f32≠f64 `floatExponent` split across backends is unREACHABLE, not merely
-    documented against. -/
-def settle (s : Sig) : Option Sig :=
-  let s' := settleRamps s
-  if readsSampleIndex s' then none else some s'
+def clamp (value lo hi : Sig) : BuildM Sig :=
+  internSig (.clamp value lo hi)
 
-/-- Mirror the elaborator's `registerInstanceDecl` over a sequence of
-    instantiated program names: each adds `(name, idx)` then merges that
-    program's own registry (skipping keys already present), in declaration
-    order. Generalizes `buildWarpBank`'s single-voice registry merge to the
-    several distinct programs a multi-instance body references. -/
+def select (cond then_ else_ : Sig) : BuildM Sig :=
+  internSig (.select cond then_ else_)
+
+def inputRef (idx : InputIdx) : BuildM Sig := internSig (.inputRef idx)
+
+def paramRef (idx : ParamIdx) : BuildM Sig := internSig (.paramRef idx)
+
+def nestedOut (instance_ : InstanceIdx) (output : OutputIdx) : BuildM Sig :=
+  internSig (.nestedOut instance_ output)
+
+def sampleRate : BuildM Sig := internSig .sampleRate
+
+def sampleIndex : BuildM Sig := internSig .sampleIndex
+
+def arr (items : Array Sig) : BuildM Sig := internSig (.arr items)
+
+def index (array index : Sig) : BuildM Sig :=
+  internSig (.index array index)
+
+def loopIdx (id : Nat) : BuildM Sig := internSig (.loopIdx id)
+
+/-- An indexed reduction.  Table order, optional dynamic count, and binder ID
+    are stored verbatim; callers construct the body with the matching
+    `loopIdx` ID before interning this parent. -/
+def bankSum (count : Nat) (tables : Array Sig) (body : Sig)
+    (dynCount? : Option Sig := none) (idxId : Nat := 0) : BuildM Sig :=
+  internSig (.bankSum count tables body dynCount? idxId)
+
+/-- Static-capacity pure map followed by an authored-order routed additive
+    fold.  Routes, tables, values, and binder ID are stored verbatim. -/
+def routedSum (capacity outputCount : Nat) (routes : Array (Option Nat))
+    (tables values : Array Sig) (dynCount? : Option Sig := none)
+    (idxId : Nat := 0) : BuildM Sig :=
+  internSig (.routedSum capacity outputCount routes tables values dynCount? idxId)
+
+-- The production scalar helper vocabulary, preserving its existing names and
+-- operand order.  Each helper performs exactly one intern step.
+
+def litI (mantissa : Int) : BuildM Sig := do
+  let value ← lit mantissa
+  unary .toInt value
+
+def mul (a b : Sig) : BuildM Sig := binary .mul a b
+def add (a b : Sig) : BuildM Sig := binary .add a b
+def sub (a b : Sig) : BuildM Sig := binary .sub a b
+def div (a b : Sig) : BuildM Sig := binary .div a b
+def bitAnd (a b : Sig) : BuildM Sig := binary .bitAnd a b
+def bitOr (a b : Sig) : BuildM Sig := binary .bitOr a b
+def rshift (a b : Sig) : BuildM Sig := binary .rshift a b
+def lshift (a b : Sig) : BuildM Sig := binary .lshift a b
+def gt (a b : Sig) : BuildM Sig := binary .gt a b
+def ldexpE (mantissa exponent : Sig) : BuildM Sig :=
+  binary .ldexp mantissa exponent
+
+def toIntE (a : Sig) : BuildM Sig := unary .toInt a
+def neg (a : Sig) : BuildM Sig := unary .neg a
+def absE (a : Sig) : BuildM Sig := unary .abs a
+def floatExponentE (a : Sig) : BuildM Sig := unary .floatExponent a
+def roundE (a : Sig) : BuildM Sig := unary .round a
+def toFloatE (a : Sig) : BuildM Sig := unary .toFloat a
+def clampE (value lo hi : Sig) : BuildM Sig := clamp value lo hi
+def selectE (cond then_ else_ : Sig) : BuildM Sig := select cond then_ else_
+
+/-- Authored-order, left-associated addition over an array of already-built
+    IDs.  The empty sum constructs the same numeric zero as the recursive
+    authoring surface. -/
+def sumLeft (items : Array Sig) : BuildM Sig := do
+  match items[0]? with
+  | none => lit 0
+  | some first => (items.extract 1 items.size).foldlM add first
+
+/-- Encode a build-time `Float` as the same decimal literal used by the
+    recursive authoring path. -/
+def litF (x : Float) : BuildM Sig :=
+  let scaled := x * 1000000000000.0
+  let mantissa : Int :=
+    if scaled ≥ 0.0 then Int.ofNat (scaled + 0.5).toUInt64.toNat
+    else -(Int.ofNat (0.5 - scaled).toUInt64.toNat)
+  if mantissa == 0 then lit 0 else lit mantissa 12
+
+-- ─────────────────────────────────────────────────────────────
+-- Ordered declaration construction and ID-native assembly
+-- ─────────────────────────────────────────────────────────────
+
+/-- Append one instance in authored order and return its stable positional
+    index.  Inputs already contain IDs from the active builder arena. -/
+def declareInst (decl : AInst) : BuildM InstanceIdx := do
+  let builder ← get
+  let idx : InstanceIdx := ⟨builder.decls.size⟩
+  set { builder with decls := builder.decls.push decl }
+  pure idx
+
+/-- Convenience form of `declareInst` retaining input-port order verbatim. -/
+def inst (name programName : String) (inputs : Array AInput := #[]) :
+    BuildM InstanceIdx :=
+  declareInst { name, programName, inputs }
+
+/-- Mirror the elaborator's deterministic transitive registry merge. -/
 def buildRegistry (arena : Arena) (resolved : Array (String × ProgramIdx))
     (programNames : Array String) : Except String (Array (String × ProgramIdx)) := do
   let mut registry : Array (String × ProgramIdx) := #[]
-  for pn in programNames do
-    let some idx := (resolved.find? (·.1 == pn)).map (·.2)
-      | .error s!"EmitArrow: program '{pn}' not found in the elaborated stdlib chain"
-    let some prog := arena.program? idx
-      | .error s!"EmitArrow: program '{pn}' index out of range"
-    if !registry.any (·.1 == prog.name) then registry := registry.push (prog.name, idx)
-    for (k, v) in prog.registry do
-      if !registry.any (·.1 == k) then registry := registry.push (k, v)
+  for programName in programNames do
+    let some index := (resolved.find? (·.1 == programName)).map (·.2)
+      | .error s!"EmitArrow: program '{programName}' not found in the elaborated stdlib chain"
+    let some program := arena.program? index
+      | .error s!"EmitArrow: program '{programName}' index out of range"
+    if !registry.any (·.1 == program.name) then
+      registry := registry.push (program.name, index)
+    for (name, registeredIndex) in program.registry do
+      if !registry.any (·.1 == name) then
+        registry := registry.push (name, registeredIndex)
   pure registry
 
-/-- Encode a build-time `Float` as a decimal `lit` (12 places, round-to-nearest) —
-    the bridge that lets residue-computed complex coefficients become a bank's
-    literal params. Magnitude must fit `·10¹²` in `UInt64` (fine for audio
-    σ/f/amp/phase). -/
-def litF (x : Float) : Sig :=
-  let s := x * 1000000000000.0
-  let m : Int := if s ≥ 0.0 then Int.ofNat (s + 0.5).toUInt64.toNat
-                 else -(Int.ofNat (0.5 - s).toUInt64.toNat)
-  -- a zero-mantissa NumLit with a nonzero exponent serializes to invalid JSON
-  -- ("0.e-12"); a plain `0` avoids it.
-  if m == 0 then lit 0 else lit m 12
+/-- Assemble one ID-native program.  The build starts from `arena.exprs`; only
+    an `.ok` result publishes the updated expression arena and appends exactly
+    one program.  No recursive expression lowering occurs at this seam. -/
+def assemble (arena : Arena) (name : String) (outputs : Array OutputDecl)
+    (registry : Array (String × ProgramIdx)) (build : BuildM ProgramBody)
+    (extraDecls : Array BodyDecl := #[]) :
+    Except String (Arena × ProgramIdx) := do
+  let initial : Builder := { exprs := arena.exprs }
+  let (body, builder) ← build.run initial
+  let inputs : Array InputDecl := body.inputs.map fun decl =>
+    { name := decl.name, type? := decl.type?, default? := decl.defaultSig }
+  let decls : Array BodyDecl := builder.decls.map fun decl =>
+    .inst decl.name decl.programName (decl.inputs.map fun input =>
+      { port := input.port, value := input.value })
+  let assigns : Array OutputAssign := body.assigns.map fun (target, expr) =>
+    { target, expr }
+  let program : Program :=
+    { name, inputs, outputs, decls := decls ++ extraDecls, assigns, registry }
+  let idx : ProgramIdx := ⟨arena.programs.size⟩
+  pure ({ arena with
+    programs := arena.programs.push program
+    exprs := builder.exprs }, idx)
+
+/-- Assemble a program whose output declarations, plus arbitrary pure caller
+    metadata, are determined inside the same atomic builder transaction. -/
+def assembleCompleteWithResult {α : Type} (arena : Arena) (name : String)
+    (registry : Array (String × ProgramIdx))
+    (build : BuildM (CompleteProgramBody × α))
+    (extraDecls : Array BodyDecl := #[]) :
+    Except String (Arena × ProgramIdx × α) := do
+  let initial : Builder := { exprs := arena.exprs }
+  let ((body, result), builder) ← build.run initial
+  let inputs : Array InputDecl := body.inputs.map fun decl =>
+    { name := decl.name, type? := decl.type?, default? := decl.defaultSig }
+  let decls : Array BodyDecl := builder.decls.map fun decl =>
+    .inst decl.name decl.programName (decl.inputs.map fun input =>
+      { port := input.port, value := input.value })
+  let assigns : Array OutputAssign := body.assigns.map fun (target, expr) =>
+    { target, expr }
+  let program : Program := {
+    name, inputs, outputs := body.outputs
+    decls := decls ++ extraDecls, assigns, registry }
+  let idx : ProgramIdx := ⟨arena.programs.size⟩
+  pure ({ arena with
+    programs := arena.programs.push program
+    exprs := builder.exprs }, idx, result)
 
 end Tropical.EmitArrow

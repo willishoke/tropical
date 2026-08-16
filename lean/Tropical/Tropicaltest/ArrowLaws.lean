@@ -63,7 +63,8 @@ def buildAndFinishStaged (built : Except String (Arena × ProgramIdx)) :
 /-- Build one EmitArrow clock carrier (named `name`, clocked at `clkE`) into a
     runnable `FlatPlan` via the production session path. -/
 def compileArrowCarrier (arena : Arena) (resolved : Array (String × ProgramIdx))
-    (name : String) (clkE : Tropical.EmitArrow.Clock) :
+    (name : String) (clkE : Tropical.EmitArrow.BuildM
+      Tropical.EmitArrow.Clock) :
     Except String Tropical.Plan.FlatPlan :=
   buildAndFinish (Tropical.EmitArrow.buildClockCarrier name clkE arena resolved)
 
@@ -218,7 +219,8 @@ def runStdlibWireGoldens (writeMode : Bool) : IO Bool := do
     plans are byte-identical (EXPECTED NO — the algebra is exact in the clock,
     not normalized in the tree). PASS iff the audio hashes match. -/
 def runArrowLaw (name : String)
-    (lhsClk rhsClk : Tropical.EmitArrow.Clock)
+    (lhsClk rhsClk : Tropical.EmitArrow.BuildM
+      Tropical.EmitArrow.Clock)
     (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Bool := do
   match compileArrowCarrier arena resolved s!"{name}_lhs" lhsClk,
         compileArrowCarrier arena resolved s!"{name}_rhs" rhsClk with
@@ -396,20 +398,24 @@ def runReverseFlangerCommute
     side is exact int64, so these hold byte-exactly — the fixed-point analog of
     `runArrowLaw`'s float laws (which also pass) over the integer source. -/
 def runFixedSourceLaw (name : String)
-    (lhsClk rhsClk : Tropical.EmitArrow.Clock) (arena : Arena) : IO Bool := do
-  let (arenaL, idxL) := Tropical.EmitArrow.buildFixedSourceCarrier s!"{name}_lhs" lhsClk arena
-  let (arenaR, idxR) := Tropical.EmitArrow.buildFixedSourceCarrier s!"{name}_rhs" rhsClk arena
-  match diagStrataCompile arenaL idxL, diagStrataCompile arenaR idxR with
-  | .error e, _ => failGate s!"arrow-law/{name}" s!"compile lhs: {firstLine e}"
-  | _, .error e => failGate s!"arrow-law/{name}" s!"compile rhs: {firstLine e}"
-  | .ok (_, planL), .ok (_, planR) =>
-    match ← renderIrBytes planL, ← renderIrBytes planR with
-    | .error e, _ | _, .error e =>
-      failGate s!"arrow-law/{name}" s!"render: {firstLine e}"
-    | .ok bytesL, .ok bytesR =>
-      hashGate s!"arrow-law/{name}" bytesL bytesR
-        (fun h => s!"audio ≡ {h.take 16} (byte-identical)")
-        (fun hl hr => s!"audio differs: lhs {hl.take 16} rhs {hr.take 16}")
+    (lhsClk rhsClk : Tropical.EmitArrow.BuildM
+      Tropical.EmitArrow.Clock) (arena : Arena) : IO Bool := do
+  match Tropical.EmitArrow.buildFixedSourceCarrier s!"{name}_lhs" lhsClk arena,
+      Tropical.EmitArrow.buildFixedSourceCarrier s!"{name}_rhs" rhsClk arena with
+  | .error e, _ => failGate s!"arrow-law/{name}" s!"build lhs: {firstLine e}"
+  | _, .error e => failGate s!"arrow-law/{name}" s!"build rhs: {firstLine e}"
+  | .ok (arenaL, idxL), .ok (arenaR, idxR) =>
+    match diagStrataCompile arenaL idxL, diagStrataCompile arenaR idxR with
+    | .error e, _ => failGate s!"arrow-law/{name}" s!"compile lhs: {firstLine e}"
+    | _, .error e => failGate s!"arrow-law/{name}" s!"compile rhs: {firstLine e}"
+    | .ok (_, planL), .ok (_, planR) =>
+      match ← renderIrBytes planL, ← renderIrBytes planR with
+      | .error e, _ | _, .error e =>
+        failGate s!"arrow-law/{name}" s!"render: {firstLine e}"
+      | .ok bytesL, .ok bytesR =>
+        hashGate s!"arrow-law/{name}" bytesL bytesR
+          (fun h => s!"audio ≡ {h.take 16} (byte-identical)")
+          (fun hl hr => s!"audio differs: lhs {hl.take 16} rhs {hr.take 16}")
 
 /-- THE GATE: certify reverse-equivariance of the FIXED-POINT flanger
     `warp(neg) ⋙ flanger ≡ flanger ⋙ warp(neg)` — the exact law slice 5 found
@@ -419,32 +425,35 @@ def runFixedSourceLaw (name : String)
     differing-sample count (must be 0/N vs slice 5's 1271/4096). PASS iff
     byte-identical and non-silent. -/
 def runReverseFlangerCommuteFixedpoint (arena : Arena) : IO Bool := do
-  let (arenaL, idxL) := Tropical.EmitArrow.buildReverseThenFixedFlanger arena
-  let (arenaR, idxR) := Tropical.EmitArrow.buildFixedFlangerThenReverse arena
-  match diagStrataCompile arenaL idxL, diagStrataCompile arenaR idxR with
-  | .error e, _ => failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"compile lhs: {firstLine e}"
-  | _, .error e => failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"compile rhs: {firstLine e}"
-  | .ok (_, planL), .ok (_, planR) =>
-    match ← renderIrBytes planL, ← renderIrBytes planR with
-    | .error e, _ | _, .error e =>
-      failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"render: {firstLine e}"
-    | .ok bytesL, .ok bytesR =>
-      let hashL ← sha256Hex bytesL
-      let hashR ← sha256Hex bytesR
-      let byteIdentical := hashL == hashR
-      let samplesL := decodeF64LE bytesL
-      let samplesR := decodeF64LE bytesR
-      let n := min samplesL.size samplesR.size
-      let mut bitDiff := 0
-      let mut energy := 0.0
-      for k in [0:n] do
-        if samplesL[k]!.toBits != samplesR[k]!.toBits then bitDiff := bitDiff + 1
-        energy := energy + samplesL[k]! * samplesL[k]!
-      IO.println s!"        gate  byte-identical: {byteIdentical}  ·  bit-differing samples: {bitDiff}/{n} (slice-5 float was 1271/4096)  ·  lhs energy={energy}"
-      IO.println s!"        gate  integer add is associative — ±δ tap slot swap leaves the Q0.32 mix bit-identical; one toFloat·/2³² scale at the boundary"
-      if energy <= 1e-6 then
-        failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"signal silent (energy={energy})"
-      else if byteIdentical then
-        passGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"audio ≡ {hashL.take 16} ({bitDiff}/{n} differing — byte-exact)"
-      else
-        failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"audio differs ({bitDiff}/{n}): lhs {hashL.take 16} rhs {hashR.take 16}"
+  match Tropical.EmitArrow.buildReverseThenFixedFlanger arena,
+      Tropical.EmitArrow.buildFixedFlangerThenReverse arena with
+  | .error e, _ => failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"build lhs: {firstLine e}"
+  | _, .error e => failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"build rhs: {firstLine e}"
+  | .ok (arenaL, idxL), .ok (arenaR, idxR) =>
+    match diagStrataCompile arenaL idxL, diagStrataCompile arenaR idxR with
+    | .error e, _ => failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"compile lhs: {firstLine e}"
+    | _, .error e => failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"compile rhs: {firstLine e}"
+    | .ok (_, planL), .ok (_, planR) =>
+      match ← renderIrBytes planL, ← renderIrBytes planR with
+      | .error e, _ | _, .error e =>
+        failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"render: {firstLine e}"
+      | .ok bytesL, .ok bytesR =>
+        let hashL ← sha256Hex bytesL
+        let hashR ← sha256Hex bytesR
+        let byteIdentical := hashL == hashR
+        let samplesL := decodeF64LE bytesL
+        let samplesR := decodeF64LE bytesR
+        let n := min samplesL.size samplesR.size
+        let mut bitDiff := 0
+        let mut energy := 0.0
+        for k in [0:n] do
+          if samplesL[k]!.toBits != samplesR[k]!.toBits then bitDiff := bitDiff + 1
+          energy := energy + samplesL[k]! * samplesL[k]!
+        IO.println s!"        gate  byte-identical: {byteIdentical}  ·  bit-differing samples: {bitDiff}/{n} (slice-5 float was 1271/4096)  ·  lhs energy={energy}"
+        IO.println s!"        gate  integer add is associative — ±δ tap slot swap leaves the Q0.32 mix bit-identical; one toFloat·/2³² scale at the boundary"
+        if energy <= 1e-6 then
+          failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"signal silent (energy={energy})"
+        else if byteIdentical then
+          passGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"audio ≡ {hashL.take 16} ({bitDiff}/{n} differing — byte-exact)"
+        else
+          failGate "arrow-law/reverse-flanger-commute-fixedpoint" s!"audio differs ({bitDiff}/{n}): lhs {hashL.take 16} rhs {hashR.take 16}"

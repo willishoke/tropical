@@ -1,6 +1,7 @@
 import Tropical.Playground
 import Tropical.StagedLoad
 import Tropical.Tropicaltest.Stress
+import Tropical.Testing.ArrowFixtures
 
 /-!
 # Current-universe modal phaser gates
@@ -16,8 +17,9 @@ namespace Tropical.Tropicaltest.Phaser
 open Tropical
 open Tropical.Plan
 open Tropical.Ir (Arena ProgramIdx)
-open Tropical.EmitArrow
 open Tropical.Playground
+open Tropical.EmitArrow
+open Tropical.Testing.ArrowFixtures
 
 private def passGate (label detail : String) : IO Bool := do
   IO.println s!"  PASS  {label}  {detail}"
@@ -45,33 +47,35 @@ private def cdiv (a b : CplxF) : CplxF :=
 private def cscale (scale : Float) (a : CplxF) : CplxF :=
   (scale * a.1, scale * a.2)
 
-private def constantControl (value : Sig) : ModalControlRef :=
-  ModalControlRef.constant value
+private def constantControl (value : BuildM Sig) : BuildM ModalControlRef := do
+  pure (ModalControlRef.constant (← value))
 
-private def testPhaser (id input : String) : Node × Array PatchNode :=
-  modalPhaserTopology id input
-    (constantControl (lit 700)) (constantControl (lit 15 1))
-    (constantControl (lit 2 1)) (constantControl (lit 5 1))
-    modalPhaserRatios
+private def testPhaser (id input : String) : BuildM (Node × Array PatchNode) := do
+  pure <| modalPhaserTopology id input
+    (← constantControl (lit 700)) (← constantControl (lit 15 1))
+    (← constantControl (lit 2 1)) (← constantControl (lit 5 1))
+    Tropical.Playground.Metadata.modalPhaserRatios
 
-private def sourceMode (sigma : Int := 3) : ModalMode :=
-  ModalMode.hz (lit 220) (lit sigma) (lit 1)
+private def sourceMode (sigma : Int := 3) : BuildM ModalMode := do
+  ModalMode.hz (← lit 220) (← lit sigma) (← lit 1)
 
-private def phaserGraph : PatchGraph :=
-  let (phaser, topology) := testPhaser "phaser" "source"
-  { nodes := #[
-      { id := "source", node := .modalSource #[sourceMode] (lit (Int.ofNat anchor))
-          clockLit none },
+private def phaserGraph : BuildM PatchGraph := do
+  let (phaser, topology) ← testPhaser "phaser" "source"
+  let mode ← sourceMode
+  let anchorExpr ← lit (Int.ofNat anchor)
+  let clock ← clockLit
+  let nodes : Array PatchNode := #[
+      { id := "source", node := .modalSource #[mode] anchorExpr clock none },
       { id := "phaser", node := phaser }] ++ topology
-    output := "phaser" }
+  pure { nodes, output := "phaser" }
 
-private def graphPlan (arena : Arena) (name : String) (graph : PatchGraph) :
-    Except String FlatPlan := do
-  let term ← lowerGraph graph
-  let (output, _) := emitTerm (normalize term) {}
-  buildAndFinish (.ok (buildExprCarrier name output arena))
+private def graphPlan (arena : Arena) (name : String) (graph : BuildM PatchGraph) :
+    Except String FlatPlan :=
+  buildAndFinish <| buildExprCarrier name (do
+    let term ← lowerGraph (← graph)
+    emitTerm (normalize term)) arena
 
-private def renderGraph (arena : Arena) (name : String) (graph : PatchGraph) :
+private def renderGraph (arena : Arena) (name : String) (graph : BuildM PatchGraph) :
     IO (Except String (Array Float)) :=
   match graphPlan arena name graph with
   | .error error => pure (.error error)
@@ -84,7 +88,8 @@ private def lfoPhase (sample : Nat) (rate : Float) : Float :=
 private def sectionPoles (sample : Nat) : Array Float :=
   let octave := 1.5 * Float.sin (twoPi * lfoPhase sample 0.2)
   let scale := Float.pow 2.0 octave
-  modalPhaserRatios.map fun ratio => twoPi * 700.0 * ratio * scale
+  Tropical.Playground.Metadata.modalPhaserRatios.map fun ratio =>
+    twoPi * 700.0 * ratio * scale
 
 private def allpassAt (s : CplxF) (poles : Array Float) : CplxF :=
   poles.foldl (fun value a =>
@@ -130,33 +135,31 @@ private def maximumOracleError (samples : Array Float) : Float := Id.run do
     The fixture deliberately uses interior directions so future and past room
     arms, the zero seam, and all six cold phaser-pole rows participate. -/
 private def fusedProductError (arena : Arena) : IO (Except String Float) := do
-  let source : Array ModalMode := #[sourceMode]
-  let room1 : Array ModalMode := #[
-    ModalMode.hz (lit 90) (lit 9) (lit 3 1),
-    ModalMode.hz (lit 370) (lit 13) (lit (-1) 2)]
-  let room2 : Array ModalMode := #[
-    ModalMode.hz (lit 90) (lit 7) (lit 2 1),
-    ModalMode.hz (lit 370) (lit 15) (lit 1 2)]
-  let tails := modalPhaserRatios.map fun ratio =>
-    Oriented.allpassTail (litF (twoPi * 700.0 * ratio))
-  let mix := lit 5 1
-  let direction1 := lit 25 2
-  let direction2 := lit 75 2
-  let decorated := Oriented.decorateDegreeZeroCausalPhaser source tails mix
-  let reference ← match Oriented.factoredTwoRoomTerminal? decorated room1 room2
-      direction1 direction2 with
-    | none => return .error "reference terminal refused decorated fixture"
-    | some terminal => pure terminal
-  let specialized ← match Oriented.factoredTwoRoomPhaserTerminal? source tails
-      room1 room2 mix direction1 direction2 with
-    | none => return .error "fused terminal refused admitted fixture"
-    | some terminal => pure terminal
-  let clock := clockLit
-  let anchorE := lit (Int.ofNat anchor)
-  let difference := sub (specialized.realizeSig clock anchorE)
-    (reference.realizeSig clock anchorE)
-  let plan ← match buildAndFinish (.ok
-      (buildExprCarrier "modal_phaser_fused_differential" difference arena)) with
+  let built := buildExprCarrier "modal_phaser_fused_differential" (do
+    let source : Array ModalMode := #[← sourceMode]
+    let room1a ← ModalMode.hz (← lit 90) (← lit 9) (← lit 3 1)
+    let room1b ← ModalMode.hz (← lit 370) (← lit 13) (← lit (-1) 2)
+    let room1 : Array ModalMode := #[room1a, room1b]
+    let room2a ← ModalMode.hz (← lit 90) (← lit 7) (← lit 2 1)
+    let room2b ← ModalMode.hz (← lit 370) (← lit 15) (← lit 1 2)
+    let room2 : Array ModalMode := #[room2a, room2b]
+    let tails ← Tropical.Playground.Metadata.modalPhaserRatios.mapM fun ratio => do
+      Oriented.allpassTail (← litF (twoPi * 700.0 * ratio))
+    let mix ← lit 5 1
+    let direction1 ← lit 25 2
+    let direction2 ← lit 75 2
+    let decorated ← Oriented.decorateDegreeZeroCausalPhaser source tails mix
+    let some reference ← Oriented.factoredTwoRoomTerminal? decorated room1 room2
+        direction1 direction2
+      | throw "reference terminal refused decorated fixture"
+    let some specialized ← Oriented.factoredTwoRoomPhaserTerminal? source tails
+        room1 room2 mix direction1 direction2
+      | throw "fused terminal refused admitted fixture"
+    let clock ← clockLit
+    let anchorE ← lit (Int.ofNat anchor)
+    sub (← specialized.realizeSig clock anchorE)
+      (← reference.realizeSig clock anchorE)) arena
+  let plan ← match buildAndFinish built with
     | .error error => return .error error
     | .ok plan => pure plan
   match ← renderPlanSamples plan frameCount with
@@ -164,11 +167,11 @@ private def fusedProductError (arena : Arena) : IO (Except String Float) := do
   | .ok samples =>
       pure (.ok (samples.foldl (fun worst sample => max worst sample.abs) 0.0))
 
-private def controlValue (control : ModalControlRef) : Option Float := do
-  let .konst expression := control.fallback | none
+private def controlValue (control : ModalControlRef) : BuildM (Option Float) := do
+  let .konst expression := control.fallback | pure none
   sigConstF? expression
 
-private def lowerModalRoot (graph : PatchGraph) (id : String) : Except String ModalForest := do
+private def lowerModalRoot (graph : PatchGraph) (id : String) : BuildM ModalForest := do
   let ids := graph.nodes.map (·.id)
   let deps := graph.nodes.map fun node => node.node.inputIds.filterMap ids.idxOf?
   let some ranks := Tropical.Ir.topoRanks? deps | throw "fixture cycle"
@@ -178,96 +181,125 @@ private def lowerModalRoot (graph : PatchGraph) (id : String) : Except String Mo
 
 /-- Visible topology and retained compiler structure both grow by one factor
     per authored section; no parallel product is distributed here. -/
-private def retainedSizeCheck (ratios : Array Float) : Bool :=
+private def retainedSizeCheck (ratios : Array Float) : BuildM Bool := do
   let (phaser, topology) := modalPhaserTopology "phaser" "source"
-    (constantControl (lit 700)) (constantControl (lit 15 1))
-    (constantControl (lit 2 1)) (constantControl (lit 5 1)) ratios
+    (← constantControl (lit 700)) (← constantControl (lit 15 1))
+    (← constantControl (lit 2 1)) (← constantControl (lit 5 1)) ratios
+  let mode ← sourceMode
+  let anchorExpr ← lit 0
+  let clock ← clockLit
   let graph : PatchGraph := {
     nodes := #[
-      { id := "source", node := .modalSource #[sourceMode] (lit 0) clockLit none },
+      { id := "source", node := .modalSource #[mode] anchorExpr clock none },
       { id := "phaser", node := phaser }] ++ topology
     output := "phaser" }
   let tailNodes := topology.countP fun node => node.node matches .modalLinear _ _
   let junctions := topology.countP fun node => node.node matches .modalMix _
-  match lowerModalRoot graph "phaser" with
-  | .ok #[branch] => match branch.stages.toList with
-      | [.linear stage] =>
-          let values := branch.controls.filterMap controlValue |>.map litF
-          match (stage.build clockLit values).dryWetAllpassCascadeShape? with
+  match ← lowerModalRoot graph "phaser" with
+  | #[branch] => match branch.stages.toList with
+      | [.linear stage] => do
+          let values ← branch.controls.filterMapM controlValue
+          match (← stage.build (← clockLit) (← values.mapM litF)).dryWetAllpassCascadeShape? with
           | some (tails, _) =>
-              topology.size == 2 * ratios.size && tailNodes == ratios.size &&
+              pure <| topology.size == 2 * ratios.size && tailNodes == ratios.size &&
                 junctions == ratios.size && tails.size == ratios.size &&
                 branch.controls.size == 3 * ratios.size + 1
-          | none => false
-      | _ => false
-  | _ => false
+          | none => pure false
+      | _ => pure false
+  | _ => pure false
 
-private def deferredStructureCheck : Bool :=
-  let explicitTails := phaserGraph.nodes.countP fun node =>
+private def deferredStructureCheck : BuildM Bool := do
+  let graph ← phaserGraph
+  let explicitTails := graph.nodes.countP fun node =>
     node.node matches .modalLinear _ _
-  let explicitJunctions := phaserGraph.nodes.countP fun node =>
+  let explicitJunctions := graph.nodes.countP fun node =>
     node.node matches .modalMix _
-  retainedSizeCheck (modalPhaserRatios.extract 0 1) &&
-    retainedSizeCheck (modalPhaserRatios.extract 0 2) &&
-    retainedSizeCheck modalPhaserRatios &&
-  match lowerModalRoot phaserGraph "phaser" with
-  | .ok #[branch] =>
-      explicitTails == 6 && explicitJunctions == 6 &&
-        nodeIsModal phaserGraph "phaser" && match branch.stages.toList with
-      | [.linear stage] =>
-          let values := branch.controls.filterMap controlValue |>.map litF
-          match (stage.build clockLit values).dryWetAllpassCascadeShape? with
-          | some (tails, mix) =>
-              tails.size == 6 && sigConstF? mix == some 0.5 &&
+  let ratios := Tropical.Playground.Metadata.modalPhaserRatios
+  let small ← retainedSizeCheck (ratios.extract 0 1)
+  let medium ← retainedSizeCheck (ratios.extract 0 2)
+  let full ← retainedSizeCheck ratios
+  let shape ← match ← lowerModalRoot graph "phaser" with
+  | #[branch] => do
+      let retained ← match branch.stages.toList with
+      | [.linear stage] => do
+          let values ← branch.controls.filterMapM controlValue
+          match (← stage.build (← clockLit) (← values.mapM litF)).dryWetAllpassCascadeShape? with
+          | some (tails, mix) => do
+              let mixValue ← sigConstF? mix
+              let control0 ← match branch.controls[0]? with
+                | some control => controlValue control
+                | none => pure none
+              let control1 ← match branch.controls[1]? with
+                | some control => controlValue control
+                | none => pure none
+              let control2 ← match branch.controls[2]? with
+                | some control => controlValue control
+                | none => pure none
+              pure <| tails.size == 6 && mixValue == some 0.5 &&
                 branch.controls.size == 19 &&
-                branch.controls[0]?.bind controlValue == some 700.0 &&
-                branch.controls[1]?.bind controlValue == some 1.5 &&
-                branch.controls[2]?.bind controlValue == some 0.2
-          | none => false
-      | _ => false
-  | _ => false
+                control0 == some 700.0 && control1 == some 1.5 &&
+                control2 == some 0.2
+          | none => pure false
+      | _ => pure false
+      pure <| explicitTails == 6 && explicitJunctions == 6 &&
+        nodeIsModal graph "phaser" && retained
+  | _ => pure false
+  pure (small && medium && full && shape)
 
 /-- Filter is the independent second producer proving the retained algebra is
     not merely a renamed phaser stage. -/
-private def filterUsesGenericKernelCheck : Bool :=
+private def filterUsesGenericKernelCheck : BuildM Bool := do
   let empty := Lean.Json.mkObj []
-  let (node, _) := buildNode (fun _ => none) "filter" "filter" empty empty empty
+  let (node, _) ← Tropical.Playground.Compiler.buildNode
+    (fun _ => none) "filter" "filter" empty empty empty
   match node with
   | .modalLinear _ stage =>
-      let values := stage.controls.filterMap controlValue |>.map litF
-      (stage.build clockLit values).orientedShape?.isSome
-  | _ => false
+      let values ← stage.controls.filterMapM controlValue
+      pure (← stage.build (← clockLit) (← values.mapM litF)).orientedShape?.isSome
+  | _ => pure false
 
-private def modalMixOrderCheck : Bool :=
-  let (phaser, topology) := testPhaser "phaser" "mix"
+private def modalMixOrderCheck : BuildM Bool := do
+  let (phaser, topology) ← testPhaser "phaser" "mix"
+  let modeA ← sourceMode 3
+  let modeB ← sourceMode 7
+  let anchorA ← lit 0
+  let anchorB ← lit 0
+  let clockA ← clockLit
+  let clockB ← clockLit
   let graph : PatchGraph :=
     { nodes := #[
-        { id := "a", node := .modalSource #[sourceMode 3] (lit 0) clockLit none },
-        { id := "b", node := .modalSource #[sourceMode 7] (lit 0) clockLit none },
+        { id := "a", node := .modalSource #[modeA] anchorA clockA none },
+        { id := "b", node := .modalSource #[modeB] anchorB clockB none },
         { id := "mix", node := .modalMix #["b", "a"] },
         { id := "phaser", node := phaser }] ++ topology
       output := "phaser" }
-  match lowerModalRoot graph "phaser" with
-  | .ok #[first, second] =>
+  match ← lowerModalRoot graph "phaser" with
+  | #[first, second] => do
       let sigmaOf := fun branch => match branch.source with
-        | .plain modes => modes[0]?.bind (sigConstF? ·.sigma)
-        | _ => none
-      sigmaOf first == some 7.0 && sigmaOf second == some 3.0 &&
+        | .plain modes => match modes[0]? with
+          | some mode => sigConstF? mode.sigma
+          | none => pure none
+        | _ => pure none
+      pure <| (← sigmaOf first) == some 7.0 && (← sigmaOf second) == some 3.0 &&
         first.stages.size == 1 && second.stages.size == 1
-  | _ => false
+  | _ => pure false
 
-private def refusalChecks : Bool :=
-  let (phaser, topology) := testPhaser "phaser" "bloom"
+private def refusalChecks : BuildM Bool := do
+  let (phaser, topology) ← testPhaser "phaser" "bloom"
+  let mode ← sourceMode
+  let anchorExpr ← lit 0
+  let clock ← clockLit
   let bloomed : PatchGraph :=
     { nodes := #[
-        { id := "bloom", node := .modalSource #[sourceMode] (lit 0) clockLit none
+        { id := "bloom", node := .modalSource #[mode] anchorExpr clock none
             none (some (0.1, 1.8)) },
         { id := "phaser", node := phaser }] ++ topology
       output := "phaser" }
-  let bloomOk := match lowerGraph bloomed with
+  let builder ← get
+  let bloomOk := match (lowerGraph bloomed).run builder with
     | .error error => error == "lower: bloomed linear-kernel crossing at 'phaser' refused (the live linear/Gamma crossing is not implemented)"
     | .ok _ => false
-  bloomOk
+  pure bloomOk
 
 private def phaserPatchJson : String :=
   "{\"nodes\":[" ++
@@ -375,7 +407,7 @@ private def hierarchyEquivalenceCheck (arena : Arena)
   | .error error => pure (.error error)
   | .ok (flat, legacyCompiled, hierarchicalCompiled, authoredCompiled,
       typedBoundaryRefusal) =>
-    let flatRaws := rawsOf flat
+    let flatRaws := Tropical.Playground.Metadata.rawsOf flat
     let sourceMapSize := match flat.getObjVal? "source_map" with
       | .ok (.arr entries) => entries.size
       | _ => 0
@@ -473,10 +505,15 @@ private def productScratchCheck (arena : Arena)
 
 def runPhaser (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Bool := do
   IO.eprintln "current-universe modal phaser: structural gates"
-  let structural := deferredStructureCheck
-  let genericFilter := filterUsesGenericKernelCheck
-  let forestOrder := modalMixOrderCheck
-  let refusals := refusalChecks
+  let structuralChecks := runBuild arena do
+    pure (← deferredStructureCheck, ← filterUsesGenericKernelCheck,
+      ← modalMixOrderCheck, ← refusalChecks)
+  let (structural, genericFilter, forestOrder, refusals) ←
+    match structuralChecks with
+    | .error error =>
+        IO.eprintln s!"        arena-native structural fixture: {firstLine error}"
+        pure (false, false, false, false)
+    | .ok (_, checks) => pure checks
   let hierarchyValidation := hierarchyValidationCheck
   IO.eprintln "        rendering independent-oracle fixture"
   let numeric ← renderGraph arena "modal_phaser_oracle" phaserGraph

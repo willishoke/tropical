@@ -242,7 +242,10 @@ def handleSetParamDispatch (env : Env) (args : Json) : EngineM Json := do
   let st ← env.state.get
   let disc := match st.paramDisciplines.find? (·.name == name) with
     | some d => d.discipline
-    | none => if name == Tropical.Playground.masterVelocityParam then "velocity" else "raw"
+    | none =>
+      if name == Tropical.Playground.Metadata.masterVelocityParam then
+        "velocity"
+      else "raw"
   match disc with
   | "glide" => applyParamGlide env args
   | "anchor" => applyParamAnchor env args

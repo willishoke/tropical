@@ -1,15 +1,15 @@
-import Tropical.EmitArrow.ArenaNumerics
+import Tropical.EmitArrow.Numerics
 
 /-!
-# EmitArrow.ArenaStdlib — arena-native standard-library authoring
+# EmitArrow.Stdlib — ID-native standard-library authoring
 
 The production stdlib builders allocate directly in the `ExprArena` owned by
-`ArenaNative.Builder`.  Inputs, instance wiring, and output assignments carry
+`Builder`.  Inputs, instance wiring, and output assignments carry
 stable IDs from the same build action; no recursive `Sig` or `lowerSig` path is
 involved.
 -/
 
-namespace Tropical.EmitArrow.ArenaNative
+namespace Tropical.EmitArrow
 
 open Tropical.Ir
 
@@ -536,4 +536,4 @@ def buildStdlibChain : Except String (Arena × Array (String × ProgramIdx)) := 
     chain := chain.push (name, index)
   pure (arena, chain)
 
-end Tropical.EmitArrow.ArenaNative
+end Tropical.EmitArrow

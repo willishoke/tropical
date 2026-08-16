@@ -1,5 +1,4 @@
 import Tropical.EmitArrow.Patch
-import Tropical.Playground.Vocabulary
 import Tropical.Tropicaltest.Stress
 
 /-!
@@ -19,148 +18,197 @@ open Tropical.EmitArrow
 
 private def sampleRate : Float := 44100.0
 private def anchorNat : Nat := 512
-private def anchorSig : Sig := lit (Int.ofNat anchorNat)
+private def anchorSig : BuildM Sig := lit (Int.ofNat anchorNat)
 private def frameCount : Nat := 1024
 
-private def realMode (sigma : Int) : ModalMode :=
-  { sigma := lit sigma, omega := lit 0, cre := lit 1 }
+private def realMode (sigma : Int) : BuildM ModalMode := do
+  let sigma ← lit sigma
+  let omega ← lit 0
+  let cre ← lit 1
+  let cim ← lit 0
+  pure { sigma, omega, cre, cim }
 
-private def sourceModes : Array ModalMode := #[realMode 2]
-private def roomOne : Array ModalMode := #[realMode 5]
-private def roomTwo : Array ModalMode := #[realMode 9]
+private def sourceModes : BuildM (Array ModalMode) := do pure #[← realMode 2]
+private def roomOne : BuildM (Array ModalMode) := do pure #[← realMode 5]
+private def roomTwo : BuildM (Array ModalMode) := do pure #[← realMode 9]
 
-private def direction (past : Bool) : Option ModalDir :=
-  some { dir := if past then lit 1 else lit 0 }
+private def direction (past : Bool) : BuildM (Option ModalDir) := do
+  let dir ← if past then lit 1 else lit 0
+  pure (some { dir })
 
-private def mirrorAtAnchor (clock : Clock) : Clock :=
+private def mirrorAtAnchor (clock : Clock) : BuildM Clock := do
   let twiceAnchorQ : Int := Int.ofNat (2 * anchorNat) * 4294967296
-  sub (litI twiceAnchorQ) clock
+  sub (← litI twiceAnchorQ) clock
 
-private def oneRoomLocalReverse : PatchGraph :=
-  { nodes := #[
-      { id := "source", node := .modalSource sourceModes anchorSig clockLit none },
-      { id := "room", node := .modalReverb "source" roomOne (direction true) }]
-    output := "room" }
+private def oneRoomLocalReverse : BuildM PatchGraph := do
+  let source ← sourceModes
+  let anchor ← anchorSig
+  let clock ← clockLit
+  let room ← roomOne
+  let directionValue ← direction true
+  pure (PatchGraph.mk #[
+      { id := "source", node := .modalSource source anchor clock none },
+      { id := "room", node := (.modalReverb "source" room directionValue) }]
+    "room")
 
-private def oneRoomOutputReverse : PatchGraph :=
-  { nodes := #[
-      { id := "source", node := .modalSource sourceModes anchorSig clockLit none },
-      { id := "room", node := .modalReverb "source" roomOne (direction false) },
-      { id := "output-reverse", node := .warpFx "room" mirrorAtAnchor }]
-    output := "output-reverse" }
+private def oneRoomOutputReverse : BuildM PatchGraph := do
+  let source ← sourceModes
+  let anchor ← anchorSig
+  let clock ← clockLit
+  let room ← roomOne
+  let directionValue ← direction false
+  pure (PatchGraph.mk #[
+      { id := "source", node := .modalSource source anchor clock none },
+      { id := "room", node := (.modalReverb "source" room directionValue) },
+      { id := "output-reverse", node := (.warpFx "room" mirrorAtAnchor) }]
+    "output-reverse")
 
-private def twoRoomGraph (roomOnePast roomTwoPast : Bool) : PatchGraph :=
-  { nodes := #[
-      { id := "source", node := .modalSource sourceModes anchorSig clockLit none },
+private def twoRoomGraph (roomOnePast roomTwoPast : Bool) : BuildM PatchGraph := do
+  let source ← sourceModes
+  let anchor ← anchorSig
+  let clock ← clockLit
+  let roomOne ← roomOne
+  let roomTwo ← roomTwo
+  let directionOneValue ← direction roomOnePast
+  let directionTwoValue ← direction roomTwoPast
+  pure (PatchGraph.mk #[
+      { id := "source", node := .modalSource source anchor clock none },
       { id := "room-one",
-        node := .modalReverb "source" roomOne (direction roomOnePast) },
+        node := (.modalReverb "source" roomOne directionOneValue) },
       { id := "room-two",
-        node := .modalReverb "room-one" roomTwo (direction roomTwoPast) }]
-    output := "room-two" }
+        node := (.modalReverb "room-one" roomTwo directionTwoValue) }]
+    "room-two")
 
 private def constantControl (value : Sig) : ModalControlRef :=
   ModalControlRef.constant value
 
-private def equalRt60Modes (rt60 : Sig) : Array ModalMode :=
-  let mode : ModalMode :=
-    { sigma := div (lit 10) rt60
-      omega := lit 0
-      cre := lit 1 }
-  #[mode]
+private def equalRt60Modes (rt60 : Sig) : BuildM (Array ModalMode) := do
+  let sigma ← div (← lit 10) rt60
+  let omega ← lit 0
+  let cre ← lit 1
+  let cim ← lit 0
+  pure #[{ sigma, omega, cre, cim }]
 
 /-- Two separately authored room nodes whose frozen RT60 controls happen to be
 equal.  Each builds the same physical pole `sigma = 10/rt60 = 5`; the second
 convolution must take the repeated-pole beta route instead of dividing by zero. -/
-private def equalRt60Graph : PatchGraph :=
+private def equalRt60Graph : BuildM PatchGraph := do
+  let rt60 ← lit 2
+  let zero ← lit 0
   let room := fun input => Node.modalRoom input equalRt60Modes
-    (constantControl (lit 2)) (constantControl (lit 0))
-    (constantControl (lit 0)) (constantControl (lit 0))
-  { nodes := #[
-      { id := "source", node := .modalSource sourceModes anchorSig clockLit none },
-      { id := "equal-room-one", node := room "source" },
-      { id := "equal-room-two", node := room "equal-room-one" }]
-    output := "equal-room-two" }
+    (constantControl rt60) (constantControl zero)
+    (constantControl zero) (constantControl zero)
+  let source ← sourceModes
+  let anchor ← anchorSig
+  let clock ← clockLit
+  pure (PatchGraph.mk #[
+      { id := "source", node := .modalSource source anchor clock none },
+      { id := "equal-room-one", node := (room "source") },
+      { id := "equal-room-two", node := (room "equal-room-one") }]
+    "equal-room-two")
 
-private def repeatedRoomCrossingGraph (afterGauge : Bool) : PatchGraph :=
+private def repeatedRoomCrossingGraph (afterGauge : Bool) : BuildM PatchGraph := do
+  let rt60 ← lit 2
+  let zero ← lit 0
   let room := fun input => Node.modalRoom input equalRt60Modes
-    (constantControl (lit 2)) (constantControl (lit 0))
-    (constantControl (lit 0)) (constantControl (lit 0))
+    (constantControl rt60) (constantControl zero)
+    (constantControl zero) (constantControl zero)
+  let source ← sourceModes
+  let anchor ← anchorSig
+  let clock ← clockLit
   let nodesPrefix : Array PatchNode := #[
-    { id := "source", node := .modalSource sourceModes anchorSig clockLit none },
+    { id := "source", node := .modalSource source anchor clock none },
     { id := "equal-room-one", node := room "source" },
     { id := "equal-room-two", node := room "equal-room-one" }]
   if afterGauge then
-    { nodes := nodesPrefix.push
-        { id := "gauge", node := .modalGauge "equal-room-two" (lit 1) }
-      output := "gauge" }
+    let gauge ← lit 1
+    let nodes := nodesPrefix.push
+      ({ id := "gauge", node := .modalGauge "equal-room-two" gauge } : PatchNode)
+    pure (PatchGraph.mk nodes "gauge")
   else
-    { nodes := nodesPrefix.push
-        { id := "equal-room-three", node := room "equal-room-two" }
-      output := "equal-room-three" }
+    let nodes := nodesPrefix.push
+      ({ id := "equal-room-three", node := room "equal-room-two" } : PatchNode)
+    pure (PatchGraph.mk nodes "equal-room-three")
 
-private def degreePositiveGraph : PatchGraph :=
-  let source := #[({ (realMode 2) with deg := 1 } : ModalMode)]
-  { nodes := #[
-      { id := "source", node := .modalSource source anchorSig clockLit none },
-      { id := "room", node := .modalReverb "source" roomOne (direction false) }]
-    output := "room" }
+private def degreePositiveGraph : BuildM PatchGraph := do
+  let source := #[({ (← realMode 2) with deg := 1 } : ModalMode)]
+  let anchor ← anchorSig
+  let clock ← clockLit
+  let room ← roomOne
+  let directionValue ← direction false
+  pure (PatchGraph.mk #[
+      { id := "source", node := .modalSource source anchor clock none },
+      { id := "room", node := (.modalReverb "source" room directionValue) }]
+    "room")
 
-private def sourceCrossingGraph (near triple : Bool) : PatchGraph :=
-  let sourceSigma := if near then lit 50001 4 else add (lit 2) (lit 3)
-  let source := #[({ (realMode 5) with sigma := sourceSigma } : ModalMode)]
+private def sourceCrossingGraph (near triple : Bool) : BuildM PatchGraph := do
+  let sourceSigma ← if near then lit 50001 4 else do add (← lit 2) (← lit 3)
+  let source := #[({ (← realMode 5) with sigma := sourceSigma } : ModalMode)]
+  let repeated ← realMode 5
+  let tripleSigma ← sub (← lit 6) (← lit 1)
+  let ordinaryRoom ← roomTwo
   let second := if triple then
-      #[({ (realMode 5) with sigma := sub (lit 6) (lit 1) } : ModalMode)]
-    else roomTwo
-  { nodes := #[
-      { id := "source", node := .modalSource source anchorSig clockLit none },
+      #[({ repeated with sigma := tripleSigma } : ModalMode)]
+    else ordinaryRoom
+  let anchor ← anchorSig
+  let clock ← clockLit
+  let directionValue ← direction false
+  pure (PatchGraph.mk #[
+      { id := "source", node := .modalSource source anchor clock none },
       { id := "crossing-room-one",
-        node := .modalReverb "source" #[realMode 5] (direction false) },
+        node := (.modalReverb "source" #[repeated] directionValue) },
       { id := "crossing-room-two",
-        node := .modalReverb "crossing-room-one" second (direction false) }]
-    output := "crossing-room-two" }
+        node := (.modalReverb "crossing-room-one" second directionValue) }]
+    "crossing-room-two")
 
 /-- The same exact source/room crossing with the resonant room authored second.
     The terminal convolution is commutative, but this ordering exercises the
     room-2 confluence bookkeeping independently of the room-1 path. -/
-private def sourceSecondCrossingGraph : PatchGraph :=
-  let source := #[realMode 5]
-  { nodes := #[
-      { id := "source", node := .modalSource source anchorSig clockLit none },
+private def sourceSecondCrossingGraph : BuildM PatchGraph := do
+  let source := #[← realMode 5]
+  let anchor ← anchorSig
+  let clock ← clockLit
+  let room ← roomTwo
+  let directionValue ← direction false
+  pure (PatchGraph.mk #[
+      { id := "source", node := .modalSource source anchor clock none },
       { id := "ordinary-room-one",
-        node := .modalReverb "source" roomTwo (direction false) },
+        node := (.modalReverb "source" room directionValue) },
       { id := "crossing-room-two",
-        node := .modalReverb "ordinary-room-one" #[realMode 5] (direction false) }]
-    output := "crossing-room-two" }
+        node := (.modalReverb "ordinary-room-one" source directionValue) }]
+    "crossing-room-two")
 
 /-- One complex repeated-pole DD atom.  The non-real coefficient makes the
     carrier phase observable; installing it on each terminal arm separately
     pins both the causal reduction and its anchor-mirrored past read. -/
-private def complexTerminalPair : PairedMode :=
-  { lam := (neg (lit 5), lit 700)
-    nu := (neg (lit 5), lit 700)
-    c := (lit 34 2, lit (-13) 2) }
+private def complexTerminalPair : BuildM PairedMode := do
+  let pole := (← neg (← lit 5), ← lit 700)
+  let coefficient := (← lit 34 2, ← lit (-13) 2)
+  pure { lam := pole, nu := pole, c := coefficient }
 
-private def complexTerminalSig (past : Bool) : Sig :=
+private def complexTerminalSig (past : Bool) : BuildM Sig := do
+  let zero ← lit 0
+  let bank : Oriented.Bank := { atZero := (zero, zero) }
+  let pair ← complexTerminalPair
   let terminal : Oriented.TerminalBank :=
-    if past then { bank := {}, pastPaired := #[complexTerminalPair] }
-    else { bank := {}, futurePaired := #[complexTerminalPair] }
-  terminal.realizeSig clockLit anchorSig
+    if past then { bank, pastPaired := #[pair] }
+    else { bank, futurePaired := #[pair] }
+  terminal.realizeSig (← clockLit) (← anchorSig)
 
-private def graphPlan (arena : Arena) (name : String) (graph : PatchGraph) :
+private def graphPlan (arena : Arena) (name : String) (graph : BuildM PatchGraph) :
     Except String FlatPlan := do
-  let term ← lowerGraph graph
-  let (output, _) := emitTerm (normalize term) {}
-  buildAndFinish (.ok (buildExprCarrier name output arena))
+  buildAndFinish (buildExprCarrier name (do
+    emitTerm (normalize (← lowerGraph (← graph)))) arena)
 
-private def renderGraph (arena : Arena) (name : String) (graph : PatchGraph) :
+private def renderGraph (arena : Arena) (name : String) (graph : BuildM PatchGraph) :
     IO (Except String (Array Float)) :=
   match graphPlan arena name graph with
   | .error error => pure (.error error)
   | .ok plan => renderPlanSamples plan frameCount
 
-private def renderSignal (arena : Arena) (name : String) (signal : Sig) :
+private def renderSignal (arena : Arena) (name : String) (signal : BuildM Sig) :
     IO (Except String (Array Float)) :=
-  match buildAndFinish (.ok (buildExprCarrier name signal arena)) with
+  match buildAndFinish (buildExprCarrier name signal arena) with
   | .error error => pure (.error error)
   | .ok plan => renderPlanSamples plan frameCount
 
@@ -260,8 +308,12 @@ private def complexPairOracle (past : Bool) (relativeSeconds : Float) : Float :=
   else 0.0
 
 private def fractionalControlClockOk : Bool :=
-  sigConstF? (Tropical.Playground.q32DeltaSamples
-    (lit 2147483648) (lit 0)) == some 0.5
+  match Tropical.Testing.ArrowFixtures.freezeBuild {} do
+      let delta ← sub (← lit 2147483648) (← lit 0)
+      div (← toFloatE delta) (← lit 4294967296) with
+  | .error _ => false
+  | .ok (arena, result) =>
+    (sigConstDFrom? (sigConstTable arena) result).map Tropical.Exact.DyadicI.toFloat == some 0.5
 
 private def maxOracleError (samples : Array Float) (oracle : Float → Float) :
     Float := Id.run do
@@ -326,35 +378,39 @@ private def checkComplexPair (arena : Arena) : IO (Except String ComplexPairResu
           past.all (fun sample => sample.isFinite) })
   | .error error, _ | _, .error error => pure (.error error)
 
-private def controlConstant (control : ModalControlRef) : Option Float :=
+private def controlConstant (constants : Array (Option Tropical.Exact.DyadicI))
+    (control : ModalControlRef) : Option Float :=
   match control.fallback with
-  | .konst signal => sigConstF? signal
+  | .konst signal =>
+    (sigConstDFrom? constants signal).map Tropical.Exact.DyadicI.toFloat
   | _ => none
 
-private def stageSignature (stage : ModalStage) : Option (Float × Float) := do
+private def stageSignature (constants : Array (Option Tropical.Exact.DyadicI))
+    (stage : ModalStage) : Option (Float × Float) := do
   let .ordinaryRoom room := stage | none
   let .fixed modes := room.kernel | none
   let mode ← modes[0]?
-  let sigma ← sigConstF? mode.sigma
-  let dir ← controlConstant room.direction
+  let sigma ← (sigConstDFrom? constants mode.sigma).map Tropical.Exact.DyadicI.toFloat
+  let dir ← controlConstant constants room.direction
   pure (sigma, dir)
 
 private def stagesKeepOrder (roomOnePast roomTwoPast : Bool) : Bool :=
-  let graph := twoRoomGraph roomOnePast roomTwoPast
   let rankOf := fun id =>
     if id == "source" then some 0
     else if id == "room-one" then some 1
     else if id == "room-two" then some 2
     else none
-  match lowerModal graph rankOf "room-two" 2 with
+  match Tropical.Testing.ArrowFixtures.freezeBuild {} do
+      lowerModal (← twoRoomGraph roomOnePast roomTwoPast) rankOf "room-two" 2 with
   | .error _ => false
-  | .ok forest => match forest[0]? with
+  | .ok (arena, forest) => match forest[0]? with
     | none => false
     | some branch =>
+        let constants := sigConstTable arena
         match branch.stages.toList with
         | [first, second] =>
-            stageSignature first == some (5.0, if roomOnePast then 1.0 else 0.0) &&
-            stageSignature second == some (9.0, if roomTwoPast then 1.0 else 0.0)
+            stageSignature constants first == some (5.0, if roomOnePast then 1.0 else 0.0) &&
+            stageSignature constants second == some (9.0, if roomTwoPast then 1.0 else 0.0)
         | _ => false
 
 private structure TwoRoomResult where
@@ -418,12 +474,14 @@ private def checkTwoRooms (arena : Arena) : IO (Except String TwoRoomResult) := 
             | return .error "source second-room crossing render"
           let (.ok nearCrossing) := nearCrossing
             | return .error "source near crossing render"
-          let repeatedRoomRefused := match lowerGraph
-              (repeatedRoomCrossingGraph false) with
+          let repeatedRoomRefused := match
+              Tropical.Testing.ArrowFixtures.runBuild arena do
+                lowerGraph (← repeatedRoomCrossingGraph false) with
             | .error error => error == "lower: nonterminal repeated-room crossing at 'equal-room-three' refused (a later room, phaser, or gauge requires the composable divided-difference carrier)"
             | .ok _ => false
-          let roomRoomGaugeRefused := match lowerGraph
-              (repeatedRoomCrossingGraph true) with
+          let roomRoomGaugeRefused := match
+              Tropical.Testing.ArrowFixtures.runBuild arena do
+                lowerGraph (← repeatedRoomCrossingGraph true) with
             | .error error => error == "lower: nonterminal repeated-room crossing at 'gauge' refused (a later room, phaser, or gauge requires the composable divided-difference carrier)"
             | .ok _ => false
           pure (.ok {

@@ -62,7 +62,6 @@ def knownGates : Array String := #[
   "modal-oriented-patch",
   "modal-phaser",
   "semantics-production-fixtures",
-  "semantics-pointer-differential",
   "clock-algebra-theorems",
   "reduce-coverage",
   "routed-sum-coverage",
@@ -83,27 +82,10 @@ def knownGates : Array String := #[
   "current_module_process"
 ]
 
-/-- Exactly the current production Lean trust escape surface.  The two unsafe
-    definitions and their `implemented_by` marker are three sites supporting
-    one optimization/refinement obligation, not three independent assumptions. -/
-def productionTrustSites : Array TrustSite := #[
-  { id := "LOWER_SIG_PTR_GO_UNSAFE"
-    path := "lean/Tropical/EmitArrow/Sig.lean"
-    symbol := "lowerSigPtrGo"
-    obligationId := "LOWER_SIG_PTR_REFINES_TREE"
-    kind := "unsafe definition" },
-  { id := "LOWER_SIG_PTR_UNSAFE"
-    path := "lean/Tropical/EmitArrow/Sig.lean"
-    symbol := "lowerSigPtr"
-    obligationId := "LOWER_SIG_PTR_REFINES_TREE"
-    kind := "unsafe definition" },
-  { id := "LOWER_SIG_IMPLEMENTED_BY"
-    path := "lean/Tropical/EmitArrow/Sig.lean"
-    symbol := "lowerSig"
-    target := some "lowerSigPtr"
-    obligationId := "LOWER_SIG_PTR_REFINES_TREE"
-    kind := "implemented_by marker" }
-]
+/-- Exactly the tracked Lean trust-escape surface. The arena-native authoring
+    cutover removed the recursive pointer lowering, leaving no production Lean
+    `unsafe def` or `implemented_by` site. -/
+def productionTrustSites : Array TrustSite := #[]
 
 def obligations : Array Obligation := #[
   { id := "MODAL_UNIVERSE_CANONICAL_COMMUTES"
@@ -133,54 +115,50 @@ def obligations : Array Obligation := #[
     status := .open
     limitation := "Production now retains an authored ordinary-room/gauge/phaser stage spine, binds live controls together at the true terminal, and carries plain sources through explicit future/past algebra with stable divided-difference and exact fused two-room/phaser routes. Full refinement remains open: hot/equal-pole divided differences are not yet composable through a later room or gauge; arbitrary live source-frequency crossings need a declared pole envelope; phaser and live reverse/sway/gauge after bloom need the oriented Gamma bridge; and the bilateral live-gauge cost/backend envelope is not qualified."
     priority := .critical },
-  { id := "LOWER_SIG_TREE_PRESERVES"
-    statement := "For every carrier algebra, environment, production Sig, and well-formed initial ExprArena, lowerSigTree returns a well-formed arena extension whose expression denotation equals the direct Sig denotation."
+  { id := "EXPR_ARENA_DENOTATION_STABLE"
+    statement := "For every carrier algebra and environment, extending a well-formed ExprArena preserves the direct denotation of every addressable existing root."
     evidence := #[.theorem]
     implementationPaths := #["lean/Tropical/Ir/Nodes.lean",
+      "lean/Tropical/Semantics/Environment.lean",
       "lean/Tropical/Semantics/Arena.lean",
-      "lean/Tropical/Semantics/Expr.lean",
-      "lean/Tropical/Semantics/LowerSig.lean"]
+      "lean/Tropical/Semantics/Expr.lean"]
     gateNames := #["lake-build:Tropical.Semantics", "semantics-production-fixtures"]
     owner := "Lean semantics"
     status := .proved
-    theoremSymbol := some "Tropical.Semantics.lowerSigTree_preserves"
-    limitation := "This proves the structural lowerSigTree reference. The unsafe pointer-memoized implementation remains the separate LOWER_SIG_PTR_REFINES_TREE obligation; no backend execution theorem is claimed."
+    theoremSymbol := some "Tropical.Semantics.denoteExpr_extends"
+    limitation := "The production compiler authors ExprIds directly, so there is no source-tree lowering refinement obligation. Backend execution remains separate."
     priority := .critical },
   { id := "CLOCK_RAIL_IS_EXACT"
     statement := "Per sample, runtime integer rail operations implement the Int denotation modulo the documented i64 image and shift/mask headroom rules."
     evidence := #[.theorem, .inspection, .golden]
-    implementationPaths := #["lean/Tropical/EmitArrow/ClockAlgebra.lean", "lean/Tropical/Ir/EmitLlvm.lean", "lean/Tropical/Ir/EmitMsl.lean"]
+    implementationPaths := #["lean/Tropical/EmitArrow/ClockAlgebra.lean",
+      "lean/Tropical/Ir/EmitLlvm.lean", "lean/Tropical/Ir/EmitMsl.lean"]
     gateNames := #["clock-algebra-theorems", "patch-goldens"]
     owner := "Backend correctness"
     status := .open
-    limitation := "Front-end algebra is proved; correspondence to emitted LLVM/MSL integer execution is inspected, not proved."
+    limitation := "The front-end algebra is proved directly on frozen ExprArena/ExprId graphs. Correspondence to emitted LLVM/MSL integer execution is inspected, not proved."
     priority := .critical },
   { id := "REDUCE_REGION_EXECUTES_IN_ARRAY_ORDER"
     statement := "JIT, wasm, and MSL execute bank bodies at increasing indices with a scalar left fold and a dynamic count clamped to the static capacity."
     evidence := #[.theorem, .executableGate, .inspection]
-    implementationPaths := #["lean/Tropical/EmitArrow/BankOrder.lean", "lean/Tropical/Ir/EmitBankLaws.lean", "engine/jit/OrcJitEngine.cpp", "lean/Tropical/Ir/EmitMsl.lean"]
+    implementationPaths := #["lean/Tropical/EmitArrow/BankOrder.lean",
+      "lean/Tropical/Semantics/Expr.lean", "lean/Tropical/Ir/EmitBankLaws.lean",
+      "engine/jit/OrcJitEngine.cpp", "lean/Tropical/Ir/EmitMsl.lean"]
     gateNames := #["reduce-coverage", "msl-column-guard", "manual:backend reduce-loop inspection"]
     owner := "Backend correctness"
     status := .open
-    limitation := "Tree order, region shape, and prefix clamp are proved; backend execution of the region remains a named runtime assumption."
+    limitation := "Direct arena denotation order, nested fold order, region shape, and prefix clamp are proved; backend execution of the region remains a named runtime assumption."
     priority := .critical },
   { id := "ROUTED_SUM_PRESERVES_AUTHORED_ORDER"
     statement := "Routed reductions map each item once and fold active contributions per output in authored item/emit order; cooperative Metal may parallelize the map but not reassociate the gather."
     evidence := #[.theorem, .executableGate, .inspection]
-    implementationPaths := #["lean/Tropical/Semantics/Sig.lean", "lean/Tropical/Semantics/LowerSig.lean", "lean/Tropical/Ir/EmitLlvm.lean", "lean/Tropical/Ir/EmitMsl.lean", "engine/metal/MetalKernel.mm"]
+    implementationPaths := #["lean/Tropical/Semantics/Environment.lean",
+      "lean/Tropical/Semantics/Expr.lean", "lean/Tropical/Ir/EmitLlvm.lean",
+      "lean/Tropical/Ir/EmitMsl.lean", "engine/metal/MetalKernel.mm"]
     gateNames := #["routed-sum-coverage", "metal-ctest", "manual:routed backend inspection"]
     owner := "Backend correctness"
     status := .evidenceBacked
-    limitation := "Source-to-arena preservation is proved and scalar/cooperative schedules are differentially exercised; LLVM, Metal compiler, driver, and hardware execution remain external refinement assumptions."
-    priority := .critical },
-  { id := "LOWER_SIG_PTR_REFINES_TREE"
-    statement := "For immutable Sig, pointer-memoized lowerSigPtr returns the same id and expression-arena result as structural lowerSigTree."
-    evidence := #[.unsafeOptimization, .differential, .inspection]
-    implementationPaths := #["lean/Tropical/EmitArrow/Sig.lean", "lean/Tropical/Testing/Semantics.lean"]
-    gateNames := #["semantics-pointer-differential", "manual:pointer memo code review"]
-    owner := "Lean semantics"
-    status := .open
-    limitation := "Differential fixtures cover representative sharing, arrays, nested banks, and re-intern every emitted node to observe its dedup hit; this remains finite evidence, and ptrAddrUnsafe identity is intentionally not modeled as a theorem."
+    limitation := "Direct arena semantics proves authored fold order and scalar/cooperative schedules are differentially exercised; LLVM, Metal compiler, driver, and hardware execution remain external refinement assumptions."
     priority := .critical },
   { id := "LLVM_TEXT_EXECUTES_PLAN"
     statement := "Generated LLVM implements tropical_plan_6 instruction, source, instance, and sink semantics."
@@ -383,8 +361,8 @@ def auditLedger : Array String := Id.run do
       errors := errors.push s!"incomplete trust site: {site.id}"
     if !obligationExists site.obligationId then
       errors := errors.push s!"unowned trust site: {site.id}"
-  if productionTrustSites.size != 3 then
-    errors := errors.push "production trust-site inventory must contain exactly the current three Lean sites"
+  if !productionTrustSites.isEmpty then
+    errors := errors.push "production Lean trust-site inventory must be empty after the arena-native cutover"
   return errors
 
 theorem ledger_audit_passes : auditLedger = #[] := by native_decide

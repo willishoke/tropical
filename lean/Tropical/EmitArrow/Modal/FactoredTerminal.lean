@@ -33,7 +33,7 @@ structure FactoredSlice where
 deriving Repr, BEq, Inhabited
 
 private instance : Inhabited ModalMode :=
-  ⟨{ sigma := lit 0, omega := lit 0, cre := lit 0 }⟩
+  ⟨{ sigma := default, omega := default, cre := default, cim := default }⟩
 
 def FactoredSlice.floatCount (slice : FactoredSlice) : Nat := 2 * slice.extent
 
@@ -41,9 +41,12 @@ private def FactoredSlice.endOffset (slice : FactoredSlice) : Nat :=
   slice.offset + slice.floatCount
 
 private def FactoredSlice.read (slice : FactoredSlice) (image : Sig)
-    (index : Nat) : CplxE :=
-  (Sig.index image (lit (Int.ofNat (slice.offset + 2 * index))),
-   Sig.index image (lit (Int.ofNat (slice.offset + 2 * index + 1))))
+    (index : Nat) : BuildM CplxE := do
+  let realIndex ← lit (Int.ofNat (slice.offset + 2 * index))
+  let real ← Tropical.EmitArrow.index image realIndex
+  let imagIndex ← lit (Int.ofNat (slice.offset + 2 * index + 1))
+  let imag ← Tropical.EmitArrow.index image imagIndex
+  pure (real, imag)
 
 /-- Named source/room image.  The sequential allocator makes overlap
     impossible; `valid` is still checked at the construction seam so routes can
@@ -138,13 +141,22 @@ def factoredTerminalStats (sourceModes roomModes : Nat) : FactoredTerminalStats 
     roomPhysicalReciprocals := physical
     totalReciprocals := sourceRoom + difference + physical }
 
-private def cscaleE (scale : Sig) (value : CplxE) : CplxE :=
-  (mul scale value.1, mul scale value.2)
+private def cscaleE (scale : Sig) (value : CplxE) : BuildM CplxE := do
+  let real ← mul scale value.1
+  let imag ← mul scale value.2
+  pure (real, imag)
 
 /-- One complex inverse with exactly one real reciprocal. -/
-private def cinvSharedE (value : CplxE) : CplxE :=
-  let invNorm := div (lit 1) (add (mul value.1 value.1) (mul value.2 value.2))
-  (mul value.1 invNorm, neg (mul value.2 invNorm))
+private def cinvSharedE (value : CplxE) : BuildM CplxE := do
+  let realSquared ← mul value.1 value.1
+  let imagSquared ← mul value.2 value.2
+  let norm ← add realSquared imagSquared
+  let one ← lit 1
+  let invNorm ← div one norm
+  let real ← mul value.1 invNorm
+  let imagProduct ← mul value.2 invNorm
+  let imag ← neg imagProduct
+  pure (real, imag)
 
 private def appendComplexRoute (routes : Array (Option Nat))
     (slice : FactoredSlice) (index : Nat) : Array (Option Nat) :=
@@ -158,11 +170,11 @@ private def routesInRange (routes : Array (Option Nat)) (outputCount : Nat) : Bo
 
 private def routedImage? (capacity outputCount : Nat)
     (routes : Array (Option Nat)) (tables values : Array Sig)
-    (binder : Nat) : Option Sig :=
+    (binder : Nat) : BuildM (Option Sig) := do
   if capacity > 0 && outputCount > 0 && !values.isEmpty &&
       routes.size == capacity * values.size && routesInRange routes outputCount
-  then some (Sig.routedSum capacity outputCount routes tables values none binder)
-  else none
+  then pure (some (← routedSum capacity outputCount routes tables values none binder))
+  else pure none
 
 private structure SourceRoomPart where
   image : Sig
@@ -176,33 +188,45 @@ private def SourceRoomImage.images (image : SourceRoomImage) : Array Sig :=
   image.parts.map (·.image)
 
 private def SourceRoomImage.readSource (image : SourceRoomImage)
-    (slice : SourceRoomLayout → FactoredSlice) (index : Sig) : CplxE :=
-  image.parts.foldl (fun total part =>
+    (slice : SourceRoomLayout → FactoredSlice) (itemIndex : Sig) : BuildM CplxE := do
+  let zero ← natE 0
+  image.parts.foldlM (fun total part => do
     let selected := slice part.layout
-    let value : CplxE :=
-      (Sig.index part.image
-        (add (lit (Int.ofNat selected.offset)) (mul (lit 2) index)),
-       Sig.index part.image
-        (add (lit (Int.ofNat (selected.offset + 1))) (mul (lit 2) index)))
-    caddE total value) (natE 0)
+    let two ← lit 2
+    let doubled ← mul two itemIndex
+    let realOffset ← lit (Int.ofNat selected.offset)
+    let realIndex ← add realOffset doubled
+    let real ← Tropical.EmitArrow.index part.image realIndex
+    let imagOffset ← lit (Int.ofNat (selected.offset + 1))
+    let imagIndex ← add imagOffset doubled
+    let imag ← Tropical.EmitArrow.index part.image imagIndex
+    caddE total (real, imag)) zero
 
 private def SourceRoomImage.readRoom (image : SourceRoomImage)
-    (slice : SourceRoomLayout → FactoredSlice) (index : Sig) : CplxE :=
-  image.parts.foldl (fun total part =>
+    (slice : SourceRoomLayout → FactoredSlice) (itemIndex : Sig) : BuildM CplxE := do
+  let initial ← natE 0
+  image.parts.foldlM (fun total part => do
     let selected := slice part.layout
-    let start := litI (Int.ofNat part.roomStart)
-    let stop := litI (Int.ofNat (part.roomStart + selected.extent))
-    let owns := Sig.binary .and (Sig.binary .gte index start)
-      (Sig.binary .lt index stop)
-    let localIndex := sub index start
-    let safeLocal := selectE owns localIndex (litI 0)
-    let value : CplxE :=
-      (Sig.index part.image
-        (add (lit (Int.ofNat selected.offset)) (mul (lit 2) safeLocal)),
-       Sig.index part.image
-        (add (lit (Int.ofNat (selected.offset + 1))) (mul (lit 2) safeLocal)))
-    caddE total
-      (selectE owns value.1 (lit 0), selectE owns value.2 (lit 0))) (natE 0)
+    let start ← litI (Int.ofNat part.roomStart)
+    let stop ← litI (Int.ofNat (part.roomStart + selected.extent))
+    let afterStart ← binary .gte itemIndex start
+    let beforeStop ← binary .lt itemIndex stop
+    let owns ← binary .and afterStart beforeStop
+    let localIndex ← sub itemIndex start
+    let zeroInt ← litI 0
+    let safeLocal ← selectE owns localIndex zeroInt
+    let two ← lit 2
+    let doubled ← mul two safeLocal
+    let realOffset ← lit (Int.ofNat selected.offset)
+    let realIndex ← add realOffset doubled
+    let real ← Tropical.EmitArrow.index part.image realIndex
+    let imagOffset ← lit (Int.ofNat (selected.offset + 1))
+    let imagIndex ← add imagOffset doubled
+    let imag ← Tropical.EmitArrow.index part.image imagIndex
+    let zero ← lit 0
+    let selectedReal ← selectE owns real zero
+    let selectedImag ← selectE owns imag zero
+    caddE total (selectedReal, selectedImag)) initial
 
 private structure ModeColumns where
   poleRe : Sig
@@ -210,46 +234,67 @@ private structure ModeColumns where
   ampRe : Sig
   ampIm : Sig
 
-private def modeColumns (modes : Array ModalMode) : ModeColumns where
-  poleRe := Sig.arr (modes.map fun mode => mode.poleE.1)
-  poleIm := Sig.arr (modes.map fun mode => mode.poleE.2)
-  ampRe := Sig.arr (modes.map fun mode => mode.ampE.1)
-  ampIm := Sig.arr (modes.map fun mode => mode.ampE.2)
+private def modeColumns (modes : Array ModalMode) : BuildM ModeColumns := do
+  let poles ← modes.mapM (·.poleE)
+  let amps := modes.map (·.ampE)
+  let poleRe ← arr (poles.map (·.1))
+  let poleIm ← arr (poles.map (·.2))
+  let ampRe ← arr (amps.map (·.1))
+  let ampIm ← arr (amps.map (·.2))
+  pure { poleRe, poleIm, ampRe, ampIm }
 
 private def ModeColumns.tables (columns : ModeColumns) : Array Sig :=
   #[columns.poleRe, columns.poleIm, columns.ampRe, columns.ampIm]
 
-private def ModeColumns.readPole (columns : ModeColumns) (index : Sig) : CplxE :=
-  (Sig.index columns.poleRe index, Sig.index columns.poleIm index)
+private def ModeColumns.readPole (columns : ModeColumns) (itemIndex : Sig) : BuildM CplxE := do
+  let real ← Tropical.EmitArrow.index columns.poleRe itemIndex
+  let imag ← Tropical.EmitArrow.index columns.poleIm itemIndex
+  pure (real, imag)
 
-private def ModeColumns.readAmp (columns : ModeColumns) (index : Sig) : CplxE :=
-  (Sig.index columns.ampRe index, Sig.index columns.ampIm index)
+private def ModeColumns.readAmp (columns : ModeColumns) (itemIndex : Sig) : BuildM CplxE := do
+  let real ← Tropical.EmitArrow.index columns.ampRe itemIndex
+  let imag ← Tropical.EmitArrow.index columns.ampIm itemIndex
+  pure (real, imag)
 
-private def sourceCrossingHot (delta : CplxE) : Sig :=
-  let theta := litF ecddThetaAcc
-  Sig.binary .lt (add (mul delta.1 delta.1) (mul delta.2 delta.2))
-    (mul theta theta)
+private def sourceCrossingHot (delta : CplxE) : BuildM Sig := do
+  let theta ← litF ecddThetaAcc
+  let realSquared ← mul delta.1 delta.1
+  let imagSquared ← mul delta.2 delta.2
+  let norm ← add realSquared imagSquared
+  let threshold ← mul theta theta
+  binary .lt norm threshold
 
 /-- Inner source-crossing lane.  Here a quotient of two nearby Cauchy
     transforms is replaced by its analytic derivative.  The outer lens is
     exact, so its boundary agrees algebraically with the ordinary image. -/
-private def sourceCrossingInner (delta : CplxE) : Sig :=
-  Sig.binary .lt (add (mul delta.1 delta.1) (mul delta.2 delta.2)) (lit 1 12)
+private def sourceCrossingInner (delta : CplxE) : BuildM Sig := do
+  let realSquared ← mul delta.1 delta.1
+  let imagSquared ← mul delta.2 delta.2
+  let norm ← add realSquared imagSquared
+  let threshold ← lit 1 12
+  binary .lt norm threshold
 
-private def safeInverseFor (delta : CplxE) (hot : Sig) : CplxE :=
-  cinvSharedE (selectE hot (lit 1) delta.1, selectE hot (lit 0) delta.2)
+private def safeInverseFor (delta : CplxE) (hot : Sig) : BuildM CplxE := do
+  let one ← lit 1
+  let safeReal ← selectE hot one delta.1
+  let zero ← lit 0
+  let safeImag ← selectE hot zero delta.2
+  cinvSharedE (safeReal, safeImag)
 
-private def unlessHot (hot : Sig) (value : CplxE) : CplxE :=
-  (selectE hot (lit 0) value.1, selectE hot (lit 0) value.2)
+private def unlessHot (hot : Sig) (value : CplxE) : BuildM CplxE := do
+  let zero ← lit 0
+  let real ← selectE hot zero value.1
+  let imag ← selectE hot zero value.2
+  pure (real, imag)
 
 private def sourceRoomImage? (source room1 room2 : Array ModalMode) :
-    Option SourceRoomImage := do
+    BuildM (Option SourceRoomImage) := do
   let n := source.size
   let m := room1.size
-  if n == 0 || m == 0 || room2.size != m then none
-  let sourceCols := modeColumns source
-  let room1Cols := modeColumns room1
-  let room2Cols := modeColumns room2
+  if n == 0 || m == 0 || room2.size != m then return none
+  let sourceCols ← modeColumns source
+  let room1Cols ← modeColumns room1
+  let room2Cols ← modeColumns room2
   let tables := sourceCols.tables ++ room1Cols.tables ++ room2Cols.tables
   let mut parts := #[]
   -- Split by room columns.  Each part retains all source accumulators but only
@@ -263,39 +308,52 @@ private def sourceRoomImage? (source room1 room2 : Array ModalMode) :
       let width := stop - start
       let capacity := n * width
       let layout := SourceRoomLayout.create n width
-      if !layout.valid then none
-      let index := Sig.loopIdx 2
-      let sourceIndex := Sig.binary .floorDiv index (litI (Int.ofNat width))
-      let roomLocal := Sig.binary .mod index (litI (Int.ofNat width))
-      let roomIndex := add roomLocal (litI (Int.ofNat start))
-      let lam := sourceCols.readPole sourceIndex
-      let amp := sourceCols.readAmp sourceIndex
-      let pole1 := room1Cols.readPole roomIndex
-      let residue1 := room1Cols.readAmp roomIndex
-      let pole2 := room2Cols.readPole roomIndex
-      let residue2 := room2Cols.readAmp roomIndex
-      let q1 := cnegE pole1
-      let q2 := cnegE pole2
-      let delta1 := csubE lam pole1
-      let delta2 := csubE lam pole2
-      let hot1 := sourceCrossingHot delta1
-      let hot2 := sourceCrossingHot delta2
-      let anyHot := Sig.binary .or hot1 hot2
-      let u1 := safeInverseFor delta1 hot1
-      let v1 := cinvSharedE (csubE q1 lam)
-      let u2 := safeInverseFor delta2 hot2
-      let v2 := cinvSharedE (csubE q2 lam)
-      let d1 := unlessHot hot1 (cmulE residue1 u1)
-      let p1 := cmulE residue1 v1
-      let e1 := unlessHot hot1 (cnegE (cmulE amp u1))
-      let e1Cold2 := unlessHot hot2 e1
-      let m1 := cmulE amp v1
-      let d2 := unlessHot hot2 (cmulE residue2 u2)
-      let p2 := cmulE residue2 v2
-      let e2 := unlessHot hot2 (cnegE (cmulE amp u2))
-      let m2 := cmulE amp v2
-      let tf := unlessHot anyHot (cmulE amp (cmulE u1 u2))
-      let tp := cmulE amp (cmulE v1 v2)
+      if !layout.valid then return none
+      let itemIndex ← loopIdx 2
+      let widthSig ← litI (Int.ofNat width)
+      let sourceIndex ← binary .floorDiv itemIndex widthSig
+      let roomLocal ← binary .mod itemIndex widthSig
+      let startSig ← litI (Int.ofNat start)
+      let roomIndex ← add roomLocal startSig
+      let lam ← sourceCols.readPole sourceIndex
+      let amp ← sourceCols.readAmp sourceIndex
+      let pole1 ← room1Cols.readPole roomIndex
+      let residue1 ← room1Cols.readAmp roomIndex
+      let pole2 ← room2Cols.readPole roomIndex
+      let residue2 ← room2Cols.readAmp roomIndex
+      let q1 ← cnegE pole1
+      let q2 ← cnegE pole2
+      let delta1 ← csubE lam pole1
+      let delta2 ← csubE lam pole2
+      let hot1 ← sourceCrossingHot delta1
+      let hot2 ← sourceCrossingHot delta2
+      let anyHot ← binary .or hot1 hot2
+      let u1 ← safeInverseFor delta1 hot1
+      let q1Delta ← csubE q1 lam
+      let v1 ← cinvSharedE q1Delta
+      let u2 ← safeInverseFor delta2 hot2
+      let q2Delta ← csubE q2 lam
+      let v2 ← cinvSharedE q2Delta
+      let residue1U1 ← cmulE residue1 u1
+      let d1 ← unlessHot hot1 residue1U1
+      let p1 ← cmulE residue1 v1
+      let ampU1 ← cmulE amp u1
+      let negAmpU1 ← cnegE ampU1
+      let e1 ← unlessHot hot1 negAmpU1
+      let e1Cold2 ← unlessHot hot2 e1
+      let m1 ← cmulE amp v1
+      let residue2U2 ← cmulE residue2 u2
+      let d2 ← unlessHot hot2 residue2U2
+      let p2 ← cmulE residue2 v2
+      let ampU2 ← cmulE amp u2
+      let negAmpU2 ← cnegE ampU2
+      let e2 ← unlessHot hot2 negAmpU2
+      let m2 ← cmulE amp v2
+      let uProduct ← cmulE u1 u2
+      let ampUProduct ← cmulE amp uProduct
+      let tf ← unlessHot anyHot ampUProduct
+      let vProduct ← cmulE v1 v2
+      let tp ← cmulE amp vProduct
       let values := #[d1.1, d1.2, p1.1, p1.2,
         e1.1, e1.2, e1Cold2.1, e1Cold2.2, m1.1, m1.2,
         d2.1, d2.2, p2.1, p2.2, e2.1, e2.2, m2.1, m2.2,
@@ -314,23 +372,30 @@ private def sourceRoomImage? (source room1 room2 : Array ModalMode) :
         let routes := appendComplexRoute routes layout.m2 j
         let routes := appendComplexRoute routes layout.tf j
         appendComplexRoute routes layout.tp j) #[]
-      let image ← routedImage? capacity layout.floatCount routes tables values 2
+      let some image ← routedImage? capacity layout.floatCount routes tables values 2
+        | return none
       parts := parts.push { image, layout, roomStart := start }
-  let _ ← parts[0]?
-  pure { parts }
+  if parts.isEmpty then return none
+  pure (some { parts })
 
 private structure RoomPairImage where
   images : Array Sig
   layout : RoomPairLayout
 
 private def RoomPairImage.read (image : RoomPairImage)
-    (slice : RoomPairLayout → FactoredSlice) (index : Sig) : CplxE :=
-  image.images.foldl (fun total part =>
+    (slice : RoomPairLayout → FactoredSlice) (itemIndex : Sig) : BuildM CplxE := do
+  let zero ← natE 0
+  image.images.foldlM (fun total part => do
     let selected := slice image.layout
-    let value : CplxE :=
-      (Sig.index part (add (lit (Int.ofNat selected.offset)) (mul (lit 2) index)),
-       Sig.index part (add (lit (Int.ofNat (selected.offset + 1))) (mul (lit 2) index)))
-    caddE total value) (natE 0)
+    let two ← lit 2
+    let doubled ← mul two itemIndex
+    let realOffset ← lit (Int.ofNat selected.offset)
+    let realIndex ← add realOffset doubled
+    let real ← Tropical.EmitArrow.index part realIndex
+    let imagOffset ← lit (Int.ofNat (selected.offset + 1))
+    let imagIndex ← add imagOffset doubled
+    let imag ← Tropical.EmitArrow.index part imagIndex
+    caddE total (real, imag)) zero
 
 private def fourChunks (size : Nat) : Array (Nat × Nat) :=
   (Array.range 4).filterMap fun chunk =>
@@ -356,49 +421,77 @@ private def physicalPairs (m : Nat) : Array (Nat × Nat) := Id.run do
     below `2^24`, so the float square root followed by floor has an exact integer
     answer on every backend. -/
 private def triangularPairIndex (m : Nat) (withDiagonal : Bool)
-    (item : Sig) : Sig × Sig :=
+    (item : Sig) : BuildM (Sig × Sig) := do
   let widthNat := if withDiagonal then 2 * m + 1 else 2 * m - 1
-  let width := lit (Int.ofNat widthNat)
-  let itemFloat := toFloatE item
-  let discriminant := sub (mul width width) (mul (lit 8) itemFloat)
-  let jFloat := Sig.unary .floor
-    (div (sub width (Sig.unary .sqrt discriminant)) (lit 2))
-  let j := toIntE jFloat
-  let widthI := litI (Int.ofNat widthNat)
-  let rowStart := Sig.binary .floorDiv (mul j (sub widthI j)) (litI 2)
-  let offset := sub item rowStart
-  let k := add j (add offset (if withDiagonal then litI 0 else litI 1))
-  (j, k)
+  let width ← lit (Int.ofNat widthNat)
+  let itemFloat ← toFloatE item
+  let widthSquared ← mul width width
+  let eight ← lit 8
+  let scaledItem ← mul eight itemFloat
+  let discriminant ← sub widthSquared scaledItem
+  let root ← unary .sqrt discriminant
+  let numerator ← sub width root
+  let two ← lit 2
+  let half ← div numerator two
+  let jFloat ← unary .floor half
+  let j ← toIntE jFloat
+  let widthI ← litI (Int.ofNat widthNat)
+  let remainder ← sub widthI j
+  let rowProduct ← mul j remainder
+  let twoInt ← litI 2
+  let rowStart ← binary .floorDiv rowProduct twoInt
+  let offset ← sub item rowStart
+  let diagonalOffset ← if withDiagonal then litI 0 else litI 1
+  let kOffset ← add offset diagonalOffset
+  let k ← add j kOffset
+  pure (j, k)
 
-private def differenceImage? (room1 room2 : Array ModalMode) : Option RoomPairImage := do
+private def differenceImage? (room1 room2 : Array ModalMode) : BuildM (Option RoomPairImage) := do
   let m := room1.size
-  if m == 0 || room2.size != m then none
+  if m == 0 || room2.size != m then return none
   let layout := RoomPairLayout.create "A" "C" m
-  if !layout.valid then none
+  if !layout.valid then return none
   let pairs := differencePairs m
   if pairs.isEmpty then
-    pure { images := #[Sig.arr (Array.replicate layout.floatCount (lit 0))], layout }
+    let zero ← lit 0
+    let image ← arr (Array.replicate layout.floatCount zero)
+    pure (some { images := #[image], layout })
   else
-    let room1Cols := modeColumns room1
-    let room2Cols := modeColumns room2
+    let room1Cols ← modeColumns room1
+    let room2Cols ← modeColumns room2
     let mut images := #[]
     for (start, stop) in fourChunks pairs.size do
-      let index := Sig.loopIdx 3
-      let globalIndex := add index (litI (Int.ofNat start))
-      let (j, k) := triangularPairIndex m false globalIndex
-      let inverse := cinvSharedE
-        (csubE (room1Cols.readPole j) (room2Cols.readPole k))
-      let inverseConj := (inverse.1, neg inverse.2)
-      let square := cmulE inverse inverse
-      let squareConj := (square.1, neg square.2)
-      let aj := cmulE (room2Cols.readAmp k) inverse
-      let ck := cnegE (cmulE (room1Cols.readAmp j) inverse)
-      let ak := cmulE (room2Cols.readAmp j) inverseConj
-      let cj := cnegE (cmulE (room1Cols.readAmp k) inverseConj)
-      let ajPrime := cnegE (cmulE (room2Cols.readAmp k) square)
-      let ckPrime := cnegE (cmulE (room1Cols.readAmp j) square)
-      let akPrime := cnegE (cmulE (room2Cols.readAmp j) squareConj)
-      let cjPrime := cnegE (cmulE (room1Cols.readAmp k) squareConj)
+      let itemIndex ← loopIdx 3
+      let startSig ← litI (Int.ofNat start)
+      let globalIndex ← add itemIndex startSig
+      let (j, k) ← triangularPairIndex m false globalIndex
+      let pole1 ← room1Cols.readPole j
+      let pole2 ← room2Cols.readPole k
+      let delta ← csubE pole1 pole2
+      let inverse ← cinvSharedE delta
+      let inverseConjImag ← neg inverse.2
+      let inverseConj := (inverse.1, inverseConjImag)
+      let square ← cmulE inverse inverse
+      let squareConjImag ← neg square.2
+      let squareConj := (square.1, squareConjImag)
+      let room2AmpK ← room2Cols.readAmp k
+      let aj ← cmulE room2AmpK inverse
+      let room1AmpJ ← room1Cols.readAmp j
+      let ckProduct ← cmulE room1AmpJ inverse
+      let ck ← cnegE ckProduct
+      let room2AmpJ ← room2Cols.readAmp j
+      let ak ← cmulE room2AmpJ inverseConj
+      let room1AmpK ← room1Cols.readAmp k
+      let cjProduct ← cmulE room1AmpK inverseConj
+      let cj ← cnegE cjProduct
+      let ajPrimeProduct ← cmulE room2AmpK square
+      let ajPrime ← cnegE ajPrimeProduct
+      let ckPrimeProduct ← cmulE room1AmpJ square
+      let ckPrime ← cnegE ckPrimeProduct
+      let akPrimeProduct ← cmulE room2AmpJ squareConj
+      let akPrime ← cnegE akPrimeProduct
+      let cjPrimeProduct ← cmulE room1AmpK squareConj
+      let cjPrime ← cnegE cjPrimeProduct
       let values := #[aj.1, aj.2, ck.1, ck.2, ak.1, ak.2, cj.1, cj.2,
         ajPrime.1, ajPrime.2, ckPrime.1, ckPrime.2,
         akPrime.1, akPrime.2, cjPrime.1, cjPrime.2]
@@ -415,35 +508,44 @@ private def differenceImage? (room1 room2 : Array ModalMode) : Option RoomPairIm
                     layout.leftPrime j) layout.rightPrime k)
                 layout.leftPrime k) layout.rightPrime j) #[]
       let tables := room1Cols.tables ++ room2Cols.tables
-      let image ← routedImage? (stop - start) layout.floatCount routes tables values 3
+      let some image ← routedImage? (stop - start) layout.floatCount routes tables values 3
+        | return none
       images := images.push image
-    pure { images, layout }
+    pure (some { images, layout })
 
-private def physicalImage? (room1 room2 : Array ModalMode) : Option RoomPairImage := do
+private def physicalImage? (room1 room2 : Array ModalMode) : BuildM (Option RoomPairImage) := do
   let m := room1.size
-  if m == 0 || room2.size != m then none
+  if m == 0 || room2.size != m then return none
   let layout := RoomPairLayout.create "B[0,1]" "B[1,0]" m
-  if !layout.valid then none
+  if !layout.valid then return none
   let pairs := physicalPairs m
-  let room1Cols := modeColumns room1
-  let room2Cols := modeColumns room2
+  let room1Cols ← modeColumns room1
+  let room2Cols ← modeColumns room2
   let tables := room1Cols.tables ++ room2Cols.tables
   let mut images := #[]
   for (start, stop) in fourChunks pairs.size do
-    let index := Sig.loopIdx 4
-    let globalIndex := add index (litI (Int.ofNat start))
-    let (j, k) := triangularPairIndex m true globalIndex
-    let inverse := cinvSharedE
-      (csubE (cnegE (room2Cols.readPole k)) (room1Cols.readPole j))
-    let square := cmulE inverse inverse
-    let leftJ := cmulE (room2Cols.readAmp k) inverse
-    let rightK := cmulE (room1Cols.readAmp j) inverse
-    let leftK := cmulE (room2Cols.readAmp j) inverse
-    let rightJ := cmulE (room1Cols.readAmp k) inverse
-    let leftJPrime := cmulE (room2Cols.readAmp k) square
-    let rightKPrime := cmulE (room1Cols.readAmp j) square
-    let leftKPrime := cmulE (room2Cols.readAmp j) square
-    let rightJPrime := cmulE (room1Cols.readAmp k) square
+    let itemIndex ← loopIdx 4
+    let startSig ← litI (Int.ofNat start)
+    let globalIndex ← add itemIndex startSig
+    let (j, k) ← triangularPairIndex m true globalIndex
+    let room2Pole ← room2Cols.readPole k
+    let negativeRoom2Pole ← cnegE room2Pole
+    let room1Pole ← room1Cols.readPole j
+    let delta ← csubE negativeRoom2Pole room1Pole
+    let inverse ← cinvSharedE delta
+    let square ← cmulE inverse inverse
+    let room2AmpK ← room2Cols.readAmp k
+    let leftJ ← cmulE room2AmpK inverse
+    let room1AmpJ ← room1Cols.readAmp j
+    let rightK ← cmulE room1AmpJ inverse
+    let room2AmpJ ← room2Cols.readAmp j
+    let leftK ← cmulE room2AmpJ inverse
+    let room1AmpK ← room1Cols.readAmp k
+    let rightJ ← cmulE room1AmpK inverse
+    let leftJPrime ← cmulE room2AmpK square
+    let rightKPrime ← cmulE room1AmpJ square
+    let leftKPrime ← cmulE room2AmpJ square
+    let rightJPrime ← cmulE room1AmpK square
     let values := #[leftJ.1, leftJ.2, rightK.1, rightK.2,
       leftK.1, leftK.2, rightJ.1, rightJ.2,
       leftJPrime.1, leftJPrime.2, rightKPrime.1, rightKPrime.2,
@@ -461,9 +563,10 @@ private def physicalImage? (room1 room2 : Array ModalMode) : Option RoomPairImag
         routes.push none |>.push none |>.push none |>.push none
       else appendComplexRoute
         (appendComplexRoute routes layout.leftPrime k) layout.rightPrime j) #[]
-    let image ← routedImage? (stop - start) layout.floatCount routes tables values 4
+    let some image ← routedImage? (stop - start) layout.floatCount routes tables values 4
+      | return none
     images := images.push image
-  pure { images, layout }
+  pure (some { images, layout })
 
 private structure SourceAssemblyLayout where
   amps : FactoredSlice
@@ -556,75 +659,101 @@ private structure AssemblyImage (Layout : Type) where
 
 private def sourceAssemblyImage? (source : Array ModalMode)
     (sourceRoom : SourceRoomImage) (direction1 direction2 : Sig) :
-    Option (AssemblyImage SourceAssemblyLayout) := do
+    BuildM (Option (AssemblyImage SourceAssemblyLayout)) := do
   let n := source.size
-  if n == 0 then none
+  if n == 0 then return none
   let layout := SourceAssemblyLayout.create n
-  let columns := modeColumns source
-  let index := Sig.loopIdx 5
-  let gain1 := caddE
-    (cscaleE (sub (lit 1) direction1)
-      (sourceRoom.readSource (fun layout => layout.d1) index))
-    (cscaleE direction1 (sourceRoom.readSource (fun layout => layout.p1) index))
-  let gain2 := caddE
-    (cscaleE (sub (lit 1) direction2)
-      (sourceRoom.readSource (fun layout => layout.d2) index))
-    (cscaleE direction2 (sourceRoom.readSource (fun layout => layout.p2) index))
-  let amp := cmulE (columns.readAmp index) (cmulE gain1 gain2)
+  let columns ← modeColumns source
+  let itemIndex ← loopIdx 5
+  let one ← lit 1
+  let forward1 ← sub one direction1
+  let d1 ← sourceRoom.readSource (fun layout => layout.d1) itemIndex
+  let future1 ← cscaleE forward1 d1
+  let p1 ← sourceRoom.readSource (fun layout => layout.p1) itemIndex
+  let past1 ← cscaleE direction1 p1
+  let gain1 ← caddE future1 past1
+  let forward2 ← sub one direction2
+  let d2 ← sourceRoom.readSource (fun layout => layout.d2) itemIndex
+  let future2 ← cscaleE forward2 d2
+  let p2 ← sourceRoom.readSource (fun layout => layout.p2) itemIndex
+  let past2 ← cscaleE direction2 p2
+  let gain2 ← caddE future2 past2
+  let gains ← cmulE gain1 gain2
+  let sourceAmp ← columns.readAmp itemIndex
+  let amp ← cmulE sourceAmp gains
   let values := #[amp.1, amp.2, amp.1, amp.2]
   let routes := (Array.range n).foldl (fun routes i =>
     appendComplexRoute (appendComplexRoute routes layout.amps i) layout.strike 0) #[]
-  let image ← routedImage? n layout.floatCount routes
-    (sourceRoom.images ++ columns.tables) values 5
-  pure { image, layout }
+  let some image ← routedImage? n layout.floatCount routes
+    (sourceRoom.images ++ columns.tables) values 5 | return none
+  pure (some { image, layout })
 
 private def roomAssemblyImage? (room1 room2 : Array ModalMode)
     (sourceRoom : SourceRoomImage) (difference physical : RoomPairImage)
-    (direction1 direction2 : Sig) : Option (AssemblyImage RoomAssemblyLayout) := do
+    (direction1 direction2 : Sig) : BuildM (Option (AssemblyImage RoomAssemblyLayout)) := do
   let m := room1.size
-  if m == 0 || room2.size != m then none
+  if m == 0 || room2.size != m then return none
   let layout := RoomAssemblyLayout.create m
-  let room1Cols := modeColumns room1
-  let room2Cols := modeColumns room2
-  let index := Sig.loopIdx 6
-  let f1 := sub (lit 1) direction1
-  let f2 := sub (lit 1) direction2
+  let room1Cols ← modeColumns room1
+  let room2Cols ← modeColumns room2
+  let itemIndex ← loopIdx 6
+  let one ← lit 1
+  let f1 ← sub one direction1
+  let f2 ← sub one direction2
   let d1 := direction1
   let d2 := direction2
-  let b1 := room1Cols.readAmp index
-  let b2 := room2Cols.readAmp index
-  let otherFuture1 := caddE
-    (cscaleE f2 (difference.read (fun layout => layout.left) index))
-    (cscaleE d2 (physical.read (fun layout => layout.left) index))
-  let future1 := cscaleE f1 (cmulE b1
-    (cmulE (sourceRoom.readRoom (fun layout => layout.e1) index) otherFuture1))
-  let otherFuture2 := caddE
-    (cscaleE f1 (difference.read (fun layout => layout.right) index))
-    (cscaleE d1 (physical.read (fun layout => layout.right) index))
-  let future2Ordinary := cscaleE f2 (cmulE b2
-    (cmulE (sourceRoom.readRoom (fun layout => layout.e2) index) otherFuture2))
-  let futureDiagonal := cscaleE (neg (mul f1 f2))
-    (cmulE (cmulE b1 b2) (sourceRoom.readRoom (fun layout => layout.tf) index))
-  let future2 := caddE future2Ordinary futureDiagonal
-  let otherPast1 := caddE
-    (cscaleE d2 (difference.read (fun layout => layout.left) index))
-    (cscaleE f2 (physical.read (fun layout => layout.left) index))
-  let past1 := cscaleE d1 (cmulE b1
-    (cmulE (sourceRoom.readRoom (fun layout => layout.m1) index) otherPast1))
-  let otherPast2 := caddE
-    (cscaleE d1 (difference.read (fun layout => layout.right) index))
-    (cscaleE f1 (physical.read (fun layout => layout.right) index))
-  let past2Ordinary := cscaleE d2 (cmulE b2
-    (cmulE (sourceRoom.readRoom (fun layout => layout.m2) index) otherPast2))
-  let pastDiagonal := cscaleE (mul d1 d2)
-    (cmulE (cmulE b1 b2) (sourceRoom.readRoom (fun layout => layout.tp) index))
-  let past2 := caddE past2Ordinary pastDiagonal
-  let futureDDSource := sourceRoom.readRoom (fun layout => layout.e1Cold2) index
-  let futureDD := cscaleE (mul f1 f2)
-    (cmulE (cmulE b1 b2) futureDDSource)
-  let pastDD := cscaleE (mul d1 d2)
-    (cmulE (cmulE b1 b2) (sourceRoom.readRoom (fun layout => layout.m1) index))
-  let strike := caddE future1 future2
+  let b1 ← room1Cols.readAmp itemIndex
+  let b2 ← room2Cols.readAmp itemIndex
+  let differenceLeft ← difference.read (fun layout => layout.left) itemIndex
+  let futureDifferenceLeft ← cscaleE f2 differenceLeft
+  let physicalLeft ← physical.read (fun layout => layout.left) itemIndex
+  let futurePhysicalLeft ← cscaleE d2 physicalLeft
+  let otherFuture1 ← caddE futureDifferenceLeft futurePhysicalLeft
+  let e1 ← sourceRoom.readRoom (fun layout => layout.e1) itemIndex
+  let e1Gain ← cmulE e1 otherFuture1
+  let b1E1Gain ← cmulE b1 e1Gain
+  let future1 ← cscaleE f1 b1E1Gain
+  let differenceRight ← difference.read (fun layout => layout.right) itemIndex
+  let futureDifferenceRight ← cscaleE f1 differenceRight
+  let physicalRight ← physical.read (fun layout => layout.right) itemIndex
+  let futurePhysicalRight ← cscaleE d1 physicalRight
+  let otherFuture2 ← caddE futureDifferenceRight futurePhysicalRight
+  let e2 ← sourceRoom.readRoom (fun layout => layout.e2) itemIndex
+  let e2Gain ← cmulE e2 otherFuture2
+  let b2E2Gain ← cmulE b2 e2Gain
+  let future2Ordinary ← cscaleE f2 b2E2Gain
+  let forwardProduct ← mul f1 f2
+  let negativeForwardProduct ← neg forwardProduct
+  let b1b2 ← cmulE b1 b2
+  let tf ← sourceRoom.readRoom (fun layout => layout.tf) itemIndex
+  let diagonalProduct ← cmulE b1b2 tf
+  let futureDiagonal ← cscaleE negativeForwardProduct diagonalProduct
+  let future2 ← caddE future2Ordinary futureDiagonal
+  let pastDifferenceLeft ← cscaleE d2 differenceLeft
+  let pastPhysicalLeft ← cscaleE f2 physicalLeft
+  let otherPast1 ← caddE pastDifferenceLeft pastPhysicalLeft
+  let m1 ← sourceRoom.readRoom (fun layout => layout.m1) itemIndex
+  let m1Gain ← cmulE m1 otherPast1
+  let b1M1Gain ← cmulE b1 m1Gain
+  let past1 ← cscaleE d1 b1M1Gain
+  let pastDifferenceRight ← cscaleE d1 differenceRight
+  let pastPhysicalRight ← cscaleE f1 physicalRight
+  let otherPast2 ← caddE pastDifferenceRight pastPhysicalRight
+  let m2 ← sourceRoom.readRoom (fun layout => layout.m2) itemIndex
+  let m2Gain ← cmulE m2 otherPast2
+  let b2M2Gain ← cmulE b2 m2Gain
+  let past2Ordinary ← cscaleE d2 b2M2Gain
+  let directionProduct ← mul d1 d2
+  let tp ← sourceRoom.readRoom (fun layout => layout.tp) itemIndex
+  let pastDiagonalProduct ← cmulE b1b2 tp
+  let pastDiagonal ← cscaleE directionProduct pastDiagonalProduct
+  let past2 ← caddE past2Ordinary pastDiagonal
+  let futureDDSource ← sourceRoom.readRoom (fun layout => layout.e1Cold2) itemIndex
+  let futureDDProduct ← cmulE b1b2 futureDDSource
+  let futureDD ← cscaleE forwardProduct futureDDProduct
+  let pastDDProduct ← cmulE b1b2 m1
+  let pastDD ← cscaleE directionProduct pastDDProduct
+  let strike ← caddE future1 future2
   let values := #[future1.1, future1.2, future2.1, future2.2,
     past1.1, past1.2, past2.1, past2.2,
     futureDD.1, futureDD.2, pastDD.1, pastDD.2, strike.1, strike.2]
@@ -640,8 +769,9 @@ private def roomAssemblyImage? (room1 room2 : Array ModalMode)
             layout.futureDD j) layout.pastDD j) layout.strike 0) #[]
   let tables := sourceRoom.images ++ difference.images ++ physical.images ++
     room1Cols.tables ++ room2Cols.tables
-  let image ← routedImage? m layout.floatCount routes tables values 6
-  pure { image, layout }
+  let some image ← routedImage? m layout.floatCount routes tables values 6
+    | return none
+  pure (some { image, layout })
 
 /-- Fold all `N*M` crossing classifications into one coefficient row per
     source.  Room-frequency separation proves that at most one authored room
@@ -650,18 +780,19 @@ private def roomAssemblyImage? (room1 room2 : Array ModalMode)
     exponential/DD carriers subsequently run at capacity `N`, not `N*M`. -/
 private def confluenceAssemblyImage? (source room1 room2 : Array ModalMode)
     (sourceRoom : SourceRoomImage) (difference physical : RoomPairImage)
-    (direction1 direction2 : Sig) : Option ConfluenceAssembly := do
+    (direction1 direction2 : Sig) : BuildM (Option ConfluenceAssembly) := do
   let n := source.size
   let m := room1.size
-  if n == 0 || m == 0 || room2.size != m then none
+  if n == 0 || m == 0 || room2.size != m then return none
   let layout := ConfluenceLayout.create n
-  if !layout.valid then none
-  let sourceCols := modeColumns source
-  let room1Cols := modeColumns room1
-  let room2Cols := modeColumns room2
+  if !layout.valid then return none
+  let sourceCols ← modeColumns source
+  let room1Cols ← modeColumns room1
+  let room2Cols ← modeColumns room2
   let capacity := n * m
-  let f1 := sub (lit 1) direction1
-  let f2 := sub (lit 1) direction2
+  let one ← lit 1
+  let f1 ← sub one direction1
+  let f2 ← sub one direction2
   let d1 := direction1
   let d2 := direction2
   let mut images := #[]
@@ -669,93 +800,115 @@ private def confluenceAssemblyImage? (source room1 room2 : Array ModalMode)
     let start := chunk * capacity / 2
     let stop := (chunk + 1) * capacity / 2
     if start < stop then
-      let flatIndex := add (Sig.loopIdx 14) (litI (Int.ofNat start))
-      let sourceIndex := Sig.binary .floorDiv flatIndex (litI (Int.ofNat m))
-      let roomIndex := Sig.binary .mod flatIndex (litI (Int.ofNat m))
-      let lam := sourceCols.readPole sourceIndex
-      let a := sourceCols.readAmp sourceIndex
-      let pole1 := room1Cols.readPole roomIndex
-      let b1 := room1Cols.readAmp roomIndex
-      let pole2 := room2Cols.readPole roomIndex
-      let b2 := room2Cols.readAmp roomIndex
-      let delta1 := csubE lam pole1
-      let delta2 := csubE lam pole2
-      let hot1 := sourceCrossingHot delta1
-      let hot2 := sourceCrossingHot delta2
-      let inner1 := sourceCrossingInner delta1
-      let inner2 := sourceCrossingInner delta2
-      let anyHot := Sig.binary .or hot1 hot2
-      let sourceD1 := sourceRoom.readSource (fun layout => layout.d1) sourceIndex
-      let sourceP1 := sourceRoom.readSource (fun layout => layout.p1) sourceIndex
-      let sourceD2 := sourceRoom.readSource (fun layout => layout.d2) sourceIndex
-      let sourceP2 := sourceRoom.readSource (fun layout => layout.p2) sourceIndex
+      let localIndex ← loopIdx 14
+      let startSig ← litI (Int.ofNat start)
+      let flatIndex ← add localIndex startSig
+      let roomCount ← litI (Int.ofNat m)
+      let sourceIndex ← binary .floorDiv flatIndex roomCount
+      let roomIndex ← binary .mod flatIndex roomCount
+      let lam ← sourceCols.readPole sourceIndex
+      let a ← sourceCols.readAmp sourceIndex
+      let pole1 ← room1Cols.readPole roomIndex
+      let b1 ← room1Cols.readAmp roomIndex
+      let pole2 ← room2Cols.readPole roomIndex
+      let b2 ← room2Cols.readAmp roomIndex
+      let delta1 ← csubE lam pole1
+      let delta2 ← csubE lam pole2
+      let hot1 ← sourceCrossingHot delta1
+      let hot2 ← sourceCrossingHot delta2
+      let inner1 ← sourceCrossingInner delta1
+      let inner2 ← sourceCrossingInner delta2
+      let anyHot ← binary .or hot1 hot2
+      let sourceD1 ← sourceRoom.readSource (fun layout => layout.d1) sourceIndex
+      let sourceP1 ← sourceRoom.readSource (fun layout => layout.p1) sourceIndex
+      let sourceD2 ← sourceRoom.readSource (fun layout => layout.d2) sourceIndex
+      let sourceP2 ← sourceRoom.readSource (fun layout => layout.p2) sourceIndex
       -- These two hot-row exclusions used to occupy four source-indexed
       -- columns in every source/room chunk.  Room-frequency separation proves
       -- there is at most one contributing row, so recomputing them in this
       -- already-mapped confluence phase is exact and reclaims the persistent
       -- image columns for product effects.
-      let u1 := safeInverseFor delta1 hot1
-      let u2 := safeInverseFor delta2 hot2
-      let x12 := unlessHot (Sig.binary .or (Sig.unary .not hot1) hot2)
-        (cmulE b2 u2)
-      let x21 := unlessHot (Sig.binary .or (Sig.unary .not hot2) hot1)
-        (cmulE b1 u1)
-      let diffLeft := difference.read (fun layout => layout.left) roomIndex
-      let diffRight := difference.read (fun layout => layout.right) roomIndex
-      let diffLeftPrime := difference.read
-        (fun layout => layout.leftPrime) roomIndex
-      let diffRightPrime := difference.read
-        (fun layout => layout.rightPrime) roomIndex
-      let physLeft := physical.read (fun layout => layout.left) roomIndex
-      let physRight := physical.read (fun layout => layout.right) roomIndex
-      let physLeftPrime := physical.read
-        (fun layout => layout.leftPrime) roomIndex
-      let physRightPrime := physical.read
-        (fun layout => layout.rightPrime) roomIndex
-      let k2Lam := caddE
-        (cscaleE f2 (csubE sourceD2 x12)) (cscaleE d2 sourceP2)
-      let k2Pole := caddE
-        (cscaleE f2 diffLeft) (cscaleE d2 physLeft)
-      let k2Prime := caddE
-        (cscaleE f2 diffLeftPrime) (cscaleE d2 physLeftPrime)
-      let safeDelta1 : CplxE :=
-        (selectE inner1 (lit 1) delta1.1,
-         selectE inner1 (lit 0) delta1.2)
-      let k2QuotientDirect := cdivE (csubE k2Lam k2Pole) safeDelta1
-      let k2Quotient : CplxE :=
-        (selectE inner1 k2Prime.1 k2QuotientDirect.1,
-         selectE inner1 k2Prime.2 k2QuotientDirect.2)
-      let pair1Scale := cscaleE f1 (cmulE a b1)
-      let pair1DD := unlessHot (Sig.unary .not hot1)
-        (cmulE pair1Scale k2Pole)
-      let pair1Simple := unlessHot (Sig.unary .not hot1)
-        (cmulE pair1Scale k2Quotient)
-      let k1Lam := caddE
-        (cscaleE f1 (csubE sourceD1 x21)) (cscaleE d1 sourceP1)
-      let k1Pole := caddE
-        (cscaleE f1 diffRight) (cscaleE d1 physRight)
-      let k1Prime := caddE
-        (cscaleE f1 diffRightPrime) (cscaleE d1 physRightPrime)
-      let safeDelta2 : CplxE :=
-        (selectE inner2 (lit 1) delta2.1,
-         selectE inner2 (lit 0) delta2.2)
-      let k1QuotientDirect := cdivE (csubE k1Lam k1Pole) safeDelta2
-      let k1Quotient : CplxE :=
-        (selectE inner2 k1Prime.1 k1QuotientDirect.1,
-         selectE inner2 k1Prime.2 k1QuotientDirect.2)
-      let pair2Scale := cscaleE f2 (cmulE a b2)
-      let pair2DD := unlessHot (Sig.unary .not hot2)
-        (cmulE pair2Scale k1Pole)
-      let pair2Simple := unlessHot (Sig.unary .not hot2)
-        (cmulE pair2Scale k1Quotient)
-      let triple := unlessHot (Sig.unary .not anyHot)
-        (cscaleE (mul f1 f2) (cmulE a (cmulE b1 b2)))
-      let selectedPole1 := unlessHot (Sig.unary .not anyHot) pole1
-      let selectedPole2 := unlessHot (Sig.unary .not anyHot) pole2
+      let u1 ← safeInverseFor delta1 hot1
+      let u2 ← safeInverseFor delta2 hot2
+      let notHot1 ← unary .not hot1
+      let suppress12 ← binary .or notHot1 hot2
+      let b2u2 ← cmulE b2 u2
+      let x12 ← unlessHot suppress12 b2u2
+      let notHot2 ← unary .not hot2
+      let suppress21 ← binary .or notHot2 hot1
+      let b1u1 ← cmulE b1 u1
+      let x21 ← unlessHot suppress21 b1u1
+      let diffLeft ← difference.read (fun layout => layout.left) roomIndex
+      let diffRight ← difference.read (fun layout => layout.right) roomIndex
+      let diffLeftPrime ← difference.read (fun layout => layout.leftPrime) roomIndex
+      let diffRightPrime ← difference.read (fun layout => layout.rightPrime) roomIndex
+      let physLeft ← physical.read (fun layout => layout.left) roomIndex
+      let physRight ← physical.read (fun layout => layout.right) roomIndex
+      let physLeftPrime ← physical.read (fun layout => layout.leftPrime) roomIndex
+      let physRightPrime ← physical.read (fun layout => layout.rightPrime) roomIndex
+      let sourceD2Cold ← csubE sourceD2 x12
+      let k2LamFuture ← cscaleE f2 sourceD2Cold
+      let k2LamPast ← cscaleE d2 sourceP2
+      let k2Lam ← caddE k2LamFuture k2LamPast
+      let k2PoleFuture ← cscaleE f2 diffLeft
+      let k2PolePast ← cscaleE d2 physLeft
+      let k2Pole ← caddE k2PoleFuture k2PolePast
+      let k2PrimeFuture ← cscaleE f2 diffLeftPrime
+      let k2PrimePast ← cscaleE d2 physLeftPrime
+      let k2Prime ← caddE k2PrimeFuture k2PrimePast
+      let zero ← lit 0
+      let safeDelta1Real ← selectE inner1 one delta1.1
+      let safeDelta1Imag ← selectE inner1 zero delta1.2
+      let safeDelta1 : CplxE := (safeDelta1Real, safeDelta1Imag)
+      let k2Difference ← csubE k2Lam k2Pole
+      let k2QuotientDirect ← cdivE k2Difference safeDelta1
+      let k2QuotientReal ← selectE inner1 k2Prime.1 k2QuotientDirect.1
+      let k2QuotientImag ← selectE inner1 k2Prime.2 k2QuotientDirect.2
+      let k2Quotient : CplxE := (k2QuotientReal, k2QuotientImag)
+      let ab1 ← cmulE a b1
+      let pair1Scale ← cscaleE f1 ab1
+      let pair1DDProduct ← cmulE pair1Scale k2Pole
+      let pair1DD ← unlessHot notHot1 pair1DDProduct
+      let pair1SimpleProduct ← cmulE pair1Scale k2Quotient
+      let pair1Simple ← unlessHot notHot1 pair1SimpleProduct
+      let sourceD1Cold ← csubE sourceD1 x21
+      let k1LamFuture ← cscaleE f1 sourceD1Cold
+      let k1LamPast ← cscaleE d1 sourceP1
+      let k1Lam ← caddE k1LamFuture k1LamPast
+      let k1PoleFuture ← cscaleE f1 diffRight
+      let k1PolePast ← cscaleE d1 physRight
+      let k1Pole ← caddE k1PoleFuture k1PolePast
+      let k1PrimeFuture ← cscaleE f1 diffRightPrime
+      let k1PrimePast ← cscaleE d1 physRightPrime
+      let k1Prime ← caddE k1PrimeFuture k1PrimePast
+      let safeDelta2Real ← selectE inner2 one delta2.1
+      let safeDelta2Imag ← selectE inner2 zero delta2.2
+      let safeDelta2 : CplxE := (safeDelta2Real, safeDelta2Imag)
+      let k1Difference ← csubE k1Lam k1Pole
+      let k1QuotientDirect ← cdivE k1Difference safeDelta2
+      let k1QuotientReal ← selectE inner2 k1Prime.1 k1QuotientDirect.1
+      let k1QuotientImag ← selectE inner2 k1Prime.2 k1QuotientDirect.2
+      let k1Quotient : CplxE := (k1QuotientReal, k1QuotientImag)
+      let ab2 ← cmulE a b2
+      let pair2Scale ← cscaleE f2 ab2
+      let pair2DDProduct ← cmulE pair2Scale k1Pole
+      let pair2DD ← unlessHot notHot2 pair2DDProduct
+      let pair2SimpleProduct ← cmulE pair2Scale k1Quotient
+      let pair2Simple ← unlessHot notHot2 pair2SimpleProduct
+      let notAnyHot ← unary .not anyHot
+      let f1f2 ← mul f1 f2
+      let b1b2 ← cmulE b1 b2
+      let ab1b2 ← cmulE a b1b2
+      let scaledTriple ← cscaleE f1f2 ab1b2
+      let triple ← unlessHot notAnyHot scaledTriple
+      let selectedPole1 ← unlessHot notAnyHot pole1
+      let selectedPole2 ← unlessHot notAnyHot pole2
+      let hot1Float ← toFloatE hot1
+      let hot2Float ← toFloatE hot2
       let values := #[pair1DD.1, pair1DD.2, pair1Simple.1, pair1Simple.2,
         pair2DD.1, pair2DD.2, pair2Simple.1, pair2Simple.2,
         triple.1, triple.2, selectedPole1.1, selectedPole1.2,
-        selectedPole2.1, selectedPole2.2, toFloatE hot1, toFloatE hot2]
+        selectedPole2.1, selectedPole2.2, hot1Float, hot2Float]
       let routes := (Array.range capacity |>.extract start stop).foldl
         (fun routes k =>
           let i := k / m
@@ -770,10 +923,10 @@ private def confluenceAssemblyImage? (source room1 room2 : Array ModalMode)
             |>.push (some (layout.hot2Offset + i))) #[]
       let tables := sourceCols.tables ++ room1Cols.tables ++ room2Cols.tables ++
         sourceRoom.images ++ difference.images ++ physical.images
-      let image ← routedImage? (stop - start) layout.floatCount routes
-        tables values 14
+      let some image ← routedImage? (stop - start) layout.floatCount routes
+        tables values 14 | return none
       images := images.push image
-  pure { images, layout }
+  pure (some { images, layout })
 
 private def sameFrequencyTopology (room1 room2 : Array ModalMode) : Bool :=
   room1.size == room2.size && (room1.zip room2).all fun (left, right) =>
@@ -787,32 +940,34 @@ private def degreeZero (modes : Array ModalMode) : Bool :=
     `X[1→2]`/`X[2→1]` per-source summaries exact.  Non-constant frequencies
     are conservatively left on the generic terminal until their declared
     intervals can prove the same separation. -/
-private def separatedRoomFrequencies (modes : Array ModalMode) : Bool :=
-  modes.zipIdx.all fun (left, j) =>
-    modes.zipIdx.all fun (right, k) =>
-      if j >= k then true else
-      match sigConstF? left.omega, sigConstF? right.omega with
-      | some l, some r => (l - r).abs >= 2.0 * ecddThetaAcc
-      | _, _ => false
+private def separatedRoomFrequencies (modes : Array ModalMode) : BuildM Bool := do
+  for (left, j) in modes.zipIdx do
+    for (right, k) in modes.zipIdx do
+      if j < k then
+        match ← sigConstF? left.omega, ← sigConstF? right.omega with
+        | some l, some r => if (l - r).abs < 2.0 * ecddThetaAcc then return false
+        | _, _ => return false
+  pure true
 
 /-- A constant imaginary-frequency gap is enough to prove that the full
     complex pole distance never enters the source/room confluence lens.  This
     is especially useful for the real phaser tails (`omega = 0`) against an
     authored room whose modes are all audible-frequency conjugate pairs. -/
-private def sourceRoomConfluenceCold (source room1 room2 : Array ModalMode) : Bool :=
-  source.all fun sourceMode =>
-    (room1 ++ room2).all fun roomMode =>
-      match sigConstF? sourceMode.omega, sigConstF? roomMode.omega with
+private def sourceRoomConfluenceCold (source room1 room2 : Array ModalMode) : BuildM Bool := do
+  for sourceMode in source do
+    for roomMode in room1 ++ room2 do
+      match ← sigConstF? sourceMode.omega, ← sigConstF? roomMode.omega with
       | some sourceOmega, some roomOmega =>
-          (sourceOmega - roomOmega).abs >= ecddThetaAcc
-      | _, _ => false
+          if (sourceOmega - roomOmega).abs < ecddThetaAcc then return false
+      | _, _ => return false
+  pure true
 
 /-- Does this terminal have the exact topology served by the factored image?
     Numeric pole values never influence this decision. -/
-def factoredTwoRoomAdmitted (source room1 room2 : Array ModalMode) : Bool :=
-  !source.isEmpty && !room1.isEmpty && degreeZero source && degreeZero room1 &&
-    degreeZero room2 && sameFrequencyTopology room1 room2 &&
-    separatedRoomFrequencies room1
+def factoredTwoRoomAdmitted (source room1 room2 : Array ModalMode) : BuildM Bool := do
+  if source.isEmpty || room1.isEmpty || !degreeZero source || !degreeZero room1 ||
+      !degreeZero room2 || !sameFrequencyTopology room1 room2 then return false
+  separatedRoomFrequencies room1
 
 /-- The factored terminal retains the ordinary carrier spelling as data, but
     realizes its four banks through routed float images.  Keeping this wrapper
@@ -848,59 +1003,111 @@ structure FactoredTwoRoomTerminal where
 private def sumRoutes (count : Nat) : Array (Option Nat) :=
   Array.replicate count (some 0)
 
-private def FactoredSlice.readDynamic (slice : FactoredSlice) (image index : Sig) : CplxE :=
-  (Sig.index image (add (lit (Int.ofNat slice.offset)) (mul (lit 2) index)),
-   Sig.index image (add (lit (Int.ofNat (slice.offset + 1))) (mul (lit 2) index)))
+private def FactoredSlice.readDynamic (slice : FactoredSlice) (image itemIndex : Sig) : BuildM CplxE := do
+  let two ← lit 2
+  let doubled ← mul two itemIndex
+  let realOffset ← lit (Int.ofNat slice.offset)
+  let realIndex ← add realOffset doubled
+  let real ← Tropical.EmitArrow.index image realIndex
+  let imagOffset ← lit (Int.ofNat (slice.offset + 1))
+  let imagIndex ← add imagOffset doubled
+  let imag ← Tropical.EmitArrow.index image imagIndex
+  pure (real, imag)
 
 private def readImageParts (images : Array Sig) (slice : FactoredSlice)
-    (index : Sig) : CplxE :=
-  images.foldl (fun total image =>
-    caddE total (slice.readDynamic image index)) (natE 0)
+    (itemIndex : Sig) : BuildM CplxE := do
+  let zero ← natE 0
+  images.foldlM (fun total image => do
+    let value ← slice.readDynamic image itemIndex
+    caddE total value) zero
 
 private def readScalarParts (images : Array Sig) (offset : Nat)
-    (index : Sig) : Sig :=
-  images.foldl (fun total image =>
-    add total (Sig.index image (add (litI (Int.ofNat offset)) index))) (lit 0)
+    (itemIndex : Sig) : BuildM Sig := do
+  let zero ← lit 0
+  images.foldlM (fun total image => do
+    let offsetSig ← litI (Int.ofNat offset)
+    let scalarIndex ← add offsetSig itemIndex
+    let value ← Tropical.EmitArrow.index image scalarIndex
+    add total value) zero
 
-private def cselectE (condition : Sig) (thenValue elseValue : CplxE) : CplxE :=
-  (selectE condition thenValue.1 elseValue.1,
-   selectE condition thenValue.2 elseValue.2)
+private def cselectE (condition : Sig) (thenValue elseValue : CplxE) : BuildM CplxE := do
+  let real ← selectE condition thenValue.1 elseValue.1
+  let imag ← selectE condition thenValue.2 elseValue.2
+  pure (real, imag)
 
-private def onlyWhen (condition : Sig) (value : CplxE) : CplxE :=
-  cselectE condition value (natE 0)
+private def onlyWhen (condition : Sig) (value : CplxE) : BuildM CplxE := do
+  let zero ← natE 0
+  cselectE condition value zero
 
 /-- The same fixed-phase complex carrier used by the simple routed rows. -/
-private def poleCarrierE (pole : CplxE) (dSec clkRel : Sig) : CplxE :=
-  let incr := div (mul (div pole.2 twoPiE) (lit 4294967296)) .sampleRate
-  let phaseQ := modePhaseQFromIncr (toIntE incr) clkRel
-  let carrierCos := div (toFloatE (fixedCosCycSig phaseQ)) (lit 1073741824)
-  let carrierSin := div (toFloatE (fixedSinCycSig phaseQ)) (lit 1073741824)
-  cscaleE (expSig (mul pole.1 dSec)) (carrierCos, carrierSin)
+private def poleCarrierE (pole : CplxE) (dSec clkRel : Sig) : BuildM CplxE := do
+  let twoPi ← twoPiE
+  let cycles ← div pole.2 twoPi
+  let twoPow32 ← lit 4294967296
+  let fixedCycles ← mul cycles twoPow32
+  let sr ← sampleRate
+  let incr ← div fixedCycles sr
+  let increment ← toIntE incr
+  let phaseQ ← modePhaseQFromIncr increment clkRel
+  let fixedCos ← fixedCosCycSig phaseQ
+  let floatCos ← toFloatE fixedCos
+  let carrierScale ← lit 1073741824
+  let carrierCos ← div floatCos carrierScale
+  let fixedSin ← fixedSinCycSig phaseQ
+  let floatSin ← toFloatE fixedSin
+  let carrierSin ← div floatSin carrierScale
+  let exponent ← mul pole.1 dSec
+  let env ← expSig exponent
+  cscaleE env (carrierCos, carrierSin)
 
 /-- Stable first divided difference of the exponential carrier:
     `(exp(lam*t) - exp(nu*t)) / (lam - nu)`. -/
 private def dividedDifferenceWithCarrierE (lam nu nuCarrier : CplxE)
-    (dSec clkRel : Sig) : CplxE :=
-  let delta := csubE lam nu
-  let z := cscaleE dSec delta
-  let zsq := add (mul z.1 z.1) (mul z.2 z.2)
-  let directLane := gt zsq (litF 0.01)
-  let zsafe : CplxE :=
-    (selectE directLane z.1 (lit 1), selectE directLane z.2 (lit 0))
-  let deltaIncr := div (mul (div delta.2 twoPiE) (lit 4294967296)) .sampleRate
-  let deltaPhase := modePhaseQFromIncr (toIntE deltaIncr) clkRel
-  let deltaCos := div (toFloatE (fixedCosCycSig deltaPhase)) (lit 1073741824)
-  let deltaSin := div (toFloatE (fixedSinCycSig deltaPhase)) (lit 1073741824)
-  let ezScale := expSig (mul delta.1 dSec)
-  let ez : CplxE := (mul ezScale deltaCos, mul ezScale deltaSin)
-  let direct := cdivE (csubE ez (natE 1)) zsafe
-  let series := cexpm1SeriesE z
-  let exprel := cselectE directLane direct series
-  cmulE nuCarrier (cscaleE dSec exprel)
+    (dSec clkRel : Sig) : BuildM CplxE := do
+  let delta ← csubE lam nu
+  let z ← cscaleE dSec delta
+  let realSquared ← mul z.1 z.1
+  let imagSquared ← mul z.2 z.2
+  let zsq ← add realSquared imagSquared
+  let threshold ← litF 0.01
+  let directLane ← gt zsq threshold
+  let oneReal ← lit 1
+  let zeroImag ← lit 0
+  let safeReal ← selectE directLane z.1 oneReal
+  let safeImag ← selectE directLane z.2 zeroImag
+  let zsafe : CplxE := (safeReal, safeImag)
+  let twoPi ← twoPiE
+  let cycles ← div delta.2 twoPi
+  let twoPow32 ← lit 4294967296
+  let fixedCycles ← mul cycles twoPow32
+  let sr ← sampleRate
+  let deltaIncr ← div fixedCycles sr
+  let increment ← toIntE deltaIncr
+  let deltaPhase ← modePhaseQFromIncr increment clkRel
+  let fixedCos ← fixedCosCycSig deltaPhase
+  let floatCos ← toFloatE fixedCos
+  let carrierScale ← lit 1073741824
+  let deltaCos ← div floatCos carrierScale
+  let fixedSin ← fixedSinCycSig deltaPhase
+  let floatSin ← toFloatE fixedSin
+  let deltaSin ← div floatSin carrierScale
+  let exponent ← mul delta.1 dSec
+  let ezScale ← expSig exponent
+  let ezReal ← mul ezScale deltaCos
+  let ezImag ← mul ezScale deltaSin
+  let ez : CplxE := (ezReal, ezImag)
+  let one ← natE 1
+  let numerator ← csubE ez one
+  let direct ← cdivE numerator zsafe
+  let series ← cexpm1SeriesE z
+  let exprel ← cselectE directLane direct series
+  let scaledExprel ← cscaleE dSec exprel
+  cmulE nuCarrier scaledExprel
 
 private def dividedDifferenceCarrierE (lam nu : CplxE)
-    (dSec clkRel : Sig) : CplxE :=
-  dividedDifferenceWithCarrierE lam nu (poleCarrierE nu dSec clkRel) dSec clkRel
+    (dSec clkRel : Sig) : BuildM CplxE := do
+  let nuCarrier ← poleCarrierE nu dSec clkRel
+  dividedDifferenceWithCarrierE lam nu nuCarrier dSec clkRel
 
 /-- Bivariate series for the second divided difference around the third pole.
     With `x=(lam-r)*t` and `y=(p-r)*t`, the dimensionless factor is
@@ -908,15 +1115,20 @@ private def dividedDifferenceCarrierE (lam nu : CplxE)
     the `|x|,|y| < 0.1` lane selected below.  The complete homogeneous
     polynomial recurrence `h[d] = x*h[d-1] + y^d` shares every power instead
     of respelling each monomial. -/
-private def secondExprelSeriesE (x y : CplxE) : CplxE := Id.run do
-  let mut homogeneous := natE 1
-  let mut yPower := natE 1
-  let mut total := cscaleE (litF 0.5) homogeneous
+private def secondExprelSeriesE (x y : CplxE) : BuildM CplxE := do
+  let mut homogeneous ← natE 1
+  let mut yPower ← natE 1
+  let half ← litF 0.5
+  let mut total ← cscaleE half homogeneous
   for degree in [1:9] do
-    yPower := cmulE yPower y
-    homogeneous := caddE (cmulE x homogeneous) yPower
-    total := caddE total (cscaleE
-      (div (lit 1) (lit (Int.ofNat (factorial (degree + 2))))) homogeneous)
+    yPower ← cmulE yPower y
+    let xHomogeneous ← cmulE x homogeneous
+    homogeneous ← caddE xHomogeneous yPower
+    let one ← lit 1
+    let factorialValue ← lit (Int.ofNat (factorial (degree + 2)))
+    let coefficient ← div one factorialValue
+    let term ← cscaleE coefficient homogeneous
+    total ← caddE total term
   return total
 
 /-- Stable second divided difference for three future simple poles.  Direct
@@ -924,41 +1136,56 @@ private def secondExprelSeriesE (x y : CplxE) : CplxE := Id.run do
     covers the small-time cancellation lens and the exact triple collision;
     every inactive direct denominator is replaced before eager evaluation. -/
 private def secondDividedDifferenceWithFirstE (lam p r : CplxE)
-    (dSec clkRel : Sig) (ddLamP ddLamR rCarrier : CplxE) : CplxE :=
-  let delta1 := csubE lam p
-  let delta2 := csubE lam r
-  let inner1 := sourceCrossingInner delta1
-  let inner2 := sourceCrossingInner delta2
-  let x := cscaleE dSec delta2
-  let y := cscaleE dSec (csubE p r)
-  let xSmall := Sig.binary .lt
-    (add (mul x.1 x.1) (mul x.2 x.2)) (litF 0.01)
-  let ySmall := Sig.binary .lt
-    (add (mul y.1 y.1) (mul y.2 y.2)) (litF 0.01)
-  let bothInner := Sig.binary .and inner1 inner2
-  let seriesLane := Sig.binary .or bothInner (Sig.binary .and xSmall ySmall)
+    (dSec clkRel : Sig) (ddLamP ddLamR rCarrier : CplxE) : BuildM CplxE := do
+  let delta1 ← csubE lam p
+  let delta2 ← csubE lam r
+  let inner1 ← sourceCrossingInner delta1
+  let inner2 ← sourceCrossingInner delta2
+  let x ← cscaleE dSec delta2
+  let pMinusR ← csubE p r
+  let y ← cscaleE dSec pMinusR
+  let xRealSquared ← mul x.1 x.1
+  let xImagSquared ← mul x.2 x.2
+  let xNorm ← add xRealSquared xImagSquared
+  let threshold ← litF 0.01
+  let xSmall ← binary .lt xNorm threshold
+  let yRealSquared ← mul y.1 y.1
+  let yImagSquared ← mul y.2 y.2
+  let yNorm ← add yRealSquared yImagSquared
+  let ySmall ← binary .lt yNorm threshold
+  let bothInner ← binary .and inner1 inner2
+  let bothSmall ← binary .and xSmall ySmall
+  let seriesLane ← binary .or bothInner bothSmall
   -- First divided differences are symmetric.  One authored room/room DD is
   -- therefore sufficient for both stable direct formulas, and the two
   -- source/room DDs are shared with the pair corrections at the call site.
-  let ddPR := dividedDifferenceCarrierE p r dSec clkRel
-  let safeDelta2 : CplxE :=
-    (selectE inner2 (lit 1) delta2.1, selectE inner2 (lit 0) delta2.2)
-  let directAtP := cdivE (csubE ddLamP ddPR) safeDelta2
-  let safeDelta1 : CplxE :=
-    (selectE inner1 (lit 1) delta1.1, selectE inner1 (lit 0) delta1.2)
-  let directAtR := cdivE (csubE ddLamR ddPR) safeDelta1
-  let direct := cselectE inner1 directAtP
-    (cselectE inner2 directAtR directAtP)
-  let series := cmulE rCarrier
-    (cscaleE (mul dSec dSec) (secondExprelSeriesE x y))
+  let ddPR ← dividedDifferenceCarrierE p r dSec clkRel
+  let one ← lit 1
+  let zero ← lit 0
+  let safeDelta2Real ← selectE inner2 one delta2.1
+  let safeDelta2Imag ← selectE inner2 zero delta2.2
+  let safeDelta2 : CplxE := (safeDelta2Real, safeDelta2Imag)
+  let differenceAtP ← csubE ddLamP ddPR
+  let directAtP ← cdivE differenceAtP safeDelta2
+  let safeDelta1Real ← selectE inner1 one delta1.1
+  let safeDelta1Imag ← selectE inner1 zero delta1.2
+  let safeDelta1 : CplxE := (safeDelta1Real, safeDelta1Imag)
+  let differenceAtR ← csubE ddLamR ddPR
+  let directAtR ← cdivE differenceAtR safeDelta1
+  let innerDirect ← cselectE inner2 directAtR directAtP
+  let direct ← cselectE inner1 directAtP innerDirect
+  let seriesFactor ← secondExprelSeriesE x y
+  let secondsSquared ← mul dSec dSec
+  let scaledSeries ← cscaleE secondsSquared seriesFactor
+  let series ← cmulE rCarrier scaledSeries
   cselectE seriesLane series direct
 
 private def secondDividedDifferenceCarrierE (lam p r : CplxE)
-    (dSec clkRel : Sig) : CplxE :=
-  let pCarrier := poleCarrierE p dSec clkRel
-  let rCarrier := poleCarrierE r dSec clkRel
-  let ddLamP := dividedDifferenceWithCarrierE lam p pCarrier dSec clkRel
-  let ddLamR := dividedDifferenceWithCarrierE lam r rCarrier dSec clkRel
+    (dSec clkRel : Sig) : BuildM CplxE := do
+  let pCarrier ← poleCarrierE p dSec clkRel
+  let rCarrier ← poleCarrierE r dSec clkRel
+  let ddLamP ← dividedDifferenceWithCarrierE lam p pCarrier dSec clkRel
+  let ddLamR ← dividedDifferenceWithCarrierE lam r rCarrier dSec clkRel
   secondDividedDifferenceWithFirstE lam p r dSec clkRel
     ddLamP ddLamR rCarrier
 
@@ -966,148 +1193,198 @@ private def secondDividedDifferenceCarrierE (lam p r : CplxE)
     source/room confluence correction.  Sharing the source carrier here avoids
     a second mapped phase and a duplicate fixed-phase evaluation. -/
 private def routedSourceSideSig (factored : FactoredTwoRoomTerminal)
-    (clkInt anchorSamples : Sig) : Sig × Sig :=
+    (clkInt anchorSamples : Sig) : BuildM (Sig × Sig) := do
   let capacity := factored.source.size
-  if capacity == 0 then (lit 0, lit 0) else
-  let sourceCols := modeColumns factored.source
-  let sourceIndex := Sig.loopIdx 15
-  let lam := sourceCols.readPole sourceIndex
-  let sourceAmp := factored.sourceAmps.readDynamic
+  if capacity == 0 then
+    let zero ← lit 0
+    return (zero, zero)
+  let sourceCols ← modeColumns factored.source
+  let sourceIndex ← loopIdx 15
+  let lam ← sourceCols.readPole sourceIndex
+  let sourceAmp ← factored.sourceAmps.readDynamic
     factored.sourceAssembly sourceIndex
-  let p := readImageParts factored.confluenceImages
+  let p ← readImageParts factored.confluenceImages
     factored.confluencePole1 sourceIndex
-  let r := readImageParts factored.confluenceImages
+  let r ← readImageParts factored.confluenceImages
     factored.confluencePole2 sourceIndex
-  let pair1DDCoeff := readImageParts factored.confluenceImages
+  let pair1DDCoeff ← readImageParts factored.confluenceImages
     factored.confluencePair1DD sourceIndex
-  let pair1SimpleCoeff := readImageParts factored.confluenceImages
+  let pair1SimpleCoeff ← readImageParts factored.confluenceImages
     factored.confluencePair1Simple sourceIndex
-  let pair2DDCoeff := readImageParts factored.confluenceImages
+  let pair2DDCoeff ← readImageParts factored.confluenceImages
     factored.confluencePair2DD sourceIndex
-  let pair2SimpleCoeff := readImageParts factored.confluenceImages
+  let pair2SimpleCoeff ← readImageParts factored.confluenceImages
     factored.confluencePair2Simple sourceIndex
-  let tripleCoeff := readImageParts factored.confluenceImages
+  let tripleCoeff ← readImageParts factored.confluenceImages
     factored.confluenceTriple sourceIndex
-  let hot1 := gt (readScalarParts factored.confluenceImages
-    factored.confluenceHot1Offset sourceIndex) (lit 0)
-  let hot2 := gt (readScalarParts factored.confluenceImages
-    factored.confluenceHot2Offset sourceIndex) (lit 0)
-  let clkRel := relClockQ clkInt anchorSamples
-  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-  let sourceCarrier := poleCarrierE lam dSec clkRel
-  let pCarrier := poleCarrierE p dSec clkRel
-  let rCarrier := poleCarrierE r dSec clkRel
+  let hot1Value ← readScalarParts factored.confluenceImages
+    factored.confluenceHot1Offset sourceIndex
+  let zero ← lit 0
+  let hot1 ← gt hot1Value zero
+  let hot2Value ← readScalarParts factored.confluenceImages
+    factored.confluenceHot2Offset sourceIndex
+  let hot2 ← gt hot2Value zero
+  let clkRel ← relClockQ clkInt anchorSamples
+  let clkFloat ← toFloatE clkRel
+  let twoPow32 ← lit 4294967296
+  let secondsTimesRate ← div clkFloat twoPow32
+  let sr ← sampleRate
+  let dSec ← div secondsTimesRate sr
+  let sourceCarrier ← poleCarrierE lam dSec clkRel
+  let pCarrier ← poleCarrierE p dSec clkRel
+  let rCarrier ← poleCarrierE r dSec clkRel
   -- Sum every coefficient sharing the source carrier before multiplying it.
   -- Near a source/room crossing these terms can be individually large and
   -- cancel; multiplying them separately spends float32 precision twice.
-  let simpleCoeff := caddE sourceAmp
-    (caddE (onlyWhen hot1 pair1SimpleCoeff)
-      (onlyWhen hot2 pair2SimpleCoeff))
-  let simple := cmulE simpleCoeff sourceCarrier
-  let dd1 := dividedDifferenceWithCarrierE lam p pCarrier dSec clkRel
-  let pair1 := onlyWhen hot1 (cmulE pair1DDCoeff dd1)
-  let dd2 := dividedDifferenceWithCarrierE lam r rCarrier dSec clkRel
-  let pair2 := onlyWhen hot2 (cmulE pair2DDCoeff dd2)
-  let tripleCarrier := secondDividedDifferenceWithFirstE lam p r dSec clkRel
+  let pair1Simple ← onlyWhen hot1 pair1SimpleCoeff
+  let pair2Simple ← onlyWhen hot2 pair2SimpleCoeff
+  let simpleCorrections ← caddE pair1Simple pair2Simple
+  let simpleCoeff ← caddE sourceAmp simpleCorrections
+  let simple ← cmulE simpleCoeff sourceCarrier
+  let dd1 ← dividedDifferenceWithCarrierE lam p pCarrier dSec clkRel
+  let pair1Product ← cmulE pair1DDCoeff dd1
+  let pair1 ← onlyWhen hot1 pair1Product
+  let dd2 ← dividedDifferenceWithCarrierE lam r rCarrier dSec clkRel
+  let pair2Product ← cmulE pair2DDCoeff dd2
+  let pair2 ← onlyWhen hot2 pair2Product
+  let tripleCarrier ← secondDividedDifferenceWithFirstE lam p r dSec clkRel
     dd1 dd2 rCarrier
-  let triple := onlyWhen (Sig.binary .or hot1 hot2)
-    (cmulE tripleCoeff tripleCarrier)
-  let side := caddE simple (caddE (caddE pair1 pair2) triple)
-  let strike := caddE (onlyWhen hot1 pair1SimpleCoeff)
-    (onlyWhen hot2 pair2SimpleCoeff)
-  let values := #[selectE (gt clkRel (lit 0)) side.1 (lit 0), strike.1]
+  let anyHot ← binary .or hot1 hot2
+  let tripleProduct ← cmulE tripleCoeff tripleCarrier
+  let triple ← onlyWhen anyHot tripleProduct
+  let pairs ← caddE pair1 pair2
+  let corrections ← caddE pairs triple
+  let side ← caddE simple corrections
+  let strike ← caddE pair1Simple pair2Simple
+  let afterStrike ← gt clkRel zero
+  let selectedSide ← selectE afterStrike side.1 zero
+  let values := #[selectedSide, strike.1]
   let routes := (Array.range capacity).foldl
     (fun routes _ => routes.push (some 0) |>.push (some 1)) #[]
   let tables := sourceCols.tables ++ #[factored.sourceAssembly] ++
     factored.confluenceImages
-  let image := Sig.routedSum capacity 2 routes tables values none 15
-  (Sig.index image (lit 0), Sig.index image (lit 1))
+  let image ← routedSum capacity 2 routes tables values none 15
+  let sideResult ← Tropical.EmitArrow.index image zero
+  let one ← lit 1
+  let strikeResult ← Tropical.EmitArrow.index image one
+  pure (sideResult, strikeResult)
 
 /-- The structurally cold source lane has no DD or collision correction.  Do
     not merely feed zero confluence images through `routedSourceSideSig`: the
     symbolic backend is eager, so spelling the unreachable DD carrier would
     still consume threadgroup scalar scratch. -/
 private def routedColdSourceSideSig (factored : FactoredTwoRoomTerminal)
-    (clkInt anchorSamples : Sig) : Sig × Sig :=
+    (clkInt anchorSamples : Sig) : BuildM (Sig × Sig) := do
   let capacity := factored.source.size
-  if capacity == 0 then (lit 0, lit 0) else
-  let sourceCols := modeColumns factored.source
-  let sourceIndex := Sig.loopIdx 15
-  let lam := sourceCols.readPole sourceIndex
-  let sourceAmp := factored.sourceAmps.readDynamic
+  if capacity == 0 then
+    let zero ← lit 0
+    return (zero, zero)
+  let sourceCols ← modeColumns factored.source
+  let sourceIndex ← loopIdx 15
+  let lam ← sourceCols.readPole sourceIndex
+  let sourceAmp ← factored.sourceAmps.readDynamic
     factored.sourceAssembly sourceIndex
-  let clkRel := relClockQ clkInt anchorSamples
-  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-  let side := cmulE sourceAmp (poleCarrierE lam dSec clkRel)
-  let value := selectE (gt clkRel (lit 0)) side.1 (lit 0)
-  let image := Sig.routedSum capacity 1 (sumRoutes capacity)
+  let clkRel ← relClockQ clkInt anchorSamples
+  let clkFloat ← toFloatE clkRel
+  let twoPow32 ← lit 4294967296
+  let secondsTimesRate ← div clkFloat twoPow32
+  let sr ← sampleRate
+  let dSec ← div secondsTimesRate sr
+  let carrier ← poleCarrierE lam dSec clkRel
+  let side ← cmulE sourceAmp carrier
+  let zero ← lit 0
+  let afterStrike ← gt clkRel zero
+  let value ← selectE afterStrike side.1 zero
+  let image ← routedSum capacity 1 (sumRoutes capacity)
     (sourceCols.tables ++ #[factored.sourceAssembly]) #[value] none 15
-  (Sig.index image (lit 0), lit 0)
+  let result ← Tropical.EmitArrow.index image zero
+  pure (result, zero)
 
 /-- Fuse both ordinary room carriers and their paired DD row into one routed
     phase.  Besides removing two barrier triplets per side, the room-2 carrier
     is shared with the DD evaluation. -/
 private def routedRoomSideSig (room1 room2 : Array ModalMode) (assembly : Sig)
     (coeff1 coeff2 coeffDD : FactoredSlice) (clkInt anchorSamples : Sig)
-    (binder : Nat) : Sig :=
-  if room1.isEmpty then lit 0 else
-  let clkRel := relClockQ clkInt anchorSamples
-  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-  let leftCols := modeColumns room1
-  let rightCols := modeColumns room2
-  let index := Sig.loopIdx binder
-  let p := leftCols.readPole index
-  let r := rightCols.readPole index
-  let carrier1 := poleCarrierE p dSec clkRel
-  let carrier2 := poleCarrierE r dSec clkRel
-  let dd := dividedDifferenceWithCarrierE p r carrier2 dSec clkRel
-  let ordinary1 := cmulE (coeff1.readDynamic assembly index) carrier1
-  let ordinary2 := cmulE (coeff2.readDynamic assembly index) carrier2
-  let paired := cmulE (coeffDD.readDynamic assembly index) dd
-  let value := (caddE (caddE ordinary1 ordinary2) paired).1
-  let image := Sig.routedSum room1.size 1 (sumRoutes room1.size)
-    (leftCols.tables ++ rightCols.tables ++ #[assembly]) #[value] none binder
-  selectE (gt clkRel (lit 0)) (Sig.index image (lit 0)) (lit 0)
+    (binder : Nat) : BuildM Sig := do
+  if room1.isEmpty then return ← lit 0
+  let clkRel ← relClockQ clkInt anchorSamples
+  let clkFloat ← toFloatE clkRel
+  let twoPow32 ← lit 4294967296
+  let secondsTimesRate ← div clkFloat twoPow32
+  let sr ← sampleRate
+  let dSec ← div secondsTimesRate sr
+  let leftCols ← modeColumns room1
+  let rightCols ← modeColumns room2
+  let itemIndex ← loopIdx binder
+  let p ← leftCols.readPole itemIndex
+  let r ← rightCols.readPole itemIndex
+  let carrier1 ← poleCarrierE p dSec clkRel
+  let carrier2 ← poleCarrierE r dSec clkRel
+  let dd ← dividedDifferenceWithCarrierE p r carrier2 dSec clkRel
+  let coefficient1 ← coeff1.readDynamic assembly itemIndex
+  let ordinary1 ← cmulE coefficient1 carrier1
+  let coefficient2 ← coeff2.readDynamic assembly itemIndex
+  let ordinary2 ← cmulE coefficient2 carrier2
+  let ddCoefficient ← coeffDD.readDynamic assembly itemIndex
+  let paired ← cmulE ddCoefficient dd
+  let ordinary ← caddE ordinary1 ordinary2
+  let value ← caddE ordinary paired
+  let image ← routedSum room1.size 1 (sumRoutes room1.size)
+    (leftCols.tables ++ rightCols.tables ++ #[assembly]) #[value.1] none binder
+  let zero ← lit 0
+  let afterStrike ← gt clkRel zero
+  let result ← Tropical.EmitArrow.index image zero
+  selectE afterStrike result zero
 
 def FactoredTwoRoomTerminal.realizeSig (factored : FactoredTwoRoomTerminal)
-    (clkInt anchorSamples : Sig) : Sig :=
-  let anchorQ := toIntE (mul anchorSamples (lit 4294967296))
-  let mirroredClock := sub (mul (lit 2) anchorQ) clkInt
-  let source := if factored.confluenceImages.isEmpty then
+    (clkInt anchorSamples : Sig) : BuildM Sig := do
+  let twoPow32 ← lit 4294967296
+  let anchorFixed ← mul anchorSamples twoPow32
+  let anchorQ ← toIntE anchorFixed
+  let two ← lit 2
+  let twiceAnchor ← mul two anchorQ
+  let mirroredClock ← sub twiceAnchor clkInt
+  let source ← if factored.confluenceImages.isEmpty then
       routedColdSourceSideSig factored clkInt anchorSamples
     else routedSourceSideSig factored clkInt anchorSamples
-  let future := routedRoomSideSig factored.room1 factored.room2
+  let future ← routedRoomSideSig factored.room1 factored.room2
     factored.roomAssembly factored.roomFuture1 factored.roomFuture2
     factored.roomFutureDD clkInt anchorSamples 8
-  let past := routedRoomSideSig factored.room1 factored.room2
+  let past ← routedRoomSideSig factored.room1 factored.room2
     factored.roomAssembly factored.roomPast1 factored.roomPast2
     factored.roomPastDD mirroredClock anchorSamples 9
-  let sides := add source.1 (add future past)
-  let atStrike := Sig.binary .eq (relClockQ clkInt anchorSamples) (lit 0)
-  selectE atStrike (add factored.atZero.1 source.2) sides
+  let roomSides ← add future past
+  let sides ← add source.1 roomSides
+  let relativeClock ← relClockQ clkInt anchorSamples
+  let zero ← lit 0
+  let atStrike ← binary .eq relativeClock zero
+  let sourceStrike ← add factored.atZero.1 source.2
+  selectE atStrike sourceStrike sides
 
 /-- Assemble the exact two-room degree-zero terminal from shared routed images.
     `none` is a structural refusal and tells the caller to retain the generic
     scalar `Bank` path. -/
 def factoredTwoRoomTerminal? (source room1 room2 : Array ModalMode)
-    (direction1 direction2 : Sig) : Option FactoredTwoRoomTerminal := do
-  if !factoredTwoRoomAdmitted source room1 room2 then none
-  let sourceImage ← sourceRoomImage? source room1 room2
-  let difference ← differenceImage? room1 room2
-  let physical ← physicalImage? room1 room2
-  let confluence ← if sourceRoomConfluenceCold source room1 room2 then
+    (direction1 direction2 : Sig) : BuildM (Option FactoredTwoRoomTerminal) := do
+  if !(← factoredTwoRoomAdmitted source room1 room2) then return none
+  let some sourceImage ← sourceRoomImage? source room1 room2 | return none
+  let some difference ← differenceImage? room1 room2 | return none
+  let some physical ← physicalImage? room1 room2 | return none
+  let confluence? : Option ConfluenceAssembly ← if ← sourceRoomConfluenceCold source room1 room2 then
       let layout := ConfluenceLayout.create source.size
-      some { images := #[], layout }
-    else
+      pure (some { images := #[], layout })
+    else do
       confluenceAssemblyImage? source room1 room2 sourceImage difference physical
         direction1 direction2
-  let sourceAssembly ← sourceAssemblyImage? source sourceImage direction1 direction2
-  let roomAssembly ← roomAssemblyImage? room1 room2 sourceImage difference physical
-    direction1 direction2
-  let atZero := caddE
-    (sourceAssembly.layout.strike.read sourceAssembly.image 0)
-    (roomAssembly.layout.strike.read roomAssembly.image 0)
-  pure {
+  let some confluence := confluence? | return none
+  let some sourceAssembly ← sourceAssemblyImage? source sourceImage direction1 direction2
+    | return none
+  let some roomAssembly ← roomAssemblyImage? room1 room2 sourceImage difference physical
+    direction1 direction2 | return none
+  let sourceStrike ← sourceAssembly.layout.strike.read sourceAssembly.image 0
+  let roomStrike ← roomAssembly.layout.strike.read roomAssembly.image 0
+  let atZero ← caddE sourceStrike roomStrike
+  pure (some {
     source, room1, room2
     direction1, direction2
     confluenceImages := confluence.images
@@ -1129,7 +1406,7 @@ def factoredTwoRoomTerminal? (source room1 room2 : Array ModalMode)
     roomPast2 := roomAssembly.layout.past2
     roomFutureDD := roomAssembly.layout.futureDD
     roomPastDD := roomAssembly.layout.pastDD
-    atZero }
+    atZero })
 
 /-! ## Six-section product extension
 
@@ -1141,33 +1418,48 @@ summary for those rows, and publishes their live poles/residues once through a
 and the six additional source amplitudes; room-pair and room-assembly images
 remain shared. -/
 
-private def inlineModeField (modes : Array ModalMode) (index : Sig)
-    (field : ModalMode → CplxE) : CplxE :=
-  modes.zipIdx.foldl (fun selected (mode, i) =>
-    cselectE (Sig.binary .eq index (litI (Int.ofNat i))) (field mode) selected)
-    (natE 0)
+private def inlineModeField (modes : Array ModalMode) (itemIndex : Sig)
+    (field : ModalMode → BuildM CplxE) : BuildM CplxE := do
+  let zero ← natE 0
+  modes.zipIdx.foldlM (fun selected (mode, i) => do
+    let row ← litI (Int.ofNat i)
+    let isRow ← binary .eq itemIndex row
+    let value ← field mode
+    cselectE isRow value selected) zero
 
 /-- Evaluate all live phaser rows once in one small cooperative image.  The
     interleaved layout avoids serial scalar scratch and lets every larger map
     use indexed reads instead of respelling six-way selections. -/
-private def liveModeImage? (modes : Array ModalMode) : Option Sig := do
-  if modes.isEmpty then none
-  let index := Sig.loopIdx 16
-  let pole := inlineModeField modes index (fun mode => mode.poleE)
-  let amp := inlineModeField modes index (fun mode => mode.ampE)
+private def liveModeImage? (modes : Array ModalMode) : BuildM (Option Sig) := do
+  if modes.isEmpty then return none
+  let itemIndex ← loopIdx 16
+  let pole ← inlineModeField modes itemIndex (fun mode => mode.poleE)
+  let amp ← inlineModeField modes itemIndex (fun mode => pure mode.ampE)
   let values := #[pole.1, pole.2, amp.1, amp.2]
   let routes := (Array.range modes.size).foldl (fun routes i =>
     routes.push (some (4 * i)) |>.push (some (4 * i + 1))
       |>.push (some (4 * i + 2)) |>.push (some (4 * i + 3))) #[]
   routedImage? modes.size (4 * modes.size) routes #[] values 16
 
-private def liveModePole (image index : Sig) : CplxE :=
-  (Sig.index image (mul (lit 4) index),
-   Sig.index image (add (lit 1) (mul (lit 4) index)))
+private def liveModePole (image itemIndex : Sig) : BuildM CplxE := do
+  let four ← lit 4
+  let base ← mul four itemIndex
+  let real ← Tropical.EmitArrow.index image base
+  let one ← lit 1
+  let imagIndex ← add one base
+  let imag ← Tropical.EmitArrow.index image imagIndex
+  pure (real, imag)
 
-private def liveModeAmp (image index : Sig) : CplxE :=
-  (Sig.index image (add (lit 2) (mul (lit 4) index)),
-   Sig.index image (add (lit 3) (mul (lit 4) index)))
+private def liveModeAmp (image itemIndex : Sig) : BuildM CplxE := do
+  let four ← lit 4
+  let base ← mul four itemIndex
+  let two ← lit 2
+  let realIndex ← add two base
+  let real ← Tropical.EmitArrow.index image realIndex
+  let three ← lit 3
+  let imagIndex ← add three base
+  let imag ← Tropical.EmitArrow.index image imagIndex
+  pure (real, imag)
 
 private structure ColdSourceLayout where
   d1 : FactoredSlice
@@ -1188,7 +1480,7 @@ private structure ColdSourceSummary where
   layout : ColdSourceLayout
 
 private def ColdSourceSummary.read (summary : ColdSourceSummary)
-    (slice : ColdSourceLayout → FactoredSlice) (index : Sig) : CplxE :=
+    (slice : ColdSourceLayout → FactoredSlice) (index : Sig) : BuildM CplxE :=
   (slice summary.layout).readDynamic summary.image index
 
 /-- Add the cold phaser rows only to the room-indexed columns of each incumbent
@@ -1196,14 +1488,14 @@ private def ColdSourceSummary.read (summary : ColdSourceSummary)
     combined `12×8×22` mapped-record shape is exactly the existing maximum
     physical-room route arena (`2112` records). -/
 private def sourceRoomPhaserImage? (source phaserRows room1 room2 : Array ModalMode)
-    (phaserImage : Sig) : Option SourceRoomImage := do
+    (phaserImage : Sig) : BuildM (Option SourceRoomImage) := do
   let n := source.size
   let k := phaserRows.size
   let m := room1.size
-  if n == 0 || k == 0 || m == 0 || room2.size != m then none
-  let sourceCols := modeColumns source
-  let room1Cols := modeColumns room1
-  let room2Cols := modeColumns room2
+  if n == 0 || k == 0 || m == 0 || room2.size != m then return none
+  let sourceCols ← modeColumns source
+  let room1Cols ← modeColumns room1
+  let room2Cols ← modeColumns room2
   let tables := sourceCols.tables ++ room1Cols.tables ++ room2Cols.tables ++
     #[phaserImage]
   let mut parts := #[]
@@ -1214,45 +1506,62 @@ private def sourceRoomPhaserImage? (source phaserRows room1 room2 : Array ModalM
       let width := stop - start
       let capacity := (n + k) * width
       let layout := SourceRoomLayout.create n width
-      if !layout.valid then none
-      let index := Sig.loopIdx 2
-      let row := Sig.binary .floorDiv index (litI (Int.ofNat width))
-      let roomLocal := Sig.binary .mod index (litI (Int.ofNat width))
-      let roomIndex := add roomLocal (litI (Int.ofNat start))
-      let original := Sig.binary .lt row (litI (Int.ofNat n))
-      let sourceIndex := selectE original row (litI 0)
-      let phaserIndex := selectE original (litI 0)
-        (sub row (litI (Int.ofNat n)))
-      let lam := cselectE original (sourceCols.readPole sourceIndex)
-        (liveModePole phaserImage phaserIndex)
-      let amp := cselectE original (sourceCols.readAmp sourceIndex)
-        (liveModeAmp phaserImage phaserIndex)
-      let pole1 := room1Cols.readPole roomIndex
-      let residue1 := room1Cols.readAmp roomIndex
-      let pole2 := room2Cols.readPole roomIndex
-      let residue2 := room2Cols.readAmp roomIndex
-      let q1 := cnegE pole1
-      let q2 := cnegE pole2
-      let delta1 := csubE lam pole1
-      let delta2 := csubE lam pole2
-      let hot1 := sourceCrossingHot delta1
-      let hot2 := sourceCrossingHot delta2
-      let anyHot := Sig.binary .or hot1 hot2
-      let u1 := safeInverseFor delta1 hot1
-      let v1 := cinvSharedE (csubE q1 lam)
-      let u2 := safeInverseFor delta2 hot2
-      let v2 := cinvSharedE (csubE q2 lam)
-      let d1 := unlessHot hot1 (cmulE residue1 u1)
-      let p1 := cmulE residue1 v1
-      let e1 := unlessHot hot1 (cnegE (cmulE amp u1))
-      let e1Cold2 := unlessHot hot2 e1
-      let m1 := cmulE amp v1
-      let d2 := unlessHot hot2 (cmulE residue2 u2)
-      let p2 := cmulE residue2 v2
-      let e2 := unlessHot hot2 (cnegE (cmulE amp u2))
-      let m2 := cmulE amp v2
-      let tf := unlessHot anyHot (cmulE amp (cmulE u1 u2))
-      let tp := cmulE amp (cmulE v1 v2)
+      if !layout.valid then return none
+      let itemIndex ← loopIdx 2
+      let widthSig ← litI (Int.ofNat width)
+      let row ← binary .floorDiv itemIndex widthSig
+      let roomLocal ← binary .mod itemIndex widthSig
+      let startSig ← litI (Int.ofNat start)
+      let roomIndex ← add roomLocal startSig
+      let sourceCount ← litI (Int.ofNat n)
+      let original ← binary .lt row sourceCount
+      let zeroInt ← litI 0
+      let sourceIndex ← selectE original row zeroInt
+      let phaserOffset ← sub row sourceCount
+      let phaserIndex ← selectE original zeroInt phaserOffset
+      let sourcePole ← sourceCols.readPole sourceIndex
+      let phaserPole ← liveModePole phaserImage phaserIndex
+      let lam ← cselectE original sourcePole phaserPole
+      let sourceAmp ← sourceCols.readAmp sourceIndex
+      let phaserAmp ← liveModeAmp phaserImage phaserIndex
+      let amp ← cselectE original sourceAmp phaserAmp
+      let pole1 ← room1Cols.readPole roomIndex
+      let residue1 ← room1Cols.readAmp roomIndex
+      let pole2 ← room2Cols.readPole roomIndex
+      let residue2 ← room2Cols.readAmp roomIndex
+      let q1 ← cnegE pole1
+      let q2 ← cnegE pole2
+      let delta1 ← csubE lam pole1
+      let delta2 ← csubE lam pole2
+      let hot1 ← sourceCrossingHot delta1
+      let hot2 ← sourceCrossingHot delta2
+      let anyHot ← binary .or hot1 hot2
+      let u1 ← safeInverseFor delta1 hot1
+      let q1Delta ← csubE q1 lam
+      let v1 ← cinvSharedE q1Delta
+      let u2 ← safeInverseFor delta2 hot2
+      let q2Delta ← csubE q2 lam
+      let v2 ← cinvSharedE q2Delta
+      let residue1U1 ← cmulE residue1 u1
+      let d1 ← unlessHot hot1 residue1U1
+      let p1 ← cmulE residue1 v1
+      let ampU1 ← cmulE amp u1
+      let negAmpU1 ← cnegE ampU1
+      let e1 ← unlessHot hot1 negAmpU1
+      let e1Cold2 ← unlessHot hot2 e1
+      let m1 ← cmulE amp v1
+      let residue2U2 ← cmulE residue2 u2
+      let d2 ← unlessHot hot2 residue2U2
+      let p2 ← cmulE residue2 v2
+      let ampU2 ← cmulE amp u2
+      let negAmpU2 ← cnegE ampU2
+      let e2 ← unlessHot hot2 negAmpU2
+      let m2 ← cmulE amp v2
+      let uProduct ← cmulE u1 u2
+      let ampUProduct ← cmulE amp uProduct
+      let tf ← unlessHot anyHot ampUProduct
+      let vProduct ← cmulE v1 v2
+      let tp ← cmulE amp vProduct
       let values := #[d1.1, d1.2, p1.1, p1.2,
         e1.1, e1.2, e1Cold2.1, e1Cold2.2, m1.1, m1.2,
         d2.1, d2.2, p2.1, p2.2, e2.1, e2.2, m2.1, m2.2,
@@ -1277,33 +1586,45 @@ private def sourceRoomPhaserImage? (source phaserRows room1 room2 : Array ModalM
               (appendComplexRoute routes layout.e2 j) layout.m2 j) layout.tf j)
           layout.tp j
         routes) #[]
-      let image ← routedImage? capacity layout.floatCount routes tables values 2
+      let some image ← routedImage? capacity layout.floatCount routes tables values 2
+        | return none
       parts := parts.push { image, layout, roomStart := start }
-  let _ ← parts[0]?
-  pure { parts }
+  if parts.isEmpty then return none
+  pure (some { parts })
 
 /-- One reused mapped region computes the four room transfer summaries needed
     to assemble all six phaser-pole source residues. -/
 private def coldSourceSummaryImage? (phaserRows room1 room2 : Array ModalMode)
-    (phaserImage : Sig) : Option ColdSourceSummary := do
+    (phaserImage : Sig) : BuildM (Option ColdSourceSummary) := do
   let k := phaserRows.size
   let m := room1.size
-  if k == 0 || m == 0 || room2.size != m then none
+  if k == 0 || m == 0 || room2.size != m then return none
   let layout := ColdSourceLayout.create k
-  let room1Cols := modeColumns room1
-  let room2Cols := modeColumns room2
-  let index := Sig.loopIdx 10
-  let sourceIndex := Sig.binary .floorDiv index (litI (Int.ofNat m))
-  let roomIndex := Sig.binary .mod index (litI (Int.ofNat m))
-  let lam := liveModePole phaserImage sourceIndex
-  let pole1 := room1Cols.readPole roomIndex
-  let pole2 := room2Cols.readPole roomIndex
-  let residue1 := room1Cols.readAmp roomIndex
-  let residue2 := room2Cols.readAmp roomIndex
-  let d1 := cmulE residue1 (cinvSharedE (csubE lam pole1))
-  let p1 := cmulE residue1 (cinvSharedE (csubE (cnegE pole1) lam))
-  let d2 := cmulE residue2 (cinvSharedE (csubE lam pole2))
-  let p2 := cmulE residue2 (cinvSharedE (csubE (cnegE pole2) lam))
+  let room1Cols ← modeColumns room1
+  let room2Cols ← modeColumns room2
+  let itemIndex ← loopIdx 10
+  let roomCount ← litI (Int.ofNat m)
+  let sourceIndex ← binary .floorDiv itemIndex roomCount
+  let roomIndex ← binary .mod itemIndex roomCount
+  let lam ← liveModePole phaserImage sourceIndex
+  let pole1 ← room1Cols.readPole roomIndex
+  let pole2 ← room2Cols.readPole roomIndex
+  let residue1 ← room1Cols.readAmp roomIndex
+  let residue2 ← room2Cols.readAmp roomIndex
+  let delta1 ← csubE lam pole1
+  let inverse1 ← cinvSharedE delta1
+  let d1 ← cmulE residue1 inverse1
+  let negativePole1 ← cnegE pole1
+  let physicalDelta1 ← csubE negativePole1 lam
+  let physicalInverse1 ← cinvSharedE physicalDelta1
+  let p1 ← cmulE residue1 physicalInverse1
+  let delta2 ← csubE lam pole2
+  let inverse2 ← cinvSharedE delta2
+  let d2 ← cmulE residue2 inverse2
+  let negativePole2 ← cnegE pole2
+  let physicalDelta2 ← csubE negativePole2 lam
+  let physicalInverse2 ← cinvSharedE physicalDelta2
+  let p2 ← cmulE residue2 physicalInverse2
   let values := #[d1.1, d1.2, p1.1, p1.2, d2.1, d2.2, p2.1, p2.2]
   let routes := (Array.range (k * m)).foldl (fun routes item =>
     let i := item / m
@@ -1312,44 +1633,58 @@ private def coldSourceSummaryImage? (phaserRows room1 room2 : Array ModalMode)
         (appendComplexRoute
           (appendComplexRoute routes layout.d1 i) layout.p1 i) layout.d2 i)
       layout.p2 i) #[]
-  let image ← routedImage? (k * m) layout.floatCount routes
+  let some image ← routedImage? (k * m) layout.floatCount routes
     (room1Cols.tables ++ room2Cols.tables ++ #[phaserImage]) values 10
-  pure { image, layout }
+    | return none
+  pure (some { image, layout })
 
 private def phaserSourceAssemblyImage? (source phaserRows : Array ModalMode)
     (sourceRoom : SourceRoomImage) (cold : ColdSourceSummary)
     (phaserImage direction1 direction2 : Sig) :
-    Option (AssemblyImage SourceAssemblyLayout) := do
+    BuildM (Option (AssemblyImage SourceAssemblyLayout)) := do
   let n := source.size
   let k := phaserRows.size
-  if n == 0 || k == 0 then none
+  if n == 0 || k == 0 then return none
   let layout := SourceAssemblyLayout.create (n + k)
-  let sourceCols := modeColumns source
-  let index := Sig.loopIdx 5
-  let original := Sig.binary .lt index (litI (Int.ofNat n))
-  let sourceIndex := selectE original index (litI 0)
-  let phaserIndex := selectE original (litI 0)
-    (sub index (litI (Int.ofNat n)))
+  let sourceCols ← modeColumns source
+  let itemIndex ← loopIdx 5
+  let sourceCount ← litI (Int.ofNat n)
+  let original ← binary .lt itemIndex sourceCount
+  let zeroInt ← litI 0
+  let sourceIndex ← selectE original itemIndex zeroInt
+  let phaserOffset ← sub itemIndex sourceCount
+  let phaserIndex ← selectE original zeroInt phaserOffset
   let chooseSummary := fun
       (sourceSlice : SourceRoomLayout → FactoredSlice)
-      (coldSlice : ColdSourceLayout → FactoredSlice) =>
-    cselectE original (sourceRoom.readSource sourceSlice sourceIndex)
-      (cold.read coldSlice phaserIndex)
-  let gain1 := caddE
-    (cscaleE (sub (lit 1) direction1) (chooseSummary (fun l => l.d1) (fun l => l.d1)))
-    (cscaleE direction1 (chooseSummary (fun l => l.p1) (fun l => l.p1)))
-  let gain2 := caddE
-    (cscaleE (sub (lit 1) direction2) (chooseSummary (fun l => l.d2) (fun l => l.d2)))
-    (cscaleE direction2 (chooseSummary (fun l => l.p2) (fun l => l.p2)))
-  let rawAmp := cselectE original (sourceCols.readAmp sourceIndex)
-    (liveModeAmp phaserImage phaserIndex)
-  let amp := cmulE rawAmp (cmulE gain1 gain2)
+      (coldSlice : ColdSourceLayout → FactoredSlice) => do
+    let sourceValue ← sourceRoom.readSource sourceSlice sourceIndex
+    let coldValue ← cold.read coldSlice phaserIndex
+    cselectE original sourceValue coldValue
+  let one ← lit 1
+  let forward1 ← sub one direction1
+  let d1 ← chooseSummary (fun l => l.d1) (fun l => l.d1)
+  let future1 ← cscaleE forward1 d1
+  let p1 ← chooseSummary (fun l => l.p1) (fun l => l.p1)
+  let past1 ← cscaleE direction1 p1
+  let gain1 ← caddE future1 past1
+  let forward2 ← sub one direction2
+  let d2 ← chooseSummary (fun l => l.d2) (fun l => l.d2)
+  let future2 ← cscaleE forward2 d2
+  let p2 ← chooseSummary (fun l => l.p2) (fun l => l.p2)
+  let past2 ← cscaleE direction2 p2
+  let gain2 ← caddE future2 past2
+  let sourceAmp ← sourceCols.readAmp sourceIndex
+  let phaserAmp ← liveModeAmp phaserImage phaserIndex
+  let rawAmp ← cselectE original sourceAmp phaserAmp
+  let gains ← cmulE gain1 gain2
+  let amp ← cmulE rawAmp gains
   let values := #[amp.1, amp.2, amp.1, amp.2]
   let routes := (Array.range (n + k)).foldl (fun routes i =>
     appendComplexRoute (appendComplexRoute routes layout.amps i) layout.strike 0) #[]
-  let image ← routedImage? (n + k) layout.floatCount routes
+  let some image ← routedImage? (n + k) layout.floatCount routes
     (sourceRoom.images ++ #[cold.image, phaserImage] ++ sourceCols.tables) values 5
-  pure { image, layout }
+    | return none
+  pure (some { image, layout })
 
 /-- Exact fused terminal for `source → room → six-section phaser → room`.
     The caller has already proved the frozen-LTI commutation that moves the
@@ -1363,48 +1698,59 @@ structure FactoredTwoRoomPhaserTerminal where
 
 private def routedInlineColdSourceSideSig (modes : Array ModalMode)
     (modeImage assembly : Sig) (amps : FactoredSlice)
-    (clkInt anchorSamples : Sig) : Sig :=
+    (clkInt anchorSamples : Sig) : BuildM Sig := do
   let capacity := modes.size
-  if capacity == 0 then lit 0 else
-  let index := Sig.loopIdx 15
-  let pole := liveModePole modeImage index
-  let amp := amps.readDynamic assembly index
-  let clkRel := relClockQ clkInt anchorSamples
-  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-  let side := cmulE amp (poleCarrierE pole dSec clkRel)
-  let image := Sig.routedSum capacity 1 (sumRoutes capacity)
+  if capacity == 0 then return ← lit 0
+  let itemIndex ← loopIdx 15
+  let pole ← liveModePole modeImage itemIndex
+  let amp ← amps.readDynamic assembly itemIndex
+  let clkRel ← relClockQ clkInt anchorSamples
+  let clkFloat ← toFloatE clkRel
+  let twoPow32 ← lit 4294967296
+  let secondsTimesRate ← div clkFloat twoPow32
+  let sr ← sampleRate
+  let dSec ← div secondsTimesRate sr
+  let carrier ← poleCarrierE pole dSec clkRel
+  let side ← cmulE amp carrier
+  let zero ← lit 0
+  let afterStrike ← gt clkRel zero
+  let value ← selectE afterStrike side.1 zero
+  let image ← routedSum capacity 1 (sumRoutes capacity)
     #[modeImage, assembly]
-    #[selectE (gt clkRel (lit 0)) side.1 (lit 0)] none 15
-  Sig.index image (lit 0)
+    #[value] none 15
+  Tropical.EmitArrow.index image zero
 
 def FactoredTwoRoomPhaserTerminal.realizeSig
     (factored : FactoredTwoRoomPhaserTerminal)
-    (clkInt anchorSamples : Sig) : Sig :=
-  add (factored.base.realizeSig clkInt anchorSamples)
-    (routedInlineColdSourceSideSig factored.phaserRows factored.phaserImage
-      factored.sourceAssembly factored.phaserAmps clkInt anchorSamples)
+    (clkInt anchorSamples : Sig) : BuildM Sig := do
+  let base ← factored.base.realizeSig clkInt anchorSamples
+  let phaser ← routedInlineColdSourceSideSig factored.phaserRows factored.phaserImage
+    factored.sourceAssembly factored.phaserAmps clkInt anchorSamples
+  add base phaser
 
 def factoredTwoRoomPhaserTerminal? (source tails room1 room2 : Array ModalMode)
-    (mix direction1 direction2 : Sig) : Option FactoredTwoRoomPhaserTerminal := do
-  if tails.isEmpty || !factoredTwoRoomAdmitted source room1 room2 then none
-  let decorated := decorateDegreeZeroCausalPhaser source tails mix
+    (mix direction1 direction2 : Sig) : BuildM (Option FactoredTwoRoomPhaserTerminal) := do
+  if tails.isEmpty || !(← factoredTwoRoomAdmitted source room1 room2) then return none
+  let decorated ← decorateDegreeZeroCausalPhaser source tails mix
   let phaserRows := decorated.extract source.size decorated.size
   if phaserRows.size != tails.size ||
-      !sourceRoomConfluenceCold phaserRows room1 room2 then none
-  let phaserImage ← liveModeImage? phaserRows
-  let sourceImage ← sourceRoomPhaserImage? source phaserRows room1 room2 phaserImage
-  let cold ← coldSourceSummaryImage? phaserRows room1 room2 phaserImage
-  let difference ← differenceImage? room1 room2
-  let physical ← physicalImage? room1 room2
-  let confluence ← confluenceAssemblyImage? source room1 room2 sourceImage
-    difference physical direction1 direction2
-  let sourceAssembly ← phaserSourceAssemblyImage? source phaserRows sourceImage
-    cold phaserImage direction1 direction2
-  let roomAssembly ← roomAssemblyImage? room1 room2 sourceImage difference physical
-    direction1 direction2
-  let atZero := caddE
-    (sourceAssembly.layout.strike.read sourceAssembly.image 0)
-    (roomAssembly.layout.strike.read roomAssembly.image 0)
+      !(← sourceRoomConfluenceCold phaserRows room1 room2) then return none
+  let some phaserImage ← liveModeImage? phaserRows | return none
+  let some sourceImage ← sourceRoomPhaserImage? source phaserRows room1 room2 phaserImage
+    | return none
+  let some cold ← coldSourceSummaryImage? phaserRows room1 room2 phaserImage
+    | return none
+  let some difference ← differenceImage? room1 room2 | return none
+  let some physical ← physicalImage? room1 room2 | return none
+  let some confluence ← confluenceAssemblyImage? source room1 room2 sourceImage
+    difference physical direction1 direction2 | return none
+  let some sourceAssembly ← phaserSourceAssemblyImage? source phaserRows sourceImage
+    cold phaserImage direction1 direction2 | return none
+  let some roomAssembly ← roomAssemblyImage? room1 room2 sourceImage difference physical
+    direction1 direction2 | return none
+  let sourceStrike ← sourceAssembly.layout.strike.read sourceAssembly.image 0
+  let roomStrike ← roomAssembly.layout.strike.read roomAssembly.image 0
+  let atZero ← caddE sourceStrike roomStrike
   let base : FactoredTwoRoomTerminal := {
     source, room1, room2
     direction1, direction2
@@ -1432,11 +1778,11 @@ def factoredTwoRoomPhaserTerminal? (source tails room1 room2 : Array ModalMode)
     name := "phaser-source-future"
     offset := 2 * source.size
     extent := phaserRows.size }
-  pure {
+  pure (some {
     base := base
     phaserRows := phaserRows
     phaserImage := phaserImage
     sourceAssembly := sourceAssembly.image
-    phaserAmps := phaserAmps }
+    phaserAmps := phaserAmps })
 
 end Tropical.EmitArrow.Oriented

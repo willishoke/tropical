@@ -34,18 +34,18 @@ Production PatchGraph modal lowering and terminal realization refine the canonic
 - Gates: `modal-universe-history`, `modal-oriented-patch`, `modal-phaser`, `manual:production modal refinement review`
 - Limitation: Production now retains an authored ordinary-room/gauge/phaser stage spine, binds live controls together at the true terminal, and carries plain sources through explicit future/past algebra with stable divided-difference and exact fused two-room/phaser routes. Full refinement remains open: hot/equal-pole divided differences are not yet composable through a later room or gauge; arbitrary live source-frequency crossings need a declared pole envelope; phaser and live reverse/sway/gauge after bloom need the oriented Gamma bridge; and the bilateral live-gauge cost/backend envelope is not qualified.
 
-## LOWER_SIG_TREE_PRESERVES
+## EXPR_ARENA_DENOTATION_STABLE
 
-For every carrier algebra, environment, production Sig, and well-formed initial ExprArena, lowerSigTree returns a well-formed arena extension whose expression denotation equals the direct Sig denotation.
+For every carrier algebra and environment, extending a well-formed ExprArena preserves the direct denotation of every addressable existing root.
 
 - Status: proved
 - Priority: critical
 - Owner: Lean semantics
 - Evidence: theorem
-- Formal symbol: `Tropical.Semantics.lowerSigTree_preserves`
-- Implementation: `lean/Tropical/Ir/Nodes.lean`, `lean/Tropical/Semantics/Arena.lean`, `lean/Tropical/Semantics/Expr.lean`, `lean/Tropical/Semantics/LowerSig.lean`
+- Formal symbol: `Tropical.Semantics.denoteExpr_extends`
+- Implementation: `lean/Tropical/Ir/Nodes.lean`, `lean/Tropical/Semantics/Environment.lean`, `lean/Tropical/Semantics/Arena.lean`, `lean/Tropical/Semantics/Expr.lean`
 - Gates: `lake-build:Tropical.Semantics`, `semantics-production-fixtures`
-- Limitation: This proves the structural lowerSigTree reference. The unsafe pointer-memoized implementation remains the separate LOWER_SIG_PTR_REFINES_TREE obligation; no backend execution theorem is claimed.
+- Limitation: The production compiler authors ExprIds directly, so there is no source-tree lowering refinement obligation. Backend execution remains separate.
 
 ## CLOCK_RAIL_IS_EXACT
 
@@ -58,7 +58,7 @@ Per sample, runtime integer rail operations implement the Int denotation modulo 
 - Formal symbol: none
 - Implementation: `lean/Tropical/EmitArrow/ClockAlgebra.lean`, `lean/Tropical/Ir/EmitLlvm.lean`, `lean/Tropical/Ir/EmitMsl.lean`
 - Gates: `clock-algebra-theorems`, `patch-goldens`
-- Limitation: Front-end algebra is proved; correspondence to emitted LLVM/MSL integer execution is inspected, not proved.
+- Limitation: The front-end algebra is proved directly on frozen ExprArena/ExprId graphs. Correspondence to emitted LLVM/MSL integer execution is inspected, not proved.
 
 ## REDUCE_REGION_EXECUTES_IN_ARRAY_ORDER
 
@@ -69,9 +69,9 @@ JIT, wasm, and MSL execute bank bodies at increasing indices with a scalar left 
 - Owner: Backend correctness
 - Evidence: theorem, executable gate, inspection
 - Formal symbol: none
-- Implementation: `lean/Tropical/EmitArrow/BankOrder.lean`, `lean/Tropical/Ir/EmitBankLaws.lean`, `engine/jit/OrcJitEngine.cpp`, `lean/Tropical/Ir/EmitMsl.lean`
+- Implementation: `lean/Tropical/EmitArrow/BankOrder.lean`, `lean/Tropical/Semantics/Expr.lean`, `lean/Tropical/Ir/EmitBankLaws.lean`, `engine/jit/OrcJitEngine.cpp`, `lean/Tropical/Ir/EmitMsl.lean`
 - Gates: `reduce-coverage`, `msl-column-guard`, `manual:backend reduce-loop inspection`
-- Limitation: Tree order, region shape, and prefix clamp are proved; backend execution of the region remains a named runtime assumption.
+- Limitation: Direct arena denotation order, nested fold order, region shape, and prefix clamp are proved; backend execution of the region remains a named runtime assumption.
 
 ## ROUTED_SUM_PRESERVES_AUTHORED_ORDER
 
@@ -82,22 +82,9 @@ Routed reductions map each item once and fold active contributions per output in
 - Owner: Backend correctness
 - Evidence: theorem, executable gate, inspection
 - Formal symbol: none
-- Implementation: `lean/Tropical/Semantics/Sig.lean`, `lean/Tropical/Semantics/LowerSig.lean`, `lean/Tropical/Ir/EmitLlvm.lean`, `lean/Tropical/Ir/EmitMsl.lean`, `engine/metal/MetalKernel.mm`
+- Implementation: `lean/Tropical/Semantics/Environment.lean`, `lean/Tropical/Semantics/Expr.lean`, `lean/Tropical/Ir/EmitLlvm.lean`, `lean/Tropical/Ir/EmitMsl.lean`, `engine/metal/MetalKernel.mm`
 - Gates: `routed-sum-coverage`, `metal-ctest`, `manual:routed backend inspection`
-- Limitation: Source-to-arena preservation is proved and scalar/cooperative schedules are differentially exercised; LLVM, Metal compiler, driver, and hardware execution remain external refinement assumptions.
-
-## LOWER_SIG_PTR_REFINES_TREE
-
-For immutable Sig, pointer-memoized lowerSigPtr returns the same id and expression-arena result as structural lowerSigTree.
-
-- Status: open
-- Priority: critical
-- Owner: Lean semantics
-- Evidence: unsafe optimization, differential, inspection
-- Formal symbol: none
-- Implementation: `lean/Tropical/EmitArrow/Sig.lean`, `lean/Tropical/Testing/Semantics.lean`
-- Gates: `semantics-pointer-differential`, `manual:pointer memo code review`
-- Limitation: Differential fixtures cover representative sharing, arrays, nested banks, and re-intern every emitted node to observe its dedup hit; this remains finite evidence, and ptrAddrUnsafe identity is intentionally not modeled as a theorem.
+- Limitation: Direct arena semantics proves authored fold order and scalar/cooperative schedules are differentially exercised; LLVM, Metal compiler, driver, and hardware execution remain external refinement assumptions.
 
 ## LLVM_TEXT_EXECUTES_PLAN
 

@@ -158,7 +158,7 @@ Keeping these phases separate prevents most architectural misunderstandings.
 
 | Phase | What happens | Current representation |
 |---|---|---|
-| Authoring time | Lean combinators build an expression tree and declarations; `assemble` interns them into the graph. | [`EmitArrow.Sig`](../lean/Tropical/EmitArrow/Sig.lean), then [`Ir.ENode`/`ExprArena`](../lean/Tropical/Ir/Nodes.lean) |
+| Authoring time | Lean `BuildM` combinators intern expression nodes immediately and collect ordered declarations; `assemble` publishes the completed program atomically. | [`EmitArrow.Sig`](../lean/Tropical/EmitArrow/Sig.lean) over [`Ir.ENode`/`ExprArena`](../lean/Tropical/Ir/Nodes.lean) |
 | Compile time | Program registration performs direct `Ir.Strata` lowering. A structural session compile links those resolved types into a checked synthetic root, then partitions, classifies binding time, and emits backends. | [`Engine.Compile`](../lean/Tropical/Engine/Compile.lean), [`Ir.Strata`](../lean/Tropical/Ir/Strata.lean), [`Compile`](../lean/Tropical/Compile.lean), [`Ir.Stage0`](../lean/Tropical/Ir/Stage0.lean) |
 | Control time | A host dispatches a parameter write according to the plan-carried discipline and writes one or more slots. | [`Plan.ParamDiscipline`](../lean/Tropical/Plan.lean), [`Engine.Audio`](../lean/Tropical/Engine/Audio.lean), [`tropical_socket`](../engine/c_api/tropical_socket.cpp) |
 | Sample time | The selected backend evaluates the closed-form kernel at a coordinate and current slot values. | [`EmitLlvm`](../lean/Tropical/Ir/EmitLlvm.lean), [`EmitMsl`](../lean/Tropical/Ir/EmitMsl.lean), [`FlatRuntime`](../engine/runtime/FlatRuntime.hpp), [`WasmKernel`](../web/runtime/kernel.ts) |
@@ -172,18 +172,20 @@ kernel.
 
 ### Lean arrow builders
 
-[`Tropical.EmitArrow.Sig`](../lean/Tropical/EmitArrow/Sig.lean) is a fourteen
-constructor authoring tree. `assemble` lowers it directly into the resolved
-arena. The standard library is a chain of these builders in
-[`Tropical.Stdlib`](../lean/Tropical/Stdlib.lean); there is no literate surface
-parser or name-resolution elaborator between a builder and the trunk IR.
+[`Tropical.EmitArrow.Sig`](../lean/Tropical/EmitArrow/Sig.lean) defines `Sig`
+as a stable `ExprId` in the active builder's `ExprArena`. Every smart
+constructor interns its `ENode` immediately after its child IDs exist;
+`assemble` publishes the expression arena and ordered declarations only after
+the complete build succeeds. The standard library is a chain of these builders
+in [`EmitArrow.Stdlib`](../lean/Tropical/EmitArrow/Stdlib.lean), re-exported by
+[`Tropical.Stdlib`](../lean/Tropical/Stdlib.lean). There is no recursive
+authoring tree, adapter, literate parser, or name-resolution elaborator between
+a builder and the trunk IR.
 
-`Sig` is the fourteen-constructor authoring subset of the `ENode` executable
-trunk. Other current producers can use additional trunk nodes such as `bool`
-and `arraySet`; there is still one expression vocabulary rather than a rich
-AST/core twin. `bankSum` is deliberate backend-visible data: it describes a
-bounded ordered reduction, not a combinator waiting for a later “sum
-lowering” pass.
+Authoring and compilation therefore share one expression vocabulary. Other
+current producers can use trunk nodes such as `bool` and `arraySet`; `bankSum`
+is deliberate backend-visible data describing a bounded ordered reduction,
+not a combinator waiting for a later “sum lowering” pass.
 
 ### MCP session mutations
 
@@ -267,8 +269,8 @@ audio callback does not pack coefficient data.
 | Closed-form kernel | the authoring and wire vocabularies | absence of state/register/delay/update constructors in [`EmitArrow.Sig`](../lean/Tropical/EmitArrow/Sig.lean), [`Ir.ENode`](../lean/Tropical/Ir/Nodes.lean), and [`WireExpr`](../lean/Tropical/WireExpr.lean) | LLVM, wasm32, and Metal execution |
 | Whole-graph parameter universe | canonical modal proof; production refinement is tracked as an open trust obligation | one terminal-context control freeze, with branch address isolated to response-coordinate resolution | random-access JIT/wasm/Metal rendering and observation taps |
 | Typed wire | [`WireExpr` JSON decoder](../lean/Tropical/WireExpr.lean) and port validation in [`Engine.Wire`](../lean/Tropical/Engine/Wire.lean) | `Tropical.WireExpr` plus declared port positions/types | `sessionToResolvedRoot` and export construction |
-| Source-expression meaning | direct [`Sig` denotation](../lean/Tropical/Semantics/Sig.lean), total [`ExprArena` denotation](../lean/Tropical/Semantics/Expr.lean), and [`lowerSigTree_preserves`](../lean/Tropical/Semantics/LowerSig.lean) | refusal-aware carrier-parametric equality across structural lowering | whole-program lowering and later refinement proofs |
-| Bank order | authoring and emitter laws in [`EmitArrow.BankOrder`](../lean/Tropical/EmitArrow/BankOrder.lean) and [`Ir.EmitBankLaws`](../lean/Tropical/Ir/EmitBankLaws.lean) | `ENode.bankSum`, `ReduceBegin`/`ReduceEnd`, ordered tables | LLVM/JIT, wasm32, and MSL/Metal |
+| Source-expression meaning | total [`ExprArena` denotation](../lean/Tropical/Semantics/Expr.lean) and extension stability in [`Semantics.Arena`](../lean/Tropical/Semantics/Arena.lean) | carrier-parametric denotation of stable `ExprId` roots as the arena grows | authoring inspection and later backend refinement proofs |
+| Bank order | direct arena denotation in [`EmitArrow.BankOrder`](../lean/Tropical/EmitArrow/BankOrder.lean) and emitter laws in [`Ir.EmitBankLaws`](../lean/Tropical/Ir/EmitBankLaws.lean) | `ENode.bankSum`, `ReduceBegin`/`ReduceEnd`, ordered tables | LLVM/JIT, wasm32, and MSL/Metal |
 | Stage separation | stage attributes and [`Stage0.hoistTyped`](../lean/Tropical/Ir/Stage0.lean) | typed per-instruction stage blocks plus coefficient slots/columns | staged native and Metal loads |
 | Host write discipline | playground decode/report and plan construction in [`Playground`](../lean/Tropical/Playground/) | `FlatPlan.paramDisciplines` and named companion slots | Lean host, C++ socket host, and other manifest hosts |
 
@@ -397,7 +399,7 @@ what is implementation-backed, and what remains empirical.
 
 ```text
 lean/Tropical/
-  EmitArrow/                 fourteen-constructor authoring tree and builders
+  EmitArrow/                 ID-native `BuildM` authoring and modal builders
   Ir/Nodes.lean              ResolvedProgram / ENode / ExprArena trunk
   Ir/Strata.lean             direct lowering
   Compile.lean               partition + tropical_plan_6 construction
