@@ -43,14 +43,30 @@ open Tropical.Exact (DyadicI)
     own `clkRel > 0` gate fires at the strike exactly as unwarped.
     `scale` lets a stiffer register (high partials) take a fraction of the
     glide. -/
-def gongBloomWarp (anchorSamples beta g : Sig) (scale : Float) : Clock → Clock :=
-  fun clk =>
-    let clkRel := relClockQ clk anchorSamples
-    let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-    let dPos := clampE dSec (lit 0) (lit 1000000)
-    let bloom := mul (mul beta (litF scale))
-      (div (sub (lit 1) (expSig (neg (mul g dPos)))) g)
-    add clk (toIntE (mul (mul bloom .sampleRate) (lit 4294967296)))
+def gongBloomWarp (anchorSamples beta g : Sig) (scale : Float) : Clock → BuildM Clock :=
+  fun clk => do
+    let clkRel ← relClockQ clk anchorSamples
+    let clkFloat ← toFloatE clkRel
+    let twoPow32 ← lit 4294967296
+    let scaledClock ← div clkFloat twoPow32
+    let sr ← sampleRate
+    let dSec ← div scaledClock sr
+    let zero ← lit 0
+    let horizon ← lit 1000000
+    let dPos ← clampE dSec zero horizon
+    let scaleSig ← litF scale
+    let scaledBeta ← mul beta scaleSig
+    let gd ← mul g dPos
+    let negativeGd ← neg gd
+    let decay ← expSig negativeGd
+    let one ← lit 1
+    let rise ← sub one decay
+    let normalizedRise ← div rise g
+    let bloom ← mul scaledBeta normalizedRise
+    let samples ← mul bloom sr
+    let fixed ← mul samples twoPow32
+    let shift ← toIntE fixed
+    add clk shift
 
 -- ── The default strike (a bare gong node, no score data) ──────────────────
 
@@ -62,21 +78,21 @@ def gongBloomWarp (anchorSamples beta g : Sig) (scale : Float) : Clock → Clock
     default (every vocabulary kind sounds when dropped), and it keeps the
     master-clock slots read in the minimal patch (an EMPTY gong would emit
     no generator at all). -/
-def defaultGongModes (f0 : Float) : Array ModalMode × Array ModalMode := Id.run do
+def defaultGongModes (f0 : Float) : BuildM (Array ModalMode × Array ModalMode) := do
   -- The bake layer's libm exile reaches a SERVED kind here: these literals are
   -- what a bare `gong` node emits, so they must be a function of `f0` alone and
   -- not of the host's trig. `DyadicI.pow` is `exp(y·ln x)` where libm's `pow` is
   -- separately rounded, so the amplitudes move by ~1e-16 relative — the carrier
   -- being deterministic, not better, is the claim.
   let ex := DyadicI.toFloat
-  let mode := fun (f sigma amp ph : Float) =>
+  let mode := fun (f sigma amp ph : Float) => do
     let phD := DyadicI.ofFloat ph
     let ampD := DyadicI.ofFloat amp
-    ({ sigma := litF sigma,
-       omega := litF (ex (DyadicI.mul Tropical.Exact.twoPiI (DyadicI.ofFloat f))),
-       cre := litF (ex (DyadicI.mul ampD (DyadicI.cos phD))),
-       cim := litF (ex (DyadicI.mul ampD (DyadicI.sin phD))) }
-     : ModalMode)
+    let sigma ← litF sigma
+    let omega ← litF (ex (DyadicI.mul Tropical.Exact.twoPiI (DyadicI.ofFloat f)))
+    let cre ← litF (ex (DyadicI.mul ampD (DyadicI.cos phD)))
+    let cim ← litF (ex (DyadicI.mul ampD (DyadicI.sin phD)))
+    pure ({ sigma, omega, cre, cim } : ModalMode)
   -- `c / x^p` as one certified quotient (`pow` needs a certifiably positive
   -- base, which every ratio here is)
   let rolloff := fun (c x p : Float) =>
@@ -85,11 +101,11 @@ def defaultGongModes (f0 : Float) : Array ModalMode × Array ModalMode := Id.run
   let lowRatios : Array Float := #[1.0, 1.51, 2.07, 2.63, 3.21]
   let mut full : Array ModalMode := #[]
   for i in [0:lowRatios.size] do
-    full := full.push (mode (f0 * lowRatios[i]!) (0.2 + 0.12 * i.toFloat)
+    full := full.push (← mode (f0 * lowRatios[i]!) (0.2 + 0.12 * i.toFloat)
       (rolloff 1.0 (i.toFloat + 1.0) 0.7) (2.399963 * i.toFloat))
   for j in [0:8] do
     let r := 3.0 + 0.9 * j.toFloat
-    full := full.push (mode (f0 * r) (0.5 + 0.09 * j.toFloat)
+    full := full.push (← mode (f0 * r) (0.5 + 0.09 * j.toFloat)
       (rolloff 0.3 r 0.8) (2.399963 * (j.toFloat + 5.0)))
   let mut half : Array ModalMode := #[]
   for j in [0:4] do
@@ -97,8 +113,8 @@ def defaultGongModes (f0 : Float) : Array ModalMode × Array ModalMode := Id.run
     let a := rolloff 0.18 r 0.5
     let ph := 2.399963 * (j.toFloat + 13.0)
     let d1 := 0.5 + 0.1 * j.toFloat
-    half := half.push (mode (f0 * r) d1 a ph)
-    half := half.push (mode (f0 * r) (d1 + 2.5) (-a) ph)
+    half := half.push (← mode (f0 * r) d1 a ph)
+    half := half.push (← mode (f0 * r) (d1 + 2.5) (-a) ph)
   return (full, half)
 
 -- ── The strike, composed from existing node kinds ─────────────────────────

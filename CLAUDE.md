@@ -81,8 +81,9 @@ compile, export's direct construction (`Ir/Cycles.lean`) — there is no
 `reg`/`delay` escape hatch; recursive filtering of live/external input
 is the ceded island, deferred to a future stateful sister runtime). The lowering is
 what makes this concrete — and it is DIRECT, not a pipeline: the
-authoring surface (`Sig`, fourteen constructors) is already the trunk
-IR, so there is nothing left to progressively retire. The historical
+authoring surface (`Sig = ExprId` with `BuildM` smart constructors) interns
+directly into the trunk IR, so there is nothing left to progressively retire.
+The historical
 five-pass strata drop sequence (specialize → sumLower →
 inlineInstances → arrayLower → identityElim) was retired 2026-07-25:
 four of the five passes had no live producer for the structure they
@@ -152,10 +153,10 @@ ResolvedProgram (lowered)
   `Ir/EmitBankLaws.lean`; trusted base = one named assumption,
   `REDUCE_REGION_EXECUTES_IN_ARRAY_ORDER`). The waist of the
   hourglass: the smallest IR sufficient for any per-sample evaluator.
-  `Sig` is the fourteen-constructor authoring subset of this `ENode`
-  trunk (`ENode` also has current non-`Sig` producers such as `bool`
-  and `arraySet`); both sides share one expression vocabulary and meet
-  at the `assemble` seam.
+  `Sig` is a stable `ExprId` in this `ENode` trunk. Smart constructors
+  intern children before parents in the active `BuildM`; other producers
+  can use nodes such as `bool` and `arraySet`. All paths share one
+  expression vocabulary and complete at the atomic `assemble` seam.
 ```
 
 Sessions (the MCP/runtime view of a graph in flight) reuse the

@@ -36,11 +36,12 @@ MCP mutations / program_2 JSON → typed SessionSt → synthetic resolved root
                                               LLVM → JIT    LLVM → wasm32  MSL → Metal
 ```
 
-The standard library is authored as fourteen-constructor
-[`Tropical.EmitArrow.Sig`](lean/Tropical/EmitArrow/Sig.lean) trees and
-assembled directly into the resolved `ENode`/`ExprArena` vocabulary. There is
+The standard library is authored with the ID-native
+[`Tropical.EmitArrow.Sig`](lean/Tropical/EmitArrow/Sig.lean) `BuildM` API,
+which interns directly into the resolved `ENode`/`ExprArena` vocabulary and
+publishes complete programs atomically. There is
 no surface parser, name-resolution elaborator, generic specialization pass,
-sum-lowering pass, or separate core-expression arena.
+recursive authoring tree, sum-lowering pass, or separate core-expression arena.
 
 MCP sessions and `tropical_program_2` files are patch bays over registered
 types. Their wiring decodes into the closed

@@ -27,7 +27,8 @@ def handleListScopeTaps (env : Env) : EngineM Json := do
   pure <| Json.mkObj [("taps", Json.arr taps)]
 
 private def selectedObservationTapNames (args : Json) : Array String :=
-  let visible := Tropical.Playground.tapNodeIds (Tropical.Playground.rawsOf args)
+  let visible := Tropical.Playground.tapNodeIds
+    (Tropical.Playground.Metadata.rawsOf args)
   match args.getObjVal? "taps" with
   | .ok (.arr taps) => taps.foldl (init := #[]) fun selected tap =>
       match tap with
@@ -101,7 +102,7 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   -- The vocabulary (port-spec table as data: ports, accepts, defaults, write
   -- disciplines, display metadata) — clients render it, never re-encode it.
   -- Session-independent, so it just echoes.
-  | "get_vocabulary" => pure Tropical.Playground.vocabularyJson
+  | "get_vocabulary" => pure Tropical.Playground.Metadata.vocabularyJson
   | "get_module_library" => pure Tropical.Playground.hierarchyLibraryJson
   | "add_instance"    => handleAddInstance env args
   | "remove_instance" => handleRemoveInstance env args

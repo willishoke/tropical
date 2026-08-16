@@ -14,6 +14,7 @@ import Tropical.Compile
 import Tropical.EmitArrow
 import Tropical.Stdlib
 import Tropical.Testing.ArrowFixtures
+import Tropical.Testing.EmitArrow
 import Tropical.Testing.ClockLaws
 import Tropical.Testing.EngineMirror
 import Tropical.Testing.PlanWire
@@ -56,6 +57,13 @@ def main (args : List String) : IO UInt32 := do
   let writeMode := args.contains "--write"
   if args.contains "--routed-only" then
     return if ← runRoutedSumCoverage then 0 else 1
+  if args.contains "--emitarrow-only" || args.contains "--arena-native-only" then
+    let phase1 ← Tropical.Testing.EmitArrow.runPhase1Gate
+    let phase2 ← Tropical.Testing.EmitArrow.runPhase2Gate
+    let phase3 ← Tropical.Testing.EmitArrow.runPhase3Gate
+    let phase4 ← Tropical.Testing.ClockLaws.runPhase4Gate
+    let phase5 ← Tropical.Testing.EmitArrow.runPhase5Gate
+    return if phase1 && phase2 && phase3 && phase4 && phase5 then 0 else 1
   if args.contains "--oriented-patch-only" then
     return if ← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch {} then 0 else 1
   if args.contains "--phaser-only" then
@@ -88,6 +96,19 @@ def main (args : List String) : IO UInt32 := do
   IO.println "trusted boundary (typed ledger, report, production fixtures):"
   total := total + 1
   if !(← Tropical.Testing.Semantics.runTrustAudit) then failed := failed + 1
+
+  -- ── EmitArrow authoring qualification ────────────────────────────────────
+  IO.println "EmitArrow authoring foundation:"
+  total := total + 1
+  if !(← Tropical.Testing.EmitArrow.runPhase1Gate) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Testing.EmitArrow.runPhase2Gate) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Testing.EmitArrow.runPhase3Gate) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Testing.ClockLaws.runPhase4Gate) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Testing.EmitArrow.runPhase5Gate) then failed := failed + 1
 
   -- ── (a) Patch audio goldens (tests/golden/*.hash) ──────────────────────────
   IO.println "patch goldens:"
@@ -615,10 +636,10 @@ def main (args : List String) : IO UInt32 := do
     if !(← runVocabDriven arena resolved) then
       failed := failed + 1
     total := total + 1
-    if !(← runModalClassAgreement) then
+    if !(← runModalClassAgreement arena) then
       failed := failed + 1
     total := total + 1
-    if !(← runImplicitFanIn) then
+    if !(← runImplicitFanIn arena) then
       failed := failed + 1
     total := total + 1
     if !(← runMalformedRejection arena resolved) then

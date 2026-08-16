@@ -65,8 +65,10 @@ def modalBankTermPartitioned (plain : Array ModalMode) (paired : Array PairedMod
     then fun ms clk a => modalBankSigTable ms clk a count?
     else fun ms clk a => modalBankSig ms clk a
   ArrowTerm.arrUn
-    (fun clkSig => add (lowerP plain clkSig anchor)
-                       (modalBankSigTableDD paired clkSig anchor))
+    (fun clkSig => do
+      let plainSig ← lowerP plain clkSig anchor
+      let pairedSig ← modalBankSigTableDD paired clkSig anchor
+      add plainSig pairedSig)
     (ArrowTerm.clk c)
 
 -- ── The strike train: quotient clock × comb factor (the CF sequencer, tier 0) ──
@@ -93,8 +95,8 @@ def modalBankTermPartitioned (plain : Array ModalMode) (paired : Array PairedMod
     driving, the factor is large, and it lands in the amps where the landing
     exponent sees it. (A live-σ factor leaves the amps unfoldable and the
     landing falls back exactly as gauge output does.) -/
-def combFactorE (m : ModalMode) (pSec : Float) : Option CplxE := do
-  let wv ← sigConstF? m.omega
+def combFactorE (m : ModalMode) (pSec : Float) : BuildM (Option CplxE) := do
+  let some wv ← sigConstF? m.omega | return none
   let pD := DyadicI.ofFloat pSec
   -- ω·P reaches ~1e6 rad for an audio partial at a bar-length period; the
   -- carrier reduces against a 300-bit π, so the reduced argument still lands a
@@ -102,23 +104,37 @@ def combFactorE (m : ModalMode) (pSec : Float) : Option CplxE := do
   -- factor sits at a near-singularity (`1/(1−e^{λP})` with ωP ≈ 2πk) whose value
   -- the landing exponent reads, so those bits are not decorative.
   let wpD := DyadicI.mul (DyadicI.ofFloat wv) pD
-  let eS := match sigConstF? m.sigma with
+  let eS ← match ← sigConstF? m.sigma with
     | some sv => litF (DyadicI.toFloat
         (DyadicI.exp (DyadicI.neg (DyadicI.mul (DyadicI.ofFloat sv) pD))))
-    | none => expSig (neg (mul m.sigma (litF pSec)))
-  let eLamP : CplxE := (mul eS (litF (DyadicI.toFloat (DyadicI.cos wpD))),
-                        mul eS (litF (DyadicI.toFloat (DyadicI.sin wpD))))
-  pure (cdivE (lit 1, lit 0) (csubE (lit 1, lit 0) eLamP))
+    | none => do
+      let period ← litF pSec
+      let sigmaPeriod ← mul m.sigma period
+      let negative ← neg sigmaPeriod
+      expSig negative
+  let cosine ← litF (DyadicI.toFloat (DyadicI.cos wpD))
+  let real ← mul eS cosine
+  let sine ← litF (DyadicI.toFloat (DyadicI.sin wpD))
+  let imag ← mul eS sine
+  let eLamP : CplxE := (real, imag)
+  let oneReal ← lit 1
+  let zeroImag ← lit 0
+  let one : CplxE := (oneReal, zeroImag)
+  let denominator ← csubE one eLamP
+  let factor ← cdivE one denominator
+  pure (some factor)
 
 /-- Scale a bank's residues by the period-P comb factor (the strike train's
     steady state). A mode whose ω does not fold keeps its bare amp — the
     retrigger-without-overlap reading, stated (unreachable from served
     surfaces, where modal ω always folds). -/
-def combScale (pSec : Float) (modes : Array ModalMode) : Array ModalMode :=
-  modes.map fun m =>
-    match combFactorE m pSec with
-    | some f => let a := cmulE m.ampE f; { m with cre := a.1, cim := a.2 }
-    | none => m
+def combScale (pSec : Float) (modes : Array ModalMode) : BuildM (Array ModalMode) :=
+  modes.mapM fun m => do
+    match ← combFactorE m pSec with
+    | some f =>
+      let a ← cmulE m.ampE f
+      pure { m with cre := a.1, cim := a.2 }
+    | none => pure m
 
 /-- The strike train as a `Sig`: the combed bank read on the quotient clock,
     summed over the bar's strikes `(offset seconds, weight)` — each strike is
@@ -129,17 +145,26 @@ def combScale (pSec : Float) (modes : Array ModalMode) : Array ModalMode :=
     silence (the graceful-silence contract). -/
 def strikeTrainSig (modes : Array ModalMode) (clkInt anchorSamples : Sig)
     (pSec : Float) (strikes : Array (Float × Float) := #[(0.0, 1.0)])
-    (count? : Option Sig := none) : Sig :=
+    (count? : Option Sig := none) : BuildM Sig := do
   let banked := bankIsUniform modes && (count?.isSome || banksTableEnabled)
   let lower := if banked
     then fun ms clk a => modalBankSigTable ms clk a count?
     else fun ms clk a => modalBankSig ms clk a
-  let combed := combScale pSec modes
-  strikes.foldl (init := lit 0) fun acc (off, w) =>
-    let ms := combed.map fun m =>
-      { m with cre := mul (litF w) m.cre, cim := mul (litF w) m.cim }
-    let anchorK := add anchorSamples (mul (litF off) .sampleRate)
-    add acc (lower ms (relClockQuot clkInt anchorK pSec) (lit 0))
+  let combed ← combScale pSec modes
+  let zero ← lit 0
+  strikes.foldlM (init := zero) fun acc (off, w) => do
+    let weight ← litF w
+    let ms ← combed.mapM fun m => do
+      let cre ← mul weight m.cre
+      let cim ← mul weight m.cim
+      pure { m with cre, cim }
+    let offset ← litF off
+    let sr ← sampleRate
+    let offsetSamples ← mul offset sr
+    let anchorK ← add anchorSamples offsetSamples
+    let quotient ← relClockQuot clkInt anchorK pSec
+    let signal ← lower ms quotient zero
+    add acc signal
 
 /-- The strike train as a term: one `arrUn` at the clock leaf, so a warped
     master clock warps the WHOLE train — tempo rubato reaches the strikes and
@@ -171,9 +196,13 @@ def strikeTrainTerm (modes : Array ModalMode) (anchor : Sig) (c : Clock)
     composed output. `dampScale?` bends the decay clock (sway) on both sides. Pure
     `f(clk)`: no state. -/
 def modalBankSigDir (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Sig)
-    (dir : Sig) (dampScale? : Option Sig := none) : Sig :=
-  let clkRel := relClockQ clkInt anchorSamples
-  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
+    (dir : Sig) (dampScale? : Option Sig := none) : BuildM Sig := do
+  let clkRel ← relClockQ clkInt anchorSamples
+  let clkFloat ← toFloatE clkRel
+  let twoPow32 ← lit 4294967296
+  let secondsTimesRate ← div clkFloat twoPow32
+  let sr ← sampleRate
+  let dSec ← div secondsTimesRate sr
   -- Q datapath, same ledger as `modalBankSig` (Q(4+k).(28−k) weight landings via
   -- option E's `le`, exact Q2.30 oscillators, i64 mode sums). The causal gates
   -- and the dir crossfade hoist OUT of the per-mode fold. `le` is derived from
@@ -183,37 +212,76 @@ def modalBankSigDir (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Si
   -- non-taken poison must not force k upward, and the audible reverse tail is the
   -- forward tail's time-mirror, equally |A|-bounded. So the same `le` serves both
   -- arms and `dir=0` stays bit-identical to `modalBankSig`.
-  let le := bankLandExp modes
-  let (fwdQ, revQ) := modes.foldl
-    (fun (acc : Sig × Sig) m =>
-      let phQ := modePhaseQ m.omega clkRel
+  let le ← bankLandExp modes
+  let landingScale ← le.scale
+  let landingShift ← le.shift
+  let zeroInt ← litI 0
+  let (fwdQ, revQ) ← modes.foldlM
+    (fun (acc : Sig × Sig) m => do
+      let phQ ← modePhaseQ m.omega clkRel
       -- osc(−d) as the phase of the NEGATED relative clock (not cos-even/
       -- sin-odd), so `dir=1` is the forward tail's exact time-mirror — the
       -- fixed sine isn't bit-symmetric (one signed floor-shift), so the
       -- mirrored phase must be spelled out to match `fwd[2C−i]`. `modePhaseQ`
       -- is exact on the negated i64, so the rev side at `clkRel = −X`
       -- evaluates at bit-equal phase to the fwd side at `+X`.
-      let phQN := modePhaseQ m.omega (neg clkRel)
+      let negativeClock ← neg clkRel
+      let phQN ← modePhaseQ m.omega negativeClock
       -- σ·d, optionally sway-bent (decay clock only, so pitch is untouched).
-      let sd := mul m.sigma dSec
-      let sd := match dampScale? with | none => sd | some s => mul sd s
-      let envF := expSig (neg sd)
-      let envF := if m.deg == 0 then envF else mul (powE dSec m.deg) envF
-      let envR := expSig sd
-      let envR := if m.deg == 0 then envR else mul (powE (neg dSec) m.deg) envR
-      let wCreF := toIntE (mul (mul envF m.cre) le.scale)
-      let wCimF := toIntE (mul (mul envF m.cim) le.scale)
-      let wCreR := toIntE (mul (mul envR m.cre) le.scale)
-      let wCimR := toIntE (mul (mul envR m.cim) le.scale)
-      let fwdM := rshift (sub (mul wCreF (fixedCosCycSig phQ))
-                              (mul wCimF (fixedSinCycSig phQ))) le.shift
-      let revM := rshift (sub (mul wCreR (fixedCosCycSig phQN))
-                              (mul wCimR (fixedSinCycSig phQN))) le.shift
-      (add acc.1 fwdM, add acc.2 revM))
-    (litI 0, litI 0)
-  let fwd := selectE (gt clkRel (lit 0)) (fixedOutQ 30 fwdQ) (lit 0)
-  let rev := selectE (gt (lit 0) clkRel) (fixedOutQ 30 revQ) (lit 0)
-  add (mul (sub (lit 1) dir) fwd) (mul dir rev)
+      let sigmaTime ← mul m.sigma dSec
+      let sd ← match dampScale? with
+        | none => pure sigmaTime
+        | some scale => mul sigmaTime scale
+      let negativeSd ← neg sd
+      let forwardBase ← expSig negativeSd
+      let envF ← if m.deg == 0 then pure forwardBase else do
+        let power ← powE dSec m.deg
+        mul power forwardBase
+      let reverseBase ← expSig sd
+      let envR ← if m.deg == 0 then pure reverseBase else do
+        let negativeSec ← neg dSec
+        let power ← powE negativeSec m.deg
+        mul power reverseBase
+      let forwardCre ← mul envF m.cre
+      let forwardCreScaled ← mul forwardCre landingScale
+      let wCreF ← toIntE forwardCreScaled
+      let forwardCim ← mul envF m.cim
+      let forwardCimScaled ← mul forwardCim landingScale
+      let wCimF ← toIntE forwardCimScaled
+      let reverseCre ← mul envR m.cre
+      let reverseCreScaled ← mul reverseCre landingScale
+      let wCreR ← toIntE reverseCreScaled
+      let reverseCim ← mul envR m.cim
+      let reverseCimScaled ← mul reverseCim landingScale
+      let wCimR ← toIntE reverseCimScaled
+      let forwardCos ← fixedCosCycSig phQ
+      let forwardReal ← mul wCreF forwardCos
+      let forwardSin ← fixedSinCycSig phQ
+      let forwardImag ← mul wCimF forwardSin
+      let forwardDifference ← sub forwardReal forwardImag
+      let fwdM ← rshift forwardDifference landingShift
+      let reverseCos ← fixedCosCycSig phQN
+      let reverseReal ← mul wCreR reverseCos
+      let reverseSin ← fixedSinCycSig phQN
+      let reverseImag ← mul wCimR reverseSin
+      let reverseDifference ← sub reverseReal reverseImag
+      let revM ← rshift reverseDifference landingShift
+      let fwdAcc ← add acc.1 fwdM
+      let revAcc ← add acc.2 revM
+      pure (fwdAcc, revAcc))
+    (zeroInt, zeroInt)
+  let zero ← lit 0
+  let afterStrike ← gt clkRel zero
+  let forwardOutput ← fixedOutQ 30 fwdQ
+  let fwd ← selectE afterStrike forwardOutput zero
+  let beforeStrike ← gt zero clkRel
+  let reverseOutput ← fixedOutQ 30 revQ
+  let rev ← selectE beforeStrike reverseOutput zero
+  let one ← lit 1
+  let forwardMix ← sub one dir
+  let forwardTerm ← mul forwardMix fwd
+  let reverseTerm ← mul dir rev
+  add forwardTerm reverseTerm
 
 /-- The BANKED direction bank: `modalBankSigDir`'s value with BOTH mode sums as
     indexed reductions — the forward and reverse accumulators are two `bankFold`s
@@ -226,51 +294,98 @@ def modalBankSigDir (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Si
     `modalBankSigTable`. Same signature as `modalBankSigDir` — the dispatch in
     `modalBankTermDir` picks between them. -/
 def modalBankSigDirTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
-    (dir : Sig) (dampScale? : Option Sig := none) (live? : Option Sig := none) : Sig :=
-  let clkRel := relClockQ clkInt anchorSamples
-  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-  let cols := bankCols modes live?
-  let le := bankLandExp modes                 -- option E: amp-only, shared fwd/rev (see modalBankSigDir)
+    (dir : Sig) (dampScale? : Option Sig := none) (live? : Option Sig := none) : BuildM Sig := do
+  let clkRel ← relClockQ clkInt anchorSamples
+  let clkFloat ← toFloatE clkRel
+  let twoPow32 ← lit 4294967296
+  let secondsTimesRate ← div clkFloat twoPow32
+  let sr ← sampleRate
+  let dSec ← div secondsTimesRate sr
+  let cols ← bankCols modes live?
+  let le ← bankLandExp modes                 -- option E: amp-only, shared fwd/rev (see modalBankSigDir)
+  let landingScale ← le.scale
+  let landingShift ← le.shift
   -- σ·d, optionally sway-bent (decay clock only, pitch untouched) — the same
   -- subterm both sides read, per symbolic mode.
-  let sdOf := fun (m : ModeSym) =>
-    let sd := mul m.sigma dSec
-    match dampScale? with | none => sd | some s => mul sd s
-  let fwdQ := bankFold cols fun m =>
-    let phQ   := modePhaseQFromIncr (toIntE m.incr) clkRel
-    let envF  := expSig (neg (sdOf m))
-    let wCreF := toIntE (mul (mul envF m.cre) le.scale)
-    let wCimF := toIntE (mul (mul envF m.cim) le.scale)
-    rshift (sub (mul wCreF (fixedCosCycSig phQ))
-                (mul wCimF (fixedSinCycSig phQ))) le.shift
-  let revQ := bankFold cols fun m =>
+  let sdOf := fun (m : ModeSym) => do
+    let sd ← mul m.sigma dSec
+    match dampScale? with | none => pure sd | some scale => mul sd scale
+  let fwdQ ← bankFold cols fun m => do
+    let increment ← toIntE m.incr
+    let phQ ← modePhaseQFromIncr increment clkRel
+    let sd ← sdOf m
+    let negativeSd ← neg sd
+    let envF ← expSig negativeSd
+    let weightedCre ← mul envF m.cre
+    let scaledCre ← mul weightedCre landingScale
+    let wCreF ← toIntE scaledCre
+    let weightedCim ← mul envF m.cim
+    let scaledCim ← mul weightedCim landingScale
+    let wCimF ← toIntE scaledCim
+    let cosine ← fixedCosCycSig phQ
+    let realPart ← mul wCreF cosine
+    let sine ← fixedSinCycSig phQ
+    let imagPart ← mul wCimF sine
+    let difference ← sub realPart imagPart
+    rshift difference landingShift
+  let revQ ← bankFold cols fun m => do
     -- the mirrored phase spelled out on the NEGATED clock, as in the unrolled
     -- path (the fixed sine isn't bit-symmetric; see `modalBankSigDir`).
-    let phQN  := modePhaseQFromIncr (toIntE m.incr) (neg clkRel)
-    let envR  := expSig (sdOf m)
-    let wCreR := toIntE (mul (mul envR m.cre) le.scale)
-    let wCimR := toIntE (mul (mul envR m.cim) le.scale)
-    rshift (sub (mul wCreR (fixedCosCycSig phQN))
-                (mul wCimR (fixedSinCycSig phQN))) le.shift
-  let fwd := selectE (gt clkRel (lit 0)) (fixedOutQ 30 fwdQ) (lit 0)
-  let rev := selectE (gt (lit 0) clkRel) (fixedOutQ 30 revQ) (lit 0)
-  add (mul (sub (lit 1) dir) fwd) (mul dir rev)
+    let increment ← toIntE m.incr
+    let negativeClock ← neg clkRel
+    let phQN ← modePhaseQFromIncr increment negativeClock
+    let sd ← sdOf m
+    let envR ← expSig sd
+    let weightedCre ← mul envR m.cre
+    let scaledCre ← mul weightedCre landingScale
+    let wCreR ← toIntE scaledCre
+    let weightedCim ← mul envR m.cim
+    let scaledCim ← mul weightedCim landingScale
+    let wCimR ← toIntE scaledCim
+    let cosine ← fixedCosCycSig phQN
+    let realPart ← mul wCreR cosine
+    let sine ← fixedSinCycSig phQN
+    let imagPart ← mul wCimR sine
+    let difference ← sub realPart imagPart
+    rshift difference landingShift
+  let zero ← lit 0
+  let afterStrike ← gt clkRel zero
+  let forwardOutput ← fixedOutQ 30 fwdQ
+  let fwd ← selectE afterStrike forwardOutput zero
+  let beforeStrike ← gt zero clkRel
+  let reverseOutput ← fixedOutQ 30 revQ
+  let rev ← selectE beforeStrike reverseOutput zero
+  let one ← lit 1
+  let forwardMix ← sub one dir
+  let forwardTerm ← mul forwardMix fwd
+  let reverseTerm ← mul dir rev
+  add forwardTerm reverseTerm
 
 /-- The direction bank as a term over the clock leaf, with the LOWERING (unrolled
     or banked) supplied explicitly — shared by `modalBankTermDir` (which picks by
     flag) and the `banks-as-data-dir` equivalence gate (which builds both sides
     regardless of the flag). -/
 def modalBankTermDirWith
-    (lower : Array ModalMode → Sig → Sig → Sig → Option Sig → Sig)
+    (lower : Array ModalMode → Sig → Sig → Sig → Option Sig → BuildM Sig)
     (modes : Array ModalMode) (anchor : Sig) (c : Clock)
     (dir : Sig) (damp? : Option (Sig × Sig) := none) : ArrowTerm :=
   ArrowTerm.arrUn
-    (fun clkSig =>
+    (fun clkSig => do
       -- the sway LFO is a pure function of the SAME clock leaf the bank rides, so a
       -- master scrub reverses it coherently with the tail. Its phase is integer-
       -- reduced (`phasorPhaseSig`), never `rate·t` on unbounded float seconds.
-      let dampScale? := damp?.map (fun (depth, rate) =>
-        add (lit 1) (mul depth (sinSig (mul twoPiE (phasorPhaseSig rate (lit 0) clkSig)))))
+      let dampScale? ← match damp? with
+        | none => pure none
+        | some (depth, rate) => do
+          let zero ← lit 0
+          let phase ← phasorPhaseSig rate zero clkSig
+          let twoPi ← twoPiE
+          let radians ← mul twoPi phase
+          let sine ← sinSig radians
+          let modulation ← mul depth sine
+          let one ← lit 1
+          let scale ← add one modulation
+          pure (some scale)
       lower modes clkSig anchor dir dampScale?)
     (ArrowTerm.clk c)
 
@@ -283,7 +398,7 @@ def modalBankTermDir (modes : Array ModalMode) (anchor : Sig) (c : Clock)
   -- Same dispatch rule as `modalBankTerm`: a dynamic count ALWAYS banks (a
   -- runtime count cannot be unrolled; TROPICAL_BANKS_UNROLL governs only
   -- static banks); non-uniform banks unroll at capacity, dropping the count.
-  let lower : Array ModalMode → Sig → Sig → Sig → Option Sig → Sig :=
+  let lower : Array ModalMode → Sig → Sig → Sig → Option Sig → BuildM Sig :=
     if bankIsUniform modes && (count?.isSome || banksTableEnabled)
     then fun ms clk a d s? => modalBankSigDirTable ms clk a d s? count?
     else fun ms clk a d s? => modalBankSigDir ms clk a d s?
@@ -293,6 +408,6 @@ def modalBankTermDir (modes : Array ModalMode) (anchor : Sig) (c : Clock)
     (0 = forward kernel, 1 = reversed kernel) plus optional decay sway `(depth,
     rateHz)`. Each room owns its value; it is not complete-output reversal data. -/
 structure ModalDir where
-  dir : Sig := lit 0
+  dir : Sig
   damp : Option (Sig × Sig) := none
 deriving BEq

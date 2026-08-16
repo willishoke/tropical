@@ -502,10 +502,10 @@ decreasing_by all_goals (apply Prod.Lex.left; omega)
     renders bit-identical to the unroll for ANY scalar element type. Since
     slice 3c this is a THEOREM, not prose: `compileBankSum_stream`
     (`Ir/EmitBankLaws.lean`) proves this function emits exactly
-    `tables ++ [ReduceBegin] ++ body ++ [Add, ReduceEnd]`, the frontend half
-    (`EmitArrow/BankOrder.lean`, `unrollBanks_modalBankSigTable`) proves the
-    banked and unrolled builders are the same tree under the reference
-    realization, and the whole trusted base is the ONE named assumption
+    `tables ++ [ReduceBegin] ++ body ++ [Add, ReduceEnd]`, while
+    (`EmitArrow/BankOrder.lean`, `denoteExpr_staticBank_order`) proves the
+    production bank node denotes the same increasing-index left fold. The
+    whole trusted base is the ONE named assumption
     `REDUCE_REGION_EXECUTES_IN_ARRAY_ORDER` (`regionDenotation`'s docstring,
     `Ir/EmitBankLaws.lean`) — checkable against the emitted LLVM/MSL by eye.
     Order preservation needs no associativity; the earlier i64-only

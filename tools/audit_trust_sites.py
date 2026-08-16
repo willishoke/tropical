@@ -38,11 +38,15 @@ def tracked_lean_files() -> list[pathlib.Path]:
         capture_output=True,
         text=True,
     )
-    return [
+    tracked = [
         ROOT / path
         for path in result.stdout.splitlines()
         if path.endswith(".lean")
     ]
+    # `git ls-files` retains paths deleted in the candidate working tree until
+    # the cutover commit is staged. Audit the tree being qualified rather than
+    # crashing while a tracked module is intentionally being removed.
+    return [path for path in tracked if path.exists()]
 
 
 def source_sites() -> set[tuple[str, str, str, str]]:

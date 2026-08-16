@@ -661,24 +661,37 @@ open Tropical.EmitArrow in
     the `k=2`/`2²⁶` assertions go RED. -/
 def runModalRailIdentity (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
-  let mkModes := fun (amp : Sig) => (Array.range 6).map fun i =>
-    ModalMode.hz (lit (Int.ofNat (220 + 40 * i))) (lit 30 1) amp
-  let small := mkModes (lit 2 1)      -- amp 0.2 ⇒ maxAbs 0.2 < 32 ⇒ k = 0
-  let large := mkModes (lit 100)      -- amp 100  ⇒ maxAbs 100    ⇒ k = 2
+  let mkModes := fun (amp : BuildM Sig) => do
+    (Array.range 6).mapM fun i => do
+      ModalMode.hz (← lit (Int.ofNat (220 + 40 * i))) (← lit 30 1) (← amp)
+  let small : ModesM := mkModes (lit 2 1)      -- amp 0.2 ⇒ maxAbs 0.2 < 32 ⇒ k = 0
+  let large : ModesM := mkModes (lit 100)      -- amp 100  ⇒ maxAbs 100    ⇒ k = 2
   -- a deg-1 bank with small σ: |A|=10 < 32 (amp-only would give k=0), but env₂ =
   -- d·e^{−σd} peaks at (1/(σe)) ≈ 3.68, so the LANDED sup ≈ 36.8 > 32 ⇒ the
   -- envelope-aware bound bumps k to 1. Proves the deg>0 lift is not amp-only.
-  let degBank := (Array.range 3).map fun i =>
-    ({ sigma := litF 0.1, omega := mul twoPiE (lit (Int.ofNat (300 + 40 * i))),
-       cre := litF 10.0, cim := lit 0, deg := 1 } : ModalMode)
+  let degBank : ModesM := do
+    (Array.range 3).mapM fun i => do
+      let frequency ← lit (Int.ofNat (300 + 40 * i))
+      let sigma ← litF 0.1
+      let omega ← mul (← twoPiE) frequency
+      let cre ← litF 10.0
+      let cim ← lit 0
+      pure ({ sigma, omega, cre, cim, deg := 1 } : ModalMode)
   let hasSub := fun (s sub : String) => (s.splitOn sub).length != 1
   let land2p28 := "0x41b0000000000000"   -- 2²⁸, the verbatim Q4.28 landing (lowercase hex)
   let land2p26 := "0x4190000000000000"   -- 2²⁶, the k=2 landing
-  let kSmall := match bankLandExp small with | .static k => some k | .dynamic _ => none
-  let kLarge := match bankLandExp large with | .static k => some k | .dynamic _ => none
-  let kDeg   := match bankLandExp degBank with | .static k => some k | .dynamic _ => none
-  match buildAndFinish (.ok (buildModalBankTable "id_small" small (lit 200) arena)),
-        buildAndFinish (.ok (buildModalBankTable "id_large" large (lit 200) arena)) with
+  let landing (modes : ModesM) : Option Nat :=
+    match Tropical.Testing.ArrowFixtures.runBuild arena do
+      bankLandExp (← modes) with
+    | .ok (_, .static k) => some k
+    | _ => none
+  let kSmall := landing small
+  let kLarge := landing large
+  let kDeg := landing degBank
+  match buildAndFinish (Tropical.EmitArrow.buildModalBankTable
+          "id_small" small (lit 200) arena),
+        buildAndFinish (Tropical.EmitArrow.buildModalBankTable
+          "id_large" large (lit 200) arena) with
   | .ok pSmall, .ok pLarge =>
     match Tropical.Ir.EmitLlvm.emitKernel pSmall, Tropical.Ir.EmitLlvm.emitKernel pLarge with
     | .ok irSmall, .ok irLarge =>
@@ -706,9 +719,9 @@ open Tropical.EmitArrow in
         the real `compilePlanPure` to codegen (the graph surface wires the address). -/
 def runModalAddr (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : IO Bool := do
-  let modes : Array ModalMode := #[
-    ModalMode.hz (lit 220) (lit 30 1) (lit 6 1),
-    ModalMode.hz (lit 440) (lit 45 1) (lit 3 1)]
+  let modes : ModesM := modeArray #[
+    do ModalMode.hz (← lit 220) (← lit 30 1) (← lit 6 1),
+    do ModalMode.hz (← lit 440) (← lit 45 1) (← lit 3 1)]
   let n := 2048
   let onsetSec : Float := 0.01
   let onset := (onsetSec * 44100.0).toUInt64.toNat
@@ -722,9 +735,12 @@ def runModalAddr (arena : Arena)
     | .ok j => match Tropical.Playground.compilePlanPure arena resolved j with
       | .error _ => false
       | .ok compiled => (Tropical.Ir.EmitLlvm.emitKernel compiled.plan).toOption.isSome
-  match buildAndFinish (.ok (buildModalBankArrow "ma_ref" modes (lit 0) arena)),
-        buildAndFinish (.ok (buildModalAddrRamp "ma_id" modes (lit 0) 0.0 arena)),
-        buildAndFinish (.ok (buildModalAddrRamp "ma_off" modes (lit 0) onsetSec arena)) with
+  match buildAndFinish (Tropical.EmitArrow.buildModalBankArrow
+          "ma_ref" modes (lit 0) arena),
+        buildAndFinish (Tropical.EmitArrow.buildModalAddrRamp
+          "ma_id" modes (lit 0) 0.0 arena),
+        buildAndFinish (Tropical.EmitArrow.buildModalAddrRamp
+          "ma_off" modes (lit 0) onsetSec arena) with
   | .ok refp, .ok idp, .ok offp =>
     match ← renderPlanSamples refp n, ← renderPlanSamples idp n, ← renderPlanSamples offp n with
     | .ok ref, .ok ida, .ok off =>

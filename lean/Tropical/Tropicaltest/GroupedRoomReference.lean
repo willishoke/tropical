@@ -24,7 +24,7 @@ private instance : Inhabited RoomCarrierGroup :=
   ⟨{ id := "", period := 1, radius := jn 5 1, carrier := #[jn 0] }⟩
 
 private instance : Inhabited ModalMode :=
-  ⟨{ sigma := lit 1, omega := lit 0, cre := lit 0 }⟩
+  ⟨{ sigma := ⟨0⟩, omega := ⟨0⟩, cre := ⟨0⟩, cim := ⟨0⟩ }⟩
 
 private def tinyProfile : RoomProfile := {
   id := "synthetic-two-cycle-room"
@@ -55,11 +55,12 @@ private structure OracleMode where
   cim : Float
 deriving Inhabited
 
-private def OracleMode.emit (m : OracleMode) : ModalMode := {
-  sigma := litF m.sigma
-  omega := litF m.omega
-  cre := litF m.cre
-  cim := litF m.cim }
+private def OracleMode.emit (m : OracleMode) : BuildM ModalMode := do
+  pure {
+    sigma := ← litF m.sigma
+    omega := ← litF m.omega
+    cre := ← litF m.cre
+    cim := ← litF m.cim }
 
 private def sourceAOracle : Array OracleMode := #[
   { sigma := 7.0, omega := 701.0, cre := 0.7, cim := 0.2 },
@@ -69,8 +70,8 @@ private def sourceBOracle : Array OracleMode := #[
   { sigma := 9.0, omega := 947.0, cre := 0.42, cim := -0.18 },
   { sigma := 17.0, omega := 1703.0, cre := 0.31, cim := 0.11 }]
 
-private def sourceA : Array ModalMode := sourceAOracle.map OracleMode.emit
-private def sourceB : Array ModalMode := sourceBOracle.map OracleMode.emit
+private def sourceA : BuildM (Array ModalMode) := sourceAOracle.mapM OracleMode.emit
+private def sourceB : BuildM (Array ModalMode) := sourceBOracle.mapM OracleMode.emit
 
 private structure OCplx where
   re : Float
@@ -151,13 +152,13 @@ private def maxAbsDiff (a b : Array Float) : Float := Id.run do
   return mx
 
 private def buildRoomPlan (arena : Arena) (name : String)
-    (s : RoomReferenceSpecialization) (clk anchor position : Sig) :
+    (s : RoomReferenceSpecialization) (clk anchor position : BuildM Sig) :
     Except String Tropical.Plan.FlatPlan :=
-  buildAndFinish (.ok (buildExprCarrier name
-    (groupedRoomReferenceSig s clk anchor position) arena))
+  buildAndFinish (buildExprCarrier name (do
+    groupedRoomReferenceSig s (← clk) (← anchor) (← position)) arena)
 
 private def renderRoom (arena : Arena) (name : String)
-    (s : RoomReferenceSpecialization) (clk anchor position : Sig) (count : Nat) :
+    (s : RoomReferenceSpecialization) (clk anchor position : BuildM Sig) (count : Nat) :
     IO (Except String (Array Float)) :=
   match buildRoomPlan arena name s clk anchor position with
   | .error e => pure (.error s!"build {name}: {firstLine e}")
@@ -168,7 +169,7 @@ private def renderRoom (arena : Arena) (name : String)
 
 private def renderAgainstOracle (arena : Arena) (name : String)
     (spec : RoomReferenceSpecialization) (modes : Array OracleMode)
-    (position : Float) (clk anchor : Sig) (count : Nat) (uAt : Nat → Float) :
+    (position : Float) (clk anchor : BuildM Sig) (count : Nat) (uAt : Nat → Float) :
     IO (Except String (Array Float × Float)) := do
   match buildRoomPlan arena name spec clk anchor (litF position) with
   | .error e => pure (.error s!"build {name}: {firstLine e}")
@@ -196,130 +197,168 @@ private def specializationOk
   | .ok _ => true
   | .error _ => false
 
+private structure Prepared where
+  sourceA : Array ModalMode
+  sourceB : Array ModalMode
+  specA : RoomReferenceSpecialization
+  specB : RoomReferenceSpecialization
+  emptySpec : RoomReferenceSpecialization
+  ampSpec : RoomReferenceSpecialization
+  frequencyResult : Except RoomRefusal RoomReferenceSpecialization
+  dampingResult : Except RoomRefusal RoomReferenceSpecialization
+  phaseResult : Except RoomRefusal RoomReferenceSpecialization
+  zeroResidueResult : Except RoomRefusal RoomReferenceSpecialization
+  structural : Bool
+  refusals : Bool
+
+private def prepare (profile : RoomProfile) : BuildM Prepared := do
+  let sourceA ← sourceA
+  let sourceB ← sourceB
+  let .ok specA ← specializeGroupedRoomReference profile 44100 sourceA
+    | throw "source A admission refused"
+  let .ok specB ← specializeGroupedRoomReference profile 44100 sourceB
+    | throw "source B admission refused"
+  let ampOnlyModes := sourceA.set! 0 { sourceA[0]! with cre := ← lit 2 }
+  let frequencyModes := sourceA.set! 0 { sourceA[0]! with omega := ← lit 801 }
+  let dampingModes := sourceA.set! 0 { sourceA[0]! with sigma := ← lit 8 }
+  let phaseModes := sourceA.set! 0 {
+    sourceA[0]! with cre := ← lit (-2) 1, cim := ← lit 7 1 }
+  let zeroResidueModes ← sourceA.mapM fun mode => do
+    pure { mode with cre := ← lit 0, cim := ← lit 0 }
+  let .ok emptySpec ← specializeGroupedRoomReference profile 44100 #[]
+    | throw "empty source admission refused"
+  let .ok ampSpec ← specializeGroupedRoomReference profile 44100 ampOnlyModes
+    | throw "amplitude source admission refused"
+  let frequencyResult ← specializeGroupedRoomReference profile 44100 frequencyModes
+  let dampingResult ← specializeGroupedRoomReference profile 44100 dampingModes
+  let phaseResult ← specializeGroupedRoomReference profile 44100 phaseModes
+  let zeroResidueResult ← specializeGroupedRoomReference profile 44100 zeroResidueModes
+  let repeated ← specializeGroupedRoomReference profile 44100 sourceA
+  let repeatedPrefixes := match repeated with
+    | .ok specialization => prefixEqual specA specialization
+    | .error _ => false
+  let structural := profile == tinyProfile && profile.groups.size == 2 &&
+    specA.profileId == profile.id && specA.generatedScalarCount == 64 &&
+    specA.generatedScalarCount ==
+      2 * (specA.forwardPrefix.size + specA.reversePrefix.size) &&
+    prefixEqual specA ampSpec && !prefixEqual specA specB && repeatedPrefixes
+
+  let badPeriodGroup := { profile.groups[0]! with period := 4 }
+  let badPeriod := { profile with groups := #[badPeriodGroup, profile.groups[1]!] }
+  let badRadiusGroup := { profile.groups[0]! with radius := jn 1 }
+  let badRadius := { profile with groups := #[badRadiusGroup, profile.groups[1]!] }
+  let duplicateIdGroup := { profile.groups[1]! with id := profile.groups[0]!.id }
+  let duplicateIds := { profile with groups := #[profile.groups[0]!, duplicateIdGroup] }
+  let livePole := sourceA.set! 0 { sourceA[0]! with sigma := ← paramRef ⟨0⟩ }
+  let nonfinitePole := sourceA.set! 0 {
+    sourceA[0]! with sigma := ← div (← lit 1) (← lit 0) }
+  let degreeOne := sourceA.set! 0 { sourceA[0]! with deg := 1 }
+  let outOfDomain := sourceA.set! 0 { sourceA[0]! with sigma := ← lit 100 }
+  let boundaryModes := #[
+    ← ModalMode.hz (← lit 10) (← lit 1) (← lit 1),
+    ← ModalMode.hz (← lit 5000) (← lit 50) (← lit 1)]
+  let belowFrequency := #[
+    ← ModalMode.hz (← lit 9) (← lit 1) (← lit 1)]
+  let aboveFrequency := #[
+    ← ModalMode.hz (← lit 5001) (← lit 50) (← lit 1)]
+  let rowCap := { profile with admission := { profile.admission with maxSourceRows := 1 } }
+  let scalarCap := { profile with admission := {
+    profile.admission with maxGeneratedScalars := 63 } }
+  let identityBad := { profile with id := "", profileVersion := 0 }
+  let evaluatorBad := { profile with evaluatorVersion := "grouped-prefix-reference-v0" }
+  let zeroRate := { profile with sampleRate := 0 }
+  let domainBad := { profile with admission := { profile.admission with poles :=
+    { profile.admission.poles with maxFrequencyHz := jn 10 } } }
+  let branchCap := { profile with admission := { profile.admission with maxBranches := 0 } }
+  let groupCap := { profile with admission := { profile.admission with maxCarrierGroups := 0 } }
+  let periodCap := { profile with admission := { profile.admission with maxPeriod := 0 } }
+  let explosiveGroup : RoomCarrierGroup := {
+    id := "explosive-1", period := 1, radius := jn 9 1, carrier := #[jn 1000001] }
+  let explosiveProfile : RoomProfile := {
+    profile with
+    groups := #[explosiveGroup]
+    admission := {
+      poles := profile.admission.poles
+      maxBranches := 1
+      maxSourceRows := 1
+      maxCarrierGroups := 1
+      maxPeriod := 1
+      maxGeneratedScalars := 4 } }
+  let refusals :=
+    exclusionHas .invalidProfileIdentity none none
+      (← specializeGroupedRoomReference identityBad 44100 sourceA) &&
+    exclusionHas .unsupportedEvaluator none none
+      (← specializeGroupedRoomReference evaluatorBad 44100 sourceA) &&
+    exclusionHas .invalidSampleRate none none
+      (← specializeGroupedRoomReference zeroRate 0 sourceA) &&
+    exclusionHas .invalidPoleDomain none none
+      (← specializeGroupedRoomReference domainBad 44100 sourceA) &&
+    exclusionHas .branchCapacity none none
+      (← specializeGroupedRoomReference branchCap 44100 sourceA) &&
+    exclusionHas .groupCapacity none none
+      (← specializeGroupedRoomReference groupCap 44100 sourceA) &&
+    exclusionHas .invalidCarrier none (some 0)
+      (← specializeGroupedRoomReference periodCap 44100 sourceA) &&
+    exclusionHas .sampleRateMismatch none none
+      (← specializeGroupedRoomReference profile 48000 sourceA) &&
+    exclusionHas .invalidCarrier none (some 0)
+      (← specializeGroupedRoomReference badPeriod 44100 sourceA) &&
+    exclusionHas .invalidCarrier none (some 0)
+      (← specializeGroupedRoomReference badRadius 44100 sourceA) &&
+    exclusionHas .invalidCarrier none (some 1)
+      (← specializeGroupedRoomReference duplicateIds 44100 sourceA) &&
+    exclusionHas .nonconstantPole (some 0) none
+      (← specializeGroupedRoomReference profile 44100 livePole) &&
+    exclusionHas .nonfinitePole (some 0) none
+      (← specializeGroupedRoomReference profile 44100 nonfinitePole) &&
+    exclusionHas .unsupportedDegree (some 0) none
+      (← specializeGroupedRoomReference profile 44100 degreeOne) &&
+    exclusionHas .poleOutOfDomain (some 0) none
+      (← specializeGroupedRoomReference profile 44100 outOfDomain) &&
+    specializationOk (← specializeGroupedRoomReference profile 44100 boundaryModes) &&
+    exclusionHas .poleOutOfDomain (some 0) none
+      (← specializeGroupedRoomReference profile 44100 belowFrequency) &&
+    exclusionHas .poleOutOfDomain (some 0) none
+      (← specializeGroupedRoomReference profile 44100 aboveFrequency) &&
+    exclusionHas .sourceCapacity none none
+      (← specializeGroupedRoomReference rowCap 44100 sourceA) &&
+    exclusionHas .generatedScalarCapacity none none
+      (← specializeGroupedRoomReference scalarCap 44100 sourceA) &&
+    exclusionHas .prefixComputation (some 0) (some 0)
+      (← specializeGroupedRoomReference explosiveProfile 44100 #[sourceA[0]!])
+  pure {
+    sourceA := sourceA
+    sourceB := sourceB
+    specA := specA
+    specB := specB
+    emptySpec := emptySpec
+    ampSpec := ampSpec
+    frequencyResult := frequencyResult
+    dampingResult := dampingResult
+    phaseResult := phaseResult
+    zeroResidueResult := zeroResidueResult
+    structural := structural
+    refusals := refusals }
+
 set_option maxRecDepth 2048 in
 def runGroupedRoomReference (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let profile := tinyProfile
-  match specializeGroupedRoomReference profile 44100 sourceA,
-        specializeGroupedRoomReference profile 44100 sourceB with
-  | .error e, _ => failGate "grouped-room-reference" s!"source A admission: {e.summary}"
-  | _, .error e => failGate "grouped-room-reference" s!"source B admission: {e.summary}"
-  | .ok specA, .ok specB =>
-    let ampOnlyModes : Array ModalMode := #[
-      { sourceA[0]! with cre := lit 2 }, sourceA[1]!]
-    let frequencyModes : Array ModalMode := #[
-      { sourceA[0]! with omega := lit 801 }, sourceA[1]!]
-    let dampingModes : Array ModalMode := #[
-      { sourceA[0]! with sigma := lit 8 }, sourceA[1]!]
-    let phaseModes : Array ModalMode := #[
-      { sourceA[0]! with cre := lit (-2) 1, cim := lit 7 1 }, sourceA[1]!]
-    let zeroResidueModes := sourceA.map fun m => { m with cre := lit 0, cim := lit 0 }
-    let emptyResult := specializeGroupedRoomReference profile 44100 #[]
-    let ampResult := specializeGroupedRoomReference profile 44100 ampOnlyModes
-    match emptyResult, ampResult with
-    | .error e, _ => failGate "grouped-room-reference" s!"empty source admission: {e.summary}"
-    | _, .error e => failGate "grouped-room-reference" s!"amplitude-only admission: {e.summary}"
-    | .ok emptySpec, .ok ampSpec =>
-      let repeated := specializeGroupedRoomReference profile 44100 sourceA
-      let repeatedPrefixes := match repeated with
-        | .ok s => prefixEqual specA s
-        | .error _ => false
-      let structural := profile == tinyProfile && profile.groups.size == 2 &&
-        specA.profileId == profile.id && specA.generatedScalarCount == 64 &&
-        specA.generatedScalarCount ==
-          2 * (specA.forwardPrefix.size + specA.reversePrefix.size) &&
-        prefixEqual specA ampSpec && !prefixEqual specA specB && repeatedPrefixes
-
-      let frequencyResult := specializeGroupedRoomReference profile 44100 frequencyModes
-      let dampingResult := specializeGroupedRoomReference profile 44100 dampingModes
-      let phaseResult := specializeGroupedRoomReference profile 44100 phaseModes
-      let zeroResidueResult := specializeGroupedRoomReference profile 44100 zeroResidueModes
-
-      let badPeriodGroup := { profile.groups[0]! with period := 4 }
-      let badPeriod := { profile with groups := #[badPeriodGroup, profile.groups[1]!] }
-      let badRadiusGroup := { profile.groups[0]! with radius := jn 1 }
-      let badRadius := { profile with groups := #[badRadiusGroup, profile.groups[1]!] }
-      let duplicateIdGroup := { profile.groups[1]! with id := profile.groups[0]!.id }
-      let duplicateIds := { profile with groups := #[profile.groups[0]!, duplicateIdGroup] }
-      let livePole : Array ModalMode := #[
-        { sourceA[0]! with sigma := .paramRef ⟨0⟩ }, sourceA[1]!]
-      let nonfinitePole : Array ModalMode := #[
-        { sourceA[0]! with sigma := div (lit 1) (lit 0) }, sourceA[1]!]
-      let degreeOne : Array ModalMode := #[{ sourceA[0]! with deg := 1 }, sourceA[1]!]
-      let outOfDomain : Array ModalMode := #[
-        { sourceA[0]! with sigma := lit 100 }, sourceA[1]!]
-      let boundaryModes : Array ModalMode := #[
-        ModalMode.hz (lit 10) (lit 1) (lit 1),
-        ModalMode.hz (lit 5000) (lit 50) (lit 1)]
-      let belowFrequency : Array ModalMode := #[ModalMode.hz (lit 9) (lit 1) (lit 1)]
-      let aboveFrequency : Array ModalMode := #[ModalMode.hz (lit 5001) (lit 50) (lit 1)]
-      let rowCap := { profile with admission := { profile.admission with maxSourceRows := 1 } }
-      let scalarCap := { profile with admission := { profile.admission with maxGeneratedScalars := 63 } }
-      let identityBad := { profile with id := "", profileVersion := 0 }
-      let evaluatorBad := { profile with evaluatorVersion := "grouped-prefix-reference-v0" }
-      let zeroRate := { profile with sampleRate := 0 }
-      let domainBad := { profile with admission := { profile.admission with poles :=
-        { profile.admission.poles with maxFrequencyHz := jn 10 } } }
-      let branchCap := { profile with admission := { profile.admission with maxBranches := 0 } }
-      let groupCap := { profile with admission := { profile.admission with maxCarrierGroups := 0 } }
-      let periodCap := { profile with admission := { profile.admission with maxPeriod := 0 } }
-      let explosiveGroup : RoomCarrierGroup := {
-        id := "explosive-1", period := 1, radius := jn 9 1,
-        carrier := #[jn 1000001] }
-      let explosiveProfile : RoomProfile := {
-        profile with
-        groups := #[explosiveGroup]
-        admission := {
-          poles := profile.admission.poles
-          maxBranches := 1
-          maxSourceRows := 1
-          maxCarrierGroups := 1
-          maxPeriod := 1
-          maxGeneratedScalars := 4 } }
-      let explosiveMode : Array ModalMode := #[sourceA[0]!]
-      let refusals :=
-        exclusionHas .invalidProfileIdentity none none
-          (specializeGroupedRoomReference identityBad 44100 sourceA) &&
-        exclusionHas .unsupportedEvaluator none none
-          (specializeGroupedRoomReference evaluatorBad 44100 sourceA) &&
-        exclusionHas .invalidSampleRate none none
-          (specializeGroupedRoomReference zeroRate 0 sourceA) &&
-        exclusionHas .invalidPoleDomain none none
-          (specializeGroupedRoomReference domainBad 44100 sourceA) &&
-        exclusionHas .branchCapacity none none
-          (specializeGroupedRoomReference branchCap 44100 sourceA) &&
-        exclusionHas .groupCapacity none none
-          (specializeGroupedRoomReference groupCap 44100 sourceA) &&
-        exclusionHas .invalidCarrier none (some 0)
-          (specializeGroupedRoomReference periodCap 44100 sourceA) &&
-        exclusionHas .sampleRateMismatch none none
-          (specializeGroupedRoomReference profile 48000 sourceA) &&
-        exclusionHas .invalidCarrier none (some 0)
-          (specializeGroupedRoomReference badPeriod 44100 sourceA) &&
-        exclusionHas .invalidCarrier none (some 0)
-          (specializeGroupedRoomReference badRadius 44100 sourceA) &&
-        exclusionHas .invalidCarrier none (some 1)
-          (specializeGroupedRoomReference duplicateIds 44100 sourceA) &&
-        exclusionHas .nonconstantPole (some 0) none
-          (specializeGroupedRoomReference profile 44100 livePole) &&
-        exclusionHas .nonfinitePole (some 0) none
-          (specializeGroupedRoomReference profile 44100 nonfinitePole) &&
-        exclusionHas .unsupportedDegree (some 0) none
-          (specializeGroupedRoomReference profile 44100 degreeOne) &&
-        exclusionHas .poleOutOfDomain (some 0) none
-          (specializeGroupedRoomReference profile 44100 outOfDomain) &&
-        specializationOk (specializeGroupedRoomReference profile 44100 boundaryModes) &&
-        exclusionHas .poleOutOfDomain (some 0) none
-          (specializeGroupedRoomReference profile 44100 belowFrequency) &&
-        exclusionHas .poleOutOfDomain (some 0) none
-          (specializeGroupedRoomReference profile 44100 aboveFrequency) &&
-        exclusionHas .sourceCapacity none none
-          (specializeGroupedRoomReference rowCap 44100 sourceA) &&
-        exclusionHas .generatedScalarCapacity none none
-          (specializeGroupedRoomReference scalarCap 44100 sourceA) &&
-        exclusionHas .prefixComputation (some 0) (some 0)
-          (specializeGroupedRoomReference explosiveProfile 44100 explosiveMode)
-
+  match Tropical.Testing.ArrowFixtures.freezeBuild arena (prepare profile) with
+  | .error error =>
+    failGate "grouped-room-reference" s!"native preparation: {firstLine error}"
+  | .ok (expressions, prepared) =>
+      let arena := { arena with exprs := expressions }
+      let specA := prepared.specA
+      let specB := prepared.specB
+      let emptySpec := prepared.emptySpec
+      let ampSpec := prepared.ampSpec
+      let frequencyResult := prepared.frequencyResult
+      let dampingResult := prepared.dampingResult
+      let phaseResult := prepared.phaseResult
+      let zeroResidueResult := prepared.zeroResidueResult
+      let structural := prepared.structural
+      let refusals := prepared.refusals
       let n := 128
       let anchorF := 23.25
       let anchor := lit 2325 2
@@ -415,14 +454,14 @@ def runGroupedRoomReference (arena : Arena)
       let farAnchor := lit 100000002325 2
       let mut farTranslationExact := false
       match buildRoomPlan arena "room_ref_far" specA
-          (add clockLit (litI farQ)) farAnchor (lit 0) with
+          (do add (← clockLit) (← litI farQ)) farAnchor (lit 0) with
       | .error e => if renderFailure.isNone then renderFailure := some (firstLine e)
       | .ok p => match ← renderPlanSamples p n with
         | .error e => if renderFailure.isNone then renderFailure := some (firstLine e)
         | .ok got => farTranslationExact := bitDiffCount got baseAtZero == 0
 
       let holdClock := litI (115 * 1073741824)
-      let reverseClock := sub (litI (133 * 1073741824)) clockLit
+      let reverseClock := do sub (← litI (133 * 1073741824)) (← clockLit)
       let mut holdReverseOk := false
       match ← renderAgainstOracle arena "room_ref_hold" specA sourceAOracle 0.45
           holdClock anchor n (fun _ => 5.5),

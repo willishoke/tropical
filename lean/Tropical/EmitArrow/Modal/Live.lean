@@ -184,24 +184,32 @@ def classifyBloomPairLive (mu : CplxB) (nuOmega : Float) (sigLo sigHi : Float)
     `residueComposeEC`'s coincidence. `B = 0` (or κ→0) degenerates every pair to
     series-only with `M ≡ 1` — the WS-B2 divided-difference atom, which the
     `modal-bloom-gamma` gate pins. -/
+private def cplxLitsD? (values : Array CplxDI) : BuildM (Option (Array CplxE)) := do
+  let mut result : Array CplxE := #[]
+  for value in values do
+    match ← cplxLitD? value with
+    | none => return none
+    | some literal => result := result.push literal
+  pure (some result)
+
 private def bloomComposePairs? (voice reverb : Array ModalMode) (B g : Float) :
-    Option (Array BloomPair) := Id.run do
+    BuildM (Option (Array BloomPair)) := do
   let mut out : Array BloomPair := #[]
   for v in voice do
-    let some vSig := sigConstF? v.sigma | return none
-    let some vOm  := sigConstF? v.omega | return none
+    let some vSig ← sigConstF? v.sigma | return none
+    let some vOm ← sigConstF? v.omega | return none
     for r in reverb do
-      let some rOm  := sigConstF? r.omega | return none
+      let some rOm ← sigConstF? r.omega | return none
       let mu : CplxB := ⟨-vSig, vOm⟩
-      let c := cmulE v.ampE r.ampE
-      match sigConstF? r.sigma with
+      let c ← cmulE v.ampE r.ampE
+      match ← sigConstF? r.sigma with
       | none =>
         -- WS-LP Phase 1: a LIVE reverb σ (the rt60 pole). Admissible only when
         -- the pole read is s0 (a raw slot, not a glide — `settle` a glided pole
         -- first) and the authoring site declared its interval; the checked
         -- preflight reports either violation before this private materializer runs.
         let some (sLo, sHi) := r.sigmaRange | return none
-        if !(sigIsS0 r.sigma) then return none
+        if !(← sigIsS0 r.sigma) then return none
         match classifyBloomPairLiveChecked mu rOm sLo sHi B g with
         | .error _ => continue
         | .ok plan =>
@@ -209,24 +217,36 @@ private def bloomComposePairs? (voice reverb : Array ModalMode) (B g : Float) :
           -- live pole. The clamp ENFORCES the classified interval in-kernel, so
           -- an out-of-range slot write saturates the crossing's σ instead of
           -- walking off the classified region. κ = μ·B is σ_ν-independent (baked).
-          let sigC := clampE r.sigma (litF sLo) (litF sHi)
-          let nuE : CplxE := (neg sigC, litF rOm)
-          let dNuMu := csubE nuE (cplxLitE mu)
-          let aE := scaleRealE (litF (1.0 / g)) dNuMu
-          let invNuMuE := cdivE cOneE dNuMu
-          let invA := (Array.range plan.nDepth).map (fun k =>
-            cdivE cOneE (caddE aE (litF (k + 1).toFloat, lit 0)))
+          let sLo ← litF sLo
+          let sHi ← litF sHi
+          let sigC ← clampE r.sigma sLo sHi
+          let rOmega ← litF rOm
+          let nuReal ← neg sigC
+          let muE ← cplxLitE mu
+          let dNuMu ← csubE (nuReal, rOmega) muE
+          let invG ← litF (1.0 / g)
+          let aE ← scaleRealE invG dNuMu
+          let one ← cOneE
+          let invNuMuE ← cdivE one dNuMu
+          let zero ← lit 0
+          let invA ← (Array.range plan.nDepth).mapM fun k => do
+            let index ← litF (k + 1).toFloat
+            let denominator ← caddE aE (index, zero)
+            cdivE one denominator
           let kappaB := mu.scale B
-          let kE := cplxLitE kappaB
+          let kE ← cplxLitE kappaB
+          let muSigma ← litF vSig
+          let muOmega ← litF vOm
           match plan.region with
           | .serOnly =>
+            let m1 ← bloomM1E invA kE
+            let k1Ser ← cmulE m1 invNuMuE
+            let fSer ← cnegE invNuMuE
             out := out.push {
-              muSigma := litF vSig, muOmega := litF vOm
-              nuSigma := sigC, nuOmega := litF rOm
+              muSigma, muOmega, nuSigma := sigC, nuOmega := rOmega
               bloomB := B, gRate := g, c, kappa := kE
-              k1Ser := cmulE (bloomM1E invA kE) invNuMuE
-              k1Cf := (lit 0, lit 0), fSer := cnegE invNuMuE
-              dSwitch := lit 0, invA, cfB := #[], cfN := #[] }
+              k1Ser, k1Cf := (zero, zero), fSer
+              dSwitch := zero, invA, cfB := #[], cfN := #[] }
           | .crossing =>
             -- WS-LP phase 2: the CF lane's constants as s0 `CplxE` of the live
             -- pole — `cfB`/`cfN` linear in `a`, `CF(κ)` by the SAME emitted
@@ -234,26 +254,42 @@ private def bloomComposePairs? (voice reverb : Array ModalMode) (B g : Float) :
             -- constant by the emitted `Γ★` (`bloomGammaStarE`, phase 0), and
             -- `dSwitch = (ln|κ| − ½·ln|a+1|²)/g` via `logSig` (the `clogE`
             -- modulus form — no sqrt in the vocabulary needed).
-            let cfB := (Array.range (plan.kDepth + 1)).map (fun j =>
-              ((sub (litF (2 * j + 1).toFloat) aE.1, neg aE.2) : CplxE))
-            let cfN := (Array.range plan.kDepth).map (fun j =>
-              let jf := cplxLitE ⟨(j + 1).toFloat, 0⟩
-              cmulE jf (csubE jf aE))
-            let cfK := bloomCFE cfB cfN kE
-            let cfOverG : CplxE := (div cfK.1 (litF g), div cfK.2 (litF g))
-            let aP1 := caddE aE cOneE
+            let cfB ← (Array.range (plan.kDepth + 1)).mapM fun j => do
+              let odd ← litF (2 * j + 1).toFloat
+              let real ← sub odd aE.1
+              let imag ← neg aE.2
+              pure (real, imag)
+            let cfN ← (Array.range plan.kDepth).mapM fun j => do
+              let jf ← cplxLitE ⟨(j + 1).toFloat, 0⟩
+              let difference ← csubE jf aE
+              cmulE jf difference
+            let cfK ← bloomCFE cfB cfN kE
+            let gSig ← litF g
+            let cfReal ← div cfK.1 gSig
+            let cfImag ← div cfK.2 gSig
+            let cfOverG : CplxE := (cfReal, cfImag)
+            let aP1 ← caddE aE one
             -- `ln|κ|` is BAKED (κ is σ_ν-independent), so its half moves to the
             -- carrier; only the `|a+1|` half is live and keeps its emitted
             -- `logSig` modulus form (no sqrt in the vocabulary).
-            let dSwitch := div (sub (litF (DyadicI.toFloat
-                (DyadicI.log (CplxDI.abs kappaB.toExact))))
-              (mul (lit 5 1) (logSig (add (mul aP1.1 aP1.1) (mul aP1.2 aP1.2))))) (litF g)
+            let logKappa ← litF (DyadicI.toFloat
+              (DyadicI.log (CplxDI.abs kappaB.toExact)))
+            let real2 ← mul aP1.1 aP1.1
+            let imag2 ← mul aP1.2 aP1.2
+            let norm2 ← add real2 imag2
+            let logNorm ← logSig norm2
+            let half ← lit 5 1
+            let halfLogNorm ← mul half logNorm
+            let switchNumerator ← sub logKappa halfLogNorm
+            let dSwitch ← div switchNumerator gSig
+            let gammaStar ← bloomGammaStarE aE kE gSig
+            let k1Ser ← csubE gammaStar cfOverG
+            let k1Cf ← cnegE cfOverG
+            let fSer ← cnegE invNuMuE
             out := out.push {
-              muSigma := litF vSig, muOmega := litF vOm
-              nuSigma := sigC, nuOmega := litF rOm
+              muSigma, muOmega, nuSigma := sigC, nuOmega := rOmega
               bloomB := B, gRate := g, c, kappa := kE
-              k1Ser := csubE (bloomGammaStarE aE kE (litF g)) cfOverG
-              k1Cf := cnegE cfOverG, fSer := cnegE invNuMuE
+              k1Ser, k1Cf, fSer
               dSwitch, invA, cfB, cfN }
       | some rSig =>
         let nu : CplxB := ⟨-rSig, rOm⟩
@@ -297,17 +333,21 @@ private def bloomComposePairs? (voice reverb : Array ModalMode) (B g : Float) :
           -- this one converges the κ-side constant.
           let nK := if kZero then 0 else bloomM1DepthD aC.toPoint kappa.toPoint bloomM1TolD
           let mK := if kZero then CplxDI.one else bloomM1D aD kD nK
-          let some k1SerE := cplxLitD? (CplxDI.mul mK invNuMuD) | return none
-          let some kappaE := cplxLitD? kD | return none
-          let some fSerE  := cplxLitD? (CplxDI.neg invNuMuD) | return none
-          let some invAE  := invAD.mapM cplxLitD? | return none
+          let some k1SerE ← cplxLitD? (CplxDI.mul mK invNuMuD) | return none
+          let some kappaE ← cplxLitD? kD | return none
+          let some fSerE ← cplxLitD? (CplxDI.neg invNuMuD) | return none
+          let some invAE ← cplxLitsD? invAD | return none
+          let muSigma ← litF vSig
+          let muOmega ← litF vOm
+          let nuSigma ← litF rSig
+          let nuOmega ← litF rOm
+          let zero ← lit 0
           out := out.push {
-            muSigma := litF vSig, muOmega := litF vOm
-            nuSigma := litF rSig, nuOmega := litF rOm
+            muSigma, muOmega, nuSigma, nuOmega
             bloomB := B, gRate := g, c, kappa := kappaE
-            k1Ser := k1SerE, k1Cf := (lit 0, lit 0)
+            k1Ser := k1SerE, k1Cf := (zero, zero)
             fSer := fSerE
-            dSwitch := lit 0, invA := invAE, cfB := #[], cfN := #[] }
+            dSwitch := zero, invA := invAE, cfB := #[], cfN := #[] }
         | .crossing =>
           -- CF(κ) runs on the POINT carrier: modified Lentz self-corrects, and an
           -- enclosure cannot follow that (it widens ~2 bits per iteration and
@@ -319,20 +359,24 @@ private def bloomComposePairs? (voice reverb : Array ModalMode) (B g : Float) :
           let (cfKp, _) := bloomCFPointD aC.toPoint kappa.toPoint bloomCFTolD
           let cfOverG := CplxDI.scale (DyadicI.inv gD) cfKp.asPointI
           let gs := bloomGammaStarD aD kD gD
-          let some kappaE := cplxLitD? kD | return none
-          let some k1SerE := cplxLitD? (CplxDI.sub gs cfOverG) | return none
-          let some k1CfE  := cplxLitD? (CplxDI.neg cfOverG) | return none
-          let some fSerE  := cplxLitD? (CplxDI.neg invNuMuD) | return none
-          let some invAE  := invAD.mapM cplxLitD? | return none
-          let some cfBE   := cfBD.mapM cplxLitD? | return none
-          let some cfNE   := cfND.mapM cplxLitD? | return none
+          let some kappaE ← cplxLitD? kD | return none
+          let some k1SerE ← cplxLitD? (CplxDI.sub gs cfOverG) | return none
+          let some k1CfE ← cplxLitD? (CplxDI.neg cfOverG) | return none
+          let some fSerE ← cplxLitD? (CplxDI.neg invNuMuD) | return none
+          let some invAE ← cplxLitsD? invAD | return none
+          let some cfBE ← cplxLitsD? cfBD | return none
+          let some cfNE ← cplxLitsD? cfND | return none
+          let muSigma ← litF vSig
+          let muOmega ← litF vOm
+          let nuSigma ← litF rSig
+          let nuOmega ← litF rOm
+          let dSwitch ← litF (DyadicI.toFloat dSwitchD)
           out := out.push {
-            muSigma := litF vSig, muOmega := litF vOm
-            nuSigma := litF rSig, nuOmega := litF rOm
+            muSigma, muOmega, nuSigma, nuOmega
             bloomB := B, gRate := g, c, kappa := kappaE
             k1Ser := k1SerE, k1Cf := k1CfE
             fSer := fSerE
-            dSwitch := litF (DyadicI.toFloat dSwitchD), invA := invAE
+            dSwitch, invA := invAE
             cfB := cfBE, cfN := cfNE }
         | .coincidentCrossing =>
           -- WS-A4: the CF branch (large z, `k1Cf`/`cfB`/`cfN`), coincidence-stable,
@@ -343,19 +387,27 @@ private def bloomComposePairs? (voice reverb : Array ModalMode) (B g : Float) :
           let cfK := cfKp.asPointI
           let cfOverG := CplxDI.scale (DyadicI.inv gD) cfK
           let dCoef := bloomDCoefD aD plan.nDepth
-          let some kappaE   := cplxLitD? kD | return none
-          let some k1CfE    := cplxLitD? (CplxDI.neg cfOverG) | return none
-          let some cfBE     := cfBD.mapM cplxLitD? | return none
-          let some cfNE     := cfND.mapM cplxLitD? | return none
-          let some dCoefE   := dCoef.mapM cplxLitD? | return none
-          let some k1SerDDE := cplxLitD? (bloomPhiKappaOverGD aD kD cfK dCoef gD) | return none
-          let some eKappaE  := cplxLitD? (CplxDI.exp kD) | return none
+          let some kappaE ← cplxLitD? kD | return none
+          let some k1CfE ← cplxLitD? (CplxDI.neg cfOverG) | return none
+          let some cfBE ← cplxLitsD? cfBD | return none
+          let some cfNE ← cplxLitsD? cfND | return none
+          let some dCoefE ← cplxLitsD? dCoef | return none
+          let some k1SerDDE ← cplxLitD? (bloomPhiKappaOverGD aD kD cfK dCoef gD)
+            | return none
+          let some eKappaE ← cplxLitD? (CplxDI.exp kD) | return none
+          let muSigma ← litF vSig
+          let muOmega ← litF vOm
+          let nuSigma ← litF rSig
+          let nuOmega ← litF rOm
+          let zero ← lit 0
+          let dSwitch ← litF (DyadicI.toFloat dSwitchD)
+          let secReal ← litF (vSig - rSig)
+          let secImag ← litF (rOm - vOm)
           out := out.push {
-            muSigma := litF vSig, muOmega := litF vOm
-            nuSigma := litF rSig, nuOmega := litF rOm
+            muSigma, muOmega, nuSigma, nuOmega
             bloomB := B, gRate := g, c, kappa := kappaE
-            k1Ser := (lit 0, lit 0), k1Cf := k1CfE, fSer := (lit 0, lit 0)
-            dSwitch := litF (DyadicI.toFloat dSwitchD), invA := #[]
+            k1Ser := (zero, zero), k1Cf := k1CfE, fSer := (zero, zero)
+            dSwitch, invA := #[]
             cfB := cfBE, cfN := cfNE
             coincident := true
             dCoef := dCoefE
@@ -366,7 +418,7 @@ private def bloomComposePairs? (voice reverb : Array ModalMode) (B g : Float) :
             -- `litF` of the carrier's answer would be bit-identical. Flipping it
             -- would buy nothing — single-op float arithmetic on exact inputs is
             -- not a libm dependency, and that is what keeps P2 from sprawling.
-            secCoef := (litF (vSig - rSig), litF (rOm - vOm)) }
+            secCoef := (secReal, secImag) }
         | .coincidentSubtle =>
           -- WS-A4 subtle bloom (`dSwitch < 0`): the per-sample path is series-DD from
           -- d = 0, so the CF lane is DEAD (the `selectE` is const-true — LLVM `select`
@@ -375,39 +427,46 @@ private def bloomComposePairs? (voice reverb : Array ModalMode) (B g : Float) :
           -- routes to the subtle sub-branch), no `invA`. `bloomPhiKappaOverGD`'s subtle
           -- branch reads only `dCoef`/κ (`cfK` unread), so a dummy `cfK` is bit-identical.
           let dCoef := bloomDCoefD aD plan.nDepth
-          let some kappaE   := cplxLitD? kD | return none
-          let some dCoefE   := dCoef.mapM cplxLitD? | return none
-          let some k1SerDDE :=
+          let some kappaE ← cplxLitD? kD | return none
+          let some dCoefE ← cplxLitsD? dCoef | return none
+          let some k1SerDDE ←
             cplxLitD? (bloomPhiKappaOverGD aD kD CplxDI.zero dCoef gD) | return none
-          let some eKappaE  := cplxLitD? (CplxDI.exp kD) | return none
+          let some eKappaE ← cplxLitD? (CplxDI.exp kD) | return none
+          let muSigma ← litF vSig
+          let muOmega ← litF vOm
+          let nuSigma ← litF rSig
+          let nuOmega ← litF rOm
+          let zero ← lit 0
+          let dSwitch ← litF (DyadicI.toFloat dSwitchD)
+          let secReal ← litF (vSig - rSig)
+          let secImag ← litF (rOm - vOm)
           out := out.push {
-            muSigma := litF vSig, muOmega := litF vOm
-            nuSigma := litF rSig, nuOmega := litF rOm
+            muSigma, muOmega, nuSigma, nuOmega
             bloomB := B, gRate := g, c, kappa := kappaE
-            k1Ser := (lit 0, lit 0), k1Cf := (lit 0, lit 0), fSer := (lit 0, lit 0)
-            dSwitch := litF (DyadicI.toFloat dSwitchD)
+            k1Ser := (zero, zero), k1Cf := (zero, zero), fSer := (zero, zero)
+            dSwitch
             invA := #[], cfB := #[], cfN := #[]
             coincident := true
             dCoef := dCoefE
             k1SerDD := k1SerDDE
             eKappa := eKappaE
-            secCoef := (litF (vSig - rSig), litF (rOm - vOm)) }
-  return some out
+            secCoef := (secReal, secImag) }
+  pure (some out)
 
 /-- Classify the complete requested Cartesian product before materializing any
     coefficient arrays.  This is the stop-line inventory: every unsupported or
     excluded pair has stable indices and a named reason. -/
 private def bloomCompositionExclusions (voice reverb : Array ModalMode) (B g : Float) :
-    Array BloomPairExclusion := Id.run do
+    BuildM (Array BloomPairExclusion) := do
   let mut out : Array BloomPairExclusion := #[]
   for vi in [0:voice.size] do
     let some v := voice[vi]? | continue
-    let some vSig := sigConstF? v.sigma
+    let some vSig ← sigConstF? v.sigma
       | for ri in [0:reverb.size] do
           out := out.push { voiceIndex := some vi, roomIndex := some ri,
                             reason := .voiceSigmaNotConstant }
         continue
-    let some vOm := sigConstF? v.omega
+    let some vOm ← sigConstF? v.omega
       | for ri in [0:reverb.size] do
           out := out.push { voiceIndex := some vi, roomIndex := some ri,
                             reason := .voiceOmegaNotConstant }
@@ -415,17 +474,17 @@ private def bloomCompositionExclusions (voice reverb : Array ModalMode) (B g : F
     let mu : CplxB := ⟨-vSig, vOm⟩
     for ri in [0:reverb.size] do
       let some r := reverb[ri]? | continue
-      let some rOm := sigConstF? r.omega
+      let some rOm ← sigConstF? r.omega
         | out := out.push { voiceIndex := some vi, roomIndex := some ri,
                             reason := .roomOmegaNotConstant }
           continue
-      match sigConstF? r.sigma with
+      match ← sigConstF? r.sigma with
       | none =>
         let some (sLo, sHi) := r.sigmaRange
           | out := out.push { voiceIndex := some vi, roomIndex := some ri,
                               reason := .liveSigmaRangeMissing }
             continue
-        if !(sigIsS0 r.sigma) then
+        if !(← sigIsS0 r.sigma) then
           out := out.push { voiceIndex := some vi, roomIndex := some ri,
                             reason := .liveSigmaNotS0 }
           continue
@@ -449,29 +508,29 @@ private def bloomCompositionExclusions (voice reverb : Array ModalMode) (B g : F
     every requested voice×room pair is supported; otherwise the complete
     exclusion inventory is returned and no partial room response exists for a
     caller to realize accidentally. -/
-def bloomComposeChecked (voice reverb : Array ModalMode) (B g : Float) : BloomComposition :=
+def bloomComposeChecked (voice reverb : Array ModalMode) (B g : Float) : BuildM BloomComposition := do
   let expectedPairs := voice.size * reverb.size
-  let exclusions := bloomCompositionExclusions voice reverb B g
+  let exclusions ← bloomCompositionExclusions voice reverb B g
   if !exclusions.isEmpty then
-    { expectedPairs, pairs := #[], exclusions }
+    pure { expectedPairs, pairs := #[], exclusions }
   else
-    match bloomComposePairs? voice reverb B g with
+    match ← bloomComposePairs? voice reverb B g with
     | some pairs =>
       if pairs.size == expectedPairs then
-        { expectedPairs, pairs, exclusions := #[] }
+        pure { expectedPairs, pairs, exclusions := #[] }
       else
-        { expectedPairs, pairs := #[], exclusions := #[{
+        pure { expectedPairs, pairs := #[], exclusions := #[{
             voiceIndex := none, roomIndex := none,
             reason := .coefficientMaterialization }] }
     | none =>
-      { expectedPairs, pairs := #[], exclusions := #[{
+      pure { expectedPairs, pairs := #[], exclusions := #[{
           voiceIndex := none, roomIndex := none,
           reason := .coefficientMaterialization }] }
 
 /-- Compatibility lens preserving the historical `Option (Array BloomPair)`
     API. New production lowering uses `bloomComposeChecked` and reports reasons. -/
-def bloomCompose (voice reverb : Array ModalMode) (B g : Float) : Option (Array BloomPair) :=
-  (bloomComposeChecked voice reverb B g).toOption
+def bloomCompose (voice reverb : Array ModalMode) (B g : Float) : BuildM (Option (Array BloomPair)) := do
+  pure (← bloomComposeChecked voice reverb B g).toOption
 
 /-- The bloom-composed pair bank as a pure `Sig` over the clock: per pair, TWO
     Q-rotator carriers — the reverb ring `e^{νd}` on the straight relative clock
@@ -504,27 +563,60 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) : Option (Array 
     bare bloom or partial room. The fixed factor landing is not a proof for
     arbitrary authored tables outside this measured admission contract, which is
     why the public `bloomgong` surface remains withheld. -/
-def bloomComposedSig (pairs : Array BloomPair) (clkInt anchorSamples : Sig) : Sig :=
-  let clkRel := relClockQ clkInt anchorSamples
-  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-  let dPos := clampE dSec (lit 0) (lit 1000000)
-  let one : CplxE := (lit 1, lit 0)
-  let land := fun (env : Sig) (w : CplxE) (ph : Sig) =>
-    rshift (sub (mul (toIntE (mul (mul env w.1) (lit 268435456))) (fixedCosCycSig ph))
-                (mul (toIntE (mul (mul env w.2) (lit 268435456))) (fixedSinCycSig ph))) (lit 28)
+def bloomComposedSig (pairs : Array BloomPair) (clkInt anchorSamples : Sig) : BuildM Sig := do
+  let clkRel ← relClockQ clkInt anchorSamples
+  let clkFloat ← toFloatE clkRel
+  let twoPow32 ← lit 4294967296
+  let secondsTimesRate ← div clkFloat twoPow32
+  let sr ← sampleRate
+  let dSec ← div secondsTimesRate sr
+  let zero ← lit 0
+  let million ← lit 1000000
+  let dPos ← clampE dSec zero million
+  let oneReal ← lit 1
+  let zeroImag ← lit 0
+  let one : CplxE := (oneReal, zeroImag)
+  let land := fun (env : Sig) (w : CplxE) (ph : Sig) => do
+    let realWeight ← mul env w.1
+    let scale ← lit 268435456
+    let realScaled ← mul realWeight scale
+    let realInt ← toIntE realScaled
+    let cosine ← fixedCosCycSig ph
+    let realPart ← mul realInt cosine
+    let imagWeight ← mul env w.2
+    let imagScaled ← mul imagWeight scale
+    let imagInt ← toIntE imagScaled
+    let sine ← fixedSinCycSig ph
+    let imagPart ← mul imagInt sine
+    let difference ← sub realPart imagPart
+    let shift ← lit 28
+    rshift difference shift
   -- the per-sample continued fraction `CF(z) = Γ(a,z)eᶻz^{−a}` (`bloomCFE`,
   -- shared with the live-pole lift's CF(κ) constant), used by the crossing and
   -- coincident branches (both large-z sides).
-  let cfEnv := fun (p : BloomPair) (z : CplxE) => bloomCFE p.cfB p.cfN z
-  let bankQ := pairs.foldl (fun acc p =>
-    let eg := expSig (neg (mul (litF p.gRate) dPos))
-    let z : CplxE := (mul p.kappa.1 eg, mul p.kappa.2 eg)
-    let off := mul (litF p.bloomB) (sub (lit 1) eg)
-    let clkW := add clkRel (toIntE (mul (mul off .sampleRate) (lit 4294967296)))
-    let phNu := modePhaseQ p.nuOmega clkRel
-    let phMu := modePhaseQ p.muOmega clkW
-    let envNu := expSig (neg (mul p.nuSigma dPos))
-    let envMu := expSig (neg (mul p.muSigma (add dPos off)))
+  let zeroInt ← litI 0
+  let bankQ ← pairs.foldlM (fun acc p => do
+    let gRate ← litF p.gRate
+    let gd ← mul gRate dPos
+    let negGd ← neg gd
+    let eg ← expSig negGd
+    let zReal ← mul p.kappa.1 eg
+    let zImag ← mul p.kappa.2 eg
+    let z : CplxE := (zReal, zImag)
+    let bloomB ← litF p.bloomB
+    let oneMinusEg ← sub oneReal eg
+    let off ← mul bloomB oneMinusEg
+    let offSamples ← mul off sr
+    let offFixed ← mul offSamples twoPow32
+    let offInt ← toIntE offFixed
+    let clkW ← add clkRel offInt
+    let phNu ← modePhaseQ p.nuOmega clkRel
+    let phMu ← modePhaseQ p.muOmega clkW
+    let nuTime ← mul p.nuSigma dPos
+    let envNu ← neg nuTime >>= expSig
+    let dWarped ← add dPos off
+    let muTime ← mul p.muSigma dWarped
+    let envMu ← neg muTime >>= expSig
     if p.coincident then
       if p.cfN.isEmpty then
         -- WS-A4 / WS-CL: the subtle-bloom coincident pair (`dSwitch < 0`). The
@@ -533,75 +625,144 @@ def bloomComposedSig (pairs : Array BloomPair) (clkInt anchorSamples : Sig) : Si
         -- panic). Series-DD + the τ·e secular, ALWAYS on. Bit-identical to the old
         -- coincident branch with the const-true `onSer` (the `selectE`s all picked
         -- the series-DD/secular arm; the LLVM `select` ignored the CF operand).
-        let phiZ := cmulE z (p.dCoef.foldr (fun dk h => caddE dk (cmulE z h)) (lit 0, lit 0))
-        let k2ser : CplxE := (div (neg phiZ.1) (litF p.gRate), div (neg phiZ.2) (litF p.gRate))
-        let w1 := cmulE p.c p.k1SerDD
-        let w2 := cmulE p.c k2ser
-        let phMuS := modePhaseQ p.muOmega clkRel
-        let envMuS := expSig (neg (mul p.muSigma dPos))
-        let zsec : CplxE := (mul p.secCoef.1 dPos,     -- (ν−μ)d
-                             mul p.secCoef.2 dPos)
-        let zsq := add (mul zsec.1 zsec.1) (mul zsec.2 zsec.2)
-        let big := gt zsq (litF 0.01)
-        let zsafe : CplxE := (selectE big zsec.1 (lit 1), selectE big zsec.2 (lit 0))
-        let ezr := expSig zsec.1
-        let ez : CplxE := (mul ezr (cosSig zsec.2), mul ezr (sinSig zsec.2))
-        let direct := cdivE (csubE ez one) zsafe
-        let series := cexpm1SeriesE zsec
-        let cxsec : CplxE := (selectE big direct.1 series.1, selectE big direct.2 series.2)
-        let cek := cmulE p.c p.eKappa
-        let wsec := cmulE cek (scaleRealE dPos cxsec)                   -- c·e^κ·d·cexpm1
-        add acc (add (add (land envNu w1 phNu) (land envMu w2 phMu)) (land envMuS wsec phMuS))
+        let zeroC : CplxE := (zero, zeroImag)
+        let horner ← p.dCoef.foldrM (fun dk h => do
+          let zh ← cmulE z h
+          caddE dk zh) zeroC
+        let phiZ ← cmulE z horner
+        let negPhiReal ← neg phiZ.1
+        let k2Real ← div negPhiReal gRate
+        let negPhiImag ← neg phiZ.2
+        let k2Imag ← div negPhiImag gRate
+        let k2ser : CplxE := (k2Real, k2Imag)
+        let w1 ← cmulE p.c p.k1SerDD
+        let w2 ← cmulE p.c k2ser
+        let phMuS ← modePhaseQ p.muOmega clkRel
+        let straightMuTime ← mul p.muSigma dPos
+        let envMuS ← neg straightMuTime >>= expSig
+        let zsecReal ← mul p.secCoef.1 dPos
+        let zsecImag ← mul p.secCoef.2 dPos
+        let zsec : CplxE := (zsecReal, zsecImag)
+        let zrealSq ← mul zsec.1 zsec.1
+        let zimagSq ← mul zsec.2 zsec.2
+        let zsq ← add zrealSq zimagSq
+        let threshold ← litF 0.01
+        let big ← gt zsq threshold
+        let zsafeReal ← selectE big zsec.1 oneReal
+        let zsafeImag ← selectE big zsec.2 zeroImag
+        let zsafe : CplxE := (zsafeReal, zsafeImag)
+        let ezr ← expSig zsec.1
+        let cosZ ← cosSig zsec.2
+        let ezReal ← mul ezr cosZ
+        let sinZ ← sinSig zsec.2
+        let ezImag ← mul ezr sinZ
+        let ez : CplxE := (ezReal, ezImag)
+        let numerator ← csubE ez one
+        let direct ← cdivE numerator zsafe
+        let series ← cexpm1SeriesE zsec
+        let cxsecReal ← selectE big direct.1 series.1
+        let cxsecImag ← selectE big direct.2 series.2
+        let cxsec : CplxE := (cxsecReal, cxsecImag)
+        let cek ← cmulE p.c p.eKappa
+        let secular ← scaleRealE dPos cxsec
+        let wsec ← cmulE cek secular
+        let laneNu ← land envNu w1 phNu
+        let laneMu ← land envMu w2 phMu
+        let lanes ← add laneNu laneMu
+        let laneSec ← land envMuS wsec phMuS
+        let allLanes ← add lanes laneSec
+        add acc allLanes
       else
         -- WS-A4: the τ·e coincidence pair (`coincidentCrossing`). CF branch (large z,
         -- `onSer` false) bridges at `dSwitch` to the series-DD branch (small z) + the
         -- secular.
-        let onSer := gt dPos p.dSwitch
-        let cf := cfEnv p z
-        let k2cf : CplxE := (div cf.1 (litF p.gRate), div cf.2 (litF p.gRate))   -- CF(z)/g
+        let onSer ← gt dPos p.dSwitch
+        let cf ← bloomCFE p.cfB p.cfN z
+        let k2cfReal ← div cf.1 gRate
+        let k2cfImag ← div cf.2 gRate
+        let k2cf : CplxE := (k2cfReal, k2cfImag)
         -- series-DD: Φ(a,z) = z·Σ dₙ z^{n−1} (Horner over `dCoef`); k2 = −Φ(a,z)/g.
-        let phiZ := cmulE z (p.dCoef.foldr (fun dk h => caddE dk (cmulE z h)) (lit 0, lit 0))
-        let k2ser : CplxE := (div (neg phiZ.1) (litF p.gRate), div (neg phiZ.2) (litF p.gRate))
-        let k1 : CplxE := (selectE onSer p.k1SerDD.1 p.k1Cf.1,
-                           selectE onSer p.k1SerDD.2 p.k1Cf.2)
-        let k2 : CplxE := (selectE onSer k2ser.1 k2cf.1, selectE onSer k2ser.2 k2cf.2)
-        let w1 := cmulE p.c k1
-        let w2 := cmulE p.c k2
+        let zeroC : CplxE := (zero, zeroImag)
+        let horner ← p.dCoef.foldrM (fun dk h => do
+          let zh ← cmulE z h
+          caddE dk zh) zeroC
+        let phiZ ← cmulE z horner
+        let negPhiReal ← neg phiZ.1
+        let k2serReal ← div negPhiReal gRate
+        let negPhiImag ← neg phiZ.2
+        let k2serImag ← div negPhiImag gRate
+        let k2ser : CplxE := (k2serReal, k2serImag)
+        let k1Real ← selectE onSer p.k1SerDD.1 p.k1Cf.1
+        let k1Imag ← selectE onSer p.k1SerDD.2 p.k1Cf.2
+        let k1 : CplxE := (k1Real, k1Imag)
+        let k2Real ← selectE onSer k2ser.1 k2cf.1
+        let k2Imag ← selectE onSer k2ser.2 k2cf.2
+        let k2 : CplxE := (k2Real, k2Imag)
+        let w1 ← cmulE p.c k1
+        let w2 ← cmulE p.c k2
         -- the τ·e secular `c·e^κ·e^{μd}·d·cexpm1((ν−μ)d)` on the STRAIGHT μ carrier
         -- (= `c·e^κ·(e^{νd}−e^{μd})/(ν−μ)`), gated OFF on the CF side.
-        let phMuS := modePhaseQ p.muOmega clkRel
-        let envMuS := expSig (neg (mul p.muSigma dPos))
-        let zsec : CplxE := (mul p.secCoef.1 dPos,     -- (ν−μ)d
-                             mul p.secCoef.2 dPos)
-        let zsq := add (mul zsec.1 zsec.1) (mul zsec.2 zsec.2)
-        let big := gt zsq (litF 0.01)
-        let zsafe : CplxE := (selectE big zsec.1 (lit 1), selectE big zsec.2 (lit 0))
-        let ezr := expSig zsec.1
-        let ez : CplxE := (mul ezr (cosSig zsec.2), mul ezr (sinSig zsec.2))
-        let direct := cdivE (csubE ez one) zsafe
-        let series := cexpm1SeriesE zsec
-        let cxsec : CplxE := (selectE big direct.1 series.1, selectE big direct.2 series.2)
-        let cek := cmulE p.c p.eKappa
-        let wsecFull := cmulE cek (scaleRealE dPos cxsec)                -- c·e^κ·d·cexpm1
-        let wsec : CplxE := (selectE onSer wsecFull.1 (lit 0), selectE onSer wsecFull.2 (lit 0))
-        add acc (add (add (land envNu w1 phNu) (land envMu w2 phMu)) (land envMuS wsec phMuS))
+        let phMuS ← modePhaseQ p.muOmega clkRel
+        let straightMuTime ← mul p.muSigma dPos
+        let envMuS ← neg straightMuTime >>= expSig
+        let zsecReal ← mul p.secCoef.1 dPos
+        let zsecImag ← mul p.secCoef.2 dPos
+        let zsec : CplxE := (zsecReal, zsecImag)
+        let zrealSq ← mul zsec.1 zsec.1
+        let zimagSq ← mul zsec.2 zsec.2
+        let zsq ← add zrealSq zimagSq
+        let threshold ← litF 0.01
+        let big ← gt zsq threshold
+        let zsafeReal ← selectE big zsec.1 oneReal
+        let zsafeImag ← selectE big zsec.2 zeroImag
+        let zsafe : CplxE := (zsafeReal, zsafeImag)
+        let ezr ← expSig zsec.1
+        let cosZ ← cosSig zsec.2
+        let ezReal ← mul ezr cosZ
+        let sinZ ← sinSig zsec.2
+        let ezImag ← mul ezr sinZ
+        let ez : CplxE := (ezReal, ezImag)
+        let numerator ← csubE ez one
+        let direct ← cdivE numerator zsafe
+        let series ← cexpm1SeriesE zsec
+        let cxsecReal ← selectE big direct.1 series.1
+        let cxsecImag ← selectE big direct.2 series.2
+        let cxsec : CplxE := (cxsecReal, cxsecImag)
+        let cek ← cmulE p.c p.eKappa
+        let secular ← scaleRealE dPos cxsec
+        let wsecFull ← cmulE cek secular
+        let wsecReal ← selectE onSer wsecFull.1 zero
+        let wsecImag ← selectE onSer wsecFull.2 zeroImag
+        let wsec : CplxE := (wsecReal, wsecImag)
+        let laneNu ← land envNu w1 phNu
+        let laneMu ← land envMu w2 phMu
+        let lanes ← add laneNu laneMu
+        let laneSec ← land envMuS wsec phMuS
+        let allLanes ← add lanes laneSec
+        add acc allLanes
     else
-      let mser := bloomM1E p.invA z
-      let k2ser := cmulE mser p.fSer
-      let (k1, k2) : CplxE × CplxE :=
-        if p.cfN.isEmpty then (p.k1Ser, k2ser)
-        else
-          let cf := cfEnv p z
-          let k2cf : CplxE := (div cf.1 (litF p.gRate), div cf.2 (litF p.gRate))
-          let onSer := gt dPos p.dSwitch
-          ((selectE onSer p.k1Ser.1 p.k1Cf.1,
-            selectE onSer p.k1Ser.2 p.k1Cf.2),
-           (selectE onSer k2ser.1 k2cf.1, selectE onSer k2ser.2 k2cf.2))
-      let w1 := cmulE p.c k1
-      let w2 := cmulE p.c k2
-      add acc (add (land envNu w1 phNu) (land envMu w2 phMu)))
-    (litI 0)
-  selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
+      let mser ← bloomM1E p.invA z
+      let k2ser ← cmulE mser p.fSer
+      let (k1, k2) ← if p.cfN.isEmpty then pure (p.k1Ser, k2ser) else do
+        let cf ← bloomCFE p.cfB p.cfN z
+        let k2cfReal ← div cf.1 gRate
+        let k2cfImag ← div cf.2 gRate
+        let k2cf : CplxE := (k2cfReal, k2cfImag)
+        let onSer ← gt dPos p.dSwitch
+        let k1Real ← selectE onSer p.k1Ser.1 p.k1Cf.1
+        let k1Imag ← selectE onSer p.k1Ser.2 p.k1Cf.2
+        let k2Real ← selectE onSer k2ser.1 k2cf.1
+        let k2Imag ← selectE onSer k2ser.2 k2cf.2
+        pure ((k1Real, k1Imag), (k2Real, k2Imag))
+      let w1 ← cmulE p.c k1
+      let w2 ← cmulE p.c k2
+      let laneNu ← land envNu w1 phNu
+      let laneMu ← land envMu w2 phMu
+      let lanes ← add laneNu laneMu
+      add acc lanes) zeroInt
+  let afterStrike ← gt clkRel zero
+  let output ← fixedOutQ 30 bankQ
+  selectE afterStrike output zero
 
 /-- The bloom-composed pair bank as a TERM over the clock leaf — the realization
     of a bloomed source crossed against a (folded) room. Rides `arrUn … (.clk c)`
@@ -643,22 +804,22 @@ deriving Inhabited
     close to the rooms (`|a| < ½` or CF side `|a+1| < |κ|`) or over the 300 depth cap
     is skipped (graceful — that mode is out of the series-side v1 scope). -/
 def bloomFoldCompose (voice : Array ModalMode) (r1 r2 : ModalMode) (B g : Float) :
-    Option (Array BloomFoldPair) := Id.run do
-  let some r1Sig := sigConstF? r1.sigma | return none
-  let some r1Om  := sigConstF? r1.omega | return none
-  let some r1Cre := sigConstF? r1.cre   | return none
-  let some r1Cim := sigConstF? r1.cim   | return none
-  let some r2Sig := sigConstF? r2.sigma | return none
-  let some r2Om  := sigConstF? r2.omega | return none
-  let some r2Cre := sigConstF? r2.cre   | return none
-  let some r2Cim := sigConstF? r2.cim   | return none
+    BuildM (Option (Array BloomFoldPair)) := do
+  let some r1Sig ← sigConstF? r1.sigma | return none
+  let some r1Om  ← sigConstF? r1.omega | return none
+  let some r1Cre ← sigConstF? r1.cre   | return none
+  let some r1Cim ← sigConstF? r1.cim   | return none
+  let some r2Sig ← sigConstF? r2.sigma | return none
+  let some r2Om  ← sigConstF? r2.omega | return none
+  let some r2Cre ← sigConstF? r2.cre   | return none
+  let some r2Cim ← sigConstF? r2.cim   | return none
   let nu1 : CplxB := ⟨-r1Sig, r1Om⟩
   let nu2 : CplxB := ⟨-r2Sig, r2Om⟩
   let r1r2 := (⟨r1Cre, r1Cim⟩ : CplxB).mul ⟨r2Cre, r2Cim⟩
   let mut out : Array BloomFoldPair := #[]
   for v in voice do
-    let some vSig := sigConstF? v.sigma | return none
-    let some vOm  := sigConstF? v.omega | return none
+    let some vSig ← sigConstF? v.sigma | return none
+    let some vOm  ← sigConstF? v.omega | return none
     let mu : CplxB := ⟨-vSig, vOm⟩
     let a1 := (nu1.sub mu).scale (1.0 / g)
     let a2 := (nu2.sub mu).scale (1.0 / g)
@@ -701,11 +862,13 @@ def bloomFoldCompose (voice : Array ModalMode) (r1 r2 : ModalMode) (B g : Float)
     let some ddK1g := toB (CplxDI.scale (DyadicI.inv (DyadicI.mul gD gD)) ddMaκD) | continue
     let some invA1a2 := toB invA1a2D | continue
     let some invA2 := toB invA2D | continue
+    let roomAmp ← cplxLitE r1r2
+    let c ← cmulE v.ampE roomAmp
     out := out.push {
       muSigma := vSig, muOmega := vOm
       nu1Sigma := r1Sig, nu1Omega := r1Om, nu2Sigma := r2Sig, nu2Omega := r2Om
       bloomB := B, gRate := g
-      c := cmulE v.ampE (cplxLitE r1r2)
+      c
       kappa
       k1a1, ddK1g, invA1a2, invA2, invA, qCoef }
   return some out
@@ -738,43 +901,125 @@ def bloomFoldCompose (voice : Array ModalMode) (r1 r2 : ModalMode) (B g : Float)
     a site over, so the exposure is INHERITED, not introduced; the atom-specific
     delta is that the divided difference is ~70× more exposed than its `k1a1`
     sibling at the same pole distance. -/
-def bloomFoldComposedSig (pairs : Array BloomFoldPair) (clkInt anchorSamples : Sig) : Sig :=
-  let clkRel := relClockQ clkInt anchorSamples
-  let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-  let dPos := clampE dSec (lit 0) (lit 1000000)
-  let one : CplxE := (lit 1, lit 0)
-  let land := fun (env : Sig) (w : CplxE) (ph : Sig) =>
-    rshift (sub (mul (toIntE (mul (mul env w.1) (lit 268435456))) (fixedCosCycSig ph))
-                (mul (toIntE (mul (mul env w.2) (lit 268435456))) (fixedSinCycSig ph))) (lit 28)
-  let bankQ := pairs.foldl (fun acc p =>
-    let eg := expSig (neg (mul (litF p.gRate) dPos))
-    let z : CplxE := (mul (litF p.kappa.re) eg, mul (litF p.kappa.im) eg)
-    let off := mul (litF p.bloomB) (sub (lit 1) eg)
-    let clkW := add clkRel (toIntE (mul (mul off .sampleRate) (lit 4294967296)))
-    let phNu2 := modePhaseQ (litF p.nu2Omega) clkRel
-    let phMu := modePhaseQ (litF p.muOmega) clkW
-    let envNu2 := expSig (neg (mul (litF p.nu2Sigma) dPos))
-    let envMu := expSig (neg (mul (litF p.muSigma) (add dPos off)))
+def bloomFoldComposedSig (pairs : Array BloomFoldPair) (clkInt anchorSamples : Sig) : BuildM Sig := do
+  let clkRel ← relClockQ clkInt anchorSamples
+  let clkFloat ← toFloatE clkRel
+  let twoPow32 ← lit 4294967296
+  let secondsTimesRate ← div clkFloat twoPow32
+  let sr ← sampleRate
+  let dSec ← div secondsTimesRate sr
+  let zero ← lit 0
+  let million ← lit 1000000
+  let dPos ← clampE dSec zero million
+  let oneReal ← lit 1
+  let zeroImag ← lit 0
+  let one : CplxE := (oneReal, zeroImag)
+  let land := fun (env : Sig) (w : CplxE) (ph : Sig) => do
+    let realWeight ← mul env w.1
+    let scale ← lit 268435456
+    let realScaled ← mul realWeight scale
+    let realInt ← toIntE realScaled
+    let cosine ← fixedCosCycSig ph
+    let realPart ← mul realInt cosine
+    let imagWeight ← mul env w.2
+    let imagScaled ← mul imagWeight scale
+    let imagInt ← toIntE imagScaled
+    let sine ← fixedSinCycSig ph
+    let imagPart ← mul imagInt sine
+    let difference ← sub realPart imagPart
+    let shift ← lit 28
+    rshift difference shift
+  let zeroInt ← litI 0
+  let bankQ ← pairs.foldlM (fun acc p => do
+    let gRate ← litF p.gRate
+    let gd ← mul gRate dPos
+    let negGd ← neg gd
+    let eg ← expSig negGd
+    let kappaReal ← litF p.kappa.re
+    let zReal ← mul kappaReal eg
+    let kappaImag ← litF p.kappa.im
+    let zImag ← mul kappaImag eg
+    let z : CplxE := (zReal, zImag)
+    let bloomB ← litF p.bloomB
+    let oneMinusEg ← sub oneReal eg
+    let off ← mul bloomB oneMinusEg
+    let offSamples ← mul off sr
+    let offFixed ← mul offSamples twoPow32
+    let offInt ← toIntE offFixed
+    let clkW ← add clkRel offInt
+    let nu2Omega ← litF p.nu2Omega
+    let phNu2 ← modePhaseQ nu2Omega clkRel
+    let muOmega ← litF p.muOmega
+    let phMu ← modePhaseQ muOmega clkW
+    let nu2Sigma ← litF p.nu2Sigma
+    let nu2Time ← mul nu2Sigma dPos
+    let negNu2Time ← neg nu2Time
+    let envNu2 ← expSig negNu2Time
+    let muSigma ← litF p.muSigma
+    let dWarped ← add dPos off
+    let muTime ← mul muSigma dWarped
+    let negMuTime ← neg muTime
+    let envMu ← expSig negMuTime
     -- ν2-carrier weight: K1(a1)·d·cexpm1(Δd) + ddK1/g. Δ = ν1−ν2 (pole difference).
-    let w : CplxE := (mul (litF (p.nu2Sigma - p.nu1Sigma)) dPos,     -- Δ.re·d = (σ2−σ1)d
-                      mul (litF (p.nu1Omega - p.nu2Omega)) dPos)      -- Δ.im·d = (ω1−ω2)d
-    let wsq := add (mul w.1 w.1) (mul w.2 w.2)
-    let big := gt wsq (litF 0.01)
-    let wsafe : CplxE := (selectE big w.1 (lit 1), selectE big w.2 (lit 0))
-    let ewr := expSig w.1
-    let ew : CplxE := (mul ewr (cosSig w.2), mul ewr (sinSig w.2))
-    let direct := cdivE (csubE ew one) wsafe
-    let series := cexpm1SeriesE w
-    let cxΔ : CplxE := (selectE big direct.1 series.1, selectE big direct.2 series.2)   -- cexpm1(Δd)
-    let wNu := cmulE p.c (caddE (cmulE (cplxLitE p.k1a1) (scaleRealE dPos cxΔ)) (cplxLitE p.ddK1g))
+    let deltaReal ← litF (p.nu2Sigma - p.nu1Sigma)
+    let wReal ← mul deltaReal dPos
+    let deltaImag ← litF (p.nu1Omega - p.nu2Omega)
+    let wImag ← mul deltaImag dPos
+    let w : CplxE := (wReal, wImag)
+    let wrealSq ← mul w.1 w.1
+    let wimagSq ← mul w.2 w.2
+    let wsq ← add wrealSq wimagSq
+    let threshold ← litF 0.01
+    let big ← gt wsq threshold
+    let wsafeReal ← selectE big w.1 oneReal
+    let wsafeImag ← selectE big w.2 zeroImag
+    let wsafe : CplxE := (wsafeReal, wsafeImag)
+    let ewr ← expSig w.1
+    let cosW ← cosSig w.2
+    let ewReal ← mul ewr cosW
+    let sinW ← sinSig w.2
+    let ewImag ← mul ewr sinW
+    let ew : CplxE := (ewReal, ewImag)
+    let numerator ← csubE ew one
+    let direct ← cdivE numerator wsafe
+    let series ← cexpm1SeriesE w
+    let deltaQuotReal ← selectE big direct.1 series.1
+    let deltaQuotImag ← selectE big direct.2 series.2
+    let cxDelta : CplxE := (deltaQuotReal, deltaQuotImag)
+    let k1a1 ← cplxLitE p.k1a1
+    let scaledDelta ← scaleRealE dPos cxDelta
+    let secular ← cmulE k1a1 scaledDelta
+    let ddK1g ← cplxLitE p.ddK1g
+    let nuWeight ← caddE secular ddK1g
+    let wNu ← cmulE p.c nuWeight
     -- voice-carrier weight: DDa(K2)(z)/g = −DDa(M/a;z)/g², M(a1;z) & DDa(M;z) Horners.
-    let mser := p.invA.foldr (fun ik h => caddE one (cmulE (cmulE z (cplxLitE ik)) h)) one   -- M(a1;z)
-    let ddMz := cmulE z (p.qCoef.foldr (fun q h => caddE (cplxLitE q) (cmulE z h)) (lit 0, lit 0))
-    let ddMaz := caddE (cnegE (cmulE mser (cplxLitE p.invA1a2))) (cmulE ddMz (cplxLitE p.invA2))
-    let wMu := cmulE p.c (scaleRealE (litF (-1.0 / (p.gRate * p.gRate))) ddMaz)
-    add acc (add (land envNu2 wNu phNu2) (land envMu wMu phMu)))
-    (litI 0)
-  selectE (gt clkRel (lit 0)) (fixedOutQ 30 bankQ) (lit 0)
+    let mser ← p.invA.foldrM (fun ik h => do
+      let ikE ← cplxLitE ik
+      let zik ← cmulE z ikE
+      let product ← cmulE zik h
+      caddE one product) one
+    let zeroC : CplxE := (zero, zeroImag)
+    let ddMHorner ← p.qCoef.foldrM (fun q h => do
+      let qE ← cplxLitE q
+      let zh ← cmulE z h
+      caddE qE zh) zeroC
+    let ddMz ← cmulE z ddMHorner
+    let invA1a2 ← cplxLitE p.invA1a2
+    let mOverA ← cmulE mser invA1a2
+    let negMOverA ← cnegE mOverA
+    let invA2 ← cplxLitE p.invA2
+    let ddMOverA2 ← cmulE ddMz invA2
+    let ddMaz ← caddE negMOverA ddMOverA2
+    let inverseGSquared ← litF (-1.0 / (p.gRate * p.gRate))
+    let scaledDd ← scaleRealE inverseGSquared ddMaz
+    let wMu ← cmulE p.c scaledDd
+    let nuLane ← land envNu2 wNu phNu2
+    let muLane ← land envMu wMu phMu
+    let lanes ← add nuLane muLane
+    add acc lanes) zeroInt
+  let afterStrike ← gt clkRel zero
+  let output ← fixedOutQ 30 bankQ
+  selectE afterStrike output zero
 
 /-- The WS-DDF fold-atom bank as a TERM over the clock leaf (rides `arrUn … (.clk c)`
     like `bloomComposedTerm`, so master warps reach the carriers). -/
@@ -788,13 +1033,29 @@ def bloomFoldComposedTerm (pairs : Array BloomFoldPair) (anchor : Sig) (c : Cloc
     `Patch.lowerInput` can realize the explicitly bare source without a
     circular import. `W(0)=0`, monotone, so the bank's own causal gate is
     untouched. -/
-def bloomWarpClock (anchorSamples : Sig) (B g : Float) : Clock → Clock :=
-  fun clk =>
-    let clkRel := relClockQ clk anchorSamples
-    let dSec := div (div (toFloatE clkRel) (lit 4294967296)) .sampleRate
-    let dPos := clampE dSec (lit 0) (lit 1000000)
-    let bloom := mul (litF B) (sub (lit 1) (expSig (neg (mul (litF g) dPos))))
-    add clk (toIntE (mul (mul bloom .sampleRate) (lit 4294967296)))
+def bloomWarpClock (anchorSamples : Sig) (B g : Float) : Clock → BuildM Clock :=
+  fun clk => do
+    let clkRel ← relClockQ clk anchorSamples
+    let clkFloat ← toFloatE clkRel
+    let twoPow32 ← lit 4294967296
+    let secondsTimesRate ← div clkFloat twoPow32
+    let sr ← sampleRate
+    let dSec ← div secondsTimesRate sr
+    let zero ← lit 0
+    let million ← lit 1000000
+    let dPos ← clampE dSec zero million
+    let gSig ← litF g
+    let gd ← mul gSig dPos
+    let negGd ← neg gd
+    let decay ← expSig negGd
+    let one ← lit 1
+    let settled ← sub one decay
+    let bloomB ← litF B
+    let bloom ← mul bloomB settled
+    let bloomSamples ← mul bloom sr
+    let bloomFixed ← mul bloomSamples twoPow32
+    let bloomInt ← toIntE bloomFixed
+    add clk bloomInt
 
 
 end Tropical.EmitArrow

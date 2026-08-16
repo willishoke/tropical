@@ -63,20 +63,23 @@ open Tropical.EmitArrow in
 private def buildArrNProbe (name : String) (useArrN warped : Bool)
     (arena : Arena) (resolved : Array (String × ProgramIdx)) :
     Except String (Arena × ProgramIdx) :=
-  let x : ArrowTerm := .gen (litPitchVoice 220) "arrn_x" clockLit
-  let y : ArrowTerm := .gen (litPitchVoice 330) "arrn_y" clockLit
-  let pointwise : Array Sig → Sig := fun xs =>
-    add (mul (lit 2) xs[0]!) (mul (lit 3) xs[1]!)
-  let arrTerm : ArrowTerm := .arrN pointwise #[x, y]
-  let refTerm : ArrowTerm := .sum #[.scale (lit 2) x, .scale (lit 3) y]
-  let term :=
-    if warped then
-      if useArrN then .warp slideBack arrTerm
-      else .sum #[.scale (lit 2) (.warp slideBack x),
-                  .scale (lit 3) (.warp slideBack y)]
-    else if useArrN then arrTerm else refTerm
-  let (out, b) := emitTerm (normalize term) {}
-  buildVoiceProgram name b.decls out arena resolved
+  buildVoiceProgram name arena resolved do
+    let clock ← clockLit
+    let x : ArrowTerm := .gen (litPitchVoice 220) "arrn_x" clock
+    let y : ArrowTerm := .gen (litPitchVoice 330) "arrn_y" clock
+    let pointwise : Array Sig → BuildM Sig := fun xs => do
+      add (← mul (← lit 2) xs[0]!) (← mul (← lit 3) xs[1]!)
+    let arrTerm : ArrowTerm := .arrN pointwise #[x, y]
+    let two ← lit 2
+    let three ← lit 3
+    let refTerm : ArrowTerm := .sum #[.scale two x, .scale three y]
+    let term :=
+      if warped then
+        if useArrN then .warp slideBack arrTerm
+        else .sum #[.scale two (.warp slideBack x),
+                    .scale three (.warp slideBack y)]
+      else if useArrN then arrTerm else refTerm
+    emitTerm (normalize term)
 
 /-- THE MULTI-INPUT ARR gate. `arrN` must (1) emit children left-to-right so its
     scalar bundle agrees with an authored-order reference and (2) thread one
@@ -114,8 +117,10 @@ def runArrN (arena : Arena)
     down. -/
 def runBootstrapSin (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : IO Bool := do
-  let refPlan := buildAndFinish (Tropical.EmitArrow.buildClockCarrier "boot_ref" Tropical.EmitArrow.clockLit arena resolved)
-  let termPlan := buildAndFinish (.ok (Tropical.EmitArrow.buildBootstrapSinOsc "boot_term" arena))
+  let refPlan := buildAndFinish (Tropical.EmitArrow.buildClockCarrier
+    "boot_ref" Tropical.EmitArrow.clockLit arena resolved)
+  let termPlan := buildAndFinish
+    (Tropical.EmitArrow.buildBootstrapSinOsc "boot_term" arena)
   match refPlan, termPlan with
   | .ok rp, .ok tp =>
     match ← renderPlanSamples rp 2048, ← renderPlanSamples tp 2048 with
@@ -145,7 +150,7 @@ def runBootstrapSin (arena : Arena)
     up as error ≫ 1e-5. This is the envelope's `bootstrap-sin`. -/
 def runBootstrapExp (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
-  match buildAndFinish (.ok (Tropical.EmitArrow.buildExpProbe "exp_probe" arena)) with
+  match buildAndFinish (Tropical.EmitArrow.buildExpProbe "exp_probe" arena) with
   | .ok p =>
     match ← renderPlanSamples p 2048 with
     | .ok s =>
@@ -179,7 +184,7 @@ def runBootstrapExp (arena : Arena)
     `bootstrap-exp`. -/
 def runBootstrapLog (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
-  match buildAndFinish (.ok (Tropical.EmitArrow.buildLogProbe "log_probe" arena)) with
+  match buildAndFinish (Tropical.EmitArrow.buildLogProbe "log_probe" arena) with
   | .ok p =>
     match ← renderPlanSamples p 2048 with
     | .ok s =>
@@ -210,7 +215,7 @@ def runBootstrapLog (arena : Arena)
     ≫ 1e-5. Absolute error on the angle scale. `logSig`'s `bootstrap-exp`, for atan2. -/
 def runBootstrapAtan2 (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
-  match buildAndFinish (.ok (Tropical.EmitArrow.buildAtan2Probe "atan2_probe" arena)) with
+  match buildAndFinish (Tropical.EmitArrow.buildAtan2Probe "atan2_probe" arena) with
   | .ok p =>
     match ← renderPlanSamples p 2048 with
     | .ok s =>
@@ -244,26 +249,42 @@ open Tropical.EmitArrow in
 def runSettle (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   -- a synthetic glide v0=2 → v1=10, glideExpr's shape (smoothstep of a clamped ramp)
-  let dur := mul (lit 2 2) .sampleRate
-  let s := clampE (div (sub (toFloatE .sampleIndex) (lit 0)) dur) (lit 0) (lit 1)
-  let ss := mul (mul s s) (sub (lit 3) (mul (lit 2) s))
-  let glide := add (lit 2) (mul (sub (lit 10) (lit 2)) ss)
-  let osc := sinSig (toFloatE .sampleIndex)           -- a surviving clock read
-  let konst := lit 7
+  let glide : BuildM Sig := do
+    let duration ← mul (← lit 2 2) (← sampleRate)
+    let progress ← div (← sub (← toFloatE (← sampleIndex)) (← lit 0)) duration
+    let s ← clampE progress (← lit 0) (← lit 1)
+    let smooth ← mul (← mul s s) (← sub (← lit 3) (← mul (← lit 2) s))
+    add (← lit 2) (← mul (← sub (← lit 10) (← lit 2)) smooth)
+  let osc : BuildM Sig := do sinSig (← toFloatE (← sampleIndex))
+  let konst : BuildM Sig := lit 7
   let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
-  let renderConst := fun (name : String) (e : Sig) => do
-    match buildAndFinish (.ok (buildExprCarrier name e arena)) with
+  let renderConst := fun (name : String) (expression : BuildM Sig) => do
+    match buildAndFinish (buildExprCarrier name expression arena) with
     | .ok p => match ← renderPlanSamples p 8192 with
       | .ok v => pure (some v)
       | .error e => IO.println s!"        settle render: {firstLine e}"; pure none
     | .error e => IO.println s!"        settle build: {firstLine e}"; pure none
-  let glideS1 := readsSampleIndex glide
-  let some g' := settle glide | return (← failGate "settle" "settle glide = none")
-  let g'S0 := !readsSampleIndex g'
-  let oscNone := (settle osc).isNone
-  let konstSome := match settle konst with | some k => !readsSampleIndex k | none => false
+  let settled : BuildM Sig := do
+    let some values ← settleSignals #[← glide] | throw "settle glide = none"
+    pure values[0]!
+  let (glideS1, g'S0, oscNone, konstSome) :=
+    match Tropical.Testing.ArrowFixtures.runBuild arena do
+      let glideSig ← glide
+      let settledSignals? ← settleSignals #[glideSig]
+      let oscSignals? ← settleSignals #[← osc]
+      let constSignals? ← settleSignals #[← konst]
+      let glideS0 ← sigIsS0 glideSig
+      let settledS0 ← match settledSignals? with
+        | some values => sigIsS0 values[0]!
+        | none => pure false
+      let constS0 ← match constSignals? with
+        | some values => sigIsS0 values[0]!
+        | none => pure false
+      pure (!glideS0, settledS0, oscSignals?.isNone, constS0) with
+    | .ok (_, result) => result
+    | .error _ => (false, false, false, false)
   let some rGlide ← renderConst "settle_ramp" glide | return (← failGate "settle" "ramp render")
-  let some rSettled ← renderConst "settle_dst" g' | return (← failGate "settle" "settled render")
+  let some rSettled ← renderConst "settle_dst" settled | return (← failGate "settle" "settled render")
   -- the glide rises 2 → 10 over 20 ms (≈882 samples at 44.1k), so 8192 samples reach v1
   let rampLo := rGlide[10]! / sinkGain
   let rampHi := rGlide[8000]! / sinkGain
@@ -286,10 +307,11 @@ def runSettle (arena : Arena)
     rounding + 9 floor-shifts ≈ 1e-8 abs on the sin scale (−160 dB). -/
 def runFixedSinAccuracy (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
-  match buildAndFinish (.ok (Tropical.EmitArrow.buildExprCarrier "fixedsin_acc"
-      (Tropical.EmitArrow.fixedOutQ 30
-        (Tropical.EmitArrow.fixedSinCycSig
-          (Tropical.EmitArrow.fixedPhase Tropical.EmitArrow.clockLit))) arena)) with
+  match buildAndFinish (Tropical.EmitArrow.buildExprCarrier "fixedsin_acc" (do
+      let phase ← Tropical.EmitArrow.fixedPhase
+        (← Tropical.EmitArrow.clockLit)
+      let sine ← Tropical.EmitArrow.fixedSinCycSig phase
+      Tropical.EmitArrow.fixedOutQ 30 sine) arena) with
   | .ok p =>
     match ← renderPlanSamples p 4096 with
     | .ok s =>
@@ -325,19 +347,26 @@ def runFixedSinLongTau (arena : Arena)
   let K : Int := 1073741824 + 12345
   let Kq : Int := K * 4294967296
   let offset : Int := (21426140 * K) % 4294967296
-  let farOsc := Tropical.EmitArrow.fixedOutQ 30
-    (Tropical.EmitArrow.fixedSinCycSig
-      (Tropical.EmitArrow.fixedPhase
-        (Tropical.EmitArrow.add Tropical.EmitArrow.clockLit (Tropical.EmitArrow.litI Kq))))
-  let shiftedOsc := Tropical.EmitArrow.fixedOutQ 30
-    (Tropical.EmitArrow.fixedSinCycSig
-      (Tropical.EmitArrow.bitAnd
-        (Tropical.EmitArrow.add
-          (Tropical.EmitArrow.fixedPhase Tropical.EmitArrow.clockLit)
-          (Tropical.EmitArrow.litI offset))
-        (Tropical.EmitArrow.lit 4294967295)))
-  match buildAndFinish (.ok (Tropical.EmitArrow.buildExprCarrier "fixedsin_lt_far" farOsc arena)),
-        buildAndFinish (.ok (Tropical.EmitArrow.buildExprCarrier "fixedsin_lt_shift" shiftedOsc arena)) with
+  let farOsc : Tropical.EmitArrow.BuildM Tropical.EmitArrow.Sig := do
+    let clock ← Tropical.EmitArrow.clockLit
+    let farClock ← Tropical.EmitArrow.add clock
+      (← Tropical.EmitArrow.litI Kq)
+    let phase ← Tropical.EmitArrow.fixedPhase farClock
+    let sine ← Tropical.EmitArrow.fixedSinCycSig phase
+    Tropical.EmitArrow.fixedOutQ 30 sine
+  let shiftedOsc : Tropical.EmitArrow.BuildM Tropical.EmitArrow.Sig := do
+    let phase ← Tropical.EmitArrow.fixedPhase
+      (← Tropical.EmitArrow.clockLit)
+    let shifted ← Tropical.EmitArrow.add phase
+      (← Tropical.EmitArrow.litI offset)
+    let wrapped ← Tropical.EmitArrow.bitAnd shifted
+      (← Tropical.EmitArrow.lit 4294967295)
+    let sine ← Tropical.EmitArrow.fixedSinCycSig wrapped
+    Tropical.EmitArrow.fixedOutQ 30 sine
+  match buildAndFinish (Tropical.EmitArrow.buildExprCarrier
+          "fixedsin_lt_far" farOsc arena),
+        buildAndFinish (Tropical.EmitArrow.buildExprCarrier
+          "fixedsin_lt_shift" shiftedOsc arena) with
   | .ok fp, .ok sp =>
     match ← renderPlanSamples fp 2048, ← renderPlanSamples sp 2048 with
     | .ok far, .ok shifted =>
@@ -365,13 +394,20 @@ def runFixedSinLongTau (arena : Arena)
     decaying ⇒ it is a real closed-form resonator bank, random-access by clk. -/
 def runModalBank (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
-  let modes : Array Tropical.EmitArrow.ModalMode := #[
-    Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 220) (Tropical.EmitArrow.lit 30 1) (Tropical.EmitArrow.lit 6 1),
-    Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 330) (Tropical.EmitArrow.lit 40 1) (Tropical.EmitArrow.lit 4 1),
-    Tropical.EmitArrow.ModalMode.hz (Tropical.EmitArrow.lit 440) (Tropical.EmitArrow.lit 55 1) (Tropical.EmitArrow.lit 3 1)]
+  let mode (frequency sigma amplitude : Int) : Tropical.EmitArrow.BuildM
+      Tropical.EmitArrow.ModalMode := do
+    Tropical.EmitArrow.ModalMode.hz
+      (← Tropical.EmitArrow.lit frequency)
+      (← Tropical.EmitArrow.lit sigma 1)
+      (← Tropical.EmitArrow.lit amplitude 1)
+  let modes : Tropical.EmitArrow.ModesM :=
+    Tropical.EmitArrow.modeArray #[
+      mode 220 30 6, mode 330 40 4, mode 440 55 3]
   let anchor := Tropical.EmitArrow.lit 200
-  let arrowPlan := buildAndFinish (.ok (Tropical.EmitArrow.buildModalBankArrow "modal_arrow" modes anchor arena))
-  let directPlan := buildAndFinish (.ok (Tropical.EmitArrow.buildModalBankDirect "modal_direct" modes anchor arena))
+  let arrowPlan := buildAndFinish
+    (Tropical.EmitArrow.buildModalBankArrow "modal_arrow" modes anchor arena)
+  let directPlan := buildAndFinish
+    (Tropical.EmitArrow.buildModalBankDirect "modal_direct" modes anchor arena)
   match arrowPlan, directPlan with
   | .ok ap, .ok dp =>
     match ← renderPlanSamples ap 2048, ← renderPlanSamples dp 2048 with
@@ -422,13 +458,15 @@ def runBanksAsData (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   -- A K-mode decaying bank, all deg-0 (the uniform datapath). Frequencies spread
   -- so the bank is non-trivial; small amps so the i64 sum stays in headroom.
-  let mkModes (k : Nat) : Array ModalMode :=
-    (Array.range k).map fun i =>
-      ModalMode.hz (lit (Int.ofNat (220 + 40 * i))) (lit 30 1) (lit 2 1)
+  let mkModes (k : Nat) : ModesM := do
+    (Array.range k).mapM fun i => do
+      ModalMode.hz (← lit (Int.ofNat (220 + 40 * i))) (← lit 30 1) (← lit 2 1)
   let anchor := lit 200
   let modes := mkModes 12
-  let directPlan := buildAndFinish (.ok (buildModalBankDirect "bank_unrolled" modes anchor arena))
-  let tablePlan  := buildAndFinish (.ok (buildModalBankTable  "bank_looped"   modes anchor arena))
+  let directPlan := buildAndFinish (Tropical.EmitArrow.buildModalBankDirect
+    "bank_unrolled" modes anchor arena)
+  let tablePlan := buildAndFinish (Tropical.EmitArrow.buildModalBankTable
+    "bank_looped" modes anchor arena)
   match directPlan, tablePlan with
   | .ok dp, .ok tp =>
     match ← renderPlanSamples dp 2048, ← renderPlanSamples tp 2048 with
@@ -444,10 +482,14 @@ def runBanksAsData (arena : Arena)
       for i in [200:600] do eEarly := eEarly + tS[i]! * tS[i]!
       for i in [1648:2048] do eLate := eLate + tS[i]! * tS[i]!
       -- Compile-scaling: the same bank at two mode counts, both lowerings.
-      let dSmall := buildAndFinish (.ok (buildModalBankDirect "d6"  (mkModes 6)  anchor arena))
-      let dBig   := buildAndFinish (.ok (buildModalBankDirect "d24" (mkModes 24) anchor arena))
-      let tSmall := buildAndFinish (.ok (buildModalBankTable  "t6"  (mkModes 6)  anchor arena))
-      let tBig   := buildAndFinish (.ok (buildModalBankTable  "t24" (mkModes 24) anchor arena))
+      let dSmall := buildAndFinish (Tropical.EmitArrow.buildModalBankDirect
+        "d6" (mkModes 6) anchor arena)
+      let dBig := buildAndFinish (Tropical.EmitArrow.buildModalBankDirect
+        "d24" (mkModes 24) anchor arena)
+      let tSmall := buildAndFinish (Tropical.EmitArrow.buildModalBankTable
+        "t6" (mkModes 6) anchor arena)
+      let tBig := buildAndFinish (Tropical.EmitArrow.buildModalBankTable
+        "t24" (mkModes 24) anchor arena)
       match dSmall, dBig, tSmall, tBig with
       | .ok ds, .ok db, .ok ts, .ok tb =>
         let dMarginal := planInstrCount db - planInstrCount ds   -- unrolled per-mode marginal (×18)
@@ -485,28 +527,28 @@ open Tropical.EmitArrow in
     (two accumulators, mirrored phase, sway) without a transcription step. -/
 def runBanksAsDataDir (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
-  let mkModes (k : Nat) : Array ModalMode :=
-    (Array.range k).map fun i =>
-      ModalMode.hz (lit (Int.ofNat (220 + 40 * i))) (lit 30 1) (lit 2 1)
+  let mkModes (k : Nat) : ModesM := do
+    (Array.range k).mapM fun i => do
+      ModalMode.hz (← lit (Int.ofNat (220 + 40 * i))) (← lit 30 1) (← lit 2 1)
   let anchor := lit 200
   let modes := mkModes 12
-  let sway : Option (Sig × Sig) := some (lit 5 1, lit 20 1)
+  let sway : Option (BuildM Sig × BuildM Sig) := some (lit 5 1, lit 20 1)
   -- explicit lambdas: Lean eta-expands optParam references by inserting the
   -- default, which would drop the `dampScale?` slot from the function type
-  let unrolled : Array ModalMode → Sig → Sig → Sig → Option Sig → Sig :=
+  let unrolled : Array ModalMode → Sig → Sig → Sig → Option Sig → BuildM Sig :=
     fun ms clk a d s? => modalBankSigDir ms clk a d s?
-  let looped : Array ModalMode → Sig → Sig → Sig → Option Sig → Sig :=
+  let looped : Array ModalMode → Sig → Sig → Sig → Option Sig → BuildM Sig :=
     fun ms clk a d s? => modalBankSigDirTable ms clk a d s?
   -- Three configs: crossfade, pure reverse, crossfade+sway — each unrolled vs banked.
-  let cfgs : Array (String × Sig × Option (Sig × Sig)) :=
+  let cfgs : Array (String × BuildM Sig × Option (BuildM Sig × BuildM Sig)) :=
     #[("mid", litF 0.5, none), ("rev", lit 1, none), ("sway", litF 0.5, sway)]
   let mut ok := true
   let mut planPair : Option (Nat × Nat) := none
   for (tag, dir, damp?) in cfgs do
-    let uPlan := buildAndFinish (.ok (buildModalBankDirWith unrolled
-      s!"dir_{tag}_unrolled" modes anchor dir arena damp?))
-    let tPlan := buildAndFinish (.ok (buildModalBankDirWith looped
-      s!"dir_{tag}_looped" modes anchor dir arena damp?))
+    let uPlan := buildAndFinish (Tropical.EmitArrow.buildModalBankDirWith
+      unrolled s!"dir_{tag}_unrolled" modes anchor dir arena damp?)
+    let tPlan := buildAndFinish (Tropical.EmitArrow.buildModalBankDirWith
+      looped s!"dir_{tag}_looped" modes anchor dir arena damp?)
     match uPlan, tPlan with
     | .ok up, .ok tp =>
       match ← renderPlanSamples up 2048, ← renderPlanSamples tp 2048 with
@@ -529,10 +571,14 @@ def runBanksAsDataDir (arena : Arena)
       IO.println s!"  FAIL  banks-as-data-dir  build[{tag}]: {firstLine e}"; ok := false
   -- Payoff: banked direction plan shrinks at 12 modes; per-mode marginal collapses
   -- (BOTH regions loop — the marginal is the column fills alone).
-  let uSmall := buildAndFinish (.ok (buildModalBankDirWith unrolled "du6"  (mkModes 6)  anchor (litF 0.5) arena))
-  let uBig   := buildAndFinish (.ok (buildModalBankDirWith unrolled "du24" (mkModes 24) anchor (litF 0.5) arena))
-  let tSmall := buildAndFinish (.ok (buildModalBankDirWith looped "dt6"  (mkModes 6)  anchor (litF 0.5) arena))
-  let tBig   := buildAndFinish (.ok (buildModalBankDirWith looped "dt24" (mkModes 24) anchor (litF 0.5) arena))
+  let uSmall := buildAndFinish (Tropical.EmitArrow.buildModalBankDirWith
+    unrolled "du6" (mkModes 6) anchor (litF 0.5) arena)
+  let uBig := buildAndFinish (Tropical.EmitArrow.buildModalBankDirWith
+    unrolled "du24" (mkModes 24) anchor (litF 0.5) arena)
+  let tSmall := buildAndFinish (Tropical.EmitArrow.buildModalBankDirWith
+    looped "dt6" (mkModes 6) anchor (litF 0.5) arena)
+  let tBig := buildAndFinish (Tropical.EmitArrow.buildModalBankDirWith
+    looped "dt24" (mkModes 24) anchor (litF 0.5) arena)
   match planPair, uSmall, uBig, tSmall, tBig with
   | some (uc, tc), .ok us, .ok ub, .ok ts, .ok tb =>
     let uMarginal := planInstrCount ub - planInstrCount us
@@ -562,13 +608,17 @@ def runBanksFloat (arena : Arena)
   let k := 16
   -- t = τ seconds (the dSec recipe, anchor 0) — varies per sample so the sum
   -- is a live float datapath, not a constant the optimizer could fold away.
-  let t := div (div (toFloatE clockLit) (lit 4294967296)) .sampleRate
-  let amps := (Array.range k).map fun i => litF (0.31 + 0.07 * i.toFloat)
-  let col := Sig.arr amps
-  let unrolled := amps.foldl (fun acc a => add acc (mul a t)) (lit 0)
-  let looped := Sig.bankSum k #[col] (mul (Sig.index col (Sig.loopIdx 0)) t) none 0
-  let uPlan := buildAndFinish (.ok (buildExprCarrier "fbank_unrolled" unrolled arena))
-  let tPlan := buildAndFinish (.ok (buildExprCarrier "fbank_looped" looped arena))
+  let values : BuildM (Sig × Sig) := do
+    let t ← div (← div (← toFloatE (← clockLit)) (← lit 4294967296)) (← sampleRate)
+    let amps ← (Array.range k).mapM fun i => litF (0.31 + 0.07 * i.toFloat)
+    let column ← arr amps
+    let unrolled ← amps.foldlM (fun accumulated amplitude => do
+      add accumulated (← mul amplitude t)) (← lit 0)
+    let element ← index column (← loopIdx 0)
+    let looped ← bankSum k #[column] (← mul element t) none 0
+    pure (unrolled, looped)
+  let uPlan := buildAndFinish (buildExprCarrier "fbank_unrolled" (do pure (← values).1) arena)
+  let tPlan := buildAndFinish (buildExprCarrier "fbank_looped" (do pure (← values).2) arena)
   match uPlan, tPlan with
   | .ok up, .ok tp =>
     match ← renderPlanSamples up 2048, ← renderPlanSamples tp 2048 with
@@ -679,27 +729,30 @@ def runStrikeComb (arena : Arena)
   let pSamp := 4096.0
   let pSec := pSamp / sr
   let off2Samp := 1536.0
-  let mkBank (w : Float) : Array ModalMode :=
-    #[ ModalMode.hz (litF 223.0) (litF 15.0) (litF (0.5 * w)),
-       ModalMode.hz (litF 391.0) (litF 17.0) (litF (0.35 * w)),
-       ModalMode.hz (litF 667.0) (litF 19.0) (litF (0.3 * w)) ]
+  let mkBank (w : Float) : BuildM (Array ModalMode) := do
+    pure #[ ← ModalMode.hz (← litF 223.0) (← litF 15.0) (← litF (0.5 * w)),
+       ← ModalMode.hz (← litF 391.0) (← litF 17.0) (← litF (0.35 * w)),
+       ← ModalMode.hz (← litF 667.0) (← litF 19.0) (← litF (0.3 * w)) ]
   let nWin : Nat := 16384
   let anchorF := 200.0
-  let comb := strikeTrainSig (mkBank 1.0) clockLit (lit 200) pSec
-    #[(0.0, 1.0), (off2Samp / sr, 0.6)]
+  let comb : BuildM Sig := do
+    strikeTrainSig (← mkBank 1.0) (← clockLit) (← lit 200) pSec
+      #[(0.0, 1.0), (off2Samp / sr, 0.6)]
   -- brute force: anchored instances over strikes j ∈ [−16, 3] (pre-history to
   -- the landing floor: e^{−15·0.0929·16} ≈ 2e-10) at both bar offsets
-  let bruteOver := fun (nPre : Nat) => Id.run do
-    let mut s : Sig := lit 0
+  let bruteOver := fun (nPre : Nat) => do
+    let mut signal : Sig ← lit 0
+    let clock ← clockLit
     for k in [0 : nPre + 4] do
       let jF : Float := k.toFloat - nPre.toFloat
       let base := anchorF + jF * pSamp
-      s := add s (modalBankSigTable (mkBank 1.0) clockLit (litF base))
-      s := add s (modalBankSigTable (mkBank 0.6) clockLit (litF (base + off2Samp)))
-    return s
-  match buildAndFinish (.ok (buildExprCarrier "strike_comb" comb arena)),
-        buildAndFinish (.ok (buildExprCarrier "strike_brute" (bruteOver 16) arena)),
-        buildAndFinish (.ok (buildExprCarrier "strike_trunc" (bruteOver 0) arena)) with
+      signal ← add signal (← modalBankSigTable (← mkBank 1.0) clock (← litF base))
+      signal ← add signal (← modalBankSigTable (← mkBank 0.6) clock
+        (← litF (base + off2Samp)))
+    pure signal
+  match buildAndFinish (buildExprCarrier "strike_comb" comb arena),
+        buildAndFinish (buildExprCarrier "strike_brute" (bruteOver 16) arena),
+        buildAndFinish (buildExprCarrier "strike_trunc" (bruteOver 0) arena) with
   | .ok cp, .ok bp, .ok tp =>
     match ← renderPlanSamples cp nWin, ← renderPlanSamples bp nWin,
           ← renderPlanSamples tp nWin with
