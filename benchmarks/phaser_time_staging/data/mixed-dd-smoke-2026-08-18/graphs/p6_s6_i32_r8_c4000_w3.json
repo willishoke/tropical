@@ -1,0 +1,1 @@
+{"nodes":[{"id":"resonator","kind":"resonator","params":{"freq":220.0,"decay":4.0,"partials":6.0},"sel":{},"in":{"addr":[]}},{"id":"phaser","kind":"phaser","params":{"center":4000.0,"sweep":3.0,"rate":8.0,"mix":0.5,"_benchmark_stages":6.0},"sel":{},"in":{"in":["resonator"]}},{"id":"out","kind":"out","params":{},"sel":{},"in":{"in":["phaser"]}}],"out":"out","taps":[]}

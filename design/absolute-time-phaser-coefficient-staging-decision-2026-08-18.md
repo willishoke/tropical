@@ -4,7 +4,8 @@ Date: 2026-08-18
 
 Branch: `perf/phaser-time-staging`
 
-Decision: **revise the endpoint representation before product integration**
+Decision: **reject first-order mixed DD staging and pivot to a higher-order
+routed/factored endpoint representation before product integration**
 
 ## Outcome
 
@@ -13,13 +14,33 @@ not a production phaser terminal yet. It establishes the absolute-time
 compiler/runtime crossing, makes the 6- and 12-stage audio kernels compact,
 and preserves an independently owned exact JIT oracle/fallback. The ordinary
 residue image fails the handoff's confluence-safety requirement at the
-18-stage/32-partial stress point. The feature therefore remains disabled by
-default and is not connected to the factory demo.
+18-stage/32-partial stress point.
+
+A bounded follow-up tested a mixed ordinary/first-order-divided-difference
+image. An interval-wide structural classifier proves that every unordered
+all-pass-tail pair is hot: every tail remains a real pole (`omega = 0`) over
+the entire control interval. Disjoint first-order pairs cover only a shrinking
+fraction of that dense graph, and every smoke row that reached the mixed Metal
+kernel emitted non-finite samples. The hybrid is therefore rejected rather
+than widened. The next representation must retain the whole tail product or an
+equivalent higher-order routed/factored carrier.
+
+Both experiments remain disabled by default and are not connected to the
+factory demo.
 
 Enable the experiment explicitly with:
 
 ```text
 TROPICAL_PHASER_TIME_STAGING=1
+TROPICAL_PHASER_TIME_STAGING_INTERVAL=128
+```
+
+The rejected mixed image is reproducible only when the additional
+falsification flag is present:
+
+```text
+TROPICAL_PHASER_TIME_STAGING=1
+TROPICAL_PHASER_TIME_STAGING_MIXED_DD=1
 TROPICAL_PHASER_TIME_STAGING_INTERVAL=128
 ```
 
@@ -31,7 +52,7 @@ hidden benchmark voicing, not a public musical voicing.
 
 ## Evidence
 
-The retained no-DAC smoke run is
+The original retained no-DAC smoke run is
 `benchmarks/phaser_time_staging/data/smoke-2026-08-18/raw.json`. It contains
 three independent repetitions per row, exact/staged f64 audio, error JSON,
 operation counts, conservative plan register spans, artifact hashes, and raw
@@ -61,15 +82,63 @@ source coordinates, interval subdivisions, rematerialization after a backward
 clock jump, immutable program lifetime across publication, and unsafe-image
 fallback.
 
+### First-order mixed DD falsification
+
+The retained follow-up is
+`benchmarks/phaser_time_staging/data/mixed-dd-smoke-2026-08-18/raw.json`.
+It records the interval-wide classifier, realized pair coverage, artifacts,
+audio comparisons, three independent performance repetitions, and explicit
+non-finite counts. JSON quality metrics are `null` when any sample is
+non-finite; the harness does not turn that failure into an apparently finite
+error or SNR.
+
+| row | hot candidates / realized pairs | first-order coverage | audio instructions / divisions | median / max measured deadline load | result |
+| --- | ---: | ---: | ---: | ---: | --- |
+| 6 partials, 6 sections, R=128, 0.2 Hz | 15 / 3 | 20.0% | 1001 / 42 | 11.41% / 11.45% | 384 non-finite samples per repetition |
+| 6 partials, 6 sections, R=64, 8 Hz, low-center extreme | 15 / 3 | 20.0% | 1001 / 42 | 11.44% / 11.45% | 204 non-finite samples per repetition |
+| 6 partials, 6 sections, R=32, 8 Hz, high-center extreme | 15 / 3 | 20.0% | 1001 / 42 | 11.39% / 11.49% | 384 non-finite samples per repetition |
+| 32 partials, 12 sections, R=64, 0.2 Hz | 66 / 6 | 9.09% | 2231 / 112 | 17.70% / 17.80% | 384 non-finite samples per repetition |
+| 32 partials, 18 sections, R=32, 8 Hz | 153 / 9 | 5.88% | 2446 / 130 | 72.87% / 72.89% | 416 materializer/exact fallbacks per repetition |
+
+The first-order rewrite is an exact frozen-endpoint identity: two ordinary
+rows become one `PairedMode` plus their summed residue on one pole. That does
+not make the higher-order cluster first-order. Large cancellation remains
+between the paired atom and its remainder. Trying the incumbent Q4.28 DD
+landing merely moves the failure: its intermediate rail saturated at 128.0
+absolute error in the focused oracle, so it cannot certify this image either.
+
+The compact cost result is real but unusable. Four rows reach approximately
+the desired 11–18% load only by producing invalid audio. The 18-stage row
+remains safe solely because the existing endpoint coefficient guard selects
+the exact fallback before Metal. No load number is an admission argument in
+the presence of either outcome.
+
 ## Why this stops here
 
 Raising the residue limit, clamping, or allowing partially filled images would
 hide the numerical failure forbidden by the handoff. Ordinary independent
 residue interpolation is not a safe representation through high-order
-confluence. The next experiment should publish structural pole identities plus
-divided-difference/factored parameters and evaluate the existing stable
-carrier on Metal. Admission should then prove the whole interval safe; only
-intervals outside the hot/crossing predicate may use ordinary rows.
+confluence, and disjoint first-order DD atoms do not span the dense all-pass
+cluster. The next experiment must publish structural pole identities plus a
+higher-order routed/factored image and evaluate that stable carrier on Metal.
+Admission must prove the whole interval safe; only intervals outside the
+hot/crossing predicate may use ordinary rows.
+
+The successor contract is now narrow:
+
+1. Keep source rows and the authored all-pass tail product structurally
+   identified at absolute endpoints; never publish the exploding tail partial
+   fractions as independent values.
+2. Evaluate a higher-order Newton/Hermite divided-difference or equivalent
+   routed factored carrier whose bounded intermediates cover the complete hot
+   cluster, including exact pole crossings.
+3. Preserve deterministic endpoint materialization, shuffled-seek identity,
+   and the existing exact CPU oracle/fallback. A direct `O(P*S)` factored
+   cascade is acceptable only as a diagnostic reference; the production goal
+   remains approximately `O(P+S)` audio work.
+4. Re-run the 6/12/18 matrix and require finite output, the existing oracle and
+   boundary gates, zero materializer/exact fallbacks in admitted rows, and
+   stable operation growth before any cubic interpolation or factory wiring.
 
 Before that representation exists, cubic interpolation and factory/reverb
 composition would broaden scope without addressing the observed failure. Full
