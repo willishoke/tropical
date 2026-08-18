@@ -150,6 +150,7 @@ structure EmitSt where
   nextReg : Nat := 0
   nextArraySlot : Nat := 0
   arraySizes : Array Nat := #[]
+  tileArraySlots : Array Nat := #[]
   instrs : Array NInstr := #[]
   memo : Std.HashMap String CompileResult := {}
   -- ── Staging (Phase 1 of the typed stage-0 refactor) ──
@@ -241,6 +242,8 @@ private def tryTerminal (e : ENode) (expected : Option ScalarType) :
       | none => pure (some (.const (0 : Nat) .float, .float))
   | .sampleRate => pure (some (Tropical.Plan.opRate, .float))
   | .sampleIndex => pure (some (Tropical.Plan.opTick, .int))
+  | .tilePhase => pure (some (.source 2 .float, .float))
+  | .tileSampleIndex => pure (some (.source 3 .int, .int))
   | .loopIdx id => pure (some (Tropical.Plan.NOperand.loopIdx id, .int))
   | .nestedOut inst out => do
     if let some perInstArr := lookup st.slots.nestedOutputArraySlots inst.idx then
@@ -312,6 +315,9 @@ private def compileNodeUncached (arena : ExprArena) (hw : arena.wf = true)
   | .arr items, hch =>
     compilePack arena hw bound items
       (fun c hc => hch c (by simpa [ENode.children] using hc)) expected
+  | .tileArray items, hch =>
+    compileTilePack arena hw bound items
+      (fun c hc => hch c (by simpa [ENode.children] using hc)) expected
   | .inputRef i, _ =>
     match lookup (← get).slots.inputArraySlots i.idx with
     | some info => pure (.array (.sessionArrayReg info.slot) info.size .float)
@@ -366,6 +372,7 @@ private def compileNodeUncached (arena : ExprArena) (hw : arena.wf = true)
         simp only [ENode.children, Array.mem_append]
         exact Or.inr (by rw [Option.mem_def.mp hd]; simp)))
   | .num _, _ | .bool _, _ | .paramRef _, _ | .sampleRate, _ | .sampleIndex, _
+  | .tilePhase, _ | .tileSampleIndex, _
   | .loopIdx _, _ =>
     throw "emit_resolved: terminal node reached compileNodeUncached (port bug)"
 termination_by (bound, 1)
@@ -379,6 +386,23 @@ private def compilePack (arena : ExprArena) (hw : arena.wf = true) (bound : Nat)
     let r ← compileNode arena hw el expected
     pure (if r.isArray then NOperand.const (0 : Nat) .float else r.op)
   emit (Tropical.Plan.instrPack slot args)
+  pure (.array (.arrayReg slot) size .float)
+termination_by (bound, 0)
+decreasing_by have := _hels _ ‹_ ∈ elements›; apply Prod.Lex.left; omega
+
+/-- A tile pack emits exactly the ordinary `Pack` instruction, then records
+    its local destination slot for the later tile-time residualizer. -/
+private def compileTilePack (arena : ExprArena) (hw : arena.wf = true)
+    (bound : Nat) (elements : Array ExprId)
+    (_hels : ∀ c ∈ elements, c.idx < bound)
+    (expected : Option ScalarType) : EmitM CompileResult := do
+  let size := elements.size
+  let slot ← allocArraySlot size
+  let args ← elements.attach.mapM fun ⟨el, _⟩ => do
+    let r ← compileNode arena hw el expected
+    pure (if r.isArray then NOperand.const (0 : Nat) .float else r.op)
+  emit (Tropical.Plan.instrPack slot args)
+  modify fun st => { st with tileArraySlots := st.tileArraySlots.push slot }
   pure (.array (.arrayReg slot) size .float)
 termination_by (bound, 0)
 decreasing_by have := _hels _ ‹_ ∈ elements›; apply Prod.Lex.left; omega
@@ -675,6 +699,7 @@ structure FlatProgram where
   instructions : Array NInstr
   perChildPreInput : Array (Array NInstr)
   outputTargets : Array Nat
+  tileArraySlots : Array Nat := #[]
   instrStages : Array (Option Stage) := #[]
   perChildPreInputStages : Array (Array (Option Stage)) := #[]
 deriving Inhabited
@@ -831,6 +856,7 @@ def emitProgram (arena : ExprArena) (hw : arena.wf = true) (zeroId : ExprId)
     instructions := st.instrs
     perChildPreInput
     outputTargets
+    tileArraySlots := st.tileArraySlots
     instrStages := st.instrStages
     perChildPreInputStages }
 

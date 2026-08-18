@@ -123,6 +123,51 @@ make_observation_control_image(
   return image;
 }
 
+#ifdef TROPICAL_METAL
+std::shared_ptr<const tropical_metal::ExactTileFallbackProgram>
+make_exact_tile_fallback_program(const KernelState & state)
+{
+  auto image =
+    std::make_shared<tropical_metal::ExactTileFallbackProgram>();
+  image->kernel = state.kernel;
+  image->coeff_kernel = state.coeff_kernel;
+  image->register_count = state.registers.size();
+  image->temp_count = state.temps.size();
+  image->coeff_register_count = state.coeff_registers.size();
+  image->coeff_temp_count = state.coeff_temps.size();
+  image->array_storage = state.array_storage;
+  image->array_sizes = state.array_sizes;
+  image->param_ptrs = state.param_ptrs;
+  image->coeff_array_slots = state.coeff_array_slots;
+  image->initial_slots = state.slots;
+  return image;
+}
+
+void attach_exact_tile_fallback(
+  KernelState & audio_state, const KernelState & exact_state)
+{
+  if (!audio_state.tile_materializer) return;
+  if (!exact_state.kernel
+      || exact_state.mode != tropical_jit::CompilationMode::Fused)
+    throw std::runtime_error(
+      "FlatRuntime: time staging requires a fused exact fallback artifact");
+
+  audio_state.tile_exact_fallback =
+    make_exact_tile_fallback_program(exact_state);
+  audio_state.tile_exact_slot_sources.assign(
+    exact_state.slot_names.size(), -1);
+  for (std::size_t exact = 0; exact < exact_state.slot_names.size(); ++exact)
+  {
+    const auto found = std::find(
+      audio_state.slot_names.begin(), audio_state.slot_names.end(),
+      exact_state.slot_names[exact]);
+    if (found != audio_state.slot_names.end())
+      audio_state.tile_exact_slot_sources[exact] = static_cast<int32_t>(
+        found - audio_state.slot_names.begin());
+  }
+}
+#endif
+
 } // namespace
 
 FlatRuntime::FlatRuntime(unsigned int buffer_length)
@@ -238,6 +283,7 @@ FlatRuntime::make_metal_epoch_request(
     generation = std::atomic_ref(state.control_published_gen)
                    .load(std::memory_order_acquire);
   const auto & slots = state.slot_generations[generation];
+  request.materializer_slots = slots;
   request.slots.reserve(slots.size());
   for (double value : slots)
     request.slots.push_back(static_cast<float>(value));
@@ -249,6 +295,33 @@ FlatRuntime::make_metal_epoch_request(
     for (int64_t value : column)
       request.columns.push_back(
         static_cast<float>(std::bit_cast<double>(value)));
+  request.tile_materializer = state.tile_materializer;
+  if (state.tile_materializer)
+  {
+    request.materializer_seed_arrays = state.array_storage;
+    for (std::size_t j = 0; j < state.coeff_array_slots.size(); ++j)
+    {
+      const uint32_t slot = state.coeff_array_slots[j];
+      if (slot < request.materializer_seed_arrays.size())
+        request.materializer_seed_arrays[slot] =
+          state.coeff_generations[generation][j];
+    }
+    request.exact_fallback = state.tile_exact_fallback;
+    if (request.exact_fallback)
+    {
+      request.exact_fallback_slots =
+        request.exact_fallback->initial_slots;
+      for (std::size_t exact = 0;
+           exact < state.tile_exact_slot_sources.size()
+             && exact < request.exact_fallback_slots.size(); ++exact)
+      {
+        const int32_t source = state.tile_exact_slot_sources[exact];
+        if (source >= 0 && static_cast<std::size_t>(source) < slots.size())
+          request.exact_fallback_slots[exact] =
+            slots[static_cast<std::size_t>(source)];
+      }
+    }
+  }
   return request;
 }
 
@@ -402,6 +475,13 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan6::ParsedPlan6 & 
   for (uint32_t s : parsed.coeff_array_slots)
     if (s < new_state.array_storage.size())
       new_state.coeff_array_slots.push_back(s);
+  for (uint32_t s : parsed.tile_array_slots)
+    if (s < new_state.array_storage.size()
+        && std::find(new_state.coeff_array_slots.begin(),
+                     new_state.coeff_array_slots.end(), s)
+             == new_state.coeff_array_slots.end())
+      new_state.tile_array_slots.push_back(s);
+  new_state.tile_interval_frames = parsed.tile_interval_frames;
   if (!new_state.coeff_array_slots.empty())
   {
     for (auto & gen : new_state.coeff_generations)
@@ -424,6 +504,13 @@ PublishedGeneration FlatRuntime::publish_state(
 {
   std::lock_guard<std::mutex> lock(build_mutex_);
 #ifdef TROPICAL_METAL
+  if (new_state.tile_materializer)
+  {
+    if (!observation_state)
+      throw std::runtime_error(
+        "FlatRuntime: time staging requires an exact observation/fallback artifact");
+    attach_exact_tile_fallback(new_state, *observation_state);
+  }
   if (new_state.metal)
   {
     if (!metal_worker_)
@@ -552,12 +639,30 @@ bool FlatRuntime::load_ir_staged(const std::string & ir_text,
     ir_text, msl_source, coeff_ir, manifest_json).program_version != 0;
 }
 
+bool FlatRuntime::load_ir_time_staged(
+  const std::string & ir_text, const std::string & msl_source,
+  const std::string & coeff_ir, const std::string & tile_ir,
+  const std::string & manifest_json)
+{
+  return load_ir_time_staged_generation(
+    ir_text, msl_source, coeff_ir, tile_ir, manifest_json).program_version != 0;
+}
+
 PublishedGeneration FlatRuntime::load_ir_staged_generation(
   const std::string & ir_text, const std::string & msl_source,
   const std::string & coeff_ir, const std::string & manifest_json)
 {
-  return load_ir_staged_with_observation_generation(
-    ir_text, msl_source, coeff_ir, manifest_json, {}, {}, {});
+  return load_ir_time_staged_generation(
+    ir_text, msl_source, coeff_ir, {}, manifest_json);
+}
+
+PublishedGeneration FlatRuntime::load_ir_time_staged_generation(
+  const std::string & ir_text, const std::string & msl_source,
+  const std::string & coeff_ir, const std::string & tile_ir,
+  const std::string & manifest_json)
+{
+  return load_ir_time_staged_with_observation_generation(
+    ir_text, msl_source, coeff_ir, tile_ir, manifest_json, {}, {}, {});
 }
 
 PublishedGeneration
@@ -569,10 +674,27 @@ FlatRuntime::load_ir_staged_with_observation_generation(
   const std::string & observation_coeff_ir,
   const std::string & observation_manifest_json)
 {
+  return load_ir_time_staged_with_observation_generation(
+    audio_ir, audio_msl_source, audio_coeff_ir, {},
+    audio_manifest_json, observation_ir, observation_coeff_ir,
+    observation_manifest_json);
+}
+
+PublishedGeneration
+FlatRuntime::load_ir_time_staged_with_observation_generation(
+  const std::string & audio_ir, const std::string & audio_msl_source,
+  const std::string & audio_coeff_ir,
+  const std::string & audio_tile_ir,
+  const std::string & audio_manifest_json,
+  const std::string & observation_ir,
+  const std::string & observation_coeff_ir,
+  const std::string & observation_manifest_json)
+{
   using json = nlohmann::json;
   auto compile_jit_state = [this](
       const std::string & kernel_ir,
       const std::string & coefficient_ir,
+      const std::string & tile_ir,
       const std::string & manifest_text) {
     const json manifest = json::parse(manifest_text);
     const std::string schema = manifest.value("schema", std::string{});
@@ -614,6 +736,38 @@ FlatRuntime::load_ir_staged_with_observation_generation(
       state.coeff_kernel = *coeff_result;
     }
 
+    if (!tile_ir.empty())
+    {
+#ifdef TROPICAL_METAL
+      if (state.tile_array_slots.empty()
+          || state.tile_interval_frames == 0)
+        throw std::runtime_error(
+          "FlatRuntime: tile IR requires tile-array and interval metadata");
+      auto tile_result =
+        tropical_jit::OrcJitEngine::instance().compile_ir_text(tile_ir, true);
+      if (!tile_result)
+      {
+        std::string err;
+        llvm::handleAllErrors(tile_result.takeError(),
+          [&err](const llvm::ErrorInfoBase & e) { err = e.message(); });
+        throw std::runtime_error(
+          "FlatRuntime: tile materializer IR JIT compilation failed: " + err);
+      }
+      auto image = std::make_shared<tropical_metal::TileMaterializerProgram>();
+      image->kernel = *tile_result;
+      image->register_count = state.registers.size();
+      image->temp_count = state.temps.size();
+      image->array_sizes = state.array_sizes;
+      image->param_ptrs = state.param_ptrs;
+      image->tile_array_slots = state.tile_array_slots;
+      image->interval_frames = state.tile_interval_frames;
+      state.tile_materializer = std::move(image);
+#else
+      throw std::runtime_error(
+        "FlatRuntime: tile materializer supplied without Metal support");
+#endif
+    }
+
     // Both artifacts must be fully initialized before the single publication.
     publish_control_snapshot(state);
     return state;
@@ -628,11 +782,11 @@ FlatRuntime::load_ir_staged_with_observation_generation(
       "FlatRuntime: observation IR and manifest must be supplied together");
 
   KernelState new_state = compile_jit_state(
-    audio_ir, audio_coeff_ir, audio_manifest_json);
+    audio_ir, audio_coeff_ir, audio_tile_ir, audio_manifest_json);
   std::unique_ptr<KernelState> observation_state;
   if (has_observation_artifact)
     observation_state = std::make_unique<KernelState>(compile_jit_state(
-      observation_ir, observation_coeff_ir, observation_manifest_json));
+      observation_ir, observation_coeff_ir, {}, observation_manifest_json));
 
   if (!audio_msl_source.empty())
   {
@@ -648,6 +802,11 @@ FlatRuntime::load_ir_staged_with_observation_generation(
         published_sample_index_.load(std::memory_order_acquire));
       metal_queue_ready_.store(true, std::memory_order_release);
     }
+    if (new_state.tile_materializer
+        && (new_state.tile_interval_frames == 0
+            || metal_render_tile_frames_ % new_state.tile_interval_frames != 0))
+      throw std::runtime_error(
+        "FlatRuntime: tile_interval_frames must divide the Metal render tile size");
     std::string err;
     std::size_t column_floats = 0;
     for (const auto & column :
@@ -661,6 +820,24 @@ FlatRuntime::load_ir_staged_with_observation_generation(
         throw std::runtime_error(
           "FlatRuntime: aggregate Metal coefficient columns exceed uint32");
       column_floats += column.size();
+    }
+    const std::size_t tile_segment_count = new_state.tile_materializer
+      ? metal_render_tile_frames_ / new_state.tile_interval_frames : 1;
+    for (uint32_t slot : new_state.tile_array_slots)
+    {
+      if (slot >= new_state.array_storage.size()
+          || new_state.array_storage[slot].size()
+               > std::numeric_limits<uint32_t>::max()
+          || new_state.array_storage[slot].size() > 0
+               && tile_segment_count
+                 > std::numeric_limits<uint32_t>::max()
+                   / new_state.array_storage[slot].size()
+          || column_floats > std::numeric_limits<uint32_t>::max()
+               - tile_segment_count * new_state.array_storage[slot].size())
+        throw std::runtime_error(
+          "FlatRuntime: aggregate Metal tile columns exceed uint32");
+      column_floats +=
+        tile_segment_count * new_state.array_storage[slot].size();
     }
     new_state.metal = tropical_metal::create(
       audio_msl_source, metal_render_tile_frames_,

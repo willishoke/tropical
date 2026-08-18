@@ -1,4 +1,5 @@
 import Tropical.EmitArrow.Modal
+import Tropical.Ir.TileTime
 import Tropical.EmitArrow.Modal.OrientedRealize
 import Tropical.Ir.Cycles
 
@@ -598,6 +599,98 @@ private def PlainTerminal.realizeSig (terminal : PlainTerminal)
   | .scaled gain value => do
       mul gain (← value.realizeSig clkInt anchorSamples count?)
 
+/-- Reconstruct the same mode identities at `sampleIndex + frames`.  Every
+    signal field participates, so a warped address or a glide straddling the
+    endpoint is evaluated at its true absolute coordinate. -/
+private def shiftModalInputs (voice : Array ModalMode) (responseClock : Sig)
+    (values : Array Sig) (frames : Nat) :
+    BuildM (Array ModalMode × Sig × Array Sig) := do
+  let mut roots : Array Sig := #[]
+  for mode in voice do
+    roots := roots ++ #[mode.sigma, mode.omega, mode.cre, mode.cim]
+  roots := roots.push responseClock ++ values
+  let shifted ← shiftSampleIndex roots frames
+  let mut modes : Array ModalMode := #[]
+  let mut cursor := 0
+  for mode in voice do
+    modes := modes.push { mode with
+      sigma := shifted[cursor]!
+      omega := shifted[cursor + 1]!
+      cre := shifted[cursor + 2]!
+      cim := shifted[cursor + 3]! }
+    cursor := cursor + 4
+  let shiftedResponse := shifted[cursor]!
+  pure (modes, shiftedResponse,
+    shifted.extract (cursor + 1) shifted.size)
+
+private def stablePhaserTails (tails : Array ModalMode) : Bool :=
+  tails.all fun tail =>
+    tail.deg == 0 && match tail.sigmaRange with
+      | some (lo, hi) => 0.0 < lo && lo <= hi
+      | none => false
+
+private def admittedPhaserSectionCount (count : Nat) : Bool :=
+  count == 6 || count == 12 || count == 18
+
+private def lerpSig (phase a b : Sig) : BuildM Sig := do
+  add a (← mul phase (← sub b a))
+
+/-- Build the compact audio side of the staged terminal.  Endpoint arrays are
+    exact residue images rooted at absolute coordinates; the later TileStage
+    residualizer removes their construction from Metal and leaves only these
+    `O(P+S)` row interpolations plus the ordinary modal realization. -/
+private def stagedPhaserTerminal? (voice : Array ModalMode)
+    (linear : ModalLinearStage) (responseClock : Sig) (values : Array Sig) :
+    BuildM (Option PlainTerminal) := do
+  if !Tropical.Ir.phaserTimeStagingEnabled then return none
+  if !(voice.all (·.deg == 0)) then return none
+  -- Patched signal-rate controls are not part of the first proof surface.
+  if !(linear.controls.all (·.signalNode?.isNone)) then return none
+  let (startVoice, startResponse, startValues) ←
+    shiftModalInputs voice responseClock values 0
+  let (startKernel, _) ← resolveLinearStage linear startResponse startValues 0
+  let some (startTails, startMix) := startKernel.dryWetAllpassCascadeShape?
+    | return none
+  if !admittedPhaserSectionCount startTails.size
+      || !stablePhaserTails startTails then return none
+  let interval := Tropical.Ir.phaserTimeStagingInterval
+  let (endVoice, endResponse, endValues) ←
+    shiftModalInputs voice responseClock values interval
+  let (endKernel, _) ← resolveLinearStage linear endResponse endValues 0
+  let some (endTails, endMix) := endKernel.dryWetAllpassCascadeShape?
+    | return none
+  if endTails.size != startTails.size || !stablePhaserTails endTails then
+    return none
+  let startRows ← Oriented.decorateDegreeZeroCausalPhaser
+    startVoice startTails startMix
+  let endRows ← Oriented.decorateDegreeZeroCausalPhaser
+    endVoice endTails endMix
+  if startRows.size != endRows.size || startRows.isEmpty then return none
+
+  let startSigma ← tileArray (startRows.map (·.sigma))
+  let startOmega ← tileArray (startRows.map (·.omega))
+  let startCre ← tileArray (startRows.map (·.cre))
+  let startCim ← tileArray (startRows.map (·.cim))
+  let endSigma ← tileArray (endRows.map (·.sigma))
+  let endOmega ← tileArray (endRows.map (·.omega))
+  let endCre ← tileArray (endRows.map (·.cre))
+  let endCim ← tileArray (endRows.map (·.cim))
+  let phase ← tilePhase
+  let rows ← (Array.range startRows.size).mapM fun i => do
+    let indexSig ← litI (Int.ofNat i)
+    pure ({
+      sigma := ← lerpSig phase (← index startSigma indexSig)
+        (← index endSigma indexSig)
+      omega := ← lerpSig phase (← index startOmega indexSig)
+        (← index endOmega indexSig)
+      cre := ← lerpSig phase (← index startCre indexSig)
+        (← index endCre indexSig)
+      cim := ← lerpSig phase (← index startCim indexSig)
+        (← index endCim indexSig)
+      deg := 0 } : ModalMode)
+  let bank ← Oriented.Bank.ofFuture rows
+  pure (some (.generic (Oriented.TerminalBank.ofBank bank)))
+
 /-- Fold an authored stage spine after binding the current static universe.  A
     final room uses the stable EC/DD carrier for hot same-side couplings. -/
 private def resolvePlainStages (voice : Array ModalMode) (stages : Array ModalStage)
@@ -607,18 +700,21 @@ private def resolvePlainStages (voice : Array ModalMode) (stages : Array ModalSt
   if stages.size == 1 then
     match stages[0]? with
     | some (ModalStage.linear linear) =>
-      let (kernel, _) ← resolveLinearStage linear responseClock values 0
-      match kernel.dryWetAllpassCascadeShape? with
-      | some (tails, mix) =>
-        let decorated ← Oriented.decorateDegreeZeroCausalPhaser voice tails mix
-        let bank ← Oriented.Bank.ofFuture decorated
-        pure (.generic (Oriented.TerminalBank.ofBank bank))
-      | none => match kernel.orientedShape? with
-        | some (modes, direction) =>
-          pure (.generic (← initialBank.convolveKernelTerminal modes direction))
-        | none =>
-          let bank ← kernel.applyGeneric initialBank
+      match ← stagedPhaserTerminal? voice linear responseClock values with
+      | some terminal => pure terminal
+      | none =>
+        let (kernel, _) ← resolveLinearStage linear responseClock values 0
+        match kernel.dryWetAllpassCascadeShape? with
+        | some (tails, mix) =>
+          let decorated ← Oriented.decorateDegreeZeroCausalPhaser voice tails mix
+          let bank ← Oriented.Bank.ofFuture decorated
           pure (.generic (Oriented.TerminalBank.ofBank bank))
+        | none => match kernel.orientedShape? with
+          | some (modes, direction) =>
+            pure (.generic (← initialBank.convolveKernelTerminal modes direction))
+          | none =>
+            let bank ← kernel.applyGeneric initialBank
+            pure (.generic (Oriented.TerminalBank.ofBank bank))
     | some (ModalStage.ordinaryRoom room) =>
       let (kernel, direction, gain?, _) ← resolveRoomStage room responseClock values 0
       pure <| (PlainTerminal.generic (← initialBank.convolveKernelTerminal kernel direction))

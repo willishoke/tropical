@@ -94,6 +94,14 @@ def modalPhaserRatios : Array Float := #[
   1.681792830507429,
   2.378414230005442]
 
+/-- Deterministic qualification-only logarithmic voicing. It is selected by
+    Decode only when tile-time staging is explicitly enabled and the hidden
+    `_benchmark_stages` field is present; it is not a factory voicing. -/
+def modalPhaserBenchmarkRatios (count : Nat) : Array Float :=
+  if count < 2 then #[] else
+    (Array.range count).map fun i =>
+      Float.pow 2.0 (-1.25 + 2.5 * i.toFloat / (count - 1).toFloat)
+
 /-- The single served port-spec table. Declaration order defines `ParamIdx`
     scan order and is therefore semantically significant. -/
 def portSpecs : String → Array PortSpec

@@ -193,6 +193,9 @@ struct ParsedPlan6
   // kernel reads a whole, consistent generation of columns across a live knob
   // move. An absent field is the canonical empty table.
   std::vector<uint32_t> coeff_array_slots;
+  std::vector<uint32_t> tile_array_slots;
+  uint32_t tile_interval_frames = 0;
+  std::string phaser_time_staging;
   bool metal_sample_threadgroups = false;
   uint32_t metal_threadgroup_scratch_bytes = 0;
 };
@@ -358,11 +361,16 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
     for (const auto & js : plan["sources"])
     {
       tropical_jit::Source src;
-      const std::string k = js.get<std::string>();
+      const std::string k = js.is_string()
+        ? js.get<std::string>() : js.value("kind", std::string{});
       if (k == "tick")
         src.kind = tropical_jit::SourceKind::Tick;
       else if (k == "rate")
         src.kind = tropical_jit::SourceKind::Rate;
+      else if (k == "tile_phase")
+        src.kind = tropical_jit::SourceKind::TilePhase;
+      else if (k == "tile_tick")
+        src.kind = tropical_jit::SourceKind::TileTick;
       else
         throw std::runtime_error(
           "NumericProgramParser: unknown source kind '" + k + "'");
@@ -402,6 +410,12 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
   if (plan.contains("coeff_array_slots"))
     for (const auto & s : plan["coeff_array_slots"])
       result.coeff_array_slots.push_back(s.get<uint32_t>());
+  if (plan.contains("tile_array_slots"))
+    for (const auto & s : plan["tile_array_slots"])
+      result.tile_array_slots.push_back(s.get<uint32_t>());
+  result.tile_interval_frames = plan.value("tile_interval_frames", 0u);
+  result.phaser_time_staging =
+    plan.value("phaser_time_staging", std::string{});
 
   return result;
 }

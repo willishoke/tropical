@@ -140,6 +140,8 @@ private def sourceOfWire (j : JsonV) : Except String SourceKind := do
   match j with
   | .str "tick" => pure .tick
   | .str "rate" => pure .rate
+  | .str "tile_phase" => pure .tilePhase
+  | .str "tile_tick" => pure .tileTick
   | .str s => .error s!"PlanDecode: bad source kind '{s}'"
   | _ => .error "PlanDecode: source kind must be a string"
 
@@ -169,6 +171,9 @@ private def ofWireV (j : JsonV) : Except String FlatPlan := do
   let arraySlotCount := optNat j "array_slot_count" 0
   let slotCount := optNat j "slot_count" 0
   let slotDefaults := (optArr j "slot_defaults").map (·.toJson)
+  let phaserTimeStaging := match j.getField? "phaser_time_staging" with
+    | some (.str reason) => some reason
+    | _ => none
   pure {
     sampleRate, compilationMode := mode,
     arraySlotNames := strArr j "array_slot_names",
@@ -178,7 +183,11 @@ private def ofWireV (j : JsonV) : Except String FlatPlan := do
     sinks, sources,
     slotCount,
     slotNames := strArr j "slot_names",
-    slotDefaults }
+    slotDefaults,
+    coeffArraySlots := natArr j "coeff_array_slots",
+    tileArraySlots := natArr j "tile_array_slots",
+    tileIntervalFrames := optNat j "tile_interval_frames" 0,
+    phaserTimeStaging }
 
 /-- Parse a tropical_plan_6 JSON object into a `FlatPlan`. -/
 def FlatPlan.ofWire (j : Json) : Except String FlatPlan := do

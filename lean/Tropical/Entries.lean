@@ -47,9 +47,12 @@ private def wireOpName : ENode → String
   | .inputRef _ => "inputRef" | .paramRef _ => "paramRef"
   | .nestedOut .. => "nestedOut"
   | .sampleRate => "sampleRate" | .sampleIndex => "sampleIndex"
+  | .tileSampleIndex => "tileSampleIndex"
+  | .tilePhase => "tilePhase"
   | .loopIdx _ => "loopIdx" | .bankSum .. => "bankSum"
   | .routedSum .. => "routedSum"
   | .num _ => "num" | .bool _ => "bool" | .arr _ => "arr"
+  | .tileArray _ => "tileArray"
 
 private def mkOpNode (op : String) (args : Array Json) : Json :=
   Json.mkObj [("op", Json.str op), ("args", Json.arr args)]

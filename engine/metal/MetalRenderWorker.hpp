@@ -1,6 +1,7 @@
 #pragma once
 
 #include "metal/MetalKernel.hpp"
+#include "jit/OrcJitEngine.hpp"
 #include "runtime/EpochTileQueue.hpp"
 
 #include <atomic>
@@ -32,6 +33,41 @@ enum class EpochTransitionKind : uint8_t
   HotSwap,
 };
 
+// Immutable owner for the off-real-time absolute-time materializer. The ORC
+// engine retains the compiled module for process lifetime; this image owns the
+// function identity and every piece of metadata/storage shape a queued worker
+// request needs, independently of either movable runtime state slot.
+struct TileMaterializerProgram
+{
+  tropical_jit::NumericKernelFn kernel = nullptr;
+  std::size_t register_count = 0;
+  std::size_t temp_count = 0;
+  std::vector<uint64_t> array_sizes;
+  std::vector<uint64_t> param_ptrs;
+  std::vector<uint32_t> tile_array_slots;
+  uint32_t interval_frames = 0;
+  double max_abs_coefficient = 1.0e12;
+};
+
+// Immutable exact CPU image retained beside a staged Metal epoch. It is not
+// consulted on the normal path; the worker uses it only when endpoint
+// materialization rejects a non-finite or out-of-range coefficient. Keeping
+// the image on the request makes fallback independent of subsequent hot swaps.
+struct ExactTileFallbackProgram
+{
+  tropical_jit::NumericKernelFn kernel = nullptr;
+  tropical_jit::NumericKernelFn coeff_kernel = nullptr;
+  std::size_t register_count = 0;
+  std::size_t temp_count = 0;
+  std::size_t coeff_register_count = 0;
+  std::size_t coeff_temp_count = 0;
+  std::vector<std::vector<int64_t>> array_storage;
+  std::vector<uint64_t> array_sizes;
+  std::vector<uint64_t> param_ptrs;
+  std::vector<uint32_t> coeff_array_slots;
+  std::vector<double> initial_slots;
+};
+
 struct RenderEpochRequest
 {
   uint64_t epoch_id = 0;
@@ -39,6 +75,11 @@ struct RenderEpochRequest
   double sample_rate = 44100.0;
   std::vector<float> slots;
   std::vector<float> columns;
+  std::shared_ptr<const TileMaterializerProgram> tile_materializer;
+  std::vector<double> materializer_slots;
+  std::vector<std::vector<int64_t>> materializer_seed_arrays;
+  std::shared_ptr<const ExactTileFallbackProgram> exact_fallback;
+  std::vector<double> exact_fallback_slots;
   uint64_t source_origin = 0;
   EpochTransitionKind transition = EpochTransitionKind::Continuous;
   bool fixed_activation = false;
@@ -124,6 +165,8 @@ public:
     uint64_t epoch_id) const noexcept;
 
   uint64_t dispatch_failure_count() const noexcept;
+  uint64_t materialization_failure_count() const noexcept;
+  uint64_t exact_fallback_count() const noexcept;
   uint64_t activation_retarget_count() const noexcept;
   uint64_t activation_failure_count() const noexcept;
   uint64_t stale_completion_count() const noexcept;
@@ -154,7 +197,28 @@ private:
     uint64_t next_device = 0;
     uint64_t next_source = 0;
     uint32_t next_slot = 0;
+    bool materializer_ready = false;
+    std::vector<int64_t> materializer_registers;
+    std::vector<int64_t> materializer_temps;
+    std::vector<std::vector<int64_t>> materializer_arrays;
+    std::vector<int64_t *> materializer_array_ptrs;
+    std::vector<double> materializer_slots;
+    std::vector<float> base_columns;
+    std::vector<float> prepared_columns;
+    bool exact_fallback_ready = false;
+    std::vector<int64_t> exact_registers;
+    std::vector<int64_t> exact_temps;
+    std::vector<int64_t> exact_coeff_registers;
+    std::vector<int64_t> exact_coeff_temps;
+    std::vector<std::vector<int64_t>> exact_arrays;
+    std::vector<int64_t *> exact_array_ptrs;
+    std::vector<double> exact_slots;
   };
+
+  bool materialize_columns(BankRenderCursor & cursor, uint64_t source_start);
+  bool render_exact_fallback(
+    BankRenderCursor & cursor, uint64_t source_start, uint32_t frames,
+    double * destination);
 
   void ensure_started();
   void run();
@@ -195,6 +259,8 @@ private:
   uint64_t pending_activation_epoch_ = 0;
 
   std::atomic<uint64_t> dispatch_failures_{0};
+  std::atomic<uint64_t> materialization_failures_{0};
+  std::atomic<uint64_t> exact_fallbacks_{0};
   std::atomic<uint64_t> activation_retargets_{0};
   std::atomic<uint64_t> activation_failures_{0};
   std::atomic<uint64_t> stale_completions_{0};
