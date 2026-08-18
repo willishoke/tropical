@@ -1190,6 +1190,23 @@ static void test_playback_anchored_observation_socket_frame()
   ASSERT(explicit_result.at("values")[0][0] == 5.0);
   ASSERT(explicit_result.at("values")[0][1] == 6.0);
   ASSERT(explicit_result.at("values")[0][2] == 7.0);
+
+  // The source-sample span may exceed the response budget. Only the bounded
+  // number of strided coordinates is evaluated and returned.
+  request["id"] = 3;
+  request["params"] = {
+    {"start", 5}, {"count", 100000}, {"point_budget", 3},
+    {"slots", {"tap:ramp"}},
+  };
+  ASSERT(socket_request(socket_path, request.dump(), response_text));
+  const auto long_response = nlohmann::json::parse(response_text);
+  const auto & long_result = long_response.at("result");
+  ASSERT(long_result.at("span") == 100000);
+  ASSERT(long_result.at("stride") == 33334);
+  ASSERT(long_result.at("count") == 3);
+  ASSERT(long_result.at("values")[0][0] == 5.0);
+  ASSERT(long_result.at("values")[0][1] == 33339.0);
+  ASSERT(long_result.at("values")[0][2] == 66673.0);
   server.stop();
 }
 
@@ -1523,8 +1540,16 @@ struct ReadyAwareStartSource : CaptureTestSource
     requested_process_cycles = process_cycles;
   }
 
+  void set_realtime_running(bool value) noexcept
+  {
+    realtime_running = value;
+    ++realtime_signals;
+  }
+
   unsigned int prepare_calls = 0;
   unsigned int requested_process_cycles = 0;
+  bool realtime_running = false;
+  unsigned int realtime_signals = 0;
 };
 
 static void test_dac_start_source_preparation()
@@ -1549,6 +1574,12 @@ static void test_dac_start_source_preparation()
   ASSERT(ready_aware.prepare_calls == 2);
   ASSERT(ready_aware.requested_process_cycles == 0);
   ASSERT(ready_aware.process_calls == 0);
+
+  ready_dac.set_source_realtime_running(true);
+  ASSERT(ready_aware.realtime_running);
+  ready_dac.set_source_realtime_running(false);
+  ASSERT(!ready_aware.realtime_running);
+  ASSERT(ready_aware.realtime_signals == 2);
 
   legacy_dac.prepare_source_for_stream_restart();
   ASSERT(legacy.process_calls == kPrimeCycles);

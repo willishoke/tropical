@@ -352,9 +352,9 @@ describe('param dispatch conformance (C++ data-plane ≡ Lean reference)', () =>
       // ── Pin the data-plane companion values themselves ───────────────────
       const slotsA = await readSlots(a, observedSlots)
       const v = Object.fromEntries(observedSlots.map((n, i) => [n, slotsA[i]]))
-      // glide: dur = 0.02·SR (SR = 44100 for the arrow patch plan);
-      // s = clamp((512 − 0)/882, 0, 1), curr = v0 + (v1−v0)·s²(3−2s).
-      const s = Math.min(1, Math.max(0, 512 / (0.02 * 44100)))
+      // glide: dur = 0.01·SR (SR = 44100 for the arrow patch plan);
+      // s = clamp((512 − 0)/441, 0, 1), curr = v0 + (v1−v0)·s²(3−2s).
+      const s = Math.min(1, Math.max(0, 512 / (0.01 * 44100)))
       const expectedV0 = 0.001 + (0.02 - 0.001) * (s * s * (3 - 2 * s))
       expect(Math.abs(v['param:sfl.depth#v0'] - expectedV0)).toBeLessThanOrEqual(1e-12)
       expect(v['param:sfl.depth#v1']).toBe(driveValues['sfl.depth']) // target lands in v1

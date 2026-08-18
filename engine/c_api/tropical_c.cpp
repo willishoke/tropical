@@ -534,6 +534,20 @@ uint64_t tropical_runtime_metal_worker_wall_time_ns(tropical_runtime_t r)
     ->metal_worker_wall_time_ns();
 }
 
+uint64_t tropical_runtime_metal_render_time_ns(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_render_time_ns();
+}
+
+uint64_t tropical_runtime_metal_rendered_frame_count(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->metal_rendered_frame_count();
+}
+
 uint64_t tropical_runtime_ownership_failure_count(tropical_runtime_t r)
 {
   if (!r) return 0;

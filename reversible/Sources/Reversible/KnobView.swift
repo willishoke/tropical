@@ -1,5 +1,33 @@
 import SwiftUI
 
+/// Gesture-local truth. SwiftUI may rebuild the view while a drag is active,
+/// so the final value must not be read back from the `PatchNode` snapshot that
+/// happened to install the gesture recognizer.
+struct KnobDragSession {
+    private var startNorm: Double?
+    private var latestValue: Double?
+
+    mutating func update(
+        knob: KnobSpec,
+        currentValue: Double,
+        translation: Double
+    ) -> Double {
+        let start = startNorm ?? knob.toNorm(currentValue)
+        startNorm = start
+        let value = knob.fromNorm(start - translation / 180)
+        latestValue = value
+        return value
+    }
+
+    mutating func finish() -> Double? {
+        defer {
+            startNorm = nil
+            latestValue = nil
+        }
+        return latestValue
+    }
+}
+
 /// Knob: 38px dial, pointer sweeping −135°…+135° (styles.css .knob).
 /// A vertical drag (180px = full sweep) edits authored scalar truth. The
 /// realized handshake decides whether that scalar is live (`set_param`) or
@@ -10,7 +38,7 @@ struct KnobView: View {
     @EnvironmentObject var model: PatchModel
     let node: PatchNode
     let knob: KnobSpec
-    @State private var dragStartNorm: Double?
+    @State private var drag = KnobDragSession()
 
     private var value: Double { node.values[knob.name] ?? knob.def }
 
@@ -42,14 +70,22 @@ struct KnobView: View {
                 .gesture(
                     DragGesture(minimumDistance: 0)
                         .onChanged { g in
-                            let t0 = dragStartNorm ?? knob.toNorm(value)
-                            dragStartNorm = t0
-                            let v = knob.fromNorm(t0 - g.translation.height / 180)
+                            let current = model.nodes[node.id]?
+                                .values[knob.name] ?? value
+                            let v = drag.update(
+                                knob: knob,
+                                currentValue: current,
+                                translation: g.translation.height
+                            )
                             model.setKnob(node, knob, v)
                         }
                         .onEnded { _ in
-                            dragStartNorm = nil
-                            model.setKnob(node, knob, value)
+                            guard let finalValue = drag.finish() else { return }
+                            model.finishKnobGesture(
+                                nodeID: node.id,
+                                knob: knob,
+                                value: finalValue
+                            )
                         }
                 )
             Text(knob.name)

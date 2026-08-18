@@ -154,11 +154,7 @@ def portSpecs : String → Array PortSpec
       { name := "rt60", accepts := sigIn, knob := some (2, 0), discipline := .glide,
         display := some { min := 0.2, max := 12, log := true, unit := "sec" } },
       { name := "dir", accepts := sigIn, knob := some (0, 0), discipline := .glide,
-        display := some { min := 0, max := 1 } },
-      { name := "sway", accepts := sigIn, knob := some (0, 0), discipline := .glide,
-        display := some { min := 0, max := 0.9 } },
-      { name := "rate", accepts := sigIn, knob := some (3, 1), discipline := .glide,
-        display := some { min := 0.05, max := 8, log := true, unit := "Hz" } }]
+        display := some { min := 0, max := 1 } }]
   | "filter" => #[
       { name := "in", accepts := modalIn, multi := true },
       { name := "cutoff", knob := some (800, 0), discipline := .glide,

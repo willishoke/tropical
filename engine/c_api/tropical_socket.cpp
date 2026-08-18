@@ -267,9 +267,14 @@ std::string SocketServer::handle_data(const std::string & line)
     {
       const json & p = j.at("params");
       const uint32_t requested_count = p.at("count").get<uint32_t>();
-      if (requested_count == 0 || requested_count > 16384u)
+      // `requested_count` is a source-sample span, not an allocation size.
+      // Long scope acquisitions are deterministically strided to the bounded
+      // point budget below, so even the slowest built-in oscillator can be
+      // phase-acquired without increasing response or workspace memory.
+      constexpr uint32_t max_render_window_span = 2250000u;
+      if (requested_count == 0 || requested_count > max_render_window_span)
         return json{{"jsonrpc", "2.0"}, {"id", id},
-                    {"error", {{"code", -32602}, {"message", "render_window: count must be in [1,16384]"}}}}.dump();
+                    {"error", {{"code", -32602}, {"message", "render_window: count must be in [1,2250000]"}}}}.dump();
       const std::string anchor = p.value("anchor", std::string{});
       if (!anchor.empty() && anchor != "playback")
         return json{{"jsonrpc", "2.0"}, {"id", id},

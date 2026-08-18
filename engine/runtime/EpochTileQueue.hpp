@@ -250,9 +250,9 @@ public:
     return true;
   }
 
-  // Worker only. Coalesces a fresh prepared epoch before any callback has
-  // claimed it. The claim CAS prevents overwriting a descriptor while audio
-  // may be acting on a stable read.
+  // Worker only. Coalesces a prepared epoch before any callback has claimed
+  // it. The claim CAS prevents overwriting a descriptor while audio may be
+  // acting on a stable read.
   bool cancel_unclaimed_activation(uint64_t epoch_id)
   {
     if (epoch_id == 0

@@ -11,6 +11,13 @@ struct ObservationChannel: Equatable, Hashable, Sendable {
 /// pointBudget permits deterministic engine-side striding without changing
 /// the identity or completeness of the returned channel set.
 struct ObservationBinding: Equatable, Sendable {
+    /// The engine evaluates at most `maximumPointBudget` coordinates; a larger
+    /// source-sample span is represented by deterministic striding. The upper
+    /// span covers one period of the slowest built-in oscillator plus the
+    /// scope's largest display window.
+    static let maximumSpan = 2_250_000
+    static let maximumPointBudget = 16_384
+
     let expectedGeneration: EngineGeneration
     let span: Int
     let pointBudget: Int
@@ -24,8 +31,8 @@ struct ObservationBinding: Equatable, Sendable {
     ) throws {
         guard expectedGeneration.programVersion > 0,
               expectedGeneration.controlVersion > 0,
-              (1...16_384).contains(span),
-              (1...16_384).contains(pointBudget),
+              (1...Self.maximumSpan).contains(span),
+              (1...Self.maximumPointBudget).contains(pointBudget),
               !channels.isEmpty,
               Set(channels.map(\.key)).count == channels.count,
               channels.allSatisfy({ channel in

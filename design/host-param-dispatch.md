@@ -19,7 +19,7 @@ document is the intent and the code is the bug.
 "param_disciplines": [
   { "name": "master.velocity", "discipline": "velocity",
     "companions": ["master.tau_base"] },
-  { "name": "sf.depth", "discipline": "glide", "glide_dur_sec": 0.02,
+  { "name": "sf.depth", "discipline": "glide", "glide_dur_sec": 0.01,
     "companions": ["sf.depth#v0", "sf.depth#v1", "sf.depth#t0",
       "sf.depth#t0#u0", "sf.depth#t0#u1",
       "sf.depth#t0#u2", "sf.depth#t0#u3"] },
@@ -48,6 +48,14 @@ audible starting at `E`. If the worker cannot safely publish the prepared
 window for the reserved frame, it retargets a later physical frame and the
 host recomputes the whole transaction at the new `E`; it never reuses
 companions calculated for the missed epoch.
+
+Live controls and clock jumps reserve one render tile of lead and publish once
+that prime tile is ready; the worker fills the rest of the inactive bank during
+the lead. Fresh loads and graph hot-swaps retain a complete-bank lead and prime
+because replacing executable topology has a larger safety requirement.
+Running audio serializes control epochs through callback acknowledgement so a
+later glide cannot reuse the projected state of a cancelled epoch. With the DAC
+stopped, unclaimed epochs may coalesce because no callback can acknowledge them.
 
 Raw writes, glides, anchors, velocity changes, clock jumps, and hot-swaps all
 use the same exact-epoch rule. Device frames remain monotonic through a clock

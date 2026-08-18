@@ -995,6 +995,19 @@ public:
     return published_sample_index_.load(std::memory_order_acquire);
   }
 
+  // DAC lifecycle signal for the asynchronous Metal scheduler. While a
+  // callback is running, control epochs are serialized through activation
+  // acknowledgement so glide projections remain continuous. With the DAC
+  // stopped, unclaimed epochs may coalesce because no callback can claim them.
+  void set_realtime_running(bool running) noexcept
+  {
+#ifdef TROPICAL_METAL
+    realtime_running_.store(running, std::memory_order_release);
+#else
+    (void)running;
+#endif
+  }
+
   // Number of callbacks that emitted silence because bounded ownership
   // acquisition could not obtain a coherent state/generation.
   uint64_t ownership_failure_count() const
@@ -1179,6 +1192,26 @@ public:
 #endif
   }
 
+  uint64_t metal_render_time_ns() const
+  {
+#ifdef TROPICAL_METAL
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    return metal_worker_ ? metal_worker_->render_time_ns() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  uint64_t metal_rendered_frame_count() const
+  {
+#ifdef TROPICAL_METAL
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    return metal_worker_ ? metal_worker_->rendered_frame_count() : 0;
+#else
+    return 0;
+#endif
+  }
+
   // Test-only: install/remove the deterministic ownership pause seam.
   void set_ownership_test_seam(RuntimeOwnershipTestSeam * seam)
   {
@@ -1356,6 +1389,7 @@ private:
 #ifdef TROPICAL_METAL
   uint32_t metal_render_tile_frames_ = 0;
   std::unique_ptr<EpochTileQueue> metal_tiles_;
+  std::atomic<bool> realtime_running_{false};
   std::unique_ptr<tropical_metal::MetalRenderWorker> metal_worker_;
   std::atomic<bool> metal_queue_ready_{false};
   std::atomic<bool> metal_runtime_loaded_{false};

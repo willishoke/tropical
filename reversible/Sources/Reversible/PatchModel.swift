@@ -23,30 +23,191 @@ struct PatchNode: Identifiable {
 }
 
 enum ScopeTraceProjection {
-    /// Preserve each scope's own 2× trigger-search horizon when several
-    /// different window sizes share one larger generation-pinned RPC.
-    static func triggeredSamples(_ values: [Double], displayCount: Int) -> [Double] {
-        guard displayCount > 0, !values.isEmpty else { return [] }
-        let horizon = min(values.count, min(16_384, displayCount * 2))
-        let suffix = Array(values.suffix(horizon))
-        let trigger = triggerIndex(suffix, display: displayCount)
-        return Array(suffix[trigger..<min(trigger + displayCount, suffix.count)])
+    /// Preserve each channel's own trigger-search horizon when several
+    /// timebases share one generation-pinned RPC. Source-sample spans are
+    /// converted through the response stride so a slow known signal can use
+    /// a long acquisition without making the display itself enormous.
+    static func triggeredSamples(
+        _ values: [Double],
+        displaySpanSamples: Int,
+        acquisitionSpanSamples: Int,
+        stride: Int
+    ) -> [Double] {
+        guard displaySpanSamples > 0, !values.isEmpty else { return [] }
+        let safeStride = max(1, stride)
+        let displayCount = min(
+            values.count,
+            max(2, (displaySpanSamples + safeStride - 1) / safeStride)
+        )
+        let acquisitionCount = min(
+            values.count,
+            max(displayCount, (acquisitionSpanSamples + safeStride - 1) / safeStride)
+        )
+        let suffix = Array(values.suffix(acquisitionCount))
+        guard suffix.count > displayCount else { return suffix }
+        guard let trigger = triggerOffset(suffix, display: displayCount) else {
+            // An untriggerable/DC/one-shot signal should still be live. The
+            // old index-zero fallback showed the oldest half of the fetch.
+            return Array(suffix.suffix(displayCount))
+        }
+        return (0..<displayCount).map {
+            sampleLinear(suffix, at: trigger + Double($0))
+        }
     }
 
-    /// Rising level-trigger with hysteresis (the playground scope's port of
-    /// tui/scope/trigger.ts).
-    static func triggerIndex(_ samples: [Double], display: Int) -> Int {
+    /// DC-offset-tolerant rising level trigger. The threshold is the observed
+    /// range midpoint rather than absolute zero, and the newest crossing with
+    /// a complete display after it wins. Linear crossing interpolation keeps
+    /// sub-sample phase from wobbling as the playback anchor advances.
+    static func triggerOffset(_ samples: [Double], display: Int) -> Double? {
         let searchEnd = samples.count - display
-        guard searchEnd > 0 else { return 0 }
-        let peak = samples.reduce(0) { max($0, abs($1)) }
-        let hysteresis = peak * 0.05
-        guard hysteresis > 0 else { return 0 }
-        var armed = false
-        for index in 0..<searchEnd {
-            if samples[index] < -hysteresis { armed = true }
-            else if armed && samples[index] >= hysteresis { return index }
+        guard searchEnd > 0 else { return nil }
+        let finite = samples.filter(\.isFinite)
+        guard let low = finite.min(), let high = finite.max(),
+              high - low >= 1e-12
+        else { return nil }
+        let threshold = (low + high) / 2
+        let armLevel = threshold - (high - low) * 0.08
+        var armed = samples[0].isFinite && samples[0] <= armLevel
+        var best: Double?
+
+        for index in 1...searchEnd {
+            let previous = samples[index - 1]
+            let current = samples[index]
+            guard previous.isFinite, current.isFinite else {
+                armed = false
+                continue
+            }
+            if current <= armLevel { armed = true }
+            guard armed, previous < threshold, current >= threshold else { continue }
+            let width = current - previous
+            let crossing = Double(index - 1) +
+                (width == 0 ? 0 : (threshold - previous) / width)
+            if crossing <= Double(searchEnd) {
+                best = crossing
+                armed = false
+            }
         }
-        return 0
+        if best != nil { return best }
+
+        // A steep or very asymmetric waveform can skip the arming band while
+        // retaining a perfectly useful rising midpoint crossing.
+        for index in 1...searchEnd {
+            let previous = samples[index - 1]
+            let current = samples[index]
+            guard previous.isFinite, current.isFinite,
+                  previous < threshold, current >= threshold
+            else { continue }
+            let width = current - previous
+            best = Double(index - 1) +
+                (width == 0 ? 0 : (threshold - previous) / width)
+        }
+        return best
+    }
+
+    private static func sampleLinear(_ values: [Double], at position: Double) -> Double {
+        let left = max(0, min(values.count - 1, Int(floor(position))))
+        let right = min(values.count - 1, left + 1)
+        let fraction = position - Double(left)
+        return values[left] + (values[right] - values[left]) * fraction
+    }
+}
+
+enum ScopeSignalKnowledge {
+    static let defaultWindow = 0.02
+    static let minimumWindow = 0.002
+    static let maximumWindow = 0.35
+    static let visibleCycles = 4.0
+
+    /// The surface graph already knows oscillator and modal fundamentals. Use
+    /// that knowledge for a useful shared timebase, following audio/modal
+    /// inputs but deliberately ignoring temporal/control inputs such as a
+    /// resonator's `addr` signal.
+    static func frequencies(
+        for sourceID: String,
+        nodes: [String: PatchNode]
+    ) -> [Double] {
+        var visiting = Set<String>()
+        return frequencies(for: sourceID, nodes: nodes, visiting: &visiting)
+    }
+
+    static func recommendedWindow(
+        for sourceIDs: [String],
+        nodes: [String: PatchNode]
+    ) -> Double? {
+        let frequency = sourceIDs.flatMap { frequencies(for: $0, nodes: nodes) }
+            .filter { $0.isFinite && $0 > 0 }
+            .min()
+        guard let frequency else { return nil }
+        return min(maximumWindow, max(minimumWindow, visibleCycles / frequency))
+    }
+
+    static func acquisitionSpanSamples(
+        displaySpanSamples: Int,
+        frequency: Double?,
+        sampleRate: Double
+    ) -> Int {
+        guard let frequency, frequency.isFinite, frequency > 0 else {
+            return min(
+                ObservationBinding.maximumSpan,
+                max(displaySpanSamples + 1, displaySpanSamples * 2)
+            )
+        }
+        let onePeriod = Int(ceil(sampleRate / frequency)) + 2
+        return min(
+            ObservationBinding.maximumSpan,
+            max(displaySpanSamples + 1, displaySpanSamples + onePeriod)
+        )
+    }
+
+    static func isAutomaticWindow(
+        _ window: Double,
+        sourceIDs: [String],
+        nodes: [String: PatchNode]
+    ) -> Bool {
+        let expected = recommendedWindow(for: sourceIDs, nodes: nodes) ?? defaultWindow
+        return abs(window - expected) <= max(1e-9, expected * 1e-6)
+    }
+
+    private static func frequencies(
+        for sourceID: String,
+        nodes: [String: PatchNode],
+        visiting: inout Set<String>
+    ) -> [Double] {
+        guard visiting.insert(sourceID).inserted,
+              let node = nodes[sourceID]
+        else { return [] }
+        defer { visiting.remove(sourceID) }
+
+        switch node.kind {
+        case .source:
+            if let controlID = node.inputs["freq"]?.first,
+               let control = nodes[controlID], control.kind == .knob {
+                return [control.values["value"] ?? 220]
+            }
+            return [node.values["freq"] ?? 220]
+        case .resonator:
+            return [node.values["freq"] ?? 220]
+        case .fm:
+            return [node.values["carrier"] ?? 330]
+        case .knob, .scope, .moduleInput:
+            return []
+        case .modalBlend:
+            return ["dry", "wet"].flatMap { port in
+                (node.inputs[port] ?? []).flatMap {
+                    frequencies(for: $0, nodes: nodes, visiting: &visiting)
+                }
+            }
+        case .flange, .sflange, .delay, .reverse, .mix, .ring,
+             .reverb, .phaser, .modalmix, .allpass, .modalTail,
+             .moduleOutput, .out:
+            // `sflange.mod` and similar non-audio inlets describe motion, not
+            // the trace's carrier; all of these kinds carry audio/modal data
+            // through their `in` inlet.
+            return (node.inputs["in"] ?? []).flatMap {
+                frequencies(for: $0, nodes: nodes, visiting: &visiting)
+            }
+        }
     }
 }
 
@@ -362,14 +523,47 @@ final class PatchModel: ObservableObject {
         return n
     }
 
+    /// Remember which scopes are still following graph-derived defaults
+    /// before a graph/parameter edit. A user-turned window no longer equals
+    /// its prior recommendation and is therefore left alone.
+    private func automaticallyTunedScopeIDs(
+        in graph: [String: PatchNode]
+    ) -> Set<String> {
+        Set(graph.values.compactMap { scope in
+            guard scope.kind == .scope,
+                  ScopeSignalKnowledge.isAutomaticWindow(
+                    scope.values["window"] ?? ScopeSignalKnowledge.defaultWindow,
+                    sourceIDs: scope.allInputs,
+                    nodes: graph
+                  )
+            else { return nil }
+            return scope.id
+        })
+    }
+
+    private func retuneScopes(_ scopeIDs: Set<String>) {
+        for id in scopeIDs {
+            guard var scope = nodes[id], scope.kind == .scope else { continue }
+            let recommended = ScopeSignalKnowledge.recommendedWindow(
+                for: scope.allInputs,
+                nodes: nodes
+            ) ?? ScopeSignalKnowledge.defaultWindow
+            guard scope.values["window"] != recommended else { continue }
+            scope.values["window"] = recommended
+            nodes[id] = scope
+        }
+    }
+
     func deleteNode(_ id: String) {
         guard let n = nodes[id], !n.kind.spec.fixed else { return }
+        let automaticScopes = automaticallyTunedScopeIDs(in: nodes)
         nodes.removeValue(forKey: id)
         order.removeAll { $0 == id }
         for var m in nodes.values {
             for p in m.inputs.keys { m.inputs[p]?.removeAll { $0 == id } }
             nodes[m.id] = m
         }
+        retuneScopes(automaticScopes)
         autoArrangeIfOn()
         advanceAuthoredRevision()
         schedulePush()
@@ -411,6 +605,7 @@ final class PatchModel: ObservableObject {
 
     func connect(from fromId: String, to toId: String, port: String) {
         guard canConnect(from: fromId, to: toId, port: port), var to = nodes[toId] else { return }
+        let automaticScopes = automaticallyTunedScopeIDs(in: nodes)
         let servedMulti: Bool? = {
             guard let vocabulary,
                   let kind = NodeKindID(rawValue: to.kind.rawValue),
@@ -424,6 +619,7 @@ final class PatchModel: ObservableObject {
         }
         to.inputs[port, default: []].append(fromId)
         nodes[toId] = to
+        retuneScopes(automaticScopes)
         autoArrangeIfOn()
         advanceAuthoredRevision()
         schedulePush()
@@ -431,8 +627,10 @@ final class PatchModel: ObservableObject {
 
     func deleteEdge(to toId: String, port: String, from fromId: String) {
         guard var to = nodes[toId] else { return }
+        let automaticScopes = automaticallyTunedScopeIDs(in: nodes)
         to.inputs[port]?.removeAll { $0 == fromId }
         nodes[toId] = to
+        retuneScopes(automaticScopes)
         autoArrangeIfOn()
         advanceAuthoredRevision()
         schedulePush()
@@ -649,33 +847,67 @@ final class PatchModel: ObservableObject {
     lazy var params = ParamSender(model: self)
 
     func setKnob(_ node: PatchNode, _ knob: KnobSpec, _ value: Double) {
-        guard value.isFinite, var current = nodes[node.id],
-              current.values[knob.name] != value
-        else { return }
-        current.values[knob.name] = value
-        nodes[node.id] = current
+        applyKnob(
+            nodeID: node.id,
+            knob: knob,
+            value: value,
+            guaranteeDelivery: false
+        )
+    }
+
+    /// End-of-gesture delivery does not trust the view's node snapshot. Even
+    /// when authored truth already equals the final pointer value, enqueue it
+    /// once more so coalescing cannot leave the engine at an intermediate
+    /// value when the gesture produces no further events.
+    func finishKnobGesture(nodeID: String, knob: KnobSpec, value: Double) {
+        applyKnob(
+            nodeID: nodeID,
+            knob: knob,
+            value: value,
+            guaranteeDelivery: true
+        )
+    }
+
+    private func applyKnob(
+        nodeID: String,
+        knob: KnobSpec,
+        value: Double,
+        guaranteeDelivery: Bool
+    ) {
+        guard value.isFinite, var current = nodes[nodeID] else { return }
+        let changed = current.values[knob.name] != value
+        guard changed || guaranteeDelivery else { return }
+        if changed {
+            let automaticScopes = current.kind.spec.monitor
+                ? Set<String>()
+                : automaticallyTunedScopeIDs(in: nodes)
+            current.values[knob.name] = value
+            nodes[nodeID] = current
+            retuneScopes(automaticScopes)
+        }
 
         // A monitor's knobs (Scope `window`) are authored view state, not
         // parameter slots and do not invalidate lowering compatibility.
-        guard !node.kind.spec.monitor else {
-            advanceAuthoredRevision(requiresCompile: false)
+        guard !current.kind.spec.monitor else {
+            if changed { advanceAuthoredRevision(requiresCompile: false) }
             return
         }
-        let name = "\(node.id).\(knob.name)"
+        let name = "\(nodeID).\(knob.name)"
         guard let realizedPatch,
               realizedPatch.loweringRevision == loweringRevision,
               case .live = realizedPatch.patch.parameterStatus(
-                nodeID: node.id,
+                nodeID: nodeID,
                 port: knob.name
               )
         else {
+            guard changed else { return }
             // Absent live truth means the edit is structural (or belongs to a
             // not-yet-realized lowering revision).
             advanceAuthoredRevision()
             schedulePush(after: .milliseconds(90))
             return
         }
-        advanceAuthoredRevision(requiresCompile: false)
+        if changed { advanceAuthoredRevision(requiresCompile: false) }
         params.send(name, value)
     }
 
@@ -757,7 +989,12 @@ final class PatchModel: ObservableObject {
 
     private struct ScopeProjection: Equatable {
         let binding: ObservationBinding
-        let displayCounts: [String: Int]
+        let channels: [String: ScopeChannelProjection]
+    }
+
+    private struct ScopeChannelProjection: Equatable {
+        let displaySpanSamples: Int
+        let acquisitionSpanSamples: Int
     }
 
     func scopeSlot(for sourceId: String) -> String? {
@@ -788,32 +1025,81 @@ final class PatchModel: ObservableObject {
         guard !scopes.isEmpty else { return nil }
 
         var channels: [ObservationChannel] = []
-        var displayCounts: [String: Int] = [:]
-        var maximumFetch = 0
+        var channelProjections: [String: ScopeChannelProjection] = [:]
+        var desiredMaximumFetch = 0
+        var highestKnownFrequency = 0.0
+        var hasUnknownFrequency = false
         for scope in scopes {
-            let window = scope.values["window"] ?? 0.02
-            let displayCount = min(
-                8_192,
-                max(128, Int(window * Self.sampleRate))
-            )
-            maximumFetch = max(maximumFetch, min(16_384, displayCount * 2))
+            let window = scope.values["window"] ?? ScopeSignalKnowledge.defaultWindow
+            let displaySpanSamples = max(128, Int(window * Self.sampleRate))
             for port in scope.kind.spec.inlets {
                 guard let src = scope.inputs[port]?.first,
                       let slot = scopeSlot(for: src) else { continue }
                 let key = "\(scope.id).\(port)"
+                let frequencies = ScopeSignalKnowledge.frequencies(
+                    for: src,
+                    nodes: nodes
+                ).filter { $0.isFinite && $0 > 0 }
+                let fundamental = frequencies.min()
+                if let channelHigh = frequencies.max() {
+                    highestKnownFrequency = max(highestKnownFrequency, channelHigh)
+                } else {
+                    hasUnknownFrequency = true
+                }
+                let acquisitionSpanSamples =
+                    ScopeSignalKnowledge.acquisitionSpanSamples(
+                        displaySpanSamples: displaySpanSamples,
+                        frequency: fundamental,
+                        sampleRate: Self.sampleRate
+                    )
                 channels.append(.init(key: key, slot: slot))
-                displayCounts[key] = displayCount
+                channelProjections[key] = .init(
+                    displaySpanSamples: displaySpanSamples,
+                    acquisitionSpanSamples: acquisitionSpanSamples
+                )
+                desiredMaximumFetch = max(
+                    desiredMaximumFetch,
+                    acquisitionSpanSamples
+                )
             }
+        }
+        // Keep at least eight observation points per cycle of the fastest
+        // known channel. A very slow channel may ask for seconds of trigger
+        // history, but it must not alias a fast trace sharing the RPC.
+        let maximumStride: Int
+        if hasUnknownFrequency || highestKnownFrequency <= 0 {
+            maximumStride = 1
+        } else {
+            maximumStride = max(
+                1,
+                Int(floor(Self.sampleRate / (highestKnownFrequency * 8)))
+            )
+        }
+        let maximumFetch = min(
+            desiredMaximumFetch,
+            ObservationBinding.maximumPointBudget * maximumStride
+        )
+        for (key, projection) in channelProjections {
+            channelProjections[key] = .init(
+                displaySpanSamples: projection.displaySpanSamples,
+                acquisitionSpanSamples: min(
+                    projection.acquisitionSpanSamples,
+                    maximumFetch
+                )
+            )
         }
         guard maximumFetch > 0, !channels.isEmpty,
               let binding = try? ObservationBinding(
                 expectedGeneration: realizedPatch.generation,
                 span: maximumFetch,
-                pointBudget: maximumFetch,
+                pointBudget: min(
+                    maximumFetch,
+                    ObservationBinding.maximumPointBudget
+                ),
                 channels: channels
               )
         else { return nil }
-        return .init(binding: binding, displayCounts: displayCounts)
+        return .init(binding: binding, channels: channelProjections)
     }
 
     private func adoptObservationFrame(_ frame: ObservationFrame) {
@@ -835,11 +1121,13 @@ final class PatchModel: ObservableObject {
         else { return }
         var fresh: [String: [Double]] = [:]
         for channel in frame.channels {
-            guard let displayCount = projection.displayCounts[channel.channel.key]
+            guard let channelProjection = projection.channels[channel.channel.key]
             else { continue }
             fresh[channel.channel.key] = ScopeTraceProjection.triggeredSamples(
                 channel.values,
-                displayCount: displayCount
+                displaySpanSamples: channelProjection.displaySpanSamples,
+                acquisitionSpanSamples: channelProjection.acquisitionSpanSamples,
+                stride: frame.stride
             )
         }
         guard fresh.count == frame.channels.count else { return }
@@ -881,10 +1169,27 @@ private final class EventBox: @unchecked Sendable {
     @MainActor init() {}
 }
 
+enum ParamWriteFailureRecovery: Equatable {
+    case reportOnly
+}
+
+enum ParamWriteFailurePolicy {
+    /// A failed write says nothing about the authored graph. In particular,
+    /// transport timeouts and publication failures must not turn a live
+    /// control gesture into an unrelated graph compile.
+    static func recovery(for _: Error) -> ParamWriteFailureRecovery {
+        .reportOnly
+    }
+
+    static func status(name: String, error: Error) -> String {
+        "parameter \(name): \(error.localizedDescription)"
+    }
+}
+
 /// Live param drive: set the `param:<name>` slot on the running kernel — no
-/// recompile. Rapid drags coalesce to the latest value per name; a cold-start
-/// miss (slot not compiled yet) falls back to a relower that bakes the value
-/// as the slot default, after which subsequent turns are live.
+/// recompile. Rapid drags coalesce to the latest value per name. Cold-start
+/// lowering is decided by `setKnob` before a write reaches this sender; once
+/// a control is live, an RPC failure is reported and never relowers the graph.
 @MainActor
 final class ParamSender {
     private var pending: [String: LatestValueBuffer] = [:]
@@ -913,7 +1218,14 @@ final class ParamSender {
                         "name": .string(name), "value": .number(v)
                     ]))
                 } catch {
-                    self?.model?.schedulePush()
+                    guard let model = self?.model else { return }
+                    switch ParamWriteFailurePolicy.recovery(for: error) {
+                    case .reportOnly:
+                        model.setStatus(
+                            ParamWriteFailurePolicy.status(name: name, error: error),
+                            isError: true
+                        )
+                    }
                     return
                 }
             }

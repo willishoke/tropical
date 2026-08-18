@@ -259,6 +259,10 @@ FlatRuntime::schedule_metal_epoch_locked(
   uint64_t requested_source, uint32_t generation)
 {
   const uint64_t epoch_id = next_metal_epoch_id_++;
+  const auto retarget_deadline = std::chrono::steady_clock::now()
+    + std::chrono::nanoseconds(
+        tropical_metal::kActivationRetargetTimeoutNs);
+  uint32_t retargets = 0;
   for (;;)
   {
     const auto reservation =
@@ -268,8 +272,23 @@ FlatRuntime::schedule_metal_epoch_locked(
       reservation.effective_sample_index, generation);
     request.fixed_activation = true;
     request.activation_frame = reservation.activation_frame;
+    request.reservation_device_frame = reservation.device_frame;
+    request.enqueue_device_frame = metal_worker_->device_frame();
     auto result = metal_worker_->schedule(std::move(request));
-    if (result.retargeted) continue;
+    if (result.retargeted)
+    {
+      ++retargets;
+      if (retargets >= tropical_metal::kActivationRetargetLimit
+          || std::chrono::steady_clock::now() >= retarget_deadline)
+      {
+        result.retargeted = false;
+        result.error =
+          "MetalRenderWorker: fixed activation remained late after "
+          + std::to_string(retargets) + " retargets";
+        return result;
+      }
+      continue;
+    }
     return result;
   }
 }
@@ -408,9 +427,12 @@ PublishedGeneration FlatRuntime::publish_state(
   if (new_state.metal)
   {
     if (!metal_worker_)
+    {
       metal_worker_ =
         std::make_unique<tropical_metal::MetalRenderWorker>(
-          *metal_tiles_);
+          *metal_tiles_, tropical_metal::MetalRenderWorker::RenderFunction{},
+          &realtime_running_);
+    }
     const uint64_t epoch_id = next_metal_epoch_id_++;
     const auto transition =
       metal_runtime_loaded_.load(std::memory_order_acquire)
@@ -822,6 +844,10 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
   if (state.metal)
   {
     const uint64_t epoch_id = next_metal_epoch_id_++;
+    const auto retarget_deadline = std::chrono::steady_clock::now()
+      + std::chrono::nanoseconds(
+          tropical_metal::kActivationRetargetTimeoutNs);
+    uint32_t retargets = 0;
     for (;;)
     {
       const auto epoch = metal_worker_->reserve(
@@ -848,10 +874,27 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
         epoch.effective_sample_index, reservation.target);
       request.fixed_activation = true;
       request.activation_frame = epoch.activation_frame;
+      request.reservation_device_frame = epoch.device_frame;
+      request.enqueue_device_frame = metal_worker_->device_frame();
       const auto scheduled =
         metal_worker_->schedule(std::move(request));
       if (scheduled.retargeted)
+      {
+        ++retargets;
+        if (retargets >= tropical_metal::kActivationRetargetLimit
+            || std::chrono::steady_clock::now() >= retarget_deadline)
+        {
+          state.slots = base_slots;
+          release_control_snapshot_reservation(
+            state_idx, reservation);
+          result.ok = false;
+          result.error =
+            "set_param: Metal activation remained late after "
+            + std::to_string(retargets) + " retargets";
+          return result;
+        }
         continue;
+      }
       if (!scheduled.ok)
       {
         state.slots = base_slots;
@@ -865,6 +908,16 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync(
       }
       commit_control_snapshot(
         state, state_idx, reservation, result.effective_sample_index);
+      // The UI sender coalesces pointer events while this request is in
+      // flight. Returning at audible acknowledgement, rather than candidate
+      // publication, keeps the next write out of the worker queue and makes it
+      // carry the latest pointer value at one clean activation boundary.
+      if (!metal_worker_->wait_for_activation_acknowledgement(epoch_id))
+      {
+        result.ok = false;
+        result.error =
+          "set_param: Metal activation acknowledgement timed out";
+      }
       return result;
     }
   }
@@ -1021,7 +1074,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
     if (v0i == UINT32_MAX)
       return fail("set_param: no glide slots for '" + name + "'");
     const double dur_sec = pd->glide_dur_sec > 0.0
-      ? pd->glide_dur_sec : 0.02;
+      ? pd->glide_dur_sec : 0.01;
     const double dur = state.sample_rate * dur_sec;
     const double v0 = read(v0i);
     const double v1 = read(v1i);

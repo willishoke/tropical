@@ -208,16 +208,66 @@ final class ObservationSamplerTests: XCTestCase {
         XCTAssertEqual(sampler.latestFrame?.generation.controlVersion, 77)
     }
 
-    func testMixedWindowBatchPreservesEachScopesTwoTimesHorizon() {
-        let sharedBatch = [-1.0, 1.0, 5, 5, 5, 5, 10, 11, 12, 13, 14, 15]
+    func testMixedWindowBatchPreservesEachChannelsOwnHorizon() {
+        let sharedBatch = (0...11).reversed().map(Double.init)
         XCTAssertEqual(
-            ScopeTraceProjection.triggeredSamples(sharedBatch, displayCount: 3),
-            [10, 11, 12]
+            ScopeTraceProjection.triggeredSamples(
+                sharedBatch,
+                displaySpanSamples: 3,
+                acquisitionSpanSamples: 6,
+                stride: 1
+            ),
+            [2, 1, 0]
         )
         XCTAssertEqual(
-            ScopeTraceProjection.triggeredSamples(sharedBatch, displayCount: 6),
-            [1, 5, 5, 5, 5, 10]
+            ScopeTraceProjection.triggeredSamples(
+                sharedBatch,
+                displaySpanSamples: 6,
+                acquisitionSpanSamples: 12,
+                stride: 1
+            ),
+            [5, 4, 3, 2, 1, 0]
         )
+    }
+
+    func testOffsetWaveformPhaseLocksAcrossPlaybackAnchors() {
+        func sine(start: Int) -> [Double] {
+            (0..<80).map { index in
+                5 + sin(2 * .pi * Double(start + index) / 20)
+            }
+        }
+        let first = ScopeTraceProjection.triggeredSamples(
+            sine(start: 0),
+            displaySpanSamples: 40,
+            acquisitionSpanSamples: 80,
+            stride: 1
+        )
+        let advanced = ScopeTraceProjection.triggeredSamples(
+            sine(start: 7),
+            displaySpanSamples: 40,
+            acquisitionSpanSamples: 80,
+            stride: 1
+        )
+
+        XCTAssertEqual(first.count, 40)
+        XCTAssertEqual(advanced.count, 40)
+        XCTAssertEqual(first[0], 5, accuracy: 1e-12)
+        XCTAssertGreaterThan(first[1], first[0])
+        for (lhs, rhs) in zip(first, advanced) {
+            XCTAssertEqual(lhs, rhs, accuracy: 1e-12)
+        }
+    }
+
+    func testLongAcquisitionUsesBoundedDeterministicStride() throws {
+        let binding = try ObservationBinding(
+            expectedGeneration: .init(programVersion: 1, controlVersion: 1),
+            span: 100_000,
+            pointBudget: ObservationBinding.maximumPointBudget,
+            channels: [.init(key: "scope1.ch1", slot: "out")]
+        )
+
+        XCTAssertEqual(binding.expectedStride, 7)
+        XCTAssertEqual(binding.expectedCount, 14_286)
     }
 
     func testDisplayCadenceCapsOneHundredTwentyHertzAtSixty() {

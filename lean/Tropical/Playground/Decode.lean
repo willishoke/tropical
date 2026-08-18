@@ -172,8 +172,6 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
     let rt60 ← modalControl "rt60"
     let rtRange := Tropical.Playground.Metadata.displayRangeOf "reverb" "rt60"
     let direction ← modalControl "dir"
-    let sway ← modalControl "sway"
-    let rate ← modalControl "rate"
     let build := fun frozenRt60 => do
       let bounded ← match rtRange with
         | some (lo, hi) => do
@@ -181,8 +179,8 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
           let hi ← litF hi
           clampE frozenRt60 lo hi
         | none => pure frozenRt60
-      reverbRoom bounded rtRange 32 (60, 0) (6000, 0)
-    pure (.modalRoom modalInput build rt60 direction sway rate, modalFanIn)
+      reverbRoom bounded rtRange 14 (60, 0) (6000, 0)
+    pure (.modalRoom modalInput build rt60 direction, modalFanIn)
   | "filter" =>
     let zero ← lit 0
     let cutoff ← paramValue pidx paramName kind params "cutoff"

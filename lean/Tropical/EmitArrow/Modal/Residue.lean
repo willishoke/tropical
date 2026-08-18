@@ -15,9 +15,9 @@ record; `bankFold` is the generic banked reduction over coefficient columns
 its bit-identical banked twins. Composition (`voice ⋙ reverb`) is the
 SYMBOLIC residue calculus (`residueComposeE`/`residueComposeEC`) over
 `CplxE` — pure `+−×÷` on `Sig`, so poles and amps stay live param slots
-through a room. The direction operator crossfades causal/anti-causal tails
-without touching σ or ω. For public reverb this operator belongs to the room
-kernel before convolution; it is not a reversal of the complete upstream value.
+through a room. The low-level direction operator crossfades causal/anti-causal
+tails without touching σ or ω. Public reverb fixes that room-kernel orientation
+at forward before convolution; complete-output reversal remains a clock warp.
 -/
 
 namespace Tropical.EmitArrow

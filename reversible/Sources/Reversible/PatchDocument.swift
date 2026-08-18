@@ -308,7 +308,9 @@ extension PatchModel {
 
     func newPhaserDemo() async {
         resetCounter()
-        resetHierarchy(to: FactoryPatches.modalPhaser)
+        let demo = FactoryPatches.modalPhaser
+        resetHierarchy(to: demo)
+        adoptCounter(from: demo.nodes.keys)
         advanceAuthoredRevision()
         documentURL = nil
         await pushGraph()
@@ -410,27 +412,30 @@ enum FactoryPatches {
             // demo is hot-swapped after startup, so that strike may already
             // be in the past. This qualified sub-Hz saw repeatedly crosses
             // zero and therefore gives the scene an audible re-trigger.
-            node(7, .source, at: CGPoint(x: 88, y: 420), values: [
+            node(1, .source, at: CGPoint(x: 88, y: 420), values: [
                 "freq": 0.63,
             ]),
-            node(1, .resonator, at: CGPoint(x: 88, y: 132), inputs: [
-                "addr": ["source7"],
+            node(2, .resonator, at: CGPoint(x: 88, y: 132), inputs: [
+                "addr": ["source1"],
             ]),
-            node(2, .reverb, at: CGPoint(x: 330, y: 132), inputs: [
-                "in": ["resonator1"],
+            node(3, .phaser, at: CGPoint(x: 360, y: 132), inputs: [
+                "in": ["resonator2"],
             ]),
-            node(3, .phaser, at: CGPoint(x: 610, y: 132), inputs: [
-                "in": ["reverb2"],
-            ]),
-            node(4, .reverb, at: CGPoint(x: 930, y: 132), inputs: [
+            node(4, .reverb, at: CGPoint(x: 700, y: 132), inputs: [
                 "in": ["phaser3"],
             ]),
-            node(5, .out, at: CGPoint(x: 1210, y: 240), inputs: [
+            node(5, .out, at: CGPoint(x: 980, y: 240), inputs: [
                 "in": ["reverb4"],
             ]),
-            node(6, .scope, at: CGPoint(x: 930, y: 430), inputs: [
-                "ch1": ["out5"],
-            ]),
+            node(
+                6,
+                .scope,
+                at: CGPoint(x: 980, y: 430),
+                values: ["window": ScopeSignalKnowledge.visibleCycles / 220],
+                inputs: [
+                    "ch1": ["out5"],
+                ]
+            ),
         ]
         return PatchGraphState(
             nodes: Dictionary(uniqueKeysWithValues: authored.map { ($0.id, $0) }),

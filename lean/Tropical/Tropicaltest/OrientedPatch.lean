@@ -97,7 +97,6 @@ private def equalRt60Graph : BuildM PatchGraph := do
   let zero ← lit 0
   let room := fun input => Node.modalRoom input equalRt60Modes
     (constantControl rt60) (constantControl zero)
-    (constantControl zero) (constantControl zero)
   let source ← sourceModes
   let anchor ← anchorSig
   let clock ← clockLit
@@ -112,7 +111,6 @@ private def repeatedRoomCrossingGraph (afterGauge : Bool) : BuildM PatchGraph :=
   let zero ← lit 0
   let room := fun input => Node.modalRoom input equalRt60Modes
     (constantControl rt60) (constantControl zero)
-    (constantControl zero) (constantControl zero)
   let source ← sourceModes
   let anchor ← anchorSig
   let clock ← clockLit

@@ -127,11 +127,11 @@ inductive Node where
       direction is still room-local; this constructor remains convenient for
       structural banks that do not own a wireable RT60 control. -/
   | modalReverb (input : String) (room : Array ModalMode) (dir : Option ModalDir)
-  /-- The public ordinary room.  Its topology is a function of the frozen RT60
-      value, while all four controls retain their optional signal dependencies
-      until the terminal multi-input binding seam. -/
+  /-- The public ordinary room. Its topology is a function of the frozen RT60
+      value and its local direction remains a live terminal control. Decay
+      sway remains a low-level modal operation. -/
   | modalRoom (input : String) (build : Sig → BuildM (Array ModalMode))
-      (rt60 direction sway rate : ModalControlRef)
+      (rt60 direction : ModalControlRef)
   /-- One generic linear modal-kernel action.  The stage builds a retained
       identity/proper/parallel/cascade expression only after its controls are
       frozen at the terminal response coordinate. -/
@@ -242,8 +242,8 @@ def Node.inputIds : Node → Array String
   | .modalBlend dry wet mixControl =>
       #[dry, wet] ++ (mixControl.signalNode?.map (#[·])).getD #[]
   | .modalGaugeControl i g => #[i] ++ (g.signalNode?.map (#[·])).getD #[]
-  | .modalRoom i _ rt60 direction sway rate =>
-      #[i] ++ (#[rt60, direction, sway, rate].filterMap (fun control => control.signalNode?))
+  | .modalRoom i _ rt60 direction =>
+      #[i] ++ (#[rt60, direction].filterMap (fun control => control.signalNode?))
 
 /-- Is `id` a modal-island node? Its output wire carries poles, not a `Sig`. A
     missing node reads as Sig (graceful — a half-built patch stays lowerable). -/
@@ -379,7 +379,7 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
       sway? }
     return lowered.map fun branch =>
       { branch with stages := branch.stages.push stage, modeCount? := none }
-  | .modalRoom inId build rt60 direction sway rate => do
+  | .modalRoom inId build rt60 direction => do
     let lowered ←
       if inId == "__silence__" then silentForest
       else match rankOf inId with
@@ -392,7 +392,8 @@ def lowerModal (g : PatchGraph) (rankOf : String → Option Nat) (id : String) (
         let modes ← build value
         clampSigmas modes)
       direction
-      sway? := some (sway, rate) }
+      sway? := none
+      normalizeDirectionLevel := true }
     return lowered.map fun branch =>
       { branch with stages := branch.stages.push stage, modeCount? := none }
   | .modalLinear inId linear => do
@@ -501,7 +502,8 @@ private def valueOrZero (values : Array Sig) (cursor : Nat) : BuildM Sig :=
 
 /-- Resolve one room's controls in `ModalStage.controls` order. -/
 private def resolveRoomStage (room : OrdinaryRoomStage) (responseClock : Sig)
-    (values : Array Sig) (cursor : Nat) : BuildM (Array ModalMode × Sig × Nat) := do
+    (values : Array Sig) (cursor : Nat) :
+    BuildM (Array ModalMode × Sig × Option Sig × Nat) := do
   let (kernel, cursor) ← match room.kernel with
     | .fixed modes => pure (modes, cursor)
     | .controlled _ build => do
@@ -523,36 +525,69 @@ private def resolveRoomStage (room : OrdinaryRoomStage) (responseClock : Sig)
         let sway ← clampE swayValue zero swayMax
         let rate ← clampE rateValue zero rateMax
         pure (← Oriented.swayKernel kernel sway rate responseClock, cursor + 2)
-  pure (kernel, direction, cursor)
+  -- Fixed-coordinate qualification of the shipped phaser room gives the
+  -- reverse/forward level curve closely enough with `1 + 3.5·d²` (endpoints
+  -- within 0.1 dB, interior within 1.2 dB). Apply it once after realization,
+  -- never through each modal row, so it costs one multiply and does not deepen
+  -- or duplicate the specialized phaser→room graph.
+  let levelGain? ← if room.normalizeDirectionLevel then do
+      let directionSquared ← mul direction direction
+      let scale ← lit 35 1
+      let correction ← mul scale directionSquared
+      pure (some (← add one correction))
+    else
+      pure none
+  pure (kernel, direction, levelGain?, cursor)
 
 private def resolveLinearStage (stage : ModalLinearStage) (responseClock : Sig)
     (values : Array Sig) (cursor : Nat) : BuildM (ModalKernelExpr × Nat) := do
   let next := cursor + stage.controls.size
   pure (← stage.build responseClock (values.extract cursor next), next)
 
-private def resolvePlainStageState (initial : Nat × Oriented.Bank)
+private structure PlainStageState where
+  cursor : Nat
+  bank : Oriented.Bank
+  levelGain? : Option Sig := none
+
+private def combineLevelGain (left right : Option Sig) : BuildM (Option Sig) :=
+  match left, right with
+  | none, value | value, none => pure value
+  | some a, some b => return some (← mul a b)
+
+private def resolvePlainStageState (initial : PlainStageState)
     (stages : Array ModalStage) (responseClock : Sig) (values : Array Sig) :
-    BuildM (Nat × Oriented.Bank) :=
-  stages.foldlM (fun (state : Nat × Oriented.Bank) stage => do
-    let (cursor, bank) := state
+    BuildM PlainStageState :=
+  stages.foldlM (fun (state : PlainStageState) stage => do
+    let cursor := state.cursor
+    let bank := state.bank
     match stage with
     | .ordinaryRoom room =>
-      let (kernel, direction, cursor) ← resolveRoomStage room responseClock values cursor
-      pure (cursor, ← bank.convolveKernel kernel direction Oriented.syntacticSameSideClassifier)
+      let (kernel, direction, gain?, cursor) ←
+        resolveRoomStage room responseClock values cursor
+      let bank ← bank.convolveKernel kernel direction Oriented.syntacticSameSideClassifier
+      let levelGain? ← combineLevelGain state.levelGain? gain?
+      pure { cursor, bank, levelGain? }
     | .linear linear =>
       let (kernel, cursor) ← resolveLinearStage linear responseClock values cursor
-      pure (cursor, ← kernel.applyGeneric bank)
+      pure { state with cursor, bank := ← kernel.applyGeneric bank }
     | .gauge _ =>
       let value ← valueOrZero values cursor
       let zero ← lit 0
       let one ← lit 1
       let g ← clampE value zero one
-      pure (cursor + 1, ← bank.gauge g)) initial
+      pure { state with cursor := cursor + 1, bank := ← bank.gauge g }) initial
 
 private inductive PlainTerminal where
   | generic (terminal : Oriented.TerminalBank)
   | factored (terminal : Oriented.FactoredTwoRoomTerminal)
   | factoredPhaser (terminal : Oriented.FactoredTwoRoomPhaserTerminal)
+  | scaled (gain : Sig) (terminal : PlainTerminal)
+
+private def PlainTerminal.withLevelGain (terminal : PlainTerminal)
+    (gain? : Option Sig) : PlainTerminal :=
+  match gain? with
+  | none => terminal
+  | some gain => .scaled gain terminal
 
 private def PlainTerminal.realizeSig (terminal : PlainTerminal)
     (clkInt anchorSamples : Sig) (count? : Option Sig) : BuildM Sig :=
@@ -560,13 +595,15 @@ private def PlainTerminal.realizeSig (terminal : PlainTerminal)
   | .generic value => value.realizeSig clkInt anchorSamples count?
   | .factored value => value.realizeSig clkInt anchorSamples
   | .factoredPhaser value => value.realizeSig clkInt anchorSamples
+  | .scaled gain value => do
+      mul gain (← value.realizeSig clkInt anchorSamples count?)
 
 /-- Fold an authored stage spine after binding the current static universe.  A
     final room uses the stable EC/DD carrier for hot same-side couplings. -/
 private def resolvePlainStages (voice : Array ModalMode) (stages : Array ModalStage)
     (responseClock : Sig) (values : Array Sig) : BuildM PlainTerminal := do
   let initialBank ← Oriented.Bank.ofFuture voice
-  let initial := (0, initialBank)
+  let initial : PlainStageState := { cursor := 0, bank := initialBank }
   if stages.size == 1 then
     match stages[0]? with
     | some (ModalStage.linear linear) =>
@@ -583,72 +620,89 @@ private def resolvePlainStages (voice : Array ModalMode) (stages : Array ModalSt
           let bank ← kernel.applyGeneric initialBank
           pure (.generic (Oriented.TerminalBank.ofBank bank))
     | some (ModalStage.ordinaryRoom room) =>
-      let (kernel, direction, _) ← resolveRoomStage room responseClock values 0
-      pure (.generic (← initialBank.convolveKernelTerminal kernel direction))
+      let (kernel, direction, gain?, _) ← resolveRoomStage room responseClock values 0
+      pure <| (PlainTerminal.generic (← initialBank.convolveKernelTerminal kernel direction))
+        |>.withLevelGain gain?
     | _ =>
-      let (_, bank) ← resolvePlainStageState initial stages responseClock values
-      pure (.generic (Oriented.TerminalBank.ofBank bank))
+      let state ← resolvePlainStageState initial stages responseClock values
+      pure <| (PlainTerminal.generic (Oriented.TerminalBank.ofBank state.bank))
+        |>.withLevelGain state.levelGain?
   else if stages.size == 2 then
     match stages[0]?, stages[1]? with
     | some (ModalStage.ordinaryRoom first), some (ModalStage.ordinaryRoom second) =>
-      let (room1, direction1, cursor) ←
+      let (room1, direction1, gain1?, cursor) ←
         resolveRoomStage first responseClock values 0
-      let (room2, direction2, _) ←
+      let (room2, direction2, gain2?, _) ←
         resolveRoomStage second responseClock values cursor
+      let gain? ← combineLevelGain gain1? gain2?
       match ← Oriented.factoredTwoRoomTerminal? voice room1 room2 direction1 direction2 with
-      | some terminal => pure (.factored terminal)
+      | some terminal => pure <| (PlainTerminal.factored terminal).withLevelGain gain?
       | none =>
         let bank ← initialBank.convolveKernel room1 direction1
           Oriented.syntacticSameSideClassifier
-        pure (.generic (← bank.convolveKernelTerminal room2 direction2))
+        pure <| (PlainTerminal.generic (← bank.convolveKernelTerminal room2 direction2))
+          |>.withLevelGain gain?
     | some (ModalStage.linear linear), some (ModalStage.ordinaryRoom room) =>
       let (linearKernel, cursor) ← resolveLinearStage linear responseClock values 0
       match linearKernel.dryWetAllpassCascadeShape? with
       | some (tails, mix) =>
         let decorated ← Oriented.decorateDegreeZeroCausalPhaser voice tails mix
         let decoratedBank ← Oriented.Bank.ofFuture decorated
-        let (kernel, direction, _) ← resolveRoomStage room responseClock values cursor
-        pure (.generic (← decoratedBank.convolveKernelTerminal kernel direction))
+        let (kernel, direction, gain?, _) ←
+          resolveRoomStage room responseClock values cursor
+        pure <| (PlainTerminal.generic (← decoratedBank.convolveKernelTerminal kernel direction))
+          |>.withLevelGain gain?
       | none =>
-        let (_, bank) ← resolvePlainStageState initial stages responseClock values
-        pure (.generic (Oriented.TerminalBank.ofBank bank))
+        let state ← resolvePlainStageState initial stages responseClock values
+        pure <| (PlainTerminal.generic (Oriented.TerminalBank.ofBank state.bank))
+          |>.withLevelGain state.levelGain?
     | _, _ =>
-      let (_, bank) ← resolvePlainStageState initial stages responseClock values
-      pure (.generic (Oriented.TerminalBank.ofBank bank))
+      let state ← resolvePlainStageState initial stages responseClock values
+      pure <| (PlainTerminal.generic (Oriented.TerminalBank.ofBank state.bank))
+        |>.withLevelGain state.levelGain?
   else if stages.size == 3 then
     match stages[0]?, stages[1]?, stages[2]? with
     | some (ModalStage.ordinaryRoom first), some (ModalStage.linear linear),
         some (ModalStage.ordinaryRoom second) =>
-      let (room1, direction1, cursor) ←
+      let (room1, direction1, gain1?, cursor) ←
         resolveRoomStage first responseClock values 0
       let (linearKernel, cursor) ← resolveLinearStage linear responseClock values cursor
       match linearKernel.dryWetAllpassCascadeShape? with
       | some (tails, mix) =>
-        let (room2, direction2, _) ←
+        let (room2, direction2, gain2?, _) ←
           resolveRoomStage second responseClock values cursor
+        let gain? ← combineLevelGain gain1? gain2?
         match ← Oriented.factoredTwoRoomPhaserTerminal? voice tails room1 room2 mix
             direction1 direction2 with
-        | some terminal => pure (.factoredPhaser terminal)
+        | some terminal =>
+          pure <| (PlainTerminal.factoredPhaser terminal).withLevelGain gain?
         | none =>
           let bank ← initialBank.convolveKernel room1 direction1
             Oriented.syntacticSameSideClassifier
           let bank ← linearKernel.applyGeneric bank
-          pure (.generic (← bank.convolveKernelTerminal room2 direction2))
+          pure <| (PlainTerminal.generic (← bank.convolveKernelTerminal room2 direction2))
+            |>.withLevelGain gain?
       | none =>
-        let (_, bank) ← resolvePlainStageState initial stages responseClock values
-        pure (.generic (Oriented.TerminalBank.ofBank bank))
+        let state ← resolvePlainStageState initial stages responseClock values
+        pure <| (PlainTerminal.generic (Oriented.TerminalBank.ofBank state.bank))
+          |>.withLevelGain state.levelGain?
     | _, _, _ =>
-      let (_, bank) ← resolvePlainStageState initial stages responseClock values
-      pure (.generic (Oriented.TerminalBank.ofBank bank))
+      let state ← resolvePlainStageState initial stages responseClock values
+      pure <| (PlainTerminal.generic (Oriented.TerminalBank.ofBank state.bank))
+        |>.withLevelGain state.levelGain?
   else
     match stages.back? with
     | some (.ordinaryRoom room) =>
-      let (cursor, bank) ← resolvePlainStageState initial stages.pop responseClock values
-      let (kernel, direction, _) ← resolveRoomStage room responseClock values cursor
-      pure (.generic (← bank.convolveKernelTerminal kernel direction))
+      let state ← resolvePlainStageState initial stages.pop responseClock values
+      let (kernel, direction, gain?, _) ←
+        resolveRoomStage room responseClock values state.cursor
+      let gain? ← combineLevelGain state.levelGain? gain?
+      pure <| (PlainTerminal.generic (← state.bank.convolveKernelTerminal kernel direction))
+        |>.withLevelGain gain?
     | _ =>
-      let (_, bank) ← resolvePlainStageState initial stages responseClock values
-      pure (.generic (Oriented.TerminalBank.ofBank bank))
+      let state ← resolvePlainStageState initial stages responseClock values
+      pure <| (PlainTerminal.generic (Oriented.TerminalBank.ofBank state.bank))
+        |>.withLevelGain state.levelGain?
 
 /-- The present composable carrier can safely cross one nonterminal room.  A
     second room must remain terminal: making it cross a later room, phaser, or gauge

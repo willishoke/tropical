@@ -311,15 +311,17 @@ static void test_metal_slots()
   tropical_runtime_process(rt);
   const double* out = tropical_runtime_output_buffer(rt);
   for (unsigned int i = 0; i < buf; ++i) ASSERT_NEAR(out[i], 0.25, 1e-7);
-  // Live slot write lands next block.
+  // Live slot write lands at the one-render-tile control boundary.
   tropical_runtime_set_slot(rt, 0, 0.75);
-  for (unsigned int block = 0; block < 512 / buf; ++block)
+  const unsigned int activation_blocks =
+    tropical_runtime_metal_render_tile_frames(rt) / buf;
+  for (unsigned int block = 0; block < activation_blocks; ++block)
   {
-    tropical_runtime_process(rt);
+    ASSERT(tropical_runtime_process_offline(rt));
     for (unsigned int i = 0; i < buf; ++i)
       ASSERT_NEAR(out[i], 0.25, 1e-7);
   }
-  tropical_runtime_process(rt);
+  ASSERT(tropical_runtime_process_offline(rt));
   for (unsigned int i = 0; i < buf; ++i) ASSERT_NEAR(out[i], 0.75, 1e-7);
   tropical_runtime_free(rt);
   printf("PASS  metal slot snapshot + live write\n");
@@ -345,16 +347,18 @@ static void test_metal_hotswap()
                                       rampB.c_str(), rampB.size(),
                                       MANIFEST, strlen(MANIFEST)));
   const double* out = tropical_runtime_output_buffer(rt);
-  for (unsigned int block = 0; block < 512 / buf; ++block)
+  const uint64_t activation_frames =
+    tropical_runtime_metal_worker_capacity_frames(rt);
+  for (unsigned int block = 0; block < activation_frames / buf; ++block)
   {
-    tropical_runtime_process(rt);
+    ASSERT(tropical_runtime_process_offline(rt));
     const uint64_t start = buf + static_cast<uint64_t>(block) * buf;
     for (unsigned int i = 0; i < buf; ++i)
       ASSERT_NEAR(out[i], static_cast<double>(start + i), 1e-5);
   }
-  tropical_runtime_process(rt);
+  ASSERT(tropical_runtime_process_offline(rt));
   for (unsigned int i = 0; i < buf; ++i)
-    ASSERT_NEAR(out[i], 2.0 * (buf + 512 + i), 1e-5);
+    ASSERT_NEAR(out[i], 2.0 * (buf + activation_frames + i), 1e-5);
   tropical_runtime_free(rt);
   printf("PASS  metal hot-swap carries the sample clock\n");
 }
@@ -449,15 +453,17 @@ static void test_metal_columns_live()
   for (unsigned int i = 0; i < buf; ++i)
     ASSERT_NEAR(out[i], 0.25 + (double)(i % 4), 1e-7);
   // Live knob: set_slot re-runs the coefficient kernel into a fresh
-  // generation; the next block captures + uploads it.
+  // generation; the next render-tile boundary captures + uploads it.
   tropical_runtime_set_slot(rt, 0, 1.5);
-  for (unsigned int block = 0; block < 512 / buf; ++block)
+  const unsigned int activation_blocks =
+    tropical_runtime_metal_render_tile_frames(rt) / buf;
+  for (unsigned int block = 0; block < activation_blocks; ++block)
   {
-    tropical_runtime_process(rt);
+    ASSERT(tropical_runtime_process_offline(rt));
     for (unsigned int i = 0; i < buf; ++i)
       ASSERT_NEAR(out[i], 0.25 + (double)(i % 4), 1e-7);
   }
-  tropical_runtime_process(rt);
+  ASSERT(tropical_runtime_process_offline(rt));
   for (unsigned int i = 0; i < buf; ++i)
     ASSERT_NEAR(out[i], 1.5 + (double)(i % 4), 1e-7);
   tropical_runtime_free(rt);
@@ -505,7 +511,8 @@ static void test_metal_effective_dispatch_epochs()
   const auto raw = rt.dispatch_param_sync("bank.freq", 260.0);
   ASSERT(raw.ok);
   ASSERT(raw.observed_sample_index == buf);
-  ASSERT(raw.effective_sample_index == buf + 512);
+  ASSERT(raw.effective_sample_index
+         == buf + rt.metal_render_tile_frames());
   while (rt.current_sample_index() < raw.effective_sample_index)
   {
     for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 180.0, 1e-5);
@@ -581,7 +588,8 @@ static void test_metal_retarget_recomputes_companions()
   ASSERT(rt.load_ir_msl(JIT_CONST_IR, msl, manifest));
   rt.process();
 
-  const uint64_t provisional = rt.current_sample_index() + 512;
+  const uint64_t provisional =
+    rt.current_sample_index() + rt.metal_render_tile_frames();
   const double old_v0 = rt.get_slot(1);
   const double old_v1 = rt.get_slot(2);
   const double old_t0 = rt.get_slot(3);
@@ -594,7 +602,8 @@ static void test_metal_retarget_recomputes_companions()
     result = rt.dispatch_param_sync("canary.morph", 0.5);
   });
   ASSERT(wait_for_true(seam.target_reserved));
-  for (unsigned int block = 0; block < 512 / buf; ++block)
+  for (unsigned int block = 0;
+       block < rt.metal_worker_capacity_frames() / buf; ++block)
     rt.process();
   seam.pause_after_target_reserved.store(false, std::memory_order_release);
   seam.release_target.store(true, std::memory_order_release);
@@ -603,6 +612,7 @@ static void test_metal_retarget_recomputes_companions()
 
   ASSERT(result.ok);
   ASSERT(result.effective_sample_index > provisional);
+  ASSERT(rt.metal_activation_retarget_count() >= 1);
   const double r =
     (static_cast<double>(result.effective_sample_index) - old_t0)
     / (0.02 * sr);
@@ -689,7 +699,9 @@ static void test_metal_dispatch_failure_fail_closed()
     msl.c_str(), msl.size(), MANIFEST, strlen(MANIFEST)));
   const uint64_t replacement_epoch =
     tropical_runtime_metal_published_activation_epoch(rt);
-  for (unsigned int block = 0; block < 64
+  const unsigned int recovery_blocks =
+    tropical_runtime_metal_worker_capacity_frames(rt) / buf + 1;
+  for (unsigned int block = 0; block < recovery_blocks
        && tropical_runtime_metal_acknowledged_activation_epoch(rt)
             < replacement_epoch; ++block)
     tropical_runtime_process(rt);
@@ -763,13 +775,17 @@ static void test_metal_clock_jump_and_precompiled_swap_stress()
       tropical_metal::EpochTransitionKind::ClockJump, source));
     ASSERT(scheduled.ok);
 
-    const auto old = consume();
-    ASSERT(old.status == tropical_runtime::TileConsumeStatus::Audio);
-    ASSERT(!old.activated);
-    ASSERT(old.source_start == active_source);
-    for (uint32_t sample = 0; sample < frames; ++sample)
-      ASSERT(output[sample]
-             == expected(active_source, sample, active_marker));
+    while (queue.published_device_frame() < scheduled.activation_frame)
+    {
+      const auto old = consume();
+      ASSERT(old.status == tropical_runtime::TileConsumeStatus::Audio);
+      ASSERT(!old.activated);
+      ASSERT(old.source_start == active_source);
+      for (uint32_t sample = 0; sample < frames; ++sample)
+        ASSERT(output[sample]
+               == expected(active_source, sample, active_marker));
+      active_source += frames;
+    }
 
     const auto switched = consume();
     ASSERT(switched.status == tropical_runtime::TileConsumeStatus::Audio);

@@ -267,7 +267,7 @@ def glideExprAt (pidx : String → Option Nat) (base : String)
     else do
       let coordinate ← toFloatE coordinate
       sub coordinate t0
-  let durationFactor ← lit 2 2
+  let durationFactor ← lit 5 3
   let sr ← sampleRate
   let duration ← mul durationFactor sr
   let fraction ← div elapsed duration
@@ -306,7 +306,7 @@ def glideExprQAt (pidx : String → Option Nat) (base : String)
       let coordinate ← toFloatE coordinateQ
       let samples ← div coordinate qScale
       sub samples t0
-  let durationFactor ← lit 2 2
+  let durationFactor ← lit 5 3
   let sr ← sampleRate
   let duration ← mul durationFactor sr
   let fraction ← div elapsed duration

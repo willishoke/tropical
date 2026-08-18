@@ -530,7 +530,7 @@ def runPhaser (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Boo
       let oracleError := maximumOracleError samples
       IO.println s!"        topology-derived={structural} generic-filter={genericFilter} forest-order={forestOrder} refusals={refusals} hierarchy-validation={hierarchyValidation} oracle max abs={oracleError}"
       IO.println s!"        fused two-room JIT vs generic max abs={fusedError} ({fusedError * 1.0e9}e-9)"
-      IO.println s!"        four served controls live without relower={controlsLive}; canonical 6→32→6-section→32 Metal scratch={scratch.total}/24576 (arrays={scratch.arrays}, max-routes={scratch.maxRoutedRecords}×4, slots={scratch.arraySlots}/{scratch.coeffArraySlots} coeff)"
+      IO.println s!"        four served controls live without relower={controlsLive}; canonical 6→14→6-section→14 Metal scratch={scratch.total}/24576 (arrays={scratch.arrays}, max-routes={scratch.maxRoutedRecords}×4, slots={scratch.arraySlots}/{scratch.coeffArraySlots} coeff)"
       IO.println s!"        nested v3 Phaser→Allpass expansion equivalent={hierarchyEquivalent}; public ph.* aliases retained"
       IO.println s!"        two-room baseline scratch={baseline.total} (arrays={baseline.arrays}, max-routes={baseline.maxRoutedRecords}×4, slots={baseline.arraySlots}/{baseline.coeffArraySlots} coeff)"
       IO.println s!"        product non-coeff array floats={repr scratch.nonCoeffSizes}; baseline={repr baseline.nonCoeffSizes}"

@@ -1781,7 +1781,7 @@ def runModalUniverseHistory (arena : Arena)
   let addressedSrc := "{\"nodes\":[" ++
     "{\"id\":\"osc\",\"kind\":\"source\",\"params\":{\"freq\":0.63,\"morph\":0}}," ++
     "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":56.78,\"decay\":15.48},\"in\":{\"addr\":[\"osc\"]}}," ++
-    "{\"id\":\"room_a\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.21,\"dir\":1},\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"room_a\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.21},\"in\":{\"in\":[\"res\"]}}," ++
     "{\"id\":\"room_b\",\"kind\":\"reverb\",\"params\":{\"rt60\":2},\"in\":{\"in\":[\"room_a\"]}}," ++
     "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"room_b\"]}}],\"out\":\"out\"}"
   let holdSrc := "{\"nodes\":[" ++
@@ -1841,15 +1841,17 @@ def runModalUniverseHistory (arena : Arena)
     let addressedScratch := addressedSplit.audio.metalThreadgroupScratchBytes
     let routed := modalUniverseRoutedBegins split.audio
     let sourceItems := routed.foldl (fun total begin =>
-      if begin.routedOutputCount == 160 &&
+      if (begin.routedOutputCount == 90 || begin.routedOutputCount == 104) &&
           begin.routedRoutes.size == begin.loopCount * 22
       then total + begin.loopCount else total) 0
     let differenceItems := routed.foldl (fun total begin =>
-      if begin.routedOutputCount == 256 && begin.loopCount == 124 &&
+      if begin.routedOutputCount == 112 &&
+          (begin.loopCount == 22 || begin.loopCount == 23) &&
           begin.routedRoutes.size == begin.loopCount * 16
       then total + begin.loopCount else total) 0
     let physicalItems := routed.foldl (fun total begin =>
-      if begin.routedOutputCount == 256 && begin.loopCount == 132 &&
+      if begin.routedOutputCount == 112 &&
+          (begin.loopCount == 26 || begin.loopCount == 27) &&
           begin.routedRoutes.size == begin.loopCount * 16
       then total + begin.loopCount else total) 0
     let confluenceRows := routed.filter fun begin =>
@@ -1857,10 +1859,10 @@ def runModalUniverseHistory (arena : Arena)
         begin.routedRoutes.size == 2 * begin.loopCount
     let confluenceItems := confluenceRows.foldl (· + ·.loopCount) 0
     let reciprocalCount := 4 * sourceItems + differenceItems + physicalItems
-    let declaredStats := Tropical.EmitArrow.Oriented.factoredTerminalStats 6 32
-    let factoredShape := sourceItems == 192 && differenceItems == 496 &&
-      physicalItems == 528 && reciprocalCount == 1792 &&
-      declaredStats.totalReciprocals == 1792 && confluenceRows.size ≤ 1
+    let declaredStats := Tropical.EmitArrow.Oriented.factoredTerminalStats 6 14
+    let factoredShape := sourceItems == 84 && differenceItems == 91 &&
+      physicalItems == 105 && reciprocalCount == 532 &&
+      declaredStats.totalReciprocals == 532 && confluenceRows.size ≤ 1
     let scratchOk := scratch ≤ 24576 && addressedScratch ≤ 24576
     IO.println s!"        split compile footprint: one-room={oneRoomFootprint} two-room={twoRoomFootprint} compact={compact}"
     IO.println s!"        routed terminal: source={sourceItems}×4 difference={differenceItems} physical={physicalItems} total reciprocals={reciprocalCount} confluence rows={confluenceItems}"

@@ -9,6 +9,8 @@ struct AudioTelemetrySample: Equatable {
     let bufferFrames: Int
     let callbackCount: Int
     let averageCallbackMs: Double
+    let metalRenderTimeMs: Double?
+    let metalRenderedFrames: Int?
     let underrunCount: Int
     let overrunCount: Int
 
@@ -29,6 +31,16 @@ struct AudioTelemetrySample: Equatable {
         self.bufferFrames = bufferFrames
         self.callbackCount = callbackCount
         self.averageCallbackMs = averageCallbackMs
+        if let renderTimeNs = stats["metalRenderTimeNs"]?.doubleValue,
+           renderTimeNs.isFinite, renderTimeNs >= 0,
+           let renderedFrames = JSONExact.int(stats["metalRenderedFrames"]),
+           renderedFrames >= 0 {
+            self.metalRenderTimeMs = renderTimeNs / 1_000_000
+            self.metalRenderedFrames = renderedFrames
+        } else {
+            self.metalRenderTimeMs = nil
+            self.metalRenderedFrames = nil
+        }
         self.underrunCount = underrunCount
         self.overrunCount = overrunCount
     }
@@ -44,6 +56,8 @@ struct AudioLoadReading: Equatable {
 struct AudioLoadMeter {
     private var previousCallbackCount = 0
     private var previousTotalCallbackMs = 0.0
+    private var previousMetalRenderMs: Double?
+    private var previousMetalRenderedFrames: Int?
     private var underrunBase = 0
     private var overrunBase = 0
     private var hasBaseline = false
@@ -52,6 +66,8 @@ struct AudioLoadMeter {
         previousCallbackCount = sample.callbackCount
         previousTotalCallbackMs = sample.averageCallbackMs
             * Double(sample.callbackCount)
+        previousMetalRenderMs = sample.metalRenderTimeMs
+        previousMetalRenderedFrames = sample.metalRenderedFrames
         underrunBase = sample.underrunCount
         overrunBase = sample.overrunCount
         hasBaseline = true
@@ -76,14 +92,35 @@ struct AudioLoadMeter {
         }
 
         let callbackDelta = sample.callbackCount - previousCallbackCount
-        guard callbackDelta > 0 else { return nil }
-        let recentAverageMs = (totalCallbackMs - previousTotalCallbackMs)
-            / Double(callbackDelta)
+        let loadRatio: Double
+        if sample.backend == "metal",
+           let renderMs = sample.metalRenderTimeMs,
+           let renderedFrames = sample.metalRenderedFrames,
+           let previousRenderMs = previousMetalRenderMs,
+           let previousRenderedFrames = previousMetalRenderedFrames {
+            guard renderMs >= previousRenderMs,
+                  renderedFrames >= previousRenderedFrames
+            else {
+                reset(to: sample)
+                return nil
+            }
+            let frameDelta = renderedFrames - previousRenderedFrames
+            guard frameDelta > 0 else { return nil }
+            let renderedAudioMs = Double(frameDelta) / sample.sampleRate * 1_000
+            loadRatio = (renderMs - previousRenderMs) / renderedAudioMs
+        } else {
+            guard callbackDelta > 0 else { return nil }
+            let recentAverageMs = (totalCallbackMs - previousTotalCallbackMs)
+                / Double(callbackDelta)
+            let deadlineMs = Double(sample.bufferFrames) / sample.sampleRate * 1_000
+            loadRatio = recentAverageMs / deadlineMs
+        }
         previousCallbackCount = sample.callbackCount
         previousTotalCallbackMs = totalCallbackMs
+        previousMetalRenderMs = sample.metalRenderTimeMs
+        previousMetalRenderedFrames = sample.metalRenderedFrames
 
-        let deadlineMs = Double(sample.bufferFrames) / sample.sampleRate * 1_000
-        let percent = Int((recentAverageMs / deadlineMs * 100).rounded())
+        let percent = Int((loadRatio * 100).rounded())
         return AudioLoadReading(
             backend: sample.backend,
             percent: max(0, percent),

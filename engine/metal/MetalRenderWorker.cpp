@@ -64,9 +64,12 @@ void update_max(std::atomic<uint64_t> & target, uint64_t value)
 } // namespace
 
 MetalRenderWorker::MetalRenderWorker(
-  EpochTileQueue & queue, RenderFunction render)
+  EpochTileQueue & queue, RenderFunction render,
+  std::atomic<bool> * realtime_running)
   : queue_(queue),
-    render_(std::move(render))
+    render_(std::move(render)),
+    realtime_running_source_(
+      realtime_running ? realtime_running : &realtime_running_)
 {
   if (!render_)
   {
@@ -146,7 +149,12 @@ void MetalRenderWorker::run()
   for (;;)
   {
     observe_activation_acknowledgement();
-    bool worked = refill_active_bank();
+    // Finish the newly published bank before servicing the old active bank.
+    // Live controls publish after one prime tile; the remaining tiles are
+    // rendered during the one-tile lead instead of delaying publication by a
+    // complete four-tile window.
+    bool worked = refill_pending_bank();
+    if (!worked) worked = refill_active_bank();
 
     std::shared_ptr<PendingRequest> pending;
     {
@@ -157,15 +165,24 @@ void MetalRenderWorker::run()
           current_thread_cpu_time_ns(), std::memory_order_release);
         return;
       }
-      if (pending_activation_epoch_ != 0 && active_epoch_ == 0
-          && !requests_.empty()
-          && bank_cursors_[0].valid
-          && bank_cursors_[0].request.transition
-               == EpochTransitionKind::Fresh
+      // schedule() returns once a complete activation has been published; it
+      // does not wait for the audio callback to reach that future boundary.
+      // With no device callback, an intermediate epoch can never be
+      // acknowledged, so stopped-DAC edits coalesce to the newest complete
+      // image. While audio is running we must preserve activation order:
+      // FlatRuntime's glide companions project the state at each activation,
+      // and reusing a projection from a cancelled epoch causes a discontinuity.
+      // The queue's claim CAS still makes stopped-DAC cancellation lose safely
+      // to a callback that has already committed to the activation.
+      if (pending_activation_epoch_ != 0 && !requests_.empty()
+          && !realtime_running_source_->load(std::memory_order_acquire)
           && queue_.cancel_unclaimed_activation(
             pending_activation_epoch_))
       {
-        bank_cursors_[0].valid = false;
+        for (BankRenderCursor & cursor : bank_cursors_)
+          if (cursor.valid
+              && cursor.request.epoch_id == pending_activation_epoch_)
+            cursor.valid = false;
         pending_activation_epoch_ = 0;
       }
       if (pending_activation_epoch_ == 0 && !requests_.empty())
@@ -245,9 +262,28 @@ bool MetalRenderWorker::refill_active_bank()
   return render_one(active_bank_, cursor, false);
 }
 
+bool MetalRenderWorker::refill_pending_bank()
+{
+  if (pending_activation_epoch_ == 0) return false;
+  for (uint32_t bank = 0; bank < EpochTileQueue::kBankCount; ++bank)
+  {
+    BankRenderCursor & cursor = bank_cursors_[bank];
+    if (!cursor.valid
+        || cursor.request.epoch_id != pending_activation_epoch_)
+      continue;
+    if (queue_.tile_state(bank, cursor.next_slot)
+        != tropical_runtime::TileState::Free)
+      return false;
+    return render_one(bank, cursor, false);
+  }
+  return false;
+}
+
 EpochScheduleResult
 MetalRenderWorker::prepare_activation(RenderEpochRequest request)
 {
+  const uint64_t preparation_device_frame =
+    queue_.published_device_frame();
   // Publish the new request identity only after clearing every later stage.
   // Readers may observe an incomplete in-flight request, but never a prefix
   // from this request combined with a suffix from the preceding activation.
@@ -260,6 +296,8 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
   old_epoch_retired_time_.store(0, std::memory_order_relaxed);
   request_received_time_.store(
     monotonic_time_ns(), std::memory_order_release);
+  const uint64_t retarget_started = monotonic_time_ns();
+  uint32_t retargets = 0;
   const uint32_t staging_bank =
     active_bank_ == EpochTileQueue::kNoBank ? 0U : 1U - active_bank_;
 
@@ -274,7 +312,7 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
       ? request.activation_frame
       : (fresh && observed_device == 0
           ? 0
-          : observed_device + queue_.render_frames());
+          : observed_device + activation_lead_frames(request.transition));
     const uint64_t source_start = request.fixed_activation
       ? request.source_origin
       : (request.transition == EpochTransitionKind::ClockJump
@@ -293,6 +331,25 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
         std::this_thread::yield();
     }
 
+    // A fixed request can become stale while it waits behind a previously
+    // published activation. Reject that coordinate before spending another
+    // GPU tile on a candidate FlatRuntime must recompute at a fresh E.
+    const uint64_t admissible_before_render =
+      observed_device > UINT64_MAX - queue_.device_frames()
+        ? UINT64_MAX
+        : observed_device + queue_.device_frames();
+    if (request.fixed_activation && activation_frame != 0
+        && activation_frame < admissible_before_render)
+    {
+      activation_retargets_.fetch_add(1, std::memory_order_relaxed);
+      learn_live_activation_lead(
+        request, preparation_device_frame, observed_device, true);
+      return {
+        false, "MetalRenderWorker: activation target became inadmissible",
+        request.epoch_id, activation_frame, source_start, true
+      };
+    }
+
     if (!queue_.begin_epoch(staging_bank, request.epoch_id))
     {
       activation_failures_.fetch_add(1, std::memory_order_relaxed);
@@ -308,7 +365,8 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
     candidate.next_device = activation_frame;
     candidate.next_source = source_start;
     candidate.next_slot = 0;
-    if (!render_window(staging_bank, candidate))
+    if (!render_tiles(
+          staging_bank, candidate, prime_tile_count(request.transition)))
     {
       activation_failures_.fetch_add(1, std::memory_order_relaxed);
       return {
@@ -325,12 +383,33 @@ MetalRenderWorker::prepare_activation(RenderEpochRequest request)
     {
       activation_retargets_.fetch_add(1, std::memory_order_relaxed);
       if (request.fixed_activation)
+      {
+        learn_live_activation_lead(
+          request, preparation_device_frame, device_after_render, true);
         return {
           false, "MetalRenderWorker: activation target became inadmissible",
           request.epoch_id, activation_frame, source_start, true
         };
+      }
+      ++retargets;
+      const uint64_t now = monotonic_time_ns();
+      if (retargets >= kActivationRetargetLimit
+          || now - retarget_started >= kActivationRetargetTimeoutNs)
+      {
+        activation_failures_.fetch_add(1, std::memory_order_relaxed);
+        return {
+          false,
+          "MetalRenderWorker: candidate remained late after "
+            + std::to_string(retargets) + " retargets",
+          request.epoch_id, activation_frame, source_start
+        };
+      }
       continue;
     }
+
+    if (request.fixed_activation)
+      learn_live_activation_lead(
+        request, preparation_device_frame, device_after_render, false);
 
     if (!queue_.publish_activation(
           EpochActivation{
@@ -362,13 +441,39 @@ EpochReservation MetalRenderWorker::reserve(
   const bool no_active =
     queue_.audio_active_bank() == EpochTileQueue::kNoBank;
   const uint64_t frame =
-    no_active && device == 0 ? 0 : device + queue_.render_frames();
+    no_active && device == 0 ? 0 : device + activation_lead_frames(transition);
   return {
+    device,
     frame,
     transition == EpochTransitionKind::ClockJump
       ? requested_source
       : source + (frame - device)
   };
+}
+
+uint64_t MetalRenderWorker::device_frame() const noexcept
+{
+  return queue_.published_device_frame();
+}
+
+bool MetalRenderWorker::wait_for_activation_acknowledgement(
+  uint64_t epoch_id) const noexcept
+{
+  if (epoch_id == 0
+      || !realtime_running_source_->load(std::memory_order_acquire))
+    return true;
+  const uint64_t started = monotonic_time_ns();
+  while (queue_.activation_acknowledged() != epoch_id)
+  {
+    // A DAC stop removes the only consumer that can acknowledge the future
+    // boundary. Stopped-audio controls deliberately coalesce instead.
+    if (!realtime_running_source_->load(std::memory_order_acquire))
+      return true;
+    if (monotonic_time_ns() - started >= kActivationRetargetTimeoutNs)
+      return false;
+    std::this_thread::yield();
+  }
+  return true;
 }
 
 bool MetalRenderWorker::render_one(
@@ -388,9 +493,15 @@ bool MetalRenderWorker::render_one(
   if (record_candidate_stage)
     render_submitted_time_.store(
       monotonic_time_ns(), std::memory_order_release);
+  const uint64_t render_started = monotonic_time_ns();
   const bool rendered = render_(
     cursor.request, cursor.next_source,
     queue_.render_frames(), claim.destination);
+  const uint64_t render_finished = monotonic_time_ns();
+  render_time_ns_.fetch_add(
+    render_finished - render_started, std::memory_order_relaxed);
+  rendered_frame_count_.fetch_add(
+    queue_.render_frames(), std::memory_order_relaxed);
   if (record_candidate_stage)
     gpu_completion_time_.store(
       monotonic_time_ns(), std::memory_order_release);
@@ -420,13 +531,81 @@ bool MetalRenderWorker::render_one(
   return true;
 }
 
-bool MetalRenderWorker::render_window(
-  uint32_t bank_index, BankRenderCursor & cursor)
+bool MetalRenderWorker::render_tiles(
+  uint32_t bank_index, BankRenderCursor & cursor, uint32_t tile_count)
 {
-  for (uint32_t i = 0; i < EpochTileQueue::kTilesPerBank; ++i)
+  for (uint32_t i = 0; i < tile_count; ++i)
     if (!render_one(bank_index, cursor, true))
       return false;
   return true;
+}
+
+uint64_t MetalRenderWorker::activation_lead_frames(
+  EpochTransitionKind transition) const noexcept
+{
+  switch (transition)
+  {
+    case EpochTransitionKind::Continuous:
+    case EpochTransitionKind::ClockJump:
+      return std::max<uint64_t>(
+        queue_.render_frames(),
+        live_activation_lead_frames_.load(std::memory_order_acquire));
+    case EpochTransitionKind::Fresh:
+    case EpochTransitionKind::HotSwap:
+      return queue_.capacity_frames();
+  }
+  return queue_.capacity_frames();
+}
+
+void MetalRenderWorker::learn_live_activation_lead(
+  const RenderEpochRequest & request,
+  uint64_t preparation_device_frame,
+  uint64_t device_after_render,
+  bool candidate_was_late) noexcept
+{
+  if ((request.transition != EpochTransitionKind::Continuous
+       && request.transition != EpochTransitionKind::ClockJump)
+      || request.reservation_device_frame == UINT64_MAX)
+    return;
+
+  const uint64_t control_progress =
+    request.enqueue_device_frame != UINT64_MAX
+      && request.enqueue_device_frame > request.reservation_device_frame
+      ? request.enqueue_device_frame - request.reservation_device_frame
+      : 0;
+  const uint64_t worker_progress =
+    device_after_render > preparation_device_frame
+      ? device_after_render - preparation_device_frame
+      : 0;
+  const uint64_t preparation_progress =
+    control_progress > UINT64_MAX - worker_progress
+      ? UINT64_MAX
+      : control_progress + worker_progress;
+  const uint64_t elapsed_horizon =
+    preparation_progress > UINT64_MAX - queue_.device_frames()
+      ? UINT64_MAX
+      : preparation_progress + queue_.device_frames();
+  const uint64_t learned = std::max<uint64_t>(
+    queue_.render_frames(), elapsed_horizon);
+  if (candidate_was_late)
+    update_max(live_activation_lead_frames_, learned);
+  else
+    live_activation_lead_frames_.store(learned, std::memory_order_release);
+}
+
+uint32_t MetalRenderWorker::prime_tile_count(
+  EpochTransitionKind transition) noexcept
+{
+  switch (transition)
+  {
+    case EpochTransitionKind::Continuous:
+    case EpochTransitionKind::ClockJump:
+      return 1;
+    case EpochTransitionKind::Fresh:
+    case EpochTransitionKind::HotSwap:
+      return EpochTileQueue::kTilesPerBank;
+  }
+  return EpochTileQueue::kTilesPerBank;
 }
 
 uint64_t MetalRenderWorker::monotonic_time_ns()
@@ -495,6 +674,22 @@ uint64_t MetalRenderWorker::worker_wall_time_ns() const noexcept
   const uint64_t start =
     worker_start_time_ns_.load(std::memory_order_acquire);
   return start == 0 ? 0 : monotonic_time_ns() - start;
+}
+
+uint64_t MetalRenderWorker::render_time_ns() const noexcept
+{
+  return render_time_ns_.load(std::memory_order_acquire);
+}
+
+uint64_t MetalRenderWorker::rendered_frame_count() const noexcept
+{
+  return rendered_frame_count_.load(std::memory_order_acquire);
+}
+
+void MetalRenderWorker::set_realtime_running(bool running) noexcept
+{
+  realtime_running_source_->store(running, std::memory_order_release);
+  wake_.notify_one();
 }
 
 void MetalRenderWorker::set_test_seam(

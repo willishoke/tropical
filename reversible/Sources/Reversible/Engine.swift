@@ -175,6 +175,17 @@ actor Engine {
         if environment["TROPICAL_BACKEND"] == nil {
             environment["TROPICAL_BACKEND"] = "metal"
         }
+        // Reversible is an interactive instrument, so its product quantum is
+        // lower than the engine CLI qualification default. The factory modal
+        // phaser stays below 60% measured Metal load at 128 frames while its
+        // common audible control boundary falls below 9 ms. Explicit developer
+        // overrides still win.
+        if environment["TROPICAL_BUFFER_LENGTH"] == nil {
+            environment["TROPICAL_BUFFER_LENGTH"] = "128"
+        }
+        if environment["TROPICAL_METAL_RENDER_TILE_FRAMES"] == nil {
+            environment["TROPICAL_METAL_RENDER_TILE_FRAMES"] = "128"
+        }
         return environment
     }
 

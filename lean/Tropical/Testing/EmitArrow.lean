@@ -449,7 +449,7 @@ def phase5Evidence : Except String Phase5Evidence := do
   unless parameters.map (·.1) == expectedNames do
     throw "EmitArrow phase-5 fixture: reserved parameter order changed"
   let fingerprint := Tropical.Playground.Metadata.vocabularyFingerprint
-  unless fingerprint == "fnv1a64:5b536cbc16add425" do
+  unless fingerprint == "fnv1a64:e2d9d7b44e8c3bbf" do
     throw s!"EmitArrow phase-5 fixture: vocabulary fingerprint changed to {fingerprint}"
   pure {
     vocabularyKinds := kinds.size
