@@ -40,11 +40,11 @@ but the matrix was not promoted after the explicit 18-stage stop condition.
 
 | row | audio instructions / divisions | max abs error | SNR | median / max measured deadline load | materializer / exact fallback |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| 6 partials, 6 sections, R=128, 0.2 Hz | 741 / 30 | 4.56e-5 | 92.30 dB | 10.61% / 10.88% | 0 / 0 |
-| 6 partials, 6 sections, R=64, 8 Hz, low-center extreme | 741 / 30 | 4.13e-2 | 40.44 dB | 10.70% / 10.88% | 0 / 0 |
-| 6 partials, 6 sections, R=32, 8 Hz, high-center extreme | 741 / 30 | 8.25e-3 | 60.54 dB | 10.62% / 10.62% | 0 / 0 |
-| 32 partials, 12 sections, R=64, 0.2 Hz | 1989 / 94 | 2.65e-2 | 66.23 dB | 18.57% / 18.61% | 0 / 0 |
-| 32 partials, 18 sections, R=32, 8 Hz | 2222 / 106 | not meaningful: exact stress voicing collapsed to zero | n/a | 72.53% / 76.03% | 416 / 416 per repetition |
+| 6 partials, 6 sections, R=128, 0.2 Hz | 741 / 30 | 4.56e-5 | 92.30 dB | 10.61% / 10.74% | 0 / 0 |
+| 6 partials, 6 sections, R=64, 8 Hz, low-center extreme | 741 / 30 | 4.13e-2 | 40.44 dB | 10.78% / 11.01% | 0 / 0 |
+| 6 partials, 6 sections, R=32, 8 Hz, high-center extreme | 741 / 30 | 8.25e-3 | 60.54 dB | 10.60% / 10.78% | 0 / 0 |
+| 32 partials, 12 sections, R=64, 0.2 Hz | 1989 / 94 | 2.65e-2 | 66.23 dB | 18.59% / 18.61% | 0 / 0 |
+| 32 partials, 18 sections, R=32, 8 Hz | 2222 / 106 | not meaningful: exact stress voicing collapsed to zero | n/a | 71.52% / 71.69% | 416 / 416 per repetition |
 
 The first four rows produced finite audio and zero starvation, tag mismatch,
 activation, callback-thread, deadline-overrun, materialization, and exact
