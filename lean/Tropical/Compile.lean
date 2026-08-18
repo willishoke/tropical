@@ -722,6 +722,8 @@ def compileSessionStaged (input : SessionInput) :
         if Tropical.Ir.phaserTimeStagingEnabled then
           some "staged_phaser_fallback:no_admissible_terminal"
         else none
+      else if Tropical.Ir.phaserTimeStagingMixedDDEnabled then
+        some "staged_phaser_admitted:mixed_dd_experiment"
       else some "staged_phaser_admitted" }, partition.stageBlocks)
 
 def compileSession (input : SessionInput) : Except String Tropical.Plan.FlatPlan :=

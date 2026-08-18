@@ -12,6 +12,13 @@ namespace Tropical.Ir
 initialize phaserTimeStagingEnabled : Bool ← do
   return (← IO.getEnv "TROPICAL_PHASER_TIME_STAGING") == some "1"
 
+/-- Falsification-only first-order mixed DD image.  The ordinary staged path
+    remains the default experiment because the dense-tail qualification data
+    rejects this representation; the extra flag makes that result reproducible
+    without silently changing the original prototype. -/
+initialize phaserTimeStagingMixedDDEnabled : Bool ← do
+  return (← IO.getEnv "TROPICAL_PHASER_TIME_STAGING_MIXED_DD") == some "1"
+
 /-- Endpoint separation in absolute source frames. -/
 initialize phaserTimeStagingInterval : Nat ← do
   let raw ← IO.getEnv "TROPICAL_PHASER_TIME_STAGING_INTERVAL"

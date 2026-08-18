@@ -116,20 +116,26 @@ private def stagedShape (arena : Arena)
   let json ← benchmarkPhaserJson sections
   let compiled ← compilePlanPure arena resolved json
   let plan := compiled.plan
-  -- Eight logical endpoint fields are authored. Structural interning may
-  -- share one field when its two endpoint expressions are identical.
-  if plan.tileArraySlots.size < 7
-      || plan.phaserTimeStaging != some "staged_phaser_admitted" then
+  let mixed := Tropical.Ir.phaserTimeStagingMixedDDEnabled
+  let expectedProvenance := if mixed then
+    "staged_phaser_admitted:mixed_dd_experiment"
+  else "staged_phaser_admitted"
+  -- Structural interning may share a field when its endpoint expressions are
+  -- identical, hence the lower bounds rather than exact slot counts.
+  if plan.tileArraySlots.size < (if mixed then 12 else 7)
+      || plan.phaserTimeStaging != some expectedProvenance then
     throw s!"{sections} sections were not admitted (tile slots={plan.tileArraySlots}, provenance={plan.phaserTimeStaging})"
   let split ← Tropical.Ir.TileStage.split plan
   let some _ := split.tile? | throw s!"{sections} sections produced no tile program"
-  let rows := sections + 6
+  let simpleRows := if mixed then 6 + (sections + 1) / 2 else 6 + sections
+  let pairedRows := if mixed then sections / 2 else 0
   for slot in plan.tileArraySlots do
-    if plan.arraySlotSizes[slot]? != some rows then
-      throw s!"{sections} sections: endpoint slot {slot} has wrong row count"
+    let size := plan.arraySlotSizes[slot]?.getD 0
+    if size != simpleRows && (!mixed || size != pairedRows) then
+      throw s!"{sections} sections: endpoint slot {slot} has wrong row count {size}"
   pure {
     sections
-    rows
+    rows := simpleRows + pairedRows
     exactInstructions := planInstructionCount plan
     audioInstructions := planInstructionCount split.audio
     exactDivisions := planDivisionCount plan
@@ -158,7 +164,10 @@ private def stagedTerminalStructureCheck (arena : Arena)
         IO.println s!"        staged {shape.sections} sections/{shape.rows} rows: exact/audio instructions={shape.exactInstructions}/{shape.audioInstructions}, divisions={shape.exactDivisions}/{shape.audioDivisions}"
       if compact && incrementsLinear && refused then
         passGate "phaser-time-stage-structure"
-          "6/12/18 admitted with all logical absolute endpoint fields (one may intern when identical); compact audio work grows approximately linearly; five-section topology retains exact fallback provenance"
+          (if Tropical.Ir.phaserTimeStagingMixedDDEnabled then
+            "6/12/18 admitted with falsification-only mixed simple/DD endpoint fields; compact audio work grows approximately linearly; five-section topology retains exact fallback provenance"
+          else
+            "6/12/18 admitted with ordinary absolute endpoint fields; compact audio work grows approximately linearly; five-section topology retains exact fallback provenance")
       else
         failGate "phaser-time-stage-structure"
           s!"compact={compact} linear={incrementsLinear} ineligibleFallback={refused}"

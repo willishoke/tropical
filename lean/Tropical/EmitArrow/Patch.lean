@@ -635,6 +635,105 @@ private def admittedPhaserSectionCount (count : Nat) : Bool :=
 private def lerpSig (phase a b : Sig) : BuildM Sig := do
   add a (← mul phase (← sub b a))
 
+private structure MixedPhaserRows where
+  simple : Array ModalMode
+  paired : Array PairedMode
+
+/-- Rewrite two ordinary exponential rows into one first-order divided-difference
+    atom plus their summed residue on the right pole:
+
+      A e^(λt) + B e^(νt)
+        = A(λ-ν) e^(νt) t cexpm1((λ-ν)t) + (A+B)e^(νt).
+
+    This is an algebraic identity for every frozen endpoint.  Pair selection is
+    structural and authored-order; it never depends on floating residue size. -/
+private def fusePhaserRows (left right : ModalMode) : BuildM (ModalMode × PairedMode) := do
+  let lam ← left.poleE
+  let nu ← right.poleE
+  let delta ← csubE lam nu
+  let c ← cmulE left.ampE delta
+  let remainder ← caddE left.ampE right.ampE
+  pure ({ right with cre := remainder.1, cim := remainder.2 }, { lam, nu, c })
+
+/-- The all-pass tail poles form one same-frequency cluster.  This falsification
+    experiment pairs adjacent structural rows, leaving source rows and
+    at most one odd tail as simple exponentials.  Candidate density is reported
+    by the benchmark from the section count; this representation deliberately
+    does not pretend disjoint first-order pairs solve a dense higher-order
+    cluster. -/
+private def mixedPhaserRows (sourceCount : Nat) (rows : Array ModalMode) :
+    BuildM MixedPhaserRows := do
+  if rows.size < sourceCount then
+    throw "mixedPhaserRows: decorated row count is smaller than source count"
+  let source := rows.extract 0 sourceCount
+  let tails := rows.extract sourceCount rows.size
+  let mut simple := source
+  let mut paired : Array PairedMode := #[]
+  let mut i := 0
+  while i + 1 < tails.size do
+    let (remainder, pair) ← fusePhaserRows tails[i]! tails[i + 1]!
+    simple := simple.push remainder
+    paired := paired.push pair
+    i := i + 2
+  if i < tails.size then simple := simple.push tails[i]!
+  pure { simple, paired }
+
+private def interpolateModes (phase : Sig) (startRows endRows : Array ModalMode) :
+    BuildM (Array ModalMode) := do
+  let startSigma ← tileArray (startRows.map (·.sigma))
+  let startOmega ← tileArray (startRows.map (·.omega))
+  let startCre ← tileArray (startRows.map (·.cre))
+  let startCim ← tileArray (startRows.map (·.cim))
+  let endSigma ← tileArray (endRows.map (·.sigma))
+  let endOmega ← tileArray (endRows.map (·.omega))
+  let endCre ← tileArray (endRows.map (·.cre))
+  let endCim ← tileArray (endRows.map (·.cim))
+  (Array.range startRows.size).mapM fun i => do
+    let indexSig ← litI (Int.ofNat i)
+    pure ({
+      sigma := ← lerpSig phase (← index startSigma indexSig)
+        (← index endSigma indexSig)
+      omega := ← lerpSig phase (← index startOmega indexSig)
+        (← index endOmega indexSig)
+      cre := ← lerpSig phase (← index startCre indexSig)
+        (← index endCre indexSig)
+      cim := ← lerpSig phase (← index startCim indexSig)
+        (← index endCim indexSig)
+      deg := 0 } : ModalMode)
+
+private def interpolatePairedModes (phase : Sig)
+    (startRows endRows : Array PairedMode) : BuildM (Array PairedMode) := do
+  let startLamRe ← tileArray (startRows.map (·.lam.1))
+  let startLamIm ← tileArray (startRows.map (·.lam.2))
+  let startNuRe ← tileArray (startRows.map (·.nu.1))
+  let startNuIm ← tileArray (startRows.map (·.nu.2))
+  let startCre ← tileArray (startRows.map (·.c.1))
+  let startCim ← tileArray (startRows.map (·.c.2))
+  let endLamRe ← tileArray (endRows.map (·.lam.1))
+  let endLamIm ← tileArray (endRows.map (·.lam.2))
+  let endNuRe ← tileArray (endRows.map (·.nu.1))
+  let endNuIm ← tileArray (endRows.map (·.nu.2))
+  let endCre ← tileArray (endRows.map (·.c.1))
+  let endCim ← tileArray (endRows.map (·.c.2))
+  (Array.range startRows.size).mapM fun i => do
+    let indexSig ← litI (Int.ofNat i)
+    pure ({
+      lam := (
+        ← lerpSig phase (← index startLamRe indexSig)
+          (← index endLamRe indexSig),
+        ← lerpSig phase (← index startLamIm indexSig)
+          (← index endLamIm indexSig))
+      nu := (
+        ← lerpSig phase (← index startNuRe indexSig)
+          (← index endNuRe indexSig),
+        ← lerpSig phase (← index startNuIm indexSig)
+          (← index endNuIm indexSig))
+      c := (
+        ← lerpSig phase (← index startCre indexSig)
+          (← index endCre indexSig),
+        ← lerpSig phase (← index startCim indexSig)
+          (← index endCim indexSig)) } : PairedMode)
+
 /-- Build the compact audio side of the staged terminal.  Endpoint arrays are
     exact residue images rooted at absolute coordinates; the later TileStage
     residualizer removes their construction from Metal and leaves only these
@@ -666,30 +765,20 @@ private def stagedPhaserTerminal? (voice : Array ModalMode)
   let endRows ← Oriented.decorateDegreeZeroCausalPhaser
     endVoice endTails endMix
   if startRows.size != endRows.size || startRows.isEmpty then return none
-
-  let startSigma ← tileArray (startRows.map (·.sigma))
-  let startOmega ← tileArray (startRows.map (·.omega))
-  let startCre ← tileArray (startRows.map (·.cre))
-  let startCim ← tileArray (startRows.map (·.cim))
-  let endSigma ← tileArray (endRows.map (·.sigma))
-  let endOmega ← tileArray (endRows.map (·.omega))
-  let endCre ← tileArray (endRows.map (·.cre))
-  let endCim ← tileArray (endRows.map (·.cim))
   let phase ← tilePhase
-  let rows ← (Array.range startRows.size).mapM fun i => do
-    let indexSig ← litI (Int.ofNat i)
-    pure ({
-      sigma := ← lerpSig phase (← index startSigma indexSig)
-        (← index endSigma indexSig)
-      omega := ← lerpSig phase (← index startOmega indexSig)
-        (← index endOmega indexSig)
-      cre := ← lerpSig phase (← index startCre indexSig)
-        (← index endCre indexSig)
-      cim := ← lerpSig phase (← index startCim indexSig)
-        (← index endCim indexSig)
-      deg := 0 } : ModalMode)
-  let bank ← Oriented.Bank.ofFuture rows
-  pure (some (.generic (Oriented.TerminalBank.ofBank bank)))
+  if Tropical.Ir.phaserTimeStagingMixedDDEnabled then
+    let startMixed ← mixedPhaserRows voice.size startRows
+    let endMixed ← mixedPhaserRows voice.size endRows
+    if startMixed.simple.size != endMixed.simple.size
+        || startMixed.paired.size != endMixed.paired.size then return none
+    let rows ← interpolateModes phase startMixed.simple endMixed.simple
+    let paired ← interpolatePairedModes phase startMixed.paired endMixed.paired
+    let bank ← Oriented.Bank.ofFuture rows
+    pure (some (.generic ({ bank, futurePaired := paired } : Oriented.TerminalBank)))
+  else
+    let rows ← interpolateModes phase startRows endRows
+    let bank ← Oriented.Bank.ofFuture rows
+    pure (some (.generic (Oriented.TerminalBank.ofBank bank)))
 
 /-- Fold an authored stage spine after binding the current static universe.  A
     final room uses the stable EC/DD carrier for hot same-side couplings. -/

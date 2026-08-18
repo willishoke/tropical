@@ -16,6 +16,7 @@ import math
 import os
 from pathlib import Path
 import platform
+import re
 import statistics
 import struct
 import subprocess
@@ -139,6 +140,7 @@ def emit_artifacts(label: str, graph_path: Path, interval: int,
     directory.mkdir(parents=True, exist_ok=True)
     env = clean_env({
         "TROPICAL_PHASER_TIME_STAGING": "1",
+        "TROPICAL_PHASER_TIME_STAGING_MIXED_DD": "1",
         "TROPICAL_PHASER_TIME_STAGING_INTERVAL": str(interval),
         "TROPICAL_METAL_RENDER_TILE_FRAMES": str(BUFFER),
         "TROPICAL_STAGE0": "1",
@@ -165,6 +167,7 @@ def render(graph_path: Path, *, metal: bool, interval: int,
     frames = math.ceil(samples / BUFFER)
     env = clean_env({
         "TROPICAL_PHASER_TIME_STAGING": "1",
+        "TROPICAL_PHASER_TIME_STAGING_MIXED_DD": "1",
         "TROPICAL_PHASER_TIME_STAGING_INTERVAL": str(interval),
         "TROPICAL_METAL_RENDER_TILE_FRAMES": str(BUFFER),
         "TROPICAL_STAGE0": "1",
@@ -186,6 +189,8 @@ def error_metrics(exact_payload: bytes, staged_payload: bytes,
     if len(exact) != len(staged):
         raise RuntimeError("exact/staged sample count mismatch")
     residual = [right - left for left, right in zip(exact, staged)]
+    all_finite = all(math.isfinite(value)
+                     for value in exact + staged + residual)
     signal_energy = sum(value * value for value in exact)
     error_energy = sum(value * value for value in residual)
     exact_diff = [abs(exact[i] - exact[i - 1]) for i in range(1, len(exact))]
@@ -195,29 +200,38 @@ def error_metrics(exact_payload: bytes, staged_payload: bytes,
     transient_radius = round(RATE * 0.005)
     transient_errors: list[float] = []
     for boundary in boundaries:
+        exact_first = exact_diff[boundary - 1]
+        staged_first = staged_diff[boundary - 1]
+        boundary_finite = math.isfinite(exact_first) and math.isfinite(staged_first)
         boundary_rows.append({
             "sample": boundary,
-            "exact_first_difference": exact_diff[boundary - 1],
-            "staged_first_difference": staged_diff[boundary - 1],
-            "excess": staged_diff[boundary - 1] - exact_diff[boundary - 1],
+            "exact_first_difference": exact_first if math.isfinite(exact_first) else None,
+            "staged_first_difference": staged_first if math.isfinite(staged_first) else None,
+            "excess": staged_first - exact_first if boundary_finite else None,
         })
         transient_errors.extend(abs(residual[i]) for i in range(
             max(0, boundary - transient_radius),
-            min(len(residual), boundary + transient_radius + 1)))
+            min(len(residual), boundary + transient_radius + 1))
+            if math.isfinite(residual[i]))
     return {
         "sample_count": len(exact),
-        "all_finite": all(math.isfinite(value)
-                          for value in exact + staged + residual),
-        "exact_peak": max((abs(value) for value in exact), default=0.0),
-        "staged_peak": max((abs(value) for value in staged), default=0.0),
-        "max_abs_error": max((abs(value) for value in residual), default=0.0),
-        "rms_error": math.sqrt(error_energy / len(residual)) if residual else 0.0,
+        "all_finite": all_finite,
+        "exact_peak": max((abs(value) for value in exact
+                           if math.isfinite(value)), default=0.0),
+        "staged_peak": (max((abs(value) for value in staged), default=0.0)
+                        if all_finite else None),
+        "max_abs_error": (max((abs(value) for value in residual), default=0.0)
+                          if all_finite else None),
+        "rms_error": (math.sqrt(error_energy / len(residual))
+                      if all_finite and residual else 0.0 if all_finite else None),
         "snr_db": (10.0 * math.log10(signal_energy / error_energy)
-                   if signal_energy > 0.0 and error_energy > 0.0
-                   else 999.0 if signal_energy > 0.0 else None),
-        "boundary_max_first_difference_excess": max(
-            (row["excess"] for row in boundary_rows), default=0.0),
-        "five_ms_transient_max_abs_error": max(transient_errors, default=0.0),
+                   if all_finite and signal_energy > 0.0 and error_energy > 0.0
+                   else 999.0 if all_finite and signal_energy > 0.0 else None),
+        "boundary_max_first_difference_excess": (max(
+            (row["excess"] for row in boundary_rows), default=0.0)
+            if all_finite else None),
+        "five_ms_transient_max_abs_error": (max(transient_errors, default=0.0)
+                                             if all_finite else None),
         "boundaries": boundary_rows,
     }
 
@@ -226,6 +240,7 @@ def performance_probe(directory: Path, interval: int,
                       blocks: int, warmup: int, cache: Path) -> dict[str, Any]:
     env = clean_env({
         "TROPICAL_PHASER_TIME_STAGING": "1",
+        "TROPICAL_PHASER_TIME_STAGING_MIXED_DD": "1",
         "TROPICAL_PHASER_TIME_STAGING_INTERVAL": str(interval),
         "TROPICAL_METAL_RENDER_TILE_FRAMES": str(BUFFER),
         "TROPICAL_KERNEL_CACHE_ROOT": str(cache),
@@ -243,7 +258,17 @@ def performance_probe(directory: Path, interval: int,
         "--buffer", str(BUFFER), "--rate", str(RATE),
         "--blocks", str(blocks), "--warmup", str(warmup),
     ], env=env)
-    row = json.loads(completed.stdout)
+    # The runtime reports C++ non-finite spellings when a falsification row
+    # actually emits one. Preserve that evidence instead of losing the entire
+    # run to Python's stricter lowercase-token parser.
+    payload = completed.stdout.decode("utf-8", "replace")
+    payload = re.sub(r"(?<=[:\[,])nan(?=[,\]}])", "NaN", payload)
+    payload = re.sub(r"(?<=[:\[,])inf(?=[,\]}])", "Infinity", payload)
+    payload = re.sub(r"(?<=[:\[,])-inf(?=[,\]}])", "-Infinity", payload)
+    row = json.loads(payload)
+    for key, value in row.items():
+        if isinstance(value, float) and not math.isfinite(value):
+            row[key] = None
     frames = row.get("metal_rendered_frames_measured", 0)
     audio_ns = frames * 1e9 / RATE
     row["metal_render_load_fraction"] = (
@@ -265,6 +290,28 @@ def smoke_matrix() -> list[tuple[int, int, int, float, float, float]]:
         (32, 12, 64, 0.2, 700.0, 1.5),
         (32, 18, 32, 8.0, 700.0, 1.5),
     ]
+
+
+def mixed_representation_metrics(partials: int, sections: int) -> dict[str, Any]:
+    """Topology-only interval classifier for the real-pole all-pass tail.
+
+    Every tail has omega=0 throughout the control interval, so every unordered
+    tail pair satisfies the incumbent same-physical-frequency hot predicate.
+    The first-order experiment can cover only disjoint adjacent pairs.
+    """
+    candidate_pairs = sections * (sections - 1) // 2
+    realized_pairs = sections // 2
+    return {
+        "classifier": "interval_structural_same_physical_frequency",
+        "simple_rows": partials + (sections + 1) // 2,
+        "paired_rows": realized_pairs,
+        "hot_candidate_pairs": candidate_pairs,
+        "hot_candidate_density": 1.0 if sections > 1 else 0.0,
+        "first_order_pair_coverage": (
+            realized_pairs / candidate_pairs if candidate_pairs else 1.0),
+        "higher_order_factored_representation_required": (
+            candidate_pairs > realized_pairs),
+    }
 
 
 def full_matrix() -> list[tuple[int, int, int, float, float, float]]:
@@ -307,7 +354,7 @@ def main() -> int:
             parser.error("--limit must be positive")
         matrix = matrix[:args.limit]
     result: dict[str, Any] = {
-        "schema": "tropical_absolute_time_phaser_staging_1",
+        "schema": "tropical_absolute_time_phaser_staging_2",
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "commit": command_text(["git", "rev-parse", "HEAD"]),
         "git_status": command_text(["git", "status", "--short"]),
@@ -353,6 +400,7 @@ def main() -> int:
             "sections": sections, "interval_frames": interval,
             "lfo_rate_hz": rate, "center_hz": center, "sweep_octaves": sweep,
             "start_sample": args.start, "samples": samples,
+            "representation": mixed_representation_metrics(partials, sections),
             "artifacts": artifacts, "error": errors,
             "exact_renderer_stderr": exact_stderr.strip(),
             "staged_renderer_stderr": staged_stderr.strip(),
@@ -375,6 +423,8 @@ def main() -> int:
                 "zero_exact_fallbacks": all(
                     probe.get("metal_exact_fallback_count", 0) == 0
                     for probe in probes),
+                "zero_nonfinite_output": all(
+                    probe.get("nonfinite_count", 0) == 0 for probe in probes),
                 "zero_dispatch_starvation_tag_activation_callback_faults": all(
                     all(probe.get(key, 0) == 0 for key in (
                         "metal_dispatch_failure_count",
