@@ -233,7 +233,6 @@ function drawTrace(canvas, v) {
 
 // ── boot + the render loop ───────────────────────────────────────────────────
 const DISPLAY = 1024      // samples per well
-const WARMUP = 64
 const FPS = 24
 
 async function boot() {
@@ -264,12 +263,12 @@ async function loop() {
     document.getElementById('tau').textContent = `τ ${p}`
     const live = wells.filter((s) => s.slot)
     const count = DISPLAY * 2 // display + trigger search
-    const start = Math.max(0, p - count - WARMUP)
+    const start = Math.max(0, p - count)
     const res = await rpc('render_window', {
-      start, count: count + WARMUP, slots: live.map((s) => s.slot),
+      start, count, slots: live.map((s) => s.slot),
     })
     live.forEach((s, i) => {
-      const v = (res.values[i] ?? []).slice(WARMUP)
+      const v = res.values[i] ?? []
       const off = s.trig ? findTrigger(v, 0, DISPLAY) : 0
       drawTrace(s.canvas, v.slice(off, off + DISPLAY))
     })

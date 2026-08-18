@@ -164,6 +164,20 @@ describe('load_patch_graph compile handshake', () => {
       expect(rendered.control_version).toBe(report.control_version)
       expect(rendered.values[0]).not.toEqual(rendered.values[1])
 
+      // CF-only kernels need no priming: a fresh random-access render at N is
+      // exactly the same signal as the N-offset slice of a render from zero.
+      const offset = 17
+      const coldRendered = await client.call('render_window', {
+        start: offset,
+        count: 32 - offset,
+        slots: report.taps.map((tap: any) => tap.slot),
+      })
+      expect(coldRendered.program_version).toBe(report.program_version)
+      expect(coldRendered.control_version).toBe(report.control_version)
+      expect(coldRendered.values).toEqual(
+        rendered.values.map((values: number[]) => values.slice(offset)),
+      )
+
       const listed = await client.call('list_scope_taps')
       expect(listed.taps).toEqual(report.taps)
 
