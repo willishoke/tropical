@@ -761,6 +761,8 @@ FlatRuntime::load_ir_time_staged_with_observation_generation(
       image->param_ptrs = state.param_ptrs;
       image->tile_array_slots = state.tile_array_slots;
       image->interval_frames = state.tile_interval_frames;
+      image->higher_order_phaser = parsed.phaser_time_staging
+        == "staged_phaser_admitted:higher_order_experiment";
       state.tile_materializer = std::move(image);
 #else
       throw std::runtime_error(

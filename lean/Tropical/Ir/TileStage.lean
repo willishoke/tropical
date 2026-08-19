@@ -56,12 +56,40 @@ private def dependencyStages (plan : FlatPlan)
       if !selected[i]! then
         selected := selected.set! i true
         work := work ++ deps[i]!
+    -- A hash-consed scalar can feed both the tile image and surviving audio
+    -- work.  Moving that shared definition outright would create a scalar
+    -- `coef:` crossing whose value changes at tile time; the Metal worker only
+    -- publishes tile arrays.  Retain and duplicate the complete scalar support
+    -- slice instead.  Stage0's fold closure is exactly the mechanical form we
+    -- need here: one copy remains in audio, while one copy follows the image
+    -- writer into the materializer.  Array writers are the intentional
+    -- crossing and therefore stay s0.
+    let isScalarDef (i : Nat) : Bool :=
+      match flat[i]!.dst with
+      | .temp _ | .moduleSlot _ => true
+      | _ => false
+    let mut retained := Array.replicate flat.size false
+    let mut retainedWork : Array Nat := #[]
+    for user in [0:flat.size] do
+      if !selected[user]! then
+        for dependency in deps[user]! do
+          if selected[dependency]! && isScalarDef dependency then
+            retainedWork := retainedWork.push dependency
+    while !retainedWork.isEmpty do
+      let i := retainedWork.back!
+      retainedWork := retainedWork.pop
+      if !retained[i]! then
+        retained := retained.set! i true
+        for dependency in deps[i]! do
+          if selected[dependency]! && isScalarDef dependency then
+            retainedWork := retainedWork.push dependency
     let mut cursor := 0
     let mut result : Array (Array (Option Tropical.Ir.Stage)) := #[]
     for block in blocks do
       let mut stages : Array (Option Tropical.Ir.Stage) := #[]
       for _ in block do
-        stages := stages.push (some (if selected[cursor]! then .s0 else .s1))
+        stages := stages.push (some (if retained[cursor]! then .fold
+          else if selected[cursor]! then .s0 else .s1))
         cursor := cursor + 1
       result := result.push stages
     return result

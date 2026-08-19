@@ -722,6 +722,8 @@ def compileSessionStaged (input : SessionInput) :
         if Tropical.Ir.phaserTimeStagingEnabled then
           some "staged_phaser_fallback:no_admissible_terminal"
         else none
+      else if Tropical.Ir.phaserTimeStagingHigherOrderEnabled then
+        some "staged_phaser_admitted:higher_order_experiment"
       else if Tropical.Ir.phaserTimeStagingMixedDDEnabled then
         some "staged_phaser_admitted:mixed_dd_experiment"
       else some "staged_phaser_admitted" }, partition.stageBlocks)

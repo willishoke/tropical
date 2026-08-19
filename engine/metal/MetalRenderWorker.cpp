@@ -1,4 +1,5 @@
 #include "metal/MetalRenderWorker.hpp"
+#include "metal/PhaserHigherOrderMaterializer.hpp"
 
 #include <algorithm>
 #include <bit>
@@ -162,6 +163,18 @@ bool MetalRenderWorker::materialize_columns(
       &scratch_output,
       1,
       cursor.materializer_slots.data());
+
+    if (program->higher_order_phaser)
+    {
+      if (program->tile_array_slots.size() != 1)
+        return false;
+      const uint32_t image_slot = program->tile_array_slots.front();
+      if (image_slot >= cursor.materializer_arrays.size()
+          || !materialize_higher_order_phaser_image(
+            cursor.materializer_arrays[image_slot],
+            program->interval_frames))
+        return false;
+    }
 
     for (uint32_t slot : program->tile_array_slots)
     {

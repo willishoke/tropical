@@ -578,10 +578,19 @@ private def resolvePlainStageState (initial : PlainStageState)
       let g ← clampE value zero one
       pure { state with cursor := cursor + 1, bank := ← bank.gauge g }) initial
 
+private structure HigherOrderPhaserTerminal where
+  source : Array ModalMode
+  sourceAtTile : Array ModalMode
+  linear : ModalLinearStage
+  responseClock : Sig
+  values : Array Sig
+  exactRows : Array ModalMode
+
 private inductive PlainTerminal where
   | generic (terminal : Oriented.TerminalBank)
   | factored (terminal : Oriented.FactoredTwoRoomTerminal)
   | factoredPhaser (terminal : Oriented.FactoredTwoRoomPhaserTerminal)
+  | higherOrderPhaser (terminal : HigherOrderPhaserTerminal)
   | scaled (gain : Sig) (terminal : PlainTerminal)
 
 private def PlainTerminal.withLevelGain (terminal : PlainTerminal)
@@ -589,15 +598,6 @@ private def PlainTerminal.withLevelGain (terminal : PlainTerminal)
   match gain? with
   | none => terminal
   | some gain => .scaled gain terminal
-
-private def PlainTerminal.realizeSig (terminal : PlainTerminal)
-    (clkInt anchorSamples : Sig) (count? : Option Sig) : BuildM Sig :=
-  match terminal with
-  | .generic value => value.realizeSig clkInt anchorSamples count?
-  | .factored value => value.realizeSig clkInt anchorSamples
-  | .factoredPhaser value => value.realizeSig clkInt anchorSamples
-  | .scaled gain value => do
-      mul gain (← value.realizeSig clkInt anchorSamples count?)
 
 /-- Reconstruct the same mode identities at `sampleIndex + frames`.  Every
     signal field participates, so a warped address or a glide straddling the
@@ -632,8 +632,181 @@ private def stablePhaserTails (tails : Array ModalMode) : Bool :=
 private def admittedPhaserSectionCount (count : Nat) : Bool :=
   count == 6 || count == 12 || count == 18
 
+private def admittedPhaserSourceCount (count : Nat) : Bool :=
+  count == 6 || count == 32
+
 private def lerpSig (phase a b : Sig) : BuildM Sig := do
   add a (← mul phase (← sub b a))
+
+private def sameModeFields (left right : ModalMode) : Bool :=
+  left.sigma == right.sigma && left.omega == right.omega
+    && left.cre == right.cre && left.cim == right.cim
+
+private def higherOrderSourceOffsets : Nat → Option (Array Nat)
+  | 32 => some #[0, 2, 6, 12, 20, 26, 30, 32]
+  | 64 => some #[0, 3, 12, 25, 39, 52, 61, 64]
+  | 128 => some #[0, 4, 15, 32, 53, 75, 96, 113, 124, 128]
+  | _ => none
+
+private def higherOrderWeightSupport (interval : Nat) : Nat :=
+  if interval == 32 then 6 else 8
+
+private def chebyshevEvalSig (coefficients : Array Sig)
+    (coordinate : Sig) : BuildM Sig := do
+  if coefficients.isEmpty then return ← lit 0
+  let mut following ← lit 0
+  let mut afterFollowing ← lit 0
+  for coefficient in (coefficients.extract 1 coefficients.size).reverse do
+    let twice ← mul (← lit 2) coordinate
+    let current ← add (← sub (← mul twice following) afterFollowing) coefficient
+    afterFollowing := following
+    following := current
+  add (← sub (← mul coordinate following) afterFollowing) coefficients[0]!
+
+/-- Evaluate the published source-gain field inside one indexed modal loop.
+    Keeping the Chebyshev reads in the loop body avoids constructing `P`
+    separate per-sample amplitude expressions before entering `bankSum`; plan
+    size and register pressure are therefore independent of the source row
+    count. -/
+private def higherOrderSourceSig (modes : Array ModalMode)
+    (sourceSupport : Nat) (image coordinate : Sig)
+    (clkInt anchorSamples : Sig) : BuildM Sig := do
+  let relative ← relClockQ clkInt anchorSamples
+  let relativeFloat ← toFloatE relative
+  let secondsTimesRate ← div relativeFloat (← lit 4294967296)
+  let dSec ← div secondsTimesRate (← sampleRate)
+  let twoPi ← twoPiE
+  let twoPow32 ← lit 4294967296
+  let sr ← sampleRate
+  let increments ← modes.mapM fun mode => do
+    let frequency ← div mode.omega twoPi
+    let scaled ← mul frequency twoPow32
+    div scaled sr
+  let incrementTable ← arr increments
+  let sigmaTable ← arr (modes.map (·.sigma))
+  let binderId := 6200
+  let modeIndex ← loopIdx binderId
+  let coefficientStride := 2 * sourceSupport
+  let coefficientBase ← add (← litI 8)
+    (← mul (← litI (Int.ofNat coefficientStride)) modeIndex)
+  let realCoefficients ← (Array.range sourceSupport).mapM fun degree => do
+    let offset ← add coefficientBase (← litI (Int.ofNat (2 * degree)))
+    index image offset
+  let imagCoefficients ← (Array.range sourceSupport).mapM fun degree => do
+    let offset ← add coefficientBase (← litI (Int.ofNat (2 * degree + 1)))
+    index image offset
+  let cre ← chebyshevEvalSig realCoefficients coordinate
+  let cim ← chebyshevEvalSig imagCoefficients coordinate
+  let increment ← toIntE (← index incrementTable modeIndex)
+  let phase ← modePhaseQFromIncr increment relative
+  let scale ← lit 1073741824
+  let cosine ← div (← toFloatE (← fixedCosCycSig phase)) scale
+  let sine ← div (← toFloatE (← fixedSinCycSig phase)) scale
+  let carrier ← sub (← mul cre cosine) (← mul cim sine)
+  let sigma ← index sigmaTable modeIndex
+  let envelope ← expSig (← neg (← mul sigma dSec))
+  let contribution ← mul envelope carrier
+  let value ← bankSum modes.size #[incrementTable, sigmaTable, image]
+    contribution none binderId
+  selectE (← gt relative (← litI 0)) value (← lit 0)
+
+private def higherOrderPhaserSig (terminal : HigherOrderPhaserTerminal)
+    (clkInt anchorSamples : Sig) (count? : Option Sig) : BuildM Sig := do
+  -- A dynamic source trip count would make the worker's whole-tail sum and the
+  -- audio source bank disagree.  Keep that graph on the exact path.
+  if count?.isSome then
+    let bank ← Oriented.Bank.ofFuture terminal.exactRows
+    return ← (Oriented.TerminalBank.ofBank bank).realizeSig
+      clkInt anchorSamples count?
+  let interval := Tropical.Ir.phaserTimeStagingInterval
+  let some supportOffsets := higherOrderSourceOffsets interval
+    | let bank ← Oriented.Bank.ofFuture terminal.exactRows
+      return ← (Oriented.TerminalBank.ofBank bank).realizeSig
+        clkInt anchorSamples count?
+  let sourceCount := terminal.source.size
+  let sectionCount := terminal.exactRows.size - sourceCount
+  let sourceSupport := supportOffsets.size
+  let weightSupport := higherOrderWeightSupport interval
+  let headerCount := 8
+  let sourceCoefficientCount := 2 * sourceSupport * sourceCount
+  let tailBase := headerCount + sourceCoefficientCount
+  let primitiveBase := tailBase + interval
+
+  -- The unsplit LLVM form is the exact fallback.  At every JIT sample
+  -- tilePhase=0 and tileTick=current_idx, so c[0] holds the current exact
+  -- decorated source amplitude and tail[0] holds the current exact real-pole
+  -- sum.  Keeping the small tail fold scalar (rather than nesting a BankSum in
+  -- the Pack) lets TileStage move the complete dependency slice.  The Metal
+  -- worker overwrites this prefix with the stable higher-order image.
+  let shiftedClockAnchor ← shiftSampleIndex #[clkInt, anchorSamples] 0
+  let zero ← lit 0
+  let relative ← relClockQ shiftedClockAnchor[0]! shiftedClockAnchor[1]!
+  let relativeFloat ← toFloatE relative
+  let secondsTimesRate ← div relativeFloat (← lit 4294967296)
+  let dSec ← div secondsTimesRate (← sampleRate)
+  let tailRows := terminal.exactRows.extract sourceCount terminal.exactRows.size
+  let fallbackTail ← tailRows.foldlM (fun total mode => do
+    let envelope ← expSig (← neg (← mul mode.sigma dSec))
+    add total (← mul envelope mode.cre)) zero
+  let fallbackTail ← selectE (← gt relative (← litI 0)) fallbackTail zero
+  let mut items : Array Sig := #[]
+  for value in #[8430261, 1, sourceCount, sectionCount, interval,
+      sourceSupport, weightSupport, primitiveBase] do
+    items := items.push (← lit (Int.ofNat value))
+  for sourceIndex in [0:sourceCount] do
+    items := items ++ #[terminal.exactRows[sourceIndex]!.cre,
+      terminal.exactRows[sourceIndex]!.cim]
+      ++ Array.replicate (2 * sourceSupport - 2) zero
+  items := items.push fallbackTail
+  items := items ++ Array.replicate (interval - 1) zero
+
+  -- Static source pole/amplitude fields are private materializer inputs.
+  for mode in terminal.sourceAtTile do
+    items := items ++ #[mode.sigma, mode.omega, mode.cre, mode.cim]
+
+  -- Integer-coordinate control images feed both the source-gain and internal
+  -- rate interpolation.  The 128-frame form uses ten source supports and
+  -- eight private weight supports; shorter images retain the measured 8/6
+  -- form.  The worker derives weight supports from this common field, avoiding
+  -- a second JIT-side trajectory image.
+  for offset in supportOffsets do
+    let (source, response, values) ← shiftModalInputs terminal.source
+      terminal.responseClock terminal.values offset
+    let (kernel, _) ← resolveLinearStage terminal.linear response values 0
+    let some (tails, mix) := kernel.dryWetAllpassCascadeShape?
+      | throw "higherOrderPhaserSig: shifted all-pass topology changed"
+    if source.size != sourceCount || tails.size != sectionCount
+        || !stablePhaserTails tails then
+      throw "higherOrderPhaserSig: shifted source/tail shape changed"
+    items := items.push mix ++ tails.map (·.sigma)
+
+  -- The phase-type fold needs the exact bounded response time at every output
+  -- sample.  This retains warped clocks, anchors, glides, and random seeks.
+  for offset in [0:interval] do
+    let shifted ← shiftSampleIndex #[terminal.responseClock, anchorSamples] offset
+    let relative ← relClockQ shifted[0]! shifted[1]!
+    let relativeFloat ← toFloatE relative
+    let secondsTimesRate ← div relativeFloat (← lit 4294967296)
+    items := items.push (← div secondsTimesRate (← sampleRate))
+
+  let image ← tileArray items
+  let phase ← tilePhase
+  let coordinate ← sub (← mul (← lit 2) phase) (← lit 1)
+  let sourceValue ← higherOrderSourceSig terminal.source sourceSupport image coordinate
+    clkInt anchorSamples
+  let localOffset ← toIntE (← mul phase (← lit (Int.ofNat interval)))
+  let tailIndex ← add (← lit (Int.ofNat tailBase)) localOffset
+  add sourceValue (← index image tailIndex)
+
+private def PlainTerminal.realizeSig (terminal : PlainTerminal)
+    (clkInt anchorSamples : Sig) (count? : Option Sig) : BuildM Sig :=
+  match terminal with
+  | .generic value => value.realizeSig clkInt anchorSamples count?
+  | .factored value => value.realizeSig clkInt anchorSamples
+  | .factoredPhaser value => value.realizeSig clkInt anchorSamples
+  | .higherOrderPhaser value => higherOrderPhaserSig value clkInt anchorSamples count?
+  | .scaled gain value => do
+      mul gain (← value.realizeSig clkInt anchorSamples count?)
 
 private structure MixedPhaserRows where
   simple : Array ModalMode
@@ -734,10 +907,11 @@ private def interpolatePairedModes (phase : Sig)
         ← lerpSig phase (← index startCim indexSig)
           (← index endCim indexSig)) } : PairedMode)
 
-/-- Build the compact audio side of the staged terminal.  Endpoint arrays are
-    exact residue images rooted at absolute coordinates; the later TileStage
-    residualizer removes their construction from Metal and leaves only these
-    `O(P+S)` row interpolations plus the ordinary modal realization. -/
+/-- Build the compact audio side of the staged terminal.  The higher-order
+    experiment publishes a single primitive image for the native worker to
+    replace with stable source polynomials and a bounded whole-tail table.  The
+    retained endpoint paths remain available only to reproduce the earlier
+    ordinary and mixed-DD falsification evidence. -/
 private def stagedPhaserTerminal? (voice : Array ModalMode)
     (linear : ModalLinearStage) (responseClock : Sig) (values : Array Sig) :
     BuildM (Option PlainTerminal) := do
@@ -765,6 +939,20 @@ private def stagedPhaserTerminal? (voice : Array ModalMode)
   let endRows ← Oriented.decorateDegreeZeroCausalPhaser
     endVoice endTails endMix
   if startRows.size != endRows.size || startRows.isEmpty then return none
+  if Tropical.Ir.phaserTimeStagingHigherOrderEnabled then
+    if (higherOrderSourceOffsets interval).isNone
+        || !admittedPhaserSourceCount startVoice.size
+        || startVoice.size != endVoice.size
+        || !(startVoice.zip endVoice).all fun (left, right) =>
+          sameModeFields left right then
+      return none
+    return some (.higherOrderPhaser {
+      source := voice
+      sourceAtTile := startVoice
+      linear
+      responseClock
+      values
+      exactRows := startRows })
   let phase ← tilePhase
   if Tropical.Ir.phaserTimeStagingMixedDDEnabled then
     let startMixed ← mixedPhaserRows voice.size startRows

@@ -117,21 +117,34 @@ private def stagedShape (arena : Arena)
   let compiled ← compilePlanPure arena resolved json
   let plan := compiled.plan
   let mixed := Tropical.Ir.phaserTimeStagingMixedDDEnabled
-  let expectedProvenance := if mixed then
+  let higher := Tropical.Ir.phaserTimeStagingHigherOrderEnabled
+  let expectedProvenance := if higher then
+    "staged_phaser_admitted:higher_order_experiment"
+  else if mixed then
     "staged_phaser_admitted:mixed_dd_experiment"
   else "staged_phaser_admitted"
   -- Structural interning may share a field when its endpoint expressions are
   -- identical, hence the lower bounds rather than exact slot counts.
-  if plan.tileArraySlots.size < (if mixed then 12 else 7)
+  if (if higher then plan.tileArraySlots.size != 1
+      else plan.tileArraySlots.size < (if mixed then 12 else 7))
       || plan.phaserTimeStaging != some expectedProvenance then
     throw s!"{sections} sections were not admitted (tile slots={plan.tileArraySlots}, provenance={plan.phaserTimeStaging})"
-  let split ← Tropical.Ir.TileStage.split plan
+  let stage0 ← Tropical.Ir.Stage0.hoistTyped plan compiled.stageBlocks
+  let split ← Tropical.Ir.TileStage.split stage0.audio
   let some _ := split.tile? | throw s!"{sections} sections produced no tile program"
-  let simpleRows := if mixed then 6 + (sections + 1) / 2 else 6 + sections
-  let pairedRows := if mixed then sections / 2 else 0
+  if split.audio.slotCount != stage0.audio.slotCount then
+    throw s!"{sections} sections leaked tile-time scalar boundaries into Metal ({stage0.audio.slotCount} -> {split.audio.slotCount} slots)"
+  let simpleRows := if higher then 6
+    else if mixed then 6 + (sections + 1) / 2 else 6 + sections
+  let pairedRows := if mixed && !higher then sections / 2 else 0
   for slot in plan.tileArraySlots do
     let size := plan.arraySlotSizes[slot]?.getD 0
-    if size != simpleRows && (!mixed || size != pairedRows) then
+    let interval := Tropical.Ir.phaserTimeStagingInterval
+    let sourceSupport := if interval == 128 then 10 else 8
+    let higherSize := 8 + 2 * sourceSupport * 6 + interval
+      + 4 * 6 + sourceSupport * (sections + 1) + interval
+    if (if higher then size != higherSize
+        else size != simpleRows && (!mixed || size != pairedRows)) then
       throw s!"{sections} sections: endpoint slot {slot} has wrong row count {size}"
   pure {
     sections
@@ -164,7 +177,9 @@ private def stagedTerminalStructureCheck (arena : Arena)
         IO.println s!"        staged {shape.sections} sections/{shape.rows} rows: exact/audio instructions={shape.exactInstructions}/{shape.audioInstructions}, divisions={shape.exactDivisions}/{shape.audioDivisions}"
       if compact && incrementsLinear && refused then
         passGate "phaser-time-stage-structure"
-          (if Tropical.Ir.phaserTimeStagingMixedDDEnabled then
+          (if Tropical.Ir.phaserTimeStagingHigherOrderEnabled then
+            "6/12/18 admitted with one self-describing whole-tail image; compact audio work is section-count independent; five-section topology retains exact fallback provenance"
+          else if Tropical.Ir.phaserTimeStagingMixedDDEnabled then
             "6/12/18 admitted with falsification-only mixed simple/DD endpoint fields; compact audio work grows approximately linearly; five-section topology retains exact fallback provenance"
           else
             "6/12/18 admitted with ordinary absolute endpoint fields; compact audio work grows approximately linearly; five-section topology retains exact fallback provenance")

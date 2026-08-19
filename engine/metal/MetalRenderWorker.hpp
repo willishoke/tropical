@@ -47,6 +47,7 @@ struct TileMaterializerProgram
   std::vector<uint32_t> tile_array_slots;
   uint32_t interval_frames = 0;
   double max_abs_coefficient = 1.0e12;
+  bool higher_order_phaser = false;
 };
 
 // Immutable exact CPU image retained beside a staged Metal epoch. It is not

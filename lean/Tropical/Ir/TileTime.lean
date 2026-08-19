@@ -19,6 +19,11 @@ initialize phaserTimeStagingEnabled : Bool ← do
 initialize phaserTimeStagingMixedDDEnabled : Bool ← do
   return (← IO.getEnv "TROPICAL_PHASER_TIME_STAGING_MIXED_DD") == some "1"
 
+/-- Whole-tail Newton/phase-type image.  This remains an explicit research
+    flag pending the manual matched-level listening/product-integration gate. -/
+initialize phaserTimeStagingHigherOrderEnabled : Bool ← do
+  return (← IO.getEnv "TROPICAL_PHASER_TIME_STAGING_HIGHER_ORDER") == some "1"
+
 /-- Endpoint separation in absolute source frames. -/
 initialize phaserTimeStagingInterval : Nat ← do
   let raw ← IO.getEnv "TROPICAL_PHASER_TIME_STAGING_INTERVAL"

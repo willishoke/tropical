@@ -67,7 +67,8 @@ if(TROPICAL_METAL)
     set(CMAKE_OBJCXX_STANDARD 20)
     target_sources(tropical_core PRIVATE
         engine/metal/MetalKernel.mm
-        engine/metal/MetalRenderWorker.cpp)
+        engine/metal/MetalRenderWorker.cpp
+        engine/metal/PhaserHigherOrderMaterializer.cpp)
     set_source_files_properties(engine/metal/MetalKernel.mm PROPERTIES
         COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(tropical_core PRIVATE
@@ -209,6 +210,15 @@ if(TROPICAL_BUILD_TESTS)
             USES_TERMINAL)
     endif()
     if(TROPICAL_METAL)
+        add_executable(test_phaser_higher_order_materializer
+            engine/tests/test_phaser_higher_order_materializer.cpp
+            engine/metal/PhaserHigherOrderMaterializer.cpp)
+        target_include_directories(test_phaser_higher_order_materializer
+            PRIVATE engine)
+        target_compile_features(test_phaser_higher_order_materializer PRIVATE cxx_std_20)
+        add_test(NAME current_phaser_higher_order_materializer
+            COMMAND test_phaser_higher_order_materializer)
+
         add_executable(test_metal_render_worker
             engine/tests/test_metal_render_worker.cpp)
         target_include_directories(test_metal_render_worker
