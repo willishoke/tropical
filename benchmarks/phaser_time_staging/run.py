@@ -140,7 +140,7 @@ def emit_artifacts(label: str, graph_path: Path, interval: int,
     directory.mkdir(parents=True, exist_ok=True)
     env = clean_env({
         "TROPICAL_PHASER_TIME_STAGING": "1",
-        "TROPICAL_PHASER_TIME_STAGING_MIXED_DD": "1",
+        "TROPICAL_PHASER_TIME_STAGING_HIGHER_ORDER": "1",
         "TROPICAL_PHASER_TIME_STAGING_INTERVAL": str(interval),
         "TROPICAL_METAL_RENDER_TILE_FRAMES": str(BUFFER),
         "TROPICAL_STAGE0": "1",
@@ -166,13 +166,16 @@ def render(graph_path: Path, *, metal: bool, interval: int,
            start: int, samples: int, cache: Path) -> tuple[bytes, str]:
     frames = math.ceil(samples / BUFFER)
     env = clean_env({
-        "TROPICAL_PHASER_TIME_STAGING": "1",
-        "TROPICAL_PHASER_TIME_STAGING_MIXED_DD": "1",
-        "TROPICAL_PHASER_TIME_STAGING_INTERVAL": str(interval),
-        "TROPICAL_METAL_RENDER_TILE_FRAMES": str(BUFFER),
         "TROPICAL_STAGE0": "1",
         "TROPICAL_KERNEL_CACHE_ROOT": str(cache),
     })
+    if metal:
+        env.update({
+            "TROPICAL_PHASER_TIME_STAGING": "1",
+            "TROPICAL_PHASER_TIME_STAGING_HIGHER_ORDER": "1",
+            "TROPICAL_PHASER_TIME_STAGING_INTERVAL": str(interval),
+            "TROPICAL_METAL_RENDER_TILE_FRAMES": str(BUFFER),
+        })
     command = [str(DIFFCLI), "render-graph", str(graph_path),
                "--frames", str(frames), "--buffer", str(BUFFER),
                "--start", str(start)]
@@ -222,6 +225,10 @@ def error_metrics(exact_payload: bytes, staged_payload: bytes,
                         if all_finite else None),
         "max_abs_error": (max((abs(value) for value in residual), default=0.0)
                           if all_finite else None),
+        "max_peak_relative_error": (
+            max((abs(value) for value in residual), default=0.0)
+            / max(max((abs(value) for value in exact), default=0.0), 1.0e-30)
+            if all_finite else None),
         "rms_error": (math.sqrt(error_energy / len(residual))
                       if all_finite and residual else 0.0 if all_finite else None),
         "snr_db": (10.0 * math.log10(signal_energy / error_energy)
@@ -240,7 +247,7 @@ def performance_probe(directory: Path, interval: int,
                       blocks: int, warmup: int, cache: Path) -> dict[str, Any]:
     env = clean_env({
         "TROPICAL_PHASER_TIME_STAGING": "1",
-        "TROPICAL_PHASER_TIME_STAGING_MIXED_DD": "1",
+        "TROPICAL_PHASER_TIME_STAGING_HIGHER_ORDER": "1",
         "TROPICAL_PHASER_TIME_STAGING_INTERVAL": str(interval),
         "TROPICAL_METAL_RENDER_TILE_FRAMES": str(BUFFER),
         "TROPICAL_KERNEL_CACHE_ROOT": str(cache),
@@ -282,6 +289,32 @@ def performance_probe(directory: Path, interval: int,
     return row
 
 
+def performance_summary(probes: list[dict[str, Any]]) -> dict[str, Any]:
+    loads = [probe["metal_render_load_fraction"] for probe in probes]
+    return {
+        "median_load_fraction": statistics.median(loads),
+        "p99_load_fraction": max(loads),
+        "zero_deadline_overruns": all(
+            probe.get("overrun_count", 0) == 0 for probe in probes),
+        "zero_materialization_failures": all(
+            probe.get("metal_materialization_failure_count", 0) == 0
+            for probe in probes),
+        "zero_exact_fallbacks": all(
+            probe.get("metal_exact_fallback_count", 0) == 0
+            for probe in probes),
+        "zero_nonfinite_output": all(
+            probe.get("nonfinite_count", 0) == 0 for probe in probes),
+        "zero_dispatch_starvation_tag_activation_callback_faults": all(
+            all(probe.get(key, 0) == 0 for key in (
+                "metal_dispatch_failure_count",
+                "metal_render_starvation_count",
+                "metal_epoch_tag_mismatch_count",
+                "metal_activation_failure_count",
+                "metal_callback_thread_violation_count"))
+            for probe in probes),
+    }
+
+
 def smoke_matrix() -> list[tuple[int, int, int, float, float, float]]:
     return [
         (6, 6, 128, 0.2, 700.0, 1.5),
@@ -292,25 +325,22 @@ def smoke_matrix() -> list[tuple[int, int, int, float, float, float]]:
     ]
 
 
-def mixed_representation_metrics(partials: int, sections: int) -> dict[str, Any]:
-    """Topology-only interval classifier for the real-pole all-pass tail.
-
-    Every tail has omega=0 throughout the control interval, so every unordered
-    tail pair satisfies the incumbent same-physical-frequency hot predicate.
-    The first-order experiment can cover only disjoint adjacent pairs.
-    """
-    candidate_pairs = sections * (sections - 1) // 2
-    realized_pairs = sections // 2
+def higher_order_representation_metrics(
+    partials: int, sections: int, interval: int,
+) -> dict[str, Any]:
+    source_support = 10 if interval == 128 else 8
+    weight_support = 6 if interval == 32 else 8
+    output_floats = 8 + 2 * source_support * partials + interval
+    primitive_floats = (4 * partials
+                        + source_support * (sections + 1) + interval)
     return {
-        "classifier": "interval_structural_same_physical_frequency",
-        "simple_rows": partials + (sections + 1) // 2,
-        "paired_rows": realized_pairs,
-        "hot_candidate_pairs": candidate_pairs,
-        "hot_candidate_density": 1.0 if sections > 1 else 0.0,
-        "first_order_pair_coverage": (
-            realized_pairs / candidate_pairs if candidate_pairs else 1.0),
-        "higher_order_factored_representation_required": (
-            candidate_pairs > realized_pairs),
+        "kind": "whole_tail_newton_phase_type_table",
+        "source_support": source_support,
+        "weight_support": weight_support,
+        "tail_samples": interval,
+        "published_semantic_floats": output_floats,
+        "private_primitive_floats": primitive_floats,
+        "packed_segment_floats": output_floats + primitive_floats,
     }
 
 
@@ -337,7 +367,15 @@ def main() -> int:
     parser.add_argument("--start", type=int, default=4096)
     parser.add_argument("--limit", type=int,
                         help="run only the first N selected rows")
+    parser.add_argument("--case-index", type=int, action="append", default=[],
+                        help="run only this zero-based matrix row (repeatable)")
+    parser.add_argument("--performance-only", action="store_true",
+                        help="reuse emitted rows and refresh only worker probes")
+    parser.add_argument("--staged-audio-only", action="store_true",
+                        help="reuse graphs/exact audio and refresh staged comparisons")
     args = parser.parse_args()
+    if args.performance_only and args.staged_audio_only:
+        parser.error("choose at most one refresh-only mode")
     if args.performance_repetitions < 1 or args.blocks < 1 or args.samples < 1:
         parser.error("repetitions, blocks, and samples must be positive")
     for binary in (DIFFCLI, RUNTIME_BENCH):
@@ -346,15 +384,83 @@ def main() -> int:
 
     output = args.output_dir.resolve()
     output.mkdir(parents=True, exist_ok=True)
+    if args.performance_only:
+        raw_path = output / "raw.json"
+        if not raw_path.exists():
+            parser.error("--performance-only requires an existing raw.json")
+        result = json.loads(raw_path.read_text())
+        rows = result.get("rows", [])
+        if args.case_index:
+            selected = set(args.case_index)
+            rows = [row for row in rows if int(row.get("index", -1)) in selected]
+            if len(rows) != len(selected):
+                parser.error("a refresh case index is absent from raw.json")
+        for row in rows:
+            label = row["label"]
+            interval = int(row["interval_frames"])
+            probes = [performance_probe(
+                output / "artifacts" / label, interval,
+                args.blocks, args.warmup,
+                output / "cache" / f"probe-{label}-{repetition}")
+                for repetition in range(args.performance_repetitions)]
+            row["performance_rows"] = probes
+            row["performance_summary"] = performance_summary(probes)
+            print(f"[performance] {label}", file=sys.stderr, flush=True)
+        result["performance_recorded_at"] = datetime.now(timezone.utc).isoformat()
+        result["performance_repetitions"] = args.performance_repetitions
+        result["performance_blocks"] = args.blocks
+        result["performance_warmup"] = args.warmup
+        raw_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        print(raw_path)
+        return 0
+    if args.staged_audio_only:
+        raw_path = output / "raw.json"
+        if not raw_path.exists():
+            parser.error("--staged-audio-only requires an existing raw.json")
+        result = json.loads(raw_path.read_text())
+        rows = result.get("rows", [])
+        if args.case_index:
+            selected = set(args.case_index)
+            rows = [row for row in rows if int(row.get("index", -1)) in selected]
+            if len(rows) != len(selected):
+                parser.error("a refresh case index is absent from raw.json")
+        for row in rows:
+            label = row["label"]
+            interval = int(row["interval_frames"])
+            graph_path = output / "graphs" / f"{label}.json"
+            staged_payload, staged_stderr = render(
+                graph_path, metal=True, interval=interval,
+                start=int(row["start_sample"]), samples=int(row["samples"]),
+                cache=output / "cache" / f"staged-{label}")
+            staged_path = output / row["audio_artifacts"]["staged"]
+            exact_path = output / row["audio_artifacts"]["exact"]
+            error_path = output / row["audio_artifacts"]["error"]
+            staged_path.write_bytes(staged_payload)
+            errors = error_metrics(exact_path.read_bytes(), staged_payload, interval)
+            error_path.write_text(
+                json.dumps(errors, indent=2, sort_keys=True) + "\n")
+            row["error"] = errors
+            row["staged_renderer_stderr"] = staged_stderr.strip()
+            print(f"[staged-audio] {label}", file=sys.stderr, flush=True)
+        result["staged_audio_recorded_at"] = datetime.now(timezone.utc).isoformat()
+        raw_path.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
+        print(raw_path)
+        return 0
     (output / "graphs").mkdir(exist_ok=True)
     (output / "audio").mkdir(exist_ok=True)
     matrix = full_matrix() if args.full else smoke_matrix()
+    if args.case_index:
+        invalid = [index for index in args.case_index
+                   if index < 0 or index >= len(matrix)]
+        if invalid:
+            parser.error(f"case indices out of range: {invalid}")
+        matrix = [matrix[index] for index in args.case_index]
     if args.limit is not None:
         if args.limit < 1:
             parser.error("--limit must be positive")
         matrix = matrix[:args.limit]
     result: dict[str, Any] = {
-        "schema": "tropical_absolute_time_phaser_staging_2",
+        "schema": "tropical_absolute_time_phaser_staging_3",
         "recorded_at": datetime.now(timezone.utc).isoformat(),
         "commit": command_text(["git", "rev-parse", "HEAD"]),
         "git_status": command_text(["git", "status", "--short"]),
@@ -362,7 +468,7 @@ def main() -> int:
         "machine": platform.machine(),
         "sample_rate": RATE,
         "device_buffer_frames": BUFFER,
-        "interpolation": "linear",
+        "interpolation": "adaptive_source_chebyshev_8_or_10_weight_chebyshev_6_or_8_tail_table",
         "full_matrix": args.full,
         "physical_output_opened": False,
         "rows": [],
@@ -400,7 +506,8 @@ def main() -> int:
             "sections": sections, "interval_frames": interval,
             "lfo_rate_hz": rate, "center_hz": center, "sweep_octaves": sweep,
             "start_sample": args.start, "samples": samples,
-            "representation": mixed_representation_metrics(partials, sections),
+            "representation": higher_order_representation_metrics(
+                partials, sections, interval),
             "artifacts": artifacts, "error": errors,
             "exact_renderer_stderr": exact_stderr.strip(),
             "staged_renderer_stderr": staged_stderr.strip(),
@@ -410,30 +517,7 @@ def main() -> int:
                 "error": str(error_path.relative_to(output)),
             },
             "performance_rows": probes,
-            "performance_summary": {
-                "median_load_fraction": statistics.median(
-                    probe["metal_render_load_fraction"] for probe in probes),
-                "p99_load_fraction": max(
-                    probe["metal_render_load_fraction"] for probe in probes),
-                "zero_deadline_overruns": all(
-                    probe.get("overrun_count", 0) == 0 for probe in probes),
-                "zero_materialization_failures": all(
-                    probe.get("metal_materialization_failure_count", 0) == 0
-                    for probe in probes),
-                "zero_exact_fallbacks": all(
-                    probe.get("metal_exact_fallback_count", 0) == 0
-                    for probe in probes),
-                "zero_nonfinite_output": all(
-                    probe.get("nonfinite_count", 0) == 0 for probe in probes),
-                "zero_dispatch_starvation_tag_activation_callback_faults": all(
-                    all(probe.get(key, 0) == 0 for key in (
-                        "metal_dispatch_failure_count",
-                        "metal_render_starvation_count",
-                        "metal_epoch_tag_mismatch_count",
-                        "metal_activation_failure_count",
-                        "metal_callback_thread_violation_count"))
-                    for probe in probes),
-            },
+            "performance_summary": performance_summary(probes),
         }
         result["rows"].append(row)
         raw_path = output / "raw.json"
