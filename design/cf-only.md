@@ -228,15 +228,14 @@ save/restore round-trip for delays, state-transfer-by-name on hot-swap,
 and the MCP `feedback` tool. The session-acyclicity check stays, but
 hardens into a plain "no cycles at all" rule.
 
-One payoff closes the loop with the scope work. The scope's `WARMUP`
-lead exists only because the MCP wraps every wire in a unit delay to
-break session cycles — so "stateless" patches are secretly stateful, the
-render window starts cold, and it needs priming. CF-only pulls the wire
-delays at the root: `render_window` becomes cold-start-exact, no warmup,
-no priming, and the scope sees everything because there is nothing left
-it cannot. The strange-scope smell and the cold-start garbage are the
-same residual state, removed at the source instead of patched at two
-leaves.
+One payoff closes the loop with the scope work. The scope's former `WARMUP`
+lead existed only because the MCP wrapped every wire in a unit delay to
+break session cycles — so "stateless" patches were secretly stateful, the
+render window started cold, and it needed priming. CF-only pulls the wire
+delays at the root: `render_window` is cold-start-exact, with no warmup or
+priming, and the scope sees everything because there is nothing left it
+cannot. The strange-scope smell and the cold-start garbage were the same
+residual state, removed at the source instead of patched at two leaves.
 
 ## One-line summary
 
