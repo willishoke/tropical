@@ -162,6 +162,8 @@ private def operandStage (sources : Array SourceKind)
     match sources[i]? with
     | some .tick => .s1
     | some .rate => .fold
+    | some .tilePhase => .s1
+    | some .tileTick => .s1
     | none => .fold           -- out-of-range source resolves to 0.0
   | .slot i _ =>
     match slotStage.get? i with
@@ -377,9 +379,12 @@ private def rebuild (plan : FlatPlan) (allBlocks : Array (Array NInstr))
   -- The audio plan advertises them so the runtime double-buffers exactly these:
   -- the coeff kernel writes a back generation, one atomic flip publishes it, and
   -- the audio kernel reads a whole consistent generation (no cross-column tear).
-  let coeffArraySlots : Array Nat := (coeffStream.filterMap fun i =>
+  let filledArraySlots : Array Nat := (coeffStream.filterMap fun i =>
     match i.dst with | .array s => some s | _ => none).foldl
       (fun acc s => if acc.contains s then acc else acc.push s) #[]
+  let coeffArraySlots := filledArraySlots.foldl
+    (fun acc s => if acc.contains s then acc else acc.push s)
+    plan.coeffArraySlots
   let audio : FlatPlan := { plan with
     instanceFunctions := fns
     slotCount := slotBase + a.boundary.size

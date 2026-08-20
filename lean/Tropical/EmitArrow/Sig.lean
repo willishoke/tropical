@@ -113,7 +113,18 @@ def sampleRate : BuildM Sig := internSig .sampleRate
 
 def sampleIndex : BuildM Sig := internSig .sampleIndex
 
+/-- Dispatch-local `[0,1)` coordinate used only by the absolute-time tile
+    terminal.  Exact/JIT evaluation deliberately reads zero. -/
+def tilePhase : BuildM Sig := internSig .tilePhase
+
+/-- Absolute clock leaf used only by the tile endpoint materializer. -/
+def tileSampleIndex : BuildM Sig := internSig .tileSampleIndex
+
 def arr (items : Array Sig) : BuildM Sig := internSig (.arr items)
+
+/-- Mark an array as an immutable endpoint image owned by the tile-time
+    materializer. -/
+def tileArray (items : Array Sig) : BuildM Sig := internSig (.tileArray items)
 
 def index (array index : Sig) : BuildM Sig :=
   internSig (.index array index)
@@ -133,6 +144,65 @@ def routedSum (capacity outputCount : Nat) (routes : Array (Option Nat))
     (tables values : Array Sig) (dynCount? : Option Sig := none)
     (idxId : Nat := 0) : BuildM Sig :=
   internSig (.routedSum capacity outputCount routes tables values dynCount? idxId)
+
+-- ────────────────────────────────────────────────────────────────────────
+-- Absolute-coordinate substitution
+-- ────────────────────────────────────────────────────────────────────────
+
+/-- Rebuild `roots` in the current arena while substituting every
+    `sampleIndex` leaf with `tileSampleIndex + frames`.  The distinct base
+    leaf prevents the tile dependency slice from capturing shared audio-clock
+    instructions.  The walk freezes the
+    pre-rewrite arena and proceeds in child-before-parent ID order, so address
+    warps and control trajectories are shifted as complete expressions rather
+    than approximated by advancing only a visible phasor. -/
+def shiftSampleIndex (roots : Array Sig) (frames : Nat) : BuildM (Array Sig) := do
+  let snapshot := (← get).exprs.nodes
+  let rawTick ← internSig .tileSampleIndex
+  let shiftedTick ← if frames == 0 then
+      pure rawTick
+    else do
+      let frameLiteral ← internSig (.num ⟨Int.ofNat frames, 0⟩)
+      let frameInt ← internSig (.unary .toInt frameLiteral)
+      internSig (.binary .add rawTick frameInt)
+  let mut mapped : Array Sig := #[]
+  let mapId := fun (mapping : Array Sig) (id : Sig) =>
+    mapping[id.idx]?.getD id
+  for node in snapshot do
+    let id ← match node with
+      | .sampleIndex => pure shiftedTick
+      | .tileSampleIndex => internSig .tileSampleIndex
+      | .num n => internSig (.num n)
+      | .bool b => internSig (.bool b)
+      | .arr items => internSig (.arr (items.map (mapId mapped)))
+      | .tileArray items => internSig (.tileArray (items.map (mapId mapped)))
+      | .binary tag a b =>
+        internSig (.binary tag (mapId mapped a) (mapId mapped b))
+      | .unary tag a => internSig (.unary tag (mapId mapped a))
+      | .clamp a b c => internSig (.clamp
+          (mapId mapped a) (mapId mapped b) (mapId mapped c))
+      | .select a b c => internSig (.select
+          (mapId mapped a) (mapId mapped b) (mapId mapped c))
+      | .arraySet a b c =>
+        internSig (.arraySet
+          (mapId mapped a) (mapId mapped b) (mapId mapped c))
+      | .index a b =>
+        internSig (.index (mapId mapped a) (mapId mapped b))
+      | .inputRef i => internSig (.inputRef i)
+      | .paramRef i => internSig (.paramRef i)
+      | .nestedOut i o => internSig (.nestedOut i o)
+      | .sampleRate => internSig .sampleRate
+      | .tilePhase => internSig .tilePhase
+      | .loopIdx i => internSig (.loopIdx i)
+      | .bankSum count tables body dynCount? idxId =>
+        internSig (.bankSum count (tables.map (mapId mapped))
+          (mapId mapped body) (dynCount?.map (mapId mapped)) idxId)
+      | .routedSum capacity outputCount routes tables values dynCount? idxId =>
+        internSig (.routedSum capacity outputCount routes
+          (tables.map (mapId mapped)) (values.map (mapId mapped))
+          (dynCount?.map (mapId mapped)) idxId)
+    mapped := mapped.push id
+  pure (roots.map (mapId mapped))
 
 -- The production scalar helper vocabulary, preserving its existing names and
 -- operand order.  Each helper performs exactly one intern step.

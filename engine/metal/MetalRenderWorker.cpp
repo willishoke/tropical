@@ -1,6 +1,10 @@
 #include "metal/MetalRenderWorker.hpp"
+#include "metal/PhaserHigherOrderMaterializer.hpp"
 
+#include <algorithm>
+#include <bit>
 #include <chrono>
+#include <cmath>
 #include <ctime>
 #include <utility>
 
@@ -85,6 +89,184 @@ MetalRenderWorker::MetalRenderWorker(
             request.sample_rate, source_start, frames, destination);
     };
   }
+}
+
+bool MetalRenderWorker::materialize_columns(
+  BankRenderCursor & cursor, uint64_t source_start)
+{
+  const auto & program = cursor.request.tile_materializer;
+  if (!program) return true;
+  if (!program->kernel || program->interval_frames == 0
+      || queue_.render_frames() % program->interval_frames != 0
+      || program->tile_array_slots.empty())
+    return false;
+
+  if (!cursor.materializer_ready)
+  {
+    cursor.materializer_registers.assign(program->register_count, 0);
+    cursor.materializer_temps.assign(program->temp_count, 0);
+    cursor.materializer_arrays = cursor.request.materializer_seed_arrays;
+    cursor.materializer_arrays.resize(program->array_sizes.size());
+    cursor.materializer_array_ptrs.resize(program->array_sizes.size());
+    cursor.base_columns = cursor.request.columns;
+    for (std::size_t i = 0; i < program->array_sizes.size(); ++i)
+    {
+      cursor.materializer_arrays[i].resize(
+        static_cast<std::size_t>(program->array_sizes[i]), 0);
+      cursor.materializer_array_ptrs[i] =
+        cursor.materializer_arrays[i].data();
+    }
+    const std::size_t segment_count =
+      queue_.render_frames() / program->interval_frames;
+    std::size_t prepared_size = cursor.base_columns.size();
+    for (uint32_t slot : program->tile_array_slots)
+    {
+      if (slot >= program->array_sizes.size()) return false;
+      prepared_size += segment_count
+        * static_cast<std::size_t>(program->array_sizes[slot]);
+    }
+    cursor.prepared_columns.reserve(prepared_size);
+    cursor.materializer_ready = true;
+  }
+
+  if (cursor.request.materializer_seed_arrays.size()
+      != cursor.materializer_arrays.size())
+    return false;
+  cursor.prepared_columns = cursor.base_columns;
+  const uint32_t segment_count =
+    queue_.render_frames() / program->interval_frames;
+  for (uint32_t segment = 0; segment < segment_count; ++segment)
+  {
+    for (std::size_t i = 0; i < cursor.materializer_arrays.size(); ++i)
+    {
+      const auto & seed = cursor.request.materializer_seed_arrays[i];
+      auto & work = cursor.materializer_arrays[i];
+      if (seed.size() != work.size()) return false;
+      std::copy(seed.begin(), seed.end(), work.begin());
+    }
+    std::fill(cursor.materializer_registers.begin(),
+              cursor.materializer_registers.end(), 0);
+    std::fill(cursor.materializer_temps.begin(),
+              cursor.materializer_temps.end(), 0);
+    cursor.materializer_slots = cursor.request.materializer_slots;
+    double scratch_output = 0.0;
+    program->kernel(
+      nullptr,
+      cursor.materializer_registers.data(),
+      cursor.materializer_array_ptrs.data(),
+      program->array_sizes.data(),
+      cursor.materializer_temps.data(),
+      cursor.request.sample_rate,
+      source_start + static_cast<uint64_t>(segment)
+        * program->interval_frames,
+      program->param_ptrs.data(),
+      &scratch_output,
+      1,
+      cursor.materializer_slots.data());
+
+    if (program->higher_order_phaser)
+    {
+      if (program->tile_array_slots.size() != 1)
+        return false;
+      const uint32_t image_slot = program->tile_array_slots.front();
+      if (image_slot >= cursor.materializer_arrays.size()
+          || !materialize_higher_order_phaser_image(
+            cursor.materializer_arrays[image_slot],
+            program->interval_frames))
+        return false;
+    }
+
+    for (uint32_t slot : program->tile_array_slots)
+    {
+      if (slot >= cursor.materializer_arrays.size()) return false;
+      for (int64_t bits : cursor.materializer_arrays[slot])
+      {
+        const double value = std::bit_cast<double>(bits);
+        if (!std::isfinite(value)
+            || std::abs(value) > program->max_abs_coefficient)
+          return false;
+        cursor.prepared_columns.push_back(static_cast<float>(value));
+      }
+    }
+  }
+  return true;
+}
+
+bool MetalRenderWorker::render_exact_fallback(
+  BankRenderCursor & cursor, uint64_t source_start, uint32_t frames,
+  double * destination)
+{
+  const auto & program = cursor.request.exact_fallback;
+  if (!program || !program->kernel || !destination || frames == 0)
+    return false;
+
+  if (!cursor.exact_fallback_ready)
+  {
+    cursor.exact_registers.assign(program->register_count, 0);
+    cursor.exact_temps.assign(program->temp_count, 0);
+    cursor.exact_coeff_registers.assign(program->coeff_register_count, 0);
+    cursor.exact_coeff_temps.assign(program->coeff_temp_count, 0);
+    cursor.exact_arrays = program->array_storage;
+    cursor.exact_arrays.resize(program->array_sizes.size());
+    cursor.exact_array_ptrs.resize(program->array_sizes.size());
+    for (std::size_t i = 0; i < program->array_sizes.size(); ++i)
+    {
+      cursor.exact_arrays[i].resize(
+        static_cast<std::size_t>(program->array_sizes[i]), 0);
+      cursor.exact_array_ptrs[i] = cursor.exact_arrays[i].data();
+    }
+    cursor.exact_fallback_ready = true;
+  }
+
+  if (program->array_storage.size() != cursor.exact_arrays.size())
+    return false;
+  for (std::size_t i = 0; i < cursor.exact_arrays.size(); ++i)
+  {
+    if (program->array_storage[i].size() != cursor.exact_arrays[i].size())
+      return false;
+    std::copy(program->array_storage[i].begin(),
+              program->array_storage[i].end(), cursor.exact_arrays[i].begin());
+  }
+  std::fill(cursor.exact_registers.begin(), cursor.exact_registers.end(), 0);
+  std::fill(cursor.exact_temps.begin(), cursor.exact_temps.end(), 0);
+  std::fill(cursor.exact_coeff_registers.begin(),
+            cursor.exact_coeff_registers.end(), 0);
+  std::fill(cursor.exact_coeff_temps.begin(),
+            cursor.exact_coeff_temps.end(), 0);
+  cursor.exact_slots = cursor.request.exact_fallback_slots;
+  if (cursor.exact_slots.size() != program->initial_slots.size())
+    return false;
+
+  double coefficient_output = 0.0;
+  if (program->coeff_kernel)
+    program->coeff_kernel(
+      nullptr,
+      cursor.exact_coeff_registers.data(),
+      cursor.exact_array_ptrs.data(),
+      program->array_sizes.data(),
+      cursor.exact_coeff_temps.data(),
+      cursor.request.sample_rate,
+      0,
+      program->param_ptrs.data(),
+      &coefficient_output,
+      1,
+      cursor.exact_slots.data());
+
+  program->kernel(
+    nullptr,
+    cursor.exact_registers.data(),
+    cursor.exact_array_ptrs.data(),
+    program->array_sizes.data(),
+    cursor.exact_temps.data(),
+    cursor.request.sample_rate,
+    source_start,
+    program->param_ptrs.data(),
+    destination,
+    frames,
+    cursor.exact_slots.data());
+  for (uint32_t i = 0; i < frames; ++i)
+    if (!std::isfinite(destination[i])) return false;
+  return true;
 }
 
 MetalRenderWorker::~MetalRenderWorker()
@@ -494,9 +676,23 @@ bool MetalRenderWorker::render_one(
     render_submitted_time_.store(
       monotonic_time_ns(), std::memory_order_release);
   const uint64_t render_started = monotonic_time_ns();
-  const bool rendered = render_(
-    cursor.request, cursor.next_source,
-    queue_.render_frames(), claim.destination);
+  bool rendered = false;
+  if (!materialize_columns(cursor, cursor.next_source))
+  {
+    materialization_failures_.fetch_add(1, std::memory_order_relaxed);
+    rendered = render_exact_fallback(
+      cursor, cursor.next_source, queue_.render_frames(), claim.destination);
+    if (rendered)
+      exact_fallbacks_.fetch_add(1, std::memory_order_relaxed);
+  }
+  else
+  {
+    if (cursor.request.tile_materializer)
+      cursor.request.columns = cursor.prepared_columns;
+    rendered = render_(
+      cursor.request, cursor.next_source,
+      queue_.render_frames(), claim.destination);
+  }
   const uint64_t render_finished = monotonic_time_ns();
   render_time_ns_.fetch_add(
     render_finished - render_started, std::memory_order_relaxed);
@@ -618,6 +814,14 @@ uint64_t MetalRenderWorker::monotonic_time_ns()
 uint64_t MetalRenderWorker::dispatch_failure_count() const noexcept
 {
   return dispatch_failures_.load(std::memory_order_acquire);
+}
+uint64_t MetalRenderWorker::materialization_failure_count() const noexcept
+{
+  return materialization_failures_.load(std::memory_order_acquire);
+}
+uint64_t MetalRenderWorker::exact_fallback_count() const noexcept
+{
+  return exact_fallbacks_.load(std::memory_order_acquire);
 }
 uint64_t MetalRenderWorker::activation_retarget_count() const noexcept
 {

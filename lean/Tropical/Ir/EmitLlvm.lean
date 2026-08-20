@@ -262,6 +262,10 @@ def resolveOperand : NOperand → M TVal
     match srcs[idx]? with
     | some .tick => pure ⟨"%current_idx", .int⟩
     | some .rate => pure ⟨"%sampleRate", .float⟩
+    -- The exact/JIT artifact observes the left endpoint at every absolute
+    -- sample.  Only the Metal dispatch supplies an interpolation phase.
+    | some .tilePhase => pure ⟨f64Lit 0.0, .float⟩
+    | some .tileTick => pure ⟨"%current_idx", .int⟩
     | none => pure ⟨f64Lit 0.0, .float⟩
   | .slot idx t => do
     let v ← loadSlotF64 idx

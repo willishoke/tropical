@@ -1,4 +1,5 @@
 import Tropical.EmitArrow.Modal
+import Tropical.Ir.TileTime
 import Tropical.EmitArrow.Modal.OrientedRealize
 import Tropical.Ir.Cycles
 
@@ -577,10 +578,19 @@ private def resolvePlainStageState (initial : PlainStageState)
       let g ← clampE value zero one
       pure { state with cursor := cursor + 1, bank := ← bank.gauge g }) initial
 
+private structure HigherOrderPhaserTerminal where
+  source : Array ModalMode
+  sourceAtTile : Array ModalMode
+  linear : ModalLinearStage
+  responseClock : Sig
+  values : Array Sig
+  exactRows : Array ModalMode
+
 private inductive PlainTerminal where
   | generic (terminal : Oriented.TerminalBank)
   | factored (terminal : Oriented.FactoredTwoRoomTerminal)
   | factoredPhaser (terminal : Oriented.FactoredTwoRoomPhaserTerminal)
+  | higherOrderPhaser (terminal : HigherOrderPhaserTerminal)
   | scaled (gain : Sig) (terminal : PlainTerminal)
 
 private def PlainTerminal.withLevelGain (terminal : PlainTerminal)
@@ -589,14 +599,374 @@ private def PlainTerminal.withLevelGain (terminal : PlainTerminal)
   | none => terminal
   | some gain => .scaled gain terminal
 
+/-- Reconstruct the same mode identities at `sampleIndex + frames`.  Every
+    signal field participates, so a warped address or a glide straddling the
+    endpoint is evaluated at its true absolute coordinate. -/
+private def shiftModalInputs (voice : Array ModalMode) (responseClock : Sig)
+    (values : Array Sig) (frames : Nat) :
+    BuildM (Array ModalMode × Sig × Array Sig) := do
+  let mut roots : Array Sig := #[]
+  for mode in voice do
+    roots := roots ++ #[mode.sigma, mode.omega, mode.cre, mode.cim]
+  roots := roots.push responseClock ++ values
+  let shifted ← shiftSampleIndex roots frames
+  let mut modes : Array ModalMode := #[]
+  let mut cursor := 0
+  for mode in voice do
+    modes := modes.push { mode with
+      sigma := shifted[cursor]!
+      omega := shifted[cursor + 1]!
+      cre := shifted[cursor + 2]!
+      cim := shifted[cursor + 3]! }
+    cursor := cursor + 4
+  let shiftedResponse := shifted[cursor]!
+  pure (modes, shiftedResponse,
+    shifted.extract (cursor + 1) shifted.size)
+
+private def stablePhaserTails (tails : Array ModalMode) : Bool :=
+  tails.all fun tail =>
+    tail.deg == 0 && match tail.sigmaRange with
+      | some (lo, hi) => 0.0 < lo && lo <= hi
+      | none => false
+
+private def admittedPhaserSectionCount (count : Nat) : Bool :=
+  count == 6 || count == 12 || count == 18
+
+private def admittedPhaserSourceCount (count : Nat) : Bool :=
+  count == 6 || count == 32
+
+private def lerpSig (phase a b : Sig) : BuildM Sig := do
+  add a (← mul phase (← sub b a))
+
+private def sameModeFields (left right : ModalMode) : Bool :=
+  left.sigma == right.sigma && left.omega == right.omega
+    && left.cre == right.cre && left.cim == right.cim
+
+private def higherOrderSourceOffsets : Nat → Option (Array Nat)
+  | 32 => some #[0, 2, 6, 12, 20, 26, 30, 32]
+  | 64 => some #[0, 3, 12, 25, 39, 52, 61, 64]
+  | 128 => some #[0, 4, 15, 32, 53, 75, 96, 113, 124, 128]
+  | _ => none
+
+private def higherOrderWeightSupport (interval : Nat) : Nat :=
+  if interval == 32 then 6 else 8
+
+private def chebyshevEvalSig (coefficients : Array Sig)
+    (coordinate : Sig) : BuildM Sig := do
+  if coefficients.isEmpty then return ← lit 0
+  let mut following ← lit 0
+  let mut afterFollowing ← lit 0
+  for coefficient in (coefficients.extract 1 coefficients.size).reverse do
+    let twice ← mul (← lit 2) coordinate
+    let current ← add (← sub (← mul twice following) afterFollowing) coefficient
+    afterFollowing := following
+    following := current
+  add (← sub (← mul coordinate following) afterFollowing) coefficients[0]!
+
+/-- Evaluate the published source-gain field inside one indexed modal loop.
+    Keeping the Chebyshev reads in the loop body avoids constructing `P`
+    separate per-sample amplitude expressions before entering `bankSum`; plan
+    size and register pressure are therefore independent of the source row
+    count. -/
+private def higherOrderSourceSig (modes : Array ModalMode)
+    (sourceSupport : Nat) (image coordinate : Sig)
+    (clkInt anchorSamples : Sig) : BuildM Sig := do
+  let relative ← relClockQ clkInt anchorSamples
+  let relativeFloat ← toFloatE relative
+  let secondsTimesRate ← div relativeFloat (← lit 4294967296)
+  let dSec ← div secondsTimesRate (← sampleRate)
+  let twoPi ← twoPiE
+  let twoPow32 ← lit 4294967296
+  let sr ← sampleRate
+  let increments ← modes.mapM fun mode => do
+    let frequency ← div mode.omega twoPi
+    let scaled ← mul frequency twoPow32
+    div scaled sr
+  let incrementTable ← arr increments
+  let sigmaTable ← arr (modes.map (·.sigma))
+  let binderId := 6200
+  let modeIndex ← loopIdx binderId
+  let coefficientStride := 2 * sourceSupport
+  let coefficientBase ← add (← litI 8)
+    (← mul (← litI (Int.ofNat coefficientStride)) modeIndex)
+  let realCoefficients ← (Array.range sourceSupport).mapM fun degree => do
+    let offset ← add coefficientBase (← litI (Int.ofNat (2 * degree)))
+    index image offset
+  let imagCoefficients ← (Array.range sourceSupport).mapM fun degree => do
+    let offset ← add coefficientBase (← litI (Int.ofNat (2 * degree + 1)))
+    index image offset
+  let cre ← chebyshevEvalSig realCoefficients coordinate
+  let cim ← chebyshevEvalSig imagCoefficients coordinate
+  let increment ← toIntE (← index incrementTable modeIndex)
+  let phase ← modePhaseQFromIncr increment relative
+  let scale ← lit 1073741824
+  let cosine ← div (← toFloatE (← fixedCosCycSig phase)) scale
+  let sine ← div (← toFloatE (← fixedSinCycSig phase)) scale
+  let carrier ← sub (← mul cre cosine) (← mul cim sine)
+  let sigma ← index sigmaTable modeIndex
+  let envelope ← expSig (← neg (← mul sigma dSec))
+  let contribution ← mul envelope carrier
+  let value ← bankSum modes.size #[incrementTable, sigmaTable, image]
+    contribution none binderId
+  selectE (← gt relative (← litI 0)) value (← lit 0)
+
+private def higherOrderPhaserSig (terminal : HigherOrderPhaserTerminal)
+    (clkInt anchorSamples : Sig) (count? : Option Sig) : BuildM Sig := do
+  -- A dynamic source trip count would make the worker's whole-tail sum and the
+  -- audio source bank disagree.  Keep that graph on the exact path.
+  if count?.isSome then
+    let bank ← Oriented.Bank.ofFuture terminal.exactRows
+    return ← (Oriented.TerminalBank.ofBank bank).realizeSig
+      clkInt anchorSamples count?
+  let interval := Tropical.Ir.phaserTimeStagingInterval
+  let some supportOffsets := higherOrderSourceOffsets interval
+    | let bank ← Oriented.Bank.ofFuture terminal.exactRows
+      return ← (Oriented.TerminalBank.ofBank bank).realizeSig
+        clkInt anchorSamples count?
+  let sourceCount := terminal.source.size
+  let sectionCount := terminal.exactRows.size - sourceCount
+  let sourceSupport := supportOffsets.size
+  let weightSupport := higherOrderWeightSupport interval
+  let headerCount := 8
+  let sourceCoefficientCount := 2 * sourceSupport * sourceCount
+  let tailBase := headerCount + sourceCoefficientCount
+  let primitiveBase := tailBase + interval
+
+  -- The unsplit LLVM form is the exact fallback.  At every JIT sample
+  -- tilePhase=0 and tileTick=current_idx, so c[0] holds the current exact
+  -- decorated source amplitude and tail[0] holds the current exact real-pole
+  -- sum.  Keeping the small tail fold scalar (rather than nesting a BankSum in
+  -- the Pack) lets TileStage move the complete dependency slice.  The Metal
+  -- worker overwrites this prefix with the stable higher-order image.
+  let shiftedClockAnchor ← shiftSampleIndex #[clkInt, anchorSamples] 0
+  let zero ← lit 0
+  let relative ← relClockQ shiftedClockAnchor[0]! shiftedClockAnchor[1]!
+  let relativeFloat ← toFloatE relative
+  let secondsTimesRate ← div relativeFloat (← lit 4294967296)
+  let dSec ← div secondsTimesRate (← sampleRate)
+  let tailRows := terminal.exactRows.extract sourceCount terminal.exactRows.size
+  let fallbackTail ← tailRows.foldlM (fun total mode => do
+    let envelope ← expSig (← neg (← mul mode.sigma dSec))
+    add total (← mul envelope mode.cre)) zero
+  let fallbackTail ← selectE (← gt relative (← litI 0)) fallbackTail zero
+  let mut items : Array Sig := #[]
+  for value in #[8430261, 1, sourceCount, sectionCount, interval,
+      sourceSupport, weightSupport, primitiveBase] do
+    items := items.push (← lit (Int.ofNat value))
+  for sourceIndex in [0:sourceCount] do
+    items := items ++ #[terminal.exactRows[sourceIndex]!.cre,
+      terminal.exactRows[sourceIndex]!.cim]
+      ++ Array.replicate (2 * sourceSupport - 2) zero
+  items := items.push fallbackTail
+  items := items ++ Array.replicate (interval - 1) zero
+
+  -- Static source pole/amplitude fields are private materializer inputs.
+  for mode in terminal.sourceAtTile do
+    items := items ++ #[mode.sigma, mode.omega, mode.cre, mode.cim]
+
+  -- Integer-coordinate control images feed both the source-gain and internal
+  -- rate interpolation.  The 128-frame form uses ten source supports and
+  -- eight private weight supports; shorter images retain the measured 8/6
+  -- form.  The worker derives weight supports from this common field, avoiding
+  -- a second JIT-side trajectory image.
+  for offset in supportOffsets do
+    let (source, response, values) ← shiftModalInputs terminal.source
+      terminal.responseClock terminal.values offset
+    let (kernel, _) ← resolveLinearStage terminal.linear response values 0
+    let some (tails, mix) := kernel.dryWetAllpassCascadeShape?
+      | throw "higherOrderPhaserSig: shifted all-pass topology changed"
+    if source.size != sourceCount || tails.size != sectionCount
+        || !stablePhaserTails tails then
+      throw "higherOrderPhaserSig: shifted source/tail shape changed"
+    items := items.push mix ++ tails.map (·.sigma)
+
+  -- The phase-type fold needs the exact bounded response time at every output
+  -- sample.  This retains warped clocks, anchors, glides, and random seeks.
+  for offset in [0:interval] do
+    let shifted ← shiftSampleIndex #[terminal.responseClock, anchorSamples] offset
+    let relative ← relClockQ shifted[0]! shifted[1]!
+    let relativeFloat ← toFloatE relative
+    let secondsTimesRate ← div relativeFloat (← lit 4294967296)
+    items := items.push (← div secondsTimesRate (← sampleRate))
+
+  let image ← tileArray items
+  let phase ← tilePhase
+  let coordinate ← sub (← mul (← lit 2) phase) (← lit 1)
+  let sourceValue ← higherOrderSourceSig terminal.source sourceSupport image coordinate
+    clkInt anchorSamples
+  let localOffset ← toIntE (← mul phase (← lit (Int.ofNat interval)))
+  let tailIndex ← add (← lit (Int.ofNat tailBase)) localOffset
+  add sourceValue (← index image tailIndex)
+
 private def PlainTerminal.realizeSig (terminal : PlainTerminal)
     (clkInt anchorSamples : Sig) (count? : Option Sig) : BuildM Sig :=
   match terminal with
   | .generic value => value.realizeSig clkInt anchorSamples count?
   | .factored value => value.realizeSig clkInt anchorSamples
   | .factoredPhaser value => value.realizeSig clkInt anchorSamples
+  | .higherOrderPhaser value => higherOrderPhaserSig value clkInt anchorSamples count?
   | .scaled gain value => do
       mul gain (← value.realizeSig clkInt anchorSamples count?)
+
+private structure MixedPhaserRows where
+  simple : Array ModalMode
+  paired : Array PairedMode
+
+/-- Rewrite two ordinary exponential rows into one first-order divided-difference
+    atom plus their summed residue on the right pole:
+
+      A e^(λt) + B e^(νt)
+        = A(λ-ν) e^(νt) t cexpm1((λ-ν)t) + (A+B)e^(νt).
+
+    This is an algebraic identity for every frozen endpoint.  Pair selection is
+    structural and authored-order; it never depends on floating residue size. -/
+private def fusePhaserRows (left right : ModalMode) : BuildM (ModalMode × PairedMode) := do
+  let lam ← left.poleE
+  let nu ← right.poleE
+  let delta ← csubE lam nu
+  let c ← cmulE left.ampE delta
+  let remainder ← caddE left.ampE right.ampE
+  pure ({ right with cre := remainder.1, cim := remainder.2 }, { lam, nu, c })
+
+/-- The all-pass tail poles form one same-frequency cluster.  This falsification
+    experiment pairs adjacent structural rows, leaving source rows and
+    at most one odd tail as simple exponentials.  Candidate density is reported
+    by the benchmark from the section count; this representation deliberately
+    does not pretend disjoint first-order pairs solve a dense higher-order
+    cluster. -/
+private def mixedPhaserRows (sourceCount : Nat) (rows : Array ModalMode) :
+    BuildM MixedPhaserRows := do
+  if rows.size < sourceCount then
+    throw "mixedPhaserRows: decorated row count is smaller than source count"
+  let source := rows.extract 0 sourceCount
+  let tails := rows.extract sourceCount rows.size
+  let mut simple := source
+  let mut paired : Array PairedMode := #[]
+  let mut i := 0
+  while i + 1 < tails.size do
+    let (remainder, pair) ← fusePhaserRows tails[i]! tails[i + 1]!
+    simple := simple.push remainder
+    paired := paired.push pair
+    i := i + 2
+  if i < tails.size then simple := simple.push tails[i]!
+  pure { simple, paired }
+
+private def interpolateModes (phase : Sig) (startRows endRows : Array ModalMode) :
+    BuildM (Array ModalMode) := do
+  let startSigma ← tileArray (startRows.map (·.sigma))
+  let startOmega ← tileArray (startRows.map (·.omega))
+  let startCre ← tileArray (startRows.map (·.cre))
+  let startCim ← tileArray (startRows.map (·.cim))
+  let endSigma ← tileArray (endRows.map (·.sigma))
+  let endOmega ← tileArray (endRows.map (·.omega))
+  let endCre ← tileArray (endRows.map (·.cre))
+  let endCim ← tileArray (endRows.map (·.cim))
+  (Array.range startRows.size).mapM fun i => do
+    let indexSig ← litI (Int.ofNat i)
+    pure ({
+      sigma := ← lerpSig phase (← index startSigma indexSig)
+        (← index endSigma indexSig)
+      omega := ← lerpSig phase (← index startOmega indexSig)
+        (← index endOmega indexSig)
+      cre := ← lerpSig phase (← index startCre indexSig)
+        (← index endCre indexSig)
+      cim := ← lerpSig phase (← index startCim indexSig)
+        (← index endCim indexSig)
+      deg := 0 } : ModalMode)
+
+private def interpolatePairedModes (phase : Sig)
+    (startRows endRows : Array PairedMode) : BuildM (Array PairedMode) := do
+  let startLamRe ← tileArray (startRows.map (·.lam.1))
+  let startLamIm ← tileArray (startRows.map (·.lam.2))
+  let startNuRe ← tileArray (startRows.map (·.nu.1))
+  let startNuIm ← tileArray (startRows.map (·.nu.2))
+  let startCre ← tileArray (startRows.map (·.c.1))
+  let startCim ← tileArray (startRows.map (·.c.2))
+  let endLamRe ← tileArray (endRows.map (·.lam.1))
+  let endLamIm ← tileArray (endRows.map (·.lam.2))
+  let endNuRe ← tileArray (endRows.map (·.nu.1))
+  let endNuIm ← tileArray (endRows.map (·.nu.2))
+  let endCre ← tileArray (endRows.map (·.c.1))
+  let endCim ← tileArray (endRows.map (·.c.2))
+  (Array.range startRows.size).mapM fun i => do
+    let indexSig ← litI (Int.ofNat i)
+    pure ({
+      lam := (
+        ← lerpSig phase (← index startLamRe indexSig)
+          (← index endLamRe indexSig),
+        ← lerpSig phase (← index startLamIm indexSig)
+          (← index endLamIm indexSig))
+      nu := (
+        ← lerpSig phase (← index startNuRe indexSig)
+          (← index endNuRe indexSig),
+        ← lerpSig phase (← index startNuIm indexSig)
+          (← index endNuIm indexSig))
+      c := (
+        ← lerpSig phase (← index startCre indexSig)
+          (← index endCre indexSig),
+        ← lerpSig phase (← index startCim indexSig)
+          (← index endCim indexSig)) } : PairedMode)
+
+/-- Build the compact audio side of the staged terminal.  The higher-order
+    experiment publishes a single primitive image for the native worker to
+    replace with stable source polynomials and a bounded whole-tail table.  The
+    retained endpoint paths remain available only to reproduce the earlier
+    ordinary and mixed-DD falsification evidence. -/
+private def stagedPhaserTerminal? (voice : Array ModalMode)
+    (linear : ModalLinearStage) (responseClock : Sig) (values : Array Sig) :
+    BuildM (Option PlainTerminal) := do
+  if !Tropical.Ir.phaserTimeStagingEnabled then return none
+  if !(voice.all (·.deg == 0)) then return none
+  -- Patched signal-rate controls are not part of the first proof surface.
+  if !(linear.controls.all (·.signalNode?.isNone)) then return none
+  let (startVoice, startResponse, startValues) ←
+    shiftModalInputs voice responseClock values 0
+  let (startKernel, _) ← resolveLinearStage linear startResponse startValues 0
+  let some (startTails, startMix) := startKernel.dryWetAllpassCascadeShape?
+    | return none
+  if !admittedPhaserSectionCount startTails.size
+      || !stablePhaserTails startTails then return none
+  let interval := Tropical.Ir.phaserTimeStagingInterval
+  let (endVoice, endResponse, endValues) ←
+    shiftModalInputs voice responseClock values interval
+  let (endKernel, _) ← resolveLinearStage linear endResponse endValues 0
+  let some (endTails, endMix) := endKernel.dryWetAllpassCascadeShape?
+    | return none
+  if endTails.size != startTails.size || !stablePhaserTails endTails then
+    return none
+  let startRows ← Oriented.decorateDegreeZeroCausalPhaser
+    startVoice startTails startMix
+  let endRows ← Oriented.decorateDegreeZeroCausalPhaser
+    endVoice endTails endMix
+  if startRows.size != endRows.size || startRows.isEmpty then return none
+  if Tropical.Ir.phaserTimeStagingHigherOrderEnabled then
+    if (higherOrderSourceOffsets interval).isNone
+        || !admittedPhaserSourceCount startVoice.size
+        || startVoice.size != endVoice.size
+        || !(startVoice.zip endVoice).all fun (left, right) =>
+          sameModeFields left right then
+      return none
+    return some (.higherOrderPhaser {
+      source := voice
+      sourceAtTile := startVoice
+      linear
+      responseClock
+      values
+      exactRows := startRows })
+  let phase ← tilePhase
+  if Tropical.Ir.phaserTimeStagingMixedDDEnabled then
+    let startMixed ← mixedPhaserRows voice.size startRows
+    let endMixed ← mixedPhaserRows voice.size endRows
+    if startMixed.simple.size != endMixed.simple.size
+        || startMixed.paired.size != endMixed.paired.size then return none
+    let rows ← interpolateModes phase startMixed.simple endMixed.simple
+    let paired ← interpolatePairedModes phase startMixed.paired endMixed.paired
+    let bank ← Oriented.Bank.ofFuture rows
+    pure (some (.generic ({ bank, futurePaired := paired } : Oriented.TerminalBank)))
+  else
+    let rows ← interpolateModes phase startRows endRows
+    let bank ← Oriented.Bank.ofFuture rows
+    pure (some (.generic (Oriented.TerminalBank.ofBank bank)))
 
 /-- Fold an authored stage spine after binding the current static universe.  A
     final room uses the stable EC/DD carrier for hot same-side couplings. -/
@@ -607,18 +977,21 @@ private def resolvePlainStages (voice : Array ModalMode) (stages : Array ModalSt
   if stages.size == 1 then
     match stages[0]? with
     | some (ModalStage.linear linear) =>
-      let (kernel, _) ← resolveLinearStage linear responseClock values 0
-      match kernel.dryWetAllpassCascadeShape? with
-      | some (tails, mix) =>
-        let decorated ← Oriented.decorateDegreeZeroCausalPhaser voice tails mix
-        let bank ← Oriented.Bank.ofFuture decorated
-        pure (.generic (Oriented.TerminalBank.ofBank bank))
-      | none => match kernel.orientedShape? with
-        | some (modes, direction) =>
-          pure (.generic (← initialBank.convolveKernelTerminal modes direction))
-        | none =>
-          let bank ← kernel.applyGeneric initialBank
+      match ← stagedPhaserTerminal? voice linear responseClock values with
+      | some terminal => pure terminal
+      | none =>
+        let (kernel, _) ← resolveLinearStage linear responseClock values 0
+        match kernel.dryWetAllpassCascadeShape? with
+        | some (tails, mix) =>
+          let decorated ← Oriented.decorateDegreeZeroCausalPhaser voice tails mix
+          let bank ← Oriented.Bank.ofFuture decorated
           pure (.generic (Oriented.TerminalBank.ofBank bank))
+        | none => match kernel.orientedShape? with
+          | some (modes, direction) =>
+            pure (.generic (← initialBank.convolveKernelTerminal modes direction))
+          | none =>
+            let bank ← kernel.applyGeneric initialBank
+            pure (.generic (Oriented.TerminalBank.ofBank bank))
     | some (ModalStage.ordinaryRoom room) =>
       let (kernel, direction, gain?, _) ← resolveRoomStage room responseClock values 0
       pure <| (PlainTerminal.generic (← initialBank.convolveKernelTerminal kernel direction))

@@ -28,6 +28,12 @@ def denoteNode (alg : Algebra α) (env : SigEnv α) (node : ENode)
           recur env child (by simpa [ENode.children] using hMem)) with
     | .error error => .error error
     | .ok values => .ok (.array values)
+  | .tileArray items =>
+    match sequence
+        (items.attach.map fun ⟨child, hMem⟩ =>
+          recur env child (by simpa [ENode.children] using hMem)) with
+    | .error error => .error error
+    | .ok values => .ok (.array values)
   | .binary tag lhs rhs =>
     applyBinary alg tag
       (recur env lhs (by simp [ENode.children]))
@@ -61,6 +67,8 @@ def denoteNode (alg : Algebra α) (env : SigEnv α) (node : ENode)
     lookupNested env instanceIdx.idx outputIdx.idx
   | .sampleRate => .ok env.sampleRate
   | .sampleIndex => .ok env.sampleIndex
+  | .tileSampleIndex => .ok env.sampleIndex
+  | .tilePhase => alg.literal (0 : Nat)
   | .loopIdx binderId =>
     match env.loops binderId with
     | some value => .ok value
@@ -146,8 +154,22 @@ theorem denoteExpr_extends {before after : ExprArena}
     denoteExpr_of_deref alg env after hAfter (hExtends hDeref)]
   cases node with
   | num | bool | inputRef | paramRef | nestedOut | sampleRate
-  | sampleIndex | loopIdx => simp [denoteNode]
+  | sampleIndex | tileSampleIndex | tilePhase | loopIdx => simp [denoteNode]
   | arr items =>
+    simp only [denoteNode]
+    have hItems :
+        items.attach.map
+            (fun item => denoteExpr alg env before hBefore item.1) =
+          items.attach.map
+            (fun item => denoteExpr alg env after hAfter item.1) := by
+      apply Array.ext
+      · simp
+      · intro i hiBefore hiAfter
+        simp only [Array.getElem_map, Array.getElem_attach]
+        apply hChild
+        simp [ENode.children]
+    rw [hItems]
+  | tileArray items =>
     simp only [denoteNode]
     have hItems :
         items.attach.map

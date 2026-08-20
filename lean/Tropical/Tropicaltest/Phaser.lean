@@ -81,6 +81,116 @@ private def renderGraph (arena : Arena) (name : String) (graph : BuildM PatchGra
   | .error error => pure (.error error)
   | .ok plan => renderPlanSamples plan frameCount
 
+private def planInstructionCount (plan : FlatPlan) : Nat :=
+  plan.instanceFunctions.foldl (fun total fn =>
+    total + (Tropical.Ir.Stage0.collectBlocks fn).foldl
+      (fun subtotal block => subtotal + block.size) 0) 0
+
+private def planDivisionCount (plan : FlatPlan) : Nat :=
+  plan.instanceFunctions.foldl (fun total fn =>
+    total + (Tropical.Ir.Stage0.collectBlocks fn).foldl
+      (fun subtotal block => subtotal + block.countP (·.tag == "Div")) 0) 0
+
+private def benchmarkPhaserJson (sections : Nat) : Except String Lean.Json := do
+  Lean.Json.parse ("{\"nodes\":["
+    ++ String.intercalate "," #[
+    "{\"id\":\"address\",\"kind\":\"source\",\"params\":{\"freq\":0.63,\"morph\":0},\"sel\":{},\"in\":{\"freq\":[]}}",
+    "{\"id\":\"resonator\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4,\"partials\":6},\"sel\":{},\"in\":{\"addr\":[\"address\"]}}",
+    "{\"id\":\"phaser\",\"kind\":\"phaser\",\"params\":{\"center\":700,\"sweep\":1.5,\"rate\":0.2,\"mix\":0.5,\"_benchmark_stages\":"
+      ++ toString sections ++ "},\"sel\":{},\"in\":{\"in\":[\"resonator\"]}}",
+    "{\"id\":\"out\",\"kind\":\"out\",\"params\":{},\"sel\":{},\"in\":{\"in\":[\"phaser\"]}}"].toList
+    ++ "],\"out\":\"out\",\"taps\":[]}")
+
+private structure StagedShape where
+  sections : Nat
+  rows : Nat
+  exactInstructions : Nat
+  audioInstructions : Nat
+  exactDivisions : Nat
+  audioDivisions : Nat
+deriving Inhabited
+
+private def stagedShape (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) (sections : Nat) :
+    Except String StagedShape := do
+  let json ← benchmarkPhaserJson sections
+  let compiled ← compilePlanPure arena resolved json
+  let plan := compiled.plan
+  let mixed := Tropical.Ir.phaserTimeStagingMixedDDEnabled
+  let higher := Tropical.Ir.phaserTimeStagingHigherOrderEnabled
+  let expectedProvenance := if higher then
+    "staged_phaser_admitted:higher_order_experiment"
+  else if mixed then
+    "staged_phaser_admitted:mixed_dd_experiment"
+  else "staged_phaser_admitted"
+  -- Structural interning may share a field when its endpoint expressions are
+  -- identical, hence the lower bounds rather than exact slot counts.
+  if (if higher then plan.tileArraySlots.size != 1
+      else plan.tileArraySlots.size < (if mixed then 12 else 7))
+      || plan.phaserTimeStaging != some expectedProvenance then
+    throw s!"{sections} sections were not admitted (tile slots={plan.tileArraySlots}, provenance={plan.phaserTimeStaging})"
+  let stage0 ← Tropical.Ir.Stage0.hoistTyped plan compiled.stageBlocks
+  let split ← Tropical.Ir.TileStage.split stage0.audio
+  let some _ := split.tile? | throw s!"{sections} sections produced no tile program"
+  if split.audio.slotCount != stage0.audio.slotCount then
+    throw s!"{sections} sections leaked tile-time scalar boundaries into Metal ({stage0.audio.slotCount} -> {split.audio.slotCount} slots)"
+  let simpleRows := if higher then 6
+    else if mixed then 6 + (sections + 1) / 2 else 6 + sections
+  let pairedRows := if mixed && !higher then sections / 2 else 0
+  for slot in plan.tileArraySlots do
+    let size := plan.arraySlotSizes[slot]?.getD 0
+    let interval := Tropical.Ir.phaserTimeStagingInterval
+    let sourceSupport := if interval == 128 then 10 else 8
+    let higherSize := 8 + 2 * sourceSupport * 6 + interval
+      + 4 * 6 + sourceSupport * (sections + 1) + interval
+    if (if higher then size != higherSize
+        else size != simpleRows && (!mixed || size != pairedRows)) then
+      throw s!"{sections} sections: endpoint slot {slot} has wrong row count {size}"
+  pure {
+    sections
+    rows := simpleRows + pairedRows
+    exactInstructions := planInstructionCount plan
+    audioInstructions := planInstructionCount split.audio
+    exactDivisions := planDivisionCount plan
+    audioDivisions := planDivisionCount split.audio }
+
+private def stagedTerminalStructureCheck (arena : Arena)
+    (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  if !Tropical.Ir.phaserTimeStagingEnabled then
+    return true
+  let shapes := #[6, 12, 18].mapM (stagedShape arena resolved)
+  let ineligible := do
+    let json ← benchmarkPhaserJson 5
+    pure (← compilePlanPure arena resolved json).plan
+  match shapes, ineligible with
+  | .ok results, .ok fallback =>
+      let compact := results.all fun shape =>
+        shape.audioInstructions < shape.exactInstructions
+          && shape.audioDivisions * 4 < shape.exactDivisions
+      let incrementsLinear := decide (
+        results[2]!.audioInstructions - results[1]!.audioInstructions
+          ≤ 2 * (results[1]!.audioInstructions - results[0]!.audioInstructions))
+      let refused := fallback.tileArraySlots.isEmpty
+        && fallback.phaserTimeStaging
+          == some "staged_phaser_fallback:no_admissible_terminal"
+      for shape in results do
+        IO.println s!"        staged {shape.sections} sections/{shape.rows} rows: exact/audio instructions={shape.exactInstructions}/{shape.audioInstructions}, divisions={shape.exactDivisions}/{shape.audioDivisions}"
+      if compact && incrementsLinear && refused then
+        passGate "phaser-time-stage-structure"
+          (if Tropical.Ir.phaserTimeStagingHigherOrderEnabled then
+            "6/12/18 admitted with one self-describing whole-tail image; compact audio work is section-count independent; five-section topology retains exact fallback provenance"
+          else if Tropical.Ir.phaserTimeStagingMixedDDEnabled then
+            "6/12/18 admitted with falsification-only mixed simple/DD endpoint fields; compact audio work grows approximately linearly; five-section topology retains exact fallback provenance"
+          else
+            "6/12/18 admitted with ordinary absolute endpoint fields; compact audio work grows approximately linearly; five-section topology retains exact fallback provenance")
+      else
+        failGate "phaser-time-stage-structure"
+          s!"compact={compact} linear={incrementsLinear} ineligibleFallback={refused}"
+  | .error error, _ =>
+      failGate "phaser-time-stage-structure" s!"admission: {firstLine error}"
+  | _, .error error =>
+      failGate "phaser-time-stage-structure" s!"fallback: {firstLine error}"
+
 private def lfoPhase (sample : Nat) (rate : Float) : Float :=
   let inc := (rate * 4294967296.0 / sampleRate).toUInt64.toNat
   ((inc * sample) % 4294967296).toFloat / 4294967296.0
@@ -515,6 +625,7 @@ def runPhaser (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Boo
         pure (false, false, false, false)
     | .ok (_, checks) => pure checks
   let hierarchyValidation := hierarchyValidationCheck
+  let stagedStructure ← stagedTerminalStructureCheck arena resolved
   IO.eprintln "        rendering independent-oracle fixture"
   let numeric ← renderGraph arena "modal_phaser_oracle" phaserGraph
   let fused ← fusedProductError arena
@@ -534,7 +645,7 @@ def runPhaser (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Boo
       IO.println s!"        nested v3 Phaser→Allpass expansion equivalent={hierarchyEquivalent}; public ph.* aliases retained"
       IO.println s!"        two-room baseline scratch={baseline.total} (arrays={baseline.arrays}, max-routes={baseline.maxRoutedRecords}×4, slots={baseline.arraySlots}/{baseline.coeffArraySlots} coeff)"
       IO.println s!"        product non-coeff array floats={repr scratch.nonCoeffSizes}; baseline={repr baseline.nonCoeffSizes}"
-      if structural && genericFilter && forestOrder && refusals && hierarchyValidation && oracleError < 2.0e-5 &&
+      if structural && genericFilter && forestOrder && refusals && hierarchyValidation && stagedStructure && oracleError < 2.0e-5 &&
           -- The two exact schedules sum the same analytic rows in different
           -- routed orders.  This absolute lens is below two accumulated
           -- Q4.28 quanta per participating row and remains meaningful at

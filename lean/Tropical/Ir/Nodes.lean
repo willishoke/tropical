@@ -176,6 +176,11 @@ inductive ENode where
   | num (n : JsonNumber)
   | bool (b : Bool)
   | arr (items : Array ExprId)
+  /-- An immutable coefficient image materialized once for each absolute-time
+      render tile.  Its value is an ordinary array; the distinct constructor
+      survives only long enough for emit to mark the destination slot as the
+      root of the tile-time residual program. -/
+  | tileArray (items : Array ExprId)
   | binary (tag : BinaryOpTag) (lhs rhs : ExprId)
   | unary (tag : UnaryOpTag) (arg : ExprId)
   | clamp (value lo hi : ExprId)
@@ -187,6 +192,14 @@ inductive ENode where
   | nestedOut (instance_ : InstanceIdx) (output : OutputIdx)
   | sampleRate
   | sampleIndex
+  /-- Absolute sample coordinate reserved for the tile materializer.  It has
+      the same exact/JIT value as `sampleIndex`, but a distinct identity keeps
+      the endpoint dependency slice from capturing the audio carrier clock. -/
+  | tileSampleIndex
+  /-- Dispatch-local interpolation coordinate.  The exact/JIT semantics are
+      zero (therefore the unsplit graph evaluates its exact left endpoint);
+      Metal binds it to the current lane's normalized tile coordinate. -/
+  | tilePhase
   /-- The iteration index of the `bankSum` region whose `idxId` equals `id`
       (the post-strata analogue of `Plan.NOperand.loopIdx`).
       `id` is a UNIQUE BINDER ID, not a de Bruijn index: it is
@@ -225,6 +238,7 @@ def enodeHash : ENode → UInt64
   | .num n          => mixHash 1 (hash n)
   | .bool b         => mixHash 2 (hash b)
   | .arr items      => mixHash 3 (hash (items.map (·.idx)))
+  | .tileArray items => mixHash 31 (hash (items.map (·.idx)))
   | .binary t a b   => mixHash (mixHash (mixHash 4 (hash t.wire)) (hash a.idx)) (hash b.idx)
   | .unary t a      => mixHash (mixHash 5 (hash t.wire)) (hash a.idx)
   | .clamp a b c    => mixHash (mixHash (mixHash 6 (hash a.idx)) (hash b.idx)) (hash c.idx)
@@ -236,6 +250,8 @@ def enodeHash : ENode → UInt64
   | .nestedOut i o  => mixHash (mixHash 15 (hash i.idx)) (hash o.idx)
   | .sampleRate     => 16
   | .sampleIndex    => 17
+  | .tilePhase      => 32
+  | .tileSampleIndex => 33
   | .loopIdx id     => mixHash 28 (hash id)
   | .bankSum c ts b dc ii => mixHash (mixHash (mixHash (mixHash (mixHash 29 (hash c)) (hash (ts.map (·.idx)))) (hash b.idx)) (hash (dc.map (·.idx)))) (hash ii)
   | .routedSum c oc rs ts vs dc ii =>
@@ -335,7 +351,7 @@ private def sigAt (sigs : Array StageSig) (id : ExprId) : StageSig :=
     attribute's. -/
 def enodeSig (sigs : Array StageSig) : ENode → StageSig
   | .num _ | .bool _ | .sampleRate => { base := .fold }
-  | .sampleIndex => { base := .s1 }
+  | .sampleIndex | .tileSampleIndex | .tilePhase => { base := .s1 }
   -- `loopIdx` is the join IDENTITY (`fold`), not `s1`, REGARDLESS of its
   -- binder id: as a VALUE attribute,
   -- the iteration index is defined by the enclosing reduce region, so it
@@ -357,6 +373,8 @@ def enodeSig (sigs : Array StageSig) : ENode → StageSig
   | .inputRef i => { base := .fold, inputs := #[i.idx] }
   | .nestedOut i o => { base := .fold, nested := #[(i.idx, o.idx)] }
   | .arr items => items.foldl (fun acc id => acc.join (sigAt sigs id)) { base := .fold }
+  | .tileArray items =>
+    items.foldl (fun acc id => acc.join (sigAt sigs id)) { base := .fold }
   | .binary _ a b => (sigAt sigs a).join (sigAt sigs b)
   | .unary _ a => sigAt sigs a
   | .clamp a b c | .select a b c | .arraySet a b c =>
@@ -413,9 +431,9 @@ def ExprArena.sig? (a : ExprArena) (id : ExprId) : Option StageSig :=
     (including `bankSum` tables/body/dynCount). -/
 def ENode.children : ENode → Array ExprId
   | .num _ | .bool _ | .inputRef _ | .paramRef _
-  | .nestedOut _ _ | .sampleRate | .sampleIndex
+  | .nestedOut _ _ | .sampleRate | .sampleIndex | .tileSampleIndex | .tilePhase
   | .loopIdx _ => #[]
-  | .arr items => items
+  | .arr items | .tileArray items => items
   | .binary _ a b => #[a, b]
   | .unary _ a => #[a]
   | .clamp a b c => #[a, b, c]

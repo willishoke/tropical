@@ -349,6 +349,8 @@ structure PerInstancePlan where
   /-- Per-output-port temp indices (local; the session compiler shifts). -/
   outputTargets : Array Nat
   arraySlotNames : Array String
+  /-- Local array slots whose values are immutable per-tile endpoint images. -/
+  tileArraySlots : Array Nat := #[]
   /-- Staging metadata, parallel to `instructions` / `perChildPreInput`:
       the binding-time stage of the node each instruction was emitted
       for (typed stage-0 refactor Phase 1). Never serialized. -/
@@ -464,14 +466,18 @@ def SinkSpec.toWire (s : SinkSpec) : Json :=
     ("target", toJson s.target)]
 
 inductive SourceKind where
-  | tick | rate
+  | tick | rate | tilePhase | tileTick
 deriving BEq, Repr, Inhabited
 
 def SourceKind.wire : SourceKind → String
-  | .tick => "tick" | .rate => "rate"
+  | .tick => "tick" | .rate => "rate" | .tilePhase => "tile_phase"
+  | .tileTick => "tile_tick"
 
 /-- Canonical source ordering: `[tick, rate]`. -/
 def defaultSources : Array SourceKind := #[.tick, .rate]
+
+/-- Source order for plans that contain the staged terminal. -/
+def tileSources : Array SourceKind := #[.tick, .rate, .tilePhase, .tileTick]
 
 def isDefaultSources (s : Array SourceKind) : Bool :=
   s == defaultSources
@@ -552,6 +558,13 @@ structure FlatPlan where
       kernel reads a whole, consistent generation of columns (no cross-column
       tear on a live knob move). Empty ⇒ no double-buffering (omitted from wire). -/
   coeffArraySlots : Array Nat := #[]
+  /-- Array slots filled by the absolute-time tile materializer.  These are
+      packed after Stage0 columns in the Metal coefficient binding. -/
+  tileArraySlots : Array Nat := #[]
+  /-- Exact interval used when constructing the endpoint image. -/
+  tileIntervalFrames : Nat := 0
+  /-- Admission/provenance string carried into benchmark artifacts. -/
+  phaserTimeStaging : Option String := none
 deriving Inhabited
 
 /-- Instructions in the exact recursive order used by both code emitters. -/
@@ -565,6 +578,12 @@ decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children _h
 
 private def FlatPlan.linearInstrs (p : FlatPlan) : Array NInstr :=
   p.instanceFunctions.foldl (fun out f => out ++ f.linearInstrs) #[]
+
+/-- Array slots sourced from immutable host-written Metal columns. -/
+def FlatPlan.metalBoundArraySlots (p : FlatPlan) : Array Nat :=
+  p.tileArraySlots.foldl
+    (fun slots slot => if slots.contains slot then slots else slots.push slot)
+    p.coeffArraySlots
 
 def FlatPlan.hasRoutedSum (p : FlatPlan) : Bool :=
   p.linearInstrs.any (·.tag == "RoutedSumBegin")
@@ -622,7 +641,7 @@ def FlatPlan.metalThreadgroupScratchBytes (p : FlatPlan) : Nat := Id.run do
   if !p.hasRoutedSum then return 0
   let mut bytes := 0
   for slot in [0:p.arraySlotCount] do
-    if !p.coeffArraySlots.contains slot then
+    if !p.metalBoundArraySlots.contains slot then
       bytes := bytes + 4 * max (p.arraySlotSizes[slot]?.getD 1) 1
   let mut declared : Std.HashSet String := {}
   let sharedScalars := p.metalSharedScalarKeys
@@ -682,6 +701,13 @@ def FlatPlan.toWire (p : FlatPlan) : Except String Json := do
     else fields.push ("param_disciplines", Json.arr (p.paramDisciplines.map (·.toWire)))
   let fields := if p.coeffArraySlots.isEmpty then fields
     else fields.push ("coeff_array_slots", toJson p.coeffArraySlots)
+  let fields := if p.tileArraySlots.isEmpty then fields
+    else fields.push ("tile_array_slots", toJson p.tileArraySlots)
+  let fields := if p.tileIntervalFrames == 0 then fields
+    else fields.push ("tile_interval_frames", toJson p.tileIntervalFrames)
+  let fields := match p.phaserTimeStaging with
+    | some reason => fields.push ("phaser_time_staging", Json.str reason)
+    | none => fields
   let fields := match p.metalExecutionToWire with
     | some execution => fields.push ("metal_execution", execution)
     | none => fields

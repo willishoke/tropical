@@ -106,6 +106,7 @@ def compileResolved (prog : CoreProgram) (arena : Tropical.Ir.ExprArena)
     perChildPreInput := program.perChildPreInput
     outputTargets := program.outputTargets
     arraySlotNames := #[]
+    tileArraySlots := program.tileArraySlots
     instrStages := program.instrStages
     perChildPreInputStages := program.perChildPreInputStages }
 

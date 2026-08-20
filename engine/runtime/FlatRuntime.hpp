@@ -34,7 +34,11 @@
 #endif
 
 namespace tropical_plan6 { struct ParsedPlan6; }
-namespace tropical_metal { struct MetalKernel; }
+namespace tropical_metal {
+struct MetalKernel;
+struct TileMaterializerProgram;
+struct ExactTileFallbackProgram;
+}
 
 namespace tropical_runtime
 {
@@ -232,6 +236,15 @@ struct KernelState
   // control_published_gen covers BOTH slot and column generations. atomic_ref
   // is used at access sites so KernelState remains movable.
   std::vector<uint32_t> coeff_array_slots;
+  std::vector<uint32_t> tile_array_slots;
+  uint32_t tile_interval_frames = 0;
+  std::shared_ptr<const tropical_metal::TileMaterializerProgram>
+    tile_materializer;
+  std::shared_ptr<const tropical_metal::ExactTileFallbackProgram>
+    tile_exact_fallback;
+  // For each exact fallback slot, the matching compact-audio slot index, or
+  // -1 when the exact manifest's initial default must be retained.
+  std::vector<int32_t> tile_exact_slot_sources;
   std::array<std::vector<std::vector<int64_t>>, 3> coeff_generations;
   std::vector<int64_t *> coeff_array_ptrs;
   std::array<std::vector<double>, 3> slot_generations;
@@ -325,10 +338,20 @@ public:
   bool load_ir_staged(const std::string & ir_text, const std::string & msl_source,
                       const std::string & coeff_ir, const std::string & manifest_json);
 
+  bool load_ir_time_staged(
+    const std::string & ir_text, const std::string & msl_source,
+    const std::string & coeff_ir, const std::string & tile_ir,
+    const std::string & manifest_json);
+
   /** Publish one audio/observation artifact and return its exact initial pair. */
   PublishedGeneration load_ir_staged_generation(
     const std::string & ir_text, const std::string & msl_source,
     const std::string & coeff_ir, const std::string & manifest_json);
+
+  PublishedGeneration load_ir_time_staged_generation(
+    const std::string & ir_text, const std::string & msl_source,
+    const std::string & coeff_ir, const std::string & tile_ir,
+    const std::string & manifest_json);
 
   /**
    * Atomically publish distinct audio and observation artifacts. The audio
@@ -339,6 +362,14 @@ public:
   PublishedGeneration load_ir_staged_with_observation_generation(
     const std::string & audio_ir, const std::string & audio_msl_source,
     const std::string & audio_coeff_ir,
+    const std::string & audio_manifest_json,
+    const std::string & observation_ir,
+    const std::string & observation_coeff_ir,
+    const std::string & observation_manifest_json);
+
+  PublishedGeneration load_ir_time_staged_with_observation_generation(
+    const std::string & audio_ir, const std::string & audio_msl_source,
+    const std::string & audio_coeff_ir, const std::string & audio_tile_ir,
     const std::string & audio_manifest_json,
     const std::string & observation_ir,
     const std::string & observation_coeff_ir,
@@ -1024,6 +1055,26 @@ public:
 #ifdef TROPICAL_METAL
     std::lock_guard<std::mutex> lock(build_mutex_);
     return metal_worker_ ? metal_worker_->dispatch_failure_count() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  uint64_t metal_materialization_failure_count() const
+  {
+#ifdef TROPICAL_METAL
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    return metal_worker_ ? metal_worker_->materialization_failure_count() : 0;
+#else
+    return 0;
+#endif
+  }
+
+  uint64_t metal_exact_fallback_count() const
+  {
+#ifdef TROPICAL_METAL
+    std::lock_guard<std::mutex> lock(build_mutex_);
+    return metal_worker_ ? metal_worker_->exact_fallback_count() : 0;
 #else
     return 0;
 #endif

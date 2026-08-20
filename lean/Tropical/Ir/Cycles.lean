@@ -28,7 +28,7 @@ private def collectNestedOutDeps (ea : ExprArena) (hw : ea.wf = true)
   match _hd : ea.deref id with
   | none => acc
   | some (.num _) | some (.bool _) => acc
-  | some (.arr items) =>
+  | some (.arr items) | some (.tileArray items) =>
     items.attach.foldl (fun a ⟨x, _⟩ => collectNestedOutDeps ea hw numInstances a x) acc
   | some (.nestedOut inst _) =>
     if inst.idx < numInstances && !acc.contains inst.idx then acc.push inst.idx else acc
@@ -59,7 +59,8 @@ private def collectNestedOutDeps (ea : ExprArena) (hw : ea.wf = true)
     | some d => collectNestedOutDeps ea hw numInstances acc d
     | none => acc
   | some (.inputRef _) | some (.paramRef _)
-  | some (.sampleRate) | some (.sampleIndex)
+  | some (.sampleRate) | some (.sampleIndex) | some (.tileSampleIndex)
+  | some (.tilePhase)
   | some (.loopIdx _) => acc
 termination_by id.idx
 decreasing_by

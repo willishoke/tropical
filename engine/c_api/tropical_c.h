@@ -170,16 +170,19 @@ bool             tropical_runtime_load_ir_msl(tropical_runtime_t, const char* ir
    state before publish and re-run after every control-plane slot write.
    Its outputs land in coef:<n> module slots the audio kernel reads. */
 bool             tropical_runtime_load_ir_staged(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* manifest_json, size_t manifest_len);
+bool             tropical_runtime_load_ir_time_staged(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* tile_ir, size_t tile_ir_len, const char* manifest_json, size_t manifest_len);
 
 /* Staged single-artifact load returning the exact program/control generation
    pair constructed by this publication. The pair is written before the load
    returns and is not sampled from mutable counters afterward. */
 bool             tropical_runtime_load_ir_staged_generation(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* manifest_json, size_t manifest_len, tropical_runtime_generation_t* out_generation);
+bool             tropical_runtime_load_ir_time_staged_generation(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* tile_ir, size_t tile_ir_len, const char* manifest_json, size_t manifest_len, tropical_runtime_generation_t* out_generation);
 
 /* Atomic dual-artifact publication. The first staged artifact owns audio and
    optional Metal execution; the second JIT-only artifact owns observation.
    Controls project between differing slot layouts by exact manifest name. */
 bool             tropical_runtime_load_ir_staged_with_observation_generation(tropical_runtime_t, const char* audio_ir, size_t audio_ir_len, const char* audio_msl_source, size_t audio_msl_len, const char* audio_coeff_ir, size_t audio_coeff_len, const char* audio_manifest_json, size_t audio_manifest_len, const char* observation_ir, size_t observation_ir_len, const char* observation_coeff_ir, size_t observation_coeff_len, const char* observation_manifest_json, size_t observation_manifest_len, tropical_runtime_generation_t* out_generation);
+bool             tropical_runtime_load_ir_time_staged_with_observation_generation(tropical_runtime_t, const char* audio_ir, size_t audio_ir_len, const char* audio_msl_source, size_t audio_msl_len, const char* audio_coeff_ir, size_t audio_coeff_len, const char* audio_tile_ir, size_t audio_tile_ir_len, const char* audio_manifest_json, size_t audio_manifest_len, const char* observation_ir, size_t observation_ir_len, const char* observation_coeff_ir, size_t observation_coeff_len, const char* observation_manifest_json, size_t observation_manifest_len, tropical_runtime_generation_t* out_generation);
 
 /* Control-plane/test-only: request a sample-clock reposition. JIT applies it
    at its next process-buffer boundary; Metal prepares and acknowledges an
@@ -236,6 +239,12 @@ uint64_t         tropical_runtime_ownership_failure_count(tropical_runtime_t);
    replacement does not erase the evidence. Always 0 for JIT/non-Metal builds;
    qualification requires zero. */
 uint64_t         tropical_runtime_metal_dispatch_failure_count(tropical_runtime_t);
+/* Tile-time staging diagnostics. A rejected endpoint image increments
+   materialization_failure_count; successful exact CPU recovery increments
+   exact_fallback_count. Normal qualification expects both to remain zero. */
+uint64_t         tropical_runtime_metal_materialization_failure_count(
+                   tropical_runtime_t);
+uint64_t         tropical_runtime_metal_exact_fallback_count(tropical_runtime_t);
 /* Sticky monotonic worker-handoff diagnostics. Starvation, tag mismatch,
    activation failure, and callback-thread Metal entry must remain zero in
    qualification. Retargets are permitted but measured explicitly. */

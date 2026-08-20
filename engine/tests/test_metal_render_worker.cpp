@@ -1,12 +1,18 @@
 #include "metal/MetalRenderWorker.hpp"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <chrono>
+#include <cmath>
 #include <cstdio>
 #include <functional>
+#include <limits>
 #include <memory>
+#include <mutex>
 #include <thread>
+#include <vector>
 
 using tropical_metal::EpochTransitionKind;
 using tropical_metal::MetalRenderWorker;
@@ -60,6 +66,158 @@ static RenderEpochRequest request(
   value.transition = kind;
   value.slots = {static_cast<float>(epoch)};
   return value;
+}
+
+static void absolute_endpoint_materializer(
+  const int64_t *, int64_t *, int64_t * const * arrays,
+  const uint64_t *, int64_t *, double, uint64_t start_sample_index,
+  const uint64_t *, double *, uint64_t, double * slots)
+{
+  const double bias = slots ? slots[0] : 0.0;
+  const uint64_t interval = slots
+    ? static_cast<uint64_t>(slots[1]) : 128;
+  arrays[0][0] = std::bit_cast<int64_t>(
+    static_cast<double>(start_sample_index) + bias);
+  arrays[0][1] = std::bit_cast<int64_t>(
+    static_cast<double>(start_sample_index + interval) + bias);
+}
+
+static void unsafe_endpoint_materializer(
+  const int64_t *, int64_t *, int64_t * const * arrays,
+  const uint64_t *, int64_t *, double, uint64_t,
+  const uint64_t *, double *, uint64_t, double *)
+{
+  arrays[0][0] = std::bit_cast<int64_t>(
+    std::numeric_limits<double>::quiet_NaN());
+}
+
+static void exact_fallback_kernel(
+  const int64_t *, int64_t *, int64_t * const *,
+  const uint64_t *, int64_t *, double, uint64_t start_sample_index,
+  const uint64_t *, double * output, uint64_t frames, double * slots)
+{
+  const double bias = slots ? slots[0] : 0.0;
+  for (uint64_t i = 0; i < frames; ++i)
+    output[i] = static_cast<double>(start_sample_index + i) + bias;
+}
+
+static void test_absolute_time_materialization_and_clock_jump()
+{
+  EpochTileQueue queue(128, 128);
+  std::atomic<bool> mismatch{false};
+  std::mutex seen_mutex;
+  std::vector<uint64_t> seen_sources;
+  MetalRenderWorker worker(
+    queue,
+    [&](const RenderEpochRequest & value, uint64_t source, uint32_t frames,
+        double * destination) {
+      if (value.columns.size() != 4
+          || value.columns[0] != static_cast<float>(source + 7)
+          || value.columns[1] != static_cast<float>(source + 64 + 7)
+          || value.columns[2] != static_cast<float>(source + 64 + 7)
+          || value.columns[3] != static_cast<float>(source + 128 + 7))
+        mismatch.store(true, std::memory_order_release);
+      {
+        std::lock_guard<std::mutex> lock(seen_mutex);
+        seen_sources.push_back(source);
+      }
+      for (uint32_t i = 0; i < frames; ++i)
+        destination[i] = static_cast<double>(source + i);
+      return true;
+    });
+
+  auto program = std::make_shared<tropical_metal::TileMaterializerProgram>();
+  program->kernel = absolute_endpoint_materializer;
+  program->array_sizes = {2};
+  program->tile_array_slots = {0};
+  program->interval_frames = 64;
+  auto initial = request(1, EpochTransitionKind::Fresh);
+  initial.tile_materializer = program;
+  initial.materializer_slots = {7.0, 64.0};
+  initial.materializer_seed_arrays = {{0, 0}};
+  ASSERT(worker.schedule(std::move(initial)).ok);
+  std::weak_ptr<const tropical_metal::TileMaterializerProgram> retained =
+    program;
+  program.reset();
+  ASSERT(!retained.expired());
+  ASSERT(!mismatch.load(std::memory_order_acquire));
+  {
+    std::lock_guard<std::mutex> lock(seen_mutex);
+    ASSERT(seen_sources.size() == EpochTileQueue::kTilesPerBank);
+    for (std::size_t i = 0; i < seen_sources.size(); ++i)
+      ASSERT(seen_sources[i] == i * 128);
+  }
+
+  std::array<double, 128> output{};
+  ASSERT(queue.consume(output.data(), output.size()).activated);
+  ASSERT(wait_for([&] { return queue.activation_acknowledged() == 1; }));
+
+  auto jump_program =
+    std::make_shared<tropical_metal::TileMaterializerProgram>();
+  jump_program->kernel = absolute_endpoint_materializer;
+  jump_program->array_sizes = {2};
+  jump_program->tile_array_slots = {0};
+  jump_program->interval_frames = 64;
+  auto jump = request(2, EpochTransitionKind::ClockJump, 17);
+  jump.tile_materializer = std::move(jump_program);
+  jump.materializer_slots = {7.0, 64.0};
+  jump.materializer_seed_arrays = {{0, 0}};
+  const auto jumped = worker.schedule(std::move(jump));
+  ASSERT(jumped.ok);
+  ASSERT(jumped.effective_sample_index == 17);
+  ASSERT(!mismatch.load(std::memory_order_acquire));
+  {
+    std::lock_guard<std::mutex> lock(seen_mutex);
+    ASSERT(std::find(seen_sources.begin(), seen_sources.end(), 17)
+           != seen_sources.end());
+  }
+  ASSERT(worker.materialization_failure_count() == 0);
+  ASSERT(worker.exact_fallback_count() == 0);
+}
+
+static void test_unsafe_materialization_uses_exact_fallback()
+{
+  EpochTileQueue queue(128, 128);
+  std::atomic<uint32_t> staged_dispatches{0};
+  MetalRenderWorker worker(
+    queue,
+    [&](const RenderEpochRequest &, uint64_t, uint32_t frames,
+        double * destination) {
+      staged_dispatches.fetch_add(1, std::memory_order_relaxed);
+      std::fill_n(destination, frames, -1.0);
+      return true;
+    });
+
+  auto materializer =
+    std::make_shared<tropical_metal::TileMaterializerProgram>();
+  materializer->kernel = unsafe_endpoint_materializer;
+  materializer->array_sizes = {1};
+  materializer->tile_array_slots = {0};
+  materializer->interval_frames = 128;
+  auto exact =
+    std::make_shared<tropical_metal::ExactTileFallbackProgram>();
+  exact->kernel = exact_fallback_kernel;
+  exact->array_storage = {{0}};
+  exact->array_sizes = {1};
+  exact->initial_slots = {0.0};
+
+  auto staged = request(1, EpochTransitionKind::Fresh);
+  staged.tile_materializer = std::move(materializer);
+  staged.materializer_slots = {0.0};
+  staged.materializer_seed_arrays = {{0}};
+  staged.exact_fallback = std::move(exact);
+  staged.exact_fallback_slots = {3.0};
+  ASSERT(worker.schedule(std::move(staged)).ok);
+  ASSERT(staged_dispatches.load(std::memory_order_acquire) == 0);
+  ASSERT(worker.materialization_failure_count()
+         == EpochTileQueue::kTilesPerBank);
+  ASSERT(worker.exact_fallback_count() == EpochTileQueue::kTilesPerBank);
+
+  std::array<double, 128> output{};
+  const auto consumed = queue.consume(output.data(), output.size());
+  ASSERT(consumed.status == TileConsumeStatus::Audio);
+  for (uint32_t i = 0; i < output.size(); ++i)
+    ASSERT(output[i] == static_cast<double>(i) + 3.0);
 }
 
 static void test_worker_activation_and_refill()
@@ -619,6 +777,10 @@ static void test_unclaimed_epochs_coalesce_after_audio_stops()
 int main()
 {
   std::printf("test_metal_render_worker (no DAC)\n");
+  run_test("absolute tile images rematerialize across a backward clock jump",
+           test_absolute_time_materialization_and_clock_jump);
+  run_test("unsafe tile images fall back to the exact CPU kernel",
+           test_unsafe_materialization_uses_exact_fallback);
   run_test("lazy worker activation, refill, and continuous handoff",
            test_worker_activation_and_refill);
   run_test("candidate inside full-bank horizon avoids a retarget",

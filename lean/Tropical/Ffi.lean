@@ -124,6 +124,17 @@ def Runtime.loadIrStaged (rt : Runtime) (irText mslSource coeffIr manifestJson :
   if !(← rt.loadIrStagedRaw irText mslSource coeffIr manifestJson) then
     throw <| IO.userError s!"runtime loadIrStaged failed: {← lastError}"
 
+@[extern "shim_runtime_load_ir_time_staged"]
+private opaque Runtime.loadIrTimeStagedRaw (rt : @& Runtime)
+    (irText : @& String) (mslSource : @& String) (coeffIr : @& String)
+    (tileIr : @& String) (manifestJson : @& String) : IO Bool
+
+/-- Metal load with a distinct absolute-time tile materializer. -/
+def Runtime.loadIrTimeStaged (rt : Runtime)
+    (irText mslSource coeffIr tileIr manifestJson : String) : IO Unit := do
+  if !( ← rt.loadIrTimeStagedRaw irText mslSource coeffIr tileIr manifestJson) then
+    throw <| IO.userError s!"runtime loadIrTimeStaged failed: {← lastError}"
+
 /-- Generation-returning staged load for an atomic compile handshake. The pair
     comes from the publication operation itself, rather than a later sample. -/
 def Runtime.loadIrStagedGeneration (rt : Runtime)
@@ -131,6 +142,20 @@ def Runtime.loadIrStagedGeneration (rt : Runtime)
     IO PublishedGeneration := do
   let (programVersion, controlVersion) ←
     rt.loadIrStagedGenerationRaw irText mslSource coeffIr manifestJson
+  pure { programVersion, controlVersion }
+
+@[extern "shim_runtime_load_ir_time_staged_generation"]
+private opaque Runtime.loadIrTimeStagedGenerationRaw
+    (rt : @& Runtime) (irText : @& String) (mslSource : @& String)
+    (coeffIr : @& String) (tileIr : @& String)
+    (manifestJson : @& String) : IO (UInt64 × UInt64)
+
+def Runtime.loadIrTimeStagedGeneration (rt : Runtime)
+    (irText mslSource coeffIr tileIr manifestJson : String) :
+    IO PublishedGeneration := do
+  let (programVersion, controlVersion) ←
+    rt.loadIrTimeStagedGenerationRaw
+      irText mslSource coeffIr tileIr manifestJson
   pure { programVersion, controlVersion }
 
 @[extern "shim_runtime_load_ir_staged_with_observation_generation"]
@@ -150,6 +175,23 @@ def Runtime.loadIrStagedWithObservationGeneration (rt : Runtime)
   let (programVersion, controlVersion) ←
     rt.loadIrStagedWithObservationGenerationRaw
       irText mslSource coeffIr manifestJson
+      observationIr observationCoeffIr observationManifestJson
+  pure { programVersion, controlVersion }
+
+@[extern "shim_runtime_load_ir_time_staged_with_observation_generation"]
+private opaque Runtime.loadIrTimeStagedWithObservationGenerationRaw
+    (rt : @& Runtime) (irText : @& String) (mslSource : @& String)
+    (coeffIr : @& String) (tileIr : @& String) (manifestJson : @& String)
+    (observationIr : @& String) (observationCoeffIr : @& String)
+    (observationManifestJson : @& String) : IO (UInt64 × UInt64)
+
+def Runtime.loadIrTimeStagedWithObservationGeneration (rt : Runtime)
+    (irText mslSource coeffIr tileIr manifestJson : String)
+    (observationIr observationCoeffIr observationManifestJson : String) :
+    IO PublishedGeneration := do
+  let (programVersion, controlVersion) ←
+    rt.loadIrTimeStagedWithObservationGenerationRaw
+      irText mslSource coeffIr tileIr manifestJson
       observationIr observationCoeffIr observationManifestJson
   pure { programVersion, controlVersion }
 

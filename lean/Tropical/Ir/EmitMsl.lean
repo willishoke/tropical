@@ -191,6 +191,12 @@ structure St where
       `coeff_array_slots`, the SAME order the runtime packs the upload
       staging. Empty for ordinary plans (the byte-frozen 3-binding ABI). -/
   coeffOffsets : Std.HashMap Nat Nat := {}
+  /-- Per-interval tile columns use segment-major packing after the Stage0
+      prefix. The dispatch may cover several coefficient intervals. -/
+  tileOffsets : Std.HashMap Nat Nat := {}
+  tileColumnBase : Nat := 0
+  tileColumnWidth : Nat := 0
+  tileIntervalFrames : Nat := 0
   /-- The stack of open reduction regions, outermost first (`ReduceBegin`
       pushes, `ReduceEnd` pops). Nested banks: `loopIdx id` resolves by
       searching this stack for its binder id; accumulator writes search it
@@ -374,6 +380,13 @@ def resolveOperand : NOperand → M TVal
     | some .rate => do
       let sr := (← get).sampleRate
       pure ⟨"k.sample_rate", .float, some (.f sr)⟩
+    | some .tilePhase =>
+      let interval := (← get).tileIntervalFrames
+      if interval == 0 then
+        pure ⟨f32Lit 0.0, .float, some (.f 0.0)⟩
+      else
+        pure ⟨s!"(float(s % {interval}u) / float({interval}u))", .float, none⟩
+    | some .tileTick => pure ⟨"current_idx", .int, none⟩
     | none => pure ⟨f32Lit 0.0, .float, some (.f 0.0)⟩
   | .slot idx t => do
     coerce (← loadSlot idx) t
@@ -539,9 +552,13 @@ private def resolveF32 (o : NOperand) : M String := do
     local for in-kernel arrays, the packed device buffer at a
     compile-time offset for hoisted coefficient columns. -/
 private def arrayElem (slot : Nat) (idx : String) : M String := do
-  match (← get).coeffOffsets.get? slot with
-  | some off => pure s!"coeff_columns[{off} + {idx}]"
-  | none => pure s!"arr{slot}[{idx}]"
+  let state ← get
+  match state.tileOffsets.get? slot with
+  | some within =>
+      pure s!"coeff_columns[{state.tileColumnBase} + (s / {state.tileIntervalFrames}u) * {state.tileColumnWidth} + {within} + {idx}]"
+  | none => match state.coeffOffsets.get? slot with
+    | some off => pure s!"coeff_columns[{off} + {idx}]"
+    | none => pure s!"arr{slot}[{idx}]"
 
 /-- Hoisted columns are GPU-read-only (`constant` address space; the
     stage-0 kernel fills them host-side). A plan that still writes one
@@ -971,6 +988,19 @@ def emitKernel (plan : FlatPlan) : Except String String := do
       | throw s!"EmitMsl: coeff_array_slots entry {s} out of range (plan has {sizes.size} array slots)"
     coeffOffsets := coeffOffsets.insert s colOff
     colOff := colOff + max sz 1
+  let tileColumnBase := colOff
+  let mut tileOffsets : Std.HashMap Nat Nat := {}
+  let mut tileColumnWidth := 0
+  for s in plan.tileArraySlots do
+    unless coeffOffsets.contains s do
+      let some sz := sizes[s]?
+        | throw s!"EmitMsl: tile_array_slots entry {s} out of range (plan has {sizes.size} array slots)"
+      tileOffsets := tileOffsets.insert s tileColumnWidth
+      coeffOffsets := coeffOffsets.insert s (tileColumnBase + tileColumnWidth)
+      tileColumnWidth := tileColumnWidth + max sz 1
+  if !tileOffsets.isEmpty && plan.tileIntervalFrames == 0 then
+    throw "EmitMsl: tile columns require a positive tile_interval_frames"
+  let boundArraySlots := plan.metalBoundArraySlots
   -- Cooperative scalar phases may be split by several all-lane regions.
   -- Predeclare outside-region scalar destinations at function scope so lane 0
   -- retains them across reopened scopes. Only values actually read by an
@@ -1025,7 +1055,8 @@ def emitKernel (plan : FlatPlan) : Except String String := do
       popIndent
       line "}"
   let init : St := { sources := plan.sources, sampleRate := plan.sampleRate.toFloat,
-                     coeffOffsets, cooperative,
+                     coeffOffsets, tileOffsets, tileColumnBase, tileColumnWidth,
+                     tileIntervalFrames := plan.tileIntervalFrames, cooperative,
                      declared := if cooperative then predeclared else {} }
   match body.run init with
   | .error e _ => .error e
@@ -1035,10 +1066,10 @@ def emitKernel (plan : FlatPlan) : Except String String := do
     -- keep -Wunused clean would misfire on use, so leave it — Metal's
     -- compiler doesn't warn on unused const locals by default.
     let hdr := if cooperative then
-      cooperativeHeader (!plan.coeffArraySlots.isEmpty)
+      cooperativeHeader (!boundArraySlots.isEmpty)
         (cooperativeRouteConstants routedBegins ++ "\n")
         plan.metalThreadgroupScratchBytes
-      else if plan.coeffArraySlots.isEmpty then header else headerColumns
+      else if boundArraySlots.isEmpty then header else headerColumns
     .ok (hdr ++ bodyText ++ "\n}\n")
 
 end Tropical.Ir.EmitMsl

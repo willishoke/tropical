@@ -1,0 +1,6 @@
+# Reproducible compiler/JIT products are large and machine-specific.  The
+# retained raw JSON carries their sizes, hashes, operation counts, and register
+# span; the qualification script regenerates the full files when needed.
+data/*/artifacts/
+data/*/cache/
+data/latest/

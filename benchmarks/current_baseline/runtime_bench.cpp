@@ -46,7 +46,11 @@ struct Options
   std::string ir;
   std::string manifest;
   std::string coeff;
+  std::string tile;
   std::string msl;
+  std::string exact_ir;
+  std::string exact_coeff;
+  std::string exact_manifest;
   std::string reload_ir;
   std::string reload_manifest;
   std::string reload_coeff;
@@ -173,7 +177,11 @@ Options parse_options(int argc, char ** argv)
     if (flag == "--ir") o.ir = value();
     else if (flag == "--manifest") o.manifest = value();
     else if (flag == "--coeff") o.coeff = value();
+    else if (flag == "--tile") o.tile = value();
     else if (flag == "--msl") o.msl = value();
+    else if (flag == "--exact-ir") o.exact_ir = value();
+    else if (flag == "--exact-coeff") o.exact_coeff = value();
+    else if (flag == "--exact-manifest") o.exact_manifest = value();
     else if (flag == "--reload-ir") o.reload_ir = value();
     else if (flag == "--reload-manifest") o.reload_manifest = value();
     else if (flag == "--reload-coeff") o.reload_coeff = value();
@@ -328,8 +336,30 @@ uint64_t process_cpu_ns()
 
 bool load(tropical_runtime_t rt, const Options & o,
           const std::string & ir, const std::string & manifest,
-          const std::string & coeff, const std::string & msl)
+          const std::string & coeff, const std::string & msl,
+          const std::string & tile, const std::string & exact_ir,
+          const std::string & exact_coeff,
+          const std::string & exact_manifest)
 {
+  if (!tile.empty())
+  {
+    if (exact_ir.empty() || exact_manifest.empty())
+      throw std::runtime_error(
+        "--tile requires --exact-ir and --exact-manifest");
+    if (msl.empty())
+      return tropical_runtime_load_ir_staged(
+        rt, exact_ir.data(), exact_ir.size(), nullptr, 0,
+        exact_coeff.empty() ? nullptr : exact_coeff.data(), exact_coeff.size(),
+        exact_manifest.data(), exact_manifest.size());
+    tropical_runtime_generation_t generation{};
+    return tropical_runtime_load_ir_time_staged_with_observation_generation(
+      rt, ir.data(), ir.size(), msl.data(), msl.size(),
+      coeff.empty() ? nullptr : coeff.data(), coeff.size(),
+      tile.data(), tile.size(), manifest.data(), manifest.size(),
+      exact_ir.data(), exact_ir.size(),
+      exact_coeff.empty() ? nullptr : exact_coeff.data(), exact_coeff.size(),
+      exact_manifest.data(), exact_manifest.size(), &generation);
+  }
   return tropical_runtime_load_ir_staged(
     rt, ir.data(), ir.size(),
     msl.empty() ? nullptr : msl.data(), msl.size(),
@@ -358,7 +388,11 @@ int main(int argc, char ** argv)
     const std::string ir = read_file(o.ir);
     const std::string manifest = read_file(o.manifest);
     const std::string coeff = read_file(o.coeff);
+    const std::string tile = read_file(o.tile);
     const std::string msl = read_file(o.msl);
+    const std::string exact_ir = read_file(o.exact_ir);
+    const std::string exact_coeff = read_file(o.exact_coeff);
+    const std::string exact_manifest = read_file(o.exact_manifest);
     const std::string reload_ir =
       o.reload_ir.empty() ? ir : read_file(o.reload_ir);
     const std::string reload_manifest =
@@ -384,7 +418,8 @@ int main(int argc, char ** argv)
     tropical_runtime_t rt = rt_owner.get();
     if (!rt) throw std::runtime_error(tropical_last_error());
     const auto load_start = Clock::now();
-    if (!load(rt, o, ir, manifest, coeff, msl))
+    if (!load(rt, o, ir, manifest, coeff, msl, tile,
+              exact_ir, exact_coeff, exact_manifest))
       throw std::runtime_error(tropical_last_error());
     const uint64_t load_ns = elapsed_ns(load_start, Clock::now());
     const uint32_t render_tile_frames =
@@ -403,6 +438,10 @@ int main(int argc, char ** argv)
 
     const double before =
       tropical_runtime_output_buffer(rt) ? tropical_runtime_output_buffer(rt)[0] : 0.0;
+    const uint64_t metal_render_time_before =
+      tropical_runtime_metal_render_time_ns(rt);
+    const uint64_t metal_rendered_frames_before =
+      tropical_runtime_metal_rendered_frame_count(rt);
     std::vector<uint64_t> write_ns;
     std::vector<uint64_t> process_ns;
     std::vector<uint64_t> rss_block;
@@ -467,6 +506,8 @@ int main(int argc, char ** argv)
     uint64_t ownership_failure_count = 0;
     uint64_t reference_ownership_failure_count = 0;
     uint64_t metal_dispatch_failure_count = 0;
+    uint64_t metal_materialization_failure_count = 0;
+    uint64_t metal_exact_fallback_count = 0;
     uint64_t metal_render_starvation_count = 0;
     uint64_t metal_render_starvation_count_before_dac_start = 0;
     uint64_t metal_render_starvation_count_after_dac_start = 0;
@@ -540,7 +581,8 @@ int main(int argc, char ** argv)
       RuntimeOwner reference_owner(tropical_runtime_new(o.buffer));
       tropical_runtime_t reference_rt = reference_owner.get();
       if (!reference_rt) throw std::runtime_error(tropical_last_error());
-      if (!load(reference_rt, o, ir, manifest, coeff, {}))
+      if (!load(reference_rt, o, ir, manifest, coeff, {}, tile,
+                exact_ir, exact_coeff, exact_manifest))
         throw std::runtime_error(tropical_last_error());
 
       DacOwner dac_owner(tropical_dac_new_runtime(
@@ -958,7 +1000,8 @@ int main(int argc, char ** argv)
           const std::string & next_msl =
             replacement_live ? reload_msl : msl;
           if (!load(rt, o, next_ir, next_manifest,
-                    next_coeff, next_msl))
+                    next_coeff, next_msl, tile,
+                    exact_ir, exact_coeff, exact_manifest))
             throw std::runtime_error(tropical_last_error());
           reload_ns = elapsed_ns(start, Clock::now());
           tropical_dac_stats_t published{};
@@ -972,7 +1015,8 @@ int main(int argc, char ** argv)
             reload_activation_epoch = activation_epoch;
           }
           if (!load(reference_rt, o, next_ir, next_manifest,
-                    next_coeff, {}))
+                    next_coeff, {}, tile,
+                    exact_ir, exact_coeff, exact_manifest))
             throw std::runtime_error(tropical_last_error());
           if (first) reloaded = true;
           ++swap_request_count;
@@ -1155,7 +1199,8 @@ int main(int argc, char ** argv)
         if (o.reload_at && block == *o.reload_at)
         {
           const auto start = Clock::now();
-          if (!load(rt, o, ir, manifest, coeff, msl))
+          if (!load(rt, o, ir, manifest, coeff, msl, tile,
+                    exact_ir, exact_coeff, exact_manifest))
             throw std::runtime_error(tropical_last_error());
           reload_ns = elapsed_ns(start, Clock::now());
         }
@@ -1231,6 +1276,20 @@ int main(int argc, char ** argv)
       tropical_runtime_ownership_failure_count(rt);
     metal_dispatch_failure_count =
       tropical_runtime_metal_dispatch_failure_count(rt);
+    metal_materialization_failure_count =
+      tropical_runtime_metal_materialization_failure_count(rt);
+    metal_exact_fallback_count =
+      tropical_runtime_metal_exact_fallback_count(rt);
+    const uint64_t metal_render_time_after =
+      tropical_runtime_metal_render_time_ns(rt);
+    const uint64_t metal_rendered_frames_after =
+      tropical_runtime_metal_rendered_frame_count(rt);
+    const uint64_t metal_render_time_measured_ns =
+      metal_render_time_after >= metal_render_time_before
+        ? metal_render_time_after - metal_render_time_before : 0;
+    const uint64_t metal_rendered_frames_measured =
+      metal_rendered_frames_after >= metal_rendered_frames_before
+        ? metal_rendered_frames_after - metal_rendered_frames_before : 0;
     metal_render_starvation_count =
       tropical_runtime_metal_render_starvation_count(rt);
     metal_render_starvation_count_measured_delta =
@@ -1315,6 +1374,14 @@ int main(int argc, char ** argv)
               << reference_ownership_failure_count
               << ",\"metal_dispatch_failure_count\":"
               << metal_dispatch_failure_count
+              << ",\"metal_materialization_failure_count\":"
+              << metal_materialization_failure_count
+              << ",\"metal_exact_fallback_count\":"
+              << metal_exact_fallback_count
+              << ",\"metal_render_time_measured_ns\":"
+              << metal_render_time_measured_ns
+              << ",\"metal_rendered_frames_measured\":"
+              << metal_rendered_frames_measured
               << ",\"metal_render_starvation_count\":"
               << metal_render_starvation_count
               << ",\"metal_render_starvation_count_before_dac_start\":"

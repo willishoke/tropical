@@ -1,0 +1,250 @@
+{
+  "schema": "tropical_absolute_time_phaser_higher_order_qualification_1",
+  "recorded_at": "2026-08-19",
+  "physical_output_opened": false,
+  "uncommitted_source_sha256": {
+    "engine/metal/PhaserHigherOrderMaterializer.cpp": "9dccbdb60d8cadaf5864b3cf30128bd9a96afd543d92f237ec517a7ff2cb3409",
+    "lean/Tropical/EmitArrow/Patch.lean": "5045c9b292d26f61180890c48315654903088e6cc649b650f0ae253a76a58afe",
+    "lean/Tropical/Ir/TileStage.lean": "2d0ee28e7921f8779da78d8b44909aa931edaf9023523bc5b8d7c57b1168247c",
+    "benchmarks/phaser_time_staging/run.py": "13447326af9731eadbddba2fb5fe3a9f2e1b1240324c30a3d978d5765169c168",
+    "benchmarks/phaser_time_staging/higher_order_research.py": "fe64a86dccc9b29471f051f6848c09eb42088b754ebc6fe1aa049e0d647419f1",
+    "engine/tests/test_phaser_higher_order_materializer.cpp": "51387a722e5786ba7e36b752377ea239470aa7130c2de12a01cae07ffa0e6bef"
+  },
+  "oracle": {
+    "kind": "mpmath_complete_partial_fraction_sum",
+    "decimal_digits": 100,
+    "fixture_output_gain": 3.7
+  },
+  "arithmetic": {
+    "source_division": "one_residual_correction",
+    "newton_differences": "double_double",
+    "product_residual": "fma",
+    "scratch": "fixed_18_element_arrays",
+    "support_dispatch": "compile_time_8x6_8x8_10x8",
+    "published_precision": "float32"
+  },
+  "actual_metal_oracle": [
+    {
+      "partials": 32,
+      "sections": 18,
+      "interval_frames": 32,
+      "source_support": 8,
+      "weight_support": 6,
+      "start_sample": 0,
+      "max_absolute_error": 3.252041209034218e-05,
+      "max_peak_relative_error": 5.046750021023299e-06
+    },
+    {
+      "partials": 32,
+      "sections": 18,
+      "interval_frames": 32,
+      "start_sample": 256,
+      "max_absolute_error": 3.5524865527603033e-06,
+      "max_peak_relative_error": 3.504284188060701e-06
+    },
+    {
+      "partials": 32,
+      "sections": 18,
+      "interval_frames": 32,
+      "start_sample": 1376,
+      "max_absolute_error": 1.0228648535726137e-05,
+      "max_peak_relative_error": 2.7527460538541917e-06
+    },
+    {
+      "partials": 32,
+      "sections": 18,
+      "interval_frames": 32,
+      "start_sample": 4096,
+      "max_absolute_error": 1.608292857757654e-05,
+      "max_peak_relative_error": 1.1729007679184883e-05
+    },
+    {
+      "partials": 6,
+      "sections": 18,
+      "interval_frames": 64,
+      "source_support": 8,
+      "weight_support": 8,
+      "start_sample": 0,
+      "lfo_rate_hz": 8.0,
+      "center_hz": 700.0,
+      "sweep_octaves": 1.5,
+      "max_absolute_error": 3.715509389201621e-05,
+      "max_peak_relative_error": 6.897525279833599e-06,
+      "staged_interval_sha256": "07be69cb7cd71bde1e83537d9b34f94f4cd2752b14b00159ef4727e14d323b57"
+    },
+    {
+      "partials": 32,
+      "sections": 18,
+      "interval_frames": 64,
+      "source_support": 8,
+      "weight_support": 8,
+      "start_sample": 0,
+      "lfo_rate_hz": 8.0,
+      "center_hz": 700.0,
+      "sweep_octaves": 1.5,
+      "max_absolute_error": 3.678972008336334e-05,
+      "max_peak_relative_error": 5.709291754617542e-06,
+      "staged_interval_sha256": "7c15a8af89f6f4ee3429bdc71299e0b548f1ae0b8dfe96745d3f32a9e5af3727"
+    },
+    {
+      "partials": 6,
+      "sections": 18,
+      "interval_frames": 128,
+      "source_support": 10,
+      "weight_support": 8,
+      "start_sample": 0,
+      "lfo_rate_hz": 8.0,
+      "center_hz": 700.0,
+      "sweep_octaves": 1.5,
+      "max_absolute_error": 7.332061205822527e-05,
+      "max_peak_relative_error": 1.361134429304056e-05,
+      "staged_interval_sha256": "a179bc1f6b86f374cbab7c586d282080548851eb95b7550f0213de98c87a5900"
+    },
+    {
+      "partials": 32,
+      "sections": 18,
+      "interval_frames": 128,
+      "source_support": 10,
+      "weight_support": 8,
+      "start_sample": 0,
+      "lfo_rate_hz": 8.0,
+      "center_hz": 700.0,
+      "sweep_octaves": 1.5,
+      "max_absolute_error": 7.474554130304512e-05,
+      "max_peak_relative_error": 1.159954741946727e-05,
+      "staged_interval_sha256": "29f80f453f4df7b37b0b8593e26f4f8fba03d8728d93f0e293332479b2136ca6"
+    },
+    {
+      "partials": 32,
+      "sections": 18,
+      "interval_frames": 128,
+      "source_support": 10,
+      "weight_support": 8,
+      "start_sample": 0,
+      "lfo_rate_hz": 8.0,
+      "center_hz": 4000.0,
+      "sweep_octaves": 3.0,
+      "max_absolute_error": 5.098177936146975e-06,
+      "max_peak_relative_error": 7.543891140858052e-07,
+      "staged_interval_sha256": "95c42f1a666b74b8b53a29ed9f26c5522149ffb84f60378f9711f4c0f404ec72"
+    }
+  ],
+  "seeded_distribution": {
+    "role": "pre_adaptive_continuous_control_stress",
+    "output_gain_applied": false,
+    "seed": "0xA85E2026",
+    "segments": 96,
+    "samples": 6816,
+    "sample_peak_relative_p50": 1.641590e-08,
+    "sample_peak_relative_p90": 5.477650e-08,
+    "sample_peak_relative_p95": 1.702603e-07,
+    "sample_peak_relative_p99": 9.418527e-06,
+    "sample_peak_relative_max": 3.503664e-05,
+    "absolute_max": 4.932768e-05,
+    "samples_over_1e_5": 64,
+    "samples_over_1e_4": 0,
+    "segments_over_1e_4": 0
+  },
+  "final_stratified_conservative_model": {
+    "base_matrix_rows": 162,
+    "absolute_starts": [0, 256, 1376, 4096],
+    "segments": 648,
+    "samples": 48384,
+    "fixture_output_gain": 3.7,
+    "sample_peak_relative_p50": 9.337249e-09,
+    "sample_peak_relative_p90": 5.364313e-08,
+    "sample_peak_relative_p95": 3.971105e-07,
+    "sample_peak_relative_p99": 1.090054e-06,
+    "sample_peak_relative_max": 2.497069e-05,
+    "sample_absolute_p50": 2.951935e-08,
+    "sample_absolute_p90": 1.230507e-07,
+    "sample_absolute_p95": 1.361222e-06,
+    "sample_absolute_p99": 6.502347e-06,
+    "sample_absolute_max": 1.345266e-04,
+    "samples_absolute_over_1e_5": 390,
+    "samples_absolute_over_1e_4": 34,
+    "segments_absolute_over_1e_4": 8,
+    "segments_peak_relative_over_1e_4": 0,
+    "topology_absolute_max": {
+      "p6_s6": 2.544704e-07,
+      "p6_s12": 2.917234e-07,
+      "p6_s18": 1.345103e-04,
+      "p32_s6": 2.723008e-07,
+      "p32_s12": 2.608374e-07,
+      "p32_s18": 1.345266e-04
+    },
+    "worst_model_case": {
+      "partials": 32,
+      "sections": 18,
+      "start_sample": 0,
+      "interval_frames": 128,
+      "lfo_rate_hz": 8.0,
+      "center_hz": 700.0,
+      "sweep_octaves": 1.5,
+      "max_absolute_error": 1.345266e-04,
+      "max_peak_relative_error": 2.087680e-05
+    },
+    "interpretation": "The Python model is conservative and not bit-identical to native FMA/f32 reduction; each modeled absolute-outlier family was checked on actual Metal, whose worst measured absolute error was 7.474554130304512e-05."
+  },
+  "representation_revisions": [
+    {
+      "kind": "uniform_8_source_6_weight_supports",
+      "status": "rejected",
+      "reason": "32x18/R=128/8 Hz/high-center/max-sweep actual Metal max absolute error 2.646165543895851e-04 after fixture gain"
+    },
+    {
+      "kind": "adaptive_8x6_8x8_10x8_supports",
+      "status": "candidate",
+      "reason": "same wide corner fell to 5.098177936146975e-06; checked standard-center 64/128 startup rows remained below 1e-4"
+    },
+    {
+      "kind": "runtime_sized_support_transform",
+      "status": "rejected",
+      "reason": "32x18/R=32 isolated load regressed to 35.38-36.14 percent with synthetic overruns; compile-time support dispatch restored a clean 32.80-32.91 percent set"
+    }
+  ],
+  "boundary_transients": {
+    "cases": 7,
+    "boundaries": 37,
+    "max_first_difference_over_peak": 3.354633e-06,
+    "max_first_difference_over_local_exact_envelope": 1.381947e-05,
+    "boundaries_over_1e_4": 0
+  },
+  "notches": {
+    "comparisons": 203,
+    "frequency_grid_points": 8193,
+    "source_damping": 5.6,
+    "max_center_relative_error": 0.0,
+    "max_depth_error_db": 1.3674398708829472e-04,
+    "centers_over_1_percent": 0,
+    "depths_over_1_db": 0
+  },
+  "determinism": {
+    "absolute_segment_cases": 6,
+    "orders": ["forward", "reverse", "shuffle", "repeat"],
+    "published_images_byte_identical": true,
+    "native_forward_reverse_test": true,
+    "native_wide_10x8_test": true,
+    "native_wide_source_max_absolute_error": 5.274e-12,
+    "native_wide_tail_max_absolute_error": 2.856e-10
+  },
+  "rejected_arithmetic": [
+    {
+      "kind": "ordinary_double_source_sum",
+      "reason": "32x18 actual Metal max absolute error 1.9706088654123377e-03"
+    },
+    {
+      "kind": "kahan_double_source_sum",
+      "reason": "seeded max absolute error 2.596689e-04; 19 samples over 1e-4"
+    },
+    {
+      "kind": "full_double_double_source_division",
+      "reason": "accurate but 32x18 measured load remained above 35 percent"
+    }
+  ],
+  "known_limitations": [
+    "The incumbent fixed 32-partial generic bank is not a valid quality oracle.",
+    "The 162-row 100-digit matrix is complete, but exhaustive actual-Metal/full-cycle rendering and matched-level listening remain pending.",
+    "Patched signal-rate controls and phaser-plus-room graphs retain the exact path."
+  ]
+}
