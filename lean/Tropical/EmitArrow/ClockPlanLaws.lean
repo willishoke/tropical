@@ -86,6 +86,14 @@ theorem declaredTick_source
   simp [PlanInputs.withDeclaredSources, defaultSources, PlanSourceImage.value,
     sourceTick]
 
+theorem evalOperand_tick_withDeclaredSources
+    (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
+    (image : PlanSourceImage α) :
+    evalOperand alg (inputs.withDeclaredSources defaultSources image) state opTick =
+      .ok image.tick := by
+  exact evalOperand_source_of_getElem alg _ state sourceTick .int image.tick
+    (declaredTick_source inputs image)
+
 /-- Tile materialization keeps absolute tile tick at declared source index 3.
     This is source correspondence only; it makes no interpolated-Metal claim. -/
 theorem declaredTileTick_source
@@ -93,6 +101,14 @@ theorem declaredTileTick_source
     (inputs.withDeclaredSources tileSources image).sources[3]? =
       some image.tileTick := by
   simp [PlanInputs.withDeclaredSources, tileSources, PlanSourceImage.value]
+
+theorem evalOperand_tileTick_withDeclaredSources
+    (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
+    (image : PlanSourceImage α) :
+    evalOperand alg (inputs.withDeclaredSources tileSources image) state
+      (.source 3 .int) = .ok image.tileTick := by
+  exact evalOperand_source_of_getElem alg _ state 3 .int image.tileTick
+    (declaredTileTick_source inputs image)
 
 theorem warp_inv_i64 {arena : ExprArena} {c delta sum root : ExprId}
     (clockRail : OnClockRail arena c) (deltaRail : OnClockRail arena delta)
