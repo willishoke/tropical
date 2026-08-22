@@ -609,6 +609,8 @@ PublishedGeneration FlatRuntime::publish_state(
       break;
   }
   active_state_.store(inactive, std::memory_order_release);
+  output_channel_count_.store(
+    states_[inactive].output_channel_count, std::memory_order_release);
   recompile_version_.store(
     generation.program_version, std::memory_order_release);
   std::atomic_store_explicit(

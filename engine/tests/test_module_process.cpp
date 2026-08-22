@@ -220,6 +220,9 @@ static void test_interleaved_native_output()
   ASSERT_OK(tropical_runtime_load_ir(
     rt, stereo_ir.c_str(), stereo_ir.size(),
     STEREO_MANIFEST, std::strlen(STEREO_MANIFEST)));
+  ASSERT(tropical_runtime_output_channel_count(rt) == 2);
+  ASSERT(tropical_runtime_interleaved_output_buffer(rt)
+         != tropical_runtime_output_buffer(rt));
   tropical_runtime_process(rt);
 
   ASSERT(tropical_runtime_output_channel_count(rt) == 2);

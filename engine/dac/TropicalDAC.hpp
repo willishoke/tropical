@@ -561,6 +561,16 @@ struct TropicalDACImpl
     unsigned int source_channels = 1;
     const double * interleaved = buf.data();
     if constexpr (requires {
+                    self->source->getRenderedOutputChannelCount();
+                    self->source->getRenderedInterleavedOutputBuffer();
+                  })
+    {
+      source_channels = std::max(
+        1u, static_cast<unsigned int>(
+          self->source->getRenderedOutputChannelCount()));
+      interleaved = self->source->getRenderedInterleavedOutputBuffer();
+    }
+    else if constexpr (requires {
                     self->source->getOutputChannelCount();
                     self->source->getInterleavedOutputBuffer();
                   })

@@ -713,10 +713,10 @@ public:
 
   unsigned int getBufferLength() const { return buffer_length_; }
 
-  /** Number of channels in the most recently completed callback image. */
+  /** Number of channels declared by the active published plan. */
   uint32_t getOutputChannelCount() const noexcept
   {
-    return rendered_output_channel_count_.load(std::memory_order_acquire);
+    return output_channel_count_.load(std::memory_order_acquire);
   }
 
   /** Compact frame-major output (`frame * channels + channel`). The pointer is
@@ -725,6 +725,20 @@ public:
   const double * getInterleavedOutputBuffer() const noexcept
   {
     return getOutputChannelCount() == 1
+      ? outputBuffer.data() : interleaved_output_buffer_.data();
+  }
+
+  /** Callback-local image access for the DAC. Publication can race immediately
+      after a callback, so device mapping follows the layout actually rendered
+      by that callback rather than a newly published plan's future layout. */
+  uint32_t getRenderedOutputChannelCount() const noexcept
+  {
+    return rendered_output_channel_count_.load(std::memory_order_acquire);
+  }
+
+  const double * getRenderedInterleavedOutputBuffer() const noexcept
+  {
+    return getRenderedOutputChannelCount() == 1
       ? outputBuffer.data() : interleaved_output_buffer_.data();
   }
 
@@ -1461,6 +1475,7 @@ private:
   // resizes on the real-time thread. Mono kernels write the legacy view
   // directly; wider kernels write this compact frame-major image.
   std::vector<double> interleaved_output_buffer_;
+  std::atomic<uint32_t> output_channel_count_{1};
   std::atomic<uint32_t> rendered_output_channel_count_{1};
   std::array<KernelState, 2> states_;
   std::atomic<uint32_t> active_state_{0};
