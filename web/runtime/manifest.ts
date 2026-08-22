@@ -26,10 +26,14 @@ export type KernelManifest = {
   outputChannelCount?: number
 }
 
+export const MAX_KERNEL_OUTPUT_CHANNELS = 64
+
 /** Resolve and validate the fixed output width once, off the audio callback. */
 export function kernelOutputChannelCount(manifest: KernelManifest): number {
   const count = manifest.outputChannelCount ?? 1
-  if (!Number.isSafeInteger(count) || count < 1)
-    throw new RangeError('KernelManifest.outputChannelCount must be a positive integer')
+  if (!Number.isSafeInteger(count) || count < 1
+      || count > MAX_KERNEL_OUTPUT_CHANNELS)
+    throw new RangeError(
+      `KernelManifest.outputChannelCount must be an integer in [1, ${MAX_KERNEL_OUTPUT_CHANNELS}]`)
   return count
 }

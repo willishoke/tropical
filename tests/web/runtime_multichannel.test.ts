@@ -65,6 +65,7 @@ describe('multichannel wasm runtime contract', () => {
     expect(kernelOutputChannelCount(manifest())).toBe(1)
     expect(() => kernelOutputChannelCount(manifest(0))).toThrow()
     expect(() => kernelOutputChannelCount(manifest(1.5))).toThrow()
+    expect(() => kernelOutputChannelCount(manifest(65))).toThrow(/\[1, 64\]/)
   })
 
   test('linear memory reserves frames times compact channel width', () => {
