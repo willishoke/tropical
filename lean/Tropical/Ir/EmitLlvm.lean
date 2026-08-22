@@ -24,7 +24,8 @@ void(ptr inputs, ptr registers, ptr arrays, ptr array_sizes, ptr temps,
 `output_buffer` is compact frame-major interleaved storage. For a plan with
 `C` output channels, sink target `c` writes index `sample * C + c`. The channel
 count is a compile-time Plan fact, so widening output does not change the native
-kernel ABI.
+kernel ABI. FlatRuntime clears all `bufferLength * C` samples before calling the
+kernel, so channels with no sink (and sink-free plans) remain deterministic zero.
 
 Registers/temps/arrays are `i64`-backed (float=bitcast, int=raw,
 bool=zext); slots are direct `double`. Instruction operand/dst slots are

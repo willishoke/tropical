@@ -51,9 +51,17 @@ def Runtime.processOffline (rt : Runtime) : IO Unit := do
   if !(← rt.processOfflineRaw) then
     throw <| IO.userError s!"runtime processOffline failed: {← lastError}"
 
-/-- Copy of the output buffer: `bufferLength` little-endian float64s. -/
+/-- Channel-0 compatibility view: `bufferLength` little-endian float64s. -/
 @[extern "shim_runtime_output_bytes"]
 opaque Runtime.outputBytes (rt : @& Runtime) : IO ByteArray
+
+/-- Compact frame-major native output: `bufferLength * outputChannelCount`
+    little-endian float64s. -/
+@[extern "shim_runtime_output_interleaved_bytes"]
+opaque Runtime.outputInterleavedBytes (rt : @& Runtime) : IO ByteArray
+
+@[extern "shim_runtime_output_channel_count"]
+opaque Runtime.outputChannelCount (rt : @& Runtime) : IO UInt32
 
 @[extern "shim_runtime_get_buffer_length"]
 opaque Runtime.bufferLength (rt : @& Runtime) : IO UInt32

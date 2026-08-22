@@ -2,6 +2,7 @@
 
 #include "../lib/rtaudio/RtAudio.h"
 
+#include <algorithm>
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -102,6 +103,8 @@ static inline void update_max(std::atomic<uint64_t>& cur, uint64_t val)
  *   void begin_fade_out(int samples = 2048);
  *   bool is_fade_out_complete() const;
  *   void set_realtime_running(bool) noexcept;  // optional async scheduler hint
+ *   unsigned int getOutputChannelCount() const; // optional; defaults to mono
+ *   const double* getInterleavedOutputBuffer() const; // optional with count
  *
  * Both Graph and FlatRuntime satisfy this.
  */
@@ -555,16 +558,45 @@ struct TropicalDACImpl
     }
 
     auto* out = static_cast<double*>(output_buffer);
-
-    for (unsigned int i = 0; i < n_buffer_frames; ++i)
+    unsigned int source_channels = 1;
+    const double * interleaved = buf.data();
+    if constexpr (requires {
+                    self->source->getOutputChannelCount();
+                    self->source->getInterleavedOutputBuffer();
+                  })
     {
-      // The device-boundary clamp — the last thing before the speaker, applied
-      // AFTER the runtime's fade envelope (which is in [0,1] and so can never
-      // defeat it). See kDeviceOutputBound.
-      const double sample =
-          clamp_to_device_bound(i < buf.size() ? buf[i] : 0.0);
+      source_channels = std::max(
+        1u, static_cast<unsigned int>(
+          self->source->getOutputChannelCount()));
+      interleaved = self->source->getInterleavedOutputBuffer();
+    }
+
+    // A multichannel plan cannot be folded down implicitly. Startup rejects a
+    // too-narrow device; this callback guard covers a plan hot-swap that races
+    // an already-open stream by failing safely to silence.
+    if (source_channels > 1 && source_channels > self->channels)
+    {
+      std::fill_n(out,
+        static_cast<std::size_t>(n_buffer_frames) * self->channels, 0.0);
+    }
+    else for (unsigned int i = 0; i < n_buffer_frames; ++i)
+    {
       for (unsigned int c = 0; c < self->channels; ++c)
-        *out++ = sample;
+      {
+        // Mono sources upmix to every device channel. Multichannel sources map
+        // independently; surplus device channels are explicitly silent.
+        const unsigned int source_channel = source_channels == 1 ? 0 : c;
+        const bool in_range = i < buf.size()
+                           && source_channel < source_channels
+                           && interleaved != nullptr;
+        const double sample = in_range
+          ? interleaved[static_cast<std::size_t>(i) * source_channels
+                        + source_channel]
+          : 0.0;
+        // The device-boundary clamp — the last thing before the speaker,
+        // applied AFTER the runtime fade envelope.
+        *out++ = clamp_to_device_bound(sample);
+      }
     }
 
     const auto t1 = std::chrono::steady_clock::now();
@@ -601,6 +633,17 @@ private:
 
   void open_stream(unsigned int device_id)
   {
+    if constexpr (requires { source->getOutputChannelCount(); })
+    {
+      const unsigned int source_channels = std::max(
+        1u, static_cast<unsigned int>(source->getOutputChannelCount()));
+      if (source_channels > 1 && source_channels > channels)
+        throw std::runtime_error(
+          "Tropical multichannel plan requires "
+          + std::to_string(source_channels)
+          + " device output channels, but the stream requested "
+          + std::to_string(channels));
+    }
     if (audio.getDeviceCount() < 1)
       throw std::runtime_error("No audio output devices found.");
 

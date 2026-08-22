@@ -141,6 +141,7 @@ struct ObservationProgramImage
   tropical_jit::NumericKernelFn kernel = nullptr;
   tropical_jit::NumericKernelFn coeff_kernel = nullptr;
   double sample_rate = 44100.0;
+  uint32_t output_channel_count = 1;
   std::size_t register_count = 0;
   std::size_t temp_count = 0;
   std::size_t coeff_register_count = 0;
@@ -224,6 +225,7 @@ struct KernelState
   // that generation once per buffer, so ordinary slots, scalar coefficients,
   // and every coefficient column are mutually coherent.
   tropical_jit::NumericKernelFn      coeff_kernel = nullptr;
+  uint32_t                           output_channel_count = 1;
 
   // The coefficient-column slots (indices into array_storage/array_ptrs), the
   // three storage generations ([gen][j] backs slot coeff_array_slots[j]), the
@@ -384,12 +386,16 @@ public:
 
   /**
    * Process one buffer of audio. Called from the audio thread.
-   * Fills outputBuffer with buffer_length_ samples.
+   * Fills the compact frame-major output image. `outputBuffer` remains the
+   * channel-0 compatibility view used by historical render clients.
    */
   void process()
   {
     auto finish_silence = [&] {
       std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);
+      std::fill(interleaved_output_buffer_.begin(),
+                interleaved_output_buffer_.end(), 0.0);
+      rendered_output_channel_count_.store(1, std::memory_order_release);
       audio_sample_index_ += buffer_length_;
       audio_device_frame_ += buffer_length_;
       publish_audio_boundary();
@@ -408,7 +414,8 @@ public:
       tropical_metal::set_audio_callback_thread(false);
       audio_device_frame_ = metal_tiles_->published_device_frame();
       audio_sample_index_ = metal_tiles_->published_source_sample();
-      apply_fade_to_output();
+      apply_fade_to_output(outputBuffer.data(), 1);
+      rendered_output_channel_count_.store(1, std::memory_order_release);
       publish_audio_boundary();
       return;
     }
@@ -594,6 +601,11 @@ public:
     if (!fused_ready && !mk_ready)
     {
       std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);
+      const uint32_t output_channels = state.output_channel_count;
+      std::fill_n(interleaved_output_buffer_.begin(),
+        static_cast<std::size_t>(buffer_length_) * output_channels, 0.0);
+      rendered_output_channel_count_.store(
+        output_channels, std::memory_order_release);
       audio_sample_index_ += buffer_length_;
       audio_device_frame_ += buffer_length_;
       publish_audio_boundary();
@@ -612,6 +624,14 @@ public:
         state.array_ptrs[state.coeff_array_slots[j]] =
           state.coeff_generations[control_gen][j].data();
 
+    const uint32_t output_channels = state.output_channel_count;
+    double * const rendered_output = output_channels == 1
+      ? outputBuffer.data() : interleaved_output_buffer_.data();
+    // Native emitters only overwrite declared sink targets. Clear the complete
+    // compact image first so missing targets and sink-free plans are silent.
+    std::fill_n(rendered_output,
+      static_cast<std::size_t>(buffer_length_) * output_channels, 0.0);
+
     if (state.mode == tropical_jit::CompilationMode::Fused)
     {
       // Single kernel call processes the entire buffer.
@@ -624,7 +644,7 @@ public:
         state.sample_rate,
         start_sample_index,
         state.param_ptrs.data(),
-        outputBuffer.data(),
+        rendered_output,
         buffer_length_,
         state.audio_slots.data());   // private whole-buffer slot snapshot
     }
@@ -643,20 +663,28 @@ public:
       const double   sr          = state.sample_rate;
       const uint64_t * params    = state.param_ptrs.data();
       double *       slots       = state.audio_slots.data();
-      double *       out         = outputBuffer.data();
+      double *       out         = rendered_output;
       const uint64_t start_idx   = start_sample_index;
       for (unsigned int i = 0; i < buffer_length_; ++i)
       {
         const uint64_t s = start_idx + i;
         for (auto fn : mk.instances)
           fn(regs, arrays, arr_sizes, temps, sr, s, params, slots);
-        mk.postamble_mix(regs, arrays, arr_sizes, temps, sr, s, params, slots, out, i);
+        mk.postamble_mix(
+          regs, arrays, arr_sizes, temps, sr, s, params, slots, out, i,
+          output_channels);
       }
     }
 
     audio_sample_index_ += buffer_length_;
     audio_device_frame_ += buffer_length_;
-    apply_fade_to_output();
+    apply_fade_to_output(rendered_output, output_channels);
+    if (output_channels > 1)
+      for (unsigned int frame = 0; frame < buffer_length_; ++frame)
+        outputBuffer[frame] =
+          rendered_output[static_cast<std::size_t>(frame) * output_channels];
+    rendered_output_channel_count_.store(
+      output_channels, std::memory_order_release);
 
     // Publish the completed boundary only after all output processing for this
     // buffer (including fade) is complete.
@@ -684,6 +712,21 @@ public:
   std::vector<double> outputBuffer;
 
   unsigned int getBufferLength() const { return buffer_length_; }
+
+  /** Number of channels in the most recently completed callback image. */
+  uint32_t getOutputChannelCount() const noexcept
+  {
+    return rendered_output_channel_count_.load(std::memory_order_acquire);
+  }
+
+  /** Compact frame-major output (`frame * channels + channel`). The pointer is
+      stable for the runtime lifetime; callers consume only
+      `buffer_length * getOutputChannelCount()` values. */
+  const double * getInterleavedOutputBuffer() const noexcept
+  {
+    return getOutputChannelCount() == 1
+      ? outputBuffer.data() : interleaved_output_buffer_.data();
+  }
 
   uint32_t metal_render_tile_frames() const
   {
@@ -900,7 +943,7 @@ public:
         || workspace.materialized_slots.empty())
     {
       workspace.materialized_slots = snapshot->controls->slots;
-      double coeff_out = 0.0;
+      std::array<double, tropical_jit::kMaxOutputChannels> coeff_out{};
       if (program.coeff_kernel)
         program.coeff_kernel(
           nullptr,
@@ -911,14 +954,14 @@ public:
           program.sample_rate,
           0,
           program.param_ptrs.data(),
-          &coeff_out,
+          coeff_out.data(),
           1,
           workspace.materialized_slots.data());
     }
     workspace.control_version = snapshot->controls->control_version;
     workspace.slots = workspace.materialized_slots;
 
-    double scratch_out = 0.0;
+    std::array<double, tropical_jit::kMaxOutputChannels> scratch_out{};
     for (uint32_t i = 0; i < count; ++i)
     {
       program.kernel(
@@ -930,7 +973,7 @@ public:
         program.sample_rate,
         start_index + static_cast<uint64_t>(i) * stride,
         program.param_ptrs.data(),
-        &scratch_out,
+        scratch_out.data(),
         1,
         workspace.slots.data());
       for (uint32_t k = 0; k < n_slots; ++k)
@@ -1326,17 +1369,18 @@ private:
     const KernelState & state,
     uint64_t effective_sample_index = UINT64_MAX);
 
-  void apply_fade_to_output()
+  void apply_fade_to_output(double * output, uint32_t channels)
   {
     int fi = fade_in_remaining_.load(std::memory_order_relaxed);
     int fo = fade_out_remaining_.load(std::memory_order_relaxed);
     if (fi <= 0 && fo == -1) return;
     for (unsigned int s = 0; s < buffer_length_; ++s)
     {
+      double gain = 1.0;
       if (fi > 0)
       {
         const double t = 1.0 - static_cast<double>(fi) / kFadeSamples_;
-        outputBuffer[s] *= t * t * (3.0 - 2.0 * t);
+        gain *= t * t * (3.0 - 2.0 * t);
         --fi;
       }
       if (fo != -1)
@@ -1344,12 +1388,14 @@ private:
         if (fo > 0)
         {
           const double t = static_cast<double>(fo) / kFadeSamples_;
-          outputBuffer[s] *= t * t * (3.0 - 2.0 * t);
+          gain *= t * t * (3.0 - 2.0 * t);
           --fo;
         }
         else
-          outputBuffer[s] = 0.0;
+          gain = 0.0;
       }
+      for (uint32_t channel = 0; channel < channels; ++channel)
+        output[static_cast<std::size_t>(s) * channels + channel] *= gain;
     }
     fade_in_remaining_.store(fi, std::memory_order_relaxed);
     fade_out_remaining_.store(fo, std::memory_order_relaxed);
@@ -1411,6 +1457,11 @@ private:
   }
 
   unsigned int buffer_length_;
+  // Fixed-capacity callback storage: loading a wider plan never allocates or
+  // resizes on the real-time thread. Mono kernels write the legacy view
+  // directly; wider kernels write this compact frame-major image.
+  std::vector<double> interleaved_output_buffer_;
+  std::atomic<uint32_t> rendered_output_channel_count_{1};
   std::array<KernelState, 2> states_;
   std::atomic<uint32_t> active_state_{0};
   std::array<std::atomic<StorageOwner>, 2> state_owners_{};

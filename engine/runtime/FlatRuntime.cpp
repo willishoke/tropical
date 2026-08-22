@@ -86,6 +86,7 @@ make_observation_program_image(
   image->kernel = state.kernel;
   image->coeff_kernel = state.coeff_kernel;
   image->sample_rate = state.sample_rate;
+  image->output_channel_count = state.output_channel_count;
   image->register_count = state.registers.size();
   image->temp_count = state.temps.size();
   image->coeff_register_count = state.coeff_registers.size();
@@ -171,8 +172,12 @@ void attach_exact_tile_fallback(
 } // namespace
 
 FlatRuntime::FlatRuntime(unsigned int buffer_length)
-  : buffer_length_(buffer_length),
-    outputBuffer(buffer_length, 0.0)
+  : outputBuffer(buffer_length, 0.0),
+    buffer_length_(buffer_length),
+    interleaved_output_buffer_(
+      static_cast<std::size_t>(buffer_length)
+        * tropical_jit::kMaxOutputChannels,
+      0.0)
 {
   if (buffer_length == 0)
     throw std::invalid_argument(
@@ -420,6 +425,7 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan6::ParsedPlan6 & 
   KernelState new_state;
   new_state.mode           = parsed.compilation_mode;
   new_state.sample_rate    = parsed.sample_rate;
+  new_state.output_channel_count = parsed.output_channel_count;
   new_state.array_names    = parsed.array_slot_names;
   new_state.metal_sample_threadgroups = parsed.metal_sample_threadgroups;
   new_state.metal_threadgroup_scratch_bytes =
@@ -792,6 +798,9 @@ FlatRuntime::load_ir_time_staged_with_observation_generation(
 
   if (!audio_msl_source.empty())
   {
+    if (new_state.output_channel_count != 1)
+      throw std::runtime_error(
+        "FlatRuntime: Metal output is mono-only; multichannel plans require the JIT backend");
 #ifdef TROPICAL_METAL
     if (!metal_queue_ready_.load(std::memory_order_acquire))
     {
@@ -910,7 +919,7 @@ void FlatRuntime::materialize_control_snapshot(
   }
   if (state.coeff_kernel)
   {
-    double scratch_out = 0.0;
+    std::array<double, tropical_jit::kMaxOutputChannels> scratch_out{};
     state.coeff_kernel(
       nullptr,
       state.coeff_registers.data(),
@@ -920,7 +929,7 @@ void FlatRuntime::materialize_control_snapshot(
       state.sample_rate,
       0,
       state.param_ptrs.data(),
-      &scratch_out,
+      scratch_out.data(),
       1,
       state.slots.data());
   }
