@@ -1,5 +1,5 @@
 import Tropical.Ir.EmitBankLaws
-import Tropical.Semantics.PlanWellFormed
+import Tropical.Semantics.Plan
 
 /-!
 # Routed-sum lowering and Plan capstones
@@ -39,8 +39,8 @@ theorem denoteExpr_routed_authored_order
 /-- An exact production routed stream decomposes into its independently closed
     invariant prefix followed by one intact routed Plan region. -/
 theorem execBlocks_routedStream
-    (alg : Algebra α) (inputs : PlanInputs α) (plan : FlatPlan)
-    (state : PlanState α) (emitted invariant body : Array NInstr)
+    (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
+    (emitted invariant body : Array NInstr)
     (dst capacity outputCount binderId : Nat)
     (routes : Array (Option Nat)) (count? : Option NOperand)
     (mapped : Array NOperand)
@@ -48,7 +48,7 @@ theorem execBlocks_routedStream
       ++ #[instrRoutedSumBegin dst capacity outputCount routes count? binderId]
       ++ body
       ++ #[instrRoutedSumYield dst mapped, instrRoutedSumEnd dst])
-    (hprefix : BlocksWellFormed plan invariant) :
+    (hprefix : BlocksStructurallyClosed invariant) :
     execBlocks alg inputs state emitted =
       (execBlocks alg inputs state invariant >>= fun next =>
         execBlocks alg inputs next
@@ -57,7 +57,7 @@ theorem execBlocks_routedStream
             ++ #[instrRoutedSumYield dst mapped, instrRoutedSumEnd dst])) := by
   rw [hstream]
   simpa only [Array.append_assoc] using
-    execBlocks_append_of_wellFormed alg inputs plan state invariant
+    execBlocks_append_of_structurallyClosed alg inputs state invariant
       (#[instrRoutedSumBegin dst capacity outputCount routes count? binderId]
         ++ body
         ++ #[instrRoutedSumYield dst mapped, instrRoutedSumEnd dst]) hprefix
@@ -258,8 +258,8 @@ theorem compileRoutedSum_execBlocks
         ++ #[instrRoutedSumYield dst mappedOps, instrRoutedSumEnd dst]
       ∧ r = .array (.arrayReg dst) outputCount .float
       ∧ ∀ {α : Type} (alg : Algebra α) (inputs : PlanInputs α)
-          (plan : FlatPlan) (state : PlanState α),
-        BlocksWellFormed plan (s.instrs ++ pre) →
+          (state : PlanState α),
+        BlocksStructurallyClosed (s.instrs ++ pre) →
         execBlocks alg inputs state s'.instrs =
           (execBlocks alg inputs state (s.instrs ++ pre) >>= fun next =>
             execBlocks alg inputs next
@@ -272,8 +272,8 @@ theorem compileRoutedSum_execBlocks
       values dynCount? idxId hts hvs hdc hT hC hV s r s' hDepth hCapacity
       hOutputs hFanout hRouteCount hTargets hcompile
   refine ⟨pre, bodyIns, dst, countOp?, mappedOps, hstream, hresult, ?_⟩
-  intro α alg inputs plan state hprefix
-  exact execBlocks_routedStream alg inputs plan state s'.instrs
+  intro α alg inputs state hprefix
+  exact execBlocks_routedStream alg inputs state s'.instrs
     (s.instrs ++ pre) bodyIns dst capacity outputCount idxId routes countOp?
     mappedOps hstream hprefix
 

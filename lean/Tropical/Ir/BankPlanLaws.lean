@@ -1,5 +1,5 @@
 import Tropical.Ir.EmitBankLaws
-import Tropical.Semantics.PlanWellFormed
+import Tropical.Semantics.Plan
 
 /-!
 # Bank/Reduce Plan capstones
@@ -70,8 +70,8 @@ theorem nestedReduce_order_capstone {α : Type _}
     loop-invariant prefix followed by one structured Plan region.  This is the
     semantic companion to `compileBankSum_stream`; the region remains intact. -/
 theorem execBlocks_reduceStream
-    (alg : Algebra α) (inputs : PlanInputs α) (plan : FlatPlan)
-    (state : PlanState α) (emitted invariant body : Array NInstr)
+    (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
+    (emitted invariant body : Array NInstr)
     (acc capacity binderId : Nat) (ty : ScalarType)
     (init : NOperand) (count? : Option NOperand) (contribution : NOperand)
     (hstream : emitted = invariant
@@ -79,7 +79,7 @@ theorem execBlocks_reduceStream
       ++ body
       ++ #[instrScalar "Add" acc #[.reg acc ty, contribution] ty,
         instrReduceEnd acc ty])
-    (hprefix : BlocksWellFormed plan invariant) :
+    (hprefix : BlocksStructurallyClosed invariant) :
     execBlocks alg inputs state emitted =
       (execBlocks alg inputs state invariant >>= fun next =>
         execBlocks alg inputs next
@@ -89,7 +89,7 @@ theorem execBlocks_reduceStream
               instrReduceEnd acc ty])) := by
   rw [hstream]
   simpa only [Array.append_assoc] using
-    execBlocks_append_of_wellFormed alg inputs plan state invariant
+    execBlocks_append_of_structurallyClosed alg inputs state invariant
       (#[instrReduceBegin acc init capacity ty count? binderId]
         ++ body
         ++ #[instrScalar "Add" acc #[.reg acc ty, contribution] ty,
@@ -119,8 +119,8 @@ theorem compileBankSum_execBlocks
           instrReduceEnd acc ty]
       ∧ r = .scalar (.reg acc ty) ty
       ∧ ∀ {α : Type} (alg : Algebra α) (inputs : PlanInputs α)
-          (plan : FlatPlan) (state : PlanState α),
-        BlocksWellFormed plan (s.instrs ++ pre) →
+          (state : PlanState α),
+        BlocksStructurallyClosed (s.instrs ++ pre) →
         execBlocks alg inputs state s'.instrs =
           (execBlocks alg inputs state (s.instrs ++ pre) >>= fun next =>
             execBlocks alg inputs next
@@ -134,8 +134,8 @@ theorem compileBankSum_execBlocks
     compileBankSum_stream arena hw bound count tables body dynCount? idxId
       hts hb hdc hT hC hB s r s' hcompile
   refine ⟨pre, bodyIns, acc, ty, countOp?, contribOp, hstream, hresult, ?_⟩
-  intro α alg inputs plan state hprefix
-  exact execBlocks_reduceStream alg inputs plan state s'.instrs
+  intro α alg inputs state hprefix
+  exact execBlocks_reduceStream alg inputs state s'.instrs
     (s.instrs ++ pre) bodyIns acc count idxId ty
     (.const (Lean.JsonNumber.fromNat 0) ty) countOp? contribOp hstream hprefix
 
