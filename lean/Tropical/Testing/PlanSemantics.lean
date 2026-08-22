@@ -141,4 +141,77 @@ private def imageScalars? : Outcome (SinkImage Int) → Option (Array Int)
 example : imageScalars? (denoteSinks fixtureAlgebra stereoPlan stereoState) =
     some #[8, 14] := by native_decide
 
+private def reducedState : PlanState Int := {
+  temps := #[.scalar 99]
+}
+
+private def reduceBlock : Array NInstr := #[
+  instrReduceBegin 0 (.const ⟨0, 0⟩ .int) 4 .int none 7,
+  instrScalar "Add" 0 #[.reg 0 .int, .loopIdx 7] .int,
+  instrReduceEnd 0 .int
+]
+
+example : tempScalar? 0
+    (execBlocks fixtureAlgebra fixtureInputs reducedState reduceBlock) = some 6 := by
+  native_decide
+
+private def dynamicReduceState : PlanState Int := {
+  temps := #[.scalar 0]
+  slots := #[.scalar 2]
+}
+
+private def dynamicReduceBlock : Array NInstr := #[
+  instrReduceBegin 0 (.const ⟨0, 0⟩ .int) 8 .int (some (.slot 0 .int)) 3,
+  instrScalar "Add" 0 #[.reg 0 .int, .loopIdx 3] .int,
+  instrReduceEnd 0 .int
+]
+
+example : tempScalar? 0
+    (execBlocks fixtureAlgebra fixtureInputs dynamicReduceState dynamicReduceBlock) =
+      some 1 := by native_decide
+
+private def nestedReduceState : PlanState Int := {
+  temps := #[.scalar 0, .scalar 0]
+}
+
+private def nestedReduceBlock : Array NInstr := #[
+  instrReduceBegin 0 (.const ⟨0, 0⟩ .int) 3 .int none 10,
+  instrReduceBegin 1 (.loopIdx 10) 2 .int none 11,
+  instrScalar "Add" 1 #[.reg 1 .int, .const ⟨1, 0⟩ .int] .int,
+  instrReduceEnd 1 .int,
+  instrScalar "Add" 0 #[.reg 0 .int, .reg 1 .int] .int,
+  instrReduceEnd 0 .int
+]
+
+example : tempScalar? 0
+    (execBlocks fixtureAlgebra fixtureInputs nestedReduceState nestedReduceBlock) =
+      some 9 := by native_decide
+
+private def routedState : PlanState Int := {
+  temps := #[.scalar 0, .scalar 5]
+  arrays := #[#[.scalar 99, .scalar 99]]
+}
+
+private def routedBlock : Array NInstr := #[
+  instrRoutedSumBegin 0 3 2
+    #[some 0, none, some 1, some 0, some 0, some 1] none 23,
+  instrScalar "Add" 1 #[.loopIdx 23, .const ⟨10, 0⟩ .int] .int,
+  instrRoutedSumYield 0 #[.loopIdx 23, .reg 1 .int],
+  instrRoutedSumEnd 0
+]
+
+example : arrayScalars? 0
+    (execBlocks fixtureAlgebra fixtureInputs routedState routedBlock) =
+      some #[13, 13] := by native_decide
+
+example : tempScalar? 1
+    (execBlocks fixtureAlgebra fixtureInputs routedState routedBlock) = some 5 := by
+  native_decide
+
+example :
+    (match execBlocks fixtureAlgebra fixtureInputs reducedState
+      #[instrReduceEnd 0 .int] with
+    | .error error => error.operation
+    | .ok _ => "unexpected success") = "instruction.region" := by native_decide
+
 end Tropical.Testing.PlanSemantics
