@@ -35,7 +35,16 @@ function runNative(slug: string, samples: number): Float64Array {
   const r = spawnSync([diffcli, 'render-bytes', planTmp, '--frames', '1', '--buffer', String(samples)], { cwd: repoRoot, env: cliEnv })
   if (r.exitCode !== 0) throw new Error(`render-bytes ${slug} failed: ${r.stderr?.toString()}`)
   const b = r.stdout
-  return new Float64Array(b.buffer.slice(b.byteOffset, b.byteOffset + samples * 8))
+  const plan = JSON.parse(c.stdout.toString())
+  const outputChannelCount = plan.output_channel_count ??
+    (plan.sinks ?? []).reduce(
+      (count: number, sink: { target?: number }) =>
+        Math.max(count, (sink.target ?? 0) + 1),
+      1,
+    )
+  return new Float64Array(
+    b.buffer.slice(
+      b.byteOffset, b.byteOffset + samples * outputChannelCount * 8))
 }
 
 describe('web/dist shipped artifacts vs native JIT', () => {
@@ -58,8 +67,10 @@ describe('web/dist shipped artifacts vs native JIT', () => {
       const k = await WasmKernel.instantiate(wasmBytes, manifest, N)
       const wasm = k.render(N).slice()
 
+      expect(wasm.length).toBe(nat.length)
       let maxDiff = 0
-      for (let i = 0; i < N; i++) maxDiff = Math.max(maxDiff, Math.abs(wasm[i]! - nat[i]!))
+      for (let i = 0; i < nat.length; i++)
+        maxDiff = Math.max(maxDiff, Math.abs(wasm[i]! - nat[i]!))
       expect(maxDiff).toBeLessThan(1e-12)
     }, 20000) // compile (JIT) + wasm instantiate + dual render; the heaviest
               // patches (deeply-nested clocked oscillators) exceed the 5s default

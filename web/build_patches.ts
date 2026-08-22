@@ -65,12 +65,19 @@ for (const { slug, title, description } of manifest) {
   }
 
   // 3. Trim plan_6 down to the KernelManifest the runtime consumes.
+  const outputChannelCount = plan.output_channel_count ??
+    (plan.sinks ?? []).reduce(
+      (count: number, sink: { target?: number }) =>
+        Math.max(count, (sink.target ?? 0) + 1),
+      1,
+    )
   writeFileSync(join(distDir, `${slug}.manifest.json`), JSON.stringify({
     sampleRate:     plan.config?.sampleRate ?? 44100,
     registerCount:  plan.register_count ?? 0,
     arraySlotSizes: plan.array_slot_sizes ?? [],
     slotCount:      plan.slot_count ?? (plan.slot_defaults?.length ?? 0),
     slotDefaults:   plan.slot_defaults ?? [],
+    outputChannelCount,
   }), 'utf-8')
 
   index.push({ slug, title, description, wasmPath: `patches/${slug}.wasm`, manifestPath: `patches/${slug}.manifest.json` })

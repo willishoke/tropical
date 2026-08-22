@@ -5,6 +5,7 @@
  * a second consumer appears (see design notes / CLAUDE.md).
  */
 export type { KernelManifest } from './manifest.js'
+export { kernelOutputChannelCount } from './manifest.js'
 export type { KernelLayout } from './layout.js'
 export { computeLayout } from './layout.js'
 export { WasmKernel } from './kernel.js'

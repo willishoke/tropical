@@ -11,7 +11,9 @@
  * a WebAssembly.Module) because Chrome silently drops worklet messages
  * containing a Module; the worklet compiles them itself.
  */
-import { WasmKernel, type KernelManifest } from '../runtime/index.js'
+import {
+  WasmKernel, kernelOutputChannelCount, type KernelManifest,
+} from '../runtime/index.js'
 
 type WorkletMsg =
   | { type: 'load'; wasm: ArrayBuffer; manifest: KernelManifest }
@@ -49,26 +51,44 @@ class TropicalProcessor extends AudioWorkletProcessor {
     else if (msg.type === 'fadeOut') this.kernel?.beginFadeOut()
   }
 
+  private clear(output: Float32Array[]): void {
+    for (const channel of output) channel.fill(0)
+  }
+
   process(_inputs: Float32Array[][], outputs: Float32Array[][], _parameters: Record<string, Float32Array>): boolean {
+    const output = outputs[0]
+    if (!output || output.length === 0) return true
+
     // Instantiate a queued patch (async; the kernel arrives a few blocks later).
     if (this.pending) {
       const { wasm, manifest } = this.pending
       this.pending = null
       this.kernel = null
+      let channelCount: number
+      try { channelCount = kernelOutputChannelCount(manifest) }
+      catch (err) {
+        this.port.postMessage({ type: 'error', error: String(err) })
+        this.clear(output)
+        return true
+      }
+      if (channelCount > 1 && channelCount > output.length) {
+        this.port.postMessage({
+          type: 'error',
+          error: `patch requires ${channelCount} output channels; node has ${output.length}`,
+        })
+        this.clear(output)
+        return true
+      }
       WasmKernel.instantiate(new Uint8Array(wasm), manifest, 128)
         .then((k) => { this.kernel = k; k.beginFadeIn() })
         .catch((err) => this.port.postMessage({ type: 'error', error: String(err) }))
-      const o = outputs[0]?.[0]; if (o) o.fill(0)
+      this.clear(output)
       return true
     }
 
-    const output = outputs[0]
-    if (!output || output.length === 0) return true
-    const mono = output[0]!
-    if (!this.kernel) { mono.fill(0); return true }
+    if (!this.kernel) { this.clear(output); return true }
 
-    this.kernel.process(mono, mono.length)
-    for (let ch = 1; ch < output.length; ch++) output[ch]!.set(mono)
+    this.kernel.process(output, output[0]!.length)
     return true
   }
 }

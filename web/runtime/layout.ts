@@ -8,7 +8,7 @@
  * `KernelManifest` — no plan internals, the native engine's analog is
  * `FlatRuntime`'s backing-store allocation.
  */
-import type { KernelManifest } from './manifest.js'
+import { kernelOutputChannelCount, type KernelManifest } from './manifest.js'
 
 export type KernelLayout = {
   inputs: number
@@ -42,6 +42,7 @@ export function computeLayout(
   for (const sz of manifest.arraySlotSizes) { arrayOffsets.push(p); p = align8(p + sz * 8) }
   const arraySizes = p; p = align8(p + manifest.arraySlotSizes.length * 8)
   const slots = p;      p = align8(p + manifest.slotCount * 8)
-  const output = p;     p = align8(p + maxBlockSize * 8)
+  const output = p
+  p = align8(p + maxBlockSize * kernelOutputChannelCount(manifest) * 8)
   return { inputs, registers, temps, arrays, arrayOffsets, arraySizes, slots, output, endByte: p }
 }
