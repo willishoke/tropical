@@ -38,6 +38,11 @@ def SigsIn (builder : Builder) (ids : Array Sig) : Prop :=
 def OptionalSigIn (builder : Builder) (id? : Option Sig) : Prop :=
   ∀ id ∈ id?, SigIn builder id
 
+theorem pure_preserves_builderWF {α : Type} (value : α) :
+    PreservesBuilderWF (pure value : BuildM α) := by
+  intro builder hBuilder
+  exact ⟨hBuilder, BuilderExtends.refl builder⟩
+
 /-- Generic sequencing rule used by the multi-intern production helpers. -/
 theorem bind_preserves {α β : Type} (first : BuildM α) (next : α → BuildM β)
     (validFirst : Builder → α → Prop) (validFinal : Builder → β → Prop)
