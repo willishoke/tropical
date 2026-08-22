@@ -15,6 +15,27 @@ namespace Tropical.Ir.Emit
 open Tropical.Plan
 open Tropical.Semantics
 
+/-- Direct production `ENode.routedSum` semantics is exactly the shared routed
+    fold: tables are eager, items use `List.range trips`, and route application
+    is the authored `(item, emit)` left fold. -/
+theorem denoteExpr_routed_authored_order
+    (alg : Algebra α) (env : SigEnv α) (arena : ExprArena)
+    (hArena : ArenaWellFormed arena)
+    {root : ExprId} {capacity outputCount : Nat}
+    {routes : Array (Option Nat)} {tables values : Array ExprId}
+    {dynCount? : Option ExprId} {binderId : Nat}
+    (hDeref : arena.deref root = some
+      (.routedSum capacity outputCount routes tables values dynCount? binderId)) :
+    denoteExpr alg env arena hArena root =
+      denoteRoutedSum alg capacity outputCount values.size routes
+        (tables.attach.map fun item =>
+          denoteExpr alg env arena hArena item.1)
+        (fun loopValue => values.attach.map fun item =>
+          denoteExpr alg (env.bindLoop binderId loopValue) arena hArena item.1)
+        (dynCount?.map fun count => denoteExpr alg env arena hArena count) := by
+  rw [denoteExpr_of_deref alg env arena hArena hDeref]
+  cases dynCount? <;> simp [denoteNode]
+
 theorem AppendsOnly.validateRoutedBodyEffects (instrs : Array NInstr) :
     AppendsOnly (validateRoutedBodyEffects instrs) := by
   unfold Tropical.Ir.Emit.validateRoutedBodyEffects
