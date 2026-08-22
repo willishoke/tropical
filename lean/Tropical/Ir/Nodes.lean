@@ -316,8 +316,10 @@ structure StageSig where
   nested : Array (Nat × Nat) := #[]
 deriving BEq, Repr, Inhabited
 
-/-- Merge two strictly-ascending dep arrays (dedup). -/
-private def mergeAsc {α : Type} [Ord α] [Inhabited α] (a b : Array α) : Array α := Id.run do
+/-- Merge two strictly-ascending dependency arrays and deduplicate equal
+    entries.  Public for the signature-shape proof surface; staging production
+    remains the sole caller that constructs dependency arrays. -/
+def mergeAsc {α : Type} [Ord α] [Inhabited α] (a b : Array α) : Array α := Id.run do
   if a.isEmpty then return b
   if b.isEmpty then return a
   let mut out : Array α := #[]
