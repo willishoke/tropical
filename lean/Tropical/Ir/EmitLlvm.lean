@@ -21,6 +21,11 @@ void(ptr inputs, ptr registers, ptr arrays, ptr array_sizes, ptr temps,
      ptr output_buffer, i64 buffer_length, ptr slots)
 ```
 
+`output_buffer` is compact frame-major interleaved storage. For a plan with
+`C` output channels, sink target `c` writes index `sample * C + c`. The channel
+count is a compile-time Plan fact, so widening output does not change the native
+kernel ABI.
+
 Registers/temps/arrays are `i64`-backed (float=bitcast, int=raw,
 bool=zext); slots are direct `double`. Instruction operand/dst slots are
 already global (the partitioner pre-shifts); only writeback register
@@ -720,7 +725,7 @@ decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children _h
 -- Sinks (mirrors the loop-body sink mix)
 -- ─────────────────────────────────────────────────────────────
 
-def emitSinks (sinks : Array SinkSpec) : M Unit := do
+def emitSinks (sinks : Array SinkSpec) (outputChannelCount : Nat) : M Unit := do
   for sink in sinks do
     let mut acc := zeroF
     for slotIdx in sink.inputs do
@@ -728,8 +733,36 @@ def emitSinks (sinks : Array SinkSpec) : M Unit := do
       let r ← fresh; line s!"{r} = fadd double {acc}, {v}"; acc := r
     let scaled ← fresh
     line s!"{scaled} = fmul double {acc}, {f64Lit sink.gain.toFloat}"
-    let g ← fresh; line s!"{g} = getelementptr inbounds double, ptr %output_buffer, i64 %s"
+    let outputIdx ←
+      if outputChannelCount == 1 && sink.target == 0 then
+        pure "%s"
+      else do
+        let frameBase ← fresh
+        line s!"{frameBase} = mul i64 %s, {outputChannelCount}"
+        let targetIdx ← fresh
+        line s!"{targetIdx} = add i64 {frameBase}, {sink.target}"
+        pure targetIdx
+    let g ← fresh
+    line s!"{g} = getelementptr inbounds double, ptr %output_buffer, i64 {outputIdx}"
     line s!"store double {scaled}, ptr {g}, align 8"
+
+/-- Native output width on the pre-schema branch. Integration replaces this
+    derivation with `plan.outputChannelCount`; compiler-produced plans guarantee
+    that the explicit manifest width equals this sink extent. -/
+private def derivedOutputChannelCount (sinks : Array SinkSpec) : Nat :=
+  sinks.foldl (fun count sink => max count (sink.target + 1)) 1
+
+private def validateSinkTargets (sinks : Array SinkSpec)
+    (outputChannelCount : Nat) : Except String Unit := do
+  if outputChannelCount == 0 || outputChannelCount > 64 then
+    throw s!"EmitLlvm: output channel count {outputChannelCount} is outside [1,64]"
+  for i in [0:sinks.size] do
+    let target := sinks[i]!.target
+    if target >= outputChannelCount then
+      throw s!"EmitLlvm: sink target {target} is outside output channel count {outputChannelCount}"
+    for j in [0:i] do
+      if sinks[j]!.target == target then
+        throw s!"EmitLlvm: duplicate sink target {target}"
 
 -- ─────────────────────────────────────────────────────────────
 -- Module entry point
@@ -750,10 +783,12 @@ private def intrinsicDecls : String :=
 /-- Emit the full LLVM module text for a FlatPlan's fused kernel. The
     function is named `tropical_kernel`; `compile_ir_text` renames it. -/
 def emitKernel (plan : FlatPlan) : Except String String := do
+  let outputChannelCount := derivedOutputChannelCount plan.sinks
+  validateSinkTargets plan.sinks outputChannelCount
   let body : M Unit := do
     for inst in plan.instanceFunctions do
       emitKernelBlock inst
-    emitSinks plan.sinks
+    emitSinks plan.sinks outputChannelCount
   let init : St := { sources := plan.sources }
   match body.run init with
   | .error e _ => .error e
