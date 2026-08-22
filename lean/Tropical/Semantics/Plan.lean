@@ -951,6 +951,14 @@ termination_by sizeOf inst
 decreasing_by
   exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children _h
 
+theorem execInstanceFunction_deterministic
+    (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
+    (inst : InstanceFunction) {first second : Outcome (PlanState α)}
+    (hfirst : execInstanceFunction alg inputs state inst = first)
+    (hsecond : execInstanceFunction alg inputs state inst = second) :
+    first = second :=
+  hfirst.symm.trans hsecond
+
 /-- Execute all top-level instance functions in authored array order. -/
 def execPlanFunctions (alg : Algebra α) (inputs : PlanInputs α)
     (state : PlanState α) (plan : FlatPlan) : Outcome (PlanState α) :=
@@ -1015,5 +1023,12 @@ def denoteFlatPlan (alg : Algebra α) (inputs : PlanInputs α)
     (plan : FlatPlan) : Outcome (SinkImage α) := do
   let initial ← initialPlanState alg inputs plan
   denoteSinks alg plan (← execPlanFunctions alg inputs initial plan)
+
+theorem denoteFlatPlan_deterministic
+    (alg : Algebra α) (inputs : PlanInputs α) (plan : FlatPlan)
+    {first second : Outcome (SinkImage α)}
+    (hfirst : denoteFlatPlan alg inputs plan = first)
+    (hsecond : denoteFlatPlan alg inputs plan = second) : first = second :=
+  hfirst.symm.trans hsecond
 
 end Tropical.Semantics
