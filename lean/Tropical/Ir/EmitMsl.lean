@@ -851,12 +851,6 @@ def emitKernelBlock (sizes : Array Nat) (inst : InstanceFunction) : M Unit := do
 termination_by sizeOf inst
 decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children _h
 
-/-- Fixed output width carried by a compiled kernel.  A sink targeting channel
-    `n` makes channels `0..n` addressable; a plan with no sinks remains a
-    one-channel kernel so all runtime allocations have a non-zero width. -/
-def outputChannelCount (sinks : Array SinkSpec) : Nat :=
-  sinks.foldl (fun count sink => max count (sink.target + 1)) 1
-
 private def sinkOutputIndex (channelCount target : Nat) : String :=
   if channelCount == 1 then "s" else s!"s * {channelCount}u + {target}u"
 
@@ -989,6 +983,10 @@ private def cooperativeRouteConstants (begins : Array NInstr) : String :=
     and in-kernel fills. Columns-free plans keep the exact 3-binding
     header, byte-frozen by the msl-golden gates. -/
 def emitKernel (plan : FlatPlan) : Except String String := do
+  if !plan.outputLayoutWellFormed then
+    throw "EmitMsl: output channel count must be positive and sink targets must be unique and in range"
+  if plan.outputChannelCount > 64 then
+    throw "EmitMsl: output channel count exceeds the supported maximum of 64"
   let sizes := plan.arraySlotSizes
   let cooperative := plan.hasRoutedSum
   let flat := planInstrs plan
@@ -1065,7 +1063,7 @@ def emitKernel (plan : FlatPlan) : Except String String := do
     for inst in plan.instanceFunctions do
       emitKernelBlock sizes inst
     if cooperative then ensureCooperativeLane0
-    emitSinks (outputChannelCount plan.sinks) plan.sinks
+    emitSinks plan.outputChannelCount plan.sinks
     if cooperative then
       popIndent
       line "}"
