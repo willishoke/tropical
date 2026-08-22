@@ -3,7 +3,9 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <thread>
 #include <vector>
@@ -104,17 +106,21 @@ public:
     double * destination = nullptr;
   };
 
-  EpochTileQueue(uint32_t device_frames, uint32_t render_frames)
+  EpochTileQueue(uint32_t device_frames, uint32_t render_frames,
+                 uint32_t output_channels = 1)
     : device_frames_(device_frames),
-      render_frames_(render_frames)
+      render_frames_(render_frames),
+      output_channels_(output_channels)
   {
     if (device_frames == 0 || render_frames < device_frames
-        || render_frames % device_frames != 0)
+        || render_frames % device_frames != 0 || output_channels == 0
+        || static_cast<std::size_t>(render_frames)
+             > std::numeric_limits<std::size_t>::max() / output_channels)
       throw std::invalid_argument(
-        "EpochTileQueue: render frames must be a positive multiple of device frames");
+        "EpochTileQueue: invalid frame or channel shape");
     for (auto & bank : banks_)
       for (auto & tile : bank.tiles)
-        tile.samples.assign(render_frames_, 0.0);
+        tile.samples.assign(sample_count(render_frames_), 0.0);
   }
 
   EpochTileQueue(const EpochTileQueue &) = delete;
@@ -122,6 +128,7 @@ public:
 
   uint32_t device_frames() const noexcept { return device_frames_; }
   uint32_t render_frames() const noexcept { return render_frames_; }
+  uint32_t output_channels() const noexcept { return output_channels_; }
   uint32_t capacity_frames() const noexcept
   {
     return kTilesPerBank * render_frames_;
@@ -284,7 +291,7 @@ public:
     if (!destination || frames != device_frames_)
     {
       if (destination)
-        std::fill_n(destination, frames, 0.0);
+        std::fill_n(destination, sample_count(frames), 0.0);
       advance_coordinates(frames);
       result.status = TileConsumeStatus::FaultSilence;
       return result;
@@ -330,7 +337,7 @@ public:
 
     if (audio_epoch_id_ == 0)
     {
-      std::fill_n(destination, frames, 0.0);
+      std::fill_n(destination, sample_count(frames), 0.0);
       advance_coordinates(frames);
       result.status = TileConsumeStatus::InitialSilence;
       publish_audio_boundary();
@@ -339,7 +346,7 @@ public:
 
     if (active_faulted_)
     {
-      std::fill_n(destination, frames, 0.0);
+      std::fill_n(destination, sample_count(frames), 0.0);
       advance_coordinates(frames);
       result.status = TileConsumeStatus::FaultSilence;
       publish_audio_boundary();
@@ -358,7 +365,7 @@ public:
             std::memory_order_acquire, std::memory_order_relaxed))
       {
         latch_starvation(expected);
-        std::fill_n(destination, frames, 0.0);
+        std::fill_n(destination, sample_count(frames), 0.0);
         advance_coordinates(frames);
         result.status = TileConsumeStatus::FaultSilence;
         publish_audio_boundary();
@@ -382,7 +389,7 @@ public:
     if (!tag_matches)
     {
       latch_tag_mismatch();
-      std::fill_n(destination, frames, 0.0);
+      std::fill_n(destination, sample_count(frames), 0.0);
       advance_coordinates(frames);
       result.status = TileConsumeStatus::FaultSilence;
       publish_audio_boundary();
@@ -390,7 +397,8 @@ public:
     }
 
     std::copy_n(
-      tile->samples.data() + reading_offset_, frames, destination);
+      tile->samples.data() + sample_count(reading_offset_),
+      sample_count(frames), destination);
     reading_offset_ += frames;
     advance_coordinates(frames);
     if (reading_offset_ == tag.frame_count)
@@ -541,6 +549,11 @@ public:
   }
 
 private:
+  std::size_t sample_count(uint32_t frames) const noexcept
+  {
+    return static_cast<std::size_t>(frames) * output_channels_;
+  }
+
   struct Tile
   {
     std::atomic<TileState> state{TileState::Free};
@@ -696,6 +709,7 @@ private:
 
   const uint32_t device_frames_;
   const uint32_t render_frames_;
+  const uint32_t output_channels_;
   std::array<Bank, kBankCount> banks_;
 
   // One immutable activation descriptor while epoch != acknowledgement.

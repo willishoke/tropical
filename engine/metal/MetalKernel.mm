@@ -67,7 +67,7 @@ id<MTLCommandQueue> shared_queue()
 struct MetalKernel
 {
   id<MTLComputePipelineState> pso    = nil;
-  id<MTLBuffer>               out    = nil;  // f32 × render quantum, worker-owned
+  id<MTLBuffer>               out    = nil;  // interleaved f32 × frames × channels
   id<MTLBuffer>               slots  = nil;  // immutable epoch snapshot upload
   // Packed coefficient-column buffer (buffer(3), banks-as-data) — nil when
   // the plan hoists no columns. Sized at load from the advertised slots'
@@ -75,6 +75,7 @@ struct MetalKernel
   // the plan across swaps like every other buffer here.
   id<MTLBuffer>               columns = nil; // packed immutable epoch columns
   uint32_t capacity     = 0;
+  uint32_t output_channels = 0;
   uint32_t slot_count   = 0;
   uint32_t column_count = 0;
   DispatchKind dispatch_kind = DispatchKind::SampleThreads;
@@ -230,7 +231,9 @@ static bool render_tile_impl(MetalKernel & k,
       latch_dispatch_failure(k);
       return false;
     }
-    for (uint32_t i = 0; i < frames; ++i)
+    const std::size_t output_count =
+      static_cast<std::size_t>(frames) * k.output_channels;
+    for (std::size_t i = 0; i < output_count; ++i)
       destination[i] = static_cast<double>(source[i]);
     return true;
   }
@@ -238,6 +241,7 @@ static bool render_tile_impl(MetalKernel & k,
 
 MetalKernelPtr create(const std::string & msl_source,
                       uint32_t buffer_length,
+                      uint32_t output_channels,
                       uint32_t slot_count,
                       uint32_t column_count,
                       std::string & err,
@@ -246,6 +250,15 @@ MetalKernelPtr create(const std::string & msl_source,
 {
   @autoreleasepool
   {
+    if (buffer_length == 0 || output_channels == 0
+        || static_cast<std::size_t>(buffer_length)
+             > std::numeric_limits<std::size_t>::max() / output_channels
+        || static_cast<std::size_t>(buffer_length) * output_channels
+             > std::numeric_limits<NSUInteger>::max() / sizeof(float))
+    {
+      err = "MetalKernel: invalid output buffer shape";
+      return nullptr;
+    }
     id<MTLDevice> dev = shared_device();
     if (!dev) { err = "MetalKernel: no Metal device"; return nullptr; }
 
@@ -283,6 +296,7 @@ MetalKernelPtr create(const std::string & msl_source,
     auto k = std::make_shared<MetalKernel>();
     k->pso          = pso;
     k->capacity     = buffer_length;
+    k->output_channels = output_channels;
     k->slot_count   = slot_count;
     k->column_count = column_count;
     k->dispatch_kind = dispatch_kind;
@@ -321,7 +335,10 @@ MetalKernelPtr create(const std::string & msl_source,
       k->threadgroup_width = static_cast<uint32_t>(group_width);
       k->threadgroup_scratch_bytes = threadgroup_scratch_bytes;
     }
-    k->out = [dev newBufferWithLength:(NSUInteger)buffer_length * sizeof(float)
+    const NSUInteger output_bytes = static_cast<NSUInteger>(
+      static_cast<std::size_t>(buffer_length) * output_channels
+        * sizeof(float));
+    k->out = [dev newBufferWithLength:output_bytes
                               options:MTLResourceStorageModeShared];
     k->slots = [dev newBufferWithLength:(NSUInteger)std::max<uint32_t>(slot_count, 1) * sizeof(float)
                                 options:MTLResourceStorageModeShared];
@@ -342,6 +359,11 @@ MetalKernelPtr create(const std::string & msl_source,
 DispatchKind dispatch_kind(const MetalKernel & k)
 {
   return k.dispatch_kind;
+}
+
+uint32_t output_channels(const MetalKernel & k)
+{
+  return k.output_channels;
 }
 
 uint32_t threadgroup_width(const MetalKernel & k)

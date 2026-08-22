@@ -101,6 +101,51 @@ static void exact_fallback_kernel(
     output[i] = static_cast<double>(start_sample_index + i) + bias;
 }
 
+static void exact_fallback_stereo_kernel(
+  const int64_t *, int64_t *, int64_t * const *,
+  const uint64_t *, int64_t *, double, uint64_t start_sample_index,
+  const uint64_t *, double * output, uint64_t frames, double *)
+{
+  for (uint64_t frame = 0; frame < frames; ++frame)
+  {
+    output[frame * 2] = static_cast<double>(start_sample_index + frame);
+    output[frame * 2 + 1] = -static_cast<double>(start_sample_index + frame);
+  }
+}
+
+static void test_interleaved_stereo_rendering()
+{
+  EpochTileQueue queue(2, 4, 2);
+  MetalRenderWorker worker(
+    queue,
+    [](const RenderEpochRequest &, uint64_t source, uint32_t frames,
+       double * destination) {
+      for (uint32_t frame = 0; frame < frames; ++frame)
+      {
+        destination[frame * 2] = static_cast<double>(source + frame);
+        destination[frame * 2 + 1] = -static_cast<double>(source + frame);
+      }
+      return true;
+    });
+
+  auto mismatched = request(1, EpochTransitionKind::Fresh);
+  const auto refused = worker.schedule(std::move(mismatched));
+  ASSERT(!refused.ok);
+  ASSERT(refused.error.find("request/queue output channel mismatch")
+         != std::string::npos);
+
+  auto stereo = request(2, EpochTransitionKind::Fresh);
+  stereo.output_channels = 2;
+  ASSERT(worker.schedule(std::move(stereo)).ok);
+  std::array<double, 4> output{};
+  ASSERT(queue.consume(output.data(), 2).status == TileConsumeStatus::Audio);
+  const std::array<double, 4> first{{0.0, -0.0, 1.0, -1.0}};
+  ASSERT(output == first);
+  ASSERT(queue.consume(output.data(), 2).status == TileConsumeStatus::Audio);
+  const std::array<double, 4> second{{2.0, -2.0, 3.0, -3.0}};
+  ASSERT(output == second);
+}
+
 static void test_absolute_time_materialization_and_clock_jump()
 {
   EpochTileQueue queue(128, 128);
@@ -218,6 +263,41 @@ static void test_unsafe_materialization_uses_exact_fallback()
   ASSERT(consumed.status == TileConsumeStatus::Audio);
   for (uint32_t i = 0; i < output.size(); ++i)
     ASSERT(output[i] == static_cast<double>(i) + 3.0);
+}
+
+static void test_stereo_exact_fallback_uses_full_sample_width()
+{
+  EpochTileQueue queue(2, 4, 2);
+  MetalRenderWorker worker(
+    queue,
+    [](const RenderEpochRequest &, uint64_t, uint32_t, double *) {
+      return false;
+    });
+
+  auto materializer =
+    std::make_shared<tropical_metal::TileMaterializerProgram>();
+  materializer->kernel = unsafe_endpoint_materializer;
+  materializer->array_sizes = {1};
+  materializer->tile_array_slots = {0};
+  materializer->interval_frames = 4;
+  auto exact =
+    std::make_shared<tropical_metal::ExactTileFallbackProgram>();
+  exact->kernel = exact_fallback_stereo_kernel;
+  exact->array_storage = {{0}};
+  exact->array_sizes = {1};
+
+  auto staged = request(1, EpochTransitionKind::Fresh);
+  staged.output_channels = 2;
+  staged.tile_materializer = std::move(materializer);
+  staged.materializer_slots = {0.0};
+  staged.materializer_seed_arrays = {{0}};
+  staged.exact_fallback = std::move(exact);
+  ASSERT(worker.schedule(std::move(staged)).ok);
+
+  std::array<double, 4> output{};
+  ASSERT(queue.consume(output.data(), 2).status == TileConsumeStatus::Audio);
+  const std::array<double, 4> expected{{0.0, -0.0, 1.0, -1.0}};
+  ASSERT(output == expected);
 }
 
 static void test_worker_activation_and_refill()
@@ -777,10 +857,14 @@ static void test_unclaimed_epochs_coalesce_after_audio_stops()
 int main()
 {
   std::printf("test_metal_render_worker (no DAC)\n");
+  run_test("stereo render requests preserve interleaved tile width",
+           test_interleaved_stereo_rendering);
   run_test("absolute tile images rematerialize across a backward clock jump",
            test_absolute_time_materialization_and_clock_jump);
   run_test("unsafe tile images fall back to the exact CPU kernel",
            test_unsafe_materialization_uses_exact_fallback);
+  run_test("stereo exact fallback validates the full interleaved tile",
+           test_stereo_exact_fallback_uses_full_sample_width);
   run_test("lazy worker activation, refill, and continuous handoff",
            test_worker_activation_and_refill);
   run_test("candidate inside full-bank horizon avoids a retarget",

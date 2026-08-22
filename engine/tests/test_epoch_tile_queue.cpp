@@ -93,6 +93,35 @@ static void test_independent_quanta()
   }
 }
 
+static void test_interleaved_stereo_tiles()
+{
+  EpochTileQueue queue(2, 4, 2);
+  ASSERT(queue.output_channels() == 2);
+
+  std::array<double, 4> out{{9.0, 9.0, 9.0, 9.0}};
+  ASSERT(queue.consume(out.data(), 2).status
+         == TileConsumeStatus::InitialSilence);
+  for (double sample : out) ASSERT(sample == 0.0);
+
+  ASSERT(queue.begin_epoch(0, 1));
+  EpochTileQueue::RenderClaim claim;
+  ASSERT(queue.claim_tile(0, 0, {1, 2, 10, 4}, claim));
+  for (uint32_t frame = 0; frame < 4; ++frame)
+  {
+    claim.destination[frame * 2] = static_cast<double>(10 + frame);
+    claim.destination[frame * 2 + 1] = -static_cast<double>(10 + frame);
+  }
+  ASSERT(queue.publish_tile(claim));
+  ASSERT(queue.publish_activation({1, 2, 10, 0}));
+
+  ASSERT(queue.consume(out.data(), 2).status == TileConsumeStatus::Audio);
+  const std::array<double, 4> first{{10.0, -10.0, 11.0, -11.0}};
+  ASSERT(out == first);
+  ASSERT(queue.consume(out.data(), 2).status == TileConsumeStatus::Audio);
+  const std::array<double, 4> second{{12.0, -12.0, 13.0, -13.0}};
+  ASSERT(out == second);
+}
+
 static void test_activation_and_jump()
 {
   EpochTileQueue queue(128, 512);
@@ -266,6 +295,8 @@ int main()
 {
   std::printf("test_epoch_tile_queue\n");
   run_test("Bdev 128/256/512 slices Rgpu 512", test_independent_quanta);
+  run_test("stereo tiles slice on frames and copy interleaved samples",
+           test_interleaved_stereo_tiles);
   run_test("continuous activation and exact clock jump", test_activation_and_jump);
   run_test("unstable activation read defers without spinning",
            test_unstable_activation_defers);
