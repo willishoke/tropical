@@ -23,6 +23,12 @@ example (arena : ExprArena) (id : ExprId)
     stageOf arena {} id = .s1 :=
   stageOf_dangling h
 
+example : SignaturesShaped ({} : ExprArena) := empty_signaturesShaped
+
+example (inputIdx : Nat) :
+    StageSigShape ({ base := .fold, inputs := #[inputIdx] } : StageSig) :=
+  stageSigShape_input inputIdx
+
 end Tropical.Testing.StagingLaws
 
 namespace Tropical.Testing.Stage0Laws
