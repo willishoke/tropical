@@ -43,6 +43,20 @@ private def stereoEmissionLooksInterleaved : Bool :=
 
 example : stereoEmissionLooksInterleaved = true := by native_decide
 
+private def sparseTargetZeroFilled : Bool :=
+  let sparse :=
+    { stereoPlan with
+      outputChannelCount := 3
+      sinks := #[
+        { inputs := #[0], gain := jn 1, target := 0 },
+        { inputs := #[0], gain := jn 1, target := 2 }] }
+  match Tropical.Ir.EmitLlvm.emitKernel sparse with
+  | .error _ => false
+  | .ok ir =>
+      (ir.splitOn "store double 0x0000000000000000").length == 2
+
+example : sparseTargetZeroFilled = true := by native_decide
+
 private def duplicateTargetsRejected : Bool :=
   let duplicate :=
     { stereoPlan with

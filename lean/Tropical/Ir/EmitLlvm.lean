@@ -727,6 +727,22 @@ decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children _h
 -- ─────────────────────────────────────────────────────────────
 
 def emitSinks (sinks : Array SinkSpec) (outputChannelCount : Nat) : M Unit := do
+  -- A sparse target image is semantically zero in every missing channel.  Do
+  -- not rely on a particular host to clear reused wasm/native output storage.
+  for target in [0:outputChannelCount] do
+    unless sinks.any (fun sink => sink.target == target) do
+      let outputIdx ←
+        if outputChannelCount == 1 then
+          pure "%s"
+        else do
+          let frameBase ← fresh
+          line s!"{frameBase} = mul i64 %s, {outputChannelCount}"
+          let targetIdx ← fresh
+          line s!"{targetIdx} = add i64 {frameBase}, {target}"
+          pure targetIdx
+      let g ← fresh
+      line s!"{g} = getelementptr inbounds double, ptr %output_buffer, i64 {outputIdx}"
+      line s!"store double {zeroF}, ptr {g}, align 8"
   for sink in sinks do
     let mut acc := zeroF
     for slotIdx in sink.inputs do
