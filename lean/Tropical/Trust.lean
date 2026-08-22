@@ -153,7 +153,7 @@ def obligations : Array Obligation := #[
       "patch-goldens"]
     owner := "Backend correctness"
     status := .open
-    limitation := "ClockAlgebra and ClockPlanLaws prove the arena-native identities, signed-i64 image laws, declared tick/tileTick source lookup, and the explicit compile-result-to-Plan operand seam. A whole compileNode induction and correspondence from Plan execution to emitted LLVM/MSL integer execution remain open."
+    limitation := "Tropical.EmitArrow.compileClockRail_refines and its ClockPlanLaws dependencies prove the arena-native identities, signed-i64 image laws, declared tick/tileTick source lookup, and the explicit compile-result-to-Plan operand seam. A whole compileNode induction and correspondence from Plan execution to emitted LLVM/MSL integer execution remain open."
     priority := .critical },
   { id := "REDUCE_REGION_EXECUTES_IN_ARRAY_ORDER"
     statement := "JIT, wasm, and MSL execute bank bodies at increasing indices with a scalar left fold and a dynamic count clamped to the static capacity."
@@ -166,7 +166,7 @@ def obligations : Array Obligation := #[
       "msl-column-guard", "manual:backend reduce-loop inspection"]
     owner := "Backend correctness"
     status := .open
-    limitation := "BankPlanLaws proves direct authored-order source semantics and connects a successful compileBankSum stream to execReductionRegion when its recursively emitted body supplies the named delimiter-balance invariant. The universal compileNode invariant and Plan-to-JIT/wasm/MSL execution refinement remain open."
+    limitation := "Tropical.Ir.Emit.compileBankSum_execReductionRegion proves direct authored-order source semantics and connects a successful compileBankSum stream to execReductionRegion when its recursively emitted body supplies the named delimiter-balance invariant. The universal compileNode invariant and Plan-to-JIT/wasm/MSL execution refinement remain open."
     priority := .critical },
   { id := "ROUTED_SUM_PRESERVES_AUTHORED_ORDER"
     statement := "Routed reductions map each item once and fold active contributions per output in authored item/emit order; cooperative Metal may parallelize the map but not reassociate the gather."
@@ -179,7 +179,7 @@ def obligations : Array Obligation := #[
       "metal-ctest", "manual:routed backend inspection"]
     owner := "Backend correctness"
     status := .evidenceBacked
-    limitation := "RoutedSumLaws proves direct authored item/emit order and connects a successful compileRoutedSum stream to execRoutedRegion when mapped-value compilation supplies the named routed-depth/parser-safety invariant. Its universal compileNode discharge and LLVM, Metal compiler, driver, and hardware execution remain external refinement assumptions."
+    limitation := "Tropical.Ir.Emit.compileRoutedSum_execRoutedRegion proves direct authored item/emit order and connects a successful compileRoutedSum stream to execRoutedRegion when mapped-value compilation supplies the named routed-depth/parser-safety invariant. Its universal compileNode discharge and LLVM, Metal compiler, driver, and hardware execution remain external refinement assumptions."
     priority := .critical },
   { id := "LLVM_TEXT_EXECUTES_PLAN"
     statement := "Generated LLVM implements tropical_plan_6 instruction, source, instance, and sink semantics."
