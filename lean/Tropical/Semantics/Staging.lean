@@ -86,4 +86,30 @@ theorem stageOf_resolves {arena : ExprArena} {ctx : StageCtx} {id : ExprId}
     stageOf arena ctx id = resolve ctx sig := by
   simp [stageOf, h]
 
+/-- The absolute tile clock has exactly the same direct denotation as the
+    ordinary sample clock.  TileStage changes the leaf used by a rebuilt DAG,
+    not the coordinate carried by the exact environment. -/
+theorem denoteExpr_tileSampleIndex (alg : Algebra α) (env : SigEnv α)
+    (arena : ExprArena) (hArena : ArenaWellFormed arena) {id : ExprId}
+    (hDeref : arena.deref id = some .tileSampleIndex) :
+    denoteExpr alg env arena hArena id = .ok env.sampleIndex := by
+  rw [denoteExpr_of_deref alg env arena hArena hDeref]
+  rfl
+
+/-- Direct/JIT semantics observes the exact left endpoint: `tilePhase` is the
+    literal zero.  This deliberately says nothing about nonzero interpolated
+    Metal lanes. -/
+theorem denoteExpr_tilePhase_zero (alg : Algebra α) (env : SigEnv α)
+    (arena : ExprArena) (hArena : ArenaWellFormed arena) {id : ExprId}
+    (hDeref : arena.deref id = some .tilePhase) :
+    denoteExpr alg env arena hArena id = alg.literal (0 : Nat) := by
+  rw [denoteExpr_of_deref alg env arena hArena hDeref]
+  rfl
+
+/-- Marking `tilePhase` as per-sample is conservative: its direct expression
+    denotation is nevertheless the constant left endpoint. -/
+theorem tilePhase_signature_is_conservative :
+    (enodeSig #[] .tilePhase).base = .s1 := by
+  rfl
+
 end Tropical.Semantics.Staging

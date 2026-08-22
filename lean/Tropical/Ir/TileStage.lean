@@ -8,8 +8,10 @@ This is deliberately separate from Stage0.  Stage0 first removes only
 τ-independent work and retains its sample-zero/control-write contract.  This
 pass then roots a second dependency slice at `tile_array_slots`, classifies only
 that slice as materializer-time, and delegates the mechanical residualization
-(regions, scalar boundaries, array crossings, block rebuilding) to the proven
-typed Stage0 machinery.
+(regions, scalar boundaries, array crossings, block rebuilding) to the typed
+Stage0 residualization machinery.  Its proved surface currently covers the
+alignment/refusal and empty-selection boundaries; deeper publication
+refinement is stated separately in `TileStageLaws`.
 -/
 
 namespace Tropical.Ir.TileStage

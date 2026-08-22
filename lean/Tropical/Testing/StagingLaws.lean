@@ -1,5 +1,6 @@
 import Tropical.Semantics.Staging
 import Tropical.Ir.Stage0Laws
+import Tropical.Ir.TileStageLaws
 
 /-! Executable witnesses for the staging proof surface. -/
 
