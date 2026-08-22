@@ -58,6 +58,7 @@ deriving BEq, Repr, Inhabited
 
 def knownGates : Array String := #[
   "lake-build:Tropical.Semantics",
+  "lake-build:Tropical.Proofs",
   "modal-universe-history",
   "modal-oriented-patch",
   "modal-phaser",
@@ -129,37 +130,56 @@ def obligations : Array Obligation := #[
     theoremSymbol := some "Tropical.Semantics.denoteExpr_extends"
     limitation := "The production compiler authors ExprIds directly, so there is no source-tree lowering refinement obligation. Backend execution remains separate."
     priority := .critical },
+  { id := "TO_RESOLVED_PRESERVES_PROGRAM_DENOTATION"
+    statement := "Every successful reachable EArena.toResolved conversion preserves recursive source-program denotation in the returned CoreProgram for every supported carrier and invocation."
+    evidence := #[.theorem]
+    implementationPaths := #["lean/Tropical/Ir/Strata/EArena.lean",
+      "lean/Tropical/Semantics/Program.lean",
+      "lean/Tropical/Semantics/Strata.lean"]
+    gateNames := #["lake-build:Tropical.Semantics"]
+    owner := "Lean semantics"
+    status := .proved
+    theoremSymbol := some "Tropical.Semantics.toResolved_preserves_denotation"
+    limitation := "The theorem covers the reachable source-to-Core strata exit, including recursive instances and refusal behavior. CoreProgram-to-FlatPlan compilation and backend execution remain separate obligations."
+    priority := .critical },
   { id := "CLOCK_RAIL_IS_EXACT"
     statement := "Per sample, runtime integer rail operations implement the Int denotation modulo the documented i64 image and shift/mask headroom rules."
     evidence := #[.theorem, .inspection, .golden]
     implementationPaths := #["lean/Tropical/EmitArrow/ClockAlgebra.lean",
-      "lean/Tropical/Ir/EmitLlvm.lean", "lean/Tropical/Ir/EmitMsl.lean"]
-    gateNames := #["clock-algebra-theorems", "patch-goldens"]
+      "lean/Tropical/EmitArrow/ClockPlanLaws.lean",
+      "lean/Tropical/Semantics/Plan.lean", "lean/Tropical/Ir/EmitLlvm.lean",
+      "lean/Tropical/Ir/EmitMsl.lean"]
+    gateNames := #["lake-build:Tropical.Proofs", "clock-algebra-theorems",
+      "patch-goldens"]
     owner := "Backend correctness"
     status := .open
-    limitation := "The front-end algebra is proved directly on frozen ExprArena/ExprId graphs. Correspondence to emitted LLVM/MSL integer execution is inspected, not proved."
+    limitation := "ClockAlgebra and ClockPlanLaws prove the arena-native identities, signed-i64 image laws, declared tick/tileTick source lookup, and the explicit compile-result-to-Plan operand seam. A whole compileNode induction and correspondence from Plan execution to emitted LLVM/MSL integer execution remain open."
     priority := .critical },
   { id := "REDUCE_REGION_EXECUTES_IN_ARRAY_ORDER"
     statement := "JIT, wasm, and MSL execute bank bodies at increasing indices with a scalar left fold and a dynamic count clamped to the static capacity."
     evidence := #[.theorem, .executableGate, .inspection]
     implementationPaths := #["lean/Tropical/EmitArrow/BankOrder.lean",
-      "lean/Tropical/Semantics/Expr.lean", "lean/Tropical/Ir/EmitBankLaws.lean",
+      "lean/Tropical/Semantics/Expr.lean", "lean/Tropical/Semantics/Plan.lean",
+      "lean/Tropical/Ir/EmitBankLaws.lean", "lean/Tropical/Ir/BankPlanLaws.lean",
       "engine/jit/OrcJitEngine.cpp", "lean/Tropical/Ir/EmitMsl.lean"]
-    gateNames := #["reduce-coverage", "msl-column-guard", "manual:backend reduce-loop inspection"]
+    gateNames := #["lake-build:Tropical.Proofs", "reduce-coverage",
+      "msl-column-guard", "manual:backend reduce-loop inspection"]
     owner := "Backend correctness"
     status := .open
-    limitation := "Direct arena denotation order, nested fold order, region shape, and prefix clamp are proved; backend execution of the region remains a named runtime assumption."
+    limitation := "BankPlanLaws proves direct authored-order source semantics and connects a successful compileBankSum stream to execReductionRegion when its recursively emitted body supplies the named delimiter-balance invariant. The universal compileNode invariant and Plan-to-JIT/wasm/MSL execution refinement remain open."
     priority := .critical },
   { id := "ROUTED_SUM_PRESERVES_AUTHORED_ORDER"
     statement := "Routed reductions map each item once and fold active contributions per output in authored item/emit order; cooperative Metal may parallelize the map but not reassociate the gather."
     evidence := #[.theorem, .executableGate, .inspection]
     implementationPaths := #["lean/Tropical/Semantics/Environment.lean",
-      "lean/Tropical/Semantics/Expr.lean", "lean/Tropical/Ir/EmitLlvm.lean",
+      "lean/Tropical/Semantics/Expr.lean", "lean/Tropical/Semantics/Plan.lean",
+      "lean/Tropical/Ir/RoutedSumLaws.lean", "lean/Tropical/Ir/EmitLlvm.lean",
       "lean/Tropical/Ir/EmitMsl.lean", "engine/metal/MetalKernel.mm"]
-    gateNames := #["routed-sum-coverage", "metal-ctest", "manual:routed backend inspection"]
+    gateNames := #["lake-build:Tropical.Proofs", "routed-sum-coverage",
+      "metal-ctest", "manual:routed backend inspection"]
     owner := "Backend correctness"
     status := .evidenceBacked
-    limitation := "Direct arena semantics proves authored fold order and scalar/cooperative schedules are differentially exercised; LLVM, Metal compiler, driver, and hardware execution remain external refinement assumptions."
+    limitation := "RoutedSumLaws proves direct authored item/emit order and connects a successful compileRoutedSum stream to execRoutedRegion when mapped-value compilation supplies the named routed-depth/parser-safety invariant. Its universal compileNode discharge and LLVM, Metal compiler, driver, and hardware execution remain external refinement assumptions."
     priority := .critical },
   { id := "LLVM_TEXT_EXECUTES_PLAN"
     statement := "Generated LLVM implements tropical_plan_6 instruction, source, instance, and sink semantics."
