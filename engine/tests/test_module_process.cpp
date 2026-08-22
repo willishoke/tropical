@@ -104,6 +104,24 @@ static std::string wrap_loop(const std::string& body)
     "le:\n  ret void\n}\n";
 }
 
+static std::string stereo_constant_ir()
+{
+  return wrap_loop(
+    "  %frame_base = mul i64 %s, 2\n"
+    "  %left = getelementptr inbounds double, ptr %output_buffer, i64 %frame_base\n"
+    "  store double 2.500000e-01, ptr %left, align 8\n"
+    "  %right_index = add i64 %frame_base, 1\n"
+    "  %right = getelementptr inbounds double, ptr %output_buffer, i64 %right_index\n"
+    "  store double -5.000000e-01, ptr %right, align 8\n");
+}
+
+static const char* STEREO_MANIFEST = R"({
+  "schema":"tropical_plan_6","config":{"sampleRate":44100},
+  "output_channel_count":2,"register_count":0,"array_slot_count":0,
+  "array_slot_sizes":[],"instance_functions":[],
+  "sinks":[{"inputs":[],"gain":1,"target":0},
+           {"inputs":[],"gain":1,"target":1}],"slot_count":0})";
+
 static bool wait_for_true(
   const std::atomic<bool> & value,
   std::chrono::milliseconds timeout = std::chrono::seconds(10))
@@ -186,9 +204,75 @@ static void test_ir_constant()
   tropical_runtime_process(rt);
   const double* out = tropical_runtime_output_buffer(rt);
   ASSERT(out != nullptr);
+  ASSERT(tropical_runtime_output_channel_count(rt) == 1);
+  ASSERT(tropical_runtime_interleaved_output_buffer(rt) == out);
   for (unsigned int i = 0; i < buf; ++i) ASSERT_NEAR(out[i], 0.5, 1e-12);
 
   tropical_runtime_free(rt);
+}
+
+static void test_interleaved_native_output()
+{
+  constexpr unsigned int frames = 8;
+  tropical_runtime_t rt = tropical_runtime_new(frames);
+  ASSERT(rt != nullptr);
+  const std::string stereo_ir = stereo_constant_ir();
+  ASSERT_OK(tropical_runtime_load_ir(
+    rt, stereo_ir.c_str(), stereo_ir.size(),
+    STEREO_MANIFEST, std::strlen(STEREO_MANIFEST)));
+  tropical_runtime_process(rt);
+
+  ASSERT(tropical_runtime_output_channel_count(rt) == 2);
+  const double * compact =
+    tropical_runtime_interleaved_output_buffer(rt);
+  const double * mono = tropical_runtime_output_buffer(rt);
+  ASSERT(compact != nullptr);
+  ASSERT(mono != nullptr);
+  ASSERT(compact != mono);
+  for (unsigned int frame = 0; frame < frames; ++frame)
+  {
+    ASSERT_NEAR(compact[frame * 2], 0.25, 0.0);
+    ASSERT_NEAR(compact[frame * 2 + 1], -0.5, 0.0);
+    ASSERT_NEAR(mono[frame], compact[frame * 2], 0.0);
+  }
+
+  // Missing sink targets and sink-free plans rely on the runtime's full B*C
+  // pre-clear. Hot-swap from nonzero stereo proves this is not allocator-zero
+  // luck. The maximum supported width uses the same fixed callback scratch.
+  const std::string silent_ir = wrap_loop("");
+  const char * silent_manifest = R"({
+    "schema":"tropical_plan_6","config":{"sampleRate":44100},
+    "output_channel_count":64,"register_count":0,"array_slot_count":0,
+    "array_slot_sizes":[],"instance_functions":[],"sinks":[],"slot_count":0})";
+  ASSERT_OK(tropical_runtime_load_ir(
+    rt, silent_ir.c_str(), silent_ir.size(),
+    silent_manifest, std::strlen(silent_manifest)));
+  tropical_runtime_process(rt);
+  ASSERT(tropical_runtime_output_channel_count(rt) == 64);
+  compact = tropical_runtime_interleaved_output_buffer(rt);
+  for (std::size_t i = 0; i < frames * 64; ++i)
+    ASSERT_NEAR(compact[i], 0.0, 0.0);
+  for (unsigned int frame = 0; frame < frames; ++frame)
+    ASSERT_NEAR(tropical_runtime_output_buffer(rt)[frame], 0.0, 0.0);
+
+  tropical_runtime_free(rt);
+
+  // One frame gain is shared across every channel: a fade must preserve the
+  // stereo relationship, and the compatibility view follows faded channel 0.
+  tropical_runtime::FlatRuntime faded(frames);
+  ASSERT(faded.load_ir(stereo_ir, STEREO_MANIFEST));
+  faded.begin_fade_in();
+  faded.process();
+  const double * faded_compact = faded.getInterleavedOutputBuffer();
+  ASSERT(faded.getOutputChannelCount() == 2);
+  ASSERT_NEAR(faded_compact[0], 0.0, 0.0);
+  ASSERT_NEAR(faded_compact[1], 0.0, 0.0);
+  for (unsigned int frame = 1; frame < frames; ++frame)
+  {
+    ASSERT_NEAR(faded_compact[frame * 2 + 1],
+                -2.0 * faded_compact[frame * 2], 1e-15);
+    ASSERT_NEAR(faded.outputBuffer[frame], faded_compact[frame * 2], 0.0);
+  }
 }
 
 // A sample-index ramp via load_ir — closed-form, no state. Exercises the
@@ -254,6 +338,20 @@ static void test_plan6_only_manifest_boundary()
     rt, ir,
     R"({"schema":"tropical_plan_6","instance_functions":[{"instructions":[{"tag":"Add","dst":0,"dst_kind":"temp","args":[{"kind":"rate","scalar_type":"float"}],"result_type":"float"}]}]})",
     "unknown operand kind 'rate'"));
+  ASSERT(load_fails_with(
+    rt, ir, R"({"schema":"tropical_plan_6","output_channel_count":0})",
+    "output_channel_count must be in [1,64]"));
+  ASSERT(load_fails_with(
+    rt, ir, R"({"schema":"tropical_plan_6","output_channel_count":65})",
+    "output_channel_count must be in [1,64]"));
+  ASSERT(load_fails_with(
+    rt, ir,
+    R"({"schema":"tropical_plan_6","output_channel_count":2,"sinks":[{"target":2}]})",
+    "sink target 2 is out of range"));
+  ASSERT(load_fails_with(
+    rt, ir,
+    R"({"schema":"tropical_plan_6","output_channel_count":2,"sinks":[{"target":0},{"target":0}]})",
+    "duplicate sink target 0"));
 
   tropical_runtime_free(rt);
 }
@@ -1530,6 +1628,75 @@ struct CaptureTestSource
   unsigned int process_calls = 0;
 };
 
+struct MultichannelTestSource
+{
+  explicit MultichannelTestSource(unsigned int frames)
+    : outputBuffer(frames, 0.0), compact(frames * 2, 0.0) {}
+
+  void process()
+  {
+    for (unsigned int frame = 0; frame < outputBuffer.size(); ++frame)
+    {
+      compact[frame * 2] = 0.25 + frame;
+      compact[frame * 2 + 1] = -0.5 - frame;
+      outputBuffer[frame] = compact[frame * 2];
+    }
+  }
+  unsigned int getBufferLength() const
+  {
+    return static_cast<unsigned int>(outputBuffer.size());
+  }
+  unsigned int getOutputChannelCount() const { return 2; }
+  const double * getInterleavedOutputBuffer() const { return compact.data(); }
+  void begin_fade_in(int = 2048) {}
+  void begin_fade_out(int = 2048) {}
+  bool is_fade_out_complete() const { return true; }
+
+  std::vector<double> outputBuffer;
+  std::vector<double> compact;
+};
+
+static void test_dac_multichannel_mapping()
+{
+  constexpr unsigned int frames = 4;
+  MultichannelTestSource stereo(frames);
+  TropicalDACImpl<MultichannelTestSource> stereo_dac(
+    &stereo, 44100, 3);
+  double three_channel_device[frames * 3]{};
+  ASSERT(TropicalDACImpl<MultichannelTestSource>::fill_buffer(
+           three_channel_device, nullptr, frames, 0.0, 0,
+           &stereo_dac) == 0);
+  for (unsigned int frame = 0; frame < frames; ++frame)
+  {
+    ASSERT_NEAR(three_channel_device[frame * 3], 0.25 + frame, 0.0);
+    ASSERT_NEAR(three_channel_device[frame * 3 + 1], -0.5 - frame, 0.0);
+    ASSERT_NEAR(three_channel_device[frame * 3 + 2], 0.0, 0.0);
+  }
+
+  // An already-open stream may become too narrow after a plan hot-swap. The
+  // callback never downmixes implicitly; it fails the whole device image to
+  // silence. open_stream rejects the same policy before startup.
+  TropicalDACImpl<MultichannelTestSource> narrow_dac(
+    &stereo, 44100, 1);
+  double narrow_device[frames];
+  std::fill_n(narrow_device, frames, 1.0);
+  ASSERT(TropicalDACImpl<MultichannelTestSource>::fill_buffer(
+           narrow_device, nullptr, frames, 0.0, 0, &narrow_dac) == 0);
+  for (double sample : narrow_device)
+    ASSERT_NEAR(sample, 0.0, 0.0);
+
+  CaptureTestSource mono(frames);
+  TropicalDACImpl<CaptureTestSource> mono_dac(&mono, 44100, 2);
+  double upmixed_device[frames * 2]{};
+  ASSERT(TropicalDACImpl<CaptureTestSource>::fill_buffer(
+           upmixed_device, nullptr, frames, 0.0, 0, &mono_dac) == 0);
+  for (unsigned int frame = 0; frame < frames; ++frame)
+  {
+    ASSERT_NEAR(upmixed_device[frame * 2], frame, 0.0);
+    ASSERT_NEAR(upmixed_device[frame * 2 + 1], frame, 0.0);
+  }
+}
+
 struct ReadyAwareStartSource : CaptureTestSource
 {
   using CaptureTestSource::CaptureTestSource;
@@ -1615,6 +1782,7 @@ int main()
   printf("test_module_process (load_ir engine)\n");
 
   run_test("constant kernel via load_ir",   test_ir_constant);
+  run_test("compact interleaved native output", test_interleaved_native_output);
   run_test("plan-6-only manifest boundary", test_plan6_only_manifest_boundary);
   run_test("closed-form index ramp",        test_ir_index_ramp);
   run_test("clock request boundary handoff", test_clock_boundary_handoff);
@@ -1647,6 +1815,8 @@ int main()
   run_test("fixed DAC histogram/ABI contract", test_dac_histogram_contract);
   run_test("DAC startup honors source readiness barrier",
            test_dac_start_source_preparation);
+  run_test("DAC multichannel mapping and narrow-device silence",
+           test_dac_multichannel_mapping);
   run_test("serial output-capture state machine", test_capture_serial_state_machine);
 
   printf("\n  %d passed, %d failed\n", g_pass, g_fail);
