@@ -621,25 +621,34 @@ private def slotMetadata (s : SessionAlloc) (params : Array (String × Json))
     if idx < slotCount then names := names.set! idx s!"input:{name}"
   return (slotCount, names, defaults)
 
-/-- Materialize the audible outputs as device-bound sinks (`emitSinks`). -/
-private def emitSinks (s : SessionAlloc) (graphOutputs : Array Tropical.GraphOutput) :
-    Except String (Nat × Array Tropical.Plan.SinkSpec) := do
+/-- Group already-resolved `(channel, moduleSlot)` routes into the canonical
+    Plan sink image. Channels are ascending; inputs within one channel retain
+    authored route order. -/
+def groupSinks (routes : Array (Nat × Nat)) : Nat × Array Tropical.Plan.SinkSpec := Id.run do
   let mut channelInputs : Array (Nat × Array Nat) := #[]
   let mut outputChannelCount := 1
-  for route in graphOutputs do
-    let key := slotKey route.sourceInstance route.sourceOutput
-    let some idx := s.outputSlotRegistry.get? key
-      | throw s!"compileSessionSlotted: dac wire '{key}' has no allocated output slot."
-    outputChannelCount := max outputChannelCount (route.channel + 1)
-    match channelInputs.findIdx? (·.1 == route.channel) with
+  for (channel, slot) in routes do
+    outputChannelCount := max outputChannelCount (channel + 1)
+    match channelInputs.findIdx? (·.1 == channel) with
     | some i =>
       let entry := channelInputs[i]!
-      channelInputs := channelInputs.set! i (entry.1, entry.2.push idx)
-    | none => channelInputs := channelInputs.push (route.channel, #[idx])
+      channelInputs := channelInputs.set! i (entry.1, entry.2.push slot)
+    | none => channelInputs := channelInputs.push (channel, #[slot])
   let ordered := channelInputs.qsort fun a b => a.1 < b.1
   let sinks := ordered.map fun (target, inputs) =>
     { inputs, gain := Tropical.Plan.defaultSinkGain, target }
   return (outputChannelCount, sinks)
+
+/-- Materialize the audible outputs as device-bound sinks (`emitSinks`). -/
+private def emitSinks (s : SessionAlloc) (graphOutputs : Array Tropical.GraphOutput) :
+    Except String (Nat × Array Tropical.Plan.SinkSpec) := do
+  let mut routes : Array (Nat × Nat) := #[]
+  for route in graphOutputs do
+    let key := slotKey route.sourceInstance route.sourceOutput
+    let some idx := s.outputSlotRegistry.get? key
+      | throw s!"compileSessionSlotted: dac wire '{key}' has no allocated output slot."
+    routes := routes.push (route.channel, idx)
+  return groupSinks routes
 
 /-- `preallocateOutputsRecursive`: parent before children, body order. -/
 private def preallocOutputs (s : SessionAlloc) (path : String)

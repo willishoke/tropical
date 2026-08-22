@@ -18,6 +18,7 @@ import Tropical.Testing.EmitArrow
 import Tropical.Testing.ClockLaws
 import Tropical.Testing.EngineMirror
 import Tropical.Testing.PlanWire
+import Tropical.Testing.PlanOutputs
 import Tropical.Testing.Semantics
 import Lean.Data.Json
 import Tropical.Tropicaltest.Patcher
