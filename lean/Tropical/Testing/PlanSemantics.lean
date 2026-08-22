@@ -1,4 +1,4 @@
-import Tropical.Semantics.Plan
+import Tropical.Semantics.PlanWellFormed
 
 /-!
 # Focused Plan-semantics fixtures
@@ -125,7 +125,7 @@ private def stereoPlan : FlatPlan := {
   outputChannelCount := 2
   slotCount := 3
   slotNames := #["left-a", "left-b", "right"]
-  slotDefaults := #[]
+  slotDefaults := #[.num ⟨0, 0⟩, .num ⟨0, 0⟩, .num ⟨0, 0⟩]
 }
 
 private def stereoState : PlanState Int := {
@@ -213,5 +213,36 @@ example :
       #[instrReduceEnd 0 .int] with
     | .error error => error.operation
     | .ok _ => "unexpected success") = "instruction.region" := by native_decide
+
+example : FlatPlanWellFormed stereoPlan := by native_decide
+
+example : ¬FlatPlanWellFormed {
+    stereoPlan with
+    sinks := #[
+      { inputs := #[0], gain := ⟨1, 0⟩, target := 0 },
+      { inputs := #[1], gain := ⟨1, 0⟩, target := 0 }]
+  } := by native_decide
+
+example : ¬BlocksWellFormed {
+    stereoPlan with registerCount := 1
+  } #[instrSessionSetElement 0 #[.sessionArrayReg 0,
+      .const ⟨0, 0⟩ .int, .const ⟨1, 0⟩ .float]] := by native_decide
+
+example : ¬BlocksWellFormed {
+    stereoPlan with registerCount := 1
+  } #[instrReduceBegin 0 (.const ⟨0, 0⟩ .int) 2 .int] := by native_decide
+
+private def routedWfPlan : FlatPlan := {
+  stereoPlan with
+  arraySlotCount := 1
+  arraySlotNames := #["routed"]
+  arraySlotSizes := #[2]
+}
+
+example : ¬BlocksWellFormed routedWfPlan #[
+    instrRoutedSumBegin 0 2 2 #[some 0] none 1,
+    instrRoutedSumYield 0 #[.const ⟨1, 0⟩ .float],
+    instrRoutedSumEnd 0
+  ] := by native_decide
 
 end Tropical.Testing.PlanSemantics
