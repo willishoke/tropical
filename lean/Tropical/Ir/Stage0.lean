@@ -398,7 +398,10 @@ private def rebuild (plan : FlatPlan) (allBlocks : Array (Array NInstr))
   let coeffUsesArrays := !coeffArraySlots.isEmpty || coeffStream.any fun i =>
     i.args.any fun a => match a with | .arrayReg _ => true | _ => false
   let coeff : FlatPlan := { audio with
-    outputChannelCount := audio.outputChannelCount
+    -- Staging kernels publish slots/arrays, never device channels. Keeping
+    -- their scratch output mono preserves the single-cell host invocation
+    -- even when the audio residual has independent stereo sinks.
+    outputChannelCount := 1
     coeffArraySlots := #[]
     compilationMode := .fused
     arraySlotNames := if coeffUsesArrays then plan.arraySlotNames else #[]
