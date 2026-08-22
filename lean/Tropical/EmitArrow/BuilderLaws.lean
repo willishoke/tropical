@@ -784,6 +784,54 @@ theorem litI_preserves (mantissa : Int) : ProducesSig (litI mantissa) := by
     (fun builder value hBuilder hValue =>
       unary_preserves hBuilder .toInt hValue)
 
+theorem sumLeftTail_preserves {builder : Builder}
+    (hBuilder : BuilderWellFormed builder) {items : List Sig} {acc : Sig}
+    (hItems : ∀ item ∈ items, SigIn builder item)
+    (hAcc : SigIn builder acc) :
+    SigBuildResultWellFormed builder ((sumLeftTail items acc).run builder) := by
+  induction items generalizing builder acc with
+  | nil => exact ⟨hBuilder, BuilderExtends.refl builder, hAcc⟩
+  | cons item rest ih =>
+    rw [show sumLeftTail (item :: rest) acc =
+      add acc item >>= fun next => sumLeftTail rest next from rfl]
+    rw [StateT.run_bind]
+    have hAdd := add_preserves hBuilder hAcc (hItems item (by simp))
+    generalize hRunAdd : (add acc item).run builder = runAdd at hAdd ⊢
+    cases runAdd with
+    | error message => trivial
+    | ok pair =>
+      rcases pair with ⟨next, middle⟩
+      change SigBuildResultWellFormed builder ((sumLeftTail rest next).run middle)
+      have hRestItems : ∀ query ∈ rest, SigIn middle query := by
+        intro query hQuery
+        exact hAdd.2.1.sigIn (hItems query (by simp [hQuery]))
+      have hTail := ih hAdd.1 hRestItems hAdd.2.2
+      generalize hRunTail : (sumLeftTail rest next).run middle = runTail
+        at hTail ⊢
+      cases runTail with
+      | error message => trivial
+      | ok pair =>
+        rcases pair with ⟨result, after⟩
+        exact ⟨hTail.1, BuilderExtends.trans hAdd.2.1 hTail.2.1,
+          hTail.2.2⟩
+
+theorem sumLeft_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
+    {items : Array Sig} (hItems : SigsIn builder items) :
+    SigBuildResultWellFormed builder ((sumLeft items).run builder) := by
+  unfold sumLeft
+  generalize hList : items.toList = list
+  cases list with
+  | nil => exact (lit_preserves 0) builder hBuilder
+  | cons first rest =>
+    apply sumLeftTail_preserves hBuilder
+    · intro item hItem
+      apply hItems item
+      have : item ∈ items.toList := by rw [hList]; simp [hItem]
+      simpa using this
+    · apply hItems first
+      have : first ∈ items.toList := by rw [hList]; simp
+      simpa using this
+
 theorem litF_preserves (value : Float) : ProducesSig (litF value) := by
   simp only [litF]
   split <;> split
@@ -833,5 +881,253 @@ theorem inst_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder
       BuilderExtends builder after ∧ idx.idx < after.decls.size := by
   simpa [inst] using declareInst_preserves (decl := { name, programName, inputs })
     hBuilder (by exact hInputs)
+
+-- Certified assembly ---------------------------------------------------------
+
+/-- Expression-root obligations contributed directly by an ordinary body and
+    by caller-supplied declarations. Builder-created declarations are already
+    covered by `BuilderWellFormed`. -/
+def ProgramBodyWellFormed (builder : Builder) (body : ProgramBody)
+    (extraDecls : Array BodyDecl := #[]) : Prop :=
+  (∀ input ∈ body.inputs, ∀ id ∈ input.defaultSig, SigIn builder id) ∧
+  (∀ assign ∈ body.assigns, SigIn builder assign.2) ∧
+  (∀ decl ∈ extraDecls, match decl with
+    | .inst _ _ inputs => ∀ input ∈ inputs, SigIn builder input.value
+    | _ => True)
+
+/-- The analogous root obligations for a complete body. -/
+def CompleteProgramBodyWellFormed (builder : Builder)
+    (body : CompleteProgramBody) (extraDecls : Array BodyDecl := #[]) : Prop :=
+  (∀ input ∈ body.inputs, ∀ id ∈ input.defaultSig, SigIn builder id) ∧
+  (∀ assign ∈ body.assigns, SigIn builder assign.2) ∧
+  (∀ decl ∈ extraDecls, match decl with
+    | .inst _ _ inputs => ∀ input ∈ inputs, SigIn builder input.value
+    | _ => True)
+
+/-- Pure program value published by ordinary assembly after a successful run. -/
+def assembledProgram (name : String) (outputs : Array OutputDecl)
+    (registry : Array (String × ProgramIdx)) (builder : Builder)
+    (body : ProgramBody) (extraDecls : Array BodyDecl := #[]) : Program :=
+  { name
+    inputs := body.inputs.map fun decl =>
+      { name := decl.name, type? := decl.type?, default? := decl.defaultSig }
+    outputs
+    decls := (builder.decls.map fun decl =>
+      .inst decl.name decl.programName (decl.inputs.map fun input =>
+        { port := input.port, value := input.value })) ++ extraDecls
+    assigns := body.assigns.map fun (target, expr) => { target, expr }
+    registry }
+
+/-- Pure program value published by complete assembly after a successful run. -/
+def assembledCompleteProgram (name : String)
+    (registry : Array (String × ProgramIdx)) (builder : Builder)
+    (body : CompleteProgramBody) (extraDecls : Array BodyDecl := #[]) : Program :=
+  { name
+    inputs := body.inputs.map fun decl =>
+      { name := decl.name, type? := decl.type?, default? := decl.defaultSig }
+    outputs := body.outputs
+    decls := (builder.decls.map fun decl =>
+      .inst decl.name decl.programName (decl.inputs.map fun input =>
+        { port := input.port, value := input.value })) ++ extraDecls
+    assigns := body.assigns.map fun (target, expr) => { target, expr }
+    registry }
+
+theorem assembledProgram_exprRefs {builder : Builder}
+    (hBuilder : BuilderWellFormed builder) {name : String}
+    {outputs : Array OutputDecl} {registry : Array (String × ProgramIdx)}
+    {body : ProgramBody} {extraDecls : Array BodyDecl}
+    (hBody : ProgramBodyWellFormed builder body extraDecls) :
+    ProgramExprRefsIn builder.exprs
+      (assembledProgram name outputs registry builder body extraDecls) := by
+  unfold ProgramExprRefsIn assembledProgram
+  constructor
+  · intro input hInput id hId
+    obtain ⟨source, hSource, rfl⟩ := Array.mem_map.mp hInput
+    exact hBody.1 source hSource id hId
+  constructor
+  · intro decl hDecl
+    rw [Array.mem_append] at hDecl
+    rcases hDecl with hGenerated | hExtra
+    · obtain ⟨source, hSource, rfl⟩ := Array.mem_map.mp hGenerated
+      intro input hInput
+      obtain ⟨authored, hAuthored, rfl⟩ := Array.mem_map.mp hInput
+      exact hBuilder.decls source hSource authored hAuthored
+    · cases decl with
+      | param name value => trivial
+      | prog name target => trivial
+      | inst name typeKey inputs => exact hBody.2.2 (.inst name typeKey inputs) hExtra
+  · intro assign hAssign
+    obtain ⟨source, hSource, rfl⟩ := Array.mem_map.mp hAssign
+    exact hBody.2.1 source hSource
+
+theorem assembledCompleteProgram_exprRefs {builder : Builder}
+    (hBuilder : BuilderWellFormed builder) {name : String}
+    {registry : Array (String × ProgramIdx)} {body : CompleteProgramBody}
+    {extraDecls : Array BodyDecl}
+    (hBody : CompleteProgramBodyWellFormed builder body extraDecls) :
+    ProgramExprRefsIn builder.exprs
+      (assembledCompleteProgram name registry builder body extraDecls) := by
+  unfold ProgramExprRefsIn assembledCompleteProgram
+  constructor
+  · intro input hInput id hId
+    obtain ⟨source, hSource, rfl⟩ := Array.mem_map.mp hInput
+    exact hBody.1 source hSource id hId
+  constructor
+  · intro decl hDecl
+    rw [Array.mem_append] at hDecl
+    rcases hDecl with hGenerated | hExtra
+    · obtain ⟨source, hSource, rfl⟩ := Array.mem_map.mp hGenerated
+      intro input hInput
+      obtain ⟨authored, hAuthored, rfl⟩ := Array.mem_map.mp hInput
+      exact hBuilder.decls source hSource authored hAuthored
+    · cases decl with
+      | param name value => trivial
+      | prog name target => trivial
+      | inst name typeKey inputs =>
+        exact hBody.2.2 (.inst name typeKey inputs) hExtra
+  · intro assign hAssign
+    obtain ⟨source, hSource, rfl⟩ := Array.mem_map.mp hAssign
+    exact hBody.2.1 source hSource
+
+theorem programWellFormed_push {arena : ExprArena} {programs : Array Program}
+    {program : Program} (hArena : ArenaWellFormed arena)
+    (hPool : progPoolWf (programs.push program) = true)
+    (hExprs : ProgramExprRefsIn arena program)
+    (hIndices : ProgramIndicesWellFormed arena (programs.push program) program)
+    (hRegistry : ProgramRegistryWellFormed (programs.push program)
+      programs.size program) :
+    ProgramWellFormed arena (programs.push program) programs.size := by
+  have hLookup : (programs.push program)[programs.size]? = some program := by simp
+  constructor
+  · exact ⟨program, hLookup⟩
+  · exact hArena
+  · exact hPool
+  · intro query hQuery
+    have hEq : query = program := by
+      rw [hLookup] at hQuery
+      exact Option.some.inj hQuery.symm
+    subst query
+    exact hExprs
+  · intro query hQuery
+    have hEq : query = program := by
+      rw [hLookup] at hQuery
+      exact Option.some.inj hQuery.symm
+    subst query
+    exact hIndices
+  · intro query hQuery
+    have hEq : query = program := by
+      rw [hLookup] at hQuery
+      exact Option.some.inj hQuery.symm
+    subst query
+    exact hRegistry
+
+theorem assemble_run_of_build {arena : Arena} {name : String}
+    {outputs : Array OutputDecl} {registry : Array (String × ProgramIdx)}
+    {build : BuildM ProgramBody} {extraDecls : Array BodyDecl}
+    {body : ProgramBody} {final : Builder}
+    (hRun : build.run { exprs := arena.exprs } = .ok (body, final)) :
+    assemble arena name outputs registry build extraDecls =
+      .ok ({ arena with
+        programs := arena.programs.push
+          (assembledProgram name outputs registry final body extraDecls)
+        exprs := final.exprs }, ⟨arena.programs.size⟩) := by
+  simp only [assemble, hRun]
+  rfl
+
+/-- Certified ordinary assembly. Pool/index/registry clauses remain explicit
+    because production `assemble` does not run those validators. -/
+theorem assemble_of_certified_build {arena : Arena} {name : String}
+    {outputs : Array OutputDecl} {registry : Array (String × ProgramIdx)}
+    {build : BuildM ProgramBody} {extraDecls : Array BodyDecl}
+    {body : ProgramBody} {final : Builder}
+    (hArena : ArenaWellFormed arena.exprs)
+    (hRun : build.run { exprs := arena.exprs } = .ok (body, final))
+    (hBuild : PreservesBuilderWF build)
+    (hBody : ProgramBodyWellFormed final body extraDecls)
+    (hPool : progPoolWf (arena.programs.push
+      (assembledProgram name outputs registry final body extraDecls)) = true)
+    (hIndices : ProgramIndicesWellFormed final.exprs
+      (arena.programs.push (assembledProgram name outputs registry final body extraDecls))
+      (assembledProgram name outputs registry final body extraDecls))
+    (hRegistry : ProgramRegistryWellFormed
+      (arena.programs.push (assembledProgram name outputs registry final body extraDecls))
+      arena.programs.size
+      (assembledProgram name outputs registry final body extraDecls)) :
+    match assemble arena name outputs registry build extraDecls with
+    | .error _ => False
+    | .ok (resultArena, resultRoot) =>
+      ProgramWellFormed resultArena.exprs resultArena.programs resultRoot.idx := by
+  rw [assemble_run_of_build hRun]
+  have hInitial : BuilderWellFormed ({ exprs := arena.exprs } : Builder) := by
+    exact ⟨hArena, by simp [BuilderDeclsWellFormed]⟩
+  have hFinal := hBuild { exprs := arena.exprs } hInitial
+  rw [hRun] at hFinal
+  simpa using programWellFormed_push hFinal.1.arena hPool
+    (assembledProgram_exprRefs hFinal.1 hBody) hIndices hRegistry
+
+theorem assembleComplete_run_of_build {α : Type} {arena : Arena} {name : String}
+    {registry : Array (String × ProgramIdx)}
+    {build : BuildM (CompleteProgramBody × α)} {extraDecls : Array BodyDecl}
+    {body : CompleteProgramBody} {value : α} {final : Builder}
+    (hRun : build.run { exprs := arena.exprs } = .ok ((body, value), final)) :
+    assembleCompleteWithResult arena name registry build extraDecls =
+      .ok ({ arena with
+        programs := arena.programs.push
+          (assembledCompleteProgram name registry final body extraDecls)
+        exprs := final.exprs }, ⟨arena.programs.size⟩, value) := by
+  simp only [assembleCompleteWithResult, hRun]
+  rfl
+
+/-- Certified complete assembly, with the same explicit unvalidated clauses. -/
+theorem assembleComplete_of_certified_build {α : Type} {arena : Arena}
+    {name : String} {registry : Array (String × ProgramIdx)}
+    {build : BuildM (CompleteProgramBody × α)} {extraDecls : Array BodyDecl}
+    {body : CompleteProgramBody} {value : α} {final : Builder}
+    (hArena : ArenaWellFormed arena.exprs)
+    (hRun : build.run { exprs := arena.exprs } = .ok ((body, value), final))
+    (hBuild : PreservesBuilderWF build)
+    (hBody : CompleteProgramBodyWellFormed final body extraDecls)
+    (hPool : progPoolWf (arena.programs.push
+      (assembledCompleteProgram name registry final body extraDecls)) = true)
+    (hIndices : ProgramIndicesWellFormed final.exprs
+      (arena.programs.push (assembledCompleteProgram name registry final body extraDecls))
+      (assembledCompleteProgram name registry final body extraDecls))
+    (hRegistry : ProgramRegistryWellFormed
+      (arena.programs.push (assembledCompleteProgram name registry final body extraDecls))
+      arena.programs.size
+      (assembledCompleteProgram name registry final body extraDecls)) :
+    match assembleCompleteWithResult arena name registry build extraDecls with
+    | .error _ => False
+    | .ok (resultArena, resultRoot, _) =>
+      ProgramWellFormed resultArena.exprs resultArena.programs resultRoot.idx := by
+  rw [assembleComplete_run_of_build hRun]
+  have hInitial : BuilderWellFormed ({ exprs := arena.exprs } : Builder) := by
+    exact ⟨hArena, by simp [BuilderDeclsWellFormed]⟩
+  have hFinal := hBuild { exprs := arena.exprs } hInitial
+  rw [hRun] at hFinal
+  simpa using programWellFormed_push hFinal.1.arena hPool
+    (assembledCompleteProgram_exprRefs hFinal.1 hBody) hIndices hRegistry
+
+/-- Observable failure atomicity: failure publishes no arena/program pair. -/
+theorem assemble_failure_no_result {arena : Arena} {name : String}
+    {outputs : Array OutputDecl} {registry : Array (String × ProgramIdx)}
+    {build : BuildM ProgramBody} {extraDecls : Array BodyDecl} {message : String}
+    (hFailure : assemble arena name outputs registry build extraDecls = .error message) :
+    ¬ ∃ result, assemble arena name outputs registry build extraDecls = .ok result := by
+  rintro ⟨result, hResult⟩
+  rw [hFailure] at hResult
+  contradiction
+
+theorem assembleComplete_failure_no_result {α : Type} {arena : Arena}
+    {name : String} {registry : Array (String × ProgramIdx)}
+    {build : BuildM (CompleteProgramBody × α)} {extraDecls : Array BodyDecl}
+    {message : String}
+    (hFailure : assembleCompleteWithResult arena name registry build extraDecls =
+      .error message) :
+    ¬ ∃ result,
+      assembleCompleteWithResult arena name registry build extraDecls = .ok result := by
+  rintro ⟨result, hResult⟩
+  rw [hFailure] at hResult
+  contradiction
 
 end Tropical.EmitArrow

@@ -253,13 +253,20 @@ def toFloatE (a : Sig) : BuildM Sig := unary .toFloat a
 def clampE (value lo hi : Sig) : BuildM Sig := clamp value lo hi
 def selectE (cond then_ else_ : Sig) : BuildM Sig := select cond then_ else_
 
+/-- Structurally recursive tail of the authored-order additive fold. -/
+def sumLeftTail : List Sig → Sig → BuildM Sig
+  | [], acc => pure acc
+  | item :: rest, acc => do
+    let next ← add acc item
+    sumLeftTail rest next
+
 /-- Authored-order, left-associated addition over an array of already-built
     IDs.  The empty sum constructs the same numeric zero as the recursive
     authoring surface. -/
-def sumLeft (items : Array Sig) : BuildM Sig := do
-  match items[0]? with
-  | none => lit 0
-  | some first => (items.extract 1 items.size).foldlM add first
+def sumLeft (items : Array Sig) : BuildM Sig :=
+  match items.toList with
+  | [] => lit 0
+  | first :: rest => sumLeftTail rest first
 
 /-- Encode a build-time `Float` as the same decimal literal used by the
     recursive authoring path. -/
