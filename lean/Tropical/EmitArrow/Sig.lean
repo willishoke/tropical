@@ -71,10 +71,12 @@ structure CompleteProgramBody where
   assigns : Array (OutputTarget × Sig) := #[]
 deriving Inhabited, Repr
 
-/-- The sole expression-arena mutation in the authoring API.  Raw `ENode`
-    construction stays local to this module; ordinary callers use the smart
-    constructors below. -/
-private def internSig (node : ENode) : BuildM Sig := do
+/-- The sole expression-arena mutation in the authoring API.  This low-level
+    operation is public so its qualified preservation law can be reused by
+    proof modules; ordinary authoring code should use the smart constructors
+    below.  Like raw `BuildM`, it is intentionally not an invariant-by-type
+    boundary: callers must establish that every child belongs to the builder. -/
+def internSig (node : ENode) : BuildM Sig := do
   let builder ← get
   let (id, exprs) := (eintern node).run builder.exprs
   set { builder with exprs }
