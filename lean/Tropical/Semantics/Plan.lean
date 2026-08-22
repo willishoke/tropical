@@ -248,4 +248,30 @@ def execSmallInstr (alg : Algebra α) (inputs : PlanInputs α)
           s!"delimiter {instr.tag} must execute through execBlocks"
     | _ => planError "instruction.tag" s!"unknown Plan instruction '{instr.tag}'"
 
+/-- Target-indexed output values produced from a completed Plan state. The
+array index is the logical output channel. -/
+abbrev SinkImage (α : Type) := Array (Value α)
+
+private def denoteSink (alg : Algebra α) (state : PlanState α)
+    (sink : SinkSpec) : Outcome (Value α) := do
+  let zero : Value α ← alg.zero
+  let mixed : Value α ← List.foldlM (fun acc slot => do
+      alg.binary .add acc (← lookupPlanValue "sink.input" "slot" state.slots slot))
+    zero sink.inputs.toList
+  let gain : Value α ← alg.literal sink.gain
+  alg.binary .mul mixed gain
+
+/-- Observe all pushed outputs after instruction execution. Missing channels
+are zero; malformed duplicate or out-of-range targets are refused rather than
+assigned an order-dependent meaning. -/
+def denoteSinks (alg : Algebra α) (plan : FlatPlan)
+    (state : PlanState α) : Outcome (SinkImage α) := do
+  if !plan.outputLayoutWellFormed then
+    planError "sinks" "output channel count must be positive and targets unique and in range"
+  else
+    let zero : Value α ← alg.zero
+    List.foldlM (fun image sink => do
+        pure (image.set! sink.target (← denoteSink alg state sink)))
+      (Array.replicate plan.outputChannelCount zero) plan.sinks.toList
+
 end Tropical.Semantics

@@ -22,6 +22,7 @@ private def fixtureAlgebra : Algebra Int where
   binary := fun tag lhs rhs =>
     match tag, lhs, rhs with
     | .add, .scalar a, .scalar b => .ok (.scalar (a + b))
+    | .mul, .scalar a, .scalar b => .ok (.scalar (a * b))
     | _, _, _ => refusal "fixture.binary" "unsupported fixture operation"
   clamp := fun _ _ _ => refusal "fixture.clamp" "outside fixture"
   select := fun _ _ _ => refusal "fixture.select" "outside fixture"
@@ -111,5 +112,33 @@ private def elementwiseInstr : NInstr :=
 example : arrayScalars? 0
     (execSmallInstr fixtureAlgebra fixtureInputs fixtureState elementwiseInstr) =
       some #[30, 32] := by native_decide
+
+private def stereoPlan : FlatPlan := {
+  arraySlotNames := #[]
+  registerCount := 0
+  arraySlotCount := 0
+  arraySlotSizes := #[]
+  instanceFunctions := #[]
+  sinks := #[
+    { inputs := #[0, 1], gain := ⟨1, 0⟩, target := 0 },
+    { inputs := #[2], gain := ⟨2, 0⟩, target := 1 }]
+  outputChannelCount := 2
+  slotCount := 3
+  slotNames := #["left-a", "left-b", "right"]
+  slotDefaults := #[]
+}
+
+private def stereoState : PlanState Int := {
+  slots := #[.scalar 3, .scalar 5, .scalar 7]
+}
+
+private def imageScalars? : Outcome (SinkImage Int) → Option (Array Int)
+  | .ok values => values.mapM fun
+      | .scalar value => some value
+      | .array _ => none
+  | .error _ => none
+
+example : imageScalars? (denoteSinks fixtureAlgebra stereoPlan stereoState) =
+    some #[8, 14] := by native_decide
 
 end Tropical.Testing.PlanSemantics
