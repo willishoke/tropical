@@ -322,6 +322,9 @@ def runRoutedSumCoverage : IO Bool := do
         (msl.splitOn "threadgroup float tf7;").length == 2 &&
         (msl.splitOn "    float tf4;").length == 2 &&
         (msl.splitOn "switch (rs").length == 1 &&
+        (msl.splitOn "output_buffer[s * 3u + 0u]").length == 2 &&
+        (msl.splitOn "output_buffer[s * 3u + 1u]").length == 2 &&
+        (msl.splitOn "output_buffer[s * 3u + 2u]").length == 2 &&
         (msl.splitOn s!"tropical.threadgroup_scratch_bytes={static.metalThreadgroupScratchBytes}").length > 1
     | _, _ => false
   match ← renderIrBytes static, ← renderIrBytes (routedUnrolledPlan 4),
