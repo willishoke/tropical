@@ -1,4 +1,5 @@
 import Std.Data.HashMap
+import Std.Data.HashMap.Lemmas
 import Tropical.Ir.Nodes
 import Tropical.Ir.Core
 import Tropical.Ir.Strata.Basic
@@ -128,9 +129,226 @@ def EArena.materialize (ea : EArena) (root : ProgramIdx) :
 open Tropical.Ir.Core (CoreProgram CoreInputDecl CoreOutputDecl CoreOutputAssign
   CoreBodyDecl CoreInstanceInput)
 
+instance : ReflBEq OutputTarget where
+  rfl := by
+    intro target
+    cases target with
+    | port idx =>
+      change (idx == idx) = true
+      exact BEq.rfl
+    | dac => rfl
+
+instance : LawfulBEq OutputTarget where
+  rfl := by
+    intro target
+    cases target with
+    | port idx =>
+      change (idx == idx) = true
+      exact BEq.rfl
+    | dac => rfl
+  eq_of_beq := by
+    intro lhs rhs h
+    cases lhs with
+    | port lhs =>
+      cases rhs with
+      | port rhs =>
+        change (lhs == rhs) = true at h
+        exact congrArg OutputTarget.port (eq_of_beq h)
+      | dac =>
+        change false = true at h
+        contradiction
+    | dac =>
+      cases rhs with
+      | port rhs =>
+        change false = true at h
+        contradiction
+      | dac => rfl
+
+/-- The representation-neutral, evaluator-visible part of an input. -/
+structure ProgramCopyInput (ρ : Type) where
+  name : String
+  default? : Option ρ := none
+deriving BEq, ReflBEq, LawfulBEq
+
+/-- The representation-neutral, evaluator-visible part of an instance input. -/
+structure ProgramCopyInstanceInput (ρ : Type) where
+  port : InputIdx
+  value : ρ
+deriving BEq, ReflBEq, LawfulBEq
+
+/-- The representation-neutral, evaluator-visible body declarations. -/
+inductive ProgramCopyDecl (ρ : Type) where
+  | param (name : String) (value? : Option Lean.JsonNumber)
+  | inst (name typeKey : String) (inputs : Array (ProgramCopyInstanceInput ρ))
+  | progDecl (name : String)
+deriving BEq, ReflBEq, LawfulBEq
+
+/-- The representation-neutral, evaluator-visible part of an assignment. -/
+structure ProgramCopyAssign (ρ : Type) where
+  target : OutputTarget
+  expr : ρ
+deriving BEq, ReflBEq, LawfulBEq
+
+/-- A common structural view of source and core programs.  It deliberately
+    omits port types and registry storage: neither is inspected by the small
+    per-sample evaluator, while output arity and authored declaration order
+    remain observable. -/
+structure ProgramCopyView (ρ : Type) where
+  name : String
+  inputs : Array (ProgramCopyInput ρ)
+  outputCount : Nat
+  decls : Array (ProgramCopyDecl ρ)
+  assigns : Array (ProgramCopyAssign ρ)
+deriving BEq, ReflBEq, LawfulBEq
+
+def Program.copyView (program : Program) : ProgramCopyView ExprId :=
+  { name := program.name
+    inputs := program.inputs.map fun input =>
+      { name := input.name, default? := input.default? }
+    outputCount := program.outputs.size
+    decls := program.decls.map fun
+      | .param name value? => .param name value?
+      | .inst name typeKey inputs => .inst name typeKey <|
+          inputs.map fun input => { port := input.port, value := input.value }
+      | .prog name _ => .progDecl name
+    assigns := program.assigns.map fun assign =>
+      { target := assign.target, expr := assign.expr } }
+
+def CoreProgram.copyView (program : CoreProgram) : ProgramCopyView ExprId :=
+  { name := program.name
+    inputs := program.inputs.map fun input =>
+      { name := input.name, default? := input.default? }
+    outputCount := program.outputs.size
+    decls := program.decls.map fun
+      | .param name value? => .param name value?
+      | .inst name typeKey inputs => .inst name typeKey <|
+          inputs.map fun input => { port := input.port, value := input.value }
+      | .progDecl name => .progDecl name
+    assigns := program.assigns.map fun assign =>
+      { target := assign.target, expr := assign.expr } }
+
 /-- GC state: the fresh dst `ExprArena` under construction plus a memo
     mapping a src id (`.idx`) to its interned dst id. -/
 private abbrev ConvM := StateT (ExprArena × Std.HashMap Nat ExprId) (Except Error)
+
+/-- Proof-facing source-to-destination id memo produced by reachability copy. -/
+abbrev ExprCopyMemo := Std.HashMap Nat ExprId
+
+def remapExprId? (memo : ExprCopyMemo) (id : ExprId) : Option ExprId :=
+  memo[id.idx]?
+
+def remapProgramCopyInput? (memo : ExprCopyMemo)
+    (input : ProgramCopyInput ExprId) : Option (ProgramCopyInput ExprId) := do
+  pure { input with default? := ← input.default?.mapM (remapExprId? memo) }
+
+def remapProgramCopyInstanceInput? (memo : ExprCopyMemo)
+    (input : ProgramCopyInstanceInput ExprId) : Option (ProgramCopyInstanceInput ExprId) := do
+  pure { input with value := ← remapExprId? memo input.value }
+
+def remapProgramCopyDecl? (memo : ExprCopyMemo) :
+    ProgramCopyDecl ExprId → Option (ProgramCopyDecl ExprId)
+  | .param name value? => pure (.param name value?)
+  | .progDecl name => pure (.progDecl name)
+  | .inst name typeKey inputs => do
+      pure (.inst name typeKey
+        (← inputs.mapM (remapProgramCopyInstanceInput? memo)))
+
+def remapProgramCopyAssign? (memo : ExprCopyMemo)
+    (assign : ProgramCopyAssign ExprId) : Option (ProgramCopyAssign ExprId) := do
+  pure { assign with expr := ← remapExprId? memo assign.expr }
+
+/-- Rename every evaluator-reachable expression root in a program view. -/
+def remapProgramCopyView? (memo : ExprCopyMemo)
+    (view : ProgramCopyView ExprId) : Option (ProgramCopyView ExprId) := do
+  pure { view with
+    inputs := ← view.inputs.mapM (remapProgramCopyInput? memo)
+    decls := ← view.decls.mapM (remapProgramCopyDecl? memo)
+    assigns := ← view.assigns.mapM (remapProgramCopyAssign? memo) }
+
+def remapExprIdList? (memo : ExprCopyMemo) :
+    List ExprId → Option (List ExprId)
+  | [] => pure []
+  | id :: rest =>
+    match memo[id.idx]? with
+    | none => none
+    | some mapped =>
+      match remapExprIdList? memo rest with
+      | none => none
+      | some mappedRest => some (mapped :: mappedRest)
+
+def remapExprIds? (memo : ExprCopyMemo) (ids : Array ExprId) :
+    Option (Array ExprId) :=
+  (·.toArray) <$> remapExprIdList? memo ids.toList
+
+/-- Rename every child of a source node through a completed conversion memo.
+    Metadata (including binders, dynamic counts, routes, and tile identity) is
+    copied verbatim. -/
+def remapENode? (memo : ExprCopyMemo) : ENode → Option ENode
+  | .num value => pure (.num value)
+  | .bool value => pure (.bool value)
+  | .arr items => .arr <$> remapExprIds? memo items
+  | .tileArray items => .tileArray <$> remapExprIds? memo items
+  | .binary tag lhs rhs =>
+      match memo[lhs.idx]?, memo[rhs.idx]? with
+      | some lhs, some rhs => some (.binary tag lhs rhs)
+      | _, _ => none
+  | .unary tag arg =>
+      match memo[arg.idx]? with
+      | some arg => some (.unary tag arg)
+      | none => none
+  | .clamp value lo hi =>
+      match memo[value.idx]?, memo[lo.idx]?, memo[hi.idx]? with
+      | some value, some lo, some hi => some (.clamp value lo hi)
+      | _, _, _ => none
+  | .select cond then_ else_ =>
+      match memo[cond.idx]?, memo[then_.idx]?, memo[else_.idx]? with
+      | some cond, some then_, some else_ => some (.select cond then_ else_)
+      | _, _, _ => none
+  | .arraySet array index value =>
+      match memo[array.idx]?, memo[index.idx]?, memo[value.idx]? with
+      | some array, some index, some value => some (.arraySet array index value)
+      | _, _, _ => none
+  | .index array index =>
+      match memo[array.idx]?, memo[index.idx]? with
+      | some array, some index => some (.index array index)
+      | _, _ => none
+  | .inputRef index => pure (.inputRef index)
+  | .paramRef index => pure (.paramRef index)
+  | .nestedOut instanceIdx outputIdx =>
+      pure (.nestedOut instanceIdx outputIdx)
+  | .sampleRate => pure .sampleRate
+  | .sampleIndex => pure .sampleIndex
+  | .tileSampleIndex => pure .tileSampleIndex
+  | .tilePhase => pure .tilePhase
+  | .loopIdx binderId => pure (.loopIdx binderId)
+  | .bankSum capacity tables body dynCount? binderId => do
+      let tables ← remapExprIds? memo tables
+      let body ← memo[body.idx]?
+      let dynCount? ← dynCount?.mapM fun count => memo[count.idx]?
+      pure (.bankSum capacity tables body dynCount? binderId)
+  | .routedSum capacity outputCount routes tables values dynCount? binderId => do
+      let tables ← remapExprIds? memo tables
+      let values ← remapExprIds? memo values
+      let dynCount? ← dynCount?.mapM fun count => memo[count.idx]?
+      pure (.routedSum capacity outputCount routes tables values dynCount? binderId)
+
+/-- Executable validation of the completed copy memo.  Every memo entry must
+    dereference on both sides to the same node after child renaming. -/
+def checkExprCopyMemo (src dst : ExprArena) (memo : ExprCopyMemo) : Bool :=
+  memo.toList.all fun entry =>
+    match src.deref ⟨entry.1⟩ with
+    | none => false
+    | some sourceNode =>
+      match remapENode? memo sourceNode with
+      | none => false
+      | some destNode => dst.deref entry.2 == some destNode
+
+/-- Executable form of the complete semantic arena invariant.  Unlike
+    `ExprArena.wf`, this also checks the hash-cons index and stage alignment. -/
+def semanticWfCheck (arena : ExprArena) : Bool :=
+  arena.wf &&
+  arena.sigs.size == arena.nodes.size &&
+  arena.dedup.toList.all fun entry => arena.deref entry.2 == some entry.1
 
 /-- Copy one reachable src node (and its children) into the dst arena,
     memoized — a pure structure-preserving copy; the reachability GC.
@@ -190,6 +408,24 @@ decreasing_by
     apply ExprArena.forall_children_lt hw ‹ExprArena.deref _ _ = some _›
     simp_all [ENode.children]
 
+/-- Instance-referenced registry entries in evaluator first-use order.  The
+    target subtype retains the pool-descent fact used by both conversion and
+    proof-witness checking. -/
+def referencedPrograms (ea : EArena)
+    (hwp : progPoolWf ea.programs = true) (eIdx : ProgramIdx)
+    (ep : Program) (hp : ea.programs[eIdx.idx]? = some ep) :
+    Except Error (Array (String × {t : ProgramIdx // t.idx < eIdx.idx})) := do
+  let mut keys : Array (String × {t : ProgramIdx // t.idx < eIdx.idx}) := #[]
+  for d in ep.decls do
+    if let .inst name typeKey _ := d then
+      unless keys.any (·.1 == typeKey) do
+        match hr : ep.registryGet? typeKey with
+        | some tIdx =>
+          keys := keys.push (typeKey, ⟨tIdx, progPool_registry_lt hwp hp hr⟩)
+        | none =>
+          throw ⟨s!"core check ('{ep.name}'): instance '{name}' typeKey '{typeKey}' missing from registry"⟩
+  pure keys
+
 /-- Convert the reachable `Program` subgraph rooted at `eIdx` into a
     `CoreProgram`, remapping every leaf id into the `ExprArena` and
     following instance-referenced registry entries recursively (the
@@ -224,37 +460,86 @@ private def convProgram (ea : EArena) (hw : ea.exprs.wf = true)
       { name := o.name, type? := o.type? }
     -- Registry: follow only instance-referenced entries (evaluator-
     -- reachable), first-use dedup order, each carrying its decrease fact.
-    let mut keys : Array (String × {t : ProgramIdx // t.idx < eIdx.idx}) := #[]
-    for d in ep.decls do
-      if let .inst name typeKey _ := d then
-        unless keys.any (·.1 == typeKey) do
-          match hr : ep.registryGet? typeKey with
-          | some tIdx =>
-            keys := keys.push (typeKey, ⟨tIdx, progPool_registry_lt hwp hp hr⟩)
-          | none =>
-            throw ⟨s!"core check ('{ep.name}'): instance '{name}' typeKey '{typeKey}' missing from registry"⟩
+    let keys ← referencedPrograms ea hwp eIdx ep hp
     let registry ← keys.mapM fun kt => do
       pure (kt.1, ← convProgram ea hw hwp kt.2.1)
     return .mk ep.name inputs outputs decls assigns registry
 termination_by eIdx.idx
 decreasing_by exact kt.2.2
 
-/-- The Phase B strata-exit reify: post-strata `EArena` → `(ExprArena ×
-    CoreProgram)`, sharing preserved, reachable-only from `root`. -/
-def EArena.toResolved (ea : EArena) (root : ProgramIdx) :
-    Except Error (ExprArena × CoreProgram) := do
+/-- Executable validation of the complete reachable program copy.  Node views
+    check all evaluator-visible fields and expression-root renaming; recursive
+    checks follow exactly the first-use registry spine used by `convProgram`. -/
+def checkProgramCopy (ea : EArena) (hwp : progPoolWf ea.programs = true)
+    (memo : ExprCopyMemo) (root : ProgramIdx) (core : CoreProgram) : Bool :=
+  match hp : ea.programs[root.idx]? with
+  | none => false
+  | some program =>
+    match remapProgramCopyView? memo
+        (Tropical.Ir.Strata.Program.copyView program) with
+    | none => false
+    | some copiedView =>
+      match referencedPrograms ea hwp root program hp with
+      | .error _ => false
+      | .ok keys =>
+        copiedView == Tropical.Ir.Strata.CoreProgram.copyView core &&
+        keys.map (·.1) == core.registry.map (·.1) &&
+        program.decls.all fun decl =>
+          match decl with
+          | .param .. | .prog .. => true
+          | .inst _ typeKey _ =>
+            match hs : program.registryGet? typeKey with
+            | none => false
+            | some sourceChild =>
+              match hr : core.registryGet? typeKey with
+              | none => false
+              | some child => checkProgramCopy ea hwp memo sourceChild child
+termination_by root.idx
+decreasing_by exact progPool_registry_lt hwp hp hs
+
+/-- The Phase B strata-exit reify together with the checks that make its
+    source/destination correspondence proof-visible. -/
+structure ResolvedCopy (ea : EArena) (root : ProgramIdx) where
+  exprs : ExprArena
+  program : CoreProgram
+  memo : ExprCopyMemo
+  sourceExprDescends : ea.exprs.wf = true
+  sourceProgramsDescend : progPoolWf ea.programs = true
+  destinationChecked : semanticWfCheck exprs = true
+  expressionsChecked : checkExprCopyMemo ea.exprs exprs memo = true
+  programChecked : checkProgramCopy ea sourceProgramsDescend memo root program = true
+
+/-- Proof-facing variant retaining the exact source/destination root memo. -/
+def EArena.toResolvedWithWitness (ea : EArena) (root : ProgramIdx) :
+    Except Error (ResolvedCopy ea root) := do
   -- Two O(edges) sweeps buy the conversion's termination measures: the
   -- expression arena's child-descending ids and the program pool's —
   -- both hold by construction, so a failure here is a construction-
   -- order bug, not a user error.
   if hw : ea.exprs.wf then
     if hwp : progPoolWf ea.programs then
-      let (core, (ca, _)) ← (convProgram ea hw hwp root).run ({}, {})
-      return (ca, core)
+      let (core, (ca, memo)) ← (convProgram ea hw hwp root).run ({}, {})
+      if hArena : semanticWfCheck ca then
+        if hExprCopy : checkExprCopyMemo ea.exprs ca memo then
+          if hProgramCopy : checkProgramCopy ea hwp memo root core then
+            return ResolvedCopy.mk ca core memo hw hwp hArena hExprCopy hProgramCopy
+          else
+            throw ⟨"toResolved: program copy witness check failed (internal)"⟩
+        else
+          throw ⟨"toResolved: expression copy witness check failed (internal)"⟩
+      else
+        throw ⟨"toResolved: destination arena invariant check failed (internal)"⟩
     else
       throw ⟨"toResolved: program pool is not child-descending (internal construction-order bug)"⟩
   else
     throw ⟨"toResolved: expression arena is not child-descending (internal interning-order bug)"⟩
+
+/-- The Phase B strata-exit reify: post-strata `EArena` → `(ExprArena ×
+    CoreProgram)`, sharing preserved, reachable-only from `root`. -/
+def EArena.toResolved (ea : EArena) (root : ProgramIdx) :
+    Except Error (ExprArena × CoreProgram) := do
+  let result ← ea.toResolvedWithWitness root
+  pure (result.exprs, result.program)
 
 /-- Downcast an elaborated `Arena` (a session root / per-program compile
     boundary that never ran the lowering rewrites, but IS the id-form) to
