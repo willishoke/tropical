@@ -595,7 +595,10 @@ decreasing_by
     | (have := hdc _ rfl; apply Prod.Lex.left; omega)
     | (apply Prod.Lex.left; omega)
 
-private def compileRoutedSum (arena : ExprArena) (hw : arena.wf = true)
+/-- Proof-facing entry point for the routed-region lowering. Production calls
+    still enter through `compileNode`; exposing this helper lets the routed
+    stream law name the exact implementation rather than duplicate it. -/
+def compileRoutedSum (arena : ExprArena) (hw : arena.wf = true)
     (bound capacity outputCount : Nat) (routes : Array (Option Nat))
     (tables values : Array ExprId) (dynCount? : Option ExprId) (idxId : Nat)
     (_hts : ∀ t ∈ tables, t.idx < bound)

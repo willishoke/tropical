@@ -85,12 +85,36 @@ private theorem AppendsOnly.listFoldlM {α} (l : List α) (f : PUnit → α → 
     exact .bind (hf a (by simp) init)
       (fun u => ih (fun x hx => hf x (by simp [hx])) u)
 
+private theorem AppendsOnly.listFoldlMGeneral {α β} (l : List α)
+    (f : β → α → EmitM β)
+    (hf : ∀ x ∈ l, ∀ acc, AppendsOnly (f acc x)) :
+    ∀ init, AppendsOnly (List.foldlM f init l) := by
+  induction l with
+  | nil => intro init; rw [List.foldlM_nil]; exact .pure _
+  | cons a l ih =>
+    intro init
+    rw [List.foldlM_cons]
+    exact .bind (hf a (by simp) init)
+      (fun acc => ih (fun x hx => hf x (by simp [hx])) acc)
+
 theorem AppendsOnly.arrayForM {α} (xs : Array α) (f : α → EmitM PUnit)
     (hf : ∀ x ∈ xs, AppendsOnly (f x)) : AppendsOnly (Array.forM f xs) := by
   show AppendsOnly (Array.foldlM (fun _ => f) PUnit.unit xs 0 xs.size)
   rw [← Array.foldlM_toList]
   exact AppendsOnly.listFoldlM xs.toList (fun _ => f)
     (fun x hx _ => hf x (by simpa using hx)) PUnit.unit
+
+/-- Mapping append-only compiler actions left-to-right is append-only. This is
+    the routed analogue of `arrayForM`: unlike tables, routed mapped values are
+    retained as the `RoutedSumYield` operand image. -/
+theorem AppendsOnly.arrayMapM {α β} (xs : Array α) (f : α → EmitM β)
+    (hf : ∀ x ∈ xs, AppendsOnly (f x)) : AppendsOnly (xs.mapM f) := by
+  rw [Array.mapM_eq_foldlM_push, ← Array.foldlM_toList]
+  exact AppendsOnly.listFoldlMGeneral xs.toList
+    (fun acc x => f x >>= fun value =>
+      (Pure.pure (acc.push value) : EmitM (Array β)))
+    (fun x hx _ => .bind (hf x (by simpa using hx))
+      (fun _ => AppendsOnly.pure _)) #[]
 
 private theorem List.insertIdx_length_append {α} (l₁ l₂ : List α) (x : α) :
     (l₁ ++ l₂).insertIdx l₁.length x = l₁ ++ x :: l₂ := by
