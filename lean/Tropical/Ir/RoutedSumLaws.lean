@@ -63,6 +63,37 @@ theorem validateRoutedBodyEffects_success
     cases h
     rfl
 
+/-- Nested routed regions are refused by the production guard before any
+    table, dynamic-count, or mapped-value compiler action can run. -/
+theorem validateRoutedConfig_nested_refuses
+    (capacity outputCount : Nat) (routes : Array (Option Nat))
+    (values : Array ExprId) (s : EmitSt)
+    (hDepth : (s.routedDepth != 0) = true) :
+    (validateRoutedConfig s.routedDepth capacity outputCount routes values).run s =
+      .error "emit_resolved: nested routedSum regions are not supported" := by
+  unfold Tropical.Ir.Emit.validateRoutedConfig
+  simp only [hDepth, if_true]
+  rfl
+
+theorem compileRoutedSum_nested_refuses
+    (arena : ExprArena) (hw : arena.wf = true)
+    (bound capacity outputCount : Nat) (routes : Array (Option Nat))
+    (tables values : Array ExprId) (dynCount? : Option ExprId) (idxId : Nat)
+    (hts : ∀ t ∈ tables, t.idx < bound)
+    (hvs : ∀ v ∈ values, v.idx < bound)
+    (hdc : ∀ d ∈ dynCount?, d.idx < bound)
+    (s : EmitSt) (hDepth : (s.routedDepth != 0) = true) :
+    (compileRoutedSum arena hw bound capacity outputCount routes tables values
+      dynCount? idxId hts hvs hdc).run s =
+      .error "emit_resolved: nested routedSum regions are not supported" := by
+  rw [compileRoutedSum.eq_def]
+  simp only [bind]
+  rw [step_get]
+  show (validateRoutedConfig s.routedDepth capacity outputCount routes values).run s
+      >>= _ = _
+  rw [validateRoutedConfig_nested_refuses capacity outputCount routes values s hDepth]
+  rfl
+
 set_option maxHeartbeats 1000000 in
 theorem compileRoutedSum_stream
     (arena : ExprArena) (hw : arena.wf = true)
