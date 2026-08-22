@@ -47,6 +47,11 @@ theorem AppendsOnly.pure {α} (a : α) : AppendsOnly (pure a : EmitM α) := by
   cases h
   exact ⟨#[], by simp⟩
 
+theorem AppendsOnly.throw {α} (message : String) :
+    AppendsOnly (throw message : EmitM α) := by
+  intro s r s' h
+  cases h
+
 theorem AppendsOnly.bind {α β} {x : EmitM α} {f : α → EmitM β}
     (hx : AppendsOnly x) (hf : ∀ a, AppendsOnly (f a)) :
     AppendsOnly (x >>= f) := by
@@ -146,6 +151,11 @@ theorem run_emit (i : NInstr) (s : EmitSt) :
       { s with instrs := s.instrs.push i,
                instrStages := s.instrStages.push s.curStage }) := rfl
 
+theorem run_allocArraySlot (size : Nat) (s : EmitSt) :
+    (allocArraySlot size).run s = .ok (s.nextArraySlot,
+      { s with nextArraySlot := s.nextArraySlot + 1,
+               arraySizes := s.arraySizes.push size }) := rfl
+
 /-- Peel one `StateT.bind` off a successful run. -/
 theorem step_ok {α β} {x : EmitM α} {f : α → EmitM β} {s : EmitSt} {r : β} {s' : EmitSt}
     (h : (StateT.bind x f).run s = .ok (r, s')) :
@@ -173,6 +183,11 @@ theorem step_get {β} (f : EmitSt → EmitM β) (s : EmitSt) :
 theorem step_allocReg {β} (f : Nat → EmitM β) (s : EmitSt) :
     (StateT.bind allocReg f).run s
       = (f s.nextReg).run { s with nextReg := s.nextReg + 1 } := rfl
+theorem step_allocArraySlot {β} (size : Nat) (f : Nat → EmitM β) (s : EmitSt) :
+    (StateT.bind (allocArraySlot size) f).run s
+      = (f s.nextArraySlot).run
+          { s with nextArraySlot := s.nextArraySlot + 1,
+                   arraySizes := s.arraySizes.push size } := rfl
 theorem step_modify {β} (g : EmitSt → EmitSt) (f : PUnit → EmitM β) (s : EmitSt) :
     (StateT.bind (modify g) f).run s = (f PUnit.unit).run (g s) := rfl
 theorem step_emit {β} (i : NInstr) (f : PUnit → EmitM β) (s : EmitSt) :
