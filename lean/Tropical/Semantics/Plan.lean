@@ -110,6 +110,12 @@ def evalOperand (alg : Algebra α) (inputs : PlanInputs α)
       | some value => .ok value
       | none => planError "operand.loopIdx" s!"binder {id} is not open"
 
+theorem evalOperand_source_of_getElem (alg : Algebra α) (inputs : PlanInputs α)
+    (state : PlanState α) (index : Nat) (ty : ScalarType) (value : Value α)
+    (h : inputs.sources[index]? = some value) :
+    evalOperand alg inputs state (.source index ty) = .ok value := by
+  simp [evalOperand, lookupPlanValue, h]
+
 private def planOpBinaryTag? : PlanOp → Option BinaryOpTag
   | .add => some .add | .sub => some .sub | .mul => some .mul
   | .div => some .div | .mod => some .mod | .floorDiv => some .floorDiv
@@ -287,6 +293,46 @@ private def splitRegion (beginTag endTag : String) (rest : List NInstr) :
     Outcome (List NInstr × List NInstr) :=
   splitRegionAux beginTag endTag 0 rest []
 
+private theorem splitRegionAux_length {beginTag endTag : String}
+    {depth : Nat} {rest reversed body suffix : List NInstr}
+    (hsplit : splitRegionAux beginTag endTag depth rest reversed =
+      .ok (body, suffix)) :
+    body.length + suffix.length + 1 = reversed.length + rest.length := by
+  induction rest generalizing depth reversed with
+  | nil => simp [splitRegionAux, planError] at hsplit
+  | cons instr rest ih =>
+      simp only [splitRegionAux] at hsplit
+      split at hsplit
+      next hend =>
+        split at hsplit
+        next hzero =>
+          rcases hsplit with ⟨rfl, rfl⟩
+          simp
+          omega
+        next hdepth =>
+          have hrec := ih hsplit
+          simp at hrec ⊢
+          omega
+      next hnotEnd =>
+        split at hsplit
+        next hbegin =>
+          have hrec := ih hsplit
+          simp at hrec ⊢
+          omega
+        next hnotBegin =>
+          have hrec := ih hsplit
+          simp at hrec ⊢
+          omega
+
+private theorem splitRegion_lengths {beginTag endTag : String}
+    {rest body suffix : List NInstr}
+    (hsplit : splitRegion beginTag endTag rest = .ok (body, suffix)) :
+    body.length < rest.length + 1 ∧ suffix.length < rest.length + 1 := by
+  change splitRegionAux beginTag endTag 0 rest [] = .ok (body, suffix) at hsplit
+  have hlength := splitRegionAux_length hsplit
+  simp at hlength
+  omega
+
 private def splitRoutedYieldAux : Nat → List NInstr → List NInstr →
     Outcome (List NInstr × NInstr × List NInstr)
   | _, [], _ =>
@@ -309,6 +355,53 @@ private def splitRoutedYieldAux : Nat → List NInstr → List NInstr →
 private def splitRoutedYield (body : List NInstr) :
     Outcome (List NInstr × NInstr × List NInstr) :=
   splitRoutedYieldAux 0 body []
+
+private theorem splitRoutedYieldAux_length {reduceDepth : Nat}
+    {body reversed mapped afterYield : List NInstr} {yieldInstr : NInstr}
+    (hsplit : splitRoutedYieldAux reduceDepth body reversed =
+      .ok (mapped, yieldInstr, afterYield)) :
+    mapped.length + afterYield.length + 1 = reversed.length + body.length := by
+  induction body generalizing reduceDepth reversed with
+  | nil => simp [splitRoutedYieldAux, planError] at hsplit
+  | cons instr body ih =>
+      simp only [splitRoutedYieldAux] at hsplit
+      split at hsplit
+      next hreduce =>
+        have hrec := ih hsplit
+        simp at hrec ⊢
+        omega
+      next hnotReduce =>
+        split at hsplit
+        next hend =>
+          split at hsplit
+          next hzero => simp [planError] at hsplit
+          next hdepth =>
+            have hrec := ih hsplit
+            simp at hrec ⊢
+            omega
+        next hnotEnd =>
+          split at hsplit
+          next hnested => simp [planError] at hsplit
+          next hnotNested =>
+            split at hsplit
+            next hyield =>
+              rcases hsplit with ⟨rfl, rfl, rfl⟩
+              simp
+              omega
+            next hnotYield =>
+              have hrec := ih hsplit
+              simp at hrec ⊢
+              omega
+
+private theorem splitRoutedYield_lengths {body mapped afterYield : List NInstr}
+    {yieldInstr : NInstr}
+    (hsplit : splitRoutedYield body = .ok (mapped, yieldInstr, afterYield)) :
+    mapped.length < body.length + 1 ∧ afterYield.length < body.length + 1 := by
+  change splitRoutedYieldAux 0 body [] =
+    .ok (mapped, yieldInstr, afterYield) at hsplit
+  have hlength := splitRoutedYieldAux_length hsplit
+  simp at hlength
+  omega
 
 private def loopIdIsOpen (state : PlanState α) (id : Nat) : Bool :=
   state.openLoops.any (fun frame => frame.binderId == id)
@@ -342,11 +435,98 @@ private def applyRoutedValues (alg : Algebra α) (state : PlanState α)
       outputs (List.range fanout)
     writeArrayDst state (.array dst) next
 
+private def execReductionRegion
+    (runBlocks : PlanState α → List NInstr → Outcome (PlanState α))
+    (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
+    (instr : NInstr) (accTemp : Nat) (body : List NInstr) :
+    Outcome (PlanState α) := do
+  let init ← evalOperand alg inputs state instr.args[0]!
+  let trips ← dynamicTrips alg inputs state instr.loopCount instr.args[1]?
+  let seeded ← writeScalarDst state instr.dst init
+  let entryTemps := seeded.temps
+  let outerLoops := seeded.openLoops
+  List.foldlM (fun current item => do
+      let acc ← lookupPlanValue "instruction.Reduce" "accumulator"
+        current.temps accTemp
+      let loopValue ← alg.loopIndex item
+      let iteration : PlanState α := {
+        current with
+        temps := entryTemps.set! accTemp acc
+        openLoops := { binderId := instr.loopId, index := loopValue } :: outerLoops
+      }
+      let bodyState ← runBlocks iteration body
+      let nextAcc ← lookupPlanValue "instruction.Reduce" "accumulator"
+        bodyState.temps accTemp
+      pure {
+        bodyState with
+        temps := entryTemps.set! accTemp nextAcc
+        openLoops := outerLoops
+      }) seeded (List.range trips)
+
+private def execRoutedRegion
+    (runBlocks : PlanState α → List NInstr → Outcome (PlanState α))
+    (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
+    (instr : NInstr) (dst : Nat) (mapped : List NInstr)
+    (yieldInstr : NInstr) (afterYield : List NInstr) :
+    Outcome (PlanState α) := do
+  let (.array yieldDst) := yieldInstr.dst
+    | planError "instruction.RoutedSumYield" "destination is not an array"
+  let fanout := yieldInstr.args.size
+  if yieldDst != dst then
+    planError "instruction.RoutedSumYield" "destination does not match its region"
+  else if instr.loopCount == 0 || instr.routedOutputCount == 0 || fanout == 0 then
+    planError "instruction.RoutedSumBegin" "capacity, output count, and fanout must be nonzero"
+  else if instr.routedRoutes.size != instr.loopCount * fanout then
+    planError "instruction.RoutedSumBegin"
+      s!"route count {instr.routedRoutes.size} does not equal capacity×fanout {instr.loopCount * fanout}"
+  else
+    let trips ← dynamicTrips alg inputs state instr.loopCount instr.args[0]?
+    let zero ← alg.zero
+    let seeded ← writeArrayDst state instr.dst
+      (Array.replicate instr.routedOutputCount zero)
+    let entryTemps := seeded.temps
+    let outerLoops := seeded.openLoops
+    List.foldlM (fun current item => do
+        let loopValue ← alg.loopIndex item
+        let iteration : PlanState α := {
+          current with
+          temps := entryTemps
+          openLoops := { binderId := instr.loopId, index := loopValue } :: outerLoops
+        }
+        let mappedState ← runBlocks iteration mapped
+        let values ← evalOperands alg inputs mappedState yieldInstr.args
+        let accumulated ← applyRoutedValues alg mappedState dst item fanout
+          instr.routedOutputCount instr.routedRoutes values
+        let afterState ← runBlocks accumulated afterYield
+        pure { afterState with temps := entryTemps, openLoops := outerLoops })
+      seeded (List.range trips)
+
+private theorem execReductionRegion_congr
+    {runLeft runRight : PlanState α → List NInstr → Outcome (PlanState α)}
+    (body : List NInstr)
+    (hrun : ∀ state, runLeft state body = runRight state body)
+    (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
+    (instr : NInstr) (accTemp : Nat) :
+    execReductionRegion runLeft alg inputs state instr accTemp body =
+      execReductionRegion runRight alg inputs state instr accTemp body := by
+  simp [execReductionRegion, hrun]
+
+private theorem execRoutedRegion_congr
+    {runLeft runRight : PlanState α → List NInstr → Outcome (PlanState α)}
+    (mapped afterYield : List NInstr)
+    (hmapped : ∀ state, runLeft state mapped = runRight state mapped)
+    (hafter : ∀ state, runLeft state afterYield = runRight state afterYield)
+    (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
+    (instr : NInstr) (dst : Nat) (yieldInstr : NInstr) :
+    execRoutedRegion runLeft alg inputs state instr dst mapped yieldInstr afterYield =
+      execRoutedRegion runRight alg inputs state instr dst mapped yieldInstr afterYield := by
+  simp [execRoutedRegion, hmapped, hafter]
+
 /-- Execute one structurally closed instruction block. Regions are parsed at
 their delimiters and evaluated directly: no unrolled instruction stream is
 constructed. Reduction and routed bodies run in increasing item order; their
 body-local temps and binder frames do not escape the region. -/
-private def execBlocksListFuel (fuel : Nat) (alg : Algebra α)
+def execBlocksListFuel (fuel : Nat) (alg : Algebra α)
     (inputs : PlanInputs α) (state : PlanState α) (blocks : List NInstr) :
     Outcome (PlanState α) :=
   match fuel with
@@ -366,28 +546,8 @@ private def execBlocksListFuel (fuel : Nat) (alg : Algebra α)
             s!"expected init and optional count, got {instr.args.size} args"
         else
           let (body, suffix) ← splitRegion "ReduceBegin" "ReduceEnd" rest
-          let init ← evalOperand alg inputs state instr.args[0]!
-          let trips ← dynamicTrips alg inputs state instr.loopCount instr.args[1]?
-          let seeded ← writeScalarDst state instr.dst init
-          let entryTemps := seeded.temps
-          let outerLoops := seeded.openLoops
-          let reduced ← List.foldlM (fun current item => do
-              let acc ← lookupPlanValue "instruction.Reduce" "accumulator"
-                current.temps accTemp
-              let loopValue ← alg.loopIndex item
-              let iteration : PlanState α := {
-                current with
-                temps := entryTemps.set! accTemp acc
-                openLoops := { binderId := instr.loopId, index := loopValue } :: outerLoops
-              }
-              let bodyState ← execBlocksListFuel fuel alg inputs iteration body
-              let nextAcc ← lookupPlanValue "instruction.Reduce" "accumulator"
-                bodyState.temps accTemp
-              pure {
-                bodyState with
-                temps := entryTemps.set! accTemp nextAcc
-                openLoops := outerLoops
-              }) seeded (List.range trips)
+          let reduced ← execReductionRegion
+            (execBlocksListFuel fuel alg inputs) alg inputs state instr accTemp body
           execBlocksListFuel fuel alg inputs reduced suffix
       else if instr.tag == "RoutedSumBegin" then
         let (.array dst) := instr.dst
@@ -401,38 +561,10 @@ private def execBlocksListFuel (fuel : Nat) (alg : Algebra α)
         else
           let (body, suffix) ← splitRegion "RoutedSumBegin" "RoutedSumEnd" rest
           let (mapped, yieldInstr, afterYield) ← splitRoutedYield body
-          let (.array yieldDst) := yieldInstr.dst
-            | planError "instruction.RoutedSumYield" "destination is not an array"
-          let fanout := yieldInstr.args.size
-          if yieldDst != dst then
-            planError "instruction.RoutedSumYield" "destination does not match its region"
-          else if instr.loopCount == 0 || instr.routedOutputCount == 0 || fanout == 0 then
-            planError "instruction.RoutedSumBegin" "capacity, output count, and fanout must be nonzero"
-          else if instr.routedRoutes.size != instr.loopCount * fanout then
-            planError "instruction.RoutedSumBegin"
-              s!"route count {instr.routedRoutes.size} does not equal capacity×fanout {instr.loopCount * fanout}"
-          else
-            let trips ← dynamicTrips alg inputs state instr.loopCount instr.args[0]?
-            let zero ← alg.zero
-            let seeded ← writeArrayDst state instr.dst
-              (Array.replicate instr.routedOutputCount zero)
-            let entryTemps := seeded.temps
-            let outerLoops := seeded.openLoops
-            let routed ← List.foldlM (fun current item => do
-                let loopValue ← alg.loopIndex item
-                let iteration : PlanState α := {
-                  current with
-                  temps := entryTemps
-                  openLoops := { binderId := instr.loopId, index := loopValue } :: outerLoops
-                }
-                let mappedState ← execBlocksListFuel fuel alg inputs iteration mapped
-                let values ← evalOperands alg inputs mappedState yieldInstr.args
-                let accumulated ← applyRoutedValues alg mappedState dst item fanout
-                  instr.routedOutputCount instr.routedRoutes values
-                let afterState ← execBlocksListFuel fuel alg inputs accumulated afterYield
-                pure { afterState with temps := entryTemps, openLoops := outerLoops })
-              seeded (List.range trips)
-            execBlocksListFuel fuel alg inputs routed suffix
+          let routed ← execRoutedRegion
+            (execBlocksListFuel fuel alg inputs) alg inputs state instr dst mapped
+              yieldInstr afterYield
+          execBlocksListFuel fuel alg inputs routed suffix
       else if instr.tag == "ReduceEnd" || instr.tag == "RoutedSumYield"
           || instr.tag == "RoutedSumEnd" then
         planError "instruction.region" s!"unmatched delimiter {instr.tag}"
@@ -440,6 +572,160 @@ private def execBlocksListFuel (fuel : Nat) (alg : Algebra α)
         execBlocksListFuel fuel alg inputs
           (← execSmallInstr alg inputs state instr) rest
 termination_by fuel
+
+theorem execBlocksListFuel_irrel (alg : Algebra α) (inputs : PlanInputs α)
+    (state : PlanState α) (blocks : List NInstr) (left right : Nat)
+    (hleft : blocks.length < left) (hright : blocks.length < right) :
+    execBlocksListFuel left alg inputs state blocks =
+      execBlocksListFuel right alg inputs state blocks := by
+  cases left with
+  | zero => omega
+  | succ left =>
+    cases right with
+    | zero => omega
+    | succ right =>
+      cases hblocks : blocks with
+      | nil => simp [execBlocksListFuel]
+      | cons instr rest =>
+        simp only [execBlocksListFuel]
+        by_cases hreduce : instr.tag == "ReduceBegin"
+        · simp only [if_pos hreduce]
+          cases hdst : instr.dst with
+          | temp accTemp =>
+            by_cases hcollision : loopIdIsOpen state instr.loopId
+            · simp [hcollision]
+            · simp only [if_neg hcollision]
+              by_cases harity : instr.args.size != 1 && instr.args.size != 2
+              · simp [harity]
+              · simp only [if_neg harity]
+                cases hsplit : splitRegion "ReduceBegin" "ReduceEnd" rest with
+                | error error => rfl
+                | ok split =>
+                  rcases split with ⟨body, suffix⟩
+                  have hsizes := splitRegion_lengths hsplit
+                  have hblocksLength : blocks.length = rest.length + 1 := by
+                    rw [hblocks]
+                    simp
+                  have hbodyLeft : body.length < left := by omega
+                  have hbodyRight : body.length < right := by omega
+                  have hsuffixLeft : suffix.length < left := by omega
+                  have hsuffixRight : suffix.length < right := by omega
+                  have hbody : ∀ current,
+                      execBlocksListFuel left alg inputs current body =
+                        execBlocksListFuel right alg inputs current body := fun current =>
+                    execBlocksListFuel_irrel alg inputs current body left right
+                      hbodyLeft hbodyRight
+                  have hregion := execReductionRegion_congr body hbody alg inputs
+                    state instr accTemp
+                  change (execReductionRegion (execBlocksListFuel left alg inputs)
+                      alg inputs state instr accTemp body >>= fun reduced =>
+                        execBlocksListFuel left alg inputs reduced suffix) =
+                    (execReductionRegion (execBlocksListFuel right alg inputs)
+                      alg inputs state instr accTemp body >>= fun reduced =>
+                        execBlocksListFuel right alg inputs reduced suffix)
+                  rw [hregion]
+                  cases hresult : execReductionRegion
+                      (execBlocksListFuel right alg inputs) alg inputs state instr
+                        accTemp body with
+                  | error error => rfl
+                  | ok reduced =>
+                    simp
+                    exact execBlocksListFuel_irrel alg inputs reduced suffix left right
+                      hsuffixLeft hsuffixRight
+          | array _ | sessionArray _ | moduleSlot _ => simp
+        · simp only [if_neg hreduce]
+          by_cases hrouted : instr.tag == "RoutedSumBegin"
+          · simp only [if_pos hrouted]
+            cases hdst : instr.dst with
+            | array dst =>
+              by_cases hcollision : loopIdIsOpen state instr.loopId
+              · simp [hcollision]
+              · simp only [if_neg hcollision]
+                by_cases harity : instr.args.size > 1
+                · simp [harity]
+                · simp only [if_neg harity]
+                  cases hsplit : splitRegion "RoutedSumBegin" "RoutedSumEnd" rest with
+                  | error error => rfl
+                  | ok split =>
+                    rcases split with ⟨body, suffix⟩
+                    cases hyield : splitRoutedYield body with
+                    | error error => simp [bind, Except.bind, hyield]
+                    | ok yieldSplit =>
+                      rcases yieldSplit with ⟨mapped, yieldInstr, afterYield⟩
+                      have hsizes := splitRegion_lengths hsplit
+                      have hyieldSizes := splitRoutedYield_lengths hyield
+                      have hblocksLength : blocks.length = rest.length + 1 := by
+                        rw [hblocks]
+                        simp
+                      have hmappedLeft : mapped.length < left := by omega
+                      have hmappedRight : mapped.length < right := by omega
+                      have hafterLeft : afterYield.length < left := by omega
+                      have hafterRight : afterYield.length < right := by omega
+                      have hsuffixLeft : suffix.length < left := by omega
+                      have hsuffixRight : suffix.length < right := by omega
+                      have hmapped : ∀ current,
+                          execBlocksListFuel left alg inputs current mapped =
+                            execBlocksListFuel right alg inputs current mapped := fun current =>
+                        execBlocksListFuel_irrel alg inputs current mapped left right
+                          hmappedLeft hmappedRight
+                      have hafter : ∀ current,
+                          execBlocksListFuel left alg inputs current afterYield =
+                            execBlocksListFuel right alg inputs current afterYield := fun current =>
+                        execBlocksListFuel_irrel alg inputs current afterYield left right
+                          hafterLeft hafterRight
+                      have hregion := execRoutedRegion_congr mapped afterYield hmapped hafter
+                        alg inputs state instr dst yieldInstr
+                      simp only [bind, Except.bind, hyield]
+                      change (execRoutedRegion (execBlocksListFuel left alg inputs)
+                          alg inputs state instr dst mapped yieldInstr afterYield >>= fun routed =>
+                            execBlocksListFuel left alg inputs routed suffix) =
+                        (execRoutedRegion (execBlocksListFuel right alg inputs)
+                          alg inputs state instr dst mapped yieldInstr afterYield >>= fun routed =>
+                            execBlocksListFuel right alg inputs routed suffix)
+                      rw [hregion]
+                      cases hresult : execRoutedRegion
+                          (execBlocksListFuel right alg inputs) alg inputs state instr dst
+                            mapped yieldInstr afterYield with
+                      | error error => rfl
+                      | ok routed =>
+                        simp
+                        exact execBlocksListFuel_irrel alg inputs routed suffix left right
+                          hsuffixLeft hsuffixRight
+            | temp _ | sessionArray _ | moduleSlot _ => simp
+          · simp only [if_neg hrouted]
+            by_cases hdelimiter : instr.tag == "ReduceEnd" ||
+                instr.tag == "RoutedSumYield" || instr.tag == "RoutedSumEnd"
+            · simp [hdelimiter]
+            · simp only [if_neg hdelimiter]
+              cases hsmall : execSmallInstr alg inputs state instr with
+              | error error => rfl
+              | ok next =>
+                simp
+                apply execBlocksListFuel_irrel alg inputs next rest left right
+                · have hblocksLength : blocks.length = rest.length + 1 := by
+                    rw [hblocks]
+                    simp
+                  omega
+                · have hblocksLength : blocks.length = rest.length + 1 := by
+                    rw [hblocks]
+                    simp
+                  omega
+termination_by blocks.length
+decreasing_by
+  · rw [hblocks]
+    simpa using hsizes.1
+  · rw [hblocks]
+    simpa using hsizes.2
+  · rw [hblocks]
+    have : mapped.length < rest.length + 1 := by omega
+    simpa using this
+  · rw [hblocks]
+    have : afterYield.length < rest.length + 1 := by omega
+    simpa using this
+  · rw [hblocks]
+    simpa using hsizes.2
+  · rw [hblocks]
+    simp
 
 /-- Public structured-block semantic interface. The fuel is a termination
 witness only: a recursive region body always has strictly fewer delimiters than
