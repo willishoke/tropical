@@ -28,6 +28,25 @@ structure PlanInputs (α : Type) where
   initialSlots : Array (Value α) := #[]
   initialArrays : Array (Array (Value α)) := #[]
 
+/-- Named source rails from which a Plan's positional source image is built.
+Ordinary audio plans select `tick`/`rate`; tile materializers additionally
+select `tilePhase`/`tileTick` in their declared order. -/
+structure PlanSourceImage (α : Type) where
+  tick : Value α
+  rate : Value α
+  tilePhase : Value α
+  tileTick : Value α
+
+def PlanSourceImage.value (image : PlanSourceImage α) : SourceKind → Value α
+  | .tick => image.tick
+  | .rate => image.rate
+  | .tilePhase => image.tilePhase
+  | .tileTick => image.tileTick
+
+def PlanInputs.withDeclaredSources (inputs : PlanInputs α)
+    (kinds : Array SourceKind) (image : PlanSourceImage α) : PlanInputs α :=
+  { inputs with sources := kinds.map image.value }
+
 /-- One open structured-region binder. Binder identifiers are nominal and are
 resolved innermost-first, matching both production emitters. -/
 structure LoopFrame (α : Type) where
@@ -464,6 +483,9 @@ def initialPlanState (alg : Algebra α) (inputs : PlanInputs α)
   else if inputs.initialArrays.size != plan.arraySlotCount then
     planError "plan.initialArrays"
       s!"expected {plan.arraySlotCount} arrays, got {inputs.initialArrays.size}"
+  else if inputs.sources.size != plan.sources.size then
+    planError "plan.sources"
+      s!"expected {plan.sources.size} sources, got {inputs.sources.size}"
   else if plan.arraySlotSizes.size != plan.arraySlotCount then
     planError "plan.arraySlotSizes" "array size metadata is not aligned"
   else

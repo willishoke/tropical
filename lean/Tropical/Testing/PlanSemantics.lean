@@ -44,6 +44,24 @@ private def fixtureInputs : PlanInputs Int := {
   sources := #[.scalar 11, .scalar 48000]
 }
 
+private def sourceImage : PlanSourceImage Int := {
+  tick := .scalar 11
+  rate := .scalar 48000
+  tilePhase := .scalar 2
+  tileTick := .scalar 128
+}
+
+example : (PlanInputs.withDeclaredSources ({} : PlanInputs Int)
+    defaultSources sourceImage).sources = #[.scalar 11, .scalar 48000] := by
+  simp [PlanInputs.withDeclaredSources, defaultSources, PlanSourceImage.value,
+    sourceImage]
+
+example : (PlanInputs.withDeclaredSources ({} : PlanInputs Int)
+    tileSources sourceImage).sources =
+      #[.scalar 11, .scalar 48000, .scalar 2, .scalar 128] := by
+  simp [PlanInputs.withDeclaredSources, tileSources, PlanSourceImage.value,
+    sourceImage]
+
 private def fixtureState : PlanState Int := {
   temps := #[.scalar 2, .scalar 5]
   slots := #[.scalar 13]
