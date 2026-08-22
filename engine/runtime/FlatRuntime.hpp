@@ -407,15 +407,23 @@ public:
     // queue and its tile storage live for the FlatRuntime's whole lifetime.
     if (metal_audio_enabled_.load(std::memory_order_acquire))
     {
+      const uint32_t output_channels = metal_tiles_->output_channels();
+      double * const rendered_output = output_channels == 1
+        ? outputBuffer.data() : interleaved_output_buffer_.data();
       metal_tiles_->synchronize_audio_coordinates(
         audio_device_frame_, audio_sample_index_);
       tropical_metal::set_audio_callback_thread(true);
-      metal_tiles_->consume(outputBuffer.data(), buffer_length_);
+      metal_tiles_->consume(rendered_output, buffer_length_);
       tropical_metal::set_audio_callback_thread(false);
       audio_device_frame_ = metal_tiles_->published_device_frame();
       audio_sample_index_ = metal_tiles_->published_source_sample();
-      apply_fade_to_output(outputBuffer.data(), 1);
-      rendered_output_channel_count_.store(1, std::memory_order_release);
+      apply_fade_to_output(rendered_output, output_channels);
+      if (output_channels > 1)
+        for (unsigned int frame = 0; frame < buffer_length_; ++frame)
+          outputBuffer[frame] = rendered_output[
+            static_cast<std::size_t>(frame) * output_channels];
+      rendered_output_channel_count_.store(
+        output_channels, std::memory_order_release);
       publish_audio_boundary();
       return;
     }

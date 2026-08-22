@@ -281,6 +281,7 @@ FlatRuntime::make_metal_epoch_request(
   tropical_metal::RenderEpochRequest request;
   request.epoch_id = epoch_id;
   request.kernel = state.metal;
+  request.output_channels = state.output_channel_count;
   request.sample_rate = state.sample_rate;
   request.source_origin = source_origin;
   request.transition = transition;
@@ -800,21 +801,24 @@ FlatRuntime::load_ir_time_staged_with_observation_generation(
 
   if (!audio_msl_source.empty())
   {
-    if (new_state.output_channel_count != 1)
-      throw std::runtime_error(
-        "FlatRuntime: Metal output is mono-only; multichannel plans require the JIT backend");
 #ifdef TROPICAL_METAL
     if (!metal_queue_ready_.load(std::memory_order_acquire))
     {
       metal_render_tile_frames_ =
         configure_metal_render_tile_frames(buffer_length_);
       metal_tiles_ = std::make_unique<EpochTileQueue>(
-        buffer_length_, metal_render_tile_frames_);
+        buffer_length_, metal_render_tile_frames_,
+        new_state.output_channel_count);
       metal_tiles_->synchronize_audio_coordinates(
         published_device_frame_.load(std::memory_order_acquire),
         published_sample_index_.load(std::memory_order_acquire));
       metal_queue_ready_.store(true, std::memory_order_release);
     }
+    else if (metal_tiles_->output_channels()
+             != new_state.output_channel_count)
+      throw std::runtime_error(
+        "FlatRuntime: a Metal runtime cannot change output channel count "
+        "after its tile queue is initialized");
     if (new_state.tile_materializer
         && (new_state.tile_interval_frames == 0
             || metal_render_tile_frames_ % new_state.tile_interval_frames != 0))
@@ -854,6 +858,7 @@ FlatRuntime::load_ir_time_staged_with_observation_generation(
     }
     new_state.metal = tropical_metal::create(
       audio_msl_source, metal_render_tile_frames_,
+      new_state.output_channel_count,
       static_cast<uint32_t>(new_state.slots.size()),
       static_cast<uint32_t>(column_floats), err,
       new_state.metal_sample_threadgroups

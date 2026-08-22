@@ -17,6 +17,7 @@ private def jn (mantissa : Int) : Lean.JsonNumber :=
 
 private def stereoPlan : FlatPlan :=
   { arraySlotNames := #[]
+    outputChannelCount := 2
     registerCount := 0
     arraySlotCount := 0
     arraySlotSizes := #[]

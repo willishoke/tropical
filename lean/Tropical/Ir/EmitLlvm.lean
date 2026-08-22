@@ -747,12 +747,6 @@ def emitSinks (sinks : Array SinkSpec) (outputChannelCount : Nat) : M Unit := do
     line s!"{g} = getelementptr inbounds double, ptr %output_buffer, i64 {outputIdx}"
     line s!"store double {scaled}, ptr {g}, align 8"
 
-/-- Native output width on the pre-schema branch. Integration replaces this
-    derivation with `plan.outputChannelCount`; compiler-produced plans guarantee
-    that the explicit manifest width equals this sink extent. -/
-private def derivedOutputChannelCount (sinks : Array SinkSpec) : Nat :=
-  sinks.foldl (fun count sink => max count (sink.target + 1)) 1
-
 private def validateSinkTargets (sinks : Array SinkSpec)
     (outputChannelCount : Nat) : Except String Unit := do
   if outputChannelCount == 0 || outputChannelCount > 64 then
@@ -784,7 +778,7 @@ private def intrinsicDecls : String :=
 /-- Emit the full LLVM module text for a FlatPlan's fused kernel. The
     function is named `tropical_kernel`; `compile_ir_text` renames it. -/
 def emitKernel (plan : FlatPlan) : Except String String := do
-  let outputChannelCount := derivedOutputChannelCount plan.sinks
+  let outputChannelCount := plan.outputChannelCount
   validateSinkTargets plan.sinks outputChannelCount
   let body : M Unit := do
     for inst in plan.instanceFunctions do
