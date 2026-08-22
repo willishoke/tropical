@@ -1,4 +1,5 @@
 import Tropical.Semantics.Staging
+import Tropical.Ir.Stage0Laws
 
 /-! Executable witnesses for the staging proof surface. -/
 
@@ -22,3 +23,33 @@ example (arena : ExprArena) (id : ExprId)
   stageOf_dangling h
 
 end Tropical.Testing.StagingLaws
+
+namespace Tropical.Testing.Stage0Laws
+
+open Tropical.Ir
+open Tropical.Ir.Stage0
+open Tropical.Plan
+
+private def emptyPlan : FlatPlan :=
+  { arraySlotNames := #[]
+    registerCount := 0
+    arraySlotCount := 0
+    arraySlotSizes := #[]
+    instanceFunctions := #[]
+    sinks := #[]
+    slotCount := 0
+    slotNames := #[]
+    slotDefaults := #[] }
+
+example : hoistTyped emptyPlan #[] =
+    .ok { audio := emptyPlan, coeff? := none } := by
+  exact hoistTyped_identity_of_no_selection _ _
+    (by native_decide)
+    (by native_decide)
+
+example : hoistTyped emptyPlan #[#[none]] =
+    .error "Stage0.hoistTyped: typed stage blocks do not align with emitter blocks" := by
+  exact hoistTyped_refuses_misaligned _ _
+    (by native_decide)
+
+end Tropical.Testing.Stage0Laws

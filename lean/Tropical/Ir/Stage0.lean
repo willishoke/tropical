@@ -103,6 +103,28 @@ def collectBlocks (f : InstanceFunction) : Array (Array NInstr) := Id.run do
 termination_by sizeOf f
 decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children _h
 
+/-- Every instruction block in a plan, in emitter order.  Keeping this walk
+    public gives typed staging and its proofs one canonical block skeleton. -/
+def collectPlanBlocks (plan : FlatPlan) : Array (Array NInstr) := Id.run do
+  let mut blocks : Array (Array NInstr) := #[]
+  for fn in plan.instanceFunctions do
+    blocks := blocks ++ collectBlocks fn
+  return blocks
+
+/-- Typed classifications align block-for-block with emitter order.  A flat
+    total alone is insufficient: adjacent block-length mistakes can cancel. -/
+def typedStagesAligned (blocks : Array (Array NInstr))
+    (stageBlocks : Array (Array (Option Stage))) : Bool :=
+  blocks.map Array.size == stageBlocks.map Array.size
+
+/-- No instruction is selected for coefficient-time execution.  Missing
+    classifications and explicit `s1` are both conservative audio placement. -/
+def noTypedSelection (stageBlocks : Array (Array (Option Stage))) : Bool :=
+  stageBlocks.all fun block => block.all fun stage =>
+    match stage with
+    | some .fold | some .s0 => false
+    | some .s1 | none => true
+
 /-- Reassemble an instance function from rewritten blocks, consuming them
     in the same order `collectBlocks` produced. Returns the rebuilt
     function and the next unconsumed block index. -/
@@ -305,9 +327,7 @@ private def analyze (plan : FlatPlan) (blocks : Array (Array NInstr)) : Analysis
     per linear instruction (the `collectBlocks` emit-order walk), its
     value stage and whether this pass hoists it. -/
 def classify (plan : FlatPlan) : Array Stage × Array Bool := Id.run do
-  let mut allBlocks : Array (Array NInstr) := #[]
-  for f in plan.instanceFunctions do
-    allBlocks := allBlocks ++ collectBlocks f
+  let allBlocks := collectPlanBlocks plan
   let a := analyze plan allBlocks
   return (a.stages, a.hoisted)
 
@@ -417,9 +437,7 @@ private def rebuild (plan : FlatPlan) (allBlocks : Array (Array NInstr))
     classification (the plan-level reference pass — the only splitter
     available where the arena is gone, i.e. plans parsed from JSON). -/
 def hoist (plan : FlatPlan) : Split := Id.run do
-  let mut allBlocks : Array (Array NInstr) := #[]
-  for f in plan.instanceFunctions do
-    allBlocks := allBlocks ++ collectBlocks f
+  let allBlocks := collectPlanBlocks plan
   return rebuild plan allBlocks (analyze plan allBlocks)
 
 -- ─────────────────────────────────────────────────────────────
@@ -735,9 +753,11 @@ private def placementFromStages (blocks : Array (Array NInstr))
     emit-order blocks from `compileSessionStaged`). -/
 def hoistTyped (plan : FlatPlan)
     (stageBlocks : Array (Array (Option Stage))) : Except String Split := do
-  let mut allBlocks : Array (Array NInstr) := #[]
-  for f in plan.instanceFunctions do
-    allBlocks := allBlocks ++ collectBlocks f
+  let allBlocks := collectPlanBlocks plan
+  if !typedStagesAligned allBlocks stageBlocks then
+    throw "Stage0.hoistTyped: typed stage blocks do not align with emitter blocks"
+  if noTypedSelection stageBlocks then
+    return { audio := plan, coeff? := none }
   let a ← placementFromStages allBlocks (stageBlocks.flatten)
   return rebuild plan allBlocks a
 
