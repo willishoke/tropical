@@ -333,6 +333,38 @@ private theorem splitRegion_lengths {beginTag endTag : String}
   simp at hlength
   omega
 
+private theorem splitRegionAux_append_of_success {beginTag endTag : String}
+    {depth : Nat} {rest reversed body suffix : List NInstr}
+    (tail : List NInstr)
+    (hsplit : splitRegionAux beginTag endTag depth rest reversed =
+      .ok (body, suffix)) :
+    splitRegionAux beginTag endTag depth (rest ++ tail) reversed =
+      .ok (body, suffix ++ tail) := by
+  induction rest generalizing depth reversed with
+  | nil => simp [splitRegionAux, planError] at hsplit
+  | cons instr rest ih =>
+      simp only [List.cons_append, splitRegionAux] at hsplit ⊢
+      by_cases hend : instr.tag == endTag
+      · simp only [if_pos hend] at hsplit ⊢
+        by_cases hzero : depth == 0
+        · simp only [if_pos hzero] at hsplit ⊢
+          rcases hsplit with ⟨rfl, rfl⟩
+          rfl
+        · simp only [if_neg hzero] at hsplit ⊢
+          exact ih hsplit
+      · simp only [if_neg hend] at hsplit ⊢
+        by_cases hbegin : instr.tag == beginTag
+        · simp only [if_pos hbegin] at hsplit ⊢
+          exact ih hsplit
+        · simp only [if_neg hbegin] at hsplit ⊢
+          exact ih hsplit
+
+private theorem splitRegion_append_of_success {beginTag endTag : String}
+    {rest body suffix : List NInstr} (tail : List NInstr)
+    (hsplit : splitRegion beginTag endTag rest = .ok (body, suffix)) :
+    splitRegion beginTag endTag (rest ++ tail) = .ok (body, suffix ++ tail) := by
+  exact splitRegionAux_append_of_success tail hsplit
+
 private def splitRoutedYieldAux : Nat → List NInstr → List NInstr →
     Outcome (List NInstr × NInstr × List NInstr)
   | _, [], _ =>
@@ -402,6 +434,40 @@ private theorem splitRoutedYield_lengths {body mapped afterYield : List NInstr}
   have hlength := splitRoutedYieldAux_length hsplit
   simp at hlength
   omega
+
+/-- Syntactic closure at the structured-block boundary used by `execBlocks`.
+It records exactly the condition needed for appending a continuation: every
+top-level region opened in the prefix is closed before that continuation. -/
+def blocksStructurallyClosedList : List NInstr → Bool
+  | [] => true
+  | instr :: rest =>
+      if instr.tag == "ReduceBegin" then
+        match _hreduceSplit : splitRegion "ReduceBegin" "ReduceEnd" rest with
+        | .ok (_, suffix) => blocksStructurallyClosedList suffix
+        | .error _ => false
+      else if instr.tag == "RoutedSumBegin" then
+        match _hroutedSplit : splitRegion "RoutedSumBegin" "RoutedSumEnd" rest with
+        | .ok (_, suffix) => blocksStructurallyClosedList suffix
+        | .error _ => false
+      else if instr.tag == "ReduceEnd" || instr.tag == "RoutedSumYield"
+          || instr.tag == "RoutedSumEnd" then
+        false
+      else
+        blocksStructurallyClosedList rest
+termination_by blocks => blocks.length
+decreasing_by
+  · have hsizes := splitRegion_lengths _hreduceSplit
+    simpa using hsizes.2
+  · have hsizes := splitRegion_lengths _hroutedSplit
+    simpa using hsizes.2
+  · simp
+
+def BlocksStructurallyClosed (instrs : Array NInstr) : Prop :=
+  blocksStructurallyClosedList instrs.toList = true
+
+instance (instrs : Array NInstr) : Decidable (BlocksStructurallyClosed instrs) := by
+  unfold BlocksStructurallyClosed
+  infer_instance
 
 private def loopIdIsOpen (state : PlanState α) (id : Nat) : Bool :=
   state.openLoops.any (fun frame => frame.binderId == id)
@@ -593,10 +659,10 @@ theorem execBlocksListFuel_irrel (alg : Algebra α) (inputs : PlanInputs α)
           cases hdst : instr.dst with
           | temp accTemp =>
             by_cases hcollision : loopIdIsOpen state instr.loopId
-            · simp [hcollision]
+            · simp [hcollision, planError]
             · simp only [if_neg hcollision]
               by_cases harity : instr.args.size != 1 && instr.args.size != 2
-              · simp [harity]
+              · simp [harity, planError]
               · simp only [if_neg harity]
                 cases hsplit : splitRegion "ReduceBegin" "ReduceEnd" rest with
                 | error error => rfl
@@ -727,12 +793,143 @@ decreasing_by
   · rw [hblocks]
     simp
 
+theorem execBlocksListFuel_append_of_structurallyClosed
+    (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
+    (head suffix : List NInstr) (fuel suffixFuel : Nat)
+    (hclosed : blocksStructurallyClosedList head = true)
+    (hfuel : (head ++ suffix).length < fuel)
+    (hsuffixFuel : suffix.length < suffixFuel) :
+    execBlocksListFuel fuel alg inputs state (head ++ suffix) =
+      (execBlocksListFuel fuel alg inputs state head >>= fun next =>
+        execBlocksListFuel suffixFuel alg inputs next suffix) := by
+  cases fuel with
+  | zero => omega
+  | succ fuel =>
+    cases suffixFuel with
+    | zero => omega
+    | succ suffixFuel =>
+      cases hprefix : head with
+      | nil =>
+        simpa [execBlocksListFuel] using
+          execBlocksListFuel_irrel alg inputs state suffix (fuel + 1)
+            (suffixFuel + 1) (by simpa [hprefix] using hfuel) hsuffixFuel
+      | cons instr rest =>
+        have hheadLength : head.length = rest.length + 1 := by
+          rw [hprefix]
+          simp
+        simp only [hprefix, blocksStructurallyClosedList] at hclosed
+        simp only [List.cons_append, execBlocksListFuel, bind, Except.bind]
+        by_cases hreduce : instr.tag == "ReduceBegin"
+        · simp only [if_pos hreduce] at hclosed ⊢
+          cases hdst : instr.dst with
+          | temp accTemp =>
+            by_cases hcollision : loopIdIsOpen state instr.loopId
+            · simp only [if_pos hcollision]
+              rfl
+            · simp only [if_neg hcollision]
+              by_cases harity : instr.args.size != 1 && instr.args.size != 2
+              · simp only [if_pos harity]
+                rfl
+              · simp only [if_neg harity]
+                cases hsplit : splitRegion "ReduceBegin" "ReduceEnd" rest with
+                | error error =>
+                  rw [hsplit] at hclosed
+                  contradiction
+                | ok split =>
+                  rcases split with ⟨body, closedSuffix⟩
+                  rw [hsplit] at hclosed
+                  simp at hclosed
+                  have hsizes := splitRegion_lengths hsplit
+                  have happend := splitRegion_append_of_success suffix hsplit
+                  simp only [happend]
+                  cases hregion : execReductionRegion
+                      (execBlocksListFuel fuel alg inputs) alg inputs state instr
+                        accTemp body with
+                  | error error => rfl
+                  | ok reduced =>
+                    exact execBlocksListFuel_append_of_structurallyClosed
+                      alg inputs reduced closedSuffix suffix fuel (suffixFuel + 1)
+                      hclosed (by simp at hfuel ⊢; omega) hsuffixFuel
+          | array _ | sessionArray _ | moduleSlot _ => rfl
+        · simp only [if_neg hreduce] at hclosed ⊢
+          by_cases hrouted : instr.tag == "RoutedSumBegin"
+          · simp only [if_pos hrouted] at hclosed ⊢
+            cases hdst : instr.dst with
+            | array dst =>
+              by_cases hcollision : loopIdIsOpen state instr.loopId
+              · simp only [if_pos hcollision]
+                rfl
+              · simp only [if_neg hcollision]
+                by_cases harity : instr.args.size > 1
+                · simp only [if_pos harity]
+                  rfl
+                · simp only [if_neg harity]
+                  cases hsplit : splitRegion "RoutedSumBegin" "RoutedSumEnd" rest with
+                  | error error =>
+                    rw [hsplit] at hclosed
+                    contradiction
+                  | ok split =>
+                    rcases split with ⟨body, closedSuffix⟩
+                    rw [hsplit] at hclosed
+                    simp at hclosed
+                    have hsizes := splitRegion_lengths hsplit
+                    have happend := splitRegion_append_of_success suffix hsplit
+                    simp only [happend]
+                    cases hyield : splitRoutedYield body with
+                    | error error => rfl
+                    | ok yieldSplit =>
+                      rcases yieldSplit with ⟨mapped, yieldInstr, afterYield⟩
+                      simp only [hyield, bind, Except.bind]
+                      cases hregion : execRoutedRegion
+                          (execBlocksListFuel fuel alg inputs) alg inputs state instr dst
+                            mapped yieldInstr afterYield with
+                      | error error => rfl
+                      | ok routed =>
+                        exact execBlocksListFuel_append_of_structurallyClosed
+                          alg inputs routed closedSuffix suffix fuel (suffixFuel + 1)
+                          hclosed (by simp at hfuel ⊢; omega) hsuffixFuel
+            | temp _ | sessionArray _ | moduleSlot _ => rfl
+          · simp only [if_neg hrouted] at hclosed ⊢
+            by_cases hdelimiter : instr.tag == "ReduceEnd" ||
+                instr.tag == "RoutedSumYield" || instr.tag == "RoutedSumEnd"
+            · simp [hdelimiter] at hclosed
+            · simp only [if_neg hdelimiter] at hclosed ⊢
+              cases hsmall : execSmallInstr alg inputs state instr with
+              | error error => rfl
+              | ok next =>
+                exact execBlocksListFuel_append_of_structurallyClosed
+                  alg inputs next rest suffix fuel (suffixFuel + 1)
+                  hclosed (by simp at hfuel ⊢; omega) hsuffixFuel
+termination_by head.length
+decreasing_by
+  · rw [hprefix]
+    simpa using hsizes.2
+  · rw [hprefix]
+    simpa using hsizes.2
+  · omega
+
 /-- Public structured-block semantic interface. The fuel is a termination
 witness only: a recursive region body always has strictly fewer delimiters than
 its enclosing call. -/
 def execBlocks (alg : Algebra α) (inputs : PlanInputs α)
     (state : PlanState α) (instrs : Array NInstr) : Outcome (PlanState α) :=
   execBlocksListFuel (instrs.size + 1) alg inputs state instrs.toList
+
+theorem execBlocks_append_of_structurallyClosed
+    (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
+    (head suffix : Array NInstr) (hclosed : BlocksStructurallyClosed head) :
+    execBlocks alg inputs state (head ++ suffix) =
+      (execBlocks alg inputs state head >>= fun next =>
+        execBlocks alg inputs next suffix) := by
+  unfold execBlocks
+  unfold BlocksStructurallyClosed at hclosed
+  rw [Array.toList_append]
+  have hcompose := execBlocksListFuel_append_of_structurallyClosed
+    alg inputs state head.toList suffix.toList ((head ++ suffix).size + 1)
+      (suffix.size + 1) hclosed (by simp) (by simp)
+  rw [hcompose]
+  rw [execBlocksListFuel_irrel alg inputs state head.toList
+    ((head ++ suffix).size + 1) (head.size + 1) (by simp; omega) (by simp)]
 
 theorem execBlocks_deterministic (alg : Algebra α) (inputs : PlanInputs α)
     (state : PlanState α) (instrs : Array NInstr)

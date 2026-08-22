@@ -197,9 +197,10 @@ private def scanBlocks (plan : FlatPlan) :
 /-- A block is independently closed and every operand/destination is
 addressable under its structured binder stack. -/
 private def blocksWellFormed (plan : FlatPlan) (instrs : Array NInstr) : Bool :=
-  match scanBlocks plan [] instrs.toList with
-  | some [] => true
-  | _ => false
+  blocksStructurallyClosedList instrs.toList &&
+    match scanBlocks plan [] instrs.toList with
+    | some [] => true
+    | _ => false
 
 def BlocksWellFormed (plan : FlatPlan) (instrs : Array NInstr) : Prop :=
   blocksWellFormed plan instrs = true
@@ -208,6 +209,23 @@ instance (plan : FlatPlan) (instrs : Array NInstr) :
     Decidable (BlocksWellFormed plan instrs) := by
   unfold BlocksWellFormed
   infer_instance
+
+theorem BlocksWellFormed.structurallyClosed {plan : FlatPlan}
+    {instrs : Array NInstr} (hwf : BlocksWellFormed plan instrs) :
+    BlocksStructurallyClosed instrs := by
+  unfold BlocksWellFormed blocksWellFormed at hwf
+  unfold BlocksStructurallyClosed
+  exact (Bool.and_eq_true_iff.mp hwf).1
+
+theorem execBlocks_append_of_wellFormed
+    (alg : Algebra α) (inputs : PlanInputs α) (plan : FlatPlan)
+    (state : PlanState α) (head suffix : Array NInstr)
+    (hwf : BlocksWellFormed plan head) :
+    execBlocks alg inputs state (head ++ suffix) =
+      (execBlocks alg inputs state head >>= fun next =>
+        execBlocks alg inputs next suffix) :=
+  execBlocks_append_of_structurallyClosed alg inputs state head suffix
+    hwf.structurallyClosed
 
 /-- Instruction-local well-formedness outside a structured region. -/
 def NInstrWellFormed (plan : FlatPlan) (instr : NInstr) : Prop :=
