@@ -22,6 +22,14 @@ def ProducesSig (action : BuildM Sig) : Prop :=
     | .ok (id, after) =>
       BuilderWellFormed after ∧ BuilderExtends builder after ∧ SigIn after id
 
+/-- Postcondition for one concrete signal-building run. -/
+def SigBuildResultWellFormed (before : Builder)
+    (result : Except String (Sig × Builder)) : Prop :=
+  match result with
+  | .error _ => True
+  | .ok (id, after) =>
+    BuilderWellFormed after ∧ BuilderExtends before after ∧ SigIn after id
+
 /-- Every signal in an authored array belongs to the active builder. -/
 def SigsIn (builder : Builder) (ids : Array Sig) : Prop :=
   ∀ id ∈ ids, SigIn builder id
@@ -29,6 +37,48 @@ def SigsIn (builder : Builder) (ids : Array Sig) : Prop :=
 /-- An optional signal, when present, belongs to the active builder. -/
 def OptionalSigIn (builder : Builder) (id? : Option Sig) : Prop :=
   ∀ id ∈ id?, SigIn builder id
+
+/-- Generic sequencing rule used by the multi-intern production helpers. -/
+theorem bind_preserves {α β : Type} (first : BuildM α) (next : α → BuildM β)
+    (validFirst : Builder → α → Prop) (validFinal : Builder → β → Prop)
+    (hFirst : ∀ builder, BuilderWellFormed builder →
+      match first.run builder with
+      | .error _ => True
+      | .ok (value, after) => BuilderWellFormed after ∧
+        BuilderExtends builder after ∧ validFirst after value)
+    (hNext : ∀ builder value, BuilderWellFormed builder →
+      validFirst builder value →
+      match (next value).run builder with
+      | .error _ => True
+      | .ok (result, after) => BuilderWellFormed after ∧
+        BuilderExtends builder after ∧ validFinal after result) :
+    ∀ builder, BuilderWellFormed builder →
+      match (first >>= next).run builder with
+      | .error _ => True
+      | .ok (result, after) => BuilderWellFormed after ∧
+        BuilderExtends builder after ∧ validFinal after result := by
+  intro builder hBuilder
+  rw [StateT.run_bind]
+  generalize hRunFirst : first.run builder = runFirst
+  cases runFirst with
+  | error message => trivial
+  | ok pair =>
+    rcases pair with ⟨value, middle⟩
+    change match (next value).run middle with
+      | .error _ => True
+      | .ok (result, after) => BuilderWellFormed after ∧
+        BuilderExtends builder after ∧ validFinal after result
+    have hFirstResult := hFirst builder hBuilder
+    rw [hRunFirst] at hFirstResult
+    have hNextResult := hNext middle value hFirstResult.1 hFirstResult.2.2
+    generalize hRunNext : (next value).run middle = runNext at hNextResult ⊢
+    cases runNext with
+    | error message => trivial
+    | ok pair =>
+      rcases pair with ⟨result, after⟩
+      exact ⟨hNextResult.1,
+        BuilderExtends.trans hFirstResult.2.1 hNextResult.2.1,
+        hNextResult.2.2⟩
 
 theorem internSig_run (builder : Builder) (node : ENode) :
     (internSig node).run builder =
@@ -272,5 +322,159 @@ theorem routedSum_preserves {builder : Builder}
   simpa [routedSum] using internSig_preserves_of_children
     (node := .routedSum capacity outputCount routes tables values dynCount? idxId)
     hBuilder (childrenIn_routedSum hTables hValues hDyn)
+
+-- Scalar vocabulary aliases and short sequences ------------------------------
+
+theorem mul_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
+    {a b : Sig} (ha : SigIn builder a) (hb : SigIn builder b) :
+    SigBuildResultWellFormed builder ((mul a b).run builder) :=
+  by simpa [mul] using binary_preserves hBuilder .mul ha hb
+
+theorem add_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
+    {a b : Sig} (ha : SigIn builder a) (hb : SigIn builder b) :
+    SigBuildResultWellFormed builder ((add a b).run builder) :=
+  by simpa [add] using binary_preserves hBuilder .add ha hb
+
+theorem sub_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
+    {a b : Sig} (ha : SigIn builder a) (hb : SigIn builder b) :
+    SigBuildResultWellFormed builder ((sub a b).run builder) :=
+  by simpa [sub] using binary_preserves hBuilder .sub ha hb
+
+theorem div_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
+    {a b : Sig} (ha : SigIn builder a) (hb : SigIn builder b) :
+    SigBuildResultWellFormed builder ((div a b).run builder) :=
+  by simpa [div] using binary_preserves hBuilder .div ha hb
+
+theorem bitAnd_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
+    {a b : Sig} (ha : SigIn builder a) (hb : SigIn builder b) :
+    SigBuildResultWellFormed builder ((bitAnd a b).run builder) :=
+  by simpa [bitAnd] using binary_preserves hBuilder .bitAnd ha hb
+
+theorem bitOr_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
+    {a b : Sig} (ha : SigIn builder a) (hb : SigIn builder b) :
+    SigBuildResultWellFormed builder ((bitOr a b).run builder) :=
+  by simpa [bitOr] using binary_preserves hBuilder .bitOr ha hb
+
+theorem rshift_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
+    {a b : Sig} (ha : SigIn builder a) (hb : SigIn builder b) :
+    SigBuildResultWellFormed builder ((rshift a b).run builder) :=
+  by simpa [rshift] using binary_preserves hBuilder .rshift ha hb
+
+theorem lshift_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
+    {a b : Sig} (ha : SigIn builder a) (hb : SigIn builder b) :
+    SigBuildResultWellFormed builder ((lshift a b).run builder) :=
+  by simpa [lshift] using binary_preserves hBuilder .lshift ha hb
+
+theorem gt_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
+    {a b : Sig} (ha : SigIn builder a) (hb : SigIn builder b) :
+    SigBuildResultWellFormed builder ((gt a b).run builder) :=
+  by simpa [gt] using binary_preserves hBuilder .gt ha hb
+
+theorem ldexpE_preserves {builder : Builder}
+    (hBuilder : BuilderWellFormed builder) {mantissa exponent : Sig}
+    (hm : SigIn builder mantissa) (he : SigIn builder exponent) :
+    SigBuildResultWellFormed builder ((ldexpE mantissa exponent).run builder) :=
+  by simpa [ldexpE] using binary_preserves hBuilder .ldexp hm he
+
+theorem toIntE_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
+    {a : Sig} (ha : SigIn builder a) :
+    SigBuildResultWellFormed builder ((toIntE a).run builder) :=
+  by simpa [toIntE] using unary_preserves hBuilder .toInt ha
+
+theorem neg_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
+    {a : Sig} (ha : SigIn builder a) :
+    SigBuildResultWellFormed builder ((neg a).run builder) :=
+  by simpa [neg] using unary_preserves hBuilder .neg ha
+
+theorem absE_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
+    {a : Sig} (ha : SigIn builder a) :
+    SigBuildResultWellFormed builder ((absE a).run builder) :=
+  by simpa [absE] using unary_preserves hBuilder .abs ha
+
+theorem floatExponentE_preserves {builder : Builder}
+    (hBuilder : BuilderWellFormed builder) {a : Sig} (ha : SigIn builder a) :
+    SigBuildResultWellFormed builder ((floatExponentE a).run builder) :=
+  by simpa [floatExponentE] using unary_preserves hBuilder .floatExponent ha
+
+theorem roundE_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
+    {a : Sig} (ha : SigIn builder a) :
+    SigBuildResultWellFormed builder ((roundE a).run builder) :=
+  by simpa [roundE] using unary_preserves hBuilder .round ha
+
+theorem toFloatE_preserves {builder : Builder}
+    (hBuilder : BuilderWellFormed builder) {a : Sig} (ha : SigIn builder a) :
+    SigBuildResultWellFormed builder ((toFloatE a).run builder) :=
+  by simpa [toFloatE] using unary_preserves hBuilder .toFloat ha
+
+theorem clampE_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
+    {value lo hi : Sig} (hv : SigIn builder value) (hl : SigIn builder lo)
+    (hh : SigIn builder hi) :
+    SigBuildResultWellFormed builder ((clampE value lo hi).run builder) :=
+  by simpa [clampE] using clamp_preserves hBuilder hv hl hh
+
+theorem selectE_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
+    {cond then_ else_ : Sig} (hc : SigIn builder cond)
+    (ht : SigIn builder then_) (he : SigIn builder else_) :
+    SigBuildResultWellFormed builder ((selectE cond then_ else_).run builder) :=
+  by simpa [selectE] using select_preserves hBuilder hc ht he
+
+theorem litI_preserves (mantissa : Int) : ProducesSig (litI mantissa) := by
+  unfold ProducesSig
+  simpa [litI] using bind_preserves (lit mantissa) (unary .toInt)
+    (fun builder id => SigIn builder id)
+    (fun builder id => SigIn builder id)
+    (lit_preserves mantissa)
+    (fun builder value hBuilder hValue =>
+      unary_preserves hBuilder .toInt hValue)
+
+theorem litF_preserves (value : Float) : ProducesSig (litF value) := by
+  simp only [litF]
+  split <;> split
+  · exact lit_preserves 0
+  · exact lit_preserves _ 12
+  · exact lit_preserves 0
+  · exact lit_preserves _ 12
+
+-- Declaration construction --------------------------------------------------
+
+/-- Every signal captured by a proposed instance declaration is owned. -/
+def AInstWellFormed (builder : Builder) (decl : AInst) : Prop :=
+  ∀ input ∈ decl.inputs, SigIn builder input.value
+
+theorem declareInst_run (builder : Builder) (decl : AInst) :
+    (declareInst decl).run builder =
+      .ok (⟨builder.decls.size⟩,
+        { builder with decls := builder.decls.push decl }) := by
+  rfl
+
+theorem declareInst_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
+    {decl : AInst} (hDecl : AInstWellFormed builder decl) :
+    match (declareInst decl).run builder with
+    | .error _ => True
+    | .ok (idx, after) => BuilderWellFormed after ∧
+      BuilderExtends builder after ∧ idx.idx < after.decls.size := by
+  rw [declareInst_run]
+  refine ⟨⟨hBuilder.arena, ?_⟩, ?_, by simp⟩
+  · intro query hQuery input hInput
+    rw [Array.mem_push] at hQuery
+    rcases hQuery with hOld | rfl
+    · exact hBuilder.decls query hOld input hInput
+    · exact hDecl input hInput
+  · constructor
+    · exact Extends.refl builder.exprs
+    · intro i oldDecl hOld
+      have hi := (Array.getElem?_eq_some_iff.mp hOld).1
+      rw [Array.getElem?_push_lt hi]
+      simpa [Array.getElem?_eq_getElem hi] using hOld
+
+theorem inst_preserves {builder : Builder} (hBuilder : BuilderWellFormed builder)
+    (name programName : String) (inputs : Array AInput := #[])
+    (hInputs : ∀ input ∈ inputs, SigIn builder input.value) :
+    match (inst name programName inputs).run builder with
+    | .error _ => True
+    | .ok (idx, after) => BuilderWellFormed after ∧
+      BuilderExtends builder after ∧ idx.idx < after.decls.size := by
+  simpa [inst] using declareInst_preserves (decl := { name, programName, inputs })
+    hBuilder (by exact hInputs)
 
 end Tropical.EmitArrow
