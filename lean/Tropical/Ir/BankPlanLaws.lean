@@ -175,7 +175,7 @@ theorem execBlocks_reduceStream_as_fold
   cases hrun : execBlocks alg inputs state invariant with
   | error error => rfl
   | ok next =>
-      simp only [hrun, bind, Except.bind]
+      simp only [bind, Except.bind]
       have hregion := execBlocks_reduceRegion alg inputs next acc capacity binderId
         ty init count? (body ++ #[instrScalar "Add" acc
           #[.reg acc ty, contribution] ty]) (hfresh next hrun)

@@ -111,7 +111,7 @@ theorem execBlocks_routedStream_as_fold
   cases hrun : execBlocks alg inputs state invariant with
   | error error => rfl
   | ok next =>
-      simp only [hrun, bind, Except.bind]
+      simp only [bind, Except.bind]
       have hparse := hbalanced dst mapped
       have hregion := execBlocks_routedRegion alg inputs next dst capacity
         outputCount binderId routes count? body #[] mapped (hfresh next hrun)
