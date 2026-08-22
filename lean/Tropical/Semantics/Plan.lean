@@ -286,10 +286,11 @@ private def splitRegionAux (beginTag endTag : String) :
       else
         splitRegionAux beginTag endTag depth rest (instr :: reversed)
 
-/-- Split the body and suffix at the matching delimiter without unrolling the
-region. Nested regions of the same kind remain in the body and are interpreted
-recursively. -/
-private def splitRegion (beginTag endTag : String) (rest : List NInstr) :
+/-- Split a structured delimiter stream at its matching close. This parser is
+public so lowering proofs can establish the exact region body consumed by the
+reference semantics without unfolding the fuelled executor. Nested regions of
+the same kind remain in the body and are interpreted recursively. -/
+def splitRegion (beginTag endTag : String) (rest : List NInstr) :
     Outcome (List NInstr × List NInstr) :=
   splitRegionAux beginTag endTag 0 rest []
 
@@ -384,7 +385,8 @@ private def splitRoutedYieldAux : Nat → List NInstr → List NInstr →
       else
         splitRoutedYieldAux reduceDepth rest (instr :: reversed)
 
-private def splitRoutedYield (body : List NInstr) :
+/-- Split a routed body at its unique top-level yield. -/
+def splitRoutedYield (body : List NInstr) :
     Outcome (List NInstr × NInstr × List NInstr) :=
   splitRoutedYieldAux 0 body []
 
@@ -501,7 +503,7 @@ private def applyRoutedValues (alg : Algebra α) (state : PlanState α)
       outputs (List.range fanout)
     writeArrayDst state (.array dst) next
 
-private def execReductionRegion
+def execReductionRegion
     (runBlocks : PlanState α → List NInstr → Outcome (PlanState α))
     (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
     (instr : NInstr) (accTemp : Nat) (body : List NInstr) :
@@ -529,7 +531,7 @@ private def execReductionRegion
         openLoops := outerLoops
       }) seeded (List.range trips)
 
-private def execRoutedRegion
+def execRoutedRegion
     (runBlocks : PlanState α → List NInstr → Outcome (PlanState α))
     (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
     (instr : NInstr) (dst : Nat) (mapped : List NInstr)
@@ -793,6 +795,13 @@ decreasing_by
   · rw [hblocks]
     simp
 
+theorem execBlocksListFuel_nil_of_pos (alg : Algebra α) (inputs : PlanInputs α)
+    (state : PlanState α) (fuel : Nat) (hfuel : 0 < fuel) :
+    execBlocksListFuel fuel alg inputs state [] = .ok state := by
+  cases fuel with
+  | zero => omega
+  | succ fuel => simp [execBlocksListFuel]
+
 theorem execBlocksListFuel_append_of_structurallyClosed
     (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
     (head suffix : List NInstr) (fuel suffixFuel : Nat)
@@ -914,6 +923,143 @@ its enclosing call. -/
 def execBlocks (alg : Algebra α) (inputs : PlanInputs α)
     (state : PlanState α) (instrs : Array NInstr) : Outcome (PlanState α) :=
   execBlocksListFuel (instrs.size + 1) alg inputs state instrs.toList
+
+/-- Canonical equation for one syntactically delimited Reduce region. The
+parser premise is necessary for arbitrary instruction arrays: without it an
+unmatched delimiter in `body` could capture the advertised closing marker. -/
+theorem execBlocks_reduceRegion
+    (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
+    (acc capacity binderId : Nat) (ty : ScalarType)
+    (init : NOperand) (count? : Option NOperand) (body : Array NInstr)
+    (hfresh : state.openLoops.any (fun frame => frame.binderId == binderId) = false)
+    (hsplit : splitRegion "ReduceBegin" "ReduceEnd"
+      (body.toList ++ [instrReduceEnd acc ty]) = .ok (body.toList, [])) :
+    execBlocks alg inputs state
+      (#[instrReduceBegin acc init capacity ty count? binderId] ++ body ++
+        #[instrReduceEnd acc ty]) =
+      execReductionRegion
+        (fun current blocks => execBlocks alg inputs current blocks.toArray)
+        alg inputs state
+        (instrReduceBegin acc init capacity ty count? binderId) acc body.toList := by
+  have hrun : ∀ current,
+      execBlocksListFuel (body.size + 2) alg inputs current body.toList =
+        execBlocks alg inputs current body.toList.toArray := fun current => by
+    unfold execBlocks
+    simpa using execBlocksListFuel_irrel alg inputs current body.toList
+      (body.size + 2) (body.toList.toArray.size + 1) (by simp) (by simp)
+  have hregion := execReductionRegion_congr body.toList hrun alg inputs state
+    (instrReduceBegin acc init capacity ty count? binderId) acc
+  have hregion' :
+      execReductionRegion (execBlocksListFuel (1 + (body.size + 1)) alg inputs)
+          alg inputs state (instrReduceBegin acc init capacity ty count? binderId)
+            acc body.toList =
+        execReductionRegion
+          (fun current blocks => execBlocks alg inputs current blocks.toArray)
+          alg inputs state (instrReduceBegin acc init capacity ty count? binderId)
+            acc body.toList := by
+    simpa [Nat.one_add] using hregion
+  have hnil : ∀ current,
+      execBlocksListFuel (1 + (body.size + 1)) alg inputs current [] = .ok current :=
+    fun current => execBlocksListFuel_nil_of_pos alg inputs current _ (by omega)
+  cases count? <;> unfold execBlocks <;>
+    simp [Array.toList_append, Array.size_append] <;>
+    simp only [execBlocksListFuel] <;>
+    rw [hsplit] <;>
+    simp [instrReduceBegin, loopIdIsOpen, hfresh] <;>
+    simp only [bind, Except.bind] <;>
+    simp only [instrReduceBegin] at hregion' <;>
+    rw [hregion']
+  all_goals
+    split
+    · rename_i err heq
+      simpa [execBlocks] using heq.symm
+    · rename_i reduced heq
+      rw [hnil]
+      simpa [execBlocks] using heq.symm
+
+/-- Canonical equation for one routed region with an explicitly verified outer
+delimiter split and unique top-level yield. These parser premises are what
+production stream-shape theorems discharge. -/
+theorem execBlocks_routedRegion
+    (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
+    (dst capacity outputCount binderId : Nat)
+    (routes : Array (Option Nat)) (count? : Option NOperand)
+    (mapped afterYield : Array NInstr) (yieldArgs : Array NOperand)
+    (hfresh : state.openLoops.any (fun frame => frame.binderId == binderId) = false)
+    (hsplit : splitRegion "RoutedSumBegin" "RoutedSumEnd"
+      (mapped ++ #[instrRoutedSumYield dst yieldArgs] ++ afterYield ++
+        #[instrRoutedSumEnd dst]).toList =
+      .ok ((mapped ++ #[instrRoutedSumYield dst yieldArgs] ++ afterYield).toList, []))
+    (hyield : splitRoutedYield
+      (mapped ++ #[instrRoutedSumYield dst yieldArgs] ++ afterYield).toList =
+      .ok (mapped.toList, instrRoutedSumYield dst yieldArgs, afterYield.toList)) :
+    execBlocks alg inputs state
+      (#[instrRoutedSumBegin dst capacity outputCount routes count? binderId] ++
+        mapped ++ #[instrRoutedSumYield dst yieldArgs] ++ afterYield ++
+        #[instrRoutedSumEnd dst]) =
+      execRoutedRegion
+        (fun current blocks => execBlocks alg inputs current blocks.toArray)
+        alg inputs state
+        (instrRoutedSumBegin dst capacity outputCount routes count? binderId)
+        dst mapped.toList (instrRoutedSumYield dst yieldArgs) afterYield.toList := by
+  let regionFuel := mapped.size + afterYield.size + 3
+  have hmapped : ∀ current,
+      execBlocksListFuel regionFuel alg inputs current mapped.toList =
+        execBlocks alg inputs current mapped.toList.toArray := fun current => by
+    unfold execBlocks
+    apply execBlocksListFuel_irrel alg inputs current mapped.toList
+    · simp [regionFuel]
+      omega
+    · simp
+  have hafter : ∀ current,
+      execBlocksListFuel regionFuel alg inputs current afterYield.toList =
+        execBlocks alg inputs current afterYield.toList.toArray := fun current => by
+    unfold execBlocks
+    apply execBlocksListFuel_irrel alg inputs current afterYield.toList
+    · simp [regionFuel]
+      omega
+    · simp
+  have hregion := execRoutedRegion_congr
+    (runLeft := execBlocksListFuel regionFuel alg inputs)
+    (runRight := fun current blocks => execBlocks alg inputs current blocks.toArray)
+    mapped.toList afterYield.toList hmapped hafter alg inputs state
+      (instrRoutedSumBegin dst capacity outputCount routes count? binderId)
+        dst (instrRoutedSumYield dst yieldArgs)
+  have hnil : ∀ current,
+      execBlocksListFuel regionFuel alg inputs current [] = .ok current :=
+    fun current => execBlocksListFuel_nil_of_pos alg inputs current _ (by
+      simp [regionFuel])
+  have hsplit' : splitRegion "RoutedSumBegin" "RoutedSumEnd"
+      (mapped.toList ++ instrRoutedSumYield dst yieldArgs ::
+        (afterYield.toList ++ [instrRoutedSumEnd dst])) =
+      .ok (mapped.toList ++ instrRoutedSumYield dst yieldArgs :: afterYield.toList,
+        []) := by
+    simpa [Array.toList_append] using hsplit
+  have hyield' : splitRoutedYield
+      (mapped.toList ++ instrRoutedSumYield dst yieldArgs :: afterYield.toList) =
+      .ok (mapped.toList, instrRoutedSumYield dst yieldArgs, afterYield.toList) := by
+    simpa [Array.toList_append] using hyield
+  cases count? <;> unfold execBlocks <;>
+    simp [Array.toList_append, Array.size_append] <;>
+    simp only [execBlocksListFuel] <;>
+    rw [hsplit'] <;>
+    simp [instrRoutedSumBegin, loopIdIsOpen, hfresh] <;>
+    simp only [bind, Except.bind] <;>
+    rw [hyield'] <;>
+    simp only [bind, Except.bind]
+  all_goals
+    have hfuel : 1 + (mapped.size + 1 + (afterYield.size + 1)) = regionFuel := by
+      simp [regionFuel]
+      omega
+    rw [hfuel]
+    simp only [instrRoutedSumBegin, Option.toArray] at hregion
+    rw [hregion]
+    split
+    · rename_i err heq
+      simpa [execBlocks] using heq.symm
+    · rename_i routed heq
+      rw [hnil]
+      simpa [execBlocks] using heq.symm
 
 theorem execBlocks_append_of_structurallyClosed
     (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
