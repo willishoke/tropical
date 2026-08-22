@@ -41,6 +41,27 @@ def AppendsOnly {α : Type} (act : EmitM α) : Prop :=
   ∀ (s : EmitSt) (r : α) (s' : EmitSt),
     act.run s = .ok (r, s') → ∃ d, s'.instrs = s.instrs ++ d
 
+/-- A successful emitter action appends a delta carrying an additional proof
+    invariant. This is the proof-facing seam for structured compiler deltas:
+    `AppendsOnly` is recovered by forgetting `property`. -/
+def AppendsWith {α : Type} (act : EmitM α)
+    (property : Array NInstr → Prop) : Prop :=
+  ∀ (s : EmitSt) (r : α) (s' : EmitSt),
+    act.run s = .ok (r, s') →
+      ∃ d, s'.instrs = s.instrs ++ d ∧ property d
+
+theorem AppendsWith.appendsOnly {act : EmitM α} {property : Array NInstr → Prop}
+    (h : AppendsWith act property) : AppendsOnly act := by
+  intro s r s' hrun
+  obtain ⟨delta, hdelta, _⟩ := h s r s' hrun
+  exact ⟨delta, hdelta⟩
+
+theorem AppendsOnly.withTrue {act : EmitM α} (h : AppendsOnly act) :
+    AppendsWith act (fun _ => True) := by
+  intro s r s' hrun
+  obtain ⟨delta, hdelta⟩ := h s r s' hrun
+  exact ⟨delta, hdelta, trivial⟩
+
 theorem AppendsOnly.pure {α} (a : α) : AppendsOnly (pure a : EmitM α) := by
   intro s r s' h
   rw [StateT.run_pure] at h
@@ -199,6 +220,88 @@ theorem step_throw {α β} (e : String) (f : α → EmitM β) (s : EmitSt) :
 theorem run_pure' {α} (a : α) (s : EmitSt) : (pure a : EmitM α).run s = .ok (a, s) := rfl
 
 set_option maxHeartbeats 1000000 in
+theorem compileBankSum_stream_with
+    (property : Array NInstr → Prop)
+    (arena : ExprArena) (hw : arena.wf = true) (bound count : Nat)
+    (tables : Array ExprId) (body : ExprId) (dynCount? : Option ExprId) (idxId : Nat)
+    (hts : ∀ t ∈ tables, t.idx < bound) (hb : body.idx < bound)
+    (hdc : ∀ d ∈ dynCount?, d.idx < bound)
+    (hT : ∀ t ∈ tables, AppendsOnly (compileNode arena hw t))
+    (hC : ∀ dc ∈ dynCount?, AppendsOnly (compileNode arena hw dc (some .int)))
+    (hB : AppendsWith (compileNode arena hw body) property)
+    (s : EmitSt) (r : CompileResult) (s' : EmitSt)
+    (h : (compileBankSum arena hw bound count tables body dynCount? idxId hts hb hdc).run s
+          = .ok (r, s')) :
+    ∃ (pre bodyIns : Array NInstr) (acc : Nat) (ty : Tropical.Parse.ScalarKind)
+      (countOp? : Option NOperand) (contribOp : NOperand),
+      s'.instrs = s.instrs ++ pre
+        ++ #[instrReduceBegin acc (.const (Lean.JsonNumber.fromNat 0) ty) count ty countOp? idxId]
+        ++ bodyIns
+        ++ #[instrScalar "Add" acc #[.reg acc ty, contribOp] ty, instrReduceEnd acc ty]
+      ∧ r = .scalar (.reg acc ty) ty
+      ∧ property bodyIns := by
+  rw [compileBankSum.eq_def] at h
+  cases dynCount? with
+  | none =>
+    simp only [bind] at h
+    -- 1. tables + count (the loop-invariant prefix)
+    obtain ⟨_, s1, hFor, h⟩ := step_ok h
+    obtain ⟨dT, hdT⟩ := AppendsOnly.arrayForM _ _
+      (fun x _ => AppendsOnly.discard (hT x.val x.property)) s _ s1 hFor
+    rw [step_pure, step_allocReg, step_get, step_get] at h
+    -- 2. the body
+    obtain ⟨contrib, s6, hbody, h⟩ := step_ok h
+    obtain ⟨dB, hdB, hproperty⟩ := hB _ contrib s6 hbody
+    simp only at hdB
+    -- 3. the tail: array-valued body dies on throw; scalar body emits the region
+    cases hIA : contrib.isArray with
+    | true => rw [if_pos (by rw [hIA])] at h; rw [step_throw] at h; cases h
+    | false =>
+      rw [if_neg (by rw [hIA]; exact Bool.false_ne_true)] at h
+      rw [step_pure, step_modify, step_emit, step_emit, step_modify, run_pure'] at h
+      simp only [Except.ok.injEq, Prod.mk.injEq] at h
+      obtain ⟨hr, hs⟩ := h
+      subst hr; subst hs
+      refine ⟨dT, dB, s1.nextReg,
+        (if (contrib.scalarType == Parse.ScalarKind.bool) = true
+          then Parse.ScalarKind.int else contrib.scalarType),
+        none, contrib.op, ?_, rfl, hproperty⟩
+      rw [hdB, hdT, insertIdx!_at_prefix]
+      simp only [Array.push_eq_append, Array.append_assoc]
+      rfl
+  | some dc =>
+    simp only [bind] at h
+    obtain ⟨_, s1, hFor, h⟩ := step_ok h
+    obtain ⟨dT, hdT⟩ := AppendsOnly.arrayForM _ _
+      (fun x _ => AppendsOnly.discard (hT x.val x.property)) s _ s1 hFor
+    -- the runtime effective count compiles with the tables (loop-invariant)
+    obtain ⟨cres, s2, hcnt, h⟩ := step_ok h
+    obtain ⟨dC, hdC⟩ := hC dc rfl s1 cres s2 hcnt
+    cases hCA : cres.isArray with
+    | true => rw [if_pos (by rw [hCA])] at h; rw [step_throw] at h; cases h
+    | false =>
+      rw [if_neg (by rw [hCA]; exact Bool.false_ne_true)] at h
+      rw [step_pure, step_pure, step_allocReg, step_get, step_get] at h
+      obtain ⟨contrib, s6, hbody, h⟩ := step_ok h
+      obtain ⟨dB, hdB, hproperty⟩ := hB _ contrib s6 hbody
+      simp only at hdB
+      cases hIA : contrib.isArray with
+      | true => rw [if_pos (by rw [hIA])] at h; rw [step_throw] at h; cases h
+      | false =>
+        rw [if_neg (by rw [hIA]; exact Bool.false_ne_true)] at h
+        rw [step_pure, step_modify, step_emit, step_emit, step_modify, run_pure'] at h
+        simp only [Except.ok.injEq, Prod.mk.injEq] at h
+        obtain ⟨hr, hs⟩ := h
+        subst hr; subst hs
+        refine ⟨dT ++ dC, dB, s2.nextReg,
+          (if (contrib.scalarType == Parse.ScalarKind.bool) = true
+            then Parse.ScalarKind.int else contrib.scalarType),
+          some cres.op, contrib.op, ?_, rfl, hproperty⟩
+        rw [hdB, hdC, hdT, insertIdx!_at_prefix]
+        simp only [Array.push_eq_append, Array.append_assoc]
+        rfl
+
+set_option maxHeartbeats 1000000 in
 theorem compileBankSum_stream
     (arena : ExprArena) (hw : arena.wf = true) (bound count : Nat)
     (tables : Array ExprId) (body : ExprId) (dynCount? : Option ExprId) (idxId : Nat)
@@ -217,66 +320,10 @@ theorem compileBankSum_stream
         ++ bodyIns
         ++ #[instrScalar "Add" acc #[.reg acc ty, contribOp] ty, instrReduceEnd acc ty]
       ∧ r = .scalar (.reg acc ty) ty := by
-  rw [compileBankSum.eq_def] at h
-  cases dynCount? with
-  | none =>
-    simp only [bind] at h
-    -- 1. tables + count (the loop-invariant prefix)
-    obtain ⟨_, s1, hFor, h⟩ := step_ok h
-    obtain ⟨dT, hdT⟩ := AppendsOnly.arrayForM _ _
-      (fun x _ => AppendsOnly.discard (hT x.val x.property)) s _ s1 hFor
-    rw [step_pure, step_allocReg, step_get, step_get] at h
-    -- 2. the body
-    obtain ⟨contrib, s6, hbody, h⟩ := step_ok h
-    obtain ⟨dB, hdB⟩ := hB _ contrib s6 hbody
-    simp only at hdB
-    -- 3. the tail: array-valued body dies on throw; scalar body emits the region
-    cases hIA : contrib.isArray with
-    | true => rw [if_pos (by rw [hIA])] at h; rw [step_throw] at h; cases h
-    | false =>
-      rw [if_neg (by rw [hIA]; exact Bool.false_ne_true)] at h
-      rw [step_pure, step_modify, step_emit, step_emit, step_modify, run_pure'] at h
-      simp only [Except.ok.injEq, Prod.mk.injEq] at h
-      obtain ⟨hr, hs⟩ := h
-      subst hr; subst hs
-      refine ⟨dT, dB, s1.nextReg,
-        (if (contrib.scalarType == Parse.ScalarKind.bool) = true
-          then Parse.ScalarKind.int else contrib.scalarType),
-        none, contrib.op, ?_, rfl⟩
-      rw [hdB, hdT, insertIdx!_at_prefix]
-      simp only [Array.push_eq_append, Array.append_assoc]
-      rfl
-  | some dc =>
-    simp only [bind] at h
-    obtain ⟨_, s1, hFor, h⟩ := step_ok h
-    obtain ⟨dT, hdT⟩ := AppendsOnly.arrayForM _ _
-      (fun x _ => AppendsOnly.discard (hT x.val x.property)) s _ s1 hFor
-    -- the runtime effective count compiles with the tables (loop-invariant)
-    obtain ⟨cres, s2, hcnt, h⟩ := step_ok h
-    obtain ⟨dC, hdC⟩ := hC dc rfl s1 cres s2 hcnt
-    cases hCA : cres.isArray with
-    | true => rw [if_pos (by rw [hCA])] at h; rw [step_throw] at h; cases h
-    | false =>
-      rw [if_neg (by rw [hCA]; exact Bool.false_ne_true)] at h
-      rw [step_pure, step_pure, step_allocReg, step_get, step_get] at h
-      obtain ⟨contrib, s6, hbody, h⟩ := step_ok h
-      obtain ⟨dB, hdB⟩ := hB _ contrib s6 hbody
-      simp only at hdB
-      cases hIA : contrib.isArray with
-      | true => rw [if_pos (by rw [hIA])] at h; rw [step_throw] at h; cases h
-      | false =>
-        rw [if_neg (by rw [hIA]; exact Bool.false_ne_true)] at h
-        rw [step_pure, step_modify, step_emit, step_emit, step_modify, run_pure'] at h
-        simp only [Except.ok.injEq, Prod.mk.injEq] at h
-        obtain ⟨hr, hs⟩ := h
-        subst hr; subst hs
-        refine ⟨dT ++ dC, dB, s2.nextReg,
-          (if (contrib.scalarType == Parse.ScalarKind.bool) = true
-            then Parse.ScalarKind.int else contrib.scalarType),
-          some cres.op, contrib.op, ?_, rfl⟩
-        rw [hdB, hdC, hdT, insertIdx!_at_prefix]
-        simp only [Array.push_eq_append, Array.append_assoc]
-        rfl
+  obtain ⟨pre, bodyIns, acc, ty, countOp?, contribOp, hstream, hresult, _⟩ :=
+    compileBankSum_stream_with (fun _ => True) arena hw bound count tables body
+      dynCount? idxId hts hb hdc hT hC hB.withTrue s r s' h
+  exact ⟨pre, bodyIns, acc, ty, countOp?, contribOp, hstream, hresult⟩
 
 
 -- ─────────────────────────────────────────────────────────────
