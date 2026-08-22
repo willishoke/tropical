@@ -542,6 +542,10 @@ structure FlatPlan where
   arraySlotSizes : Array Nat
   instanceFunctions : Array InstanceFunction
   sinks : Array SinkSpec
+  /-- Number of independently addressable output channels in the published
+      sample image. `SinkSpec.target` is an index into this image. The
+      canonical mono value is omitted from Plan-6 JSON for compatibility. -/
+  outputChannelCount : Nat := 1
   sources : Array SourceKind := defaultSources
   slotCount : Nat
   slotNames : Array String
@@ -566,6 +570,17 @@ structure FlatPlan where
   /-- Admission/provenance string carried into benchmark artifacts. -/
   phaserTimeStaging : Option String := none
 deriving Inhabited
+
+/-- The structural output-image contract consumed by plan semantics and code
+    generation: the image is nonempty and each channel has at most one sink. -/
+def FlatPlan.outputLayoutWellFormed (p : FlatPlan) : Bool := Id.run do
+  if p.outputChannelCount == 0 then return false
+  let mut seen : Std.HashSet Nat := {}
+  for sink in p.sinks do
+    if sink.target >= p.outputChannelCount || seen.contains sink.target then
+      return false
+    seen := seen.insert sink.target
+  return true
 
 /-- Instructions in the exact recursive order used by both code emitters. -/
 private def InstanceFunction.linearInstrs (f : InstanceFunction) : Array NInstr := Id.run do
@@ -684,10 +699,14 @@ def FlatPlan.metalExecutionToWire (p : FlatPlan) : Option Json :=
 
 /-- Mirrors `toWirePlan`'s omission rules. -/
 def FlatPlan.toWire (p : FlatPlan) : Except String Json := do
+  if !p.outputLayoutWellFormed then
+    throw "FlatPlan.toWire: output channel count must be positive and sink targets must be unique and in range"
   let fields := #[("schema", Json.str "tropical_plan_6"),
     ("config", Json.mkObj [("sampleRate", Json.num p.sampleRate)])]
   let fields := if p.compilationMode == .fused then fields
     else fields.push ("compilation_mode", Json.str p.compilationMode.wire)
+  let fields := if p.outputChannelCount == 1 then fields
+    else fields.push ("output_channel_count", toJson p.outputChannelCount)
   let fields := fields
     ++ #[("array_slot_names", toJson p.arraySlotNames),
       ("register_count", toJson p.registerCount),

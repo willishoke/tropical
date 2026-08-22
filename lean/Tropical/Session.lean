@@ -102,13 +102,22 @@ deriving Inhabited
 def ScopeTap.slot (tap : ScopeTap) : String :=
   s!"{tap.sourceInstance}.{tap.sourceOutput}"
 
+/-- One source routed to an independently addressable DAC channel. Multiple
+    routes may target the same channel; compilation folds them into one sink
+    in authored source order. -/
+structure GraphOutput where
+  channel : Nat := 0
+  sourceInstance : String
+  sourceOutput : String
+deriving Inhabited, Repr
+
 structure SessionSt where
   /-- Program registration order (stdlib, then exported session types). -/
   catalogOrder : Array String := #[]
   programs     : Std.HashMap String ProgMeta := {}
   instances    : Array (String × InstanceInfo) := #[]
   wires        : Array Wire := #[]
-  graphOutputs : Array (String × String) := #[]   -- (instance, output)
+  graphOutputs : Array GraphOutput := #[]
   /-- Opt-in observation points — like `graphOutputs` (dac) but routed to a
       render_window-readable slot instead of the audio output. The keep-set
       the collapse honors: params ∪ dac ∪ scope-taps stay materialized. -/

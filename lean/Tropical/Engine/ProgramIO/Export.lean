@@ -46,13 +46,16 @@ def handleSave (env : Env) : EngineM Json := do
       ++ (match info.typeArgs with | some ta => [("type_args", ta)] | none => [])
       ++ (if inputs.isEmpty then [] else [("inputs", Json.mkObj inputs.toList)])
   let mut assigns : Array Json := #[]
-  for (inst, output) in st.graphOutputs do
-    if let some info := st.findInstance? inst then
-      if let some idx := info.progMeta.outputNames.idxOf? output then
-        assigns := assigns.push <| Json.mkObj
-          [("op", Json.str "outputAssign"), ("name", Json.str "dac.out"),
-           ("expr", Json.mkObj [("op", Json.str "ref"), ("instance", Json.str inst),
-             ("output", toJson idx)])]
+  for output in st.graphOutputs do
+    if let some info := st.findInstance? output.sourceInstance then
+      if let some idx := info.progMeta.outputNames.idxOf? output.sourceOutput then
+        let fields := #[
+          ("op", Json.str "outputAssign"), ("name", Json.str "dac.out"),
+          ("expr", Json.mkObj [("op", Json.str "ref"),
+            ("instance", Json.str output.sourceInstance), ("output", toJson idx)])]
+        let fields := if output.channel == 0 then fields
+          else fields.push ("channel", toJson output.channel)
+        assigns := assigns.push <| Json.mkObj fields.toList
   let body := Json.mkObj <|
     [("op", Json.str "block"), ("decls", Json.arr decls)]
     ++ (if assigns.isEmpty then [] else [("assigns", Json.arr assigns)])
@@ -454,7 +457,8 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
         wires := st.wires.filter fun w =>
           !(exported.contains w.instName
             || w.expr.deps.any exported.contains)
-        graphOutputs := st.graphOutputs.filter fun (i, _) => !exported.contains i }
+        graphOutputs := st.graphOutputs.filter fun output =>
+          !exported.contains output.sourceInstance }
     let st ← env.state.get
     if !st.instances.isEmpty || !st.graphOutputs.isEmpty then
       syncCompile env

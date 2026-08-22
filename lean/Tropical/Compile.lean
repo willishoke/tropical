@@ -573,7 +573,7 @@ structure SessionInput where
   instances : Array (String × CoreProgram)
   /-- Post-extraction wires (alias checks only — not re-lowered). -/
   wiresPost : Array Tropical.Wire
-  graphOutputs : Array (String × String)
+  graphOutputs : Array Tropical.GraphOutput
   /-- Param mirror: name → raw value Json (slot_defaults echo). -/
   params : Array (String × Json)
   /-- Allocation (params, top-level outputs). -/
@@ -596,7 +596,7 @@ def SessionInput.forRoot (root : CoreProgram) (arena : Tropical.Ir.ExprArena)
     (alloc : Tropical.Lowering.Alloc := {}) : SessionInput :=
   { instances := #[(rootInstancePath, root)]
     wiresPost := #[]
-    graphOutputs := #[(rootInstancePath, "out")]
+    graphOutputs := #[{ sourceInstance := rootInstancePath, sourceOutput := "out" }]
     params, alloc, root, arena }
 
 private def rootParamName : CoreBodyDecl → Option String
@@ -622,15 +622,24 @@ private def slotMetadata (s : SessionAlloc) (params : Array (String × Json))
   return (slotCount, names, defaults)
 
 /-- Materialize the audible outputs as device-bound sinks (`emitSinks`). -/
-private def emitSinks (s : SessionAlloc) (graphOutputs : Array (String × String)) :
-    Except String (Array Tropical.Plan.SinkSpec) := do
-  let mut inputs : Array Nat := #[]
-  for (inst, output) in graphOutputs do
-    let key := slotKey inst output
+private def emitSinks (s : SessionAlloc) (graphOutputs : Array Tropical.GraphOutput) :
+    Except String (Nat × Array Tropical.Plan.SinkSpec) := do
+  let mut channelInputs : Array (Nat × Array Nat) := #[]
+  let mut outputChannelCount := 1
+  for route in graphOutputs do
+    let key := slotKey route.sourceInstance route.sourceOutput
     let some idx := s.outputSlotRegistry.get? key
       | throw s!"compileSessionSlotted: dac wire '{key}' has no allocated output slot."
-    inputs := inputs.push idx
-  return #[{ inputs, gain := Tropical.Plan.defaultSinkGain, target := 0 }]
+    outputChannelCount := max outputChannelCount (route.channel + 1)
+    match channelInputs.findIdx? (·.1 == route.channel) with
+    | some i =>
+      let entry := channelInputs[i]!
+      channelInputs := channelInputs.set! i (entry.1, entry.2.push idx)
+    | none => channelInputs := channelInputs.push (route.channel, #[idx])
+  let ordered := channelInputs.qsort fun a b => a.1 < b.1
+  let sinks := ordered.map fun (target, inputs) =>
+    { inputs, gain := Tropical.Plan.defaultSinkGain, target }
+  return (outputChannelCount, sinks)
 
 /-- `preallocateOutputsRecursive`: parent before children, body order. -/
 private def preallocOutputs (s : SessionAlloc) (path : String)
@@ -698,7 +707,7 @@ def compileSessionStaged (input : SessionInput) :
     input.wiresPost s acc #[] #[] paramSlots #[]
   s := partition.allocation
 
-  let sinks ← emitSinks s input.graphOutputs
+  let (outputChannelCount, sinks) ← emitSinks s input.graphOutputs
   let (slotCount, slotNames, slotDefaults) :=
     slotMetadata s input.params s.paramSlots
 
@@ -710,6 +719,7 @@ def compileSessionStaged (input : SessionInput) :
     arraySlotSizes := partition.accumulators.arraySlotSizes
     instanceFunctions := #[partition.instanceFunction]
     sinks
+    outputChannelCount
     slotCount
     slotNames
     slotDefaults

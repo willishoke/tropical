@@ -75,6 +75,24 @@ private def decodeWire (expr : Json) (path : String) (param : String) :
         (param := some param) (value := some expr)
     | none => pure e
 
+/-- Decode an optional DAC channel at the interactive tool boundary. `none`
+    distinguishes the legacy spelling so response JSON and remove-all behavior
+    stay byte-compatible. -/
+private def optionalDacChannel (entry : Json) (param : String) :
+    EngineM (Option Nat) :=
+  match arg? entry "channel" with
+  | none => pure none
+  | some value@(.num n) =>
+    let channel := n.toFloat
+    if channel >= 0 && channel == channel.floor then
+      pure (some channel.toUInt64.toNat)
+    else
+      throwBare .invalidValue "DAC channel must be a non-negative integer."
+        (param := some param) (value := some value)
+  | some value =>
+    throwBare .invalidValue "DAC channel must be a non-negative integer."
+      (param := some param) (value := some value)
+
 def handleWire (env : Env) (args : Json) : EngineM Json := do
   let setOps := argArr args "set"
   let removeOps := argArr args "remove"
@@ -90,8 +108,14 @@ def handleWire (env : Env) (args : Json) : EngineM Json := do
           s!"dac has only one output port: '{dacOut}'. Got '{tsInterp rInput}'."
           (param := some "remove[].input") (value := some rInput)
       let st ← env.state.get
-      dacRemoved := dacRemoved + st.graphOutputs.size
-      env.state.modify fun st => { st with graphOutputs := #[] }
+      match ← optionalDacChannel r "remove[].channel" with
+      | none =>
+        dacRemoved := dacRemoved + st.graphOutputs.size
+        env.state.modify fun st => { st with graphOutputs := #[] }
+      | some channel =>
+        let kept := st.graphOutputs.filter (·.channel != channel)
+        dacRemoved := dacRemoved + st.graphOutputs.size - kept.size
+        env.state.modify fun st => { st with graphOutputs := kept }
     else
       let st ← env.state.get
       let info ← requireInstance st rInst "remove[].instance"
@@ -113,12 +137,18 @@ def handleWire (env : Env) (args : Json) : EngineM Json := do
           s!"dac has only one output port: '{dacOut}'. Got '{tsInterp sInput}'."
           (param := some "set[].input") (value := some sInput)
       let decoded ← decodeWire sExpr s!"{dacName}.{dacOut}" "set[].expr"
+      let channel? ← optionalDacChannel s "set[].channel"
+      let channel := channel?.getD 0
       let st ← env.state.get
       let (srcInst, srcOut) ← resolveDacSource st decoded sExpr s!"{dacName}.{dacOut}"
       env.state.modify fun st =>
-        { st with graphOutputs := st.graphOutputs.push (srcInst, srcOut) }
-      dacWires := dacWires.push <| Json.mkObj
-        [("instance", Json.str sInst), ("input", sInput), ("expr", sExpr)]
+        { st with graphOutputs := st.graphOutputs.push {
+            channel, sourceInstance := srcInst, sourceOutput := srcOut } }
+      let fields := #[("instance", Json.str sInst), ("input", sInput), ("expr", sExpr)]
+      let fields := match channel? with
+        | some value => fields.push ("channel", toJson value)
+        | none => fields
+      dacWires := dacWires.push <| Json.mkObj fields.toList
     else if sInst == scopeName then
       let tapName := (argStr? s "input").getD ""
       if tapName.isEmpty then
