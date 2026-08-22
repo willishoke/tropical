@@ -888,7 +888,7 @@ theorem execBlocksListFuel_append_of_structurallyClosed
                     | error error => rfl
                     | ok yieldSplit =>
                       rcases yieldSplit with ⟨mapped, yieldInstr, afterYield⟩
-                      simp only [hyield, bind, Except.bind]
+                      simp only
                       cases hregion : execRoutedRegion
                           (execBlocksListFuel fuel alg inputs) alg inputs state instr dst
                             mapped yieldInstr afterYield with
@@ -1046,7 +1046,7 @@ theorem execBlocks_routedRegion
     simp [instrRoutedSumBegin, loopIdIsOpen, hfresh] <;>
     simp only [bind, Except.bind] <;>
     rw [hyield'] <;>
-    simp only [bind, Except.bind]
+    simp only
   all_goals
     have hfuel : 1 + (mapped.size + 1 + (afterYield.size + 1)) = regionFuel := by
       simp [regionFuel]
@@ -1141,6 +1141,16 @@ def initialPlanState (alg : Algebra α) (inputs : PlanInputs α)
 array index is the logical output channel. -/
 abbrev SinkImage (α : Type) := Array (Value α)
 
+/-- The complete public observation of one Plan execution. `state` retains the
+module slots that pull observers such as scopes inspect on demand, while
+`sinks` is the target-indexed image pushed to output devices. Keeping both in
+one result makes the two observation modes explicit without turning scopes
+into sinks. -/
+structure FlatPlanObservation (α : Type) where
+  state : PlanState α
+  sinks : SinkImage α
+deriving Repr
+
 private def denoteSink (alg : Algebra α) (state : PlanState α)
     (sink : SinkSpec) : Outcome (Value α) := do
   let zero : Value α ← alg.zero
@@ -1163,12 +1173,33 @@ def denoteSinks (alg : Algebra α) (plan : FlatPlan)
         pure (image.set! sink.target (← denoteSink alg state sink)))
       (Array.replicate plan.outputChannelCount zero) plan.sinks.toList
 
-/-- Execute a complete Plan from its explicit initial image and observe the
-target-indexed sink image. -/
-def denoteFlatPlan (alg : Algebra α) (inputs : PlanInputs α)
-    (plan : FlatPlan) : Outcome (SinkImage α) := do
+/-- Execute a complete Plan from its explicit initial image and retain both
+the final namespace image and the target-indexed pushed outputs. -/
+def observeFlatPlan (alg : Algebra α) (inputs : PlanInputs α)
+    (plan : FlatPlan) : Outcome (FlatPlanObservation α) := do
   let initial ← initialPlanState alg inputs plan
-  denoteSinks alg plan (← execPlanFunctions alg inputs initial plan)
+  let state ← execPlanFunctions alg inputs initial plan
+  let sinks ← denoteSinks alg plan state
+  pure { state, sinks }
+
+/-- Execute a complete Plan and return its pushed sink image. This remains the
+compatibility surface for existing consumers; pull observers should use
+`observeFlatPlan` and project retained slots from its final state. -/
+def denoteFlatPlan (alg : Algebra α) (inputs : PlanInputs α)
+    (plan : FlatPlan) : Outcome (SinkImage α) :=
+  (observeFlatPlan alg inputs plan).map FlatPlanObservation.sinks
+
+theorem denoteFlatPlan_eq_observeFlatPlan_map
+    (alg : Algebra α) (inputs : PlanInputs α) (plan : FlatPlan) :
+    denoteFlatPlan alg inputs plan =
+      (observeFlatPlan alg inputs plan).map FlatPlanObservation.sinks := rfl
+
+theorem observeFlatPlan_deterministic
+    (alg : Algebra α) (inputs : PlanInputs α) (plan : FlatPlan)
+    {first second : Outcome (FlatPlanObservation α)}
+    (hfirst : observeFlatPlan alg inputs plan = first)
+    (hsecond : observeFlatPlan alg inputs plan = second) : first = second :=
+  hfirst.symm.trans hsecond
 
 theorem denoteFlatPlan_deterministic
     (alg : Algebra α) (inputs : PlanInputs α) (plan : FlatPlan)

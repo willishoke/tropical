@@ -159,6 +159,37 @@ private def imageScalars? : Outcome (SinkImage Int) → Option (Array Int)
 example : imageScalars? (denoteSinks fixtureAlgebra stereoPlan stereoState) =
     some #[8, 14] := by native_decide
 
+private def stereoInputs : PlanInputs Int := {
+  sources := #[.scalar 11, .scalar 48000]
+  initialSlots := #[.scalar 3, .scalar 5, .scalar 7]
+}
+
+private def observedSlotScalar? (index : Nat) :
+    Outcome (FlatPlanObservation Int) → Option Int
+  | .ok observation => scalarResult?
+      (lookupValue "fixture.observedSlot" observation.state.slots index)
+  | .error _ => none
+
+private def observedImageScalars? :
+    Outcome (FlatPlanObservation Int) → Option (Array Int)
+  | .ok observation => observation.sinks.mapM fun
+      | .scalar value => some value
+      | .array _ => none
+  | .error _ => none
+
+example : observedSlotScalar? 2
+    (observeFlatPlan fixtureAlgebra stereoInputs stereoPlan) = some 7 := by
+  native_decide
+
+example : observedImageScalars?
+    (observeFlatPlan fixtureAlgebra stereoInputs stereoPlan) = some #[8, 14] := by
+  native_decide
+
+example : denoteFlatPlan fixtureAlgebra stereoInputs stereoPlan =
+    (observeFlatPlan fixtureAlgebra stereoInputs stereoPlan).map
+      FlatPlanObservation.sinks :=
+  denoteFlatPlan_eq_observeFlatPlan_map _ _ _
+
 private def reducedState : PlanState Int := {
   temps := #[.scalar 99]
 }
