@@ -42,6 +42,11 @@ the atomically published program generation. Existing mono output APIs remain
 channel-zero compatibility views; explicit channel-count and interleaved-output
 APIs expose the full image.
 
+A live host/device output object may fix its width when it first attaches. In
+particular, a Metal render queue rejects a hot-swap that changes the declared
+channel count; changing that width requires rebuilding the output object. This
+keeps allocation and device-layout negotiation outside realtime publication.
+
 ## Authoring
 
 Session DAC routes carry an explicit nonnegative channel. Channel zero is the
