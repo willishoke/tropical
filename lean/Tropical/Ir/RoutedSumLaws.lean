@@ -1,5 +1,5 @@
 import Tropical.Ir.EmitBankLaws
-import Tropical.Semantics.Plan
+import Tropical.Semantics.PlanWellFormed
 
 /-!
 # Routed-sum lowering and Plan capstones
@@ -35,6 +35,32 @@ theorem denoteExpr_routed_authored_order
         (dynCount?.map fun count => denoteExpr alg env arena hArena count) := by
   rw [denoteExpr_of_deref alg env arena hArena hDeref]
   cases dynCount? <;> simp [denoteNode]
+
+/-- An exact production routed stream decomposes into its independently closed
+    invariant prefix followed by one intact routed Plan region. -/
+theorem execBlocks_routedStream
+    (alg : Algebra α) (inputs : PlanInputs α) (plan : FlatPlan)
+    (state : PlanState α) (emitted invariant body : Array NInstr)
+    (dst capacity outputCount binderId : Nat)
+    (routes : Array (Option Nat)) (count? : Option NOperand)
+    (mapped : Array NOperand)
+    (hstream : emitted = invariant
+      ++ #[instrRoutedSumBegin dst capacity outputCount routes count? binderId]
+      ++ body
+      ++ #[instrRoutedSumYield dst mapped, instrRoutedSumEnd dst])
+    (hprefix : BlocksWellFormed plan invariant) :
+    execBlocks alg inputs state emitted =
+      (execBlocks alg inputs state invariant >>= fun next =>
+        execBlocks alg inputs next
+          (#[instrRoutedSumBegin dst capacity outputCount routes count? binderId]
+            ++ body
+            ++ #[instrRoutedSumYield dst mapped, instrRoutedSumEnd dst])) := by
+  rw [hstream]
+  simpa only [Array.append_assoc] using
+    execBlocks_append_of_wellFormed alg inputs plan state invariant
+      (#[instrRoutedSumBegin dst capacity outputCount routes count? binderId]
+        ++ body
+        ++ #[instrRoutedSumYield dst mapped, instrRoutedSumEnd dst]) hprefix
 
 theorem AppendsOnly.validateRoutedBodyEffects (instrs : Array NInstr) :
     AppendsOnly (validateRoutedBodyEffects instrs) := by
@@ -202,5 +228,53 @@ theorem compileRoutedSum_stream
           rw [hdV, hdC, hdT, insertIdx!_at_prefix]
           simp only [Array.push_eq_append, Array.append_assoc]
           rfl
+
+set_option maxHeartbeats 1000000 in
+theorem compileRoutedSum_execBlocks
+    (arena : ExprArena) (hw : arena.wf = true)
+    (bound capacity outputCount : Nat) (routes : Array (Option Nat))
+    (tables values : Array ExprId) (dynCount? : Option ExprId) (idxId : Nat)
+    (hts : ∀ t ∈ tables, t.idx < bound)
+    (hvs : ∀ v ∈ values, v.idx < bound)
+    (hdc : ∀ d ∈ dynCount?, d.idx < bound)
+    (hT : ∀ t ∈ tables, AppendsOnly (compileNode arena hw t))
+    (hC : ∀ dc ∈ dynCount?,
+      AppendsOnly (compileNode arena hw dc (some .int)))
+    (hV : ∀ v ∈ values,
+      AppendsOnly (compileNode arena hw v (some .float)))
+    (s : EmitSt) (r : CompileResult) (s' : EmitSt)
+    (hDepth : s.routedDepth = 0)
+    (hCapacity : capacity ≠ 0) (hOutputs : outputCount ≠ 0)
+    (hFanout : values.isEmpty = false)
+    (hRouteCount : routes.size = capacity * values.size)
+    (hTargets : routes.findSome? (routedInvalidTarget? outputCount) = none)
+    (hcompile : (compileRoutedSum arena hw bound capacity outputCount routes
+      tables values dynCount? idxId hts hvs hdc).run s = .ok (r, s')) :
+    ∃ (pre bodyIns : Array NInstr) (dst : Nat)
+      (countOp? : Option NOperand) (mappedOps : Array NOperand),
+      s'.instrs = s.instrs ++ pre
+        ++ #[instrRoutedSumBegin dst capacity outputCount routes countOp? idxId]
+        ++ bodyIns
+        ++ #[instrRoutedSumYield dst mappedOps, instrRoutedSumEnd dst]
+      ∧ r = .array (.arrayReg dst) outputCount .float
+      ∧ ∀ {α : Type} (alg : Algebra α) (inputs : PlanInputs α)
+          (plan : FlatPlan) (state : PlanState α),
+        BlocksWellFormed plan (s.instrs ++ pre) →
+        execBlocks alg inputs state s'.instrs =
+          (execBlocks alg inputs state (s.instrs ++ pre) >>= fun next =>
+            execBlocks alg inputs next
+              (#[instrRoutedSumBegin dst capacity outputCount routes countOp? idxId]
+                ++ bodyIns
+                ++ #[instrRoutedSumYield dst mappedOps,
+                  instrRoutedSumEnd dst])) := by
+  obtain ⟨pre, bodyIns, dst, countOp?, mappedOps, hstream, hresult⟩ :=
+    compileRoutedSum_stream arena hw bound capacity outputCount routes tables
+      values dynCount? idxId hts hvs hdc hT hC hV s r s' hDepth hCapacity
+      hOutputs hFanout hRouteCount hTargets hcompile
+  refine ⟨pre, bodyIns, dst, countOp?, mappedOps, hstream, hresult, ?_⟩
+  intro α alg inputs plan state hprefix
+  exact execBlocks_routedStream alg inputs plan state s'.instrs
+    (s.instrs ++ pre) bodyIns dst capacity outputCount idxId routes countOp?
+    mappedOps hstream hprefix
 
 end Tropical.Ir.Emit

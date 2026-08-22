@@ -1,5 +1,5 @@
 import Tropical.Ir.EmitBankLaws
-import Tropical.Semantics.Plan
+import Tropical.Semantics.PlanWellFormed
 
 /-!
 # Bank/Reduce Plan capstones
@@ -65,6 +65,79 @@ theorem nestedReduce_order_capstone {α : Type _}
       refFold outerOp outerZero
         (fun i => refFold innerOp innerZero (body i) inner) outer :=
   refFold_nested outerOp innerOp outerZero innerZero body outer inner
+
+/-- An exact production Reduce stream decomposes into its independently closed
+    loop-invariant prefix followed by one structured Plan region.  This is the
+    semantic companion to `compileBankSum_stream`; the region remains intact. -/
+theorem execBlocks_reduceStream
+    (alg : Algebra α) (inputs : PlanInputs α) (plan : FlatPlan)
+    (state : PlanState α) (emitted invariant body : Array NInstr)
+    (acc capacity binderId : Nat) (ty : ScalarType)
+    (init : NOperand) (count? : Option NOperand) (contribution : NOperand)
+    (hstream : emitted = invariant
+      ++ #[instrReduceBegin acc init capacity ty count? binderId]
+      ++ body
+      ++ #[instrScalar "Add" acc #[.reg acc ty, contribution] ty,
+        instrReduceEnd acc ty])
+    (hprefix : BlocksWellFormed plan invariant) :
+    execBlocks alg inputs state emitted =
+      (execBlocks alg inputs state invariant >>= fun next =>
+        execBlocks alg inputs next
+          (#[instrReduceBegin acc init capacity ty count? binderId]
+            ++ body
+            ++ #[instrScalar "Add" acc #[.reg acc ty, contribution] ty,
+              instrReduceEnd acc ty])) := by
+  rw [hstream]
+  simpa only [Array.append_assoc] using
+    execBlocks_append_of_wellFormed alg inputs plan state invariant
+      (#[instrReduceBegin acc init capacity ty count? binderId]
+        ++ body
+        ++ #[instrScalar "Add" acc #[.reg acc ty, contribution] ty,
+          instrReduceEnd acc ty]) hprefix
+
+set_option maxHeartbeats 1000000 in
+theorem compileBankSum_execBlocks
+    (arena : ExprArena) (hw : arena.wf = true) (bound count : Nat)
+    (tables : Array ExprId) (body : ExprId) (dynCount? : Option ExprId)
+    (idxId : Nat)
+    (hts : ∀ t ∈ tables, t.idx < bound) (hb : body.idx < bound)
+    (hdc : ∀ d ∈ dynCount?, d.idx < bound)
+    (hT : ∀ t ∈ tables, AppendsOnly (compileNode arena hw t))
+    (hC : ∀ dc ∈ dynCount?,
+      AppendsOnly (compileNode arena hw dc (some .int)))
+    (hB : AppendsOnly (compileNode arena hw body))
+    (s : EmitSt) (r : CompileResult) (s' : EmitSt)
+    (hcompile : (compileBankSum arena hw bound count tables body dynCount?
+      idxId hts hb hdc).run s = .ok (r, s')) :
+    ∃ (pre bodyIns : Array NInstr) (acc : Nat) (ty : ScalarType)
+      (countOp? : Option NOperand) (contribOp : NOperand),
+      s'.instrs = s.instrs ++ pre
+        ++ #[instrReduceBegin acc (.const (Lean.JsonNumber.fromNat 0) ty)
+          count ty countOp? idxId]
+        ++ bodyIns
+        ++ #[instrScalar "Add" acc #[.reg acc ty, contribOp] ty,
+          instrReduceEnd acc ty]
+      ∧ r = .scalar (.reg acc ty) ty
+      ∧ ∀ {α : Type} (alg : Algebra α) (inputs : PlanInputs α)
+          (plan : FlatPlan) (state : PlanState α),
+        BlocksWellFormed plan (s.instrs ++ pre) →
+        execBlocks alg inputs state s'.instrs =
+          (execBlocks alg inputs state (s.instrs ++ pre) >>= fun next =>
+            execBlocks alg inputs next
+              (#[instrReduceBegin acc
+                    (.const (Lean.JsonNumber.fromNat 0) ty)
+                    count ty countOp? idxId]
+                ++ bodyIns
+                ++ #[instrScalar "Add" acc #[.reg acc ty, contribOp] ty,
+                  instrReduceEnd acc ty])) := by
+  obtain ⟨pre, bodyIns, acc, ty, countOp?, contribOp, hstream, hresult⟩ :=
+    compileBankSum_stream arena hw bound count tables body dynCount? idxId
+      hts hb hdc hT hC hB s r s' hcompile
+  refine ⟨pre, bodyIns, acc, ty, countOp?, contribOp, hstream, hresult, ?_⟩
+  intro α alg inputs plan state hprefix
+  exact execBlocks_reduceStream alg inputs plan state s'.instrs
+    (s.instrs ++ pre) bodyIns acc count idxId ty
+    (.const (Lean.JsonNumber.fromNat 0) ty) countOp? contribOp hstream hprefix
 
 /-- A Plan observation packages the public executor run and the operand used to
     observe its result.  Fixture capstones discharge this relation directly;
