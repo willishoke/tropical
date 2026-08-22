@@ -75,6 +75,14 @@ def StageCtxLe (a b : StageCtx) : Prop :=
     (childStage a instanceIdx outputIdx).le
       (childStage b instanceIdx outputIdx) = true)
 
+theorem resolve_le_s1 (ctx : StageCtx) (sig : StageSig) :
+    (resolve ctx sig).le .s1 = true := by
+  cases h : resolve ctx sig <;> rfl
+
+theorem stageOf_le_s1 (arena : ExprArena) (ctx : StageCtx) (id : ExprId) :
+    (stageOf arena ctx id).le .s1 = true := by
+  cases h : stageOf arena ctx id <;> rfl
+
 /-- A dangling expression id is classified maximally dynamically. -/
 theorem stageOf_dangling {arena : ExprArena} {ctx : StageCtx} {id : ExprId}
     (h : arena.sig? id = none) : stageOf arena ctx id = .s1 := by
