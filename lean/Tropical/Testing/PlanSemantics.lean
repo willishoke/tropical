@@ -98,4 +98,11 @@ example : arrayScalars? 0
     (execSmallInstr fixtureAlgebra fixtureInputs fixtureState setInstr) =
       some #[17, 5] := by native_decide
 
+private def setOutOfRangeInstr : NInstr :=
+  instrSetElement 0 #[.arrayReg 0, .const ⟨8, 0⟩ .int, .reg 1 .int]
+
+example : arrayScalars? 0
+    (execSmallInstr fixtureAlgebra fixtureInputs fixtureState setOutOfRangeInstr) =
+      some #[17, 19] := by native_decide
+
 end Tropical.Testing.PlanSemantics

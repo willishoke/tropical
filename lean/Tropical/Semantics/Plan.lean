@@ -202,14 +202,13 @@ def execSmallInstr (alg : Algebra α) (inputs : PlanInputs α)
             | planError "instruction.SetElement" "first argument is not an array"
           let rawIndex ← alg.dynamicCount args[1]!
           if rawIndex < 0 then
-            planError "instruction.SetElement" s!"negative array index {rawIndex}"
+            .ok state
           else
             let index := rawIndex.toNat
             if h : index < values.size then
               writeArrayDst state instr.dst (values.set index args[2]!)
             else
-              planError "instruction.SetElement"
-                s!"array index {index} is out of bounds (size {values.size})"
+              .ok state
     | "ReduceBegin" | "ReduceEnd" | "RoutedSumBegin" | "RoutedSumYield"
     | "RoutedSumEnd" =>
         planError "instruction.region"
