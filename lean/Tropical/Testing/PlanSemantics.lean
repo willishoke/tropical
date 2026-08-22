@@ -105,4 +105,11 @@ example : arrayScalars? 0
     (execSmallInstr fixtureAlgebra fixtureInputs fixtureState setOutOfRangeInstr) =
       some #[17, 19] := by native_decide
 
+private def elementwiseInstr : NInstr :=
+  instrArray "Add" 0 #[.arrayReg 0, .slot 0 .int] 2 #[1, 0] .int
+
+example : arrayScalars? 0
+    (execSmallInstr fixtureAlgebra fixtureInputs fixtureState elementwiseInstr) =
+      some #[30, 32] := by native_decide
+
 end Tropical.Testing.PlanSemantics

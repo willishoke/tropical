@@ -165,6 +165,41 @@ private def evalOperands (alg : Algebra α) (inputs : PlanInputs α)
     Outcome (Array (Value α)) :=
   sequence (operands.map (evalOperand alg inputs state))
 
+private def evalElementwiseOperand (alg : Algebra α) (inputs : PlanInputs α)
+    (state : PlanState α) (instr : NInstr) (position index : Nat) : Result α := do
+  let some operand := instr.args[position]?
+    | planError "instruction.elementwise"
+        s!"argument position {position} is out of bounds"
+  if (instr.strides[position]?.getD 0) == 1 then
+    match operand with
+    | .arrayReg slot =>
+        let some values := state.arrays[slot]?
+          | planError "instruction.elementwise"
+              s!"array argument {slot} is out of bounds"
+        lookupPlanValue "instruction.elementwise" "array element" values index
+    | .sessionArrayReg slot =>
+        planError "instruction.elementwise"
+          s!"session array {slot} leaked to a wire-ready Plan"
+    | _ =>
+        planError "instruction.elementwise"
+          s!"strided argument {position} is not an array operand"
+  else
+    evalOperand alg inputs state operand
+
+/-- Execute the scalar loop represented by an array-destination Plan op. Array
+arguments are selected exactly when the parallel stride entry is one; all
+other operands are loop-invariant scalar broadcasts. -/
+def execElementwiseInstr (alg : Algebra α) (inputs : PlanInputs α)
+    (state : PlanState α) (instr : NInstr) (op : PlanOp) :
+    Outcome (PlanState α) := do
+  let values ← List.foldlM (fun (values : Array (Value α)) index => do
+      let args ← List.foldlM (fun (args : Array (Value α)) position => do
+          pure (args.push (← evalElementwiseOperand alg inputs state instr position index)))
+        #[] (List.range instr.args.size)
+      pure (values.push (← evalPlanOp alg op args)))
+    #[] (List.range instr.loopCount)
+  writeArrayDst state instr.dst values
+
 /-- Execute an instruction that does not delimit a structured region.
 Elementwise array scalar-ops and region delimiters are handled by `execBlocks`;
 encountering them here is an explicit layering refusal. -/
@@ -175,9 +210,7 @@ def execSmallInstr (alg : Algebra α) (inputs : PlanInputs α)
     | .temp _ | .moduleSlot _ =>
         let args ← evalOperands alg inputs state instr.args
         writeScalarDst state instr.dst (← evalPlanOp alg op args)
-    | .array _ | .sessionArray _ =>
-        planError "instruction.scalarOp"
-          s!"elementwise {instr.tag} must execute through execBlocks"
+    | .array _ | .sessionArray _ => execElementwiseInstr alg inputs state instr op
   else
     match instr.tag with
     | "Pack" =>
