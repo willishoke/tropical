@@ -28,8 +28,10 @@ differential and render gates are valuable evidence, not that theorem.
   `Staging.resolve` interprets them in a `StageCtx` that reflects child
   execution availability.
 - `sampleIndex`, `tileSampleIndex`, and `tilePhase` are all classified `s1`.
-  Direct exact/JIT semantics maps `tileSampleIndex` to `env.sampleIndex` and
-  `tilePhase` to literal zero.
+  Direct semantics gives `tileSampleIndex` its own `SigEnv.tileSampleIndex`
+  rail and maps `tilePhase` to literal zero. Ordinary exact/JIT invocations
+  bind the tile rail equal to `sampleIndex`; materializer and substitution
+  proofs may bind an independent absolute endpoint coordinate.
 - `loopIdx` is deliberately stage-neutral at the value level. Stage0 pins
   delimiters and loop-index readers for individual moves, while permitting a
   whole region to move.
@@ -48,6 +50,12 @@ differential and render gates are valuable evidence, not that theorem.
   replacement.
 
 ## Proof surface
+
+The sprint resolved one semantic-model fork in favor of independent rails:
+`SigEnv.sampleIndex` is the ordinary audio coordinate and
+`SigEnv.tileSampleIndex` is the materializer coordinate. This mirrors Plan's
+separate `.tick` and `.tileTick` sources and lets the shift theorem preserve
+pre-existing tile-coordinate references without a syntactic exclusion.
 
 ### 1. Stage lattice and signature invariants
 
@@ -227,4 +235,3 @@ cd lean && lake build Tropical.Testing.StagingLaws tropicaltest phasercheck
   numeric evidence.
 - Metal compiler, GPU execution, worker deadlines, and callback atomicity stay
   outside this proof surface.
-
