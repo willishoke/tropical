@@ -185,6 +185,18 @@ example : observedImageScalars?
     (observeFlatPlan fixtureAlgebra stereoInputs stereoPlan) = some #[8, 14] := by
   native_decide
 
+example (observation : FlatPlanObservation Int)
+    (hrun : observeFlatPlan fixtureAlgebra stereoInputs stereoPlan = .ok observation) :
+    observation.sinks.size = 2 := by
+  simpa [stereoPlan] using observeFlatPlan_sinks_size_of_ok
+    fixtureAlgebra stereoInputs stereoPlan observation hrun
+
+example (image : SinkImage Int)
+    (hrun : denoteFlatPlan fixtureAlgebra stereoInputs stereoPlan = .ok image) :
+    image.size = 2 := by
+  simpa [stereoPlan] using denoteFlatPlan_size_of_ok
+    fixtureAlgebra stereoInputs stereoPlan image hrun
+
 example : denoteFlatPlan fixtureAlgebra stereoInputs stereoPlan =
     (observeFlatPlan fixtureAlgebra stereoInputs stereoPlan).map
       FlatPlanObservation.sinks :=
@@ -264,6 +276,29 @@ example :
     | .ok _ => "unexpected success") = "instruction.region" := by native_decide
 
 example : FlatPlanWellFormed stereoPlan := by native_decide
+
+example : (stereoPlan.sinks.map SinkSpec.target).toList.Nodup :=
+  (by native_decide : FlatPlanWellFormed stereoPlan).sinkTargetsNodup
+
+example : stereoPlan.sinks[1].target < stereoPlan.outputChannelCount :=
+  (by native_decide : FlatPlanWellFormed stereoPlan).sinkTargetInRange 1 (by decide)
+
+example : stereoPlan.sinks[0].inputs[1] < stereoPlan.slotCount :=
+  (by native_decide : FlatPlanWellFormed stereoPlan).sinkInputInRange
+    0 (by decide) 1 (by decide)
+
+private def balancedChild : InstanceFunction :=
+  .mk "child" "child" #[] #[] #[] 0 0 0 #[]
+
+private def balancedRoot : InstanceFunction :=
+  .mk "root" "root" #[] #[] #[] 0 0 0 #[balancedChild]
+
+private def balancedPlan : FlatPlan := {
+  stereoPlan with instanceFunctions := #[balancedRoot]
+}
+
+example : InstanceRegionsBalanced balancedPlan balancedPlan.instanceFunctions[0] :=
+  planWellFormed_regions_balanced (by native_decide) 0 (by decide)
 
 example : ¬FlatPlanWellFormed {
     stereoPlan with

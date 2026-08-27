@@ -237,19 +237,83 @@ instance (plan : FlatPlan) (instr : NInstr) :
   infer_instance
 
 private def instanceWellFormed (plan : FlatPlan) (inst : InstanceFunction) : Bool :=
-  if !(inst.registerOffset + inst.registerCount <= plan.registerCount
-      && inst.arraySlotOffset <= plan.arraySlotCount
-      && decide (BlocksWellFormed plan inst.preambleInstructions)
-      && decide (BlocksWellFormed plan inst.preInputInstructions)
-      && decide (BlocksWellFormed plan inst.instructions)) then
-    false
-  else Id.run do
-    for _h : child in inst.children do
-      if !instanceWellFormed plan child then return false
-    return true
+  inst.registerOffset + inst.registerCount <= plan.registerCount
+    && inst.arraySlotOffset <= plan.arraySlotCount
+    && decide (BlocksWellFormed plan inst.preambleInstructions)
+    && decide (BlocksWellFormed plan inst.preInputInstructions)
+    && decide (BlocksWellFormed plan inst.instructions)
+    && inst.children.attach.all fun ⟨child, _h⟩ =>
+      instanceWellFormed plan child
 termination_by sizeOf inst
 decreasing_by
   exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children _h
+
+/-- The recursive instance-shape clause used by `FlatPlanWellFormed`, exposed
+for consumers that reason about one function at a time. -/
+def InstanceFunctionWellFormed (plan : FlatPlan) (inst : InstanceFunction) : Prop :=
+  instanceWellFormed plan inst = true
+
+instance (plan : FlatPlan) (inst : InstanceFunction) :
+    Decidable (InstanceFunctionWellFormed plan inst) := by
+  unfold InstanceFunctionWellFormed
+  infer_instance
+
+theorem InstanceFunctionWellFormed.preamble {plan : FlatPlan}
+    {inst : InstanceFunction} (hwf : InstanceFunctionWellFormed plan inst) :
+    BlocksWellFormed plan inst.preambleInstructions := by
+  unfold InstanceFunctionWellFormed instanceWellFormed at hwf
+  simp at hwf
+  exact hwf.1.1.1.2
+
+theorem InstanceFunctionWellFormed.preInput {plan : FlatPlan}
+    {inst : InstanceFunction} (hwf : InstanceFunctionWellFormed plan inst) :
+    BlocksWellFormed plan inst.preInputInstructions := by
+  unfold InstanceFunctionWellFormed instanceWellFormed at hwf
+  simp at hwf
+  exact hwf.1.1.2
+
+theorem InstanceFunctionWellFormed.instructions {plan : FlatPlan}
+    {inst : InstanceFunction} (hwf : InstanceFunctionWellFormed plan inst) :
+    BlocksWellFormed plan inst.instructions := by
+  unfold InstanceFunctionWellFormed instanceWellFormed at hwf
+  simp at hwf
+  exact hwf.1.2
+
+theorem InstanceFunctionWellFormed.child {plan : FlatPlan}
+    {inst : InstanceFunction} (hwf : InstanceFunctionWellFormed plan inst)
+    (index : Nat) (hindex : index < inst.children.size) :
+    InstanceFunctionWellFormed plan inst.children[index] := by
+  unfold InstanceFunctionWellFormed instanceWellFormed at hwf
+  simp at hwf
+  unfold InstanceFunctionWellFormed
+  exact hwf.2 index hindex
+
+/-- Recursive structural closure of every delimiter-bearing instruction block
+in one instance tree. The root `preInput` block is included even though a
+top-level execution does not consume it; for a child it is consumed by its
+parent immediately before the recursive body. -/
+inductive InstanceRegionsBalanced (plan : FlatPlan) : InstanceFunction → Prop where
+  | intro (inst : InstanceFunction)
+      (preamble : BlocksStructurallyClosed inst.preambleInstructions)
+      (preInput : BlocksStructurallyClosed inst.preInputInstructions)
+      (instructions : BlocksStructurallyClosed inst.instructions)
+      (children : ∀ (index : Nat) (hindex : index < inst.children.size),
+        InstanceRegionsBalanced plan inst.children[index]) :
+      InstanceRegionsBalanced plan inst
+
+theorem InstanceFunctionWellFormed.regionsBalanced {plan : FlatPlan}
+    {inst : InstanceFunction} (hwf : InstanceFunctionWellFormed plan inst) :
+    InstanceRegionsBalanced plan inst := by
+  apply InstanceRegionsBalanced.intro
+  · exact hwf.preamble.structurallyClosed
+  · exact hwf.preInput.structurallyClosed
+  · exact hwf.instructions.structurallyClosed
+  · intro index hindex
+    exact (hwf.child index hindex).regionsBalanced
+termination_by sizeOf inst
+decreasing_by
+  exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children
+    (Array.getElem_mem hindex)
 
 private def indicesUniqueAndInRange (limit : Nat) (indices : Array Nat) : Bool :=
   indices.all (· < limit) && indices.toList.Nodup
@@ -259,6 +323,26 @@ private def publicationRolesUnique (plan : FlatPlan) : Bool :=
 
 private def sinkInputsInRange (plan : FlatPlan) : Bool :=
   plan.sinks.all (fun sink => sink.inputs.all (· < plan.slotCount))
+
+/-- The target image has no ambiguous writers and every authored sink target
+addresses the declared channel image. This duplicates the executable layout
+check as a theorem-facing Boolean, keeping its elimination surface independent
+of the hash-set implementation used by `FlatPlan.outputLayoutWellFormed`. -/
+def SinkTargetsWellFormed (plan : FlatPlan) : Prop :=
+  indicesUniqueAndInRange plan.outputChannelCount
+    (plan.sinks.map SinkSpec.target) = true
+
+instance (plan : FlatPlan) : Decidable (SinkTargetsWellFormed plan) := by
+  unfold SinkTargetsWellFormed
+  infer_instance
+
+/-- Every slot mixed by a sink exists in the retained Plan state. -/
+def SinkInputsWellFormed (plan : FlatPlan) : Prop :=
+  sinkInputsInRange plan = true
+
+instance (plan : FlatPlan) : Decidable (SinkInputsWellFormed plan) := by
+  unfold SinkInputsWellFormed
+  infer_instance
 
 /-- Host/environment shape needed to initialize a well-formed plan. -/
 structure PlanEnvironmentWellFormed (plan : FlatPlan) (inputs : PlanInputs α) : Prop where
@@ -272,6 +356,7 @@ structure PlanEnvironmentWellFormed (plan : FlatPlan) (inputs : PlanInputs α) :
 example the native/Metal maximum channel width) remain separate obligations. -/
 def flatPlanWellFormed (plan : FlatPlan) : Bool :=
   plan.outputLayoutWellFormed &&
+  (decide (SinkTargetsWellFormed plan) &&
   (plan.arraySlotNames.size == plan.arraySlotCount &&
   (plan.arraySlotSizes.size == plan.arraySlotCount &&
   (plan.slotNames.size == plan.slotCount &&
@@ -282,7 +367,7 @@ def flatPlanWellFormed (plan : FlatPlan) : Bool :=
   (publicationRolesUnique plan &&
   ((plan.tileArraySlots.isEmpty || plan.tileIntervalFrames > 0) &&
   (plan.instanceFunctions.all (instanceWellFormed plan) &&
-   sinkInputsInRange plan))))))))))
+   sinkInputsInRange plan)))))))))))
 
 /-- Canonical theorem-facing structural predicate. -/
 def FlatPlanWellFormed (plan : FlatPlan) : Prop :=
@@ -296,6 +381,76 @@ theorem FlatPlanWellFormed.outputLayout {plan : FlatPlan}
     (hwf : FlatPlanWellFormed plan) : plan.outputLayoutWellFormed = true := by
   simp [FlatPlanWellFormed, flatPlanWellFormed] at hwf
   exact hwf.1
+
+theorem FlatPlanWellFormed.sinkTargets {plan : FlatPlan}
+    (hwf : FlatPlanWellFormed plan) : SinkTargetsWellFormed plan := by
+  simp [FlatPlanWellFormed, flatPlanWellFormed] at hwf
+  exact hwf.2.1
+
+theorem FlatPlanWellFormed.sinkInputs {plan : FlatPlan}
+    (hwf : FlatPlanWellFormed plan) : SinkInputsWellFormed plan := by
+  simp [FlatPlanWellFormed, flatPlanWellFormed] at hwf
+  rcases hwf with ⟨_, _, _, _, _, _, _, _, _, _, _, _, hinputs⟩
+  exact hinputs
+
+theorem FlatPlanWellFormed.instanceFunction {plan : FlatPlan}
+    (hwf : FlatPlanWellFormed plan) (index : Nat)
+    (hindex : index < plan.instanceFunctions.size) :
+    InstanceFunctionWellFormed plan plan.instanceFunctions[index] := by
+  simp [FlatPlanWellFormed, flatPlanWellFormed] at hwf
+  rcases hwf with ⟨_, _, _, _, _, _, _, _, _, _, _, hinstances, _⟩
+  exact hinstances index hindex
+
+/-- A well-formed Plan has balanced structured regions throughout every
+recursive instance tree. -/
+theorem planWellFormed_regions_balanced {plan : FlatPlan}
+    (hwf : FlatPlanWellFormed plan) (index : Nat)
+    (hindex : index < plan.instanceFunctions.size) :
+    InstanceRegionsBalanced plan plan.instanceFunctions[index] :=
+  (hwf.instanceFunction index hindex).regionsBalanced
+
+theorem SinkTargetsWellFormed.targetInRange {plan : FlatPlan}
+    (hwf : SinkTargetsWellFormed plan) (sinkIndex : Nat)
+    (hsink : sinkIndex < plan.sinks.size) :
+    plan.sinks[sinkIndex].target < plan.outputChannelCount := by
+  unfold SinkTargetsWellFormed indicesUniqueAndInRange at hwf
+  have hall := (Bool.and_eq_true_iff.mp hwf).1
+  have htarget := Array.all_eq_true.mp hall sinkIndex (by simpa using hsink)
+  simpa using htarget
+
+theorem SinkTargetsWellFormed.targetsNodup {plan : FlatPlan}
+    (hwf : SinkTargetsWellFormed plan) :
+    (plan.sinks.map SinkSpec.target).toList.Nodup := by
+  unfold SinkTargetsWellFormed indicesUniqueAndInRange at hwf
+  exact of_decide_eq_true (Bool.and_eq_true_iff.mp hwf).2
+
+theorem SinkInputsWellFormed.inputInRange {plan : FlatPlan}
+    (hwf : SinkInputsWellFormed plan) (sinkIndex : Nat)
+    (hsink : sinkIndex < plan.sinks.size) (inputIndex : Nat)
+    (hinput : inputIndex < plan.sinks[sinkIndex].inputs.size) :
+    plan.sinks[sinkIndex].inputs[inputIndex] < plan.slotCount := by
+  unfold SinkInputsWellFormed sinkInputsInRange at hwf
+  have hsinkWf := Array.all_eq_true.mp hwf sinkIndex hsink
+  have hinputWf := Array.all_eq_true.mp hsinkWf inputIndex hinput
+  simpa using hinputWf
+
+theorem FlatPlanWellFormed.sinkTargetInRange {plan : FlatPlan}
+    (hwf : FlatPlanWellFormed plan) (sinkIndex : Nat)
+    (hsink : sinkIndex < plan.sinks.size) :
+    plan.sinks[sinkIndex].target < plan.outputChannelCount :=
+  hwf.sinkTargets.targetInRange sinkIndex hsink
+
+theorem FlatPlanWellFormed.sinkTargetsNodup {plan : FlatPlan}
+    (hwf : FlatPlanWellFormed plan) :
+    (plan.sinks.map SinkSpec.target).toList.Nodup :=
+  hwf.sinkTargets.targetsNodup
+
+theorem FlatPlanWellFormed.sinkInputInRange {plan : FlatPlan}
+    (hwf : FlatPlanWellFormed plan) (sinkIndex : Nat)
+    (hsink : sinkIndex < plan.sinks.size) (inputIndex : Nat)
+    (hinput : inputIndex < plan.sinks[sinkIndex].inputs.size) :
+    plan.sinks[sinkIndex].inputs[inputIndex] < plan.slotCount :=
+  hwf.sinkInputs.inputInRange sinkIndex hsink inputIndex hinput
 
 theorem planWellFormed_no_session_array_leak {plan : FlatPlan}
     (_hwf : FlatPlanWellFormed plan) {instr : NInstr}
@@ -317,5 +472,33 @@ theorem planWellFormed_output_nonempty {plan : FlatPlan}
         simp [FlatPlan.outputLayoutWellFormed, hzero]
       rw [hfalse] at hlayout
       contradiction
+
+/-- Conditional whole-plan execution safety. `FlatPlanWellFormed` discharges
+delimiter shape, namespaces, and output layout, but cannot make an arbitrary
+carrier algebra total: `initialPlanState`, instruction execution, and sink
+arithmetic may still refuse (as may missing host parameters or value-dependent
+array indices). The three success premises are exactly those remaining dynamic
+obligations. Under them, the combined pull/push observation succeeds, has the
+declared width, and that width is nonzero. -/
+theorem planWellFormed_exec_safe
+    (alg : Algebra α) (inputs : PlanInputs α) (plan : FlatPlan)
+    (hwf : FlatPlanWellFormed plan) (initial final : PlanState α)
+    (image : SinkImage α)
+    (hinitial : initialPlanState alg inputs plan = .ok initial)
+    (hexec : execPlanFunctions alg inputs initial plan = .ok final)
+    (hsinks : denoteSinks alg plan final = .ok image) :
+    observeFlatPlan alg inputs plan = .ok { state := final, sinks := image }
+      ∧ image.size = plan.outputChannelCount
+      ∧ plan.outputChannelCount > 0 := by
+  constructor
+  · unfold observeFlatPlan
+    rw [hinitial]
+    simp only [bind, Except.bind]
+    rw [hexec]
+    simp only
+    rw [hsinks]
+    rfl
+  · exact ⟨denoteSinks_size_of_ok alg plan final image hsinks,
+      planWellFormed_output_nonempty hwf⟩
 
 end Tropical.Semantics

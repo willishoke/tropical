@@ -1173,6 +1173,39 @@ def denoteSinks (alg : Algebra α) (plan : FlatPlan)
         pure (image.set! sink.target (← denoteSink alg state sink)))
       (Array.replicate plan.outputChannelCount zero) plan.sinks.toList
 
+private theorem denoteSinksFold_size (alg : Algebra α) (state : PlanState α)
+    (sinks : List SinkSpec) (initial final : SinkImage α)
+    (hrun : List.foldlM (fun image sink => do
+        pure (image.set! sink.target (← denoteSink alg state sink)))
+      initial sinks = .ok final) : final.size = initial.size := by
+  induction sinks generalizing initial with
+  | nil => simpa using (congrArg Array.size (Except.ok.inj hrun)).symm
+  | cons sink rest ih =>
+      simp only [List.foldlM_cons] at hrun
+      cases hsink : denoteSink alg state sink with
+      | error error => simp_all [bind, Except.bind]
+      | ok value =>
+          simp only [hsink, bind, Except.bind] at hrun
+          exact (ih (initial.set! sink.target value) hrun).trans
+            Array.size_setIfInBounds
+
+/-- Successful pushed output observation always has exactly the plan's
+declared logical channel width, including zero-filled channels without a
+sink. -/
+theorem denoteSinks_size_of_ok (alg : Algebra α) (plan : FlatPlan)
+    (state : PlanState α) (image : SinkImage α)
+    (hrun : denoteSinks alg plan state = .ok image) :
+    image.size = plan.outputChannelCount := by
+  unfold denoteSinks at hrun
+  split at hrun
+  · contradiction
+  · cases hzero : alg.zero with
+    | error error => simp_all [bind, Except.bind]
+    | ok zero =>
+        simp only [hzero, bind, Except.bind] at hrun
+        exact (denoteSinksFold_size alg state plan.sinks.toList
+          (Array.replicate plan.outputChannelCount zero) image hrun).trans (by simp)
+
 /-- Execute a complete Plan from its explicit initial image and retain both
 the final namespace image and the target-indexed pushed outputs. -/
 def observeFlatPlan (alg : Algebra α) (inputs : PlanInputs α)
@@ -1181,6 +1214,39 @@ def observeFlatPlan (alg : Algebra α) (inputs : PlanInputs α)
   let state ← execPlanFunctions alg inputs initial plan
   let sinks ← denoteSinks alg plan state
   pure { state, sinks }
+
+theorem observeFlatPlan_sinks_size_of_ok
+    (alg : Algebra α) (inputs : PlanInputs α) (plan : FlatPlan)
+    (observation : FlatPlanObservation α)
+    (hrun : observeFlatPlan alg inputs plan = .ok observation) :
+    observation.sinks.size = plan.outputChannelCount := by
+  unfold observeFlatPlan at hrun
+  cases hinitial : initialPlanState alg inputs plan with
+  | error error =>
+      rw [hinitial] at hrun
+      contradiction
+  | ok initial =>
+      rw [hinitial] at hrun
+      simp only [bind, Except.bind] at hrun
+      cases hexec : execPlanFunctions alg inputs initial plan with
+      | error error =>
+          rw [hexec] at hrun
+          contradiction
+      | ok state =>
+          rw [hexec] at hrun
+          simp only at hrun
+          cases hsinks : denoteSinks alg plan state with
+          | error error =>
+              rw [hsinks] at hrun
+              contradiction
+          | ok sinks =>
+              rw [hsinks] at hrun
+              simp only at hrun
+              have hobservation :
+                  ({ state := state, sinks := sinks } : FlatPlanObservation α) =
+                    observation := Except.ok.inj hrun
+              rw [← hobservation]
+              exact denoteSinks_size_of_ok alg plan state sinks hsinks
 
 /-- Execute a complete Plan and return its pushed sink image. This remains the
 compatibility surface for existing consumers; pull observers should use
@@ -1193,6 +1259,22 @@ theorem denoteFlatPlan_eq_observeFlatPlan_map
     (alg : Algebra α) (inputs : PlanInputs α) (plan : FlatPlan) :
     denoteFlatPlan alg inputs plan =
       (observeFlatPlan alg inputs plan).map FlatPlanObservation.sinks := rfl
+
+theorem denoteFlatPlan_size_of_ok
+    (alg : Algebra α) (inputs : PlanInputs α) (plan : FlatPlan)
+    (image : SinkImage α) (hrun : denoteFlatPlan alg inputs plan = .ok image) :
+    image.size = plan.outputChannelCount := by
+  unfold denoteFlatPlan at hrun
+  cases hobservation : observeFlatPlan alg inputs plan with
+  | error error =>
+      rw [hobservation] at hrun
+      contradiction
+  | ok observation =>
+      rw [hobservation] at hrun
+      have himage : observation.sinks = image := by
+        exact Except.ok.inj hrun
+      rw [← himage]
+      exact observeFlatPlan_sinks_size_of_ok alg inputs plan observation hobservation
 
 theorem observeFlatPlan_deterministic
     (alg : Algebra α) (inputs : PlanInputs α) (plan : FlatPlan)
