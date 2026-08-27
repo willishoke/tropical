@@ -18,6 +18,10 @@ structure SigEnv (α : Type) where
   nestedOutputs : Array (Array (Value α)) := #[]
   sampleRate : Value α
   sampleIndex : Value α
+  /-- Absolute tile/materializer coordinate. Ordinary exact/JIT evaluation
+      supplies the same value as `sampleIndex`; staged materialization may
+      supply an independent endpoint coordinate. -/
+  tileSampleIndex : Value α
   /-- Unique bank binder id to its current value. `bindLoop` shadows the same
       id, although well-formed production terms forbid ancestor collisions. -/
   loops : Nat → Option (Value α) := fun _ => none
@@ -25,11 +29,12 @@ structure SigEnv (α : Type) where
 def SigEnv.bindLoop (env : SigEnv α) (id : Nat) (value : Value α) : SigEnv α :=
   { env with loops := fun query => if query = id then some value else env.loops query }
 
-/-- Environment-level well-formedness is intentionally small: the two runtime
-    rails are scalar. -/
+/-- Environment-level well-formedness is intentionally small: the three
+    runtime rails are scalar. -/
 def EnvWellFormed (env : SigEnv α) : Prop :=
   (∃ value, env.sampleRate = .scalar value) ∧
-  (∃ value, env.sampleIndex = .scalar value)
+  (∃ value, env.sampleIndex = .scalar value) ∧
+  (∃ value, env.tileSampleIndex = .scalar value)
 
 /-- Interpret one flat environment reference with the production refusal text. -/
 def lookupValue (operation : String) (xs : Array (Value α)) (idx : Nat) :

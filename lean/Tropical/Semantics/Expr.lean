@@ -67,7 +67,7 @@ def denoteNode (alg : Algebra α) (env : SigEnv α) (node : ENode)
     lookupNested env instanceIdx.idx outputIdx.idx
   | .sampleRate => .ok env.sampleRate
   | .sampleIndex => .ok env.sampleIndex
-  | .tileSampleIndex => .ok env.sampleIndex
+  | .tileSampleIndex => .ok env.tileSampleIndex
   | .tilePhase => alg.literal (0 : Nat)
   | .loopIdx binderId =>
     match env.loops binderId with

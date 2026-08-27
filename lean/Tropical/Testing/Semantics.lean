@@ -89,6 +89,17 @@ example (alg : Algebra α) (env : SigEnv α) :
   denoteExpr_extends fixtureWellFormed extendedFixtureWellFormed fixtureExtends
     alg env (by rfl)
 
+/-- The ordinary and tile coordinates are independent semantic rails. Exact
+    callers may bind them equally; materializer proofs can vary them
+    independently without changing the expression language. -/
+example (alg : Algebra α) (env : SigEnv α) :
+    denoteNode alg env .sampleIndex (fun _ _ _ => .ok env.sampleIndex) =
+      .ok env.sampleIndex := rfl
+
+example (alg : Algebra α) (env : SigEnv α) :
+    denoteNode alg env .tileSampleIndex (fun _ _ _ => .ok env.sampleIndex) =
+      .ok env.tileSampleIndex := rfl
+
 def runTrustAudit : IO Bool := do
   let ledgerErrors := Tropical.Trust.auditLedger
   let reportPath := System.FilePath.mk "design/trust-boundary.md"
