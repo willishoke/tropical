@@ -1,4 +1,5 @@
 import Tropical.Semantics.PlanWellFormed
+import Tropical.Ir.Stage0PlanLaws
 
 /-!
 # Focused Plan-semantics fixtures
@@ -299,6 +300,13 @@ private def balancedPlan : FlatPlan := {
 
 example : InstanceRegionsBalanced balancedPlan balancedPlan.instanceFunctions[0] :=
   planWellFormed_regions_balanced (by native_decide) 0 (by decide)
+
+example : Tropical.Ir.Stage0PlanLaws.execCollectedBlocks
+      fixtureAlgebra stereoInputs stereoState
+      (Tropical.Ir.Stage0.collectBlocks balancedRoot) =
+    execInstanceFunction fixtureAlgebra stereoInputs stereoState balancedRoot :=
+  Tropical.Ir.Stage0PlanLaws.collectBlocks_agrees_with_execution_order
+    fixtureAlgebra stereoInputs stereoState balancedRoot
 
 example : ¬FlatPlanWellFormed {
     stereoPlan with
