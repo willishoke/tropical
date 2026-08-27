@@ -81,8 +81,21 @@ theorem denoteFlatPlan_via_state (alg : Algebra α)
     denoteFlatPlan alg sampleInputs plan = (do
       let state ← runPlanState alg sampleInputs plan
       denoteSinks alg plan state) := by
-  unfold denoteFlatPlan runPlanState
-  cases hi : initialPlanState alg sampleInputs plan <;> rfl
+  unfold denoteFlatPlan observeFlatPlan runPlanState
+  cases hi : initialPlanState alg sampleInputs plan with
+  | error refusal => rfl
+  | ok initial =>
+    cases he : execPlanFunctions alg sampleInputs initial plan with
+    | error refusal =>
+      simp only [bind, Except.bind, Except.map]
+      rw [he]
+    | ok state =>
+      cases hs : denoteSinks alg plan state <;>
+        simp only [bind, Except.bind, Except.map] <;>
+        rw [he] <;>
+        simp only <;>
+        rw [hs] <;>
+        simp only [pure, Except.pure]
 
 theorem denoteStaged_via_state (alg : Algebra α)
     (controlInputs sampleInputs : PlanInputs α) (split : Split) :
