@@ -47,6 +47,61 @@ def denoteStaged (alg : Algebra α) (controlInputs sampleInputs : PlanInputs α)
       (publishCoefficientImage split.audio sampleInputs coefficientState)
       split.audio
 
+/-- Execute the same publication protocol up to its final audio state, before
+    observing any sinks.  This isolates instruction-state simulation from the
+    independent stereo/multi-sink observation layer. -/
+def runStagedState (alg : Algebra α)
+    (controlInputs sampleInputs : PlanInputs α) (split : Split) :
+    Outcome (PlanState α) :=
+  match split.coeff? with
+  | none => runPlanState alg sampleInputs split.audio
+  | some coefficient => do
+    let coefficientState ← runPlanState alg controlInputs coefficient
+    runPlanState alg
+      (publishCoefficientImage split.audio sampleInputs coefficientState)
+      split.audio
+
+/-- The exact remaining simulation obligation for a nontrivial Stage0 split:
+    coefficient execution followed by atomic-image publication reaches the
+    same completed Plan state as direct execution.  It is deliberately a state
+    relation, not the sink-image conclusion restated as a premise. -/
+def StatePublicationRefines (alg : Algebra α)
+    (controlInputs sampleInputs : PlanInputs α) (plan : FlatPlan)
+    (split : Split) : Prop :=
+  runStagedState alg controlInputs sampleInputs split =
+    runPlanState alg sampleInputs plan
+
+private theorem outcome_bind_assoc (x : Outcome α) (f : α → Outcome β)
+    (g : β → Outcome γ) :
+    (x.bind f).bind g = x.bind fun value => (f value).bind g := by
+  cases x <;> rfl
+
+theorem denoteFlatPlan_via_state (alg : Algebra α)
+    (sampleInputs : PlanInputs α) (plan : FlatPlan) :
+    denoteFlatPlan alg sampleInputs plan = (do
+      let state ← runPlanState alg sampleInputs plan
+      denoteSinks alg plan state) := by
+  unfold denoteFlatPlan runPlanState
+  cases hi : initialPlanState alg sampleInputs plan <;> rfl
+
+theorem denoteStaged_via_state (alg : Algebra α)
+    (controlInputs sampleInputs : PlanInputs α) (split : Split) :
+    denoteStaged alg controlInputs sampleInputs split = (do
+      let state ← runStagedState alg controlInputs sampleInputs split
+      denoteSinks alg split.audio state) := by
+  cases h : split.coeff? with
+  | none =>
+    simp [denoteStaged, runStagedState, h, denoteFlatPlan_via_state]
+  | some coefficient =>
+    rw [denoteStaged, h, denoteFlatPlan_via_state]
+    simp only [runStagedState, h]
+    simp only [denoteFlatPlan_via_state]
+    exact (outcome_bind_assoc (runPlanState alg controlInputs coefficient)
+      (fun coefficientState => runPlanState alg
+        (publishCoefficientImage split.audio sampleInputs coefficientState)
+        split.audio)
+      (denoteSinks alg split.audio)).symm
+
 theorem hoistTyped_refuses_misaligned (plan : FlatPlan)
     (stageBlocks : Array (Array (Option Stage)))
     (h : typedStagesAligned (collectPlanBlocks plan) stageBlocks = false) :
@@ -93,5 +148,33 @@ theorem hoistTyped_refines_no_selection (alg : Algebra α)
     at hsplit
   cases hsplit
   rfl
+
+/-- Full observable refinement for any successful, including nontrivial,
+    typed split once the explicit coefficient-publication state simulation is
+    discharged.  `hoistTyped` itself supplies the orthogonal interface fact:
+    every original sink and output channel survives, so independent stereo and
+    wider layouts are observed without collapsing them into one sink. -/
+theorem hoistTyped_refines_of_state_publication (alg : Algebra α)
+    (controlInputs sampleInputs : PlanInputs α) (plan : FlatPlan)
+    (stageBlocks : Array (Array (Option Stage))) (split : Split)
+    (hsplit : hoistTyped plan stageBlocks = .ok split)
+    (hpublication : StatePublicationRefines alg controlInputs sampleInputs
+      plan split) :
+    denoteStaged alg controlInputs sampleInputs split =
+      denoteFlatPlan alg sampleInputs plan := by
+  have hinterface := hoistTyped_preserves_audio_interface
+    plan stageBlocks split hsplit
+  have hlayout : split.audio.outputLayoutWellFormed =
+      plan.outputLayoutWellFormed := by
+    unfold FlatPlan.outputLayoutWellFormed
+    rw [hinterface.1, hinterface.2.1]
+  have hobserve (state : PlanState α) :
+      denoteSinks alg split.audio state = denoteSinks alg plan state := by
+    unfold denoteSinks
+    rw [hlayout, hinterface.1, hinterface.2.1]
+  rw [denoteStaged_via_state, denoteFlatPlan_via_state]
+  unfold StatePublicationRefines at hpublication
+  rw [hpublication]
+  simp only [hobserve]
 
 end Tropical.Ir.Stage0
