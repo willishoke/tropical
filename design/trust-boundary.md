@@ -47,6 +47,71 @@ For every carrier algebra and environment, extending a well-formed ExprArena pre
 - Gates: `lake-build:Tropical.Semantics`, `semantics-production-fixtures`
 - Limitation: The production compiler authors ExprIds directly, so there is no source-tree lowering refinement obligation. Backend execution remains separate.
 
+## TO_RESOLVED_PRESERVES_PROGRAM_DENOTATION
+
+Every successful reachable EArena.toResolved conversion preserves recursive source-program denotation in the returned CoreProgram for every supported carrier and invocation.
+
+- Status: proved
+- Priority: critical
+- Owner: Lean semantics
+- Evidence: theorem
+- Formal symbol: `Tropical.Semantics.toResolved_preserves_denotation`
+- Implementation: `lean/Tropical/Ir/Strata/EArena.lean`, `lean/Tropical/Semantics/Program.lean`, `lean/Tropical/Semantics/Strata.lean`
+- Gates: `lake-build:Tropical.Semantics`
+- Limitation: The theorem covers the reachable source-to-Core strata exit, including recursive instances and refusal behavior. CoreProgram-to-FlatPlan compilation and backend execution remain separate obligations.
+
+## STAGE_SIGNATURE_CLASSIFICATION_IS_CONSERVATIVE
+
+For every generated well-formed expression DAG, an intern-time StageSig upper bound guarantees equal direct denotation in environments that agree through that stage.
+
+- Status: proved
+- Priority: critical
+- Owner: Staging semantics
+- Evidence: theorem
+- Formal symbol: `Tropical.Semantics.Staging.stageSig_sound`
+- Implementation: `lean/Tropical/Semantics/Staging.lean`
+- Gates: `lake-build:Tropical.Proofs`
+- Limitation: This proves value-level noninterference for generated signatures, including independent sample and tile coordinates. Moving Plan instructions and publishing coefficient or endpoint state are separate refinement obligations.
+
+## SHIFT_SAMPLE_INDEX_PRESERVES_DENOTATION
+
+For a successful production shiftSampleIndex run, every returned root preserves its source denotation when the environments agree outside sampleIndex and the replacement tile clock plus frame offset equals the source sample coordinate.
+
+- Status: proved
+- Priority: critical
+- Owner: Staging semantics
+- Evidence: theorem
+- Formal symbol: `Tropical.Semantics.shiftSampleIndex_denotes`
+- Implementation: `lean/Tropical/Semantics/ShiftSampleIndex.lean`, `lean/Tropical/Testing/ShiftSampleIndex.lean`
+- Gates: `lake-build:Tropical.Proofs`
+- Limitation: The theorem covers arrays, banks, routed sums, shared DAG nodes, frame zero and nonzero offsets, and preserves pre-existing tileSampleIndex and tilePhase leaves. It is an exact direct-expression theorem, not an interpolation or backend-execution theorem.
+
+## STAGE0_TYPED_SPLIT_REFINES_PLAN
+
+Every successful nontrivial typed Stage0 split reaches the same final Plan observation as direct execution under the documented coefficient-publication protocol.
+
+- Status: open
+- Priority: critical
+- Owner: Staging semantics
+- Evidence: theorem, executable gate, inspection
+- Formal symbol: none
+- Implementation: `lean/Tropical/Ir/Stage0.lean`, `lean/Tropical/Ir/Stage0Laws.lean`, `lean/Tropical/Testing/StagingLaws.lean`
+- Gates: `lake-build:Tropical.Proofs`, `patch-goldens`, `manual:Stage0 publication simulation review`
+- Limitation: Tropical.Ir.Stage0.hoistTyped_refines_of_state_publication proves the observation conclusion only from an explicit StatePublicationRefines premise. Alignment refusal, identity, and multichannel interface preservation are proved, but the actual nontrivial rewrite has not yet been shown to establish the final-state relation.
+
+## TILE_STAGE_LEFT_ENDPOINT_REFINES_EXACT
+
+Every successful admitted TileStage split reaches the unsplit exact/JIT Plan observation at the left endpoint after publishing its materialized endpoint image.
+
+- Status: open
+- Priority: critical
+- Owner: Staging semantics
+- Evidence: theorem, numeric tolerance, differential, inspection
+- Formal symbol: none
+- Implementation: `lean/Tropical/Ir/TileStage.lean`, `lean/Tropical/Ir/TileStageLaws.lean`, `lean/Tropical/Testing/StagingLaws.lean`, `tests/web/metal_vs_jit.test.ts`
+- Gates: `lake-build:Tropical.Proofs`, `metal-vs-jit`, `manual:TileStage endpoint simulation review`
+- Limitation: Tropical.Ir.TileStage.split_refines_of_endpoint_publication proves the exact observation conclusion only from EndpointPublicationRefines. No-root identity and multichannel interface preservation are proved; dependency-slice/shared-scalar simulation and the nontrivial endpoint state relation remain open. Full-tile interpolation stays tolerance-backed and hardware-dependent.
+
 ## CLOCK_RAIL_IS_EXACT
 
 Per sample, runtime integer rail operations implement the Int denotation modulo the documented i64 image and shift/mask headroom rules.
@@ -56,9 +121,9 @@ Per sample, runtime integer rail operations implement the Int denotation modulo 
 - Owner: Backend correctness
 - Evidence: theorem, inspection, golden
 - Formal symbol: none
-- Implementation: `lean/Tropical/EmitArrow/ClockAlgebra.lean`, `lean/Tropical/Ir/EmitLlvm.lean`, `lean/Tropical/Ir/EmitMsl.lean`
-- Gates: `clock-algebra-theorems`, `patch-goldens`
-- Limitation: The front-end algebra is proved directly on frozen ExprArena/ExprId graphs. Correspondence to emitted LLVM/MSL integer execution is inspected, not proved.
+- Implementation: `lean/Tropical/EmitArrow/ClockAlgebra.lean`, `lean/Tropical/EmitArrow/ClockPlanLaws.lean`, `lean/Tropical/Semantics/Plan.lean`, `lean/Tropical/Ir/EmitLlvm.lean`, `lean/Tropical/Ir/EmitMsl.lean`
+- Gates: `lake-build:Tropical.Proofs`, `clock-algebra-theorems`, `patch-goldens`
+- Limitation: Tropical.EmitArrow.compileClockRail_refines projects an assumed CompileResultRefinesScalar witness; it does not establish constructor compilation. The arena-native identities, signed-i64 image laws, and declared tick/tileTick source lookup are proved, while whole compileNode constructor closure and correspondence from Plan execution to emitted LLVM/MSL integer execution remain open.
 
 ## REDUCE_REGION_EXECUTES_IN_ARRAY_ORDER
 
@@ -69,9 +134,9 @@ JIT, wasm, and MSL execute bank bodies at increasing indices with a scalar left 
 - Owner: Backend correctness
 - Evidence: theorem, executable gate, inspection
 - Formal symbol: none
-- Implementation: `lean/Tropical/EmitArrow/BankOrder.lean`, `lean/Tropical/Semantics/Expr.lean`, `lean/Tropical/Ir/EmitBankLaws.lean`, `engine/jit/OrcJitEngine.cpp`, `lean/Tropical/Ir/EmitMsl.lean`
-- Gates: `reduce-coverage`, `msl-column-guard`, `manual:backend reduce-loop inspection`
-- Limitation: Direct arena denotation order, nested fold order, region shape, and prefix clamp are proved; backend execution of the region remains a named runtime assumption.
+- Implementation: `lean/Tropical/EmitArrow/BankOrder.lean`, `lean/Tropical/Semantics/Expr.lean`, `lean/Tropical/Semantics/Plan.lean`, `lean/Tropical/Ir/EmitBankLaws.lean`, `lean/Tropical/Ir/BankPlanLaws.lean`, `engine/jit/OrcJitEngine.cpp`, `lean/Tropical/Ir/EmitMsl.lean`
+- Gates: `lake-build:Tropical.Proofs`, `reduce-coverage`, `msl-column-guard`, `manual:backend reduce-loop inspection`
+- Limitation: Tropical.Ir.Emit.denoteExpr_bank_authored_order proves direct source order. Separately, Tropical.Ir.Emit.compileBankSum_execReductionRegion connects a successful stream to execReductionRegion only when recursive body compilation supplies delimiter balance, prefix closure, and freshness. Composition with source denotation, the universal compileNode invariant, and Plan-to-JIT/wasm/MSL execution refinement remain open.
 
 ## ROUTED_SUM_PRESERVES_AUTHORED_ORDER
 
@@ -82,9 +147,9 @@ Routed reductions map each item once and fold active contributions per output in
 - Owner: Backend correctness
 - Evidence: theorem, executable gate, inspection
 - Formal symbol: none
-- Implementation: `lean/Tropical/Semantics/Environment.lean`, `lean/Tropical/Semantics/Expr.lean`, `lean/Tropical/Ir/EmitLlvm.lean`, `lean/Tropical/Ir/EmitMsl.lean`, `engine/metal/MetalKernel.mm`
-- Gates: `routed-sum-coverage`, `metal-ctest`, `manual:routed backend inspection`
-- Limitation: Direct arena semantics proves authored fold order and scalar/cooperative schedules are differentially exercised; LLVM, Metal compiler, driver, and hardware execution remain external refinement assumptions.
+- Implementation: `lean/Tropical/Semantics/Environment.lean`, `lean/Tropical/Semantics/Expr.lean`, `lean/Tropical/Semantics/Plan.lean`, `lean/Tropical/Ir/RoutedSumLaws.lean`, `lean/Tropical/Ir/EmitLlvm.lean`, `lean/Tropical/Ir/EmitMsl.lean`, `engine/metal/MetalKernel.mm`
+- Gates: `lake-build:Tropical.Proofs`, `routed-sum-coverage`, `metal-ctest`, `manual:routed backend inspection`
+- Limitation: Tropical.Ir.Emit.denoteExpr_routed_authored_order proves direct authored item/emit order. Separately, Tropical.Ir.Emit.compileRoutedSum_execRoutedRegion connects a successful stream to execRoutedRegion only when recursive mapped-value compilation supplies routed-depth safety, prefix closure, and freshness. Composition with source denotation and the universal compileNode discharge remain open; LLVM, Metal compiler, driver, and hardware execution remain external refinement assumptions.
 
 ## LLVM_TEXT_EXECUTES_PLAN
 
@@ -119,11 +184,11 @@ Plan sinks publish independent logical channels and native, wasm, and Metal kern
 - Status: evidence-backed
 - Priority: critical
 - Owner: Audio output
-- Evidence: executable gate, inspection
+- Evidence: theorem, executable gate, inspection
 - Formal symbol: none
-- Implementation: `design/stereo-output-contract.md`, `lean/Tropical/Plan.lean`, `lean/Tropical/PlanDecode.lean`, `lean/Tropical/Ir/EmitLlvm.lean`, `lean/Tropical/Ir/EmitMsl.lean`, `engine/runtime/FlatRuntime.cpp`, `engine/dac/TropicalDAC.hpp`, `web/worklet/processor.ts`
+- Implementation: `design/stereo-output-contract.md`, `lean/Tropical/Plan.lean`, `lean/Tropical/PlanDecode.lean`, `lean/Tropical/Semantics/Plan.lean`, `lean/Tropical/Ir/EmitLlvm.lean`, `lean/Tropical/Ir/EmitMsl.lean`, `engine/runtime/FlatRuntime.cpp`, `engine/dac/TropicalDAC.hpp`, `web/worklet/processor.ts`
 - Gates: `runtime-multichannel`, `current_module_process`, `metal-ctest`, `manual:device channel-layout review`
-- Limitation: Schema validation and native/web/Metal mappings have executable coverage. Plan reference semantics, backend refinement, physical device negotiation, callback deadlines, and the fixed-width live Metal queue boundary remain separate obligations.
+- Limitation: The Plan reference semantics and layout validation are machine checked, and native/web/Metal mappings have executable coverage. Backend refinement, physical device negotiation, callback deadlines, and the fixed-width live Metal queue boundary remain host/runtime obligations.
 
 ## METAL_CALLBACK_CONSUMES_PREPARED_EPOCHS
 
