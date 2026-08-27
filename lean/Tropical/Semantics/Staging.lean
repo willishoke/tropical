@@ -763,11 +763,11 @@ theorem StageSigLe.resolve_mono {a b : StageSig} (h : StageSigLe a b)
 
 /-- Semantic environment agreement through one binding time.  Rate and open
     loop binders are structural/fold inputs.  Control parameters become fixed
-    at `s0`; the sample clock only becomes fixed at `s1`.  Symbolic input and
-    nested-output dependencies agree exactly when their resolved stage is no
-    later than the requested boundary.  Agreement is phrased through the
-    production lookup operations, preserving refusal behavior as well as
-    successful values. -/
+    at `s0`; the ordinary and tile sample clocks independently become fixed at
+    `s1`.  Symbolic input and nested-output dependencies agree exactly when
+    their resolved stage is no later than the requested boundary.  Agreement
+    is phrased through the production lookup operations, preserving refusal
+    behavior as well as successful values. -/
 def EnvAgreesThrough (stage : Stage) (ctx : StageCtx)
     (a b : SigEnv α) : Prop :=
   a.sampleRate = b.sampleRate ∧
@@ -776,6 +776,7 @@ def EnvAgreesThrough (stage : Stage) (ctx : StageCtx)
     ∀ i, lookupValue "paramRef" a.params i =
       lookupValue "paramRef" b.params i) ∧
   (Stage.s1.le stage = true → a.sampleIndex = b.sampleIndex) ∧
+  (Stage.s1.le stage = true → a.tileSampleIndex = b.tileSampleIndex) ∧
   (∀ i, (ctx.inputStages[i]?.getD Stage.s1).le stage = true →
     lookupValue "inputRef" a.inputs i =
       lookupValue "inputRef" b.inputs i) ∧
@@ -803,18 +804,24 @@ theorem EnvAgreesThrough.sampleIndex {stage : Stage} {ctx : StageCtx}
     (hstage : Stage.s1.le stage = true) : a.sampleIndex = b.sampleIndex :=
   h.2.2.2.1 hstage
 
+theorem EnvAgreesThrough.tileSampleIndex {stage : Stage} {ctx : StageCtx}
+    {a b : SigEnv α} (h : EnvAgreesThrough stage ctx a b)
+    (hstage : Stage.s1.le stage = true) :
+    a.tileSampleIndex = b.tileSampleIndex :=
+  h.2.2.2.2.1 hstage
+
 theorem EnvAgreesThrough.input {stage : Stage} {ctx : StageCtx}
     {a b : SigEnv α} (h : EnvAgreesThrough stage ctx a b) (i : Nat)
     (hstage : (ctx.inputStages[i]?.getD Stage.s1).le stage = true) :
     lookupValue "inputRef" a.inputs i = lookupValue "inputRef" b.inputs i :=
-  h.2.2.2.2.1 i hstage
+  h.2.2.2.2.2.1 i hstage
 
 theorem EnvAgreesThrough.nested {stage : Stage} {ctx : StageCtx}
     {a b : SigEnv α} (h : EnvAgreesThrough stage ctx a b)
     (instanceIdx outputIdx : Nat)
     (hstage : (childStage ctx instanceIdx outputIdx).le stage = true) :
     lookupNested a instanceIdx outputIdx = lookupNested b instanceIdx outputIdx :=
-  h.2.2.2.2.2 instanceIdx outputIdx hstage
+  h.2.2.2.2.2.2 instanceIdx outputIdx hstage
 
 theorem EnvAgreesThrough.bindLoop {stage : Stage} {ctx : StageCtx}
     {a b : SigEnv α} (h : EnvAgreesThrough stage ctx a b)
@@ -822,7 +829,7 @@ theorem EnvAgreesThrough.bindLoop {stage : Stage} {ctx : StageCtx}
     EnvAgreesThrough stage ctx (a.bindLoop binderId value)
       (b.bindLoop binderId value) := by
   refine ⟨h.sampleRate, ?_, h.2.2.1, h.2.2.2.1,
-    h.2.2.2.2.1, h.2.2.2.2.2⟩
+    h.2.2.2.2.1, h.2.2.2.2.2.1, h.2.2.2.2.2.2⟩
   funext query
   simp only [SigEnv.bindLoop]
   split
@@ -931,7 +938,7 @@ theorem stageSig_sound {arena : ExprArena} (hSound : SignaturesSound arena)
     exact congrArg Except.ok (hEnv.sampleIndex
       (stage_le_trans (resolve_base_le ctx parentSig) hParentResolve))
   | tileSampleIndex =>
-    exact congrArg Except.ok (hEnv.sampleIndex
+    exact congrArg Except.ok (hEnv.tileSampleIndex
       (stage_le_trans (resolve_base_le ctx parentSig) hParentResolve))
   | tilePhase => rfl
   | loopIdx binderId =>
@@ -1138,7 +1145,7 @@ theorem stageSig_sound_tileSampleIndex (alg : Algebra α) (ctx : StageCtx)
     denoteExpr alg a arena hArena id = denoteExpr alg b arena hArena id := by
   rw [denoteExpr_of_deref alg a arena hArena hDeref,
     denoteExpr_of_deref alg b arena hArena hDeref]
-  exact congrArg Except.ok (henv.sampleIndex hstage)
+  exact congrArg Except.ok (henv.tileSampleIndex hstage)
 
 theorem stageSig_sound_tilePhase (alg : Algebra α) (ctx : StageCtx)
     (a b : SigEnv α) (arena : ExprArena) (hArena : ArenaWellFormed arena)
@@ -1149,13 +1156,14 @@ theorem stageSig_sound_tilePhase (alg : Algebra α) (ctx : StageCtx)
     denoteExpr_of_deref alg b arena hArena hDeref]
   rfl
 
-/-- The absolute tile clock has exactly the same direct denotation as the
-    ordinary sample clock.  TileStage changes the leaf used by a rebuilt DAG,
-    not the coordinate carried by the exact environment. -/
+/-- The absolute tile clock reads its independent semantic environment rail.
+    Ordinary exact/JIT callers may bind it equal to `sampleIndex`, while a
+    materializer may supply an endpoint coordinate without changing the audio
+    carrier clock. -/
 theorem denoteExpr_tileSampleIndex (alg : Algebra α) (env : SigEnv α)
     (arena : ExprArena) (hArena : ArenaWellFormed arena) {id : ExprId}
     (hDeref : arena.deref id = some .tileSampleIndex) :
-    denoteExpr alg env arena hArena id = .ok env.sampleIndex := by
+    denoteExpr alg env arena hArena id = .ok env.tileSampleIndex := by
   rw [denoteExpr_of_deref alg env arena hArena hDeref]
   rfl
 
