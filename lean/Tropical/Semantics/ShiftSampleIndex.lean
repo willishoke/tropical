@@ -562,6 +562,130 @@ theorem AgreesOutsideSampleIndex.bindLoop
   constructor <;> simp [SigEnv.bindLoop, h.inputs, h.params,
     h.nestedOutputs, h.sampleRate, h.tileSampleIndex, h.loops]
 
+/-- Carrier-parametric value of the replacement absolute clock. -/
+def shiftedSampleResult (alg : Algebra α) (tileSampleIndex : Value α) :
+    Nat → Result α
+  | 0 => .ok tileSampleIndex
+  | frames@(_ + 1) =>
+    applyBinary alg .add (.ok tileSampleIndex)
+      (match alg.literal ⟨Int.ofNat frames, 0⟩ with
+      | .error error => .error error
+      | .ok value => alg.unary .toInt value)
+
+theorem shiftedSampleResult_congr (alg : Algebra α) {a b : Value α}
+    (h : a = b) (frames : Nat) :
+    shiftedSampleResult alg a frames = shiftedSampleResult alg b frames := by
+  subst b
+  rfl
+
+/-- The concrete replacement DAG denotes `tileSampleIndex + frames`, with the
+    exact literal/conversion/addition behavior supplied by `alg`. -/
+theorem buildShiftedTick_denotes {before after : Builder}
+    {frames : Nat} {shiftedTick : ExprId}
+    (hBefore : BuilderWellFormed before) (hAfter : BuilderWellFormed after)
+    (hRun : (buildShiftedTick frames).run before =
+      .ok (shiftedTick, after)) (alg : Algebra α) (env : SigEnv α) :
+    denoteExpr alg env after.exprs hAfter.arena shiftedTick =
+      shiftedSampleResult alg env.tileSampleIndex frames := by
+  cases frames with
+  | zero =>
+    have hChildren : ENodeChildrenIn before.exprs .tileSampleIndex := by
+      simp [ENodeChildrenIn, ENode.children]
+    have hDeref := internSig_deref_of_run hBefore hChildren hRun
+    rw [denoteExpr_of_deref alg env after.exprs hAfter.arena hDeref]
+    rfl
+  | succ offset =>
+    rw [show buildShiftedTick (offset + 1) = (do
+      let rawTick ← internSig .tileSampleIndex
+      addFrameOffset rawTick (offset + 1)) from rfl] at hRun
+    rw [StateT.run_bind] at hRun
+    generalize hRawRun :
+      (internSig .tileSampleIndex).run before = rawResult at hRun
+    cases rawResult with
+    | error message =>
+      change Except.error message = Except.ok (shiftedTick, after) at hRun
+      contradiction
+    | ok pair =>
+      rcases pair with ⟨rawTick, rawBuilder⟩
+      change (addFrameOffset rawTick (offset + 1)).run rawBuilder =
+        .ok (shiftedTick, after) at hRun
+      rw [show addFrameOffset rawTick (offset + 1) = (do
+        let frameLiteral ← internSig
+          (.num ⟨Int.ofNat (offset + 1), 0⟩)
+        let frameInt ← internSig (.unary .toInt frameLiteral)
+        internSig (.binary .add rawTick frameInt)) from rfl] at hRun
+      rw [StateT.run_bind] at hRun
+      generalize hLiteralRun :
+        (internSig (.num ⟨Int.ofNat (offset + 1), 0⟩)).run rawBuilder =
+          literalResult at hRun
+      cases literalResult with
+      | error message =>
+        change Except.error message = Except.ok (shiftedTick, after) at hRun
+        contradiction
+      | ok pair =>
+        rcases pair with ⟨frameLiteral, literalBuilder⟩
+        change (do
+          let frameInt ← internSig (.unary .toInt frameLiteral)
+          internSig (.binary .add rawTick frameInt)).run literalBuilder =
+            .ok (shiftedTick, after) at hRun
+        rw [StateT.run_bind] at hRun
+        generalize hIntRun :
+          (internSig (.unary .toInt frameLiteral)).run literalBuilder =
+            intResult at hRun
+        cases intResult with
+        | error message =>
+          change Except.error message = Except.ok (shiftedTick, after) at hRun
+          contradiction
+        | ok pair =>
+          rcases pair with ⟨frameInt, intBuilder⟩
+          change (internSig (.binary .add rawTick frameInt)).run intBuilder =
+            .ok (shiftedTick, after) at hRun
+          have hRawChildren : ENodeChildrenIn before.exprs .tileSampleIndex := by
+            simp [ENodeChildrenIn, ENode.children]
+          have hRawPres := internSig_preserves_of_children hBefore hRawChildren
+          rw [hRawRun] at hRawPres
+          have hRawDeref := internSig_deref_of_run hBefore hRawChildren hRawRun
+          have hLiteralChildren : ENodeChildrenIn rawBuilder.exprs
+              (.num ⟨Int.ofNat (offset + 1), 0⟩) := by
+            simp [ENodeChildrenIn, ENode.children]
+          have hLiteralPres := internSig_preserves_of_children
+            hRawPres.1 hLiteralChildren
+          rw [hLiteralRun] at hLiteralPres
+          have hLiteralDeref := internSig_deref_of_run hRawPres.1
+            hLiteralChildren hLiteralRun
+          have hIntChildren : ENodeChildrenIn literalBuilder.exprs
+              (.unary .toInt frameLiteral) := by
+            simpa [ENodeChildrenIn, ENode.children, SigIn] using
+              hLiteralPres.2.2
+          have hIntPres := internSig_preserves_of_children
+            hLiteralPres.1 hIntChildren
+          rw [hIntRun] at hIntPres
+          have hIntDeref := internSig_deref_of_run hLiteralPres.1
+            hIntChildren hIntRun
+          have hRawInt : SigIn intBuilder rawTick :=
+            hIntPres.2.1.sigIn (hLiteralPres.2.1.sigIn hRawPres.2.2)
+          have hBinaryChildren : ENodeChildrenIn intBuilder.exprs
+              (.binary .add rawTick frameInt) := by
+            simpa [ENodeChildrenIn, ENode.children, SigIn] using
+              And.intro hRawInt hIntPres.2.2
+          have hBinaryPres := internSig_preserves_of_children
+            hIntPres.1 hBinaryChildren
+          rw [hRun] at hBinaryPres
+          have hRootDeref := internSig_deref_of_run hIntPres.1
+            hBinaryChildren hRun
+          have hRawFinal := hBinaryPres.2.1.exprs
+            (hIntPres.2.1.exprs (hLiteralPres.2.1.exprs hRawDeref))
+          have hLiteralFinal := hBinaryPres.2.1.exprs
+            (hIntPres.2.1.exprs hLiteralDeref)
+          have hIntFinal := hBinaryPres.2.1.exprs hIntDeref
+          rw [denoteExpr_of_deref alg env after.exprs hAfter.arena hRootDeref]
+          simp only [denoteNode]
+          rw [denoteExpr_of_deref alg env after.exprs hAfter.arena hRawFinal,
+            denoteExpr_of_deref alg env after.exprs hAfter.arena hIntFinal]
+          simp only [denoteNode]
+          rw [denoteExpr_of_deref alg env after.exprs hAfter.arena hLiteralFinal]
+          rfl
+
 /-- The semantic substitution theorem for an explicit recursive copy.
 
 `hTick` is the precise, carrier-parametric statement of `t + frames`: the
@@ -745,5 +869,61 @@ theorem denoteExpr_shiftCopy {before after : ExprArena}
 termination_by root.idx
 decreasing_by
   exact hBefore.childrenDescend hRoot child hMem
+
+/-- Every returned shifted root has exactly the source meaning at the shifted
+    coordinate. Pre-existing tile-clock and tile-phase leaves are preserved. -/
+theorem shiftSampleIndex_denotes {before after : Builder}
+    {roots shiftedRoots : Array ExprId} {frames : Nat}
+    (hBefore : BuilderWellFormed before) (hRoots : SigsIn before roots)
+    (hRun : (shiftSampleIndex roots frames).run before =
+      .ok (shiftedRoots, after)) (alg : Algebra α)
+    {source shifted : SigEnv α}
+    (hEnv : AgreesOutsideSampleIndex source shifted)
+    (hOffset : shiftedSampleResult alg shifted.tileSampleIndex frames =
+      .ok source.sampleIndex) :
+    ∀ (i : Nat) (root shiftedRoot : ExprId), roots[i]? = some root →
+      shiftedRoots[i]? = some shiftedRoot →
+      denoteExpr alg source before.exprs hBefore.arena root =
+        denoteExpr alg shifted after.exprs
+          (shiftSampleIndex_run_certificate hBefore hRoots hRun).after_wellFormed.arena
+          shiftedRoot := by
+  let cert := shiftSampleIndex_run_certificate hBefore hRoots hRun
+  intro i root shiftedRoot hRootGet hShiftedGet
+  have hRootInfo := Array.getElem?_eq_some_iff.mp hRootGet
+  have hRootMem : root ∈ roots :=
+    Array.mem_iff_getElem.mpr ⟨i, hRootInfo.1, hRootInfo.2⟩
+  have hRootOwned := hRoots root hRootMem
+  obtain ⟨rootNode, hRootDeref⟩ := deref_of_index_lt hRootOwned
+  have hShiftedEq : shiftedRoot = shiftedId cert.mapped root := by
+    rw [cert.shiftedRoots_eq] at hShiftedGet
+    have hi : i < roots.size := hRootInfo.1
+    rw [Array.getElem?_eq_getElem (by simpa using hi)] at hShiftedGet
+    have hEq := Option.some.inj hShiftedGet
+    simp only [Array.getElem_map] at hEq
+    rw [hRootInfo.2] at hEq
+    exact hEq.symm
+  subst shiftedRoot
+  obtain ⟨tickNode, hTickDeref⟩ :=
+    deref_of_index_lt cert.shiftedTick_owned
+  have hTick (tickEnv : SigEnv α)
+      (hTile : tickEnv.tileSampleIndex = shifted.tileSampleIndex) :
+      denoteExpr alg tickEnv after.exprs cert.after_wellFormed.arena
+          cert.shiftedTick = .ok source.sampleIndex := by
+    have hAtTick := buildShiftedTick_denotes hBefore
+      cert.afterTick_wellFormed cert.shiftedTick_run alg tickEnv
+    have hExtended := denoteExpr_extends cert.afterTick_wellFormed.arena
+      cert.after_wellFormed.arena cert.rebuild_extends.exprs alg tickEnv
+      hTickDeref
+    calc
+      denoteExpr alg tickEnv after.exprs cert.after_wellFormed.arena
+          cert.shiftedTick =
+          denoteExpr alg tickEnv cert.afterTick.exprs
+            cert.afterTick_wellFormed.arena cert.shiftedTick := hExtended.symm
+      _ = shiftedSampleResult alg tickEnv.tileSampleIndex frames := hAtTick
+      _ = shiftedSampleResult alg shifted.tileSampleIndex frames :=
+        shiftedSampleResult_congr alg hTile frames
+      _ = .ok source.sampleIndex := hOffset
+  exact denoteExpr_shiftCopy hBefore.arena cert.after_wellFormed.arena
+    cert.copy alg hEnv hTick hRootDeref
 
 end Tropical.Semantics
