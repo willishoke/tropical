@@ -264,6 +264,197 @@ theorem PrefixShiftCopy.transport {before : ExprArena}
   | tilePhase | loopIdx | bankSum | routedSum =>
     exact hNonSample (by simp)
 
+theorem deref_of_nodes_split {arena : ExprArena} {done rest : List ENode}
+    {node : ENode} (hSplit : arena.nodes.toList = done ++ node :: rest) :
+    arena.deref ⟨done.length⟩ = some node := by
+  rw [ExprArena.deref]
+  have hGet := congrArg (fun items : List ENode => items[done.length]?) hSplit
+  simpa using hGet
+
+/-- Add the just-rebuilt head to an already-certified mapping prefix. -/
+theorem PrefixShiftCopy.push {before : ExprArena}
+    {current after : Builder} {mapped : Array ExprId}
+    {shiftedTick newId : ExprId} {node : ENode}
+    (hBefore : ArenaWellFormed before)
+    (hPrefix : PrefixShiftCopy before current.exprs mapped shiftedTick)
+    (hExtends : BuilderExtends current after)
+    (hHeadDeref : before.deref ⟨mapped.size⟩ = some node)
+    (hHeadSample : node = .sampleIndex → newId = shiftedTick)
+    (hHeadOther : node ≠ .sampleIndex → after.exprs.deref newId =
+      some (remapShiftedNode (shiftedId mapped) node)) :
+    PrefixShiftCopy before after.exprs (mapped.push newId) shiftedTick := by
+  have hOld := hPrefix.transport hBefore hExtends
+    (MappingExtends.push mapped newId)
+  intro id actual hDeref hi
+  by_cases hlt : id.idx < mapped.size
+  · exact hOld id actual hDeref hlt
+  have heq : id.idx = mapped.size := by
+    simpa using (Nat.eq_of_lt_succ_of_not_lt (by simpa using hi) hlt)
+  have hId : id = ⟨mapped.size⟩ := by
+    cases id
+    simp_all
+  subst id
+  have hNode : actual = node :=
+    Option.some.inj (hDeref.symm.trans hHeadDeref)
+  subst actual
+  have hNewId : shiftedId (mapped.push newId) ⟨mapped.size⟩ = newId := by
+    simp [shiftedId]
+  have hRemap :
+      remapShiftedNode (shiftedId (mapped.push newId)) node =
+        remapShiftedNode (shiftedId mapped) node :=
+    remapShiftedNode_congr (by
+      intro child hChild
+      exact shiftedId_eq_of_mappingExtends (MappingExtends.push mapped newId)
+        (hBefore.childrenDescend hHeadDeref child hChild))
+  have hNonSample (hne : node ≠ .sampleIndex) :
+      after.exprs.deref (shiftedId (mapped.push newId) ⟨mapped.size⟩) =
+        some (remapShiftedNode (shiftedId (mapped.push newId)) node) := by
+    calc
+      after.exprs.deref (shiftedId (mapped.push newId) ⟨mapped.size⟩) =
+          after.exprs.deref newId := by rw [hNewId]
+      _ = some (remapShiftedNode (shiftedId mapped) node) := hHeadOther hne
+      _ = some (remapShiftedNode (shiftedId (mapped.push newId)) node) :=
+        congrArg some hRemap.symm
+  cases node with
+  | sampleIndex => simpa [hNewId] using hHeadSample rfl
+  | num | bool | arr | tileArray | binary | unary | clamp | select | arraySet
+  | index | inputRef | paramRef | nestedOut | sampleRate | tileSampleIndex
+  | tilePhase | loopIdx | bankSum | routedSum =>
+    exact hNonSample (by simp)
+
+/-- The recursive production walk preserves its starting mapping, certifies
+    every newly processed frozen node, and returns the expected mapping size. -/
+theorem rebuildShiftedNodes_prefix {original current : Builder}
+    {nodes done : List ENode} {shiftedTick : ExprId}
+    {mapped : Array ExprId}
+    (hOriginal : BuilderWellFormed original)
+    (hCurrent : BuilderWellFormed current)
+    (hExtends : BuilderExtends original current)
+    (hTick : SigIn current shiftedTick)
+    (hMapped : SigsIn current mapped)
+    (hSplit : original.exprs.nodes.toList = done ++ nodes)
+    (hSize : mapped.size = done.length)
+    (hPrefix : PrefixShiftCopy original.exprs current.exprs mapped shiftedTick) :
+    match (rebuildShiftedNodes nodes shiftedTick mapped).run current with
+    | .error _ => True
+    | .ok (result, after) =>
+      BuilderWellFormed after ∧ BuilderExtends current after ∧
+      SigsIn after result ∧ MappingExtends mapped result ∧
+      PrefixShiftCopy original.exprs after.exprs result shiftedTick ∧
+      result.size = mapped.size + nodes.length := by
+  induction nodes generalizing done current mapped with
+  | nil =>
+    exact ⟨hCurrent, BuilderExtends.refl current, hMapped,
+      MappingExtends.refl mapped, hPrefix, by simp⟩
+  | cons node rest ih =>
+    rw [show rebuildShiftedNodes (node :: rest) shiftedTick mapped =
+      rebuildShiftedNode mapped shiftedTick node >>= fun id =>
+        rebuildShiftedNodes rest shiftedTick (mapped.push id) from rfl]
+    rw [StateT.run_bind]
+    generalize hRunHead :
+      (rebuildShiftedNode mapped shiftedTick node).run current = runHead
+    cases runHead with
+    | error message => trivial
+    | ok pair =>
+      rcases pair with ⟨newId, middle⟩
+      have hHeadDeref : original.exprs.deref ⟨mapped.size⟩ = some node := by
+        rw [hSize]
+        exact deref_of_nodes_split hSplit
+      have hChildren : ENodeChildrenIn original.exprs node := by
+        intro child hChild
+        exact Nat.lt_trans
+          (hOriginal.arena.childrenDescend hHeadDeref child hChild)
+          (deref_index_lt hHeadDeref)
+      have hHeadPres := rebuildShiftedNode_preserves hCurrent hExtends hMapped
+        hTick hChildren
+      rw [hRunHead] at hHeadPres
+      have hHead := rebuildShiftedNode_image hCurrent hExtends hMapped
+        hTick hChildren hRunHead
+      have hOriginalMiddle := BuilderExtends.trans hExtends hHead.2.1
+      have hTickMiddle := hHead.2.1.sigIn hTick
+      have hMappedMiddle : SigsIn middle (mapped.push newId) := by
+        intro id hId
+        rw [Array.mem_push] at hId
+        rcases hId with hOld | rfl
+        · exact hHead.2.1.sigIn (hMapped id hOld)
+        · exact hHeadPres.2.2
+      have hHeadSample : node = .sampleIndex → newId = shiftedTick := by
+        intro hNode
+        subst node
+        simpa only using hHead.2.2
+      have hHeadOther : node ≠ .sampleIndex → middle.exprs.deref newId =
+          some (remapShiftedNode (shiftedId mapped) node) := by
+        intro hNode
+        cases node <;> try { exact (hNode rfl).elim } <;>
+          simpa only using hHead.2.2
+      have hPrefixMiddle : PrefixShiftCopy original.exprs middle.exprs
+          (mapped.push newId) shiftedTick :=
+        hPrefix.push hOriginal.arena hHead.2.1 hHeadDeref hHeadSample
+          hHeadOther
+      have hRestSplit : original.exprs.nodes.toList =
+          (done ++ [node]) ++ rest := by
+        simpa [List.append_assoc] using hSplit
+      have hRestSize : (mapped.push newId).size =
+          (done ++ [node]).length := by simp [hSize]
+      have hTail := ih hHead.1 hOriginalMiddle hTickMiddle
+        hMappedMiddle hRestSplit hRestSize hPrefixMiddle
+      change match
+          (rebuildShiftedNodes rest shiftedTick (mapped.push newId)).run middle with
+        | .error _ => True
+        | .ok (result, after) =>
+          BuilderWellFormed after ∧ BuilderExtends current after ∧
+          SigsIn after result ∧ MappingExtends mapped result ∧
+          PrefixShiftCopy original.exprs after.exprs result shiftedTick ∧
+          result.size = mapped.size + (node :: rest).length
+      generalize hRunTail :
+        (rebuildShiftedNodes rest shiftedTick (mapped.push newId)).run middle =
+          runTail at hTail ⊢
+      cases runTail with
+      | error message => trivial
+      | ok pair =>
+        rcases pair with ⟨result, after⟩
+        refine ⟨hTail.1, BuilderExtends.trans hHead.2.1 hTail.2.1,
+          hTail.2.2.1,
+          MappingExtends.trans (MappingExtends.push mapped newId)
+            hTail.2.2.2.1,
+          hTail.2.2.2.2.1, ?_⟩
+        simpa [Nat.add_assoc, Nat.add_comm, Nat.add_left_comm] using
+          hTail.2.2.2.2.2
+
+/-- A complete frozen-arena rebuild establishes the recursive copy relation. -/
+theorem rebuildShiftedNodes_shiftCopy {original current : Builder}
+    {shiftedTick : ExprId}
+    (hOriginal : BuilderWellFormed original)
+    (hCurrent : BuilderWellFormed current)
+    (hExtends : BuilderExtends original current)
+    (hTick : SigIn current shiftedTick) :
+    match (rebuildShiftedNodes original.exprs.nodes.toList shiftedTick).run
+        current with
+    | .error _ => True
+    | .ok (mapped, after) =>
+      BuilderWellFormed after ∧ BuilderExtends current after ∧
+      SigsIn after mapped ∧
+      ShiftCopy original.exprs after.exprs (shiftedId mapped) shiftedTick ∧
+      mapped.size = original.exprs.nodes.size := by
+  have hResult := rebuildShiftedNodes_prefix hOriginal hCurrent hExtends hTick
+    (mapped := #[]) (done := []) (nodes := original.exprs.nodes.toList)
+    (by simp [SigsIn]) (by simp) (by simp) (by
+      intro id node hDeref hi
+      simp at hi)
+  generalize hRun :
+    (rebuildShiftedNodes original.exprs.nodes.toList shiftedTick).run current =
+      result at hResult ⊢
+  cases result with
+  | error message => trivial
+  | ok pair =>
+    rcases pair with ⟨mapped, after⟩
+    refine ⟨hResult.1, hResult.2.1, hResult.2.2.1, ?_, ?_⟩
+    · intro id node hDeref
+      exact hResult.2.2.2.2.1 id node hDeref (by
+        rw [hResult.2.2.2.2.2]
+        simpa using deref_index_lt hDeref)
+    · simpa using hResult.2.2.2.2.2
+
 /-- Environments used on the two sides differ only at the sample coordinate.
     Keeping loop bindings in the relation is what makes the theorem apply
     recursively inside ordinary banks and routed banks. -/
