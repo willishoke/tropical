@@ -20,6 +20,36 @@ This initiative must correct one misleading phrase in the current code:
 `origin/main` contains no Stage0 semantic preservation theorem. Existing
 differential and render gates are valuable evidence, not that theorem.
 
+## Integrated result and explicit deviations — 2026-08-26
+
+The stage lattice, generated-signature shape/soundness, and carrier-generic
+classification noninterference are proved; the main symbol is
+`Tropical.Semantics.Staging.stageSig_sound`. Absolute-coordinate substitution
+is also proved by `Tropical.Semantics.shiftSampleIndex_denotes`, backed by the
+successful production-run certificate and `buildShiftedTick_denotes`.
+
+Stage0 now proves block alignment refusal, empty-selection identity, and
+preservation of arbitrary multichannel audio interfaces. Its strongest
+nontrivial observation theorem,
+`Tropical.Ir.Stage0.hoistTyped_refines_of_state_publication`, assumes
+`StatePublicationRefines`. Nothing yet derives that final-state relation from
+typed-stage soundness or the actual rewrite, so nontrivial order, freshness,
+boundary, and region simulation remain open.
+
+TileStage proves no-root identity and multichannel audio-interface
+preservation. Its strongest endpoint theorem,
+`Tropical.Ir.TileStage.split_refines_of_endpoint_publication`, assumes
+`EndpointPublicationRefines`. Nothing yet derives that relation from
+`TileStage.split`, `tilePhase = 0`, or the dependency-slice construction.
+Dependency-slice and shared-scalar semantic correctness, and therefore the
+unconditional exact-left-endpoint theorem, remain open. Full-tile polynomial
+interpolation remains numeric/tolerance evidence and is not claimed exact.
+
+Thus the deliverables and exit criteria below remain the target contract; the
+integrated result satisfies their structural, signature, shift-substitution,
+and interface-preservation portions, but not the two nontrivial publication
+simulations.
+
 ## Ground truth on the pinned baseline
 
 - `Stage` is `fold < s0 < s1`; `StageSig` contains a base stage plus sorted

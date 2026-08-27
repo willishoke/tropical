@@ -16,6 +16,35 @@ case of the general multichannel model. The frozen schema, authoring, kernel,
 host, and proof obligations are recorded in
 [`stereo-output-contract.md`](stereo-output-contract.md).
 
+## Integrated status — 2026-08-26
+
+W1–W3 are complete: Plan has combined pull/push reference observations and
+well-formedness laws, builder/program construction is certified, and
+`EArena.toResolved` preserves whole-program denotation. The independent
+`sampleIndex` and `tileSampleIndex` rails and the general multichannel sink
+model are also integrated.
+
+W4 is partially complete. `StageSig` noninterference and production
+`shiftSampleIndex` substitution are proved, including arrays, banks, routed
+sums, sharing, and a nonzero-frame production-shaped fixture. Nontrivial
+Stage0 observation refinement remains conditional on
+`StatePublicationRefines`; TileStage exact-left-endpoint refinement remains
+conditional on `EndpointPublicationRefines`. The current proofs do not derive
+those final-state simulations from the rewrites, nor prove TileStage's full
+dependency-slice/shared-scalar semantics. Full-tile interpolation remains
+tolerance-backed.
+
+W5 is partially complete. The source-order and emitted-region facts are real,
+named theorems, but the compiler-to-Plan bridges still assume whole-recursive
+certificates for `compileNode`. Clock constructor closure, delimiter balance,
+routed-depth safety, and composition of compiled operands/bodies with direct
+expression denotation remain open. The pipeline fixtures use independent
+hand-constructed Plans and are not production-compiler capstones.
+
+Accordingly M3 and the sprint Definition of Done remain open at precisely
+those W4/W5 seams; the integrated branch does not promote conditional fragment
+lemmas to unconditional source-to-Plan refinement claims.
+
 ## Initiative index
 
 | Worker | Initiative | Priority | Difficulty | Independent start | Integration dependency |
@@ -164,6 +193,12 @@ predicates or parallel Plan interpreters.
 - static/dynamic/nested bank source-to-Plan refinement;
 - routed authored-order source-to-Plan refinement.
 
+Integration result: the first two symbols exist unconditionally. Stage0 and
+TileStage expose conditional observation theorems under explicit publication
+state relations. Clock, bank, and routed expose conditional fragment bridges;
+their universal source-to-Plan closures remain targets rather than achieved
+milestones.
+
 ### M4 — qualification and trust accounting
 
 - Build every new theorem module and the `Tropical.Semantics` aggregate.
@@ -240,10 +275,12 @@ The sprint is complete when:
 - every current Plan instruction and source kind has reference semantics;
 - builder/program well-formedness is explicit at production assembly seams;
 - `toResolved` has whole-program denotation preservation;
-- Stage0 has semantic refinement and TileStage has a proved exact endpoint
-  contract without overstating interpolation accuracy;
-- clock, bank, and routed fragments reach Plan semantics through named
-  theorems;
+- Stage0's publication-state relation is derived for successful nontrivial
+  splits, and TileStage's endpoint-state relation plus dependency-slice and
+  shared-scalar semantics are derived without overstating interpolation
+  accuracy;
+- clock, bank, and routed fragments reach Plan semantics through unconditional
+  compiler-constructor theorems rather than assumed recursive certificates;
 - focused and full qualification gates pass;
 - trust-ledger changes cite real theorem symbols and preserve backend limits;
 - no worker's temporary compatibility layer, duplicate predicate, or proof

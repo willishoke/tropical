@@ -20,6 +20,33 @@ semantics for three high-value fragments:
 These are deliberately fragment capstones, not a premature theorem for the
 entire compiler.
 
+## Integrated result and explicit deviations — 2026-08-26
+
+The integrated clock theorem `compileClockRail_refines` consumes a
+`CompileResultRefinesScalar` witness whose fields already assume compilation
+and the desired operand evaluation. Constructor closure for `OnClockRail` and
+the whole `compileNode` recursion is still missing.
+
+For banks, `denoteExpr_bank_authored_order` proves direct authored-order
+semantics. Separately, `compileBankSum_execReductionRegion` connects a
+successful emitted stream to `execReductionRegion`, conditional on prefix
+closure, binder freshness, and
+`EmitsDelimiterBalanced (compileNode ... body)`. These facts are not yet
+composed into a universal source-to-Plan theorem.
+
+For routed sums, emission shape and nested refusal are proved, while
+`compileRoutedSum_execRoutedRegion` remains conditional on prefix closure,
+freshness, and `EmitsRoutedDepthSafe` for the recursively mapped traversal. It
+is not yet composed with `denoteExpr_routed_authored_order`.
+
+`Tropical.Testing.PipelineCapstones` provides independent hand-constructed
+Plan fixtures for static/live/nested banks and static/live routed behavior;
+they are not production-compiler capstones. Remaining work is the clock
+`CompileResultRefinesScalar` constructor closure, the two universal recursive
+stream invariants, and the relation from compiled operands/bodies to direct
+expression denotation. The deliverables and exit criteria below are therefore
+partially met, not complete.
+
 ## Ground truth on the pinned baseline
 
 ### Clock
@@ -227,4 +254,3 @@ cd lean && lake build Tropical.Testing.PipelineCapstones tropicaltest
   production emitter explicitly rejects.
 - Whole-compiler, LLVM, MSL, runtime, cache, and callback refinement are not in
   scope.
-
