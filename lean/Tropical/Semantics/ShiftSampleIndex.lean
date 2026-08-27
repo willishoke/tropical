@@ -162,6 +162,108 @@ theorem remapShiftedNode_congr {f g : ExprId → ExprId} {node : ENode}
     | none => rfl
     | some count => simp [h count (by simp [ENode.children])]
 
+theorem remapShiftedNode_children (mapId : ExprId → ExprId) (node : ENode) :
+    (remapShiftedNode mapId node).children = node.children.map mapId := by
+  have hOption (item : Option ExprId) :
+      (item.map mapId).toArray = item.toArray.map mapId := by
+    cases item <;> simp
+  cases node <;> simp [remapShiftedNode, ENode.children,
+    Array.map_append, Array.map_push, hOption]
+
+theorem internSig_deref_of_run {builder after : Builder} {node : ENode}
+    {id : ExprId} (hBuilder : BuilderWellFormed builder)
+    (hChildren : ENodeChildrenIn builder.exprs node)
+    (hRun : (internSig node).run builder = .ok (id, after)) :
+    after.exprs.deref id = some node := by
+  let result := (eintern node).run builder.exprs
+  have hIntern := eintern_preserves hBuilder.arena
+    (enodeChildrenIn_iff_childrenInPrefix.mp hChildren)
+  change ArenaWellFormed result.2 ∧ Extends builder.exprs result.2 ∧
+    result.2.deref result.1 = some node at hIntern
+  rw [internSig_run] at hRun
+  change Except.ok (result.1,
+    { builder with exprs := result.2 }) = Except.ok (id, after) at hRun
+  have hPair := Except.ok.inj hRun
+  have hId : result.1 = id := congrArg Prod.fst hPair
+  have hAfter : { builder with exprs := result.2 } = after :=
+    congrArg Prod.snd hPair
+  subst id
+  subst after
+  exact hIntern.2.2
+
+/-- One successful recursive rebuild returns the requested remapped node;
+    `sampleIndex` is the sole case that returns the existing shifted clock. -/
+theorem rebuildShiftedNode_image {original current after : Builder}
+    {mapped : Array ExprId} {shiftedTick id : ExprId} {node : ENode}
+    (hCurrent : BuilderWellFormed current)
+    (hExtends : BuilderExtends original current)
+    (hMapped : SigsIn current mapped)
+    (hTick : SigIn current shiftedTick)
+    (hChildren : ENodeChildrenIn original.exprs node)
+    (hRun : (rebuildShiftedNode mapped shiftedTick node).run current =
+      .ok (id, after)) :
+    BuilderWellFormed after ∧ BuilderExtends current after ∧
+      match node with
+      | .sampleIndex => id = shiftedTick
+      | node => after.exprs.deref id =
+          some (remapShiftedNode (shiftedId mapped) node) := by
+  have hPres := rebuildShiftedNode_preserves hCurrent hExtends hMapped
+    hTick hChildren
+  rw [hRun] at hPres
+  refine ⟨hPres.1, hPres.2.1, ?_⟩
+  have hRemapped : ENodeChildrenIn current.exprs
+      (remapShiftedNode (shiftedId mapped) node) := by
+    intro child hChild
+    rw [remapShiftedNode_children] at hChild
+    obtain ⟨oldChild, hOldChild, rfl⟩ := Array.mem_map.mp hChild
+    exact shiftedId_in hExtends hMapped (hChildren oldChild hOldChild)
+  cases node <;> simp only [rebuildShiftedNode, remapShiftedNode] at hRun ⊢
+  case sampleIndex =>
+    simpa using (congrArg Prod.fst (Except.ok.inj hRun)).symm
+  all_goals
+    exact internSig_deref_of_run hCurrent hRemapped hRun
+
+/-- Extending both the target arena and the accumulated mapping preserves every
+    already-certified image. -/
+theorem PrefixShiftCopy.transport {before : ExprArena}
+    {current after : Builder} {mapped result : Array ExprId}
+    {shiftedTick : ExprId} (hBefore : ArenaWellFormed before)
+    (hPrefix : PrefixShiftCopy before current.exprs mapped shiftedTick)
+    (hBuilderExtends : BuilderExtends current after)
+    (hMappingExtends : MappingExtends mapped result) :
+    ∀ id node, before.deref id = some node → id.idx < mapped.size →
+      match node with
+      | .sampleIndex => shiftedId result id = shiftedTick
+      | node => after.exprs.deref (shiftedId result id) =
+          some (remapShiftedNode (shiftedId result) node) := by
+  intro id node hDeref hi
+  have hOld := hPrefix id node hDeref hi
+  have hId := shiftedId_eq_of_mappingExtends hMappingExtends hi
+  have hNonSample (hne : node ≠ .sampleIndex) :
+      after.exprs.deref (shiftedId result id) =
+        some (remapShiftedNode (shiftedId result) node) := by
+    have hOld' : current.exprs.deref (shiftedId mapped id) =
+        some (remapShiftedNode (shiftedId mapped) node) := by
+      simpa [hne] using hOld
+    have hNode := remapShiftedNode_congr
+      (node := node) (f := shiftedId result) (g := shiftedId mapped) (by
+        intro child hChild
+        exact shiftedId_eq_of_mappingExtends hMappingExtends
+          (Nat.lt_trans (hBefore.childrenDescend hDeref child hChild) hi))
+    calc
+      after.exprs.deref (shiftedId result id) =
+          after.exprs.deref (shiftedId mapped id) := by rw [hId]
+      _ = some (remapShiftedNode (shiftedId mapped) node) :=
+        hBuilderExtends.exprs hOld'
+      _ = some (remapShiftedNode (shiftedId result) node) :=
+        congrArg some hNode.symm
+  cases node with
+  | sampleIndex => simpa [hId] using hOld
+  | num | bool | arr | tileArray | binary | unary | clamp | select | arraySet
+  | index | inputRef | paramRef | nestedOut | sampleRate | tileSampleIndex
+  | tilePhase | loopIdx | bankSum | routedSum =>
+    exact hNonSample (by simp)
+
 /-- Environments used on the two sides differ only at the sample coordinate.
     Keeping loop bindings in the relation is what makes the theorem apply
     recursively inside ordinary banks and routed banks. -/
