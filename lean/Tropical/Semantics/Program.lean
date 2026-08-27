@@ -29,6 +29,7 @@ structure ProgramInputs (α : Type) where
   values : Array (Option (Value α)) := #[]
   sampleRate : Value α
   sampleIndex : Value α
+  tileSampleIndex : Value α
 
 abbrev ModelInput := ProgramCopyInput
 abbrev ModelInstanceInput := ProgramCopyInstanceInput
@@ -255,7 +256,8 @@ private def programRefusal (operation detail : String) : Outcome β :=
 
 private def baseEnv (invocation : ProgramInputs α) : SigEnv α :=
   { sampleRate := invocation.sampleRate
-    sampleIndex := invocation.sampleIndex }
+    sampleIndex := invocation.sampleIndex
+    tileSampleIndex := invocation.tileSampleIndex }
 
 private def resolveInputsGo (eval : SigEnv α → ρ → Result α)
     (invocation : ProgramInputs α) :
@@ -341,7 +343,8 @@ private def resolveInstancesGo (eval : SigEnv α → ρ → Result α)
           match child typeKey
               { values := supplied
                 sampleRate := invocation.sampleRate
-                sampleIndex := invocation.sampleIndex } with
+                sampleIndex := invocation.sampleIndex
+                tileSampleIndex := invocation.tileSampleIndex } with
           | .error refusal => Except.error refusal
           | .ok observation =>
             match completeChildOutputs name observation.portOutputs with
@@ -542,7 +545,8 @@ private theorem resolveInstancesGo_rel
           (match childDest typeKey
               { values := supplied
                 sampleRate := invocation.sampleRate
-                sampleIndex := invocation.sampleIndex } with
+                sampleIndex := invocation.sampleIndex
+                tileSampleIndex := invocation.tileSampleIndex } with
           | .error refusal => Except.error refusal
           | .ok observation =>
             match completeChildOutputs name observation.portOutputs with
@@ -554,7 +558,8 @@ private theorem resolveInstancesGo_rel
           (match childDest typeKey
               { values := supplied
                 sampleRate := invocation.sampleRate
-                sampleIndex := invocation.sampleIndex } with
+                sampleIndex := invocation.sampleIndex
+                tileSampleIndex := invocation.tileSampleIndex } with
           | .error refusal => Except.error refusal
           | .ok observation =>
             match completeChildOutputs name observation.portOutputs with
@@ -566,7 +571,8 @@ private theorem resolveInstancesGo_rel
         cases hChildResult : childDest typeKey
             { values := supplied
               sampleRate := invocation.sampleRate
-              sampleIndex := invocation.sampleIndex } with
+              sampleIndex := invocation.sampleIndex
+              tileSampleIndex := invocation.tileSampleIndex } with
         | error refusal =>
           change (Except.error refusal : Outcome _) = Except.error refusal
           rfl
