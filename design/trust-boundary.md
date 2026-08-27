@@ -112,6 +112,19 @@ Generated MSL implements the plan within the documented f32 SNR contract.
 - Gates: `metal-vs-jit`, `metal-ctest`, `msl-goldens`
 - Limitation: Evidence is tolerance-based and hardware-dependent; it is not exact equality or a proof of Metal compiler behavior.
 
+## INDEPENDENT_OUTPUT_CHANNEL_LAYOUT
+
+Plan sinks publish independent logical channels and native, wasm, and Metal kernels expose the declared image as frame-major interleaved samples while advancing clocks in frames.
+
+- Status: evidence-backed
+- Priority: critical
+- Owner: Audio output
+- Evidence: executable gate, inspection
+- Formal symbol: none
+- Implementation: `design/stereo-output-contract.md`, `lean/Tropical/Plan.lean`, `lean/Tropical/PlanDecode.lean`, `lean/Tropical/Ir/EmitLlvm.lean`, `lean/Tropical/Ir/EmitMsl.lean`, `engine/runtime/FlatRuntime.cpp`, `engine/dac/TropicalDAC.hpp`, `web/worklet/processor.ts`
+- Gates: `runtime-multichannel`, `current_module_process`, `metal-ctest`, `manual:device channel-layout review`
+- Limitation: Schema validation and native/web/Metal mappings have executable coverage. Plan reference semantics, backend refinement, physical device negotiation, callback deadlines, and the fixed-width live Metal queue boundary remain separate obligations.
+
 ## METAL_CALLBACK_CONSUMES_PREPARED_EPOCHS
 
 Live Metal submits and waits only on its render worker; the audio callback copies exact-tagged prepared tiles and activates old-before-E/new-at-E or fails silent.
@@ -201,7 +214,7 @@ Serialized plan entry points accept tropical_plan_6 only and reject retired sche
 - Formal symbol: none
 - Implementation: `engine/runtime/FlatRuntime.cpp`, `engine/runtime/NumericProgramParser.hpp`, `lean/Tropical/PlanDecode.lean`
 - Gates: `production-non-emission`, `plan6-schema-rejection`, `current_module_process`, `manual:serialized-plan boundary review`
-- Limitation: Canonical plan 6 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, the tick/rate source pair, empty child/instruction arrays, zero loop ids, and the ordinary sample-thread Metal execution description.
+- Limitation: Canonical plan 6 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, mono output_channel_count, the tick/rate source pair, empty child/instruction arrays, zero loop ids, and the ordinary sample-thread Metal execution description.
 
 ## FROZEN_AUDIO_GOLDENS_ANCHOR_CORRECTNESS
 
