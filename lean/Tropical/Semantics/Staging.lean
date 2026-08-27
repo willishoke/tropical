@@ -415,8 +415,7 @@ theorem signaturesGenerated_push {arena : ExprArena} {node : ENode}
     subst index
     simp [hAligned.symm]
     have hGet : (arena.nodes.push node)[arena.sigs.size] = node := by
-      simpa [hAligned] using
-        (Array.getElem_push_eq (xs := arena.nodes) (x := node))
+      simp [hAligned]
     rw [hGet]
 
 theorem eintern_preserves_signaturesSound {arena : ExprArena} {node : ENode}
@@ -882,7 +881,7 @@ theorem child_stage_le_of_parent {arena : ExprArena}
   have hPrefixChild : sigPrefix[child.idx]? = arena.sigs[child.idx]? := by
     rw [Array.getElem?_extract_of_lt]
     · simp
-    · simp [sigPrefix, hSound.arenaWellFormed.signaturesAligned]
+    · simp [hSound.arenaWellFormed.signaturesAligned]
       omega
   have hContains := enodeSig_contains_child sigPrefix node hChild
   rw [hPrefixChild] at hContains
@@ -896,7 +895,7 @@ theorem child_stage_le_of_parent {arena : ExprArena}
     exact Nat.lt_trans hChildLt hIdBound
   have hChildSig : arena.sigs[child.idx]? =
       some arena.sigs[child.idx] := by
-    simpa [Array.getElem?_eq_getElem, hChildSigBound]
+    simp [hChildSigBound]
   rw [hChildSig] at hResolveChild
   rw [stageOf_resolves hChildSig]
   exact stage_le_trans hResolveChild hParentResolve
