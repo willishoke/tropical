@@ -478,12 +478,288 @@ theorem stage_join_least {a b upper : Stage}
     (a.join b).le upper = true := by
   cases a <;> cases b <;> cases upper <;> simp_all [Stage.le, Stage.join]
 
+private theorem foldl_join_bounded (items : List β) (value : β → Stage)
+    (initial upper : Stage)
+    (hfinal : (items.foldl (fun stage item => stage.join (value item))
+      initial).le upper = true) :
+    initial.le upper = true ∧ ∀ item ∈ items, (value item).le upper = true := by
+  induction items generalizing initial with
+  | nil =>
+    exact ⟨hfinal, by simp⟩
+  | cons head tail ih =>
+    simp only [List.foldl_cons] at hfinal
+    have hrest := ih (initial := initial.join (value head)) hfinal
+    have hHeadBound :=
+      stage_le_trans (stage_le_join_right initial (value head)) hrest.1
+    constructor
+    · exact stage_le_trans (stage_le_join_left initial (value head)) hrest.1
+    · intro item hItem
+      simp only [List.mem_cons] at hItem
+      rcases hItem with rfl | hTail
+      · exact hHeadBound
+      · exact hrest.2 item hTail
+
+/-- Signature containment: intrinsic stage is earlier and both symbolic
+    dependency sets are included. -/
+structure StageSigLe (a b : StageSig) : Prop where
+  base : a.base.le b.base = true
+  inputs : ∀ inputIdx ∈ a.inputs, inputIdx ∈ b.inputs
+  nested : ∀ dependency ∈ a.nested, dependency ∈ b.nested
+
+theorem StageSigLe.refl (sig : StageSig) : StageSigLe sig sig :=
+  { base := stage_le_refl sig.base
+    inputs := fun _ h => h
+    nested := fun _ h => h }
+
+theorem mem_mergeAsc [Ord α] [BEq α] [LawfulBEq α]
+    {value : α} {a b : Array α} :
+    value ∈ mergeAsc a b ↔ value ∈ a ∨ value ∈ b := by
+  simp [mergeAsc]
+
+theorem StageSigLe.joinLeft (a b : StageSig) : StageSigLe a (a.join b) :=
+  { base := stage_le_join_left a.base b.base
+    inputs := by
+      intro inputIdx hInput
+      exact mem_mergeAsc.mpr (Or.inl hInput)
+    nested := by
+      intro dependency hDependency
+      exact mem_mergeAsc.mpr (Or.inl hDependency) }
+
+theorem StageSigLe.joinRight (a b : StageSig) : StageSigLe b (a.join b) :=
+  { base := stage_le_join_right a.base b.base
+    inputs := by
+      intro inputIdx hInput
+      exact mem_mergeAsc.mpr (Or.inr hInput)
+    nested := by
+      intro dependency hDependency
+      exact mem_mergeAsc.mpr (Or.inr hDependency) }
+
+theorem StageSigLe.trans {a b c : StageSig}
+    (hab : StageSigLe a b) (hbc : StageSigLe b c) : StageSigLe a c :=
+  { base := stage_le_trans hab.base hbc.base
+    inputs := fun inputIdx hInput => hbc.inputs inputIdx (hab.inputs inputIdx hInput)
+    nested := fun dependency hDependency =>
+      hbc.nested dependency (hab.nested dependency hDependency) }
+
+private theorem foldl_join_initial (items : List ExprId)
+    (sigs : Array StageSig) (initial : StageSig) :
+    StageSigLe initial
+      (items.foldl (fun accumulated id =>
+        accumulated.join (sigs[id.idx]?.getD { base := .s1 })) initial) := by
+  induction items generalizing initial with
+  | nil => exact StageSigLe.refl initial
+  | cons head tail ih =>
+    simp only [List.foldl_cons]
+    exact (StageSigLe.joinLeft initial _).trans
+      (ih (initial := initial.join (sigs[head.idx]?.getD { base := .s1 })))
+
+private theorem foldl_join_contains (items : List ExprId)
+    (sigs : Array StageSig) (initial : StageSig) {child : ExprId}
+    (hChild : child ∈ items) :
+    StageSigLe (sigs[child.idx]?.getD { base := .s1 })
+      (items.foldl (fun accumulated id =>
+        accumulated.join (sigs[id.idx]?.getD { base := .s1 })) initial) := by
+  induction items generalizing initial with
+  | nil => simp at hChild
+  | cons head tail ih =>
+    simp only [List.mem_cons] at hChild
+    simp only [List.foldl_cons]
+    rcases hChild with rfl | hTail
+    · exact (StageSigLe.joinRight initial _).trans
+        (foldl_join_initial tail sigs _)
+    · exact (ih (initial := initial.join
+        (sigs[head.idx]?.getD { base := .s1 })) hTail)
+
+/-- Every semantic child signature is contained in the signature computed for
+    its parent node. -/
+theorem enodeSig_contains_child (sigs : Array StageSig) (node : ENode)
+    {child : ExprId} (hChild : child ∈ node.children) :
+    StageSigLe (sigs[child.idx]?.getD { base := .s1 })
+      (enodeSig sigs node) := by
+  cases node with
+  | num | bool | inputRef | paramRef | nestedOut | sampleRate
+  | sampleIndex | tileSampleIndex | tilePhase | loopIdx =>
+    simp [ENode.children] at hChild
+  | arr items | tileArray items =>
+    simp only [enodeSig]
+    rw [← Array.foldl_toList]
+    apply foldl_join_contains items.toList sigs _
+    simpa [ENode.children] using hChild
+  | binary tag lhs rhs =>
+    have hBinary : child = lhs ∨ child = rhs := by
+      simpa [ENode.children] using hChild
+    simp only [enodeSig]
+    rcases hBinary with hLeft | hRight
+    · subst child; exact StageSigLe.joinLeft _ _
+    · subst child; exact StageSigLe.joinRight _ _
+  | unary tag arg =>
+    have hUnary : child = arg := by simpa [ENode.children] using hChild
+    subst child
+    change StageSigLe (sigs[arg.idx]?.getD { base := .s1 })
+      (sigs[arg.idx]?.getD { base := .s1 })
+    exact StageSigLe.refl _
+  | clamp value lo hi | select value lo hi | arraySet value lo hi =>
+    have hTernary : child = value ∨ child = lo ∨ child = hi := by
+      simpa [ENode.children] using hChild
+    simp only [enodeSig]
+    rcases hTernary with hValue | hLo | hHi
+    · subst child
+      exact (StageSigLe.joinLeft _ _).trans (StageSigLe.joinLeft _ _)
+    · subst child
+      exact (StageSigLe.joinRight _ _).trans (StageSigLe.joinLeft _ _)
+    · subst child
+      exact StageSigLe.joinRight _ _
+  | index array index =>
+    have hIndexNode : child = array ∨ child = index := by
+      simpa [ENode.children] using hChild
+    simp only [enodeSig]
+    rcases hIndexNode with hArray | hIndex
+    · subst child; exact StageSigLe.joinLeft _ _
+    · subst child; exact StageSigLe.joinRight _ _
+  | bankSum capacity tables body dynCount binderId =>
+    simp only [enodeSig]
+    have hBank : (child ∈ tables ∨ child = body) ∨
+        dynCount = some child := by
+      simpa [ENode.children] using hChild
+    rw [← Array.foldl_toList]
+    rcases hBank with (hTable | hBody) | hDyn
+    · have hTableLe := foldl_join_contains tables.toList sigs
+          ({ base := .fold } : StageSig)
+          (by simpa using hTable)
+      cases dynCount with
+      | none => exact hTableLe.trans (StageSigLe.joinLeft _ _)
+      | some count =>
+        exact (hTableLe.trans (StageSigLe.joinLeft _ _)).trans
+          (StageSigLe.joinLeft _ _)
+    · subst child
+      cases dynCount with
+      | none => exact StageSigLe.joinRight _ _
+      | some count =>
+        exact (StageSigLe.joinRight _ _).trans (StageSigLe.joinLeft _ _)
+    · cases dynCount with
+      | none => simp at hDyn
+      | some count =>
+        simp at hDyn
+        subst count
+        exact StageSigLe.joinRight _ _
+  | routedSum capacity outputCount routes tables values dynCount binderId =>
+    simp only [enodeSig]
+    have hRouted : child ∈ tables ∨ child ∈ values ∨
+        dynCount = some child := by
+      simpa [ENode.children] using hChild
+    rw [← Array.foldl_toList]
+    rcases hRouted with hTable | hValue | hDyn
+    · have hItemLe := foldl_join_contains (tables ++ values).toList sigs
+          ({ base := .fold } : StageSig)
+          (by simp; exact Or.inl hTable)
+      cases dynCount with
+      | none => exact hItemLe
+      | some count => exact hItemLe.trans (StageSigLe.joinLeft _ _)
+    · have hItemLe := foldl_join_contains (tables ++ values).toList sigs
+          ({ base := .fold } : StageSig)
+          (by simp; exact Or.inr hValue)
+      cases dynCount with
+      | none => exact hItemLe
+      | some count => exact hItemLe.trans (StageSigLe.joinLeft _ _)
+    · cases dynCount with
+      | none => simp at hDyn
+      | some count =>
+        simp at hDyn
+        subst count
+        exact StageSigLe.joinRight _ _
+
 /-- Resolve one nested-output dependency.  Missing children and outputs are
     maximally dynamic. -/
 def childStage (ctx : StageCtx) (instanceIdx outputIdx : Nat) : Stage :=
-  match ctx.childOut[instanceIdx]? with
-  | some (some outputs) => outputs[outputIdx]?.getD Stage.s1
-  | _ => Stage.s1
+  resolveNested ctx (instanceIdx, outputIdx)
+
+private theorem foldl_join_le_of_bounded (items : List β)
+    (value : β → Stage) (initial upper : Stage)
+    (hInitial : initial.le upper = true)
+    (hItems : ∀ item ∈ items, (value item).le upper = true) :
+    (items.foldl (fun stage item => stage.join (value item)) initial).le
+      upper = true := by
+  induction items generalizing initial with
+  | nil => exact hInitial
+  | cons head tail ih =>
+    simp only [List.foldl_cons]
+    apply ih
+    · exact stage_join_least hInitial (hItems head (by simp))
+    · intro item hItem
+      exact hItems item (by simp [hItem])
+
+theorem resolve_base_le (ctx : StageCtx) (sig : StageSig) :
+    sig.base.le (resolve ctx sig) = true := by
+  unfold resolve
+  rw [← Array.foldl_toList, ← Array.foldl_toList]
+  let afterInputs := sig.inputs.toList.foldl (fun stage inputIdx =>
+    stage.join (ctx.inputStages[inputIdx]?.getD .s1)) sig.base
+  let final := sig.nested.toList.foldl (fun stage dependency =>
+    stage.join (resolveNested ctx dependency)) afterInputs
+  have hNested := foldl_join_bounded sig.nested.toList
+    (resolveNested ctx) afterInputs final (stage_le_refl final)
+  have hInputs := foldl_join_bounded sig.inputs.toList
+    (fun inputIdx => ctx.inputStages[inputIdx]?.getD .s1)
+    sig.base final (by simpa [afterInputs] using hNested.1)
+  simpa [afterInputs, final] using hInputs.1
+
+theorem resolve_input_le (ctx : StageCtx) (sig : StageSig) {inputIdx : Nat}
+    (hInput : inputIdx ∈ sig.inputs) :
+    (ctx.inputStages[inputIdx]?.getD .s1).le (resolve ctx sig) = true := by
+  unfold resolve
+  rw [← Array.foldl_toList, ← Array.foldl_toList]
+  let afterInputs := sig.inputs.toList.foldl (fun stage inputIdx =>
+    stage.join (ctx.inputStages[inputIdx]?.getD .s1)) sig.base
+  let final := sig.nested.toList.foldl (fun stage dependency =>
+    stage.join (resolveNested ctx dependency)) afterInputs
+  have hNested := foldl_join_bounded sig.nested.toList
+    (resolveNested ctx) afterInputs final (stage_le_refl final)
+  have hInputs := foldl_join_bounded sig.inputs.toList
+    (fun inputIdx => ctx.inputStages[inputIdx]?.getD .s1)
+    sig.base final (by simpa [afterInputs] using hNested.1)
+  simpa [afterInputs, final] using
+    hInputs.2 inputIdx (by simpa using hInput)
+
+theorem resolve_nested_le (ctx : StageCtx) (sig : StageSig)
+    {dependency : Nat × Nat} (hDependency : dependency ∈ sig.nested) :
+    (resolveNested ctx dependency).le (resolve ctx sig) = true := by
+  unfold resolve
+  rw [← Array.foldl_toList, ← Array.foldl_toList]
+  let afterInputs := sig.inputs.toList.foldl (fun stage inputIdx =>
+    stage.join (ctx.inputStages[inputIdx]?.getD .s1)) sig.base
+  let final := sig.nested.toList.foldl (fun stage dependency =>
+    stage.join (resolveNested ctx dependency)) afterInputs
+  have hNested := foldl_join_bounded sig.nested.toList
+    (resolveNested ctx) afterInputs final (stage_le_refl final)
+  simpa [afterInputs, final] using
+    hNested.2 dependency (by simpa using hDependency)
+
+theorem StageSigLe.resolve_mono {a b : StageSig} (h : StageSigLe a b)
+    (ctx : StageCtx) : (resolve ctx a).le (resolve ctx b) = true := by
+  unfold resolve
+  rw [← Array.foldl_toList, ← Array.foldl_toList,
+    ← Array.foldl_toList, ← Array.foldl_toList]
+  let upper :=
+    b.nested.toList.foldl (fun stage dependency =>
+      stage.join (resolveNested ctx dependency))
+      (b.inputs.toList.foldl (fun stage inputIdx =>
+        stage.join (ctx.inputStages[inputIdx]?.getD .s1)) b.base)
+  have hBase : a.base.le upper = true :=
+    stage_le_trans h.base (by
+      simpa [upper, resolve, ← Array.foldl_toList] using resolve_base_le ctx b)
+  have hInputs : ∀ inputIdx ∈ a.inputs.toList,
+      (ctx.inputStages[inputIdx]?.getD .s1).le upper = true := by
+    intro inputIdx hInput
+    simpa [upper, resolve, ← Array.foldl_toList] using
+      resolve_input_le ctx b (h.inputs inputIdx (by simpa using hInput))
+  have hAfterInputs := foldl_join_le_of_bounded a.inputs.toList
+    (fun inputIdx => ctx.inputStages[inputIdx]?.getD .s1)
+    a.base upper hBase hInputs
+  apply foldl_join_le_of_bounded a.nested.toList (resolveNested ctx) _ upper
+    hAfterInputs
+  intro dependency hDependency
+  simpa [upper, resolve, ← Array.foldl_toList] using
+    resolve_nested_le ctx b (h.nested dependency (by simpa using hDependency))
 
 /-- Semantic environment agreement through one binding time.  Rate and open
     loop binders are structural/fold inputs.  Control parameters become fixed
@@ -540,6 +816,19 @@ theorem EnvAgreesThrough.nested {stage : Stage} {ctx : StageCtx}
     lookupNested a instanceIdx outputIdx = lookupNested b instanceIdx outputIdx :=
   h.2.2.2.2.2 instanceIdx outputIdx hstage
 
+theorem EnvAgreesThrough.bindLoop {stage : Stage} {ctx : StageCtx}
+    {a b : SigEnv α} (h : EnvAgreesThrough stage ctx a b)
+    (binderId : Nat) (value : Value α) :
+    EnvAgreesThrough stage ctx (a.bindLoop binderId value)
+      (b.bindLoop binderId value) := by
+  refine ⟨h.sampleRate, ?_, h.2.2.1, h.2.2.2.1,
+    h.2.2.2.2.1, h.2.2.2.2.2⟩
+  funext query
+  simp only [SigEnv.bindLoop]
+  split
+  · rfl
+  · exact congrFun h.loops query
+
 /-- Pointwise order on staging contexts.  Missing entries remain maximally
     dynamic, so extending a context with earlier-stage bindings can only lower
     the resolved stage. -/
@@ -568,6 +857,225 @@ theorem stageOf_resolves {arena : ExprArena} {ctx : StageCtx} {id : ExprId}
     {sig : StageSig} (h : arena.sig? id = some sig) :
     stageOf arena ctx id = resolve ctx sig := by
   simp [stageOf, h]
+
+theorem child_stage_le_of_parent {arena : ExprArena}
+    (hSound : SignaturesSound arena) (ctx : StageCtx)
+    {id child : ExprId} {node : ENode}
+    (hDeref : arena.deref id = some node)
+    (hChild : child ∈ node.children) {stage : Stage}
+    (hStage : (stageOf arena ctx id).le stage = true) :
+    (stageOf arena ctx child).le stage = true := by
+  have hIdBound := Tropical.Semantics.deref_index_lt hDeref
+  have hChildLt := hSound.arenaWellFormed.childrenDescend
+    hDeref child hChild
+  have hGenerated := hSound.generated id.idx hIdBound
+  have hNode : arena.nodes[id.idx] = node := by
+    simpa [ExprArena.deref, Array.getElem?_eq_getElem, hIdBound] using hDeref
+  let sigPrefix := arena.sigs.extract 0 id.idx
+  have hPrefixChild : sigPrefix[child.idx]? = arena.sigs[child.idx]? := by
+    rw [Array.getElem?_extract_of_lt]
+    · simp
+    · simp [sigPrefix, hSound.arenaWellFormed.signaturesAligned]
+      omega
+  have hContains := enodeSig_contains_child sigPrefix node hChild
+  rw [hPrefixChild] at hContains
+  have hResolveChild := hContains.resolve_mono ctx
+  have hParentResolve :
+      (resolve ctx (enodeSig sigPrefix node)).le stage = true := by
+    rw [stageOf_resolves hGenerated] at hStage
+    simpa [sigPrefix, hNode] using hStage
+  have hChildSigBound : child.idx < arena.sigs.size := by
+    rw [hSound.arenaWellFormed.signaturesAligned]
+    exact Nat.lt_trans hChildLt hIdBound
+  have hChildSig : arena.sigs[child.idx]? =
+      some arena.sigs[child.idx] := by
+    simpa [Array.getElem?_eq_getElem, hChildSigBound]
+  rw [hChildSig] at hResolveChild
+  rw [stageOf_resolves hChildSig]
+  exact stage_le_trans hResolveChild hParentResolve
+
+/-- Intern-time stage classification is semantically conservative for every
+    generated expression DAG.  The theorem compares production denotations,
+    including refusal results, under the exact binding-time agreement rules. -/
+theorem stageSig_sound {arena : ExprArena} (hSound : SignaturesSound arena)
+    (alg : Algebra α) (ctx : StageCtx) (a b : SigEnv α)
+    {id : ExprId} {node : ENode} (hDeref : arena.deref id = some node)
+    {stage : Stage} (hStage : (stageOf arena ctx id).le stage = true)
+    (hEnv : EnvAgreesThrough stage ctx a b) :
+    denoteExpr alg a arena hSound.arenaWellFormed id =
+      denoteExpr alg b arena hSound.arenaWellFormed id := by
+  have hChildEq (child : ExprId) (hChild : child ∈ node.children) :
+      denoteExpr alg a arena hSound.arenaWellFormed child =
+        denoteExpr alg b arena hSound.arenaWellFormed child := by
+    have hChildStage := child_stage_le_of_parent hSound ctx hDeref hChild hStage
+    obtain ⟨childNode, hChildDeref⟩ :=
+      Tropical.Semantics.deref_of_index_lt
+        (Nat.lt_trans
+          (hSound.arenaWellFormed.childrenDescend hDeref child hChild)
+          (Tropical.Semantics.deref_index_lt hDeref))
+    exact stageSig_sound hSound alg ctx a b hChildDeref hChildStage hEnv
+  have hIdBound := Tropical.Semantics.deref_index_lt hDeref
+  have hGenerated := hSound.generated id.idx hIdBound
+  have hNode : arena.nodes[id.idx] = node := by
+    simpa [ExprArena.deref, Array.getElem?_eq_getElem, hIdBound] using hDeref
+  let parentSig := enodeSig (arena.sigs.extract 0 id.idx) node
+  have hParentResolve : (resolve ctx parentSig).le stage = true := by
+    rw [stageOf_resolves hGenerated] at hStage
+    simpa [parentSig, hNode] using hStage
+  rw [denoteExpr_of_deref alg a arena hSound.arenaWellFormed hDeref,
+    denoteExpr_of_deref alg b arena hSound.arenaWellFormed hDeref]
+  cases node with
+  | num | bool => rfl
+  | sampleRate => exact congrArg Except.ok hEnv.sampleRate
+  | sampleIndex =>
+    exact congrArg Except.ok (hEnv.sampleIndex
+      (stage_le_trans (resolve_base_le ctx parentSig) hParentResolve))
+  | tileSampleIndex =>
+    exact congrArg Except.ok (hEnv.sampleIndex
+      (stage_le_trans (resolve_base_le ctx parentSig) hParentResolve))
+  | tilePhase => rfl
+  | loopIdx binderId =>
+    simp only [denoteNode]
+    rw [hEnv.loops]
+  | paramRef paramIdx =>
+    exact hEnv.params
+      (stage_le_trans (resolve_base_le ctx parentSig) hParentResolve)
+      paramIdx.idx
+  | inputRef inputIdx =>
+    exact hEnv.input inputIdx.idx
+      (stage_le_trans
+        (resolve_input_le ctx parentSig (by simp [parentSig, enodeSig]))
+        hParentResolve)
+  | nestedOut instanceIdx outputIdx =>
+    exact hEnv.nested instanceIdx.idx outputIdx.idx
+      (stage_le_trans
+        (resolve_nested_le ctx parentSig (by simp [parentSig, enodeSig]))
+        hParentResolve)
+  | arr items | tileArray items =>
+    simp only [denoteNode]
+    have hItems :
+        items.attach.map
+            (fun item => denoteExpr alg a arena hSound.arenaWellFormed item.1) =
+          items.attach.map
+            (fun item => denoteExpr alg b arena hSound.arenaWellFormed item.1) := by
+      apply Array.ext
+      · simp
+      · intro i hiA hiB
+        simp only [Array.getElem_map, Array.getElem_attach]
+        apply hChildEq
+        simp [ENode.children]
+    rw [hItems]
+  | binary tag lhs rhs =>
+    simp only [denoteNode]
+    rw [hChildEq lhs (by simp [ENode.children]),
+      hChildEq rhs (by simp [ENode.children])]
+  | unary tag arg =>
+    simp only [denoteNode]
+    rw [hChildEq arg (by simp [ENode.children])]
+  | clamp value lo hi =>
+    simp only [denoteNode]
+    rw [hChildEq value (by simp [ENode.children]),
+      hChildEq lo (by simp [ENode.children]),
+      hChildEq hi (by simp [ENode.children])]
+  | select cond then_ else_ =>
+    simp only [denoteNode]
+    rw [hChildEq cond (by simp [ENode.children]),
+      hChildEq then_ (by simp [ENode.children]),
+      hChildEq else_ (by simp [ENode.children])]
+  | arraySet array index value =>
+    rfl
+  | index array index =>
+    simp only [denoteNode]
+    rw [hChildEq array (by simp [ENode.children]),
+      hChildEq index (by simp [ENode.children])]
+  | bankSum capacity tables body dynCount binderId =>
+    simp only [denoteNode]
+    have hBodyChild : body ∈
+        (ENode.bankSum capacity tables body dynCount binderId).children := by
+      simp [ENode.children]
+    have hTableArray :
+        tables.attach.map
+            (fun item => denoteExpr alg a arena hSound.arenaWellFormed item.1) =
+          tables.attach.map
+            (fun item => denoteExpr alg b arena hSound.arenaWellFormed item.1) := by
+      apply Array.ext
+      · simp
+      · intro i hiA hiB
+        simp only [Array.getElem_map, Array.getElem_attach]
+        apply hChildEq
+        simp [ENode.children]
+    have hBody (loopValue : Value α) :
+        denoteExpr alg (a.bindLoop binderId loopValue)
+            arena hSound.arenaWellFormed body =
+          denoteExpr alg (b.bindLoop binderId loopValue)
+            arena hSound.arenaWellFormed body := by
+      have hBodyStage := child_stage_le_of_parent hSound ctx hDeref
+        hBodyChild hStage
+      obtain ⟨bodyNode, hBodyDeref⟩ :=
+        Tropical.Semantics.deref_of_index_lt
+          (Nat.lt_trans
+            (hSound.arenaWellFormed.childrenDescend hDeref body
+              hBodyChild) hIdBound)
+      exact stageSig_sound hSound alg ctx
+        (a.bindLoop binderId loopValue) (b.bindLoop binderId loopValue)
+        hBodyDeref hBodyStage (hEnv.bindLoop binderId loopValue)
+    rw [hTableArray]
+    cases dynCount with
+    | none => simp only [hBody]
+    | some count =>
+      simp only [hChildEq count (by simp [ENode.children]), hBody]
+  | routedSum capacity outputCount routes tables values dynCount binderId =>
+    simp only [denoteNode]
+    have hTableArray :
+        tables.attach.map
+            (fun item => denoteExpr alg a arena hSound.arenaWellFormed item.1) =
+          tables.attach.map
+            (fun item => denoteExpr alg b arena hSound.arenaWellFormed item.1) := by
+      apply Array.ext
+      · simp
+      · intro i hiA hiB
+        simp only [Array.getElem_map, Array.getElem_attach]
+        apply hChildEq
+        simp [ENode.children]
+    have hValueArray (loopValue : Value α) :
+        values.attach.map
+            (fun item => denoteExpr alg (a.bindLoop binderId loopValue)
+              arena hSound.arenaWellFormed item.1) =
+          values.attach.map
+            (fun item => denoteExpr alg (b.bindLoop binderId loopValue)
+              arena hSound.arenaWellFormed item.1) := by
+      apply Array.ext
+      · simp
+      · intro i hiA hiB
+        simp only [Array.getElem_map, Array.getElem_attach]
+        have hi : i < values.size := by simpa using hiA
+        let value := values[i]
+        have hValueMem : value ∈ values := Array.getElem_mem hi
+        have hValueChild : value ∈
+            (ENode.routedSum capacity outputCount routes tables values dynCount
+              binderId).children := by
+          simp only [ENode.children, Array.mem_append]
+          exact Or.inl (Or.inr hValueMem)
+        have hValueStage := child_stage_le_of_parent hSound ctx hDeref
+          hValueChild hStage
+        obtain ⟨valueNode, hValueDeref⟩ :=
+          Tropical.Semantics.deref_of_index_lt
+            (Nat.lt_trans
+              (hSound.arenaWellFormed.childrenDescend hDeref value
+                hValueChild) hIdBound)
+        exact stageSig_sound hSound alg ctx
+          (a.bindLoop binderId loopValue) (b.bindLoop binderId loopValue)
+          hValueDeref hValueStage (hEnv.bindLoop binderId loopValue)
+    rw [hTableArray]
+    cases dynCount with
+    | none => simp only [hValueArray]
+    | some count =>
+      simp only [hChildEq count (by simp [ENode.children]), hValueArray]
+termination_by id.idx
+decreasing_by
+  all_goals
+    apply hSound.arenaWellFormed.childrenDescend hDeref
+    simp_all [ENode.children]
 
 theorem stageSig_sound_sampleRate (alg : Algebra α) (ctx : StageCtx)
     (a b : SigEnv α) (arena : ExprArena) (hArena : ArenaWellFormed arena)
