@@ -338,7 +338,7 @@ def classify (plan : FlatPlan) : Array Stage × Array Bool := Id.run do
 /-- Shared split assembly: given a placement (`Analysis` — from the flow
     `analyze` or the typed `placementFromStages`), rebuild the audio plan
     and the coefficient plan. Identity when nothing hoists. -/
-private def rebuild (plan : FlatPlan) (allBlocks : Array (Array NInstr))
+private def rebuildCore (plan : FlatPlan) (allBlocks : Array (Array NInstr))
     (a : Analysis) : Split := Id.run do
   if !(a.hoisted.any id) then
     return { audio := plan, coeff? := none }
@@ -432,6 +432,20 @@ private def rebuild (plan : FlatPlan) (allBlocks : Array (Array NInstr))
     sinks := #[]
     paramDisciplines := #[] }
   return { audio, coeff? := some coeff }
+
+/-- Normalize the split's external interfaces at the assembly boundary.  The
+    core already constructs these fields this way; spelling the invariant at
+    the boundary prevents later residualization changes from accidentally
+    collapsing stereo/multi-sink audio or exposing coefficient sinks. -/
+private def rebuild (plan : FlatPlan) (allBlocks : Array (Array NInstr))
+    (a : Analysis) : Split :=
+  let result := rebuildCore plan allBlocks a
+  { result with
+    audio := { result.audio with
+      sinks := plan.sinks
+      outputChannelCount := plan.outputChannelCount }
+    coeff? := result.coeff?.map fun coefficient =>
+      { coefficient with sinks := #[], outputChannelCount := 1 } }
 
 /-- Split a plan into its audio and coefficient stages via the FLOW
     classification (the plan-level reference pass — the only splitter
@@ -760,5 +774,34 @@ def hoistTyped (plan : FlatPlan)
     return { audio := plan, coeff? := none }
   let a ← placementFromStages allBlocks (stageBlocks.flatten)
   return rebuild plan allBlocks a
+
+/-- Every typed split preserves the complete externally observable audio
+    interface.  In particular, independent stereo (or wider) sink routing is
+    never collapsed by staging; only the private coefficient kernel is mono. -/
+theorem hoistTyped_preserves_audio_interface (plan : FlatPlan)
+    (stageBlocks : Array (Array (Option Stage))) (result : Split)
+    (h : hoistTyped plan stageBlocks = .ok result) :
+    result.audio.sinks = plan.sinks ∧
+    result.audio.outputChannelCount = plan.outputChannelCount ∧
+    ∀ coefficient, result.coeff? = some coefficient →
+      coefficient.sinks = #[] ∧ coefficient.outputChannelCount = 1 := by
+  unfold hoistTyped at h
+  by_cases hMisaligned : typedStagesAligned (collectPlanBlocks plan)
+      stageBlocks = false
+  · simp [hMisaligned, bind, Except.bind] at h
+  · by_cases hNone : noTypedSelection stageBlocks = true
+    · simp [hMisaligned, hNone] at h
+      cases h
+      exact ⟨rfl, rfl, by simp⟩
+    · cases hp : placementFromStages (collectPlanBlocks plan)
+          stageBlocks.flatten with
+      | error message =>
+        simp [hMisaligned, hNone, hp, bind, Except.bind] at h
+        change (Except.error message : Except String Split) = .ok result at h
+        contradiction
+      | ok analysis =>
+        simp [hMisaligned, hNone, hp, bind, Except.bind] at h
+        cases h
+        simp [rebuild]
 
 end Tropical.Ir.Stage0

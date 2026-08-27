@@ -99,9 +99,7 @@ private def dependencyStages (plan : FlatPlan)
 /-- Residualize the marked endpoint images.  Identity for ordinary plans. -/
 def split (plan : FlatPlan) : Except String Split := do
   if plan.tileArraySlots.isEmpty then return { audio := plan, tile? := none }
-  let mut blocks : Array (Array NInstr) := #[]
-  for fn in plan.instanceFunctions do
-    blocks := blocks ++ Tropical.Ir.Stage0.collectBlocks fn
+  let blocks := Tropical.Ir.Stage0.collectPlanBlocks plan
   let staged ← Tropical.Ir.Stage0.hoistTyped plan (dependencyStages plan blocks)
   let some tile := staged.coeff?
     | throw "TileStage: endpoint roots produced no materializer instructions"
@@ -111,5 +109,39 @@ def split (plan : FlatPlan) : Except String Split := do
   let audio := { staged.audio with
     coeffArraySlots := plan.coeffArraySlots }
   return { audio, tile? := some tile }
+
+/-- Tile residualization preserves the complete audio observation interface.
+    Endpoint materialization therefore remains orthogonal to independent
+    stereo or wider sink routing. -/
+theorem split_preserves_audio_interface (plan : FlatPlan) (result : Split)
+    (h : split plan = .ok result) :
+    result.audio.sinks = plan.sinks ∧
+    result.audio.outputChannelCount = plan.outputChannelCount := by
+  unfold split at h
+  by_cases hEmpty : plan.tileArraySlots.isEmpty = true
+  · simp [hEmpty] at h
+    cases h
+    exact ⟨rfl, rfl⟩
+  · cases hs : Tropical.Ir.Stage0.hoistTyped plan
+        (dependencyStages plan (Tropical.Ir.Stage0.collectPlanBlocks plan)) with
+    | error message =>
+      simp [hEmpty, hs, bind, Except.bind] at h
+      change (Except.error message : Except String Split) = .ok result at h
+      contradiction
+    | ok staged =>
+      cases ht : staged.coeff? with
+      | none =>
+        simp [hEmpty, hs, ht, bind, Except.bind] at h
+        change (Except.error
+          "TileStage: endpoint roots produced no materializer instructions" :
+          Except String Split) = .ok result at h
+        contradiction
+      | some tile =>
+        simp [hEmpty, hs, ht, bind, Except.bind] at h
+        cases h
+        have hinterface := Tropical.Ir.Stage0.hoistTyped_preserves_audio_interface
+          plan (dependencyStages plan
+            (Tropical.Ir.Stage0.collectPlanBlocks plan)) staged hs
+        exact ⟨hinterface.1, hinterface.2.1⟩
 
 end Tropical.Ir.TileStage
