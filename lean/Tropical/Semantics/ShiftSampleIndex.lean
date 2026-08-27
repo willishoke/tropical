@@ -455,6 +455,93 @@ theorem rebuildShiftedNodes_shiftCopy {original current : Builder}
         simpa using deref_index_lt hDeref)
     · simpa using hResult.2.2.2.2.2
 
+/-- Witnesses exposed by one successful production `shiftSampleIndex` run. -/
+structure ShiftSampleIndexRunCertificate (before : Builder)
+    (roots : Array ExprId) (frames : Nat) (shiftedRoots : Array ExprId)
+    (after : Builder) where
+  shiftedTick : ExprId
+  afterTick : Builder
+  mapped : Array ExprId
+  shiftedTick_run : (buildShiftedTick frames).run before =
+    .ok (shiftedTick, afterTick)
+  rebuild_run :
+    (rebuildShiftedNodes before.exprs.nodes.toList shiftedTick).run afterTick =
+      .ok (mapped, after)
+  shiftedRoots_eq : shiftedRoots = roots.map (shiftedId mapped)
+  afterTick_wellFormed : BuilderWellFormed afterTick
+  afterTick_extends : BuilderExtends before afterTick
+  shiftedTick_owned : SigIn afterTick shiftedTick
+  after_wellFormed : BuilderWellFormed after
+  rebuild_extends : BuilderExtends afterTick after
+  after_extends : BuilderExtends before after
+  mapped_owned : SigsIn after mapped
+  shiftedRoots_owned : SigsIn after shiftedRoots
+  copy : ShiftCopy before.exprs after.exprs (shiftedId mapped) shiftedTick
+  mapped_size : mapped.size = before.exprs.nodes.size
+
+/-- The W2 construction certificates plus the prefix proof expose an exact
+    recursive-copy witness for every successful public shift run. -/
+def shiftSampleIndex_run_certificate {before after : Builder}
+    {roots shiftedRoots : Array ExprId} {frames : Nat}
+    (hBefore : BuilderWellFormed before) (hRoots : SigsIn before roots)
+    (hRun : (shiftSampleIndex roots frames).run before =
+      .ok (shiftedRoots, after)) :
+    ShiftSampleIndexRunCertificate before roots frames shiftedRoots after := by
+  have hWhole := shiftSampleIndex_preserves hBefore hRoots frames
+  rw [hRun] at hWhole
+  rw [shiftSampleIndex_run] at hRun
+  rw [StateT.run_bind] at hRun
+  generalize hTickRun : (buildShiftedTick frames).run before = tickResult at hRun
+  cases tickResult with
+  | error message =>
+    change Except.error message = Except.ok (shiftedRoots, after) at hRun
+    contradiction
+  | ok pair =>
+    rcases pair with ⟨shiftedTick, afterTick⟩
+    change (do
+      let mapped ← rebuildShiftedNodes before.exprs.nodes.toList shiftedTick
+      pure (roots.map (shiftedId mapped))).run afterTick =
+        .ok (shiftedRoots, after) at hRun
+    rw [StateT.run_bind] at hRun
+    generalize hRebuildRun :
+      (rebuildShiftedNodes before.exprs.nodes.toList shiftedTick).run afterTick =
+        rebuildResult at hRun
+    cases rebuildResult with
+    | error message =>
+      change Except.error message = Except.ok (shiftedRoots, after) at hRun
+      contradiction
+    | ok pair =>
+      rcases pair with ⟨mapped, rebuilt⟩
+      simp only [StateT.run_pure] at hRun
+      have hPair := Except.ok.inj hRun
+      have hRootsEq : shiftedRoots = roots.map (shiftedId mapped) :=
+        (congrArg Prod.fst hPair).symm
+      have hAfterEq : after = rebuilt := (congrArg Prod.snd hPair).symm
+      subst shiftedRoots
+      subst after
+      have hTickPres := buildShiftedTick_preserves frames before hBefore
+      rw [hTickRun] at hTickPres
+      have hCopy := rebuildShiftedNodes_shiftCopy hBefore hTickPres.1
+        hTickPres.2.1 hTickPres.2.2
+      rw [hRebuildRun] at hCopy
+      exact {
+        shiftedTick := shiftedTick
+        afterTick := afterTick
+        mapped := mapped
+        shiftedTick_run := hTickRun
+        rebuild_run := hRebuildRun
+        shiftedRoots_eq := rfl
+        afterTick_wellFormed := hTickPres.1
+        afterTick_extends := hTickPres.2.1
+        shiftedTick_owned := hTickPres.2.2
+        after_wellFormed := hCopy.1
+        rebuild_extends := hCopy.2.1
+        after_extends := BuilderExtends.trans hTickPres.2.1 hCopy.2.1
+        mapped_owned := hCopy.2.2.1
+        shiftedRoots_owned := hWhole.2.2.1
+        copy := hCopy.2.2.2.1
+        mapped_size := hCopy.2.2.2.2 }
+
 /-- Environments used on the two sides differ only at the sample coordinate.
     Keeping loop bindings in the relation is what makes the theorem apply
     recursively inside ordinary banks and routed banks. -/
