@@ -19,6 +19,15 @@ open Tropical.Ir.Staging
 def NestedDependencyLt (a b : Nat × Nat) : Prop :=
   a.1 < b.1 ∨ (a.1 = b.1 ∧ a.2 < b.2)
 
+private def NestedDependencyLe (a b : Nat × Nat) : Prop :=
+  a.1 < b.1 ∨ (a.1 = b.1 ∧ a.2 ≤ b.2)
+
+private instance (a b : Nat × Nat) : Decidable (NestedDependencyLe a b) := by
+  unfold NestedDependencyLe
+  infer_instance
+
+local instance : Ord (Nat × Nat) := nestedDependencyOrd
+
 /-- The representation invariant promised by `StageSig`: dependency arrays
     are strictly ascending and contain no duplicates.  `Nodup` is stated
     explicitly even though it follows mathematically from strict order, so
@@ -35,9 +44,33 @@ structure StageSigShape (sig : StageSig) : Prop where
 def SignaturesShaped (arena : ExprArena) : Prop :=
   ∀ sig ∈ arena.sigs, StageSigShape sig
 
+/-- Each stored signature was computed from exactly the preceding signature
+    prefix and its same-index node.  This excludes hand-built arenas whose
+    signature array merely has the right length. -/
+def SignaturesGenerated (arena : ExprArena) : Prop :=
+  ∀ (index : Nat) (hIndex : index < arena.nodes.size),
+    arena.sigs[index]? = some
+      (enodeSig (arena.sigs.extract 0 index) arena.nodes[index])
+
+/-- Canonical staging invariant: aligned semantic arena, generated
+    signatures, and the strict/deduplicated dependency representation. -/
+structure SignaturesSound (arena : ExprArena) : Prop where
+  arenaWellFormed : ArenaWellFormed arena
+  generated : SignaturesGenerated arena
+  shaped : SignaturesShaped arena
+
 theorem empty_signaturesShaped : SignaturesShaped ({} : ExprArena) := by
   intro sig h
   simp at h
+
+theorem empty_signaturesGenerated : SignaturesGenerated ({} : ExprArena) := by
+  intro index hIndex
+  simp at hIndex
+
+theorem empty_signaturesSound : SignaturesSound ({} : ExprArena) :=
+  { arenaWellFormed := Tropical.Semantics.emptyArena_wellFormed
+    generated := empty_signaturesGenerated
+    shaped := empty_signaturesShaped }
 
 theorem signaturesShaped_push {arena : ExprArena} {sig : StageSig}
     (hArena : SignaturesShaped arena) (hSig : StageSigShape sig) :
@@ -76,6 +109,331 @@ theorem stageSigShape_nested (instanceIdx outputIdx : Nat) :
     StageSigShape
       ({ base := .fold, nested := #[(instanceIdx, outputIdx)] } : StageSig) := by
   constructor <;> simp
+
+private theorem eraseDups_sublist [BEq α] (xs : List α) :
+    List.Sublist xs.eraseDups xs := by
+  cases xs with
+  | nil => simp
+  | cons head tail =>
+    rw [List.eraseDups_cons]
+    apply List.Sublist.cons₂
+    exact (eraseDups_sublist (tail.filter fun value => !value == head)).trans
+      List.filter_sublist
+termination_by xs.length
+decreasing_by
+  exact Nat.lt_succ_of_le (List.length_filter_le _ _)
+
+private theorem eraseDups_nodup [BEq α] [LawfulBEq α] (xs : List α) :
+    xs.eraseDups.Nodup := by
+  cases xs with
+  | nil => simp
+  | cons head tail =>
+    rw [List.eraseDups_cons]
+    apply List.nodup_cons.mpr
+    constructor
+    · intro hMember
+      have hFiltered : head ∈ tail.filter (fun value => !value == head) :=
+        List.mem_eraseDups.mp hMember
+      simp at hFiltered
+    · exact eraseDups_nodup (tail.filter fun value => !value == head)
+termination_by xs.length
+decreasing_by
+  exact Nat.lt_succ_of_le (List.length_filter_le _ _)
+
+private theorem nat_pairwise_lt_of_le_nodup (xs : List Nat)
+    (hle : xs.Pairwise (· ≤ ·)) (hnodup : xs.Nodup) :
+    xs.Pairwise (· < ·) := by
+  cases xs with
+  | nil => simp
+  | cons head tail =>
+    rw [List.pairwise_cons] at hle ⊢
+    rw [List.nodup_cons] at hnodup
+    constructor
+    · intro value hValue
+      have hne : head ≠ value := by
+        intro heq
+        exact hnodup.1 (heq ▸ hValue)
+      exact Nat.lt_of_le_of_ne (hle.1 value hValue) hne
+    · exact nat_pairwise_lt_of_le_nodup tail hle.2 hnodup.2
+termination_by xs.length
+
+private theorem nat_compare_not_gt (lhs rhs : Nat) :
+    (compare lhs rhs != Ordering.gt) = decide (lhs ≤ rhs) := by
+  cases hcmp : compare lhs rhs with
+  | lt =>
+    have hlt := Nat.compare_eq_lt.mp hcmp
+    change true = decide (lhs ≤ rhs)
+    simp [Nat.le_of_lt hlt]
+  | eq =>
+    have heq := Nat.compare_eq_eq.mp hcmp
+    change true = decide (lhs ≤ rhs)
+    simp [heq]
+  | gt =>
+    have hgt := Nat.compare_eq_gt.mp hcmp
+    change false = decide (lhs ≤ rhs)
+    simp [Nat.not_le.mpr hgt]
+
+private theorem mergeAsc_nat_shape (a b : Array Nat) :
+    let merged := mergeAsc a b
+    merged.toList.Pairwise (· < ·) ∧ merged.toList.Nodup := by
+  let sorted := (a.toList ++ b.toList).mergeSort fun lhs rhs =>
+    compare lhs rhs != Ordering.gt
+  have hcompare (lhs rhs : Nat) :
+      (compare lhs rhs != Ordering.gt) = decide (lhs ≤ rhs) :=
+    nat_compare_not_gt lhs rhs
+  have htrans : ∀ lhs middle rhs : Nat,
+      (compare lhs middle != Ordering.gt) = true →
+      (compare middle rhs != Ordering.gt) = true →
+      (compare lhs rhs != Ordering.gt) = true := by
+    intro lhs middle rhs hl hm
+    simp only [hcompare, decide_eq_true_eq] at hl hm ⊢
+    omega
+  have htotal : ∀ lhs rhs : Nat,
+      (compare lhs rhs != Ordering.gt) ||
+        (compare rhs lhs != Ordering.gt) := by
+    intro lhs rhs
+    simp only [hcompare, decide_eq_true_eq, Bool.or_eq_true]
+    omega
+  have hsorted : sorted.Pairwise (· ≤ ·) := by
+    have h := List.pairwise_mergeSort htrans htotal (a.toList ++ b.toList)
+    simpa only [sorted, hcompare, decide_eq_true_eq] using h
+  have hsub : List.Sublist sorted.eraseDups sorted := eraseDups_sublist sorted
+  have hle : sorted.eraseDups.Pairwise (· ≤ ·) := hsorted.sublist hsub
+  have hnodup : sorted.eraseDups.Nodup := eraseDups_nodup sorted
+  change sorted.eraseDups.Pairwise (· < ·) ∧ sorted.eraseDups.Nodup
+  exact ⟨nat_pairwise_lt_of_le_nodup sorted.eraseDups hle hnodup, hnodup⟩
+
+private theorem nested_pairwise_lt_of_le_nodup (xs : List (Nat × Nat))
+    (hle : xs.Pairwise NestedDependencyLe) (hnodup : xs.Nodup) :
+    xs.Pairwise NestedDependencyLt := by
+  cases xs with
+  | nil => simp
+  | cons head tail =>
+    rw [List.pairwise_cons] at hle ⊢
+    rw [List.nodup_cons] at hnodup
+    constructor
+    · intro value hValue
+      have hne : head ≠ value := by
+        intro heq
+        exact hnodup.1 (heq ▸ hValue)
+      rcases hle.1 value hValue with hFirst | ⟨hFirst, hSecond⟩
+      · exact Or.inl hFirst
+      · right
+        refine ⟨hFirst, Nat.lt_of_le_of_ne hSecond ?_⟩
+        intro hSecondEq
+        apply hne
+        apply Prod.ext <;> assumption
+    · exact nested_pairwise_lt_of_le_nodup tail hle.2 hnodup.2
+termination_by xs.length
+
+private theorem mergeAsc_nested_shape (a b : Array (Nat × Nat)) :
+    let merged := mergeAsc a b
+    merged.toList.Pairwise NestedDependencyLt ∧ merged.toList.Nodup := by
+  let sorted := (a.toList ++ b.toList).mergeSort fun lhs rhs =>
+    compare lhs rhs != Ordering.gt
+  have hcompare (lhs rhs : Nat × Nat) :
+      (compare lhs rhs != Ordering.gt) =
+        decide (NestedDependencyLe lhs rhs) := by
+    rcases lhs with ⟨lhsFirst, lhsSecond⟩
+    rcases rhs with ⟨rhsFirst, rhsSecond⟩
+    change
+      ((match compare lhsFirst rhsFirst with
+        | .eq => compare lhsSecond rhsSecond
+        | ordering => ordering) != Ordering.gt) = _
+    cases hFirst : compare lhsFirst rhsFirst with
+    | lt =>
+      have hlt := Nat.compare_eq_lt.mp hFirst
+      change true = decide (NestedDependencyLe
+        (lhsFirst, lhsSecond) (rhsFirst, rhsSecond))
+      simp [NestedDependencyLe, hlt]
+    | eq =>
+      have heq := Nat.compare_eq_eq.mp hFirst
+      subst rhsFirst
+      change (compare lhsSecond rhsSecond != Ordering.gt) =
+        decide (NestedDependencyLe
+          (lhsFirst, lhsSecond) (lhsFirst, rhsSecond))
+      simp [NestedDependencyLe, nat_compare_not_gt]
+    | gt =>
+      have hgt := Nat.compare_eq_gt.mp hFirst
+      change false = decide (NestedDependencyLe
+        (lhsFirst, lhsSecond) (rhsFirst, rhsSecond))
+      simp [NestedDependencyLe]
+      omega
+  have htrans : ∀ lhs middle rhs : Nat × Nat,
+      (compare lhs middle != Ordering.gt) = true →
+      (compare middle rhs != Ordering.gt) = true →
+      (compare lhs rhs != Ordering.gt) = true := by
+    intro lhs middle rhs hl hm
+    simp only [hcompare, decide_eq_true_eq] at hl hm ⊢
+    rcases hl with hl | ⟨hl1, hl2⟩ <;>
+      rcases hm with hm | ⟨hm1, hm2⟩
+    · left; omega
+    · left; omega
+    · left; omega
+    · right; constructor <;> omega
+  have htotal : ∀ lhs rhs : Nat × Nat,
+      (compare lhs rhs != Ordering.gt) ||
+        (compare rhs lhs != Ordering.gt) := by
+    intro lhs rhs
+    simp only [hcompare, decide_eq_true_eq, Bool.or_eq_true]
+    unfold NestedDependencyLe
+    omega
+  have hsorted : sorted.Pairwise NestedDependencyLe := by
+    have h := List.pairwise_mergeSort htrans htotal (a.toList ++ b.toList)
+    simpa only [sorted, hcompare, decide_eq_true_eq] using h
+  have hsub : List.Sublist sorted.eraseDups sorted := eraseDups_sublist sorted
+  have hle : sorted.eraseDups.Pairwise NestedDependencyLe := hsorted.sublist hsub
+  have hnodup : sorted.eraseDups.Nodup := eraseDups_nodup sorted
+  change sorted.eraseDups.Pairwise NestedDependencyLt ∧ sorted.eraseDups.Nodup
+  exact ⟨nested_pairwise_lt_of_le_nodup sorted.eraseDups hle hnodup, hnodup⟩
+
+/-- Signature joins normalize both dependency unions to the promised strict,
+    duplicate-free representation. -/
+theorem StageSigShape.join {a b : StageSig}
+    (_ha : StageSigShape a) (_hb : StageSigShape b) :
+    StageSigShape (a.join b) := by
+  let hInputs := mergeAsc_nat_shape a.inputs b.inputs
+  let hNested := mergeAsc_nested_shape a.nested b.nested
+  exact {
+    inputsAscending := hInputs.1
+    inputsDeduplicated := hInputs.2
+    nestedAscending := hNested.1
+    nestedDeduplicated := hNested.2 }
+
+private theorem signatureAt_shape {sigs : Array StageSig}
+    (hSigs : ∀ sig ∈ sigs, StageSigShape sig) (id : ExprId) :
+    StageSigShape (sigs[id.idx]?.getD { base := .s1 }) := by
+  cases hGet : sigs[id.idx]? with
+  | none => simpa [hGet] using stageSigShape_s1
+  | some sig =>
+    have hMem : sig ∈ sigs := by
+      exact Array.mem_of_getElem? hGet
+    simpa [hGet] using hSigs sig hMem
+
+private theorem foldl_signatures_shape {sigs : Array StageSig}
+    (hSigs : ∀ sig ∈ sigs, StageSigShape sig) (items : List ExprId)
+    (initial : StageSig) (hInitial : StageSigShape initial) :
+    StageSigShape (items.foldl
+      (fun accumulated id =>
+        accumulated.join (sigs[id.idx]?.getD { base := .s1 })) initial) := by
+  induction items generalizing initial with
+  | nil => exact hInitial
+  | cons head tail ih =>
+    simp only [List.foldl_cons]
+    exact ih (initial := initial.join (sigs[head.idx]?.getD { base := .s1 }))
+      (hInitial.join (signatureAt_shape hSigs head))
+
+/-- Every node constructor preserves the dependency-array representation
+    invariant when the already-interned child signature prefix has it. -/
+theorem enodeSig_shape {sigs : Array StageSig}
+    (hSigs : ∀ sig ∈ sigs, StageSigShape sig) (node : ENode) :
+    StageSigShape (enodeSig sigs node) := by
+  cases node with
+  | num | sampleRate | loopIdx =>
+    exact stageSigShape_fold
+  | bool =>
+    exact stageSigShape_fold
+  | sampleIndex | tileSampleIndex | tilePhase =>
+    exact stageSigShape_s1
+  | paramRef =>
+    exact {
+      inputsAscending := by simp [enodeSig]
+      inputsDeduplicated := by simp [enodeSig]
+      nestedAscending := by simp [enodeSig]
+      nestedDeduplicated := by simp [enodeSig] }
+  | inputRef inputIdx =>
+    simpa [enodeSig] using stageSigShape_input inputIdx.idx
+  | nestedOut instanceIdx outputIdx =>
+    simpa [enodeSig] using stageSigShape_nested instanceIdx.idx outputIdx.idx
+  | arr items | tileArray items =>
+    simp only [enodeSig]
+    rw [← Array.foldl_toList]
+    exact foldl_signatures_shape hSigs items.toList _ stageSigShape_fold
+  | binary tag lhs rhs =>
+    simp only [enodeSig]
+    exact (signatureAt_shape hSigs lhs).join (signatureAt_shape hSigs rhs)
+  | unary tag arg =>
+    simpa only [enodeSig] using signatureAt_shape hSigs arg
+  | clamp value lo hi | select value lo hi | arraySet value lo hi =>
+    simp only [enodeSig]
+    exact ((signatureAt_shape hSigs value).join
+      (signatureAt_shape hSigs lo)).join (signatureAt_shape hSigs hi)
+  | index array index =>
+    simp only [enodeSig]
+    exact (signatureAt_shape hSigs array).join
+      (signatureAt_shape hSigs index)
+  | bankSum capacity tables body dynCount binderId =>
+    simp only [enodeSig]
+    have hTables : StageSigShape
+        (tables.foldl (fun accumulated id =>
+          accumulated.join (sigs[id.idx]?.getD { base := .s1 }))
+          { base := .fold }) := by
+      rw [← Array.foldl_toList]
+      exact foldl_signatures_shape hSigs tables.toList _ stageSigShape_fold
+    have hBody := hTables.join (signatureAt_shape hSigs body)
+    cases dynCount with
+    | none => exact hBody
+    | some count => exact hBody.join (signatureAt_shape hSigs count)
+  | routedSum capacity outputCount routes tables values dynCount binderId =>
+    simp only [enodeSig]
+    have hItems : StageSigShape
+        ((tables ++ values).foldl (fun accumulated id =>
+          accumulated.join (sigs[id.idx]?.getD { base := .s1 }))
+          { base := .fold }) := by
+      rw [← Array.foldl_toList]
+      exact foldl_signatures_shape hSigs (tables ++ values).toList _
+        stageSigShape_fold
+    cases dynCount with
+    | none => exact hItems
+    | some count => exact hItems.join (signatureAt_shape hSigs count)
+
+theorem eintern_preserves_signaturesShaped_auto {arena : ExprArena}
+    {node : ENode} (hArena : SignaturesShaped arena) :
+    SignaturesShaped (eintern node arena).2 :=
+  eintern_preserves_signaturesShaped hArena (enodeSig_shape hArena node)
+
+theorem signaturesGenerated_push {arena : ExprArena} {node : ENode}
+    (hGenerated : SignaturesGenerated arena)
+    (hAligned : arena.sigs.size = arena.nodes.size) :
+    SignaturesGenerated {
+      arena with
+      nodes := arena.nodes.push node
+      sigs := arena.sigs.push (enodeSig arena.sigs node) } := by
+  intro index hIndex
+  simp only [Array.size_push] at hIndex
+  by_cases hOld : index < arena.nodes.size
+  · have hSigOld : index < arena.sigs.size := by
+      simpa [hAligned] using hOld
+    have hStop : index ≤ arena.sigs.size := by
+      simpa [hAligned] using Nat.le_of_lt hOld
+    rw [Array.getElem?_push_lt hSigOld,
+      Array.extract_push_of_le hStop, Array.getElem_push_lt hOld]
+    have hAt := hGenerated index hOld
+    rw [Array.getElem?_eq_getElem hSigOld] at hAt
+    exact hAt
+  · have hNew : index = arena.nodes.size := by omega
+    subst index
+    simp [hAligned.symm]
+    have hGet : (arena.nodes.push node)[arena.sigs.size] = node := by
+      simpa [hAligned] using
+        (Array.getElem_push_eq (xs := arena.nodes) (x := node))
+    rw [hGet]
+
+theorem eintern_preserves_signaturesSound {arena : ExprArena} {node : ENode}
+    (hSound : SignaturesSound arena)
+    (hChildren : ChildrenInPrefix arena node) :
+    SignaturesSound (eintern node arena).2 := by
+  have hWellFormed :=
+    (Tropical.Semantics.eintern_preserves hSound.arenaWellFormed hChildren).1
+  rw [Tropical.Semantics.eintern_run] at hWellFormed ⊢
+  split at *
+  · exact hSound
+  · exact {
+      arenaWellFormed := hWellFormed
+      generated := signaturesGenerated_push hSound.generated
+        hSound.arenaWellFormed.signaturesAligned
+      shaped := signaturesShaped_push hSound.shaped
+        (enodeSig_shape hSound.shaped node) }
 
 theorem stage_le_refl (stage : Stage) : stage.le stage = true := by
   cases stage <;> rfl
