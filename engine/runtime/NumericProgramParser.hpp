@@ -166,6 +166,7 @@ struct ParsedPlan6
   tropical_jit::FlatProgram                program;
   std::vector<std::string>                 array_slot_names;
   double                                   sample_rate = 44100.0;
+  uint32_t                                 output_channel_count = 1;
 
   // Engine realization strategy. Canonical fused plans omit the field.
   tropical_jit::CompilationMode compilation_mode = tropical_jit::CompilationMode::Fused;
@@ -318,6 +319,16 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
   auto & prog = result.program;
   prog.register_count = plan.value("register_count", 0u);
 
+  // The field is optional for Plan-6 backward compatibility: every historical
+  // manifest was mono. New manifests state the compact output width explicitly.
+  result.output_channel_count = plan.value("output_channel_count", 1u);
+  if (result.output_channel_count == 0
+      || result.output_channel_count > tropical_jit::kMaxOutputChannels)
+    throw std::runtime_error(
+      "NumericProgramParser: output_channel_count must be in [1," +
+      std::to_string(tropical_jit::kMaxOutputChannels) + "]");
+  prog.output_channel_count = result.output_channel_count;
+
   if (plan.contains("array_slot_sizes"))
     for (const auto & s : plan["array_slot_sizes"])
       prog.array_slot_sizes.push_back(s.get<uint32_t>());
@@ -350,6 +361,16 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
           sink.inputs.push_back(i.get<uint32_t>());
       sink.gain   = js.value("gain", 0.05);
       sink.target = js.value("target", 0u);
+      if (sink.target >= result.output_channel_count)
+        throw std::runtime_error(
+          "NumericProgramParser: sink target " + std::to_string(sink.target) +
+          " is out of range for output_channel_count " +
+          std::to_string(result.output_channel_count));
+      if (std::any_of(prog.sinks.begin(), prog.sinks.end(),
+            [&](const auto & existing) { return existing.target == sink.target; }))
+        throw std::runtime_error(
+          "NumericProgramParser: duplicate sink target " +
+          std::to_string(sink.target));
       prog.sinks.push_back(sink);
     }
   }

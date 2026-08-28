@@ -193,8 +193,10 @@ inductive ENode where
   | sampleRate
   | sampleIndex
   /-- Absolute sample coordinate reserved for the tile materializer.  It has
-      the same exact/JIT value as `sampleIndex`, but a distinct identity keeps
-      the endpoint dependency slice from capturing the audio carrier clock. -/
+      its own semantic environment rail. Ordinary exact/JIT evaluation binds
+      it to `sampleIndex`; materialization may bind an independent endpoint
+      coordinate. Its distinct identity keeps the endpoint dependency slice
+      from capturing the audio carrier clock. -/
   | tileSampleIndex
   /-- Dispatch-local interpolation coordinate.  The exact/JIT semantics are
       zero (therefore the unsplit graph evaluates its exact left endpoint);

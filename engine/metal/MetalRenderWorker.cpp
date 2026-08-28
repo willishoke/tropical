@@ -264,7 +264,9 @@ bool MetalRenderWorker::render_exact_fallback(
     destination,
     frames,
     cursor.exact_slots.data());
-  for (uint32_t i = 0; i < frames; ++i)
+  const std::size_t output_count =
+    static_cast<std::size_t>(frames) * cursor.request.output_channels;
+  for (std::size_t i = 0; i < output_count; ++i)
     if (!std::isfinite(destination[i])) return false;
   return true;
 }
@@ -302,6 +304,18 @@ MetalRenderWorker::schedule(RenderEpochRequest request)
 {
   if (request.epoch_id == 0)
     return {false, "MetalRenderWorker: epoch id must be nonzero", 0, 0, 0};
+  if (request.output_channels != queue_.output_channels())
+    return {
+      false, "MetalRenderWorker: request/queue output channel mismatch",
+      request.epoch_id, 0, 0
+    };
+  if (request.kernel
+      && tropical_metal::output_channels(*request.kernel)
+           != request.output_channels)
+    return {
+      false, "MetalRenderWorker: request/kernel output channel mismatch",
+      request.epoch_id, 0, 0
+    };
   if (!request.kernel && !render_)
     return {
       false, "MetalRenderWorker: request has no Metal kernel",

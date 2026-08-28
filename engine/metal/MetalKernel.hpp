@@ -32,28 +32,48 @@ enum class DispatchKind : uint8_t
 };
 
 /// Compile MSL source and build the pipeline + buffers. Control-thread only.
-/// `buffer_length` sizes the output buffer; `slot_count` sizes the slot
-/// snapshot; `column_count` sizes the packed coefficient-column buffer
+/// `buffer_length` is a frame capacity and `output_channels` is the immutable
+/// compact channel width. Together they size the frame-major interleaved
+/// output buffer. `slot_count` sizes the slot snapshot; `column_count` sizes
+/// the packed coefficient-column buffer
 /// (`buffer(3)`, banks-as-data) — 0 for plans without hoisted columns
 /// (the kernel then has the plain 3-binding ABI and no column buffer is
 /// allocated or bound). Returns nullptr on failure with the compiler
 /// diagnostic in `err`.
 MetalKernelPtr create(const std::string & msl_source,
                       uint32_t buffer_length,
+                      uint32_t output_channels,
                       uint32_t slot_count,
                       uint32_t column_count,
                       std::string & err,
                       DispatchKind dispatch_kind = DispatchKind::SampleThreads,
                       uint32_t threadgroup_scratch_bytes = 0);
 
+/// Backward-compatible mono construction seam. New runtime integrations must
+/// pass the plan's explicit output width to the overload above.
+inline MetalKernelPtr create(
+  const std::string & msl_source,
+  uint32_t buffer_length,
+  uint32_t slot_count,
+  uint32_t column_count,
+  std::string & err,
+  DispatchKind dispatch_kind = DispatchKind::SampleThreads,
+  uint32_t threadgroup_scratch_bytes = 0)
+{
+  return create(
+    msl_source, buffer_length, 1, slot_count, column_count, err,
+    dispatch_kind, threadgroup_scratch_bytes);
+}
+
 DispatchKind dispatch_kind(const MetalKernel & k);
+uint32_t output_channels(const MetalKernel & k);
 uint32_t threadgroup_width(const MetalKernel & k);
 uint32_t threadgroup_scratch_bytes(const MetalKernel & k);
 
 /// Worker-only blocking primitive. `slots` and `columns` are immutable f32
 /// snapshots owned by one render epoch request. The destination is stable,
-/// preallocated tile storage. A command-buffer failure permanently latches the
-/// kernel closed.
+/// preallocated storage for `frames * output_channels(k)` interleaved doubles.
+/// A command-buffer failure permanently latches the kernel closed.
 bool render_tile(MetalKernel & k,
                  const float * slots, uint32_t n_slots,
                  const float * columns, uint32_t n_columns,

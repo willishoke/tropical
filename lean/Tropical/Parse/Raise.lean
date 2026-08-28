@@ -200,7 +200,7 @@ def normalizeProgramFile (raw : JsonV) : Except String JsonV := do
       "top-level params are retired; declare body.decls paramDecl entries instead"
   if (raw.getField? "audio_outputs").isSome then
     Schema.zerr "audio_outputs"
-      "audio_outputs is retired; declare body.assigns outputAssign{name:'dac.out',expr:{op:'ref',...}} instead"
+      "audio_outputs is retired; declare body.assigns outputAssign{name:'dac.out',channel?:0,expr:{op:'ref',...}} instead"
   if (raw.getField? "breaks_cycles").isSome then
     Schema.zerr "breaks_cycles"
       "breaks_cycles is retired; tropical patch graphs are closed-form and acyclic"

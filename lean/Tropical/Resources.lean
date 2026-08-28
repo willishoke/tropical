@@ -47,7 +47,10 @@ programs are authored in Lean (arrow builders) and registered at boot (or
 crystallized from a session with `export_program`); a file carrying a
 `programDecl` is refused at ingest.
 **Audio output is an `outputAssign` in the body with name `"dac.out"`** — wire
-the signal you want heard to it. Root `params`, `audio_outputs`, and
+the signal you want heard to it. Add `"channel": 1` (or another non-negative
+index) for an independent output channel; an absent channel is the legacy mono
+channel 0. Multiple assignments to one channel are mixed in authored order.
+Root `params`, `audio_outputs`, and
 `breaks_cycles` carriers are retired and refused.
 
 {
@@ -141,7 +144,8 @@ Use `wire` with a single set entry, or `set_param` for control parameters.
 - Use named ports (e.g. `"output": "out"`) rather than integer indices.
 - Wire everything in one program object where possible; minimize round trips.
 - Audio output goes through a body `outputAssign` named `"dac.out"` (or the
-  `wire` tool with `instance: "dac", input: "out"`).
+  `wire` tool with `instance: "dac", input: "out"`). Add `channel` for
+  independent stereo/multichannel routing; omission keeps mono channel 0.
 "#
 
 /-- Port of `renderProgramCatalog` over the engine catalog (concrete

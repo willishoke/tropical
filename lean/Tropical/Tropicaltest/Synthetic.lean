@@ -212,6 +212,7 @@ private def routedPlan (capacity : Nat := 4)
     sinks := #[{ inputs := #[0], gain := jn 1, target := 0 },
       { inputs := #[1], gain := jn 1, target := 1 },
       { inputs := #[2], gain := jn 1, target := 2 }],
+    outputChannelCount := 3,
     sources := defaultSources, slotCount := 5,
     slotNames := #["out:0", "out:1", "out:2", "param:count", "param:scale"],
     slotDefaults := #[Lean.Json.num (jn 0), Lean.Json.num (jn 0),
@@ -246,6 +247,7 @@ private def routedUnrolledPlan (trips : Nat) : FlatPlan := Id.run do
             sinks := #[{ inputs := #[0], gain := jn 1, target := 0 },
               { inputs := #[1], gain := jn 1, target := 1 },
               { inputs := #[2], gain := jn 1, target := 2 }],
+            outputChannelCount := 3,
             sources := defaultSources, slotCount := 5,
             slotNames := #["out:0", "out:1", "out:2", "param:count", "param:scale"],
             slotDefaults := #[Lean.Json.num (jn 0), Lean.Json.num (jn 0),
@@ -320,6 +322,9 @@ def runRoutedSumCoverage : IO Bool := do
         (msl.splitOn "threadgroup float tf7;").length == 2 &&
         (msl.splitOn "    float tf4;").length == 2 &&
         (msl.splitOn "switch (rs").length == 1 &&
+        (msl.splitOn "output_buffer[s * 3u + 0u]").length == 2 &&
+        (msl.splitOn "output_buffer[s * 3u + 1u]").length == 2 &&
+        (msl.splitOn "output_buffer[s * 3u + 2u]").length == 2 &&
         (msl.splitOn s!"tropical.threadgroup_scratch_bytes={static.metalThreadgroupScratchBytes}").length > 1
     | _, _ => false
   match ← renderIrBytes static, ← renderIrBytes (routedUnrolledPlan 4),

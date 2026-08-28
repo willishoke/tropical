@@ -34,6 +34,7 @@
 
 import { describe, test, expect, setDefaultTimeout } from 'bun:test'
 import { spawnSync } from 'bun'
+import { readFileSync, writeFileSync } from 'fs'
 import { resolve, dirname } from 'path'
 import { fileURLToPath } from 'url'
 import { expectAudible } from './energy_floor'
@@ -61,7 +62,14 @@ function render(verb: 'render-bytes' | 'render-metal', planPath: string,
   const r = spawnSync(args, { cwd: repoRoot, env: cliEnv })
   if (r.exitCode !== 0) throw new Error(`diffcli ${verb} failed: ${r.stderr?.toString()}`)
   const b = r.stdout
-  const n = frames * buffer
+  const plan = JSON.parse(readFileSync(planPath, 'utf-8'))
+  const outputChannelCount = plan.output_channel_count ??
+    (plan.sinks ?? []).reduce(
+      (count: number, sink: { target?: number }) =>
+        Math.max(count, (sink.target ?? 0) + 1),
+      1,
+    )
+  const n = frames * buffer * outputChannelCount
   return new Float64Array(b.buffer.slice(b.byteOffset, b.byteOffset + n * 8))
 }
 
@@ -76,8 +84,6 @@ function snrDb(ref: Float64Array, got: Float64Array): number {
   if (err === 0) return Infinity
   return 10 * Math.log10(sig / err)
 }
-
-import { writeFileSync } from 'fs'
 
 function planFile(name: string, planJson: string): string {
   const p = `/tmp/mvj-${name}.plan.json`

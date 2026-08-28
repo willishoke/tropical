@@ -17,6 +17,11 @@
 
 namespace tropical_jit
 {
+// Native kernels use compact frame-major output buffers. Keep the bound small
+// and fixed so FlatRuntime can preallocate callback scratch once at startup;
+// hot-swapping a wider plan never resizes audio-thread storage.
+inline constexpr uint32_t kMaxOutputChannels = 64;
+
 #ifdef TROPICAL_WASM_EMIT
 // Lower textual LLVM IR (Lean's EmitLlvm output) to a complete wasm32 module,
 // fully in-process: a wasm32 TargetMachine emits an object, lld::wasm::link
@@ -211,6 +216,7 @@ struct FlatProgram
   std::vector<InstanceProgram> instance_functions;
   std::vector<Sink>            sinks;    // device-bound outputs (plan_6 mix path)
   std::vector<Source>          sources;  // runtime-bound inputs (plan_6 source path)
+  uint32_t                     output_channel_count = 1;
 };
 
 // Engine realization strategy.
@@ -275,8 +281,10 @@ using NumericKernelFn = void (*)(
 // needs per-call inputs, we'll widen the signature.
 //
 // `preamble`, `instance_i`, and `state_evolution` share an identical
-// signature (PerSampleFn). `postamble_mix` widens it with the audio
-// buffer and the per-sample destination index, because it is the
+// signature (PerSampleFn). `postamble_mix` widens it with the compact
+// frame-major audio buffer, the per-frame destination index, and channel
+// count. Each sink writes `output_index * output_channel_count + target`.
+// This is the
 // single LLVM-land site that touches `output_buffer`. Keeping the mix
 // inside LLVM preserves the optimizer's view of mix-temp coercions.
 using PerSampleFn = void (*)(
@@ -299,7 +307,8 @@ using PostambleMixFn = void (*)(
   const uint64_t * param_ptrs,
   double * slots,
   double * output_buffer,
-  uint64_t output_index);
+  uint64_t output_index,
+  uint32_t output_channel_count);
 
 struct MicrokernelKernels
 {

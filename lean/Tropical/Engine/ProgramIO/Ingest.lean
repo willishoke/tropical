@@ -36,6 +36,19 @@ private def jvStr? (j : JsonV) (k : String) : Option String :=
 open Tropical.Parse (JsonV) in
 private def jvOp? (j : JsonV) : Option String := jvStr? j "op"
 
+open Tropical.Parse (JsonV) in
+private def jvChannel (j : JsonV) (context : String) : EngineM Nat :=
+  match j.getField? "channel" with
+  | none | some .null => pure 0
+  | some (.num n) =>
+    let value := n.toFloat
+    if value >= 0 && value == value.floor then
+      pure value.toUInt64.toNat
+    else
+      internalError s!"{context}: dac.out channel must be a non-negative integer"
+  | some _ =>
+    internalError s!"{context}: dac.out channel must be a non-negative integer"
+
 /-- Resolve a body dac-wire expression (port of
     `resolveDacWireExprToGraphOutput`; exact messages). -/
 private def resolveDacWire (st : SessionSt) (expr : Tropical.Parse.JsonV)
@@ -165,12 +178,16 @@ private def ingestProgram (env : Env) (node : Tropical.Parse.JsonV)
 
   -- Graph outputs are canonical body `dac.out` wires.
   let st ← env.state.get
-  let mut outs : Array (String × String) := #[]
+  let mut outs : Array GraphOutput := #[]
   for a in jvBodyEntries node "assigns" do
     if jvOp? a == some "outputAssign" && jvStr? a "name" == some "dac.out" then
       let some expr := a.getField? "expr"
         | internalError s!"{context}: dac.out wire requires a ref-shaped expression (use \{op:'ref',instance,output}); got literal/array."
-      outs := outs.push (← resolveDacWire st expr context)
+      let (sourceInstance, sourceOutput) ← resolveDacWire st expr context
+      outs := outs.push {
+        channel := ← jvChannel a context
+        sourceInstance
+        sourceOutput }
   env.state.modify fun st => { st with graphOutputs := st.graphOutputs ++ outs }
 
 def handleLoad (env : Env) (args : Json) : EngineM Json := do

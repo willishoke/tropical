@@ -65,6 +65,7 @@ def knownGates : Array String := #[
   "clock-algebra-theorems",
   "reduce-coverage",
   "routed-sum-coverage",
+  "runtime-multichannel",
   "msl-goldens",
   "msl-column-guard",
   "exact-carrier",
@@ -178,6 +179,20 @@ def obligations : Array Obligation := #[
     status := .evidenceBacked
     limitation := "Evidence is tolerance-based and hardware-dependent; it is not exact equality or a proof of Metal compiler behavior."
     priority := .high },
+  { id := "INDEPENDENT_OUTPUT_CHANNEL_LAYOUT"
+    statement := "Plan sinks publish independent logical channels and native, wasm, and Metal kernels expose the declared image as frame-major interleaved samples while advancing clocks in frames."
+    evidence := #[.executableGate, .inspection]
+    implementationPaths := #["design/stereo-output-contract.md",
+      "lean/Tropical/Plan.lean", "lean/Tropical/PlanDecode.lean",
+      "lean/Tropical/Ir/EmitLlvm.lean", "lean/Tropical/Ir/EmitMsl.lean",
+      "engine/runtime/FlatRuntime.cpp", "engine/dac/TropicalDAC.hpp",
+      "web/worklet/processor.ts"]
+    gateNames := #["runtime-multichannel", "current_module_process",
+      "metal-ctest", "manual:device channel-layout review"]
+    owner := "Audio output"
+    status := .evidenceBacked
+    limitation := "Schema validation and native/web/Metal mappings have executable coverage. Plan reference semantics, backend refinement, physical device negotiation, callback deadlines, and the fixed-width live Metal queue boundary remain separate obligations."
+    priority := .critical },
   { id := "METAL_CALLBACK_CONSUMES_PREPARED_EPOCHS"
     statement := "Live Metal submits and waits only on its render worker; the audio callback copies exact-tagged prepared tiles and activates old-before-E/new-at-E or fails silent."
     evidence := #[.executableGate, .differential, .inspection]
@@ -240,7 +255,7 @@ def obligations : Array Obligation := #[
       "current_module_process", "manual:serialized-plan boundary review"]
     owner := "Compatibility"
     status := .evidenceBacked
-    limitation := "Canonical plan 6 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, the tick/rate source pair, empty child/instruction arrays, zero loop ids, and the ordinary sample-thread Metal execution description."
+    limitation := "Canonical plan 6 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, mono output_channel_count, the tick/rate source pair, empty child/instruction arrays, zero loop ids, and the ordinary sample-thread Metal execution description."
     priority := .medium },
   { id := "FROZEN_AUDIO_GOLDENS_ANCHOR_CORRECTNESS"
     statement := "Frozen audio hashes are the independent behavioral anchor after retirement of the TypeScript compiler."

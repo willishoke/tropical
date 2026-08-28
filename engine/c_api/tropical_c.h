@@ -204,7 +204,13 @@ void             tropical_runtime_process(tropical_runtime_t);
    worker has prepared the next exact tile, then runs the ordinary bounded
    callback path once. Never call from an audio callback. */
 bool             tropical_runtime_process_offline(tropical_runtime_t);
+/* Legacy mono view: one channel-0 sample per frame, even when the active
+   native plan renders multiple channels. */
 const double*    tropical_runtime_output_buffer(tropical_runtime_t);
+/* Compact frame-major native output. Contains
+   buffer_length * tropical_runtime_output_channel_count() doubles. */
+const double*    tropical_runtime_interleaved_output_buffer(tropical_runtime_t);
+unsigned int     tropical_runtime_output_channel_count(tropical_runtime_t);
 unsigned int     tropical_runtime_get_buffer_length(tropical_runtime_t);
 /* Device-independent Metal render quantum. Returns 0 for JIT-only,
    non-Metal, and unloaded runtimes. */

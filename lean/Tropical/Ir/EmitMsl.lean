@@ -45,7 +45,8 @@ sample_rate; uint buffer_length; }` (8+4+4, no padding).
   cross-thread races by construction. Constants fold THROUGH kernel-
   written slots (safe: the CPU kernel rewrites them every sample, so
   host writes there are clobbered on CPU too — a folded slot cannot be
-  a live knob).
+  a live knob). Sink targets are compact, frame-major channels:
+  `output_buffer[s * C + target]`, where `C = max(1, maxTarget + 1)`.
 * **Typed locals, no i64 temp pool.** The bitcast pool exists so one C
   array can back three types; MSL locals are just typed variables
   `tf{n}`/`ti{n}`/`tb{n}` with the same last-write-type discipline
@@ -850,14 +851,22 @@ def emitKernelBlock (sizes : Array Nat) (inst : InstanceFunction) : M Unit := do
 termination_by sizeOf inst
 decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children _h
 
-def emitSinks (sinks : Array SinkSpec) : M Unit := do
+private def sinkOutputIndex (channelCount target : Nat) : String :=
+  if channelCount == 1 then "s" else s!"s * {channelCount}u + {target}u"
+
+def emitSinks (channelCount : Nat) (sinks : Array SinkSpec) : M Unit := do
+  -- Targets are unique by the validated-plan contract.  Fill holes so sparse
+  -- target sets and sink-free plans never expose stale GPU buffer contents.
+  for target in [0:channelCount] do
+    unless sinks.any (fun sink => sink.target == target) do
+      line s!"output_buffer[{sinkOutputIndex channelCount target}] = {f32Lit 0.0};"
   for sink in sinks do
     let mut acc := f32Lit 0.0
     for slotIdx in sink.inputs do
       let v ← coerceF32 (← loadSlot slotIdx)
       let r ← bindVal .float s!"({acc} + {v})"
       acc := r.ref
-    line s!"output_buffer[s] = {acc} * {f32Lit sink.gain.toFloat};"
+    line s!"output_buffer[{sinkOutputIndex channelCount sink.target}] = {acc} * {f32Lit sink.gain.toFloat};"
 
 -- ─────────────────────────────────────────────────────────────
 -- Module entry point
@@ -974,6 +983,10 @@ private def cooperativeRouteConstants (begins : Array NInstr) : String :=
     and in-kernel fills. Columns-free plans keep the exact 3-binding
     header, byte-frozen by the msl-golden gates. -/
 def emitKernel (plan : FlatPlan) : Except String String := do
+  if !plan.outputLayoutWellFormed then
+    throw "EmitMsl: output channel count must be positive and sink targets must be unique and in range"
+  if plan.outputChannelCount > 64 then
+    throw "EmitMsl: output channel count exceeds the supported maximum of 64"
   let sizes := plan.arraySlotSizes
   let cooperative := plan.hasRoutedSum
   let flat := planInstrs plan
@@ -1050,7 +1063,7 @@ def emitKernel (plan : FlatPlan) : Except String String := do
     for inst in plan.instanceFunctions do
       emitKernelBlock sizes inst
     if cooperative then ensureCooperativeLane0
-    emitSinks plan.sinks
+    emitSinks plan.outputChannelCount plan.sinks
     if cooperative then
       popIndent
       line "}"

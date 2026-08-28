@@ -42,9 +42,11 @@ tool_args GetInfo where
 deriving instance ToJson for GetInfo
 
 tool_args Wire where
-  /-- Inputs to set: each {instance, input, expr, [combine]}. -/
+  /-- Inputs to set: each {instance, input, expr, [combine]}. DAC routes may
+      add `channel`; absent means the legacy mono channel 0. -/
   set : Option (Array Json)
-  /-- Inputs to disconnect: each {instance, input}. -/
+  /-- Inputs to disconnect: each {instance, input}. A DAC `channel` removes
+      only that channel; omitting it retains the legacy remove-all behavior. -/
   remove : Option (Array Json)
 deriving instance ToJson for Wire
 

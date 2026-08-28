@@ -2,7 +2,8 @@
  * manifest.ts — the runtime's consumption contract.
  *
  * A `KernelManifest` is everything the runtime needs to drive a Lean-emitted
- * wasm32 kernel: scratch/array/slot sizing, slot defaults, and sample rate. It is
+ * wasm32 kernel: scratch/array/slot sizing, slot defaults, sample rate, and the
+ * fixed output width. It is
  * a *subset* of `tropical_plan_6` — the runtime never sees the instruction
  * stream or any other compiler internal. This type IS the boundary between
  * tropical (the producer, via `diffcli compile-wasm`) and any consumer (this
@@ -21,4 +22,18 @@ export type KernelManifest = {
   slotCount: number
   /** Seed value for each slot. Params default here too. */
   slotDefaults: number[]
+  /** Compact device output width. Omitted v1 manifests are mono. */
+  outputChannelCount?: number
+}
+
+export const MAX_KERNEL_OUTPUT_CHANNELS = 64
+
+/** Resolve and validate the fixed output width once, off the audio callback. */
+export function kernelOutputChannelCount(manifest: KernelManifest): number {
+  const count = manifest.outputChannelCount ?? 1
+  if (!Number.isSafeInteger(count) || count < 1
+      || count > MAX_KERNEL_OUTPUT_CHANNELS)
+    throw new RangeError(
+      `KernelManifest.outputChannelCount must be an integer in [1, ${MAX_KERNEL_OUTPUT_CHANNELS}]`)
+  return count
 }

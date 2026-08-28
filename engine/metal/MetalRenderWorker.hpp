@@ -73,6 +73,7 @@ struct RenderEpochRequest
 {
   uint64_t epoch_id = 0;
   MetalKernelPtr kernel;
+  uint32_t output_channels = 1;
   double sample_rate = 44100.0;
   std::vector<float> slots;
   std::vector<float> columns;
@@ -143,6 +144,8 @@ struct MetalRenderWorkerTestSeam
 class MetalRenderWorker
 {
 public:
+  // `frames` is a frame count; `destination` has stable storage for
+  // `frames * request.output_channels` frame-major interleaved samples.
   using RenderFunction = std::function<bool(
     const RenderEpochRequest &, uint64_t, uint32_t, double *)>;
 

@@ -542,6 +542,20 @@ const double* tropical_runtime_output_buffer(tropical_runtime_t r)
   return static_cast<tropical_runtime::FlatRuntime*>(r)->outputBuffer.data();
 }
 
+const double* tropical_runtime_interleaved_output_buffer(tropical_runtime_t r)
+{
+  if (!r) return nullptr;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->getInterleavedOutputBuffer();
+}
+
+unsigned int tropical_runtime_output_channel_count(tropical_runtime_t r)
+{
+  if (!r) return 0;
+  return static_cast<tropical_runtime::FlatRuntime*>(r)
+    ->getOutputChannelCount();
+}
+
 unsigned int tropical_runtime_get_buffer_length(tropical_runtime_t r)
 {
   if (!r) return 0;

@@ -147,7 +147,7 @@ def handleRemoveInstance (env : Env) (args : Json) : EngineM Json := do
     { st with
       wires := st.wires.filter fun w =>
         !(w.instName == instanceName || w.expr.deps.contains instanceName)
-      graphOutputs := st.graphOutputs.filter (·.1 != instanceName)
+      graphOutputs := st.graphOutputs.filter (·.sourceInstance != instanceName)
       scopeTaps := st.scopeTaps.filter (·.sourceInstance != instanceName) }
   syncCompile env
   pure <| Json.mkObj [("removed", Json.str instanceName)]

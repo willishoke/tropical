@@ -61,12 +61,19 @@ function compileViaLean(program: ProgramFile): string {
 /** Trim a plan_6 JSON to the KernelManifest the runtime consumes. */
 function manifestFromPlan(planJson: string): KernelManifest {
   const p = JSON.parse(planJson)
+  const outputChannelCount = p.output_channel_count ??
+    (p.sinks ?? []).reduce(
+      (count: number, sink: { target?: number }) =>
+        Math.max(count, (sink.target ?? 0) + 1),
+      1,
+    )
   return {
     sampleRate:     p.config?.sampleRate ?? 44100,
     registerCount:  p.register_count ?? 0,
     arraySlotSizes: p.array_slot_sizes ?? [],
     slotCount:      p.slot_count ?? (p.slot_defaults?.length ?? 0),
     slotDefaults:   p.slot_defaults ?? [],
+    outputChannelCount,
   }
 }
 
@@ -77,7 +84,9 @@ function runNative(wirePlan: string, samples: number): Float64Array {
   const r = spawnSync([diffcli, 'render-bytes', tmp, '--frames', '1', '--buffer', String(samples)], { cwd: repoRoot, env: cliEnv })
   if (r.exitCode !== 0) throw new Error(`diffcli render-bytes failed (exit ${r.exitCode}): ${r.stderr?.toString()}`)
   const b = r.stdout
-  return new Float64Array(b.buffer.slice(b.byteOffset, b.byteOffset + samples * 8))
+  const outputSamples = samples * (manifestFromPlan(wirePlan).outputChannelCount ?? 1)
+  return new Float64Array(
+    b.buffer.slice(b.byteOffset, b.byteOffset + outputSamples * 8))
 }
 
 /** WASM side: lower the same source to wasm32 in-process and drive it through
@@ -148,7 +157,8 @@ describe('wasm vs native JIT', () => {
     const nat = runNative(wire, N)
     expectAudible('FixedSinOsc 440 Hz', nat)
     const wasm = await runWasm(prog, wire, N)
-    for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
+    expect(wasm.length).toBe(nat.length)
+    for (let i = 0; i < nat.length; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
 
   test('FixedSinOsc 880 Hz — 128 samples', async () => {
@@ -158,7 +168,8 @@ describe('wasm vs native JIT', () => {
     const nat = runNative(wire, N)
     expectAudible('FixedSinOsc 880 Hz', nat)
     const wasm = await runWasm(prog, wire, N)
-    for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
+    expect(wasm.length).toBe(nat.length)
+    for (let i = 0; i < nat.length; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
 
   test('FixedSinOsc → SoftClip(drive 4) — 256 samples', async () => {
@@ -168,7 +179,8 @@ describe('wasm vs native JIT', () => {
     const nat = runNative(wire, N)
     expectAudible('FixedSinOsc → SoftClip(drive 4)', nat)
     const wasm = await runWasm(prog, wire, N)
-    for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
+    expect(wasm.length).toBe(nat.length)
+    for (let i = 0; i < nat.length; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
 
   // Program definitions over the wire are retired (elaborator retirement,
@@ -216,6 +228,7 @@ describe('wasm vs native JIT', () => {
     const nat = runNative(wire, N)
     expectAudible('op-zoo', nat)
     const wasm = await runWasm(prog, wire, N)
-    for (let i = 0; i < N; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
+    expect(wasm.length).toBe(nat.length)
+    for (let i = 0; i < nat.length; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
 })

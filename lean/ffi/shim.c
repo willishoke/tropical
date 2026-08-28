@@ -231,7 +231,7 @@ LEAN_EXPORT lean_obj_res shim_runtime_process_offline(b_lean_obj_arg rt,
       lean_box(tropical_runtime_process_offline(unwrap(rt))));
 }
 
-/* Copy the output buffer (buffer_length doubles) into a fresh ByteArray. */
+/* Copy the channel-0 compatibility view into a fresh ByteArray. */
 LEAN_EXPORT lean_obj_res shim_runtime_output_bytes(b_lean_obj_arg rt, lean_obj_arg world) {
   (void)world;
   tropical_runtime_t r = unwrap(rt);
@@ -241,6 +241,27 @@ LEAN_EXPORT lean_obj_res shim_runtime_output_bytes(b_lean_obj_arg rt, lean_obj_a
   lean_obj_res arr = lean_alloc_sarray(1, bytes, bytes);
   if (buf && bytes) memcpy(lean_sarray_cptr(arr), buf, bytes);
   return lean_io_result_mk_ok(arr);
+}
+
+/* Copy compact frame-major native output into a fresh ByteArray. */
+LEAN_EXPORT lean_obj_res shim_runtime_output_interleaved_bytes(
+    b_lean_obj_arg rt, lean_obj_arg world) {
+  (void)world;
+  tropical_runtime_t r = unwrap(rt);
+  const double *buf = tropical_runtime_interleaved_output_buffer(r);
+  size_t samples = (size_t)tropical_runtime_get_buffer_length(r)
+                 * (size_t)tropical_runtime_output_channel_count(r);
+  size_t bytes = samples * sizeof(double);
+  lean_obj_res arr = lean_alloc_sarray(1, bytes, bytes);
+  if (buf && bytes) memcpy(lean_sarray_cptr(arr), buf, bytes);
+  return lean_io_result_mk_ok(arr);
+}
+
+LEAN_EXPORT lean_obj_res shim_runtime_output_channel_count(
+    b_lean_obj_arg rt, lean_obj_arg world) {
+  (void)world;
+  return lean_io_result_mk_ok(lean_box_uint32(
+      tropical_runtime_output_channel_count(unwrap(rt))));
 }
 
 LEAN_EXPORT lean_obj_res shim_runtime_get_buffer_length(b_lean_obj_arg rt, lean_obj_arg world) {

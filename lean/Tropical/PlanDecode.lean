@@ -42,6 +42,17 @@ private def optNat (j : JsonV) (k : String) (dflt : Nat) : Nat :=
   | some (.num n) => n.toFloat.toUInt64.toNat
   | _ => dflt
 
+private def optNatural (j : JsonV) (k : String) (dflt : Nat) : Except String Nat :=
+  match j.getField? k with
+  | none => pure dflt
+  | some (.num n) =>
+    let value := n.toFloat
+    if value >= 0 && value == value.floor then
+      pure value.toUInt64.toNat
+    else
+      throw s!"PlanDecode: field '{k}' must be a natural number"
+  | some _ => throw s!"PlanDecode: field '{k}' must be a natural number"
+
 private def rejectRetiredFields (j : JsonV) : Except String Unit := do
   for field in #[
       "state_init", "register_names", "register_types", "register_targets",
@@ -133,7 +144,7 @@ private def sinkOfWire (j : JsonV) : Except String SinkSpec := do
   let inputs := (optArr j "inputs").map fun x =>
     match x with | .num n => n.toFloat.toUInt64.toNat | _ => 0
   let gain := optNum j "gain" defaultSinkGain
-  let target := optNat j "target" 0
+  let target ← optNatural j "target" 0
   pure { inputs, gain, target }
 
 private def sourceOfWire (j : JsonV) : Except String SourceKind := do
@@ -164,6 +175,7 @@ private def ofWireV (j : JsonV) : Except String FlatPlan := do
     | _ => none).getD .fused
   let instFns ← (optArr j "instance_functions").mapM instanceOfWire
   let sinks ← (optArr j "sinks").mapM sinkOfWire
+  let outputChannelCount ← optNatural j "output_channel_count" 1
   let sources ← if (j.getField? "sources").isSome
     then (optArr j "sources").mapM sourceOfWire
     else pure defaultSources
@@ -174,13 +186,13 @@ private def ofWireV (j : JsonV) : Except String FlatPlan := do
   let phaserTimeStaging := match j.getField? "phaser_time_staging" with
     | some (.str reason) => some reason
     | _ => none
-  pure {
+  let plan : FlatPlan := {
     sampleRate, compilationMode := mode,
     arraySlotNames := strArr j "array_slot_names",
     registerCount, arraySlotCount,
     arraySlotSizes := natArr j "array_slot_sizes",
     instanceFunctions := instFns,
-    sinks, sources,
+    sinks, outputChannelCount, sources,
     slotCount,
     slotNames := strArr j "slot_names",
     slotDefaults,
@@ -188,6 +200,9 @@ private def ofWireV (j : JsonV) : Except String FlatPlan := do
     tileArraySlots := natArr j "tile_array_slots",
     tileIntervalFrames := optNat j "tile_interval_frames" 0,
     phaserTimeStaging }
+  if !plan.outputLayoutWellFormed then
+    throw "PlanDecode: output channel count must be positive and sink targets must be unique and in range"
+  pure plan
 
 /-- Parse a tropical_plan_6 JSON object into a `FlatPlan`. -/
 def FlatPlan.ofWire (j : Json) : Except String FlatPlan := do

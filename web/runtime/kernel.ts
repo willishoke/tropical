@@ -7,7 +7,7 @@
  * a *player* — no live recompile, no state-transfer hot-swap (those live on the
  * native instrument). Depends only on `KernelManifest`; no compiler internals.
  */
-import type { KernelManifest } from './manifest.js'
+import { kernelOutputChannelCount, type KernelManifest } from './manifest.js'
 import { computeLayout, type KernelLayout } from './layout.js'
 
 const WASM_PAGE = 65536
@@ -44,6 +44,7 @@ export class WasmKernel {
     private readonly layout: KernelLayout,
     private readonly manifest: KernelManifest,
     readonly maxBlockSize: number,
+    readonly outputChannelCount: number,
   ) {}
 
   static async instantiate(
@@ -51,12 +52,14 @@ export class WasmKernel {
     manifest: KernelManifest,
     maxBlockSize = 128,
   ): Promise<WasmKernel> {
+    const outputChannelCount = kernelOutputChannelCount(manifest)
     // Region bytes are small and known; the unknown is the module's
     // __heap_base (its shadow stack + data segment). Allocate 1 MiB of slack
     // above the regions, then grow once if heapBase lands higher.
     const arrayBytes = manifest.arraySlotSizes.reduce((a, s) => a + s, 0) * 8
     const regionBytes =
-      (64 + 2 * manifest.registerCount + manifest.slotCount + maxBlockSize +
+      (64 + 2 * manifest.registerCount + manifest.slotCount +
+       maxBlockSize * outputChannelCount +
        manifest.arraySlotSizes.length) * 8 + arrayBytes
     const initialPages = Math.ceil(((1 << 20) + regionBytes) / WASM_PAGE)
     const memory = new WebAssembly.Memory({ initial: initialPages })
@@ -72,7 +75,8 @@ export class WasmKernel {
     const needPages = Math.ceil(layout.endByte / WASM_PAGE)
     if (needPages > initialPages) memory.grow(needPages - initialPages)
 
-    const k = new WasmKernel(memory, kernel, layout, manifest, maxBlockSize)
+    const k = new WasmKernel(
+      memory, kernel, layout, manifest, maxBlockSize, outputChannelCount)
     k.initState()
     return k
   }
@@ -98,21 +102,26 @@ export class WasmKernel {
     new Float64Array(this.memory.buffer)[(this.layout.slots >> 3) + index] = value
   }
 
-  /** Run the kernel for `n` (≤ maxBlockSize) samples; return a view of the
-   *  f64 output region. This is the kernel's *native* output — what the
+  /** Run the kernel for `n` (≤ maxBlockSize) frames; return a frame-major,
+   *  interleaved view of `n * outputChannelCount` f64 samples. This is the
+   *  kernel's *native* output — what the
    *  WASM≡JIT equivalence gate compares against `render-bytes`. The view is
    *  valid until the next `render`/`process`. */
   render(n: number): Float64Array {
+    if (!Number.isSafeInteger(n) || n < 0 || n > this.maxBlockSize)
+      throw new RangeError(`render frame count must be in [0, ${this.maxBlockSize}]`)
     const L = this.layout
     this.kernel(L.inputs, L.registers, L.arrays, L.arraySizes, L.temps,
                 this.manifest.sampleRate, this.startIdx, /*param_ptrs*/ 0,
                 L.output, BigInt(n), L.slots)
     this.startIdx += BigInt(n)
-    return new Float64Array(this.memory.buffer, L.output, n)
+    return new Float64Array(
+      this.memory.buffer, L.output, n * this.outputChannelCount)
   }
 
-  /** Render `n` samples into `out` (f32 audio) with the anti-click fade and the
-   *  device-boundary clamp.
+  /** Render `n` frames into planar host outputs (f32 audio) with the anti-click
+   *  fade and the device-boundary clamp. Mono kernels are upmixed to every host
+   *  channel; wider kernels map each compact channel independently.
    *
    *  The clamp lives HERE and not in `render` on purpose: `render` returns the
    *  kernel's own f64 output — the value of `f(τ)` — and that is the surface the
@@ -124,19 +133,45 @@ export class WasmKernel {
    *  callback clamps — see `kDeviceOutputBound` in engine/dac/TropicalDAC.hpp
    *  for `C`, its measurement, and the NaN/±0 argument for spelling it as
    *  ordered-compare + select rather than Math.min/Math.max. */
-  process(out: Float32Array, n: number): void {
+  process(outputs: readonly Float32Array[], n: number): void {
+    if (outputs.length === 0)
+      throw new RangeError('process requires at least one host output channel')
+    if (this.outputChannelCount > 1
+        && outputs.length < this.outputChannelCount)
+      throw new RangeError(
+        `kernel requires ${this.outputChannelCount} host output channels; got ${outputs.length}`)
+    for (const output of outputs)
+      if (output.length < n)
+        throw new RangeError('host output channel is shorter than the frame count')
+
     const f64 = this.render(n)
-    for (let i = 0; i < n; i++) {
-      let v = f64[i]!
+    if (this.outputChannelCount > 1)
+      for (let channel = this.outputChannelCount; channel < outputs.length; channel++)
+        outputs[channel]!.fill(0, 0, n)
+
+    for (let frame = 0; frame < n; frame++) {
+      let gain = 1
       if (this.fadeInRem > 0) {
         const t = 1 - this.fadeInRem / FADE_SAMPLES
-        v *= t * t * (3 - 2 * t); this.fadeInRem--
+        gain = t * t * (3 - 2 * t); this.fadeInRem--
       } else if (this.fadeOutRem > 0) {
         const t = this.fadeOutRem / FADE_SAMPLES
-        v *= t * t * (3 - 2 * t); this.fadeOutRem--
+        gain = t * t * (3 - 2 * t); this.fadeOutRem--
       }
-      const lo = v > -DEVICE_OUTPUT_BOUND ? v : -DEVICE_OUTPUT_BOUND
-      out[i] = lo < DEVICE_OUTPUT_BOUND ? lo : DEVICE_OUTPUT_BOUND
+
+      if (this.outputChannelCount === 1) {
+        const v = f64[frame]! * gain
+        const lo = v > -DEVICE_OUTPUT_BOUND ? v : -DEVICE_OUTPUT_BOUND
+        const sample = lo < DEVICE_OUTPUT_BOUND ? lo : DEVICE_OUTPUT_BOUND
+        for (const output of outputs) output[frame] = sample
+        continue
+      }
+      for (let channel = 0; channel < this.outputChannelCount; channel++) {
+        const v = f64[frame * this.outputChannelCount + channel]! * gain
+        const lo = v > -DEVICE_OUTPUT_BOUND ? v : -DEVICE_OUTPUT_BOUND
+        outputs[channel]![frame] =
+          lo < DEVICE_OUTPUT_BOUND ? lo : DEVICE_OUTPUT_BOUND
+      }
     }
   }
 }

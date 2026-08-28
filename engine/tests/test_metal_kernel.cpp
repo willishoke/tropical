@@ -220,6 +220,27 @@ static void test_callback_thread_provenance()
   printf("PASS  callback-thread Metal provenance guard\n");
 }
 
+static void test_interleaved_stereo_readback()
+{
+  const std::string msl = msl_kernel(
+    "    output_buffer[s * 2u] = float(current_idx);\n"
+    "    output_buffer[s * 2u + 1u] = -float(current_idx);");
+  std::string error;
+  auto kernel = tropical_metal::create(msl, 16, 2, 0, 0, error);
+  ASSERT(kernel != nullptr);
+  ASSERT(tropical_metal::output_channels(*kernel) == 2);
+  std::array<double, 32> output{};
+  ASSERT(tropical_metal::render_tile(
+    *kernel, nullptr, 0, nullptr, 0, 44100.0, 100, 16,
+    output.data()));
+  for (uint32_t frame = 0; frame < 16; ++frame)
+  {
+    ASSERT_NEAR(output[frame * 2], 100.0 + frame, 1e-6);
+    ASSERT_NEAR(output[frame * 2 + 1], -(100.0 + frame), 1e-6);
+  }
+  printf("PASS  interleaved stereo Metal allocation and readback\n");
+}
+
 static void test_cooperative_dispatch_geometry()
 {
   const std::string msl =
@@ -1004,6 +1025,7 @@ static void test_metal_set_index()
 int main()
 {
   test_callback_thread_provenance();
+  test_interleaved_stereo_readback();
   test_cooperative_dispatch_geometry();
   test_independent_device_and_render_quanta();
   test_metal_ramp();

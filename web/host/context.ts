@@ -10,7 +10,9 @@
  * No SharedArrayBuffer / params: the demo is a player of precompiled patches,
  * so it needs no COOP/COEP and deploys as plain static files.
  */
-import type { KernelManifest } from '../runtime/index.js'
+import {
+  kernelOutputChannelCount, type KernelManifest,
+} from '../runtime/index.js'
 
 export type TropicalHost = {
   context: AudioContext
@@ -25,11 +27,14 @@ export type TropicalHost = {
 export type BootstrapOptions = {
   /** URL to the compiled worklet bundle (ESM). */
   workletUrl: string
-  /** Number of output channels (mono upmixed to stereo by default). */
+  /** Host output width. Mono kernels upmix; wider kernels map independently. */
   outputChannels?: number
 }
 
 export async function startHost(opts: BootstrapOptions): Promise<TropicalHost> {
+  const outputChannels = opts.outputChannels ?? 2
+  if (!Number.isSafeInteger(outputChannels) || outputChannels < 1)
+    throw new RangeError('outputChannels must be a positive integer')
   const ctx = new AudioContext()
   if (ctx.state === 'suspended') await ctx.resume()
 
@@ -38,7 +43,7 @@ export async function startHost(opts: BootstrapOptions): Promise<TropicalHost> {
   const node = new AudioWorkletNode(ctx, 'tropical-processor', {
     numberOfInputs: 0,
     numberOfOutputs: 1,
-    outputChannelCount: [opts.outputChannels ?? 2],
+    outputChannelCount: [outputChannels],
   })
 
   node.port.onmessage = (e) => {
@@ -53,6 +58,10 @@ export async function startHost(opts: BootstrapOptions): Promise<TropicalHost> {
     context: ctx,
     node,
     loadPatch(wasm, manifest) {
+      const required = kernelOutputChannelCount(manifest)
+      if (required > 1 && required > outputChannels)
+        throw new RangeError(
+          `patch requires ${required} output channels; host has ${outputChannels}`)
       node.port.postMessage({ type: 'load', wasm, manifest })
     },
     fadeIn() { node.port.postMessage({ type: 'fadeIn' }) },
