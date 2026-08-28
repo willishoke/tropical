@@ -207,4 +207,3 @@ cd lean && lake build Tropical.Testing.BuilderLaws tropicaltest
 - **Medium risk:** growing `ProgramWellFormed` into a full source type system.
 - This initiative does not prove expression or program denotational
   preservation; initiative 3 owns that layer.
-

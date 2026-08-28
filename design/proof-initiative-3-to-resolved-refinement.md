@@ -196,4 +196,3 @@ cd lean && lake build Tropical.Testing.StrataSemantics Tropical.Semantics
   exported theorem would suffice.
 - This initiative does not prove `CoreProgram → FlatPlan`; that requires the
   Plan semantics from initiative 1 and is a later compiler-wide capstone.
-

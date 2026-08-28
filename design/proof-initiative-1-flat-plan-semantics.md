@@ -224,4 +224,3 @@ LLVM dynamic-linking constraint.
 - **Medium risk:** treating coefficient and tile plans as one synchronous plan;
   their publication protocol is a host-level relation.
 - No LLVM, wasm, MSL, driver, cache, callback, or scheduling proof is in scope.
-
