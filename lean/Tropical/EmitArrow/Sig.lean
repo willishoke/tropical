@@ -71,10 +71,12 @@ structure CompleteProgramBody where
   assigns : Array (OutputTarget × Sig) := #[]
 deriving Inhabited, Repr
 
-/-- The sole expression-arena mutation in the authoring API.  Raw `ENode`
-    construction stays local to this module; ordinary callers use the smart
-    constructors below. -/
-private def internSig (node : ENode) : BuildM Sig := do
+/-- The sole expression-arena mutation in the authoring API.  This low-level
+    operation is public so its qualified preservation law can be reused by
+    proof modules; ordinary authoring code should use the smart constructors
+    below.  Like raw `BuildM`, it is intentionally not an invariant-by-type
+    boundary: callers must establish that every child belongs to the builder. -/
+def internSig (node : ENode) : BuildM Sig := do
   let builder ← get
   let (id, exprs) := (eintern node).run builder.exprs
   set { builder with exprs }
@@ -149,6 +151,67 @@ def routedSum (capacity outputCount : Nat) (routes : Array (Option Nat))
 -- Absolute-coordinate substitution
 -- ────────────────────────────────────────────────────────────────────────
 
+/-- Resolve an old arena id through the prefix of rebuilt ids. -/
+def shiftedId (mapped : Array Sig) (id : Sig) : Sig :=
+  mapped[id.idx]?.getD id
+
+/-- Rebuild one frozen node, remapping its children through the already-built
+    prefix. `sampleIndex` is the sole substitution point. -/
+def rebuildShiftedNode (mapped : Array Sig) (shiftedTick : Sig) :
+    ENode → BuildM Sig
+  | .sampleIndex => pure shiftedTick
+  | .tileSampleIndex => internSig .tileSampleIndex
+  | .num n => internSig (.num n)
+  | .bool b => internSig (.bool b)
+  | .arr items => internSig (.arr (items.map (shiftedId mapped)))
+  | .tileArray items => internSig (.tileArray (items.map (shiftedId mapped)))
+  | .binary tag a b =>
+    internSig (.binary tag (shiftedId mapped a) (shiftedId mapped b))
+  | .unary tag a => internSig (.unary tag (shiftedId mapped a))
+  | .clamp a b c => internSig (.clamp
+      (shiftedId mapped a) (shiftedId mapped b) (shiftedId mapped c))
+  | .select a b c => internSig (.select
+      (shiftedId mapped a) (shiftedId mapped b) (shiftedId mapped c))
+  | .arraySet a b c => internSig (.arraySet
+      (shiftedId mapped a) (shiftedId mapped b) (shiftedId mapped c))
+  | .index a b =>
+    internSig (.index (shiftedId mapped a) (shiftedId mapped b))
+  | .inputRef i => internSig (.inputRef i)
+  | .paramRef i => internSig (.paramRef i)
+  | .nestedOut i o => internSig (.nestedOut i o)
+  | .sampleRate => internSig .sampleRate
+  | .tilePhase => internSig .tilePhase
+  | .loopIdx i => internSig (.loopIdx i)
+  | .bankSum count tables body dynCount? idxId =>
+    internSig (.bankSum count (tables.map (shiftedId mapped))
+      (shiftedId mapped body) (dynCount?.map (shiftedId mapped)) idxId)
+  | .routedSum capacity outputCount routes tables values dynCount? idxId =>
+    internSig (.routedSum capacity outputCount routes
+      (tables.map (shiftedId mapped)) (values.map (shiftedId mapped))
+      (dynCount?.map (shiftedId mapped)) idxId)
+
+/-- Structurally recursive form of the frozen child-before-parent rebuild. -/
+def rebuildShiftedNodes (nodes : List ENode) (shiftedTick : Sig)
+    (mapped : Array Sig := #[]) : BuildM (Array Sig) :=
+  match nodes with
+  | [] => pure mapped
+  | node :: rest => do
+    let id ← rebuildShiftedNode mapped shiftedTick node
+    rebuildShiftedNodes rest shiftedTick (mapped.push id)
+
+/-- Add a positive integral frame offset to an already-built absolute clock. -/
+def addFrameOffset (rawTick : Sig) (frames : Nat) : BuildM Sig := do
+  let frameLiteral ← internSig (.num ⟨Int.ofNat frames, 0⟩)
+  let frameInt ← internSig (.unary .toInt frameLiteral)
+  internSig (.binary .add rawTick frameInt)
+
+/-- Build the replacement absolute clock used by `shiftSampleIndex`. -/
+def buildShiftedTick : Nat → BuildM Sig
+  | 0 => internSig .tileSampleIndex
+  | frames@(_ + 1) => do
+    let rawTick ← internSig .tileSampleIndex
+    addFrameOffset rawTick frames
+
 /-- Rebuild `roots` in the current arena while substituting every
     `sampleIndex` leaf with `tileSampleIndex + frames`.  The distinct base
     leaf prevents the tile dependency slice from capturing shared audio-clock
@@ -157,52 +220,10 @@ def routedSum (capacity outputCount : Nat) (routes : Array (Option Nat))
     warps and control trajectories are shifted as complete expressions rather
     than approximated by advancing only a visible phasor. -/
 def shiftSampleIndex (roots : Array Sig) (frames : Nat) : BuildM (Array Sig) := do
-  let snapshot := (← get).exprs.nodes
-  let rawTick ← internSig .tileSampleIndex
-  let shiftedTick ← if frames == 0 then
-      pure rawTick
-    else do
-      let frameLiteral ← internSig (.num ⟨Int.ofNat frames, 0⟩)
-      let frameInt ← internSig (.unary .toInt frameLiteral)
-      internSig (.binary .add rawTick frameInt)
-  let mut mapped : Array Sig := #[]
-  let mapId := fun (mapping : Array Sig) (id : Sig) =>
-    mapping[id.idx]?.getD id
-  for node in snapshot do
-    let id ← match node with
-      | .sampleIndex => pure shiftedTick
-      | .tileSampleIndex => internSig .tileSampleIndex
-      | .num n => internSig (.num n)
-      | .bool b => internSig (.bool b)
-      | .arr items => internSig (.arr (items.map (mapId mapped)))
-      | .tileArray items => internSig (.tileArray (items.map (mapId mapped)))
-      | .binary tag a b =>
-        internSig (.binary tag (mapId mapped a) (mapId mapped b))
-      | .unary tag a => internSig (.unary tag (mapId mapped a))
-      | .clamp a b c => internSig (.clamp
-          (mapId mapped a) (mapId mapped b) (mapId mapped c))
-      | .select a b c => internSig (.select
-          (mapId mapped a) (mapId mapped b) (mapId mapped c))
-      | .arraySet a b c =>
-        internSig (.arraySet
-          (mapId mapped a) (mapId mapped b) (mapId mapped c))
-      | .index a b =>
-        internSig (.index (mapId mapped a) (mapId mapped b))
-      | .inputRef i => internSig (.inputRef i)
-      | .paramRef i => internSig (.paramRef i)
-      | .nestedOut i o => internSig (.nestedOut i o)
-      | .sampleRate => internSig .sampleRate
-      | .tilePhase => internSig .tilePhase
-      | .loopIdx i => internSig (.loopIdx i)
-      | .bankSum count tables body dynCount? idxId =>
-        internSig (.bankSum count (tables.map (mapId mapped))
-          (mapId mapped body) (dynCount?.map (mapId mapped)) idxId)
-      | .routedSum capacity outputCount routes tables values dynCount? idxId =>
-        internSig (.routedSum capacity outputCount routes
-          (tables.map (mapId mapped)) (values.map (mapId mapped))
-          (dynCount?.map (mapId mapped)) idxId)
-    mapped := mapped.push id
-  pure (roots.map (mapId mapped))
+  let snapshot := (← get).exprs.nodes.toList
+  let shiftedTick ← buildShiftedTick frames
+  let mapped ← rebuildShiftedNodes snapshot shiftedTick
+  pure (roots.map (shiftedId mapped))
 
 -- The production scalar helper vocabulary, preserving its existing names and
 -- operand order.  Each helper performs exactly one intern step.
@@ -232,13 +253,20 @@ def toFloatE (a : Sig) : BuildM Sig := unary .toFloat a
 def clampE (value lo hi : Sig) : BuildM Sig := clamp value lo hi
 def selectE (cond then_ else_ : Sig) : BuildM Sig := select cond then_ else_
 
+/-- Structurally recursive tail of the authored-order additive fold. -/
+def sumLeftTail : List Sig → Sig → BuildM Sig
+  | [], acc => pure acc
+  | item :: rest, acc => do
+    let next ← add acc item
+    sumLeftTail rest next
+
 /-- Authored-order, left-associated addition over an array of already-built
     IDs.  The empty sum constructs the same numeric zero as the recursive
     authoring surface. -/
-def sumLeft (items : Array Sig) : BuildM Sig := do
-  match items[0]? with
-  | none => lit 0
-  | some first => (items.extract 1 items.size).foldlM add first
+def sumLeft (items : Array Sig) : BuildM Sig :=
+  match items.toList with
+  | [] => lit 0
+  | first :: rest => sumLeftTail rest first
 
 /-- Encode a build-time `Float` as the same decimal literal used by the
     recursive authoring path. -/

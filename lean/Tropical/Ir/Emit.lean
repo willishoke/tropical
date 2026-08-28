@@ -186,13 +186,57 @@ private def operandKind : NOperand → String
 def allocReg : EmitM Nat :=
   modifyGet fun s => (s.nextReg, { s with nextReg := s.nextReg + 1 })
 
-private def allocArraySlot (size : Nat) : EmitM Nat :=
+/-- Proof-facing name for the production array-slot allocator. -/
+def allocArraySlot (size : Nat) : EmitM Nat :=
   modifyGet fun s => (s.nextArraySlot,
     { s with nextArraySlot := s.nextArraySlot + 1, arraySizes := s.arraySizes.push size })
 
 def emit (i : NInstr) : EmitM Unit :=
   modify fun s => { s with instrs := s.instrs.push i,
                            instrStages := s.instrStages.push s.curStage }
+
+/-- Proof-facing name for the production routed-body effect scan. The check is
+    read-only: success returns the emitter state unchanged. -/
+def validateRoutedBodyEffects (instrs : Array NInstr) : EmitM Unit := do
+  match instrs.findSome? fun instr =>
+      if instr.tag == "WriteSlot" || instr.tag == "SetElement" then
+        some instr.tag
+      else none with
+  | some tag =>
+      throw s!"emit_resolved: effectful instruction '{tag}' is not allowed inside routedSum"
+  | none => pure ()
+
+/-- Validate and project one production routed mapped-value result. Keeping
+    this state-free tail named lets proofs compose it with `compileNode`. -/
+def finishRoutedMappedValue (r : CompileResult) : EmitM NOperand := do
+  match r with
+  | .array .. =>
+      throw "emit_resolved: routedSum mapped values must be scalar"
+  | .scalar op .float => pure op
+  | .scalar _ _ =>
+      throw "emit_resolved: routedSum results are float-only until typed array slots are supported"
+
+def routedInvalidTarget? (outputCount : Nat) : Option Nat → Option Nat
+  | some target => if target >= outputCount then some target else none
+  | none => none
+
+/-- Validate routed-region shape metadata before any subexpression compiles.
+    This is the production guard sequence, named so a stream proof can discharge
+    it without re-expanding the rest of the recursive compiler. -/
+def validateRoutedConfig (depth capacity outputCount : Nat)
+    (routes : Array (Option Nat)) (values : Array ExprId) : EmitM Unit := do
+  if depth != 0 then
+    throw "emit_resolved: nested routedSum regions are not supported"
+  if capacity == 0 then
+    throw "emit_resolved: routedSum capacity must be nonzero"
+  if outputCount == 0 then
+    throw "emit_resolved: routedSum output count must be nonzero"
+  if values.isEmpty then
+    throw "emit_resolved: routedSum fanout must be nonzero"
+  if routes.size != capacity * values.size then
+    throw s!"emit_resolved: routedSum route count {routes.size} does not equal capacity×fanout {capacity * values.size}"
+  if let some target := routes.findSome? (routedInvalidTarget? outputCount) then
+    throw s!"emit_resolved: routedSum route target {target} is out of bounds for {outputCount} outputs"
 
 private def expectedKey : Option ScalarType → String
   | none => ""
@@ -595,26 +639,16 @@ decreasing_by
     | (have := hdc _ rfl; apply Prod.Lex.left; omega)
     | (apply Prod.Lex.left; omega)
 
-private def compileRoutedSum (arena : ExprArena) (hw : arena.wf = true)
+/-- Proof-facing entry point for the routed-region lowering. Production calls
+    still enter through `compileNode`; exposing this helper lets the routed
+    stream law name the exact implementation rather than duplicate it. -/
+def compileRoutedSum (arena : ExprArena) (hw : arena.wf = true)
     (bound capacity outputCount : Nat) (routes : Array (Option Nat))
     (tables values : Array ExprId) (dynCount? : Option ExprId) (idxId : Nat)
     (_hts : ∀ t ∈ tables, t.idx < bound)
     (_hvs : ∀ v ∈ values, v.idx < bound)
     (hdc : ∀ d ∈ dynCount?, d.idx < bound) : EmitM CompileResult := do
-  if ( ← get).routedDepth != 0 then
-    throw "emit_resolved: nested routedSum regions are not supported"
-  if capacity == 0 then
-    throw "emit_resolved: routedSum capacity must be nonzero"
-  if outputCount == 0 then
-    throw "emit_resolved: routedSum output count must be nonzero"
-  if values.isEmpty then
-    throw "emit_resolved: routedSum fanout must be nonzero"
-  if routes.size != capacity * values.size then
-    throw s!"emit_resolved: routedSum route count {routes.size} does not equal capacity×fanout {capacity * values.size}"
-  if let some target := routes.findSome? fun route => match route with
-      | some target => if target >= outputCount then some target else none
-      | none => none then
-    throw s!"emit_resolved: routedSum route target {target} is out of bounds for {outputCount} outputs"
+  validateRoutedConfig (← get).routedDepth capacity outputCount routes values
   tables.attach.forM fun ⟨table, _⟩ =>
     discard (compileNode arena hw table)
   let countOp? ← match _hdo : dynCount? with
@@ -630,16 +664,10 @@ private def compileRoutedSum (arena : ExprArena) (hw : arena.wf = true)
   modify fun s => { s with routedDepth := s.routedDepth + 1 }
   let mapped ← values.attach.mapM fun ⟨value, _⟩ => do
     let r ← compileNode arena hw value (some .float)
-    if r.isArray then
-      throw "emit_resolved: routedSum mapped values must be scalar"
-    if r.scalarType != .float then
-      throw "emit_resolved: routedSum results are float-only until typed array slots are supported"
-    pure r.op
+    finishRoutedMappedValue r
   modify fun s => { s with routedDepth := s.routedDepth - 1 }
   let bodyEnd := (← get).instrs.size
-  for instr in (← get).instrs.extract regionStart bodyEnd do
-    if instr.tag == "WriteSlot" || instr.tag == "SetElement" then
-      throw s!"emit_resolved: effectful instruction '{instr.tag}' is not allowed inside routedSum"
+  validateRoutedBodyEffects ((← get).instrs.extract regionStart bodyEnd)
   modify fun s => { s with
     instrs := s.instrs.insertIdx! regionStart
       (Tropical.Plan.instrRoutedSumBegin dst capacity outputCount routes countOp? idxId)

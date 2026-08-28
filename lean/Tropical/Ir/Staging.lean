@@ -32,16 +32,19 @@ structure StageCtx where
   childOut : Array (Option (Array Stage)) := #[]
 deriving Inhabited
 
-/-- Resolve a signature against a context. -/
-def resolve (ctx : StageCtx) (sig : StageSig) : Stage := Id.run do
-  let mut s := sig.base
-  for i in sig.inputs do
-    s := s.join (ctx.inputStages[i]?.getD .s1)
-  for (k, o) in sig.nested do
-    match ctx.childOut[k]? with
-    | some (some outs) => s := s.join (outs[o]?.getD .s1)
-    | _ => s := .s1
-  return s
+/-- Resolve one nested-output dependency. -/
+def resolveNested (ctx : StageCtx) (dependency : Nat × Nat) : Stage :=
+  match ctx.childOut[dependency.1]? with
+  | some (some outputs) => outputs[dependency.2]?.getD .s1
+  | _ => .s1
+
+/-- Resolve a signature against a context.  The declarative folds are the
+    proof-facing form of the original emitter-order loops. -/
+def resolve (ctx : StageCtx) (sig : StageSig) : Stage :=
+  let afterInputs := sig.inputs.foldl (fun stage inputIdx =>
+    stage.join (ctx.inputStages[inputIdx]?.getD .s1)) sig.base
+  sig.nested.foldl (fun stage dependency =>
+    stage.join (resolveNested ctx dependency)) afterInputs
 
 /-- The stage of an interned node under a context. Dangling id → `s1`. -/
 def stageOf (arena : ExprArena) (ctx : StageCtx) (id : ExprId) : Stage :=

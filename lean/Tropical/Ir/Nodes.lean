@@ -316,26 +316,21 @@ structure StageSig where
   nested : Array (Nat × Nat) := #[]
 deriving BEq, Repr, Inhabited
 
-/-- Merge two strictly-ascending dep arrays (dedup). -/
-private def mergeAsc {α : Type} [Ord α] [Inhabited α] (a b : Array α) : Array α := Id.run do
-  if a.isEmpty then return b
-  if b.isEmpty then return a
-  let mut out : Array α := #[]
-  let mut i := 0
-  let mut j := 0
-  while i < a.size && j < b.size do
-    match compare a[i]! b[j]! with
-    | .lt => out := out.push a[i]!; i := i + 1
-    | .gt => out := out.push b[j]!; j := j + 1
-    | .eq => out := out.push a[i]!; i := i + 1; j := j + 1
-  while i < a.size do out := out.push a[i]!; i := i + 1
-  while j < b.size do out := out.push b[j]!; j := j + 1
-  return out
+/-- Merge two strictly-ascending dependency arrays and deduplicate equal
+    entries.  Public for the signature-shape proof surface; staging production
+    remains the sole caller that constructs dependency arrays. -/
+def mergeAsc {α : Type} [Ord α] [BEq α]
+    (a b : Array α) : Array α :=
+  (((a.toList ++ b.toList).mergeSort fun lhs rhs =>
+    compare lhs rhs != .gt).eraseDups).toArray
 
-private instance : Ord (Nat × Nat) := ⟨fun a b =>
+/-- Canonical lexicographic ordering of nested-output dependencies. -/
+@[reducible] def nestedDependencyOrd : Ord (Nat × Nat) := ⟨fun a b =>
   match compare a.1 b.1 with
   | .eq => compare a.2 b.2
   | o => o⟩
+
+local instance : Ord (Nat × Nat) := nestedDependencyOrd
 
 def StageSig.join (a b : StageSig) : StageSig :=
   { base := a.base.join b.base
