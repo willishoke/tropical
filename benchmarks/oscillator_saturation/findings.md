@@ -159,27 +159,74 @@ O0 hands the scheduler a larger DAG.
 `--mode microkernel` was measured against `fused` at every count from 64 to
 1024 and is **identical** (4.1 s vs 4.2 s at N=1024). It is not a lever here.
 
-## An unresolved anomaly worth filing separately
+## The graph-route anomaly, bisected
 
-The `--fixture graph` route (playground `source` nodes) is **~100× worse per
-instruction** than the patch route, and the gap is not explained by scale:
+The `--fixture graph` route compiles ~100x slower per instruction than the
+patch route. The bisect below rules out the obvious causes and localises the
+remainder to tropical's JIT invocation rather than to the program.
 
-| route | instructions (1 block) | JIT compile |
-|---|---|---|
-| patch, N=1024 | ~88,000 | 4.1 s |
-| graph, N=256 | 32,295 | 212 s |
+**Not the voice body.** Holding the route, the summing structure and the
+constants fixed and swapping only the oscillator:
 
-The graph route detonates on 2.7× *fewer* instructions. Ruled out by
-measurement: MSL emission (JIT and Metal within 2%), opt level (O0 slowest),
-`TROPICAL_STAGE0` (no effect), instruction count (1.5×), basic-block count and
-max block size (both routes are one ~identical giant block), register pressure
-(a flat 15 simultaneously-live values at N=64/128/256 — the emitter already
-accumulates the sum incrementally), and instruction mix (no exotic opcodes, no
-calls). The profile locates it in the scheduler; what provokes the scheduler on
-one lowering and not the other is **not yet identified**.
+```
+  FixedSinOsc  N=256   26,150 instrs   1.1s
+  MorphOsc     N=256   26,150 instrs   1.2s     (the morph voice, patch route)
+  graph source N=256   32,295 instrs   212s
+```
 
-Repro: `--fixture graph --counts 256 --backend jit` versus
-`--fixture patch --counts 1024 --backend jit`.
+**Not param-slot reads.** The playground `source` reads freq/morph from param
+slots where the patch fixture folds constants. Reproducing that on the patch
+route (one `paramDecl` per voice, freq and then morph via `{"op":"param"}`)
+changes nothing: 1.2s at N=256 for all three of const / param / param+morph.
+
+**Not the IR.** This is the decisive one. Standalone LLVM on the *same*
+`audio.ll` files, composing exactly what the JIT composes:
+
+```
+                       llc -O2 alone   opt -O2 then llc -O2   tropical
+  graph  (32,295)         73.9s              3.05s             214.5s
+  patch  (26,150)         75.4s              1.28s               2.8s
+```
+
+`-mcpu=generic` and `-mcpu=apple-m1` are within noise of each other, and both
+modules are 0.07-0.08s at `llc -O0`. Reproduced through one loader with the
+kernel cache disabled (`tropical_runtime_bench`, `load_ns`): graph 214.5s,
+patch 2.8s.
+
+Two conclusions:
+
+1. **Feeding the scheduler unoptimized IR is what costs, and it is general.**
+   `llc -O2` on raw IR is ~74s for either module; running `opt -O2` first drops
+   codegen to ~1.4s. The IR pipeline pays for itself roughly 50x over on this
+   shape. That matches the pathology the engine already documents at
+   `engine/jit/OrcJitEngine.cpp:324`, where an unoptimized sibling JIT
+   (`CodeGenOptLevel::None`, linear source-order scheduler) exists precisely
+   because "the default backend's scheduler/regalloc go superlinear on exactly
+   that shape". Only the stage-0 coefficient kernel is routed to it; the audio
+   kernel is not.
+
+2. **The graph module's 214s is not justified by its content.** The identical
+   file goes through `opt -O2 && llc -O2` in 3.05s. Something in the JIT path
+   is ~70x off the standalone equivalent for this module and not for the patch
+   module -- and it is not size, since the patch route compiles 88,000
+   instructions (N=1024) in 4.1s. Root cause unidentified; the next step is to
+   establish whether the IR transform layer actually runs for this module, which
+   needs instrumentation in `OrcJitEngine`.
+
+Minimal repro, no benchmark needed:
+
+```sh
+# 3.05s standalone
+opt -O2 -S -o /tmp/g_opt.ll <graph audio.ll> && llc -O2 -filetype=obj -o /tmp/g.o /tmp/g_opt.ll
+# 214s through the JIT, same file
+TROPICAL_KERNEL_CACHE_DISABLE=1 build/tropical_runtime_bench \
+  --ir <graph audio.ll> --manifest <manifest.json> --coeff <coeff.ll> \
+  --buffer 512 --blocks 5 --warmup 1 --rate 44100
+```
+
+Generate the two `audio.ll` files with `--fixture graph --counts 256` and
+`--fixture patch --counts 256`, both `--backend jit`, under
+`TROPICAL_STAGE0_DUMP`.
 
 ## Caveats
 
