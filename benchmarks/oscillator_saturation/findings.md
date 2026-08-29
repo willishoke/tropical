@@ -7,6 +7,16 @@
 **Fixture:** `--fixture patch --mode fused` — N `FixedSinOsc` instances summed
 into one `SoftClip`, 512-frame block at 44.1 kHz (11.610 ms deadline)
 
+> **CORRECTION (same day, after review).** The headline below is measured at
+> the default Metal render tile of 512 frames, and at that tile the dispatch is
+> **one threadgroup**, which occupies **one of the M1 Pro's 16 GPU cores**. The
+> comparison is therefore between a full CPU core and ~1/16 of the GPU. Widening
+> the tile flips the result: at N=512 voices Metal goes from 6.201 ns/voice-sample
+> (1.5x *slower* than the JIT's 4.091) to **1.290 at an 8192-frame tile — 3.2x
+> faster**. The 512->1024 step is exactly 2.0x, as an occupancy explanation
+> predicts. See "The dispatch is one threadgroup" below. Read every Metal number
+> in this row as *"Metal at Rgpu=512"*, not as *"Metal"*.
+
 ## TL;DR
 
 For plain time-domain oscillators the GPU is **not** the win it is for fat
@@ -20,7 +30,8 @@ threshold.
    interpolated 1776.
 3. **Metal only becomes cheaper at N=1536**, and then only by ~2 points. Below
    that the JIT is strictly better — by **16×** at N=8, where Metal is pinned
-   at its submission floor.
+   at its submission floor. *(At the default 512-frame tile only — see the
+   correction above; with a wider tile Metal leads from far lower counts.)*
 4. **Metal refuses N=3072 outright**: `pipeline state failed: Compute function
    exceeds available stack space`. The ceiling is structural and sits between
    2048 and 3072 unrolled voices. It does not degrade; it fails to build.
@@ -72,6 +83,57 @@ overhead it has already paid down. This is the structural difference from the
 modal case, where `gpu_time_partition` saw up to 7.8×: there the per-block work
 was large enough that the toll amortized while the CPU had far more arithmetic
 to chew through.
+
+## The dispatch is one threadgroup
+
+The non-cooperative kernel is emitted as one thread per sample
+(`uint s [[thread_position_in_grid]]`, `Ir/EmitMsl.lean`) and dispatched
+(`engine/metal/MetalKernel.mm:213-217`) as:
+
+```objc
+threads = min(pso.maxTotalThreadsPerThreadgroup, frames);
+dispatchThreads(MTLSize(frames,1,1), threadsPerThreadgroup: MTLSize(threads,1,1));
+```
+
+With `frames = 512` and a threadgroup width up to 512, the whole grid is a
+single threadgroup — and a threadgroup runs on a single GPU core. Fifteen of
+sixteen cores are idle for the entire dispatch.
+
+Measured at N=512 voices, sweeping `TROPICAL_METAL_RENDER_TILE_FRAMES`:
+
+```
+  tile   ns/voice-sample   vs jit (4.091)
+   512        6.201          1.5x slower     <- the default, and this row's data
+  1024        3.251          1.26x faster    <- exactly 2.0x the 512 result
+  2048        1.818          2.25x faster
+  4096        1.847          (plateau)
+  8192        1.290          3.2x faster
+```
+
+The clean 2.0x at the first doubling is what an occupancy-bound dispatch
+predicts and is hard to explain otherwise.
+
+Two consequences:
+
+1. **The "GPU is not a win for oscillators" conclusion does not survive.** It
+   was a statement about a 512-frame tile, not about the workload.
+2. **The fix may not require a larger tile at all.** Capping
+   `threadsPerThreadgroup` (at, say, 32) would split the *same* 512-frame tile
+   into 16 threadgroups and let it span all 16 cores. That is a one-line change
+   in `MetalKernel.mm` and is the obvious first experiment.
+
+Even at 8192 the kernel is roughly **0.5% of the device's arithmetic peak**, and
+throughput was still improving at the largest tile measured — so occupancy is
+the first bound, not the last. Per-thread register pressure is the likely next
+one: a thread evaluates all N voices, and the N=3072 failure is precisely a
+per-thread stack overflow.
+
+**Caveat on the large-tile numbers.** These sum `process_ns` over 400 blocks, so
+they measure the rate the pipeline delivers samples to the consumer. Where the
+worker renders ahead asynchronously (the large tiles), some GPU time is
+overlapped rather than waited on, so those figures are throughput-as-delivered
+and may flatter the device relative to a pure GPU-busy measure. The 512 and 1024
+points have little render-ahead and are the cleanest comparison.
 
 ## Compile time
 

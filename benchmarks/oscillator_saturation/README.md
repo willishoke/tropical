@@ -95,6 +95,22 @@ worker pipelined, the callback only copies from a ready tile.
 saturation figure here therefore says "the GPU can sustain this block rate",
 not "the callback costs this much".
 
+## Metal is measured at one tile width, and that matters
+
+Every Metal number in the committed row uses the default
+`TROPICAL_METAL_RENDER_TILE_FRAMES=512`. At that width the dispatch is a single
+threadgroup and therefore a single GPU core, so the row compares a whole CPU
+core against ~1/16 of the GPU. Widening the tile changes the verdict by more
+than 4x. When sweeping Metal, sweep the tile too:
+
+```sh
+TROPICAL_METAL_RENDER_TILE_FRAMES=2048 \
+  benchmarks/oscillator_saturation/run.sh --backend metal --counts 512
+```
+
+See [`findings.md`](findings.md) for the occupancy measurement and the
+one-line `MetalKernel.mm` change it points at.
+
 ## Measurement hygiene
 
 Adjacent runs contend for the same cores and GPU queue. An unsettled sweep
