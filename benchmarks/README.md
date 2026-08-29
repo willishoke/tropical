@@ -9,6 +9,10 @@ experiments with recorded findings.
   baseline, on CPU.
 - **`gpu_time_partition/`** — the same time-partition axis taken to the GPU (Apple
   Silicon / Metal, UMA): is a per-block dispatch realtime-feasible? See its `findings.md`.
+- **`oscillator_saturation/`** — the other end of the vocabulary from the modal
+  work: plain `FixedSinOsc` voices swept by count until a backend spends half
+  its realtime budget on one block, JIT vs Metal. Answers "how many oscillators
+  before 50% saturation" and finds the crossover. See its `findings.md`.
 - **`llvm/`** — LLVM-level optimization spikes (active-set inlining, compile-time
   scaling, cross-module inlining) that backed the fractal-compilation choices. See
   `llvm/README.md` for the index.
