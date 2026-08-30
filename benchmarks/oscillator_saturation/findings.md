@@ -159,74 +159,86 @@ O0 hands the scheduler a larger DAG.
 `--mode microkernel` was measured against `fused` at every count from 64 to
 1024 and is **identical** (4.1 s vs 4.2 s at N=1024). It is not a lever here.
 
-## The graph-route anomaly, bisected
+## The graph-route anomaly: root cause and fix
 
-The `--fixture graph` route compiles ~100x slower per instruction than the
-patch route. The bisect below rules out the obvious causes and localises the
-remainder to tropical's JIT invocation rather than to the program.
+The `--fixture graph` route compiled ~100x slower per instruction than the
+patch route. Bisected to LLVM's pre-RA instruction scheduler, and fixed behind
+a knob.
 
-**Not the voice body.** Holding the route, the summing structure and the
-constants fixed and swapping only the oscillator:
-
-```
-  FixedSinOsc  N=256   26,150 instrs   1.1s
-  MorphOsc     N=256   26,150 instrs   1.2s     (the morph voice, patch route)
-  graph source N=256   32,295 instrs   212s
-```
+**Not the voice body.** Holding route, summing and constants fixed and swapping
+only the oscillator: `MorphOsc` on the patch route is 1.2s at N=256 (26,150
+instrs) against the graph route's 212s (32,295 instrs).
 
 **Not param-slot reads.** The playground `source` reads freq/morph from param
 slots where the patch fixture folds constants. Reproducing that on the patch
-route (one `paramDecl` per voice, freq and then morph via `{"op":"param"}`)
-changes nothing: 1.2s at N=256 for all three of const / param / param+morph.
+route (a `paramDecl` per voice; freq, then also morph, via `{"op":"param"}`)
+changes nothing: 1.2s for const / param / param+morph alike.
 
-**Not the IR.** This is the decisive one. Standalone LLVM on the *same*
-`audio.ll` files, composing exactly what the JIT composes:
+**Not the IR pipeline.** Instrumenting the JIT (`TROPICAL_JIT_TRACE=1`, added
+in `engine/jit/OrcJitEngine.cpp`) splits the compile wall in two and settles
+it. The pipeline runs, and is fast:
 
 ```
-                       llc -O2 alone   opt -O2 then llc -O2   tropical
-  graph  (32,295)         73.9s              3.05s             214.5s
-  patch  (26,150)         75.4s              1.28s               2.8s
+  patch256   ir-pipeline 636ms  27,438 -> 16,418 instrs   codegen   2.1s
+  graph256   ir-pipeline 716ms  32,301 -> 26,398 instrs   codegen 214.7s
 ```
 
-`-mcpu=generic` and `-mcpu=apple-m1` are within noise of each other, and both
-modules are 0.07-0.08s at `llc -O0`. Reproduced through one loader with the
-kernel cache disabled (`tropical_runtime_bench`, `load_ns`): graph 214.5s,
-patch 2.8s.
+Codegen is the entire gap: 1.6x the instructions for 100x the time.
 
-Two conclusions:
+**It is the pre-RA scheduler.** Dumping the exact post-pipeline module
+(`TROPICAL_JIT_TRACE_DUMP=<dir>`) and compiling it standalone at each
+scheduler, on one 26,398-instruction straight-line block:
 
-1. **Feeding the scheduler unoptimized IR is what costs, and it is general.**
-   `llc -O2` on raw IR is ~74s for either module; running `opt -O2` first drops
-   codegen to ~1.4s. The IR pipeline pays for itself roughly 50x over on this
-   shape. That matches the pathology the engine already documents at
-   `engine/jit/OrcJitEngine.cpp:324`, where an unoptimized sibling JIT
-   (`CodeGenOptLevel::None`, linear source-order scheduler) exists precisely
-   because "the default backend's scheduler/regalloc go superlinear on exactly
-   that shape". Only the stage-0 coefficient kernel is routed to it; the audio
-   kernel is not.
-
-2. **The graph module's 214s is not justified by its content.** The identical
-   file goes through `opt -O2 && llc -O2` in 3.05s. Something in the JIT path
-   is ~70x off the standalone equivalent for this module and not for the patch
-   module -- and it is not size, since the patch route compiles 88,000
-   instructions (N=1024) in 4.1s. Root cause unidentified; the next step is to
-   establish whether the IR transform layer actually runs for this module, which
-   needs instrumentation in `OrcJitEngine`.
-
-Minimal repro, no benchmark needed:
-
-```sh
-# 3.05s standalone
-opt -O2 -S -o /tmp/g_opt.ll <graph audio.ll> && llc -O2 -filetype=obj -o /tmp/g.o /tmp/g_opt.ll
-# 214s through the JIT, same file
-TROPICAL_KERNEL_CACHE_DISABLE=1 build/tropical_runtime_bench \
-  --ir <graph audio.ll> --manifest <manifest.json> --coeff <coeff.ll> \
-  --buffer 512 --blocks 5 --warmup 1 --rate 44100
+```
+  -pre-RA-sched=   wall        object
+  linearize        1.53s        93,176B
+  fast             1.82s       103,536B
+  list-ilp         2.55s       109,248B
+  source          55.39s       103,608B   <- the default on this target
+  list-hybrid   2955.19s       100,760B
+  list-burr     3594.30s       100,328B
 ```
 
-Generate the two `audio.ll` files with `--fixture graph --counts 256` and
-`--fixture patch --counts 256`, both `--backend jit`, under
-`TROPICAL_STAGE0_DUMP`.
+`source` is `src_ls_rr_sort`, which is exactly the frame the earlier profile
+named (83% of samples in `RegReductionPriorityQueue::pop()`); it selects by
+**linear scan over the ready list**, and one enormous straight-line block of
+mutually independent voices keeps that list at its worst case. `fast` is ~30x
+cheaper for an object 0.07% *smaller*, so the scheduling quality the default
+buys is not visible in code size at this shape.
+
+**The fix, measured end to end** (`TROPICAL_JIT_PRERA_SCHED`, 200 blocks):
+
+```
+  kernel     scheduler   compile    runtime median
+  graph256   default     215.29s      717.8us
+  graph256   fast          7.79s      795.5us   (+10.8%)
+  graph256   list-ilp      9.52s      938.2us   (+30.7%)
+  patch512   default        8.34s    1002.1us
+  patch512   fast           7.56s    1040.6us   (+3.8%)
+```
+
+`fast` removes the pathology (27.6x on the compile wall) and brings the graph
+kernel in line with the patch kernel. It is **not free**: ~4-11% of runtime on
+these two kernels, which is real money in a realtime synth, so it is a knob and
+not a new default. Left unset the engine keeps LLVM's default and behaves
+exactly as before; `ctest` 5/5 and `tropicaltest` 137/137 (byte-for-byte audio
+goldens) pass with the instrumentation in place.
+
+**Still unexplained:** why this cliff is shape-dependent rather than
+size-dependent. graph256 (26,398 post-pipeline instrs) detonates while
+patch512 (larger) does not, and the patch route compiles 88,000 instructions at
+N=1024 in 4.1s. The scheduler is the mechanism; what puts one block's ready set
+in the pathological regime and not another's is not established. With the knob
+in place this is a tuning question rather than a wall.
+
+**Diagnostic surface added** (all default-off, zero cost unset):
+
+- `TROPICAL_JIT_TRACE=1` — per compile: tier, IR bytes, instruction counts
+  either side of the IR pipeline, and the wall of each phase, plus a call
+  counter that distinguishes one slow compile from many.
+- `TROPICAL_JIT_TRACE_DUMP=<dir>` — write the post-pipeline module, so the
+  exact IR the codegen layer receives can be compiled standalone.
+- `TROPICAL_JIT_PRERA_SCHED=<name>` — select the pre-RA scheduler.
 
 ## Caveats
 

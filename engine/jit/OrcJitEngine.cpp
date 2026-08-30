@@ -16,6 +16,7 @@
 #include <llvm/Passes/PassBuilder.h>
 #include <llvm/Config/llvm-config.h>
 #include <llvm/Support/Error.h>
+#include <llvm/Support/Format.h>
 #include <llvm/Support/MD5.h>
 #if LLVM_VERSION_MAJOR >= 21
 #include <llvm/Support/ModRef.h>
@@ -24,6 +25,9 @@
 #include <llvm/Support/TargetSelect.h>
 #include <llvm/Support/raw_ostream.h>
 
+#include <atomic>
+#include <system_error>
+#include <chrono>
 #include <cstdlib>
 #include <filesystem>
 #include <string>
@@ -36,6 +40,7 @@
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/TargetParser/Triple.h>
 #include <llvm/IR/LegacyPassManager.h>
+#include <llvm/Support/CommandLine.h>
 #include <llvm/Support/FileSystem.h>
 #include <lld/Common/Driver.h>
 LLD_HAS_DRIVER(wasm)
@@ -229,6 +234,81 @@ static fs::path kernel_cache_dir()
   return base / "tropical" / "kernels" / binary_build_id();
 }
 
+// ---------------------------------------------------------------------------
+// Compile-path tracing (TROPICAL_JIT_TRACE=1).
+//
+// Diagnostic only, and off unless the variable is set: the JIT's compile wall
+// is split into the IR pipeline and codegen so a superlinear phase can be
+// attributed rather than guessed at. Reports per compile_ir_text call:
+// module identity, instruction counts either side of the IR pipeline, and the
+// wall of each phase. A global call counter distinguishes "one slow compile"
+// from "many compiles".
+// ---------------------------------------------------------------------------
+static bool jit_trace_enabled()
+{
+  static const bool on = [] {
+    const char * v = std::getenv("TROPICAL_JIT_TRACE");
+    return v && *v && std::string(v) != "0";
+  }();
+  return on;
+}
+
+static std::atomic<unsigned> g_jit_compile_calls{0};
+
+static size_t count_instructions(const llvm::Module & m)
+{
+  size_t n = 0;
+  for (const llvm::Function & f : m)
+    for (const llvm::BasicBlock & b : f)
+      n += b.size();
+  return n;
+}
+
+using TraceClock = std::chrono::steady_clock;
+static double ms_since(TraceClock::time_point t0)
+{
+  return std::chrono::duration<double, std::milli>(TraceClock::now() - t0).count();
+}
+
+// ---------------------------------------------------------------------------
+// Pre-RA instruction-scheduler override (TROPICAL_JIT_PRERA_SCHED).
+//
+// SelectionDAG's default pre-RA scheduler on this target is `source`
+// (`src_ls_rr_sort`), whose priority queue selects by linear scan over the
+// ready list. On one very large straight-line block -- exactly the shape a
+// fused kernel of N independent voices produces -- that goes superlinear and
+// dominates the compile wall. Measured on a 26,398-instruction single-block
+// kernel (`llc -O2`, object size in parens):
+//
+//     linearize    1.53s (93,176B)     source   55.39s (103,608B)  <- default
+//     fast         1.82s (103,536B)    hybrid 2955.19s (100,760B)
+//     list-ilp     2.55s (109,248B)    burr   3594.30s (100,328B)
+//
+// `fast` is ~30x cheaper than the default for an object 0.07% SMALLER, so the
+// scheduling quality the default buys is not visible in code size at this
+// shape. Left unset the engine keeps LLVM's default; set the variable to
+// select another (`fast`, `list-ilp`, `linearize`, `source`, ...). Applied
+// once, before the JIT is built, via LLVM's registered-option table -- the
+// only in-process route to a cl::opt-registered backend knob.
+// ---------------------------------------------------------------------------
+static void apply_prera_sched_override()
+{
+  const char * v = std::getenv("TROPICAL_JIT_PRERA_SCHED");
+  if (!v || !*v) return;
+  auto & opts = llvm::cl::getRegisteredOptions();
+  auto it = opts.find("pre-RA-sched");
+  if (it == opts.end())
+  {
+    llvm::errs() << "[tropical-jit] pre-RA-sched option not registered; "
+                 << "TROPICAL_JIT_PRERA_SCHED ignored\n";
+    return;
+  }
+  if (it->second->addOccurrence(0, "pre-RA-sched", v))
+    llvm::errs() << "[tropical-jit] failed to set pre-RA-sched=" << v << "\n";
+  else if (jit_trace_enabled())
+    llvm::errs() << "[jit-trace] pre-RA-sched=" << v << "\n";
+}
+
 static bool kernel_cache_disabled()
 {
   const char * value = std::getenv("TROPICAL_KERNEL_CACHE_DISABLE");
@@ -272,6 +352,7 @@ OrcJitEngine::OrcJitEngine()
   KernelObjectCache * cache_ptr = object_cache_.get();
 
   opt_level_ = parse_opt_level();
+  apply_prera_sched_override();
 
   auto jit_or_err = llvm::orc::LLJITBuilder()
     .setCompileFunctionCreator(
@@ -315,7 +396,28 @@ OrcJitEngine::OrcJitEngine()
         llvm::ModulePassManager MPM = (level == llvm::OptimizationLevel::O0)
           ? PB.buildO0DefaultPipeline(level)
           : PB.buildPerModuleDefaultPipeline(level);
+        const bool trace = jit_trace_enabled();
+        const size_t before = trace ? count_instructions(M) : 0;
+        const auto t0 = TraceClock::now();
         MPM.run(M, MAM);
+        if (trace)
+        {
+          // Optional: write the post-pipeline module so the exact IR the
+          // codegen layer receives can be compiled standalone.
+          if (const char * dir = std::getenv("TROPICAL_JIT_TRACE_DUMP"))
+          {
+            std::error_code ec;
+            llvm::raw_fd_ostream out(
+              std::string(dir) + "/postpipeline_" + M.getModuleIdentifier() + ".ll",
+              ec);
+            if (!ec) M.print(out, nullptr);
+          }
+          const double ms = ms_since(t0);
+          llvm::errs() << "[jit-trace] ir-pipeline module=" << M.getModuleIdentifier()
+                       << " level=" << opt_level_tag(level)
+                       << " instrs=" << before << "->" << count_instructions(M)
+                       << " wall=" << llvm::format("%.1f", ms) << "ms\n";
+        }
       });
       return std::move(TSM);
     });
@@ -519,11 +621,26 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_ir_text(
       "compile_ir_text: parsed IR fails verification",
       llvm::inconvertibleErrorCode());
 
+  const bool trace = jit_trace_enabled();
+  const unsigned call_no = ++g_jit_compile_calls;
+  const size_t parsed_instrs = trace ? count_instructions(*module) : 0;
+
   llvm::orc::ThreadSafeModule tsm(std::move(module), std::move(context));
   if (auto err = target->addIRModule(std::move(tsm)))
     return std::move(err);
 
+  // Materialization (IR transform layer + codegen) happens inside lookup.
+  const auto t_materialize = TraceClock::now();
   auto symbol_or_err = target->lookup(symbol);
+  const double materialize_ms = trace ? ms_since(t_materialize) : 0.0;
+  if (trace)
+    llvm::errs() << "[jit-trace] compile#" << call_no
+                 << " key=" << key
+                 << " tier=" << (unoptimized ? "unopt" : "opt")
+                 << " ir_bytes=" << ir_text.size()
+                 << " parsed_instrs=" << parsed_instrs
+                 << " materialize_wall=" << llvm::format("%.1f", materialize_ms)
+                 << "ms\n";
   if (!symbol_or_err)
     return symbol_or_err.takeError();
 #if LLVM_VERSION_MAJOR >= 15
