@@ -240,6 +240,49 @@ in place this is a tuning question rather than a wall.
   exact IR the codegen layer receives can be compiled standalone.
 - `TROPICAL_JIT_PRERA_SCHED=<name>` — select the pre-RA scheduler.
 
+## Metal-target compile time is the JIT, not the shader compiler
+
+Splitting a Metal load with the same instrumentation (patch fixture, current
+binaries, cache disabled), against the mandatory dual-loaded JIT:
+
+```
+    N    metal total   jit portion   metal shader   msl size
+  256        3.28s      3.11s (95%)      0.17s        928KB
+  512        8.86s      8.63s (97%)      0.23s        1.9MB
+ 1024       18.44s     17.89s (97%)      0.55s        3.8MB
+ 2048       46.55s     45.73s (98%)      0.82s        7.8MB
+```
+
+**Apple's Metal shader compiler is not the bottleneck** — 0.82s for 7.8MB of
+MSL, scaling sublinearly. Tropical's own MSL emission is ~0.2s. Between them
+they are ~2% of the wall. (This is the flat contradiction of the first
+diagnosis offered in this investigation, which blamed the MSL emitter; that
+was wrong.)
+
+**~98% of a Metal target's compile wall is the dual-loaded JIT** — and on a
+Metal session the JIT kernel does not produce the audio. It exists for
+`render_window` and reference comparisons. So nearly the entire Metal load is
+spent compiling a kernel that is off the audio path.
+
+That makes the largest Metal-specific compile win a scheduling question, not a
+codegen one: making the reference JIT lazy (compile on first `render_window` /
+comparison rather than at load) would cut Metal load roughly 50x at N=2048 —
+45.7s of the 46.55s. Not attempted here; it changes when a documented
+invariant is established, so it wants its own design pass.
+
+**The pre-RA scheduler knob does not help the Metal path**, because these
+modules are not on the cliff:
+
+```
+  N=1024   default 16.80s   fast 18.45s     gpu runtime 3132.0 -> 3082.7us
+  N=2048   default 45.42s   fast 50.60s     gpu runtime 6785.5 -> 6844.8us
+```
+
+Marginally worse, and GPU runtime is unchanged as expected — the knob affects
+the CPU kernel's codegen, and on Metal that kernel is the reference, not the
+audio. `fast` is for the pathological shape only; it removes a cliff rather
+than speeding up healthy compiles.
+
 ## Caveats
 
 - Metal's `process_ns` is a synchronous worker-tile wait, so it measures GPU
