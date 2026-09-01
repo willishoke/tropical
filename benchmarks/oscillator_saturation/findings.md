@@ -59,9 +59,11 @@ plus one cliff:
 
 - **JIT holds a flat ~1,950 ns/voice from N=8 through N=1024**, then cliffs to
   **~3,365 ns/voice at N=1536** — a 55% jump for a 1.5× count increase — and
-  stays there. The work per voice has not changed; this is a code-size effect
-  in a single straight-line kernel (at N=1536 the fused kernel is ~126k
-  instructions).
+  stays there. The work per voice has not changed. Swept finely this is a ramp
+  beginning just past N=1024, and it is two stacked emission pathologies:
+  AArch64 slot offsets leaving the scaled-immediate window, and the per-sample
+  straight-line body outgrowing the 192 KB L1 instruction cache. Both are
+  measured in "The runtime kernel-size cliff: resolved" below.
 - **Metal has no cliff.** It starts as pure overhead — 197 µs at N=1, which is
   the flat submission toll `../gpu_time_partition/findings.md` measured at
   ~200–330 µs — and amortizes monotonically to a flat **~3,100–3,270 ns/voice**
@@ -400,6 +402,196 @@ latency with SMT and allocates from a huge register file, so aggressive pre-RA
 scheduling buys it little. Like for like the two are comparable; tropical was
 simply asking for the expensive dial.
 
+## The runtime kernel-size cliff: resolved
+
+**Date:** 2026-09-01 · **Commit:** `77bd626` · same host.
+Probes: [`cliff_probes/`](cliff_probes/) · row
+[`data/knee-fine-20260901T072327Z.jsonl`](data/knee-fine-20260901T072327Z.jsonl)
+
+The per-voice step reported above (and independently in
+`benchmarks/faust_comparison`) is **two separate emission pathologies stacked
+at nearby counts**, not one. Both are named below, both are measured with
+instruction-level counters taken from the actual emitted object, and both are
+fixable. Neither is the compile-side scheduler cliff that `2ed2466` defused.
+
+The 1.5x bracket in the original sweep hid the shape. Swept finely, the "cliff"
+is a **ramp** that begins just past N=1024 and saturates near N=1400:
+
+```
+   N     ns/voice   emitted __text
+  512      2409        118,724
+  768      2341        177,940
+  896      2354        207,600
+ 1024      2378        237,268
+ 1056      2640        246,456
+ 1088      3000        255,532
+ 1104      3429        264,012
+ 1120      3522        268,548
+ 1136      3771        273,068
+ 1152      3985        277,596
+ 1280      4110        313,860
+ 1536      4256        386,396
+ 2048      4451        576,988
+```
+
+`min` steps with `median` (2338 -> 3762 ns/voice at the same points), so this is
+structural per block, not thermal drift or a tail artifact.
+
+### Cause 1 — the AArch64 scaled-immediate window on slot offsets
+
+`EmitLlvm` gives every intermediate its own `%slots` index and addresses it with
+a constant GEP (`loadSlotF64`/`storeSlotF64`, `Ir/EmitLlvm.lean:197-204`). A
+64-bit AArch64 `ldr`/`str` encodes an unsigned offset scaled by 8 in 12 bits, so
+the last addressable slot is index **4095** (byte 32,760). Past it the backend
+must materialise the offset in a register.
+
+The patch fixture allocates `4N+3` slots, so the window closes at N=1023. The
+emitted object agrees exactly, in two fixtures with different slots-per-voice:
+
+```
+  register-offset ldr/str  =  slots_per_voice x (N - N_wall),  N_wall = (4095-3)/spv
+
+  FixedSinOsc          (4 slots/voice, N_wall=1023):  N=1024 -> 4     N=1536 -> 2052
+  FixedSinOsc+SoftClip (7 slots/voice, N_wall=584.6): N=608  -> 164   N=768  -> 1284
+```
+
+Every emitted object pins `max_imm` at exactly `0x7ff8`. The damage is not the
+addressing form itself but what it does to `RegAllocFast`: the extra live
+offsets evict the `%slots` base pointer, which is then reloaded from the stack
+**once per voice for the whole kernel**, not just past the wall.
+
+```
+  FixedSinOsc+SoftClip     N=576      N=608
+  slot_count               4,035      4,259     <- crosses 4,095
+  base-pointer reloads         1        608
+  loads from sp              588      8,068     <- 13.7x
+```
+
+Rewriting the GEPs against page-relative bases (`cliff_probes/rebase3.py`, page
+= 4096 doubles, base hidden behind a zero-instruction `asm ""` identity so
+InstCombine cannot reassociate it away) removes the pathology completely —
+`regoff` 516 -> 1, base reloads 1149 -> 1, `sp` loads 2828 -> 1167 — and is
+worth:
+
+```
+                       stock ns/voice   rebased ns/voice
+  4 slots/voice N=1152      3,985            3,504    -12%
+  7 slots/voice N=608       5,322            3,534    -34%
+  7 slots/voice N=640       6,397            3,533    -45%
+```
+
+Real, and larger the more slots a voice holds. **It is not the cliff**: with it
+removed the ramp is still there, and every voice now emits an identical 57.9
+machine instructions on both sides of it.
+
+### Cause 2 — the per-sample body outgrowing the L1 instruction cache
+
+The kernel is one straight-line basic block executed once per sample. With
+cause 1 repaired the per-voice instruction stream is byte-identical across the
+ramp, so the only remaining variable is how much of it there is.
+
+Measured directly, holding the voice count fixed at 896 and padding the loop
+body with independent integer adds that do no useful work
+(`cliff_probes/pad.py`):
+
+```
+   pad insns    __text     ns/sample   marginal cost per byte of code
+          0    207,600       4,200.2
+      2,048    215,788       4,249.4        6.0 ps/B
+      4,096    223,980       4,388.3       17.0 ps/B
+      6,144    240,360       5,328.0       57.4 ps/B   <-- onset
+      8,192    256,744       7,557.4      136.1 ps/B
+     12,288    289,508       9,934.7       72.6 ps/B
+     16,384    322,272      11,280.7       41.1 ps/B
+     24,576    387,800      13,892.5       39.9 ps/B
+     32,768    453,328      16,100.0       33.7 ps/B
+```
+
+At fixed work and fixed data footprint, an instruction that computes nothing
+costs ~0.02 cycles while the body is under ~224 KB and ~1 cycle once it is over
+~240 KB — a 10-20x change in the price of code. `hw.perflevel0.l1icachesize` on
+this host is **196,608 B**. The onset sits modestly above nominal capacity and
+the degradation is gradual rather than a step, which is what a non-LRU
+replacement policy plus L2 next-line prefetch absorbing the first tens of KB of
+overflow would produce.
+
+That threshold predicts both fixtures' knees from their emitted size alone:
+
+```
+                          flat through          degrading from
+  4 slots/voice (232 B/voice)   N=1024, 237,260 B    N=1056, 244,648 B
+  7 slots/voice (340 B/voice)   N=640,  217,344 B    N=672,  228,184 B
+```
+
+Of the 1,599 ns/voice excess at N=1152, ~480 (30%) is cause 1 and ~1,120 (70%)
+is cause 2.
+
+### Ruled out by measurement
+
+- **L1d capacity on temps/slots** (handoff hypothesis 1) — striding every
+  `%slots` access so the touched array grows 32,792 -> 131,144 B, with the
+  instruction stream held byte-identical (`cliff_probes/stride.py`), costs
+  **3%**. The working set is not the constraint; the arithmetic that made
+  ~98 KB look suspicious was coincidence.
+
+```
+   stride   slots bytes   ns/voice
+        1        32,792     2,353
+        2        65,576     2,415
+        4       131,144     2,424
+```
+
+- **Stage-0 changing character at scale** (hypothesis 3) — `coeff.ll` is empty
+  at every count for this fixture; the split has nothing to do here.
+- **P-core to E-core migration.** The ~1.7x ratio looks like one, but forced
+  background scheduling (`taskpolicy -b`) is **9x** slower, not 1.7x.
+- **Thermal or DVFS drift** — the `min` block steps with the median.
+- **The IR pipeline.** With `TROPICAL_JIT_OPT_LEVEL=O0` there is no knee at all
+  (5333 -> 5943 ns/voice from N=768 to 1280, smooth): the kernel is uniformly
+  ~2.4x slower and instruction fetch is hidden behind it. The knee is what
+  happens when good code runs out of instruction cache.
+
+### Does banking remove it?
+
+Not demonstrated, and the standing claim in *Caveats* was too strong. Measured
+on the `resonator` bank, 256 -> 12,288 partials shows no knee at all — but not
+because the emitted IR is O(1) in N:
+
+```
+  partials   per-sample IR insns   per partial   ns/partial
+       256                 1,557          6.08        6,443
+     2,048                12,524          6.12        6,387
+     8,192                49,388          6.03        6,423
+    12,288                73,964          6.02        6,846
+```
+
+`bankSum` banks the **reduction** — the `rd_body` region is a flat 192
+instructions at every count — while per-partial evaluation stays straight-line
+in the per-sample block. By 12,288 partials that block is well past the
+instruction-cache threshold, and it still does not knee, because the resonator
+runs at ~2 ns per per-sample IR instruction (vs 0.08 for `FixedSinOsc`):
+latency-bound arithmetic hides the fetch cost entirely.
+
+So the honest answer is: **banking moves the wall in proportion to the
+per-sample straight-line code it removes per voice, and does not remove it.**
+Six instructions per partial instead of 86 per voice is a ~14x shift — from
+~1,000 unrolled voices to an extrapolated ~14,000 banked partials. A bank whose
+per-sample body is genuinely O(1) (a loop over an array, not an unrolled
+evaluation feeding a banked sum) would remove it; the resonator's is not that
+shape.
+
+### What to do
+
+1. **Page-relative slot bases in `EmitLlvm`** — emit one
+   `getelementptr double, ptr %slots, i64 4096k` per page in `entry` and index
+   from it, keeping every immediate inside the window. Proven above by IR
+   rewriting to be worth 12-45% past the wall, semantics unchanged (identical
+   IR after `-O2`, `nonfinite_count` 0). Not implemented here: it changes every
+   emitted kernel and wants `make validate` behind it.
+2. **Per-sample straight-line code is the scaling budget, and it is ~230 KB.**
+   That is the number a banked oscillator family is buying room against — a
+   concrete runtime argument for banking, not only the compile-time one.
+
 ## Caveats
 
 - Metal's `process_ns` is a synchronous worker-tile wait, so it measures GPU
@@ -410,9 +602,11 @@ simply asking for the expensive dial.
 - The GPU was shared with the desktop compositor (WindowServer at ~36% CPU
   during some runs). A reserved-GPU measurement would be needed before any
   production claim, as `gpu_time_partition` also notes.
-- Voices here are **unrolled**, not banked. A `bankSum` region would make the
-  emitted IR O(1) in N and remove the compile-time question entirely; the
-  playground `source` and patch `FixedSinOsc` paths simply never construct one,
-  because banking is chosen at authoring time by the arrow modal builder
-  (`Ir/BanksFlag.lean`). A banked oscillator family is the obvious follow-on.
+- Voices here are **unrolled**, not banked; the playground `source` and patch
+  `FixedSinOsc` paths never construct a `bankSum` region, because banking is
+  chosen at authoring time by the arrow modal builder (`Ir/BanksFlag.lean`). A
+  banked oscillator family is the obvious follow-on. An earlier revision of this
+  line claimed a `bankSum` region would make the emitted IR O(1) in N; measured,
+  it does not — it banks the reduction and leaves per-partial evaluation
+  straight-line. See "Does banking remove it?" above.
 - Single host, single row. No other hardware is inferred.
