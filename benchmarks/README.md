@@ -13,6 +13,11 @@ experiments with recorded findings.
   work: plain `FixedSinOsc` voices swept by count until a backend spends half
   its realtime budget on one block, JIT vs Metal. Answers "how many oscillators
   before 50% saturation" and finds the crossover. See its `findings.md`.
+- **`faust_comparison/`** — an external sanity check against Faust, compiled by
+  the same LLVM the JIT uses. Three Faust variants separate "what a Faust user
+  ships" from "the recurrence-vs-closed-form axis"; tropical loses the former
+  by ~3x (its sine kernel) and the latter goes tropical's way by ~20%. See its
+  `findings.md`.
 - **`llvm/`** — LLVM-level optimization spikes (active-set inlining, compile-time
   scaling, cross-module inlining) that backed the fractal-compilation choices. See
   `llvm/README.md` for the index.
