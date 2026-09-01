@@ -322,16 +322,53 @@ still bites interactively -- every topology edit is new IR -- but a replayed
 patch is nearly free, and every measurement in this document disables the cache
 deliberately to expose the underlying cost.
 
-**Codegen opt level, independent of the IR pipeline** (`TROPICAL_JIT_CODEGEN_OPT`):
+**Codegen opt level, independent of the IR pipeline**
+(`TROPICAL_JIT_CODEGEN_OPT`) — **now defaulted to `none`.**
+
+An earlier revision of this file reported +29% / +19% runtime for `none`.
+Those were CONTENTION, measured in a loop against other work — the same trap
+the harness settles for. Isolated, repeated, 300 blocks, the penalty is gone:
 
 ```
-  kernel     codegen    compile     runtime median
-  graph256   default    213.30s       717.3us
-  graph256   none         0.92s       925.0us   (232x compile, +29% runtime)
-  graph256   less       214.44s       716.3us   (no help: same scheduler)
-  patch512   default      8.40s       999.7us
-  patch512   none         1.46s      1191.3us   (5.8x compile, +19% runtime)
+  kernel              default      none        delta
+  oscillators N=64     130.6us    130.8us      +0.2%
+  oscillators N=256    536.1us    539.5us      +0.6%
+  oscillators N=512   1003.2us   1010.5us      +0.7%
+  oscillators N=768   1503.9us   1500.2us      -0.2%
+  oscillators N=1024    19.21%     19.50% (saturation)
+  oscillators N=1536    44.78%     44.80% (saturation)
+  oscillators N=2048    59.99%     59.99% (saturation)
+  graph256 (x2 reps)   736.6us    736.3us  /  717.0us  716.6us
+  gong                 116.8us    117.0us      +0.2%
+  resonator->reverb   3576.7us   3590.3us      +0.4%
+  256-partial bank    1631.5us   1630.3us      -0.1%
 ```
+
+The bank row matters most: it is a `bankSum` REGION — a loop, not straight
+line — which is the shape where scheduling and loop-aware register allocation
+would most plausibly pay. It does not.
+
+Compile, meanwhile:
+
+```
+  kernel              default      none
+  oscillators N=512      8.40s     1.46s   (5.8x)
+  oscillators N=1024    17.35s     2.83s   (6.1x)
+  oscillators N=2048    47.83s     5.92s   (8.1x)
+  graph256 (worst)     213.30s     0.92s   (232x)
+  `less`               214.44s             (no help: same scheduler)
+```
+
+Why: a closed-form kernel is long straight-line f64 arithmetic (or one bounded
+reduction) that is dependency- and memory-bound. There is little for an
+aggressive scheduler or a graph-colouring allocator to win, so the expensive
+dial buys nothing measurable while costing 6x-232x of compile.
+
+Audio goldens are byte-identical under the new default (tropicaltest 137/137,
+ctest 5/5) — codegen opt level does not perturb FP semantics.
+`TROPICAL_JIT_CODEGEN_OPT=default` restores LLVM's choice with no rebuild.
+If a future kernel shape (tight loops, high register pressure, branchy control
+flow) does reward real codegen, re-measure before assuming this still holds.
 
 **Pre-RA scheduler only** (`TROPICAL_JIT_PRERA_SCHED=fast`), a gentler point on
 the same curve: graph256 7.79s / +10.8%, patch512 7.56s / +3.8%.
@@ -344,16 +381,14 @@ So there is a spectrum, not a single answer:
   default               1x           baseline
 ```
 
-**The recommendation is tiered compilation, and the machinery already exists.**
-Compile at `codegen=none` immediately so audio starts (0.92s), then recompile
-at full quality in the background and hot-swap when ready. Tropical already has
-(a) a publish/flip hot-swap that carries no DSP state, and (b) a second JIT tier
-at `CodeGenOptLevel::None` (`OrcJitEngine::unoptimized_jit()`) that is today
-used only for the stage-0 coefficient kernel. Tier-0-then-upgrade is those two
-pieces wired together. Unlike the reference-JIT laziness discussed above this
-is a genuine improvement to time-to-audible, not a relocation: the fast tier
-produces a usable kernel, and the slow tier's cost moves off the interactive
-path entirely.
+**Tiered compilation is NOT needed for this.** The obvious design — compile
+fast, start audio, recompile at quality in the background, hot-swap — assumes
+the fast tier is a compromise you want to escape. It is not: at these kernel
+shapes `none` and `default` produce indistinguishable runtime, so there is no
+second tier worth upgrading to. Defaulting the dial gets the whole win with a
+flag instead of a background compiler, a swap protocol, and the failure modes
+both carry. Tiering stays available if a future shape actually rewards
+codegen — but on this evidence it would be machinery built to recover nothing.
 
 **On the LLVM-vs-Metal asymmetry.** At `codegen=none` the JIT compiles
 N=2048-class work in ~1.5s, the same order as Metal's 0.82s shader compile. The

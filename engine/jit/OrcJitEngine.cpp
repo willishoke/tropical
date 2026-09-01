@@ -298,18 +298,44 @@ static double ms_since(TraceClock::time_point t0)
 // TROPICAL_JIT_OPT_LEVEL selects the IR optimization pipeline -- where the
 // kernel's runtime performance actually comes from (vectorize, SLP, CSE,
 // instcombine). CodeGenOptLevel is a SEPARATE dial governing instruction
-// selection, pre-RA scheduling and register allocation, and it is what the
-// compile wall is spent on: on one 26,398-instruction post-pipeline module,
-// `llc` codegen is 0.14s at None against 56.6s at O2 -- ~400x -- for IR that
-// has already been fully optimized.
+// selection, pre-RA scheduling and register allocation, and it is where the
+// compile wall goes: on one 26,398-instruction post-pipeline module, `llc`
+// codegen is 0.14s at None against 56.6s at O2 -- ~400x -- for IR that has
+// already been fully optimized.
 //
-// Unset, LLJIT's default (Default/O2) is kept and behaviour is unchanged.
-// `none` keeps the O2 IR pipeline while asking for cheap codegen.
+// DEFAULT IS `None`. On tropical's kernels the expensive dial buys no
+// measurable runtime, because a closed-form kernel is long straight-line f64
+// arithmetic (or one bankSum region) where aggressive scheduling and
+// register allocation have little to exploit. Measured cold-cache, isolated,
+// median over 300 blocks, default vs None:
+//
+//     oscillators N=64      130.6us  130.8us        gong          116.8us  117.0us
+//     oscillators N=512    1003.2us 1010.5us        ring->reverb 3576.7us 3590.3us
+//     oscillators N=1536     44.78%   44.80% (sat)  256-part bank 1631.5us 1630.3us
+//     oscillators N=2048     59.99%   59.99% (sat)
+//
+// -- while compile falls 6x-232x (N=2048: 47.8s -> 5.9s; the pathological
+// graph-route kernel: 213.3s -> 0.92s). Audio goldens are byte-identical
+// (tropicaltest 137/137 with the default flipped), as expected: codegen opt
+// level does not perturb FP semantics.
+//
+// Set TROPICAL_JIT_CODEGEN_OPT=default (or O2/aggressive) to restore LLVM's
+// choice -- that is the revert, and it needs no rebuild. If a future kernel
+// shape (tight loops, high register pressure, branchy control flow) does
+// reward real codegen, re-measure before assuming this default still holds.
+//
+// Note this leaves the `unoptimized_jit()` tier still distinct: it ALSO skips
+// the O2 IR pipeline, which is the larger saving for the stage-0 coefficient
+// kernel it serves.
 // ---------------------------------------------------------------------------
 static bool codegen_opt_override(llvm::CodeGenOptLevel & out)
 {
   const char * v = std::getenv("TROPICAL_JIT_CODEGEN_OPT");
-  if (!v || !*v) return false;
+  if (!v || !*v)
+  {
+    out = llvm::CodeGenOptLevel::None;   // measured default; see above
+    return true;
+  }
   const std::string s(v);
   if (s == "none" || s == "None" || s == "O0") { out = llvm::CodeGenOptLevel::None; return true; }
   if (s == "less" || s == "Less" || s == "O1") { out = llvm::CodeGenOptLevel::Less; return true; }
