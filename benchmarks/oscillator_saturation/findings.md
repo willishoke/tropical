@@ -264,11 +264,38 @@ Metal session the JIT kernel does not produce the audio. It exists for
 `render_window` and reference comparisons. So nearly the entire Metal load is
 spent compiling a kernel that is off the audio path.
 
-That makes the largest Metal-specific compile win a scheduling question, not a
-codegen one: making the reference JIT lazy (compile on first `render_window` /
-comparison rather than at load) would cut Metal load roughly 50x at N=2048 —
-45.7s of the 46.55s. Not attempted here; it changes when a documented
-invariant is established, so it wants its own design pass.
+That makes the largest Metal-specific opportunity a **scheduling** question,
+not a codegen one — with the caveat that scheduling moves work rather than
+removing it. Three distinct things could be meant, and only one is a saving:
+
+- **Elimination.** A session that never opens the scope or calls
+  `render_window` never needs the reference at all, so the compile is avoided
+  rather than deferred and total CPU genuinely drops. Conditional on how often
+  the reference is used, which is not measured here.
+- **Deferral to first use.** No saving of any kind: the same 45.7s moves from
+  load onto the first `render_window` call, i.e. onto an interactive moment.
+  Strictly worse than paying it at load. Not worth doing alone.
+- **Overlap.** Compile the reference on a background thread after publishing
+  the Metal kernel. Total CPU is unchanged and nothing gets faster, but audio
+  starts when the GPU pipeline is up (~0.8s here instead of 46.55s) and the
+  scope arrives when it is ready.
+
+Overlap is the one worth building. It is the same move `../gpu_time_partition`
+used to hide the GPU submission toll: latency off the critical path, throughput
+untouched. ORC already supports it — `compile_ir_text` calls `addIRModule` and
+then immediately `lookup(symbol)`, and the instrumentation shows the `lookup`
+is what triggers materialization, so the eagerness is tropical's choice rather
+than LLVM's.
+
+Not attempted. Two risks want measuring first: every hot-swap re-arms the
+compile, so repeated topology edits followed by opening the scope could pay it
+repeatedly; and `../metal_live`'s qualification takes reference checkpoints at
+specific moments, so the gates stay valid but their timing assumptions need
+re-examining.
+
+Note that none of this reduces the compile cost itself. The levers that do are
+a `bankSum` region (smaller IR) and, for the pathological shape only, the
+pre-RA scheduler knob below.
 
 **The pre-RA scheduler knob does not help the Metal path**, because these
 modules are not on the cliff:
