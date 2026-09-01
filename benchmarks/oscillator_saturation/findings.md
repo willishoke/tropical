@@ -310,6 +310,61 @@ the CPU kernel's codegen, and on Metal that kernel is the reference, not the
 audio. `fast` is for the pathological shape only; it removes a cliff rather
 than speeding up healthy compiles.
 
+## Improving JIT compile time: the measured menu
+
+The compile wall is codegen, not the IR pipeline, and codegen quality is a
+dial separate from the optimization that produces runtime performance. All
+figures below are cold-cache, `tropical_runtime_bench`, 200 blocks.
+
+**The object cache already covers repeats.** graph256 cold 212.3s, warm 0.83s
+(256x), keyed on IR hash plus build id. The wall is a FIRST-compile cost. That
+still bites interactively -- every topology edit is new IR -- but a replayed
+patch is nearly free, and every measurement in this document disables the cache
+deliberately to expose the underlying cost.
+
+**Codegen opt level, independent of the IR pipeline** (`TROPICAL_JIT_CODEGEN_OPT`):
+
+```
+  kernel     codegen    compile     runtime median
+  graph256   default    213.30s       717.3us
+  graph256   none         0.92s       925.0us   (232x compile, +29% runtime)
+  graph256   less       214.44s       716.3us   (no help: same scheduler)
+  patch512   default      8.40s       999.7us
+  patch512   none         1.46s      1191.3us   (5.8x compile, +19% runtime)
+```
+
+**Pre-RA scheduler only** (`TROPICAL_JIT_PRERA_SCHED=fast`), a gentler point on
+the same curve: graph256 7.79s / +10.8%, patch512 7.56s / +3.8%.
+
+So there is a spectrum, not a single answer:
+
+```
+  codegen=none        232x compile   +29% runtime    (fast ISel, regalloc-fast)
+  sched=fast           27x compile   +11% runtime    (good ISel/RA, cheap sched)
+  default               1x           baseline
+```
+
+**The recommendation is tiered compilation, and the machinery already exists.**
+Compile at `codegen=none` immediately so audio starts (0.92s), then recompile
+at full quality in the background and hot-swap when ready. Tropical already has
+(a) a publish/flip hot-swap that carries no DSP state, and (b) a second JIT tier
+at `CodeGenOptLevel::None` (`OrcJitEngine::unoptimized_jit()`) that is today
+used only for the stage-0 coefficient kernel. Tier-0-then-upgrade is those two
+pieces wired together. Unlike the reference-JIT laziness discussed above this
+is a genuine improvement to time-to-audible, not a relocation: the fast tier
+produces a usable kernel, and the slow tier's cost moves off the interactive
+path entirely.
+
+**On the LLVM-vs-Metal asymmetry.** At `codegen=none` the JIT compiles
+N=2048-class work in ~1.5s, the same order as Metal's 0.82s shader compile. The
+gap was never LLVM being slower than a Metal assembler -- Apple's Metal
+compiler *is* LLVM (MSL -> AIR is Clang; the driver lowers AIR at PSO
+creation). The asymmetry is that a CPU backend schedules for a superscalar
+out-of-order core with 32 architectural registers, while a GPU backend hides
+latency with SMT and allocates from a huge register file, so aggressive pre-RA
+scheduling buys it little. Like for like the two are comparable; tropical was
+simply asking for the expensive dial.
+
 ## Caveats
 
 - Metal's `process_ns` is a synchronous worker-tile wait, so it measures GPU

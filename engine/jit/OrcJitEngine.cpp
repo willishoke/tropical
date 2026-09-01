@@ -40,6 +40,7 @@
 #include <llvm/Target/TargetOptions.h>
 #include <llvm/TargetParser/Triple.h>
 #include <llvm/IR/LegacyPassManager.h>
+#include <llvm/Support/CodeGen.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/FileSystem.h>
 #include <lld/Common/Driver.h>
@@ -291,6 +292,33 @@ static double ms_since(TraceClock::time_point t0)
 // once, before the JIT is built, via LLVM's registered-option table -- the
 // only in-process route to a cl::opt-registered backend knob.
 // ---------------------------------------------------------------------------
+// ---------------------------------------------------------------------------
+// Codegen opt level, independent of the IR pipeline (TROPICAL_JIT_CODEGEN_OPT).
+//
+// TROPICAL_JIT_OPT_LEVEL selects the IR optimization pipeline -- where the
+// kernel's runtime performance actually comes from (vectorize, SLP, CSE,
+// instcombine). CodeGenOptLevel is a SEPARATE dial governing instruction
+// selection, pre-RA scheduling and register allocation, and it is what the
+// compile wall is spent on: on one 26,398-instruction post-pipeline module,
+// `llc` codegen is 0.14s at None against 56.6s at O2 -- ~400x -- for IR that
+// has already been fully optimized.
+//
+// Unset, LLJIT's default (Default/O2) is kept and behaviour is unchanged.
+// `none` keeps the O2 IR pipeline while asking for cheap codegen.
+// ---------------------------------------------------------------------------
+static bool codegen_opt_override(llvm::CodeGenOptLevel & out)
+{
+  const char * v = std::getenv("TROPICAL_JIT_CODEGEN_OPT");
+  if (!v || !*v) return false;
+  const std::string s(v);
+  if (s == "none" || s == "None" || s == "O0") { out = llvm::CodeGenOptLevel::None; return true; }
+  if (s == "less" || s == "Less" || s == "O1") { out = llvm::CodeGenOptLevel::Less; return true; }
+  if (s == "default" || s == "Default" || s == "O2") { out = llvm::CodeGenOptLevel::Default; return true; }
+  if (s == "aggressive" || s == "Aggressive" || s == "O3") { out = llvm::CodeGenOptLevel::Aggressive; return true; }
+  llvm::errs() << "[tropical-jit] unknown TROPICAL_JIT_CODEGEN_OPT=" << s << "; ignored\n";
+  return false;
+}
+
 static void apply_prera_sched_override()
 {
   const char * v = std::getenv("TROPICAL_JIT_PRERA_SCHED");
@@ -359,6 +387,8 @@ OrcJitEngine::OrcJitEngine()
       [cache_ptr](llvm::orc::JITTargetMachineBuilder jtmb)
         -> llvm::Expected<std::unique_ptr<llvm::orc::IRCompileLayer::IRCompiler>>
       {
+        llvm::CodeGenOptLevel cg;
+        if (codegen_opt_override(cg)) jtmb.setCodeGenOptLevel(cg);
         return std::make_unique<llvm::orc::ConcurrentIRCompiler>(std::move(jtmb), cache_ptr);
       })
     .create();
