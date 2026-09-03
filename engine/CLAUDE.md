@@ -144,6 +144,42 @@ build-id subtree under a harness-owned directory, or
 `TROPICAL_KERNEL_CACHE_DISABLE=1` to disable disk cache reads/writes. Defaults
 are unchanged; harnesses must never clear the user's ordinary cache.
 
+### JIT compile controls
+
+Two independent dials, and they are often confused:
+
+- `TROPICAL_JIT_OPT_LEVEL` (`O0`..`O3`/`Os`/`Oz`, default `O2`) selects the
+  **IR optimization pipeline** — vectorize, SLP, CSE, instcombine. This is
+  where the kernel's runtime performance comes from.
+- `TROPICAL_JIT_CODEGEN_OPT` (`none`/`less`/`default`/`aggressive`, **default
+  `none`**) selects `CodeGenOptLevel` — instruction selection, pre-RA
+  scheduling, register allocation. This is where the compile wall goes.
+
+The codegen dial defaults OFF because on tropical's kernels it buys no
+measurable runtime while costing 6x–232x of compile. A closed-form kernel is
+long straight-line f64 arithmetic (or one `bankSum` reduction) that is
+dependency- and memory-bound, so an aggressive scheduler and a graph-colouring
+allocator have little to exploit. Measured across oscillator sweeps, gong,
+resonator→reverb, and a 256-partial banked (loop) kernel, the runtime delta is
+within ±1%; audio goldens are byte-identical. Set
+`TROPICAL_JIT_CODEGEN_OPT=default` to restore LLVM's choice — no rebuild
+needed. Re-measure before assuming this holds for a kernel shape with tight
+loops, branchy control flow, or high register pressure.
+
+`TROPICAL_JIT_PRERA_SCHED` (`fast`, `list-ilp`, `source`, `linearize`, …)
+overrides just the pre-RA scheduler, a middle point on the same curve. It is
+mostly a diagnostic now that codegen defaults to `none`; the default `source`
+scheduler selects by linear scan over the ready list and goes superlinear on
+one very large straight-line block.
+
+Diagnostics, both default-off and free when unset:
+`TROPICAL_JIT_TRACE=1` reports per compile the tier, IR byte count, instruction
+counts either side of the IR pipeline, each phase's wall, and a call counter;
+`TROPICAL_JIT_TRACE_DUMP=<dir>` writes the post-pipeline module so the exact IR
+the codegen layer receives can be compiled standalone with `llc`.
+
+Full measurements and method: `benchmarks/oscillator_saturation/findings.md`.
+
 ### WebAssembly build support
 
 With `TROPICAL_WASM_EMIT`, the engine lowers the same LLVM module to wasm32
