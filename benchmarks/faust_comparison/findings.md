@@ -47,10 +47,24 @@ kernel, so neither side is secretly looping where the other is not.
 **1. tropical loses to idiomatic Faust, by ~3x at N=512 and ~6x at N=2048.**
 F1 is flat at ~750 ns/voice from N=256 on. This is the headline loss.
 
-The cause is almost certainly the sine kernel, not the architecture: Faust's
-`os.osc` is an interpolated wavetable (one load plus a lerp), tropical's
-`FixedSin` is a ~6-term fixed-point Q31 Horner polynomial with quadrant
-folding (`EmitArrow/Numerics.lean`). Memory beats arithmetic at this size.
+The cause is the sine kernel, not the architecture — and the two kernels are
+not solving the same problem. Faust's `os.osc` compiles to a **truncated**
+lookup in a 65536-entry table (one load, NO interpolation: the emitted index
+is `int(65536.0 * phase)`, clamped); tropical's `FixedSin` is a ~6-term
+fixed-point Q31 Horner polynomial with quadrant folding
+(`EmitArrow/Numerics.lean`). Measured against `libm`:
+
+```
+  tropical Q31 polynomial   max |error| 3.83e-9   -168.3 dB   ~28 bits
+  Faust F1 truncated table  max |error| 9.59e-5    -80.4 dB   ~13 bits
+                                          25017x    88.0 dB
+```
+
+Memory beats arithmetic at this size, but it is buying its speed with 88 dB of
+accuracy, and the table's error is a staircase — harmonic distortion, not
+noise. Chasing 750 ns/voice means choosing that trade, not closing a gap.
+(Corrected 2026-09-02: this section previously described F1 as "an interpolated
+wavetable (one load plus a lerp)". It interpolates nothing.)
 
 **2. tropical also trails Faust's OWN closed-form variant by 24-32%**
 (2334 vs 1805 at N=512). Same semantics, same compiler, same unrolled shape —
@@ -209,9 +223,9 @@ which is why `sine_probes/loopdiff.py` differences loop bodies instead.
 
 ### What is still open
 
-Reading 1 -- the ~2.4x loss to F1's interpolated wavetable at ~750 ns/voice
--- is untouched and is a different question: memory versus arithmetic, not
-implementation quality. Reading 3 (statelessness is a discount, not a tax)
+Reading 1 -- the ~2.4x loss to F1 at ~750 ns/voice -- is untouched, and is a
+different question: memory versus arithmetic at 88 dB less accuracy (see
+reading 1, corrected), not implementation quality. Reading 3 (statelessness is a discount, not a tax)
 is unaffected; it was always an F2-vs-F3 comparison internal to Faust.
 
 ## What this fixture does NOT show
@@ -222,7 +236,7 @@ composition — filters, modulation, or the modal algebra where a filter
 composes into modes already being evaluated rather than adding a per-voice
 stage. A fixture built around a modal source through a swept resonant filter,
 reported as the MARGINAL cost of adding the filter, would cancel the
-wavetable-vs-polynomial handicap that dominates this table and measure the
+table-vs-polynomial handicap that dominates this table and measure the
 architecture instead. That is the natural next fixture; it is not built.
 
 Read this table as "the cost of tropical's sine kernel at scale", not as "the

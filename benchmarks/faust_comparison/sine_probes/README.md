@@ -9,6 +9,13 @@ The instruments behind "Reading 2 resolved" in
 | `loopdiff.py` | marginal per-voice instructions in the PER-SAMPLE LOOP BODY, tropical vs Faust F3, by differencing N=64 -> 128 |
 | `disasm.py` | the same difference over the whole function — superseded by `loopdiff.py`, kept because it is what exposed the preheader trap |
 | `conststore.py <stages> <counts>` | what deleting the dead constant slot stores is worth (answer: it is negative) |
+| `accuracy.py` | max error of both sine kernels vs libm — what F1's speed actually costs |
+
+- **F1 interpolates nothing.** Faust's `os.osc` compiles to a TRUNCATED
+  65536-entry table lookup, not the interpolated one the earlier findings
+  text claimed. It is 88 dB less accurate than tropical's polynomial
+  (`accuracy.py`), so its ~750 ns/voice is a different point on the
+  accuracy/cost curve, not a gap to close.
 
 ## Traps
 
