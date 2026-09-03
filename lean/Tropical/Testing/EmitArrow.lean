@@ -323,8 +323,10 @@ def phase2Evidence : Except String Phase2Evidence := do
   let (nativeStdlib, nativeResolved) ← Tropical.EmitArrow.buildStdlibChain
   unless nativeStdlib.programs.size == 15 do
     throw s!"EmitArrow phase-2 fixture: expected 15 stdlib programs, got {nativeStdlib.programs.size}"
-  unless nativeStdlib.exprs.nodes.size == 283 do
-    throw s!"EmitArrow phase-2 fixture: expected 283 stdlib nodes, got {nativeStdlib.exprs.nodes.size}"
+  -- 283 -> 278: `FixedSinOsc` no longer launders its Q32 phase through a
+  -- float and back (see `buildFixedSinOsc`), retiring five hash-consed nodes.
+  unless nativeStdlib.exprs.nodes.size == 278 do
+    throw s!"EmitArrow phase-2 fixture: expected 278 stdlib nodes, got {nativeStdlib.exprs.nodes.size}"
   unless nativeStdlib.exprs.wf do
     throw "EmitArrow phase-2 fixture: stdlib authored arena is not child-descending"
   let (nativeArena, nativeCarrier) ←
@@ -338,10 +340,10 @@ def phase2Evidence : Except String Phase2Evidence := do
   let (nativeExprs, nativeWire) ← resolvedWire nativeCorpus nativeCarrier
   unless nativeExprs.wf do
     throw "EmitArrow phase-2 fixture: reachable arrow arena is not child-descending"
-  unless nativeExprs.nodes.size == 206 do
-    throw s!"EmitArrow phase-2 fixture: expected 206 reachable carrier nodes, got {nativeExprs.nodes.size}"
-  unless nativeWire.length == 36103 do
-    throw s!"EmitArrow phase-2 fixture: expected 36103 carrier wire bytes, got {nativeWire.length}"
+  unless nativeExprs.nodes.size == 191 do
+    throw s!"EmitArrow phase-2 fixture: expected 191 reachable carrier nodes, got {nativeExprs.nodes.size}"
+  unless nativeWire.length == 33230 do
+    throw s!"EmitArrow phase-2 fixture: expected 33230 carrier wire bytes, got {nativeWire.length}"
   pure {
     stdlibPrograms := nativeStdlib.programs.size
     stdlibUniqueNodes := nativeStdlib.exprs.nodes.size

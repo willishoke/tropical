@@ -165,6 +165,11 @@ def main() -> int:
     ap.add_argument("--faust-timeout", type=float, default=1800,
                     help="faust -t; its default 120s aborts on large exprs")
     ap.add_argument("--skip-tropical", action="store_true")
+    # Faust compilation dominates the wall clock of a rerun, so a targeted
+    # re-measurement (e.g. verifying a tropical-side change against F3 as a
+    # control) can skip the variants it does not need.
+    ap.add_argument("--variants", default=",".join(VARIANTS),
+                    help="comma-separated subset of " + ",".join(VARIANTS))
     ap.add_argument("--tag", default=None)
     a = ap.parse_args()
 
@@ -173,11 +178,16 @@ def main() -> int:
             print(f"missing {tool}", file=sys.stderr); return 2
 
     counts = [int(c) for c in a.counts.split(",") if c.strip()]
+    variants = [v for v in a.variants.split(",") if v.strip()]
+    unknown = [v for v in variants if v not in VARIANTS]
+    if unknown:
+        print("unknown variant(s): " + ",".join(unknown), file=sys.stderr)
+        return 2
     tag = a.tag or f"{a.precision}-{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}"
     work = HERE / ".work" / tag
     rows: list[dict[str, Any]] = []
     for n in counts:
-        for v in VARIANTS:
+        for v in variants:
             r = faust_point(n, v, work, a)
             rows.append(r)
             print(f"[{v}] N={n}: " + (r["error"] if "error" in r else
