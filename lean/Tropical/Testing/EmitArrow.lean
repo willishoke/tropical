@@ -315,35 +315,40 @@ def phase2Evidence : Except String Phase2Evidence := do
     resolvedWire nativeNumericCorpus nativeNumericProgram
   unless nativeNumericExprs.wf do
     throw "EmitArrow phase-2 fixture: reachable numeric arena is not child-descending"
-  unless nativeNumericExprs.nodes.size == 268 do
-    throw s!"EmitArrow phase-2 fixture: expected 268 reachable numeric nodes, got {nativeNumericExprs.nodes.size}"
-  unless nativeNumericWire.length == 46451 do
-    throw s!"EmitArrow phase-2 fixture: expected 46451 numeric wire bytes, got {nativeNumericWire.length}"
 
   let (nativeStdlib, nativeResolved) ← Tropical.EmitArrow.buildStdlibChain
-  unless nativeStdlib.programs.size == 15 do
-    throw s!"EmitArrow phase-2 fixture: expected 15 stdlib programs, got {nativeStdlib.programs.size}"
-  -- 283 -> 278: `FixedSinOsc` no longer launders its Q32 phase through a
-  -- float and back (see `buildFixedSinOsc`), retiring five hash-consed nodes.
-  unless nativeStdlib.exprs.nodes.size == 278 do
-    throw s!"EmitArrow phase-2 fixture: expected 278 stdlib nodes, got {nativeStdlib.exprs.nodes.size}"
   unless nativeStdlib.exprs.wf do
     throw "EmitArrow phase-2 fixture: stdlib authored arena is not child-descending"
   let (nativeArena, nativeCarrier) ←
     buildNativeArrowCarrier nativeStdlib nativeResolved
   let some nativeProgram := nativeArena.program? nativeCarrier
     | throw "EmitArrow phase-2 fixture: native carrier missing"
-  unless nativeProgram.decls.size == 3 do
-    throw s!"EmitArrow phase-2 fixture: expected 3 carrier instances, got {nativeProgram.decls.size}"
   let nativeCorpus : FixtureCorpus :=
     { arena := nativeArena, leaf := nativeCarrier, root := nativeCarrier }
   let (nativeExprs, nativeWire) ← resolvedWire nativeCorpus nativeCarrier
   unless nativeExprs.wf do
     throw "EmitArrow phase-2 fixture: reachable arrow arena is not child-descending"
-  unless nativeExprs.nodes.size == 191 do
-    throw s!"EmitArrow phase-2 fixture: expected 191 reachable carrier nodes, got {nativeExprs.nodes.size}"
-  unless nativeWire.length == 33230 do
-    throw s!"EmitArrow phase-2 fixture: expected 33230 carrier wire bytes, got {nativeWire.length}"
+
+  -- The pinned magnitudes, checked TOGETHER.  Unlike the `wf` and
+  -- carrier-exists checks above -- which are preconditions, so they stay
+  -- fail-fast -- these are observations: nothing downstream reads them, and a
+  -- drift in one says nothing about the others.  Reported one at a time they
+  -- cost a full rebuild per number to re-pin, so one legitimate change to a
+  -- stdlib builder turns into three or four build-and-read-the-error cycles.
+  -- Report every drift, with its actual value, in a single pass.
+  let pinned : Array (String × Nat × Nat) := #[
+    ("reachable numeric nodes", nativeNumericExprs.nodes.size, 268),
+    ("numeric wire bytes",      nativeNumericWire.length,      46451),
+    ("stdlib programs",         nativeStdlib.programs.size,    15),
+    ("stdlib nodes",            nativeStdlib.exprs.nodes.size, 278),
+    ("carrier instances",       nativeProgram.decls.size,      3),
+    ("reachable carrier nodes", nativeExprs.nodes.size,        191),
+    ("carrier wire bytes",      nativeWire.length,             33230)]
+  let drifted := pinned.filter fun (_, actual, expected) => actual != expected
+  unless drifted.isEmpty do
+    let lines := drifted.toList.map fun (label, actual, expected) =>
+      s!"\n          {label}: expected {expected}, got {actual}"
+    throw s!"EmitArrow phase-2 fixture: {drifted.size} pinned magnitude(s) drifted:{String.join lines}"
   pure {
     stdlibPrograms := nativeStdlib.programs.size
     stdlibUniqueNodes := nativeStdlib.exprs.nodes.size
