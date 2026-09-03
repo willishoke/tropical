@@ -405,14 +405,16 @@ def buildFixedSinOsc (arena : Arena)
     let lowHigh ← rshift lowProduct shift32
     let accumulated ← add highProduct lowHigh
     let acc ← add accumulated off
-    let wrapped ← bitAnd acc mask
-    let wrappedFloat ← toFloatE wrapped
-    let phaseRaw ← div wrappedFloat twoPow32
-    let zero ← lit 0
-    let one ← lit 1
-    let phase ← clampE phaseRaw zero one
-    let phaseScaled ← mul phase twoPow32
-    let phaseQ ← toIntE phaseScaled
+    -- `acc & 0xffffffff` IS the Q32 phase the sine wants.  Normalizing it to a
+    -- float in [0,1) and scaling it back is an exact identity: the mask puts
+    -- `wrapped` in [0, 2^32), which converts to double without loss (< 2^53),
+    -- 2^32 is a power of two so both scalings are exact, and the clamp to [0,1]
+    -- can therefore never fire.  Emitting it cost two conversions, two
+    -- multiplies and a two-sided clamp per voice per sample -- eight arm64
+    -- instructions computing nothing.  The float excursion was a representation
+    -- seam, not a computation: the phase OFFSET is already folded in above, in
+    -- the integer domain (`acc`).  Bit-exactness is gated by the audio goldens.
+    let phaseQ ← bitAnd acc mask
     let fixedSine ← fixedSinCycSig phaseQ
     let sineFloat ← toFloatE fixedSine
     let q30 ← lit 1073741824

@@ -39,9 +39,17 @@ variants at a given voice count.
 
 ## Caveat that governs the whole table
 
-tropical's `FixedSin` is a fixed-point Q31 polynomial; Faust's `os.osc` is an
-interpolated wavetable. Different numerical methods with different accuracy
-and aliasing behaviour, so "ns per voice" is not the whole story, and the
-headline loss is mostly a property of that choice rather than of the
-architecture. `findings.md` says which single row is actually about the
-design.
+tropical's `FixedSin` is a fixed-point Q31 polynomial; Faust's `os.osc`
+compiles to a **truncated** lookup in a 65536-entry table — one load, no
+interpolation (read the emitted `compute`: the index is
+`int(65536.0 * phase)`, clamped). The two sit in different accuracy classes:
+
+```
+  tropical Q31 polynomial   max |error| 3.83e-9   -168.3 dB   ~28 bits
+  Faust F1 truncated table  max |error| 9.59e-5    -80.4 dB   ~13 bits
+                                          25017x    88.0 dB
+```
+
+So "ns per voice" is not the whole story, and the headline loss is mostly the
+price of that accuracy difference rather than a property of the architecture.
+`findings.md` says which single row is actually about the design.
