@@ -69,14 +69,10 @@ arm64 op that is not meaningfully pipelined, which is why the wall clock
 **None of it depends on τ.** Pole positions, residues, and the partial-fraction
 denominators are all functions of `cutoff`/`resonance` and the source's own
 modal parameters. It is coefficient math sitting in the audio kernel. The
-premise is right about the ALGEBRA and wrong about the emitted code.
-
-Why it is not hoisted: `cutoff`/`resonance` are `param:*` module slots
-(`discipline := .glide`), so nothing proves them block-invariant, and
-everything downstream of the slot read stays audio-rate. The constant `sqrt` in
-the loop body is `filterPair`'s `unary .sqrt radicand` — its whole pole-pair
-derivation, recomputed 44100 times a second for a value that changes at most
-once per block.
+premise is right about the ALGEBRA and wrong about the emitted code. The
+constant `sqrt` in the loop body is `filterPair`'s `unary .sqrt radicand` — its
+whole pole-pair derivation, recomputed 44100 times a second for a value that
+changes at most once per block.
 
 ## A hypothesis this refuted
 
@@ -93,6 +89,94 @@ Whatever the freezing mechanism currently covers, it is not this. The two
 stages differ only in their intercept — reverb derives 14 room modes per sample
 where filter derives one pole pair — and share the per-mode term entirely.
 
+## The slope is value-independent — by construction
+
+Re-fit at a high cutoff (2500 Hz), high resonance (0.9), and long source decay
+(12): **identical to the instruction** — slope 393.0, intercept 1607 in every
+row (`robustness.py`). Obvious once seen: cutoff/resonance/decay are param
+slots, so the emitted code shape cannot depend on their values. The slope is a
+property of the emitted composition, not of any pole geometry. (Wall clock
+636-666% across configs — noise.)
+
+## LLVM does not rescue it either
+
+The preflight counted the EMITTER's IR; the JIT then runs its O2 pipeline
+(LICM included). Splitting the post-O2 module at the sample loop
+(`posto2.py`, `loopsplit.py`): the preheader holds **one `fmul`**; the `sqrt`
+and the whole divide army (152 fdiv at M=16, 536 at M=64) are inside the loop,
+which also carries ~1400-5000 loads, mostly through pointers loaded from
+`%arrays` that alias analysis cannot disambiguate from the ~250-900 in-loop
+stores. The τ-free math is trapped at BOTH layers.
+
+## The mechanism, named to the line
+
+Two hypotheses died on the way to this one (the freezing-path story above, and
+"param slots are opaque to staging" — refuted by the source: `paramRef` interns
+at **`base := .s0`**, `Ir/Nodes.lean:369`, explicitly "the stage-0 coefficient
+kernel's territory"). The staging ATTRIBUTES are correct: the entire
+composition is s0-valued.
+
+The failure is PLACEMENT. The modal linear stages lower through
+`RoutedSumBegin`/`RoutedSumEnd` spans (the `rs_*` blocks in the emitted IR;
+the routed terminal that serves orientation/direction), and
+`Ir/Stage0.lean:546-560` (`placementFromStages`) masks every instruction
+inside a routed span to s1 CATEGORICALLY:
+
+```lean
+    -- Static routed reductions are indivisible placement regions. ...
+    let stageAt (i : Nat) : Stage :=
+      if routedMask[i]! then .s1
+```
+
+No per-instruction hoist applies inside the span, and the whole-region move
+(`tryRegion`) exists only for `ReduceBegin`/`ReduceEnd` units — that is the
+path the bare resonator's bank takes to `coeff.ll` (the `banks-region-hoist`
+gate), which is why the UNFILTERED source hoists beautifully and the filtered
+one does not. An s0-valued computation is trapped by a deliberate v1
+conservatism in placement — not by the algebra, not by the attributes.
+
+## The price of the fix, measured without building it
+
+If the composition ran at s0, the audio kernel would evaluate an
+**(M+2)-mode bare bank** — the filter's conjugate pair joins the source's
+modes with rescaled residues; that is the modal algebra's closure property
+(the proven residue-composition ground). And because the emitted code shape is
+value-independent (above), the bank's COST does not depend on what the
+residues are — so `resonator(partials=M+2)` prices the hoisted kernel exactly,
+no residue math required:
+
+```
+               fixture  audio-IR   ns/block   speedup
+           filter(M=4)      3439     243854
+       bare bank M+2=6       272      45458      5.4x
+          filter(M=16)      8227     764292
+      bare bank M+2=18       344     118584      6.4x
+          filter(M=64)     27379    3104208
+      bare bank M+2=66       632     422000      7.4x
+```
+
+Growing with M, as 1607 + 393·M over a ~6/mode bank predicts. Scope: this
+bound is for the forward, direction-zero case measured here — and note the
+filter node's direction is STATICALLY zero (`ModalControlRef.constant zero`,
+`Playground/Decode.lean`), so for this node the routed orientation machinery
+is inert by construction.
+
+## Two shapes for the fix
+
+1. **A `tryRegion` analog for routed spans**: a delimiter-matched routed
+   region whose region-neutral stage is ≤ s0 moves to the coefficient stream
+   as a unit, exactly as `banks-region-hoist` established for reduce regions.
+   General (covers reverb and a swept phaser whose controls are s0), touches
+   the placement pass and its availability rules.
+2. **Degenerate the statically-forward filter to plain composition**: when a
+   modal linear stage's direction is a compile-time zero, lower it through the
+   ordinary bank path — no routed region exists to be trapped. Narrower (the
+   filter node today, not reverb), but it is a lowering decision rather than a
+   placement-pass change, and it cannot perturb the orientation machinery.
+
+Either way the sweep tradeoff below is the semantic decision that comes with
+it.
+
 ## Why this blocks the fixture rather than feeding it
 
 The fixture is designed to isolate the marginal cost of the filter as the
@@ -108,11 +192,11 @@ some other axis came out favourable it would launder the artifact.
 
 ## What to do instead, in order
 
-1. **Establish whether the composition is hoistable.** It has no τ in it, so in
-   principle the whole `1607 + 393·M` moves to `coeff.ll` and the audio kernel
-   goes back to ~6 instructions per mode. That is the real finding here, and it
-   is worth far more than the benchmark: it is a ~65x on every filtered modal
-   patch, not a number in a table.
+1. **Hoist the composition** — established above: it is s0 by attribute,
+   trapped only by the routed-span placement mask, and worth a measured
+   5.4-7.4x on this fixture (more at higher M). Two fix shapes above. This is
+   worth far more than the benchmark: it is every filtered modal patch, not a
+   number in a table.
 2. **Decide the sweep tradeoff deliberately.** Hoisting means coefficients
    update once per block — 86 Hz at 512 frames / 44.1 kHz — so a fast cutoff
    sweep gets staircase-quantized. The current code pays full audio rate to get
@@ -130,5 +214,8 @@ some other axis came out favourable it would launder the artifact.
 
 ```sh
 make build && make lean
-benchmarks/modal_filter/preflight/marginal.py 4,16,64
+benchmarks/modal_filter/preflight/marginal.py 4,16,64   # the headline table
+benchmarks/modal_filter/preflight/robustness.py         # value-independence
+benchmarks/modal_filter/preflight/posto2.py             # post-O2 loop bodies
+benchmarks/modal_filter/preflight/loopsplit.py m16filter m64filter  # preheader split
 ```

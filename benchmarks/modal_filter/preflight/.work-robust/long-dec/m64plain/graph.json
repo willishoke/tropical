@@ -1,0 +1,1 @@
+{"nodes":[{"id":"bank","kind":"resonator","params":{"freq":220,"decay":12,"partials":64}},{"id":"out","kind":"out","in":{"in":["bank"]}}],"out":"out"}
