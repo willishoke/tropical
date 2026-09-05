@@ -425,8 +425,10 @@ def phase3Evidence : Except String Phase3Evidence := do
   -- are observations, not preconditions, so report every drift with its
   -- actual value in one pass instead of one rebuild per number.
   let pinned : Array (String × Nat × Nat) := #[
-    ("authored nodes", nativeArena.exprs.nodes.size, 2333),
-    ("reachable nodes", nativeExprs.nodes.size, 2136),
+    -- +8 nodes / -264 wire bytes on the WS3b landing: the dynamic Q-landing
+    -- rides 1-element invariant columns (`bankFoldInv`) instead of body refs.
+    ("authored nodes", nativeArena.exprs.nodes.size, 2341),
+    ("reachable nodes", nativeExprs.nodes.size, 2144),
     -- 24 -> 0: `cauchyFold` now emits ordinary `bankSum` pairs; the carrier
     -- authors no routed reductions at all. Kept pinned as the tripwire that
     -- composition stays placement-hoistable (a routedSum here would be
@@ -434,7 +436,7 @@ def phase3Evidence : Except String Phase3Evidence := do
     -- (`Bank.settled?`) keeps original and settled coefficient subtrees
     -- both reachable — a ~26% authored-arena cost, compile-side only.
     ("routed reductions", routed, 0),
-    ("wire bytes", nativeWire.length, 909065)]
+    ("wire bytes", nativeWire.length, 908801)]
   let drifted := pinned.filter fun (_, actual, expected) => actual != expected
   unless drifted.isEmpty do
     let lines := drifted.toList.map fun (label, actual, expected) =>

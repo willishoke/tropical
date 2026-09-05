@@ -506,6 +506,32 @@ def bankFold (cols : BankCols) (body : ModeSym → BuildM Sig) : BuildM Sig := d
   bankSum cols.count #[cols.incr, cols.sigma, cols.cre, cols.cim]
     contribution cols.live? cols.idxId
 
+/-- `bankFold` with loop-invariant scalars threaded as 1-element coefficient
+    columns (WS3b, fill-as-reduce). A banked body that references a
+    region-external SCALAR compiles that scalar's support at the reference
+    point — INSIDE the region — when the memo misses (the type-keyed memo), so
+    a heavy invariant (the dynamic Q-landing chain over COMPOSED amplitudes,
+    whose weights are Cauchy folds) is re-emitted into the audio loop and
+    re-evaluated per iteration per sample: the measured O(modes²) shape.
+    Tables have no such failure mode — `compileBankSum`'s stream law
+    (`compileBankSum_stream`) materializes them ONCE before the region — so
+    invariants ride the tables list as 1-element columns and the body reads
+    them back by `index`. The loaded bits are the stored bits, so the value
+    plane is untouched; only WHERE the invariant's support is emitted moves. -/
+def bankFoldInv (cols : BankCols) (invariants : Array Sig)
+    (body : ModeSym → Array Sig → BuildM Sig) : BuildM Sig := do
+  let invTables ← invariants.mapM fun value => arr #[value]
+  let zeroIdx ← lit 0
+  let invReads ← invTables.mapM fun table => index table zeroIdx
+  let k ← loopIdx cols.idxId
+  let incr ← index cols.incr k
+  let sigma ← index cols.sigma k
+  let cre ← index cols.cre k
+  let cim ← index cols.cim k
+  let contribution ← body { incr, sigma, cre, cim } invReads
+  bankSum cols.count (#[cols.incr, cols.sigma, cols.cre, cols.cim] ++ invTables)
+    contribution cols.live? cols.idxId
+
 /-- The BANKED lowering of a modal bank (banks-as-data): the SAME value
     as `modalBankSig`, but the mode sum is a `bankFold` indexed reduction over
     the coefficient columns instead of an unrolled fold — so the emitted plan is
@@ -529,24 +555,33 @@ def modalBankSigTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
   let landingScale ← le.scale
   let landingShift ← le.shift
   let cols ← bankCols modes live?
-  let bankQ ← bankFold cols fun m => do
+  let mkBody := fun (scale shift : Sig) (m : ModeSym) => do
     let increment ← toIntE m.incr
     let phQ ← modePhaseQFromIncr increment clkRel
     let sigmaTime ← mul m.sigma dSec
     let negative ← neg sigmaTime
     let env ← expSig negative
     let weightedCre ← mul env m.cre
-    let landedCre ← mul weightedCre landingScale
+    let landedCre ← mul weightedCre scale
     let wCre ← toIntE landedCre
     let weightedCim ← mul env m.cim
-    let landedCim ← mul weightedCim landingScale
+    let landedCim ← mul weightedCim scale
     let wCim ← toIntE landedCim
     let cos ← fixedCosCycSig phQ
     let cosProduct ← mul wCre cos
     let sin ← fixedSinCycSig phQ
     let sinProduct ← mul wCim sin
     let difference ← sub cosProduct sinProduct
-    rshift difference landingShift
+    rshift difference shift
+  -- STATIC landing: fold literals, kept verbatim in the body (byte-identical
+  -- plan, EmitMsl f64 emit-time folding — `modal-rail-identity` pins it).
+  -- DYNAMIC landing: the chain is s0 but HEAVY once amplitudes are composed;
+  -- thread it as invariant columns so it materializes before the region.
+  let bankQ ← match le with
+    | .static _ => bankFold cols (mkBody landingScale landingShift)
+    | .dynamic _ =>
+        bankFoldInv cols #[landingScale, landingShift]
+          (fun m inv => mkBody inv[0]! inv[1]! m)
   let zero ← lit 0
   let afterStrike ← gt clkRel zero
   let output ← fixedOutQ 30 bankQ
@@ -575,17 +610,17 @@ def modalBankSigPairTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
   let le ← bankLandExp modes                                    -- option E: shared by Re and Im
   let landingScale ← le.scale
   let landingShift ← le.shift
-  let body (imag : Bool) : ModeSym → BuildM Sig := fun m => do
+  let body (imag : Bool) (scale shift : Sig) : ModeSym → BuildM Sig := fun m => do
     let increment ← toIntE m.incr
     let phQ ← modePhaseQFromIncr increment clkRel
     let sigmaTime ← mul m.sigma dSec
     let negative ← neg sigmaTime
     let env ← expSig negative
     let weightedCre ← mul env m.cre
-    let landedCre ← mul weightedCre landingScale
+    let landedCre ← mul weightedCre scale
     let wCre ← toIntE landedCre
     let weightedCim ← mul env m.cim
-    let landedCim ← mul weightedCim landingScale
+    let landedCim ← mul weightedCim scale
     let wCim ← toIntE landedCim
     if imag then
       let sin ← fixedSinCycSig phQ
@@ -593,16 +628,24 @@ def modalBankSigPairTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
       let cos ← fixedCosCycSig phQ
       let right ← mul wCim cos
       let sum ← add left right
-      rshift sum landingShift
+      rshift sum shift
     else
       let cos ← fixedCosCycSig phQ
       let left ← mul wCre cos
       let sin ← fixedSinCycSig phQ
       let right ← mul wCim sin
       let difference ← sub left right
-      rshift difference landingShift
-  let realQ ← bankFold cols (body false)
-  let imagQ ← bankFold cols (body true)
+      rshift difference shift
+  -- Static landing stays verbatim; dynamic landing rides invariant columns
+  -- (see `bankFoldInv`). The two folds intern the same 1-element tables, so
+  -- one Pack serves both.
+  let fold := fun (imag : Bool) => match le with
+    | .static _ => bankFold cols (body imag landingScale landingShift)
+    | .dynamic _ =>
+        bankFoldInv cols #[landingScale, landingShift]
+          (fun m inv => body imag inv[0]! inv[1]! m)
+  let realQ ← fold false
+  let imagQ ← fold true
   let gate := fun q => do
     let zero ← lit 0
     let afterStrike ← gt clkRel zero
