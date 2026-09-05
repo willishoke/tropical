@@ -794,7 +794,12 @@ def runGaugeStage (arena : Arena)
   let some (aGauge, cGauge) ← feOf true | return (← failGate "gauge-stage" "gauge compile")
   IO.println s!"        resonator ⋙ filter(glided) ⋙ [gauge] ⋙ out — FloatExponent (audio, coeff):"
   IO.println s!"        result   without gauge ({aBare}, {cBare}) · with gauge ({aGauge}, {cGauge})"
-  if aGauge > aBare then
-    passGate "gauge-stage" s!"current-universe gauge remains live: its norm adds {aGauge - aBare} FloatExponent operations to the audio kernel (coeff {cBare}→{cGauge}); backend qualification remains an open trust obligation"
+  -- With the modal coefficient plane settling (`Bank.settled?`), the gauge's
+  -- current-universe norm is s0 by construction and lands in the COEFFICIENT
+  -- kernel — which is what `gaugeScale`'s own doc promises ("the Metal
+  -- divergence is unreachable"). The norm must still exist somewhere: coeff
+  -- must grow, and the audio kernel must NOT pay per-sample FloatExponent.
+  if cGauge > cBare && aGauge ≤ aBare then
+    passGate "gauge-stage" s!"current-universe gauge norm is coefficient-time: coeff FloatExponent {cBare}→{cGauge}, audio flat at {aGauge}; backend qualification remains an open trust obligation"
   else
-    failGate "gauge-stage" s!"audio {aBare}→{aGauge} (must grow for a live current-universe norm), coeff {cBare}→{cGauge}"
+    failGate "gauge-stage" s!"norm placement drifted: audio {aBare}→{aGauge} (must stay flat), coeff {cBare}→{cGauge} (must grow)"

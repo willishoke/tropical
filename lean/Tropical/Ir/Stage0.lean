@@ -624,11 +624,21 @@ private def placementFromStages (blocks : Array (Array NInstr))
           | _ => return none
         | .arrayReg s =>
           let ws := arrayWriters.getD s #[]
-          if ws.isEmpty || !(ws.all fun w => w < b && hoisted[w]!) then
+          -- A table the region reads must be a coefficient column: every fill
+          -- either already hoisted, or a fold Pack — pure constants, which
+          -- DUPLICATE into the coefficient stream exactly like fold scalars
+          -- (the audio original stays behind for the EmitMsl f64 emit-time
+          -- folding rule; both copies write the same constant column).
+          if ws.isEmpty then return none
+          else if ws.all fun w => w < b && (hoisted[w]! || stageAt w == .fold) then
+            for w in ws do
+              if !(hoisted[w]!) then seeds := seeds.push w
+          else
             return none
         | .loopIdx _ => pure ()                    -- defined by the unit (any id: ours or a nested subregion's)
         | .const _ _ | .source _ _ => pure ()      -- value stage (rule 1) covers these
-        | .input _ _ | .param _ _ | .sessionArrayReg _ => return none
+        | .input _ _ | .param _ _ | .sessionArrayReg _ =>
+          return none
       if let .temp t := instr.dst then regTemps := regTemps.insert t ()
     return some seeds
 

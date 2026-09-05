@@ -415,20 +415,31 @@ def phase3Evidence : Except String Phase3Evidence := do
   let (nativeArena, nativeProgram) ← buildNativeModalCarrier
   unless nativeArena.exprs.wf do
     throw "EmitArrow phase-3 fixture: authored modal arena is not child-descending"
-  unless nativeArena.exprs.nodes.size == 2357 do
-    throw s!"EmitArrow phase-3 fixture: expected 2357 authored nodes, got {nativeArena.exprs.nodes.size}"
   let nativeCorpus : FixtureCorpus := {
     arena := nativeArena, leaf := nativeProgram, root := nativeProgram }
   let (nativeExprs, nativeWire) ← resolvedWire nativeCorpus nativeProgram
   unless nativeExprs.wf do
     throw "EmitArrow phase-3 fixture: reachable modal arena is not child-descending"
-  unless nativeExprs.nodes.size == 2160 do
-    throw s!"EmitArrow phase-3 fixture: expected 2160 reachable nodes, got {nativeExprs.nodes.size}"
   let routed := routedReductionCount nativeExprs
-  unless routed == 24 do
-    throw s!"EmitArrow phase-3 fixture: expected 24 routed reductions, got {routed}"
-  unless nativeWire.length == 719467 do
-    throw s!"EmitArrow phase-3 fixture: expected 719467 wire bytes, got {nativeWire.length}"
+  -- The pinned magnitudes, checked together (the phase-2 discipline): these
+  -- are observations, not preconditions, so report every drift with its
+  -- actual value in one pass instead of one rebuild per number.
+  let pinned : Array (String × Nat × Nat) := #[
+    ("authored nodes", nativeArena.exprs.nodes.size, 2333),
+    ("reachable nodes", nativeExprs.nodes.size, 2136),
+    -- 24 -> 0: `cauchyFold` now emits ordinary `bankSum` pairs; the carrier
+    -- authors no routed reductions at all. Kept pinned as the tripwire that
+    -- composition stays placement-hoistable (a routedSum here would be
+    -- masked s1 again). 719467 -> 909065 wire bytes: the settled rebuild
+    -- (`Bank.settled?`) keeps original and settled coefficient subtrees
+    -- both reachable — a ~26% authored-arena cost, compile-side only.
+    ("routed reductions", routed, 0),
+    ("wire bytes", nativeWire.length, 909065)]
+  let drifted := pinned.filter fun (_, actual, expected) => actual != expected
+  unless drifted.isEmpty do
+    let lines := drifted.toList.map fun (label, actual, expected) =>
+      s!"\n          {label}: expected {expected}, got {actual}"
+    throw s!"EmitArrow phase-3 fixture: {drifted.size} pinned magnitude(s) drifted:{String.join lines}"
   pure {
     authoredUniqueNodes := nativeArena.exprs.nodes.size
     reachableUniqueNodes := nativeExprs.nodes.size

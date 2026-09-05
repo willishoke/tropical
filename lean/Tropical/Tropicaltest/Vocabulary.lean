@@ -48,11 +48,26 @@ def unreadParamSlots (plan : Tropical.Plan.FlatPlan) : Array String := Id.run do
         && name == s!"param:{d.name}#t0"
         && (Array.range 4).all fun i =>
           d.companions.contains s!"{d.name}#t0#u{i}"
+  -- A glide knob whose coefficients SETTLE (`Bank.settled?` — modal
+  -- coefficient planes collapse the ramp to its `#v1` target) legitimately
+  -- stops reading its ramp timer: the exact-t0 limbs become write-only
+  -- protocol state while the knob itself stays live through `#v1`. Exempt
+  -- `#t0#u{i}` exactly when the same knob's `#v1` IS read — a knob that went
+  -- entirely dead still fails the lint.
+  let slotIndexOf := fun (name : String) =>
+    (Array.range plan.slotNames.size).find? fun i => plan.slotNames[i]! == name
+  let isSettledRampLimb := fun (name : String) =>
+    plan.paramDisciplines.any fun d =>
+      d.discipline == "glide"
+        && (Array.range 4).any (fun i => name == s!"param:{d.name}#t0#u{i}")
+        && (match slotIndexOf s!"param:{d.name}#v1" with
+            | some v1 => reads.contains v1
+            | none => false)
   let mut dead : Array String := #[]
   for i in [0:plan.slotNames.size] do
     let name := plan.slotNames[i]!
     if "param:".isPrefixOf name && !reads.contains i
-        && !isCompatibilityT0 name then
+        && !isCompatibilityT0 name && !isSettledRampLimb name then
       dead := dead.push name
   return dead
 

@@ -784,8 +784,21 @@ def settleSignals (roots : Array Sig) : BuildM (Option (Array Sig)) := do
       | .binary tag lhs rhs => binary tag (mappedAt lhs) (mappedAt rhs)
       | .unary tag arg => unary tag (mappedAt arg)
       | .clamp value lo hi =>
-          if isZeroNode source.exprs lo && isOneNode source.exprs hi &&
-              (sourceReads[value.idx]?).getD true then
+          -- Collapse ONLY the glide's own ramp fraction — `clamp(elapsed/duration,
+          -- 0, 1)`, a division whose numerator reads the clock and whose
+          -- denominator does not — to its saturated endpoint. The previous
+          -- shape (any clock-reading clamp01) also collapsed OUTER clamp01s
+          -- wrapped around glide VALUES (a direction weight, the gauge's g),
+          -- forcing them to 1 regardless of their target — measured as the
+          -- `modal-rail-dir` amplitude collapse.
+          let isRampFraction :=
+            isZeroNode source.exprs lo && isOneNode source.exprs hi &&
+              match source.exprs.deref value with
+              | some (.binary .div numerator denominator) =>
+                  ((sourceReads[numerator.idx]?).getD true) &&
+                    !((sourceReads[denominator.idx]?).getD true)
+              | _ => false
+          if isRampFraction then
             lit 1
           else
             clamp (mappedAt value) (mappedAt lo) (mappedAt hi)
