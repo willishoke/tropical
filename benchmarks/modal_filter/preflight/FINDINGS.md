@@ -219,3 +219,35 @@ benchmarks/modal_filter/preflight/robustness.py         # value-independence
 benchmarks/modal_filter/preflight/posto2.py             # post-O2 loop bodies
 benchmarks/modal_filter/preflight/loopsplit.py m16filter m64filter  # preheader split
 ```
+
+## Resolution (2026-09-05): the composition is coefficient-time on the default path
+
+Landed on this branch in two commits after the preflight:
+
+- `feat(modal): the composition plane settles to s0` — cauchyFold emits
+  hoistable `bankSum` pairs; `Bank.settled?` collapses glide-driven
+  coefficients to their `#v1` targets at the Modal→Sig seam (the `gaugeScale`
+  semantics; genuine per-sample modulation declines to the live path); fold
+  Packs duplicate into the coefficient stream.
+- `feat(banks): WS3b` — the last mile was NOT the fills but the dynamic
+  Q-landing chain, recompiled inside the eval region by a type-keyed memo miss
+  and dragging every composed amplitude with it (O(M²) per sample).
+  `bankFoldInv` threads invariant scalars as 1-element columns riding the
+  tables list, which `compileBankSum_stream` proves materialize before the
+  region.
+
+Measured, marginal cost of the filter over the bare bank (512-frame block):
+
+```
+              M=16              M=64
+  routed      +1967%            +627%      d_audio = 1607 + 393·M
+  landed        +23.5%            +6.2%    d_audio = 249, FLAT in M
+  reverb      +184.7% / +42.4%             d_audio = 563, flat
+```
+
+The handoff's central prediction — marginal filter cost a fixed additive
+constant, approaching zero as a fraction of M — was false by ~65x when this
+preflight measured it, and is now true on the banked default. The fixture is
+unblocked: metric 1 will now measure the architecture, and metric 3 measures
+the settle tradeoff honestly (settled knobs are coefficient-time; an
+LFO-driven cutoff takes the per-sample path on both systems).
