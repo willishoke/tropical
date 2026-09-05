@@ -1,0 +1,12 @@
+{"schema": "modal_filter_comparison_1", "commit": "a09ca899a6fe421c61bafdc281ea416b13d684cd", "recorded": "20260905T163828Z"}
+{"metric": "cost", "system": "tropical", "P": 1, "M": 16, "bare_ns": 111354.5, "filtered_ns": 128520.5, "marginal_ns": 17166.0}
+{"metric": "cost", "system": "faust", "P": 1, "M": 16, "bare_ns": 32041.0, "filtered_ns": 36000.0, "marginal_ns": 3959.0}
+{"metric": "cost", "system": "tropical", "P": 1, "M": 64, "bare_ns": 407083.5, "filtered_ns": 438875.0, "marginal_ns": 31791.5}
+{"metric": "cost", "system": "faust", "P": 1, "M": 64, "bare_ns": 72750.0, "filtered_ns": 131167.0, "marginal_ns": 58417.0}
+{"metric": "cost", "system": "tropical", "P": 8, "M": 16, "bare_ns": 777541.0, "filtered_ns": 999500.5, "marginal_ns": 221959.5}
+{"metric": "cost", "system": "faust", "P": 8, "M": 16, "bare_ns": 135125.0, "filtered_ns": 151958.0, "marginal_ns": 16833.0}
+{"metric": "cost", "system": "tropical", "P": 8, "M": 64, "bare_ns": 3087250.0, "filtered_ns": 3356354.5, "marginal_ns": 269104.5}
+{"metric": "cost", "system": "faust", "P": 8, "M": 64, "bare_ns": 348792.0, "filtered_ns": 493125.0, "marginal_ns": 144333.0}
+{"metric": "sweep", "M": 64, "rate_hz": 0.0, "tropical_b512_snr_db": Infinity, "tropical_b64_snr_db": Infinity, "faust_vs_8x_snr_db": -4.489039291309327}
+{"metric": "sweep", "M": 64, "rate_hz": 2.0, "tropical_b512_snr_db": 10.294962375050964, "tropical_b64_snr_db": 26.90351318246503, "faust_vs_8x_snr_db": -4.4959179282830295}
+{"metric": "sweep", "M": 64, "rate_hz": 20.0, "tropical_b512_snr_db": 0.22872223691663113, "tropical_b64_snr_db": 9.207388200485706, "faust_vs_8x_snr_db": -4.2704457410105245}

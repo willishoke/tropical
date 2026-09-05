@@ -140,6 +140,67 @@ private def parseStrFlag (args : List String) (flag : String) : Option String :=
   args.findSome? fun a =>
     if a.startsWith (flag ++ "=") then some (a.drop (flag.length + 1)).toString else none
 
+private def parseFloatFlag (args : List String) (flag : String)
+    (default : Float) : Float :=
+  match parseStrFlag args flag with
+  | some v => match Lean.Json.parse v with
+    | .ok j => (j.getNum?.toOption.map (·.toFloat)).getD default
+    | .error _ => default
+  | none => default
+
+/-- `diffcli render-sweep <graph.json> --param=<knob> [--center=800]
+    [--octaves=2] [--rate-hz=2] [--frames N] [--buffer N]` — render a
+    playground graph while the CONTROL PLANE sweeps one knob:
+    `value(t) = center · 2^(octaves · sin(2π · rate · t))`, written to the
+    knob's glide slots (`#v0`/`#v1`, or the bare `param:` slot) once per
+    process call, at the block-start time. Per-sample automation is
+    `--buffer 1` — the update granularity IS the buffer, which is the point:
+    the same verb at two buffer sizes prices coefficient-update quantization
+    (the settle tradeoff) with no other variable moving. Byte protocol as
+    `render-bytes`. Rate is the engine default 44100. -/
+def renderSweep (args : List String) : IO UInt32 := do
+  let some graphPath := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
+    | IO.eprintln "usage: diffcli render-sweep <graph.json> --param=<knob> [--center=C] [--octaves=O] [--rate-hz=R] [--frames N] [--buffer N]"
+      return 1
+  let some knob := parseStrFlag args "--param"
+    | IO.eprintln "render-sweep: --param=<knob> is required (e.g. --param=flt.cutoff)"
+      return 1
+  let frames := parseNatFlag args "--frames" 16
+  let buffer := parseNatFlag args "--buffer" 256
+  let center := parseFloatFlag args "--center" 800.0
+  let octaves := parseFloatFlag args "--octaves" 2.0
+  let rateHz := parseFloatFlag args "--rate-hz" 2.0
+  let text ← IO.FS.readFile graphPath
+  let j ← match Lean.Json.parse text with
+    | .error e => IO.eprintln s!"render-sweep: parse: {e}"; return 1
+    | .ok j => pure j
+  match ← Tropical.Playground.compilePlan j with
+  | .error e => IO.eprintln s!"render-sweep: compile: {e}"; return 1
+  | .ok compiled =>
+    let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
+    Tropical.StagedLoad.loadTyped rt compiled.plan compiled.stageBlocks
+    let v0? ← rt.slotIndex? s!"param:{knob}#v0"
+    let v1? ← rt.slotIndex? s!"param:{knob}#v1"
+    let bare? ← rt.slotIndex? s!"param:{knob}"
+    let slots := #[v0?, v1?, bare?].filterMap id
+    if slots.isEmpty then
+      IO.eprintln s!"render-sweep: no slot found for knob '{knob}'"
+      return 1
+    let sampleRate := 44100.0
+    let twoPi := 6.283185307179586
+    let stdout ← IO.getStdout
+    let mut framesDone : Nat := 0
+    for _ in [0:frames] do
+      let t := framesDone.toFloat / sampleRate
+      let value := center * Float.exp2 (octaves * Float.sin (twoPi * rateHz * t))
+      for slot in slots do
+        rt.setSlot slot value
+      rt.process
+      stdout.write (← rt.outputBytes)
+      framesDone := framesDone + buffer
+    stdout.flush
+    return 0
+
 -- ── compile (Phase 6 stage 6d — the compile_patch.ts contract) ──────────────
 
 /-- `diffcli compile <patch.json> [--mode=<m>]` → plan JSON on stdout.
@@ -232,6 +293,7 @@ def main (args : List String) : IO UInt32 := do
   | "render-bytes" :: rest => renderBytes rest
   | "render-metal" :: rest => renderMetal rest
   | "render-graph" :: rest => renderGraph rest
+  | "render-sweep" :: rest => renderSweep rest
   | "emit-ir" :: rest => emitIrVerb rest
   | "emit-msl" :: rest => emitMslVerb rest
   | "compile-wasm" :: rest => compileWasmVerb rest
