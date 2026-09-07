@@ -568,8 +568,18 @@ private def guardColumnWrite (slot : Nat) (what : String) : M Unit := do
   if (← get).coeffOffsets.contains slot then
     fail s!"EmitMsl: {what} writes hoisted coefficient column {slot} (columns are filled host-side by the stage-0 kernel and read-only on the GPU)"
 
-/-- `Pack` — fill the thread-private array with the resolved args. -/
+/-- `Pack` — fill the thread-private array with the resolved args.
+
+    A Pack of PURE CONSTANTS aimed at a hoisted column is not a split bug:
+    it is the fold-duplicated fill (`Stage0` keeps the audio original for the
+    JIT's f64 emit-time folding and duplicates it into the coefficient
+    stream), and the host-side materialization writes the identical values —
+    so on the GPU the in-kernel copy is simply omitted. A VARYING write to a
+    read-only column still fails loudly. -/
 private def emitPack (dst : Nat) (args : Array NOperand) : M Unit := do
+  if (← get).coeffOffsets.contains dst then
+    if args.all (fun a => match a with | .const .. => true | _ => false) then
+      return
   guardColumnWrite dst "Pack"
   for i in [0:args.size] do
     let v ← resolveF32 args[i]!
