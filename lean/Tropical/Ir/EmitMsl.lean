@@ -137,6 +137,13 @@ structure ReduceCtx where
   savedTempTypes : Std.HashMap Nat ScalarType
   savedConstTemps : Std.HashMap Nat CVal
   savedDeclared : Std.HashSet String
+  /-- Lane-parallel region (cooperative mode, top-level, wide): the body
+      accumulates into `partialVar` per lane; End folds the partials arena
+      lane-ordered on lane 0 and writes `initRef + Σ` to the accumulator. -/
+  coop : Bool := false
+  partialVar : String := ""
+  initRef : String := ""
+  savedReduceLocals : Std.HashSet Nat := {}
 deriving Inhabited
 
 structure RoutedCtx where
@@ -210,6 +217,9 @@ structure St where
       names so they cannot race with captured lane-0 temps in threadgroup
       storage. -/
   cooperative : Bool := false
+  /-- Temps written inside an open COOPERATIVE reduce region: per-lane values,
+      renamed to lane-private locals (the `routedLocalTemps` discipline). -/
+  reduceLocalTemps : Std.HashSet Nat := {}
   /-- Whether ordinary scalar emission is currently inside the lane-0 block.
       A routed close deliberately leaves it shut so an immediately adjacent
       static region can reuse the publishing barrier. -/
@@ -240,7 +250,8 @@ def popIndent : M Unit := modify fun s => { s with indent := s.indent - 1 }
 
 private def ensureCooperativeLane0 : M Unit := do
   let st ← get
-  if st.cooperative && st.routeds.isEmpty && !st.cooperativeLane0Open then
+  if st.cooperative && st.routeds.isEmpty && !(st.reduces.any (·.coop))
+      && !st.cooperativeLane0Open then
     line "if (lane == 0u) {"
     pushIndent
     modify fun s => { s with cooperativeLane0Open := true }
@@ -286,10 +297,20 @@ def routedTempVarName (slot : Nat) (ty : ScalarType) : String :=
   match ty with
   | .float => s!"rtf{slot}" | .int => s!"rti{slot}" | .bool => s!"rtb{slot}"
 
+def coopTempVarName (slot : Nat) (ty : ScalarType) : String :=
+  match ty with
+  | .float => s!"qf{slot}" | .int => s!"qi{slot}" | .bool => s!"qb{slot}"
+
 private def activeTempVarName (slot : Nat) (ty : ScalarType) : M String := do
   let st ← get
   if st.cooperative && !st.routeds.isEmpty && st.routedLocalTemps.contains slot then
     pure (routedTempVarName slot ty)
+  else if st.cooperative && st.reduces.any (·.coop) then
+    match st.reduces.find? (fun rc => rc.coop && rc.accTemp == slot) with
+    | some rc => pure rc.partialVar
+    | none =>
+      if st.reduceLocalTemps.contains slot then pure (coopTempVarName slot ty)
+      else pure (tempVarName slot ty)
   else pure (tempVarName slot ty)
 
 def loadTempTyped (slot : Nat) (ty : ScalarType) : M TVal := do
@@ -304,6 +325,10 @@ def loadTempTyped (slot : Nat) (ty : ScalarType) : M TVal := do
     varies across iterations even when one write folds). -/
 def storeTempTyped (slot : Nat) (v : TVal) : M Unit := do
   if let some rc ← findAccCtx slot then
+    -- A NESTED serial accumulator inside a cooperative region is a per-lane
+    -- value: give it the lane-private name before writing.
+    if !rc.coop && (← get).cooperative && (← get).reduces.any (·.coop) then
+      modify fun s => { s with reduceLocalTemps := s.reduceLocalTemps.insert slot }
     let cv ← coerce v rc.accTy
     line s!"{← activeTempVarName slot rc.accTy} = {cv.ref};"
     modify fun s => { s with constTemps := s.constTemps.erase slot }
@@ -316,6 +341,8 @@ def storeTempTyped (slot : Nat) (v : TVal) : M Unit := do
   | none =>
     if (← get).cooperative && !(← get).routeds.isEmpty then
       modify fun s => { s with routedLocalTemps := s.routedLocalTemps.insert slot }
+    else if (← get).cooperative && (← get).reduces.any (·.coop) then
+      modify fun s => { s with reduceLocalTemps := s.reduceLocalTemps.insert slot }
     let name ← activeTempVarName slot v.ty
     if (← get).declared.contains name then
       line s!"{name} = {v.ref};"
@@ -673,9 +700,52 @@ def emitInstr (sizes : Array Nat) (instr : NInstr) : M Unit := do
         let iv ← coerce v .int
         let b ← bindVal .int s!"min(max({iv.ref}, 0L), {instr.loopCount}L)"
         pure b.ref
+    -- COOPERATIVE lowering: a top-level region wide enough for lane
+    -- parallelism runs strided across the threadgroup — per-lane partials
+    -- from the additive identity, a barrier, then a LANE-ORDERED fold on
+    -- lane 0 (deterministic; and for the i64 banks, bit-identical to the
+    -- serial loop — modular addition is associative-commutative). Requires a
+    -- constant init (production regions seed `const 0`; anything else keeps
+    -- the serial loop). Threshold shared with the plan-side analyses
+    -- (`Plan.metalCoopReduceThreshold`) so storage and sharing agree.
+    let stC ← get
+    let coop := stC.cooperative && stC.reduces.isEmpty && stC.routeds.isEmpty
+      && instr.loopCount ≥ Tropical.Plan.metalCoopReduceThreshold
+      && initV.cv.isSome
+    if coop then
+      let dynamic := instr.args.size > 1
+      if dynamic then
+        line s!"reduce_trips = uint({bound});"
+      if (← get).cooperativeLane0Open then
+        popIndent
+        line "}"
+        modify fun s => { s with cooperativeLane0Open := false }
+      line "threadgroup_barrier(mem_flags::mem_threadgroup);"
+      let n ← fresh
+      let partialVar := s!"rdp{n}"
+      let identity := match instr.resultType with
+        | .float => "0.0f" | _ => "0L"
+      line s!"{mslTy instr.resultType} {partialVar} = {identity};"
+      let idxVar := s!"rd{n}"
+      let limit := if dynamic then "long(reduce_trips)" else s!"{instr.loopCount}L"
+      line s!"for (long {idxVar} = long(lane); {idxVar} < {limit}; {idxVar} += long(groupSize.x)) \{"
+      let st ← get
+      modify fun s => { s with
+        indent := s.indent + 1
+        declared := s.declared.insert partialVar
+        tempTypes := s.tempTypes.insert accTemp instr.resultType
+        constTemps := s.constTemps.erase accTemp
+        reduces := s.reduces.push {
+          id := instr.loopId, accTemp, accTy := instr.resultType, idxVar
+          coop := true, partialVar, initRef := initV.ref
+          savedReduceLocals := st.reduceLocalTemps
+          savedTempTypes := st.tempTypes.insert accTemp instr.resultType
+          savedConstTemps := st.constTemps.erase accTemp
+          savedDeclared := st.declared.insert partialVar } }
+      return
     -- The accumulator is a mutable typed local declared BEFORE the loop
     -- (never const-folded — its value varies across iterations).
-    let accName := tempVarName accTemp instr.resultType
+    let accName ← activeTempVarName accTemp instr.resultType
     if (← get).declared.contains accName then
       line s!"{accName} = {initV.ref};"
     else
@@ -701,6 +771,36 @@ def emitInstr (sizes : Array Nat) (instr : NInstr) : M Unit := do
       fail "EmitMsl: ReduceEnd accumulator does not match the innermost open ReduceBegin"
     modify fun s => { s with indent := s.indent - 1 }
     line "}"
+    if rc.coop then
+      -- Publish the lane partial, fold lane-ordered on lane 0, hand the
+      -- result (init + Σ partials) to the ordinary lane-0 accumulator, and
+      -- LEAVE lane-0 open — the next all-lane region's entry barrier is the
+      -- synchronization point, exactly as between plain lane-0 sections.
+      let arena := match rc.accTy with
+        | .float => "reduce_partials_f" | _ => "reduce_partials_l"
+      line s!"{arena}[lane] = {rc.partialVar};"
+      line "threadgroup_barrier(mem_flags::mem_threadgroup);"
+      line "if (lane == 0u) {"
+      pushIndent
+      let n ← fresh
+      let sumVar := s!"rds{n}"
+      line s!"{mslTy rc.accTy} {sumVar} = {rc.initRef};"
+      line s!"for (uint rl{n} = 0u; rl{n} < groupSize.x; ++rl{n}) \{"
+      pushIndent
+      line s!"{sumVar} = {sumVar} + {arena}[rl{n}];"
+      popIndent
+      line "}"
+      modify fun s => { s with
+        cooperativeLane0Open := true
+        reduces := s.reduces.pop
+        reduceLocalTemps := rc.savedReduceLocals
+        tempTypes := rc.savedTempTypes
+        constTemps := rc.savedConstTemps
+        declared := rc.savedDeclared }
+      -- The accumulator write goes through the ordinary store path (its
+      -- name may be a predeclared threadgroup scalar).
+      storeTempTyped accTemp ⟨sumVar, rc.accTy, none⟩
+      return
     -- Body locals were scoped to the loop braces; only the accumulator
     -- survives (its declaration precedes the loop). Each region restores its
     -- OWN entry snapshots — nested regions unwind LIFO by construction.
@@ -998,7 +1098,7 @@ def emitKernel (plan : FlatPlan) : Except String String := do
   if plan.outputChannelCount > 64 then
     throw "EmitMsl: output channel count exceeds the supported maximum of 64"
   let sizes := plan.arraySlotSizes
-  let cooperative := plan.hasRoutedSum
+  let cooperative := plan.metalCooperative
   let flat := planInstrs plan
   let routedBegins := flat.filter (·.tag == "RoutedSumBegin")
   -- Packed offsets for the hoisted columns, in the plan's advertised
@@ -1067,6 +1167,13 @@ def emitKernel (plan : FlatPlan) : Except String String := do
       line s!"threadgroup float routed_records[{max maxRecords 1}];"
       if routedBegins.any (fun instr => !instr.args.isEmpty) then
         line "threadgroup uint routed_trips;"
+      let (coopFloat, coopInt, coopDyn) := plan.metalCoopReduceInfo
+      if coopFloat then
+        line s!"threadgroup float reduce_partials_f[{Tropical.Plan.metalCoopReduceMaxLanes}];"
+      if coopInt then
+        line s!"threadgroup long reduce_partials_l[{Tropical.Plan.metalCoopReduceMaxLanes}];"
+      if coopDyn then
+        line "threadgroup uint reduce_trips;"
       line "if (lane == 0u) {"
       pushIndent
       modify fun s => { s with cooperativeLane0Open := true }
