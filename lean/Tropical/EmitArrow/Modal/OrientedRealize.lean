@@ -74,9 +74,25 @@ private def cauchyCols (modes : Array ModalMode) : BuildM CauchyCols := do
 
 /-- Ordered complex reduction over a mode table. Binder 1 is reserved for
     these coefficient-side loops; the terminal oscillator bank uses binder 0.
-    Real and imaginary components are two routed outputs of ONE mapped body,
-    so a complex reciprocal is evaluated once and both authored left folds see
-    the same item order. -/
+
+    Emitted as TWO ordinary `bankSum` reductions (real, imaginary) over the
+    same tables, not one two-output `routedSum`. The routed form shared the
+    complex reciprocal between components, but `Stage0.placementFromStages`
+    masks every routed span s1 categorically — so a Cauchy sum whose value is
+    pure coefficient math (poles and amps from params, no τ anywhere) was
+    re-evaluated every sample, and everything downstream of its image (the
+    composed residues, hence the bank's coefficient columns) was pinned in the
+    audio kernel with it. As `ReduceBegin`/`ReduceEnd` units the folds are
+    whole-region hoistable by the EXISTING `tryRegion` (the
+    `banks-region-hoist` precedent), the residue chain cascades to s0 behind
+    them, and the mode tables hoist as banks-as-data columns.
+
+    Value-identical to the routed form: both loops visit the tables in the
+    same order, each item's component is the same expression the routed body
+    produced, and the additive fold is the same left-to-right accumulation —
+    so each component's sum is bit-identical. The reciprocal is evaluated once
+    per component loop instead of once for both; at s0 that is once per
+    control write, not once per sample. -/
 private def cauchyFold (modes : Array ModalMode)
     (body : CauchyModeSym → BuildM CplxE) : BuildM CplxE := do
   if modes.isEmpty then return ← natE 0
@@ -90,13 +106,8 @@ private def cauchyFold (modes : Array ModalMode)
     pole := (poleRe, poleIm)
     amp := (ampRe, ampIm) }
   let tables := #[cols.poleRe, cols.poleIm, cols.ampRe, cols.ampIm]
-  let routes := (Array.range cols.count).foldl
-    (fun out _ => out.push (some 0) |>.push (some 1)) #[]
-  let image ← routedSum cols.count 2 routes tables #[value.1, value.2] none 1
-  let zero ← lit 0
-  let real ← index image zero
-  let one ← lit 1
-  let imag ← index image one
+  let real ← bankSum cols.count tables value.1 none 1
+  let imag ← bankSum cols.count tables value.2 none 1
   pure (real, imag)
 
 private def differenceSum (pole : CplxE) (modes : Array ModalMode) : BuildM CplxE :=
@@ -223,10 +234,48 @@ private def pairedSig (pairs : Array PairedMode) (clkInt anchorSamples : Sig) : 
   let afterStrike ← gt clkRel zero
   selectE afterStrike value zero
 
+/-- Settle a bank's coefficient plane to its control targets: a glide at rest
+    or mid-ramp collapses to its `#v1` target (`settleSignals` — the semantics
+    `gaugeScale` committed to first: settled knobs are coefficient-time).
+    Every glide-disciplined knob is formally a function of the clock even at
+    rest (the smoothstep saturates in VALUE but not in EXPRESSION), so without
+    this the entire composed coefficient plane — pole derivations, Cauchy
+    sums, residues — is s1 by attribute and re-evaluates every sample.
+    Settled, it is s0 by construction and the placement pass hoists the whole
+    composition (folds via `tryRegion`, mode tables as coefficient columns)
+    into the coefficient kernel, leaving the audio kernel the bank itself.
+    `none` when any coefficient carries genuine per-sample modulation (an LFO
+    wired into a cutoff): the caller keeps the live expressions and the
+    terminal evaluates per sample, exactly as before — the decline discipline,
+    not a wrong answer. -/
+def Bank.settled? (bank : Bank) : BuildM (Option Bank) := do
+  let modeRoots := fun (modes : Array ModalMode) =>
+    modes.flatMap fun m => #[m.sigma, m.omega, m.cre, m.cim]
+  let roots := modeRoots bank.future ++ modeRoots bank.past
+    ++ #[bank.atZero.1, bank.atZero.2]
+  let some settled ← settleSignals roots | pure none
+  let rebuild := fun (modes : Array ModalMode) (base : Nat) =>
+    modes.mapIdx fun index m =>
+      ({ m with
+        sigma := settled[base + 4 * index]!
+        omega := settled[base + 4 * index + 1]!
+        cre := settled[base + 4 * index + 2]!
+        cim := settled[base + 4 * index + 3]! } : ModalMode)
+  let future := rebuild bank.future 0
+  let past := rebuild bank.past (4 * bank.future.size)
+  let atZeroBase := 4 * (bank.future.size + bank.past.size)
+  pure (some { bank with
+    future := future
+    past := past
+    atZero := (settled[atZeroBase]!, settled[atZeroBase + 1]!) })
+
 /-- Read both strict half-axis banks and supply the continuous mixed-orientation
     convolution value at the strike itself. -/
 def Bank.realizeSig (bank : Bank) (clkInt anchorSamples : Sig)
     (count? : Option Sig := none) : BuildM Sig := do
+  -- The coefficient plane settles to its control targets before the terminal
+  -- read; un-settleable coefficients keep the live per-sample path.
+  let bank := (← bank.settled?).getD bank
   let twoPow32 ← lit 4294967296
   let anchorFixed ← mul anchorSamples twoPow32
   let anchorQ ← toIntE anchorFixed

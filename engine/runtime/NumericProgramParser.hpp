@@ -279,6 +279,50 @@ inline bool has_routed_sum(const tropical_jit::InstanceProgram & inst)
   return false;
 }
 
+/** Mirror of `Tropical.Plan.metalCoopReduceThreshold`: a TOP-LEVEL
+ *  `ReduceBegin` at or above this trip count runs lane-parallel under the
+ *  cooperative Metal lowering, so such plans legitimately declare
+ *  `sample_threadgroups` execution without any routed region. The Lean
+ *  constant is the source of truth; this validator must agree with it. */
+constexpr uint32_t kMetalCoopReduceThreshold = 32;
+
+inline bool has_coop_reduce_stream(
+  const std::vector<tropical_jit::FlatInstr> & instrs,
+  int & routed_depth, int & reduce_depth)
+{
+  for (const auto & instr : instrs)
+  {
+    switch (instr.tag)
+    {
+      case tropical_jit::OpTag::RoutedSumBegin: ++routed_depth; break;
+      case tropical_jit::OpTag::RoutedSumEnd: --routed_depth; break;
+      case tropical_jit::OpTag::ReduceBegin:
+        if (routed_depth == 0 && reduce_depth == 0
+            && instr.loop_count >= kMetalCoopReduceThreshold)
+          return true;
+        ++reduce_depth;
+        break;
+      case tropical_jit::OpTag::ReduceEnd: --reduce_depth; break;
+      default: break;
+    }
+  }
+  return false;
+}
+
+inline bool has_coop_reduce(const tropical_jit::InstanceProgram & inst,
+                            int & routed_depth, int & reduce_depth)
+{
+  if (has_coop_reduce_stream(inst.preamble_instructions, routed_depth, reduce_depth))
+    return true;
+  if (has_coop_reduce_stream(inst.pre_input_instructions, routed_depth, reduce_depth))
+    return true;
+  if (has_coop_reduce_stream(inst.instructions, routed_depth, reduce_depth))
+    return true;
+  for (const auto & child : inst.children)
+    if (has_coop_reduce(child, routed_depth, reduce_depth)) return true;
+  return false;
+}
+
 /** Parse a tropical_plan_6 JSON object. The C++ side supports nested
  *  `instance_functions` (the fractal architecture): each function may
  *  have `children: InstanceFunction[]` that emit recursively inside the
@@ -342,13 +386,23 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
   const bool routed = std::any_of(
     prog.instance_functions.begin(), prog.instance_functions.end(),
     [](const auto & inst) { return has_routed_sum(inst); });
-  if (routed && (!result.metal_sample_threadgroups
-                 || result.metal_threadgroup_scratch_bytes == 0))
+  int coop_routed_depth = 0;
+  int coop_reduce_depth = 0;
+  bool wide_reduce = false;
+  for (const auto & inst : prog.instance_functions)
+    if (has_coop_reduce(inst, coop_routed_depth, coop_reduce_depth))
+    {
+      wide_reduce = true;
+      break;
+    }
+  const bool cooperative = routed || wide_reduce;
+  if (cooperative && (!result.metal_sample_threadgroups
+                      || result.metal_threadgroup_scratch_bytes == 0))
     throw std::runtime_error(
-      "NumericProgramParser: routed Plan 6 requires cooperative Metal execution metadata");
-  if (!routed && result.metal_sample_threadgroups)
+      "NumericProgramParser: routed or wide-bank Plan 6 requires cooperative Metal execution metadata");
+  if (!cooperative && result.metal_sample_threadgroups)
     throw std::runtime_error(
-      "NumericProgramParser: cooperative Metal execution requires a routed region");
+      "NumericProgramParser: cooperative Metal execution requires a routed region or a wide reduce");
 
   // ── sinks: device-bound outputs (slot-mix path) ──
   if (plan.contains("sinks"))

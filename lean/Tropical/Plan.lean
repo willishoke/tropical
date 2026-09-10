@@ -603,6 +603,71 @@ def FlatPlan.metalBoundArraySlots (p : FlatPlan) : Array Nat :=
 def FlatPlan.hasRoutedSum (p : FlatPlan) : Bool :=
   p.linearInstrs.any (·.tag == "RoutedSumBegin")
 
+/-- The trip count at which the cooperative Metal lowering runs a TOP-LEVEL
+    `ReduceBegin` lane-parallel (strided per-lane partials + a lane-ordered
+    threadgroup fold) instead of as a serial per-sample loop. Below it, the
+    lane-0 serial loop wins (redundant scalar phases would dominate); at or
+    above it, occupancy does — measured in ~/metal_benchmarks: a 512-thread
+    serial-bank dispatch uses <1% of an M1 Pro, and the samples×modes shape
+    takes a single 512-frame block from the serial shape's latency-bound floor
+    to the dispatch floor. `EmitMsl` imports this constant so the emitter and
+    the plan-side storage/sharing analyses cannot disagree. -/
+def metalCoopReduceThreshold : Nat := 32
+
+/-- Does the plan contain a reduce region the cooperative lowering will run
+    lane-parallel? Top-level only: a region nested in a routed span or in
+    another reduce stays serial (it already runs per-lane or per-iteration). -/
+def FlatPlan.hasMetalCoopReduce (p : FlatPlan) : Bool := Id.run do
+  let mut routedDepth := 0
+  let mut reduceDepth := 0
+  for instr in p.linearInstrs do
+    match instr.tag with
+    | "RoutedSumBegin" => routedDepth := routedDepth + 1
+    | "RoutedSumEnd" => routedDepth := routedDepth - 1
+    | "ReduceBegin" =>
+      if routedDepth == 0 && reduceDepth == 0
+          && instr.loopCount ≥ metalCoopReduceThreshold then
+        return true
+      reduceDepth := reduceDepth + 1
+    | "ReduceEnd" => reduceDepth := reduceDepth - 1
+    | _ => pure ()
+  return false
+
+/-- The cooperative (threadgroup-per-sample) Metal execution mode: routed
+    regions require it; wide banks profit from it. One predicate, consumed by
+    `EmitMsl`, the sharing/storage analyses below, and the execution wire —
+    they must agree or the emitted kernel and the declared contract diverge. -/
+def FlatPlan.metalCooperative (p : FlatPlan) : Bool :=
+  p.hasRoutedSum || p.hasMetalCoopReduce
+
+/-- Per-plan facts about cooperative reduce regions: which accumulator types
+    occur (each needs its own threadgroup partials arena) and whether any has
+    a runtime trip count (needs the shared `reduce_trips` cell). -/
+def FlatPlan.metalCoopReduceInfo (p : FlatPlan) : Bool × Bool × Bool := Id.run do
+  let mut hasFloat := false
+  let mut hasInt := false
+  let mut hasDyn := false
+  let mut routedDepth := 0
+  let mut reduceDepth := 0
+  for instr in p.linearInstrs do
+    match instr.tag with
+    | "RoutedSumBegin" => routedDepth := routedDepth + 1
+    | "RoutedSumEnd" => routedDepth := routedDepth - 1
+    | "ReduceBegin" =>
+      if routedDepth == 0 && reduceDepth == 0
+          && instr.loopCount ≥ metalCoopReduceThreshold then
+        if instr.resultType == .float then hasFloat := true else hasInt := true
+        if instr.args.size > 1 then hasDyn := true
+      reduceDepth := reduceDepth + 1
+    | "ReduceEnd" => reduceDepth := reduceDepth - 1
+    | _ => pure ()
+  return (hasFloat, hasInt, hasDyn)
+
+/-- The partials arenas are declared at this many lanes; the engine's group
+    policy is `min(maxTotalThreadsPerThreadgroup, 4·threadExecutionWidth)`,
+    128 on every shipped Apple GPU — 256 leaves headroom for a 64-wide part. -/
+def metalCoopReduceMaxLanes : Nat := 256
+
 private def NInstr.scalarStorageKey? (instr : NInstr) : Option String :=
   match instr.dst with
   | .temp slot => some s!"temp:{slot}:{repr instr.resultType}"
@@ -620,23 +685,40 @@ private def NOperand.scalarStorageKey? : NOperand → Option String
     thread-private across the emitter's reopened lane-0 scopes. -/
 def FlatPlan.metalSharedScalarKeys (p : FlatPlan) : Std.HashSet String := Id.run do
   let flat := p.linearInstrs
+  -- Cooperative reduce spans (top-level, ≥ threshold) are all-lane like
+  -- routed spans, with one asymmetry: the ACCUMULATOR is written by lane 0
+  -- after the fold (Begin seeds it, End finalizes it), so Begin/End dsts
+  -- count as OUTSIDE — coopSpan is entered after Begin's dst is recorded and
+  -- left before End's dst is.
   let mut outside : Std.HashSet String := {}
   let mut depth := 0
+  let mut coopSpan := 0
   for instr in flat do
     if instr.tag == "RoutedSumBegin" then depth := depth + 1
-    if depth == 0 then
+    if instr.tag == "ReduceEnd" && coopSpan > 0 then coopSpan := coopSpan - 1
+    if depth == 0 && coopSpan == 0 then
       if let some key := instr.scalarStorageKey? then
         outside := outside.insert key
+    if instr.tag == "ReduceBegin" then
+      if coopSpan > 0 then coopSpan := coopSpan + 1
+      else if depth == 0 && instr.loopCount ≥ metalCoopReduceThreshold then
+        coopSpan := 1
     if instr.tag == "RoutedSumEnd" then depth := depth - 1
   let mut shared : Std.HashSet String := {}
   depth := 0
+  coopSpan := 0
   for instr in flat do
     if instr.tag == "RoutedSumBegin" then depth := depth + 1
-    if depth > 0 then
+    if instr.tag == "ReduceBegin" then
+      if coopSpan > 0 then coopSpan := coopSpan + 1
+      else if depth == 0 && instr.loopCount ≥ metalCoopReduceThreshold then
+        coopSpan := 1
+    if depth > 0 || coopSpan > 0 then
       for operand in instr.args do
         if let some key := operand.scalarStorageKey? then
           if outside.contains key then shared := shared.insert key
     if instr.tag == "RoutedSumEnd" then depth := depth - 1
+    if instr.tag == "ReduceEnd" && coopSpan > 0 then coopSpan := coopSpan - 1
   return shared
 
 private def scalarStorageBytes : ScalarType → Nat
@@ -653,7 +735,7 @@ private def scalarStorageBytes : ScalarType → Nat
     eight-byte alignment, but the compiled allocation can round the complete
     declaration block to sixteen bytes. -/
 def FlatPlan.metalThreadgroupScratchBytes (p : FlatPlan) : Nat := Id.run do
-  if !p.hasRoutedSum then return 0
+  if !p.metalCooperative then return 0
   let mut bytes := 0
   for slot in [0:p.arraySlotCount] do
     if !p.metalBoundArraySlots.contains slot then
@@ -687,10 +769,17 @@ def FlatPlan.metalThreadgroupScratchBytes (p : FlatPlan) : Nat := Id.run do
   -- lane 0 resumes.  Only mapped records need a separate reusable arena.
   bytes := bytes + 4 * maxRecords
   if hasDynamicRoutedCount then bytes := bytes + 4
+  -- Cooperative reduce arenas: one per accumulator type present, plus the
+  -- shared runtime trip cell. Sequential regions reuse the arenas (barriers
+  -- separate them), hence per-type not per-region.
+  let (coopFloat, coopInt, coopDyn) := p.metalCoopReduceInfo
+  if coopFloat then bytes := bytes + 4 * metalCoopReduceMaxLanes
+  if coopInt then bytes := bytes + 8 * metalCoopReduceMaxLanes
+  if coopDyn then bytes := bytes + 4
   return ((bytes + 15) / 16) * 16
 
 def FlatPlan.metalExecutionToWire (p : FlatPlan) : Option Json :=
-  if p.hasRoutedSum then
+  if p.metalCooperative then
     some <| Json.mkObj [
       ("kind", Json.str "sample_threadgroups"),
       ("threadgroup_scratch_bytes", toJson p.metalThreadgroupScratchBytes),

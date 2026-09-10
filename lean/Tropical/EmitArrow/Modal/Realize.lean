@@ -310,25 +310,25 @@ def modalBankSigDirTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
   let sdOf := fun (m : ModeSym) => do
     let sd ← mul m.sigma dSec
     match dampScale? with | none => pure sd | some scale => mul sd scale
-  let fwdQ ← bankFold cols fun m => do
+  let fwdBody := fun (scale shift : Sig) (m : ModeSym) => do
     let increment ← toIntE m.incr
     let phQ ← modePhaseQFromIncr increment clkRel
     let sd ← sdOf m
     let negativeSd ← neg sd
     let envF ← expSig negativeSd
     let weightedCre ← mul envF m.cre
-    let scaledCre ← mul weightedCre landingScale
+    let scaledCre ← mul weightedCre scale
     let wCreF ← toIntE scaledCre
     let weightedCim ← mul envF m.cim
-    let scaledCim ← mul weightedCim landingScale
+    let scaledCim ← mul weightedCim scale
     let wCimF ← toIntE scaledCim
     let cosine ← fixedCosCycSig phQ
     let realPart ← mul wCreF cosine
     let sine ← fixedSinCycSig phQ
     let imagPart ← mul wCimF sine
     let difference ← sub realPart imagPart
-    rshift difference landingShift
-  let revQ ← bankFold cols fun m => do
+    rshift difference shift
+  let revBody := fun (scale shift : Sig) (m : ModeSym) => do
     -- the mirrored phase spelled out on the NEGATED clock, as in the unrolled
     -- path (the fixed sine isn't bit-symmetric; see `modalBankSigDir`).
     let increment ← toIntE m.incr
@@ -337,17 +337,26 @@ def modalBankSigDirTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
     let sd ← sdOf m
     let envR ← expSig sd
     let weightedCre ← mul envR m.cre
-    let scaledCre ← mul weightedCre landingScale
+    let scaledCre ← mul weightedCre scale
     let wCreR ← toIntE scaledCre
     let weightedCim ← mul envR m.cim
-    let scaledCim ← mul weightedCim landingScale
+    let scaledCim ← mul weightedCim scale
     let wCimR ← toIntE scaledCim
     let cosine ← fixedCosCycSig phQN
     let realPart ← mul wCreR cosine
     let sine ← fixedSinCycSig phQN
     let imagPart ← mul wCimR sine
     let difference ← sub realPart imagPart
-    rshift difference landingShift
+    rshift difference shift
+  -- Static landing stays verbatim; dynamic landing rides invariant columns
+  -- (see `bankFoldInv` — the WS3b re-emission trap).
+  let fold := fun (body : Sig → Sig → ModeSym → BuildM Sig) => match le with
+    | .static _ => bankFold cols (body landingScale landingShift)
+    | .dynamic _ =>
+        Tropical.EmitArrow.bankFoldInv cols #[landingScale, landingShift]
+          (fun m inv => body inv[0]! inv[1]! m)
+  let fwdQ ← fold fwdBody
+  let revQ ← fold revBody
   let zero ← lit 0
   let afterStrike ← gt clkRel zero
   let forwardOutput ← fixedOutQ 30 fwdQ
