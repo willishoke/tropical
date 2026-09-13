@@ -17,6 +17,10 @@ A row whose nodes are all ONE expression is a confluent pole of multiplicity
 `k`: `exp[z,…,z](d) = d^{k−m}/(k−m)!·e^{zd}`, i.e. polynomial degree — the
 `deg` machinery the unrolled bank already renders, at any multiplicity.
 
+A PAST row (slice Phase 4) realizes the same families on the mirrored clock
+at the physical poles `ν = −z'` with the reflected coefficients
+`(−1)^{k−m+1}·n_m`; the strike sample carries the continuous value `h(0)`.
+
 ## The triple body
 
 Anchor at the third node: with `u = (z₁−z₃)·d`, `v = (z₂−z₃)·d`,
@@ -223,49 +227,98 @@ def tripleSig (rows : Array TripleMode) (clkInt anchorSamples : Sig) : BuildM Si
 
 -- ── The block terminal ────────────────────────────────────────────────────────
 
-/-- Block rows routed into their realizable families. -/
+/-- Block rows routed into their realizable families, per arm. `atZero` is the
+    value at the strike sample: `0` for a single-sided spine (today's causal
+    convention) and, once a past arm exists, the continuous value `h(0) =
+    Σ_{future rows} n_k` (every same-side product of two or more factors has
+    relative degree ≥ 2, so the bilateral response is continuous at 0). -/
 structure BlockTerminal where
   plain : Array ModalMode := #[]
   paired : Array PairedMode := #[]
   triple : Array TripleMode := #[]
+  pastPlain : Array ModalMode := #[]
+  pastPaired : Array PairedMode := #[]
+  pastTriple : Array TripleMode := #[]
+  atZero : CplxE
 
-/-- Route each row: a confluent row becomes degree modes; a simple row of size
-    `k ≤ 3` becomes the suffix families. A larger simple row cannot reach here
-    (`decompose` refuses it) and is a build error, never a silent drop. -/
+private structure Families where
+  plain : Array ModalMode := #[]
+  paired : Array PairedMode := #[]
+  triple : Array TripleMode := #[]
+
+/-- Route one row's `(nodes, coeffs)` — already in the realizer's frame (physical
+    poles, reflection applied) — into its families. -/
+private def routeRow (fam : Families) (nodes coeffs : Array CplxE) (confluent : Bool) :
+    BuildM Families := do
+  let k := nodes.size
+  if confluent then
+    -- exp[z,…,z] (k−m+1 copies) = d^{k−m}/(k−m)!·e^{zd}
+    let some z := nodes[0]? | pure fam
+    let mut fam := fam
+    for (n, m) in coeffs.zipIdx do
+      let degree := k - 1 - m
+      let amp ← Oriented.scaledNatQuotient n 1 (Oriented.factorial degree)
+      fam := { fam with plain := fam.plain.push (← modeOfE z amp degree) }
+    pure fam
+  else
+    match nodes.toList, coeffs.toList with
+    | [z1], [n1] => pure { fam with plain := fam.plain.push (← modeOfE z1 n1) }
+    | [z1, z2], [n1, n2] =>
+        pure { fam with
+          paired := fam.paired.push { lam := z1, nu := z2, c := n1 },
+          plain := fam.plain.push (← modeOfE z2 n2) }
+    | [z1, z2, z3], [n1, n2, n3] =>
+        pure { fam with
+          triple := fam.triple.push { z1, z2, z3, c := n1 },
+          paired := fam.paired.push { lam := z2, nu := z3, c := n2 },
+          plain := fam.plain.push (← modeOfE z3 n3) }
+    | _, _ => throw s!"block terminal: a simple row of size {k} has no realizable body"
+
+/-- Route each row. A future row is realized as it stands. A past row is
+    realized on the mirrored clock at the PHYSICAL poles `ν = −z'` with
+    coefficients `(−1)^{k−m+1}·n_m` (the anti-causal sign of the two-sided
+    transform times the divided-difference reflection). A larger simple row
+    cannot reach here (`decompose` refuses it) and is a build error. -/
 def BlockTerminal.ofRows (rows : Array BlockRow) : BuildM BlockTerminal := do
-  let mut terminal : BlockTerminal := {}
+  let mut future : Families := {}
+  let mut past : Families := {}
+  let mut atZero ← Oriented.natE 0
+  let anyPast := rows.any (·.orientation == .past)
   for row in rows do
-    let k := row.nodes.size
-    if row.confluent then
-      -- exp[z,…,z] (k−m+1 copies) = d^{k−m}/(k−m)!·e^{zd}
-      let some z := row.nodes[0]? | continue
-      for (n, m) in row.coeffs.zipIdx do
-        let degree := k - 1 - m
-        let amp ← Oriented.scaledNatQuotient n 1 (Oriented.factorial degree)
-        terminal := { terminal with plain := terminal.plain.push (← modeOfE z amp degree) }
-    else
-      match row.nodes.toList, row.coeffs.toList with
-      | [z1], [n1] =>
-          terminal := { terminal with plain := terminal.plain.push (← modeOfE z1 n1) }
-      | [z1, z2], [n1, n2] =>
-          terminal := { terminal with
-            paired := terminal.paired.push { lam := z1, nu := z2, c := n1 },
-            plain := terminal.plain.push (← modeOfE z2 n2) }
-      | [z1, z2, z3], [n1, n2, n3] =>
-          terminal := { terminal with
-            triple := terminal.triple.push { z1, z2, z3, c := n1 },
-            paired := terminal.paired.push { lam := z2, nu := z3, c := n2 },
-            plain := terminal.plain.push (← modeOfE z3 n3) }
-      | _, _ => throw s!"block terminal: a simple row of size {k} has no realizable body"
-  pure terminal
+    match row.orientation with
+    | .future =>
+        future ← routeRow future row.nodes row.coeffs row.confluent
+        if anyPast then
+          if let some nk := row.coeffs.back? then atZero ← caddE atZero nk
+    | .past =>
+        let k := row.nodes.size
+        let nodes ← row.nodes.mapM cnegE
+        -- 0-based m: (−1)^{k−m} — negate the last coefficient (m = k−1) always
+        let coeffs ← row.coeffs.zipIdx.mapM fun (n, m) =>
+          if (k - m) % 2 == 1 then cnegE n else pure n
+        past ← routeRow past nodes coeffs row.confluent
+  pure { plain := future.plain, paired := future.paired, triple := future.triple,
+         pastPlain := past.plain, pastPaired := past.paired, pastTriple := past.triple,
+         atZero }
 
-/-- Render the terminal: the plain and paired families through the existing
-    `TerminalBank` read (fixed datapath + float paired lane), plus the triple lane. -/
+/-- Render the terminal: both arms' plain and paired families through the
+    existing `TerminalBank` read (fixed datapath + float paired lane, the past
+    arm on the mirrored clock, `atZero` at the strike), plus the triple lanes. -/
 def BlockTerminal.realizeSig (terminal : BlockTerminal) (clkInt anchorSamples : Sig)
     (count? : Option Sig := none) : BuildM Sig := do
-  let bank ← Oriented.Bank.ofFuture terminal.plain
-  let base : Oriented.TerminalBank := { bank, futurePaired := terminal.paired }
+  let bank : Oriented.Bank :=
+    { future := terminal.plain, past := terminal.pastPlain, atZero := terminal.atZero }
+  let base : Oriented.TerminalBank :=
+    { bank, futurePaired := terminal.paired, pastPaired := terminal.pastPaired }
   let baseSig ← base.realizeSig clkInt anchorSamples count?
-  add baseSig (← tripleSig terminal.triple clkInt anchorSamples)
+  let futureTriple ← tripleSig terminal.triple clkInt anchorSamples
+  let twoPow32 ← lit 4294967296
+  let anchorFixed ← mul anchorSamples twoPow32
+  let anchorQ ← toIntE anchorFixed
+  let two ← lit 2
+  let twiceAnchor ← mul two anchorQ
+  let mirroredClock ← sub twiceAnchor clkInt
+  let pastTriple ← tripleSig terminal.pastTriple mirroredClock anchorSamples
+  add (← add baseSig futureTriple) pastTriple
 
 end Tropical.EmitArrow.Block

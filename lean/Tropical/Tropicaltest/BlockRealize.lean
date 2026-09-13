@@ -74,6 +74,12 @@ private def oracleStride : Nat := 4
 
 private def allFinite (xs : Array Float) : Bool := xs.all (·.isFinite)
 
+private def foldCplx (constants : Array (Option DyadicI)) (value : CplxE) :
+    Option (Float × Float) := do
+  let re ← (sigConstDFrom? constants value.1).map DyadicI.toFloat
+  let im ← (sigConstDFrom? constants value.2).map DyadicI.toFloat
+  pure (re, im)
+
 /-- `x` in scientific notation (Lean's `Float.toString` is fixed six-decimal). -/
 private def sci (x : Float) : String :=
   if x == 0.0 then "0" else
@@ -99,10 +105,12 @@ private def modeF (sigma omega cre cim : Float) : BuildM ModalMode := do
 private def properOf (modes : Array ModalMode) : BuildM ModalKernelExpr := do
   pure (.proper (.oriented modes (← lit 0)))
 
-private def blockSig (spine : ModalKernelExpr) : BuildM Sig := do
+private def blockSigAt (anchor : Nat) (spine : ModalKernelExpr) : BuildM Sig := do
   match ← decompose spine with
   | .error r => throw r.describe
-  | .ok rows => (← BlockTerminal.ofRows rows).realizeSig (← clockLit) (← anchorSig)
+  | .ok rows => (← BlockTerminal.ofRows rows).realizeSig (← clockLit) (← lit (Int.ofNat anchor))
+
+private def blockSig (spine : ModalKernelExpr) : BuildM Sig := blockSigAt anchorNat spine
 
 -- ── exact oracle helpers (128-bit dyadic) ─────────────────────────────────────
 
@@ -283,6 +291,103 @@ private def tripleLanes : IO (Except String (Float × Float)) := do
     debugPair "lanes" d ref
     pure (.ok (relL2 d ref oracleStride, width))
 
+-- ── (f) bilateral render: mixed directions, a hot PAST pair, exact oracle ────
+
+/-- `voice{a at λ} ⋙ room{r₁ at ν₁, past} ⋙ room{r₂ at ν₂, future} ⋙ room{r₃ at
+    ν₃, past}` with `ν₁ ≈ ν₃` (gap 1e-3 rad/s) so the past arm carries one
+    paired row — the reflection sign under test — rendered around a mid-window
+    anchor so both `d < 0` and `d > 0` are observed, against the exact
+    two-sided partial fractions on the 128-bit carrier: LHP residues on `d > 0`,
+    RHP residues with the anti-causal sign on `d < 0`, the continuous value at
+    the strike. -/
+private def bilateralRender : IO (Except String (Float × Float)) := do
+  let anchorB := 2048
+  -- amps of order 30: four poles hundreds of rad/s apart give residues ~1/Δ³,
+  -- so unit amps would sit under the fixed lane's landing LSB
+  let lam := (3.0, tp * 180.0, 30.0)
+  let nu1 := (7.0, tp * 420.0 + 0.0006, 25.0)
+  let nu2 := (11.0, tp * 260.0, 20.0)
+  let nu3 := (7.0003, tp * 420.0, 30.0)
+  let spineOf : BuildM ModalKernelExpr := do
+    let mode := fun (m : Float × Float × Float) => modeF m.1 m.2.1 m.2.2 0.0
+    let one ← lit 1
+    let zero ← lit 0
+    pure (.cascade #[
+      .proper (.oriented #[← mode lam] zero),
+      .proper (.oriented #[← mode nu1] one),
+      .proper (.oriented #[← mode nu2] zero),
+      .proper (.oriented #[← mode nu3] one)])
+  if (← IO.getEnv "TROPICAL_BLOCK_DEBUG").isSome then
+    match Tropical.Testing.ArrowFixtures.freezeBuild {} (do decompose (← spineOf)) with
+    | .ok (arena, .ok rows) =>
+      let constants := sigConstTable arena
+      for row in rows do
+        let ns := row.nodes.map fun z => match foldCplx constants z with
+          | some (re, im) => s!"({sci re},{sci im})" | none => "?"
+        let cs := row.coeffs.map fun c => match foldCplx constants c with
+          | some (re, im) => s!"({sci re},{sci im})" | none => "?"
+        IO.println s!"        [bilateral rows] {repr row.orientation} nodes {ns} coeffs {cs}"
+    | .ok (_, .error r) => IO.println s!"        [bilateral rows] refused: {r.describe}"
+    | .error e => IO.println s!"        [bilateral rows] build error: {e}"
+  let dut ← render "block_bilateral" (do blockSigAt anchorB (← spineOf))
+  match dut with
+  | .error e => pure (.error e)
+  | .ok d =>
+    if !(allFinite d) then return .error "non-finite render"
+    -- effective poles: each arm's carrier is on the rotator grid at the row's
+    -- last node; the past paired row's carrier is ν₃, its difference raw
+    let zL := cI (-lam.1) (qOm lam.2.1)
+    let z2 := cI (-nu2.1) (qOm nu2.2.1)
+    let w3q := qOm nu3.2.1
+    -- RHP (mirrored) poles for the past arm: z' = −ν
+    let z3p := cI nu3.1 (-w3q)
+    let z1p := cI nu1.1 (-(w3q + (nu1.2.1 - nu3.2.1)))
+    let a := cI lam.2.2 0
+    let r1 := cI nu1.2.2 0
+    let r2 := cI nu2.2.2 0
+    let r3 := cI nu3.2.2 0
+    let sub := CplxDI.sub; let mul := CplxDI.mul; let div := CplxDI.div; let neg := CplxDI.neg
+    -- H = a/(s−λ) · (−r₁/(s−z₁')) · r₂/(s−z₂) · (−r₃/(s−z₃'))  (two past arms ⇒ sign +)
+    let num := mul (mul a r1) (mul r2 r3)
+    let poles := #[zL, z1p, z2, z3p]
+    let residue := fun (i : Nat) => Id.run do
+      let mut den := CplxDI.one
+      for (p, j) in poles.zipIdx do
+        if j != i then den := mul den (sub poles[i]! p)
+      return div num den
+    let mut y : Array Float := Array.replicate nProbe 0.0
+    let mut width := 0.0
+    let mut i := 0
+    while i < nProbe do
+      let dF := (i.toFloat - anchorB.toFloat) / srF
+      let d := DyadicI.ofFloat dF
+      let mut acc := DyadicI.zero
+      if dF > 0.0 then
+        for k in [0, 2] do
+          acc := DyadicI.add acc (mul (residue k) (CplxDI.exp (CplxDI.scale d poles[k]!))).re
+      else if dF < 0.0 then
+        for k in [1, 3] do
+          acc := DyadicI.sub acc (mul (residue k) (CplxDI.exp (CplxDI.scale d poles[k]!))).re
+      else
+        for k in [0, 2] do acc := DyadicI.add acc (residue k).re
+      width := max width (Dyadic.toFloat (DyadicI.width acc))
+      y := y.set! i (DyadicI.toFloat acc)
+      i := i + oracleStride
+    let _ := neg
+    -- rel-L2 over the whole window (both arms), on the oracle's stride
+    let mut nm := 0.0
+    let mut dn := 0.0
+    let mut j := 0
+    while j < nProbe do
+      let dd := d[j]! - y[j]!
+      nm := nm + dd * dd
+      dn := dn + y[j]! * y[j]!
+      j := j + oracleStride
+    if (← IO.getEnv "TROPICAL_BLOCK_DEBUG").isSome then
+      for k in [10, 1000, 2047, 2048, 2049, 3000, 4000] do
+        IO.println s!"        [bilateral] i={k} dut {sci d[k]!} ref {sci y[k]!}"
+    pure (.ok (Float.sqrt (nm / (dn + 1e-300)), width))
+
 -- ── the gate ──────────────────────────────────────────────────────────────────
 
 /-- Thresholds — MEASURED at landing (2026-09-13), fail lines a decade above.
@@ -302,20 +407,21 @@ def runBlockRealize : IO Bool := do
   let triple ← tripleRender
   let collision ← tripleCollision
   let lanes ← tripleLanes
-  match singleton, confluent, triple, collision, lanes with
-  | .ok s, .ok c, .ok (t, tw), .ok k, .ok (l, lw) =>
+  let bilateral ← bilateralRender
+  match singleton, confluent, triple, collision, lanes, bilateral with
+  | .ok s, .ok c, .ok (t, tw), .ok k, .ok (l, lw), .ok (b, bw) =>
     if s < sameLaneFloor && c < floatLaneFloor && t < floatLaneFloor
-        && k < floatLaneFloor && l < floatLaneFloor then
+        && k < floatLaneFloor && l < floatLaneFloor && b < floatLaneFloor then
       passGate "block-realize"
-        s!"singleton render rel {sci s}; confluent deg-3 render rel {sci c}; triple (gap 1e-3, 4 poles) vs 128-bit exact rel {sci t} (oracle width {sci tw}); triple collision vs closed form rel {sci k}; triple lanes (gaps 3, 5 rad/s, seam crossed in-window) vs exact Lagrange rel {sci l} (oracle width {sci lw})"
+        s!"singleton render rel {sci s}; confluent deg-3 render rel {sci c}; triple (gap 1e-3, 4 poles) vs 128-bit exact rel {sci t} (oracle width {sci tw}); triple collision vs closed form rel {sci k}; triple lanes (gaps 3, 5 rad/s, seam crossed in-window) vs exact Lagrange rel {sci l} (oracle width {sci lw}); bilateral (past·future·past rooms, hot past pair) vs exact two-sided rel {sci b} (oracle width {sci bw})"
     else
       failGate "block-realize"
-        s!"off the law: singleton {sci s} confluent {sci c} triple {sci t} collision {sci k} lanes {sci l} (floors {sci sameLaneFloor} / {sci floatLaneFloor})"
-  | s, c, t, k, l =>
+        s!"off the law: singleton {sci s} confluent {sci c} triple {sci t} collision {sci k} lanes {sci l} bilateral {sci b} (floors {sci sameLaneFloor} / {sci floatLaneFloor})"
+  | s, c, t, k, l, b =>
     let sh := fun (x : Except String Float) => match x with | .ok v => s!"{v}" | .error e => s!"ERR {e}"
     let sh2 := fun (x : Except String (Float × Float)) => match x with
       | .ok (v, w) => s!"{v} (width {w})" | .error e => s!"ERR {e}"
     failGate "block-realize"
-      s!"singleton {sh s}; confluent {sh c}; triple {sh2 t}; collision {sh k}; lanes {sh2 l}"
+      s!"singleton {sh s}; confluent {sh c}; triple {sh2 t}; collision {sh k}; lanes {sh2 l}; bilateral {sh2 b}"
 
 end Tropical.Tropicaltest.BlockRealize

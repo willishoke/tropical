@@ -1082,35 +1082,34 @@ private def resolvePlainStages (voice : Array ModalMode) (stages : Array ModalSt
       pure <| (PlainTerminal.generic (Oriented.TerminalBank.ofBank state.bank))
         |>.withLevelGain state.levelGain?
 
-/-- Is a room stage exactly forward and unswayed, decided from its authored
-    control (the `fixedForwardBloomRooms?` reading)? The block carrier serves
-    causal spines only (slice plan Phase 4 lifts this). -/
-private def roomFixedForward (room : OrdinaryRoomStage) : BuildM Bool := do
-  if room.direction.signalNode?.isSome || room.sway?.isSome then return false
-  let .konst direction := room.direction.fallback | return false
-  match ← sigConstD? direction with
-  | some d => pure (Block.isExactZero d)
-  | none => pure false
-
 /-- Why a spine that `plainStageSpineAdmitted` rejects cannot go to the block
-    terminal either — decided at lowering time from stage kinds and authored
-    controls, before any control is bound. `none` ⇒ the block terminal serves it. -/
+    terminal either — decided at lowering time from stage kinds, before any
+    control is bound. `none` ⇒ the block terminal serves it (any direction,
+    live or reversed; sway; linear kernels). -/
 private def blockSpineRefusal? (stages : Array ModalStage) : BuildM (Option String) := do
   for stage in stages do
     match stage with
     | .gauge _ => return some "a gauge after a repeated-room crossing is a nonlinear materialization point the block carrier does not cross"
-    | .ordinaryRoom room =>
-      if !(← roomFixedForward room) then
-        return some "a live, reversed, or swayed room direction in a repeated-room crossing needs the bilateral block carrier, which is not yet served"
-    | .linear _ => pure ()
+    | .ordinaryRoom _ | .linear _ => pure ()
   pure none
 
+/-- The direction a room's proper kernel carries into the block algebra: the
+    authored literal when the control is a constant (so an exactly-forward or
+    exactly-reversed room contributes ONE arm and const-folds), else the bound
+    and clamped control (both arms, scaled `(1−δ)` / `δ`). -/
+private def blockDirection (room : OrdinaryRoomStage) (resolved : Sig) : BuildM Sig := do
+  if room.direction.signalNode?.isSome then return resolved
+  let .konst direction := room.direction.fallback | return resolved
+  match ← sigConstD? direction with
+  | some d => pure (if Block.isExactZero d || Block.isExactOne d then direction else resolved)
+  | none => pure resolved
+
 /-- Fold a repeated-room spine through the block terminal: every stage becomes
-    a retained factor of one `ModalKernelExpr.cascade` (rooms as exactly-forward
-    proper kernels, linear stages as their built kernels), decomposed into block
-    partial fractions ONCE at this terminal. A numeric refusal (a cluster over
-    the served body size, a non-forward direction inside a linear kernel) is a
-    typed reason, raised here with the node named. -/
+    a retained factor of one `ModalKernelExpr.cascade` (rooms as oriented
+    proper kernels with their direction, linear stages as their built kernels),
+    decomposed into block partial fractions ONCE at this terminal. A numeric
+    refusal (a cluster over the served body size) is a typed reason, raised
+    here with the node named. -/
 private def resolveBlockStages (id : String) (voice : Array ModalMode)
     (stages : Array ModalStage) (responseClock : Sig) (values : Array Sig) :
     BuildM PlainTerminal := do
@@ -1121,8 +1120,8 @@ private def resolveBlockStages (id : String) (voice : Array ModalMode)
   for stage in stages do
     match stage with
     | .ordinaryRoom room =>
-      let (modes, _, gain?, next) ← resolveRoomStage room responseClock values cursor
-      kernels := kernels.push (.proper (.oriented modes zero))
+      let (modes, direction, gain?, next) ← resolveRoomStage room responseClock values cursor
+      kernels := kernels.push (.proper (.oriented modes (← blockDirection room direction)))
       levelGain? ← combineLevelGain levelGain? gain?
       cursor := next
     | .linear linear =>

@@ -16,8 +16,8 @@ oracles the algebra must reduce to.
 * CONFLUENCE LAW — an identity-coincident voice/room pole forms one size-2
   block whose Newton coefficients are exactly the `Oriented` coincident
   algebra's degree-1 and degree-0 amplitudes at that pole (`exp[z,z] = d·e^{zd}`).
-* REFUSALS — a non-forward direction and an over-cap cluster refuse with the
-  typed reason, never a silent fallback.
+* REFUSALS — an over-cap cluster refuses with the typed reason, never a silent
+  fallback; a reversed room is admitted and yields past rows.
 
 No realizer participates: Phase 2 owns the render.
 -/
@@ -152,14 +152,15 @@ private def describeOutcome (x : Except Refusal (Array BlockRow)) : String :=
   | .error r => r.describe
   | .ok rows => s!"{rows.size} rows"
 
-/-- REFUSALS: a non-forward direction, and four near-equal distinct poles. -/
+/-- REFUSALS: four near-equal distinct poles refuse as typed; a reversed room
+    is ADMITTED and contributes past rows (slice Phase 4). -/
 private def refusals : IO (Except String Unit) := do
   match Tropical.Testing.ArrowFixtures.freezeBuild {} do
       let voice ← voice3
       let room ← room3a
-      let tilted : ModalKernelExpr := .cascade #[← properOf voice,
-        .proper (.oriented room (← lit 3 1))]
-      let nonCausal ← decompose tilted
+      let reversed : ModalKernelExpr := .cascade #[← properOf voice,
+        .proper (.oriented room (← lit 1))]
+      let bilateral ← decompose reversed
       -- four poles within 1e-3 rad/s of each other, all distinct expressions
       let comb : Array ModalMode := #[
         ← litMode (9, 0) (9424, 1) (7, 1) (0, 0),
@@ -168,15 +169,19 @@ private def refusals : IO (Except String Unit) := do
         ← litMode (9, 0) (94243, 2) (7, 1) (0, 0)]
       let dense : ModalKernelExpr := .cascade #[← properOf voice, ← properOf comb]
       let tooLarge ← decompose dense
-      pure (nonCausal, tooLarge) with
+      pure (bilateral, tooLarge) with
   | .error e => pure (.error s!"build: {e}")
-  | .ok (_, (nonCausal, tooLarge)) =>
-    match nonCausal, tooLarge with
-    | .error .nonCausal, .error (.clusterTooLarge 4 3) => pure (.ok ())
-    | .error .nonCausal, other =>
+  | .ok (_, (bilateral, tooLarge)) =>
+    match bilateral, tooLarge with
+    | .ok rows, .error (.clusterTooLarge 4 3) =>
+        let past := rows.filter (·.orientation == .past)
+        let future := rows.filter (·.orientation == .future)
+        if past.size == 3 && future.size == 3 then pure (.ok ())
+        else pure (.error s!"reversed room: expected 3 future + 3 past rows, got {future.size} + {past.size}")
+    | .ok _, other =>
         pure (.error s!"dense comb: expected clusterTooLarge 4 3, got {describeOutcome other}")
     | other, _ =>
-        pure (.error s!"tilted room: expected nonCausal, got {describeOutcome other}")
+        pure (.error s!"reversed room: expected admission, got {describeOutcome other}")
 
 private def showResult (x : Except String Float) : String :=
   match x with
@@ -196,7 +201,7 @@ def runBlockAlgebra : IO Bool := do
   | .ok s, .ok c, .ok () =>
     if s < 1e-12 && c < 1e-12 then
       passGate "block-algebra"
-        s!"singleton law rel {s} (block coefficients = collected residues up to reassociation); confluence law rel {c} (size-2 block = Oriented deg-1/deg-0 amps); nonCausal + clusterTooLarge refusals typed"
+        s!"singleton law rel {s} (block coefficients = collected residues up to reassociation); confluence law rel {c} (size-2 block = Oriented deg-1/deg-0 amps); reversed room admitted as past rows; clusterTooLarge refusal typed"
     else
       failGate "block-algebra" s!"off the law: singleton rel {s}, confluence rel {c}"
   | s, c, r =>

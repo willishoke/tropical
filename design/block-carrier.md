@@ -1,7 +1,7 @@
 # The block carrier — repeated rooms without collecting
 
-Status: Phases 1–3 landed 2026-09-13 (`feat/block-carrier`). Causal spines
-with more than one nonterminal room lower through the block terminal. Cockpit
+Status: Phases 1–4 landed 2026-09-13 (`feat/block-carrier`). Spines with more
+than one nonterminal room lower through the block terminal, any direction. Cockpit
 scripts: `demos/block_carrier_leibniz.py` (the coefficient algebra in f64 vs a
 60-digit reference), `demos/block_carrier_body.py` (the size-3 body),
 `demos/block_carrier_exp.py` / `dd_union_law.py` (the research experiments).
@@ -24,11 +24,19 @@ The composable carrier is the retained factor tree the island already kept:
 `ModalKernelExpr` (identity / proper / scale / parallel / cascade / blend). The
 block terminal (`Modal/Block.lean`) consumes it once, at the end of a spine:
 
-1. **Pole multiset.** The union over the tree; composition never moves a pole.
+1. **Pole multiset.** The union over the tree in the s-plane; composition
+   never moves a pole. A room's past arm enters as the MIRRORED pole `z' = −ν`
+   with the two-sided Laplace transform's sign (`−δ·r/(s−z')`, and
+   `(−1)^{p+1}·B·p!` for degree `p`), so both arms are one rational function;
+   a degree-`p` mode is `p+1` copies of its node with coefficient `A·p!`. An
+   exactly-forward or exactly-reversed room contributes one arm; a live or
+   fractional direction contributes both, scaled `(1−δ)` / `δ`.
 2. **Clusters.** Union-find under the one pole-distance lens the pairwise router
    already uses (`poleAccuracyHotFrom?`: min |Δ| over declared σ intervals,
-   ω exact, certified below `θ_acc = 0.4642` rad/s on the `DyadicI` carrier).
-   Amps play no part: membership is a pole question.
+   ω exact, certified below `θ_acc = 0.4642` rad/s on the `DyadicI` carrier),
+   or expression identity. Never across orientation: a future and a past pole
+   are separated by at least `σ_f + σ_p` and are different signals. Amps play
+   no part: membership is a pole question.
 3. **Coefficients.** For a cluster with ordered nodes `z₁..z_k`, the Newton
    coefficients `n_m = g_c[z₁..z_m]` of `g_c = H·D_c` are computed by the
    Leibniz rule for divided differences over the tree's factors — linear
@@ -38,7 +46,12 @@ block terminal (`Modal/Block.lean`) consumes it once, at the end of a spine:
    nodes in one cluster is ever formed; exact coincidence needs no branch; a
    singleton reduces to the ordinary residue as a product of sums.
 4. **Rows.** `h_c(d) = Σ_m n_m · exp[z_m..z_k](d)` — the suffix divided
-   differences of `e^{zd}`.
+   differences of `e^{zd}`. A past row is the anti-causal
+   `−Σ_m n_m·exp[z'_m..z'_k](d)` on `d < 0`, which on the mirrored clock
+   `d' = −d` is `Σ_m (−1)^{k−m+1}·n_m·exp[ν_m..ν_k](d')` at the physical poles —
+   the same families, reflected. The strike sample carries `0` for a
+   single-sided spine (the causal convention) and the continuous `h(0) =
+   Σ_{future rows} n_k` once a past arm exists.
 
 Every coefficient is a `CplxE` (`Sig × Sig`): literal poles const-fold on the
 exact carrier and round once; live poles ride the stage-0 kernel, as the
@@ -65,14 +78,11 @@ cluster tolerance.
 ## Admission and refusal
 
 The block terminal serves a spine iff every stage is a room or a linear
-kernel, every room is exactly forward and unswayed (decided from the authored
-control, as `fixedForwardBloomRooms?` does), and every cluster with at least
-two distinct expressions has at most three nodes. Refusals are typed
-(`Block.Refusal`: `nonCausal`, `higherDegree`, `clusterTooLarge size cap`) and
-surface with the node named; a gauge after repeated rooms and a live, reversed
-or swayed direction in a repeated-room spine are refused at lowering time with
-the reason. Spines admitted before this change keep their previous path and
-goldens.
+kernel (any direction, live or reversed; sway) and every cluster with at
+least two distinct expressions has at most three nodes. The refusal is typed
+(`Block.Refusal.clusterTooLarge size cap`) and surfaces with the node named; a
+gauge after repeated rooms is refused at lowering time with the reason. Spines
+admitted before this change keep their previous path and goldens.
 
 ## Witnesses
 
@@ -93,14 +103,14 @@ goldens.
   through the block terminal over the residue atom's own interiors and
   boundary probes against the quadrature oracle, total admission, snr 2e-4.
 - `modal-oriented-patch`: three separately authored equal rooms render through
-  the production lowering against `1/((s+2)(s+5)³)`; room-room-gauge refuses.
+  the production lowering against `1/((s+2)(s+5)³)`; a past·future·past chain
+  against the bilateral partial fractions; room-room-gauge refuses.
+- `block-realize` bilateral probe: past·future·past rooms with a hot PAST pair
+  against the exact two-sided partial fractions on the 128-bit carrier, both
+  arms observed around a mid-window anchor (9.4e-6).
 
 ## Not yet
 
-- Bilateral chains (live or reversed direction on a nonterminal room):
-  same-side words through Leibniz, mixed future×past couplings collected (they
-  are never hot — the divisor magnitude is at least `σ_f + σ_p`). Slice plan
-  Phase 4.
 - Subsuming the admitted one- and two-room paths (goldens move deliberately;
   the factored two-room terminals stay as cost schedules). Phase 5.
 - A fixed-lane landing for block rows via the Hermite–Genocchi sup bound
