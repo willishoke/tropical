@@ -591,6 +591,10 @@ private inductive PlainTerminal where
   | factored (terminal : Oriented.FactoredTwoRoomTerminal)
   | factoredPhaser (terminal : Oriented.FactoredTwoRoomPhaserTerminal)
   | higherOrderPhaser (terminal : HigherOrderPhaserTerminal)
+  /-- The block-partial-fraction terminal over the retained factor tree — the
+      carrier for causal spines with more than one nonterminal room
+      (`Modal/Block.lean`). -/
+  | block (terminal : Block.BlockTerminal)
   | scaled (gain : Sig) (terminal : PlainTerminal)
 
 private def PlainTerminal.withLevelGain (terminal : PlainTerminal)
@@ -805,6 +809,7 @@ private def PlainTerminal.realizeSig (terminal : PlainTerminal)
   | .factored value => value.realizeSig clkInt anchorSamples
   | .factoredPhaser value => value.realizeSig clkInt anchorSamples
   | .higherOrderPhaser value => higherOrderPhaserSig value clkInt anchorSamples count?
+  | .block value => value.realizeSig clkInt anchorSamples count?
   | .scaled gain value => do
       mul gain (← value.realizeSig clkInt anchorSamples count?)
 
@@ -1077,6 +1082,61 @@ private def resolvePlainStages (voice : Array ModalMode) (stages : Array ModalSt
       pure <| (PlainTerminal.generic (Oriented.TerminalBank.ofBank state.bank))
         |>.withLevelGain state.levelGain?
 
+/-- Is a room stage exactly forward and unswayed, decided from its authored
+    control (the `fixedForwardBloomRooms?` reading)? The block carrier serves
+    causal spines only (slice plan Phase 4 lifts this). -/
+private def roomFixedForward (room : OrdinaryRoomStage) : BuildM Bool := do
+  if room.direction.signalNode?.isSome || room.sway?.isSome then return false
+  let .konst direction := room.direction.fallback | return false
+  match ← sigConstD? direction with
+  | some d => pure (Block.isExactZero d)
+  | none => pure false
+
+/-- Why a spine that `plainStageSpineAdmitted` rejects cannot go to the block
+    terminal either — decided at lowering time from stage kinds and authored
+    controls, before any control is bound. `none` ⇒ the block terminal serves it. -/
+private def blockSpineRefusal? (stages : Array ModalStage) : BuildM (Option String) := do
+  for stage in stages do
+    match stage with
+    | .gauge _ => return some "a gauge after a repeated-room crossing is a nonlinear materialization point the block carrier does not cross"
+    | .ordinaryRoom room =>
+      if !(← roomFixedForward room) then
+        return some "a live, reversed, or swayed room direction in a repeated-room crossing needs the bilateral block carrier, which is not yet served"
+    | .linear _ => pure ()
+  pure none
+
+/-- Fold a repeated-room spine through the block terminal: every stage becomes
+    a retained factor of one `ModalKernelExpr.cascade` (rooms as exactly-forward
+    proper kernels, linear stages as their built kernels), decomposed into block
+    partial fractions ONCE at this terminal. A numeric refusal (a cluster over
+    the served body size, a non-forward direction inside a linear kernel) is a
+    typed reason, raised here with the node named. -/
+private def resolveBlockStages (id : String) (voice : Array ModalMode)
+    (stages : Array ModalStage) (responseClock : Sig) (values : Array Sig) :
+    BuildM PlainTerminal := do
+  let zero ← lit 0
+  let mut kernels : Array ModalKernelExpr := #[.proper (.oriented voice zero)]
+  let mut cursor := 0
+  let mut levelGain? : Option Sig := none
+  for stage in stages do
+    match stage with
+    | .ordinaryRoom room =>
+      let (modes, _, gain?, next) ← resolveRoomStage room responseClock values cursor
+      kernels := kernels.push (.proper (.oriented modes zero))
+      levelGain? ← combineLevelGain levelGain? gain?
+      cursor := next
+    | .linear linear =>
+      let (kernel, next) ← resolveLinearStage linear responseClock values cursor
+      kernels := kernels.push kernel
+      cursor := next
+    | .gauge _ =>
+      throw s!"lower: repeated-room crossing at '{id}' reached the block terminal with a gauge stage"
+  match ← Block.decompose (.cascade kernels) with
+  | .error refusal =>
+    throw s!"lower: repeated-room crossing at '{id}' refused ({refusal.describe})"
+  | .ok rows =>
+    pure <| (PlainTerminal.block (← Block.BlockTerminal.ofRows rows)).withLevelGain levelGain?
+
 /-- The present composable carrier can safely cross one nonterminal room.  A
     second room must remain terminal: making it cross a later room, phaser, or gauge
     would require generalized composable divided differences when independently
@@ -1171,9 +1231,13 @@ def lowerInput (g : PatchGraph) (rankOf : String → Option Nat)
         | some controlId => lowerInputGated g rankOf id controlId r
       match modal.source with
       | .plain modes =>
-        if !plainStageSpineAdmitted modal.stages then
-          throw s!"lower: nonterminal repeated-room crossing at '{id}' refused (a later room, phaser, or gauge requires the composable divided-difference carrier)"
-        else if modal.stages.isEmpty then
+        let admitted := plainStageSpineAdmitted modal.stages
+        if !admitted then
+          match ← blockSpineRefusal? modal.stages with
+          | some reason =>
+            throw s!"lower: nonterminal repeated-room crossing at '{id}' refused ({reason})"
+          | none => pure ()
+        if modal.stages.isEmpty then
           let bare := modalBankTerm modes modal.strikeAnchor modal.realizationClock
             modal.modeCount?
           match modal.addressNode? with
@@ -1194,7 +1258,9 @@ def lowerInput (g : PatchGraph) (rankOf : String → Option Nat)
           pure (.arrN (fun inputs => do
             let responseClock := (inputs[0]?).getD modal.realizationClock
             let values := inputs.extract 1 inputs.size
-            let bank ← resolvePlainStages modes modal.stages responseClock values
+            let bank ← if admitted then
+                resolvePlainStages modes modal.stages responseClock values
+              else resolveBlockStages id modes modal.stages responseClock values
             bank.realizeSig responseClock modal.strikeAnchor modal.modeCount?)
             (#[response] ++ controlTerms))
       | .bloomed voice B gr =>

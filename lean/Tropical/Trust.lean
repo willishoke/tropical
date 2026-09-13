@@ -60,7 +60,7 @@ def knownGates : Array String := #[
   "lake-build:Tropical.Semantics",
   "lake-build:Tropical.Proofs",
   "modal-universe-history",
-  "modal-oriented-patch",
+  "modal-oriented-patch", "block-algebra", "block-realize", "seam-sweep",
   "modal-phaser",
   "semantics-production-fixtures",
   "clock-algebra-theorems",
@@ -105,6 +105,8 @@ def obligations : Array Obligation := #[
     evidence := #[.executableGate, .inspection]
     implementationPaths := #["lean/Tropical/EmitArrow/Patch.lean",
       "lean/Tropical/EmitArrow/Modal/Forest.lean",
+      "lean/Tropical/EmitArrow/Modal/Block.lean",
+      "lean/Tropical/EmitArrow/Modal/BlockRealize.lean",
       "lean/Tropical/EmitArrow/Modal/Oriented.lean",
       "lean/Tropical/EmitArrow/Modal/OrientedRealize.lean",
       "lean/Tropical/EmitArrow/Modal/FactoredTerminal.lean",
@@ -112,10 +114,11 @@ def obligations : Array Obligation := #[
       "lean/Tropical/Tropicaltest/OrientedPatch.lean",
       "lean/Tropical/Tropicaltest/Phaser.lean"]
     gateNames := #["modal-universe-history", "modal-oriented-patch", "modal-phaser",
+      "block-algebra", "block-realize", "seam-sweep",
       "manual:production modal refinement review"]
     owner := "Modal compiler"
     status := .open
-    limitation := "Production now retains an authored ordinary-room/gauge/phaser stage spine, binds live controls together at the true terminal, and carries plain sources through explicit future/past algebra with stable divided-difference and exact fused two-room/phaser routes. Full refinement remains open: hot/equal-pole divided differences are not yet composable through a later room or gauge; arbitrary live source-frequency crossings need a declared pole envelope; phaser and live reverse/sway/gauge after bloom need the oriented Gamma bridge; and the bilateral live-gauge cost/backend envelope is not qualified."
+    limitation := "Production now retains an authored ordinary-room/gauge/phaser stage spine, binds live controls together at the true terminal, and carries plain sources through explicit future/past algebra with stable divided-difference and exact fused two-room/phaser routes. Causal spines with more than one nonterminal room now cross through the block-partial-fraction terminal (`lean/Tropical/EmitArrow/Modal/Block.lean`, `BlockRealize.lean`; gates `block-algebra`, `block-realize`, the `blockCompose` seam atom), which forms no `1/Δ` inside a runtime-near-equal cluster and refuses, with the reason, a cluster over the served body size (three distinct poles). Full refinement remains open: repeated-room crossings with a live, reversed, or swayed direction, or followed by a gauge, are refused (the bilateral block carrier is not yet served); arbitrary live source-frequency crossings need a declared pole envelope; phaser and live reverse/sway/gauge after bloom need the oriented Gamma bridge; and the bilateral live-gauge cost/backend envelope is not qualified."
     priority := .critical },
   { id := "EXPR_ARENA_DENOTATION_STABLE"
     statement := "For every carrier algebra and environment, extending a well-formed ExprArena preserves the direct denotation of every addressable existing root."

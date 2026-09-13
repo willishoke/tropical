@@ -291,6 +291,15 @@ private def sourceTripleCrossingOracle (relativeSeconds : Float) : Float :=
     relativeSeconds * relativeSeconds * Float.exp (-5.0 * relativeSeconds) / 2.0
   else 0.0
 
+/-- `1/((s+2)(s+5)³)`: the source through three separately authored rooms of
+    one frozen RT60 — the block at `−5` is the Hermite data of `1/(s+2)`
+    (`g = −1/3, g' = −1/9, g''/2 = −1/27`), the residue at `−2` is `1/27`. -/
+private def repeatedRoomOracle (t : Float) : Float :=
+  if t > 0.0 then
+    Float.exp (-2.0 * t) / 27.0 -
+      Float.exp (-5.0 * t) * (t * t / 6.0 + t / 9.0 + 1.0 / 27.0)
+  else 0.0
+
 private def sourceNearCrossingOracle (relativeSeconds : Float) : Float :=
   analyticOracle #[
     { physicalPole := -5.0001 },
@@ -425,7 +434,9 @@ private structure TwoRoomResult where
   sourceTripleCrossingError : Float
   sourceNearCrossingError : Float
   sourceCrossingsFinite : Bool
-  repeatedRoomRefused : Bool
+  repeatedRoomError : Float
+  repeatedRoomFinite : Bool
+  repeatedRoomPeak : Float
   roomRoomGaugeRefused : Bool
 
 private def checkTwoRooms (arena : Arena) : IO (Except String TwoRoomResult) := do
@@ -472,15 +483,16 @@ private def checkTwoRooms (arena : Arena) : IO (Except String TwoRoomResult) := 
             | return .error "source second-room crossing render"
           let (.ok nearCrossing) := nearCrossing
             | return .error "source near crossing render"
-          let repeatedRoomRefused := match
-              Tropical.Testing.ArrowFixtures.runBuild arena do
-                lowerGraph (← repeatedRoomCrossingGraph false) with
-            | .error error => error == "lower: nonterminal repeated-room crossing at 'equal-room-three' refused (a later room, phaser, or gauge requires the composable divided-difference carrier)"
-            | .ok _ => false
+          -- three separately authored equal rooms cross through the block
+          -- terminal (slice Phase 3): one identity-confluent cluster of three
+          let repeatedRoom ← renderGraph arena "oriented_repeated_room"
+            (repeatedRoomCrossingGraph false)
+          let (.ok repeatedRoom) := repeatedRoom
+            | return .error "repeated-room (three rooms) render"
           let roomRoomGaugeRefused := match
               Tropical.Testing.ArrowFixtures.runBuild arena do
                 lowerGraph (← repeatedRoomCrossingGraph true) with
-            | .error error => error == "lower: nonterminal repeated-room crossing at 'gauge' refused (a later room, phaser, or gauge requires the composable divided-difference carrier)"
+            | .error error => error == "lower: nonterminal repeated-room crossing at 'gauge' refused (a gauge after a repeated-room crossing is a nonlinear materialization point the block carrier does not cross)"
             | .ok _ => false
           pure (.ok {
             maximumOracleError := maximumError
@@ -500,7 +512,9 @@ private def checkTwoRooms (arena : Arena) : IO (Except String TwoRoomResult) := 
               secondCrossing.all (fun sample => sample.isFinite) &&
               tripleCrossing.all (fun sample => sample.isFinite) &&
               nearCrossing.all (fun sample => sample.isFinite)
-            repeatedRoomRefused
+            repeatedRoomError := maxOracleError repeatedRoom repeatedRoomOracle
+            repeatedRoomFinite := repeatedRoom.all (fun sample => sample.isFinite)
+            repeatedRoomPeak := maxWindow repeatedRoom (anchorNat + 1) frameCount
             roomRoomGaugeRefused })
 
 /-- End-to-end production gate for local room direction. -/
@@ -511,7 +525,7 @@ def runOrientedPatch (arena : Arena) : IO Bool := do
       IO.println s!"        one room  local oracle {one.localError} · output-reverse oracle {one.outputReverseError} · local≠output-reverse {one.localVsOutputReverse} · post {one.localPost}/{one.outputReversePost}"
       IO.println s!"        two rooms FF/FR/RF/RR max oracle error {two.maximumOracleError} · min pair distance {two.minimumPairDifference} · authored stage order {two.authoredOrder}"
       IO.println s!"        equal RT60 independently authored: finite {two.equalRt60Finite} · repeated-pole oracle error {two.equalRt60Error} · peak {two.equalRt60Peak}"
-      IO.println s!"        degree-positive terminal: finite {two.degreePositiveFinite} · oracle error {two.degreePositiveError}; guarded crossings: room-room-room {two.repeatedRoomRefused} · room-room-gauge {two.roomRoomGaugeRefused}"
+      IO.println s!"        degree-positive terminal: finite {two.degreePositiveFinite} · oracle error {two.degreePositiveError}; room-room-room via the block terminal: finite {two.repeatedRoomFinite} · oracle error {two.repeatedRoomError} · peak {two.repeatedRoomPeak}; guarded crossing room-room-gauge {two.roomRoomGaugeRefused}"
       IO.println s!"        source/room confluence: finite {two.sourceCrossingsFinite} · room-1/room-2/three-pole/near oracle {two.sourceCrossingError}/{two.sourceSecondCrossingError}/{two.sourceTripleCrossingError}/{two.sourceNearCrossingError}"
       IO.println s!"        float-banked complex DD: finite {complex.finite} · future/past oracle {complex.futureError}/{complex.pastError} · mirror diff {complex.mirrorDifference}"
       IO.println s!"        terminal control clock retains a half-sample Q32.32 offset: {fractionalControlClockOk}"
@@ -527,13 +541,14 @@ def runOrientedPatch (arena : Arena) : IO Bool := do
         two.sourceSecondCrossingError < 2.0e-6 &&
         two.sourceTripleCrossingError < 2.0e-6 &&
         two.sourceNearCrossingError < 2.0e-6 &&
-        two.repeatedRoomRefused && two.roomRoomGaugeRefused &&
+        two.repeatedRoomFinite && two.repeatedRoomError < 2.0e-6 &&
+        two.repeatedRoomPeak > 1.0e-8 && two.roomRoomGaugeRefused &&
         complex.finite && complex.futureError < 2.0e-6 &&
         complex.pastError < 2.0e-6 && complex.mirrorDifference == 0.0 &&
         fractionalControlClockOk
       if pass then
         passGate "modal-oriented-patch"
-          "room reverse is kernel-local (not complete-output reverse); two rooms retain independent FF/FR/RF/RR controls and authored stage order; float-banked complex DD preserves future/past phase and exact mirroring; equal frozen RT60 takes a finite repeated-pole limit; general-degree terminals preserve polynomial factors; unsupported nonterminal DD crossings refuse; terminal controls retain fractional Q32.32 time"
+          "room reverse is kernel-local (not complete-output reverse); two rooms retain independent FF/FR/RF/RR controls and authored stage order; float-banked complex DD preserves future/past phase and exact mirroring; equal frozen RT60 takes a finite repeated-pole limit; general-degree terminals preserve polynomial factors; three equal rooms cross through the block terminal; room-room-gauge refuses with the reason; terminal controls retain fractional Q32.32 time"
       else
         failGate "modal-oriented-patch" "numeric or structural contract failed"
   | .error error, _, _ | _, .error error, _ | _, _, .error error =>
