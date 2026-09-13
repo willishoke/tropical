@@ -1,0 +1,271 @@
+import Tropical.EmitArrow.Modal.Block
+import Tropical.EmitArrow.Modal.OrientedRealize
+
+/-!
+# EmitArrow.Modal.BlockRealize — rendering block rows (slice Phase 2)
+
+A block row `{z₁..z_k; n₁..n_k}` renders as `Σ_m n_m · exp[z_m..z_k](d)`, the
+suffix divided differences of `e^{zd}`. Each suffix is an existing row family
+or the one new one:
+
+* `exp[z_k]`            — a plain `ModalMode` (the fixed Q datapath, as today);
+* `exp[z_{k−1}, z_k]`   — a `PairedMode` (`c·e^{z_k d}·d·cexpm1((z_{k−1}−z_k)d)`,
+                          the float terminal lane `pairedSig`);
+* `exp[z₁, z₂, z₃]`     — `TripleMode`, the one body this module adds.
+
+A row whose nodes are all ONE expression is a confluent pole of multiplicity
+`k`: `exp[z,…,z](d) = d^{k−m}/(k−m)!·e^{zd}`, i.e. polynomial degree — the
+`deg` machinery the unrolled bank already renders, at any multiplicity.
+
+## The triple body
+
+Anchor at the third node: with `u = (z₁−z₃)·d`, `v = (z₂−z₃)·d`,
+
+    exp[z₁,z₂,z₃](d) = e^{z₃d} · d² · Φ(u, v)
+
+and `Φ` has two lanes, selected per sample by `selectE` (both lanes evaluated,
+dead divisors swapped to 1 — the `cexpm1` discipline):
+
+* SERIES, when `max(|u|², |v|², |u−v|²) < 0.01`:
+  `Φ = Σ_{n≤10} h_n(u,v)/(n+2)!`, `h_n` the complete homogeneous symmetric
+  sums (`h_0 = 1`, `h_n = u·h_{n−1} + vⁿ`). Division-free; exact at `u = v = 0`
+  (the triple collision). Truncation < 3e-18 inside the lane.
+* DIRECT, otherwise — one level of the divided-difference recurrence over
+  size-2 factors, choosing the symmetric form whose divisor is LARGEST so no
+  ordering of the nodes can put a near-zero gap in a live divisor:
+      A = (e^{v}·cexpm1(u−v) − cexpm1(v)) / u
+      B = (cexpm1(u) − cexpm1(v)) / (u − v)
+      C = (e^{v}·cexpm1(u−v) − cexpm1(u)) / v
+  (all three equal `Φ`; the numerators cancel by at most one digit when the
+  chosen divisor is ≥ 0.1).
+
+The `z₃` carrier is the float terminal carrier (`expSig` envelope × the exact
+Q0.32 rotator), so the phase argument never leaves the circle; `u`, `v` use
+raw pole differences — bounded by the cluster tolerance, so a raw float angle
+is fine there (the same convention as `modalBankSigTableDD`'s `z`). Validated
+against a 60-digit reference at every gap incl. 0 (`demos/block_carrier_body.py`).
+-/
+
+namespace Tropical.EmitArrow.Block
+
+open Tropical.Ir
+open Tropical.EmitArrow.Oriented (natE)
+
+/-- The size-3 row: `c · exp[z₁, z₂, z₃](d)`. Poles in pole form `(−σ, ω)`. -/
+structure TripleMode where
+  z1 : CplxE
+  z2 : CplxE
+  z3 : CplxE
+  c : CplxE
+
+/-- Coefficient columns of a triple bank: the `z₃` rotator increment and
+    damping, the two raw differences `z₁−z₃`, `z₂−z₃`, and the complex coeff. -/
+structure TripleBankCols where
+  count : Nat
+  live? : Option Sig := none
+  idxId : Nat := 0
+  incr3 : Sig
+  sigma3 : Sig
+  duRe : Sig
+  duIm : Sig
+  dvRe : Sig
+  dvIm : Sig
+  cre : Sig
+  cim : Sig
+
+structure TripleModeSym where
+  incr3 : Sig
+  sigma3 : Sig
+  duRe : Sig
+  duIm : Sig
+  dvRe : Sig
+  dvIm : Sig
+  cre : Sig
+  cim : Sig
+
+def tripleBankCols (rows : Array TripleMode) (live? : Option Sig := none) :
+    BuildM TripleBankCols := do
+  let twoPi ← twoPiE
+  let twoPow32 ← lit 4294967296
+  let sr ← sampleRate
+  let incr3 ← arr (← rows.mapM fun r => do
+    let frequency ← div r.z3.2 twoPi
+    let scaled ← mul frequency twoPow32
+    div scaled sr)
+  let sigma3 ← arr (← rows.mapM fun r => neg r.z3.1)
+  let duRe ← arr (← rows.mapM fun r => sub r.z1.1 r.z3.1)
+  let duIm ← arr (← rows.mapM fun r => sub r.z1.2 r.z3.2)
+  let dvRe ← arr (← rows.mapM fun r => sub r.z2.1 r.z3.1)
+  let dvIm ← arr (← rows.mapM fun r => sub r.z2.2 r.z3.2)
+  let cre ← arr (rows.map fun r => r.c.1)
+  let cim ← arr (rows.map fun r => r.c.2)
+  pure { count := rows.size, live?, incr3, sigma3, duRe, duIm, dvRe, dvIm, cre, cim }
+
+def bankFoldTriple (cols : TripleBankCols) (body : TripleModeSym → BuildM Sig) :
+    BuildM Sig := do
+  let k ← loopIdx cols.idxId
+  let incr3 ← index cols.incr3 k
+  let sigma3 ← index cols.sigma3 k
+  let duRe ← index cols.duRe k
+  let duIm ← index cols.duIm k
+  let dvRe ← index cols.dvRe k
+  let dvIm ← index cols.dvIm k
+  let cre ← index cols.cre k
+  let cim ← index cols.cim k
+  let contribution ← body { incr3, sigma3, duRe, duIm, dvRe, dvIm, cre, cim }
+  bankSum cols.count
+    #[cols.incr3, cols.sigma3, cols.duRe, cols.duIm, cols.dvRe, cols.dvIm, cols.cre, cols.cim]
+    contribution cols.live? cols.idxId
+
+private def cscaleE (s : Sig) (z : CplxE) : BuildM CplxE := do
+  pure (← mul s z.1, ← mul s z.2)
+
+private def cselectE (condition : Sig) (a b : CplxE) : BuildM CplxE := do
+  pure (← selectE condition a.1 b.1, ← selectE condition a.2 b.2)
+
+private def cnormSqE (z : CplxE) : BuildM Sig := do
+  add (← mul z.1 z.1) (← mul z.2 z.2)
+
+/-- `e^z` for a small-argument complex `z` in float (`expSig` × the float
+    `cosSig`/`sinSig` polynomials). -/
+private def cexpFloatE (z : CplxE) : BuildM CplxE := do
+  let env ← expSig z.1
+  pure (← mul env (← cosSig z.2), ← mul env (← sinSig z.2))
+
+/-- `(e^z − 1)/z`, lane-safe: the direct quotient when `|z|² ≥ 0.01` (its
+    divisor swapped to 1 on the other lane), the Horner series otherwise. -/
+private def cexpm1LaneE (z : CplxE) (ez : CplxE) : BuildM CplxE := do
+  let threshold ← litF 0.01
+  let big ← gt (← cnormSqE z) threshold
+  let one ← natE 1
+  let safe ← cselectE big z one
+  let direct ← cdivE (← csubE ez one) safe
+  let series ← cexpm1SeriesE z
+  cselectE big direct series
+
+/-- The series lane of `Φ`: `Σ_{n=0}^{10} h_n(u,v)/(n+2)!`. -/
+private def secondFactorSeriesE (u v : CplxE) : BuildM CplxE := do
+  let mut h ← natE 1
+  let mut vPow ← natE 1
+  let mut total ← cscaleE (← litF 0.5) h
+  for n in [1:11] do
+    vPow ← cmulE vPow v
+    h ← caddE (← cmulE u h) vPow
+    let coefficient ← litF (1.0 / (Oriented.factorial (n + 2)).toFloat)
+    total ← caddE total (← cscaleE coefficient h)
+  pure total
+
+/-- `Φ(u, v)` with `exp[z₁,z₂,z₃](d) = e^{z₃d}·d²·Φ` — both lanes, per-sample select. -/
+private def secondFactorE (u v : CplxE) : BuildM CplxE := do
+  let uv ← csubE u v
+  let nu ← cnormSqE u
+  let nv ← cnormSqE v
+  let nuv ← cnormSqE uv
+  let threshold ← litF 0.01
+  -- series iff every pairwise gap is small
+  let uSmall ← binary .lt nu threshold
+  let vSmall ← binary .lt nv threshold
+  let uvSmall ← binary .lt nuv threshold
+  let seriesLane ← binary .and (← binary .and uSmall vSmall) uvSmall
+  -- the three symmetric direct forms, divisors swapped to 1 when small
+  let eu ← cexpFloatE u
+  let ev ← cexpFloatE v
+  let euv ← cexpFloatE uv
+  let cu ← cexpm1LaneE u eu
+  let cv ← cexpm1LaneE v ev
+  let cuv ← cexpm1LaneE uv euv
+  let one ← natE 1
+  let evCuv ← cmulE ev cuv
+  let safeU ← cselectE (← gt nu threshold) u one
+  let safeV ← cselectE (← gt nv threshold) v one
+  let safeUV ← cselectE (← gt nuv threshold) uv one
+  let candidateA ← cdivE (← csubE evCuv cv) safeU
+  let candidateB ← cdivE (← csubE cu cv) safeUV
+  let candidateC ← cdivE (← csubE evCuv cu) safeV
+  -- choose the form with the LARGEST divisor
+  let aBest ← binary .and (← binary .gte nu nuv) (← binary .gte nu nv)
+  let bBest ← binary .gte nuv nv
+  let direct ← cselectE aBest candidateA (← cselectE bBest candidateB candidateC)
+  let series ← secondFactorSeriesE u v
+  cselectE seriesLane series direct
+
+/-- Float terminal realization of triple rows: `Re(c · e^{z₃d} · d² · Φ(u,v))`
+    per row, one banked reduction, gated causal. -/
+def tripleSig (rows : Array TripleMode) (clkInt anchorSamples : Sig) : BuildM Sig := do
+  if rows.isEmpty then return ← lit 0
+  let clkRel ← relClockQ clkInt anchorSamples
+  let clkFloat ← toFloatE clkRel
+  let twoPow32 ← lit 4294967296
+  let secondsTimesRate ← div clkFloat twoPow32
+  let sr ← sampleRate
+  let dSec ← div secondsTimesRate sr
+  let cols ← tripleBankCols rows
+  let value ← bankFoldTriple cols fun row => do
+    let u ← cscaleE dSec (row.duRe, row.duIm)
+    let v ← cscaleE dSec (row.dvRe, row.dvIm)
+    let factor ← secondFactorE u v
+    let dSq ← mul dSec dSec
+    let scaled ← cscaleE dSq factor
+    let weight ← cmulE (row.cre, row.cim) scaled
+    -- the z₃ carrier: float envelope × the exact Q0.32 rotator
+    let env ← expSig (← neg (← mul row.sigma3 dSec))
+    let increment ← toIntE row.incr3
+    let phaseQ ← modePhaseQFromIncr increment clkRel
+    let q30 ← lit 1073741824
+    let carrierCos ← div (← toFloatE (← fixedCosCycSig phaseQ)) q30
+    let carrierSin ← div (← toFloatE (← fixedSinCycSig phaseQ)) q30
+    let carrier : CplxE := (← mul env carrierCos, ← mul env carrierSin)
+    let product ← cmulE weight carrier
+    pure product.1
+  let zero ← lit 0
+  let afterStrike ← gt clkRel zero
+  selectE afterStrike value zero
+
+-- ── The block terminal ────────────────────────────────────────────────────────
+
+/-- Block rows routed into their realizable families. -/
+structure BlockTerminal where
+  plain : Array ModalMode := #[]
+  paired : Array PairedMode := #[]
+  triple : Array TripleMode := #[]
+
+/-- Route each row: a confluent row becomes degree modes; a simple row of size
+    `k ≤ 3` becomes the suffix families. A larger simple row cannot reach here
+    (`decompose` refuses it) and is a build error, never a silent drop. -/
+def BlockTerminal.ofRows (rows : Array BlockRow) : BuildM BlockTerminal := do
+  let mut terminal : BlockTerminal := {}
+  for row in rows do
+    let k := row.nodes.size
+    if row.confluent then
+      -- exp[z,…,z] (k−m+1 copies) = d^{k−m}/(k−m)!·e^{zd}
+      let some z := row.nodes[0]? | continue
+      for (n, m) in row.coeffs.zipIdx do
+        let degree := k - 1 - m
+        let amp ← Oriented.scaledNatQuotient n 1 (Oriented.factorial degree)
+        terminal := { terminal with plain := terminal.plain.push (← modeOfE z amp degree) }
+    else
+      match row.nodes.toList, row.coeffs.toList with
+      | [z1], [n1] =>
+          terminal := { terminal with plain := terminal.plain.push (← modeOfE z1 n1) }
+      | [z1, z2], [n1, n2] =>
+          terminal := { terminal with
+            paired := terminal.paired.push { lam := z1, nu := z2, c := n1 },
+            plain := terminal.plain.push (← modeOfE z2 n2) }
+      | [z1, z2, z3], [n1, n2, n3] =>
+          terminal := { terminal with
+            triple := terminal.triple.push { z1, z2, z3, c := n1 },
+            paired := terminal.paired.push { lam := z2, nu := z3, c := n2 },
+            plain := terminal.plain.push (← modeOfE z3 n3) }
+      | _, _ => throw s!"block terminal: a simple row of size {k} has no realizable body"
+  pure terminal
+
+/-- Render the terminal: the plain and paired families through the existing
+    `TerminalBank` read (fixed datapath + float paired lane), plus the triple lane. -/
+def BlockTerminal.realizeSig (terminal : BlockTerminal) (clkInt anchorSamples : Sig)
+    (count? : Option Sig := none) : BuildM Sig := do
+  let bank ← Oriented.Bank.ofFuture terminal.plain
+  let base : Oriented.TerminalBank := { bank, futurePaired := terminal.paired }
+  let baseSig ← base.realizeSig clkInt anchorSamples count?
+  add baseSig (← tripleSig terminal.triple clkInt anchorSamples)
+
+end Tropical.EmitArrow.Block

@@ -6,6 +6,7 @@ import Tropical.EmitArrow.Modal.FactoredTerminal
 import Tropical.EmitArrow.Modal.Kernel
 import Tropical.EmitArrow.Modal.Forest
 import Tropical.EmitArrow.Modal.Block
+import Tropical.EmitArrow.Modal.BlockRealize
 
 /-!
 # EmitArrow.Modal

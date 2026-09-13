@@ -28,6 +28,7 @@ import Tropical.Tropicaltest.Exact
 import Tropical.Tropicaltest.GroupedRoomReference
 import Tropical.Tropicaltest.Oriented
 import Tropical.Tropicaltest.Block
+import Tropical.Tropicaltest.BlockRealize
 import Tropical.Tropicaltest.OrientedPatch
 import Tropical.Tropicaltest.Phaser
 
@@ -69,7 +70,9 @@ def main (args : List String) : IO UInt32 := do
     let phase5 ← Tropical.Testing.EmitArrow.runPhase5Gate
     return if phase1 && phase2 && phase3 && phase4 && phase5 then 0 else 1
   if args.contains "--block-only" then
-    return if ← Tropical.Tropicaltest.Block.runBlockAlgebra then 0 else 1
+    let algebra ← Tropical.Tropicaltest.Block.runBlockAlgebra
+    let realize ← Tropical.Tropicaltest.BlockRealize.runBlockRealize
+    return if algebra && realize then 0 else 1
   if args.contains "--oriented-patch-only" then
     return if ← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch {} then 0 else 1
   if args.contains "--phaser-only" then
@@ -158,6 +161,8 @@ def main (args : List String) : IO UInt32 := do
   IO.println "block carrier (divided-difference Leibniz over the factor tree):"
   total := total + 1
   if !(← Tropical.Tropicaltest.Block.runBlockAlgebra) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Tropicaltest.BlockRealize.runBlockRealize) then failed := failed + 1
 
   -- ── (c) Synthetic op-coverage: EmitLlvm over the rare ops, frozen hash ─────
   -- The patch corpus exercises 24 of 29 ops; this funnels the rest
