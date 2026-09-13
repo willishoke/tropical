@@ -1292,6 +1292,36 @@ inductive CouplingRoute where
   | refused
 deriving DecidableEq
 
+/-- min |Δ| between two poles over their σ INTERVALS, with ω exact — the one
+    pole-distance lens shared by the pairwise router (`classifyCouplingWith`)
+    and the block carrier's clustering (`Block.clusterPoles`), so "how far
+    apart are these two poles" has one implementation. The SPAN DISTANCE
+    between `[svLo,svHi]` and `[srLo,srHi]` is `max(0, max(svLo,srLo) −
+    min(svHi,srHi))` — zero when the spans overlap and the gap when they are
+    separated; a const σ is its own point interval. The two axes separate
+    because `dw` does not depend on σ, so this IS min |Δ| over the spans.
+    Conservative under overlap (the three-answer discipline, below). -/
+def poleSpanDistanceD (sv sr : DyadicI × DyadicI) (wv wr : DyadicI) : DyadicI :=
+  let sepLo := DyadicI.max sv.1 sr.1
+  let sepHi := DyadicI.min sv.2 sr.2
+  let dSig := if DyadicI.certGt sepLo sepHi then DyadicI.sub sepLo sepHi else DyadicI.zero
+  let dw := DyadicI.sub wv wr
+  DyadicI.sqrt (DyadicI.add (DyadicI.mul dSig dSig) (DyadicI.mul dw dw))
+
+/-- The pole-distance lens as the block carrier reads it: `some (min |Δ| < θ_acc)`
+    when both poles classify (σ const or ranged, ω const), `none` when either
+    is unclassifiable — the caller decides the conservative side. Amps play no
+    part: clustering is a pole-distance question (composition never moves a
+    pole, and the block coefficients are formed without any `1/Δ` inside a
+    cluster, so no amp-dependent rail lens is needed to decide membership). -/
+def poleAccuracyHotFrom? (constants : Array (Option DyadicI))
+    (a b : ModalMode) : Option Bool := do
+  let sa ← sigmaIntervalDFrom? constants a
+  let sb ← sigmaIntervalDFrom? constants b
+  let wa ← sigConstDFrom? constants a.omega
+  let wb ← sigConstDFrom? constants b.omega
+  pure (DyadicI.certLt (poleSpanDistanceD sa sb wa wb) ecddThetaAccD)
+
 /-- The per-coupling routing verdict — compile-time only. σ may be LIVE with a
     declared range (Phase 2): the lenses evaluate at min |Δ| over the interval —
     a coupling whose interval DIPS under θ takes DD throughout the knob span, so
@@ -1341,11 +1371,7 @@ private def classifyCouplingWith (constants : Array (Option DyadicI))
     -- differently damped. Repaired in its own commit, out of the carrier flip,
     -- so its differential has exactly one variable in it; gate
     -- `ecdd-sigma-axis` now pins the axis in both directions.)
-    let sepLo := DyadicI.max svLo srLo
-    let sepHi := DyadicI.min svHi srHi
-    let dSig := if DyadicI.certGt sepLo sepHi then DyadicI.sub sepLo sepHi else DyadicI.zero
-    let dw := DyadicI.sub wv wr
-    let dAbs := DyadicI.sqrt (DyadicI.add (DyadicI.mul dSig dSig) (DyadicI.mul dw dw))
+    let dAbs := poleSpanDistanceD (svLo, svHi) (srLo, srHi) wv wr
     let cAbs := DyadicI.mul (CplxDI.abs (CplxDI.mkI ar ai)) (CplxDI.abs (CplxDI.mkI rr ri))
     let dPos := DyadicI.certGt dAbs DyadicI.zero
     if !(DyadicI.certLt dAbs ecddThetaAccD
