@@ -19,8 +19,8 @@ the OBSERVABLE (samples leaving the datapath):
   mode all carry weight, against an EXACT oracle — the collected partial
   fractions evaluated on the 128-bit dyadic carrier (`CplxDI`), whose
   enclosure width is reported as the oracle's own certificate.
-* TRIPLE COLLISION — three distinct-expression poles of one VALUE: the series
-  lane at `u = v = 0`, against the closed form `a·r·r'·d²/2·e^{zd}`.
+* TRIPLE COLLISION — three poles a nanoradian apart: the series lane at
+  `u, v ≈ 0`, against the confluent closed form `a·r·r'·d²/2·e^{zd}`.
 * TRIPLE LANES — hand-built triple rows at gaps of 3 and 5 rad/s, so `|u|²`
   crosses the 0.01 lane threshold INSIDE the probe window: both lanes and the
   seam between them, against the exact Lagrange form on `CplxDI`.
@@ -106,9 +106,7 @@ private def properOf (modes : Array ModalMode) : BuildM ModalKernelExpr := do
   pure (.proper (.oriented modes (← lit 0)))
 
 private def blockSigAt (anchor : Nat) (spine : ModalKernelExpr) : BuildM Sig := do
-  match ← decompose spine with
-  | .error r => throw r.describe
-  | .ok rows => (← BlockTerminal.ofRows rows).realizeSig (← clockLit) (← lit (Int.ofNat anchor))
+  (← BlockTerminal.ofRows (← decompose spine)).realizeSig (← clockLit) (← lit (Int.ofNat anchor))
 
 private def blockSig (spine : ModalKernelExpr) : BuildM Sig := blockSigAt anchorNat spine
 
@@ -234,17 +232,19 @@ private def tripleRender : IO (Except String (Float × Float)) := do
     debugPair "triple" d ref
     pure (.ok (relL2 d ref oracleStride, width))
 
--- ── (d) triple collision: three literals of one value ─────────────────────────
+-- ── (d) triple collision: three poles 1e-9 rad/s apart (the series lane at u,v ≈ 0) ──
 
 private def tripleCollision : IO (Except String Float) := do
   let s := 9.0
   let w := tp * 300.0
   let a := 0.9; let r := 0.7; let r' := 0.6
   let dut ← render "block_triple_collision" (do
-    -- three DISTINCT literal spellings of one value: distinct expressions, one node value
+    -- distinct VALUES a nanoradian apart (equal spellings would be one confluent
+    -- node and realize as degree — the series lane at the collision needs
+    -- three nodes), against the confluent closed form, exact to ~1e-10
     let z1 ← pure { sigma := ← lit 9, omega := ← litF w, cre := ← litF a, cim := ← lit 0 : ModalMode }
-    let z2 ← pure { sigma := ← lit 90 1, omega := ← litF w, cre := ← litF r, cim := ← lit 0 : ModalMode }
-    let z3 ← pure { sigma := ← lit 900 2, omega := ← litF w, cre := ← litF r', cim := ← lit 0 : ModalMode }
+    let z2 ← pure { sigma := ← lit 9, omega := ← litF (w + 1e-9), cre := ← litF r, cim := ← lit 0 : ModalMode }
+    let z3 ← pure { sigma := ← lit 9, omega := ← litF (w - 1e-9), cre := ← litF r', cim := ← lit 0 : ModalMode }
     blockSig (.cascade #[← properOf #[z1], ← properOf #[z2], ← properOf #[z3]]))
   match dut with
   | .error e => pure (.error e)
@@ -319,7 +319,7 @@ private def bilateralRender : IO (Except String (Float × Float)) := do
       .proper (.oriented #[← mode nu3] one)])
   if (← IO.getEnv "TROPICAL_BLOCK_DEBUG").isSome then
     match Tropical.Testing.ArrowFixtures.freezeBuild {} (do decompose (← spineOf)) with
-    | .ok (arena, .ok rows) =>
+    | .ok (arena, rows) =>
       let constants := sigConstTable arena
       for row in rows do
         let ns := row.nodes.map fun z => match foldCplx constants z with
@@ -327,7 +327,6 @@ private def bilateralRender : IO (Except String (Float × Float)) := do
         let cs := row.coeffs.map fun c => match foldCplx constants c with
           | some (re, im) => s!"({sci re},{sci im})" | none => "?"
         IO.println s!"        [bilateral rows] {repr row.orientation} nodes {ns} coeffs {cs}"
-    | .ok (_, .error r) => IO.println s!"        [bilateral rows] refused: {r.describe}"
     | .error e => IO.println s!"        [bilateral rows] build error: {e}"
   let dut ← render "block_bilateral" (do blockSigAt anchorB (← spineOf))
   match dut with

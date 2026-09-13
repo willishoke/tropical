@@ -1,7 +1,8 @@
 # The block carrier — repeated rooms without collecting
 
-Status: Phases 1–4 landed 2026-09-13 (`feat/block-carrier`). Spines with more
-than one nonterminal room lower through the block terminal, any direction. Cockpit
+Status: Phases 1–5 landed 2026-09-13 (`feat/block-carrier`). Every plain
+modal spine lowers through the block terminal, any direction, except the three
+exact cost schedules that keep their topologies. Cockpit
 scripts: `demos/block_carrier_leibniz.py` (the coefficient algebra in f64 vs a
 60-digit reference), `demos/block_carrier_body.py` (the size-3 body),
 `demos/block_carrier_exp.py` / `dd_union_law.py` (the research experiments).
@@ -77,19 +78,33 @@ cluster tolerance.
 
 ## Admission and refusal
 
-The block terminal serves a spine iff every stage is a room or a linear
-kernel (any direction, live or reversed; sway) and every cluster with at
-least two distinct expressions has at most three nodes. The refusal is typed
-(`Block.Refusal.clusterTooLarge size cap`) and surfaces with the node named; a
-gauge after repeated rooms is refused at lowering time with the reason. Spines
-admitted before this change keep their previous path and goldens.
+`resolvePlainStages` keeps three exact cost schedules for their topologies —
+the time-staged phaser (`stagedPhaserTerminal?`), the fused two-room product
+(`factoredTwoRoomTerminal?`) and the fused two-room-with-phaser product — and
+sends every other plain spine to `resolveBlockSpine`: rooms (any direction,
+live or reversed; sway) and linear kernels are retained factors, decomposed
+once at the spine's end. A gauge is nonlinear in the whole bank, so it splits
+the spine into segments: the block terminal before it is materialized to a
+collected bank (`BlockTerminal.toBank`, the one structure-dropping step, at
+the collected fold's `1/Δ` floor), gauged, and re-enters as the next
+segment's input factor. The carrier is TOTAL: a cluster with at most three
+value classes is one row; a larger one splits into its classes, which then
+divide by their mutual gaps — the collected fold's floor, exactly what every
+such spine rendered before. Two constant nodes are one value class when their
+enclosures cannot be separated (a decimal literal is a tight enclosure, so two
+spellings of one number overlap rather than coincide; the three-answer
+discipline reads that as "cannot be told apart", the conservative side, since
+the alternative is dividing by a gap that may be exactly zero); two doubles a
+nanoradian apart enter exactly and stay two nodes. The syntactic nonterminal
+fold, the two-room generic fallback, and the topological spine rule are gone.
 
 ## Witnesses
 
 - `block-algebra` (`Tropicaltest/Block.lean`): singleton rows equal the
   collected residues up to reassociation; an identity-coincident pair's Newton
   coefficients equal the `Oriented` coincident algebra's degree-1/degree-0
-  amplitudes; `nonCausal` and `clusterTooLarge` refuse as typed.
+  amplitudes; a reversed room is admitted as past rows; an over-cap comb splits to the
+  collected floor; three spellings of one value are one confluent row.
 - `block-realize` (`Tropicaltest/BlockRealize.lean`), at the observable:
   singleton render bit-identical to the plain path; a four-fold confluent pole
   vs the closed form; a gap-1e-3 triple plus a separated pole vs the exact
@@ -97,22 +112,28 @@ admitted before this change keep their previous path and goldens.
   oracle's certificate); the triple collision vs its closed form; hand-built
   triple rows at gaps 3 and 5 rad/s so the lane seam is crossed in-window.
   Measured 2026-09-13: singleton 0, confluent 1.7e-6, triple 1.0e-5 (the plain
-  family's Q4.28 landing LSB is the binding floor), collision 1.0e-9, lanes
-  4.9e-7; fail lines at 1e-7 / 1e-4.
+  family's Q4.28 landing LSB is the binding floor), collision (poles a
+  nanoradian apart) 9.7e-10, lanes 4.9e-7; fail lines at 1e-7 / 1e-4.
 - `blockCompose` seam atom (`Tropicaltest/SeamSweep.lean`): `voice ⋙ room`
   through the block terminal over the residue atom's own interiors and
   boundary probes against the quadrature oracle, total admission, snr 2e-4.
+- `ecdd-gauge`: the gauge's scale law now holds at the sub-grid detune too —
+  the segment after a gauge re-enters the block terminal, so the tuned pair
+  renders on the divided-difference lane; the landing poison that gate once
+  recorded no longer reaches the render.
+- `arena-native-phase3` re-frozen: its room → phaser → room spine (rooms of
+  different frequency topology, never the fused schedule) now lowers through
+  the block terminal — (2234, 2232, 0, 799131) nodes/reachable/routed/bytes.
 - `modal-oriented-patch`: three separately authored equal rooms render through
   the production lowering against `1/((s+2)(s+5)³)`; a past·future·past chain
-  against the bilateral partial fractions; room-room-gauge refuses.
+  against the bilateral partial fractions; room-room-gauge renders through a
+  materialized segment.
 - `block-realize` bilateral probe: past·future·past rooms with a hot PAST pair
   against the exact two-sided partial fractions on the 128-bit carrier, both
   arms observed around a mid-window anchor (9.4e-6).
 
 ## Not yet
 
-- Subsuming the admitted one- and two-room paths (goldens move deliberately;
-  the factored two-room terminals stay as cost schedules). Phase 5.
 - A fixed-lane landing for block rows via the Hermite–Genocchi sup bound
   `|n₁|·((k−1)/(σ_min·e))^{k−1}/(k−1)!`; Metal. Phase 6.
 - Live poles without a declared σ range are unclassifiable and stay singletons

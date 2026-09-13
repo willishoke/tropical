@@ -435,6 +435,9 @@ def phase3Evidence : Except String Phase3Evidence := do
     -- masked s1 again). 719467 -> 909065 wire bytes: the settled rebuild
     -- (`Bank.settled?`) keeps original and settled coefficient subtrees
     -- both reachable — a ~26% authored-arena cost, compile-side only.
+    -- Slice Phase 5: this spine's two rooms differ in frequency topology, so
+    -- it never took the fused schedule; it lowered through the generic fold +
+    -- terminal and now lowers through the block terminal (re-pinned below).
     ("routed reductions", routed, 0),
     ("wire bytes", nativeWire.length, 908801)]
   let drifted := pinned.filter fun (_, actual, expected) => actual != expected

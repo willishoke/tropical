@@ -48,23 +48,9 @@ namespace Tropical.EmitArrow.Block
 open Tropical.Ir
 open Tropical.Exact (DyadicI)
 
-/-- Why a spine is not served by the block terminal. Every constructor names
-    the numerical or structural fact, so the refusal an agent sees says what
-    to change. -/
-inductive Refusal where
-  /-- a cluster of more than `cap` nodes with at least two DISTINCT (by
-      expression identity) members — the realizable body size is capped. A
-      cluster whose nodes are all one expression is exempt at any size: it
-      realizes as polynomial degree (`exp[z,…,z] = dᵏ⁻¹/(k−1)!·e^{zd}`). -/
-  | clusterTooLarge (size cap : Nat)
-deriving Repr, BEq, Inhabited
-
-def Refusal.describe : Refusal → String
-  | .clusterTooLarge size cap =>
-      s!"block carrier: a cluster of {size} runtime-near-equal poles (not all one expression) exceeds the served body size {cap}"
-
-/-- The default cap on distinct nodes per cluster — the largest body Phase 2
-    realizes (size 1 = a mode, 2 = a paired mode, 3 = the nested body). -/
+/-- The largest divided-difference body realized (size 1 = a mode, 2 = a
+    paired mode, 3 = the nested body). A cluster with more value classes than
+    this splits into its classes at the collected floor. -/
 def defaultClusterCap : Nat := 3
 
 -- ── Divided-difference tables ─────────────────────────────────────────────────
@@ -246,11 +232,43 @@ def expandNodes (factors : Array PoleFactor) : Array (CplxE × Oriented.Orientat
 
 -- ── Clustering ────────────────────────────────────────────────────────────────
 
+/-- Can two enclosures NOT be separated? A decimal literal enters as a tight
+    enclosure, not a point, so two spellings of one number (`9`, `90·10⁻¹`)
+    overlap rather than coincide; the three-answer discipline reads an overlap
+    as "cannot be told apart" — the conservative side here, since the
+    alternative is dividing by a gap that may be exactly zero. -/
+private def inseparable (a b : DyadicI) : Bool :=
+  a.ok && b.ok && DyadicI.cmp a b == .overlap
+
+/-- Are two s-plane nodes ONE node — the same hash-consed expressions, or two
+    constants whose enclosures cannot be separated? Such nodes carry
+    multiplicity (polynomial degree), never a divided difference between them:
+    no gap that may be exactly zero is ever divided by. Two constants a
+    representable distance apart (two doubles 1e-9 rad/s apart enter exactly)
+    remain two nodes. -/
+def sameNodeValue (constants : Array (Option DyadicI)) (a b : CplxE) : Bool :=
+  (a.1 == b.1 && a.2 == b.2) ||
+  match sigConstDFrom? constants a.1, sigConstDFrom? constants b.1,
+        sigConstDFrom? constants a.2, sigConstDFrom? constants b.2 with
+  | some ar, some br, some ai, some bi => inseparable ar br && inseparable ai bi
+  | _, _, _, _ => false
+
+/-- Partition a cluster's positions into value classes (traversal order kept). -/
+def valueClasses (constants : Array (Option DyadicI)) (nodes : Array CplxE) :
+    Array (Array Nat) := Id.run do
+  let mut classes : Array (Array Nat) := #[]
+  for (z, i) in nodes.zipIdx do
+    match classes.findIdx? (fun c => match c[0]? with
+        | some j => sameNodeValue constants z nodes[j]!
+        | none => false) with
+    | some k => classes := classes.set! k (classes[k]!.push i)
+    | none => classes := classes.push #[i]
+  return classes
+
 /-- Union-find over the expanded pole multiset under the shared pole-distance
     lens: two poles of the SAME orientation join a cluster when their min |Δ|
     over the declared σ intervals is certifiably below θ_acc, or when they are
-    one expression (a factor's own copies, or two spellings that interned to
-    one node). Opposite orientations never cluster — a future pole and a past
+    one node value (a factor's own copies, or two spellings of one constant). Opposite orientations never cluster — a future pole and a past
     pole are separated by at least `σ_f + σ_p` and are different signals. An
     unclassifiable pair (a live σ without a declared range) never joins — the
     pairwise router's `cold` convention. Each cluster lists global indices in
@@ -270,7 +288,7 @@ def clusterPoles (constants : Array (Option DyadicI))
     for j in [i+1:n] do
       let hot := match nodes[i]?, nodes[j]? with
         | some (zi, oi, mi), some (zj, oj, mj) =>
-            oi == oj && ((zi.1 == zj.1 && zi.2 == zj.2)
+            oi == oj && (sameNodeValue constants zi zj
               || poleAccuracyHotFrom? constants mi mj == some true)
         | _, _ => false
       if hot then
@@ -287,15 +305,6 @@ def clusterPoles (constants : Array (Option DyadicI))
         root := root.push r
         groups := groups.push #[i]
   return groups
-
-/-- The number of DISTINCT nodes in a cluster by expression identity — nodes
-    built from the same hash-consed pole expressions are one node with
-    multiplicity, and realize as polynomial degree. -/
-def distinctNodeCount (nodes : Array CplxE) : Nat := Id.run do
-  let mut seen : Array CplxE := #[]
-  for z in nodes do
-    if !(seen.any (fun w => w.1 == z.1 && w.2 == z.2)) then seen := seen.push z
-  return seen.size
 
 -- ── The Leibniz traversal ─────────────────────────────────────────────────────
 
@@ -389,24 +398,25 @@ decreasing_by
     and its signal is the anti-causal `−Σ_m n_m·exp[z'_m..z'_k](d)` on `d < 0`,
     which on the mirrored clock `d' = −d` is `Σ_m (−1)^{k−m+1} n_m ·
     exp[ν_m..ν_k](d')` at the physical poles — the realizer applies that
-    reflection. `indices` are the nodes' global positions in the expanded
-    multiset. -/
+    reflection. `confluent` marks a row whose nodes are ONE value (it realizes
+    as polynomial degree). `indices` are the nodes' global positions in the
+    expanded multiset. -/
 structure BlockRow where
   nodes : Array CplxE
   coeffs : Array CplxE
   indices : Array Nat
   orientation : Oriented.Orientation
+  confluent : Bool
 
-/-- Are all of a row's nodes one expression (so the row is a confluent pole of
-    multiplicity `k` and realizes as degree, never as a divided difference)? -/
-def BlockRow.confluent (row : BlockRow) : Bool := distinctNodeCount row.nodes ≤ 1
-
-/-- Block partial fractions of a bilateral retained tree: expand the pole
-    multiset (arms by direction, copies by degree), cluster it, then run the
-    Leibniz traversal once per cluster. Refuses, with the reason, a cluster
-    whose distinct node count exceeds `cap`. -/
+/-- Block partial fractions of a bilateral retained tree — TOTAL. Expand the
+    pole multiset (arms by direction, copies by degree), cluster it, then run
+    the Leibniz traversal once per row. A cluster with at most `cap` value
+    classes is one row; a cluster with more splits into one row per value
+    class — its classes then divide by their mutual gaps, the collected fold's
+    floor, which is exactly what every such spine rendered before (and a gap
+    between distinct certified values is never exactly zero). -/
 def decompose (spine : ModalKernelExpr) (cap : Nat := defaultClusterCap) :
-    BuildM (Except Refusal (Array BlockRow)) := do
+    BuildM (Array BlockRow) := do
   let factors ← poleFactors (sigConstTable (← get).exprs) spine
   -- the constant table is taken AFTER expansion: a past arm's mirrored pole is
   -- a fresh `neg` node, and the lens must be able to fold it
@@ -414,15 +424,20 @@ def decompose (spine : ModalKernelExpr) (cap : Nat := defaultClusterCap) :
   let expanded := expandNodes factors
   let clusters := clusterPoles constants expanded
   let mut rows : Array BlockRow := #[]
-  for indices in clusters do
-    let entries := indices.filterMap (expanded[·]?)
+  for cluster in clusters do
+    let entries := cluster.filterMap (expanded[·]?)
     let nodes := entries.map (·.1)
     let some (_, orientation, _) := entries[0]? | continue
-    if distinctNodeCount nodes > 1 && nodes.size > cap then
-      return .error (.clusterTooLarge nodes.size cap)
-    let member := fun (g : Nat) => indices.contains g
-    let (table, _, _) ← leibniz constants nodes member 0 spine
-    rows := rows.push { nodes, coeffs := table.newton, indices, orientation }
-  pure (.ok rows)
+    let classes := valueClasses constants nodes
+    let groups : Array (Array Nat) :=
+      if classes.size ≤ cap then #[cluster]
+      else classes.map fun cls => cls.filterMap (cluster[·]?)
+    for indices in groups do
+      let nodes := (indices.filterMap (expanded[·]?)).map (·.1)
+      let member := fun (g : Nat) => indices.contains g
+      let (table, _, _) ← leibniz constants nodes member 0 spine
+      let confluent := (valueClasses constants nodes).size ≤ 1
+      rows := rows.push { nodes, coeffs := table.newton, indices, orientation, confluent }
+  pure rows
 
 end Tropical.EmitArrow.Block

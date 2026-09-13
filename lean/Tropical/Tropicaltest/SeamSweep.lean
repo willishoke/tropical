@@ -380,9 +380,7 @@ private def blockAtom : SeamAtom :=
       let spine : ModalKernelExpr := .cascade #[
         .proper (.oriented (← v.mapM (·.toModal)) zero),
         .proper (.oriented (← r.mapM (·.toModal)) zero)]
-      match ← Block.decompose spine with
-      | .error refusal => throw refusal.describe
-      | .ok rows => (← Block.BlockTerminal.ofRows rows).realizeSig (← clockLit) (← anchorSig)
+      (← Block.BlockTerminal.ofRows (← Block.decompose spine)).realizeSig (← clockLit) (← anchorSig)
     admitsPair := fun _ _ => true
     activeExclusion := false
     snr := 2e-4
@@ -1920,30 +1918,46 @@ def runEcddGauge (arena : Arena)
       { id := "src", node := .modalSource modes anchor clock none none none },
       { id := "rev", node := .modalReverb "src" room none },
       { id := "gg", node := .modalGauge "rev" gauge }], output := "gg" } : PatchGraph)
+  -- the UNGAUGED reference through the same production path (the block
+  -- terminal since slice Phase 5), so the scale law is stated on one carrier
+  let bareGraph := fun (room : Array SeamMode) => do
+    let modes ← voice.mapM (·.toModal)
+    let room ← room.mapM (·.toModal)
+    let anchor ← anchorSig
+    let clock ← clockLit
+    pure ({ nodes := #[
+      { id := "src", node := .modalSource modes anchor clock none none none },
+      { id := "rev", node := .modalReverb "src" room none }], output := "rev" } : PatchGraph)
   -- config A: the sub-grid worst case (norm sanity + the landing poison)
   let roomSub : Array SeamMode := #[{ sigma := 1.0, omega := tp * 220 + 1e-6, are := 0.7 }]
   -- config B: representable detune (the clean scale-law witness — amps ±700,
   -- landing exponent k = 6, quantization decades under the signal)
   let roomRep : Array SeamMode := #[{ sigma := 1.0, omega := tp * 220 + 1e-3, are := 0.7 }]
   match ← renderGraphN arena "ecddg_gauged_sub" (gaugedGraph roomSub) nWin,
-        ← renderTerm arena "ecddg_bare_sub" (collectedTerm voice #[roomSub]) nWin,
+        ← renderGraphN arena "ecddg_bare_sub" (bareGraph roomSub) nWin,
         ← renderGraphN arena "ecddg_gauged_rep" (gaugedGraph roomRep) nWin,
-        ← renderTerm arena "ecddg_bare_rep" (collectedTerm voice #[roomRep]) nWin with
+        ← renderGraphN arena "ecddg_bare_rep" (bareGraph roomRep) nWin with
   | .ok dutGS, .ok dutBS, .ok dutGR, .ok dutBR =>
     let scaleSub := scaleOf roomSub
     let scaleRep := scaleOf roomRep
     let eLawRep := relL2Win dutGR (dutBR.map (· * scaleRep)) lo nWin
-    let ePoison := relL2Win dutGS (dutBS.map (· * scaleSub)) lo nWin
+    let eLawSub := relL2Win dutGS (dutBS.map (· * scaleSub)) lo nWin
     let eGS := energyWin dutGS lo nWin
     let saneSub := 0.1 < scaleSub && scaleSub < 10.0
     IO.println s!"ecdd gauge-over-hot (the norm on cancelling ±c/Δ amps):"
-    IO.println s!"        scale law (Δ=1e-3, resolvable): gauged ≡ {scaleRep} × collected rel {eLawRep}"
-    IO.println s!"        sub-grid (|c/Δ|≈7e5): norm sane {saneSub} (scale {scaleSub}) · landing-poison comparison {ePoison} (quantization-dominated, recorded) · E {eGS}"
+    IO.println s!"        scale law (Δ=1e-3, resolvable): gauged ≡ {scaleRep} × ungauged rel {eLawRep}"
+    IO.println s!"        sub-grid (|c/Δ|≈7e5): norm sane {saneSub} (scale {scaleSub}) · scale law rel {eLawSub} · E {eGS}"
+    -- Since slice Phase 5 the gauge materializes the block terminal to a
+    -- collected bank ONLY to measure the norm; the gauged segment re-enters
+    -- the block terminal and the tuned pair renders on the divided-difference
+    -- lane again, so the scale law holds at the sub-grid detune too — the
+    -- landing poison this gate once recorded (huge collected amps sizing the
+    -- bank's k) no longer reaches the render.
     if allFinite dutGS && allFinite dutGR && eLawRep < 1e-4
-        && saneSub && ePoison < 2.0 && eGS > 1e-9 then
-      passGate "ecdd-gauge" s!"gauge over a tuned-unison chain: the H-norm survives the ±c/Δ amps (sub-grid scale {scaleSub}, mirrored independently — no oblivion; scale law holds where the datapath resolves, {eLawRep}); the recorded residual is the collected floor PLUS the landing poison (huge amps size the bank's k, LSB over the cold modes)"
+        && saneSub && eLawSub < 1e-3 && eGS > 1e-9 then
+      passGate "ecdd-gauge" s!"gauge over a tuned-unison chain: the H-norm survives the ±c/Δ amps (sub-grid scale {scaleSub}, mirrored independently — no oblivion); the scale law holds at the resolvable detune ({eLawRep}) and at the sub-grid one ({eLawSub}) — the gauged segment renders its tuned pair on the divided-difference lane, no landing poison"
     else
-      failGate "ecdd-gauge" s!"eLawRep={eLawRep} scaleSub={scaleSub} scaleRep={scaleRep} ePoison={ePoison} finite={allFinite dutGS}/{allFinite dutGR} E={eGS}"
+      failGate "ecdd-gauge" s!"eLawRep={eLawRep} eLawSub={eLawSub} scaleSub={scaleSub} scaleRep={scaleRep} finite={allFinite dutGS}/{allFinite dutGR} E={eGS}"
   | _, _, _, _ => failGate "ecdd-gauge" "build/render failed for a gauge-over-hot config"
 
 end Tropical.Tropicaltest.SeamSweep

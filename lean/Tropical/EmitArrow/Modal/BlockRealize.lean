@@ -277,8 +277,8 @@ private def routeRow (fam : Families) (nodes coeffs : Array CplxE) (confluent : 
 /-- Route each row. A future row is realized as it stands. A past row is
     realized on the mirrored clock at the PHYSICAL poles `ν = −z'` with
     coefficients `(−1)^{k−m+1}·n_m` (the anti-causal sign of the two-sided
-    transform times the divided-difference reflection). A larger simple row
-    cannot reach here (`decompose` refuses it) and is a build error. -/
+    transform times the divided-difference reflection). A simple row larger
+    than the cap cannot reach here (`decompose` splits it) and is a build error. -/
 def BlockTerminal.ofRows (rows : Array BlockRow) : BuildM BlockTerminal := do
   let mut future : Families := {}
   let mut past : Families := {}
@@ -320,5 +320,53 @@ def BlockTerminal.realizeSig (terminal : BlockTerminal) (clkInt anchorSamples : 
   let mirroredClock ← sub twiceAnchor clkInt
   let pastTriple ← tripleSig terminal.pastTriple mirroredClock anchorSamples
   add (← add baseSig futureTriple) pastTriple
+
+-- ── Materialization (the gauge seam) ──────────────────────────────────────────
+
+/-- A paired row as two collected modes: `c·exp[λ,ν] = c/(λ−ν)·e^{λd} −
+    c/(λ−ν)·e^{νd}`. The `1/Δ` this forms is exactly the collected fold's — the
+    status-quo floor, taken only where a consumer needs a plain bank. -/
+private def pairedCollected (pair : PairedMode) : BuildM (Array ModalMode) := do
+  let gap ← csubE pair.lam pair.nu
+  let amp ← cdivE pair.c gap
+  pure #[← modeOfE pair.lam amp, ← modeOfE pair.nu (← cnegE amp)]
+
+/-- A triple row as three collected modes (the Lagrange form). -/
+private def tripleCollected (row : TripleMode) : BuildM (Array ModalMode) := do
+  let nodes := #[row.z1, row.z2, row.z3]
+  nodes.zipIdx.mapM fun (z, i) => do
+    let mut denominator ← Oriented.natE 1
+    for (w, j) in nodes.zipIdx do
+      if i != j then denominator ← cmulE denominator (← csubE z w)
+    modeOfE z (← cdivE row.c denominator)
+
+/-- The terminal as a plain oriented bank — every divided-difference row
+    collected. This is the block carrier's only structure-dropping step, and it
+    runs only where the next consumer is nonlinear in the whole bank (a gauge);
+    a confluent row is already degree modes and drops nothing. -/
+def BlockTerminal.toBank (terminal : BlockTerminal) : BuildM Oriented.Bank := do
+  let collect := fun (plain : Array ModalMode) (paired : Array PairedMode)
+      (triple : Array TripleMode) => do
+    let mut modes := plain
+    for pair in paired do modes := modes ++ (← pairedCollected pair)
+    for row in triple do modes := modes ++ (← tripleCollected row)
+    pure modes
+  let future ← collect terminal.plain terminal.paired terminal.triple
+  let past ← collect terminal.pastPlain terminal.pastPaired terminal.pastTriple
+  pure { future, past, atZero := terminal.atZero }
+
+/-- A plain oriented bank as a retained factor: its future modes as an
+    exactly-forward proper kernel, its past modes as an exactly-reversed one,
+    in parallel — the input of the segment after a gauge. -/
+def bankKernel (bank : Oriented.Bank) : BuildM ModalKernelExpr := do
+  let zero ← lit 0
+  let one ← lit 1
+  let mut branches : Array ModalKernelExpr := #[]
+  if !bank.future.isEmpty then branches := branches.push (.proper (.oriented bank.future zero))
+  if !bank.past.isEmpty then branches := branches.push (.proper (.oriented bank.past one))
+  match branches.toList with
+  | [] => pure (.proper (.oriented #[] zero))
+  | [single] => pure single
+  | _ => pure (.parallel branches)
 
 end Tropical.EmitArrow.Block

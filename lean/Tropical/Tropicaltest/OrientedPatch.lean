@@ -465,7 +465,8 @@ private structure TwoRoomResult where
   threeRoomMixedError : Float
   threeRoomMixedFinite : Bool
   threeRoomMixedPeak : Float
-  roomRoomGaugeRefused : Bool
+  roomRoomGaugeFinite : Bool
+  roomRoomGaugePeak : Float
 
 private def checkTwoRooms (arena : Arena) : IO (Except String TwoRoomResult) := do
   let cases : Array (Bool × Bool × String) := #[
@@ -520,11 +521,12 @@ private def checkTwoRooms (arena : Arena) : IO (Except String TwoRoomResult) := 
           let threeMixed ← renderGraph arena "oriented_three_room_mixed" threeRoomMixedGraph
           let (.ok threeMixed) := threeMixed
             | return .error "three-room mixed-direction render"
-          let roomRoomGaugeRefused := match
-              Tropical.Testing.ArrowFixtures.runBuild arena do
-                lowerGraph (← repeatedRoomCrossingGraph true) with
-            | .error error => error == "lower: nonterminal repeated-room crossing at 'gauge' refused (a gauge after a repeated-room crossing is a nonlinear materialization point the block carrier does not cross)"
-            | .ok _ => false
+          -- room ⋙ room ⋙ gauge (slice Phase 5): the spine splits at the gauge,
+          -- the block terminal before it materializes to a collected bank
+          let roomRoomGauge ← renderGraph arena "oriented_room_room_gauge"
+            (repeatedRoomCrossingGraph true)
+          let (.ok roomRoomGauge) := roomRoomGauge
+            | return .error "room-room-gauge render"
           pure (.ok {
             maximumOracleError := maximumError
             minimumPairDifference := minimumDifference
@@ -549,7 +551,8 @@ private def checkTwoRooms (arena : Arena) : IO (Except String TwoRoomResult) := 
             threeRoomMixedError := maxOracleError threeMixed threeRoomMixedOracle
             threeRoomMixedFinite := threeMixed.all (fun sample => sample.isFinite)
             threeRoomMixedPeak := maxWindow threeMixed 0 frameCount
-            roomRoomGaugeRefused })
+            roomRoomGaugeFinite := roomRoomGauge.all (fun sample => sample.isFinite)
+            roomRoomGaugePeak := maxWindow roomRoomGauge (anchorNat + 1) frameCount })
 
 /-- End-to-end production gate for local room direction. -/
 def runOrientedPatch (arena : Arena) : IO Bool := do
@@ -559,7 +562,7 @@ def runOrientedPatch (arena : Arena) : IO Bool := do
       IO.println s!"        one room  local oracle {one.localError} · output-reverse oracle {one.outputReverseError} · local≠output-reverse {one.localVsOutputReverse} · post {one.localPost}/{one.outputReversePost}"
       IO.println s!"        two rooms FF/FR/RF/RR max oracle error {two.maximumOracleError} · min pair distance {two.minimumPairDifference} · authored stage order {two.authoredOrder}"
       IO.println s!"        equal RT60 independently authored: finite {two.equalRt60Finite} · repeated-pole oracle error {two.equalRt60Error} · peak {two.equalRt60Peak}"
-      IO.println s!"        degree-positive terminal: finite {two.degreePositiveFinite} · oracle error {two.degreePositiveError}; room-room-room via the block terminal: finite {two.repeatedRoomFinite} · oracle error {two.repeatedRoomError} · peak {two.repeatedRoomPeak}; past·future·past rooms: finite {two.threeRoomMixedFinite} · oracle error {two.threeRoomMixedError} · peak {two.threeRoomMixedPeak}; guarded crossing room-room-gauge {two.roomRoomGaugeRefused}"
+      IO.println s!"        degree-positive terminal: finite {two.degreePositiveFinite} · oracle error {two.degreePositiveError}; room-room-room via the block terminal: finite {two.repeatedRoomFinite} · oracle error {two.repeatedRoomError} · peak {two.repeatedRoomPeak}; past·future·past rooms: finite {two.threeRoomMixedFinite} · oracle error {two.threeRoomMixedError} · peak {two.threeRoomMixedPeak}; room-room-gauge: finite {two.roomRoomGaugeFinite} · peak {two.roomRoomGaugePeak}"
       IO.println s!"        source/room confluence: finite {two.sourceCrossingsFinite} · room-1/room-2/three-pole/near oracle {two.sourceCrossingError}/{two.sourceSecondCrossingError}/{two.sourceTripleCrossingError}/{two.sourceNearCrossingError}"
       IO.println s!"        float-banked complex DD: finite {complex.finite} · future/past oracle {complex.futureError}/{complex.pastError} · mirror diff {complex.mirrorDifference}"
       IO.println s!"        terminal control clock retains a half-sample Q32.32 offset: {fractionalControlClockOk}"
@@ -576,7 +579,8 @@ def runOrientedPatch (arena : Arena) : IO Bool := do
         two.sourceTripleCrossingError < 2.0e-6 &&
         two.sourceNearCrossingError < 2.0e-6 &&
         two.repeatedRoomFinite && two.repeatedRoomError < 2.0e-6 &&
-        two.repeatedRoomPeak > 1.0e-8 && two.roomRoomGaugeRefused &&
+        two.repeatedRoomPeak > 1.0e-8 &&
+        two.roomRoomGaugeFinite && two.roomRoomGaugePeak > 1.0e-8 &&
         two.threeRoomMixedFinite && two.threeRoomMixedError < 2.0e-6 &&
         two.threeRoomMixedPeak > 1.0e-6 &&
         complex.finite && complex.futureError < 2.0e-6 &&
@@ -584,7 +588,7 @@ def runOrientedPatch (arena : Arena) : IO Bool := do
         fractionalControlClockOk
       if pass then
         passGate "modal-oriented-patch"
-          "room reverse is kernel-local (not complete-output reverse); two rooms retain independent FF/FR/RF/RR controls and authored stage order; float-banked complex DD preserves future/past phase and exact mirroring; equal frozen RT60 takes a finite repeated-pole limit; general-degree terminals preserve polynomial factors; three equal rooms and a past·future·past chain cross through the block terminal; room-room-gauge refuses with the reason; terminal controls retain fractional Q32.32 time"
+          "room reverse is kernel-local (not complete-output reverse); two rooms retain independent FF/FR/RF/RR controls and authored stage order; float-banked complex DD preserves future/past phase and exact mirroring; equal frozen RT60 takes a finite repeated-pole limit; general-degree terminals preserve polynomial factors; three equal rooms and a past·future·past chain cross through the block terminal; room-room-gauge renders through a materialized segment; terminal controls retain fractional Q32.32 time"
       else
         failGate "modal-oriented-patch" "numeric or structural contract failed"
   | .error error, _, _ | _, .error error, _ | _, _, .error error =>

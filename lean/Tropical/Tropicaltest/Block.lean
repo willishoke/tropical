@@ -16,8 +16,8 @@ oracles the algebra must reduce to.
 * CONFLUENCE LAW — an identity-coincident voice/room pole forms one size-2
   block whose Newton coefficients are exactly the `Oriented` coincident
   algebra's degree-1 and degree-0 amplitudes at that pole (`exp[z,z] = d·e^{zd}`).
-* REFUSALS — an over-cap cluster refuses with the typed reason, never a silent
-  fallback; a reversed room is admitted and yields past rows.
+* TOTALITY — a reversed room yields past rows; an over-cap cluster splits into
+  value classes at the collected floor; spellings of one value are one node.
 
 No realizer participates: Phase 2 owns the render.
 -/
@@ -78,14 +78,12 @@ private def singletonLaw : IO (Except String Float) := do
       let collected ← foldRoomsEC voice #[r1, r2]
       let spine : ModalKernelExpr :=
         .cascade #[← properOf voice, ← properOf r1, ← properOf r2]
-      let blocks ← decompose spine
-      pure (collected, blocks) with
+      let rows ← decompose spine
+      pure (collected, rows) with
   | .error e => pure (.error s!"build: {e}")
-  | .ok (arena, (collected, blocks)) =>
+  | .ok (arena, (collected, rows)) =>
     let constants := sigConstTable arena
-    match blocks with
-    | .error refusal => pure (.error s!"unexpected refusal: {refusal.describe}")
-    | .ok rows =>
+    do
       if rows.size != 9 then return .error s!"expected 9 singleton rows, got {rows.size}"
       if rows.any (·.nodes.size != 1) then return .error "a cluster formed among separated poles"
       let mut worst := 0.0
@@ -119,14 +117,12 @@ private def confluenceLaw : IO (Except String Float) := do
       let bank ← (← Oriented.Bank.ofFuture voice).convolveKernel room zero
         Oriented.syntacticSameSideClassifier
       let spine : ModalKernelExpr := .cascade #[← properOf voice, ← properOf room]
-      let blocks ← decompose spine
-      pure (bank, blocks) with
+      let rows ← decompose spine
+      pure (bank, rows) with
   | .error e => pure (.error s!"build: {e}")
-  | .ok (arena, (bank, blocks)) =>
+  | .ok (arena, (bank, rows)) =>
     let constants := sigConstTable arena
-    match blocks with
-    | .error refusal => pure (.error s!"unexpected refusal: {refusal.describe}")
-    | .ok rows =>
+    do
       let some pair := rows.find? (·.nodes.size == 2) | return .error "no size-2 block formed"
       if rows.size != 2 then return .error s!"expected 2 rows (pair + singleton), got {rows.size}"
       let some z := foldCplx constants pair.nodes[0]! | return .error "node did not fold"
@@ -147,41 +143,41 @@ private def confluenceLaw : IO (Except String Float) := do
       let rel0 := cdist a0 n2 / max (cabs a0) 1e-300
       pure (.ok (max rel1 rel0))
 
-private def describeOutcome (x : Except Refusal (Array BlockRow)) : String :=
-  match x with
-  | .error r => r.describe
-  | .ok rows => s!"{rows.size} rows"
-
-/-- REFUSALS: four near-equal distinct poles refuse as typed; a reversed room
-    is ADMITTED and contributes past rows (slice Phase 4). -/
-private def refusals : IO (Except String Unit) := do
+/-- TOTALITY: a reversed room is admitted and yields past rows; four
+    near-equal distinct-valued poles exceed the body cap and split into four
+    singleton rows (the collected floor); three spellings of ONE value are one
+    confluent row of multiplicity three (degree, never a divided difference). -/
+private def totality : IO (Except String Unit) := do
   match Tropical.Testing.ArrowFixtures.freezeBuild {} do
       let voice ← voice3
       let room ← room3a
       let reversed : ModalKernelExpr := .cascade #[← properOf voice,
         .proper (.oriented room (← lit 1))]
       let bilateral ← decompose reversed
-      -- four poles within 1e-3 rad/s of each other, all distinct expressions
       let comb : Array ModalMode := #[
         ← litMode (9, 0) (9424, 1) (7, 1) (0, 0),
         ← litMode (9, 0) (94241, 2) (7, 1) (0, 0),
         ← litMode (9, 0) (94242, 2) (7, 1) (0, 0),
         ← litMode (9, 0) (94243, 2) (7, 1) (0, 0)]
-      let dense : ModalKernelExpr := .cascade #[← properOf voice, ← properOf comb]
-      let tooLarge ← decompose dense
-      pure (bilateral, tooLarge) with
+      let dense ← decompose (.cascade #[← properOf voice, ← properOf comb])
+      let spelled : Array ModalMode := #[
+        ← litMode (9, 0) (9424, 1) (7, 1) (0, 0),
+        ← litMode (90, 1) (94240, 2) (5, 1) (0, 0),
+        ← litMode (900, 2) (942400, 3) (3, 1) (0, 0)]
+      let confluent ← decompose (.cascade #[← properOf voice, ← properOf spelled])
+      pure (bilateral, dense, confluent) with
   | .error e => pure (.error s!"build: {e}")
-  | .ok (_, (bilateral, tooLarge)) =>
-    match bilateral, tooLarge with
-    | .ok rows, .error (.clusterTooLarge 4 3) =>
-        let past := rows.filter (·.orientation == .past)
-        let future := rows.filter (·.orientation == .future)
-        if past.size == 3 && future.size == 3 then pure (.ok ())
-        else pure (.error s!"reversed room: expected 3 future + 3 past rows, got {future.size} + {past.size}")
-    | .ok _, other =>
-        pure (.error s!"dense comb: expected clusterTooLarge 4 3, got {describeOutcome other}")
-    | other, _ =>
-        pure (.error s!"reversed room: expected admission, got {describeOutcome other}")
+  | .ok (_, (bilateral, dense, confluent)) =>
+    let past := bilateral.filter (·.orientation == .past)
+    let future := bilateral.filter (·.orientation == .future)
+    if !(past.size == 3 && future.size == 3) then
+      return .error s!"reversed room: expected 3 future + 3 past rows, got {future.size} + {past.size}"
+    let combRows := dense.filter (·.nodes.size == 1)
+    if !(dense.size == 7 && combRows.size == 7) then
+      return .error s!"dense comb: expected 7 singleton rows (3 voice + 4 split), got {dense.size}"
+    let some triple := confluent.find? (·.nodes.size == 3) | return .error "spelled triple: no size-3 row"
+    if !triple.confluent then return .error "spelled triple: not marked confluent"
+    pure (.ok ())
 
 private def showResult (x : Except String Float) : String :=
   match x with
@@ -196,12 +192,12 @@ private def showUnit (x : Except String Unit) : String :=
 def runBlockAlgebra : IO Bool := do
   let singleton ← singletonLaw
   let confluence ← confluenceLaw
-  let refused ← refusals
+  let refused ← totality
   match singleton, confluence, refused with
   | .ok s, .ok c, .ok () =>
     if s < 1e-12 && c < 1e-12 then
       passGate "block-algebra"
-        s!"singleton law rel {s} (block coefficients = collected residues up to reassociation); confluence law rel {c} (size-2 block = Oriented deg-1/deg-0 amps); reversed room admitted as past rows; clusterTooLarge refusal typed"
+        s!"singleton law rel {s} (block coefficients = collected residues up to reassociation); confluence law rel {c} (size-2 block = Oriented deg-1/deg-0 amps); reversed room admitted as past rows; over-cap comb splits to the collected floor; three spellings of one value are one confluent row"
     else
       failGate "block-algebra" s!"off the law: singleton rel {s}, confluence rel {c}"
   | s, c, r =>
