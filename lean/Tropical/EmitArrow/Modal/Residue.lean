@@ -136,7 +136,7 @@ private def landExpZ (x : DyadicI) : Int := (DyadicI.abs x).hi.magBits - 1
     all-zero bank, or one whose enclosure cannot be separated from zero) lands
     verbatim at `k = 0`; an UNBOUNDED sup is handled by the caller, which lands
     `k = 28` (max headroom) without ever forming an infinity. -/
-private def landK (maxAbs : DyadicI) : Nat :=
+def landK (maxAbs : DyadicI) : Nat :=
   if !DyadicI.certGt maxAbs DyadicI.zero then 0
   else
     let e := landExpZ maxAbs - 4
@@ -169,6 +169,17 @@ def LandExp.shift : LandExp → BuildM Sig
   | .dynamic k => do
       let twentyEight ← lit 28
       sub twentyEight k
+
+/-- The DYNAMIC landing exponent from an s0 magnitude bound: `k = clamp(0, 28,
+    floatExponent(maxSig) − 4)` — `⌊log₂⌋` failing toward headroom
+    (`floatExponent 0 = −1023 ⇒ k=0`, `NaN/∞ = 1024 ⇒ k=28`). -/
+def LandExp.dynamicOf (maxSig : Sig) : BuildM LandExp := do
+  let exponent ← floatExponentE maxSig
+  let four ← lit 4
+  let reduced ← sub exponent four
+  let zero ← lit 0
+  let twentyEight ← lit 28
+  return .dynamic (← clampE reduced zero twentyEight)
 
 /-- The envelope-peak factor `sup_{d≥0} d^p·e^{−σd} = (p/(σe))^p` for a mode of
     degree `p` (the polynomial-order lift): `1` for `p=0` (`e^{−σd} ≤ 1`), else the
@@ -258,12 +269,7 @@ def bankLandExp (modes : Array ModalMode) : BuildM LandExp := do
     let a ← modeWeightBoundSig m
     let greater ← gt acc a
     selectE greater acc a) zero
-  let exponent ← floatExponentE maxSig
-  let four ← lit 4
-  let reduced ← sub exponent four
-  let zero ← lit 0
-  let twentyEight ← lit 28
-  return .dynamic (← clampE reduced zero twentyEight)
+  LandExp.dynamicOf maxSig
 
 /-- The RELATIVE clock `clkRel = clk − anchor·2³²` as an EXACT i64 subtract.
     (A float-relative clock — `toFloat(clk)/2³² − anchor` — loses mantissa bits
@@ -1565,7 +1571,16 @@ def bankFoldPaired (cols : PairedBankCols)
     (the divisor needs only relative precision; the rotator phase is integer-reduced,
     consistent because `e^z` is periodic). -/
 def modalBankSigTableDD (modes : Array PairedMode) (clkInt anchorSamples : Sig)
-    (live? : Option Sig := none) : BuildM Sig := do
+    (live? : Option Sig := none) (landing? : Option LandExp := none) : BuildM Sig := do
+  if modes.isEmpty then return ← lit 0
+  -- option E for the paired lane (slice Phase 6): a caller that has bounded
+  -- `sup_d |Wc|` lands at `2^(28−k)`; the default is the verbatim q28 literals
+  let landingScale ← match landing? with
+    | some le => le.scale
+    | none => lit 268435456
+  let landingShift ← match landing? with
+    | some le => le.shift
+    | none => lit 28
   let clkRel ← relClockQ clkInt anchorSamples
   let clkFloat ← toFloatE clkRel
   let twoPow32 ← lit 4294967296
@@ -1613,18 +1628,16 @@ def modalBankSigTableDD (modes : Array PairedMode) (clkInt anchorSamples : Sig)
     let envTime ← mul envNu dSec
     let scaled ← scaleRealE envTime (cxReal, cxImag)
     let wc ← cmulE (m.cre, m.cim) scaled
-    let q28 ← lit 268435456
-    let landedCre ← mul wc.1 q28
+    let landedCre ← mul wc.1 landingScale
     let wCre ← toIntE landedCre
-    let landedCim ← mul wc.2 q28
+    let landedCim ← mul wc.2 landingScale
     let wCim ← toIntE landedCim
     let carrierCos ← fixedCosCycSig phQnu
     let real ← mul wCre carrierCos
     let carrierSin ← fixedSinCycSig phQnu
     let imag ← mul wCim carrierSin
     let difference ← sub real imag
-    let twentyEight ← lit 28
-    rshift difference twentyEight
+    rshift difference landingShift
   let zero ← lit 0
   let afterStrike ← gt clkRel zero
   let output ← fixedOutQ 30 bankQ

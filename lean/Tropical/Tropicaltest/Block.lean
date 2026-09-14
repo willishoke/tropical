@@ -179,6 +179,62 @@ private def totality : IO (Except String Unit) := do
     if !triple.confluent then return .error "spelled triple: not marked confluent"
     pure (.ok ())
 
+/-- STAGE PROBE (debug, `TROPICAL_BLOCK_DEBUG`): with param-backed poles, the
+    block coefficients and the realizer's column arrays must be s0 — a τ leaf
+    anywhere in them would park the coefficient trees in the audio kernel. -/
+private def stageProbe : IO Unit := do
+  let stageName := fun (s : Tropical.Ir.Stage) => match s with
+    | .fold => "fold" | .s0 => "s0" | .s1 => "s1"
+  match Tropical.Testing.ArrowFixtures.freezeBuild {} do
+      let rt ← paramRef ⟨0⟩
+      let dir ← paramRef ⟨1⟩
+      let mk := fun (k : Int) (f : Int) => do
+        let sigma ← mul (← lit k) rt
+        pure ({ sigma, omega := ← lit f, cre := ← lit 7 1, cim := ← lit 0 } : ModalMode)
+      let voice ← pure #[← mk 3 6280, ← mk 11 14100]
+      let room ← pure #[← mk 9 9424, ← mk 21 (-20100)]
+      let zero ← lit 0
+      let one ← lit 1
+      let clamped ← clampE dir zero one
+      let spine : ModalKernelExpr := .cascade #[.proper (.oriented voice zero),
+        .proper (.oriented room clamped)]
+      let rows ← decompose spine
+      let terminal ← BlockTerminal.ofRows rows
+      let clock ← clockLit
+      let anchor ← lit 200
+      let sig ← terminal.realizeSig clock anchor
+      let cols ← bankCols terminal.plain
+      let pcols ← pairedBankCols terminal.paired
+      pure (rows, terminal, sig, cols, pcols) with
+  | .error e => IO.println s!"        [stage probe] build error: {e}"
+  | .ok (arena, (rows, terminal, sig, cols, pcols)) =>
+    let st := fun (id : Sig) => match arena.sigs[id.idx]? with
+      | some sg => stageName sg.base | none => "?"
+    for (row, i) in rows.zipIdx do
+      let cs := row.coeffs.map fun c => s!"{st c.1}/{st c.2}"
+      let ns := row.nodes.map fun z => s!"{st z.1}/{st z.2}"
+      IO.println s!"        [stage probe] row {i} {repr row.orientation} nodes {ns} coeffs {cs}"
+    IO.println s!"        [stage probe] plain cols incr={st cols.incr} sigma={st cols.sigma} cre={st cols.cre} cim={st cols.cim}; paired cols incrNu={st pcols.incrNu} ds={st pcols.ds} cre={st pcols.cre}; atZero={st terminal.atZero.1}; realized={st sig}"
+    -- walk the plain cre column's first item down to its first s1 child
+    let rec firstS1 (id : Sig) (fuel : Nat) : Option (Sig × Tropical.Ir.ENode) :=
+      match fuel with
+      | 0 => none
+      | fuel + 1 =>
+        match arena.nodes[id.idx]?, arena.sigs[id.idx]? with
+        | some node, some sg =>
+          if sg.base != .s1 then none else
+          let kids := Tropical.Ir.ENode.children node
+          match kids.find? (fun k => (arena.sigs[k.idx]?).map (·.base == .s1) == some true) with
+          | some k => firstS1 k fuel
+          | none => some (id, node)
+        | _, _ => none
+    match terminal.plain[0]? with
+    | some m =>
+      match firstS1 m.cre 100000 with
+      | some (id, node) => IO.println s!"        [stage probe] first s1 leaf under plain[0].cre: id {id.idx} node {repr node}"
+      | none => IO.println "        [stage probe] plain[0].cre has no s1 leaf"
+    | none => pure ()
+
 private def showResult (x : Except String Float) : String :=
   match x with
   | .ok v => s!"ok {v}"
@@ -190,6 +246,7 @@ private def showUnit (x : Except String Unit) : String :=
   | .error e => e
 
 def runBlockAlgebra : IO Bool := do
+  if (← IO.getEnv "TROPICAL_BLOCK_DEBUG").isSome then stageProbe
   let singleton ← singletonLaw
   let confluence ← confluenceLaw
   let refused ← totality

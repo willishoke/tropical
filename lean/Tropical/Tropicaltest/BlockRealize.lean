@@ -24,6 +24,8 @@ the OBSERVABLE (samples leaving the datapath):
 * TRIPLE LANES — hand-built triple rows at gaps of 3 and 5 rad/s, so `|u|²`
   crosses the 0.01 lane threshold INSIDE the probe window: both lanes and the
   seam between them, against the exact Lagrange form on `CplxDI`.
+* PAIRED HEADROOM — a paired weight 80× over the bare fixed rail, landed at
+  the family's option-E exponent (Phase 6), against the exact oracle.
 -/
 
 namespace Tropical.Tropicaltest.BlockRealize
@@ -387,6 +389,36 @@ private def bilateralRender : IO (Except String (Float × Float)) := do
         IO.println s!"        [bilateral] i={k} dut {sci d[k]!} ref {sci y[k]!}"
     pure (.ok (Float.sqrt (nm / (dn + 1e-300)), width))
 
+-- ── (g) paired headroom: a landed weight far over the old fixed lane's rail ──
+
+/-- `voice{60 at λ} ⋙ room{60 at ν}` with `λ ≈ ν` (gap 1e-3 rad/s) and light
+    damping σ = 0.5: the paired weight's sup `|c|/(e·σ_min) = 3600/1.36 ≈ 2649`
+    is 80× the fixed lane's bare rail of 32, so the family lands at
+    `k = ⌊log₂ 2649⌋ − 4 = 7` (slice Phase 6's option-E exponent); the old fixed
+    paired lane would have wrapped. Against the exact partial fractions on the
+    128-bit carrier. -/
+private def pairedHeadroom : IO (Except String (Float × Float)) := do
+  let s := 0.5
+  let w := tp * 330.0
+  let a := 60.0; let r := 60.0
+  let dut ← render "block_paired_headroom" (do
+    let v ← pure #[← modeF s w a 0.0]
+    let room ← pure #[← modeF s (w + 0.001) r 0.0]
+    blockSig (.cascade #[← properOf v, ← properOf room]))
+  match dut with
+  | .error e => pure (.error e)
+  | .ok d =>
+    if !(allFinite d) then return .error "non-finite render"
+    let wq := qOm (w + 0.001)
+    let z2 := cI (-s) wq
+    let z1 := cI (-s) (wq - 0.001)
+    let c := cI (a * r) 0
+    let res1 := CplxDI.div c (CplxDI.sub z1 z2)
+    let res2 := CplxDI.div c (CplxDI.sub z2 z1)
+    let (ref, width) := exactSum #[(res1, z1), (res2, z2)]
+    debugPair "headroom" d ref
+    pure (.ok (relL2 d ref oracleStride, width))
+
 -- ── the gate ──────────────────────────────────────────────────────────────────
 
 /-- Thresholds — MEASURED at landing (2026-09-13), fail lines a decade above.
@@ -407,20 +439,22 @@ def runBlockRealize : IO Bool := do
   let collision ← tripleCollision
   let lanes ← tripleLanes
   let bilateral ← bilateralRender
-  match singleton, confluent, triple, collision, lanes, bilateral with
-  | .ok s, .ok c, .ok (t, tw), .ok k, .ok (l, lw), .ok (b, bw) =>
+  let headroom ← pairedHeadroom
+  match singleton, confluent, triple, collision, lanes, bilateral, headroom with
+  | .ok s, .ok c, .ok (t, tw), .ok k, .ok (l, lw), .ok (b, bw), .ok (h, hw) =>
     if s < sameLaneFloor && c < floatLaneFloor && t < floatLaneFloor
-        && k < floatLaneFloor && l < floatLaneFloor && b < floatLaneFloor then
+        && k < floatLaneFloor && l < floatLaneFloor && b < floatLaneFloor
+        && h < floatLaneFloor then
       passGate "block-realize"
-        s!"singleton render rel {sci s}; confluent deg-3 render rel {sci c}; triple (gap 1e-3, 4 poles) vs 128-bit exact rel {sci t} (oracle width {sci tw}); triple collision vs closed form rel {sci k}; triple lanes (gaps 3, 5 rad/s, seam crossed in-window) vs exact Lagrange rel {sci l} (oracle width {sci lw}); bilateral (past·future·past rooms, hot past pair) vs exact two-sided rel {sci b} (oracle width {sci bw})"
+        s!"singleton render rel {sci s}; confluent deg-3 render rel {sci c}; triple (gap 1e-3, 4 poles) vs 128-bit exact rel {sci t} (oracle width {sci tw}); triple collision vs closed form rel {sci k}; triple lanes (gaps 3, 5 rad/s, seam crossed in-window) vs exact Lagrange rel {sci l} (oracle width {sci lw}); bilateral (past·future·past rooms, hot past pair) vs exact two-sided rel {sci b} (oracle width {sci bw}); paired headroom (sup ≈ 2649, k = 7) vs exact rel {sci h} (oracle width {sci hw})"
     else
       failGate "block-realize"
-        s!"off the law: singleton {sci s} confluent {sci c} triple {sci t} collision {sci k} lanes {sci l} bilateral {sci b} (floors {sci sameLaneFloor} / {sci floatLaneFloor})"
-  | s, c, t, k, l, b =>
+        s!"off the law: singleton {sci s} confluent {sci c} triple {sci t} collision {sci k} lanes {sci l} bilateral {sci b} headroom {sci h} (floors {sci sameLaneFloor} / {sci floatLaneFloor})"
+  | s, c, t, k, l, b, h =>
     let sh := fun (x : Except String Float) => match x with | .ok v => s!"{v}" | .error e => s!"ERR {e}"
     let sh2 := fun (x : Except String (Float × Float)) => match x with
       | .ok (v, w) => s!"{v} (width {w})" | .error e => s!"ERR {e}"
     failGate "block-realize"
-      s!"singleton {sh s}; confluent {sh c}; triple {sh2 t}; collision {sh k}; lanes {sh2 l}; bilateral {sh2 b}"
+      s!"singleton {sh s}; confluent {sh c}; triple {sh2 t}; collision {sh k}; lanes {sh2 l}; bilateral {sh2 b}; headroom {sh2 h}"
 
 end Tropical.Tropicaltest.BlockRealize

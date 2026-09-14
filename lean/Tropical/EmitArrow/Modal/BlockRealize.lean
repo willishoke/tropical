@@ -53,6 +53,7 @@ against a 60-digit reference at every gap incl. 0 (`demos/block_carrier_body.py`
 namespace Tropical.EmitArrow.Block
 
 open Tropical.Ir
+open Tropical.Exact (DyadicI CplxDI)
 open Tropical.EmitArrow.Oriented (natE)
 
 /-- The size-3 row: `c · exp[z₁, z₂, z₃](d)`. Poles in pole form `(−σ, ω)`. -/
@@ -171,10 +172,12 @@ private def secondFactorE (u v : CplxE) : BuildM CplxE := do
   let vSmall ← binary .lt nv threshold
   let uvSmall ← binary .lt nuv threshold
   let seriesLane ← binary .and (← binary .and uSmall vSmall) uvSmall
-  -- the three symmetric direct forms, divisors swapped to 1 when small
+  -- the three symmetric direct forms, divisors swapped to 1 when small;
+  -- `e^{u−v} = e^u / e^v` (one complex division instead of a third
+  -- exp·cos·sin — the Metal shader compiler's budget is the tighter one)
   let eu ← cexpFloatE u
   let ev ← cexpFloatE v
-  let euv ← cexpFloatE uv
+  let euv ← cdivE eu ev
   let cu ← cexpm1LaneE u eu
   let cv ← cexpm1LaneE v ev
   let cuv ← cexpm1LaneE uv euv
@@ -193,9 +196,13 @@ private def secondFactorE (u v : CplxE) : BuildM CplxE := do
   let series ← secondFactorSeriesE u v
   cselectE seriesLane series direct
 
-/-- Float terminal realization of triple rows: `Re(c · e^{z₃d} · d² · Φ(u,v))`
-    per row, one banked reduction, gated causal. -/
-def tripleSig (rows : Array TripleMode) (clkInt anchorSamples : Sig) : BuildM Sig := do
+/-- Terminal realization of triple rows: `Re(c · e^{z₃d} · d² · Φ(u,v))` per
+    row, one banked reduction, gated causal. With a `landing`, the weight
+    `c·d²·Φ·env` lands at `2^(28−k)` and multiplies the exact Q2.30 rotator in
+    i64 — the fixed datapath every plain mode uses (slice Phase 6); without
+    one, the float carrier. -/
+def tripleSig (rows : Array TripleMode) (clkInt anchorSamples : Sig)
+    (landing? : Option LandExp := none) : BuildM Sig := do
   if rows.isEmpty then return ← lit 0
   let clkRel ← relClockQ clkInt anchorSamples
   let clkFloat ← toFloatE clkRel
@@ -204,26 +211,115 @@ def tripleSig (rows : Array TripleMode) (clkInt anchorSamples : Sig) : BuildM Si
   let sr ← sampleRate
   let dSec ← div secondsTimesRate sr
   let cols ← tripleBankCols rows
-  let value ← bankFoldTriple cols fun row => do
+  let weightOf := fun (row : TripleModeSym) => do
     let u ← cscaleE dSec (row.duRe, row.duIm)
     let v ← cscaleE dSec (row.dvRe, row.dvIm)
     let factor ← secondFactorE u v
     let dSq ← mul dSec dSec
     let scaled ← cscaleE dSq factor
     let weight ← cmulE (row.cre, row.cim) scaled
-    -- the z₃ carrier: float envelope × the exact Q0.32 rotator
     let env ← expSig (← neg (← mul row.sigma3 dSec))
     let increment ← toIntE row.incr3
     let phaseQ ← modePhaseQFromIncr increment clkRel
-    let q30 ← lit 1073741824
-    let carrierCos ← div (← toFloatE (← fixedCosCycSig phaseQ)) q30
-    let carrierSin ← div (← toFloatE (← fixedSinCycSig phaseQ)) q30
-    let carrier : CplxE := (← mul env carrierCos, ← mul env carrierSin)
-    let product ← cmulE weight carrier
-    pure product.1
+    pure (← cscaleE env weight, phaseQ)
   let zero ← lit 0
   let afterStrike ← gt clkRel zero
-  selectE afterStrike value zero
+  match landing? with
+  | none =>
+    let value ← bankFoldTriple cols fun row => do
+      let (weight, phaseQ) ← weightOf row
+      let q30 ← lit 1073741824
+      let carrierCos ← div (← toFloatE (← fixedCosCycSig phaseQ)) q30
+      let carrierSin ← div (← toFloatE (← fixedSinCycSig phaseQ)) q30
+      let product ← cmulE weight (carrierCos, carrierSin)
+      pure product.1
+    selectE afterStrike value zero
+  | some landing =>
+    let landingScale ← landing.scale
+    let landingShift ← landing.shift
+    let bankQ ← bankFoldTriple cols fun row => do
+      let (weight, phaseQ) ← weightOf row
+      let wCre ← toIntE (← mul weight.1 landingScale)
+      let wCim ← toIntE (← mul weight.2 landingScale)
+      let real ← mul wCre (← fixedCosCycSig phaseQ)
+      let imag ← mul wCim (← fixedSinCycSig phaseQ)
+      rshift (← sub real imag) landingShift
+    let output ← fixedOutQ 30 bankQ
+    selectE afterStrike output zero
+
+-- ── Landing bounds (option E for the divided-difference families) ─────────────
+
+/-- `|c|` bounded by `|Re c| + |Im c|`, as `modeWeightBoundSig` does. -/
+private def ampBoundSig (c : CplxE) : BuildM Sig := do
+  add (← absE c.1) (← absE c.2)
+
+private def minSig (a b : Sig) : BuildM Sig := do
+  selectE (← gt a b) b a
+
+private def eulerF : Float := 2.718281828459045
+
+/-- The static/dynamic landing exponent of a family from per-row sup bounds:
+    `boundD` on the exact carrier when the row's poles and coefficient fold
+    (`none` = no finite sup), else `boundSig` as an s0 expression. -/
+private def familyLandExp {α : Type} (rows : Array α)
+    (boundD : Array (Option DyadicI) → α → Option (Option DyadicI))
+    (boundSig : α → BuildM Sig) : BuildM LandExp := do
+  let constants := sigConstTable (← get).exprs
+  let mut mx := DyadicI.zero
+  let mut unbounded := false
+  let mut allConst := true
+  for row in rows do
+    match boundD constants row with
+    | some (some b) => mx := DyadicI.max mx b
+    | some none => unbounded := true
+    | none => allConst := false
+  if allConst then return .static (if unbounded then 28 else landK mx)
+  let zero ← lit 0
+  let maxSig ← rows.foldlM (fun acc row => do
+    let b ← boundSig row
+    selectE (← gt acc b) acc b) zero
+  LandExp.dynamicOf maxSig
+
+/-- `sup_d |c·e^{νd}·d·cexpm1((λ−ν)d)| ≤ |c|/(e·σ_min)`, `σ_min = min(σ_λ, σ_ν)`
+    (`|(e^{λd}−e^{νd})/(λ−ν)| ≤ d·e^{−σ_min d}`, the mean-value form). -/
+def pairedLandExp (rows : Array PairedMode) : BuildM LandExp :=
+  familyLandExp rows
+    (fun constants row =>
+      match sigConstDFrom? constants row.c.1, sigConstDFrom? constants row.c.2,
+            sigConstDFrom? constants row.lam.1, sigConstDFrom? constants row.nu.1 with
+      | some cr, some ci, some lr, some nr =>
+        let amp := DyadicI.mul (CplxDI.abs (CplxDI.mkI cr ci)) DyadicI.one
+        let sigmaMin := DyadicI.min (DyadicI.neg lr) (DyadicI.neg nr)
+        if !DyadicI.certGt sigmaMin DyadicI.zero then some none
+        else some (some (DyadicI.div amp (DyadicI.mul Tropical.Exact.DyadicI.eulerI sigmaMin)))
+      | _, _, _, _ => none)
+    (fun row => do
+      let amp ← ampBoundSig row.c
+      let sigmaMin ← minSig (← neg row.lam.1) (← neg row.nu.1)
+      div amp (← mul (← litF eulerF) sigmaMin))
+
+/-- `sup_d |c·exp[z₁,z₂,z₃](d)| ≤ |c|·sup_d d²/2·e^{−σ_min d} = 2|c|/(e·σ_min)²`
+    (Hermite–Genocchi: the second divided difference of `e^{zd}` is `d²/2` times
+    a mean of `e^{zd}` over the nodes' simplex). -/
+def tripleLandExp (rows : Array TripleMode) : BuildM LandExp :=
+  familyLandExp rows
+    (fun constants row =>
+      match sigConstDFrom? constants row.c.1, sigConstDFrom? constants row.c.2,
+            sigConstDFrom? constants row.z1.1, sigConstDFrom? constants row.z2.1,
+            sigConstDFrom? constants row.z3.1 with
+      | some cr, some ci, some r1, some r2, some r3 =>
+        let amp := CplxDI.abs (CplxDI.mkI cr ci)
+        let sigmaMin := DyadicI.min (DyadicI.min (DyadicI.neg r1) (DyadicI.neg r2)) (DyadicI.neg r3)
+        if !DyadicI.certGt sigmaMin DyadicI.zero then some none
+        else
+          let es := DyadicI.mul Tropical.Exact.DyadicI.eulerI sigmaMin
+          some (some (DyadicI.div (DyadicI.mul (DyadicI.ofNat 2) amp) (DyadicI.mul es es)))
+      | _, _, _, _, _ => none)
+    (fun row => do
+      let amp ← ampBoundSig row.c
+      let sigmaMin ← minSig (← minSig (← neg row.z1.1) (← neg row.z2.1)) (← neg row.z3.1)
+      let es ← mul (← litF eulerF) sigmaMin
+      div (← mul (← lit 2) amp) (← mul es es))
 
 -- ── The block terminal ────────────────────────────────────────────────────────
 
@@ -301,25 +397,35 @@ def BlockTerminal.ofRows (rows : Array BlockRow) : BuildM BlockTerminal := do
          pastPlain := past.plain, pastPaired := past.paired, pastTriple := past.triple,
          atZero }
 
-/-- Render the terminal: both arms' plain and paired families through the
-    existing `TerminalBank` read (fixed datapath + float paired lane, the past
-    arm on the mirrored clock, `atZero` at the strike), plus the triple lanes. -/
+/-- Render the terminal: every family on the fixed i64 datapath. The plain
+    families through `Bank.realizeSig` (per-bank option-E landing, the past
+    arm on the mirrored clock, `atZero` at the strike); the paired families
+    through `modalBankSigTableDD` and the triple families through `tripleSig`,
+    each landed at its own per-bank exponent from the family's sup bound
+    (`pairedLandExp`, `tripleLandExp`) — no admission cap, the exponent
+    absorbs the range (slice Phase 6). -/
 def BlockTerminal.realizeSig (terminal : BlockTerminal) (clkInt anchorSamples : Sig)
     (count? : Option Sig := none) : BuildM Sig := do
   let bank : Oriented.Bank :=
     { future := terminal.plain, past := terminal.pastPlain, atZero := terminal.atZero }
-  let base : Oriented.TerminalBank :=
-    { bank, futurePaired := terminal.paired, pastPaired := terminal.pastPaired }
-  let baseSig ← base.realizeSig clkInt anchorSamples count?
-  let futureTriple ← tripleSig terminal.triple clkInt anchorSamples
+  let plainSig ← bank.realizeSig clkInt anchorSamples count?
   let twoPow32 ← lit 4294967296
   let anchorFixed ← mul anchorSamples twoPow32
   let anchorQ ← toIntE anchorFixed
   let two ← lit 2
   let twiceAnchor ← mul two anchorQ
   let mirroredClock ← sub twiceAnchor clkInt
+  let futurePaired ← modalBankSigTableDD terminal.paired clkInt anchorSamples none
+    (some (← pairedLandExp terminal.paired))
+  let pastPaired ← modalBankSigTableDD terminal.pastPaired mirroredClock anchorSamples none
+    (some (← pairedLandExp terminal.pastPaired))
+  let futureTriple ← tripleSig terminal.triple clkInt anchorSamples
+    (some (← tripleLandExp terminal.triple))
   let pastTriple ← tripleSig terminal.pastTriple mirroredClock anchorSamples
-  add (← add baseSig futureTriple) pastTriple
+    (some (← tripleLandExp terminal.pastTriple))
+  let paired ← add futurePaired pastPaired
+  let triple ← add futureTriple pastTriple
+  add (← add plainSig paired) triple
 
 -- ── Materialization (the gauge seam) ──────────────────────────────────────────
 

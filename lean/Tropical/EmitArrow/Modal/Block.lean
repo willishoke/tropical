@@ -94,17 +94,32 @@ def linear (nodes : Array CplxE) (a : CplxE) : BuildM DDTable := do
     else if j == i + 1 then pure unit
     else pure zero
 
+/-- `c/(s − a)` for a pole `a` OUTSIDE the cluster: `[i,j] = (−1)^{j−i}·c /
+    ∏_{l=i..j}(z_l − a)`, by running products along each row and ONE complex
+    division per entry (the numerator folded into the quotient, as the
+    collected fold's `amp/Δ` is): O(k²) complex ops, k² divisions. -/
+def scaledInverse (nodes : Array CplxE) (a c : CplxE) : BuildM DDTable := do
+  let k := nodes.size
+  let zero ← Oriented.natE 0
+  let gaps ← nodes.mapM fun z => csubE z a
+  let mut entries : Array CplxE := Array.replicate (k * k) zero
+  for i in [0:k] do
+    let mut denominator : Option CplxE := none
+    for j in [i:k] do
+      denominator := some (← match denominator with
+        | none => pure gaps[j]!
+        | some d => cmulE d gaps[j]!)
+      let quotient ← cdivE c denominator.get!
+      let entry ← if (j - i) % 2 == 1 then cnegE quotient else pure quotient
+      entries := entries.set! (i * k + j) entry
+  pure { size := k, entries }
+
+
 /-- The factor `1/(s − a)` for a pole `a` OUTSIDE the cluster:
     `[i,j] = (−1)^{j−i} / ∏_{l=i..j}(z_l − a)`. The only division in the
     algebra, and every divisor is a cross-cluster gap. -/
-def inverse (nodes : Array CplxE) (a : CplxE) : BuildM DDTable :=
-  build nodes.size fun i j => do
-    let unit ← Oriented.natE 1
-    let mut denominator := unit
-    for l in [i:j+1] do
-      denominator ← cmulE denominator (← csubE nodes[l]! a)
-    let quotient ← cdivE unit denominator
-    if (j - i) % 2 == 1 then cnegE quotient else pure quotient
+def inverse (nodes : Array CplxE) (a : CplxE) : BuildM DDTable := do
+  scaledInverse nodes a (← Oriented.natE 1)
 
 def add (a b : DDTable) : BuildM DDTable :=
   build a.size fun i j => caddE (a.get i j) (b.get i j)
@@ -334,19 +349,41 @@ private def leibniz (constants : Array (Option DyadicI)) (nodes : Array CplxE)
       for (f, i) in factors.zipIdx do
         if inCluster i then
           clusterPolesHere := clusterPolesHere ++ Array.replicate f.mult f.node
+      let anyMember := (Array.range factors.size).any inCluster
+      let members := (Array.range factors.size).filter inCluster
+      let memberCount := members.foldl (fun acc i => acc + ((factors[i]?).map (·.mult)).getD 0) 0
+      let memberNode : Option CplxE := members[0]?.bind fun i => (factors[i]?).map (·.node)
       let mut total ← DDTable.zero k
       for (f, i) in factors.zipIdx do
         -- term_ν = coeff_ν · ∏_{ν'∈c∩stage, ν'≠ν}(s − z_ν')^{mult} · [(s − z_ν)^{−mult} if ν ∉ c]
-        let mut term ← DDTable.const k f.coeff
-        for (f', j) in factors.zipIdx do
-          if j != i && inCluster j then
-            for _ in [0:f'.mult] do
-              term ← term.mul (← DDTable.linear nodes f'.node)
-        if !(inCluster i) then
-          let inverse ← DDTable.inverse nodes f.node
-          for _ in [0:f.mult] do
-            term ← term.mul inverse
-        total ← total.add term
+        if anyMember && k == 1 && !(inCluster i) then
+          -- a singleton cluster {z_m}: every non-member term of z_m's own
+          -- stage carries the factor (s − z_m), whose one-node table is
+          -- (z_m − z_m) = 0 EXACTLY — nothing to compute
+          pure ()
+        else if !anyMember && f.mult == 1 then
+          -- the common case (a stage none of whose poles is in this cluster):
+          -- `coeff_ν/(s − z_ν)` as one scaled inverse table, no table products
+          total ← total.add (← DDTable.scaledInverse nodes f.node f.coeff)
+        else if f.mult == 1 && !(inCluster i) && memberCount == 1 then
+          -- a stage owning ONE cluster pole z_m, a non-member ν of multiplicity 1:
+          -- `c·(s − z_m)/(s − z_ν) = c + c·(z_ν − z_m)/(s − z_ν)` — a constant
+          -- plus one scaled inverse, instead of two table products
+          let some m := memberNode | pure ()
+          let shifted ← cmulE f.coeff (← csubE f.node m)
+          let term ← (← DDTable.const k f.coeff).add (← DDTable.scaledInverse nodes f.node shifted)
+          total ← total.add term
+        else
+          let mut term ← DDTable.const k f.coeff
+          for (f', j) in factors.zipIdx do
+            if j != i && inCluster j then
+              for _ in [0:f'.mult] do
+                term ← term.mul (← DDTable.linear nodes f'.node)
+          if !(inCluster i) then
+            let inverse ← DDTable.inverse nodes f.node
+            for _ in [0:f.mult] do
+              term ← term.mul inverse
+          total ← total.add term
       pure (total, clusterPolesHere, g)
   | .scale value kernel => do
       let (table, poles, cursor) ← leibniz constants nodes member cursor kernel

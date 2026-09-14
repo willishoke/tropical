@@ -97,6 +97,10 @@ def renderMetal (args : List String) : IO UInt32 := do
   stdout.flush
   return 0
 
+private def parseStrFlag (args : List String) (flag : String) : Option String :=
+  args.findSome? fun a =>
+    if a.startsWith (flag ++ "=") then some (a.drop (flag.length + 1)).toString else none
+
 /-- `diffcli render-graph <graph.json> [--metal] [--frames N] [--buffer N]
     [--start S]` — compile a playground PatchGraph (`{"nodes":[…],"out":…}`)
     through the TYPED session path (`Playground.compilePlan` → typed
@@ -123,8 +127,52 @@ def renderGraph (args : List String) : IO UInt32 := do
   match ← Tropical.Playground.compilePlan j with
   | .error e => IO.eprintln s!"render-graph: compile: {e}"; return 1
   | .ok compiled =>
+    -- `--dump-plan=<path>`: write the compiled plan's wire JSON (so `emit-msl`
+    -- / `emit-ir` can be pointed at a graph's plan) and stop
+    if let some path := parseStrFlag args "--dump-plan" then
+      match compiled.plan.toWire with
+      | .error e => IO.eprintln s!"render-graph: toWire: {e}"; return 1
+      | .ok wire =>
+        IO.FS.writeFile path wire.compress
+        IO.eprintln s!"render-graph: wrote plan to {path}"
+        return 0
     let split ← Tropical.StagedLoad.splitTyped compiled.plan compiled.stageBlocks
     IO.eprintln s!"render-graph: hoisted columns={split.audio.coeffArraySlots.size}"
+    -- `--stage-census`: how the typed stages and the split distribute the plan
+    if args.contains "--stage-census" then
+      let mut fold := 0; let mut s0 := 0; let mut s1 := 0; let mut untyped := 0
+      for block in compiled.stageBlocks do
+        for st in block do
+          match st with
+          | some .fold => fold := fold + 1
+          | some .s0 => s0 := s0 + 1
+          | some .s1 => s1 := s1 + 1
+          | none => untyped := untyped + 1
+      IO.eprintln s!"census: typed stages fold={fold} s0={s0} s1={s1} untyped={untyped}"
+      let census := fun (plan : Tropical.Plan.FlatPlan) => Id.run do
+        let mut instrs := 0; let mut fills := 0; let mut fillSlots : Array Nat := #[]
+        let mut stack := plan.instanceFunctions.toList
+        let mut fuel := 100000
+        while fuel > 0 do
+          fuel := fuel - 1
+          match stack with
+          | [] => break
+          | f :: rest =>
+            stack := rest ++ f.children.toList
+            for i in f.preambleInstructions ++ f.instructions ++ f.preInputInstructions do
+              instrs := instrs + 1
+              if let .array sl := i.dst then
+                fills := fills + 1
+                if !fillSlots.contains sl then fillSlots := fillSlots.push sl
+        return (instrs, fills, fillSlots.size)
+      let (ai, af, asl) := census split.audio
+      IO.eprintln s!"census: audio instrs={ai} array-fills={af} over {asl} array slots"
+      match split.coeff? with
+      | some c =>
+        let (ci, cf, csl) := census c
+        IO.eprintln s!"census: coeff instrs={ci} array-fills={cf} over {csl} array slots"
+      | none => IO.eprintln "census: no coefficient kernel"
+      return 0
     let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
     if metal then Tropical.StagedLoad.loadMslTyped rt compiled.plan compiled.stageBlocks
     else Tropical.StagedLoad.loadTyped rt compiled.plan compiled.stageBlocks
@@ -135,10 +183,6 @@ def renderGraph (args : List String) : IO UInt32 := do
       stdout.write (← rt.outputBytes)
     stdout.flush
     return 0
-
-private def parseStrFlag (args : List String) (flag : String) : Option String :=
-  args.findSome? fun a =>
-    if a.startsWith (flag ++ "=") then some (a.drop (flag.length + 1)).toString else none
 
 private def parseFloatFlag (args : List String) (flag : String)
     (default : Float) : Float :=
