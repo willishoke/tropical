@@ -235,21 +235,16 @@ describe.skipIf(!METAL)('metal vs native JIT (SNR gates)', () => {
     }
   })
 
-  // SKIPPED (2026-09-13, design/block-carrier.md §Cost): on this base the
-  // playground's room coefficients are stage-1 (the controls are frozen at the
-  // terminal coordinate), so the block terminal's 28 triple clusters put ~580k
-  // per-sample instructions in the audio kernel and the Metal shader compiler
-  // gives up (XPC_ERROR_CONNECTION_INTERRUPTED). The two-room paired kernel
-  // compiles and renders on Metal. Re-enable once the coefficient plane settles
-  // to stage 0 (the modal-s0-compose work), when this kernel is ~10k lines.
-  test.skip('block terminal — three near-equal rooms, paired and triple fixed lanes on the GPU', () => {
+  test('block terminal — three near-equal rooms, paired and triple fixed lanes on the GPU', () => {
     // Three reverbs with rt60 a tenth of a percent apart share every mode
     // frequency, so each of the 14 frequencies is one cluster of THREE
     // near-equal poles: the block terminal (design/block-carrier.md) renders
     // 14 triple rows + 14 paired rows + plain modes, every family on the
     // fixed i64 datapath with its own option-E landing exponent. Slot-driven
     // (rt60 is a live knob), so gated on the short window like the banked
-    // resonator. Floor set from measurement.
+    // resonator. Measured 86.6 dB on M1 Pro (2026-09-16, after the block
+    // families settle to stage 0 — 6k audio instructions, 34 hoisted
+    // columns); gate at 60 as the boundary.
     const graph = planFile('block-three-rooms-graph', JSON.stringify({
       nodes: [
         { id: 'res', kind: 'resonator', params: { freq: 220, decay: 4 } },
@@ -272,8 +267,8 @@ describe.skipIf(!METAL)('metal vs native JIT (SNR gates)', () => {
     const gpu = renderGraph(graph, true, 4096, start)
     expect(gpu.columns).toBe(ref.columns)
     const snr = snrDb(ref.out, gpu.out)
-    console.log(`    block three rooms: ${ref.columns} hoisted column(s), RMS ${rms.toExponential(2)}, SNR ${snr.toFixed(1)} dB (floor 40)`)
-    expect(snr).toBeGreaterThan(40)
+    console.log(`    block three rooms: ${ref.columns} hoisted column(s), RMS ${rms.toExponential(2)}, SNR ${snr.toFixed(1)} dB (floor 60)`)
+    expect(snr).toBeGreaterThan(60)
   })
   test('modal_heavy64 — the pre-scope-A unreduced-radian canary (short window only)', () => {
     // sin(ω·t) on a growing float argument: f32 π-reduction bleeds with

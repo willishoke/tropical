@@ -122,6 +122,28 @@ def bankFoldTriple (cols : TripleBankCols) (body : TripleModeSym → BuildM Sig)
     #[cols.incr3, cols.sigma3, cols.duRe, cols.duIm, cols.dvRe, cols.dvIm, cols.cre, cols.cim]
     contribution cols.live? cols.idxId
 
+/-- `bankFoldTriple` with loop-invariant scalars as 1-element columns (the
+    `bankFoldInv` discipline): a dynamic landing materializes before the region. -/
+def bankFoldTripleInv (cols : TripleBankCols) (invariants : Array Sig)
+    (body : TripleModeSym → Array Sig → BuildM Sig) : BuildM Sig := do
+  let invTables ← invariants.mapM fun value => arr #[value]
+  let zeroIdx ← lit 0
+  let invReads ← invTables.mapM fun table => index table zeroIdx
+  let k ← loopIdx cols.idxId
+  let incr3 ← index cols.incr3 k
+  let sigma3 ← index cols.sigma3 k
+  let duRe ← index cols.duRe k
+  let duIm ← index cols.duIm k
+  let dvRe ← index cols.dvRe k
+  let dvIm ← index cols.dvIm k
+  let cre ← index cols.cre k
+  let cim ← index cols.cim k
+  let contribution ← body { incr3, sigma3, duRe, duIm, dvRe, dvIm, cre, cim } invReads
+  bankSum cols.count
+    (#[cols.incr3, cols.sigma3, cols.duRe, cols.duIm, cols.dvRe, cols.dvIm, cols.cre, cols.cim]
+      ++ invTables)
+    contribution cols.live? cols.idxId
+
 private def cscaleE (s : Sig) (z : CplxE) : BuildM CplxE := do
   pure (← mul s z.1, ← mul s z.2)
 
@@ -237,13 +259,18 @@ def tripleSig (rows : Array TripleMode) (clkInt anchorSamples : Sig)
   | some landing =>
     let landingScale ← landing.scale
     let landingShift ← landing.shift
-    let bankQ ← bankFoldTriple cols fun row => do
+    let mkBody := fun (scale shift : Sig) (row : TripleModeSym) => do
       let (weight, phaseQ) ← weightOf row
-      let wCre ← toIntE (← mul weight.1 landingScale)
-      let wCim ← toIntE (← mul weight.2 landingScale)
+      let wCre ← toIntE (← mul weight.1 scale)
+      let wCim ← toIntE (← mul weight.2 scale)
       let real ← mul wCre (← fixedCosCycSig phaseQ)
       let imag ← mul wCim (← fixedSinCycSig phaseQ)
-      rshift (← sub real imag) landingShift
+      rshift (← sub real imag) shift
+    let bankQ ← match landing with
+      | .dynamic _ =>
+          bankFoldTripleInv cols #[landingScale, landingShift]
+            (fun row inv => mkBody inv[0]! inv[1]! row)
+      | .static _ => bankFoldTriple cols (mkBody landingScale landingShift)
     let output ← fixedOutQ 30 bankQ
     selectE afterStrike output zero
 
@@ -397,6 +424,57 @@ def BlockTerminal.ofRows (rows : Array BlockRow) : BuildM BlockTerminal := do
          pastPlain := past.plain, pastPaired := past.paired, pastTriple := past.triple,
          atZero }
 
+/-- Settle every family's coefficient plane to its control targets — the
+    `Bank.settled?` discipline extended to the paired and triple rows, which
+    are their own row types and would otherwise keep the glide's formal clock
+    dependence and stay per-sample. `none` when any coefficient carries genuine
+    per-sample modulation: the caller keeps the live expressions. -/
+def BlockTerminal.settled? (terminal : BlockTerminal) : BuildM (Option BlockTerminal) := do
+  let modeRoots := fun (ms : Array ModalMode) => ms.flatMap fun m => #[m.sigma, m.omega, m.cre, m.cim]
+  let pairRoots := fun (ps : Array PairedMode) =>
+    ps.flatMap fun p => #[p.lam.1, p.lam.2, p.nu.1, p.nu.2, p.c.1, p.c.2]
+  let tripleRoots := fun (ts : Array TripleMode) =>
+    ts.flatMap fun r => #[r.z1.1, r.z1.2, r.z2.1, r.z2.2, r.z3.1, r.z3.2, r.c.1, r.c.2]
+  let roots := modeRoots terminal.plain ++ modeRoots terminal.pastPlain
+    ++ pairRoots terminal.paired ++ pairRoots terminal.pastPaired
+    ++ tripleRoots terminal.triple ++ tripleRoots terminal.pastTriple
+    ++ #[terminal.atZero.1, terminal.atZero.2]
+  let some settled ← settleSignals roots | pure none
+  let pick := fun (i : Nat) => settled[i]!
+  let modes := fun (ms : Array ModalMode) (base : Nat) =>
+    ms.mapIdx fun i m =>
+      ({ m with
+        sigma := pick (base + 4 * i)
+        omega := pick (base + 4 * i + 1)
+        cre := pick (base + 4 * i + 2)
+        cim := pick (base + 4 * i + 3) } : ModalMode)
+  let pairs := fun (ps : Array PairedMode) (base : Nat) =>
+    ps.mapIdx fun i _ =>
+      ({ lam := (pick (base + 6 * i), pick (base + 6 * i + 1))
+         nu := (pick (base + 6 * i + 2), pick (base + 6 * i + 3))
+         c := (pick (base + 6 * i + 4), pick (base + 6 * i + 5)) } : PairedMode)
+  let triples := fun (ts : Array TripleMode) (base : Nat) =>
+    ts.mapIdx fun i _ =>
+      ({ z1 := (pick (base + 8 * i), pick (base + 8 * i + 1))
+         z2 := (pick (base + 8 * i + 2), pick (base + 8 * i + 3))
+         z3 := (pick (base + 8 * i + 4), pick (base + 8 * i + 5))
+         c := (pick (base + 8 * i + 6), pick (base + 8 * i + 7)) } : TripleMode)
+  let b0 := 0
+  let b1 := b0 + 4 * terminal.plain.size
+  let b2 := b1 + 4 * terminal.pastPlain.size
+  let b3 := b2 + 6 * terminal.paired.size
+  let b4 := b3 + 6 * terminal.pastPaired.size
+  let b5 := b4 + 8 * terminal.triple.size
+  let b6 := b5 + 8 * terminal.pastTriple.size
+  pure (some {
+    plain := modes terminal.plain b0
+    pastPlain := modes terminal.pastPlain b1
+    paired := pairs terminal.paired b2
+    pastPaired := pairs terminal.pastPaired b3
+    triple := triples terminal.triple b4
+    pastTriple := triples terminal.pastTriple b5
+    atZero := (pick b6, pick (b6 + 1)) })
+
 /-- Render the terminal: every family on the fixed i64 datapath. The plain
     families through `Bank.realizeSig` (per-bank option-E landing, the past
     arm on the mirrored clock, `atZero` at the strike); the paired families
@@ -406,6 +484,9 @@ def BlockTerminal.ofRows (rows : Array BlockRow) : BuildM BlockTerminal := do
     absorbs the range (slice Phase 6). -/
 def BlockTerminal.realizeSig (terminal : BlockTerminal) (clkInt anchorSamples : Sig)
     (count? : Option Sig := none) : BuildM Sig := do
+  -- the coefficient plane settles to its control targets before the terminal
+  -- read; un-settleable coefficients keep the live per-sample path
+  let terminal := (← terminal.settled?).getD terminal
   let bank : Oriented.Bank :=
     { future := terminal.plain, past := terminal.pastPlain, atZero := terminal.atZero }
   let plainSig ← bank.realizeSig clkInt anchorSamples count?

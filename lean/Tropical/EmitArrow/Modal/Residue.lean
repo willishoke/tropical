@@ -1548,6 +1548,29 @@ def bankFoldPaired (cols : PairedBankCols)
     #[cols.incrNu, cols.incrDiff, cols.sigmaNu, cols.ds, cols.wd, cols.cre, cols.cim]
     contribution cols.live? cols.idxId
 
+/-- `bankFoldPaired` with loop-invariant scalars as 1-element columns — the
+    paired twin of `bankFoldInv` (WS3b): a dynamic landing over composed
+    coefficients is a heavy s0 chain, and referencing it from the body would
+    re-emit it inside the region on a memo miss; as a table it materializes
+    once before the region. -/
+def bankFoldPairedInv (cols : PairedBankCols) (invariants : Array Sig)
+    (body : PairedModeSym → Array Sig → BuildM Sig) : BuildM Sig := do
+  let invTables ← invariants.mapM fun value => arr #[value]
+  let zeroIdx ← lit 0
+  let invReads ← invTables.mapM fun table => index table zeroIdx
+  let k ← loopIdx cols.idxId
+  let incrNu ← index cols.incrNu k
+  let incrDiff ← index cols.incrDiff k
+  let sigmaNu ← index cols.sigmaNu k
+  let ds ← index cols.ds k
+  let wd ← index cols.wd k
+  let cre ← index cols.cre k
+  let cim ← index cols.cim k
+  let contribution ← body { incrNu, incrDiff, sigmaNu, ds, wd, cre, cim } invReads
+  bankSum cols.count
+    (#[cols.incrNu, cols.incrDiff, cols.sigmaNu, cols.ds, cols.wd, cols.cre, cols.cim] ++ invTables)
+    contribution cols.live? cols.idxId
+
 /-- The divided-difference paired-mode bank body (qA). Per mode: the ν rotator (exact
     integer phase) plus a SECOND integer-phase rotator at the signed difference
     frequency `ω_λ−ω_ν` for `e^z`; `cexpm1(z)` by a per-sample `selectE` between the
@@ -1588,7 +1611,7 @@ def modalBankSigTableDD (modes : Array PairedMode) (clkInt anchorSamples : Sig)
   let sr ← sampleRate
   let dSec ← div secondsTimesRate sr
   let cols ← pairedBankCols modes live?
-  let bankQ ← bankFoldPaired cols fun m => do
+  let mkBody := fun (landingScale landingShift : Sig) (m : PairedModeSym) => do
     let incrNu ← toIntE m.incrNu
     let phQnu ← modePhaseQFromIncr incrNu clkRel
     let incrDiff ← toIntE m.incrDiff
@@ -1638,6 +1661,13 @@ def modalBankSigTableDD (modes : Array PairedMode) (clkInt anchorSamples : Sig)
     let imag ← mul wCim carrierSin
     let difference ← sub real imag
     rshift difference landingShift
+  -- a DYNAMIC landing (a heavy s0 chain over composed coefficients) rides
+  -- invariant columns; the static literals stay verbatim in the body
+  let bankQ ← match landing? with
+    | some (.dynamic _) =>
+        bankFoldPairedInv cols #[landingScale, landingShift]
+          (fun m inv => mkBody inv[0]! inv[1]! m)
+    | _ => bankFoldPaired cols (mkBody landingScale landingShift)
   let zero ← lit 0
   let afterStrike ← gt clkRel zero
   let output ← fixedOutQ 30 bankQ

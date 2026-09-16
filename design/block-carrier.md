@@ -1,9 +1,10 @@
 # The block carrier — repeated rooms without collecting
 
-Status: Phases 1–6 landed 2026-09-13 (`feat/block-carrier`). Every plain
-modal spine lowers through the block terminal, any direction, except the three
-exact cost schedules that keep their topologies; every family renders on the
-fixed i64 lane. Cockpit
+Status: Phases 1–6 landed 2026-09-13, rebased onto `main` after #244 and
+integrated with the settle discipline 2026-09-16 (`feat/block-carrier`).
+Every plain modal spine lowers through the block terminal, any direction,
+except the three exact cost schedules that keep their topologies; every family
+renders on the fixed i64 lane; the coefficient plane is stage-0. Cockpit
 scripts: `demos/block_carrier_leibniz.py` (the coefficient algebra in f64 vs a
 60-digit reference), `demos/block_carrier_body.py` (the size-3 body),
 `demos/block_carrier_exp.py` / `dd_union_law.py` (the research experiments).
@@ -147,36 +148,31 @@ exactly zero (skipped), and the numerator folds into the reciprocal. A stage
 owning one pole of a larger cluster uses `c·(s−z_m)/(s−z_ν) = c +
 c·(z_ν−z_m)/(s−z_ν)`, a constant plus one scaled inverse.
 
-| playground graph | base `main@943bf32` | this branch |
-|---|---|---|
-| resonator ⋙ reverb (6 + 14 modes, live direction ⇒ both arms) | 10825 audio IR lines, 407 stage-0 | 9652 audio instructions, 2106 stage-0 |
-| resonator ⋙ reverb ⋙ reverb ⋙ reverb (rt60 0.1 % apart ⇒ 28 triple clusters) | refused | ~580k audio instructions |
+Every coefficient is stage-0 by construction, but a glide-disciplined knob is
+formally a function of the clock even at rest, so without #244's settle the
+whole plane was per-sample (at the pre-#244 base too). `BlockTerminal.settled?`
+extends `Bank.settled?` to the paired and triple rows, and a dynamic landing
+rides 1-element invariant columns (`bankFoldPairedInv`, `bankFoldTripleInv`,
+the `bankFoldInv` discipline) so it materializes before the region instead of
+being re-emitted inside it on a memo miss.
 
-The second row is the finding: on this base the playground's room
-coefficients are STAGE-1 — the controls are frozen at the terminal coordinate,
-so every coefficient tree runs per sample, at base too (the base's one-room
-kernel is 10 k lines for 34 modes). The block terminal's trees are correct and
-s0 in isolation (`block-algebra`'s stage probe) but larger than the collected
-fold's on wide clustered spines, so until the coefficient plane settles to
-stage 0 (the in-flight `modal-s0-compose` work on the main checkout, which
-brings the one-room kernel to ~860 lines) a wide repeated-room chain is
-compile-heavy. On Metal the two-room paired kernel compiles and renders; the
-three-room triple kernel exceeds the shader compiler
-(`XPC_ERROR_CONNECTION_INTERRUPTED`), and its bun case in
-`tests/web/metal_vs_jit.test.ts` is skipped with that reason. `diffcli
-render-graph` gained `--dump-plan=<path>` and `--stage-census` for this.
-- `modal-oriented-patch`: three separately authored equal rooms render through
-  the production lowering against `1/((s+2)(s+5)³)`; a past·future·past chain
-  against the bilateral partial fractions; room-room-gauge renders through a
-  materialized segment.
-- `block-realize` bilateral probe: past·future·past rooms with a hot PAST pair
-  against the exact two-sided partial fractions on the 128-bit carrier, both
-  arms observed around a mid-window anchor (9.4e-6).
+| playground graph | base `main@943bf32` | this branch (audio / coefficient kernel) |
+|---|---|---|
+| resonator ⋙ reverb (6 + 14 modes, live direction ⇒ both arms) | 10825 audio IR lines, 407 stage-0 | 802 / 11366 instructions, 11 hoisted columns |
+| resonator ⋙ reverb ⋙ reverb ⋙ reverb (rt60 0.1 % apart ⇒ 28 triple clusters) | refused | 6030 / 521464 instructions, 34 hoisted columns |
+
+The coefficient kernel of the three-room chain is large (half a million
+knob-time instructions: 28 triple clusters against ~94 poles at `k² = 9`
+divisions each) but it runs once per control write, not per sample. On Metal
+the chain renders at 86.6 dB against the f64 JIT (slot-driven, the documented
+class; `tests/web/metal_vs_jit.test.ts`, floor 60). `diffcli render-graph`
+gained `--dump-plan=<path>` and `--stage-census` for these measurements.
 
 ## Not yet
 
-- Re-enable the Metal three-room case and re-measure the cost table once the
-  coefficient plane settles to stage 0.
+- The three-room chain's coefficient kernel (~520k knob-time instructions)
+  is the price of `k²` divisions per (cluster, pole); a cheaper exact form
+  for the size-3 tables, or hash-consing the shared reciprocals, would cut it.
 - Live poles without a declared σ range are unclassifiable and stay singletons
   (the pairwise router's `cold` convention); two such poles becoming
   runtime-equal divide by their gap exactly as the collected fold did.
