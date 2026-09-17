@@ -151,6 +151,7 @@ def renderGraph (args : List String) : IO UInt32 := do
       IO.eprintln s!"census: typed stages fold={fold} s0={s0} s1={s1} untyped={untyped}"
       let census := fun (plan : Tropical.Plan.FlatPlan) => Id.run do
         let mut instrs := 0; let mut fills := 0; let mut fillSlots : Array Nat := #[]
+        let mut reduces := 0; let mut routed := 0
         let mut stack := plan.instanceFunctions.toList
         let mut fuel := 100000
         while fuel > 0 do
@@ -161,16 +162,18 @@ def renderGraph (args : List String) : IO UInt32 := do
             stack := rest ++ f.children.toList
             for i in f.preambleInstructions ++ f.instructions ++ f.preInputInstructions do
               instrs := instrs + 1
+              if i.tag == "ReduceBegin" then reduces := reduces + 1
+              if i.tag == "RoutedSumBegin" then routed := routed + 1
               if let .array sl := i.dst then
                 fills := fills + 1
                 if !fillSlots.contains sl then fillSlots := fillSlots.push sl
-        return (instrs, fills, fillSlots.size)
-      let (ai, af, asl) := census split.audio
-      IO.eprintln s!"census: audio instrs={ai} array-fills={af} over {asl} array slots"
+        return (instrs, fills, fillSlots.size, reduces, routed)
+      let (ai, af, asl, ar, art) := census split.audio
+      IO.eprintln s!"census: audio instrs={ai} array-fills={af} over {asl} array slots · regions reduce={ar} routed={art}"
       match split.coeff? with
       | some c =>
-        let (ci, cf, csl) := census c
-        IO.eprintln s!"census: coeff instrs={ci} array-fills={cf} over {csl} array slots"
+        let (ci, cf, csl, cr, crt) := census c
+        IO.eprintln s!"census: coeff instrs={ci} array-fills={cf} over {csl} array slots · regions reduce={cr} routed={crt}"
       | none => IO.eprintln "census: no coefficient kernel"
       return 0
     let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32

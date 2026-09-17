@@ -74,25 +74,19 @@ private def cauchyCols (modes : Array ModalMode) : BuildM CauchyCols := do
 
 /-- Ordered complex reduction over a mode table. Binder 1 is reserved for
     these coefficient-side loops; the terminal oscillator bank uses binder 0.
+    Real and imaginary components are two routed outputs of ONE mapped body,
+    so a complex reciprocal is evaluated once and both authored left folds see
+    the same item order.
 
-    Emitted as TWO ordinary `bankSum` reductions (real, imaginary) over the
-    same tables, not one two-output `routedSum`. The routed form shared the
-    complex reciprocal between components, but `Stage0.placementFromStages`
-    masks every routed span s1 categorically — so a Cauchy sum whose value is
-    pure coefficient math (poles and amps from params, no τ anywhere) was
-    re-evaluated every sample, and everything downstream of its image (the
-    composed residues, hence the bank's coefficient columns) was pinned in the
-    audio kernel with it. As `ReduceBegin`/`ReduceEnd` units the folds are
-    whole-region hoistable by the EXISTING `tryRegion` (the
-    `banks-region-hoist` precedent), the residue chain cascades to s0 behind
-    them, and the mode tables hoist as banks-as-data columns.
-
-    Value-identical to the routed form: both loops visit the tables in the
-    same order, each item's component is the same expression the routed body
-    produced, and the additive fold is the same left-to-right accumulation —
-    so each component's sum is bit-identical. The reciprocal is evaluated once
-    per component loop instead of once for both; at s0 that is once per
-    control write, not once per sample. -/
+    History: `efb3dbc` split this into two `bankSum` folds because
+    `Stage0.placementFromStages` masked every routed span s1 categorically, so
+    a Cauchy sum of pure coefficient math was re-evaluated per sample and
+    pinned everything downstream of its image in the audio kernel. Placement
+    now moves an all-s0 routed span AS A UNIT into the coefficient stream, its
+    image becoming a coefficient column, so the routed form is back: same
+    item order, same per-item arithmetic, same left-to-right accumulation per
+    component — bit-identical to the two-fold form — with the reciprocal
+    evaluated once per item instead of once per component. -/
 private def cauchyFold (modes : Array ModalMode)
     (body : CauchyModeSym → BuildM CplxE) : BuildM CplxE := do
   if modes.isEmpty then return ← natE 0
@@ -106,8 +100,13 @@ private def cauchyFold (modes : Array ModalMode)
     pole := (poleRe, poleIm)
     amp := (ampRe, ampIm) }
   let tables := #[cols.poleRe, cols.poleIm, cols.ampRe, cols.ampIm]
-  let real ← bankSum cols.count tables value.1 none 1
-  let imag ← bankSum cols.count tables value.2 none 1
+  let routes := (Array.range cols.count).foldl
+    (fun out _ => out.push (some 0) |>.push (some 1)) #[]
+  let image ← routedSum cols.count 2 routes tables #[value.1, value.2] none 1
+  let zero ← lit 0
+  let real ← index image zero
+  let one ← lit 1
+  let imag ← index image one
   pure (real, imag)
 
 private def differenceSum (pole : CplxE) (modes : Array ModalMode) : BuildM CplxE :=

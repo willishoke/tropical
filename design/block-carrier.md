@@ -177,31 +177,42 @@ over 4096 samples, 796 regions, 29 k vs 43 k plan instructions). Multiplicity
 > 1 and a stage owning ≥ 2 poles of one cluster stay on the unrolled branch
 (`Block.leibniz`); `TROPICAL_BANKS_UNROLL` reverts to it everywhere.
 
-| playground graph | base `main@943bf32` | `main` after #244 | this branch, unrolled tables | this branch, banked tables (audio / coefficient kernel) |
-|---|---|---|---|---|
-| resonator ⋙ reverb (6 + 14 modes, live direction ⇒ both arms) | 10825 audio IR lines, 407 stage-0 | 187 fdiv / 161 loops in the coefficient object | 802 / 11366 instructions, 11 columns | 774 / 5330 instructions, 19 columns |
-| resonator ⋙ reverb ⋙ reverb ⋙ reverb (rt60 0.1 % apart ⇒ 28 triple clusters) | refused | refused | 6030 / 521464 instructions, 34 columns | 2898 / 98745 instructions, 48 columns |
+**One routed span per (cluster, stage).** The stage table is a multi-output
+reduction: the k(k+1) real/imaginary entry components are the outputs of ONE
+`routedSum` whose mapped body computes the item's gaps, running products,
+shifted coefficient and member mask once and yields every entry from them
+(identity routes; the image is read back with `index`). That form was
+unavailable to the coefficient plane until now — `Stage0.placementFromStages`
+masked every routed span s1 categorically, which is also why `cauchyFold` had
+been split into two scalar folds (#244). Placement now treats a routed span
+as a whole-region candidate exactly like a reduce region: an all-s0 span
+hoists AS A UNIT, its image (an array slot the unit wholly owns) becomes a
+coefficient column — generation-buffered, `buffer(3)` on Metal — and a span
+that does not move is pinned s1 wholesale. `cauchyFold` is the two-output
+routed form again. The fused two-room schedule's per-sample routed images
+read τ and stay in the audio kernel (19 spans; `modal-universe-history`
+unmoved).
+
+| playground graph | base `main@943bf32` | `main` after #244 | this branch, unrolled tables | banked, one region per entry | banked, one routed span per (cluster, stage) (audio / coefficient kernel) |
+|---|---|---|---|---|---|
+| resonator ⋙ reverb (6 + 14 modes, live direction ⇒ both arms) | 10825 audio IR lines, 407 stage-0 | 187 fdiv / 161 loops in the coefficient object | 802 / 11366 instructions, 11 columns | 774 / 5330, 19 columns | 774 / 4202 instructions, 53 columns, 34 routed spans |
+| resonator ⋙ reverb ⋙ reverb ⋙ reverb (rt60 0.1 % apart ⇒ 28 triple clusters) | refused | refused | 6030 / 521464 instructions, 34 columns | 2898 / 98745, 48 columns | 2898 / 33021 instructions, 178 columns, 130 routed spans |
 
 (The `main` column is `llvm-objdump` of the cached coefficient kernel for the
 same resonator ⋙ reverb graph — `fdiv` count and backward branches; the
-unrolled branch had 1522 / 1.) The three-room coefficient kernel compiles in
-1.3 s instead of 4.0 s (cache disabled, `TROPICAL_JIT_TRACE=1`; 13 MB of IR
-instead of 31 MB); per-sample work is identical (2308 s1 instructions). What
-remains of the 99 k is the per-entry region shape — 12 scalar regions per
-(cluster, stage), each recomputing the gaps, running products, shifted
-coefficient and member mask for the same item — which a multi-output
-reduction at stage 0 (`routedSum` hoisting) collapses to one region per
-(cluster, stage). On Metal the chain renders at 84.2 dB against the f64 JIT
-(slot-driven, the documented class; `tests/web/metal_vs_jit.test.ts`, floor
-60). `diffcli render-graph` gained `--dump-plan=<path>` and `--stage-census`
-for these measurements.
+unrolled branch had 1522 / 1.) Every step renders md5-identical on the JIT
+(64 frames, three-room from frame 11000) and at the same Metal SNR; per-sample
+work is identical (2308 s1 instructions, 2898 audio). The three-room
+coefficient kernel's JIT compile (cache disabled, `TROPICAL_JIT_TRACE=1`):
+4.0 s / 31 MB of IR unrolled, 1.3 s / 13 MB at the per-entry form, 0.40 s /
+5.1 MB (102 k parsed instructions) with one routed span per (cluster, stage). On
+Metal the chain renders at 84.2 dB against the f64 JIT (slot-driven, the
+documented class; `tests/web/metal_vs_jit.test.ts`, floor 60). `diffcli
+render-graph` gained `--dump-plan=<path>` and `--stage-census` (instruction,
+fill, and region counts per kernel) for these measurements.
 
 ## Not yet
 
-- The banked stage tables are one region per table ENTRY (12 per (cluster,
-  stage) at k = 3); a routed (multi-output) reduction at stage 0 would compute
-  the shared gaps and products once per item. Stage0 today pins every routed
-  span s1, so the coefficient plane cannot use one.
 - A stage owning ≥ 2 poles of one cluster, or a pole of multiplicity > 1,
   still meta-unrolls its table (`Block.leibniz`'s general branch). A
   pathological authored comb collapsing many value classes into one cluster

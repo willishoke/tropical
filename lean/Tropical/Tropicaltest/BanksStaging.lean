@@ -199,6 +199,54 @@ def runMslColumnGuard (arena : Arena)
   let src := "{\"nodes\":[" ++
     "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
     "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"res\"]}}],\"out\":\"out\"}"
+  -- The routed-image clause: resonator ⋙ reverb lowers through the block
+  -- terminal, whose banked stage tables are routed spans; all-s0, they hoist
+  -- as units and their IMAGES are coefficient columns — read on the GPU via
+  -- `coeff_columns[…]` like any Pack-filled column, with no local `arrN`.
+  let routedSrc := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"room_a\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.9},\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"room_a\"]}}],\"out\":\"out\"}"
+  let routedImages : Except String (Nat × Nat × Bool × Bool × Bool × Bool) ←
+    match Lean.Json.parse routedSrc with
+    | .error e => pure (Except.error s!"routed json: {e}")
+    | .ok j => match Tropical.Playground.compilePlanPure arena resolved j with
+      | .error e => pure (Except.error s!"routed compile: {firstLine e}")
+      | .ok compiled => match Tropical.Ir.Stage0.hoistTyped compiled.plan compiled.stageBlocks with
+        | .error e => pure (Except.error s!"routed split: {firstLine e}")
+        | .ok split =>
+          let cols := split.audio.coeffArraySlots
+          -- image slots of routed spans that landed in the coefficient kernel
+          let images : Array Nat := match split.coeff? with
+            | none => #[]
+            | some c => c.instanceFunctions.foldl (fun acc f =>
+                acc ++ f.instructions.filterMap fun i =>
+                  if i.tag == "RoutedSumBegin" then
+                    (match i.dst with | .array s => some s | _ => none)
+                  else none) #[]
+          let imagesAreColumns := !images.isEmpty && images.all cols.contains
+          match Tropical.Ir.EmitMsl.emitKernel split.audio with
+          | .error e => pure (Except.error s!"routed split plan refused: {firstLine e}")
+          | .ok msl =>
+            let sizes := split.audio.arraySlotSizes
+            let has : String → String → Bool := fun hay needle => (hay.splitOn needle).length > 1
+            let audioBlocks := Tropical.Ir.Stage0.collectPlanBlocks split.audio
+            -- an image's readers are usually s0 themselves and hoist with it
+            -- (the audio kernel then reads the downstream columns); the
+            -- offset-read check applies to the images the audio plan DOES index
+            let audioReads : Array Nat := images.filter fun s => audioBlocks.any fun b =>
+              b.any fun i => i.args.any fun a => match a with
+                | .arrayReg t => t == s | _ => false
+            let mut off := 0
+            let mut reads := true
+            let mut noLocals := true
+            for s in cols do
+              if images.contains s then
+                if audioReads.contains s && !(has msl s!"coeff_columns[{off} + ") then reads := false
+                if has msl s!"float arr{s}[" then noLocals := false
+              off := off + max (sizes[s]?.getD 1) 1
+            let audioRouted := audioBlocks.any fun b => b.any (·.tag == "RoutedSumBegin")
+            pure (Except.ok (images.size, cols.size, imagesAreColumns, reads, noLocals, audioRouted))
   match Lean.Json.parse src with
   | .error e => failGate "msl-column-guard" s!"json: {e}"
   | .ok j =>
@@ -237,10 +285,18 @@ def runMslColumnGuard (arena : Arena)
             off := off + max (sizes[s]?.getD 1) 1
           IO.println (s!"        banked={banked} · hoisted columns={cols.size} ({off} floats packed) · "
             ++ s!"buffer(3)={binding} · offset reads={reads} · locals suppressed={noLocals} · unsplit 3-binding={unsplitClean}")
-          if cols.size > 0 && binding && reads && noLocals && unsplitClean then
-            passGate "msl-column-guard" s!"{cols.size} hoisted column(s) EMIT in column-binding mode: buffer(3) declared, reads at packed offsets, no arrN locals; columns-free plan keeps the frozen 3-binding header"
+          let routedOk ← match routedImages with
+            | .error e =>
+              IO.println s!"        routed images: {e}"
+              pure false
+            | .ok (nImages, nCols, asColumns, rReads, rNoLocals, audioRouted) =>
+              IO.println (s!"        resonator ⋙ reverb: {nImages} routed image(s) among {nCols} hoisted columns · "
+                ++ s!"images are columns={asColumns} · audio-read images at offsets={rReads} · no image locals={rNoLocals} · audio routed-free={audioRouted == false}")
+              pure (asColumns && rReads && rNoLocals && !audioRouted)
+          if cols.size > 0 && binding && reads && noLocals && unsplitClean && routedOk then
+            passGate "msl-column-guard" s!"{cols.size} hoisted column(s) EMIT in column-binding mode: buffer(3) declared, reads at packed offsets, no arrN locals; columns-free plan keeps the frozen 3-binding header; hoisted routed images cross as columns"
           else
-            failGate "msl-column-guard" s!"banked: cols={cols.size} binding={binding} reads={reads} noLocals={noLocals} unsplitClean={unsplitClean}"
+            failGate "msl-column-guard" s!"banked: cols={cols.size} binding={binding} reads={reads} noLocals={noLocals} unsplitClean={unsplitClean} routed={routedOk}"
         else
           let splitClean := has splitMsl plainHeader && !(has splitMsl "buffer(3)")
           IO.println s!"        banked={banked} · hoisted columns={cols.size} · split 3-binding={splitClean} · unsplit 3-binding={unsplitClean}"

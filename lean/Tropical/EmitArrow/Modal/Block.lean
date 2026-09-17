@@ -121,11 +121,16 @@ def scaledInverse (nodes : Array CplxE) (a c : CplxE) : BuildM DDTable := do
 def leibnizBinder : Nat := 17
 
 /-- The BANKED stage table: `Σ_ν coeff_ν/(s − z_ν)` over a stage's poles as ONE
-    reduction per table entry instead of one `scaledInverse` table per pole.
-    The (pole, coeff) pairs ride four coefficient columns (`arr` of node re/im,
-    coeff re/im); each of the k(k+1)/2 complex entries is two `bankSum`
-    reductions (real, imaginary) whose body is `scaledInverse`'s entry formula
-    for the INDEXED pole — the `cauchyFold` discipline (`OrientedRealize`).
+    routed reduction per (cluster, stage) instead of one `scaledInverse` table
+    per pole. The (pole, coeff) pairs ride four coefficient columns (`arr` of
+    node re/im, coeff re/im); the k(k+1)/2 complex entries are the `k(k+1)`
+    outputs of a single `routedSum` (identity routes per item, values in
+    (i, j, re/im) order) whose mapped body is `scaledInverse`'s entry formula
+    for the INDEXED pole — the `cauchyFold` discipline (`OrientedRealize`) —
+    so the gaps, running products, shifted coefficient and member mask are
+    computed once per item and shared by every entry. The image is read back
+    with `index`; placement hoists the whole span as a unit and the image
+    becomes a coefficient column.
 
     `member? = some (m, z_m)` is the stage owning ONE cluster pole: every
     non-member ν contributes `c_ν + c_ν·(z_ν − z_m)/(s − z_ν)` (the constant plus
@@ -172,7 +177,8 @@ def scaledInverseBanked (nodes : Array CplxE) (poles coeffs : Array CplxE)
     | none => pure d
     | some isM => pure (← selectE isM one.1 d.1, ← selectE isM one.2 d.2)
   let gaps ← nodes.mapM fun z => csubE z a
-  let mut entries : Array CplxE := Array.replicate (k * k) zero
+  -- the mapped values, (i, j, re/im) order over the upper triangle
+  let mut values : Array Sig := #[]
   for i in [0:k] do
     let mut denominator : Option CplxE := none
     for j in [i:k] do
@@ -185,9 +191,20 @@ def scaledInverseBanked (nodes : Array CplxE) (poles coeffs : Array CplxE)
       let entry ← match isMember? with
         | none => pure masked
         | some _ => caddE (if i == j then c else zero) masked
-      let real ← bankSum poles.size tables entry.1 none leibnizBinder
-      let imag ← bankSum poles.size tables entry.2 none leibnizBinder
+      values := values.push entry.1
+      values := values.push entry.2
+  let outputCount := values.size
+  let routes := (Array.range poles.size).foldl
+    (fun out _ => out ++ (Array.range outputCount).map some) #[]
+  let image ← routedSum poles.size outputCount routes tables values none leibnizBinder
+  let mut entries : Array CplxE := Array.replicate (k * k) zero
+  let mut pos := 0
+  for i in [0:k] do
+    for j in [i:k] do
+      let real ← index image (← lit (Int.ofNat (2 * pos)))
+      let imag ← index image (← lit (Int.ofNat (2 * pos + 1)))
       entries := entries.set! (i * k + j) (real, imag)
+      pos := pos + 1
   pure { size := k, entries }
 
 

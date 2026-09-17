@@ -433,8 +433,14 @@ def phase3Evidence : Except String Phase3Evidence := do
     -- authored nodes (the per-pole entry trees collapse into one body per
     -- entry); 505166 → 508332 wire bytes (reductions and their columns
     -- serialize slightly larger than the scalar trees they replace).
-    ("authored nodes", nativeArena.exprs.nodes.size, 1299),
-    ("reachable nodes", nativeExprs.nodes.size, 1297),
+    -- Routed coefficient plane: placement now hoists an all-s0 routed span
+    -- as a unit, so `cauchyFold` is a two-output `routedSum` again and each
+    -- banked stage table is ONE routed span per (cluster, stage) instead of
+    -- k(k+1) `bankSum`s — 1299 → 1314 authored nodes (the image `index`
+    -- reads), 508332 → 429612 wire bytes (one body per span instead of one
+    -- per entry), and the routed count is 15 (below: the tripwire inverts).
+    ("authored nodes", nativeArena.exprs.nodes.size, 1314),
+    ("reachable nodes", nativeExprs.nodes.size, 1312),
     -- 24 -> 0: `cauchyFold` now emits ordinary `bankSum` pairs; the carrier
     -- authors no routed reductions at all. Kept pinned as the tripwire that
     -- composition stays placement-hoistable (a routedSum here would be
@@ -446,8 +452,14 @@ def phase3Evidence : Except String Phase3Evidence := do
     -- fold + terminal and now lowers through the block terminal — one
     -- decomposition, families settled and landed on the fixed lane: 2341 →
     -- 1499 authored nodes, 908801 → 505166 wire bytes.
-    ("routed reductions", routed, 0),
-    ("wire bytes", nativeWire.length, 508332)]
+    -- 0 → 15: the carrier authors routed reductions again — `cauchyFold`
+    -- and the Leibniz stage tables — because `Stage0.placementFromStages`
+    -- now moves an all-s0 routed span AS A UNIT (its image a coefficient
+    -- column) instead of masking every routed span s1. The tripwire's
+    -- meaning inverts: a routed span here is EXPECTED to hoist, and the
+    -- `routed-sum-coverage` gate pins that placement directly.
+    ("routed reductions", routed, 15),
+    ("wire bytes", nativeWire.length, 429612)]
   let drifted := pinned.filter fun (_, actual, expected) => actual != expected
   unless drifted.isEmpty do
     let lines := drifted.toList.map fun (label, actual, expected) =>

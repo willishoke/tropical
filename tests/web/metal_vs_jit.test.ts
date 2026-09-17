@@ -243,8 +243,10 @@ describe.skipIf(!METAL)('metal vs native JIT (SNR gates)', () => {
     // fixed i64 datapath with its own option-E landing exponent. Slot-driven
     // (rt60 is a live knob), so gated on the short window like the banked
     // resonator. Measured 86.6 dB on M1 Pro (2026-09-16, after the block
-    // families settle to stage 0 — 6k audio instructions, 34 hoisted
-    // columns); gate at 60 as the boundary.
+    // families settle to stage 0) and 84.2 dB with the banked coefficient
+    // plane (2.9k audio instructions; the stage tables are 130 routed spans
+    // in the coefficient kernel, their images among 178 hoisted columns);
+    // gate at 60 as the boundary.
     const graph = planFile('block-three-rooms-graph', JSON.stringify({
       nodes: [
         { id: 'res', kind: 'resonator', params: { freq: 220, decay: 4 } },

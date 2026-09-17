@@ -490,9 +490,11 @@ private def renderBanked (plan : Tropical.Plan.FlatPlan) : IO (Except String (Ar
     `decompose`'s explicit `banked := false`, since the flag is process-global)
     — must render BYTE-EQUAL (the docstring's same-ops-same-order argument),
     and the banked plan must be the smaller one with the coefficient plane as
-    regions: ≥ `minRegions` reduce regions and fewer instructions than the
-    unrolled plan. Both clauses are the `residue-banked` precedent's. -/
-private def bankedMinRegions : Nat := 64
+    regions: ≥ `bankedMinRegions` regions (one routed span per (cluster,
+    stage): 8 triples × 4 stages + 2 singletons × 3 room stages = 38) and
+    fewer instructions than the unrolled plan. Both clauses are the
+    `residue-banked` precedent's. -/
+private def bankedMinRegions : Nat := 32
 
 private def countFnTag (t : String) (f : Tropical.Plan.InstanceFunction) : Nat :=
   (f.instructions.filter (·.tag == t)).size
@@ -500,8 +502,11 @@ private def countFnTag (t : String) (f : Tropical.Plan.InstanceFunction) : Nat :
 termination_by sizeOf f
 decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children c.2
 
+/-- Coefficient-plane regions of either kind: ordinary reductions and routed
+    spans (the banked stage tables are ONE routed span per (cluster, stage)). -/
 private def planRegions (p : Tropical.Plan.FlatPlan) : Nat :=
-  p.instanceFunctions.foldl (fun acc f => acc + countFnTag "ReduceBegin" f) 0
+  p.instanceFunctions.foldl (fun acc f =>
+    acc + countFnTag "ReduceBegin" f + countFnTag "RoutedSumBegin" f) 0
 
 def runBlockBanked : IO Bool := do
   match bankedPlan "block_banked" true, bankedPlan "block_unrolled" false with
