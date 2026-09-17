@@ -96,7 +96,7 @@ Every successful nontrivial typed Stage0 split reaches the same final Plan obser
 - Evidence: theorem, executable gate, inspection
 - Formal symbol: none
 - Implementation: `lean/Tropical/Ir/Stage0.lean`, `lean/Tropical/Ir/Stage0Laws.lean`, `lean/Tropical/Testing/StagingLaws.lean`
-- Gates: `lake-build:Tropical.Proofs`, `patch-goldens`, `manual:Stage0 publication simulation review`
+- Gates: `lake-build:Tropical.Proofs`, `patch-goldens`, `msl-column-dup`, `manual:Stage0 publication simulation review`
 - Limitation: Tropical.Ir.Stage0.hoistTyped_refines_of_state_publication proves the observation conclusion only from an explicit StatePublicationRefines premise. Alignment refusal, identity, and multichannel interface preservation are proved, but the actual nontrivial rewrite has not yet been shown to establish the final-state relation.
 
 ## TILE_STAGE_LEFT_ENDPOINT_REFINES_EXACT

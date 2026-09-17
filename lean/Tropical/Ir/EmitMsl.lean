@@ -597,16 +597,12 @@ private def guardColumnWrite (slot : Nat) (what : String) : M Unit := do
 
 /-- `Pack` — fill the thread-private array with the resolved args.
 
-    A Pack of PURE CONSTANTS aimed at a hoisted column is not a split bug:
-    it is the fold-duplicated fill (`Stage0` keeps the audio original for the
-    JIT's f64 emit-time folding and duplicates it into the coefficient
-    stream), and the host-side materialization writes the identical values —
-    so on the GPU the in-kernel copy is simply omitted. A VARYING write to a
-    read-only column still fails loudly. -/
+    ANY Pack aimed at a hoisted column is a split bug. The fold-duplicated
+    fill of a column (a constant table a hoisted region reads) is placed in
+    the coefficient stream ONLY by `Stage0.rebuildCore` — the audio plan never
+    carries a copy, constant-argument or otherwise — so `guardColumnWrite` is
+    the single rule here and fires loudly on any write, varying or not. -/
 private def emitPack (dst : Nat) (args : Array NOperand) : M Unit := do
-  if (← get).coeffOffsets.contains dst then
-    if args.all (fun a => match a with | .const .. => true | _ => false) then
-      return
   guardColumnWrite dst "Pack"
   for i in [0:args.size] do
     let v ← resolveF32 args[i]!

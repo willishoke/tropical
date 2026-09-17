@@ -69,6 +69,7 @@ def knownGates : Array String := #[
   "runtime-multichannel",
   "msl-goldens",
   "msl-column-guard",
+  "msl-column-dup",
   "exact-carrier",
   "patch-goldens",
   "migration-goldens",
@@ -171,7 +172,7 @@ def obligations : Array Obligation := #[
     evidence := #[.theorem, .executableGate, .inspection]
     implementationPaths := #["lean/Tropical/Ir/Stage0.lean",
       "lean/Tropical/Ir/Stage0Laws.lean", "lean/Tropical/Testing/StagingLaws.lean"]
-    gateNames := #["lake-build:Tropical.Proofs", "patch-goldens",
+    gateNames := #["lake-build:Tropical.Proofs", "patch-goldens", "msl-column-dup",
       "manual:Stage0 publication simulation review"]
     owner := "Staging semantics"
     status := .open

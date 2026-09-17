@@ -373,6 +373,18 @@ private def rebuildCore (plan : FlatPlan) (allBlocks : Array (Array NInstr))
         if let some w := boundaryWrite.get? idx then
           coeffStream := coeffStream.push w
       else
+        -- A fold-duplicated COLUMN fill (a `Pack`/`SetElement` of a hoisted
+        -- coefficient column seeded by a region that reads it) lives in the
+        -- coefficient stream ONLY. The f64 emit-time-folding rule that keeps
+        -- fold SCALARS in the audio kernel protects a constant folded into
+        -- downstream arithmetic; a column has no such consumer — both kernels
+        -- read it through `Index` on the shared, generation-buffered storage
+        -- the coefficient kernel fills (`coeffArraySlots`, derived below from
+        -- this very stream). An audio copy would be dead on the JIT and a
+        -- write to a read-only `constant` column on Metal. Its fold-temp args
+        -- stay behind (duplicated too; dead unless read elsewhere).
+        let dupColumn := a.needFold.contains idx &&
+          (match instr.dst with | .array _ => true | _ => false)
         if a.needFold.contains idx then
           coeffStream := coeffStream.push instr
         let instr' := match a.rewrites.get? idx with
@@ -383,7 +395,8 @@ private def rebuildCore (plan : FlatPlan) (allBlocks : Array (Array NInstr))
               let (slot, ty) := boundaryInfo.get! d
               args := args.set! pos (.slot slot ty)
             return { instr with args }
-        block' := block'.push instr'
+        if !dupColumn then
+          block' := block'.push instr'
       idx := idx + 1
     newBlocks := newBlocks.push block'
 
