@@ -141,12 +141,13 @@ fold, the two-room generic fallback, and the topological spine rule are gone.
 ## Cost (measured through `diffcli render-graph --stage-census`)
 
 The coefficient algebra costs one complex division per (cluster, outside pole,
-table entry): `k²` per pole for a size-`k` cluster, `1` for a singleton. Two
-identities keep the singleton cost equal to the collected fold's: a non-member
-term of a singleton's own stage carries `(s − z_m)`, whose one-node table is
-exactly zero (skipped), and the numerator folds into the reciprocal. A stage
-owning one pole of a larger cluster uses `c·(s−z_m)/(s−z_ν) = c +
-c·(z_ν−z_m)/(s−z_ν)`, a constant plus one scaled inverse.
+table entry): `k(k+1)/2` per pole for a size-`k` cluster (`scaledInverse`
+fills the upper triangle), `1` for a singleton. Two identities keep the
+singleton cost equal to the collected fold's: a non-member term of a
+singleton's own stage carries `(s − z_m)`, whose one-node table is exactly
+zero (skipped), and the numerator folds into the reciprocal. A stage owning
+one pole of a larger cluster uses `c·(s−z_m)/(s−z_ν) = c + c·(z_ν−z_m)/(s−z_ν)`,
+a constant plus one scaled inverse.
 
 Every coefficient is stage-0 by construction, but a glide-disciplined knob is
 formally a function of the clock even at rest, so without #244's settle the
@@ -156,23 +157,56 @@ rides 1-element invariant columns (`bankFoldPairedInv`, `bankFoldTripleInv`,
 the `bankFoldInv` discipline) so it materializes before the region instead of
 being re-emitted inside it on a memo miss.
 
-| playground graph | base `main@943bf32` | this branch (audio / coefficient kernel) |
-|---|---|---|
-| resonator ⋙ reverb (6 + 14 modes, live direction ⇒ both arms) | 10825 audio IR lines, 407 stage-0 | 802 / 11366 instructions, 11 hoisted columns |
-| resonator ⋙ reverb ⋙ reverb ⋙ reverb (rt60 0.1 % apart ⇒ 28 triple clusters) | refused | 6030 / 521464 instructions, 34 hoisted columns |
+**The stage tables are banked.** A stage's table is the sum over its poles of
+`coeff_ν/(s − z_ν)`; realized as one `scaledInverse` per pole and added
+entrywise it meta-unrolls to `~103` instructions per (cluster, pole) — on the
+three-room chain, `~5.1k` pairs (both arms live) and half a million knob-time
+instructions, of which complex division is 58 %, table accumulation 12 %, and
+the algebra itself is at its floor (the exact form needs 3 reciprocals, 3
+products and 6 multiply-accumulates per pair; a Taylor expansion about the
+cluster centroid needs 5–7 terms at these span/gap ratios and buys nothing).
+The count is the LOOP STRUCTURE, not the arithmetic: main's terminal (after
+#244) runs its Cauchy sums as `cauchyFold` reductions, and the block branch
+was unrolling what main loops. `DDTable.scaledInverseBanked` puts the stage's
+(pole, coefficient) pairs on four coefficient columns and computes each table
+entry as two `bankSum` reductions (real, imaginary) whose body is the per-pole
+entry formula — the same f64 operations in the same left-to-right order as the
+unrolled chain, so the render is bit-identical (`block-banked`,
+`Tropicaltest/BlockRealize.lean`: 8 live-σ triple clusters, banked ≡ unrolled
+over 4096 samples, 796 regions, 29 k vs 43 k plan instructions). Multiplicity
+> 1 and a stage owning ≥ 2 poles of one cluster stay on the unrolled branch
+(`Block.leibniz`); `TROPICAL_BANKS_UNROLL` reverts to it everywhere.
 
-The coefficient kernel of the three-room chain is large (half a million
-knob-time instructions: 28 triple clusters against ~94 poles at `k² = 9`
-divisions each) but it runs once per control write, not per sample. On Metal
-the chain renders at 86.6 dB against the f64 JIT (slot-driven, the documented
-class; `tests/web/metal_vs_jit.test.ts`, floor 60). `diffcli render-graph`
-gained `--dump-plan=<path>` and `--stage-census` for these measurements.
+| playground graph | base `main@943bf32` | `main` after #244 | this branch, unrolled tables | this branch, banked tables (audio / coefficient kernel) |
+|---|---|---|---|---|
+| resonator ⋙ reverb (6 + 14 modes, live direction ⇒ both arms) | 10825 audio IR lines, 407 stage-0 | 187 fdiv / 161 loops in the coefficient object | 802 / 11366 instructions, 11 columns | 774 / 5330 instructions, 19 columns |
+| resonator ⋙ reverb ⋙ reverb ⋙ reverb (rt60 0.1 % apart ⇒ 28 triple clusters) | refused | refused | 6030 / 521464 instructions, 34 columns | 2898 / 98745 instructions, 48 columns |
+
+(The `main` column is `llvm-objdump` of the cached coefficient kernel for the
+same resonator ⋙ reverb graph — `fdiv` count and backward branches; the
+unrolled branch had 1522 / 1.) The three-room coefficient kernel compiles in
+1.3 s instead of 4.0 s (cache disabled, `TROPICAL_JIT_TRACE=1`; 13 MB of IR
+instead of 31 MB); per-sample work is identical (2308 s1 instructions). What
+remains of the 99 k is the per-entry region shape — 12 scalar regions per
+(cluster, stage), each recomputing the gaps, running products, shifted
+coefficient and member mask for the same item — which a multi-output
+reduction at stage 0 (`routedSum` hoisting) collapses to one region per
+(cluster, stage). On Metal the chain renders at 84.2 dB against the f64 JIT
+(slot-driven, the documented class; `tests/web/metal_vs_jit.test.ts`, floor
+60). `diffcli render-graph` gained `--dump-plan=<path>` and `--stage-census`
+for these measurements.
 
 ## Not yet
 
-- The three-room chain's coefficient kernel (~520k knob-time instructions)
-  is the price of `k²` divisions per (cluster, pole); a cheaper exact form
-  for the size-3 tables, or hash-consing the shared reciprocals, would cut it.
+- The banked stage tables are one region per table ENTRY (12 per (cluster,
+  stage) at k = 3); a routed (multi-output) reduction at stage 0 would compute
+  the shared gaps and products once per item. Stage0 today pins every routed
+  span s1, so the coefficient plane cannot use one.
+- A stage owning ≥ 2 poles of one cluster, or a pole of multiplicity > 1,
+  still meta-unrolls its table (`Block.leibniz`'s general branch). A
+  pathological authored comb collapsing many value classes into one cluster
+  is correct but not small; the total carrier guarantees correctness, not
+  size.
 - Live poles without a declared σ range are unclassifiable and stay singletons
   (the pairwise router's `cold` convention); two such poles becoming
   runtime-equal divide by their gap exactly as the collected fold did.

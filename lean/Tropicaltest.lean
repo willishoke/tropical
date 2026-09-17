@@ -72,7 +72,8 @@ def main (args : List String) : IO UInt32 := do
   if args.contains "--block-only" then
     let algebra ← Tropical.Tropicaltest.Block.runBlockAlgebra
     let realize ← Tropical.Tropicaltest.BlockRealize.runBlockRealize
-    return if algebra && realize then 0 else 1
+    let banked ← Tropical.Tropicaltest.BlockRealize.runBlockBanked
+    return if algebra && realize && banked then 0 else 1
   if args.contains "--oriented-patch-only" then
     return if ← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch {} then 0 else 1
   if args.contains "--phaser-only" then
@@ -163,6 +164,8 @@ def main (args : List String) : IO UInt32 := do
   if !(← Tropical.Tropicaltest.Block.runBlockAlgebra) then failed := failed + 1
   total := total + 1
   if !(← Tropical.Tropicaltest.BlockRealize.runBlockRealize) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Tropicaltest.BlockRealize.runBlockBanked) then failed := failed + 1
 
   -- ── (c) Synthetic op-coverage: EmitLlvm over the rare ops, frozen hash ─────
   -- The patch corpus exercises 24 of 29 ops; this funnels the rest

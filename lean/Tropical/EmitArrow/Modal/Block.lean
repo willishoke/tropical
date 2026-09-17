@@ -115,6 +115,82 @@ def scaledInverse (nodes : Array CplxE) (a c : CplxE) : BuildM DDTable := do
   pure { size := k, entries }
 
 
+/-- Binder id of the coefficient-side Leibniz loops. The hand-maintained binder
+    space: 0 the terminal bank, 1 `cauchyFold`, 2–16 the modal families, 23 and
+    4300/4301 elsewhere — grep `loopIdx [0-9]` before choosing a new one. -/
+def leibnizBinder : Nat := 17
+
+/-- The BANKED stage table: `Σ_ν coeff_ν/(s − z_ν)` over a stage's poles as ONE
+    reduction per table entry instead of one `scaledInverse` table per pole.
+    The (pole, coeff) pairs ride four coefficient columns (`arr` of node re/im,
+    coeff re/im); each of the k(k+1)/2 complex entries is two `bankSum`
+    reductions (real, imaginary) whose body is `scaledInverse`'s entry formula
+    for the INDEXED pole — the `cauchyFold` discipline (`OrientedRealize`).
+
+    `member? = some (m, z_m)` is the stage owning ONE cluster pole: every
+    non-member ν contributes `c_ν + c_ν·(z_ν − z_m)/(s − z_ν)` (the constant plus
+    one scaled inverse, as the unrolled path's third branch) and the member
+    itself contributes the constant `c_m`; so the body computes the shifted
+    coefficient `c·(z_ν − z_m)`, masks the member's lane (`loopIdx = m`) to +0
+    and adds `c` on the diagonal. The dead lane's divisor is swapped to 1
+    BEFORE the division (the fixed-lane families' convention, never a
+    post-division select): a 0/0 in a masked lane is a NaN the JIT would
+    tolerate but the GPU need not.
+
+    Bit-identity with the unrolled chain. Unrolled, the stage total is
+    `((0 + T₁) + T₂) + …` entrywise in factor order, each `T_ν` computed by the
+    same per-pole expression this body computes at index ν; `bankSum` starts
+    its accumulator at 0 and adds each item's contribution in index order —
+    the same f64 operations in the same order, and a masked lane adds exactly
+    +0. The one edge is `−0` (a −0 partial sum plus +0 is +0 either way; never
+    observed — the `generic-banking` note), which the `block-banked` gate
+    would surface as a 1-sample bit difference. -/
+def scaledInverseBanked (nodes : Array CplxE) (poles coeffs : Array CplxE)
+    (member? : Option (Nat × CplxE) := none) : BuildM DDTable := do
+  let k := nodes.size
+  let zero ← Oriented.natE 0
+  let one ← Oriented.natE 1
+  let nRe ← arr (poles.map (·.1))
+  let nIm ← arr (poles.map (·.2))
+  let cRe ← arr (coeffs.map (·.1))
+  let cIm ← arr (coeffs.map (·.2))
+  let tables := #[nRe, nIm, cRe, cIm]
+  let idx ← loopIdx leibnizBinder
+  let a : CplxE := (← index nRe idx, ← index nIm idx)
+  let c : CplxE := (← index cRe idx, ← index cIm idx)
+  let (scaled, isMember?) ← match member? with
+    | none => pure (c, none)
+    | some (m, zm) => do
+      let isM ← binary .eq idx (← litI m)
+      pure (← cmulE c (← csubE a zm), some isM)
+  let mask := fun (v : CplxE) => do
+    match isMember? with
+    | none => pure v
+    | some isM => pure (← selectE isM zero.1 v.1, ← selectE isM zero.2 v.2)
+  let swap := fun (d : CplxE) => do
+    match isMember? with
+    | none => pure d
+    | some isM => pure (← selectE isM one.1 d.1, ← selectE isM one.2 d.2)
+  let gaps ← nodes.mapM fun z => csubE z a
+  let mut entries : Array CplxE := Array.replicate (k * k) zero
+  for i in [0:k] do
+    let mut denominator : Option CplxE := none
+    for j in [i:k] do
+      denominator := some (← match denominator with
+        | none => pure gaps[j]!
+        | some d => cmulE d gaps[j]!)
+      let quotient ← cdivE scaled (← swap denominator.get!)
+      let signed ← if (j - i) % 2 == 1 then cnegE quotient else pure quotient
+      let masked ← mask signed
+      let entry ← match isMember? with
+        | none => pure masked
+        | some _ => caddE (if i == j then c else zero) masked
+      let real ← bankSum poles.size tables entry.1 none leibnizBinder
+      let imag ← bankSum poles.size tables entry.2 none leibnizBinder
+      entries := entries.set! (i * k + j) (real, imag)
+  pure { size := k, entries }
+
+
 /-- The factor `1/(s − a)` for a pole `a` OUTSIDE the cluster:
     `[i,j] = (−1)^{j−i} / ∏_{l=i..j}(z_l − a)`. The only division in the
     algebra, and every divisor is a cross-cluster gap. -/
@@ -332,7 +408,7 @@ def clusterPoles (constants : Array (Option DyadicI))
     in traversal order; the cursor walks it one factor at a time, its global
     index advancing by the factor's multiplicity. -/
 private def leibniz (constants : Array (Option DyadicI)) (nodes : Array CplxE)
-    (member : Nat → Bool) (cursor : Nat) :
+    (member : Nat → Bool) (banked : Bool) (cursor : Nat) :
     ModalKernelExpr → BuildM (DDTable × Array CplxE × Nat)
   | .identity => do pure (← DDTable.one nodes.size, #[], cursor)
   | .proper kernel => do
@@ -353,10 +429,29 @@ private def leibniz (constants : Array (Option DyadicI)) (nodes : Array CplxE)
       let members := (Array.range factors.size).filter inCluster
       let memberCount := members.foldl (fun acc i => acc + ((factors[i]?).map (·.mult)).getD 0) 0
       let memberNode : Option CplxE := members[0]?.bind fun i => (factors[i]?).map (·.node)
+      -- BANKED (`banked`, the `Ir.banksEnabled` realization knob): a stage of
+      -- ≥ 2 simple poles that owns no cluster pole (`bankedA`) or exactly one
+      -- (`bankedB`, k > 1) is ONE `scaledInverseBanked` table — the per-pole
+      -- loop below is its unrolled twin and the gate oracle (the `modalBankSig`
+      -- meta-fold precedent). Multiplicity > 1 and a stage owning ≥ 2 poles of
+      -- one cluster (deliberate unisons, over-cap value classes) stay on the
+      -- unrolled general branch: rare and small.
+      let simple := factors.size ≥ 2 && factors.all (·.mult == 1)
+      let bankedA := banked && simple && !anyMember
+      let bankedB := banked && simple && anyMember && memberCount == 1 && k > 1
       let mut total ← DDTable.zero k
+      if bankedA then
+        total ← DDTable.scaledInverseBanked nodes (factors.map (·.node)) (factors.map (·.coeff))
+      else if bankedB then
+        if let some m := members[0]? then
+          if let some zm := memberNode then
+            total ← DDTable.scaledInverseBanked nodes (factors.map (·.node))
+              (factors.map (·.coeff)) (some (m, zm))
       for (f, i) in factors.zipIdx do
         -- term_ν = coeff_ν · ∏_{ν'∈c∩stage, ν'≠ν}(s − z_ν')^{mult} · [(s − z_ν)^{−mult} if ν ∉ c]
-        if anyMember && k == 1 && !(inCluster i) then
+        if bankedA || bankedB then
+          pure ()
+        else if anyMember && k == 1 && !(inCluster i) then
           -- a singleton cluster {z_m}: every non-member term of z_m's own
           -- stage carries the factor (s − z_m), whose one-node table is
           -- (z_m − z_m) = 0 EXACTLY — nothing to compute
@@ -386,20 +481,20 @@ private def leibniz (constants : Array (Option DyadicI)) (nodes : Array CplxE)
           total ← total.add term
       pure (total, clusterPolesHere, g)
   | .scale value kernel => do
-      let (table, poles, cursor) ← leibniz constants nodes member cursor kernel
+      let (table, poles, cursor) ← leibniz constants nodes member banked cursor kernel
       pure (← table.scaleReal value, poles, cursor)
   | .cascade kernels => do
       let one ← DDTable.one nodes.size
       kernels.attach.foldlM (fun (state : DDTable × Array CplxE × Nat) kernel => do
         let (table, poles, cursor) := state
-        let (t, p, c) ← leibniz constants nodes member cursor kernel.1
+        let (t, p, c) ← leibniz constants nodes member banked cursor kernel.1
         pure (← table.mul t, poles ++ p, c)) (one, #[], cursor)
   | .parallel kernels => do
       -- Σ_a T_a · ∏_{b≠a} D_{c,b}: each branch carries the other branches'
       -- cluster factors so every summand is (branch · D_{c,node}).
       let (branches, cursor) ← kernels.attach.foldlM
         (fun (state : Array (DDTable × Array CplxE) × Nat) kernel => do
-          let (t, p, c) ← leibniz constants nodes member state.2 kernel.1
+          let (t, p, c) ← leibniz constants nodes member banked state.2 kernel.1
           pure (state.1.push (t, p), c)) (#[], cursor)
       let all := branches.foldl (fun acc (_, p) => acc ++ p) #[]
       let mut total ← DDTable.zero nodes.size
@@ -414,8 +509,8 @@ private def leibniz (constants : Array (Option DyadicI)) (nodes : Array CplxE)
   | .blend mix dry wet => do
       let one ← lit 1
       let dryWeight ← sub one mix
-      let (dt, dp, cursor) ← leibniz constants nodes member cursor dry
-      let (wt, wp, cursor) ← leibniz constants nodes member cursor wet
+      let (dt, dp, cursor) ← leibniz constants nodes member banked cursor dry
+      let (wt, wp, cursor) ← leibniz constants nodes member banked cursor wet
       let mut dryTerm ← dt.scaleReal dryWeight
       for z in wp do dryTerm ← dryTerm.mul (← DDTable.linear nodes z)
       let mut wetTerm ← wt.scaleReal mix
@@ -451,9 +546,12 @@ structure BlockRow where
     classes is one row; a cluster with more splits into one row per value
     class — its classes then divide by their mutual gaps, the collected fold's
     floor, which is exactly what every such spine rendered before (and a gap
-    between distinct certified values is never exactly zero). -/
-def decompose (spine : ModalKernelExpr) (cap : Nat := defaultClusterCap) :
-    BuildM (Array BlockRow) := do
+    between distinct certified values is never exactly zero). `banked` selects
+    the stage-table realization (`scaledInverseBanked` vs the unrolled per-pole
+    chain); it defaults to the process-wide `Ir.banksEnabled` and is explicit
+    only so the `block-banked` gate can build the unrolled oracle in-process. -/
+def decompose (spine : ModalKernelExpr) (cap : Nat := defaultClusterCap)
+    (banked : Bool := Tropical.Ir.banksEnabled) : BuildM (Array BlockRow) := do
   let factors ← poleFactors (sigConstTable (← get).exprs) spine
   -- the constant table is taken AFTER expansion: a past arm's mirrored pole is
   -- a fresh `neg` node, and the lens must be able to fold it
@@ -472,7 +570,7 @@ def decompose (spine : ModalKernelExpr) (cap : Nat := defaultClusterCap) :
     for indices in groups do
       let nodes := (indices.filterMap (expanded[·]?)).map (·.1)
       let member := fun (g : Nat) => indices.contains g
-      let (table, _, _) ← leibniz constants nodes member 0 spine
+      let (table, _, _) ← leibniz constants nodes member banked 0 spine
       let confluent := (valueClasses constants nodes).size ≤ 1
       rows := rows.push { nodes, coeffs := table.newton, indices, orientation, confluent }
   pure rows

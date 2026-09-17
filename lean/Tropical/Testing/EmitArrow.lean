@@ -427,8 +427,14 @@ def phase3Evidence : Except String Phase3Evidence := do
   let pinned : Array (String × Nat × Nat) := #[
     -- +8 nodes / -264 wire bytes on the WS3b landing: the dynamic Q-landing
     -- rides 1-element invariant columns (`bankFoldInv`) instead of body refs.
-    ("authored nodes", nativeArena.exprs.nodes.size, 1499),
-    ("reachable nodes", nativeExprs.nodes.size, 1497),
+    -- Banked Leibniz (`Block.scaledInverseBanked`): each stage's table is
+    -- k(k+1) `bankSum` reductions over four pole/coefficient columns instead
+    -- of one meta-unrolled `scaledInverse` table per pole — 1499 → 1299
+    -- authored nodes (the per-pole entry trees collapse into one body per
+    -- entry); 505166 → 508332 wire bytes (reductions and their columns
+    -- serialize slightly larger than the scalar trees they replace).
+    ("authored nodes", nativeArena.exprs.nodes.size, 1299),
+    ("reachable nodes", nativeExprs.nodes.size, 1297),
     -- 24 -> 0: `cauchyFold` now emits ordinary `bankSum` pairs; the carrier
     -- authors no routed reductions at all. Kept pinned as the tripwire that
     -- composition stays placement-hoistable (a routedSum here would be
@@ -441,7 +447,7 @@ def phase3Evidence : Except String Phase3Evidence := do
     -- decomposition, families settled and landed on the fixed lane: 2341 →
     -- 1499 authored nodes, 908801 → 505166 wire bytes.
     ("routed reductions", routed, 0),
-    ("wire bytes", nativeWire.length, 505166)]
+    ("wire bytes", nativeWire.length, 508332)]
   let drifted := pinned.filter fun (_, actual, expected) => actual != expected
   unless drifted.isEmpty do
     let lines := drifted.toList.map fun (label, actual, expected) =>

@@ -19,7 +19,10 @@ oracles the algebra must reduce to.
 * TOTALITY — a reversed room yields past rows; an over-cap cluster splits into
   value classes at the collected floor; spellings of one value are one node.
 
-No realizer participates: Phase 2 owns the render.
+No realizer participates: Phase 2 owns the render. The laws read the UNROLLED
+stage tables (`decompose … (banked := false)`): the exact lens folds constant
+trees, and the banked reductions are pinned to the unrolled chain bit-for-bit
+by `block-banked` (`BlockRealize`).
 -/
 
 namespace Tropical.Tropicaltest.Block
@@ -78,7 +81,9 @@ private def singletonLaw : IO (Except String Float) := do
       let collected ← foldRoomsEC voice #[r1, r2]
       let spine : ModalKernelExpr :=
         .cascade #[← properOf voice, ← properOf r1, ← properOf r2]
-      let rows ← decompose spine
+      -- the UNROLLED chain: the exact lens folds a constant tree, not a
+      -- reduction; `block-banked` pins the banked tables to this chain bitwise
+      let rows ← decompose spine defaultClusterCap false
       pure (collected, rows) with
   | .error e => pure (.error s!"build: {e}")
   | .ok (arena, (collected, rows)) =>
@@ -117,7 +122,7 @@ private def confluenceLaw : IO (Except String Float) := do
       let bank ← (← Oriented.Bank.ofFuture voice).convolveKernel room zero
         Oriented.syntacticSameSideClassifier
       let spine : ModalKernelExpr := .cascade #[← properOf voice, ← properOf room]
-      let rows ← decompose spine
+      let rows ← decompose spine defaultClusterCap false   -- unrolled: foldable
       pure (bank, rows) with
   | .error e => pure (.error s!"build: {e}")
   | .ok (arena, (bank, rows)) =>

@@ -419,6 +419,116 @@ private def pairedHeadroom : IO (Except String (Float × Float)) := do
     debugPair "headroom" d ref
     pure (.ok (relL2 d ref oracleStride, width))
 
+-- ── (h) banked Leibniz: the stage tables as reductions, ≡ the unrolled chain ──
+
+/-- A live-σ mode (a root param slot `param:<name>` with a declared σ range,
+    the reverb knob's shape) at a literal ω with a literal real amplitude. -/
+private def liveMode (param : Nat) (lo hi : Float) (omega amp : Float) : BuildM ModalMode := do
+  pure { sigma := ← paramRef ⟨param⟩, omega := ← litF omega, cre := ← litF amp,
+         cim := ← litF 0.0, sigmaRange := some (lo, hi) }
+
+/-- The three-cluster spine: a two-mode voice (literal, separated poles) into
+    THREE rooms sharing `bankedModes` literal frequencies, each room's σ a live
+    knob over the same declared range — so every frequency is one cluster of
+    three near-equal poles (the three-room chain's shape), each room stage
+    owns exactly one pole of every cluster (`bankedB`) and the voice stage
+    owns none (`bankedA`); the voice's singleton rows take `bankedA` in the
+    room stages. Params 0..2 are the rooms' σ. -/
+private def bankedModes : Nat := 8
+private def bankedSpine : BuildM ModalKernelExpr := do
+  let v ← pure #[← modeF 2.0 (tp * 150.0) 0.9 0.0, ← modeF 2.5 (tp * 205.0) 0.6 0.0]
+  let room := fun (param : Nat) => do
+    (Array.range bankedModes).mapM fun i =>
+      liveMode param 3.0 9.0 (tp * (240.0 + 37.0 * i.toFloat)) (0.5 / (1.0 + i.toFloat))
+  pure (.cascade #[← properOf v, ← properOf (← room 0), ← properOf (← room 1),
+    ← properOf (← room 2)])
+
+private def jnum (m : Int) (e : Nat := 0) : Lean.JsonNumber := { mantissa := m, exponent := e }
+private def bankedParams : Array BodyDecl :=
+  #[.param "s0" (some (jnum 5)), .param "s1" (some (jnum 53 1)), .param "s2" (some (jnum 56 1))]
+
+/-- Build the spine through the block terminal with the given realization and
+    compile it as a root carrier whose params are the rooms' σ knobs. -/
+private def bankedPlan (name : String) (banked : Bool) :
+    Except String (Tropical.Plan.FlatPlan × Nat) := do
+  let outputs : Array OutputDecl := #[{ name := "out", type? := some (.scalar .float) }]
+  let (arena, idx) ← assemble {} name outputs #[] (do
+    let terminal ← BlockTerminal.ofRows (← decompose (← bankedSpine) defaultClusterCap banked)
+    let sig ← terminal.realizeSig (← clockLit) (← lit (Int.ofNat anchorNat))
+    pure { assigns := #[(.port ⟨0⟩, sig)] }) bankedParams
+  -- the session root with the σ knobs as `param:<name>` module slots (a bare
+  -- `buildAndFinish` registers no params, and an unbound `paramRef` lowers to 0)
+  let (coreArena, core) ← (Tropical.Ir.Strata.runResolved {} arena idx).mapError (·.message)
+  let sessionParams := bankedParams.filterMap fun d => match d with
+    | .param n (some v) => some (n, Lean.Json.num v)
+    | _ => none
+  let plan ← Tropical.Compile.compileSession (.forRoot core coreArena sessionParams
+    (Tropical.Lowering.allocate (sessionParams.map (·.1)) #[]))
+  -- the triple count from a second, frozen decomposition (pure; same discipline)
+  let triples ← (Tropical.Testing.ArrowFixtures.freezeBuild {} (do
+    let rows ← decompose (← bankedSpine) defaultClusterCap banked
+    pure (rows.filter (·.nodes.size == 3)).size)).map (·.2)
+  pure (plan, triples)
+
+/-- Render with the rooms' σ knobs set (5.0, 5.3, 5.6 s⁻¹ — inside the declared
+    [3, 9] range, a 0.3 spread so the triples are near-equal but distinct). -/
+private def renderBanked (plan : Tropical.Plan.FlatPlan) : IO (Except String (Array Float)) := do
+  try
+    let rt ← Tropical.Ffi.Runtime.new (UInt32.ofNat nProbe)
+    Tropical.StagedLoad.load rt plan
+    for (name, v) in [("param:s0", 5.0), ("param:s1", 5.3), ("param:s2", 5.6)] do
+      match ← rt.slotIndex? name with
+      | some i => rt.setSlot i v
+      | none => throw (IO.userError s!"no slot {name}")
+    rt.process
+    pure (.ok (decodeF64LE (← rt.outputBytes)))
+  catch e => pure (.error e.toString)
+
+/-- THE BANKED-LEIBNIZ gate. The same three-cluster spine realized both ways —
+    `scaledInverseBanked` reductions (production under `Ir.banksEnabled`) vs
+    the unrolled per-pole `scaledInverse` chain (built in-process through
+    `decompose`'s explicit `banked := false`, since the flag is process-global)
+    — must render BYTE-EQUAL (the docstring's same-ops-same-order argument),
+    and the banked plan must be the smaller one with the coefficient plane as
+    regions: ≥ `minRegions` reduce regions and fewer instructions than the
+    unrolled plan. Both clauses are the `residue-banked` precedent's. -/
+private def bankedMinRegions : Nat := 64
+
+private def countFnTag (t : String) (f : Tropical.Plan.InstanceFunction) : Nat :=
+  (f.instructions.filter (·.tag == t)).size
+    + f.children.attach.foldl (fun acc c => acc + countFnTag t c.1) 0
+termination_by sizeOf f
+decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children c.2
+
+private def planRegions (p : Tropical.Plan.FlatPlan) : Nat :=
+  p.instanceFunctions.foldl (fun acc f => acc + countFnTag "ReduceBegin" f) 0
+
+def runBlockBanked : IO Bool := do
+  match bankedPlan "block_banked" true, bankedPlan "block_unrolled" false with
+  | .error e, _ => failGate "block-banked" s!"banked build: {e}"
+  | _, .error e => failGate "block-banked" s!"unrolled build: {e}"
+  | .ok (bp, bTriples), .ok (up, uTriples) =>
+    let bRegions := planRegions bp
+    let uRegions := planRegions up
+    let bN := planInstrCount bp
+    let uN := planInstrCount up
+    match ← renderBanked bp, ← renderBanked up with
+    | .error e, _ | _, .error e => failGate "block-banked" s!"render: {e}"
+    | .ok b, .ok u =>
+      let bitDiff := bitDiffCount b u
+      let e := energy b
+      let finite := allFinite b && allFinite u
+      IO.println (s!"        triples banked={bTriples} unrolled={uTriples} · regions banked={bRegions} "
+        ++ s!"unrolled={uRegions} · plan instrs banked={bN} unrolled={uN} · "
+        ++ s!"banked≡unrolled bitDiff={bitDiff}/{nProbe} · finite={finite} · E={sci e}")
+      if bitDiff == 0 && finite && e > 1e-12 && bTriples == bankedModes && uTriples == bankedModes
+          && bRegions ≥ bankedMinRegions && bN < uN then
+        passGate "block-banked"
+          s!"banked stage tables ≡ unrolled chain bit-identical over {nProbe} samples ({bankedModes} triple clusters, live σ); {bRegions} coefficient regions, {bN} vs {uN} plan instructions"
+      else
+        failGate "block-banked"
+          s!"bitDiff={bitDiff} finite={finite} E={sci e} triples={bTriples}/{uTriples} regions={bRegions}/{uRegions} (min {bankedMinRegions}) instrs={bN}/{uN}"
+
 -- ── the gate ──────────────────────────────────────────────────────────────────
 
 /-- Thresholds — MEASURED at landing (2026-09-13), fail lines a decade above.

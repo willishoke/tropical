@@ -60,7 +60,7 @@ def knownGates : Array String := #[
   "lake-build:Tropical.Semantics",
   "lake-build:Tropical.Proofs",
   "modal-universe-history",
-  "modal-oriented-patch", "block-algebra", "block-realize", "seam-sweep",
+  "modal-oriented-patch", "block-algebra", "block-realize", "block-banked", "seam-sweep",
   "modal-phaser",
   "semantics-production-fixtures",
   "clock-algebra-theorems",
@@ -115,7 +115,7 @@ def obligations : Array Obligation := #[
       "lean/Tropical/Tropicaltest/OrientedPatch.lean",
       "lean/Tropical/Tropicaltest/Phaser.lean"]
     gateNames := #["modal-universe-history", "modal-oriented-patch", "modal-phaser",
-      "block-algebra", "block-realize", "seam-sweep",
+      "block-algebra", "block-realize", "block-banked", "seam-sweep",
       "manual:production modal refinement review"]
     owner := "Modal compiler"
     status := .open
