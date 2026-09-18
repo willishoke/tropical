@@ -222,6 +222,47 @@ private def composeAdmitsPair (v r : SeamMode) : Bool :=
       coupling / (2.718281828459045 * min v.sigma r.sigma) < 8.0)
   !lens || cap
 
+/-- The compose seam's interior configs (shared by the residue and block atoms). -/
+private def composeInterior : Array (Array SeamMode × Array SeamMode) :=
+      -- the old EC interiors (separated pairs — all route collected) …
+      (Array.range 4).map (fun c =>
+        (#[haltonMode (c*10+1) 220 900, haltonMode (c*10+2) 220 900],
+         #[haltonMode (c*10+3) 1500 3300, haltonMode (c*10+4) 1500 3300]))
+      -- … plus the old DD interiors (near-coincident offsets — these straddle
+      -- θ_acc, so the sweep exercises BOTH sides of the routing boundary).
+      ++ (Array.range 4).map (fun c =>
+        let vo := #[haltonMode (c*10+1) 400 1200, haltonMode (c*10+2) 400 1200]
+        let off := 0.6 * haltonF 2 (c+1)
+        (vo, vo.map (fun m => { m with omega := m.omega + tp * off, sigma := m.sigma + 0.1 })))
+
+/-- The compose seam's boundary probes (shared by the residue and block atoms). -/
+private def composeBoundary : Array (SeamMode × SeamMode) :=
+      -- the old EC accuracy edge (|Δ| ≈ 0.6 > θ_acc, |a·r/Δ| < 4 — still cold,
+      -- the collected route's regression probes) …
+      #[ (mkMode 800 0.4 0.8, { sigma := 1.0, omega := tp * 800, are := 0.6 })
+       , (mkMode 500 0.5 0.7, { sigma := 1.1, omega := tp * 500, are := 0.7 })
+      -- … the old DD coincidence probes (λ = ν exactly; the τ·e resonance) …
+       , (mkMode 700 0.8 0.6, mkMode 700 0.8 0.5)
+       , (mkMode 1100 0.5 0.7, { sigma := 0.5, omega := tp * 1100 + 0.02, are := 0.4 })
+      -- … and the WIDENING (gate iii): hard probes INSIDE the old EC exclusion
+      -- — configurations the apparatus previously certified for nobody.
+      -- Deep inside the old exclusion (|a·r/Δ| ≈ 14 ≫ 8; Δ = 0.05 < θ_acc, so
+      -- the ACCURACY lens routes it — the rail lens's own witness is below):
+       , (mkMode 800 0.6 0.9, { sigma := 0.6, omega := tp * 800 + 0.05, are := 0.8 })
+      -- the sub-grid detune (Δ = 1e-6 rad/s < the 6.5e-5 rotator quantum —
+      -- UNREPRESENTABLE collected; the served-full upgrade's sharpest point):
+       , (mkMode 500 0.8 0.7, { sigma := 0.8, omega := tp * 500 + 1e-6, are := 0.7 })
+      -- the RAIL lens's own service region (its only discriminating law probe:
+      -- Δ = 0.6 > θ_acc so the accuracy lens is OFF; |a·r|/Δ = 4/0.6 ≈ 6.7 > 4
+      -- fires the rail lens; σ = 1.5 makes the damping arm the binding sup and
+      -- clears the cap, |c|/(e·σ_min) ≈ 0.98 < 8 — routed, law asserted):
+       , (mkMode 800 1.5 2.0, { sigma := 1.5, omega := tp * 800 + 0.6, are := 2.0 })
+      -- the STATED refusal (sub-grid Δ fires the accuracy lens; σ = 0.02 is
+      -- extreme Q, |c|/(e·σ_min) ≈ 18 ≥ 8 — the cap refuses, `admitsPair` is
+      -- false, the harness skips it as out-of-contract; the ecdd-partition
+      -- gate pins the refusal structurally):
+       , (mkMode 400 0.02 1.0, { sigma := 0.02, omega := tp * 400 + 1e-6, are := 1.0 }) ]
+
 /-- `residueCompose` — THE one compose seam (fork 3′ erasure). The EC and DD
     atoms MERGED: the realization is the PARTITIONED compose
     (`residueComposePartitioned` — cold couplings collected, hot couplings
@@ -268,43 +309,8 @@ private def composeAtom : SeamAtom :=
     -- if a route's floor ever rises past the shared snr, the probes on that
     -- side fail loudly rather than silently averaging).
     snr := 2e-4
-    interior :=
-      -- the old EC interiors (separated pairs — all route collected) …
-      (Array.range 4).map (fun c =>
-        (#[haltonMode (c*10+1) 220 900, haltonMode (c*10+2) 220 900],
-         #[haltonMode (c*10+3) 1500 3300, haltonMode (c*10+4) 1500 3300]))
-      -- … plus the old DD interiors (near-coincident offsets — these straddle
-      -- θ_acc, so the sweep exercises BOTH sides of the routing boundary).
-      ++ (Array.range 4).map (fun c =>
-        let vo := #[haltonMode (c*10+1) 400 1200, haltonMode (c*10+2) 400 1200]
-        let off := 0.6 * haltonF 2 (c+1)
-        (vo, vo.map (fun m => { m with omega := m.omega + tp * off, sigma := m.sigma + 0.1 })))
-    boundary :=
-      -- the old EC accuracy edge (|Δ| ≈ 0.6 > θ_acc, |a·r/Δ| < 4 — still cold,
-      -- the collected route's regression probes) …
-      #[ (mkMode 800 0.4 0.8, { sigma := 1.0, omega := tp * 800, are := 0.6 })
-       , (mkMode 500 0.5 0.7, { sigma := 1.1, omega := tp * 500, are := 0.7 })
-      -- … the old DD coincidence probes (λ = ν exactly; the τ·e resonance) …
-       , (mkMode 700 0.8 0.6, mkMode 700 0.8 0.5)
-       , (mkMode 1100 0.5 0.7, { sigma := 0.5, omega := tp * 1100 + 0.02, are := 0.4 })
-      -- … and the WIDENING (gate iii): hard probes INSIDE the old EC exclusion
-      -- — configurations the apparatus previously certified for nobody.
-      -- Deep inside the old exclusion (|a·r/Δ| ≈ 14 ≫ 8; Δ = 0.05 < θ_acc, so
-      -- the ACCURACY lens routes it — the rail lens's own witness is below):
-       , (mkMode 800 0.6 0.9, { sigma := 0.6, omega := tp * 800 + 0.05, are := 0.8 })
-      -- the sub-grid detune (Δ = 1e-6 rad/s < the 6.5e-5 rotator quantum —
-      -- UNREPRESENTABLE collected; the served-full upgrade's sharpest point):
-       , (mkMode 500 0.8 0.7, { sigma := 0.8, omega := tp * 500 + 1e-6, are := 0.7 })
-      -- the RAIL lens's own service region (its only discriminating law probe:
-      -- Δ = 0.6 > θ_acc so the accuracy lens is OFF; |a·r|/Δ = 4/0.6 ≈ 6.7 > 4
-      -- fires the rail lens; σ = 1.5 makes the damping arm the binding sup and
-      -- clears the cap, |c|/(e·σ_min) ≈ 0.98 < 8 — routed, law asserted):
-       , (mkMode 800 1.5 2.0, { sigma := 1.5, omega := tp * 800 + 0.6, are := 2.0 })
-      -- the STATED refusal (sub-grid Δ fires the accuracy lens; σ = 0.02 is
-      -- extreme Q, |c|/(e·σ_min) ≈ 18 ≥ 8 — the cap refuses, `admitsPair` is
-      -- false, the harness skips it as out-of-contract; the ecdd-partition
-      -- gate pins the refusal structurally):
-       , (mkMode 400 0.02 1.0, { sigma := 0.02, omega := tp * 400 + 1e-6, are := 1.0 }) ] }
+    interior := composeInterior
+    boundary := composeBoundary }
 
 /-- The pitch bloom warp (shipped gong: β=0.05, g=1.8, scale 1 ⇒ B = β/g). -/
 private def bloomBg : Float × Float := (0.05 / 1.8, 1.8)
@@ -357,7 +363,31 @@ private def bloomAtom : SeamAtom :=
        , (mkMode 700 0.5 0.8, { sigma := 0.5, omega := tp * 700 + 0.5, are := 0.4 })      -- |a|≈0.278 (imag spiral)
        , (mkMode 2600 0.9 0.5, mkMode 300 0.8 0.4) ] }
 
-private def allAtoms : Array SeamAtom := #[composeAtom, bloomAtom]
+/-- `blockCompose` — the block-partial-fraction terminal on the same seam
+    (slice Phase 3): `voice ⋙ room` as ONE retained cascade, decomposed into
+    block partial fractions at the terminal (`Block.decompose`) and realized
+    through `BlockTerminal` (plain rows on the fixed datapath, size-2 rows on
+    the float paired lane). TOTAL: every coupling is served — a θ_acc-near pair
+    forms a block (no `1/Δ` is ever formed), everything else stays a singleton
+    residue; there is no rail-lens refusal because the paired lane is float.
+    Same interiors, same boundary probes, same error model as `residueCompose`,
+    so the two carriers are certified over one region against one oracle. -/
+private def blockAtom : SeamAtom :=
+  { name := "blockCompose"
+    phi := idWarp
+    realize := fun v r => do
+      let zero ← lit 0
+      let spine : ModalKernelExpr := .cascade #[
+        .proper (.oriented (← v.mapM (·.toModal)) zero),
+        .proper (.oriented (← r.mapM (·.toModal)) zero)]
+      (← Block.BlockTerminal.ofRows (← Block.decompose spine)).realizeSig (← clockLit) (← anchorSig)
+    admitsPair := fun _ _ => true
+    activeExclusion := false
+    snr := 2e-4
+    interior := composeInterior
+    boundary := composeBoundary }
+
+private def allAtoms : Array SeamAtom := #[composeAtom, bloomAtom, blockAtom]
 
 -- ── The gate ──────────────────────────────────────────────────────────────────
 
@@ -1888,30 +1918,46 @@ def runEcddGauge (arena : Arena)
       { id := "src", node := .modalSource modes anchor clock none none none },
       { id := "rev", node := .modalReverb "src" room none },
       { id := "gg", node := .modalGauge "rev" gauge }], output := "gg" } : PatchGraph)
+  -- the UNGAUGED reference through the same production path (the block
+  -- terminal since slice Phase 5), so the scale law is stated on one carrier
+  let bareGraph := fun (room : Array SeamMode) => do
+    let modes ← voice.mapM (·.toModal)
+    let room ← room.mapM (·.toModal)
+    let anchor ← anchorSig
+    let clock ← clockLit
+    pure ({ nodes := #[
+      { id := "src", node := .modalSource modes anchor clock none none none },
+      { id := "rev", node := .modalReverb "src" room none }], output := "rev" } : PatchGraph)
   -- config A: the sub-grid worst case (norm sanity + the landing poison)
   let roomSub : Array SeamMode := #[{ sigma := 1.0, omega := tp * 220 + 1e-6, are := 0.7 }]
   -- config B: representable detune (the clean scale-law witness — amps ±700,
   -- landing exponent k = 6, quantization decades under the signal)
   let roomRep : Array SeamMode := #[{ sigma := 1.0, omega := tp * 220 + 1e-3, are := 0.7 }]
   match ← renderGraphN arena "ecddg_gauged_sub" (gaugedGraph roomSub) nWin,
-        ← renderTerm arena "ecddg_bare_sub" (collectedTerm voice #[roomSub]) nWin,
+        ← renderGraphN arena "ecddg_bare_sub" (bareGraph roomSub) nWin,
         ← renderGraphN arena "ecddg_gauged_rep" (gaugedGraph roomRep) nWin,
-        ← renderTerm arena "ecddg_bare_rep" (collectedTerm voice #[roomRep]) nWin with
+        ← renderGraphN arena "ecddg_bare_rep" (bareGraph roomRep) nWin with
   | .ok dutGS, .ok dutBS, .ok dutGR, .ok dutBR =>
     let scaleSub := scaleOf roomSub
     let scaleRep := scaleOf roomRep
     let eLawRep := relL2Win dutGR (dutBR.map (· * scaleRep)) lo nWin
-    let ePoison := relL2Win dutGS (dutBS.map (· * scaleSub)) lo nWin
+    let eLawSub := relL2Win dutGS (dutBS.map (· * scaleSub)) lo nWin
     let eGS := energyWin dutGS lo nWin
     let saneSub := 0.1 < scaleSub && scaleSub < 10.0
     IO.println s!"ecdd gauge-over-hot (the norm on cancelling ±c/Δ amps):"
-    IO.println s!"        scale law (Δ=1e-3, resolvable): gauged ≡ {scaleRep} × collected rel {eLawRep}"
-    IO.println s!"        sub-grid (|c/Δ|≈7e5): norm sane {saneSub} (scale {scaleSub}) · landing-poison comparison {ePoison} (quantization-dominated, recorded) · E {eGS}"
+    IO.println s!"        scale law (Δ=1e-3, resolvable): gauged ≡ {scaleRep} × ungauged rel {eLawRep}"
+    IO.println s!"        sub-grid (|c/Δ|≈7e5): norm sane {saneSub} (scale {scaleSub}) · scale law rel {eLawSub} · E {eGS}"
+    -- Since slice Phase 5 the gauge materializes the block terminal to a
+    -- collected bank ONLY to measure the norm; the gauged segment re-enters
+    -- the block terminal and the tuned pair renders on the divided-difference
+    -- lane again, so the scale law holds at the sub-grid detune too — the
+    -- landing poison this gate once recorded (huge collected amps sizing the
+    -- bank's k) no longer reaches the render.
     if allFinite dutGS && allFinite dutGR && eLawRep < 1e-4
-        && saneSub && ePoison < 2.0 && eGS > 1e-9 then
-      passGate "ecdd-gauge" s!"gauge over a tuned-unison chain: the H-norm survives the ±c/Δ amps (sub-grid scale {scaleSub}, mirrored independently — no oblivion; scale law holds where the datapath resolves, {eLawRep}); the recorded residual is the collected floor PLUS the landing poison (huge amps size the bank's k, LSB over the cold modes)"
+        && saneSub && eLawSub < 1e-3 && eGS > 1e-9 then
+      passGate "ecdd-gauge" s!"gauge over a tuned-unison chain: the H-norm survives the ±c/Δ amps (sub-grid scale {scaleSub}, mirrored independently — no oblivion); the scale law holds at the resolvable detune ({eLawRep}) and at the sub-grid one ({eLawSub}) — the gauged segment renders its tuned pair on the divided-difference lane, no landing poison"
     else
-      failGate "ecdd-gauge" s!"eLawRep={eLawRep} scaleSub={scaleSub} scaleRep={scaleRep} ePoison={ePoison} finite={allFinite dutGS}/{allFinite dutGR} E={eGS}"
+      failGate "ecdd-gauge" s!"eLawRep={eLawRep} eLawSub={eLawSub} scaleSub={scaleSub} scaleRep={scaleRep} finite={allFinite dutGS}/{allFinite dutGR} E={eGS}"
   | _, _, _, _ => failGate "ecdd-gauge" "build/render failed for a gauge-over-hot config"
 
 end Tropical.Tropicaltest.SeamSweep

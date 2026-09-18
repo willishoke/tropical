@@ -27,6 +27,8 @@ import Tropical.Tropicaltest.Patcher
 import Tropical.Tropicaltest.Exact
 import Tropical.Tropicaltest.GroupedRoomReference
 import Tropical.Tropicaltest.Oriented
+import Tropical.Tropicaltest.Block
+import Tropical.Tropicaltest.BlockRealize
 import Tropical.Tropicaltest.OrientedPatch
 import Tropical.Tropicaltest.Phaser
 
@@ -53,7 +55,7 @@ open Tropical.Ir (Arena ProgramIdx)
     reported as the total collapse it is; the `arrow-block-count` gate at the end
     of `main` checks the number against what the block actually ran, so it is
     verified rather than maintained. -/
-def arrowBlockGates : Nat := 105
+def arrowBlockGates : Nat := 106
 
 set_option maxRecDepth 2048 in
 def main (args : List String) : IO UInt32 := do
@@ -67,6 +69,11 @@ def main (args : List String) : IO UInt32 := do
     let phase4 ← Tropical.Testing.ClockLaws.runPhase4Gate
     let phase5 ← Tropical.Testing.EmitArrow.runPhase5Gate
     return if phase1 && phase2 && phase3 && phase4 && phase5 then 0 else 1
+  if args.contains "--block-only" then
+    let algebra ← Tropical.Tropicaltest.Block.runBlockAlgebra
+    let realize ← Tropical.Tropicaltest.BlockRealize.runBlockRealize
+    let banked ← Tropical.Tropicaltest.BlockRealize.runBlockBanked
+    return if algebra && realize && banked then 0 else 1
   if args.contains "--oriented-patch-only" then
     return if ← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch {} then 0 else 1
   if args.contains "--phaser-only" then
@@ -150,6 +157,15 @@ def main (args : List String) : IO UInt32 := do
   IO.println "oriented modal convolution (local room direction):"
   total := total + 1
   if !(← Tropical.Tropicaltest.Oriented.runOriented) then failed := failed + 1
+
+  -- ── (b‴) Block partial fractions over the retained kernel (slice Phase 1) ──
+  IO.println "block carrier (divided-difference Leibniz over the factor tree):"
+  total := total + 1
+  if !(← Tropical.Tropicaltest.Block.runBlockAlgebra) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Tropicaltest.BlockRealize.runBlockRealize) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Tropicaltest.BlockRealize.runBlockBanked) then failed := failed + 1
 
   -- ── (c) Synthetic op-coverage: EmitLlvm over the rare ops, frozen hash ─────
   -- The patch corpus exercises 24 of 29 ops; this funnels the rest
@@ -604,6 +620,9 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← runMslColumnGuard arena resolved) then
+      failed := failed + 1
+    total := total + 1
+    if !(← runMslColumnDup) then
       failed := failed + 1
     total := total + 1
     if !(← runBanksBench arena resolved) then

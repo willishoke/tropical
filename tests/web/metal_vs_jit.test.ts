@@ -235,6 +235,43 @@ describe.skipIf(!METAL)('metal vs native JIT (SNR gates)', () => {
     }
   })
 
+  test('block terminal — three near-equal rooms, paired and triple fixed lanes on the GPU', () => {
+    // Three reverbs with rt60 a tenth of a percent apart share every mode
+    // frequency, so each of the 14 frequencies is one cluster of THREE
+    // near-equal poles: the block terminal (design/block-carrier.md) renders
+    // 14 triple rows + 14 paired rows + plain modes, every family on the
+    // fixed i64 datapath with its own option-E landing exponent. Slot-driven
+    // (rt60 is a live knob), so gated on the short window like the banked
+    // resonator. Measured 86.6 dB on M1 Pro (2026-09-16, after the block
+    // families settle to stage 0) and 84.2 dB with the banked coefficient
+    // plane (2.9k audio instructions; the stage tables are 130 routed spans
+    // in the coefficient kernel, their images among 178 hoisted columns);
+    // gate at 60 as the boundary.
+    const graph = planFile('block-three-rooms-graph', JSON.stringify({
+      nodes: [
+        { id: 'res', kind: 'resonator', params: { freq: 220, decay: 4 } },
+        { id: 'room_a', kind: 'reverb', params: { rt60: 0.9 }, in: { in: ['res'] } },
+        { id: 'room_b', kind: 'reverb', params: { rt60: 0.9009 }, in: { in: ['room_a'] } },
+        { id: 'room_c', kind: 'reverb', params: { rt60: 0.9018 }, in: { in: ['room_b'] } },
+        { id: 'out', kind: 'out', in: { in: ['room_c'] } },
+      ],
+      out: 'out',
+    }))
+    // A triple convolution of decaying rooms grows as d² and peaks near
+    // 2/σ ≈ 0.26 s, so the window starts there rather than at the strike.
+    const start = 11000n
+    const ref = renderGraph(graph, false, 4096, start)
+    expect(ref.columns).toBeGreaterThan(0)
+    let rms = 0
+    for (let i = 0; i < ref.out.length; i++) rms += ref.out[i]! * ref.out[i]!
+    rms = Math.sqrt(rms / ref.out.length)
+    expect(rms).toBeGreaterThan(1e-5)   // not a graceful exclusion
+    const gpu = renderGraph(graph, true, 4096, start)
+    expect(gpu.columns).toBe(ref.columns)
+    const snr = snrDb(ref.out, gpu.out)
+    console.log(`    block three rooms: ${ref.columns} hoisted column(s), RMS ${rms.toExponential(2)}, SNR ${snr.toFixed(1)} dB (floor 60)`)
+    expect(snr).toBeGreaterThan(60)
+  })
   test('modal_heavy64 — the pre-scope-A unreduced-radian canary (short window only)', () => {
     // sin(ω·t) on a growing float argument: f32 π-reduction bleeds with
     // arg size — the pathology scope A fixed in production paths. ~92 dB

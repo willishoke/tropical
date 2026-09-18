@@ -60,7 +60,7 @@ def knownGates : Array String := #[
   "lake-build:Tropical.Semantics",
   "lake-build:Tropical.Proofs",
   "modal-universe-history",
-  "modal-oriented-patch",
+  "modal-oriented-patch", "block-algebra", "block-realize", "block-banked", "seam-sweep",
   "modal-phaser",
   "semantics-production-fixtures",
   "clock-algebra-theorems",
@@ -69,6 +69,7 @@ def knownGates : Array String := #[
   "runtime-multichannel",
   "msl-goldens",
   "msl-column-guard",
+  "msl-column-dup",
   "exact-carrier",
   "patch-goldens",
   "migration-goldens",
@@ -105,6 +106,8 @@ def obligations : Array Obligation := #[
     evidence := #[.executableGate, .inspection]
     implementationPaths := #["lean/Tropical/EmitArrow/Patch.lean",
       "lean/Tropical/EmitArrow/Modal/Forest.lean",
+      "lean/Tropical/EmitArrow/Modal/Block.lean",
+      "lean/Tropical/EmitArrow/Modal/BlockRealize.lean",
       "lean/Tropical/EmitArrow/Modal/Oriented.lean",
       "lean/Tropical/EmitArrow/Modal/OrientedRealize.lean",
       "lean/Tropical/EmitArrow/Modal/FactoredTerminal.lean",
@@ -112,10 +115,11 @@ def obligations : Array Obligation := #[
       "lean/Tropical/Tropicaltest/OrientedPatch.lean",
       "lean/Tropical/Tropicaltest/Phaser.lean"]
     gateNames := #["modal-universe-history", "modal-oriented-patch", "modal-phaser",
+      "block-algebra", "block-realize", "block-banked", "seam-sweep",
       "manual:production modal refinement review"]
     owner := "Modal compiler"
     status := .open
-    limitation := "Production now retains an authored ordinary-room/gauge/phaser stage spine, binds live controls together at the true terminal, and carries plain sources through explicit future/past algebra with stable divided-difference and exact fused two-room/phaser routes. Full refinement remains open: hot/equal-pole divided differences are not yet composable through a later room or gauge; arbitrary live source-frequency crossings need a declared pole envelope; phaser and live reverse/sway/gauge after bloom need the oriented Gamma bridge; and the bilateral live-gauge cost/backend envelope is not qualified."
+    limitation := "Production now retains an authored ordinary-room/gauge/phaser stage spine, binds live controls together at the true terminal, and carries plain sources through explicit future/past algebra with stable divided-difference and exact fused two-room/phaser routes. Causal spines with more than one nonterminal room now cross through the block-partial-fraction terminal (`lean/Tropical/EmitArrow/Modal/Block.lean`, `BlockRealize.lean`; gates `block-algebra`, `block-realize`, the `blockCompose` seam atom), which forms no `1/Δ` inside a runtime-near-equal cluster of up to three value classes and splits a larger cluster into its classes at the collected floor (total: nothing that lowered before stops lowering). The block terminal is bilateral: a room's past arm enters as the mirrored pole with the two-sided transform's sign, clusters never cross orientation, and past rows realize on the mirrored clock. The divided-difference families (paired, triple) land on the fixed i64 lane with a per-family option-E exponent from their sup bounds (`pairedLandExp`, `tripleLandExp`), no admission cap. Every plain spine now lowers through the block terminal except the three exact cost schedules (time-staged phaser, fused two-room, fused two-room-with-phaser), which keep their topologies; a gauge splits the spine into segments, the block terminal before it materializing to a collected bank at the status-quo floor. The block families settle to their control targets (`BlockTerminal.settled?`, the `Bank.settled?` discipline) and a dynamic landing rides invariant columns, so the whole coefficient plane hoists: a three-room 14-mode chain is ~6k audio instructions with 34 hoisted columns and renders on Metal at 86.6 dB against the f64 JIT. Full refinement remains open: arbitrary live source-frequency crossings need a declared pole envelope; phaser and live reverse/sway/gauge after bloom need the oriented Gamma bridge; and the bilateral live-gauge cost/backend envelope is not qualified."
     priority := .critical },
   { id := "EXPR_ARENA_DENOTATION_STABLE"
     statement := "For every carrier algebra and environment, extending a well-formed ExprArena preserves the direct denotation of every addressable existing root."
@@ -168,7 +172,7 @@ def obligations : Array Obligation := #[
     evidence := #[.theorem, .executableGate, .inspection]
     implementationPaths := #["lean/Tropical/Ir/Stage0.lean",
       "lean/Tropical/Ir/Stage0Laws.lean", "lean/Tropical/Testing/StagingLaws.lean"]
-    gateNames := #["lake-build:Tropical.Proofs", "patch-goldens",
+    gateNames := #["lake-build:Tropical.Proofs", "patch-goldens", "msl-column-dup",
       "manual:Stage0 publication simulation review"]
     owner := "Staging semantics"
     status := .open

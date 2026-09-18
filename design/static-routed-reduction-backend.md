@@ -842,22 +842,32 @@ exact branch, room stage, and routed region on refusal.
 `RoutedSum` receives one stage signature from its tables, body, and effective
 count. Its loop index is a binding-time identity exactly like `bankSum`.
 
-Initial placement rules:
+Placement rules (`Stage0.placementFromStages`, the typed split):
 
-- an s1 routed region stays wholly in the audio plan;
-- an s0 routed region may stay in the audio plan without changing semantics;
-- no individual instruction may be hoisted out of a region;
-- a routed region is hoisted only after `Stage0` can move the complete
-  delimiter-matched region, its routed output image, and every downstream
-  boundary value atomically;
+- a routed span is a whole-region candidate exactly like a reduce region:
+  when every member's value stage is ≤ s0 and the aggregate availability
+  holds, the complete delimiter-matched span (`RoutedSumBegin` … `Yield` …
+  `RoutedSumEnd`) moves AS A UNIT into the coefficient stream, and its image
+  — an array slot the unit wholly owns (Begin zero-fills, Yield accumulates,
+  End closes) — becomes a coefficient column: generation-buffered with the
+  scalar slots, read by the audio kernel's `Index` through the shared
+  `array_ptrs`, uploaded to Metal as part of `buffer(3)`;
+- a routed span that does not move (a τ-reading body, an unavailable read,
+  nested in a staying region) is pinned s1 wholesale — no individual
+  instruction is ever hoisted out of it (a routed body is one mapped value
+  per item);
 - group-local/threadgroup storage never crosses the coefficient/audio kernel
-  boundary; hoisted results use the existing generation-published slot/column
-  mechanism; and
+  boundary; an audio plan with no routed span left takes the serial /
+  lane-parallel Metal path (`metalCooperative` is evaluated on the audio
+  plan), a span that stays keeps the cooperative lowering; and
 - numeric values never select whether a region is s0 or s1.
 
-S1 correctness and Metal performance come first. S0 routed-region hoisting is
-a transparent later optimization, not a prerequisite for accepting live
-controls.
+History: the first landing masked every routed span s1 categorically (S1
+correctness and Metal performance first), which is why `cauchyFold` was
+briefly split into two scalar folds; the whole-unit move landed with the
+block terminal's banked stage tables (`routed-sum-coverage` pins both
+placements: a τ-span stays atomic, an s0-span hoists as a unit, byte-equal to
+the flow split).
 
 ## 12. Proof and trust obligations
 

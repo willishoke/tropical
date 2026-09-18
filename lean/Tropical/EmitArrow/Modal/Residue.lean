@@ -136,7 +136,7 @@ private def landExpZ (x : DyadicI) : Int := (DyadicI.abs x).hi.magBits - 1
     all-zero bank, or one whose enclosure cannot be separated from zero) lands
     verbatim at `k = 0`; an UNBOUNDED sup is handled by the caller, which lands
     `k = 28` (max headroom) without ever forming an infinity. -/
-private def landK (maxAbs : DyadicI) : Nat :=
+def landK (maxAbs : DyadicI) : Nat :=
   if !DyadicI.certGt maxAbs DyadicI.zero then 0
   else
     let e := landExpZ maxAbs - 4
@@ -169,6 +169,17 @@ def LandExp.shift : LandExp → BuildM Sig
   | .dynamic k => do
       let twentyEight ← lit 28
       sub twentyEight k
+
+/-- The DYNAMIC landing exponent from an s0 magnitude bound: `k = clamp(0, 28,
+    floatExponent(maxSig) − 4)` — `⌊log₂⌋` failing toward headroom
+    (`floatExponent 0 = −1023 ⇒ k=0`, `NaN/∞ = 1024 ⇒ k=28`). -/
+def LandExp.dynamicOf (maxSig : Sig) : BuildM LandExp := do
+  let exponent ← floatExponentE maxSig
+  let four ← lit 4
+  let reduced ← sub exponent four
+  let zero ← lit 0
+  let twentyEight ← lit 28
+  return .dynamic (← clampE reduced zero twentyEight)
 
 /-- The envelope-peak factor `sup_{d≥0} d^p·e^{−σd} = (p/(σe))^p` for a mode of
     degree `p` (the polynomial-order lift): `1` for `p=0` (`e^{−σd} ≤ 1`), else the
@@ -258,12 +269,7 @@ def bankLandExp (modes : Array ModalMode) : BuildM LandExp := do
     let a ← modeWeightBoundSig m
     let greater ← gt acc a
     selectE greater acc a) zero
-  let exponent ← floatExponentE maxSig
-  let four ← lit 4
-  let reduced ← sub exponent four
-  let zero ← lit 0
-  let twentyEight ← lit 28
-  return .dynamic (← clampE reduced zero twentyEight)
+  LandExp.dynamicOf maxSig
 
 /-- The RELATIVE clock `clkRel = clk − anchor·2³²` as an EXACT i64 subtract.
     (A float-relative clock — `toFloat(clk)/2³² − anchor` — loses mantissa bits
@@ -1292,6 +1298,36 @@ inductive CouplingRoute where
   | refused
 deriving DecidableEq
 
+/-- min |Δ| between two poles over their σ INTERVALS, with ω exact — the one
+    pole-distance lens shared by the pairwise router (`classifyCouplingWith`)
+    and the block carrier's clustering (`Block.clusterPoles`), so "how far
+    apart are these two poles" has one implementation. The SPAN DISTANCE
+    between `[svLo,svHi]` and `[srLo,srHi]` is `max(0, max(svLo,srLo) −
+    min(svHi,srHi))` — zero when the spans overlap and the gap when they are
+    separated; a const σ is its own point interval. The two axes separate
+    because `dw` does not depend on σ, so this IS min |Δ| over the spans.
+    Conservative under overlap (the three-answer discipline, below). -/
+def poleSpanDistanceD (sv sr : DyadicI × DyadicI) (wv wr : DyadicI) : DyadicI :=
+  let sepLo := DyadicI.max sv.1 sr.1
+  let sepHi := DyadicI.min sv.2 sr.2
+  let dSig := if DyadicI.certGt sepLo sepHi then DyadicI.sub sepLo sepHi else DyadicI.zero
+  let dw := DyadicI.sub wv wr
+  DyadicI.sqrt (DyadicI.add (DyadicI.mul dSig dSig) (DyadicI.mul dw dw))
+
+/-- The pole-distance lens as the block carrier reads it: `some (min |Δ| < θ_acc)`
+    when both poles classify (σ const or ranged, ω const), `none` when either
+    is unclassifiable — the caller decides the conservative side. Amps play no
+    part: clustering is a pole-distance question (composition never moves a
+    pole, and the block coefficients are formed without any `1/Δ` inside a
+    cluster, so no amp-dependent rail lens is needed to decide membership). -/
+def poleAccuracyHotFrom? (constants : Array (Option DyadicI))
+    (a b : ModalMode) : Option Bool := do
+  let sa ← sigmaIntervalDFrom? constants a
+  let sb ← sigmaIntervalDFrom? constants b
+  let wa ← sigConstDFrom? constants a.omega
+  let wb ← sigConstDFrom? constants b.omega
+  pure (DyadicI.certLt (poleSpanDistanceD sa sb wa wb) ecddThetaAccD)
+
 /-- The per-coupling routing verdict — compile-time only. σ may be LIVE with a
     declared range (Phase 2): the lenses evaluate at min |Δ| over the interval —
     a coupling whose interval DIPS under θ takes DD throughout the knob span, so
@@ -1341,11 +1377,7 @@ private def classifyCouplingWith (constants : Array (Option DyadicI))
     -- differently damped. Repaired in its own commit, out of the carrier flip,
     -- so its differential has exactly one variable in it; gate
     -- `ecdd-sigma-axis` now pins the axis in both directions.)
-    let sepLo := DyadicI.max svLo srLo
-    let sepHi := DyadicI.min svHi srHi
-    let dSig := if DyadicI.certGt sepLo sepHi then DyadicI.sub sepLo sepHi else DyadicI.zero
-    let dw := DyadicI.sub wv wr
-    let dAbs := DyadicI.sqrt (DyadicI.add (DyadicI.mul dSig dSig) (DyadicI.mul dw dw))
+    let dAbs := poleSpanDistanceD (svLo, svHi) (srLo, srHi) wv wr
     let cAbs := DyadicI.mul (CplxDI.abs (CplxDI.mkI ar ai)) (CplxDI.abs (CplxDI.mkI rr ri))
     let dPos := DyadicI.certGt dAbs DyadicI.zero
     if !(DyadicI.certLt dAbs ecddThetaAccD
@@ -1516,6 +1548,29 @@ def bankFoldPaired (cols : PairedBankCols)
     #[cols.incrNu, cols.incrDiff, cols.sigmaNu, cols.ds, cols.wd, cols.cre, cols.cim]
     contribution cols.live? cols.idxId
 
+/-- `bankFoldPaired` with loop-invariant scalars as 1-element columns — the
+    paired twin of `bankFoldInv` (WS3b): a dynamic landing over composed
+    coefficients is a heavy s0 chain, and referencing it from the body would
+    re-emit it inside the region on a memo miss; as a table it materializes
+    once before the region. -/
+def bankFoldPairedInv (cols : PairedBankCols) (invariants : Array Sig)
+    (body : PairedModeSym → Array Sig → BuildM Sig) : BuildM Sig := do
+  let invTables ← invariants.mapM fun value => arr #[value]
+  let zeroIdx ← lit 0
+  let invReads ← invTables.mapM fun table => index table zeroIdx
+  let k ← loopIdx cols.idxId
+  let incrNu ← index cols.incrNu k
+  let incrDiff ← index cols.incrDiff k
+  let sigmaNu ← index cols.sigmaNu k
+  let ds ← index cols.ds k
+  let wd ← index cols.wd k
+  let cre ← index cols.cre k
+  let cim ← index cols.cim k
+  let contribution ← body { incrNu, incrDiff, sigmaNu, ds, wd, cre, cim } invReads
+  bankSum cols.count
+    (#[cols.incrNu, cols.incrDiff, cols.sigmaNu, cols.ds, cols.wd, cols.cre, cols.cim] ++ invTables)
+    contribution cols.live? cols.idxId
+
 /-- The divided-difference paired-mode bank body (qA). Per mode: the ν rotator (exact
     integer phase) plus a SECOND integer-phase rotator at the signed difference
     frequency `ω_λ−ω_ν` for `e^z`; `cexpm1(z)` by a per-sample `selectE` between the
@@ -1539,7 +1594,16 @@ def bankFoldPaired (cols : PairedBankCols)
     (the divisor needs only relative precision; the rotator phase is integer-reduced,
     consistent because `e^z` is periodic). -/
 def modalBankSigTableDD (modes : Array PairedMode) (clkInt anchorSamples : Sig)
-    (live? : Option Sig := none) : BuildM Sig := do
+    (live? : Option Sig := none) (landing? : Option LandExp := none) : BuildM Sig := do
+  if modes.isEmpty then return ← lit 0
+  -- option E for the paired lane (slice Phase 6): a caller that has bounded
+  -- `sup_d |Wc|` lands at `2^(28−k)`; the default is the verbatim q28 literals
+  let landingScale ← match landing? with
+    | some le => le.scale
+    | none => lit 268435456
+  let landingShift ← match landing? with
+    | some le => le.shift
+    | none => lit 28
   let clkRel ← relClockQ clkInt anchorSamples
   let clkFloat ← toFloatE clkRel
   let twoPow32 ← lit 4294967296
@@ -1547,7 +1611,7 @@ def modalBankSigTableDD (modes : Array PairedMode) (clkInt anchorSamples : Sig)
   let sr ← sampleRate
   let dSec ← div secondsTimesRate sr
   let cols ← pairedBankCols modes live?
-  let bankQ ← bankFoldPaired cols fun m => do
+  let mkBody := fun (landingScale landingShift : Sig) (m : PairedModeSym) => do
     let incrNu ← toIntE m.incrNu
     let phQnu ← modePhaseQFromIncr incrNu clkRel
     let incrDiff ← toIntE m.incrDiff
@@ -1587,18 +1651,23 @@ def modalBankSigTableDD (modes : Array PairedMode) (clkInt anchorSamples : Sig)
     let envTime ← mul envNu dSec
     let scaled ← scaleRealE envTime (cxReal, cxImag)
     let wc ← cmulE (m.cre, m.cim) scaled
-    let q28 ← lit 268435456
-    let landedCre ← mul wc.1 q28
+    let landedCre ← mul wc.1 landingScale
     let wCre ← toIntE landedCre
-    let landedCim ← mul wc.2 q28
+    let landedCim ← mul wc.2 landingScale
     let wCim ← toIntE landedCim
     let carrierCos ← fixedCosCycSig phQnu
     let real ← mul wCre carrierCos
     let carrierSin ← fixedSinCycSig phQnu
     let imag ← mul wCim carrierSin
     let difference ← sub real imag
-    let twentyEight ← lit 28
-    rshift difference twentyEight
+    rshift difference landingShift
+  -- a DYNAMIC landing (a heavy s0 chain over composed coefficients) rides
+  -- invariant columns; the static literals stay verbatim in the body
+  let bankQ ← match landing? with
+    | some (.dynamic _) =>
+        bankFoldPairedInv cols #[landingScale, landingShift]
+          (fun m inv => mkBody inv[0]! inv[1]! m)
+    | _ => bankFoldPaired cols (mkBody landingScale landingShift)
   let zero ← lit 0
   let afterStrike ← gt clkRel zero
   let output ← fixedOutQ 30 bankQ

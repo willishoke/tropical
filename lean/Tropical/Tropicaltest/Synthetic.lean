@@ -303,13 +303,57 @@ def runRoutedSumCoverage : IO Bool := do
         | .error _ => false
         | .ok decodedWire =>
           decodedWire == wire && routedTags decoded == routedTags static
-  let allS0 : Array (Option Tropical.Ir.Stage) :=
-    Array.replicate staticBody.size (some .s0)
-  let atomic := match Tropical.Ir.Stage0.hoistTyped static #[#[], allS0] with
+  -- Placement, two probes on the same static plan.
+  -- (a) A routed span whose body is s1 by attribute (a τ-reading map) stays
+  --     ATOMIC in the audio kernel: the span's tags survive there, the
+  --     coefficient kernel is routed-free, and NO member is peeled — only
+  --     the pre-region scalar (`Add` 7, an s0 param read) hoists, so the
+  --     audio kernel is exactly one instruction shorter.
+  let s1Body : Array (Option Tropical.Ir.Stage) := staticBody.map fun i =>
+    if i.tag == "Add" && (match i.dst with | .temp 7 => true | _ => false) then some .s0
+    else some .s1
+  let atomic := match Tropical.Ir.Stage0.hoistTyped static #[#[], s1Body] with
     | .error _ => false
     | .ok split =>
       routedTags split.audio == routedTags static &&
-        (match split.coeff? with | none => true | some p => routedTags p |>.isEmpty)
+        (match split.coeff? with | none => true | some p => routedTags p |>.isEmpty) &&
+        split.audio.instanceFunctions[0]!.instructions.size + 1 == staticBody.size
+  -- (b) An all-s0 routed span hoists AS A UNIT into the coefficient kernel:
+  --     its image (array slot 0) becomes a coefficient column, the audio
+  --     kernel keeps its `Index` readers (the τ-side consumers, s1 here) and
+  --     reads the image through the column, and the typed render is
+  --     byte-equal to the flow split (which never hoists regions) — static
+  --     and dynamic (slot-driven) trip counts alike.
+  let s0Body := fun (body : Array NInstr) => body.map fun i =>
+    if i.tag == "Index" || i.tag == "WriteSlot" then some Tropical.Ir.Stage.s1
+    else some Tropical.Ir.Stage.s0
+  let hoistShape := fun (plan : FlatPlan) => match Tropical.Ir.Stage0.hoistTyped plan
+      #[#[], s0Body plan.instanceFunctions[0]!.instructions] with
+    | .error _ => false
+    | .ok split =>
+      (routedTags split.audio).isEmpty &&
+        (match split.coeff? with
+          | none => false
+          | some p => routedTags p == #["RoutedSumBegin", "RoutedSumYield", "RoutedSumEnd"]) &&
+        split.audio.coeffArraySlots == #[0] &&
+        (split.audio.instanceFunctions[0]!.instructions.filter fun i =>
+          i.tag == "Index" && i.args.any fun a => match a with
+            | .arrayReg 0 => true | _ => false).size == 3
+  let hoisted := hoistShape static && hoistShape dynamic
+  let typedRender := fun (plan : FlatPlan) => do
+    try
+      let rt ← Tropical.Ffi.Runtime.new BUFFER.toUInt32
+      Tropical.StagedLoad.loadTyped rt plan #[#[], s0Body plan.instanceFunctions[0]!.instructions]
+      let mut acc := ByteArray.empty
+      for _ in [0:FRAMES] do
+        rt.process
+        acc := acc ++ (← rt.outputBytes)
+      pure (Except.ok acc)
+    catch e => pure (.error e.toString)
+  let hoistedRenderOk ← match ← typedRender static, ← typedRender dynamic,
+      ← renderIrBytes static, ← renderIrBytes dynamic with
+    | .ok ts, .ok td, .ok fs, .ok fd => pure (ts == fs && td == fd && ts.size > 0)
+    | _, _, _, _ => pure false
   let sourceSmoke := match Tropical.Ir.EmitLlvm.emitKernel static,
       Tropical.Ir.EmitMsl.emitKernel static with
     | .ok llvm, .ok msl =>
@@ -330,10 +374,10 @@ def runRoutedSumCoverage : IO Bool := do
   match ← renderIrBytes static, ← renderIrBytes (routedUnrolledPlan 4),
       ← renderIrBytes dynamic, ← renderIrBytes (routedUnrolledPlan 3) with
   | .ok routedStatic, .ok unrolledStatic, .ok routedDynamic, .ok unrolledDynamic =>
-    let coreOk := compact && roundTrip && atomic && sourceSmoke &&
+    let coreOk := compact && roundTrip && atomic && hoisted && hoistedRenderOk && sourceSmoke &&
       routedStatic == unrolledStatic && routedDynamic == unrolledDynamic
     if !coreOk then
-      failGate "routed-sum-coverage" s!"compact={compact} roundTrip={roundTrip} atomic={atomic} source={sourceSmoke} staticEq={routedStatic == unrolledStatic} dynamicEq={routedDynamic == unrolledDynamic}"
+      failGate "routed-sum-coverage" s!"compact={compact} roundTrip={roundTrip} atomic={atomic} hoisted={hoisted} hoistedRender={hoistedRenderOk} source={sourceSmoke} staticEq={routedStatic == unrolledStatic} dynamicEq={routedDynamic == unrolledDynamic}"
     else
       match ← renderRoutedMsl static with
       | .ok metalStatic =>
@@ -343,14 +387,14 @@ def runRoutedSumCoverage : IO Bool := do
           (fun worst i => max worst (Float.abs (cpu[i]! - gpu[i]!))) 0.0
         if !gpu.isEmpty && gpu.size <= cpu.size && metalError < 1e-5 then
           passGate "routed-sum-coverage"
-            s!"static+dynamic routed folds equal authored-order unrolling; cooperative Metal max error={metalError}; compact Plan 6 round-trips; Stage0 atomic"
+            s!"static+dynamic routed folds equal authored-order unrolling; cooperative Metal max error={metalError}; compact Plan 6 round-trips; Stage0: τ-span atomic, s0-span hoists as a unit"
         else
           failGate "routed-sum-coverage"
             s!"cooperative Metal returned samples={gpu.size}/{cpu.size} maxError={metalError}"
       | .error e =>
         if routedMetalUnavailable e then
           passGate "routed-sum-coverage"
-            "static+dynamic routed folds equal authored-order unrolling; compact Plan 6 round-trips; Stage0 atomic; MSL source contract checked (Metal execution unavailable in this build)"
+            "static+dynamic routed folds equal authored-order unrolling; compact Plan 6 round-trips; Stage0: τ-span atomic, s0-span hoists as a unit; MSL source contract checked (Metal execution unavailable in this build)"
         else
           failGate "routed-sum-coverage" s!"cooperative Metal: {firstLine e}"
   | .error e, _, _, _ => failGate "routed-sum-coverage" s!"static routed: {firstLine e}"

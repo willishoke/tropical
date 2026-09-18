@@ -199,6 +199,54 @@ def runMslColumnGuard (arena : Arena)
   let src := "{\"nodes\":[" ++
     "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
     "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"res\"]}}],\"out\":\"out\"}"
+  -- The routed-image clause: resonator ⋙ reverb lowers through the block
+  -- terminal, whose banked stage tables are routed spans; all-s0, they hoist
+  -- as units and their IMAGES are coefficient columns — read on the GPU via
+  -- `coeff_columns[…]` like any Pack-filled column, with no local `arrN`.
+  let routedSrc := "{\"nodes\":[" ++
+    "{\"id\":\"res\",\"kind\":\"resonator\",\"params\":{\"freq\":220,\"decay\":4}}," ++
+    "{\"id\":\"room_a\",\"kind\":\"reverb\",\"params\":{\"rt60\":0.9},\"in\":{\"in\":[\"res\"]}}," ++
+    "{\"id\":\"out\",\"kind\":\"out\",\"in\":{\"in\":[\"room_a\"]}}],\"out\":\"out\"}"
+  let routedImages : Except String (Nat × Nat × Bool × Bool × Bool × Bool) ←
+    match Lean.Json.parse routedSrc with
+    | .error e => pure (Except.error s!"routed json: {e}")
+    | .ok j => match Tropical.Playground.compilePlanPure arena resolved j with
+      | .error e => pure (Except.error s!"routed compile: {firstLine e}")
+      | .ok compiled => match Tropical.Ir.Stage0.hoistTyped compiled.plan compiled.stageBlocks with
+        | .error e => pure (Except.error s!"routed split: {firstLine e}")
+        | .ok split =>
+          let cols := split.audio.coeffArraySlots
+          -- image slots of routed spans that landed in the coefficient kernel
+          let images : Array Nat := match split.coeff? with
+            | none => #[]
+            | some c => c.instanceFunctions.foldl (fun acc f =>
+                acc ++ f.instructions.filterMap fun i =>
+                  if i.tag == "RoutedSumBegin" then
+                    (match i.dst with | .array s => some s | _ => none)
+                  else none) #[]
+          let imagesAreColumns := !images.isEmpty && images.all cols.contains
+          match Tropical.Ir.EmitMsl.emitKernel split.audio with
+          | .error e => pure (Except.error s!"routed split plan refused: {firstLine e}")
+          | .ok msl =>
+            let sizes := split.audio.arraySlotSizes
+            let has : String → String → Bool := fun hay needle => (hay.splitOn needle).length > 1
+            let audioBlocks := Tropical.Ir.Stage0.collectPlanBlocks split.audio
+            -- an image's readers are usually s0 themselves and hoist with it
+            -- (the audio kernel then reads the downstream columns); the
+            -- offset-read check applies to the images the audio plan DOES index
+            let audioReads : Array Nat := images.filter fun s => audioBlocks.any fun b =>
+              b.any fun i => i.args.any fun a => match a with
+                | .arrayReg t => t == s | _ => false
+            let mut off := 0
+            let mut reads := true
+            let mut noLocals := true
+            for s in cols do
+              if images.contains s then
+                if audioReads.contains s && !(has msl s!"coeff_columns[{off} + ") then reads := false
+                if has msl s!"float arr{s}[" then noLocals := false
+              off := off + max (sizes[s]?.getD 1) 1
+            let audioRouted := audioBlocks.any fun b => b.any (·.tag == "RoutedSumBegin")
+            pure (Except.ok (images.size, cols.size, imagesAreColumns, reads, noLocals, audioRouted))
   match Lean.Json.parse src with
   | .error e => failGate "msl-column-guard" s!"json: {e}"
   | .ok j =>
@@ -237,10 +285,18 @@ def runMslColumnGuard (arena : Arena)
             off := off + max (sizes[s]?.getD 1) 1
           IO.println (s!"        banked={banked} · hoisted columns={cols.size} ({off} floats packed) · "
             ++ s!"buffer(3)={binding} · offset reads={reads} · locals suppressed={noLocals} · unsplit 3-binding={unsplitClean}")
-          if cols.size > 0 && binding && reads && noLocals && unsplitClean then
-            passGate "msl-column-guard" s!"{cols.size} hoisted column(s) EMIT in column-binding mode: buffer(3) declared, reads at packed offsets, no arrN locals; columns-free plan keeps the frozen 3-binding header"
+          let routedOk ← match routedImages with
+            | .error e =>
+              IO.println s!"        routed images: {e}"
+              pure false
+            | .ok (nImages, nCols, asColumns, rReads, rNoLocals, audioRouted) =>
+              IO.println (s!"        resonator ⋙ reverb: {nImages} routed image(s) among {nCols} hoisted columns · "
+                ++ s!"images are columns={asColumns} · audio-read images at offsets={rReads} · no image locals={rNoLocals} · audio routed-free={audioRouted == false}")
+              pure (asColumns && rReads && rNoLocals && !audioRouted)
+          if cols.size > 0 && binding && reads && noLocals && unsplitClean && routedOk then
+            passGate "msl-column-guard" s!"{cols.size} hoisted column(s) EMIT in column-binding mode: buffer(3) declared, reads at packed offsets, no arrN locals; columns-free plan keeps the frozen 3-binding header; hoisted routed images cross as columns"
           else
-            failGate "msl-column-guard" s!"banked: cols={cols.size} binding={binding} reads={reads} noLocals={noLocals} unsplitClean={unsplitClean}"
+            failGate "msl-column-guard" s!"banked: cols={cols.size} binding={binding} reads={reads} noLocals={noLocals} unsplitClean={unsplitClean} routed={routedOk}"
         else
           let splitClean := has splitMsl plainHeader && !(has splitMsl "buffer(3)")
           IO.println s!"        banked={banked} · hoisted columns={cols.size} · split 3-binding={splitClean} · unsplit 3-binding={unsplitClean}"
@@ -252,6 +308,119 @@ def runMslColumnGuard (arena : Arena)
         failGate "msl-column-guard" s!"split plan refused (the WS0 stopgap is retired — columns must emit): {firstLine e}"
       | _, .error e =>
         failGate "msl-column-guard" s!"unsplit plan refused: {firstLine e}"
+
+-- ── Fold-duplicated column fills live in the coefficient stream only ─────────
+section ColumnDup
+open Tropical.Plan
+
+/-- A region whose table is a FOLD Pack with TEMP args (the block terminal's
+    pole columns: `Neg`/`Mul` of literals — never `.const` operands), read by
+    an all-s0 body (weighted by a live param slot), consumed by an s1 tail.
+    Temps: fold 9,10; acc 1; body 2,5; tail 6..8. -/
+private def foldColumnPlan : FlatPlan :=
+  let body : Array NInstr := #[
+    instrScalar "Neg" 9 #[cF 5 1] .float,                       -- −0.5 (fold temp)
+    instrScalar "Mul" 10 #[rgF 9, cF 25 2] .float,              -- −0.125 (fold temp)
+    instrPack 0 #[rgF 9, rgF 10, rgF 9, rgF 10],               -- the column: temp args
+    instrReduceBegin 1 (cF 0) 4 .float none,
+    instrIndex 2 #[.arrayReg 0, .loopIdx] .float,               -- v = table[k]
+    instrScalar "Mul" 5 #[rgF 2, .slot 1 .float] .float,        -- v·param:a  (s0)
+    instrScalar "Add" 1 #[rgF 1, rgF 5] .float,
+    instrReduceEnd 1 .float,
+    instrScalar "ToFloat" 6 #[Tropical.Plan.opTick] .float,     -- the s1 consumer
+    instrScalar "Mod" 7 #[rgF 6, cF 64] .float,
+    instrScalar "Mul" 8 #[rgF 1, rgF 7] .float,
+    instrWriteSlot 0 (rgF 8)]
+  let inst := InstanceFunction.mk "root" "root" #[] body #[] 0 0 11 #[]
+  { sampleRate := jn 44100, compilationMode := .fused,
+    arraySlotNames := #["table"], registerCount := 11, arraySlotCount := 1,
+    arraySlotSizes := #[4], instanceFunctions := #[inst],
+    sinks := #[{ inputs := #[0], gain := jn 1, target := 0 }],
+    sources := defaultSources, slotCount := 2,
+    slotNames := #["out", "param:a"],
+    slotDefaults := #[Lean.Json.num (jn 0), Lean.Json.num (jn 5 1)] }
+
+private def foldColumnStages : Array (Array (Option Tropical.Ir.Stage)) :=
+  let f : Option Tropical.Ir.Stage := some .fold
+  let s0 : Option Tropical.Ir.Stage := some .s0
+  let s1 : Option Tropical.Ir.Stage := some .s1
+  #[#[], #[f, f, f, s0, s0, s0, s0, s0, s1, s1, s1, s1]]
+
+/-- An AUDIO plan that writes a hoisted column in-kernel — the split bug the
+    Metal guard must refuse — with `varying` (τ-derived) or constant args. -/
+private def columnWritePlan (varying : Bool) : FlatPlan :=
+  let v : NOperand := if varying then rgF 6 else cF 1
+  let body : Array NInstr := #[
+    instrScalar "ToFloat" 6 #[Tropical.Plan.opTick] .float,
+    instrPack 0 #[v, v, v, v],
+    instrIndex 2 #[.arrayReg 0, cI 0] .float,
+    instrWriteSlot 0 (rgF 2)]
+  let inst := InstanceFunction.mk "root" "root" #[] body #[] 0 0 7 #[]
+  { sampleRate := jn 44100, compilationMode := .fused,
+    arraySlotNames := #["table"], registerCount := 7, arraySlotCount := 1,
+    arraySlotSizes := #[4], instanceFunctions := #[inst],
+    sinks := #[{ inputs := #[0], gain := jn 1, target := 0 }],
+    sources := defaultSources, slotCount := 1, slotNames := #["out"],
+    slotDefaults := #[Lean.Json.num (jn 0)], coeffArraySlots := #[0] }
+
+/-- THE COLUMN-DUPLICATION gate. A hoisted region that reads a FOLD-filled
+    column seeds that fill for duplication; the split must place the fill in
+    the coefficient stream ONLY (the audio kernel is fill-free for that slot,
+    the column is in `coeffArraySlots`), so the audio plan EMITS as MSL with
+    no `arrN[` write for any hoisted slot — and the render is byte-exact
+    against the flow split (which never hoists regions). The fill's args are
+    fold TEMPS, not `.const` operands: exactly the shape the block terminal's
+    pole columns take, which the retired `28fddfd` constant-only omission in
+    `EmitMsl.emitPack` did not cover. The second clause pins the guard: an
+    audio plan that still writes a hoisted column in-kernel — with varying OR
+    constant args — is refused. -/
+def runMslColumnDup : IO Bool := do
+  let has : String → String → Bool := fun hay needle => (hay.splitOn needle).length > 1
+  let plan := foldColumnPlan
+  match Tropical.Ir.Stage0.hoistTyped plan foldColumnStages with
+  | .error e => failGate "msl-column-dup" s!"split: {firstLine e}"
+  | .ok split =>
+    let cols := split.audio.coeffArraySlots
+    let audioFills := planArrayFills split.audio
+    let audioReduces := planReduces split.audio
+    let coeffFills := match split.coeff? with | some c => planArrayFills c | none => 0
+    let (mslOk, mslLocalFree) ← match Tropical.Ir.EmitMsl.emitKernel split.audio with
+      | .ok msl => pure (true, cols.all fun s => !(has msl s!"arr{s}["))
+      | .error e =>
+        IO.println s!"        split audio plan refused MSL: {firstLine e}"
+        pure (false, false)
+    let refuses := fun (varying : Bool) =>
+      match Tropical.Ir.EmitMsl.emitKernel (columnWritePlan varying) with
+      | .error e => has e "writes hoisted coefficient column 0"
+      | .ok _ => false
+    let refuseVarying := refuses true
+    let refuseConst := refuses false
+    let typed ← renderTypedBytes plan foldColumnStages
+    match ← renderIrBytes plan with
+    | .error e => failGate "msl-column-dup" s!"flow render: {firstLine e}"
+    | .ok flow =>
+      let n := min typed.size flow.size
+      let mut bitDiff := 0
+      for i in [0:n] do
+        if typed[i]! != flow[i]! then bitDiff := bitDiff + 1
+      let mut energy : Float := 0.0
+      for s in decodeF64LE typed do energy := energy + s * s
+      IO.println (s!"        columns={cols} · audio fills={audioFills} regions={audioReduces} · "
+        ++ s!"coeff fills={coeffFills} · MSL emits={mslOk} local-free={mslLocalFree} · "
+        ++ s!"guard refuses varying={refuseVarying} const={refuseConst} · "
+        ++ s!"typed≡flow bitDiff={bitDiff}/{n} · E={energy}")
+      if cols == #[0] && audioFills == 0 && audioReduces == 0 && coeffFills == 1
+          && mslOk && mslLocalFree && refuseVarying && refuseConst
+          && typed.size == flow.size && bitDiff == 0 && energy > 1e-6 then
+        passGate "msl-column-dup" ("fold-duplicated column fill (temp args) lives in the coeff "
+          ++ "stream only: audio plan fill-free, emits MSL with no arrN local; in-kernel column "
+          ++ "writes refused varying AND constant; typed ≡ flow byte-exact")
+      else
+        failGate "msl-column-dup" (s!"cols={cols} audioFills={audioFills} audioReduces={audioReduces} "
+          ++ s!"coeffFills={coeffFills} msl={mslOk} localFree={mslLocalFree} "
+          ++ s!"refuseVarying={refuseVarying} refuseConst={refuseConst} bitDiff={bitDiff} E={energy}")
+
+end ColumnDup
 
 /-- THE COMPILE-FLATNESS BENCHMARK (banks-as-data payoff). Where `banks-staging`
     proves the payoff STRUCTURALLY at one mode count (columns hoist, audio is

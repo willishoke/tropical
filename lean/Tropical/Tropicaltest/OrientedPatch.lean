@@ -79,6 +79,24 @@ private def twoRoomGraph (roomOnePast roomTwoPast : Bool) : BuildM PatchGraph :=
         node := (.modalReverb "room-one" roomTwo directionTwoValue) }]
     "room-two")
 
+/-- Three rooms with mixed local directions (past, future, past) — a spine the
+    two-room rule refuses, served by the bilateral block terminal (Phase 4). -/
+private def threeRoomMixedGraph : BuildM PatchGraph := do
+  let source ← sourceModes
+  let anchor ← anchorSig
+  let clock ← clockLit
+  let roomOne ← roomOne
+  let roomTwo ← roomTwo
+  let roomThree : Array ModalMode := #[← realMode 13]
+  let past ← direction true
+  let future ← direction false
+  pure (PatchGraph.mk #[
+      { id := "source", node := .modalSource source anchor clock none },
+      { id := "room-one", node := (.modalReverb "source" roomOne past) },
+      { id := "room-two", node := (.modalReverb "room-one" roomTwo future) },
+      { id := "room-three", node := (.modalReverb "room-two" roomThree past) }]
+    "room-three")
+
 private def constantControl (value : Sig) : ModalControlRef :=
   ModalControlRef.constant value
 
@@ -265,6 +283,13 @@ private def twoRoomOracle (roomOnePast roomTwoPast : Bool)
     { physicalPole := -5.0, past := roomOnePast },
     { physicalPole := -9.0, past := roomTwoPast }] relativeSeconds
 
+private def threeRoomMixedOracle (relativeSeconds : Float) : Float :=
+  analyticOracle #[
+    { physicalPole := -2.0 },
+    { physicalPole := -5.0, past := true },
+    { physicalPole := -9.0 },
+    { physicalPole := -13.0, past := true }] relativeSeconds
+
 private def equalRt60Oracle (relativeSeconds : Float) : Float :=
   if relativeSeconds > 0.0 then
     (Float.exp (-2.0 * relativeSeconds) - Float.exp (-5.0 * relativeSeconds)) /
@@ -289,6 +314,15 @@ private def sourceCrossingOracle (relativeSeconds : Float) : Float :=
 private def sourceTripleCrossingOracle (relativeSeconds : Float) : Float :=
   if relativeSeconds > 0.0 then
     relativeSeconds * relativeSeconds * Float.exp (-5.0 * relativeSeconds) / 2.0
+  else 0.0
+
+/-- `1/((s+2)(s+5)³)`: the source through three separately authored rooms of
+    one frozen RT60 — the block at `−5` is the Hermite data of `1/(s+2)`
+    (`g = −1/3, g' = −1/9, g''/2 = −1/27`), the residue at `−2` is `1/27`. -/
+private def repeatedRoomOracle (t : Float) : Float :=
+  if t > 0.0 then
+    Float.exp (-2.0 * t) / 27.0 -
+      Float.exp (-5.0 * t) * (t * t / 6.0 + t / 9.0 + 1.0 / 27.0)
   else 0.0
 
 private def sourceNearCrossingOracle (relativeSeconds : Float) : Float :=
@@ -425,8 +459,14 @@ private structure TwoRoomResult where
   sourceTripleCrossingError : Float
   sourceNearCrossingError : Float
   sourceCrossingsFinite : Bool
-  repeatedRoomRefused : Bool
-  roomRoomGaugeRefused : Bool
+  repeatedRoomError : Float
+  repeatedRoomFinite : Bool
+  repeatedRoomPeak : Float
+  threeRoomMixedError : Float
+  threeRoomMixedFinite : Bool
+  threeRoomMixedPeak : Float
+  roomRoomGaugeFinite : Bool
+  roomRoomGaugePeak : Float
 
 private def checkTwoRooms (arena : Arena) : IO (Except String TwoRoomResult) := do
   let cases : Array (Bool × Bool × String) := #[
@@ -472,16 +512,21 @@ private def checkTwoRooms (arena : Arena) : IO (Except String TwoRoomResult) := 
             | return .error "source second-room crossing render"
           let (.ok nearCrossing) := nearCrossing
             | return .error "source near crossing render"
-          let repeatedRoomRefused := match
-              Tropical.Testing.ArrowFixtures.runBuild arena do
-                lowerGraph (← repeatedRoomCrossingGraph false) with
-            | .error error => error == "lower: nonterminal repeated-room crossing at 'equal-room-three' refused (a later room, phaser, or gauge requires the composable divided-difference carrier)"
-            | .ok _ => false
-          let roomRoomGaugeRefused := match
-              Tropical.Testing.ArrowFixtures.runBuild arena do
-                lowerGraph (← repeatedRoomCrossingGraph true) with
-            | .error error => error == "lower: nonterminal repeated-room crossing at 'gauge' refused (a later room, phaser, or gauge requires the composable divided-difference carrier)"
-            | .ok _ => false
+          -- three separately authored equal rooms cross through the block
+          -- terminal (slice Phase 3): one identity-confluent cluster of three
+          let repeatedRoom ← renderGraph arena "oriented_repeated_room"
+            (repeatedRoomCrossingGraph false)
+          let (.ok repeatedRoom) := repeatedRoom
+            | return .error "repeated-room (three rooms) render"
+          let threeMixed ← renderGraph arena "oriented_three_room_mixed" threeRoomMixedGraph
+          let (.ok threeMixed) := threeMixed
+            | return .error "three-room mixed-direction render"
+          -- room ⋙ room ⋙ gauge (slice Phase 5): the spine splits at the gauge,
+          -- the block terminal before it materializes to a collected bank
+          let roomRoomGauge ← renderGraph arena "oriented_room_room_gauge"
+            (repeatedRoomCrossingGraph true)
+          let (.ok roomRoomGauge) := roomRoomGauge
+            | return .error "room-room-gauge render"
           pure (.ok {
             maximumOracleError := maximumError
             minimumPairDifference := minimumDifference
@@ -500,8 +545,14 @@ private def checkTwoRooms (arena : Arena) : IO (Except String TwoRoomResult) := 
               secondCrossing.all (fun sample => sample.isFinite) &&
               tripleCrossing.all (fun sample => sample.isFinite) &&
               nearCrossing.all (fun sample => sample.isFinite)
-            repeatedRoomRefused
-            roomRoomGaugeRefused })
+            repeatedRoomError := maxOracleError repeatedRoom repeatedRoomOracle
+            repeatedRoomFinite := repeatedRoom.all (fun sample => sample.isFinite)
+            repeatedRoomPeak := maxWindow repeatedRoom (anchorNat + 1) frameCount
+            threeRoomMixedError := maxOracleError threeMixed threeRoomMixedOracle
+            threeRoomMixedFinite := threeMixed.all (fun sample => sample.isFinite)
+            threeRoomMixedPeak := maxWindow threeMixed 0 frameCount
+            roomRoomGaugeFinite := roomRoomGauge.all (fun sample => sample.isFinite)
+            roomRoomGaugePeak := maxWindow roomRoomGauge (anchorNat + 1) frameCount })
 
 /-- End-to-end production gate for local room direction. -/
 def runOrientedPatch (arena : Arena) : IO Bool := do
@@ -511,7 +562,7 @@ def runOrientedPatch (arena : Arena) : IO Bool := do
       IO.println s!"        one room  local oracle {one.localError} · output-reverse oracle {one.outputReverseError} · local≠output-reverse {one.localVsOutputReverse} · post {one.localPost}/{one.outputReversePost}"
       IO.println s!"        two rooms FF/FR/RF/RR max oracle error {two.maximumOracleError} · min pair distance {two.minimumPairDifference} · authored stage order {two.authoredOrder}"
       IO.println s!"        equal RT60 independently authored: finite {two.equalRt60Finite} · repeated-pole oracle error {two.equalRt60Error} · peak {two.equalRt60Peak}"
-      IO.println s!"        degree-positive terminal: finite {two.degreePositiveFinite} · oracle error {two.degreePositiveError}; guarded crossings: room-room-room {two.repeatedRoomRefused} · room-room-gauge {two.roomRoomGaugeRefused}"
+      IO.println s!"        degree-positive terminal: finite {two.degreePositiveFinite} · oracle error {two.degreePositiveError}; room-room-room via the block terminal: finite {two.repeatedRoomFinite} · oracle error {two.repeatedRoomError} · peak {two.repeatedRoomPeak}; past·future·past rooms: finite {two.threeRoomMixedFinite} · oracle error {two.threeRoomMixedError} · peak {two.threeRoomMixedPeak}; room-room-gauge: finite {two.roomRoomGaugeFinite} · peak {two.roomRoomGaugePeak}"
       IO.println s!"        source/room confluence: finite {two.sourceCrossingsFinite} · room-1/room-2/three-pole/near oracle {two.sourceCrossingError}/{two.sourceSecondCrossingError}/{two.sourceTripleCrossingError}/{two.sourceNearCrossingError}"
       IO.println s!"        float-banked complex DD: finite {complex.finite} · future/past oracle {complex.futureError}/{complex.pastError} · mirror diff {complex.mirrorDifference}"
       IO.println s!"        terminal control clock retains a half-sample Q32.32 offset: {fractionalControlClockOk}"
@@ -527,13 +578,17 @@ def runOrientedPatch (arena : Arena) : IO Bool := do
         two.sourceSecondCrossingError < 2.0e-6 &&
         two.sourceTripleCrossingError < 2.0e-6 &&
         two.sourceNearCrossingError < 2.0e-6 &&
-        two.repeatedRoomRefused && two.roomRoomGaugeRefused &&
+        two.repeatedRoomFinite && two.repeatedRoomError < 2.0e-6 &&
+        two.repeatedRoomPeak > 1.0e-8 &&
+        two.roomRoomGaugeFinite && two.roomRoomGaugePeak > 1.0e-8 &&
+        two.threeRoomMixedFinite && two.threeRoomMixedError < 2.0e-6 &&
+        two.threeRoomMixedPeak > 1.0e-6 &&
         complex.finite && complex.futureError < 2.0e-6 &&
         complex.pastError < 2.0e-6 && complex.mirrorDifference == 0.0 &&
         fractionalControlClockOk
       if pass then
         passGate "modal-oriented-patch"
-          "room reverse is kernel-local (not complete-output reverse); two rooms retain independent FF/FR/RF/RR controls and authored stage order; float-banked complex DD preserves future/past phase and exact mirroring; equal frozen RT60 takes a finite repeated-pole limit; general-degree terminals preserve polynomial factors; unsupported nonterminal DD crossings refuse; terminal controls retain fractional Q32.32 time"
+          "room reverse is kernel-local (not complete-output reverse); two rooms retain independent FF/FR/RF/RR controls and authored stage order; float-banked complex DD preserves future/past phase and exact mirroring; equal frozen RT60 takes a finite repeated-pole limit; general-degree terminals preserve polynomial factors; three equal rooms and a past·future·past chain cross through the block terminal; room-room-gauge renders through a materialized segment; terminal controls retain fractional Q32.32 time"
       else
         failGate "modal-oriented-patch" "numeric or structural contract failed"
   | .error error, _, _ | _, .error error, _ | _, _, .error error =>

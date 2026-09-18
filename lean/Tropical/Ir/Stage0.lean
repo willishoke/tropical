@@ -373,6 +373,18 @@ private def rebuildCore (plan : FlatPlan) (allBlocks : Array (Array NInstr))
         if let some w := boundaryWrite.get? idx then
           coeffStream := coeffStream.push w
       else
+        -- A fold-duplicated COLUMN fill (a `Pack`/`SetElement` of a hoisted
+        -- coefficient column seeded by a region that reads it) lives in the
+        -- coefficient stream ONLY. The f64 emit-time-folding rule that keeps
+        -- fold SCALARS in the audio kernel protects a constant folded into
+        -- downstream arithmetic; a column has no such consumer — both kernels
+        -- read it through `Index` on the shared, generation-buffered storage
+        -- the coefficient kernel fills (`coeffArraySlots`, derived below from
+        -- this very stream). An audio copy would be dead on the JIT and a
+        -- write to a read-only `constant` column on Metal. Its fold-temp args
+        -- stay behind (duplicated too; dead unless read elsewhere).
+        let dupColumn := a.needFold.contains idx &&
+          (match instr.dst with | .array _ => true | _ => false)
         if a.needFold.contains idx then
           coeffStream := coeffStream.push instr
         let instr' := match a.rewrites.get? idx with
@@ -383,7 +395,8 @@ private def rebuildCore (plan : FlatPlan) (allBlocks : Array (Array NInstr))
               let (slot, ty) := boundaryInfo.get! d
               args := args.set! pos (.slot slot ty)
             return { instr with args }
-        block' := block'.push instr'
+        if !dupColumn then
+          block' := block'.push instr'
       idx := idx + 1
     newBlocks := newBlocks.push block'
 
@@ -458,6 +471,14 @@ def hoist (plan : FlatPlan) : Split := Id.run do
 -- Typed placement — the split driven by the intern-time attribute
 -- ─────────────────────────────────────────────────────────────
 
+/-- The two region kinds placement moves as units: ordinary reductions
+    (`ReduceBegin`/`ReduceEnd`, scalar accumulator) and routed reductions
+    (`RoutedSumBegin`/`Yield`/`End`, an array image). -/
+private def isRegionBegin (i : NInstr) : Bool :=
+  i.tag == "ReduceBegin" || i.tag == "RoutedSumBegin"
+private def isRegionEnd (i : NInstr) : Bool :=
+  i.tag == "ReduceEnd" || i.tag == "RoutedSumEnd"
+
 /-- The stage-independent per-sample pins shared by BOTH placement layers
     (individual moves and whole-region moves): SESSION I/O arrays
     (`sessionArray*` — genuinely per-sample device/wire buffers) and the
@@ -484,20 +505,23 @@ private def overlayPinnedS1 (i : NInstr) : Bool :=
     the shared, coefficient-filled storage (`run_coeff` and `process` share
     `state.array_ptrs`). -/
 private def overlayS1 (i : NInstr) : Bool :=
-  i.tag == "ReduceBegin" || i.tag == "ReduceEnd"
+  isRegionBegin i || isRegionEnd i || i.tag == "RoutedSumYield"
   || overlayPinnedS1 i
   || i.args.any fun a => match a with | .loopIdx _ => true | _ => false
 
-/-- The matching `ReduceEnd` of the `ReduceBegin` at `b` in the linear
-    stream, DEPTH-COUNTING (regions nest): a nested `ReduceBegin` opens a
-    subregion whose own `ReduceEnd` must close before ours matches. A
-    missing `ReduceEnd` yields `none` and the region stays put. -/
+/-- The matching end of the region opened at `b` — `ReduceEnd` for a
+    `ReduceBegin`, `RoutedSumEnd` for a `RoutedSumBegin` — in the linear
+    stream, DEPTH-COUNTING both kinds (a reduce nests inside a routed span;
+    the emitter refuses a routed span nested in anything): a nested begin
+    opens a subregion whose own end must close before ours matches. A missing
+    or mismatched end yields `none` and the region stays put. -/
 private def findRegionEnd (flat : Array NInstr) (b : Nat) : Option Nat := Id.run do
+  let endTag := if flat[b]!.tag == "ReduceBegin" then "ReduceEnd" else "RoutedSumEnd"
   let mut depth : Nat := 0
   for i in [b+1:flat.size] do
-    if flat[i]!.tag == "ReduceBegin" then depth := depth + 1
-    else if flat[i]!.tag == "ReduceEnd" then
-      if depth == 0 then return some i
+    if isRegionBegin flat[i]! then depth := depth + 1
+    else if isRegionEnd flat[i]! then
+      if depth == 0 then return (if flat[i]!.tag == endTag then some i else none)
       depth := depth - 1
   return none
 
@@ -519,11 +543,16 @@ private def findRegionEnd (flat : Array NInstr) (b : Nat) : Option Nat := Id.run
     instruction of a loop moves alone; loop-invariant s0 body
     instructions still hoist individually, shrinking the region:
     staging-as-LICM). Layer 2 is the whole-region move (`tryRegion`): a
-    delimiter-matched `ReduceBegin`/`ReduceEnd` unit whose entire body is
-    coefficient-shaped hoists AS A UNIT, in original relative order, its
-    result crossing back through the ordinary scalar boundary (the
-    accumulator's reaching def is the `ReduceEnd`, so the existing
-    `coef:<n>` rewrite machinery applies unchanged). -/
+    delimiter-matched `ReduceBegin`/`ReduceEnd` or `RoutedSumBegin`/
+    `RoutedSumEnd` unit whose entire body is coefficient-shaped hoists AS A
+    UNIT, in original relative order. A reduce's result crosses back through
+    the ordinary scalar boundary (the accumulator's reaching def is the
+    `ReduceEnd`, so the existing `coef:<n>` rewrite machinery applies
+    unchanged); a routed span's image is an array slot the unit wholly owns,
+    so it becomes a coefficient column (`coeffArraySlots`, generation-
+    buffered, `buffer(3)` on Metal) read by the audio kernel's `Index`. A
+    routed span that does NOT move is pinned s1 wholesale — a routed body is
+    one mapped value per item and no member is ever peeled by layer 1. -/
 private def placementFromStages (blocks : Array (Array NInstr))
     (linStages : Array (Option Stage)) : Except String Analysis := do
   -- Prepass: per-slot and per-array-slot in-plan writers. An array slot whose
@@ -543,22 +572,14 @@ private def placementFromStages (blocks : Array (Array NInstr))
   if flat.size != linStages.size then
     throw s!"Stage0.placementFromStages: {flat.size} instructions but {linStages.size} stages"
 
-  -- Static routed reductions are indivisible placement regions.  Mark their
-  -- full delimiter spans once, then make the ordinary placement lattice see
-  -- every member as s1.  This prevents both delimiter/body separation and
-  -- accidental whole-region movement through an enclosing ordinary reduce.
-  let routedMask : Array Bool := Id.run do
-    let mut mask := Array.replicate flat.size false
-    let mut depth : Nat := 0
-    for i in [0:flat.size] do
-      if flat[i]!.tag == "RoutedSumBegin" then depth := depth + 1
-      if depth > 0 then mask := mask.set! i true
-      if flat[i]!.tag == "RoutedSumEnd" then depth := depth - 1
-    return mask
-
+  -- A routed span (`RoutedSumBegin`..`RoutedSumEnd`, an array image) is a
+  -- layer-2 candidate exactly like a reduce region. When it does NOT move as a
+  -- unit it is pinned s1 WHOLESALE below (`routedPinUntil`): its delimiters
+  -- and `loopIdx` readers are pinned by `overlayS1` like a reduce's, and its
+  -- other members must never be peeled by layer 1 either — a routed body is
+  -- one mapped value per item, indivisible by the emit contract.
   let stageAt (i : Nat) : Stage :=
-    if routedMask[i]! then .s1
-    else match linStages[i]? with
+    match linStages[i]? with
       | some (some s) => if overlayS1 flat[i]! then .s1 else s
       | _ => .s1
   -- Region-neutral value stage: for the WHOLE-REGION decision the
@@ -570,21 +591,26 @@ private def placementFromStages (blocks : Array (Array NInstr))
     | _ => .s1
 
   -- ── Layer 2: the whole-region move ──
-  -- At `b` = a `ReduceBegin` with matching `ReduceEnd` at `e`, decide
-  -- whether the ENTIRE delimiter-matched unit moves to the coefficient
-  -- stream. Conditions, checked as an aggregate:
+  -- At `b` = a `ReduceBegin` or `RoutedSumBegin` with matching end at `e`,
+  -- decide whether the ENTIRE delimiter-matched unit moves to the
+  -- coefficient stream. Conditions, checked as an aggregate:
   --   1. every instruction's VALUE stage is ≤ s0 under the region-neutral
   --      overlay (`loopIdx` counts as stage-neutral for this check only —
   --      it is defined by the region itself; a τ-reading body is s1 by
   --      attribute and keeps the region in the audio kernel);
   --   2. every dst is a plain temp (the accumulator and body SSA temps —
-  --      internal to the unit; no slot/array writes move this way, v1);
+  --      internal to the unit), OR an `.array s` whose writers ALL lie in
+  --      `[b..e]` — a routed span's image (Begin zero-fills, Yield
+  --      accumulates, End closes) or a fill region's column: the hoisted
+  --      unit then owns the whole column, which becomes a coefficient
+  --      column (generation-buffered, read by the audio kernel's `Index`
+  --      through the shared `array_ptrs`; no `coef:` slot);
   --   3. availability holds for the aggregate: every temp/slot the region
   --      reads from OUTSIDE itself is hoisted, fold-duplicable, or
   --      external (the individual pass's discipline), and every array it
-  --      reads has ALL its fills already hoisted — the shared-`array_ptrs`
-  --      crossing (a fill kept in the audio kernel, e.g. a fold Pack under
-  --      the EmitMsl f64 rule, keeps the region there too: the coefficient
+  --      reads has ALL its fills already hoisted, fold-duplicable, or
+  --      inside this unit — the shared-`array_ptrs` crossing (a fill kept
+  --      in the audio kernel keeps the region there too: the coefficient
   --      kernel must never read a column only the audio kernel fills);
   --   4. the dynamic-count operand (`ReduceBegin` args[1], trip-count-as-
   --      data), when present, is an ordinary operand, so rule 3 covers it
@@ -603,6 +629,9 @@ private def placementFromStages (blocks : Array (Array NInstr))
       if regionStageAt i == .s1 then return none
       match instr.dst with
       | .temp _ => pure ()
+      | .array s =>
+        if !((arrayWriters.getD s #[]).all fun w => b ≤ w && w ≤ e) then
+          return none
       | _ => return none
       for arg in instr.args do
         match arg with
@@ -625,14 +654,16 @@ private def placementFromStages (blocks : Array (Array NInstr))
         | .arrayReg s =>
           let ws := arrayWriters.getD s #[]
           -- A table the region reads must be a coefficient column: every fill
-          -- either already hoisted, or a fold Pack — pure constants, which
+          -- either already hoisted, a fold Pack — pure constants, which
           -- DUPLICATE into the coefficient stream exactly like fold scalars
-          -- (the audio original stays behind for the EmitMsl f64 emit-time
-          -- folding rule; both copies write the same constant column).
+          -- (coefficient-stream only; `rebuildCore` drops the audio copy) —
+          -- or inside THIS unit (a routed span reading its own image, a fill
+          -- region's `SetElement` reading its own column).
           if ws.isEmpty then return none
-          else if ws.all fun w => w < b && (hoisted[w]! || stageAt w == .fold) then
+          else if ws.all fun w => (w < b && (hoisted[w]! || stageAt w == .fold))
+              || (b ≤ w && w ≤ e) then
             for w in ws do
-              if !(hoisted[w]!) then seeds := seeds.push w
+              if w < b && !(hoisted[w]!) then seeds := seeds.push w
           else
             return none
         | .loopIdx _ => pure ()                    -- defined by the unit (any id: ours or a nested subregion's)
@@ -648,19 +679,24 @@ private def placementFromStages (blocks : Array (Array NInstr))
   let mut rewrites : HashMap Nat (Array (Nat × Nat)) := {}
   let mut tempDef : HashMap Nat Nat := {}
   let mut dupSeeds : Array Nat := #[]
-  -- The matching `ReduceEnd` index while inside a whole-region move.
+  -- The matching end index while inside a whole-region move.
   let mut regionEnd : Option Nat := none
   -- Only OUTERMOST regions are whole-move candidates (nested v1 policy): a
   -- nested subregion moves with its enclosing unit (it lies inside [b..e])
   -- and is never considered separately. When an outermost region STAYS, its
   -- matching end is recorded here so the begins nested inside it are skipped.
   let mut noRegionUntil : Nat := 0
+  -- A routed span that is not moving as a unit (declined, nested in a staying
+  -- region, or unmatched) is pinned s1 through its end: no member is ever
+  -- peeled by the individual walk.
+  let mut routedPinUntil : Option Nat := none
+  let mut pinned : Array Bool := #[]
   for idx in [0:flat.size] do
     let instr := flat[idx]!
-    -- Whole-region decision at each OUTERMOST `ReduceBegin`. Region
-    -- membership is derived from depth-counted delimiter matching in the
-    -- linear stream (`findRegionEnd`).
-    if regionEnd.isNone && idx ≥ noRegionUntil && instr.tag == "ReduceBegin" then
+    -- Whole-region decision at each OUTERMOST region begin (`ReduceBegin` or
+    -- `RoutedSumBegin`). Region membership is derived from depth-counted
+    -- delimiter matching in the linear stream (`findRegionEnd`).
+    if regionEnd.isNone && idx ≥ noRegionUntil && isRegionBegin instr then
       if let some e := findRegionEnd flat idx then
         match tryRegion idx e hoisted tempDef with
         | some regionSeeds =>
@@ -668,8 +704,12 @@ private def placementFromStages (blocks : Array (Array NInstr))
           dupSeeds := dupSeeds ++ regionSeeds
         | none =>
           noRegionUntil := e + 1
+    if regionEnd.isNone && routedPinUntil.isNone && instr.tag == "RoutedSumBegin" then
+      routedPinUntil := some ((findRegionEnd flat idx).getD (flat.size - 1))
     let inRegion := regionEnd.isSome
-    let stage := stageAt idx
+    let isPinned := routedPinUntil.any (idx ≤ ·)
+    pinned := pinned.push isPinned
+    let stage := if isPinned then .s1 else stageAt idx
     -- Availability of every read, given the placement so far (skipped
     -- inside a moving region — `tryRegion` checked the aggregate).
     let mut avail := true
@@ -692,6 +732,17 @@ private def placementFromStages (blocks : Array (Array NInstr))
             else if w < idx && stageAt w == .fold then seeds := seeds.push w
             else avail := false
           | _ => avail := false                   -- multi-writer: stay
+        | .arrayReg s =>
+          -- An s0 read of an array hoists only if every fill of that column
+          -- is already hoisted or a fold fill (duplicated into the coefficient
+          -- stream, as for a whole region): a coefficient-stream reader of an
+          -- audio-filled column would see never-run storage at coefficient-run
+          -- time — the shared-`array_ptrs` hazard rule 3 enforces for regions.
+          let ws := arrayWriters.getD s #[]
+          if ws.all fun w => w < idx && (hoisted[w]! || stageAt w == .fold) then
+            for w in ws do
+              if !(hoisted[w]!) then seeds := seeds.push w
+          else avail := false
         | _ => pure ()
     let hoist := inRegion || (stage == .s0 && avail &&
       (match instr.dst with
@@ -723,6 +774,7 @@ private def placementFromStages (blocks : Array (Array NInstr))
       tempDef := tempDef.insert t idx
     | _ => defMeta := defMeta.push none
     if regionEnd == some idx then regionEnd := none
+    if routedPinUntil == some idx then routedPinUntil := none
 
   -- Duplication closure over fold support: temp defs and sole-writer
   -- slot writes referenced (transitively) by hoisted instructions.
@@ -770,7 +822,8 @@ private def placementFromStages (blocks : Array (Array NInstr))
       match defMeta[d]! with
       | some (t, ty) => boundary := boundary.push (d, t, ty)
       | none => throw "Stage0.placementFromStages: boundary def is not a temp def"
-  let stages := (Array.range flat.size).map stageAt
+  let stages := (Array.range flat.size).map fun i =>
+    if pinned[i]! then .s1 else stageAt i
   return { stages, hoisted, needFold, boundary, rewrites }
 
 /-- Split a plan via the TYPED per-instruction stages (the partitioner's
