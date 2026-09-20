@@ -16,34 +16,42 @@ far side. That is **through-zero flanging** (TZF), and every digital
 flanger that does *not* do it is poorer for the same reason: it cannot,
 without paying a cost the tape machines paid invisibly.
 
-## A flanger is a comb
+## Two copies, slightly apart
 
-Sum a signal with a delayed copy of itself,
-
-$$ y(\tau) \;=\; x(\tau - d_A) \;+\; x(\tau - d_B), \qquad \Delta \;=\; d_A - d_B, $$
-
-and the magnitude response depends only on the *relative* delay $\Delta$:
-
-$$ |H(\omega)| \;=\; \bigl|\,1 + e^{-j\omega\Delta}\,\bigr| \;=\; 2\,\bigl|\cos(\tfrac{1}{2}\omega\Delta)\bigr|. $$
-
-The cosine puts notches wherever the two copies are half a cycle out of
-phase — at frequencies $f_k = (2k+1)/(2\Delta)$. A large $\Delta$ packs
-the notches close together; a small $\Delta$ spreads them out; and as
-$\Delta \to 0$ the first notch runs off to infinity and the response
-flattens to a uniform $2\times$ — the two copies have become one, and
-everything reinforces.
+Everything a flanger does comes from one small fact about adding a sound
+to a slightly late copy of itself. Fix on a single frequency in the sound.
+If the copy is delayed by exactly half of that frequency's cycle, it
+arrives crest-against-trough and the two cancel to nothing; if it is
+delayed by a whole cycle, it arrives crest-against-crest and they
+reinforce. The same fixed delay is a different fraction of every
+frequency's cycle, so across the spectrum the sum comes out as a row of
+evenly spaced nulls — deep notches, total cancellation — with
+reinforcement in the bands between them. That row of notches is the comb,
+and it is the entire sound of a flanger: a hollow, metallic coloration
+that is nothing more than a set of missing frequencies.
 
 ![The flanger comb](figures/comb.svg)
 
-*Figure 1. The comb $|H(f)| = 2|\cos(\pi f\Delta)|$. Halving the delay
-doubles the notch spacing; in the limit $\Delta \to 0$ the notches leave
-the audible band entirely and the copies sum in phase.*
+*Figure 1. Adding a signal to a delayed copy cancels the frequencies that
+fall half a cycle out of step and reinforces the ones that fall in step —
+a comb of notches whose spacing is set by the length of the delay alone.*
 
-An ordinary flanger modulates $\Delta$ with an LFO — but keeps it
-strictly positive. The delayed tap is always *behind* the dry signal,
-never level with it, never ahead. So the notches breathe up and down
-within bounded bands; the lowest one bounces off some minimum frequency
-and turns around. It never sweeps through DC.
+How far apart those notches sit is fixed entirely by the delay — call it
+$\Delta$, the gap between the two copies. Lengthen $\Delta$ and the notches
+crowd together; shorten it and they spread apart; let $\Delta$ fall all the
+way to zero and the lowest notch climbs up out of hearing until the comb
+goes flat — the copy has caught the original, the two are one signal, and
+every frequency reinforces at once. Sweep $\Delta$ slowly with a low
+oscillator and the whole comb glides up and down the spectrum. That gliding
+rake of cancellations, drawn across the sound, is the flange.
+
+An ordinary flanger sweeps $\Delta$ but never lets it reach zero: the copy
+stays behind the original, always late, never level and never early. So
+the comb can only breathe within limits — its lowest notch sinks toward a
+floor and turns back before the comb can open. Getting it to open all the
+way — through the instant the copy draws level, the notches scatter upward
+out of hearing, and the comb dissolves into pure reinforcement — is the
+whole game. It is also where the trouble starts.
 
 ## Through zero
 
