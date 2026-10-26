@@ -24,6 +24,7 @@ rev = "main"
 [[lean_lib]]
 name = "TropicalCore"
 globs = [
+  "Tropical.Artifact",
   "Tropical.Compile",
   "Tropical.EmitArrow.*",
   "Tropical.Entries",

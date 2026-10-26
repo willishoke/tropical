@@ -12,7 +12,7 @@ import Tropical.Ir.Core
 import Tropical.Ir.WireProgram
 import Tropical.Ir.EmitLlvm
 import Tropical.Ir.EmitMsl
-import Tropical.StagedLoad
+import Tropical.Artifact
 import Tropical.Compile
 import Tropical.Entries
 import Tropical.Playground

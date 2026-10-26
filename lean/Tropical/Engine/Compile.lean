@@ -69,40 +69,22 @@ def buildKernelIr (plan : Tropical.Plan.FlatPlan) : EngineM (String × String) :
     | .ok s => pure s
   pure (ir, planJson)
 
-private structure KernelLoadArtifacts where
-  ir : String
-  msl : String
-  coeffIr : String
-  tileIr : String
-  manifest : String
-
 private def buildLoadArtifacts (plan : Tropical.Plan.FlatPlan)
     (stages? : Option (Array (Array (Option Tropical.Ir.Stage))))
-    (emitMsl : Bool) : EngineM KernelLoadArtifacts := do
+    (emitMsl : Bool) : EngineM Tropical.Artifact.KernelArtifact := do
   let split ← match stages? with
-    | some blocks => Tropical.StagedLoad.splitTyped plan blocks
-    | none => Tropical.StagedLoad.split plan
+    | some blocks => Tropical.Artifact.splitTyped plan blocks
+    | none => Tropical.Artifact.split plan
   if emitMsl then
-    let parts ← match Tropical.StagedLoad.emitMetalParts split with
+    match Tropical.Artifact.emitMetal split with
       | .error msg => internalError s!"Emit Metal artifacts: {msg}"
-      | .ok parts => pure parts
-    pure {
-      ir := parts.audioIr
-      msl := parts.msl
-      coeffIr := parts.coefficientIr
-      tileIr := parts.tileIr
-      manifest := parts.manifest }
+      | .ok artifact => pure artifact
   else
     let (ir, manifest) ← buildKernelIr split.audio
-    let coeffIr ← match Tropical.StagedLoad.coeffIr split with
+    let coefficientIr ← match Tropical.Artifact.coeffIr split with
       | .error msg => internalError s!"EmitLlvm (coeff): {msg}"
       | .ok s => pure s
-    pure {
-      ir := ir
-      msl := ""
-      coeffIr := coeffIr
-      tileIr := ""
-      manifest := manifest }
+    pure { ir, coefficientIr, manifest }
 
 /-- Emit the plan's kernel artifacts and load them into the runtime: the
     stage-0 split first (Stage0.hoist, gated by `TROPICAL_STAGE0`), then
@@ -120,15 +102,15 @@ def loadKernelPublished (env : Env) (plan : Tropical.Plan.FlatPlan)
   let artifact ← buildLoadArtifacts plan stages? env.metalBackend
   if artifact.tileIr.isEmpty then
     env.runtime.loadIrTimeStagedGeneration
-      artifact.ir artifact.msl artifact.coeffIr artifact.tileIr artifact.manifest
+      artifact.ir artifact.msl artifact.coefficientIr artifact.tileIr artifact.manifest
   else
     -- The compact Metal artifact deliberately no longer contains the exact
     -- coefficient path. Retain the unsplit JIT realization as both the
     -- observation oracle and worker-only numerical fallback image.
     let exact ← buildLoadArtifacts plan stages? false
     env.runtime.loadIrTimeStagedWithObservationGeneration
-      artifact.ir artifact.msl artifact.coeffIr artifact.tileIr artifact.manifest
-      exact.ir exact.coeffIr exact.manifest
+      artifact.ir artifact.msl artifact.coefficientIr artifact.tileIr artifact.manifest
+      exact.ir exact.coefficientIr exact.manifest
 
 /-- Compatibility form for compile paths whose replies do not expose the
     publication identity. -/
@@ -149,8 +131,8 @@ def loadKernelWithObservationPublished (env : Env)
   let observation ←
     buildLoadArtifacts observationPlan (some observationStages) false
   env.runtime.loadIrTimeStagedWithObservationGeneration
-    audio.ir audio.msl audio.coeffIr audio.tileIr audio.manifest
-    observation.ir observation.coeffIr observation.manifest
+    audio.ir audio.msl audio.coefficientIr audio.tileIr audio.manifest
+    observation.ir observation.coefficientIr observation.manifest
 
 -- ── Snapshot compile (`wire()` in TS) ────────────────────────────────────────
 

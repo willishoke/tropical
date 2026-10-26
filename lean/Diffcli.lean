@@ -136,7 +136,7 @@ def renderGraph (args : List String) : IO UInt32 := do
         IO.FS.writeFile path wire.compress
         IO.eprintln s!"render-graph: wrote plan to {path}"
         return 0
-    let split ← Tropical.StagedLoad.splitTyped compiled.plan compiled.stageBlocks
+    let split ← Tropical.Artifact.splitTyped compiled.plan compiled.stageBlocks
     IO.eprintln s!"render-graph: hoisted columns={split.audio.coeffArraySlots.size}"
     -- `--stage-census`: how the typed stages and the split distribute the plan
     if args.contains "--stage-census" then
