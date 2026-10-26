@@ -8,11 +8,66 @@ name = "turnstile"
 git = "https://github.com/willishoke/turnstile"
 rev = "main"
 
-# The Tropical library — everything but the executable entry point. The
-# TS→Lean port lands here module by module (Json today; Errors, Session,
-# Engine, Ir/*, Strata/*, Emit/* as the phases proceed).
+# The Tropical libraries, layered so dependencies point inward. Membership
+# is by glob; the allowed direction between libraries is enforced by
+# `tools/check_layers.py` (run by `make validate`):
+#
+#   TropicalCore     the compiler: IR, lowering, emitters, semantics, the
+#                    pure session compile. Imports nothing outside itself.
+#   TropicalHost     the runtime binding (Ffi) and the staged loaders.
+#   TropicalSession  the session engine and its adapters: MCP tools and
+#                    resources, RPC, the control socket.
+#   TropicalTest     proofs, witnesses, the tropicaltest suites.
+#
+# Executable roots below are composition roots and may import any layer;
+# only they link libtropical.
 [[lean_lib]]
-name = "Tropical"
+name = "TropicalCore"
+globs = [
+  "Tropical.Compile",
+  "Tropical.EmitArrow.*",
+  "Tropical.Entries",
+  "Tropical.Errors",
+  "Tropical.Exact.*",
+  "Tropical.Expr",
+  "Tropical.Ir.+",
+  "Tropical.Lowering",
+  "Tropical.Parse.+",
+  "Tropical.Plan",
+  "Tropical.PlanDecode",
+  "Tropical.Playground.*",
+  "Tropical.Semantics.*",
+  "Tropical.Session",
+  "Tropical.Stdlib",
+  "Tropical.StdlibChain",
+  "Tropical.WireExpr",
+  "Tropical.Wiring",
+]
+
+[[lean_lib]]
+name = "TropicalHost"
+globs = ["Tropical.Ffi", "Tropical.StagedLoad"]
+
+[[lean_lib]]
+name = "TropicalSession"
+globs = [
+  "Tropical",
+  "Tropical.Engine.*",
+  "Tropical.Frontend",
+  "Tropical.Resources",
+  "Tropical.Rpc",
+  "Tropical.Serve",
+  "Tropical.Tools",
+]
+
+[[lean_lib]]
+name = "TropicalTest"
+globs = [
+  "Tropical.Proofs",
+  "Tropical.Testing.+",
+  "Tropical.Trust",
+  "Tropical.Tropicaltest.+",
+]
 
 # Native link: the FFI shim object (built by `make lean` via leanc) and
 # libtropical from the CMake build. Paths are relative to this package

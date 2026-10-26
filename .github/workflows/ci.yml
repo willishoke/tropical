@@ -74,6 +74,9 @@ jobs:
       - name: Audit typed trust sites against production Lean
         run: python3 tools/audit_trust_sites.py
 
+      - name: Lean library layering (TropicalCore never imports the runtime)
+        run: python3 tools/check_layers.py
+
       - name: Golden + native-equiv runner
         run: ./lean/.lake/build/bin/tropicaltest
 

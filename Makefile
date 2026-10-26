@@ -55,6 +55,7 @@ clean:
 validate: build lean
 	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build diffcli tropicaltest trustreport phasercheck
 	$(PYTHON) tools/audit_trust_sites.py
+	$(PYTHON) tools/check_layers.py
 	./lean/.lake/build/bin/tropicaltest
 	bun web/build_patches.ts
 	TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test
