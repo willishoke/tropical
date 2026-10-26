@@ -14,13 +14,17 @@ rev = "main"
 #
 #   TropicalCore     the compiler: IR, lowering, emitters, semantics, the
 #                    pure session compile. Imports nothing outside itself.
-#   TropicalHost     the runtime binding (Ffi) and the staged loaders.
-#   TropicalSession  the session engine and its adapters: MCP tools and
-#                    resources, RPC, the control socket.
+#                    Includes the host port the engine drives.
+#   TropicalHost     the runtime binding (Ffi), its HostPort adapter, and
+#                    the staged loaders.
+#   TropicalSession  the session engine and its MCP tools, resources and
+#                    RPC dispatch. Imports only the core: it reaches the
+#                    runtime through the port, never through Ffi.
+#   TropicalApp      composition roots: native boot, the MCP front door,
+#                    the control socket.
 #   TropicalTest     proofs, witnesses, the tropicaltest suites.
 #
-# Executable roots below are composition roots and may import any layer;
-# only they link libtropical.
+# Executable roots below may import any layer; only they link libtropical.
 [[lean_lib]]
 name = "TropicalCore"
 globs = [
@@ -31,6 +35,7 @@ globs = [
   "Tropical.Errors",
   "Tropical.Exact.*",
   "Tropical.Expr",
+  "Tropical.HostPort",
   "Tropical.Ir.+",
   "Tropical.Lowering",
   "Tropical.Parse.+",
@@ -47,18 +52,24 @@ globs = [
 
 [[lean_lib]]
 name = "TropicalHost"
-globs = ["Tropical.Ffi", "Tropical.StagedLoad"]
+globs = ["Tropical.Ffi", "Tropical.NativeHost", "Tropical.StagedLoad"]
 
 [[lean_lib]]
 name = "TropicalSession"
 globs = [
-  "Tropical",
   "Tropical.Engine.*",
-  "Tropical.Frontend",
   "Tropical.Resources",
   "Tropical.Rpc",
-  "Tropical.Serve",
   "Tropical.Tools",
+]
+
+[[lean_lib]]
+name = "TropicalApp"
+globs = [
+  "Tropical",
+  "Tropical.Frontend",
+  "Tropical.NativeBoot",
+  "Tropical.Serve",
 ]
 
 [[lean_lib]]

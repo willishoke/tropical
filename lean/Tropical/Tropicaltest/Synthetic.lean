@@ -563,7 +563,7 @@ private def playgroundProbe : Lean.Json :=
 
 private def compileSessionProbe (path : String) :
     IO (Except String FlatPlan) := do
-  let env ← Tropical.Engine.boot
+  let env ← Tropical.NativeBoot.boot
   let action : Tropical.EngineM FlatPlan := do
     let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", .str path)])
     Tropical.Engine.compileMirrorFlatPlan env .fused
@@ -572,7 +572,7 @@ private def compileSessionProbe (path : String) :
   | .error failure => pure (.error failure.toJson.compress)
 
 private def compileExportProbe : IO (Except String FlatPlan) := do
-  let env ← Tropical.Engine.boot
+  let env ← Tropical.NativeBoot.boot
   let action : Tropical.EngineM FlatPlan := do
     let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [
       ("path", .str "web/patches/pure-sine-440.json")])
@@ -678,7 +678,7 @@ def sortedNames (dir : String) (suffix : String) : IO (Array String) := do
 def compilePatchStaged (path : String) :
     IO (Except String (Tropical.Plan.FlatPlan
       × Array (Array (Option Tropical.Ir.Stage)))) := do
-  let env ← Tropical.Engine.boot
+  let env ← Tropical.NativeBoot.boot
   let act : Tropical.EngineM _ := do
     let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str path)])
     Tropical.Engine.compileMirrorStaged env .fused

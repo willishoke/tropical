@@ -8,6 +8,7 @@ import Tropical.Ir.EmitMsl
 import Tropical.StagedLoad
 import Tropical.PlanDecode
 import Tropical.Engine
+import Tropical.NativeBoot
 import Tropical.EmitArrow
 import Tropical.Stdlib
 import Tropical.Testing.ArrowFixtures
@@ -263,7 +264,7 @@ def compileVerb (args : List String) : IO UInt32 := do
   let some mode := Tropical.Plan.CompilationMode.ofWire? modeStr
     | IO.eprintln s!"unknown compilation mode: {modeStr}"
       return 1
-  let env ← Tropical.Engine.boot
+  let env ← Tropical.NativeBoot.boot
   let act : Tropical.EngineM String := do
     if args.contains "--fixtures" then Tropical.Engine.registerTestFixtures env
     let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str patch)])
@@ -282,7 +283,7 @@ def compileVerb (args : List String) : IO UInt32 := do
     them by name. -/
 private def compileToFlatPlan (patch : String) (fixtures : Bool := false) :
     IO (Except String Tropical.Plan.FlatPlan) := do
-  let env ← Tropical.Engine.boot
+  let env ← Tropical.NativeBoot.boot
   let act : Tropical.EngineM Tropical.Plan.FlatPlan := do
     if fixtures then Tropical.Engine.registerTestFixtures env
     let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str patch)])

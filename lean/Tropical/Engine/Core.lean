@@ -1,6 +1,5 @@
 import Std.Data.HashMap
 import Tropical.Errors
-import Tropical.Ffi
 import Tropical.Expr
 import Tropical.Wiring
 import Tropical.Session
@@ -12,7 +11,7 @@ import Tropical.Ir.Core
 import Tropical.Ir.WireProgram
 import Tropical.Ir.EmitLlvm
 import Tropical.Ir.EmitMsl
-import Tropical.Artifact
+import Tropical.HostPort
 import Tropical.Compile
 import Tropical.Entries
 import Tropical.Playground
@@ -20,7 +19,7 @@ import Tropical.Playground
 /-!
 # Engine.Core — session env, tool-arg access, and lookup vocabulary
 
-`Env` (the runtime handle: session store, native runtime, DAC, params) and
+`Env` (the runtime handle: session store, host port, DAC, params) and
 `EngineM`, plus the shared helpers every tool handler draws on: typed
 tool-argument access over `Json`, the instance/port lookup helpers with their
 ported failure shapes, and `adaptInputExpr` (input type-check + auto-broadcast).
@@ -36,10 +35,11 @@ open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
 structure Env where
   state   : IO.Ref SessionSt
-  /-- The native FlatRuntime this engine owns: plans load here; the DAC
-      reads from it; param slots are driven on it. -/
-  runtime : Ffi.Runtime
-  dac     : IO.Ref (Option Ffi.Dac)
+  /-- The runtime this engine drives, as a port: plans publish here; the
+      DAC reads from it; param slots are driven on it. The composition root
+      (`Tropical.NativeBoot`) supplies it. -/
+  host    : Tropical.Host.HostPort
+  dac     : IO.Ref (Option Tropical.Host.DacPort)
   /-- `TROPICAL_BACKEND=metal` at boot: every session compile dual-loads
       (LLVM IR → JIT + MSL → GPU pipeline) and audio dispatches on Metal.
       The JIT keeps serving render_window/the scope either way. -/

@@ -8,9 +8,10 @@ Executable roots (`[[lean_exe]]`) are composition roots and may import
 anything. Every local module must belong to exactly one library or be an
 executable root.
 
-The rule that matters: TropicalCore imports only TropicalCore (plus the
+The rules that matter: TropicalCore imports only TropicalCore (plus the
 Lean toolchain), so the runtime binding `Tropical.Ffi` can never enter
-the compiler core's import closure.
+the compiler core's import closure; and TropicalSession imports only the
+core, so the session engine reaches the runtime through its host port.
 """
 
 from __future__ import annotations
@@ -28,8 +29,9 @@ LEAN = ROOT / "lean"
 ALLOWED = {
     "TropicalCore": set(),
     "TropicalHost": {"TropicalCore"},
-    "TropicalSession": {"TropicalCore", "TropicalHost"},
-    "TropicalTest": {"TropicalCore", "TropicalHost", "TropicalSession"},
+    "TropicalSession": {"TropicalCore"},
+    "TropicalApp": {"TropicalCore", "TropicalHost", "TropicalSession"},
+    "TropicalTest": {"TropicalCore", "TropicalHost", "TropicalSession", "TropicalApp"},
 }
 
 # External import roots a library may use. Libraries not listed may use any.

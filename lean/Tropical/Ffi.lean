@@ -1,3 +1,5 @@
+import Tropical.HostPort
+
 /-!
 # Native FFI — the engine talks to libtropical directly
 
@@ -19,6 +21,8 @@ next recompile, which Phase 2 fixes by writing the slot.)
 -/
 
 namespace Tropical.Ffi
+
+open Tropical.Host (PublishedGeneration DacStats DeviceInfo)
 
 private opaque RuntimePointed : NonemptyType
 /-- A `tropical_runtime_t` (FlatRuntime): the hot-swappable kernel host. -/
@@ -110,12 +114,6 @@ def Runtime.slotIndex? (rt : Runtime) (name : String) : IO (Option UInt32) := do
 @[extern "shim_runtime_load_ir_staged"]
 opaque Runtime.loadIrStagedRaw (rt : @& Runtime) (irText : @& String) (mslSource : @& String)
     (coeffIr : @& String) (manifestJson : @& String) : IO Bool
-
-/-- Exact immutable program/control identity created by one runtime load. -/
-structure PublishedGeneration where
-  programVersion : UInt64
-  controlVersion : UInt64
-deriving Repr, BEq
 
 @[extern "shim_runtime_load_ir_staged_generation"]
 private opaque Runtime.loadIrStagedGenerationRaw
@@ -265,13 +263,6 @@ structure Dac where
   handle  : DacHandle
   runtime : Runtime
 
-structure DacStats where
-  callbackCount : UInt64
-  avgCallbackMs : Float
-  maxCallbackMs : Float
-  underrunCount : UInt64
-  overrunCount  : UInt64
-
 namespace Dac
 
 def fromRuntime (rt : Runtime) (sampleRate channels : UInt32) : IO Dac := do
@@ -307,10 +298,6 @@ opaque audioDeviceName (deviceId : UInt32) : IO String
 
 @[extern "shim_audio_default_output_device"]
 opaque audioDefaultOutputDevice : IO UInt32
-
-structure DeviceInfo where
-  id   : UInt32
-  name : String
 
 def listDevices : IO (Array DeviceInfo) := do
   let ids ← audioDeviceIds

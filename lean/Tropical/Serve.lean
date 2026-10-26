@@ -1,7 +1,6 @@
-import Tropical.Engine
+import Tropical.NativeBoot
 import Tropical.Rpc
 import Tropical.Resources
-import Tropical.Ffi
 
 /-!
 # `--serve` mode — the C++-owned socket endpoint
@@ -22,8 +21,8 @@ namespace Tropical.Serve
 open Lean (Json)
 
 def run (addr : String) : IO Unit := do
-  let env ← Engine.boot
-  let sock ← Ffi.Socket.listen env.runtime addr
+  let (runtime, env) ← NativeBoot.bootWithRuntime
+  let sock ← Ffi.Socket.listen runtime addr
   IO.eprintln s!"tropical: serving on {addr}"
   repeat
     match ← Ffi.Socket.nextControl sock with

@@ -98,19 +98,16 @@ private def buildLoadArtifacts (plan : Tropical.Plan.FlatPlan)
     IR path. -/
 def loadKernelPublished (env : Env) (plan : Tropical.Plan.FlatPlan)
     (stages? : Option (Array (Array (Option Tropical.Ir.Stage))) := none) :
-    EngineM Ffi.PublishedGeneration := do
+    EngineM Tropical.Host.PublishedGeneration := do
   let artifact ← buildLoadArtifacts plan stages? env.metalBackend
   if artifact.tileIr.isEmpty then
-    env.runtime.loadIrTimeStagedGeneration
-      artifact.ir artifact.msl artifact.coefficientIr artifact.tileIr artifact.manifest
+    env.host.publish artifact
   else
     -- The compact Metal artifact deliberately no longer contains the exact
     -- coefficient path. Retain the unsplit JIT realization as both the
     -- observation oracle and worker-only numerical fallback image.
     let exact ← buildLoadArtifacts plan stages? false
-    env.runtime.loadIrTimeStagedWithObservationGeneration
-      artifact.ir artifact.msl artifact.coefficientIr artifact.tileIr artifact.manifest
-      exact.ir exact.coefficientIr exact.manifest
+    env.host.publishWithObservation artifact exact
 
 /-- Compatibility form for compile paths whose replies do not expose the
     publication identity. -/
@@ -126,13 +123,11 @@ def loadKernel (env : Env) (plan : Tropical.Plan.FlatPlan)
 def loadKernelWithObservationPublished (env : Env)
     (audioPlan observationPlan : Tropical.Plan.FlatPlan)
     (audioStages observationStages : Array (Array (Option Tropical.Ir.Stage))) :
-    EngineM Ffi.PublishedGeneration := do
+    EngineM Tropical.Host.PublishedGeneration := do
   let audio ← buildLoadArtifacts audioPlan (some audioStages) env.metalBackend
   let observation ←
     buildLoadArtifacts observationPlan (some observationStages) false
-  env.runtime.loadIrTimeStagedWithObservationGeneration
-    audio.ir audio.msl audio.coefficientIr audio.tileIr audio.manifest
-    observation.ir observation.coefficientIr observation.manifest
+  env.host.publishWithObservation audio observation
 
 -- ── Snapshot compile (`wire()` in TS) ────────────────────────────────────────
 

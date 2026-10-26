@@ -34,7 +34,7 @@ private def validatePositiveInt (v : Option Json) (param : String)
 private def containsSub (hay needle : String) : Bool :=
   needle.isEmpty || (hay.splitOn needle).length > 1
 
-private def isRunningJson (dac : Ffi.Dac) : EngineM Json := do
+private def isRunningJson (dac : Tropical.Host.DacPort) : EngineM Json := do
   pure <| Json.mkObj [("is_running", Json.bool (← dac.isRunning))]
 
 def handleStartAudio (env : Env) (args : Json) : EngineM Json := do
@@ -43,12 +43,12 @@ def handleStartAudio (env : Env) (args : Json) : EngineM Json := do
     | none =>
       let sampleRate ← validatePositiveInt (arg? args "sample_rate") "sample_rate" 44100
       let channels   ← validatePositiveInt (arg? args "channels") "channels" 2
-      let d ← Ffi.Dac.fromRuntime env.runtime sampleRate.toUInt32 channels.toUInt32
+      let d ← env.host.openDac sampleRate.toUInt32 channels.toUInt32
       env.dac.set (some d)
       pure d
   match argStr? args "device_name" with
   | some deviceName =>
-    let devices ← Ffi.listDevices
+    let devices ← env.host.listDevices
     let lower := deviceName.toLower
     match devices.find? (fun d => containsSub d.name.toLower lower) with
     | none =>
@@ -81,10 +81,10 @@ def handleAudioStatus (env : Env) : EngineM Json := do
       ("backend", Json.str backend)]
   | some dac =>
     let stats ← dac.stats
-    let sampleRate ← env.runtime.sampleRate
+    let sampleRate ← env.host.sampleRate
     let bufferFrames ← dac.bufferFrames
-    let metalRenderTimeNs ← env.runtime.metalRenderTimeNs
-    let metalRenderedFrames ← env.runtime.metalRenderedFrameCount
+    let metalRenderTimeNs ← env.host.metalRenderTimeNs
+    let metalRenderedFrames ← env.host.metalRenderedFrameCount
     pure <| Json.mkObj [
       ("is_running", Json.bool (← dac.isRunning)),
       ("is_reconnecting", Json.bool (← dac.isReconnecting)),
@@ -114,8 +114,8 @@ def handleSetParam (env : Env) (args : Json) : EngineM Json := do
     | .num n => pure n.toFloat
     | _ => internalError s!"set_param: value must be a number, got {valueJ.compress}"
   env.state.modify (·.setParamValue name valueJ)
-  if let some idx := ← env.runtime.slotIndex? s!"param:{name}" then
-    env.runtime.setSlot idx value
+  if let some idx := ← env.host.slotIndex? s!"param:{name}" then
+    env.host.setSlot idx value
   pure <| Json.mkObj [("name", Json.str name), ("value", valueJ)]
 
 /-- Apply the glide discipline for `set_param`: a CLOSED-FORM parameter ramp
@@ -133,24 +133,24 @@ private def applyParamGlide (env : Env) (args : Json) : EngineM Json := do
     | some (.num n) => pure n.toFloat
     | _ => internalError "set_param: glide value must be a number"
   let slotOf (sfx : String) : EngineM (Option UInt32) :=
-    env.runtime.slotIndex? s!"param:{name}#{sfx}"
+    env.host.slotIndex? s!"param:{name}#{sfx}"
   let some _ := ← slotOf "v0"
     | internalError s!"set_param: no glide slots for '{name}'"
   let read (sfx : String) : EngineM Float := do
-    match ← slotOf sfx with | some i => env.runtime.getSlot i | none => pure 0.0
+    match ← slotOf sfx with | some i => env.host.getSlot i | none => pure 0.0
   let readExactT0 : EngineM (Option UInt64) := do
     let mut bits : UInt64 := 0
     for i in [0:4] do
       let some idx ← slotOf s!"t0#u{i}" | return none
-      let limb ← env.runtime.getSlot idx
+      let limb ← env.host.getSlot idx
       bits := bits |||
         ((limb.toUInt64 &&& 0xffff) <<< (16 * i).toUInt64)
     return some bits
   let write (sfx : String) (v : Float) : EngineM Unit := do
-    match ← slotOf sfx with | some i => env.runtime.setSlot i v | none => pure ()
-  let nowBits ← env.runtime.currentSampleIndexU64
+    match ← slotOf sfx with | some i => env.host.setSlot i v | none => pure ()
+  let nowBits ← env.host.currentSampleIndexU64
   let now := nowBits.toFloat
-  let dur := (← env.runtime.sampleRate) * 0.005   -- 5 ms, matching the kernel's ramp
+  let dur := (← env.host.sampleRate) * 0.005   -- 5 ms, matching the kernel's ramp
   let v0 ← read "v0"; let v1 ← read "v1"; let t0 ← read "t0"
   let elapsed ← match ← readExactT0 with
     | some exactT0 =>
@@ -186,21 +186,21 @@ private def applyParamAnchor (env : Env) (args : Json) : EngineM Json := do
   let target ← match getField? args "value" with
     | some (.num n) => pure n.toFloat
     | _ => internalError "set_param: anchor value must be a number"
-  let some freqIdx := ← env.runtime.slotIndex? s!"param:{name}"
+  let some freqIdx := ← env.host.slotIndex? s!"param:{name}"
     | internalError s!"set_param: no anchor slot '{name}'"
-  match ← env.runtime.slotIndex? s!"param:{name}#phase" with
+  match ← env.host.slotIndex? s!"param:{name}#phase" with
   | some phaseIdx =>
-    let now ← env.runtime.currentSampleIndex
-    let f0 ← env.runtime.getSlot freqIdx
-    let sr ← env.runtime.sampleRate
+    let now ← env.host.currentSampleIndex
+    let f0 ← env.host.getSlot freqIdx
+    let sr ← env.host.sampleRate
     let inc0 := Float.floor (f0 * 4294967296.0 / sr)
     let inc1 := Float.floor (target * 4294967296.0 / sr)
     let dcyc := ((inc0 - inc1) * now) / 4294967296.0
-    let off0 ← env.runtime.getSlot phaseIdx
+    let off0 ← env.host.getSlot phaseIdx
     let raw := off0 + dcyc
-    env.runtime.setSlot phaseIdx (raw - Float.floor raw)   -- frac → [0, 1)
-    env.runtime.setSlot freqIdx target
-  | none => env.runtime.setSlot freqIdx target
+    env.host.setSlot phaseIdx (raw - Float.floor raw)   -- frac → [0, 1)
+    env.host.setSlot freqIdx target
+  | none => env.host.setSlot freqIdx target
   env.state.modify (·.setParamValue name (toJson target))
   pure <| Json.mkObj [("name", Json.str name), ("value", toJson target)]
 
@@ -220,17 +220,17 @@ private def applyParamVelocity (env : Env) (args : Json) : EngineM Json := do
   let target ← match getField? args "value" with
     | some (.num n) => pure n.toFloat
     | _ => internalError "set_param: velocity value must be a number"
-  let some velIdx := ← env.runtime.slotIndex? s!"param:{name}"
+  let some velIdx := ← env.host.slotIndex? s!"param:{name}"
     | internalError s!"set_param: no velocity slot '{name}'"
   let tauName := name.replace "velocity" "tau_base"
-  let some tauIdx := ← env.runtime.slotIndex? s!"param:{tauName}"
+  let some tauIdx := ← env.host.slotIndex? s!"param:{tauName}"
     | internalError s!"set_param: no velocity origin slot '{tauName}'"
-  let now ← env.runtime.currentSampleIndex
-  let sr ← env.runtime.sampleRate
-  let v0 ← env.runtime.getSlot velIdx
-  let tb0 ← env.runtime.getSlot tauIdx
-  env.runtime.setSlot tauIdx (tb0 + (v0 - target) * now / sr)
-  env.runtime.setSlot velIdx target
+  let now ← env.host.currentSampleIndex
+  let sr ← env.host.sampleRate
+  let v0 ← env.host.getSlot velIdx
+  let tb0 ← env.host.getSlot tauIdx
+  env.host.setSlot tauIdx (tb0 + (v0 - target) * now / sr)
+  env.host.setSlot velIdx target
   env.state.modify (·.setParamValue name (toJson target))
   pure <| Json.mkObj [("name", Json.str name), ("value", toJson target)]
 
@@ -274,8 +274,8 @@ def handleDebugRender (env : Env) (args : Json) : EngineM Json := do
     else Char.ofNat ('a'.toNat + n.toNat - 10)
   let mut hex := ""
   for _ in [0:frames] do
-    env.runtime.process
-    let bytes ← env.runtime.outputBytes
+    env.host.process
+    let bytes ← env.host.outputBytes
     let mut chunk := ""
     for b in bytes.toList do
       chunk := chunk.push (hexDigit (b >>> 4)) |>.push (hexDigit (b &&& 0xf))

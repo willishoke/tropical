@@ -5,8 +5,9 @@ import Tropical.Stdlib
 # Engine.Front — the tool dispatcher and boot
 
 `handleTool` routes a named MCP tool to its handler; `boot` constructs the
-`Env`, wiring the native runtime and DAC. `handleLoadPatchGraph` compiles a
-downstream-only patch graph through the EmitArrow lowering to a session root.
+`Env` over a host port supplied by the composition root.
+`handleLoadPatchGraph` compiles a downstream-only patch graph through the
+EmitArrow lowering to a session root.
 -/
 
 namespace Tropical.Engine
@@ -133,24 +134,6 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
 
 -- ── Boot ─────────────────────────────────────────────────────────────────────
 
-/-- Qualification-only runtime block-length seam. The live default stays 512;
-    the opt-in environment value is read before Runtime/DAC construction and
-    is already visible through runtime telemetry's `buffer_length`. -/
-private def bootBufferLength : IO UInt32 := do
-  match ← IO.getEnv "TROPICAL_BUFFER_LENGTH" with
-  | none => pure 512
-  | some raw =>
-    match raw.toNat? with
-    | some n =>
-      if n >= 16 && n <= 16384 then
-        pure n.toUInt32
-      else
-        throw <| IO.userError
-          "TROPICAL_BUFFER_LENGTH must be an integer in [16,16384]"
-    | none =>
-      throw <| IO.userError
-        "TROPICAL_BUFFER_LENGTH must be an integer in [16,16384]"
-
 /-- Boot the stdlib and build the Env.
 
     The stdlib is the arrow-builder chain (`Tropical.EmitArrow.stdlibBuilders`),
@@ -160,12 +143,11 @@ private def bootBufferLength : IO UInt32 := do
     far (deps precede dependents in manifest order); `registerResolved` relinks
     that raw registry to the post-strata canon and adopts the catalog entry. Any
     failure here is fatal: the engine cannot compile without its store. -/
-def boot : IO Env := do
+def boot (host : Tropical.Host.HostPort) : IO Env := do
   let state ← IO.mkRef ({} : SessionSt)
-  let runtime ← Ffi.Runtime.new (← bootBufferLength)
-  let dac ← IO.mkRef (none : Option Ffi.Dac)
+  let dac ← IO.mkRef (none : Option Tropical.Host.DacPort)
   let metalBackend := (← IO.getEnv "TROPICAL_BACKEND") == some "metal"
-  let env : Env := { state, runtime, dac, metalBackend }
+  let env : Env := { state, host, dac, metalBackend }
   -- The stdlib is the arrow-builder chain (`Tropical.EmitArrow.stdlibBuilders`),
   -- no longer the parsed-.md bridge. Each builder appends its RAW program to the
   -- arena, linking sub-programs by name against the chain built so far;

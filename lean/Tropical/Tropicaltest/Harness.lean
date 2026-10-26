@@ -1,5 +1,6 @@
 import Tropical.Ffi
 import Tropical.Engine
+import Tropical.NativeBoot
 import Tropical.StagedLoad
 import Tropical.Playground
 import Tropical.Plan
@@ -61,7 +62,7 @@ def sha256Hex (bytes : ByteArray) : IO String := do
     booted env does not survive sequential loads). -/
 def compilePatch (path : String) (mode : Tropical.Plan.CompilationMode) :
     IO (Except String String) := do
-  let env ← Tropical.Engine.boot
+  let env ← Tropical.NativeBoot.boot
   let act : Tropical.EngineM String := do
     let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str path)])
     Tropical.Engine.compileMirrorPlan env mode
