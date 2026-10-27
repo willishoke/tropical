@@ -15,6 +15,7 @@ namespace Tropical.Engine
 open Lean (Json toJson)
 open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
+open Tropical.Session (registerStdlib)
 
 -- ── Dispatcher ───────────────────────────────────────────────────────────────
 
@@ -134,36 +135,15 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
 
 -- ── Boot ─────────────────────────────────────────────────────────────────────
 
-/-- Boot the stdlib and build the Env.
-
-    The stdlib is the arrow-builder chain (`Tropical.EmitArrow.stdlibBuilders`),
-    the 15 live programs authored directly as `Sig`/`assemble` builders — no
-    `.md` source, no parsed bridge, no elaboration. Each builder appends its raw
-    program to the arena, linking sub-programs by name against the chain built so
-    far (deps precede dependents in manifest order); `registerResolved` relinks
-    that raw registry to the post-strata canon and adopts the catalog entry. Any
-    failure here is fatal: the engine cannot compile without its store. -/
+/-- Boot the stdlib and build the Env. The boot chain itself is
+    `Tropical.Session.registerStdlib`; any failure there is fatal: the engine
+    cannot compile without its store. -/
 def boot (host : Tropical.Host.HostPort) : IO Env := do
   let state ← IO.mkRef ({} : SessionSt)
   let dac ← IO.mkRef (none : Option Tropical.Host.DacPort)
   let metalBackend := (← IO.getEnv "TROPICAL_BACKEND") == some "metal"
   let env : Env := { state, host, dac, metalBackend }
-  -- The stdlib is the arrow-builder chain (`Tropical.EmitArrow.stdlibBuilders`),
-  -- no longer the parsed-.md bridge. Each builder appends its RAW program to the
-  -- arena, linking sub-programs by name against the chain built so far;
-  -- `registerResolved` relinks that raw registry to the post-strata canon and
-  -- adopts the catalog entry. Manifest order == the chain order, so the catalog
-  -- (and `list_programs`) ordering is preserved.
-  let registerAll : EngineM Unit := do
-    let mut chain : Array (String × Tropical.Ir.ProgramIdx) := #[]
-    for (name, build) in Tropical.EmitArrow.stdlibBuilders do
-      let st ← env.state.get
-      let (arena', rawIdx) ← match build st.arena chain with
-        | .error e => internalError s!"stdlib builder '{name}': {e}"
-        | .ok r => pure r
-      let _ ← registerResolved env name arena' rawIdx
-      chain := chain.push (name, rawIdx)
-  match ← registerAll.run with
+  match ← (env.session registerStdlib).run with
   | .ok () => pure ()
   | .error f => throw <| IO.userError s!"stdlib boot failed: {f.toJson.compress}"
   pure env

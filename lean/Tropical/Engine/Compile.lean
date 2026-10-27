@@ -8,8 +8,7 @@ constructs one resolved root directly, checks its Core shape, partitions,
 assembles the plan, and hot-swaps it into the Lean-owned runtime; a failed
 compile leaves the mutated graph in place and the previous kernel playing.
 `liftIfNeeded` lifts free wire expressions into synthetic programs;
-`buildKernelIr`/`loadKernel` bridge to the FFI. `adoptResolved` re-adopts a
-serialized resolved entry into the typed store.
+`buildKernelIr`/`loadKernel` bridge to the host port.
 -/
 
 namespace Tropical.Engine
@@ -17,44 +16,7 @@ namespace Tropical.Engine
 open Lean (Json toJson)
 open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
-
--- ── Typed-store adoption ─────────────────────────────────────────────────────
-
-/-- Adopt a catalog entry's `resolved` IR into the typed store (EngineM
-    shell over `SessionSt.adoptResolved`). Returns the store index, or
-    `none` for entries without resolved IR (generic templates). A decode
-    failure is an engine bug — the service encoded it — so it maps to
-    `internal_error`. -/
-def adoptResolved (env : Env) (entry : Json) : EngineM (Option Tropical.Ir.ProgramIdx) := do
-  let st ← env.state.get
-  match st.adoptResolved entry with
-  | .error msg => internalError msg
-  | .ok (st', idx?) =>
-    env.state.set st'
-    pure idx?
-
--- ── Engine-side strata ───────────────────────────────────────────────────────
-
-/-- The service session's `inlineNested` (makeSession defaults it to
-    `true`; nothing on the MCP path overrides it). Threaded into every
-    engine-side strata run so the two sides can never disagree about
-    which realization the registered catalog holds. -/
-private def sessionInlineNested : Bool := true
-
-/-- The direct lowering + the Core downcast (inline path), as a pure
-    `Except` so call sites choose the envelope: registration failures
-    map to `internal_error`. (Retired constructs are refused at the JSON
-    front doors — by the time IR exists here it is trunk-only.) -/
-def runStrataChecked (arena : Tropical.Ir.Arena)
-    (rootIdx : Tropical.Ir.ProgramIdx) :
-    Except String (Tropical.Ir.Arena × Tropical.Ir.ProgramIdx) := do
-  let (arena, rootIdx) ←
-    (Tropical.Ir.Strata.run
-      { inlineNested := sessionInlineNested } arena rootIdx).mapError (·.message)
-  if sessionInlineNested then
-    if let .error e := Tropical.Ir.checkResolvedArena arena rootIdx then
-      throw s!"core check failed: {e}"
-  pure (arena, rootIdx)
+open Tropical.Session (runStrataChecked adoptResolved)
 
 /-- Emit the (LLVM IR text, manifest JSON) for a compiled session plan
     without loading it. Shared by the audio compile (`syncCompile`) and the
@@ -182,7 +144,7 @@ def liftIfNeeded (env : Env) : EngineM Unit := do
       | .error e => internalError e
       | .ok j => pure j
     let pm := ProgMeta.fromEntry entry
-    let resolvedIdx ← adoptResolved env entry
+    let resolvedIdx ← env.session (adoptResolved entry)
     env.state.modify fun s =>
       let s := s.addProgram pm
       if (s.findInstance? synthName).isSome then s

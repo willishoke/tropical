@@ -13,6 +13,7 @@ namespace Tropical.Engine
 open Lean (Json toJson)
 open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
+open Tropical.Session (registerResolved)
 
 private structure ExposedInput where
   name : String
@@ -438,7 +439,7 @@ def handleExportProgram (env : Env) (args : Json) : EngineM Json := do
     internalError (Tropical.Ir.cycleViolationMessage name cyc)
   let arena' := { st.arena with programs := st.arena.programs.push prog, exprs }
   let rawIdx : Tropical.Ir.ProgramIdx := ⟨st.arena.programs.size⟩
-  let (rootEntry, _) ← registerResolved env name arena' rawIdx
+  let (rootEntry, _) ← env.session (registerResolved name arena' rawIdx)
   let entryNames := fun (k : String) => Json.arr <|
     (match getField? rootEntry k with
      | some (.arr ps) => ps

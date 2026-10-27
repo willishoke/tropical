@@ -114,8 +114,8 @@ private def buildDeps (instances : Array (String × InstanceInfo)) (wires : Arra
     `Ir.findCycle`, over the wire dep graph). Producer names outside
     the instance set (dangling refs) cannot sit on a cycle and are
     dropped at interning. -/
-def assertSessionAcyclic (instances : Array (String × InstanceInfo))
-    (wires : Array Wire) : EngineM Unit := do
+def assertSessionAcyclic {m : Type → Type} [MonadFailure m]
+    (instances : Array (String × InstanceInfo)) (wires : Array Wire) : m Unit := do
   let deps := buildDeps instances wires (dropSelfEdges := false)
   let depsIdx : Array (Array Nat) := deps.map fun (_, ps) =>
     ps.filterMap fun p => deps.findIdx? (·.1 == p)

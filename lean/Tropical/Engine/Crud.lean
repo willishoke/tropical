@@ -1,4 +1,4 @@
-import Tropical.Engine.Registry
+import Tropical.Engine.Compile
 
 /-!
 # Engine.Crud — instance/program lifecycle tool handlers

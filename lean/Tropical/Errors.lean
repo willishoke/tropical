@@ -103,6 +103,11 @@ def Failure.toJson : Failure → Json
 /-- The handler monad: tool logic that can fail with an envelope. -/
 abbrev EngineM := ExceptT Failure IO
 
+/-- Any monad that can fail with an envelope: `EngineM`, and the pure
+    session monad (`Tropical.Session.SessionM`). The throw helpers below are
+    written against this so the same validation code runs in both. -/
+class abbrev MonadFailure (m : Type → Type) := Monad m, MonadExceptOf Failure m
+
 -- ── Levenshtein suggestions ──────────────────────────────────────────────────
 
 def levenshtein (a b : String) : Nat := Id.run do
@@ -134,42 +139,46 @@ def nearestMatch (value : String) (candidates : Array String) : Option String :=
 
 -- ── Throw helpers (mirror failEnum / failRecord / failPredicate / failBare) ──
 
-def throwEnum {α} (code : ErrorCode) (param : String) (value : Json)
-    (options : Array String) (message : Option String := none) : EngineM α := do
+def throwEnum {m : Type → Type} {α : Type} [MonadFailure m]
+    (code : ErrorCode) (param : String) (value : Json)
+    (options : Array String) (message : Option String := none) : m α := do
   let suggestion := match value with
     | .str s => nearestMatch s options
     | _      => none
   let msg := message.getD <|
     s!"Invalid {param}: {value.compress}" ++
     (match suggestion with | some s => s!". Did you mean '{s}'?" | none => "")
-  throw <| .env {
+  throwThe Failure <| .env {
     code, message := msg, retryable := false,
     param := some param, value := some value,
     valid := some (.enum options),
     suggestion := suggestion.map Json.str }
 
-def throwRecord {α} (code : ErrorCode) (param : String) (value : Json)
-    (fields : List (String × FieldSpec)) (message : Option String := none) : EngineM α :=
-  throw <| .env {
+def throwRecord {m : Type → Type} {α : Type} [MonadFailure m]
+    (code : ErrorCode) (param : String) (value : Json)
+    (fields : List (String × FieldSpec)) (message : Option String := none) : m α :=
+  throwThe Failure <| .env {
     code, message := message.getD s!"Invalid {param}", retryable := false,
     param := some param, value := some value,
     valid := some (.record fields) }
 
-def throwPredicate {α} (code : ErrorCode) (param : String) (value : Json)
+def throwPredicate {m : Type → Type} {α : Type} [MonadFailure m]
+    (code : ErrorCode) (param : String) (value : Json)
     (predicate : String) (expected got : Option Json)
-    (message : Option String := none) : EngineM α :=
-  throw <| .env {
+    (message : Option String := none) : m α :=
+  throwThe Failure <| .env {
     code, message := message.getD s!"{predicate} failed on {param}",
     retryable := false,
     param := some param, value := some value,
     valid := some (.predicate predicate expected got) }
 
-def throwBare {α} (code : ErrorCode) (message : String)
+def throwBare {m : Type → Type} {α : Type} [MonadFailure m]
+    (code : ErrorCode) (message : String)
     (retryable : Bool := false) (param : Option String := none)
-    (value : Option Json := none) : EngineM α :=
-  throw <| .env { code, message, retryable, param, value }
+    (value : Option Json := none) : m α :=
+  throwThe Failure <| .env { code, message, retryable, param, value }
 
-def internalError {α} (message : String) : EngineM α :=
+def internalError {m : Type → Type} {α : Type} [MonadFailure m] (message : String) : m α :=
   throwBare .internalError message
 
 -- ── ToolResult framing (the MCP TextContent envelope) ────────────────────────

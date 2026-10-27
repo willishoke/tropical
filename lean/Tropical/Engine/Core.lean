@@ -3,6 +3,7 @@ import Tropical.Errors
 import Tropical.Expr
 import Tropical.Wiring
 import Tropical.Session
+import Tropical.Session.Registry
 import Tropical.Lowering
 import Tropical.Parse.Nodes
 import Tropical.Parse.Raise
@@ -44,6 +45,16 @@ structure Env where
       (LLVM IR → JIT + MSL → GPU pipeline) and audio dispatches on Metal.
       The JIT keeps serving render_window/the scope either way. -/
   metalBackend : Bool := false
+
+/-- Run pure session logic against this engine's session. State written
+    before a failure is kept, exactly as when the logic wrote the ref
+    directly. -/
+def Env.session {α : Type} (env : Env) (m : Tropical.Session.SessionM α) : EngineM α := do
+  let (r, st) := m.runOn (← env.state.get)
+  env.state.set st
+  match r with
+  | .ok a => pure a
+  | .error f => throw f
 
 -- Reserved audio-output boundary leaf.
 def dacName : String := "dac"

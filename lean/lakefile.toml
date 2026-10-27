@@ -43,7 +43,7 @@ globs = [
   "Tropical.PlanDecode",
   "Tropical.Playground.*",
   "Tropical.Semantics.*",
-  "Tropical.Session",
+  "Tropical.Session.*",
   "Tropical.Stdlib",
   "Tropical.StdlibChain",
   "Tropical.WireExpr",
