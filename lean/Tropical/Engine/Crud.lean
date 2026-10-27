@@ -4,8 +4,8 @@ import Tropical.Engine.Compile
 # Engine.Crud — instance/program lifecycle tool handlers
 
 The per-tool handlers for defining programs and creating, replicating,
-removing, listing, and describing instances. `resolveInstanceMeta` resolves a
-program name to its registered metadata (shared with the program-I/O path).
+removing, listing, and describing instances. Program names resolve through
+`Tropical.Session.resolveInstanceMeta`, shared with the ingest path.
 -/
 
 namespace Tropical.Engine
@@ -13,18 +13,7 @@ namespace Tropical.Engine
 open Lean (Json toJson)
 open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
-
-structure InstanceResolution where
-  typeArgs : Option Json
-  programMeta : ProgMeta
-  resolvedIdx? : Option Tropical.Ir.ProgramIdx
-
-def InstanceResolution.toInstanceInfo
-    (resolved : InstanceResolution) (baseTypeName : String) : InstanceInfo := {
-  baseTypeName
-  typeArgs := resolved.typeArgs
-  progMeta := resolved.programMeta
-  resolvedIdx := resolved.resolvedIdx? }
+open Tropical.Session (resolveInstanceMeta)
 
 -- ── Per-tool handlers ────────────────────────────────────────────────────────
 
@@ -37,55 +26,6 @@ private def instanceSummary (st : SessionSt) (name : String) : Json :=
       ("type_args", info.typeArgs.getD jsonNull),
       ("inputs", toJson info.progMeta.inputNames),
       ("outputs", toJson info.progMeta.outputNames)]
-
-/-- Resolve a program name (+ optional type args) to instance metadata
-    plus the typed-store snapshot for the resolved program, with the TS
-    failure shapes. Generic programs specialize through the service's
-    `resolve_type`, whose entry is adopted into the store; concrete
-    programs take the store's current mapping for the name.
-
-    `toolEnvelopes := false` selects the LOAD/MERGE ingest path's
-    failure shapes — `resolveProgramType`'s plain TS Errors
-    (`Unknown program type '…'. Known: …` etc.), which the service
-    relay surfaced as `internal_error` with the verbatim message. -/
-def resolveInstanceMeta (env : Env) (programName : String)
-    (typeArgs : Option Json) (programParam : String)
-    (toolEnvelopes : Bool := true) :
-    EngineM InstanceResolution := do
-  let st ← env.state.get
-  match st.programs.get? programName with
-  | none =>
-    -- TS options: [...typeRegistry.keys(), ...programs.keys()] — concrete
-    -- names first, then every program name (concrete ones repeat).
-    let concrete := st.catalogOrder.filter fun n =>
-      (st.programs.get? n).isSome
-    if !toolEnvelopes then
-      let known := String.intercalate ", " (concrete ++ st.catalogOrder).toList
-      internalError s!"Unknown program type '{programName}'. Known: {if known.isEmpty then "(none)" else known}"
-    throwEnum .unknownProgram programParam (Json.str programName)
-      (concrete ++ st.catalogOrder)
-  | some pm =>
-    -- No generics: no program declares `type_params`, so `type_args` is always
-    -- rejected. Return the concrete metadata + its resolved snapshot.
-    match typeArgs with
-    | some ta =>
-      let keys := match ta with
-        | .obj m => String.intercalate ", " (m.toList.map Prod.fst)
-        | _ => ""
-      if keys.isEmpty then pure {
-        typeArgs := none
-        programMeta := pm
-        resolvedIdx? := st.resolvedByName.get? programName }
-      else if !toolEnvelopes then
-        internalError s!"Program '{programName}' does not declare type_params; got type_args: {keys}"
-      else
-        throwBare .invalidTypeArgs
-          (s!"Program '{programName}' does not declare type_params; got type_args: {keys}")
-          (param := some "type_args") (value := some ta)
-    | none => pure {
-        typeArgs := none
-        programMeta := pm
-        resolvedIdx? := st.resolvedByName.get? programName }
 
 -- `define_program` is retired: new DSP types are authored as `Tropical.Stdlib`
 -- arrow builders, not defined over the wire. `load`/`merge` still ingest
@@ -103,7 +43,7 @@ def handleAddInstance (env : Env) (args : Json) : EngineM Json := do
   if (st.findInstance? instanceName).isSome then
     throwBare .instanceExists s!"Instance '{instanceName}' already exists."
       (param := some "instance_name") (value := some (Json.str instanceName))
-  let resolved ← resolveInstanceMeta env programName (arg? args "type_args") "program"
+  let resolved ← env.session (resolveInstanceMeta programName (arg? args "type_args") "program")
   env.state.modify (·.addInstance instanceName
     (resolved.toInstanceInfo programName))
   pure (instanceSummary (← env.state.get) instanceName)
@@ -133,7 +73,7 @@ def handleReplicate (env : Env) (args : Json) : EngineM Json := do
       throwBare .instanceExists
         s!"Instance '{name}' already exists — pick a different name_prefix"
         (param := some "name_prefix") (value := namePrefix.map Json.str)
-    let resolved ← resolveInstanceMeta env programName (arg? args "type_args") "program"
+    let resolved ← env.session (resolveInstanceMeta programName (arg? args "type_args") "program")
     env.state.modify (·.addInstance name (resolved.toInstanceInfo programName))
     created := created.push (instanceSummary (← env.state.get) name)
   pure <| Json.mkObj [("created", Json.arr created)]
