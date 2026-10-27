@@ -13,7 +13,7 @@ namespace Tropical.Engine
 open Lean (Json toJson)
 open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
-open Tropical.Session (registerResolved)
+open Tropical.Session (registerResolved WireCtx wireExprToResolved)
 
 private structure ExposedInput where
   name : String

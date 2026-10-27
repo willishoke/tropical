@@ -14,7 +14,7 @@ elaborator (2026-07-26): program bodies no longer cross the wire, so
 there is nothing left to parse them into. The JSON front door is the
 patch-bay subset (`Parse/Raise.lean` `normalizeProgramFile`); wire
 expressions live in the session grammar (`Tropical.WireExpr`'s decoder)
-and lower directly (`Engine.wireExprToResolved`).
+and lower directly (`Session.wireExprToResolved`).
 -/
 
 namespace Tropical.Parse

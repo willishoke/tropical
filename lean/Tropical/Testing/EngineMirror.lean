@@ -34,8 +34,8 @@ open Tropical.Session (registerResolved)
     retires. -/
 def buildSessionInput (env : Env) (mode : Tropical.Plan.CompilationMode) :
     EngineM Tropical.Compile.SessionInput :=
-  -- The shared prologue lives in `Engine.Compile.buildSessionInputVia`.
-  buildSessionInputVia env "compileMirrorPlan" mode
+  -- The shared prologue lives in `Session.Compile.buildSessionInput`.
+  env.session (Tropical.Session.buildSessionInput "compileMirrorPlan" mode)
 
 def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
     EngineM Tropical.Plan.FlatPlan := do

@@ -6,7 +6,7 @@ import Tropical.Parse.OrderedJson
 
 The wire-expression grammar as a closed inductive, replacing raw
 `Lean.Json` in the session store. The constructor set is derived from
-the READERS — what the two lowerings (`Engine.wireExprToResolved`,
+the READERS — what the two lowerings (`Session.wireExprToResolved`,
 `Ir.WireProgram.translate`) can compile, plus current forms other parts
 of the engine construct:
 
@@ -152,7 +152,7 @@ def deps (e : WireExpr) : Array String := depsInto #[] e
     Three constructors are in the grammar because current engine code builds
     them — `broadcastTo` from the wiring adapter and `input` / `nestedOut`
     from `export_program`'s serializer — and BOTH lowerings
-    (`Engine.wireExprToResolved`, `Ir.WireProgram.translate`) refuse all
+    (`Session.wireExprToResolved`, `Ir.WireProgram.translate`) refuse all
     three. So "it decodes" was never the same as "it compiles", and a wire
     carrying one used to reach the session store and detonate at the next
     `syncCompile` — poisoning the session for every later mutation and

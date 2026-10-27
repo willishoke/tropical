@@ -19,7 +19,7 @@ session compile (the durable `SessionSt` is never mutated here):
 - `computeInstanceTopoOrder` — Kahn with sorted ties
 
 Wire lifting (array literals → anonymous `__wire_N` instances) is handled by
-`Engine.Compile.liftIfNeeded` before this module builds the synthetic root.
+`Session.liftIfNeeded` before this module builds the synthetic root.
 Lift detection is `WireExpr.needsLift` on the session's typed wire values.
 -/
 

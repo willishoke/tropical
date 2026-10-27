@@ -3,8 +3,7 @@ import Tropical.Errors
 import Tropical.Expr
 import Tropical.Wiring
 import Tropical.Session
-import Tropical.Session.Registry
-import Tropical.Session.Ingest
+import Tropical.Session.Compile
 import Tropical.Lowering
 import Tropical.Parse.Nodes
 import Tropical.Parse.Raise
