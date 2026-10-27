@@ -17,10 +17,12 @@ build:
 		-DLLVM_DIR=$(LLVM_DIR) \
 		$(EXTRA_CMAKE_ARGS)
 	cmake --build $(BUILD_DIR) -j$(JOBS)
-# TROPICAL_WASM_EMIT=ON links the WebAssembly backend + lld so `diffcli
-# compile-wasm` (the web build) works out of the box; requires `brew install
-# lld`. TROPICAL_METAL=ON builds the GPU backend (macOS only; runtime MSL
-# compile, no Xcode needed). The CMake defaults are OFF, so a slim build is
+# TROPICAL_WASM_EMIT=ON builds the WebAssembly backend + lld into
+# libtropical_wasm (the toolchain library only `diffcli compile-wasm` links;
+# libtropical, the runtime, never carries it) so the web build works out of
+# the box; requires `brew install lld`. TROPICAL_METAL=ON builds the GPU
+# backend (macOS only; runtime MSL compile, no Xcode needed). The CMake
+# defaults are OFF, so a slim build is
 # `cmake ... -DTROPICAL_WASM_EMIT=OFF -DTROPICAL_METAL=OFF` via EXTRA_CMAKE_ARGS.
 
 repl: build
@@ -35,6 +37,7 @@ run: repl
 # `lake build` leaves stale tropicaltest/diffcli binaries in place.
 lean:
 	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake env leanc -c ffi/shim.c -o ffi/shim.o -I ../engine/c_api
+	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake env leanc -c ffi/shim_wasm.c -o ffi/shim_wasm.o -I ../engine/toolchain
 	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build frontend diffcli tropicaltest trustreport phasercheck tropicalc tropicaltest-core
 
 # Launch the Lean MCP server. As of Phase 6 the whole stack is the one
@@ -50,13 +53,14 @@ clean:
 # tests/web + the MCP protocol tests against the Lean engine), and ctest.
 # NB: run the BUILT binaries directly, never `lake exe` — lake forces the Lean
 # lib dir onto DYLD_LIBRARY_PATH (for libleanshared), which shadows Homebrew's
-# libLLVM with Lean's (no AMDGPU target) and the lld wasm emitter then dies at
-# load (_LLVMInitializeAMDGPUAsmParser). See CLAUDE.md "Test".
+# libLLVM with Lean's, and any binary carrying the lld wasm emitter (diffcli,
+# via libtropical_wasm) then dies at load. See CLAUDE.md "Test".
 validate: build lean
 	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build diffcli tropicaltest trustreport phasercheck tropicalc tropicaltest-core
 	$(PYTHON) tools/audit_trust_sites.py
 	$(PYTHON) tools/check_layers.py
 	$(PYTHON) tools/check_artifact_parity.py
+	$(PYTHON) tools/check_runtime_deps.py
 	./lean/.lake/build/bin/tropicaltest-core
 	./lean/.lake/build/bin/tropicaltest
 	bun web/build_patches.ts

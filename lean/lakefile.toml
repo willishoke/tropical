@@ -17,6 +17,8 @@ rev = "main"
 #                    Includes the host port the engine drives.
 #   TropicalHost     the runtime binding (Ffi), its HostPort adapter, and
 #                    the staged loaders.
+#   TropicalToolchain  the IR→wasm toolchain binding (libtropical_wasm).
+#                    Imports nothing; only `diffcli` links it.
 #   TropicalSession  the session engine and its MCP tools, resources and
 #                    RPC dispatch. Imports only the core: it reaches the
 #                    runtime through the port, never through Ffi.
@@ -53,6 +55,10 @@ globs = [
 [[lean_lib]]
 name = "TropicalHost"
 globs = ["Tropical.Ffi", "Tropical.NativeHost", "Tropical.StagedLoad"]
+
+[[lean_lib]]
+name = "TropicalToolchain"
+globs = ["Tropical.Toolchain.+"]
 
 [[lean_lib]]
 name = "TropicalSession"
@@ -95,13 +101,14 @@ moreLinkArgs = [
 ]
 
 # Differential-harness verbs over the Lean-owned native runtime
-# (render-bytes → golden-hash gate).
+# (render-bytes → golden-hash gate), plus `compile-wasm`: the one binary that
+# links the IR→wasm toolchain (shim_wasm.o + libtropical_wasm).
 [[lean_exe]]
 name = "diffcli"
 root = "Diffcli"
 moreLinkArgs = [
-  "ffi/shim.o",
-  "-L../build", "-ltropical",
+  "ffi/shim.o", "ffi/shim_wasm.o",
+  "-L../build", "-ltropical", "-ltropical_wasm",
   "-Wl,-rpath,@executable_path/../../../../build",
 ]
 

@@ -64,8 +64,9 @@ build host (Lean + LLVM + lld)              browser
 ```
 
 `web/build_patches.ts` shells `diffcli` over the source patches; the browser
-runs only the runtime package. Requires libtropical built with
-`TROPICAL_WASM_EMIT` (`make build` enables it; needs `brew install lld`).
+runs only the runtime package. Requires libtropical_wasm (the toolchain
+library only `diffcli` links) built with `TROPICAL_WASM_EMIT` (`make build`
+enables it; needs `brew install lld`).
 
 ## Player, not instrument
 

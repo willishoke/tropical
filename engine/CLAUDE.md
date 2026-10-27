@@ -11,7 +11,8 @@ c_api/     tropical_c.h/.cpp      stable opaque-handle API
            tropical_socket.*      native control/data socket
 runtime/   FlatRuntime.*          metadata load, staged init, atomic publish
            NumericProgramParser.hpp
-jit/       OrcJitEngine.*         textual LLVM → ORC; LLVM → wasm32 support
+jit/       OrcJitEngine.*         textual LLVM → ORC
+toolchain/ WasmEmit.*, tropical_wasm.h  LLVM → wasm32 (libtropical_wasm, build-time only)
 metal/     MetalKernel.*          MSL compilation and block dispatch
 dac/       TropicalDAC.hpp        RtAudio device boundary
 tests/                              current ABI and schema-boundary CTests
@@ -182,9 +183,12 @@ Full measurements and method: `benchmarks/oscillator_saturation/findings.md`.
 
 ### WebAssembly build support
 
-With `TROPICAL_WASM_EMIT`, the engine lowers the same LLVM module to wasm32
-and links it in-process with lld. This is a build-time capability used by
-`diffcli compile-wasm`; the browser player lives in `web/runtime/`.
+With `TROPICAL_WASM_EMIT`, `libtropical_wasm` (`toolchain/`) lowers the same
+LLVM module to wasm32 and links it in-process with lld. It is a separate
+library from the runtime: only `diffcli compile-wasm` links it, `libtropical`
+never carries the WebAssembly backend or lld (`tools/check_runtime_deps.py`
+checks the built artifacts), and its C API (`tropical_wasm.h`) has its own
+thread-local error. The browser player lives in `web/runtime/`.
 
 ### Metal
 

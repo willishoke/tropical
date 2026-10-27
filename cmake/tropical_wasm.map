@@ -1,0 +1,4 @@
+{
+    global: tropical_wasm_*;
+    local: *;
+};

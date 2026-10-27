@@ -222,18 +222,6 @@ def Runtime.loadIrTimeStagedWithObservationGeneration (rt : Runtime)
 @[extern "shim_runtime_set_sample_index"]
 opaque Runtime.setSampleIndex (rt : @& Runtime) (idx : UInt64) : IO Unit
 
-/-- Lower textual LLVM IR (Lean's EmitLlvm output) to a complete wasm32 module,
-    in-process via the engine's LLVM + lld. Build-time only — requires
-    libtropical built with `TROPICAL_WASM_EMIT`. Empty result ⇒ throw. -/
-@[extern "shim_compile_ir_to_wasm"]
-opaque compileIrToWasmRaw (irText : @& String) : IO ByteArray
-
-def compileIrToWasm (irText : String) : IO ByteArray := do
-  let wasm ← compileIrToWasmRaw irText
-  if wasm.size == 0 then
-    throw <| IO.userError s!"compileIrToWasm failed: {← lastError}"
-  pure wasm
-
 -- ── DAC ──────────────────────────────────────────────────────────────────────
 
 @[extern "shim_dac_new_runtime"]

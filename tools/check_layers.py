@@ -12,8 +12,10 @@ The rules that matter: TropicalCore imports only TropicalCore (plus the
 Lean toolchain), so the runtime binding `Tropical.Ffi` can never enter
 the compiler core's import closure; TropicalSession imports only the
 core, so the session engine reaches the runtime through its host port;
-and the `tropicalc` executable's closure stays inside TropicalCore, so
-the compiler demonstrably runs with no runtime in the binary.
+TropicalToolchain (the wasm emitter binding) imports nothing, so only the
+executable that asks for it (`diffcli`) links the toolchain; and the
+`tropicalc` executable's closure stays inside TropicalCore, so the compiler
+demonstrably runs with no runtime in the binary.
 """
 
 from __future__ import annotations
@@ -31,6 +33,7 @@ LEAN = ROOT / "lean"
 ALLOWED = {
     "TropicalCore": set(),
     "TropicalHost": {"TropicalCore"},
+    "TropicalToolchain": set(),
     "TropicalSession": {"TropicalCore"},
     "TropicalApp": {"TropicalCore", "TropicalHost", "TropicalSession"},
     "TropicalTest": {"TropicalCore", "TropicalHost", "TropicalSession", "TropicalApp"},
@@ -47,6 +50,7 @@ EXE_CLOSURE = {
 EXTERNAL = {
     "TropicalCore": {"Init", "Lean", "Std"},
     "TropicalHost": {"Init", "Lean", "Std"},
+    "TropicalToolchain": {"Init", "Lean", "Std"},
 }
 
 

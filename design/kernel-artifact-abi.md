@@ -214,8 +214,9 @@ because there is nothing stateful to transfer (`architecture.md`,
 - The JIT's symbol naming, its IR cache (`~/.cache/tropical/kernels`), the
   three-generation slot buffering, the DAC output bound: host mechanisms
   behind the guarantees above.
-- The wasm emitter (`tropical_compile_ir_to_wasm`): a toolchain concern.
-  It links lld into `libtropical` today; sprint phase P6 separates it.
+- The wasm emitter (`tropical_wasm_compile_ir`, `libtropical_wasm`): a
+  toolchain concern, in its own library that only `diffcli` links. The
+  runtime carries no lld (`tools/check_runtime_deps.py`).
 
 ## Open questions for the owner
 

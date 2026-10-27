@@ -190,14 +190,7 @@ bool             tropical_runtime_load_ir_time_staged_with_observation_generatio
    the source coordinate moves to idx. */
 void             tropical_runtime_set_sample_index(tropical_runtime_t, uint64_t idx);
 
-/* ---------- Build-time IR→wasm (TROPICAL_WASM_EMIT builds only) ----------
-   Lower Lean's LLVM IR to a complete wasm32 module, fully in-process (wasm32
-   TargetMachine + lld-as-a-library — no subprocess). Returns a malloc'd buffer
-   of length *out_len (free with tropical_free_buffer), or NULL on error (see
-   tropical_last_error()). Returns NULL if libtropical was built without
-   TROPICAL_WASM_EMIT. This is a build/CI tool — the shipped audio runtime does
-   not need it. */
-uint8_t*         tropical_compile_ir_to_wasm(const char* ir_text, size_t ir_len, size_t* out_len);
+/* Free a malloc'd buffer this library handed out (tropical_socket_next_control). */
 void             tropical_free_buffer(uint8_t* buf);
 void             tropical_runtime_process(tropical_runtime_t);
 /* Deterministic render-tool entry point. For Metal, waits off-RT until the

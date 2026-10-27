@@ -23,7 +23,8 @@ make clean          # remove build directories
 the JIT-only core builds on LLVM ≥ 19, but `make build`/CI and the in-process
 wasm emitter target 22), Lean 4 (via elan), Bun (for the surviving behavioral
 suites). The wasm emitter (`TROPICAL_WASM_EMIT`, on by default in `make build`)
-also needs lld (`brew install lld`) and LLVM ≥ 21 for its Triple-based codegen API.
+also needs lld (`brew install lld`) and LLVM ≥ 21 for its Triple-based codegen API;
+it builds into its own library, `libtropical_wasm`, which only `diffcli` links.
 
 ## Test
 
@@ -41,19 +42,22 @@ are the surviving cross-backend gate (`tests/web`, wasm vs. JIT) and the MCP
 protocol tests (`mcp/`), both run against the live Lean engine via
 `TROPICAL_ENGINE_CMD`.
 
-**Run these binaries directly — never via `lake exe`.** `libtropical`
-hard-links Homebrew's `liblldWasm` (the wasm emitter), which in turn binds the
-absolute `/opt/homebrew/opt/llvm/lib/libLLVM.dylib` (the one with the AMDGPU
-target). `lake exe` forces the Lean toolchain's lib dir onto
-`DYLD_LIBRARY_PATH` so the process can find `libleanshared`, and that shadows
-`libLLVM.dylib` *by leaf name* with Lean's own bundled libLLVM (no AMDGPU
-target) — so the binary dies at load with
-`Symbol not found: _LLVMInitializeAMDGPUAsmParser`. The built binary instead
-resolves `libleanshared` via rpath (which only applies to `@rpath/…` refs and
-never shadows the absolute Homebrew libLLVM), so it runs clean. This is why
-`make validate` invokes `./lean/.lake/build/bin/…` directly throughout and
-never `lake exe`. (Not a version mismatch — pinning won't help; it's the
-`lake exe` DYLD environment. Run the binary, not the wrapper.)
+**Run these binaries directly — never via `lake exe`.** `libtropical_wasm`
+(the wasm emitter, linked only by `diffcli`) hard-links Homebrew's
+`liblldWasm`, which in turn binds the absolute
+`/opt/homebrew/opt/llvm/lib/libLLVM.dylib`. `lake exe` forces the Lean
+toolchain's lib dir onto `DYLD_LIBRARY_PATH` so the process can find
+`libleanshared`, and that shadows `libLLVM.dylib` *by leaf name* with Lean's
+own bundled libLLVM — so `lake exe diffcli` dies at load with
+`Symbol not found: …` referenced from `liblldWasm.dylib`. The built binary
+instead resolves `libleanshared` via rpath (which only applies to `@rpath/…`
+refs and never shadows the absolute Homebrew libLLVM), so it runs clean.
+`libtropical` itself links LLVM statically and carries no lld, so the other
+binaries (`frontend`, `tropicaltest`, …) load either way; the rule is one rule
+for all of them, and `make validate` invokes `./lean/.lake/build/bin/…`
+directly throughout and never `lake exe`. (Not a version mismatch — pinning
+won't help; it's the `lake exe` DYLD environment. Run the binary, not the
+wrapper.)
 
 **If equivalence tests fail unexpectedly, clear the JIT cache first.**
 `rm -rf ~/.cache/tropical/kernels` — the LLVM-IR cache is keyed by an MD5

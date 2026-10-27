@@ -1,4 +1,5 @@
 import Tropical.Ffi
+import Tropical.Toolchain.Wasm
 import Tropical.Ir.Codec
 import Tropical.Ir.Strata
 import Tropical.Ir.Core
@@ -318,7 +319,7 @@ def emitMslVerb (args : List String) : IO UInt32 := do
     | .ok msl => IO.println msl; return 0
 
 /-- `diffcli compile-wasm <patch.json> --out <out.wasm>` → a complete wasm32
-    module, emitted in-process (Lean IR → engine LLVM+lld, no subprocess). The
+    module, emitted in-process (Lean IR → libtropical_wasm's LLVM+lld, no subprocess). The
     plan_6 JSON from `diffcli compile` serves as the browser-side manifest. -/
 def compileWasmVerb (args : List String) : IO UInt32 := do
   let some patch := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
@@ -331,7 +332,7 @@ def compileWasmVerb (args : List String) : IO UInt32 := do
     match Tropical.Ir.EmitLlvm.emitKernel plan with
     | .error e => IO.eprintln s!"emitKernel: {e}"; return 1
     | .ok ir =>
-      let wasm ← Tropical.Ffi.compileIrToWasm ir
+      let wasm ← Tropical.Toolchain.Wasm.compileIr ir
       IO.FS.writeBinFile (System.FilePath.mk outPath) wasm
       IO.eprintln s!"compile-wasm: wrote {wasm.size} bytes → {outPath}"
       return 0

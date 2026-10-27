@@ -62,7 +62,7 @@ def main() -> int:
             print(f"check_artifact_parity: MISMATCH {rel}")
     if mismatches:
         return 1
-    print(f"check_artifact_parity: ok ({len(patches)} patches, tropicalc links no runtime)")
+    print(f"check_artifact_parity: ok ({len(patches)} patches, tropicalc links no runtime and no toolchain)")
     return 0
 
 

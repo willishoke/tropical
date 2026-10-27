@@ -3,12 +3,12 @@
  *
  * Reads web/patches/<slug>.json (tropical_program_2) + web/patches/manifest.json
  * (slug/title/description). For each patch it lowers the Lean IR to a complete
- * wasm32 module in-process via `diffcli compile-wasm` (engine LLVM + lld, no
- * toolchain), and writes web/dist/patches/<slug>.wasm plus a trimmed
+ * wasm32 module in-process via `diffcli compile-wasm` (libtropical_wasm's
+ * LLVM + lld, no external toolchain), and writes web/dist/patches/<slug>.wasm plus a trimmed
  * <slug>.manifest.json (the runtime's consumption contract). The browser
  * fetches the .wasm + manifest and instantiates — no emitter, no compiler.
  *
- * Requires libtropical built with TROPICAL_WASM_EMIT (cmake -DTROPICAL_WASM_EMIT=ON).
+ * Requires libtropical_wasm built with TROPICAL_WASM_EMIT (cmake -DTROPICAL_WASM_EMIT=ON).
  *
  *   bun web/build_patches.ts
  */
