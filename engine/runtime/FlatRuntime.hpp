@@ -65,6 +65,9 @@ struct ParamDispatchResult
   // sample that can actually contain the published generation.
   uint64_t    observed_sample_index = 0;
   uint64_t    effective_sample_index = 0;
+  // The loaded manifest has no slot for the name: a client error, which the
+  // engine reports as its unknown_param envelope rather than a host failure.
+  bool        unknown_param = false;
 };
 
 // Exact graph generation created by one successful publication. Returning the

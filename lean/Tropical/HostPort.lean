@@ -9,9 +9,10 @@ composition root (`Tropical.NativeBoot`) fills it from the native FFI
 (`Tropical.NativeHost`). Nothing on the engine side names `Tropical.Ffi`.
 
 The vocabulary here is exactly what the engine uses today: publish an
-artifact (optionally with a JIT-only observation realization), read and
-write named slots, read the clock, render for the debug tap, read Metal
-telemetry, and open the audio output.
+artifact (optionally with a JIT-only observation realization), write a param
+through the host's discipline dispatch, render for the debug tap, read the
+sample rate and Metal telemetry, and open the audio output. There is no raw
+slot or clock access: the engine declares, the host executes.
 -/
 
 namespace Tropical.Host
@@ -35,6 +36,13 @@ structure DeviceInfo where
   id   : UInt32
   name : String
 
+/-- What a host reports back from one param write: the completed buffer
+    boundary it observed, and the first audible sample its discipline math
+    used as `now`. -/
+structure ParamWrite where
+  observedSampleIndex : UInt64
+  effectiveSampleIndex : UInt64
+
 /-- An open output stream on the host. -/
 structure DacPort where
   start : IO Unit
@@ -52,11 +60,12 @@ structure HostPort where
       observation artifact. Controls project into the observation by
       matching slot names. -/
   publishWithObservation : (audio observation : KernelArtifact) → IO PublishedGeneration
-  slotIndex? : String → IO (Option UInt32)
-  setSlot : UInt32 → Float → IO Unit
-  getSlot : UInt32 → IO Float
-  currentSampleIndex : IO Float
-  currentSampleIndexU64 : IO UInt64
+  /-- Write a param through the discipline the loaded manifest declares for
+      it (`design/host-param-dispatch.md`): the host resolves the companions,
+      reads its own clock and sample rate, and lands every slot of the write
+      in one control generation. `none` when the loaded manifest has no slot
+      for the name; throws with the host's message on any other failure. -/
+  setParam : String → Float → IO (Option ParamWrite)
   sampleRate : IO Float
   /-- Render one buffer; `outputBytes` reads it back. -/
   process : IO Unit

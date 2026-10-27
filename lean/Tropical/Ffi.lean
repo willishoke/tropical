@@ -22,7 +22,7 @@ next recompile, which Phase 2 fixes by writing the slot.)
 
 namespace Tropical.Ffi
 
-open Tropical.Host (PublishedGeneration DacStats DeviceInfo)
+open Tropical.Host (PublishedGeneration DacStats DeviceInfo ParamWrite)
 
 private opaque RuntimePointed : NonemptyType
 /-- A `tropical_runtime_t` (FlatRuntime): the hot-swappable kernel host. -/
@@ -95,6 +95,22 @@ opaque Runtime.currentSampleIndexU64 (rt : @& Runtime) : IO UInt64
     phase-anchoring a live frequency change (and for the glide's ms→sample dur). -/
 @[extern "shim_runtime_sample_rate"]
 opaque Runtime.sampleRate (rt : @& Runtime) : IO Float
+
+@[extern "shim_runtime_set_param"]
+private opaque Runtime.setParamRaw (rt : @& Runtime) (name : @& String) (value : Float) :
+    IO (Option (UInt64 × UInt64))
+
+/-- The host-contract param write (`tropical_runtime_set_param`): the runtime
+    dispatches per the loaded manifest's `param_disciplines` and publishes the
+    companions as one control generation. `none` when the loaded manifest has
+    no slot for the name; throws with the runtime's message on any other
+    failure. -/
+def Runtime.setParam (rt : Runtime) (name : String) (value : Float) :
+    IO (Option ParamWrite) := do
+  match ← rt.setParamRaw name value with
+  | none => pure none
+  | some (observedSampleIndex, effectiveSampleIndex) =>
+    pure (some { observedSampleIndex, effectiveSampleIndex })
 
 /-- Cumulative wall time spent rendering Metal tiles and the number of sample
     frames those attempts produced. Their interval ratio is render utilization;

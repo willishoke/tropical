@@ -759,6 +759,28 @@ bool tropical_runtime_is_fade_out_complete(tropical_runtime_t r)
 
 // ── Slot model (M5+) ────────────────────────────────────────────────────────
 
+int tropical_runtime_set_param(tropical_runtime_t r, const char* name, double value,
+                               tropical_param_write_t* out_write)
+{
+  if (out_write) *out_write = {};
+  if (!r || !name || !out_write) { set_error("set_param: null argument"); return -1; }
+  try
+  {
+    const auto result = static_cast<tropical_runtime::FlatRuntime*>(r)
+      ->dispatch_param_sync(std::string(name), value);
+    if (!result.ok)
+    {
+      if (result.unknown_param) return 0;
+      set_error(result.error);
+      return -1;
+    }
+    out_write->observed_sample_index = result.observed_sample_index;
+    out_write->effective_sample_index = result.effective_sample_index;
+    return 1;
+  }
+  catch (const std::exception& e) { set_error(e.what()); return -1; }
+}
+
 unsigned int tropical_runtime_slot_index(tropical_runtime_t r, const char* name)
 {
   if (!r || !name) return UINT32_MAX;

@@ -90,8 +90,7 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
   -- this graph's inspection points via `list_scope_taps` with no session wiring.
   env.state.modify (fun st => { st with
     params := Tropical.Playground.knobParams flatArgs
-    scopeTaps := publishedTaps
-    paramDisciplines := compiled.plan.paramDisciplines })
+    scopeTaps := publishedTaps })
   -- The realized-state report: facts about what compiled (active/excluded
   -- nodes, wired/normalled inputs, live params with disciplines, taps) —
   -- never warnings. `ok` stays for callers that only ever looked at it.
@@ -126,9 +125,8 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   | "start_audio"     => handleStartAudio env args
   | "stop_audio"      => handleStopAudio env
   | "audio_status"    => handleAudioStatus env
-  -- ONE set_param: discipline-dispatched from the loaded plan's table
-  -- (raw for table-less names).
-  | "set_param"       => handleSetParamDispatch env args
+  -- ONE set_param: the host dispatches from the loaded manifest's table.
+  | "set_param"       => handleSetParam env args
   | "list_params"     => handleListParams env
   | "debug_render"    => handleDebugRender env args
   | _ => internalError s!"Unknown tool: '{name}'"

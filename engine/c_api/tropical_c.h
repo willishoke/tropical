@@ -288,6 +288,22 @@ unsigned int     tropical_runtime_slot_index(tropical_runtime_t, const char* nam
 void             tropical_runtime_set_slot(tropical_runtime_t, unsigned int slot_index, double value);
 double           tropical_runtime_get_slot(tropical_runtime_t, unsigned int slot_index);
 
+/* The one param-write executor (design/host-param-dispatch.md). Resolves
+   `name` against the loaded manifest's param_disciplines table and performs
+   the raw / glide / anchor / velocity write with the host's own `now` and
+   sample rate; every companion slot lands in one control generation. Both
+   the socket data plane and the Lean engine's `set_param` reach this. Returns
+   1 on success, filling the boundary the write observed and the first audible
+   sample the discipline math used; 0 when the loaded manifest has no slot for
+   the name (a client error, nothing written, no error set); -1 with
+   tropical_last_error set for any other failure (non-finite value, a Metal
+   activation that stayed late). */
+typedef struct tropical_param_write {
+  uint64_t observed_sample_index;
+  uint64_t effective_sample_index;
+} tropical_param_write_t;
+int              tropical_runtime_set_param(tropical_runtime_t, const char* name, double value, tropical_param_write_t* out_write);
+
 /* The runtime's current sample index (τ of the next buffer to be processed) —
    the coordinate the kernel reads as `tick`. The control plane stamps a glide's
    start-tick with this so a closed-form parameter ramp `f(τ)` anchors to "now".

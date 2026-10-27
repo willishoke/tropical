@@ -8,9 +8,12 @@ like `slot_names` and `slot_defaults`. A host that implements this section is
 conformant; hosts are gated against each other differentially (same write
 sequence → identical slot trajectories → identical audio).
 
-The reference implementation is the Lean control plane
-(`lean/Tropical/Engine.lean`, `handleSetParamGlide` / `handleSetParamFreq` /
-`handleSetParamVelocity`). Where this document and that code disagree, this
+The executor is the C++ host, `FlatRuntime::dispatch_param_sync`
+(`engine/runtime/FlatRuntime.cpp`), reached by the socket data plane directly
+and by the Lean engine's `set_param` through its host port
+(`tropical_runtime_set_param`). The compiler declares; the host executes.
+`tests/web/param_dispatch_conformance.test.ts` pins both routes against the
+closed forms below. Where this document and that code disagree, this
 document is the intent and the code is the bug.
 
 ## The manifest field

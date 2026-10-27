@@ -3,20 +3,21 @@
  *
  * design/host-param-dispatch.md: every runtime host dispatches param writes
  * itself from the plan's `param_disciplines` table; no client ever chooses a
- * write verb. Two implementations exist today:
+ * write verb. One executor exists, FlatRuntime::dispatch_param_sync, reached
+ * by two routes:
  *
- *   - the Lean control plane (Engine.Audio's discipline implementations — the
- *     reference), reached over stdio RPC through the same public `set_param`;
- *   - the C++ socket data-plane (tropical_socket.cpp `set_param`, dispatching
- *     per the loaded plan's table against FlatRuntime's slots).
+ *   - the C++ socket data-plane (tropical_socket.cpp `set_param`), which never
+ *     leaves C++;
+ *   - the Lean engine's public `set_param` over stdio RPC, which hands the
+ *     write to the host through its port (tropical_runtime_set_param).
  *
- * This gate drives an IDENTICAL write sequence through both, on two separate
- * engine instances, pins the data plane's companion-slot values
- * (v0/v1/t0, #phase, tau_base), and requires the rendered output trajectory
- * to be byte-identical.
- * These are pure closed-form re-anchorings computed from the same inputs, so
- * they should typically be EXACTLY equal; a material difference means the C++
- * math diverged from the reference (fix the C++, do not widen the tolerance).
+ * This gate drives an IDENTICAL write sequence through both routes, on two
+ * separate engine instances, pins the companion-slot values (v0/v1/t0,
+ * #phase, tau_base) against the closed forms in the design document, and
+ * requires the rendered output trajectory to be byte-identical. A difference
+ * between the routes means the engine's shell and the data plane disagree; a
+ * difference from the closed forms means the executor diverged from the
+ * contract (fix the C++, do not widen the tolerance).
  *
  * TIMING: neither run starts audio. One explicit debug-render advances both
  * runtimes to the same 512-sample boundary before the writes, so every
@@ -158,7 +159,7 @@ class SocketEngineClient implements Client {
 
 // ── Minimal stdio RPC client ───────────────────────────────────────────────
 // This reaches Engine.handleTool directly, so public `set_param` exercises the
-// Lean reference dispatcher without retaining private method aliases.
+// engine's route into the host executor without retaining private method aliases.
 class RpcEngineClient implements Client {
   private proc: ChildProcess
   private buf = ''
@@ -296,7 +297,7 @@ async function readSlots(c: Client, names: string[]): Promise<number[]> {
   return (r.values as number[][]).map((ch) => ch[0])
 }
 
-describe('param dispatch conformance (C++ data-plane ≡ Lean reference)', () => {
+describe('param dispatch conformance (socket route ≡ engine route ≡ closed forms)', () => {
   test('identical write sequence → identical companion slots and audio', async () => {
     if (!existsSync(frontendBin))
       throw new Error(`frontend binary missing: ${frontendBin} (run \`make lean\`)`)
@@ -305,7 +306,7 @@ describe('param dispatch conformance (C++ data-plane ≡ Lean reference)', () =>
     // reaches Lean — handle_line routes it to handle_data, which dispatches
     // per the loaded plan's param_disciplines table.
     const a = new SocketEngineClient('data')
-    // Run B: the Lean reference, via stdio and the same public method.
+    // Run B: the engine's route, via stdio and the same public method.
     const b = new RpcEngineClient()
     try {
       const [tapA, tapB] = await Promise.all([

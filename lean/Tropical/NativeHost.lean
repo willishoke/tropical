@@ -29,11 +29,7 @@ def Runtime.hostPort (rt : Runtime) : HostPort where
     rt.loadIrTimeStagedWithObservationGeneration
       a.ir a.msl a.coefficientIr a.tileIr a.manifest
       o.ir o.coefficientIr o.manifest
-  slotIndex? := rt.slotIndex?
-  setSlot := rt.setSlot
-  getSlot := rt.getSlot
-  currentSampleIndex := rt.currentSampleIndex
-  currentSampleIndexU64 := rt.currentSampleIndexU64
+  setParam := rt.setParam
   sampleRate := rt.sampleRate
   process := rt.process
   outputBytes := rt.outputBytes

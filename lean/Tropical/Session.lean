@@ -125,11 +125,6 @@ structure SessionSt where
   /-- Param mirror: name → last-known value (raw Json preserves lexical number
       forms). The loaded runtime owns the live module slots. -/
   params       : Array (String × Json) := #[]
-  /-- Host-contract dispatch table for the LOADED plan (name → discipline),
-      seeded from the plan's own `param_disciplines` at load — the unified
-      `set_param` dispatches from this, so no client ever chooses a verb.
-      Empty (a session-model patch, an old plan) ⇒ every write is raw. -/
-  paramDisciplines : Array Tropical.Plan.ParamDiscipline := #[]
   nameCounters : Std.HashMap String Nat := {}
   /-- The typed store (Phase 4 stage 4a): every adopted catalog entry's
       post-strata resolved IR, appended via `decodeResolvedInto`. The

@@ -1259,6 +1259,11 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
       true, {}, discipline, sample_index, sample_index
     };
   };
+  auto unknown = [&]() {
+    auto result = fail("set_param: unknown param '" + name + "'");
+    result.unknown_param = true;
+    return result;
+  };
   const double now = static_cast<double>(sample_index);
 
   if (discipline == "glide")
@@ -1293,7 +1298,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
   {
     const uint32_t fi = slot_of("param:" + name);
     if (fi == UINT32_MAX)
-      return fail("set_param: unknown param '" + name + "'");
+      return unknown();
     const uint32_t pi = slot_of("param:" + name + "#phase");
     if (pi == UINT32_MAX)
     {
@@ -1315,7 +1320,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
   {
     const uint32_t vi = slot_of("param:" + name);
     if (vi == UINT32_MAX)
-      return fail("set_param: unknown param '" + name + "'");
+      return unknown();
     std::string tau;
     if (!pd->companions.empty()) tau = pd->companions.front();
     else
@@ -1334,7 +1339,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
 
   const uint32_t bi = slot_of("param:" + name);
   if (bi == UINT32_MAX)
-    return fail("set_param: unknown param '" + name + "'");
+    return unknown();
   write(bi, value);
   return commit();
 }

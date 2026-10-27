@@ -283,6 +283,21 @@ LEAN_EXPORT lean_obj_res shim_runtime_set_slot(b_lean_obj_arg rt, uint32_t idx, 
   return lean_io_result_mk_ok(lean_box(0));
 }
 
+LEAN_EXPORT lean_obj_res shim_runtime_set_param(b_lean_obj_arg rt, b_lean_obj_arg name,
+                                                double value, lean_obj_arg world) {
+  (void)world;
+  tropical_param_write_t write = {0, 0};
+  int status = tropical_runtime_set_param(unwrap(rt), lean_string_cstr(name), value, &write);
+  if (status < 0) return io_err(tropical_last_error());
+  if (status == 0) return lean_io_result_mk_ok(lean_box(0)); /* Option.none */
+  lean_obj_res pair = lean_alloc_ctor(0, 2, 0);
+  lean_ctor_set(pair, 0, lean_box_uint64(write.observed_sample_index));
+  lean_ctor_set(pair, 1, lean_box_uint64(write.effective_sample_index));
+  lean_obj_res some = lean_alloc_ctor(1, 1, 0);
+  lean_ctor_set(some, 0, pair);
+  return lean_io_result_mk_ok(some);
+}
+
 LEAN_EXPORT lean_obj_res shim_runtime_get_slot(b_lean_obj_arg rt, uint32_t idx,
                                                lean_obj_arg world) {
   (void)world;
