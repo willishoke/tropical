@@ -24,6 +24,7 @@ import Tropical.Testing.NativeMultichannel
 import Tropical.Testing.Semantics
 import Lean.Data.Json
 import Tropical.Tropicaltest.Patcher
+import Tropical.Tropicaltest.ProductionNonEmission
 import Tropical.Tropicaltest.Exact
 import Tropical.Tropicaltest.GroupedRoomReference
 import Tropical.Tropicaltest.Oriented
