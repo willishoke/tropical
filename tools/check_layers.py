@@ -10,8 +10,10 @@ executable root.
 
 The rules that matter: TropicalCore imports only TropicalCore (plus the
 Lean toolchain), so the runtime binding `Tropical.Ffi` can never enter
-the compiler core's import closure; and TropicalSession imports only the
-core, so the session engine reaches the runtime through its host port.
+the compiler core's import closure; TropicalSession imports only the
+core, so the session engine reaches the runtime through its host port;
+and the `tropicalc` executable's closure stays inside TropicalCore, so
+the compiler demonstrably runs with no runtime in the binary.
 """
 
 from __future__ import annotations
@@ -32,6 +34,12 @@ ALLOWED = {
     "TropicalSession": {"TropicalCore"},
     "TropicalApp": {"TropicalCore", "TropicalHost", "TropicalSession"},
     "TropicalTest": {"TropicalCore", "TropicalHost", "TropicalSession", "TropicalApp"},
+}
+
+# Executable roots whose whole import closure must stay inside the named
+# libraries: the compiler runs with no runtime in the binary.
+EXE_CLOSURE = {
+    "Tropicalc": {"TropicalCore"},
 }
 
 # External import roots a library may use. Libraries not listed may use any.
@@ -126,6 +134,21 @@ def main() -> int:
                     errors.append(f"{mod} ({lib}) imports {imp} ({target})")
             elif lib in EXTERNAL and imp.split(".")[0] not in EXTERNAL[lib]:
                 errors.append(f"{mod} ({lib}) imports external {imp}")
+
+    for exe, allowed in EXE_CLOSURE.items():
+        if exe not in mods:
+            errors.append(f"{exe}: executable root in EXE_CLOSURE not found")
+            continue
+        seen, stack = set(), [exe]
+        while stack:
+            mod = stack.pop()
+            for imp in mods.get(mod, []):
+                if imp in mods and imp not in seen:
+                    seen.add(imp)
+                    stack.append(imp)
+        for mod in sorted(seen):
+            if owner.get(mod) not in allowed:
+                errors.append(f"{exe}: closure reaches {mod} ({owner.get(mod)}), allowed {sorted(allowed)}")
 
     for err in errors:
         print(f"check_layers: {err}")

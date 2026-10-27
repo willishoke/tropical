@@ -121,6 +121,13 @@ moreLinkArgs = [
 name = "trustreport"
 root = "TrustReport"
 
+# The compiler alone: a patch to a kernel artifact with no runtime linked.
+# tools/check_layers.py keeps its import closure inside TropicalCore;
+# tools/check_artifact_parity.py checks its plans against the engine's.
+[[lean_exe]]
+name = "tropicalc"
+root = "Tropicalc"
+
 # Focused modal-phaser qualification runner.  Keeping this gate separate avoids
 # paying the full tropicaltest module-initialization cost during product-layout
 # iteration; the same gate is also called by the repository-wide runner.
