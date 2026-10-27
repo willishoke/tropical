@@ -1,4 +1,6 @@
 import Tropical.Tropicaltest.Harness
+import Tropical.NativeBoot
+import Tropical.Testing.EngineMirror
 
 /-!
 # Tropical.Tropicaltest.Synthetic
@@ -672,19 +674,6 @@ def sortedNames (dir : String) (suffix : String) : IO (Array String) := do
   let names := entries.filterMap fun e =>
     if e.fileName.endsWith suffix then some (e.fileName.dropEnd suffix.length).toString else none
   pure (names.qsort fun a b => decide (a < b))
-
-/-- Compile a patch through the session mirror, returning the plan plus
-    the typed per-instruction stage blocks (the split classification). -/
-def compilePatchStaged (path : String) :
-    IO (Except String (Tropical.Plan.FlatPlan
-      × Array (Array (Option Tropical.Ir.Stage)))) := do
-  let env ← Tropical.NativeBoot.boot
-  let act : Tropical.EngineM _ := do
-    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str path)])
-    Tropical.Engine.compileMirrorStaged env .fused
-  match ← act.run with
-  | .ok compiled => pure (.ok (compiled.plan, compiled.stageBlocks))
-  | .error f => pure (.error f.toJson.compress)
 
 /-- Render a FlatPlan via the TYPED split (stage attribute →
     hoistTyped → EmitLlvm → load_ir_staged). -/

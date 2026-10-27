@@ -1,7 +1,6 @@
 import Tropical.Ffi
-import Tropical.Engine
-import Tropical.NativeBoot
 import Tropical.StagedLoad
+import Tropical.Session.Compile
 import Tropical.Playground
 import Tropical.Plan
 import Tropical.Ir.EmitLlvm
@@ -14,15 +13,17 @@ import Tropical.Ir.CompileResolved
 import Tropical.Compile
 import Tropical.EmitArrow
 import Tropical.Testing.ArrowFixtures
-import Tropical.Testing.EngineMirror
 import Tropical.Testing.PlanWire
 import Tropical.Tropicaltest.Gates
 
 /-!
 # Tropical.Tropicaltest.Harness
 
-The runtime side of the shared test substrate: PCM render through the
-native host and the `compilePatch*` drivers. The verdict combinators
+The host side of the shared test substrate: PCM render through the native
+runtime, and the `compilePatch*` drivers over the pure session compile
+(`Tropical.Session.compilePatch`, the same function the engine and
+`tropicalc` run). This module knows the compiler and a host; it does not
+know the session engine. The verdict combinators
 (`passGate`/`failGate`/`hashGate`, `bitDiffCount`/`energyOf`, `sha256Hex`)
 live in `Gates`, imported here, so suites that never render take only that.
 -/
@@ -50,18 +51,33 @@ def renderPlanBytes (planJson : String) : IO ByteArray := do
     acc := acc ++ (← rt.outputBytes)
   pure acc
 
-/-- Compile a tropical_program_2 patch (by path) to a plan in `mode`. Boots a
-    fresh engine per compile (the proven `diffcli compile` pattern — a reused
-    booted env does not survive sequential loads). -/
+/-- Compile a tropical_program_2 patch (by path) to its plan and typed stage
+    blocks, over a fresh stdlib registry each time (a value, so there is
+    nothing to reuse across loads). -/
+def compilePatchStaged (path : String) :
+    IO (Except String (Tropical.Plan.FlatPlan
+      × Array (Array (Option Tropical.Ir.Stage)))) := do
+  let text ← IO.FS.readFile path
+  let registry ← match Tropical.Session.bootRegistry with
+    | .error f => throw (IO.userError s!"stdlib boot failed: {f.toJson.compress}")
+    | .ok st => pure st
+  match (Tropical.Session.compilePatch text).runOn registry with
+  | (.ok r, _) => pure (.ok r)
+  | (.error f, _) => pure (.error f.toJson.compress)
+
+/-- Compile a tropical_program_2 patch (by path) to a plan in `mode`. -/
 def compilePatch (path : String) (mode : Tropical.Plan.CompilationMode) :
     IO (Except String String) := do
-  let env ← Tropical.NativeBoot.boot
-  let act : Tropical.EngineM String := do
-    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str path)])
-    Tropical.Engine.compileMirrorPlan env mode
-  match ← act.run with
-  | .ok planJson => pure (.ok planJson)
-  | .error f => pure (.error f.toJson.compress)
+  let text ← IO.FS.readFile path
+  let registry ← match Tropical.Session.bootRegistry with
+    | .error f => throw (IO.userError s!"stdlib boot failed: {f.toJson.compress}")
+    | .ok st => pure st
+  match (Tropical.Session.compilePatch text mode).runOn registry with
+  | (.error f, _) => pure (.error f.toJson.compress)
+  | (.ok (plan, _), _) =>
+    match plan.toWire with
+    | .error msg => pure (.error msg)
+    | .ok j => pure (.ok j.compress)
 
 /-- Render a FlatPlan via the Lean-emitted-IR path (stage-0 split →
     EmitLlvm → load_ir_staged). -/
