@@ -128,6 +128,13 @@ root = "TrustReport"
 name = "tropicalc"
 root = "Tropicalc"
 
+# The core test tier: the gates that are statements about the compiler
+# alone, run with no runtime linked. tools/check_layers.py keeps its import
+# closure inside TropicalCore and TropicalTest.
+[[lean_exe]]
+name = "tropicaltest-core"
+root = "TropicaltestCore"
+
 # Focused modal-phaser qualification runner.  Keeping this gate separate avoids
 # paying the full tropicaltest module-initialization cost during product-layout
 # iteration; the same gate is also called by the repository-wide runner.

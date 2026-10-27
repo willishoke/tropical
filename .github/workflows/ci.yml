@@ -69,7 +69,7 @@ jobs:
         run: |
           cd lean
           lake env leanc -c ffi/shim.c -o ffi/shim.o -I ../engine/c_api
-          lake build frontend diffcli tropicaltest trustreport tropicalc
+          lake build frontend diffcli tropicaltest trustreport tropicalc tropicaltest-core
 
       - name: Audit typed trust sites against production Lean
         run: python3 tools/audit_trust_sites.py
@@ -79,6 +79,9 @@ jobs:
 
       - name: Offline compiler agrees with the engine (and links no runtime)
         run: python3 tools/check_artifact_parity.py
+
+      - name: Core test tier (no runtime linked)
+        run: ./lean/.lake/build/bin/tropicaltest-core
 
       - name: Golden + native-equiv runner
         run: ./lean/.lake/build/bin/tropicaltest

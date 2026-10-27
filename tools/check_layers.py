@@ -40,6 +40,7 @@ ALLOWED = {
 # libraries: the compiler runs with no runtime in the binary.
 EXE_CLOSURE = {
     "Tropicalc": {"TropicalCore"},
+    "TropicaltestCore": {"TropicalCore", "TropicalTest"},
 }
 
 # External import roots a library may use. Libraries not listed may use any.

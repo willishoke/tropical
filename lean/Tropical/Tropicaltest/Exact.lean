@@ -1,4 +1,4 @@
-import Tropical.Tropicaltest.Harness
+import Tropical.Tropicaltest.Gates
 import Tropical.Exact.Gamma
 import Tropical.Playground.Vocabulary
 import Tropical.Testing.ArrowFixtures
