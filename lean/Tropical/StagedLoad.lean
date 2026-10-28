@@ -18,65 +18,48 @@ namespace Tropical.StagedLoad
 open Tropical.Plan (FlatPlan)
 open Tropical.Artifact (KernelArtifact split splitTyped emitJit emitMetal)
 
-/-- Debug: `TROPICAL_STAGE0_DUMP=<dir>` writes the split artifacts. -/
+/-- Debug: `TROPICAL_STAGE0_DUMP=<dir>` writes the artifact. -/
 private def dumpParts (parts : KernelArtifact) : IO Unit := do
   if let some dir ← IO.getEnv "TROPICAL_STAGE0_DUMP" then
-    IO.FS.writeFile s!"{dir}/audio.ll" parts.ir
-    IO.FS.writeFile s!"{dir}/coeff.ll" parts.coefficientIr
+    IO.FS.writeFile s!"{dir}/kernel.ll" parts.ir
     IO.FS.writeFile s!"{dir}/manifest.json" parts.manifest
+    unless parts.msl.isEmpty do IO.FS.writeFile s!"{dir}/kernel.metal" parts.msl
+    unless parts.stage0Ir.isEmpty do IO.FS.writeFile s!"{dir}/stage0.ll" parts.stage0Ir
 
-/-- The Metal sibling of the opt-in stage dump. Normal output and wire schemas
-    are untouched when `TROPICAL_STAGE0_DUMP` is absent. -/
-private def dumpMetalParts (parts : KernelArtifact) : IO Unit := do
-  if let some dir ← IO.getEnv "TROPICAL_STAGE0_DUMP" then
-    IO.FS.writeFile s!"{dir}/audio.ll" parts.ir
-    IO.FS.writeFile s!"{dir}/coeff.ll" parts.coefficientIr
-    IO.FS.writeFile s!"{dir}/manifest.json" parts.manifest
-    IO.FS.writeFile s!"{dir}/audio.metal" parts.msl
+private def publish (rt : Tropical.Ffi.Runtime) (parts : KernelArtifact) : IO Unit := do
+  dumpParts parts
+  rt.load parts.ir parts.msl parts.stage0Ir parts.manifest
 
-/-- Split + emit + load, JIT-only. -/
+/-- Split + emit + load, JIT-only, for the runtime's own frame count. -/
 def load (rt : Tropical.Ffi.Runtime) (plan : FlatPlan) : IO Unit := do
-  let s ← split plan
-  match emitJit s with
+  let frames := (← rt.bufferLength).toNat
+  match emitJit (← split plan) frames with
   | .error e => throw <| IO.userError s!"StagedLoad: {e}"
-  | .ok parts =>
-    dumpParts parts
-    rt.loadIrStaged parts.ir "" parts.coefficientIr parts.manifest
+  | .ok parts => publish rt parts
 
-/-- Split + emit + dual load (JIT + Metal): MSL is emitted from the
-    *audio* plan — coefficients are computed host-side in f64 by the JIT
-    coefficient kernel and cross to the GPU as host-written slots. -/
+/-- Split + emit + dual load (JIT + Metal). -/
 def loadMsl (rt : Tropical.Ffi.Runtime) (plan : FlatPlan) : IO Unit := do
-  let s ← split plan
-  match emitMetal s with
+  let frames := (← rt.bufferLength).toNat
+  match emitMetal (← split plan) frames with
   | .error e => throw <| IO.userError s!"StagedLoad (msl): {e}"
-  | .ok parts =>
-    dumpMetalParts parts
-    rt.loadIrStaged parts.ir parts.msl parts.coefficientIr parts.manifest
+  | .ok parts => publish rt parts
 
 /-- Typed split + emit + load, JIT-only. -/
 def loadTyped (rt : Tropical.Ffi.Runtime) (plan : FlatPlan)
     (stageBlocks : Array (Array (Option Tropical.Ir.Stage))) : IO Unit := do
-  let s ← splitTyped plan stageBlocks
-  match emitJit s with
+  let frames := (← rt.bufferLength).toNat
+  match emitJit (← splitTyped plan stageBlocks) frames with
   | .error e => throw <| IO.userError s!"StagedLoad: {e}"
-  | .ok parts =>
-    dumpParts parts
-    rt.loadIrStaged parts.ir "" parts.coefficientIr parts.manifest
+  | .ok parts => publish rt parts
 
-/-- Typed split + emit + dual load (JIT + Metal). MSL is emitted from the
-    *audio* plan: scalar coefficients cross to the GPU as host-written
-    slots, and hoisted coefficient COLUMNS (banks-as-data) cross via the
-    packed `coeff_columns` buffer — the runtime uploads the captured
-    generation per dispatch, f64→f32. The same typed split a live
-    session runs on `TROPICAL_BACKEND=metal`. -/
+/-- Typed split + emit + dual load (JIT + Metal). The MSL kernel reads the
+    slot vector and the hoisted coefficient columns the host computes with
+    the artifact's stage-0 pre-pass, f64 on the CPU, narrowed per dispatch. -/
 def loadMslTyped (rt : Tropical.Ffi.Runtime) (plan : FlatPlan)
     (stageBlocks : Array (Array (Option Tropical.Ir.Stage))) : IO Unit := do
-  let s ← splitTyped plan stageBlocks
-  match emitMetal s with
+  let frames := (← rt.bufferLength).toNat
+  match emitMetal (← splitTyped plan stageBlocks) frames with
   | .error e => throw <| IO.userError s!"StagedLoad (msl): {e}"
-  | .ok parts =>
-    dumpMetalParts parts
-    rt.loadIrStaged parts.ir parts.msl parts.coefficientIr parts.manifest
+  | .ok parts => publish rt parts
 
 end Tropical.StagedLoad

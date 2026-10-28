@@ -14,14 +14,15 @@ the `tests/web/` suites.
 Per patch, the build emits two artifacts the browser fetches:
 
 - `<slug>.wasm` — a complete wasm32 module exporting `tropical_kernel` (the
-  11-argument per-block kernel) + `__heap_base`, importing `env.memory` and
-  `env.round`. Produced by `diffcli compile-wasm` (engine LLVM + lld,
-  in-process — no `wasm-ld` on PATH, no toolchain).
-- `<slug>.manifest.json` — a `KernelManifest`: the trimmed subset of
-  `tropical_plan_6` the runtime needs (sample rate, SSA scratch sizing,
-  array/slot sizing, and slot defaults). Retired state/register metadata is
-  not part of this contract; see the
-  [compatibility matrix](../design/compatibility-matrix.md).
+  port: one pointer per input — `tau`, then the params — and one for the
+  output, over a static 128-frame block) + `__heap_base`, importing
+  `env.memory` and `env.round`. Produced by `diffcli compile-wasm --frames
+  128` (engine LLVM + lld, in-process — no `wasm-ld` on PATH, no toolchain).
+- `<slug>.manifest.json` — the kernel's type, `tropical_kernel_1`
+  (`design/typed-kernel.md`): `tau:i64q32[128]`, one `f64` param per knob
+  with its default, and `out:f64[128, C]`. Produced by `diffcli
+  compile-kernel --frames 128`. The compiler's plan is nested inside for its
+  own gates; the runtime never reads it.
 
 ## Layout
 
@@ -46,8 +47,8 @@ web/
     index.html
 ```
 
-`web/runtime/` depends **only** on `KernelManifest` — nothing from the
-compiler or `tropical_plan_6`. It is a self-contained consumer of tropical's
+`web/runtime/` depends **only** on `KernelManifest` (`tropical_kernel_1`) —
+nothing from the compiler. It is a self-contained consumer of tropical's
 artifact contract, ready to extract to its own package once a second consumer
 (an Electron app, a hosted player) appears. The forcing function is the
 dependency edge, not the repo boundary.
@@ -57,9 +58,10 @@ dependency edge, not the repo boundary.
 ```
 build host (Lean + LLVM + lld)              browser
   diffcli compile-wasm <patch>   →           fetch /patches/<slug>.wasm
-    (Lean EmitLlvm → wasm32 TargetMachine     fetch /patches/<slug>.manifest.json
-     → lld::wasm::link, in-process)           → WasmKernel.instantiate(wasm, manifest)
-  → <slug>.wasm + <slug>.manifest.json        → kernel.process per 128-sample block
+  diffcli compile-kernel <patch>              fetch /patches/<slug>.manifest.json
+    (Lean EmitLlvm → wasm32 TargetMachine     → WasmKernel.instantiate(wasm, manifest)
+     → lld::wasm::link, in-process)           → kernel.process per 128-sample block
+  → <slug>.wasm + <slug>.manifest.json
   written to web/dist/patches/                → AudioWorkletNode → speakers
 ```
 
@@ -73,32 +75,30 @@ enables it; needs `brew install lld`).
 The demo plays precompiled patches: **no live recompile, no state-transfer
 hot-swap, no SharedArrayBuffer params.** Those belong to the native
 instrument (Electron + the ORC JIT), where topology edits trigger
-recompile→hot-swap. `WasmKernel` keeps a `setSlot` method (params are slots in
-the session lowering) for a future host with live control, but the demo never
+recompile→hot-swap. `WasmKernel` keeps a `setParam` method (one cell per
+param input) for a future host with live control, but the demo never
 calls it — so the demo needs no COOP/COEP and deploys as plain static files. A
 smoothstep fade (`beginFadeIn`/`beginFadeOut`) is the only envelope, to avoid
 start/stop clicks.
 
 ## Linear-memory layout
 
-The kernel takes its working regions as pointer arguments. The host owns one
-imported `WebAssembly.Memory` and places each region above the module's
+The kernel takes one pointer per input and one for the output; everything
+else lives inside the function. The host owns one imported
+`WebAssembly.Memory` and places each region above the module's
 `__heap_base` (`runtime/layout.ts`):
 
 ```
 __heap_base
-  inputs        f64[64]            — zeroed (demo patches have no external input)
-  registers     i64[registerCount] — zeroed kernel-ABI region (unused by current kernels)
-  temps         i64[registerCount] — per-sample SSA scratch
-  arrays        f64[arraySlotSizes...] — array-register backing stores
-  array_sizes   i64[arraySlotCount]    — element count per array slot
-  slots         f64[slotCount]     — inter-module slots (output wires + params)
-  output        f64[maxBlockSize]  — kernel writes mono audio out
+  tau       i64[frames]              — the Q32.32 clock of each frame
+  params    f64 × (one cell per param input, port order)
+  output    f64[frames * channels]   — frame-major
 ```
 
-`WasmKernel.render(n)` returns the raw f64 output region (what the WASM≡JIT
-gate compares); `process(out, n)` applies the fade and downcasts to the f32
-worklet buffer.
+`WasmKernel.render(n)` fills tau and calls the kernel once per static block,
+chunking a longer window over the same closed form, and returns a copy of
+the raw f64 output (what the WASM≡JIT gate compares); `process(out, n)`
+applies the fade and downcasts to the f32 worklet buffer.
 
 ## Worklet protocol
 

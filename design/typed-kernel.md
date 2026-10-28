@@ -1,7 +1,10 @@
 # The typed kernel — one pure function at the port
 
-Status: **Proposed** (2026-10-28). Decided in conversation with the owner;
-nothing here is built. This document *replaces* §2, §3 and §4 of
+Status: **Landed through T3** (2026-10-28). Decided in conversation with
+the owner; T0–T3 are built, T4 is folded into T3 (the scope reads output
+channels), T5 is landed with T3 (the web runtime binds the port), T6 and T7
+remain. The "What it states" sections below are the design; the
+"As built" section records where the implementation settled. This document *replaces* §2, §3 and §4 of
 `kernel-artifact-abi.md` and narrows §1, §5 and §6. It honours `cf-only.md`
 without amendment: a kernel was always `f(τ, params)`, and this document
 makes the port say so. `architecture.md` and `compatibility-matrix.md` are
@@ -266,10 +269,10 @@ entry point is byte-identical coming out); every step below must hold
 |---|---|---|
 | T0 | Delete the tile kernel, the materializer, the flags and the manifest fields. | `make validate` green; `PhaserHigherOrderMaterializer` gone; no `tile_` in `Plan.lean` |
 | T1 | `Tropical.Kernel` type in core (inputs/outputs/elem/shape/role) and `tropical_kernel_1` manifest; emitted alongside plan 6, not yet consumed. | `tropicalc` writes `kernel.json` (the type, with the plan nested) beside `manifest.json`; the core-tier `typed-kernel` gate derives, shape-checks and round-trips it for every corpus patch |
-| T2 | EmitLlvm emits the new signature with the coefficient preamble as an internal function; EmitMsl emits per-input bindings with the pre-pass buffer internal. | goldens byte-identical; MSL goldens re-frozen once, deliberately |
-| T3 | FlatRuntime loads one artifact: input record, two generations, one flip. Delete column generations, slot capture, `load_ir_time_staged*`. | goldens; `param_dispatch_conformance` green; TSAN suite green |
-| T4 | τ as an input: the DAC host fills it; `render_window` becomes a host τ fill over the scope artifact. | scope output identical to the previous `render_window` for integer coordinates |
-| T5 | Web runtime: `KernelManifest` → `inputs`/`outputs`; `wasm_vs_jit` and `web_plans_vs_jit` on the new ABI. | both suites green |
+| T2 | EmitLlvm emits the port with the coefficient plan as its prologue; EmitMsl binds `tau` with static frames and a literal rate. **Landed.** | goldens byte-identical; MSL goldens re-frozen once, deliberately |
+| T3 | FlatRuntime loads one artifact over `tropical_kernel_1`, calls the argv thunk with tau and the param cells, keeps the Metal pre-pass. `load_ir*` family deleted. **Landed.** | goldens; `param_dispatch_conformance` green; TSAN suite green |
+| T4 | τ as an input: the host fills it; `render_window` renders the observation kernel's output channels. **Landed with T3.** | scope output identical to the previous `render_window` for integer coordinates |
+| T5 | Web runtime: `KernelManifest` is `tropical_kernel_1`; `wasm_vs_jit` and `web_plans_vs_jit` on the new ABI. **Landed with T3.** | both suites green |
 | T6 | Realtime input: a `signal` role, a DAC input path, one patch that uses it. | a feedforward patch (delay-free FIR on mic) renders byte-identically between a recorded buffer and the live path |
 | T7 | Retire `kernel-artifact-abi.md` §2–§4; update `architecture.md`, `compatibility-matrix.md`, `engine/CLAUDE.md`. | docs describe only what exists |
 
@@ -277,14 +280,40 @@ T0 and T1 are independent. T2 and T3 must land together or behind a flag,
 since the signature and the loader change in lockstep. T6 is the only step
 that adds behaviour and can wait.
 
-## Open questions
+## As built (T2/T3, 2026-10-28)
 
-1. **τ's element type.** Q32.32 rail (recommended; fractional scrub for free,
-   the rail already exists) or integer sample index (what every current
-   kernel actually receives)? Kernels that `floor` a τ-derived value need
-   checking under fractional τ before the rail is the type.
-2. **Scalar inputs as one-element buffers** (uniform binding, recommended) or
-   as by-value arguments (one fewer load, two calling conventions)?
-3. **Does `role` belong in the type or in a separate host-facing annotation
-   block?** It is not semantic, which argues for the latter; it is per-input,
-   which argues for the former.
+The three open questions were taken as recommended: τ is the Q32.32 rail
+(`i64q32`), scalars bind as one-element buffers, `role` is a field of the
+port. Where the implementation settled differently from the text above:
+
+- **The thunk.** Beside `@tropical_kernel` the module exports
+  `@tropical_kernel_argv(ptr argv)`, which unpacks a pointer table and calls
+  the port. A C host cannot call a function of arbitrary arity; the thunk is
+  the host's convenience, not part of the type. `compile_ir_text` renames
+  every definition and looks the thunk up.
+- **`current_idx` is `tau >> 32`.** The kernels' integer tick is derived from
+  the rail, so a fractional τ is representable at the port but truncates to
+  its integer sample for today's tick-based arithmetic. Fractional
+  evaluation is a later change to the emitters, not to the port.
+- **Output channels are named.** The `out` port carries `channels`, one
+  source name per channel, and a scope tap is an output channel of the
+  observation artifact (the playground routes each tap to its own channel).
+  `render_window` resolves names to channels and renders a wider window in
+  chunks of the kernel's frame count.
+- **Metal keeps a CPU pre-pass.** A Metal artifact carries `stage0Ir`, the
+  coefficient plan as `@tropical_stage0(slots, arrays, array_sizes, temps)`
+  over host storage, run at load and after every control write; the GPU
+  kernel reads the slot vector and the hoisted coefficient columns it
+  produces. The three-generation column protocol therefore survives for
+  Metal only. The MSL binding is `output_buffer`(0), `slots`(1), `tau`(2),
+  `coeff_columns`(3); a render tile is `Rgpu / frames` dispatches in one
+  command buffer. Metal's own 31-binding limit is why scalars are not one
+  binding each there; the port is unchanged.
+- **Three generations of the control slots remain on the JIT path**, for
+  the same reason the slot generations always had three: a control stream
+  can publish twice inside one audio buffer. The coefficient generations and
+  the slot capture of columns are gone from the JIT path.
+- **Microkernel realization is deleted.** The plan's `compilation_mode`
+  field survives as `fused` only; a host refuses anything else.
+- **`get_slot` on a kernel-written slot** returns the host's seed on every
+  backend now, uniformly; nothing reads such slots any more.

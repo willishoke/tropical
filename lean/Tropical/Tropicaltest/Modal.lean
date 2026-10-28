@@ -124,7 +124,7 @@ def runBanksNestedMsl (arena : Arena)
       "nested_msl" (nestedBankProbe 4 4) arena) with
   | .error e => failGate "banks-nested-msl" s!"build: {firstLine e}"
   | .ok fp =>
-    match Tropical.Ir.EmitMsl.emitKernel fp with
+    match Tropical.Ir.EmitMsl.emitKernel fp 256 with
     | .error e => failGate "banks-nested-msl" s!"EmitMsl: {firstLine e}"
     | .ok msl =>
       -- Depth scan over the kernel text: a reduce-for line opens a loop, a
@@ -2026,7 +2026,7 @@ def runModalLive (arena : Arena)
   | .ok compiled =>
     let plan := compiled.plan
     let stageBlocks := compiled.stageBlocks
-    match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
+    match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel { audio := plan, coeff? := none } 256 with
     | .ok _, .ok _ =>
       -- A slot that EXISTS but is never READ is a dead knob — exactly the
       -- reverb-discards-the-voice regression (the pitch knob accepted writes into

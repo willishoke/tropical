@@ -1,20 +1,14 @@
 #include <metal_stdlib>
 using namespace metal;
 
-struct TropicalKernelConsts {
-    ulong start_sample_index;
-    float sample_rate;
-    uint  buffer_length;
-};
-
 kernel void tropical_kernel(
     device float*                  output_buffer [[buffer(0)]],
     constant float*                slots         [[buffer(1)]],
-    constant TropicalKernelConsts& k             [[buffer(2)]],
+    constant long*                 tau           [[buffer(2)]],
     uint s [[thread_position_in_grid]])
 {
-    if (s >= k.buffer_length) { return; }
-    const long current_idx = long(k.start_sample_index) + long(s);
+    if (s >= 256u) { return; }
+    const long current_idx = tau[s] >> 32;
     const long t0 = (current_idx << 32L);
     long ti50 = t0;
     long sli2 = ti50;

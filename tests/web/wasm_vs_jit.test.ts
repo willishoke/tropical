@@ -58,23 +58,24 @@ function compileViaLean(program: ProgramFile): string {
   return r.stdout.toString().trim()
 }
 
-/** Trim a plan_6 JSON to the KernelManifest the runtime consumes. */
-function manifestFromPlan(planJson: string): KernelManifest {
+/** The `tropical_kernel_1` manifest the runtime consumes, for the same
+ *  source, via `diffcli compile-kernel` (128 frames per call: the worklet
+ *  quantum, and what `compile-wasm` defaults to). */
+function kernelManifestViaLean(program: ProgramFile): KernelManifest {
+  writeFileSync(PROG_TMP, JSON.stringify(program))
+  const r = spawnSync([diffcli, 'compile-kernel', PROG_TMP, '--fixtures'], { cwd: repoRoot, env: cliEnv })
+  if (r.exitCode !== 0) throw new Error(`diffcli compile-kernel failed (exit ${r.exitCode}): ${r.stderr?.toString()}`)
+  return JSON.parse(r.stdout.toString()) as KernelManifest
+}
+
+function outputChannelsOfPlan(planJson: string): number {
   const p = JSON.parse(planJson)
-  const outputChannelCount = p.output_channel_count ??
+  return p.output_channel_count ??
     (p.sinks ?? []).reduce(
       (count: number, sink: { target?: number }) =>
         Math.max(count, (sink.target ?? 0) + 1),
       1,
     )
-  return {
-    sampleRate:     p.config?.sampleRate ?? 44100,
-    registerCount:  p.register_count ?? 0,
-    arraySlotSizes: p.array_slot_sizes ?? [],
-    slotCount:      p.slot_count ?? (p.slot_defaults?.length ?? 0),
-    slotDefaults:   p.slot_defaults ?? [],
-    outputChannelCount,
-  }
 }
 
 /** Native side: render the wire plan through the engine's JIT. */
@@ -84,19 +85,22 @@ function runNative(wirePlan: string, samples: number): Float64Array {
   const r = spawnSync([diffcli, 'render-bytes', tmp, '--frames', '1', '--buffer', String(samples)], { cwd: repoRoot, env: cliEnv })
   if (r.exitCode !== 0) throw new Error(`diffcli render-bytes failed (exit ${r.exitCode}): ${r.stderr?.toString()}`)
   const b = r.stdout
-  const outputSamples = samples * (manifestFromPlan(wirePlan).outputChannelCount ?? 1)
+  const outputSamples = samples * outputChannelsOfPlan(wirePlan)
   return new Float64Array(
     b.buffer.slice(b.byteOffset, b.byteOffset + outputSamples * 8))
 }
 
 /** WASM side: lower the same source to wasm32 in-process and drive it through
  *  the runtime package (the artifacts the browser ships). */
-async function runWasm(program: ProgramFile, plan: string, samples: number): Promise<Float64Array> {
+async function runWasm(program: ProgramFile, _plan: string, samples: number): Promise<Float64Array> {
+  const manifest = kernelManifestViaLean(program)
   writeFileSync(PROG_TMP, JSON.stringify(program))
   const out = '/tmp/wvj-program.wasm'
   const r = spawnSync([diffcli, 'compile-wasm', PROG_TMP, `--out=${out}`, '--fixtures'], { cwd: repoRoot, env: cliEnv })
   if (r.exitCode !== 0) throw new Error(`diffcli compile-wasm failed (exit ${r.exitCode}): ${r.stderr?.toString()}`)
-  const k = await WasmKernel.instantiate(new Uint8Array(readFileSync(out)), manifestFromPlan(plan), samples)
+  // The kernel's shape is static (128 frames); `render` chunks a longer
+  // window over the same closed form, so the sample count is free.
+  const k = await WasmKernel.instantiate(new Uint8Array(readFileSync(out)), manifest)
   return k.render(samples).slice()
 }
 

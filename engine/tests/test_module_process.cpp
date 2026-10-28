@@ -1,9 +1,9 @@
 /**
  * test_module_process.cpp
  *
- * Exercises the current C++ engine with hand-written LLVM IR:
- * `tropical_runtime_load_ir` → compile_ir_text → JIT → run, plus the
- * device-boundary clamp. Lean's EmitLlvm owns production codegen;
+ * Exercises the current C++ engine with hand-written LLVM IR at the port
+ * (design/typed-kernel.md): `tropical_runtime_load` → compile_ir_text →
+ * JIT → run, plus the device-boundary clamp. Lean's EmitLlvm owns production codegen;
  * arithmetic/op correctness lives in the Lean `tropicaltest` gates.
  * These tests cover the engine half only. They do not assert plan
  * instruction semantics or per-sample state.
@@ -85,106 +85,175 @@ static void run_test(const char* name, std::function<void()> fn)
     }                                                                         \
   } while (0)
 
-// The fused kernel ABI (must match NumericKernelFn). Lean's EmitLlvm emits
-// exactly this signature; these hand kernels mirror it.
-static const char* KERNEL_SIG =
-  "ptr %inputs, ptr %registers, ptr %arrays, ptr %array_sizes, ptr %temps, "
-  "double %sampleRate, i64 %start_sample_index, ptr %param_ptrs, "
-  "ptr %output_buffer, i64 %buffer_length, ptr %slots";
-
-static std::string wrap_loop(const std::string& body)
+// The port (design/typed-kernel.md): `tropical_kernel(ptr tau, ptr in_1..k,
+// ptr out)` over a static frame count, plus the argv thunk compile_ir_text
+// looks up. Lean's EmitLlvm emits exactly this shape; these hand kernels
+// mirror it. Inside the loop `%s` is the frame, `%idx` the sample index
+// (`tau[s] >> 32`), `%in_<j>` the j-th param input, `%out` the output.
+static std::string wrap_kernel(unsigned int frames, unsigned int params,
+                               const std::string& body)
 {
-  return std::string("define void @kernel(") + KERNEL_SIG + ") {\n"
+  std::string args = "ptr %tau";
+  for (unsigned int j = 1; j <= params; ++j)
+    args += ", ptr %in_" + std::to_string(j);
+  args += ", ptr %out";
+  std::string loads, call_args;
+  for (unsigned int i = 0; i < params + 2; ++i)
+  {
+    loads += "  %ap" + std::to_string(i)
+      + " = getelementptr inbounds ptr, ptr %argv, i64 " + std::to_string(i) + "\n"
+      "  %a" + std::to_string(i) + " = load ptr, ptr %ap" + std::to_string(i) + ", align 8\n";
+    call_args += (i ? ", ptr %a" : "ptr %a") + std::to_string(i);
+  }
+  return "define void @tropical_kernel(" + args + ") {\n"
     "entry:\n  br label %lc\n"
     "lc:\n  %s = phi i64 [0, %entry], [%sn, %lb]\n"
-    "  %c = icmp ult i64 %s, %buffer_length\n"
+    "  %c = icmp ult i64 %s, " + std::to_string(frames) + "\n"
     "  br i1 %c, label %lb, label %le\n"
-    "lb:\n" + body +
+    "lb:\n"
+    "  %tau_p = getelementptr inbounds i64, ptr %tau, i64 %s\n"
+    "  %tau_s = load i64, ptr %tau_p, align 8\n"
+    "  %idx = ashr i64 %tau_s, 32\n"
+    + body +
     "  %sn = add i64 %s, 1\n  br label %lc\n"
-    "le:\n  ret void\n}\n";
+    "le:\n  ret void\n}\n\n"
+    "define void @tropical_kernel_argv(ptr %argv) {\n"
+    "entry:\n" + loads +
+    "  call void @tropical_kernel(" + call_args + ")\n"
+    "  ret void\n}\n";
 }
 
-static std::string stereo_constant_ir()
+// A tropical_kernel_1 manifest: tau[frames], one f64 param input per name,
+// out[frames, channels] with the given channel names, and the nested plan
+// (slot table + disciplines) a host still reads.
+static std::string kernel_manifest(unsigned int frames,
+                                   const std::vector<std::string>& params,
+                                   const std::vector<std::string>& channels,
+                                   const std::string& plan_json)
 {
-  return wrap_loop(
+  nlohmann::json inputs = nlohmann::json::array();
+  nlohmann::json tau;
+  tau["name"] = "tau"; tau["elem"] = "i64q32";
+  tau["shape"] = nlohmann::json::array({frames}); tau["role"] = "signal";
+  inputs.push_back(tau);
+  for (const auto& name : params)
+  {
+    nlohmann::json port;
+    port["name"] = name; port["elem"] = "f64";
+    port["shape"] = nlohmann::json::array(); port["role"] = "param";
+    inputs.push_back(port);
+  }
+  nlohmann::json out;
+  out["name"] = "out"; out["elem"] = "f64";
+  out["shape"] = nlohmann::json::array(
+    {frames, static_cast<unsigned int>(channels.size())});
+  out["channels"] = channels;
+  nlohmann::json manifest;
+  manifest["schema"] = "tropical_kernel_1";
+  manifest["rate"] = 44100;
+  manifest["inputs"] = inputs;
+  manifest["outputs"] = nlohmann::json::array({out});
+  manifest["realization"] = {{"mode", "fused"}, {"register_count", 0}};
+  manifest["plan"] = nlohmann::json::parse(plan_json);
+  return manifest.dump();
+}
+
+static std::string plan_json(unsigned int channels,
+                             const std::vector<std::string>& slot_names,
+                             const std::vector<double>& slot_defaults,
+                             const std::string& extra = "")
+{
+  nlohmann::json plan;
+  plan["schema"] = "tropical_plan_6";
+  plan["config"] = {{"sampleRate", 44100}};
+  plan["output_channel_count"] = channels;
+  plan["register_count"] = 0;
+  plan["array_slot_count"] = 0;
+  plan["array_slot_sizes"] = nlohmann::json::array();
+  plan["instance_functions"] = nlohmann::json::array();
+  plan["slot_count"] = static_cast<unsigned int>(slot_names.size());
+  plan["slot_names"] = slot_names;
+  plan["slot_defaults"] = slot_defaults;
+  if (!extra.empty())
+    plan.merge_patch(nlohmann::json::parse(extra));
+  return plan.dump();
+}
+
+// A frames-wide constant kernel with no params and one channel.
+static std::string constant_manifest(unsigned int frames, unsigned int channels = 1)
+{
+  std::vector<std::string> channel_names(channels, "");
+  channel_names[0] = "out";
+  return kernel_manifest(frames, {}, channel_names, plan_json(channels, {}, {}));
+}
+
+static std::string stereo_constant_ir(unsigned int frames)
+{
+  return wrap_kernel(frames, 0,
     "  %frame_base = mul i64 %s, 2\n"
-    "  %left = getelementptr inbounds double, ptr %output_buffer, i64 %frame_base\n"
+    "  %left = getelementptr inbounds double, ptr %out, i64 %frame_base\n"
     "  store double 2.500000e-01, ptr %left, align 8\n"
     "  %right_index = add i64 %frame_base, 1\n"
-    "  %right = getelementptr inbounds double, ptr %output_buffer, i64 %right_index\n"
+    "  %right = getelementptr inbounds double, ptr %out, i64 %right_index\n"
     "  store double -5.000000e-01, ptr %right, align 8\n");
 }
-
-static const char* STEREO_MANIFEST = R"({
-  "schema":"tropical_plan_6","config":{"sampleRate":44100},
-  "output_channel_count":2,"register_count":0,"array_slot_count":0,
-  "array_slot_sizes":[],"instance_functions":[],
-  "sinks":[{"inputs":[],"gain":1,"target":0},
-           {"inputs":[],"gain":1,"target":1}],"slot_count":0})";
 
 static bool wait_for_true(
   const std::atomic<bool> & value,
   std::chrono::milliseconds timeout = std::chrono::seconds(10))
 {
   const auto deadline = std::chrono::steady_clock::now() + timeout;
-  while (!value.load(std::memory_order_acquire)
-         && std::chrono::steady_clock::now() < deadline)
+  while (!value.load(std::memory_order_acquire))
+  {
+    if (std::chrono::steady_clock::now() >= deadline) return false;
     std::this_thread::yield();
-  return value.load(std::memory_order_acquire);
+  }
+  return true;
 }
 
-static bool socket_request(
-  const std::string & path, const std::string & request,
-  std::string & response)
+static bool socket_request(const std::string & path,
+                           const std::string & request,
+                           std::string & response)
 {
   const int fd = ::socket(AF_UNIX, SOCK_STREAM, 0);
   if (fd < 0) return false;
-  struct sockaddr_un address{};
+  sockaddr_un address{};
   address.sun_family = AF_UNIX;
-  if (path.size() >= sizeof(address.sun_path))
-  {
-    ::close(fd);
-    return false;
-  }
-  std::memcpy(address.sun_path, path.c_str(), path.size() + 1);
-  if (::connect(
-        fd, reinterpret_cast<struct sockaddr *>(&address),
-        sizeof(address)) != 0)
+  std::strncpy(address.sun_path, path.c_str(), sizeof(address.sun_path) - 1);
+  if (::connect(fd, reinterpret_cast<sockaddr *>(&address), sizeof(address)) != 0)
   {
     ::close(fd);
     return false;
   }
   const std::string line = request + "\n";
-  std::size_t sent = 0;
-  while (sent < line.size())
+  if (::write(fd, line.data(), line.size())
+      != static_cast<ssize_t>(line.size()))
   {
-    const ssize_t n = ::send(fd, line.data() + sent, line.size() - sent, 0);
-    if (n <= 0)
-    {
-      ::close(fd);
-      return false;
-    }
-    sent += static_cast<std::size_t>(n);
+    ::close(fd);
+    return false;
   }
   response.clear();
-  std::array<char, 1024> buffer{};
+  char buffer[4096];
   while (response.find('\n') == std::string::npos)
   {
-    const ssize_t n = ::recv(fd, buffer.data(), buffer.size(), 0);
-    if (n <= 0)
-    {
-      ::close(fd);
-      return false;
-    }
-    response.append(buffer.data(), static_cast<std::size_t>(n));
+    const ssize_t got = ::read(fd, buffer, sizeof(buffer));
+    if (got <= 0) break;
+    response.append(buffer, static_cast<size_t>(got));
   }
   ::close(fd);
   response.resize(response.find('\n'));
   return true;
 }
 
+static bool load_c(tropical_runtime_t rt, const std::string& ir,
+                   const std::string& manifest)
+{
+  return tropical_runtime_load(rt, ir.c_str(), ir.size(), nullptr, 0,
+                               nullptr, 0, manifest.c_str(), manifest.size());
+}
+
 /**
- * 1. Constant kernel via load_ir — proves textual IR parses, JITs, runs.
+ * 1. Constant kernel via load — proves textual IR parses, JITs, runs.
  */
 static void test_ir_constant()
 {
@@ -192,15 +261,10 @@ static void test_ir_constant()
   tropical_runtime_t rt = tropical_runtime_new(buf);
   ASSERT(rt != nullptr);
 
-  std::string ir = wrap_loop(
-    "  %p = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+  const std::string ir = wrap_kernel(buf, 0,
+    "  %p = getelementptr inbounds double, ptr %out, i64 %s\n"
     "  store double 5.000000e-01, ptr %p, align 8\n");
-  std::string manifest = R"({"schema":"tropical_plan_6","config":{"sampleRate":44100},
-    "register_count":0,"array_slot_count":0,"array_slot_sizes":[],
-    "instance_functions":[],"sinks":[],"slot_count":0})";
-
-  ASSERT_OK(tropical_runtime_load_ir(rt, ir.c_str(), ir.size(),
-                                     manifest.c_str(), manifest.size()));
+  ASSERT_OK(load_c(rt, ir, constant_manifest(buf)));
   tropical_runtime_process(rt);
   const double* out = tropical_runtime_output_buffer(rt);
   ASSERT(out != nullptr);
@@ -216,10 +280,9 @@ static void test_interleaved_native_output()
   constexpr unsigned int frames = 8;
   tropical_runtime_t rt = tropical_runtime_new(frames);
   ASSERT(rt != nullptr);
-  const std::string stereo_ir = stereo_constant_ir();
-  ASSERT_OK(tropical_runtime_load_ir(
-    rt, stereo_ir.c_str(), stereo_ir.size(),
-    STEREO_MANIFEST, std::strlen(STEREO_MANIFEST)));
+  const std::string stereo_ir = stereo_constant_ir(frames);
+  const std::string stereo_manifest = constant_manifest(frames, 2);
+  ASSERT_OK(load_c(rt, stereo_ir, stereo_manifest));
   ASSERT(tropical_runtime_output_channel_count(rt) == 2);
   ASSERT(tropical_runtime_interleaved_output_buffer(rt)
          != tropical_runtime_output_buffer(rt));
@@ -239,17 +302,11 @@ static void test_interleaved_native_output()
     ASSERT_NEAR(mono[frame], compact[frame * 2], 0.0);
   }
 
-  // Missing sink targets and sink-free plans rely on the runtime's full B*C
-  // pre-clear. Hot-swap from nonzero stereo proves this is not allocator-zero
-  // luck. The maximum supported width uses the same fixed callback scratch.
-  const std::string silent_ir = wrap_loop("");
-  const char * silent_manifest = R"({
-    "schema":"tropical_plan_6","config":{"sampleRate":44100},
-    "output_channel_count":64,"register_count":0,"array_slot_count":0,
-    "array_slot_sizes":[],"instance_functions":[],"sinks":[],"slot_count":0})";
-  ASSERT_OK(tropical_runtime_load_ir(
-    rt, silent_ir.c_str(), silent_ir.size(),
-    silent_manifest, std::strlen(silent_manifest)));
+  // A kernel that writes nothing relies on the runtime's full B*C pre-clear.
+  // Hot-swap from nonzero stereo proves this is not allocator-zero luck. The
+  // maximum supported width uses the same fixed callback scratch.
+  const std::string silent_ir = wrap_kernel(frames, 0, "");
+  ASSERT_OK(load_c(rt, silent_ir, constant_manifest(frames, 64)));
   tropical_runtime_process(rt);
   ASSERT(tropical_runtime_output_channel_count(rt) == 64);
   compact = tropical_runtime_interleaved_output_buffer(rt);
@@ -258,12 +315,10 @@ static void test_interleaved_native_output()
   for (unsigned int frame = 0; frame < frames; ++frame)
     ASSERT_NEAR(tropical_runtime_output_buffer(rt)[frame], 0.0, 0.0);
 
-  tropical_runtime_free(rt);
-
   // One frame gain is shared across every channel: a fade must preserve the
   // stereo relationship, and the compatibility view follows faded channel 0.
   tropical_runtime::FlatRuntime faded(frames);
-  ASSERT(faded.load_ir(stereo_ir, STEREO_MANIFEST));
+  ASSERT(faded.load(stereo_ir, "", "", stereo_manifest));
   faded.begin_fade_in();
   faded.process();
   const double * faded_compact = faded.getInterleavedOutputBuffer();
@@ -278,83 +333,93 @@ static void test_interleaved_native_output()
   }
 }
 
-// A sample-index ramp via load_ir — closed-form, no state. Exercises the
-// `%current_idx` (Tick source) argument and float<->i64 store path. CF-only
-// removed per-sample registers, so the kernel is a pure function of the
-// sample index.
+// A sample-index ramp — closed-form, no state. Exercises the tau input
+// (`%idx = tau[s] >> 32`) and the output store. The kernel is a pure
+// function of the clock it is handed.
 static const char* RAMP_BODY =
-  "  %idx = add i64 %start_sample_index, %s\n"
   "  %v = sitofp i64 %idx to double\n"
-  "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+  "  %op = getelementptr inbounds double, ptr %out, i64 %s\n"
   "  store double %v, ptr %op, align 8\n";
 
-static const char* RAMP_MANIFEST = R"({"schema":"tropical_plan_6",
-  "config":{"sampleRate":44100},"register_count":0,
-  "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
-  "sinks":[],"slot_count":0})";
-
 static bool load_fails_with(tropical_runtime_t runtime, const std::string& ir,
-                            const char* manifest, const char* expected)
+                            const std::string& manifest, const char* expected)
 {
-  if (tropical_runtime_load_ir(runtime, ir.c_str(), ir.size(),
-                               manifest, std::strlen(manifest)))
-    return false;
+  if (load_c(runtime, ir, manifest)) return false;
   const char* error = tropical_last_error();
   return error && std::strstr(error, expected);
 }
 
 /**
- * 2. The native boundary accepts exactly tropical_plan_6. Plan 5, missing or
- *    unknown schemas, retired state/output carriers, legacy operands, and
- *    missing destination namespaces fail before caller-supplied IR is loaded.
+ * 2. The native boundary accepts exactly tropical_kernel_1 over a nested
+ *    tropical_plan_6. Other schemas, a missing plan, a malformed port, a
+ *    frame count other than the runtime's, and every retired plan carrier
+ *    fail before caller-supplied IR is loaded.
  */
-static void test_plan6_only_manifest_boundary()
+static void test_manifest_boundary()
 {
   tropical_runtime_t rt = tropical_runtime_new(16);
   ASSERT(rt != nullptr);
-  const std::string ir = wrap_loop(RAMP_BODY);
+  const std::string ir = wrap_kernel(16, 0, RAMP_BODY);
+  const auto with_plan = [](const char* plan) {
+    return kernel_manifest(16, {}, {"out"}, plan);
+  };
 
   ASSERT(load_fails_with(
-    rt, ir, R"({"schema":"tropical_plan_4"})",
-    "unsupported manifest schema 'tropical_plan_4'; expected 'tropical_plan_6'"));
-  ASSERT(load_fails_with(
-    rt, ir, R"({"schema":"tropical_plan_5"})",
-    "unsupported manifest schema 'tropical_plan_5'; expected 'tropical_plan_6'"));
+    rt, ir, R"({"schema":"tropical_plan_6"})",
+    "unsupported manifest schema 'tropical_plan_6'; expected 'tropical_kernel_1'"));
   ASSERT(load_fails_with(
     rt, ir, R"({})",
-    "unsupported manifest schema ''; expected 'tropical_plan_6'"));
+    "unsupported manifest schema ''; expected 'tropical_kernel_1'"));
   ASSERT(load_fails_with(
-    rt, ir, R"({"schema":"tropical_plan_99"})",
-    "unsupported manifest schema 'tropical_plan_99'; expected 'tropical_plan_6'"));
+    rt, ir, R"({"schema":"tropical_kernel_1"})",
+    "kernel manifest has no plan"));
   ASSERT(load_fails_with(
-    rt, ir, R"({"schema":"tropical_plan_6","state_init":[1]})",
+    rt, ir, with_plan(R"({"schema":"tropical_plan_4"})"),
+    "unsupported manifest schema 'tropical_plan_4'; expected 'tropical_plan_6'"));
+  ASSERT(load_fails_with(
+    rt, ir, with_plan(R"({"schema":"tropical_plan_6","state_init":[1]})"),
     "retired field 'state_init' is not valid in tropical_plan_6"));
   ASSERT(load_fails_with(
     rt, ir,
-    R"({"schema":"tropical_plan_6","output_targets":[],"outputs":[]})",
+    with_plan(R"({"schema":"tropical_plan_6","output_targets":[],"outputs":[]})"),
     "retired field 'output_targets' is not valid in tropical_plan_6"));
   ASSERT(load_fails_with(
     rt, ir,
-    R"({"schema":"tropical_plan_6","instance_functions":[{"instructions":[{"tag":"Add","dst":0,"args":[],"result_type":"float"}]}]})",
+    with_plan(R"({"schema":"tropical_plan_6","instance_functions":[{"instructions":[{"tag":"Add","dst":0,"args":[],"result_type":"float"}]}]})"),
     "plan-6 instruction missing required dst_kind"));
   ASSERT(load_fails_with(
     rt, ir,
-    R"({"schema":"tropical_plan_6","instance_functions":[{"instructions":[{"tag":"Add","dst":0,"dst_kind":"temp","args":[{"kind":"rate","scalar_type":"float"}],"result_type":"float"}]}]})",
+    with_plan(R"({"schema":"tropical_plan_6","instance_functions":[{"instructions":[{"tag":"Add","dst":0,"dst_kind":"temp","args":[{"kind":"rate","scalar_type":"float"}],"result_type":"float"}]}]})"),
     "unknown operand kind 'rate'"));
   ASSERT(load_fails_with(
-    rt, ir, R"({"schema":"tropical_plan_6","output_channel_count":0})",
-    "output_channel_count must be in [1,64]"));
-  ASSERT(load_fails_with(
-    rt, ir, R"({"schema":"tropical_plan_6","output_channel_count":65})",
+    rt, ir, with_plan(R"({"schema":"tropical_plan_6","output_channel_count":0})"),
     "output_channel_count must be in [1,64]"));
   ASSERT(load_fails_with(
     rt, ir,
-    R"({"schema":"tropical_plan_6","output_channel_count":2,"sinks":[{"target":2}]})",
+    with_plan(R"({"schema":"tropical_plan_6","output_channel_count":2,"sinks":[{"target":2}]})"),
     "sink target 2 is out of range"));
   ASSERT(load_fails_with(
     rt, ir,
-    R"({"schema":"tropical_plan_6","output_channel_count":2,"sinks":[{"target":0},{"target":0}]})",
+    with_plan(R"({"schema":"tropical_plan_6","output_channel_count":2,"sinks":[{"target":0},{"target":0}]})"),
     "duplicate sink target 0"));
+  ASSERT(load_fails_with(
+    rt, ir, with_plan(R"({"schema":"tropical_plan_6","compilation_mode":"microkernel"})"),
+    "realization 'microkernel' is not a host-visible mode"));
+  // The port itself: tau first, a frame count that is the runtime's, one
+  // output whose width matches the nested plan, and an entry the IR defines.
+  ASSERT(load_fails_with(
+    rt, ir, kernel_manifest(32, {}, {"out"}, plan_json(1, {}, {})),
+    "artifact compiled for 32 frames per call; this runtime renders 16"));
+  ASSERT(load_fails_with(
+    rt, ir, kernel_manifest(16, {}, {"out", "right"}, plan_json(1, {}, {})),
+    "kernel output width disagrees with the nested plan"));
+  ASSERT(load_fails_with(
+    rt, ir, kernel_manifest(16, {"param:missing"}, {"out"}, plan_json(1, {}, {})),
+    "kernel input 'param:missing' names no slot of the nested plan"));
+  ASSERT(load_fails_with(
+    rt, "define void @not_the_port() {\nentry:\n  ret void\n}\n",
+    constant_manifest(16),
+    "IR does not define 'tropical_kernel_argv'"));
 
   tropical_runtime_free(rt);
 }
@@ -369,9 +434,8 @@ static void test_ir_index_ramp()
   tropical_runtime_t rt = tropical_runtime_new(buf);
   ASSERT(rt != nullptr);
 
-  std::string ir = wrap_loop(RAMP_BODY);
-  ASSERT_OK(tropical_runtime_load_ir(rt, ir.c_str(), ir.size(),
-                                     RAMP_MANIFEST, strlen(RAMP_MANIFEST)));
+  const std::string ir = wrap_kernel(buf, 0, RAMP_BODY);
+  ASSERT_OK(load_c(rt, ir, constant_manifest(buf)));
 
   tropical_runtime_process(rt);
   const double* out = tropical_runtime_output_buffer(rt);
@@ -399,9 +463,8 @@ static void test_clock_boundary_handoff()
   constexpr uint64_t requests = 10000;
   tropical_runtime_t rt = tropical_runtime_new(buf);
   ASSERT(rt != nullptr);
-  const std::string ir = wrap_loop(RAMP_BODY);
-  ASSERT_OK(tropical_runtime_load_ir(
-    rt, ir.c_str(), ir.size(), RAMP_MANIFEST, strlen(RAMP_MANIFEST)));
+  const std::string ir = wrap_kernel(buf, 0, RAMP_BODY);
+  ASSERT_OK(load_c(rt, ir, constant_manifest(buf)));
 
   std::atomic<bool> go{false};
   std::atomic<bool> done{false};
@@ -464,7 +527,9 @@ static void test_clock_boundary_handoff()
          == starts.back() + buf);
   ASSERT(tropical_runtime_current_sample_index_u64(rt)
          == starts.back() + buf);
-  constexpr uint64_t far_exact = (uint64_t{1} << 54) + 123;
+  // The Q32.32 rail carries 2^31 integer sample indices exactly; this is
+  // far past any session but inside the rail.
+  constexpr uint64_t far_exact = (uint64_t{1} << 30) + 123;
   tropical_runtime_set_sample_index(rt, far_exact);
   tropical_runtime_process(rt);
   ASSERT(tropical_runtime_current_sample_index_u64(rt)
@@ -481,8 +546,8 @@ static void test_clock_request_barrier()
   constexpr unsigned int buf = 16;
   constexpr uint64_t requested = 1000000;
   tropical_runtime::FlatRuntime rt(buf);
-  const std::string ir = wrap_loop(RAMP_BODY);
-  ASSERT(rt.load_ir(ir, RAMP_MANIFEST));
+  const std::string ir = wrap_kernel(buf, 0, RAMP_BODY);
+  ASSERT(rt.load(ir, "", "", constant_manifest(buf)));
   rt.process();
   ASSERT(rt.outputBuffer[0] == 0.0);
 
@@ -514,6 +579,26 @@ static void test_clock_request_barrier()
   ASSERT(rt.ownership_failure_count() == 0);
 }
 
+// The four-discipline control slot table the dispatch tests share.
+static const std::vector<std::string> DISCIPLINE_SLOTS = {
+  "param:bank.freq", "param:canary.morph#v0", "param:canary.morph#v1",
+  "param:canary.morph#t0", "param:canary.freq", "param:canary.freq#phase",
+  "param:master.velocity", "param:master.tau_base"};
+static const char* DISCIPLINE_TABLE = R"({"param_disciplines":[
+  {"name":"bank.freq","discipline":"raw","companions":[]},
+  {"name":"canary.morph","discipline":"glide","glide_dur_sec":0.02,
+   "companions":["canary.morph#v0","canary.morph#v1","canary.morph#t0"]},
+  {"name":"canary.freq","discipline":"anchor","companions":["canary.freq#phase"]},
+  {"name":"master.velocity","discipline":"velocity","companions":["master.tau_base"]}
+]})";
+
+static std::string discipline_manifest(unsigned int frames)
+{
+  return kernel_manifest(frames, DISCIPLINE_SLOTS, {"out"},
+    plan_json(1, DISCIPLINE_SLOTS, {180.0, 0.0, 0.0, 0.0, 55.0, 0.0, 1.0, 0.0},
+              DISCIPLINE_TABLE));
+}
+
 // A reference oracle must replay each production dispatch at the first output
 // sample where its generation is audible. Freezing one batch-start boundary
 // can accumulate a visible phase/origin error when the callback advances
@@ -521,36 +606,17 @@ static void test_clock_request_barrier()
 static void test_param_dispatch_exact_sample_replay()
 {
   constexpr unsigned int buf = 512;
-  constexpr uint64_t base = uint64_t{1} << 40;
+  constexpr uint64_t base = uint64_t{1} << 30;
   tropical_runtime::FlatRuntime live(buf);
   tropical_runtime::FlatRuntime replay(buf);
   tropical_runtime::FlatRuntime stale_batch_oracle(buf);
-  const std::string ir = wrap_loop(
-    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+  const std::string ir = wrap_kernel(buf, 8,
+    "  %op = getelementptr inbounds double, ptr %out, i64 %s\n"
     "  store double 0.000000e+00, ptr %op, align 8\n");
-  const std::string manifest = R"({"schema":"tropical_plan_6",
-    "config":{"sampleRate":44100},"register_count":0,
-    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
-    "sinks":[],"slot_count":8,
-    "slot_names":["param:bank.freq","param:canary.morph#v0",
-      "param:canary.morph#v1","param:canary.morph#t0",
-      "param:canary.freq","param:canary.freq#phase",
-      "param:master.velocity","param:master.tau_base"],
-    "slot_defaults":[180.0,0.0,0.0,0.0,55.0,0.0,1.0,0.0],
-    "param_disciplines":[
-      {"name":"bank.freq","discipline":"raw","companions":[]},
-      {"name":"canary.morph","discipline":"glide",
-       "glide_dur_sec":0.02,
-       "companions":["canary.morph#v0","canary.morph#v1",
-         "canary.morph#t0"]},
-      {"name":"canary.freq","discipline":"anchor",
-       "companions":["canary.freq#phase"]},
-      {"name":"master.velocity","discipline":"velocity",
-       "companions":["master.tau_base"]}
-    ]})";
-  ASSERT(live.load_ir(ir, manifest));
-  ASSERT(replay.load_ir(ir, manifest));
-  ASSERT(stale_batch_oracle.load_ir(ir, manifest));
+  const std::string manifest = discipline_manifest(buf);
+  ASSERT(live.load(ir, "", "", manifest));
+  ASSERT(replay.load(ir, "", "", manifest));
+  ASSERT(stale_batch_oracle.load(ir, "", "", manifest));
 
   const std::array<std::string, 4> names = {
     "bank.freq", "canary.morph", "canary.freq", "master.velocity"
@@ -633,32 +699,11 @@ static void test_param_dispatch_effective_boundary_races()
   constexpr unsigned int buf = 16;
   constexpr double sr = 44100.0;
   tropical_runtime::FlatRuntime rt(buf);
-  const std::string ir = wrap_loop(
-    "  %sp = getelementptr inbounds double, ptr %slots, i64 0\n"
-    "  %v = load double, ptr %sp, align 8\n"
-    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+  const std::string ir = wrap_kernel(buf, 8,
+    "  %v = load double, ptr %in_1, align 8\n"
+    "  %op = getelementptr inbounds double, ptr %out, i64 %s\n"
     "  store double %v, ptr %op, align 8\n");
-  const std::string manifest = R"({"schema":"tropical_plan_6",
-    "config":{"sampleRate":44100},"register_count":0,
-    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
-    "sinks":[],"slot_count":8,
-    "slot_names":["param:bank.freq","param:canary.morph#v0",
-      "param:canary.morph#v1","param:canary.morph#t0",
-      "param:canary.freq","param:canary.freq#phase",
-      "param:master.velocity","param:master.tau_base"],
-    "slot_defaults":[180.0,0.0,0.0,0.0,55.0,0.0,1.0,0.0],
-    "param_disciplines":[
-      {"name":"bank.freq","discipline":"raw","companions":[]},
-      {"name":"canary.morph","discipline":"glide",
-       "glide_dur_sec":0.02,
-       "companions":["canary.morph#v0","canary.morph#v1",
-         "canary.morph#t0"]},
-      {"name":"canary.freq","discipline":"anchor",
-       "companions":["canary.freq#phase"]},
-      {"name":"master.velocity","discipline":"velocity",
-       "companions":["master.tau_base"]}
-    ]})";
-  ASSERT(rt.load_ir(ir, manifest));
+  ASSERT(rt.load(ir, "", "", discipline_manifest(buf)));
 
   // Forced before-capture on a fresh state: C=E=0 for all four disciplines.
   tropical_runtime::RuntimeOwnershipTestSeam before;
@@ -765,27 +810,28 @@ static void test_param_dispatch_effective_boundary_races()
   ASSERT(rt.ownership_failure_count() == 0);
 }
 
+// An observation kernel: one param `param:x` and one output channel named
+// `tap:x` carrying `f(x)`. The scope reads output channels by name.
+static std::string tap_manifest(unsigned int frames, const char* tap,
+                                double x_default)
+{
+  return kernel_manifest(frames, {"param:x"}, {tap},
+    plan_json(1, {"param:x"}, {x_default},
+      R"({"param_disciplines":[{"name":"x","discipline":"raw","companions":[]}]})"));
+}
+static const char* PASS_X_BODY =
+  "  %x = load double, ptr %in_1, align 8\n"
+  "  %op = getelementptr inbounds double, ptr %out, i64 %s\n"
+  "  store double %x, ptr %op, align 8\n";
+
 // One immutable observation generation remains coherent while a raw control
 // publication completes. The paused reader must neither block control nor tear
 // to the newly published slot image.
 static void test_observation_snapshot_does_not_block_control()
 {
   tropical_runtime::FlatRuntime rt(16);
-  const std::string ir = wrap_loop(
-    "  %xp = getelementptr inbounds double, ptr %slots, i64 0\n"
-    "  %x = load double, ptr %xp, align 8\n"
-    "  %tp = getelementptr inbounds double, ptr %slots, i64 1\n"
-    "  store double %x, ptr %tp, align 8\n"
-    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
-    "  store double %x, ptr %op, align 8\n");
-  const std::string manifest = R"({"schema":"tropical_plan_6",
-    "config":{"sampleRate":44100},"register_count":0,
-    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
-    "sinks":[],"slot_count":2,"slot_names":["param:x","tap:x"],
-    "slot_defaults":[1.0,0.0],"param_disciplines":[
-      {"name":"x","discipline":"raw","companions":[]}
-    ]})";
-  ASSERT(rt.load_ir(ir, manifest));
+  const std::string ir = wrap_kernel(16, 1, PASS_X_BODY);
+  ASSERT(rt.load(ir, "", "", tap_manifest(16, "tap:x", 1.0)));
 
   tropical_runtime::RuntimeOwnershipTestSeam seam;
   seam.pause_after_observation_coordinate.store(
@@ -839,37 +885,23 @@ static void test_observation_snapshot_does_not_block_control()
 
 // Name resolution, strided coordinates, and evaluation all pin one program
 // image. A hot-swap while the old observer is paused cannot reinterpret the
-// old name through the new slot layout.
+// old name through the new channel layout. The window (64 coordinates) is
+// wider than the kernel's frame count (16): the chunked evaluation is exact.
 static void test_named_observation_pins_hot_swap_program()
 {
   tropical_runtime::FlatRuntime rt(16);
-  const std::string coordinate_ir = wrap_loop(
-    "  %idx = add i64 %start_sample_index, %s\n"
+  const std::string coordinate_ir = wrap_kernel(16, 1,
     "  %v = uitofp i64 %idx to double\n"
-    "  %sp = getelementptr inbounds double, ptr %slots, i64 0\n"
-    "  store double %v, ptr %sp, align 8\n"
-    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  %op = getelementptr inbounds double, ptr %out, i64 %s\n"
     "  store double %v, ptr %op, align 8\n");
-  const std::string value_ir = wrap_loop(
-    "  %sp = getelementptr inbounds double, ptr %slots, i64 0\n"
-    "  %v = load double, ptr %sp, align 8\n"
-    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
-    "  store double %v, ptr %op, align 8\n");
-  const auto manifest = [](const char * name, double value) {
-    return std::string(R"({"schema":"tropical_plan_6",
-      "config":{"sampleRate":44100},"register_count":0,
-      "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
-      "sinks":[],"slot_count":1,"slot_names":[")") + name
-      + R"("],"slot_defaults":[)" + std::to_string(value) + R"(],
-      "param_disciplines":[]})";
-  };
-  ASSERT(rt.load_ir(coordinate_ir, manifest("tap:old", 0.0)));
+  const std::string value_ir = wrap_kernel(16, 1, PASS_X_BODY);
+  ASSERT(rt.load(coordinate_ir, "", "", tap_manifest(16, "tap:old", 0.0)));
 
   tropical_runtime::RuntimeOwnershipTestSeam seam;
   seam.pause_after_observation_coordinate.store(
     true, std::memory_order_relaxed);
   rt.set_ownership_test_seam(&seam);
-  std::array<double, 3> old_values{};
+  std::array<double, 40> old_values{};
   tropical_runtime::ObservationRenderResult old_result;
   std::jthread old_observer([&] {
     old_result = rt.render_window_observation_by_name(
@@ -886,15 +918,14 @@ static void test_named_observation_pins_hot_swap_program()
     ASSERT(paused);
   }
 
-  ASSERT(rt.load_ir(value_ir, manifest("tap:new", 2.0)));
+  ASSERT(rt.load(value_ir, "", "", tap_manifest(16, "tap:new", 2.0)));
   seam.release_observation_coordinate.store(true, std::memory_order_release);
   old_observer.join();
   rt.set_ownership_test_seam(nullptr);
 
   ASSERT(old_result.status == tropical_runtime::RenderWindowStatus::Rendered);
-  ASSERT(old_values[0] == 10.0);
-  ASSERT(old_values[1] == 13.0);
-  ASSERT(old_values[2] == 16.0);
+  for (uint32_t i = 0; i < old_values.size(); ++i)
+    ASSERT(old_values[i] == 10.0 + 3.0 * i);
 
   std::array<double, 4> next_values{};
   const auto missing = rt.render_window_observation_by_name(
@@ -913,47 +944,27 @@ static void test_named_observation_pins_hot_swap_program()
 
 // Audio and observation may be different compiled programs with unrelated
 // slot indices. One publication installs both; controls project by exact name
-// and the observation artifact owns its own coefficient materialization.
+// and the observation kernel derives its own coefficients inside itself.
 static void test_separate_observation_artifact_projects_controls()
 {
   tropical_runtime::FlatRuntime rt(16);
-  const std::string audio_ir = wrap_loop(
-    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+  const std::string audio_ir = wrap_kernel(16, 1,
+    "  %op = getelementptr inbounds double, ptr %out, i64 %s\n"
     "  store double 2.500000e-01, ptr %op, align 8\n");
-  const std::string observation_ir = wrap_loop(
-    "  %cp = getelementptr inbounds double, ptr %slots, i64 2\n"
-    "  %coef = load double, ptr %cp, align 8\n"
-    "  %tp = getelementptr inbounds double, ptr %slots, i64 0\n"
-    "  store double %coef, ptr %tp, align 8\n"
-    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+  const std::string observation_ir = wrap_kernel(16, 1,
+    "  %x = load double, ptr %in_1, align 8\n"
+    "  %coef = fmul double %x, 2.000000e+00\n"
+    "  %op = getelementptr inbounds double, ptr %out, i64 %s\n"
     "  store double %coef, ptr %op, align 8\n");
-  const std::string observation_coeff_ir =
-    std::string("define void @kernel(") + KERNEL_SIG + ") {\n"
-      "entry:\n"
-      "  %xp = getelementptr inbounds double, ptr %slots, i64 1\n"
-      "  %x = load double, ptr %xp, align 8\n"
-      "  %c = fmul double %x, 2.000000e+00\n"
-      "  %cp = getelementptr inbounds double, ptr %slots, i64 2\n"
-      "  store double %c, ptr %cp, align 8\n"
-      "  ret void\n}\n";
-  const std::string audio_manifest = R"({"schema":"tropical_plan_6",
-    "config":{"sampleRate":44100},"register_count":0,
-    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
-    "sinks":[],"slot_count":1,"slot_names":["param:x"],
-    "slot_defaults":[3.0],"param_disciplines":[
-      {"name":"x","discipline":"raw","companions":[]}
-    ]})";
-  const std::string observation_manifest = R"({"schema":"tropical_plan_6",
-    "config":{"sampleRate":44100},"register_count":0,
-    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
-    "sinks":[],"slot_count":3,
-    "slot_names":["tap:mode","param:x","coeff:x2"],
-    "slot_defaults":[0.0,-1.0,-99.0],"param_disciplines":[]})";
+  const std::string audio_manifest = kernel_manifest(16, {"param:x"}, {"dac"},
+    plan_json(1, {"param:x"}, {3.0},
+      R"({"param_disciplines":[{"name":"x","discipline":"raw","companions":[]}]})"));
+  const std::string observation_manifest = tap_manifest(16, "tap:mode", -1.0);
 
   const auto generation =
-    rt.load_ir_staged_with_observation_generation(
+    rt.load_with_observation_generation(
       audio_ir, "", "", audio_manifest,
-      observation_ir, observation_coeff_ir, observation_manifest);
+      observation_ir, observation_manifest);
   ASSERT(generation.program_version == rt.recompile_version());
   rt.process();
   for (double value : rt.outputBuffer) ASSERT(value == 0.25);
@@ -987,18 +998,10 @@ static void test_publication_generation_tokens_and_atomic_failure()
   tropical_runtime_t handle = tropical_runtime_new(16);
   ASSERT(handle != nullptr);
   auto & rt = *static_cast<tropical_runtime::FlatRuntime *>(handle);
-  const std::string single_ir = wrap_loop(
-    "  %sp = getelementptr inbounds double, ptr %slots, i64 0\n"
-    "  %v = load double, ptr %sp, align 8\n"
-    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
-    "  store double %v, ptr %op, align 8\n");
-  const std::string single_manifest = R"({"schema":"tropical_plan_6",
-    "config":{"sampleRate":44100},"register_count":0,
-    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
-    "sinks":[],"slot_count":1,"slot_names":["tap:single"],
-    "slot_defaults":[1.25]})";
+  const std::string single_ir = wrap_kernel(16, 1, PASS_X_BODY);
+  const std::string single_manifest = tap_manifest(16, "tap:single", 1.25);
   tropical_runtime_generation_t first{};
-  ASSERT(tropical_runtime_load_ir_staged_generation(
+  ASSERT(tropical_runtime_load_generation(
     handle, single_ir.data(), single_ir.size(), nullptr, 0, nullptr, 0,
     single_manifest.data(), single_manifest.size(), &first));
   std::array<double, 2> values{};
@@ -1009,35 +1012,20 @@ static void test_publication_generation_tokens_and_atomic_failure()
   ASSERT(rendered.control_version == first.control_version);
   for (double value : values) ASSERT(value == 1.25);
 
-  const std::string audio_ir = wrap_loop(
-    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+  const std::string audio_ir = wrap_kernel(16, 1,
+    "  %op = getelementptr inbounds double, ptr %out, i64 %s\n"
     "  store double 2.500000e-01, ptr %op, align 8\n");
-  const std::string observation_ir = wrap_loop(
-    "  %xp = getelementptr inbounds double, ptr %slots, i64 1\n"
-    "  %x = load double, ptr %xp, align 8\n"
-    "  %tp = getelementptr inbounds double, ptr %slots, i64 0\n"
-    "  store double %x, ptr %tp, align 8\n"
-    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
-    "  store double %x, ptr %op, align 8\n");
-  const std::string audio_manifest = R"({"schema":"tropical_plan_6",
-    "config":{"sampleRate":44100},"register_count":0,
-    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
-    "sinks":[],"slot_count":1,"slot_names":["param:x"],
-    "slot_defaults":[3.0],"param_disciplines":[
-      {"name":"x","discipline":"raw","companions":[]}
-    ]})";
-  const std::string observation_manifest = R"({"schema":"tropical_plan_6",
-    "config":{"sampleRate":44100},"register_count":0,
-    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
-    "sinks":[],"slot_count":2,
-    "slot_names":["tap:projected","param:x"],
-    "slot_defaults":[0.0,-1.0]})";
+  const std::string observation_ir = wrap_kernel(16, 1, PASS_X_BODY);
+  const std::string audio_manifest = kernel_manifest(16, {"param:x"}, {"dac"},
+    plan_json(1, {"param:x"}, {3.0},
+      R"({"param_disciplines":[{"name":"x","discipline":"raw","companions":[]}]})"));
+  const std::string observation_manifest = tap_manifest(16, "tap:projected", -1.0);
   tropical_runtime_generation_t second{};
-  ASSERT(tropical_runtime_load_ir_staged_with_observation_generation(
+  ASSERT(tropical_runtime_load_with_observation_generation(
     handle,
     audio_ir.data(), audio_ir.size(), nullptr, 0, nullptr, 0,
     audio_manifest.data(), audio_manifest.size(),
-    observation_ir.data(), observation_ir.size(), nullptr, 0,
+    observation_ir.data(), observation_ir.size(),
     observation_manifest.data(), observation_manifest.size(), &second));
   ASSERT(second.program_version == first.program_version + 1);
   ASSERT(second.control_version > first.control_version);
@@ -1049,15 +1037,15 @@ static void test_publication_generation_tokens_and_atomic_failure()
   for (double value : values) ASSERT(value == 3.0);
 
   tropical_runtime_generation_t failed{99, 101};
-  const std::string replacement_audio = wrap_loop(
-    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+  const std::string replacement_audio = wrap_kernel(16, 1,
+    "  %op = getelementptr inbounds double, ptr %out, i64 %s\n"
     "  store double 7.500000e-01, ptr %op, align 8\n");
   const std::string invalid_observation = "not LLVM IR";
-  ASSERT(!tropical_runtime_load_ir_staged_with_observation_generation(
+  ASSERT(!tropical_runtime_load_with_observation_generation(
     handle,
     replacement_audio.data(), replacement_audio.size(), nullptr, 0,
     nullptr, 0, audio_manifest.data(), audio_manifest.size(),
-    invalid_observation.data(), invalid_observation.size(), nullptr, 0,
+    invalid_observation.data(), invalid_observation.size(),
     observation_manifest.data(), observation_manifest.size(), &failed));
   ASSERT(failed.program_version == 0);
   ASSERT(failed.control_version == 0);
@@ -1073,179 +1061,17 @@ static void test_publication_generation_tokens_and_atomic_failure()
   tropical_runtime_free(handle);
 }
 
-// Scalar coefficient materialization is cached per immutable control version.
-// Repeated frames cannot regress to the pre-coefficient slot image after the
-// main kernel overwrites its private scratch.
-static void test_observation_reuses_materialized_scalar_coefficients()
-{
-  tropical_runtime::FlatRuntime rt(16);
-  const std::string ir = wrap_loop(
-    "  %cp = getelementptr inbounds double, ptr %slots, i64 2\n"
-    "  %coef = load double, ptr %cp, align 8\n"
-    "  %tp = getelementptr inbounds double, ptr %slots, i64 0\n"
-    "  store double %coef, ptr %tp, align 8\n"
-    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
-    "  store double %coef, ptr %op, align 8\n");
-  const std::string coeff_ir = std::string("define void @kernel(")
-    + KERNEL_SIG + ") {\n"
-      "entry:\n"
-      "  %xp = getelementptr inbounds double, ptr %slots, i64 1\n"
-      "  %x = load double, ptr %xp, align 8\n"
-      "  %c = fmul double %x, 2.000000e+00\n"
-      "  %cp = getelementptr inbounds double, ptr %slots, i64 2\n"
-      "  store double %c, ptr %cp, align 8\n"
-      "  ret void\n}\n";
-  const std::string manifest = R"({"schema":"tropical_plan_6",
-    "config":{"sampleRate":44100},"register_count":0,
-    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
-    "sinks":[],"slot_count":3,
-    "slot_names":["tap:mode","param:x","coeff:x2"],
-    "slot_defaults":[0.0,3.0,-99.0],"param_disciplines":[
-      {"name":"x","discipline":"raw","companions":[]}
-    ]})";
-  ASSERT(rt.load_ir_staged(ir, "", coeff_ir, manifest));
-
-  const auto check_twice = [&](double expected) {
-    std::array<double, 4> values{};
-    for (unsigned int read = 0; read < 2; ++read)
-    {
-      const auto observation = rt.render_window_observation_by_name(
-        0, static_cast<uint32_t>(values.size()), 1,
-        {"tap:mode"}, values.data());
-      ASSERT(observation.status ==
-             tropical_runtime::RenderWindowStatus::Rendered);
-      for (double value : values) ASSERT(value == expected);
-    }
-  };
-  check_twice(6.0);
-  const auto update = rt.dispatch_param_sync("x", 7.0);
-  ASSERT(update.ok);
-  check_twice(14.0);
-}
-
-// Program publication retains constant/banked array contents, not merely their
-// shapes. The load-time coefficient pass seeds a regular array; after the
-// control flag changes, subsequent coefficient passes deliberately leave that
-// bank untouched, so observation can recover it only from the program image.
-static void test_observation_retains_constant_array_storage()
-{
-  tropical_runtime::FlatRuntime rt(16);
-  const std::string ir = wrap_loop(
-    "  %a0p = getelementptr inbounds ptr, ptr %arrays, i64 0\n"
-    "  %a0 = load ptr, ptr %a0p, align 8\n"
-    "  %raw = load i64, ptr %a0, align 8\n"
-    "  %v = bitcast i64 %raw to double\n"
-    "  %tp = getelementptr inbounds double, ptr %slots, i64 1\n"
-    "  store double %v, ptr %tp, align 8\n"
-    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
-    "  store double %v, ptr %op, align 8\n");
-  const std::string coeff_ir = std::string("define void @kernel(")
-    + KERNEL_SIG + ") {\n"
-      "entry:\n"
-      "  %fp = getelementptr inbounds double, ptr %slots, i64 0\n"
-      "  %flag = load double, ptr %fp, align 8\n"
-      "  %initialize = fcmp oeq double %flag, 0.000000e+00\n"
-      "  br i1 %initialize, label %write, label %done\n"
-      "write:\n"
-      "  %a0p = getelementptr inbounds ptr, ptr %arrays, i64 0\n"
-      "  %a0 = load ptr, ptr %a0p, align 8\n"
-      "  %raw = bitcast double 4.250000e+00 to i64\n"
-      "  store i64 %raw, ptr %a0, align 8\n"
-      "  br label %done\n"
-      "done:\n"
-      "  ret void\n}\n";
-  const std::string manifest = R"({"schema":"tropical_plan_6",
-    "config":{"sampleRate":44100},"register_count":0,
-    "array_slot_count":1,"array_slot_sizes":[1],
-    "array_slot_names":["constant-bank"],"instance_functions":[],
-    "sinks":[],"slot_count":2,
-    "slot_names":["param:initialized","tap:bank"],
-    "slot_defaults":[0.0,0.0],"param_disciplines":[
-      {"name":"initialized","discipline":"raw","companions":[]}
-    ]})";
-  ASSERT(rt.load_ir_staged(ir, "", coeff_ir, manifest));
-  const auto initialized = rt.dispatch_param_sync("initialized", 1.0);
-  ASSERT(initialized.ok);
-
-  std::array<double, 4> values{};
-  const auto observation = rt.render_window_observation_by_name(
-    0, static_cast<uint32_t>(values.size()), 1,
-    {"tap:bank"}, values.data());
-  ASSERT(observation.status == tropical_runtime::RenderWindowStatus::Rendered);
-  for (double value : values) ASSERT(value == 4.25);
-}
-
-// Coefficient columns are rebuilt in observer-owned arrays and change
-// coherently with the control image instead of borrowing an audio generation.
-static void test_observation_materializes_coefficient_columns()
-{
-  tropical_runtime::FlatRuntime rt(16);
-  const std::string ir = wrap_loop(
-    "  %a0p = getelementptr inbounds ptr, ptr %arrays, i64 0\n"
-    "  %a0 = load ptr, ptr %a0p, align 8\n"
-    "  %raw = load i64, ptr %a0, align 8\n"
-    "  %v = bitcast i64 %raw to double\n"
-    "  %sp = getelementptr inbounds double, ptr %slots, i64 1\n"
-    "  store double %v, ptr %sp, align 8\n"
-    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
-    "  store double %v, ptr %op, align 8\n");
-  const std::string coeff_ir = std::string("define void @kernel(")
-    + KERNEL_SIG + ") {\n"
-      "entry:\n"
-      "  %sp = getelementptr inbounds double, ptr %slots, i64 0\n"
-      "  %x = load double, ptr %sp, align 8\n"
-      "  %v = fmul double %x, 2.000000e+00\n"
-      "  %raw = bitcast double %v to i64\n"
-      "  %a0p = getelementptr inbounds ptr, ptr %arrays, i64 0\n"
-      "  %a0 = load ptr, ptr %a0p, align 8\n"
-      "  store i64 %raw, ptr %a0, align 8\n"
-      "  ret void\n}\n";
-  const std::string manifest = R"({"schema":"tropical_plan_6",
-    "config":{"sampleRate":44100},"register_count":0,
-    "array_slot_count":1,"array_slot_sizes":[1],
-    "array_slot_names":["coef"],"coeff_array_slots":[0],
-    "instance_functions":[],"sinks":[],"slot_count":2,
-    "slot_names":["param:x","tap:column"],"slot_defaults":[1.0,0.0],
-    "param_disciplines":[
-      {"name":"x","discipline":"raw","companions":[]}
-    ]})";
-  ASSERT(rt.load_ir_staged(ir, "", coeff_ir, manifest));
-
-  std::array<double, 4> values{};
-  auto observation = rt.render_window_observation_by_name(
-    0, static_cast<uint32_t>(values.size()), 1,
-    {"tap:column"}, values.data());
-  ASSERT(observation.status == tropical_runtime::RenderWindowStatus::Rendered);
-  for (double value : values) ASSERT(value == 2.0);
-
-  const auto update = rt.dispatch_param_sync("x", 3.0);
-  ASSERT(update.ok);
-  observation = rt.render_window_observation_by_name(
-    0, static_cast<uint32_t>(values.size()), 1,
-    {"tap:column"}, values.data());
-  ASSERT(observation.status == tropical_runtime::RenderWindowStatus::Rendered);
-  for (double value : values) ASSERT(value == 6.0);
-}
-
 // The playback-anchored socket form captures the authoritative runtime
 // position and returns it with one version-pinned, point-budgeted frame. The
 // explicit-start spelling remains accepted for existing callers.
 static void test_playback_anchored_observation_socket_frame()
 {
   tropical_runtime::FlatRuntime rt(16);
-  const std::string ir = wrap_loop(
-    "  %idx = add i64 %start_sample_index, %s\n"
+  const std::string ir = wrap_kernel(16, 0,
     "  %v = uitofp i64 %idx to double\n"
-    "  %sp = getelementptr inbounds double, ptr %slots, i64 0\n"
-    "  store double %v, ptr %sp, align 8\n"
-    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+    "  %op = getelementptr inbounds double, ptr %out, i64 %s\n"
     "  store double %v, ptr %op, align 8\n");
-  const std::string manifest = R"({"schema":"tropical_plan_6",
-    "config":{"sampleRate":44100},"register_count":0,
-    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
-    "sinks":[],"slot_count":1,"slot_names":["tap:ramp"],
-    "slot_defaults":[0.0]})";
-  ASSERT(rt.load_ir(ir, manifest));
+  ASSERT(rt.load(ir, "", "", kernel_manifest(16, {}, {"tap:ramp"}, plan_json(1, {}, {}))));
   rt.process();
   rt.process();
   ASSERT(rt.current_sample_index() == 32);
@@ -1311,65 +1137,6 @@ static void test_playback_anchored_observation_socket_frame()
   server.stop();
 }
 
-// A coefficient transaction writes slot[1] = 2*slot[0], while the audio
-// kernel outputs slot[1] - 2*slot[0]. Old and new generations both produce
-// exact zero; any scalar/coeff publication tear is immediately nonzero.
-static void test_control_generation_coherence()
-{
-  constexpr unsigned int buf = 32;
-  tropical_runtime_t rt = tropical_runtime_new(buf);
-  ASSERT(rt != nullptr);
-  const std::string audio_ir = wrap_loop(
-    "  %xp = getelementptr inbounds double, ptr %slots, i64 0\n"
-    "  %x = load double, ptr %xp, align 8\n"
-    "  %cp = getelementptr inbounds double, ptr %slots, i64 1\n"
-    "  %coefv = load double, ptr %cp, align 8\n"
-    "  %twox = fmul double %x, 2.000000e+00\n"
-    "  %v = fsub double %coefv, %twox\n"
-    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
-    "  store double %v, ptr %op, align 8\n");
-  const std::string coeff_ir = std::string("define void @kernel(")
-    + KERNEL_SIG + ") {\n"
-      "entry:\n"
-      "  %xp = getelementptr inbounds double, ptr %slots, i64 0\n"
-      "  %x = load double, ptr %xp, align 8\n"
-      "  %v = fmul double %x, 2.000000e+00\n"
-      "  %cp = getelementptr inbounds double, ptr %slots, i64 1\n"
-      "  store double %v, ptr %cp, align 8\n"
-      "  ret void\n}\n";
-  const std::string manifest = R"({"schema":"tropical_plan_6",
-    "config":{"sampleRate":44100},"register_count":0,
-    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
-    "sinks":[],"slot_count":2,"slot_names":["param:x","coef:y"],
-    "slot_defaults":[1.0,0.0]})";
-  ASSERT_OK(tropical_runtime_load_ir_staged(
-    rt, audio_ir.data(), audio_ir.size(), nullptr, 0,
-    coeff_ir.data(), coeff_ir.size(), manifest.data(), manifest.size()));
-
-  std::atomic<bool> go{false};
-  std::atomic<bool> done{false};
-  std::jthread control([&] {
-    while (!go.load(std::memory_order_acquire)) std::this_thread::yield();
-    for (uint64_t i = 0; i < 20000; ++i)
-    {
-      tropical_runtime_set_slot(rt, 0, 0.25 + (i % 97) * 0.01);
-      if ((i & 7U) == 0) std::this_thread::yield();
-    }
-    done.store(true, std::memory_order_release);
-  });
-
-  go.store(true, std::memory_order_release);
-  for (uint64_t block = 0;
-       block < 3000 || !done.load(std::memory_order_acquire); ++block)
-  {
-    tropical_runtime_process(rt);
-    const double * out = tropical_runtime_output_buffer(rt);
-    for (unsigned int i = 0; i < buf; ++i) ASSERT_NEAR(out[i], 0.0, 0.0);
-  }
-  control.join();
-  tropical_runtime_free(rt);
-}
-
 // Rapid A/B/A publications exercise the state-index advertise/verify
 // handshake. Each callback must bind one complete state for its whole block.
 static void test_hot_swap_state_handoff()
@@ -1377,14 +1144,14 @@ static void test_hot_swap_state_handoff()
   constexpr unsigned int buf = 16;
   tropical_runtime_t rt = tropical_runtime_new(buf);
   ASSERT(rt != nullptr);
-  const std::string one = wrap_loop(
-    "  %p = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+  const std::string one = wrap_kernel(buf, 0,
+    "  %p = getelementptr inbounds double, ptr %out, i64 %s\n"
     "  store double 1.000000e+00, ptr %p, align 8\n");
-  const std::string two = wrap_loop(
-    "  %p = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
+  const std::string two = wrap_kernel(buf, 0,
+    "  %p = getelementptr inbounds double, ptr %out, i64 %s\n"
     "  store double 2.000000e+00, ptr %p, align 8\n");
-  ASSERT_OK(tropical_runtime_load_ir(
-    rt, one.data(), one.size(), RAMP_MANIFEST, strlen(RAMP_MANIFEST)));
+  const std::string manifest = constant_manifest(buf);
+  ASSERT_OK(load_c(rt, one, manifest));
 
   std::atomic<bool> go{false};
   std::atomic<bool> done{false};
@@ -1393,9 +1160,7 @@ static void test_hot_swap_state_handoff()
     for (unsigned int i = 0; i < 80; ++i)
     {
       const std::string & next = (i & 1U) ? one : two;
-      if (!tropical_runtime_load_ir(
-            rt, next.data(), next.size(),
-            RAMP_MANIFEST, strlen(RAMP_MANIFEST)))
+      if (!load_c(rt, next, manifest))
         std::abort();
     }
     done.store(true, std::memory_order_release);
@@ -1422,17 +1187,8 @@ static void test_generation_ownership_barrier()
 {
   constexpr unsigned int buf = 16;
   tropical_runtime::FlatRuntime rt(buf);
-  const std::string ir = wrap_loop(
-    "  %xp = getelementptr inbounds double, ptr %slots, i64 0\n"
-    "  %x = load double, ptr %xp, align 8\n"
-    "  %op = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
-    "  store double %x, ptr %op, align 8\n");
-  const std::string manifest = R"({"schema":"tropical_plan_6",
-    "config":{"sampleRate":44100},"register_count":0,
-    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
-    "sinks":[],"slot_count":1,"slot_names":["param:x"],
-    "slot_defaults":[1.0]})";
-  ASSERT(rt.load_ir(ir, manifest));
+  const std::string ir = wrap_kernel(buf, 1, PASS_X_BODY);
+  ASSERT(rt.load(ir, "", "", tap_manifest(buf, "out", 1.0)));
 
   tropical_runtime::RuntimeOwnershipTestSeam seam;
   seam.pause_after_generation_ownership.store(true, std::memory_order_relaxed);
@@ -1465,16 +1221,18 @@ static void test_state_ownership_barrier()
 {
   constexpr unsigned int buf = 16;
   tropical_runtime::FlatRuntime rt(buf);
-  const std::string one = wrap_loop(
-    "  %p = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
-    "  store double 1.000000e+00, ptr %p, align 8\n");
-  const std::string two = wrap_loop(
-    "  %p = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
-    "  store double 2.000000e+00, ptr %p, align 8\n");
-  const std::string three = wrap_loop(
-    "  %p = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
-    "  store double 3.000000e+00, ptr %p, align 8\n");
-  ASSERT(rt.load_ir(one, RAMP_MANIFEST));
+  const auto constant = [](double value) {
+    char text[64];
+    std::snprintf(text, sizeof(text), "%.6e", value);
+    return wrap_kernel(buf, 0,
+      "  %p = getelementptr inbounds double, ptr %out, i64 %s\n"
+      "  store double " + std::string(text) + ", ptr %p, align 8\n");
+  };
+  const std::string one = constant(1.0);
+  const std::string two = constant(2.0);
+  const std::string three = constant(3.0);
+  const std::string manifest = constant_manifest(buf);
+  ASSERT(rt.load(one, "", "", manifest));
   const uint64_t initial_version = rt.recompile_version();
 
   tropical_runtime::RuntimeOwnershipTestSeam seam;
@@ -1492,8 +1250,8 @@ static void test_state_ownership_barrier()
   std::atomic<bool> loads_ok{true};
   std::atomic<bool> control_done{false};
   std::jthread control([&] {
-    if (!rt.load_ir(two, RAMP_MANIFEST)) loads_ok.store(false);
-    if (!rt.load_ir(three, RAMP_MANIFEST)) loads_ok.store(false);
+    if (!rt.load(two, "", "", manifest)) loads_ok.store(false);
+    if (!rt.load(three, "", "", manifest)) loads_ok.store(false);
     control_done.store(true, std::memory_order_release);
   });
 
@@ -1782,11 +1540,11 @@ static void test_capture_serial_state_machine()
 
 int main()
 {
-  printf("test_module_process (load_ir engine)\n");
+  printf("test_module_process (the port: typed kernel load)\n");
 
-  run_test("constant kernel via load_ir",   test_ir_constant);
+  run_test("constant kernel via load",      test_ir_constant);
   run_test("compact interleaved native output", test_interleaved_native_output);
-  run_test("plan-6-only manifest boundary", test_plan6_only_manifest_boundary);
+  run_test("kernel manifest boundary",      test_manifest_boundary);
   run_test("closed-form index ramp",        test_ir_index_ramp);
   run_test("clock request boundary handoff", test_clock_boundary_handoff);
   run_test("clock odd-sequence barrier", test_clock_request_barrier);
@@ -1802,15 +1560,8 @@ int main()
            test_separate_observation_artifact_projects_controls);
   run_test("publication generation tokens and atomic dual failure",
            test_publication_generation_tokens_and_atomic_failure);
-  run_test("observation reuses materialized scalar coefficients",
-           test_observation_reuses_materialized_scalar_coefficients);
-  run_test("observation retains constant/banked array storage",
-           test_observation_retains_constant_array_storage);
-  run_test("observation materializes coefficient columns privately",
-           test_observation_materializes_coefficient_columns);
   run_test("playback-anchored observation socket frame",
            test_playback_anchored_observation_socket_frame);
-  run_test("coherent slot/coefficient generation", test_control_generation_coherence);
   run_test("hot-swap state handoff", test_hot_swap_state_handoff);
   run_test("owned generation survives two publications", test_generation_ownership_barrier);
   run_test("owned state blocks ABA reuse", test_state_ownership_barrier);

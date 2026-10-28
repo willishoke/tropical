@@ -155,7 +155,7 @@ def runReduceCoverage : IO Bool := do
       return false
     -- MSL smoke: the region must emit as a real for-loop (full SNR
     -- gating arrives with the modal banked plans in slice 3b).
-    match Tropical.Ir.EmitMsl.emitKernel reduceLoopPlan with
+    match Tropical.Ir.EmitMsl.emitKernel reduceLoopPlan 256 with
     | .error e =>
       failGate "reduce-coverage" s!"EmitMsl: {firstLine e}"
     | .ok msl =>
@@ -354,8 +354,8 @@ def runRoutedSumCoverage : IO Bool := do
       ← renderIrBytes static, ← renderIrBytes dynamic with
     | .ok ts, .ok td, .ok fs, .ok fd => pure (ts == fs && td == fd && ts.size > 0)
     | _, _, _, _ => pure false
-  let sourceSmoke := match Tropical.Ir.EmitLlvm.emitKernel static,
-      Tropical.Ir.EmitMsl.emitKernel static with
+  let sourceSmoke := match Tropical.Ir.EmitLlvm.emitKernel { audio := static, coeff? := none } 256,
+      Tropical.Ir.EmitMsl.emitKernel static 256 with
     | .ok llvm, .ok msl =>
       (llvm.splitOn "@routed_routes_").length > 1 &&
         (msl.splitOn "threadgroup_position_in_grid").length > 1 &&
@@ -649,7 +649,7 @@ private def emitMslOf (patchPath : String) : IO (Except String String) := do
     | .ok j =>
       match Tropical.Plan.FlatPlan.ofWire j with
       | .error e => pure (.error s!"ofWire: {e}")
-      | .ok plan => pure (Tropical.Ir.EmitMsl.emitKernel plan)
+      | .ok plan => pure (Tropical.Ir.EmitMsl.emitKernel plan 256)
 
 /-- MSL GOLDEN: the emitted Metal kernel text for a patch, frozen under
     `tests/golden/msl/<name>.metal`. Text-frozen (like the IR philosophy:

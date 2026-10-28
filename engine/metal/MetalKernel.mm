@@ -3,14 +3,15 @@
 //
 //   buffer(0) device float*                  output_buffer
 //   buffer(1) constant float*                slots
-//   buffer(2) constant TropicalKernelConsts& k
+//   buffer(2) constant long*                 tau   (Q32.32 clock per thread)
 //   buffer(3) constant float*                coeff_columns   (ONLY when the
 //             plan advertises hoisted coefficient columns — column_count > 0;
 //             ordinary kernels keep the exact 3-binding signature)
-//   thread_position_in_grid                  = sample index
+//   thread_position_in_grid                  = sample index within one call
 //
-// with TropicalKernelConsts = { ulong start_sample_index; float sample_rate;
-// uint buffer_length; } (16 bytes, no padding).
+// The kernel's frame count is static (design/typed-kernel.md): a render tile
+// of `capacity` frames is `capacity / frames` dispatches in one command
+// buffer, each over its own slice of the tau and output buffers.
 
 #include "MetalKernel.hpp"
 
@@ -40,15 +41,6 @@ bool reject_audio_callback_entry()
   return true;
 }
 
-// Matches the MSL struct exactly (8 + 4 + 4).
-struct KernelConsts
-{
-  uint64_t start_sample_index;
-  float    sample_rate;
-  uint32_t buffer_length;
-};
-static_assert(sizeof(KernelConsts) == 16, "KernelConsts must match the MSL layout");
-
 // Process-wide device + queue (one GPU, many kernels; queues are cheap but
 // one is enough — dispatches are serialized per block anyway).
 id<MTLDevice> shared_device()
@@ -69,12 +61,14 @@ struct MetalKernel
   id<MTLComputePipelineState> pso    = nil;
   id<MTLBuffer>               out    = nil;  // interleaved f32 × frames × channels
   id<MTLBuffer>               slots  = nil;  // immutable epoch snapshot upload
+  id<MTLBuffer>               tau    = nil;  // Q32.32 clock per frame of the tile
   // Packed coefficient-column buffer (buffer(3), banks-as-data) — nil when
   // the plan hoists no columns. Sized at load from the advertised slots'
   // capacities; a hot-swap creates a fresh MetalKernel, so the size follows
   // the plan across swaps like every other buffer here.
   id<MTLBuffer>               columns = nil; // packed immutable epoch columns
   uint32_t capacity     = 0;
+  uint32_t frames       = 0;   // the kernel's static frame count per call
   uint32_t output_channels = 0;
   uint32_t slot_count   = 0;
   uint32_t column_count = 0;
@@ -136,21 +130,32 @@ static void latch_dispatch_failure(MetalKernel & k)
 static bool render_tile_impl(MetalKernel & k,
                              const float * slots, uint32_t n_slots,
                              const float * columns, uint32_t n_columns,
-                             double sample_rate, uint64_t source_start,
+                             uint64_t source_start,
                              uint32_t frames, double * destination)
 {
   if (!destination || frames == 0 || frames > k.capacity
+      || k.frames == 0 || frames % k.frames != 0
       || k.dispatch_failure_latched)
     return false;
 
   @autoreleasepool
   {
-    if (!k.pso || !k.out || !k.slots
+    if (!k.pso || !k.out || !k.slots || !k.tau
         || (k.column_count > 0 && !k.columns))
     {
       latch_dispatch_failure(k);
       return false;
     }
+
+    int64_t * tau_destination = static_cast<int64_t *>(k.tau.contents);
+    if (!tau_destination)
+    {
+      latch_dispatch_failure(k);
+      return false;
+    }
+    for (uint32_t i = 0; i < frames; ++i)
+      tau_destination[i] = static_cast<int64_t>(
+        (source_start + static_cast<uint64_t>(i)) << 32);
 
     const uint32_t n = std::min<uint32_t>(n_slots, k.slot_count);
     float * slot_destination = static_cast<float *>(k.slots.contents);
@@ -182,12 +187,7 @@ static bool render_tile_impl(MetalKernel & k,
       return false;
     }
     [encoder setComputePipelineState:k.pso];
-    [encoder setBuffer:k.out offset:0 atIndex:0];
     [encoder setBuffer:k.slots offset:0 atIndex:1];
-    KernelConsts constants{
-      source_start, static_cast<float>(sample_rate), frames
-    };
-    [encoder setBytes:&constants length:sizeof(constants) atIndex:2];
     if (k.column_count > 0)
     {
       const uint32_t count =
@@ -204,17 +204,27 @@ static bool render_tile_impl(MetalKernel & k,
           column_destination, columns, count * sizeof(float));
       [encoder setBuffer:k.columns offset:0 atIndex:3];
     }
-    if (k.dispatch_kind == DispatchKind::SampleThreadgroups)
+    // One dispatch per static-shaped call, each over its slice of the tile.
+    for (uint32_t chunk = 0; chunk < frames; chunk += k.frames)
     {
-      [encoder dispatchThreadgroups:MTLSizeMake(frames, 1, 1)
-         threadsPerThreadgroup:MTLSizeMake(k.threadgroup_width, 1, 1)];
-    }
-    else
-    {
-      const NSUInteger threads =
-        std::min<NSUInteger>(k.pso.maxTotalThreadsPerThreadgroup, frames);
-      [encoder dispatchThreads:MTLSizeMake(frames, 1, 1)
-         threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+      [encoder setBuffer:k.out
+                  offset:static_cast<NSUInteger>(chunk) * k.output_channels * sizeof(float)
+                 atIndex:0];
+      [encoder setBuffer:k.tau
+                  offset:static_cast<NSUInteger>(chunk) * sizeof(int64_t)
+                 atIndex:2];
+      if (k.dispatch_kind == DispatchKind::SampleThreadgroups)
+      {
+        [encoder dispatchThreadgroups:MTLSizeMake(k.frames, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(k.threadgroup_width, 1, 1)];
+      }
+      else
+      {
+        const NSUInteger threads =
+          std::min<NSUInteger>(k.pso.maxTotalThreadsPerThreadgroup, k.frames);
+        [encoder dispatchThreads:MTLSizeMake(k.frames, 1, 1)
+           threadsPerThreadgroup:MTLSizeMake(threads, 1, 1)];
+      }
     }
     [encoder endEncoding];
     [command commit];
@@ -241,6 +251,7 @@ static bool render_tile_impl(MetalKernel & k,
 
 MetalKernelPtr create(const std::string & msl_source,
                       uint32_t buffer_length,
+                      uint32_t kernel_frames,
                       uint32_t output_channels,
                       uint32_t slot_count,
                       uint32_t column_count,
@@ -250,6 +261,11 @@ MetalKernelPtr create(const std::string & msl_source,
 {
   @autoreleasepool
   {
+    if (kernel_frames == 0 || buffer_length % kernel_frames != 0)
+    {
+      err = "MetalKernel: the render tile must be a multiple of the kernel's frame count";
+      return nullptr;
+    }
     if (buffer_length == 0 || output_channels == 0
         || static_cast<std::size_t>(buffer_length)
              > std::numeric_limits<std::size_t>::max() / output_channels
@@ -296,6 +312,7 @@ MetalKernelPtr create(const std::string & msl_source,
     auto k = std::make_shared<MetalKernel>();
     k->pso          = pso;
     k->capacity     = buffer_length;
+    k->frames       = kernel_frames;
     k->output_channels = output_channels;
     k->slot_count   = slot_count;
     k->column_count = column_count;
@@ -342,7 +359,9 @@ MetalKernelPtr create(const std::string & msl_source,
                               options:MTLResourceStorageModeShared];
     k->slots = [dev newBufferWithLength:(NSUInteger)std::max<uint32_t>(slot_count, 1) * sizeof(float)
                                 options:MTLResourceStorageModeShared];
-    if (!k->out || !k->slots) { err = "MetalKernel: buffer allocation failed"; return nullptr; }
+    k->tau = [dev newBufferWithLength:(NSUInteger)buffer_length * sizeof(int64_t)
+                              options:MTLResourceStorageModeShared];
+    if (!k->out || !k->slots || !k->tau) { err = "MetalKernel: buffer allocation failed"; return nullptr; }
     if (column_count > 0)
     {
       k->columns = [dev newBufferWithLength:(NSUInteger)column_count * sizeof(float)
@@ -379,13 +398,13 @@ uint32_t threadgroup_scratch_bytes(const MetalKernel & k)
 bool render_tile(MetalKernel & k,
                  const float * slots, uint32_t n_slots,
                  const float * columns, uint32_t n_columns,
-                 double sample_rate, uint64_t source_start,
+                 uint64_t source_start,
                  uint32_t frames, double * destination)
 {
   if (reject_audio_callback_entry()) return false;
   return render_tile_impl(
     k, slots, n_slots, columns, n_columns,
-    sample_rate, source_start, frames, destination);
+    source_start, frames, destination);
 }
 
 bool take_dispatch_failure(MetalKernel & k)

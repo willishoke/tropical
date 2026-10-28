@@ -1,5 +1,6 @@
 import Tropical.Ir.EmitLlvm
 
+
 /-!
 # Native multichannel LLVM contract
 
@@ -32,8 +33,12 @@ private def stereoPlan : FlatPlan :=
 private def hasSubstring (text needle : String) : Bool :=
   decide ((text.splitOn needle).length > 1)
 
+/-- Emit at the port with no stage-0 split, for a 16-frame kernel. -/
+private def emit (plan : FlatPlan) : Except String String :=
+  Tropical.Ir.EmitLlvm.emitKernel { audio := plan, coeff? := none } 16
+
 private def stereoEmissionLooksInterleaved : Bool :=
-  match Tropical.Ir.EmitLlvm.emitKernel stereoPlan with
+  match emit stereoPlan with
   | .error _ => false
   | .ok ir =>
       hasSubstring ir "mul i64 %s, 2" &&
@@ -50,9 +55,10 @@ private def sparseTargetZeroFilled : Bool :=
       sinks := #[
         { inputs := #[0], gain := jn 1, target := 0 },
         { inputs := #[0], gain := jn 1, target := 2 }] }
-  match Tropical.Ir.EmitLlvm.emitKernel sparse with
+  match emit sparse with
   | .error _ => false
   | .ok ir =>
+      -- exactly one zero store: the silent channel, per frame
       (ir.splitOn "store double 0x0000000000000000").length == 2
 
 example : sparseTargetZeroFilled = true := by native_decide
@@ -63,7 +69,7 @@ private def duplicateTargetsRejected : Bool :=
       sinks := #[
         { inputs := #[0], gain := jn 1, target := 0 },
         { inputs := #[0], gain := jn 1, target := 0 }] }
-  match Tropical.Ir.EmitLlvm.emitKernel duplicate with
+  match emit duplicate with
   | .error _ => true
   | .ok _ => false
 

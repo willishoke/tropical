@@ -76,16 +76,16 @@ LEAN_EXPORT lean_obj_res shim_runtime_new(uint32_t buffer_length, lean_obj_arg w
   return lean_io_result_mk_ok(lean_alloc_external(runtime_class(), r));
 }
 
-LEAN_EXPORT lean_obj_res shim_runtime_load_ir_staged(b_lean_obj_arg rt, b_lean_obj_arg ir,
-                                                     b_lean_obj_arg msl, b_lean_obj_arg coeff,
-                                                     b_lean_obj_arg manifest, lean_obj_arg world) {
+LEAN_EXPORT lean_obj_res shim_runtime_load(b_lean_obj_arg rt, b_lean_obj_arg ir,
+                                           b_lean_obj_arg msl, b_lean_obj_arg stage0,
+                                           b_lean_obj_arg manifest, lean_obj_arg world) {
   (void)world;
   const char *i = lean_string_cstr(ir);
   const char *g = lean_string_cstr(msl);
-  const char *c = lean_string_cstr(coeff);
+  const char *c = lean_string_cstr(stage0);
   const char *m = lean_string_cstr(manifest);
-  bool ok = tropical_runtime_load_ir_staged(unwrap(rt), i, strlen(i), g, strlen(g),
-                                            c, strlen(c), m, strlen(m));
+  bool ok = tropical_runtime_load(unwrap(rt), i, strlen(i), g, strlen(g),
+                                  c, strlen(c), m, strlen(m));
   return lean_io_result_mk_ok(lean_box(ok));
 }
 
@@ -97,40 +97,38 @@ static lean_obj_res box_runtime_generation(
   return pair;
 }
 
-LEAN_EXPORT lean_obj_res shim_runtime_load_ir_staged_generation(
+LEAN_EXPORT lean_obj_res shim_runtime_load_generation(
     b_lean_obj_arg rt, b_lean_obj_arg ir, b_lean_obj_arg msl,
-    b_lean_obj_arg coeff, b_lean_obj_arg manifest, lean_obj_arg world) {
+    b_lean_obj_arg stage0, b_lean_obj_arg manifest, lean_obj_arg world) {
   (void)world;
   const char *i = lean_string_cstr(ir);
   const char *g = lean_string_cstr(msl);
-  const char *c = lean_string_cstr(coeff);
+  const char *c = lean_string_cstr(stage0);
   const char *m = lean_string_cstr(manifest);
   tropical_runtime_generation_t generation = {0, 0};
-  bool ok = tropical_runtime_load_ir_staged_generation(
+  bool ok = tropical_runtime_load_generation(
       unwrap(rt), i, strlen(i), g, strlen(g), c, strlen(c), m, strlen(m),
       &generation);
   if (!ok) return io_err(tropical_last_error());
   return lean_io_result_mk_ok(box_runtime_generation(&generation));
 }
 
-LEAN_EXPORT lean_obj_res shim_runtime_load_ir_staged_with_observation_generation(
+LEAN_EXPORT lean_obj_res shim_runtime_load_with_observation_generation(
     b_lean_obj_arg rt,
-    b_lean_obj_arg ir, b_lean_obj_arg msl, b_lean_obj_arg coeff,
+    b_lean_obj_arg ir, b_lean_obj_arg msl, b_lean_obj_arg stage0,
     b_lean_obj_arg manifest, b_lean_obj_arg observation_ir,
-    b_lean_obj_arg observation_coeff, b_lean_obj_arg observation_manifest,
-    lean_obj_arg world) {
+    b_lean_obj_arg observation_manifest, lean_obj_arg world) {
   (void)world;
   const char *i = lean_string_cstr(ir);
   const char *g = lean_string_cstr(msl);
-  const char *c = lean_string_cstr(coeff);
+  const char *c = lean_string_cstr(stage0);
   const char *m = lean_string_cstr(manifest);
   const char *oi = lean_string_cstr(observation_ir);
-  const char *oc = lean_string_cstr(observation_coeff);
   const char *om = lean_string_cstr(observation_manifest);
   tropical_runtime_generation_t generation = {0, 0};
-  bool ok = tropical_runtime_load_ir_staged_with_observation_generation(
+  bool ok = tropical_runtime_load_with_observation_generation(
       unwrap(rt), i, strlen(i), g, strlen(g), c, strlen(c), m, strlen(m),
-      oi, strlen(oi), oc, strlen(oc), om, strlen(om), &generation);
+      oi, strlen(oi), om, strlen(om), &generation);
   if (!ok) return io_err(tropical_last_error());
   return lean_io_result_mk_ok(box_runtime_generation(&generation));
 }

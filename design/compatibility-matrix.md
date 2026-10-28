@@ -16,7 +16,8 @@ Audit base: sprint integration line, 2026-07-28.
 | `programDecl` inside `program_2` | retired/refused | N | N | refused | refused | refused | N |
 | retired Program-2 root carriers | retired/refused | N | N | refused | refused | refused | N |
 | retired wire aliases/state spellings | retired/refused | N | N | refused | refused | refused | N |
-| `tropical_plan_6` typed/wire plan | current plan | Y | Y | Y | Y | Y | required |
+| `tropical_kernel_1` kernel manifest (the plan nested) | current artifact manifest | Y | Y | Y | Y | Y | required |
+| `tropical_plan_6` typed/wire plan | current plan | Y | Y | Y | Y | Y | nested in the manifest |
 | any other serialized plan schema | unsupported/refused | N | N | N | refused | N | refused |
 | `tropical_plan_5` and older plans | unsupported/refused | N | N | N | refused | N | refused |
 | retired top-level state/output carriers in Plan 6 | unsupported/refused | N | N | N | refused | N | refused |
@@ -50,9 +51,14 @@ patch-bay front door.
 
 ## Required rejection behavior
 
-Both `Tropical.Plan.FlatPlan.ofWire` and the native C load tail require an
-explicit `schema: "tropical_plan_6"`. Missing, unknown, and older schemas fail
-with an error naming the unsupported boundary. Plan 6 rejects these retired
+`Tropical.Plan.FlatPlan.ofWire` requires an explicit
+`schema: "tropical_plan_6"`. The native C load tail (`tropical_runtime_load`)
+requires a `schema: "tropical_kernel_1"` manifest (`design/typed-kernel.md`)
+whose first input is `tau:i64q32[frames]` with `frames` equal to the
+runtime's buffer length, whose one output is `f64[frames, channels]`, and
+whose nested `plan` carries `schema: "tropical_plan_6"` and the `fused`
+realization. Missing, unknown, and older schemas fail with an error naming
+the unsupported boundary. Plan 6 rejects these retired
 top-level fields rather than ignoring them:
 
 `state_init`, `register_names`, `register_types`, `register_targets`,

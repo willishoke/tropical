@@ -2,12 +2,15 @@
  * kernel.ts — WasmKernel: instantiate + drive a Lean-emitted wasm32 kernel.
  *
  * The Web Audio analog of `engine/runtime/FlatRuntime` (native): it owns one
- * imported linear memory, initializes array/slot metadata and defaults, calls
- * the 11-argument kernel per audio block, and applies an anti-click fade. It is
- * a *player* — no live recompile, no state-transfer hot-swap (those live on the
- * native instrument). Depends only on `KernelManifest`; no compiler internals.
+ * imported linear memory, holds the kernel's input record (tau and the
+ * params) and its output, calls the port once per static-shaped block, and
+ * applies an anti-click fade. It is a *player* — no live recompile, no
+ * hot-swap (those live on the native instrument). Depends only on
+ * `KernelManifest`; no compiler internals.
  */
-import { kernelOutputChannelCount, type KernelManifest } from './manifest.js'
+import {
+  kernelFrames, kernelOutputChannelCount, kernelParams, type KernelManifest,
+} from './manifest.js'
 import { computeLayout, type KernelLayout } from './layout.js'
 
 const WASM_PAGE = 65536
@@ -27,40 +30,38 @@ function roundTiesAway(x: number): number {
   return d < 0.5 ? f : d > 0.5 ? f + 1 : (x < 0 ? f : f + 1)
 }
 
-type KernelFn = (
-  inputs: number, registers: number, arrays: number, arraySizes: number,
-  temps: number, sampleRate: number, startIdx: bigint, paramPtrs: number,
-  output: number, bufferLen: bigint, slots: number,
-) => void
+/** The port: one i32 offset per input (tau, then the params) and the output. */
+type KernelFn = (...pointers: number[]) => void
 
 export class WasmKernel {
   private startIdx = 0n
   private fadeInRem = 0
   private fadeOutRem = 0
+  private readonly argv: number[]
 
   private constructor(
     private readonly memory: WebAssembly.Memory,
     private readonly kernel: KernelFn,
     private readonly layout: KernelLayout,
-    private readonly manifest: KernelManifest,
-    readonly maxBlockSize: number,
     readonly outputChannelCount: number,
-  ) {}
+  ) {
+    this.argv = [layout.tau, ...layout.params, layout.output]
+  }
+
+  /** The static frame count per call: the kernel's shape. */
+  get frames(): number { return this.layout.frames }
 
   static async instantiate(
     wasmBytes: BufferSource,
     manifest: KernelManifest,
-    maxBlockSize = 128,
   ): Promise<WasmKernel> {
+    const frames = kernelFrames(manifest)
     const outputChannelCount = kernelOutputChannelCount(manifest)
     // Region bytes are small and known; the unknown is the module's
     // __heap_base (its shadow stack + data segment). Allocate 1 MiB of slack
     // above the regions, then grow once if heapBase lands higher.
-    const arrayBytes = manifest.arraySlotSizes.reduce((a, s) => a + s, 0) * 8
     const regionBytes =
-      (64 + 2 * manifest.registerCount + manifest.slotCount +
-       maxBlockSize * outputChannelCount +
-       manifest.arraySlotSizes.length) * 8 + arrayBytes
+      (frames + kernelParams(manifest).length + frames * outputChannelCount + 8) * 8
     const initialPages = Math.ceil(((1 << 20) + regionBytes) / WASM_PAGE)
     const memory = new WebAssembly.Memory({ initial: initialPages })
 
@@ -71,52 +72,64 @@ export class WasmKernel {
     const kernel = instance.exports.tropical_kernel as KernelFn
     const heapBase = (instance.exports.__heap_base as WebAssembly.Global).value as number
 
-    const layout = computeLayout(manifest, maxBlockSize, heapBase)
+    const layout = computeLayout(manifest, heapBase)
     const needPages = Math.ceil(layout.endByte / WASM_PAGE)
     if (needPages > initialPages) memory.grow(needPages - initialPages)
 
-    const k = new WasmKernel(
-      memory, kernel, layout, manifest, maxBlockSize, outputChannelCount)
-    k.initState()
+    const k = new WasmKernel(memory, kernel, layout, outputChannelCount)
+    k.initParams(manifest)
     return k
   }
 
-  /** Initialize array sizes and slots from their defaults. The scratch and
-   * register regions begin zeroed with WebAssembly memory. */
-  private initState(): void {
-    const dv = new DataView(this.memory.buffer)
+  /** Seed every param from its default. */
+  private initParams(manifest: KernelManifest): void {
     const f64 = new Float64Array(this.memory.buffer)
-    const m = this.manifest
-    m.arraySlotSizes.forEach((sz, i) =>
-      dv.setBigInt64(this.layout.arraySizes + i * 8, BigInt(sz), true))
-    for (let i = 0; i < m.slotCount; i++)
-      f64[(this.layout.slots >> 3) + i] = m.slotDefaults[i] ?? 0
+    kernelParams(manifest).forEach((port, j) => {
+      f64[this.layout.params[j]! >> 3] = port.default ?? 0
+    })
   }
 
   beginFadeIn(): void { this.fadeInRem = FADE_SAMPLES; this.fadeOutRem = 0 }
   beginFadeOut(): void { this.fadeOutRem = FADE_SAMPLES; this.fadeInRem = 0 }
 
-  /** Write a slot directly. Params are slots in the session lowering, so this
-   *  is how a host with live control drives them. (Unused by the demo.) */
-  setSlot(index: number, value: number): void {
-    new Float64Array(this.memory.buffer)[(this.layout.slots >> 3) + index] = value
+  /** Write a param input (port order after `tau`). This is how a host with
+   *  live control drives a knob. (Unused by the demo.) */
+  setParam(index: number, value: number): void {
+    const cell = this.layout.params[index]
+    if (cell === undefined) throw new RangeError(`no param input ${index}`)
+    new Float64Array(this.memory.buffer)[cell >> 3] = value
   }
 
-  /** Run the kernel for `n` (≤ maxBlockSize) frames; return a frame-major,
-   *  interleaved view of `n * outputChannelCount` f64 samples. This is the
-   *  kernel's *native* output — what the
-   *  WASM≡JIT equivalence gate compares against `render-bytes`. The view is
-   *  valid until the next `render`/`process`. */
-  render(n: number): Float64Array {
-    if (!Number.isSafeInteger(n) || n < 0 || n > this.maxBlockSize)
-      throw new RangeError(`render frame count must be in [0, ${this.maxBlockSize}]`)
+  /** Run the kernel once over its static block, with `tau` the clock of each
+   *  frame from `startIdx`, and return the frame-major output view. */
+  private renderBlock(startIdx: bigint): Float64Array {
     const L = this.layout
-    this.kernel(L.inputs, L.registers, L.arrays, L.arraySizes, L.temps,
-                this.manifest.sampleRate, this.startIdx, /*param_ptrs*/ 0,
-                L.output, BigInt(n), L.slots)
-    this.startIdx += BigInt(n)
+    const tau = new BigInt64Array(this.memory.buffer, L.tau, L.frames)
+    for (let s = 0; s < L.frames; s++)
+      tau[s] = (startIdx + BigInt(s)) << 32n
+    this.kernel(...this.argv)
     return new Float64Array(
-      this.memory.buffer, L.output, n * this.outputChannelCount)
+      this.memory.buffer, L.output, L.frames * this.outputChannelCount)
+  }
+
+  /** Render `n` frames and return a frame-major, interleaved copy of
+   *  `n * outputChannelCount` f64 samples. The kernel's shape is static, so
+   *  `n` frames are `ceil(n / frames)` calls, the last one's tail discarded:
+   *  a closed form has no cost beyond the arithmetic. This is the kernel's
+   *  *native* output — what the WASM≡JIT equivalence gate compares against
+   *  `render-bytes`. */
+  render(n: number): Float64Array {
+    if (!Number.isSafeInteger(n) || n < 0)
+      throw new RangeError('render frame count must be a non-negative integer')
+    const C = this.outputChannelCount
+    const out = new Float64Array(n * C)
+    for (let done = 0; done < n; done += this.layout.frames) {
+      const block = this.renderBlock(this.startIdx + BigInt(done))
+      const take = Math.min(this.layout.frames, n - done)
+      out.set(block.subarray(0, take * C), done * C)
+    }
+    this.startIdx += BigInt(n)
+    return out
   }
 
   /** Render `n` frames into planar host outputs (f32 audio) with the anti-click

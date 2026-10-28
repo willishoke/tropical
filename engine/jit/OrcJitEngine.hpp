@@ -208,102 +208,27 @@ struct FlatProgram
   uint32_t                     output_channel_count = 1;
 };
 
-// Engine realization strategy.
+// ── The port (design/typed-kernel.md) ──
 //
-//   Fused           — one monolithic LLVM kernel function that inlines
-//                     every instance body inside the outer sample loop.
-//                     Canonical default; consumed by FlatRuntime via
-//                     NumericKernelFn.
-//   Microkernel     — N+3 LLVM functions in one module (preamble, N per-
-//                     instance kernels, state_evolution, postamble_mix);
-//                     the C++ scheduler dispatches them via function
-//                     pointers per sample. Top-level session instances
-//                     each get their own function; nested children are
-//                     inlined into their parent's function. Consumed by
-//                     FlatRuntime via MicrokernelKernels.
-//   MicrokernelDeep — like Microkernel, but children are also emitted
-//                     as their own LLVM functions instead of being
-//                     inlined — one function per `InstanceProgram` at
-//                     every nesting depth. Requires plans with non-
-//                     empty `children` arrays. Codegen lands in a
-//                     follow-up (Phase 2); the parser accepts the value
-//                     so plans round-trip, but the compile path throws
-//                     "not yet implemented" if asked to realize it.
-//
-// Distinguished by *return type* from the compiler, not by a runtime
-// flag — the cache must be partitioned by mode so a fused-mode cache
-// hit cannot satisfy a microkernel-mode query.
-enum class CompilationMode : uint8_t { Fused, Microkernel, MicrokernelDeep };
+// An emitted module defines `tropical_kernel(ptr tau, ptr in_1, …, ptr in_k,
+// ptr out)` — one pointer per input of the kernel's type (tau: i64 Q32.32
+// clock values, shape [frames]; params: one double each) and one for the
+// frame-major output — plus the thunk `tropical_kernel_argv(ptr argv)` that
+// unpacks a pointer table and calls it. Hosts call the thunk: argv[0] = tau,
+// argv[1..k] = the params in manifest order, argv[k+1] = out. Everything
+// else (slots, arrays, scratch, the stage-0 prologue) lives inside the
+// function; the frame count is a literal in the IR.
+using KernelArgvFn = void (*)(void * const * argv);
 
-// ── Fused-mode kernel signature ──
-// `slots` (M6+) is the shared inter-module slot array passed by
-// reference for both reads (slot operands) and writes (WriteSlot
-// instructions). Always passed; plans without slots pass an empty vector's
-// data ptr (the kernel does not reference it). The argument is
-// annotated `nocapture noalias` in the IR so GVN / store-to-load
-// forwarding can engage on slot reads (per spike #3).
-using NumericKernelFn = void (*)(
-  const int64_t * inputs,
-  int64_t * registers,
-  int64_t * const * arrays,
-  const uint64_t * array_sizes,
-  int64_t * temps,
-  double sample_rate,
-  uint64_t start_sample_index,
-  const uint64_t * param_ptrs,
-  double * output_buffer,
-  uint64_t buffer_length,
-  double * slots);
-
-// ── Microkernel-mode function-pointer signatures ──
-//
-// Per-sample, not per-buffer. The C++ scheduler in FlatRuntime supplies
-// `sample_index` (= state.sample_index + i within the current buffer)
-// and walks the buffer one sample at a time, calling each function in
-// order. The slim signature drops `buffer_length` (= 1 implicitly) and
-// `output_buffer` (only `postamble_mix` writes audio); both would be
-// dead args for the per-sample callers.
-//
-// `inputs` is omitted for the same reason — fused-mode plans pass a
-// null pointer here and the kernels never read it (the parser doesn't
-// emit Input operands for session-built plans). If a future use case
-// needs per-call inputs, we'll widen the signature.
-//
-// `preamble`, `instance_i`, and `state_evolution` share an identical
-// signature (PerSampleFn). `postamble_mix` widens it with the compact
-// frame-major audio buffer, the per-frame destination index, and channel
-// count. Each sink writes `output_index * output_channel_count + target`.
-// This is the
-// single LLVM-land site that touches `output_buffer`. Keeping the mix
-// inside LLVM preserves the optimizer's view of mix-temp coercions.
-using PerSampleFn = void (*)(
-  int64_t * registers,
-  int64_t * const * arrays,
-  const uint64_t * array_sizes,
-  int64_t * temps,
-  double sample_rate,
-  uint64_t sample_index,
-  const uint64_t * param_ptrs,
-  double * slots);
-
-using PostambleMixFn = void (*)(
-  int64_t * registers,
-  int64_t * const * arrays,
-  const uint64_t * array_sizes,
-  int64_t * temps,
-  double sample_rate,
-  uint64_t sample_index,
-  const uint64_t * param_ptrs,
+// The Metal adapter's CPU pre-pass: the coefficient plan over host storage,
+// `tropical_stage0(slots, arrays, array_sizes, temps)`. Computes the slot
+// vector and the coefficient columns the GPU kernel reads. Internal to that
+// realization; JIT artifacts carry none.
+using Stage0Fn = void (*)(
   double * slots,
-  double * output_buffer,
-  uint64_t output_index,
-  uint32_t output_channel_count);
-
-struct MicrokernelKernels
-{
-  std::vector<PerSampleFn>  instances;   // one per FlatProgram::instance_functions entry
-  PostambleMixFn            postamble_mix   = nullptr;  // the output sink mix
-};
+  int64_t * const * arrays,
+  const uint64_t * array_sizes,
+  int64_t * temps);
 
 class KernelObjectCache;
 
@@ -321,26 +246,29 @@ class OrcJitEngine
 
     llvm::Expected<uint64_t> lookup(const std::string & symbol_name);
 
-    /** Receive textual LLVM IR, JIT-compile it, return the kernel.
+    /** Receive textual LLVM IR, JIT-compile it, return the address of
+     *  `entry`.
      *
      *  The engine's "receive IR, JIT, run" core — Lean owns IR generation
      *  (EmitLlvm); C++ is strictly an engine. Parses the text into a fresh
-     *  module, renames its single function definition to a content-
-     *  addressed symbol (`tropical_k_<md5(ir)>`) so distinct IR never
-     *  collides in the JIT and identical IR is served from
-     *  `ir_kernel_cache_` without a duplicate-symbol re-add, then
-     *  add_module + lookup. The text must define exactly one function with
-     *  the fused `NumericKernelFn` signature.
+     *  module, renames every function definition to a content-addressed
+     *  symbol (`tropical_k_<md5(ir)>_<name>`) so distinct IR never collides
+     *  in the JIT and identical IR is served from `ir_kernel_cache_`
+     *  without a duplicate-symbol re-add, then add_module + lookup of the
+     *  renamed `entry`. The caller casts to the entry's type
+     *  (`KernelArgvFn` for `tropical_kernel_argv`, `Stage0Fn` for
+     *  `tropical_stage0`).
      *
      *  `unoptimized` compiles the module at O0 regardless of the engine
      *  opt level (a module flag steers the transform layer; the cache key
-     *  is salted so the two levels never collide). For kernels whose
-     *  codegen quality is irrelevant — the stage-0 coefficient kernel runs
-     *  once per control write, and O2's vectorizer/scheduler/regalloc on
-     *  its thousands-of-flops single block is exactly the compile wall the
-     *  split exists to remove. */
-    llvm::Expected<NumericKernelFn> compile_ir_text(
-      const std::string & ir_text, bool unoptimized = false);
+     *  is salted so the two levels never collide). For modules whose
+     *  codegen quality is irrelevant — the Metal pre-pass runs once per
+     *  control write, and O2's vectorizer/scheduler/regalloc on its
+     *  thousands-of-flops single block is exactly the compile wall the
+     *  stage-0 split exists to remove. */
+    llvm::Expected<void *> compile_ir_text(
+      const std::string & ir_text, bool unoptimized = false,
+      const std::string & entry = "tropical_kernel_argv");
 
   private:
     OrcJitEngine();
@@ -358,7 +286,7 @@ class OrcJitEngine
     /** IR-text kernels, keyed by md5(ir_text), so a reload of identical IR
      *  (e.g. a hot-swap back to a prior plan) returns the cached kernel
      *  instead of re-adding a duplicate symbol to the JIT. */
-    std::unordered_map<std::string, NumericKernelFn>      ir_kernel_cache_;
+    std::unordered_map<std::string, void *>               ir_kernel_cache_;
     std::unique_ptr<KernelObjectCache> object_cache_;
     llvm::OptimizationLevel opt_level_ = llvm::OptimizationLevel::O2;
 };

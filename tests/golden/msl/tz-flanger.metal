@@ -1,20 +1,14 @@
 #include <metal_stdlib>
 using namespace metal;
 
-struct TropicalKernelConsts {
-    ulong start_sample_index;
-    float sample_rate;
-    uint  buffer_length;
-};
-
 kernel void tropical_kernel(
     device float*                  output_buffer [[buffer(0)]],
     constant float*                slots         [[buffer(1)]],
-    constant TropicalKernelConsts& k             [[buffer(2)]],
+    constant long*                 tau           [[buffer(2)]],
     uint s [[thread_position_in_grid]])
 {
-    if (s >= k.buffer_length) { return; }
-    const long current_idx = long(k.start_sample_index) + long(s);
+    if (s >= 256u) { return; }
+    const long current_idx = tau[s] >> 32;
     const long t0 = (4294967296L * current_idx);
     long ti5 = t0;
     const long t1 = (0L + ti5);
@@ -437,7 +431,7 @@ kernel void tropical_kernel(
     float tf223 = t219;
     const float t220 = (as_type<float>(0x3ac49ba6u) * tf223);
     float tf224 = t220;
-    const float t221 = (tf224 * k.sample_rate);
+    const float t221 = (tf224 * as_type<float>(0x472c4400u));
     float tf225 = t221;
     const float t222 = (tf225 * as_type<float>(0x4f800000u));
     float tf226 = t222;

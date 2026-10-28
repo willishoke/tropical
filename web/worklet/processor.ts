@@ -79,7 +79,7 @@ class TropicalProcessor extends AudioWorkletProcessor {
         this.clear(output)
         return true
       }
-      WasmKernel.instantiate(new Uint8Array(wasm), manifest, 128)
+      WasmKernel.instantiate(new Uint8Array(wasm), manifest)
         .then((k) => { this.kernel = k; k.beginFadeIn() })
         .catch((err) => this.port.postMessage({ type: 'error', error: String(err) }))
       this.clear(output)

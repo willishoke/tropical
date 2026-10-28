@@ -20,37 +20,44 @@ tests/                              current ABI and schema-boundary CTests
 
 ## Kernel load path
 
-The production load is:
+The artifact is one typed pure kernel (`design/typed-kernel.md`). The
+production load is:
 
 ```text
-Lean FlatPlan
-  ├─ EmitLlvm → audio LLVM IR
-  ├─ Stage0    → optional coefficient LLVM IR
-  ├─ EmitMsl   → optional MSL
-  └─ toWire    → tropical_plan_6 metadata
+Lean FlatPlan (+ stage-0 split)
+  ├─ EmitLlvm → kernel.ll   : @tropical_kernel(ptr tau, ptr in_1.., ptr out)
+  │                           + @tropical_kernel_argv(ptr argv), the thunk
+  ├─ EmitMsl  → kernel.metal: the MSL realization (Metal artifacts)
+  ├─ EmitLlvm → stage0.ll   : @tropical_stage0, the Metal CPU pre-pass
+  └─ Kernel   → manifest.json: tropical_kernel_1 (the plan nested)
         │
         ▼
-tropical_runtime_load_ir_staged
-  → NumericProgramParser (metadata only)
-  → OrcJitEngine::compile_ir_text
-  → optional MetalKernel
-  → run coefficient kernel once
+tropical_runtime_load
+  → NumericProgramParser::parse_kernel1 (the type; the nested plan's metadata)
+  → OrcJitEngine::compile_ir_text (entry = tropical_kernel_argv)
+  → optional MetalKernel + the pre-pass (entry = tropical_stage0)
   → FlatRuntime::publish_state
 ```
 
-The C++ plan instruction structs and parser are not a code generator.
-`OrcJitEngine` compiles the LLVM text emitted by Lean. The manifest sizes
-scratch/array/slot regions, supplies defaults and parameter disciplines, and
-names stage-0 coefficient columns.
+The kernel's inputs are `tau` (the Q32.32 clock of each frame, shape
+`[frames]`) and one `f64` cell per `param:` slot in port order; its one
+output is `[frames, channels]`, frame-major. Everything else — the module
+slot vector, the arrays, the SSA scratch, the stage-0 prologue — lives inside
+the function; `frames` is a literal in the IR and must equal the runtime's
+buffer length. The C++ plan instruction structs and parser are not a code
+generator: the nested plan supplies slot names, defaults and parameter
+disciplines (the host's control table) and, for Metal, the array metadata
+the pre-pass fills.
 
 Three C entry points share the same tail:
 
-- `tropical_runtime_load_ir`;
-- `tropical_runtime_load_ir_msl`;
-- `tropical_runtime_load_ir_staged`.
+- `tropical_runtime_load`;
+- `tropical_runtime_load_generation`;
+- `tropical_runtime_load_with_observation_generation`.
 
-All three require a `tropical_plan_6` manifest. Older or unknown schemas and
-retired state/output carriers fail at the load boundary; see
+All three require a `tropical_kernel_1` manifest whose nested plan is
+`tropical_plan_6`. Other schemas, a malformed port, a frame count other than
+the runtime's, and retired plan carriers fail at the load boundary; see
 [`design/compatibility-matrix.md`](../design/compatibility-matrix.md).
 
 ## State and publication contract
@@ -58,12 +65,11 @@ retired state/output carriers fail at the load boundary; see
 Production Tropical kernels are closed-form `f(τ, params)`. In the native
 runtime:
 
-- `register_count` sizes the SSA temp pool; it is not persistent state;
-- the `%registers` kernel-ABI argument is retained but its backing buffer is
-  empty;
+- the kernel owns its scratch, slot vector and arrays per call; the host
+  allocates nothing for them;
 - retired state keys such as `state_init`, `register_names`,
   `register_types`, and `register_targets` are rejected;
-- a fresh load initializes scratch, arrays, and slots from its own manifest;
+- a fresh load seeds the host's control slots from its own manifest;
 - `publish_state` carries only `sample_index`;
 - there is no by-name register, array, or slot migration.
 
@@ -71,20 +77,22 @@ The session/control layer keeps current parameter values and supplies them
 through fresh plan defaults and live slot writes. That is not kernel state
 transfer.
 
-Stage-0 coefficient storage is also not per-sample state. The coefficient
-kernel is a closed-form control-time computation. Scalar results go to slots;
-bank coefficient columns use a three-generation publication protocol so an
-audio block sees one complete generation.
+Stage-0 work is currying, not state: on the JIT the coefficient plan is the
+kernel's own prologue, recomputed each call from the params. On Metal the
+same plan runs as a CPU pre-pass (`tropical_stage0`) at load and after every
+control write; scalar results go to slots and bank coefficient columns use a
+three-generation publication protocol so a render tile sees one complete
+generation.
 
 ## FlatRuntime
 
 `KernelState` owns:
 
-- the JIT kernel and optional coefficient kernel;
-- optional `MetalKernel`;
-- SSA temp scratch;
-- array storage and coefficient generations;
-- module slots/defaults/names;
+- the JIT kernel (the argv thunk), its frame count, the slot index of each
+  param input, the output channel names, and the tau/argv tables;
+- optional `MetalKernel` and the pre-pass, with the array storage and
+  coefficient generations only the pre-pass writes;
+- module slots/defaults/names (the host's control table);
 - parameter write-discipline metadata;
 - sample rate and sample coordinate.
 
@@ -98,7 +106,9 @@ On the JIT callback path, `process()`:
 1. applies any stable even-sequence clock request;
 2. CAS-owns, captures, and revalidates the active state and one coherent
    slot/coefficient generation;
-3. copies published slots into preallocated audio scratch and calls the kernel;
+3. copies published slots into preallocated audio scratch, fills tau with
+   each frame's clock, points the param arguments into the snapshot, and
+   calls the kernel once;
 4. advances the runtime-global audio clock and applies the smoothstep fade;
 5. publishes the completed sample boundary and releases ownership.
 
@@ -115,30 +125,33 @@ the barrier-driven clock/state/generation tests plus epoch-queue and
 render-worker mailbox publication stress under ThreadSanitizer when the
 compiler provides it.
 
-`render_window` evaluates the fused JIT kernel at arbitrary coordinates for
-scope/slave consumers. Metal sessions remain dual-loaded so this path stays on
-the f64 JIT reference.
+`render_window` evaluates the observation kernel (the JIT realization) at
+arbitrary coordinates for scope/slave consumers and returns its output
+channels by name: a scope tap is an output channel of the observation
+artifact. A window wider than the kernel's frame count is rendered in
+chunks over the same closed form. Metal sessions remain dual-loaded so this
+path stays on the f64 JIT reference.
 
 ## Execution targets
 
 ### ORC JIT
 
-`OrcJitEngine::compile_ir_text` parses a one-function LLVM module, verifies it,
-renames the function to a content-addressed symbol, compiles it through ORC,
-and caches the result. The stage-0 coefficient module can request the
-unoptimized JIT because it runs at control time and compile latency dominates
-its execution cost.
+`OrcJitEngine::compile_ir_text` parses an LLVM module, verifies it, renames
+every definition to a content-addressed symbol, compiles it through ORC, and
+returns the named entry (the argv thunk for a kernel, `tropical_stage0` for
+the Metal pre-pass). The pre-pass can request the unoptimized JIT because it
+runs at control time and compile latency dominates its execution cost.
 
-Kernel ABI:
+Kernel ABI (`design/typed-kernel.md`):
 
 ```text
-(inputs, registers, arrays, array_sizes, temps,
- rate, start_sample_index, param_ptrs,
- output_buffer, buffer_length, slots) → void
+@tropical_kernel(ptr tau, ptr in_1, …, ptr in_k, ptr out) → void
+@tropical_kernel_argv(ptr argv) → void     ; argv = [tau, in_1.., out]
 ```
 
-Lean emission defines the semantics of those arguments. Do not resurrect C++
-instruction codegen.
+`tau` holds `frames` Q32.32 clock values; each `in_j` is one `double`; `out`
+is `frames × channels` doubles, frame-major. Lean emission defines the
+semantics. Do not resurrect C++ instruction codegen.
 
 Benchmark/qualification runs may set `TROPICAL_KERNEL_CACHE_ROOT` to move the
 build-id subtree under a harness-owned directory, or
@@ -238,11 +251,13 @@ Correctness: `tests/web/metal_vs_jit.test.ts` (SNR vs the f64 JIT — f32
 output quantizes at ~-144 dB, so the gate is ~140 dB SNR flat in τ, not
 bytes) + `engine/tests/test_metal_kernel.cpp` (ctest).
 
-**Known v1 wart:** kernel-WRITTEN port slots are thread-private locals in the
-GPU kernel and never write back to the host slot array, so
-`tropical_runtime_get_slot` on such a slot returns the plan default in Metal
-mode (the CPU kernel would show the last sample's value). Host-written param
-slots are unaffected; the scope reads via `render_window` (JIT) and is exact.
+The MSL kernel binds `output_buffer` (0), `slots` (1), `tau` (2) and, when
+the plan hoists columns, `coeff_columns` (3); its frame count is a literal,
+so a render tile of `Rgpu` frames is `Rgpu / frames` dispatches in one
+command buffer, each over its own slice of the tau and output buffers.
+Kernel-written slots are thread-private locals on the GPU and are never read
+back by anyone: the scope reads output channels through `render_window`
+(JIT) and is exact.
 
 **Coefficient columns (banks-as-data) cross via `buffer(3)`.** A plan that
 advertises hoisted columns (`coeff_array_slots`) emits its MSL kernel with a
@@ -291,8 +306,8 @@ copies mono output to every device channel and:
 
 All handles are opaque `void *`.
 
-- Runtime: create/free, staged artifact loads, process/output, slots,
-  random-access render.
+- Runtime: create/free, artifact loads, process/output, control slots,
+  random-access render of the observation kernel's output channels.
 - Parameters: the older `ControlParam` pointer API remains for standalone
   bindings; session params are module slots.
 - DAC: create/start/stop, stats, device switch/reconnect, playback position.

@@ -64,7 +64,7 @@ describe('web/dist shipped artifacts vs native JIT', () => {
 
       const wasmBytes = new Uint8Array(readFileSync(join(distDir, `${e.slug}.wasm`)))
       const manifest = JSON.parse(readFileSync(join(distDir, `${e.slug}.manifest.json`), 'utf-8')) as KernelManifest
-      const k = await WasmKernel.instantiate(wasmBytes, manifest, N)
+      const k = await WasmKernel.instantiate(wasmBytes, manifest)
       const wasm = k.render(N).slice()
 
       expect(wasm.length).toBe(nat.length)

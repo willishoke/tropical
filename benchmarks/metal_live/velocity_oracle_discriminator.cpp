@@ -59,9 +59,10 @@ struct Artifacts
 
 void load(FlatRuntime & rt, const Artifacts & a, bool metal)
 {
-  if (!rt.load_ir_staged(
+  // `coeff` is the Metal pre-pass IR (stage0.ll); a JIT load passes none.
+  if (!rt.load(
         read_file(a.ir), metal ? read_file(a.msl) : std::string{},
-        read_file(a.coeff), read_file(a.manifest)))
+        metal ? read_file(a.coeff) : std::string{}, read_file(a.manifest)))
     throw std::runtime_error("load failed");
 }
 

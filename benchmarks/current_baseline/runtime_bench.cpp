@@ -197,6 +197,7 @@ Options parse_options(int argc, char ** argv)
     else if (flag == "--slot")
       o.slot = static_cast<uint32_t>(parse_u64(value(), "--slot"));
     else if (flag == "--reference-slot")
+      // An output channel of the observation kernel (design/typed-kernel.md).
       o.reference_slot = static_cast<uint32_t>(parse_u64(value(), "--reference-slot"));
     else if (flag == "--slot-value") o.slot_value = parse_double(value(), "--slot-value");
     else if (flag == "--reload-at") o.reload_at = parse_u64(value(), "--reload-at");
@@ -330,7 +331,8 @@ bool load(tropical_runtime_t rt, const Options &,
           const std::string & ir, const std::string & manifest,
           const std::string & coeff, const std::string & msl)
 {
-  return tropical_runtime_load_ir_staged(
+  // `coeff` is the Metal pre-pass IR (stage0.ll); a JIT artifact has none.
+  return tropical_runtime_load(
     rt, ir.data(), ir.size(),
     msl.empty() ? nullptr : msl.data(), msl.size(),
     coeff.empty() ? nullptr : coeff.data(), coeff.size(),

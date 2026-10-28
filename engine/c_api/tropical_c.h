@@ -151,35 +151,24 @@ uint64_t     tropical_dac_playback_position(tropical_dac_t);
 
 tropical_runtime_t tropical_runtime_new(unsigned int buffer_length);
 void             tropical_runtime_free(tropical_runtime_t);
-/* Load a kernel from textual LLVM IR plus a tropical_plan_6 metadata manifest.
-   Every other schema is rejected. The instruction graph is metadata only —
-   codegen comes from ir_text, emitted by Lean's EmitLlvm. Always fused. */
-bool             tropical_runtime_load_ir(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* manifest_json, size_t manifest_len);
+/* Load one kernel artifact (design/typed-kernel.md): the port IR (defining
+   tropical_kernel and its argv thunk), the MSL realization (may be empty:
+   JIT-only), the Metal pre-pass IR (empty unless MSL is present and the plan
+   hoisted anything), and the tropical_kernel_1 manifest. The manifest's
+   frame count must equal the runtime's buffer length. A failed load leaves
+   the previous kernel playing and sets tropical_last_error. */
+bool             tropical_runtime_load(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* stage0_ir, size_t stage0_len, const char* manifest_json, size_t manifest_len);
 
-/* Dual load: LLVM IR -> JIT (always; render_window + the correctness
-   reference stay on CPU) and MSL -> Metal compute pipeline (the audio path;
-   TROPICAL_METAL builds only -- fails with tropical_last_error otherwise
-   when msl is non-empty). Same manifest contract as load_ir; the same
-   double-buffered publish covers both artifacts (hot-swap preserved). */
-bool             tropical_runtime_load_ir_msl(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* manifest_json, size_t manifest_len);
-
-/* Staged load: like load_ir_msl (msl may be empty for JIT-only), plus an
-   optional stage-0 coefficient kernel (coeff_ir may be empty): a second
-   single-function LLVM module holding the plan's tau-independent
-   instructions, JIT-compiled as its own module, run once against the new
-   state before publish and re-run after every control-plane slot write.
-   Its outputs land in coef:<n> module slots the audio kernel reads. */
-bool             tropical_runtime_load_ir_staged(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* manifest_json, size_t manifest_len);
-
-/* Staged single-artifact load returning the exact program/control generation
-   pair constructed by this publication. The pair is written before the load
+/* The same load, returning the exact program/control generation pair
+   constructed by this publication. The pair is written before the load
    returns and is not sampled from mutable counters afterward. */
-bool             tropical_runtime_load_ir_staged_generation(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* manifest_json, size_t manifest_len, tropical_runtime_generation_t* out_generation);
+bool             tropical_runtime_load_generation(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* stage0_ir, size_t stage0_len, const char* manifest_json, size_t manifest_len, tropical_runtime_generation_t* out_generation);
 
-/* Atomic dual-artifact publication. The first staged artifact owns audio and
-   optional Metal execution; the second JIT-only artifact owns observation.
-   Controls project between differing slot layouts by exact manifest name. */
-bool             tropical_runtime_load_ir_staged_with_observation_generation(tropical_runtime_t, const char* audio_ir, size_t audio_ir_len, const char* audio_msl_source, size_t audio_msl_len, const char* audio_coeff_ir, size_t audio_coeff_len, const char* audio_manifest_json, size_t audio_manifest_len, const char* observation_ir, size_t observation_ir_len, const char* observation_coeff_ir, size_t observation_coeff_len, const char* observation_manifest_json, size_t observation_manifest_len, tropical_runtime_generation_t* out_generation);
+/* Atomic dual-artifact publication. The first artifact owns audio and
+   optional Metal execution; the second JIT-only artifact owns observation
+   (its output channels are what render_window reads). Controls project
+   between differing slot layouts by exact manifest name. */
+bool             tropical_runtime_load_with_observation_generation(tropical_runtime_t, const char* audio_ir, size_t audio_ir_len, const char* audio_msl_source, size_t audio_msl_len, const char* audio_stage0_ir, size_t audio_stage0_len, const char* audio_manifest_json, size_t audio_manifest_len, const char* observation_ir, size_t observation_ir_len, const char* observation_manifest_json, size_t observation_manifest_len, tropical_runtime_generation_t* out_generation);
 
 /* Control-plane/test-only: request a sample-clock reposition. JIT applies it
    at its next process-buffer boundary; Metal prepares and acknowledges an
@@ -302,15 +291,15 @@ uint64_t         tropical_runtime_current_sample_index_u64(tropical_runtime_t);
    increment when phase-anchoring a live frequency change. */
 double           tropical_runtime_sample_rate(tropical_runtime_t);
 
-/* Random-access render (scope / slave consumers): evaluate the active fused
-   kernel over [start_index, start_index+count) and write each requested slot's
-   per-sample trajectory into `out`, slot-major (out[k*count + i]). Exact and
-   concurrency-safe with the audio thread for a register-free (stateless) patch.
-   Returns false if the kernel isn't fused or a slot id is out of range. */
+/* Random-access render (scope / slave consumers): evaluate the observation
+   kernel over [start_index, start_index+count) and write each requested
+   output channel's per-sample trajectory into `out`, channel-major
+   (out[k*count + i]). Exact and concurrency-safe with the audio thread: a
+   closed-form kernel has no state to race. Returns false if no observation
+   kernel is loaded or a channel id is out of range. */
 bool             tropical_runtime_render_window(tropical_runtime_t, uint64_t start_index,
-                   unsigned int count, const unsigned int* slot_ids, unsigned int n_slots,
+                   unsigned int count, const unsigned int* channel_ids, unsigned int n_channels,
                    double* out);
-
 /* ---------- Socket endpoint ----------
  *
  * A single Unix-domain socket serving many clients over newline-delimited

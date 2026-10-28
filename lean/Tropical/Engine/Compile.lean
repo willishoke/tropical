@@ -7,7 +7,7 @@ Every graph mutation ends here. `syncCompile` runs the pure session compile
 (`Tropical.Session.compileStaged`: lift, resolved root, Core check,
 partition, plan) and hot-swaps the result into the runtime through the host
 port; a failed compile leaves the mutated graph in place and the previous
-kernel playing. `buildKernelIr`/`loadKernel` emit the artifact and publish.
+kernel playing. `loadKernel` emits the artifact and publishes.
 -/
 
 namespace Tropical.Engine
@@ -17,42 +17,19 @@ open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 open Tropical.Session (compileStaged)
 
-/-- Emit the (LLVM IR text, manifest JSON) for a compiled session plan
-    without loading it. Shared by the audio compile (`syncCompile`) and the
-    lazy inspection compile (Part II): both realizations go through the same
-    `toWire`/`emitKernel` path; only the originating `FlatPlan` differs. -/
-def buildKernelIr (plan : Tropical.Plan.FlatPlan) : EngineM (String × String) := do
-  let planJson ← match plan.toWire with
-    | .error msg => internalError msg
-    | .ok j => pure j.compress
-  let ir ← match Tropical.Ir.EmitLlvm.emitKernel plan with
-    | .error msg => internalError s!"EmitLlvm: {msg}"
-    | .ok s => pure s
-  pure (ir, planJson)
-
-private def buildLoadArtifacts (plan : Tropical.Plan.FlatPlan)
+private def buildLoadArtifacts (env : Env) (plan : Tropical.Plan.FlatPlan)
     (stages? : Option (Array (Array (Option Tropical.Ir.Stage))))
     (emitMsl : Bool) : EngineM Tropical.Artifact.KernelArtifact := do
   let split ← match stages? with
     | some blocks => Tropical.Artifact.splitTyped plan blocks
     | none => Tropical.Artifact.split plan
-  if emitMsl then
-    match Tropical.Artifact.emitMetal split with
-      | .error msg => internalError s!"Emit Metal artifacts: {msg}"
-      | .ok artifact => pure artifact
-  else
-    let (ir, manifest) ← buildKernelIr split.audio
-    let coefficientIr ← match Tropical.Artifact.coeffIr split with
-      | .error msg => internalError s!"EmitLlvm (coeff): {msg}"
-      | .ok s => pure s
-    -- The typed-kernel manifest rides along unconsumed (slice T1); the
-    -- engine does not yet know the host's buffer length, so the type is
-    -- derived for the runtime's device default until T3 threads it.
-    let kernel ← match Tropical.Kernel.manifest split.audio
-        Tropical.Artifact.defaultFrames with
-      | .error msg => internalError s!"Kernel.manifest: {msg}"
-      | .ok s => pure s
-    pure { ir, coefficientIr, manifest, kernel }
+  -- Shapes are static: the artifact is compiled for the frames the host
+  -- renders per call (`design/typed-kernel.md`).
+  let emitted := if emitMsl then Tropical.Artifact.emitMetal split env.host.frames
+    else Tropical.Artifact.emitJit split env.host.frames
+  match emitted with
+  | .error msg => internalError s!"Emit artifact: {msg}"
+  | .ok artifact => pure artifact
 
 /-- Emit the plan's kernel artifacts and load them into the runtime: the
     stage-0 split first (Stage0.hoist, gated by `TROPICAL_STAGE0`), then
@@ -67,7 +44,7 @@ private def buildLoadArtifacts (plan : Tropical.Plan.FlatPlan)
 def loadKernelPublished (env : Env) (plan : Tropical.Plan.FlatPlan)
     (stages? : Option (Array (Array (Option Tropical.Ir.Stage))) := none) :
     EngineM Tropical.Host.PublishedGeneration := do
-  let artifact ← buildLoadArtifacts plan stages? env.metalBackend
+  let artifact ← buildLoadArtifacts env plan stages? env.metalBackend
   env.host.publish artifact
 
 /-- Compatibility form for compile paths whose replies do not expose the
@@ -85,9 +62,9 @@ def loadKernelWithObservationPublished (env : Env)
     (audioPlan observationPlan : Tropical.Plan.FlatPlan)
     (audioStages observationStages : Array (Array (Option Tropical.Ir.Stage))) :
     EngineM Tropical.Host.PublishedGeneration := do
-  let audio ← buildLoadArtifacts audioPlan (some audioStages) env.metalBackend
+  let audio ← buildLoadArtifacts env audioPlan (some audioStages) env.metalBackend
   let observation ←
-    buildLoadArtifacts observationPlan (some observationStages) false
+    buildLoadArtifacts env observationPlan (some observationStages) false
   env.host.publishWithObservation audio observation
 
 /-- The session lowering + compile: lift free wires if needed, build the session

@@ -585,8 +585,8 @@ llvm::Expected<uint64_t> OrcJitEngine::lookup(const std::string & symbol_name)
 // C++ plan compiler retired (Phase 2), this is the only kernel producer;
 // Lean's EmitLlvm emits the IR.
 // ---------------------------------------------------------------------------
-llvm::Expected<NumericKernelFn> OrcJitEngine::compile_ir_text(
-  const std::string & ir_text, bool unoptimized)
+llvm::Expected<void *> OrcJitEngine::compile_ir_text(
+  const std::string & ir_text, bool unoptimized, const std::string & entry)
 {
   if (!jit_)
   {
@@ -601,7 +601,9 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_ir_text(
   // levels (however unlikely) never serves the wrong object from either
   // cache tier.
   const std::string key = md5_hex(ir_text) + (unoptimized ? "_u" : "");
-  if (auto it = ir_kernel_cache_.find(key); it != ir_kernel_cache_.end())
+  const std::string prefix = "tropical_k_" + key + "_";
+  const std::string symbol = prefix + entry;
+  if (auto it = ir_kernel_cache_.find(symbol); it != ir_kernel_cache_.end())
     return it->second;
 
   llvm::orc::LLJIT * target = jit_.get();
@@ -613,8 +615,6 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_ir_text(
         "unoptimized JIT is not available: " + unopt_init_error_,
         llvm::inconvertibleErrorCode());
   }
-
-  const std::string symbol = "tropical_k_" + key;
 
   auto context = std::make_unique<llvm::LLVMContext>();
   llvm::SMDiagnostic diag;
@@ -631,31 +631,26 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_ir_text(
   }
   module->setDataLayout(target->getDataLayout());
 
-  // Rename the single function definition to the content-addressed
-  // symbol. Declarations (e.g. intrinsics) are left alone.
-  llvm::Function * kernel_fn = nullptr;
+  // Rename every function definition to its content-addressed symbol
+  // (calls between them follow the rename). Declarations (intrinsics) are
+  // left alone. The entry must be among them.
+  bool entry_defined = false;
   for (llvm::Function & f : *module)
   {
     if (f.isDeclaration()) continue;
-    if (kernel_fn)
-      return llvm::make_error<llvm::StringError>(
-        "compile_ir_text: IR defines more than one function",
-        llvm::inconvertibleErrorCode());
-    kernel_fn = &f;
+    if (f.getName() == entry) entry_defined = true;
+    f.setName(prefix + f.getName().str());
+    f.setLinkage(llvm::Function::ExternalLinkage);
   }
-  if (!kernel_fn)
+  if (!entry_defined)
     return llvm::make_error<llvm::StringError>(
-      "compile_ir_text: IR defines no function",
+      "compile_ir_text: IR does not define '" + entry + "'",
       llvm::inconvertibleErrorCode());
-  kernel_fn->setName(symbol);
-  kernel_fn->setLinkage(llvm::Function::ExternalLinkage);
 
   // Give the module a unique identity. parseIR preserves the original
   // `; ModuleID` from the printed text, which would make the disk
-  // KernelObjectCache serve the *plan-compiled* object (defining
-  // tropical_f_<hash>) for this renamed module — whose symbol isn't in
-  // it, so materialization fails. Key the module on the IR content hash
-  // instead, matching the renamed symbol.
+  // KernelObjectCache serve another module's object for this one. Key the
+  // module on the IR content hash instead, matching the renamed symbols.
   module->setModuleIdentifier(key);
   module->setSourceFileName(key);
 
@@ -692,8 +687,8 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_ir_text(
   const uint64_t addr = symbol_or_err->getAddress();
 #endif
 
-  auto kernel = reinterpret_cast<NumericKernelFn>(addr);
-  ir_kernel_cache_.emplace(key, kernel);
+  void * kernel = reinterpret_cast<void *>(addr);
+  ir_kernel_cache_.emplace(symbol, kernel);
   return kernel;
 }
 

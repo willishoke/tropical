@@ -225,7 +225,7 @@ def runMslColumnGuard (arena : Arena)
                     (match i.dst with | .array s => some s | _ => none)
                   else none) #[]
           let imagesAreColumns := !images.isEmpty && images.all cols.contains
-          match Tropical.Ir.EmitMsl.emitKernel split.audio with
+          match Tropical.Ir.EmitMsl.emitKernel split.audio 256 with
           | .error e => pure (Except.error s!"routed split plan refused: {firstLine e}")
           | .ok msl =>
             let sizes := split.audio.arraySlotSizes
@@ -262,10 +262,10 @@ def runMslColumnGuard (arena : Arena)
       let cols := split.audio.coeffArraySlots
       let has : String → String → Bool := fun hay needle =>
         (hay.splitOn needle).length > 1
-      let plainHeader := "constant TropicalKernelConsts& k             [[buffer(2)]],\n    uint s [[thread_position_in_grid]])"
+      let plainHeader := "constant long*                 tau           [[buffer(2)]],\n    uint s [[thread_position_in_grid]])"
       let columnsHeader := "constant float*                coeff_columns [[buffer(3)]],\n    uint s [[thread_position_in_grid]])"
-      match Tropical.Ir.EmitMsl.emitKernel split.audio,
-            Tropical.Ir.EmitMsl.emitKernel plan with
+      match Tropical.Ir.EmitMsl.emitKernel split.audio 256,
+            Tropical.Ir.EmitMsl.emitKernel plan 256 with
       | .ok splitMsl, .ok unsplitMsl =>
         -- The unsplit plan advertises no columns: exact 3-binding header,
         -- no buffer(3) anywhere (the text-frozen ABI must not move).
@@ -384,13 +384,13 @@ def runMslColumnDup : IO Bool := do
     let audioFills := planArrayFills split.audio
     let audioReduces := planReduces split.audio
     let coeffFills := match split.coeff? with | some c => planArrayFills c | none => 0
-    let (mslOk, mslLocalFree) ← match Tropical.Ir.EmitMsl.emitKernel split.audio with
+    let (mslOk, mslLocalFree) ← match Tropical.Ir.EmitMsl.emitKernel split.audio 256 with
       | .ok msl => pure (true, cols.all fun s => !(has msl s!"arr{s}["))
       | .error e =>
         IO.println s!"        split audio plan refused MSL: {firstLine e}"
         pure (false, false)
     let refuses := fun (varying : Bool) =>
-      match Tropical.Ir.EmitMsl.emitKernel (columnWritePlan varying) with
+      match Tropical.Ir.EmitMsl.emitKernel (columnWritePlan varying) 256 with
       | .error e => has e "writes hoisted coefficient column 0"
       | .ok _ => false
     let refuseVarying := refuses true
@@ -568,8 +568,8 @@ def runBanksCountCache (arena : Arena)
     let j ← (Lean.Json.parse (src dflt cap)).mapError (s!"json: {·}")
     let compiled ← Tropical.Playground.compilePlanPure arena resolved j
     let split ← Tropical.Ir.Stage0.hoistTyped compiled.plan compiled.stageBlocks
-    pure (← Tropical.Ir.EmitLlvm.emitKernel compiled.plan,
-      ← Tropical.Ir.EmitLlvm.emitKernel split.audio)
+    pure (← Tropical.Ir.EmitLlvm.emitKernel { audio := compiled.plan, coeff? := none } 256,
+      ← Tropical.Ir.EmitLlvm.emitKernel split 256)
   match irOf 4 16, irOf 12 16, irOf 4 24 with
   | .error e, _, _ | _, .error e, _ | _, _, .error e =>
     failGate "banks-count-cache" s!"compile/emit: {firstLine e}"
@@ -672,7 +672,7 @@ def runModalFilter (arena : Arena)
       | .ok compiled =>
       let plan := compiled.plan
       let stageBlocks := compiled.stageBlocks
-      match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
+      match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel { audio := plan, coeff? := none } 2048 with
       | .ok _, .ok _ =>
         let rt ← Tropical.Ffi.Runtime.new 2048
         Tropical.StagedLoad.loadTyped rt plan stageBlocks
@@ -862,7 +862,7 @@ def runModalRailIdentity (arena : Arena)
         buildAndFinish (Tropical.EmitArrow.buildModalBankTable
           "id_large" large (lit 200) arena) with
   | .ok pSmall, .ok pLarge =>
-    match Tropical.Ir.EmitLlvm.emitKernel pSmall, Tropical.Ir.EmitLlvm.emitKernel pLarge with
+    match Tropical.Ir.EmitLlvm.emitKernel { audio := pSmall, coeff? := none } 256, Tropical.Ir.EmitLlvm.emitKernel { audio := pLarge, coeff? := none } 256 with
     | .ok irSmall, .ok irLarge =>
       let smallVerbatim := hasSub irSmall land2p28    -- k=0 keeps 2²⁸
       let largeRescaled := hasSub irLarge land2p26 && !(hasSub irLarge land2p28)  -- k=2 ⇒ 2²⁶, no 2²⁸
@@ -903,7 +903,7 @@ def runModalAddr (arena : Arena)
     | .error _ => false
     | .ok j => match Tropical.Playground.compilePlanPure arena resolved j with
       | .error _ => false
-      | .ok compiled => (Tropical.Ir.EmitLlvm.emitKernel compiled.plan).toOption.isSome
+      | .ok compiled => (Tropical.Ir.EmitLlvm.emitKernel { audio := compiled.plan, coeff? := none } 256).toOption.isSome
   match buildAndFinish (Tropical.EmitArrow.buildModalBankArrow
           "ma_ref" modes (lit 0) arena),
         buildAndFinish (Tropical.EmitArrow.buildModalAddrRamp

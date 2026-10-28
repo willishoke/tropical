@@ -219,6 +219,14 @@ the C++ runtime receives textual LLVM plus plan metadata, compiles the text, and
 publishes the resulting kernel. The parser's instruction graph does not
 generate native code.
 
+**The port.** The compiler's product is one typed pure kernel
+(`design/typed-kernel.md`): `@tropical_kernel(ptr tau, ptr in_1.., ptr out)`
+— `tau` the Q32.32 clock of each frame, one `f64` per `param:` slot, one
+frame-major output — with static shapes (a different buffer length is a
+different artifact) and everything else inside the function. The manifest is
+its type, `tropical_kernel_1`. The scope reads output channels of a separate
+observation artifact of the same plan.
+
 **Fixed-topology compilation.** Topology and structural selector changes
 rebuild the synthetic root, lower, emit, and hot-swap. Ordinary parameter
 changes write `param:<name>` slots without relowering. `FlatRuntime` carries
@@ -260,7 +268,8 @@ Two distinct JSON schemas; do not confuse them.
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
 | `tropical_program_2` | `lean/Tropical/Parse/Raise.lean` (JSON ingest) | The PATCH-BAY shape: instances of registered types + wiring + params, a body block of instanceDecls/paramDecls/outputAssigns. The JSON front door for `load`/`merge` (and `save`/`export_program`'s output serialization). Program DEFINITIONS over the wire are retired — a programDecl is refused at ingest with the retirement message; wire expressions decode into the typed session grammar (`Tropical.WireExpr`), which cannot spell combinators/binders/state ops. (Programs are authored as `Tropical.Stdlib`/EmitArrow arrow builders, not this schema.) |
-| `tropical_plan_6`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: nested instance blocks plus `sinks[]`, `sources[]`, typed slots, stage metadata, bank/routed regions, and cooperative-Metal metadata where required. Lean emits LLVM/MSL from the typed plan; native and web hosts consume trimmed metadata manifests. Serialized-plan entry points accept this schema only and reject older schemas and retired state/output carriers. See `design/compatibility-matrix.md`. |
+| `tropical_plan_6`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: nested instance blocks plus `sinks[]`, `sources[]`, typed slots, stage metadata, bank/routed regions, and cooperative-Metal metadata where required. Lean emits LLVM/MSL from the typed plan. Serialized-plan entry points accept this schema only and reject older schemas and retired state/output carriers. See `design/compatibility-matrix.md`. |
+| `tropical_kernel_1`  | `lean/Tropical/Kernel.lean` | The port manifest a host loads (`design/typed-kernel.md`): the kernel's inputs (`tau`, then the params with defaults and disciplines) and its output (shape and channel names), rate, realization, with the `tropical_plan_6` plan nested for the gates. `tropicalc` and `diffcli compile-kernel` write it; the C++ runtime and the web player read it. |
 
 Going from the first to the second without losing meaning is exactly
 what the session compile does (ingest → sessionToResolvedRoot →

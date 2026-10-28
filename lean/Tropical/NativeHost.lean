@@ -22,13 +22,13 @@ def Dac.port (d : Dac) : DacPort where
   bufferFrames := d.bufferFrames
   stats := d.stats
 
-def Runtime.hostPort (rt : Runtime) : HostPort where
+def Runtime.hostPort (rt : Runtime) (frames : Nat) : HostPort where
+  frames := frames
   publish a :=
-    rt.loadIrStagedGeneration a.ir a.msl a.coefficientIr a.manifest
+    rt.loadGeneration a.ir a.msl a.stage0Ir a.manifest
   publishWithObservation a o :=
-    rt.loadIrStagedWithObservationGeneration
-      a.ir a.msl a.coefficientIr a.manifest
-      o.ir o.coefficientIr o.manifest
+    rt.loadWithObservationGeneration
+      a.ir a.msl a.stage0Ir a.manifest o.ir o.manifest
   setParam := rt.setParam
   sampleRate := rt.sampleRate
   process := rt.process

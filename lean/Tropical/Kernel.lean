@@ -88,6 +88,10 @@ structure Port where
   role : Option Role := none
   default : Option Json := none
   discipline : Option Discipline := none
+  /-- For an output of shape `[frames, C]`: the name of each channel's
+      source (the slot its sink mixes first), `""` for a silent channel.
+      The scope resolves a tap name to a channel through this. -/
+  channels : Array String := #[]
 deriving Inhabited
 
 /-- The realization a loader compiles; not part of the type's meaning. -/
@@ -119,6 +123,24 @@ def outName : String := "out"
 /-- The slot-name prefix that marks a host-written control. -/
 def paramPrefix : String := "param:"
 
+/-- The slot indices of a plan's param inputs, in slot order — the order the
+    port's input pointers follow after `tau`. Shared by the type derivation
+    and the emitters so both agree by construction. -/
+def paramSlotIndices (plan : FlatPlan) : Array Nat := Id.run do
+  let mut out := #[]
+  for i in [0:plan.slotNames.size] do
+    if plan.slotNames[i]!.startsWith paramPrefix then out := out.push i
+  return out
+
+/-- The source name of each output channel: the first slot its sink mixes. -/
+def channelNames (plan : FlatPlan) : Array String := Id.run do
+  let mut names := Array.replicate plan.outputChannelCount ""
+  for sink in plan.sinks do
+    if sink.target < names.size then
+      if let some slot := sink.inputs[0]? then
+        names := names.set! sink.target (plan.slotNames[slot]?.getD "")
+  return names
+
 private def disciplineOf (plan : FlatPlan) (base : String) : Option Discipline :=
   (plan.paramDisciplines.find? (·.name == base)).map fun d =>
     { discipline := d.discipline, glideDurSec := d.glideDurSec,
@@ -130,16 +152,16 @@ def ofPlan (plan : FlatPlan) (frames : Nat) : Except String KernelType := do
   let tau : Port :=
     { name := tauName, elem := .i64q32, shape := #[frames], role := some .signal }
   let mut inputs : Array Port := #[tau]
-  for i in [0:plan.slotNames.size] do
+  for i in paramSlotIndices plan do
     let slotName := plan.slotNames[i]!
-    if slotName.startsWith paramPrefix then
-      let base := (slotName.drop paramPrefix.length).toString
-      inputs := inputs.push {
-        name := slotName, elem := .f64, shape := #[], role := some .param,
-        default := plan.slotDefaults[i]?,
-        discipline := disciplineOf plan base }
+    let base := (slotName.drop paramPrefix.length).toString
+    inputs := inputs.push {
+      name := slotName, elem := .f64, shape := #[], role := some .param,
+      default := plan.slotDefaults[i]?,
+      discipline := disciplineOf plan base }
   let out : Port :=
-    { name := outName, elem := .f64, shape := #[frames, plan.outputChannelCount] }
+    { name := outName, elem := .f64, shape := #[frames, plan.outputChannelCount],
+      channels := channelNames plan }
   return {
     rate := plan.sampleRate
     inputs
@@ -170,6 +192,8 @@ def Port.toWire (p : Port) : Json :=
   let fields := match p.discipline with
     | some d => fields.push ("discipline", d.toWire)
     | none => fields
+  let fields := if p.channels.isEmpty then fields
+    else fields.push ("channels", toJson p.channels)
   Json.mkObj fields.toList
 
 def Realization.toWire (r : Realization) : Json :=
@@ -238,7 +262,7 @@ def Port.ofWire (j : Json) : Except String Port := do
   let discipline ← match j.getObjVal? "discipline" with
     | .ok d => some <$> Discipline.ofWire d
     | _ => pure none
-  return { name, elem, shape, role, default, discipline }
+  return { name, elem, shape, role, default, discipline, channels := strArr j "channels" }
 
 def Realization.ofWire (j : Json) : Except String Realization := do
   let modeStr ← reqStr "Kernel.Realization" j "mode"

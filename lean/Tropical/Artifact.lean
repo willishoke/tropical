@@ -7,16 +7,13 @@ import Tropical.Kernel
 # Artifact — what the compiler hands a runtime
 
 A `KernelArtifact` is the compiler's product for one `FlatPlan`: the kernel
-code a runtime loads plus the manifest that describes it. Producing one is
-pure emission (stage-0 split, `EmitLlvm`, `EmitMsl`, the plan's wire form);
+code a runtime loads plus the manifest that types it. Producing one is
+pure emission (stage-0 split, `EmitLlvm`, `EmitMsl`, the kernel type);
 loading one is a host concern and lives outside the compiler core
 (`Tropical.StagedLoad`, the engine's host port).
 
-The manifest is the plan's wire form: same schema, its slot table extended
-with the `coef:<n>` slots the main and coefficient kernels share. Beside it
-rides `kernel`, the `tropical_kernel_1` type of the same plan
-(`Tropical.Kernel`, `design/typed-kernel.md`): emitted for every artifact,
-consumed by no host yet (slice T1).
+The manifest is the kernel's type, `tropical_kernel_1` (`Tropical.Kernel`,
+`design/typed-kernel.md`), with the plan's wire form nested for the gates.
 -/
 
 namespace Tropical.Artifact
@@ -24,24 +21,26 @@ namespace Tropical.Artifact
 open Tropical.Plan (FlatPlan)
 open Tropical.Ir.Stage0 (Split hoist)
 
-/-- One loadable kernel image. Empty strings mean "absent": no coefficient
-    kernel (nothing hoisted), no MSL (JIT-only). `kernel` is the typed-kernel
-    manifest of the same plan. -/
+/-- One loadable kernel: the port function as LLVM IR, the manifest that
+    types it (`tropical_kernel_1`, the plan nested inside), and the Metal
+    realization when asked for — its MSL plus `stage0Ir`, the CPU pre-pass
+    that computes the slot vector and coefficient columns the GPU kernel
+    reads (empty for a JIT-only artifact: the JIT kernel carries that
+    prologue inside itself). -/
 structure KernelArtifact where
   ir : String
-  coefficientIr : String
-  msl : String := ""
   manifest : String
-  kernel : String := ""
+  msl : String := ""
+  stage0Ir : String := ""
 
-/-- The frames-per-call the typed kernel is derived for when the caller has
-    no host to ask: the runtime's own device default (`TROPICAL_BUFFER_LENGTH`
+/-- The frames-per-call an artifact is compiled for when the caller has no
+    host to ask: the runtime's own device default (`TROPICAL_BUFFER_LENGTH`
     absent). Shapes are static, so a host with a different buffer length is
-    a different kernel; slice T3 threads the host's value through. -/
+    a different kernel; every host path passes its own value. -/
 def defaultFrames : Nat := 512
 
 /-- Kill-switch for A/B and debugging: `TROPICAL_STAGE0=0` disables the
-    split (plans load exactly as before, one kernel). -/
+    split (the whole plan runs in the sample loop). -/
 def enabled : IO Bool := do
   pure ((← IO.getEnv "TROPICAL_STAGE0") != some "0")
 
@@ -62,40 +61,21 @@ def splitTyped (plan : FlatPlan)
     | .error e => throw <| IO.userError s!"StagedLoad (typed split): {e}"
   else pure { audio := plan, coeff? := none }
 
-/-- The coefficient kernel's IR — empty string when nothing hoisted
-    (the FFI treats empty as "no coefficient kernel"). -/
-def coeffIr (s : Split) : Except String String :=
-  match s.coeff? with
-  | none => .ok ""
-  | some c => Tropical.Ir.EmitLlvm.emitKernel c
+/-- The JIT-only artifact: the port kernel and its manifest. -/
+def emitJit (s : Split) (frames : Nat) : Except String KernelArtifact := do
+  let ir ← Tropical.Ir.EmitLlvm.emitKernel s frames
+  let manifest ← Tropical.Kernel.manifest s.audio frames
+  return { ir, manifest }
 
-/-- The JIT-only artifact: main kernel, coefficient kernel, manifest. -/
-def emitJit (s : Split) (frames : Nat := defaultFrames) :
-    Except String KernelArtifact := do
-  let manifestJson ← s.audio.toWire
-  let ir ← Tropical.Ir.EmitLlvm.emitKernel s.audio
-  let cir ← coeffIr s
-  let kernel ← Tropical.Kernel.manifest s.audio frames
-  return {
-    ir := ir
-    coefficientIr := cir
-    manifest := manifestJson.compress
-    kernel }
-
-/-- The dual artifact: the JIT kernels plus the MSL realization of the same
-    audio plan.  JIT-only callers never enter this function. -/
-def emitMetal (s : Split) (frames : Nat := defaultFrames) :
-    Except String KernelArtifact := do
-  let manifestJson ← s.audio.toWire
-  let ir ← Tropical.Ir.EmitLlvm.emitKernel s.audio
-  let coefficientIr ← coeffIr s
-  let msl ← Tropical.Ir.EmitMsl.emitKernel s.audio
-  let kernel ← Tropical.Kernel.manifest s.audio frames
-  return {
-    ir := ir
-    coefficientIr := coefficientIr
-    manifest := manifestJson.compress
-    msl := msl
-    kernel }
+/-- The dual artifact: the port kernel, the MSL realization of the same
+    audio plan, and the CPU pre-pass for its τ-independent part. -/
+def emitMetal (s : Split) (frames : Nat) : Except String KernelArtifact := do
+  let ir ← Tropical.Ir.EmitLlvm.emitKernel s frames
+  let manifest ← Tropical.Kernel.manifest s.audio frames
+  let msl ← Tropical.Ir.EmitMsl.emitKernel s.audio frames
+  let stage0Ir ← match s.coeff? with
+    | none => pure ""
+    | some c => Tropical.Ir.EmitLlvm.emitStage0 c
+  return { ir, manifest, msl, stage0Ir }
 
 end Tropical.Artifact

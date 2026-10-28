@@ -1,17 +1,18 @@
 import { describe, expect, test } from 'bun:test'
 import {
-  WasmKernel, computeLayout, kernelOutputChannelCount,
+  WasmKernel, computeLayout, kernelFrames, kernelOutputChannelCount,
   type KernelLayout, type KernelManifest,
 } from '../../web/runtime/index'
 
-function manifest(outputChannelCount?: number): KernelManifest {
+const FRAMES = 8
+
+/** A `tropical_kernel_1` manifest: tau[FRAMES], no params, one output. */
+function manifest(outputChannelCount: number, frames: number = FRAMES): KernelManifest {
   return {
-    sampleRate: 44100,
-    registerCount: 0,
-    arraySlotSizes: [],
-    slotCount: 0,
-    slotDefaults: [],
-    ...(outputChannelCount === undefined ? {} : { outputChannelCount }),
+    schema: 'tropical_kernel_1',
+    rate: 44100,
+    inputs: [{ name: 'tau', elem: 'i64q32', shape: [frames], role: 'signal' }],
+    outputs: [{ name: 'out', elem: 'f64', shape: [frames, outputChannelCount] }],
   }
 }
 
@@ -21,27 +22,23 @@ function fakeKernel(
 ): WasmKernel {
   const memory = new WebAssembly.Memory({ initial: 1 })
   const kernelManifest = manifest(outputChannelCount)
-  const layout: KernelLayout = computeLayout(kernelManifest, 8, 0)
-  const kernel = (
-    _inputs: number, _registers: number, _arrays: number,
-    _arraySizes: number, _temps: number, _sampleRate: number,
-    startIdx: bigint, _paramPtrs: number, output: number,
-    bufferLen: bigint,
-  ) => {
-    const frames = Number(bufferLen)
+  const layout: KernelLayout = computeLayout(kernelManifest, 0)
+  // The port: argv = [tau, ...params, out]; the frame count is the kernel's.
+  const kernel = (...pointers: number[]) => {
+    const tau = new BigInt64Array(memory.buffer, pointers[0]!, FRAMES)
     const view = new Float64Array(
-      memory.buffer, output, frames * outputChannelCount)
-    for (let frame = 0; frame < frames; frame++)
+      memory.buffer, pointers[pointers.length - 1]!, FRAMES * outputChannelCount)
+    for (let frame = 0; frame < FRAMES; frame++)
       for (let channel = 0; channel < outputChannelCount; channel++)
         view[frame * outputChannelCount + channel] =
-          sample(frame, channel, Number(startIdx) + frame)
+          sample(frame, channel, Number(tau[frame]! >> 32n))
   }
 
   const value = Object.create(WasmKernel.prototype) as WasmKernel & {
     memory: WebAssembly.Memory
     kernel: typeof kernel
     layout: KernelLayout
-    manifest: KernelManifest
+    argv: number[]
     startIdx: bigint
     fadeInRem: number
     fadeOutRem: number
@@ -50,8 +47,7 @@ function fakeKernel(
     memory,
     kernel,
     layout,
-    manifest: kernelManifest,
-    maxBlockSize: 8,
+    argv: [layout.tau, ...layout.params, layout.output],
     outputChannelCount,
     startIdx: 0n,
     fadeInRem: 0,
@@ -61,16 +57,23 @@ function fakeKernel(
 }
 
 describe('multichannel wasm runtime contract', () => {
-  test('old manifests default to mono and invalid widths are refused', () => {
-    expect(kernelOutputChannelCount(manifest())).toBe(1)
+  test('the manifest is the type: tau first, one output, bounded width', () => {
+    expect(kernelFrames(manifest(1))).toBe(FRAMES)
+    expect(kernelOutputChannelCount(manifest(1))).toBe(1)
     expect(() => kernelOutputChannelCount(manifest(0))).toThrow()
     expect(() => kernelOutputChannelCount(manifest(1.5))).toThrow()
     expect(() => kernelOutputChannelCount(manifest(65))).toThrow(/\[1, 64\]/)
+    const noTau = { ...manifest(1), inputs: [] }
+    expect(() => kernelFrames(noTau)).toThrow(/tau/)
+    const mismatched = { ...manifest(1), outputs: [{ name: 'out', elem: 'f64', shape: [4, 1] }] }
+    expect(() => kernelOutputChannelCount(mismatched as KernelManifest)).toThrow(/frame count/)
   })
 
   test('linear memory reserves frames times compact channel width', () => {
-    const layout = computeLayout(manifest(3), 8, 0)
-    expect(layout.endByte - layout.output).toBe(8 * 3 * 8)
+    const layout = computeLayout(manifest(3), 0)
+    expect(layout.frames).toBe(FRAMES)
+    expect(layout.endByte - layout.output).toBe(FRAMES * 3 * 8)
+    expect(layout.params).toEqual([])
   })
 
   test('render exposes frame-major interleaved samples', () => {
@@ -83,6 +86,13 @@ describe('multichannel wasm runtime contract', () => {
       absoluteFrame * 10 + channel)
     kernel.render(2)
     expect(Array.from(kernel.render(1))).toEqual([20, 21])
+  })
+
+  test('a window wider than the block is chunked over the same clock', () => {
+    const kernel = fakeKernel(1, (_frame, _channel, absoluteFrame) => absoluteFrame)
+    expect(Array.from(kernel.render(FRAMES + 3)))
+      .toEqual(Array.from({ length: FRAMES + 3 }, (_, i) => i))
+    expect(Array.from(kernel.render(2))).toEqual([FRAMES + 3, FRAMES + 4])
   })
 
   test('stereo maps independently, clamps, and clears surplus host channels', () => {

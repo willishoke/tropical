@@ -586,10 +586,16 @@ structure SessionInput where
     live knobs when it has any. -/
 def SessionInput.forRoot (root : CoreProgram) (arena : Tropical.Ir.ExprArena)
     (params : Array (String × Json) := #[])
-    (alloc : Tropical.Lowering.Alloc := {}) : SessionInput :=
+    (alloc : Tropical.Lowering.Alloc := {})
+    (extraOutputs : Array String := #[]) : SessionInput :=
   { instances := #[(rootInstancePath, root)]
     wiresPost := #[]
+    -- `out` is channel 0; each extra root output port (a scope tap) is its
+    -- own channel, so an observation artifact exposes taps as outputs
+    -- (`design/typed-kernel.md`: the scope reads output channels).
     graphOutputs := #[{ sourceInstance := rootInstancePath, sourceOutput := "out" }]
+      ++ extraOutputs.mapIdx fun i port =>
+        { channel := i + 1, sourceInstance := rootInstancePath, sourceOutput := port }
     params, alloc, root, arena }
 
 private def rootParamName : CoreBodyDecl → Option String

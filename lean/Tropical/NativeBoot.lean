@@ -33,8 +33,9 @@ private def bufferLength : IO UInt32 := do
 /-- Boot an engine on a fresh native runtime, returning both. The runtime is
     for host-side services that need the raw handle (the `--serve` socket). -/
 def bootWithRuntime : IO (Ffi.Runtime × Engine.Env) := do
-  let runtime ← Ffi.Runtime.new (← bufferLength)
-  let env ← Engine.boot runtime.hostPort
+  let frames ← bufferLength
+  let runtime ← Ffi.Runtime.new frames
+  let env ← Engine.boot (runtime.hostPort frames.toNat)
   pure (runtime, env)
 
 /-- Boot an engine on a fresh native runtime. -/

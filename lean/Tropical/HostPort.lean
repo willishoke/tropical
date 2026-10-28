@@ -54,6 +54,9 @@ structure DacPort where
   stats : IO DacStats
 
 structure HostPort where
+  /-- The frames per call this host renders: the static shape every
+      artifact it loads must be compiled for (`design/typed-kernel.md`). -/
+  frames : Nat
   /-- Publish one artifact atomically; returns the generation it created. -/
   publish : KernelArtifact → IO PublishedGeneration
   /-- Publish a realtime artifact together with a distinct JIT-only

@@ -20,12 +20,12 @@ per-sample loop collapses — one thread per sample
 kernel void tropical_kernel(
     device float*                  output_buffer [[buffer(0)]],
     constant float*                slots         [[buffer(1)]],
-    constant TropicalKernelConsts& k             [[buffer(2)]],
+    constant long*                 tau           [[buffer(2)]],
     uint s [[thread_position_in_grid]])
 ```
 
-with `TropicalKernelConsts = { ulong start_sample_index; float
-sample_rate; uint buffer_length; }` (8+4+4, no padding).
+where `tau` is the Q32.32 clock per thread (`current_idx = tau[s] >> 32`),
+the frame count is a literal (shapes are static), and the rate is a literal.
 
 ## Divergences from EmitLlvm, all deliberate
 
@@ -401,7 +401,7 @@ def resolveOperand : NOperand → M TVal
     | some .tick => pure ⟨"current_idx", .int, none⟩
     | some .rate => do
       let sr := (← get).sampleRate
-      pure ⟨"k.sample_rate", .float, some (.f sr)⟩
+      pure ⟨f32Lit sr, .float, some (.f sr)⟩
     | none => pure ⟨f32Lit 0.0, .float, some (.f 0.0)⟩
   | .slot idx t => do
     coerce (← loadSlot idx) t
@@ -962,60 +962,48 @@ def emitSinks (channelCount : Nat) (sinks : Array SinkSpec) : M Unit := do
 -- Module entry point
 -- ─────────────────────────────────────────────────────────────
 
-private def header : String :=
+private def header (frames : Nat) : String :=
   "#include <metal_stdlib>\n" ++
   "using namespace metal;\n\n" ++
-  "struct TropicalKernelConsts {\n" ++
-  "    ulong start_sample_index;\n" ++
-  "    float sample_rate;\n" ++
-  "    uint  buffer_length;\n" ++
-  "};\n\n" ++
+
   "kernel void tropical_kernel(\n" ++
   "    device float*                  output_buffer [[buffer(0)]],\n" ++
   "    constant float*                slots         [[buffer(1)]],\n" ++
-  "    constant TropicalKernelConsts& k             [[buffer(2)]],\n" ++
+  "    constant long*                 tau           [[buffer(2)]],\n" ++
   "    uint s [[thread_position_in_grid]])\n" ++
   "{\n" ++
-  "    if (s >= k.buffer_length) { return; }\n" ++
-  "    const long current_idx = long(k.start_sample_index) + long(s);\n"
+  s!"    if (s >= {frames}u) \{ return; }\n" ++
+  "    const long current_idx = tau[s] >> 32;\n"
 
 /-- The column-binding header: `header` plus `buffer(3)` — the packed
     coefficient-column buffer, uploaded by the host from the generation
     `process()` captures. Emitted ONLY when the plan advertises hoisted
     columns; ordinary plans keep the exact 3-binding header above (the
     msl-golden gates freeze that text). -/
-private def headerColumns : String :=
+private def headerColumns (frames : Nat) : String :=
   "#include <metal_stdlib>\n" ++
   "using namespace metal;\n\n" ++
-  "struct TropicalKernelConsts {\n" ++
-  "    ulong start_sample_index;\n" ++
-  "    float sample_rate;\n" ++
-  "    uint  buffer_length;\n" ++
-  "};\n\n" ++
+
   "kernel void tropical_kernel(\n" ++
   "    device float*                  output_buffer [[buffer(0)]],\n" ++
   "    constant float*                slots         [[buffer(1)]],\n" ++
-  "    constant TropicalKernelConsts& k             [[buffer(2)]],\n" ++
+  "    constant long*                 tau           [[buffer(2)]],\n" ++
   "    constant float*                coeff_columns [[buffer(3)]],\n" ++
   "    uint s [[thread_position_in_grid]])\n" ++
   "{\n" ++
-  "    if (s >= k.buffer_length) { return; }\n" ++
-  "    const long current_idx = long(k.start_sample_index) + long(s);\n"
+  s!"    if (s >= {frames}u) \{ return; }\n" ++
+  "    const long current_idx = tau[s] >> 32;\n"
 
-private def cooperativeHeader (withColumns : Bool) (routeConstants : String)
-    (scratchBytes : Nat) : String :=
+private def cooperativeHeader (frames : Nat) (withColumns : Bool)
+    (routeConstants : String) (scratchBytes : Nat) : String :=
   "#include <metal_stdlib>\n" ++
   "using namespace metal;\n\n" ++
-  "struct TropicalKernelConsts {\n" ++
-  "    ulong start_sample_index;\n" ++
-  "    float sample_rate;\n" ++
-  "    uint  buffer_length;\n" ++
-  "};\n\n" ++ routeConstants ++
+ routeConstants ++
   s!"// tropical.threadgroup_scratch_bytes={scratchBytes}\n" ++
   "kernel void tropical_kernel(\n" ++
   "    device float*                  output_buffer [[buffer(0)]],\n" ++
   "    constant float*                slots         [[buffer(1)]],\n" ++
-  "    constant TropicalKernelConsts& k             [[buffer(2)]]" ++
+  "    constant long*                 tau           [[buffer(2)]]" ++
   (if withColumns then
     ",\n    constant float*                coeff_columns [[buffer(3)]]" else "") ++
   ",\n    uint3 sampleGroup [[threadgroup_position_in_grid]],\n" ++
@@ -1023,8 +1011,8 @@ private def cooperativeHeader (withColumns : Bool) (routeConstants : String)
   "    uint3 groupSize [[threads_per_threadgroup]])\n" ++
   "{\n" ++
   "    const uint s = sampleGroup.x;\n" ++
-  "    if (s >= k.buffer_length) { return; }\n" ++
-  "    const long current_idx = long(k.start_sample_index) + long(s);\n"
+  s!"    if (s >= {frames}u) \{ return; }\n" ++
+  "    const long current_idx = tau[s] >> 32;\n"
 
 private def linearInstrs (f : InstanceFunction) : Array NInstr := Id.run do
   let mut out := f.preambleInstructions
@@ -1072,7 +1060,8 @@ private def cooperativeRouteConstants (begins : Array NInstr) : String :=
     never be filled). All OTHER array slots keep thread-private locals
     and in-kernel fills. Columns-free plans keep the exact 3-binding
     header, byte-frozen by the msl-golden gates. -/
-def emitKernel (plan : FlatPlan) : Except String String := do
+def emitKernel (plan : FlatPlan) (frames : Nat) : Except String String := do
+  if frames == 0 then throw "EmitMsl: frames must be positive"
   if !plan.outputLayoutWellFormed then
     throw "EmitMsl: output channel count must be positive and sink targets must be unique and in range"
   if plan.outputChannelCount > 64 then
@@ -1163,10 +1152,10 @@ def emitKernel (plan : FlatPlan) : Except String String := do
     -- keep -Wunused clean would misfire on use, so leave it — Metal's
     -- compiler doesn't warn on unused const locals by default.
     let hdr := if cooperative then
-      cooperativeHeader (!boundArraySlots.isEmpty)
+      cooperativeHeader frames (!boundArraySlots.isEmpty)
         (cooperativeRouteConstants routedBegins ++ "\n")
         plan.metalThreadgroupScratchBytes
-      else if boundArraySlots.isEmpty then header else headerColumns
+      else if boundArraySlots.isEmpty then header frames else headerColumns frames
     .ok (hdr ++ bodyText ++ "\n}\n")
 
 end Tropical.Ir.EmitMsl

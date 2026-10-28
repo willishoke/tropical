@@ -2,7 +2,7 @@
  * test_metal_kernel.cpp — Metal execution backend smoke (TROPICAL_METAL
  * builds; no audio device required, needs a Metal GPU).
  *
- * Exercises `tropical_runtime_load_ir_msl`: dual-load (JIT + MSL→PSO),
+ * Exercises the dual load at the port (JIT + MSL→PSO) through `tropical_runtime_load`,
  * worker-prepared GPU epochs consumed by tropical_runtime_process, sample-clock
  * continuity across blocks, hot-swap (double load) mid-stream, and the
  * set_sample_index test hook. Hand-written IR/MSL pairs mirror the two
@@ -60,62 +60,119 @@ static bool wait_for_true(
     }                                                                         \
   } while (0)
 
-// The JIT side of the dual load — a constant kernel (never dispatched when
-// the Metal side is live, but load_ir_msl compiles it regardless).
-static const char* JIT_CONST_IR =
-  "define void @kernel(ptr %inputs, ptr %registers, ptr %arrays, "
-  "ptr %array_sizes, ptr %temps, double %sampleRate, i64 %start_sample_index, "
-  "ptr %param_ptrs, ptr %output_buffer, i64 %buffer_length, ptr %slots) {\n"
-  "entry:\n  br label %lc\n"
-  "lc:\n  %s = phi i64 [0, %entry], [%sn, %lb]\n"
-  "  %c = icmp ult i64 %s, %buffer_length\n"
-  "  br i1 %c, label %lb, label %le\n"
-  "lb:\n"
-  "  %p = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
-  "  store double 9.000000e-01, ptr %p, align 8\n"
-  "  %sn = add i64 %s, 1\n  br label %lc\n"
-  "le:\n  ret void\n}\n";
+// The JIT side of the dual load, at the port (design/typed-kernel.md):
+// `tropical_kernel(ptr tau, ptr in_1.., ptr out)` over the static frame
+// count plus the argv thunk. `jit_kernel(frames, params, body)` mirrors
+// what EmitLlvm emits; inside the loop `%s` is the frame, `%idx` the sample
+// index, `%in_<j>` the j-th param, `%out` the output.
+static std::string jit_kernel(unsigned int frames, unsigned int params,
+                              const std::string& body)
+{
+  std::string args = "ptr %tau";
+  for (unsigned int j = 1; j <= params; ++j)
+    args += ", ptr %in_" + std::to_string(j);
+  args += ", ptr %out";
+  std::string loads, call_args;
+  for (unsigned int i = 0; i < params + 2; ++i)
+  {
+    loads += "  %ap" + std::to_string(i)
+      + " = getelementptr inbounds ptr, ptr %argv, i64 " + std::to_string(i) + "\n"
+      "  %a" + std::to_string(i) + " = load ptr, ptr %ap" + std::to_string(i) + ", align 8\n";
+    call_args += (i ? ", ptr %a" : "ptr %a") + std::to_string(i);
+  }
+  return "define void @tropical_kernel(" + args + ") {\n"
+    "entry:\n  br label %lc\n"
+    "lc:\n  %s = phi i64 [0, %entry], [%sn, %lb]\n"
+    "  %c = icmp ult i64 %s, " + std::to_string(frames) + "\n"
+    "  br i1 %c, label %lb, label %le\n"
+    "lb:\n"
+    "  %tau_p = getelementptr inbounds i64, ptr %tau, i64 %s\n"
+    "  %tau_s = load i64, ptr %tau_p, align 8\n"
+    "  %idx = ashr i64 %tau_s, 32\n"
+    + body +
+    "  %sn = add i64 %s, 1\n  br label %lc\n"
+    "le:\n  ret void\n}\n\n"
+    "define void @tropical_kernel_argv(ptr %argv) {\n"
+    "entry:\n" + loads +
+    "  call void @tropical_kernel(" + call_args + ")\n"
+    "  ret void\n}\n";
+}
 
-static const char* JIT_SLOT0_IR =
-  "define void @kernel(ptr %inputs, ptr %registers, ptr %arrays, "
-  "ptr %array_sizes, ptr %temps, double %sampleRate, i64 %start_sample_index, "
-  "ptr %param_ptrs, ptr %output_buffer, i64 %buffer_length, ptr %slots) {\n"
-  "entry:\n"
-  "  %value = load double, ptr %slots, align 8\n"
-  "  br label %lc\n"
-  "lc:\n  %s = phi i64 [0, %entry], [%sn, %lb]\n"
-  "  %c = icmp ult i64 %s, %buffer_length\n"
-  "  br i1 %c, label %lb, label %le\n"
-  "lb:\n"
-  "  %p = getelementptr inbounds double, ptr %output_buffer, i64 %s\n"
-  "  store double %value, ptr %p, align 8\n"
-  "  %sn = add i64 %s, 1\n  br label %lc\n"
-  "le:\n  ret void\n}\n";
+// A constant JIT kernel (never dispatched when the Metal side is live, but
+// the load compiles it regardless) and one that passes its first param.
+static std::string jit_const_ir(unsigned int frames, unsigned int params)
+{
+  return jit_kernel(frames, params,
+    "  %p = getelementptr inbounds double, ptr %out, i64 %s\n"
+    "  store double 9.000000e-01, ptr %p, align 8\n");
+}
+static std::string jit_slot0_ir(unsigned int frames, unsigned int params)
+{
+  return jit_kernel(frames, params,
+    "  %value = load double, ptr %in_1, align 8\n"
+    "  %p = getelementptr inbounds double, ptr %out, i64 %s\n"
+    "  store double %value, ptr %p, align 8\n");
+}
 
-static const char* MANIFEST = R"({"schema":"tropical_plan_6",
-  "config":{"sampleRate":44100},"register_count":0,
-  "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
-  "sinks":[],"slot_count":2,"slot_defaults":[0.25, 0]})";
+// A tropical_kernel_1 manifest over a nested plan: tau[frames], one f64
+// param per name, out[frames, channels].
+static std::string kernel_manifest(unsigned int frames,
+                                   const std::vector<std::string>& params,
+                                   unsigned int channels,
+                                   const std::string& plan_json)
+{
+  std::string inputs =
+    "{\"name\":\"tau\",\"elem\":\"i64q32\",\"shape\":[" + std::to_string(frames)
+    + "],\"role\":\"signal\"}";
+  for (const auto& name : params)
+    inputs += ",{\"name\":\"" + name
+      + "\",\"elem\":\"f64\",\"shape\":[],\"role\":\"param\"}";
+  std::string channel_names = "\"out\"";
+  for (unsigned int c = 1; c < channels; ++c) channel_names += ",\"\"";
+  return "{\"schema\":\"tropical_kernel_1\",\"rate\":44100,"
+    "\"inputs\":[" + inputs + "],"
+    "\"outputs\":[{\"name\":\"out\",\"elem\":\"f64\",\"shape\":["
+    + std::to_string(frames) + "," + std::to_string(channels) + "],"
+    "\"channels\":[" + channel_names + "]}],"
+    "\"realization\":{\"mode\":\"fused\",\"register_count\":0},"
+    "\"plan\":" + plan_json + "}";
+}
 
-// MSL ABI mirror of EmitMsl's header.
-static std::string msl_kernel(const std::string& body)
+// Two slots: [param:gain = 0.25, a wire]. The GPU kernel reads slots[0].
+static const std::vector<std::string> MANIFEST_PARAMS = {"param:gain"};
+static std::string manifest_for(unsigned int frames)
+{
+  return kernel_manifest(frames, MANIFEST_PARAMS, 1, R"({"schema":"tropical_plan_6",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
+    "sinks":[],"slot_count":2,"slot_names":["param:gain","wire"],
+    "slot_defaults":[0.25, 0]})");
+}
+
+static bool load_msl(tropical_runtime_t rt, const std::string& ir,
+                     const std::string& msl, const std::string& manifest,
+                     const std::string& stage0 = "")
+{
+  return tropical_runtime_load(
+    rt, ir.c_str(), ir.size(), msl.c_str(), msl.size(),
+    stage0.empty() ? nullptr : stage0.c_str(), stage0.size(),
+    manifest.c_str(), manifest.size());
+}
+
+// MSL ABI mirror of EmitMsl's header: tau per thread, static frame count.
+static std::string msl_kernel(const std::string& body, unsigned int frames)
 {
   return std::string(
     "#include <metal_stdlib>\n"
     "using namespace metal;\n"
-    "struct TropicalKernelConsts {\n"
-    "    ulong start_sample_index;\n"
-    "    float sample_rate;\n"
-    "    uint  buffer_length;\n"
-    "};\n"
     "kernel void tropical_kernel(\n"
     "    device float*                  output_buffer [[buffer(0)]],\n"
     "    constant float*                slots         [[buffer(1)]],\n"
-    "    constant TropicalKernelConsts& k             [[buffer(2)]],\n"
+    "    constant long*                 tau           [[buffer(2)]],\n"
     "    uint s [[thread_position_in_grid]])\n"
     "{\n"
-    "    if (s >= k.buffer_length) { return; }\n"
-    "    const long current_idx = long(k.start_sample_index) + long(s);\n")
+    "    if (s >= " + std::to_string(frames) + "u) { return; }\n"
+    "    const long current_idx = tau[s] >> 32;\n")
     + body + "\n}\n";
 }
 
@@ -129,10 +186,8 @@ static void test_metal_ramp()
   ASSERT(rt != nullptr);
 
   const std::string msl = msl_kernel(
-    "    output_buffer[s] = float(current_idx);");
-  ASSERT(tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
-                                      msl.c_str(), msl.size(),
-                                      MANIFEST, strlen(MANIFEST)));
+    "    output_buffer[s] = float(current_idx);", buf);
+  ASSERT(load_msl(rt, jit_const_ir(buf, 1), msl, manifest_for(buf)));
   ASSERT(tropical_runtime_metal_render_tile_frames(rt) == 512);
   ASSERT(tropical_runtime_metal_worker_capacity_frames(rt) == 2048);
   tropical_metal::reset_callback_thread_violation_count();
@@ -157,10 +212,8 @@ static void test_offline_renderer_waits_for_worker_refill()
   tropical_runtime_t rt = tropical_runtime_new(buf);
   ASSERT(rt != nullptr);
   const std::string msl = msl_kernel(
-    "    output_buffer[s] = float(current_idx);");
-  ASSERT(tropical_runtime_load_ir_msl(
-    rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
-    msl.c_str(), msl.size(), MANIFEST, strlen(MANIFEST)));
+    "    output_buffer[s] = float(current_idx);", buf);
+  ASSERT(load_msl(rt, jit_const_ir(buf, 1), msl, manifest_for(buf)));
 
   const double * output = tropical_runtime_output_buffer(rt);
   constexpr uint64_t offline_blocks = 1000;
@@ -196,23 +249,23 @@ static void test_offline_renderer_waits_for_worker_refill()
 static void test_callback_thread_provenance()
 {
   const std::string msl = msl_kernel(
-    "    output_buffer[s] = float(current_idx);");
+    "    output_buffer[s] = float(current_idx);", 32);
   std::string error;
-  auto kernel = tropical_metal::create(msl, 32, 0, 0, error);
+  auto kernel = tropical_metal::create(msl, 32, 32, 1, 0, 0, error);
   ASSERT(kernel != nullptr);
   std::array<double, 32> output{};
 
   tropical_metal::reset_callback_thread_violation_count();
   tropical_metal::set_audio_callback_thread(true);
   const bool callback_render = tropical_metal::render_tile(
-    *kernel, nullptr, 0, nullptr, 0, 44100.0, 0,
+    *kernel, nullptr, 0, nullptr, 0, 0,
     static_cast<uint32_t>(output.size()), output.data());
   tropical_metal::set_audio_callback_thread(false);
   ASSERT(!callback_render);
   ASSERT(tropical_metal::callback_thread_violation_count() == 1);
 
   ASSERT(tropical_metal::render_tile(
-    *kernel, nullptr, 0, nullptr, 0, 44100.0, 0,
+    *kernel, nullptr, 0, nullptr, 0, 0,
     static_cast<uint32_t>(output.size()), output.data()));
   for (uint32_t i = 0; i < output.size(); ++i)
     ASSERT_NEAR(output[i], static_cast<double>(i), 1e-6);
@@ -224,14 +277,15 @@ static void test_interleaved_stereo_readback()
 {
   const std::string msl = msl_kernel(
     "    output_buffer[s * 2u] = float(current_idx);\n"
-    "    output_buffer[s * 2u + 1u] = -float(current_idx);");
+    "    output_buffer[s * 2u + 1u] = -float(current_idx);", 8);
   std::string error;
-  auto kernel = tropical_metal::create(msl, 16, 2, 0, 0, error);
+  // A 16-frame tile over an 8-frame kernel: two dispatches, one command.
+  auto kernel = tropical_metal::create(msl, 16, 8, 2, 0, 0, error);
   ASSERT(kernel != nullptr);
   ASSERT(tropical_metal::output_channels(*kernel) == 2);
   std::array<double, 32> output{};
   ASSERT(tropical_metal::render_tile(
-    *kernel, nullptr, 0, nullptr, 0, 44100.0, 100, 16,
+    *kernel, nullptr, 0, nullptr, 0, 100, 16,
     output.data()));
   for (uint32_t frame = 0; frame < 16; ++frame)
   {
@@ -246,23 +300,22 @@ static void test_cooperative_dispatch_geometry()
   const std::string msl =
     "#include <metal_stdlib>\n"
     "using namespace metal;\n"
-    "struct TropicalKernelConsts { ulong start_sample_index; float sample_rate; uint buffer_length; };\n"
     "kernel void tropical_kernel(device float* out [[buffer(0)]], "
     "constant float* slots [[buffer(1)]], "
-    "constant TropicalKernelConsts& k [[buffer(2)]], "
+    "constant long* tau [[buffer(2)]], "
     "uint3 group [[threadgroup_position_in_grid]], "
     "uint lane [[thread_index_in_threadgroup]], "
     "uint3 width [[threads_per_threadgroup]]) {\n"
     "  threadgroup float shared_value;\n"
     "  const uint sample = group.x;\n"
-    "  if (sample >= k.buffer_length) return;\n"
-    "  if (lane == 0u) shared_value = float(k.start_sample_index + sample);\n"
+    "  if (sample >= 64u) return;\n"
+    "  if (lane == 0u) shared_value = float(tau[sample] >> 32);\n"
     "  threadgroup_barrier(mem_flags::mem_threadgroup);\n"
     "  if (lane == width.x - 1u) out[sample] = shared_value;\n"
     "}\n";
   std::string error;
   auto kernel = tropical_metal::create(
-    msl, 64, 0, 0, error,
+    msl, 64, 64, 1, 0, 0, error,
     tropical_metal::DispatchKind::SampleThreadgroups, 64);
   ASSERT(kernel != nullptr);
   ASSERT(tropical_metal::dispatch_kind(*kernel)
@@ -271,14 +324,14 @@ static void test_cooperative_dispatch_geometry()
   ASSERT(tropical_metal::threadgroup_scratch_bytes(*kernel) == 64);
   std::array<double, 64> output{};
   ASSERT(tropical_metal::render_tile(
-    *kernel, nullptr, 0, nullptr, 0, 44100.0, 100,
+    *kernel, nullptr, 0, nullptr, 0, 100,
     static_cast<uint32_t>(output.size()), output.data()));
   for (uint32_t i = 0; i < output.size(); ++i)
     ASSERT_NEAR(output[i], static_cast<double>(100 + i), 1e-6);
 
   error.clear();
   auto over_cap = tropical_metal::create(
-    msl, 64, 0, 0, error,
+    msl, 64, 64, 1, 0, 0, error,
     tropical_metal::DispatchKind::SampleThreadgroups,
     std::numeric_limits<uint32_t>::max());
   ASSERT(over_cap == nullptr);
@@ -290,16 +343,17 @@ static void test_cooperative_dispatch_geometry()
 static void test_independent_device_and_render_quanta()
 {
   setenv("TROPICAL_METAL_RENDER_TILE_FRAMES", "512", 1);
-  const std::string msl = msl_kernel(
-    "    output_buffer[s] = float(current_idx);");
   for (const unsigned int device_frames : {128U, 256U, 512U})
   {
+    // The kernel's shape follows the device quantum; the 512-frame render
+    // tile is 4, 2 or 1 dispatches of it.
+    const std::string msl = msl_kernel(
+      "    output_buffer[s] = float(current_idx);", device_frames);
     tropical_runtime_t rt = tropical_runtime_new(device_frames);
     ASSERT(rt != nullptr);
     ASSERT(tropical_runtime_metal_render_tile_frames(rt) == 0);
-    ASSERT(tropical_runtime_load_ir_msl(
-      rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
-      msl.c_str(), msl.size(), MANIFEST, strlen(MANIFEST)));
+    ASSERT(load_msl(rt, jit_const_ir(device_frames, 1), msl,
+                    manifest_for(device_frames)));
     ASSERT(tropical_runtime_metal_render_tile_frames(rt) == 512);
     const double * output = tropical_runtime_output_buffer(rt);
     const unsigned callbacks = 512 / device_frames;
@@ -324,11 +378,8 @@ static void test_metal_slots()
   tropical_runtime_t rt = tropical_runtime_new(buf);
   ASSERT(rt != nullptr);
 
-  const std::string msl = msl_kernel(
-    "    output_buffer[s] = slots[0];");
-  ASSERT(tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
-                                      msl.c_str(), msl.size(),
-                                      MANIFEST, strlen(MANIFEST)));
+  const std::string msl = msl_kernel("    output_buffer[s] = slots[0];", buf);
+  ASSERT(load_msl(rt, jit_const_ir(buf, 1), msl, manifest_for(buf)));
   tropical_runtime_process(rt);
   const double* out = tropical_runtime_output_buffer(rt);
   for (unsigned int i = 0; i < buf; ++i) ASSERT_NEAR(out[i], 0.25, 1e-7);
@@ -356,17 +407,12 @@ static void test_metal_hotswap()
   tropical_runtime_t rt = tropical_runtime_new(buf);
   ASSERT(rt != nullptr);
 
-  const std::string rampA = msl_kernel("    output_buffer[s] = float(current_idx);");
-  ASSERT(tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
-                                      rampA.c_str(), rampA.size(),
-                                      MANIFEST, strlen(MANIFEST)));
+  const std::string rampA = msl_kernel("    output_buffer[s] = float(current_idx);", buf);
+  ASSERT(load_msl(rt, jit_const_ir(buf, 1), rampA, manifest_for(buf)));
   tropical_runtime_process(rt);   // clock now at 32
 
-  const std::string rampB = msl_kernel(
-    "    output_buffer[s] = float(current_idx) * as_type<float>(0x40000000u);"); // ×2
-  ASSERT(tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
-                                      rampB.c_str(), rampB.size(),
-                                      MANIFEST, strlen(MANIFEST)));
+  const std::string rampB = msl_kernel("    output_buffer[s] = float(current_idx) * as_type<float>(0x40000000u);", buf); // ×2
+  ASSERT(load_msl(rt, jit_const_ir(buf, 1), rampB, manifest_for(buf)));
   const double* out = tropical_runtime_output_buffer(rt);
   const uint64_t activation_frames =
     tropical_runtime_metal_worker_capacity_frames(rt);
@@ -392,20 +438,22 @@ static void test_metal_hotswap()
 // exactly as EmitLlvm's Pack does — and the GPU kernel reads it from the
 // packed `coeff_columns` buffer(3) binding.
 
-static const char* STAGED_MANIFEST = R"({"schema":"tropical_plan_6",
-  "config":{"sampleRate":44100},"register_count":0,
-  "array_slot_count":1,"array_slot_sizes":[4],"array_slot_names":["col"],
-  "coeff_array_slots":[0],
-  "instance_functions":[],"sinks":[],"slot_count":2,"slot_defaults":[0.25, 0]})";
+static std::string staged_manifest(unsigned int frames)
+{
+  return kernel_manifest(frames, MANIFEST_PARAMS, 1, R"({"schema":"tropical_plan_6",
+    "config":{"sampleRate":44100},"register_count":0,
+    "array_slot_count":1,"array_slot_sizes":[4],"array_slot_names":["col"],
+    "coeff_array_slots":[0],
+    "instance_functions":[],"sinks":[],"slot_count":2,
+    "slot_names":["param:gain","wire"],"slot_defaults":[0.25, 0]})");
+}
 
-// Stage-0 coefficient kernel (run during control-snapshot publication with
-// buffer_length = 1):
-// arrays[0][k] = slots[0] + k for k = 0..3, stored as bitcast i64 — the
-// same f64-punned view the JIT's Index loads.
+// The Metal pre-pass (`tropical_stage0`, run during control-snapshot
+// publication): arrays[0][k] = slots[0] + k for k = 0..3, stored as bitcast
+// i64 — the same f64-punned view the GPU's column read expects.
 static const char* COEFF_FILL_IR =
-  "define void @kernel(ptr %inputs, ptr %registers, ptr %arrays, "
-  "ptr %array_sizes, ptr %temps, double %sampleRate, i64 %start_sample_index, "
-  "ptr %param_ptrs, ptr %output_buffer, i64 %buffer_length, ptr %slots) {\n"
+  "define void @tropical_stage0(ptr %slots, ptr %arrays, "
+  "ptr %array_sizes, ptr %temps) {\n"
   "entry:\n"
   "  %s0 = load double, ptr %slots, align 8\n"
   "  %a0p = getelementptr inbounds ptr, ptr %arrays, i64 0\n"
@@ -429,25 +477,20 @@ static const char* COEFF_FILL_IR =
   "  ret void\n}\n";
 
 // MSL ABI mirror of EmitMsl's COLUMN-BINDING header (buffer(3)).
-static std::string msl_kernel_columns(const std::string& body)
+static std::string msl_kernel_columns(const std::string& body, unsigned int frames)
 {
   return std::string(
     "#include <metal_stdlib>\n"
     "using namespace metal;\n"
-    "struct TropicalKernelConsts {\n"
-    "    ulong start_sample_index;\n"
-    "    float sample_rate;\n"
-    "    uint  buffer_length;\n"
-    "};\n"
     "kernel void tropical_kernel(\n"
     "    device float*                  output_buffer [[buffer(0)]],\n"
     "    constant float*                slots         [[buffer(1)]],\n"
-    "    constant TropicalKernelConsts& k             [[buffer(2)]],\n"
+    "    constant long*                 tau           [[buffer(2)]],\n"
     "    constant float*                coeff_columns [[buffer(3)]],\n"
     "    uint s [[thread_position_in_grid]])\n"
     "{\n"
-    "    if (s >= k.buffer_length) { return; }\n"
-    "    const long current_idx = long(k.start_sample_index) + long(s);\n")
+    "    if (s >= " + std::to_string(frames) + "u) { return; }\n"
+    "    const long current_idx = tau[s] >> 32;\n")
     + body + "\n}\n";
 }
 
@@ -460,12 +503,9 @@ static void test_metal_columns_live()
   tropical_runtime_t rt = tropical_runtime_new(buf);
   ASSERT(rt != nullptr);
 
-  const std::string msl = msl_kernel_columns(
-    "    output_buffer[s] = coeff_columns[s % 4u];");
-  ASSERT(tropical_runtime_load_ir_staged(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
-                                         msl.c_str(), msl.size(),
-                                         COEFF_FILL_IR, strlen(COEFF_FILL_IR),
-                                         STAGED_MANIFEST, strlen(STAGED_MANIFEST)));
+  const std::string msl = msl_kernel_columns("    output_buffer[s] = coeff_columns[s % 4u];", buf);
+  ASSERT(load_msl(rt, jit_const_ir(buf, 1), msl, staged_manifest(buf),
+                  COEFF_FILL_IR));
   // Load ran the coefficient kernel against the slot default (0.25):
   // column = [0.25, 1.25, 2.25, 3.25].
   tropical_runtime_process(rt);
@@ -496,8 +536,12 @@ static void test_metal_effective_dispatch_epochs()
 {
   constexpr unsigned int buf = 16;
   constexpr double sr = 44100.0;
-  const std::string msl = msl_kernel("    output_buffer[s] = slots[0];");
-  const std::string manifest = R"({"schema":"tropical_plan_6",
+  const std::string msl = msl_kernel("    output_buffer[s] = slots[0];", buf);
+  const std::string manifest = kernel_manifest(buf,
+    {"param:bank.freq", "param:canary.morph#v0", "param:canary.morph#v1",
+     "param:canary.morph#t0", "param:canary.freq", "param:canary.freq#phase",
+     "param:master.velocity", "param:master.tau_base"}, 1,
+    R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":8,
@@ -516,9 +560,9 @@ static void test_metal_effective_dispatch_epochs()
        "companions":["canary.freq#phase"]},
       {"name":"master.velocity","discipline":"velocity",
        "companions":["master.tau_base"]}
-    ]})";
+    ]})");
   tropical_runtime::FlatRuntime rt(buf);
-  ASSERT(rt.load_ir_msl(JIT_CONST_IR, msl, manifest));
+  ASSERT(rt.load(jit_const_ir(buf, 8), msl, "", manifest));
   rt.process();
   for (double sample : rt.outputBuffer) ASSERT_NEAR(sample, 180.0, 1e-5);
 
@@ -590,8 +634,11 @@ static void test_metal_retarget_recomputes_companions()
 {
   constexpr unsigned int buf = 16;
   constexpr double sr = 44100.0;
-  const std::string msl = msl_kernel("    output_buffer[s] = slots[0];");
-  const std::string manifest = R"({"schema":"tropical_plan_6",
+  const std::string msl = msl_kernel("    output_buffer[s] = slots[0];", buf);
+  const std::string manifest = kernel_manifest(buf,
+    {"param:bank.freq", "param:canary.morph#v0", "param:canary.morph#v1",
+     "param:canary.morph#t0"}, 1,
+    R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":4,
@@ -604,9 +651,9 @@ static void test_metal_retarget_recomputes_companions()
        "glide_dur_sec":0.02,
        "companions":["canary.morph#v0","canary.morph#v1",
          "canary.morph#t0"]}
-    ]})";
+    ]})");
   tropical_runtime::FlatRuntime rt(buf);
-  ASSERT(rt.load_ir_msl(JIT_CONST_IR, msl, manifest));
+  ASSERT(rt.load(jit_const_ir(buf, 4), msl, "", manifest));
   rt.process();
 
   const uint64_t provisional =
@@ -654,16 +701,13 @@ static void test_metal_retarget_recomputes_companions()
 static void test_metal_dispatch_failure_fail_closed()
 {
   const unsigned int buf = 16;
-  const std::string msl = msl_kernel(
-    "    output_buffer[s] = slots[0];");
+  const std::string msl = msl_kernel("    output_buffer[s] = slots[0];", buf);
 
   setenv("TROPICAL_METAL_TEST_FAIL_DISPATCH_AT", "2", 1);
   tropical_runtime_t refused = tropical_runtime_new(buf);
   ASSERT(refused != nullptr);
   const bool loaded =
-    tropical_runtime_load_ir_msl(
-      refused, JIT_CONST_IR, strlen(JIT_CONST_IR),
-      msl.c_str(), msl.size(), MANIFEST, strlen(MANIFEST));
+    load_msl(refused, jit_const_ir(buf, 1), msl, manifest_for(buf));
   unsetenv("TROPICAL_METAL_TEST_FAIL_DISPATCH_AT");
   ASSERT(!loaded);
   ASSERT(std::strstr(
@@ -675,9 +719,7 @@ static void test_metal_dispatch_failure_fail_closed()
   setenv("TROPICAL_METAL_TEST_FAIL_DISPATCH_AT", "5", 1);
   tropical_runtime_t rt = tropical_runtime_new(buf);
   ASSERT(rt != nullptr);
-  ASSERT(tropical_runtime_load_ir_msl(
-    rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
-    msl.c_str(), msl.size(), MANIFEST, strlen(MANIFEST)));
+  ASSERT(load_msl(rt, jit_const_ir(buf, 1), msl, manifest_for(buf)));
   unsetenv("TROPICAL_METAL_TEST_FAIL_DISPATCH_AT");
   ASSERT(tropical_runtime_metal_dispatch_failure_count(rt) == 0);
   ASSERT(tropical_runtime_metal_render_starvation_count(rt) == 0);
@@ -715,9 +757,7 @@ static void test_metal_dispatch_failure_fail_closed()
   ASSERT(tropical_runtime_metal_dispatch_failure_count(rt) == 1);
   ASSERT(tropical_runtime_metal_epoch_tag_mismatch_count(rt) == 0);
 
-  ASSERT(tropical_runtime_load_ir_msl(
-    rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
-    msl.c_str(), msl.size(), MANIFEST, strlen(MANIFEST)));
+  ASSERT(load_msl(rt, jit_const_ir(buf, 1), msl, manifest_for(buf)));
   const uint64_t replacement_epoch =
     tropical_runtime_metal_published_activation_epoch(rt);
   const unsigned int recovery_blocks =
@@ -745,10 +785,10 @@ static void test_metal_clock_jump_and_precompiled_swap_stress()
     "    output_buffer[s] = float(current_idx & 4095l) + 0.25f;";
   std::string error;
   auto kernel_a = tropical_metal::create(
-    msl_kernel(body_a), frames, 0, 0, error);
+    msl_kernel(body_a, frames), frames, frames, 1, 0, 0, error);
   ASSERT(kernel_a != nullptr);
   auto kernel_b = tropical_metal::create(
-    msl_kernel(body_b), frames, 0, 0, error);
+    msl_kernel(body_b, frames), frames, frames, 1, 0, 0, error);
   ASSERT(kernel_b != nullptr);
 
   tropical_runtime::EpochTileQueue queue(frames, frames);
@@ -837,9 +877,12 @@ static void test_metal_control_transition_stress()
   constexpr unsigned int frames = 512;
   constexpr uint64_t transitions = 10000;
   constexpr double sr = 44100.0;
-  const std::string msl = msl_kernel(
-    "    output_buffer[s] = slots[0];");
-  const std::string manifest = R"({"schema":"tropical_plan_6",
+  const std::string msl = msl_kernel("    output_buffer[s] = slots[0];", frames);
+  const std::string manifest = kernel_manifest(frames,
+    {"param:bank.freq", "param:canary.morph#v0", "param:canary.morph#v1",
+     "param:canary.morph#t0", "param:canary.freq", "param:canary.freq#phase",
+     "param:master.velocity", "param:master.tau_base"}, 1,
+    R"({"schema":"tropical_plan_6",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":8,
@@ -858,12 +901,12 @@ static void test_metal_control_transition_stress()
        "companions":["canary.freq#phase"]},
       {"name":"master.velocity","discipline":"velocity",
        "companions":["master.tau_base"]}
-    ]})";
+    ]})");
   tropical_runtime::FlatRuntime rt(frames);
-  ASSERT(rt.load_ir_msl(JIT_CONST_IR, msl, manifest));
+  ASSERT(rt.load(jit_slot0_ir(frames, 8), msl, "", manifest));
   rt.process();
   tropical_runtime::FlatRuntime jit_reference(frames);
-  ASSERT(jit_reference.load_ir(JIT_SLOT0_IR, manifest));
+  ASSERT(jit_reference.load(jit_slot0_ir(frames, 8), "", "", manifest));
 
   std::array<std::jthread, 2> contention{
     std::jthread([](std::stop_token stop) {
@@ -1009,10 +1052,8 @@ static void test_metal_set_index()
   tropical_runtime_t rt = tropical_runtime_new(buf);
   ASSERT(rt != nullptr);
 
-  const std::string msl = msl_kernel("    output_buffer[s] = float(current_idx);");
-  ASSERT(tropical_runtime_load_ir_msl(rt, JIT_CONST_IR, strlen(JIT_CONST_IR),
-                                      msl.c_str(), msl.size(),
-                                      MANIFEST, strlen(MANIFEST)));
+  const std::string msl = msl_kernel("    output_buffer[s] = float(current_idx);", buf);
+  ASSERT(load_msl(rt, jit_const_ir(buf, 1), msl, manifest_for(buf)));
   tropical_runtime_set_sample_index(rt, 1000000);
   tropical_runtime_process(rt);
   const double* out = tropical_runtime_output_buffer(rt);

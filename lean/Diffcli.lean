@@ -293,14 +293,17 @@ private def compileToFlatPlan (patch : String) (fixtures : Bool := false) :
   | .ok p => pure (.ok p)
   | .error f => pure (.error f.toJson.compress)
 
-/-- `diffcli emit-ir <patch.json>` → the Lean-emitted LLVM IR on stdout. -/
+/-- `diffcli emit-ir <patch.json> [--frames N]` → the Lean-emitted LLVM IR
+    on stdout: the port kernel for `N` frames per call (default 512), with
+    the stage-0 prologue inside. -/
 def emitIrVerb (args : List String) : IO UInt32 := do
   let some patch := args.find? (fun a => !a.startsWith "--")
-    | IO.eprintln "usage: diffcli emit-ir <patch.json>"; return 1
+    | IO.eprintln "usage: diffcli emit-ir <patch.json> [--frames N]"; return 1
+  let frames := parseNatFlag args "--frames" Tropical.Artifact.defaultFrames
   match ← compileToFlatPlan patch with
   | .error e => IO.eprintln e; return 1
   | .ok plan =>
-    match Tropical.Ir.EmitLlvm.emitKernel plan with
+    match Tropical.Ir.EmitLlvm.emitKernel (← Tropical.Artifact.split plan) frames with
     | .error e => IO.eprintln s!"emitKernel: {e}"; return 1
     | .ok ir => IO.println ir; return 0
 
@@ -310,32 +313,50 @@ def emitIrVerb (args : List String) : IO UInt32 := do
     `diffcli emit-msl p.json | xcrun -sdk macosx metal -x metal -c -o /dev/null -`. -/
 def emitMslVerb (args : List String) : IO UInt32 := do
   let some patch := args.find? (fun a => !a.startsWith "--")
-    | IO.eprintln "usage: diffcli emit-msl <patch.json>"; return 1
+    | IO.eprintln "usage: diffcli emit-msl <patch.json> [--frames N]"; return 1
+  let frames := parseNatFlag args "--frames" Tropical.Artifact.defaultFrames
   match ← compileToFlatPlan patch with
   | .error e => IO.eprintln e; return 1
   | .ok plan =>
-    match Tropical.Ir.EmitMsl.emitKernel plan with
+    match Tropical.Ir.EmitMsl.emitKernel plan frames with
     | .error e => IO.eprintln s!"emitKernel (msl): {e}"; return 1
     | .ok msl => IO.println msl; return 0
 
-/-- `diffcli compile-wasm <patch.json> --out <out.wasm>` → a complete wasm32
-    module, emitted in-process (Lean IR → libtropical_wasm's LLVM+lld, no subprocess). The
-    plan_6 JSON from `diffcli compile` serves as the browser-side manifest. -/
+/-- `diffcli compile-wasm <patch.json> --out <out.wasm> [--frames N]` → a
+    complete wasm32 module of the port kernel for `N` frames per call
+    (default 128, the worklet quantum), emitted in-process (Lean IR →
+    libtropical_wasm's LLVM+lld, no subprocess). `compile-kernel` prints the
+    matching `tropical_kernel_1` manifest. -/
 def compileWasmVerb (args : List String) : IO UInt32 := do
   let some patch := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
-    | IO.eprintln "usage: diffcli compile-wasm <patch.json> --out <out.wasm> [--fixtures]"; return 1
+    | IO.eprintln "usage: diffcli compile-wasm <patch.json> --out <out.wasm> [--frames N] [--fixtures]"; return 1
   let some outPath := parseStrFlag args "--out"
     | IO.eprintln "compile-wasm: --out <path> required"; return 1
+  let frames := parseNatFlag args "--frames" 128
   match ← compileToFlatPlan patch (fixtures := args.contains "--fixtures") with
   | .error e => IO.eprintln e; return 1
   | .ok plan =>
-    match Tropical.Ir.EmitLlvm.emitKernel plan with
+    match Tropical.Ir.EmitLlvm.emitKernel { audio := plan, coeff? := none } frames with
     | .error e => IO.eprintln s!"emitKernel: {e}"; return 1
     | .ok ir =>
       let wasm ← Tropical.Toolchain.Wasm.compileIr ir
       IO.FS.writeBinFile (System.FilePath.mk outPath) wasm
       IO.eprintln s!"compile-wasm: wrote {wasm.size} bytes → {outPath}"
       return 0
+
+/-- `diffcli compile-kernel <patch.json> [--frames N] [--fixtures]` → the
+    `tropical_kernel_1` manifest of the patch for `N` frames per call
+    (default 128), on stdout. The browser-side manifest. -/
+def compileKernelVerb (args : List String) : IO UInt32 := do
+  let some patch := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
+    | IO.eprintln "usage: diffcli compile-kernel <patch.json> [--frames N] [--fixtures]"; return 1
+  let frames := parseNatFlag args "--frames" 128
+  match ← compileToFlatPlan patch (fixtures := args.contains "--fixtures") with
+  | .error e => IO.eprintln e; return 1
+  | .ok plan =>
+    match Tropical.Kernel.manifest plan frames with
+    | .error e => IO.eprintln s!"compile-kernel: {e}"; return 1
+    | .ok manifest => IO.println manifest; return 0
 
 def main (args : List String) : IO UInt32 := do
   match args with
@@ -346,7 +367,8 @@ def main (args : List String) : IO UInt32 := do
   | "emit-ir" :: rest => emitIrVerb rest
   | "emit-msl" :: rest => emitMslVerb rest
   | "compile-wasm" :: rest => compileWasmVerb rest
+  | "compile-kernel" :: rest => compileKernelVerb rest
   | "compile" :: rest => compileVerb rest
   | _ =>
-    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]\n       diffcli render-metal <plan.json>\n       diffcli render-graph <graph.json>\n       diffcli emit-ir <patch.json>\n       diffcli emit-msl <patch.json>\n       diffcli compile <patch.json> [--mode=M]\n       diffcli compile-wasm <patch.json> --out <out.wasm>"
+    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]\n       diffcli render-metal <plan.json>\n       diffcli render-graph <graph.json>\n       diffcli emit-ir <patch.json>\n       diffcli emit-msl <patch.json>\n       diffcli compile <patch.json> [--mode=M]\n       diffcli compile-wasm <patch.json> --out <out.wasm> [--frames N]\n       diffcli compile-kernel <patch.json> [--frames N]"
     return 1

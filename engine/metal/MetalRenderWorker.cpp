@@ -85,7 +85,7 @@ MetalRenderWorker::MetalRenderWorker(
             static_cast<uint32_t>(request.slots.size()),
             request.columns.data(),
             static_cast<uint32_t>(request.columns.size()),
-            request.sample_rate, source_start, frames, destination);
+            source_start, frames, destination);
     };
   }
 }

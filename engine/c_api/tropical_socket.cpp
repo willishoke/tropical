@@ -332,7 +332,7 @@ std::string SocketServer::handle_data(const std::string & line)
       }
       if (render.status == tropical_runtime::RenderWindowStatus::Unsupported)
         return json{{"jsonrpc", "2.0"}, {"id", id},
-                    {"error", {{"code", -32603}, {"message", "render_window: active kernel is not fused"}}}}.dump();
+                    {"error", {{"code", -32603}, {"message", "render_window: no observation kernel is loaded"}}}}.dump();
       if (render.status != tropical_runtime::RenderWindowStatus::Rendered)
         return json{{"jsonrpc", "2.0"}, {"id", id},
                     {"error", {{"code", -32602}, {"message", "render_window: invalid render request"}}}}.dump();

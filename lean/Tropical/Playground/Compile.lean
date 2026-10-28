@@ -85,13 +85,15 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
   let input := Tropical.Compile.SessionInput.forRoot core coreArena
     (params := paramTable.map (fun (nm, v) => (nm, Json.num v)))
     (alloc := Tropical.Lowering.allocate (paramTable.map (·.1)) #[])
+    (extraOutputs := successfulTapIds.map fun id => s!"tap:{id}")
   let (plan, stageBlocks) ← Tropical.Compile.compileSessionStaged input
   -- The host-contract dispatch table rides the manifest: any runtime host
   -- (C++ today, Swift/Metal or wasm tomorrow) reads per-slot disciplines from
   -- the plan itself and dispatches param writes locally.
   let plan := { plan with paramDisciplines := paramDisciplinesOf (rawsOf j) }
-  -- The final mix (`out`) plus one tap per user node, all routed to the synthetic
-  -- root's output slots (`__root__.<port>`), ready for `render_window`.
+  -- The final mix (`out`) plus one tap per user node, each an output channel
+  -- of this artifact named by its root slot (`__root__.<port>`); the scope
+  -- resolves a tap's slot name to its channel through the kernel manifest.
   let root := Tropical.Compile.rootInstancePath
   let taps : Array Tap := #[{
       name := "out"

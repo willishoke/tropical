@@ -168,9 +168,6 @@ struct ParsedPlan6
   double                                   sample_rate = 44100.0;
   uint32_t                                 output_channel_count = 1;
 
-  // Engine realization strategy. Canonical fused plans omit the field.
-  tropical_jit::CompilationMode compilation_mode = tropical_jit::CompilationMode::Fused;
-
   // Inter-module slot array.
   uint32_t                 slot_count = 0;
   std::vector<std::string> slot_names;
@@ -198,16 +195,15 @@ struct ParsedPlan6
   uint32_t metal_threadgroup_scratch_bytes = 0;
 };
 
-// Parse the optional `compilation_mode` JSON string. Fails closed on
-// unknown values — mirrors parseCompilationMode in compiler/flat_plan.ts.
-inline tropical_jit::CompilationMode parse_compilation_mode(const nlohmann::json & plan)
+// `fused` is the only realization a host accepts (design/typed-kernel.md);
+// the canonical plan omits the field.
+inline void require_fused_realization(const nlohmann::json & plan)
 {
-  if (!plan.contains("compilation_mode")) return tropical_jit::CompilationMode::Fused;
+  if (!plan.contains("compilation_mode")) return;
   const std::string s = plan["compilation_mode"].get<std::string>();
-  if (s == "fused")             return tropical_jit::CompilationMode::Fused;
-  if (s == "microkernel")       return tropical_jit::CompilationMode::Microkernel;
-  if (s == "microkernel-deep")  return tropical_jit::CompilationMode::MicrokernelDeep;
-  throw std::runtime_error("NumericProgramParser: unknown compilation_mode '" + s + "'");
+  if (s == "fused") return;
+  throw std::runtime_error(
+    "NumericProgramParser: realization '" + s + "' is not a host-visible mode (fused only)");
 }
 
 inline void reject_retired_fields(const nlohmann::json & plan)
@@ -351,7 +347,7 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
   result.sample_rate = plan.value("config", nlohmann::json::object())
                            .value("sampleRate", 44100.0);
 
-  result.compilation_mode = parse_compilation_mode(plan);
+  require_fused_realization(plan);
 
   if (plan.contains("array_slot_names"))
     for (const auto & n : plan["array_slot_names"])
@@ -479,6 +475,90 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
     for (const auto & s : plan["coeff_array_slots"])
       result.coeff_array_slots.push_back(s.get<uint32_t>());
 
+  return result;
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// tropical_kernel_1 — the port manifest (design/typed-kernel.md)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// What a host reads from a kernel manifest: the frame count the kernel was
+// compiled for, its rate, the input names in port order (`tau` first, then
+// the params), the output's channel names, and the nested plan whose slot
+// table, defaults, disciplines and array metadata the host still uses to
+// hold controls and (for Metal) run the pre-pass.
+struct ParsedKernel1
+{
+  uint32_t frames = 0;
+  double rate = 44100.0;
+  uint32_t output_channel_count = 1;
+  std::vector<std::string> input_names;      // [0] = "tau"
+  std::vector<std::string> output_channels;  // one name per channel ("" = silent)
+  ParsedPlan6 plan;
+};
+
+inline ParsedKernel1 parse_kernel1(const nlohmann::json & manifest)
+{
+  ParsedKernel1 result;
+  const std::string schema = manifest.value("schema", std::string{});
+  if (schema != "tropical_kernel_1")
+    throw std::runtime_error(
+      "NumericProgramParser: unsupported manifest schema '" + schema +
+      "'; expected 'tropical_kernel_1'");
+  if (!manifest.contains("plan"))
+    throw std::runtime_error("NumericProgramParser: kernel manifest has no plan");
+  const std::string plan_schema =
+    manifest.at("plan").value("schema", std::string{});
+  if (plan_schema != "tropical_plan_6")
+    throw std::runtime_error(
+      "NumericProgramParser: unsupported manifest schema '" + plan_schema +
+      "'; expected 'tropical_plan_6'");
+  result.plan = parse_plan6(manifest.at("plan"));
+  result.rate = manifest.value("rate", result.plan.sample_rate);
+
+  const auto & inputs = manifest.at("inputs");
+  if (!inputs.is_array() || inputs.empty())
+    throw std::runtime_error("NumericProgramParser: kernel manifest declares no inputs");
+  for (const auto & port : inputs)
+    result.input_names.push_back(port.at("name").get<std::string>());
+  const auto & tau = inputs.at(0);
+  if (result.input_names[0] != "tau" || tau.value("elem", std::string{}) != "i64q32"
+      || !tau.contains("shape") || tau.at("shape").size() != 1)
+    throw std::runtime_error(
+      "NumericProgramParser: kernel manifest's first input must be tau:i64q32[frames]");
+  result.frames = tau.at("shape").at(0).get<uint32_t>();
+  if (result.frames == 0)
+    throw std::runtime_error("NumericProgramParser: kernel frames must be positive");
+  for (std::size_t i = 1; i < inputs.size(); ++i)
+  {
+    const auto & port = inputs.at(i);
+    if (port.value("elem", std::string{}) != "f64" || !port.contains("shape")
+        || !port.at("shape").empty() || port.value("role", std::string{}) != "param")
+      throw std::runtime_error(
+        "NumericProgramParser: kernel input '" + result.input_names[i]
+        + "' is not a scalar f64 param (this host binds params only)");
+  }
+
+  const auto & outputs = manifest.at("outputs");
+  if (!outputs.is_array() || outputs.size() != 1)
+    throw std::runtime_error("NumericProgramParser: kernel manifest must declare one output");
+  const auto & out = outputs.at(0);
+  if (out.value("elem", std::string{}) != "f64" || !out.contains("shape")
+      || out.at("shape").size() != 2
+      || out.at("shape").at(0).get<uint32_t>() != result.frames)
+    throw std::runtime_error(
+      "NumericProgramParser: kernel output must be f64[frames, channels]");
+  result.output_channel_count = out.at("shape").at(1).get<uint32_t>();
+  if (result.output_channel_count == 0
+      || result.output_channel_count > tropical_jit::kMaxOutputChannels)
+    throw std::runtime_error("NumericProgramParser: kernel output channel count out of range");
+  if (result.output_channel_count != result.plan.output_channel_count)
+    throw std::runtime_error(
+      "NumericProgramParser: kernel output width disagrees with the nested plan");
+  if (out.contains("channels"))
+    for (const auto & name : out.at("channels"))
+      result.output_channels.push_back(name.get<std::string>());
+  result.output_channels.resize(result.output_channel_count);
   return result;
 }
 
