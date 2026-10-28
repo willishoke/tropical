@@ -5,6 +5,7 @@ import Tropical.Testing.Semantics
 import Tropical.Tropicaltest.Exact
 import Tropical.Tropicaltest.Oriented
 import Tropical.Tropicaltest.Block
+import Tropical.Tropicaltest.KernelType
 
 /-!
 # tropicaltest-core — the gates that need no runtime
@@ -41,7 +42,9 @@ def sections : List (String × List (IO Bool)) := [
   ("oriented modal convolution (local room direction):", [
     Tropical.Tropicaltest.Oriented.runOriented]),
   ("block carrier (divided-difference Leibniz over the factor tree):", [
-    Tropical.Tropicaltest.Block.runBlockAlgebra])]
+    Tropical.Tropicaltest.Block.runBlockAlgebra]),
+  ("typed kernel (the port: tau/params/out, tropical_kernel_1 round trip):", [
+    Tropical.Tropicaltest.KernelType.runKernelType])]
 
 def main (_ : List String) : IO UInt32 := do
   let mut failed := 0

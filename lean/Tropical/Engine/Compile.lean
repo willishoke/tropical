@@ -45,7 +45,14 @@ private def buildLoadArtifacts (plan : Tropical.Plan.FlatPlan)
     let coefficientIr ← match Tropical.Artifact.coeffIr split with
       | .error msg => internalError s!"EmitLlvm (coeff): {msg}"
       | .ok s => pure s
-    pure { ir, coefficientIr, manifest }
+    -- The typed-kernel manifest rides along unconsumed (slice T1); the
+    -- engine does not yet know the host's buffer length, so the type is
+    -- derived for the runtime's device default until T3 threads it.
+    let kernel ← match Tropical.Kernel.manifest split.audio
+        Tropical.Artifact.defaultFrames with
+      | .error msg => internalError s!"Kernel.manifest: {msg}"
+      | .ok s => pure s
+    pure { ir, coefficientIr, manifest, kernel }
 
 /-- Emit the plan's kernel artifacts and load them into the runtime: the
     stage-0 split first (Stage0.hoist, gated by `TROPICAL_STAGE0`), then

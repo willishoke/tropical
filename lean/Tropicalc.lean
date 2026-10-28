@@ -4,13 +4,15 @@ import Tropical.Artifact
 /-!
 # tropicalc — the compiler, with no runtime
 
-    tropicalc <patch.json> --out=<dir> [--metal] [--mode=M]
+    tropicalc <patch.json> --out=<dir> [--metal] [--mode=M] [--frames=N]
     tropicalc <patch.json> --emit=plan [--mode=M]
 
 Boots the stdlib registry as a value, compiles the patch through the same
 `Tropical.Session` path the engine runs (`compilePatch`: normalize, load,
 lift, resolved root, partition), and writes the kernel artifact: `audio.ll`,
-`coeff.ll`, `manifest.json`, plus `audio.metal` with `--metal`. `--emit=plan` prints the plan's wire JSON instead, byte-identical
+`coeff.ll`, `manifest.json`, `kernel.json` (the `tropical_kernel_1` type of
+the plan for `--frames` samples per call, default 512), plus `audio.metal`
+with `--metal`. `--emit=plan` prints the plan's wire JSON instead, byte-identical
 to `diffcli compile` (tools/check_artifact_parity.py holds that gate).
 
 This binary links nothing from libtropical, and tools/check_layers.py keeps
@@ -23,7 +25,7 @@ def parseStrFlag (args : List String) (flag : String) : Option String :=
     if a.startsWith (flag ++ "=") then some (a.drop (flag.length + 1)).toString else none
 
 def usage : String :=
-  "usage: tropicalc <patch.json> (--out=<dir> [--metal] | --emit=plan) " ++
+  "usage: tropicalc <patch.json> (--out=<dir> [--metal] [--frames=N] | --emit=plan) " ++
   "[--mode=fused|microkernel|microkernel-deep]"
 
 def main (args : List String) : IO UInt32 := do
@@ -51,9 +53,21 @@ def main (args : List String) : IO UInt32 := do
     let some out := parseStrFlag args "--out"
       | IO.eprintln usage; return 1
     let metal := args.contains "--metal"
+    let frames : Nat ← match parseStrFlag args "--frames" with
+      | none => pure Tropical.Artifact.defaultFrames
+      | some text =>
+        match text.toNat? with
+        | some n =>
+          if n > 0 then pure n
+          else
+            IO.eprintln "tropicalc: --frames must be positive"
+            return 1
+        | none =>
+          IO.eprintln s!"tropicalc: bad --frames '{text}'"
+          return 1
     let split ← Tropical.Artifact.splitTyped plan stageBlocks
-    let emitted := if metal then Tropical.Artifact.emitMetal split
-                   else Tropical.Artifact.emitJit split
+    let emitted := if metal then Tropical.Artifact.emitMetal split frames
+                   else Tropical.Artifact.emitJit split frames
     let artifact ← match emitted with
       | .error e => IO.eprintln s!"tropicalc: emit: {e}"; return 1
       | .ok a => pure a
@@ -62,6 +76,7 @@ def main (args : List String) : IO UInt32 := do
     IO.FS.writeFile (dir / "audio.ll") artifact.ir
     IO.FS.writeFile (dir / "coeff.ll") artifact.coefficientIr
     IO.FS.writeFile (dir / "manifest.json") artifact.manifest
+    IO.FS.writeFile (dir / "kernel.json") artifact.kernel
     if metal then
       IO.FS.writeFile (dir / "audio.metal") artifact.msl
     return 0

@@ -39,6 +39,7 @@ globs = [
   "Tropical.Expr",
   "Tropical.HostPort",
   "Tropical.Ir.+",
+  "Tropical.Kernel",
   "Tropical.Lowering",
   "Tropical.Parse.+",
   "Tropical.Plan",
