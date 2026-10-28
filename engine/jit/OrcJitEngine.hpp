@@ -188,8 +188,6 @@ enum class SourceKind : uint8_t
 {
   Tick,  // current sample index (integer)
   Rate,  // current sample rate (float)
-  TilePhase, // exact/JIT value is zero; Metal supplies dispatch-local phase
-  TileTick, // materializer-only absolute clock; exact value equals Tick
 };
 
 struct Source

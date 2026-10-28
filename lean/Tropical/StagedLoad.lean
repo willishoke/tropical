@@ -31,15 +31,8 @@ private def dumpMetalParts (parts : KernelArtifact) : IO Unit := do
   if let some dir ← IO.getEnv "TROPICAL_STAGE0_DUMP" then
     IO.FS.writeFile s!"{dir}/audio.ll" parts.ir
     IO.FS.writeFile s!"{dir}/coeff.ll" parts.coefficientIr
-    IO.FS.writeFile s!"{dir}/tile.ll" parts.tileIr
     IO.FS.writeFile s!"{dir}/manifest.json" parts.manifest
     IO.FS.writeFile s!"{dir}/audio.metal" parts.msl
-
-private def dumpExactParts (parts : KernelArtifact) : IO Unit := do
-  if let some dir ← IO.getEnv "TROPICAL_STAGE0_DUMP" then
-    IO.FS.writeFile s!"{dir}/exact.ll" parts.ir
-    IO.FS.writeFile s!"{dir}/exact_coeff.ll" parts.coefficientIr
-    IO.FS.writeFile s!"{dir}/exact_manifest.json" parts.manifest
 
 /-- Split + emit + load, JIT-only. -/
 def load (rt : Tropical.Ffi.Runtime) (plan : FlatPlan) : IO Unit := do
@@ -59,18 +52,7 @@ def loadMsl (rt : Tropical.Ffi.Runtime) (plan : FlatPlan) : IO Unit := do
   | .error e => throw <| IO.userError s!"StagedLoad (msl): {e}"
   | .ok parts =>
     dumpMetalParts parts
-    if parts.tileIr.isEmpty then
-      rt.loadIrTimeStaged parts.ir parts.msl parts.coefficientIr
-        parts.tileIr parts.manifest
-    else
-      let exact ← match emitJit s with
-        | .error e => throw <| IO.userError s!"StagedLoad (exact): {e}"
-        | .ok value => pure value
-      dumpExactParts exact
-      let _ ← rt.loadIrTimeStagedWithObservationGeneration
-        parts.ir parts.msl parts.coefficientIr parts.tileIr parts.manifest
-        exact.ir exact.coefficientIr exact.manifest
-      pure ()
+    rt.loadIrStaged parts.ir parts.msl parts.coefficientIr parts.manifest
 
 /-- Typed split + emit + load, JIT-only. -/
 def loadTyped (rt : Tropical.Ffi.Runtime) (plan : FlatPlan)
@@ -95,17 +77,6 @@ def loadMslTyped (rt : Tropical.Ffi.Runtime) (plan : FlatPlan)
   | .error e => throw <| IO.userError s!"StagedLoad (msl): {e}"
   | .ok parts =>
     dumpMetalParts parts
-    if parts.tileIr.isEmpty then
-      rt.loadIrTimeStaged parts.ir parts.msl parts.coefficientIr
-        parts.tileIr parts.manifest
-    else
-      let exact ← match emitJit s with
-        | .error e => throw <| IO.userError s!"StagedLoad (exact): {e}"
-        | .ok value => pure value
-      dumpExactParts exact
-      let _ ← rt.loadIrTimeStagedWithObservationGeneration
-        parts.ir parts.msl parts.coefficientIr parts.tileIr parts.manifest
-        exact.ir exact.coefficientIr exact.manifest
-      pure ()
+    rt.loadIrStaged parts.ir parts.msl parts.coefficientIr parts.manifest
 
 end Tropical.StagedLoad

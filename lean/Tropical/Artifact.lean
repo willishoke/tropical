@@ -1,5 +1,4 @@
 import Tropical.Ir.Stage0
-import Tropical.Ir.TileStage
 import Tropical.Ir.EmitLlvm
 import Tropical.Ir.EmitMsl
 
@@ -22,11 +21,10 @@ open Tropical.Plan (FlatPlan)
 open Tropical.Ir.Stage0 (Split hoist)
 
 /-- One loadable kernel image. Empty strings mean "absent": no coefficient
-    kernel (nothing hoisted), no tile kernel, no MSL (JIT-only). -/
+    kernel (nothing hoisted), no MSL (JIT-only). -/
 structure KernelArtifact where
   ir : String
   coefficientIr : String
-  tileIr : String := ""
   msl : String := ""
   manifest : String
 
@@ -69,21 +67,16 @@ def emitJit (s : Split) : Except String KernelArtifact := do
     coefficientIr := cir
     manifest := manifestJson.compress }
 
-/-- Apply the distinct tile-time split after Stage0 and emit all Metal-side
-    artifacts.  JIT-only callers never enter this function. -/
+/-- The dual artifact: the JIT kernels plus the MSL realization of the same
+    audio plan.  JIT-only callers never enter this function. -/
 def emitMetal (s : Split) : Except String KernelArtifact := do
-  let tile ← Tropical.Ir.TileStage.split s.audio
-  let manifestJson ← tile.audio.toWire
-  let ir ← Tropical.Ir.EmitLlvm.emitKernel tile.audio
+  let manifestJson ← s.audio.toWire
+  let ir ← Tropical.Ir.EmitLlvm.emitKernel s.audio
   let coefficientIr ← coeffIr s
-  let tileIr ← match tile.tile? with
-    | none => pure ""
-    | some plan => Tropical.Ir.EmitLlvm.emitKernel plan
-  let msl ← Tropical.Ir.EmitMsl.emitKernel tile.audio
+  let msl ← Tropical.Ir.EmitMsl.emitKernel s.audio
   return {
     ir := ir
     coefficientIr := coefficientIr
-    tileIr := tileIr
     manifest := manifestJson.compress
     msl := msl }
 

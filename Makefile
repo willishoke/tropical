@@ -38,7 +38,7 @@ run: repl
 lean:
 	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake env leanc -c ffi/shim.c -o ffi/shim.o -I ../engine/c_api
 	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake env leanc -c ffi/shim_wasm.c -o ffi/shim_wasm.o -I ../engine/toolchain
-	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build frontend diffcli tropicaltest trustreport phasercheck tropicalc tropicaltest-core
+	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build frontend diffcli tropicaltest trustreport tropicalc tropicaltest-core
 
 # Launch the Lean MCP server. As of Phase 6 the whole stack is the one
 # binary (session, compiler, runtime FFI) — no bun subprocess.
@@ -56,7 +56,7 @@ clean:
 # libLLVM with Lean's, and any binary carrying the lld wasm emitter (diffcli,
 # via libtropical_wasm) then dies at load. See CLAUDE.md "Test".
 validate: build lean
-	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build diffcli tropicaltest trustreport phasercheck tropicalc tropicaltest-core
+	cd lean && PATH="$$HOME/.elan/bin:$$PATH" lake build diffcli tropicaltest trustreport tropicalc tropicaltest-core
 	$(PYTHON) tools/audit_trust_sites.py
 	$(PYTHON) tools/check_layers.py
 	$(PYTHON) tools/check_artifact_parity.py

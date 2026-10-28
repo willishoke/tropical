@@ -383,14 +383,10 @@ private def translatedInputs (node : Json)
 def elaboratePatchHierarchy (document : Json) : Except String Json := do
   let originalVersion? := (field? document "version").bind nat?
   let legacyNodes := arrField document "nodes"
-  let isBenchmarkPhaser := fun node =>
-    strField? node "kind" == some "phaser"
-      && ((field? node "params").bind (field? · "_benchmark_stages")).isSome
   let document := if originalVersion? != some 3 &&
-      legacyNodes.any (fun node =>
-        strField? node "kind" == some "phaser" && !isBenchmarkPhaser node) then
+      legacyNodes.any (fun node => strField? node "kind" == some "phaser") then
     let migratedNodes := legacyNodes.map fun node =>
-      if strField? node "kind" == some "phaser" && !isBenchmarkPhaser node then
+      if strField? node "kind" == some "phaser" then
         jsonSet
           (jsonSet
             (jsonSet node "kind" (.str "module"))

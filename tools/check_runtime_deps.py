@@ -21,10 +21,8 @@ BIN = ROOT / "lean" / ".lake" / "build" / "bin"
 DARWIN = sys.platform == "darwin"
 
 # Lean binaries that link the runtime but must not link the toolchain.
-# phasercheck is built by `make lean` but not by CI, so it is checked only
-# when present.
 RUNTIME_BINARIES = ["frontend", "tropicaltest"]
-OPTIONAL_BINARIES = ["phasercheck"]
+OPTIONAL_BINARIES = []
 
 
 def run(*cmd: str) -> str:

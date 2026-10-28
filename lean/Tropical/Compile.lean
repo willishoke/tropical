@@ -1,6 +1,5 @@
 import Tropical.Lowering
 import Tropical.Ir.CompileResolved
-import Tropical.Ir.TileTime
 import Tropical.Plan
 
 /-!
@@ -372,7 +371,6 @@ structure PartitionResult where
   accumulators : Accumulators
   stageBlocks : Array (Array (Option Tropical.Ir.Stage))
   outputStages : Array Tropical.Ir.Stage
-  tileArraySlots : Array Nat := #[]
 
 private def instParts : CoreBodyDecl → Option (String × String)
   | .inst name typeKey _ => some (name, typeKey)
@@ -409,7 +407,6 @@ def partitionKernel (instancePath : String) (prog : CoreProgram)
   let mut children : Array InstanceFunction := #[]
   let mut childStageBlocks : Array (Array (Array (Option Tropical.Ir.Stage))) := #[]
   let mut childOutStages : Array (Array Tropical.Ir.Stage) := #[]
-  let mut childTileArraySlots : Array Nat := #[]
   let mut nestedOutputSlots : Array (Nat × Array (Nat × Nat)) := #[]
   let mut nestedInputSlots : Array (Nat × Array (Nat × Nat)) := #[]
   let mut nestedOutputArraySlots : Array (Nat × Array (Nat × ArraySlotInfo)) := #[]
@@ -481,7 +478,6 @@ def partitionKernel (instancePath : String) (prog : CoreProgram)
     children := children.push child.instanceFunction
     childStageBlocks := childStageBlocks.push child.stageBlocks
     childOutStages := childOutStages.push child.outputStages
-    childTileArraySlots := childTileArraySlots ++ child.tileArraySlots
 
   -- ── 2. Compile this kernel's body. ──
   let ctx : Context := {
@@ -552,15 +548,12 @@ def partitionKernel (instancePath : String) (prog : CoreProgram)
     nextRegRaw := acc.nextRegRaw + plan.registerCount
     nextArrayRaw := acc.nextArrayRaw + plan.arraySlotCount }
 
-  let tileArraySlots := childTileArraySlots ++ plan.tileArraySlots.map (arrayOffset + ·)
-
   return {
     instanceFunction := fn
     allocation := s
     accumulators := acc
     stageBlocks
-    outputStages := outStages
-    tileArraySlots }
+    outputStages := outStages }
 termination_by sizeOf prog
 decreasing_by exact declTypeS.2
 
@@ -731,21 +724,7 @@ def compileSessionStaged (input : SessionInput) :
     outputChannelCount
     slotCount
     slotNames
-    slotDefaults
-    tileArraySlots := partition.tileArraySlots
-    sources := if partition.tileArraySlots.isEmpty then Tropical.Plan.defaultSources
-      else Tropical.Plan.tileSources
-    tileIntervalFrames := if partition.tileArraySlots.isEmpty then 0
-      else Tropical.Ir.phaserTimeStagingInterval
-    phaserTimeStaging := if partition.tileArraySlots.isEmpty then
-        if Tropical.Ir.phaserTimeStagingEnabled then
-          some "staged_phaser_fallback:no_admissible_terminal"
-        else none
-      else if Tropical.Ir.phaserTimeStagingHigherOrderEnabled then
-        some "staged_phaser_admitted:higher_order_experiment"
-      else if Tropical.Ir.phaserTimeStagingMixedDDEnabled then
-        some "staged_phaser_admitted:mixed_dd_experiment"
-      else some "staged_phaser_admitted" }, partition.stageBlocks)
+    slotDefaults }, partition.stageBlocks)
 
 def compileSession (input : SessionInput) : Except String Tropical.Plan.FlatPlan :=
   (compileSessionStaged input).map (·.1)

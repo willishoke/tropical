@@ -199,13 +199,8 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
     let sweep ← modalControl "sweep"
     let rate ← modalControl "rate"
     let mix ← modalControl "mix"
-    let requestedStages :=
-      (Tropical.Playground.Metadata.jInt params "_benchmark_stages" 0).toNat
-    let ratios := if Tropical.Ir.phaserTimeStagingEnabled
-        && requestedStages ≥ 2 && requestedStages ≤ 18 then
-      modalPhaserBenchmarkRatios requestedStages
-    else modalPhaserRatios
-    let (node, topology) := modalPhaserTopology id modalInput center sweep rate mix ratios
+    let (node, topology) :=
+      modalPhaserTopology id modalInput center sweep rate mix modalPhaserRatios
     pure (node, modalFanIn ++ topology)
   | "modal_allpass_tail" =>
     let center ← modalControl "center"

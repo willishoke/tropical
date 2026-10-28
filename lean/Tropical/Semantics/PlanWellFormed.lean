@@ -32,8 +32,8 @@ private def operandScalarType? : NOperand → Option ScalarType
   | .arrayReg _ | .sessionArrayReg _ => none
 
 private def sourceType : SourceKind → ScalarType
-  | .tick | .tileTick => .int
-  | .rate | .tilePhase => .float
+  | .tick => .int
+  | .rate => .float
 
 private def operandWellFormed (plan : FlatPlan) (frames : List RegionFrame) :
     NOperand → Bool
@@ -318,9 +318,6 @@ decreasing_by
 private def indicesUniqueAndInRange (limit : Nat) (indices : Array Nat) : Bool :=
   indices.all (· < limit) && indices.toList.Nodup
 
-private def publicationRolesUnique (plan : FlatPlan) : Bool :=
-  plan.coeffArraySlots.all (fun slot => !plan.tileArraySlots.contains slot)
-
 private def sinkInputsInRange (plan : FlatPlan) : Bool :=
   plan.sinks.all (fun sink => sink.inputs.all (· < plan.slotCount))
 
@@ -361,13 +358,10 @@ def flatPlanWellFormed (plan : FlatPlan) : Bool :=
   (plan.arraySlotSizes.size == plan.arraySlotCount &&
   (plan.slotNames.size == plan.slotCount &&
   (plan.slotDefaults.size == plan.slotCount &&
-  ((plan.sources == defaultSources || plan.sources == tileSources) &&
+  (plan.sources == defaultSources &&
   (indicesUniqueAndInRange plan.arraySlotCount plan.coeffArraySlots &&
-  (indicesUniqueAndInRange plan.arraySlotCount plan.tileArraySlots &&
-  (publicationRolesUnique plan &&
-  ((plan.tileArraySlots.isEmpty || plan.tileIntervalFrames > 0) &&
   (plan.instanceFunctions.all (instanceWellFormed plan) &&
-   sinkInputsInRange plan)))))))))))
+   sinkInputsInRange plan))))))))
 
 /-- Canonical theorem-facing structural predicate. -/
 def FlatPlanWellFormed (plan : FlatPlan) : Prop :=
@@ -390,7 +384,7 @@ theorem FlatPlanWellFormed.sinkTargets {plan : FlatPlan}
 theorem FlatPlanWellFormed.sinkInputs {plan : FlatPlan}
     (hwf : FlatPlanWellFormed plan) : SinkInputsWellFormed plan := by
   simp [FlatPlanWellFormed, flatPlanWellFormed] at hwf
-  rcases hwf with ⟨_, _, _, _, _, _, _, _, _, _, _, _, hinputs⟩
+  rcases hwf with ⟨_, _, _, _, _, _, _, _, _, hinputs⟩
   exact hinputs
 
 theorem FlatPlanWellFormed.instanceFunction {plan : FlatPlan}
@@ -398,7 +392,7 @@ theorem FlatPlanWellFormed.instanceFunction {plan : FlatPlan}
     (hindex : index < plan.instanceFunctions.size) :
     InstanceFunctionWellFormed plan plan.instanceFunctions[index] := by
   simp [FlatPlanWellFormed, flatPlanWellFormed] at hwf
-  rcases hwf with ⟨_, _, _, _, _, _, _, _, _, _, _, hinstances, _⟩
+  rcases hwf with ⟨_, _, _, _, _, _, _, _, hinstances, _⟩
   exact hinstances index hindex
 
 /-- A well-formed Plan has balanced structured regions throughout every

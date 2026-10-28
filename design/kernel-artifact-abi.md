@@ -1,7 +1,9 @@
 # The kernel artifact — the port between the compiler and its hosts
 
-Status: **Proposed** (hexagonal sprint, S10). This document names a contract
-that already exists in code and comments; it does not change it. Where it
+Status: **Proposed** (hexagonal sprint, S10); §2–§4 are superseded by
+`typed-kernel.md` (2026-10-28), which replaces this port with one typed pure
+kernel. This document names the contract that exists in code today; it does
+not change it. Where it
 disagrees with the code, one of the two is wrong and the owner decides which.
 It does not amend `cf-only.md`, `host-param-dispatch.md`, `architecture.md`
 or `compatibility-matrix.md`; it points at them where they already govern.
@@ -29,13 +31,12 @@ the engine publishes.
 KernelArtifact
   ir            : String   LLVM IR text — the main kernel (always present)
   coefficientIr : String   LLVM IR text — the stage-0 coefficient kernel, or ""
-  tileIr        : String   LLVM IR text — the absolute-time tile kernel, or "" (Metal only)
   msl           : String   Metal Shading Language source, or "" (JIT-only)
   manifest      : String   tropical_plan_6 wire JSON of the *audio* plan
 ```
 
 Empty strings mean *absent*. On disk (`tropicalc --out=<dir>`) these are
-`audio.ll`, `coeff.ll`, `tile.ll`, `audio.metal` and `manifest.json`, the
+`audio.ll`, `coeff.ll`, `audio.metal` and `manifest.json`, the
 same names `TROPICAL_STAGE0_DUMP` writes.
 
 The manifest is the audio plan after the stage-0 split: the same schema a
@@ -48,7 +49,7 @@ patch, mode or realization is a different artifact.
 
 ## 2. The kernel function
 
-Every LLVM kernel in an artifact (main, coefficient, tile) defines exactly
+Every LLVM kernel in an artifact (main, coefficient) defines exactly
 one function with this signature. In the IR text it is named
 `tropical_kernel`; a host may rename it when it links (the JIT uses
 `tropical_k_<md5(ir)>` so distinct kernels never collide).
@@ -140,15 +141,6 @@ bit-exact. Slots and coefficient columns cross to the GPU f64→f32 as
 host-written data; the kernel writes only `output_buffer`. Compile with
 `MTLMathModeSafe`.
 
-`tileIr`, when present, is the absolute-time tile materializer that the
-Metal host runs ahead of the audio dispatch; its slots are
-`tile_array_slots`, refreshed every `tile_interval_frames`. When a Metal
-artifact carries a tile kernel, the exact JIT realization of the same plan
-is published alongside it as the observation artifact (§6).
-`absolute-time-phaser-coefficient-staging-decision-2026-08-18.md` records
-the decision; S8 of the sprint handoff records that the materializer is
-still DSP-specific and lists it as known debt.
-
 ## 5. The manifest
 
 The manifest is the `tropical_plan_6` wire form (`Plan.lean`). It carries
@@ -167,7 +159,6 @@ coupling to the compiler's internals.
 | `output_channel_count` | `C`; omitted means 1 |
 | `param_disciplines` | how to write each param slot (`host-param-dispatch.md`); omitted means every write is raw |
 | `coeff_array_slots` | the coefficient columns (§3); omitted means none |
-| `tile_array_slots`, `tile_interval_frames`, `phaser_time_staging` | the tile kernel's slots and cadence (§4) |
 | `metal_execution` | `sample_threadgroups` dispatch shape and `threadgroup_scratch_bytes`, Metal only |
 | `compilation_mode` | `fused` (the shipped realization) or `microkernel`; a host that cannot run the mode refuses the artifact |
 
@@ -197,8 +188,7 @@ which artifact and which control state it is hearing.
 
 A host may publish **two artifacts at once** — the realtime one and a
 JIT-only *observation* artifact for scopes and `render_window` — and the
-controls project between their slot layouts by exact slot name. The Metal
-host does this whenever an artifact carries a tile kernel.
+controls project between their slot layouts by exact slot name.
 
 Across a hot-swap the host carries only the sample index. Slot values come
 from the new manifest's defaults and from the control layer re-applying its

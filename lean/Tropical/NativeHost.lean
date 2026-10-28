@@ -24,10 +24,10 @@ def Dac.port (d : Dac) : DacPort where
 
 def Runtime.hostPort (rt : Runtime) : HostPort where
   publish a :=
-    rt.loadIrTimeStagedGeneration a.ir a.msl a.coefficientIr a.tileIr a.manifest
+    rt.loadIrStagedGeneration a.ir a.msl a.coefficientIr a.manifest
   publishWithObservation a o :=
-    rt.loadIrTimeStagedWithObservationGeneration
-      a.ir a.msl a.coefficientIr a.tileIr a.manifest
+    rt.loadIrStagedWithObservationGeneration
+      a.ir a.msl a.coefficientIr a.manifest
       o.ir o.coefficientIr o.manifest
   setParam := rt.setParam
   sampleRate := rt.sampleRate

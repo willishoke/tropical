@@ -349,8 +349,6 @@ structure PerInstancePlan where
   /-- Per-output-port temp indices (local; the session compiler shifts). -/
   outputTargets : Array Nat
   arraySlotNames : Array String
-  /-- Local array slots whose values are immutable per-tile endpoint images. -/
-  tileArraySlots : Array Nat := #[]
   /-- Staging metadata, parallel to `instructions` / `perChildPreInput`:
       the binding-time stage of the node each instruction was emitted
       for (typed stage-0 refactor Phase 1). Never serialized. -/
@@ -466,18 +464,14 @@ def SinkSpec.toWire (s : SinkSpec) : Json :=
     ("target", toJson s.target)]
 
 inductive SourceKind where
-  | tick | rate | tilePhase | tileTick
+  | tick | rate
 deriving BEq, Repr, Inhabited
 
 def SourceKind.wire : SourceKind → String
-  | .tick => "tick" | .rate => "rate" | .tilePhase => "tile_phase"
-  | .tileTick => "tile_tick"
+  | .tick => "tick" | .rate => "rate"
 
 /-- Canonical source ordering: `[tick, rate]`. -/
 def defaultSources : Array SourceKind := #[.tick, .rate]
-
-/-- Source order for plans that contain the staged terminal. -/
-def tileSources : Array SourceKind := #[.tick, .rate, .tilePhase, .tileTick]
 
 def isDefaultSources (s : Array SourceKind) : Bool :=
   s == defaultSources
@@ -562,13 +556,6 @@ structure FlatPlan where
       kernel reads a whole, consistent generation of columns (no cross-column
       tear on a live knob move). Empty ⇒ no double-buffering (omitted from wire). -/
   coeffArraySlots : Array Nat := #[]
-  /-- Array slots filled by the absolute-time tile materializer.  These are
-      packed after Stage0 columns in the Metal coefficient binding. -/
-  tileArraySlots : Array Nat := #[]
-  /-- Exact interval used when constructing the endpoint image. -/
-  tileIntervalFrames : Nat := 0
-  /-- Admission/provenance string carried into benchmark artifacts. -/
-  phaserTimeStaging : Option String := none
 deriving Inhabited
 
 /-- The structural output-image contract consumed by plan semantics and code
@@ -596,9 +583,7 @@ private def FlatPlan.linearInstrs (p : FlatPlan) : Array NInstr :=
 
 /-- Array slots sourced from immutable host-written Metal columns. -/
 def FlatPlan.metalBoundArraySlots (p : FlatPlan) : Array Nat :=
-  p.tileArraySlots.foldl
-    (fun slots slot => if slots.contains slot then slots else slots.push slot)
-    p.coeffArraySlots
+  p.coeffArraySlots
 
 def FlatPlan.hasRoutedSum (p : FlatPlan) : Bool :=
   p.linearInstrs.any (·.tag == "RoutedSumBegin")
@@ -809,13 +794,6 @@ def FlatPlan.toWire (p : FlatPlan) : Except String Json := do
     else fields.push ("param_disciplines", Json.arr (p.paramDisciplines.map (·.toWire)))
   let fields := if p.coeffArraySlots.isEmpty then fields
     else fields.push ("coeff_array_slots", toJson p.coeffArraySlots)
-  let fields := if p.tileArraySlots.isEmpty then fields
-    else fields.push ("tile_array_slots", toJson p.tileArraySlots)
-  let fields := if p.tileIntervalFrames == 0 then fields
-    else fields.push ("tile_interval_frames", toJson p.tileIntervalFrames)
-  let fields := match p.phaserTimeStaging with
-    | some reason => fields.push ("phaser_time_staging", Json.str reason)
-    | none => fields
   let fields := match p.metalExecutionToWire with
     | some execution => fields.push ("metal_execution", execution)
     | none => fields

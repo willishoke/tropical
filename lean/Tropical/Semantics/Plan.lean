@@ -29,19 +29,14 @@ structure PlanInputs (α : Type) where
   initialArrays : Array (Array (Value α)) := #[]
 
 /-- Named source rails from which a Plan's positional source image is built.
-Ordinary audio plans select `tick`/`rate`; tile materializers additionally
-select `tilePhase`/`tileTick` in their declared order. -/
+Audio plans select `tick`/`rate` in their declared order. -/
 structure PlanSourceImage (α : Type) where
   tick : Value α
   rate : Value α
-  tilePhase : Value α
-  tileTick : Value α
 
 def PlanSourceImage.value (image : PlanSourceImage α) : SourceKind → Value α
   | .tick => image.tick
   | .rate => image.rate
-  | .tilePhase => image.tilePhase
-  | .tileTick => image.tileTick
 
 def PlanInputs.withDeclaredSources (inputs : PlanInputs α)
     (kinds : Array SourceKind) (image : PlanSourceImage α) : PlanInputs α :=

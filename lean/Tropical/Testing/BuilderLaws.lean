@@ -101,29 +101,6 @@ example : SigBuildResultWellFormed twoNodeForeignBuilder
     simp [SigIn, ExprIdIn, twoNodeForeignBuilder, foreignOnlyRoot]
   · simp [OptionalSigIn]
 
-example : SigBuildResultWellFormed twoNodeForeignBuilder
-    ((tileArray #[localRoot, foreignOnlyRoot]).run twoNodeForeignBuilder) := by
-  apply tileArray_preserves twoNodeForeignBuilder_wellFormed
-  intro id h
-  simp at h
-  rcases h with rfl | rfl
-  · simp [SigIn, ExprIdIn, twoNodeForeignBuilder, localRoot]
-  · simp [SigIn, ExprIdIn, twoNodeForeignBuilder, foreignOnlyRoot]
-
-example : ProducesSig tilePhase := tilePhase_preserves
-example : ProducesSig tileSampleIndex := tileSampleIndex_preserves
-
-example : ShiftResultWellFormed twoNodeForeignBuilder
-    #[localRoot, foreignOnlyRoot]
-    ((shiftSampleIndex #[localRoot, foreignOnlyRoot] 64).run
-      twoNodeForeignBuilder) := by
-  apply shiftSampleIndex_preserves twoNodeForeignBuilder_wellFormed
-  intro id h
-  simp at h
-  rcases h with rfl | rfl
-  · simp [SigIn, ExprIdIn, twoNodeForeignBuilder, localRoot]
-  · simp [SigIn, ExprIdIn, twoNodeForeignBuilder, foreignOnlyRoot]
-
 example : match
     (inst "child" "Child" #[{ port := ⟨0⟩, value := localRoot }]).run
       oneNodeBuilder with

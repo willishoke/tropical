@@ -115,18 +115,7 @@ def sampleRate : BuildM Sig := internSig .sampleRate
 
 def sampleIndex : BuildM Sig := internSig .sampleIndex
 
-/-- Dispatch-local `[0,1)` coordinate used only by the absolute-time tile
-    terminal.  Exact/JIT evaluation deliberately reads zero. -/
-def tilePhase : BuildM Sig := internSig .tilePhase
-
-/-- Absolute clock leaf used only by the tile endpoint materializer. -/
-def tileSampleIndex : BuildM Sig := internSig .tileSampleIndex
-
 def arr (items : Array Sig) : BuildM Sig := internSig (.arr items)
-
-/-- Mark an array as an immutable endpoint image owned by the tile-time
-    materializer. -/
-def tileArray (items : Array Sig) : BuildM Sig := internSig (.tileArray items)
 
 def index (array index : Sig) : BuildM Sig :=
   internSig (.index array index)
@@ -146,84 +135,6 @@ def routedSum (capacity outputCount : Nat) (routes : Array (Option Nat))
     (tables values : Array Sig) (dynCount? : Option Sig := none)
     (idxId : Nat := 0) : BuildM Sig :=
   internSig (.routedSum capacity outputCount routes tables values dynCount? idxId)
-
--- ────────────────────────────────────────────────────────────────────────
--- Absolute-coordinate substitution
--- ────────────────────────────────────────────────────────────────────────
-
-/-- Resolve an old arena id through the prefix of rebuilt ids. -/
-def shiftedId (mapped : Array Sig) (id : Sig) : Sig :=
-  mapped[id.idx]?.getD id
-
-/-- Rebuild one frozen node, remapping its children through the already-built
-    prefix. `sampleIndex` is the sole substitution point. -/
-def rebuildShiftedNode (mapped : Array Sig) (shiftedTick : Sig) :
-    ENode → BuildM Sig
-  | .sampleIndex => pure shiftedTick
-  | .tileSampleIndex => internSig .tileSampleIndex
-  | .num n => internSig (.num n)
-  | .bool b => internSig (.bool b)
-  | .arr items => internSig (.arr (items.map (shiftedId mapped)))
-  | .tileArray items => internSig (.tileArray (items.map (shiftedId mapped)))
-  | .binary tag a b =>
-    internSig (.binary tag (shiftedId mapped a) (shiftedId mapped b))
-  | .unary tag a => internSig (.unary tag (shiftedId mapped a))
-  | .clamp a b c => internSig (.clamp
-      (shiftedId mapped a) (shiftedId mapped b) (shiftedId mapped c))
-  | .select a b c => internSig (.select
-      (shiftedId mapped a) (shiftedId mapped b) (shiftedId mapped c))
-  | .arraySet a b c => internSig (.arraySet
-      (shiftedId mapped a) (shiftedId mapped b) (shiftedId mapped c))
-  | .index a b =>
-    internSig (.index (shiftedId mapped a) (shiftedId mapped b))
-  | .inputRef i => internSig (.inputRef i)
-  | .paramRef i => internSig (.paramRef i)
-  | .nestedOut i o => internSig (.nestedOut i o)
-  | .sampleRate => internSig .sampleRate
-  | .tilePhase => internSig .tilePhase
-  | .loopIdx i => internSig (.loopIdx i)
-  | .bankSum count tables body dynCount? idxId =>
-    internSig (.bankSum count (tables.map (shiftedId mapped))
-      (shiftedId mapped body) (dynCount?.map (shiftedId mapped)) idxId)
-  | .routedSum capacity outputCount routes tables values dynCount? idxId =>
-    internSig (.routedSum capacity outputCount routes
-      (tables.map (shiftedId mapped)) (values.map (shiftedId mapped))
-      (dynCount?.map (shiftedId mapped)) idxId)
-
-/-- Structurally recursive form of the frozen child-before-parent rebuild. -/
-def rebuildShiftedNodes (nodes : List ENode) (shiftedTick : Sig)
-    (mapped : Array Sig := #[]) : BuildM (Array Sig) :=
-  match nodes with
-  | [] => pure mapped
-  | node :: rest => do
-    let id ← rebuildShiftedNode mapped shiftedTick node
-    rebuildShiftedNodes rest shiftedTick (mapped.push id)
-
-/-- Add a positive integral frame offset to an already-built absolute clock. -/
-def addFrameOffset (rawTick : Sig) (frames : Nat) : BuildM Sig := do
-  let frameLiteral ← internSig (.num ⟨Int.ofNat frames, 0⟩)
-  let frameInt ← internSig (.unary .toInt frameLiteral)
-  internSig (.binary .add rawTick frameInt)
-
-/-- Build the replacement absolute clock used by `shiftSampleIndex`. -/
-def buildShiftedTick : Nat → BuildM Sig
-  | 0 => internSig .tileSampleIndex
-  | frames@(_ + 1) => do
-    let rawTick ← internSig .tileSampleIndex
-    addFrameOffset rawTick frames
-
-/-- Rebuild `roots` in the current arena while substituting every
-    `sampleIndex` leaf with `tileSampleIndex + frames`.  The distinct base
-    leaf prevents the tile dependency slice from capturing shared audio-clock
-    instructions.  The walk freezes the
-    pre-rewrite arena and proceeds in child-before-parent ID order, so address
-    warps and control trajectories are shifted as complete expressions rather
-    than approximated by advancing only a visible phasor. -/
-def shiftSampleIndex (roots : Array Sig) (frames : Nat) : BuildM (Array Sig) := do
-  let snapshot := (← get).exprs.nodes.toList
-  let shiftedTick ← buildShiftedTick frames
-  let mapped ← rebuildShiftedNodes snapshot shiftedTick
-  pure (roots.map (shiftedId mapped))
 
 -- The production scalar helper vocabulary, preserving its existing names and
 -- operand order.  Each helper performs exactly one intern step.

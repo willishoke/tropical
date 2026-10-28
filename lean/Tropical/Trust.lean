@@ -61,7 +61,6 @@ def knownGates : Array String := #[
   "lake-build:Tropical.Proofs",
   "modal-universe-history",
   "modal-oriented-patch", "block-algebra", "block-realize", "block-banked", "seam-sweep",
-  "modal-phaser",
   "semantics-production-fixtures",
   "clock-algebra-theorems",
   "reduce-coverage",
@@ -112,14 +111,13 @@ def obligations : Array Obligation := #[
       "lean/Tropical/EmitArrow/Modal/OrientedRealize.lean",
       "lean/Tropical/EmitArrow/Modal/FactoredTerminal.lean",
       "lean/Tropical/Tropicaltest/Modal.lean",
-      "lean/Tropical/Tropicaltest/OrientedPatch.lean",
-      "lean/Tropical/Tropicaltest/Phaser.lean"]
-    gateNames := #["modal-universe-history", "modal-oriented-patch", "modal-phaser",
+      "lean/Tropical/Tropicaltest/OrientedPatch.lean"]
+    gateNames := #["modal-universe-history", "modal-oriented-patch",
       "block-algebra", "block-realize", "block-banked", "seam-sweep",
       "manual:production modal refinement review"]
     owner := "Modal compiler"
     status := .open
-    limitation := "Production now retains an authored ordinary-room/gauge/phaser stage spine, binds live controls together at the true terminal, and carries plain sources through explicit future/past algebra with stable divided-difference and exact fused two-room/phaser routes. Causal spines with more than one nonterminal room now cross through the block-partial-fraction terminal (`lean/Tropical/EmitArrow/Modal/Block.lean`, `BlockRealize.lean`; gates `block-algebra`, `block-realize`, the `blockCompose` seam atom), which forms no `1/Δ` inside a runtime-near-equal cluster of up to three value classes and splits a larger cluster into its classes at the collected floor (total: nothing that lowered before stops lowering). The block terminal is bilateral: a room's past arm enters as the mirrored pole with the two-sided transform's sign, clusters never cross orientation, and past rows realize on the mirrored clock. The divided-difference families (paired, triple) land on the fixed i64 lane with a per-family option-E exponent from their sup bounds (`pairedLandExp`, `tripleLandExp`), no admission cap. Every plain spine now lowers through the block terminal except the three exact cost schedules (time-staged phaser, fused two-room, fused two-room-with-phaser), which keep their topologies; a gauge splits the spine into segments, the block terminal before it materializing to a collected bank at the status-quo floor. The block families settle to their control targets (`BlockTerminal.settled?`, the `Bank.settled?` discipline) and a dynamic landing rides invariant columns, so the whole coefficient plane hoists: a three-room 14-mode chain is ~6k audio instructions with 34 hoisted columns and renders on Metal at 86.6 dB against the f64 JIT. Full refinement remains open: arbitrary live source-frequency crossings need a declared pole envelope; phaser and live reverse/sway/gauge after bloom need the oriented Gamma bridge; and the bilateral live-gauge cost/backend envelope is not qualified."
+    limitation := "Production now retains an authored ordinary-room/gauge/phaser stage spine, binds live controls together at the true terminal, and carries plain sources through explicit future/past algebra with stable divided-difference and exact fused two-room/phaser routes. Causal spines with more than one nonterminal room now cross through the block-partial-fraction terminal (`lean/Tropical/EmitArrow/Modal/Block.lean`, `BlockRealize.lean`; gates `block-algebra`, `block-realize`, the `blockCompose` seam atom), which forms no `1/Δ` inside a runtime-near-equal cluster of up to three value classes and splits a larger cluster into its classes at the collected floor (total: nothing that lowered before stops lowering). The block terminal is bilateral: a room's past arm enters as the mirrored pole with the two-sided transform's sign, clusters never cross orientation, and past rows realize on the mirrored clock. The divided-difference families (paired, triple) land on the fixed i64 lane with a per-family option-E exponent from their sup bounds (`pairedLandExp`, `tripleLandExp`), no admission cap. Every plain spine now lowers through the block terminal except the two exact cost schedules (fused two-room, fused two-room-with-phaser), which keep their topologies; a gauge splits the spine into segments, the block terminal before it materializing to a collected bank at the status-quo floor. The block families settle to their control targets (`BlockTerminal.settled?`, the `Bank.settled?` discipline) and a dynamic landing rides invariant columns, so the whole coefficient plane hoists: a three-room 14-mode chain is ~6k audio instructions with 34 hoisted columns and renders on Metal at 86.6 dB against the f64 JIT. Full refinement remains open: arbitrary live source-frequency crossings need a declared pole envelope; phaser and live reverse/sway/gauge after bloom need the oriented Gamma bridge; and the bilateral live-gauge cost/backend envelope is not qualified."
     priority := .critical },
   { id := "EXPR_ARENA_DENOTATION_STABLE"
     statement := "For every carrier algebra and environment, extending a well-formed ExprArena preserves the direct denotation of every addressable existing root."
@@ -154,18 +152,7 @@ def obligations : Array Obligation := #[
     owner := "Staging semantics"
     status := .proved
     theoremSymbol := some "Tropical.Semantics.Staging.stageSig_sound"
-    limitation := "This proves value-level noninterference for generated signatures, including independent sample and tile coordinates. Moving Plan instructions and publishing coefficient or endpoint state are separate refinement obligations."
-    priority := .critical },
-  { id := "SHIFT_SAMPLE_INDEX_PRESERVES_DENOTATION"
-    statement := "For a successful production shiftSampleIndex run, every returned root preserves its source denotation when the environments agree outside sampleIndex and the replacement tile clock plus frame offset equals the source sample coordinate."
-    evidence := #[.theorem]
-    implementationPaths := #["lean/Tropical/Semantics/ShiftSampleIndex.lean",
-      "lean/Tropical/Testing/ShiftSampleIndex.lean"]
-    gateNames := #["lake-build:Tropical.Proofs"]
-    owner := "Staging semantics"
-    status := .proved
-    theoremSymbol := some "Tropical.Semantics.shiftSampleIndex_denotes"
-    limitation := "The theorem covers arrays, banks, routed sums, shared DAG nodes, frame zero and nonzero offsets, and preserves pre-existing tileSampleIndex and tilePhase leaves. It is an exact direct-expression theorem, not an interpolation or backend-execution theorem."
+    limitation := "This proves value-level noninterference for generated signatures. Moving Plan instructions and publishing coefficient state are separate refinement obligations."
     priority := .critical },
   { id := "STAGE0_TYPED_SPLIT_REFINES_PLAN"
     statement := "Every successful nontrivial typed Stage0 split reaches the same final Plan observation as direct execution under the documented coefficient-publication protocol."
@@ -178,18 +165,6 @@ def obligations : Array Obligation := #[
     status := .open
     limitation := "Tropical.Ir.Stage0.hoistTyped_refines_of_state_publication proves the observation conclusion only from an explicit StatePublicationRefines premise. Alignment refusal, identity, and multichannel interface preservation are proved, but the actual nontrivial rewrite has not yet been shown to establish the final-state relation."
     priority := .critical },
-  { id := "TILE_STAGE_LEFT_ENDPOINT_REFINES_EXACT"
-    statement := "Every successful admitted TileStage split reaches the unsplit exact/JIT Plan observation at the left endpoint after publishing its materialized endpoint image."
-    evidence := #[.theorem, .numericTolerance, .differential, .inspection]
-    implementationPaths := #["lean/Tropical/Ir/TileStage.lean",
-      "lean/Tropical/Ir/TileStageLaws.lean", "lean/Tropical/Testing/StagingLaws.lean",
-      "tests/web/metal_vs_jit.test.ts"]
-    gateNames := #["lake-build:Tropical.Proofs", "metal-vs-jit",
-      "manual:TileStage endpoint simulation review"]
-    owner := "Staging semantics"
-    status := .open
-    limitation := "Tropical.Ir.TileStage.split_refines_of_endpoint_publication proves the exact observation conclusion only from EndpointPublicationRefines. No-root identity and multichannel interface preservation are proved; dependency-slice/shared-scalar simulation and the nontrivial endpoint state relation remain open. Full-tile interpolation stays tolerance-backed and hardware-dependent."
-    priority := .critical },
   { id := "CLOCK_RAIL_IS_EXACT"
     statement := "Per sample, runtime integer rail operations implement the Int denotation modulo the documented i64 image and shift/mask headroom rules."
     evidence := #[.theorem, .inspection, .golden]
@@ -201,7 +176,7 @@ def obligations : Array Obligation := #[
       "patch-goldens"]
     owner := "Backend correctness"
     status := .open
-    limitation := "Tropical.EmitArrow.compileClockRail_refines projects an assumed CompileResultRefinesScalar witness; it does not establish constructor compilation. The arena-native identities, signed-i64 image laws, and declared tick/tileTick source lookup are proved, while whole compileNode constructor closure and correspondence from Plan execution to emitted LLVM/MSL integer execution remain open."
+    limitation := "Tropical.EmitArrow.compileClockRail_refines projects an assumed CompileResultRefinesScalar witness; it does not establish constructor compilation. The arena-native identities, signed-i64 image laws, and declared tick source lookup are proved, while whole compileNode constructor closure and correspondence from Plan execution to emitted LLVM/MSL integer execution remain open."
     priority := .critical },
   { id := "REDUCE_REGION_EXECUTES_IN_ARRAY_ORDER"
     statement := "JIT, wasm, and MSL execute bank bodies at increasing indices with a scalar left fold and a dynamic count clamped to the static capacity."

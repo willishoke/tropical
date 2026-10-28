@@ -31,7 +31,6 @@ import Tropical.Tropicaltest.Oriented
 import Tropical.Tropicaltest.Block
 import Tropical.Tropicaltest.BlockRealize
 import Tropical.Tropicaltest.OrientedPatch
-import Tropical.Tropicaltest.Phaser
 
 /-!
 # tropicaltest — the post-TS golden + native-equiv runner (Phase 8)
@@ -56,7 +55,7 @@ open Tropical.Ir (Arena ProgramIdx)
     reported as the total collapse it is; the `arrow-block-count` gate at the end
     of `main` checks the number against what the block actually ran, so it is
     verified rather than maintained. -/
-def arrowBlockGates : Nat := 106
+def arrowBlockGates : Nat := 105
 
 set_option maxRecDepth 2048 in
 def main (args : List String) : IO UInt32 := do
@@ -77,13 +76,6 @@ def main (args : List String) : IO UInt32 := do
     return if algebra && realize && banked then 0 else 1
   if args.contains "--oriented-patch-only" then
     return if ← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch {} then 0 else 1
-  if args.contains "--phaser-only" then
-    match Tropical.EmitArrow.buildStdlibChain with
-    | .error error =>
-        IO.eprintln error
-        return 1
-    | .ok (arena, resolved) =>
-        return if ← Tropical.Tropicaltest.Phaser.runPhaser arena resolved then 0 else 1
   if args.contains "--ecdd-only" then
     match ← Tropical.Playground.getStdlib with
     | .error error =>
@@ -585,9 +577,6 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch arena) then
-      failed := failed + 1
-    total := total + 1
-    if !(← Tropical.Tropicaltest.Phaser.runPhaser arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runModalForestAnchors arena resolved) then

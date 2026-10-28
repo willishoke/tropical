@@ -61,14 +61,7 @@ def loadKernelPublished (env : Env) (plan : Tropical.Plan.FlatPlan)
     (stages? : Option (Array (Array (Option Tropical.Ir.Stage))) := none) :
     EngineM Tropical.Host.PublishedGeneration := do
   let artifact ← buildLoadArtifacts plan stages? env.metalBackend
-  if artifact.tileIr.isEmpty then
-    env.host.publish artifact
-  else
-    -- The compact Metal artifact deliberately no longer contains the exact
-    -- coefficient path. Retain the unsplit JIT realization as both the
-    -- observation oracle and worker-only numerical fallback image.
-    let exact ← buildLoadArtifacts plan stages? false
-    env.host.publishWithObservation artifact exact
+  env.host.publish artifact
 
 /-- Compatibility form for compile paths whose replies do not expose the
     publication identity. -/

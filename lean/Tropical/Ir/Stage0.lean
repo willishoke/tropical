@@ -184,8 +184,6 @@ private def operandStage (sources : Array SourceKind)
     match sources[i]? with
     | some .tick => .s1
     | some .rate => .fold
-    | some .tilePhase => .s1
-    | some .tileTick => .s1
     | none => .fold           -- out-of-range source resolves to 0.0
   | .slot i _ =>
     match slotStage.get? i with

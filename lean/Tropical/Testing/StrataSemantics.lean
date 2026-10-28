@@ -18,25 +18,25 @@ open Tropical.Semantics
 
 private structure ExprFixture where
   arena : ExprArena
-  tile : ExprId
+  table : ExprId
   bank : ExprId
   routed : ExprId
 
 private def buildExprFixture : ExprFixture :=
   let action : StateM ExprArena (ExprId × ExprId × ExprId) := do
     let one ← eintern (.num ⟨1, 0⟩)
-    let tileIndex ← eintern .tileSampleIndex
-    let tilePhase ← eintern .tilePhase
-    let tile ← eintern (.tileArray #[tileIndex, tilePhase])
+    let tick ← eintern .sampleIndex
+    let rate ← eintern .sampleRate
+    let table ← eintern (.arr #[tick, rate])
     let loop ← eintern (.loopIdx 7)
-    let bank ← eintern (.bankSum 2 #[tile] loop none 7)
+    let bank ← eintern (.bankSum 2 #[table] loop none 7)
     let routed ← eintern
-      (.routedSum 2 2 #[some 0, some 1] #[tile] #[one, bank] none 9)
+      (.routedSum 2 2 #[some 0, some 1] #[table] #[one, bank] none 9)
     -- Deliberately unreachable from every program root.
     let _ ← eintern (.num ⟨99, 0⟩)
-    pure (tile, bank, routed)
+    pure (table, bank, routed)
   let (roots, arena) := action.run {}
-  { arena, tile := roots.1, bank := roots.2.1, routed := roots.2.2 }
+  { arena, table := roots.1, bank := roots.2.1, routed := roots.2.2 }
 
 private def exprFixture : ExprFixture := buildExprFixture
 
@@ -56,7 +56,7 @@ private def rootProgram : Program :=
     outputs := #[{ name := "left" }, { name := "right" }]
     decls := #[
       .inst "first" "Child" #[{ port := ⟨0⟩, value := exprFixture.bank }],
-      .inst "second" "Child" #[{ port := ⟨0⟩, value := exprFixture.tile }]]
+      .inst "second" "Child" #[{ port := ⟨0⟩, value := exprFixture.table }]]
     assigns := #[
       { target := .port ⟨0⟩, expr := exprFixture.routed },
       { target := .port ⟨1⟩, expr := exprFixture.bank }]
@@ -81,9 +81,9 @@ private def fixtureCheck : Bool :=
     | Except.ok (dst, core) =>
       dst.nodes.size + 1 == fixtureArena.exprs.nodes.size &&
       core.registry.map (·.1) == #["Child"] &&
-      dst.nodes.any (fun node => match node with | .tileArray .. => true | _ => false) &&
-      dst.nodes.any (fun node => match node with | .tileSampleIndex => true | _ => false) &&
-      dst.nodes.any (fun node => match node with | .tilePhase => true | _ => false) &&
+      dst.nodes.any (fun node => match node with | .arr .. => true | _ => false) &&
+      dst.nodes.any (fun node => match node with | .sampleIndex => true | _ => false) &&
+      dst.nodes.any (fun node => match node with | .sampleRate => true | _ => false) &&
       dst.nodes.any (fun node => match node with | .bankSum .. => true | _ => false) &&
       dst.nodes.any (fun node => match node with | .routedSum .. => true | _ => false)
 

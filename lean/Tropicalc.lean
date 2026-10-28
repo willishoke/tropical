@@ -10,8 +10,7 @@ import Tropical.Artifact
 Boots the stdlib registry as a value, compiles the patch through the same
 `Tropical.Session` path the engine runs (`compilePatch`: normalize, load,
 lift, resolved root, partition), and writes the kernel artifact: `audio.ll`,
-`coeff.ll`, `manifest.json`, plus `tile.ll` and `audio.metal` with
-`--metal`. `--emit=plan` prints the plan's wire JSON instead, byte-identical
+`coeff.ll`, `manifest.json`, plus `audio.metal` with `--metal`. `--emit=plan` prints the plan's wire JSON instead, byte-identical
 to `diffcli compile` (tools/check_artifact_parity.py holds that gate).
 
 This binary links nothing from libtropical, and tools/check_layers.py keeps
@@ -64,6 +63,5 @@ def main (args : List String) : IO UInt32 := do
     IO.FS.writeFile (dir / "coeff.ll") artifact.coefficientIr
     IO.FS.writeFile (dir / "manifest.json") artifact.manifest
     if metal then
-      IO.FS.writeFile (dir / "tile.ll") artifact.tileIr
       IO.FS.writeFile (dir / "audio.metal") artifact.msl
     return 0
