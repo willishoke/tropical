@@ -139,6 +139,12 @@ structure St where
   /-- Port kernel: every array slot is an `alloca` named `%arr<slot>`.
       Stage-0 pre-pass: arrays come through the `%arrays` pointer table. -/
   arraysInline : Bool := true
+  /-- The SSA value the plan's `tau` source reads: `%tau_s`, the frame's
+      coordinate loaded in the sample loop. The port kernel's stage-0
+      prologue runs before the loop, where no frame exists; it binds this to
+      `%tau0` (zero) so a stray τ read in τ-independent code is defined, as
+      the one-sample host call once made it. -/
+  tauName : String := "%tau_s"
   /-- Label of the basic block currently being emitted into. Starts at
       `entry`; array ops (SetElement / elementwise) and zeroing loops open
       new blocks, so the loop header's phi and the back-edge must reference
@@ -291,7 +297,7 @@ def resolveOperand : NOperand → M TVal
   | .source idx _ => do
     let srcs := (← get).sources
     match srcs[idx]? with
-    | some .tau => pure ⟨"%tau_s", .int⟩
+    | some .tau => pure ⟨(← get).tauName, .int⟩
     | some .rate => pure ⟨f64Lit (← get).sampleRate, .float⟩
     | none => pure ⟨f64Lit 0.0, .float⟩
   | .slot idx t => do
@@ -866,15 +872,18 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
       let v ← fresh; line s!"{v} = load double, ptr %in_{j + 1}, align 8"
       storeSlotF64 paramSlots[j]! v
     -- Stage-0 prologue: the coefficient plan's instructions, once per call.
-    -- `%tau_s` is unreachable from τ-independent code; defined so a stray τ
-    -- read is zero, as the one-sample host call made it.
+    -- No frame exists here, so τ is bound to `%tau0` (zero): unreachable
+    -- from τ-independent code, defined so a stray read is well-formed.
     line "%tau0 = add i64 0, 0"
+    modify fun st => { st with tauName := "%tau0" }
     if let some coeff := split.coeff? then
       for inst in coeff.instanceFunctions do
         emitKernelBlock inst
     -- Temps are per-kernel SSA scratch; the audio plan's reads see only its
     -- own definitions (boundary values crossed through slots at the split).
-    modify fun st => { st with tempVals := {}, reduces := #[], routeds := #[] }
+    -- From here τ is the frame's coordinate, loaded in the loop.
+    modify fun st => { st with tempVals := {}, reduces := #[], routeds := #[],
+                               tauName := "%tau_s" }
     let pred := (← get).curBlock
     line "br label %loop_cond"
     labelLine "loop_cond"
@@ -889,24 +898,12 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
     emitSinks plan.sinks outputChannelCount
   let init : St := { sources := plan.sources, sampleRate := plan.sampleRate.toFloat,
                      arraySizes := sizes, arraysInline := true }
-  -- Inside the prologue `%tau_s` is not yet defined (the loop loads it); the
-  -- prologue's stray τ reads are renamed to `%tau0`.
   match body.run init with
   | .error e _ => .error e
   | .ok _ st =>
     let lastBlock := st.curBlock
     let lines := st.lines.map fun l => l.replace "%LOOP_LAST" s!"%{lastBlock}"
-    -- Prologue lines precede `loop_cond:`; rewrite their τ reads.
-    let (prologue, rest) := Id.run do
-      let mut pro : Array String := #[]
-      let mut rest : Array String := #[]
-      let mut inLoop := false
-      for l in lines do
-        if l == "loop_cond:" then inLoop := true
-        if inLoop then rest := rest.push l
-        else pro := pro.push (l.replace "%tau_s" "%tau0")
-      return (pro, rest)
-    let bodyText := String.intercalate "\n" (prologue ++ rest).toList
+    let bodyText := String.intercalate "\n" lines.toList
     let globalsText := String.intercalate "\n" st.globals.toList
     let inputArgs := String.intercalate ", "
       ((List.range paramSlots.size).map fun j => s!"ptr noalias nocapture readonly %in_{j + 1}")
