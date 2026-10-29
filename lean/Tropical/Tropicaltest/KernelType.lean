@@ -76,12 +76,17 @@ def runKernelType : IO Bool := do
       | .ok k => pure k
     if let some why := checkShape plan k then
       return ← failGate label s!"{path}: {why}"
-    let wire := k.toWire.compress
+    let wire ← match k.toWire with
+      | .error e => return ← failGate label s!"{path}: toWire: {e}"
+      | .ok j => pure j.compress
     let back ← match Lean.Json.parse wire >>= KernelType.ofWire with
       | .error e => return ← failGate label s!"{path}: ofWire: {e}"
       | .ok back => pure back
-    if back.toWire.compress != wire then
-      return ← failGate label s!"{path}: wire form is not a fixed point of ofWire ∘ toWire"
+    match back.toWire with
+    | .error e => return ← failGate label s!"{path}: toWire after round trip: {e}"
+    | .ok j =>
+      if j.compress != wire then
+        return ← failGate label s!"{path}: wire form is not a fixed point of ofWire ∘ toWire"
     if let some why := checkShape plan back then
       return ← failGate label s!"{path}: after round trip: {why}"
     checked := checked + 1

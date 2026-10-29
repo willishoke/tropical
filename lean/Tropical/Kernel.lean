@@ -1,4 +1,5 @@
 import Tropical.Plan
+import Tropical.PlanDecode
 
 /-!
 # Kernel — the typed kernel at the port
@@ -79,14 +80,14 @@ structure Discipline where
 deriving Repr, Inhabited
 
 /-- One named, shaped, typed value at the port. `default` is the seed a host
-    writes before the first call (raw Json so the plan's lexical number
-    form survives, as `slot_defaults` does). -/
+    writes before the first call; a `JsonNumber` keeps the plan's lexical
+    number form, as `slot_defaults` does. -/
 structure Port where
   name : String
   elem : Elem
   shape : Array Nat
   role : Option Role := none
-  default : Option Json := none
+  default : Option JsonNumber := none
   discipline : Option Discipline := none
   /-- For an output of shape `[frames, C]`: the name of each channel's
       source (the slot its sink mixes first), `""` for a silent channel.
@@ -100,15 +101,15 @@ structure Realization where
   registerCount : Nat := 0
 deriving Repr, Inhabited
 
-/-- The kernel type plus the plan it was derived from. `plan` is the
-    `tropical_plan_6` wire form, carried for the gates; a host that reads it
+/-- The kernel type plus the plan it was derived from. `plan` is nested in
+    the wire form (as `tropical_plan_6`) for the gates; a host that reads it
     is coupling to the compiler's internals. -/
 structure KernelType where
   rate : JsonNumber
   inputs : Array Port
   outputs : Array Port
   realization : Realization := {}
-  plan : Json
+  plan : FlatPlan
 deriving Inhabited
 
 /-- A one-line description of a port for gate messages. -/
@@ -148,17 +149,20 @@ private def disciplineOf (plan : FlatPlan) (base : String) : Option Discipline :
 
 /-- Derive the kernel type of a plan compiled for `frames` samples per call. -/
 def ofPlan (plan : FlatPlan) (frames : Nat) : Except String KernelType := do
-  let planJson ← plan.toWire
   let tau : Port :=
     { name := tauName, elem := .i64q32, shape := #[frames], role := some .signal }
   let mut inputs : Array Port := #[tau]
   for i in paramSlotIndices plan do
     let slotName := plan.slotNames[i]!
     let base := (slotName.drop paramPrefix.length).toString
+    let default ← match plan.slotDefaults[i]? with
+      | none => pure none
+      | some (.num n) => pure (some n)
+      | some other =>
+        throw s!"Kernel: slot '{slotName}' default is not a number: {other.compress}"
     inputs := inputs.push {
       name := slotName, elem := .f64, shape := #[], role := some .param,
-      default := plan.slotDefaults[i]?,
-      discipline := disciplineOf plan base }
+      default, discipline := disciplineOf plan base }
   let out : Port :=
     { name := outName, elem := .f64, shape := #[frames, plan.outputChannelCount],
       channels := channelNames plan }
@@ -167,7 +171,7 @@ def ofPlan (plan : FlatPlan) (frames : Nat) : Except String KernelType := do
     inputs
     outputs := #[out]
     realization := { mode := plan.compilationMode, registerCount := plan.registerCount }
-    plan := planJson }
+    plan }
 
 -- ── Wire form ────────────────────────────────────────────────────────────
 
@@ -187,7 +191,7 @@ def Port.toWire (p : Port) : Json :=
     | some r => fields.push ("role", Json.str r.wire)
     | none => fields
   let fields := match p.default with
-    | some d => fields.push ("default", d)
+    | some d => fields.push ("default", Json.num d)
     | none => fields
   let fields := match p.discipline with
     | some d => fields.push ("discipline", d.toWire)
@@ -200,14 +204,15 @@ def Realization.toWire (r : Realization) : Json :=
   Json.mkObj [("mode", Json.str r.mode.wire),
     ("register_count", toJson r.registerCount)]
 
-def KernelType.toWire (k : KernelType) : Json :=
-  Json.mkObj [
+def KernelType.toWire (k : KernelType) : Except String Json := do
+  let plan ← k.plan.toWire
+  return Json.mkObj [
     ("schema", Json.str schema),
     ("rate", Json.num k.rate),
     ("inputs", Json.arr (k.inputs.map Port.toWire)),
     ("outputs", Json.arr (k.outputs.map Port.toWire)),
     ("realization", k.realization.toWire),
-    ("plan", k.plan)]
+    ("plan", plan)]
 
 private def reqStr (ctx : String) (j : Json) (k : String) : Except String String :=
   match j.getObjVal? k with
@@ -256,9 +261,10 @@ def Port.ofWire (j : Json) : Except String Port := do
       | some role => pure (some role)
       | none => throw s!"Kernel.Port '{name}': unknown role '{r}'"
     | _ => pure none
-  let default := match j.getObjVal? "default" with
-    | .ok d => some d
-    | _ => none
+  let default ← match j.getObjVal? "default" with
+    | .ok (.num d) => pure (some d)
+    | .ok other => throw s!"Kernel.Port '{name}': default is not a number: {other.compress}"
+    | _ => pure none
   let discipline ← match j.getObjVal? "discipline" with
     | .ok d => some <$> Discipline.ofWire d
     | _ => pure none
@@ -285,13 +291,13 @@ def KernelType.ofWire (j : Json) : Except String KernelType := do
     | .ok r => Realization.ofWire r
     | _ => pure {}
   let plan ← match j.getObjVal? "plan" with
-    | .ok p => pure p
+    | .ok p => FlatPlan.ofWire p
     | _ => throw "Kernel: missing field 'plan'"
   return { rate, inputs, outputs, realization, plan }
 
 /-- The `tropical_kernel_1` manifest text for a plan. -/
 def manifest (plan : FlatPlan) (frames : Nat) : Except String String := do
   let k ← ofPlan plan frames
-  return k.toWire.compress
+  return (← k.toWire).compress
 
 end Tropical.Kernel
