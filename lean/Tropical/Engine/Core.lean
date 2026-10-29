@@ -6,12 +6,7 @@ import Tropical.Session
 import Tropical.Session.Compile
 import Tropical.Lowering
 import Tropical.Parse.Nodes
-import Tropical.Parse.Raise
-import Tropical.Ir.Strata
 import Tropical.Ir.Core
-import Tropical.Ir.WireProgram
-import Tropical.Ir.EmitLlvm
-import Tropical.Ir.EmitMsl
 import Tropical.HostPort
 import Tropical.Compile
 import Tropical.Entries

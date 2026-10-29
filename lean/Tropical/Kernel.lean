@@ -5,12 +5,12 @@ import Tropical.Plan
 
 `design/typed-kernel.md` (2026-10-28): a kernel is one pure function from a
 record of named, static-shaped, typed inputs to a record of outputs. This
-module is the type and its wire form, `tropical_kernel_1`. In this slice
-(T1) the type is *derived* from a `FlatPlan` and emitted beside the plan's
-own manifest; no host consumes it yet. Later slices make it the thing the
-emitters target and the loaders read.
+module is the type and its wire form, `tropical_kernel_1`. The type is
+*derived* from a `FlatPlan`: `EmitLlvm`/`EmitMsl` emit the port it names,
+`Tropical.Artifact` ships it as the artifact's manifest, and the loaders
+(`FlatRuntime`, the web runtime) read it.
 
-What the derivation says today:
+What the derivation says:
 
 * `tau` is the first input: the clock rail (`i64` in Q32.32, the
   `fixed-carrier.md` ledger), shape `[frames]`, role `signal`. Shapes are

@@ -34,15 +34,14 @@ def InstanceResolution.toInstanceInfo
   resolvedIdx := resolved.resolvedIdx? }
 
 /-- Resolve a program name (+ optional type args) to instance metadata
-    plus the typed-store snapshot for the resolved program, with the TS
-    failure shapes. Generic programs specialize through the service's
-    `resolve_type`, whose entry is adopted into the store; concrete
-    programs take the store's current mapping for the name.
+    plus the typed-store snapshot for the resolved program. Concrete
+    programs take the store's current mapping for the name; no program
+    declares type parameters, so `type_args` must be absent or empty.
 
     `toolEnvelopes := false` selects the LOAD/MERGE ingest path's
-    failure shapes — `resolveProgramType`'s plain TS Errors
-    (`Unknown program type '…'. Known: …` etc.), which the service
-    relay surfaced as `internal_error` with the verbatim message. -/
+    failure shape: a plain `internal_error` carrying the message
+    (`Unknown program type '…'. Known: …`), as `mcp/ERRORS.md` documents
+    for file ingest, instead of the tool-call `unknown_program` enum. -/
 def resolveInstanceMeta (programName : String)
     (typeArgs : Option Json) (programParam : String)
     (toolEnvelopes : Bool := true) :
@@ -50,8 +49,8 @@ def resolveInstanceMeta (programName : String)
   let st ← get
   match st.programs.get? programName with
   | none =>
-    -- TS options: [...typeRegistry.keys(), ...programs.keys()] — concrete
-    -- names first, then every program name (concrete ones repeat).
+    -- The options list is concrete names first, then every catalog name
+    -- (concrete ones repeat): the documented `unknown_program` shape.
     let concrete := st.catalogOrder.filter fun n =>
       (st.programs.get? n).isSome
     if !toolEnvelopes then
@@ -150,7 +149,7 @@ def ingestProgram (node : JsonV) (merge : Bool) : SessionM Unit := do
         | _ => Lean.toJson (0 : Nat)
       pure (name, value)
     else none
-  -- Merge collision checks (fail fast, TS order: instances then params).
+  -- Merge collision checks (fail fast; instances are checked before params).
   if merge then
     let st ← get
     for d in jvBodyEntries node "decls" do
@@ -224,8 +223,8 @@ def ingestProgram (node : JsonV) (merge : Bool) : SessionM Unit := do
           | some op => internalError (WireExpr.uncompilableMessage path op)
           | none => modify (·.setWireRaw instName input expr)
 
-  -- Input defaults — every instance in registry order (TS loops the
-  -- whole registry, pre-existing instances included on merge).
+  -- Input defaults — every instance in registry order, pre-existing
+  -- instances included on merge.
   let st ← get
   for (name, info) in st.instances do
     for port in info.progMeta.inputs do

@@ -19,20 +19,16 @@ namespace Tropical.Session
 
 open Lean (Json toJson)
 
--- ── Snapshot compile (`wire()` in TS) ────────────────────────────────────────
+-- ── Snapshot compile ─────────────────────────────────────────────────────────
 
 /-- If any wire needs lifting (array literals), lift each to an
-    anonymous `__wire_N` program — engine-side as of Phase 5 stage 6b
-    (port of `liftWiresToInstances`): build the wire program
-    (`Tropical.Ir.WireProgram.lift`), run strata, ship the raw AND
-    post-strata forms to the service's `register_lifted` (registry
-    residue: typeRegistry Compiled + the raw form in
-    `session.programs`, which export_program's resolver reads), adopt
-    the entry, add the instance, wire each free ref back to its
-    source, and replace the original wire with a ref to the lifted
-    instance — same observable behavior the TS engine's in-session
-    lift had. Lift/strata failures were plain TS Errors → internal_error
-    with the verbatim message. -/
+    anonymous `__wire_N` program: build the wire program
+    (`Tropical.Ir.WireProgram.lift`), run strata, register the raw form
+    under its name (what `export_program`'s resolver reads) and the
+    post-strata entry as the instance's resolved type, add the instance,
+    wire each free ref back to its source, and replace the original wire
+    with a ref to the lifted instance. Lift/strata failures are
+    `internal_error` with the verbatim message. -/
 def liftIfNeeded : SessionM Unit := do
   let st ← get
   -- Capture before mutation — never re-lift a wire just inserted.
@@ -44,26 +40,22 @@ def liftIfNeeded : SessionM Unit := do
     let lifted ← match Tropical.Ir.WireProgram.lift w.expr synthName st.arena.exprs with
       | .error msg => internalError msg
       | .ok r => pure r
-    -- The raw lifted program joins the store: templateByName mirrors
-    -- TS `session.programs.set(name, lifted)` — the RAW form, which
-    -- is what a later registration's relink byName would see. The lifted
-    -- body's ids intern into the store's shared expression DAG.
+    -- The raw lifted program joins the store under its name — the RAW
+    -- form, which is what a later registration's relink byName sees. The
+    -- lifted body's ids intern into the store's shared expression DAG.
     let arenaRaw := {
       st.arena with
       programs := st.arena.programs.push lifted.program
       exprs := lifted.exprs }
     let rawIdx : Tropical.Ir.ProgramIdx := ⟨st.arena.programs.size⟩
-    -- (the raw form itself is never encoded — it has no consumer since the
-    -- service residue left; only the post-strata encode below is used)
-    -- Strata, no relink (lifted bodies have no InstanceDecls — the
-    -- registry is empty, exactly the TS lift's `programRegistry: new
-    -- Map()`).
+    -- Only the post-strata form is encoded into an entry below. Strata
+    -- runs with no relink: a lifted body has no InstanceDecls.
     let (arenaPost, postIdx) ← match runStrataChecked arenaRaw rawIdx with
       | .error msg => internalError msg
       | .ok r => pure r
     -- Persist the raw program + counter; the post-strata arena growth
-    -- is transient — the store adopts the service entry's round trip,
-    -- one copy, like the registration path.
+    -- is transient — the store adopts the entry's round trip, one copy,
+    -- like the registration path.
     modify fun s =>
       { s with arena := arenaRaw,
                nameCounters := s.nameCounters.insert "__wire" counter,
