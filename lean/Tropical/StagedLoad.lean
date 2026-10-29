@@ -16,7 +16,22 @@ compiler's (`Tropical.Artifact`); this module is only the loading side.
 namespace Tropical.StagedLoad
 
 open Tropical.Plan (FlatPlan)
-open Tropical.Artifact (KernelArtifact split splitTyped emitJit emitMetal)
+open Tropical.Artifact (KernelArtifact emitJit emitMetal)
+
+/-- The emission options this host's environment selects:
+    `TROPICAL_STAGE0=0` disables the stage-0 split. The core never reads
+    the environment; the roots that boot on libtropical read it here. -/
+def optionsFromEnv : IO Tropical.Artifact.Options := do
+  pure { stage0 := (← IO.getEnv "TROPICAL_STAGE0") != some "0" }
+
+private def split (plan : FlatPlan) : IO Tropical.Ir.Stage0.Split := do
+  pure (Tropical.Artifact.split (← optionsFromEnv) plan)
+
+private def splitTyped (plan : FlatPlan)
+    (stageBlocks : Array (Array (Option Tropical.Ir.Stage))) : IO Tropical.Ir.Stage0.Split := do
+  match Tropical.Artifact.splitTyped (← optionsFromEnv) plan stageBlocks with
+  | .ok s => pure s
+  | .error e => throw <| IO.userError s!"StagedLoad: {e}"
 
 /-- Debug: `TROPICAL_STAGE0_DUMP=<dir>` writes the artifact. -/
 private def dumpParts (parts : KernelArtifact) : IO Unit := do

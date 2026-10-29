@@ -105,19 +105,13 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
       sourceOutput := s!"tap:{id}" })
   pure { plan, taps, stageBlocks }
 
--- ── Stdlib-into-arena (the shared chain; cached below via `getStdlib`) ───────
-def elabStdlib : IO (Except String (Arena × Array (String × ProgramIdx))) :=
-  Tropical.StdlibChain.elabStdlib
+/-- The stdlib arena the playground links against (`StdlibChain.elabStdlib`,
+    the arrow-builder fold). A long-lived caller (the engine) builds it once
+    at boot and passes it to `compilePlanPure`; `compilePlan` rebuilds it per
+    call for one-shot callers. -/
+abbrev Stdlib := Arena × Array (String × ProgramIdx)
 
-initialize stdlibCache : IO.Ref (Option (Arena × Array (String × ProgramIdx))) ← IO.mkRef none
-
-def getStdlib : IO (Except String (Arena × Array (String × ProgramIdx))) := do
-  match ← stdlibCache.get with
-  | some v => pure (.ok v)
-  | none =>
-    match ← elabStdlib with
-    | .error e => pure (.error e)
-    | .ok v => stdlibCache.set (some v); pure (.ok v)
+def stdlib : Except String Stdlib := Tropical.StdlibChain.elabStdlib
 
 /-- Every live param as `(name, valueJson)` — the session param mirror the engine
     seeds after a successful load, so `set_param` (which guards on the mirror and
@@ -128,8 +122,8 @@ def knobParams (j : Json) : Array (String × Json) :=
   (collectParams (rawsOf j)).map (fun (nm, v) => (nm, Json.num v))
 
 /-- Decode + lower + compile the GUI graph to a loadable `FlatPlan` + its
-    taps + typed stage blocks (the split classification). -/
-def compilePlan (j : Json) : IO (Except String CompiledPatch) := do
-  match ← getStdlib with
-  | .error e => pure (.error s!"stdlib elaboration: {e}")
-  | .ok (arena, resolved) => pure (compilePlanPure arena resolved j)
+    taps + typed stage blocks (the split classification), against a freshly
+    built stdlib. -/
+def compilePlan (j : Json) : Except String CompiledPatch := do
+  let (arena, resolved) ← stdlib.mapError (s!"stdlib elaboration: {·}")
+  compilePlanPure arena resolved j

@@ -21,8 +21,11 @@ private def buildLoadArtifacts (env : Env) (plan : Tropical.Plan.FlatPlan)
     (stages? : Option (Array (Array (Option Tropical.Ir.Stage))))
     (emitMsl : Bool) : EngineM Tropical.Artifact.KernelArtifact := do
   let split ← match stages? with
-    | some blocks => Tropical.Artifact.splitTyped plan blocks
-    | none => Tropical.Artifact.split plan
+    | some blocks =>
+      match Tropical.Artifact.splitTyped env.artifact plan blocks with
+      | .ok s => pure s
+      | .error e => internalError e
+    | none => pure (Tropical.Artifact.split env.artifact plan)
   -- Shapes are static: the artifact is compiled for the frames the host
   -- renders per call (`design/typed-kernel.md`).
   let emitted := if emitMsl then Tropical.Artifact.emitMetal split env.host.frames
@@ -31,16 +34,12 @@ private def buildLoadArtifacts (env : Env) (plan : Tropical.Plan.FlatPlan)
   | .error msg => internalError s!"Emit artifact: {msg}"
   | .ok artifact => pure artifact
 
-/-- Emit the plan's kernel artifacts and load them into the runtime: the
-    stage-0 split first (Stage0.hoist, gated by `TROPICAL_STAGE0`), then
-    LLVM IR for the audio kernel — and the coefficient kernel when
-    anything hoisted — always; on the metal backend also the MSL kernel,
-    dual-loaded (audio on the GPU, render_window/the scope on the JIT;
-    coefficients run on the CPU JIT in f64 and cross to the GPU as
-    host-written slots, coefficient COLUMNS as the packed `coeff_columns`
-    buffer). Any emit failure errors BEFORE the load, so the
-    previous kernel keeps playing — the same recoverable contract as the
-    IR path. -/
+/-- Emit the plan's artifact and publish it through the host port: the
+    stage-0 split first (under the root's `Artifact.Options`), then the
+    port kernel with the coefficient plan as its prologue; on the metal
+    backend also the MSL kernel and the CPU pre-pass, dual-loaded (audio on
+    the GPU, render_window/the scope on the JIT). Any emit failure errors
+    BEFORE the load, so the previous kernel keeps playing. -/
 def loadKernelPublished (env : Env) (plan : Tropical.Plan.FlatPlan)
     (stages? : Option (Array (Array (Option Tropical.Ir.Stage))) := none) :
     EngineM Tropical.Host.PublishedGeneration := do

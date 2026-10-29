@@ -47,6 +47,11 @@ private def graphArtifactArgs (args : Json) (taps : Json) : Json :=
     .obj (fields.insert "taps" taps)
   | _ => args
 
+/-- The playground compile against the engine's boot-time stdlib arena. -/
+private def compilePatchGraph (env : Env) (graph : Json) :
+    Except String Tropical.Playground.CompiledPatch :=
+  Tropical.Playground.compilePlanPure env.stdlib.1 env.stdlib.2 graph
+
 /-- EXPERIMENT (`load_patch_graph`): compile a downstream-only patch graph (the
     playground GUI) through the EmitArrow arrow lowering — `lowerGraph → normalize
     (the slide) → emitTerm` — to a session root, then the production
@@ -58,7 +63,7 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
     | .ok graph => pure graph
   let requestedTaps := selectedObservationTapNames flatArgs
   let (compiled, publishedTaps, generation) ← if requestedTaps.isEmpty then
-      let compiled ← match ← Tropical.Playground.compilePlan flatArgs with
+      let compiled ← match compilePatchGraph env flatArgs with
         | .error e => internalError e
         | .ok p => pure p
       let generation ←
@@ -73,10 +78,10 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
       let audioArgs := graphArtifactArgs flatArgs (Json.bool false)
       let observationArgs := graphArtifactArgs flatArgs
         (Json.arr (requestedTaps.map Json.str))
-      let audio ← match ← Tropical.Playground.compilePlan audioArgs with
+      let audio ← match compilePatchGraph env audioArgs with
         | .error e => internalError e
         | .ok p => pure p
-      let observation ← match ← Tropical.Playground.compilePlan observationArgs with
+      let observation ← match compilePatchGraph env observationArgs with
         | .error e => internalError e
         | .ok p => pure p
       let generation ← loadKernelWithObservationPublished env
@@ -136,10 +141,14 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
 /-- Boot the stdlib and build the Env. The boot chain itself is
     `Tropical.Session.registerStdlib`; any failure there is fatal: the engine
     cannot compile without its store. -/
-def boot (host : Tropical.Host.HostPort) : IO Env := do
+def boot (host : Tropical.Host.HostPort)
+    (artifact : Tropical.Artifact.Options := {}) : IO Env := do
   let state ← IO.mkRef ({} : SessionSt)
   let dac ← IO.mkRef (none : Option Tropical.Host.OutputPort)
-  let env : Env := { state, host, dac }
+  let stdlib ← match Tropical.Playground.stdlib with
+    | .ok s => pure s
+    | .error e => throw <| IO.userError s!"stdlib elaboration failed: {e}"
+  let env : Env := { state, host, dac, artifact, stdlib }
   match ← (env.session registerStdlib).run with
   | .ok () => pure ()
   | .error f => throw <| IO.userError s!"stdlib boot failed: {f.toJson.compress}"

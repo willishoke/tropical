@@ -126,7 +126,7 @@ def renderGraph (args : List String) : IO UInt32 := do
   let j ← match Lean.Json.parse text with
     | .error e => IO.eprintln s!"render-graph: parse: {e}"; return 1
     | .ok j => pure j
-  match ← Tropical.Playground.compilePlan j with
+  match Tropical.Playground.compilePlan j with
   | .error e => IO.eprintln s!"render-graph: compile: {e}"; return 1
   | .ok compiled =>
     -- `--dump-plan=<path>`: write the compiled plan's wire JSON (so `emit-msl`
@@ -138,7 +138,10 @@ def renderGraph (args : List String) : IO UInt32 := do
         IO.FS.writeFile path wire.compress
         IO.eprintln s!"render-graph: wrote plan to {path}"
         return 0
-    let split ← Tropical.Artifact.splitTyped compiled.plan compiled.stageBlocks
+    let opts ← Tropical.StagedLoad.optionsFromEnv
+    let split ← match Tropical.Artifact.splitTyped opts compiled.plan compiled.stageBlocks with
+      | .error e => IO.eprintln s!"render-graph: {e}"; return 1
+      | .ok s => pure s
     IO.eprintln s!"render-graph: hoisted columns={split.audio.coeffArraySlots.size}"
     -- `--stage-census`: how the typed stages and the split distribute the plan
     if args.contains "--stage-census" then
@@ -223,7 +226,7 @@ def renderSweep (args : List String) : IO UInt32 := do
   let j ← match Lean.Json.parse text with
     | .error e => IO.eprintln s!"render-sweep: parse: {e}"; return 1
     | .ok j => pure j
-  match ← Tropical.Playground.compilePlan j with
+  match Tropical.Playground.compilePlan j with
   | .error e => IO.eprintln s!"render-sweep: compile: {e}"; return 1
   | .ok compiled =>
     let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
@@ -303,7 +306,8 @@ def emitIrVerb (args : List String) : IO UInt32 := do
   match ← compileToFlatPlan patch with
   | .error e => IO.eprintln e; return 1
   | .ok plan =>
-    match Tropical.Ir.EmitLlvm.emitKernel (← Tropical.Artifact.split plan) frames with
+    let opts ← Tropical.StagedLoad.optionsFromEnv
+    match Tropical.Ir.EmitLlvm.emitKernel (Tropical.Artifact.split opts plan) frames with
     | .error e => IO.eprintln s!"emitKernel: {e}"; return 1
     | .ok ir => IO.println ir; return 0
 

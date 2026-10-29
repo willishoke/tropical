@@ -79,7 +79,7 @@ def main (args : List String) : IO UInt32 := do
   if args.contains "--oriented-patch-only" then
     return if ← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch {} then 0 else 1
   if args.contains "--ecdd-only" then
-    match ← Tropical.Playground.getStdlib with
+    match Tropical.Playground.stdlib with
     | .error error =>
         IO.eprintln error
         return 1
@@ -88,7 +88,7 @@ def main (args : List String) : IO UInt32 := do
         let liveOk ← Tropical.Tropicaltest.SeamSweep.runEcddLive arena resolved
         return if partitionOk && liveOk then 0 else 1
   if args.contains "--modal-universe-history-only" then
-    match ← Tropical.Playground.getStdlib with
+    match Tropical.Playground.stdlib with
     | .error error =>
         IO.eprintln error
         return 1

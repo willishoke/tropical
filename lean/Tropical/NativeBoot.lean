@@ -1,5 +1,6 @@
 import Tropical.Engine
 import Tropical.NativeHost
+import Tropical.StagedLoad
 
 /-!
 # NativeBoot — the composition root for a native-hosted engine
@@ -43,6 +44,7 @@ def bootWithRuntime : IO (Ffi.Runtime × Engine.Env) := do
   let frames ← bufferLength
   let runtime ← Ffi.Runtime.new frames
   let env ← Engine.boot (runtime.hostPort frames.toNat (← backend))
+    (← StagedLoad.optionsFromEnv)
   pure (runtime, env)
 
 /-- Boot an engine on a fresh native runtime. -/

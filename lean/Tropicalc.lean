@@ -71,7 +71,13 @@ def main (args : List String) : IO UInt32 := do
     let some out := parseStrFlag args "--out"
       | IO.eprintln usage; return 1
     let metal := args.contains "--metal"
-    let split ← Tropical.Artifact.splitTyped plan stageBlocks
+    -- The one environment read, at the root: `TROPICAL_STAGE0=0` is the
+    -- stage-0 kill-switch the engine honours too.
+    let opts : Tropical.Artifact.Options :=
+      { stage0 := (← IO.getEnv "TROPICAL_STAGE0") != some "0" }
+    let split ← match Tropical.Artifact.splitTyped opts plan stageBlocks with
+      | .error e => IO.eprintln s!"tropicalc: {e}"; return 1
+      | .ok s => pure s
     let emitted := if metal then Tropical.Artifact.emitMetal split frames
                    else Tropical.Artifact.emitJit split frames
     let artifact ← match emitted with

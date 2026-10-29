@@ -33,7 +33,7 @@ open Tropical.Ir (Arena ProgramIdx)
     are in the arena for `buildClockCarrier` to link against. Done once and
     reused. -/
 def arrowElabStdlib : IO (Except String (Arena × Array (String × ProgramIdx))) :=
-  Tropical.StdlibChain.elabStdlib
+  pure Tropical.StdlibChain.elabStdlib
 
 /-- Finish a built carrier program into a runnable `FlatPlan` via the
     production session path: the full lowering, then the carrier as the synthetic

@@ -23,6 +23,23 @@ The helpers exposed here are the engine's shared vocabulary — non-`private`
 because every downstream handler module consumes them.
 -/
 
+namespace Tropical
+
+/-- The handler monad: tool logic that can fail with an envelope, over the
+    host's IO. The pure session logic runs in `Session.SessionM`; this is
+    the engine's lift of it onto a live host. -/
+abbrev EngineM := ExceptT Failure IO
+
+/-- Run a handler, framing success/failure as a ToolResult. IO exceptions
+    map to `internal_error`. -/
+def wrap (m : EngineM Lean.Json) : IO Lean.Json := do
+  match ← (try m.run catch e => pure (.error (.env
+      { code := .internalError, message := toString e, retryable := false }))) with
+  | .ok data   => pure (okResult data)
+  | .error f   => pure (failResult f)
+
+end Tropical
+
 namespace Tropical.Engine
 
 open Lean (Json toJson)
@@ -36,6 +53,10 @@ structure Env where
       (`Tropical.NativeBoot`) supplies it. -/
   host    : Tropical.Host.HostPort
   dac     : IO.Ref (Option Tropical.Host.OutputPort)
+  /-- Emission options the composition root chose (the stage-0 split). -/
+  artifact : Tropical.Artifact.Options := {}
+  /-- The stdlib arena `load_patch_graph` links against, built once at boot. -/
+  stdlib : Tropical.Playground.Stdlib
 
 /-- Run pure session logic against this engine's session. State written
     before a failure is kept, exactly as when the logic wrote the ref

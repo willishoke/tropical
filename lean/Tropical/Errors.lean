@@ -100,12 +100,10 @@ def Failure.toJson : Failure → Json
   | .env e => e.toJson
   | .raw j => j
 
-/-- The handler monad: tool logic that can fail with an envelope. -/
-abbrev EngineM := ExceptT Failure IO
-
-/-- Any monad that can fail with an envelope: `EngineM`, and the pure
-    session monad (`Tropical.Session.SessionM`). The throw helpers below are
-    written against this so the same validation code runs in both. -/
+/-- Any monad that can fail with an envelope: the engine's handler monad
+    (`Tropical.EngineM`, over the host's IO) and the pure session monad
+    (`Tropical.Session.SessionM`). The throw helpers below are written
+    against this so the same validation code runs in both. -/
 class abbrev MonadFailure (m : Type → Type) := Monad m, MonadExceptOf Failure m
 
 -- ── Levenshtein suggestions ──────────────────────────────────────────────────
@@ -193,13 +191,5 @@ def failResult (f : Failure) : Json :=
   Json.mkObj [("content", Json.arr #[
     Json.mkObj [("type", Json.str "text"), ("text", Json.str payload.compress)]]),
     ("isError", Json.bool true)]
-
-/-- Run a handler, framing success/failure as a ToolResult. IO exceptions
-    map to `internal_error`, matching the TS `wrap`'s catch-all. -/
-def wrap (m : EngineM Json) : IO Json := do
-  match ← (try m.run catch e => pure (.error (.env
-      { code := .internalError, message := toString e, retryable := false }))) with
-  | .ok data   => pure (okResult data)
-  | .error f   => pure (failResult f)
 
 end Tropical

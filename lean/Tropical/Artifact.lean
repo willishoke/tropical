@@ -39,27 +39,27 @@ structure KernelArtifact where
     a different kernel; every host path passes its own value. -/
 def defaultFrames : Nat := 512
 
-/-- Kill-switch for A/B and debugging: `TROPICAL_STAGE0=0` disables the
-    split (the whole plan runs in the sample loop). -/
-def enabled : IO Bool := do
-  pure ((← IO.getEnv "TROPICAL_STAGE0") != some "0")
+/-- Emission options a composition root chooses. The core reads no
+    environment: a root that honours `TROPICAL_STAGE0=0` (the kill-switch
+    for A/B and debugging — the whole plan runs in the sample loop) maps it
+    to `stage0 := false` here. -/
+structure Options where
+  stage0 : Bool := true
+deriving Repr, Inhabited
 
-/-- The env-gated split (flow classification — the only splitter where
-    the arena is gone, i.e. plans parsed from JSON). -/
-def split (plan : FlatPlan) : IO Split := do
-  if ← enabled then pure (hoist plan)
-  else pure { audio := plan, coeff? := none }
+/-- The split by flow classification — the only splitter where the arena
+    is gone, i.e. plans parsed from JSON. -/
+def split (opts : Options) (plan : FlatPlan) : Split :=
+  if opts.stage0 then hoist plan else { audio := plan, coeff? := none }
 
-/-- The env-gated TYPED split: classification from the intern-time
-    stage attribute (the partitioner's emit-order stage blocks), the
-    production path wherever the session compile is in hand. -/
-def splitTyped (plan : FlatPlan)
-    (stageBlocks : Array (Array (Option Tropical.Ir.Stage))) : IO Split := do
-  if ← enabled then
-    match Tropical.Ir.Stage0.hoistTyped plan stageBlocks with
-    | .ok s => pure s
-    | .error e => throw <| IO.userError s!"StagedLoad (typed split): {e}"
-  else pure { audio := plan, coeff? := none }
+/-- The TYPED split: classification from the intern-time stage attribute
+    (the partitioner's emit-order stage blocks), the production path
+    wherever the session compile is in hand. -/
+def splitTyped (opts : Options) (plan : FlatPlan)
+    (stageBlocks : Array (Array (Option Tropical.Ir.Stage))) : Except String Split :=
+  if opts.stage0 then
+    (Tropical.Ir.Stage0.hoistTyped plan stageBlocks).mapError (s!"Artifact (typed split): {·}")
+  else .ok { audio := plan, coeff? := none }
 
 /-- The JIT-only artifact: the port kernel and its manifest. -/
 def emitJit (s : Split) (frames : Nat) : Except String KernelArtifact := do
