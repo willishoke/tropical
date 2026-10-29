@@ -35,11 +35,7 @@ structure Env where
       DAC reads from it; param slots are driven on it. The composition root
       (`Tropical.NativeBoot`) supplies it. -/
   host    : Tropical.Host.HostPort
-  dac     : IO.Ref (Option Tropical.Host.DacPort)
-  /-- `TROPICAL_BACKEND=metal` at boot: every session compile dual-loads
-      (LLVM IR → JIT + MSL → GPU pipeline) and audio dispatches on Metal.
-      The JIT keeps serving render_window/the scope either way. -/
-  metalBackend : Bool := false
+  dac     : IO.Ref (Option Tropical.Host.OutputPort)
 
 /-- Run pure session logic against this engine's session. State written
     before a failure is kept, exactly as when the logic wrote the ref

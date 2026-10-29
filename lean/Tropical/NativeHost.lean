@@ -11,9 +11,9 @@ the runtime object (and so the C handle) alive for the port's lifetime.
 
 namespace Tropical.Ffi
 
-open Tropical.Host (HostPort DacPort)
+open Tropical.Host (HostPort OutputPort Backend)
 
-def Dac.port (d : Dac) : DacPort where
+def Dac.port (d : Dac) : OutputPort where
   start := d.start
   stop := d.stop
   isRunning := d.isRunning
@@ -22,8 +22,9 @@ def Dac.port (d : Dac) : DacPort where
   bufferFrames := d.bufferFrames
   stats := d.stats
 
-def Runtime.hostPort (rt : Runtime) (frames : Nat) : HostPort where
+def Runtime.hostPort (rt : Runtime) (frames : Nat) (backend : Backend) : HostPort where
   frames := frames
+  backend := backend
   publish a :=
     rt.loadGeneration a.ir a.msl a.stage0Ir a.manifest
   publishWithObservation a o :=
@@ -33,9 +34,12 @@ def Runtime.hostPort (rt : Runtime) (frames : Nat) : HostPort where
   sampleRate := rt.sampleRate
   process := rt.process
   outputBytes := rt.outputBytes
-  metalRenderTimeNs := rt.metalRenderTimeNs
-  metalRenderedFrameCount := rt.metalRenderedFrameCount
-  openDac sampleRate channels := do
+  -- libtropical's off-callback renderer is its Metal tile worker; the JIT
+  -- renders in the callback and these read zero.
+  renderStats := do
+    pure { renderTimeNs := ← rt.metalRenderTimeNs,
+           renderedFrames := ← rt.metalRenderedFrameCount }
+  openOutput sampleRate channels := do
     pure (← Dac.fromRuntime rt sampleRate channels).port
   listDevices := listDevices
 

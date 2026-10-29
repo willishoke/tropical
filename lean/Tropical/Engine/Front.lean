@@ -138,9 +138,8 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
     cannot compile without its store. -/
 def boot (host : Tropical.Host.HostPort) : IO Env := do
   let state ← IO.mkRef ({} : SessionSt)
-  let dac ← IO.mkRef (none : Option Tropical.Host.DacPort)
-  let metalBackend := (← IO.getEnv "TROPICAL_BACKEND") == some "metal"
-  let env : Env := { state, host, dac, metalBackend }
+  let dac ← IO.mkRef (none : Option Tropical.Host.OutputPort)
+  let env : Env := { state, host, dac }
   match ← (env.session registerStdlib).run with
   | .ok () => pure ()
   | .error f => throw <| IO.userError s!"stdlib boot failed: {f.toJson.compress}"

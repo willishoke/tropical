@@ -22,7 +22,7 @@ next recompile, which Phase 2 fixes by writing the slot.)
 
 namespace Tropical.Ffi
 
-open Tropical.Host (PublishedGeneration DacStats DeviceInfo ParamWrite)
+open Tropical.Host (PublishedGeneration OutputStats DeviceInfo ParamWrite)
 
 private opaque RuntimePointed : NonemptyType
 /-- A `tropical_runtime_t` (FlatRuntime): the hot-swappable kernel host. -/
@@ -254,7 +254,7 @@ def isReconnecting (d : Dac) : IO Bool := dacIsReconnecting d.handle
 def switchDevice (d : Dac) (deviceId : UInt32) : IO Bool := dacSwitchDevice d.handle deviceId
 def bufferFrames (d : Dac) : IO UInt32 := dacBufferFrames d.handle
 
-def stats (d : Dac) : IO DacStats := do
+def stats (d : Dac) : IO OutputStats := do
   pure {
     callbackCount := ← dacStatCallbackCount d.handle
     avgCallbackMs := ← dacStatAvgMs d.handle

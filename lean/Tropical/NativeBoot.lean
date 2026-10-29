@@ -30,12 +30,19 @@ private def bufferLength : IO UInt32 := do
       throw <| IO.userError
         "TROPICAL_BUFFER_LENGTH must be an integer in [16,16384]"
 
+/-- `TROPICAL_BACKEND=metal` selects the Metal realization for live audio:
+    every session compile dual-loads (LLVM IR → JIT + MSL → GPU pipeline)
+    and audio dispatches on Metal; the JIT keeps serving render_window and
+    the scope either way. Read once here, at the composition root. -/
+private def backend : IO Host.Backend := do
+  pure (if (← IO.getEnv "TROPICAL_BACKEND") == some "metal" then .metal else .jit)
+
 /-- Boot an engine on a fresh native runtime, returning both. The runtime is
     for host-side services that need the raw handle (the `--serve` socket). -/
 def bootWithRuntime : IO (Ffi.Runtime × Engine.Env) := do
   let frames ← bufferLength
   let runtime ← Ffi.Runtime.new frames
-  let env ← Engine.boot (runtime.hostPort frames.toNat)
+  let env ← Engine.boot (runtime.hostPort frames.toNat (← backend))
   pure (runtime, env)
 
 /-- Boot an engine on a fresh native runtime. -/

@@ -44,7 +44,7 @@ private def buildLoadArtifacts (env : Env) (plan : Tropical.Plan.FlatPlan)
 def loadKernelPublished (env : Env) (plan : Tropical.Plan.FlatPlan)
     (stages? : Option (Array (Array (Option Tropical.Ir.Stage))) := none) :
     EngineM Tropical.Host.PublishedGeneration := do
-  let artifact ← buildLoadArtifacts env plan stages? env.metalBackend
+  let artifact ← buildLoadArtifacts env plan stages? (env.host.backend == .metal)
   env.host.publish artifact
 
 /-- Compatibility form for compile paths whose replies do not expose the
@@ -62,7 +62,7 @@ def loadKernelWithObservationPublished (env : Env)
     (audioPlan observationPlan : Tropical.Plan.FlatPlan)
     (audioStages observationStages : Array (Array (Option Tropical.Ir.Stage))) :
     EngineM Tropical.Host.PublishedGeneration := do
-  let audio ← buildLoadArtifacts env audioPlan (some audioStages) env.metalBackend
+  let audio ← buildLoadArtifacts env audioPlan (some audioStages) (env.host.backend == .metal)
   let observation ←
     buildLoadArtifacts env observationPlan (some observationStages) false
   env.host.publishWithObservation audio observation

@@ -34,7 +34,7 @@ private def validatePositiveInt (v : Option Json) (param : String)
 private def containsSub (hay needle : String) : Bool :=
   needle.isEmpty || (hay.splitOn needle).length > 1
 
-private def isRunningJson (dac : Tropical.Host.DacPort) : EngineM Json := do
+private def isRunningJson (dac : Tropical.Host.OutputPort) : EngineM Json := do
   pure <| Json.mkObj [("is_running", Json.bool (← dac.isRunning))]
 
 def handleStartAudio (env : Env) (args : Json) : EngineM Json := do
@@ -43,7 +43,7 @@ def handleStartAudio (env : Env) (args : Json) : EngineM Json := do
     | none =>
       let sampleRate ← validatePositiveInt (arg? args "sample_rate") "sample_rate" 44100
       let channels   ← validatePositiveInt (arg? args "channels") "channels" 2
-      let d ← env.host.openDac sampleRate.toUInt32 channels.toUInt32
+      let d ← env.host.openOutput sampleRate.toUInt32 channels.toUInt32
       env.dac.set (some d)
       pure d
   match argStr? args "device_name" with
@@ -74,7 +74,7 @@ def handleStopAudio (env : Env) : EngineM Json := do
     isRunningJson dac
 
 def handleAudioStatus (env : Env) : EngineM Json := do
-  let backend := if env.metalBackend then "metal" else "jit"
+  let backend := env.host.backend.wire
   match ← env.dac.get with
   | none => pure <| Json.mkObj [
       ("is_running", Json.bool false),
@@ -83,8 +83,10 @@ def handleAudioStatus (env : Env) : EngineM Json := do
     let stats ← dac.stats
     let sampleRate ← env.host.sampleRate
     let bufferFrames ← dac.bufferFrames
-    let metalRenderTimeNs ← env.host.metalRenderTimeNs
-    let metalRenderedFrames ← env.host.metalRenderedFrameCount
+    -- The wire keys keep their historical names: on libtropical the
+    -- off-callback renderer is the Metal tile worker, and Reversible reads
+    -- these two fields by name.
+    let render ← env.host.renderStats
     pure <| Json.mkObj [
       ("is_running", Json.bool (← dac.isRunning)),
       ("is_reconnecting", Json.bool (← dac.isReconnecting)),
@@ -95,8 +97,8 @@ def handleAudioStatus (env : Env) : EngineM Json := do
         ("callbackCount", toJson stats.callbackCount.toNat),
         ("avgCallbackMs", toJson stats.avgCallbackMs),
         ("maxCallbackMs", toJson stats.maxCallbackMs),
-        ("metalRenderTimeNs", toJson metalRenderTimeNs.toNat),
-        ("metalRenderedFrames", toJson metalRenderedFrames.toNat),
+        ("metalRenderTimeNs", toJson render.renderTimeNs.toNat),
+        ("metalRenderedFrames", toJson render.renderedFrames.toNat),
         ("underrunCount", toJson stats.underrunCount.toNat),
         ("overrunCount",  toJson stats.overrunCount.toNat)])]
 
