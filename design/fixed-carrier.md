@@ -23,7 +23,7 @@ Two independent motivations converged:
 
 | quantity | format | storage | notes |
 |---|---|---|---|
-| clock | Q32.32 signed | i64 | unchanged; `sampleIndex << 32` |
+| clock | Q32.32 signed | i64 | τ itself (`ENode.tau`, the port's coordinate); the integer sample index is the derived `tau >> 32` |
 | phase | Q0.32 (masked, cycles) | i64 | one turn = 2³²; `fixedPhase`/`modePhaseW`/ClockPhasor's pre-`toFloat` accumulator |
 | half-turn index | int | i64 | `n = (P + 2³⁰) >> 31` |
 | quarter-turn residual `s` | Q2.30 signed | i64 | `r = P − (n<<31)`; `r` IS `s = r/2³⁰ ∈ [−1, 1)` |

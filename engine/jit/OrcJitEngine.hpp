@@ -181,18 +181,18 @@ struct Sink
 
 // A runtime-bound input source — the dual of `Sink`. The kernel reads source
 // values via `OperandKind::Source` operands carrying an index into the plan's
-// `sources` array; the engine switches on the source's `kind` to the
-// appropriate kernel argument (Tick → current_sample_idx, Rate →
-// sample_rate_arg). v1: sources[0] = Tick, sources[1] = Rate.
+// `sources` array. Lean's emitters bind them (Tau → the frame's Q32.32
+// coordinate `tau[s]`, Rate → the plan's literal rate); the manifest reader
+// only records them. Canonical: sources[0] = Tau, sources[1] = Rate.
 enum class SourceKind : uint8_t
 {
-  Tick,  // current sample index (integer)
-  Rate,  // current sample rate (float)
+  Tau,   // τ, the Q32.32 time coordinate (i64)
+  Rate,  // the rate (float)
 };
 
 struct Source
 {
-  SourceKind kind = SourceKind::Tick;
+  SourceKind kind = SourceKind::Tau;
 };
 
 struct FlatProgram

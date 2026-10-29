@@ -66,7 +66,7 @@ top-level fields rather than ignoring them:
 `scheduler_function`.
 
 Canonical Plan-6 omissions are not legacy compatibility. The current encoder
-may omit fused `compilation_mode`, the default tick/rate `sources` pair, empty
+may omit fused `compilation_mode`, the default tau/rate `sources` pair, empty
 child/instruction arrays, and zero loop ids. Decoders retain those current
 defaults.
 

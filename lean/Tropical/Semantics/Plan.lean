@@ -29,13 +29,13 @@ structure PlanInputs (α : Type) where
   initialArrays : Array (Array (Value α)) := #[]
 
 /-- Named source rails from which a Plan's positional source image is built.
-Audio plans select `tick`/`rate` in their declared order. -/
+Audio plans select `tau`/`rate` in their declared order. -/
 structure PlanSourceImage (α : Type) where
-  tick : Value α
+  tau : Value α
   rate : Value α
 
 def PlanSourceImage.value (image : PlanSourceImage α) : SourceKind → Value α
-  | .tick => image.tick
+  | .tau => image.tau
   | .rate => image.rate
 
 def PlanInputs.withDeclaredSources (inputs : PlanInputs α)

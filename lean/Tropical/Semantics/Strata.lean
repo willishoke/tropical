@@ -313,7 +313,7 @@ private theorem denoteExpr_copy_map_eq {src dst : ExprArena}
         simp only [denoteNode]
         rw [denoteExpr_copy_map_eq hMap alg env hSrcArena hDstArena hArray,
           denoteExpr_copy_map_eq hMap alg env hSrcArena hDstArena hIndex]
-  | inputRef index | paramRef index | sampleRate | sampleIndex
+  | inputRef index | paramRef index | sampleRate | tau
   | loopIdx index =>
     simp [remapENode?] at hRemap
     subst dstNode

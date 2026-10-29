@@ -291,10 +291,23 @@ port. Where the implementation settled differently from the text above:
   the port. A C host cannot call a function of arbitrary arity; the thunk is
   the host's convenience, not part of the type. `compile_ir_text` renames
   every definition and looks the thunk up.
-- **`current_idx` is `tau >> 32`.** The kernels' integer tick is derived from
-  the rail, so a fractional τ is representable at the port but truncates to
-  its integer sample for today's tick-based arithmetic. Fractional
-  evaluation is a later change to the emitters, not to the port.
+- **τ is the IR's time leaf.** The resolved IR's only time primitive is
+  `ENode.tau`, the Q32.32 coordinate itself (Plan source `tau`, bound by the
+  emitters to `tau[s]`); the integer sample index is the derived expression
+  `tau >> 32`, spelled where a builder wants the integer grid (a glide's
+  start tick, a seed) and nowhere in the emitters. Every clock is an
+  expression over τ, and the one place a clock multiplied τ as an integer
+  tick — `ScrubClock`'s `base + velocity · τ` and the playground master
+  clock — now uses the exact split product `scaleClockQ`. So a fractional τ
+  evaluates the closed form at that fractional instant, gated by
+  `fractional-tau` in `tropicaltest`: `ScrubClock(½)` on the integer grid at
+  τ = 2k+1 is byte-identical to the default clock at τ = k+½. The host-side τ
+  fill with explicit coordinates is `tropical_runtime_render_tau`
+  (`Runtime.renderTau` in Lean); `render_window` remains the integer
+  progression over it. (Landed 2026-10-28, the day after T2/T3; an
+  integer-grid render is byte-identical to before, the wire-plan and MSL text
+  goldens were re-frozen once because the `tau << 32 >> 32` round trip is
+  gone from the emitted plan.)
 - **Output channels are named.** The `out` port carries `channels`, one
   source name per channel, and a scope tap is an output channel of the
   observation artifact (the playground routes each tap to its own channel).

@@ -59,7 +59,7 @@ private def collectNestedOutDeps (ea : ExprArena) (hw : ea.wf = true)
     | some d => collectNestedOutDeps ea hw numInstances acc d
     | none => acc
   | some (.inputRef _) | some (.paramRef _)
-  | some (.sampleRate) | some (.sampleIndex)
+  | some (.sampleRate) | some (.tau)
   | some (.loopIdx _) => acc
 termination_by id.idx
 decreasing_by

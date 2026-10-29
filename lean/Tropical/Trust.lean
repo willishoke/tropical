@@ -176,7 +176,7 @@ def obligations : Array Obligation := #[
       "patch-goldens"]
     owner := "Backend correctness"
     status := .open
-    limitation := "Tropical.EmitArrow.compileClockRail_refines projects an assumed CompileResultRefinesScalar witness; it does not establish constructor compilation. The arena-native identities, signed-i64 image laws, and declared tick source lookup are proved, while whole compileNode constructor closure and correspondence from Plan execution to emitted LLVM/MSL integer execution remain open."
+    limitation := "Tropical.EmitArrow.compileClockRail_refines projects an assumed CompileResultRefinesScalar witness; it does not establish constructor compilation. The arena-native identities, signed-i64 image laws, and declared tau source lookup are proved, while whole compileNode constructor closure and correspondence from Plan execution to emitted LLVM/MSL integer execution remain open."
     priority := .critical },
   { id := "REDUCE_REGION_EXECUTES_IN_ARRAY_ORDER"
     statement := "JIT, wasm, and MSL execute bank bodies at increasing indices with a scalar left fold and a dynamic count clamped to the static capacity."
@@ -299,7 +299,7 @@ def obligations : Array Obligation := #[
       "current_module_process", "manual:serialized-plan boundary review"]
     owner := "Compatibility"
     status := .evidenceBacked
-    limitation := "Canonical plan 6 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, mono output_channel_count, the tick/rate source pair, empty child/instruction arrays, zero loop ids, and the ordinary sample-thread Metal execution description."
+    limitation := "Canonical plan 6 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, mono output_channel_count, the tau/rate source pair, empty child/instruction arrays, zero loop ids, and the ordinary sample-thread Metal execution description."
     priority := .medium },
   { id := "FROZEN_AUDIO_GOLDENS_ANCHOR_CORRECTNESS"
     statement := "Frozen audio hashes are the independent behavioral anchor after retirement of the TypeScript compiler."

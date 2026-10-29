@@ -165,6 +165,30 @@ LEAN_EXPORT lean_obj_res shim_runtime_output_bytes(b_lean_obj_arg rt, lean_obj_a
   return lean_io_result_mk_ok(arr);
 }
 
+/* Render explicit Q32.32 coordinates — a little-endian i64 ByteArray — against
+   the observation artifact. Returns channel-major little-endian f64s
+   (count × channels), or the runtime's error. */
+LEAN_EXPORT lean_obj_res shim_runtime_render_tau(b_lean_obj_arg rt, b_lean_obj_arg tau,
+                                                 b_lean_obj_arg channels,
+                                                 lean_obj_arg world) {
+  (void)world;
+  size_t count = lean_sarray_size(tau) / sizeof(int64_t);
+  size_t n = lean_array_size(channels);
+  unsigned int ids[64];
+  if (n > 64) return io_err("render_tau: more than 64 channels");
+  for (size_t i = 0; i < n; i++)
+    ids[i] = lean_unbox_uint32(lean_array_get_core(channels, i));
+  size_t bytes = count * n * sizeof(double);
+  lean_obj_res arr = lean_alloc_sarray(1, bytes, bytes);
+  if (!tropical_runtime_render_tau(unwrap(rt), (const int64_t *)lean_sarray_cptr(tau),
+                                   (unsigned int)count, ids, (unsigned int)n,
+                                   (double *)lean_sarray_cptr(arr))) {
+    lean_dec(arr);
+    return io_err(tropical_last_error());
+  }
+  return lean_io_result_mk_ok(arr);
+}
+
 /* Copy compact frame-major native output into a fresh ByteArray. */
 LEAN_EXPORT lean_obj_res shim_runtime_output_interleaved_bytes(
     b_lean_obj_arg rt, lean_obj_arg world) {

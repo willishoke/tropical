@@ -17,7 +17,7 @@ structure SigEnv (α : Type) where
   params : Array (Value α) := #[]
   nestedOutputs : Array (Array (Value α)) := #[]
   sampleRate : Value α
-  sampleIndex : Value α
+  tau : Value α
   /-- Unique bank binder id to its current value. `bindLoop` shadows the same
       id, although well-formed production terms forbid ancestor collisions. -/
   loops : Nat → Option (Value α) := fun _ => none
@@ -29,7 +29,7 @@ def SigEnv.bindLoop (env : SigEnv α) (id : Nat) (value : Value α) : SigEnv α 
     runtime rails are scalar. -/
 def EnvWellFormed (env : SigEnv α) : Prop :=
   (∃ value, env.sampleRate = .scalar value) ∧
-  (∃ value, env.sampleIndex = .scalar value)
+  (∃ value, env.tau = .scalar value)
 
 /-- Interpret one flat environment reference with the production refusal text. -/
 def lookupValue (operation : String) (xs : Array (Value α)) (idx : Nat) :

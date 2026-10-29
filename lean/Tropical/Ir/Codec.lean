@@ -94,7 +94,7 @@ def encExpr (arena : Arena) (hw : arena.exprs.wf = true) (id : ExprId) : EncM Js
     pure <| Json.mkObj [("op", Json.str "nestedOut"),
                         ("instance", Lean.toJson inst.idx), ("output", Lean.toJson out.idx)]
   | some .sampleRate => pure <| Json.mkObj [("op", Json.str "sampleRate")]
-  | some .sampleIndex => pure <| Json.mkObj [("op", Json.str "sampleIndex")]
+  | some .tau => pure <| Json.mkObj [("op", Json.str "tau")]
   -- `id` omitted when 0 so pre-nesting programs serialize byte-identically.
   | some (.loopIdx id) =>
     let idField : Option Json := if id == 0 then none else some (Lean.toJson id)
@@ -390,7 +390,7 @@ private def expr (ctx : String) (j : JsonV) : DecM ExprId := do
     | "nestedOut" =>
       internD (.nestedOut ⟨← reqNat ctx j "instance"⟩ ⟨← reqNat ctx j "output"⟩)
     | "sampleRate" => internD .sampleRate
-    | "sampleIndex" => internD .sampleIndex
+    | "tau" => internD .tau
     -- optional binder id (nested banks); absent = 0, the pre-nesting form.
     | "loopIdx" => do
       let id ← match j.getField? "id" with

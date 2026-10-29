@@ -76,23 +76,23 @@ theorem compileClockRail_refines
         .ok (.scalar (i64Image (denoteClock rail env))) := by
   exact ⟨hrefines.operand, hrefines.scalarResult, hrefines.evaluates⟩
 
-/-- The canonical `.tick` Plan operand index is populated by the named tick
+/-- The canonical `.tau` Plan operand index is populated by the named tau
     source.  `evalOperand_source_of_getElem` turns this image fact into operand
     evaluation at the public Plan seam. -/
-theorem declaredTick_source
+theorem declaredTau_source
     (inputs : PlanInputs α) (image : PlanSourceImage α) :
-    (inputs.withDeclaredSources defaultSources image).sources[sourceTick]? =
-      some image.tick := by
+    (inputs.withDeclaredSources defaultSources image).sources[sourceTau]? =
+      some image.tau := by
   simp [PlanInputs.withDeclaredSources, defaultSources, PlanSourceImage.value,
-    sourceTick]
+    sourceTau]
 
-theorem evalOperand_tick_withDeclaredSources
+theorem evalOperand_tau_withDeclaredSources
     (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
     (image : PlanSourceImage α) :
-    evalOperand alg (inputs.withDeclaredSources defaultSources image) state opTick =
-      .ok image.tick := by
-  exact evalOperand_source_of_getElem alg _ state sourceTick .int image.tick
-    (declaredTick_source inputs image)
+    evalOperand alg (inputs.withDeclaredSources defaultSources image) state opTau =
+      .ok image.tau := by
+  exact evalOperand_source_of_getElem alg _ state sourceTau .int image.tau
+    (declaredTau_source inputs image)
 
 theorem warp_inv_i64 {arena : ExprArena} {c delta sum root : ExprId}
     (clockRail : OnClockRail arena c) (deltaRail : OnClockRail arena delta)

@@ -31,7 +31,10 @@ module slot vector, the array backing stores and the SSA scratch are
 `alloca`s inside the function, seeded per call from the plan's slot
 defaults, the param inputs and the stage-0 prologue (the coefficient plan's
 instructions, emitted before the sample loop — currying, not a second
-kernel). The rate is a literal. `%current_idx` is `tau[s] >> 32`.
+kernel). The rate is a literal. The plan's `tau` source is `%tau_s`, the
+frame's Q32.32 coordinate itself: a fractional τ evaluates the closed form
+at that fractional instant (the integer sample index is `tau >> 32`, derived
+in the IR where a builder wants it, never here).
 
 A second exported function, `@tropical_kernel_argv(ptr %argv)`, unpacks a
 pointer table and calls the port — the host-side thunk a C caller needs,
@@ -288,7 +291,7 @@ def resolveOperand : NOperand → M TVal
   | .source idx _ => do
     let srcs := (← get).sources
     match srcs[idx]? with
-    | some .tick => pure ⟨"%current_idx", .int⟩
+    | some .tau => pure ⟨"%tau_s", .int⟩
     | some .rate => pure ⟨f64Lit (← get).sampleRate, .float⟩
     | none => pure ⟨f64Lit 0.0, .float⟩
   | .slot idx t => do
@@ -863,9 +866,9 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
       let v ← fresh; line s!"{v} = load double, ptr %in_{j + 1}, align 8"
       storeSlotF64 paramSlots[j]! v
     -- Stage-0 prologue: the coefficient plan's instructions, once per call.
-    -- `%current_idx` is unreachable from τ-independent code; defined so a
-    -- stray tick read is zero, as the one-sample host call made it.
-    line "%cidx0 = add i64 0, 0"
+    -- `%tau_s` is unreachable from τ-independent code; defined so a stray τ
+    -- read is zero, as the one-sample host call made it.
+    line "%tau0 = add i64 0, 0"
     if let some coeff := split.coeff? then
       for inst in coeff.instanceFunctions do
         emitKernelBlock inst
@@ -881,20 +884,19 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
     labelLine "loop_body"
     line "%tau_ptr = getelementptr inbounds i64, ptr %tau, i64 %s"
     line "%tau_s = load i64, ptr %tau_ptr, align 8"
-    line "%current_idx = ashr i64 %tau_s, 32"
     for inst in plan.instanceFunctions do
       emitKernelBlock inst
     emitSinks plan.sinks outputChannelCount
   let init : St := { sources := plan.sources, sampleRate := plan.sampleRate.toFloat,
                      arraySizes := sizes, arraysInline := true }
-  -- Inside the prologue `%current_idx` is not yet defined (the loop defines
-  -- it); the prologue's stray tick reads are renamed to `%cidx0`.
+  -- Inside the prologue `%tau_s` is not yet defined (the loop loads it); the
+  -- prologue's stray τ reads are renamed to `%tau0`.
   match body.run init with
   | .error e _ => .error e
   | .ok _ st =>
     let lastBlock := st.curBlock
     let lines := st.lines.map fun l => l.replace "%LOOP_LAST" s!"%{lastBlock}"
-    -- Prologue lines precede `loop_cond:`; rewrite their tick reads.
+    -- Prologue lines precede `loop_cond:`; rewrite their τ reads.
     let (prologue, rest) := Id.run do
       let mut pro : Array String := #[]
       let mut rest : Array String := #[]
@@ -902,7 +904,7 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
       for l in lines do
         if l == "loop_cond:" then inLoop := true
         if inLoop then rest := rest.push l
-        else pro := pro.push (l.replace "%current_idx" "%cidx0")
+        else pro := pro.push (l.replace "%tau_s" "%tau0")
       return (pro, rest)
     let bodyText := String.intercalate "\n" (prologue ++ rest).toList
     let globalsText := String.intercalate "\n" st.globals.toList
@@ -939,7 +941,7 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
     storage, one evaluation per call. -/
 def emitStage0 (coeff : FlatPlan) : Except String String := do
   let body : M Unit := do
-    line "%current_idx = add i64 0, 0"
+    line "%tau_s = add i64 0, 0"
     for inst in coeff.instanceFunctions do
       emitKernelBlock inst
   let init : St := { sources := coeff.sources, sampleRate := coeff.sampleRate.toFloat,

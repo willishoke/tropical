@@ -423,7 +423,7 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
   }
 
   // ── sources: runtime-bound inputs (the dual of sinks). The Plan-6 encoder
-  //    omits the canonical pair [tick, rate], which is restored here. ──
+  //    omits the canonical pair [tau, rate], which is restored here. ──
   if (plan.contains("sources"))
   {
     for (const auto & js : plan["sources"])
@@ -431,8 +431,8 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
       tropical_jit::Source src;
       const std::string k = js.is_string()
         ? js.get<std::string>() : js.value("kind", std::string{});
-      if (k == "tick")
-        src.kind = tropical_jit::SourceKind::Tick;
+      if (k == "tau")
+        src.kind = tropical_jit::SourceKind::Tau;
       else if (k == "rate")
         src.kind = tropical_jit::SourceKind::Rate;
       else
@@ -443,7 +443,7 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
   }
   else
   {
-    prog.sources.push_back({ tropical_jit::SourceKind::Tick });
+    prog.sources.push_back({ tropical_jit::SourceKind::Tau });
     prog.sources.push_back({ tropical_jit::SourceKind::Rate });
   }
 

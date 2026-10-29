@@ -242,8 +242,8 @@ theorem sampleRate_preserves : ProducesSig sampleRate := by
     intro builder hBuilder
     simp [ENodeChildrenIn, ENode.children])
 
-theorem sampleIndex_preserves : ProducesSig sampleIndex := by
-  simpa [sampleIndex] using internSig_preserves .sampleIndex (by
+theorem tau_preserves : ProducesSig tau := by
+  simpa [tau] using internSig_preserves .tau (by
     intro builder hBuilder
     simp [ENodeChildrenIn, ENode.children])
 

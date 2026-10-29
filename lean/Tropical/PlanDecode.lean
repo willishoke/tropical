@@ -149,7 +149,7 @@ private def sinkOfWire (j : JsonV) : Except String SinkSpec := do
 
 private def sourceOfWire (j : JsonV) : Except String SourceKind := do
   match j with
-  | .str "tick" => pure .tick
+  | .str "tau" => pure .tau
   | .str "rate" => pure .rate
   | .str s => .error s!"PlanDecode: bad source kind '{s}'"
   | _ => .error "PlanDecode: source kind must be a string"

@@ -60,7 +60,7 @@ def denoteNode (alg : Algebra α) (env : SigEnv α) (node : ENode)
   | .nestedOut instanceIdx outputIdx =>
     lookupNested env instanceIdx.idx outputIdx.idx
   | .sampleRate => .ok env.sampleRate
-  | .sampleIndex => .ok env.sampleIndex
+  | .tau => .ok env.tau
   | .loopIdx binderId =>
     match env.loops binderId with
     | some value => .ok value
@@ -146,7 +146,7 @@ theorem denoteExpr_extends {before after : ExprArena}
     denoteExpr_of_deref alg env after hAfter (hExtends hDeref)]
   cases node with
   | num | bool | inputRef | paramRef | nestedOut | sampleRate
-  | sampleIndex | loopIdx => simp [denoteNode]
+  | tau | loopIdx => simp [denoteNode]
   | arr items =>
     simp only [denoteNode]
     have hItems :

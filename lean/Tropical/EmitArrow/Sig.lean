@@ -113,7 +113,10 @@ def nestedOut (instance_ : InstanceIdx) (output : OutputIdx) : BuildM Sig :=
 
 def sampleRate : BuildM Sig := internSig .sampleRate
 
-def sampleIndex : BuildM Sig := internSig .sampleIndex
+/-- τ, the kernel's time coordinate: the Q32.32 clock the port is called with
+    (`i64`, integer samples in the high word, the fraction in the low word).
+    Every `Clock` is an expression over this one leaf. -/
+def tau : BuildM Sig := internSig .tau
 
 def arr (items : Array Sig) : BuildM Sig := internSig (.arr items)
 
@@ -151,6 +154,14 @@ def bitAnd (a b : Sig) : BuildM Sig := binary .bitAnd a b
 def bitOr (a b : Sig) : BuildM Sig := binary .bitOr a b
 def rshift (a b : Sig) : BuildM Sig := binary .rshift a b
 def lshift (a b : Sig) : BuildM Sig := binary .lshift a b
+
+/-- The integer sample index, `⌊τ⌋ = τ >> 32` (an arithmetic shift, so it is
+    the floor for negative coordinates too). Derived, not primitive: the
+    fraction of τ is dropped HERE and nowhere else, so a builder that reads
+    `sampleIndex` is stating that it works on the integer grid (a glide's
+    start tick, a seed). Clocks read `tau`. -/
+def sampleIndex : BuildM Sig := do
+  rshift (← tau) (← lit 32)
 def gt (a b : Sig) : BuildM Sig := binary .gt a b
 def ldexpE (mantissa exponent : Sig) : BuildM Sig :=
   binary .ldexp mantissa exponent

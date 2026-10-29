@@ -27,7 +27,7 @@ open Tropical.Ir
     keyed by its source `ExprId`; structural interning makes equal source
     subgraphs use the same key. -/
 structure ClockEnv where
-  tick : Int
+  tau : Int
   boundary : ExprId → Int
 
 /-- The Q32.32 clock fragment, stated on ids in one frozen expression arena.
@@ -40,8 +40,8 @@ inductive OnClockRail (arena : ExprArena) : ExprId → Type where
   | intLit (id : ExprId) (m : Int)
       (node : arena.deref id = some (.num ⟨m, 0⟩)) :
       OnClockRail arena id
-  | tick (id : ExprId)
-      (node : arena.deref id = some .sampleIndex) :
+  | tau (id : ExprId)
+      (node : arena.deref id = some .tau) :
       OnClockRail arena id
   | boundary (id source : ExprId)
       (node : arena.deref id = some (.unary .toInt source)) :
@@ -85,7 +85,7 @@ inductive OnClockRail (arena : ExprArena) : ExprId → Type where
 def denoteClock {arena : ExprArena} :
     {id : ExprId} → OnClockRail arena id → ClockEnv → Int
   | _, .intLit _ m _, _ => m
-  | _, .tick _ _, env => env.tick
+  | _, .tau _ _, env => env.tau
   | _, .boundary _ source _, env => env.boundary source
   | _, .neg _ argRail, env => -(denoteClock argRail env)
   | _, .add _ lhsRail rhsRail, env =>

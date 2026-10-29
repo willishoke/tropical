@@ -98,11 +98,13 @@ private def modeBody (t : Nat) (k : NOperand) : Array NInstr := #[
   instrScalar "Mul" (t+4) #[rgI (t+2), rgI (t+3)] .int]         -- w·(k+1)
 
 /-- Shared tail: scale the i64 accumulator (temp `acc`) to float, mix
-    with τ (so the render is per-sample), write the output slot. -/
+    with the sample index ⌊τ⌋ (so the render is per-sample), write the
+    output slot. Uses temps `t` .. `t+5`. -/
 private def tailInstrs (acc t : Nat) : Array NInstr := #[
   instrScalar "ToFloat" t #[rgI acc] .float,
   instrScalar "Div" (t+1) #[rgF t, cF 268435456] .float,
-  instrScalar "ToFloat" (t+2) #[Tropical.Plan.opTick] .float,
+  instrScalar "RShift" (t+5) #[Tropical.Plan.opTau, cI 32] .int,
+  instrScalar "ToFloat" (t+2) #[rgI (t+5)] .float,
   instrScalar "Mod" (t+3) #[rgF (t+2), cF 64] .float,
   instrScalar "Mul" (t+4) #[rgF (t+1), rgF (t+3)] .float,
   instrWriteSlot 0 (rgF (t+4))]
@@ -124,7 +126,7 @@ private def reduceLoopPlan : FlatPlan :=
     ++ #[instrScalar "Add" 1 #[rgI 1, rgI 6] .int,
          instrReduceEnd 1 .int]
     ++ tailInstrs 1 7
-  reducePlanOf body 12
+  reducePlanOf body 13
 
 /-- The unrolled twin: same ops, literal indices, explicit adds. -/
 private def reduceUnrolledPlan : FlatPlan := Id.run do
@@ -140,7 +142,7 @@ private def reduceUnrolledPlan : FlatPlan := Id.run do
   for i in [1:4] do
     body := body.push (instrScalar "Add" (t+i) #[rgI (t+i-1), rgI accs[i]!] .int)
   body := body ++ tailInstrs (t+3) (t+4)
-  reducePlanOf body (t+9)
+  reducePlanOf body (t+10)
 
 def runReduceCoverage : IO Bool := do
   match ← renderIrBytes reduceLoopPlan, ← renderIrBytes reduceUnrolledPlan with

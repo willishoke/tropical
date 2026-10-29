@@ -35,13 +35,14 @@ private def regionS0PlanOf (dyn : Bool) : FlatPlan :=
     instrScalar "Mul" 5 #[rgF 2, rgF 4] .float,                 -- v·(k+1)
     instrScalar "Add" 1 #[rgF 1, rgF 5] .float,
     instrReduceEnd 1 .float,
-    instrScalar "ToFloat" 6 #[Tropical.Plan.opTick] .float,     -- the s1 consumer
+    instrScalar "RShift" 9 #[Tropical.Plan.opTau, cI 32] .int,  -- ⌊τ⌋: the s1 consumer
+    instrScalar "ToFloat" 6 #[rgI 9] .float,
     instrScalar "Mod" 7 #[rgF 6, cF 64] .float,
     instrScalar "Mul" 8 #[rgF 1, rgF 7] .float,
     instrWriteSlot 0 (rgF 8)]
-  let inst := InstanceFunction.mk "root" "root" #[] body #[] 0 0 9 #[]
+  let inst := InstanceFunction.mk "root" "root" #[] body #[] 0 0 10 #[]
   { sampleRate := jn 44100, compilationMode := .fused,
-    arraySlotNames := #["table"], registerCount := 9, arraySlotCount := 1,
+    arraySlotNames := #["table"], registerCount := 10, arraySlotCount := 1,
     arraySlotSizes := #[4], instanceFunctions := #[inst],
     sinks := #[{ inputs := #[0], gain := jn 1, target := 0 }],
     sources := defaultSources, slotCount := 4,
@@ -55,7 +56,7 @@ private def regionS0PlanOf (dyn : Bool) : FlatPlan :=
 private def regionS0Stages : Array (Array (Option Tropical.Ir.Stage)) :=
   let s0 : Option Tropical.Ir.Stage := some .s0
   let s1 : Option Tropical.Ir.Stage := some .s1
-  #[#[], #[s0, s0, s0, s0, s0, s0, s0, s0, s1, s1, s1, s1]]
+  #[#[], #[s0, s0, s0, s0, s0, s0, s0, s0, s1, s1, s1, s1, s1]]
 
 /-- THE REGION-HOIST gate (region-aware Stage0, WS3a). A reduce region whose
     body is entirely s0 (param-slot-derived, no clock/tick dependence) plus an
@@ -327,13 +328,14 @@ private def foldColumnPlan : FlatPlan :=
     instrScalar "Mul" 5 #[rgF 2, .slot 1 .float] .float,        -- v·param:a  (s0)
     instrScalar "Add" 1 #[rgF 1, rgF 5] .float,
     instrReduceEnd 1 .float,
-    instrScalar "ToFloat" 6 #[Tropical.Plan.opTick] .float,     -- the s1 consumer
+    instrScalar "RShift" 11 #[Tropical.Plan.opTau, cI 32] .int, -- ⌊τ⌋: the s1 consumer
+    instrScalar "ToFloat" 6 #[rgI 11] .float,
     instrScalar "Mod" 7 #[rgF 6, cF 64] .float,
     instrScalar "Mul" 8 #[rgF 1, rgF 7] .float,
     instrWriteSlot 0 (rgF 8)]
-  let inst := InstanceFunction.mk "root" "root" #[] body #[] 0 0 11 #[]
+  let inst := InstanceFunction.mk "root" "root" #[] body #[] 0 0 12 #[]
   { sampleRate := jn 44100, compilationMode := .fused,
-    arraySlotNames := #["table"], registerCount := 11, arraySlotCount := 1,
+    arraySlotNames := #["table"], registerCount := 12, arraySlotCount := 1,
     arraySlotSizes := #[4], instanceFunctions := #[inst],
     sinks := #[{ inputs := #[0], gain := jn 1, target := 0 }],
     sources := defaultSources, slotCount := 2,
@@ -344,20 +346,21 @@ private def foldColumnStages : Array (Array (Option Tropical.Ir.Stage)) :=
   let f : Option Tropical.Ir.Stage := some .fold
   let s0 : Option Tropical.Ir.Stage := some .s0
   let s1 : Option Tropical.Ir.Stage := some .s1
-  #[#[], #[f, f, f, s0, s0, s0, s0, s0, s1, s1, s1, s1]]
+  #[#[], #[f, f, f, s0, s0, s0, s0, s0, s1, s1, s1, s1, s1]]
 
 /-- An AUDIO plan that writes a hoisted column in-kernel — the split bug the
     Metal guard must refuse — with `varying` (τ-derived) or constant args. -/
 private def columnWritePlan (varying : Bool) : FlatPlan :=
   let v : NOperand := if varying then rgF 6 else cF 1
   let body : Array NInstr := #[
-    instrScalar "ToFloat" 6 #[Tropical.Plan.opTick] .float,
+    instrScalar "RShift" 7 #[Tropical.Plan.opTau, cI 32] .int,
+    instrScalar "ToFloat" 6 #[rgI 7] .float,
     instrPack 0 #[v, v, v, v],
     instrIndex 2 #[.arrayReg 0, cI 0] .float,
     instrWriteSlot 0 (rgF 2)]
-  let inst := InstanceFunction.mk "root" "root" #[] body #[] 0 0 7 #[]
+  let inst := InstanceFunction.mk "root" "root" #[] body #[] 0 0 8 #[]
   { sampleRate := jn 44100, compilationMode := .fused,
-    arraySlotNames := #["table"], registerCount := 7, arraySlotCount := 1,
+    arraySlotNames := #["table"], registerCount := 8, arraySlotCount := 1,
     arraySlotSizes := #[4], instanceFunctions := #[inst],
     sinks := #[{ inputs := #[0], gain := jn 1, target := 0 }],
     sources := defaultSources, slotCount := 1, slotNames := #["out"],

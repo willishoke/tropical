@@ -340,10 +340,10 @@ def phase2Evidence : Except String Phase2Evidence := do
     ("reachable numeric nodes", nativeNumericExprs.nodes.size, 268),
     ("numeric wire bytes",      nativeNumericWire.length,      46451),
     ("stdlib programs",         nativeStdlib.programs.size,    15),
-    ("stdlib nodes",            nativeStdlib.exprs.nodes.size, 278),
+    ("stdlib nodes",            nativeStdlib.exprs.nodes.size, 289),
     ("carrier instances",       nativeProgram.decls.size,      3),
-    ("reachable carrier nodes", nativeExprs.nodes.size,        191),
-    ("carrier wire bytes",      nativeWire.length,             33230)]
+    ("reachable carrier nodes", nativeExprs.nodes.size,        190),
+    ("carrier wire bytes",      nativeWire.length,             32864)]
   let drifted := pinned.filter fun (_, actual, expected) => actual != expected
   unless drifted.isEmpty do
     let lines := drifted.toList.map fun (label, actual, expected) =>
@@ -439,8 +439,11 @@ def phase3Evidence : Except String Phase3Evidence := do
     -- k(k+1) `bankSum`s — 1299 → 1314 authored nodes (the image `index`
     -- reads), 508332 → 429612 wire bytes (one body per span instead of one
     -- per entry), and the routed count is 15 (below: the tripwire inverts).
-    ("authored nodes", nativeArena.exprs.nodes.size, 1314),
-    ("reachable nodes", nativeExprs.nodes.size, 1312),
+    -- 1314 → 1313 / 429612 → 429231 when τ became the IR's time leaf: the
+    -- clock is `tau` itself, no longer `sampleIndex << 32` (one node, one
+    -- literal fewer).
+    ("authored nodes", nativeArena.exprs.nodes.size, 1313),
+    ("reachable nodes", nativeExprs.nodes.size, 1311),
     -- 24 -> 0: `cauchyFold` now emits ordinary `bankSum` pairs; the carrier
     -- authors no routed reductions at all. Kept pinned as the tripwire that
     -- composition stays placement-hoistable (a routedSum here would be
@@ -459,7 +462,7 @@ def phase3Evidence : Except String Phase3Evidence := do
     -- meaning inverts: a routed span here is EXPECTED to hoist, and the
     -- `routed-sum-coverage` gate pins that placement directly.
     ("routed reductions", routed, 15),
-    ("wire bytes", nativeWire.length, 429612)]
+    ("wire bytes", nativeWire.length, 429231)]
   let drifted := pinned.filter fun (_, actual, expected) => actual != expected
   unless drifted.isEmpty do
     let lines := drifted.toList.map fun (label, actual, expected) =>

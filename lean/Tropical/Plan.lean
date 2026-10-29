@@ -20,7 +20,7 @@ Port of `compiler/flat_plan.ts` plus the instruction/operand types from
 - **Wire**: `toWire` encoders producing the plain-JSON shape the C++
   engine parses. Key-omission rules are mirrored from `toWirePlan` /
   `toWireInstanceFn`: `compilation_mode` omitted when `fused`, `sinks`
-  omitted when empty, `sources` omitted when canonical `[tick, rate]`,
+  omitted when empty, `sources` omitted when canonical `[tau, rate]`,
   `preamble_instructions` / `pre_input_instructions` / `children`
   omitted when empty. (Structural diff is key-order-insensitive, but
   key *presence* matters to it.)
@@ -74,11 +74,11 @@ inductive NOperand where
   | loopIdx (id : Nat := 0)
 deriving Repr, Inhabited
 
-/-- Canonical source indices (sessions always emit `[tick, rate]`). -/
-def sourceTick : Nat := 0
+/-- Canonical source indices (sessions always emit `[tau, rate]`). -/
+def sourceTau : Nat := 0
 def sourceRate : Nat := 1
 
-def opTick : NOperand := .source sourceTick .int
+def opTau : NOperand := .source sourceTau .int
 def opRate : NOperand := .source sourceRate .float
 
 def NOperand.toWire : NOperand → Json
@@ -464,14 +464,14 @@ def SinkSpec.toWire (s : SinkSpec) : Json :=
     ("target", toJson s.target)]
 
 inductive SourceKind where
-  | tick | rate
+  | tau | rate
 deriving BEq, Repr, Inhabited
 
 def SourceKind.wire : SourceKind → String
-  | .tick => "tick" | .rate => "rate"
+  | .tau => "tau" | .rate => "rate"
 
-/-- Canonical source ordering: `[tick, rate]`. -/
-def defaultSources : Array SourceKind := #[.tick, .rate]
+/-- Canonical source ordering: `[tau, rate]`. -/
+def defaultSources : Array SourceKind := #[.tau, .rate]
 
 def isDefaultSources (s : Array SourceKind) : Bool :=
   s == defaultSources

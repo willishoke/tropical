@@ -72,6 +72,28 @@ def fixedOutQ (fracBits : Nat) (x : Sig) : BuildM Sig := do
   let scale ← lit (Int.pow 2 fracBits)
   div xf scale
 
+/-- `(scaleQ · clk) >> 32`, exactly: a Q32.32 scale times a Q32.32 clock, as a
+    Q32.32 clock (`clock = base + velocity · τ`). The direct product overflows
+    i64 for any clock past a few seconds, so the clock is split at its floor
+    (`hi = clk >> 32`, `lo = clk & (2³²−1)`, `clk = hi·2³² + lo`) and the low
+    word again at 16 bits, so every partial product stays below 2⁶³ for
+    `|scaleQ| < 2⁴⁷` (a scale below 2¹⁵). The two-level floor is exact:
+    `⌊(a + ⌊x⌋)/m⌋ = ⌊(a + x)/m⌋` for integer `a`, and every `>>` is `ashr`
+    (floor), the ledger's rounding convention (`design/fixed-carrier.md`). An
+    integer clock has `lo = 0` and reduces to `scaleQ · hi`, so integer-grid
+    renders are byte-identical to the pre-fractional `velocityQ · sampleIndex`. -/
+def scaleClockQ (scaleQ clk : Sig) : BuildM Sig := do
+  let shift32 ← lit 32
+  let shift16 ← lit 16
+  let hi ← rshift clk shift32
+  let lo ← bitAnd clk (← lit 4294967295)
+  let loHi ← rshift lo shift16
+  let loLo ← bitAnd lo (← lit 65535)
+  let pHi ← mul scaleQ hi
+  let pLoLo ← rshift (← mul scaleQ loLo) shift16
+  let pLo ← rshift (← add (← mul scaleQ loHi) pLoLo) shift16
+  add pHi pLo
+
 def phasorPhaseSig (freqE offsetE clkSig : Sig) : BuildM Sig := do
   let twoPow32 ← lit 4294967296
   let scaledFreq ← mul freqE twoPow32

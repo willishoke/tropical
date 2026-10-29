@@ -284,7 +284,7 @@ private def tryTerminal (e : ENode) (expected : Option ScalarType) :
       | some ptr => pure (some (.param ptr .float, .float))
       | none => pure (some (.const (0 : Nat) .float, .float))
   | .sampleRate => pure (some (Tropical.Plan.opRate, .float))
-  | .sampleIndex => pure (some (Tropical.Plan.opTick, .int))
+  | .tau => pure (some (Tropical.Plan.opTau, .int))
   | .loopIdx id => pure (some (Tropical.Plan.NOperand.loopIdx id, .int))
   | .nestedOut inst out => do
     if let some perInstArr := lookup st.slots.nestedOutputArraySlots inst.idx then
@@ -409,7 +409,7 @@ private def compileNodeUncached (arena : ExprArena) (hw : arena.wf = true)
       (fun d hd => hch d (by
         simp only [ENode.children, Array.mem_append]
         exact Or.inr (by rw [Option.mem_def.mp hd]; simp)))
-  | .num _, _ | .bool _, _ | .paramRef _, _ | .sampleRate, _ | .sampleIndex, _
+  | .num _, _ | .bool _, _ | .paramRef _, _ | .sampleRate, _ | .tau, _
   | .loopIdx _, _ =>
     throw "emit_resolved: terminal node reached compileNodeUncached (port bug)"
 termination_by (bound, 1)

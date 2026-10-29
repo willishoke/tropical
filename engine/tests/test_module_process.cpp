@@ -88,8 +88,9 @@ static void run_test(const char* name, std::function<void()> fn)
 // The port (design/typed-kernel.md): `tropical_kernel(ptr tau, ptr in_1..k,
 // ptr out)` over a static frame count, plus the argv thunk compile_ir_text
 // looks up. Lean's EmitLlvm emits exactly this shape; these hand kernels
-// mirror it. Inside the loop `%s` is the frame, `%idx` the sample index
-// (`tau[s] >> 32`), `%in_<j>` the j-th param input, `%out` the output.
+// mirror it. Inside the loop `%s` is the frame, `%tau_s` the frame's Q32.32
+// coordinate, `%idx` its integer part (`tau[s] >> 32`, which these hand
+// kernels ramp on), `%in_<j>` the j-th param input, `%out` the output.
 static std::string wrap_kernel(unsigned int frames, unsigned int params,
                                const std::string& body)
 {

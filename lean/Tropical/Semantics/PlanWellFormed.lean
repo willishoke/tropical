@@ -32,7 +32,7 @@ private def operandScalarType? : NOperand → Option ScalarType
   | .arrayReg _ | .sessionArrayReg _ => none
 
 private def sourceType : SourceKind → ScalarType
-  | .tick => .int
+  | .tau => .int
   | .rate => .float
 
 private def operandWellFormed (plan : FlatPlan) (frames : List RegionFrame) :

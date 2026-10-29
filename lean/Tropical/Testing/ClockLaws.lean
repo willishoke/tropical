@@ -25,7 +25,7 @@ private structure InverseFixture where
 deriving Inhabited
 
 private def buildInverseFixture : BuildM InverseFixture := do
-  let clockLeaf ← sampleIndex
+  let clockLeaf ← tau
   let shiftAmount ← lit 32
   let clock ← lshift clockLeaf shiftAmount
   let deltaSource ← lit 1
@@ -40,7 +40,7 @@ private def built : InverseFixture × Builder :=
   | .error _ => default
 
 private theorem clockLeafNode :
-    built.2.exprs.deref built.1.clockLeaf = some .sampleIndex := by
+    built.2.exprs.deref built.1.clockLeaf = some .tau := by
   apply eq_of_beq
   native_decide
 
@@ -76,7 +76,7 @@ private theorem rootNode :
 private def clockRail : OnClockRail built.2.exprs built.1.clock :=
   .lshift (id := built.1.clock) (arg := built.1.clockLeaf)
     (amount := built.1.shiftAmount) 32 32 rfl clockNode shiftAmountNode
-    (.tick built.1.clockLeaf clockLeafNode)
+    (.tau built.1.clockLeaf clockLeafNode)
 
 private def deltaRail : OnClockRail built.2.exprs built.1.delta :=
   .boundary built.1.delta built.1.deltaSource deltaNode

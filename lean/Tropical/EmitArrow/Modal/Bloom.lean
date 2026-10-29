@@ -124,7 +124,7 @@ def bloomCFE (cfB cfN : Array CplxE) (z : CplxE) : BuildM CplxE := do
 /- Is this `Sig` a pure s0 value — a function of knob slots and constants only
     (no `τ`/tick, no input, no bank machinery)? The live-pole lift's admission
     check: the lifted pair constants are correct (and Stage0-hoistable) only if
-    the pole read is knob-invariant per sample. A GLIDED pole (`.sampleIndex`
+    the pole read is knob-invariant per sample. A GLIDED pole (`.tau`
     inside `glideExpr`) fails here — `settle` it first (the recorded WS-LP
     discipline; reverb rt60 is raw ⇒ s0, filter cutoff/resonance are glided).
     The frozen arena is classified once in child-before-parent order, so shared

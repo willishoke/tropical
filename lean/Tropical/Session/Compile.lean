@@ -99,7 +99,7 @@ def liftIfNeeded : SessionM Unit := do
     instance decls in topo order then params alphabetical; each `InstanceInput`
     `port` = the target program's input position; wires resolved to `Ir.Expr`
     (`nestedOut ⟨topoIdx⟩ ⟨outputIdx⟩`, `paramRef ⟨alphaIdx⟩`, builtins —
-    `clock()` ⇒ `sampleIndex << 32`, `sampleRate`/`sampleIndex` direct); registry
+    `clock()` ⇒ `tau`, `sampleIndex` ⇒ `tau >> 32`, `sampleRate` direct); registry
     accumulated per-instance with the transitive merge. -/
 
 /-- Resolution context for a session wire expression. Not `private`: the
@@ -146,9 +146,10 @@ def wireExprToResolved (ctx : WireCtx) (expr : Tropical.WireExpr) :
       | some i => internWE (.inputRef ⟨i⟩)
       | none => throwThe String s!"unknown name '{name}'"
   | .sampleRate => internWE .sampleRate
-  | .sampleIndex => internWE .sampleIndex
-  | .clock => do
-    internWE (.binary .lshift (← internWE .sampleIndex) (← internWE (.num ⟨32, 0⟩)))
+  | .sampleIndex => do
+    -- The integer sample index is `⌊τ⌋`; the IR's time leaf is τ itself.
+    internWE (.binary .rshift (← internWE .tau) (← internWE (.num ⟨32, 0⟩)))
+  | .clock => internWE .tau
   | .clamp a b c => do
     internWE (.clamp (← wireExprToResolved ctx a) (← wireExprToResolved ctx b)
       (← wireExprToResolved ctx c))

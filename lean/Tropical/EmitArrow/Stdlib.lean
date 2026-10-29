@@ -50,10 +50,8 @@ def floatDecl (name : String) (default : Sig) : AInputDecl :=
 def clockInDecl (name : String) (default : Sig) : AInputDecl :=
   { name, type? := some (.scalar .int), defaultSig := some default }
 
-def clockSig : BuildM Sig := do
-  let sample ← sampleIndex
-  let shift ← lit 32
-  lshift sample shift
+/-- The default clock input: τ itself (see `Term.clockLit`). -/
+def clockSig : BuildM Sig := tau
 
 def floatOut (name : String := "out") : OutputDecl :=
   { name, type? := some (.scalar .float) }
@@ -128,8 +126,8 @@ def buildScrubClock (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
     let base ← toIntE baseFixed
     let velocityFixed ← mul velocity twoPow32
     let velocityInt ← toIntE velocityFixed
-    let sample ← sampleIndex
-    let ramp ← mul velocityInt sample
+    -- `clk = base + velocity · τ` on the Q32.32 rail, exact at fractional τ.
+    let ramp ← scaleClockQ velocityInt (← tau)
     let body ← add base ramp
     let zero ← lit 0
     let one ← lit 1

@@ -30,6 +30,7 @@ import Tropical.Tropicaltest.GroupedRoomReference
 import Tropical.Tropicaltest.Oriented
 import Tropical.Tropicaltest.Block
 import Tropical.Tropicaltest.KernelType
+import Tropical.Tropicaltest.FractionalTau
 import Tropical.Tropicaltest.BlockRealize
 import Tropical.Tropicaltest.OrientedPatch
 
@@ -165,6 +166,11 @@ def main (args : List String) : IO UInt32 := do
   IO.println "typed kernel (the port: tau/params/out, tropical_kernel_1 round trip):"
   total := total + 1
   if !(← Tropical.Tropicaltest.KernelType.runKernelType) then failed := failed + 1
+
+  -- ── (b⁗′) Fractional τ at the port: the closed form at half-sample instants ──
+  IO.println "fractional tau (scrub(½) on the grid ≡ τ at k+½, byte-exact):"
+  total := total + 1
+  if !(← Tropical.Tropicaltest.FractionalTau.runFractionalTau) then failed := failed + 1
 
   -- ── (c) Synthetic op-coverage: EmitLlvm over the rare ops, frozen hash ─────
   -- The patch corpus exercises 24 of 29 ops; this funnels the rest

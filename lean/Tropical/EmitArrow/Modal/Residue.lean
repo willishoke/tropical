@@ -797,7 +797,7 @@ private def readsSampleTable (arena : ExprArena) : Array Bool := Id.run do
   for node in arena.nodes do
     let getRead := fun (id : ExprId) => (reads[id.idx]?).getD true
     let value := match node with
-      | .sampleIndex => true
+      | .tau => true
       | .binary _ a b => getRead a || getRead b
       | .unary _ a => getRead a
       | .clamp value lo hi => getRead value || getRead lo || getRead hi

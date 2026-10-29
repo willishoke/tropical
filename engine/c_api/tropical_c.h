@@ -277,9 +277,10 @@ typedef struct tropical_param_write {
 } tropical_param_write_t;
 int              tropical_runtime_set_param(tropical_runtime_t, const char* name, double value, tropical_param_write_t* out_write);
 
-/* The runtime's current sample index (τ of the next buffer to be processed) —
-   the coordinate the kernel reads as `tick`. The control plane stamps a glide's
-   start-tick with this so a closed-form parameter ramp `f(τ)` anchors to "now".
+/* The runtime's current sample index (the integer part of τ for the next
+   buffer to be processed; the kernel reads τ itself in Q32.32). The control
+   plane stamps a glide's start-tick with this so a closed-form parameter ramp
+   `f(τ)` anchors to "now".
    Returned as a double (sample indices are exact in f64 well past any session). */
 double           tropical_runtime_current_sample_index(tropical_runtime_t);
 /* Exact companion for control paths that transport the source coordinate as
@@ -298,6 +299,12 @@ double           tropical_runtime_sample_rate(tropical_runtime_t);
    closed-form kernel has no state to race. Returns false if no observation
    kernel is loaded or a channel id is out of range. */
 bool             tropical_runtime_render_window(tropical_runtime_t, uint64_t start_index,
+                   unsigned int count, const unsigned int* channel_ids, unsigned int n_channels,
+                   double* out);
+/* The same observation render at explicit Q32.32 coordinates: `tau[i]` is the
+   i-th instant, fractional or not, in any order (design/typed-kernel.md, "τ as
+   an array"). `out` is channel-major like render_window. */
+bool             tropical_runtime_render_tau(tropical_runtime_t, const int64_t* tau,
                    unsigned int count, const unsigned int* channel_ids, unsigned int n_channels,
                    double* out);
 /* ---------- Socket endpoint ----------

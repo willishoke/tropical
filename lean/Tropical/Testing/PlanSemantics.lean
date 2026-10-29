@@ -46,7 +46,7 @@ private def fixtureInputs : PlanInputs Int := {
 }
 
 private def sourceImage : PlanSourceImage Int := {
-  tick := .scalar 11
+  tau := .scalar 11
   rate := .scalar 48000
 }
 

@@ -24,7 +24,7 @@ kernel void tropical_kernel(
     uint s [[thread_position_in_grid]])
 ```
 
-where `tau` is the Q32.32 clock per thread (`current_idx = tau[s] >> 32`),
+where `tau` is the Q32.32 clock per thread (`tau_s = tau[s]`, the plan's `tau` source),
 the frame count is a literal (shapes are static), and the rate is a literal.
 
 ## Divergences from EmitLlvm, all deliberate
@@ -53,7 +53,7 @@ the frame count is a literal (shapes are static), and the rate is a literal.
   (`tempTypes`).
 * **Emit-time f64 constant folding.** Instruction chains whose inputs
   are compile-time constants (literals, and `rate` = the plan's
-  sampleRate; `tick` never) are evaluated HERE in f64/Int — mirroring
+  sampleRate; `tau` never) are evaluated HERE in f64/Int — mirroring
   `EmitLlvm`'s runtime semantics op for op (Int ops wrap to i64
   two's-complement) — and land as single literals. This is what makes
   literal-frequency patches carry byte-exact i64 phase increments onto
@@ -398,7 +398,7 @@ def resolveOperand : NOperand → M TVal
   | .source idx _ => do
     let srcs := (← get).sources
     match srcs[idx]? with
-    | some .tick => pure ⟨"current_idx", .int, none⟩
+    | some .tau => pure ⟨"tau_s", .int, none⟩
     | some .rate => do
       let sr := (← get).sampleRate
       pure ⟨f32Lit sr, .float, some (.f sr)⟩
@@ -973,7 +973,7 @@ private def header (frames : Nat) : String :=
   "    uint s [[thread_position_in_grid]])\n" ++
   "{\n" ++
   s!"    if (s >= {frames}u) \{ return; }\n" ++
-  "    const long current_idx = tau[s] >> 32;\n"
+  "    const long tau_s = tau[s];\n"
 
 /-- The column-binding header: `header` plus `buffer(3)` — the packed
     coefficient-column buffer, uploaded by the host from the generation
@@ -992,7 +992,7 @@ private def headerColumns (frames : Nat) : String :=
   "    uint s [[thread_position_in_grid]])\n" ++
   "{\n" ++
   s!"    if (s >= {frames}u) \{ return; }\n" ++
-  "    const long current_idx = tau[s] >> 32;\n"
+  "    const long tau_s = tau[s];\n"
 
 private def cooperativeHeader (frames : Nat) (withColumns : Bool)
     (routeConstants : String) (scratchBytes : Nat) : String :=
@@ -1012,7 +1012,7 @@ private def cooperativeHeader (frames : Nat) (withColumns : Bool)
   "{\n" ++
   "    const uint s = sampleGroup.x;\n" ++
   s!"    if (s >= {frames}u) \{ return; }\n" ++
-  "    const long current_idx = tau[s] >> 32;\n"
+  "    const long tau_s = tau[s];\n"
 
 private def linearInstrs (f : InstanceFunction) : Array NInstr := Id.run do
   let mut out := f.preambleInstructions
@@ -1148,7 +1148,7 @@ def emitKernel (plan : FlatPlan) (frames : Nat) : Except String String := do
   | .error e _ => .error e
   | .ok _ st =>
     let bodyText := String.intercalate "\n" st.lines.toList
-    -- `current_idx` may be unused after full folding; cast to void to
+    -- `tau_s` may be unused after full folding; cast to void to
     -- keep -Wunused clean would misfire on use, so leave it — Metal's
     -- compiler doesn't warn on unused const locals by default.
     let hdr := if cooperative then

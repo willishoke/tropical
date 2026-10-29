@@ -36,7 +36,7 @@ example : bankTrips countAlgebra 4 (some (.ok (.scalar 9))) = .ok 4 := rfl
 /-- A tiny frozen production DAG used to instantiate direct denotation and
     extension stability without any recursive authoring syntax. -/
 private def fixtureArena : ExprArena := {
-  nodes := #[.sampleIndex, .num ⟨1, 0⟩, .binary .add ⟨0⟩ ⟨1⟩]
+  nodes := #[.tau, .num ⟨1, 0⟩, .binary .add ⟨0⟩ ⟨1⟩]
   sigs := #[{ base := .s1 }, {}, { base := .s1 }]
 }
 
@@ -92,8 +92,8 @@ example (alg : Algebra α) (env : SigEnv α) :
 /-- The sample coordinate is a semantic rail read directly from the
     environment. -/
 example (alg : Algebra α) (env : SigEnv α) :
-    denoteNode alg env .sampleIndex (fun _ _ _ => .ok env.sampleIndex) =
-      .ok env.sampleIndex := rfl
+    denoteNode alg env .tau (fun _ _ _ => .ok env.tau) =
+      .ok env.tau := rfl
 
 def runTrustAudit : IO Bool := do
   let ledgerErrors := Tropical.Trust.auditLedger

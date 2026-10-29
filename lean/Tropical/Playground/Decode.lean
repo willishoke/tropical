@@ -28,8 +28,8 @@ def masterClock (pidx : String → Option Nat) : BuildM Clock := do
   let tauSamples ← mul tauBase sr
   let tauFixed ← mul tauSamples twoPow32
   let tauQ ← toIntE tauFixed
-  let coordinate ← sampleIndex
-  let advancing ← mul velocityQ coordinate
+  -- `clock = tau_base + velocity · τ` on the Q32.32 rail, exact at fractional τ.
+  let advancing ← scaleClockQ velocityQ (← tau)
   add tauQ advancing
 
 private def defaultValue (kind : String) (params : Json) (kname : String) : BuildM Sig := do

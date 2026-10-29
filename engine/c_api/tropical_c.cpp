@@ -662,6 +662,17 @@ bool tropical_runtime_render_window(tropical_runtime_t r, uint64_t start_index,
     reinterpret_cast<const uint32_t*>(slot_ids), n_slots, out);
 }
 
+bool tropical_runtime_render_tau(tropical_runtime_t r, const int64_t* tau,
+                                 unsigned int count, const unsigned int* channel_ids,
+                                 unsigned int n_channels, double* out)
+{
+  if (!r) { set_error("render_tau: null runtime"); return false; }
+  const bool ok = static_cast<tropical_runtime::FlatRuntime*>(r)->render_tau(
+    tau, count, reinterpret_cast<const uint32_t*>(channel_ids), n_channels, out);
+  if (!ok) set_error("render_tau: no observation artifact, bad channel, or null buffer");
+  return ok;
+}
+
 // ── Socket endpoint ─────────────────────────────────────────────────────────
 
 tropical_socket_t tropical_socket_listen(tropical_runtime_t r, const char* addr)

@@ -63,10 +63,9 @@ def instMor (name programName : String) (portOrder : Array InputIdx)
   let instanceIdx ← declareInst { name, programName, inputs }
   (Array.range numOut).mapM fun output => nestedOut instanceIdx ⟨output⟩
 
-def clockLit : BuildM Clock := do
-  let sample ← sampleIndex
-  let shift ← lit 32
-  lshift sample shift
+/-- The identity clock: τ itself, the Q32.32 coordinate the port is called
+    with. A fractional τ is a fractional clock; nothing here rounds. -/
+def clockLit : BuildM Clock := tau
 
 inductive ArrowTerm where
   | gen (v : Voice) (name : String) (clk : Clock)

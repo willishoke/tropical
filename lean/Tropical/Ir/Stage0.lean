@@ -6,7 +6,7 @@ import Tropical.Plan
 # Stage0 — plan-level binding-time split (`FlatPlan → audio + coefficient`)
 
 Binding time is a SYNTACTIC property of the instruction stream, not an
-ontology: an instruction whose operands never mention τ (`source(tick)`)
+ontology: an instruction whose operands never mention τ (`source(tau)`)
 computes the same value at every sample, so it belongs in a one-sample
 **coefficient kernel** run on the control thread at param-write time, not
 in the per-sample audio kernel. This is NOT a control rate — no signal is
@@ -37,7 +37,7 @@ join of its operands':
   constant between control writes; never `fold`, because `set_slot` can
   move it). A `reg` with no reaching def (the emitter's zero fallback)
   is `fold`.
-- **s1** — per-sample: `source(tick)`, `input`, `param` (per-program FFI
+- **s1** — per-sample: `source(tau)`, `input`, `param` (per-program FFI
   path — no re-run hook), any array operand (arrays are conservatively
   per-sample in v1), a `slot` whose reaching write is stage-1 or not yet
   seen (previous-sample value).
@@ -182,7 +182,7 @@ private def operandStage (sources : Array SourceKind)
     | none => .fold
   | .source i _ =>
     match sources[i]? with
-    | some .tick => .s1
+    | some .tau => .s1
     | some .rate => .fold
     | none => .fold           -- out-of-range source resolves to 0.0
   | .slot i _ =>

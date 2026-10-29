@@ -316,7 +316,7 @@ def remapENode? (memo : ExprCopyMemo) : ENode → Option ENode
   | .nestedOut instanceIdx outputIdx =>
       pure (.nestedOut instanceIdx outputIdx)
   | .sampleRate => pure .sampleRate
-  | .sampleIndex => pure .sampleIndex
+  | .tau => pure .tau
   | .loopIdx binderId => pure (.loopIdx binderId)
   | .bankSum capacity tables body dynCount? binderId => do
       let tables ← remapExprIds? memo tables
@@ -375,7 +375,7 @@ private def convExprId (ea : ExprArena) (hw : ea.wf = true) (eid : ExprId) :
       | some (.paramRef i)     => pure (.paramRef i)
       | some (.nestedOut i o)  => pure (.nestedOut i o)
       | some .sampleRate       => pure .sampleRate
-      | some .sampleIndex      => pure .sampleIndex
+      | some .tau      => pure .tau
       | some (.loopIdx id)     => pure (.loopIdx id)
       | some (.bankSum c ts b dc ii) => do
         let ts' ← ts.attach.mapM fun ⟨t, _⟩ => convExprId ea hw t
@@ -596,7 +596,7 @@ def mapExprIdGo (src : ExprArena) (hw : src.wf = true) (h : MapHooksId)
       | none =>
         match _hn : n with
         | .num _ | .bool _ | .inputRef _ | .paramRef _
-        | .nestedOut _ _ | .sampleRate | .sampleIndex
+        | .nestedOut _ _ | .sampleRate | .tau
         | .loopIdx _ => pure id
         | .bankSum c ts b dc ii =>
           einternP (.bankSum c

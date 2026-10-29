@@ -333,7 +333,7 @@ theorem enodeSig_shape {sigs : Array StageSig}
     exact stageSigShape_fold
   | bool =>
     exact stageSigShape_fold
-  | sampleIndex =>
+  | tau =>
     exact stageSigShape_s1
   | paramRef =>
     exact {
@@ -577,7 +577,7 @@ theorem enodeSig_contains_child (sigs : Array StageSig) (node : ENode)
       (enodeSig sigs node) := by
   cases node with
   | num | bool | inputRef | paramRef | nestedOut | sampleRate
-  | sampleIndex | loopIdx =>
+  | tau | loopIdx =>
     simp [ENode.children] at hChild
   | arr items =>
     simp only [enodeSig]
@@ -773,7 +773,7 @@ def EnvAgreesThrough (stage : Stage) (ctx : StageCtx)
   (Stage.s0.le stage = true →
     ∀ i, lookupValue "paramRef" a.params i =
       lookupValue "paramRef" b.params i) ∧
-  (Stage.s1.le stage = true → a.sampleIndex = b.sampleIndex) ∧
+  (Stage.s1.le stage = true → a.tau = b.tau) ∧
   (∀ i, (ctx.inputStages[i]?.getD Stage.s1).le stage = true →
     lookupValue "inputRef" a.inputs i =
       lookupValue "inputRef" b.inputs i) ∧
@@ -796,9 +796,9 @@ theorem EnvAgreesThrough.params {stage : Stage} {ctx : StageCtx}
     lookupValue "paramRef" a.params i = lookupValue "paramRef" b.params i :=
   h.2.2.1 hstage i
 
-theorem EnvAgreesThrough.sampleIndex {stage : Stage} {ctx : StageCtx}
+theorem EnvAgreesThrough.tau {stage : Stage} {ctx : StageCtx}
     {a b : SigEnv α} (h : EnvAgreesThrough stage ctx a b)
-    (hstage : Stage.s1.le stage = true) : a.sampleIndex = b.sampleIndex :=
+    (hstage : Stage.s1.le stage = true) : a.tau = b.tau :=
   h.2.2.2.1 hstage
 
 theorem EnvAgreesThrough.input {stage : Stage} {ctx : StageCtx}
@@ -925,8 +925,8 @@ theorem stageSig_sound {arena : ExprArena} (hSound : SignaturesSound arena)
   cases node with
   | num | bool => rfl
   | sampleRate => exact congrArg Except.ok hEnv.sampleRate
-  | sampleIndex =>
-    exact congrArg Except.ok (hEnv.sampleIndex
+  | tau =>
+    exact congrArg Except.ok (hEnv.tau
       (stage_le_trans (resolve_base_le ctx parentSig) hParentResolve))
   | loopIdx binderId =>
     simp only [denoteNode]
@@ -1114,14 +1114,14 @@ theorem stageSig_sound_nestedOut (alg : Algebra α) (ctx : StageCtx)
     denoteExpr_of_deref alg b arena hArena hDeref]
   exact henv.nested instanceIdx outputIdx hstage
 
-theorem stageSig_sound_sampleIndex (alg : Algebra α) (ctx : StageCtx)
+theorem stageSig_sound_tau (alg : Algebra α) (ctx : StageCtx)
     (a b : SigEnv α) (arena : ExprArena) (hArena : ArenaWellFormed arena)
-    {id : ExprId} (hDeref : arena.deref id = some .sampleIndex)
+    {id : ExprId} (hDeref : arena.deref id = some .tau)
     (hstage : Stage.s1.le stage = true)
     (henv : EnvAgreesThrough stage ctx a b) :
     denoteExpr alg a arena hArena id = denoteExpr alg b arena hArena id := by
   rw [denoteExpr_of_deref alg a arena hArena hDeref,
     denoteExpr_of_deref alg b arena hArena hDeref]
-  exact congrArg Except.ok (henv.sampleIndex hstage)
+  exact congrArg Except.ok (henv.tau hstage)
 
 end Tropical.Semantics.Staging

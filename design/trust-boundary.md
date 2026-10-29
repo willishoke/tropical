@@ -97,7 +97,7 @@ Per sample, runtime integer rail operations implement the Int denotation modulo 
 - Formal symbol: none
 - Implementation: `lean/Tropical/EmitArrow/ClockAlgebra.lean`, `lean/Tropical/EmitArrow/ClockPlanLaws.lean`, `lean/Tropical/Semantics/Plan.lean`, `lean/Tropical/Ir/EmitLlvm.lean`, `lean/Tropical/Ir/EmitMsl.lean`
 - Gates: `lake-build:Tropical.Proofs`, `clock-algebra-theorems`, `patch-goldens`
-- Limitation: Tropical.EmitArrow.compileClockRail_refines projects an assumed CompileResultRefinesScalar witness; it does not establish constructor compilation. The arena-native identities, signed-i64 image laws, and declared tick source lookup are proved, while whole compileNode constructor closure and correspondence from Plan execution to emitted LLVM/MSL integer execution remain open.
+- Limitation: Tropical.EmitArrow.compileClockRail_refines projects an assumed CompileResultRefinesScalar witness; it does not establish constructor compilation. The arena-native identities, signed-i64 image laws, and declared tau source lookup are proved, while whole compileNode constructor closure and correspondence from Plan execution to emitted LLVM/MSL integer execution remain open.
 
 ## REDUCE_REGION_EXECUTES_IN_ARRAY_ORDER
 
@@ -253,7 +253,7 @@ Serialized plan entry points accept tropical_plan_6 only and reject retired sche
 - Formal symbol: none
 - Implementation: `engine/runtime/FlatRuntime.cpp`, `engine/runtime/NumericProgramParser.hpp`, `lean/Tropical/PlanDecode.lean`
 - Gates: `production-non-emission`, `plan6-schema-rejection`, `current_module_process`, `manual:serialized-plan boundary review`
-- Limitation: Canonical plan 6 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, mono output_channel_count, the tick/rate source pair, empty child/instruction arrays, zero loop ids, and the ordinary sample-thread Metal execution description.
+- Limitation: Canonical plan 6 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, mono output_channel_count, the tau/rate source pair, empty child/instruction arrays, zero loop ids, and the ordinary sample-thread Metal execution description.
 
 ## FROZEN_AUDIO_GOLDENS_ANCHOR_CORRECTNESS
 

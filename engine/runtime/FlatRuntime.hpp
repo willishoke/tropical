@@ -797,15 +797,50 @@ public:
   // ── Random-access observation (room / scope / telemetry consumers) ─────────
   // Render `count` coordinates from one atomically acquired program/control
   // image. `out` is channel-major: out[k*count+i] is output channel
-  // channel_ids[k] at start_index+i*stride. The scope's taps are output
-  // channels of the observation artifact (design/typed-kernel.md). This path never borrows a live KernelState or takes
-  // build_mutex_, so a paused observer cannot delay control or hot-swap.
+  // channel_ids[k] at the i-th coordinate. The scope's taps are output
+  // channels of the observation artifact (design/typed-kernel.md). This path
+  // never borrows a live KernelState or takes build_mutex_, so a paused
+  // observer cannot delay control or hot-swap.
+  //
+  // The host-side τ fill has two shapes over one body. `render_window_
+  // observation` is the arithmetic progression `(start_index + i·stride) << 32`
+  // (the scope's integer grid); `render_tau_observation` takes the Q32.32
+  // coordinates as data, fractional or not, in any order — a kernel is a
+  // closed form `f(τ, params)` and nothing here rounds τ.
   RenderWindowStatus render_window_observation(
     uint64_t start_index, uint32_t count, uint32_t stride,
     const uint32_t * channel_ids, uint32_t n_channels, double * out,
     std::shared_ptr<const ObservationSnapshot> snapshot = {})
   {
-    if (!out || stride == 0 || (n_channels > 0 && !channel_ids))
+    if (stride == 0) return RenderWindowStatus::InvalidArgument;
+    return render_observation_at(
+      [=](uint32_t i) {
+        return static_cast<int64_t>(
+          (start_index + static_cast<uint64_t>(i) * stride) << 32);
+      },
+      count, channel_ids, n_channels, out, std::move(snapshot));
+  }
+
+  RenderWindowStatus render_tau_observation(
+    const int64_t * tau, uint32_t count,
+    const uint32_t * channel_ids, uint32_t n_channels, double * out,
+    std::shared_ptr<const ObservationSnapshot> snapshot = {})
+  {
+    if (!tau || count == 0) return RenderWindowStatus::InvalidArgument;
+    // Coordinates past `count` in the last chunk are computed and discarded;
+    // any value serves, so they repeat the last one.
+    return render_observation_at(
+      [=](uint32_t i) { return tau[i < count ? i : count - 1]; },
+      count, channel_ids, n_channels, out, std::move(snapshot));
+  }
+
+  template <class TauOf>
+  RenderWindowStatus render_observation_at(
+    TauOf && tau_of, uint32_t count,
+    const uint32_t * channel_ids, uint32_t n_channels, double * out,
+    std::shared_ptr<const ObservationSnapshot> snapshot)
+  {
+    if (!out || (n_channels > 0 && !channel_ids))
       return RenderWindowStatus::InvalidArgument;
     if (!snapshot)
       snapshot = std::atomic_load_explicit(
@@ -845,9 +880,7 @@ public:
     for (uint32_t chunk = 0; chunk < count; chunk += N)
     {
       for (uint32_t i = 0; i < N; ++i)
-        workspace.tau[i] = static_cast<int64_t>(
-          (start_index
-           + static_cast<uint64_t>(chunk + i) * stride) << 32);
+        workspace.tau[i] = tau_of(chunk + i);
       program.kernel(workspace.argv.data());
       const uint32_t produced = std::min<uint32_t>(N, count - chunk);
       for (uint32_t k = 0; k < n_channels; ++k)
@@ -941,6 +974,15 @@ public:
   {
     return render_window_observation(
       start_index, count, 1, channel_ids, n_channels, out)
+      == RenderWindowStatus::Rendered;
+  }
+
+  // Explicit Q32.32 coordinates (the C API's tropical_runtime_render_tau).
+  bool render_tau(const int64_t * tau, uint32_t count,
+                  const uint32_t * channel_ids, uint32_t n_channels,
+                  double * out)
+  {
+    return render_tau_observation(tau, count, channel_ids, n_channels, out)
       == RenderWindowStatus::Rendered;
   }
 

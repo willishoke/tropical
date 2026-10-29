@@ -25,7 +25,7 @@ private structure ExprFixture where
 private def buildExprFixture : ExprFixture :=
   let action : StateM ExprArena (ExprId × ExprId × ExprId) := do
     let one ← eintern (.num ⟨1, 0⟩)
-    let tick ← eintern .sampleIndex
+    let tick ← eintern .tau
     let rate ← eintern .sampleRate
     let table ← eintern (.arr #[tick, rate])
     let loop ← eintern (.loopIdx 7)
@@ -82,7 +82,7 @@ private def fixtureCheck : Bool :=
       dst.nodes.size + 1 == fixtureArena.exprs.nodes.size &&
       core.registry.map (·.1) == #["Child"] &&
       dst.nodes.any (fun node => match node with | .arr .. => true | _ => false) &&
-      dst.nodes.any (fun node => match node with | .sampleIndex => true | _ => false) &&
+      dst.nodes.any (fun node => match node with | .tau => true | _ => false) &&
       dst.nodes.any (fun node => match node with | .sampleRate => true | _ => false) &&
       dst.nodes.any (fun node => match node with | .bankSum .. => true | _ => false) &&
       dst.nodes.any (fun node => match node with | .routedSum .. => true | _ => false)

@@ -186,7 +186,7 @@ inductive ENode where
   | paramRef (idx : ParamIdx)
   | nestedOut (instance_ : InstanceIdx) (output : OutputIdx)
   | sampleRate
-  | sampleIndex
+  | tau
   /-- The iteration index of the `bankSum` region whose `idxId` equals `id`
       (the post-strata analogue of `Plan.NOperand.loopIdx`).
       `id` is a UNIQUE BINDER ID, not a de Bruijn index: it is
@@ -235,7 +235,7 @@ def enodeHash : ENode → UInt64
   | .paramRef i     => mixHash 12 (hash i.idx)
   | .nestedOut i o  => mixHash (mixHash 15 (hash i.idx)) (hash o.idx)
   | .sampleRate     => 16
-  | .sampleIndex    => 17
+  | .tau    => 17
   | .loopIdx id     => mixHash 28 (hash id)
   | .bankSum c ts b dc ii => mixHash (mixHash (mixHash (mixHash (mixHash 29 (hash c)) (hash (ts.map (·.idx)))) (hash b.idx)) (hash (dc.map (·.idx)))) (hash ii)
   | .routedSum c oc rs ts vs dc ii =>
@@ -330,7 +330,7 @@ private def sigAt (sigs : Array StageSig) (id : ExprId) : StageSig :=
     attribute's. -/
 def enodeSig (sigs : Array StageSig) : ENode → StageSig
   | .num _ | .bool _ | .sampleRate => { base := .fold }
-  | .sampleIndex => { base := .s1 }
+  | .tau => { base := .s1 }
   -- `loopIdx` is the join IDENTITY (`fold`), not `s1`, REGARDLESS of its
   -- binder id: as a VALUE attribute,
   -- the iteration index is defined by the enclosing reduce region, so it
@@ -408,7 +408,7 @@ def ExprArena.sig? (a : ExprArena) (id : ExprId) : Option StageSig :=
     (including `bankSum` tables/body/dynCount). -/
 def ENode.children : ENode → Array ExprId
   | .num _ | .bool _ | .inputRef _ | .paramRef _
-  | .nestedOut _ _ | .sampleRate | .sampleIndex
+  | .nestedOut _ _ | .sampleRate | .tau
   | .loopIdx _ => #[]
   | .arr items => items
   | .binary _ a b => #[a, b]
