@@ -31,6 +31,7 @@ import Tropical.Tropicaltest.Oriented
 import Tropical.Tropicaltest.Block
 import Tropical.Tropicaltest.KernelType
 import Tropical.Tropicaltest.FractionalTau
+import Tropical.Tropicaltest.ParamOrder
 import Tropical.Tropicaltest.BlockRealize
 import Tropical.Tropicaltest.OrientedPatch
 
@@ -171,6 +172,11 @@ def main (args : List String) : IO UInt32 := do
   IO.println "fractional tau (scrub(½) on the grid ≡ τ at k+½, byte-exact):"
   total := total + 1
   if !(← Tropical.Tropicaltest.FractionalTau.runFractionalTau) then failed := failed + 1
+
+  -- ── (b⁗″) Param order at the port: three params through both kernels' argv ──
+  IO.println "param order (compile → load → set_param → audio + observation kernels):"
+  total := total + 1
+  if !(← Tropical.Tropicaltest.ParamOrder.runParamOrder) then failed := failed + 1
 
   -- ── (c) Synthetic op-coverage: EmitLlvm over the rare ops, frozen hash ─────
   -- The patch corpus exercises 24 of 29 ops; this funnels the rest
