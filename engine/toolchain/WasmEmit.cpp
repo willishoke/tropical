@@ -1,5 +1,6 @@
 #include "toolchain/WasmEmit.hpp"
 
+#include <llvm/IR/Instructions.h>
 #include <llvm/IR/LLVMContext.h>
 #include <llvm/IR/LegacyPassManager.h>
 #include <llvm/IR/Module.h>
@@ -19,7 +20,9 @@
 
 #include <memory>
 #include <optional>
+#include <string>
 #include <system_error>
+#include <vector>
 
 LLD_HAS_DRIVER(wasm)
 
@@ -65,6 +68,27 @@ std::vector<uint8_t> compile_ir_to_wasm(const std::string & ir_text, std::string
   module->setTargetTriple(triple);
   module->setDataLayout(tm->createDataLayout());
 
+  // The port kernel keeps its per-call storage (slots, SSA temps, arrays) in
+  // allocas, which wasm puts on the shadow stack. wasm-ld's default stack is
+  // 64 KiB and sits below the data segment, so a large plan would silently
+  // overwrite its own constants. Size the stack from the module's allocas
+  // plus headroom for the codegen's own frame, and link it first so an
+  // overflow traps (the address wraps out of bounds) instead.
+  uint64_t frame_bytes = 0;
+  for (const auto & fn : *module)
+    for (const auto & bb : fn)
+      for (const auto & inst : bb)
+        if (const auto * ai = llvm::dyn_cast<llvm::AllocaInst>(&inst))
+        {
+          const auto size = ai->getAllocationSize(module->getDataLayout());
+          if (!size || size->isScalable())
+          { err = "wasm: alloca of non-constant size in @" + fn.getName().str(); return {}; }
+          frame_bytes += size->getFixedValue();
+        }
+  constexpr uint64_t kStackHeadroom = 64 * 1024;
+  const uint64_t stack_bytes =
+    (frame_bytes + kStackHeadroom + kStackHeadroom - 1) / kStackHeadroom * kStackHeadroom;
+
   llvm::SmallString<128> obj_path, wasm_path;
   if (auto ec = llvm::sys::fs::createTemporaryFile("tropical", "o", obj_path))
   { err = "temp obj: " + ec.message(); return {}; }
@@ -88,17 +112,21 @@ std::vector<uint8_t> compile_ir_to_wasm(const std::string & ir_text, std::string
     pm.run(*module);
   } // obj_out flushes/closes here
 
-  const char * argv[] = {
-    "wasm-ld", "--no-entry", "--import-memory",
+  const std::string stack_size = "stack-size=" + std::to_string(stack_bytes);
+  const std::vector<const char *> argv = {
+    "wasm-ld", "--no-entry", "--import-memory", "--stack-first",
+    "-z", stack_size.c_str(),
     "--export=tropical_kernel", "--export=__heap_base", "--allow-undefined",
     obj_path.c_str(), "-o", wasm_path.c_str()
   };
   std::string link_err;
   llvm::raw_string_ostream link_os(link_err);
-  bool ok = lld::wasm::link(
-    llvm::ArrayRef<const char *>(argv, sizeof(argv) / sizeof(argv[0])),
-    llvm::outs(), link_os, /*exitEarly=*/false, /*disableOutput=*/false);
-  if (!ok)
+  // lldMain, not lld::wasm::link directly: only lldMain destroys the linker's
+  // global context afterwards, so a second link in the same process (a test,
+  // a batch build) starts from a fresh config instead of the last one's.
+  const lld::Result linked = lld::lldMain(
+    argv, llvm::outs(), link_os, {{lld::Wasm, &lld::wasm::link}});
+  if (linked.retCode != 0)
   {
     llvm::sys::fs::remove(obj_path); llvm::sys::fs::remove(wasm_path);
     err = "wasm-ld: " + link_err;

@@ -209,6 +209,14 @@ never carries the WebAssembly backend or lld (`tools/check_runtime_deps.py`
 checks the built artifacts), and its C API (`tropical_wasm.h`) has its own
 thread-local error. The browser player lives in `web/runtime/`.
 
+The kernel's per-call storage (slots, SSA scratch, arrays) is allocas, which
+wasm puts on the shadow stack. The emitter sizes that stack from the module's
+own allocas plus 64 KiB of headroom and links it first (`--stack-first`), so
+an overflow traps instead of running into the data segment; an alloca of
+non-constant size is refused. The player reads the module's declared memory
+minimum before instantiating. Links go through `lld::lldMain` so each starts
+from a fresh linker context (`current_wasm_emit`).
+
 ### Metal
 
 With `TROPICAL_METAL`, `MetalKernel` compiles Lean-emitted MSL at runtime and

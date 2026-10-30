@@ -30,6 +30,49 @@ function roundTiesAway(x: number): number {
   return d < 0.5 ? f : d > 0.5 ? f + 1 : (x < 0 ? f : f + 1)
 }
 
+/** The minimum page count the module declares for its imported memory (0 if
+ *  it imports none). The toolchain links the shadow stack first and sizes it
+ *  to the kernel's own storage, so a large kernel can declare more than a
+ *  fixed allocation would give it; `WebAssembly.Module.imports` does not
+ *  expose limits, so read them from the import section. */
+export function importedMemoryMinPages(wasmBytes: BufferSource): number {
+  const b = ArrayBuffer.isView(wasmBytes)
+    ? new Uint8Array(wasmBytes.buffer, wasmBytes.byteOffset, wasmBytes.byteLength)
+    : new Uint8Array(wasmBytes)
+  let p = 8 // magic + version
+  const u32 = (): number => {
+    let r = 0, shift = 0, byte: number
+    do { byte = b[p++]!; r |= (byte & 0x7f) << shift; shift += 7 } while (byte & 0x80)
+    return r >>> 0
+  }
+  const limitsMin = (): number => {
+    const flags = b[p++]!
+    const min = u32()
+    if (flags & 1) u32()
+    return min
+  }
+  while (p < b.length) {
+    const id = b[p++]!
+    const size = u32()
+    const end = p + size
+    if (id === 2) { // the import section
+      for (let n = u32(); n > 0; n--) {
+        for (let name = 0; name < 2; name++) { // module and field names
+          const len = u32() // read first: `p += u32()` would add to the old p
+          p += len
+        }
+        const kind = b[p++]!
+        if (kind === 2) return limitsMin()
+        if (kind === 0) u32()                   // func: type index
+        else if (kind === 1) { p++; limitsMin() } // table: reftype + limits
+        else if (kind === 3) p += 2             // global: valtype + mutability
+      }
+    }
+    p = end
+  }
+  return 0
+}
+
 /** The port: one i32 offset per input (tau, then the params) and the output. */
 type KernelFn = (...pointers: number[]) => void
 
@@ -59,10 +102,13 @@ export class WasmKernel {
     const outputChannelCount = kernelOutputChannelCount(manifest)
     // Region bytes are small and known; the unknown is the module's
     // __heap_base (its shadow stack + data segment). Allocate 1 MiB of slack
-    // above the regions, then grow once if heapBase lands higher.
+    // above the regions, or the module's declared minimum if a large kernel
+    // frame needs more, then grow once if heapBase lands higher.
     const regionBytes =
       (frames + kernelParams(manifest).length + frames * outputChannelCount + 8) * 8
-    const initialPages = Math.ceil(((1 << 20) + regionBytes) / WASM_PAGE)
+    const initialPages = Math.max(
+      importedMemoryMinPages(wasmBytes),
+      Math.ceil(((1 << 20) + regionBytes) / WASM_PAGE))
     const memory = new WebAssembly.Memory({ initial: initialPages })
 
     const module = await WebAssembly.compile(wasmBytes)

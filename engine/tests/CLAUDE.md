@@ -19,6 +19,11 @@ This file does not test a plan compiler, plan instructions, named register
 transfer, or stateful source semantics. Lean owns LLVM emission and exercises
 arithmetic semantics in `tropicaltest`.
 
+`test_wasm_emit.cpp` is registered as `current_wasm_emit` when
+`TROPICAL_WASM_EMIT` is enabled. It compiles hand-written kernels through
+`libtropical_wasm` and reads the module back: the shadow stack is linked first
+and covers the kernel's allocas, and a non-constant alloca is refused.
+
 `test_metal_kernel.cpp` is registered as `current_metal_kernel` when
 `TROPICAL_METAL` is enabled. It tests the current MSL runtime boundary.
 
