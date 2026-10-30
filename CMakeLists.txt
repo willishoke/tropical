@@ -173,11 +173,18 @@ if(TROPICAL_WASM_EMIT)
         # the names from llvm_map_components_to_libnames) out of an explicit
         # --start-group. Wrap lld + LLVM in --start-group so the circular static
         # archives resolve regardless of order.
+        # `option` is lld's driver (OptTable), which `lto` does not pull in;
+        # --system-libs adds the compression libs (zlib, zstd) lld calls.
         execute_process(
-            COMMAND ${LLVM_TOOLS_BINARY_DIR}/llvm-config --link-static --libs all-targets lto
+            COMMAND ${LLVM_TOOLS_BINARY_DIR}/llvm-config --link-static --libs all-targets lto option
             OUTPUT_VARIABLE TROPICAL_LLVM_ALL_LIBS
             OUTPUT_STRIP_TRAILING_WHITESPACE)
         separate_arguments(TROPICAL_LLVM_ALL_LIBS)
+        execute_process(
+            COMMAND ${LLVM_TOOLS_BINARY_DIR}/llvm-config --link-static --system-libs
+            OUTPUT_VARIABLE TROPICAL_LLVM_SYSTEM_LIBS
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+        separate_arguments(TROPICAL_LLVM_SYSTEM_LIBS)
         # `lto` → LLVMPasses references Polly (apt's LLVM is built with Polly
         # linked into the pass pipeline), so -lPolly/-lPollyISL must resolve;
         # CI installs libpolly-N-dev for the static archives.
@@ -185,7 +192,11 @@ if(TROPICAL_WASM_EMIT)
             "-L${LLVM_LIBRARY_DIRS}"
             -Wl,--start-group
             ${LLD_WASM_LIB} ${LLD_COMMON_LIB} ${TROPICAL_LLVM_ALL_LIBS}
-            -Wl,--end-group)
+            -Wl,--end-group
+            ${TROPICAL_LLVM_SYSTEM_LIBS})
+        # A shared library may otherwise leave symbols unresolved, to be found
+        # (or not) in whatever process loads it; refuse that at link time.
+        target_link_options(tropical_wasm PRIVATE -Wl,--no-undefined)
     endif()
 endif()
 
