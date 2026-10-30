@@ -57,9 +57,9 @@ private def checkFlatPlan (path : String) (plan : FlatPlan) :
     checkInstanceFunction s!"{path}/{f.instanceName}" f
   let wire ← plan.toWire
   match wire.getObjVal? "schema" with
-  | .ok (.str "tropical_plan_6") => pure ()
+  | .ok (.str "tropical_plan_7") => pure ()
   | .ok got =>
-    throw s!"{path}: production plan schema is {got.compress}, expected tropical_plan_6"
+    throw s!"{path}: production plan schema is {got.compress}, expected tropical_plan_7"
   | .error e => throw s!"{path}: production plan has no schema: {e}"
 
 private def checkPerInstancePlan (path : String) (plan : PerInstancePlan) :
@@ -147,7 +147,7 @@ def runProductionNonEmission (arena : Arena)
 
   if failures.isEmpty then
     passGate "production-non-emission"
-      "builder + playground + program_2/session + export emit typed state-free plan_6 only"
+      "builder + playground + program_2/session + export emit typed state-free plan_7 only"
   else
     failGate "production-non-emission" (String.intercalate "; " failures.toList)
 

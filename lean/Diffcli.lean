@@ -22,7 +22,7 @@ verbs over the Lean-owned compiler and native runtime.
 
     diffcli render-bytes <plan.json> [--frames N] [--buffer N]
 
-Loads a tropical_plan_6 JSON file into a fresh runtime, renders
+Loads a tropical_plan_7 JSON file into a fresh runtime, renders
 `frames × buffer` samples, and writes the raw little-endian float64
 stream to stdout. `… | shasum -a 256` reproduces the golden hashes in
 tests/golden/ with the standard frame and buffer counts.

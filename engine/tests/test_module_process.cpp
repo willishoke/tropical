@@ -165,7 +165,7 @@ static std::string plan_json(unsigned int channels,
                              const std::string& extra = "")
 {
   nlohmann::json plan;
-  plan["schema"] = "tropical_plan_6";
+  plan["schema"] = "tropical_plan_7";
   plan["config"] = {{"sampleRate", 44100}};
   plan["output_channel_count"] = channels;
   plan["register_count"] = 0;
@@ -352,7 +352,7 @@ static bool load_fails_with(tropical_runtime_t runtime, const std::string& ir,
 
 /**
  * 2. The native boundary accepts exactly tropical_kernel_1 over a nested
- *    tropical_plan_6. Other schemas, a missing plan, a malformed port, a
+ *    tropical_plan_7. Other schemas, a missing plan, a malformed port, a
  *    frame count other than the runtime's, and every retired plan carrier
  *    fail before caller-supplied IR is loaded.
  */
@@ -366,8 +366,8 @@ static void test_manifest_boundary()
   };
 
   ASSERT(load_fails_with(
-    rt, ir, R"({"schema":"tropical_plan_6"})",
-    "unsupported manifest schema 'tropical_plan_6'; expected 'tropical_kernel_1'"));
+    rt, ir, R"({"schema":"tropical_plan_7"})",
+    "unsupported manifest schema 'tropical_plan_7'; expected 'tropical_kernel_1'"));
   ASSERT(load_fails_with(
     rt, ir, R"({})",
     "unsupported manifest schema ''; expected 'tropical_kernel_1'"));
@@ -376,35 +376,38 @@ static void test_manifest_boundary()
     "kernel manifest has no plan"));
   ASSERT(load_fails_with(
     rt, ir, with_plan(R"({"schema":"tropical_plan_4"})"),
-    "unsupported manifest schema 'tropical_plan_4'; expected 'tropical_plan_6'"));
+    "unsupported manifest schema 'tropical_plan_4'; expected 'tropical_plan_7'"));
   ASSERT(load_fails_with(
-    rt, ir, with_plan(R"({"schema":"tropical_plan_6","state_init":[1]})"),
-    "retired field 'state_init' is not valid in tropical_plan_6"));
+    rt, ir, with_plan(R"({"schema":"tropical_plan_6"})"),
+    "expected 'tropical_plan_7' (plan 6's time source is the integer sample index"));
+  ASSERT(load_fails_with(
+    rt, ir, with_plan(R"({"schema":"tropical_plan_7","state_init":[1]})"),
+    "retired field 'state_init' is not valid in tropical_plan_7"));
   ASSERT(load_fails_with(
     rt, ir,
-    with_plan(R"({"schema":"tropical_plan_6","output_targets":[],"outputs":[]})"),
-    "retired field 'output_targets' is not valid in tropical_plan_6"));
+    with_plan(R"({"schema":"tropical_plan_7","output_targets":[],"outputs":[]})"),
+    "retired field 'output_targets' is not valid in tropical_plan_7"));
   ASSERT(load_fails_with(
     rt, ir,
-    with_plan(R"({"schema":"tropical_plan_6","instance_functions":[{"instructions":[{"tag":"Add","dst":0,"args":[],"result_type":"float"}]}]})"),
+    with_plan(R"({"schema":"tropical_plan_7","instance_functions":[{"instructions":[{"tag":"Add","dst":0,"args":[],"result_type":"float"}]}]})"),
     "plan-6 instruction missing required dst_kind"));
   ASSERT(load_fails_with(
     rt, ir,
-    with_plan(R"({"schema":"tropical_plan_6","instance_functions":[{"instructions":[{"tag":"Add","dst":0,"dst_kind":"temp","args":[{"kind":"rate","scalar_type":"float"}],"result_type":"float"}]}]})"),
+    with_plan(R"({"schema":"tropical_plan_7","instance_functions":[{"instructions":[{"tag":"Add","dst":0,"dst_kind":"temp","args":[{"kind":"rate","scalar_type":"float"}],"result_type":"float"}]}]})"),
     "unknown operand kind 'rate'"));
   ASSERT(load_fails_with(
-    rt, ir, with_plan(R"({"schema":"tropical_plan_6","output_channel_count":0})"),
+    rt, ir, with_plan(R"({"schema":"tropical_plan_7","output_channel_count":0})"),
     "output_channel_count must be in [1,64]"));
   ASSERT(load_fails_with(
     rt, ir,
-    with_plan(R"({"schema":"tropical_plan_6","output_channel_count":2,"sinks":[{"target":2}]})"),
+    with_plan(R"({"schema":"tropical_plan_7","output_channel_count":2,"sinks":[{"target":2}]})"),
     "sink target 2 is out of range"));
   ASSERT(load_fails_with(
     rt, ir,
-    with_plan(R"({"schema":"tropical_plan_6","output_channel_count":2,"sinks":[{"target":0},{"target":0}]})"),
+    with_plan(R"({"schema":"tropical_plan_7","output_channel_count":2,"sinks":[{"target":0},{"target":0}]})"),
     "duplicate sink target 0"));
   ASSERT(load_fails_with(
-    rt, ir, with_plan(R"({"schema":"tropical_plan_6","compilation_mode":"microkernel"})"),
+    rt, ir, with_plan(R"({"schema":"tropical_plan_7","compilation_mode":"microkernel"})"),
     "realization 'microkernel' is not a host-visible mode"));
   // The port itself: tau first, a frame count that is the runtime's, one
   // output whose width matches the nested plan, and an entry the IR defines.

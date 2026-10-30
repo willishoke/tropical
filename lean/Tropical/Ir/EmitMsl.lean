@@ -9,7 +9,7 @@ import Tropical.Ir.EmitCommon
 # EmitMsl — `FlatPlan → Metal Shading Language source` (the Metal backend)
 
 The MSL sibling of `EmitLlvm`: the same fractal walk over the same
-`tropical_plan_6`, emitting a compute kernel instead of a CPU loop. The
+`tropical_plan_7`, emitting a compute kernel instead of a CPU loop. The
 per-sample loop collapses — one thread per sample
 (`thread_position_in_grid`), legal because kernels are closed-form
 `f(τ, params)` with no per-sample state.

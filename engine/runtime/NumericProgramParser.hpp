@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * NumericProgramParser.hpp — Parse `tropical_plan_6` JSON metadata.
+ * NumericProgramParser.hpp — Parse `tropical_plan_7` JSON metadata.
  *
  * Thin deserialiser. Since Phase 2 (Lean owns codegen) this is the
  * *manifest reader*: load_ir consumes the plan's metadata — temp pool size
@@ -22,7 +22,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace tropical_plan6
+namespace tropical_plan7
 {
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -158,10 +158,10 @@ inline tropical_jit::FlatInstr parse_instr(const nlohmann::json & ji)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Parsed plan_6 result
+// Parsed plan_7 result
 // ─────────────────────────────────────────────────────────────────────────────
 
-struct ParsedPlan6
+struct ParsedPlan7
 {
   tropical_jit::FlatProgram                program;
   std::vector<std::string>                 array_slot_names;
@@ -223,7 +223,7 @@ inline void reject_retired_fields(const nlohmann::json & plan)
     if (plan.contains(field))
       throw std::runtime_error(
         std::string{"NumericProgramParser: retired field '"} + field +
-        "' is not valid in tropical_plan_6");
+        "' is not valid in tropical_plan_7");
 }
 
 /** Parse a single `InstanceProgram` from JSON, recursing into nested
@@ -239,7 +239,7 @@ inline tropical_jit::InstanceProgram parse_instance_program(const nlohmann::json
     for (const auto & ji : jf["instructions"])
       inst.instructions.push_back(parse_instr(ji));
   // Slot-based parent→child input wiring. Empty arrays are omitted by the
-  // canonical Plan-6 encoder. Same instruction
+  // canonical Plan-7 encoder. Same instruction
   // shape as `instructions`; difference is purely WHEN they emit —
   // the parent's emit_kernel_block runs each child's
   // pre_input_instructions immediately before recursing into that
@@ -316,13 +316,13 @@ inline bool has_coop_reduce(const tropical_jit::InstanceProgram & inst,
   return false;
 }
 
-/** Parse a tropical_plan_6 JSON object. The C++ side supports nested
+/** Parse a tropical_plan_7 JSON object. The C++ side supports nested
  *  `instance_functions` (the fractal architecture): each function may
  *  have `children: InstanceFunction[]` that emit recursively inside the
  *  parent's body. Canonical leaf kernels omit `children`. */
-inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
+inline ParsedPlan7 parse_plan7(const nlohmann::json & plan)
 {
-  ParsedPlan6 result;
+  ParsedPlan7 result;
   reject_retired_fields(plan);
 
   if (plan.contains("metal_execution"))
@@ -356,7 +356,7 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
   auto & prog = result.program;
   prog.register_count = plan.value("register_count", 0u);
 
-  // The field is optional for Plan-6 backward compatibility: every historical
+  // The field is optional for backward compatibility: every historical
   // manifest was mono. New manifests state the compact output width explicitly.
   result.output_channel_count = plan.value("output_channel_count", 1u);
   if (result.output_channel_count == 0
@@ -392,7 +392,7 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
   if (cooperative && (!result.metal_sample_threadgroups
                       || result.metal_threadgroup_scratch_bytes == 0))
     throw std::runtime_error(
-      "NumericProgramParser: routed or wide-bank Plan 6 requires cooperative Metal execution metadata");
+      "NumericProgramParser: routed or wide-bank Plan 7 requires cooperative Metal execution metadata");
   if (!cooperative && result.metal_sample_threadgroups)
     throw std::runtime_error(
       "NumericProgramParser: cooperative Metal execution requires a routed region or a wide reduce");
@@ -422,7 +422,7 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
     }
   }
 
-  // ── sources: runtime-bound inputs (the dual of sinks). The Plan-6 encoder
+  // ── sources: runtime-bound inputs (the dual of sinks). The Plan-7 encoder
   //    omits the canonical pair [tau, rate], which is restored here. ──
   if (plan.contains("sources"))
   {
@@ -461,7 +461,7 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
   if (plan.contains("param_disciplines"))
     for (const auto & d : plan["param_disciplines"])
     {
-      ParsedPlan6::ParamDiscipline pd;
+      ParsedPlan7::ParamDiscipline pd;
       pd.name       = d.value("name", std::string{});
       pd.discipline = d.value("discipline", std::string{"raw"});
       pd.glide_dur_sec = d.value("glide_dur_sec", 0.0);
@@ -494,7 +494,7 @@ struct ParsedKernel1
   uint32_t output_channel_count = 1;
   std::vector<std::string> input_names;      // [0] = "tau"
   std::vector<std::string> output_channels;  // one name per channel ("" = silent)
-  ParsedPlan6 plan;
+  ParsedPlan7 plan;
 };
 
 inline ParsedKernel1 parse_kernel1(const nlohmann::json & manifest)
@@ -509,11 +509,16 @@ inline ParsedKernel1 parse_kernel1(const nlohmann::json & manifest)
     throw std::runtime_error("NumericProgramParser: kernel manifest has no plan");
   const std::string plan_schema =
     manifest.at("plan").value("schema", std::string{});
-  if (plan_schema != "tropical_plan_6")
+  if (plan_schema == "tropical_plan_6")
+    throw std::runtime_error(
+      "NumericProgramParser: unsupported manifest schema 'tropical_plan_6'; "
+      "expected 'tropical_plan_7' (plan 6's time source is the integer sample "
+      "index, plan 7's the Q32.32 tau: recompile the patch)");
+  if (plan_schema != "tropical_plan_7")
     throw std::runtime_error(
       "NumericProgramParser: unsupported manifest schema '" + plan_schema +
-      "'; expected 'tropical_plan_6'");
-  result.plan = parse_plan6(manifest.at("plan"));
+      "'; expected 'tropical_plan_7'");
+  result.plan = parse_plan7(manifest.at("plan"));
   result.rate = manifest.value("rate", result.plan.sample_rate);
 
   const auto & inputs = manifest.at("inputs");
@@ -562,4 +567,4 @@ inline ParsedKernel1 parse_kernel1(const nlohmann::json & manifest)
   return result;
 }
 
-} // namespace tropical_plan6
+} // namespace tropical_plan7

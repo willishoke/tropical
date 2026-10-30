@@ -80,7 +80,7 @@ def knownGates : Array String := #[
   "mcp-protocol",
   "patch-bay-refusal",
   "production-non-emission",
-  "plan6-schema-rejection",
+  "plan-schema-rejection",
   "current_module_process"
 ]
 
@@ -205,7 +205,7 @@ def obligations : Array Obligation := #[
     limitation := "Tropical.Ir.Emit.denoteExpr_routed_authored_order proves direct authored item/emit order. Separately, Tropical.Ir.Emit.compileRoutedSum_execRoutedRegion connects a successful stream to execRoutedRegion only when recursive mapped-value compilation supplies routed-depth safety, prefix closure, and freshness. Composition with source denotation and the universal compileNode discharge remain open; LLVM, Metal compiler, driver, and hardware execution remain external refinement assumptions."
     priority := .critical },
   { id := "LLVM_TEXT_EXECUTES_PLAN"
-    statement := "Generated LLVM implements tropical_plan_6 instruction, source, instance, and sink semantics."
+    statement := "Generated LLVM implements tropical_plan_7 instruction, source, instance, and sink semantics."
     evidence := #[.executableGate, .golden, .inspection]
     implementationPaths := #["lean/Tropical/Ir/EmitLlvm.lean", "engine/jit/OrcJitEngine.cpp", "engine/runtime/NumericProgramParser.hpp"]
     gateNames := #["patch-goldens", "native-mode-equivalence", "manual:LLVM emitter review"]
@@ -292,14 +292,14 @@ def obligations : Array Obligation := #[
     limitation := "Pinning and tests constrain versions; they do not verify the implementations of external compilers, frameworks, drivers, or hardware."
     priority := .high },
   { id := "SERIALIZED_PLAN_SCHEMA_IS_PLAN_6_ONLY"
-    statement := "Serialized plan entry points accept tropical_plan_6 only and reject retired schema carriers instead of translating or ignoring them."
+    statement := "Serialized plan entry points accept tropical_plan_7 only and reject retired schema carriers instead of translating or ignoring them."
     evidence := #[.inspection, .executableGate]
     implementationPaths := #["engine/runtime/FlatRuntime.cpp", "engine/runtime/NumericProgramParser.hpp", "lean/Tropical/PlanDecode.lean"]
-    gateNames := #["production-non-emission", "plan6-schema-rejection",
+    gateNames := #["production-non-emission", "plan-schema-rejection",
       "current_module_process", "manual:serialized-plan boundary review"]
     owner := "Compatibility"
     status := .evidenceBacked
-    limitation := "Canonical plan 6 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, mono output_channel_count, the tau/rate source pair, empty child/instruction arrays, zero loop ids, and the ordinary sample-thread Metal execution description."
+    limitation := "Canonical plan 7 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, mono output_channel_count, the tau/rate source pair, empty child/instruction arrays, zero loop ids, and the ordinary sample-thread Metal execution description."
     priority := .medium },
   { id := "FROZEN_AUDIO_GOLDENS_ANCHOR_CORRECTNESS"
     statement := "Frozen audio hashes are the independent behavioral anchor after retirement of the TypeScript compiler."

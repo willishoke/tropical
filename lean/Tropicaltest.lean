@@ -202,7 +202,7 @@ def main (args : List String) : IO UInt32 := do
   total := total + 1
   if !(← runReduceCoverage) then failed := failed + 1
 
-  -- ── (c⁗⁺) Static routed reduction: semantics + compact Plan 6 region ──────
+  -- ── (c⁗⁺) Static routed reduction: semantics + compact Plan 7 region ──────
   IO.println "routed reduction (compact region ≡ authored-order unrolling):"
   total := total + 1
   if !(← runRoutedSumCoverage) then failed := failed + 1
@@ -284,7 +284,7 @@ def main (args : List String) : IO UInt32 := do
   | .ok (arena, resolved) =>
     arrowRan := true
     -- ── Production legacy-state non-emission (Lane F quarantine) ────────────
-    IO.println "production non-emission (current front doors → state-free plan_6):"
+    IO.println "production non-emission (current front doors → state-free plan_7):"
     total := total + 1
     if !(← runProductionNonEmission arena resolved) then failed := failed + 1
     total := total + 1

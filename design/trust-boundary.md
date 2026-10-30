@@ -127,7 +127,7 @@ Routed reductions map each item once and fold active contributions per output in
 
 ## LLVM_TEXT_EXECUTES_PLAN
 
-Generated LLVM implements tropical_plan_6 instruction, source, instance, and sink semantics.
+Generated LLVM implements tropical_plan_7 instruction, source, instance, and sink semantics.
 
 - Status: open
 - Priority: critical
@@ -244,7 +244,7 @@ Lean core arithmetic, LLVM/lld, Metal, RtAudio, and Turnstile are distinct exter
 
 ## SERIALIZED_PLAN_SCHEMA_IS_PLAN_6_ONLY
 
-Serialized plan entry points accept tropical_plan_6 only and reject retired schema carriers instead of translating or ignoring them.
+Serialized plan entry points accept tropical_plan_7 only and reject retired schema carriers instead of translating or ignoring them.
 
 - Status: evidence-backed
 - Priority: medium
@@ -252,8 +252,8 @@ Serialized plan entry points accept tropical_plan_6 only and reject retired sche
 - Evidence: inspection, executable gate
 - Formal symbol: none
 - Implementation: `engine/runtime/FlatRuntime.cpp`, `engine/runtime/NumericProgramParser.hpp`, `lean/Tropical/PlanDecode.lean`
-- Gates: `production-non-emission`, `plan6-schema-rejection`, `current_module_process`, `manual:serialized-plan boundary review`
-- Limitation: Canonical plan 6 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, mono output_channel_count, the tau/rate source pair, empty child/instruction arrays, zero loop ids, and the ordinary sample-thread Metal execution description.
+- Gates: `production-non-emission`, `plan-schema-rejection`, `current_module_process`, `manual:serialized-plan boundary review`
+- Limitation: Canonical plan 7 deliberately permits omission of fields whose current defaults are part of the encoder contract, including fused compilation mode, mono output_channel_count, the tau/rate source pair, empty child/instruction arrays, zero loop ids, and the ordinary sample-thread Metal execution description.
 
 ## FROZEN_AUDIO_GOLDENS_ANCHOR_CORRECTNESS
 

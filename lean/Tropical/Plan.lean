@@ -4,7 +4,7 @@ import Tropical.Parse.Nodes
 import Tropical.Ir.Core
 
 /-!
-# Plan layer — `tropical_plan_6` as a type
+# Plan layer — `tropical_plan_7` as a type
 
 Port of `compiler/flat_plan.ts` plus the instruction/operand types from
 `compiler/ir/emit_resolved.ts`. Two layers, exactly as in TS:
@@ -25,8 +25,11 @@ Port of `compiler/flat_plan.ts` plus the instruction/operand types from
   omitted when empty. (Structural diff is key-order-insensitive, but
   key *presence* matters to it.)
 
-Plan 6 has no state-initialization or legacy temp-mix carriers. Runtime
-consumers reject older schemas instead of translating them.
+Plan 7 has no state-initialization or legacy temp-mix carriers. Runtime
+consumers reject older schemas instead of translating them. Plan 7 is plan 6
+with the time source redefined: source 0 (`tau`) is the Q32.32 coordinate
+where plan 6's was the integer sample index, so a plan 6 document would
+decode to a different function, and is refused instead.
 
 Numbers that are data (const vals, slot defaults, sink
 gain) are `Lean.JsonNumber` so decimal text re-parses to the identical
@@ -149,7 +152,7 @@ inductive PlanOp where
   | select | clamp
 deriving BEq, Repr, Inhabited
 
-/-- The plan wire tag for a scalar op (Capitalized; the `tropical_plan_6`
+/-- The plan wire tag for a scalar op (Capitalized; the `tropical_plan_7`
     instruction `tag`). -/
 def PlanOp.name : PlanOp → String
   | .add => "Add" | .sub => "Sub" | .mul => "Mul" | .div => "Div"
@@ -418,7 +421,7 @@ def withPreInput (f : InstanceFunction) (block : Array NInstr) : InstanceFunctio
   | .mk n i pre instrs _ ro ao rc ch => .mk n i pre instrs block ro ao rc ch
 
 /-- Mirrors `toWireInstanceFn`: canonical empty preamble/pre_input/children
-    fields are omitted for a compact Plan-6 wire form. -/
+    fields are omitted for a compact Plan-7 wire form. -/
 def toWire (f : InstanceFunction) : Except String Json := do
   let base := #[
     ("name", Json.str f.name),
@@ -538,7 +541,7 @@ structure FlatPlan where
   sinks : Array SinkSpec
   /-- Number of independently addressable output channels in the published
       sample image. `SinkSpec.target` is an index into this image. The
-      canonical mono value is omitted from Plan-6 JSON for compatibility. -/
+      canonical mono value is omitted from Plan-7 JSON for compatibility. -/
   outputChannelCount : Nat := 1
   sources : Array SourceKind := defaultSources
   slotCount : Nat
@@ -771,11 +774,14 @@ def FlatPlan.metalExecutionToWire (p : FlatPlan) : Option Json :=
       ("requested_group_policy", Json.str "four_pipeline_widths_capped")]
   else none
 
+/-- The one plan schema this compiler writes and reads. -/
+def planSchema : String := "tropical_plan_7"
+
 /-- Mirrors `toWirePlan`'s omission rules. -/
 def FlatPlan.toWire (p : FlatPlan) : Except String Json := do
   if !p.outputLayoutWellFormed then
     throw "FlatPlan.toWire: output channel count must be positive and sink targets must be unique and in range"
-  let fields := #[("schema", Json.str "tropical_plan_6"),
+  let fields := #[("schema", Json.str planSchema),
     ("config", Json.mkObj [("sampleRate", Json.num p.sampleRate)])]
   let fields := if p.compilationMode == .fused then fields
     else fields.push ("compilation_mode", Json.str p.compilationMode.wire)

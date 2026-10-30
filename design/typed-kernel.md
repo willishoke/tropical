@@ -180,7 +180,7 @@ column crossing achieves.
                  "default": [ … ] } ],
   "outputs": [ { "name": "out",          "elem": "f64",    "shape": [512, 2] } ],
   "realization": { "mode": "fused", "register_count": 0 },
-  "plan": { … tropical_plan_6 metadata, for the gates; a host that reads it is coupling to the compiler … }
+  "plan": { … tropical_plan_7 metadata, for the gates; a host that reads it is coupling to the compiler … }
 }
 ```
 
@@ -307,7 +307,13 @@ port. Where the implementation settled differently from the text above:
   progression over it. (Landed 2026-10-28, the day after T2/T3; an
   integer-grid render is byte-identical to before, the wire-plan and MSL text
   goldens were re-frozen once because the `tau << 32 >> 32` round trip is
-  gone from the emitted plan.)
+  gone from the emitted plan.) Because this changes what plan source 0 means
+  without changing any field, the plan schema is now `tropical_plan_7`: a
+  `tropical_plan_6` document (source 0 the integer sample index) would
+  decode to a different function, so both decoders refuse it with a
+  recompile message (2026-10-29). The `fractional-tau` gate also drives
+  `scaleClockQ` at dense fractional τ, where its low-word partial products
+  are live.
 - **Output channels are named.** The `out` port carries `channels`, one
   source name per channel, and a scope tap is an output channel of the
   observation artifact (the playground routes each tap to its own channel).

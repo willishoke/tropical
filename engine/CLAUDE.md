@@ -56,7 +56,7 @@ Three C entry points share the same tail:
 - `tropical_runtime_load_with_observation_generation`.
 
 All three require a `tropical_kernel_1` manifest whose nested plan is
-`tropical_plan_6`. Other schemas, a malformed port, a frame count other than
+`tropical_plan_7`. Other schemas, a malformed port, a frame count other than
 the runtime's, and retired plan carriers fail at the load boundary; see
 [`design/compatibility-matrix.md`](../design/compatibility-matrix.md).
 
@@ -347,6 +347,6 @@ ctest --test-dir build --output-on-failure
 - Keep public C ABI changes explicit and separately reviewed.
 - No interpreter or C++ plan-codegen fallback belongs on the production path.
 - Audio-thread code must not allocate, lock, log, or throw.
-- Do not add state-shaped compatibility carriers to the Plan-6 runtime.
+- Do not add state-shaped compatibility carriers to the Plan-7 runtime.
 - Update the compatibility matrix and negative boundary gates when changing
   serialized-plan dispatch.

@@ -142,7 +142,7 @@ static std::string kernel_manifest(unsigned int frames,
 static const std::vector<std::string> MANIFEST_PARAMS = {"param:gain"};
 static std::string manifest_for(unsigned int frames)
 {
-  return kernel_manifest(frames, MANIFEST_PARAMS, 1, R"({"schema":"tropical_plan_6",
+  return kernel_manifest(frames, MANIFEST_PARAMS, 1, R"({"schema":"tropical_plan_7",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":2,"slot_names":["param:gain","wire"],
@@ -440,7 +440,7 @@ static void test_metal_hotswap()
 
 static std::string staged_manifest(unsigned int frames)
 {
-  return kernel_manifest(frames, MANIFEST_PARAMS, 1, R"({"schema":"tropical_plan_6",
+  return kernel_manifest(frames, MANIFEST_PARAMS, 1, R"({"schema":"tropical_plan_7",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":1,"array_slot_sizes":[4],"array_slot_names":["col"],
     "coeff_array_slots":[0],
@@ -541,7 +541,7 @@ static void test_metal_effective_dispatch_epochs()
     {"param:bank.freq", "param:canary.morph#v0", "param:canary.morph#v1",
      "param:canary.morph#t0", "param:canary.freq", "param:canary.freq#phase",
      "param:master.velocity", "param:master.tau_base"}, 1,
-    R"({"schema":"tropical_plan_6",
+    R"({"schema":"tropical_plan_7",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":8,
@@ -638,7 +638,7 @@ static void test_metal_retarget_recomputes_companions()
   const std::string manifest = kernel_manifest(buf,
     {"param:bank.freq", "param:canary.morph#v0", "param:canary.morph#v1",
      "param:canary.morph#t0"}, 1,
-    R"({"schema":"tropical_plan_6",
+    R"({"schema":"tropical_plan_7",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":4,
@@ -882,7 +882,7 @@ static void test_metal_control_transition_stress()
     {"param:bank.freq", "param:canary.morph#v0", "param:canary.morph#v1",
      "param:canary.morph#t0", "param:canary.freq", "param:canary.freq#phase",
      "param:master.velocity", "param:master.tau_base"}, 1,
-    R"({"schema":"tropical_plan_6",
+    R"({"schema":"tropical_plan_7",
     "config":{"sampleRate":44100},"register_count":0,
     "array_slot_count":0,"array_slot_sizes":[],"instance_functions":[],
     "sinks":[],"slot_count":8,

@@ -343,9 +343,9 @@ void FlatRuntime::set_sample_index(uint64_t idx)
 // function handles, which load fills (via compile_ir_text) between this and
 // publish_state. The nested plan's instruction graph is metadata-only;
 // codegen is Lean's (EmitLlvm).
-KernelState FlatRuntime::build_kernel_state(const tropical_plan6::ParsedKernel1 & kernel)
+KernelState FlatRuntime::build_kernel_state(const tropical_plan7::ParsedKernel1 & kernel)
 {
-  const tropical_plan6::ParsedPlan6 & parsed = kernel.plan;
+  const tropical_plan7::ParsedPlan7 & parsed = kernel.plan;
   KernelState new_state;
   new_state.sample_rate    = parsed.sample_rate;
   new_state.output_channel_count = parsed.output_channel_count;
@@ -586,7 +586,7 @@ FlatRuntime::load_with_observation_generation(
       const std::string & stage0_ir,
       const std::string & manifest_text) {
     const json manifest = json::parse(manifest_text);
-    auto parsed = tropical_plan6::parse_kernel1(manifest);
+    auto parsed = tropical_plan7::parse_kernel1(manifest);
     KernelState state = build_kernel_state(parsed);
 
     auto kernel_result =

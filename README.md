@@ -30,7 +30,7 @@ MCP mutations / program_2 JSON → typed SessionSt → synthetic resolved root
                                                                   ▼
                                                    partition + stage-0 split
                                                                   │
-                                                        tropical_plan_6
+                                                        tropical_plan_7
                                                    ┌──────────────┼───────────┐
                                                    ▼              ▼           ▼
                                               LLVM → JIT    LLVM → wasm32  MSL → Metal

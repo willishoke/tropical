@@ -201,10 +201,10 @@ struct FlatProgram
   uint32_t                   register_count   = 0;
   std::vector<uint32_t>      array_slot_sizes; // element count per array slot
 
-  // ── Multi-function layout (tropical_plan_6) ──
+  // ── Multi-function layout (tropical_plan_7) ──
   std::vector<InstanceProgram> instance_functions;
-  std::vector<Sink>            sinks;    // device-bound outputs (plan_6 mix path)
-  std::vector<Source>          sources;  // runtime-bound inputs (plan_6 source path)
+  std::vector<Sink>            sinks;    // device-bound outputs (plan_7 mix path)
+  std::vector<Source>          sources;  // runtime-bound inputs (plan_7 source path)
   uint32_t                     output_channel_count = 1;
 };
 

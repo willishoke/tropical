@@ -8,8 +8,8 @@ The C++ suites test the execution boundary without opening an audio device.
 the public C API plus hand-written LLVM matching the production kernel ABI:
 
 1. a constant closed-form kernel loads and renders;
-2. the serialized-plan boundary accepts Plan 6 only and clearly rejects Plan
-   4, missing/unknown schemas, retired carriers, missing `dst_kind`, and legacy
+2. the serialized-plan boundary accepts Plan 7 only and clearly rejects Plans
+   4 and 6, missing/unknown schemas, retired carriers, missing `dst_kind`, and legacy
    operand kinds;
 3. an index ramp proves the sample coordinate advances between buffers without
    per-sample state;

@@ -170,7 +170,7 @@ def runReduceCoverage : IO Bool := do
 
 end ReduceCoverage
 
--- ── Static routed reduction (Plan 6) ───────────────────────────────────────
+-- ── Static routed reduction (Plan 7) ───────────────────────────────────────
 section RoutedSumCoverage
 open Tropical.Plan
 
@@ -389,14 +389,14 @@ def runRoutedSumCoverage : IO Bool := do
           (fun worst i => max worst (Float.abs (cpu[i]! - gpu[i]!))) 0.0
         if !gpu.isEmpty && gpu.size <= cpu.size && metalError < 1e-5 then
           passGate "routed-sum-coverage"
-            s!"static+dynamic routed folds equal authored-order unrolling; cooperative Metal max error={metalError}; compact Plan 6 round-trips; Stage0: τ-span atomic, s0-span hoists as a unit"
+            s!"static+dynamic routed folds equal authored-order unrolling; cooperative Metal max error={metalError}; compact Plan 7 round-trips; Stage0: τ-span atomic, s0-span hoists as a unit"
         else
           failGate "routed-sum-coverage"
             s!"cooperative Metal returned samples={gpu.size}/{cpu.size} maxError={metalError}"
       | .error e =>
         if routedMetalUnavailable e then
           passGate "routed-sum-coverage"
-            "static+dynamic routed folds equal authored-order unrolling; compact Plan 6 round-trips; Stage0: τ-span atomic, s0-span hoists as a unit; MSL source contract checked (Metal execution unavailable in this build)"
+            "static+dynamic routed folds equal authored-order unrolling; compact Plan 7 round-trips; Stage0: τ-span atomic, s0-span hoists as a unit; MSL source contract checked (Metal execution unavailable in this build)"
         else
           failGate "routed-sum-coverage" s!"cooperative Metal: {firstLine e}"
   | .error e, _, _, _ => failGate "routed-sum-coverage" s!"static routed: {firstLine e}"
@@ -504,7 +504,7 @@ end CycleRefusal
 
 -- ── Serialized-plan schema boundary ────────────────────────────────────────
 
-/-- The Lean-owned serialized-plan entry point is deliberately Plan-6-only.
+/-- The Lean-owned serialized-plan entry point is deliberately Plan-7-only.
     This is a separate boundary gate from production non-emission: even a
     hand-authored document cannot revive an older schema or retired carrier. -/
 def runPlanSchemaRejection : IO Bool := do
@@ -514,24 +514,27 @@ def runPlanSchemaRejection : IO Bool := do
     | .error e => (e.splitOn needle).length > 1
   let plan4 := Lean.Json.mkObj [("schema", .str "tropical_plan_4")]
   let plan5 := Lean.Json.mkObj [("schema", .str "tropical_plan_5")]
+  let plan6 := Lean.Json.mkObj [("schema", .str "tropical_plan_6")]
   let unknown := Lean.Json.mkObj [("schema", .str "tropical_plan_99")]
   let missing := Lean.Json.mkObj []
   let retired := Lean.Json.mkObj [
-    ("schema", .str "tropical_plan_6"),
+    ("schema", .str "tropical_plan_7"),
     ("state_init", .arr #[])]
   if rejectsWith plan4
-        "unsupported schema 'tropical_plan_4'; expected 'tropical_plan_6'"
+        "unsupported schema 'tropical_plan_4'; expected 'tropical_plan_7'"
       && rejectsWith plan5
-        "unsupported schema 'tropical_plan_5'; expected 'tropical_plan_6'"
+        "unsupported schema 'tropical_plan_5'; expected 'tropical_plan_7'"
+      && rejectsWith plan6
+        "expected 'tropical_plan_7' (plan 6's time source is the integer sample index"
       && rejectsWith unknown
-        "unsupported schema 'tropical_plan_99'; expected 'tropical_plan_6'"
+        "unsupported schema 'tropical_plan_99'; expected 'tropical_plan_7'"
       && rejectsWith missing "missing string field 'schema'"
       && rejectsWith retired
-        "retired field 'state_init' is not valid in tropical_plan_6" then
-    passGate "plan6-schema-rejection"
-      "PlanDecode rejects plan_4, plan_5, unknown/missing schemas, and retired carriers"
+        "retired field 'state_init' is not valid in tropical_plan_7" then
+    passGate "plan-schema-rejection"
+      "PlanDecode rejects plan_4, plan_5, plan_6 (its integer time source), unknown/missing schemas, and retired carriers"
   else
-    failGate "plan6-schema-rejection"
+    failGate "plan-schema-rejection"
       "PlanDecode accepted an unsupported schema/carrier or returned the wrong boundary error"
 
 def sortedNames (dir : String) (suffix : String) : IO (Array String) := do

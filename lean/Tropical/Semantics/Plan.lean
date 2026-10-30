@@ -2,7 +2,7 @@ import Tropical.Plan
 import Tropical.Semantics.Environment
 
 /-!
-# Reference semantics for Plan-6
+# Reference semantics for Plan-7
 
 This module defines the carrier-facing state and the small-instruction waist of
 the Plan interpreter.  Region execution is deliberately layered on top of this

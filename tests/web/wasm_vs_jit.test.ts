@@ -47,7 +47,7 @@ const dacOut = (instance: string, output: string) => ({
   expr: { op: 'ref', instance, output },
 })
 
-/** Compile a `ProgramFile` to a `tropical_plan_6` wire plan JSON string via
+/** Compile a `ProgramFile` to a `tropical_plan_7` wire plan JSON string via
  *  the Lean `diffcli compile` front door (native oracle + manifest source).
  *  `--fixtures` registers the builder-authored test programs (`OpZoo`) on top
  *  of the stdlib so patch-bay fixtures can instantiate them by name. */

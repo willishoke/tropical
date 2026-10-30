@@ -1,7 +1,7 @@
 import Tropical.Semantics.Plan
 
 /-!
-# Structural well-formedness for Plan-6
+# Structural well-formedness for Plan-7
 
 This module validates the Plan semantic waist without importing a backend.
 It checks the namespaces and structured-region invariants needed by

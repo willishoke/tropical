@@ -3,13 +3,13 @@ import Tropical.Plan
 import Tropical.Parse.OrderedJson
 
 /-!
-# PlanDecode — `tropical_plan_6 JSON → FlatPlan` (the inverse of `toWire`)
+# PlanDecode — `tropical_plan_7 JSON → FlatPlan` (the inverse of `toWire`)
 
 Phase 2 deletes the C++ codegen, so the plan-text → kernel capability moves
 to Lean: `render-bytes <plan.json>` (and any consumer holding a serialized
 plan rather than an in-memory `FlatPlan`) parses here, then emits IR via
 `EmitLlvm` and loads it with `load_ir`. Mirrors `Plan.lean`'s `*.toWire`
-field-for-field. Plan 6 is the only accepted runtime schema.
+field-for-field. Plan 7 is the only accepted runtime schema.
 
 Decodes over `JsonV` (the array-backed twin with the `sizeOf` lemmas), so
 the instance-tree recursion is total by descent on the document — the
@@ -59,7 +59,7 @@ private def rejectRetiredFields (j : JsonV) : Except String Unit := do
       "state_reg_offset", "output_targets", "outputs", "instructions",
       "scheduler_function"] do
     if (j.getField? field).isSome then
-      throw s!"PlanDecode: retired field '{field}' is not valid in tropical_plan_6"
+      throw s!"PlanDecode: retired field '{field}' is not valid in {planSchema}"
 
 private def optNum (j : JsonV) (k : String) (dflt : JsonNumber) : JsonNumber :=
   match j.getField? k with
@@ -162,8 +162,10 @@ private def natArr (j : JsonV) (k : String) : Array Nat :=
 
 private def ofWireV (j : JsonV) : Except String FlatPlan := do
   let schema ← reqStr j "schema"
-  if schema != "tropical_plan_6" then
-    throw s!"PlanDecode: unsupported schema '{schema}'; expected 'tropical_plan_6'"
+  if schema == "tropical_plan_6" then
+    throw s!"PlanDecode: unsupported schema 'tropical_plan_6'; expected '{planSchema}' (plan 6's time source is the integer sample index, plan 7's the Q32.32 τ: recompile the patch)"
+  if schema != planSchema then
+    throw s!"PlanDecode: unsupported schema '{schema}'; expected '{planSchema}'"
   rejectRetiredFields j
   let sampleRate := match (j.getField? "config").bind (·.getField? "sampleRate") with
     | some (.num n) => n
@@ -196,7 +198,7 @@ private def ofWireV (j : JsonV) : Except String FlatPlan := do
     throw "PlanDecode: output channel count must be positive and sink targets must be unique and in range"
   pure plan
 
-/-- Parse a tropical_plan_6 JSON object into a `FlatPlan`. -/
+/-- Parse a tropical_plan_7 JSON object into a `FlatPlan`. -/
 def FlatPlan.ofWire (j : Json) : Except String FlatPlan := do
   match Tropical.Parse.JsonV.parse j.compress with
   | .error e => .error s!"PlanDecode: internal reparse failure: {e}"

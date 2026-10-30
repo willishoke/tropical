@@ -102,7 +102,7 @@ structure Realization where
 deriving Repr, Inhabited
 
 /-- The kernel type plus the plan it was derived from. `plan` is nested in
-    the wire form (as `tropical_plan_6`) for the gates; a host that reads it
+    the wire form (as `tropical_plan_7`) for the gates; a host that reads it
     is coupling to the compiler's internals. -/
 structure KernelType where
   rate : JsonNumber

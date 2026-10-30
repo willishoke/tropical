@@ -5,7 +5,7 @@ import Tropical.Lowering
 import Tropical.Compile
 
 /-!
-# Session.Compile — the session graph → `tropical_plan_6`, purely
+# Session.Compile — the session graph → `tropical_plan_7`, purely
 
 The compile path over `SessionSt`: lift free wire expressions into synthetic
 programs, build the resolved session root directly from the graph, check its
