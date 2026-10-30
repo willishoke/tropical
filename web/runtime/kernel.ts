@@ -77,10 +77,15 @@ export function importedMemoryMinPages(wasmBytes: BufferSource): number {
 type KernelFn = (...pointers: number[]) => void
 
 export class WasmKernel {
-  private startIdx = 0n
+  /** The frame index of the next block; a number is exact to 2⁵³ frames. */
+  private frameIdx = 0
   private fadeInRem = 0
   private fadeOutRem = 0
   private readonly argv: number[]
+  /** Views of tau (as u32 word pairs) and the output, made on first use and
+   *  again only if the memory's buffer changes, so a block allocates nothing. */
+  private tauWords?: Uint32Array
+  private outView?: Float64Array
 
   private constructor(
     private readonly memory: WebAssembly.Memory,
@@ -147,15 +152,25 @@ export class WasmKernel {
   }
 
   /** Run the kernel once over its static block, with `tau` the clock of each
-   *  frame from `startIdx`, and return the frame-major output view. */
-  private renderBlock(startIdx: bigint): Float64Array {
+   *  frame from `frameIdx`, and return the frame-major output view. Each τ is
+   *  written as its two little-endian u32 words, the fraction (0) and then the
+   *  frame index mod 2³²: the same 64 bits a `BigInt64Array` stores for
+   *  `idx << 32n`, without a BigInt per frame on the audio thread. */
+  private renderBlock(frameIdx: number): Float64Array {
     const L = this.layout
-    const tau = new BigInt64Array(this.memory.buffer, L.tau, L.frames)
-    for (let s = 0; s < L.frames; s++)
-      tau[s] = (startIdx + BigInt(s)) << 32n
+    if (this.outView?.buffer !== this.memory.buffer) {
+      this.tauWords = new Uint32Array(this.memory.buffer, L.tau, 2 * L.frames)
+      this.outView = new Float64Array(
+        this.memory.buffer, L.output, L.frames * this.outputChannelCount)
+    }
+    const words = this.tauWords!
+    const base = frameIdx % 4294967296
+    for (let s = 0; s < L.frames; s++) {
+      words[2 * s] = 0
+      words[2 * s + 1] = base + s // a u32 store wraps mod 2³²
+    }
     this.kernel(...this.argv)
-    return new Float64Array(
-      this.memory.buffer, L.output, L.frames * this.outputChannelCount)
+    return this.outView!
   }
 
   /** Render `n` frames and return a frame-major, interleaved copy of
@@ -170,11 +185,11 @@ export class WasmKernel {
     const C = this.outputChannelCount
     const out = new Float64Array(n * C)
     for (let done = 0; done < n; done += this.layout.frames) {
-      const block = this.renderBlock(this.startIdx + BigInt(done))
+      const block = this.renderBlock(this.frameIdx + done)
       const take = Math.min(this.layout.frames, n - done)
       out.set(block.subarray(0, take * C), done * C)
     }
-    this.startIdx += BigInt(n)
+    this.frameIdx += n
     return out
   }
 
@@ -191,7 +206,10 @@ export class WasmKernel {
    *  side, where `FlatRuntime.outputBuffer` is honest and `TropicalDAC`'s
    *  callback clamps — see `kDeviceOutputBound` in engine/dac/TropicalDAC.hpp
    *  for `C`, its measurement, and the NaN/±0 argument for spelling it as
-   *  ordered-compare + select rather than Math.min/Math.max. */
+   *  ordered-compare + select rather than Math.min/Math.max.
+   *
+   *  It runs on the audio thread, so it reads each block's output view in
+   *  place rather than going through `render`'s copy, and allocates nothing. */
   process(outputs: readonly Float32Array[], n: number): void {
     if (outputs.length === 0)
       throw new RangeError('process requires at least one host output channel')
@@ -203,34 +221,41 @@ export class WasmKernel {
       if (output.length < n)
         throw new RangeError('host output channel is shorter than the frame count')
 
-    const f64 = this.render(n)
-    if (this.outputChannelCount > 1)
-      for (let channel = this.outputChannelCount; channel < outputs.length; channel++)
+    const C = this.outputChannelCount
+    if (C > 1)
+      for (let channel = C; channel < outputs.length; channel++)
         outputs[channel]!.fill(0, 0, n)
 
-    for (let frame = 0; frame < n; frame++) {
-      let gain = 1
-      if (this.fadeInRem > 0) {
-        const t = 1 - this.fadeInRem / FADE_SAMPLES
-        gain = t * t * (3 - 2 * t); this.fadeInRem--
-      } else if (this.fadeOutRem > 0) {
-        const t = this.fadeOutRem / FADE_SAMPLES
-        gain = t * t * (3 - 2 * t); this.fadeOutRem--
-      }
+    // A block's tail past `n` is discarded and recomputed by the next call,
+    // as in `render`: the closed form has no state to keep in step.
+    for (let frame = 0; frame < n;) {
+      const block = this.renderBlock(this.frameIdx)
+      const take = Math.min(this.layout.frames, n - frame)
+      for (let s = 0; s < take; s++, frame++) {
+        let gain = 1
+        if (this.fadeInRem > 0) {
+          const t = 1 - this.fadeInRem / FADE_SAMPLES
+          gain = t * t * (3 - 2 * t); this.fadeInRem--
+        } else if (this.fadeOutRem > 0) {
+          const t = this.fadeOutRem / FADE_SAMPLES
+          gain = t * t * (3 - 2 * t); this.fadeOutRem--
+        }
 
-      if (this.outputChannelCount === 1) {
-        const v = f64[frame]! * gain
-        const lo = v > -DEVICE_OUTPUT_BOUND ? v : -DEVICE_OUTPUT_BOUND
-        const sample = lo < DEVICE_OUTPUT_BOUND ? lo : DEVICE_OUTPUT_BOUND
-        for (const output of outputs) output[frame] = sample
-        continue
+        if (C === 1) {
+          const v = block[s]! * gain
+          const lo = v > -DEVICE_OUTPUT_BOUND ? v : -DEVICE_OUTPUT_BOUND
+          const sample = lo < DEVICE_OUTPUT_BOUND ? lo : DEVICE_OUTPUT_BOUND
+          for (const output of outputs) output[frame] = sample
+          continue
+        }
+        for (let channel = 0; channel < C; channel++) {
+          const v = block[s * C + channel]! * gain
+          const lo = v > -DEVICE_OUTPUT_BOUND ? v : -DEVICE_OUTPUT_BOUND
+          outputs[channel]![frame] =
+            lo < DEVICE_OUTPUT_BOUND ? lo : DEVICE_OUTPUT_BOUND
+        }
       }
-      for (let channel = 0; channel < this.outputChannelCount; channel++) {
-        const v = f64[frame * this.outputChannelCount + channel]! * gain
-        const lo = v > -DEVICE_OUTPUT_BOUND ? v : -DEVICE_OUTPUT_BOUND
-        outputs[channel]![frame] =
-          lo < DEVICE_OUTPUT_BOUND ? lo : DEVICE_OUTPUT_BOUND
-      }
+      this.frameIdx += take
     }
   }
 }

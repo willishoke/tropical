@@ -39,7 +39,7 @@ function fakeKernel(
     kernel: typeof kernel
     layout: KernelLayout
     argv: number[]
-    startIdx: bigint
+    frameIdx: number
     fadeInRem: number
     fadeOutRem: number
   }
@@ -49,7 +49,7 @@ function fakeKernel(
     layout,
     argv: [layout.tau, ...layout.params, layout.output],
     outputChannelCount,
-    startIdx: 0n,
+    frameIdx: 0,
     fadeInRem: 0,
     fadeOutRem: 0,
   })
@@ -93,6 +93,30 @@ describe('multichannel wasm runtime contract', () => {
     expect(Array.from(kernel.render(FRAMES + 3)))
       .toEqual(Array.from({ length: FRAMES + 3 }, (_, i) => i))
     expect(Array.from(kernel.render(2))).toEqual([FRAMES + 3, FRAMES + 4])
+  })
+
+  test('tau is the BigInt64 image of idx << 32 across the 2³² frame wrap', () => {
+    const kernel = fakeKernel(1, (_frame, _channel, absoluteFrame) => absoluteFrame)
+    const start = 2 ** 32 - 3
+    ;(kernel as unknown as { frameIdx: number }).frameIdx = start
+    expect(Array.from(kernel.render(FRAMES)))
+      .toEqual(Array.from({ length: FRAMES }, (_, s) =>
+        Number(BigInt.asIntN(64, BigInt(start + s) << 32n) >> 32n)))
+    const { memory, layout } = kernel as unknown as
+      { memory: WebAssembly.Memory, layout: KernelLayout }
+    const tau = new BigInt64Array(memory.buffer, layout.tau, FRAMES)
+    for (let s = 0; s < FRAMES; s++)
+      expect(tau[s]).toBe(BigInt.asIntN(64, BigInt(start + s) << 32n))
+  })
+
+  test('process spans blocks on the same clock as render', () => {
+    const kernel = fakeKernel(1, (_frame, _channel, absoluteFrame) => absoluteFrame)
+    const out = new Float32Array(FRAMES + 3)
+    kernel.process([out], FRAMES + 3)
+    expect(Array.from(out)).toEqual(Array.from({ length: FRAMES + 3 }, (_, i) => i))
+    kernel.process([out], 2)
+    expect(Array.from(out.subarray(0, 2))).toEqual([FRAMES + 3, FRAMES + 4])
+    expect(Array.from(kernel.render(1))).toEqual([FRAMES + 5])
   })
 
   test('stereo maps independently, clamps, and clears surplus host channels', () => {
