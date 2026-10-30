@@ -61,6 +61,7 @@ validate: build lean
 	$(PYTHON) tools/check_layers.py
 	$(PYTHON) tools/check_artifact_parity.py
 	$(PYTHON) tools/check_runtime_deps.py
+	bun run tsc --noEmit
 	./lean/.lake/build/bin/tropicaltest-core
 	./lean/.lake/build/bin/tropicaltest
 	bun web/build_patches.ts

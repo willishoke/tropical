@@ -60,6 +60,7 @@ The individual checks:
 cmake --build build -j4 && ctest --test-dir build         # C++ tests (JIT + C API, no audio device)
 ./lean/.lake/build/bin/tropicaltest                       # audio + wire/port goldens + native mode-equiv
 TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test   # WASM≡JIT + MCP behavioral
+bun run tsc --noEmit                                      # TypeScript type-check (web/)
 ```
 
 `tropicaltest` is the Lean golden runner: it boots the `Tropical.Stdlib`

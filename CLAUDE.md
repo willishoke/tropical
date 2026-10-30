@@ -15,7 +15,7 @@ oscillator phase is computed from the time coordinate, not latched.
 make build          # C++ core, outputs build/libtropical.dylib
 make lean           # Lean frontend + diffcli (the production compiler + MCP server)
 make mcp-lean       # build C++ + Lean front door, then launch the MCP server
-make validate       # build + lean + tropicaltest + web build + bun test + ctest
+make validate       # build + lean + tsc + tropicaltest + web build + bun test + ctest
 make clean          # remove build directories
 ```
 
