@@ -152,6 +152,11 @@ void acknowledge_latest(FlatRuntime & metal)
     throw std::runtime_error("Metal activation did not acknowledge");
 }
 
+// render_window reads output channels of the observation kernel
+// (design/typed-kernel.md); a plain load observes the audio artifact, whose
+// one channel is `__root__.out`.
+constexpr uint32_t kReferenceChannel = 0;
+
 std::vector<double> render_reference(
   FlatRuntime & jit, uint32_t reference_slot, uint64_t capture_start)
 {
@@ -185,12 +190,12 @@ Result run_scenario(
   const uint32_t tau_slot = metal.slot_index("param:master.tau_base");
   const uint32_t velocity_slot =
     metal.slot_index("param:master.velocity");
-  const uint32_t reference_slot = metal.slot_index("__root__.out");
+  const uint32_t reference_slot = kReferenceChannel;
   if (tau_slot == UINT32_MAX || velocity_slot == UINT32_MAX
-      || reference_slot == UINT32_MAX
+      || metal.slot_index("__root__.out") == UINT32_MAX
       || exact.slot_index("param:master.tau_base") != tau_slot
       || exact.slot_index("param:master.velocity") != velocity_slot
-      || exact.slot_index("__root__.out") != reference_slot)
+      || exact.slot_index("__root__.out") == UINT32_MAX)
     throw std::runtime_error("master clock slots missing");
 
   std::vector<Event> velocity_events;
@@ -286,10 +291,10 @@ DelayedOracleResult run_delayed_oracle(
   load(stale, replacement, false);
   acknowledge_latest(metal);
 
-  const uint32_t reference_slot = metal.slot_index("__root__.out");
-  if (reference_slot == UINT32_MAX
-      || exact.slot_index("__root__.out") != reference_slot
-      || stale.slot_index("__root__.out") != reference_slot)
+  const uint32_t reference_slot = kReferenceChannel;
+  if (metal.slot_index("__root__.out") == UINT32_MAX
+      || exact.slot_index("__root__.out") == UINT32_MAX
+      || stale.slot_index("__root__.out") == UINT32_MAX)
     throw std::runtime_error("delayed oracle reference slot missing");
 
   for (uint64_t round = 0; round < 15; ++round)

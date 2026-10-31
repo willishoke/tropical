@@ -1,0 +1,8 @@
+{
+  "nodes": [
+    {"id": "echo", "kind": "knob", "params": {"value": 1},
+     "param_aliases": {"value": "master.velocity"}},
+    {"id": "out", "kind": "out", "in": {"in": ["echo"]}}
+  ],
+  "out": "out"
+}

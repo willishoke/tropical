@@ -1,0 +1,9 @@
+{
+  "nodes": [
+    {"id": "probe", "kind": "source", "params": {"freq": 220, "morph": 0}},
+    {"id": "echo", "kind": "knob", "params": {"value": 220},
+     "param_aliases": {"value": "probe.freq"}},
+    {"id": "out", "kind": "out", "in": {"in": ["echo"]}}
+  ],
+  "out": "out"
+}

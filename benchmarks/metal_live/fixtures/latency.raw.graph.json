@@ -1,0 +1,8 @@
+{
+  "nodes": [
+    {"id": "echo", "kind": "knob", "params": {"value": 0.25},
+     "param_aliases": {"value": "probe.raw"}},
+    {"id": "out", "kind": "out", "in": {"in": ["echo"]}}
+  ],
+  "out": "out"
+}

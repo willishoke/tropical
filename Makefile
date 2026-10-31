@@ -67,6 +67,8 @@ validate: build lean
 	bun web/build_patches.ts
 	TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test
 	ctest --test-dir $(BUILD_DIR) --output-on-failure
+	$(PYTHON) benchmarks/metal_live/test_run.py
+	$(PYTHON) benchmarks/metal_live/run.py --mode smoke --skip-build
 
 # Behavioral MCP protocol suites against the live Lean engine.
 test-lean-engine: build lean

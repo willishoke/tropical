@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import math
 import os
@@ -22,12 +23,21 @@ RUNTIME_BENCH = ROOT / "build" / "tropical_runtime_bench"
 DIFFCLI = ROOT / "lean" / ".lake" / "build" / "bin" / "diffcli"
 LATENCY = HERE / "fixtures"
 MATRIX = ROOT / "benchmarks" / "current_baseline" / "fixtures" / "matrix.json"
+# Each latency probe (fixtures/latency.<discipline>.graph.json) is an echo:
+# the output is a knob aliased to the slot the discipline's write lands in
+# (the target itself; glide's `#v1`), so the first block that carries the
+# write reads exactly the written value. A non-echo graph never would (the
+# glide ramps and the oscillator keeps moving).
 LATENCY_PARAMS = {
     "raw": ("probe.raw", 0.25, 0.75),
     "glide": ("probe.glide", 0.25, 0.75),
     "anchor": ("probe.freq", 220.0, 440.0),
     "velocity": ("master.velocity", 1.0, 0.75),
 }
+LATENCY_BUFFERS = (128, 256, 512)
+# The playground output stage multiplies by `master.gain` (default 3.7);
+# unity makes the echo exact on the f32 Metal path as well as the JIT.
+LATENCY_SET_PARAMS = (("master.gain", 1.0),)
 
 
 class QualificationBlocked(RuntimeError):
@@ -577,12 +587,39 @@ def write_failure_row(stream, *, mode: str, requested_mode: str,
     stream.flush()
 
 
-def latency_args(buffer: int, metal: bool, discipline: str) -> list[str]:
+def emit_graph(artifact: Path, graph: Path, buffer: int, metal: bool,
+               cache: Path) -> dict[str, Path]:
+    """Compile a playground graph into one kernel artifact of `buffer`
+    frames (the frame count is part of the artifact's type)."""
+    artifact.mkdir(parents=True)
+    env = benchmark_env({
+        "TROPICAL_STAGE0_DUMP": str(artifact),
+        "TROPICAL_KERNEL_CACHE_ROOT": str(cache),
+    })
+    run([
+        str(DIFFCLI), "render-graph", str(graph),
+        *(["--metal"] if metal else []),
+        "--frames", "0", "--buffer", str(buffer),
+    ], env)
+    paths = {
+        "ir": artifact / "kernel.ll",
+        "manifest": artifact / "manifest.json",
+    }
+    if metal:
+        paths |= {
+            "coeff": artifact / "stage0.ll",
+            "msl": artifact / "kernel.metal",
+        }
+    return paths
+
+
+def latency_args(artifact: dict[str, Path], buffer: int,
+                 discipline: str) -> list[str]:
     name, low, high = LATENCY_PARAMS[discipline]
     args = [
         str(RUNTIME_BENCH),
-        "--ir", str(LATENCY / "latency.ll"),
-        "--manifest", str(LATENCY / f"latency.{discipline}.manifest.json"),
+        "--ir", str(artifact["ir"]),
+        "--manifest", str(artifact["manifest"]),
         "--buffer", str(buffer),
         "--blocks", "8",
         "--warmup", "2",
@@ -590,20 +627,29 @@ def latency_args(buffer: int, metal: bool, discipline: str) -> list[str]:
         "--latency",
         "--rss-every", "1",
     ]
-    if metal:
-        args += ["--msl", str(LATENCY / "latency.metal")]
+    for set_name, value in LATENCY_SET_PARAMS:
+        args += ["--set-param", f"{set_name},{value}"]
+    if "msl" in artifact:
+        args += ["--msl", str(artifact["msl"]),
+                 "--coeff", str(artifact["coeff"])]
     return args
 
 
-def run_latency_matrix(stream, work: Path) -> None:
+def run_latency_matrix(stream, work: Path,
+                       buffers: tuple[int, ...] = LATENCY_BUFFERS,
+                       metal: bool = True) -> None:
     rate = 44100
-    for buffer in (128, 256, 512):
+    for buffer in buffers:
         for discipline in LATENCY_PARAMS:
+            graph = LATENCY / f"latency.{discipline}.graph.json"
+            artifact = emit_graph(
+                work / "latency" / f"jit-{buffer}-{discipline}", graph,
+                buffer, False, work / "cache" / "prepare")
             jit_env = benchmark_env({
                 "TROPICAL_KERNEL_CACHE_ROOT":
                     str(work / "cache" / f"jit-{buffer}-{discipline}"),
             })
-            jit = probe(latency_args(buffer, False, discipline), jit_env)
+            jit = probe(latency_args(artifact, buffer, discipline), jit_env)
             if jit.get("ownership_failure_count") != 0:
                 raise RuntimeError(
                     f"JIT ownership failure at B={buffer} {discipline}")
@@ -618,6 +664,8 @@ def run_latency_matrix(stream, work: Path) -> None:
             stream.write(json.dumps({
                 "schema": "tropical_metal_latency_row_1",
                 "backend": "jit",
+                "fixture": graph.name,
+                "set_params": dict(LATENCY_SET_PARAMS),
                 "device_frames": buffer,
                 "render_tile_frames": 0,
                 "discipline": discipline,
@@ -627,15 +675,20 @@ def run_latency_matrix(stream, work: Path) -> None:
                 "raw": jit,
             }, separators=(",", ":")) + "\n")
             stream.flush()
+            if not metal:
+                continue
 
             render_frames = 512
+            artifact = emit_graph(
+                work / "latency" / f"metal-{buffer}-{discipline}", graph,
+                buffer, True, work / "cache" / "prepare")
             env = benchmark_env({
                 "TROPICAL_METAL_RENDER_TILE_FRAMES": str(render_frames),
                 "TROPICAL_KERNEL_CACHE_ROOT": str(
                     work / "cache" / f"metal-{buffer}-{render_frames}-{discipline}"
                 ),
             })
-            result = probe(latency_args(buffer, True, discipline), env)
+            result = probe(latency_args(artifact, buffer, discipline), env)
             fault_fields = (
                 "metal_dispatch_failure_count",
                 "metal_render_starvation_count",
@@ -663,6 +716,8 @@ def run_latency_matrix(stream, work: Path) -> None:
             stream.write(json.dumps({
                 "schema": "tropical_metal_latency_row_2",
                 "backend": "metal",
+                "fixture": graph.name,
+                "set_params": dict(LATENCY_SET_PARAMS),
                 "device_frames": buffer,
                 "render_tile_frames": render_frames,
                 "discipline": discipline,
@@ -723,24 +778,10 @@ def prepare_heavy_graph(work: Path) -> tuple[dict[str, Path], dict[str, Any]]:
          if node["id"] == "probe_addr")["params"]["value"] = 0.075
 
     def emit(name: str, graph_value: dict[str, Any]) -> dict[str, Path]:
-        artifact = work / name
-        artifact.mkdir(parents=True)
-        graph = artifact / "graph.json"
+        graph = work / f"{name}.graph.json"
         graph.write_text(json.dumps(graph_value, separators=(",", ":")))
-        env = benchmark_env({
-            "TROPICAL_STAGE0_DUMP": str(artifact),
-            "TROPICAL_KERNEL_CACHE_ROOT": str(work / f"{name}-prepare-cache"),
-        })
-        run([
-            str(DIFFCLI), "render-graph", str(graph), "--metal",
-            "--frames", "0", "--buffer", "512",
-        ], env)
-        return {
-            "ir": artifact / "audio.ll",
-            "coeff": artifact / "coeff.ll",
-            "msl": artifact / "audio.metal",
-            "manifest": artifact / "manifest.json",
-        }
+        return emit_graph(work / name, graph, 512, True,
+                          work / f"{name}-prepare-cache")
 
     artifacts = emit("modal-bank-512", heavy_bank)
     reload_artifacts = emit("modal-bank-511-replacement", replacement)
@@ -759,9 +800,16 @@ def prepare_heavy_graph(work: Path) -> tuple[dict[str, Path], dict[str, Any]]:
     ):
         raise RuntimeError("replacement manifest is not distinguishable")
 
-    plan = json.loads(artifacts["manifest"].read_text())
-    sink = plan.get("sinks", [{}])[0]
-    reference_slot = sink.get("inputs", [None])[0]
+    # `--reference-slot` is an output channel of the observation kernel
+    # (design/typed-kernel.md); a plain load observes the audio artifact.
+    def reference_channel(kernel: dict[str, Any]) -> int | None:
+        channels = kernel.get("outputs", [{}])[0].get("channels", [])
+        return (channels.index("__root__.out")
+                if "__root__.out" in channels else None)
+
+    kernel = json.loads(artifacts["manifest"].read_text())
+    plan = kernel.get("plan", {})
+    reference_slot = reference_channel(kernel)
     expected = {
         "raw": "bank.freq",
         "glide": "canary.morph",
@@ -773,9 +821,9 @@ def prepare_heavy_graph(work: Path) -> tuple[dict[str, Path], dict[str, Any]]:
         for item in plan.get("param_disciplines", [])
         if item.get("name") in expected.values()
     }
-    replacement_plan = json.loads(reload_artifacts["manifest"].read_text())
-    replacement_sink = replacement_plan.get("sinks", [{}])[0]
-    replacement_reference_slot = replacement_sink.get("inputs", [None])[0]
+    replacement_kernel = json.loads(reload_artifacts["manifest"].read_text())
+    replacement_plan = replacement_kernel.get("plan", {})
+    replacement_reference_slot = reference_channel(replacement_kernel)
     replacement_applied = {
         item["discipline"]: item["name"]
         for item in replacement_plan.get("param_disciplines", [])
@@ -962,9 +1010,25 @@ def run_soak(stream, work: Path, duration: float, buffer: int,
             "Metal soak acceptance blocked: " + ", ".join(failure_reasons))
 
 
+def run_smoke() -> None:
+    """One cheap pass over every latency probe (JIT, Bdev=128), so the
+    probe graphs and the bench's artifact contract cannot rot unnoticed.
+    Records nothing; `make validate` and CI run it."""
+    with tempfile.TemporaryDirectory(prefix="tropical-metal-live-smoke-") as work:
+        stream = io.StringIO()
+        run_latency_matrix(stream, Path(work), buffers=(128,), metal=False)
+    rows = [json.loads(line) for line in stream.getvalue().splitlines()]
+    if len(rows) != len(LATENCY_PARAMS):
+        raise RuntimeError(f"smoke wrote {len(rows)} latency rows")
+    for row in rows:
+        print(f"metal_live smoke: {row['discipline']} next-block",
+              file=os.sys.stderr)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--mode", choices=("latency", "soak", "all"), default="latency")
+    parser.add_argument(
+        "--mode", choices=("latency", "soak", "all", "smoke"), default="latency")
     parser.add_argument("--duration-seconds", type=float, default=600)
     parser.add_argument("--buffer", type=int, choices=(128, 256, 512), default=512)
     parser.add_argument(
@@ -978,6 +1042,9 @@ def main() -> int:
         run(["make", "lean", "JOBS=4"])
     if not RUNTIME_BENCH.exists() or not DIFFCLI.exists():
         raise RuntimeError("build artifacts are missing")
+    if options.mode == "smoke":
+        run_smoke()
+        return 0
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     output_path = options.output or HERE / "data" / f"{options.mode}-{stamp}.jsonl"

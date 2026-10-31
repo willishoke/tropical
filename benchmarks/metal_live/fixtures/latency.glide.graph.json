@@ -1,0 +1,10 @@
+{
+  "nodes": [
+    {"id": "probe", "kind": "source", "params": {"freq": 220, "morph": 0.25},
+     "param_aliases": {"morph": "probe.glide"}},
+    {"id": "echo", "kind": "knob", "params": {"value": 0.25},
+     "param_aliases": {"value": "probe.glide#v1"}},
+    {"id": "out", "kind": "out", "in": {"in": ["echo"]}}
+  ],
+  "out": "out"
+}

@@ -12,6 +12,20 @@ benchmarks/metal_live/run.sh --mode soak \
   --duration-seconds 600 --buffer 512 --render-frames 512
 ```
 
+The latency probes are compiled fresh from the playground graphs in
+`fixtures/latency.<discipline>.graph.json`, one artifact per discipline,
+`Bdev`, and backend (the frame count is part of the kernel's type). Each
+probe is an echo: its output is a knob aliased to the slot the discipline's
+write lands in (`probe.raw`, glide's `probe.glide#v1`, `probe.freq`,
+`master.velocity`), and the harness sets `master.gain` to 1, so the first
+block that carries the write reads back exactly the written value. The soak
+compiles the `modal-bank-512` matrix graph the same way.
+
+```sh
+# JIT only, Bdev=128, nothing recorded: what `make validate` and CI run
+benchmarks/metal_live/run.sh --mode smoke --skip-build
+```
+
 `Bdev` is the exact RtAudio callback quantum. `Rgpu` is the Metal tile render
 quantum and must be a positive multiple of `Bdev`. The runtime owns two banks
 of four preallocated `Rgpu` tiles. A dedicated worker submits and waits for

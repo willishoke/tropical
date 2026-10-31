@@ -41,6 +41,12 @@ struct ParamEvent
   double high = 0.0;
 };
 
+struct ParamSet
+{
+  std::string name;
+  double value = 0.0;
+};
+
 struct Options
 {
   std::string ir;
@@ -63,6 +69,7 @@ struct Options
   std::optional<uint64_t> write_stop_at;
   uint32_t write_count = 1;
   std::vector<ParamEvent> param_events;
+  std::vector<ParamSet> set_params;
   std::optional<uint32_t> slot;
   std::optional<uint32_t> reference_slot;
   double slot_value = 0.75;
@@ -160,6 +167,18 @@ ParamEvent parse_param_event(const char * raw)
   };
 }
 
+ParamSet parse_param_set(const char * raw)
+{
+  const std::string text = raw;
+  const std::size_t comma = text.rfind(',');
+  if (comma == std::string::npos || comma == 0 || comma + 1 == text.size())
+    throw std::runtime_error("--set-param expects name,value");
+  return {
+    text.substr(0, comma),
+    parse_double(text.substr(comma + 1).c_str(), "--set-param value"),
+  };
+}
+
 Options parse_options(int argc, char ** argv)
 {
   Options o;
@@ -192,6 +211,8 @@ Options parse_options(int argc, char ** argv)
       o.write_stop_at = parse_u64(value(), "--write-stop-at");
     else if (flag == "--param-event")
       o.param_events.push_back(parse_param_event(value()));
+    else if (flag == "--set-param")
+      o.set_params.push_back(parse_param_set(value()));
     else if (flag == "--write-count")
       o.write_count = static_cast<uint32_t>(parse_u64(value(), "--write-count"));
     else if (flag == "--slot")
@@ -389,6 +410,19 @@ int main(int argc, char ** argv)
     if (!load(rt, o, ir, manifest, coeff, msl))
       throw std::runtime_error(tropical_last_error());
     const uint64_t load_ns = elapsed_ns(load_start, Clock::now());
+    // `--set-param`: a host-dispatched write after the initial load and
+    // before warm-up, e.g. a unity master gain so a probe's output is
+    // exactly the slot it echoes. Reloads do not re-apply it.
+    for (const auto & set : o.set_params)
+    {
+      tropical_param_write_t write{};
+      const int status =
+        tropical_runtime_set_param(rt, set.name.c_str(), set.value, &write);
+      if (status == 0)
+        throw std::runtime_error(
+          "--set-param: the manifest has no param '" + set.name + "'");
+      if (status < 0) throw std::runtime_error(tropical_last_error());
+    }
     const uint32_t render_tile_frames =
       tropical_runtime_metal_render_tile_frames(rt);
     const uint32_t worker_capacity_frames =
