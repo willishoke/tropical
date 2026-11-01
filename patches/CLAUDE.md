@@ -70,8 +70,8 @@ The serialized plan boundary is independently strict. See
 - **Ternary** — `{"op": "select", "args": [<cond>, <then>, <else>]}` /
   `{"op": "clamp", "args": [<v>, <lo>, <hi>]}`
 - **Sentinels** — `{"op": "sampleRate"}`, `{"op": "clock"}` (τ, the
-  kernel's Q32.32 time coordinate — the IR's time leaf), `{"op":
-  "sampleIndex"}` (the integer sample index, `⌊τ⌋ = clock >> 32`; a derived
+  kernel's Q48.16 time coordinate — the IR's time leaf), `{"op":
+  "sampleIndex"}` (the integer sample index, `⌊τ⌋ = clock >> 16`; a derived
   expression, so a builder that spells it is choosing the integer grid)
 - **Param** — `{"op": "param", "name": "cutoff"}`. The session compile
   resolves the name to a `param:<name>` module slot.

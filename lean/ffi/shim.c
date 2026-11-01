@@ -165,7 +165,7 @@ LEAN_EXPORT lean_obj_res shim_runtime_output_bytes(b_lean_obj_arg rt, lean_obj_a
   return lean_io_result_mk_ok(arr);
 }
 
-/* Render explicit Q32.32 coordinates — a little-endian i64 ByteArray — against
+/* Render explicit Q48.16 coordinates — a little-endian i64 ByteArray — against
    the observation artifact. Returns channel-major little-endian f64s
    (count × channels), or the runtime's error. */
 LEAN_EXPORT lean_obj_res shim_runtime_render_tau(b_lean_obj_arg rt, b_lean_obj_arg tau,

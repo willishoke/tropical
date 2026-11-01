@@ -14,6 +14,7 @@
  */
 
 #include "jit/OrcJitEngine.hpp"
+#include "runtime/ClockFormat.hpp"
 
 #include <algorithm>
 #include <nlohmann/json.hpp>
@@ -513,7 +514,7 @@ inline ParsedKernel1 parse_kernel1(const nlohmann::json & manifest)
     throw std::runtime_error(
       "NumericProgramParser: unsupported manifest schema 'tropical_plan_6'; "
       "expected 'tropical_plan_7' (plan 6's time source is the integer sample "
-      "index, plan 7's the Q32.32 tau: recompile the patch)");
+      "index, plan 7's the fixed-point tau: recompile the patch)");
   if (plan_schema != "tropical_plan_7")
     throw std::runtime_error(
       "NumericProgramParser: unsupported manifest schema '" + plan_schema +
@@ -527,10 +528,12 @@ inline ParsedKernel1 parse_kernel1(const nlohmann::json & manifest)
   for (const auto & port : inputs)
     result.input_names.push_back(port.at("name").get<std::string>());
   const auto & tau = inputs.at(0);
-  if (result.input_names[0] != "tau" || tau.value("elem", std::string{}) != "i64q32"
+  if (result.input_names[0] != "tau"
+      || tau.value("elem", std::string{}) != tropical_clock::kTauElem
       || !tau.contains("shape") || tau.at("shape").size() != 1)
     throw std::runtime_error(
-      "NumericProgramParser: kernel manifest's first input must be tau:i64q32[frames]");
+      std::string("NumericProgramParser: kernel manifest's first input must be tau:")
+      + tropical_clock::kTauElem + "[frames] (recompile a manifest built for another clock format)");
   result.frames = tau.at("shape").at(0).get<uint32_t>();
   if (result.frames == 0)
     throw std::runtime_error("NumericProgramParser: kernel frames must be positive");

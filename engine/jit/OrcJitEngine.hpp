@@ -181,12 +181,12 @@ struct Sink
 
 // A runtime-bound input source — the dual of `Sink`. The kernel reads source
 // values via `OperandKind::Source` operands carrying an index into the plan's
-// `sources` array. Lean's emitters bind them (Tau → the frame's Q32.32
+// `sources` array. Lean's emitters bind them (Tau → the frame's Q48.16
 // coordinate `tau[s]`, Rate → the plan's literal rate); the manifest reader
 // only records them. Canonical: sources[0] = Tau, sources[1] = Rate.
 enum class SourceKind : uint8_t
 {
-  Tau,   // τ, the Q32.32 time coordinate (i64)
+  Tau,   // τ, the Q48.16 time coordinate (i64)
   Rate,  // the rate (float)
 };
 
@@ -211,7 +211,7 @@ struct FlatProgram
 // ── The port (design/typed-kernel.md) ──
 //
 // An emitted module defines `tropical_kernel(ptr tau, ptr in_1, …, ptr in_k,
-// ptr out)` — one pointer per input of the kernel's type (tau: i64 Q32.32
+// ptr out)` — one pointer per input of the kernel's type (tau: i64 Q48.16
 // clock values, shape [frames]; params: one double each) and one for the
 // frame-major output — plus the thunk `tropical_kernel_argv(ptr argv)` that
 // unpacks a pointer table and calls it. Hosts call the thunk: argv[0] = tau,

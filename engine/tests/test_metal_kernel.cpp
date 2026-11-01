@@ -122,7 +122,7 @@ static std::string kernel_manifest(unsigned int frames,
                                    const std::string& plan_json)
 {
   std::string inputs =
-    "{\"name\":\"tau\",\"elem\":\"i64q32\",\"shape\":[" + std::to_string(frames)
+    "{\"name\":\"tau\",\"elem\":\"i64q16\",\"shape\":[" + std::to_string(frames)
     + "],\"role\":\"signal\"}";
   for (const auto& name : params)
     inputs += ",{\"name\":\"" + name
@@ -172,7 +172,7 @@ static std::string msl_kernel(const std::string& body, unsigned int frames)
     "    uint s [[thread_position_in_grid]])\n"
     "{\n"
     "    if (s >= " + std::to_string(frames) + "u) { return; }\n"
-    "    const long current_idx = tau[s] >> 32;\n")
+    "    const long current_idx = tau[s] >> 16;\n")
     + body + "\n}\n";
 }
 
@@ -309,7 +309,7 @@ static void test_cooperative_dispatch_geometry()
     "  threadgroup float shared_value;\n"
     "  const uint sample = group.x;\n"
     "  if (sample >= 64u) return;\n"
-    "  if (lane == 0u) shared_value = float(tau[sample] >> 32);\n"
+    "  if (lane == 0u) shared_value = float(tau[sample] >> 16);\n"
     "  threadgroup_barrier(mem_flags::mem_threadgroup);\n"
     "  if (lane == width.x - 1u) out[sample] = shared_value;\n"
     "}\n";
@@ -490,7 +490,7 @@ static std::string msl_kernel_columns(const std::string& body, unsigned int fram
     "    uint s [[thread_position_in_grid]])\n"
     "{\n"
     "    if (s >= " + std::to_string(frames) + "u) { return; }\n"
-    "    const long current_idx = tau[s] >> 32;\n")
+    "    const long current_idx = tau[s] >> 16;\n")
     + body + "\n}\n";
 }
 

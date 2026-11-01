@@ -134,7 +134,7 @@ def deltaSamples : BuildM Sig := do
   let offset ← offsetIn
   let sr ← sampleRate
   let seconds ← mul offset sr
-  let scale ← lit 4294967296
+  let scale ← clockOneLit
   toIntE (← mul seconds scale)
 
 def fixedSinOscVoice : Voice := {
@@ -172,7 +172,7 @@ def flangerTaps : Array Tap := #[
 
 def clkInputDecl : BuildM AInputDecl := do
   let sample ← sampleIndex
-  let shift ← lit 32
+  let shift ← clockFracLit
   let defaultSig ← lshift sample shift
   pure { name := "clk", type? := some (.scalar .int), defaultSig := some defaultSig }
 
@@ -260,7 +260,7 @@ def deltaLit (mantissa : Int) (exponent : Nat) : BuildM Sig := do
   let seconds ← lit mantissa exponent
   let sr ← sampleRate
   let samples ← mul seconds sr
-  let scale ← lit 4294967296
+  let scale ← clockOneLit
   toIntE (← mul samples scale)
 
 def delta1 : BuildM Sig := deltaLit 7 4
@@ -303,7 +303,7 @@ def buildFmCarrier (name : String) (carHz modHz depthSamples : Int)
     let modSignal ← Builder.osc (litPitchVoice modHz) "mod" clock
     let depth ← lit depthSamples
     let scaled ← mul depth modSignal
-    let qScale ← lit 4294967296
+    let qScale ← clockOneLit
     let shift ← toIntE (← mul scaled qScale)
     let warped ← sub clock shift
     Builder.osc (litPitchVoice carHz) "car" warped
@@ -315,7 +315,7 @@ def buildPmPmCarrier (name : String) (carHz modHz mod2Hz depth1 depth2 : Int)
     let clock ← clockLit
     let mod2 ← Builder.osc (litPitchVoice mod2Hz) "mod2" clock
     let depth2 ← lit depth2
-    let qScale ← lit 4294967296
+    let qScale ← clockOneLit
     let modShift ← toIntE (← mul (← mul depth2 mod2) qScale)
     let modClock ← sub clock modShift
     let modSignal ← Builder.osc (litPitchVoice modHz) "mod" modClock
@@ -409,14 +409,14 @@ def buildFlangerThenReverse (arena : Arena) (resolved : Array (String × Program
     flangerSum dry past ahead
 
 def fixedPhase (clock : Clock) : BuildM Sig := do
-  let shift ← lit 32
+  let shift ← clockFracLit
   let high ← rshift clock shift
-  let mask ← lit 4294967295
-  let low ← bitAnd clock mask
+  let low ← bitAnd clock (← clockFracMaskLit)
   let increment ← lit 21426140
   let highProduct ← mul increment high
   let lowProduct ← mul increment low
   let lowShifted ← rshift lowProduct shift
+  let mask ← lit 4294967295
   bitAnd (← add highProduct lowShifted) mask
 
 def fixedFlangerSum (dry past ahead : Sig) : BuildM Sig := do
@@ -613,7 +613,7 @@ def buildBootstrapSinOsc (name : String) (arena : Arena) :
 
 private def sampleNumber : BuildM Sig := do
   let clock ← clockLit
-  let shifted ← rshift clock (← lit 32)
+  let shifted ← rshift clock (← clockFracLit)
   toFloatE shifted
 
 def buildExpProbe (name : String) (arena : Arena) : Except String (Arena × ProgramIdx) :=
@@ -725,7 +725,7 @@ def buildHeterodyne (name : String) (modes : ModesM) (wm b : Float)
     let clock ← clockLit
     let (real, imag) ← modalBankSigPairTable (← modes) clock anchor
     let relative ← relClockQ clock anchor
-    let qScale ← lit 4294967296
+    let qScale ← clockOneLit
     let secondsQ ← div (← toFloatE relative) qScale
     let seconds ← div secondsQ (← sampleRate)
     let angle ← mul (← litF b) (← sinSig (← mul (← litF wm) seconds))
@@ -809,7 +809,7 @@ def buildModalAddrRamp (name : String) (modes : ModesM) (anchor : BuildM Sig)
   buildExprCarrier name (do
     let clock ← clockLit
     let address : ArrowTerm := .arrUn (fun clock => do
-      let sample ← rshift clock (← lit 32)
+      let sample ← rshift clock (← clockFracLit)
       let seconds ← div (← toFloatE sample) (← sampleRate)
       sub seconds (← litF offsetSeconds)) (.clk clock)
     let bank := modalBankTerm (← modes) (← anchor) clock

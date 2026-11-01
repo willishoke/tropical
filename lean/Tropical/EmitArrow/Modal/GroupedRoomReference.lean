@@ -412,7 +412,7 @@ private def cselectE (c : Sig) (a b : CplxE) : BuildM CplxE := do
   pure (real, imag)
 
 /-- `exp((-sigma+i*omega)t/Fs)`, with `t` in samples.  The caller supplies a
-    clock already made relative in integer Q32.32, so far absolute seeks do not
+    clock already made relative on the integer clock rail, so far absolute seeks do not
     spend phase or envelope mantissa bits. -/
 private def roomPoleExpSamples (bakedRate sigma omega t : Sig) : BuildM CplxE := do
   let sec ← div t bakedRate
@@ -557,8 +557,8 @@ def groupedRoomReferenceSig (specialization : RoomReferenceSpecialization)
   let sourceStride ← lit specialization.prefixStride
   let clkRel ← relClockQ clk anchor
   let clkFloat ← toFloatE clkRel
-  let twoPow32 ← lit 4294967296
-  let u ← div clkFloat twoPow32
+  let clockScale ← clockOneLit
+  let u ← div clkFloat clockScale
   let sourceIdx ← loopIdx 4300
   let groupIdx ← loopIdx 4301
   let columns := #[sigma, omega, cre, cim, periods, logRadii, offsets,

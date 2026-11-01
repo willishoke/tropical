@@ -13,8 +13,8 @@ module is the type and its wire form, `tropical_kernel_1`. The type is
 
 What the derivation says:
 
-* `tau` is the first input: the clock rail (`i64` in Q32.32, the
-  `fixed-carrier.md` ledger), shape `[frames]`, role `signal`. Shapes are
+* `tau` is the first input: the clock rail (`i64` in Q48.16, the
+  `fixed-carrier.md` ledger and `Ir/ClockFormat.lean`), shape `[frames]`, role `signal`. Shapes are
   static, so `frames` is a parameter of the type — a different buffer
   length is a different kernel.
 * Every `param:<name>` slot is a scalar `f64` input with role `param`, its
@@ -40,16 +40,18 @@ def schema : String := "tropical_kernel_1"
 
 /-- Element types. `f64` values and `i64` rails are the JIT/wasm
     realization; Metal refines values to `f32` under its tolerance gate.
-    `i64q32` is the signed Q32.32 clock rail. -/
+    `i64q16` is the signed Q48.16 clock rail: `i64` with `clockFracBits` = 16
+    fraction bits (`Ir/ClockFormat.lean`; the `long-horizon` gate pins the
+    two together). -/
 inductive Elem where
-  | f64 | i64 | i64q32
+  | f64 | i64 | i64q16
 deriving BEq, Repr, Inhabited
 
 def Elem.wire : Elem → String
-  | .f64 => "f64" | .i64 => "i64" | .i64q32 => "i64q32"
+  | .f64 => "f64" | .i64 => "i64" | .i64q16 => "i64q16"
 
 def Elem.ofWire? : String → Option Elem
-  | "f64" => some .f64 | "i64" => some .i64 | "i64q32" => some .i64q32
+  | "f64" => some .f64 | "i64" => some .i64 | "i64q16" => some .i64q16
   | _ => none
 
 theorem Elem.ofWire_wire (e : Elem) : Elem.ofWire? e.wire = some e := by
@@ -150,7 +152,7 @@ private def disciplineOf (plan : FlatPlan) (base : String) : Option Discipline :
 /-- Derive the kernel type of a plan compiled for `frames` samples per call. -/
 def ofPlan (plan : FlatPlan) (frames : Nat) : Except String KernelType := do
   let tau : Port :=
-    { name := tauName, elem := .i64q32, shape := #[frames], role := some .signal }
+    { name := tauName, elem := .i64q16, shape := #[frames], role := some .signal }
   let mut inputs : Array Port := #[tau]
   for i in paramSlotIndices plan do
     let slotName := plan.slotNames[i]!

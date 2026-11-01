@@ -3,7 +3,7 @@
 //
 //   buffer(0) device float*                  output_buffer
 //   buffer(1) constant float*                slots
-//   buffer(2) constant long*                 tau   (Q32.32 clock per thread)
+//   buffer(2) constant long*                 tau   (Q48.16 clock per thread)
 //   buffer(3) constant float*                coeff_columns   (ONLY when the
 //             plan advertises hoisted coefficient columns — column_count > 0;
 //             ordinary kernels keep the exact 3-binding signature)
@@ -14,6 +14,7 @@
 // buffer, each over its own slice of the tau and output buffers.
 
 #include "MetalKernel.hpp"
+#include "runtime/ClockFormat.hpp"
 
 #import <Metal/Metal.h>
 #import <Foundation/Foundation.h>
@@ -61,7 +62,7 @@ struct MetalKernel
   id<MTLComputePipelineState> pso    = nil;
   id<MTLBuffer>               out    = nil;  // interleaved f32 × frames × channels
   id<MTLBuffer>               slots  = nil;  // immutable epoch snapshot upload
-  id<MTLBuffer>               tau    = nil;  // Q32.32 clock per frame of the tile
+  id<MTLBuffer>               tau    = nil;  // Q48.16 clock per frame of the tile
   // Packed coefficient-column buffer (buffer(3), banks-as-data) — nil when
   // the plan hoists no columns. Sized at load from the advertised slots'
   // capacities; a hot-swap creates a fresh MetalKernel, so the size follows
@@ -154,8 +155,8 @@ static bool render_tile_impl(MetalKernel & k,
       return false;
     }
     for (uint32_t i = 0; i < frames; ++i)
-      tau_destination[i] = static_cast<int64_t>(
-        (source_start + static_cast<uint64_t>(i)) << 32);
+      tau_destination[i] = tropical_clock::clock_of_sample(
+        source_start + static_cast<uint64_t>(i));
 
     const uint32_t n = std::min<uint32_t>(n_slots, k.slot_count);
     float * slot_destination = static_cast<float *>(k.slots.contents);

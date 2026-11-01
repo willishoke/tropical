@@ -163,7 +163,7 @@ private def natArr (j : JsonV) (k : String) : Array Nat :=
 private def ofWireV (j : JsonV) : Except String FlatPlan := do
   let schema ← reqStr j "schema"
   if schema == "tropical_plan_6" then
-    throw s!"PlanDecode: unsupported schema 'tropical_plan_6'; expected '{planSchema}' (plan 6's time source is the integer sample index, plan 7's the Q32.32 τ: recompile the patch)"
+    throw s!"PlanDecode: unsupported schema 'tropical_plan_6'; expected '{planSchema}' (plan 6's time source is the integer sample index, plan 7's the fixed-point τ: recompile the patch)"
   if schema != planSchema then
     throw s!"PlanDecode: unsupported schema '{schema}'; expected '{planSchema}'"
   rejectRetiredFields j

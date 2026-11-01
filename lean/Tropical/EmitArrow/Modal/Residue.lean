@@ -271,26 +271,27 @@ def bankLandExp (modes : Array ModalMode) : BuildM LandExp := do
     selectE greater acc a) zero
   LandExp.dynamicOf maxSig
 
-/-- The RELATIVE clock `clkRel = clk − anchor·2³²` as an EXACT i64 subtract.
-    (A float-relative clock — `toFloat(clk)/2³² − anchor` — loses mantissa bits
+/-- The RELATIVE clock `clkRel = clk − anchor·clockOne` as an EXACT i64 subtract.
+    (A float-relative clock — `toFloat(clk)/clockOne − anchor` — loses mantissa bits
     as the absolute clock grows, drifting with τ.) Subtracting on
     the integer clock first keeps time-translation exact at any τ; everything
     downstream (phase reduction, the bounded envelope coordinate, the causal gate)
     sees only the bounded relative value. -/
 def relClockQ (clkInt anchorSamples : Sig) : BuildM Sig := do
-  let twoPow32 ← lit 4294967296
-  let anchorFixed ← mul anchorSamples twoPow32
+  let clockScale ← clockOneLit
+  let anchorFixed ← mul anchorSamples clockScale
   let anchorInt ← toIntE anchorFixed
   sub clkInt anchorInt
 
 /-- A mode's oscillator phase over the RELATIVE clock, integer-reduced (the
     FixedPhasor pattern): the frequency lands ONCE as `incr = ⌊(ω/2π)·2³²/SR⌋`
     (float math, so ω may be a live slot), then the exact split-multiply
-    `incr·hi + (incr·lo)>>32` reduces `incr·clkRel` on the circle ℤ/2³² — the
+    `incr·hi + (incr·lo)>>F` (F = `clockFracBits`) reduces `incr·clkRel` on
+    the circle ℤ/2³² — the
     phase argument never leaves `[0, 2π)`, so its precision is τ-INDEPENDENT
     (a raw `ω·dSec` argument is unbounded — its mantissa starves as τ grows).
     ω quantizes to the SR/2³² grid (~1e-5 Hz at 44.1k) — inaudible.
-    `rshift` is `ashr`, so `clkRel = (clkRel>>32)·2³² + (clkRel & (2³²−1))` holds
+    `rshift` is `ashr`, so `clkRel = (clkRel>>F)·2ᶠ + (clkRel & (2ᶠ−1))` holds
     exactly on NEGATIVE relative clocks (pre-strike, mirrored reads). Returns the
     phase in RADIANS `[0, 2π)` for the `sinSig`/`cosSig` polynomials. -/
 def modePhaseQ (omega clkRel : Sig) : BuildM Sig := do
@@ -301,13 +302,12 @@ def modePhaseQ (omega clkRel : Sig) : BuildM Sig := do
   let sr ← sampleRate
   let incrementFloat ← div scaled sr
   let increment ← toIntE incrementFloat
-  let thirtyTwo ← lit 32
-  let thi ← rshift clkRel thirtyTwo
-  let mask ← lit 4294967295
-  let tlo ← bitAnd clkRel mask
+  let thi ← rshift clkRel (← clockFracLit)
+  let tlo ← bitAnd clkRel (← clockFracMaskLit)
   let highProduct ← mul increment thi
   let lowProduct ← mul increment tlo
-  let lowShifted ← rshift lowProduct thirtyTwo
+  let lowShifted ← rshift lowProduct (← clockFracLit)
+  let mask ← lit 4294967295
   let phase ← add highProduct lowShifted
   bitAnd phase mask
 
@@ -328,13 +328,12 @@ def modePhaseW (omega clkRel : Sig) : BuildM Sig := do
     `modePhaseQFromIncr (toIntE incrFloat) clkRel` is bit-identical to
     `modePhaseQ ω clkRel`. -/
 def modePhaseQFromIncr (incr clkRel : Sig) : BuildM Sig := do
-  let thirtyTwo ← lit 32
-  let thi ← rshift clkRel thirtyTwo
-  let mask ← lit 4294967295
-  let tlo ← bitAnd clkRel mask
+  let thi ← rshift clkRel (← clockFracLit)
+  let tlo ← bitAnd clkRel (← clockFracMaskLit)
   let highProduct ← mul incr thi
   let lowProduct ← mul incr tlo
-  let lowShifted ← rshift lowProduct thirtyTwo
+  let lowShifted ← rshift lowProduct (← clockFracLit)
+  let mask ← lit 4294967295
   let phase ← add highProduct lowShifted
   bitAnd phase mask
 
@@ -346,7 +345,7 @@ def modePhaseQFromIncr (incr clkRel : Sig) : BuildM Sig := do
     `incr·clkRel` on ℤ/2³², and the masked phase re-expands to ticks. P
     quantizes to the 2³² grid exactly as ω does (the strike lattice shares the
     oscillators' grid story; a P whose sample count divides 2³² is EXACT — the
-    gate's tight configs). The result lives in `[0, P·SR·2³²)` for ALL τ —
+    gate's tight configs). The result lives in `[0, P·SR·clockOne)` for ALL τ —
     before the anchor too (ashr/mask reduce negative clkRel correctly), so a
     bank reading this clock is an ETERNAL periodic train: the anchor is a
     phase reference, not a start (universe semantics — scrub anywhere, the
@@ -364,7 +363,7 @@ def relClockQuot (clkInt anchorSamples : Sig) (pSec : Float) : BuildM Sig := do
   -- (`clkRel > 0`, matching an anchored bank sample-for-sample). A [0, P)
   -- read would zero the WHOLE tail stack for that one sample per bar — the
   -- gate misfiring on the eternal train's oldest coordinate. Off the strike
-  -- samples the tick shift is a uniform ~2e-14 s lag — sub-quantization.
+  -- samples the tick shift is a uniform 2⁻ᶠ-sample lag — sub-quantization.
   let relative ← relClockQ clkInt anchorSamples
   let oneInt ← litI 1
   let clkRel ← sub relative oneInt
@@ -375,17 +374,19 @@ def relClockQuot (clkInt anchorSamples : Sig) (pSec : Float) : BuildM Sig := do
   let quotient ← div twoPow32 periodSamples
   let rounded ← roundE quotient
   let incr ← toIntE rounded
-  let thirtyTwo ← lit 32
-  let thi ← rshift clkRel thirtyTwo
-  let mask ← lit 4294967295
-  let tlo ← bitAnd clkRel mask
+  let thi ← rshift clkRel (← clockFracLit)
+  let tlo ← bitAnd clkRel (← clockFracMaskLit)
   let highProduct ← mul incr thi
   let lowProduct ← mul incr tlo
-  let lowShifted ← rshift lowProduct thirtyTwo
+  let lowShifted ← rshift lowProduct (← clockFracLit)
+  let mask ← lit 4294967295
   let phaseSum ← add highProduct lowShifted
   let phase ← bitAnd phaseSum mask
+  -- The Q0.32 phase of the period, re-expanded to a clock: one turn is
+  -- `P·SR` samples, `P·SR·clockOne` on the rail.
   let phaseFloat ← toFloatE phase
-  let tickFloat ← mul phaseFloat periodSamples
+  let periodTicks ← mul phaseFloat periodSamples
+  let tickFloat ← div periodTicks (← lit (2 ^ (32 - clockFracBits)))
   let tick ← toIntE tickFloat
   add tick oneInt
 
@@ -402,8 +403,8 @@ def modalBankSig (modes : Array ModalMode) (clkInt : Sig)
     (anchorSamples : Sig) : BuildM Sig := do
   let clkRel ← relClockQ clkInt anchorSamples
   let clkFloat ← toFloatE clkRel
-  let twoPow32 ← lit 4294967296
-  let secondsTimesRate ← div clkFloat twoPow32
+  let clockScale ← clockOneLit
+  let secondsTimesRate ← div clkFloat clockScale
   let sr ← sampleRate
   let dSec ← div secondsTimesRate sr
   -- Q datapath: per mode, the slow scalars (envelope × residue weight) land ONCE
@@ -553,8 +554,8 @@ def modalBankSigTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
     (live? : Option Sig := none) : BuildM Sig := do
   let clkRel ← relClockQ clkInt anchorSamples
   let clkFloat ← toFloatE clkRel
-  let twoPow32 ← lit 4294967296
-  let secondsTimesRate ← div clkFloat twoPow32
+  let clockScale ← clockOneLit
+  let secondsTimesRate ← div clkFloat clockScale
   let sr ← sampleRate
   let dSec ← div secondsTimesRate sr
   let le ← bankLandExp modes                                    -- option E: per-bank Q exponent
@@ -608,8 +609,8 @@ def modalBankSigPairTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
     (live? : Option Sig := none) : BuildM (Sig × Sig) := do
   let clkRel ← relClockQ clkInt anchorSamples
   let clkFloat ← toFloatE clkRel
-  let twoPow32 ← lit 4294967296
-  let secondsTimesRate ← div clkFloat twoPow32
+  let clockScale ← clockOneLit
+  let secondsTimesRate ← div clkFloat clockScale
   let sr ← sampleRate
   let dSec ← div secondsTimesRate sr
   let cols ← bankCols modes live?
@@ -1606,8 +1607,8 @@ def modalBankSigTableDD (modes : Array PairedMode) (clkInt anchorSamples : Sig)
     | none => lit 28
   let clkRel ← relClockQ clkInt anchorSamples
   let clkFloat ← toFloatE clkRel
-  let twoPow32 ← lit 4294967296
-  let secondsTimesRate ← div clkFloat twoPow32
+  let clockScale ← clockOneLit
+  let secondsTimesRate ← div clkFloat clockScale
   let sr ← sampleRate
   let dSec ← div secondsTimesRate sr
   let cols ← pairedBankCols modes live?

@@ -19,8 +19,8 @@ namespace Tropical.EmitArrow
 open Tropical.Ir
 
 /-- An ABSOLUTE address warp: the modulator signal `s` (read as SECONDS) BECOMES
-    the clock, the base discarded — `c ↦ toInt(s·SR·2³²)`, so the modal bank's
-    `dSec = clk/2³²/SR − anchor` reduces to `s − anchor`. Unlike the RELATIVE
+    the clock, the base discarded — `c ↦ toInt(s·SR·clockOne)`, so the modal bank's
+    `dSec = clk/clockOne/SR − anchor` reduces to `s − anchor`. Unlike the RELATIVE
     flange/fm warps (`c ± δ·m`, a bounded perturbation of the ambient clock), this
     RELOCATES the causal gate to `s`'s crossing of the anchor: a patched CF signal
     triggers and scrubs the resonance by its own zero-crossing, and its read rate
@@ -29,8 +29,8 @@ open Tropical.Ir
 def modalAddrWarp : Clock → Sig → BuildM Clock :=
   fun _ s => do
     let sr ← sampleRate
-    let twoPow32 ← lit 4294967296
-    let scale ← mul sr twoPow32
+    let clockScale ← clockOneLit
+    let scale ← mul sr clockScale
     let fixed ← mul s scale
     toIntE fixed
 
@@ -159,14 +159,14 @@ structure PatchGraph where
   output : String
 
 /-- The standard FM modulation law: a modulator signal `m` shifts the carrier's
-    Q32.32 clock by `depth · m` samples — `clk − toInt(depth · m · 2³²)`. `depth`
+    clock by `depth · m` samples — `clk − toInt(depth · m · clockOne)`. `depth`
     is an EXPRESSION (a literal, or a live `paramRef` slot), so the depth knob can
     be a live param. Closed form in τ (`m` is a closed-form signal) either way. -/
 def fmWarp (depthE : Sig) : Clock → Sig → BuildM Clock :=
   fun base m => do
     let modulation ← mul depthE m
-    let twoPow32 ← lit 4294967296
-    let fixed ← mul modulation twoPow32
+    let clockScale ← clockOneLit
+    let fixed ← mul modulation clockScale
     let shift ← toIntE fixed
     sub base shift
 

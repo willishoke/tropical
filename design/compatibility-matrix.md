@@ -49,14 +49,15 @@ patch-bay front door.
 | `array_set` | array-update alias | rejected; use `arraySet` |
 | `sessionSlot`/`sessionArraySlot` | serialized session-state carriers | constructors deleted; rejected as unknown ops |
 | Plan-4 compatibility CTest and fixture payload | acceptance evidence | deleted; useful program input remains |
-| Plan 6's integer `tick` time source | source 0 was the sample index | refused with a recompile message: Plan 7's source 0 is the Q32.32 τ, so a Plan 6 document cannot be reinterpreted |
+| Plan 6's integer `tick` time source | source 0 was the sample index | refused with a recompile message: Plan 7's source 0 is the fixed-point τ (Q48.16, `fixed-carrier.md`), so a Plan 6 document cannot be reinterpreted |
+| `tau:i64q32` kernel manifests | the Q32.32 clock rail (2026-10-28 to 2026-11-01, unreleased) | refused by the native and web manifest readers: τ's element type names the rail's format, and the rail is now Q48.16 (`i64q16`) |
 
 ## Required rejection behavior
 
 `Tropical.Plan.FlatPlan.ofWire` requires an explicit
 `schema: "tropical_plan_7"`. The native C load tail (`tropical_runtime_load`)
 requires a `schema: "tropical_kernel_1"` manifest (`design/typed-kernel.md`)
-whose first input is `tau:i64q32[frames]` with `frames` equal to the
+whose first input is `tau:i64q16[frames]` with `frames` equal to the
 runtime's buffer length, whose one output is `f64[frames, channels]`, and
 whose nested `plan` carries `schema: "tropical_plan_7"` and the `fused`
 realization. Missing, unknown, and older schemas fail with an error naming

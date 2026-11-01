@@ -79,9 +79,9 @@ other than the LLVM math intrinsics listed in `EmitLlvm.intrinsicDecls`
 (`sqrt`, `floor`, `ceil`, `round`, `fabs` on f64).
 
 **Values and the clock rail.** Values are f64; integer and clock arithmetic
-is i64 (the "rails"). The master clock is Q32.32 signed on i64: a wire's
-`clock()` is `sampleIndex << 32` (`fixed-carrier.md` is the normative
-Q-format ledger). A kernel is a closed form `f(τ, params)`
+is i64 (the "rails"). The master clock is Q48.16 signed on i64: a wire's
+`clock()` is τ itself (`fixed-carrier.md` is the normative Q-format
+ledger). A kernel is a closed form `f(τ, params)`
 (`cf-only.md`): it carries no state from one call to the next, so a host may
 call it for any `start_sample_index`, in any order, and get the same
 samples. That is what makes hot-swap click-free and scrubbing exact.

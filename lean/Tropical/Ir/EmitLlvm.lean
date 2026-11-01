@@ -22,7 +22,7 @@ define void @tropical_kernel(ptr %tau, ptr %in_1, …, ptr %in_k, ptr %out)
 ```
 
 One pointer per input of the plan's kernel type (`Tropical.Kernel.ofPlan`:
-`tau` first — `i64` Q32.32 clock values, shape `[frames]` — then one
+`tau` first — `i64` Q48.16 clock values, shape `[frames]` — then one
 one-element `double` per `param:` slot in slot order) and one for the
 output (`double`, shape `[frames, C]`, frame-major: sink target `c` writes
 `s * C + c`). `frames` is static: the loop bound is a literal, and a
@@ -32,8 +32,8 @@ module slot vector, the array backing stores and the SSA scratch are
 defaults, the param inputs and the stage-0 prologue (the coefficient plan's
 instructions, emitted before the sample loop — currying, not a second
 kernel). The rate is a literal. The plan's `tau` source is `%tau_s`, the
-frame's Q32.32 coordinate itself: a fractional τ evaluates the closed form
-at that fractional instant (the integer sample index is `tau >> 32`, derived
+frame's Q48.16 coordinate itself: a fractional τ evaluates the closed form
+at that fractional instant (the integer sample index is `tau >> 16`, derived
 in the IR where a builder wants it, never here).
 
 A second exported function, `@tropical_kernel_argv(ptr %argv)`, unpacks a

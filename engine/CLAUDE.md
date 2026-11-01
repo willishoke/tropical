@@ -39,7 +39,7 @@ tropical_runtime_load
   → FlatRuntime::publish_state
 ```
 
-The kernel's inputs are `tau` (the Q32.32 clock of each frame, shape
+The kernel's inputs are `tau` (the Q48.16 clock of each frame, shape
 `[frames]`) and one `f64` cell per `param:` slot in port order; its one
 output is `[frames, channels]`, frame-major. Everything else — the module
 slot vector, the arrays, the SSA scratch, the stage-0 prologue — lives inside
@@ -130,7 +130,7 @@ arbitrary coordinates for scope/slave consumers and returns its output
 channels by name: a scope tap is an output channel of the observation
 artifact. A window wider than the kernel's frame count is rendered in
 chunks over the same closed form. `render_tau` is the same render over an
-explicit Q32.32 coordinate array (fractional, any order): the host-side τ
+explicit Q48.16 coordinate array (fractional, any order): the host-side τ
 fill of `design/typed-kernel.md`, which the `fractional-tau` gate drives.
 Metal sessions remain dual-loaded so this path stays on the f64 JIT
 reference.
@@ -152,7 +152,7 @@ Kernel ABI (`design/typed-kernel.md`):
 @tropical_kernel_argv(ptr argv) → void     ; argv = [tau, in_1.., out]
 ```
 
-`tau` holds `frames` Q32.32 clock values, and the kernel evaluates its closed
+`tau` holds `frames` Q48.16 clock values, and the kernel evaluates its closed
 form at each one as given — a fractional coordinate is a fractional instant,
 nothing truncates to a sample index (the plan's `tau` source is `tau[s]`
 itself). Each `in_j` is one `double`; `out` is `frames × channels` doubles,

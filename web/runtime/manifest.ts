@@ -2,7 +2,7 @@
  * manifest.ts — the runtime's consumption contract: `tropical_kernel_1`.
  *
  * A kernel is one typed pure function (design/typed-kernel.md): a record of
- * named, static-shaped inputs — `tau` (the Q32.32 clock, shape `[frames]`)
+ * named, static-shaped inputs — `tau` (the Q48.16 clock, shape `[frames]`)
  * and one scalar `f64` per param — and one output of shape
  * `[frames, channels]`, frame-major. This type IS the boundary between
  * tropical (the producer, via `diffcli compile-kernel`) and any consumer
@@ -10,7 +10,13 @@
  * tomorrow). The manifest also nests the compiler's plan for its own gates;
  * the runtime never reads it.
  */
-export type KernelElem = 'f64' | 'i64' | 'i64q32'
+export type KernelElem = 'f64' | 'i64' | 'i64q16'
+
+/** The clock rail's fraction bits: τ is a signed i64 with this many fraction
+ *  bits (Q48.16), whole sample `n` is `n << CLOCK_FRAC_BITS`. Mirrors
+ *  `lean/Tropical/Ir/ClockFormat.lean`; the manifest names it as τ's elem. */
+export const CLOCK_FRAC_BITS = 16
+export const TAU_ELEM = 'i64q16'
 export type KernelRole = 'param' | 'signal' | 'table'
 
 export type KernelPort = {
@@ -39,8 +45,8 @@ export const MAX_KERNEL_OUTPUT_CHANNELS = 64
 /** The static frame count per call, from the `tau` input's shape. */
 export function kernelFrames(manifest: KernelManifest): number {
   const tau = manifest.inputs[0]
-  if (!tau || tau.name !== 'tau' || tau.elem !== 'i64q32' || tau.shape.length !== 1)
-    throw new RangeError('KernelManifest: the first input must be tau:i64q32[frames]')
+  if (!tau || tau.name !== 'tau' || tau.elem !== TAU_ELEM || tau.shape.length !== 1)
+    throw new RangeError(`KernelManifest: the first input must be tau:${TAU_ELEM}[frames]`)
   const frames = tau.shape[0]!
   if (!Number.isSafeInteger(frames) || frames < 1)
     throw new RangeError('KernelManifest: frames must be a positive integer')

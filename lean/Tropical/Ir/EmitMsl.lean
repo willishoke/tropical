@@ -24,20 +24,20 @@ kernel void tropical_kernel(
     uint s [[thread_position_in_grid]])
 ```
 
-where `tau` is the Q32.32 clock per thread (`tau_s = tau[s]`, the plan's `tau` source),
+where `tau` is the Q48.16 clock per thread (`tau_s = tau[s]`, the plan's `tau` source),
 the frame count is a literal (shapes are static), and the rate is a literal.
 
 ## Divergences from EmitLlvm, all deliberate
 
 * **f32 values, i64 clocks.** `.float` is `float` (Apple GPUs have no
-  f64); `.int` is native `long` — the Q32.32/Q0.32/Q2.30 integer
+  f64); `.int` is native `long` — the Q48.16/Q0.32/Q2.30 integer
   datapath is bit-identical to the JIT (design/fixed-carrier.md). The
   f32 surface is the enumerated residue (envelope exp, param landings,
   the DAC scale), tolerance-gated by `metal_vs_jit`.
 * **Thread-private TYPED slots.** Module slots are same-sample dataflow
   only (producers topo-sorted before consumers; CF-only — nothing reads
   a previous sample's slot). Slots the kernel WRITES become thread-
-  private locals at their NATIVE type — the Q32.32 clock crosses a wire
+  private locals at their NATIVE type — the Q48.16 clock crosses a wire
   as a `long`, never an f32 (an f32 slot would shed sub-sample bits
   immediately and whole samples past ~2²⁴). Reads before any write hit
   the host snapshot in the `constant` buffer (host-written param slots
@@ -180,7 +180,7 @@ structure St where
   sampleRate : Float := 44100.0
   /-- Module slot → scalar type last written THIS kernel (thread-private
       typed locals `slf{i}`/`sli{i}`/`slb{i}` — kernel-written slots are
-      same-sample dataflow, so they keep their NATIVE type: the Q32.32
+      same-sample dataflow, so they keep their NATIVE type: the Q48.16
       clock rides a `long` local through a wire, never an f32). Absent =
       not written yet → reads hit the host snapshot `slots[i]`. -/
   slotTypes : Std.HashMap Nat ScalarType := {}

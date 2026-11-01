@@ -345,7 +345,7 @@ def runFixedSinAccuracy (arena : Arena)
 def runFixedSinLongTau (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
   let K : Int := 1073741824 + 12345
-  let Kq : Int := K * 4294967296
+  let Kq : Int := K * Tropical.Ir.clockOne
   let offset : Int := (21426140 * K) % 4294967296
   let farOsc : Tropical.EmitArrow.BuildM Tropical.EmitArrow.Sig := do
     let clock ← Tropical.EmitArrow.clockLit
@@ -422,7 +422,7 @@ def runModalBank (arena : Arena)
       let mut eLate : Float := 0.0
       for i in [200:600] do eEarly := eEarly + aS[i]! * aS[i]!
       for i in [1648:2048] do eLate := eLate + aS[i]! * aS[i]!
-      IO.println s!"        bank = Σ amp·e^(−σd)·cos(2πf·d) @ 220/330/440, struck @ sample 200 (d=clk/2³²/SR−anchor):"
+      IO.println s!"        bank = Σ amp·e^(−σd)·cos(2πf·d) @ 220/330/440, struck @ sample 200 (d=clk/clockOne/SR−anchor):"
       IO.println s!"        result   arrow vs straight-line:  bit-differing {bitDiff}/{n}  ·  pre-strike |max|={preMax}  ·  E[early]={eEarly}  E[late]={eLate}"
       if bitDiff == 0 && preMax == 0.0 && eEarly > 1e-6 && eLate < eEarly then
         passGate "modal-bank" s!"gated decaying-sinusoid bank: arrow ≡ straight-line bit-exact, causal (silent pre-strike), decaying ({n} samples)"
@@ -609,7 +609,7 @@ def runBanksFloat (arena : Arena)
   -- t = τ seconds (the dSec recipe, anchor 0) — varies per sample so the sum
   -- is a live float datapath, not a constant the optimizer could fold away.
   let values : BuildM (Sig × Sig) := do
-    let t ← div (← div (← toFloatE (← clockLit)) (← lit 4294967296)) (← sampleRate)
+    let t ← div (← div (← toFloatE (← clockLit)) (← clockOneLit)) (← sampleRate)
     let amps ← (Array.range k).mapM fun i => litF (0.31 + 0.07 * i.toFloat)
     let column ← arr amps
     let unrolled ← amps.foldlM (fun accumulated amplitude => do

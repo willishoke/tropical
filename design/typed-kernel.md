@@ -71,8 +71,9 @@ Kernel
 - `elem` is the element type. The JIT and wasm realizations use `f64` for
   values and `i64` for rails; Metal refines values to `f32` under the
   documented tolerance gate. τ's element type is the clock rail: `i64` in
-  Q32.32 (`fixed-carrier.md` is normative), so a fractional coordinate is
-  representable and an integer-sample host writes `index << 32`.
+  Q48.16, spelled `i64q16` (`fixed-carrier.md` is normative), so a
+  fractional coordinate is representable and an integer-sample host writes
+  `index << 16`.
 - `shape` is a static extent list. A scalar is `[]`. The audio kernel's τ is
   `[N]`; its output is `[N, C]` frame-major, `output[s*C + c]`, as
   `stereo-output-contract.md` already states. Shapes are rate- and
@@ -105,7 +106,7 @@ expressions as foldable, so this is the existing behaviour made explicit.
 
 ### τ as an array
 
-τ is passed, not derived. The audio host fills `τ[s] = (origin + s) << 32`,
+τ is passed, not derived. The audio host fills `τ[s] = (origin + s) << 16`,
 a trivially vectorized fill. The scope fills whatever coordinates it wants,
 including a backward scrub at a fractional speed. One kernel, two callers;
 `render_window` stops being a second entry point and becomes a host that
@@ -172,7 +173,7 @@ column crossing achieves.
 {
   "schema":  "tropical_kernel_1",
   "rate":    44100.0,
-  "inputs":  [ { "name": "tau",          "elem": "i64q32", "shape": [512],  "role": "signal" },
+  "inputs":  [ { "name": "tau",          "elem": "i64q16", "shape": [512],  "role": "signal" },
                { "name": "param:freq",   "elem": "f64",    "shape": [],     "role": "param",
                  "default": 220.0, "discipline": "anchor", "companion": "param:freq.tau_base" },
                { "name": "in:mic",       "elem": "f64",    "shape": [512],  "role": "signal" },
@@ -336,3 +337,15 @@ port. Where the implementation settled differently from the text above:
   field survives as `fused` only; a host refuses anything else.
 - **`get_slot` on a kernel-written slot** returns the host's seed on every
   backend now, uniformly; nothing reads such slots any more.
+- **τ is Q48.16 (2026-11-01).** The rail moved from Q32.32 to Q48.16: 16
+  fraction bits (2⁻¹⁶ sample, ≈ 0.3 ns at 48 kHz) buy a horizon of 2⁴⁷
+  samples (93 years at 48 kHz) where Q32.32 went negative after 2³¹ (12.4 h).
+  Q32.32 had broken non-integer-speed clocks, strike anchors and the derived
+  `sampleIndex` past that point; `long-horizon` in `tropicaltest` pins all
+  three. τ's element type is `i64q16`, so a manifest built for the old rail
+  is refused, and `tropical_plan_7` was not yet released, so it keeps its
+  name with source 0 now the Q48.16 coordinate. Speed stays a Q·.32 scale and
+  phase Q0.32; audio goldens are byte-identical. The change also fixed a
+  nested-output read typed `float` whatever its producer declared, which put
+  wired clocks through f32 on Metal; the old τ+2⁴⁰ Metal gates had not seen
+  it because `2⁴⁰ << 32` wraps to τ = 0.

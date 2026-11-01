@@ -8,7 +8,7 @@ This focused phase-4 fixture authors the inverse law with the production
 the rail derivations from dereference facts, and instantiates the universal
 arena-native theorem.  No recursive `Sig` or lowering function participates.
 
-The clock is the production clock: τ itself, the IR's Q32.32 time leaf
+The clock is the production clock: τ itself, the IR's fixed-point time leaf
 (`clockLit`/`clockSig` are `tau`). The fixture warps it by a boundary delta
 and back.
 -/

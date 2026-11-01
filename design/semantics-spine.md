@@ -57,7 +57,7 @@ narrow the admitted fragment.
 ## Production fixtures
 
 `Tropical.Testing.Semantics` instantiates the preservation theorem against the
-root Q32.32 clock,
+root clock (the Q48.16 rail),
 a `bankFold` modal-column expression, a nested bank with distinct binder ids,
 and a parameterized `select`. The same corpus differentially compares compiled
 `lowerSig` with `lowerSigTree`; that differential is evidence for the unsafe

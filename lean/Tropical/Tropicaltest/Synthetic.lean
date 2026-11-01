@@ -103,7 +103,7 @@ private def modeBody (t : Nat) (k : NOperand) : Array NInstr := #[
 private def tailInstrs (acc t : Nat) : Array NInstr := #[
   instrScalar "ToFloat" t #[rgI acc] .float,
   instrScalar "Div" (t+1) #[rgF t, cF 268435456] .float,
-  instrScalar "RShift" (t+5) #[Tropical.Plan.opTau, cI 32] .int,
+  instrScalar "RShift" (t+5) #[Tropical.Plan.opTau, cI Tropical.Ir.clockFracBits] .int,
   instrScalar "ToFloat" (t+2) #[rgI (t+5)] .float,
   instrScalar "Mod" (t+3) #[rgF (t+2), cF 64] .float,
   instrScalar "Mul" (t+4) #[rgF (t+1), rgF (t+3)] .float,

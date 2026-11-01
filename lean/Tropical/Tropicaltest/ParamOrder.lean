@@ -61,7 +61,7 @@ private def loadPatch : IO (Except String Tropical.Ffi.Runtime) := do
 private def renderBoth (rt : Tropical.Ffi.Runtime) : IO (Array Float × Array Float) := do
   rt.process
   let audio := decodeF64LE (← rt.outputBytes)
-  let tau : Array UInt64 := (Array.range frames).map fun k => k.toUInt64 <<< (32 : UInt64)
+  let tau : Array UInt64 := (Array.range frames).map fun k => k.toUInt64 <<< Tropical.Ir.clockFracBits.toUInt64
   let observed := decodeF64LE (← rt.renderTau tau #[0])
   return (audio, observed)
 

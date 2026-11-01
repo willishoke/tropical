@@ -69,8 +69,9 @@ private opaque Runtime.renderTauRaw (rt : @& Runtime) (tau : @& ByteArray)
     (channels : @& Array UInt32) : IO ByteArray
 
 /-- The host-side τ fill of `design/typed-kernel.md`: evaluate the observation
-    artifact (the loaded kernel) at explicit Q32.32 coordinates — the i64 bit
-    patterns, so `k <<< 32` is sample `k` and `(2k+1) <<< 31` is `k + ½` —
+    artifact (the loaded kernel) at explicit Q48.16 coordinates — the i64 bit
+    patterns (`Ir/ClockFormat.lean`), so `k <<< 16` is sample `k` and
+    `(2k+1) <<< 15` is `k + ½` —
     and return its output channels, channel-major, as little-endian float64s
     (`count × channels.size`). Coordinates may be fractional and in any order;
     the kernel is a closed form and nothing rounds τ. -/

@@ -10,6 +10,7 @@
  * expression trees into executable code.
  */
 
+#include "ClockFormat.hpp"
 #include "ControlParam.hpp"
 #include "jit/OrcJitEngine.hpp"
 
@@ -189,7 +190,7 @@ struct KernelState
 
   // ── The kernel at the port ───────────────────────────────────────────────
   // `kernel` is the argv thunk of the loaded artifact: argv[0] = tau
-  // (`frames` Q32.32 clock values), argv[1..k] = one double per param input
+  // (`frames` Q48.16 clock values), argv[1..k] = one double per param input
   // in port order (`input_slots[j]` is the slot the j-th param lives in),
   // argv[k+1] = the frame-major output. Everything else — the slot vector,
   // the arrays, the SSA scratch, the stage-0 prologue — is inside the
@@ -556,11 +557,11 @@ public:
     std::fill_n(rendered_output,
       static_cast<std::size_t>(buffer_length_) * output_channels, 0.0);
 
-    // One call renders the whole buffer: tau is the Q32.32 clock of each
-    // frame, the params point into this buffer's private slot snapshot.
+    // One call renders the whole buffer: tau is the clock-rail coordinate of
+    // each frame, the params point into this buffer's private slot snapshot.
     for (uint32_t s = 0; s < buffer_length_; ++s)
-      state.tau[s] = static_cast<int64_t>(
-        (start_sample_index + static_cast<uint64_t>(s)) << 32);
+      state.tau[s] = tropical_clock::clock_of_sample(
+        start_sample_index + static_cast<uint64_t>(s));
     state.argv[0] = state.tau.data();
     for (std::size_t j = 0; j < state.input_slots.size(); ++j)
       state.argv[1 + j] = &state.audio_slots[state.input_slots[j]];
@@ -803,9 +804,9 @@ public:
   // observer cannot delay control or hot-swap.
   //
   // The host-side τ fill has two shapes over one body. `render_window_
-  // observation` is the arithmetic progression `(start_index + i·stride) << 32`
-  // (the scope's integer grid); `render_tau_observation` takes the Q32.32
-  // coordinates as data, fractional or not, in any order — a kernel is a
+  // observation` is the arithmetic progression of whole samples
+  // `start_index + i·stride` on the rail (the scope's integer grid);
+  // `render_tau_observation` takes the rail's coordinates as data, fractional or not, in any order — a kernel is a
   // closed form `f(τ, params)` and nothing here rounds τ.
   RenderWindowStatus render_window_observation(
     uint64_t start_index, uint32_t count, uint32_t stride,
@@ -815,8 +816,8 @@ public:
     if (stride == 0) return RenderWindowStatus::InvalidArgument;
     return render_observation_at(
       [=](uint32_t i) {
-        return static_cast<int64_t>(
-          (start_index + static_cast<uint64_t>(i) * stride) << 32);
+        return tropical_clock::clock_of_sample(
+          start_index + static_cast<uint64_t>(i) * stride);
       },
       count, channel_ids, n_channels, out, std::move(snapshot));
   }
@@ -977,7 +978,7 @@ public:
       == RenderWindowStatus::Rendered;
   }
 
-  // Explicit Q32.32 coordinates (the C API's tropical_runtime_render_tau).
+  // Explicit Q48.16 coordinates (the C API's tropical_runtime_render_tau).
   bool render_tau(const int64_t * tau, uint32_t count,
                   const uint32_t * channel_ids, uint32_t n_channels,
                   double * out)

@@ -19,7 +19,7 @@ Per patch, the build emits two artifacts the browser fetches:
   `env.memory` and `env.round`. Produced by `diffcli compile-wasm --frames
   128` (engine LLVM + lld, in-process — no `wasm-ld` on PATH, no toolchain).
 - `<slug>.manifest.json` — the kernel's type, `tropical_kernel_1`
-  (`design/typed-kernel.md`): `tau:i64q32[128]`, one `f64` param per knob
+  (`design/typed-kernel.md`): `tau:i64q16[128]`, one `f64` param per knob
   with its default, and `out:f64[128, C]`. Produced by `diffcli
   compile-kernel --frames 128`. The compiler's plan is nested inside for its
   own gates; the runtime never reads it.
@@ -90,7 +90,7 @@ else lives inside the function. The host owns one imported
 
 ```
 __heap_base
-  tau       i64[frames]              — the Q32.32 clock of each frame
+  tau       i64[frames]              — the Q48.16 clock of each frame
   params    f64 × (one cell per param input, port order)
   output    f64[frames * channels]   — frame-major
 ```

@@ -14,7 +14,7 @@ import {
 
 export type KernelLayout = {
   frames: number
-  tau: number             // i64[frames] — the Q32.32 clock of each frame
+  tau: number             // i64[frames] — the Q48.16 clock of each frame
   params: number[]        // one f64 cell per param input, in port order
   output: number          // f64[frames * channels], frame-major
   endByte: number         // first free byte after every region

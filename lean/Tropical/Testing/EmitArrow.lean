@@ -336,14 +336,17 @@ def phase2Evidence : Except String Phase2Evidence := do
   -- cost a full rebuild per number to re-pin, so one legitimate change to a
   -- stdlib builder turns into three or four build-and-read-the-error cycles.
   -- Report every drift, with its actual value, in a single pass.
+  -- Q48.16 (`Ir/ClockFormat.lean`): the phasors split the clock with their
+  -- own fraction mask (2¹⁶ − 1) beside the Q0.32 phase mask, one node more
+  -- each; the literals are shorter (65536 for 4294967296).
   let pinned : Array (String × Nat × Nat) := #[
-    ("reachable numeric nodes", nativeNumericExprs.nodes.size, 268),
-    ("numeric wire bytes",      nativeNumericWire.length,      46451),
+    ("reachable numeric nodes", nativeNumericExprs.nodes.size, 269),
+    ("numeric wire bytes",      nativeNumericWire.length,      46446),
     ("stdlib programs",         nativeStdlib.programs.size,    15),
-    ("stdlib nodes",            nativeStdlib.exprs.nodes.size, 289),
+    ("stdlib nodes",            nativeStdlib.exprs.nodes.size, 290),
     ("carrier instances",       nativeProgram.decls.size,      3),
-    ("reachable carrier nodes", nativeExprs.nodes.size,        190),
-    ("carrier wire bytes",      nativeWire.length,             32864)]
+    ("reachable carrier nodes", nativeExprs.nodes.size,        191),
+    ("carrier wire bytes",      nativeWire.length,             32849)]
   let drifted := pinned.filter fun (_, actual, expected) => actual != expected
   unless drifted.isEmpty do
     let lines := drifted.toList.map fun (label, actual, expected) =>
@@ -441,9 +444,12 @@ def phase3Evidence : Except String Phase3Evidence := do
     -- per entry), and the routed count is 15 (below: the tripwire inverts).
     -- 1314 → 1313 / 429612 → 429231 when τ became the IR's time leaf: the
     -- clock is `tau` itself, no longer `sampleIndex << 32` (one node, one
-    -- literal fewer).
-    ("authored nodes", nativeArena.exprs.nodes.size, 1313),
-    ("reachable nodes", nativeExprs.nodes.size, 1311),
+    -- literal fewer). 1313 → 1317 / 1311 → 1315 / 429231 → 429713 for
+    -- Q48.16: the modal phase reducers split the clock with their own
+    -- fraction mask beside the Q0.32 phase mask, and the periodic quotient
+    -- rescales its phase to the rail.
+    ("authored nodes", nativeArena.exprs.nodes.size, 1317),
+    ("reachable nodes", nativeExprs.nodes.size, 1315),
     -- 24 -> 0: `cauchyFold` now emits ordinary `bankSum` pairs; the carrier
     -- authors no routed reductions at all. Kept pinned as the tripwire that
     -- composition stays placement-hoistable (a routedSum here would be
@@ -462,7 +468,7 @@ def phase3Evidence : Except String Phase3Evidence := do
     -- meaning inverts: a routed span here is EXPECTED to hoist, and the
     -- `routed-sum-coverage` gate pins that placement directly.
     ("routed reductions", routed, 15),
-    ("wire bytes", nativeWire.length, 429231)]
+    ("wire bytes", nativeWire.length, 429713)]
   let drifted := pinned.filter fun (_, actual, expected) => actual != expected
   unless drifted.isEmpty do
     let lines := drifted.toList.map fun (label, actual, expected) =>

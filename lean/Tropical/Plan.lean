@@ -27,8 +27,8 @@ Port of `compiler/flat_plan.ts` plus the instruction/operand types from
 
 Plan 7 has no state-initialization or legacy temp-mix carriers. Runtime
 consumers reject older schemas instead of translating them. Plan 7 is plan 6
-with the time source redefined: source 0 (`tau`) is the Q32.32 coordinate
-where plan 6's was the integer sample index, so a plan 6 document would
+with the time source redefined: source 0 (`tau`) is the Q48.16 coordinate
+(`Ir/ClockFormat.lean`) where plan 6's was the integer sample index, so a plan 6 document would
 decode to a different function, and is refused instead.
 
 Numbers that are data (const vals, slot defaults, sink

@@ -1,3 +1,4 @@
+import Tropical.Ir.ClockFormat
 import Tropical.Ir.Nodes
 
 /-!
@@ -17,7 +18,8 @@ open Tropical.Ir
 /-- An authored signal is a stable handle into the active builder arena. -/
 abbrev Sig := ExprId
 
-/-- The Q32.32 clock rail uses the same expression vocabulary and handles. -/
+/-- The clock rail (`Ir/ClockFormat.lean`) uses the same expression vocabulary
+    and handles. -/
 abbrev Clock := Sig
 
 /-- An instance input already carrying an arena-native expression ID. -/
@@ -113,10 +115,20 @@ def nestedOut (instance_ : InstanceIdx) (output : OutputIdx) : BuildM Sig :=
 
 def sampleRate : BuildM Sig := internSig .sampleRate
 
-/-- τ, the kernel's time coordinate: the Q32.32 clock the port is called with
-    (`i64`, integer samples in the high word, the fraction in the low word).
+/-- τ, the kernel's time coordinate: the fixed-point clock the port is called
+    with (`i64`, integer samples above `clockFracBits`, the fraction below).
     Every `Clock` is an expression over this one leaf. -/
 def tau : BuildM Sig := internSig .tau
+
+/-- One sample on the clock rail, `2^clockFracBits`: the scale between a
+    sample count and a clock. -/
+def clockOneLit : BuildM Sig := lit clockOne
+
+/-- The clock rail's fraction bits, as a shift amount. -/
+def clockFracLit : BuildM Sig := lit clockFracBits
+
+/-- The fraction field of a clock, `clockOne − 1`, as a mask. -/
+def clockFracMaskLit : BuildM Sig := lit clockFracMask
 
 def arr (items : Array Sig) : BuildM Sig := internSig (.arr items)
 
@@ -155,13 +167,13 @@ def bitOr (a b : Sig) : BuildM Sig := binary .bitOr a b
 def rshift (a b : Sig) : BuildM Sig := binary .rshift a b
 def lshift (a b : Sig) : BuildM Sig := binary .lshift a b
 
-/-- The integer sample index, `⌊τ⌋ = τ >> 32` (an arithmetic shift, so it is
+/-- The integer sample index, `⌊τ⌋ = τ >> clockFracBits` (an arithmetic shift, so it is
     the floor for negative coordinates too). Derived, not primitive: the
     fraction of τ is dropped HERE and nowhere else, so a builder that reads
     `sampleIndex` is stating that it works on the integer grid (a glide's
     start tick, a seed). Clocks read `tau`. -/
 def sampleIndex : BuildM Sig := do
-  rshift (← tau) (← lit 32)
+  rshift (← tau) (← clockFracLit)
 def gt (a b : Sig) : BuildM Sig := binary .gt a b
 def ldexpE (mantissa exponent : Sig) : BuildM Sig :=
   binary .ldexp mantissa exponent

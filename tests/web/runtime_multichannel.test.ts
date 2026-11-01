@@ -11,7 +11,7 @@ function manifest(outputChannelCount: number, frames: number = FRAMES): KernelMa
   return {
     schema: 'tropical_kernel_1',
     rate: 44100,
-    inputs: [{ name: 'tau', elem: 'i64q32', shape: [frames], role: 'signal' }],
+    inputs: [{ name: 'tau', elem: 'i64q16', shape: [frames], role: 'signal' }],
     outputs: [{ name: 'out', elem: 'f64', shape: [frames, outputChannelCount] }],
   }
 }
@@ -31,7 +31,7 @@ function fakeKernel(
     for (let frame = 0; frame < FRAMES; frame++)
       for (let channel = 0; channel < outputChannelCount; channel++)
         view[frame * outputChannelCount + channel] =
-          sample(frame, channel, Number(tau[frame]! >> 32n))
+          sample(frame, channel, Number(tau[frame]! >> 16n))
   }
 
   const value = Object.create(WasmKernel.prototype) as WasmKernel & {
@@ -95,19 +95,22 @@ describe('multichannel wasm runtime contract', () => {
     expect(Array.from(kernel.render(2))).toEqual([FRAMES + 3, FRAMES + 4])
   })
 
-  test('tau is the BigInt64 image of idx << 32 across the 2³² frame wrap', () => {
-    const kernel = fakeKernel(1, (_frame, _channel, absoluteFrame) => absoluteFrame)
-    const start = 2 ** 32 - 3
-    ;(kernel as unknown as { frameIdx: number }).frameIdx = start
-    expect(Array.from(kernel.render(FRAMES)))
-      .toEqual(Array.from({ length: FRAMES }, (_, s) =>
-        Number(BigInt.asIntN(64, BigInt(start + s) << 32n) >> 32n)))
-    const { memory, layout } = kernel as unknown as
-      { memory: WebAssembly.Memory, layout: KernelLayout }
-    const tau = new BigInt64Array(memory.buffer, layout.tau, FRAMES)
-    for (let s = 0; s < FRAMES; s++)
-      expect(tau[s]).toBe(BigInt.asIntN(64, BigInt(start + s) << 32n))
-  })
+  // The low word's carry into the high word, a frame past the old Q32.32
+  // horizon, and the Q48.16 rail's own sign bit (2⁴⁷ frames).
+  for (const start of [2 ** 16 - 3, 2 ** 32 - 3, 2 ** 47 - 3]) {
+    test(`tau is the BigInt64 image of idx << 16 from frame ${start}`, () => {
+      const kernel = fakeKernel(1, (_frame, _channel, absoluteFrame) => absoluteFrame)
+      ;(kernel as unknown as { frameIdx: number }).frameIdx = start
+      expect(Array.from(kernel.render(FRAMES)))
+        .toEqual(Array.from({ length: FRAMES }, (_, s) =>
+          Number(BigInt.asIntN(64, BigInt(start + s) << 16n) >> 16n)))
+      const { memory, layout } = kernel as unknown as
+        { memory: WebAssembly.Memory, layout: KernelLayout }
+      const tau = new BigInt64Array(memory.buffer, layout.tau, FRAMES)
+      for (let s = 0; s < FRAMES; s++)
+        expect(tau[s]).toBe(BigInt.asIntN(64, BigInt(start + s) << 16n))
+    })
+  }
 
   test('process spans blocks on the same clock as render', () => {
     const kernel = fakeKernel(1, (_frame, _channel, absoluteFrame) => absoluteFrame)

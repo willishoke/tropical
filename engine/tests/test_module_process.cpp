@@ -88,8 +88,8 @@ static void run_test(const char* name, std::function<void()> fn)
 // The port (design/typed-kernel.md): `tropical_kernel(ptr tau, ptr in_1..k,
 // ptr out)` over a static frame count, plus the argv thunk compile_ir_text
 // looks up. Lean's EmitLlvm emits exactly this shape; these hand kernels
-// mirror it. Inside the loop `%s` is the frame, `%tau_s` the frame's Q32.32
-// coordinate, `%idx` its integer part (`tau[s] >> 32`, which these hand
+// mirror it. Inside the loop `%s` is the frame, `%tau_s` the frame's clock-rail
+// coordinate, `%idx` its integer part (`tau[s] >> 16`, which these hand
 // kernels ramp on), `%in_<j>` the j-th param input, `%out` the output.
 static std::string wrap_kernel(unsigned int frames, unsigned int params,
                                const std::string& body)
@@ -114,7 +114,7 @@ static std::string wrap_kernel(unsigned int frames, unsigned int params,
     "lb:\n"
     "  %tau_p = getelementptr inbounds i64, ptr %tau, i64 %s\n"
     "  %tau_s = load i64, ptr %tau_p, align 8\n"
-    "  %idx = ashr i64 %tau_s, 32\n"
+    "  %idx = ashr i64 %tau_s, 16\n"
     + body +
     "  %sn = add i64 %s, 1\n  br label %lc\n"
     "le:\n  ret void\n}\n\n"
@@ -134,7 +134,7 @@ static std::string kernel_manifest(unsigned int frames,
 {
   nlohmann::json inputs = nlohmann::json::array();
   nlohmann::json tau;
-  tau["name"] = "tau"; tau["elem"] = "i64q32";
+  tau["name"] = "tau"; tau["elem"] = "i64q16";
   tau["shape"] = nlohmann::json::array({frames}); tau["role"] = "signal";
   inputs.push_back(tau);
   for (const auto& name : params)
@@ -335,7 +335,7 @@ static void test_interleaved_native_output()
 }
 
 // A sample-index ramp — closed-form, no state. Exercises the tau input
-// (`%idx = tau[s] >> 32`) and the output store. The kernel is a pure
+// (`%idx = tau[s] >> 16`) and the output store. The kernel is a pure
 // function of the clock it is handed.
 static const char* RAMP_BODY =
   "  %v = sitofp i64 %idx to double\n"
@@ -531,9 +531,9 @@ static void test_clock_boundary_handoff()
          == starts.back() + buf);
   ASSERT(tropical_runtime_current_sample_index_u64(rt)
          == starts.back() + buf);
-  // The Q32.32 rail carries 2^31 integer sample indices exactly; this is
-  // far past any session but inside the rail.
-  constexpr uint64_t far_exact = (uint64_t{1} << 30) + 123;
+  // The Q48.16 rail carries 2^47 integer sample indices exactly; this is
+  // far past any session (≈ 265 days at 48 kHz) but inside the rail.
+  constexpr uint64_t far_exact = (uint64_t{1} << 40) + 123;
   tropical_runtime_set_sample_index(rt, far_exact);
   tropical_runtime_process(rt);
   ASSERT(tropical_runtime_current_sample_index_u64(rt)

@@ -450,7 +450,7 @@ def runGroupedRoomReference (arena : Arena)
         | .ok got => runtimeRateMismatchZero := got.all (· == 0.0)
 
       let farSamples : Int := 1000000000
-      let farQ : Int := farSamples * 4294967296
+      let farQ : Int := farSamples * Tropical.Ir.clockOne
       let farAnchor := lit 100000002325 2
       let mut farTranslationExact := false
       match buildRoomPlan arena "room_ref_far" specA
@@ -460,8 +460,9 @@ def runGroupedRoomReference (arena : Arena)
         | .error e => if renderFailure.isNone then renderFailure := some (firstLine e)
         | .ok got => farTranslationExact := bitDiffCount got baseAtZero == 0
 
-      let holdClock := litI (115 * 1073741824)
-      let reverseClock := do sub (← litI (133 * 1073741824)) (← clockLit)
+      -- 28.75 and 33.25 samples on the rail (anchor 23.25: relative 5.5, 10 − i).
+      let holdClock := litI (115 * Tropical.Ir.clockOne / 4)
+      let reverseClock := do sub (← litI (133 * Tropical.Ir.clockOne / 4)) (← clockLit)
       let mut holdReverseOk := false
       match ← renderAgainstOracle arena "room_ref_hold" specA sourceAOracle 0.45
           holdClock anchor n (fun _ => 5.5),

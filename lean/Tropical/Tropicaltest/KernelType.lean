@@ -35,7 +35,7 @@ private def frames : Nat := 256
 private def checkShape (plan : Tropical.Plan.FlatPlan) (k : KernelType) :
     Option String := Id.run do
   let some tau := k.inputs[0]? | return some "no inputs"
-  if tau.name != tauName || tau.elem != .i64q32 || tau.shape != #[frames]
+  if tau.name != tauName || tau.elem != .i64q16 || tau.shape != #[frames]
       || tau.role != some .signal then
     return some s!"tau port is {tau.describe}"
   let paramSlots := plan.slotNames.filter (·.startsWith paramPrefix)

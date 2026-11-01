@@ -408,6 +408,7 @@ def partitionKernel (instancePath : String) (prog : CoreProgram)
   let mut childStageBlocks : Array (Array (Array (Option Tropical.Ir.Stage))) := #[]
   let mut childOutStages : Array (Array Tropical.Ir.Stage) := #[]
   let mut nestedOutputSlots : Array (Nat × Array (Nat × Nat)) := #[]
+  let mut nestedOutputTypes : Array (Nat × Array (Nat × Tropical.Ir.Emit.ScalarType)) := #[]
   let mut nestedInputSlots : Array (Nat × Array (Nat × Nat)) := #[]
   let mut nestedOutputArraySlots : Array (Nat × Array (Nat × ArraySlotInfo)) := #[]
   let mut nestedInputArraySlots : Array (Nat × Array (Nat × ArraySlotInfo)) := #[]
@@ -433,15 +434,20 @@ def partitionKernel (instancePath : String) (prog : CoreProgram)
     s ← allocateInputSlots s wires childPath declType
 
     let mut childOutputMap : Array (Nat × Nat) := #[]
+    let mut childOutputTypes : Array (Nat × Tropical.Ir.Emit.ScalarType) := #[]
     let mut childOutputArrayMap : Array (Nat × ArraySlotInfo) := #[]
     for i in [0:declType.outputs.size] do
       let outDecl := declType.outputs[i]!
       match lookupOutputSlot s childPath outDecl.name with
-      | some slot => childOutputMap := childOutputMap.push (i, slot)
+      | some slot =>
+        childOutputMap := childOutputMap.push (i, slot)
+        if let some (.scalar k) := outDecl.type? then
+          childOutputTypes := childOutputTypes.push (i, k)
       | none =>
         if let some info := lookupOutputArraySlot s childPath outDecl.name then
           childOutputArrayMap := childOutputArrayMap.push (i, info)
     nestedOutputSlots := nestedOutputSlots.push (k, childOutputMap)
+    nestedOutputTypes := nestedOutputTypes.push (k, childOutputTypes)
     nestedOutputArraySlots := nestedOutputArraySlots.push (k, childOutputArrayMap)
 
     let mut childInputMap : Array (Nat × Nat) := #[]
@@ -483,6 +489,7 @@ def partitionKernel (instancePath : String) (prog : CoreProgram)
   let ctx : Context := {
     paramSlots
     nestedOutputSlots? := some nestedOutputSlots
+    nestedOutputTypes
     nestedInputSlots
     inputSlotOverride
     inputArraySlots

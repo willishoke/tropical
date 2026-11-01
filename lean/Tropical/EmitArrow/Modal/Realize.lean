@@ -199,8 +199,8 @@ def modalBankSigDir (modes : Array ModalMode) (clkInt : Sig) (anchorSamples : Si
     (dir : Sig) (dampScale? : Option Sig := none) : BuildM Sig := do
   let clkRel ← relClockQ clkInt anchorSamples
   let clkFloat ← toFloatE clkRel
-  let twoPow32 ← lit 4294967296
-  let secondsTimesRate ← div clkFloat twoPow32
+  let clockScale ← clockOneLit
+  let secondsTimesRate ← div clkFloat clockScale
   let sr ← sampleRate
   let dSec ← div secondsTimesRate sr
   -- Q datapath, same ledger as `modalBankSig` (Q(4+k).(28−k) weight landings via
@@ -297,8 +297,8 @@ def modalBankSigDirTable (modes : Array ModalMode) (clkInt anchorSamples : Sig)
     (dir : Sig) (dampScale? : Option Sig := none) (live? : Option Sig := none) : BuildM Sig := do
   let clkRel ← relClockQ clkInt anchorSamples
   let clkFloat ← toFloatE clkRel
-  let twoPow32 ← lit 4294967296
-  let secondsTimesRate ← div clkFloat twoPow32
+  let clockScale ← clockOneLit
+  let secondsTimesRate ← div clkFloat clockScale
   let sr ← sampleRate
   let dSec ← div secondsTimesRate sr
   let cols ← bankCols modes live?

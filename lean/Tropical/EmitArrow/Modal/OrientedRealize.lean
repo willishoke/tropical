@@ -172,8 +172,8 @@ private def pairedSig (pairs : Array PairedMode) (clkInt anchorSamples : Sig) : 
   if pairs.isEmpty then return ← lit 0
   let clkRel ← relClockQ clkInt anchorSamples
   let clkFloat ← toFloatE clkRel
-  let twoPow32 ← lit 4294967296
-  let secondsTimesRate ← div clkFloat twoPow32
+  let clockScale ← clockOneLit
+  let secondsTimesRate ← div clkFloat clockScale
   let sr ← sampleRate
   let dSec ← div secondsTimesRate sr
   let cols ← pairedBankCols pairs
@@ -275,8 +275,8 @@ def Bank.realizeSig (bank : Bank) (clkInt anchorSamples : Sig)
   -- The coefficient plane settles to its control targets before the terminal
   -- read; un-settleable coefficients keep the live per-sample path.
   let bank := (← bank.settled?).getD bank
-  let twoPow32 ← lit 4294967296
-  let anchorFixed ← mul anchorSamples twoPow32
+  let clockScale ← clockOneLit
+  let anchorFixed ← mul anchorSamples clockScale
   let anchorQ ← toIntE anchorFixed
   let two ← lit 2
   let twiceAnchor ← mul two anchorQ
@@ -301,8 +301,8 @@ def Bank.realizeSig (bank : Bank) (clkInt anchorSamples : Sig)
 def TerminalBank.realizeSig (terminal : TerminalBank)
     (clkInt anchorSamples : Sig) (count? : Option Sig := none) : BuildM Sig := do
   let future ← pairedSig terminal.futurePaired clkInt anchorSamples
-  let twoPow32 ← lit 4294967296
-  let anchorFixed ← mul anchorSamples twoPow32
+  let clockScale ← clockOneLit
+  let anchorFixed ← mul anchorSamples clockScale
   let anchorQ ← toIntE anchorFixed
   let two ← lit 2
   let twiceAnchor ← mul two anchorQ

@@ -1,3 +1,4 @@
+import Tropical.Ir.ClockFormat
 import Tropical.WireExpr
 import Tropical.Ir.Nodes
 
@@ -128,7 +129,7 @@ private def translate (refToInput : Array (String × Nat))
   | .sampleIndex =>
     -- The wire's integer sample index is `⌊τ⌋`: the IR's time leaf is τ.
     let (t, ctx) := internW .tau ctx
-    let (s, ctx) := internW (.num ⟨32, 0⟩) ctx
+    let (s, ctx) := internW (.num ⟨Tropical.Ir.clockFracBits, 0⟩) ctx
     pure (internW (.binary .rshift t s) ctx)
   | .binary tag l r =>
     let (a, ctx) ← translate refToInput l ctx

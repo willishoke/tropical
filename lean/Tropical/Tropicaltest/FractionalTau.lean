@@ -1,3 +1,4 @@
+import Tropical.Ir.ClockFormat
 import Tropical.Session.Compile
 import Tropical.StagedLoad
 import Tropical.Tropicaltest.Reversibility
@@ -6,7 +7,8 @@ import Tropical.Tropicaltest.Gates
 /-!
 # Fractional τ at the port
 
-`design/typed-kernel.md`: τ is the kernel's Q32.32 time coordinate, passed as
+`design/typed-kernel.md`: τ is the kernel's fixed-point time coordinate
+(`Ir/ClockFormat.lean`, Q48.16), passed as
 an array, and the kernel is a closed form `f(τ, params)`. The IR's time leaf
 is τ itself (`ENode.tau`), so a fractional coordinate evaluates the closed
 form at that fractional instant — nothing between the port and the
@@ -18,9 +20,9 @@ the runtime's host-side τ fill (`Runtime.renderTau`):
 * **half speed on the integer grid**: `ScrubClock(velocity = ½)` feeding
   `FixedSinOsc`, rendered at τ = 2k+1 for k < N; the scrub clock is
   `base + velocity · τ` on the rail, exactly (`scaleClockQ`), so the
-  oscillator sees the clock `(k + ½) · 2³²`;
+  oscillator sees the clock `(k + ½) · clockOne`;
 * **full speed at half-sample instants**: `FixedSinOsc` on the default clock
-  (τ itself), rendered at τ = k + ½, i.e. the i64 `(2k+1) <<< 31`.
+  (τ itself), rendered at τ = k + ½, i.e. the i64 `(2k+1) · clockOne / 2`.
 
 Byte-identical output is the statement that (a) the port honours the fraction
 of τ and (b) the scrub clock's product is exact when it *produces* a fraction.
@@ -28,12 +30,13 @@ Its input τ is whole there, so a third leg feeds it fractional τ:
 
 * **dense velocity at dense τ**: `ScrubClock` at velocity
   `S / 2³²` with `S = 7331967795` (every fraction bit significant, exact in
-  f64 and in its decimal spelling), rendered at `τ_k = k·2³² + h(k)` with
-  `h` a 32-bit hash, so every word of `scaleClockQ`'s split product is live,
-  against the default clock at `⌊S·τ_k / 2³²⌋` computed here in `Nat`. That
-  floor is `scaleClockQ`'s contract; the two nested 16-bit floors collapse
-  to it exactly. The leg also checks that it can see an error of 2⁻¹⁶
-  sample, the weight of the low partial product.
+  f64 and in its decimal spelling; the velocity is a Q·.32 scale whatever the
+  rail's format), rendered at `τ_k = h(k)` with `h` a 48-bit hash, so every
+  word of `scaleClockQ`'s split product is live, against the default clock at
+  `⌊S·τ_k / 2³²⌋` computed here in `Nat`. That floor is `scaleClockQ`'s
+  contract; the two nested 16-bit floors collapse to it exactly. The leg also
+  checks that it can see an error of one rail unit (2⁻¹⁶ sample), the most
+  the low partial products can contribute.
 
 A second check
 confirms the fraction is not simply dropped: the full-speed kernel at k + ½
@@ -54,7 +57,7 @@ private def oscAt (clkInput : String) (velocity : String := "0.5") : String :=
 private def halfSpeedPatch : String :=
   oscAt ",\"clk\":{\"op\":\"ref\",\"instance\":\"clock\",\"output\":\"clk\"}"
 
-/-- `S`, the dense velocity's Q32.32 image, and its exact decimal spelling. -/
+/-- `S`, the dense velocity's Q·.32 image, and its exact decimal spelling. -/
 private def denseScaleQ : Nat := 7331967795
 private def denseVelocity : String := "1.70710678095929324626922607421875"
 
@@ -87,9 +90,10 @@ def runFractionalTau : IO Bool := do
     | .ok rt => pure rt
   -- Three τ images over k < N: the odd integers 2k+1, the half-samples k + ½,
   -- and the integers k.
-  let odd : Array UInt64 := (Array.range frames).map fun k => (2 * k + 1).toUInt64 <<< (32 : UInt64)
-  let halves : Array UInt64 := (Array.range frames).map fun k => (2 * k + 1).toUInt64 <<< (31 : UInt64)
-  let ints : Array UInt64 := (Array.range frames).map fun k => k.toUInt64 <<< (32 : UInt64)
+  let one := Tropical.Ir.clockOne
+  let odd : Array UInt64 := (Array.range frames).map fun k => ((2 * k + 1) * one).toUInt64
+  let halves : Array UInt64 := (Array.range frames).map fun k => ((2 * k + 1) * one / 2).toUInt64
+  let ints : Array UInt64 := (Array.range frames).map fun k => (k * one).toUInt64
   let onGrid := decodeF64LE (← half.renderTau odd #[0])
   let atHalves := decodeF64LE (← full.renderTau halves #[0])
   let atInts := decodeF64LE (← full.renderTau ints #[0])
@@ -104,16 +108,16 @@ def runFractionalTau : IO Bool := do
     | .error e => return ← failGate label s!"dense-velocity patch: {e}"
     | .ok rt => pure rt
   let denseTau : Array UInt64 := (Array.range frames).map fun k =>
-    ((k <<< 32) + (k * 2654435761 + 2654435769) % 4294967296).toUInt64
+    ((k * 2654435761 * 65537 + 2654435769) % 2 ^ 48).toUInt64
   let expected : Array UInt64 := denseTau.map fun t => (denseScaleQ * t.toNat / 4294967296).toUInt64
   let scrubbed := decodeF64LE (← dense.renderTau denseTau #[0])
   let direct := decodeF64LE (← full.renderTau expected #[0])
-  let nudged := decodeF64LE (← full.renderTau (expected.map (· + 65536)) #[0])
+  let nudged := decodeF64LE (← full.renderTau (expected.map (· + 1)) #[0])
   if scrubbed.size != frames || direct.size != frames || nudged.size != frames then
     return ← failGate label s!"dense render sizes {scrubbed.size}/{direct.size}/{nudged.size}, want {frames}"
   let denseIdentity := bitDiffCount scrubbed direct
   let lowWordVisible := bitDiffCount direct nudged
-  IO.println s!"        scrub(S/2³²)@τ_k ≡ τ@⌊S·τ_k/2³²⌋ bitDiff={denseIdentity}/{frames} · a 2⁻¹⁶-sample error is visible in {lowWordVisible}/{frames}"
+  IO.println s!"        scrub(S/2³²)@τ_k ≡ τ@⌊S·τ_k/2³²⌋ bitDiff={denseIdentity}/{frames} · a one-unit (2⁻{Tropical.Ir.clockFracBits}-sample) error is visible in {lowWordVisible}/{frames}"
   if identity == 0 && fractionLive > frames / 2 && energy > 1.0
       && denseIdentity == 0 && lowWordVisible > frames / 2 then
     passGate label "scrub(½)·τ on the integer grid ≡ τ at half-sample instants, and scrub(S)·τ ≡ ⌊S·τ/2³²⌋ at dense fractional τ, byte-exact"

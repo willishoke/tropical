@@ -21,14 +21,15 @@ def masterClock (pidx : String → Option Nat) : BuildM Clock := do
   let zero ← lit 0
   let velocity ← pref pidx Tropical.Playground.Metadata.masterVelocityParam one
   let tauBase ← pref pidx Tropical.Playground.Metadata.masterTauBaseParam zero
+  -- The velocity is a Q·.32 scale, independent of the clock rail's format.
   let twoPow32 ← lit 4294967296
   let velocityFixed ← mul velocity twoPow32
   let velocityQ ← toIntE velocityFixed
   let sr ← sampleRate
   let tauSamples ← mul tauBase sr
-  let tauFixed ← mul tauSamples twoPow32
+  let tauFixed ← mul tauSamples (← clockOneLit)
   let tauQ ← toIntE tauFixed
-  -- `clock = tau_base + velocity · τ` on the Q32.32 rail, exact at fractional τ.
+  -- `clock = tau_base + velocity · τ` on the clock rail, exact at fractional τ.
   let advancing ← scaleClockQ velocityQ (← tau)
   add tauQ advancing
 
@@ -157,7 +158,13 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
     let decay ← paramValue pidx paramName kind params "decay"
     let npart := (Tropical.Playground.Metadata.jInt params "partials" 6).toNat
     let address := (Tropical.Playground.Metadata.portSources inObj "addr")[0]?
-    let zero ← lit 0
+    -- The strike time `t` in seconds, as `string`/`gong` read it; absent is
+    -- a strike at 0 (the literal, so graphs without `t` emit unchanged).
+    let zero ← match Tropical.Playground.Metadata.jNum? params "t" with
+      | none => lit 0
+      | some _ => do
+        let seconds ← litOfD (Tropical.Playground.Metadata.jExactD params "t" (0, 0))
+        mul seconds (← sampleRate)
     match Tropical.Playground.Metadata.jNum? params "partials_max" with
     | none =>
       let modes ← resonatorBank f0 decay npart

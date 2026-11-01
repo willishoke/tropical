@@ -1226,8 +1226,8 @@ private def routedSourceSideSig (factored : FactoredTwoRoomTerminal)
   let hot2 ← gt hot2Value zero
   let clkRel ← relClockQ clkInt anchorSamples
   let clkFloat ← toFloatE clkRel
-  let twoPow32 ← lit 4294967296
-  let secondsTimesRate ← div clkFloat twoPow32
+  let clockScale ← clockOneLit
+  let secondsTimesRate ← div clkFloat clockScale
   let sr ← sampleRate
   let dSec ← div secondsTimesRate sr
   let sourceCarrier ← poleCarrierE lam dSec clkRel
@@ -1286,8 +1286,8 @@ private def routedColdSourceSideSig (factored : FactoredTwoRoomTerminal)
     factored.sourceAssembly sourceIndex
   let clkRel ← relClockQ clkInt anchorSamples
   let clkFloat ← toFloatE clkRel
-  let twoPow32 ← lit 4294967296
-  let secondsTimesRate ← div clkFloat twoPow32
+  let clockScale ← clockOneLit
+  let secondsTimesRate ← div clkFloat clockScale
   let sr ← sampleRate
   let dSec ← div secondsTimesRate sr
   let carrier ← poleCarrierE lam dSec clkRel
@@ -1309,8 +1309,8 @@ private def routedRoomSideSig (room1 room2 : Array ModalMode) (assembly : Sig)
   if room1.isEmpty then return ← lit 0
   let clkRel ← relClockQ clkInt anchorSamples
   let clkFloat ← toFloatE clkRel
-  let twoPow32 ← lit 4294967296
-  let secondsTimesRate ← div clkFloat twoPow32
+  let clockScale ← clockOneLit
+  let secondsTimesRate ← div clkFloat clockScale
   let sr ← sampleRate
   let dSec ← div secondsTimesRate sr
   let leftCols ← modeColumns room1
@@ -1338,8 +1338,8 @@ private def routedRoomSideSig (room1 room2 : Array ModalMode) (assembly : Sig)
 
 def FactoredTwoRoomTerminal.realizeSig (factored : FactoredTwoRoomTerminal)
     (clkInt anchorSamples : Sig) : BuildM Sig := do
-  let twoPow32 ← lit 4294967296
-  let anchorFixed ← mul anchorSamples twoPow32
+  let clockScale ← clockOneLit
+  let anchorFixed ← mul anchorSamples clockScale
   let anchorQ ← toIntE anchorFixed
   let two ← lit 2
   let twiceAnchor ← mul two anchorQ
@@ -1706,8 +1706,8 @@ private def routedInlineColdSourceSideSig (modes : Array ModalMode)
   let amp ← amps.readDynamic assembly itemIndex
   let clkRel ← relClockQ clkInt anchorSamples
   let clkFloat ← toFloatE clkRel
-  let twoPow32 ← lit 4294967296
-  let secondsTimesRate ← div clkFloat twoPow32
+  let clockScale ← clockOneLit
+  let secondsTimesRate ← div clkFloat clockScale
   let sr ← sampleRate
   let dSec ← div secondsTimesRate sr
   let carrier ← poleCarrierE pole dSec clkRel

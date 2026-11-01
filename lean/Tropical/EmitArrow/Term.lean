@@ -63,7 +63,7 @@ def instMor (name programName : String) (portOrder : Array InputIdx)
   let instanceIdx ← declareInst { name, programName, inputs }
   (Array.range numOut).mapM fun output => nestedOut instanceIdx ⟨output⟩
 
-/-- The identity clock: τ itself, the Q32.32 coordinate the port is called
+/-- The identity clock: τ itself, the fixed-point coordinate the port is called
     with. A fractional τ is a fractional clock; nothing here rounds. -/
 def clockLit : BuildM Clock := tau
 
@@ -186,8 +186,8 @@ def sweptDelta (seconds modulator : Sig) : BuildM Sig := do
   let secondsModulated ← mul seconds modulator
   let sr ← sampleRate
   let samples ← mul secondsModulated sr
-  let twoPow32 ← lit 4294967296
-  let fixedSamples ← mul samples twoPow32
+  let clockScale ← clockOneLit
+  let fixedSamples ← mul samples clockScale
   toIntE fixedSamples
 
 def sflangeBack (seconds : Sig) : Clock → Sig → BuildM Clock :=

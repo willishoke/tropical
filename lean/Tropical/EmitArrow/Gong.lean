@@ -47,8 +47,8 @@ def gongBloomWarp (anchorSamples beta g : Sig) (scale : Float) : Clock → Build
   fun clk => do
     let clkRel ← relClockQ clk anchorSamples
     let clkFloat ← toFloatE clkRel
-    let twoPow32 ← lit 4294967296
-    let scaledClock ← div clkFloat twoPow32
+    let clockScale ← clockOneLit
+    let scaledClock ← div clkFloat clockScale
     let sr ← sampleRate
     let dSec ← div scaledClock sr
     let zero ← lit 0
@@ -64,7 +64,7 @@ def gongBloomWarp (anchorSamples beta g : Sig) (scale : Float) : Clock → Build
     let normalizedRise ← div rise g
     let bloom ← mul scaledBeta normalizedRise
     let samples ← mul bloom sr
-    let fixed ← mul samples twoPow32
+    let fixed ← mul samples clockScale
     let shift ← toIntE fixed
     add clk shift
 

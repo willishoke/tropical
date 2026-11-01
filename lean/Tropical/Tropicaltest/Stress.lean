@@ -8,13 +8,16 @@ Standard-rep differentials on the hard cases: the convolution oracle (clock-warp
 
 open Tropical
 open Tropical.Plan
-open Tropical.Ir (Arena ProgramIdx)
+open Tropical.Ir (Arena ProgramIdx clockOne)
+
+/-- One sample on the clock rail, as an `Int` (`Ir/ClockFormat.lean`). -/
+private def oneQ : Int := clockOne
 
 -- ── (h″) The convolution stress test — the bubble, EXECUTED, with a NON-FACADE
 -- oracle. An FIR filter is fan-out + clock-warps + scale + sum (a convolution IS
 -- the flanger with more taps). We compute the convolution TWO independent ways
 -- and demand they agree:
---   tropical: each tap warps the CLOCK by j samples (j·2³² in Q32.32); the
+--   tropical: each tap warps the CLOCK by j samples (j·clockOne on the rail); the
 --     oscillator is evaluated at the warped clock, weighted, summed — the bubble
 --     doing the work inside the kernel.
 --   oracle:   render the BARE oscillator once, then shift the resulting Float
@@ -25,12 +28,12 @@ open Tropical.Ir (Arena ProgramIdx)
 -- lowering (this is what defeats correct-by-facade — eval-walking the same term
 -- could not). The filter-effect figure confirms the FIR is non-degenerate.
 
-/-- A j-sample clock delay: subtract `j·2³²` (Q32.32) from the clock. `j = 0` is
+/-- A j-sample clock delay: subtract `j·clockOne` from the clock. `j = 0` is
     identity (`sub c 0 = c`). -/
 private def firShift (j : Nat) : Tropical.EmitArrow.Clock →
     Tropical.EmitArrow.BuildM Tropical.EmitArrow.Clock :=
   fun clock => do
-    let value ← Tropical.EmitArrow.lit (Int.ofNat j * 4294967296)
+    let value ← Tropical.EmitArrow.lit (Int.ofNat j * oneQ)
     let shift ← Tropical.EmitArrow.toIntE value
     Tropical.EmitArrow.sub clock shift
 
@@ -106,7 +109,7 @@ def runConvolutionOracle (arena : Arena)
 
 -- ── (h‴) The MODULATED-CLOCK stress test — a fractional, NONLINEAR warp, to see
 -- whether the bubble is a side-effect of affineness (it should not be). The warp
--- φ(τ) = clk − ⌊depth·mod(τ)·2³²⌋ is sub-sample and nonlinear (mod is a sine);
+-- φ(τ) = clk − ⌊depth·mod(τ)·clockOne⌋ is sub-sample and nonlinear (mod is a sine);
 -- it evaluates the carrier at clock values BETWEEN integer samples, which the
 -- array-shift oracle cannot reach. So the oracle is an INDEPENDENT closed-form
 -- reference (Lean `Float.sin` on the modulated phase), calibrated against the
@@ -140,16 +143,16 @@ private def fixedSinQ (p : Int) : Int :=
 private def voiceSin (phase : Float) : Float :=
   Float.ofInt (fixedSinQ ((phase * 4294967296.0).toUInt64.toNat)) / 1073741824.0
 
-/-- `ClockPhasor.phase` at a Q32.32 clock value, transcribed exactly (integer
+/-- `ClockPhasor.phase` at a clock-rail value, transcribed exactly (integer
     math, offset = 0). inc = ⌊freqHz·2³²/SR⌋. Uses `fdiv`/`fmod` so it matches the
     engine's arithmetic shift (`>>`, floor) and two's-complement mask (`&`) for
     NEGATIVE clocks too — i.e. negative time / backward extrapolation. For clk ≥ 0
     these agree with plain /,%. -/
 private def phasorPhase (clk : Int) (freqHz : Int) : Float :=
   let inc : Int := (freqHz * 4294967296) / 44100
-  let thi := Int.fdiv clk 4294967296
-  let tlo := Int.fmod clk 4294967296
-  let acc := inc * thi + Int.fdiv (inc * tlo) 4294967296
+  let thi := Int.fdiv clk oneQ
+  let tlo := Int.fmod clk oneQ
+  let acc := inc * thi + Int.fdiv (inc * tlo) oneQ
   Float.ofInt (Int.fmod acc 4294967296) / 4294967296.0
 
 /-- Float → Int truncation toward zero (matches the engine's `toInt`). -/
@@ -162,13 +165,13 @@ private def truncToInt (v : Float) : Int :=
     and the SAME integer phasor. The polynomial cancels (it is identical on both
     sides — no true sine in the loop), so the residual is purely the warp/emit
     path and float op-ordering. The warp is genuinely nonlinear and fractional:
-    φ(τ) = clk − toInt(depth · Sin(mod phase) · 2³²). -/
+    φ(τ) = clk − toInt(depth · Sin(mod phase) · clockOne). -/
 def runModulatedClock (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : IO Bool := do
   let n : Nat := 1024
   let lo : Nat := 8
   let depth : Float := 3.0
-  let two32 : Float := 4294967296.0
+  let clockScale : Float := Float.ofNat clockOne
   let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat   -- scales OUTPUTS, not the mid-graph warp
   match buildAndFinish (Tropical.EmitArrow.buildTapCarrier "BareFc"
           (Tropical.EmitArrow.litPitchVoice 2000) bareTaps arena resolved),
@@ -187,16 +190,16 @@ def runModulatedClock (arena : Arena)
       let mut calBitDiff : Nat := 0       -- bit-differing samples (engine bare vs std)
       let mut fmBitDiff : Nat := 0        -- bit-differing samples (engine fm vs std)
       for t in [lo:n] do
-        let clk : Int := Int.ofNat t * 4294967296
+        let clk : Int := Int.ofNat t * oneQ
         -- calibration: engine's bare carrier vs the standard-rep carrier
         let refBare := sinkGain * voiceSin (phasorPhase clk 2000)
         if (bare[t]! - refBare).abs > e0 then e0 := (bare[t]! - refBare).abs
         if bare[t]!.toBits != refBare.toBits then calBitDiff := calBitDiff + 1
         if bare[t]!.abs > maxBare then maxBare := bare[t]!.abs
         -- the warp: mid-graph (unit-scale) modulator = Sin at the modulator phase;
-        -- offset = toInt(depth·mod·2³²); φ = clk − offset (sub-sample, nonlinear)
+        -- offset = toInt(depth·mod·clockOne); φ = clk − offset (sub-sample, nonlinear)
         let rawMod := voiceSin (phasorPhase clk 200)
-        let phi : Int := clk - truncToInt (depth * rawMod * two32)
+        let phi : Int := clk - truncToInt (depth * rawMod * clockScale)
         let refFm := sinkGain * voiceSin (phasorPhase phi 2000)
         if (got[t]! - refFm).abs > efm then efm := (got[t]! - refFm).abs
         if got[t]!.toBits != refFm.toBits then fmBitDiff := fmBitDiff + 1
@@ -227,7 +230,7 @@ def runPmPm (arena : Arena)
   let lo : Nat := 8
   let d1 : Float := 3.0
   let d2 : Float := 3.0
-  let two32 : Float := 4294967296.0
+  let clockScale : Float := Float.ofNat clockOne
   let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
   match buildAndFinish (Tropical.EmitArrow.buildPmPmCarrier "PmPm" 2000 200 700 3 3 arena resolved),
         buildAndFinish (Tropical.EmitArrow.buildFmCarrier "Fm1" 2000 200 3 arena resolved) with
@@ -243,11 +246,11 @@ def runPmPm (arena : Arena)
       let mut maxOut : Float := 0.0
       let mut nestEffect : Float := 0.0   -- |pm(pm) − single-level pm| (does level 2 matter)
       for t in [lo:n] do
-        let clk : Int := Int.ofNat t * 4294967296
+        let clk : Int := Int.ofNat t * oneQ
         let mod2 := voiceSin (phasorPhase clk 700)
-        let modClk : Int := clk - truncToInt (d2 * mod2 * two32)
+        let modClk : Int := clk - truncToInt (d2 * mod2 * clockScale)
         let mod := voiceSin (phasorPhase modClk 200)
-        let carClk : Int := clk - truncToInt (d1 * mod * two32)
+        let carClk : Int := clk - truncToInt (d1 * mod * clockScale)
         let ref := sinkGain * voiceSin (phasorPhase carClk 2000)
         if (got[t]! - ref).abs > e0 then e0 := (got[t]! - ref).abs
         if got[t]!.toBits != ref.toBits then bitDiff := bitDiff + 1
@@ -281,7 +284,7 @@ def runNegativeClock (arena : Arena)
   let delayTap : Tropical.EmitArrow.Tap :=
     { name := "d"
       warp := fun clock => do
-        let value ← Tropical.EmitArrow.lit (Int.ofNat delta * 4294967296)
+        let value ← Tropical.EmitArrow.lit (Int.ofNat delta * oneQ)
         let shift ← Tropical.EmitArrow.toIntE value
         Tropical.EmitArrow.sub clock shift
       weight := Tropical.EmitArrow.lit 1 }
@@ -298,8 +301,8 @@ def runNegativeClock (arena : Arena)
       let mut negMag : Float := 0.0      -- |output| at negative-time samples (streaming ⇒ 0)
       let mut negBitDiff : Nat := 0
       for t in [0:n] do
-        let clk : Int := Int.ofNat t * 4294967296
-        let phi : Int := clk - Int.ofNat delta * 4294967296   -- (t − 20)·2³²
+        let clk : Int := Int.ofNat t * oneQ
+        let phi : Int := clk - Int.ofNat delta * oneQ   -- (t − 20)·clockOne
         let ref := sinkGain * voiceSin (phasorPhase phi 2000)
         if got[t]!.toBits != ref.toBits then bitDiff := bitDiff + 1
         if got[t]!.abs > maxOut then maxOut := got[t]!.abs
@@ -307,7 +310,7 @@ def runNegativeClock (arena : Arena)
           negCount := negCount + 1
           if got[t]!.abs > negMag then negMag := got[t]!.abs
           if got[t]!.toBits != ref.toBits then negBitDiff := negBitDiff + 1
-      IO.println s!"        random-access rep: osc(φ), φ=(t−{delta})·2³², INCLUDING negative time:"
+      IO.println s!"        random-access rep: osc(φ), φ=(t−{delta})·clockOne, INCLUDING negative time:"
       IO.println s!"        result   engine vs random-access rep: bit-differing {bitDiff}/{n}  (neg-time samples {negCount}, differing {negBitDiff})"
       IO.println s!"        moat     |output| at negative time max={negMag}  (a streaming delay line would emit 0 here)"
       if maxOut < 1e-3 then
@@ -357,7 +360,7 @@ def runMorphOscDifferential (arena : Arena)
     let mut maxBlend : Float := 0.0
     let mut sawVsSin : Float := 0.0        -- the diagonal feeds two distinct shapes
     for t in [lo:n] do
-      let clk : Int := Int.ofNat t * 4294967296
+      let clk : Int := Int.ofNat t * oneQ
       if saw[t]!.toBits   != (refOut 0.0 clk).toBits then sawDiff   := sawDiff   + 1
       if sinv[t]!.toBits  != (refOut 1.0 clk).toBits then sinDiff   := sinDiff   + 1
       if blend[t]!.toBits != (refOut 0.5 clk).toBits then blendDiff := blendDiff + 1

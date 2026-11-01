@@ -35,7 +35,7 @@ private def regionS0PlanOf (dyn : Bool) : FlatPlan :=
     instrScalar "Mul" 5 #[rgF 2, rgF 4] .float,                 -- v·(k+1)
     instrScalar "Add" 1 #[rgF 1, rgF 5] .float,
     instrReduceEnd 1 .float,
-    instrScalar "RShift" 9 #[Tropical.Plan.opTau, cI 32] .int,  -- ⌊τ⌋: the s1 consumer
+    instrScalar "RShift" 9 #[Tropical.Plan.opTau, cI Tropical.Ir.clockFracBits] .int,  -- ⌊τ⌋: the s1 consumer
     instrScalar "ToFloat" 6 #[rgI 9] .float,
     instrScalar "Mod" 7 #[rgF 6, cF 64] .float,
     instrScalar "Mul" 8 #[rgF 1, rgF 7] .float,
@@ -328,7 +328,7 @@ private def foldColumnPlan : FlatPlan :=
     instrScalar "Mul" 5 #[rgF 2, .slot 1 .float] .float,        -- v·param:a  (s0)
     instrScalar "Add" 1 #[rgF 1, rgF 5] .float,
     instrReduceEnd 1 .float,
-    instrScalar "RShift" 11 #[Tropical.Plan.opTau, cI 32] .int, -- ⌊τ⌋: the s1 consumer
+    instrScalar "RShift" 11 #[Tropical.Plan.opTau, cI Tropical.Ir.clockFracBits] .int, -- ⌊τ⌋: the s1 consumer
     instrScalar "ToFloat" 6 #[rgI 11] .float,
     instrScalar "Mod" 7 #[rgF 6, cF 64] .float,
     instrScalar "Mul" 8 #[rgF 1, rgF 7] .float,
@@ -353,7 +353,7 @@ private def foldColumnStages : Array (Array (Option Tropical.Ir.Stage)) :=
 private def columnWritePlan (varying : Bool) : FlatPlan :=
   let v : NOperand := if varying then rgF 6 else cF 1
   let body : Array NInstr := #[
-    instrScalar "RShift" 7 #[Tropical.Plan.opTau, cI 32] .int,
+    instrScalar "RShift" 7 #[Tropical.Plan.opTau, cI Tropical.Ir.clockFracBits] .int,
     instrScalar "ToFloat" 6 #[rgI 7] .float,
     instrPack 0 #[v, v, v, v],
     instrIndex 2 #[.arrayReg 0, cI 0] .float,

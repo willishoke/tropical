@@ -30,7 +30,7 @@ structure ClockEnv where
   tau : Int
   boundary : ExprId → Int
 
-/-- The Q32.32 clock fragment, stated on ids in one frozen expression arena.
+/-- The clock-rail fragment, stated on ids in one frozen expression arena.
 
     The judgment is intentionally `Type`-valued: its derivation is the total
     recursion argument for `denoteClock`. Shift amounts are literal natural
@@ -168,10 +168,11 @@ theorem rev_swap {arena : ExprArena}
   omega
 
 /-- The exact split identity used by the native phase reducers, including for
-    negative relative clocks. -/
+    negative relative clocks: a clock is its whole samples above
+    `clockFracBits` plus its fraction below. -/
 theorem rail_split_identity (x : Int) :
-    (x >>> (32 : Nat)) * 2 ^ 32 + x % 2 ^ 32 = x := by
+    (x >>> clockFracBits) * 2 ^ clockFracBits + x % 2 ^ clockFracBits = x := by
   rw [Int.shiftRight_eq_div_pow]
-  omega
+  exact Int.ediv_add_emod' x _
 
 end Tropical.EmitArrow

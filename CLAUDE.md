@@ -221,7 +221,7 @@ generate native code.
 
 **The port.** The compiler's product is one typed pure kernel
 (`design/typed-kernel.md`): `@tropical_kernel(ptr tau, ptr in_1.., ptr out)`
-— `tau` the Q32.32 clock of each frame, one `f64` per `param:` slot, one
+— `tau` the Q48.16 clock of each frame (`design/fixed-carrier.md`), one `f64` per `param:` slot, one
 frame-major output — with static shapes (a different buffer length is a
 different artifact) and everything else inside the function. The manifest is
 its type, `tropical_kernel_1`. The scope reads output channels of a separate

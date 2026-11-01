@@ -228,8 +228,8 @@ def tripleSig (rows : Array TripleMode) (clkInt anchorSamples : Sig)
   if rows.isEmpty then return ← lit 0
   let clkRel ← relClockQ clkInt anchorSamples
   let clkFloat ← toFloatE clkRel
-  let twoPow32 ← lit 4294967296
-  let secondsTimesRate ← div clkFloat twoPow32
+  let clockScale ← clockOneLit
+  let secondsTimesRate ← div clkFloat clockScale
   let sr ← sampleRate
   let dSec ← div secondsTimesRate sr
   let cols ← tripleBankCols rows
@@ -490,8 +490,8 @@ def BlockTerminal.realizeSig (terminal : BlockTerminal) (clkInt anchorSamples : 
   let bank : Oriented.Bank :=
     { future := terminal.plain, past := terminal.pastPlain, atZero := terminal.atZero }
   let plainSig ← bank.realizeSig clkInt anchorSamples count?
-  let twoPow32 ← lit 4294967296
-  let anchorFixed ← mul anchorSamples twoPow32
+  let clockScale ← clockOneLit
+  let anchorFixed ← mul anchorSamples clockScale
   let anchorQ ← toIntE anchorFixed
   let two ← lit 2
   let twiceAnchor ← mul two anchorQ

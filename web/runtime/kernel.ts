@@ -9,7 +9,8 @@
  * `KernelManifest`; no compiler internals.
  */
 import {
-  kernelFrames, kernelOutputChannelCount, kernelParams, type KernelManifest,
+  CLOCK_FRAC_BITS, kernelFrames, kernelOutputChannelCount, kernelParams,
+  type KernelManifest,
 } from './manifest.js'
 import { computeLayout, type KernelLayout } from './layout.js'
 
@@ -153,9 +154,11 @@ export class WasmKernel {
 
   /** Run the kernel once over its static block, with `tau` the clock of each
    *  frame from `frameIdx`, and return the frame-major output view. Each τ is
-   *  written as its two little-endian u32 words, the fraction (0) and then the
-   *  frame index mod 2³²: the same 64 bits a `BigInt64Array` stores for
-   *  `idx << 32n`, without a BigInt per frame on the audio thread. */
+   *  written as its two little-endian u32 words of `idx << CLOCK_FRAC_BITS`:
+   *  the low word holds the index's low bits above a zero fraction, the high
+   *  word the rest (a u32 store wraps mod 2³², which is the i64's own wrap at
+   *  the rail's horizon). The same 64 bits a `BigInt64Array` stores, without a
+   *  BigInt per frame on the audio thread. */
   private renderBlock(frameIdx: number): Float64Array {
     const L = this.layout
     if (this.outView?.buffer !== this.memory.buffer) {
@@ -164,10 +167,12 @@ export class WasmKernel {
         this.memory.buffer, L.output, L.frames * this.outputChannelCount)
     }
     const words = this.tauWords!
-    const base = frameIdx % 4294967296
+    const lowSpan = 2 ** (32 - CLOCK_FRAC_BITS)
+    const one = 2 ** CLOCK_FRAC_BITS
     for (let s = 0; s < L.frames; s++) {
-      words[2 * s] = 0
-      words[2 * s + 1] = base + s // a u32 store wraps mod 2³²
+      const idx = frameIdx + s
+      words[2 * s] = (idx % lowSpan) * one
+      words[2 * s + 1] = Math.floor(idx / lowSpan) // a u32 store wraps mod 2³²
     }
     this.kernel(...this.argv)
     return this.outView!

@@ -116,6 +116,10 @@ structure EmitSlots where
   paramHandles : Array (Nat × String) := #[]
   paramSlots : Array (Nat × Nat) := #[]
   nestedOutputSlots? : Option (Array (Nat × Array (Nat × Nat))) := none
+  /-- Each child's declared scalar output types, by instance then output
+      position. A child output slot is read at the type its producer wrote;
+      absent is `.float`. -/
+  nestedOutputTypes : Array (Nat × Array (Nat × ScalarType)) := #[]
   nestedInputSlots : Array (Nat × Array (Nat × Nat)) := #[]
   inputSlotOverride : Array (Nat × Nat) := #[]
   inputArraySlots : Array (Nat × ArraySlotInfo) := #[]
@@ -301,7 +305,13 @@ private def tryTerminal (e : ENode) (expected : Option ScalarType) :
         match lookup perInst out.idx with
         | none =>
           throw s!"emit_resolved: NestedOut to instance idx={inst.idx} output idx={out.idx} — output port not in slot map."
-        | some slotRaw => pure (some (.slot slotRaw .float, .float))
+        | some slotRaw =>
+          -- Read at the producer's declared type: an `int` output (a clock)
+          -- must not round-trip through a float — on Metal that float is
+          -- f32, 24 bits of a 64-bit clock.
+          let t := ((lookup st.slots.nestedOutputTypes inst.idx).bind
+            (lookup · out.idx)).getD .float
+          pure (some (.slot slotRaw t, t))
   | _ => pure none
 
 -- ─────────────────────────────────────────────────────────────

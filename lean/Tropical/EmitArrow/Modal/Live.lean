@@ -534,7 +534,7 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) : BuildM (Option
 
 /-- The bloom-composed pair bank as a pure `Sig` over the clock: per pair, TWO
     Q-rotator carriers — the reverb ring `e^{νd}` on the straight relative clock
-    and the bloomed voice mode `e^{μφ(d)}` on the OFFSET clock (the same Q32.32
+    and the bloomed voice mode `e^{μφ(d)}` on the OFFSET clock (the same clock-rail
     offset add as `gongBloomWarp`; never a float round-trip of the absolute
     coordinate) — each weighted by its per-sample envelope (float, slowly
     varying — the DD's `envDf` stance): the fixed-depth series Horner, and for
@@ -566,8 +566,8 @@ def bloomCompose (voice reverb : Array ModalMode) (B g : Float) : BuildM (Option
 def bloomComposedSig (pairs : Array BloomPair) (clkInt anchorSamples : Sig) : BuildM Sig := do
   let clkRel ← relClockQ clkInt anchorSamples
   let clkFloat ← toFloatE clkRel
-  let twoPow32 ← lit 4294967296
-  let secondsTimesRate ← div clkFloat twoPow32
+  let clockScale ← clockOneLit
+  let secondsTimesRate ← div clkFloat clockScale
   let sr ← sampleRate
   let dSec ← div secondsTimesRate sr
   let zero ← lit 0
@@ -607,7 +607,7 @@ def bloomComposedSig (pairs : Array BloomPair) (clkInt anchorSamples : Sig) : Bu
     let oneMinusEg ← sub oneReal eg
     let off ← mul bloomB oneMinusEg
     let offSamples ← mul off sr
-    let offFixed ← mul offSamples twoPow32
+    let offFixed ← mul offSamples clockScale
     let offInt ← toIntE offFixed
     let clkW ← add clkRel offInt
     let phNu ← modePhaseQ p.nuOmega clkRel
@@ -904,8 +904,8 @@ def bloomFoldCompose (voice : Array ModalMode) (r1 r2 : ModalMode) (B g : Float)
 def bloomFoldComposedSig (pairs : Array BloomFoldPair) (clkInt anchorSamples : Sig) : BuildM Sig := do
   let clkRel ← relClockQ clkInt anchorSamples
   let clkFloat ← toFloatE clkRel
-  let twoPow32 ← lit 4294967296
-  let secondsTimesRate ← div clkFloat twoPow32
+  let clockScale ← clockOneLit
+  let secondsTimesRate ← div clkFloat clockScale
   let sr ← sampleRate
   let dSec ← div secondsTimesRate sr
   let zero ← lit 0
@@ -944,7 +944,7 @@ def bloomFoldComposedSig (pairs : Array BloomFoldPair) (clkInt anchorSamples : S
     let oneMinusEg ← sub oneReal eg
     let off ← mul bloomB oneMinusEg
     let offSamples ← mul off sr
-    let offFixed ← mul offSamples twoPow32
+    let offFixed ← mul offSamples clockScale
     let offInt ← toIntE offFixed
     let clkW ← add clkRel offInt
     let nu2Omega ← litF p.nu2Omega
@@ -1037,8 +1037,8 @@ def bloomWarpClock (anchorSamples : Sig) (B g : Float) : Clock → BuildM Clock 
   fun clk => do
     let clkRel ← relClockQ clk anchorSamples
     let clkFloat ← toFloatE clkRel
-    let twoPow32 ← lit 4294967296
-    let secondsTimesRate ← div clkFloat twoPow32
+    let clockScale ← clockOneLit
+    let secondsTimesRate ← div clkFloat clockScale
     let sr ← sampleRate
     let dSec ← div secondsTimesRate sr
     let zero ← lit 0
@@ -1053,7 +1053,7 @@ def bloomWarpClock (anchorSamples : Sig) (B g : Float) : Clock → BuildM Clock 
     let bloomB ← litF B
     let bloom ← mul bloomB settled
     let bloomSamples ← mul bloom sr
-    let bloomFixed ← mul bloomSamples twoPow32
+    let bloomFixed ← mul bloomSamples clockScale
     let bloomInt ← toIntE bloomFixed
     add clk bloomInt
 
