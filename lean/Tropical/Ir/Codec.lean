@@ -70,9 +70,6 @@ def encExpr (arena : Arena) (hw : arena.exprs.wf = true) (id : ExprId) : EncM Js
   | some (.arr items) => do
     let out ← items.attach.mapM fun ⟨e, _⟩ => encExpr arena hw e
     pure (Json.arr out)
-  | some (.tileArray items) => do
-    let out ← items.attach.mapM fun ⟨e, _⟩ => encExpr arena hw e
-    pure <| Json.mkObj [("op", Json.str "tileArray"), ("items", Json.arr out)]
   | some (.binary tag lhs rhs) => do
     pure <| Json.mkObj [("op", Json.str tag.wire),
                         ("args", Json.arr #[← encExpr arena hw lhs, ← encExpr arena hw rhs])]
@@ -97,9 +94,7 @@ def encExpr (arena : Arena) (hw : arena.exprs.wf = true) (id : ExprId) : EncM Js
     pure <| Json.mkObj [("op", Json.str "nestedOut"),
                         ("instance", Lean.toJson inst.idx), ("output", Lean.toJson out.idx)]
   | some .sampleRate => pure <| Json.mkObj [("op", Json.str "sampleRate")]
-  | some .sampleIndex => pure <| Json.mkObj [("op", Json.str "sampleIndex")]
-  | some .tileSampleIndex => pure <| Json.mkObj [("op", Json.str "tileSampleIndex")]
-  | some .tilePhase => pure <| Json.mkObj [("op", Json.str "tilePhase")]
+  | some .tau => pure <| Json.mkObj [("op", Json.str "tau")]
   -- `id` omitted when 0 so pre-nesting programs serialize byte-identically.
   | some (.loopIdx id) =>
     let idField : Option Json := if id == 0 then none else some (Lean.toJson id)
@@ -395,14 +390,7 @@ private def expr (ctx : String) (j : JsonV) : DecM ExprId := do
     | "nestedOut" =>
       internD (.nestedOut ⟨← reqNat ctx j "instance"⟩ ⟨← reqNat ctx j "output"⟩)
     | "sampleRate" => internD .sampleRate
-    | "sampleIndex" => internD .sampleIndex
-    | "tileSampleIndex" => internD .tileSampleIndex
-    | "tilePhase" => internD .tilePhase
-    | "tileArray" => do
-      let ⟨items, _⟩ ← reqArrD ctx j "items"
-      let values ← items.attach.zipIdx.mapM fun (⟨item, _⟩, i) =>
-        expr s!"{ctx}.items[{i}]" item
-      internD (.tileArray values)
+    | "tau" => internD .tau
     -- optional binder id (nested banks); absent = 0, the pre-nesting form.
     | "loopIdx" => do
       let id ← match j.getField? "id" with

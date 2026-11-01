@@ -1,6 +1,6 @@
 import Turnstile
 import Tropical.Tools
-import Tropical.Engine
+import Tropical.NativeBoot
 import Tropical.Rpc
 import Tropical.Serve
 import Tropical.Resources
@@ -96,7 +96,7 @@ private def enginePrompts : List Prompt := [
 -- ── Entry points ─────────────────────────────────────────────────────────────
 
 def runFrontend : IO Unit := do
-  let env ← Engine.boot
+  let env ← NativeBoot.boot
   let srv : Server := {
     name := "tropical", version := "0.1.0",
     tools := tropicalEngineTools env,
@@ -105,7 +105,7 @@ def runFrontend : IO Unit := do
   srv.run                       -- runs until the MCP client closes stdin
 
 def runRpc : IO Unit := do
-  let env ← Engine.boot
+  let env ← NativeBoot.boot
   Rpc.run env
 
 /-- `--serve <addr>` — the multi-client socket endpoint (C++-owned socket,

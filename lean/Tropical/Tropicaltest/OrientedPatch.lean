@@ -37,7 +37,7 @@ private def direction (past : Bool) : BuildM (Option ModalDir) := do
   pure (some { dir })
 
 private def mirrorAtAnchor (clock : Clock) : BuildM Clock := do
-  let twiceAnchorQ : Int := Int.ofNat (2 * anchorNat) * 4294967296
+  let twiceAnchorQ : Int := Int.ofNat (2 * anchorNat) * Tropical.Ir.clockOne
   sub (← litI twiceAnchorQ) clock
 
 private def oneRoomLocalReverse : BuildM PatchGraph := do
@@ -341,8 +341,8 @@ private def complexPairOracle (past : Bool) (relativeSeconds : Float) : Float :=
 
 private def fractionalControlClockOk : Bool :=
   match Tropical.Testing.ArrowFixtures.freezeBuild {} do
-      let delta ← sub (← lit 2147483648) (← lit 0)
-      div (← toFloatE delta) (← lit 4294967296) with
+      let delta ← sub (← lit (Tropical.Ir.clockOne / 2)) (← lit 0)
+      div (← toFloatE delta) (← clockOneLit) with
   | .error _ => false
   | .ok (arena, result) =>
     (sigConstDFrom? (sigConstTable arena) result).map Tropical.Exact.DyadicI.toFloat == some 0.5
@@ -565,7 +565,7 @@ def runOrientedPatch (arena : Arena) : IO Bool := do
       IO.println s!"        degree-positive terminal: finite {two.degreePositiveFinite} · oracle error {two.degreePositiveError}; room-room-room via the block terminal: finite {two.repeatedRoomFinite} · oracle error {two.repeatedRoomError} · peak {two.repeatedRoomPeak}; past·future·past rooms: finite {two.threeRoomMixedFinite} · oracle error {two.threeRoomMixedError} · peak {two.threeRoomMixedPeak}; room-room-gauge: finite {two.roomRoomGaugeFinite} · peak {two.roomRoomGaugePeak}"
       IO.println s!"        source/room confluence: finite {two.sourceCrossingsFinite} · room-1/room-2/three-pole/near oracle {two.sourceCrossingError}/{two.sourceSecondCrossingError}/{two.sourceTripleCrossingError}/{two.sourceNearCrossingError}"
       IO.println s!"        float-banked complex DD: finite {complex.finite} · future/past oracle {complex.futureError}/{complex.pastError} · mirror diff {complex.mirrorDifference}"
-      IO.println s!"        terminal control clock retains a half-sample Q32.32 offset: {fractionalControlClockOk}"
+      IO.println s!"        terminal control clock retains a half-sample clock-rail offset: {fractionalControlClockOk}"
       let pass := one.localError < 2.0e-6 && one.outputReverseError < 2.0e-6 &&
         one.localVsOutputReverse > 1.0e-2 && one.localPost > 1.0e-2 &&
         one.outputReversePost < 1.0e-12 &&
@@ -588,7 +588,7 @@ def runOrientedPatch (arena : Arena) : IO Bool := do
         fractionalControlClockOk
       if pass then
         passGate "modal-oriented-patch"
-          "room reverse is kernel-local (not complete-output reverse); two rooms retain independent FF/FR/RF/RR controls and authored stage order; float-banked complex DD preserves future/past phase and exact mirroring; equal frozen RT60 takes a finite repeated-pole limit; general-degree terminals preserve polynomial factors; three equal rooms and a past·future·past chain cross through the block terminal; room-room-gauge renders through a materialized segment; terminal controls retain fractional Q32.32 time"
+          "room reverse is kernel-local (not complete-output reverse); two rooms retain independent FF/FR/RF/RR controls and authored stage order; float-banked complex DD preserves future/past phase and exact mirroring; equal frozen RT60 takes a finite repeated-pole limit; general-degree terminals preserve polynomial factors; three equal rooms and a past·future·past chain cross through the block terminal; room-room-gauge renders through a materialized segment; terminal controls retain fractional clock-rail time"
       else
         failGate "modal-oriented-patch" "numeric or structural contract failed"
   | .error error, _, _ | _, .error error, _ | _, _, .error error =>

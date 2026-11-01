@@ -1,6 +1,8 @@
 import Std.Data.HashMap
 import Lean.Data.Json
 import Tropical.Plan
+import Tropical.Kernel
+import Tropical.Ir.Stage0
 import Tropical.Ir.EmitCommon
 
 /-!
@@ -13,25 +15,41 @@ text; the gate is **audio equality** with `load_plan` (not IR-text
 equality), so this emits uniform, un-folded IR and lets the JIT's
 optimizer normalize (e.g. constant div-by-zero guards fold away).
 
-## Calling convention (must match `NumericKernelFn`)
+## The port (`design/typed-kernel.md`)
 
 ```
-void(ptr inputs, ptr registers, ptr arrays, ptr array_sizes, ptr temps,
-     double sampleRate, i64 start_sample_index, ptr param_ptrs,
-     ptr output_buffer, i64 buffer_length, ptr slots)
+define void @tropical_kernel(ptr %tau, ptr %in_1, …, ptr %in_k, ptr %out)
 ```
 
-`output_buffer` is compact frame-major interleaved storage. For a plan with
-`C` output channels, sink target `c` writes index `sample * C + c`. The channel
-count is a compile-time Plan fact, so widening output does not change the native
-kernel ABI. FlatRuntime clears all `bufferLength * C` samples before calling the
-kernel, so channels with no sink (and sink-free plans) remain deterministic zero.
+One pointer per input of the plan's kernel type (`Tropical.Kernel.ofPlan`:
+`tau` first — `i64` Q48.16 clock values, shape `[frames]` — then one
+one-element `double` per `param:` slot in slot order) and one for the
+output (`double`, shape `[frames, C]`, frame-major: sink target `c` writes
+`s * C + c`). `frames` is static: the loop bound is a literal, and a
+different buffer length is a different kernel. Nothing else crosses: the
+module slot vector, the array backing stores and the SSA scratch are
+`alloca`s inside the function, seeded per call from the plan's slot
+defaults, the param inputs and the stage-0 prologue (the coefficient plan's
+instructions, emitted before the sample loop — currying, not a second
+kernel). The rate is a literal. The plan's `tau` source is `%tau_s`, the
+frame's Q48.16 coordinate itself: a fractional τ evaluates the closed form
+at that fractional instant (the integer sample index is `tau >> 16`, derived
+in the IR where a builder wants it, never here).
+
+A second exported function, `@tropical_kernel_argv(ptr %argv)`, unpacks a
+pointer table and calls the port — the host-side thunk a C caller needs,
+not part of the type. `compile_ir_text` renames every definition to a
+content-addressed symbol and looks the thunk up.
+
+`emitStage0` is the Metal adapter's CPU pre-pass: the coefficient plan as
+`@tropical_stage0(ptr %slots, ptr %arrays, ptr %array_sizes, ptr %temps)`
+over host storage, so the slot vector and the coefficient columns the GPU
+kernel reads are computed in f64 on the host. Internal to that realization;
+a JIT artifact carries none.
 
 Registers/temps/arrays are `i64`-backed (float=bitcast, int=raw,
 bool=zext); slots are direct `double`. Instruction operand/dst slots are
-already global (the partitioner pre-shifts); only writeback register
-indices add `state_reg_offset`. The function is named `tropical_kernel`
-here — `compile_ir_text` renames it to a content-addressed symbol.
+already global (the partitioner pre-shifts).
 
 f64 constants are emitted as LLVM hex-bits (`0x…`, raw IEEE-754) so the
 parser reproduces them exactly rather than risking decimal round-trip.
@@ -114,11 +132,24 @@ structure St where
       semantics. -/
   tempVals : Std.HashMap Nat TVal := {}
   sources : Array SourceKind := #[]
+  /-- The rate the plan was compiled for: a literal in the kernel. -/
+  sampleRate : Float := 44100.0
+  /-- Array slot sizes — plan constants, so bounds checks are literals. -/
+  arraySizes : Array Nat := #[]
+  /-- Port kernel: every array slot is an `alloca` named `%arr<slot>`.
+      Stage-0 pre-pass: arrays come through the `%arrays` pointer table. -/
+  arraysInline : Bool := true
+  /-- The SSA value the plan's `tau` source reads: `%tau_s`, the frame's
+      coordinate loaded in the sample loop. The port kernel's stage-0
+      prologue runs before the loop, where no frame exists; it binds this to
+      `%tau0` (zero) so a stray τ read in τ-independent code is defined, as
+      the one-sample host call once made it. -/
+  tauName : String := "%tau_s"
   /-- Label of the basic block currently being emitted into. Starts at
-      `loop_body`; array ops (SetElement / elementwise) open new blocks,
-      so the loop back-edge + counter phi must reference the *final*
-      block, not a hardcoded `loop_body`. -/
-  curBlock : String := "loop_body"
+      `entry`; array ops (SetElement / elementwise) and zeroing loops open
+      new blocks, so the loop header's phi and the back-edge must reference
+      the *actual* predecessor, never a hardcoded label. -/
+  curBlock : String := "entry"
   /-- The stack of open reduction regions, outermost first (`ReduceBegin`
       pushes, `ReduceEnd` pops). Nested banks: `loopIdx id` resolves by
       searching this stack for its binder id; accumulator temp reads/writes
@@ -203,16 +234,16 @@ def storeSlotF64 (idx : Nat) (v : String) : M Unit := do
   let g ← fresh; line s!"{g} = getelementptr inbounds double, ptr %slots, i64 {idx}"
   line s!"store double {v}, ptr {g}, align 8"
 
--- Arrays: `%arrays` is a ptr-to-ptr; `%array_sizes` a ptr-to-i64.
+-- Arrays: an alloca per slot in the port kernel; the `%arrays` pointer
+-- table in the stage-0 pre-pass. Sizes are plan constants either way.
 def loadArrayPtr (slot : Nat) : M String := do
+  if (← get).arraysInline then return s!"%arr{slot}"
   let g ← fresh; line s!"{g} = getelementptr inbounds ptr, ptr %arrays, i64 {slot}"
   let p ← fresh; line s!"{p} = load ptr, ptr {g}, align 8"
   pure p
 
 def loadArraySize (slot : Nat) : M String := do
-  let g ← fresh; line s!"{g} = getelementptr inbounds i64, ptr %array_sizes, i64 {slot}"
-  let sz ← fresh; line s!"{sz} = load i64, ptr {g}, align 8"
-  pure sz
+  pure (toString ((← get).arraySizes[slot]?.getD 0))
 
 -- Fresh integer id (for unique basic-block labels).
 def freshId : M Nat := do
@@ -266,12 +297,8 @@ def resolveOperand : NOperand → M TVal
   | .source idx _ => do
     let srcs := (← get).sources
     match srcs[idx]? with
-    | some .tick => pure ⟨"%current_idx", .int⟩
-    | some .rate => pure ⟨"%sampleRate", .float⟩
-    -- The exact/JIT artifact observes the left endpoint at every absolute
-    -- sample.  Only the Metal dispatch supplies an interpolation phase.
-    | some .tilePhase => pure ⟨f64Lit 0.0, .float⟩
-    | some .tileTick => pure ⟨"%current_idx", .int⟩
+    | some .tau => pure ⟨(← get).tauName, .int⟩
+    | some .rate => pure ⟨f64Lit (← get).sampleRate, .float⟩
     | none => pure ⟨f64Lit 0.0, .float⟩
   | .slot idx t => do
     let v ← loadSlotF64 idx
@@ -279,10 +306,9 @@ def resolveOperand : NOperand → M TVal
     | .float => pure ⟨v, .float⟩
     | .int  => let r ← fresh; line s!"{r} = fptosi double {v} to i64"; pure ⟨r, .int⟩
     | .bool => let r ← fresh; line s!"{r} = fcmp one double {v}, 0x0000000000000000"; pure ⟨r, .bool⟩
-  | .input slot _ => do
-    let g ← fresh; line s!"{g} = getelementptr inbounds double, ptr %inputs, i64 {slot}"
-    let v ← fresh; line s!"{v} = load double, ptr {g}, align 8"
-    pure ⟨v, .float⟩
+  -- External inputs never reached the session path (the compile maps them
+  -- to constant zero); the port has no such region, so the operand IS zero.
+  | .input _ _ => pure ⟨f64Lit 0.0, .float⟩
   | .param _ _ => fail "EmitLlvm: 'param' operand is dead on the session path (use slots)"
   | .arrayReg _ => fail "EmitLlvm: bare 'arrayReg' operand outside an array op"
   | .sessionArrayReg _ => fail "EmitLlvm: 'sessionArrayReg' must be remapped before emit"
@@ -709,9 +735,7 @@ def emitInstr (instr : NInstr) : M Unit := do
 -- Fractal per-instance walk (mirrors EmitCtx::emit_kernel_block)
 -- ─────────────────────────────────────────────────────────────
 
--- CF-only: no register writebacks — there is no per-sample state. The
--- `%registers` kernel argument survives in the calling convention but is
--- never read or written.
+-- CF-only: no register writebacks — there is no per-sample state.
 def emitKernelBlock (inst : InstanceFunction) : M Unit := do
   -- preamble → per-child {pre_input, child} → body
   for i in inst.preambleInstructions do emitInstr i
@@ -741,7 +765,7 @@ def emitSinks (sinks : Array SinkSpec) (outputChannelCount : Nat) : M Unit := do
           line s!"{targetIdx} = add i64 {frameBase}, {target}"
           pure targetIdx
       let g ← fresh
-      line s!"{g} = getelementptr inbounds double, ptr %output_buffer, i64 {outputIdx}"
+      line s!"{g} = getelementptr inbounds double, ptr %out, i64 {outputIdx}"
       line s!"store double {zeroF}, ptr {g}, align 8"
   for sink in sinks do
     let mut acc := zeroF
@@ -760,7 +784,7 @@ def emitSinks (sinks : Array SinkSpec) (outputChannelCount : Nat) : M Unit := do
         line s!"{targetIdx} = add i64 {frameBase}, {sink.target}"
         pure targetIdx
     let g ← fresh
-    line s!"{g} = getelementptr inbounds double, ptr %output_buffer, i64 {outputIdx}"
+    line s!"{g} = getelementptr inbounds double, ptr %out, i64 {outputIdx}"
     line s!"store double {scaled}, ptr {g}, align 8"
 
 private def validateSinkTargets (sinks : Array SinkSpec)
@@ -779,11 +803,6 @@ private def validateSinkTargets (sinks : Array SinkSpec)
 -- Module entry point
 -- ─────────────────────────────────────────────────────────────
 
-private def kernelArgs : String :=
-  "ptr %inputs, ptr %registers, ptr %arrays, ptr %array_sizes, ptr %temps, " ++
-  "double %sampleRate, i64 %start_sample_index, ptr %param_ptrs, " ++
-  "ptr %output_buffer, i64 %buffer_length, ptr noalias nocapture %slots"
-
 private def intrinsicDecls : String :=
   "declare double @llvm.sqrt.f64(double)\n" ++
   "declare double @llvm.floor.f64(double)\n" ++
@@ -791,41 +810,146 @@ private def intrinsicDecls : String :=
   "declare double @llvm.round.f64(double)\n" ++
   "declare double @llvm.fabs.f64(double)\n"
 
-/-- Emit the full LLVM module text for a FlatPlan's fused kernel. The
-    function is named `tropical_kernel`; `compile_ir_text` renames it. -/
-def emitKernel (plan : FlatPlan) : Except String String := do
+/-- A counted loop storing zero into `n` i64 cells at `ptr`. Explicit IR
+    rather than `llvm.memset`, so the wasm32 lowering never needs a libc
+    import. -/
+private def zeroCells (ptr : String) (n : Nat) : M Unit := do
+  if n == 0 then return
+  let k ← freshId
+  let condbb := s!"zero_cond_{k}"; let bodybb := s!"zero_body_{k}"; let endbb := s!"zero_end_{k}"
+  let pred := (← get).curBlock
+  line s!"br label %{condbb}"
+  labelLine condbb
+  let i ← fresh
+  let inext := s!"{i}_next"
+  line s!"{i} = phi i64 [ 0, %{pred} ], [ {inext}, %{bodybb} ]"
+  let c ← fresh; line s!"{c} = icmp ult i64 {i}, {n}"
+  line s!"br i1 {c}, label %{bodybb}, label %{endbb}"
+  labelLine bodybb
+  let g ← fresh; line s!"{g} = getelementptr inbounds i64, ptr {ptr}, i64 {i}"
+  line s!"store i64 0, ptr {g}, align 8"
+  line s!"{inext} = add i64 {i}, 1"
+  line s!"br label %{condbb}"
+  labelLine endbb
+
+private def slotDefaultFloat : Json → Float
+  | .num n => n.toFloat
+  | _ => 0.0
+
+/-- Emit the full LLVM module text for a plan's kernel at the port: the
+    port function, the argv thunk, and the intrinsic declarations. The
+    stage-0 split's coefficient plan, when present, becomes the prologue. -/
+def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
+    Except String String := do
+  let plan := split.audio
   let outputChannelCount := plan.outputChannelCount
   validateSinkTargets plan.sinks outputChannelCount
+  if frames == 0 then throw "EmitLlvm: frames must be positive"
+  let paramSlots := Tropical.Kernel.paramSlotIndices plan
+  let slotCount := max plan.slotCount 1
+  let registerCount := max plan.registerCount 1
+  let sizes := plan.arraySlotSizes
   let body : M Unit := do
+    -- Internal storage: the module slot vector, the SSA scratch and one
+    -- backing store per array slot, all per call.
+    line s!"%slots = alloca double, i64 {slotCount}, align 8"
+    line s!"%temps = alloca i64, i64 {registerCount}, align 8"
+    for i in [0:sizes.size] do
+      line s!"%arr{i} = alloca i64, i64 {max (sizes[i]?.getD 0) 1}, align 8"
+    zeroCells "%temps" registerCount
+    zeroCells "%slots" slotCount
+    for i in [0:sizes.size] do
+      zeroCells s!"%arr{i}" (sizes[i]?.getD 0)
+    -- Slots start at zero; a param's value is its input, never a literal, so
+    -- the IR is knob-invariant (one cached kernel serves every default). A
+    -- non-param slot with a nonzero default — none on the session path, but
+    -- a plan from a file could carry one — is seeded as the host used to.
+    for i in [0:plan.slotCount] do
+      if !(paramSlots.contains i) then
+        let v := slotDefaultFloat (plan.slotDefaults[i]?.getD (Json.num 0))
+        if v != 0.0 then storeSlotF64 i (f64Lit v)
+    for j in [0:paramSlots.size] do
+      let v ← fresh; line s!"{v} = load double, ptr %in_{j + 1}, align 8"
+      storeSlotF64 paramSlots[j]! v
+    -- Stage-0 prologue: the coefficient plan's instructions, once per call.
+    -- No frame exists here, so τ is bound to `%tau0` (zero): unreachable
+    -- from τ-independent code, defined so a stray read is well-formed.
+    line "%tau0 = add i64 0, 0"
+    modify fun st => { st with tauName := "%tau0" }
+    if let some coeff := split.coeff? then
+      for inst in coeff.instanceFunctions do
+        emitKernelBlock inst
+    -- Temps are per-kernel SSA scratch; the audio plan's reads see only its
+    -- own definitions (boundary values crossed through slots at the split).
+    -- From here τ is the frame's coordinate, loaded in the loop.
+    modify fun st => { st with tempVals := {}, reduces := #[], routeds := #[],
+                               tauName := "%tau_s" }
+    let pred := (← get).curBlock
+    line "br label %loop_cond"
+    labelLine "loop_cond"
+    line s!"%s = phi i64 [ 0, %{pred} ], [ %s_next, %LOOP_LAST ]"
+    line s!"%loopcond = icmp ult i64 %s, {frames}"
+    line "br i1 %loopcond, label %loop_body, label %loop_end"
+    labelLine "loop_body"
+    line "%tau_ptr = getelementptr inbounds i64, ptr %tau, i64 %s"
+    line "%tau_s = load i64, ptr %tau_ptr, align 8"
     for inst in plan.instanceFunctions do
       emitKernelBlock inst
     emitSinks plan.sinks outputChannelCount
-  let init : St := { sources := plan.sources }
+  let init : St := { sources := plan.sources, sampleRate := plan.sampleRate.toFloat,
+                     arraySizes := sizes, arraysInline := true }
   match body.run init with
   | .error e _ => .error e
   | .ok _ st =>
-    let bodyText := String.intercalate "\n" st.lines.toList
-    let globalsText := String.intercalate "\n" st.globals.toList
-    -- The loop back-edge leaves the *final* body block (array ops open
-    -- new blocks), and the counter phi must name it as its predecessor.
     let lastBlock := st.curBlock
+    let lines := st.lines.map fun l => l.replace "%LOOP_LAST" s!"%{lastBlock}"
+    let bodyText := String.intercalate "\n" lines.toList
+    let globalsText := String.intercalate "\n" st.globals.toList
+    let inputArgs := String.intercalate ", "
+      ((List.range paramSlots.size).map fun j => s!"ptr noalias nocapture readonly %in_{j + 1}")
+    let portArgs := "ptr noalias nocapture readonly %tau" ++
+      (if paramSlots.isEmpty then "" else ", " ++ inputArgs) ++
+      ", ptr noalias nocapture %out"
     let header :=
-      s!"define void @tropical_kernel({kernelArgs}) \{\n" ++
-      "entry:\n" ++
-      "  br label %loop_cond\n\n" ++
-      "loop_cond:\n" ++
-      s!"  %s = phi i64 [ 0, %entry ], [ %s_next, %{lastBlock} ]\n" ++
-      "  %current_idx = add i64 %start_sample_index, %s\n" ++
-      "  %loopcond = icmp ult i64 %s, %buffer_length\n" ++
-      "  br i1 %loopcond, label %loop_body, label %loop_end\n\n" ++
-      "loop_body:\n"
+      s!"define void @tropical_kernel({portArgs}) \{\n" ++
+      "entry:\n"
     let tail :=
       "\n  %s_next = add i64 %s, 1\n" ++
       "  br label %loop_cond\n\n" ++
       "loop_end:\n" ++
       "  ret void\n" ++
       "}\n\n"
+    -- The argv thunk: argv[0] = tau, argv[1..k] = params, argv[k+1] = out.
+    let argc := paramSlots.size + 2
+    let thunkLoads := String.intercalate "" ((List.range argc).map fun i =>
+      s!"  %ap{i} = getelementptr inbounds ptr, ptr %argv, i64 {i}\n" ++
+      s!"  %a{i} = load ptr, ptr %ap{i}, align 8\n")
+    let callArgs := String.intercalate ", " ((List.range argc).map fun i => s!"ptr %a{i}")
+    let thunk :=
+      "define void @tropical_kernel_argv(ptr %argv) {\n" ++
+      "entry:\n" ++ thunkLoads ++
+      s!"  call void @tropical_kernel({callArgs})\n" ++
+      "  ret void\n" ++
+      "}\n\n"
     .ok (globalsText ++ (if globalsText.isEmpty then "" else "\n\n") ++
-      header ++ bodyText ++ tail ++ intrinsicDecls)
+      header ++ bodyText ++ tail ++ thunk ++ intrinsicDecls)
+
+/-- The Metal adapter's CPU pre-pass: the coefficient plan over host
+    storage, one evaluation per call. -/
+def emitStage0 (coeff : FlatPlan) : Except String String := do
+  let body : M Unit := do
+    line "%tau_s = add i64 0, 0"
+    for inst in coeff.instanceFunctions do
+      emitKernelBlock inst
+  let init : St := { sources := coeff.sources, sampleRate := coeff.sampleRate.toFloat,
+                     arraySizes := coeff.arraySlotSizes, arraysInline := false }
+  match body.run init with
+  | .error e _ => .error e
+  | .ok _ st =>
+    let bodyText := String.intercalate "\n" st.lines.toList
+    let globalsText := String.intercalate "\n" st.globals.toList
+    .ok (globalsText ++ (if globalsText.isEmpty then "" else "\n\n") ++
+      "define void @tropical_stage0(ptr %slots, ptr %arrays, ptr %array_sizes, ptr %temps) {\n" ++
+      "entry:\n" ++ bodyText ++ "\n  ret void\n}\n\n" ++ intrinsicDecls)
 
 end Tropical.Ir.EmitLlvm

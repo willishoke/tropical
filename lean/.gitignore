@@ -1,1 +1,3 @@
 /.lake/
+/ffi/shim_wasm.o
+/ffi/shim.o

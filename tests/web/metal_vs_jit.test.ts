@@ -208,9 +208,15 @@ describe.skipIf(!METAL)('metal vs native JIT (SNR gates)', () => {
         start: 0n, lens: 'absolute' },
     ] as const
     for (const row of cases) {
+      // A far row strikes the resonator just before it starts: struck at 0,
+      // 2³² samples (≈ 27 h) after a 4 s decay is silence. (Under the Q32.32
+      // rail 2³² samples wrapped τ to 0, so this row used to render a fresh
+      // strike by accident.)
+      const strike = row.start === 0n ? {} : { t: (Number(row.start) - 64) / 44100 }
+      const source = { id: 'res', kind: 'resonator', params: { freq: 220, decay: 4, ...strike } }
       const graph = planFile(`modal-phaser-${row.name}`, JSON.stringify({
         nodes: [
-          { id: 'res', kind: 'resonator', params: { freq: 220, decay: 4 } },
+          source,
           { id: 'room_a', kind: 'reverb', params: { rt60: 0.6 }, in: { in: ['res'] } },
           { id: 'phaser', kind: 'phaser',
             params: { center: row.center, sweep: row.sweep, rate: row.rate, mix: row.mix },

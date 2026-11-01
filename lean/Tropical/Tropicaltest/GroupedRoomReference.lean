@@ -450,7 +450,7 @@ def runGroupedRoomReference (arena : Arena)
         | .ok got => runtimeRateMismatchZero := got.all (· == 0.0)
 
       let farSamples : Int := 1000000000
-      let farQ : Int := farSamples * 4294967296
+      let farQ : Int := farSamples * Tropical.Ir.clockOne
       let farAnchor := lit 100000002325 2
       let mut farTranslationExact := false
       match buildRoomPlan arena "room_ref_far" specA
@@ -460,8 +460,9 @@ def runGroupedRoomReference (arena : Arena)
         | .error e => if renderFailure.isNone then renderFailure := some (firstLine e)
         | .ok got => farTranslationExact := bitDiffCount got baseAtZero == 0
 
-      let holdClock := litI (115 * 1073741824)
-      let reverseClock := do sub (← litI (133 * 1073741824)) (← clockLit)
+      -- 28.75 and 33.25 samples on the rail (anchor 23.25: relative 5.5, 10 − i).
+      let holdClock := litI (115 * Tropical.Ir.clockOne / 4)
+      let reverseClock := do sub (← litI (133 * Tropical.Ir.clockOne / 4)) (← clockLit)
       let mut holdReverseOk := false
       match ← renderAgainstOracle arena "room_ref_hold" specA sourceAOracle 0.45
           holdClock anchor n (fun _ => 5.5),
@@ -483,12 +484,12 @@ def runGroupedRoomReference (arena : Arena)
           runtimeRateMismatchZero && emptyZero && forwardPreZero && reversePreNonzero &&
           farTranslationExact && holdReverseOk
         IO.println s!"        room-only profile: groups={profile.groups.size}, generated={specA.generatedScalarCount} scalars, source grids A/B both admitted"
-        IO.println s!"        direct carrier-train oracle worst relative L2={oracleWorst}; nested Plan-6 reductions={planShape}"
+        IO.println s!"        direct carrier-train oracle worst relative L2={oracleWorst}; nested Plan-7 reductions={planShape}"
         IO.println s!"        profile/prefix separation={structural}; indexed refusals={refusals}; rate/zero/mutations={runtimeRateMismatchZero}/{zeroResiduesZero}/{isolatedMutations}"
         IO.println s!"        empty/endpoint/translation/hold/reverse={emptyZero}/{forwardPreZero}/{farTranslationExact}/{holdReverseOk}"
         if ok then
           passGate "grouped-room-reference"
-            "one unchanged room profile specializes unrelated modal poles; exact prefixes and Plan-6 evaluator agree with the direct causal/reverse oracle"
+            "one unchanged room profile specializes unrelated modal poles; exact prefixes and Plan-7 evaluator agree with the direct causal/reverse oracle"
         else
           failGate "grouped-room-reference" s!"structural={structural} refusals={refusals} shape={planShape} oracle={oracleWorst} sourceB={sourceBOracleOk} amp={amplitudeChanges} mutations={isolatedMutations} zeroResidues={zeroResiduesZero} rateMismatch={runtimeRateMismatchZero} empty={emptyZero} fwdPre={forwardPreZero} revPre={reversePreNonzero} far={farTranslationExact} holdRev={holdReverseOk}"
 

@@ -2,7 +2,7 @@ import Tropical.Plan
 import Tropical.Semantics.Environment
 
 /-!
-# Reference semantics for Plan-6
+# Reference semantics for Plan-7
 
 This module defines the carrier-facing state and the small-instruction waist of
 the Plan interpreter.  Region execution is deliberately layered on top of this
@@ -29,19 +29,14 @@ structure PlanInputs (α : Type) where
   initialArrays : Array (Array (Value α)) := #[]
 
 /-- Named source rails from which a Plan's positional source image is built.
-Ordinary audio plans select `tick`/`rate`; tile materializers additionally
-select `tilePhase`/`tileTick` in their declared order. -/
+Audio plans select `tau`/`rate` in their declared order. -/
 structure PlanSourceImage (α : Type) where
-  tick : Value α
+  tau : Value α
   rate : Value α
-  tilePhase : Value α
-  tileTick : Value α
 
 def PlanSourceImage.value (image : PlanSourceImage α) : SourceKind → Value α
-  | .tick => image.tick
+  | .tau => image.tau
   | .rate => image.rate
-  | .tilePhase => image.tilePhase
-  | .tileTick => image.tileTick
 
 def PlanInputs.withDeclaredSources (inputs : PlanInputs α)
     (kinds : Array SourceKind) (image : PlanSourceImage α) : PlanInputs α :=

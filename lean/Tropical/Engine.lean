@@ -1,6 +1,5 @@
 import Tropical.Engine.Core
 import Tropical.Engine.Compile
-import Tropical.Engine.Registry
 import Tropical.Engine.Crud
 import Tropical.Engine.Wire
 import Tropical.Engine.ProgramIO
@@ -10,10 +9,10 @@ import Tropical.Engine.Front
 /-!
 # The tropical IR engine — tool semantics, in Lean
 
-The engine is the whole stack: the session, the native runtime (FFI),
-direct resolved-program registration/lowering, plan partition/assembly, the
-v2 patch-bay ingest (load/merge), and save/export. There is no
-compiler-service subprocess.
+The engine is the session's stateful shell: it holds the `SessionSt`
+and the host port, runs the pure session semantics (`Tropical.Session.*`:
+registration, ingest, lowering) against them, and publishes the result.
+There is no compiler-service subprocess.
 
 Every structural graph mutation ends in `syncCompile`: the mirror becomes one
 resolved root directly, passes the Core check, partitions, and hot-swaps its
@@ -26,7 +25,6 @@ surface so `import Tropical.Engine` sees it unchanged:
 
 * `Engine.Core` — env, tool-arg access, lookup vocabulary
 * `Engine.Compile` — mirror → resolved root → partition → hot-swap
-* `Engine.Registry` — program registration
 * `Engine.Crud` — instance/program lifecycle handlers
 * `Engine.Wire` — the wiring tools
 * `Engine.ProgramIO` — save / export / ingest

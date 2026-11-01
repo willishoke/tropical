@@ -82,24 +82,19 @@ make_observation_program_image(
 {
   auto image = std::make_shared<ObservationProgramImage>();
   image->program_version = program_version;
-  image->mode = state.mode;
   image->kernel = state.kernel;
-  image->coeff_kernel = state.coeff_kernel;
-  image->sample_rate = state.sample_rate;
+  image->frames = state.frames;
   image->output_channel_count = state.output_channel_count;
-  image->register_count = state.registers.size();
-  image->temp_count = state.temps.size();
-  image->coeff_register_count = state.coeff_registers.size();
-  image->coeff_temp_count = state.coeff_temps.size();
-  image->array_storage = state.array_storage;
-  image->array_sizes = state.array_sizes;
-  image->param_ptrs = state.param_ptrs;
-  image->coeff_array_slots = state.coeff_array_slots;
+  image->input_slots = state.input_slots;
   image->slot_names = state.slot_names;
   image->initial_slots = state.slots;
   image->slot_lookup.reserve(image->slot_names.size());
   for (uint32_t i = 0; i < image->slot_names.size(); ++i)
     image->slot_lookup.emplace(image->slot_names[i], i);
+  image->channel_names = state.channel_names;
+  for (uint32_t c = 0; c < image->channel_names.size(); ++c)
+    if (!image->channel_names[c].empty())
+      image->channel_lookup.emplace(image->channel_names[c], c);
   return image;
 }
 
@@ -123,51 +118,6 @@ make_observation_control_image(
   }
   return image;
 }
-
-#ifdef TROPICAL_METAL
-std::shared_ptr<const tropical_metal::ExactTileFallbackProgram>
-make_exact_tile_fallback_program(const KernelState & state)
-{
-  auto image =
-    std::make_shared<tropical_metal::ExactTileFallbackProgram>();
-  image->kernel = state.kernel;
-  image->coeff_kernel = state.coeff_kernel;
-  image->register_count = state.registers.size();
-  image->temp_count = state.temps.size();
-  image->coeff_register_count = state.coeff_registers.size();
-  image->coeff_temp_count = state.coeff_temps.size();
-  image->array_storage = state.array_storage;
-  image->array_sizes = state.array_sizes;
-  image->param_ptrs = state.param_ptrs;
-  image->coeff_array_slots = state.coeff_array_slots;
-  image->initial_slots = state.slots;
-  return image;
-}
-
-void attach_exact_tile_fallback(
-  KernelState & audio_state, const KernelState & exact_state)
-{
-  if (!audio_state.tile_materializer) return;
-  if (!exact_state.kernel
-      || exact_state.mode != tropical_jit::CompilationMode::Fused)
-    throw std::runtime_error(
-      "FlatRuntime: time staging requires a fused exact fallback artifact");
-
-  audio_state.tile_exact_fallback =
-    make_exact_tile_fallback_program(exact_state);
-  audio_state.tile_exact_slot_sources.assign(
-    exact_state.slot_names.size(), -1);
-  for (std::size_t exact = 0; exact < exact_state.slot_names.size(); ++exact)
-  {
-    const auto found = std::find(
-      audio_state.slot_names.begin(), audio_state.slot_names.end(),
-      exact_state.slot_names[exact]);
-    if (found != audio_state.slot_names.end())
-      audio_state.tile_exact_slot_sources[exact] = static_cast<int32_t>(
-        found - audio_state.slot_names.begin());
-  }
-}
-#endif
 
 } // namespace
 
@@ -289,7 +239,6 @@ FlatRuntime::make_metal_epoch_request(
     generation = std::atomic_ref(state.control_published_gen)
                    .load(std::memory_order_acquire);
   const auto & slots = state.slot_generations[generation];
-  request.materializer_slots = slots;
   request.slots.reserve(slots.size());
   for (double value : slots)
     request.slots.push_back(static_cast<float>(value));
@@ -301,33 +250,6 @@ FlatRuntime::make_metal_epoch_request(
     for (int64_t value : column)
       request.columns.push_back(
         static_cast<float>(std::bit_cast<double>(value)));
-  request.tile_materializer = state.tile_materializer;
-  if (state.tile_materializer)
-  {
-    request.materializer_seed_arrays = state.array_storage;
-    for (std::size_t j = 0; j < state.coeff_array_slots.size(); ++j)
-    {
-      const uint32_t slot = state.coeff_array_slots[j];
-      if (slot < request.materializer_seed_arrays.size())
-        request.materializer_seed_arrays[slot] =
-          state.coeff_generations[generation][j];
-    }
-    request.exact_fallback = state.tile_exact_fallback;
-    if (request.exact_fallback)
-    {
-      request.exact_fallback_slots =
-        request.exact_fallback->initial_slots;
-      for (std::size_t exact = 0;
-           exact < state.tile_exact_slot_sources.size()
-             && exact < request.exact_fallback_slots.size(); ++exact)
-      {
-        const int32_t source = state.tile_exact_slot_sources[exact];
-        if (source >= 0 && static_cast<std::size_t>(source) < slots.size())
-          request.exact_fallback_slots[exact] =
-            slots[static_cast<std::size_t>(source)];
-      }
-    }
-  }
   return request;
 }
 
@@ -417,20 +339,28 @@ void FlatRuntime::set_sample_index(uint64_t idx)
   sample_index_request_seq_.fetch_add(1, std::memory_order_release);
 }
 
-// Map a parsed plan's *metadata* (the manifest) into a fresh KernelState —
-// everything except the kernel handle, which load_ir fills (via
-// compile_ir_text) between this and publish_state. The plan's instruction
-// graph is metadata-only now; codegen is Lean's (EmitLlvm).
-KernelState FlatRuntime::build_kernel_state(const tropical_plan6::ParsedPlan6 & parsed)
+// Map a kernel manifest into a fresh KernelState — everything except the
+// function handles, which load fills (via compile_ir_text) between this and
+// publish_state. The nested plan's instruction graph is metadata-only;
+// codegen is Lean's (EmitLlvm).
+KernelState FlatRuntime::build_kernel_state(const tropical_plan7::ParsedKernel1 & kernel)
 {
+  const tropical_plan7::ParsedPlan7 & parsed = kernel.plan;
   KernelState new_state;
-  new_state.mode           = parsed.compilation_mode;
   new_state.sample_rate    = parsed.sample_rate;
   new_state.output_channel_count = parsed.output_channel_count;
   new_state.array_names    = parsed.array_slot_names;
   new_state.metal_sample_threadgroups = parsed.metal_sample_threadgroups;
   new_state.metal_threadgroup_scratch_bytes =
     parsed.metal_threadgroup_scratch_bytes;
+  if (kernel.frames != buffer_length_)
+    throw std::runtime_error(
+      "FlatRuntime: artifact compiled for " + std::to_string(kernel.frames)
+      + " frames per call; this runtime renders " + std::to_string(buffer_length_));
+  new_state.frames = kernel.frames;
+  new_state.channel_names = kernel.output_channels;
+  new_state.tau.assign(kernel.frames, 0);
+  new_state.argv.assign(kernel.input_names.size() + 1, nullptr);
 
   // Slot array
   new_state.slots.assign(parsed.slot_count, 0.0);
@@ -445,6 +375,22 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan6::ParsedPlan6 & 
     generation = new_state.slots;
   new_state.audio_slots = new_state.slots;
 
+  // The param inputs, in port order, resolved to their slots by name. The
+  // manifest's inputs after tau ARE the `param:` slots in slot order, but
+  // resolving by name keeps the binding honest if that ever changes.
+  for (std::size_t j = 1; j < kernel.input_names.size(); ++j)
+  {
+    const auto it = std::find(
+      new_state.slot_names.begin(), new_state.slot_names.end(),
+      kernel.input_names[j]);
+    if (it == new_state.slot_names.end())
+      throw std::runtime_error(
+        "FlatRuntime: kernel input '" + kernel.input_names[j]
+        + "' names no slot of the nested plan");
+    new_state.input_slots.push_back(
+      static_cast<uint32_t>(it - new_state.slot_names.begin()));
+  }
+
   // Host-contract dispatch table — swaps with the plan it describes, like
   // slot_names. Field-copied because the runtime keeps its own struct (the
   // header stays free of the parser header).
@@ -453,13 +399,9 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan6::ParsedPlan6 & 
     new_state.param_disciplines.push_back(
       { d.name, d.discipline, d.glide_dur_sec, d.companions });
 
-  // CF-only: there are no per-sample state registers. The kernel's
-  // `%registers` argument survives in the calling convention but is never
-  // read or written, so the backing buffer is empty. The temp pool
-  // (`register_count`) is the SSA scratch the kernel actually uses.
-  new_state.registers.clear();
-  new_state.temps.assign(parsed.program.register_count, 0);
-  new_state.coeff_registers = new_state.registers;
+  // Host-side scratch exists only for the Metal pre-pass; the JIT kernel
+  // allocates its own. Sized anyway: it is tiny and keeps the load path
+  // uniform.
   new_state.coeff_temps.assign(parsed.program.register_count, 0);
 
   const auto & sizes = parsed.program.array_slot_sizes;
@@ -476,19 +418,12 @@ KernelState FlatRuntime::build_kernel_state(const tropical_plan6::ParsedPlan6 & 
 
   // BANKS-AS-DATA: generation-buffer the coefficient columns the plan
   // advertises (see the KernelState comment for the protocol). Three
-  // generations per column, sized like the slot's base storage; the
-  // coefficient kernel's pointer view starts as a copy of the audio view
+  // generations per column, sized like the slot's base storage; the Metal
+  // pre-pass's pointer view starts as a copy of the base view
   // (publish_control_snapshot repoints column entries to its target generation).
   for (uint32_t s : parsed.coeff_array_slots)
     if (s < new_state.array_storage.size())
       new_state.coeff_array_slots.push_back(s);
-  for (uint32_t s : parsed.tile_array_slots)
-    if (s < new_state.array_storage.size()
-        && std::find(new_state.coeff_array_slots.begin(),
-                     new_state.coeff_array_slots.end(), s)
-             == new_state.coeff_array_slots.end())
-      new_state.tile_array_slots.push_back(s);
-  new_state.tile_interval_frames = parsed.tile_interval_frames;
   if (!new_state.coeff_array_slots.empty())
   {
     for (auto & gen : new_state.coeff_generations)
@@ -511,13 +446,6 @@ PublishedGeneration FlatRuntime::publish_state(
 {
   std::lock_guard<std::mutex> lock(build_mutex_);
 #ifdef TROPICAL_METAL
-  if (new_state.tile_materializer)
-  {
-    if (!observation_state)
-      throw std::runtime_error(
-        "FlatRuntime: time staging requires an exact observation/fallback artifact");
-    attach_exact_tile_fallback(new_state, *observation_state);
-  }
   if (new_state.metal)
   {
     if (!metal_worker_)
@@ -627,96 +555,43 @@ PublishedGeneration FlatRuntime::publish_state(
   return generation;
 }
 
-bool FlatRuntime::load_ir(const std::string & ir_text, const std::string & manifest_json)
+bool FlatRuntime::load(const std::string & ir_text,
+                       const std::string & msl_source,
+                       const std::string & stage0_ir,
+                       const std::string & manifest_json)
 {
-  return load_ir_staged(ir_text, {}, {}, manifest_json);
+  return load_generation(
+    ir_text, msl_source, stage0_ir, manifest_json).program_version != 0;
 }
 
-bool FlatRuntime::load_ir_msl(const std::string & ir_text,
-                              const std::string & msl_source,
-                              const std::string & manifest_json)
-{
-  return load_ir_staged(ir_text, msl_source, {}, manifest_json);
-}
-
-bool FlatRuntime::load_ir_staged(const std::string & ir_text,
-                                 const std::string & msl_source,
-                                 const std::string & coeff_ir,
-                                 const std::string & manifest_json)
-{
-  return load_ir_staged_generation(
-    ir_text, msl_source, coeff_ir, manifest_json).program_version != 0;
-}
-
-bool FlatRuntime::load_ir_time_staged(
+PublishedGeneration FlatRuntime::load_generation(
   const std::string & ir_text, const std::string & msl_source,
-  const std::string & coeff_ir, const std::string & tile_ir,
-  const std::string & manifest_json)
+  const std::string & stage0_ir, const std::string & manifest_json)
 {
-  return load_ir_time_staged_generation(
-    ir_text, msl_source, coeff_ir, tile_ir, manifest_json).program_version != 0;
-}
-
-PublishedGeneration FlatRuntime::load_ir_staged_generation(
-  const std::string & ir_text, const std::string & msl_source,
-  const std::string & coeff_ir, const std::string & manifest_json)
-{
-  return load_ir_time_staged_generation(
-    ir_text, msl_source, coeff_ir, {}, manifest_json);
-}
-
-PublishedGeneration FlatRuntime::load_ir_time_staged_generation(
-  const std::string & ir_text, const std::string & msl_source,
-  const std::string & coeff_ir, const std::string & tile_ir,
-  const std::string & manifest_json)
-{
-  return load_ir_time_staged_with_observation_generation(
-    ir_text, msl_source, coeff_ir, tile_ir, manifest_json, {}, {}, {});
+  return load_with_observation_generation(
+    ir_text, msl_source, stage0_ir, manifest_json, {}, {});
 }
 
 PublishedGeneration
-FlatRuntime::load_ir_staged_with_observation_generation(
+FlatRuntime::load_with_observation_generation(
   const std::string & audio_ir, const std::string & audio_msl_source,
-  const std::string & audio_coeff_ir,
+  const std::string & audio_stage0_ir,
   const std::string & audio_manifest_json,
   const std::string & observation_ir,
-  const std::string & observation_coeff_ir,
-  const std::string & observation_manifest_json)
-{
-  return load_ir_time_staged_with_observation_generation(
-    audio_ir, audio_msl_source, audio_coeff_ir, {},
-    audio_manifest_json, observation_ir, observation_coeff_ir,
-    observation_manifest_json);
-}
-
-PublishedGeneration
-FlatRuntime::load_ir_time_staged_with_observation_generation(
-  const std::string & audio_ir, const std::string & audio_msl_source,
-  const std::string & audio_coeff_ir,
-  const std::string & audio_tile_ir,
-  const std::string & audio_manifest_json,
-  const std::string & observation_ir,
-  const std::string & observation_coeff_ir,
   const std::string & observation_manifest_json)
 {
   using json = nlohmann::json;
   auto compile_jit_state = [this](
       const std::string & kernel_ir,
-      const std::string & coefficient_ir,
-      const std::string & tile_ir,
+      const std::string & stage0_ir,
       const std::string & manifest_text) {
     const json manifest = json::parse(manifest_text);
-    const std::string schema = manifest.value("schema", std::string{});
-    if (schema != "tropical_plan_6")
-      throw std::runtime_error(
-        "FlatRuntime: load_ir unsupported manifest schema '" + schema +
-        "'; expected 'tropical_plan_6'");
-    auto parsed = tropical_plan6::parse_plan6(manifest);
+    auto parsed = tropical_plan7::parse_kernel1(manifest);
     KernelState state = build_kernel_state(parsed);
-    state.mode = tropical_jit::CompilationMode::Fused;
 
     auto kernel_result =
-      tropical_jit::OrcJitEngine::instance().compile_ir_text(kernel_ir);
+      tropical_jit::OrcJitEngine::instance().compile_ir_text(
+        kernel_ir, false, "tropical_kernel_argv");
     if (!kernel_result)
     {
       std::string err;
@@ -725,58 +600,24 @@ FlatRuntime::load_ir_time_staged_with_observation_generation(
       throw std::runtime_error(
         "FlatRuntime: IR JIT compilation failed: " + err);
     }
-    state.kernel = *kernel_result;
+    state.kernel = reinterpret_cast<tropical_jit::KernelArgvFn>(*kernel_result);
 
-    if (!coefficient_ir.empty())
+    if (!stage0_ir.empty())
     {
-      // Coefficient code runs only on control/observation lanes; O0 minimizes
-      // compile latency for what may be a large uniform instruction block.
-      auto coeff_result =
+      // The pre-pass runs only on control lanes; O0 minimizes compile
+      // latency for what may be a large uniform instruction block.
+      auto stage0_result =
         tropical_jit::OrcJitEngine::instance().compile_ir_text(
-          coefficient_ir, true);
-      if (!coeff_result)
+          stage0_ir, true, "tropical_stage0");
+      if (!stage0_result)
       {
         std::string err;
-        llvm::handleAllErrors(coeff_result.takeError(),
+        llvm::handleAllErrors(stage0_result.takeError(),
           [&err](const llvm::ErrorInfoBase & e) { err = e.message(); });
         throw std::runtime_error(
-          "FlatRuntime: coefficient IR JIT compilation failed: " + err);
+          "FlatRuntime: stage-0 pre-pass IR JIT compilation failed: " + err);
       }
-      state.coeff_kernel = *coeff_result;
-    }
-
-    if (!tile_ir.empty())
-    {
-#ifdef TROPICAL_METAL
-      if (state.tile_array_slots.empty()
-          || state.tile_interval_frames == 0)
-        throw std::runtime_error(
-          "FlatRuntime: tile IR requires tile-array and interval metadata");
-      auto tile_result =
-        tropical_jit::OrcJitEngine::instance().compile_ir_text(tile_ir, true);
-      if (!tile_result)
-      {
-        std::string err;
-        llvm::handleAllErrors(tile_result.takeError(),
-          [&err](const llvm::ErrorInfoBase & e) { err = e.message(); });
-        throw std::runtime_error(
-          "FlatRuntime: tile materializer IR JIT compilation failed: " + err);
-      }
-      auto image = std::make_shared<tropical_metal::TileMaterializerProgram>();
-      image->kernel = *tile_result;
-      image->register_count = state.registers.size();
-      image->temp_count = state.temps.size();
-      image->array_sizes = state.array_sizes;
-      image->param_ptrs = state.param_ptrs;
-      image->tile_array_slots = state.tile_array_slots;
-      image->interval_frames = state.tile_interval_frames;
-      image->higher_order_phaser = parsed.phaser_time_staging
-        == "staged_phaser_admitted:higher_order_experiment";
-      state.tile_materializer = std::move(image);
-#else
-      throw std::runtime_error(
-        "FlatRuntime: tile materializer supplied without Metal support");
-#endif
+      state.stage0 = reinterpret_cast<tropical_jit::Stage0Fn>(*stage0_result);
     }
 
     // Both artifacts must be fully initialized before the single publication.
@@ -785,19 +626,18 @@ FlatRuntime::load_ir_time_staged_with_observation_generation(
   };
 
   const bool has_observation_artifact =
-    !observation_ir.empty() || !observation_coeff_ir.empty()
-    || !observation_manifest_json.empty();
+    !observation_ir.empty() || !observation_manifest_json.empty();
   if (has_observation_artifact
       && (observation_ir.empty() || observation_manifest_json.empty()))
     throw std::invalid_argument(
       "FlatRuntime: observation IR and manifest must be supplied together");
 
   KernelState new_state = compile_jit_state(
-    audio_ir, audio_coeff_ir, audio_tile_ir, audio_manifest_json);
+    audio_ir, audio_stage0_ir, audio_manifest_json);
   std::unique_ptr<KernelState> observation_state;
   if (has_observation_artifact)
     observation_state = std::make_unique<KernelState>(compile_jit_state(
-      observation_ir, observation_coeff_ir, {}, observation_manifest_json));
+      observation_ir, {}, observation_manifest_json));
 
   if (!audio_msl_source.empty())
   {
@@ -819,11 +659,6 @@ FlatRuntime::load_ir_time_staged_with_observation_generation(
       throw std::runtime_error(
         "FlatRuntime: a Metal runtime cannot change output channel count "
         "after its tile queue is initialized");
-    if (new_state.tile_materializer
-        && (new_state.tile_interval_frames == 0
-            || metal_render_tile_frames_ % new_state.tile_interval_frames != 0))
-      throw std::runtime_error(
-        "FlatRuntime: tile_interval_frames must divide the Metal render tile size");
     std::string err;
     std::size_t column_floats = 0;
     for (const auto & column :
@@ -838,26 +673,8 @@ FlatRuntime::load_ir_time_staged_with_observation_generation(
           "FlatRuntime: aggregate Metal coefficient columns exceed uint32");
       column_floats += column.size();
     }
-    const std::size_t tile_segment_count = new_state.tile_materializer
-      ? metal_render_tile_frames_ / new_state.tile_interval_frames : 1;
-    for (uint32_t slot : new_state.tile_array_slots)
-    {
-      if (slot >= new_state.array_storage.size()
-          || new_state.array_storage[slot].size()
-               > std::numeric_limits<uint32_t>::max()
-          || new_state.array_storage[slot].size() > 0
-               && tile_segment_count
-                 > std::numeric_limits<uint32_t>::max()
-                   / new_state.array_storage[slot].size()
-          || column_floats > std::numeric_limits<uint32_t>::max()
-               - tile_segment_count * new_state.array_storage[slot].size())
-        throw std::runtime_error(
-          "FlatRuntime: aggregate Metal tile columns exceed uint32");
-      column_floats +=
-        tile_segment_count * new_state.array_storage[slot].size();
-    }
     new_state.metal = tropical_metal::create(
-      audio_msl_source, metal_render_tile_frames_,
+      audio_msl_source, metal_render_tile_frames_, new_state.frames,
       new_state.output_channel_count,
       static_cast<uint32_t>(new_state.slots.size()),
       static_cast<uint32_t>(column_floats), err,
@@ -916,29 +733,20 @@ FlatRuntime::reserve_control_generation(
 void FlatRuntime::materialize_control_snapshot(
   KernelState & state, uint32_t target)
 {
-  int64_t ** arrays = state.array_ptrs.data();
-  if (!state.coeff_array_slots.empty())
+  if (state.stage0)
   {
-    for (std::size_t j = 0; j < state.coeff_array_slots.size(); ++j)
-      state.coeff_array_ptrs[state.coeff_array_slots[j]] =
-        state.coeff_generations[target][j].data();
-    arrays = state.coeff_array_ptrs.data();
-  }
-  if (state.coeff_kernel)
-  {
-    std::array<double, tropical_jit::kMaxOutputChannels> scratch_out{};
-    state.coeff_kernel(
-      nullptr,
-      state.coeff_registers.data(),
-      arrays,
-      state.array_sizes.data(),
-      state.coeff_temps.data(),
-      state.sample_rate,
-      0,
-      state.param_ptrs.data(),
-      scratch_out.data(),
-      1,
-      state.slots.data());
+    int64_t ** arrays = state.array_ptrs.data();
+    if (!state.coeff_array_slots.empty())
+    {
+      for (std::size_t j = 0; j < state.coeff_array_slots.size(); ++j)
+        state.coeff_array_ptrs[state.coeff_array_slots[j]] =
+          state.coeff_generations[target][j].data();
+      arrays = state.coeff_array_ptrs.data();
+    }
+    std::fill(state.coeff_temps.begin(), state.coeff_temps.end(), 0);
+    state.stage0(
+      state.slots.data(), arrays, state.array_sizes.data(),
+      state.coeff_temps.data());
   }
   std::copy(state.slots.begin(), state.slots.end(),
             state.slot_generations[target].begin());
@@ -1259,6 +1067,11 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
       true, {}, discipline, sample_index, sample_index
     };
   };
+  auto unknown = [&]() {
+    auto result = fail("set_param: unknown param '" + name + "'");
+    result.unknown_param = true;
+    return result;
+  };
   const double now = static_cast<double>(sample_index);
 
   if (discipline == "glide")
@@ -1293,7 +1106,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
   {
     const uint32_t fi = slot_of("param:" + name);
     if (fi == UINT32_MAX)
-      return fail("set_param: unknown param '" + name + "'");
+      return unknown();
     const uint32_t pi = slot_of("param:" + name + "#phase");
     if (pi == UINT32_MAX)
     {
@@ -1315,7 +1128,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
   {
     const uint32_t vi = slot_of("param:" + name);
     if (vi == UINT32_MAX)
-      return fail("set_param: unknown param '" + name + "'");
+      return unknown();
     std::string tau;
     if (!pd->companions.empty()) tau = pd->companions.front();
     else
@@ -1334,7 +1147,7 @@ ParamDispatchResult FlatRuntime::dispatch_param_sync_locked(
 
   const uint32_t bi = slot_of("param:" + name);
   if (bi == UINT32_MAX)
-    return fail("set_param: unknown param '" + name + "'");
+    return unknown();
   write(bi, value);
   return commit();
 }

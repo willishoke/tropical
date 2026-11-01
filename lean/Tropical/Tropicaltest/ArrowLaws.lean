@@ -33,7 +33,7 @@ open Tropical.Ir (Arena ProgramIdx)
     are in the arena for `buildClockCarrier` to link against. Done once and
     reused. -/
 def arrowElabStdlib : IO (Except String (Arena × Array (String × ProgramIdx))) :=
-  Tropical.StdlibChain.elabStdlib
+  pure Tropical.StdlibChain.elabStdlib
 
 /-- Finish a built carrier program into a runnable `FlatPlan` via the
     production session path: the full lowering, then the carrier as the synthetic
@@ -82,7 +82,7 @@ def compileArrowCarrier (arena : Arena) (resolved : Array (String × ProgramIdx)
 
 /-- The production per-program emit recipe (the `diffcli emit-*` body): strata
     (the direct lowering, inline) → Core.check → compileResolved → wire JSON. The
-    canonical `tropical_plan_6`-per-instance bytes a program emits today. -/
+    canonical `tropical_plan_7`-per-instance bytes a program emits today. -/
 def emitResolvedWire (arena : Arena) (idx : ProgramIdx) : Except String String := do
   let (coreArena, core) ← (Tropical.Ir.Strata.runResolved
       { inlineNested := true } arena idx).mapError (·.message)
@@ -166,7 +166,7 @@ def runStdlibGate (name : String)
   let ports ← runEntryEquivGate name name arena resolved builder
   pure (plan && ports)
 
-/-- One program's frozen artifact: the compressed `tropical_plan_6` wire plus its
+/-- One program's frozen artifact: the compressed `tropical_plan_7` wire plus its
     concreteEntry port surface (inputs/outputs). The pair the goldens hash. -/
 def stdlibArtifact (arena : Arena) (idx : ProgramIdx) (name : String) : Except String String := do
   let wire ← emitResolvedWire arena idx

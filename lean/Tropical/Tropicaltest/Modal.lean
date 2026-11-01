@@ -8,7 +8,7 @@ The modal island: nested banks, the decaying-resonator bank (arrow ≡ straight-
 
 open Tropical
 open Tropical.Plan
-open Tropical.Ir (Arena ProgramIdx)
+open Tropical.Ir (Arena ProgramIdx clockOne)
 
 -- ── Nested banks (WS5) ───────────────────────────────────────────────────────
 
@@ -124,7 +124,7 @@ def runBanksNestedMsl (arena : Arena)
       "nested_msl" (nestedBankProbe 4 4) arena) with
   | .error e => failGate "banks-nested-msl" s!"build: {firstLine e}"
   | .ok fp =>
-    match Tropical.Ir.EmitMsl.emitKernel fp with
+    match Tropical.Ir.EmitMsl.emitKernel fp 256 with
     | .error e => failGate "banks-nested-msl" s!"EmitMsl: {firstLine e}"
     | .ok msl =>
       -- Depth scan over the kernel text: a reduce-for line opens a loop, a
@@ -194,7 +194,7 @@ def runModalDegree (arena : Arena)
     the SAME bank struck K samples later, read K samples later, must be BYTE-
     IDENTICAL to the bank at the origin (K = 2³⁰ samples ≈ 6.8 hours at 44.1k).
     Both clocks are FRACTIONAL-sample — the production scrub form
-    `M(n) = toInt(velocity·2³²)·n` and a sub-sample offset — because that is
+    `M(τ) = scaleClockQ(toInt(velocity·2³²), τ)` and a sub-sample offset — because that is
     where the old float path actually rounded: at whole samples
     `toFloat((2³⁰+s)·2³²)` has ~31 significant bits and was accidentally exact,
     but a fractional clock plus the 2³⁰-sample shift needs >53 bits, so
@@ -215,7 +215,7 @@ def runLongTauModal (arena : Arena)
     Tropical.EmitArrow.modeArray #[
       mode 220 30 6, mode 330 40 4, mode 440 55 3]
   let K : Int := 1073741824                    -- 2³⁰ samples
-  let Kq : Int := K * 4294967296               -- the same shift as a Q32.32 clock offset
+  let Kq : Int := K * clockOne                 -- the same shift as a clock offset
   let mkPair (tag : String) (clk : Tropical.EmitArrow.BuildM
       Tropical.EmitArrow.Clock) :
       Except String Tropical.Plan.FlatPlan × Except String Tropical.Plan.FlatPlan :=
@@ -244,17 +244,16 @@ def runLongTauModal (arena : Arena)
         IO.println s!"  FAIL  modal-longtau  render ({tag}): {firstLine e}"; pure none
     | (.error e, _) | (_, .error e) =>
       IO.println s!"  FAIL  modal-longtau  build ({tag}): {firstLine e}"; pure none
-  -- the master-clock scrub form: M(n) = toInt(velocity·2³²)·n at velocity 1.001
+  -- the master-clock scrub form (`Playground.Decode.masterClock`):
+  -- M(τ) = scaleClockQ(toInt(velocity·2³²), τ) at velocity 1.001
   -- (toInt(1.001·2³²) = 4299262263) — every sample has populated low bits. The
-  -- literals ride `litI`: a bare `lit` would float-promote the clock arithmetic
+  -- literal rides `litI`: a bare `lit` would float-promote the clock arithmetic
   -- and round the very bits this gate exists to protect.
   let velClk : Tropical.EmitArrow.BuildM Tropical.EmitArrow.Clock := do
-    let samples ← Tropical.EmitArrow.rshift
-      (← Tropical.EmitArrow.clockLit)
-      (← Tropical.EmitArrow.lit 32)
-    Tropical.EmitArrow.mul samples
+    Tropical.EmitArrow.scaleClockQ
       (← Tropical.EmitArrow.litI 4299262263)
-  -- a bare sub-sample offset: one 2⁻³² unit off the whole-sample grid.
+      (← Tropical.EmitArrow.clockLit)
+  -- a bare sub-sample offset: one rail unit (2⁻¹⁶ sample) off the whole-sample grid.
   let subClk : Tropical.EmitArrow.BuildM Tropical.EmitArrow.Clock := do
     Tropical.EmitArrow.add (← Tropical.EmitArrow.clockLit)
       (← Tropical.EmitArrow.litI 1)
@@ -269,7 +268,7 @@ def runLongTauModal (arena : Arena)
   | _, _ => pure false
 
 /-- THE REVERSE-REVERB gate (the moat). The modal bank read through a reversing
-    warp φ(c) = 2·C·2³² − c (reflect scene time around sample C=1024) must equal
+    warp φ(c) = 2·C·clockOne − c (reflect scene time around sample C=1024) must equal
     the FORWARD bank time-mirrored: rev[i] ≡ fwd[2C−i], bit-for-bit. This is
     zero-latency reverse reverb — a stateless closed form addressed at negative
     velocity, impossible on a streaming delay line. The warp threads through the
@@ -285,7 +284,7 @@ def runModalReverse (arena : Arena)
   let modes : Tropical.EmitArrow.ModesM :=
     Tropical.EmitArrow.modeArray #[mode 220 30 6, mode 330 40 4]
   let anchor := Tropical.EmitArrow.lit 200
-  let twoC : Int := 2048 * 4294967296          -- reflect around sample C = 1024
+  let twoC : Int := 2048 * clockOne            -- reflect around sample C = 1024
   let revφ : Tropical.EmitArrow.Clock →
       Tropical.EmitArrow.BuildM Tropical.EmitArrow.Clock :=
     fun clock => do
@@ -1459,7 +1458,7 @@ open Tropical.EmitArrow in
     bit-for-bit. This is the whole seam end to end: a patch graph, not a builder. -/
 def runModalPatch (arena : Arena)
     (_resolved : Array (String × ProgramIdx)) : IO Bool := do
-  let twoC : Int := 2048 * 4294967296
+  let twoC : Int := 2048 * clockOne
   let carrier := fun (name : String) (clock : BuildM Clock) =>
     buildExprCarrier name (do
       let res := #[
@@ -1650,7 +1649,7 @@ def runModalForestTimedIslands (arena : Arena)
       | .error e, _ => pure (.error s!"forest render {tag}: {e}")
       | _, .error e => pure (.error s!"oracle render {tag}: {e}")
 
-  let q : Int := 4294967296
+  let q : Int := clockOne
   let holdAt : Nat := 1234
   let seekBy : Nat := 257
   let holdClock : BuildM Clock := litI (Int.ofNat holdAt * q)
@@ -2026,7 +2025,7 @@ def runModalLive (arena : Arena)
   | .ok compiled =>
     let plan := compiled.plan
     let stageBlocks := compiled.stageBlocks
-    match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel plan with
+    match plan.toWire, Tropical.Ir.EmitLlvm.emitKernel { audio := plan, coeff? := none } 256 with
     | .ok _, .ok _ =>
       -- A slot that EXISTS but is never READ is a dead knob — exactly the
       -- reverb-discards-the-voice regression (the pitch knob accepted writes into
@@ -2322,7 +2321,7 @@ def runLgammaEmit (arena : Arena)
   let sinkGain : Float := Tropical.Plan.defaultSinkGain.toFloat
   let step := 10.0 / 2048.0
   let reRamp : BuildM Sig := do
-    sub (← mul (← toFloatE (← rshift (← clockLit) (← lit 32))) (← litF step)) (← lit 5)
+    sub (← mul (← toFloatE (← rshift (← clockLit) (← clockFracLit))) (← litF step)) (← lit 5)
   let mut worst : Float := 0.0
   let mut worstAt : String := ""
   let mut ok := true

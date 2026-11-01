@@ -98,11 +98,13 @@ private def modeBody (t : Nat) (k : NOperand) : Array NInstr := #[
   instrScalar "Mul" (t+4) #[rgI (t+2), rgI (t+3)] .int]         -- w·(k+1)
 
 /-- Shared tail: scale the i64 accumulator (temp `acc`) to float, mix
-    with τ (so the render is per-sample), write the output slot. -/
+    with the sample index ⌊τ⌋ (so the render is per-sample), write the
+    output slot. Uses temps `t` .. `t+5`. -/
 private def tailInstrs (acc t : Nat) : Array NInstr := #[
   instrScalar "ToFloat" t #[rgI acc] .float,
   instrScalar "Div" (t+1) #[rgF t, cF 268435456] .float,
-  instrScalar "ToFloat" (t+2) #[Tropical.Plan.opTick] .float,
+  instrScalar "RShift" (t+5) #[Tropical.Plan.opTau, cI Tropical.Ir.clockFracBits] .int,
+  instrScalar "ToFloat" (t+2) #[rgI (t+5)] .float,
   instrScalar "Mod" (t+3) #[rgF (t+2), cF 64] .float,
   instrScalar "Mul" (t+4) #[rgF (t+1), rgF (t+3)] .float,
   instrWriteSlot 0 (rgF (t+4))]
@@ -124,7 +126,7 @@ private def reduceLoopPlan : FlatPlan :=
     ++ #[instrScalar "Add" 1 #[rgI 1, rgI 6] .int,
          instrReduceEnd 1 .int]
     ++ tailInstrs 1 7
-  reducePlanOf body 12
+  reducePlanOf body 13
 
 /-- The unrolled twin: same ops, literal indices, explicit adds. -/
 private def reduceUnrolledPlan : FlatPlan := Id.run do
@@ -140,7 +142,7 @@ private def reduceUnrolledPlan : FlatPlan := Id.run do
   for i in [1:4] do
     body := body.push (instrScalar "Add" (t+i) #[rgI (t+i-1), rgI accs[i]!] .int)
   body := body ++ tailInstrs (t+3) (t+4)
-  reducePlanOf body (t+9)
+  reducePlanOf body (t+10)
 
 def runReduceCoverage : IO Bool := do
   match ← renderIrBytes reduceLoopPlan, ← renderIrBytes reduceUnrolledPlan with
@@ -155,7 +157,7 @@ def runReduceCoverage : IO Bool := do
       return false
     -- MSL smoke: the region must emit as a real for-loop (full SNR
     -- gating arrives with the modal banked plans in slice 3b).
-    match Tropical.Ir.EmitMsl.emitKernel reduceLoopPlan with
+    match Tropical.Ir.EmitMsl.emitKernel reduceLoopPlan 256 with
     | .error e =>
       failGate "reduce-coverage" s!"EmitMsl: {firstLine e}"
     | .ok msl =>
@@ -168,7 +170,7 @@ def runReduceCoverage : IO Bool := do
 
 end ReduceCoverage
 
--- ── Static routed reduction (Plan 6) ───────────────────────────────────────
+-- ── Static routed reduction (Plan 7) ───────────────────────────────────────
 section RoutedSumCoverage
 open Tropical.Plan
 
@@ -354,8 +356,8 @@ def runRoutedSumCoverage : IO Bool := do
       ← renderIrBytes static, ← renderIrBytes dynamic with
     | .ok ts, .ok td, .ok fs, .ok fd => pure (ts == fs && td == fd && ts.size > 0)
     | _, _, _, _ => pure false
-  let sourceSmoke := match Tropical.Ir.EmitLlvm.emitKernel static,
-      Tropical.Ir.EmitMsl.emitKernel static with
+  let sourceSmoke := match Tropical.Ir.EmitLlvm.emitKernel { audio := static, coeff? := none } 256,
+      Tropical.Ir.EmitMsl.emitKernel static 256 with
     | .ok llvm, .ok msl =>
       (llvm.splitOn "@routed_routes_").length > 1 &&
         (msl.splitOn "threadgroup_position_in_grid").length > 1 &&
@@ -387,14 +389,14 @@ def runRoutedSumCoverage : IO Bool := do
           (fun worst i => max worst (Float.abs (cpu[i]! - gpu[i]!))) 0.0
         if !gpu.isEmpty && gpu.size <= cpu.size && metalError < 1e-5 then
           passGate "routed-sum-coverage"
-            s!"static+dynamic routed folds equal authored-order unrolling; cooperative Metal max error={metalError}; compact Plan 6 round-trips; Stage0: τ-span atomic, s0-span hoists as a unit"
+            s!"static+dynamic routed folds equal authored-order unrolling; cooperative Metal max error={metalError}; compact Plan 7 round-trips; Stage0: τ-span atomic, s0-span hoists as a unit"
         else
           failGate "routed-sum-coverage"
             s!"cooperative Metal returned samples={gpu.size}/{cpu.size} maxError={metalError}"
       | .error e =>
         if routedMetalUnavailable e then
           passGate "routed-sum-coverage"
-            "static+dynamic routed folds equal authored-order unrolling; compact Plan 6 round-trips; Stage0: τ-span atomic, s0-span hoists as a unit; MSL source contract checked (Metal execution unavailable in this build)"
+            "static+dynamic routed folds equal authored-order unrolling; compact Plan 7 round-trips; Stage0: τ-span atomic, s0-span hoists as a unit; MSL source contract checked (Metal execution unavailable in this build)"
         else
           failGate "routed-sum-coverage" s!"cooperative Metal: {firstLine e}"
   | .error e, _, _, _ => failGate "routed-sum-coverage" s!"static routed: {firstLine e}"
@@ -500,144 +502,9 @@ def runCycleRefusal : IO Bool := do
 
 end CycleRefusal
 
--- ── Production legacy-state non-emission ───────────────────────────────────
--- The current source/IR types have no persistent state constructor. NInstr's
--- tag is intentionally open for backend structural operations, though, so this
--- gate also checks representative production artifacts in hand. Wire text is
--- consulted only for the schema tag; legacy-state absence is checked on typed
--- plans before serialization.
-section ProductionNonEmission
-
-open Tropical.Plan
-open Tropical.Ir (Arena ProgramIdx)
-
-private def legacyStateTags : Array String := #[
-  "Register", "StateReg", "StateLoad", "StateStore", "Update", "NextUpdate",
-  "Delay", "DelayInit", "StateInit", "Writeback", "SmoothParam"]
-
-private def checkInstrBlock (path : String) (instrs : Array NInstr) :
-    Except String Unit := do
-  for i in instrs do
-    if legacyStateTags.contains i.tag then
-      throw s!"{path}: production plan emitted legacy state instruction '{i.tag}'"
-
-private def checkInstanceFunction (path : String)
-    (f : InstanceFunction) : Except String Unit := do
-  checkInstrBlock s!"{path}/preamble" f.preambleInstructions
-  checkInstrBlock s!"{path}/pre-input" f.preInputInstructions
-  checkInstrBlock s!"{path}/body" f.instructions
-  let _ ← f.children.attach.mapM fun c =>
-    checkInstanceFunction s!"{path}/{c.1.instanceName}" c.1
-  pure ()
-termination_by sizeOf f
-decreasing_by
-  exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children c.2
-
-private def checkFlatPlan (path : String) (plan : FlatPlan) :
-    Except String Unit := do
-  for f in plan.instanceFunctions do
-    checkInstanceFunction s!"{path}/{f.instanceName}" f
-  let wire ← plan.toWire
-  match wire.getObjVal? "schema" with
-  | .ok (.str "tropical_plan_6") => pure ()
-  | .ok got =>
-    throw s!"{path}: production plan schema is {got.compress}, expected tropical_plan_6"
-  | .error e => throw s!"{path}: production plan has no schema: {e}"
-
-private def checkPerInstancePlan (path : String) (plan : PerInstancePlan) :
-    Except String Unit := do
-  checkInstrBlock s!"{path}/body" plan.instructions
-  for (block, i) in plan.perChildPreInput.zipIdx do
-    checkInstrBlock s!"{path}/child-{i}" block
-
-private def playgroundProbe : Lean.Json :=
-  let source := Lean.Json.mkObj [
-    ("id", .str "source"), ("kind", .str "source"),
-    ("params", Lean.Json.mkObj [("freq", .num (jn 440))])]
-  let output := Lean.Json.mkObj [
-    ("id", .str "out"), ("kind", .str "out"),
-    ("in", Lean.Json.mkObj [("in", .arr #[.str "source"])])]
-  Lean.Json.mkObj [
-    ("nodes", .arr #[source, output]),
-    ("out", .str "out")]
-
-private def compileSessionProbe (path : String) :
-    IO (Except String FlatPlan) := do
-  let env ← Tropical.Engine.boot
-  let action : Tropical.EngineM FlatPlan := do
-    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", .str path)])
-    Tropical.Engine.compileMirrorFlatPlan env .fused
-  match ← action.run with
-  | .ok plan => pure (.ok plan)
-  | .error failure => pure (.error failure.toJson.compress)
-
-private def compileExportProbe : IO (Except String FlatPlan) := do
-  let env ← Tropical.Engine.boot
-  let action : Tropical.EngineM FlatPlan := do
-    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [
-      ("path", .str "web/patches/pure-sine-440.json")])
-    let _ ← Tropical.Engine.handleExportProgram env (Lean.Json.mkObj [
-      ("name", .str "NonEmissionExport"),
-      ("outputs", Lean.Json.mkObj [
-        ("out", Lean.Json.mkObj [
-          ("instance", .str "osc"), ("output", .str "sine")])])])
-    let _ ← Tropical.Engine.handleAddInstance env (Lean.Json.mkObj [
-      ("program", .str "NonEmissionExport"),
-      ("instance_name", .str "export_probe")])
-    Tropical.Engine.compileMirrorFlatPlan env .fused
-  match ← action.run with
-  | .ok plan => pure (.ok plan)
-  | .error failure => pure (.error failure.toJson.compress)
-
-/-- Representative production paths must remain unable to emit legacy state:
-    a stdlib builder's per-instance plan, a playground graph, a program_2/MCP
-    session, and an exported composite re-instantiated into that session. -/
-def runProductionNonEmission (arena : Arena)
-    (resolved : Array (String × ProgramIdx)) : IO Bool := do
-  let mut failures : Array String := #[]
-
-  match resolved.find? (·.1 == "FixedSinOsc") with
-  | none => failures := failures.push "builder: FixedSinOsc missing from stdlib"
-  | some (_, idx) =>
-    match (Tropical.Ir.Strata.runResolved
-        { inlineNested := true } arena idx).mapError (·.message) with
-    | .error e => failures := failures.push s!"builder: lower: {firstLine e}"
-    | .ok (coreArena, core) =>
-      match Tropical.Ir.CompileResolved.compileResolved core coreArena with
-      | .error e => failures := failures.push s!"builder: compile: {firstLine e}"
-      | .ok plan =>
-        if let .error e := checkPerInstancePlan "builder/FixedSinOsc" plan then
-          failures := failures.push e
-
-  match Tropical.Playground.compilePlanPure arena resolved playgroundProbe with
-  | .error e => failures := failures.push s!"playground: {firstLine e}"
-  | .ok compiled =>
-    if let .error e := checkFlatPlan "playground" compiled.plan then
-      failures := failures.push e
-
-  match ← compileSessionProbe "web/patches/pure-sine-440.json" with
-  | .error e => failures := failures.push s!"session/program_2: {firstLine e}"
-  | .ok plan =>
-    if let .error e := checkFlatPlan "session/program_2" plan then
-      failures := failures.push e
-
-  match ← compileExportProbe with
-  | .error e => failures := failures.push s!"export: {firstLine e}"
-  | .ok plan =>
-    if let .error e := checkFlatPlan "export" plan then
-      failures := failures.push e
-
-  if failures.isEmpty then
-    passGate "production-non-emission"
-      "builder + playground + program_2/session + export emit typed state-free plan_6 only"
-  else
-    failGate "production-non-emission" (String.intercalate "; " failures.toList)
-
-end ProductionNonEmission
-
 -- ── Serialized-plan schema boundary ────────────────────────────────────────
 
-/-- The Lean-owned serialized-plan entry point is deliberately Plan-6-only.
+/-- The Lean-owned serialized-plan entry point is deliberately Plan-7-only.
     This is a separate boundary gate from production non-emission: even a
     hand-authored document cannot revive an older schema or retired carrier. -/
 def runPlanSchemaRejection : IO Bool := do
@@ -647,24 +514,27 @@ def runPlanSchemaRejection : IO Bool := do
     | .error e => (e.splitOn needle).length > 1
   let plan4 := Lean.Json.mkObj [("schema", .str "tropical_plan_4")]
   let plan5 := Lean.Json.mkObj [("schema", .str "tropical_plan_5")]
+  let plan6 := Lean.Json.mkObj [("schema", .str "tropical_plan_6")]
   let unknown := Lean.Json.mkObj [("schema", .str "tropical_plan_99")]
   let missing := Lean.Json.mkObj []
   let retired := Lean.Json.mkObj [
-    ("schema", .str "tropical_plan_6"),
+    ("schema", .str "tropical_plan_7"),
     ("state_init", .arr #[])]
   if rejectsWith plan4
-        "unsupported schema 'tropical_plan_4'; expected 'tropical_plan_6'"
+        "unsupported schema 'tropical_plan_4'; expected 'tropical_plan_7'"
       && rejectsWith plan5
-        "unsupported schema 'tropical_plan_5'; expected 'tropical_plan_6'"
+        "unsupported schema 'tropical_plan_5'; expected 'tropical_plan_7'"
+      && rejectsWith plan6
+        "expected 'tropical_plan_7' (plan 6's time source is the integer sample index"
       && rejectsWith unknown
-        "unsupported schema 'tropical_plan_99'; expected 'tropical_plan_6'"
+        "unsupported schema 'tropical_plan_99'; expected 'tropical_plan_7'"
       && rejectsWith missing "missing string field 'schema'"
       && rejectsWith retired
-        "retired field 'state_init' is not valid in tropical_plan_6" then
-    passGate "plan6-schema-rejection"
-      "PlanDecode rejects plan_4, plan_5, unknown/missing schemas, and retired carriers"
+        "retired field 'state_init' is not valid in tropical_plan_7" then
+    passGate "plan-schema-rejection"
+      "PlanDecode rejects plan_4, plan_5, plan_6 (its integer time source), unknown/missing schemas, and retired carriers"
   else
-    failGate "plan6-schema-rejection"
+    failGate "plan-schema-rejection"
       "PlanDecode accepted an unsupported schema/carrier or returned the wrong boundary error"
 
 def sortedNames (dir : String) (suffix : String) : IO (Array String) := do
@@ -672,19 +542,6 @@ def sortedNames (dir : String) (suffix : String) : IO (Array String) := do
   let names := entries.filterMap fun e =>
     if e.fileName.endsWith suffix then some (e.fileName.dropEnd suffix.length).toString else none
   pure (names.qsort fun a b => decide (a < b))
-
-/-- Compile a patch through the session mirror, returning the plan plus
-    the typed per-instruction stage blocks (the split classification). -/
-def compilePatchStaged (path : String) :
-    IO (Except String (Tropical.Plan.FlatPlan
-      × Array (Array (Option Tropical.Ir.Stage)))) := do
-  let env ← Tropical.Engine.boot
-  let act : Tropical.EngineM _ := do
-    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str path)])
-    Tropical.Engine.compileMirrorStaged env .fused
-  match ← act.run with
-  | .ok compiled => pure (.ok (compiled.plan, compiled.stageBlocks))
-  | .error f => pure (.error f.toJson.compress)
 
 /-- Render a FlatPlan via the TYPED split (stage attribute →
     hoistTyped → EmitLlvm → load_ir_staged). -/
@@ -797,7 +654,7 @@ private def emitMslOf (patchPath : String) : IO (Except String String) := do
     | .ok j =>
       match Tropical.Plan.FlatPlan.ofWire j with
       | .error e => pure (.error s!"ofWire: {e}")
-      | .ok plan => pure (Tropical.Ir.EmitMsl.emitKernel plan)
+      | .ok plan => pure (Tropical.Ir.EmitMsl.emitKernel plan 256)
 
 /-- MSL GOLDEN: the emitted Metal kernel text for a patch, frozen under
     `tests/golden/msl/<name>.metal`. Text-frozen (like the IR philosophy:

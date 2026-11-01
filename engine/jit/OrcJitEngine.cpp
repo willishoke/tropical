@@ -34,19 +34,6 @@
 #include <functional>
 #include <unordered_map>
 
-#ifdef TROPICAL_WASM_EMIT
-#include <llvm/MC/TargetRegistry.h>
-#include <llvm/Target/TargetMachine.h>
-#include <llvm/Target/TargetOptions.h>
-#include <llvm/TargetParser/Triple.h>
-#include <llvm/IR/LegacyPassManager.h>
-#include <llvm/Support/CodeGen.h>
-#include <llvm/Support/CommandLine.h>
-#include <llvm/Support/FileSystem.h>
-#include <lld/Common/Driver.h>
-LLD_HAS_DRIVER(wasm)
-#endif
-
 #if defined(__APPLE__)
 #  include <dlfcn.h>
 #  include <mach-o/dyld.h>
@@ -598,8 +585,8 @@ llvm::Expected<uint64_t> OrcJitEngine::lookup(const std::string & symbol_name)
 // C++ plan compiler retired (Phase 2), this is the only kernel producer;
 // Lean's EmitLlvm emits the IR.
 // ---------------------------------------------------------------------------
-llvm::Expected<NumericKernelFn> OrcJitEngine::compile_ir_text(
-  const std::string & ir_text, bool unoptimized)
+llvm::Expected<void *> OrcJitEngine::compile_ir_text(
+  const std::string & ir_text, bool unoptimized, const std::string & entry)
 {
   if (!jit_)
   {
@@ -614,7 +601,9 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_ir_text(
   // levels (however unlikely) never serves the wrong object from either
   // cache tier.
   const std::string key = md5_hex(ir_text) + (unoptimized ? "_u" : "");
-  if (auto it = ir_kernel_cache_.find(key); it != ir_kernel_cache_.end())
+  const std::string prefix = "tropical_k_" + key + "_";
+  const std::string symbol = prefix + entry;
+  if (auto it = ir_kernel_cache_.find(symbol); it != ir_kernel_cache_.end())
     return it->second;
 
   llvm::orc::LLJIT * target = jit_.get();
@@ -626,8 +615,6 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_ir_text(
         "unoptimized JIT is not available: " + unopt_init_error_,
         llvm::inconvertibleErrorCode());
   }
-
-  const std::string symbol = "tropical_k_" + key;
 
   auto context = std::make_unique<llvm::LLVMContext>();
   llvm::SMDiagnostic diag;
@@ -644,31 +631,26 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_ir_text(
   }
   module->setDataLayout(target->getDataLayout());
 
-  // Rename the single function definition to the content-addressed
-  // symbol. Declarations (e.g. intrinsics) are left alone.
-  llvm::Function * kernel_fn = nullptr;
+  // Rename every function definition to its content-addressed symbol
+  // (calls between them follow the rename). Declarations (intrinsics) are
+  // left alone. The entry must be among them.
+  bool entry_defined = false;
   for (llvm::Function & f : *module)
   {
     if (f.isDeclaration()) continue;
-    if (kernel_fn)
-      return llvm::make_error<llvm::StringError>(
-        "compile_ir_text: IR defines more than one function",
-        llvm::inconvertibleErrorCode());
-    kernel_fn = &f;
+    if (f.getName() == entry) entry_defined = true;
+    f.setName(prefix + f.getName().str());
+    f.setLinkage(llvm::Function::ExternalLinkage);
   }
-  if (!kernel_fn)
+  if (!entry_defined)
     return llvm::make_error<llvm::StringError>(
-      "compile_ir_text: IR defines no function",
+      "compile_ir_text: IR does not define '" + entry + "'",
       llvm::inconvertibleErrorCode());
-  kernel_fn->setName(symbol);
-  kernel_fn->setLinkage(llvm::Function::ExternalLinkage);
 
   // Give the module a unique identity. parseIR preserves the original
   // `; ModuleID` from the printed text, which would make the disk
-  // KernelObjectCache serve the *plan-compiled* object (defining
-  // tropical_f_<hash>) for this renamed module — whose symbol isn't in
-  // it, so materialization fails. Key the module on the IR content hash
-  // instead, matching the renamed symbol.
+  // KernelObjectCache serve another module's object for this one. Key the
+  // module on the IR content hash instead, matching the renamed symbols.
   module->setModuleIdentifier(key);
   module->setSourceFileName(key);
 
@@ -705,101 +687,10 @@ llvm::Expected<NumericKernelFn> OrcJitEngine::compile_ir_text(
   const uint64_t addr = symbol_or_err->getAddress();
 #endif
 
-  auto kernel = reinterpret_cast<NumericKernelFn>(addr);
-  ir_kernel_cache_.emplace(key, kernel);
+  void * kernel = reinterpret_cast<void *>(addr);
+  ir_kernel_cache_.emplace(symbol, kernel);
   return kernel;
 }
-
-
-#ifdef TROPICAL_WASM_EMIT
-// ---------------------------------------------------------------------------
-// compile_ir_to_wasm — the IR→wasm sibling of compile_ir_text. Same parse;
-// retargets to wasm32 and links with lld in-process instead of JITting.
-// ---------------------------------------------------------------------------
-std::vector<uint8_t> compile_ir_to_wasm(const std::string & ir_text, std::string & err)
-{
-  LLVMInitializeWebAssemblyTargetInfo();
-  LLVMInitializeWebAssemblyTarget();
-  LLVMInitializeWebAssemblyTargetMC();
-  LLVMInitializeWebAssemblyAsmPrinter();
-
-  llvm::LLVMContext context;
-  llvm::SMDiagnostic diag;
-  auto buffer = llvm::MemoryBuffer::getMemBuffer(ir_text, "tropical_ir");
-  auto module = llvm::parseIR(buffer->getMemBufferRef(), diag, context);
-  if (!module)
-  {
-    llvm::raw_string_ostream os(err);
-    diag.print("tropical_ir", os);
-    return {};
-  }
-
-  const llvm::Triple triple("wasm32-unknown-unknown");
-  std::string lookup_err;
-  const llvm::Target * target = llvm::TargetRegistry::lookupTarget(triple, lookup_err);
-  if (!target) { err = "no wasm32 target: " + lookup_err; return {}; }
-
-  llvm::TargetOptions opts;
-  // Honor FP flags only (the default). Lean's IR carries no `contract`/`fast`
-  // flags, so no FMA is ever formed — the kernel computes op-for-op identically
-  // to the ORC JIT. This is the load-bearing line for native≡wasm bit-exactness.
-  opts.AllowFPOpFusion = llvm::FPOpFusion::Standard;
-  std::unique_ptr<llvm::TargetMachine> tm(target->createTargetMachine(
-    triple, "generic", "", opts, std::nullopt, std::nullopt,
-    llvm::CodeGenOptLevel::Default));
-  module->setTargetTriple(triple);
-  module->setDataLayout(tm->createDataLayout());
-
-  llvm::SmallString<128> obj_path, wasm_path;
-  if (auto ec = llvm::sys::fs::createTemporaryFile("tropical", "o", obj_path))
-  { err = "temp obj: " + ec.message(); return {}; }
-  if (auto ec = llvm::sys::fs::createTemporaryFile("tropical", "wasm", wasm_path))
-  { llvm::sys::fs::remove(obj_path); err = "temp wasm: " + ec.message(); return {}; }
-
-  {
-    std::error_code ec;
-    llvm::raw_fd_ostream obj_out(obj_path, ec, llvm::sys::fs::OF_None);
-    if (ec)
-    {
-      llvm::sys::fs::remove(obj_path); llvm::sys::fs::remove(wasm_path);
-      err = "open obj: " + ec.message(); return {};
-    }
-    llvm::legacy::PassManager pm;
-    if (tm->addPassesToEmitFile(pm, obj_out, nullptr, llvm::CodeGenFileType::ObjectFile))
-    {
-      llvm::sys::fs::remove(obj_path); llvm::sys::fs::remove(wasm_path);
-      err = "wasm32 target cannot emit an object file"; return {};
-    }
-    pm.run(*module);
-  } // obj_out flushes/closes here
-
-  const char * argv[] = {
-    "wasm-ld", "--no-entry", "--import-memory",
-    "--export=tropical_kernel", "--export=__heap_base", "--allow-undefined",
-    obj_path.c_str(), "-o", wasm_path.c_str()
-  };
-  std::string link_err;
-  llvm::raw_string_ostream link_os(link_err);
-  bool ok = lld::wasm::link(
-    llvm::ArrayRef<const char *>(argv, sizeof(argv) / sizeof(argv[0])),
-    llvm::outs(), link_os, /*exitEarly=*/false, /*disableOutput=*/false);
-  if (!ok)
-  {
-    llvm::sys::fs::remove(obj_path); llvm::sys::fs::remove(wasm_path);
-    err = "wasm-ld: " + link_err;
-    return {};
-  }
-
-  auto wasm = llvm::MemoryBuffer::getFile(wasm_path);
-  llvm::sys::fs::remove(obj_path);
-  llvm::sys::fs::remove(wasm_path);
-  if (!wasm) { err = "read wasm: " + wasm.getError().message(); return {}; }
-
-  auto bytes = (*wasm)->getBuffer();
-  const auto * p = reinterpret_cast<const uint8_t *>(bytes.data());
-  return std::vector<uint8_t>(p, p + bytes.size());
-}
-#endif
 
 
 } // namespace tropical_jit

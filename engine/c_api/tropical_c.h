@@ -151,38 +151,24 @@ uint64_t     tropical_dac_playback_position(tropical_dac_t);
 
 tropical_runtime_t tropical_runtime_new(unsigned int buffer_length);
 void             tropical_runtime_free(tropical_runtime_t);
-/* Load a kernel from textual LLVM IR plus a tropical_plan_6 metadata manifest.
-   Every other schema is rejected. The instruction graph is metadata only —
-   codegen comes from ir_text, emitted by Lean's EmitLlvm. Always fused. */
-bool             tropical_runtime_load_ir(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* manifest_json, size_t manifest_len);
+/* Load one kernel artifact (design/typed-kernel.md): the port IR (defining
+   tropical_kernel and its argv thunk), the MSL realization (may be empty:
+   JIT-only), the Metal pre-pass IR (empty unless MSL is present and the plan
+   hoisted anything), and the tropical_kernel_1 manifest. The manifest's
+   frame count must equal the runtime's buffer length. A failed load leaves
+   the previous kernel playing and sets tropical_last_error. */
+bool             tropical_runtime_load(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* stage0_ir, size_t stage0_len, const char* manifest_json, size_t manifest_len);
 
-/* Dual load: LLVM IR -> JIT (always; render_window + the correctness
-   reference stay on CPU) and MSL -> Metal compute pipeline (the audio path;
-   TROPICAL_METAL builds only -- fails with tropical_last_error otherwise
-   when msl is non-empty). Same manifest contract as load_ir; the same
-   double-buffered publish covers both artifacts (hot-swap preserved). */
-bool             tropical_runtime_load_ir_msl(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* manifest_json, size_t manifest_len);
-
-/* Staged load: like load_ir_msl (msl may be empty for JIT-only), plus an
-   optional stage-0 coefficient kernel (coeff_ir may be empty): a second
-   single-function LLVM module holding the plan's tau-independent
-   instructions, JIT-compiled as its own module, run once against the new
-   state before publish and re-run after every control-plane slot write.
-   Its outputs land in coef:<n> module slots the audio kernel reads. */
-bool             tropical_runtime_load_ir_staged(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* manifest_json, size_t manifest_len);
-bool             tropical_runtime_load_ir_time_staged(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* tile_ir, size_t tile_ir_len, const char* manifest_json, size_t manifest_len);
-
-/* Staged single-artifact load returning the exact program/control generation
-   pair constructed by this publication. The pair is written before the load
+/* The same load, returning the exact program/control generation pair
+   constructed by this publication. The pair is written before the load
    returns and is not sampled from mutable counters afterward. */
-bool             tropical_runtime_load_ir_staged_generation(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* manifest_json, size_t manifest_len, tropical_runtime_generation_t* out_generation);
-bool             tropical_runtime_load_ir_time_staged_generation(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* coeff_ir, size_t coeff_len, const char* tile_ir, size_t tile_ir_len, const char* manifest_json, size_t manifest_len, tropical_runtime_generation_t* out_generation);
+bool             tropical_runtime_load_generation(tropical_runtime_t, const char* ir_text, size_t ir_len, const char* msl_source, size_t msl_len, const char* stage0_ir, size_t stage0_len, const char* manifest_json, size_t manifest_len, tropical_runtime_generation_t* out_generation);
 
-/* Atomic dual-artifact publication. The first staged artifact owns audio and
-   optional Metal execution; the second JIT-only artifact owns observation.
-   Controls project between differing slot layouts by exact manifest name. */
-bool             tropical_runtime_load_ir_staged_with_observation_generation(tropical_runtime_t, const char* audio_ir, size_t audio_ir_len, const char* audio_msl_source, size_t audio_msl_len, const char* audio_coeff_ir, size_t audio_coeff_len, const char* audio_manifest_json, size_t audio_manifest_len, const char* observation_ir, size_t observation_ir_len, const char* observation_coeff_ir, size_t observation_coeff_len, const char* observation_manifest_json, size_t observation_manifest_len, tropical_runtime_generation_t* out_generation);
-bool             tropical_runtime_load_ir_time_staged_with_observation_generation(tropical_runtime_t, const char* audio_ir, size_t audio_ir_len, const char* audio_msl_source, size_t audio_msl_len, const char* audio_coeff_ir, size_t audio_coeff_len, const char* audio_tile_ir, size_t audio_tile_ir_len, const char* audio_manifest_json, size_t audio_manifest_len, const char* observation_ir, size_t observation_ir_len, const char* observation_coeff_ir, size_t observation_coeff_len, const char* observation_manifest_json, size_t observation_manifest_len, tropical_runtime_generation_t* out_generation);
+/* Atomic dual-artifact publication. The first artifact owns audio and
+   optional Metal execution; the second JIT-only artifact owns observation
+   (its output channels are what render_window reads). Controls project
+   between differing slot layouts by exact manifest name. */
+bool             tropical_runtime_load_with_observation_generation(tropical_runtime_t, const char* audio_ir, size_t audio_ir_len, const char* audio_msl_source, size_t audio_msl_len, const char* audio_stage0_ir, size_t audio_stage0_len, const char* audio_manifest_json, size_t audio_manifest_len, const char* observation_ir, size_t observation_ir_len, const char* observation_manifest_json, size_t observation_manifest_len, tropical_runtime_generation_t* out_generation);
 
 /* Control-plane/test-only: request a sample-clock reposition. JIT applies it
    at its next process-buffer boundary; Metal prepares and acknowledges an
@@ -190,14 +176,7 @@ bool             tropical_runtime_load_ir_time_staged_with_observation_generatio
    the source coordinate moves to idx. */
 void             tropical_runtime_set_sample_index(tropical_runtime_t, uint64_t idx);
 
-/* ---------- Build-time IR→wasm (TROPICAL_WASM_EMIT builds only) ----------
-   Lower Lean's LLVM IR to a complete wasm32 module, fully in-process (wasm32
-   TargetMachine + lld-as-a-library — no subprocess). Returns a malloc'd buffer
-   of length *out_len (free with tropical_free_buffer), or NULL on error (see
-   tropical_last_error()). Returns NULL if libtropical was built without
-   TROPICAL_WASM_EMIT. This is a build/CI tool — the shipped audio runtime does
-   not need it. */
-uint8_t*         tropical_compile_ir_to_wasm(const char* ir_text, size_t ir_len, size_t* out_len);
+/* Free a malloc'd buffer this library handed out (tropical_socket_next_control). */
 void             tropical_free_buffer(uint8_t* buf);
 void             tropical_runtime_process(tropical_runtime_t);
 /* Deterministic render-tool entry point. For Metal, waits off-RT until the
@@ -245,12 +224,6 @@ uint64_t         tropical_runtime_ownership_failure_count(tropical_runtime_t);
    replacement does not erase the evidence. Always 0 for JIT/non-Metal builds;
    qualification requires zero. */
 uint64_t         tropical_runtime_metal_dispatch_failure_count(tropical_runtime_t);
-/* Tile-time staging diagnostics. A rejected endpoint image increments
-   materialization_failure_count; successful exact CPU recovery increments
-   exact_fallback_count. Normal qualification expects both to remain zero. */
-uint64_t         tropical_runtime_metal_materialization_failure_count(
-                   tropical_runtime_t);
-uint64_t         tropical_runtime_metal_exact_fallback_count(tropical_runtime_t);
 /* Sticky monotonic worker-handoff diagnostics. Starvation, tag mismatch,
    activation failure, and callback-thread Metal entry must remain zero in
    qualification. Retargets are permitted but measured explicitly. */
@@ -288,9 +261,26 @@ unsigned int     tropical_runtime_slot_index(tropical_runtime_t, const char* nam
 void             tropical_runtime_set_slot(tropical_runtime_t, unsigned int slot_index, double value);
 double           tropical_runtime_get_slot(tropical_runtime_t, unsigned int slot_index);
 
-/* The runtime's current sample index (τ of the next buffer to be processed) —
-   the coordinate the kernel reads as `tick`. The control plane stamps a glide's
-   start-tick with this so a closed-form parameter ramp `f(τ)` anchors to "now".
+/* The one param-write executor (design/host-param-dispatch.md). Resolves
+   `name` against the loaded manifest's param_disciplines table and performs
+   the raw / glide / anchor / velocity write with the host's own `now` and
+   sample rate; every companion slot lands in one control generation. Both
+   the socket data plane and the Lean engine's `set_param` reach this. Returns
+   1 on success, filling the boundary the write observed and the first audible
+   sample the discipline math used; 0 when the loaded manifest has no slot for
+   the name (a client error, nothing written, no error set); -1 with
+   tropical_last_error set for any other failure (non-finite value, a Metal
+   activation that stayed late). */
+typedef struct tropical_param_write {
+  uint64_t observed_sample_index;
+  uint64_t effective_sample_index;
+} tropical_param_write_t;
+int              tropical_runtime_set_param(tropical_runtime_t, const char* name, double value, tropical_param_write_t* out_write);
+
+/* The runtime's current sample index (the integer part of τ for the next
+   buffer to be processed; the kernel reads τ itself in Q48.16). The control
+   plane stamps a glide's start-tick with this so a closed-form parameter ramp
+   `f(τ)` anchors to "now".
    Returned as a double (sample indices are exact in f64 well past any session). */
 double           tropical_runtime_current_sample_index(tropical_runtime_t);
 /* Exact companion for control paths that transport the source coordinate as
@@ -302,15 +292,21 @@ uint64_t         tropical_runtime_current_sample_index_u64(tropical_runtime_t);
    increment when phase-anchoring a live frequency change. */
 double           tropical_runtime_sample_rate(tropical_runtime_t);
 
-/* Random-access render (scope / slave consumers): evaluate the active fused
-   kernel over [start_index, start_index+count) and write each requested slot's
-   per-sample trajectory into `out`, slot-major (out[k*count + i]). Exact and
-   concurrency-safe with the audio thread for a register-free (stateless) patch.
-   Returns false if the kernel isn't fused or a slot id is out of range. */
+/* Random-access render (scope / slave consumers): evaluate the observation
+   kernel over [start_index, start_index+count) and write each requested
+   output channel's per-sample trajectory into `out`, channel-major
+   (out[k*count + i]). Exact and concurrency-safe with the audio thread: a
+   closed-form kernel has no state to race. Returns false if no observation
+   kernel is loaded or a channel id is out of range. */
 bool             tropical_runtime_render_window(tropical_runtime_t, uint64_t start_index,
-                   unsigned int count, const unsigned int* slot_ids, unsigned int n_slots,
+                   unsigned int count, const unsigned int* channel_ids, unsigned int n_channels,
                    double* out);
-
+/* The same observation render at explicit Q48.16 coordinates: `tau[i]` is the
+   i-th instant, fractional or not, in any order (design/typed-kernel.md, "τ as
+   an array"). `out` is channel-major like render_window. */
+bool             tropical_runtime_render_tau(tropical_runtime_t, const int64_t* tau,
+                   unsigned int count, const unsigned int* channel_ids, unsigned int n_channels,
+                   double* out);
 /* ---------- Socket endpoint ----------
  *
  * A single Unix-domain socket serving many clients over newline-delimited

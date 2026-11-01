@@ -13,9 +13,9 @@ continuously produced output channel, not an observation tap:
 - each sink folds its input slots in authored order and then applies `gain`;
 - channels without a sink produce zero.
 
-`FlatPlan.outputChannelCount` is positive. Plan-6 encodes it as the optional
+`FlatPlan.outputChannelCount` is positive. Plan 7 encodes it as the optional
 `output_channel_count` field, omitted when its value is one. Decoders treat an
-absent field as one, so existing mono Plan-6 documents retain their meaning.
+absent field as one, so mono documents without the field retain their meaning.
 This is a correction of the previously unrealized `SinkSpec.target` contract,
 not a Plan schema-version bump.
 

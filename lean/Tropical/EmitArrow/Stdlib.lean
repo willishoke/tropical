@@ -50,10 +50,8 @@ def floatDecl (name : String) (default : Sig) : AInputDecl :=
 def clockInDecl (name : String) (default : Sig) : AInputDecl :=
   { name, type? := some (.scalar .int), defaultSig := some default }
 
-def clockSig : BuildM Sig := do
-  let sample ← sampleIndex
-  let shift ← lit 32
-  lshift sample shift
+/-- The default clock input: τ itself (see `Term.clockLit`). -/
+def clockSig : BuildM Sig := tau
 
 def floatOut (name : String := "out") : OutputDecl :=
   { name, type? := some (.scalar .float) }
@@ -123,13 +121,14 @@ def buildScrubClock (arena : Arena) (_resolved : Array (String × ProgramIdx)) :
     let velocity ← inputRef ⟨1⟩
     let sr ← sampleRate
     let baseSamples ← mul tauBase sr
-    let twoPow32 ← lit 4294967296
-    let baseFixed ← mul baseSamples twoPow32
+    let baseFixed ← mul baseSamples (← clockOneLit)
     let base ← toIntE baseFixed
+    -- The velocity is a Q·.32 scale, independent of the clock rail's format.
+    let twoPow32 ← lit 4294967296
     let velocityFixed ← mul velocity twoPow32
     let velocityInt ← toIntE velocityFixed
-    let sample ← sampleIndex
-    let ramp ← mul velocityInt sample
+    -- `clk = base + velocity · τ` on the clock rail, exact at fractional τ.
+    let ramp ← scaleClockQ velocityInt (← tau)
     let body ← add base ramp
     let zero ← lit 0
     let one ← lit 1
@@ -291,8 +290,8 @@ def buildReverseReverb (arena : Arena)
             mul coefficient spacing
       let sr ← sampleRate
       let samples ← mul scaledSpacing sr
-      let twoPow32 ← lit 4294967296
-      let fixed ← mul samples twoPow32
+      let clockScale ← clockOneLit
+      let fixed ← mul samples clockScale
       let delta ← toIntE fixed
       add clk delta
     let voice := fun (name : String) (voiceClock : Sig) =>
@@ -394,15 +393,14 @@ def buildFixedSinOsc (arena : Arena)
     let sr ← sampleRate
     let perSample ← div scaledFreq sr
     let inc ← toIntE perSample
-    let shift32 ← lit 32
-    let thi ← rshift clk shift32
-    let mask ← lit 4294967295
-    let tlo ← bitAnd clk mask
+    let thi ← rshift clk (← clockFracLit)
+    let tlo ← bitAnd clk (← clockFracMaskLit)
     let scaledOffset ← mul offset twoPow32
     let off ← toIntE scaledOffset
     let highProduct ← mul inc thi
     let lowProduct ← mul inc tlo
-    let lowHigh ← rshift lowProduct shift32
+    let lowHigh ← rshift lowProduct (← clockFracLit)
+    let mask ← lit 4294967295
     let accumulated ← add highProduct lowHigh
     let acc ← add accumulated off
     -- `acc & 0xffffffff` IS the Q32 phase the sine wants.  Normalizing it to a
@@ -473,8 +471,8 @@ private def warpBank3 (arena : Arena) (name voiceName : String)
     let offset ← inputRef ⟨2⟩
     let sr ← sampleRate
     let offsetSamples ← mul offset sr
-    let twoPow32 ← lit 4294967296
-    let offsetFixed ← mul offsetSamples twoPow32
+    let clockScale ← clockOneLit
+    let offsetFixed ← mul offsetSamples clockScale
     let delta ← toIntE offsetFixed
     let wire := fun (clock : Sig) =>
       if voiceName == "ModalVoice" then

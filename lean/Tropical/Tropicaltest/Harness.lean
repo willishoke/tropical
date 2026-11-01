@@ -1,6 +1,6 @@
 import Tropical.Ffi
-import Tropical.Engine
 import Tropical.StagedLoad
+import Tropical.Session.Compile
 import Tropical.Playground
 import Tropical.Plan
 import Tropical.Ir.EmitLlvm
@@ -13,14 +13,19 @@ import Tropical.Ir.CompileResolved
 import Tropical.Compile
 import Tropical.EmitArrow
 import Tropical.Testing.ArrowFixtures
-import Tropical.Testing.EngineMirror
 import Tropical.Testing.PlanWire
-import Lean.Data.Json
+import Tropical.Tropicaltest.Gates
 
 /-!
 # Tropical.Tropicaltest.Harness
 
-Shared test substrate: PCM render + sha256, the `compilePatch*` drivers, and the gate combinators (`passGate`/`failGate`/`hashGate`, `bitDiffCount`/`energyOf`). Every suite draws on these.
+The host side of the shared test substrate: PCM render through the native
+runtime, and the `compilePatch*` drivers over the pure session compile
+(`Tropical.Session.compilePatch`, the same function the engine and
+`tropicalc` run). This module knows the compiler and a host; it does not
+know the session engine. The verdict combinators
+(`passGate`/`failGate`/`hashGate`, `bitDiffCount`/`energyOf`, `sha256Hex`)
+live in `Gates`, imported here, so suites that never render take only that.
 -/
 
 open Tropical
@@ -46,28 +51,33 @@ def renderPlanBytes (planJson : String) : IO ByteArray := do
     acc := acc ++ (← rt.outputBytes)
   pure acc
 
-/-- SHA256 hex via `shasum -a 256` — the same digest node crypto and
-    `diff_render.sh` produce over the same bytes. -/
-def sha256Hex (bytes : ByteArray) : IO String := do
-  let tmp := "/tmp/tropicaltest-render.bin"
-  IO.FS.writeBinFile tmp bytes
-  -- `shasum -a 256` on macOS, `sha256sum` on Linux; both print "<hex>  <file>".
-  let out ← (try IO.Process.run { cmd := "shasum", args := #["-a", "256", tmp] }
-             catch _ => IO.Process.run { cmd := "sha256sum", args := #[tmp] })
-  pure (out.splitOn " " |>.headD "")
+/-- Compile a tropical_program_2 patch (by path) to its plan and typed stage
+    blocks, over a fresh stdlib registry each time (a value, so there is
+    nothing to reuse across loads). -/
+def compilePatchStaged (path : String) :
+    IO (Except String (Tropical.Plan.FlatPlan
+      × Array (Array (Option Tropical.Ir.Stage)))) := do
+  let text ← IO.FS.readFile path
+  let registry ← match Tropical.Session.bootRegistry with
+    | .error f => throw (IO.userError s!"stdlib boot failed: {f.toJson.compress}")
+    | .ok st => pure st
+  match (Tropical.Session.compilePatch text).runOn registry with
+  | (.ok r, _) => pure (.ok r)
+  | (.error f, _) => pure (.error f.toJson.compress)
 
-/-- Compile a tropical_program_2 patch (by path) to a plan in `mode`. Boots a
-    fresh engine per compile (the proven `diffcli compile` pattern — a reused
-    booted env does not survive sequential loads). -/
+/-- Compile a tropical_program_2 patch (by path) to a plan in `mode`. -/
 def compilePatch (path : String) (mode : Tropical.Plan.CompilationMode) :
     IO (Except String String) := do
-  let env ← Tropical.Engine.boot
-  let act : Tropical.EngineM String := do
-    let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str path)])
-    Tropical.Engine.compileMirrorPlan env mode
-  match ← act.run with
-  | .ok planJson => pure (.ok planJson)
-  | .error f => pure (.error f.toJson.compress)
+  let text ← IO.FS.readFile path
+  let registry ← match Tropical.Session.bootRegistry with
+    | .error f => throw (IO.userError s!"stdlib boot failed: {f.toJson.compress}")
+    | .ok st => pure st
+  match (Tropical.Session.compilePatch text mode).runOn registry with
+  | (.error f, _) => pure (.error f.toJson.compress)
+  | (.ok (plan, _), _) =>
+    match plan.toWire with
+    | .error msg => pure (.error msg)
+    | .ok j => pure (.ok j.compress)
 
 /-- Render a FlatPlan via the Lean-emitted-IR path (stage-0 split →
     EmitLlvm → load_ir_staged). -/
@@ -81,41 +91,3 @@ def renderIrBytes (plan : Tropical.Plan.FlatPlan) : IO (Except String ByteArray)
       acc := acc ++ (← rt.outputBytes)
     pure (.ok acc)
   catch e => pure (.error e.toString)
-
-def firstLine (s : String) : String := (s.splitOn "\n").headD ""
-
--- ── Gate combinators ─────────────────────────────────────────────────────────
--- Every gate's verdict funnels through these two, so the protocol line the
--- runner (and the label-diff check) depends on — `  PASS  <label>  <detail>` /
--- `  FAIL  <label>  <detail>` — is typed in exactly one place.
-
-/-- Print the gate's PASS line and return `true`. -/
-def passGate (label msg : String) : IO Bool := do
-  IO.println s!"  PASS  {label}  {msg}"
-  pure true
-
-/-- Print the gate's FAIL line and return `false`. -/
-def failGate (label msg : String) : IO Bool := do
-  IO.println s!"  FAIL  {label}  {msg}"
-  pure false
-
-/-- Bit-differing sample count over the two arrays' common prefix
-    (IEEE `!=` — the pointwise-equality reading the byte-gates use). -/
-def bitDiffCount (a b : Array Float) : Nat := Id.run do
-  let mut d := 0
-  for i in [0:min a.size b.size] do
-    if a[i]! != b[i]! then d := d + 1
-  return d
-
-/-- Σx² over the whole array. -/
-def energyOf (xs : Array Float) : Float :=
-  xs.foldl (fun acc s => acc + s * s) 0.0
-
-/-- The hash-equivalence epilogue: sha256 both renders and PASS iff they
-    agree, with the gate's own verdict texts built from the hash(es). -/
-def hashGate (label : String) (lhs rhs : ByteArray)
-    (passMsg : String → String) (failMsg : String → String → String) : IO Bool := do
-  let lhsHash ← sha256Hex lhs
-  let rhsHash ← sha256Hex rhs
-  if lhsHash == rhsHash then passGate label (passMsg lhsHash)
-  else failGate label (failMsg lhsHash rhsHash)

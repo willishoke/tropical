@@ -4,7 +4,7 @@ import Tropical.Parse.Nodes
 import Tropical.Ir.Core
 
 /-!
-# Plan layer — `tropical_plan_6` as a type
+# Plan layer — `tropical_plan_7` as a type
 
 Port of `compiler/flat_plan.ts` plus the instruction/operand types from
 `compiler/ir/emit_resolved.ts`. Two layers, exactly as in TS:
@@ -20,13 +20,16 @@ Port of `compiler/flat_plan.ts` plus the instruction/operand types from
 - **Wire**: `toWire` encoders producing the plain-JSON shape the C++
   engine parses. Key-omission rules are mirrored from `toWirePlan` /
   `toWireInstanceFn`: `compilation_mode` omitted when `fused`, `sinks`
-  omitted when empty, `sources` omitted when canonical `[tick, rate]`,
+  omitted when empty, `sources` omitted when canonical `[tau, rate]`,
   `preamble_instructions` / `pre_input_instructions` / `children`
   omitted when empty. (Structural diff is key-order-insensitive, but
   key *presence* matters to it.)
 
-Plan 6 has no state-initialization or legacy temp-mix carriers. Runtime
-consumers reject older schemas instead of translating them.
+Plan 7 has no state-initialization or legacy temp-mix carriers. Runtime
+consumers reject older schemas instead of translating them. Plan 7 is plan 6
+with the time source redefined: source 0 (`tau`) is the Q48.16 coordinate
+(`Ir/ClockFormat.lean`) where plan 6's was the integer sample index, so a plan 6 document would
+decode to a different function, and is refused instead.
 
 Numbers that are data (const vals, slot defaults, sink
 gain) are `Lean.JsonNumber` so decimal text re-parses to the identical
@@ -74,11 +77,11 @@ inductive NOperand where
   | loopIdx (id : Nat := 0)
 deriving Repr, Inhabited
 
-/-- Canonical source indices (sessions always emit `[tick, rate]`). -/
-def sourceTick : Nat := 0
+/-- Canonical source indices (sessions always emit `[tau, rate]`). -/
+def sourceTau : Nat := 0
 def sourceRate : Nat := 1
 
-def opTick : NOperand := .source sourceTick .int
+def opTau : NOperand := .source sourceTau .int
 def opRate : NOperand := .source sourceRate .float
 
 def NOperand.toWire : NOperand → Json
@@ -149,7 +152,7 @@ inductive PlanOp where
   | select | clamp
 deriving BEq, Repr, Inhabited
 
-/-- The plan wire tag for a scalar op (Capitalized; the `tropical_plan_6`
+/-- The plan wire tag for a scalar op (Capitalized; the `tropical_plan_7`
     instruction `tag`). -/
 def PlanOp.name : PlanOp → String
   | .add => "Add" | .sub => "Sub" | .mul => "Mul" | .div => "Div"
@@ -349,8 +352,6 @@ structure PerInstancePlan where
   /-- Per-output-port temp indices (local; the session compiler shifts). -/
   outputTargets : Array Nat
   arraySlotNames : Array String
-  /-- Local array slots whose values are immutable per-tile endpoint images. -/
-  tileArraySlots : Array Nat := #[]
   /-- Staging metadata, parallel to `instructions` / `perChildPreInput`:
       the binding-time stage of the node each instruction was emitted
       for (typed stage-0 refactor Phase 1). Never serialized. -/
@@ -420,7 +421,7 @@ def withPreInput (f : InstanceFunction) (block : Array NInstr) : InstanceFunctio
   | .mk n i pre instrs _ ro ao rc ch => .mk n i pre instrs block ro ao rc ch
 
 /-- Mirrors `toWireInstanceFn`: canonical empty preamble/pre_input/children
-    fields are omitted for a compact Plan-6 wire form. -/
+    fields are omitted for a compact Plan-7 wire form. -/
 def toWire (f : InstanceFunction) : Except String Json := do
   let base := #[
     ("name", Json.str f.name),
@@ -466,18 +467,14 @@ def SinkSpec.toWire (s : SinkSpec) : Json :=
     ("target", toJson s.target)]
 
 inductive SourceKind where
-  | tick | rate | tilePhase | tileTick
+  | tau | rate
 deriving BEq, Repr, Inhabited
 
 def SourceKind.wire : SourceKind → String
-  | .tick => "tick" | .rate => "rate" | .tilePhase => "tile_phase"
-  | .tileTick => "tile_tick"
+  | .tau => "tau" | .rate => "rate"
 
-/-- Canonical source ordering: `[tick, rate]`. -/
-def defaultSources : Array SourceKind := #[.tick, .rate]
-
-/-- Source order for plans that contain the staged terminal. -/
-def tileSources : Array SourceKind := #[.tick, .rate, .tilePhase, .tileTick]
+/-- Canonical source ordering: `[tau, rate]`. -/
+def defaultSources : Array SourceKind := #[.tau, .rate]
 
 def isDefaultSources (s : Array SourceKind) : Bool :=
   s == defaultSources
@@ -544,7 +541,7 @@ structure FlatPlan where
   sinks : Array SinkSpec
   /-- Number of independently addressable output channels in the published
       sample image. `SinkSpec.target` is an index into this image. The
-      canonical mono value is omitted from Plan-6 JSON for compatibility. -/
+      canonical mono value is omitted from Plan-7 JSON for compatibility. -/
   outputChannelCount : Nat := 1
   sources : Array SourceKind := defaultSources
   slotCount : Nat
@@ -562,13 +559,6 @@ structure FlatPlan where
       kernel reads a whole, consistent generation of columns (no cross-column
       tear on a live knob move). Empty ⇒ no double-buffering (omitted from wire). -/
   coeffArraySlots : Array Nat := #[]
-  /-- Array slots filled by the absolute-time tile materializer.  These are
-      packed after Stage0 columns in the Metal coefficient binding. -/
-  tileArraySlots : Array Nat := #[]
-  /-- Exact interval used when constructing the endpoint image. -/
-  tileIntervalFrames : Nat := 0
-  /-- Admission/provenance string carried into benchmark artifacts. -/
-  phaserTimeStaging : Option String := none
 deriving Inhabited
 
 /-- The structural output-image contract consumed by plan semantics and code
@@ -596,9 +586,7 @@ private def FlatPlan.linearInstrs (p : FlatPlan) : Array NInstr :=
 
 /-- Array slots sourced from immutable host-written Metal columns. -/
 def FlatPlan.metalBoundArraySlots (p : FlatPlan) : Array Nat :=
-  p.tileArraySlots.foldl
-    (fun slots slot => if slots.contains slot then slots else slots.push slot)
-    p.coeffArraySlots
+  p.coeffArraySlots
 
 def FlatPlan.hasRoutedSum (p : FlatPlan) : Bool :=
   p.linearInstrs.any (·.tag == "RoutedSumBegin")
@@ -786,11 +774,14 @@ def FlatPlan.metalExecutionToWire (p : FlatPlan) : Option Json :=
       ("requested_group_policy", Json.str "four_pipeline_widths_capped")]
   else none
 
+/-- The one plan schema this compiler writes and reads. -/
+def planSchema : String := "tropical_plan_7"
+
 /-- Mirrors `toWirePlan`'s omission rules. -/
 def FlatPlan.toWire (p : FlatPlan) : Except String Json := do
   if !p.outputLayoutWellFormed then
     throw "FlatPlan.toWire: output channel count must be positive and sink targets must be unique and in range"
-  let fields := #[("schema", Json.str "tropical_plan_6"),
+  let fields := #[("schema", Json.str planSchema),
     ("config", Json.mkObj [("sampleRate", Json.num p.sampleRate)])]
   let fields := if p.compilationMode == .fused then fields
     else fields.push ("compilation_mode", Json.str p.compilationMode.wire)
@@ -809,13 +800,6 @@ def FlatPlan.toWire (p : FlatPlan) : Except String Json := do
     else fields.push ("param_disciplines", Json.arr (p.paramDisciplines.map (·.toWire)))
   let fields := if p.coeffArraySlots.isEmpty then fields
     else fields.push ("coeff_array_slots", toJson p.coeffArraySlots)
-  let fields := if p.tileArraySlots.isEmpty then fields
-    else fields.push ("tile_array_slots", toJson p.tileArraySlots)
-  let fields := if p.tileIntervalFrames == 0 then fields
-    else fields.push ("tile_interval_frames", toJson p.tileIntervalFrames)
-  let fields := match p.phaserTimeStaging with
-    | some reason => fields.push ("phaser_time_staging", Json.str reason)
-    | none => fields
   let fields := match p.metalExecutionToWire with
     | some execution => fields.push ("metal_execution", execution)
     | none => fields

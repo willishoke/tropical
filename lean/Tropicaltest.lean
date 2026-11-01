@@ -24,13 +24,17 @@ import Tropical.Testing.NativeMultichannel
 import Tropical.Testing.Semantics
 import Lean.Data.Json
 import Tropical.Tropicaltest.Patcher
+import Tropical.Tropicaltest.ProductionNonEmission
 import Tropical.Tropicaltest.Exact
 import Tropical.Tropicaltest.GroupedRoomReference
 import Tropical.Tropicaltest.Oriented
 import Tropical.Tropicaltest.Block
+import Tropical.Tropicaltest.KernelType
+import Tropical.Tropicaltest.FractionalTau
+import Tropical.Tropicaltest.LongHorizon
+import Tropical.Tropicaltest.ParamOrder
 import Tropical.Tropicaltest.BlockRealize
 import Tropical.Tropicaltest.OrientedPatch
-import Tropical.Tropicaltest.Phaser
 
 /-!
 # tropicaltest — the post-TS golden + native-equiv runner (Phase 8)
@@ -76,15 +80,8 @@ def main (args : List String) : IO UInt32 := do
     return if algebra && realize && banked then 0 else 1
   if args.contains "--oriented-patch-only" then
     return if ← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch {} then 0 else 1
-  if args.contains "--phaser-only" then
-    match Tropical.EmitArrow.buildStdlibChain with
-    | .error error =>
-        IO.eprintln error
-        return 1
-    | .ok (arena, resolved) =>
-        return if ← Tropical.Tropicaltest.Phaser.runPhaser arena resolved then 0 else 1
   if args.contains "--ecdd-only" then
-    match ← Tropical.Playground.getStdlib with
+    match Tropical.Playground.stdlib with
     | .error error =>
         IO.eprintln error
         return 1
@@ -93,7 +90,7 @@ def main (args : List String) : IO UInt32 := do
         let liveOk ← Tropical.Tropicaltest.SeamSweep.runEcddLive arena resolved
         return if partitionOk && liveOk then 0 else 1
   if args.contains "--modal-universe-history-only" then
-    match ← Tropical.Playground.getStdlib with
+    match Tropical.Playground.stdlib with
     | .error error =>
         IO.eprintln error
         return 1
@@ -167,6 +164,21 @@ def main (args : List String) : IO UInt32 := do
   total := total + 1
   if !(← Tropical.Tropicaltest.BlockRealize.runBlockBanked) then failed := failed + 1
 
+  -- ── (b⁗) The typed kernel at the port (design/typed-kernel.md, T1) ──────
+  IO.println "typed kernel (the port: tau/params/out, tropical_kernel_1 round trip):"
+  total := total + 1
+  if !(← Tropical.Tropicaltest.KernelType.runKernelType) then failed := failed + 1
+
+  -- ── (b⁗′) Fractional τ at the port: the closed form at half-sample instants ──
+  IO.println "fractional tau (scrub(½) on the grid ≡ τ at k+½, byte-exact):"
+  total := total + 1
+  if !(← Tropical.Tropicaltest.FractionalTau.runFractionalTau) then failed := failed + 1
+
+  -- ── (b⁗″) Param order at the port: three params through both kernels' argv ──
+  IO.println "param order (compile → load → set_param → audio + observation kernels):"
+  total := total + 1
+  if !(← Tropical.Tropicaltest.ParamOrder.runParamOrder) then failed := failed + 1
+
   -- ── (c) Synthetic op-coverage: EmitLlvm over the rare ops, frozen hash ─────
   -- The patch corpus exercises 24 of 29 ops; this funnels the rest
   -- (GreaterEq, NotEqual, Or, BitOr, BitNot, FloorDiv, Sqrt, Floor, Ceil,
@@ -191,7 +203,7 @@ def main (args : List String) : IO UInt32 := do
   total := total + 1
   if !(← runReduceCoverage) then failed := failed + 1
 
-  -- ── (c⁗⁺) Static routed reduction: semantics + compact Plan 6 region ──────
+  -- ── (c⁗⁺) Static routed reduction: semantics + compact Plan 7 region ──────
   IO.println "routed reduction (compact region ≡ authored-order unrolling):"
   total := total + 1
   if !(← runRoutedSumCoverage) then failed := failed + 1
@@ -273,7 +285,7 @@ def main (args : List String) : IO UInt32 := do
   | .ok (arena, resolved) =>
     arrowRan := true
     -- ── Production legacy-state non-emission (Lane F quarantine) ────────────
-    IO.println "production non-emission (current front doors → state-free plan_6):"
+    IO.println "production non-emission (current front doors → state-free plan_7):"
     total := total + 1
     if !(← runProductionNonEmission arena resolved) then failed := failed + 1
     total := total + 1
@@ -485,6 +497,9 @@ def main (args : List String) : IO UInt32 := do
     total := total + 1
     if !(← runLongTauModal arena resolved) then
       failed := failed + 1
+    total := total + 1
+    if !(← Tropical.Tropicaltest.LongHorizon.runLongHorizon arena resolved) then
+      failed := failed + 1
     IO.println "residue calculus (voice ⋙ reverb composed at build time):"
     total := total + 1
     if !(← runResidueMoments arena resolved) then
@@ -584,9 +599,6 @@ def main (args : List String) : IO UInt32 := do
       failed := failed + 1
     total := total + 1
     if !(← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch arena) then
-      failed := failed + 1
-    total := total + 1
-    if !(← Tropical.Tropicaltest.Phaser.runPhaser arena resolved) then
       failed := failed + 1
     total := total + 1
     if !(← runModalForestAnchors arena resolved) then

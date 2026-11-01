@@ -1,3 +1,5 @@
+import Tropical.HostPort
+
 /-!
 # Native FFI — the engine talks to libtropical directly
 
@@ -19,6 +21,8 @@ next recompile, which Phase 2 fixes by writing the slot.)
 -/
 
 namespace Tropical.Ffi
+
+open Tropical.Host (PublishedGeneration OutputStats DeviceInfo ParamWrite)
 
 private opaque RuntimePointed : NonemptyType
 /-- A `tropical_runtime_t` (FlatRuntime): the hot-swappable kernel host. -/
@@ -60,6 +64,25 @@ opaque Runtime.outputBytes (rt : @& Runtime) : IO ByteArray
 @[extern "shim_runtime_output_interleaved_bytes"]
 opaque Runtime.outputInterleavedBytes (rt : @& Runtime) : IO ByteArray
 
+@[extern "shim_runtime_render_tau"]
+private opaque Runtime.renderTauRaw (rt : @& Runtime) (tau : @& ByteArray)
+    (channels : @& Array UInt32) : IO ByteArray
+
+/-- The host-side τ fill of `design/typed-kernel.md`: evaluate the observation
+    artifact (the loaded kernel) at explicit Q48.16 coordinates — the i64 bit
+    patterns (`Ir/ClockFormat.lean`), so `k <<< 16` is sample `k` and
+    `(2k+1) <<< 15` is `k + ½` —
+    and return its output channels, channel-major, as little-endian float64s
+    (`count × channels.size`). Coordinates may be fractional and in any order;
+    the kernel is a closed form and nothing rounds τ. -/
+def Runtime.renderTau (rt : Runtime) (tau : Array UInt64) (channels : Array UInt32) :
+    IO ByteArray := do
+  let mut bytes := ByteArray.empty
+  for t in tau do
+    for j in [0:8] do
+      bytes := bytes.push ((t >>> (8 * j).toUInt64).toUInt8)
+  rt.renderTauRaw bytes channels
+
 @[extern "shim_runtime_output_channel_count"]
 opaque Runtime.outputChannelCount (rt : @& Runtime) : IO UInt32
 
@@ -92,6 +115,22 @@ opaque Runtime.currentSampleIndexU64 (rt : @& Runtime) : IO UInt64
 @[extern "shim_runtime_sample_rate"]
 opaque Runtime.sampleRate (rt : @& Runtime) : IO Float
 
+@[extern "shim_runtime_set_param"]
+private opaque Runtime.setParamRaw (rt : @& Runtime) (name : @& String) (value : Float) :
+    IO (Option (UInt64 × UInt64))
+
+/-- The host-contract param write (`tropical_runtime_set_param`): the runtime
+    dispatches per the loaded manifest's `param_disciplines` and publishes the
+    companions as one control generation. `none` when the loaded manifest has
+    no slot for the name; throws with the runtime's message on any other
+    failure. -/
+def Runtime.setParam (rt : Runtime) (name : String) (value : Float) :
+    IO (Option ParamWrite) := do
+  match ← rt.setParamRaw name value with
+  | none => pure none
+  | some (observedSampleIndex, effectiveSampleIndex) =>
+    pure (some { observedSampleIndex, effectiveSampleIndex })
+
 /-- Cumulative wall time spent rendering Metal tiles and the number of sample
     frames those attempts produced. Their interval ratio is render utilization;
     the DAC callback itself only copies prepared samples and is intentionally
@@ -107,118 +146,57 @@ def Runtime.slotIndex? (rt : Runtime) (name : String) : IO (Option UInt32) := do
   let idx ← rt.slotIndexRaw name
   pure <| if idx == 0xffffffff then none else some idx
 
-@[extern "shim_runtime_load_ir_staged"]
-opaque Runtime.loadIrStagedRaw (rt : @& Runtime) (irText : @& String) (mslSource : @& String)
-    (coeffIr : @& String) (manifestJson : @& String) : IO Bool
+@[extern "shim_runtime_load"]
+private opaque Runtime.loadRaw (rt : @& Runtime) (irText : @& String) (mslSource : @& String)
+    (stage0Ir : @& String) (manifestJson : @& String) : IO Bool
 
-/-- Exact immutable program/control identity created by one runtime load. -/
-structure PublishedGeneration where
-  programVersion : UInt64
-  controlVersion : UInt64
-deriving Repr, BEq
-
-@[extern "shim_runtime_load_ir_staged_generation"]
-private opaque Runtime.loadIrStagedGenerationRaw
-    (rt : @& Runtime) (irText : @& String) (mslSource : @& String)
-    (coeffIr : @& String) (manifestJson : @& String) : IO (UInt64 × UInt64)
-
-/-- Staged load: LLVM IR → JIT (always), MSL → Metal when non-empty, plus an
-    optional stage-0 coefficient kernel (`coeffIr`, empty = no split) —
-    a second single-function module the engine runs once before publish and
-    after every control-plane slot write, landing τ-independent values in
-    `coef:<n>` module slots the audio kernel reads. -/
-def Runtime.loadIrStaged (rt : Runtime) (irText mslSource coeffIr manifestJson : String) :
+/-- Load one kernel artifact: the port IR, the MSL realization (empty =
+    JIT-only), the Metal pre-pass IR (empty unless hoisted) and the
+    `tropical_kernel_1` manifest. Its frame count must equal the runtime's
+    buffer length. -/
+def Runtime.load (rt : Runtime) (irText mslSource stage0Ir manifestJson : String) :
     IO Unit := do
-  if !(← rt.loadIrStagedRaw irText mslSource coeffIr manifestJson) then
-    throw <| IO.userError s!"runtime loadIrStaged failed: {← lastError}"
+  if !(← rt.loadRaw irText mslSource stage0Ir manifestJson) then
+    throw <| IO.userError s!"runtime load failed: {← lastError}"
 
-@[extern "shim_runtime_load_ir_time_staged"]
-private opaque Runtime.loadIrTimeStagedRaw (rt : @& Runtime)
-    (irText : @& String) (mslSource : @& String) (coeffIr : @& String)
-    (tileIr : @& String) (manifestJson : @& String) : IO Bool
+@[extern "shim_runtime_load_generation"]
+private opaque Runtime.loadGenerationRaw
+    (rt : @& Runtime) (irText : @& String) (mslSource : @& String)
+    (stage0Ir : @& String) (manifestJson : @& String) : IO (UInt64 × UInt64)
 
-/-- Metal load with a distinct absolute-time tile materializer. -/
-def Runtime.loadIrTimeStaged (rt : Runtime)
-    (irText mslSource coeffIr tileIr manifestJson : String) : IO Unit := do
-  if !( ← rt.loadIrTimeStagedRaw irText mslSource coeffIr tileIr manifestJson) then
-    throw <| IO.userError s!"runtime loadIrTimeStaged failed: {← lastError}"
-
-/-- Generation-returning staged load for an atomic compile handshake. The pair
+/-- Generation-returning load for an atomic compile handshake. The pair
     comes from the publication operation itself, rather than a later sample. -/
-def Runtime.loadIrStagedGeneration (rt : Runtime)
-    (irText mslSource coeffIr manifestJson : String) :
+def Runtime.loadGeneration (rt : Runtime)
+    (irText mslSource stage0Ir manifestJson : String) :
     IO PublishedGeneration := do
   let (programVersion, controlVersion) ←
-    rt.loadIrStagedGenerationRaw irText mslSource coeffIr manifestJson
+    rt.loadGenerationRaw irText mslSource stage0Ir manifestJson
   pure { programVersion, controlVersion }
 
-@[extern "shim_runtime_load_ir_time_staged_generation"]
-private opaque Runtime.loadIrTimeStagedGenerationRaw
-    (rt : @& Runtime) (irText : @& String) (mslSource : @& String)
-    (coeffIr : @& String) (tileIr : @& String)
-    (manifestJson : @& String) : IO (UInt64 × UInt64)
-
-def Runtime.loadIrTimeStagedGeneration (rt : Runtime)
-    (irText mslSource coeffIr tileIr manifestJson : String) :
-    IO PublishedGeneration := do
-  let (programVersion, controlVersion) ←
-    rt.loadIrTimeStagedGenerationRaw
-      irText mslSource coeffIr tileIr manifestJson
-  pure { programVersion, controlVersion }
-
-@[extern "shim_runtime_load_ir_staged_with_observation_generation"]
-private opaque Runtime.loadIrStagedWithObservationGenerationRaw (rt : @& Runtime)
-    (irText : @& String) (mslSource : @& String) (coeffIr : @& String)
+@[extern "shim_runtime_load_with_observation_generation"]
+private opaque Runtime.loadWithObservationGenerationRaw (rt : @& Runtime)
+    (irText : @& String) (mslSource : @& String) (stage0Ir : @& String)
     (manifestJson : @& String) (observationIr : @& String)
-    (observationCoeffIr : @& String) (observationManifestJson : @& String) :
-    IO (UInt64 × UInt64)
-
-/-- Atomically publish an audio/Metal staged artifact and a distinct JIT-only
-    observation projection. Matching controls are copied by slot name; program
-    storage and mutable workspaces remain disjoint. -/
-def Runtime.loadIrStagedWithObservationGeneration (rt : Runtime)
-    (irText mslSource coeffIr manifestJson : String)
-    (observationIr observationCoeffIr observationManifestJson : String) :
-    IO PublishedGeneration := do
-  let (programVersion, controlVersion) ←
-    rt.loadIrStagedWithObservationGenerationRaw
-      irText mslSource coeffIr manifestJson
-      observationIr observationCoeffIr observationManifestJson
-  pure { programVersion, controlVersion }
-
-@[extern "shim_runtime_load_ir_time_staged_with_observation_generation"]
-private opaque Runtime.loadIrTimeStagedWithObservationGenerationRaw
-    (rt : @& Runtime) (irText : @& String) (mslSource : @& String)
-    (coeffIr : @& String) (tileIr : @& String) (manifestJson : @& String)
-    (observationIr : @& String) (observationCoeffIr : @& String)
     (observationManifestJson : @& String) : IO (UInt64 × UInt64)
 
-def Runtime.loadIrTimeStagedWithObservationGeneration (rt : Runtime)
-    (irText mslSource coeffIr tileIr manifestJson : String)
-    (observationIr observationCoeffIr observationManifestJson : String) :
+/-- Atomically publish an audio artifact and a distinct JIT-only observation
+    artifact whose output channels the scope reads. Matching controls are
+    copied by slot name; program storage and mutable workspaces remain
+    disjoint. -/
+def Runtime.loadWithObservationGeneration (rt : Runtime)
+    (irText mslSource stage0Ir manifestJson : String)
+    (observationIr observationManifestJson : String) :
     IO PublishedGeneration := do
   let (programVersion, controlVersion) ←
-    rt.loadIrTimeStagedWithObservationGenerationRaw
-      irText mslSource coeffIr tileIr manifestJson
-      observationIr observationCoeffIr observationManifestJson
+    rt.loadWithObservationGenerationRaw
+      irText mslSource stage0Ir manifestJson
+      observationIr observationManifestJson
   pure { programVersion, controlVersion }
 
 /-- Control-plane/test-only: reposition the active kernel's sample clock
     (render verbs' `--start`). -/
 @[extern "shim_runtime_set_sample_index"]
 opaque Runtime.setSampleIndex (rt : @& Runtime) (idx : UInt64) : IO Unit
-
-/-- Lower textual LLVM IR (Lean's EmitLlvm output) to a complete wasm32 module,
-    in-process via the engine's LLVM + lld. Build-time only — requires
-    libtropical built with `TROPICAL_WASM_EMIT`. Empty result ⇒ throw. -/
-@[extern "shim_compile_ir_to_wasm"]
-opaque compileIrToWasmRaw (irText : @& String) : IO ByteArray
-
-def compileIrToWasm (irText : String) : IO ByteArray := do
-  let wasm ← compileIrToWasmRaw irText
-  if wasm.size == 0 then
-    throw <| IO.userError s!"compileIrToWasm failed: {← lastError}"
-  pure wasm
 
 -- ── DAC ──────────────────────────────────────────────────────────────────────
 
@@ -265,13 +243,6 @@ structure Dac where
   handle  : DacHandle
   runtime : Runtime
 
-structure DacStats where
-  callbackCount : UInt64
-  avgCallbackMs : Float
-  maxCallbackMs : Float
-  underrunCount : UInt64
-  overrunCount  : UInt64
-
 namespace Dac
 
 def fromRuntime (rt : Runtime) (sampleRate channels : UInt32) : IO Dac := do
@@ -284,7 +255,7 @@ def isReconnecting (d : Dac) : IO Bool := dacIsReconnecting d.handle
 def switchDevice (d : Dac) (deviceId : UInt32) : IO Bool := dacSwitchDevice d.handle deviceId
 def bufferFrames (d : Dac) : IO UInt32 := dacBufferFrames d.handle
 
-def stats (d : Dac) : IO DacStats := do
+def stats (d : Dac) : IO OutputStats := do
   pure {
     callbackCount := ← dacStatCallbackCount d.handle
     avgCallbackMs := ← dacStatAvgMs d.handle
@@ -307,10 +278,6 @@ opaque audioDeviceName (deviceId : UInt32) : IO String
 
 @[extern "shim_audio_default_output_device"]
 opaque audioDefaultOutputDevice : IO UInt32
-
-structure DeviceInfo where
-  id   : UInt32
-  name : String
 
 def listDevices : IO (Array DeviceInfo) := do
   let ids ← audioDeviceIds

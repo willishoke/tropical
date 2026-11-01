@@ -16,10 +16,12 @@ Audit base: sprint integration line, 2026-07-28.
 | `programDecl` inside `program_2` | retired/refused | N | N | refused | refused | refused | N |
 | retired Program-2 root carriers | retired/refused | N | N | refused | refused | refused | N |
 | retired wire aliases/state spellings | retired/refused | N | N | refused | refused | refused | N |
-| `tropical_plan_6` typed/wire plan | current plan | Y | Y | Y | Y | Y | required |
+| `tropical_kernel_1` kernel manifest (the plan nested) | current artifact manifest | Y | Y | Y | Y | Y | required |
+| `tropical_plan_7` typed/wire plan | current plan | Y | Y | Y | Y | Y | nested in the manifest |
 | any other serialized plan schema | unsupported/refused | N | N | N | refused | N | refused |
+| `tropical_plan_6` (integer time source) | unsupported/refused | N | N | N | refused | N | refused |
 | `tropical_plan_5` and older plans | unsupported/refused | N | N | N | refused | N | refused |
-| retired top-level state/output carriers in Plan 6 | unsupported/refused | N | N | N | refused | N | refused |
+| retired top-level state/output carriers in Plan 7 | unsupported/refused | N | N | N | refused | N | refused |
 | public parameter method `set_param` | current | N | Y | Y | N | future host | socket/RPC |
 | specialized parameter-method aliases | removed | N | N | refused | N | N | refused |
 
@@ -47,20 +49,28 @@ patch-bay front door.
 | `array_set` | array-update alias | rejected; use `arraySet` |
 | `sessionSlot`/`sessionArraySlot` | serialized session-state carriers | constructors deleted; rejected as unknown ops |
 | Plan-4 compatibility CTest and fixture payload | acceptance evidence | deleted; useful program input remains |
+| Plan 6's integer `tick` time source | source 0 was the sample index | refused with a recompile message: Plan 7's source 0 is the fixed-point τ (Q48.16, `fixed-carrier.md`), so a Plan 6 document cannot be reinterpreted |
+| `tau:i64q32` kernel manifests | the Q32.32 clock rail (2026-10-28 to 2026-11-01, unreleased) | refused by the native and web manifest readers: τ's element type names the rail's format, and the rail is now Q48.16 (`i64q16`) |
 
 ## Required rejection behavior
 
-Both `Tropical.Plan.FlatPlan.ofWire` and the native C load tail require an
-explicit `schema: "tropical_plan_6"`. Missing, unknown, and older schemas fail
-with an error naming the unsupported boundary. Plan 6 rejects these retired
+`Tropical.Plan.FlatPlan.ofWire` requires an explicit
+`schema: "tropical_plan_7"`. The native C load tail (`tropical_runtime_load`)
+requires a `schema: "tropical_kernel_1"` manifest (`design/typed-kernel.md`)
+whose first input is `tau:i64q16[frames]` with `frames` equal to the
+runtime's buffer length, whose one output is `f64[frames, channels]`, and
+whose nested `plan` carries `schema: "tropical_plan_7"` and the `fused`
+realization. Missing, unknown, and older schemas fail with an error naming
+the unsupported boundary; Plan 6 additionally names its integer time source
+and asks for a recompile. Plan 7 rejects these retired
 top-level fields rather than ignoring them:
 
 `state_init`, `register_names`, `register_types`, `register_targets`,
 `state_reg_offset`, `output_targets`, `outputs`, top-level `instructions`, and
 `scheduler_function`.
 
-Canonical Plan-6 omissions are not legacy compatibility. The current encoder
-may omit fused `compilation_mode`, the default tick/rate `sources` pair, empty
+Canonical Plan-7 omissions are not legacy compatibility. The current encoder
+may omit fused `compilation_mode`, the default tau/rate `sources` pair, empty
 child/instruction arrays, and zero loop ids. Decoders retain those current
 defaults.
 
@@ -73,10 +83,10 @@ aliases listed above fail as unknown operations.
 
 - `current_module_process`: native schema/carrier rejection plus current ABI
   rendering.
-- `plan6-schema-rejection`: Lean decoder rejection of Plan 4 and Plan 5,
+- `plan-schema-rejection`: Lean decoder rejection of Plans 4, 5 and 6,
   unknown/missing schemas, and retired carriers.
 - `production-non-emission`: representative current front doors emit typed,
-  state-free Plan 6 only.
+  state-free Plan 7 only.
 - `mcp/errors.test.ts`: removed parameter methods, Program-2 root carriers,
   and wire aliases are refused at their public boundaries.
 - `param_dispatch_conformance.test.ts`: socket and Lean control-plane

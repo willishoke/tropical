@@ -1,8 +1,5 @@
 import Tropical.Ffi
-import Tropical.Ir.Stage0
-import Tropical.Ir.TileStage
-import Tropical.Ir.EmitLlvm
-import Tropical.Ir.EmitMsl
+import Tropical.Artifact
 
 /-!
 # StagedLoad — the one place a `FlatPlan` becomes running kernels
@@ -12,172 +9,72 @@ the diffcli render verbs) funnels through here so the stage-0 split is
 gated by the same suites that gate everything else: hoist (unless
 `TROPICAL_STAGE0=0`), emit the audio kernel — and the coefficient
 kernel when anything hoisted — through the same `EmitLlvm`, and load
-both over `Runtime.loadIrStaged`. The manifest is the *audio* plan's
-wire form: same schema, its slot table extended with the `coef:<n>`
-slots the two kernels share.
+both over `Runtime.loadIrStaged`. The split and emission are the
+compiler's (`Tropical.Artifact`); this module is only the loading side.
 -/
 
 namespace Tropical.StagedLoad
 
 open Tropical.Plan (FlatPlan)
-open Tropical.Ir.Stage0 (Split hoist)
+open Tropical.Artifact (KernelArtifact emitJit emitMetal)
 
-/-- Kill-switch for A/B and debugging: `TROPICAL_STAGE0=0` disables the
-    split (plans load exactly as before, one kernel). -/
-def enabled : IO Bool := do
-  pure ((← IO.getEnv "TROPICAL_STAGE0") != some "0")
+/-- The emission options this host's environment selects:
+    `TROPICAL_STAGE0=0` disables the stage-0 split. The core never reads
+    the environment; the roots that boot on libtropical read it here. -/
+def optionsFromEnv : IO Tropical.Artifact.Options := do
+  pure { stage0 := (← IO.getEnv "TROPICAL_STAGE0") != some "0" }
 
-/-- The env-gated split (flow classification — the only splitter where
-    the arena is gone, i.e. plans parsed from JSON). -/
-def split (plan : FlatPlan) : IO Split := do
-  if ← enabled then pure (hoist plan)
-  else pure { audio := plan, coeff? := none }
+private def split (plan : FlatPlan) : IO Tropical.Ir.Stage0.Split := do
+  pure (Tropical.Artifact.split (← optionsFromEnv) plan)
 
-/-- The env-gated TYPED split: classification from the intern-time
-    stage attribute (the partitioner's emit-order stage blocks), the
-    production path wherever the session compile is in hand. -/
-def splitTyped (plan : FlatPlan)
-    (stageBlocks : Array (Array (Option Tropical.Ir.Stage))) : IO Split := do
-  if ← enabled then
-    match Tropical.Ir.Stage0.hoistTyped plan stageBlocks with
-    | .ok s => pure s
-    | .error e => throw <| IO.userError s!"StagedLoad (typed split): {e}"
-  else pure { audio := plan, coeff? := none }
-
-/-- The coefficient kernel's IR — empty string when nothing hoisted
-    (the FFI treats empty as "no coefficient kernel"). -/
-def coeffIr (s : Split) : Except String String :=
-  match s.coeff? with
-  | none => .ok ""
-  | some c => Tropical.Ir.EmitLlvm.emitKernel c
-
-private structure EmittedParts where
-  audioIr : String
-  coefficientIr : String
-  manifest : String
-
-structure MetalParts where
-  audioIr : String
-  coefficientIr : String
-  tileIr : String
-  manifest : String
-  msl : String
-
-private def emitParts (s : Split) : Except String EmittedParts := do
-  let manifestJson ← s.audio.toWire
-  let ir ← Tropical.Ir.EmitLlvm.emitKernel s.audio
-  let cir ← coeffIr s
-  return {
-    audioIr := ir
-    coefficientIr := cir
-    manifest := manifestJson.compress }
-
-/-- Apply the distinct tile-time split after Stage0 and emit all Metal-side
-    artifacts.  JIT-only callers never enter this function. -/
-def emitMetalParts (s : Split) : Except String MetalParts := do
-  let tile ← Tropical.Ir.TileStage.split s.audio
-  let manifestJson ← tile.audio.toWire
-  let audioIr ← Tropical.Ir.EmitLlvm.emitKernel tile.audio
-  let coefficientIr ← coeffIr s
-  let tileIr ← match tile.tile? with
-    | none => pure ""
-    | some plan => Tropical.Ir.EmitLlvm.emitKernel plan
-  let msl ← Tropical.Ir.EmitMsl.emitKernel tile.audio
-  return {
-    audioIr := audioIr
-    coefficientIr := coefficientIr
-    tileIr := tileIr
-    manifest := manifestJson.compress
-    msl := msl }
-
-/-- Debug: `TROPICAL_STAGE0_DUMP=<dir>` writes the split artifacts. -/
-private def dumpParts (parts : EmittedParts) : IO Unit := do
-  if let some dir ← IO.getEnv "TROPICAL_STAGE0_DUMP" then
-    IO.FS.writeFile s!"{dir}/audio.ll" parts.audioIr
-    IO.FS.writeFile s!"{dir}/coeff.ll" parts.coefficientIr
-    IO.FS.writeFile s!"{dir}/manifest.json" parts.manifest
-
-/-- The Metal sibling of the opt-in stage dump. Normal output and wire schemas
-    are untouched when `TROPICAL_STAGE0_DUMP` is absent. -/
-private def dumpMetalParts (parts : MetalParts) : IO Unit := do
-  if let some dir ← IO.getEnv "TROPICAL_STAGE0_DUMP" then
-    IO.FS.writeFile s!"{dir}/audio.ll" parts.audioIr
-    IO.FS.writeFile s!"{dir}/coeff.ll" parts.coefficientIr
-    IO.FS.writeFile s!"{dir}/tile.ll" parts.tileIr
-    IO.FS.writeFile s!"{dir}/manifest.json" parts.manifest
-    IO.FS.writeFile s!"{dir}/audio.metal" parts.msl
-
-private def dumpExactParts (parts : EmittedParts) : IO Unit := do
-  if let some dir ← IO.getEnv "TROPICAL_STAGE0_DUMP" then
-    IO.FS.writeFile s!"{dir}/exact.ll" parts.audioIr
-    IO.FS.writeFile s!"{dir}/exact_coeff.ll" parts.coefficientIr
-    IO.FS.writeFile s!"{dir}/exact_manifest.json" parts.manifest
-
-/-- Split + emit + load, JIT-only. -/
-def load (rt : Tropical.Ffi.Runtime) (plan : FlatPlan) : IO Unit := do
-  let s ← split plan
-  match emitParts s with
+private def splitTyped (plan : FlatPlan)
+    (stageBlocks : Array (Array (Option Tropical.Ir.Stage))) : IO Tropical.Ir.Stage0.Split := do
+  match Tropical.Artifact.splitTyped (← optionsFromEnv) plan stageBlocks with
+  | .ok s => pure s
   | .error e => throw <| IO.userError s!"StagedLoad: {e}"
-  | .ok parts =>
-    dumpParts parts
-    rt.loadIrStaged parts.audioIr "" parts.coefficientIr parts.manifest
 
-/-- Split + emit + dual load (JIT + Metal): MSL is emitted from the
-    *audio* plan — coefficients are computed host-side in f64 by the JIT
-    coefficient kernel and cross to the GPU as host-written slots. -/
+/-- Debug: `TROPICAL_STAGE0_DUMP=<dir>` writes the artifact. -/
+private def dumpParts (parts : KernelArtifact) : IO Unit := do
+  if let some dir ← IO.getEnv "TROPICAL_STAGE0_DUMP" then
+    IO.FS.writeFile s!"{dir}/kernel.ll" parts.ir
+    IO.FS.writeFile s!"{dir}/manifest.json" parts.manifest
+    unless parts.msl.isEmpty do IO.FS.writeFile s!"{dir}/kernel.metal" parts.msl
+    unless parts.stage0Ir.isEmpty do IO.FS.writeFile s!"{dir}/stage0.ll" parts.stage0Ir
+
+private def publish (rt : Tropical.Ffi.Runtime) (parts : KernelArtifact) : IO Unit := do
+  dumpParts parts
+  rt.load parts.ir parts.msl parts.stage0Ir parts.manifest
+
+/-- Split + emit + load, JIT-only, for the runtime's own frame count. -/
+def load (rt : Tropical.Ffi.Runtime) (plan : FlatPlan) : IO Unit := do
+  let frames := (← rt.bufferLength).toNat
+  match emitJit (← split plan) frames with
+  | .error e => throw <| IO.userError s!"StagedLoad: {e}"
+  | .ok parts => publish rt parts
+
+/-- Split + emit + dual load (JIT + Metal). -/
 def loadMsl (rt : Tropical.Ffi.Runtime) (plan : FlatPlan) : IO Unit := do
-  let s ← split plan
-  match emitMetalParts s with
+  let frames := (← rt.bufferLength).toNat
+  match emitMetal (← split plan) frames with
   | .error e => throw <| IO.userError s!"StagedLoad (msl): {e}"
-  | .ok parts =>
-    dumpMetalParts parts
-    if parts.tileIr.isEmpty then
-      rt.loadIrTimeStaged parts.audioIr parts.msl parts.coefficientIr
-        parts.tileIr parts.manifest
-    else
-      let exact ← match emitParts s with
-        | .error e => throw <| IO.userError s!"StagedLoad (exact): {e}"
-        | .ok value => pure value
-      dumpExactParts exact
-      let _ ← rt.loadIrTimeStagedWithObservationGeneration
-        parts.audioIr parts.msl parts.coefficientIr parts.tileIr parts.manifest
-        exact.audioIr exact.coefficientIr exact.manifest
-      pure ()
+  | .ok parts => publish rt parts
 
 /-- Typed split + emit + load, JIT-only. -/
 def loadTyped (rt : Tropical.Ffi.Runtime) (plan : FlatPlan)
     (stageBlocks : Array (Array (Option Tropical.Ir.Stage))) : IO Unit := do
-  let s ← splitTyped plan stageBlocks
-  match emitParts s with
+  let frames := (← rt.bufferLength).toNat
+  match emitJit (← splitTyped plan stageBlocks) frames with
   | .error e => throw <| IO.userError s!"StagedLoad: {e}"
-  | .ok parts =>
-    dumpParts parts
-    rt.loadIrStaged parts.audioIr "" parts.coefficientIr parts.manifest
+  | .ok parts => publish rt parts
 
-/-- Typed split + emit + dual load (JIT + Metal). MSL is emitted from the
-    *audio* plan: scalar coefficients cross to the GPU as host-written
-    slots, and hoisted coefficient COLUMNS (banks-as-data) cross via the
-    packed `coeff_columns` buffer — the runtime uploads the captured
-    generation per dispatch, f64→f32. The same typed split a live
-    session runs on `TROPICAL_BACKEND=metal`. -/
+/-- Typed split + emit + dual load (JIT + Metal). The MSL kernel reads the
+    slot vector and the hoisted coefficient columns the host computes with
+    the artifact's stage-0 pre-pass, f64 on the CPU, narrowed per dispatch. -/
 def loadMslTyped (rt : Tropical.Ffi.Runtime) (plan : FlatPlan)
     (stageBlocks : Array (Array (Option Tropical.Ir.Stage))) : IO Unit := do
-  let s ← splitTyped plan stageBlocks
-  match emitMetalParts s with
+  let frames := (← rt.bufferLength).toNat
+  match emitMetal (← splitTyped plan stageBlocks) frames with
   | .error e => throw <| IO.userError s!"StagedLoad (msl): {e}"
-  | .ok parts =>
-    dumpMetalParts parts
-    if parts.tileIr.isEmpty then
-      rt.loadIrTimeStaged parts.audioIr parts.msl parts.coefficientIr
-        parts.tileIr parts.manifest
-    else
-      let exact ← match emitParts s with
-        | .error e => throw <| IO.userError s!"StagedLoad (exact): {e}"
-        | .ok value => pure value
-      dumpExactParts exact
-      let _ ← rt.loadIrTimeStagedWithObservationGeneration
-        parts.audioIr parts.msl parts.coefficientIr parts.tileIr parts.manifest
-        exact.audioIr exact.coefficientIr exact.manifest
-      pure ()
+  | .ok parts => publish rt parts
 
 end Tropical.StagedLoad

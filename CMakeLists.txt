@@ -10,7 +10,7 @@ endif()
 
 option(TROPICAL_BUILD_PYTHON "Build ctypes-based Python package support (installs tropical/ package)" ON)
 option(TROPICAL_LLVM_STATIC "Link LLVM statically into libtropical for self-contained wheel distribution" OFF)
-option(TROPICAL_WASM_EMIT "Build the in-process IR→wasm emitter (links the LLVM WebAssembly backend + lld as a library). Needed by the build-time compile-wasm tool, not by the shipped audio runtime." OFF)
+option(TROPICAL_WASM_EMIT "Build the in-process IR→wasm emitter into libtropical_wasm (links the LLVM WebAssembly backend + lld as a library). Needed by the build-time compile-wasm tool; libtropical, the audio runtime, never links it either way." OFF)
 option(TROPICAL_METAL "Build the Metal compute backend (Apple only): MSL kernels compiled at runtime, audio dispatched per-block on the GPU. The JIT stays dual-loaded for render_window/goldens." OFF)
 option(TROPICAL_TSAN "Instrument the runtime process tests with ThreadSanitizer." OFF)
 
@@ -67,8 +67,7 @@ if(TROPICAL_METAL)
     set(CMAKE_OBJCXX_STANDARD 20)
     target_sources(tropical_core PRIVATE
         engine/metal/MetalKernel.mm
-        engine/metal/MetalRenderWorker.cpp
-        engine/metal/PhaserHigherOrderMaterializer.cpp)
+        engine/metal/MetalRenderWorker.cpp)
     set_source_files_properties(engine/metal/MetalKernel.mm PROPERTIES
         COMPILE_OPTIONS "-fobjc-arc")
     target_link_libraries(tropical_core PRIVATE
@@ -86,60 +85,6 @@ if(TROPICAL_METAL)
     target_link_libraries(msl_check PRIVATE
         "-framework Metal"
         "-framework Foundation")
-endif()
-
-if(TROPICAL_WASM_EMIT)
-    if(LLVM_PACKAGE_VERSION VERSION_LESS 21)
-        message(FATAL_ERROR "TROPICAL_WASM_EMIT needs LLVM >= 21 (modern Triple / "
-            "createTargetMachine API); found ${LLVM_PACKAGE_VERSION}. Build with "
-            "-DTROPICAL_WASM_EMIT=OFF for the JIT-only runtime.")
-    endif()
-    # In-process IR→wasm: the WebAssembly codegen backend (the same libLLVM
-    # the ORC JIT already links) plus lld's wasm driver as a library. No
-    # subprocess, no PATH, no version skew — the wasm comes out of the exact
-    # LLVM the JIT uses, which is what makes native≡wasm bit-exactness
-    # structural rather than coincidental. ~+3-4MB; gated so the shipped audio
-    # runtime can exclude it and only the build-time `diffcli` carries it.
-    llvm_map_components_to_libnames(LLVM_WASM_LIBS
-        WebAssemblyCodeGen WebAssemblyDesc WebAssemblyInfo)
-    target_link_libraries(tropical_core PRIVATE ${LLVM_WASM_LIBS})
-
-    # lld ships in the `lld` keg on Homebrew and in llvm-N's libdir on apt.llvm.org,
-    # so hint both the Homebrew prefix and LLVM's own include/lib dirs (Linux).
-    find_path(LLD_INCLUDE_DIR lld/Common/Driver.h
-        HINTS /opt/homebrew/opt/lld/include ${LLVM_INCLUDE_DIRS} REQUIRED)
-    find_library(LLD_WASM_LIB lldWasm
-        HINTS /opt/homebrew/opt/lld/lib ${LLVM_LIBRARY_DIRS} REQUIRED)
-    find_library(LLD_COMMON_LIB lldCommon
-        HINTS /opt/homebrew/opt/lld/lib ${LLVM_LIBRARY_DIRS} REQUIRED)
-    target_include_directories(tropical_core PRIVATE ${LLD_INCLUDE_DIR})
-    if(APPLE)
-        # Homebrew's lld dylibs record their own libLLVM dependency, so linking
-        # the two lld libs is enough.
-        target_link_libraries(tropical_core PRIVATE ${LLD_WASM_LIB} ${LLD_COMMON_LIB})
-    else()
-        # apt.llvm.org ships lld + LLVM as *static* archives, and lld references
-        # the full target-init + LTO surface (99 LLVMInitialize* + 12 llvm::lto::*).
-        # Pull every LLVM static lib from llvm-config as raw -l flags — CMake
-        # preserves those in order, whereas it relocates imported targets (e.g.
-        # the names from llvm_map_components_to_libnames) out of an explicit
-        # --start-group. Wrap lld + LLVM in --start-group so the circular static
-        # archives resolve regardless of order.
-        execute_process(
-            COMMAND ${LLVM_TOOLS_BINARY_DIR}/llvm-config --link-static --libs all-targets lto
-            OUTPUT_VARIABLE TROPICAL_LLVM_ALL_LIBS
-            OUTPUT_STRIP_TRAILING_WHITESPACE)
-        separate_arguments(TROPICAL_LLVM_ALL_LIBS)
-        # `lto` → LLVMPasses references Polly (apt's LLVM is built with Polly
-        # linked into the pass pipeline), so -lPolly/-lPollyISL must resolve;
-        # CI installs libpolly-N-dev for the static archives.
-        target_link_libraries(tropical_core PRIVATE
-            "-L${LLVM_LIBRARY_DIRS}"
-            -Wl,--start-group
-            ${LLD_WASM_LIB} ${LLD_COMMON_LIB} ${TROPICAL_LLVM_ALL_LIBS}
-            -Wl,--end-group)
-    endif()
-    target_compile_definitions(tropical_core PRIVATE TROPICAL_WASM_EMIT)
 endif()
 
 if(TROPICAL_LLVM_STATIC)
@@ -162,6 +107,98 @@ target_compile_features(tropical_core PRIVATE cxx_std_20)
 target_link_libraries(tropical_core PRIVATE rtaudio nlohmann_json::nlohmann_json Threads::Threads)
 target_include_directories(tropical_core PRIVATE engine)
 set_target_properties(tropical_core PROPERTIES OUTPUT_NAME "tropical")
+
+# ---- libtropical_wasm — the IR→wasm toolchain ---------------------------------
+#
+# A library separate from the runtime: `diffcli compile-wasm` (the web build)
+# is the only binary that links it. libtropical never carries LLVM's
+# WebAssembly backend or lld, so the shipped audio runtime is toolchain-free by
+# construction (tools/check_runtime_deps.py checks the built artifacts). The
+# library is always built so the Lean link is unconditional; without
+# TROPICAL_WASM_EMIT it is a stub whose one entry point reports that it was
+# built without the emitter.
+add_library(tropical_wasm SHARED engine/toolchain/tropical_wasm.cpp)
+target_compile_features(tropical_wasm PRIVATE cxx_std_20)
+target_include_directories(tropical_wasm PRIVATE engine)
+set_target_properties(tropical_wasm PROPERTIES OUTPUT_NAME "tropical_wasm")
+# Only the C API leaves the library. The emitter links its own copy of LLVM
+# (static on Linux, static + lld's libLLVM on macOS) next to the runtime's; hiding
+# it keeps the two copies' registries (cl::opt, targets) from meeting in one
+# process.
+if(APPLE)
+    target_link_options(tropical_wasm PRIVATE
+        -Wl,-exported_symbols_list,${CMAKE_CURRENT_SOURCE_DIR}/cmake/tropical_wasm_exports.txt)
+elseif(UNIX)
+    target_link_options(tropical_wasm PRIVATE
+        -Wl,--exclude-libs,ALL
+        -Wl,--version-script,${CMAKE_CURRENT_SOURCE_DIR}/cmake/tropical_wasm.map)
+endif()
+
+if(TROPICAL_WASM_EMIT)
+    if(LLVM_PACKAGE_VERSION VERSION_LESS 21)
+        message(FATAL_ERROR "TROPICAL_WASM_EMIT needs LLVM >= 21 (modern Triple / "
+            "createTargetMachine API); found ${LLVM_PACKAGE_VERSION}. Build with "
+            "-DTROPICAL_WASM_EMIT=OFF for the JIT-only runtime.")
+    endif()
+    # In-process IR→wasm: the WebAssembly codegen backend (the same LLVM the
+    # ORC JIT links) plus lld's wasm driver as a library. No subprocess, no
+    # PATH, no version skew — the wasm comes out of the exact LLVM the JIT
+    # uses, which is what makes native≡wasm bit-exactness structural rather
+    # than coincidental.
+    target_sources(tropical_wasm PRIVATE engine/toolchain/WasmEmit.cpp)
+    target_include_directories(tropical_wasm PRIVATE ${LLVM_INCLUDE_DIRS})
+    target_compile_definitions(tropical_wasm PRIVATE ${LLVM_DEFINITIONS} TROPICAL_WASM_EMIT)
+    llvm_map_components_to_libnames(LLVM_WASM_LIBS
+        Core IRReader Support WebAssemblyCodeGen WebAssemblyDesc WebAssemblyInfo)
+
+    # lld ships in the `lld` keg on Homebrew and in llvm-N's libdir on apt.llvm.org,
+    # so hint both the Homebrew prefix and LLVM's own include/lib dirs (Linux).
+    find_path(LLD_INCLUDE_DIR lld/Common/Driver.h
+        HINTS /opt/homebrew/opt/lld/include ${LLVM_INCLUDE_DIRS} REQUIRED)
+    find_library(LLD_WASM_LIB lldWasm
+        HINTS /opt/homebrew/opt/lld/lib ${LLVM_LIBRARY_DIRS} REQUIRED)
+    find_library(LLD_COMMON_LIB lldCommon
+        HINTS /opt/homebrew/opt/lld/lib ${LLVM_LIBRARY_DIRS} REQUIRED)
+    target_include_directories(tropical_wasm PRIVATE ${LLD_INCLUDE_DIR})
+    if(APPLE)
+        # Homebrew's lld dylibs record their own libLLVM dependency, so linking
+        # the two lld libs is enough.
+        target_link_libraries(tropical_wasm PRIVATE
+            ${LLVM_WASM_LIBS} ${LLD_WASM_LIB} ${LLD_COMMON_LIB})
+    else()
+        # apt.llvm.org ships lld + LLVM as *static* archives, and lld references
+        # the full target-init + LTO surface (99 LLVMInitialize* + 12 llvm::lto::*).
+        # Pull every LLVM static lib from llvm-config as raw -l flags — CMake
+        # preserves those in order, whereas it relocates imported targets (e.g.
+        # the names from llvm_map_components_to_libnames) out of an explicit
+        # --start-group. Wrap lld + LLVM in --start-group so the circular static
+        # archives resolve regardless of order.
+        # `option` is lld's driver (OptTable), which `lto` does not pull in;
+        # --system-libs adds the compression libs (zlib, zstd) lld calls.
+        execute_process(
+            COMMAND ${LLVM_TOOLS_BINARY_DIR}/llvm-config --link-static --libs all-targets lto option
+            OUTPUT_VARIABLE TROPICAL_LLVM_ALL_LIBS
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+        separate_arguments(TROPICAL_LLVM_ALL_LIBS)
+        execute_process(
+            COMMAND ${LLVM_TOOLS_BINARY_DIR}/llvm-config --link-static --system-libs
+            OUTPUT_VARIABLE TROPICAL_LLVM_SYSTEM_LIBS
+            OUTPUT_STRIP_TRAILING_WHITESPACE)
+        separate_arguments(TROPICAL_LLVM_SYSTEM_LIBS)
+        # `lto` → LLVMPasses references Polly (apt's LLVM is built with Polly
+        # linked into the pass pipeline), so -lPolly/-lPollyISL must resolve;
+        # CI installs libpolly-N-dev for the static archives.
+        target_link_libraries(tropical_wasm PRIVATE
+            "-L${LLVM_LIBRARY_DIRS}"
+            -Wl,--start-group
+            ${LLD_WASM_LIB} ${LLD_COMMON_LIB} ${TROPICAL_LLVM_ALL_LIBS}
+            -Wl,--end-group
+            ${TROPICAL_LLVM_SYSTEM_LIBS})
+        # A shared library may otherwise leave symbols unresolved, to be found
+        # (or not) in whatever process loads it; refuse that at link time.
+        target_link_options(tropical_wasm PRIVATE -Wl,--no-undefined)
+    endif()
+endif()
 
 if(TROPICAL_TSAN)
     include(CheckCXXSourceCompiles)
@@ -197,6 +234,14 @@ if(TROPICAL_BUILD_TESTS)
         tropical_core nlohmann_json::nlohmann_json)
     add_test(NAME current_module_process COMMAND test_module_process)
 
+    if(TROPICAL_WASM_EMIT)
+        add_executable(test_wasm_emit engine/tests/test_wasm_emit.cpp)
+        target_include_directories(test_wasm_emit PRIVATE engine)
+        target_compile_features(test_wasm_emit PRIVATE cxx_std_20)
+        target_link_libraries(test_wasm_emit PRIVATE tropical_wasm)
+        add_test(NAME current_wasm_emit COMMAND test_wasm_emit)
+    endif()
+
     if(TROPICAL_TSAN)
         target_compile_options(test_epoch_tile_queue PRIVATE -fsanitize=thread)
         target_link_options(test_epoch_tile_queue PRIVATE -fsanitize=thread)
@@ -210,15 +255,6 @@ if(TROPICAL_BUILD_TESTS)
             USES_TERMINAL)
     endif()
     if(TROPICAL_METAL)
-        add_executable(test_phaser_higher_order_materializer
-            engine/tests/test_phaser_higher_order_materializer.cpp
-            engine/metal/PhaserHigherOrderMaterializer.cpp)
-        target_include_directories(test_phaser_higher_order_materializer
-            PRIVATE engine)
-        target_compile_features(test_phaser_higher_order_materializer PRIVATE cxx_std_20)
-        add_test(NAME current_phaser_higher_order_materializer
-            COMMAND test_phaser_higher_order_materializer)
-
         add_executable(test_metal_render_worker
             engine/tests/test_metal_render_worker.cpp)
         target_include_directories(test_metal_render_worker

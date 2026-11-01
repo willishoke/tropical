@@ -26,6 +26,7 @@ structure Context where
   paramHandles : Array (Nat × String) := #[]
   paramSlots : Array (Nat × Nat) := #[]
   nestedOutputSlots? : Option (Array (Nat × Array (Nat × Nat))) := none
+  nestedOutputTypes : Array (Nat × Array (Nat × ScalarType)) := #[]
   nestedInputSlots : Array (Nat × Array (Nat × Nat)) := #[]
   inputSlotOverride : Array (Nat × Nat) := #[]
   inputArraySlots : Array (Nat × ArraySlotInfo) := #[]
@@ -86,6 +87,7 @@ def compileResolved (prog : CoreProgram) (arena : Tropical.Ir.ExprArena)
     paramHandles := ctx.paramHandles
     paramSlots := ctx.paramSlots
     nestedOutputSlots? := ctx.nestedOutputSlots?
+    nestedOutputTypes := ctx.nestedOutputTypes
     nestedInputSlots := ctx.nestedInputSlots
     inputSlotOverride := ctx.inputSlotOverride
     inputArraySlots := ctx.inputArraySlots
@@ -106,7 +108,6 @@ def compileResolved (prog : CoreProgram) (arena : Tropical.Ir.ExprArena)
     perChildPreInput := program.perChildPreInput
     outputTargets := program.outputTargets
     arraySlotNames := #[]
-    tileArraySlots := program.tileArraySlots
     instrStages := program.instrStages
     perChildPreInputStages := program.perChildPreInputStages }
 

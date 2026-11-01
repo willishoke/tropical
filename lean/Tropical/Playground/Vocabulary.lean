@@ -57,9 +57,9 @@ def phaseCorr (pitchE freqInit : Sig) : Clock → BuildM Sig :=
     let difference ← sub pitchE freqInit
     let shiftFloat ← toFloatE shift
     let numerator ← mul difference shiftFloat
-    let twoPow32 ← lit 4294967296
+    let clockScale ← clockOneLit
     let sr ← sampleRate
-    let denominator ← mul twoPow32 sr
+    let denominator ← mul clockScale sr
     div numerator denominator
 
 abbrev Anchor := Sig × Sig
@@ -104,8 +104,8 @@ def pluckedVoiceE (pitchE morphE eventRateE : Sig)
 def deltaOf (secondsE : Sig) : BuildM Sig := do
   let sr ← sampleRate
   let samples ← mul secondsE sr
-  let twoPow32 ← lit 4294967296
-  let fixed ← mul samples twoPow32
+  let clockScale ← clockOneLit
+  let fixed ← mul samples clockScale
   toIntE fixed
 
 def gPow (g : Sig) (k : Nat) : BuildM Sig := do
@@ -283,11 +283,10 @@ def glideExprAt (pidx : String → Option Nat) (base : String)
   let ramp ← mul delta smooth
   add v0 ramp
 
-def q32DeltaSamples (coordinateQ originQ : Sig) : BuildM Sig := do
+def clockDeltaSamples (coordinateQ originQ : Sig) : BuildM Sig := do
   let delta ← sub coordinateQ originQ
   let delta ← toFloatE delta
-  let scale ← lit 4294967296
-  div delta scale
+  div delta (← clockOneLit)
 
 def glideExprQAt (pidx : String → Option Nat) (base : String)
     (dflt coordinateQ : Sig) : BuildM Sig := do
@@ -296,12 +295,11 @@ def glideExprQAt (pidx : String → Option Nat) (base : String)
   let zero ← lit 0
   let t0 ← pref pidx s!"{base}#t0" zero
   let exactNames := (Array.range 4).map fun i => s!"{base}#t0#u{i}"
-  let qScale ← lit 4294967296
+  let qScale ← clockOneLit
   let elapsed ← if exactNames.all (fun name => (pidx name).isSome) then do
       let exact ← exactI64Companion pidx s!"{base}#t0"
-      let thirtyTwo ← lit 32
-      let origin ← lshift exact thirtyTwo
-      q32DeltaSamples coordinateQ origin
+      let origin ← lshift exact (← clockFracLit)
+      clockDeltaSamples coordinateQ origin
     else do
       let coordinate ← toFloatE coordinateQ
       let samples ← div coordinate qScale

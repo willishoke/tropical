@@ -1,13 +1,14 @@
 /**
  * @tropical/runtime-wasm (in-repo for now) — the browser-side consumer of
- * tropical's wasm codegen. Depends only on the KernelManifest contract; knows
- * nothing of tropical_plan_6 or the compiler. Extract to its own package when
+ * tropical's wasm codegen. Depends only on the `tropical_kernel_1` contract
+ * (design/typed-kernel.md); knows nothing of the compiler. Extract to its own package when
  * a second consumer appears (see design notes / CLAUDE.md).
  */
-export type { KernelManifest } from './manifest.js'
+export type { KernelManifest, KernelPort, KernelElem, KernelRole } from './manifest.js'
 export {
-  kernelOutputChannelCount, MAX_KERNEL_OUTPUT_CHANNELS,
+  kernelFrames, kernelParams, kernelOutputChannelCount,
+  MAX_KERNEL_OUTPUT_CHANNELS, CLOCK_FRAC_BITS, TAU_ELEM,
 } from './manifest.js'
 export type { KernelLayout } from './layout.js'
 export { computeLayout } from './layout.js'
-export { WasmKernel } from './kernel.js'
+export { WasmKernel, importedMemoryMinPages } from './kernel.js'

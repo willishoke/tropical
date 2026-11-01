@@ -4,7 +4,7 @@ import Tropical.PlanDecode
 /-!
 # Plan output-layout contract fixtures
 
-Pure compile-time checks for Plan-6 mono compatibility and canonical
+Pure compile-time checks for Plan-7 mono compatibility and canonical
 multichannel sink grouping. Native output-buffer behavior belongs to the
 emitter/runtime integration lane.
 -/

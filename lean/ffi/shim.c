@@ -76,32 +76,16 @@ LEAN_EXPORT lean_obj_res shim_runtime_new(uint32_t buffer_length, lean_obj_arg w
   return lean_io_result_mk_ok(lean_alloc_external(runtime_class(), r));
 }
 
-LEAN_EXPORT lean_obj_res shim_runtime_load_ir_staged(b_lean_obj_arg rt, b_lean_obj_arg ir,
-                                                     b_lean_obj_arg msl, b_lean_obj_arg coeff,
-                                                     b_lean_obj_arg manifest, lean_obj_arg world) {
+LEAN_EXPORT lean_obj_res shim_runtime_load(b_lean_obj_arg rt, b_lean_obj_arg ir,
+                                           b_lean_obj_arg msl, b_lean_obj_arg stage0,
+                                           b_lean_obj_arg manifest, lean_obj_arg world) {
   (void)world;
   const char *i = lean_string_cstr(ir);
   const char *g = lean_string_cstr(msl);
-  const char *c = lean_string_cstr(coeff);
+  const char *c = lean_string_cstr(stage0);
   const char *m = lean_string_cstr(manifest);
-  bool ok = tropical_runtime_load_ir_staged(unwrap(rt), i, strlen(i), g, strlen(g),
-                                            c, strlen(c), m, strlen(m));
-  return lean_io_result_mk_ok(lean_box(ok));
-}
-
-LEAN_EXPORT lean_obj_res shim_runtime_load_ir_time_staged(
-    b_lean_obj_arg rt, b_lean_obj_arg ir, b_lean_obj_arg msl,
-    b_lean_obj_arg coeff, b_lean_obj_arg tile,
-    b_lean_obj_arg manifest, lean_obj_arg world) {
-  (void)world;
-  const char *i = lean_string_cstr(ir);
-  const char *g = lean_string_cstr(msl);
-  const char *c = lean_string_cstr(coeff);
-  const char *t = lean_string_cstr(tile);
-  const char *m = lean_string_cstr(manifest);
-  bool ok = tropical_runtime_load_ir_time_staged(
-      unwrap(rt), i, strlen(i), g, strlen(g), c, strlen(c),
-      t, strlen(t), m, strlen(m));
+  bool ok = tropical_runtime_load(unwrap(rt), i, strlen(i), g, strlen(g),
+                                  c, strlen(c), m, strlen(m));
   return lean_io_result_mk_ok(lean_box(ok));
 }
 
@@ -113,82 +97,38 @@ static lean_obj_res box_runtime_generation(
   return pair;
 }
 
-LEAN_EXPORT lean_obj_res shim_runtime_load_ir_staged_generation(
+LEAN_EXPORT lean_obj_res shim_runtime_load_generation(
     b_lean_obj_arg rt, b_lean_obj_arg ir, b_lean_obj_arg msl,
-    b_lean_obj_arg coeff, b_lean_obj_arg manifest, lean_obj_arg world) {
+    b_lean_obj_arg stage0, b_lean_obj_arg manifest, lean_obj_arg world) {
   (void)world;
   const char *i = lean_string_cstr(ir);
   const char *g = lean_string_cstr(msl);
-  const char *c = lean_string_cstr(coeff);
+  const char *c = lean_string_cstr(stage0);
   const char *m = lean_string_cstr(manifest);
   tropical_runtime_generation_t generation = {0, 0};
-  bool ok = tropical_runtime_load_ir_staged_generation(
+  bool ok = tropical_runtime_load_generation(
       unwrap(rt), i, strlen(i), g, strlen(g), c, strlen(c), m, strlen(m),
       &generation);
   if (!ok) return io_err(tropical_last_error());
   return lean_io_result_mk_ok(box_runtime_generation(&generation));
 }
 
-LEAN_EXPORT lean_obj_res shim_runtime_load_ir_time_staged_generation(
-    b_lean_obj_arg rt, b_lean_obj_arg ir, b_lean_obj_arg msl,
-    b_lean_obj_arg coeff, b_lean_obj_arg tile,
-    b_lean_obj_arg manifest, lean_obj_arg world) {
-  (void)world;
-  const char *i = lean_string_cstr(ir);
-  const char *g = lean_string_cstr(msl);
-  const char *c = lean_string_cstr(coeff);
-  const char *t = lean_string_cstr(tile);
-  const char *m = lean_string_cstr(manifest);
-  tropical_runtime_generation_t generation = {0, 0};
-  bool ok = tropical_runtime_load_ir_time_staged_generation(
-      unwrap(rt), i, strlen(i), g, strlen(g), c, strlen(c),
-      t, strlen(t), m, strlen(m), &generation);
-  if (!ok) return io_err(tropical_last_error());
-  return lean_io_result_mk_ok(box_runtime_generation(&generation));
-}
-
-LEAN_EXPORT lean_obj_res shim_runtime_load_ir_staged_with_observation_generation(
+LEAN_EXPORT lean_obj_res shim_runtime_load_with_observation_generation(
     b_lean_obj_arg rt,
-    b_lean_obj_arg ir, b_lean_obj_arg msl, b_lean_obj_arg coeff,
+    b_lean_obj_arg ir, b_lean_obj_arg msl, b_lean_obj_arg stage0,
     b_lean_obj_arg manifest, b_lean_obj_arg observation_ir,
-    b_lean_obj_arg observation_coeff, b_lean_obj_arg observation_manifest,
-    lean_obj_arg world) {
-  (void)world;
-  const char *i = lean_string_cstr(ir);
-  const char *g = lean_string_cstr(msl);
-  const char *c = lean_string_cstr(coeff);
-  const char *m = lean_string_cstr(manifest);
-  const char *oi = lean_string_cstr(observation_ir);
-  const char *oc = lean_string_cstr(observation_coeff);
-  const char *om = lean_string_cstr(observation_manifest);
-  tropical_runtime_generation_t generation = {0, 0};
-  bool ok = tropical_runtime_load_ir_staged_with_observation_generation(
-      unwrap(rt), i, strlen(i), g, strlen(g), c, strlen(c), m, strlen(m),
-      oi, strlen(oi), oc, strlen(oc), om, strlen(om), &generation);
-  if (!ok) return io_err(tropical_last_error());
-  return lean_io_result_mk_ok(box_runtime_generation(&generation));
-}
-
-LEAN_EXPORT lean_obj_res shim_runtime_load_ir_time_staged_with_observation_generation(
-    b_lean_obj_arg rt,
-    b_lean_obj_arg ir, b_lean_obj_arg msl, b_lean_obj_arg coeff,
-    b_lean_obj_arg tile, b_lean_obj_arg manifest,
-    b_lean_obj_arg observation_ir, b_lean_obj_arg observation_coeff,
     b_lean_obj_arg observation_manifest, lean_obj_arg world) {
   (void)world;
   const char *i = lean_string_cstr(ir);
   const char *g = lean_string_cstr(msl);
-  const char *c = lean_string_cstr(coeff);
-  const char *t = lean_string_cstr(tile);
+  const char *c = lean_string_cstr(stage0);
   const char *m = lean_string_cstr(manifest);
   const char *oi = lean_string_cstr(observation_ir);
-  const char *oc = lean_string_cstr(observation_coeff);
   const char *om = lean_string_cstr(observation_manifest);
   tropical_runtime_generation_t generation = {0, 0};
-  bool ok = tropical_runtime_load_ir_time_staged_with_observation_generation(
-      unwrap(rt), i, strlen(i), g, strlen(g), c, strlen(c),
-      t, strlen(t), m, strlen(m), oi, strlen(oi), oc, strlen(oc),
-      om, strlen(om), &generation);
+  bool ok = tropical_runtime_load_with_observation_generation(
+      unwrap(rt), i, strlen(i), g, strlen(g), c, strlen(c), m, strlen(m),
+      oi, strlen(oi), om, strlen(om), &generation);
   if (!ok) return io_err(tropical_last_error());
   return lean_io_result_mk_ok(box_runtime_generation(&generation));
 }
@@ -198,24 +138,6 @@ LEAN_EXPORT lean_obj_res shim_runtime_set_sample_index(b_lean_obj_arg rt, uint64
   (void)world;
   tropical_runtime_set_sample_index(unwrap(rt), idx);
   return lean_io_result_mk_ok(lean_box(0));
-}
-
-/* In-process IR→wasm (build-time tool). Empty ByteArray signals failure;
-   Lean reads tropical_last_error. */
-LEAN_EXPORT lean_obj_res shim_compile_ir_to_wasm(b_lean_obj_arg ir, lean_obj_arg world) {
-  (void)world;
-  const char *i = lean_string_cstr(ir);
-  size_t out_len = 0;
-  uint8_t *buf = tropical_compile_ir_to_wasm(i, strlen(i), &out_len);
-  lean_obj_res arr;
-  if (buf) {
-    arr = lean_alloc_sarray(1, out_len, out_len);
-    memcpy(lean_sarray_cptr(arr), buf, out_len);
-    tropical_free_buffer(buf);
-  } else {
-    arr = lean_alloc_sarray(1, 0, 0);
-  }
-  return lean_io_result_mk_ok(arr);
 }
 
 LEAN_EXPORT lean_obj_res shim_runtime_process(b_lean_obj_arg rt, lean_obj_arg world) {
@@ -240,6 +162,30 @@ LEAN_EXPORT lean_obj_res shim_runtime_output_bytes(b_lean_obj_arg rt, lean_obj_a
   size_t bytes = (size_t)len * sizeof(double);
   lean_obj_res arr = lean_alloc_sarray(1, bytes, bytes);
   if (buf && bytes) memcpy(lean_sarray_cptr(arr), buf, bytes);
+  return lean_io_result_mk_ok(arr);
+}
+
+/* Render explicit Q48.16 coordinates — a little-endian i64 ByteArray — against
+   the observation artifact. Returns channel-major little-endian f64s
+   (count × channels), or the runtime's error. */
+LEAN_EXPORT lean_obj_res shim_runtime_render_tau(b_lean_obj_arg rt, b_lean_obj_arg tau,
+                                                 b_lean_obj_arg channels,
+                                                 lean_obj_arg world) {
+  (void)world;
+  size_t count = lean_sarray_size(tau) / sizeof(int64_t);
+  size_t n = lean_array_size(channels);
+  unsigned int ids[64];
+  if (n > 64) return io_err("render_tau: more than 64 channels");
+  for (size_t i = 0; i < n; i++)
+    ids[i] = lean_unbox_uint32(lean_array_get_core(channels, i));
+  size_t bytes = count * n * sizeof(double);
+  lean_obj_res arr = lean_alloc_sarray(1, bytes, bytes);
+  if (!tropical_runtime_render_tau(unwrap(rt), (const int64_t *)lean_sarray_cptr(tau),
+                                   (unsigned int)count, ids, (unsigned int)n,
+                                   (double *)lean_sarray_cptr(arr))) {
+    lean_dec(arr);
+    return io_err(tropical_last_error());
+  }
   return lean_io_result_mk_ok(arr);
 }
 
@@ -281,6 +227,21 @@ LEAN_EXPORT lean_obj_res shim_runtime_set_slot(b_lean_obj_arg rt, uint32_t idx, 
   (void)world;
   tropical_runtime_set_slot(unwrap(rt), idx, value);
   return lean_io_result_mk_ok(lean_box(0));
+}
+
+LEAN_EXPORT lean_obj_res shim_runtime_set_param(b_lean_obj_arg rt, b_lean_obj_arg name,
+                                                double value, lean_obj_arg world) {
+  (void)world;
+  tropical_param_write_t write = {0, 0};
+  int status = tropical_runtime_set_param(unwrap(rt), lean_string_cstr(name), value, &write);
+  if (status < 0) return io_err(tropical_last_error());
+  if (status == 0) return lean_io_result_mk_ok(lean_box(0)); /* Option.none */
+  lean_obj_res pair = lean_alloc_ctor(0, 2, 0);
+  lean_ctor_set(pair, 0, lean_box_uint64(write.observed_sample_index));
+  lean_ctor_set(pair, 1, lean_box_uint64(write.effective_sample_index));
+  lean_obj_res some = lean_alloc_ctor(1, 1, 0);
+  lean_ctor_set(some, 0, pair);
+  return lean_io_result_mk_ok(some);
 }
 
 LEAN_EXPORT lean_obj_res shim_runtime_get_slot(b_lean_obj_arg rt, uint32_t idx,

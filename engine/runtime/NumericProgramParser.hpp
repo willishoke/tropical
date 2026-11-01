@@ -1,7 +1,7 @@
 #pragma once
 
 /**
- * NumericProgramParser.hpp — Parse `tropical_plan_6` JSON metadata.
+ * NumericProgramParser.hpp — Parse `tropical_plan_7` JSON metadata.
  *
  * Thin deserialiser. Since Phase 2 (Lean owns codegen) this is the
  * *manifest reader*: load_ir consumes the plan's metadata — temp pool size
@@ -14,6 +14,7 @@
  */
 
 #include "jit/OrcJitEngine.hpp"
+#include "runtime/ClockFormat.hpp"
 
 #include <algorithm>
 #include <nlohmann/json.hpp>
@@ -22,7 +23,7 @@
 #include <unordered_map>
 #include <vector>
 
-namespace tropical_plan6
+namespace tropical_plan7
 {
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -158,18 +159,15 @@ inline tropical_jit::FlatInstr parse_instr(const nlohmann::json & ji)
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
-// Parsed plan_6 result
+// Parsed plan_7 result
 // ─────────────────────────────────────────────────────────────────────────────
 
-struct ParsedPlan6
+struct ParsedPlan7
 {
   tropical_jit::FlatProgram                program;
   std::vector<std::string>                 array_slot_names;
   double                                   sample_rate = 44100.0;
   uint32_t                                 output_channel_count = 1;
-
-  // Engine realization strategy. Canonical fused plans omit the field.
-  tropical_jit::CompilationMode compilation_mode = tropical_jit::CompilationMode::Fused;
 
   // Inter-module slot array.
   uint32_t                 slot_count = 0;
@@ -194,23 +192,19 @@ struct ParsedPlan6
   // kernel reads a whole, consistent generation of columns across a live knob
   // move. An absent field is the canonical empty table.
   std::vector<uint32_t> coeff_array_slots;
-  std::vector<uint32_t> tile_array_slots;
-  uint32_t tile_interval_frames = 0;
-  std::string phaser_time_staging;
   bool metal_sample_threadgroups = false;
   uint32_t metal_threadgroup_scratch_bytes = 0;
 };
 
-// Parse the optional `compilation_mode` JSON string. Fails closed on
-// unknown values — mirrors parseCompilationMode in compiler/flat_plan.ts.
-inline tropical_jit::CompilationMode parse_compilation_mode(const nlohmann::json & plan)
+// `fused` is the only realization a host accepts (design/typed-kernel.md);
+// the canonical plan omits the field.
+inline void require_fused_realization(const nlohmann::json & plan)
 {
-  if (!plan.contains("compilation_mode")) return tropical_jit::CompilationMode::Fused;
+  if (!plan.contains("compilation_mode")) return;
   const std::string s = plan["compilation_mode"].get<std::string>();
-  if (s == "fused")             return tropical_jit::CompilationMode::Fused;
-  if (s == "microkernel")       return tropical_jit::CompilationMode::Microkernel;
-  if (s == "microkernel-deep")  return tropical_jit::CompilationMode::MicrokernelDeep;
-  throw std::runtime_error("NumericProgramParser: unknown compilation_mode '" + s + "'");
+  if (s == "fused") return;
+  throw std::runtime_error(
+    "NumericProgramParser: realization '" + s + "' is not a host-visible mode (fused only)");
 }
 
 inline void reject_retired_fields(const nlohmann::json & plan)
@@ -230,7 +224,7 @@ inline void reject_retired_fields(const nlohmann::json & plan)
     if (plan.contains(field))
       throw std::runtime_error(
         std::string{"NumericProgramParser: retired field '"} + field +
-        "' is not valid in tropical_plan_6");
+        "' is not valid in tropical_plan_7");
 }
 
 /** Parse a single `InstanceProgram` from JSON, recursing into nested
@@ -246,7 +240,7 @@ inline tropical_jit::InstanceProgram parse_instance_program(const nlohmann::json
     for (const auto & ji : jf["instructions"])
       inst.instructions.push_back(parse_instr(ji));
   // Slot-based parent→child input wiring. Empty arrays are omitted by the
-  // canonical Plan-6 encoder. Same instruction
+  // canonical Plan-7 encoder. Same instruction
   // shape as `instructions`; difference is purely WHEN they emit —
   // the parent's emit_kernel_block runs each child's
   // pre_input_instructions immediately before recursing into that
@@ -323,13 +317,13 @@ inline bool has_coop_reduce(const tropical_jit::InstanceProgram & inst,
   return false;
 }
 
-/** Parse a tropical_plan_6 JSON object. The C++ side supports nested
+/** Parse a tropical_plan_7 JSON object. The C++ side supports nested
  *  `instance_functions` (the fractal architecture): each function may
  *  have `children: InstanceFunction[]` that emit recursively inside the
  *  parent's body. Canonical leaf kernels omit `children`. */
-inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
+inline ParsedPlan7 parse_plan7(const nlohmann::json & plan)
 {
-  ParsedPlan6 result;
+  ParsedPlan7 result;
   reject_retired_fields(plan);
 
   if (plan.contains("metal_execution"))
@@ -354,7 +348,7 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
   result.sample_rate = plan.value("config", nlohmann::json::object())
                            .value("sampleRate", 44100.0);
 
-  result.compilation_mode = parse_compilation_mode(plan);
+  require_fused_realization(plan);
 
   if (plan.contains("array_slot_names"))
     for (const auto & n : plan["array_slot_names"])
@@ -363,7 +357,7 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
   auto & prog = result.program;
   prog.register_count = plan.value("register_count", 0u);
 
-  // The field is optional for Plan-6 backward compatibility: every historical
+  // The field is optional for backward compatibility: every historical
   // manifest was mono. New manifests state the compact output width explicitly.
   result.output_channel_count = plan.value("output_channel_count", 1u);
   if (result.output_channel_count == 0
@@ -399,7 +393,7 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
   if (cooperative && (!result.metal_sample_threadgroups
                       || result.metal_threadgroup_scratch_bytes == 0))
     throw std::runtime_error(
-      "NumericProgramParser: routed or wide-bank Plan 6 requires cooperative Metal execution metadata");
+      "NumericProgramParser: routed or wide-bank Plan 7 requires cooperative Metal execution metadata");
   if (!cooperative && result.metal_sample_threadgroups)
     throw std::runtime_error(
       "NumericProgramParser: cooperative Metal execution requires a routed region or a wide reduce");
@@ -429,8 +423,8 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
     }
   }
 
-  // ── sources: runtime-bound inputs (the dual of sinks). The Plan-6 encoder
-  //    omits the canonical pair [tick, rate], which is restored here. ──
+  // ── sources: runtime-bound inputs (the dual of sinks). The Plan-7 encoder
+  //    omits the canonical pair [tau, rate], which is restored here. ──
   if (plan.contains("sources"))
   {
     for (const auto & js : plan["sources"])
@@ -438,14 +432,10 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
       tropical_jit::Source src;
       const std::string k = js.is_string()
         ? js.get<std::string>() : js.value("kind", std::string{});
-      if (k == "tick")
-        src.kind = tropical_jit::SourceKind::Tick;
+      if (k == "tau")
+        src.kind = tropical_jit::SourceKind::Tau;
       else if (k == "rate")
         src.kind = tropical_jit::SourceKind::Rate;
-      else if (k == "tile_phase")
-        src.kind = tropical_jit::SourceKind::TilePhase;
-      else if (k == "tile_tick")
-        src.kind = tropical_jit::SourceKind::TileTick;
       else
         throw std::runtime_error(
           "NumericProgramParser: unknown source kind '" + k + "'");
@@ -454,7 +444,7 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
   }
   else
   {
-    prog.sources.push_back({ tropical_jit::SourceKind::Tick });
+    prog.sources.push_back({ tropical_jit::SourceKind::Tau });
     prog.sources.push_back({ tropical_jit::SourceKind::Rate });
   }
 
@@ -472,7 +462,7 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
   if (plan.contains("param_disciplines"))
     for (const auto & d : plan["param_disciplines"])
     {
-      ParsedPlan6::ParamDiscipline pd;
+      ParsedPlan7::ParamDiscipline pd;
       pd.name       = d.value("name", std::string{});
       pd.discipline = d.value("discipline", std::string{"raw"});
       pd.glide_dur_sec = d.value("glide_dur_sec", 0.0);
@@ -485,14 +475,99 @@ inline ParsedPlan6 parse_plan6(const nlohmann::json & plan)
   if (plan.contains("coeff_array_slots"))
     for (const auto & s : plan["coeff_array_slots"])
       result.coeff_array_slots.push_back(s.get<uint32_t>());
-  if (plan.contains("tile_array_slots"))
-    for (const auto & s : plan["tile_array_slots"])
-      result.tile_array_slots.push_back(s.get<uint32_t>());
-  result.tile_interval_frames = plan.value("tile_interval_frames", 0u);
-  result.phaser_time_staging =
-    plan.value("phaser_time_staging", std::string{});
 
   return result;
 }
 
-} // namespace tropical_plan6
+// ─────────────────────────────────────────────────────────────────────────────
+// tropical_kernel_1 — the port manifest (design/typed-kernel.md)
+// ─────────────────────────────────────────────────────────────────────────────
+
+// What a host reads from a kernel manifest: the frame count the kernel was
+// compiled for, its rate, the input names in port order (`tau` first, then
+// the params), the output's channel names, and the nested plan whose slot
+// table, defaults, disciplines and array metadata the host still uses to
+// hold controls and (for Metal) run the pre-pass.
+struct ParsedKernel1
+{
+  uint32_t frames = 0;
+  double rate = 44100.0;
+  uint32_t output_channel_count = 1;
+  std::vector<std::string> input_names;      // [0] = "tau"
+  std::vector<std::string> output_channels;  // one name per channel ("" = silent)
+  ParsedPlan7 plan;
+};
+
+inline ParsedKernel1 parse_kernel1(const nlohmann::json & manifest)
+{
+  ParsedKernel1 result;
+  const std::string schema = manifest.value("schema", std::string{});
+  if (schema != "tropical_kernel_1")
+    throw std::runtime_error(
+      "NumericProgramParser: unsupported manifest schema '" + schema +
+      "'; expected 'tropical_kernel_1'");
+  if (!manifest.contains("plan"))
+    throw std::runtime_error("NumericProgramParser: kernel manifest has no plan");
+  const std::string plan_schema =
+    manifest.at("plan").value("schema", std::string{});
+  if (plan_schema == "tropical_plan_6")
+    throw std::runtime_error(
+      "NumericProgramParser: unsupported manifest schema 'tropical_plan_6'; "
+      "expected 'tropical_plan_7' (plan 6's time source is the integer sample "
+      "index, plan 7's the fixed-point tau: recompile the patch)");
+  if (plan_schema != "tropical_plan_7")
+    throw std::runtime_error(
+      "NumericProgramParser: unsupported manifest schema '" + plan_schema +
+      "'; expected 'tropical_plan_7'");
+  result.plan = parse_plan7(manifest.at("plan"));
+  result.rate = manifest.value("rate", result.plan.sample_rate);
+
+  const auto & inputs = manifest.at("inputs");
+  if (!inputs.is_array() || inputs.empty())
+    throw std::runtime_error("NumericProgramParser: kernel manifest declares no inputs");
+  for (const auto & port : inputs)
+    result.input_names.push_back(port.at("name").get<std::string>());
+  const auto & tau = inputs.at(0);
+  if (result.input_names[0] != "tau"
+      || tau.value("elem", std::string{}) != tropical_clock::kTauElem
+      || !tau.contains("shape") || tau.at("shape").size() != 1)
+    throw std::runtime_error(
+      std::string("NumericProgramParser: kernel manifest's first input must be tau:")
+      + tropical_clock::kTauElem + "[frames] (recompile a manifest built for another clock format)");
+  result.frames = tau.at("shape").at(0).get<uint32_t>();
+  if (result.frames == 0)
+    throw std::runtime_error("NumericProgramParser: kernel frames must be positive");
+  for (std::size_t i = 1; i < inputs.size(); ++i)
+  {
+    const auto & port = inputs.at(i);
+    if (port.value("elem", std::string{}) != "f64" || !port.contains("shape")
+        || !port.at("shape").empty() || port.value("role", std::string{}) != "param")
+      throw std::runtime_error(
+        "NumericProgramParser: kernel input '" + result.input_names[i]
+        + "' is not a scalar f64 param (this host binds params only)");
+  }
+
+  const auto & outputs = manifest.at("outputs");
+  if (!outputs.is_array() || outputs.size() != 1)
+    throw std::runtime_error("NumericProgramParser: kernel manifest must declare one output");
+  const auto & out = outputs.at(0);
+  if (out.value("elem", std::string{}) != "f64" || !out.contains("shape")
+      || out.at("shape").size() != 2
+      || out.at("shape").at(0).get<uint32_t>() != result.frames)
+    throw std::runtime_error(
+      "NumericProgramParser: kernel output must be f64[frames, channels]");
+  result.output_channel_count = out.at("shape").at(1).get<uint32_t>();
+  if (result.output_channel_count == 0
+      || result.output_channel_count > tropical_jit::kMaxOutputChannels)
+    throw std::runtime_error("NumericProgramParser: kernel output channel count out of range");
+  if (result.output_channel_count != result.plan.output_channel_count)
+    throw std::runtime_error(
+      "NumericProgramParser: kernel output width disagrees with the nested plan");
+  if (out.contains("channels"))
+    for (const auto & name : out.at("channels"))
+      result.output_channels.push_back(name.get<std::string>());
+  result.output_channels.resize(result.output_channel_count);
+  return result;
+}
+
+} // namespace tropical_plan7

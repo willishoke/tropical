@@ -1,18 +1,13 @@
 import Std.Data.HashMap
 import Tropical.Errors
-import Tropical.Ffi
 import Tropical.Expr
 import Tropical.Wiring
 import Tropical.Session
+import Tropical.Session.Compile
 import Tropical.Lowering
 import Tropical.Parse.Nodes
-import Tropical.Parse.Raise
-import Tropical.Ir.Strata
 import Tropical.Ir.Core
-import Tropical.Ir.WireProgram
-import Tropical.Ir.EmitLlvm
-import Tropical.Ir.EmitMsl
-import Tropical.StagedLoad
+import Tropical.HostPort
 import Tropical.Compile
 import Tropical.Entries
 import Tropical.Playground
@@ -20,13 +15,30 @@ import Tropical.Playground
 /-!
 # Engine.Core — session env, tool-arg access, and lookup vocabulary
 
-`Env` (the runtime handle: session store, native runtime, DAC, params) and
+`Env` (the runtime handle: session store, host port, DAC, params) and
 `EngineM`, plus the shared helpers every tool handler draws on: typed
 tool-argument access over `Json`, the instance/port lookup helpers with their
 ported failure shapes, and `adaptInputExpr` (input type-check + auto-broadcast).
 The helpers exposed here are the engine's shared vocabulary — non-`private`
 because every downstream handler module consumes them.
 -/
+
+namespace Tropical
+
+/-- The handler monad: tool logic that can fail with an envelope, over the
+    host's IO. The pure session logic runs in `Session.SessionM`; this is
+    the engine's lift of it onto a live host. -/
+abbrev EngineM := ExceptT Failure IO
+
+/-- Run a handler, framing success/failure as a ToolResult. IO exceptions
+    map to `internal_error`. -/
+def wrap (m : EngineM Lean.Json) : IO Lean.Json := do
+  match ← (try m.run catch e => pure (.error (.env
+      { code := .internalError, message := toString e, retryable := false }))) with
+  | .ok data   => pure (okResult data)
+  | .error f   => pure (failResult f)
+
+end Tropical
 
 namespace Tropical.Engine
 
@@ -36,14 +48,25 @@ open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
 
 structure Env where
   state   : IO.Ref SessionSt
-  /-- The native FlatRuntime this engine owns: plans load here; the DAC
-      reads from it; param slots are driven on it. -/
-  runtime : Ffi.Runtime
-  dac     : IO.Ref (Option Ffi.Dac)
-  /-- `TROPICAL_BACKEND=metal` at boot: every session compile dual-loads
-      (LLVM IR → JIT + MSL → GPU pipeline) and audio dispatches on Metal.
-      The JIT keeps serving render_window/the scope either way. -/
-  metalBackend : Bool := false
+  /-- The runtime this engine drives, as a port: plans publish here; the
+      DAC reads from it; param slots are driven on it. The composition root
+      (`Tropical.NativeBoot`) supplies it. -/
+  host    : Tropical.Host.HostPort
+  dac     : IO.Ref (Option Tropical.Host.OutputPort)
+  /-- Emission options the composition root chose (the stage-0 split). -/
+  artifact : Tropical.Artifact.Options := {}
+  /-- The stdlib arena `load_patch_graph` links against, built once at boot. -/
+  stdlib : Tropical.Playground.Stdlib
+
+/-- Run pure session logic against this engine's session. State written
+    before a failure is kept, exactly as when the logic wrote the ref
+    directly. -/
+def Env.session {α : Type} (env : Env) (m : Tropical.Session.SessionM α) : EngineM α := do
+  let (r, st) := m.runOn (← env.state.get)
+  env.state.set st
+  match r with
+  | .ok a => pure a
+  | .error f => throw f
 
 -- Reserved audio-output boundary leaf.
 def dacName : String := "dac"

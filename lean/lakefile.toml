@@ -8,11 +8,85 @@ name = "turnstile"
 git = "https://github.com/willishoke/turnstile"
 rev = "main"
 
-# The Tropical library — everything but the executable entry point. The
-# TS→Lean port lands here module by module (Json today; Errors, Session,
-# Engine, Ir/*, Strata/*, Emit/* as the phases proceed).
+# The Tropical libraries, layered so dependencies point inward. Membership
+# is by glob; the allowed direction between libraries is enforced by
+# `tools/check_layers.py` (run by `make validate`):
+#
+#   TropicalCore     the compiler: IR, lowering, emitters, semantics, the
+#                    pure session compile. Imports nothing outside itself.
+#                    Includes the host port the engine drives.
+#   TropicalHost     the runtime binding (Ffi), its HostPort adapter, and
+#                    the staged loaders.
+#   TropicalToolchain  the IR→wasm toolchain binding (libtropical_wasm).
+#                    Imports nothing; only `diffcli` links it.
+#   TropicalSession  the session engine and its MCP tools, resources and
+#                    RPC dispatch. Imports only the core: it reaches the
+#                    runtime through the port, never through Ffi.
+#   TropicalApp      composition roots: native boot, the MCP front door,
+#                    the control socket.
+#   TropicalTest     proofs, witnesses, the tropicaltest suites.
+#
+# Executable roots below may import any layer; only they link libtropical.
 [[lean_lib]]
-name = "Tropical"
+name = "TropicalCore"
+globs = [
+  "Tropical.Artifact",
+  "Tropical.Compile",
+  "Tropical.EmitArrow.*",
+  "Tropical.Entries",
+  "Tropical.Errors",
+  "Tropical.Exact.*",
+  "Tropical.Expr",
+  "Tropical.HostPort",
+  "Tropical.Ir.+",
+  "Tropical.Kernel",
+  "Tropical.Lowering",
+  "Tropical.Parse.+",
+  "Tropical.Plan",
+  "Tropical.PlanDecode",
+  "Tropical.Playground.*",
+  "Tropical.Semantics.*",
+  "Tropical.Session.*",
+  "Tropical.Stdlib",
+  "Tropical.StdlibChain",
+  "Tropical.WireExpr",
+  "Tropical.Wiring",
+]
+
+[[lean_lib]]
+name = "TropicalHost"
+globs = ["Tropical.Ffi", "Tropical.NativeHost", "Tropical.StagedLoad"]
+
+[[lean_lib]]
+name = "TropicalToolchain"
+globs = ["Tropical.Toolchain.+"]
+
+[[lean_lib]]
+name = "TropicalSession"
+globs = [
+  "Tropical.Engine.*",
+  "Tropical.Resources",
+  "Tropical.Rpc",
+  "Tropical.Tools",
+]
+
+[[lean_lib]]
+name = "TropicalApp"
+globs = [
+  "Tropical",
+  "Tropical.Frontend",
+  "Tropical.NativeBoot",
+  "Tropical.Serve",
+]
+
+[[lean_lib]]
+name = "TropicalTest"
+globs = [
+  "Tropical.Proofs",
+  "Tropical.Testing.+",
+  "Tropical.Trust",
+  "Tropical.Tropicaltest.+",
+]
 
 # Native link: the FFI shim object (built by `make lean` via leanc) and
 # libtropical from the CMake build. Paths are relative to this package
@@ -28,13 +102,14 @@ moreLinkArgs = [
 ]
 
 # Differential-harness verbs over the Lean-owned native runtime
-# (render-bytes → golden-hash gate).
+# (render-bytes → golden-hash gate), plus `compile-wasm`: the one binary that
+# links the IR→wasm toolchain (shim_wasm.o + libtropical_wasm).
 [[lean_exe]]
 name = "diffcli"
 root = "Diffcli"
 moreLinkArgs = [
-  "ffi/shim.o",
-  "-L../build", "-ltropical",
+  "ffi/shim.o", "ffi/shim_wasm.o",
+  "-L../build", "-ltropical", "-ltropical_wasm",
   "-Wl,-rpath,@executable_path/../../../../build",
 ]
 
@@ -54,14 +129,16 @@ moreLinkArgs = [
 name = "trustreport"
 root = "TrustReport"
 
-# Focused modal-phaser qualification runner.  Keeping this gate separate avoids
-# paying the full tropicaltest module-initialization cost during product-layout
-# iteration; the same gate is also called by the repository-wide runner.
+# The compiler alone: a patch to a kernel artifact with no runtime linked.
+# tools/check_layers.py keeps its import closure inside TropicalCore;
+# tools/check_artifact_parity.py checks its plans against the engine's.
 [[lean_exe]]
-name = "phasercheck"
-root = "Phasercheck"
-moreLinkArgs = [
-  "ffi/shim.o",
-  "-L../build", "-ltropical",
-  "-Wl,-rpath,@executable_path/../../../../build",
-]
+name = "tropicalc"
+root = "Tropicalc"
+
+# The core test tier: the gates that are statements about the compiler
+# alone, run with no runtime linked. tools/check_layers.py keeps its import
+# closure inside TropicalCore and TropicalTest.
+[[lean_exe]]
+name = "tropicaltest-core"
+root = "TropicaltestCore"

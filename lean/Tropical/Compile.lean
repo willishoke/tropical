@@ -1,6 +1,5 @@
 import Tropical.Lowering
 import Tropical.Ir.CompileResolved
-import Tropical.Ir.TileTime
 import Tropical.Plan
 
 /-!
@@ -372,7 +371,6 @@ structure PartitionResult where
   accumulators : Accumulators
   stageBlocks : Array (Array (Option Tropical.Ir.Stage))
   outputStages : Array Tropical.Ir.Stage
-  tileArraySlots : Array Nat := #[]
 
 private def instParts : CoreBodyDecl → Option (String × String)
   | .inst name typeKey _ => some (name, typeKey)
@@ -409,8 +407,8 @@ def partitionKernel (instancePath : String) (prog : CoreProgram)
   let mut children : Array InstanceFunction := #[]
   let mut childStageBlocks : Array (Array (Array (Option Tropical.Ir.Stage))) := #[]
   let mut childOutStages : Array (Array Tropical.Ir.Stage) := #[]
-  let mut childTileArraySlots : Array Nat := #[]
   let mut nestedOutputSlots : Array (Nat × Array (Nat × Nat)) := #[]
+  let mut nestedOutputTypes : Array (Nat × Array (Nat × Tropical.Ir.Emit.ScalarType)) := #[]
   let mut nestedInputSlots : Array (Nat × Array (Nat × Nat)) := #[]
   let mut nestedOutputArraySlots : Array (Nat × Array (Nat × ArraySlotInfo)) := #[]
   let mut nestedInputArraySlots : Array (Nat × Array (Nat × ArraySlotInfo)) := #[]
@@ -436,15 +434,20 @@ def partitionKernel (instancePath : String) (prog : CoreProgram)
     s ← allocateInputSlots s wires childPath declType
 
     let mut childOutputMap : Array (Nat × Nat) := #[]
+    let mut childOutputTypes : Array (Nat × Tropical.Ir.Emit.ScalarType) := #[]
     let mut childOutputArrayMap : Array (Nat × ArraySlotInfo) := #[]
     for i in [0:declType.outputs.size] do
       let outDecl := declType.outputs[i]!
       match lookupOutputSlot s childPath outDecl.name with
-      | some slot => childOutputMap := childOutputMap.push (i, slot)
+      | some slot =>
+        childOutputMap := childOutputMap.push (i, slot)
+        if let some (.scalar k) := outDecl.type? then
+          childOutputTypes := childOutputTypes.push (i, k)
       | none =>
         if let some info := lookupOutputArraySlot s childPath outDecl.name then
           childOutputArrayMap := childOutputArrayMap.push (i, info)
     nestedOutputSlots := nestedOutputSlots.push (k, childOutputMap)
+    nestedOutputTypes := nestedOutputTypes.push (k, childOutputTypes)
     nestedOutputArraySlots := nestedOutputArraySlots.push (k, childOutputArrayMap)
 
     let mut childInputMap : Array (Nat × Nat) := #[]
@@ -481,12 +484,12 @@ def partitionKernel (instancePath : String) (prog : CoreProgram)
     children := children.push child.instanceFunction
     childStageBlocks := childStageBlocks.push child.stageBlocks
     childOutStages := childOutStages.push child.outputStages
-    childTileArraySlots := childTileArraySlots ++ child.tileArraySlots
 
   -- ── 2. Compile this kernel's body. ──
   let ctx : Context := {
     paramSlots
     nestedOutputSlots? := some nestedOutputSlots
+    nestedOutputTypes
     nestedInputSlots
     inputSlotOverride
     inputArraySlots
@@ -552,15 +555,12 @@ def partitionKernel (instancePath : String) (prog : CoreProgram)
     nextRegRaw := acc.nextRegRaw + plan.registerCount
     nextArrayRaw := acc.nextArrayRaw + plan.arraySlotCount }
 
-  let tileArraySlots := childTileArraySlots ++ plan.tileArraySlots.map (arrayOffset + ·)
-
   return {
     instanceFunction := fn
     allocation := s
     accumulators := acc
     stageBlocks
-    outputStages := outStages
-    tileArraySlots }
+    outputStages := outStages }
 termination_by sizeOf prog
 decreasing_by exact declTypeS.2
 
@@ -593,10 +593,16 @@ structure SessionInput where
     live knobs when it has any. -/
 def SessionInput.forRoot (root : CoreProgram) (arena : Tropical.Ir.ExprArena)
     (params : Array (String × Json) := #[])
-    (alloc : Tropical.Lowering.Alloc := {}) : SessionInput :=
+    (alloc : Tropical.Lowering.Alloc := {})
+    (extraOutputs : Array String := #[]) : SessionInput :=
   { instances := #[(rootInstancePath, root)]
     wiresPost := #[]
+    -- `out` is channel 0; each extra root output port (a scope tap) is its
+    -- own channel, so an observation artifact exposes taps as outputs
+    -- (`design/typed-kernel.md`: the scope reads output channels).
     graphOutputs := #[{ sourceInstance := rootInstancePath, sourceOutput := "out" }]
+      ++ extraOutputs.mapIdx fun i port =>
+        { channel := i + 1, sourceInstance := rootInstancePath, sourceOutput := port }
     params, alloc, root, arena }
 
 private def rootParamName : CoreBodyDecl → Option String
@@ -681,7 +687,7 @@ private def preallocInputs (s : SessionAlloc) (wires : Array Tropical.Wire)
 termination_by sizeOf prog
 decreasing_by exact CoreProgram.sizeOf_lt_of_registryGet? _hr
 
-/-- The session → `tropical_plan_6` lowering: two-phase slot
+/-- The session → `tropical_plan_7` lowering: two-phase slot
     pre-allocation, accumulator seeding from the session I/O array
     space, one `partitionKernel` over the synthetic root, sinks, and
     slot metadata. The staged variant also returns the per-instruction
@@ -731,21 +737,7 @@ def compileSessionStaged (input : SessionInput) :
     outputChannelCount
     slotCount
     slotNames
-    slotDefaults
-    tileArraySlots := partition.tileArraySlots
-    sources := if partition.tileArraySlots.isEmpty then Tropical.Plan.defaultSources
-      else Tropical.Plan.tileSources
-    tileIntervalFrames := if partition.tileArraySlots.isEmpty then 0
-      else Tropical.Ir.phaserTimeStagingInterval
-    phaserTimeStaging := if partition.tileArraySlots.isEmpty then
-        if Tropical.Ir.phaserTimeStagingEnabled then
-          some "staged_phaser_fallback:no_admissible_terminal"
-        else none
-      else if Tropical.Ir.phaserTimeStagingHigherOrderEnabled then
-        some "staged_phaser_admitted:higher_order_experiment"
-      else if Tropical.Ir.phaserTimeStagingMixedDDEnabled then
-        some "staged_phaser_admitted:mixed_dd_experiment"
-      else some "staged_phaser_admitted" }, partition.stageBlocks)
+    slotDefaults }, partition.stageBlocks)
 
 def compileSession (input : SessionInput) : Except String Tropical.Plan.FlatPlan :=
   (compileSessionStaged input).map (·.1)

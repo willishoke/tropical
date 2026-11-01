@@ -1,3 +1,4 @@
+import Tropical.Ir.ClockFormat
 import Tropical.Ir.Nodes
 
 /-!
@@ -17,7 +18,8 @@ open Tropical.Ir
 /-- An authored signal is a stable handle into the active builder arena. -/
 abbrev Sig := ExprId
 
-/-- The Q32.32 clock rail uses the same expression vocabulary and handles. -/
+/-- The clock rail (`Ir/ClockFormat.lean`) uses the same expression vocabulary
+    and handles. -/
 abbrev Clock := Sig
 
 /-- An instance input already carrying an arena-native expression ID. -/
@@ -113,20 +115,22 @@ def nestedOut (instance_ : InstanceIdx) (output : OutputIdx) : BuildM Sig :=
 
 def sampleRate : BuildM Sig := internSig .sampleRate
 
-def sampleIndex : BuildM Sig := internSig .sampleIndex
+/-- τ, the kernel's time coordinate: the fixed-point clock the port is called
+    with (`i64`, integer samples above `clockFracBits`, the fraction below).
+    Every `Clock` is an expression over this one leaf. -/
+def tau : BuildM Sig := internSig .tau
 
-/-- Dispatch-local `[0,1)` coordinate used only by the absolute-time tile
-    terminal.  Exact/JIT evaluation deliberately reads zero. -/
-def tilePhase : BuildM Sig := internSig .tilePhase
+/-- One sample on the clock rail, `2^clockFracBits`: the scale between a
+    sample count and a clock. -/
+def clockOneLit : BuildM Sig := lit clockOne
 
-/-- Absolute clock leaf used only by the tile endpoint materializer. -/
-def tileSampleIndex : BuildM Sig := internSig .tileSampleIndex
+/-- The clock rail's fraction bits, as a shift amount. -/
+def clockFracLit : BuildM Sig := lit clockFracBits
+
+/-- The fraction field of a clock, `clockOne − 1`, as a mask. -/
+def clockFracMaskLit : BuildM Sig := lit clockFracMask
 
 def arr (items : Array Sig) : BuildM Sig := internSig (.arr items)
-
-/-- Mark an array as an immutable endpoint image owned by the tile-time
-    materializer. -/
-def tileArray (items : Array Sig) : BuildM Sig := internSig (.tileArray items)
 
 def index (array index : Sig) : BuildM Sig :=
   internSig (.index array index)
@@ -147,84 +151,6 @@ def routedSum (capacity outputCount : Nat) (routes : Array (Option Nat))
     (idxId : Nat := 0) : BuildM Sig :=
   internSig (.routedSum capacity outputCount routes tables values dynCount? idxId)
 
--- ────────────────────────────────────────────────────────────────────────
--- Absolute-coordinate substitution
--- ────────────────────────────────────────────────────────────────────────
-
-/-- Resolve an old arena id through the prefix of rebuilt ids. -/
-def shiftedId (mapped : Array Sig) (id : Sig) : Sig :=
-  mapped[id.idx]?.getD id
-
-/-- Rebuild one frozen node, remapping its children through the already-built
-    prefix. `sampleIndex` is the sole substitution point. -/
-def rebuildShiftedNode (mapped : Array Sig) (shiftedTick : Sig) :
-    ENode → BuildM Sig
-  | .sampleIndex => pure shiftedTick
-  | .tileSampleIndex => internSig .tileSampleIndex
-  | .num n => internSig (.num n)
-  | .bool b => internSig (.bool b)
-  | .arr items => internSig (.arr (items.map (shiftedId mapped)))
-  | .tileArray items => internSig (.tileArray (items.map (shiftedId mapped)))
-  | .binary tag a b =>
-    internSig (.binary tag (shiftedId mapped a) (shiftedId mapped b))
-  | .unary tag a => internSig (.unary tag (shiftedId mapped a))
-  | .clamp a b c => internSig (.clamp
-      (shiftedId mapped a) (shiftedId mapped b) (shiftedId mapped c))
-  | .select a b c => internSig (.select
-      (shiftedId mapped a) (shiftedId mapped b) (shiftedId mapped c))
-  | .arraySet a b c => internSig (.arraySet
-      (shiftedId mapped a) (shiftedId mapped b) (shiftedId mapped c))
-  | .index a b =>
-    internSig (.index (shiftedId mapped a) (shiftedId mapped b))
-  | .inputRef i => internSig (.inputRef i)
-  | .paramRef i => internSig (.paramRef i)
-  | .nestedOut i o => internSig (.nestedOut i o)
-  | .sampleRate => internSig .sampleRate
-  | .tilePhase => internSig .tilePhase
-  | .loopIdx i => internSig (.loopIdx i)
-  | .bankSum count tables body dynCount? idxId =>
-    internSig (.bankSum count (tables.map (shiftedId mapped))
-      (shiftedId mapped body) (dynCount?.map (shiftedId mapped)) idxId)
-  | .routedSum capacity outputCount routes tables values dynCount? idxId =>
-    internSig (.routedSum capacity outputCount routes
-      (tables.map (shiftedId mapped)) (values.map (shiftedId mapped))
-      (dynCount?.map (shiftedId mapped)) idxId)
-
-/-- Structurally recursive form of the frozen child-before-parent rebuild. -/
-def rebuildShiftedNodes (nodes : List ENode) (shiftedTick : Sig)
-    (mapped : Array Sig := #[]) : BuildM (Array Sig) :=
-  match nodes with
-  | [] => pure mapped
-  | node :: rest => do
-    let id ← rebuildShiftedNode mapped shiftedTick node
-    rebuildShiftedNodes rest shiftedTick (mapped.push id)
-
-/-- Add a positive integral frame offset to an already-built absolute clock. -/
-def addFrameOffset (rawTick : Sig) (frames : Nat) : BuildM Sig := do
-  let frameLiteral ← internSig (.num ⟨Int.ofNat frames, 0⟩)
-  let frameInt ← internSig (.unary .toInt frameLiteral)
-  internSig (.binary .add rawTick frameInt)
-
-/-- Build the replacement absolute clock used by `shiftSampleIndex`. -/
-def buildShiftedTick : Nat → BuildM Sig
-  | 0 => internSig .tileSampleIndex
-  | frames@(_ + 1) => do
-    let rawTick ← internSig .tileSampleIndex
-    addFrameOffset rawTick frames
-
-/-- Rebuild `roots` in the current arena while substituting every
-    `sampleIndex` leaf with `tileSampleIndex + frames`.  The distinct base
-    leaf prevents the tile dependency slice from capturing shared audio-clock
-    instructions.  The walk freezes the
-    pre-rewrite arena and proceeds in child-before-parent ID order, so address
-    warps and control trajectories are shifted as complete expressions rather
-    than approximated by advancing only a visible phasor. -/
-def shiftSampleIndex (roots : Array Sig) (frames : Nat) : BuildM (Array Sig) := do
-  let snapshot := (← get).exprs.nodes.toList
-  let shiftedTick ← buildShiftedTick frames
-  let mapped ← rebuildShiftedNodes snapshot shiftedTick
-  pure (roots.map (shiftedId mapped))
-
 -- The production scalar helper vocabulary, preserving its existing names and
 -- operand order.  Each helper performs exactly one intern step.
 
@@ -240,6 +166,14 @@ def bitAnd (a b : Sig) : BuildM Sig := binary .bitAnd a b
 def bitOr (a b : Sig) : BuildM Sig := binary .bitOr a b
 def rshift (a b : Sig) : BuildM Sig := binary .rshift a b
 def lshift (a b : Sig) : BuildM Sig := binary .lshift a b
+
+/-- The integer sample index, `⌊τ⌋ = τ >> clockFracBits` (an arithmetic shift, so it is
+    the floor for negative coordinates too). Derived, not primitive: the
+    fraction of τ is dropped HERE and nowhere else, so a builder that reads
+    `sampleIndex` is stating that it works on the integer grid (a glide's
+    start tick, a seed). Clocks read `tau`. -/
+def sampleIndex : BuildM Sig := do
+  rshift (← tau) (← clockFracLit)
 def gt (a b : Sig) : BuildM Sig := binary .gt a b
 def ldexpE (mantissa exponent : Sig) : BuildM Sig :=
   binary .ldexp mantissa exponent

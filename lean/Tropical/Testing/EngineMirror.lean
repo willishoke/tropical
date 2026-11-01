@@ -4,7 +4,7 @@ import Tropical.Testing.ArrowFixtures
 /-!
 # EngineMirror — harness-only session recompiles (test support, not production)
 
-The `compileMirror*` family: rebuild a `tropical_plan_6` from the engine's
+The `compileMirror*` family: rebuild a `tropical_plan_7` from the engine's
 current session mirror at an arbitrary compilation mode, WITHOUT loading it
 or touching the runtime. The production path compiles AND loads through
 `syncCompile`; these entry points exist so a harness can hold the compiled
@@ -20,6 +20,8 @@ identically to the production entry points they mirror.
 
 namespace Tropical.Engine
 
+open Tropical.Session (registerResolved)
+
 /-- Harness-only (diffcli `compile`): rebuild the plan from the current
     mirror at an arbitrary compilation mode, WITHOUT loading it or
     touching the service. Mirrors the `compile_patch.ts` contract's
@@ -32,8 +34,8 @@ namespace Tropical.Engine
     retires. -/
 def buildSessionInput (env : Env) (mode : Tropical.Plan.CompilationMode) :
     EngineM Tropical.Compile.SessionInput :=
-  -- The shared prologue lives in `Engine.Compile.buildSessionInputVia`.
-  buildSessionInputVia env "compileMirrorPlan" mode
+  -- The shared prologue lives in `Session.Compile.buildSessionInput`.
+  env.session (Tropical.Session.buildSessionInput "compileMirrorPlan" mode)
 
 def compileMirrorFlatPlan (env : Env) (mode : Tropical.Plan.CompilationMode) :
     EngineM Tropical.Plan.FlatPlan := do
@@ -73,6 +75,6 @@ def registerTestFixtures (env : Env) : EngineM Unit := do
   let (arena', rawIdx) ← match Tropical.EmitArrow.buildOpZoo st.arena with
     | .ok result => pure result
     | .error message => internalError message
-  let _ ← registerResolved env "OpZoo" arena' rawIdx
+  let _ ← env.session (registerResolved "OpZoo" arena' rawIdx)
 
 end Tropical.Engine

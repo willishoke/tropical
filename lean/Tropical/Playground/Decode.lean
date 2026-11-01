@@ -21,15 +21,16 @@ def masterClock (pidx : String → Option Nat) : BuildM Clock := do
   let zero ← lit 0
   let velocity ← pref pidx Tropical.Playground.Metadata.masterVelocityParam one
   let tauBase ← pref pidx Tropical.Playground.Metadata.masterTauBaseParam zero
+  -- The velocity is a Q·.32 scale, independent of the clock rail's format.
   let twoPow32 ← lit 4294967296
   let velocityFixed ← mul velocity twoPow32
   let velocityQ ← toIntE velocityFixed
   let sr ← sampleRate
   let tauSamples ← mul tauBase sr
-  let tauFixed ← mul tauSamples twoPow32
+  let tauFixed ← mul tauSamples (← clockOneLit)
   let tauQ ← toIntE tauFixed
-  let coordinate ← sampleIndex
-  let advancing ← mul velocityQ coordinate
+  -- `clock = tau_base + velocity · τ` on the clock rail, exact at fractional τ.
+  let advancing ← scaleClockQ velocityQ (← tau)
   add tauQ advancing
 
 private def defaultValue (kind : String) (params : Json) (kname : String) : BuildM Sig := do
@@ -157,7 +158,13 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
     let decay ← paramValue pidx paramName kind params "decay"
     let npart := (Tropical.Playground.Metadata.jInt params "partials" 6).toNat
     let address := (Tropical.Playground.Metadata.portSources inObj "addr")[0]?
-    let zero ← lit 0
+    -- The strike time `t` in seconds, as `string`/`gong` read it; absent is
+    -- a strike at 0 (the literal, so graphs without `t` emit unchanged).
+    let zero ← match Tropical.Playground.Metadata.jNum? params "t" with
+      | none => lit 0
+      | some _ => do
+        let seconds ← litOfD (Tropical.Playground.Metadata.jExactD params "t" (0, 0))
+        mul seconds (← sampleRate)
     match Tropical.Playground.Metadata.jNum? params "partials_max" with
     | none =>
       let modes ← resonatorBank f0 decay npart
@@ -199,13 +206,8 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
     let sweep ← modalControl "sweep"
     let rate ← modalControl "rate"
     let mix ← modalControl "mix"
-    let requestedStages :=
-      (Tropical.Playground.Metadata.jInt params "_benchmark_stages" 0).toNat
-    let ratios := if Tropical.Ir.phaserTimeStagingEnabled
-        && requestedStages ≥ 2 && requestedStages ≤ 18 then
-      modalPhaserBenchmarkRatios requestedStages
-    else modalPhaserRatios
-    let (node, topology) := modalPhaserTopology id modalInput center sweep rate mix ratios
+    let (node, topology) :=
+      modalPhaserTopology id modalInput center sweep rate mix modalPhaserRatios
     pure (node, modalFanIn ++ topology)
   | "modal_allpass_tail" =>
     let center ← modalControl "center"

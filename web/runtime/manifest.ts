@@ -1,39 +1,74 @@
 /**
- * manifest.ts — the runtime's consumption contract.
+ * manifest.ts — the runtime's consumption contract: `tropical_kernel_1`.
  *
- * A `KernelManifest` is everything the runtime needs to drive a Lean-emitted
- * wasm32 kernel: scratch/array/slot sizing, slot defaults, sample rate, and the
- * fixed output width. It is
- * a *subset* of `tropical_plan_6` — the runtime never sees the instruction
- * stream or any other compiler internal. This type IS the boundary between
- * tropical (the producer, via `diffcli compile-wasm`) and any consumer (this
- * demo today; an extracted `@tropical/runtime-wasm` package tomorrow).
+ * A kernel is one typed pure function (design/typed-kernel.md): a record of
+ * named, static-shaped inputs — `tau` (the Q48.16 clock, shape `[frames]`)
+ * and one scalar `f64` per param — and one output of shape
+ * `[frames, channels]`, frame-major. This type IS the boundary between
+ * tropical (the producer, via `diffcli compile-kernel`) and any consumer
+ * (this player today; an extracted `@tropical/runtime-wasm` package
+ * tomorrow). The manifest also nests the compiler's plan for its own gates;
+ * the runtime never reads it.
  */
+export type KernelElem = 'f64' | 'i64' | 'i64q16'
+
+/** The clock rail's fraction bits: τ is a signed i64 with this many fraction
+ *  bits (Q48.16), whole sample `n` is `n << CLOCK_FRAC_BITS`. Mirrors
+ *  `lean/Tropical/Ir/ClockFormat.lean`; the manifest names it as τ's elem. */
+export const CLOCK_FRAC_BITS = 16
+export const TAU_ELEM = 'i64q16'
+export type KernelRole = 'param' | 'signal' | 'table'
+
+export type KernelPort = {
+  name: string
+  elem: KernelElem
+  shape: number[]
+  role?: KernelRole
+  /** Seed value a host writes before the first call (params). */
+  default?: number
+  /** Output channel source names (outputs of shape [frames, C]). */
+  channels?: string[]
+}
+
 export type KernelManifest = {
-  /** Kernel sample rate (Hz); the kernel reads it for time-based sources. */
-  sampleRate: number
-  /** Number of i64 SSA scratch cells required by the emitted kernel. The ABI
-   * also reserves an equally sized zeroed register region, unused by current
-   * production kernels. */
-  registerCount: number
-  /** Element count of each array-typed register slot. */
-  arraySlotSizes: number[]
-  /** Number of inter-module slots (instance output wires + param inputs). */
-  slotCount: number
-  /** Seed value for each slot. Params default here too. */
-  slotDefaults: number[]
-  /** Compact device output width. Omitted v1 manifests are mono. */
-  outputChannelCount?: number
+  schema: 'tropical_kernel_1'
+  /** The rate the kernel was compiled for (Hz); a constant of the artifact. */
+  rate: number
+  /** `tau` first, then the params in port order. */
+  inputs: KernelPort[]
+  /** Exactly one output: `out`, `f64`, shape `[frames, channels]`. */
+  outputs: KernelPort[]
 }
 
 export const MAX_KERNEL_OUTPUT_CHANNELS = 64
 
+/** The static frame count per call, from the `tau` input's shape. */
+export function kernelFrames(manifest: KernelManifest): number {
+  const tau = manifest.inputs[0]
+  if (!tau || tau.name !== 'tau' || tau.elem !== TAU_ELEM || tau.shape.length !== 1)
+    throw new RangeError(`KernelManifest: the first input must be tau:${TAU_ELEM}[frames]`)
+  const frames = tau.shape[0]!
+  if (!Number.isSafeInteger(frames) || frames < 1)
+    throw new RangeError('KernelManifest: frames must be a positive integer')
+  return frames
+}
+
+/** The param inputs (everything after `tau`), in port order. */
+export function kernelParams(manifest: KernelManifest): KernelPort[] {
+  return manifest.inputs.slice(1)
+}
+
 /** Resolve and validate the fixed output width once, off the audio callback. */
 export function kernelOutputChannelCount(manifest: KernelManifest): number {
-  const count = manifest.outputChannelCount ?? 1
+  const out = manifest.outputs[0]
+  if (!out || manifest.outputs.length !== 1 || out.elem !== 'f64' || out.shape.length !== 2)
+    throw new RangeError('KernelManifest: exactly one f64[frames, channels] output is required')
+  if (out.shape[0] !== kernelFrames(manifest))
+    throw new RangeError('KernelManifest: the output frame count must equal tau\'s')
+  const count = out.shape[1]!
   if (!Number.isSafeInteger(count) || count < 1
       || count > MAX_KERNEL_OUTPUT_CHANNELS)
     throw new RangeError(
-      `KernelManifest.outputChannelCount must be an integer in [1, ${MAX_KERNEL_OUTPUT_CHANNELS}]`)
+      `KernelManifest: output channels must be an integer in [1, ${MAX_KERNEL_OUTPUT_CHANNELS}]`)
   return count
 }

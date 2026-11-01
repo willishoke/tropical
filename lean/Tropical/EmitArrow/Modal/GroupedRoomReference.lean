@@ -4,7 +4,7 @@ import Tropical.EmitArrow.Modal.Residue
 /-!
 # Graph-specialized grouped-room reference
 
-This is the deliberately internal Plan-6 M5 reference.  It specializes one
+This is the deliberately internal Plan-7 M5 reference.  It specializes one
 source-independent `RoomProfile` against one arbitrary admitted modal island,
 materializing forward and cyclic-future prefix tables as coefficient arrays.
 It is an executable semantic oracle and cost probe, not a public node, asset
@@ -196,7 +196,7 @@ private def collectAdmissionExclusions (profile : RoomProfile)
   let scalarCount := 4 * modes.size * prefixStride
   if scalarCount > profile.admission.maxGeneratedScalars || scalarCount > 4294967295 then
     out := out.push (exclusion .generatedScalarCapacity
-      s!"{scalarCount} generated scalars exceed the admitted/Plan-6 limit")
+      s!"{scalarCount} generated scalars exceed the admitted/Plan-7 limit")
 
   let fLo := jsonD profile.admission.poles.minFrequencyHz
   let fHi := jsonD profile.admission.poles.maxFrequencyHz
@@ -412,7 +412,7 @@ private def cselectE (c : Sig) (a b : CplxE) : BuildM CplxE := do
   pure (real, imag)
 
 /-- `exp((-sigma+i*omega)t/Fs)`, with `t` in samples.  The caller supplies a
-    clock already made relative in integer Q32.32, so far absolute seeks do not
+    clock already made relative on the integer clock rail, so far absolute seeks do not
     spend phase or envelope mantissa bits. -/
 private def roomPoleExpSamples (bakedRate sigma omega t : Sig) : BuildM CplxE := do
   let sec ← div t bakedRate
@@ -534,7 +534,7 @@ private def groupedRoomReferencePair (sourceIdx groupIdx : Sig)
   let reverseOutput ← mul reverseGain reverseReal
   add forwardOutput reverseOutput
 
-/-- Evaluate one graph specialization.  The room's prefix tables are Plan-6
+/-- Evaluate one graph specialization.  The room's prefix tables are Plan-7
     coefficient arrays; source/group trip counts affect data, not expression
     size. -/
 def groupedRoomReferenceSig (specialization : RoomReferenceSpecialization)
@@ -557,8 +557,8 @@ def groupedRoomReferenceSig (specialization : RoomReferenceSpecialization)
   let sourceStride ← lit specialization.prefixStride
   let clkRel ← relClockQ clk anchor
   let clkFloat ← toFloatE clkRel
-  let twoPow32 ← lit 4294967296
-  let u ← div clkFloat twoPow32
+  let clockScale ← clockOneLit
+  let u ← div clkFloat clockScale
   let sourceIdx ← loopIdx 4300
   let groupIdx ← loopIdx 4301
   let columns := #[sigma, omega, cre, cim, periods, logRadii, offsets,

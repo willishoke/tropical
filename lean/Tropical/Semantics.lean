@@ -9,7 +9,6 @@ import Tropical.Semantics.Strata
 import Tropical.Semantics.Plan
 import Tropical.Semantics.PlanWellFormed
 import Tropical.Semantics.Staging
-import Tropical.Semantics.ShiftSampleIndex
 import Tropical.Semantics.ModalUniverse
 
 /-! Public façade for Tropical's machine-checked semantic spine. -/

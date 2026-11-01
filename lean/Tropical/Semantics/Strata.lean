@@ -242,16 +242,6 @@ private theorem denoteExpr_copy_map_eq {src dst : ExprArena}
       rw [copyArray env items copied
         ((remapExprIds?_eq_some_iff memo items copied).mp hItems)
         (by simp [ENode.children])]
-  | tileArray items =>
-    cases hItems : remapExprIds? memo items with
-    | none => simp [remapENode?, hItems] at hRemap
-    | some copied =>
-      simp [remapENode?, hItems] at hRemap
-      subst dstNode
-      simp only [denoteNode]
-      rw [copyArray env items copied
-        ((remapExprIds?_eq_some_iff memo items copied).mp hItems)
-        (by simp [ENode.children])]
   | binary tag lhs rhs =>
     cases hLhs : memo[lhs.idx]? with
     | none => simp [remapENode?, hLhs] at hRemap
@@ -323,8 +313,8 @@ private theorem denoteExpr_copy_map_eq {src dst : ExprArena}
         simp only [denoteNode]
         rw [denoteExpr_copy_map_eq hMap alg env hSrcArena hDstArena hArray,
           denoteExpr_copy_map_eq hMap alg env hSrcArena hDstArena hIndex]
-  | inputRef index | paramRef index | sampleRate | sampleIndex
-  | tileSampleIndex | tilePhase | loopIdx index =>
+  | inputRef index | paramRef index | sampleRate | tau
+  | loopIdx index =>
     simp [remapENode?] at hRemap
     subst dstNode
     rfl

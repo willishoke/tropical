@@ -27,10 +27,10 @@ open Tropical.Ir
     keyed by its source `ExprId`; structural interning makes equal source
     subgraphs use the same key. -/
 structure ClockEnv where
-  tick : Int
+  tau : Int
   boundary : ExprId → Int
 
-/-- The Q32.32 clock fragment, stated on ids in one frozen expression arena.
+/-- The clock-rail fragment, stated on ids in one frozen expression arena.
 
     The judgment is intentionally `Type`-valued: its derivation is the total
     recursion argument for `denoteClock`. Shift amounts are literal natural
@@ -40,8 +40,8 @@ inductive OnClockRail (arena : ExprArena) : ExprId → Type where
   | intLit (id : ExprId) (m : Int)
       (node : arena.deref id = some (.num ⟨m, 0⟩)) :
       OnClockRail arena id
-  | tick (id : ExprId)
-      (node : arena.deref id = some .sampleIndex) :
+  | tau (id : ExprId)
+      (node : arena.deref id = some .tau) :
       OnClockRail arena id
   | boundary (id source : ExprId)
       (node : arena.deref id = some (.unary .toInt source)) :
@@ -85,7 +85,7 @@ inductive OnClockRail (arena : ExprArena) : ExprId → Type where
 def denoteClock {arena : ExprArena} :
     {id : ExprId} → OnClockRail arena id → ClockEnv → Int
   | _, .intLit _ m _, _ => m
-  | _, .tick _ _, env => env.tick
+  | _, .tau _ _, env => env.tau
   | _, .boundary _ source _, env => env.boundary source
   | _, .neg _ argRail, env => -(denoteClock argRail env)
   | _, .add _ lhsRail rhsRail, env =>
@@ -168,10 +168,11 @@ theorem rev_swap {arena : ExprArena}
   omega
 
 /-- The exact split identity used by the native phase reducers, including for
-    negative relative clocks. -/
+    negative relative clocks: a clock is its whole samples above
+    `clockFracBits` plus its fraction below. -/
 theorem rail_split_identity (x : Int) :
-    (x >>> (32 : Nat)) * 2 ^ 32 + x % 2 ^ 32 = x := by
+    (x >>> clockFracBits) * 2 ^ clockFracBits + x % 2 ^ clockFracBits = x := by
   rw [Int.shiftRight_eq_div_pow]
-  omega
+  exact Int.ediv_add_emod' x _
 
 end Tropical.EmitArrow

@@ -15,7 +15,7 @@ oscillator phase is computed from the time coordinate, not latched.
 make build          # C++ core, outputs build/libtropical.dylib
 make lean           # Lean frontend + diffcli (the production compiler + MCP server)
 make mcp-lean       # build C++ + Lean front door, then launch the MCP server
-make validate       # build + lean + tropicaltest + web build + bun test + ctest
+make validate       # build + lean + tsc + tropicaltest + web build + bun test + ctest
 make clean          # remove build directories
 ```
 
@@ -23,7 +23,8 @@ make clean          # remove build directories
 the JIT-only core builds on LLVM ≥ 19, but `make build`/CI and the in-process
 wasm emitter target 22), Lean 4 (via elan), Bun (for the surviving behavioral
 suites). The wasm emitter (`TROPICAL_WASM_EMIT`, on by default in `make build`)
-also needs lld (`brew install lld`) and LLVM ≥ 21 for its Triple-based codegen API.
+also needs lld (`brew install lld`) and LLVM ≥ 21 for its Triple-based codegen API;
+it builds into its own library, `libtropical_wasm`, which only `diffcli` links.
 
 ## Test
 
@@ -41,19 +42,22 @@ are the surviving cross-backend gate (`tests/web`, wasm vs. JIT) and the MCP
 protocol tests (`mcp/`), both run against the live Lean engine via
 `TROPICAL_ENGINE_CMD`.
 
-**Run these binaries directly — never via `lake exe`.** `libtropical`
-hard-links Homebrew's `liblldWasm` (the wasm emitter), which in turn binds the
-absolute `/opt/homebrew/opt/llvm/lib/libLLVM.dylib` (the one with the AMDGPU
-target). `lake exe` forces the Lean toolchain's lib dir onto
-`DYLD_LIBRARY_PATH` so the process can find `libleanshared`, and that shadows
-`libLLVM.dylib` *by leaf name* with Lean's own bundled libLLVM (no AMDGPU
-target) — so the binary dies at load with
-`Symbol not found: _LLVMInitializeAMDGPUAsmParser`. The built binary instead
-resolves `libleanshared` via rpath (which only applies to `@rpath/…` refs and
-never shadows the absolute Homebrew libLLVM), so it runs clean. This is why
-`make validate` invokes `./lean/.lake/build/bin/…` directly throughout and
-never `lake exe`. (Not a version mismatch — pinning won't help; it's the
-`lake exe` DYLD environment. Run the binary, not the wrapper.)
+**Run these binaries directly — never via `lake exe`.** `libtropical_wasm`
+(the wasm emitter, linked only by `diffcli`) hard-links Homebrew's
+`liblldWasm`, which in turn binds the absolute
+`/opt/homebrew/opt/llvm/lib/libLLVM.dylib`. `lake exe` forces the Lean
+toolchain's lib dir onto `DYLD_LIBRARY_PATH` so the process can find
+`libleanshared`, and that shadows `libLLVM.dylib` *by leaf name* with Lean's
+own bundled libLLVM — so `lake exe diffcli` dies at load with
+`Symbol not found: …` referenced from `liblldWasm.dylib`. The built binary
+instead resolves `libleanshared` via rpath (which only applies to `@rpath/…`
+refs and never shadows the absolute Homebrew libLLVM), so it runs clean.
+`libtropical` itself links LLVM statically and carries no lld, so the other
+binaries (`frontend`, `tropicaltest`, …) load either way; the rule is one rule
+for all of them, and `make validate` invokes `./lean/.lake/build/bin/…`
+directly throughout and never `lake exe`. (Not a version mismatch — pinning
+won't help; it's the `lake exe` DYLD environment. Run the binary, not the
+wrapper.)
 
 **If equivalence tests fail unexpectedly, clear the JIT cache first.**
 `rm -rf ~/.cache/tropical/kernels` — the LLVM-IR cache is keyed by an MD5
@@ -177,9 +181,9 @@ SessionState  (instances + wiring + dac.out + params)
   │         post-elaborate-shaped, so the resolved root `Program` is
   │         built DIRECTLY — instances → InstanceDecls linking each
   │         instance's already-resolved type snapshot, wires → Ir.Expr
-  │       → partitionKernel → tropical_plan_6
+  │       → partitionKernel → tropical_plan_7
   ▼
-tropical_plan_6  (instance_functions[] + sinks[] + sources[])
+tropical_plan_7  (instance_functions[] + sinks[] + sources[])
 ```
 
 **The IR is acyclic by construction.** There is no register to break a
@@ -199,7 +203,7 @@ Three execution targets consume the same typed `FlatPlan`; they are target
 interpretations, not more source-language stages.
 
 ```
-tropical_plan_6 / FlatPlan
+tropical_plan_7 / FlatPlan
   ├─ EmitLlvm → textual LLVM → OrcJitEngine::compile_ir_text → FlatRuntime
   ├─ EmitLlvm → the same LLVM → wasm32 TargetMachine + lld → browser player
   └─ EmitMsl  → MSL → MetalKernel → supported Apple live audio
@@ -214,6 +218,14 @@ dual-loaded for `render_window` and reference comparisons.
 the C++ runtime receives textual LLVM plus plan metadata, compiles the text, and
 publishes the resulting kernel. The parser's instruction graph does not
 generate native code.
+
+**The port.** The compiler's product is one typed pure kernel
+(`design/typed-kernel.md`): `@tropical_kernel(ptr tau, ptr in_1.., ptr out)`
+— `tau` the Q48.16 clock of each frame (`design/fixed-carrier.md`), one `f64` per `param:` slot, one
+frame-major output — with static shapes (a different buffer length is a
+different artifact) and everything else inside the function. The manifest is
+its type, `tropical_kernel_1`. The scope reads output channels of a separate
+observation artifact of the same plan.
 
 **Fixed-topology compilation.** Topology and structural selector changes
 rebuild the synthetic root, lower, emit, and hot-swap. Ordinary parameter
@@ -256,7 +268,8 @@ Two distinct JSON schemas; do not confuse them.
 | Schema | Produced by | Purpose |
 |--------|-------------|---------|
 | `tropical_program_2` | `lean/Tropical/Parse/Raise.lean` (JSON ingest) | The PATCH-BAY shape: instances of registered types + wiring + params, a body block of instanceDecls/paramDecls/outputAssigns. The JSON front door for `load`/`merge` (and `save`/`export_program`'s output serialization). Program DEFINITIONS over the wire are retired — a programDecl is refused at ingest with the retirement message; wire expressions decode into the typed session grammar (`Tropical.WireExpr`), which cannot spell combinators/binders/state ops. (Programs are authored as `Tropical.Stdlib`/EmitArrow arrow builders, not this schema.) |
-| `tropical_plan_6`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: nested instance blocks plus `sinks[]`, `sources[]`, typed slots, stage metadata, bank/routed regions, and cooperative-Metal metadata where required. Lean emits LLVM/MSL from the typed plan; native and web hosts consume trimmed metadata manifests. Serialized-plan entry points accept this schema only and reject older schemas and retired state/output carriers. See `design/compatibility-matrix.md`. |
+| `tropical_plan_7`    | `lean/Tropical/Compile.lean` (`lean/Tropical/Plan.lean` schema) | The low-detail output: nested instance blocks plus `sinks[]`, `sources[]`, typed slots, stage metadata, bank/routed regions, and cooperative-Metal metadata where required. Lean emits LLVM/MSL from the typed plan. Serialized-plan entry points accept this schema only and reject older schemas and retired state/output carriers. See `design/compatibility-matrix.md`. |
+| `tropical_kernel_1`  | `lean/Tropical/Kernel.lean` | The port manifest a host loads (`design/typed-kernel.md`): the kernel's inputs (`tau`, then the params with defaults and disciplines) and its output (shape and channel names), rate, realization, with the `tropical_plan_7` plan nested for the gates. `tropicalc` and `diffcli compile-kernel` write it; the C++ runtime and the web player read it. |
 
 Going from the first to the second without losing meaning is exactly
 what the session compile does (ingest → sessionToResolvedRoot →
@@ -288,7 +301,7 @@ lean/                 Lean 4: the production compiler + MCP server (one binary)
       Strata.lean (the direct lowering) + Strata/{Basic,EArena,InlineInstances,IdentityElim}
       Core, Nodes, Cycles, Emit, CompileResolved, Codec, WireProgram
     Engine, Session, Compile, Lowering, Wiring   engine-side session compile
-    Plan.lean         tropical_plan_6 schema
+    Plan.lean         tropical_plan_7 schema
     Ffi.lean          FFI bridge to libtropical (Runtime, DAC, Param)
     Tools, Rpc, Relay, Resources, Frontend, …    MCP tool surface + RPC
 engine/               C++: plan parsing, LLVM JIT, per-sample execution, audio output

@@ -76,39 +76,23 @@ theorem compileClockRail_refines
         .ok (.scalar (i64Image (denoteClock rail env))) := by
   exact ⟨hrefines.operand, hrefines.scalarResult, hrefines.evaluates⟩
 
-/-- The canonical `.tick` Plan operand index is populated by the named tick
+/-- The canonical `.tau` Plan operand index is populated by the named tau
     source.  `evalOperand_source_of_getElem` turns this image fact into operand
     evaluation at the public Plan seam. -/
-theorem declaredTick_source
+theorem declaredTau_source
     (inputs : PlanInputs α) (image : PlanSourceImage α) :
-    (inputs.withDeclaredSources defaultSources image).sources[sourceTick]? =
-      some image.tick := by
+    (inputs.withDeclaredSources defaultSources image).sources[sourceTau]? =
+      some image.tau := by
   simp [PlanInputs.withDeclaredSources, defaultSources, PlanSourceImage.value,
-    sourceTick]
+    sourceTau]
 
-theorem evalOperand_tick_withDeclaredSources
+theorem evalOperand_tau_withDeclaredSources
     (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
     (image : PlanSourceImage α) :
-    evalOperand alg (inputs.withDeclaredSources defaultSources image) state opTick =
-      .ok image.tick := by
-  exact evalOperand_source_of_getElem alg _ state sourceTick .int image.tick
-    (declaredTick_source inputs image)
-
-/-- Tile materialization keeps absolute tile tick at declared source index 3.
-    This is source correspondence only; it makes no interpolated-Metal claim. -/
-theorem declaredTileTick_source
-    (inputs : PlanInputs α) (image : PlanSourceImage α) :
-    (inputs.withDeclaredSources tileSources image).sources[3]? =
-      some image.tileTick := by
-  simp [PlanInputs.withDeclaredSources, tileSources, PlanSourceImage.value]
-
-theorem evalOperand_tileTick_withDeclaredSources
-    (alg : Algebra α) (inputs : PlanInputs α) (state : PlanState α)
-    (image : PlanSourceImage α) :
-    evalOperand alg (inputs.withDeclaredSources tileSources image) state
-      (.source 3 .int) = .ok image.tileTick := by
-  exact evalOperand_source_of_getElem alg _ state 3 .int image.tileTick
-    (declaredTileTick_source inputs image)
+    evalOperand alg (inputs.withDeclaredSources defaultSources image) state opTau =
+      .ok image.tau := by
+  exact evalOperand_source_of_getElem alg _ state sourceTau .int image.tau
+    (declaredTau_source inputs image)
 
 theorem warp_inv_i64 {arena : ExprArena} {c delta sum root : ExprId}
     (clockRail : OnClockRail arena c) (deltaRail : OnClockRail arena delta)

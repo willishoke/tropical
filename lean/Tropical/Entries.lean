@@ -46,13 +46,10 @@ private def wireOpName : ENode → String
   | .arraySet .. => "arraySet" | .index .. => "index"
   | .inputRef _ => "inputRef" | .paramRef _ => "paramRef"
   | .nestedOut .. => "nestedOut"
-  | .sampleRate => "sampleRate" | .sampleIndex => "sampleIndex"
-  | .tileSampleIndex => "tileSampleIndex"
-  | .tilePhase => "tilePhase"
+  | .sampleRate => "sampleRate" | .tau => "tau"
   | .loopIdx _ => "loopIdx" | .bankSum .. => "bankSum"
   | .routedSum .. => "routedSum"
   | .num _ => "num" | .bool _ => "bool" | .arr _ => "arr"
-  | .tileArray _ => "tileArray"
 
 private def mkOpNode (op : String) (args : Array Json) : Json :=
   Json.mkObj [("op", Json.str op), ("args", Json.arr args)]
@@ -87,7 +84,9 @@ def literalDefault (ea : ExprArena) (hw : ea.wf = true) (portName : String)
       .ok (mkOpNode "arraySet" #[← literalDefault ea hw portName a,
         ← literalDefault ea hw portName b, ← literalDefault ea hw portName c])
     | .sampleRate => .ok (Json.mkObj [("op", Json.str "sampleRate")])
-    | .sampleIndex => .ok (Json.mkObj [("op", Json.str "sampleIndex")])
+    -- τ spells as the wire grammar's `clock` sentinel (the wire's
+    -- `sampleIndex` is `⌊τ⌋`, a derived expression, never an IR leaf).
+    | .tau => .ok (Json.mkObj [("op", Json.str "clock")])
     | e =>
       .error (s!"Compiled: input '{portName}' default has op '{wireOpName e}' that's not a literal-class form; "
         ++ "defaults shouldn't reference decls or run combinators")

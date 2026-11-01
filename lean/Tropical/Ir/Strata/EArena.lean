@@ -281,13 +281,12 @@ def remapExprIds? (memo : ExprCopyMemo) (ids : Array ExprId) :
   (·.toArray) <$> remapExprIdList? memo ids.toList
 
 /-- Rename every child of a source node through a completed conversion memo.
-    Metadata (including binders, dynamic counts, routes, and tile identity) is
+    Metadata (including binders, dynamic counts, and routes) is
     copied verbatim. -/
 def remapENode? (memo : ExprCopyMemo) : ENode → Option ENode
   | .num value => pure (.num value)
   | .bool value => pure (.bool value)
   | .arr items => .arr <$> remapExprIds? memo items
-  | .tileArray items => .tileArray <$> remapExprIds? memo items
   | .binary tag lhs rhs =>
       match memo[lhs.idx]?, memo[rhs.idx]? with
       | some lhs, some rhs => some (.binary tag lhs rhs)
@@ -317,9 +316,7 @@ def remapENode? (memo : ExprCopyMemo) : ENode → Option ENode
   | .nestedOut instanceIdx outputIdx =>
       pure (.nestedOut instanceIdx outputIdx)
   | .sampleRate => pure .sampleRate
-  | .sampleIndex => pure .sampleIndex
-  | .tileSampleIndex => pure .tileSampleIndex
-  | .tilePhase => pure .tilePhase
+  | .tau => pure .tau
   | .loopIdx binderId => pure (.loopIdx binderId)
   | .bankSum capacity tables body dynCount? binderId => do
       let tables ← remapExprIds? memo tables
@@ -368,8 +365,6 @@ private def convExprId (ea : ExprArena) (hw : ea.wf = true) (eid : ExprId) :
       | some (.bool b)         => pure (.bool b)
       | some (.arr items)      =>
         pure (.arr (← items.attach.mapM fun ⟨c, _⟩ => convExprId ea hw c))
-      | some (.tileArray items) =>
-        pure (.tileArray (← items.attach.mapM fun ⟨c, _⟩ => convExprId ea hw c))
       | some (.binary t a b)   => pure (.binary t (← convExprId ea hw a) (← convExprId ea hw b))
       | some (.unary t a)      => pure (.unary t (← convExprId ea hw a))
       | some (.clamp a b c)    => pure (.clamp (← convExprId ea hw a) (← convExprId ea hw b) (← convExprId ea hw c))
@@ -380,9 +375,7 @@ private def convExprId (ea : ExprArena) (hw : ea.wf = true) (eid : ExprId) :
       | some (.paramRef i)     => pure (.paramRef i)
       | some (.nestedOut i o)  => pure (.nestedOut i o)
       | some .sampleRate       => pure .sampleRate
-      | some .sampleIndex      => pure .sampleIndex
-      | some .tileSampleIndex  => pure .tileSampleIndex
-      | some .tilePhase        => pure .tilePhase
+      | some .tau      => pure .tau
       | some (.loopIdx id)     => pure (.loopIdx id)
       | some (.bankSum c ts b dc ii) => do
         let ts' ← ts.attach.mapM fun ⟨t, _⟩ => convExprId ea hw t
@@ -603,8 +596,7 @@ def mapExprIdGo (src : ExprArena) (hw : src.wf = true) (h : MapHooksId)
       | none =>
         match _hn : n with
         | .num _ | .bool _ | .inputRef _ | .paramRef _
-        | .nestedOut _ _ | .sampleRate | .sampleIndex | .tileSampleIndex
-        | .tilePhase
+        | .nestedOut _ _ | .sampleRate | .tau
         | .loopIdx _ => pure id
         | .bankSum c ts b dc ii =>
           einternP (.bankSum c
@@ -622,9 +614,6 @@ def mapExprIdGo (src : ExprArena) (hw : src.wf = true) (h : MapHooksId)
                 | some d => some <$> mapExprIdGo src hw h d) ii)
         | .arr items =>
           einternP (.arr (← items.attach.mapM fun ⟨x, _⟩ => mapExprIdGo src hw h x))
-        | .tileArray items =>
-          einternP (.tileArray
-            (← items.attach.mapM fun ⟨x, _⟩ => mapExprIdGo src hw h x))
         | .binary t a b => einternP (.binary t (← mapExprIdGo src hw h a) (← mapExprIdGo src hw h b))
         | .unary t a => einternP (.unary t (← mapExprIdGo src hw h a))
         | .clamp a b c => einternP (.clamp (← mapExprIdGo src hw h a) (← mapExprIdGo src hw h b) (← mapExprIdGo src hw h c))

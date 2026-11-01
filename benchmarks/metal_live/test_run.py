@@ -638,5 +638,34 @@ class AcceptanceGateTests(unittest.TestCase):
         self.assertEqual(row["qualification_status"], "blocked")
 
 
+class LatencyProbeTests(unittest.TestCase):
+    def test_every_discipline_has_a_probe_graph(self) -> None:
+        for discipline, (name, _, _) in RUN.LATENCY_PARAMS.items():
+            graph = json.loads(
+                (RUN.LATENCY / f"latency.{discipline}.graph.json").read_text())
+            echo = next(n for n in graph["nodes"] if n["id"] == "echo")
+            # The echo reads the slot the write lands in: the target itself,
+            # or glide's `#v1`.
+            self.assertIn(echo["param_aliases"]["value"], {name, f"{name}#v1"})
+
+    def test_metal_latency_row_loads_the_prepass_at_unity_gain(self) -> None:
+        artifact = {
+            "ir": Path("k.ll"), "manifest": Path("m.json"),
+            "coeff": Path("s.ll"), "msl": Path("k.metal"),
+        }
+        args = RUN.latency_args(artifact, 128, "anchor")
+        # Without stage0.ll the Metal kernel renders silence.
+        self.assertEqual(args[args.index("--coeff") + 1], "s.ll")
+        self.assertEqual(args[args.index("--msl") + 1], "k.metal")
+        self.assertEqual(
+            args[args.index("--set-param") + 1], "master.gain,1.0")
+
+    def test_jit_latency_row_carries_no_metal_artifacts(self) -> None:
+        args = RUN.latency_args(
+            {"ir": Path("k.ll"), "manifest": Path("m.json")}, 128, "raw")
+        self.assertNotIn("--msl", args)
+        self.assertNotIn("--coeff", args)
+
+
 if __name__ == "__main__":
     unittest.main()

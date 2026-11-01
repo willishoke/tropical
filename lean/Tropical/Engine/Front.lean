@@ -5,8 +5,9 @@ import Tropical.Stdlib
 # Engine.Front — the tool dispatcher and boot
 
 `handleTool` routes a named MCP tool to its handler; `boot` constructs the
-`Env`, wiring the native runtime and DAC. `handleLoadPatchGraph` compiles a
-downstream-only patch graph through the EmitArrow lowering to a session root.
+`Env` over a host port supplied by the composition root.
+`handleLoadPatchGraph` compiles a downstream-only patch graph through the
+EmitArrow lowering to a session root.
 -/
 
 namespace Tropical.Engine
@@ -14,6 +15,7 @@ namespace Tropical.Engine
 open Lean (Json toJson)
 open Tropical.Expr (getField? getStrField? opOf?)
 open Tropical.Wiring (parsePortType? checkArrayConnection PortType)
+open Tropical.Session (registerStdlib)
 
 -- ── Dispatcher ───────────────────────────────────────────────────────────────
 
@@ -45,6 +47,11 @@ private def graphArtifactArgs (args : Json) (taps : Json) : Json :=
     .obj (fields.insert "taps" taps)
   | _ => args
 
+/-- The playground compile against the engine's boot-time stdlib arena. -/
+private def compilePatchGraph (env : Env) (graph : Json) :
+    Except String Tropical.Playground.CompiledPatch :=
+  Tropical.Playground.compilePlanPure env.stdlib.1 env.stdlib.2 graph
+
 /-- EXPERIMENT (`load_patch_graph`): compile a downstream-only patch graph (the
     playground GUI) through the EmitArrow arrow lowering — `lowerGraph → normalize
     (the slide) → emitTerm` — to a session root, then the production
@@ -56,7 +63,7 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
     | .ok graph => pure graph
   let requestedTaps := selectedObservationTapNames flatArgs
   let (compiled, publishedTaps, generation) ← if requestedTaps.isEmpty then
-      let compiled ← match ← Tropical.Playground.compilePlan flatArgs with
+      let compiled ← match compilePatchGraph env flatArgs with
         | .error e => internalError e
         | .ok p => pure p
       let generation ←
@@ -71,10 +78,10 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
       let audioArgs := graphArtifactArgs flatArgs (Json.bool false)
       let observationArgs := graphArtifactArgs flatArgs
         (Json.arr (requestedTaps.map Json.str))
-      let audio ← match ← Tropical.Playground.compilePlan audioArgs with
+      let audio ← match compilePatchGraph env audioArgs with
         | .error e => internalError e
         | .ok p => pure p
-      let observation ← match ← Tropical.Playground.compilePlan observationArgs with
+      let observation ← match compilePatchGraph env observationArgs with
         | .error e => internalError e
         | .ok p => pure p
       let generation ← loadKernelWithObservationPublished env
@@ -88,8 +95,7 @@ def handleLoadPatchGraph (env : Env) (args : Json) : EngineM Json := do
   -- this graph's inspection points via `list_scope_taps` with no session wiring.
   env.state.modify (fun st => { st with
     params := Tropical.Playground.knobParams flatArgs
-    scopeTaps := publishedTaps
-    paramDisciplines := compiled.plan.paramDisciplines })
+    scopeTaps := publishedTaps })
   -- The realized-state report: facts about what compiled (active/excluded
   -- nodes, wired/normalled inputs, live params with disciplines, taps) —
   -- never warnings. `ok` stays for callers that only ever looked at it.
@@ -124,64 +130,26 @@ def handleTool (env : Env) (name : String) (args : Json) : IO Json :=
   | "start_audio"     => handleStartAudio env args
   | "stop_audio"      => handleStopAudio env
   | "audio_status"    => handleAudioStatus env
-  -- ONE set_param: discipline-dispatched from the loaded plan's table
-  -- (raw for table-less names).
-  | "set_param"       => handleSetParamDispatch env args
+  -- ONE set_param: the host dispatches from the loaded manifest's table.
+  | "set_param"       => handleSetParam env args
   | "list_params"     => handleListParams env
   | "debug_render"    => handleDebugRender env args
   | _ => internalError s!"Unknown tool: '{name}'"
 
 -- ── Boot ─────────────────────────────────────────────────────────────────────
 
-/-- Qualification-only runtime block-length seam. The live default stays 512;
-    the opt-in environment value is read before Runtime/DAC construction and
-    is already visible through runtime telemetry's `buffer_length`. -/
-private def bootBufferLength : IO UInt32 := do
-  match ← IO.getEnv "TROPICAL_BUFFER_LENGTH" with
-  | none => pure 512
-  | some raw =>
-    match raw.toNat? with
-    | some n =>
-      if n >= 16 && n <= 16384 then
-        pure n.toUInt32
-      else
-        throw <| IO.userError
-          "TROPICAL_BUFFER_LENGTH must be an integer in [16,16384]"
-    | none =>
-      throw <| IO.userError
-        "TROPICAL_BUFFER_LENGTH must be an integer in [16,16384]"
-
-/-- Boot the stdlib and build the Env.
-
-    The stdlib is the arrow-builder chain (`Tropical.EmitArrow.stdlibBuilders`),
-    the 15 live programs authored directly as `Sig`/`assemble` builders — no
-    `.md` source, no parsed bridge, no elaboration. Each builder appends its raw
-    program to the arena, linking sub-programs by name against the chain built so
-    far (deps precede dependents in manifest order); `registerResolved` relinks
-    that raw registry to the post-strata canon and adopts the catalog entry. Any
-    failure here is fatal: the engine cannot compile without its store. -/
-def boot : IO Env := do
+/-- Boot the stdlib and build the Env. The boot chain itself is
+    `Tropical.Session.registerStdlib`; any failure there is fatal: the engine
+    cannot compile without its store. -/
+def boot (host : Tropical.Host.HostPort)
+    (artifact : Tropical.Artifact.Options := {}) : IO Env := do
   let state ← IO.mkRef ({} : SessionSt)
-  let runtime ← Ffi.Runtime.new (← bootBufferLength)
-  let dac ← IO.mkRef (none : Option Ffi.Dac)
-  let metalBackend := (← IO.getEnv "TROPICAL_BACKEND") == some "metal"
-  let env : Env := { state, runtime, dac, metalBackend }
-  -- The stdlib is the arrow-builder chain (`Tropical.EmitArrow.stdlibBuilders`),
-  -- no longer the parsed-.md bridge. Each builder appends its RAW program to the
-  -- arena, linking sub-programs by name against the chain built so far;
-  -- `registerResolved` relinks that raw registry to the post-strata canon and
-  -- adopts the catalog entry. Manifest order == the chain order, so the catalog
-  -- (and `list_programs`) ordering is preserved.
-  let registerAll : EngineM Unit := do
-    let mut chain : Array (String × Tropical.Ir.ProgramIdx) := #[]
-    for (name, build) in Tropical.EmitArrow.stdlibBuilders do
-      let st ← env.state.get
-      let (arena', rawIdx) ← match build st.arena chain with
-        | .error e => internalError s!"stdlib builder '{name}': {e}"
-        | .ok r => pure r
-      let _ ← registerResolved env name arena' rawIdx
-      chain := chain.push (name, rawIdx)
-  match ← registerAll.run with
+  let dac ← IO.mkRef (none : Option Tropical.Host.OutputPort)
+  let stdlib ← match Tropical.Playground.stdlib with
+    | .ok s => pure s
+    | .error e => throw <| IO.userError s!"stdlib elaboration failed: {e}"
+  let env : Env := { state, host, dac, artifact, stdlib }
+  match ← (env.session registerStdlib).run with
   | .ok () => pure ()
   | .error f => throw <| IO.userError s!"stdlib boot failed: {f.toJson.compress}"
   pure env

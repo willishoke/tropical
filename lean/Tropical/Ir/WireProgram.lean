@@ -1,3 +1,4 @@
+import Tropical.Ir.ClockFormat
 import Tropical.WireExpr
 import Tropical.Ir.Nodes
 
@@ -125,7 +126,11 @@ private def translate (refToInput : Array (String × Nat))
       | throw "liftWireToProgram: param accumulator lost a name (internal)"
     pure (internW (.paramRef ⟨pi⟩) ctx)
   | .sampleRate => pure (internW .sampleRate ctx)
-  | .sampleIndex => pure (internW .sampleIndex ctx)
+  | .sampleIndex =>
+    -- The wire's integer sample index is `⌊τ⌋`: the IR's time leaf is τ.
+    let (t, ctx) := internW .tau ctx
+    let (s, ctx) := internW (.num ⟨Tropical.Ir.clockFracBits, 0⟩) ctx
+    pure (internW (.binary .rshift t s) ctx)
   | .binary tag l r =>
     let (a, ctx) ← translate refToInput l ctx
     let (b, ctx) ← translate refToInput r ctx

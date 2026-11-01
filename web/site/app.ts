@@ -3,7 +3,9 @@
  */
 
 import { startHost, type TropicalHost } from '../host/context.js'
-import type { KernelManifest } from '../runtime/index.js'
+import {
+  kernelFrames, kernelOutputChannelCount, kernelParams, type KernelManifest,
+} from '../runtime/index.js'
 
 type ManifestEntry = {
   slug: string
@@ -82,8 +84,8 @@ playBtn.addEventListener('click', async () => {
     ])
     setInfo(
       `wasm: ${(wasm.byteLength / 1024).toFixed(1)} KB · ` +
-      `registers: ${manifestJson.registerCount} · slots: ${manifestJson.slotCount} · ` +
-      `arrays: ${manifestJson.arraySlotSizes.length} · rate: ${manifestJson.sampleRate}Hz · ` +
+      `frames: ${kernelFrames(manifestJson)} · params: ${kernelParams(manifestJson).length} · ` +
+      `channels: ${kernelOutputChannelCount(manifestJson)} · rate: ${manifestJson.rate}Hz · ` +
       `audioCtx: ${host.context.sampleRate}Hz ${host.context.state}`,
     )
 

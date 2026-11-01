@@ -26,10 +26,6 @@ extern "C" const char* tropical_last_error(void)
   return tls_last_error.c_str();
 }
 
-#ifdef TROPICAL_WASM_EMIT
-namespace tropical_jit { std::vector<uint8_t> compile_ir_to_wasm(const std::string &, std::string &); }
-#endif
-
 // ---------- DAC wrapper (RuntimeDAC only) ----------
 
 using RuntimeDAC = TropicalDACImpl<tropical_runtime::FlatRuntime>;
@@ -283,74 +279,28 @@ void tropical_runtime_free(tropical_runtime_t r)
   delete static_cast<tropical_runtime::FlatRuntime*>(r);
 }
 
-bool tropical_runtime_load_ir(tropical_runtime_t r, const char* ir_text, size_t ir_len,
-                              const char* manifest_json, size_t manifest_len)
-{
-  if (!r || !ir_text || !manifest_json) return false;
-  try
-  {
-    return static_cast<tropical_runtime::FlatRuntime*>(r)->load_ir(
-      std::string(ir_text, ir_len), std::string(manifest_json, manifest_len));
-  }
-  catch (const std::exception& e) { set_error(e.what()); return false; }
-}
-
-bool tropical_runtime_load_ir_msl(tropical_runtime_t r, const char* ir_text, size_t ir_len,
-                                  const char* msl_source, size_t msl_len,
-                                  const char* manifest_json, size_t manifest_len)
-{
-  if (!r || !ir_text || !manifest_json) return false;
-  try
-  {
-    return static_cast<tropical_runtime::FlatRuntime*>(r)->load_ir_msl(
-      std::string(ir_text, ir_len),
-      msl_source ? std::string(msl_source, msl_len) : std::string{},
-      std::string(manifest_json, manifest_len));
-  }
-  catch (const std::exception& e) { set_error(e.what()); return false; }
-}
-
-bool tropical_runtime_load_ir_staged(tropical_runtime_t r, const char* ir_text, size_t ir_len,
-                                     const char* msl_source, size_t msl_len,
-                                     const char* coeff_ir, size_t coeff_len,
-                                     const char* manifest_json, size_t manifest_len)
-{
-  if (!r || !ir_text || !manifest_json) return false;
-  try
-  {
-    return static_cast<tropical_runtime::FlatRuntime*>(r)->load_ir_staged(
-      std::string(ir_text, ir_len),
-      msl_source ? std::string(msl_source, msl_len) : std::string{},
-      coeff_ir ? std::string(coeff_ir, coeff_len) : std::string{},
-      std::string(manifest_json, manifest_len));
-  }
-  catch (const std::exception& e) { set_error(e.what()); return false; }
-}
-
-bool tropical_runtime_load_ir_time_staged(
+bool tropical_runtime_load(
   tropical_runtime_t r, const char* ir_text, size_t ir_len,
   const char* msl_source, size_t msl_len,
-  const char* coeff_ir, size_t coeff_len,
-  const char* tile_ir, size_t tile_ir_len,
+  const char* stage0_ir, size_t stage0_len,
   const char* manifest_json, size_t manifest_len)
 {
   if (!r || !ir_text || !manifest_json) return false;
   try
   {
-    return static_cast<tropical_runtime::FlatRuntime*>(r)->load_ir_time_staged(
+    return static_cast<tropical_runtime::FlatRuntime*>(r)->load(
       std::string(ir_text, ir_len),
       msl_source ? std::string(msl_source, msl_len) : std::string{},
-      coeff_ir ? std::string(coeff_ir, coeff_len) : std::string{},
-      tile_ir ? std::string(tile_ir, tile_ir_len) : std::string{},
+      stage0_ir ? std::string(stage0_ir, stage0_len) : std::string{},
       std::string(manifest_json, manifest_len));
   }
   catch (const std::exception& e) { set_error(e.what()); return false; }
 }
 
-bool tropical_runtime_load_ir_staged_generation(
+bool tropical_runtime_load_generation(
   tropical_runtime_t r, const char* ir_text, size_t ir_len,
   const char* msl_source, size_t msl_len,
-  const char* coeff_ir, size_t coeff_len,
+  const char* stage0_ir, size_t stage0_len,
   const char* manifest_json, size_t manifest_len,
   tropical_runtime_generation_t* out_generation)
 {
@@ -359,37 +309,10 @@ bool tropical_runtime_load_ir_staged_generation(
   try
   {
     const auto generation =
-      static_cast<tropical_runtime::FlatRuntime*>(r)
-        ->load_ir_staged_generation(
-          std::string(ir_text, ir_len),
-          msl_source ? std::string(msl_source, msl_len) : std::string{},
-          coeff_ir ? std::string(coeff_ir, coeff_len) : std::string{},
-          std::string(manifest_json, manifest_len));
-    out_generation->program_version = generation.program_version;
-    out_generation->control_version = generation.control_version;
-    return generation.program_version != 0;
-  }
-  catch (const std::exception& e) { set_error(e.what()); return false; }
-}
-
-bool tropical_runtime_load_ir_time_staged_generation(
-  tropical_runtime_t r, const char* ir_text, size_t ir_len,
-  const char* msl_source, size_t msl_len,
-  const char* coeff_ir, size_t coeff_len,
-  const char* tile_ir, size_t tile_ir_len,
-  const char* manifest_json, size_t manifest_len,
-  tropical_runtime_generation_t* out_generation)
-{
-  if (out_generation) *out_generation = {};
-  if (!r || !ir_text || !manifest_json || !out_generation) return false;
-  try
-  {
-    const auto generation = static_cast<tropical_runtime::FlatRuntime*>(r)
-      ->load_ir_time_staged_generation(
+      static_cast<tropical_runtime::FlatRuntime*>(r)->load_generation(
         std::string(ir_text, ir_len),
         msl_source ? std::string(msl_source, msl_len) : std::string{},
-        coeff_ir ? std::string(coeff_ir, coeff_len) : std::string{},
-        tile_ir ? std::string(tile_ir, tile_ir_len) : std::string{},
+        stage0_ir ? std::string(stage0_ir, stage0_len) : std::string{},
         std::string(manifest_json, manifest_len));
     out_generation->program_version = generation.program_version;
     out_generation->control_version = generation.control_version;
@@ -398,52 +321,12 @@ bool tropical_runtime_load_ir_time_staged_generation(
   catch (const std::exception& e) { set_error(e.what()); return false; }
 }
 
-bool tropical_runtime_load_ir_staged_with_observation_generation(
+bool tropical_runtime_load_with_observation_generation(
   tropical_runtime_t r, const char* audio_ir, size_t audio_ir_len,
   const char* audio_msl_source, size_t audio_msl_len,
-  const char* audio_coeff_ir, size_t audio_coeff_len,
+  const char* audio_stage0_ir, size_t audio_stage0_len,
   const char* audio_manifest_json, size_t audio_manifest_len,
   const char* observation_ir, size_t observation_ir_len,
-  const char* observation_coeff_ir, size_t observation_coeff_len,
-  const char* observation_manifest_json, size_t observation_manifest_len,
-  tropical_runtime_generation_t* out_generation)
-{
-  if (out_generation) *out_generation = {};
-  if (!r || !audio_ir || !audio_manifest_json || !observation_ir
-      || !observation_manifest_json || !out_generation)
-    return false;
-  try
-  {
-    const auto generation =
-      static_cast<tropical_runtime::FlatRuntime*>(r)
-        ->load_ir_staged_with_observation_generation(
-          std::string(audio_ir, audio_ir_len),
-          audio_msl_source
-            ? std::string(audio_msl_source, audio_msl_len) : std::string{},
-          audio_coeff_ir
-            ? std::string(audio_coeff_ir, audio_coeff_len) : std::string{},
-          std::string(audio_manifest_json, audio_manifest_len),
-          std::string(observation_ir, observation_ir_len),
-          observation_coeff_ir
-            ? std::string(observation_coeff_ir, observation_coeff_len)
-            : std::string{},
-          std::string(
-            observation_manifest_json, observation_manifest_len));
-    out_generation->program_version = generation.program_version;
-    out_generation->control_version = generation.control_version;
-    return generation.program_version != 0;
-  }
-  catch (const std::exception& e) { set_error(e.what()); return false; }
-}
-
-bool tropical_runtime_load_ir_time_staged_with_observation_generation(
-  tropical_runtime_t r, const char* audio_ir, size_t audio_ir_len,
-  const char* audio_msl_source, size_t audio_msl_len,
-  const char* audio_coeff_ir, size_t audio_coeff_len,
-  const char* audio_tile_ir, size_t audio_tile_ir_len,
-  const char* audio_manifest_json, size_t audio_manifest_len,
-  const char* observation_ir, size_t observation_ir_len,
-  const char* observation_coeff_ir, size_t observation_coeff_len,
   const char* observation_manifest_json, size_t observation_manifest_len,
   tropical_runtime_generation_t* out_generation)
 {
@@ -454,19 +337,14 @@ bool tropical_runtime_load_ir_time_staged_with_observation_generation(
   try
   {
     const auto generation = static_cast<tropical_runtime::FlatRuntime*>(r)
-      ->load_ir_time_staged_with_observation_generation(
+      ->load_with_observation_generation(
         std::string(audio_ir, audio_ir_len),
         audio_msl_source
           ? std::string(audio_msl_source, audio_msl_len) : std::string{},
-        audio_coeff_ir
-          ? std::string(audio_coeff_ir, audio_coeff_len) : std::string{},
-        audio_tile_ir
-          ? std::string(audio_tile_ir, audio_tile_ir_len) : std::string{},
+        audio_stage0_ir
+          ? std::string(audio_stage0_ir, audio_stage0_len) : std::string{},
         std::string(audio_manifest_json, audio_manifest_len),
         std::string(observation_ir, observation_ir_len),
-        observation_coeff_ir
-          ? std::string(observation_coeff_ir, observation_coeff_len)
-          : std::string{},
         std::string(observation_manifest_json, observation_manifest_len));
     out_generation->program_version = generation.program_version;
     out_generation->control_version = generation.control_version;
@@ -479,35 +357,6 @@ void tropical_runtime_set_sample_index(tropical_runtime_t r, uint64_t idx)
 {
   if (!r) return;
   static_cast<tropical_runtime::FlatRuntime*>(r)->set_sample_index(idx);
-}
-
-uint8_t* tropical_compile_ir_to_wasm(const char* ir_text, size_t ir_len, size_t* out_len)
-{
-#ifdef TROPICAL_WASM_EMIT
-  if (!ir_text || !out_len) { set_error("compile_ir_to_wasm: null argument"); return nullptr; }
-  try
-  {
-    std::string err;
-    std::vector<uint8_t> bytes =
-      tropical_jit::compile_ir_to_wasm(std::string(ir_text, ir_len), err);
-    if (bytes.empty())
-    {
-      set_error(err.empty() ? "compile_ir_to_wasm: produced no output" : err);
-      return nullptr;
-    }
-    uint8_t* buf = static_cast<uint8_t*>(std::malloc(bytes.size()));
-    if (!buf) { set_error("compile_ir_to_wasm: out of memory"); return nullptr; }
-    std::memcpy(buf, bytes.data(), bytes.size());
-    *out_len = bytes.size();
-    return buf;
-  }
-  catch (const std::exception& e) { set_error(e.what()); return nullptr; }
-#else
-  (void)ir_text; (void)ir_len;
-  if (out_len) *out_len = 0;
-  set_error("libtropical was built without TROPICAL_WASM_EMIT");
-  return nullptr;
-#endif
 }
 
 void tropical_free_buffer(uint8_t* buf) { std::free(buf); }
@@ -661,21 +510,6 @@ uint64_t tropical_runtime_metal_dispatch_failure_count(tropical_runtime_t r)
     ->metal_dispatch_failure_count();
 }
 
-uint64_t tropical_runtime_metal_materialization_failure_count(
-  tropical_runtime_t r)
-{
-  if (!r) return 0;
-  return static_cast<tropical_runtime::FlatRuntime*>(r)
-    ->metal_materialization_failure_count();
-}
-
-uint64_t tropical_runtime_metal_exact_fallback_count(tropical_runtime_t r)
-{
-  if (!r) return 0;
-  return static_cast<tropical_runtime::FlatRuntime*>(r)
-    ->metal_exact_fallback_count();
-}
-
 uint64_t tropical_runtime_metal_render_starvation_count(tropical_runtime_t r)
 {
   if (!r) return 0;
@@ -759,6 +593,28 @@ bool tropical_runtime_is_fade_out_complete(tropical_runtime_t r)
 
 // ── Slot model (M5+) ────────────────────────────────────────────────────────
 
+int tropical_runtime_set_param(tropical_runtime_t r, const char* name, double value,
+                               tropical_param_write_t* out_write)
+{
+  if (out_write) *out_write = {};
+  if (!r || !name || !out_write) { set_error("set_param: null argument"); return -1; }
+  try
+  {
+    const auto result = static_cast<tropical_runtime::FlatRuntime*>(r)
+      ->dispatch_param_sync(std::string(name), value);
+    if (!result.ok)
+    {
+      if (result.unknown_param) return 0;
+      set_error(result.error);
+      return -1;
+    }
+    out_write->observed_sample_index = result.observed_sample_index;
+    out_write->effective_sample_index = result.effective_sample_index;
+    return 1;
+  }
+  catch (const std::exception& e) { set_error(e.what()); return -1; }
+}
+
 unsigned int tropical_runtime_slot_index(tropical_runtime_t r, const char* name)
 {
   if (!r || !name) return UINT32_MAX;
@@ -804,6 +660,17 @@ bool tropical_runtime_render_window(tropical_runtime_t r, uint64_t start_index,
   return static_cast<tropical_runtime::FlatRuntime*>(r)->render_window(
     start_index, count,
     reinterpret_cast<const uint32_t*>(slot_ids), n_slots, out);
+}
+
+bool tropical_runtime_render_tau(tropical_runtime_t r, const int64_t* tau,
+                                 unsigned int count, const unsigned int* channel_ids,
+                                 unsigned int n_channels, double* out)
+{
+  if (!r) { set_error("render_tau: null runtime"); return false; }
+  const bool ok = static_cast<tropical_runtime::FlatRuntime*>(r)->render_tau(
+    tau, count, reinterpret_cast<const uint32_t*>(channel_ids), n_channels, out);
+  if (!ok) set_error("render_tau: no observation artifact, bad channel, or null buffer");
+  return ok;
 }
 
 // ── Socket endpoint ─────────────────────────────────────────────────────────

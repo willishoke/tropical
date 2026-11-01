@@ -7,7 +7,7 @@ on:
 jobs:
   reversible:
     name: Reversible Swift build and test
-    runs-on: macos-14
+    runs-on: macos-26
     steps:
       - uses: actions/checkout@v4
       - name: Build native app package
@@ -48,7 +48,7 @@ jobs:
           # the in-process wasm emitter's static LTO link needs Polly's archives.
           sudo apt-get install -y lld-22 liblld-22-dev libpolly-22-dev libasound2-dev
 
-      - name: Build libtropical (with in-process wasm emit)
+      - name: Build libtropical + libtropical_wasm (the in-process wasm emitter)
         run: |
           cmake -S . -B build \
             -DLLVM_DIR=/usr/lib/llvm-22/lib/cmake/llvm \
@@ -69,10 +69,23 @@ jobs:
         run: |
           cd lean
           lake env leanc -c ffi/shim.c -o ffi/shim.o -I ../engine/c_api
-          lake build frontend diffcli tropicaltest trustreport
+          lake env leanc -c ffi/shim_wasm.c -o ffi/shim_wasm.o -I ../engine/toolchain
+          lake build frontend diffcli tropicaltest trustreport tropicalc tropicaltest-core
 
       - name: Audit typed trust sites against production Lean
         run: python3 tools/audit_trust_sites.py
+
+      - name: Lean library layering (TropicalCore never imports the runtime)
+        run: python3 tools/check_layers.py
+
+      - name: Offline compiler agrees with the engine (and links no runtime)
+        run: python3 tools/check_artifact_parity.py
+
+      - name: The runtime carries no toolchain (lld lives in libtropical_wasm)
+        run: python3 tools/check_runtime_deps.py
+
+      - name: Core test tier (no runtime linked)
+        run: ./lean/.lake/build/bin/tropicaltest-core
 
       - name: Golden + native-equiv runner
         run: ./lean/.lake/build/bin/tropicaltest
@@ -85,3 +98,8 @@ jobs:
 
       - name: C++ tests
         run: ctest --test-dir build --output-on-failure
+
+      - name: Metal-live harness gates + latency probe smoke (JIT, Bdev=128)
+        run: |
+          python3 benchmarks/metal_live/test_run.py
+          python3 benchmarks/metal_live/run.py --mode smoke --skip-build

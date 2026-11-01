@@ -60,6 +60,7 @@ The individual checks:
 cmake --build build -j4 && ctest --test-dir build         # C++ tests (JIT + C API, no audio device)
 ./lean/.lake/build/bin/tropicaltest                       # audio + wire/port goldens + native mode-equiv
 TROPICAL_ENGINE_CMD="./lean/.lake/build/bin/frontend --rpc" bun test   # WASM≡JIT + MCP behavioral
+bun run tsc --noEmit                                      # TypeScript type-check (web/)
 ```
 
 `tropicaltest` is the Lean golden runner: it boots the `Tropical.Stdlib`
@@ -71,7 +72,7 @@ runs the native realization-variant equivalence (fused vs. per-instance
 microkernel; flat vs. nested) directly through the engine.
 
 The bun suites are the surviving cross-backend gate — `tests/web`
-(WASM emitter vs. JIT, off the same `tropical_plan_6`) and the MCP
+(WASM emitter vs. JIT, off the same `tropical_plan_7`) and the MCP
 protocol tests in `mcp/` — both run against the live Lean engine via
 `TROPICAL_ENGINE_CMD`. There is no koffi FFI: the bun process talks to
 the `frontend` binary over RPC, so `make build` and `make lean` must
@@ -89,7 +90,7 @@ bun web/build.ts            # full demo bundle (worklet + main app + index.html 
 bun web/dev.ts              # dev server with the COOP/COEP headers SAB requires
 ```
 
-The browser demo loads the precompiled `tropical_plan_6` plans, emits
+The browser demo loads the precompiled `tropical_plan_7` plans, emits
 WASM at runtime (`web/wasm/emit_wasm.ts`), and runs the kernel inside
 an AudioWorklet. See `web/CLAUDE.md` for details.
 

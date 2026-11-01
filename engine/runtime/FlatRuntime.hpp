@@ -4,12 +4,13 @@
  * FlatRuntime.hpp — publication and execution for emitted kernels.
  *
  * Receives Lean-emitted LLVM (and optionally MSL/coefficient LLVM) plus a
- * tropical_plan_6 metadata manifest, compiles/loads the artifacts, constructs
+ * tropical_plan_7 metadata manifest, compiles/loads the artifacts, constructs
  * their backing regions, and atomically publishes the inactive KernelState.
  * The plan instruction graph is diagnostic metadata here; C++ does not turn
  * expression trees into executable code.
  */
 
+#include "ClockFormat.hpp"
 #include "ControlParam.hpp"
 #include "jit/OrcJitEngine.hpp"
 
@@ -33,11 +34,9 @@
 #include "runtime/EpochTileQueue.hpp"
 #endif
 
-namespace tropical_plan6 { struct ParsedPlan6; }
+namespace tropical_plan7 { struct ParsedPlan7; struct ParsedKernel1; }
 namespace tropical_metal {
 struct MetalKernel;
-struct TileMaterializerProgram;
-struct ExactTileFallbackProgram;
 }
 
 namespace tropical_runtime
@@ -45,7 +44,7 @@ namespace tropical_runtime
 
 // Host-contract param write discipline (design/host-param-dispatch.md),
 // carried by the plan manifest exactly like slot_names / slot_defaults.
-// Runtime copy of ParsedPlan6::ParamDiscipline so this header stays free
+// Runtime copy of ParsedPlan7::ParamDiscipline so this header stays free
 // of the parser header.
 struct ParamDiscipline
 {
@@ -65,6 +64,9 @@ struct ParamDispatchResult
   // sample that can actually contain the published generation.
   uint64_t    observed_sample_index = 0;
   uint64_t    effective_sample_index = 0;
+  // The loaded manifest has no slot for the name: a client error, which the
+  // engine reports as its unknown_param envelope rather than a host failure.
+  bool        unknown_param = false;
 };
 
 // Exact graph generation created by one successful publication. Returning the
@@ -137,22 +139,15 @@ struct RuntimeOwnershipTestSeam
 struct ObservationProgramImage
 {
   uint64_t program_version = 0;
-  tropical_jit::CompilationMode mode = tropical_jit::CompilationMode::Fused;
-  tropical_jit::NumericKernelFn kernel = nullptr;
-  tropical_jit::NumericKernelFn coeff_kernel = nullptr;
-  double sample_rate = 44100.0;
+  tropical_jit::KernelArgvFn kernel = nullptr;
+  uint32_t frames = 0;
   uint32_t output_channel_count = 1;
-  std::size_t register_count = 0;
-  std::size_t temp_count = 0;
-  std::size_t coeff_register_count = 0;
-  std::size_t coeff_temp_count = 0;
-  std::vector<std::vector<int64_t>> array_storage;
-  std::vector<uint64_t> array_sizes;
-  std::vector<uint64_t> param_ptrs;
-  std::vector<uint32_t> coeff_array_slots;
+  std::vector<uint32_t> input_slots;        // param input j → slot index
   std::vector<std::string> slot_names;
   std::vector<double> initial_slots;
   std::unordered_map<std::string, uint32_t> slot_lookup;
+  std::vector<std::string> channel_names;
+  std::unordered_map<std::string, uint32_t> channel_lookup;
 };
 
 struct ObservationControlImage
@@ -171,19 +166,14 @@ struct ObservationSnapshot
 // Mutable scratch is serialized only with other observers. Keeping it outside
 // the live state makes control publication and hot-swap independent of a slow
 // room/scope/telemetry consumer, while retaining allocation-free steady-state
-// frames and coefficient reuse.
+// frames.
 struct ObservationRenderWorkspace
 {
   uint64_t program_version = 0;
-  uint64_t control_version = 0;
-  std::vector<int64_t> registers;
-  std::vector<int64_t> temps;
-  std::vector<int64_t> coeff_registers;
-  std::vector<int64_t> coeff_temps;
-  std::vector<double> materialized_slots;
+  std::vector<int64_t> tau;
   std::vector<double> slots;
-  std::vector<std::vector<int64_t>> arrays;
-  std::vector<int64_t *> array_ptrs;
+  std::vector<double> out;
+  std::vector<void *> argv;
 };
 
 struct KernelState
@@ -198,33 +188,34 @@ struct KernelState
   bool metal_sample_threadgroups = false;
   uint32_t metal_threadgroup_scratch_bytes = 0;
 
-  // ── Execution mode + kernel handles ──────────────────────────────────────
-  // Fused mode populates `kernel` (single NumericKernelFn). Microkernel
-  // mode populates `microkernels` (preamble, N instance kernels,
-  // state_evolution, postamble_mix); `kernel` is nullptr in that case.
-  // The audio-thread process() loop branches on `mode`.
-  tropical_jit::CompilationMode      mode   = tropical_jit::CompilationMode::Fused;
-  tropical_jit::NumericKernelFn      kernel = nullptr;
-  tropical_jit::MicrokernelKernels   microkernels{};
+  // ── The kernel at the port ───────────────────────────────────────────────
+  // `kernel` is the argv thunk of the loaded artifact: argv[0] = tau
+  // (`frames` Q48.16 clock values), argv[1..k] = one double per param input
+  // in port order (`input_slots[j]` is the slot the j-th param lives in),
+  // argv[k+1] = the frame-major output. Everything else — the slot vector,
+  // the arrays, the SSA scratch, the stage-0 prologue — is inside the
+  // function. `frames` must equal the runtime's buffer length.
+  tropical_jit::KernelArgvFn         kernel = nullptr;
+  uint32_t                           frames = 0;
+  std::vector<uint32_t>              input_slots;
+  std::vector<std::string>           channel_names;
+  std::vector<int64_t>               tau;
+  std::vector<void *>                argv;
 
-  // Stage-0 coefficient kernel (optional). A second single-function module
-  // holding the plan's τ-independent instructions; run once at load (before
-  // publish) and after every control-plane slot write, materializing
-  // coefficient values into `coef:<n>` module slots the audio kernel reads.
-  // Same NumericKernelFn signature, invoked with buffer_length = 1. Both
-  // kernels keep temps as SSA (never store `%temps`). Control and audio use
-  // disjoint slot views, so coefficient materialization never races the
-  // in-flight audio kernel.
+  // Metal pre-pass (TROPICAL_METAL artifacts only). The coefficient plan as a
+  // host function over the slot vector and the coefficient columns: run once
+  // at load (before publish) and after every control-plane slot write, so the
+  // GPU kernel — which has no prologue of its own — reads a complete f64-
+  // computed slot/column image. A JIT artifact carries none; its kernel does
+  // this work inside itself.
   //
-  // BANKS-AS-DATA (per-array staging): the coefficient kernel also fills shared
-  // COEFFICIENT COLUMNS — `array_ptrs` slots whose fills classified s0 — that the
-  // audio kernel's in-loop `Index` reads. Those slots (the plan advertises them
-  // as `coeff_array_slots`) are GENERATION-BUFFERED together with the entire
+  // BANKS-AS-DATA (per-array staging): the pre-pass also fills the COEFFICIENT
+  // COLUMNS — `array_ptrs` slots whose fills classified s0 — that the GPU
+  // kernel's in-loop `Index` reads. Those slots (the plan advertises them as
+  // `coeff_array_slots`) are GENERATION-BUFFERED together with the entire
   // scalar slot set. A control transaction materializes both into one free
-  // generation and release-publishes one generation word. process() captures
-  // that generation once per buffer, so ordinary slots, scalar coefficients,
-  // and every coefficient column are mutually coherent.
-  tropical_jit::NumericKernelFn      coeff_kernel = nullptr;
+  // generation and release-publishes one generation word.
+  tropical_jit::Stage0Fn             stage0 = nullptr;
   uint32_t                           output_channel_count = 1;
 
   // The coefficient-column slots (indices into array_storage/array_ptrs), the
@@ -238,33 +229,19 @@ struct KernelState
   // control_published_gen covers BOTH slot and column generations. atomic_ref
   // is used at access sites so KernelState remains movable.
   std::vector<uint32_t> coeff_array_slots;
-  std::vector<uint32_t> tile_array_slots;
-  uint32_t tile_interval_frames = 0;
-  std::shared_ptr<const tropical_metal::TileMaterializerProgram>
-    tile_materializer;
-  std::shared_ptr<const tropical_metal::ExactTileFallbackProgram>
-    tile_exact_fallback;
-  // For each exact fallback slot, the matching compact-audio slot index, or
-  // -1 when the exact manifest's initial default must be retained.
-  std::vector<int32_t> tile_exact_slot_sources;
   std::array<std::vector<std::vector<int64_t>>, 3> coeff_generations;
   std::vector<int64_t *> coeff_array_ptrs;
   std::array<std::vector<double>, 3> slot_generations;
   std::vector<double> audio_slots;
   uint32_t control_published_gen = 0;
 
-  // Flat buffers passed to kernel (matches NumericKernelFn signature)
-  std::vector<int64_t> registers;
-  std::vector<int64_t> temps;
-  // Control-only scratch for the coefficient kernel. Even though emitted
-  // stage-0 code currently keeps temporaries in SSA, using disjoint backing
-  // buffers makes that codegen property unnecessary for thread safety.
-  std::vector<int64_t> coeff_registers;
+  // Host storage for the Metal pre-pass: the array backing stores (the
+  // coefficient columns among them) and its SSA scratch. Unused by a JIT
+  // artifact, whose kernel allocates its own.
   std::vector<int64_t> coeff_temps;
   std::vector<std::vector<int64_t>> array_storage;
   std::vector<int64_t *> array_ptrs;
   std::vector<uint64_t> array_sizes;
-  std::vector<uint64_t> param_ptrs;
 
   // Array slot names from the manifest (diagnostic metadata).
   std::vector<std::string> array_names;
@@ -305,55 +282,20 @@ public:
   ~FlatRuntime();
 
   /**
-   * Load a kernel from textual LLVM IR plus a metadata manifest.
-   *
-   * `manifest_json` is a tropical_plan_6 JSON whose instruction graph is
-   * ignored — codegen comes from `ir_text` (JIT-compiled via
-   * OrcJitEngine::compile_ir_text). The manifest's metadata (temp pool
-   * size, array/slot names + sizes, sample_rate, slot defaults) drives
-   * runtime scratch + slot setup. CF-only: there is no per-sample state,
-   * so no state-register metadata or by-name transfer. Always fused. This
-   * is the seam for the Lean-emits-IR migration: the same metadata Lean
-   * already holds in FlatPlan, plus the IR it will emit.
+   * Load one kernel artifact: the port IR (defining `tropical_kernel` and
+   * its argv thunk), the MSL realization (empty for JIT-only), the Metal
+   * pre-pass IR (empty unless MSL is present and the plan hoisted
+   * anything), and the `tropical_kernel_1` manifest. The manifest's
+   * `frames` must equal this runtime's buffer length. A failed load leaves
+   * the previous kernel playing.
    */
-  bool load_ir(const std::string & ir_text, const std::string & manifest_json);
+  bool load(const std::string & ir_text, const std::string & msl_source,
+            const std::string & stage0_ir, const std::string & manifest_json);
 
-  /**
-   * Load a kernel DUAL: LLVM IR → JIT (always — render_window, the scope,
-   * and the goldens stay on the CPU kernel) and MSL → Metal pipeline (the
-   * audio path, when built with TROPICAL_METAL; throws otherwise when
-   * `msl_source` is non-empty). Same manifest contract as load_ir; the
-   * same publish/flip hot-swap covers both artifacts.
-   */
-  bool load_ir_msl(const std::string & ir_text, const std::string & msl_source,
-                   const std::string & manifest_json);
-
-  /**
-   * Load a kernel with an optional stage-0 coefficient kernel. `msl_source`
-   * may be empty (JIT-only); `coeff_ir` may be empty (no stage-0 split).
-   * When present, the coefficient kernel is compiled as its own module,
-   * run once against the new state before publish (initial knob values
-   * exist — a first buffer reading zero-initialized coefficient slots
-   * would be a plain bug, not graceful exclusion), and re-run after every
-   * control-plane slot write.
-   */
-  bool load_ir_staged(const std::string & ir_text, const std::string & msl_source,
-                      const std::string & coeff_ir, const std::string & manifest_json);
-
-  bool load_ir_time_staged(
+  /** Publish one artifact and return its exact initial generation pair. */
+  PublishedGeneration load_generation(
     const std::string & ir_text, const std::string & msl_source,
-    const std::string & coeff_ir, const std::string & tile_ir,
-    const std::string & manifest_json);
-
-  /** Publish one audio/observation artifact and return its exact initial pair. */
-  PublishedGeneration load_ir_staged_generation(
-    const std::string & ir_text, const std::string & msl_source,
-    const std::string & coeff_ir, const std::string & manifest_json);
-
-  PublishedGeneration load_ir_time_staged_generation(
-    const std::string & ir_text, const std::string & msl_source,
-    const std::string & coeff_ir, const std::string & tile_ir,
-    const std::string & manifest_json);
+    const std::string & stage0_ir, const std::string & manifest_json);
 
   /**
    * Atomically publish distinct audio and observation artifacts. The audio
@@ -361,20 +303,11 @@ public:
    * may differ: each audio control image is projected by exact manifest name
    * into the observation program's initial slot image.
    */
-  PublishedGeneration load_ir_staged_with_observation_generation(
+  PublishedGeneration load_with_observation_generation(
     const std::string & audio_ir, const std::string & audio_msl_source,
-    const std::string & audio_coeff_ir,
+    const std::string & audio_stage0_ir,
     const std::string & audio_manifest_json,
     const std::string & observation_ir,
-    const std::string & observation_coeff_ir,
-    const std::string & observation_manifest_json);
-
-  PublishedGeneration load_ir_time_staged_with_observation_generation(
-    const std::string & audio_ir, const std::string & audio_msl_source,
-    const std::string & audio_coeff_ir, const std::string & audio_tile_ir,
-    const std::string & audio_manifest_json,
-    const std::string & observation_ir,
-    const std::string & observation_coeff_ir,
     const std::string & observation_manifest_json);
 
   /**
@@ -597,16 +530,8 @@ public:
               state.slot_generations[control_gen].end(),
               state.audio_slots.begin());
 
-    // No active kernel — emit silence (covers fused, microkernel, and
-    // microkernel-deep modes; the "no kernel" predicate is mode-
-    // specific).
-    const bool fused_ready = state.mode == tropical_jit::CompilationMode::Fused
-                          && state.kernel != nullptr;
-    const bool mk_ready    =
-      (state.mode == tropical_jit::CompilationMode::Microkernel
-       || state.mode == tropical_jit::CompilationMode::MicrokernelDeep)
-      && state.microkernels.postamble_mix != nullptr;
-    if (!fused_ready && !mk_ready)
+    // No active kernel — emit silence.
+    if (state.kernel == nullptr)
     {
       std::fill(outputBuffer.begin(), outputBuffer.end(), 0.0);
       const uint32_t output_channels = state.output_channel_count;
@@ -624,65 +549,24 @@ public:
       return;
     }
 
-    // Point the audio view of every coefficient column at the captured
-    // generation — one repoint per buffer, so every in-loop Index this buffer
-    // executes reads the same generation.
-    if (!state.coeff_array_slots.empty())
-      for (std::size_t j = 0; j < state.coeff_array_slots.size(); ++j)
-        state.array_ptrs[state.coeff_array_slots[j]] =
-          state.coeff_generations[control_gen][j].data();
-
     const uint32_t output_channels = state.output_channel_count;
     double * const rendered_output = output_channels == 1
       ? outputBuffer.data() : interleaved_output_buffer_.data();
-    // Native emitters only overwrite declared sink targets. Clear the complete
-    // compact image first so missing targets and sink-free plans are silent.
+    // The emitter writes every channel of every frame (silent channels
+    // included); clearing first keeps a refused call deterministic too.
     std::fill_n(rendered_output,
       static_cast<std::size_t>(buffer_length_) * output_channels, 0.0);
 
-    if (state.mode == tropical_jit::CompilationMode::Fused)
-    {
-      // Single kernel call processes the entire buffer.
-      state.kernel(
-        nullptr,                       // no inputs (all embedded in expressions)
-        state.registers.data(),
-        state.array_ptrs.data(),
-        state.array_sizes.data(),
-        state.temps.data(),
-        state.sample_rate,
-        start_sample_index,
-        state.param_ptrs.data(),
-        rendered_output,
-        buffer_length_,
-        state.audio_slots.data());   // private whole-buffer slot snapshot
-    }
-    else
-    {
-      // Microkernel: outer sample loop in C++, dispatching the N+1
-      // per-sample functions (N instances, then the sink mix). This is
-      // the architectural shape the scoped-lifetime / per-voice
-      // microkernel roadmap needs; the spike measures whether the
-      // dispatch cost is acceptable for realtime synthesis.
-      const auto & mk = state.microkernels;
-      int64_t *      regs        = state.registers.data();
-      int64_t **     arrays      = state.array_ptrs.data();
-      const uint64_t * arr_sizes = state.array_sizes.data();
-      int64_t *      temps       = state.temps.data();
-      const double   sr          = state.sample_rate;
-      const uint64_t * params    = state.param_ptrs.data();
-      double *       slots       = state.audio_slots.data();
-      double *       out         = rendered_output;
-      const uint64_t start_idx   = start_sample_index;
-      for (unsigned int i = 0; i < buffer_length_; ++i)
-      {
-        const uint64_t s = start_idx + i;
-        for (auto fn : mk.instances)
-          fn(regs, arrays, arr_sizes, temps, sr, s, params, slots);
-        mk.postamble_mix(
-          regs, arrays, arr_sizes, temps, sr, s, params, slots, out, i,
-          output_channels);
-      }
-    }
+    // One call renders the whole buffer: tau is the clock-rail coordinate of
+    // each frame, the params point into this buffer's private slot snapshot.
+    for (uint32_t s = 0; s < buffer_length_; ++s)
+      state.tau[s] = tropical_clock::clock_of_sample(
+        start_sample_index + static_cast<uint64_t>(s));
+    state.argv[0] = state.tau.data();
+    for (std::size_t j = 0; j < state.input_slots.size(); ++j)
+      state.argv[1 + j] = &state.audio_slots[state.input_slots[j]];
+    state.argv.back() = rendered_output;
+    state.kernel(state.argv.data());
 
     audio_sample_index_ += buffer_length_;
     audio_device_frame_ += buffer_length_;
@@ -913,15 +797,51 @@ public:
 
   // ── Random-access observation (room / scope / telemetry consumers) ─────────
   // Render `count` coordinates from one atomically acquired program/control
-  // image. `out` is slot-major: out[k*count+i] is slot_ids[k] at
-  // start_index+i*stride. This path never borrows a live KernelState or takes
-  // build_mutex_, so a paused observer cannot delay control or hot-swap.
+  // image. `out` is channel-major: out[k*count+i] is output channel
+  // channel_ids[k] at the i-th coordinate. The scope's taps are output
+  // channels of the observation artifact (design/typed-kernel.md). This path
+  // never borrows a live KernelState or takes build_mutex_, so a paused
+  // observer cannot delay control or hot-swap.
+  //
+  // The host-side τ fill has two shapes over one body. `render_window_
+  // observation` is the arithmetic progression of whole samples
+  // `start_index + i·stride` on the rail (the scope's integer grid);
+  // `render_tau_observation` takes the rail's coordinates as data, fractional or not, in any order — a kernel is a
+  // closed form `f(τ, params)` and nothing here rounds τ.
   RenderWindowStatus render_window_observation(
     uint64_t start_index, uint32_t count, uint32_t stride,
-    const uint32_t * slot_ids, uint32_t n_slots, double * out,
+    const uint32_t * channel_ids, uint32_t n_channels, double * out,
     std::shared_ptr<const ObservationSnapshot> snapshot = {})
   {
-    if (!out || stride == 0 || (n_slots > 0 && !slot_ids))
+    if (stride == 0) return RenderWindowStatus::InvalidArgument;
+    return render_observation_at(
+      [=](uint32_t i) {
+        return tropical_clock::clock_of_sample(
+          start_index + static_cast<uint64_t>(i) * stride);
+      },
+      count, channel_ids, n_channels, out, std::move(snapshot));
+  }
+
+  RenderWindowStatus render_tau_observation(
+    const int64_t * tau, uint32_t count,
+    const uint32_t * channel_ids, uint32_t n_channels, double * out,
+    std::shared_ptr<const ObservationSnapshot> snapshot = {})
+  {
+    if (!tau || count == 0) return RenderWindowStatus::InvalidArgument;
+    // Coordinates past `count` in the last chunk are computed and discarded;
+    // any value serves, so they repeat the last one.
+    return render_observation_at(
+      [=](uint32_t i) { return tau[i < count ? i : count - 1]; },
+      count, channel_ids, n_channels, out, std::move(snapshot));
+  }
+
+  template <class TauOf>
+  RenderWindowStatus render_observation_at(
+    TauOf && tau_of, uint32_t count,
+    const uint32_t * channel_ids, uint32_t n_channels, double * out,
+    std::shared_ptr<const ObservationSnapshot> snapshot)
+  {
+    if (!out || (n_channels > 0 && !channel_ids))
       return RenderWindowStatus::InvalidArgument;
     if (!snapshot)
       snapshot = std::atomic_load_explicit(
@@ -929,79 +849,46 @@ public:
     if (!snapshot || !snapshot->program || !snapshot->controls)
       return RenderWindowStatus::Unsupported;
     const ObservationProgramImage & program = *snapshot->program;
-    if (program.mode != tropical_jit::CompilationMode::Fused
-        || program.kernel == nullptr)
+    if (program.kernel == nullptr || program.frames == 0)
       return RenderWindowStatus::Unsupported;
-    for (uint32_t k = 0; k < n_slots; ++k)
-      if (slot_ids[k] >= snapshot->controls->slots.size())
+    for (uint32_t k = 0; k < n_channels; ++k)
+      if (channel_ids[k] >= program.output_channel_count)
         return RenderWindowStatus::InvalidArgument;
 
     std::lock_guard<std::mutex> observation_lock(observation_render_mutex_);
     ObservationRenderWorkspace & workspace = observation_workspace_;
+    const uint32_t N = program.frames;
+    const uint32_t C = program.output_channel_count;
     if (workspace.program_version != program.program_version)
     {
-      workspace.registers.assign(program.register_count, 0);
-      workspace.temps.assign(program.temp_count, 0);
-      workspace.coeff_registers.assign(program.coeff_register_count, 0);
-      workspace.coeff_temps.assign(program.coeff_temp_count, 0);
-      workspace.materialized_slots.clear();
-      workspace.arrays = program.array_storage;
-      workspace.arrays.resize(program.array_sizes.size());
-      for (std::size_t a = 0; a < workspace.arrays.size(); ++a)
-        workspace.arrays[a].resize(
-          static_cast<std::size_t>(program.array_sizes[a]), 0);
-      workspace.array_ptrs.resize(workspace.arrays.size());
-      for (std::size_t a = 0; a < workspace.arrays.size(); ++a)
-        workspace.array_ptrs[a] = workspace.arrays[a].data();
+      workspace.tau.assign(N, 0);
+      workspace.out.assign(static_cast<std::size_t>(N) * C, 0.0);
+      workspace.argv.assign(program.input_slots.size() + 2, nullptr);
       workspace.program_version = program.program_version;
-      workspace.control_version = 0;
     }
+    // The controls image is this read's param point; the kernel reads
+    // params through pointers into it, so a copy keeps it immutable.
+    workspace.slots = snapshot->controls->slots;
+    workspace.argv[0] = workspace.tau.data();
+    for (std::size_t j = 0; j < program.input_slots.size(); ++j)
+      workspace.argv[1 + j] = &workspace.slots[program.input_slots[j]];
+    workspace.argv.back() = workspace.out.data();
 
-    // Re-materialize scalar coefficients and coefficient columns solely in
-    // observer-owned storage. Preserve the resulting scalar image across
-    // repeated reads of one control version; the main kernel may overwrite its
-    // per-frame slot scratch.
-    if (workspace.control_version != snapshot->controls->control_version
-        || workspace.materialized_slots.empty())
+    // The kernel's shape is static: `count` coordinates render in chunks of
+    // N calls, each over its own tau image (coordinates past `count` in the
+    // last chunk are computed and discarded — a closed form has no cost
+    // beyond the arithmetic).
+    for (uint32_t chunk = 0; chunk < count; chunk += N)
     {
-      workspace.materialized_slots = snapshot->controls->slots;
-      std::array<double, tropical_jit::kMaxOutputChannels> coeff_out{};
-      if (program.coeff_kernel)
-        program.coeff_kernel(
-          nullptr,
-          workspace.coeff_registers.data(),
-          workspace.array_ptrs.data(),
-          program.array_sizes.data(),
-          workspace.coeff_temps.data(),
-          program.sample_rate,
-          0,
-          program.param_ptrs.data(),
-          coeff_out.data(),
-          1,
-          workspace.materialized_slots.data());
-    }
-    workspace.control_version = snapshot->controls->control_version;
-    workspace.slots = workspace.materialized_slots;
-
-    std::array<double, tropical_jit::kMaxOutputChannels> scratch_out{};
-    for (uint32_t i = 0; i < count; ++i)
-    {
-      program.kernel(
-        nullptr,
-        workspace.registers.data(),
-        workspace.array_ptrs.data(),
-        program.array_sizes.data(),
-        workspace.temps.data(),
-        program.sample_rate,
-        start_index + static_cast<uint64_t>(i) * stride,
-        program.param_ptrs.data(),
-        scratch_out.data(),
-        1,
-        workspace.slots.data());
-      for (uint32_t k = 0; k < n_slots; ++k)
-        out[static_cast<size_t>(k) * count + i] =
-          workspace.slots[slot_ids[k]];
-      if (i == 0)
+      for (uint32_t i = 0; i < N; ++i)
+        workspace.tau[i] = tau_of(chunk + i);
+      program.kernel(workspace.argv.data());
+      const uint32_t produced = std::min<uint32_t>(N, count - chunk);
+      for (uint32_t k = 0; k < n_channels; ++k)
+        for (uint32_t i = 0; i < produced; ++i)
+          out[static_cast<size_t>(k) * count + chunk + i] =
+            workspace.out[static_cast<std::size_t>(i) * C + channel_ids[k]];
+      if (chunk == 0)
       {
         if (RuntimeOwnershipTestSeam * seam =
               ownership_test_seam_.load(std::memory_order_acquire);
@@ -1037,32 +924,66 @@ public:
     result.control_version = snapshot->controls->control_version;
     result.effective_sample_index =
       snapshot->controls->effective_sample_index;
-    std::vector<uint32_t> slot_ids;
-    slot_ids.reserve(slot_names.size());
-    for (const std::string & name : slot_names)
+    // A name is an output channel of the observation kernel, or else a
+    // control slot of the pinned control image (a param or one of its
+    // discipline companions), whose trajectory is its constant value — the
+    // data plane's way to read a control back without a second method.
+    std::vector<uint32_t> channel_ids;
+    std::vector<std::pair<std::size_t, uint32_t>> constant_slots; // (k, slot)
+    std::vector<std::size_t> channel_positions;
+    for (std::size_t k = 0; k < slot_names.size(); ++k)
     {
-      const auto found = snapshot->program->slot_lookup.find(name);
-      if (found == snapshot->program->slot_lookup.end())
+      const std::string & name = slot_names[k];
+      const auto channel = snapshot->program->channel_lookup.find(name);
+      if (channel != snapshot->program->channel_lookup.end())
+      {
+        channel_positions.push_back(k);
+        channel_ids.push_back(channel->second);
+        continue;
+      }
+      const auto slot = snapshot->program->slot_lookup.find(name);
+      if (slot == snapshot->program->slot_lookup.end()
+          || slot->second >= snapshot->controls->slots.size())
       {
         result.status = RenderWindowStatus::InvalidArgument;
         result.unknown_slot = name;
         return result;
       }
-      slot_ids.push_back(found->second);
+      constant_slots.emplace_back(k, slot->second);
     }
-    result.status = render_window_observation(
-      start_index, count, stride,
-      slot_ids.data(), static_cast<uint32_t>(slot_ids.size()), out,
-      snapshot);
+    std::vector<double> rendered(
+      static_cast<std::size_t>(count) * channel_ids.size(), 0.0);
+    // A read of controls only never runs the kernel.
+    result.status = channel_ids.empty()
+      ? RenderWindowStatus::Rendered
+      : render_window_observation(
+          start_index, count, stride,
+          channel_ids.data(), static_cast<uint32_t>(channel_ids.size()),
+          rendered.data(), snapshot);
+    if (result.status != RenderWindowStatus::Rendered) return result;
+    for (std::size_t j = 0; j < channel_positions.size(); ++j)
+      std::copy_n(rendered.data() + j * count, count,
+                  out + channel_positions[j] * count);
+    for (const auto & [k, slot] : constant_slots)
+      std::fill_n(out + k * count, count, snapshot->controls->slots[slot]);
     return result;
   }
 
   bool render_window(uint64_t start_index, uint32_t count,
-                     const uint32_t * slot_ids, uint32_t n_slots,
+                     const uint32_t * channel_ids, uint32_t n_channels,
                      double * out)
   {
     return render_window_observation(
-      start_index, count, 1, slot_ids, n_slots, out)
+      start_index, count, 1, channel_ids, n_channels, out)
+      == RenderWindowStatus::Rendered;
+  }
+
+  // Explicit Q48.16 coordinates (the C API's tropical_runtime_render_tau).
+  bool render_tau(const int64_t * tau, uint32_t count,
+                  const uint32_t * channel_ids, uint32_t n_channels,
+                  double * out)
+  {
+    return render_tau_observation(tau, count, channel_ids, n_channels, out)
       == RenderWindowStatus::Rendered;
   }
 
@@ -1120,26 +1041,6 @@ public:
 #ifdef TROPICAL_METAL
     std::lock_guard<std::mutex> lock(build_mutex_);
     return metal_worker_ ? metal_worker_->dispatch_failure_count() : 0;
-#else
-    return 0;
-#endif
-  }
-
-  uint64_t metal_materialization_failure_count() const
-  {
-#ifdef TROPICAL_METAL
-    std::lock_guard<std::mutex> lock(build_mutex_);
-    return metal_worker_ ? metal_worker_->materialization_failure_count() : 0;
-#else
-    return 0;
-#endif
-  }
-
-  uint64_t metal_exact_fallback_count() const
-  {
-#ifdef TROPICAL_METAL
-    std::lock_guard<std::mutex> lock(build_mutex_);
-    return metal_worker_ ? metal_worker_->exact_fallback_count() : 0;
 #else
     return 0;
 #endif
@@ -1440,7 +1341,7 @@ private:
   // the kernel handle) into a fresh KernelState; publish_state carries the
   // sample coordinate and performs the atomic double-buffer flip.
   // load_ir fills the kernel handle (via compile_ir_text) between them.
-  KernelState build_kernel_state(const tropical_plan6::ParsedPlan6 & parsed);
+  KernelState build_kernel_state(const tropical_plan7::ParsedKernel1 & parsed);
   PublishedGeneration publish_state(
     KernelState && new_state,
     const KernelState * observation_state = nullptr);

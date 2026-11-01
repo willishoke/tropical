@@ -9,7 +9,7 @@ import Tropical.Ir.EmitCommon
 # EmitMsl — `FlatPlan → Metal Shading Language source` (the Metal backend)
 
 The MSL sibling of `EmitLlvm`: the same fractal walk over the same
-`tropical_plan_6`, emitting a compute kernel instead of a CPU loop. The
+`tropical_plan_7`, emitting a compute kernel instead of a CPU loop. The
 per-sample loop collapses — one thread per sample
 (`thread_position_in_grid`), legal because kernels are closed-form
 `f(τ, params)` with no per-sample state.
@@ -20,24 +20,24 @@ per-sample loop collapses — one thread per sample
 kernel void tropical_kernel(
     device float*                  output_buffer [[buffer(0)]],
     constant float*                slots         [[buffer(1)]],
-    constant TropicalKernelConsts& k             [[buffer(2)]],
+    constant long*                 tau           [[buffer(2)]],
     uint s [[thread_position_in_grid]])
 ```
 
-with `TropicalKernelConsts = { ulong start_sample_index; float
-sample_rate; uint buffer_length; }` (8+4+4, no padding).
+where `tau` is the Q48.16 clock per thread (`tau_s = tau[s]`, the plan's `tau` source),
+the frame count is a literal (shapes are static), and the rate is a literal.
 
 ## Divergences from EmitLlvm, all deliberate
 
 * **f32 values, i64 clocks.** `.float` is `float` (Apple GPUs have no
-  f64); `.int` is native `long` — the Q32.32/Q0.32/Q2.30 integer
+  f64); `.int` is native `long` — the Q48.16/Q0.32/Q2.30 integer
   datapath is bit-identical to the JIT (design/fixed-carrier.md). The
   f32 surface is the enumerated residue (envelope exp, param landings,
   the DAC scale), tolerance-gated by `metal_vs_jit`.
 * **Thread-private TYPED slots.** Module slots are same-sample dataflow
   only (producers topo-sorted before consumers; CF-only — nothing reads
   a previous sample's slot). Slots the kernel WRITES become thread-
-  private locals at their NATIVE type — the Q32.32 clock crosses a wire
+  private locals at their NATIVE type — the Q48.16 clock crosses a wire
   as a `long`, never an f32 (an f32 slot would shed sub-sample bits
   immediately and whole samples past ~2²⁴). Reads before any write hit
   the host snapshot in the `constant` buffer (host-written param slots
@@ -53,7 +53,7 @@ sample_rate; uint buffer_length; }` (8+4+4, no padding).
   (`tempTypes`).
 * **Emit-time f64 constant folding.** Instruction chains whose inputs
   are compile-time constants (literals, and `rate` = the plan's
-  sampleRate; `tick` never) are evaluated HERE in f64/Int — mirroring
+  sampleRate; `tau` never) are evaluated HERE in f64/Int — mirroring
   `EmitLlvm`'s runtime semantics op for op (Int ops wrap to i64
   two's-complement) — and land as single literals. This is what makes
   literal-frequency patches carry byte-exact i64 phase increments onto
@@ -180,7 +180,7 @@ structure St where
   sampleRate : Float := 44100.0
   /-- Module slot → scalar type last written THIS kernel (thread-private
       typed locals `slf{i}`/`sli{i}`/`slb{i}` — kernel-written slots are
-      same-sample dataflow, so they keep their NATIVE type: the Q32.32
+      same-sample dataflow, so they keep their NATIVE type: the Q48.16
       clock rides a `long` local through a wire, never an f32). Absent =
       not written yet → reads hit the host snapshot `slots[i]`. -/
   slotTypes : Std.HashMap Nat ScalarType := {}
@@ -199,12 +199,6 @@ structure St where
       `coeff_array_slots`, the SAME order the runtime packs the upload
       staging. Empty for ordinary plans (the byte-frozen 3-binding ABI). -/
   coeffOffsets : Std.HashMap Nat Nat := {}
-  /-- Per-interval tile columns use segment-major packing after the Stage0
-      prefix. The dispatch may cover several coefficient intervals. -/
-  tileOffsets : Std.HashMap Nat Nat := {}
-  tileColumnBase : Nat := 0
-  tileColumnWidth : Nat := 0
-  tileIntervalFrames : Nat := 0
   /-- The stack of open reduction regions, outermost first (`ReduceBegin`
       pushes, `ReduceEnd` pops). Nested banks: `loopIdx id` resolves by
       searching this stack for its binder id; accumulator writes search it
@@ -404,17 +398,10 @@ def resolveOperand : NOperand → M TVal
   | .source idx _ => do
     let srcs := (← get).sources
     match srcs[idx]? with
-    | some .tick => pure ⟨"current_idx", .int, none⟩
+    | some .tau => pure ⟨"tau_s", .int, none⟩
     | some .rate => do
       let sr := (← get).sampleRate
-      pure ⟨"k.sample_rate", .float, some (.f sr)⟩
-    | some .tilePhase =>
-      let interval := (← get).tileIntervalFrames
-      if interval == 0 then
-        pure ⟨f32Lit 0.0, .float, some (.f 0.0)⟩
-      else
-        pure ⟨s!"(float(s % {interval}u) / float({interval}u))", .float, none⟩
-    | some .tileTick => pure ⟨"current_idx", .int, none⟩
+      pure ⟨f32Lit sr, .float, some (.f sr)⟩
     | none => pure ⟨f32Lit 0.0, .float, some (.f 0.0)⟩
   | .slot idx t => do
     coerce (← loadSlot idx) t
@@ -581,12 +568,9 @@ private def resolveF32 (o : NOperand) : M String := do
     compile-time offset for hoisted coefficient columns. -/
 private def arrayElem (slot : Nat) (idx : String) : M String := do
   let state ← get
-  match state.tileOffsets.get? slot with
-  | some within =>
-      pure s!"coeff_columns[{state.tileColumnBase} + (s / {state.tileIntervalFrames}u) * {state.tileColumnWidth} + {within} + {idx}]"
-  | none => match state.coeffOffsets.get? slot with
-    | some off => pure s!"coeff_columns[{off} + {idx}]"
-    | none => pure s!"arr{slot}[{idx}]"
+  match state.coeffOffsets.get? slot with
+  | some off => pure s!"coeff_columns[{off} + {idx}]"
+  | none => pure s!"arr{slot}[{idx}]"
 
 /-- Hoisted columns are GPU-read-only (`constant` address space; the
     stage-0 kernel fills them host-side). A plan that still writes one
@@ -978,60 +962,48 @@ def emitSinks (channelCount : Nat) (sinks : Array SinkSpec) : M Unit := do
 -- Module entry point
 -- ─────────────────────────────────────────────────────────────
 
-private def header : String :=
+private def header (frames : Nat) : String :=
   "#include <metal_stdlib>\n" ++
   "using namespace metal;\n\n" ++
-  "struct TropicalKernelConsts {\n" ++
-  "    ulong start_sample_index;\n" ++
-  "    float sample_rate;\n" ++
-  "    uint  buffer_length;\n" ++
-  "};\n\n" ++
+
   "kernel void tropical_kernel(\n" ++
   "    device float*                  output_buffer [[buffer(0)]],\n" ++
   "    constant float*                slots         [[buffer(1)]],\n" ++
-  "    constant TropicalKernelConsts& k             [[buffer(2)]],\n" ++
+  "    constant long*                 tau           [[buffer(2)]],\n" ++
   "    uint s [[thread_position_in_grid]])\n" ++
   "{\n" ++
-  "    if (s >= k.buffer_length) { return; }\n" ++
-  "    const long current_idx = long(k.start_sample_index) + long(s);\n"
+  s!"    if (s >= {frames}u) \{ return; }\n" ++
+  "    const long tau_s = tau[s];\n"
 
 /-- The column-binding header: `header` plus `buffer(3)` — the packed
     coefficient-column buffer, uploaded by the host from the generation
     `process()` captures. Emitted ONLY when the plan advertises hoisted
     columns; ordinary plans keep the exact 3-binding header above (the
     msl-golden gates freeze that text). -/
-private def headerColumns : String :=
+private def headerColumns (frames : Nat) : String :=
   "#include <metal_stdlib>\n" ++
   "using namespace metal;\n\n" ++
-  "struct TropicalKernelConsts {\n" ++
-  "    ulong start_sample_index;\n" ++
-  "    float sample_rate;\n" ++
-  "    uint  buffer_length;\n" ++
-  "};\n\n" ++
+
   "kernel void tropical_kernel(\n" ++
   "    device float*                  output_buffer [[buffer(0)]],\n" ++
   "    constant float*                slots         [[buffer(1)]],\n" ++
-  "    constant TropicalKernelConsts& k             [[buffer(2)]],\n" ++
+  "    constant long*                 tau           [[buffer(2)]],\n" ++
   "    constant float*                coeff_columns [[buffer(3)]],\n" ++
   "    uint s [[thread_position_in_grid]])\n" ++
   "{\n" ++
-  "    if (s >= k.buffer_length) { return; }\n" ++
-  "    const long current_idx = long(k.start_sample_index) + long(s);\n"
+  s!"    if (s >= {frames}u) \{ return; }\n" ++
+  "    const long tau_s = tau[s];\n"
 
-private def cooperativeHeader (withColumns : Bool) (routeConstants : String)
-    (scratchBytes : Nat) : String :=
+private def cooperativeHeader (frames : Nat) (withColumns : Bool)
+    (routeConstants : String) (scratchBytes : Nat) : String :=
   "#include <metal_stdlib>\n" ++
   "using namespace metal;\n\n" ++
-  "struct TropicalKernelConsts {\n" ++
-  "    ulong start_sample_index;\n" ++
-  "    float sample_rate;\n" ++
-  "    uint  buffer_length;\n" ++
-  "};\n\n" ++ routeConstants ++
+ routeConstants ++
   s!"// tropical.threadgroup_scratch_bytes={scratchBytes}\n" ++
   "kernel void tropical_kernel(\n" ++
   "    device float*                  output_buffer [[buffer(0)]],\n" ++
   "    constant float*                slots         [[buffer(1)]],\n" ++
-  "    constant TropicalKernelConsts& k             [[buffer(2)]]" ++
+  "    constant long*                 tau           [[buffer(2)]]" ++
   (if withColumns then
     ",\n    constant float*                coeff_columns [[buffer(3)]]" else "") ++
   ",\n    uint3 sampleGroup [[threadgroup_position_in_grid]],\n" ++
@@ -1039,8 +1011,8 @@ private def cooperativeHeader (withColumns : Bool) (routeConstants : String)
   "    uint3 groupSize [[threads_per_threadgroup]])\n" ++
   "{\n" ++
   "    const uint s = sampleGroup.x;\n" ++
-  "    if (s >= k.buffer_length) { return; }\n" ++
-  "    const long current_idx = long(k.start_sample_index) + long(s);\n"
+  s!"    if (s >= {frames}u) \{ return; }\n" ++
+  "    const long tau_s = tau[s];\n"
 
 private def linearInstrs (f : InstanceFunction) : Array NInstr := Id.run do
   let mut out := f.preambleInstructions
@@ -1088,7 +1060,8 @@ private def cooperativeRouteConstants (begins : Array NInstr) : String :=
     never be filled). All OTHER array slots keep thread-private locals
     and in-kernel fills. Columns-free plans keep the exact 3-binding
     header, byte-frozen by the msl-golden gates. -/
-def emitKernel (plan : FlatPlan) : Except String String := do
+def emitKernel (plan : FlatPlan) (frames : Nat) : Except String String := do
+  if frames == 0 then throw "EmitMsl: frames must be positive"
   if !plan.outputLayoutWellFormed then
     throw "EmitMsl: output channel count must be positive and sink targets must be unique and in range"
   if plan.outputChannelCount > 64 then
@@ -1107,18 +1080,6 @@ def emitKernel (plan : FlatPlan) : Except String String := do
       | throw s!"EmitMsl: coeff_array_slots entry {s} out of range (plan has {sizes.size} array slots)"
     coeffOffsets := coeffOffsets.insert s colOff
     colOff := colOff + max sz 1
-  let tileColumnBase := colOff
-  let mut tileOffsets : Std.HashMap Nat Nat := {}
-  let mut tileColumnWidth := 0
-  for s in plan.tileArraySlots do
-    unless coeffOffsets.contains s do
-      let some sz := sizes[s]?
-        | throw s!"EmitMsl: tile_array_slots entry {s} out of range (plan has {sizes.size} array slots)"
-      tileOffsets := tileOffsets.insert s tileColumnWidth
-      coeffOffsets := coeffOffsets.insert s (tileColumnBase + tileColumnWidth)
-      tileColumnWidth := tileColumnWidth + max sz 1
-  if !tileOffsets.isEmpty && plan.tileIntervalFrames == 0 then
-    throw "EmitMsl: tile columns require a positive tile_interval_frames"
   let boundArraySlots := plan.metalBoundArraySlots
   -- Cooperative scalar phases may be split by several all-lane regions.
   -- Predeclare outside-region scalar destinations at function scope so lane 0
@@ -1181,21 +1142,20 @@ def emitKernel (plan : FlatPlan) : Except String String := do
       popIndent
       line "}"
   let init : St := { sources := plan.sources, sampleRate := plan.sampleRate.toFloat,
-                     coeffOffsets, tileOffsets, tileColumnBase, tileColumnWidth,
-                     tileIntervalFrames := plan.tileIntervalFrames, cooperative,
+                     coeffOffsets, cooperative,
                      declared := if cooperative then predeclared else {} }
   match body.run init with
   | .error e _ => .error e
   | .ok _ st =>
     let bodyText := String.intercalate "\n" st.lines.toList
-    -- `current_idx` may be unused after full folding; cast to void to
+    -- `tau_s` may be unused after full folding; cast to void to
     -- keep -Wunused clean would misfire on use, so leave it — Metal's
     -- compiler doesn't warn on unused const locals by default.
     let hdr := if cooperative then
-      cooperativeHeader (!boundArraySlots.isEmpty)
+      cooperativeHeader frames (!boundArraySlots.isEmpty)
         (cooperativeRouteConstants routedBegins ++ "\n")
         plan.metalThreadgroupScratchBytes
-      else if boundArraySlots.isEmpty then header else headerColumns
+      else if boundArraySlots.isEmpty then header frames else headerColumns frames
     .ok (hdr ++ bodyText ++ "\n}\n")
 
 end Tropical.Ir.EmitMsl

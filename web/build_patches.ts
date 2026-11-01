@@ -3,12 +3,13 @@
  *
  * Reads web/patches/<slug>.json (tropical_program_2) + web/patches/manifest.json
  * (slug/title/description). For each patch it lowers the Lean IR to a complete
- * wasm32 module in-process via `diffcli compile-wasm` (engine LLVM + lld, no
- * toolchain), and writes web/dist/patches/<slug>.wasm plus a trimmed
- * <slug>.manifest.json (the runtime's consumption contract). The browser
- * fetches the .wasm + manifest and instantiates — no emitter, no compiler.
+ * wasm32 module in-process via `diffcli compile-wasm` (libtropical_wasm's
+ * LLVM + lld, no external toolchain), and writes web/dist/patches/<slug>.wasm
+ * plus <slug>.manifest.json, the kernel's `tropical_kernel_1` type (the
+ * runtime's consumption contract). The browser fetches the .wasm + manifest
+ * and instantiates — no emitter, no compiler.
  *
- * Requires libtropical built with TROPICAL_WASM_EMIT (cmake -DTROPICAL_WASM_EMIT=ON).
+ * Requires libtropical_wasm built with TROPICAL_WASM_EMIT (cmake -DTROPICAL_WASM_EMIT=ON).
  *
  *   bun web/build_patches.ts
  */
@@ -47,38 +48,25 @@ const index: Array<Entry & { wasmPath: string; manifestPath: string }> = []
 for (const { slug, title, description } of manifest) {
   const src = resolve(patchesDir, `${slug}.json`)
 
-  // 1. Compile to plan_6 — the source of the runtime's manifest fields.
-  const c = spawnSync([diffcli, 'compile', src, '--mode=fused'], { cwd: root })
-  if (c.exitCode !== 0) {
-    console.warn(`SKIP  ${slug}: diffcli compile failed\n${c.stderr.toString()}`)
-    continue
-  }
-  const plan = JSON.parse(c.stdout.toString())
-
-  // 2. Lower the same source to a wasm32 module in-process (Lean IR → engine
-  //    LLVM + lld). The wasm is the *only* codegen artifact the browser runs.
+  // 1. Lower the source to a wasm32 module in-process (Lean IR → engine
+  //    LLVM + lld), the port kernel for 128 frames per call. The wasm is the
+  //    *only* codegen artifact the browser runs.
   const wasmPath = join(distDir, `${slug}.wasm`)
-  const w = spawnSync([diffcli, 'compile-wasm', src, `--out=${wasmPath}`], { cwd: root })
+  const w = spawnSync([diffcli, 'compile-wasm', src, `--out=${wasmPath}`, '--frames', '128'], { cwd: root })
   if (w.exitCode !== 0) {
     console.warn(`SKIP  ${slug}: diffcli compile-wasm failed\n${w.stderr.toString()}`)
     continue
   }
 
-  // 3. Trim plan_6 down to the KernelManifest the runtime consumes.
-  const outputChannelCount = plan.output_channel_count ??
-    (plan.sinks ?? []).reduce(
-      (count: number, sink: { target?: number }) =>
-        Math.max(count, (sink.target ?? 0) + 1),
-      1,
-    )
-  writeFileSync(join(distDir, `${slug}.manifest.json`), JSON.stringify({
-    sampleRate:     plan.config?.sampleRate ?? 44100,
-    registerCount:  plan.register_count ?? 0,
-    arraySlotSizes: plan.array_slot_sizes ?? [],
-    slotCount:      plan.slot_count ?? (plan.slot_defaults?.length ?? 0),
-    slotDefaults:   plan.slot_defaults ?? [],
-    outputChannelCount,
-  }), 'utf-8')
+  // 3. The runtime's manifest: the kernel's type (`tropical_kernel_1`) for
+  //    the worklet's 128-frame quantum — the same frames `compile-wasm`
+  //    compiled the module for.
+  const k = spawnSync([diffcli, 'compile-kernel', src, '--frames', '128'], { cwd: root })
+  if (k.exitCode !== 0) {
+    console.warn(`SKIP  ${slug}: diffcli compile-kernel failed\n${k.stderr.toString()}`)
+    continue
+  }
+  writeFileSync(join(distDir, `${slug}.manifest.json`), k.stdout.toString(), 'utf-8')
 
   index.push({ slug, title, description, wasmPath: `patches/${slug}.wasm`, manifestPath: `patches/${slug}.manifest.json` })
   console.log(`built ${slug.padEnd(22)} ${statSync(wasmPath).size.toString().padStart(7)} B wasm`)

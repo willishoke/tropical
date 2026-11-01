@@ -57,7 +57,7 @@ narrow the admitted fragment.
 ## Production fixtures
 
 `Tropical.Testing.Semantics` instantiates the preservation theorem against the
-root Q32.32 clock,
+root clock (the Q48.16 rail),
 a `bankFold` modal-column expression, a nested bank with distinct binder ids,
 and a parameterized `select`. The same corpus differentially compares compiled
 `lowerSig` with `lowerSigTree`; that differential is evidence for the unsafe
@@ -72,6 +72,6 @@ now maintained by the proved `eintern_preserves` theorem.
 With the full first seam closed, the remaining boundaries are:
 
 1. expression arena denotation to lowered whole-program denotation;
-2. lowered program denotation to staged `tropical_plan_6`;
+2. lowered program denotation to staged `tropical_plan_7`;
 3. plan instruction semantics to LLVM/JIT and wasm execution;
 4. plan semantics to MSL under its documented f32 numeric contract.
