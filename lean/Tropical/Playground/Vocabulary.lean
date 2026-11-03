@@ -52,35 +52,28 @@ def jModes (obj : Json) (key : String) : BuildM (Array ModalMode) := do
     modes := modes.push { sigma, omega, cre, cim }
   pure modes
 
-def phaseCorr (pitchE freqInit : Sig) : Clock → BuildM Sig :=
-  fun shift => do
-    let difference ← sub pitchE freqInit
-    let shiftFloat ← toFloatE shift
-    let numerator ← mul difference shiftFloat
-    let clockScale ← clockOneLit
-    let sr ← sampleRate
-    let denominator ← mul clockScale sr
-    div numerator denominator
-
+/-- An anchored phase input: the `#phase` companion expression and the
+    authored default pitch (kept for the PM path's zero-anchor default). A warped
+    generator is not phase-corrected (`EmitArrow.anchoredVoice`). -/
 abbrev Anchor := Sig × Sig
 
 def sineVoiceE (pitchE : Sig) (anchor : Option Anchor := none) : Voice :=
   match anchor with
-  | some (phaseE, freqInit) =>
+  | some (phaseE, _) =>
     { programName := "FixedSinOsc"
       wire := fun clkE => pure #[⟨⟨0⟩, pitchE⟩, ⟨⟨1⟩, clkE⟩, ⟨⟨2⟩, phaseE⟩]
-      phaseAnchor := some (⟨2⟩, phaseCorr pitchE freqInit) }
+      phasePort := some ⟨2⟩ }
   | none =>
     { programName := "FixedSinOsc"
       wire := fun clkE => pure #[⟨⟨0⟩, pitchE⟩, ⟨⟨1⟩, clkE⟩] }
 
 def morphVoiceE (pitchE morphE : Sig) (anchor : Option Anchor := none) : Voice :=
   match anchor with
-  | some (phaseE, freqInit) =>
+  | some (phaseE, _) =>
     { programName := "MorphOsc"
       wire := fun clkE => pure #[⟨⟨0⟩, pitchE⟩, ⟨⟨1⟩, morphE⟩,
         ⟨⟨2⟩, clkE⟩, ⟨⟨3⟩, phaseE⟩]
-      phaseAnchor := some (⟨3⟩, phaseCorr pitchE freqInit) }
+      phasePort := some ⟨3⟩ }
   | none =>
     { programName := "MorphOsc"
       wire := fun clkE => pure #[⟨⟨0⟩, pitchE⟩, ⟨⟨1⟩, morphE⟩, ⟨⟨2⟩, clkE⟩] }
@@ -91,11 +84,11 @@ def voiceOf (pitchE morphE : Sig) (anchor : Option Anchor) : Voice :=
 def pluckedVoiceE (pitchE morphE eventRateE : Sig)
     (anchor : Option Anchor := none) : Voice :=
   match anchor with
-  | some (phaseE, freqInit) =>
+  | some (phaseE, _) =>
     { programName := "PluckedMorphOsc"
       wire := fun clkE => pure #[⟨⟨0⟩, pitchE⟩, ⟨⟨1⟩, morphE⟩,
         ⟨⟨2⟩, clkE⟩, ⟨⟨3⟩, eventRateE⟩, ⟨⟨4⟩, phaseE⟩]
-      phaseAnchor := some (⟨4⟩, phaseCorr pitchE freqInit) }
+      phasePort := some ⟨4⟩ }
   | none =>
     { programName := "PluckedMorphOsc"
       wire := fun clkE => pure #[⟨⟨0⟩, pitchE⟩, ⟨⟨1⟩, morphE⟩,

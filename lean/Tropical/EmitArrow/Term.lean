@@ -17,12 +17,34 @@ structure Voice where
   programName : String
   wire : Clock → BuildM (Array AInput)
   output : OutputIdx := ⟨0⟩
-  phaseAnchor : Option (InputIdx × (Clock → BuildM Sig)) := none
+  /-- The phase-offset input, if the program has one: where `pmGen` adds its
+      phase modulation. (It once also carried a warped-tap phase correction
+      against the voice's default frequency; see `anchoredVoice`.) -/
+  phasePort : Option InputIdx := none
 
+/-- Two instance declarations compute the same closed form: same program, same
+    input expressions port for port (expression IDs are hash-consed, so equal
+    IDs are equal expressions — the clock included). -/
+private def sameInstance (programName : String) (inputs : Array AInput)
+    (decl : AInst) : Bool :=
+  decl.programName == programName && decl.inputs.size == inputs.size &&
+    (decl.inputs.zip inputs).all fun (a, b) => a.port == b.port && a.value == b.value
+
+/-- Instantiate a voice at a clock. Hash-consed on `(closed form, clock)`: if an
+    instance of the same program with the same input expressions already exists
+    in this build, its output is reused. Every program is a pure function of its
+    inputs (there is no state primitive), so one evaluation serves every reader —
+    a fan-out of the same source at the same clock (a dry path read by a mix and
+    by a tap, a modulator re-emitted under each generator it warps) costs one
+    evaluation, not one per wire. -/
 def Builder.osc (v : Voice) (name : String) (clkE : Clock) : BuildM Sig := do
   let inputs ← v.wire clkE
-  let instanceIdx ← declareInst { name, programName := v.programName, inputs }
-  nestedOut instanceIdx v.output
+  let builder ← get
+  match builder.decls.findIdx? (sameInstance v.programName inputs) with
+  | some i => nestedOut ⟨i⟩ v.output
+  | none =>
+    let instanceIdx ← declareInst { name, programName := v.programName, inputs }
+    nestedOut instanceIdx v.output
 
 /-- A cartesian morphism over already-built signal IDs. -/
 abbrev Mor := Array Sig → BuildM (Array Sig)
@@ -101,31 +123,38 @@ def normalize : ArrowTerm → ArrowTerm
   | .pmGen v name baseClk depth modulator =>
       .pmGen v name baseClk depth (normalize modulator)
 
-private def anchoredVoice (v : Voice) (baseClk warpedClk : Clock)
-    (phaseOffset? : Option Sig := none) : BuildM Voice := do
-  match v.phaseAnchor with
-  | some (port, correction) =>
-      let shift ← sub baseClk warpedClk
-      let anchorCorrection ← correction shift
-      let correction ← match phaseOffset? with
-        | none => pure anchorCorrection
-        | some phaseOffset => add anchorCorrection phaseOffset
+/-- Add a phase offset (PM) to a voice's phase input.
+
+    A warped generator is NOT phase-corrected: it reads its source's closed
+    form at the warped clock with the live parameters, exactly — the tap of a
+    delay is the source at `τ − d`, notch positions follow the live pitch, and
+    a reversed source keeps its pitch. (The former correction added
+    `(pitch − pitch₀)·shift` against the AUTHORED default `pitch₀`, which kept
+    a warped tap from jumping on a re-tune by pretending the source had stayed
+    at `pitch₀` over the shift: wrong after the first re-tune — notch positions
+    tracked the old pitch, and a time-varying shift such as `reverse` heard a
+    pitch error `(pitch − pitch₀)·shift′`.) The host's anchor keeps the source
+    continuous on the ambient clock; a tap at shift `s` steps by `Δinc·s` at a
+    re-tune, which is the source's own history being rewritten. -/
+private def anchoredVoice (v : Voice) (phaseOffset? : Option Sig := none) :
+    BuildM Voice := do
+  match v.phasePort, phaseOffset? with
+  | some port, some phaseOffset =>
       pure { v with wire := fun clock => do
         let inputs ← v.wire clock
         inputs.mapM fun input => do
           if input.port.idx == port.idx then
-            let value ← add input.value correction
+            let value ← add input.value phaseOffset
             pure { input with value }
           else
             pure input }
-  | none => pure v
+  | _, _ => pure v
 
 /-- Emit under an enclosing clock transform.  Children, modulators, instance
     declarations, and left-associated sums are sequenced in authored order. -/
 def emitTermC (cmod : Clock → BuildM Clock) : ArrowTerm → BuildM Sig
   | .gen v name clk => do
       let warpedClk ← cmod clk
-      let v ← anchoredVoice v clk warpedClk
       let builder ← get
       Builder.osc v s!"{name}{builder.decls.size}" warpedClk
   | .scale weight t => do
@@ -156,7 +185,7 @@ def emitTermC (cmod : Clock → BuildM Clock) : ArrowTerm → BuildM Sig
       let modSignal ← emitTermC cmod modulator
       let warpedClk ← cmod baseClk
       let phaseOffset ← mul depth modSignal
-      let v ← anchoredVoice v baseClk warpedClk (some phaseOffset)
+      let v ← anchoredVoice v (some phaseOffset)
       let builder ← get
       Builder.osc v s!"{name}{builder.decls.size}" warpedClk
   | .sum ts => do
