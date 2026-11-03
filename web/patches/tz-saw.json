@@ -1,0 +1,15 @@
+{
+ "nodes": [
+  { "id": "saw", "kind": "saw", "params": { "freq": 110 } },
+  { "id": "lfo", "kind": "sine", "params": { "freq": 0.2 } },
+  { "id": "depth", "kind": "knob", "params": { "value": 0.0015 } },
+  { "id": "d", "kind": "ring", "in": { "in": ["lfo", "depth"] } },
+  { "id": "tap", "kind": "delay", "in": { "in": ["saw"], "amount": ["d"] } },
+  { "id": "wet", "kind": "knob", "params": { "value": -1 } },
+  { "id": "wt", "kind": "ring", "in": { "in": ["tap", "wet"] } },
+  { "id": "fl", "kind": "mix", "in": { "in": ["saw", "wt"] } },
+  { "id": "level", "kind": "knob", "params": { "value": 0.12 } },
+  { "id": "out", "kind": "ring", "in": { "in": ["fl", "level"] } }
+ ],
+ "out": "out"
+}

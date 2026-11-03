@@ -271,10 +271,7 @@ private def buildNativeArrowCarrier (arena : Arena)
           { port := ⟨0⟩, value := pitch },
           { port := ⟨1⟩, value := clock },
           { port := ⟨2⟩, value := zero }]
-      phaseAnchor := some (⟨2⟩, fun shift => do
-        let shiftFloat ← Tropical.EmitArrow.toFloatE shift
-        let scale ← Tropical.EmitArrow.lit 1 9
-        Tropical.EmitArrow.mul shiftFloat scale)
+      phasePort := some ⟨2⟩
     } : Tropical.EmitArrow.Voice)
     let modulator : Tropical.EmitArrow.ArrowTerm :=
       .gen (voice 11) "mod" base
@@ -339,14 +336,18 @@ def phase2Evidence : Except String Phase2Evidence := do
   -- Q48.16 (`Ir/ClockFormat.lean`): the phasors split the clock with their
   -- own fraction mask (2¹⁶ − 1) beside the Q0.32 phase mask, one node more
   -- each; the literals are shorter (65536 for 4294967296).
+  -- 191 → 174 nodes / 32849 → 28835 bytes when the warped-tap phase
+  -- correction was retired (`Voice.phaseAnchor` → `phasePort`): the fixture's
+  -- voices no longer author `toFloat(base − warped)·(1/9)` plus its add into
+  -- the phase input per warped generator. Instance count is unchanged.
   let pinned : Array (String × Nat × Nat) := #[
     ("reachable numeric nodes", nativeNumericExprs.nodes.size, 269),
     ("numeric wire bytes",      nativeNumericWire.length,      46446),
     ("stdlib programs",         nativeStdlib.programs.size,    15),
     ("stdlib nodes",            nativeStdlib.exprs.nodes.size, 290),
     ("carrier instances",       nativeProgram.decls.size,      3),
-    ("reachable carrier nodes", nativeExprs.nodes.size,        191),
-    ("carrier wire bytes",      nativeWire.length,             32849)]
+    ("reachable carrier nodes", nativeExprs.nodes.size,        174),
+    ("carrier wire bytes",      nativeWire.length,             28835)]
   let drifted := pinned.filter fun (_, actual, expected) => actual != expected
   unless drifted.isEmpty do
     let lines := drifted.toList.map fun (label, actual, expected) =>
@@ -491,8 +492,12 @@ def runPhase3Gate : IO Bool := do
 
 def phase5Evidence : Except String Phase5Evidence := do
   let kinds := Tropical.Playground.Metadata.vocabularyKinds
-  unless kinds.size == 20 do
-    throw s!"EmitArrow phase-5 fixture: expected 20 served vocabulary kinds, got {kinds.size}"
+  -- 20 → 23: `sine`, `saw` and `pulse` (the band-limited generators) joined
+  -- the served vocabulary; the fingerprint below moves with them (and again
+  -- when every knob but the modal sources' became an inlet, and when sflange
+  -- gained its `dry`/`wet` knobs).
+  unless kinds.size == 23 do
+    throw s!"EmitArrow phase-5 fixture: expected 23 served vocabulary kinds, got {kinds.size}"
   let parameters := Tropical.Playground.Metadata.collectParams #[]
   let expectedNames := #[
     Tropical.Playground.Metadata.masterVelocityParam,
@@ -501,7 +506,7 @@ def phase5Evidence : Except String Phase5Evidence := do
   unless parameters.map (·.1) == expectedNames do
     throw "EmitArrow phase-5 fixture: reserved parameter order changed"
   let fingerprint := Tropical.Playground.Metadata.vocabularyFingerprint
-  unless fingerprint == "fnv1a64:e2d9d7b44e8c3bbf" do
+  unless fingerprint == "fnv1a64:aff17af20d56c94a" do
     throw s!"EmitArrow phase-5 fixture: vocabulary fingerprint changed to {fingerprint}"
   pure {
     vocabularyKinds := kinds.size

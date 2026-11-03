@@ -15,6 +15,7 @@ import Tropical.Stdlib
 import Tropical.Testing.ArrowFixtures
 import Tropical.Testing.EngineMirror
 import Tropical.Testing.PlanWire
+import Tropical.CliArgs
 
 /-!
 The `diffcli` executable — build, inspection, render, and backend-qualification
@@ -36,22 +37,37 @@ strata-file, emit-stdlib, emit-file, emitarrow-*, parsed-roundtrip,
 voice-desugar, raise) were retired with the literate `.md` language,
 the parse bridge, and finally the elaborator (the `raise` verb printed
 the ParsedProgram, which no longer exists).
+
+Every verb reads its flags with `Tropical.CliArgs`, as `tropicalc` does: a
+value flag is `--name=V` or `--name V`, and an unknown flag or a malformed
+value is an error. `--rate R` (a positive integer) is the rate a kernel is
+compiled for: the manifest's `rate` and the kernel's `rate` source; the
+default is `Plan.defaultSampleRate`.
 -/
 
-def parseNatFlag (args : List String) (flag : String) (default : Nat) : Nat :=
-  match args.idxOf? flag with
-  | some i => match args[i+1]? with
-    | some v => v.toNat?.getD default
-    | none => default
-  | none => default
+open Tropical.CliArgs
 
-def renderBytes (args : List String) : IO UInt32 := do
-  let some planPath := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
-    | IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N] [--start S]"
-      return 1
-  let frames := parseNatFlag args "--frames" 16
-  let buffer := parseNatFlag args "--buffer" 256
-  let start := parseNatFlag args "--start" 0
+/-- Run a verb: read its flags and its one input path, decode the flag values
+    it needs, and hand both to `body`. Any error goes to stderr with the
+    verb's usage, and the verb exits 1. -/
+private def runVerb {σ : Type} (verb usage : String) (flags : List Flag)
+    (args : List String) (decode : Args → Except String σ)
+    (body : Args → σ → String → IO UInt32) : IO UInt32 := do
+  match (do
+      let a ← parse flags args
+      let path ← a.single
+      let opts ← decode a
+      pure (a, opts, path)) with
+  | .error e =>
+    IO.eprintln s!"diffcli {verb}: {e}\nusage: diffcli {verb} {usage}"
+    return 1
+  | .ok (a, opts, path) => body a opts path
+
+def renderBytes (args : List String) : IO UInt32 :=
+  runVerb "render-bytes" "<plan.json> [--frames N] [--buffer N] [--start S] [--all-channels]"
+    [valued "frames", valued "buffer", valued "start", switch "all-channels"] args
+    (fun a => return (← a.natD "frames" 16, ← a.natD "buffer" 256, ← a.natD "start" 0))
+    fun a (frames, buffer, start) planPath => do
   let planJson ← IO.FS.readFile planPath
   -- Lean owns codegen: parse the plan, stage-0 split + emit IR, load via
   -- load_ir_staged. There is no C++ plan compiler.
@@ -63,10 +79,13 @@ def renderBytes (args : List String) : IO UInt32 := do
   let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
   Tropical.StagedLoad.load rt plan
   if start != 0 then rt.setSampleIndex start.toUInt64
+  -- `--all-channels`: every output channel, frame-major, instead of the
+  -- channel-0 view (the golden hashes are channel 0).
+  let allChannels := a.has "all-channels"
   let stdout ← IO.getStdout
   for _ in [0:frames] do
     rt.process
-    stdout.write (← rt.outputBytes)
+    stdout.write (← if allChannels then rt.outputInterleavedBytes else rt.outputBytes)
   stdout.flush
   return 0
 
@@ -76,13 +95,11 @@ def renderBytes (args : List String) : IO UInt32 := do
     f32 GPU kernel — this is the device-under-test side of `metal_vs_jit`.
     Requires libtropical built with TROPICAL_METAL. The render tool may wait
     outside the callback so an offline tight loop cannot outrun the worker. -/
-def renderMetal (args : List String) : IO UInt32 := do
-  let some planPath := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
-    | IO.eprintln "usage: diffcli render-metal <plan.json> [--frames N] [--buffer N] [--start S]"
-      return 1
-  let frames := parseNatFlag args "--frames" 16
-  let buffer := parseNatFlag args "--buffer" 256
-  let start := parseNatFlag args "--start" 0
+def renderMetal (args : List String) : IO UInt32 :=
+  runVerb "render-metal" "<plan.json> [--frames N] [--buffer N] [--start S]"
+    [valued "frames", valued "buffer", valued "start"] args
+    (fun a => return (← a.natD "frames" 16, ← a.natD "buffer" 256, ← a.natD "start" 0))
+    fun _ (frames, buffer, start) planPath => do
   let planJson ← IO.FS.readFile planPath
   let plan ← match Lean.Json.parse planJson with
     | .error e => IO.eprintln s!"render-metal: parse: {e}"; return 1
@@ -99,12 +116,9 @@ def renderMetal (args : List String) : IO UInt32 := do
   stdout.flush
   return 0
 
-private def parseStrFlag (args : List String) (flag : String) : Option String :=
-  args.findSome? fun a =>
-    if a.startsWith (flag ++ "=") then some (a.drop (flag.length + 1)).toString else none
-
 /-- `diffcli render-graph <graph.json> [--metal] [--frames N] [--buffer N]
-    [--start S]` — compile a playground PatchGraph (`{"nodes":[…],"out":…}`)
+    [--start S] [--rate R] [--all-channels] [--stage-census]
+    [--dump-plan=<path>]` — compile a playground PatchGraph (`{"nodes":[…],"out":…}`)
     through the TYPED session path (`Playground.compilePlan` → typed
     stage-0 split, so banked coefficient columns hoist to the coefficient
     kernel) and render, JIT (default) or Metal (`--metal`). Same byte
@@ -114,24 +128,25 @@ private def parseStrFlag (args : List String) (flag : String) : Option String :=
     `coeff_columns` GPU crossing exactly as a live session on
     `TROPICAL_BACKEND=metal` does. Prints `hoisted columns=N` on stderr so
     the harness can assert the crossing is actually exercised. -/
-def renderGraph (args : List String) : IO UInt32 := do
-  let some graphPath := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
-    | IO.eprintln "usage: diffcli render-graph <graph.json> [--metal] [--frames N] [--buffer N] [--start S]"
-      return 1
-  let frames := parseNatFlag args "--frames" 16
-  let buffer := parseNatFlag args "--buffer" 256
-  let start := parseNatFlag args "--start" 0
-  let metal := args.contains "--metal"
+def renderGraph (args : List String) : IO UInt32 :=
+  runVerb "render-graph"
+    "<graph.json> [--metal] [--frames N] [--buffer N] [--start S] [--rate R] [--all-channels] [--stage-census] [--dump-plan=<path>]"
+    [valued "frames", valued "buffer", valued "start", valued "rate", valued "dump-plan",
+      switch "metal", switch "all-channels", switch "stage-census"] args
+    (fun a => return (← a.natD "frames" 16, ← a.natD "buffer" 256, ← a.natD "start" 0,
+      (← a.rate?).getD Tropical.Plan.defaultSampleRate))
+    fun a (frames, buffer, start, rate) graphPath => do
+  let metal := a.has "metal"
   let text ← IO.FS.readFile graphPath
   let j ← match Lean.Json.parse text with
     | .error e => IO.eprintln s!"render-graph: parse: {e}"; return 1
     | .ok j => pure j
-  match Tropical.Playground.compilePlan j with
+  match Tropical.Playground.compilePlan j rate with
   | .error e => IO.eprintln s!"render-graph: compile: {e}"; return 1
   | .ok compiled =>
     -- `--dump-plan=<path>`: write the compiled plan's wire JSON (so `emit-msl`
     -- / `emit-ir` can be pointed at a graph's plan) and stop
-    if let some path := parseStrFlag args "--dump-plan" then
+    if let some path := a.value? "dump-plan" then
       match compiled.plan.toWire with
       | .error e => IO.eprintln s!"render-graph: toWire: {e}"; return 1
       | .ok wire =>
@@ -144,7 +159,7 @@ def renderGraph (args : List String) : IO UInt32 := do
       | .ok s => pure s
     IO.eprintln s!"render-graph: hoisted columns={split.audio.coeffArraySlots.size}"
     -- `--stage-census`: how the typed stages and the split distribute the plan
-    if args.contains "--stage-census" then
+    if a.has "stage-census" then
       let mut fold := 0; let mut s0 := 0; let mut s1 := 0; let mut untyped := 0
       for block in compiled.stageBlocks do
         for st in block do
@@ -185,23 +200,18 @@ def renderGraph (args : List String) : IO UInt32 := do
     if metal then Tropical.StagedLoad.loadMslTyped rt compiled.plan compiled.stageBlocks
     else Tropical.StagedLoad.loadTyped rt compiled.plan compiled.stageBlocks
     if start != 0 then rt.setSampleIndex start.toUInt64
+    -- `--all-channels`: every output channel, frame-major (`out` then each
+    -- tap), instead of the channel-0 view — so a graph's taps can be gated.
+    let allChannels := a.has "all-channels"
     let stdout ← IO.getStdout
     for _ in [0:frames] do
       if metal then rt.processOffline else rt.process
-      stdout.write (← rt.outputBytes)
+      stdout.write (← if allChannels then rt.outputInterleavedBytes else rt.outputBytes)
     stdout.flush
     return 0
 
-private def parseFloatFlag (args : List String) (flag : String)
-    (default : Float) : Float :=
-  match parseStrFlag args flag with
-  | some v => match Lean.Json.parse v with
-    | .ok j => (j.getNum?.toOption.map (·.toFloat)).getD default
-    | .error _ => default
-  | none => default
-
 /-- `diffcli render-sweep <graph.json> --param=<knob> [--center=800]
-    [--octaves=2] [--rate-hz=2] [--frames N] [--buffer N]` — render a
+    [--octaves=2] [--rate-hz=2] [--frames N] [--buffer N] [--rate R]` — render a
     playground graph while the CONTROL PLANE sweeps one knob:
     `value(t) = center · 2^(octaves · sin(2π · rate · t))`, written to the
     knob's glide slots (`#v0`/`#v1`, or the bare `param:` slot) once per
@@ -209,24 +219,25 @@ private def parseFloatFlag (args : List String) (flag : String)
     `--buffer 1` — the update granularity IS the buffer, which is the point:
     the same verb at two buffer sizes prices coefficient-update quantization
     (the settle tradeoff) with no other variable moving. Byte protocol as
-    `render-bytes`. Rate is the engine default 44100. -/
-def renderSweep (args : List String) : IO UInt32 := do
-  let some graphPath := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
-    | IO.eprintln "usage: diffcli render-sweep <graph.json> --param=<knob> [--center=C] [--octaves=O] [--rate-hz=R] [--frames N] [--buffer N]"
-      return 1
-  let some knob := parseStrFlag args "--param"
-    | IO.eprintln "render-sweep: --param=<knob> is required (e.g. --param=flt.cutoff)"
-      return 1
-  let frames := parseNatFlag args "--frames" 16
-  let buffer := parseNatFlag args "--buffer" 256
-  let center := parseFloatFlag args "--center" 800.0
-  let octaves := parseFloatFlag args "--octaves" 2.0
-  let rateHz := parseFloatFlag args "--rate-hz" 2.0
+    `render-bytes`. The graph compiles for `--rate` (default
+    `Plan.defaultSampleRate`), and the sweep's time base is the same rate. -/
+def renderSweep (args : List String) : IO UInt32 :=
+  runVerb "render-sweep"
+    "<graph.json> --param=<knob> [--center=C] [--octaves=O] [--rate-hz=R] [--frames N] [--buffer N] [--rate R]"
+    [valued "param", valued "center", valued "octaves", valued "rate-hz",
+      valued "frames", valued "buffer", valued "rate"] args
+    (fun a => do
+      let some knob := a.value? "param"
+        | throw "--param=<knob> is required (e.g. --param=flt.cutoff)"
+      return (knob, ← a.natD "frames" 16, ← a.natD "buffer" 256,
+        ← a.floatD "center" 800.0, ← a.floatD "octaves" 2.0, ← a.floatD "rate-hz" 2.0,
+        (← a.rate?).getD Tropical.Plan.defaultSampleRate))
+    fun _ (knob, frames, buffer, center, octaves, rateHz, rate) graphPath => do
   let text ← IO.FS.readFile graphPath
   let j ← match Lean.Json.parse text with
     | .error e => IO.eprintln s!"render-sweep: parse: {e}"; return 1
     | .ok j => pure j
-  match Tropical.Playground.compilePlan j with
+  match Tropical.Playground.compilePlan j rate with
   | .error e => IO.eprintln s!"render-sweep: compile: {e}"; return 1
   | .ok compiled =>
     let rt ← Tropical.Ffi.Runtime.new buffer.toUInt32
@@ -238,7 +249,7 @@ def renderSweep (args : List String) : IO UInt32 := do
     if slots.isEmpty then
       IO.eprintln s!"render-sweep: no slot found for knob '{knob}'"
       return 1
-    let sampleRate := 44100.0
+    let sampleRate := rate.toFloat
     let twoPi := 6.283185307179586
     let stdout ← IO.getStdout
     let mut framesDone : Nat := 0
@@ -255,28 +266,61 @@ def renderSweep (args : List String) : IO UInt32 := do
 
 -- ── compile (Phase 6 stage 6d — the compile_patch.ts contract) ──────────────
 
-/-- `diffcli compile <patch.json> [--mode=<m>]` → plan JSON on stdout.
-    Boots the engine (stdlib from the pre-parsed bridge), loads the
-    patch through the engine's own ingest, and rebuilds the plan from
-    the mirror at the requested mode. The side-B command of
-    diff_plan.ts / diff_audio.ts. -/
-def compileVerb (args : List String) : IO UInt32 := do
-  let some patch := args.find? (fun a => !a.startsWith "--")
-    | IO.eprintln "usage: diffcli compile <patch.json> [--mode=fused|microkernel|microkernel-deep] [--fixtures]"
-      return 1
-  let modeStr := (parseStrFlag args "--mode").getD "fused"
-  let some mode := Tropical.Plan.CompilationMode.ofWire? modeStr
-    | IO.eprintln s!"unknown compilation mode: {modeStr}"
-      return 1
+/-- Is this source a playground graph (door 1: a flat PatchGraph or a v3
+    hierarchy document, `Playground.isGraphDocument`) rather than a
+    `tropical_program_2` patch (door 2)? `--graph` forces the graph door. -/
+private def isPatchGraph (a : Args) (j : Lean.Json) : Bool :=
+  a.has "graph" || Tropical.Playground.isGraphDocument j
+
+/-- A patch's plan at `--rate`, when given: nothing above the plan bakes a
+    rate (the IR reads `sampleRate`, a plan source), so the plan takes it after
+    compile. -/
+private def atRate (rate? : Option Nat) (plan : Tropical.Plan.FlatPlan) :
+    Tropical.Plan.FlatPlan :=
+  match rate? with
+  | some r => { plan with sampleRate := (r : Lean.JsonNumber) }
+  | none => plan
+
+/-- `diffcli compile <patch-or-graph.json> [--mode=<m>] [--rate R]
+    [--fixtures] [--graph]` → plan JSON on stdout. Boots the engine (stdlib
+    from the pre-parsed bridge), loads the patch through the engine's own
+    ingest, and rebuilds the plan from the mirror at the requested mode. The
+    side-B command of diff_plan.ts / diff_audio.ts, and the engine side of
+    `tools/check_artifact_parity.py` against `tropicalc --emit=plan`. -/
+def compileVerb (args : List String) : IO UInt32 :=
+  runVerb "compile"
+    "<patch-or-graph.json> [--mode=fused|microkernel|microkernel-deep] [--rate R] [--fixtures] [--graph]"
+    [valued "mode", valued "rate", switch "fixtures", switch "graph"] args
+    (fun a => do
+      let modeStr := (a.value? "mode").getD "fused"
+      let some mode := Tropical.Plan.CompilationMode.ofWire? modeStr
+        | throw s!"unknown compilation mode: {modeStr}"
+      return (modeStr, mode, ← a.rate?))
+    fun a (modeStr, mode, rate?) patch => do
   let env ← Tropical.NativeBoot.boot
-  let act : Tropical.EngineM String := do
-    if args.contains "--fixtures" then Tropical.Engine.registerTestFixtures env
+  -- A PatchGraph compiles as the engine's `load_patch_graph` does: against
+  -- the boot-time stdlib arena (fused; the graph door has no other mode).
+  if let .ok j := Lean.Json.parse (← IO.FS.readFile patch) then
+    if isPatchGraph a j then
+      if mode != .fused then
+        IO.eprintln s!"compile: a PatchGraph compiles fused only (got --mode={modeStr})"
+        return 1
+      match Tropical.Playground.compilePlanPure env.stdlib.1 env.stdlib.2 j
+          (rate?.getD Tropical.Plan.defaultSampleRate) with
+      | .error e => IO.eprintln s!"compile: graph: {e}"; return 1
+      | .ok compiled =>
+        match compiled.plan.toWire with
+        | .error e => IO.eprintln s!"compile: toWire: {e}"; return 1
+        | .ok wire => IO.println wire.compress; return 0
+  let act : Tropical.EngineM Tropical.Plan.FlatPlan := do
+    if a.has "fixtures" then Tropical.Engine.registerTestFixtures env
     let _ ← Tropical.Engine.handleLoad env (Lean.Json.mkObj [("path", Lean.Json.str patch)])
-    Tropical.Engine.compileMirrorPlan env mode
+    Tropical.Engine.compileMirrorFlatPlan env mode
   match ← act.run with
-  | .ok planJson =>
-    IO.println planJson
-    return 0
+  | .ok plan =>
+    match (atRate rate? plan).toWire with
+    | .error e => IO.eprintln s!"compile: toWire: {e}"; return 1
+    | .ok wire => IO.println wire.compress; return 0
   | .error f =>
     IO.eprintln f.toJson.compress
     return 1
@@ -296,13 +340,44 @@ private def compileToFlatPlan (patch : String) (fixtures : Bool := false) :
   | .ok p => pure (.ok p)
   | .error f => pure (.error f.toJson.compress)
 
+/-- The kernel split the wasm/manifest verbs emit for a source, through
+    whichever front door its shape names.
+
+    * A PatchGraph compiles through `Playground.compilePlan` and the TYPED
+      stage-0 split — exactly what `render-graph` and the live engine's
+      `load_patch_graph` load — so the τ-independent coefficient plan (bank
+      columns, coefficient tables) becomes the kernel's once-per-call
+      prologue, and the wasm matches `render-graph` on the JIT.
+    * A `tropical_program_2` patch compiles through the engine mirror. It
+      carries no stage blocks, so it is emitted unsplit (`coeff? := none`):
+      the whole plan in the sample loop. That is the `TROPICAL_STAGE0=0`
+      kill-switch shape — the same values, recomputed per frame instead of
+      per call — so it is correct, only slower for coefficient-heavy plans. -/
+private def compileToSplit (a : Args) (rate? : Option Nat) (path : String) :
+    IO (Except String Tropical.Ir.Stage0.Split) := do
+  let text ← IO.FS.readFile path
+  let patchSplit := do
+    return (← compileToFlatPlan path (fixtures := a.has "fixtures")).map
+      fun plan => { audio := atRate rate? plan, coeff? := none }
+  match Lean.Json.parse text with
+  | .ok j =>
+    if isPatchGraph a j then
+      -- A graph takes it at decode: the default string's period is a sample count.
+      match Tropical.Playground.compilePlan j (rate?.getD Tropical.Plan.defaultSampleRate) with
+      | .error e => return .error s!"graph compile: {e}"
+      | .ok compiled =>
+        let opts ← Tropical.StagedLoad.optionsFromEnv
+        return Tropical.Artifact.splitTyped opts compiled.plan compiled.stageBlocks
+    else patchSplit
+  | .error _ => patchSplit
+
 /-- `diffcli emit-ir <patch.json> [--frames N]` → the Lean-emitted LLVM IR
     on stdout: the port kernel for `N` frames per call (default 512), with
     the stage-0 prologue inside. -/
-def emitIrVerb (args : List String) : IO UInt32 := do
-  let some patch := args.find? (fun a => !a.startsWith "--")
-    | IO.eprintln "usage: diffcli emit-ir <patch.json> [--frames N]"; return 1
-  let frames := parseNatFlag args "--frames" Tropical.Artifact.defaultFrames
+def emitIrVerb (args : List String) : IO UInt32 :=
+  runVerb "emit-ir" "<patch.json> [--frames N]" [valued "frames"] args
+    (fun a => return (← a.positive? "frames").getD Tropical.Artifact.defaultFrames)
+    fun _ frames patch => do
   match ← compileToFlatPlan patch with
   | .error e => IO.eprintln e; return 1
   | .ok plan =>
@@ -315,10 +390,10 @@ def emitIrVerb (args : List String) : IO UInt32 := do
     Language kernel on stdout (the Metal backend's codegen; sibling of
     `emit-ir`). Sanity compile-check without any engine:
     `diffcli emit-msl p.json | xcrun -sdk macosx metal -x metal -c -o /dev/null -`. -/
-def emitMslVerb (args : List String) : IO UInt32 := do
-  let some patch := args.find? (fun a => !a.startsWith "--")
-    | IO.eprintln "usage: diffcli emit-msl <patch.json> [--frames N]"; return 1
-  let frames := parseNatFlag args "--frames" Tropical.Artifact.defaultFrames
+def emitMslVerb (args : List String) : IO UInt32 :=
+  runVerb "emit-msl" "<patch.json> [--frames N]" [valued "frames"] args
+    (fun a => return (← a.positive? "frames").getD Tropical.Artifact.defaultFrames)
+    fun _ frames patch => do
   match ← compileToFlatPlan patch with
   | .error e => IO.eprintln e; return 1
   | .ok plan =>
@@ -326,21 +401,25 @@ def emitMslVerb (args : List String) : IO UInt32 := do
     | .error e => IO.eprintln s!"emitKernel (msl): {e}"; return 1
     | .ok msl => IO.println msl; return 0
 
-/-- `diffcli compile-wasm <patch.json> --out <out.wasm> [--frames N]` → a
+/-- `diffcli compile-wasm <patch.json> --out <out.wasm> [--frames N] [--rate R]` → a
     complete wasm32 module of the port kernel for `N` frames per call
     (default 128, the worklet quantum), emitted in-process (Lean IR →
     libtropical_wasm's LLVM+lld, no subprocess). `compile-kernel` prints the
-    matching `tropical_kernel_1` manifest. -/
-def compileWasmVerb (args : List String) : IO UInt32 := do
-  let some patch := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
-    | IO.eprintln "usage: diffcli compile-wasm <patch.json> --out <out.wasm> [--frames N] [--fixtures]"; return 1
-  let some outPath := parseStrFlag args "--out"
-    | IO.eprintln "compile-wasm: --out <path> required"; return 1
-  let frames := parseNatFlag args "--frames" 128
-  match ← compileToFlatPlan patch (fixtures := args.contains "--fixtures") with
+    matching `tropical_kernel_1` manifest. The source is a
+    `tropical_program_2` patch or a playground graph (detected by shape,
+    or forced with `--graph`; see `compileToSplit`). -/
+def compileWasmVerb (args : List String) : IO UInt32 :=
+  runVerb "compile-wasm"
+    "<patch-or-graph.json> --out <out.wasm> [--frames N] [--rate R] [--fixtures] [--graph]"
+    [valued "out", valued "frames", valued "rate", switch "fixtures", switch "graph"] args
+    (fun a => do
+      let some outPath := a.value? "out" | throw "--out <path> is required"
+      return (outPath, (← a.positive? "frames").getD 128, ← a.rate?))
+    fun a (outPath, frames, rate?) patch => do
+  match ← compileToSplit a rate? patch with
   | .error e => IO.eprintln e; return 1
-  | .ok plan =>
-    match Tropical.Ir.EmitLlvm.emitKernel { audio := plan, coeff? := none } frames with
+  | .ok split =>
+    match Tropical.Ir.EmitLlvm.emitKernel split frames with
     | .error e => IO.eprintln s!"emitKernel: {e}"; return 1
     | .ok ir =>
       let wasm ← Tropical.Toolchain.Wasm.compileIr ir
@@ -348,17 +427,19 @@ def compileWasmVerb (args : List String) : IO UInt32 := do
       IO.eprintln s!"compile-wasm: wrote {wasm.size} bytes → {outPath}"
       return 0
 
-/-- `diffcli compile-kernel <patch.json> [--frames N] [--fixtures]` → the
+/-- `diffcli compile-kernel <patch.json> [--frames N] [--rate R] [--fixtures]
+    [--graph]` → the
     `tropical_kernel_1` manifest of the patch for `N` frames per call
     (default 128), on stdout. The browser-side manifest. -/
-def compileKernelVerb (args : List String) : IO UInt32 := do
-  let some patch := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
-    | IO.eprintln "usage: diffcli compile-kernel <patch.json> [--frames N] [--fixtures]"; return 1
-  let frames := parseNatFlag args "--frames" 128
-  match ← compileToFlatPlan patch (fixtures := args.contains "--fixtures") with
+def compileKernelVerb (args : List String) : IO UInt32 :=
+  runVerb "compile-kernel" "<patch-or-graph.json> [--frames N] [--rate R] [--fixtures] [--graph]"
+    [valued "frames", valued "rate", switch "fixtures", switch "graph"] args
+    (fun a => return ((← a.positive? "frames").getD 128, ← a.rate?))
+    fun a (frames, rate?) patch => do
+  match ← compileToSplit a rate? patch with
   | .error e => IO.eprintln e; return 1
-  | .ok plan =>
-    match Tropical.Kernel.manifest plan frames with
+  | .ok split =>
+    match Tropical.Kernel.manifest split.audio frames with
     | .error e => IO.eprintln s!"compile-kernel: {e}"; return 1
     | .ok manifest => IO.println manifest; return 0
 
@@ -374,5 +455,5 @@ def main (args : List String) : IO UInt32 := do
   | "compile-kernel" :: rest => compileKernelVerb rest
   | "compile" :: rest => compileVerb rest
   | _ =>
-    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]\n       diffcli render-metal <plan.json>\n       diffcli render-graph <graph.json>\n       diffcli emit-ir <patch.json>\n       diffcli emit-msl <patch.json>\n       diffcli compile <patch.json> [--mode=M]\n       diffcli compile-wasm <patch.json> --out <out.wasm> [--frames N]\n       diffcli compile-kernel <patch.json> [--frames N]"
+    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N] [--all-channels]\n       diffcli render-metal <plan.json>\n       diffcli render-graph <graph.json> [--all-channels] [--rate R]\n       diffcli render-sweep <graph.json> --param=<knob> [--rate R]\n       diffcli emit-ir <patch.json>\n       diffcli emit-msl <patch.json>\n       diffcli compile <patch-or-graph.json> [--mode=M] [--rate R] [--graph]\n       diffcli compile-wasm <patch-or-graph.json> --out <out.wasm> [--frames N] [--rate R] [--graph]\n       diffcli compile-kernel <patch-or-graph.json> [--frames N] [--rate R] [--graph]"
     return 1

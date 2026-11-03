@@ -1,4 +1,5 @@
 import Tropical.Session.Compile
+import Tropical.Playground.Compile
 import Tropical.Kernel
 import Tropical.Tropicaltest.Gates
 
@@ -68,9 +69,18 @@ def runKernelType : IO Bool := do
   let mut checked := 0
   for path in patches do
     let text ← IO.FS.readFile path
-    let plan ← match (Tropical.Session.compilePatch text).runOn registry with
-      | (.error f, _) => return ← failGate label s!"{path}: compile: {f.toJson.compress}"
-      | (.ok (plan, _), _) => pure plan
+    -- A playground graph (`Playground.isGraphDocument`) compiles through the
+    -- graph door, as `diffcli compile-kernel` does; a patch through the session.
+    let graph? : Option Lean.Json := match Lean.Json.parse text with
+      | .ok j => if Tropical.Playground.isGraphDocument j then some j else none
+      | .error _ => none
+    let plan ← match graph? with
+      | some j => match Tropical.Playground.compilePlan j with
+        | .error e => return ← failGate label s!"{path}: graph compile: {e}"
+        | .ok compiled => pure compiled.plan
+      | none => match (Tropical.Session.compilePatch text).runOn registry with
+        | (.error f, _) => return ← failGate label s!"{path}: compile: {f.toJson.compress}"
+        | (.ok (plan, _), _) => pure plan
     let k ← match ofPlan plan frames with
       | .error e => return ← failGate label s!"{path}: ofPlan: {e}"
       | .ok k => pure k

@@ -21,8 +21,10 @@ Per patch, the build emits two artifacts the browser fetches:
 - `<slug>.manifest.json` — the kernel's type, `tropical_kernel_1`
   (`design/typed-kernel.md`): `tau:i64q16[128]`, one `f64` param per knob
   with its default, and `out:f64[128, C]`. Produced by `diffcli
-  compile-kernel --frames 128`. The compiler's plan is nested inside for its
-  own gates; the runtime never reads it.
+  compile-kernel --frames 128` (`--rate R` or `--rate=R`, on both verbs,
+  compiles for another rate; the default is 44.1 kHz; an unknown flag or a
+  bad value is an error). The compiler's plan is nested inside for its own
+  gates; the runtime never reads it.
 
 ## Layout
 
@@ -31,9 +33,9 @@ web/
   runtime/             The extractable runtime package (→ @tropical/runtime-wasm)
     manifest.ts          KernelManifest — the consumption contract
     layout.ts            computeLayout: KernelManifest → linear-memory regions
-    kernel.ts            WasmKernel: instantiate + render(f64) + process(f32+fade)
+    kernel.ts            WasmKernel: instantiate + render/renderInto(f64) + seek + process(f32+fade)
     index.ts             public surface
-  patches/             Source demo patches (tropical_program_2 JSON) + manifest.json
+  patches/             Source demo patches (tropical_program_2 JSON or PatchGraph) + manifest.json
   build_patches.ts     Per patch: diffcli compile-wasm → <slug>.wasm + a trimmed
                        <slug>.manifest.json → web/dist/patches/ + index.json
   build.ts             Full demo bundle: build patches, bundle worklet + app, copy html
@@ -46,6 +48,17 @@ web/
     app.ts               patch picker, play/stop, fetch .wasm + manifest
     index.html
 ```
+
+`build_patches.ts` takes `TROPICAL_DIFFCLI=<path>` to use a prebuilt `diffcli`
+(e.g. from a worktree with no Lean build). A source patch is either a
+`tropical_program_2` patch or a playground graph — a flat PatchGraph
+(`{"nodes":[…],"out":…,"taps":[…]}`) or a v3 hierarchy document
+(`{"version":3,"definitions":[…],"scene":…}`): `diffcli compile-wasm` /
+`compile-kernel` detect the shape (`Playground.isGraphDocument`, or
+`--graph`) and compile a graph
+through `Playground.compilePlan` and the typed stage-0 split, as
+`render-graph` does. Channel 0 is the graph's `out`; each named tap is a
+further channel.
 
 `web/runtime/` depends **only** on `KernelManifest` (`tropical_kernel_1`) —
 nothing from the compiler. It is a self-contained consumer of tropical's
@@ -125,4 +138,23 @@ kernel's f64 output, `WasmKernel.render` vs `diffcli render-bytes`):
   FP divergence.
 - `web_plans_vs_jit.test.ts` — every shipped `web/dist/patches/<slug>.wasm` +
   manifest vs the JIT. If this passes, any browser bug is in the host/worklet
-  glue, not codegen.
+  glue, not codegen. The oracle renders every channel (patches by
+  `render-bytes --all-channels`, graphs by `render-graph --all-channels`) and
+  must carry exactly the artifact's channel count.
+- `graph_wasm_vs_jit.test.ts` — small PatchGraphs (a swept flanger with taps; a
+  modal bank whose coefficients hoist to the stage-0 prologue; signal-driven
+  controls on every inlet) through `compile-wasm` vs `render-graph`, plus the
+  unsplit (`TROPICAL_STAGE0=0`) bank kernel against the split one, a v3
+  hierarchy document against its flat expansion, the τ-invariant-cone cost
+  gate per inlet, and `--rate` (a 48 kHz kernel plays its pitch at 48 kHz).
+- `graph_clock.test.ts` — closed-form clock properties of the playground
+  generators and the signal-time `delay` at arbitrary τ (`seek`): exact
+  phasor periodicity, a negative freq playing the saw and pulse backward bit
+  for bit, a zero delay time is the source bitwise, 1/65536-frame tap
+  resolution at frame ≈ 2^40, and anchored re-tunes.
+- `graph_defaults.test.ts` — a knob a graph node omits from `params` seeds its
+  vocabulary default.
+- `cli_flags.test.ts` — `tropicalc` and `diffcli` share one flag reader and one
+  graph detector: a v3 document compiles through both to the plan
+  `render-graph` runs, `--graph` forces the graph door, `--rate N` ≡
+  `--rate=N`, and an unknown flag or a bad value is an error.

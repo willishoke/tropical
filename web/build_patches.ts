@@ -23,12 +23,16 @@ const __dirname = dirname(fileURLToPath(import.meta.url))
 const root = resolve(__dirname, '..')
 const patchesDir = resolve(__dirname, 'patches')
 const distDir = resolve(__dirname, 'dist/patches')
-const diffcli = resolve(root, 'lean/.lake/build/bin/diffcli')
+// TROPICAL_DIFFCLI points at a prebuilt diffcli (e.g. a worktree with no Lean
+// build of its own). Run the binary directly — never `lake exe` (CLAUDE.md).
+const diffcli = process.env.TROPICAL_DIFFCLI
+  ? resolve(process.env.TROPICAL_DIFFCLI)
+  : resolve(root, 'lean/.lake/build/bin/diffcli')
 
 type Entry = { slug: string; title: string; description: string }
 
 // Ensure the Lean compiler CLI exists (incremental; fast if already built).
-if (!existsSync(diffcli)) {
+if (!process.env.TROPICAL_DIFFCLI && !existsSync(diffcli)) {
   const b = spawnSync(['sh', '-c', `cd "${root}/lean" && PATH="$HOME/.elan/bin:$PATH" lake build diffcli`], {
     stdout: 'inherit', stderr: 'inherit',
   })

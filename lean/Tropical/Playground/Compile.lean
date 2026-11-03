@@ -26,8 +26,8 @@ open Metadata
     — the signal at that node's jack — so the collapse keeps the slot alive and
     `render_window` can read it. Taps cost extra kernel compute (each re-emits its
     upstream cone), so they're for the inspection build, not a lean audio path. -/
-def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j : Json) :
-    Except String CompiledPatch := do
+def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j : Json)
+    (rate : Nat := Tropical.Plan.defaultSampleRate) : Except String CompiledPatch := do
   let j ← elaboratePatchHierarchy j
   let raws := rawsOf j
   checkServedKinds raws                              -- reject withheld/unknown kinds FIRST (honest msg over the misleading type error)
@@ -48,7 +48,8 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
         | Json.str id => if visibleTapIds.contains id then some id else none
         | _ => none
     | _ => #[]
-  let registry ← buildRegistry arena resolved #["FixedSinOsc", "MorphOsc", "PluckedMorphOsc"]
+  let registry ← buildRegistry arena resolved
+    #["FixedSinOsc", "MorphOsc", "PluckedMorphOsc", "ClockPhasor"]
   -- One `.param` decl per live knob, appended AFTER the instance decls: declaration
   -- order = `ParamIdx` = the index each `paramRef` carries, and keeping params after
   -- instances leaves the emitted voices' `InstanceIdx` untouched. `compileSession`
@@ -60,7 +61,7 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
   let (arena1, idx, successfulTapIds) ←
     Tropical.EmitArrow.assembleCompleteWithResult arena "__patch__"
     registry (extraDecls := paramDecls) do
-      let g ← Compiler.decodeGraph j paramTable
+      let g ← Compiler.decodeGraph j paramTable rate
       let term ← lowerGraph g
       let out ← emitTerm (normalize term)
       let tapSigs ← tapIds.foldlM (fun (acc : Array (String × Sig)) id => do
@@ -90,7 +91,9 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
   -- The host-contract dispatch table rides the manifest: any runtime host
   -- (C++ today, Swift/Metal or wasm tomorrow) reads per-slot disciplines from
   -- the plan itself and dispatches param writes locally.
-  let plan := { plan with paramDisciplines := paramDisciplinesOf (rawsOf j) }
+  let plan := { plan with
+    sampleRate := rate
+    paramDisciplines := paramDisciplinesOf (rawsOf j) }
   -- The final mix (`out`) plus one tap per user node, each an output channel
   -- of this artifact named by its root slot (`__root__.<port>`); the scope
   -- resolves a tap's slot name to its channel through the kernel manifest.
@@ -124,6 +127,7 @@ def knobParams (j : Json) : Array (String × Json) :=
 /-- Decode + lower + compile the GUI graph to a loadable `FlatPlan` + its
     taps + typed stage blocks (the split classification), against a freshly
     built stdlib. -/
-def compilePlan (j : Json) : Except String CompiledPatch := do
+def compilePlan (j : Json) (rate : Nat := Tropical.Plan.defaultSampleRate) :
+    Except String CompiledPatch := do
   let (arena, resolved) ← stdlib.mapError (s!"stdlib elaboration: {·}")
-  compilePlanPure arena resolved j
+  compilePlanPure arena resolved j rate

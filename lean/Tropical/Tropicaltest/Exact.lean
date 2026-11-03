@@ -769,22 +769,22 @@ private def SiteDiff.note (d : SiteDiff) (emitted : Option Float) (ref : Float) 
 def runExactPlayground : IO Bool := do
   let prepared := freezeBuild {} do
     let defaultModes ← Tropical.Playground.Compiler.defaultStringModes
-      (196, 0) (996, 3)
+      (196, 0) (996, 3) Tropical.Plan.defaultSampleRate
     let highModes ← Tropical.Playground.Compiler.defaultStringModes
-      (2000, 0) (996, 3)
+      (2000, 0) (996, 3) Tropical.Plan.defaultSampleRate
     let lowModes ← Tropical.Playground.Compiler.defaultStringModes
-      (20, 0) (996, 3)
+      (20, 0) (996, 3) Tropical.Plan.defaultSampleRate
     let quantBank ← Tropical.Playground.Compiler.defaultStringModes
-      (224, 2) (996, 3)
+      (224, 2) (996, 3) Tropical.Plan.defaultSampleRate
     let zeroRho ← Tropical.Playground.Compiler.defaultStringModes
-      (196, 0) (0, 0)
+      (196, 0) (0, 0) Tropical.Plan.defaultSampleRate
     let negativeRho ← Tropical.Playground.Compiler.defaultStringModes
-      (196, 0) (-5, 1)
+      (196, 0) (-5, 1) Tropical.Plan.defaultSampleRate
     let zeroFrequency ← Tropical.Playground.Compiler.defaultStringModes
-      (0, 0) (996, 3)
+      (0, 0) (996, 3) Tropical.Plan.defaultSampleRate
     let bandBanks ← (Array.range 40).mapM fun i =>
       Tropical.Playground.Compiler.defaultStringModes
-        (20 + 60 * Int.ofNat i, 0) (996, 3)
+        (20 + 60 * Int.ofNat i, 0) (996, 3) Tropical.Plan.defaultSampleRate
     let resonator ← Tropical.Playground.Compiler.bakedResonatorProbe 512
     let reverb ← Tropical.Playground.Compiler.bakedReverbProbe 32
     let filterLn80 ← Tropical.Playground.Compiler.bakedFilterLn80

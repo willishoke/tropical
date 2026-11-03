@@ -187,16 +187,39 @@ export class WasmKernel {
   render(n: number): Float64Array {
     if (!Number.isSafeInteger(n) || n < 0)
       throw new RangeError('render frame count must be a non-negative integer')
+    const out = new Float64Array(n * this.outputChannelCount)
+    this.renderInto(out, n)
+    return out
+  }
+
+  /** `render` into a caller-owned buffer of at least `n * outputChannelCount`
+   *  f64s, allocating nothing (an audio-thread or per-frame caller). */
+  renderInto(out: Float64Array, n: number): void {
+    if (!Number.isSafeInteger(n) || n < 0)
+      throw new RangeError('render frame count must be a non-negative integer')
     const C = this.outputChannelCount
-    const out = new Float64Array(n * C)
+    if (out.length < n * C)
+      throw new RangeError('renderInto buffer is shorter than n * channels')
     for (let done = 0; done < n; done += this.layout.frames) {
       const block = this.renderBlock(this.frameIdx + done)
       const take = Math.min(this.layout.frames, n - done)
       out.set(block.subarray(0, take * C), done * C)
     }
     this.frameIdx += n
-    return out
   }
+
+  /** Move the clock: the next `render`/`process` starts at frame `frameIdx`.
+   *  The kernel is a pure function of τ, so any frame costs the same as the
+   *  next one — this is how a second consumer (a visual) evaluates the kernel
+   *  at its own τ instead of receiving samples. */
+  seek(frameIdx: number): void {
+    if (!Number.isSafeInteger(frameIdx) || frameIdx < 0)
+      throw new RangeError('seek frame must be a non-negative integer')
+    this.frameIdx = frameIdx
+  }
+
+  /** The frame index the next block starts at. */
+  get frame(): number { return this.frameIdx }
 
   /** Render `n` frames into planar host outputs (f32 audio) with the anti-click
    *  fade and the device-boundary clamp. Mono kernels are upmixed to every host

@@ -118,10 +118,15 @@ private def decodeDefinition (json : Json) : Except String HierarchyDefinition :
     parameters
     nodes }
 
+/-- A module parameter in scope: its value and, when the module instance wires
+    that parameter's inlet, the (public) source ids — a wired parameter reaches
+    every atom bound to it as a wire into the atom's same-named inlet, exactly
+    as a wire into a flat node's control inlet. -/
 private structure BoundParameter where
   localName : String
   globalName : String
   value : Json
+  sources : Array String := #[]
 
 private structure ExpandedGraph where
   nodes : Array Json := #[]
@@ -332,10 +337,13 @@ private def boundContext (definition : HierarchyDefinition) (inst : Json)
   let params := objField inst "params"
   let mut out := #[]
   for parameter in definition.parameters do
+    let sources := inputSources inst parameter.name
     match bindings[parameter.name]? with
     | some (.str parentName) =>
       let some inherited := lookupBound parent parentName
         | throw s!"hierarchy: binding '{parameter.name}={parentName}' at '{publicId}' names no outer parameter"
+      unless sources.isEmpty do
+        throw s!"hierarchy: '{publicId}.{parameter.name}' is both bound to '{parentName}' and wired — use one"
       out := out.push { inherited with localName := parameter.name }
     | some _ =>
       throw s!"hierarchy: binding '{publicId}.{parameter.name}' must name an outer parameter"
@@ -343,13 +351,15 @@ private def boundContext (definition : HierarchyDefinition) (inst : Json)
       out := out.push {
         localName := parameter.name
         globalName := s!"{publicId}.{parameter.name}"
-        value := (params[parameter.name]?).getD parameter.defaultValue }
+        value := (params[parameter.name]?).getD parameter.defaultValue
+        sources }
   pure out
 
 private def bindAtomicParams (node : Json) (context : Array BoundParameter) : Except String Json := do
   let bindings := objField node "bindings"
   let mut params := objField node "params"
   let mut aliases : Std.TreeMap.Raw String Json compare := {}
+  let mut inlets := objField node "in"
   for (localName, binding) in bindings.toList do
     let .str outerName := binding
       | throw s!"hierarchy: atomic binding '{localName}' must be a parameter name"
@@ -357,8 +367,11 @@ private def bindAtomicParams (node : Json) (context : Array BoundParameter) : Ex
       | throw s!"hierarchy: atomic binding '{localName}={outerName}' names no module parameter"
     params := params.insert localName bound.value
     aliases := aliases.insert localName (.str bound.globalName)
+    unless bound.sources.isEmpty do
+      inlets := inlets.insert localName (.arr (bound.sources.map Json.str))
   pure <| jsonErase
-    (jsonSet (jsonSet node "params" (.obj params)) "param_aliases" (.obj aliases))
+    (jsonSet (jsonSet (jsonSet node "params" (.obj params)) "param_aliases" (.obj aliases))
+      "in" (.obj inlets))
     "bindings"
 
 private def translatedInputs (node : Json)
@@ -376,6 +389,17 @@ private def translatedInputs (node : Json)
       sources := sources ++ resolved
     translated := translated.push (port, sources)
   pure translated
+
+/-- Is this document a playground graph rather than a `tropical_program_2`
+    patch? Two shapes are graphs: a flat PatchGraph (`{"nodes":[…],"out":…}`)
+    and a v3 hierarchy document (`{"version":3,"definitions":[…],"scene":…}`),
+    which `elaboratePatchHierarchy` flattens. A patch names its `schema`; a
+    graph never does. This is the one detector shared by every front door that
+    takes either shape; a TypeScript gate that needs it mirrors this one. -/
+def isGraphDocument (document : Json) : Bool :=
+  (field? document "schema").isNone &&
+    (((field? document "nodes").bind arr?).isSome ||
+      (field? document "version").bind nat? == some 3)
 
 /-- Elaborate a v3 document to the unchanged flat patch-graph envelope. Flat
     legacy graphs pass through structurally; legacy Phaser nodes first migrate
