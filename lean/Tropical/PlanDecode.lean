@@ -157,6 +157,18 @@ private def sourceOfWire (j : JsonV) : Except String SourceKind := do
 private def strArr (j : JsonV) (k : String) : Array String :=
   (optArr j k).map fun x => match x with | .str s => s | _ => ""
 
+/-- One `param_disciplines` entry (`ParamDiscipline.toWire`'s inverse). A plan
+    that carries host write disciplines (the playground graph door attaches
+    them) must keep them through decode, or `ofWire ∘ toWire` loses the
+    manifest's dispatch table. -/
+private def disciplineOfWire (j : JsonV) : Except String ParamDiscipline := do
+  let name ← reqStr j "name"
+  let discipline ← reqStr j "discipline"
+  let glideDurSec := match j.getField? "glide_dur_sec" with
+    | some (.num n) => some n
+    | _ => none
+  pure { name, discipline, glideDurSec, companions := strArr j "companions" }
+
 private def natArr (j : JsonV) (k : String) : Array Nat :=
   (optArr j k).map fun x => match x with | .num n => n.toFloat.toUInt64.toNat | _ => 0
 
@@ -193,6 +205,7 @@ private def ofWireV (j : JsonV) : Except String FlatPlan := do
     slotCount,
     slotNames := strArr j "slot_names",
     slotDefaults,
+    paramDisciplines := ← (optArr j "param_disciplines").mapM disciplineOfWire,
     coeffArraySlots := natArr j "coeff_array_slots" }
   if !plan.outputLayoutWellFormed then
     throw "PlanDecode: output channel count must be positive and sink targets must be unique and in range"
