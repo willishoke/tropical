@@ -184,7 +184,12 @@ def collectParams (raws : Array Raw) : Array (String × JsonNumber) := Id.run do
         | none => false
       if !selfWired && !ownerWired then
         let base := paramNameOf raw knob
-        let dflt := (jNum? raw.params knob).getD ⟨0, 0⟩
+        -- An omitted knob seeds its slot with the vocabulary's declared
+        -- default (the value `fallbackOf` and `get_vocabulary` advertise), not 0.
+        let declared : JsonNumber := match port.knob with
+          | some (mantissa, exponent) => ⟨mantissa, exponent⟩
+          | none => ⟨0, 0⟩
+        let dflt := (jNum? raw.params knob).getD declared
         let alreadyRegistered := parameters.any fun (name, _) =>
           name == base || name == s!"{base}#v0" || name == s!"{base}#phase"
         if alreadyRegistered then continue
