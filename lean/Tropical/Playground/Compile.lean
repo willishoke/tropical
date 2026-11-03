@@ -48,7 +48,8 @@ def compilePlanPure (arena : Arena) (resolved : Array (String × ProgramIdx)) (j
         | Json.str id => if visibleTapIds.contains id then some id else none
         | _ => none
     | _ => #[]
-  let registry ← buildRegistry arena resolved #["FixedSinOsc", "MorphOsc", "PluckedMorphOsc"]
+  let registry ← buildRegistry arena resolved
+    #["FixedSinOsc", "MorphOsc", "PluckedMorphOsc", "ClockPhasor"]
   -- One `.param` decl per live knob, appended AFTER the instance decls: declaration
   -- order = `ParamIdx` = the index each `paramRef` carries, and keeping params after
   -- instances leaves the emitted voices' `InstanceIdx` untouched. `compileSession`

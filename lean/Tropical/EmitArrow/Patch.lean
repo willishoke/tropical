@@ -57,12 +57,30 @@ def modalAddrWarp : Clock → Sig → BuildM Clock :=
     generators. `lowerGraph` produces the UNREDUCED (downstream) term; the slide
     is the separate pass that follows. -/
 
+/-- A generator control input: a fixed expression (a knob's or a param's slot
+    read — τ-invariant) or a wire from another Sig node, lowered as a term. -/
+inductive ControlIn where
+  | fixed (value : Sig)
+  | wire (id : String)
+
 /-- A patch-graph node. Generators carry their clock; effects carry the id of the
     upstream node they consume (`⋙`); the mixer carries the ids it sums (fan-in).
     Generators read the master clock; the flanger/`warp`/shaper are the effect
     morphisms. -/
 inductive Node where
   | source (v : Voice) (clk : Clock)
+  /-- A generator whose controls are inputs (`ArrowTerm.genC`): each control is
+      a fixed expression or any Sig wire, read under the generator's own clock
+      context. `mk` builds the voice from the control signals, `post` maps its
+      raw output (a phase, for the band-limited waveforms) to the signal. -/
+  | sourceC (mk : Array Sig → Voice) (post : Array Sig → Sig → BuildM Sig) (clk : Clock)
+      (controls : Array ControlIn)
+  /-- A DELAY whose time input is a signal: `input` read at `τ − time`, `time`
+      in seconds from any Sig wire (an LFO, a knob, a sum; either sign — a
+      negative time reads ahead). The offset is formed in float and enters the
+      clock rail once (`toInt(time·SR·2¹⁶)`), so the tap keeps 1/65536-sample
+      resolution and absolute τ is never rounded. -/
+  | sdelay (input timeInput : String)
   | flange (input : String) (back fwd : Clock → BuildM Clock)
   | shaper (input : String) (f : Sig → BuildM Sig)
   | warpFx (input : String) (φ : Clock → BuildM Clock)
@@ -158,6 +176,14 @@ structure PatchGraph where
   nodes : Array PatchNode
   output : String
 
+/-- The signal-driven delay warp: `c − toInt(s·SR·clockOne)`, `s` in seconds. -/
+def delayWarp : Clock → Sig → BuildM Clock :=
+  fun base seconds => do
+    let samples ← mul seconds (← sampleRate)
+    let fixed ← mul samples (← clockOneLit)
+    let shift ← toIntE fixed
+    sub base shift
+
 /-- The standard FM modulation law: a modulator signal `m` shifts the carrier's
     clock by `depth · m` samples — `clk − toInt(depth · m · clockOne)`. `depth`
     is an EXPRESSION (a literal, or a live `paramRef` slot), so the depth knob can
@@ -231,6 +257,10 @@ def modalPhaserTopology (id input : String) (center sweep rate mix : ModalContro
     edges `lowerAt` ranks (and refuses cycles over). -/
 def Node.inputIds : Node → Array String
   | .source .. | .knob _ => #[]
+  | .sourceC _ _ _ controls => controls.filterMap fun
+      | .wire id => some id
+      | .fixed _ => none
+  | .sdelay i t => #[i, t]
   | .flange i _ _ | .shaper i _ | .warpFx i _ | .comb i _ => #[i]
   | .mix is | .ring is | .modalMix is => is
   | .fm i .. | .pm i .. => #[i]
@@ -703,6 +733,14 @@ def lowerNode (g : PatchGraph) (rankOf : String → Option Nat)
     | throw s!"lower: node '{id}' not found"
   match pn.node with
   | .source v clk => pure (.gen v id clk)
+  | .sourceC mk post clk controls => do
+    let terms ← controls.mapM fun
+      | .fixed value => pure (.konst value)
+      | .wire wireId => lowerInputGated g rankOf id wireId r
+    return .genC mk post id clk terms
+  | .sdelay inId timeId =>
+    return .swarp delayWarp (← lowerInputGated g rankOf id timeId r)
+      (← lowerInputGated g rankOf id inId r)
   | .flange inId back fwd =>
     flangeEffectWith back fwd (← lowerInputGated g rankOf id inId r)
   | .shaper inId f => return .arrUn f (← lowerInputGated g rankOf id inId r)

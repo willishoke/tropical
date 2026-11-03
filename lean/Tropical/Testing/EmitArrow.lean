@@ -492,8 +492,10 @@ def runPhase3Gate : IO Bool := do
 
 def phase5Evidence : Except String Phase5Evidence := do
   let kinds := Tropical.Playground.Metadata.vocabularyKinds
-  unless kinds.size == 20 do
-    throw s!"EmitArrow phase-5 fixture: expected 20 served vocabulary kinds, got {kinds.size}"
+  -- 20 → 23: `sine`, `saw` and `pulse` (the band-limited generators) joined
+  -- the served vocabulary; the fingerprint below moves with them.
+  unless kinds.size == 23 do
+    throw s!"EmitArrow phase-5 fixture: expected 23 served vocabulary kinds, got {kinds.size}"
   let parameters := Tropical.Playground.Metadata.collectParams #[]
   let expectedNames := #[
     Tropical.Playground.Metadata.masterVelocityParam,
@@ -502,7 +504,7 @@ def phase5Evidence : Except String Phase5Evidence := do
   unless parameters.map (·.1) == expectedNames do
     throw "EmitArrow phase-5 fixture: reserved parameter order changed"
   let fingerprint := Tropical.Playground.Metadata.vocabularyFingerprint
-  unless fingerprint == "fnv1a64:e2d9d7b44e8c3bbf" do
+  unless fingerprint == "fnv1a64:e4474911988728d2" do
     throw s!"EmitArrow phase-5 fixture: vocabulary fingerprint changed to {fingerprint}"
   pure {
     vocabularyKinds := kinds.size

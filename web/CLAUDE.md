@@ -142,3 +142,8 @@ kernel's f64 output, `WasmKernel.render` vs `diffcli render-bytes`):
   `compile-wasm` vs `render-graph`, plus the unsplit (`TROPICAL_STAGE0=0`)
   bank kernel against the split one, and a v3 hierarchy document against its
   flat expansion.
+- `graph_clock.test.ts` — closed-form clock properties of the playground
+  generators and the signal-time `delay` at arbitrary τ (`seek`): exact
+  phasor periodicity, a negative freq playing the saw and pulse backward bit
+  for bit, a zero delay time is the source bitwise, 1/65536-frame tap
+  resolution at frame ≈ 2^40, and anchored re-tunes.

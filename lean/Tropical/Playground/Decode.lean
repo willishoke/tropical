@@ -45,6 +45,19 @@ private def paramValue (pidx : String → Option Nat) (paramName : String → St
   else
     pref pidx (paramName kname) dflt
 
+/-- A generator control: a wire from a knob reads the knob's own slot (a fixed,
+    τ-invariant expression, exactly as before); a wire from any other Sig node
+    is a signal input lowered as a term; no wire reads this node's own param
+    (or its default). -/
+private def controlOf (pidx : String → Option Nat) (paramName : String → String)
+    (kind : String) (params inObj : Json) (kname : String) : BuildM ControlIn := do
+  match (Tropical.Playground.Metadata.portSources inObj kname)[0]? with
+  | some wire =>
+    match pidx s!"{wire}.value" with
+    | some i => pure (.fixed (← paramRef ⟨i⟩))
+    | none => pure (.wire wire)
+  | none => pure (.fixed (← paramValue pidx paramName kind params kname))
+
 def buildNodeWithParamNames (pidx : String → Option Nat)
     (paramName : String → String) (id kind : String)
     (_sel params inObj : Json) : BuildM (Node × Array PatchNode) := do
@@ -98,6 +111,30 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
       let depth ← lit 3 1
       pure (.pm modId (voiceOf pitchE morphE (some pmAnchor)) clk depth, #[])
     | none => pure (.source (voiceOf pitchE morphE anchor) clk, #[])
+  | "sine" | "saw" | "pulse" =>
+    -- `sine` is the exact `FixedSinOsc`; `saw`/`pulse` are polyBLEP waveforms:
+    -- the exact Q32 phasor, then a pure function of (phase, increment[, width]).
+    -- Anchored like `source` when the freq is this node's own knob.
+    let pitchDefault ← defaultValue kind params "freq"
+    let freq ← controlOf pidx paramName kind params inObj "freq"
+    let phase? ← match pidx s!"{paramName "freq"}#phase" with
+      | some i => pure (some (← paramRef ⟨i⟩))
+      | none => pure none
+    if kind == "sine" then
+      let mk := fun (cs : Array Sig) =>
+        sineVoiceE ((cs[0]?).getD pitchDefault) (phase?.map (·, pitchDefault))
+      return (.sourceC mk (fun _ raw => pure raw) clk #[freq], #[])
+    let mk := fun (cs : Array Sig) => phasorVoiceE ((cs[0]?).getD pitchDefault) phase?
+    if kind == "saw" then
+      let post := fun (cs : Array Sig) (p : Sig) => do
+        blepSaw p (← phaseIncrementOf ((cs[0]?).getD pitchDefault))
+      pure (.sourceC mk post clk #[freq], #[])
+    else
+      let width ← controlOf pidx paramName kind params inObj "width"
+      let post := fun (cs : Array Sig) (p : Sig) => do
+        let half ← lit 5 1
+        blepPulse p (← phaseIncrementOf ((cs[0]?).getD pitchDefault)) ((cs[1]?).getD half)
+      pure (.sourceC mk post clk #[freq, width], #[])
   | "pluck" =>
     let pitchDefault ← defaultValue kind params "freq"
     let pitchE ← match (Tropical.Playground.Metadata.portSources inObj "freq")[0]? with
@@ -128,6 +165,9 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
     let delay ← deltaOf seconds
     pure (.flange signalInput (fun c => sub c delay) (fun c => add c delay), signalFanIn)
   | "delay" =>
+    -- A signal-driven time: any wire (an LFO, a knob, a sum), either sign.
+    if let some wire := (Tropical.Playground.Metadata.portSources inObj "amount")[0]? then
+      return (.sdelay signalInput wire, signalFanIn)
     let seconds ← paramValue pidx paramName kind params "amount"
     let delay ← deltaOf seconds
     pure (.warpFx signalInput (fun c => sub c delay), signalFanIn)

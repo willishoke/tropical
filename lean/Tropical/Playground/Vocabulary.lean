@@ -94,6 +94,93 @@ def pluckedVoiceE (pitchE morphE eventRateE : Sig)
       wire := fun clkE => pure #[⟨⟨0⟩, pitchE⟩, ⟨⟨1⟩, morphE⟩,
         ⟨⟨2⟩, clkE⟩, ⟨⟨3⟩, eventRateE⟩] }
 
+/-- A `ClockPhasor` voice (`clk`, `freq`, `offset` → phase in `[0, 1)`): the
+    exact Q32 phasor every oscillator here shares, exposed so a waveform can be
+    computed from the phase as a pure function. Anchored like the other voices:
+    `phaseE` is the `#phase` companion on the offset input. -/
+def phasorVoiceE (pitchE : Sig) (phaseE : Option Sig := none) : Voice :=
+  match phaseE with
+  | some phase =>
+    { programName := "ClockPhasor"
+      wire := fun clkE => pure #[⟨⟨0⟩, clkE⟩, ⟨⟨1⟩, pitchE⟩, ⟨⟨2⟩, phase⟩]
+      phasePort := some ⟨2⟩ }
+  | none =>
+    { programName := "ClockPhasor"
+      wire := fun clkE => pure #[⟨⟨0⟩, clkE⟩, ⟨⟨1⟩, pitchE⟩] }
+
+/-- The phasor's increment in cycles per sample, `trunc(f·2³²/SR)/2³²` — the
+    same quantized increment the phasor advances by, so the BLEP width matches
+    the phase's actual step. -/
+def phaseIncrementOf (pitchE : Sig) : BuildM Sig := do
+  let twoPow32 ← lit 4294967296
+  let scaled ← mul pitchE twoPow32
+  let perSample ← div scaled (← sampleRate)
+  let inc ← toIntE perSample
+  let incFloat ← toFloatE inc
+  div incFloat twoPow32
+
+/-- The polyBLEP residual at phase `p` for the wrap at `p = 0`, width `|dt|`:
+    `2t − t² − 1` for `t = p/|dt| < 1` (just after the wrap, for a rising
+    phasor), `t² + 2t + 1` for `t = (p − 1)/|dt| > −1` (just before it), else
+    0. A pure function of `(p, dt)`, two selects.
+
+    `dt` is the phasor's signed increment; the window is its magnitude. A
+    negative increment runs the phasor backward, so `p` crosses the wrap the
+    other way (0 → 1) and the waveform is the time-reverse of the forward one,
+    which is band-limited too. The residual is a function of `p` alone and odd
+    under `p ↦ 1 − p`, so the same residual at width `|dt|` corrects the
+    reversed step with its sign: the reversed saw at `−f` is the forward saw at
+    `f` read backward, sample for sample. -/
+def polyBlep (p dt : Sig) : BuildM Sig := do
+  let zero ← lit 0
+  let one ← lit 1
+  let two ← lit 2
+  let dt ← absE dt
+  -- 1/dt is τ-invariant for a knob pitch (hoisted once per call); the two
+  -- per-sample divisions become multiplications.
+  let invDt ← div one dt
+  let t1 ← mul p invDt
+  let rise ← sub (← sub (← mul two t1) (← mul t1 t1)) one
+  let after ← gt dt p
+  let r1 ← select after rise zero
+  let pm1 ← sub p one
+  let t2 ← mul pm1 invDt
+  let fall ← add (← add (← mul t2 t2) (← mul two t2)) one
+  let edge ← sub one dt
+  let before ← gt p edge
+  let r2 ← select before fall zero
+  add r1 r2
+
+/-- PolyBLEP sawtooth from a phase in `[0, 1)`: `2p − 1 − blep(p)`. The step
+    width is the phasor's own increment at the generator's pitch — under a clock
+    warp `φ`, the instantaneous step is `inc·φ′(τ)`; using `inc` mis-sizes the
+    correction by the factor `φ′`, which for a delay swept by `d(τ)` is
+    `1 − d′(τ)` (a sine sweep of depth `D` s at `f` Hz: `|d′| ≤ 2π·f·D`, e.g.
+    1.5 ms at 0.2 Hz → 0.19%). -/
+def blepSaw (p dt : Sig) : BuildM Sig := do
+  let one ← lit 1
+  let two ← lit 2
+  let naive ← sub (← mul two p) one
+  sub naive (← polyBlep p dt)
+
+/-- PolyBLEP pulse of width `w ∈ (0, 1)` from a phase in `[0, 1)`: the naive
+    `±1` square with a BLEP at the rising edge (`p = 0`) and a negated BLEP at
+    the falling edge (`p = w`, i.e. the phase `p − w` wrapped). -/
+def blepPulse (p dt w : Sig) : BuildM Sig := do
+  let zero ← lit 0
+  let one ← lit 1
+  let negOne ← lit (-1)
+  let lo ← lit 1 3
+  let hi ← lit 999 3
+  let width ← clampE w lo hi
+  let high ← gt width p
+  let naive ← select high one negOne
+  let shifted ← sub p width
+  let wrapped ← add shifted (← select high one zero)
+  let rising ← polyBlep p dt
+  let falling ← polyBlep wrapped dt
+  add naive (← sub rising falling)
+
 def deltaOf (secondsE : Sig) : BuildM Sig := do
   let sr ← sampleRate
   let samples ← mul secondsE sr

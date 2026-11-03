@@ -103,6 +103,14 @@ inductive ArrowTerm where
   | clk (clock : Clock)
   | pmGen (v : Voice) (name : String) (baseClk : Clock) (depth : Sig)
       (modulator : ArrowTerm)
+  /-- A CONTROL-DRIVEN generator: `controls` are signal terms (a knob is a
+      `konst`; any wire is its lowered term) evaluated under the SAME clock
+      context as the generator itself, so a warp downstream slides the whole
+      cone — controls included — up to the generator. `mk` builds the voice
+      from the control signals; `post` maps its raw output (e.g. a phasor's
+      phase) to the generator's signal, given the same controls. -/
+  | genC (mk : Array Sig → Voice) (post : Array Sig → Sig → BuildM Sig)
+      (name : String) (clk : Clock) (controls : Array ArrowTerm)
 
 instance : Inhabited ArrowTerm := ⟨.sum #[]⟩
 
@@ -122,6 +130,8 @@ def normalize : ArrowTerm → ArrowTerm
   | .clk clock => .clk clock
   | .pmGen v name baseClk depth modulator =>
       .pmGen v name baseClk depth (normalize modulator)
+  | .genC mk post name clk controls =>
+      .genC mk post name clk (controls.attach.map fun ⟨t, _⟩ => normalize t)
 
 /-- Add a phase offset (PM) to a voice's phase input.
 
@@ -188,6 +198,12 @@ def emitTermC (cmod : Clock → BuildM Clock) : ArrowTerm → BuildM Sig
       let v ← anchoredVoice v (some phaseOffset)
       let builder ← get
       Builder.osc v s!"{name}{builder.decls.size}" warpedClk
+  | .genC mk post name clk controls => do
+      let signals ← controls.attach.mapM fun ⟨t, _⟩ => emitTermC cmod t
+      let warpedClk ← cmod clk
+      let builder ← get
+      let raw ← Builder.osc (mk signals) s!"{name}{builder.decls.size}" warpedClk
+      post signals raw
   | .sum ts => do
       let signals ← ts.attach.mapM fun ⟨t, _⟩ => emitTermC cmod t
       match signals[0]? with

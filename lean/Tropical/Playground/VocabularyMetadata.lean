@@ -106,6 +106,17 @@ def portSpecs : String → Array PortSpec
       { name := "morph", knob := some (0, 0), discipline := .glide,
         display := some { min := 0, max := 1 } },
       { name := "pm", accepts := sigIn }]
+  | "sine" => #[
+      { name := "freq", accepts := sigIn, knob := some (220, 0), discipline := .anchor,
+        display := some { min := 0.02, max := 8000, log := true, unit := "Hz" } }]
+  | "saw" => #[
+      { name := "freq", accepts := sigIn, knob := some (220, 0), discipline := .anchor,
+        display := some { min := 0.02, max := 8000, log := true, unit := "Hz" } }]
+  | "pulse" => #[
+      { name := "freq", accepts := sigIn, knob := some (220, 0), discipline := .anchor,
+        display := some { min := 0.02, max := 8000, log := true, unit := "Hz" } },
+      { name := "width", accepts := sigIn, knob := some (5, 1),
+        display := some { min := 0.01, max := 0.99 } }]
   | "pluck" => #[
       { name := "freq", accepts := ctrlIn, knob := some (110, 0), discipline := .anchor,
         display := some { min := 20, max := 2000, log := true, unit := "Hz" } },
@@ -138,7 +149,7 @@ def portSpecs : String → Array PortSpec
         display := some { min := 1, max := 400, log := true } }]
   | "delay" => #[
       { name := "in", accepts := sigIn, multi := true },
-      { name := "amount", knob := some (4, 3), discipline := .glide,
+      { name := "amount", accepts := sigIn, knob := some (4, 3), discipline := .glide,
         display := some { min := 0.0001, max := 0.02, log := true, unit := "s" } }]
   | "reverse" => #[{ name := "in", accepts := sigIn, multi := true }]
   | "mix" => #[{ name := "in", accepts := sigIn, multi := true }]
@@ -200,14 +211,14 @@ def outletOf : String → Option PortDomain
   | _ => some .signal
 
 def vocabularyKinds : Array String := #[
-  "source", "pluck", "comb", "flange", "delay", "reverse", "fm", "sflange",
+  "source", "sine", "saw", "pulse", "pluck", "comb", "flange", "delay", "reverse", "fm", "sflange",
   "mix", "ring", "gong", "string", "resonator", "reverb", "filter", "phaser",
   "modalmix", "gauge", "knob", "out"]
 
 def hierarchyAtomKinds : Array String := #["modal_allpass_tail", "modalblend"]
 
 def buildNodeKinds : Array String := #[
-  "knob", "source", "pluck", "comb", "flange", "sflange", "fm", "delay",
+  "knob", "source", "sine", "saw", "pulse", "pluck", "comb", "flange", "sflange", "fm", "delay",
   "reverse", "mix", "ring", "resonator", "reverb", "filter", "phaser", "modalmix",
   "modal_allpass_tail", "modalblend", "gauge", "gong", "bloomgong", "string"]
 
