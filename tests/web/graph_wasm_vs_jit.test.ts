@@ -341,6 +341,58 @@ describe('PatchGraph → compile-wasm ≡ render-graph (JIT)', () => {
     expect(aliased.samples.equals(plain.samples)).toBe(true)
   })
 
+  test('sflange is its delay/ring/mix expansion: bit for bit, and cheaper than the hand patch', () => {
+    // The served-node patch sflange expands to: d = depth·lfo, the input
+    // delayed by d and by −d, mixed with the dry/wet knobs (½, ¼ — the
+    // former fixed weights, now knobs).
+    const common = [
+      { id: 'osc', kind: 'saw', params: { freq: 220 } },
+      { id: 'lfo', kind: 'sine', params: { freq: 3 } },
+      { id: 'depth', kind: 'knob', params: { value: 0.002 } },
+      { id: 'dry', kind: 'knob', params: { value: 0.5 } },
+      { id: 'wet', kind: 'knob', params: { value: 0.25 } },
+    ]
+    const served = stageCensus({ nodes: [...common,
+      { id: 'fl', kind: 'sflange', in: { in: ['osc'], mod: ['lfo'], depth: ['depth'], dry: ['dry'], wet: ['wet'] } }],
+      out: 'fl' })
+    const hand = stageCensus({ nodes: [...common,
+      { id: 'd', kind: 'ring', in: { in: ['depth', 'lfo'] } },
+      { id: 'm1', kind: 'knob', params: { value: -1 } },
+      { id: 'nd', kind: 'ring', in: { in: ['d', 'm1'] } },
+      { id: 'back', kind: 'delay', in: { in: ['osc'], amount: ['d'] } },
+      { id: 'fwd', kind: 'delay', in: { in: ['osc'], amount: ['nd'] } },
+      { id: 'wd', kind: 'ring', in: { in: ['dry', 'osc'] } },
+      { id: 'wb', kind: 'ring', in: { in: ['wet', 'back'] } },
+      { id: 'wf', kind: 'ring', in: { in: ['wet', 'fwd'] } },
+      { id: 'fl', kind: 'mix', in: { in: ['wd', 'wb', 'wf'] } }],
+      out: 'fl' })
+    expect(served.samples.equals(hand.samples)).toBe(true)
+    // The hand patch's ring by −1 is a live slot product, so its ahead tap
+    // converts its own time (mul, ·SR, ·2¹⁶, toInt); sflange's −d is a
+    // negation, which the delay warp folds into the shared conversion.
+    console.log(`  sflange audio instrs ${served.audio} (s1 ${served.s1}) · hand patch ${hand.audio} (s1 ${hand.s1})`)
+    expect(served.s1).toBeLessThan(hand.s1)
+  })
+
+  test('sflange with dry and wet omitted is the former fixed-weight flanger, bit for bit', () => {
+    // dry and wet default to the weights sflange baked before they were knobs
+    // (½ dry, ¼ each tap): an existing document that names neither sounds as
+    // it did, as do the same weights spelled as params or as knob wires.
+    const nodes = (fl: object) => ({ nodes: [
+      { id: 'osc', kind: 'saw', params: { freq: 220 } },
+      { id: 'lfo', kind: 'sine', params: { freq: 3 } },
+      { id: 'half', kind: 'knob', params: { value: 0.5 } },
+      { id: 'quarter', kind: 'knob', params: { value: 0.25 } },
+      { id: 'fl', kind: 'sflange', ...fl }], out: 'fl' })
+    const omitted = stageCensus(nodes({ params: { depth: 0.002 }, in: { in: ['osc'], mod: ['lfo'] } }))
+    const params = stageCensus(nodes({ params: { depth: 0.002, dry: 0.5, wet: 0.25 }, in: { in: ['osc'], mod: ['lfo'] } }))
+    const wired = stageCensus(nodes({ params: { depth: 0.002 }, in: { in: ['osc'], mod: ['lfo'], dry: ['half'], wet: ['quarter'] } }))
+    expect(omitted.samples.equals(params.samples)).toBe(true)
+    expect(omitted.samples.equals(wired.samples)).toBe(true)
+    const x = new Float64Array(omitted.samples.buffer, omitted.samples.byteOffset, omitted.samples.byteLength / 8)
+    expect(x.some((v) => Math.abs(v) > 0.1)).toBe(true)
+  })
+
   test('pm with a signal freq: a constant-cone freq ≡ the knob form, bit for bit', () => {
     const graph = (drivers: object[], driver: string) => ({ nodes: [
       { id: 'lfo', kind: 'sine', params: { freq: 3 } },

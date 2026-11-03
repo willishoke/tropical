@@ -136,10 +136,14 @@ def portSpecs : String → Array PortSpec
   | "sflange" => #[
       { name := "in", accepts := sigIn, multi := true },
       { name := "mod", accepts := sigIn },
-      { name := "depth", knob := some (2, 3), discipline := .glide,
+      { name := "depth", accepts := sigIn, knob := some (2, 3), discipline := .glide,
         display := some { min := 0.0002, max := 0.02, log := true, unit := "s" } },
       { name := "rate", knob := some (3, 1), ownerPort := some "mod",
-        display := some { min := 0.02, max := 12, log := true, unit := "Hz" } }]
+        display := some { min := 0.02, max := 12, log := true, unit := "Hz" } },
+      { name := "dry", accepts := sigIn, knob := some (5, 1),
+        display := some { min := -1, max := 1 } },
+      { name := "wet", accepts := sigIn, knob := some (25, 2),
+        display := some { min := -1, max := 1 } }]
   | "fm" => #[
       { name := "in", accepts := sigIn, multi := true },
       { name := "carrier", accepts := sigIn, knob := some (330, 0), discipline := .anchor,

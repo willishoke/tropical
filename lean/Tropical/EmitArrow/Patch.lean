@@ -109,10 +109,6 @@ inductive Node where
       port — NOT its clock. The direct `osc → osc` patch. Sidebands without pitch
       droop (the carrier clock is untouched). -/
   | pm (input : String) (carrier : Voice) (baseClk : Clock) (depthE : Sig)
-  /-- A SWEPT flanger: `input` is the signal flanged, `modInput` the modulator that
-      sweeps the ±δ taps (an LFO, or any patched signal). `depthSec` is the sweep
-      depth in seconds. The signal-warp distributes onto `input`'s generators. -/
-  | sflange (input modInput : String) (depthSec : Sig)
   /-- A KNOB: a program that is nothing but a param with one output. `idx` is the
       `ParamIdx` of the root's param slot; it lowers to a τ-constant `paramRef`
       leaf, so wiring it into a modulator/pitch position binds that parameter to a
@@ -192,22 +188,36 @@ structure PatchGraph where
   nodes : Array PatchNode
   output : String
 
-/-- The signal-driven delay warp: `c − toInt(s·SR·clockOne)`, `s` in seconds. -/
-def delayWarp : Clock → Sig → BuildM Clock :=
-  fun base seconds => do
-    let samples ← mul seconds (← sampleRate)
-    let fixed ← mul samples (← clockOneLit)
-    let shift ← toIntE fixed
-    sub base shift
-
-/-- The signal-driven advance warp: `c + toInt(s·SR·clockOne)`, `s` in seconds
-    (the forward twin of `delayWarp`). -/
+/-- The signal-driven advance warp: `c + toInt(s·SR·clockOne)`, `s` in seconds. -/
 def advanceWarp : Clock → Sig → BuildM Clock :=
   fun base seconds => do
     let samples ← mul seconds (← sampleRate)
     let fixed ← mul samples (← clockOneLit)
     let shift ← toIntE fixed
     add base shift
+
+/-- The argument of a negation node, if `s` is one. -/
+def sigNegArg? (s : Sig) : BuildM (Option Sig) := do
+  match (← get).exprs.nodes[s.idx]? with
+  | some (.unary .neg arg) => pure (some arg)
+  | _ => pure none
+
+/-- The signal-driven delay warp: `c − toInt(s·SR·clockOne)`, `s` in seconds
+    (either sign; a negative time reads ahead). A time that is a negation,
+    `s = −y`, reads `c + toInt(y·SR·clockOne)` instead — the same integer
+    exactly (the sign flip is exact through both products, and `toInt`
+    truncates toward zero, so `toInt(−v) = −toInt(v)`), and it shares
+    `toInt(y·…)` with a tap at `+y`: a symmetric pair of taps (`sflange`)
+    pays for one conversion, as a hand-shared warp does. -/
+def delayWarp : Clock → Sig → BuildM Clock :=
+  fun base seconds => do
+    match ← sigNegArg? seconds with
+    | some ahead => advanceWarp base ahead
+    | none =>
+      let samples ← mul seconds (← sampleRate)
+      let fixed ← mul samples (← clockOneLit)
+      let shift ← toIntE fixed
+      sub base shift
 
 /-- `t` read under the clock map `f c s`, `s` a control term: a fixed control
     is an ordinary warp (`f` closed over its expression), any other control a
@@ -302,6 +312,32 @@ def modalPhaserTopology (id input : String) (center sweep rate mix : ModalContro
     current := sectionId
   return (.modalBlend input current mix, nodes)
 
+/-- A product of a control and a signal node, as a patch node: a fixed control
+    is a gain (`c · x`, like a ring with a knob), a wired one a ring. -/
+private def gainNode (control : ControlIn) (input : String) : Node :=
+  match control with
+  | .fixed value => .shaper input (fun signal => mul value signal)
+  | .wire wire => .ring #[wire, input]
+
+/-- Expand the swept flanger into ordinary patch topology, the way
+    `modalPhaserTopology` expands the phaser: the sweep `d = depth · mod` (a
+    ring), two delays of the input by `d` and `−d` (the second reads ahead),
+    and a mix `dry · x + wet · x(τ − d) + wet · x(τ + d)` whose weights are
+    the node's `dry`/`wet` knobs (½ and ¼ by default — the former fixed
+    weights). Returns the public node (the mix) and its internal nodes. -/
+def sflangeTopology (id input modulator : String) (depth dry wet : ControlIn) :
+    Node × Array PatchNode :=
+  let name := fun (part : String) => s!"__sflange_{id}_{part}"
+  let nodes : Array PatchNode := #[
+    { id := name "d", node := gainNode depth modulator },
+    { id := name "nd", node := .shaper (name "d") neg },
+    { id := name "back", node := .sdelay input (name "d") },
+    { id := name "fwd", node := .sdelay input (name "nd") },
+    { id := name "dry", node := gainNode dry input },
+    { id := name "wet_back", node := gainNode wet (name "back") },
+    { id := name "wet_fwd", node := gainNode wet (name "fwd") }]
+  (.mix #[name "dry", name "wet_back", name "wet_fwd"], nodes)
+
 /-- Every input id a node's lowering recurses into — the wires of the
     graph, `modalSource`'s optional address inlet included. These are the
     edges `lowerAt` ranks (and refuses cycles over). -/
@@ -317,7 +353,6 @@ def Node.inputIds : Node → Array String
   | .flange i _ _ | .shaper i _ | .warpFx i _ | .comb i _ => #[i]
   | .mix is | .ring is | .modalMix is => is
   | .fm i .. | .pm i .. => #[i]
-  | .sflange i m _ => #[i, m]
   | .modalSource _ _ _ addr _ _ => (addr.map (#[·])).getD #[]
   | .modalReverb i _ _ | .modalGauge i _ => #[i]
   | .modalLinear i stage =>
@@ -809,9 +844,6 @@ def lowerNode (g : PatchGraph) (rankOf : String → Option Nat)
     return .swarp (fmWarp depth) (← lowerInputGated g rankOf id inId r) (.gen carrier id base)
   | .pm inId carrier base depth =>
     return .pmGen carrier id base depth (← lowerInputGated g rankOf id inId r)
-  | .sflange inId modId depthSec =>
-    sweptFlangeEffect (sflangeBack depthSec) (sflangeFwd depthSec)
-      (← lowerInputGated g rankOf id modId r) (← lowerInputGated g rankOf id inId r)
   | .knob idx => pure (.konst (← paramRef ⟨idx⟩))
   | .comb inId taps => do
     let s ← lowerInputGated g rankOf id inId r

@@ -293,14 +293,19 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
     let .fixed depthE := depthC | throw "fm: unreachable (knob form with a wired depth)"
     pure (.fm signalInput (sineVoiceE carrierE anchor) clk depthE, signalFanIn)
   | "sflange" =>
-    let depth ← paramValue pidx paramName kind params "depth"
-    match (Tropical.Playground.Metadata.portSources inObj "mod")[0]? with
-    | some modId => pure (.sflange signalInput modId depth, signalFanIn)
-    | none =>
-      let rate ← paramValue pidx paramName kind params "rate"
-      let lfoId := s!"__lfo_{id}"
-      pure (.sflange signalInput lfoId depth,
-        signalFanIn ++ #[{ id := lfoId, node := .source (sineVoiceE rate) clk }])
+    -- A convenience module over delay/ring/mix (`sflangeTopology`); with no
+    -- `mod` wire, its own sine LFO at `rate` sweeps it.
+    let depth ← controlOf kind params inObj "depth"
+    let dry ← controlOf kind params inObj "dry"
+    let wet ← controlOf kind params inObj "wet"
+    let (modId, lfo) ← match (Tropical.Playground.Metadata.portSources inObj "mod")[0]? with
+      | some modId => pure (modId, #[])
+      | none => do
+        let rate ← paramValue pidx paramName kind params "rate"
+        let lfoId := s!"__lfo_{id}"
+        pure (lfoId, #[{ id := lfoId, node := .source (sineVoiceE rate) clk }])
+    let (node, topology) := sflangeTopology id signalInput modId depth dry wet
+    pure (node, signalFanIn ++ lfo ++ topology)
   | "mix" => pure (.mix (Tropical.Playground.Metadata.portSources inObj "in"), #[])
   | "ring" => pure (.ring (Tropical.Playground.Metadata.portSources inObj "in"), #[])
   | "resonator" =>

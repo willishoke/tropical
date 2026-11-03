@@ -229,31 +229,4 @@ def flangeEffectWith (back forward : Clock → BuildM Clock)
     .scale quarter (.warp back signal),
     .scale quarter (.warp forward signal)])
 
-def sweptDelta (seconds modulator : Sig) : BuildM Sig := do
-  let secondsModulated ← mul seconds modulator
-  let sr ← sampleRate
-  let samples ← mul secondsModulated sr
-  let clockScale ← clockOneLit
-  let fixedSamples ← mul samples clockScale
-  toIntE fixedSamples
-
-def sflangeBack (seconds : Sig) : Clock → Sig → BuildM Clock :=
-  fun clock modulator => do
-    let delta ← sweptDelta seconds modulator
-    sub clock delta
-
-def sflangeFwd (seconds : Sig) : Clock → Sig → BuildM Clock :=
-  fun clock modulator => do
-    let delta ← sweptDelta seconds modulator
-    add clock delta
-
-def sweptFlangeEffect (back forward : Clock → Sig → BuildM Clock)
-    (modulator signal : ArrowTerm) : BuildM ArrowTerm := do
-  let half ← lit 5 1
-  let quarter ← lit 25 2
-  pure (.sum #[
-    .scale half signal,
-    .scale quarter (.swarp back modulator signal),
-    .scale quarter (.swarp forward modulator signal)])
-
 end Tropical.EmitArrow
