@@ -63,6 +63,13 @@ inductive ControlIn where
   | fixed (value : Sig)
   | wire (id : String)
 
+/-- Is this control a signal wire (not a knob's slot, not the node's own
+    param)? A playground node takes its signal-control form only when one is;
+    otherwise it keeps its knob form, expression for expression. -/
+def ControlIn.isWire : ControlIn → Bool
+  | .wire _ => true
+  | .fixed _ => false
+
 /-- A patch-graph node. Generators carry their clock; effects carry the id of the
     upstream node they consume (`⋙`); the mixer carries the ids it sums (fan-in).
     Generators read the master clock; the flanger/`warp`/shaper are the effect
@@ -81,6 +88,15 @@ inductive Node where
       clock rail once (`toInt(time·SR·2¹⁶)`), so the tap keeps 1/65536-sample
       resolution and absolute τ is never rounded. -/
   | sdelay (input timeInput : String)
+  /-- A Sig EFFECT whose knobs are inputs. `inputs` are its signal inlets and
+      `controls` its control inlets (a fixed expression, or any Sig wire); every
+      one is lowered to a term in THIS node's clock context, and `body` assembles
+      the node's term from them — the same warps, weights and sums as the knob
+      form, with each knob replaced by its control's term (`warpedBy`,
+      `scaledBy`). A control read by a warp is evaluated at the node's own
+      clock, the input it warps at the warped clock. -/
+  | effectC (inputs : Array String) (controls : Array ControlIn)
+      (body : Array ArrowTerm → Array ArrowTerm → BuildM ArrowTerm)
   | flange (input : String) (back fwd : Clock → BuildM Clock)
   | shaper (input : String) (f : Sig → BuildM Sig)
   | warpFx (input : String) (φ : Clock → BuildM Clock)
@@ -184,6 +200,40 @@ def delayWarp : Clock → Sig → BuildM Clock :=
     let shift ← toIntE fixed
     sub base shift
 
+/-- The signal-driven advance warp: `c + toInt(s·SR·clockOne)`, `s` in seconds
+    (the forward twin of `delayWarp`). -/
+def advanceWarp : Clock → Sig → BuildM Clock :=
+  fun base seconds => do
+    let samples ← mul seconds (← sampleRate)
+    let fixed ← mul samples (← clockOneLit)
+    let shift ← toIntE fixed
+    add base shift
+
+/-- `t` read under the clock map `f c s`, `s` a control term: a fixed control
+    is an ordinary warp (`f` closed over its expression), any other control a
+    signal warp — the control read at this clock, `t` at the warped one. -/
+def ArrowTerm.warpedBy (f : Clock → Sig → BuildM Clock) (control t : ArrowTerm) :
+    ArrowTerm :=
+  match control with
+  | .konst value => .warp (fun clock => f clock value) t
+  | _ => .swarp f control t
+
+/-- `w · t`, `w` a control term: a fixed weight is a `scale`, any other a
+    product (both emit `mul w t`). -/
+def ArrowTerm.scaledBy (weight t : ArrowTerm) : ArrowTerm :=
+  match weight with
+  | .konst value => .scale value t
+  | _ => .prod weight t
+
+/-- The FM law with the depth already applied: `clk − toInt(dm · clockOne)`,
+    `dm` the product `depth · m` (a signal depth's modulator). -/
+def fmWarpScaled : Clock → Sig → BuildM Clock :=
+  fun base dm => do
+    let clockScale ← clockOneLit
+    let fixed ← mul dm clockScale
+    let shift ← toIntE fixed
+    sub base shift
+
 /-- The standard FM modulation law: a modulator signal `m` shifts the carrier's
     clock by `depth · m` samples — `clk − toInt(depth · m · clockOne)`. `depth`
     is an EXPRESSION (a literal, or a live `paramRef` slot), so the depth knob can
@@ -261,6 +311,9 @@ def Node.inputIds : Node → Array String
       | .wire id => some id
       | .fixed _ => none
   | .sdelay i t => #[i, t]
+  | .effectC inputs controls _ => inputs ++ controls.filterMap fun
+      | .wire id => some id
+      | .fixed _ => none
   | .flange i _ _ | .shaper i _ | .warpFx i _ | .comb i _ => #[i]
   | .mix is | .ring is | .modalMix is => is
   | .fm i .. | .pm i .. => #[i]
@@ -741,6 +794,12 @@ def lowerNode (g : PatchGraph) (rankOf : String → Option Nat)
   | .sdelay inId timeId =>
     return .swarp delayWarp (← lowerInputGated g rankOf id timeId r)
       (← lowerInputGated g rankOf id inId r)
+  | .effectC inputs controls body => do
+    let ins ← inputs.mapM (lowerInputGated g rankOf id · r)
+    let cs ← controls.mapM fun
+      | .fixed value => pure (.konst value)
+      | .wire wireId => lowerInputGated g rankOf id wireId r
+    body ins cs
   | .flange inId back fwd =>
     flangeEffectWith back fwd (← lowerInputGated g rankOf id inId r)
   | .shaper inId f => return .arrUn f (← lowerInputGated g rankOf id inId r)

@@ -48,19 +48,44 @@ private def paramValue (pidx : String → Option Nat) (paramName : String → St
 /-- A generator control: a wire from a knob reads the knob's own slot (a fixed,
     τ-invariant expression, exactly as before); a wire from any other Sig node
     is a signal input lowered as a term; no wire reads this node's own param
-    (or its default). -/
+    (or its default). `knobSlot` names a knob node's slot, whatever its param
+    is called (a knob inside a module carries a `param_aliases` name). -/
 private def controlOf (pidx : String → Option Nat) (paramName : String → String)
+    (knobSlot : String → Option Nat)
     (kind : String) (params inObj : Json) (kname : String) : BuildM ControlIn := do
   match (Tropical.Playground.Metadata.portSources inObj kname)[0]? with
   | some wire =>
-    match pidx s!"{wire}.value" with
+    match knobSlot wire with
     | some i => pure (.fixed (← paramRef ⟨i⟩))
     | none => pure (.wire wire)
   | none => pure (.fixed (← paramValue pidx paramName kind params kname))
 
+/-- `knobSlot` for a node set: the slot of a `knob` node's `value`, under its
+    aliased name if it has one. -/
+def knobSlotOf (pidx : String → Option Nat)
+    (raws : Array Tropical.Playground.Metadata.Raw) (id : String) : Option Nat := do
+  let raw ← raws.find? (·.id == id)
+  if raw.kind != "knob" then none
+  pidx (Tropical.Playground.Metadata.paramNameOf raw "value")
+
+/-- The filter's pole pair from its controls, each clamped to its knob range
+    (`displayRangeOf`) in both the knob and the signal form: the pair exists
+    only for a positive cutoff and a resonance above ≈ −0.02 (q > ½), and a
+    cutoff past Nyquist folds, so the knob range is the filter's domain — as
+    reverb's rt60 is clamped to its range. -/
+private def boundedFilterPair (cutoff resonance : Sig) : BuildM (Array ModalMode) := do
+  let bounded := fun (value : Sig) (name : String) => do
+    match Tropical.Playground.Metadata.displayRangeOf "filter" name with
+    | some (lo, hi) => clampE value (← litF lo) (← litF hi)
+    | none => pure value
+  filterPair (← bounded cutoff "cutoff") (← bounded resonance "resonance")
+
 def buildNodeWithParamNames (pidx : String → Option Nat)
     (paramName : String → String) (id kind : String)
-    (_sel params inObj : Json) : BuildM (Node × Array PatchNode) := do
+    (_sel params inObj : Json)
+    (knobSlot : String → Option Nat := fun wire => pidx s!"{wire}.value") :
+    BuildM (Node × Array PatchNode) := do
+  let controlOf := controlOf pidx paramName knobSlot
   let implicitFanIn : Bool → String × Array PatchNode := fun modal =>
     let inputs := Tropical.Playground.Metadata.portSources inObj "in"
     match inputs.toList with
@@ -92,16 +117,38 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
     | none => pure (.mix #[], #[])
   | "source" =>
     let pitchDefault ← defaultValue kind params "freq"
-    let pitchE ← match (Tropical.Playground.Metadata.portSources inObj "freq")[0]? with
-      | some wire => pref pidx s!"{wire}.value" pitchDefault
-      | none => paramValue pidx paramName kind params "freq"
-    let morphE ← paramValue pidx paramName kind params "morph"
+    let freqC ← controlOf kind params inObj "freq"
+    let morphC ← controlOf kind params inObj "morph"
     let anchor : Option Anchor ← match pidx s!"{paramName "freq"}#phase" with
       | some i => do
         let phase ← paramRef ⟨i⟩
         pure (some (phase, pitchDefault))
       | none => pure none
-    match (Tropical.Playground.Metadata.portSources inObj "pm")[0]? with
+    let pmWire := (Tropical.Playground.Metadata.portSources inObj "pm")[0]?
+    -- A signal-driven pitch or morph: the control cones are read under the
+    -- generator's own clock (`genC`), a `pm` modulator as one more control
+    -- (its phase offset `0.3·m`, as on the knob path). The anchor applies
+    -- only when the freq is this node's own knob — a `#phase` companion
+    -- compensates a STEP of a knob. An expression pitch is not anchored: its
+    -- phase is `inc(τ)·τ`, the current increment times the clock, not the
+    -- integral of the pitch, so a pitch that moves over time moves the phase
+    -- by `Δinc·τ` as well.
+    if freqC.isWire || morphC.isWire then
+      let zero ← lit 0
+      let depth ← lit 3 1
+      let controls := #[freqC, morphC] ++ (pmWire.map (#[ControlIn.wire ·])).getD #[]
+      let mk := fun (cs : Array Sig) =>
+        let pitch := (cs[0]?).getD pitchDefault
+        let morph := (cs[1]?).getD zero
+        match cs[2]? with
+        | none => voiceOf pitch morph anchor
+        | some m =>
+          let phase := (anchor.map (·.1)).getD zero
+          (voiceOf pitch morph (some (phase, pitchDefault))).withPhaseOffset (mul depth m)
+      return (.sourceC mk (fun _ raw => pure raw) clk controls, #[])
+    let .fixed pitchE := freqC | throw "source: unreachable (knob form with a wired freq)"
+    let .fixed morphE := morphC | throw "source: unreachable (knob form with a wired morph)"
+    match pmWire with
     | some modId =>
       let pmAnchor ← match anchor with
         | some value => pure value
@@ -116,7 +163,7 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
     -- the exact Q32 phasor, then a pure function of (phase, increment[, width]).
     -- Anchored like `source` when the freq is this node's own knob.
     let pitchDefault ← defaultValue kind params "freq"
-    let freq ← controlOf pidx paramName kind params inObj "freq"
+    let freq ← controlOf kind params inObj "freq"
     let phase? ← match pidx s!"{paramName "freq"}#phase" with
       | some i => pure (some (← paramRef ⟨i⟩))
       | none => pure none
@@ -130,28 +177,60 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
         blepSaw p (← phaseIncrementOf ((cs[0]?).getD pitchDefault))
       pure (.sourceC mk post clk #[freq], #[])
     else
-      let width ← controlOf pidx paramName kind params inObj "width"
+      let width ← controlOf kind params inObj "width"
       let post := fun (cs : Array Sig) (p : Sig) => do
         let half ← lit 5 1
         blepPulse p (← phaseIncrementOf ((cs[0]?).getD pitchDefault)) ((cs[1]?).getD half)
       pure (.sourceC mk post clk #[freq, width], #[])
   | "pluck" =>
     let pitchDefault ← defaultValue kind params "freq"
-    let pitchE ← match (Tropical.Playground.Metadata.portSources inObj "freq")[0]? with
-      | some wire => pref pidx s!"{wire}.value" pitchDefault
-      | none => paramValue pidx paramName kind params "freq"
+    let freqC ← controlOf kind params inObj "freq"
     let anchor : Option Anchor ← match pidx s!"{paramName "freq"}#phase" with
       | some i => do
         let phase ← paramRef ⟨i⟩
         pure (some (phase, pitchDefault))
       | none => pure none
-    let morph ← paramValue pidx paramName kind params "morph"
-    let eventRate ← paramValue pidx paramName kind params "event_rate"
-    pure (.source (pluckedVoiceE pitchE morph eventRate anchor) clk, #[])
+    let morphC ← controlOf kind params inObj "morph"
+    let eventC ← controlOf kind params inObj "event_rate"
+    if freqC.isWire || morphC.isWire || eventC.isWire then
+      let morphDefault ← defaultValue kind params "morph"
+      let eventDefault ← defaultValue kind params "event_rate"
+      let mk := fun (cs : Array Sig) =>
+        pluckedVoiceE ((cs[0]?).getD pitchDefault) ((cs[1]?).getD morphDefault)
+          ((cs[2]?).getD eventDefault) anchor
+      return (.sourceC mk (fun _ raw => pure raw) clk #[freqC, morphC, eventC], #[])
+    let .fixed pitchE := freqC | throw "pluck: unreachable (knob form with a wired freq)"
+    let .fixed morphE := morphC | throw "pluck: unreachable (knob form with a wired morph)"
+    let .fixed eventE := eventC | throw "pluck: unreachable (knob form with a wired event_rate)"
+    pure (.source (pluckedVoiceE pitchE morphE eventE anchor) clk, #[])
   | "comb" =>
-    let seconds ← paramValue pidx paramName kind params "delay"
-    let delay ← deltaOf seconds
-    let gain ← paramValue pidx paramName kind params "decay"
+    let delayC ← controlOf kind params inObj "delay"
+    -- (The knob form's expressions are built in their original order.)
+    let delay? ← match delayC with
+      | .fixed seconds => some <$> deltaOf seconds
+      | .wire _ => pure none
+    let decayC ← controlOf kind params inObj "decay"
+    if delayC.isWire || decayC.isWire then
+      -- Signal controls: tap k reads the input at `c + k·Δ(s)` and weighs it
+      -- `gᵏ`, `s` and `g` the control terms at this node's clock.
+      let body := fun (ins cs : Array ArrowTerm) => do
+        let input := (ins[0]?).getD (.sum #[])
+        let delayT := (cs[0]?).getD (.sum #[])
+        let decayT := (cs[1]?).getD (.sum #[])
+        let one ← lit 1
+        let tail ← (Array.range 6).mapM fun j => do
+          let k := j + 1
+          let kSig ← lit (Int.ofNat k)
+          let weight : ArrowTerm ← match decayT with
+            | .konst gain => pure (.konst (← gPow gain k))
+            | other => pure (.arrUn (fun gain => gPow gain k) other)
+          let tap := ArrowTerm.warpedBy (fun c seconds => do
+            add c (← mul kSig (← deltaOf seconds))) delayT input
+          pure (ArrowTerm.scaledBy weight tap)
+        pure (.sum (#[.scale one input] ++ tail))
+      return (.effectC #[signalInput] #[delayC, decayC] body, signalFanIn)
+    let some delay := delay? | throw "comb: unreachable (knob form with a wired delay)"
+    let .fixed gain := decayC | throw "comb: unreachable (knob form with a wired decay)"
     let tail ← (Array.range 6).mapM fun j => do
       let k := j + 1
       let weight ← gPow gain k
@@ -161,7 +240,21 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
     let one ← lit 1
     pure (.comb signalInput (#[(one, fun c => pure c)] ++ tail), signalFanIn)
   | "flange" =>
-    let seconds ← paramValue pidx paramName kind params "depth"
+    let depthC ← controlOf kind params inObj "depth"
+    if depthC.isWire then
+      -- A signal depth: `½x + ¼x(τ − d) + ¼x(τ + d)`, `d` the depth term in
+      -- seconds at this node's clock (either sign).
+      let body := fun (ins cs : Array ArrowTerm) => do
+        let input := (ins[0]?).getD (.sum #[])
+        let depthT := (cs[0]?).getD (.sum #[])
+        let half ← lit 5 1
+        let quarter ← lit 25 2
+        pure (.sum #[
+          .scale half input,
+          .scale quarter (ArrowTerm.warpedBy delayWarp depthT input),
+          .scale quarter (ArrowTerm.warpedBy advanceWarp depthT input)])
+      return (.effectC #[signalInput] #[depthC] body, signalFanIn)
+    let .fixed seconds := depthC | throw "flange: unreachable (knob form with a wired depth)"
     let delay ← deltaOf seconds
     pure (.flange signalInput (fun c => sub c delay) (fun c => add c delay), signalFanIn)
   | "delay" =>
@@ -174,14 +267,31 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
   | "reverse" => pure (.warpFx signalInput neg, signalFanIn)
   | "fm" =>
     let carrierDefault ← defaultValue kind params "carrier"
-    let carrier ← paramValue pidx paramName kind params "carrier"
+    let carrierC ← controlOf kind params inObj "carrier"
     let anchor : Option Anchor ← match pidx s!"{paramName "carrier"}#phase" with
       | some i => do
         let phase ← paramRef ⟨i⟩
         pure (some (phase, carrierDefault))
       | none => pure none
-    let depth ← paramValue pidx paramName kind params "depth"
-    pure (.fm signalInput (sineVoiceE carrier anchor) clk depth, signalFanIn)
+    let depthC ← controlOf kind params inObj "depth"
+    if carrierC.isWire || depthC.isWire then
+      -- Signal controls: the carrier is a control-driven sine (`genC`) under
+      -- the FM warp, so its freq cone is read at the warped clock with it; the
+      -- depth, like the modulator, at this node's clock.
+      let body := fun (ins cs : Array ArrowTerm) => do
+        let modulator := (ins[0]?).getD (.sum #[])
+        let carrierT := (cs[0]?).getD (.konst carrierDefault)
+        let depthT := (cs[1]?).getD (.sum #[])
+        let carrier : ArrowTerm := .genC
+          (fun signals => sineVoiceE ((signals[0]?).getD carrierDefault) anchor)
+          (fun _ raw => pure raw) id clk #[carrierT]
+        match depthT with
+        | .konst depth => pure (.swarp (fmWarp depth) modulator carrier)
+        | other => pure (.swarp fmWarpScaled (.prod other modulator) carrier)
+      return (.effectC #[signalInput] #[carrierC, depthC] body, signalFanIn)
+    let .fixed carrierE := carrierC | throw "fm: unreachable (knob form with a wired carrier)"
+    let .fixed depthE := depthC | throw "fm: unreachable (knob form with a wired depth)"
+    pure (.fm signalInput (sineVoiceE carrierE anchor) clk depthE, signalFanIn)
   | "sflange" =>
     let depth ← paramValue pidx paramName kind params "depth"
     match (Tropical.Playground.Metadata.portSources inObj "mod")[0]? with
@@ -230,12 +340,33 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
     pure (.modalRoom modalInput build rt60 direction, modalFanIn)
   | "filter" =>
     let zero ← lit 0
-    let cutoff ← paramValue pidx paramName kind params "cutoff"
-    let resonance ← paramValue pidx paramName kind params "resonance"
+    let cutoffC ← controlOf kind params inObj "cutoff"
+    let resonanceC ← controlOf kind params inObj "resonance"
+    if cutoffC.isWire || resonanceC.isWire then
+      -- Signal controls, frozen at the response coordinate like the phaser's
+      -- sweep: the pair is rebuilt from the controls' values there, clamped to
+      -- the knob range as the knob form is (`boundedFilterPair`).
+      let ref := fun (c : ControlIn) => match c with
+        | .fixed value => ModalControlRef.constant value
+        | .wire wire => { fallback := .konst zero, signalNode? := some wire }
+      let stage : ModalLinearStage := {
+        controls := #[ModalControlRef.constant zero, ref cutoffC, ref resonanceC]
+        build := fun _ values => do
+          let value := fun (i : Nat) => match values[i]? with
+            | some value => pure value
+            | none => lit 0
+          let modes ← boundedFilterPair (← value 1) (← value 2)
+          let direction ← match values[0]? with
+            | some value => pure value
+            | none => lit 0
+          pure (.proper (.oriented modes direction)) }
+      return (.modalLinear modalInput stage, modalFanIn)
+    let .fixed cutoff := cutoffC | throw "filter: unreachable (knob form with a wired cutoff)"
+    let .fixed resonance := resonanceC | throw "filter: unreachable (knob form with a wired resonance)"
     let stage : ModalLinearStage := {
       controls := #[ModalControlRef.constant zero]
       build := fun _ values => do
-        let modes ← filterPair cutoff resonance
+        let modes ← boundedFilterPair cutoff resonance
         let direction ← match values[0]? with
           | some value => pure value
           | none => lit 0
@@ -321,7 +452,7 @@ def decodeGraph (j : Json) (params : Array (String × JsonNumber)) : BuildM Patc
     if raw.kind == "out" then continue
     let (node, extras) ← buildNodeWithParamNames pidx
       (Tropical.Playground.Metadata.paramNameOf raw)
-      raw.id raw.kind raw.sel raw.params raw.inObj
+      raw.id raw.kind raw.sel raw.params raw.inObj (knobSlotOf pidx raws)
     nodes := nodes.push { id := raw.id, node }
     for extra in extras do
       nodes := nodes.push extra

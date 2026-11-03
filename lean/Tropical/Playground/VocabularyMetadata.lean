@@ -84,7 +84,6 @@ deriving Repr
 
 def sigIn : Array PortDomain := #[.signal, .modal, .control]
 def modalIn : Array PortDomain := #[.modal]
-def ctrlIn : Array PortDomain := #[.control]
 
 def modalPhaserRatios : Array Float := #[
   0.42044820762685725,
@@ -101,9 +100,9 @@ def portSpecs : String → Array PortSpec
       { name := "value", knob := some (0, 0),
         display := some { min := 0, max := 1000 } }]
   | "source" => #[
-      { name := "freq", accepts := ctrlIn, knob := some (220, 0), discipline := .anchor,
+      { name := "freq", accepts := sigIn, knob := some (220, 0), discipline := .anchor,
         display := some { min := 0.02, max := 2000, log := true, unit := "Hz" } },
-      { name := "morph", knob := some (0, 0), discipline := .glide,
+      { name := "morph", accepts := sigIn, knob := some (0, 0), discipline := .glide,
         display := some { min := 0, max := 1 } },
       { name := "pm", accepts := sigIn }]
   | "sine" => #[
@@ -118,21 +117,21 @@ def portSpecs : String → Array PortSpec
       { name := "width", accepts := sigIn, knob := some (5, 1),
         display := some { min := 0.01, max := 0.99 } }]
   | "pluck" => #[
-      { name := "freq", accepts := ctrlIn, knob := some (110, 0), discipline := .anchor,
+      { name := "freq", accepts := sigIn, knob := some (110, 0), discipline := .anchor,
         display := some { min := 20, max := 2000, log := true, unit := "Hz" } },
-      { name := "morph", knob := some (0, 0), discipline := .glide,
+      { name := "morph", accepts := sigIn, knob := some (0, 0), discipline := .glide,
         display := some { min := 0, max := 1 } },
-      { name := "event_rate", knob := some (2, 0), discipline := .glide,
+      { name := "event_rate", accepts := sigIn, knob := some (2, 0), discipline := .glide,
         display := some { min := 0.1, max := 20, log := true, unit := "Hz" } }]
   | "comb" => #[
       { name := "in", accepts := sigIn, multi := true },
-      { name := "delay", knob := some (12, 3), discipline := .glide,
+      { name := "delay", accepts := sigIn, knob := some (12, 3), discipline := .glide,
         display := some { min := 0.0005, max := 0.05, log := true, unit := "s" } },
-      { name := "decay", knob := some (7, 1), discipline := .glide,
+      { name := "decay", accepts := sigIn, knob := some (7, 1), discipline := .glide,
         display := some { min := 0, max := 0.95 } }]
   | "flange" => #[
       { name := "in", accepts := sigIn, multi := true },
-      { name := "depth", knob := some (7, 4), discipline := .glide,
+      { name := "depth", accepts := sigIn, knob := some (7, 4), discipline := .glide,
         display := some { min := 0.0001, max := 0.01, log := true, unit := "s" } }]
   | "sflange" => #[
       { name := "in", accepts := sigIn, multi := true },
@@ -143,9 +142,9 @@ def portSpecs : String → Array PortSpec
         display := some { min := 0.02, max := 12, log := true, unit := "Hz" } }]
   | "fm" => #[
       { name := "in", accepts := sigIn, multi := true },
-      { name := "carrier", knob := some (330, 0), discipline := .anchor,
+      { name := "carrier", accepts := sigIn, knob := some (330, 0), discipline := .anchor,
         display := some { min := 20, max := 2000, log := true, unit := "Hz" } },
-      { name := "depth", knob := some (8, 0), discipline := .glide,
+      { name := "depth", accepts := sigIn, knob := some (8, 0), discipline := .glide,
         display := some { min := 1, max := 400, log := true } }]
   | "delay" => #[
       { name := "in", accepts := sigIn, multi := true },
@@ -168,29 +167,29 @@ def portSpecs : String → Array PortSpec
         display := some { min := 0, max := 1 } }]
   | "filter" => #[
       { name := "in", accepts := modalIn, multi := true },
-      { name := "cutoff", knob := some (800, 0), discipline := .glide,
+      { name := "cutoff", accepts := sigIn, knob := some (800, 0), discipline := .glide,
         display := some { min := 20, max := 8000, log := true, unit := "Hz" } },
-      { name := "resonance", knob := some (5, 1), discipline := .glide,
+      { name := "resonance", accepts := sigIn, knob := some (5, 1), discipline := .glide,
         display := some { min := 0, max := 1 } }]
   | "phaser" => #[
       { name := "in", accepts := modalIn, multi := true },
-      { name := "center", knob := some (700, 0), discipline := .glide,
+      { name := "center", accepts := sigIn, knob := some (700, 0), discipline := .glide,
         display := some { min := 40, max := 4000, log := true, unit := "Hz" } },
-      { name := "sweep", knob := some (15, 1), discipline := .glide,
+      { name := "sweep", accepts := sigIn, knob := some (15, 1), discipline := .glide,
         display := some { min := 0, max := 3, unit := "oct" } },
-      { name := "rate", knob := some (2, 1), discipline := .glide,
+      { name := "rate", accepts := sigIn, knob := some (2, 1), discipline := .glide,
         display := some { min := 0.02, max := 8, log := true, unit := "Hz" } },
-      { name := "mix", knob := some (5, 1), discipline := .glide,
+      { name := "mix", accepts := sigIn, knob := some (5, 1), discipline := .glide,
         display := some { min := 0, max := 1 } }]
   | "modal_allpass_tail" => #[
       { name := "in", accepts := modalIn, multi := true },
-      { name := "center", knob := some (700, 0), discipline := .glide },
-      { name := "sweep", knob := some (15, 1), discipline := .glide },
-      { name := "rate", knob := some (2, 1), discipline := .glide }]
+      { name := "center", accepts := sigIn, knob := some (700, 0), discipline := .glide },
+      { name := "sweep", accepts := sigIn, knob := some (15, 1), discipline := .glide },
+      { name := "rate", accepts := sigIn, knob := some (2, 1), discipline := .glide }]
   | "modalblend" => #[
       { name := "dry", accepts := modalIn },
       { name := "wet", accepts := modalIn },
-      { name := "mix", knob := some (5, 1), discipline := .glide }]
+      { name := "mix", accepts := sigIn, knob := some (5, 1), discipline := .glide }]
   | "modalmix" => #[{ name := "in", accepts := modalIn, multi := true }]
   | "gauge" => #[
       { name := "in", accepts := modalIn, multi := true },

@@ -54,7 +54,7 @@ def jModes (obj : Json) (key : String) : BuildM (Array ModalMode) := do
 
 /-- An anchored phase input: the `#phase` companion expression and the
     authored default pitch (kept for the PM path's zero-anchor default). A warped
-    generator is not phase-corrected (`EmitArrow.anchoredVoice`). -/
+    generator is not phase-corrected (`EmitArrow.Voice.withPhaseOffset`). -/
 abbrev Anchor := Sig × Sig
 
 def sineVoiceE (pitchE : Sig) (anchor : Option Anchor := none) : Voice :=

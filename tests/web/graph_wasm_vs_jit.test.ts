@@ -109,6 +109,41 @@ const cases: Record<string, unknown> = {
     out: 'out',
     taps: ['saw', 'sw'],
   },
+  // every knob that became an inlet, each driven by a signal (an LFO around
+  // its knob value), plus pm on a signal-driven freq
+  signalControls: {
+    nodes: [
+      { id: 'l', kind: 'sine', params: { freq: 2 } },
+      { id: 'osc', kind: 'saw', params: { freq: 220 } },
+      { id: 'res', kind: 'resonator', params: { freq: 220, decay: 4 } },
+      ...lfoAround('morph', 0.3, 0.2), ...lfoAround('rate', 20, 5), ...lfoAround('dly', 0.003, 0.001),
+      ...lfoAround('dec', 0.6, 0.2), ...lfoAround('dep', 0.002, 0.001), ...lfoAround('car', 440, 30),
+      ...lfoAround('idx', 20, 10), ...lfoAround('cut', 900, 300), ...lfoAround('q', 0.5, 0.3),
+      ...lfoAround('ctr', 900, 300), ...lfoAround('swp', 1.2, 0.4), ...lfoAround('phr', 0.5, 0.2),
+      ...lfoAround('pmix', 0.5, 0.3), ...lfoAround('pf', 330, 20),
+      { id: 'src', kind: 'source', params: { freq: 220 }, in: { morph: ['morph'] } },
+      { id: 'pl', kind: 'pluck', params: { freq: 110 }, in: { event_rate: ['rate'], morph: ['morph'] } },
+      { id: 'cb', kind: 'comb', in: { in: ['osc'], delay: ['dly'], decay: ['dec'] } },
+      { id: 'fl', kind: 'flange', in: { in: ['osc'], depth: ['dep'] } },
+      { id: 'fm', kind: 'fm', in: { in: ['l'], carrier: ['car'], depth: ['idx'] } },
+      { id: 'flt', kind: 'filter', in: { in: ['res'], cutoff: ['cut'], resonance: ['q'] } },
+      { id: 'ph', kind: 'phaser', in: { in: ['res'], center: ['ctr'], sweep: ['swp'], rate: ['phr'], mix: ['pmix'] } },
+      { id: 'pm', kind: 'source', params: { morph: 1 }, in: { freq: ['pf'], pm: ['l'] } },
+      { id: 'out', kind: 'mix', in: { in: ['src', 'pl', 'cb', 'fl', 'fm', 'flt', 'ph', 'pm'] } },
+    ],
+    out: 'out',
+    taps: ['src', 'pl', 'cb', 'fl', 'fm', 'flt', 'ph', 'pm'],
+  },
+}
+
+/** `id` = knob `center` + `span`·(the LFO `l`): a signal that sits on a knob value. */
+function lfoAround(id: string, center: number, span: number): object[] {
+  return [
+    { id: `${id}_c`, kind: 'knob', params: { value: center } },
+    { id: `${id}_s`, kind: 'knob', params: { value: span } },
+    { id: `${id}_m`, kind: 'ring', in: { in: ['l', `${id}_s`] } },
+    { id, kind: 'mix', in: { in: [`${id}_c`, `${id}_m`] } },
+  ]
 }
 
 describe('PatchGraph → compile-wasm ≡ render-graph (JIT)', () => {
@@ -223,6 +258,102 @@ describe('PatchGraph → compile-wasm ≡ render-graph (JIT)', () => {
       expect(cone.audio).toBe(knob.audio)
       expect(cone.samples.equals(knob.samples)).toBe(true)
     }
+  })
+
+  // Every knob that became an inlet: a knob wired in (the knob form, reading
+  // the knob's slot) against a τ-invariant cone (knob × knob, the signal
+  // form). The cone hoists, so the per-sample (s1) stage count is equal, the
+  // audio kernel's instruction count is equal (except as noted), and the two
+  // render the same samples bit for bit.
+  const ports: [kind: string, port: string, value: number, input: 'signal' | 'modal' | 'none', params: Record<string, number>][] = [
+    ['source', 'morph', 0.3, 'none', { freq: 220, morph: 0.3 }],
+    ['pluck', 'freq', 110, 'none', { freq: 110, morph: 0.4, event_rate: 20 }],
+    ['pluck', 'morph', 0.4, 'none', { freq: 110, morph: 0.4, event_rate: 20 }],
+    ['pluck', 'event_rate', 20, 'none', { freq: 110, morph: 0.4, event_rate: 20 }],
+    ['comb', 'delay', 0.003, 'signal', { delay: 0.003, decay: 0.6 }],
+    ['comb', 'decay', 0.6, 'signal', { delay: 0.003, decay: 0.6 }],
+    ['flange', 'depth', 0.002, 'signal', { depth: 0.002 }],
+    ['fm', 'carrier', 440, 'signal', { carrier: 440, depth: 20 }],
+    ['fm', 'depth', 20, 'signal', { carrier: 440, depth: 20 }],
+    ['filter', 'cutoff', 900, 'modal', { cutoff: 900, resonance: 0.6 }],
+    ['filter', 'resonance', 0.6, 'modal', { cutoff: 900, resonance: 0.6 }],
+    // out of the knob range: both forms clamp to it (a cutoff of 0 or a
+    // resonance below ≈ −0.02 has no pole pair)
+    ['filter', 'cutoff', 0, 'modal', { cutoff: 900, resonance: 0.6 }],
+    ['filter', 'cutoff', 30000, 'modal', { cutoff: 900, resonance: 0.6 }],
+    ['filter', 'resonance', -0.5, 'modal', { cutoff: 900, resonance: 0.6 }],
+    ['filter', 'resonance', 1.5, 'modal', { cutoff: 900, resonance: 0.6 }],
+    ['phaser', 'center', 900, 'modal', { center: 900, sweep: 1.2, rate: 0.5, mix: 0.4 }],
+    ['phaser', 'sweep', 1.2, 'modal', { center: 900, sweep: 1.2, rate: 0.5, mix: 0.4 }],
+    ['phaser', 'rate', 0.5, 'modal', { center: 900, sweep: 1.2, rate: 0.5, mix: 0.4 }],
+    ['phaser', 'mix', 0.4, 'modal', { center: 900, sweep: 1.2, rate: 0.5, mix: 0.4 }],
+  ]
+  const portGraph = (kind: string, port: string, input: string, params: Record<string, number>,
+      drivers: object[], driver: string) => {
+    const nodes: object[] = []
+    const inObj: Record<string, string[]> = { [port]: [driver] }
+    if (input === 'signal') { nodes.push({ id: 'src', kind: 'source', params: { freq: 220, morph: 0.2 } }); inObj.in = ['src'] }
+    if (input === 'modal') { nodes.push({ id: 'res', kind: 'resonator', params: { freq: 220, decay: 4 } }); inObj.in = ['res'] }
+    nodes.push(...drivers, { id: 'x', kind, params, in: inObj })
+    return { nodes, out: 'x' }
+  }
+  const stageCensus = (graph: unknown) => {
+    const path = join(dir, `census-${Math.random().toString(36).slice(2)}.json`)
+    writeFileSync(path, JSON.stringify(graph))
+    const r = spawnSync([diffcli, 'render-graph', path, '--stage-census', '--frames', '1', '--buffer', '8'], { cwd: repoRoot })
+    const err = r.stderr.toString()
+    const audio = /audio instrs=(\d+)/.exec(err), s1 = /s1=(\d+)/.exec(err)
+    if (!audio || !s1) throw new Error(`no census: ${err}`)
+    const samples = run(['render-graph', path, '--frames', '1', '--buffer', '2048'])
+    return { audio: Number(audio[1]), s1: Number(s1[1]), samples }
+  }
+  for (const [kind, port, value, input, params] of ports) {
+    test(`${kind}.${port} = ${value}: a τ-invariant cone costs what a knob does and renders the same samples`, () => {
+      const knob = stageCensus(portGraph(kind, port, input, params,
+        [{ id: 'a', kind: 'knob', params: { value } }], 'a'))
+      const cone = stageCensus(portGraph(kind, port, input, params, [
+        { id: 'a', kind: 'knob', params: { value } },
+        { id: 'b', kind: 'knob', params: { value: 1 } },
+        { id: 'c', kind: 'ring', in: { in: ['a', 'b'] } }], 'c'))
+      expect(cone.s1).toBe(knob.s1)
+      // The phaser's center and sweep feed one routed coefficient region per
+      // all-pass section, and a region re-evaluates a non-leaf τ-invariant
+      // operand inside its body (a knob is a slot operand there, the cone one
+      // Mul). That is s0 work left in the audio plan — one Mul per section.
+      const regionOperands = kind === 'phaser' && (port === 'center' || port === 'sweep') ? 6 : 0
+      expect(cone.audio).toBe(knob.audio + regionOperands)
+      expect(cone.samples.equals(knob.samples)).toBe(true)
+    })
+  }
+
+  test('a knob with param_aliases is still a knob: the knob form, at the same cost and samples', () => {
+    // A knob inside a module carries its param under an aliased name; wired
+    // into an inlet it must still read its slot (the knob form), not lower as
+    // a signal. 9000 Hz is past the cutoff range, so the forms would differ.
+    const graph = (aliases: Record<string, string> | undefined) => ({ nodes: [
+      { id: 'res', kind: 'resonator', params: { freq: 220, decay: 4 } },
+      { id: 'k', kind: 'knob', params: { value: 9000 }, ...(aliases ? { param_aliases: aliases } : {}) },
+      { id: 'f', kind: 'filter', params: { resonance: 0.5 }, in: { in: ['res'], cutoff: ['k'] } }], out: 'f' })
+    const plain = stageCensus(graph(undefined))
+    const aliased = stageCensus(graph({ value: 'probe.cut' }))
+    expect(aliased.s1).toBe(plain.s1)
+    expect(aliased.audio).toBe(plain.audio)
+    expect(aliased.samples.equals(plain.samples)).toBe(true)
+  })
+
+  test('pm with a signal freq: a constant-cone freq ≡ the knob form, bit for bit', () => {
+    const graph = (drivers: object[], driver: string) => ({ nodes: [
+      { id: 'lfo', kind: 'sine', params: { freq: 3 } },
+      ...drivers,
+      { id: 'x', kind: 'source', params: { morph: 0.5 }, in: { freq: [driver], pm: ['lfo'] } }], out: 'x' })
+    const knob = stageCensus(graph([{ id: 'a', kind: 'knob', params: { value: 330 } }], 'a'))
+    const cone = stageCensus(graph([
+      { id: 'a', kind: 'knob', params: { value: 330 } },
+      { id: 'b', kind: 'knob', params: { value: 1 } },
+      { id: 'c', kind: 'ring', in: { in: ['a', 'b'] } }], 'c'))
+    expect(cone.s1).toBe(knob.s1)
+    expect(cone.audio).toBe(knob.audio)
+    expect(cone.samples.equals(knob.samples)).toBe(true)
   })
 })
 

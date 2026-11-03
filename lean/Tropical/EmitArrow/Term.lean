@@ -19,7 +19,7 @@ structure Voice where
   output : OutputIdx := ⟨0⟩
   /-- The phase-offset input, if the program has one: where `pmGen` adds its
       phase modulation. (It once also carried a warped-tap phase correction
-      against the voice's default frequency; see `anchoredVoice`.) -/
+      against the voice's default frequency; see `Voice.withPhaseOffset`.) -/
   phasePort : Option InputIdx := none
 
 /-- Two instance declarations compute the same closed form: same program, same
@@ -133,7 +133,10 @@ def normalize : ArrowTerm → ArrowTerm
   | .genC mk post name clk controls =>
       .genC mk post name clk (controls.attach.map fun ⟨t, _⟩ => normalize t)
 
-/-- Add a phase offset (PM) to a voice's phase input.
+/-- The voice with `offset` added to its phase input: the PM law, for `pmGen`
+    and for a control-driven generator (`genC`) whose modulator is one of its
+    controls. `offset` is built when the voice is wired, inside the build. A
+    voice without a phase port is returned unchanged.
 
     A warped generator is NOT phase-corrected: it reads its source's closed
     form at the warped clock with the live parameters, exactly — the tap of a
@@ -146,19 +149,18 @@ def normalize : ArrowTerm → ArrowTerm
     pitch error `(pitch − pitch₀)·shift′`.) The host's anchor keeps the source
     continuous on the ambient clock; a tap at shift `s` steps by `Δinc·s` at a
     re-tune, which is the source's own history being rewritten. -/
-private def anchoredVoice (v : Voice) (phaseOffset? : Option Sig := none) :
-    BuildM Voice := do
-  match v.phasePort, phaseOffset? with
-  | some port, some phaseOffset =>
-      pure { v with wire := fun clock => do
-        let inputs ← v.wire clock
-        inputs.mapM fun input => do
-          if input.port.idx == port.idx then
-            let value ← add input.value phaseOffset
-            pure { input with value }
-          else
-            pure input }
-  | _, _ => pure v
+def Voice.withPhaseOffset (v : Voice) (offset : BuildM Sig) : Voice :=
+  match v.phasePort with
+  | some port => { v with wire := fun clock => do
+      let inputs ← v.wire clock
+      let phaseOffset ← offset
+      inputs.mapM fun input => do
+        if input.port.idx == port.idx then
+          let value ← add input.value phaseOffset
+          pure { input with value }
+        else
+          pure input }
+  | none => v
 
 /-- Emit under an enclosing clock transform.  Children, modulators, instance
     declarations, and left-associated sums are sequenced in authored order. -/
@@ -195,7 +197,7 @@ def emitTermC (cmod : Clock → BuildM Clock) : ArrowTerm → BuildM Sig
       let modSignal ← emitTermC cmod modulator
       let warpedClk ← cmod baseClk
       let phaseOffset ← mul depth modSignal
-      let v ← anchoredVoice v (some phaseOffset)
+      let v := v.withPhaseOffset (pure phaseOffset)
       let builder ← get
       Builder.osc v s!"{name}{builder.decls.size}" warpedClk
   | .genC mk post name clk controls => do

@@ -138,10 +138,11 @@ kernel's f64 output, `WasmKernel.render` vs `diffcli render-bytes`):
   manifest vs the JIT. If this passes, any browser bug is in the host/worklet
   glue, not codegen.
 - `graph_wasm_vs_jit.test.ts` — small PatchGraphs (a swept flanger with taps; a
-  modal bank whose coefficients hoist to the stage-0 prologue) through
-  `compile-wasm` vs `render-graph`, plus the unsplit (`TROPICAL_STAGE0=0`)
-  bank kernel against the split one, and a v3 hierarchy document against its
-  flat expansion.
+  modal bank whose coefficients hoist to the stage-0 prologue; signal-driven
+  controls on every inlet) through `compile-wasm` vs `render-graph`, plus the
+  unsplit (`TROPICAL_STAGE0=0`) bank kernel against the split one, a v3
+  hierarchy document against its flat expansion, and the τ-invariant-cone
+  cost gate per inlet.
 - `graph_clock.test.ts` — closed-form clock properties of the playground
   generators and the signal-time `delay` at arbitrary τ (`seek`): exact
   phasor periodicity, a negative freq playing the saw and pulse backward bit
