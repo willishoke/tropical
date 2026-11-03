@@ -133,7 +133,7 @@ structure St where
   tempVals : Std.HashMap Nat TVal := {}
   sources : Array SourceKind := #[]
   /-- The rate the plan was compiled for: a literal in the kernel. -/
-  sampleRate : Float := 44100.0
+  sampleRate : Float := Tropical.Plan.defaultSampleRate.toFloat
   /-- Array slot sizes — plan constants, so bounds checks are literals. -/
   arraySizes : Array Nat := #[]
   /-- Port kernel: every array slot is an `alloca` named `%arr<slot>`.

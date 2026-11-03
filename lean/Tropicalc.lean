@@ -1,15 +1,20 @@
 import Tropical.Session.Compile
+import Tropical.Playground.Compile
 import Tropical.Artifact
+import Tropical.CliArgs
 
 /-!
 # tropicalc — the compiler, with no runtime
 
-    tropicalc <patch.json> --out=<dir> [--metal] [--mode=M] [--frames=N]
-    tropicalc <patch.json> --emit=plan|kernel [--mode=M] [--frames=N]
+    tropicalc <patch-or-graph.json> --out=<dir> [--metal] [--mode=M] [--frames=N] [--rate=R] [--graph]
+    tropicalc <patch-or-graph.json> --emit=plan|kernel [--mode=M] [--frames=N] [--rate=R] [--graph]
 
 Boots the stdlib registry as a value, compiles the patch through the same
 `Tropical.Session` path the engine runs (`compilePatch`: normalize, load,
-lift, resolved root, partition), and writes the kernel artifact for
+lift, resolved root, partition) — or, for a playground graph (a flat
+PatchGraph or a v3 hierarchy document, `Playground.isGraphDocument`; `--graph`
+forces it), through `Playground.compilePlan`, the pure twin of the engine's
+`load_patch_graph` (fused only) — and writes the kernel artifact for
 `--frames` samples per call (default 512): `kernel.ll` (the port kernel),
 `manifest.json` (its `tropical_kernel_1` type, the plan nested), plus
 `kernel.metal` and `stage0.ll` with `--metal`. `--emit=plan` prints the
@@ -17,46 +22,60 @@ plan's wire JSON instead, byte-identical to `diffcli compile`
 (tools/check_artifact_parity.py holds that gate); `--emit=kernel` prints the
 manifest.
 
+Flags are read as `diffcli` reads them (`Tropical.CliArgs`): a value flag is
+`--name=V` or `--name V`, and an unknown flag or a malformed value (a
+`--rate` or `--frames` that is not a positive integer) is an error.
+
 This binary links nothing from libtropical, and tools/check_layers.py keeps
 its import closure inside TropicalCore. Everything a host loads comes out of
 here; what a host does with it is the host's.
 -/
 
-def parseStrFlag (args : List String) (flag : String) : Option String :=
-  args.findSome? fun a =>
-    if a.startsWith (flag ++ "=") then some (a.drop (flag.length + 1)).toString else none
+open Tropical.CliArgs
 
 def usage : String :=
-  "usage: tropicalc <patch.json> (--out=<dir> [--metal] [--frames=N] | --emit=plan|kernel [--frames=N]) " ++
-  "[--mode=fused|microkernel|microkernel-deep]"
+  "usage: tropicalc <patch-or-graph.json> (--out=<dir> [--metal] [--frames=N] | --emit=plan|kernel [--frames=N]) " ++
+  "[--mode=fused|microkernel|microkernel-deep] [--rate=R] [--graph]"
+
+def flags : List Flag :=
+  [valued "out", valued "emit", valued "mode", valued "frames", valued "rate",
+    switch "metal", switch "graph"]
 
 def main (args : List String) : IO UInt32 := do
-  let some patch := args.find? (fun a => !a.startsWith "--")
-    | IO.eprintln usage; return 1
-  let modeStr := (parseStrFlag args "--mode").getD "fused"
-  let some mode := Tropical.Plan.CompilationMode.ofWire? modeStr
-    | IO.eprintln s!"tropicalc: unknown compilation mode: {modeStr}"; return 1
+  let decoded : Except String _ := do
+    let a ← parse flags args
+    let patch ← a.single
+    let modeStr := (a.value? "mode").getD "fused"
+    let some mode := Tropical.Plan.CompilationMode.ofWire? modeStr
+      | throw s!"unknown compilation mode: {modeStr}"
+    let frames := (← a.positive? "frames").getD Tropical.Artifact.defaultFrames
+    pure (a, patch, modeStr, mode, ← a.rate?, frames)
+  let (a, patch, modeStr, mode, rate?, frames) ← match decoded with
+    | .ok v => pure v
+    | .error e => IO.eprintln s!"tropicalc: {e}\n{usage}"; return 1
   let text ← IO.FS.readFile patch
-  let registry ← match Tropical.Session.bootRegistry with
-    | .error f => IO.eprintln s!"tropicalc: stdlib boot failed: {f.toJson.compress}"; return 1
-    | .ok st => pure st
-  let (plan, stageBlocks) ←
-    match (Tropical.Session.compilePatch text mode).runOn registry with
-    | (.error f, _) => IO.eprintln f.toJson.compress; return 1
-    | (.ok r, _) => pure r
-  let frames : Nat ← match parseStrFlag args "--frames" with
-    | none => pure Tropical.Artifact.defaultFrames
-    | some text =>
-      match text.toNat? with
-      | some n =>
-        if n > 0 then pure n
-        else
-          IO.eprintln "tropicalc: --frames must be positive"
-          return 1
-      | none =>
-        IO.eprintln s!"tropicalc: bad --frames '{text}'"
-        return 1
-  match parseStrFlag args "--emit" with
+  let graph? := match Lean.Json.parse text with
+    | .ok j => if a.has "graph" || Tropical.Playground.isGraphDocument j then some j else none
+    | .error _ => none
+  let (plan, stageBlocks) ← match graph? with
+    | some j =>
+      if mode != .fused then
+        IO.eprintln s!"tropicalc: a PatchGraph compiles fused only (got --mode={modeStr})"; return 1
+      match Tropical.Playground.compilePlan j (rate?.getD Tropical.Plan.defaultSampleRate) with
+      | .error e => IO.eprintln s!"tropicalc: graph: {e}"; return 1
+      | .ok compiled => pure (compiled.plan, compiled.stageBlocks)
+    | none =>
+      let registry ← match Tropical.Session.bootRegistry with
+        | .error f => IO.eprintln s!"tropicalc: stdlib boot failed: {f.toJson.compress}"; return 1
+        | .ok st => pure st
+      match (Tropical.Session.compilePatch text mode).runOn registry with
+      | (.error f, _) => IO.eprintln f.toJson.compress; return 1
+      | (.ok (plan, blocks), _) =>
+        -- A patch takes the rate after compile (nothing above the plan bakes one).
+        pure (match rate? with
+          | some r => { plan with sampleRate := (r : Lean.JsonNumber) }
+          | none => plan, blocks)
+  match a.value? "emit" with
   | some "plan" =>
     match plan.toWire with
     | .error e => IO.eprintln s!"tropicalc: toWire: {e}"; return 1
@@ -68,9 +87,9 @@ def main (args : List String) : IO UInt32 := do
   | some other =>
     IO.eprintln s!"tropicalc: unknown --emit target '{other}' (plan, kernel)"; return 1
   | none =>
-    let some out := parseStrFlag args "--out"
-      | IO.eprintln usage; return 1
-    let metal := args.contains "--metal"
+    let some out := a.value? "out"
+      | IO.eprintln s!"tropicalc: --out=<dir> or --emit=plan|kernel is required\n{usage}"; return 1
+    let metal := a.has "metal"
     -- The one environment read, at the root: `TROPICAL_STAGE0=0` is the
     -- stage-0 kill-switch the engine honours too.
     let opts : Tropical.Artifact.Options :=

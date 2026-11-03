@@ -1,5 +1,6 @@
 import Tropical.Playground.Vocabulary
 import Tropical.Playground.DecodeMetadata
+import Tropical.Plan
 
 /-!
 # Playground.Decode
@@ -82,7 +83,7 @@ private def boundedFilterPair (cutoff resonance : Sig) : BuildM (Array ModalMode
 
 def buildNodeWithParamNames (pidx : String → Option Nat)
     (paramName : String → String) (id kind : String)
-    (_sel params inObj : Json)
+    (_sel params inObj : Json) (rate : Nat := Tropical.Plan.defaultSampleRate)
     (knobSlot : String → Option Nat := fun wire => pidx s!"{wire}.value") :
     BuildM (Node × Array PatchNode) := do
   let controlOf := controlOf pidx paramName knobSlot
@@ -431,7 +432,7 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
     let modes ← if decoded.isEmpty then
         defaultStringModes
           (Tropical.Playground.Metadata.jDec params "freq" (196, 0))
-          (Tropical.Playground.Metadata.jDec params "decay" (996, 3))
+          (Tropical.Playground.Metadata.jDec params "decay" (996, 3)) rate
       else pure decoded
     let anchorSeconds ← litOfD (Tropical.Playground.Metadata.jExactD params "t" (0, 0))
     let sr ← sampleRate
@@ -446,7 +447,8 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
     id kind sel params inObj
 
 /-- Decode graph topology and every scalar-bearing node in one active builder. -/
-def decodeGraph (j : Json) (params : Array (String × JsonNumber)) : BuildM PatchGraph := do
+def decodeGraph (j : Json) (params : Array (String × JsonNumber))
+    (rate : Nat := Tropical.Plan.defaultSampleRate) : BuildM PatchGraph := do
   let outId := match (j.getObjVal? "out").toOption with
     | some (.str value) => value
     | _ => ""
@@ -457,7 +459,7 @@ def decodeGraph (j : Json) (params : Array (String × JsonNumber)) : BuildM Patc
     if raw.kind == "out" then continue
     let (node, extras) ← buildNodeWithParamNames pidx
       (Tropical.Playground.Metadata.paramNameOf raw)
-      raw.id raw.kind raw.sel raw.params raw.inObj (knobSlotOf pidx raws)
+      raw.id raw.kind raw.sel raw.params raw.inObj rate (knobSlotOf pidx raws)
     nodes := nodes.push { id := raw.id, node }
     for extra in extras do
       nodes := nodes.push extra

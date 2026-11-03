@@ -409,6 +409,84 @@ describe('PatchGraph → compile-wasm ≡ render-graph (JIT)', () => {
   })
 })
 
+describe('compile-kernel --rate', () => {
+  test('a graph compiled at 48 kHz: manifest rate, the kernel runs at it, wasm ≡ JIT', async () => {
+    const path = join(dir, 'rate.json')
+    // A 480 Hz sine has a 100-sample period at 48 kHz (91.875 at 44.1 kHz);
+    // the default string's modes are built for the compile rate.
+    writeFileSync(path, JSON.stringify({ nodes: [
+      { id: 's', kind: 'sine', params: { freq: 480 } },
+      { id: 'str', kind: 'string' }], out: 's', taps: ['s', 'str'] }))
+    const wasmPath = join(dir, 'rate.wasm')
+    run(['compile-wasm', path, `--out=${wasmPath}`, '--rate', '48000'])
+    const manifest = JSON.parse(run(['compile-kernel', path, '--rate', '48000']).toString()) as KernelManifest
+    expect(manifest.rate).toBe(48000)
+    const k = await WasmKernel.instantiate(new Uint8Array(readFileSync(wasmPath)), manifest)
+    const N = 1024, C = k.outputChannelCount
+    const out = k.render(N)
+    let periodErr = 0
+    for (let i = 0; i + 100 < N; i++) periodErr = Math.max(periodErr, Math.abs(out[(i + 100) * C + 1]! - out[i * C + 1]!))
+    expect(periodErr).toBeLessThan(1e-6)
+    const b = run(['render-graph', path, '--all-channels', '--rate', '48000', '--frames', '1', '--buffer', String(N)])
+    const jit = new Float64Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength))
+    expect(jit.length).toBe(out.length)
+    let maxDiff = 0
+    for (let i = 0; i < jit.length; i++) maxDiff = Math.max(maxDiff, Math.abs(out[i]! - jit[i]!))
+    expect(maxDiff).toBeLessThan(1e-12)
+    // and the default rate is not 48 kHz: the same graph's sine is not 100-periodic
+    const at44 = renderGraph(path, N, C)
+    let err44 = 0
+    for (let i = 0; i + 100 < N; i++) err44 = Math.max(err44, Math.abs(at44[(i + 100) * C + 1]! - at44[i * C + 1]!))
+    expect(err44).toBeGreaterThan(1e-2)
+  })
+
+  test('a tropical_program_2 patch compiled at 48 kHz plays its pitch at 48 kHz', async () => {
+    // pure-sine-440 at 48 kHz and at the default 44.1 kHz: each kernel, run at
+    // its own rate, plays 440 Hz. (A kernel that ignored --rate would play
+    // 440·48000/44100 ≈ 479 Hz when run at 48 kHz.)
+    const path = resolve(repoRoot, 'web/patches/pure-sine-440.json')
+    const m48 = JSON.parse(run(['compile-kernel', path, '--rate', '48000']).toString()) as KernelManifest
+    const m44 = JSON.parse(run(['compile-kernel', path]).toString()) as KernelManifest
+    expect(m48.rate).toBe(48000)
+    expect(m44.rate).toBe(44100)
+    const w48 = join(dir, 'p48.wasm'), w44 = join(dir, 'p44.wasm')
+    run(['compile-wasm', path, `--out=${w48}`, '--rate=48000'])
+    run(['compile-wasm', path, `--out=${w44}`])
+    const n = 9600
+    const k48 = await WasmKernel.instantiate(new Uint8Array(readFileSync(w48)), m48)
+    const k44 = await WasmKernel.instantiate(new Uint8Array(readFileSync(w44)), m44)
+    const hz48 = zeroCrossingHz(k48.render(n), k48.outputChannelCount, 0, 48000)
+    const hz44 = zeroCrossingHz(k44.render(n), k44.outputChannelCount, 0, 44100)
+    console.log(`  pure-sine-440 measured ${hz48.toFixed(4)} Hz at 48 kHz, ${hz44.toFixed(4)} Hz at 44.1 kHz`)
+    expect(Math.abs(hz48 - 440)).toBeLessThan(0.01)
+    expect(Math.abs(hz44 - 440)).toBeLessThan(0.01)
+  })
+
+  test('--rate N and --rate=N are the same flag; a bad rate or an unknown flag is an error', () => {
+    const path = resolve(repoRoot, 'web/patches/pure-sine-440.json')
+    const spaced = run(['compile-kernel', path, '--rate', '48000']).toString()
+    expect(run(['compile-kernel', path, '--rate=48000']).toString()).toBe(spaced)
+    expect(JSON.parse(spaced).rate).toBe(48000)
+    for (const bad of [['--rate=0'], ['--rate', '-1'], ['--rate=44.1k'], ['--rate'], ['--rates=48000'], ['--frobnicate']]) {
+      const r = spawnSync([diffcli, 'compile-kernel', path, ...bad], { cwd: repoRoot })
+      expect(r.exitCode).not.toBe(0)
+      expect(r.stdout.length).toBe(0)
+    }
+  })
+})
+
+/** The pitch of channel `ch` from its upward zero crossings, each placed by
+ *  linear interpolation: (crossings − 1) periods over the span between the
+ *  first and the last. */
+function zeroCrossingHz(x: Float64Array, channels: number, ch: number, rate: number): number {
+  const ups: number[] = []
+  for (let i = 1; i < x.length / channels; i++) {
+    const a = x[(i - 1) * channels + ch]!, b = x[i * channels + ch]!
+    if (a < 0 && b >= 0) ups.push(i - 1 + a / (a - b))
+  }
+  return ((ups.length - 1) * rate) / (ups[ups.length - 1]! - ups[0]!)
+}
+
 /** Power spectrum of a Hann-windowed block (radix-2, n a power of two). */
 function powerSpectrum(x: Float64Array): Float64Array {
   const n = x.length

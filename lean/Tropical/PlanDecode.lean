@@ -181,7 +181,7 @@ private def ofWireV (j : JsonV) : Except String FlatPlan := do
   rejectRetiredFields j
   let sampleRate := match (j.getField? "config").bind (·.getField? "sampleRate") with
     | some (.num n) => n
-    | _ => (44100 : JsonNumber)
+    | _ => (defaultSampleRate : JsonNumber)
   let mode := (match j.getField? "compilation_mode" with
     | some (.str s) => CompilationMode.ofWire? s
     | _ => none).getD .fused

@@ -207,8 +207,11 @@ def resonatorBank (f0 decay : Sig) (npart : Nat) : BuildM (Array ModalMode) :=
     let amplitude ← litOfD ampD
     ModalMode.hz frequency sigma amplitude
 
-def defaultStringModes (f0 rho : Int × Nat) : BuildM (Array ModalMode) := do
-  let srI : Int := 44100
+/-- The default string's modes: a period of `n = round(rate/f0)` samples (an
+    integer, so the partials are exact multiples of `rate/(n + ½)`), at the
+    rate the kernel is compiled for. -/
+def defaultStringModes (f0 rho : Int × Nat) (rate : Nat) : BuildM (Array ModalMode) := do
+  let srI : Int := rate
   let (mantissa, exponent) := f0
   if mantissa ≤ 0 then return #[]
   let numerator : Int := srI * (10 : Int) ^ exponent

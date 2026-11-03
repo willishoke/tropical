@@ -530,8 +530,14 @@ def ParamDiscipline.toWire (d : ParamDiscipline) : Json :=
     else fields.push ("companions", toJson d.companions)
   Json.mkObj fields.toList
 
+/-- The rate a plan is compiled for when its producer names none (the
+    native runtime's and the web demo's 44.1 kHz). A compile that knows its
+    rate (`--rate` on `tropicalc` and diffcli's compile and render verbs)
+    sets it. -/
+def defaultSampleRate : Nat := 44100
+
 structure FlatPlan where
-  sampleRate : JsonNumber := (44100 : Nat)
+  sampleRate : JsonNumber := defaultSampleRate
   compilationMode : CompilationMode := .fused
   arraySlotNames : Array String
   registerCount : Nat
