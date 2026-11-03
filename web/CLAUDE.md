@@ -31,7 +31,7 @@ web/
   runtime/             The extractable runtime package (→ @tropical/runtime-wasm)
     manifest.ts          KernelManifest — the consumption contract
     layout.ts            computeLayout: KernelManifest → linear-memory regions
-    kernel.ts            WasmKernel: instantiate + render(f64) + process(f32+fade)
+    kernel.ts            WasmKernel: instantiate + render/renderInto(f64) + seek + process(f32+fade)
     index.ts             public surface
   patches/             Source demo patches (tropical_program_2 JSON) + manifest.json
   build_patches.ts     Per patch: diffcli compile-wasm → <slug>.wasm + a trimmed
@@ -46,6 +46,9 @@ web/
     app.ts               patch picker, play/stop, fetch .wasm + manifest
     index.html
 ```
+
+`build_patches.ts` takes `TROPICAL_DIFFCLI=<path>` to use a prebuilt `diffcli`
+(e.g. from a worktree with no Lean build).
 
 `web/runtime/` depends **only** on `KernelManifest` (`tropical_kernel_1`) —
 nothing from the compiler. It is a self-contained consumer of tropical's
