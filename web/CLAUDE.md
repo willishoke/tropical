@@ -48,7 +48,15 @@ web/
 ```
 
 `build_patches.ts` takes `TROPICAL_DIFFCLI=<path>` to use a prebuilt `diffcli`
-(e.g. from a worktree with no Lean build).
+(e.g. from a worktree with no Lean build). A source patch is either a
+`tropical_program_2` patch or a playground graph — a flat PatchGraph
+(`{"nodes":[…],"out":…,"taps":[…]}`) or a v3 hierarchy document
+(`{"version":3,"definitions":[…],"scene":…}`): `diffcli compile-wasm` /
+`compile-kernel` detect the shape (`Playground.isGraphDocument`, or
+`--graph`) and compile a graph
+through `Playground.compilePlan` and the typed stage-0 split, as
+`render-graph` does. Channel 0 is the graph's `out`; each named tap is a
+further channel.
 
 `web/runtime/` depends **only** on `KernelManifest` (`tropical_kernel_1`) —
 nothing from the compiler. It is a self-contained consumer of tropical's
@@ -129,3 +137,8 @@ kernel's f64 output, `WasmKernel.render` vs `diffcli render-bytes`):
 - `web_plans_vs_jit.test.ts` — every shipped `web/dist/patches/<slug>.wasm` +
   manifest vs the JIT. If this passes, any browser bug is in the host/worklet
   glue, not codegen.
+- `graph_wasm_vs_jit.test.ts` — small PatchGraphs (a swept flanger with taps; a
+  modal bank whose coefficients hoist to the stage-0 prologue) through
+  `compile-wasm` vs `render-graph`, plus the unsplit (`TROPICAL_STAGE0=0`)
+  bank kernel against the split one, and a v3 hierarchy document against its
+  flat expansion.

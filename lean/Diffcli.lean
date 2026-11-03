@@ -185,10 +185,13 @@ def renderGraph (args : List String) : IO UInt32 := do
     if metal then Tropical.StagedLoad.loadMslTyped rt compiled.plan compiled.stageBlocks
     else Tropical.StagedLoad.loadTyped rt compiled.plan compiled.stageBlocks
     if start != 0 then rt.setSampleIndex start.toUInt64
+    -- `--all-channels`: every output channel, frame-major (`out` then each
+    -- tap), instead of the channel-0 view — so a graph's taps can be gated.
+    let allChannels := args.contains "--all-channels"
     let stdout ← IO.getStdout
     for _ in [0:frames] do
       if metal then rt.processOffline else rt.process
-      stdout.write (← rt.outputBytes)
+      stdout.write (← if allChannels then rt.outputInterleavedBytes else rt.outputBytes)
     stdout.flush
     return 0
 
@@ -296,6 +299,43 @@ private def compileToFlatPlan (patch : String) (fixtures : Bool := false) :
   | .ok p => pure (.ok p)
   | .error f => pure (.error f.toJson.compress)
 
+/-- Is this source a playground graph (door 1: a flat PatchGraph or a v3
+    hierarchy document, `Playground.isGraphDocument`) rather than a
+    `tropical_program_2` patch (door 2)? `--graph` forces the graph door. -/
+private def isPatchGraph (args : List String) (j : Lean.Json) : Bool :=
+  args.contains "--graph" || Tropical.Playground.isGraphDocument j
+
+/-- The kernel split the wasm/manifest verbs emit for a source, through
+    whichever front door its shape names.
+
+    * A PatchGraph compiles through `Playground.compilePlan` and the TYPED
+      stage-0 split — exactly what `render-graph` and the live engine's
+      `load_patch_graph` load — so the τ-independent coefficient plan (bank
+      columns, coefficient tables) becomes the kernel's once-per-call
+      prologue, and the wasm matches `render-graph` on the JIT.
+    * A `tropical_program_2` patch compiles through the engine mirror. It
+      carries no stage blocks, so it is emitted unsplit (`coeff? := none`):
+      the whole plan in the sample loop. That is the `TROPICAL_STAGE0=0`
+      kill-switch shape — the same values, recomputed per frame instead of
+      per call — so it is correct, only slower for coefficient-heavy plans. -/
+private def compileToSplit (args : List String) (path : String) :
+    IO (Except String Tropical.Ir.Stage0.Split) := do
+  let text ← IO.FS.readFile path
+  match Lean.Json.parse text with
+  | .ok j =>
+    if isPatchGraph args j then
+      match Tropical.Playground.compilePlan j with
+      | .error e => return .error s!"graph compile: {e}"
+      | .ok compiled =>
+        let opts ← Tropical.StagedLoad.optionsFromEnv
+        return Tropical.Artifact.splitTyped opts compiled.plan compiled.stageBlocks
+    else
+      return (← compileToFlatPlan path (fixtures := args.contains "--fixtures")).map
+        fun plan => { audio := plan, coeff? := none }
+  | .error _ =>
+    return (← compileToFlatPlan path (fixtures := args.contains "--fixtures")).map
+      fun plan => { audio := plan, coeff? := none }
+
 /-- `diffcli emit-ir <patch.json> [--frames N]` → the Lean-emitted LLVM IR
     on stdout: the port kernel for `N` frames per call (default 512), with
     the stage-0 prologue inside. -/
@@ -330,17 +370,19 @@ def emitMslVerb (args : List String) : IO UInt32 := do
     complete wasm32 module of the port kernel for `N` frames per call
     (default 128, the worklet quantum), emitted in-process (Lean IR →
     libtropical_wasm's LLVM+lld, no subprocess). `compile-kernel` prints the
-    matching `tropical_kernel_1` manifest. -/
+    matching `tropical_kernel_1` manifest. The source is a
+    `tropical_program_2` patch or a playground PatchGraph (detected by shape,
+    or forced with `--graph`; see `compileToSplit`). -/
 def compileWasmVerb (args : List String) : IO UInt32 := do
   let some patch := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
-    | IO.eprintln "usage: diffcli compile-wasm <patch.json> --out <out.wasm> [--frames N] [--fixtures]"; return 1
+    | IO.eprintln "usage: diffcli compile-wasm <patch-or-graph.json> --out <out.wasm> [--frames N] [--fixtures] [--graph]"; return 1
   let some outPath := parseStrFlag args "--out"
     | IO.eprintln "compile-wasm: --out <path> required"; return 1
   let frames := parseNatFlag args "--frames" 128
-  match ← compileToFlatPlan patch (fixtures := args.contains "--fixtures") with
+  match ← compileToSplit args patch with
   | .error e => IO.eprintln e; return 1
-  | .ok plan =>
-    match Tropical.Ir.EmitLlvm.emitKernel { audio := plan, coeff? := none } frames with
+  | .ok split =>
+    match Tropical.Ir.EmitLlvm.emitKernel split frames with
     | .error e => IO.eprintln s!"emitKernel: {e}"; return 1
     | .ok ir =>
       let wasm ← Tropical.Toolchain.Wasm.compileIr ir
@@ -353,12 +395,12 @@ def compileWasmVerb (args : List String) : IO UInt32 := do
     (default 128), on stdout. The browser-side manifest. -/
 def compileKernelVerb (args : List String) : IO UInt32 := do
   let some patch := args.find? (fun a => !a.startsWith "--" && a.endsWith ".json")
-    | IO.eprintln "usage: diffcli compile-kernel <patch.json> [--frames N] [--fixtures]"; return 1
+    | IO.eprintln "usage: diffcli compile-kernel <patch-or-graph.json> [--frames N] [--fixtures] [--graph]"; return 1
   let frames := parseNatFlag args "--frames" 128
-  match ← compileToFlatPlan patch (fixtures := args.contains "--fixtures") with
+  match ← compileToSplit args patch with
   | .error e => IO.eprintln e; return 1
-  | .ok plan =>
-    match Tropical.Kernel.manifest plan frames with
+  | .ok split =>
+    match Tropical.Kernel.manifest split.audio frames with
     | .error e => IO.eprintln s!"compile-kernel: {e}"; return 1
     | .ok manifest => IO.println manifest; return 0
 
@@ -374,5 +416,5 @@ def main (args : List String) : IO UInt32 := do
   | "compile-kernel" :: rest => compileKernelVerb rest
   | "compile" :: rest => compileVerb rest
   | _ =>
-    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]\n       diffcli render-metal <plan.json>\n       diffcli render-graph <graph.json>\n       diffcli emit-ir <patch.json>\n       diffcli emit-msl <patch.json>\n       diffcli compile <patch.json> [--mode=M]\n       diffcli compile-wasm <patch.json> --out <out.wasm> [--frames N]\n       diffcli compile-kernel <patch.json> [--frames N]"
+    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N]\n       diffcli render-metal <plan.json>\n       diffcli render-graph <graph.json> [--all-channels]\n       diffcli emit-ir <patch.json>\n       diffcli emit-msl <patch.json>\n       diffcli compile <patch.json> [--mode=M]\n       diffcli compile-wasm <patch-or-graph.json> --out <out.wasm> [--frames N] [--graph]\n       diffcli compile-kernel <patch-or-graph.json> [--frames N] [--graph]"
     return 1

@@ -377,6 +377,17 @@ private def translatedInputs (node : Json)
     translated := translated.push (port, sources)
   pure translated
 
+/-- Is this document a playground graph rather than a `tropical_program_2`
+    patch? Two shapes are graphs: a flat PatchGraph (`{"nodes":[…],"out":…}`)
+    and a v3 hierarchy document (`{"version":3,"definitions":[…],"scene":…}`),
+    which `elaboratePatchHierarchy` flattens. A patch names its `schema`; a
+    graph never does. This is the one detector shared by every front door that
+    takes either shape; a TypeScript gate that needs it mirrors this one. -/
+def isGraphDocument (document : Json) : Bool :=
+  (field? document "schema").isNone &&
+    (((field? document "nodes").bind arr?).isSome ||
+      (field? document "version").bind nat? == some 3)
+
 /-- Elaborate a v3 document to the unchanged flat patch-graph envelope. Flat
     legacy graphs pass through structurally; legacy Phaser nodes first migrate
     to the installed hierarchy definition at this same boundary. -/
