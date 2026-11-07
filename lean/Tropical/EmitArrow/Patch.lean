@@ -58,17 +58,35 @@ def modalAddrWarp : Clock → Sig → BuildM Clock :=
     is the separate pass that follows. -/
 
 /-- A generator control input: a fixed expression (a knob's or a param's slot
-    read — τ-invariant) or a wire from another Sig node, lowered as a term. -/
+    read — τ-invariant) or a wire from another Sig node, lowered as a term.
+    A `uniform` wire is a wire into an inlet that accepts only a value constant
+    within a kernel call (stage 0: knobs, arithmetic on knobs, constants); its
+    lowered value is checked (`ArrowTerm.requireUniform`) and anything that
+    varies over time is refused with `refusal`. -/
 inductive ControlIn where
   | fixed (value : Sig)
   | wire (id : String)
+  | uniform (id : String) (refusal : String)
 
 /-- Is this control a signal wire (not a knob's slot, not the node's own
     param)? A playground node takes its signal-control form only when one is;
     otherwise it keeps its knob form, expression for expression. -/
 def ControlIn.isWire : ControlIn → Bool
-  | .wire _ => true
+  | .wire _ | .uniform .. => true
   | .fixed _ => false
+
+/-- The source node of a wired control. -/
+def ControlIn.wireId? : ControlIn → Option String
+  | .wire id | .uniform id _ => some id
+  | .fixed _ => none
+
+/-- `t` with its value required to be stage 0 (`sigIsS0`: built from params,
+    literals and the rate alone, so constant within a kernel call); anything
+    else is refused with `refusal`. Interns nothing: an admitted value is `t`'s
+    own, so the plan is the plan of `t`. -/
+def ArrowTerm.requireUniform (refusal : String) (t : ArrowTerm) : ArrowTerm :=
+  .arrUn (fun value => do
+    if ← sigIsS0 value then pure value else throw refusal) t
 
 /-- A patch-graph node. Generators carry their clock; effects carry the id of the
     upstream node they consume (`⋙`); the mixer carries the ids it sums (fan-in).
@@ -317,7 +335,7 @@ def modalPhaserTopology (id input : String) (center sweep rate mix : ModalContro
 private def gainNode (control : ControlIn) (input : String) : Node :=
   match control with
   | .fixed value => .shaper input (fun signal => mul value signal)
-  | .wire wire => .ring #[wire, input]
+  | .wire wire | .uniform wire _ => .ring #[wire, input]
 
 /-- Expand the swept flanger into ordinary patch topology, the way
     `modalPhaserTopology` expands the phaser: the sweep `d = depth · mod` (a
@@ -343,13 +361,9 @@ def sflangeTopology (id input modulator : String) (depth dry wet : ControlIn) :
     edges `lowerAt` ranks (and refuses cycles over). -/
 def Node.inputIds : Node → Array String
   | .source .. | .knob _ => #[]
-  | .sourceC _ _ _ controls => controls.filterMap fun
-      | .wire id => some id
-      | .fixed _ => none
+  | .sourceC _ _ _ controls => controls.filterMap (·.wireId?)
   | .sdelay i t => #[i, t]
-  | .effectC inputs controls _ => inputs ++ controls.filterMap fun
-      | .wire id => some id
-      | .fixed _ => none
+  | .effectC inputs controls _ => inputs ++ controls.filterMap (·.wireId?)
   | .flange i _ _ | .shaper i _ | .warpFx i _ | .comb i _ => #[i]
   | .mix is | .ring is | .modalMix is => is
   | .fm i .. | .pm i .. => #[i]
@@ -825,6 +839,8 @@ def lowerNode (g : PatchGraph) (rankOf : String → Option Nat)
     let terms ← controls.mapM fun
       | .fixed value => pure (.konst value)
       | .wire wireId => lowerInputGated g rankOf id wireId r
+      | .uniform wireId refusal =>
+        ArrowTerm.requireUniform refusal <$> lowerInputGated g rankOf id wireId r
     return .genC mk post id clk terms
   | .sdelay inId timeId =>
     return .swarp delayWarp (← lowerInputGated g rankOf id timeId r)
@@ -834,6 +850,8 @@ def lowerNode (g : PatchGraph) (rankOf : String → Option Nat)
     let cs ← controls.mapM fun
       | .fixed value => pure (.konst value)
       | .wire wireId => lowerInputGated g rankOf id wireId r
+      | .uniform wireId refusal =>
+        ArrowTerm.requireUniform refusal <$> lowerInputGated g rankOf id wireId r
     body ins cs
   | .flange inId back fwd =>
     flangeEffectWith back fwd (← lowerInputGated g rankOf id inId r)
@@ -871,7 +889,11 @@ def lowerInput (g : PatchGraph) (rankOf : String → Option Nat)
       let controlTerms ← modal.controls.mapM fun control =>
         match control.signalNode? with
         | none => pure control.fallback
-        | some controlId => lowerInputGated g rankOf id controlId r
+        | some controlId => do
+          let term ← lowerInputGated g rankOf id controlId r
+          pure (match control.uniformRefusal? with
+            | some refusal => term.requireUniform refusal
+            | none => term)
       match modal.source with
       | .plain modes =>
         if modal.stages.isEmpty then

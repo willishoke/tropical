@@ -20,6 +20,10 @@ open Tropical.Ir
 structure ModalControlRef where
   fallback : ArrowTerm
   signalNode? : Option String := none
+  /-- When set, the wired control must be constant within a kernel call
+      (`ArrowTerm.requireUniform`); a time-varying wire is refused with this
+      message. The fallback is never checked. -/
+  uniformRefusal? : Option String := none
 
 def ModalControlRef.constant (value : Sig) : ModalControlRef :=
   { fallback := .konst value }

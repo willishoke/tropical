@@ -46,19 +46,41 @@ private def paramValue (pidx : String → Option Nat) (paramName : String → St
   else
     pref pidx (paramName kname) dflt
 
+/-- The refusal for a time-varying wire into a uniform inlet (a frequency or
+    rate, `Metadata.isUniform`). The generator's phase is `inc·τ`, the
+    increment times the clock: exact for a constant increment, and for one that
+    moves over time not the integral of the frequency, so the phase drifts by
+    `Δinc·τ` — without bound as τ grows. `label` names the node as authored
+    (`nodeLabel`). -/
+def uniformRefusal (label kind port source : String) : String :=
+  let advice := match kind with
+    | "phaser" | "modal_allpass_tail" =>
+      " To move the sweep with a signal, wire it into `center` or `sweep`."
+    | "pluck" =>
+      if port == "event_rate" then "" else
+        " To modulate pitch, wire the signal into a `source`'s `pm` inlet (phase modulation) or into an `fm` node's `in` (frequency modulation, a clock warp)."
+    | _ =>
+      " To modulate pitch, wire the signal into a `source`'s `pm` inlet (phase modulation) or into an `fm` node's `in` (frequency modulation, a clock warp)."
+  s!"time-varying {port}: {label} inlet '{port}' is wired from '{source}', which varies over time. This inlet takes only a value constant within a kernel call: a knob, arithmetic on knobs, or a constant. The phase is computed as {port}·τ, which is exact only while {port} is constant.{advice}"
+
 /-- A generator control: a wire from a knob reads the knob's own slot (a fixed,
     τ-invariant expression, exactly as before); a wire from any other Sig node
-    is a signal input lowered as a term; no wire reads this node's own param
-    (or its default). `knobSlot` names a knob node's slot, whatever its param
-    is called (a knob inside a module carries a `param_aliases` name). -/
+    is a signal input lowered as a term — into a uniform inlet, one whose value
+    must be constant within a kernel call (`ControlIn.uniform`); no wire reads
+    this node's own param (or its default). `knobSlot` names a knob node's
+    slot, whatever its param is called (a knob inside a module carries a
+    `param_aliases` name). -/
 private def controlOf (pidx : String → Option Nat) (paramName : String → String)
-    (knobSlot : String → Option Nat)
+    (knobSlot : String → Option Nat) (label : String)
     (kind : String) (params inObj : Json) (kname : String) : BuildM ControlIn := do
   match (Tropical.Playground.Metadata.portSources inObj kname)[0]? with
   | some wire =>
     match knobSlot wire with
     | some i => pure (.fixed (← paramRef ⟨i⟩))
-    | none => pure (.wire wire)
+    | none =>
+      if Tropical.Playground.Metadata.isUniform kind kname then
+        pure (.uniform wire (uniformRefusal label kind kname wire))
+      else pure (.wire wire)
   | none => pure (.fixed (← paramValue pidx paramName kind params kname))
 
 /-- `knobSlot` for a node set: the slot of a `knob` node's `value`, under its
@@ -68,6 +90,14 @@ def knobSlotOf (pidx : String → Option Nat)
   let raw ← raws.find? (·.id == id)
   if raw.kind != "knob" then none
   pidx (Tropical.Playground.Metadata.paramNameOf raw "value")
+
+/-- The slot of a knob node's `#phase` companion, present when the knob is
+    wired straight into an anchored inlet (`Metadata.knobFeedsAnchor`). -/
+def knobPhaseSlotOf (pidx : String → Option Nat)
+    (raws : Array Tropical.Playground.Metadata.Raw) (id : String) : Option Nat := do
+  let raw ← raws.find? (·.id == id)
+  if raw.kind != "knob" then none
+  pidx s!"{Tropical.Playground.Metadata.paramNameOf raw "value"}#phase"
 
 /-- The filter's pole pair from its controls, each clamped to its knob range
     (`displayRangeOf`) in both the knob and the signal form: the pair exists
@@ -84,9 +114,21 @@ private def boundedFilterPair (cutoff resonance : Sig) : BuildM (Array ModalMode
 def buildNodeWithParamNames (pidx : String → Option Nat)
     (paramName : String → String) (id kind : String)
     (_sel params inObj : Json) (rate : Nat := Tropical.Plan.defaultSampleRate)
-    (knobSlot : String → Option Nat := fun wire => pidx s!"{wire}.value") :
+    (knobSlot : String → Option Nat := fun wire => pidx s!"{wire}.value")
+    (knobPhaseSlot : String → Option Nat := fun wire => pidx s!"{wire}.value#phase")
+    (label : String := s!"'{id}' ({kind})") :
     BuildM (Node × Array PatchNode) := do
-  let controlOf := controlOf pidx paramName knobSlot
+  let controlOf := controlOf pidx paramName knobSlot label
+  -- The `#phase` companion anchoring an anchored inlet: the node's own knob's,
+  -- or, when a knob is wired straight in, that knob's. A wired expression has
+  -- none (and is constant within a call: a uniform inlet).
+  let anchorPhase? (kname : String) : BuildM (Option Sig) := do
+    let slot := match (Tropical.Playground.Metadata.portSources inObj kname)[0]? with
+      | some wire => knobPhaseSlot wire
+      | none => pidx s!"{paramName kname}#phase"
+    match slot with
+    | some i => some <$> paramRef ⟨i⟩
+    | none => pure none
   let implicitFanIn : Bool → String × Array PatchNode := fun modal =>
     let inputs := Tropical.Playground.Metadata.portSources inObj "in"
     match inputs.toList with
@@ -109,8 +151,11 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
       else do
         let value ← pref pidx (paramName kname) dflt
         pure ((.konst value) : ArrowTerm)
-    pure ({ fallback := fallback
-            signalNode? := (Tropical.Playground.Metadata.portSources inObj kname)[0]? } : ModalControlRef)
+    let signalNode? := (Tropical.Playground.Metadata.portSources inObj kname)[0]?
+    let uniformRefusal? := if Tropical.Playground.Metadata.isUniform kind kname then
+        signalNode?.map (uniformRefusal label kind kname ·)
+      else none
+    pure ({ fallback, signalNode?, uniformRefusal? } : ModalControlRef)
   match kind with
   | "knob" =>
     match pidx (paramName "value") with
@@ -120,20 +165,17 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
     let pitchDefault ← defaultValue kind params "freq"
     let freqC ← controlOf kind params inObj "freq"
     let morphC ← controlOf kind params inObj "morph"
-    let anchor : Option Anchor ← match pidx s!"{paramName "freq"}#phase" with
-      | some i => do
-        let phase ← paramRef ⟨i⟩
-        pure (some (phase, pitchDefault))
-      | none => pure none
+    let anchor : Option Anchor := (← anchorPhase? "freq").map (·, pitchDefault)
     let pmWire := (Tropical.Playground.Metadata.portSources inObj "pm")[0]?
-    -- A signal-driven pitch or morph: the control cones are read under the
+    -- A wired pitch or morph: the control cones are read under the
     -- generator's own clock (`genC`), a `pm` modulator as one more control
-    -- (its phase offset `0.3·m`, as on the knob path). The anchor applies
-    -- only when the freq is this node's own knob — a `#phase` companion
-    -- compensates a STEP of a knob. An expression pitch is not anchored: its
-    -- phase is `inc(τ)·τ`, the current increment times the clock, not the
-    -- integral of the pitch, so a pitch that moves over time moves the phase
-    -- by `Δinc·τ` as well.
+    -- (its phase offset `0.3·m`, as on the knob path). The freq inlet is
+    -- uniform: a wired pitch is constant within a kernel call (a time-varying
+    -- one is refused, `uniformRefusal`), so the phase `inc·τ` is exact. The
+    -- anchor applies when the freq is this node's own knob or a knob wired
+    -- straight in — a `#phase` companion compensates a STEP of a knob; an
+    -- expression of knobs is not anchored, and a step of it moves the phase
+    -- by `Δinc·τ`.
     if freqC.isWire || morphC.isWire then
       let zero ← lit 0
       let depth ← lit 3 1
@@ -162,12 +204,10 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
   | "sine" | "saw" | "pulse" =>
     -- `sine` is the exact `FixedSinOsc`; `saw`/`pulse` are polyBLEP waveforms:
     -- the exact Q32 phasor, then a pure function of (phase, increment[, width]).
-    -- Anchored like `source` when the freq is this node's own knob.
+    -- Anchored like `source`: by this node's own knob, or a knob wired in.
     let pitchDefault ← defaultValue kind params "freq"
     let freq ← controlOf kind params inObj "freq"
-    let phase? ← match pidx s!"{paramName "freq"}#phase" with
-      | some i => pure (some (← paramRef ⟨i⟩))
-      | none => pure none
+    let phase? ← anchorPhase? "freq"
     if kind == "sine" then
       let mk := fun (cs : Array Sig) =>
         sineVoiceE ((cs[0]?).getD pitchDefault) (phase?.map (·, pitchDefault))
@@ -186,11 +226,7 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
   | "pluck" =>
     let pitchDefault ← defaultValue kind params "freq"
     let freqC ← controlOf kind params inObj "freq"
-    let anchor : Option Anchor ← match pidx s!"{paramName "freq"}#phase" with
-      | some i => do
-        let phase ← paramRef ⟨i⟩
-        pure (some (phase, pitchDefault))
-      | none => pure none
+    let anchor : Option Anchor := (← anchorPhase? "freq").map (·, pitchDefault)
     let morphC ← controlOf kind params inObj "morph"
     let eventC ← controlOf kind params inObj "event_rate"
     if freqC.isWire || morphC.isWire || eventC.isWire then
@@ -209,7 +245,7 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
     -- (The knob form's expressions are built in their original order.)
     let delay? ← match delayC with
       | .fixed seconds => some <$> deltaOf seconds
-      | .wire _ => pure none
+      | _ => pure none
     let decayC ← controlOf kind params inObj "decay"
     if delayC.isWire || decayC.isWire then
       -- Signal controls: tap k reads the input at `c + k·Δ(s)` and weighs it
@@ -269,11 +305,7 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
   | "fm" =>
     let carrierDefault ← defaultValue kind params "carrier"
     let carrierC ← controlOf kind params inObj "carrier"
-    let anchor : Option Anchor ← match pidx s!"{paramName "carrier"}#phase" with
-      | some i => do
-        let phase ← paramRef ⟨i⟩
-        pure (some (phase, carrierDefault))
-      | none => pure none
+    let anchor : Option Anchor := (← anchorPhase? "carrier").map (·, carrierDefault)
     let depthC ← controlOf kind params inObj "depth"
     if carrierC.isWire || depthC.isWire then
       -- Signal controls: the carrier is a control-driven sine (`genC`) under
@@ -354,7 +386,7 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
       -- the knob range as the knob form is (`boundedFilterPair`).
       let ref := fun (c : ControlIn) => match c with
         | .fixed value => ModalControlRef.constant value
-        | .wire wire => { fallback := .konst zero, signalNode? := some wire }
+        | .wire wire | .uniform wire _ => { fallback := .konst zero, signalNode? := some wire }
       let stage : ModalLinearStage := {
         controls := #[ModalControlRef.constant zero, ref cutoffC, ref resonanceC]
         build := fun _ values => do
@@ -446,6 +478,25 @@ def buildNode (pidx : String → Option Nat) (id kind : String)
   buildNodeWithParamNames pidx (fun knob => s!"{id}.{knob}")
     id kind sel params inObj
 
+/-- A node as its author wrote it, for messages: `'id' (kind)`, or for an atom
+    a module expanded into (`Playground.Hierarchy`, recorded in `source_map`),
+    the module instance the author placed and the atom inside it. -/
+def nodeLabel (j : Json) (id kind : String) : String :=
+  let entries := match j.getObjVal? "source_map" with
+    | .ok (.arr entries) => entries
+    | _ => #[]
+  let entry? := entries.find? fun entry =>
+    match entry.getObjValAs? String "expanded" with
+    | .ok expanded => expanded == id
+    | .error _ => false
+  match entry? with
+  | some entry =>
+    match entry.getObjValAs? (Array String) "path", entry.getObjValAs? String "local" with
+    | .ok path, .ok localId =>
+      s!"'{path[0]?.getD id}' (a module; its {kind} '{localId}')"
+    | _, _ => s!"'{id}' ({kind})"
+  | none => s!"'{id}' ({kind})"
+
 /-- Decode graph topology and every scalar-bearing node in one active builder. -/
 def decodeGraph (j : Json) (params : Array (String × JsonNumber))
     (rate : Nat := Tropical.Plan.defaultSampleRate) : BuildM PatchGraph := do
@@ -460,6 +511,7 @@ def decodeGraph (j : Json) (params : Array (String × JsonNumber))
     let (node, extras) ← buildNodeWithParamNames pidx
       (Tropical.Playground.Metadata.paramNameOf raw)
       raw.id raw.kind raw.sel raw.params raw.inObj rate (knobSlotOf pidx raws)
+      (knobPhaseSlotOf pidx raws) (nodeLabel j raw.id raw.kind)
     nodes := nodes.push { id := raw.id, node }
     for extra in extras do
       nodes := nodes.push extra

@@ -17,6 +17,8 @@
  *  4. An anchored re-tune (the `#phase` companion) leaves the source bitwise
  *     unchanged at the switch frame, where a naive write jumps it; a delayed
  *     copy follows the NEW pitch — it is the re-tuned source's own history.
+ *     A knob wired straight into several freq inlets anchors them all with
+ *     one companion.
  */
 import { describe, test, expect, setDefaultTimeout } from 'bun:test'
 import { spawnSync } from 'bun'
@@ -239,6 +241,40 @@ describe('playground generators and delay: closed-form clock', () => {
       for (const v of ['saw', 'sin', 'sq']) k.set(`${v}.freq#phase`, 0)
       const naive = k.at(now, 1)
       expect(Math.abs(naive[1]! - before[1]!)).toBeGreaterThan(1e-3)
+    }
+  })
+
+  test('a knob wired straight into several freq inlets anchors them all with one #phase companion', async () => {
+    // channels: 0 out, 1 saw, 2 sin, 3 sq, 4 src, 5 fm — every generator's
+    // freq is the knob `k`, so the host's bump (inc₀ − inc₁)·now, a function
+    // of the knob's value alone, is the same for each
+    const k = await load('knob-anchor', {
+      nodes: [
+        { id: 'k', kind: 'knob', params: { value: 330 } },
+        { id: 'zero', kind: 'knob', params: { value: 0 } },
+        { id: 'saw', kind: 'saw', in: { freq: ['k'] } },
+        { id: 'sin', kind: 'sine', in: { freq: ['k'] } },
+        { id: 'sq', kind: 'pulse', params: { width: 0.3 }, in: { freq: ['k'] } },
+        { id: 'src', kind: 'source', params: { morph: 0.4 }, in: { freq: ['k'] } },
+        { id: 'fm', kind: 'fm', params: { depth: 0 }, in: { in: ['zero'], carrier: ['k'] } },
+        { id: 'mx', kind: 'mix', in: { in: ['saw', 'sin', 'sq', 'src', 'fm'] } },
+      ],
+      out: 'mx',
+      taps: ['saw', 'sin', 'sq', 'src', 'fm'],
+    })
+    const f0 = 330, f1 = 330 * 1.05
+    const inc0 = incOf(f0, k.rate), inc1 = incOf(f1, k.rate)
+    for (const now of [12_345_678, 9_876_543_211]) {
+      k.set('k.value', f0); k.set('k.value#phase', 0)
+      const before = k.at(now, 2)
+      k.set('k.value', f1); k.set('k.value#phase', Number(wrap((inc0 - inc1) * BigInt(now))) / Q32)
+      const after = k.at(now, 2)
+      for (const ch of [1, 2, 3, 4, 5]) expect(Object.is(after[ch], before[ch])).toBe(true)
+      for (const ch of [1, 2, 4, 5]) expect(after[k.C + ch]).not.toBe(before[k.C + ch])
+      // the naive write jumps every one of them
+      k.set('k.value#phase', 0)
+      const naive = k.at(now, 1)
+      for (const ch of [1, 2, 4, 5]) expect(Math.abs(naive[ch]! - before[ch]!)).toBeGreaterThan(1e-3)
     }
   })
 })

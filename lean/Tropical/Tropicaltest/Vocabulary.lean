@@ -132,6 +132,22 @@ def runVocabDriven (arena : Arena)
   if !roomSurfaceOk || !roomInputOk then
     ok := false
     issues := issues.push "reverb: served rt60/dir controls are not signal-capable glides over a modal input"
+  -- The uniform inlets are exactly the frequencies and rates (a generator's
+  -- phase is `inc·τ`, exact only for a constant increment), each a knob-backed
+  -- inlet. A new rate-like inlet must be added here and marked in the table.
+  let uniformExpected : Array (String × String) := #[
+    ("source", "freq"), ("sine", "freq"), ("saw", "freq"), ("pulse", "freq"),
+    ("pluck", "freq"), ("pluck", "event_rate"), ("fm", "carrier"),
+    ("phaser", "rate"), ("modal_allpass_tail", "rate")]
+  let uniformServed := (vocabularyKinds ++ hierarchyAtomKinds).foldl (init := #[])
+    fun acc kind => acc ++ ((portSpecs kind).filter (·.uniform)).map (kind, ·.name)
+  let uniformShapeOk := uniformServed.all fun (kind, name) =>
+    match portOf kind name with
+    | some spec => !spec.accepts.isEmpty && spec.knob.isSome
+    | none => false
+  if uniformServed != uniformExpected || !uniformShapeOk then
+    ok := false
+    issues := issues.push s!"uniform inlets changed: {uniformServed}"
   for kind in vocabularyKinds do
     if kind == "out" then continue
     let mut nodes : Array Lean.Json := #[]
@@ -183,7 +199,7 @@ def runVocabDriven (arena : Arena)
   IO.println s!"        {covered} non-sink served kinds compiled from vocabulary-generated minimal patches; room RT60 signal+glide={roomSurfaceOk}; all served identifiers unique, withheld absent:"
   IO.println s!"        result   {if issues.isEmpty then "every declared knob registers and is read" else toString issues}"
   if ok then
-    passGate "vocab-driven" "versioned/fingerprinted vocabulary serves reverb RT60 as a signal-capable glided knob and drives one compiling patch per kind — declared knobs live, nothing unread"
+    passGate "vocab-driven" "versioned/fingerprinted vocabulary serves reverb RT60 as a signal-capable glided knob and drives one compiling patch per kind — declared knobs live, nothing unread; exactly the frequency and rate inlets are uniform"
   else
     failGate "vocab-driven" s!"{issues}"
 

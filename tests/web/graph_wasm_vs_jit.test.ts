@@ -91,8 +91,9 @@ const cases: Record<string, unknown> = {
     out: 'out',
     taps: ['saw', 'sq', 'sin', 'tap', 'fl'],
   },
-  // a pitch driven by a τ-invariant cone (knob × knob) and by a signal (an LFO
-  // + a knob): any wire into a freq inlet
+  // a pitch driven by a τ-invariant cone (knob × knob), and vibrato done the
+  // exact way: the LFO into an fm node's clock warp, its carrier a knob (a
+  // time-varying wire into a freq inlet is refused; graph_freq_inlets)
   wiredFreq: {
     nodes: [
       { id: 'a', kind: 'knob', params: { value: 110 } },
@@ -100,27 +101,25 @@ const cases: Record<string, unknown> = {
       { id: 'f', kind: 'ring', in: { in: ['a', 'b'] } },
       { id: 'saw', kind: 'saw', in: { freq: ['f'] } },
       { id: 'vib', kind: 'sine', params: { freq: 5 } },
-      { id: 'amt', kind: 'knob', params: { value: 3 } },
-      { id: 'vd', kind: 'ring', in: { in: ['vib', 'amt'] } },
-      { id: 'f2', kind: 'mix', in: { in: ['vd', 'a'] } },
-      { id: 'sw', kind: 'sine', in: { freq: ['f2'] } },
+      { id: 'sw', kind: 'fm', params: { depth: 3 }, in: { in: ['vib'], carrier: ['a'] } },
       { id: 'out', kind: 'mix', in: { in: ['saw', 'sw'] } },
     ],
     out: 'out',
     taps: ['saw', 'sw'],
   },
   // every knob that became an inlet, each driven by a signal (an LFO around
-  // its knob value), plus pm on a signal-driven freq
+  // its knob value), plus pm on a wired freq. The frequency and rate inlets
+  // take only wires constant within a call, so theirs are knob arithmetic.
   signalControls: {
     nodes: [
       { id: 'l', kind: 'sine', params: { freq: 2 } },
       { id: 'osc', kind: 'saw', params: { freq: 220 } },
       { id: 'res', kind: 'resonator', params: { freq: 220, decay: 4 } },
-      ...lfoAround('morph', 0.3, 0.2), ...lfoAround('rate', 20, 5), ...lfoAround('dly', 0.003, 0.001),
-      ...lfoAround('dec', 0.6, 0.2), ...lfoAround('dep', 0.002, 0.001), ...lfoAround('car', 440, 30),
+      ...lfoAround('morph', 0.3, 0.2), ...knobCone('rate', 20), ...lfoAround('dly', 0.003, 0.001),
+      ...lfoAround('dec', 0.6, 0.2), ...lfoAround('dep', 0.002, 0.001), ...knobCone('car', 440),
       ...lfoAround('idx', 20, 10), ...lfoAround('cut', 900, 300), ...lfoAround('q', 0.5, 0.3),
-      ...lfoAround('ctr', 900, 300), ...lfoAround('swp', 1.2, 0.4), ...lfoAround('phr', 0.5, 0.2),
-      ...lfoAround('pmix', 0.5, 0.3), ...lfoAround('pf', 330, 20),
+      ...lfoAround('ctr', 900, 300), ...lfoAround('swp', 1.2, 0.4), ...knobCone('phr', 0.5),
+      ...lfoAround('pmix', 0.5, 0.3), ...knobCone('pf', 330),
       { id: 'src', kind: 'source', params: { freq: 220 }, in: { morph: ['morph'] } },
       { id: 'pl', kind: 'pluck', params: { freq: 110 }, in: { event_rate: ['rate'], morph: ['morph'] } },
       { id: 'cb', kind: 'comb', in: { in: ['osc'], delay: ['dly'], decay: ['dec'] } },
@@ -134,6 +133,15 @@ const cases: Record<string, unknown> = {
     out: 'out',
     taps: ['src', 'pl', 'cb', 'fl', 'fm', 'flt', 'ph', 'pm'],
   },
+}
+
+/** `id` = knob `value` × knob 1: knob arithmetic, constant within a call. */
+function knobCone(id: string, value: number): object[] {
+  return [
+    { id: `${id}_v`, kind: 'knob', params: { value } },
+    { id: `${id}_1`, kind: 'knob', params: { value: 1 } },
+    { id, kind: 'ring', in: { in: [`${id}_v`, `${id}_1`] } },
+  ]
 }
 
 /** `id` = knob `center` + `span`·(the LFO `l`): a signal that sits on a knob value. */
@@ -240,9 +248,23 @@ describe('PatchGraph → compile-wasm ≡ render-graph (JIT)', () => {
       const samples = run(['render-graph', path, '--frames', '1', '--buffer', '2048'])
       return { audio: Number(audio[1]), s1: Number(s1[1]), samples }
     }
-    const knob = census({ nodes: [
+    // A knob wired straight in is anchored, by its own `#phase` companion,
+    // exactly as the node's own freq knob is, and costs what that knob does.
+    // A cone is not anchored, so it is compared with an unanchored knob: one
+    // passed through a one-input mix, which lowers to the knob's slot read.
+    const own = census({ nodes: [
+      { id: 's', kind: 'saw', params: { freq: 220 } }], out: 's' })
+    const straight = census({ nodes: [
       { id: 'a', kind: 'knob', params: { value: 220 } },
       { id: 's', kind: 'saw', in: { freq: ['a'] } }], out: 's' })
+    expect(straight.s1).toBe(own.s1)
+    expect(straight.audio).toBe(own.audio)
+    expect(straight.samples.equals(own.samples)).toBe(true)
+    const knob = census({ nodes: [
+      { id: 'a', kind: 'knob', params: { value: 220 } },
+      { id: 'm', kind: 'mix', in: { in: ['a'] } },
+      { id: 's', kind: 'saw', in: { freq: ['m'] } }], out: 's' })
+    expect(knob.samples.equals(straight.samples)).toBe(true)
     const ring = census({ nodes: [
       { id: 'a', kind: 'knob', params: { value: 110 } },
       { id: 'b', kind: 'knob', params: { value: 2 } },
@@ -307,10 +329,18 @@ describe('PatchGraph → compile-wasm ≡ render-graph (JIT)', () => {
     const samples = run(['render-graph', path, '--frames', '1', '--buffer', '2048'])
     return { audio: Number(audio[1]), s1: Number(s1[1]), samples }
   }
+  // A knob wired straight into an anchored inlet (a freq) is anchored and a
+  // cone is not, so there the cone is compared with an unanchored knob: one
+  // passed through a one-input mix, which lowers to the knob's slot read.
+  const anchoredPorts = new Set(['pluck.freq', 'fm.carrier'])
   for (const [kind, port, value, input, params] of ports) {
     test(`${kind}.${port} = ${value}: a τ-invariant cone costs what a knob does and renders the same samples`, () => {
-      const knob = stageCensus(portGraph(kind, port, input, params,
-        [{ id: 'a', kind: 'knob', params: { value } }], 'a'))
+      const knob = anchoredPorts.has(`${kind}.${port}`)
+        ? stageCensus(portGraph(kind, port, input, params, [
+          { id: 'a', kind: 'knob', params: { value } },
+          { id: 'm', kind: 'mix', in: { in: ['a'] } }], 'm'))
+        : stageCensus(portGraph(kind, port, input, params,
+          [{ id: 'a', kind: 'knob', params: { value } }], 'a'))
       const cone = stageCensus(portGraph(kind, port, input, params, [
         { id: 'a', kind: 'knob', params: { value } },
         { id: 'b', kind: 'knob', params: { value: 1 } },

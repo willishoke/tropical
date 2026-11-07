@@ -36,7 +36,7 @@ def paramDisciplinesOf (raws : Array Raw) :
         | none => false
       if !selfWired && !ownerWired then
         let base := paramNameOf r spec.name
-        let d : Tropical.Plan.ParamDiscipline := match spec.discipline with
+        let d : Tropical.Plan.ParamDiscipline := match disciplineIn raws r spec.name with
           | .glide =>
             -- 0.005 s: the engine's glide window
             { name := base, discipline := "glide", glideDurSec := some ⟨5, 3⟩,
@@ -122,7 +122,6 @@ def realizedReportForGeneration (args : Json) (taps : Array Tropical.ScopeTap)
       (if surface.2.2.isEmpty then [("state", Json.str "normalled")]
        else [("state", Json.str "wired"),
              ("sources", Json.arr (surface.2.2.map Json.str))])
-  let kindOf : String → Option String := fun id => (raws.find? (·.id == id)).map (·.kind)
   let paramsJ := (collectParams raws).filterMap fun (nm, v) =>
     if nm.endsWith "#v1" || nm.endsWith "#t0" || nm.endsWith "#phase"
         || (nm.splitOn "#t0#u").length > 1 then none
@@ -133,7 +132,9 @@ def realizedReportForGeneration (args : Json) (taps : Array Tropical.ScopeTap)
       let disc :=
         if nm == masterVelocityParam then "velocity"
         else match nm.splitOn "." with
-          | [id, kname] => (kindOf id).map (fun k => discStr (disciplineOf k kname)) |>.getD "raw"
+          | [id, kname] =>
+            (raws.find? (·.id == id)).map (fun r => discStr (disciplineIn raws r kname))
+              |>.getD "raw"
           | _ => "raw"
       some (Json.mkObj [("name", Json.str nm),
         ("value", Json.num v), ("discipline", Json.str disc)])

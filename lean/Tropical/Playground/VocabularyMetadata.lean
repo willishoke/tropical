@@ -80,6 +80,12 @@ structure PortSpec where
   discipline : Discipline := .raw
   display : Option KnobMeta := none
   ownerPort : Option String := none
+  /-- A frequency or rate inlet: a wire into it must be constant within a
+      kernel call (a knob, arithmetic on knobs, a constant). Its generator's
+      phase is `inc·τ`, exact only for a constant increment, so a time-varying
+      wire is refused at compile time; pitch modulation goes through `pm` or
+      `fm`, which are exact. -/
+  uniform : Bool := false
 deriving Repr
 
 def sigIn : Array PortDomain := #[.signal, .modal, .control]
@@ -101,28 +107,28 @@ def portSpecs : String → Array PortSpec
         display := some { min := 0, max := 1000 } }]
   | "source" => #[
       { name := "freq", accepts := sigIn, knob := some (220, 0), discipline := .anchor,
-        display := some { min := 0.02, max := 2000, log := true, unit := "Hz" } },
+        display := some { min := 0.02, max := 2000, log := true, unit := "Hz" }, uniform := true },
       { name := "morph", accepts := sigIn, knob := some (0, 0), discipline := .glide,
         display := some { min := 0, max := 1 } },
       { name := "pm", accepts := sigIn }]
   | "sine" => #[
       { name := "freq", accepts := sigIn, knob := some (220, 0), discipline := .anchor,
-        display := some { min := 0.02, max := 8000, log := true, unit := "Hz" } }]
+        display := some { min := 0.02, max := 8000, log := true, unit := "Hz" }, uniform := true }]
   | "saw" => #[
       { name := "freq", accepts := sigIn, knob := some (220, 0), discipline := .anchor,
-        display := some { min := 0.02, max := 8000, log := true, unit := "Hz" } }]
+        display := some { min := 0.02, max := 8000, log := true, unit := "Hz" }, uniform := true }]
   | "pulse" => #[
       { name := "freq", accepts := sigIn, knob := some (220, 0), discipline := .anchor,
-        display := some { min := 0.02, max := 8000, log := true, unit := "Hz" } },
+        display := some { min := 0.02, max := 8000, log := true, unit := "Hz" }, uniform := true },
       { name := "width", accepts := sigIn, knob := some (5, 1),
         display := some { min := 0.01, max := 0.99 } }]
   | "pluck" => #[
       { name := "freq", accepts := sigIn, knob := some (110, 0), discipline := .anchor,
-        display := some { min := 20, max := 2000, log := true, unit := "Hz" } },
+        display := some { min := 20, max := 2000, log := true, unit := "Hz" }, uniform := true },
       { name := "morph", accepts := sigIn, knob := some (0, 0), discipline := .glide,
         display := some { min := 0, max := 1 } },
       { name := "event_rate", accepts := sigIn, knob := some (2, 0), discipline := .glide,
-        display := some { min := 0.1, max := 20, log := true, unit := "Hz" } }]
+        display := some { min := 0.1, max := 20, log := true, unit := "Hz" }, uniform := true }]
   | "comb" => #[
       { name := "in", accepts := sigIn, multi := true },
       { name := "delay", accepts := sigIn, knob := some (12, 3), discipline := .glide,
@@ -147,7 +153,7 @@ def portSpecs : String → Array PortSpec
   | "fm" => #[
       { name := "in", accepts := sigIn, multi := true },
       { name := "carrier", accepts := sigIn, knob := some (330, 0), discipline := .anchor,
-        display := some { min := 20, max := 2000, log := true, unit := "Hz" } },
+        display := some { min := 20, max := 2000, log := true, unit := "Hz" }, uniform := true },
       { name := "depth", accepts := sigIn, knob := some (8, 0), discipline := .glide,
         display := some { min := 1, max := 400, log := true } }]
   | "delay" => #[
@@ -182,14 +188,15 @@ def portSpecs : String → Array PortSpec
       { name := "sweep", accepts := sigIn, knob := some (15, 1), discipline := .glide,
         display := some { min := 0, max := 3, unit := "oct" } },
       { name := "rate", accepts := sigIn, knob := some (2, 1), discipline := .glide,
-        display := some { min := 0.02, max := 8, log := true, unit := "Hz" } },
+        display := some { min := 0.02, max := 8, log := true, unit := "Hz" }, uniform := true },
       { name := "mix", accepts := sigIn, knob := some (5, 1), discipline := .glide,
         display := some { min := 0, max := 1 } }]
   | "modal_allpass_tail" => #[
       { name := "in", accepts := modalIn, multi := true },
       { name := "center", accepts := sigIn, knob := some (700, 0), discipline := .glide },
       { name := "sweep", accepts := sigIn, knob := some (15, 1), discipline := .glide },
-      { name := "rate", accepts := sigIn, knob := some (2, 1), discipline := .glide }]
+      { name := "rate", accepts := sigIn, knob := some (2, 1), discipline := .glide,
+        uniform := true }]
   | "modalblend" => #[
       { name := "dry", accepts := modalIn },
       { name := "wet", accepts := modalIn },
@@ -235,6 +242,10 @@ def disciplineOf (kind kname : String) : Discipline :=
 
 def isGlided (kind kname : String) : Bool := disciplineOf kind kname == .glide
 def isAnchored (kind kname : String) : Bool := disciplineOf kind kname == .anchor
+
+/-- Does this inlet take only a value constant within a kernel call? -/
+def isUniform (kind kname : String) : Bool :=
+  ((portOf kind kname).map (·.uniform)).getD false
 
 def displayRangeOf (kind kname : String) : Option (Float × Float) :=
   ((portOf kind kname).bind (·.display)).map fun display =>
