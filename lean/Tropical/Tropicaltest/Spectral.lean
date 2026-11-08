@@ -443,13 +443,159 @@ def runAlgebra (arena : Arena) : IO Bool := do
   else
     failGate label "envelope algebra or refusals wrong"
 
+-- ── playground kinds: harmonic and envelope ─────────────────────────────
+
+private def pnode (id kind : String) (params : List (String × Lean.Json) := [])
+    (ins : List (String × Array String) := []) : Lean.Json :=
+  Lean.Json.mkObj [("id", .str id), ("kind", .str kind), ("params", Lean.Json.mkObj params),
+    ("in", Lean.Json.mkObj (ins.map fun (port, sources) =>
+      (port, Lean.Json.arr (sources.map Lean.Json.str))))]
+
+private def pgraph (nodes : Array Lean.Json) (out : String) (taps : Array String := #[]) :
+    Lean.Json :=
+  Lean.Json.mkObj ([("nodes", Lean.Json.arr nodes), ("out", Lean.Json.str out)] ++
+    (if taps.isEmpty then [] else [("taps", Lean.Json.arr (taps.map Lean.Json.str))]))
+
+private def jn (mantissa : Int) (exponent : Nat := 0) : Lean.Json := .num ⟨mantissa, exponent⟩
+
+/-- **playground-envelope-equiv** — a playground `harmonic → envelope` graph
+    against the Lean builders. Static controls: the graph (a cosine harmonic,
+    200 partials, tilt 1, lowpass at 800 Hz, Q 0.7) is bit-identical to
+    `SpectralLowpassSaw`'s body (`lowpassSawSig`) at τ = 0 and ten hours in.
+    Animated controls: the graph's cutoff wired from an LFO patched out of
+    playground nodes (`800 + 600·sin(2π·30·τ)`), at 48 kHz with 181
+    partials, against the oracle sweep's closed form fed the kernel's own
+    cutoff samples (the `envelope-oracle` operator comparison). -/
+def runPlaygroundEquiv (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let label := "playground-envelope-equiv"
+  let refPlan ← match compileMulti arena "playground_lowpass_ref" (do
+      let clock ← clockLit
+      pure #[← lowpassSawSig (← lit 110) (← lit 800) (← lit 7 1) clock]) 44100 with
+    | .ok p => pure p
+    | .error e => return ← failGate label s!"fixture build: {firstLine e}"
+  let staticGraph := pgraph #[
+      pnode "h" "harmonic" [("freq", jn 110), ("partials_max", jn 200), ("partials", jn 200),
+        ("wave", .str "cosine")],
+      pnode "e" "envelope" [("cutoff", jn 800), ("q", jn 7 1)] [("in", #["h"])]] "e" #["e"]
+  let staticPlan ← match Tropical.Playground.compilePlanPure arena resolved staticGraph 44100 with
+    | .ok c => pure c.plan
+    | .error e => return ← failGate label s!"static graph compile: {firstLine e}"
+  let mut ok := true
+  for start in #[0, 36000 * 44100] do
+    let reference ← renderAt refPlan 1 (range start 4096)
+    let graph ← renderAt staticPlan 2 (range start 4096)
+    let diffs := bitDiffCount reference[0]! graph[1]!
+    let energy := energyOf reference[0]!
+    ok := ok && diffs == 0 && energy > 0.0
+    IO.println s!"        static: τ0={start} — playground harmonic→envelope vs SpectralLowpassSaw body: {diffs} bit-diffs over 4096 samples (peak {fmt (peakOf reference[0]!) 3})"
+  let animatedGraph := pgraph #[
+      pnode "h" "harmonic" [("freq", jn 110), ("partials_max", jn 181), ("partials", jn 181),
+        ("wave", .str "cosine")],
+      pnode "lfo" "sine" [("freq", jn 30)],
+      pnode "c0" "knob" [("value", jn 800)],
+      pnode "span" "knob" [("value", jn 600)],
+      pnode "sw" "ring" [] [("in", #["lfo", "span"])],
+      pnode "c" "mix" [] [("in", #["c0", "sw"])],
+      pnode "e" "envelope" [("q", jn 4)] [("in", #["h"]), ("cutoff", #["c"])]] "e" #["e", "c"]
+  let animatedPlan ← match Tropical.Playground.compilePlanPure arena resolved animatedGraph 48000 with
+    | .ok c => pure c.plan
+    | .error e => return ← failGate label s!"animated graph compile: {firstLine e}"
+  let mut worst := -1000.0
+  for start in #[0, 3600 * 48000] do
+    let samples := range start 1024
+    let out ← renderAt animatedPlan 3 samples
+    let y := out[1]!
+    let cutoff := out[2]!
+    let reference := samples.mapIdx fun i n => oracleSample 4.0 cutoff[i]! n true
+    let nmse := nmseDb y reference
+    worst := max worst nmse
+    IO.println s!"        animated: τ0={start} — cutoff {fmt (cutoff.foldl min 1e9) 0}..{fmt (cutoff.foldl max 0) 0} Hz, operator NMSE {fmt nmse 1} dB vs the oracle closed form (peak {fmt (peakOf y) 3})"
+  ok := ok && worst < -160.0
+  if ok then
+    passGate label "harmonic→envelope graph ≡ SpectralLowpassSaw bit-exact (τ0 = 0 and 10 h); LFO-driven cutoff ≡ oracle closed form < −160 dB NMSE (τ0 = 0 and 1 h)"
+  else
+    failGate label "the playground graph departs from the Lean builders"
+
+/-- **playground-envelope-algebra** — what an `envelope` node composes with and
+    what it refuses, through the real playground compile. Refused, each with
+    the message naming the node and its wire: a plain sine, a ring of two
+    harmonics, a delayed harmonic, and a VCA by a time-varying signal.
+    Accepted: harmonic → envelope, mix(harmonic, harmonic) → envelope (bit
+    for bit the mix of two enveloped harmonics: the sum distributes), and a
+    knob VCA (bit for bit the knob times the enveloped harmonic). -/
+def runPlaygroundAlgebra (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO Bool := do
+  let label := "playground-envelope-algebra"
+  let compile := fun (g : Lean.Json) => Tropical.Playground.compilePlanPure arena resolved g 44100
+  let env := fun (src : String) => pnode "e" "envelope" [] [("in", #[src])]
+  let refusals : Array (String × Array Lean.Json × String × String) := #[
+    ("a plain sine", #[pnode "osc" "sine" [("freq", jn 220)], env "osc"], "osc",
+      "spectral envelope over the generator 'osc'"),
+    ("a ring of two harmonics", #[pnode "a" "harmonic", pnode "b" "harmonic" [("freq", jn 220)],
+      pnode "r" "ring" [] [("in", #["a", "b"])], env "r"], "r", "spectral envelope over a product"),
+    ("a delayed harmonic", #[pnode "a" "harmonic", pnode "d" "delay" [] [("in", #["a"])], env "d"],
+      "d", "spectral envelope over a warped term"),
+    ("a VCA by an LFO", #[pnode "a" "harmonic", pnode "lfo" "sine" [("freq", jn 3)],
+      pnode "v" "ring" [] [("in", #["a", "lfo"])], env "v"], "v", "spectral envelope over a product")]
+  let mut ok := true
+  for (what, nodes, src, needle) in refusals do
+    match compile (pgraph nodes "e") with
+    | .ok _ =>
+      ok := false
+      IO.println s!"        {what}: compiled (expected a refusal)"
+    | .error e =>
+      let site := s!"'e' (envelope) inlet 'in' (wired from '{src}')"
+      let supported := "an envelope applies to partial families (a `harmonic`), mixes of them and constant scalings of them"
+      let hit := (e.splitOn site).length > 1 && (e.splitOn needle).length > 1
+        && (e.splitOn supported).length > 1
+      ok := ok && hit
+      IO.println s!"        {what}: refused {if hit then "with the message" else s!"WITH THE WRONG MESSAGE: {firstLine e}"}"
+  -- acceptance, with the algebra checked on the samples
+  let mixGraph := pgraph #[
+      pnode "a" "harmonic" [("freq", jn 110)], pnode "b" "harmonic" [("freq", jn 165), ("tilt", jn 2)],
+      pnode "m" "mix" [] [("in", #["a", "b"])],
+      pnode "e" "envelope" [("shape", .str "bandpass")] [("in", #["m"])],
+      pnode "ea" "envelope" [("shape", .str "bandpass")] [("in", #["a"])],
+      pnode "eb" "envelope" [("shape", .str "bandpass")] [("in", #["b"])],
+      pnode "m2" "mix" [] [("in", #["ea", "eb"])]] "e" #["e", "m2"]
+  let vcaGraph := pgraph #[
+      pnode "h" "harmonic" [("freq", jn 110)],
+      pnode "e1" "envelope" [] [("in", #["h"])],
+      pnode "k" "knob" [("value", jn 5 1)],
+      pnode "v" "ring" [] [("in", #["h", "k"])],
+      pnode "e2" "envelope" [] [("in", #["v"])]] "e2" #["e1", "e2"]
+  let plainGraph := pgraph #[pnode "h" "harmonic", env "h"] "e"
+  match compile plainGraph with
+  | .ok _ => IO.println "        harmonic → envelope: compiles"
+  | .error e => ok := false; IO.println s!"        harmonic → envelope: {firstLine e}"
+  match compile mixGraph with
+  | .ok c =>
+    let out ← renderAt c.plan 3 (range 0 4096)
+    let diffs := bitDiffCount out[1]! out[2]!
+    ok := ok && diffs == 0 && energyOf out[1]! > 0.0
+    IO.println s!"        mix(harmonic, harmonic) → envelope: compiles; vs mix of enveloped harmonics {diffs} bit-diffs"
+  | .error e => ok := false; IO.println s!"        mix → envelope: {firstLine e}"
+  match compile vcaGraph with
+  | .ok c =>
+    let out ← renderAt c.plan 3 (range 0 4096)
+    let halved := out[1]!.map (0.5 * ·)
+    let diffs := bitDiffCount halved out[2]!
+    ok := ok && diffs == 0 && energyOf out[2]! > 0.0
+    IO.println s!"        ring(harmonic, knob 0.5) → envelope: compiles; vs 0.5 × enveloped harmonic {diffs} bit-diffs"
+  | .error e => ok := false; IO.println s!"        knob VCA → envelope: {firstLine e}"
+  if ok then
+    passGate label "sine / ring of harmonics / delayed harmonic / LFO VCA refused naming node and wire; harmonic, mix (distributes, bit-exact) and knob VCA (bit-exact) compile"
+  else
+    failGate label "a refusal or an acceptance is wrong"
+
 def runSpectral (arena : Arena) (resolved : Array (String × ProgramIdx)) : IO (Nat × Nat) := do
   let results := #[
     ← runPlanSize arena,
     ← runOldSaw arena resolved,
     ← runOracle arena,
     ← runResidue arena,
-    ← runAlgebra arena]
+    ← runAlgebra arena,
+    ← runPlaygroundEquiv arena resolved,
+    ← runPlaygroundAlgebra arena resolved]
   pure (results.size, results.filter (!·) |>.size)
 
 end Tropical.Tropicaltest.Spectral

@@ -93,6 +93,14 @@ def sawFamily (freq : Sig) (phase : Option Sig) (clk : Clock) (count : Nat)
     (wave : PartialWave := .sine) : BuildM PartialFamily := do
   pure { name := "saw", freq, phase, clk, count, weights := ← sawWeights count, wave }
 
+/-- `SpectralLowpassSaw`'s body: the 200-partial zero-phase cosine saw family
+    under a complex SVF lowpass with cutoff and Q as signals. The playground
+    equivalence gate builds the same body with literal inputs. -/
+def lowpassSawSig (f0 cutoff q : Sig) (clk : Clock) : BuildM Sig := do
+  let family ← sawFamily f0 none clk fixtureCount (wave := .cosine)
+  let term := svfEnvelope .lowpass (.konst cutoff) (.konst q) (.family family)
+  emitTerm (normalize term)
+
 private def floatIn (name : String) (mantissa : Int) (exponent : Nat := 0) :
     BuildM AInputDecl := do
   pure (floatDecl name (← lit mantissa exponent))
@@ -119,9 +127,7 @@ def buildSpectralLowpassSaw (arena : Arena) : Except String (Arena × ProgramIdx
     let cutoff ← inputRef ⟨1⟩
     let q ← inputRef ⟨2⟩
     let clk ← inputRef ⟨3⟩
-    let family ← sawFamily f0 none clk fixtureCount (wave := .cosine)
-    let term := svfEnvelope .lowpass (.konst cutoff) (.konst q) (.family family)
-    let out ← emitTerm (normalize term)
+    let out ← lowpassSawSig f0 cutoff q clk
     pure {
       inputs := #[← floatIn "f0" 110, ← floatIn "cutoff" 800, ← floatIn "q" 7 1,
         ← clockIn "clk"]

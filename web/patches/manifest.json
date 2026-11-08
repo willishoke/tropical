@@ -2,5 +2,17 @@
   { "slug": "pure-sine-440", "title": "Pure Sine 440", "description": "A plain SinOsc at 440 Hz. The smallest thing tropical does." },
   { "slug": "ring-mod", "title": "Ring Mod", "description": "Two SinOscs (220 Hz × 331 Hz) multiplied through a VCA — dissonant partials." },
   { "slug": "tz-flanger", "title": "Through-Zero Flanger", "description": "A stateless through-zero flanger: an LFO sweeps the two offset taps of a reversible comb through zero on a 110 Hz modal drone. The ahead tap reads the future." },
-  { "slug": "tz-saw", "title": "Through-Zero Saw", "description": "A playground PatchGraph: a 110 Hz polyBLEP saw through a through-zero flanger patched from delay, ring and mix. The delay time is an LFO, so the tap sweeps through zero and reads ahead." }
+  { "slug": "tz-saw", "title": "Through-Zero Saw", "description": "A playground PatchGraph: a 110 Hz polyBLEP saw through a through-zero flanger patched from delay, ring and mix. The delay time is an LFO, so the tap sweeps through zero and reads ahead." },
+  { "slug": "spectral-filter-fm", "title": "Spectral Filter FM",
+    "description": "A 128-partial harmonic saw (a partial family, phase-exact at any τ) under a complex spectral lowpass envelope whose cutoff an LFO sweeps — slow, or up into audio rate for filter FM. The envelope multiplies each partial by the filter shape at its own frequency; there is no filter state.",
+    "knobs": [
+      {"param": "f0.value", "label": "f0", "min": 27.5, "max": 440, "log": true, "unit": "Hz"},
+      {"param": "tilt.value", "label": "tilt", "min": 0, "max": 3},
+      {"param": "even.value", "label": "even", "min": 0, "max": 1},
+      {"param": "q.value", "label": "Q", "min": 0.5, "max": 20, "log": true},
+      {"param": "center.value", "label": "cutoff", "min": 100, "max": 4000, "log": true, "unit": "Hz"},
+      {"param": "rate.value", "label": "LFO rate", "min": 0.05, "max": 400, "log": true, "unit": "Hz"},
+      {"param": "depth.value", "label": "LFO depth", "min": 0, "max": 2000, "unit": "Hz"},
+      {"param": "level.value", "label": "level", "min": 0, "max": 0.2}
+    ] }
 ]

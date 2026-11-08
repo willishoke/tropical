@@ -576,9 +576,30 @@ private def placementFromStages (blocks : Array (Array NInstr))
   -- and `loopIdx` readers are pinned by `overlayS1` like a reduce's, and its
   -- other members must never be peeled by layer 1 either — a routed body is
   -- one mapped value per item, indivisible by the emit contract.
+  -- Loop taint: an instruction that reads `loopIdx`, or reads a temp whose
+  -- reaching def is tainted, varies per iteration. The intern-time value
+  -- stage treats `loopIdx` as stage-neutral, so `toFloat(k + 1)` (no τ, no
+  -- slot) is `fold` by value; without the taint the individual walk would
+  -- duplicate it into the coefficient stream, where its loop-reading operand
+  -- has no def and reads as zero. Taint follows the reaching def in the
+  -- linear stream, so a region's accumulator escapes clean at `ReduceEnd`.
+  let loopTainted : Array Bool := Id.run do
+    let mut taint : Array Bool := #[]
+    let mut defOf : HashMap Nat Nat := {}
+    for i in [0:flat.size] do
+      let instr := flat[i]!
+      let tainted := instr.args.any fun a => match a with
+        | .loopIdx _ => true
+        | .reg t _ => match defOf.get? t with
+          | some d => taint[d]!
+          | none => false
+        | _ => false
+      taint := taint.push tainted
+      if let .temp t := instr.dst then defOf := defOf.insert t i
+    return taint
   let stageAt (i : Nat) : Stage :=
     match linStages[i]? with
-      | some (some s) => if overlayS1 flat[i]! then .s1 else s
+      | some (some s) => if overlayS1 flat[i]! || loopTainted[i]! then .s1 else s
       | _ => .s1
   -- Region-neutral value stage: for the WHOLE-REGION decision the
   -- delimiters and `loopIdx` are defined by the region itself, so only

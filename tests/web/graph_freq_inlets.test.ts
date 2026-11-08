@@ -74,6 +74,8 @@ const inlets: [kind: string, port: string, value: number, other: Record<string, 
   ['sine', 'freq', 440, {}],
   ['saw', 'freq', 440, {}],
   ['pulse', 'freq', 440, {}],
+  ['harmonic', 'freq', 440, {}],
+  ['harmonic', 'partials', 16, {}],
   ['pluck', 'freq', 440, {}],
   ['pluck', 'event_rate', 4, {}],
   ['fm', 'carrier', 440, { in: ['lfo'] }],
@@ -112,7 +114,12 @@ describe('a time-varying wire into a frequency or rate inlet is refused', () => 
           const label = kind === 'phaser' ? `'x' (a module; its modal_allpass_tail 'tail')` : `'x' (${kind})`
           expect(err).toContain(`time-varying ${port}: ${label} inlet '${port}' is wired from '${driver}', which varies over time`)
           expect(err).toContain('constant within a kernel call: a knob, arithmetic on knobs, or a constant')
-          if (pitchPorts.has(port)) {
+          if (kind === 'harmonic') {
+            // a family's fundamental: pitch moves through a clock warp after it
+            if (port === 'freq') expect(err).toContain('a phase-modulated family')
+            if (port === 'freq') expect(err).toContain("a `delay` whose `amount` is the signal")
+            if (port === 'partials') expect(err).toContain("trip count")
+          } else if (pitchPorts.has(port)) {
             expect(err).toContain("a `source`'s `pm` inlet")
             expect(err).toContain("an `fm` node's `in`")
           }
@@ -151,6 +158,9 @@ describe('knob arithmetic into a freq inlet plays its pitch', () => {
     ['pulse', { width: 0.5 }, {}],
     ['source', { morph: 0 }, {}],
     ['fm', { depth: 0 }, { in: ['zero'] }],
+    // the partial family: a 64-partial band-limited saw, one upward zero
+    // crossing per period (at the ramp's reset)
+    ['harmonic', {}, {}],
   ]
   const cones: [label: string, nodes: object[]][] = [
     ['110 × 2', [
@@ -224,7 +234,8 @@ describe('a knob wired straight into a freq inlet is anchored', () => {
       { id: 'k', kind: 'knob', params: { value: 330 } },
       { id: 's', kind: 'saw', in: { freq: ['k'] } },
       { id: 'q', kind: 'sine', in: { freq: ['k'] } },
-      { id: 'm', kind: 'mix', in: { in: ['s', 'q'] } }], out: 'm' })
+      { id: 'h', kind: 'harmonic', in: { freq: ['k'] } },
+      { id: 'm', kind: 'mix', in: { in: ['s', 'q', 'h'] } }], out: 'm' })
     expect(JSON.stringify(straight.get('param:k.value'))).toContain('"anchor"')
     expect(JSON.stringify(straight.get('param:k.value'))).toContain('k.value#phase')
     expect(straight.has('param:k.value#phase')).toBe(true)

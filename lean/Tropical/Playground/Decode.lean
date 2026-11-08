@@ -56,12 +56,20 @@ def uniformRefusal (label kind port source : String) : String :=
   let advice := match kind with
     | "phaser" | "modal_allpass_tail" =>
       " To move the sweep with a signal, wire it into `center` or `sweep`."
+    | "harmonic" =>
+      if port == "partials" then
+        " The partial count is the family's trip count, fixed within a call. To move the timbre with a signal, wire it into `tilt` or `even`, or into an envelope's `cutoff`."
+      else
+        " A moving fundamental is a phase-modulated family, not yet supported (S5). To modulate pitch, pass the harmonic (or its envelope) through a `delay` whose `amount` is the signal (a clock warp)."
     | "pluck" =>
       if port == "event_rate" then "" else
         " To modulate pitch, wire the signal into a `source`'s `pm` inlet (phase modulation) or into an `fm` node's `in` (frequency modulation, a clock warp)."
     | _ =>
       " To modulate pitch, wire the signal into a `source`'s `pm` inlet (phase modulation) or into an `fm` node's `in` (frequency modulation, a clock warp)."
-  s!"time-varying {port}: {label} inlet '{port}' is wired from '{source}', which varies over time. This inlet takes only a value constant within a kernel call: a knob, arithmetic on knobs, or a constant. The phase is computed as {port}·τ, which is exact only while {port} is constant.{advice}"
+  let why := if kind == "harmonic" && port == "partials" then
+      "The family's region trips this many partials per call."
+    else s!"The phase is computed as {port}·τ, which is exact only while {port} is constant."
+  s!"time-varying {port}: {label} inlet '{port}' is wired from '{source}', which varies over time. This inlet takes only a value constant within a kernel call: a knob, arithmetic on knobs, or a constant. {why}{advice}"
 
 /-- A generator control: a wire from a knob reads the knob's own slot (a fixed,
     τ-invariant expression, exactly as before); a wire from any other Sig node
@@ -110,6 +118,90 @@ private def boundedFilterPair (cutoff resonance : Sig) : BuildM (Array ModalMode
     | some (lo, hi) => clampE value (← litF lo) (← litF hi)
     | none => pure value
   filterPair (← bounded cutoff "cutoff") (← bounded resonance "resonance")
+
+/-- A `harmonic` node's structural fields (`params`, not slots): the capacity
+    `partials_max`, the projection `wave`, and an optional literal base table
+    `table`. Every malformed field is an error naming the node. -/
+structure HarmonicSpec where
+  capacity : Nat
+  wave : PartialWave
+  table : Option (Array JsonNumber)
+
+def harmonicSpec (label : String) (params : Json) : Except String HarmonicSpec := do
+  let table ← match params.getObjVal? "table" with
+    | .error _ => pure none
+    | .ok (.arr values) =>
+      let numbers := values.filterMap (·.getNum?.toOption)
+      if numbers.size != values.size || numbers.isEmpty then
+        throw s!"{label}: `table` must be a non-empty array of numbers (one weight per partial)"
+      pure (some numbers)
+    | .ok _ => throw s!"{label}: `table` must be a non-empty array of numbers (one weight per partial)"
+  let capacity ← match params.getObjVal? "partials_max" with
+    | .error _ => pure ((table.map (·.size)).getD 64)
+    | .ok (.num n) =>
+      if n.exponent != 0 || n.mantissa < 1 then
+        throw s!"{label}: `partials_max` must be a positive integer"
+      pure n.mantissa.toNat
+    | .ok _ => throw s!"{label}: `partials_max` must be a positive integer"
+  if capacity > familyCapacity then
+    throw s!"{label}: `partials_max` {capacity} exceeds the family's capacity of {familyCapacity} partials"
+  if let some t := table then
+    if t.size != capacity then
+      throw s!"{label}: `table` has {t.size} weights but `partials_max` is {capacity}"
+  let wave ← match params.getObjVal? "wave" with
+    | .error _ => pure PartialWave.sine
+    | .ok (.str "sine") => pure .sine
+    | .ok (.str "cosine") => pure .cosine
+    | .ok other => throw s!"{label}: unknown wave {other.compress}; a harmonic's wave is \"sine\" or \"cosine\""
+  pure { capacity, wave, table }
+
+/-- The `harmonic` family from its control signals `#[freq, tilt, even,
+    partials]`: weights `w_k = base_k · k^(−tilt) · (k even ? even : 1)`.
+    Without a table `base_k = 1`, and `k^(−tilt)` is computed as
+    `(1/k)·exp((1 − tilt)·ln k)` from exact `1/k` and `ln k` columns, so at
+    tilt 1 the weight is the saw's `1/k` bit for bit (`exp 0 = 1` exactly). -/
+def harmonicFamily (id : String) (spec : HarmonicSpec) (phase? : Option Sig)
+    (clk : Clock) (controls : Array Sig) : BuildM PartialFamily := do
+  let control := fun (i : Nat) => match controls[i]? with
+    | some value => pure value
+    | none => throw s!"harmonic '{id}': unreachable (control {i} missing)"
+  let freq ← control 0
+  let tilt ← control 1
+  let even ← control 2
+  let partials ← control 3
+  let ks := (Array.range spec.capacity).map (· + 1)
+  -- `ln k` in exact arithmetic (the bake layer calls no libm; `exact-corpse`),
+  -- rounded once to the double the literal carries exactly.
+  let lnK ← ks.mapM fun k => litExact (Tropical.Exact.DyadicI.log (Tropical.Exact.DyadicI.ofNat k)).toFloat
+  let (base, tableMode) ← match spec.table with
+    | some table => pure (← table.mapM fun n => lit n.mantissa n.exponent, true)
+    | none => pure (← ks.mapM fun k => litExact (1.0 / k.toFloat), false)
+  let weight := fun (cols ins : Array Sig) (n _kf : Sig) => do
+    let baseK := cols[0]!
+    let lnKk := cols[1]!
+    let tiltNow := ins[0]!
+    let evenNow := ins[1]!
+    let exponent ← if tableMode then neg tiltNow else sub (← lit 1) tiltNow
+    let slope ← expSig (← mul exponent lnKk)
+    let w ← mul baseK slope
+    let parity ← toFloatE (← bitAnd n (← litI 1))
+    let isOdd ← gt parity (← lit 5 1)
+    selectE isOdd w (← mul w evenNow)
+  pure {
+    name := id, freq, phase := phase?, clk, count := spec.capacity
+    liveCount := some partials
+    weights := .closedForm #[base, lnK] #[tilt, even] weight
+    wave := spec.wave }
+
+/-- An `envelope` node's shape (`params.shape`, structural). -/
+def envelopeShape (label : String) (params : Json) : Except String SvfResponse :=
+  match params.getObjVal? "shape" with
+  | .error _ => pure .lowpass
+  | .ok (.str "lowpass") => pure .lowpass
+  | .ok (.str "bandpass") => pure .bandpass
+  | .ok (.str "highpass") => pure .highpass
+  | .ok other =>
+    throw s!"{label}: unknown shape {other.compress}; an envelope's shape is \"lowpass\", \"bandpass\" or \"highpass\""
 
 def buildNodeWithParamNames (pidx : String → Option Nat)
     (paramName : String → String) (id kind : String)
@@ -223,6 +315,37 @@ def buildNodeWithParamNames (pidx : String → Option Nat)
         let half ← lit 5 1
         blepPulse p (← phaseIncrementOf ((cs[0]?).getD pitchDefault)) ((cs[1]?).getD half)
       pure (.sourceC mk post clk #[freq, width], #[])
+  | "harmonic" =>
+    -- One family term (`ArrowTerm.familyC`): its controls are lowered as
+    -- terms in this node's clock context; `freq` and `partials` are uniform
+    -- inlets, `tilt` and `even` take any wire. Anchored like `saw`.
+    let spec ← match harmonicSpec label params with
+      | .ok spec => pure spec
+      | .error e => throw e
+    let freqC ← controlOf kind params inObj "freq"
+    let tiltC ← controlOf kind params inObj "tilt"
+    let evenC ← controlOf kind params inObj "even"
+    let partialsC ← controlOf kind params inObj "partials"
+    let phase? ← anchorPhase? "freq"
+    let body := fun (_ : Array ArrowTerm) (cs : Array ArrowTerm) =>
+      pure (ArrowTerm.familyC (harmonicFamily id spec phase? clk) cs)
+    pure (.effectC #[] #[freqC, tiltC, evenC, partialsC] body, #[])
+  | "envelope" =>
+    -- The envelope wraps the TERM on its `in` wire (`ArrowTerm.envelope`);
+    -- `normalize` distributes it to the families below, and emission refuses
+    -- anything it cannot sit on, naming this node and wire (`site`).
+    let shape ← match envelopeShape label params with
+      | .ok shape => pure shape
+      | .error e => throw e
+    let cutoffC ← controlOf kind params inObj "cutoff"
+    let qC ← controlOf kind params inObj "q"
+    let sources := Tropical.Playground.Metadata.portSources inObj "in"
+    let wired := if sources.isEmpty then "unwired"
+      else "wired from " ++ ", ".intercalate (sources.toList.map (s!"'{·}'"))
+    let law := { svfEnvelopeLaw shape with site := some s!"{label} inlet 'in' ({wired})" }
+    let body := fun (ins cs : Array ArrowTerm) =>
+      pure (ArrowTerm.envelope law cs ((ins[0]?).getD (.sum #[])))
+    pure (.effectC #[signalInput] #[cutoffC, qC] body, signalFanIn)
   | "pluck" =>
     let pitchDefault ← defaultValue kind params "freq"
     let freqC ← controlOf kind params inObj "freq"

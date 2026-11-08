@@ -117,6 +117,12 @@ inductive ArrowTerm where
       algebra sees it as a bundle — an envelope distributes down to it — and it lowers
       to one `bankSum` region. -/
   | family (f : PartialFamily)
+  /-- A CONTROL-DRIVEN partial family: `controls` are signal terms evaluated
+      in the family's clock context, as `genC`'s are, and `mk` builds the
+      family from their signals (a uniform fundamental and live count, live
+      weight-law inputs). It is a family to the algebra: an envelope stops
+      above it and multiplies its partials. -/
+  | familyC (mk : Array Sig → BuildM PartialFamily) (controls : Array ArrowTerm)
   /-- A COMPLEX SPECTRAL ENVELOPE over `t`: each partial of `t` is multiplied
       by `G(f_k, τ)` at its own frequency (amplitude × |G|, phase + arg G).
       `controls` are signal terms evaluated in the envelope's clock context,
@@ -158,6 +164,8 @@ def normalize : ArrowTerm → ArrowTerm
   | .genC mk post name clk controls =>
       .genC mk post name clk (controls.attach.map fun ⟨t, _⟩ => normalize t)
   | .family f => .family f
+  | .familyC mk controls =>
+      .familyC mk (controls.attach.map fun ⟨t, _⟩ => normalize t)
   | .envelope law controls t =>
       envelopeInto law (controls.attach.map fun ⟨c, _⟩ => normalize c) (normalize t)
 
@@ -195,9 +203,35 @@ def Voice.withPhaseOffset (v : Voice) (offset : BuildM Sig) : Voice :=
 abbrev PendingEnvelope := EnvelopeLaw × Array Sig
 
 /-- The refusal for an envelope over a term whose partials the algebra cannot
-    see. -/
-def envelopeRefusal (what : String) : String :=
-  s!"spectral envelope over {what}: an envelope applies to partial families, through sum and scale; this term's partials are not visible to the algebra"
+    see. `envs` are the pending envelopes; the innermost one's authoring site
+    (a patch node and its input wire), if it has one, leads the message. -/
+def envelopeRefusal (envs : Array PendingEnvelope) (what : String)
+    (hint : String := "") : String :=
+  let site := match (envs.back?.bind (·.1.site)) with
+    | some site => s!"{site}: "
+    | none => ""
+  s!"{site}spectral envelope over {what}: an envelope applies to partial families (a `harmonic`), mixes of them and constant scalings of them; this term's partials are not visible to the algebra{hint}"
+
+/-- Does `t` have no clock-reading leaf: a constant, or sums, products,
+    scalings and pointwise maps of constants? Such a factor of a product is a
+    candidate scalar; emission confirms it is stage 0 (`sigIsS0`). -/
+def ArrowTerm.isScalar : ArrowTerm → Bool
+  | .konst _ => true
+  | .scale _ t => t.isScalar
+  | .arrUn _ t => t.isScalar
+  | .arrN _ ts => ts.attach.all fun ⟨t, _⟩ => t.isScalar
+  | .sum ts => ts.attach.all fun ⟨t, _⟩ => t.isScalar
+  | .prod x y => x.isScalar && y.isScalar
+  | _ => false
+
+private def generatorHint : String :=
+  " (an oscillator's output is opaque to the algebra; a `harmonic` is a partial family)"
+
+private def productHint : String :=
+  " (a product of two signals that vary over time, such as a ring of two families or a VCA by a time-varying signal, is S4, not yet supported; a VCA by a knob is a constant scaling and composes)"
+
+private def warpHint : String :=
+  " (a warp or delay between an envelope and its family needs the warped partial frequency, S5, not yet supported; put the delay after the envelope)"
 
 /-- Emit under an enclosing clock transform, with the spectral envelopes that
     apply to this subterm.  Children, modulators, instance declarations, and
@@ -209,7 +243,7 @@ def envelopeRefusal (what : String) : String :=
 def emitTermE (cmod : Clock → BuildM Clock) (envs : Array PendingEnvelope) :
     ArrowTerm → BuildM Sig
   | .gen v name clk => do
-      unless envs.isEmpty do throw (envelopeRefusal s!"the generator '{name}'")
+      unless envs.isEmpty do throw (envelopeRefusal envs s!"the generator '{name}'" generatorHint)
       let warpedClk ← cmod clk
       let builder ← get
       Builder.osc v s!"{name}{builder.decls.size}" warpedClk
@@ -217,37 +251,54 @@ def emitTermE (cmod : Clock → BuildM Clock) (envs : Array PendingEnvelope) :
       let signal ← emitTermE cmod envs t
       mul weight signal
   | .arrUn f t => do
-      unless envs.isEmpty do throw (envelopeRefusal "a pointwise map")
+      unless envs.isEmpty do throw (envelopeRefusal envs "a pointwise map")
       let signal ← emitTermE cmod #[] t
       f signal
   | .arrN f ts => do
-      unless envs.isEmpty do throw (envelopeRefusal "a pointwise map")
+      unless envs.isEmpty do throw (envelopeRefusal envs "a pointwise map")
       let signals ← ts.attach.mapM fun ⟨t, _⟩ => emitTermE cmod #[] t
       f signals
   | .warp φ t => do
-      unless envs.isEmpty do throw (envelopeRefusal "a warped term")
+      unless envs.isEmpty do throw (envelopeRefusal envs "a warped term" warpHint)
       emitTermE (fun clock => do
         let warped ← φ clock
         cmod warped) #[] t
   | .swarp mw modulator t => do
-      unless envs.isEmpty do throw (envelopeRefusal "a warped term")
+      unless envs.isEmpty do throw (envelopeRefusal envs "a warped term" warpHint)
       emitTermE (fun clock => do
         let modSignal ← emitTermE cmod #[] modulator
         let warped ← mw clock modSignal
         cmod warped) #[] t
   | .konst signal => do
-      unless envs.isEmpty do throw (envelopeRefusal "a constant")
+      unless envs.isEmpty do throw (envelopeRefusal envs "a constant")
       pure signal
   | .prod x y => do
-      unless envs.isEmpty do throw (envelopeRefusal "a product")
-      let sx ← emitTermE cmod #[] x
-      let sy ← emitTermE cmod #[] y
-      mul sx sy
+      if envs.isEmpty then
+        let sx ← emitTermE cmod #[] x
+        let sy ← emitTermE cmod #[] y
+        mul sx sy
+      -- Under an envelope a product is a SCALING when one factor is stage 0
+      -- (constant within a kernel call): the envelope commutes with it and
+      -- rides into the other factor. Factors are emitted in authored order.
+      else if x.isScalar then
+        let sx ← emitTermE cmod #[] x
+        unless ← sigIsS0 sx do
+          throw (envelopeRefusal envs "a product with a time-varying factor" productHint)
+        let sy ← emitTermE cmod envs y
+        mul sx sy
+      else if y.isScalar then
+        let sx ← emitTermE cmod envs x
+        let sy ← emitTermE cmod #[] y
+        unless ← sigIsS0 sy do
+          throw (envelopeRefusal envs "a product with a time-varying factor" productHint)
+        mul sx sy
+      else
+        throw (envelopeRefusal envs "a product" productHint)
   | .clk clock => do
-      unless envs.isEmpty do throw (envelopeRefusal "a clock")
+      unless envs.isEmpty do throw (envelopeRefusal envs "a clock")
       cmod clock
   | .pmGen v name baseClk depth modulator => do
-      unless envs.isEmpty do throw (envelopeRefusal s!"the generator '{name}'")
+      unless envs.isEmpty do throw (envelopeRefusal envs s!"the generator '{name}'" generatorHint)
       let modSignal ← emitTermE cmod #[] modulator
       let warpedClk ← cmod baseClk
       let phaseOffset ← mul depth modSignal
@@ -255,13 +306,18 @@ def emitTermE (cmod : Clock → BuildM Clock) (envs : Array PendingEnvelope) :
       let builder ← get
       Builder.osc v s!"{name}{builder.decls.size}" warpedClk
   | .genC mk post name clk controls => do
-      unless envs.isEmpty do throw (envelopeRefusal s!"the generator '{name}'")
+      unless envs.isEmpty do throw (envelopeRefusal envs s!"the generator '{name}'" generatorHint)
       let signals ← controls.attach.mapM fun ⟨t, _⟩ => emitTermE cmod #[] t
       let warpedClk ← cmod clk
       let builder ← get
       let raw ← Builder.osc (mk signals) s!"{name}{builder.decls.size}" warpedClk
       post signals raw
   | .family f => do
+      let warpedClk ← cmod f.clk
+      familySig f warpedClk envs
+  | .familyC mk controls => do
+      let signals ← controls.attach.mapM fun ⟨t, _⟩ => emitTermE cmod #[] t
+      let f ← mk signals
       let warpedClk ← cmod f.clk
       familySig f warpedClk envs
   | .envelope law controls t => do

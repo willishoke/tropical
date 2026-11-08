@@ -1,0 +1,20 @@
+{
+ "nodes": [
+  { "id": "f0", "kind": "knob", "params": { "value": 110 } },
+  { "id": "tilt", "kind": "knob", "params": { "value": 1 } },
+  { "id": "even", "kind": "knob", "params": { "value": 1 } },
+  { "id": "saw", "kind": "harmonic", "params": { "partials_max": 128, "partials": 128 }, "in": { "freq": ["f0"], "tilt": ["tilt"], "even": ["even"] } },
+  { "id": "rate", "kind": "knob", "params": { "value": 0.5 } },
+  { "id": "lfo", "kind": "sine", "in": { "freq": ["rate"] } },
+  { "id": "depth", "kind": "knob", "params": { "value": 700 } },
+  { "id": "sweep", "kind": "ring", "in": { "in": ["lfo", "depth"] } },
+  { "id": "center", "kind": "knob", "params": { "value": 900 } },
+  { "id": "cutoff", "kind": "mix", "in": { "in": ["center", "sweep"] } },
+  { "id": "q", "kind": "knob", "params": { "value": 6 } },
+  { "id": "lp", "kind": "envelope", "params": { "shape": "lowpass" }, "in": { "in": ["saw"], "cutoff": ["cutoff"], "q": ["q"] } },
+  { "id": "level", "kind": "knob", "params": { "value": 0.04 } },
+  { "id": "out", "kind": "ring", "in": { "in": ["lp", "level"] } }
+ ],
+ "out": "out",
+ "taps": ["cutoff"]
+}

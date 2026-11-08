@@ -12,3 +12,4 @@ export {
 export type { KernelLayout } from './layout.js'
 export { computeLayout } from './layout.js'
 export { WasmKernel, importedMemoryMinPages } from './kernel.js'
+export { ParamWriter } from './params.js'

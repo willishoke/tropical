@@ -80,8 +80,9 @@ structure PortSpec where
   discipline : Discipline := .raw
   display : Option KnobMeta := none
   ownerPort : Option String := none
-  /-- A frequency or rate inlet: a wire into it must be constant within a
-      kernel call (a knob, arithmetic on knobs, a constant). Its generator's
+  /-- A frequency or rate inlet (or the harmonic family's live partial
+      count, its region's trip count): a wire into it must be constant within
+      a kernel call (a knob, arithmetic on knobs, a constant). Its generator's
       phase is `inc·τ`, exact only for a constant increment, so a time-varying
       wire is refused at compile time; pitch modulation goes through `pm` or
       `fm`, which are exact. -/
@@ -122,6 +123,21 @@ def portSpecs : String → Array PortSpec
         display := some { min := 0.02, max := 8000, log := true, unit := "Hz" }, uniform := true },
       { name := "width", accepts := sigIn, knob := some (5, 1),
         display := some { min := 0.01, max := 0.99 } }]
+  | "harmonic" => #[
+      { name := "freq", accepts := sigIn, knob := some (110, 0), discipline := .anchor,
+        display := some { min := 0.02, max := 8000, log := true, unit := "Hz" }, uniform := true },
+      { name := "tilt", accepts := sigIn, knob := some (1, 0), discipline := .glide,
+        display := some { min := 0, max := 3 } },
+      { name := "even", accepts := sigIn, knob := some (1, 0), discipline := .glide,
+        display := some { min := 0, max := 1 } },
+      { name := "partials", accepts := sigIn, knob := some (64, 0),
+        display := some { min := 1, max := 256 }, uniform := true }]
+  | "envelope" => #[
+      { name := "in", accepts := sigIn, multi := true },
+      { name := "cutoff", accepts := sigIn, knob := some (800, 0), discipline := .glide,
+        display := some { min := 20, max := 16000, log := true, unit := "Hz" } },
+      { name := "q", accepts := sigIn, knob := some (707, 3), discipline := .glide,
+        display := some { min := 0.3, max := 30, log := true } }]
   | "pluck" => #[
       { name := "freq", accepts := sigIn, knob := some (110, 0), discipline := .anchor,
         display := some { min := 20, max := 2000, log := true, unit := "Hz" }, uniform := true },
@@ -221,14 +237,14 @@ def outletOf : String → Option PortDomain
   | _ => some .signal
 
 def vocabularyKinds : Array String := #[
-  "source", "sine", "saw", "pulse", "pluck", "comb", "flange", "delay", "reverse", "fm", "sflange",
+  "source", "sine", "saw", "pulse", "harmonic", "envelope", "pluck", "comb", "flange", "delay", "reverse", "fm", "sflange",
   "mix", "ring", "gong", "string", "resonator", "reverb", "filter", "phaser",
   "modalmix", "gauge", "knob", "out"]
 
 def hierarchyAtomKinds : Array String := #["modal_allpass_tail", "modalblend"]
 
 def buildNodeKinds : Array String := #[
-  "knob", "source", "sine", "saw", "pulse", "pluck", "comb", "flange", "sflange", "fm", "delay",
+  "knob", "source", "sine", "saw", "pulse", "harmonic", "envelope", "pluck", "comb", "flange", "sflange", "fm", "delay",
   "reverse", "mix", "ring", "resonator", "reverb", "filter", "phaser", "modalmix",
   "modal_allpass_tail", "modalblend", "gauge", "gong", "bloomgong", "string"]
 
