@@ -496,9 +496,10 @@ def phase5Evidence : Except String Phase5Evidence := do
   -- the served vocabulary; the fingerprint below moves with them (and again
   -- when every knob but the modal sources' became an inlet, when sflange
   -- gained its `dry`/`wet` knobs, and when the frequency and rate inlets
-  -- were marked `uniform`).
-  unless kinds.size == 23 do
-    throw s!"EmitArrow phase-5 fixture: expected 23 served vocabulary kinds, got {kinds.size}"
+  -- were marked `uniform`). 23 → 25: the spectral kinds `harmonic` and
+  -- `envelope`.
+  unless kinds.size == 25 do
+    throw s!"EmitArrow phase-5 fixture: expected 25 served vocabulary kinds, got {kinds.size}"
   let parameters := Tropical.Playground.Metadata.collectParams #[]
   let expectedNames := #[
     Tropical.Playground.Metadata.masterVelocityParam,
@@ -507,7 +508,7 @@ def phase5Evidence : Except String Phase5Evidence := do
   unless parameters.map (·.1) == expectedNames do
     throw "EmitArrow phase-5 fixture: reserved parameter order changed"
   let fingerprint := Tropical.Playground.Metadata.vocabularyFingerprint
-  unless fingerprint == "fnv1a64:f43a6bc88c7e4d54" do
+  unless fingerprint == "fnv1a64:d817bbc88df5821d" do
     throw s!"EmitArrow phase-5 fixture: vocabulary fingerprint changed to {fingerprint}"
   pure {
     vocabularyKinds := kinds.size

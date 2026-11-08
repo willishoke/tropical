@@ -133,11 +133,12 @@ def runVocabDriven (arena : Arena)
     ok := false
     issues := issues.push "reverb: served rt60/dir controls are not signal-capable glides over a modal input"
   -- The uniform inlets are exactly the frequencies and rates (a generator's
-  -- phase is `inc·τ`, exact only for a constant increment), each a knob-backed
+  -- phase is `inc·τ`, exact only for a constant increment) and the harmonic
+  -- family's live partial count (its region's trip count), each a knob-backed
   -- inlet. A new rate-like inlet must be added here and marked in the table.
   let uniformExpected : Array (String × String) := #[
     ("source", "freq"), ("sine", "freq"), ("saw", "freq"), ("pulse", "freq"),
-    ("pluck", "freq"), ("pluck", "event_rate"), ("fm", "carrier"),
+    ("harmonic", "freq"), ("harmonic", "partials"), ("pluck", "freq"), ("pluck", "event_rate"), ("fm", "carrier"),
     ("phaser", "rate"), ("modal_allpass_tail", "rate")]
   let uniformServed := (vocabularyKinds ++ hierarchyAtomKinds).foldl (init := #[])
     fun acc kind => acc ++ ((portSpecs kind).filter (·.uniform)).map (kind, ·.name)
@@ -159,8 +160,12 @@ def runVocabDriven (arena : Arena)
             [("id", .str "helper_m"), ("kind", .str "resonator"), ("params", Lean.Json.mkObj [])])
           inFields := inFields ++ [("in", Lean.Json.arr #[.str "helper_m"])]
         else
+          -- An envelope's input must lower to partial families, a term-level
+          -- fact the colors cannot state (it is checked at emission), so its
+          -- minimal patch feeds it a `harmonic`; every other kind a `source`.
+          let helperKind := if kind == "envelope" then "harmonic" else "source"
           nodes := nodes.push (Lean.Json.mkObj
-            [("id", .str "helper_s"), ("kind", .str "source"), ("params", Lean.Json.mkObj [])])
+            [("id", .str "helper_s"), ("kind", .str helperKind), ("params", Lean.Json.mkObj [])])
           inFields := inFields ++ [("in", Lean.Json.arr #[.str "helper_s"])]
     nodes := nodes.push (Lean.Json.mkObj
       [("id", .str "dut"), ("kind", .str kind), ("params", Lean.Json.mkObj []),

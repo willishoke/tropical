@@ -261,7 +261,7 @@ subterms should stay shared.
 **An honest playground kind is easy.** A `harmonic` node (a family with
 a uniform `f0` knob) and an envelope node whose input must lower to
 families would need no decoder tricks: a non-family input is refused at
-emission. This was left out of scope.
+emission. This landed later; see §8.
 
 ## 7. What S4–S6 need
 
@@ -290,3 +290,171 @@ emission. This was left out of scope.
   - folding a uniform envelope into stage-0 weights.
 
   None of these was needed to meet the 25% line.
+
+## 8. Playground
+
+The family and the envelope are served as two playground node kinds,
+`harmonic` and `envelope`. Each maps one to one onto the term algebra:
+a `harmonic` node lowers to one family term, an `envelope` node wraps
+the term arriving on its `in` wire. The playground lowering carries the
+upstream term across a wire (`lowerNode` in `EmitArrow/Patch.lean`), so
+the envelope sees the family as the algebra sees it. It never asks what
+kind of node is upstream and never reads another node's params.
+
+### `harmonic`
+
+Partials `k = 1..K` at `k·f0`, with weights
+`w_k = base_k · k^(−tilt) · (k even ? even : 1)`.
+
+| port | discipline | notes |
+|---|---|---|
+| `freq` | uniform inlet, anchored knob (110 Hz) | `f0`. A wire must be constant within a kernel call (a knob, arithmetic on knobs). |
+| `tilt` | any-wire inlet, glided knob (1) | The spectral slope. With no table, tilt 1 is a saw, 2 a triangle-like slope, 0 flat. |
+| `even` | any-wire inlet, glided knob (1) | The even partials' gain relative to the odd ones. 0 with tilt 1 is a square. |
+| `partials` | uniform inlet, raw knob (64) | The live partial count, clamped to the capacity. |
+
+Structural fields in `params` (not slots; a change recompiles and
+hot-swaps):
+
+- `partials_max`: the capacity `K` (default 64, at most 32767).
+- `wave`: `sine` (`Σ w_k sin kφ`, the default) or `cosine` (zero-phase
+  cosines).
+- `table`: an optional literal base table `base_k`, one number per
+  partial. Without it `base_k = 1`. The table is the node's own
+  structural data, not a signal: making it live would need table inputs
+  in the kernel port, which is out of scope.
+
+The output is an ordinary signal. It can be heard, scoped, mixed, warped
+and modulated like any other.
+
+### `envelope`
+
+| port | discipline | notes |
+|---|---|---|
+| `in` | signal inlet (fan-in sums) | Must be a family, a mix of families, or a constant scaling of one. |
+| `cutoff` | any-wire inlet, glided knob (800 Hz) | An LFO at any rate, slow to audio, may drive it: filter FM. |
+| `q` | any-wire inlet, glided knob (0.707) | Any wire, as `cutoff`. |
+
+Structural field: `shape`, one of `lowpass` (default), `bandpass`,
+`highpass`. An unknown shape is an error, not a fallback.
+
+### What composes
+
+- `harmonic → envelope`.
+- `mix(harmonic, harmonic) → envelope`: the envelope distributes over the
+  sum, one gain per family.
+- `ring(harmonic, knob) → envelope`, a VCA by a knob: a product whose
+  other factor is stage 0 (knobs and arithmetic on knobs) is a constant
+  scaling, which the envelope commutes with.
+- `harmonic → envelope → anything`: the envelope's output is a signal. A
+  delay, flanger or FM after the envelope reads the whole enveloped
+  signal at its warped clock.
+- Envelopes in series on one family multiply.
+- A delay or warp of a bare `harmonic` is fine. The family is a function
+  of its clock.
+
+### What is refused
+
+The compile fails with a message that names the envelope node, its `in`
+wire, and what was found:
+
+- a plain oscillator (`sine`, `saw`, `source`, …): its partials are not a
+  family the algebra can see;
+- a `ring` of two signals that vary over time (two harmonics, a harmonic
+  and an LFO): a product of families, S4;
+- a VCA by a time-varying signal: the same product, S4;
+- a delay, flange, comb, reverse or FM between the envelope and the
+  family: a warp inside the partial phases, S5;
+- a constant, a realized modal node, or any other pointwise map.
+
+### How the envelope sees the family
+
+The playground lowering is one recursion over the wires: `lowerNode`
+(`lean/Tropical/EmitArrow/Patch.lean`, the `effectC` case at line 848)
+lowers each input wire to the upstream node's *term* and hands the terms
+to the node's body. The `envelope` body
+(`lean/Tropical/Playground/Decode.lean:347`) is
+`ArrowTerm.envelope law [cutoff, q] inTerm`, and the `harmonic` body
+(`Decode.lean:331`) is `ArrowTerm.familyC`. `normalize`
+(`EmitArrow/Term.lean:170`, `envelopeInto` at line 142) distributes the
+envelope over sums and scalings, and emission (`emitTermE`, line 243)
+either reaches a family (`familyC` at line 318) or refuses. Nothing reads
+an upstream node's kind or params.
+
+Two pieces of core were added for this:
+
+- `ArrowTerm.familyC`, a family whose fundamental, live count and weight
+  inputs are signal terms, emitted in the family's clock context like
+  `genC`'s controls. Wired freq and partials are checked uniform; tilt
+  and even take any wire.
+- Under an envelope, a product with one stage-0 factor is a scaling
+  (`emitTermE`'s `prod` case, line 275). The factor is found structurally
+  (`ArrowTerm.isScalar`: constants and sums, products and maps of them)
+  and then confirmed stage 0 on its emitted value. That is the knob VCA.
+  Any other product is refused.
+
+The weight law is `PartialWeights.closedForm`: K-entry structural
+columns (`1/k` and `ln k`, the latter in exact arithmetic) and per-sample
+inputs (tilt, even) that ride the region's loop-invariant columns. Without
+a table `k^(−tilt)` is computed as `(1/k)·exp((1 − tilt)·ln k)`, so tilt 1
+is the saw's `1/k` bit for bit. It costs one `expSig` per partial per
+sample. The playable patch (128 partials, the animated lowpass) runs at
+4.8% of real time in wasm under bun at 44.1 kHz.
+
+### Gates
+
+- `playground-envelope-equiv` (tropicaltest): the static graph is
+  bit-identical to `SpectralLowpassSaw`'s body at τ = 0 and ten hours in.
+  With the cutoff wired from an LFO patched out of playground nodes, it
+  matches the oracle closed form at −179 dB NMSE (τ = 0 and one hour).
+- `playground-envelope-algebra` (tropicaltest): the four refusals, each
+  naming the node and wire, and the three acceptances. The mix is bit for
+  bit the mix of two enveloped harmonics, and the knob VCA is bit for bit
+  0.5 × the enveloped harmonic.
+- `graph_wasm_vs_jit.test.ts`: WASM ≡ JIT on a graph using every port of
+  both kinds, at τ = 0 and ten hours in. The typed split equals the
+  unsplit kernel bitwise. Harmonic → envelope through the graph front
+  door equals the registered `SpectralLowpassSaw` through the program
+  front door, bitwise.
+- `graph_freq_inlets.test.ts`: `harmonic.freq` and `harmonic.partials`
+  refuse time-varying wires. The pitch, measured by zero crossings,
+  is 220 Hz at frame 0 and ten hours in, and 330 Hz after a knob write.
+- `runtime_params.test.ts`: the player's anchored re-pitch of a harmonic
+  is continuous ten hours in.
+
+### Findings
+
+- **The typed stage-0 split hoisted loop-index arithmetic.** The
+  intern-time stage treats `loopIdx` as stage-neutral, so `toFloat(k + 1)`
+  is `fold` by value. The split's per-instruction walk duplicated it into
+  the coefficient stream, where its loop-reading operand has no def and
+  reads as zero. Every family built at the root rendered silence through
+  `render-graph` and `compile-wasm`. The fixtures never hit it, because
+  their arithmetic sits inside an instance. The fix
+  (`lean/Tropical/Ir/Stage0.lean`, `loopTainted`) pins any instruction
+  whose reaching defs read `loopIdx`, transitively. Whole-region moves
+  are unchanged. No golden moved.
+- **A glide's discipline is not on any kernel port.** `Kernel.ofPlan`
+  attaches a discipline to the port named by its base. A glided knob has
+  no base port, only `#v0/#v1/#t0` companions, so a host that reads only
+  the kernel type cannot see the glide. The `typed-kernel` gate asserts
+  that every discipline names a port, so a corpus patch with a glided
+  knob fails it. The web player therefore exposes `knob` nodes (raw or
+  anchor), and the shipped patch wires every inlet it plays from one. Attaching the glide to a companion, or
+  giving it a port, is a kernel-manifest change, out of scope here.
+- **Live tables.** A `table` is structural. Making it live needs table
+  inputs in the kernel port (`role: table`), which is out of scope.
+
+### Accepted artifacts
+
+- **Aliasing at high Q under fast modulation.** A sharp resonance swept
+  quickly past the low partials puts a near-impulsive gain spike on each
+  crossing. Its sidebands can fold. This is decision 5 (§2, §5); there is
+  no oversampling.
+- **DC from sidebands.** An animated envelope makes sidebands at
+  `k·f0 ± n·fm` that the algebra cannot see. One that lands on 0 Hz
+  carries DC. The soft edges act on carrier frequencies only. This is
+  not removed until S4 (§3).
+- **Quasi-static gain.** The envelope is a filter shape evaluated per
+  partial at the current τ, not filter dynamics: no ringing, no smear
+  (§3).

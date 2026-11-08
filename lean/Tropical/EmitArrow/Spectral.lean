@@ -85,6 +85,15 @@ deriving Inhabited, BEq, Repr
 inductive PartialWeights where
   | table (weights : Array Sig)
   | law (weight : Sig → BuildM Sig)
+  /-- A closed form over structural columns and live inputs. `columns` are
+      K-entry tables (constants of `k`, e.g. `1/k` and `ln k`), read at
+      partial `k`. `inputs` are per-sample scalars (live controls, any
+      signal); they ride the region's loop-invariant columns, so each is
+      computed once per sample, before the partial loop. `weight cols ins n
+      kf` gets the column reads, the input reads, and the partial number
+      `k` as an integer (`n`) and as a float (`kf`). -/
+  | closedForm (columns : Array (Array Sig)) (inputs : Array Sig)
+      (weight : Array Sig → Array Sig → Sig → Sig → BuildM Sig)
 
 /-- One soft edge. `standard` is 20 Hz at DC and the top 10% below Nyquist;
     `width` is an explicit width in Hz; `off` disables the edge. -/
@@ -125,6 +134,9 @@ structure EnvelopeLaw where
   name : String
   prepare : Array Sig → Sig → BuildM (Array Sig)
   gain : Array Sig → Sig → Sig → BuildM (Sig × Sig)
+  /-- Where the envelope was authored (a patch node and its input wire), for
+      the refusal when its input is not something it can sit on. -/
+  site : Option String := none
 
 instance : Inhabited EnvelopeLaw :=
   ⟨{ name := "unity", prepare := fun _ _ => pure #[]
@@ -213,7 +225,13 @@ def familySig (f : PartialFamily) (clock : Clock)
         if ws.size != f.count then
           throw s!"partial family '{f.name}': {ws.size} weights for {f.count} partials"
         pure (some (← arr ws))
-    | .law _ => pure none
+    | .law _ | .closedForm .. => pure none
+  let columnTables ← match f.weights with
+    | .closedForm columns _ _ => columns.mapM fun column => do
+        if column.size != f.count then
+          throw s!"partial family '{f.name}': a weight column of {column.size} entries for {f.count} partials"
+        arr column
+    | _ => pure #[]
   -- ── uniforms and per-sample scalars (computed before the region) ──
   let twoPow32 ← lit 4294967296
   let sr ← sampleRate
@@ -273,6 +291,11 @@ def familySig (f : PartialFamily) (clock : Clock)
     let prepared ← law.prepare controls f.freq
     envSlots := envSlots.push (law, invariants.size, prepared.size)
     invariants := invariants ++ prepared
+  let weightInputStart := invariants.size
+  let weightInputs := match f.weights with
+    | .closedForm _ inputs _ => inputs
+    | _ => #[]
+  invariants := invariants ++ weightInputs
   -- Loop-invariant scalars ride the tables list as 1-element columns, so they
   -- are materialized once before the region (`bankFoldInv`'s reason).
   let invTables ← invariants.mapM fun value => arr #[value]
@@ -288,6 +311,9 @@ def familySig (f : PartialFamily) (clock : Clock)
   let weight ← match f.weights, weightTable? with
     | .table _, some table => index table k
     | .law w, _ => w kf
+    | .closedForm _ _ w, _ => do
+        let colReads ← columnTables.mapM fun table => index table k
+        w colReads (invReads.extract weightInputStart (weightInputStart + weightInputs.size)) n kf
     | .table _, none => throw "partial family: unreachable (table without a column)"
   let fk ← mul kf invReads[2]!
   let fkAbs ← mul kf invReads[1]!
@@ -324,7 +350,7 @@ def familySig (f : PartialFamily) (clock : Clock)
     | some e => mul e projected
     | none => pure projected
   let contribution ← mul weight shaped
-  let tables := (weightTable?.map (#[·])).getD #[] ++ invTables
+  let tables := (weightTable?.map (#[·])).getD #[] ++ columnTables ++ invTables
   bankSum f.count tables contribution liveCount? familyBinderId
 
 /-- The saw's weights `1/k`, `k = 1..count`, as an exact coefficient table. -/

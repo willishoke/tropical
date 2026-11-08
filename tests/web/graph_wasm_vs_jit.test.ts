@@ -133,6 +133,37 @@ const cases: Record<string, unknown> = {
     out: 'out',
     taps: ['src', 'pl', 'cb', 'fl', 'fm', 'flt', 'ph', 'pm'],
   },
+  // the spectral kinds: a harmonic family whose tilt and even balance are
+  // LFO-driven, under a lowpass envelope whose cutoff is an audio-rate LFO
+  // (filter FM) and whose Q moves; a mix of two harmonics under a bandpass
+  // (the envelope distributes over the sum); a knob VCA under a highpass
+  // (a constant scaling); and a delay with a signal time AFTER an envelope
+  spectral: {
+    nodes: [
+      { id: 'l', kind: 'sine', params: { freq: 2 } },
+      { id: 'fm', kind: 'sine', params: { freq: 220 } },
+      ...lfoAround('tlt', 1.2, 0.4), ...lfoAround('evn', 0.5, 0.4), ...lfoAround('q', 4, 2),
+      { id: 'c0', kind: 'knob', params: { value: 900 } },
+      { id: 'cs', kind: 'knob', params: { value: 500 } },
+      { id: 'cm', kind: 'ring', in: { in: ['fm', 'cs'] } },
+      { id: 'cut', kind: 'mix', in: { in: ['c0', 'cm'] } },
+      { id: 'h', kind: 'harmonic', params: { freq: 82.5, partials_max: 96, partials: 96 }, in: { tilt: ['tlt'], even: ['evn'] } },
+      { id: 'lp', kind: 'envelope', in: { in: ['h'], cutoff: ['cut'], q: ['q'] } },
+      { id: 'a', kind: 'harmonic', params: { freq: 110, wave: 'cosine' } },
+      { id: 'b', kind: 'harmonic', params: { freq: 165, tilt: 2, partials_max: 8, table: [1, 0, 1, 0, 1, 0, 1, 0] } },
+      { id: 'ab', kind: 'mix', in: { in: ['a', 'b'] } },
+      { id: 'bp', kind: 'envelope', params: { shape: 'bandpass', cutoff: 1200, q: 3 }, in: { in: ['ab'] } },
+      { id: 'g', kind: 'knob', params: { value: 0.5 } },
+      { id: 'vca', kind: 'ring', in: { in: ['h', 'g'] } },
+      { id: 'hp', kind: 'envelope', params: { shape: 'highpass', cutoff: 2000, q: 0.7 }, in: { in: ['vca'] } },
+      { id: 'dt', kind: 'knob', params: { value: 0.002 } },
+      { id: 'dm', kind: 'ring', in: { in: ['l', 'dt'] } },
+      { id: 'dl', kind: 'delay', in: { in: ['lp'], amount: ['dm'] } },
+      { id: 'out', kind: 'mix', in: { in: ['lp', 'bp', 'hp', 'dl'] } },
+    ],
+    out: 'out',
+    taps: ['h', 'lp', 'bp', 'hp', 'dl'],
+  },
 }
 
 /** `id` = knob `value` × knob 1: knob arithmetic, constant within a call. */
@@ -176,6 +207,29 @@ describe('PatchGraph → compile-wasm ≡ render-graph (JIT)', () => {
     })
   }
 
+  test('spectral: compile-wasm ≡ render-graph ten hours in', async () => {
+    const path = join(dir, 'spectral-far.json')
+    writeFileSync(path, JSON.stringify(cases.spectral))
+    const start = 10 * 3600 * 44100
+    const wasmPath = join(dir, 'spectral-far.wasm')
+    run(['compile-wasm', path, `--out=${wasmPath}`])
+    const manifest = JSON.parse(run(['compile-kernel', path]).toString()) as KernelManifest
+    const k = await WasmKernel.instantiate(new Uint8Array(readFileSync(wasmPath)), manifest)
+    k.seek(start)
+    const out = k.render(N)
+    const channels = k.outputChannelCount
+    const b = run(['render-graph', path, '--all-channels', '--frames', '1', '--buffer', String(N), '--start', String(start)])
+    const jit = new Float64Array(b.buffer.slice(b.byteOffset, b.byteOffset + b.byteLength))
+    expect(jit.length).toBe(N * channels)
+    let maxDiff = 0, energy = 0
+    for (let i = 0; i < jit.length; i++) {
+      maxDiff = Math.max(maxDiff, Math.abs(out[i]! - jit[i]!))
+      energy += jit[i]! * jit[i]!
+    }
+    expect(energy).toBeGreaterThan(1e-3)
+    expect(maxDiff).toBeLessThan(1e-12)
+  })
+
   test('bank: the unsplit kernel (TROPICAL_STAGE0=0, coeff? := none) renders the same values', async () => {
     const path = join(dir, 'bank.json')
     writeFileSync(path, JSON.stringify(cases.bank))
@@ -185,6 +239,63 @@ describe('PatchGraph → compile-wasm ≡ render-graph (JIT)', () => {
     for (let i = 0; i < split.out.length; i++)
       maxDiff = Math.max(maxDiff, Math.abs(split.out[i]! - unsplit.out[i]!))
     expect(maxDiff).toBeLessThan(1e-12)
+  })
+
+  // The family's per-partial arithmetic on the loop index (`toFloat(k + 1)`,
+  // the parity) is value-stage `fold`; the typed split must keep it in its
+  // region (loop taint), or the coefficient stream reads an undefined temp
+  // and the family renders silence.
+  test('spectral: the typed split renders bit for bit what the unsplit kernel does', async () => {
+    const path = join(dir, 'spectral-unsplit.json')
+    writeFileSync(path, JSON.stringify(cases.spectral))
+    const split = await renderWasm(path, N)
+    const unsplit = await renderWasm(path, N, { TROPICAL_STAGE0: '0' })
+    let diffs = 0, energy = 0
+    for (let i = 0; i < split.out.length; i++) {
+      if (split.out[i] !== unsplit.out[i]) diffs++
+      energy += split.out[i]! * split.out[i]!
+    }
+    expect(energy).toBeGreaterThan(1e-3)
+    expect(diffs).toBe(0)
+  })
+
+  // The playground kinds are the spectral terms, not an imitation of them: a
+  // cosine harmonic (200 partials, tilt 1) under a lowpass envelope renders
+  // the registered `SpectralLowpassSaw` fixture bit for bit, through the
+  // graph front door (typed split) on one side and the program front door on
+  // the other, at τ = 0 and ten hours in.
+  test('spectral: harmonic → envelope ≡ the SpectralLowpassSaw fixture, bit for bit', () => {
+    const graphPath = join(dir, 'spectral-fixture.json')
+    writeFileSync(graphPath, JSON.stringify({
+      nodes: [
+        { id: 'h', kind: 'harmonic', params: { freq: 110, partials_max: 200, partials: 200, wave: 'cosine' } },
+        { id: 'e', kind: 'envelope', params: { cutoff: 800, q: 0.7 }, in: { in: ['h'] } },
+      ],
+      out: 'e',
+      taps: ['e'],
+    }))
+    const programPath = join(dir, 'spectral-fixture-program.json')
+    writeFileSync(programPath, JSON.stringify({
+      schema: 'tropical_program_2', name: 'spectral_fixture',
+      body: { op: 'block', decls: [
+        { op: 'instanceDecl', name: 'saw', program: 'SpectralLowpassSaw', inputs: { f0: 110, cutoff: 800, q: 0.7 } },
+      ], assigns: [{ op: 'outputAssign', name: 'dac.out', expr: { op: 'ref', instance: 'saw', output: 'out' } }] },
+    }))
+    const planPath = join(dir, 'spectral-fixture.plan.json')
+    writeFileSync(planPath, run(['compile', programPath, '--mode=fused', '--fixtures']))
+    for (const start of [0, 10 * 3600 * 44100]) {
+      const g = run(['render-graph', graphPath, '--all-channels', '--frames', '1', '--buffer', String(N), '--start', String(start)])
+      const graph = new Float64Array(g.buffer.slice(g.byteOffset, g.byteOffset + g.byteLength))
+      const p = run(['render-bytes', planPath, '--frames', '1', '--buffer', String(N), '--start', String(start)])
+      const fixture = new Float64Array(p.buffer.slice(p.byteOffset, p.byteOffset + N * 8))
+      let diffs = 0, energy = 0
+      for (let i = 0; i < N; i++) {
+        if (graph[2 * i + 1] !== fixture[i]) diffs++
+        energy += fixture[i]! * fixture[i]!
+      }
+      expect(energy).toBeGreaterThan(1e-3)
+      expect(diffs).toBe(0)
+    }
   })
 
   // A v3 hierarchy document is a graph too (`Playground.isGraphDocument`):
