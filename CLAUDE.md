@@ -296,7 +296,7 @@ lean/                 Lean 4: the production compiler + MCP server (one binary)
                         front door), Nodes (ScalarKind), OrderedJson (JsonV)
                         (the surface parser AND the elaborator are retired)
     Stdlib.lean       the stdlib as 15 arrow-combinator builders — the boot chain
-    EmitArrow/        the arrow authoring substrate (Sig, Term, Numerics, Patch, Modal, Gong)
+    EmitArrow/        the arrow authoring substrate (Sig, Term, Numerics, Spectral, Patch, Modal, Gong)
     Ir/               lower → emit (authoring assembles directly; no elaborate)
       Strata.lean (the direct lowering) + Strata/{Basic,EArena,InlineInstances,IdentityElim}
       Core, Nodes, Cycles, Emit, CompileResolved, Codec, WireProgram
