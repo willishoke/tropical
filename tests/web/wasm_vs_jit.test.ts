@@ -150,6 +150,33 @@ function opZooProgram(): ProgramFile {
   }
 }
 
+// The spectral fixtures (`Testing/SpectralFixtures.lean`, registered by
+// `--fixtures`): a 200-partial family (one `bankSum` region over a coefficient
+// table) and the same family under a complex SVF-lowpass envelope whose cutoff
+// is wired from an audio-rate LFO instance — the per-partial complex gain, its
+// division, and the soft edges all run on both targets.
+function spectralSawProgram(f0: number): ProgramFile {
+  return {
+    schema: 'tropical_program_2',
+    name: 'eq_spectral_saw',
+    body: { op: 'block', decls: [
+      { op: 'instanceDecl', name: 'saw', program: 'SpectralSaw', inputs: { f0, phase: 0.25 } },
+    ], assigns: [dacOut('saw', 'out')] },
+  }
+}
+
+function spectralLowpassProgram(f0: number, lfoHz: number, q: number): ProgramFile {
+  return {
+    schema: 'tropical_program_2',
+    name: 'eq_spectral_lowpass',
+    body: { op: 'block', decls: [
+      { op: 'instanceDecl', name: 'lfo', program: 'ExpCutoffLfo', inputs: { c0: 800, octaves: 2, rate: lfoHz } },
+      { op: 'instanceDecl', name: 'saw', program: 'SpectralLowpassSaw', inputs: {
+        f0, cutoff: { op: 'ref', instance: 'lfo', output: 'out' }, q } },
+    ], assigns: [dacOut('saw', 'out')] },
+  }
+}
+
 // Same IR, two LLVM targets → bit-exact in practice; keep a tolerance for safety.
 const TOL = 1e-12
 
@@ -223,6 +250,28 @@ describe('wasm vs native JIT', () => {
       ], assigns: [dacOut('inst', 'out')] },
     }
     expect(() => compileViaLean(program)).toThrow(/program definitions over the wire are retired/)
+  })
+
+  test('SpectralSaw (200-partial family) — WASM matches JIT', async () => {
+    const prog = spectralSawProgram(110)
+    const wire = compileViaLean(prog)
+    const N = 512
+    const nat = runNative(wire, N)
+    expectAudible('SpectralSaw', nat)
+    const wasm = await runWasm(prog, wire, N)
+    expect(wasm.length).toBe(nat.length)
+    for (let i = 0; i < nat.length; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
+  })
+
+  test('SpectralLowpassSaw, cutoff from a 220 Hz LFO (complex envelope) — WASM matches JIT', async () => {
+    const prog = spectralLowpassProgram(82.5, 220, 12)
+    const wire = compileViaLean(prog)
+    const N = 512
+    const nat = runNative(wire, N)
+    expectAudible('SpectralLowpassSaw', nat)
+    const wasm = await runWasm(prog, wire, N)
+    expect(wasm.length).toBe(nat.length)
+    for (let i = 0; i < nat.length; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
   })
 
   test('op-zoo (bitwise / shifts / float↔int casts / mod / clamp / select) — WASM matches JIT', async () => {
