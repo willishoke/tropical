@@ -3,6 +3,7 @@ import Tropical.EmitArrow.Inspect
 import Tropical.EmitArrow.ClockAlgebra
 import Tropical.EmitArrow.BankOrder
 import Tropical.EmitArrow.Numerics
+import Tropical.EmitArrow.Spectral
 import Tropical.EmitArrow.Term
 import Tropical.EmitArrow.Modal
 import Tropical.EmitArrow.Patch
@@ -31,6 +32,9 @@ The modules:
   directly on `ExprId` roots and frozen `ExprArena` dereference evidence.
 * `Numerics` / `Term` — ID-valued scalar kernels,
   voices, cartesian morphisms, and reified-arrow emitter.
+* `Spectral` — partial families (one `bankSum` region per family) and
+  complex spectral envelopes, carried by `Term`'s `family`/`envelope`
+  constructors (`design/spectral-family.md`).
 * `Modal` / `Patch` / `Gong` — the ID-valued modal
   compiler, graph lowering seam, and struck-register authoring.
 The recursive authoring representation has been retired; this is the single

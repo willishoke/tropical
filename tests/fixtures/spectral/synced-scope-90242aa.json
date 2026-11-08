@@ -1,0 +1,2613 @@
+{
+ "nodes": [
+  {
+   "id": "g2",
+   "kind": "knob",
+   "params": {
+    "value": 0.5
+   }
+  },
+  {
+   "id": "g3",
+   "kind": "knob",
+   "params": {
+    "value": 0.3333333333333333
+   }
+  },
+  {
+   "id": "g4",
+   "kind": "knob",
+   "params": {
+    "value": 0.25
+   }
+  },
+  {
+   "id": "g5",
+   "kind": "knob",
+   "params": {
+    "value": 0.2
+   }
+  },
+  {
+   "id": "g6",
+   "kind": "knob",
+   "params": {
+    "value": 0.16666666666666666
+   }
+  },
+  {
+   "id": "g7",
+   "kind": "knob",
+   "params": {
+    "value": 0.14285714285714285
+   }
+  },
+  {
+   "id": "g8",
+   "kind": "knob",
+   "params": {
+    "value": 0.125
+   }
+  },
+  {
+   "id": "g9",
+   "kind": "knob",
+   "params": {
+    "value": 0.1111111111111111
+   }
+  },
+  {
+   "id": "g10",
+   "kind": "knob",
+   "params": {
+    "value": 0.1
+   }
+  },
+  {
+   "id": "g11",
+   "kind": "knob",
+   "params": {
+    "value": 0.09090909090909091
+   }
+  },
+  {
+   "id": "g12",
+   "kind": "knob",
+   "params": {
+    "value": 0.08333333333333333
+   }
+  },
+  {
+   "id": "g13",
+   "kind": "knob",
+   "params": {
+    "value": 0.07692307692307693
+   }
+  },
+  {
+   "id": "g14",
+   "kind": "knob",
+   "params": {
+    "value": 0.07142857142857142
+   }
+  },
+  {
+   "id": "g15",
+   "kind": "knob",
+   "params": {
+    "value": 0.06666666666666667
+   }
+  },
+  {
+   "id": "g16",
+   "kind": "knob",
+   "params": {
+    "value": 0.0625
+   }
+  },
+  {
+   "id": "g17",
+   "kind": "knob",
+   "params": {
+    "value": 0.058823529411764705
+   }
+  },
+  {
+   "id": "g18",
+   "kind": "knob",
+   "params": {
+    "value": 0.05555555555555555
+   }
+  },
+  {
+   "id": "g19",
+   "kind": "knob",
+   "params": {
+    "value": 0.05263157894736842
+   }
+  },
+  {
+   "id": "g20",
+   "kind": "knob",
+   "params": {
+    "value": 0.05
+   }
+  },
+  {
+   "id": "g21",
+   "kind": "knob",
+   "params": {
+    "value": 0.047619047619047616
+   }
+  },
+  {
+   "id": "g22",
+   "kind": "knob",
+   "params": {
+    "value": 0.045454545454545456
+   }
+  },
+  {
+   "id": "g23",
+   "kind": "knob",
+   "params": {
+    "value": 0.043478260869565216
+   }
+  },
+  {
+   "id": "g24",
+   "kind": "knob",
+   "params": {
+    "value": 0.041666666666666664
+   }
+  },
+  {
+   "id": "pol",
+   "kind": "knob",
+   "params": {
+    "value": -1
+   }
+  },
+  {
+   "id": "v1",
+   "kind": "source",
+   "params": {
+    "freq": 107.66602075891569,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h1",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "v1_2",
+   "kind": "source",
+   "params": {
+    "freq": 215.3320363839157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h2",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_2",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_2",
+     "g2"
+    ]
+   }
+  },
+  {
+   "id": "v1_3",
+   "kind": "source",
+   "params": {
+    "freq": 322.9980520089157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h3",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_3",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_3",
+     "g3"
+    ]
+   }
+  },
+  {
+   "id": "v1_4",
+   "kind": "source",
+   "params": {
+    "freq": 430.6640676339157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h4",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_4",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_4",
+     "g4"
+    ]
+   }
+  },
+  {
+   "id": "v1_5",
+   "kind": "source",
+   "params": {
+    "freq": 538.3300832589157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h5",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_5",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_5",
+     "g5"
+    ]
+   }
+  },
+  {
+   "id": "v1_6",
+   "kind": "source",
+   "params": {
+    "freq": 645.9960988839157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h6",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_6",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_6",
+     "g6"
+    ]
+   }
+  },
+  {
+   "id": "v1_7",
+   "kind": "source",
+   "params": {
+    "freq": 753.6621145089157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h7",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_7",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_7",
+     "g7"
+    ]
+   }
+  },
+  {
+   "id": "v1_8",
+   "kind": "source",
+   "params": {
+    "freq": 861.3281301339157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h8",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_8",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_8",
+     "g8"
+    ]
+   }
+  },
+  {
+   "id": "v1_9",
+   "kind": "source",
+   "params": {
+    "freq": 968.9941457589157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h9",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_9",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_9",
+     "g9"
+    ]
+   }
+  },
+  {
+   "id": "v1_10",
+   "kind": "source",
+   "params": {
+    "freq": 1076.6601613839157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h10",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_10",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_10",
+     "g10"
+    ]
+   }
+  },
+  {
+   "id": "v1_11",
+   "kind": "source",
+   "params": {
+    "freq": 1184.3261770089157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h11",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_11",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_11",
+     "g11"
+    ]
+   }
+  },
+  {
+   "id": "v1_12",
+   "kind": "source",
+   "params": {
+    "freq": 1291.9921926339157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h12",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_12",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_12",
+     "g12"
+    ]
+   }
+  },
+  {
+   "id": "v1_13",
+   "kind": "source",
+   "params": {
+    "freq": 1399.6582082589157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h13",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_13",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_13",
+     "g13"
+    ]
+   }
+  },
+  {
+   "id": "v1_14",
+   "kind": "source",
+   "params": {
+    "freq": 1507.3242238839157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h14",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_14",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_14",
+     "g14"
+    ]
+   }
+  },
+  {
+   "id": "v1_15",
+   "kind": "source",
+   "params": {
+    "freq": 1614.9902395089157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h15",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_15",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_15",
+     "g15"
+    ]
+   }
+  },
+  {
+   "id": "v1_16",
+   "kind": "source",
+   "params": {
+    "freq": 1722.6562551339157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h16",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_16",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_16",
+     "g16"
+    ]
+   }
+  },
+  {
+   "id": "v1_17",
+   "kind": "source",
+   "params": {
+    "freq": 1830.3222707589157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h17",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_17",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_17",
+     "g17"
+    ]
+   }
+  },
+  {
+   "id": "v1_18",
+   "kind": "source",
+   "params": {
+    "freq": 1937.9882863839157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h18",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_18",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_18",
+     "g18"
+    ]
+   }
+  },
+  {
+   "id": "v1_19",
+   "kind": "source",
+   "params": {
+    "freq": 2045.6543020089157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h19",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_19",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_19",
+     "g19"
+    ]
+   }
+  },
+  {
+   "id": "v1_20",
+   "kind": "source",
+   "params": {
+    "freq": 2153.3203176339157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h20",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_20",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_20",
+     "g20"
+    ]
+   }
+  },
+  {
+   "id": "v1_21",
+   "kind": "source",
+   "params": {
+    "freq": 2260.9863332589157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h21",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_21",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_21",
+     "g21"
+    ]
+   }
+  },
+  {
+   "id": "v1_22",
+   "kind": "source",
+   "params": {
+    "freq": 2368.6523488839157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h22",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_22",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_22",
+     "g22"
+    ]
+   }
+  },
+  {
+   "id": "v1_23",
+   "kind": "source",
+   "params": {
+    "freq": 2476.3183645089157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h23",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_23",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_23",
+     "g23"
+    ]
+   }
+  },
+  {
+   "id": "v1_24",
+   "kind": "source",
+   "params": {
+    "freq": 2583.9843801339157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v1h24",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w1_24",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v1_24",
+     "g24"
+    ]
+   }
+  },
+  {
+   "id": "saw1",
+   "kind": "mix",
+   "in": {
+    "in": [
+     "v1",
+     "w1_2",
+     "w1_3",
+     "w1_4",
+     "w1_5",
+     "w1_6",
+     "w1_7",
+     "w1_8",
+     "w1_9",
+     "w1_10",
+     "w1_11",
+     "w1_12",
+     "w1_13",
+     "w1_14",
+     "w1_15",
+     "w1_16",
+     "w1_17",
+     "w1_18",
+     "w1_19",
+     "w1_20",
+     "w1_21",
+     "w1_22",
+     "w1_23",
+     "w1_24"
+    ]
+   }
+  },
+  {
+   "id": "lfo1",
+   "kind": "source",
+   "params": {
+    "freq": 0.2,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "lfo1",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "sfl1",
+   "kind": "sflange",
+   "params": {
+    "depth": 0.0015
+   },
+   "in": {
+    "in": [
+     "saw1"
+    ],
+    "mod": [
+     "lfo1"
+    ]
+   },
+   "param_aliases": {
+    "depth": "fl_depth"
+   }
+  },
+  {
+   "id": "inv1",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "saw1",
+     "pol"
+    ]
+   }
+  },
+  {
+   "id": "fl1",
+   "kind": "mix",
+   "in": {
+    "in": [
+     "sfl1",
+     "inv1"
+    ]
+   }
+  },
+  {
+   "id": "v2",
+   "kind": "source",
+   "params": {
+    "freq": 134.5825246651657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h1",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "v2_2",
+   "kind": "source",
+   "params": {
+    "freq": 269.1650441964157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h2",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_2",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_2",
+     "g2"
+    ]
+   }
+  },
+  {
+   "id": "v2_3",
+   "kind": "source",
+   "params": {
+    "freq": 403.7475637276657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h3",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_3",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_3",
+     "g3"
+    ]
+   }
+  },
+  {
+   "id": "v2_4",
+   "kind": "source",
+   "params": {
+    "freq": 538.3300832589157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h4",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_4",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_4",
+     "g4"
+    ]
+   }
+  },
+  {
+   "id": "v2_5",
+   "kind": "source",
+   "params": {
+    "freq": 672.9126027901657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h5",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_5",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_5",
+     "g5"
+    ]
+   }
+  },
+  {
+   "id": "v2_6",
+   "kind": "source",
+   "params": {
+    "freq": 807.4951223214157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h6",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_6",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_6",
+     "g6"
+    ]
+   }
+  },
+  {
+   "id": "v2_7",
+   "kind": "source",
+   "params": {
+    "freq": 942.0776418526657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h7",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_7",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_7",
+     "g7"
+    ]
+   }
+  },
+  {
+   "id": "v2_8",
+   "kind": "source",
+   "params": {
+    "freq": 1076.6601613839157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h8",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_8",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_8",
+     "g8"
+    ]
+   }
+  },
+  {
+   "id": "v2_9",
+   "kind": "source",
+   "params": {
+    "freq": 1211.2426809151657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h9",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_9",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_9",
+     "g9"
+    ]
+   }
+  },
+  {
+   "id": "v2_10",
+   "kind": "source",
+   "params": {
+    "freq": 1345.8252004464157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h10",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_10",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_10",
+     "g10"
+    ]
+   }
+  },
+  {
+   "id": "v2_11",
+   "kind": "source",
+   "params": {
+    "freq": 1480.4077199776657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h11",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_11",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_11",
+     "g11"
+    ]
+   }
+  },
+  {
+   "id": "v2_12",
+   "kind": "source",
+   "params": {
+    "freq": 1614.9902395089157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h12",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_12",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_12",
+     "g12"
+    ]
+   }
+  },
+  {
+   "id": "v2_13",
+   "kind": "source",
+   "params": {
+    "freq": 1749.5727590401657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h13",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_13",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_13",
+     "g13"
+    ]
+   }
+  },
+  {
+   "id": "v2_14",
+   "kind": "source",
+   "params": {
+    "freq": 1884.1552785714157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h14",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_14",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_14",
+     "g14"
+    ]
+   }
+  },
+  {
+   "id": "v2_15",
+   "kind": "source",
+   "params": {
+    "freq": 2018.7377981026657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h15",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_15",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_15",
+     "g15"
+    ]
+   }
+  },
+  {
+   "id": "v2_16",
+   "kind": "source",
+   "params": {
+    "freq": 2153.3203176339157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h16",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_16",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_16",
+     "g16"
+    ]
+   }
+  },
+  {
+   "id": "v2_17",
+   "kind": "source",
+   "params": {
+    "freq": 2287.9028371651657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h17",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_17",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_17",
+     "g17"
+    ]
+   }
+  },
+  {
+   "id": "v2_18",
+   "kind": "source",
+   "params": {
+    "freq": 2422.4853566964157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h18",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_18",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_18",
+     "g18"
+    ]
+   }
+  },
+  {
+   "id": "v2_19",
+   "kind": "source",
+   "params": {
+    "freq": 2557.0678762276657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h19",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_19",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_19",
+     "g19"
+    ]
+   }
+  },
+  {
+   "id": "v2_20",
+   "kind": "source",
+   "params": {
+    "freq": 2691.6503957589157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h20",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_20",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_20",
+     "g20"
+    ]
+   }
+  },
+  {
+   "id": "v2_21",
+   "kind": "source",
+   "params": {
+    "freq": 2826.2329152901657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h21",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_21",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_21",
+     "g21"
+    ]
+   }
+  },
+  {
+   "id": "v2_22",
+   "kind": "source",
+   "params": {
+    "freq": 2960.8154348214157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h22",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_22",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_22",
+     "g22"
+    ]
+   }
+  },
+  {
+   "id": "v2_23",
+   "kind": "source",
+   "params": {
+    "freq": 3095.3979543526657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h23",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_23",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_23",
+     "g23"
+    ]
+   }
+  },
+  {
+   "id": "v2_24",
+   "kind": "source",
+   "params": {
+    "freq": 3229.9804738839157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v2h24",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w2_24",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v2_24",
+     "g24"
+    ]
+   }
+  },
+  {
+   "id": "saw2",
+   "kind": "mix",
+   "in": {
+    "in": [
+     "v2",
+     "w2_2",
+     "w2_3",
+     "w2_4",
+     "w2_5",
+     "w2_6",
+     "w2_7",
+     "w2_8",
+     "w2_9",
+     "w2_10",
+     "w2_11",
+     "w2_12",
+     "w2_13",
+     "w2_14",
+     "w2_15",
+     "w2_16",
+     "w2_17",
+     "w2_18",
+     "w2_19",
+     "w2_20",
+     "w2_21",
+     "w2_22",
+     "w2_23",
+     "w2_24"
+    ]
+   }
+  },
+  {
+   "id": "lfo2",
+   "kind": "source",
+   "params": {
+    "freq": 0.2,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "lfo2",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "sfl2",
+   "kind": "sflange",
+   "params": {
+    "depth": 0.0015
+   },
+   "in": {
+    "in": [
+     "saw2"
+    ],
+    "mod": [
+     "lfo2"
+    ]
+   },
+   "param_aliases": {
+    "depth": "fl_depth"
+   }
+  },
+  {
+   "id": "inv2",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "saw2",
+     "pol"
+    ]
+   }
+  },
+  {
+   "id": "fl2",
+   "kind": "mix",
+   "in": {
+    "in": [
+     "sfl2",
+     "inv2"
+    ]
+   }
+  },
+  {
+   "id": "v3",
+   "kind": "source",
+   "params": {
+    "freq": 161.4990285714157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h1",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "v3_2",
+   "kind": "source",
+   "params": {
+    "freq": 322.9980520089157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h2",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_2",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_2",
+     "g2"
+    ]
+   }
+  },
+  {
+   "id": "v3_3",
+   "kind": "source",
+   "params": {
+    "freq": 484.4970754464157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h3",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_3",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_3",
+     "g3"
+    ]
+   }
+  },
+  {
+   "id": "v3_4",
+   "kind": "source",
+   "params": {
+    "freq": 645.9960988839157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h4",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_4",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_4",
+     "g4"
+    ]
+   }
+  },
+  {
+   "id": "v3_5",
+   "kind": "source",
+   "params": {
+    "freq": 807.4951223214157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h5",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_5",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_5",
+     "g5"
+    ]
+   }
+  },
+  {
+   "id": "v3_6",
+   "kind": "source",
+   "params": {
+    "freq": 968.9941457589157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h6",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_6",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_6",
+     "g6"
+    ]
+   }
+  },
+  {
+   "id": "v3_7",
+   "kind": "source",
+   "params": {
+    "freq": 1130.4931691964157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h7",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_7",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_7",
+     "g7"
+    ]
+   }
+  },
+  {
+   "id": "v3_8",
+   "kind": "source",
+   "params": {
+    "freq": 1291.9921926339157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h8",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_8",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_8",
+     "g8"
+    ]
+   }
+  },
+  {
+   "id": "v3_9",
+   "kind": "source",
+   "params": {
+    "freq": 1453.4912160714157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h9",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_9",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_9",
+     "g9"
+    ]
+   }
+  },
+  {
+   "id": "v3_10",
+   "kind": "source",
+   "params": {
+    "freq": 1614.9902395089157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h10",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_10",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_10",
+     "g10"
+    ]
+   }
+  },
+  {
+   "id": "v3_11",
+   "kind": "source",
+   "params": {
+    "freq": 1776.4892629464157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h11",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_11",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_11",
+     "g11"
+    ]
+   }
+  },
+  {
+   "id": "v3_12",
+   "kind": "source",
+   "params": {
+    "freq": 1937.9882863839157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h12",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_12",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_12",
+     "g12"
+    ]
+   }
+  },
+  {
+   "id": "v3_13",
+   "kind": "source",
+   "params": {
+    "freq": 2099.4873098214157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h13",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_13",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_13",
+     "g13"
+    ]
+   }
+  },
+  {
+   "id": "v3_14",
+   "kind": "source",
+   "params": {
+    "freq": 2260.9863332589157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h14",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_14",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_14",
+     "g14"
+    ]
+   }
+  },
+  {
+   "id": "v3_15",
+   "kind": "source",
+   "params": {
+    "freq": 2422.4853566964157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h15",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_15",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_15",
+     "g15"
+    ]
+   }
+  },
+  {
+   "id": "v3_16",
+   "kind": "source",
+   "params": {
+    "freq": 2583.9843801339157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h16",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_16",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_16",
+     "g16"
+    ]
+   }
+  },
+  {
+   "id": "v3_17",
+   "kind": "source",
+   "params": {
+    "freq": 2745.4834035714157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h17",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_17",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_17",
+     "g17"
+    ]
+   }
+  },
+  {
+   "id": "v3_18",
+   "kind": "source",
+   "params": {
+    "freq": 2906.9824270089157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h18",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_18",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_18",
+     "g18"
+    ]
+   }
+  },
+  {
+   "id": "v3_19",
+   "kind": "source",
+   "params": {
+    "freq": 3068.4814504464157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h19",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_19",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_19",
+     "g19"
+    ]
+   }
+  },
+  {
+   "id": "v3_20",
+   "kind": "source",
+   "params": {
+    "freq": 3229.9804738839157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h20",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_20",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_20",
+     "g20"
+    ]
+   }
+  },
+  {
+   "id": "v3_21",
+   "kind": "source",
+   "params": {
+    "freq": 3391.4794973214157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h21",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_21",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_21",
+     "g21"
+    ]
+   }
+  },
+  {
+   "id": "v3_22",
+   "kind": "source",
+   "params": {
+    "freq": 3552.9785207589157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h22",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_22",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_22",
+     "g22"
+    ]
+   }
+  },
+  {
+   "id": "v3_23",
+   "kind": "source",
+   "params": {
+    "freq": 3714.4775441964157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h23",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_23",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_23",
+     "g23"
+    ]
+   }
+  },
+  {
+   "id": "v3_24",
+   "kind": "source",
+   "params": {
+    "freq": 3875.9765676339157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v3h24",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w3_24",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v3_24",
+     "g24"
+    ]
+   }
+  },
+  {
+   "id": "saw3",
+   "kind": "mix",
+   "in": {
+    "in": [
+     "v3",
+     "w3_2",
+     "w3_3",
+     "w3_4",
+     "w3_5",
+     "w3_6",
+     "w3_7",
+     "w3_8",
+     "w3_9",
+     "w3_10",
+     "w3_11",
+     "w3_12",
+     "w3_13",
+     "w3_14",
+     "w3_15",
+     "w3_16",
+     "w3_17",
+     "w3_18",
+     "w3_19",
+     "w3_20",
+     "w3_21",
+     "w3_22",
+     "w3_23",
+     "w3_24"
+    ]
+   }
+  },
+  {
+   "id": "lfo3",
+   "kind": "source",
+   "params": {
+    "freq": 0.2,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "lfo3",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "sfl3",
+   "kind": "sflange",
+   "params": {
+    "depth": 0.0015
+   },
+   "in": {
+    "in": [
+     "saw3"
+    ],
+    "mod": [
+     "lfo3"
+    ]
+   },
+   "param_aliases": {
+    "depth": "fl_depth"
+   }
+  },
+  {
+   "id": "inv3",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "saw3",
+     "pol"
+    ]
+   }
+  },
+  {
+   "id": "fl3",
+   "kind": "mix",
+   "in": {
+    "in": [
+     "sfl3",
+     "inv3"
+    ]
+   }
+  },
+  {
+   "id": "v4",
+   "kind": "source",
+   "params": {
+    "freq": 188.4155324776657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h1",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "v4_2",
+   "kind": "source",
+   "params": {
+    "freq": 376.8310598214157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h2",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_2",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_2",
+     "g2"
+    ]
+   }
+  },
+  {
+   "id": "v4_3",
+   "kind": "source",
+   "params": {
+    "freq": 565.2465871651657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h3",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_3",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_3",
+     "g3"
+    ]
+   }
+  },
+  {
+   "id": "v4_4",
+   "kind": "source",
+   "params": {
+    "freq": 753.6621145089157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h4",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_4",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_4",
+     "g4"
+    ]
+   }
+  },
+  {
+   "id": "v4_5",
+   "kind": "source",
+   "params": {
+    "freq": 942.0776418526657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h5",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_5",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_5",
+     "g5"
+    ]
+   }
+  },
+  {
+   "id": "v4_6",
+   "kind": "source",
+   "params": {
+    "freq": 1130.4931691964157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h6",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_6",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_6",
+     "g6"
+    ]
+   }
+  },
+  {
+   "id": "v4_7",
+   "kind": "source",
+   "params": {
+    "freq": 1318.9086965401657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h7",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_7",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_7",
+     "g7"
+    ]
+   }
+  },
+  {
+   "id": "v4_8",
+   "kind": "source",
+   "params": {
+    "freq": 1507.3242238839157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h8",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_8",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_8",
+     "g8"
+    ]
+   }
+  },
+  {
+   "id": "v4_9",
+   "kind": "source",
+   "params": {
+    "freq": 1695.7397512276657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h9",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_9",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_9",
+     "g9"
+    ]
+   }
+  },
+  {
+   "id": "v4_10",
+   "kind": "source",
+   "params": {
+    "freq": 1884.1552785714157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h10",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_10",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_10",
+     "g10"
+    ]
+   }
+  },
+  {
+   "id": "v4_11",
+   "kind": "source",
+   "params": {
+    "freq": 2072.5708059151657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h11",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_11",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_11",
+     "g11"
+    ]
+   }
+  },
+  {
+   "id": "v4_12",
+   "kind": "source",
+   "params": {
+    "freq": 2260.9863332589157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h12",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_12",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_12",
+     "g12"
+    ]
+   }
+  },
+  {
+   "id": "v4_13",
+   "kind": "source",
+   "params": {
+    "freq": 2449.4018606026657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h13",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_13",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_13",
+     "g13"
+    ]
+   }
+  },
+  {
+   "id": "v4_14",
+   "kind": "source",
+   "params": {
+    "freq": 2637.8173879464157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h14",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_14",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_14",
+     "g14"
+    ]
+   }
+  },
+  {
+   "id": "v4_15",
+   "kind": "source",
+   "params": {
+    "freq": 2826.2329152901657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h15",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_15",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_15",
+     "g15"
+    ]
+   }
+  },
+  {
+   "id": "v4_16",
+   "kind": "source",
+   "params": {
+    "freq": 3014.6484426339157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h16",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_16",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_16",
+     "g16"
+    ]
+   }
+  },
+  {
+   "id": "v4_17",
+   "kind": "source",
+   "params": {
+    "freq": 3203.0639699776657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h17",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_17",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_17",
+     "g17"
+    ]
+   }
+  },
+  {
+   "id": "v4_18",
+   "kind": "source",
+   "params": {
+    "freq": 3391.4794973214157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h18",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_18",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_18",
+     "g18"
+    ]
+   }
+  },
+  {
+   "id": "v4_19",
+   "kind": "source",
+   "params": {
+    "freq": 3579.8950246651657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h19",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_19",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_19",
+     "g19"
+    ]
+   }
+  },
+  {
+   "id": "v4_20",
+   "kind": "source",
+   "params": {
+    "freq": 3768.3105520089157,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h20",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_20",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_20",
+     "g20"
+    ]
+   }
+  },
+  {
+   "id": "v4_21",
+   "kind": "source",
+   "params": {
+    "freq": 3956.7260793526657,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h21",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_21",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_21",
+     "g21"
+    ]
+   }
+  },
+  {
+   "id": "v4_22",
+   "kind": "source",
+   "params": {
+    "freq": 4145.141606696416,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h22",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_22",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_22",
+     "g22"
+    ]
+   }
+  },
+  {
+   "id": "v4_23",
+   "kind": "source",
+   "params": {
+    "freq": 4333.557134040166,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h23",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_23",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_23",
+     "g23"
+    ]
+   }
+  },
+  {
+   "id": "v4_24",
+   "kind": "source",
+   "params": {
+    "freq": 4521.972661383916,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "v4h24",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "w4_24",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "v4_24",
+     "g24"
+    ]
+   }
+  },
+  {
+   "id": "saw4",
+   "kind": "mix",
+   "in": {
+    "in": [
+     "v4",
+     "w4_2",
+     "w4_3",
+     "w4_4",
+     "w4_5",
+     "w4_6",
+     "w4_7",
+     "w4_8",
+     "w4_9",
+     "w4_10",
+     "w4_11",
+     "w4_12",
+     "w4_13",
+     "w4_14",
+     "w4_15",
+     "w4_16",
+     "w4_17",
+     "w4_18",
+     "w4_19",
+     "w4_20",
+     "w4_21",
+     "w4_22",
+     "w4_23",
+     "w4_24"
+    ]
+   }
+  },
+  {
+   "id": "lfo4",
+   "kind": "source",
+   "params": {
+    "freq": 0.2,
+    "morph": 1
+   },
+   "param_aliases": {
+    "freq": "lfo4",
+    "morph": "sine"
+   }
+  },
+  {
+   "id": "sfl4",
+   "kind": "sflange",
+   "params": {
+    "depth": 0.0015
+   },
+   "in": {
+    "in": [
+     "saw4"
+    ],
+    "mod": [
+     "lfo4"
+    ]
+   },
+   "param_aliases": {
+    "depth": "fl_depth"
+   }
+  },
+  {
+   "id": "inv4",
+   "kind": "ring",
+   "in": {
+    "in": [
+     "saw4",
+     "pol"
+    ]
+   }
+  },
+  {
+   "id": "fl4",
+   "kind": "mix",
+   "in": {
+    "in": [
+     "sfl4",
+     "inv4"
+    ]
+   }
+  },
+  {
+   "id": "flmix",
+   "kind": "mix",
+   "in": {
+    "in": [
+     "fl1",
+     "fl2",
+     "fl3",
+     "fl4"
+    ]
+   }
+  },
+  {
+   "id": "saws",
+   "kind": "mix",
+   "in": {
+    "in": [
+     "saw1",
+     "saw2",
+     "saw3",
+     "saw4"
+    ]
+   }
+  }
+ ],
+ "out": "flmix",
+ "taps": [
+  "saws",
+  "v1",
+  "v2",
+  "v3",
+  "v4",
+  "lfo1",
+  "saw1",
+  "saw2",
+  "saw3",
+  "saw4",
+  "fl1",
+  "fl2",
+  "fl3",
+  "fl4"
+ ]
+}

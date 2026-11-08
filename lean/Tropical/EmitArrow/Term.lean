@@ -1,4 +1,5 @@
 import Tropical.EmitArrow.Sig
+import Tropical.EmitArrow.Spectral
 
 /-!
 # EmitArrow.Term — ID-native voices and reified arrows
@@ -111,8 +112,32 @@ inductive ArrowTerm where
       phase) to the generator's signal, given the same controls. -/
   | genC (mk : Array Sig → Voice) (post : Array Sig → Sig → BuildM Sig)
       (name : String) (clk : Clock) (controls : Array ArrowTerm)
+  /-- A PARTIAL FAMILY (`EmitArrow.Spectral`): partials `k = 1..K` of one
+      uniform fundamental, phases `k·φ` from one phasor, weights `a_k`. The
+      algebra sees it as a bundle — an envelope distributes down to it — and it lowers
+      to one `bankSum` region. -/
+  | family (f : PartialFamily)
+  /-- A COMPLEX SPECTRAL ENVELOPE over `t`: each partial of `t` is multiplied
+      by `G(f_k, τ)` at its own frequency (amplitude × |G|, phase + arg G).
+      `controls` are signal terms evaluated in the envelope's clock context,
+      like `genC`'s. `t` must normalize to families through `sum` and `scale`;
+      a term whose partials the algebra cannot see (an opaque generator, a
+      product, a warp — the warped partial frequency needs θ′) is refused at
+      emission. -/
+  | envelope (law : EnvelopeLaw) (controls : Array ArrowTerm) (t : ArrowTerm)
 
 instance : Inhabited ArrowTerm := ⟨.sum #[]⟩
+
+/-- Distribute an envelope down to the families it multiplies. The envelope is
+    linear (`G·(x + y) = G·x + G·y`) and commutes with scaling by any signal
+    (`G` multiplies a partial's amplitude, as `scale` does), so it moves through
+    `sum` and `scale`; it stops above a family (the normal form) and above
+    anything else, where emission refuses it. -/
+def envelopeInto (law : EnvelopeLaw) (controls : Array ArrowTerm) :
+    ArrowTerm → ArrowTerm
+  | .sum ts => .sum (ts.attach.map fun ⟨t, _⟩ => envelopeInto law controls t)
+  | .scale weight t => .scale weight (envelopeInto law controls t)
+  | t => .envelope law controls t
 
 /-- Pure structural normalization; expression construction remains in
     `emitTermC`, so normalization does not perturb builder effect order. -/
@@ -132,6 +157,9 @@ def normalize : ArrowTerm → ArrowTerm
       .pmGen v name baseClk depth (normalize modulator)
   | .genC mk post name clk controls =>
       .genC mk post name clk (controls.attach.map fun ⟨t, _⟩ => normalize t)
+  | .family f => .family f
+  | .envelope law controls t =>
+      envelopeInto law (controls.attach.map fun ⟨c, _⟩ => normalize c) (normalize t)
 
 /-- The voice with `offset` added to its phase input: the PM law, for `pmGen`
     and for a control-driven generator (`genC`) whose modulator is one of its
@@ -162,52 +190,85 @@ def Voice.withPhaseOffset (v : Voice) (offset : BuildM Sig) : Voice :=
           pure input }
   | none => v
 
-/-- Emit under an enclosing clock transform.  Children, modulators, instance
-    declarations, and left-associated sums are sequenced in authored order. -/
-def emitTermC (cmod : Clock → BuildM Clock) : ArrowTerm → BuildM Sig
+/-- A spectral envelope whose controls have been emitted, waiting for the
+    families below it. -/
+abbrev PendingEnvelope := EnvelopeLaw × Array Sig
+
+/-- The refusal for an envelope over a term whose partials the algebra cannot
+    see. -/
+def envelopeRefusal (what : String) : String :=
+  s!"spectral envelope over {what}: an envelope applies to partial families, through sum and scale; this term's partials are not visible to the algebra"
+
+/-- Emit under an enclosing clock transform, with the spectral envelopes that
+    apply to this subterm.  Children, modulators, instance declarations, and
+    left-associated sums are sequenced in authored order. An envelope's controls
+    are emitted where the envelope stands; the envelope then rides down through
+    `sum` and `scale` to the families it multiplies. Below a pending envelope a
+    warp is refused (the warped partial's frequency needs θ′), as is any term
+    that is not a family, a sum, a scale or another envelope. -/
+def emitTermE (cmod : Clock → BuildM Clock) (envs : Array PendingEnvelope) :
+    ArrowTerm → BuildM Sig
   | .gen v name clk => do
+      unless envs.isEmpty do throw (envelopeRefusal s!"the generator '{name}'")
       let warpedClk ← cmod clk
       let builder ← get
       Builder.osc v s!"{name}{builder.decls.size}" warpedClk
   | .scale weight t => do
-      let signal ← emitTermC cmod t
+      let signal ← emitTermE cmod envs t
       mul weight signal
   | .arrUn f t => do
-      let signal ← emitTermC cmod t
+      unless envs.isEmpty do throw (envelopeRefusal "a pointwise map")
+      let signal ← emitTermE cmod #[] t
       f signal
   | .arrN f ts => do
-      let signals ← ts.attach.mapM fun ⟨t, _⟩ => emitTermC cmod t
+      unless envs.isEmpty do throw (envelopeRefusal "a pointwise map")
+      let signals ← ts.attach.mapM fun ⟨t, _⟩ => emitTermE cmod #[] t
       f signals
-  | .warp φ t =>
-      emitTermC (fun clock => do
+  | .warp φ t => do
+      unless envs.isEmpty do throw (envelopeRefusal "a warped term")
+      emitTermE (fun clock => do
         let warped ← φ clock
-        cmod warped) t
-  | .swarp mw modulator t =>
-      emitTermC (fun clock => do
-        let modSignal ← emitTermC cmod modulator
+        cmod warped) #[] t
+  | .swarp mw modulator t => do
+      unless envs.isEmpty do throw (envelopeRefusal "a warped term")
+      emitTermE (fun clock => do
+        let modSignal ← emitTermE cmod #[] modulator
         let warped ← mw clock modSignal
-        cmod warped) t
-  | .konst signal => pure signal
+        cmod warped) #[] t
+  | .konst signal => do
+      unless envs.isEmpty do throw (envelopeRefusal "a constant")
+      pure signal
   | .prod x y => do
-      let sx ← emitTermC cmod x
-      let sy ← emitTermC cmod y
+      unless envs.isEmpty do throw (envelopeRefusal "a product")
+      let sx ← emitTermE cmod #[] x
+      let sy ← emitTermE cmod #[] y
       mul sx sy
-  | .clk clock => cmod clock
+  | .clk clock => do
+      unless envs.isEmpty do throw (envelopeRefusal "a clock")
+      cmod clock
   | .pmGen v name baseClk depth modulator => do
-      let modSignal ← emitTermC cmod modulator
+      unless envs.isEmpty do throw (envelopeRefusal s!"the generator '{name}'")
+      let modSignal ← emitTermE cmod #[] modulator
       let warpedClk ← cmod baseClk
       let phaseOffset ← mul depth modSignal
       let v := v.withPhaseOffset (pure phaseOffset)
       let builder ← get
       Builder.osc v s!"{name}{builder.decls.size}" warpedClk
   | .genC mk post name clk controls => do
-      let signals ← controls.attach.mapM fun ⟨t, _⟩ => emitTermC cmod t
+      unless envs.isEmpty do throw (envelopeRefusal s!"the generator '{name}'")
+      let signals ← controls.attach.mapM fun ⟨t, _⟩ => emitTermE cmod #[] t
       let warpedClk ← cmod clk
       let builder ← get
       let raw ← Builder.osc (mk signals) s!"{name}{builder.decls.size}" warpedClk
       post signals raw
+  | .family f => do
+      let warpedClk ← cmod f.clk
+      familySig f warpedClk envs
+  | .envelope law controls t => do
+      let signals ← controls.attach.mapM fun ⟨c, _⟩ => emitTermE cmod #[] c
+      emitTermE cmod (envs.push (law, signals)) t
   | .sum ts => do
-      let signals ← ts.attach.mapM fun ⟨t, _⟩ => emitTermC cmod t
+      let signals ← ts.attach.mapM fun ⟨t, _⟩ => emitTermE cmod envs t
       match signals[0]? with
       | none => lit 0
       | some first =>
@@ -217,6 +278,10 @@ decreasing_by
   all_goals first
     | decreasing_tactic
     | (have := Array.sizeOf_lt_of_mem ‹_ ∈ _›; simp_all; omega)
+
+/-- Emit under an enclosing clock transform (no envelope pending). -/
+def emitTermC (cmod : Clock → BuildM Clock) (term : ArrowTerm) : BuildM Sig :=
+  emitTermE cmod #[] term
 
 def emitTerm (term : ArrowTerm) : BuildM Sig := emitTermC pure term
 
@@ -228,5 +293,12 @@ def flangeEffectWith (back forward : Clock → BuildM Clock)
     .scale half signal,
     .scale quarter (.warp back signal),
     .scale quarter (.warp forward signal)])
+
+/-- An SVF-shaped complex spectral envelope (`svfEnvelopeLaw`) over `t`, with
+    cutoff (Hz) and Q as signal terms: a filter SHAPE applied per partial, not
+    filter dynamics. -/
+def svfEnvelope (response : SvfResponse) (cutoff q : ArrowTerm) (t : ArrowTerm) :
+    ArrowTerm :=
+  .envelope (svfEnvelopeLaw response) #[cutoff, q] t
 
 end Tropical.EmitArrow

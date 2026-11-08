@@ -35,6 +35,7 @@ import Tropical.Tropicaltest.LongHorizon
 import Tropical.Tropicaltest.ParamOrder
 import Tropical.Tropicaltest.BlockRealize
 import Tropical.Tropicaltest.OrientedPatch
+import Tropical.Tropicaltest.Spectral
 
 /-!
 # tropicaltest — the post-TS golden + native-equiv runner (Phase 8)
@@ -78,6 +79,14 @@ def main (args : List String) : IO UInt32 := do
     let realize ← Tropical.Tropicaltest.BlockRealize.runBlockRealize
     let banked ← Tropical.Tropicaltest.BlockRealize.runBlockBanked
     return if algebra && realize && banked then 0 else 1
+  if args.contains "--spectral-only" then
+    match Tropical.Playground.stdlib with
+    | .error error =>
+        IO.eprintln error
+        return 1
+    | .ok (arena, resolved) =>
+        let (_, bad) ← Tropical.Tropicaltest.Spectral.runSpectral arena resolved
+        return if bad == 0 then 0 else 1
   if args.contains "--oriented-patch-only" then
     return if ← Tropical.Tropicaltest.OrientedPatch.runOrientedPatch {} then 0 else 1
   if args.contains "--ecdd-only" then
@@ -262,6 +271,19 @@ def main (args : List String) : IO UInt32 := do
     if !(← runMslGolden writeMode name patchPath) then failed := failed + 1
   total := total + 1
   if !(← runMslFold) then failed := failed + 1
+
+  -- ── (g) Spectral algebra: the partial family (S2) and the complex envelope
+  -- (S3) — design/spectral-family.md
+  IO.println "spectral family + envelope:"
+  match Tropical.Playground.stdlib with
+  | .error error =>
+      total := total + 5
+      failed := failed + 5
+      IO.println s!"  FAIL  spectral  stdlib: {error}"
+  | .ok (arena, resolved) =>
+      let (n, bad) ← Tropical.Tropicaltest.Spectral.runSpectral arena resolved
+      total := total + n
+      failed := failed + bad
 
   -- ── (h) EmitArrow arrow laws (slice 3): warp algebra ≡ in rendered audio ────
   IO.println "arrow laws (warp algebra ≡ byte-identical audio):"
