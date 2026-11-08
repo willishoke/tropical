@@ -31,6 +31,7 @@ rev = "main"
 name = "TropicalCore"
 globs = [
   "Tropical.Artifact",
+  "Tropical.CliArgs",
   "Tropical.Compile",
   "Tropical.EmitArrow.*",
   "Tropical.Entries",

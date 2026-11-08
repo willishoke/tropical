@@ -132,6 +132,22 @@ def runVocabDriven (arena : Arena)
   if !roomSurfaceOk || !roomInputOk then
     ok := false
     issues := issues.push "reverb: served rt60/dir controls are not signal-capable glides over a modal input"
+  -- The uniform inlets are exactly the frequencies and rates (a generator's
+  -- phase is `inc·τ`, exact only for a constant increment), each a knob-backed
+  -- inlet. A new rate-like inlet must be added here and marked in the table.
+  let uniformExpected : Array (String × String) := #[
+    ("source", "freq"), ("sine", "freq"), ("saw", "freq"), ("pulse", "freq"),
+    ("pluck", "freq"), ("pluck", "event_rate"), ("fm", "carrier"),
+    ("phaser", "rate"), ("modal_allpass_tail", "rate")]
+  let uniformServed := (vocabularyKinds ++ hierarchyAtomKinds).foldl (init := #[])
+    fun acc kind => acc ++ ((portSpecs kind).filter (·.uniform)).map (kind, ·.name)
+  let uniformShapeOk := uniformServed.all fun (kind, name) =>
+    match portOf kind name with
+    | some spec => !spec.accepts.isEmpty && spec.knob.isSome
+    | none => false
+  if uniformServed != uniformExpected || !uniformShapeOk then
+    ok := false
+    issues := issues.push s!"uniform inlets changed: {uniformServed}"
   for kind in vocabularyKinds do
     if kind == "out" then continue
     let mut nodes : Array Lean.Json := #[]
@@ -183,7 +199,7 @@ def runVocabDriven (arena : Arena)
   IO.println s!"        {covered} non-sink served kinds compiled from vocabulary-generated minimal patches; room RT60 signal+glide={roomSurfaceOk}; all served identifiers unique, withheld absent:"
   IO.println s!"        result   {if issues.isEmpty then "every declared knob registers and is read" else toString issues}"
   if ok then
-    passGate "vocab-driven" "versioned/fingerprinted vocabulary serves reverb RT60 as a signal-capable glided knob and drives one compiling patch per kind — declared knobs live, nothing unread"
+    passGate "vocab-driven" "versioned/fingerprinted vocabulary serves reverb RT60 as a signal-capable glided knob and drives one compiling patch per kind — declared knobs live, nothing unread; exactly the frequency and rate inlets are uniform"
   else
     failGate "vocab-driven" s!"{issues}"
 
@@ -716,8 +732,13 @@ def runDeadSlotLint (arena : Arena)
 
 /-- Test 3: `osc ⋙ flange ⋙ flange` — the slide pushes the outer warps through
     the inner flanger's sum and fuses them, producing the oscillator read at the
-    nine convolved offsets automatically (the proper multiplicity, derived). We
-    assert the generator count (9 vs 3) and that the cascade is a real, non-silent
+    nine convolved offsets automatically (the proper multiplicity, derived). The
+    nine terms read SEVEN distinct (closed form, clock) pairs: `back ∘ id` and
+    `id ∘ back` are the same clock expression (likewise `fwd`), and `Builder.osc`
+    hash-conses on (program, inputs), so those two pairs share one instance each
+    while the sum still weights them twice. `back ∘ fwd` and `fwd ∘ back` are
+    different expressions (`(c+δ)−δ` vs `(c−δ)+δ`) and stay separate. We assert
+    the generator count (7 vs 3) and that the cascade is a real, non-silent
     filter distinct from a single flanger. -/
 def runSlideCascade (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : IO Bool := do
@@ -735,11 +756,11 @@ def runSlideCascade (arena : Arena)
         for t in [8:512] do
           energy := energy + dbl[t]! * dbl[t]!
           if (dbl[t]! - sgl[t]!).abs > diff then diff := (dbl[t]! - sgl[t]!).abs
-        IO.println s!"        cascade osc ⋙ flange ⋙ flange: {ninstD} generator instances (single flange: {ninstS}); the slide convolved the kernels — 9 = 3⊛3 taps, no coincident-offset merge"
-        if ninstD == 9 && ninstS == 3 && energy > 1e-6 && diff > 1e-4 then
-          passGate "slide-cascade" s!"9-tap multiplicity derived by the slide (energy={energy}, |double−single|max={diff})"
+        IO.println s!"        cascade osc ⋙ flange ⋙ flange: {ninstD} generator instances (single flange: {ninstS}); the slide convolved the kernels — 9 = 3⊛3 taps over 7 distinct tap clocks"
+        if ninstD == 7 && ninstS == 3 && energy > 1e-6 && diff > 1e-4 then
+          passGate "slide-cascade" s!"9-tap multiplicity derived by the slide over 7 shared instances (energy={energy}, |double−single|max={diff})"
         else
-          failGate "slide-cascade" s!"ninstD={ninstD} (want 9) ninstS={ninstS} (want 3) energy={energy} diff={diff}"
+          failGate "slide-cascade" s!"ninstD={ninstD} (want 7) ninstS={ninstS} (want 3) energy={energy} diff={diff}"
       | .error e, _ | _, .error e => failGate "slide-cascade" s!"render: {firstLine e}"
     | .error e, _ | _, .error e => failGate "slide-cascade" s!"finish: {firstLine e}"
   | .error e, _ | _, .error e => failGate "slide-cascade" s!"build: {firstLine e}"

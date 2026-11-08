@@ -141,9 +141,10 @@ def vocabularyPayloadJson : Json :=
     ++ (match port.ownerPort with
         | some owner => [("owner", Json.str owner)]
         | none => [])
+    ++ (if port.uniform then [("uniform", Json.bool true)] else [])
   Json.mkObj [
     ("rule", Json.str
-      "outlet→inlet valid iff outlet.color ∈ inlet.accepts; modal→signal realizes, signal→modal is a type error"),
+      "outlet→inlet valid iff outlet.color ∈ inlet.accepts; modal→signal realizes, signal→modal is a type error; a uniform inlet takes only a wire constant within a kernel call (knobs, arithmetic on knobs, constants)"),
     ("colors", Json.arr #[Json.str "signal", Json.str "modal", Json.str "control"]),
     ("kinds", Json.arr (vocabularyKinds.map fun kind =>
       Json.mkObj [
@@ -168,6 +169,22 @@ def vocabularyJson : Json :=
       ("fingerprint", Json.str vocabularyFingerprint),
       ("payload", payload)]
 
+/-- Is knob `id` wired straight into an anchored inlet (a generator's freq)?
+    Then its slot is anchored too, with one `#phase` companion that every such
+    generator reads: the host's bump `(inc₀ − inc₁)·now` depends only on the
+    knob's value, so one companion serves every direct consumer. A knob reached
+    through arithmetic is not anchored: the host cannot compute that
+    generator's increment from the knob's. -/
+def knobFeedsAnchor (raws : Array Raw) (id : String) : Bool :=
+  raws.any fun raw => (portSpecs raw.kind).any fun port =>
+    port.discipline == .anchor && (portSources raw.inObj port.name)[0]? == some id
+
+/-- A knob's write discipline in this graph: the table's, except that a knob
+    wired straight into an anchored inlet is anchored (`knobFeedsAnchor`). -/
+def disciplineIn (raws : Array Raw) (raw : Raw) (knob : String) : Discipline :=
+  if raw.kind == "knob" && knob == "value" && knobFeedsAnchor raws raw.id then .anchor
+  else disciplineOf raw.kind knob
+
 def collectParams (raws : Array Raw) : Array (String × JsonNumber) := Id.run do
   let mut parameters : Array (String × JsonNumber) := #[
     (masterVelocityParam, ⟨1, 0⟩),
@@ -184,7 +201,12 @@ def collectParams (raws : Array Raw) : Array (String × JsonNumber) := Id.run do
         | none => false
       if !selfWired && !ownerWired then
         let base := paramNameOf raw knob
-        let dflt := (jNum? raw.params knob).getD ⟨0, 0⟩
+        -- An omitted knob seeds its slot with the vocabulary's declared
+        -- default (the value `fallbackOf` and `get_vocabulary` advertise), not 0.
+        let declared : JsonNumber := match port.knob with
+          | some (mantissa, exponent) => ⟨mantissa, exponent⟩
+          | none => ⟨0, 0⟩
+        let dflt := (jNum? raw.params knob).getD declared
         let alreadyRegistered := parameters.any fun (name, _) =>
           name == base || name == s!"{base}#v0" || name == s!"{base}#phase"
         if alreadyRegistered then continue
@@ -196,7 +218,7 @@ def collectParams (raws : Array Raw) : Array (String × JsonNumber) := Id.run do
             parameters := parameters.push (s!"{base}#t0#u{index}", ⟨0, 0⟩)
         else
           parameters := parameters.push (base, dflt)
-          if isAnchored raw.kind knob then
+          if disciplineIn raws raw knob == .anchor then
             parameters := parameters.push (s!"{base}#phase", ⟨0, 0⟩)
     if raw.kind == "resonator" &&
         (jNum? raw.params "partials_max").isSome then

@@ -34,8 +34,10 @@ def runLoweringChain (arena : Arena)
   | .error e, _ | _, .error e => failGate "lowering-chain" s!"build: {firstLine e}"
 
 /-- L3: a fan-out patch — `osc` fanned into two flangers, mixed (the diagonal +
-    the product collapse through the lowering). Asserts six generator instances
-    (3 per flanger; the source re-derived per tap) and a real, non-silent mix. -/
+    the product collapse through the lowering). Asserts five generator instances
+    — three taps per flanger, but the two DRY taps read the same closed form at
+    the same clock, and `Builder.osc` hash-conses on (program, inputs), so one
+    instance serves both — and a real, non-silent mix. -/
 def runLoweringFanOut (arena : Arena)
     (resolved : Array (String × ProgramIdx)) : IO Bool := do
   match Tropical.EmitArrow.buildFanOutFromGraph arena resolved with
@@ -47,11 +49,11 @@ def runLoweringFanOut (arena : Arena)
       | .ok got =>
         let mut energy : Float := 0.0
         for t in [8:512] do energy := energy + got[t]! * got[t]!
-        IO.println s!"        fan-out osc → (flange δ₁ &&& flange δ₂) → mix: {ninst} generator instances (the diagonal re-sources the osc per tap)"
-        if ninst == 6 && energy > 1e-6 then
+        IO.println s!"        fan-out osc → (flange δ₁ &&& flange δ₂) → mix: {ninst} generator instances (the diagonal re-sources the osc per distinct tap clock; the shared dry tap is one)"
+        if ninst == 5 && energy > 1e-6 then
           passGate "lowering-fanout" s!"diagonal + mix through the lowering ({ninst} instances, energy={energy})"
         else
-          failGate "lowering-fanout" s!"ninst={ninst} (want 6) energy={energy}"
+          failGate "lowering-fanout" s!"ninst={ninst} (want 5) energy={energy}"
       | .error e => failGate "lowering-fanout" s!"render: {firstLine e}"
     | .error e => failGate "lowering-fanout" s!"finish: {firstLine e}"
   | .error e => failGate "lowering-fanout" s!"build: {firstLine e}"

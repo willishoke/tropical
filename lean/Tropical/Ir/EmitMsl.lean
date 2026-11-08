@@ -177,7 +177,7 @@ structure St where
   /-- The plan's sample rate — a per-plan CONSTANT (the manifest seeds the
       runtime with it), so `rate` source reads carry it as a fold value:
       param landings `toInt(freq·2³²/SR)` collapse to exact i64 literals. -/
-  sampleRate : Float := 44100.0
+  sampleRate : Float := Tropical.Plan.defaultSampleRate.toFloat
   /-- Module slot → scalar type last written THIS kernel (thread-private
       typed locals `slf{i}`/`sli{i}`/`slb{i}` — kernel-written slots are
       same-sample dataflow, so they keep their NATIVE type: the Q48.16
