@@ -1,0 +1,99 @@
+{
+ "schema": "tropical_program_2",
+ "name": "spectral_old_saw_4x24",
+ "body": {
+  "op": "block",
+  "decls": [
+   {
+    "op": "instanceDecl",
+    "name": "s1",
+    "program": "SpectralSaw",
+    "inputs": {
+     "f0": 107.66602075891569,
+     "partials": 24
+    }
+   },
+   {
+    "op": "instanceDecl",
+    "name": "s2",
+    "program": "SpectralSaw",
+    "inputs": {
+     "f0": 134.5825246651657,
+     "partials": 24
+    }
+   },
+   {
+    "op": "instanceDecl",
+    "name": "s3",
+    "program": "SpectralSaw",
+    "inputs": {
+     "f0": 161.4990285714157,
+     "partials": 24
+    }
+   },
+   {
+    "op": "instanceDecl",
+    "name": "s4",
+    "program": "SpectralSaw",
+    "inputs": {
+     "f0": 188.4155324776657,
+     "partials": 24
+    }
+   },
+   {
+    "op": "instanceDecl",
+    "name": "mix",
+    "program": "VCA",
+    "inputs": {
+     "audio": {
+      "op": "add",
+      "args": [
+       {
+        "op": "add",
+        "args": [
+         {
+          "op": "add",
+          "args": [
+           {
+            "op": "ref",
+            "instance": "s1",
+            "output": "out"
+           },
+           {
+            "op": "ref",
+            "instance": "s2",
+            "output": "out"
+           }
+          ]
+         },
+         {
+          "op": "ref",
+          "instance": "s3",
+          "output": "out"
+         }
+        ]
+       },
+       {
+        "op": "ref",
+        "instance": "s4",
+        "output": "out"
+       }
+      ]
+     },
+     "cv": 1
+    }
+   }
+  ],
+  "assigns": [
+   {
+    "op": "outputAssign",
+    "name": "dac.out",
+    "expr": {
+     "op": "ref",
+     "instance": "mix",
+     "output": "out"
+    }
+   }
+  ]
+ }
+}

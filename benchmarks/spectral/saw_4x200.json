@@ -1,0 +1,95 @@
+{
+ "schema": "tropical_program_2",
+ "name": "spectral_4x200_saw",
+ "body": {
+  "op": "block",
+  "decls": [
+   {
+    "op": "instanceDecl",
+    "name": "v1",
+    "program": "SpectralSaw",
+    "inputs": {
+     "f0": 55
+    }
+   },
+   {
+    "op": "instanceDecl",
+    "name": "v2",
+    "program": "SpectralSaw",
+    "inputs": {
+     "f0": 68.75
+    }
+   },
+   {
+    "op": "instanceDecl",
+    "name": "v3",
+    "program": "SpectralSaw",
+    "inputs": {
+     "f0": 82.5
+    }
+   },
+   {
+    "op": "instanceDecl",
+    "name": "v4",
+    "program": "SpectralSaw",
+    "inputs": {
+     "f0": 96.25
+    }
+   },
+   {
+    "op": "instanceDecl",
+    "name": "mix",
+    "program": "VCA",
+    "inputs": {
+     "audio": {
+      "op": "add",
+      "args": [
+       {
+        "op": "add",
+        "args": [
+         {
+          "op": "add",
+          "args": [
+           {
+            "op": "ref",
+            "instance": "v1",
+            "output": "out"
+           },
+           {
+            "op": "ref",
+            "instance": "v2",
+            "output": "out"
+           }
+          ]
+         },
+         {
+          "op": "ref",
+          "instance": "v3",
+          "output": "out"
+         }
+        ]
+       },
+       {
+        "op": "ref",
+        "instance": "v4",
+        "output": "out"
+       }
+      ]
+     },
+     "cv": 0.25
+    }
+   }
+  ],
+  "assigns": [
+   {
+    "op": "outputAssign",
+    "name": "dac.out",
+    "expr": {
+     "op": "ref",
+     "instance": "mix",
+     "output": "out"
+    }
+   }
+  ]
+ }
+}

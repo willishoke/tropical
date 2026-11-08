@@ -1,0 +1,129 @@
+{
+ "schema": "tropical_program_2",
+ "name": "spectral_kill_4x200",
+ "body": {
+  "op": "block",
+  "decls": [
+   {
+    "op": "instanceDecl",
+    "name": "lfo",
+    "program": "ExpCutoffLfo",
+    "inputs": {
+     "c0": 800,
+     "octaves": 2,
+     "rate": 220
+    }
+   },
+   {
+    "op": "instanceDecl",
+    "name": "v1",
+    "program": "SpectralLowpassSaw",
+    "inputs": {
+     "f0": 55,
+     "cutoff": {
+      "op": "ref",
+      "instance": "lfo",
+      "output": "out"
+     },
+     "q": 8
+    }
+   },
+   {
+    "op": "instanceDecl",
+    "name": "v2",
+    "program": "SpectralLowpassSaw",
+    "inputs": {
+     "f0": 68.75,
+     "cutoff": {
+      "op": "ref",
+      "instance": "lfo",
+      "output": "out"
+     },
+     "q": 8
+    }
+   },
+   {
+    "op": "instanceDecl",
+    "name": "v3",
+    "program": "SpectralLowpassSaw",
+    "inputs": {
+     "f0": 82.5,
+     "cutoff": {
+      "op": "ref",
+      "instance": "lfo",
+      "output": "out"
+     },
+     "q": 8
+    }
+   },
+   {
+    "op": "instanceDecl",
+    "name": "v4",
+    "program": "SpectralLowpassSaw",
+    "inputs": {
+     "f0": 96.25,
+     "cutoff": {
+      "op": "ref",
+      "instance": "lfo",
+      "output": "out"
+     },
+     "q": 8
+    }
+   },
+   {
+    "op": "instanceDecl",
+    "name": "mix",
+    "program": "VCA",
+    "inputs": {
+     "audio": {
+      "op": "add",
+      "args": [
+       {
+        "op": "add",
+        "args": [
+         {
+          "op": "add",
+          "args": [
+           {
+            "op": "ref",
+            "instance": "v1",
+            "output": "out"
+           },
+           {
+            "op": "ref",
+            "instance": "v2",
+            "output": "out"
+           }
+          ]
+         },
+         {
+          "op": "ref",
+          "instance": "v3",
+          "output": "out"
+         }
+        ]
+       },
+       {
+        "op": "ref",
+        "instance": "v4",
+        "output": "out"
+       }
+      ]
+     },
+     "cv": 0.25
+    }
+   }
+  ],
+  "assigns": [
+   {
+    "op": "outputAssign",
+    "name": "dac.out",
+    "expr": {
+     "op": "ref",
+     "instance": "mix",
+     "output": "out"
+    }
+   }
+  ]
+ }
+}
