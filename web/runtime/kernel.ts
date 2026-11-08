@@ -145,11 +145,18 @@ export class WasmKernel {
   beginFadeOut(): void { this.fadeOutRem = FADE_SAMPLES; this.fadeInRem = 0 }
 
   /** Write a param input (port order after `tau`). This is how a host with
-   *  live control drives a knob. (Unused by the demo.) */
+   *  live control drives a knob; `ParamWriter` applies the disciplines. */
   setParam(index: number, value: number): void {
     const cell = this.layout.params[index]
     if (cell === undefined) throw new RangeError(`no param input ${index}`)
     new Float64Array(this.memory.buffer)[cell >> 3] = value
+  }
+
+  /** Read a param input's current value (port order after `tau`). */
+  getParam(index: number): number {
+    const cell = this.layout.params[index]
+    if (cell === undefined) throw new RangeError(`no param input ${index}`)
+    return new Float64Array(this.memory.buffer)[cell >> 3]!
   }
 
   /** Run the kernel once over its static block, with `tau` the clock of each

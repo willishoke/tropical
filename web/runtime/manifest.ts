@@ -26,6 +26,9 @@ export type KernelPort = {
   role?: KernelRole
   /** Seed value a host writes before the first call (params). */
   default?: number
+  /** How a host writes this param (`host-param-dispatch.md`): `raw`,
+   *  `anchor` (with its `#phase` companion), … Absent means `raw`. */
+  discipline?: { discipline: string; glide_dur_sec?: number; companions?: string[] }
   /** Output channel source names (outputs of shape [frames, C]). */
   channels?: string[]
 }

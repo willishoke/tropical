@@ -29,7 +29,11 @@ const diffcli = process.env.TROPICAL_DIFFCLI
   ? resolve(process.env.TROPICAL_DIFFCLI)
   : resolve(root, 'lean/.lake/build/bin/diffcli')
 
-type Entry = { slug: string; title: string; description: string }
+/** A knob the player shows for a patch: a `param:` slot (named without the
+ *  prefix) and its slider range. The player writes it under the discipline
+ *  the kernel manifest declares; only raw and anchor params are playable. */
+type Knob = { param: string; label: string; min: number; max: number; log?: boolean; unit?: string }
+type Entry = { slug: string; title: string; description: string; knobs?: Knob[] }
 
 // Ensure the Lean compiler CLI exists (incremental; fast if already built).
 if (!process.env.TROPICAL_DIFFCLI && !existsSync(diffcli)) {
@@ -49,7 +53,7 @@ for (const f of readdirSync(distDir)) {
 }
 
 const index: Array<Entry & { wasmPath: string; manifestPath: string }> = []
-for (const { slug, title, description } of manifest) {
+for (const { slug, title, description, knobs } of manifest) {
   const src = resolve(patchesDir, `${slug}.json`)
 
   // 1. Lower the source to a wasm32 module in-process (Lean IR → engine
@@ -72,7 +76,23 @@ for (const { slug, title, description } of manifest) {
   }
   writeFileSync(join(distDir, `${slug}.manifest.json`), k.stdout.toString(), 'utf-8')
 
-  index.push({ slug, title, description, wasmPath: `patches/${slug}.wasm`, manifestPath: `patches/${slug}.manifest.json` })
+  // Every declared knob must name a param input the player can write: a
+  // knob that names nothing, or a discipline the player does not implement,
+  // fails the build rather than becoming a dead slider.
+  const kernelType = JSON.parse(k.stdout.toString()) as {
+    inputs: { name: string; discipline?: { discipline: string } }[]
+  }
+  for (const knob of knobs ?? []) {
+    const port = kernelType.inputs.find((p) => p.name === `param:${knob.param}`)
+    if (!port) throw new Error(`${slug}: knob '${knob.label}' names param '${knob.param}', which the kernel does not have`)
+    const d = port.discipline?.discipline ?? 'raw'
+    if (d !== 'raw' && d !== 'anchor')
+      throw new Error(`${slug}: knob '${knob.label}' (${knob.param}) has discipline '${d}'; the player writes raw and anchor params only`)
+    if (!(knob.min < knob.max) || (knob.log && knob.min <= 0))
+      throw new Error(`${slug}: knob '${knob.label}' has a bad range [${knob.min}, ${knob.max}]`)
+  }
+
+  index.push({ slug, title, description, ...(knobs ? { knobs } : {}), wasmPath: `patches/${slug}.wasm`, manifestPath: `patches/${slug}.manifest.json` })
   console.log(`built ${slug.padEnd(22)} ${statSync(wasmPath).size.toString().padStart(7)} B wasm`)
 }
 

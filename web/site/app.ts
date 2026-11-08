@@ -7,10 +7,15 @@ import {
   kernelFrames, kernelOutputChannelCount, kernelParams, type KernelManifest,
 } from '../runtime/index.js'
 
+/** A playable knob (see `web/build_patches.ts`): a `param:` slot, named
+ *  without the prefix, with its slider range. */
+type Knob = { param: string; label: string; min: number; max: number; log?: boolean; unit?: string }
+
 type ManifestEntry = {
   slug: string
   title: string
   description: string
+  knobs?: Knob[]
   wasmPath: string
   manifestPath: string
 }
@@ -28,6 +33,7 @@ const patchMeta = $('patch-meta')
 const statusEl = $('status')
 const infoEl = $('info')
 const errorEl = $('error')
+const knobsEl = $('knobs')
 
 let host: TropicalHost | null = null
 let manifest: ManifestEntry[] = []
@@ -56,13 +62,84 @@ async function loadManifest(): Promise<void> {
   }
 }
 
+// ── knobs ────────────────────────────────────────────────────────────────
+// A slider runs 0..SLIDER_STEPS; a log knob maps it geometrically. Values are
+// kept per patch, so a stop/start keeps the knobs where they were.
+const SLIDER_STEPS = 1000
+const knobValues = new Map<string, Map<string, number>>()
+
+const toSlider = (k: Knob, v: number): number => {
+  const t = k.log ? Math.log(v / k.min) / Math.log(k.max / k.min) : (v - k.min) / (k.max - k.min)
+  return Math.round(Math.min(1, Math.max(0, t)) * SLIDER_STEPS)
+}
+const fromSlider = (k: Knob, s: number): number => {
+  const t = s / SLIDER_STEPS
+  return k.log ? k.min * Math.pow(k.max / k.min, t) : k.min + t * (k.max - k.min)
+}
+const fmtValue = (v: number, unit?: string): string => {
+  const a = Math.abs(v)
+  const s = a >= 100 ? v.toFixed(0) : a >= 10 ? v.toFixed(1) : a >= 1 ? v.toFixed(2) : v.toFixed(3)
+  return unit ? `${s} ${unit}` : s
+}
+
+/** Build the knob panel for `patch`, seeded from the values kept for it or
+ *  from the kernel's param defaults. */
+function renderKnobs(patch: ManifestEntry, kernel: KernelManifest): void {
+  knobsEl.innerHTML = ''
+  const knobs = patch.knobs ?? []
+  if (!knobValues.has(patch.slug)) knobValues.set(patch.slug, new Map())
+  const values = knobValues.get(patch.slug)!
+  for (const k of knobs) {
+    const name = `param:${k.param}`
+    const port = kernelParams(kernel).find((p) => p.name === name)
+    const value = values.get(name) ?? port?.default ?? k.min
+    values.set(name, value)
+    const row = document.createElement('label')
+    row.className = 'knob'
+    const label = document.createElement('span')
+    label.textContent = k.label
+    const slider = document.createElement('input')
+    slider.type = 'range'
+    slider.min = '0'
+    slider.max = String(SLIDER_STEPS)
+    slider.value = String(toSlider(k, value))
+    const readout = document.createElement('output')
+    readout.textContent = fmtValue(value, k.unit)
+    slider.addEventListener('input', () => {
+      const v = fromSlider(k, Number(slider.value))
+      values.set(name, v)
+      readout.textContent = fmtValue(v, k.unit)
+      host?.setParam(name, v)
+    })
+    row.append(label, slider, readout)
+    knobsEl.appendChild(row)
+  }
+}
+
+/** Send the kept knob values for `patch` (after a load: its kernel starts
+ *  from the manifest defaults). */
+function sendKnobs(patch: ManifestEntry): void {
+  const values = knobValues.get(patch.slug)
+  if (!values || !host) return
+  for (const [name, v] of values) host.setParam(name, v)
+}
+
 function currentPatch(): ManifestEntry | undefined {
   return manifest.find((p) => p.slug === patchSelect.value)
 }
 
-patchSelect.addEventListener('change', () => {
+patchSelect.addEventListener('change', async () => {
   const p = currentPatch()
   patchMeta.textContent = p?.description ?? ''
+  knobsEl.innerHTML = ''
+  if (p?.knobs?.length) {
+    try {
+      const kernel = await fetch(`./${p.manifestPath}`).then((r) => r.json() as Promise<KernelManifest>)
+      if (currentPatch() === p) renderKnobs(p, kernel)
+    } catch (err) {
+      setError(`Failed to load ${p.title}'s knobs: ${(err as Error).message}`)
+    }
+  }
 })
 
 playBtn.addEventListener('click', async () => {
@@ -90,6 +167,8 @@ playBtn.addEventListener('click', async () => {
     )
 
     host.loadPatch(wasm, manifestJson)
+    renderKnobs(patch, manifestJson)
+    sendKnobs(patch)
     host.fadeIn()
     setStatus(`playing — ${patch.title}`)
     stopBtn.disabled = false

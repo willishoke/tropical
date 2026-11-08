@@ -7,8 +7,9 @@
  *   - Provide a high-level API to load a precompiled patch (.wasm + manifest)
  *     and trigger fade in/out.
  *
- * No SharedArrayBuffer / params: the demo is a player of precompiled patches,
- * so it needs no COOP/COEP and deploys as plain static files.
+ * No SharedArrayBuffer: the demo is a player of precompiled patches, so it
+ * needs no COOP/COEP and deploys as plain static files. Knob writes are
+ * messages; the worklet applies each under its discipline.
  */
 import {
   kernelOutputChannelCount, type KernelManifest,
@@ -21,6 +22,8 @@ export type TropicalHost = {
   loadPatch(wasm: ArrayBuffer, manifest: KernelManifest): void
   fadeIn(): void
   fadeOut(): void
+  /** Write a live param (a `param:` slot name) under its discipline. */
+  setParam(name: string, value: number): void
   dispose(): Promise<void>
 }
 
@@ -66,6 +69,7 @@ export async function startHost(opts: BootstrapOptions): Promise<TropicalHost> {
     },
     fadeIn() { node.port.postMessage({ type: 'fadeIn' }) },
     fadeOut() { node.port.postMessage({ type: 'fadeOut' }) },
+    setParam(name, value) { node.port.postMessage({ type: 'param', name, value }) },
     async dispose() {
       node.disconnect()
       await ctx.close()

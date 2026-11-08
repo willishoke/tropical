@@ -34,6 +34,7 @@ web/
     manifest.ts          KernelManifest — the consumption contract
     layout.ts            computeLayout: KernelManifest → linear-memory regions
     kernel.ts            WasmKernel: instantiate + render/renderInto(f64) + seek + process(f32+fade)
+    params.ts            ParamWriter: live param writes under raw/anchor disciplines
     index.ts             public surface
   patches/             Source demo patches (tropical_program_2 JSON or PatchGraph) + manifest.json
   build_patches.ts     Per patch: diffcli compile-wasm → <slug>.wasm + a trimmed
@@ -88,11 +89,22 @@ enables it; needs `brew install lld`).
 The demo plays precompiled patches: **no live recompile, no state-transfer
 hot-swap, no SharedArrayBuffer params.** Those belong to the native
 instrument (Electron + the ORC JIT), where topology edits trigger
-recompile→hot-swap. `WasmKernel` keeps a `setParam` method (one cell per
-param input) for a future host with live control, but the demo never
-calls it — so the demo needs no COOP/COEP and deploys as plain static files. A
-smoothstep fade (`beginFadeIn`/`beginFadeOut`) is the only envelope, to avoid
-start/stop clicks.
+recompile→hot-swap. A smoothstep fade (`beginFadeIn`/`beginFadeOut`) is the
+only envelope, to avoid start/stop clicks.
+
+**Knobs.** A patch's `manifest.json` entry may list `knobs` — each a
+`param:` slot (named without the prefix) with a slider range. The page shows
+a slider per knob; a move posts `{type:'param'}` to the worklet, which applies
+it at the start of the next block through `ParamWriter`
+(`runtime/params.ts`) under the discipline the kernel manifest declares
+(`design/host-param-dispatch.md`): `raw` writes the value, `anchor` bumps the
+`#phase` companion by `Δinc·now` so a re-pitch is continuous at any τ.
+Companions and other disciplines are refused by name. A glide's discipline
+sits on a base name with no port, so the kernel type cannot carry it; a
+playable knob is therefore a `knob` node (raw, or anchor when it feeds a
+freq inlet). `build_patches.ts` fails the build on a knob that names no
+param or a discipline the player cannot write. Writes are messages, so the
+demo still needs no COOP/COEP and deploys as plain static files.
 
 ## Linear-memory layout
 
@@ -144,9 +156,15 @@ kernel's f64 output, `WasmKernel.render` vs `diffcli render-bytes`):
 - `graph_wasm_vs_jit.test.ts` — small PatchGraphs (a swept flanger with taps; a
   modal bank whose coefficients hoist to the stage-0 prologue; signal-driven
   controls on every inlet) through `compile-wasm` vs `render-graph`, plus the
-  unsplit (`TROPICAL_STAGE0=0`) bank kernel against the split one, a v3
+  unsplit (`TROPICAL_STAGE0=0`) bank kernel against the split one, the
+  spectral kinds (`harmonic`, `envelope`: wasm ≡ JIT at τ = 0 and ten hours
+  in, split ≡ unsplit bitwise, and harmonic → envelope ≡ the
+  `SpectralLowpassSaw` fixture bitwise), a v3
   hierarchy document against its flat expansion, the τ-invariant-cone cost
   gate per inlet, and `--rate` (a 48 kHz kernel plays its pitch at 48 kHz).
+- `runtime_params.test.ts` — `ParamWriter`: an anchored re-pitch ten hours in
+  is continuous and plays the new pitch (a raw one jumps); companions and
+  unimplemented disciplines are refused.
 - `graph_clock.test.ts` — closed-form clock properties of the playground
   generators and the signal-time `delay` at arbitrary τ (`seek`): exact
   phasor periodicity, a negative freq playing the saw and pulse backward bit
