@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import {
-  WasmKernel, computeLayout, kernelFrames, kernelOutputChannelCount,
+  WasmKernel, FADE_FRAMES, computeLayout, kernelFrames, kernelOutputChannelCount,
   type KernelLayout, type KernelManifest,
 } from '../../web/runtime/index'
 
@@ -40,8 +40,9 @@ function fakeKernel(
     layout: KernelLayout
     argv: number[]
     frameIdx: number
-    fadeInRem: number
-    fadeOutRem: number
+    fadeAt: number
+    fadeFrom: number
+    fadeTo: number
   }
   Object.assign(value, {
     memory,
@@ -50,8 +51,9 @@ function fakeKernel(
     argv: [layout.tau, ...layout.params, layout.output],
     outputChannelCount,
     frameIdx: 0,
-    fadeInRem: 0,
-    fadeOutRem: 0,
+    fadeAt: 0,
+    fadeFrom: 1,
+    fadeTo: 1,
   })
   return value
 }
@@ -155,5 +157,27 @@ describe('multichannel wasm runtime contract', () => {
     expect(left[0]).toBe(0)
     expect(right[0]).toBe(0)
     expect(right[1]! / left[1]!).toBeCloseTo(2, 6)
+  })
+
+  test('the fade is a function of the frame: a re-render repeats it, a fade-out stays silent', () => {
+    const kernel = fakeKernel(1, () => 1)
+    const n = FADE_FRAMES + 64
+    const first = new Float32Array(n)
+    kernel.beginFadeIn(0)
+    kernel.process([first], n)
+    const again = new Float32Array(n - 100)
+    kernel.seek(100)
+    kernel.process([again], n - 100)
+    expect(Array.from(again)).toEqual(Array.from(first.subarray(100)))
+    expect(first[0]).toBe(0)
+    expect(first[n - 1]).toBe(1)
+
+    kernel.beginFadeOut(n)
+    const out = new Float32Array(FADE_FRAMES + 64)
+    kernel.seek(n)
+    kernel.process([out], out.length)
+    expect(out[0]).toBe(1)
+    expect(Array.from(out.subarray(FADE_FRAMES))).toEqual(new Array(64).fill(0))
+    expect(kernel.mutedFrom).toBe(n + FADE_FRAMES)
   })
 })

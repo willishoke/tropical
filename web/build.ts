@@ -6,8 +6,9 @@
  * Steps:
  *  1. (re-)precompile patches via the Lean engine — web/build_patches.ts
  *  2. Bundle the AudioWorklet processor           — single self-contained file
- *  3. Bundle the main-thread app                  — app.js
- *  4. Copy index.html into dist/
+ *  3. Bundle the render-ahead Worker              — renderer.js
+ *  4. Bundle the main-thread app                  — app.js
+ *  5. Copy index.html into dist/
  */
 
 import { cpSync, existsSync, mkdirSync } from 'fs'
@@ -37,6 +38,11 @@ run(
 )
 
 run(
+  ['bun', 'build', 'web/worker/renderer.ts', '--target=browser', '--outfile', `${distDir}/renderer.js`, '--format', 'esm'],
+  'bundle render-ahead Worker',
+)
+
+run(
   ['bun', 'build', 'web/site/app.ts', '--target=browser', '--outfile', `${distDir}/app.js`, '--format', 'esm'],
   'bundle main-thread app',
 )
@@ -49,4 +55,4 @@ if (!existsSync(resolve(distDir, 'patches', 'index.json'))) {
 }
 
 console.log(`\n✓ build complete → ${distDir}`)
-console.log(`  serve with: bun web/dev.ts  (or any static server with COEP/COOP headers)`)
+console.log(`  serve with: bun web/dev.ts  (or any static server; no COOP/COEP needed)`)

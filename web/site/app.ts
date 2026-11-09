@@ -151,7 +151,7 @@ playBtn.addEventListener('click', async () => {
 
     if (!host) {
       setStatus('initializing audio…')
-      host = await startHost({ workletUrl: './worklet.js', outputChannels: 2 })
+      host = await startHost({ workletUrl: './worklet.js', rendererUrl: './renderer.js', outputChannels: 2 })
     }
 
     setStatus(`loading ${patch.title}…`)
@@ -180,17 +180,15 @@ playBtn.addEventListener('click', async () => {
 })
 
 stopBtn.addEventListener('click', async () => {
-  if (host) {
-    host.fadeOut()
-    // Give the fade time before tearing down; keep context alive for fast restart.
-    setTimeout(() => {
-      if (host) {
-        host.dispose()
-        host = null
-      }
-    }, 100)
-  }
   stopBtn.disabled = true
+  setStatus('stopping…')
+  const h = host
+  host = null
+  if (h) {
+    // Let the fade reach the speakers before tearing down.
+    await h.fadeOut()
+    await h.dispose()
+  }
   playBtn.disabled = false
   setStatus('stopped')
 })
