@@ -90,6 +90,12 @@ jobs:
       - name: Golden + native-equiv runner
         run: ./lean/.lake/build/bin/tropicaltest
 
+      - name: Embedded object links no libcalls (thumbv6m)
+        run: |
+          python3 tools/embedded_object.py --check-only \
+            --diffcli ./lean/.lake/build/bin/diffcli --llvm-bin /usr/lib/llvm-22/bin \
+            --patch tests/fixtures/embedded_lfo.json --out-dir build/embedded
+
       - name: Precompile web demo plans (Lean-driven)
         run: bun web/build_patches.ts
 

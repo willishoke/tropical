@@ -144,6 +144,18 @@ def main():
     attrs = run([f"{a.llvm_bin}/llvm-readelf", "-A", thumb])
     rep["arm_attributes"] = {m.group(1).strip(): m.group(2).strip() for m in
                              re.finditer(r"TagName: (\w+)\s*\n\s*Description: ([^\n]+)", attrs)}
+    # Fold the measured facts into the thumbv6m manifest's object block.
+    mpath = thumb + ".manifest.json"
+    with open(mpath) as f:
+        man = json.load(f)
+    man["object"]["stack_bytes"] = rep["stack_bytes"].get("tropical_kernel")
+    man["object"]["sections"] = sizes
+    man["object"]["m0plus_cycles"] = {
+        "frame_lower": rep["frame_cycles_lower"], "frame_upper": rep["frame_cycles_upper"],
+        "call_upper": rep["call_cycles_upper"], "frames": N}
+    man["object"]["float_abi"] = "soft (no FP instructions; Tag_FP_arch absent)"
+    with open(mpath, "w") as f:
+        json.dump(man, f, indent=2)
     with open(os.path.join(a.out_dir, "cycles-thumbv6m.json"), "w") as f:
         json.dump(rep, f, indent=2)
     print(json.dumps(rep, indent=2))

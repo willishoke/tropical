@@ -495,6 +495,20 @@ def compileObjectVerb (args : List String) : IO UInt32 :=
       match ktype.toWire with
       | .error e => IO.eprintln s!"compile-object: {e}"; return 1
       | .ok kj =>
+        -- The buffer layout a caller lays out, port by port, in argument
+        -- order: element, number format, bytes per element (= alignment).
+        let layout (p : Tropical.Kernel.Port) (fmt : String) : Lean.Json :=
+          let bytes : Nat := match p.elem with
+            | .f64 | .i64 | .i64q16 => 8
+            | .i32 => 4
+          Lean.Json.mkObj [("name", p.name), ("elem", p.elem.wire), ("format", fmt),
+            ("shape", Lean.toJson p.shape), ("bytes", bytes), ("align", bytes)]
+        let portFormat (p : Tropical.Kernel.Port) : String := match p.elem with
+          | .i64q16 => "Q48.16"
+          | .f64 => "ieee754-binary64"
+          | .i64 => "int64"
+          | .i32 => outFormat
+        let ports := (ktype.inputs ++ ktype.outputs).map fun p => layout p (portFormat p)
         let objectBlock := Lean.Json.mkObj [
           ("triple", if triple.isEmpty then "host" else triple),
           ("cpu", if cpu.isEmpty then "generic" else cpu),
@@ -503,6 +517,8 @@ def compileObjectVerb (args : List String) : IO UInt32 :=
           ("symbol", "tropical_kernel"),
           ("frames", frames),
           ("out_format", outFormat),
+          ("abi", "C calling convention of the triple (AAPCS on ARM): one pointer argument per port, in port order; buffers little-endian, frame-major"),
+          ("ports", Lean.Json.arr ports),
           ("numerics", objectNumerics)]
         let manifest := kj.setObjVal! "object" objectBlock
         IO.FS.writeFile (System.FilePath.mk (outPath ++ ".manifest.json")) manifest.pretty
