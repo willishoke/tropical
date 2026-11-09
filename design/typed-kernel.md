@@ -428,7 +428,9 @@ sample budget at 64 MHz and 48 kHz. Flash is 260 bytes for
 which `--gc-sections` drops when nothing references it. Stack is 32 bytes,
 and there is no static RAM. `llvm-nm -u` lists nothing: no `__aeabi_*`, no `__muldi3`, no
 soft-float helpers. The host object matches the JIT sample for sample over
-65 536 frames, and at τ = 2⁴⁰ samples.
+65 536 frames, and also at τ = 2⁴⁰ samples. The wasm32 object, linked with
+`wasm-ld` and run in Bun, matches the host object over the same 65 536
+frames.
 `tools/embedded_object.py` builds all three objects, reports these numbers
 and gates the libcalls (`make validate` runs it with `--check-only`).
 
