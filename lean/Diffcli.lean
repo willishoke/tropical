@@ -465,9 +465,10 @@ def objectNumerics : Lean.Json := Lean.Json.mkObj [
     object, `--triple wasm32-unknown-unknown` a wasm object (not a module). -/
 def compileObjectVerb (args : List String) : IO UInt32 :=
   runVerb "compile-object"
-    "<patch-or-graph.json> --out <out.o> [--triple T] [--cpu C] [--features F] [--frames N] [--rate R] [--fixtures] [--graph]"
+    "<patch-or-graph.json> --out <out.o> [--triple T] [--cpu C] [--features F] [--frames N] [--rate R] [--out-elem f64|i32] [--out-format Q1.15] [--emit-ir] [--fixtures] [--graph]"
     [valued "out", valued "triple", valued "cpu", valued "features", valued "frames",
-     valued "rate", switch "fixtures", switch "graph"] args
+     valued "rate", valued "out-elem", valued "out-format", switch "emit-ir",
+     switch "fixtures", switch "graph"] args
     (fun a => do
       let some outPath := a.value? "out" | throw "--out <path> is required"
       return (outPath, (← a.positive? "frames").getD 128, ← a.rate?))
@@ -475,7 +476,13 @@ def compileObjectVerb (args : List String) : IO UInt32 :=
   match ← compileToSplit a rate? patch with
   | .error e => IO.eprintln e; return 1
   | .ok split =>
-    match Tropical.Ir.EmitLlvm.emitKernel split frames, Tropical.Kernel.ofPlan split.audio frames with
+    let outElem ← match (a.value? "out-elem").getD "f64" with
+      | "f64" => pure Tropical.Kernel.Elem.f64
+      | "i32" => pure .i32
+      | other => IO.eprintln s!"compile-object: --out-elem {other} (f64 | i32)"; return 1
+    let outFormat := (a.value? "out-format").getD (if outElem == .i32 then "int" else "ieee754-binary64")
+    match Tropical.Ir.EmitLlvm.emitKernel split frames outElem,
+          Tropical.Kernel.ofPlan split.audio frames outElem with
     | .error e, _ => IO.eprintln s!"emitKernel: {e}"; return 1
     | _, .error e => IO.eprintln s!"compile-object: {e}"; return 1
     | .ok ir, .ok ktype =>
@@ -484,6 +491,7 @@ def compileObjectVerb (args : List String) : IO UInt32 :=
       let features := (a.value? "features").getD ""
       let obj ← Tropical.Toolchain.Wasm.compileObject ir triple cpu features
       IO.FS.writeBinFile (System.FilePath.mk outPath) obj
+      if a.has "emit-ir" then IO.FS.writeFile (System.FilePath.mk (outPath ++ ".ll")) ir
       match ktype.toWire with
       | .error e => IO.eprintln s!"compile-object: {e}"; return 1
       | .ok kj =>
@@ -494,6 +502,7 @@ def compileObjectVerb (args : List String) : IO UInt32 :=
           ("format", "relocatable-object"),
           ("symbol", "tropical_kernel"),
           ("frames", frames),
+          ("out_format", outFormat),
           ("numerics", objectNumerics)]
         let manifest := kj.setObjVal! "object" objectBlock
         IO.FS.writeFile (System.FilePath.mk (outPath ++ ".manifest.json")) manifest.pretty

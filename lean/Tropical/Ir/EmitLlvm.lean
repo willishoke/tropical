@@ -750,42 +750,57 @@ decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children _h
 -- Sinks (mirrors the loop-body sink mix)
 -- ─────────────────────────────────────────────────────────────
 
-def emitSinks (sinks : Array SinkSpec) (outputChannelCount : Nat) : M Unit := do
+/-- The output store for one frame/channel, `out[s·C + c]`. -/
+private def outIndex (outputChannelCount target : Nat) : M String := do
+  if outputChannelCount == 1 && target == 0 then
+    pure "%s"
+  else do
+    let frameBase ← fresh
+    line s!"{frameBase} = mul i64 %s, {outputChannelCount}"
+    let targetIdx ← fresh
+    line s!"{targetIdx} = add i64 {frameBase}, {target}"
+    pure targetIdx
+
+/-- Sinks into the output. `.f64` (the port default) mixes each sink's inputs
+    and applies its gain in binary64. `.i32` is the integer output a target
+    without an FPU stores: each sink must be one input at gain 1, and its
+    value is converted toward zero (`fptosi`), which is exact for an int
+    program output (an exact integer in the slot). LLVM folds that
+    int→double→int round trip when the value's range fits the mantissa, so
+    no soft-float conversion survives for a bounded int output. -/
+def emitSinks (sinks : Array SinkSpec) (outputChannelCount : Nat)
+    (outElem : Tropical.Kernel.Elem := .f64) : M Unit := do
+  let (ty, zero, align) ← match outElem with
+    | .f64 => pure ("double", zeroF, 8)
+    | .i32 => pure ("i32", "0", 4)
+    | e => fail s!"EmitLlvm: output element {e.wire} is not supported"
   -- A sparse target image is semantically zero in every missing channel.  Do
   -- not rely on a particular host to clear reused wasm/native output storage.
   for target in [0:outputChannelCount] do
     unless sinks.any (fun sink => sink.target == target) do
-      let outputIdx ←
-        if outputChannelCount == 1 then
-          pure "%s"
-        else do
-          let frameBase ← fresh
-          line s!"{frameBase} = mul i64 %s, {outputChannelCount}"
-          let targetIdx ← fresh
-          line s!"{targetIdx} = add i64 {frameBase}, {target}"
-          pure targetIdx
+      let outputIdx ← outIndex outputChannelCount target
       let g ← fresh
-      line s!"{g} = getelementptr inbounds double, ptr %out, i64 {outputIdx}"
-      line s!"store double {zeroF}, ptr {g}, align 8"
+      line s!"{g} = getelementptr inbounds {ty}, ptr %out, i64 {outputIdx}"
+      line s!"store {ty} {zero}, ptr {g}, align {align}"
   for sink in sinks do
-    let mut acc := zeroF
-    for slotIdx in sink.inputs do
-      let v ← loadSlotF64 slotIdx
-      let r ← fresh; line s!"{r} = fadd double {acc}, {v}"; acc := r
-    let scaled ← fresh
-    line s!"{scaled} = fmul double {acc}, {f64Lit sink.gain.toFloat}"
-    let outputIdx ←
-      if outputChannelCount == 1 && sink.target == 0 then
-        pure "%s"
-      else do
-        let frameBase ← fresh
-        line s!"{frameBase} = mul i64 %s, {outputChannelCount}"
-        let targetIdx ← fresh
-        line s!"{targetIdx} = add i64 {frameBase}, {sink.target}"
-        pure targetIdx
+    let value ← match outElem with
+      | .i32 =>
+        if sink.inputs.size != 1 || sink.gain.toFloat != 1.0 then
+          fail s!"EmitLlvm: an i32 output needs one sink input at gain 1 (target {sink.target})"
+        let v ← loadSlotF64 sink.inputs[0]!
+        let r ← fresh; line s!"{r} = fptosi double {v} to i32"; pure r
+      | _ => do
+        let mut acc := zeroF
+        for slotIdx in sink.inputs do
+          let v ← loadSlotF64 slotIdx
+          let r ← fresh; line s!"{r} = fadd double {acc}, {v}"; acc := r
+        let scaled ← fresh
+        line s!"{scaled} = fmul double {acc}, {f64Lit sink.gain.toFloat}"
+        pure scaled
+    let outputIdx ← outIndex outputChannelCount sink.target
     let g ← fresh
-    line s!"{g} = getelementptr inbounds double, ptr %out, i64 {outputIdx}"
-    line s!"store double {scaled}, ptr {g}, align 8"
+    line s!"{g} = getelementptr inbounds {ty}, ptr %out, i64 {outputIdx}"
+    line s!"store {ty} {value}, ptr {g}, align {align}"
 
 private def validateSinkTargets (sinks : Array SinkSpec)
     (outputChannelCount : Nat) : Except String Unit := do
@@ -839,8 +854,8 @@ private def slotDefaultFloat : Json → Float
 /-- Emit the full LLVM module text for a plan's kernel at the port: the
     port function, the argv thunk, and the intrinsic declarations. The
     stage-0 split's coefficient plan, when present, becomes the prologue. -/
-def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
-    Except String String := do
+def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat)
+    (outElem : Tropical.Kernel.Elem := .f64) : Except String String := do
   let plan := split.audio
   let outputChannelCount := plan.outputChannelCount
   validateSinkTargets plan.sinks outputChannelCount
@@ -895,7 +910,7 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
     line "%tau_s = load i64, ptr %tau_ptr, align 8"
     for inst in plan.instanceFunctions do
       emitKernelBlock inst
-    emitSinks plan.sinks outputChannelCount
+    emitSinks plan.sinks outputChannelCount outElem
   let init : St := { sources := plan.sources, sampleRate := plan.sampleRate.toFloat,
                      arraySizes := sizes, arraysInline := true }
   match body.run init with
@@ -911,7 +926,7 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
       (if paramSlots.isEmpty then "" else ", " ++ inputArgs) ++
       ", ptr noalias nocapture %out"
     let header :=
-      s!"define void @tropical_kernel({portArgs}) \{\n" ++
+      s!"define void @tropical_kernel({portArgs}) nounwind \{\n" ++
       "entry:\n"
     let tail :=
       "\n  %s_next = add i64 %s, 1\n" ++
@@ -926,7 +941,7 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
       s!"  %a{i} = load ptr, ptr %ap{i}, align 8\n")
     let callArgs := String.intercalate ", " ((List.range argc).map fun i => s!"ptr %a{i}")
     let thunk :=
-      "define void @tropical_kernel_argv(ptr %argv) {\n" ++
+      "define void @tropical_kernel_argv(ptr %argv) nounwind {\n" ++
       "entry:\n" ++ thunkLoads ++
       s!"  call void @tropical_kernel({callArgs})\n" ++
       "  ret void\n" ++

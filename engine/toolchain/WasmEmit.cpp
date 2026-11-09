@@ -6,6 +6,8 @@
 #include <llvm/IR/Module.h>
 #include <llvm/IRReader/IRReader.h>
 #include <llvm/MC/TargetRegistry.h>
+#include <llvm/Passes/OptimizationLevel.h>
+#include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/CodeGen.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/FileSystem.h>
@@ -197,6 +199,27 @@ std::vector<uint8_t> compile_ir_to_object(const std::string & ir_text,
   if (!tm) { err = "cannot create a target machine for " + triple.str(); return {}; }
   module->setTargetTriple(triple);
   module->setDataLayout(tm->createDataLayout());
+  // ELF objects carry a .stack_sizes section (per-function frame bytes), so
+  // the manifest's stack depth is read from the object, not guessed.
+  if (triple.isOSBinFormatELF()) tm->Options.EmitStackSizeSection = true;
+
+  // The JIT's IR pipeline (per-module O2, OrcJitEngine's transform layer),
+  // here target-aware: the emitted IR is uniform and un-folded by design,
+  // and narrowing of masked i64 arithmetic happens in these passes.
+  {
+    llvm::PassBuilder PB(tm.get());
+    llvm::LoopAnalysisManager LAM;
+    llvm::FunctionAnalysisManager FAM;
+    llvm::CGSCCAnalysisManager CGAM;
+    llvm::ModuleAnalysisManager MAM;
+    PB.registerModuleAnalyses(MAM);
+    PB.registerCGSCCAnalyses(CGAM);
+    PB.registerFunctionAnalyses(FAM);
+    PB.registerLoopAnalyses(LAM);
+    PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+    llvm::ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O2);
+    MPM.run(*module, MAM);
+  }
 
   llvm::SmallString<0> bytes;
   llvm::raw_svector_ostream obj_out(bytes);
