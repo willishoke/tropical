@@ -194,6 +194,10 @@ std::vector<uint8_t> compile_ir_to_object(const std::string & ir_text,
   // ELF objects carry a .stack_sizes section (per-function frame bytes), so
   // the manifest's stack depth is read from the object, not guessed.
   opts.EmitStackSizeSection = triple.isOSBinFormatELF();
+  // One section per function on ELF, so a firmware link with --gc-sections
+  // keeps tropical_kernel and drops the _argv thunk it never calls.
+  opts.FunctionSections = triple.isOSBinFormatELF();
+  opts.DataSections = triple.isOSBinFormatELF();
   // The port functions are nounwind and nothing unwinds through a kernel:
   // no EH tables (.ARM.exidx / .eh_frame) for a firmware link to keep.
   opts.ExceptionModel = llvm::ExceptionHandling::None;

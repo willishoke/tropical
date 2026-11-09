@@ -136,8 +136,11 @@ def main():
         if len(p) >= 2 and p[0].startswith("."):
             sizes[p[0]] = int(p[1])
     rep["sections"] = sizes
-    rep["flash_bytes"] = sizes.get(".text", 0) + sizes.get(".rodata", 0) + sizes.get(".data", 0)
-    rep["static_ram_bytes"] = sizes.get(".data", 0) + sizes.get(".bss", 0)
+    def total(*prefixes):
+        return sum(v for k, v in sizes.items() if any(k == p or k.startswith(p + ".") for p in prefixes))
+    rep["flash_bytes_kernel"] = sizes.get(".text.tropical_kernel", 0) + total(".rodata", ".data")
+    rep["flash_bytes_all"] = total(".text", ".rodata", ".data")
+    rep["static_ram_bytes"] = total(".data", ".bss")
     st = run([f"{a.llvm_bin}/llvm-readobj", "--stack-sizes", thumb])
     rep["stack_bytes"] = {m.group(1): int(m.group(2), 0) for m in
                           re.finditer(r"Functions: \[(\w+)\]\s+Size: (0x[0-9A-Fa-f]+|\d+)", st)}

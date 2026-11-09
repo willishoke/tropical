@@ -387,12 +387,23 @@ void tropical_kernel(const int64_t *tau,   /* N × i64, Q48.16, 8-byte aligned *
                      int32_t       *out);  /* N × C i32 frame-major, 4-byte aligned */
 ```
 
-Buffers are little-endian. The thumbv6m object has `.text` only (literal
-pools sit inside it), with no `.data`, `.bss` or `.rodata` to initialize.
-It also carries `.ARM.exidx` (16 bytes of `EXIDX_CANTUNWIND` entries,
-which a linker script may discard), `.stack_sizes` (not loaded) and
+Buffers are little-endian. On ELF each function has its own section
+(`.text.tropical_kernel`, `.text.tropical_kernel_argv`), and the literal
+pools sit inside them. There is no `.data`, `.bss` or `.rodata` to
+initialize. The object also carries `.ARM.exidx.*` (8 bytes of
+`EXIDX_CANTUNWIND` per function), `.stack_sizes` (metadata, not loaded) and
 `.ARM.attributes`: v6S-M, Thumb-1, soft float with no FP instructions
-(`Tag_FP_arch` is absent).
+(`Tag_FP_arch` is absent). A minimal placement, checked with `ld.lld
+--gc-sections`:
+
+```
+SECTIONS {
+  .text : { KEEP(*(.text.tropical_kernel)) *(.text*) *(.rodata*) } > FLASH
+  .data : { *(.data*) } > SRAM AT > FLASH
+  .bss  : { *(.bss*) *(COMMON) } > SRAM
+  /DISCARD/ : { *(.ARM.exidx*) *(.stack_sizes) }
+}
+```
 
 **The kernel.** `FixedSinOscQ15` is `FixedSinOsc` for 32-bit integer
 hardware. Its DDS phase on ℤ/2³² (`phaseQ32Lo`) is bit-identical to
@@ -412,10 +423,10 @@ On the M0+ table (ALU and `MULS` 1 cycle, loads and stores 2, taken branch
 2, `BL` 3) the hot loop is 102 instructions, 8 of them `MULS`, and takes
 118–122 cycles per frame. At N = 16 a call costs at most 1 989 cycles, of
 which 37 are prologue and epilogue. That is about 9% of a 1 333-cycle
-sample budget at 64 MHz and 48 kHz. Flash is 524 bytes of `.text` (the
-`_argv` thunk inlines a second copy, and a firmware that does not reference
-it can drop it with `--gc-sections`). Stack is 32 bytes, and there is no
-static RAM. `llvm-nm -u` lists nothing: no `__aeabi_*`, no `__muldi3`, no
+sample budget at 64 MHz and 48 kHz. Flash is 260 bytes for
+`tropical_kernel`. The `_argv` thunk inlines a second copy (264 bytes),
+which `--gc-sections` drops when nothing references it. Stack is 32 bytes,
+and there is no static RAM. `llvm-nm -u` lists nothing: no `__aeabi_*`, no `__muldi3`, no
 soft-float helpers. The host object matches the JIT sample for sample over
 65 536 frames, and at τ = 2⁴⁰ samples.
 `tools/embedded_object.py` builds all three objects, reports these numbers

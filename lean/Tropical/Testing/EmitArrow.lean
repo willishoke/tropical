@@ -343,8 +343,8 @@ def phase2Evidence : Except String Phase2Evidence := do
   let pinned : Array (String × Nat × Nat) := #[
     ("reachable numeric nodes", nativeNumericExprs.nodes.size, 269),
     ("numeric wire bytes",      nativeNumericWire.length,      46446),
-    ("stdlib programs",         nativeStdlib.programs.size,    15),
-    ("stdlib nodes",            nativeStdlib.exprs.nodes.size, 290),
+    ("stdlib programs",         nativeStdlib.programs.size,    16),
+    ("stdlib nodes",            nativeStdlib.exprs.nodes.size, 344),
     ("carrier instances",       nativeProgram.decls.size,      3),
     ("reachable carrier nodes", nativeExprs.nodes.size,        174),
     ("carrier wire bytes",      nativeWire.length,             28835)]
