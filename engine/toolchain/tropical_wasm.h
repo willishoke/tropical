@@ -29,6 +29,12 @@ const char* tropical_wasm_last_error(void);
    tropical_wasm_last_error()). Returns NULL if the library was built without
    TROPICAL_WASM_EMIT. */
 uint8_t* tropical_wasm_compile_ir(const char* ir_text, size_t ir_len, size_t* out_len);
+/* Lower LLVM IR text to one relocatable object for `triple` ("" = host), with
+   optional `cpu` and `features` ("" = generic). No link. Same buffer and error
+   conventions as tropical_wasm_compile_ir. */
+uint8_t* tropical_wasm_compile_object(const char* ir_text, size_t ir_len,
+                                      const char* triple, const char* cpu,
+                                      const char* features, size_t* out_len);
 void     tropical_wasm_free(uint8_t* buf);
 
 #ifdef __cplusplus

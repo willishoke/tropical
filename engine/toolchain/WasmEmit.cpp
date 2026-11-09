@@ -15,6 +15,7 @@
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
+#include <llvm/TargetParser/Host.h>
 #include <llvm/TargetParser/Triple.h>
 #include <lld/Common/Driver.h>
 
@@ -139,6 +140,70 @@ std::vector<uint8_t> compile_ir_to_wasm(const std::string & ir_text, std::string
   if (!wasm) { err = "read wasm: " + wasm.getError().message(); return {}; }
 
   auto bytes = (*wasm)->getBuffer();
+  const auto * p = reinterpret_cast<const uint8_t *>(bytes.data());
+  return std::vector<uint8_t>(p, p + bytes.size());
+}
+
+// ---------------------------------------------------------------------------
+// compile_ir_to_object — the same parse and the same TargetOptions as the
+// wasm path, retargeted to any triple this LLVM carries, and stopped at the
+// relocatable object. Initialized targets: the host, 32-bit ARM/Thumb (the
+// Cortex-M class) and wasm32.
+// ---------------------------------------------------------------------------
+std::vector<uint8_t> compile_ir_to_object(const std::string & ir_text,
+                                          const std::string & triple_text,
+                                          const std::string & cpu,
+                                          const std::string & features,
+                                          std::string & err)
+{
+  LLVMInitializeWebAssemblyTargetInfo();
+  LLVMInitializeWebAssemblyTarget();
+  LLVMInitializeWebAssemblyTargetMC();
+  LLVMInitializeWebAssemblyAsmPrinter();
+  LLVMInitializeARMTargetInfo();
+  LLVMInitializeARMTarget();
+  LLVMInitializeARMTargetMC();
+  LLVMInitializeARMAsmPrinter();
+  llvm::InitializeNativeTarget();
+  llvm::InitializeNativeTargetAsmPrinter();
+
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic diag;
+  auto buffer = llvm::MemoryBuffer::getMemBuffer(ir_text, "tropical_ir");
+  auto module = llvm::parseIR(buffer->getMemBufferRef(), diag, context);
+  if (!module)
+  {
+    llvm::raw_string_ostream os(err);
+    diag.print("tropical_ir", os);
+    return {};
+  }
+
+  const llvm::Triple triple(triple_text.empty() ? llvm::sys::getDefaultTargetTriple()
+                                                : triple_text);
+  std::string lookup_err;
+  const llvm::Target * target = llvm::TargetRegistry::lookupTarget(triple, lookup_err);
+  if (!target) { err = "no target for " + triple.str() + ": " + lookup_err; return {}; }
+
+  llvm::TargetOptions opts;
+  // The numeric contract the manifest states: IEEE ops as written, no FMA
+  // contraction (Standard fuses only an explicit llvm.fmuladd, which the
+  // emitter never writes), no fast-math (no flags in the IR, none here).
+  opts.AllowFPOpFusion = llvm::FPOpFusion::Standard;
+  // Static relocation, no PIC: what a bare-metal link expects, and harmless
+  // for a host object linked into an executable.
+  std::unique_ptr<llvm::TargetMachine> tm(target->createTargetMachine(
+    triple, cpu.empty() ? "generic" : cpu, features, opts,
+    llvm::Reloc::Static, std::nullopt, llvm::CodeGenOptLevel::Default));
+  if (!tm) { err = "cannot create a target machine for " + triple.str(); return {}; }
+  module->setTargetTriple(triple);
+  module->setDataLayout(tm->createDataLayout());
+
+  llvm::SmallString<0> bytes;
+  llvm::raw_svector_ostream obj_out(bytes);
+  llvm::legacy::PassManager pm;
+  if (tm->addPassesToEmitFile(pm, obj_out, nullptr, llvm::CodeGenFileType::ObjectFile))
+  { err = triple.str() + " target cannot emit an object file"; return {}; }
+  pm.run(*module);
   const auto * p = reinterpret_cast<const uint8_t *>(bytes.data());
   return std::vector<uint8_t>(p, p + bytes.size());
 }

@@ -443,6 +443,63 @@ def compileKernelVerb (args : List String) : IO UInt32 :=
     | .error e => IO.eprintln s!"compile-kernel: {e}"; return 1
     | .ok manifest => IO.println manifest; return 0
 
+/-- The numeric contract an object carries, stated in its manifest: what the
+    emitted IR and the toolchain's TargetOptions guarantee (`EmitLlvm` writes
+    no `fast`/`contract`/`afn` flags and no `llvm.fmuladd`; `compileObject`
+    keeps `AllowFPOpFusion = Standard`), so every op rounds as written. -/
+def objectNumerics : Lean.Json := Lean.Json.mkObj [
+  ("float", "ieee754-binary64"),
+  ("int", "i64-twos-complement-wrapping"),
+  ("fp_contract", "off"),
+  ("fast_math", false),
+  ("rounding", "nearest-even"),
+  ("denormals", "ieee")]
+
+/-- `diffcli compile-object <patch-or-graph.json> --out <out.o> [--triple T]
+    [--cpu C] [--features F] [--frames N] [--rate R] [--graph]` → one
+    relocatable object of the port kernel for the target triple (default:
+    the host), and its manifest at `<out>.manifest.json`: the
+    `tropical_kernel_1` manifest plus an `object` block naming the triple, the
+    symbol and the numeric contract. The same emitted LLVM as `compile-wasm`
+    and the JIT; no link. `--triple thumbv6m-none-eabi` gives a Cortex-M0+
+    object, `--triple wasm32-unknown-unknown` a wasm object (not a module). -/
+def compileObjectVerb (args : List String) : IO UInt32 :=
+  runVerb "compile-object"
+    "<patch-or-graph.json> --out <out.o> [--triple T] [--cpu C] [--features F] [--frames N] [--rate R] [--fixtures] [--graph]"
+    [valued "out", valued "triple", valued "cpu", valued "features", valued "frames",
+     valued "rate", switch "fixtures", switch "graph"] args
+    (fun a => do
+      let some outPath := a.value? "out" | throw "--out <path> is required"
+      return (outPath, (← a.positive? "frames").getD 128, ← a.rate?))
+    fun a (outPath, frames, rate?) patch => do
+  match ← compileToSplit a rate? patch with
+  | .error e => IO.eprintln e; return 1
+  | .ok split =>
+    match Tropical.Ir.EmitLlvm.emitKernel split frames, Tropical.Kernel.ofPlan split.audio frames with
+    | .error e, _ => IO.eprintln s!"emitKernel: {e}"; return 1
+    | _, .error e => IO.eprintln s!"compile-object: {e}"; return 1
+    | .ok ir, .ok ktype =>
+      let triple := (a.value? "triple").getD ""
+      let cpu := (a.value? "cpu").getD ""
+      let features := (a.value? "features").getD ""
+      let obj ← Tropical.Toolchain.Wasm.compileObject ir triple cpu features
+      IO.FS.writeBinFile (System.FilePath.mk outPath) obj
+      match ktype.toWire with
+      | .error e => IO.eprintln s!"compile-object: {e}"; return 1
+      | .ok kj =>
+        let objectBlock := Lean.Json.mkObj [
+          ("triple", if triple.isEmpty then "host" else triple),
+          ("cpu", if cpu.isEmpty then "generic" else cpu),
+          ("features", features),
+          ("format", "relocatable-object"),
+          ("symbol", "tropical_kernel"),
+          ("frames", frames),
+          ("numerics", objectNumerics)]
+        let manifest := kj.setObjVal! "object" objectBlock
+        IO.FS.writeFile (System.FilePath.mk (outPath ++ ".manifest.json")) manifest.pretty
+        IO.eprintln s!"compile-object: wrote {obj.size} bytes → {outPath}"
+        return 0
+
 def main (args : List String) : IO UInt32 := do
   match args with
   | "render-bytes" :: rest => renderBytes rest
@@ -453,7 +510,8 @@ def main (args : List String) : IO UInt32 := do
   | "emit-msl" :: rest => emitMslVerb rest
   | "compile-wasm" :: rest => compileWasmVerb rest
   | "compile-kernel" :: rest => compileKernelVerb rest
+  | "compile-object" :: rest => compileObjectVerb rest
   | "compile" :: rest => compileVerb rest
   | _ =>
-    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N] [--all-channels]\n       diffcli render-metal <plan.json>\n       diffcli render-graph <graph.json> [--all-channels] [--rate R]\n       diffcli render-sweep <graph.json> --param=<knob> [--rate R]\n       diffcli emit-ir <patch.json>\n       diffcli emit-msl <patch.json>\n       diffcli compile <patch-or-graph.json> [--mode=M] [--rate R] [--graph]\n       diffcli compile-wasm <patch-or-graph.json> --out <out.wasm> [--frames N] [--rate R] [--graph]\n       diffcli compile-kernel <patch-or-graph.json> [--frames N] [--rate R] [--graph]"
+    IO.eprintln "usage: diffcli render-bytes <plan.json> [--frames N] [--buffer N] [--all-channels]\n       diffcli render-metal <plan.json>\n       diffcli render-graph <graph.json> [--all-channels] [--rate R]\n       diffcli render-sweep <graph.json> --param=<knob> [--rate R]\n       diffcli emit-ir <patch.json>\n       diffcli emit-msl <patch.json>\n       diffcli compile <patch-or-graph.json> [--mode=M] [--rate R] [--graph]\n       diffcli compile-wasm <patch-or-graph.json> --out <out.wasm> [--frames N] [--rate R] [--graph]\n       diffcli compile-kernel <patch-or-graph.json> [--frames N] [--rate R] [--graph]\n       diffcli compile-object <patch-or-graph.json> --out <out.o> [--triple T] [--cpu C] [--frames N] [--rate R] [--graph]"
     return 1

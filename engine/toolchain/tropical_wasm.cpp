@@ -47,4 +47,36 @@ extern "C" uint8_t* tropical_wasm_compile_ir(const char* ir_text, size_t ir_len,
 #endif
 }
 
+extern "C" uint8_t* tropical_wasm_compile_object(const char* ir_text, size_t ir_len,
+                                                 const char* triple, const char* cpu,
+                                                 const char* features, size_t* out_len)
+{
+#ifdef TROPICAL_WASM_EMIT
+  if (!ir_text || !out_len || !triple || !cpu || !features)
+  { set_error("compile_object: null argument"); return nullptr; }
+  try
+  {
+    std::string err;
+    std::vector<uint8_t> bytes = tropical_toolchain::compile_ir_to_object(
+      std::string(ir_text, ir_len), triple, cpu, features, err);
+    if (bytes.empty())
+    {
+      set_error(err.empty() ? "compile_object: produced no output" : err);
+      return nullptr;
+    }
+    uint8_t* buf = static_cast<uint8_t*>(std::malloc(bytes.size()));
+    if (!buf) { set_error("compile_object: out of memory"); return nullptr; }
+    std::memcpy(buf, bytes.data(), bytes.size());
+    *out_len = bytes.size();
+    return buf;
+  }
+  catch (const std::exception& e) { set_error(e.what()); return nullptr; }
+#else
+  (void)ir_text; (void)ir_len; (void)triple; (void)cpu; (void)features;
+  if (out_len) *out_len = 0;
+  set_error("libtropical_wasm was built without TROPICAL_WASM_EMIT");
+  return nullptr;
+#endif
+}
+
 extern "C" void tropical_wasm_free(uint8_t* buf) { std::free(buf); }

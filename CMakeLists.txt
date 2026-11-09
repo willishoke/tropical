@@ -149,7 +149,8 @@ if(TROPICAL_WASM_EMIT)
     target_include_directories(tropical_wasm PRIVATE ${LLVM_INCLUDE_DIRS})
     target_compile_definitions(tropical_wasm PRIVATE ${LLVM_DEFINITIONS} TROPICAL_WASM_EMIT)
     llvm_map_components_to_libnames(LLVM_WASM_LIBS
-        Core IRReader Support WebAssemblyCodeGen WebAssemblyDesc WebAssemblyInfo)
+        Core IRReader Support WebAssemblyCodeGen WebAssemblyDesc WebAssemblyInfo
+        ARMCodeGen ARMDesc ARMInfo native)
 
     # lld ships in the `lld` keg on Homebrew and in llvm-N's libdir on apt.llvm.org,
     # so hint both the Homebrew prefix and LLVM's own include/lib dirs (Linux).
