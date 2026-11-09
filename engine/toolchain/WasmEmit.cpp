@@ -191,6 +191,12 @@ std::vector<uint8_t> compile_ir_to_object(const std::string & ir_text,
   // contraction (Standard fuses only an explicit llvm.fmuladd, which the
   // emitter never writes), no fast-math (no flags in the IR, none here).
   opts.AllowFPOpFusion = llvm::FPOpFusion::Standard;
+  // ELF objects carry a .stack_sizes section (per-function frame bytes), so
+  // the manifest's stack depth is read from the object, not guessed.
+  opts.EmitStackSizeSection = triple.isOSBinFormatELF();
+  // The port functions are nounwind and nothing unwinds through a kernel:
+  // no EH tables (.ARM.exidx / .eh_frame) for a firmware link to keep.
+  opts.ExceptionModel = llvm::ExceptionHandling::None;
   // Static relocation, no PIC: what a bare-metal link expects, and harmless
   // for a host object linked into an executable.
   std::unique_ptr<llvm::TargetMachine> tm(target->createTargetMachine(
@@ -199,15 +205,20 @@ std::vector<uint8_t> compile_ir_to_object(const std::string & ir_text,
   if (!tm) { err = "cannot create a target machine for " + triple.str(); return {}; }
   module->setTargetTriple(triple);
   module->setDataLayout(tm->createDataLayout());
-  // ELF objects carry a .stack_sizes section (per-function frame bytes), so
-  // the manifest's stack depth is read from the object, not guessed.
-  if (triple.isOSBinFormatELF()) tm->Options.EmitStackSizeSection = true;
 
   // The JIT's IR pipeline (per-module O2, OrcJitEngine's transform layer),
-  // here target-aware: the emitted IR is uniform and un-folded by design,
+  // here target-aware and without unrolling: the emitted IR is uniform and un-folded by design,
   // and narrowing of masked i64 arithmetic happens in these passes.
   {
-    llvm::PassBuilder PB(tm.get());
+    // No loop unrolling or vectorization: one loop iteration is one frame
+    // (the static cycle count reads it directly) and flash stays small.
+    // Neither changes a value: the IR has no reassociable FP.
+    llvm::PipelineTuningOptions pto;
+    pto.LoopUnrolling = false;
+    pto.LoopInterleaving = false;
+    pto.LoopVectorization = false;
+    pto.SLPVectorization = false;
+    llvm::PassBuilder PB(tm.get(), pto);
     llvm::LoopAnalysisManager LAM;
     llvm::FunctionAnalysisManager FAM;
     llvm::CGSCCAnalysisManager CGAM;

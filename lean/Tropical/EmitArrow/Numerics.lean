@@ -68,15 +68,13 @@ def fixedCosCycSig (phaseQ : Sig) : BuildM Sig := do
   fixedSinCycSig wrapped
 
 /-- `a · b` reduced to its low 32 bits, sign-extended back to the int rail:
-    `(a·b << 32) >> 32`. Exactly the product a 32-bit `MULS` computes. Only
-    the low word of the i64 product is demanded, so LLVM narrows the multiply
-    to one 32-bit multiply on a 32-bit target (no `__aeabi_lmul`) and the
-    sign extension to one shift pair. Equal to `a · b` whenever the product
-    fits in a signed 32-bit word; the Q15 datapaths below keep every product
-    inside that range. -/
-def mulLo32 (a b : Sig) : BuildM Sig := do
-  let shift32 ← lit 32
-  rshift (← lshift (← mul a b) shift32) shift32
+    exactly the product a 32-bit `MULS` computes (the `mulLo32` op). It is an
+    op, not `(a·b << 32) >> 32` over i64 `mul`: LLVM does not narrow that
+    pattern on thumbv6m (it calls `__muldi3`), while the op emits
+    `trunc`/`mul i32`/`sext`. Equal to `a · b` whenever the product fits in a
+    signed 32-bit word; the Q15 datapaths below keep every product inside
+    that range. -/
+def mulLo32 (a b : Sig) : BuildM Sig := binary .mulLo32 a b
 
 /-- The DDS phase on ℤ/2³² with 32-bit products only: `inc · τ / clockOne`
     mod 2³², bit-identical to `FixedSinOsc`'s phase. The whole-sample product
@@ -85,8 +83,9 @@ def mulLo32 (a b : Sig) : BuildM Sig := do
     increment, `inc = hi·2¹⁶ + lo`: `hi · frac` is again wanted mod 2³², and
     `⌊lo · frac / 2¹⁶⌋ < 2¹⁶` is bits 16..31 of a product below 2³², so the
     split is exact (floor of a sum whose first term is a multiple of 2¹⁶).
-    The final mask makes every product's high word dead, which is what lets
-    LLVM keep them 32-bit. -/
+    So every product is a `mulLo32`: the first two are wanted mod 2³² anyway,
+    and the third's bits 16..31 survive its sign extension and the 16-bit
+    mask. -/
 def phaseQ32Lo (inc offset clk : Sig) : BuildM Sig := do
   let shift16 ← lit 16
   let mask16 ← lit 65535
@@ -94,9 +93,9 @@ def phaseQ32Lo (inc offset clk : Sig) : BuildM Sig := do
   let frac ← bitAnd clk (← clockFracMaskLit)
   let incHi ← rshift inc shift16
   let incLo ← bitAnd inc mask16
-  let pWhole ← mul inc whole
-  let pHi ← mul incHi frac
-  let pLo ← bitAnd (← rshift (← mul incLo frac) shift16) mask16
+  let pWhole ← mulLo32 inc whole
+  let pHi ← mulLo32 incHi frac
+  let pLo ← bitAnd (← rshift (← mulLo32 incLo frac) shift16) mask16
   let acc ← add (← add (← add pWhole pHi) pLo) offset
   bitAnd acc (← lit 4294967295)
 

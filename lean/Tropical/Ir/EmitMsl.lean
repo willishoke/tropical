@@ -488,6 +488,7 @@ def emitOpRuntime (tag : String) (resultType : ScalarType) (args : Array TVal) :
   | .and => bindVal .bool s!"({← aB 0} && {← aB 1})"
   | .or  => bindVal .bool s!"({← aB 0} || {← aB 1})"
   | .bitAnd => binI "&" (← aI 0) (← aI 1)
+  | .mulLo32 => bindVal .int s!"(long)(int)((uint){← aI 0} * (uint){← aI 1})"
   | .bitOr  => binI "|" (← aI 0) (← aI 1)
   | .bitXor => binI "^" (← aI 0) (← aI 1)
   | .lshift => binI "<<" (← aI 0) (← aI 1)

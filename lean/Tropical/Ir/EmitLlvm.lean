@@ -157,6 +157,16 @@ structure St where
       OUTER accumulator finds the outer alloca. -/
   reduces : Array ReduceCtx := #[]
   routeds : Array RoutedCtx := #[]
+  /-- Port kernel only: int values written to a module slot also land, raw,
+      in a parallel `%islots` (i64) vector, and an int read of a slot whose
+      last emitted write was int loads that word instead of converting the
+      f64 copy back. This is EmitMsl's typed-slot rule (a value crosses a
+      slot at its native type): a wired clock stays exact past 2⁵³ rail
+      units, and a target without an FPU never converts it. The f64 copy is
+      still written for f64 readers (sinks, float reads); LLVM drops it when
+      nothing reads it. -/
+  typedSlots : Bool := false
+  intSlots : Std.HashSet Nat := {}
 
 abbrev M := EStateM String St
 
@@ -234,6 +244,16 @@ def storeSlotF64 (idx : Nat) (v : String) : M Unit := do
   let g ← fresh; line s!"{g} = getelementptr inbounds double, ptr %slots, i64 {idx}"
   line s!"store double {v}, ptr {g}, align 8"
 
+/-- Store a typed value to a module slot (see `St.typedSlots`). -/
+def storeSlotTyped (idx : Nat) (v : TVal) : M Unit := do
+  if (← get).typedSlots && v.ty == .int then
+    let g ← fresh; line s!"{g} = getelementptr inbounds i64, ptr %islots, i64 {idx}"
+    line s!"store i64 {v.ref}, ptr {g}, align 8"
+    modify fun st => { st with intSlots := st.intSlots.insert idx }
+  else
+    modify fun st => { st with intSlots := st.intSlots.erase idx }
+  storeSlotF64 idx (← coerceF64 v)
+
 -- Arrays: an alloca per slot in the port kernel; the `%arrays` pointer
 -- table in the stage-0 pre-pass. Sizes are plan constants either way.
 def loadArrayPtr (slot : Nat) : M String := do
@@ -300,6 +320,14 @@ def resolveOperand : NOperand → M TVal
     | some .tau => pure ⟨(← get).tauName, .int⟩
     | some .rate => pure ⟨f64Lit (← get).sampleRate, .float⟩
     | none => pure ⟨f64Lit 0.0, .float⟩
+  | .slot idx .int => do
+    if (← get).intSlots.contains idx then
+      let g ← fresh; line s!"{g} = getelementptr inbounds i64, ptr %islots, i64 {idx}"
+      let v ← fresh; line s!"{v} = load i64, ptr {g}, align 8"
+      pure ⟨v, .int⟩
+    else
+      let v ← loadSlotF64 idx
+      let r ← fresh; line s!"{r} = fptosi double {v} to i64"; pure ⟨r, .int⟩
   | .slot idx t => do
     let v ← loadSlotF64 idx
     match t with
@@ -394,6 +422,12 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
   | .and => let r ← fresh; line s!"{r} = and i1 {← aB 0}, {← aB 1}"; pure ⟨r, .bool⟩
   | .or  => let r ← fresh; line s!"{r} = or i1 {← aB 0}, {← aB 1}"; pure ⟨r, .bool⟩
   | .bitAnd => binI "and" (← aI 0) (← aI 1)
+  | .mulLo32 =>
+    let a ← aI 0; let b ← aI 1
+    let a32 ← fresh; line s!"{a32} = trunc i64 {a} to i32"
+    let b32 ← fresh; line s!"{b32} = trunc i64 {b} to i32"
+    let p ← fresh; line s!"{p} = mul i32 {a32}, {b32}"
+    let r ← fresh; line s!"{r} = sext i32 {p} to i64"; pure ⟨r, .int⟩
   | .bitOr  => binI "or"  (← aI 0) (← aI 1)
   | .bitXor => binI "xor" (← aI 0) (← aI 1)
   | .lshift => binI "shl" (← aI 0) (← aI 1)
@@ -710,7 +744,7 @@ def emitInstr (instr : NInstr) : M Unit := do
     modify fun s => { s with routeds := s.routeds.pop, tempVals := rc.savedTempVals }
   | "WriteSlot", .moduleSlot idx =>
     let v ← match instr.args[0]? with | some o => resolveOperand o | none => fail "WriteSlot missing arg"
-    storeSlotF64 idx (← coerceF64 v)
+    storeSlotTyped idx v
   | "SmoothParam", _ =>
     fail "EmitLlvm: SmoothParam is dead on the session path (params are slots)"
   | "Pack", .array dst => emitPack dst instr.args
@@ -726,7 +760,7 @@ def emitInstr (instr : NInstr) : M Unit := do
   | _, .moduleSlot idx =>
     let args ← instr.args.mapM resolveOperand
     let result ← emitOp instr.tag instr.resultType args
-    storeSlotF64 idx (← coerceF64 result)
+    storeSlotTyped idx (← coerce result instr.resultType)
   | _, .array dst => emitElementwise instr dst
   | tag, .sessionArray _ =>
     fail s!"EmitLlvm: sessionArray dst for '{tag}' must be remapped before emit"
@@ -869,10 +903,12 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat)
     -- backing store per array slot, all per call.
     line s!"%slots = alloca double, i64 {slotCount}, align 8"
     line s!"%temps = alloca i64, i64 {registerCount}, align 8"
+    line s!"%islots = alloca i64, i64 {slotCount}, align 8"
     for i in [0:sizes.size] do
       line s!"%arr{i} = alloca i64, i64 {max (sizes[i]?.getD 0) 1}, align 8"
     zeroCells "%temps" registerCount
     zeroCells "%slots" slotCount
+    zeroCells "%islots" slotCount
     for i in [0:sizes.size] do
       zeroCells s!"%arr{i}" (sizes[i]?.getD 0)
     -- Slots start at zero; a param's value is its input, never a literal, so
@@ -912,7 +948,7 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat)
       emitKernelBlock inst
     emitSinks plan.sinks outputChannelCount outElem
   let init : St := { sources := plan.sources, sampleRate := plan.sampleRate.toFloat,
-                     arraySizes := sizes, arraysInline := true }
+                     arraySizes := sizes, arraysInline := true, typedSlots := true }
   match body.run init with
   | .error e _ => .error e
   | .ok _ st =>

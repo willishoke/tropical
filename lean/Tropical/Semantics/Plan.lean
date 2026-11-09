@@ -119,6 +119,7 @@ private def planOpBinaryTag? : PlanOp → Option BinaryOpTag
   | .and => some .and | .or => some .or
   | .bitAnd => some .bitAnd | .bitOr => some .bitOr | .bitXor => some .bitXor
   | .lshift => some .lshift | .rshift => some .rshift | .ldexp => some .ldexp
+  | .mulLo32 => some .mulLo32
   | _ => none
 
 private def planOpUnaryTag? : PlanOp → Option UnaryOpTag
