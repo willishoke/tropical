@@ -46,9 +46,10 @@ const repoRoot = resolve(__dirname, '../..')
 const diffcli = resolve(repoRoot, 'lean/.lake/build/bin/diffcli')
 const cliEnv = { ...process.env, PATH: `${process.env.HOME}/.elan/bin:${process.env.PATH}` }
 
-function compilePatch(patchPath: string): string {
-  const r = spawnSync([diffcli, 'compile', resolve(repoRoot, patchPath), '--mode=fused'],
-    { cwd: repoRoot, env: cliEnv })
+function compilePatch(patchPath: string, fixtures = false): string {
+  const args = [diffcli, 'compile', resolve(repoRoot, patchPath), '--mode=fused']
+  if (fixtures) args.push('--fixtures')
+  const r = spawnSync(args, { cwd: repoRoot, env: cliEnv })
   if (r.exitCode !== 0) throw new Error(`diffcli compile ${patchPath} failed: ${r.stderr?.toString()}`)
   return r.stdout.toString().trim()
 }
@@ -117,6 +118,19 @@ function gate(name: string, patch: string, samples: number, minDb: number, start
   expect(snr).toBeGreaterThan(minDb)
 }
 
+/** The integer-output gate: every GPU sample equals the JIT's. */
+function exactGate(name: string, patch: string, samples: number, start: bigint = 0n) {
+  const plan = planFile(name.replace(/[^a-z0-9-]/gi, '_'), compilePatch(patch))
+  const ref = render('render-bytes', plan, samples, start)
+  if (start === 0n) expectAudible(name, ref)
+  const gpu = render('render-metal', plan, samples, start)
+  expect(gpu.length).toBe(ref.length)
+  let mismatches = 0
+  for (let i = 0; i < ref.length; i++) if (gpu[i] !== ref[i]) mismatches++
+  console.log(`    ${name}: ${ref.length - mismatches}/${ref.length} samples bit-identical`)
+  expect(mismatches).toBe(0)
+}
+
 /** Render a playground PatchGraph through the TYPED session split
  *  (`diffcli render-graph`): banked coefficient columns hoist to the
  *  stage-0 coefficient kernel, and on `--metal` cross to the GPU via the
@@ -148,6 +162,41 @@ describe.skipIf(!METAL)('metal vs native JIT (SNR gates)', () => {
 
   test('pure-sine-440 @ τ+2^40 — long-τ FLAT (the integer-phase proof)', () => {
     gate('pure-sine-440 far', 'web/patches/pure-sine-440.json', 4096, 125, FAR)
+  })
+
+  // An all-int32 datapath with a literal frequency: the increment folds in
+  // f64 to the same constant, the int32 words are the JIT's, and a Q1.15
+  // output is exact in f32 — so the GPU must match bit for bit, near τ = 0
+  // and 2^40 samples in.
+  test('FixedSinOscQ15 — int32 datapath, bit-identical', () => {
+    exactGate('q15 lfo', 'tests/golden/embedded/q15_lfo_fast.json', 4096)
+  })
+
+  test('FixedSinOscQ15 @ τ+2^40 — int32 datapath, bit-identical far out', () => {
+    exactGate('q15 lfo far', 'tests/golden/embedded/q15_lfo_fast.json', 4096, FAR)
+  })
+
+  // Every int32 op on the GPU (`Int32Zoo`, a `--fixtures` program), its input
+  // wired from FixedSinOscQ15's int32 output. The int32 word is exact; only
+  // its final conversion to an f32 output value rounds, so the SNR sits at
+  // the f32 floor.
+  test('Int32Zoo ← FixedSinOscQ15 — every int32 op, f32 output floor', () => {
+    const patch = planFile('int32-zoo-patch', JSON.stringify({
+      schema: 'tropical_program_2', name: 'mvj_int32zoo',
+      body: { op: 'block', decls: [
+        { op: 'instanceDecl', name: 'lfo', program: 'FixedSinOscQ15', inputs: { freq: 1234.567 } },
+        { op: 'instanceDecl', name: 'zoo', program: 'Int32Zoo', inputs: {
+          x: { op: 'ref', instance: 'lfo', output: 'out' } } },
+      ], assigns: [{ op: 'outputAssign', name: 'dac.out',
+                     expr: { op: 'ref', instance: 'zoo', output: 'out' } }] },
+    }))
+    const plan = planFile('int32-zoo', compilePatch(patch, true))
+    const ref = render('render-bytes', plan, 4096)
+    expectAudible('Int32Zoo', ref)
+    const gpu = render('render-metal', plan, 4096)
+    const snr = snrDb(ref, gpu)
+    console.log(`    Int32Zoo: SNR ${snr.toFixed(1)} dB (floor 135)`)
+    expect(snr).toBeGreaterThan(135)
   })
 
   test('tz-flanger — warped reads, reduced phases', () => {

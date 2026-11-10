@@ -3,6 +3,7 @@ import Tropical.Ir.Strata
 import Tropical.Ir.CompileResolved
 import Tropical.Testing.PlanWire
 import Tropical.Testing.ArrowOracles
+import Tropical.Ir.ConstFold
 
 /-!
 # Arena-native EmitArrow test fixtures
@@ -670,6 +671,78 @@ def opZooSig : BuildM Sig := do
 def buildOpZoo (arena : Arena) : Except String (Arena × ProgramIdx) :=
   assemble arena "OpZoo" #[{ name := "out" }] #[] do
     pure { assigns := #[(.port ⟨0⟩, ← opZooSig)] }
+
+/-- The int32 coverage word: every int32 op at runtime, seeded from `x` so
+    nothing folds — the wrapping ring ops (an LCG step, a shift into the sign
+    bit, `-(x ∣ INT32_MIN)`, which is `INT32_MIN` itself at `x = 0`), the
+    arithmetic right shift of negative words, guarded division and remainder,
+    comparison and select, clamp, abs, bitNot, and the casts both ways
+    (`int` product truncated to its low word, `float` truncated toward zero).
+    `int32ZooModel` is the same word computed on `Int` with `wrap32`. -/
+def int32ZooWord (x : Sig) : BuildM Sig := do
+  let lcg ← add (← mul x (← lit 1103515245)) (← lit 12345)
+  let mixed ← binary .bitXor lcg (← rshift lcg (← lit 16))
+  let high ← lshift x (← lit 27)
+  let minned ← neg (← bitOr x (← litI32 (-2147483648)))
+  let quot ← div lcg (← bitOr (← bitAnd x (← lit 7)) (← lit 1))
+  let rem ← binary .mod lcg (← lit 1000)
+  let sel ← selectE (← binary .lt lcg (← lit 0)) (← litI32 3) (← litI32 5)
+  let clamped ← clampE mixed (← lit (-1000000)) (← lit 1000000)
+  let ab ← absE (← sub x (← lit 100))
+  let inv ← unary .bitNot x
+  let viaInt ← toInt32E (← mul (← toIntE lcg) (← litI 3000000000))
+  let viaFloat ← toInt32E (← mul (← toFloatE x) (← lit 5 1))
+  let a ← binary .bitXor mixed high
+  let b ← add a minned
+  let c ← sub b quot
+  let d ← binary .bitXor c rem
+  let e ← add d (← mul clamped sel)
+  let f ← binary .bitXor e ab
+  let g ← add f inv
+  let h ← binary .bitXor g viaInt
+  add h viaFloat
+
+/-- `int32ZooWord` on `Int`, through the constant folder's `wrap32`/`bit32`:
+    the reference the JIT's int32 lowering must reproduce bit for bit. -/
+def int32ZooModel (x : Int) : Int :=
+  let w := Tropical.Ir.wrap32
+  let b32 := Tropical.Ir.bit32
+  let lcg := w (w (x * 1103515245) + 12345)
+  let mixed := b32 (· ^^^ ·) lcg (lcg >>> 16)
+  let high := w (x <<< 27)
+  let minned := w (-(b32 (· ||| ·) x (-2147483648)))
+  let quot := Int.tdiv lcg (b32 (· ||| ·) (b32 (· &&& ·) x 7) 1)
+  let rem := Int.tmod lcg 1000
+  let sel : Int := if lcg < 0 then 3 else 5
+  let lc := if mixed > -1000000 then mixed else -1000000
+  let clamped := if lc < 1000000 then lc else 1000000
+  let v := w (x - 100)
+  let ab := if v < 0 then w (-v) else v
+  let inv := b32 (· ^^^ ·) x (-1)
+  let viaInt := w (Tropical.Ir.wrap64 (lcg * 3000000000))
+  let viaFloat := Int.tdiv x 2
+  let a := b32 (· ^^^ ·) mixed high
+  let b := w (a + minned)
+  let c := w (b - quot)
+  let d := b32 (· ^^^ ·) c rem
+  let e := w (d + w (clamped * sel))
+  let f := b32 (· ^^^ ·) e ab
+  let g := w (f + inv)
+  let h := b32 (· ^^^ ·) g viaInt
+  w (h + viaFloat)
+
+/-- `Int32Zoo`: input `x : int32` (default: the sample index's low word),
+    output `out = int32ZooWord x / 2³¹`, a float in `[-1, 1)`. Registered as a
+    test fixture so wasm≡JIT can drive it by name, unwired or with `x` wired
+    from an int32 output (the slot crossing). -/
+def buildInt32Zoo (arena : Arena) : Except String (Arena × ProgramIdx) :=
+  assemble arena "Int32Zoo" #[{ name := "out", type? := some (.scalar .float) }] #[] do
+    let word ← int32ZooWord (← inputRef ⟨0⟩)
+    let out ← div (← toFloatE word) (← lit 2147483648)
+    let x0 ← toInt32E (← sampleIndex)
+    pure {
+      inputs := #[{ name := "x", type? := some (.scalar .int32), defaultSig := some x0 }]
+      assigns := #[(.port ⟨0⟩, out)] }
 
 abbrev ModesM := BuildM (Array ModalMode)
 

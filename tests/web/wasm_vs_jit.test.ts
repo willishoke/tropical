@@ -177,6 +177,44 @@ function spectralLowpassProgram(f0: number, lfoHz: number, q: number): ProgramFi
   }
 }
 
+// The int32 kernels: `FixedSinOscQ15` (int32 throughout, an int32 output),
+// `Int32Zoo` (every int32 op at runtime, seeded from the sample index's low
+// word; registered by `--fixtures`), and `Int32Zoo` with its int32 input wired
+// from the LFO's int32 output — a module-slot crossing at 32 bits. Integer
+// semantics are exact, so these compare bit for bit, not within TOL.
+function q15Program(freqHz: number, phase: number): ProgramFile {
+  return {
+    schema: 'tropical_program_2',
+    name: 'eq_q15',
+    body: { op: 'block', decls: [
+      { op: 'instanceDecl', name: 'lfo', program: 'FixedSinOscQ15', inputs: { freq: freqHz, phase } },
+    ], assigns: [dacOut('lfo', 'out')] },
+  }
+}
+function int32ZooProgram(wired: boolean): ProgramFile {
+  const decls: unknown[] = wired
+    ? [
+        { op: 'instanceDecl', name: 'lfo', program: 'FixedSinOscQ15', inputs: { freq: 1234.567 } },
+        { op: 'instanceDecl', name: 'zoo', program: 'Int32Zoo', inputs: {
+          x: { op: 'ref', instance: 'lfo', output: 'out' } } },
+      ]
+    : [{ op: 'instanceDecl', name: 'zoo', program: 'Int32Zoo', inputs: {} }]
+  return {
+    schema: 'tropical_program_2',
+    name: wired ? 'eq_int32zoo_wired' : 'eq_int32zoo',
+    body: { op: 'block', decls, assigns: [dacOut('zoo', 'out')] },
+  }
+}
+
+async function expectBitIdentical(name: string, prog: ProgramFile, N: number): Promise<void> {
+  const wire = compileViaLean(prog)
+  const nat = runNative(wire, N)
+  expectAudible(name, nat)
+  const wasm = await runWasm(prog, wire, N)
+  expect(wasm.length).toBe(nat.length)
+  for (let i = 0; i < nat.length; i++) expect(wasm[i]).toBe(nat[i]!)
+}
+
 // Same IR, two LLVM targets → bit-exact in practice; keep a tolerance for safety.
 const TOL = 1e-12
 
@@ -272,6 +310,18 @@ describe('wasm vs native JIT', () => {
     const wasm = await runWasm(prog, wire, N)
     expect(wasm.length).toBe(nat.length)
     for (let i = 0; i < nat.length; i++) expect(Math.abs(wasm[i]! - nat[i]!)).toBeLessThan(TOL)
+  })
+
+  test('FixedSinOscQ15 (int32 datapath, int32 output) — WASM ≡ JIT bit for bit', async () => {
+    await expectBitIdentical('FixedSinOscQ15', q15Program(1234.567, 0.3), 512)
+  })
+
+  test('int32 op zoo — WASM ≡ JIT bit for bit', async () => {
+    await expectBitIdentical('Int32Zoo', int32ZooProgram(false), 512)
+  })
+
+  test('int32 op zoo, input wired from an int32 output (32-bit slot) — WASM ≡ JIT bit for bit', async () => {
+    await expectBitIdentical('Int32Zoo ← FixedSinOscQ15', int32ZooProgram(true), 512)
   })
 
   test('op-zoo (bitwise / shifts / float↔int casts / mod / clamp / select) — WASM matches JIT', async () => {

@@ -36,6 +36,7 @@ import Tropical.Tropicaltest.ParamOrder
 import Tropical.Tropicaltest.BlockRealize
 import Tropical.Tropicaltest.OrientedPatch
 import Tropical.Tropicaltest.Spectral
+import Tropical.Tropicaltest.Int32
 
 /-!
 # tropicaltest — the post-TS golden + native-equiv runner (Phase 8)
@@ -266,6 +267,15 @@ def main (args : List String) : IO UInt32 := do
     if ← System.FilePath.pathExists patchPath then
       total := total + 1
       if !(← runGolden writeMode name patchPath s!"tests/golden/embedded/{name}.hash") then failed := failed + 1
+
+  -- ── (f‴) The int32 scalar kind: JIT ≡ the Int model, refusals, plan kinds ──
+  IO.println "int32 scalar kind:"
+  total := total + 1
+  if !(← Tropical.Tropicaltest.Int32.runInt32Model) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Tropicaltest.Int32.runInt32Refusals) then failed := failed + 1
+  total := total + 1
+  if !(← Tropical.Tropicaltest.Int32.runInt32WellKinded) then failed := failed + 1
 
   -- ── (e′) The device-boundary bound: every audio patch renders bounded ──────
   IO.println "device boundary (the safety class):"
