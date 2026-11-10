@@ -15,7 +15,8 @@ import {
 import { computeLayout, type KernelLayout } from './layout.js'
 
 const WASM_PAGE = 65536
-const FADE_SAMPLES = 2048
+/** The anti-click fade's length in frames (smoothstep, `beginFadeIn`/`Out`). */
+export const FADE_FRAMES = 2048
 
 /** `C` — the device-boundary output bound, applied in `process` (the worklet
  *  feed) and never in `render` (the equivalence surface). Must equal
@@ -80,8 +81,12 @@ type KernelFn = (...pointers: number[]) => void
 export class WasmKernel {
   /** The frame index of the next block; a number is exact to 2⁵³ frames. */
   private frameIdx = 0
-  private fadeInRem = 0
-  private fadeOutRem = 0
+  /** The fade is a function of the frame, not a countdown, so a host that
+   *  renders ahead can re-render any frame and get the same gain: a smoothstep
+   *  from `fadeFrom` at `fadeAt` to `fadeTo` at `fadeAt + FADE_FRAMES`. */
+  private fadeAt = 0
+  private fadeFrom = 1
+  private fadeTo = 1
   private readonly argv: number[]
   /** Views of tau (as u32 word pairs) and the output, made on first use and
    *  again only if the memory's buffer changes, so a block allocates nothing. */
@@ -141,8 +146,29 @@ export class WasmKernel {
     })
   }
 
-  beginFadeIn(): void { this.fadeInRem = FADE_SAMPLES; this.fadeOutRem = 0 }
-  beginFadeOut(): void { this.fadeOutRem = FADE_SAMPLES; this.fadeInRem = 0 }
+  /** Fade in from silence, starting at frame `at` (default: the next block). */
+  beginFadeIn(at: number = this.frameIdx): void {
+    this.fadeFrom = 0; this.fadeTo = 1; this.fadeAt = at
+  }
+  /** Fade out from the gain at frame `at` (default: the next block) and stay
+   *  silent. */
+  beginFadeOut(at: number = this.frameIdx): void {
+    this.fadeFrom = this.gainAt(at); this.fadeTo = 0; this.fadeAt = at
+  }
+
+  /** The fade gain at `frame`. */
+  gainAt(frame: number): number {
+    if (frame >= this.fadeAt + FADE_FRAMES) return this.fadeTo
+    if (frame <= this.fadeAt) return this.fadeFrom
+    const t = (frame - this.fadeAt) / FADE_FRAMES
+    return this.fadeFrom + (this.fadeTo - this.fadeFrom) * t * t * (3 - 2 * t)
+  }
+
+  /** The first frame from which `process` is silent for good (a finished
+   *  fade-out), or Infinity. */
+  get mutedFrom(): number {
+    return this.fadeTo === 0 ? this.fadeAt + FADE_FRAMES : Infinity
+  }
 
   /** Write a param input (port order after `tau`). This is how a host with
    *  live control drives a knob; `ParamWriter` applies the disciplines. */
@@ -266,15 +292,9 @@ export class WasmKernel {
     for (let frame = 0; frame < n;) {
       const block = this.renderBlock(this.frameIdx)
       const take = Math.min(this.layout.frames, n - frame)
+      const steady = this.frameIdx >= this.fadeAt + FADE_FRAMES ? this.fadeTo : -1
       for (let s = 0; s < take; s++, frame++) {
-        let gain = 1
-        if (this.fadeInRem > 0) {
-          const t = 1 - this.fadeInRem / FADE_SAMPLES
-          gain = t * t * (3 - 2 * t); this.fadeInRem--
-        } else if (this.fadeOutRem > 0) {
-          const t = this.fadeOutRem / FADE_SAMPLES
-          gain = t * t * (3 - 2 * t); this.fadeOutRem--
-        }
+        const gain = steady >= 0 ? steady : this.gainAt(this.frameIdx + s)
 
         if (C === 1) {
           const v = block[s]! * gain
