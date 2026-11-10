@@ -131,6 +131,10 @@ def foldOp (tag : String) (resultType : ScalarType) (args : Array CVal) : Option
   | .and => do let a ← aB 0; let b ← aB 1; pure (.b (a && b))
   | .or  => do let a ← aB 0; let b ← aB 1; pure (.b (a || b))
   | .bitAnd => do let a ← aI 0; let b ← aI 1; pure (.i (bit64 (· &&& ·) a b))
+  | .mulLo32 => do
+    let a ← aI 0; let b ← aI 1
+    let p := (a * b) % 4294967296
+    pure (.i (if p ≥ 2147483648 then p - 4294967296 else p))
   | .bitOr  => do let a ← aI 0; let b ← aI 1; pure (.i (bit64 (· ||| ·) a b))
   | .bitXor => do let a ← aI 0; let b ← aI 1; pure (.i (bit64 (· ^^^ ·) a b))
   | .lshift => do

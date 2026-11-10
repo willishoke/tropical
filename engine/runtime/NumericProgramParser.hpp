@@ -47,6 +47,7 @@ inline tropical_jit::OpTag parse_op_tag(const std::string & s)
     {"Equal",       T::Equal},
     {"NotEqual",    T::NotEqual},
     {"BitAnd",      T::BitAnd},
+    {"MulLo32",     T::MulLo32},
     {"BitOr",       T::BitOr},
     {"BitXor",      T::BitXor},
     {"LShift",      T::LShift},

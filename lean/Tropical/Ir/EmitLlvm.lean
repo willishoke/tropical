@@ -157,6 +157,16 @@ structure St where
       OUTER accumulator finds the outer alloca. -/
   reduces : Array ReduceCtx := #[]
   routeds : Array RoutedCtx := #[]
+  /-- Port kernel only: int values written to a module slot also land, raw,
+      in a parallel `%islots` (i64) vector, and an int read of a slot whose
+      last emitted write was int loads that word instead of converting the
+      f64 copy back. This is EmitMsl's typed-slot rule (a value crosses a
+      slot at its native type): a wired clock stays exact past 2⁵³ rail
+      units, and a target without an FPU never converts it. The f64 copy is
+      still written for f64 readers (sinks, float reads); LLVM drops it when
+      nothing reads it. -/
+  typedSlots : Bool := false
+  intSlots : Std.HashSet Nat := {}
 
 abbrev M := EStateM String St
 
@@ -234,6 +244,16 @@ def storeSlotF64 (idx : Nat) (v : String) : M Unit := do
   let g ← fresh; line s!"{g} = getelementptr inbounds double, ptr %slots, i64 {idx}"
   line s!"store double {v}, ptr {g}, align 8"
 
+/-- Store a typed value to a module slot (see `St.typedSlots`). -/
+def storeSlotTyped (idx : Nat) (v : TVal) : M Unit := do
+  if (← get).typedSlots && v.ty == .int then
+    let g ← fresh; line s!"{g} = getelementptr inbounds i64, ptr %islots, i64 {idx}"
+    line s!"store i64 {v.ref}, ptr {g}, align 8"
+    modify fun st => { st with intSlots := st.intSlots.insert idx }
+  else
+    modify fun st => { st with intSlots := st.intSlots.erase idx }
+  storeSlotF64 idx (← coerceF64 v)
+
 -- Arrays: an alloca per slot in the port kernel; the `%arrays` pointer
 -- table in the stage-0 pre-pass. Sizes are plan constants either way.
 def loadArrayPtr (slot : Nat) : M String := do
@@ -300,6 +320,14 @@ def resolveOperand : NOperand → M TVal
     | some .tau => pure ⟨(← get).tauName, .int⟩
     | some .rate => pure ⟨f64Lit (← get).sampleRate, .float⟩
     | none => pure ⟨f64Lit 0.0, .float⟩
+  | .slot idx .int => do
+    if (← get).intSlots.contains idx then
+      let g ← fresh; line s!"{g} = getelementptr inbounds i64, ptr %islots, i64 {idx}"
+      let v ← fresh; line s!"{v} = load i64, ptr {g}, align 8"
+      pure ⟨v, .int⟩
+    else
+      let v ← loadSlotF64 idx
+      let r ← fresh; line s!"{r} = fptosi double {v} to i64"; pure ⟨r, .int⟩
   | .slot idx t => do
     let v ← loadSlotF64 idx
     match t with
@@ -394,6 +422,12 @@ def emitOp (tag : String) (resultType : ScalarType) (args : Array TVal) : M TVal
   | .and => let r ← fresh; line s!"{r} = and i1 {← aB 0}, {← aB 1}"; pure ⟨r, .bool⟩
   | .or  => let r ← fresh; line s!"{r} = or i1 {← aB 0}, {← aB 1}"; pure ⟨r, .bool⟩
   | .bitAnd => binI "and" (← aI 0) (← aI 1)
+  | .mulLo32 =>
+    let a ← aI 0; let b ← aI 1
+    let a32 ← fresh; line s!"{a32} = trunc i64 {a} to i32"
+    let b32 ← fresh; line s!"{b32} = trunc i64 {b} to i32"
+    let p ← fresh; line s!"{p} = mul i32 {a32}, {b32}"
+    let r ← fresh; line s!"{r} = sext i32 {p} to i64"; pure ⟨r, .int⟩
   | .bitOr  => binI "or"  (← aI 0) (← aI 1)
   | .bitXor => binI "xor" (← aI 0) (← aI 1)
   | .lshift => binI "shl" (← aI 0) (← aI 1)
@@ -710,7 +744,7 @@ def emitInstr (instr : NInstr) : M Unit := do
     modify fun s => { s with routeds := s.routeds.pop, tempVals := rc.savedTempVals }
   | "WriteSlot", .moduleSlot idx =>
     let v ← match instr.args[0]? with | some o => resolveOperand o | none => fail "WriteSlot missing arg"
-    storeSlotF64 idx (← coerceF64 v)
+    storeSlotTyped idx v
   | "SmoothParam", _ =>
     fail "EmitLlvm: SmoothParam is dead on the session path (params are slots)"
   | "Pack", .array dst => emitPack dst instr.args
@@ -726,7 +760,7 @@ def emitInstr (instr : NInstr) : M Unit := do
   | _, .moduleSlot idx =>
     let args ← instr.args.mapM resolveOperand
     let result ← emitOp instr.tag instr.resultType args
-    storeSlotF64 idx (← coerceF64 result)
+    storeSlotTyped idx (← coerce result instr.resultType)
   | _, .array dst => emitElementwise instr dst
   | tag, .sessionArray _ =>
     fail s!"EmitLlvm: sessionArray dst for '{tag}' must be remapped before emit"
@@ -750,42 +784,57 @@ decreasing_by exact Tropical.Plan.InstanceFunction.sizeOf_lt_of_mem_children _h
 -- Sinks (mirrors the loop-body sink mix)
 -- ─────────────────────────────────────────────────────────────
 
-def emitSinks (sinks : Array SinkSpec) (outputChannelCount : Nat) : M Unit := do
+/-- The output store for one frame/channel, `out[s·C + c]`. -/
+private def outIndex (outputChannelCount target : Nat) : M String := do
+  if outputChannelCount == 1 && target == 0 then
+    pure "%s"
+  else do
+    let frameBase ← fresh
+    line s!"{frameBase} = mul i64 %s, {outputChannelCount}"
+    let targetIdx ← fresh
+    line s!"{targetIdx} = add i64 {frameBase}, {target}"
+    pure targetIdx
+
+/-- Sinks into the output. `.f64` (the port default) mixes each sink's inputs
+    and applies its gain in binary64. `.i32` is the integer output a target
+    without an FPU stores: each sink must be one input at gain 1, and its
+    value is converted toward zero (`fptosi`), which is exact for an int
+    program output (an exact integer in the slot). LLVM folds that
+    int→double→int round trip when the value's range fits the mantissa, so
+    no soft-float conversion survives for a bounded int output. -/
+def emitSinks (sinks : Array SinkSpec) (outputChannelCount : Nat)
+    (outElem : Tropical.Kernel.Elem := .f64) : M Unit := do
+  let (ty, zero, align) ← match outElem with
+    | .f64 => pure ("double", zeroF, 8)
+    | .i32 => pure ("i32", "0", 4)
+    | e => fail s!"EmitLlvm: output element {e.wire} is not supported"
   -- A sparse target image is semantically zero in every missing channel.  Do
   -- not rely on a particular host to clear reused wasm/native output storage.
   for target in [0:outputChannelCount] do
     unless sinks.any (fun sink => sink.target == target) do
-      let outputIdx ←
-        if outputChannelCount == 1 then
-          pure "%s"
-        else do
-          let frameBase ← fresh
-          line s!"{frameBase} = mul i64 %s, {outputChannelCount}"
-          let targetIdx ← fresh
-          line s!"{targetIdx} = add i64 {frameBase}, {target}"
-          pure targetIdx
+      let outputIdx ← outIndex outputChannelCount target
       let g ← fresh
-      line s!"{g} = getelementptr inbounds double, ptr %out, i64 {outputIdx}"
-      line s!"store double {zeroF}, ptr {g}, align 8"
+      line s!"{g} = getelementptr inbounds {ty}, ptr %out, i64 {outputIdx}"
+      line s!"store {ty} {zero}, ptr {g}, align {align}"
   for sink in sinks do
-    let mut acc := zeroF
-    for slotIdx in sink.inputs do
-      let v ← loadSlotF64 slotIdx
-      let r ← fresh; line s!"{r} = fadd double {acc}, {v}"; acc := r
-    let scaled ← fresh
-    line s!"{scaled} = fmul double {acc}, {f64Lit sink.gain.toFloat}"
-    let outputIdx ←
-      if outputChannelCount == 1 && sink.target == 0 then
-        pure "%s"
-      else do
-        let frameBase ← fresh
-        line s!"{frameBase} = mul i64 %s, {outputChannelCount}"
-        let targetIdx ← fresh
-        line s!"{targetIdx} = add i64 {frameBase}, {sink.target}"
-        pure targetIdx
+    let value ← match outElem with
+      | .i32 =>
+        if sink.inputs.size != 1 || sink.gain.toFloat != 1.0 then
+          fail s!"EmitLlvm: an i32 output needs one sink input at gain 1 (target {sink.target})"
+        let v ← loadSlotF64 sink.inputs[0]!
+        let r ← fresh; line s!"{r} = fptosi double {v} to i32"; pure r
+      | _ => do
+        let mut acc := zeroF
+        for slotIdx in sink.inputs do
+          let v ← loadSlotF64 slotIdx
+          let r ← fresh; line s!"{r} = fadd double {acc}, {v}"; acc := r
+        let scaled ← fresh
+        line s!"{scaled} = fmul double {acc}, {f64Lit sink.gain.toFloat}"
+        pure scaled
+    let outputIdx ← outIndex outputChannelCount sink.target
     let g ← fresh
-    line s!"{g} = getelementptr inbounds double, ptr %out, i64 {outputIdx}"
-    line s!"store double {scaled}, ptr {g}, align 8"
+    line s!"{g} = getelementptr inbounds {ty}, ptr %out, i64 {outputIdx}"
+    line s!"store {ty} {value}, ptr {g}, align {align}"
 
 private def validateSinkTargets (sinks : Array SinkSpec)
     (outputChannelCount : Nat) : Except String Unit := do
@@ -839,8 +888,8 @@ private def slotDefaultFloat : Json → Float
 /-- Emit the full LLVM module text for a plan's kernel at the port: the
     port function, the argv thunk, and the intrinsic declarations. The
     stage-0 split's coefficient plan, when present, becomes the prologue. -/
-def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
-    Except String String := do
+def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat)
+    (outElem : Tropical.Kernel.Elem := .f64) : Except String String := do
   let plan := split.audio
   let outputChannelCount := plan.outputChannelCount
   validateSinkTargets plan.sinks outputChannelCount
@@ -854,10 +903,12 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
     -- backing store per array slot, all per call.
     line s!"%slots = alloca double, i64 {slotCount}, align 8"
     line s!"%temps = alloca i64, i64 {registerCount}, align 8"
+    line s!"%islots = alloca i64, i64 {slotCount}, align 8"
     for i in [0:sizes.size] do
       line s!"%arr{i} = alloca i64, i64 {max (sizes[i]?.getD 0) 1}, align 8"
     zeroCells "%temps" registerCount
     zeroCells "%slots" slotCount
+    zeroCells "%islots" slotCount
     for i in [0:sizes.size] do
       zeroCells s!"%arr{i}" (sizes[i]?.getD 0)
     -- Slots start at zero; a param's value is its input, never a literal, so
@@ -895,9 +946,9 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
     line "%tau_s = load i64, ptr %tau_ptr, align 8"
     for inst in plan.instanceFunctions do
       emitKernelBlock inst
-    emitSinks plan.sinks outputChannelCount
+    emitSinks plan.sinks outputChannelCount outElem
   let init : St := { sources := plan.sources, sampleRate := plan.sampleRate.toFloat,
-                     arraySizes := sizes, arraysInline := true }
+                     arraySizes := sizes, arraysInline := true, typedSlots := true }
   match body.run init with
   | .error e _ => .error e
   | .ok _ st =>
@@ -911,7 +962,7 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
       (if paramSlots.isEmpty then "" else ", " ++ inputArgs) ++
       ", ptr noalias nocapture %out"
     let header :=
-      s!"define void @tropical_kernel({portArgs}) \{\n" ++
+      s!"define void @tropical_kernel({portArgs}) nounwind \{\n" ++
       "entry:\n"
     let tail :=
       "\n  %s_next = add i64 %s, 1\n" ++
@@ -926,7 +977,7 @@ def emitKernel (split : Tropical.Ir.Stage0.Split) (frames : Nat) :
       s!"  %a{i} = load ptr, ptr %ap{i}, align 8\n")
     let callArgs := String.intercalate ", " ((List.range argc).map fun i => s!"ptr %a{i}")
     let thunk :=
-      "define void @tropical_kernel_argv(ptr %argv) {\n" ++
+      "define void @tropical_kernel_argv(ptr %argv) nounwind {\n" ++
       "entry:\n" ++ thunkLoads ++
       s!"  call void @tropical_kernel({callArgs})\n" ++
       "  ret void\n" ++

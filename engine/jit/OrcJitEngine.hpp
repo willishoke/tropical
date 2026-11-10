@@ -38,7 +38,7 @@ enum class OpTag : uint8_t
   // arity 2
   Add, Sub, Mul, Div, Mod, FloorDiv,
   Less, LessEq, Greater, GreaterEq, Equal, NotEqual,
-  BitAnd, BitOr, BitXor, LShift, RShift,
+  BitAnd, BitOr, BitXor, LShift, RShift, MulLo32,
   Index,    // args[0]=ArrayReg, args[1]=scalar idx → scalar element
   And, Or,  // logical (truthy coercion: float/int → bool, then and/or)
   // arity 1

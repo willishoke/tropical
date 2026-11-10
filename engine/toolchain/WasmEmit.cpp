@@ -6,6 +6,8 @@
 #include <llvm/IR/Module.h>
 #include <llvm/IRReader/IRReader.h>
 #include <llvm/MC/TargetRegistry.h>
+#include <llvm/Passes/OptimizationLevel.h>
+#include <llvm/Passes/PassBuilder.h>
 #include <llvm/Support/CodeGen.h>
 #include <llvm/Support/CommandLine.h>
 #include <llvm/Support/FileSystem.h>
@@ -15,6 +17,7 @@
 #include <llvm/Support/raw_ostream.h>
 #include <llvm/Target/TargetMachine.h>
 #include <llvm/Target/TargetOptions.h>
+#include <llvm/TargetParser/Host.h>
 #include <llvm/TargetParser/Triple.h>
 #include <lld/Common/Driver.h>
 
@@ -139,6 +142,106 @@ std::vector<uint8_t> compile_ir_to_wasm(const std::string & ir_text, std::string
   if (!wasm) { err = "read wasm: " + wasm.getError().message(); return {}; }
 
   auto bytes = (*wasm)->getBuffer();
+  const auto * p = reinterpret_cast<const uint8_t *>(bytes.data());
+  return std::vector<uint8_t>(p, p + bytes.size());
+}
+
+// ---------------------------------------------------------------------------
+// compile_ir_to_object — the same parse and the same TargetOptions as the
+// wasm path, retargeted to any triple this LLVM carries, and stopped at the
+// relocatable object. Initialized targets: the host, 32-bit ARM/Thumb (the
+// Cortex-M class) and wasm32.
+// ---------------------------------------------------------------------------
+std::vector<uint8_t> compile_ir_to_object(const std::string & ir_text,
+                                          const std::string & triple_text,
+                                          const std::string & cpu,
+                                          const std::string & features,
+                                          std::string & err)
+{
+  LLVMInitializeWebAssemblyTargetInfo();
+  LLVMInitializeWebAssemblyTarget();
+  LLVMInitializeWebAssemblyTargetMC();
+  LLVMInitializeWebAssemblyAsmPrinter();
+  LLVMInitializeARMTargetInfo();
+  LLVMInitializeARMTarget();
+  LLVMInitializeARMTargetMC();
+  LLVMInitializeARMAsmPrinter();
+  llvm::InitializeNativeTarget();
+  llvm::InitializeNativeTargetAsmPrinter();
+
+  llvm::LLVMContext context;
+  llvm::SMDiagnostic diag;
+  auto buffer = llvm::MemoryBuffer::getMemBuffer(ir_text, "tropical_ir");
+  auto module = llvm::parseIR(buffer->getMemBufferRef(), diag, context);
+  if (!module)
+  {
+    llvm::raw_string_ostream os(err);
+    diag.print("tropical_ir", os);
+    return {};
+  }
+
+  const llvm::Triple triple(triple_text.empty() ? llvm::sys::getDefaultTargetTriple()
+                                                : triple_text);
+  std::string lookup_err;
+  const llvm::Target * target = llvm::TargetRegistry::lookupTarget(triple, lookup_err);
+  if (!target) { err = "no target for " + triple.str() + ": " + lookup_err; return {}; }
+
+  llvm::TargetOptions opts;
+  // The numeric contract the manifest states: IEEE ops as written, no FMA
+  // contraction (Standard fuses only an explicit llvm.fmuladd, which the
+  // emitter never writes), no fast-math (no flags in the IR, none here).
+  opts.AllowFPOpFusion = llvm::FPOpFusion::Standard;
+  // ELF objects carry a .stack_sizes section (per-function frame bytes), so
+  // the manifest's stack depth is read from the object, not guessed.
+  opts.EmitStackSizeSection = triple.isOSBinFormatELF();
+  // One section per function on ELF, so a firmware link with --gc-sections
+  // keeps tropical_kernel and drops the _argv thunk it never calls.
+  opts.FunctionSections = triple.isOSBinFormatELF();
+  opts.DataSections = triple.isOSBinFormatELF();
+  // The port functions are nounwind and nothing unwinds through a kernel:
+  // no EH tables (.ARM.exidx / .eh_frame) for a firmware link to keep.
+  opts.ExceptionModel = llvm::ExceptionHandling::None;
+  // Static relocation, no PIC: what a bare-metal link expects, and harmless
+  // for a host object linked into an executable.
+  std::unique_ptr<llvm::TargetMachine> tm(target->createTargetMachine(
+    triple, cpu.empty() ? "generic" : cpu, features, opts,
+    llvm::Reloc::Static, std::nullopt, llvm::CodeGenOptLevel::Default));
+  if (!tm) { err = "cannot create a target machine for " + triple.str(); return {}; }
+  module->setTargetTriple(triple);
+  module->setDataLayout(tm->createDataLayout());
+
+  // The JIT's IR pipeline (per-module O2, OrcJitEngine's transform layer),
+  // here target-aware and without unrolling: the emitted IR is uniform and un-folded by design,
+  // and narrowing of masked i64 arithmetic happens in these passes.
+  {
+    // No loop unrolling or vectorization: one loop iteration is one frame
+    // (the static cycle count reads it directly) and flash stays small.
+    // Neither changes a value: the IR has no reassociable FP.
+    llvm::PipelineTuningOptions pto;
+    pto.LoopUnrolling = false;
+    pto.LoopInterleaving = false;
+    pto.LoopVectorization = false;
+    pto.SLPVectorization = false;
+    llvm::PassBuilder PB(tm.get(), pto);
+    llvm::LoopAnalysisManager LAM;
+    llvm::FunctionAnalysisManager FAM;
+    llvm::CGSCCAnalysisManager CGAM;
+    llvm::ModuleAnalysisManager MAM;
+    PB.registerModuleAnalyses(MAM);
+    PB.registerCGSCCAnalyses(CGAM);
+    PB.registerFunctionAnalyses(FAM);
+    PB.registerLoopAnalyses(LAM);
+    PB.crossRegisterProxies(LAM, FAM, CGAM, MAM);
+    llvm::ModulePassManager MPM = PB.buildPerModuleDefaultPipeline(llvm::OptimizationLevel::O2);
+    MPM.run(*module, MAM);
+  }
+
+  llvm::SmallString<0> bytes;
+  llvm::raw_svector_ostream obj_out(bytes);
+  llvm::legacy::PassManager pm;
+  if (tm->addPassesToEmitFile(pm, obj_out, nullptr, llvm::CodeGenFileType::ObjectFile))
+  { err = triple.str() + " target cannot emit an object file"; return {}; }
+  pm.run(*module);
   const auto * p = reinterpret_cast<const uint8_t *>(bytes.data());
   return std::vector<uint8_t>(p, p + bytes.size());
 }

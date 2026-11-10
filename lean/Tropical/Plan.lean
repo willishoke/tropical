@@ -147,6 +147,9 @@ inductive PlanOp where
   | less | lessEq | greater | greaterEq | equal | notEqual
   | and | or
   | bitAnd | bitOr | bitXor | lshift | rshift | ldexp
+  /-- `a · b` modulo 2³², sign-extended: the product a 32-bit `MULS`
+      computes, on the i64 rail. Int-only. -/
+  | mulLo32
   | neg | abs | sqrt | floor | ceil | round
   | not | bitNot | floatExponent | toInt | toBool | toFloat
   | select | clamp
@@ -162,6 +165,7 @@ def PlanOp.name : PlanOp → String
   | .and => "And" | .or => "Or"
   | .bitAnd => "BitAnd" | .bitOr => "BitOr" | .bitXor => "BitXor"
   | .lshift => "LShift" | .rshift => "RShift" | .ldexp => "Ldexp"
+  | .mulLo32 => "MulLo32"
   | .neg => "Neg" | .abs => "Abs" | .sqrt => "Sqrt"
   | .floor => "Floor" | .ceil => "Ceil" | .round => "Round"
   | .not => "Not" | .bitNot => "BitNot" | .floatExponent => "FloatExponent"
@@ -178,6 +182,7 @@ def PlanOp.ofString? : String → Option PlanOp
   | "And" => some .and | "Or" => some .or
   | "BitAnd" => some .bitAnd | "BitOr" => some .bitOr | "BitXor" => some .bitXor
   | "LShift" => some .lshift | "RShift" => some .rshift | "Ldexp" => some .ldexp
+  | "MulLo32" => some .mulLo32
   | "Neg" => some .neg | "Abs" => some .abs | "Sqrt" => some .sqrt
   | "Floor" => some .floor | "Ceil" => some .ceil | "Round" => some .round
   | "Not" => some .not | "BitNot" => some .bitNot | "FloatExponent" => some .floatExponent
@@ -195,6 +200,8 @@ theorem PlanOp.ofString_name (op : PlanOp) :
     be exhaustive). -/
 def PlanOp.isBitwise : PlanOp → Bool
   | .bitAnd | .bitOr | .bitXor | .lshift | .rshift | .bitNot => true
+  -- not bitwise, but int-only the same way: int result, int operands
+  | .mulLo32 => true
   | _ => false
 
 def PlanOp.isComparison : PlanOp → Bool

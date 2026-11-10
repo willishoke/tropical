@@ -94,6 +94,8 @@ inductive BinaryOpTag where
   | and | or
   | bitAnd | bitOr | bitXor | lshift | rshift
   | floorDiv | ldexp
+  /-- `a · b` modulo 2³², sign-extended to the int rail: a 32-bit multiply. -/
+  | mulLo32
 deriving BEq, ReflBEq, LawfulBEq, Repr, Inhabited
 
 def BinaryOpTag.wire : BinaryOpTag → String
@@ -103,7 +105,7 @@ def BinaryOpTag.wire : BinaryOpTag → String
   | .and => "and" | .or => "or"
   | .bitAnd => "bitAnd" | .bitOr => "bitOr" | .bitXor => "bitXor"
   | .lshift => "lshift" | .rshift => "rshift"
-  | .floorDiv => "floorDiv" | .ldexp => "ldexp"
+  | .floorDiv => "floorDiv" | .ldexp => "ldexp" | .mulLo32 => "mulLo32"
 
 def BinaryOpTag.ofWire? : String → Option BinaryOpTag
   | "add" => some .add | "sub" => some .sub | "mul" => some .mul
@@ -113,7 +115,7 @@ def BinaryOpTag.ofWire? : String → Option BinaryOpTag
   | "and" => some .and | "or" => some .or
   | "bitAnd" => some .bitAnd | "bitOr" => some .bitOr | "bitXor" => some .bitXor
   | "lshift" => some .lshift | "rshift" => some .rshift
-  | "floorDiv" => some .floorDiv | "ldexp" => some .ldexp
+  | "floorDiv" => some .floorDiv | "ldexp" => some .ldexp | "mulLo32" => some .mulLo32
   | _ => none
 
 theorem BinaryOpTag.ofWire_wire (t : BinaryOpTag) :

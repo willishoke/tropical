@@ -26,4 +26,17 @@ def compileIr (irText : String) : IO ByteArray := do
     throw <| IO.userError s!"compileIr failed: {← lastError}"
   pure wasm
 
+@[extern "shim_wasm_compile_object"]
+private opaque compileObjectRaw (irText triple cpu features : @& String) : IO ByteArray
+
+/-- Lower the same IR to one relocatable object for `triple` (`""` = the
+    host), stopping before any link. `cpu`/`features` as LLVM spells them
+    (`""` = generic). The bytes are an ELF/Mach-O/wasm object a firmware or a
+    host build links itself. -/
+def compileObject (irText triple : String) (cpu features : String := "") : IO ByteArray := do
+  let obj ← compileObjectRaw irText triple cpu features
+  if obj.size == 0 then
+    throw <| IO.userError s!"compileObject failed: {← lastError}"
+  pure obj
+
 end Tropical.Toolchain.Wasm

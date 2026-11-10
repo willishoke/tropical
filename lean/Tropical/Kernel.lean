@@ -42,16 +42,19 @@ def schema : String := "tropical_kernel_1"
     realization; Metal refines values to `f32` under its tolerance gate.
     `i64q16` is the signed Q48.16 clock rail: `i64` with `clockFracBits` = 16
     fraction bits (`Ir/ClockFormat.lean`; the `long-horizon` gate pins the
-    two together). -/
+    two together). `i32` is a 32-bit integer output a target without an FPU
+    stores directly (`diffcli compile-object --out-elem i32`); its scale (e.g.
+    Q1.15) is the producing program's, stated in the object manifest. -/
 inductive Elem where
-  | f64 | i64 | i64q16
+  | f64 | i64 | i64q16 | i32
 deriving BEq, Repr, Inhabited
 
 def Elem.wire : Elem → String
-  | .f64 => "f64" | .i64 => "i64" | .i64q16 => "i64q16"
+  | .f64 => "f64" | .i64 => "i64" | .i64q16 => "i64q16" | .i32 => "i32"
 
 def Elem.ofWire? : String → Option Elem
   | "f64" => some .f64 | "i64" => some .i64 | "i64q16" => some .i64q16
+  | "i32" => some .i32
   | _ => none
 
 theorem Elem.ofWire_wire (e : Elem) : Elem.ofWire? e.wire = some e := by
@@ -150,7 +153,8 @@ private def disciplineOf (plan : FlatPlan) (base : String) : Option Discipline :
       companions := d.companions }
 
 /-- Derive the kernel type of a plan compiled for `frames` samples per call. -/
-def ofPlan (plan : FlatPlan) (frames : Nat) : Except String KernelType := do
+def ofPlan (plan : FlatPlan) (frames : Nat) (outElem : Elem := .f64) :
+    Except String KernelType := do
   let tau : Port :=
     { name := tauName, elem := .i64q16, shape := #[frames], role := some .signal }
   let mut inputs : Array Port := #[tau]
@@ -166,7 +170,7 @@ def ofPlan (plan : FlatPlan) (frames : Nat) : Except String KernelType := do
       name := slotName, elem := .f64, shape := #[], role := some .param,
       default, discipline := disciplineOf plan base }
   let out : Port :=
-    { name := outName, elem := .f64, shape := #[frames, plan.outputChannelCount],
+    { name := outName, elem := outElem, shape := #[frames, plan.outputChannelCount],
       channels := channelNames plan }
   return {
     rate := plan.sampleRate

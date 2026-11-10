@@ -349,3 +349,135 @@ port. Where the implementation settled differently from the text above:
   nested-output read typed `float` whatever its producer declared, which put
   wired clocks through f32 on Metal; the old τ+2⁴⁰ Metal gates had not seen
   it because `2⁴⁰ << 32` wraps to τ = 0.
+
+## Embedded objects (spike, 2026-11-09)
+
+The same port, compiled for a microcontroller with no FPU (Cortex-M0+,
+`thumbv6m-none-eabi`) and handed over as a **relocatable object**, not a
+linked image. A firmware, or a host test bench, links it with its own
+linker script.
+
+```
+diffcli compile-object patch.json --out k.o --triple thumbv6m-none-eabi \
+    --cpu cortex-m0plus --frames 16 --rate 48000 --out-elem i32 --out-format Q1.15
+```
+
+`compile-object` takes the IR `EmitLlvm` writes for the JIT and for
+`compile-wasm`, runs the JIT's O2 pipeline against the target (without loop
+unrolling or vectorization, so one loop iteration is one frame and flash
+stays small) and stops at the object. The triple may be the host (default),
+`thumbv6m-none-eabi`, or `wasm32-unknown-unknown` (a wasm object, not a
+module). Beside the object it writes `k.o.manifest.json`: the
+`tropical_kernel_1` manifest plus an `object` block with the triple, the
+symbol, N, the per-port layout and format, and the numeric contract.
+
+**Numeric contract.** IEEE binary64 for float values, two's-complement
+wrapping i64 for ints, round-to-nearest-even, no FP contraction and no
+fast-math. `EmitLlvm` writes no `fast`/`contract`/`afn` flags and no
+`llvm.fmuladd`, and the toolchain keeps `AllowFPOpFusion = Standard`, so
+no FMA is ever formed. Removing unrolling and vectorization changes no
+value, because nothing in the IR may be reassociated.
+
+**ABI and buffers.** The C calling convention of the triple (AAPCS on
+ARM), one pointer per port in port order:
+
+```
+void tropical_kernel(const int64_t *tau,   /* N × i64, Q48.16, 8-byte aligned */
+                     const double  *param, /* one f64 per param: slot (none in the LFO) */
+                     int32_t       *out);  /* N × C i32 frame-major, 4-byte aligned */
+```
+
+Buffers are little-endian. On ELF each function has its own section
+(`.text.tropical_kernel`, `.text.tropical_kernel_argv`), and the literal
+pools sit inside them. There is no `.data`, `.bss` or `.rodata` to
+initialize. The object also carries `.ARM.exidx.*` (8 bytes of
+`EXIDX_CANTUNWIND` per function), `.stack_sizes` (metadata, not loaded) and
+`.ARM.attributes`: v6S-M, Thumb-1, soft float with no FP instructions
+(`Tag_FP_arch` is absent). A minimal placement, checked with `ld.lld
+--gc-sections`:
+
+```
+SECTIONS {
+  .text : { KEEP(*(.text.tropical_kernel)) *(.text*) *(.rodata*) } > FLASH
+  .data : { *(.data*) } > SRAM AT > FLASH
+  .bss  : { *(.bss*) *(COMMON) } > SRAM
+  /DISCARD/ : { *(.ARM.exidx*) *(.stack_sizes) }
+}
+```
+
+**The kernel.** `FixedSinOscQ15` is `FixedSinOsc` for 32-bit integer
+hardware. Its DDS phase on ℤ/2³² (`phaseQ32Lo`) is bit-identical to
+`FixedSinOsc`'s and uses only 32-bit products: the whole-sample product is
+wanted mod 2³², which is the low word that `MULS` computes, and the
+fraction's product is split at bit 16 of the increment. The sine
+(`fixedSinQ15Sig`) rounds the phase to 16 bits, folds it to a signed quarter
+turn and evaluates an odd degree-7 polynomial in Horner form, with 16-bit
+operands, 32-bit products and rounding shifts. The output is an int in
+[-32767, 32767] that means `out / 32768` (Q1.15 in an i32; it also fits an
+i16). Error, measured exhaustively over all 2¹⁶ rounded phases: 1.63 LSB
+against `32768 sin(2π h/2¹⁶)`. Rounding the phase to 16 bits adds at most
+π/2 LSB, so the bound against the float sine of the full 32-bit phase is
+3.2 LSB (9.8e-5). The measured worst case over 65 536 frames is 2.67 LSB.
+
+On the M0+ table (ALU and `MULS` 1 cycle, loads and stores 2, taken branch
+2, `BL` 3) the hot loop is 102 instructions, 8 of them `MULS`, and takes
+118–122 cycles per frame. At N = 16 a call costs at most 1 989 cycles, of
+which 37 are prologue and epilogue. That is about 9% of a 1 333-cycle
+sample budget at 64 MHz and 48 kHz. Flash is 260 bytes for
+`tropical_kernel`. The `_argv` thunk inlines a second copy (264 bytes),
+which `--gc-sections` drops when nothing references it. Stack is 32 bytes,
+and there is no static RAM. `llvm-nm -u` lists nothing: no `__aeabi_*`, no `__muldi3`, no
+soft-float helpers. The host object matches the JIT sample for sample over
+65 536 frames, and also at τ = 2⁴⁰ samples. The wasm32 object, linked with
+`wasm-ld` and run in Bun, matches the host object over the same 65 536
+frames.
+`tools/embedded_object.py` builds all three objects, reports these numbers
+and gates the libcalls (`make validate` runs it with `--check-only`).
+
+**Formats and cost.** Q15 × Q15 fits one 1-cycle `MULS` (16 × 16 → 32).
+Q31 × Q31 needs the high word of a 64-bit product. ARMv6-M has no `UMULL`,
+so that is an `__aeabi_lmul` call or about four `MULS` plus adds and
+carries. That is why the sine is Q1.15. The phase stays Q0.32, because its
+products are only wanted mod 2³².
+
+**What the spike changed in the core.**
+
+- `mulLo32` is a new op: `a · b` mod 2³², sign-extended onto the int rail.
+  LLVM does not narrow `(a·b << 32) >> 32` over i64 `mul` on thumbv6m. It
+  calls `__muldi3`, and the disassembly showed that before the op existed.
+  The op is written as `trunc`/`mul i32`/`sext` (EmitMsl:
+  `(long)(int)((uint)a * (uint)b)`).
+- Int values cross module slots raw. Slots were f64 in `EmitLlvm`, so a
+  wired clock went i64 → f64 → i64, which is a soft-float call pair per
+  frame on a no-FPU target and loses bits past 2⁵³ rail units on any
+  target. An int write now also lands in `%islots`, and an int read of a
+  slot whose last emitted write was int loads that word. This is the rule
+  EmitMsl already follows.
+- The port functions are `nounwind`, so the object does not reference an
+  EH personality routine.
+
+**Gaps left open (smallest honest fix for each).**
+
+1. *Params are f64 by contract.* A knob on a no-FPU target means soft-float
+   `fmul`/`fdiv`/`fptosi` calls. LICM moves them out of the frame loop, but
+   they stay in the object. The spike's LFO therefore fixes `freq` as a
+   literal: changing it is a structural edit, which recompiles. Fix: a
+   per-port element type for params (`i32` with a Q format, or `i64`) that
+   the emitter loads as an int and that never enters an f64 slot. `Elem`
+   already carries the vocabulary.
+2. *The int rail is i64.* `mulLo32` keeps the products 32-bit, but each
+   rounding shift after a product is still an i64 add-and-shift (about four
+   extra cycles), and the clamp and the loop counter are 64-bit. That costs
+   roughly 25 of the 120 cycles per frame. Fix: an `int32` scalar kind
+   (ℤ/2³², the phase's own ring), or emitter range analysis that narrows
+   values proven to fit 32 bits.
+3. *The output's Q format is a flag, not a type.* `--out-elem i32` needs
+   one sink input at gain 1 and stores the int output directly. `Q1.15`
+   comes from `--out-format`, not from the program. Fix: give int output
+   declarations a `fracBits` and carry it into `Kernel.Port`.
+4. *f32* as a per-target float format on the LLVM path was not attempted.
+
+**Clocks across nodes.** The kernel reads τ from its caller. Exact ratios
+(phase-locked partials, the ℤ/2³² phase identity) hold only between
+kernels evaluated on the same τ. Whether separate nodes share τ by
+distributed sync or drift is the host's decision and is not settled here.

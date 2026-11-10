@@ -90,6 +90,7 @@ def planOpOfBinary : BinaryOpTag → PlanOp
   | .lshift => .lshift | .rshift => .rshift
   | .and => .and | .or => .or
   | .ldexp => .ldexp
+  | .mulLo32 => .mulLo32
 
 /-- Lift the IR unary tag into the plan-op signature. -/
 def planOpOfUnary : UnaryOpTag → PlanOp
